@@ -1,0 +1,250 @@
+//! ServiceContainer：15 服务拓扑排序构造 + DI 容器
+//!
+//! 所有长生命周期服务通过 `Arc<T>` 持有，构造顺序按依赖拓扑严格编排。
+//! `startup()` 启动后台服务（Engine / Scheduler / Bridge），返回启动句柄供 Launcher 管理生命周期。
+
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::bridge::BridgeSupervisor;
+use crate::config::{ConfigReloadSignal, ConfigService, ProfileService};
+use crate::engine::{Engine, EngineDeps, EngineHandle};
+use crate::environment::EnvironmentManager;
+use crate::login::{LoginHistoryService, LoginOrchestrator};
+use crate::monitor::MonitorService;
+use crate::network::detect::create_detector;
+use crate::scheduler::SchedulerService;
+use crate::status::StatusManager;
+use crate::tasks::{TaskExecutor, TaskManager};
+use crate::updater::UpdaterService;
+use crate::utils::metrics::Metrics;
+
+/// 启动后台服务后返回的句柄集合（由 Launcher 持有并管理生命周期）
+pub struct StartupHandles {
+    /// 定时任务调度器句柄
+    pub scheduler_handle: crate::scheduler::ServiceHandle,
+    /// Bridge Supervisor 句柄
+    pub bridge_handle: crate::bridge::ServiceHandle,
+}
+
+/// 服务容器：持有全部服务的 Arc 句柄
+///
+/// 构造顺序严格按拓扑排序（15 层），新增服务在此插入。
+pub struct ServiceContainer {
+    // ---- Layer 1~2：配置 & 轻量服务 ----
+    /// 配置服务（settings.json 读写 + ArcSwap 快照）
+    pub config: Arc<ConfigService>,
+    /// Profile 服务（多档案切换、检测）
+    pub profiles: Arc<ProfileService>,
+    /// 登录历史持久化
+    pub history: Arc<LoginHistoryService>,
+
+    // ---- Layer 3：任务 & 状态 ----
+    /// 自定义任务管理器（JSON 驱动）
+    pub tasks: Arc<TaskManager>,
+    /// 状态管理器（watch 通道推送）
+    pub status: Arc<StatusManager>,
+
+    // ---- Layer 4~5：桥接 & 环境 ----
+    /// 浏览器桥接器（Playwright + OCR NDJSON IPC）
+    pub bridge: Arc<BridgeSupervisor>,
+    /// 环境管理器（uv/python 按需安装）
+    pub environment: Arc<EnvironmentManager>,
+
+    // ---- Layer 6：执行器 ----
+    /// 任务执行器（脚本/Shell 沙箱执行）
+    pub executor: Arc<TaskExecutor>,
+
+    // ---- Layer 7：登录编排 ----
+    /// 登录编排器（状态机、去重、抢占、重试）
+    pub login: Arc<LoginOrchestrator>,
+
+    // ---- Layer 8~9：调度 & 监测 ----
+    /// 定时任务调度器
+    pub scheduler: Arc<SchedulerService>,
+    /// 网络监测服务（TCP/HTTP/URL 探测）
+    pub monitor: Arc<MonitorService>,
+
+    // ---- Layer 10：更新器 ----
+    /// 版本更新服务
+    pub updater: Arc<UpdaterService>,
+
+    // ---- Layer 11：Engine ----
+    /// Engine 统一启停句柄
+    pub engine_handle: EngineHandle,
+
+    // ---- 横切关注点：运行指标 ----
+    /// 共享运行指标（AtomicU64 计数器，通过 `/api/system/info` 暴露）
+    pub metrics: Arc<Metrics>,
+    /// uptime 定时器取消令牌（Drop 时触发，使定时任务干净退出）
+    uptime_cancel: CancellationToken,
+}
+
+impl ServiceContainer {
+    /// 构造服务容器（拓扑排序）
+    ///
+    /// 按依赖顺序创建 15 个服务，确保被依赖的服务先于依赖方初始化。
+    pub async fn new(base_path: &Path) -> Result<(Arc<Self>, StartupHandles)> {
+        // ---- Layer 0：配置重载信号通道 ----
+        let (reload_tx, reload_rx) = mpsc::channel::<ConfigReloadSignal>(32);
+
+        // ---- 横切关注点：运行指标 ----
+        let metrics = Metrics::new();
+
+        // ---- Layer 1：ConfigService（唯一 async 构造）----
+        let config = Arc::new(
+            ConfigService::new(base_path.to_path_buf(), reload_tx)
+                .await
+                .context("初始化 ConfigService 失败")?,
+        );
+
+        // ---- Layer 2：无依赖轻量服务 ----
+        let profiles = Arc::new(ProfileService::new(config.clone()));
+        let history = Arc::new(LoginHistoryService::new(base_path));
+        let status = Arc::new(StatusManager::new());
+
+        // ---- Layer 3：持久化 & 状态 ----
+        let tasks = TaskManager::new(base_path, config.clone());
+
+        // ---- Layer 4：桥接 & 环境（自返 Arc）----
+        let bridge = BridgeSupervisor::new(base_path.to_path_buf(), config.clone(), status.clone(), Some(metrics.clone()));
+        let git_download_enabled = config.runtime().load().app.developer_mode;
+        let environment = EnvironmentManager::new(base_path.to_path_buf(), status.clone(), git_download_enabled);
+
+        // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
+        let executor = TaskExecutor::new(base_path, status.clone(), bridge.clone(), environment.clone(), config.clone());
+
+        // ---- Layer 6：登录编排器（后置注入 bridge + environment）----
+        let login = Arc::new(LoginOrchestrator::new(
+            config.clone(),
+            history.clone(),
+            status.clone(),
+            Some(metrics.clone()),
+        ));
+        login.set_bridge(bridge.clone());
+        login.set_environment(environment.clone());
+        login.set_tasks(tasks.clone());
+
+        // ---- Layer 7：网络探测 & 监测 ----
+        let detector = create_detector();
+        let monitor = Arc::new(
+            MonitorService::new(config.clone(), detector.clone(), None, Some(metrics.clone()))
+                .context("初始化 MonitorService 失败")?,
+        );
+        // 登录后网络验证依赖 MonitorService，后置注入（login 已在 Layer 6 构造）
+        login.set_monitor(monitor.clone());
+
+        // ---- Layer 8：定时任务调度器 ----
+        let scheduler = Arc::new(
+            SchedulerService::new(
+                config.clone(),
+                tasks.clone(),
+                login.clone(),
+                executor.clone(),
+                status.clone(),
+                reload_rx,
+            )
+            .context("初始化 SchedulerService 失败")?,
+        );
+
+        // ---- Layer 9：更新器 ----
+        let updater = UpdaterService::new(config.clone(), status.clone(), base_path.to_path_buf());
+
+        // 启动时应用待处理更新（须在 Engine 等主要服务启动之前；日志系统已就绪）。
+        // apply_pending_on_startup 内部已记录各分支日志并清理残留/回滚，
+        // 因此无论成功失败都继续启动：替换失败时以当前（已回滚）版本运行，不阻断用户。
+        match updater.apply_pending_on_startup().await {
+            Ok(true) => tracing::info!("待处理更新已应用，新版本将在下次启动生效"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("应用待处理更新失败，继续以当前版本启动: {e}"),
+        }
+
+        // ---- Layer 10：自启动服务（检查平台支持）----
+        // AutoStartService / DebugSessionManager / TaskRegistry / WebSocketManager
+        // 在当前版本中尚未独立实现，相关功能由 TrayManager / Scheduler / Bridge 内聚处理。
+
+        // ---- Layer 11：Engine（聚合全部服务）----
+        let engine_deps = EngineDeps {
+            config_service: config.clone(),
+            profile_service: profiles.clone(),
+            orchestrator: login.clone(),
+            status_manager: status.clone(),
+            monitor_service: monitor.clone(),
+            network_detect: detector,
+            base_path: base_path.to_path_buf(),
+        };
+        let engine_handle = Engine::spawn(engine_deps);
+
+        // ---- 组装容器 ----
+        let container = Arc::new(Self {
+            config,
+            profiles,
+            history,
+            tasks,
+            status,
+            bridge,
+            environment,
+            executor,
+            login,
+            scheduler,
+            monitor,
+            updater,
+            engine_handle,
+            metrics,
+            uptime_cancel: CancellationToken::new(),
+        });
+
+        // ---- 启动运行时长更新任务 ----
+        let start_time = std::time::Instant::now();
+        let cancel_for_task = container.uptime_cancel.clone();
+        let metrics_for_uptime = container.metrics.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_for_task.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                        metrics_for_uptime.set_uptime(start_time.elapsed().as_secs());
+                    }
+                }
+            }
+        });
+
+        // 激活登录会话的 shutdown 响应：复用 uptime_cancel（Drop 时触发 cancel）
+        container.login.set_shutdown_token(container.uptime_cancel.clone());
+
+        // ---- 启动后台服务 ----
+        let scheduler_handle = container.startup().await?;
+
+        Ok((container, scheduler_handle))
+    }
+
+    /// 启动后台服务：Scheduler + Bridge Supervisor
+    ///
+    /// Engine 已在 `new()` 中通过 `Engine::spawn` 启动。
+    /// 返回句柄由 Launcher 持有，优雅关闭时调用。
+    async fn startup(self: &Arc<Self>) -> Result<StartupHandles> {
+        // 启动定时任务调度器
+        let scheduler_handle = self.scheduler.clone().start().await;
+
+        // 启动 Bridge Supervisor（懒加载 Worker，仅启动 supervisor 主循环）
+        let bridge_handle = self.bridge.spawn();
+
+        tracing::info!("服务容器全部启动完成");
+        Ok(StartupHandles {
+            scheduler_handle,
+            bridge_handle,
+        })
+    }
+}
+
+impl Drop for ServiceContainer {
+    fn drop(&mut self) {
+        // 取消 uptime 定时器，使其干净退出（与 TrayManager 的 Drop 惯例一致）
+        self.uptime_cancel.cancel();
+    }
+}

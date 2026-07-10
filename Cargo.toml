@@ -1,0 +1,115 @@
+[package]
+name = "campus-auth"
+version = "5.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+default-run = "campus-auth"
+description = "校园网自动认证工具 — Rust 重写版"
+authors = ["Misyra"]
+license = "MIT"
+
+[[bin]]
+name = "campus-auth"
+path = "src/main.rs"
+
+[[bin]]
+name = "campus-auth-helper"
+path = "src/helper_main.rs"
+
+[features]
+default = []
+no-embed = []
+
+[dependencies]
+# 异步运行时 & 网络
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+# HTTP 框架 & 中间件
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "set-header"] }
+
+# 序列化 & 数据
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+base64 = "0.22"
+
+# 配置 & 状态
+arc-swap = "1"
+
+# 加密 & 安全
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive", "alloc", "serde"] }
+rand = "0.8"
+# macOS F_FULLFSYNC 持久化保证（仅 macOS 编译路径使用）
+libc = "0.2"
+
+# CLI & 日志
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt", "time", "local-time"] }
+tracing-appender = "0.2"
+
+# 错误处理
+thiserror = "2"
+anyhow = "1"
+
+# 时间 & 调度
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+cron = "0.13"
+
+# 系统 & 桌面
+tray-icon = "0.24"
+image = { version = "0.25", default-features = false, features = ["png"] }
+open = "5"
+fs4 = { version = "1", features = ["tokio"] }
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+zip = "2"
+
+# 网络 & 硬件
+mac_address = "1"
+
+# 工具 & 更新
+semver = { version = "1", features = ["serde"] }
+sha2 = "0.10"
+which = "7"
+hex = "0.4"
+self-replace = "1"
+tempfile = "3"
+url = "2"
+
+# Trait & 元编程
+async-trait = "0.1"
+utoipa = { version = "5", features = ["axum_extras"] }
+
+# 嵌入
+rust-embed = "8"
+
+# 编码
+encoding_rs = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+# tray-icon Windows 平台实现靠隐藏窗口的窗口过程处理 WM_USER_TRAYICON，
+# 应用必须自行 pump 消息循环，否则托盘点击与菜单事件均不会触发。
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+wiremock = "0.6"
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+pretty_assertions = "1"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

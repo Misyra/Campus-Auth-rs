@@ -1,0 +1,126 @@
+.scheduled-task-type {
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.badge-script {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+}
+
+.badge-browser {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.task-item.disabled {
+  opacity: 0.6;
+}
+
+.scheduled-task-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.scheduled-task-item .task-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.scheduled-task-item .task-actions {
+  flex-shrink: 0;
+}
+
+.scheduled-task-item .task-toggle {
+  flex-shrink: 0;
+  padding-left: 16px;
+  border-left: 1px solid var(--border);
+}
+
+.form-section {
+  margin-bottom: 20px;
+}
+
+.form-section:last-child {
+  margin-bottom: 0;
+}
+
+.form-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.form-section .form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.form-section .form-row .form-group {
+  margin-bottom: 0;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.scheduled-tasks-page .history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: unset;
+}
+
+/* .history-item 基础样式来自 dashboard.css */
+/* 以下为定时任务历史的修饰符 */
+.scheduled-tasks-page .history-item.success {
+  border-left: 3px solid var(--success);
+}
+
+.scheduled-tasks-page .history-item.failed {
+  border-left: 3px solid var(--error);
+}
+
+.scheduled-tasks-page .history-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.scheduled-tasks-page .history-status {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.scheduled-tasks-page .history-status.success {
+  color: var(--success);
+}
+
+.scheduled-tasks-page .history-status.failure {
+  color: var(--error);
+}
+
+.scheduled-tasks-page .history-time {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.scheduled-tasks-page .history-duration {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.scheduled-tasks-page .history-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}

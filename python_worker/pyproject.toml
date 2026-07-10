@@ -1,0 +1,47 @@
+[project]
+name = "campus-auth-worker"
+version = "5.0.0a1"
+description = "Campus-Auth 浏览器自动化 Python Worker（NDJSON IPC 子进程）"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "playwright>=1.40",
+]
+
+# 可选扩展：OCR 识别与模型解密。未安装时对应命令返回错误而非崩溃，
+# 因此不作为强制依赖，避免 uv sync 因原生编译失败而中断。
+[project.optional-dependencies]
+ocr = [
+    "ddddocr>=1.4",
+    "cryptography",
+]
+
+[project.scripts]
+campus-auth-worker = "worker_main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+include = [
+    "worker_main.py",
+    "playwright_worker.py",
+    "step_handlers.py",
+    "variable_resolver.py",
+    "models.py",
+    "script_runner.py",
+]
+
+# uv 镜像源配置：使用清华大学 PyPI 镜像加速依赖下载
+[tool.uv]
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"

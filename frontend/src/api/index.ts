@@ -1,0 +1,193 @@
+/**
+ * API 端点函数集合。
+ * 所有调用统一走此处，禁止在业务代码中直接 fetch。
+ * 每个端点返回 client.ts 解包 .data 后的纯业务负载（成功时）。
+ * 路径对齐 rust-rewrite/architecture/data-models.md 附录 A。
+ */
+
+import { http } from "./client";
+import type { RequestOptions } from "./client";
+import type {
+  AutostartStatus,
+  BackgroundUploadResult,
+  BrowserListResponse,
+  ConfigResponse,
+  DebugSession,
+  HealthInfo,
+  InitStatus,
+  LoginHistoryItem,
+  LogEntry,
+  MutationResult,
+  NetworkDetectResult,
+  NetworkInterface,
+  OcrStatus,
+  Profile,
+  ProfileListResponse,
+  RepoTask,
+  SaveConfigPayload,
+  ScheduledTask,
+  ScheduledTaskHistoryItem,
+  Script,
+  ShellListResponse,
+  TaskItem,
+  UninstallItem,
+  UpdateInfo,
+} from "./types";
+
+export { ApiError, extractApiError } from "./client";
+
+/** 配置相关 */
+export const configApi = {
+  fetch: () => http.get<ConfigResponse>("/api/config"),
+  save: (payload: SaveConfigPayload) => http.put<MutationResult>("/api/config", payload),
+  patch: (payload: SaveConfigPayload, opts?: RequestOptions) => http.patch<MutationResult>("/api/config", payload, opts),
+  fetchDefaults: () => http.get<ConfigResponse>("/api/config/defaults"),
+  fetchLogLevels: () => http.get<{ level: string }>("/api/config/log-levels"),
+  setLogLevel: (level: string) => http.put<MutationResult>("/api/config/log-level", { level }),
+  fetchStealthScript: () => http.get<{ script: string }>("/api/config/default-stealth-script"),
+  reload: () => http.post<MutationResult>("/api/config/reload"),
+};
+
+/** 监控与登录操作 */
+export const monitorApi = {
+  fetchStatus: () => http.get<import("./types").StatusSnapshot>("/api/monitor/status"),
+  start: () => http.post<MutationResult>("/api/monitor/start"),
+  stop: () => http.post<MutationResult>("/api/monitor/stop"),
+  fetchInterfaces: () => http.get<NetworkInterface[]>("/api/tools/network-interfaces"),
+};
+
+/** 一次性操作 */
+export const actionsApi = {
+  login: (timeoutMs: number) =>
+    http.post<MutationResult>("/api/login", null, { timeout: timeoutMs }),
+  cancelLogin: () => http.post<MutationResult>("/api/login/cancel"),
+  testNetwork: () => http.post<MutationResult>("/api/monitor/test", null, { timeout: 5000 }),
+};
+
+/** 系统 */
+export const systemApi = {
+  health: () => http.get<HealthInfo>("/api/health"),
+  initStatus: () => http.get<InitStatus>("/api/init-status"),
+  checkUpdate: () => http.get<UpdateInfo>("/api/check-update"),
+  agree: () => http.post<MutationResult>("/api/agree"),
+  shutdown: () => http.post<MutationResult>("/api/system/shutdown"),
+  update: () => http.post<MutationResult & { message?: string; version?: string }>("/api/system/update"),
+  fetchLogs: (limit: number) => http.get<LogEntry[]>(`/api/logs?limit=${limit}`),
+};
+
+/** 配置方案 */
+export const profilesApi = {
+  list: () => http.get<ProfileListResponse>("/api/profiles"),
+  get: (id: string) => http.get<{ settings: Profile }>(`/api/profiles/${id}`),
+  save: (id: string, payload: Profile) => http.put<MutationResult>(`/api/profiles/${id}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${id}`),
+  setActive: (id: string) => http.post<MutationResult>("/api/profiles/switch", { profile_id: id }),
+  detect: () => http.post<NetworkDetectResult>("/api/profiles/detect"),
+  toggleAutoSwitch: (enabled: boolean) =>
+    http.post<MutationResult & { active_profile?: string }>("/api/profiles/auto-switch", { enabled }),
+};
+
+/** 开机自启动 */
+export const autostartApi = {
+  fetchStatus: () => http.get<AutostartStatus>("/api/autostart/status"),
+  toggle: (enable: boolean) => http.post<MutationResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
+  setMode: (runtime_mode: string) => http.post<MutationResult>("/api/autostart/mode", { runtime_mode }),
+  fetchShells: () => http.get<ShellListResponse>("/api/shells"),
+};
+
+/** OCR */
+export const ocrApi = {
+  fetchStatus: () => http.get<OcrStatus>("/api/ocr/status"),
+  install: () => http.post<MutationResult>("/api/ocr/install"),
+  uninstall: () => http.post<MutationResult>("/api/ocr/uninstall"),
+  // 识别 base64 图片中的文本，返回 { text }
+  recognize: (payload: { image_base64: string; old?: boolean }) =>
+    http.post<{ text: string }>("/api/ocr/recognize", payload),
+};
+
+/** 登录历史 */
+export const historyApi = {
+  fetch: (limit: number) => http.get<LoginHistoryItem[]>(`/api/history?limit=${limit}`),
+  clear: () => http.delete<MutationResult>("/api/history"),
+};
+
+/** 卸载 */
+export const uninstallApi = {
+  detect: () => http.get<UninstallItem[]>("/api/uninstall/detect"),
+  perform: (keys: string[]) => http.post<MutationResult & { results?: unknown[] }>("/api/uninstall", { keys }),
+};
+
+/** 浏览器 */
+export const browsersApi = {
+  fetch: () => http.get<BrowserListResponse>("/api/browsers"),
+  installPlaywright: (opts?: { signal?: AbortSignal; timeout?: number }) =>
+    http.post<MutationResult>("/api/install/playwright", null, opts),
+};
+
+/** 调试 */
+export const debugApi = {
+  start: (taskId: string) => http.post<DebugSession>("/api/debug/start", { task_id: taskId }),
+  next: () => http.post<DebugSession>("/api/debug/step"),
+  runAll: () => http.post<DebugSession>("/api/debug/run-all"),
+  stop: () => http.post<MutationResult>("/api/debug/stop"),
+};
+
+/** 远程仓库 */
+export const repoApi = {
+  fetchIndex: (url: string) => http.get<RepoTask[]>(`/api/repo/fetch?url=${encodeURIComponent(url)}`),
+  fetchTask: (url: string) => http.get<Record<string, unknown>>(`/api/repo/task?url=${encodeURIComponent(url)}`),
+};
+
+/** 纯模式 */
+export const pureModeApi = {
+  fetch: () => http.get<{ enabled: boolean }>("/api/pure-mode"),
+  toggle: () => http.post<{ enabled: boolean; message?: string }>("/api/pure-mode"),
+};
+
+/** 外观/背景 */
+export const backgroundApi = {
+  upload: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return http.post<BackgroundUploadResult>("/api/background/upload", form);
+  },
+  fetchUrl: (url: string) =>
+    http.post<BackgroundUploadResult>("/api/background/fetch-url", { url }),
+  remove: (filename: string) => http.delete<MutationResult>(`/api/background/${filename}`),
+};
+
+/** 脚本 */
+export const scriptsApi = {
+  list: () => http.get<Script[]>("/api/scripts"),
+  get: (id: string) => http.get<Script>(`/api/scripts/${id}`),
+  binaries: () => http.get<import("./types").BinaryInfo[]>("/api/scripts/binaries"),
+  save: (id: string, payload: { name: string; description: string; content: string; binary_path: string }) =>
+    http.put<MutationResult>(`/api/scripts/${id}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/scripts/${id}`),
+  run: (id: string) => http.post<MutationResult>("/api/scripts/run", { task_id: id }),
+};
+
+/** 任务（浏览器任务） */
+export const tasksApi = {
+  list: () => http.get<TaskItem[]>("/api/tasks"),
+  get: (id: string) => http.get<Record<string, unknown> & { type?: string; name?: string; description?: string; url?: string; raw_json?: unknown }>(`/api/tasks/${id}`),
+  active: () => http.get<{ task_id: string }>("/api/tasks/active"),
+  save: (id: string, payload: Record<string, unknown>) => http.put<MutationResult>(`/api/tasks/${id}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${id}`),
+  setActive: (id: string) => http.post<MutationResult>(`/api/tasks/active/${id}`),
+  order: (order: { all: string[]; scripts: string[] }) => http.post<MutationResult>("/api/tasks/order", order),
+  import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),
+  export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${id}`),
+};
+
+/** 定时任务 */
+export const scheduledTasksApi = {
+  list: () => http.get<ScheduledTask[]>("/api/scheduler/jobs"),
+  get: (id: string) => http.get<ScheduledTask>(`/api/scheduler/jobs/${id}`),
+  create: (payload: ScheduledTask) => http.post<MutationResult>("/api/scheduler/jobs", payload),
+  update: (id: string, payload: ScheduledTask) => http.put<MutationResult>(`/api/scheduler/jobs/${id}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/scheduler/jobs/${id}`),
+  toggle: (id: string) => http.post<MutationResult & { enabled: boolean }>(`/api/scheduler/jobs/${id}/toggle`),
+  run: (id: string) => http.post<MutationResult & { run_id: string }>(`/api/scheduler/jobs/${id}/run`),
+  history: (id: string) => http.get<{ runs: ScheduledTaskHistoryItem[] } | ScheduledTaskHistoryItem[]>(`/api/scheduler/jobs/${id}/history`),
+};

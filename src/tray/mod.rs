@@ -1,0 +1,625 @@
+//! 系统托盘模块：图标加载、菜单构建、事件转发与异步泵任务
+//!
+//! 设计要点：
+//! - 托盘图标与菜单事件循环运行在**独立的 OS 线程**上（[`tray-icon`] 要求）。
+//! - OS 线程只负责构建菜单、显示图标，并把菜单选择通过通道转发为 [`TrayAction`]，
+//!   所有真正的业务逻辑（Engine 命令派发、更新检查、打开浏览器）都在 tokio 泵任务中
+//!   完成，保持 OS 线程极简。
+//! - 退出时由泵任务发送 [`crate::engine::EngineCommand::Shutdown`]，随后通知 OS 线程退出
+//!   并 join。
+
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc as std_mpsc;
+use std::thread;
+
+use tokio::sync::{broadcast, watch};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
+use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, MenuId};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
+
+use crate::app::{self, AxumServeHandle, RUNTIME_PORT_FILE};
+use crate::config::{ConfigService, ProfileService};
+use crate::container::ServiceContainer;
+use crate::engine::{Engine, EngineCommand};
+use crate::login::LoginOrchestrator;
+use crate::status::{
+    EngineState, LoginStatus, NetworkStatus, StatusManager, StatusSnapshot,
+};
+use crate::updater::UpdaterService;
+use crate::web::state::LogEntry;
+
+/// 托盘图标默认尺寸（生成回退图标时使用）
+const FALLBACK_ICON_SIZE: u32 = 32;
+/// 运行时图标颜色（绿色，表示运行中）
+const ACTIVE_COLOR: [u8; 3] = [80, 200, 120];
+/// 停止/崩溃图标颜色（红色）
+const INACTIVE_COLOR: [u8; 3] = [220, 80, 80];
+/// 动作通道容量
+const ACTION_CHANNEL_CAPACITY: usize = 64;
+
+/// 菜单构建结果类型：`(Menu, 顶层菜单项容器, 监测切换 MenuItem)`
+///
+/// `toggle_item` 是 `menu_items[0]` 的克隆引用（MenuItem 内部为 Rc，clone 廉价），
+/// 单独返回以便状态变化时调用 `set_text` 动态切换「启动监测/停止监测」文本。
+type MenuBuildResult = (Menu, Vec<Box<dyn IsMenuItem>>, MenuItem);
+
+/// OS 线程内部命令（泵任务 / Drop → OS 线程），单通道承载退出与托盘刷新。
+///
+/// `TrayIcon` 内部包含 `Rc<RefCell>` 因而不满足 `Send`，必须由 OS 线程独占持有，
+/// 故状态驱动的 tooltip/图标更新也只能在 OS 线程内完成，泵任务仅通过本命令转发请求。
+enum OsCommand {
+    /// 退出 OS 线程并清理
+    Quit,
+    /// 依据最新状态刷新 tooltip / 图标
+    RefreshTray,
+}
+
+/// 菜单选择转换后的托盘动作，由 OS 线程产生、被泵任务消费
+#[derive(Debug, Clone)]
+pub enum TrayAction {
+    /// 启动监测（EngineCommand::Start）
+    StartMonitor,
+    /// 停止监测（EngineCommand::Stop）
+    StopMonitor,
+    /// 打开 Web 控制台（open::that）
+    OpenWeb,
+    /// 退出（EngineCommand::Shutdown + 停止自身）
+    Quit,
+}
+
+pub use crate::ServiceHandle;
+
+/// 托盘业务依赖集合（构造时一次性注入，避免函数参数过多触发 clippy `too_many_arguments`）
+pub struct TrayDeps {
+    /// 配置服务（读取端口、Profile 列表等）
+    pub config: Arc<ConfigService>,
+    /// 状态管理器（订阅状态以更新 tooltip/图标，并取活跃 Profile）
+    pub status: Arc<StatusManager>,
+    /// 引擎（派发命令）
+    pub engine: Arc<Engine>,
+    /// Profile 服务（枚举 Profile 构建子菜单）
+    pub profile_service: Arc<ProfileService>,
+    /// 更新服务（检查更新）
+    pub updater: Arc<UpdaterService>,
+    /// 登录编排器（托盘「立即登录」触发一次登录）
+    pub orchestrator: Arc<LoginOrchestrator>,
+    /// 服务容器（轻量模式按需启动 Axum 时需要）
+    pub container: Arc<ServiceContainer>,
+    /// 日志广播通道（按需启动 Axum 时需要）
+    pub log_tx: broadcast::Sender<LogEntry>,
+    /// 默认监听端口（Axum 未运行时回退使用）
+    pub port: u16,
+    /// 是否运行在轻量模式（Axum 按需启动）
+    pub lightweight: bool,
+}
+
+/// 托盘管理器：持有各服务 Arc 与跨线程通道，负责创建并驱动托盘
+pub struct TrayManager {
+    /// 配置服务（读取端口、Profile 列表等）
+    config: Arc<ConfigService>,
+    /// 状态管理器（订阅状态以更新 tooltip/图标，并取活跃 Profile）
+    status: Arc<StatusManager>,
+    /// 引擎（派发命令）
+    engine: Arc<Engine>,
+    /// Profile 服务（枚举 Profile 构建子菜单）
+    profile_service: Arc<ProfileService>,
+    /// 更新服务（检查更新）
+    updater: Arc<UpdaterService>,
+    /// 登录编排器（托盘「立即登录」触发一次登录）
+    orchestrator: Arc<LoginOrchestrator>,
+    /// 服务容器（轻量模式按需启动 Axum 时需要）
+    container: Arc<ServiceContainer>,
+    /// 日志广播通道（按需启动 Axum 时需要）
+    log_tx: broadcast::Sender<LogEntry>,
+    /// 默认监听端口（Axum 未运行时回退使用）
+    port: u16,
+    /// 是否运行在轻量模式（Axum 按需启动）
+    lightweight: bool,
+
+    /// 菜单动作发送端（OS 线程 → 泵任务）
+    action_tx: mpsc::Sender<TrayAction>,
+    /// 菜单动作接收端（在 spawn 时取出，移入泵任务）
+    action_rx: Mutex<Option<mpsc::Receiver<TrayAction>>>,
+    /// OS 线程命令发送端（泵任务/Drop → OS 线程），承载退出与托盘刷新
+    os_cmd_tx: std_mpsc::Sender<OsCommand>,
+    /// OS 线程命令接收端（在 spawn 时取出，移入 OS 线程）
+    os_cmd_rx: Mutex<Option<std_mpsc::Receiver<OsCommand>>>,
+    /// OS 托盘线程 JoinHandle（take 后仅一处 join，避免重复 join）
+    os_join: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+}
+
+impl TrayManager {
+    /// 构造托盘管理器。
+    ///
+    /// 仅保存依赖与通道；真正的图标与菜单在 [`spawn`](TrayManager::spawn) 中于专用 OS 线程上构建。
+    pub fn new(deps: TrayDeps) -> Arc<Self> {
+        let (action_tx, action_rx) = mpsc::channel(ACTION_CHANNEL_CAPACITY);
+        let (os_cmd_tx, os_cmd_rx) = std_mpsc::channel();
+        Arc::new(Self {
+            config: deps.config,
+            status: deps.status,
+            engine: deps.engine,
+            profile_service: deps.profile_service,
+            updater: deps.updater,
+            orchestrator: deps.orchestrator,
+            container: deps.container,
+            log_tx: deps.log_tx,
+            port: deps.port,
+            lightweight: deps.lightweight,
+            action_tx,
+            action_rx: Mutex::new(Some(action_rx)),
+            os_cmd_tx,
+            os_cmd_rx: Mutex::new(Some(os_cmd_rx)),
+            os_join: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// 启动托盘：在专用 OS 线程上构建图标与菜单，并 spawn 一个 tokio 泵任务消费 [`TrayAction`]。
+    ///
+    /// 返回 [`ServiceHandle`]，调用其 [`ServiceHandle::stop`] 可优雅停止并 join OS 线程。
+    pub fn spawn(self: &Arc<Self>) -> ServiceHandle {
+        let action_rx = self
+            .action_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("spawn 仅可被调用一次");
+        let os_cmd_rx = self
+            .os_cmd_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("spawn 仅可被调用一次");
+
+        // 跨线程共享的数据（OS 线程独占持有 TrayIcon，仅取所需 Arc）
+        let status = Arc::clone(&self.status);
+        let status_for_pump = status.clone();
+        let action_tx = self.action_tx.clone();
+        let os_cmd_tx_pump = self.os_cmd_tx.clone();
+        let os_join = Arc::clone(&self.os_join);
+        // 泵任务需要的全部业务依赖打包为 TrayDeps（含 orchestrator/container/log_tx/port/lightweight）
+        let deps = TrayDeps {
+            config: Arc::clone(&self.config),
+            status: Arc::clone(&self.status),
+            engine: Arc::clone(&self.engine),
+            profile_service: Arc::clone(&self.profile_service),
+            updater: Arc::clone(&self.updater),
+            orchestrator: Arc::clone(&self.orchestrator),
+            container: Arc::clone(&self.container),
+            log_tx: self.log_tx.clone(),
+            port: self.port,
+            lightweight: self.lightweight,
+        };
+        // 轻量模式下按需启动的 Axum 句柄（仅在该模式首次「打开控制台」时创建）
+        let axum_handle: Arc<Mutex<Option<AxumServeHandle>>> =
+            Arc::new(Mutex::new(None));
+
+        // ---- OS 托盘线程：构建菜单与图标，独占持有 TrayIcon，等待命令 ----
+        let os_handle = thread::spawn(move || {
+            // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
+            // menu_items 绑定本身保持对象存活到线程结束；toggle_item 用于动态改文本
+            let (menu, menu_items, toggle_item) = build_menu();
+            let _ = &menu_items;
+            // 首次按当前状态设置文本
+            toggle_item.set_text(monitor_toggle_label(status.borrow().engine_state));
+
+            // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标
+            let (rgba, w, h) = load_tray_rgba(&icon_path());
+            let active_icon = make_icon(rgba, w, h);
+            let (inactive_rgba, iw, ih) = solid_rgba(INACTIVE_COLOR, FALLBACK_ICON_SIZE);
+            let inactive_icon = make_icon(inactive_rgba, iw, ih);
+
+            let built = match active_icon.as_ref() {
+                Some(icon) => TrayIconBuilder::new()
+                    .with_icon(icon.clone())
+                    .with_menu(Box::new(menu))
+                    .with_tooltip("Campus-Auth")
+                    .build(),
+                None => {
+                    error!("无法加载或生成托盘图标");
+                    return;
+                }
+            };
+
+            let tray = match built {
+                Ok(t) => {
+                    info!("系统托盘已创建");
+                    Rc::new(t)
+                }
+                Err(e) => {
+                    error!("系统托盘创建失败: {e}");
+                    return;
+                }
+            };
+
+            // 注册全局菜单事件处理器：转发为 TrayAction（不阻塞 OS 线程）
+            let action_tx_tray = action_tx.clone();
+            let status_for_menu = Arc::clone(&status);
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                let id: String = event.id().0.clone();
+                // monitor_toggle 的具体动作（启动/停止）由当前引擎状态决定，
+                // 这样菜单项 id 固定，文本可随状态切换
+                let action = match id.as_str() {
+                    "monitor_toggle" => {
+                        if status_for_menu.borrow().engine_state == EngineState::Running {
+                            TrayAction::StopMonitor
+                        } else {
+                            TrayAction::StartMonitor
+                        }
+                    }
+                    "open_web" => TrayAction::OpenWeb,
+                    "quit" => TrayAction::Quit,
+                    _ => return,
+                };
+                // OS 线程用 try_send（非阻塞）转发；通道满/关闭时丢弃
+                if action_tx.try_send(action).is_err() {
+                    debug!("托盘泵任务已退出，丢弃菜单事件");
+                }
+            }));
+
+            // 注册全局托盘图标事件处理器：左键单击打开 Web 控制台
+            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+                if let TrayIconEvent::Click { button, button_state, .. } = event {
+                    if button == tray_icon::MouseButton::Left
+                        && button_state == tray_icon::MouseButtonState::Up
+                    {
+                        let _ = action_tx_tray.try_send(TrayAction::OpenWeb);
+                    }
+                }
+            }));
+
+            // 阻塞等待泵任务 / Drop 发来的命令（退出或刷新托盘），保持线程存活。
+            //
+            // Windows 平台必须 pump 消息循环：tray-icon 内部为托盘创建隐藏窗口，
+            // 窗口过程处理 WM_USER_TRAYICON 后通过 TrayIconEvent::send 分发到全局
+            // handler。若没有 GetMessage/PeekMessage + DispatchMessage，窗口消息不
+            // 被处理，托盘左键点击与菜单事件都不会触发。
+            #[cfg(windows)]
+            {
+                use std::time::Duration;
+                loop {
+                    pump_windows_messages();
+                    match os_cmd_rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(OsCommand::Quit) => break,
+                        Ok(OsCommand::RefreshTray) => {
+                            update_tray(
+                                &tray,
+                                &status.borrow(),
+                                &active_icon,
+                                &inactive_icon,
+                                &toggle_item,
+                            );
+                        }
+                        Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                loop {
+                    match os_cmd_rx.recv() {
+                        Ok(OsCommand::Quit) => break,
+                        Ok(OsCommand::RefreshTray) => {
+                            update_tray(
+                                &tray,
+                                &status.borrow(),
+                                &active_icon,
+                                &inactive_icon,
+                                &toggle_item,
+                            );
+                        }
+                        Err(_) => break, // 发送端已丢弃，结束线程
+                    }
+                }
+            }
+
+            // 清理：清除全局处理器（释放 action_tx 引用）
+            MenuEvent::set_event_handler::<fn(MenuEvent)>(None);
+            TrayIconEvent::set_event_handler::<fn(TrayIconEvent)>(None);
+            debug!("系统托盘线程退出");
+        });
+
+        // 记录 OS 线程句柄，供泵任务或 Drop 在结束时 join
+        *self.os_join.lock().unwrap_or_else(|e| e.into_inner()) = Some(os_handle);
+
+        // ---- tokio 泵任务：消费 TrayAction 并派发到 Engine/Updater ----
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let pump = tokio::spawn(async move {
+            let mut status_rx = status_for_pump.subscribe();
+            let mut action_rx = action_rx;
+
+            loop {
+                tokio::select! {
+                    // 外部停止信号（ServiceHandle::stop 或 Drop 导致发送端关闭）
+                    stop_res = stop_rx.changed() => {
+                        if stop_res.is_err() || *stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                    // 菜单动作
+                    action = action_rx.recv() => {
+                        match action {
+                            Some(action) => {
+                                let quit = handle_action(
+                                    &action,
+                                    &deps,
+                                    &axum_handle,
+                                )
+                                .await;
+                                if quit {
+                                    break;
+                                }
+                            }
+                            None => break, // 发送端已丢弃
+                        }
+                    }
+                    // 状态变化 → 请求 OS 线程刷新 tooltip/图标
+                    Ok(()) = status_rx.changed() => {
+                        let _ = os_cmd_tx_pump.send(OsCommand::RefreshTray);
+                    }
+                }
+            }
+
+            // 通知并 join OS 托盘线程
+            let _ = os_cmd_tx_pump.send(OsCommand::Quit);
+            if let Some(h) = os_join.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = h.join();
+            }
+            debug!("托盘泵任务退出");
+        });
+
+        ServiceHandle {
+            stop_tx,
+            join_handle: pump,
+        }
+    }
+}
+
+impl Drop for TrayManager {
+    fn drop(&mut self) {
+        // 若泵任务尚未触发退出，这里确保 OS 线程被通知并 join
+        let _ = self.os_cmd_tx.send(OsCommand::Quit);
+        if let Some(h) = self.os_join.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// 处理单个 [`TrayAction`]，派发到 Engine 或执行打开浏览器。
+///
+/// 返回 `true` 表示应退出托盘（Quit 动作）。
+async fn handle_action(
+    action: &TrayAction,
+    deps: &TrayDeps,
+    axum_handle: &Arc<Mutex<Option<AxumServeHandle>>>,
+) -> bool {
+    match action {
+        TrayAction::StartMonitor => {
+            if let Err(e) = deps.engine.dispatch(EngineCommand::Start).await {
+                warn!("派发 Start 失败: {e:?}");
+            }
+            false
+        }
+        TrayAction::StopMonitor => {
+            if let Err(e) = deps.engine.dispatch(EngineCommand::Stop).await {
+                warn!("派发 Stop 失败: {e:?}");
+            }
+            false
+        }
+        TrayAction::OpenWeb => {
+            // 轻量模式：Axum 未常驻，首次打开控制台时按需启动
+            if deps.lightweight && axum_handle.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+                match app::start_axum(deps.container.clone(), deps.log_tx.clone(), deps.port).await {
+                    Ok(h) => {
+                        let mut g = axum_handle.lock().unwrap_or_else(|e| e.into_inner());
+                        if g.is_none() {
+                            *g = Some(h);
+                        }
+                        info!("托盘按需启动 Axum 成功");
+                    }
+                    Err(e) => warn!("托盘按需启动 Axum 失败: {e}"),
+                }
+            }
+            // 优先读取运行时端口文件（按需启动后写入），回退到默认端口
+            let eff_port = match read_runtime_port(&deps.config) {
+                Some(p) => p,
+                None => match axum_handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                    Some(h) => h.port,
+                    None => deps.port,
+                },
+            };
+            let url = format!("http://127.0.0.1:{eff_port}");
+            if let Err(e) = open::that(&url) {
+                warn!("打开浏览器失败 ({url}): {e}");
+            } else {
+                info!("已打开 Web 控制台: {url}");
+            }
+            false
+        }
+        TrayAction::Quit => {
+            info!("收到退出指令，正在关闭引擎");
+            if let Err(e) = deps.engine.dispatch(EngineCommand::Shutdown).await {
+                warn!("派发 Shutdown 失败: {e:?}");
+            }
+            true
+        }
+    }
+}
+
+/// 根据状态更新托盘 tooltip、图标，以及监测切换菜单项文本
+fn update_tray(
+    tray: &TrayIcon,
+    snap: &StatusSnapshot,
+    active: &Option<Icon>,
+    inactive: &Option<Icon>,
+    toggle_item: &MenuItem,
+) {
+    // 动态切换「启动监测/停止监测」菜单项文本
+    toggle_item.set_text(monitor_toggle_label(snap.engine_state));
+
+    // 登录行：成功/失败时附带上次登录结果信息
+    let login_line = match (&snap.login_status, &snap.login_message) {
+        (LoginStatus::Success | LoginStatus::Failed, Some(msg)) => {
+            format!("登录: {} ({})", login_status_str(snap.login_status), msg)
+        }
+        _ => format!("登录: {}", login_status_str(snap.login_status)),
+    };
+    let tooltip = format!(
+        "Campus-Auth\n引擎: {}\n网络: {}\n{}",
+        engine_state_str(snap.engine_state),
+        network_status_str(snap.network_status),
+        login_line,
+    );
+    if let Err(e) = tray.set_tooltip(Some(tooltip.as_str())) {
+        debug!("更新托盘 tooltip 失败: {e}");
+    }
+    let target = match snap.engine_state {
+        EngineState::Running => active,
+        EngineState::Stopped | EngineState::Dead => inactive,
+    };
+    if let Some(icon) = target {
+        if let Err(e) = tray.set_icon(Some(icon.clone())) {
+            debug!("更新托盘图标失败: {e}");
+        }
+    }
+}
+
+/// 构建托盘右键菜单（精简三项：监测切换 / 打开控制台 / 退出）。
+///
+/// 返回 `(Menu, 顶层菜单项容器, 监测切换 MenuItem)`：muda 内部持有对菜单项对象的引用，
+/// 因此 `menu_items` 必须比 [`Menu`]/[`TrayIcon`] 存活更久（由调用方持有）。
+/// `toggle_item` 是 `menu_items[0]` 的克隆（MenuItem 内部为 Rc，clone 廉价），
+/// 供 [`update_tray`] 在状态变化时调用 `set_text` 动态切换文本。
+///
+/// 监测切换项使用固定 id `monitor_toggle`，具体动作（启动/停止）由菜单事件 handler
+/// 根据当前引擎状态决定，从而实现「id 不变、文本随状态切换」。
+fn build_menu() -> MenuBuildResult {
+    let toggle_item = MenuItem::with_id(MenuId::new("monitor_toggle"), "启动监测", true, None);
+    let menu_items: Vec<Box<dyn IsMenuItem>> = vec![
+        Box::new(toggle_item.clone()),
+        Box::new(MenuItem::with_id(MenuId::new("open_web"), "打开控制台", true, None)),
+        Box::new(MenuItem::with_id(MenuId::new("quit"), "退出", true, None)),
+    ];
+
+    let menu_refs: Vec<&dyn IsMenuItem> = menu_items.iter().map(|b| b.as_ref()).collect();
+    let menu = Menu::new();
+    let _ = menu.append_items(&menu_refs);
+    (menu, menu_items, toggle_item)
+}
+
+/// 引擎状态 → 监测切换菜单项文本
+fn monitor_toggle_label(state: EngineState) -> &'static str {
+    match state {
+        EngineState::Running => "停止监测",
+        EngineState::Stopped | EngineState::Dead => "启动监测",
+    }
+}
+
+/// 计算托盘图标路径（相对于当前 exe 目录的 resources/icons/tray.png）
+fn icon_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .map(|d| d.join("resources").join("icons").join("tray.png"))
+        .unwrap_or_else(|| PathBuf::from("resources/icons/tray.png"))
+}
+
+/// 读取运行时端口文件（`config/.runtime_port`，轻量模式按需启动 Axum 后写入）
+fn read_runtime_port(config: &Arc<ConfigService>) -> Option<u16> {
+    let path = config
+        .base_path()
+        .join("config")
+        .join(RUNTIME_PORT_FILE);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+}
+
+/// 加载托盘图标 RGBA 像素；若文件缺失或解码失败，回退到生成的纯色缓冲（不 panic）
+fn load_tray_rgba(path: &std::path::Path) -> (Vec<u8>, u32, u32) {
+    match image::open(path) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            (rgba.into_raw(), w, h)
+        }
+        Err(e) => {
+            warn!("托盘图标加载失败 ({path:?})，使用回退色块: {e}");
+            solid_rgba(ACTIVE_COLOR, FALLBACK_ICON_SIZE)
+        }
+    }
+}
+
+/// 生成指定颜色的纯色 RGBA 缓冲（alpha=255）
+fn solid_rgba(color: [u8; 3], size: u32) -> (Vec<u8>, u32, u32) {
+    let mut v = Vec::with_capacity((size * size) as usize * 4);
+    for _ in 0..(size * size) {
+        v.extend_from_slice(&[color[0], color[1], color[2], 255]);
+    }
+    (v, size, size)
+}
+
+/// 由 RGBA 缓冲构造 [`Icon`]；失败时回退到纯色图标，再失败返回 None（不 panic）
+fn make_icon(rgba: Vec<u8>, w: u32, h: u32) -> Option<Icon> {
+    match Icon::from_rgba(rgba, w, h) {
+        Ok(icon) => Some(icon),
+        Err(_) => {
+            let (buf, bw, bh) = solid_rgba(ACTIVE_COLOR, FALLBACK_ICON_SIZE);
+            Icon::from_rgba(buf, bw, bh).ok()
+        }
+    }
+}
+
+/// 引擎状态 → 中文
+fn engine_state_str(s: EngineState) -> &'static str {
+    match s {
+        EngineState::Running => "运行中",
+        EngineState::Stopped => "已停止",
+        EngineState::Dead => "已崩溃",
+    }
+}
+
+/// 网络状态 → 中文
+fn network_status_str(s: NetworkStatus) -> &'static str {
+    match s {
+        NetworkStatus::Online => "在线",
+        NetworkStatus::CaptivePortal => "需认证",
+        NetworkStatus::Offline => "离线",
+        NetworkStatus::Paused => "已暂停",
+    }
+}
+
+/// 登录状态 → 中文
+fn login_status_str(s: LoginStatus) -> &'static str {
+    match s {
+        LoginStatus::Idle => "空闲",
+        LoginStatus::Running => "登录中",
+        LoginStatus::Success => "成功",
+        LoginStatus::Failed => "失败",
+        LoginStatus::Cancelled => "已取消",
+    }
+}
+
+/// Windows 专用：pump 当前线程消息队列中所有待处理的消息。
+///
+/// tray-icon 在 Windows 上为托盘创建隐藏窗口，窗口过程处理 `WM_USER_TRAYICON` 后
+/// 通过 `TrayIconEvent::send` 分发到全局 handler；muda 菜单子类化也依赖窗口过程。
+/// 必须由创建 `TrayIcon` 的同一线程周期性调用本函数（`PeekMessage` + `DispatchMessage`），
+/// 否则窗口消息不被分发，托盘点击与菜单事件均不会触发。
+#[cfg(windows)]
+fn pump_windows_messages() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}

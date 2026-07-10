@@ -1,0 +1,549 @@
+/* ==================== 配置方案页面 ==================== */
+
+/* 顶部状态栏 */
+.profiles-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: var(--bg-card-elevated);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+}
+
+.profiles-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.profiles-status-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.profiles-status-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.profiles-status-icon.on {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: var(--bg-primary);
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.25);
+}
+
+.profiles-status-icon.off {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.profiles-topbar-info h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.profiles-topbar-info p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.profiles-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 网络检测结果横幅 */
+.detect-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-lg);
+  animation: fadeIn 0.3s ease;
+  backdrop-filter: blur(8px);
+}
+
+.detect-banner.matched {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.detect-banner.unmatched {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.25);
+}
+
+.detect-banner-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.detect-banner-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.detect-banner.matched .detect-banner-icon {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success);
+}
+
+.detect-banner.unmatched .detect-banner-icon {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning);
+}
+
+.detect-banner-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.detect-banner-info strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.detect-details {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* 使用说明横条 */
+.profiles-guide {
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  backdrop-filter: blur(4px);
+}
+
+.profiles-guide-intro {
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.profiles-guide-intro p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.profiles-guide-intro strong {
+  color: var(--text-primary);
+}
+
+.profiles-guide-steps {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.guide-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.guide-step-num {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--purple));
+  color: var(--bg-primary);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.2);
+}
+
+.guide-step-content strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 1px;
+}
+
+.guide-step-content p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.guide-step-divider {
+  width: 1px;
+  height: 36px;
+  background: var(--border);
+  margin: 0 20px;
+  flex-shrink: 0;
+}
+
+/* 方案列表 */
+.profiles-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.profile-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  background: var(--bg-card-elevated);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  transition: border-color 0.25s, background 0.25s, box-shadow 0.25s, transform 0.25s;
+}
+
+.profile-card:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-hover);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  transform: translateY(-1px);
+}
+
+
+.profile-card.active {
+  border-color: rgba(34, 211, 238, 0.4);
+  box-shadow: inset 3px 0 0 var(--accent), 0 0 16px rgba(34, 211, 238, 0.08);
+}
+
+.profile-card.active:hover {
+  border-color: rgba(34, 211, 238, 0.5);
+  box-shadow: inset 3px 0 0 var(--accent), 0 4px 16px rgba(34, 211, 238, 0.12);
+  transform: translateY(-1px);
+}
+
+.profile-card-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.profile-card-main.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.profile-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.profile-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.profile-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.profile-card-id {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  opacity: 0.6;
+}
+
+.profile-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.profile-badge.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: var(--bg-primary);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.3);
+}
+
+.profile-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.profile-card-meta {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.profile-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  border: 1px solid var(--border);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-tag svg {
+  flex-shrink: 0;
+}
+
+.profile-tag.muted {
+  color: var(--text-muted);
+  font-family: inherit;
+}
+
+/* 编辑器内网络检测 */
+.editor-network-detect {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.editor-detect-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+  animation: fadeIn 0.3s ease;
+}
+
+.editor-detect-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  backdrop-filter: blur(4px);
+}
+
+.editor-detect-tag.muted {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.editor-detect-tag code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.editor-detect-tag .btn-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.editor-detect-tag .btn-link:hover {
+  text-decoration: underline;
+}
+
+/* ==================== 编辑方案页面 ==================== */
+
+.profile-editor-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 16px;
+  padding: 14px 20px;
+  background: var(--bg-card-elevated);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+}
+
+.profile-editor-topbar h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.profile-editor-card {
+  width: 100%;
+  backdrop-filter: blur(8px);
+}
+
+.profile-editor-body {
+  padding: 0 24px 24px;
+}
+
+.editor-section {
+  padding-top: 24px;
+}
+
+.editor-section + .editor-section {
+  margin-top: 4px;
+}
+
+/* 区域标题：左侧 accent 竖线 + 加粗文字 */
+.editor-section-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  padding-left: 12px;
+  border-right: 0;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 3px solid transparent;
+  border-image: linear-gradient(180deg, var(--accent), var(--purple)) 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.editor-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+  margin: 20px 0;
+}
+
+/* Toggle — 使用更具体的选择器避免覆盖 components.css */
+.profile-editor-card .toggle-group {
+  margin-top: 4px;
+}
+
+.profile-editor-card .toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+/* .field-help 已统一定义在 components.css 中 */
+
+/* 空状态 — 使用更具体的选择器避免覆盖 components.css */
+.profiles-empty {
+  text-align: center;
+  padding: var(--space-xl) var(--space-lg);
+  color: var(--text-muted);
+}
+
+.profiles-empty svg {
+  width: 48px;
+  height: 48px;
+  opacity: 0.3;
+  margin-bottom: var(--space-md);
+}
+
+.profiles-empty-title {
+  display: block;
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.profiles-empty-desc {
+  display: block;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-md);
+}
+
+/* 独立账号区域 */
+.profile-credentials-section {
+  margin-top: 8px;
+}
+
+.profiles-empty p {
+  margin: 0 0 var(--space-md);
+}
+
+/* 响应式 */
+@media (max-width: 700px) {
+  .profiles-guide-steps {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .guide-step-divider {
+    width: 100%;
+    height: 1px;
+    margin: 0;
+  }
+
+  .profile-card {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .profile-card-actions {
+    width: 100%;
+  }
+
+  .profile-card-actions .btn {
+    flex: 1;
+  }
+
+  .profiles-topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .profiles-topbar-actions {
+    width: 100%;
+  }
+}

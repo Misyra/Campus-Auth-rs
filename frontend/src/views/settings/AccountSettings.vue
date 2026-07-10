@@ -1,0 +1,97 @@
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { useRouter } from "vue-router";
+import { useConfig } from "@/composables/useConfig";
+import { useProfiles } from "@/composables/useProfiles";
+import CustomSelect from "@/components/common/CustomSelect.vue";
+import type { SelectOption } from "@/components/common/CustomSelect.vue";
+import { CARRIER_OPTIONS } from "@/utils/constants";
+
+const config = useConfig();
+// 使用 useConfig 单例中的 password 字段（与 saveConfig 共用同一实例）
+const password = config.password;
+const passwordSaved = config.passwordSaved;
+const editingPassword = config.editingPassword;
+const onPasswordFocus = config.onPasswordFocus;
+const onPasswordBlur = config.onPasswordBlur;
+const { profiles, activeProfileId } = useProfiles();
+const router = useRouter();
+
+const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
+const currentProfileName = ref("");
+onMounted(() => {
+  currentProfileName.value = profiles.value[activeProfileId.value]?.name || activeProfileId.value || "默认方案";
+});
+</script>
+
+<template>
+  <div class="settings-panel-grid">
+    <!-- 当前方案提示 -->
+    <div class="current-profile-hint">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+      </svg>
+      <span>当前方案：<strong>{{ currentProfileName }}</strong></span>
+      <a href="#" @click.prevent="router.push({ name: 'profiles' })" class="hint-link">管理方案</a>
+    </div>
+
+    <section class="card settings-panel">
+      <div class="settings-card-header">
+        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+        </svg>
+        <h2>账号配置</h2>
+      </div>
+      <div class="card-body">
+        <div class="form-group">
+          <label for="settings-username">账号</label>
+          <input id="settings-username" v-model.trim="config.config.credentials.username" name="username" type="text" placeholder="学号/账号" autocomplete="username" />
+        </div>
+        <div class="form-group">
+          <label for="settings-password">密码</label>
+          <input id="settings-password"
+            :value="passwordSaved && !editingPassword ? '••••••••••' : password.value"
+            @input="password.value = ($event.target as HTMLInputElement).value"
+            @focus="onPasswordFocus()" @blur="onPasswordBlur()"
+            name="password" type="password"
+            :placeholder="passwordSaved ? '输入新密码，留空不修改' : '输入密码'"
+            autocomplete="current-password" />
+          <span class="hint" v-if="passwordSaved && !editingPassword">密码已加密保存，点击修改</span>
+          <span class="hint" v-else-if="passwordSaved && editingPassword">留空保存则不修改原密码</span>
+          <span class="hint" v-else>密码本地存储，不保证意外删除后可恢复</span>
+        </div>
+        <div class="form-group">
+          <div class="field-label-row">
+            <label for="settings-auth-url">认证地址</label>
+            <span class="field-help" tabindex="0" role="note" data-tip="校园网认证页面的地址，以 http:// 或 https:// 开头。">?</span>
+          </div>
+          <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="http://" />
+        </div>
+        <div class="form-group">
+          <div class="field-label-row">
+            <label for="settings-carrier">运营商</label>
+            <span class="field-help" tabindex="0" role="note" data-tip="校园网登录页面的运营商选择。选择&quot;无&quot;则跳过运营商步骤；选择&quot;自定义&quot;可输入关键字匹配。">?</span>
+          </div>
+          <CustomSelect v-model="config.config.credentials.isp" :options="carrierOptions" @change="(val: string) => { if (val !== '自定义') config.config.credentials.isp = val; }" />
+        </div>
+        <div v-if="config.config.credentials.isp === '自定义'" class="form-group">
+          <label for="settings-carrier-custom">自定义运营商关键字</label>
+          <input id="settings-carrier-custom" v-model.trim="config.config.credentials.isp" type="text" placeholder="例如：校园专网、宿舍网" />
+        </div>
+      </div>
+    </section>
+
+    <!-- 自定义变量（已移除） -->
+    <section class="card settings-panel">
+      <div class="settings-card-header">
+        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+        </svg>
+        <h2>自定义变量</h2>
+      </div>
+      <div class="card-body">
+        <p class="form-help-text">自定义变量功能已移除。如需在任务中使用变量，请直接在任务 JSON 的 <code>variables</code> 字段中硬编码定义。</p>
+      </div>
+    </section>
+  </div>
+</template>

@@ -1,0 +1,63 @@
+<script setup lang="ts">
+// 首次使用协议向导（替代原 wizard.html）。
+// 展示使用协议与免责声明，勾选同意后调用 finishWizard 写入后端。
+
+import { useStatus } from "../../composables/useStatus";
+import { useUi } from "../../composables/useUi";
+
+const { busy } = useStatus();
+const { state, finishWizard } = useUi();
+</script>
+
+<template>
+  <div v-if="state.showWizard" class="wizard-overlay">
+    <div class="wizard-container">
+      <div class="wizard-header">
+        <img src="/black-cat.svg" alt="Campus-Auth 校园网认证助手" class="wizard-logo" />
+        <h1>欢迎使用 Campus-Auth 校园网自动认证</h1>
+        <p>请阅读以下协议内容，同意后方可使用本软件</p>
+      </div>
+
+      <div class="wizard-content">
+        <div class="wizard-page">
+          <h2>使用协议与免责声明</h2>
+
+          <div class="terms-content">
+            <h4>使用协议</h4>
+            <p>本软件（Campus-Auth）是一款校园网自动认证工具，仅供学习和个人使用。使用本软件前，请您仔细阅读并理解以下条款：</p>
+            <ul>
+              <li>本软件按"现状"提供，不作任何明示或暗示的保证。</li>
+              <li>用户应自行承担使用本软件的一切风险和后果。</li>
+              <li>用户应遵守所在学校和网络服务提供商的相关规定。</li>
+              <li>用户不得将本软件用于任何非法用途或违反相关法律法规的行为。</li>
+              <li>本软件开发者不对因使用本软件而产生的任何直接或间接损失承担责任。</li>
+            </ul>
+
+            <h4>免责声明</h4>
+            <ul>
+              <li>本软件不保证在所有网络环境下均能正常工作。</li>
+              <li>因网络环境变化、学校政策调整等原因导致软件无法使用，开发者不承担责任。</li>
+              <li>用户因使用本软件导致的账号异常、网络服务中断等问题，开发者不承担责任。</li>
+              <li>本软件可能因系统更新、依赖变更等原因需要调整，开发者保留随时修改或终止软件的权利。</li>
+            </ul>
+          </div>
+
+          <div class="terms-checkbox">
+            <label class="toggle">
+              <input type="checkbox" v-model="state.agreedToTerms" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">我已阅读并同意《使用协议》和《免责声明》</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="wizard-footer">
+        <div class="spacer"></div>
+        <button class="btn btn-primary" @click="finishWizard" :disabled="!state.agreedToTerms || busy.save">
+          同意并开始使用
+        </button>
+      </div>
+    </div>
+  </div>
+</template>

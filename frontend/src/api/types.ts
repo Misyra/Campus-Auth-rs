@@ -1,0 +1,420 @@
+/**
+ * API 类型定义
+ *
+ * 后端使用 snake_case JSON 字段名，前端类型与之一致。
+ * 当前为手写类型；后续可通过 `npm run typegen` 从 openapi.json 自动生成。
+ */
+
+/**
+ * 变更类端点（POST/PUT/PATCH/DELETE）成功时的业务负载。
+ * spec 下 HTTP 2xx 即代表成功，无 success 字段；message 为可选的业务提示。
+ * client.ts 已解包 { data: ... } 信封，调用方直接拿到此对象。
+ */
+export interface MutationResult {
+  message?: string;
+  [key: string]: unknown;
+}
+
+/** 背景图上传/拉取返回的业务负载 */
+export interface BackgroundUploadResult {
+  filename?: string;
+  url?: string;
+  message?: string;
+}
+
+/** 状态快照（WebSocket status 消息 / GET /api/status） */
+export interface StatusSnapshot {
+  monitoring: boolean;
+  network_check_count: number;
+  login_attempt_count: number;
+  last_check_time: string | null;
+  runtime_seconds: number;
+  network_connected: boolean;
+  status_detail: string;
+  network_state: string;
+  login_status?: string;
+  engine_state?: string;
+  [key: string]: unknown;
+}
+
+/** 开机自启动状态 */
+export interface AutostartStatus {
+  platform: string;
+  enabled: boolean;
+  method: string;
+  location: string;
+  runtime_mode: string;
+}
+
+/** 日志条目 */
+export interface LogEntry {
+  timestamp: string;
+  level: string;
+  source: string;
+  message: string;
+}
+
+/** 通知条目（前端内存态） */
+export interface NotificationEntry {
+  success: boolean;
+  message: string;
+  time: string;
+  category: string;
+  icon: string;
+  label: string;
+  action: NotificationAction | null;
+}
+
+/** 通知可点击行为 */
+export interface NotificationAction {
+  label: string;
+  page: string;
+}
+
+/** 浏览器配置 */
+export interface BrowserConfig {
+  headless: boolean;
+  timeout: number;
+  navigation_timeout: number;
+  login_timeout: number;
+  user_agent: string;
+  low_resource_mode: boolean;
+  disable_web_security: boolean;
+  extra_headers_json: string;
+  browser_args: string;
+  stealth_mode: boolean;
+  stealth_custom_script: string;
+  locale: string;
+  timezone_id: string;
+  viewport_width: number;
+  viewport_height: number;
+  pure_mode: boolean;
+  browser_channel: string;
+  browser_custom_path: string;
+  custom_browser_engine: string;
+  persistent_context: boolean;
+  ignore_https_errors: boolean;
+  bind_proxy: string;
+}
+
+/** 网络监控配置 */
+export interface MonitorConfig {
+  check_interval_seconds: number;
+  network_check_timeout: number;
+  ping_targets: string[];
+  enable_tcp_check: boolean;
+  enable_http_check: boolean;
+  enable_local_check: boolean;
+  test_urls: string[];
+  check_auth_url: boolean;
+  auth_url_targets: string[];
+  url_check_urls: string[];
+  script_timeout: number;
+  bind_interface_name: string;
+}
+
+/** 暂停时段配置 */
+export interface PauseConfig {
+  enabled: boolean;
+  start_hour: number;
+  start_minute: number;
+  end_hour: number;
+  end_minute: number;
+}
+
+/** 日志配置 */
+export interface LoggingConfig {
+  level: string;
+  file_enabled: boolean;
+  retention_days: number;
+}
+
+/** 重试配置 */
+export interface RetryConfig {
+  max_retries: number;
+  retry_interval: number;
+}
+
+/** 凭据配置（前端内部嵌套结构） */
+export interface CredentialsConfig {
+  username: string;
+  password: string;
+  auth_url: string;
+  isp: string;
+}
+
+/** 应用设置 */
+export interface AppSettings {
+  auto_start_browser: boolean;
+  runtime_mode: string;
+  startup_action: string;
+  auto_update: boolean;
+  port: number;
+  autostart_enabled: boolean;
+  task_script_timeout: number;
+  task_notification: boolean;
+  show_tray: boolean;
+}
+
+/** 完整配置（前端内部表示，凭据嵌套） */
+export interface Config {
+  browser: BrowserConfig;
+  monitor: MonitorConfig;
+  pause: PauseConfig;
+  logging: LoggingConfig;
+  retry: RetryConfig;
+  credentials: CredentialsConfig;
+  active_task: string;
+  app_settings: AppSettings;
+}
+
+/** GET /api/config 返回结构（凭据平铺在顶层） */
+export interface ConfigResponse {
+  browser: BrowserConfig;
+  monitor: MonitorConfig;
+  pause: PauseConfig;
+  logging: LoggingConfig;
+  retry: RetryConfig;
+  app_settings: AppSettings;
+  active_task: string;
+  has_password: boolean;
+  username: string;
+  auth_url: string;
+  isp: string;
+  carrier_custom: string;
+  password?: string;
+}
+
+/** PATCH /api/config 请求体（凭据平铺） */
+export interface SaveConfigPayload {
+  browser: BrowserConfig;
+  monitor: MonitorConfig;
+  pause: PauseConfig;
+  logging: LoggingConfig;
+  retry: RetryConfig;
+  app_settings: AppSettings;
+  active_task: string;
+  username: string;
+  auth_url: string;
+  isp: string;
+  password: string | null;
+}
+
+/** 配置方案 */
+export interface Profile {
+  id: string;
+  name: string;
+  username: string;
+  password: string;
+  auth_url: string;
+  isp: string;
+  gateway_ip: string;
+  wifi_ssid: string;
+  active_task: string;
+  [key: string]: unknown;
+}
+
+/** 方案列表响应 */
+export interface ProfileListResponse {
+  profiles: Record<string, Profile>;
+  active_profile: string;
+  auto_switch: boolean;
+}
+
+/** 网络检测结果 */
+export interface NetworkDetectResult {
+  gateway_ip: string | null;
+  ssid: string | null;
+  matched_profile_id?: string | null;
+}
+
+/** 浏览器信息 */
+export interface BrowserInfo {
+  channel: string;
+  name: string;
+  installed: boolean;
+  custom?: boolean;
+}
+
+/** 浏览器列表响应 */
+export interface BrowserListResponse {
+  browsers: BrowserInfo[];
+  current: string;
+}
+
+/** OCR 状态 */
+export interface OcrStatus {
+  installed: boolean;
+  size_mb: number;
+}
+
+/** 可用 Shell */
+export interface ShellInfo {
+  path: string;
+  name: string;
+  description?: string;
+}
+
+/** Shell 列表响应 */
+export interface ShellListResponse {
+  shells: ShellInfo[];
+  default: string;
+}
+
+/** 任务（浏览器任务 / 脚本的列表项） */
+export interface TaskItem {
+  id: string;
+  name: string;
+  description?: string;
+  type?: string;
+  url?: string;
+  [key: string]: unknown;
+}
+
+/** 远程仓库任务索引条目 */
+export interface RepoTask {
+  id: string;
+  name: string;
+  description?: string;
+  tags?: string[];
+  author?: string;
+  version?: string;
+  url: string;
+}
+
+/** 活动任务响应 */
+export interface ActiveTaskResponse {
+  task_id: string;
+}
+
+/** 脚本 */
+export interface Script {
+  id: string;
+  name: string;
+  description?: string;
+  content?: string;
+  binary_path?: string;
+  [key: string]: unknown;
+}
+
+/** 二进制信息 */
+export interface BinaryInfo {
+  path: string;
+  name: string;
+}
+
+/** 定时任务 */
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  description?: string;
+  task_type: string;
+  target_id: string;
+  cron: string;
+  profile_id?: string | null;
+  timeout?: number | null;
+  args?: string[];
+  work_dir?: string | null;
+  enabled: boolean;
+  last_run?: string | null;
+  last_result?: string | null;
+  [key: string]: unknown;
+}
+
+/** 定时任务执行历史条目 */
+export interface ScheduledTaskHistoryItem {
+  timestamp: string;
+  status: string;
+  message: string;
+  duration: number;
+  [key: string]: unknown;
+}
+
+/** 登录历史条目 */
+export interface LoginHistoryItem {
+  timestamp: string;
+  source: string;
+  profile_id: string;
+  result: "success" | "failed" | "cancelled";
+  message: string;
+  duration_secs: number;
+  [key: string]: unknown;
+}
+
+/** 调试步骤 */
+export interface DebugStep {
+  index?: number;
+  description?: string;
+  type?: string;
+  [key: string]: unknown;
+}
+
+/** 调试步骤结果 */
+export interface DebugStepResult {
+  step_index: number;
+  success: boolean;
+  message?: string;
+  screenshot_url?: string | null;
+  [key: string]: unknown;
+}
+
+/** 调试会话 */
+export interface DebugSession {
+  running: boolean;
+  task_id: string | null;
+  current_step: number;
+  total_steps: number;
+  steps: DebugStep[];
+  results: DebugStepResult[];
+  screenshot_url: string | null;
+}
+
+/** 更新信息 */
+export interface UpdateInfo {
+  has_update: boolean;
+  latest?: string;
+  current?: string;
+  error?: string;
+  [key: string]: unknown;
+}
+
+/** 初始化状态 */
+export interface InitStatus {
+  agreed: boolean;
+  password_decryption_failed?: boolean;
+  /** Python 运行环境是否已就绪（env 自动安装） */
+  python_ready?: boolean;
+  /** Playwright 浏览器是否已安装 */
+  playwright_ready?: boolean;
+}
+
+/** 健康检查 */
+export interface HealthInfo {
+  version?: string;
+  python_version?: string;
+}
+
+/** 卸载检测项 */
+export interface UninstallItem {
+  key: string;
+  label?: string;
+  exists: boolean;
+  description?: string;
+}
+
+/** 网络接口 */
+export interface NetworkInterface {
+  id: string;
+  name: string;
+  ip: string;
+  gateway?: string;
+  is_up: boolean;
+}
+
+/** 危险步骤（保存任务前确认） */
+export interface DangerStep {
+  stepIndex: number;
+  stepType: string;
+  description: string;
+  code: string;
+}

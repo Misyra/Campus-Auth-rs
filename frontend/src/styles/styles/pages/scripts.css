@@ -1,0 +1,51 @@
+/* 脚本编辑器 */
+.script-editor {
+  width: 100%;
+  min-height: 400px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  tab-size: 4;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.script-editor:focus-visible {
+  outline: none;
+  border-color: #a855f7;
+  box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.15);
+}
+
+.script-editor::placeholder {
+  color: rgba(148, 163, 184, 0.5);
+}
+
+.binary-badge {
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  font-family: var(--font-mono);
+}
+
+.binary-default {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.binary-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mt-2 {
+  margin-top: 8px;
+}

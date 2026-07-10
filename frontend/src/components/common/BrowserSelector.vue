@@ -1,0 +1,92 @@
+<script setup lang="ts">
+// 浏览器选择共享组件（替代原 partials/shared/browser-selection.html）。
+// 展示 Firefox 兼容警告、自定义浏览器说明、自定义路径输入、保留浏览器数据开关。
+
+import { useConfig } from "../../composables/useConfig";
+import { useUi } from "../../composables/useUi";
+
+const { config } = useConfig();
+const { getActiveBrowserChannel } = useUi();
+</script>
+
+<template>
+  <!-- Firefox 兼容性警告 -->
+  <div v-if="getActiveBrowserChannel() === 'firefox'" class="browser-warning">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+    <div>
+      <strong>Firefox 兼容性限制：</strong>
+      <ul style="margin: 0.25rem 0 0 1.25rem; padding: 0">
+        <li>自定义浏览器参数不生效（已自动跳过）</li>
+        <li>反检测模式可能不完全有效</li>
+      </ul>
+      <span style="opacity: 0.8">建议使用 Chromium 内核浏览器以获得完整功能支持</span>
+    </div>
+  </div>
+
+  <!-- 自定义浏览器兼容性提示 -->
+  <div v-if="getActiveBrowserChannel() === 'custom'" class="browser-info-tip">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </svg>
+    <div>
+      <strong>自定义浏览器说明：</strong>
+      <ul style="margin: 0.25rem 0 0 1.25rem; padding: 0">
+        <li>仅支持 Chromium 内核浏览器（如 Brave、Vivaldi 等）</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- 自定义路径输入 -->
+  <div v-if="getActiveBrowserChannel() === 'custom'" class="form-group" style="margin-top: 1rem">
+    <label for="browser-custom-path">浏览器可执行文件路径</label>
+    <input
+      id="browser-custom-path"
+      type="text"
+      v-model="config.browser.browser_custom_path"
+      placeholder="例如: C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
+    />
+    <span class="hint">
+      需要使用支持 Playwright 的浏览器二进制文件。
+      <a href="https://playwright.dev/docs/browsers#chromium" target="_blank" rel="noopener">查看支持的浏览器要求 →</a>
+    </span>
+  </div>
+
+  <!-- 持久化上下文开关 -->
+  <div
+    v-if="getActiveBrowserChannel() !== 'playwright' && getActiveBrowserChannel() !== 'firefox'"
+    class="toggle-group"
+    style="margin-top: 1rem"
+  >
+    <div class="toggle-with-help">
+      <label class="toggle toggle-help-inline">
+        <input type="checkbox" v-model="config.browser.persistent_context" />
+        <span class="toggle-slider"></span>
+        <span class="toggle-label">保留浏览器数据</span>
+        <span
+          class="field-help"
+          tabindex="0"
+          role="note"
+          data-tip="使用独立的用户数据目录，保留 cookies 和登录状态。适用于需要存储登录状态的场景，不同浏览器的数据相互隔离。"
+          >?</span
+        >
+      </label>
+    </div>
+  </div>
+  <div
+    v-if="config.browser.persistent_context && getActiveBrowserChannel() !== 'playwright' && getActiveBrowserChannel() !== 'firefox'"
+    class="browser-info-tip"
+  >
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </svg>
+    <div>数据目录: <code>config/browser-data/{{ getActiveBrowserChannel() }}/</code></div>
+  </div>
+</template>

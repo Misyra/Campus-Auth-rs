@@ -1,0 +1,132 @@
+.wizard-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(ellipse 70% 50% at 30% 30%, rgba(34, 211, 238, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 70% 70%, rgba(167, 139, 250, 0.05) 0%, transparent 60%),
+    rgba(15, 23, 42, 0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-top);
+  padding: 20px;
+}
+
+.wizard-container {
+  background: var(--bg-modal);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  width: 100%;
+  max-width: 760px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+  backdrop-filter: var(--blur-lg) saturate(1.2);
+}
+
+.wizard-header {
+  text-align: center;
+  padding: 40px 40px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wizard-logo {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 16px;
+}
+
+.wizard-header h1 {
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+
+.wizard-header p {
+  color: var(--text-secondary);
+}
+
+.wizard-content {
+  padding: 24px 40px;
+}
+
+.wizard-page h2 {
+  font-size: 20px;
+  margin-bottom: 8px;
+}
+
+.wizard-footer {
+  display: flex;
+  align-items: center;
+  padding: 20px 40px;
+  border-top: 1px solid var(--border);
+  gap: 12px;
+}
+
+.wizard-footer .spacer {
+  flex: 1;
+}
+
+.wizard-footer .btn {
+  min-width: 100px;
+}
+
+/* 协议内容样式 */
+.terms-content {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 20px;
+  backdrop-filter: blur(4px);
+}
+
+.terms-content h4 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text-primary);
+}
+
+.terms-content p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.terms-content ul {
+  list-style: disc;
+  padding-left: 20px;
+  margin-bottom: 16px;
+}
+
+.terms-content li {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.terms-checkbox {
+  padding: 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.terms-checkbox .toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.terms-checkbox .toggle-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}

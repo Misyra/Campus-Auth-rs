@@ -1,0 +1,72 @@
+# Claude Code
+.claude/settings.local.json
+
+# Workbuddy
+.workbuddy/
+
+# 评审报告
+doc/review-report.md
+docs/*review*.md
+# Rust
+/target/
+**/*.rs.bk
+
+# Cargo 本地配置
+.cargo/config.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# Python Worker
+python_worker/__pycache__/
+python_worker/*.pyc
+python_worker/.venv/
+python_worker/venv/
+python_worker/node_modules/
+
+# 运行时（应用启动时自动创建，不提交）
+environment/
+config/
+tasks/active.txt
+tasks/.order.json
+tasks/scheduled/
+tasks/scripts/
+tasks/browser/
+debug/
+temp/
+logs/
+*.log
+
+# 环境变量
+.env
+.env.bak
+.env.local
+*.env.local
+
+# 旧前端源码（迁移参考，不提交）
+frontend-legacy/
+
+# 构建产物
+*.exe
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo
+
+# 旧架构文档（迁移参考，不提交）
+rust-rewrite/
+
+# 问题报告
+issues-report.md
+

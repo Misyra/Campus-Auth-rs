@@ -1,0 +1,525 @@
+.about-container {
+  max-width: 960px;
+  margin: 0 auto;
+  /* 技术徽章品牌色 */
+  --tech-python: #3776ab;
+  --tech-fastapi: #009688;
+  --tech-pyinstaller: #b0b0b0;
+  --tech-websockets: #6495ed;
+  --tech-pydantic: #e63e12;
+  --tech-playwright: #2eaa55;
+  --tech-uv: var(--accent);
+  --tech-ddddocr: #a855f7;
+}
+
+.about-hero {
+  text-align: center;
+  padding: 48px 24px;
+  margin-bottom: 24px;
+  position: relative;
+  overflow: hidden;
+}
+
+.about-hero::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(ellipse at center, rgba(34, 211, 238, 0.08) 0%, transparent 60%);
+  pointer-events: none;
+}
+
+.about-logo {
+  width: 80px;
+  height: 80px;
+  margin-bottom: 16px;
+}
+
+.about-hero h1 {
+  font-size: 28px;
+  margin-bottom: 8px;
+}
+
+.about-subtitle {
+  font-size: 20px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.version {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.description {
+  color: var(--text-secondary);
+}
+
+.update-section {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-result {
+  font-size: 14px;
+}
+
+.update-available {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent);
+  padding: 10px 16px;
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: 8px;
+}
+
+.update-available svg {
+  flex-shrink: 0;
+}
+
+.update-latest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--success);
+}
+
+.update-error {
+  color: var(--error);
+  font-size: 13px;
+}
+
+.about-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.about-grid .card {
+  transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.about-grid .card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-hover);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+.tech-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tech-badge {
+  padding: 8px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  /* color-mix 回退：旧浏览器显示半透明灰 */
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.tech-badge:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.tech-badge.python {
+  background: color-mix(in srgb, var(--tech-python) 20%, transparent);
+  color: var(--tech-python);
+  border: 1px solid color-mix(in srgb, var(--tech-python) 30%, transparent);
+}
+
+.tech-badge.fastapi {
+  background: color-mix(in srgb, var(--tech-fastapi) 20%, transparent);
+  color: var(--tech-fastapi);
+  border: 1px solid color-mix(in srgb, var(--tech-fastapi) 30%, transparent);
+}
+
+.tech-badge.pyinstaller {
+  background: color-mix(in srgb, var(--tech-pyinstaller) 20%, transparent);
+  color: var(--tech-pyinstaller);
+  border: 1px solid color-mix(in srgb, var(--tech-pyinstaller) 30%, transparent);
+}
+
+.tech-badge.websockets {
+  background: color-mix(in srgb, var(--tech-websockets) 20%, transparent);
+  color: var(--tech-websockets);
+  border: 1px solid color-mix(in srgb, var(--tech-websockets) 30%, transparent);
+}
+
+.tech-badge.pydantic {
+  background: color-mix(in srgb, var(--tech-pydantic) 20%, transparent);
+  color: var(--tech-pydantic);
+  border: 1px solid color-mix(in srgb, var(--tech-pydantic) 30%, transparent);
+}
+
+.tech-badge.playwright {
+  background: color-mix(in srgb, var(--tech-playwright) 20%, transparent);
+  color: var(--tech-playwright);
+  border: 1px solid color-mix(in srgb, var(--tech-playwright) 30%, transparent);
+}
+
+.tech-badge.uv {
+  background: color-mix(in srgb, var(--tech-uv) 20%, transparent);
+  color: var(--tech-uv);
+  border: 1px solid color-mix(in srgb, var(--tech-uv) 30%, transparent);
+}
+
+.tech-badge.ddddocr {
+  background: color-mix(in srgb, var(--tech-ddddocr) 20%, transparent);
+  color: var(--tech-ddddocr);
+  border: 1px solid color-mix(in srgb, var(--tech-ddddocr) 30%, transparent);
+}
+
+.feature-list {
+  list-style: none;
+}
+
+.feature-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.feature-list svg {
+  width: 18px;
+  height: 18px;
+  color: var(--success);
+  flex-shrink: 0;
+}
+
+.info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.info-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.info-item:last-child {
+  border-bottom: none;
+}
+
+.info-label {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.info-value {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.about-footer {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.about-links {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: 500;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  min-height: 40px;
+}
+
+.github-link:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.github-link svg {
+  width: 20px;
+  height: 20px;
+}
+
+.muted {
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.qq-group {
+  margin-top: 8px;
+}
+
+.qq-group strong {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+/* 卸载区域 */
+.uninstall-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  margin-top: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.04);
+}
+
+.uninstall-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+
+.uninstall-header svg {
+  color: var(--error);
+  flex-shrink: 0;
+}
+
+.uninstall-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.uninstall-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 2px 0 0;
+}
+
+/* 卸载弹窗 */
+.uninstall-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal);
+}
+
+.uninstall-modal {
+  background: var(--bg-modal);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  width: 540px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.uninstall-modal-header {
+  display: flex;
+  gap: 12px;
+  padding: 20px 20px 0;
+  align-items: flex-start;
+}
+
+.uninstall-modal-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.uninstall-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 4px 0 0;
+}
+
+.uninstall-scanning {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 20px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* .spinner 和 @keyframes spin 已统一定义在 base.css 中 */
+
+.uninstall-modal-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.uninstall-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.uninstall-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.uninstall-item:hover:not(.disabled) {
+  border-color: var(--accent);
+}
+
+.uninstall-item.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.uninstall-item input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.uninstall-item-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.uninstall-item-label {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.uninstall-item-path {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.uninstall-item-size {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.uninstall-item-tag {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.uninstall-hint-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: rgba(34, 211, 238, 0.06);
+  border: 1px solid rgba(34, 211, 238, 0.15);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.uninstall-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+
+/* 清理结果 */
+.uninstall-results {
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.uninstall-result-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.uninstall-result-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.result-ok {
+  color: var(--success);
+  font-weight: 600;
+  font-size: 12px;
+  min-width: 32px;
+}
+
+.result-fail {
+  color: var(--error);
+  font-weight: 600;
+  font-size: 12px;
+  min-width: 32px;
+}
+
+.uninstall-final-hint {
+  margin-top: 16px;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}

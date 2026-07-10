@@ -1,0 +1,146 @@
+/**
+ * HTTP 客户端封装：fetch + 自动解包 + 统一错误处理。
+ * 所有 API 调用通过此模块暴露的端点函数，禁止在业务代码中直接 fetch。
+ *
+ * 契约（见 rust-rewrite/architecture/data-models.md §7.3）：
+ * - 成功响应统一为 `{ "data": <业务负载> }`，列表端点 data 直接是数组；
+ * - 错误响应统一为 `{ "error": { "code": "...", "message": "...", "details": {...} } }`；
+ * - 无 success 字段，HTTP 状态码非 2xx 即为错误。
+ */
+
+/** 统一 API 错误，携带解析出的 code / 用户友好消息 / details */
+export class ApiError extends Error {
+  status?: number;
+  code?: string;
+  detail?: unknown;
+  constructor(message: string, status?: number, detail?: unknown, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+    this.code = code;
+  }
+}
+
+const BASE = "";
+
+export interface RequestOptions {
+  signal?: AbortSignal;
+  timeout?: number;
+  /** multipart/form-data 上传，禁止手动设置 Content-Type（浏览器自动加 boundary） */
+  rawBody?: BodyInit;
+  headers?: Record<string, string>;
+}
+
+/**
+ * 发起请求并解包响应。
+ *
+ * 契约说明（见 data-models.md §7.3）：
+ * - 成功响应统一为 `{ "data": <业务负载> }`，本函数自动解包返回 data 内容；
+ * - 错误响应统一为 `{ "error": { code, message, details } }`，抛出携带 code/message/details 的 ApiError；
+ * - HTTP 非 2xx 一律按错误处理；无 success 字段判断。
+ */
+async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+  const controller = opts.timeout ? new AbortController() : null;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  if (controller) {
+    timeoutId = setTimeout(() => controller.abort(), opts.timeout);
+  }
+  const signal = controller ? controller.signal : opts.signal;
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      body: opts.rawBody !== undefined ? opts.rawBody : undefined,
+      signal,
+    });
+  } catch (e) {
+    if (timeoutId) clearTimeout(timeoutId);
+    if ((e as Error).name === "AbortError") {
+      throw new ApiError("请求超时", undefined, undefined);
+    }
+    throw new ApiError("网络连接失败，请检查后端是否已启动", undefined, e);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  if (!res.ok) {
+    let message = `请求失败 (${res.status})`;
+    let code: string | undefined;
+    let detail: unknown;
+    if (contentType.includes("application/json")) {
+      try {
+        const errJson = (await res.json()) as Record<string, unknown>;
+        // spec 错误信封：{ error: { code, message, details } }
+        const errObj = errJson.error as { code?: string; message?: string; details?: unknown } | undefined;
+        if (errObj && typeof errObj === "object") {
+          if (typeof errObj.message === "string") message = errObj.message;
+          if (typeof errObj.code === "string") code = errObj.code;
+          detail = errObj.details;
+        } else {
+          // 兼容旧 FastAPI detail 数组格式
+          detail = errJson.detail;
+          const detailMsg = extractDetailMessage(detail);
+          if (detailMsg) message = detailMsg;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new ApiError(message, res.status, detail, code);
+  }
+
+  if (contentType.includes("application/json")) {
+    const json = (await res.json()) as Record<string, unknown>;
+    // spec 成功信封：{ data: <业务负载> }，解包返回 data 内容
+    if (json && typeof json === "object" && "data" in json) {
+      return json.data as T;
+    }
+    // 兜底：无信封时原样返回
+    return json as unknown as T;
+  }
+
+  // 非 JSON 成功响应（如文件流），原样返回文本
+  return (await res.text()) as unknown as T;
+}
+
+/** 从 FastAPI 422 detail 数组提取可读消息 */
+function extractDetailMessage(detail: unknown): string | null {
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => {
+        if (typeof d === "string") return d;
+        const loc = d?.loc ? `[${d.loc[d.loc.length - 1]}] ` : "";
+        return loc + (d?.msg || d?.detail || String(d));
+      })
+      .join("; ") || null;
+  }
+  if (typeof detail === "string") return detail;
+  return null;
+}
+
+/** 从任意异常提取用户友好消息 */
+export function extractApiError(error: unknown, fallback = "操作失败"): string {
+  if (error instanceof ApiError) return error.message;
+  const detail = (error as { response?: { data?: { detail?: unknown; message?: string } } })?.response?.data;
+  if (detail) {
+    const msg = extractDetailMessage(detail.detail) || detail.message;
+    if (msg) return msg;
+  }
+  const message = (error as { message?: string })?.message;
+  return message || fallback;
+}
+
+export const http = {
+  get: <T>(path: string, opts?: RequestOptions) => request<T>("GET", path, opts),
+  post: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
+    request<T>("POST", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined }),
+  put: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
+    request<T>("PUT", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined }),
+  patch: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
+    request<T>("PATCH", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined }),
+  delete: <T>(path: string, opts?: RequestOptions) => request<T>("DELETE", path, opts),
+};
