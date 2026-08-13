@@ -112,7 +112,6 @@ export interface MonitorConfig {
   ping_targets: string[];
   enable_tcp_check: boolean;
   enable_http_check: boolean;
-  enable_local_check: boolean;
   test_urls: string[];
   check_auth_url: boolean;
   auth_url_targets: string[];

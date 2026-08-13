@@ -341,7 +341,6 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "ping_targets": m.tcp_targets,
         "enable_tcp_check": m.tcp_enabled,
         "enable_http_check": m.http_enabled,
-        "enable_local_check": false,
         "test_urls": m.http_targets,
         "check_auth_url": false,
         "auth_url_targets": [],

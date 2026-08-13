@@ -92,7 +92,6 @@ export const DEFAULT_CONFIG: Config = {
     enable_tcp_check: false,
     // 默认启用 HTTP 检测（generate_204 门户探测），比 TCP 更贴近真实网络连通性
     enable_http_check: true,
-    enable_local_check: true,
     test_urls: [
       "https://connect.rom.miui.com/generate_204",
       "https://connectivitycheck.platform.hicloud.com/generate_204",
