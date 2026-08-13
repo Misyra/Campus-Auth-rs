@@ -118,25 +118,27 @@ impl ServiceContainer {
         // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
         let executor = TaskExecutor::new(base_path, status.clone(), bridge.clone(), environment.clone(), config.clone());
 
-        // ---- Layer 6：登录编排器（后置注入 bridge + environment）----
-        let login = Arc::new(LoginOrchestrator::new(
-            config.clone(),
-            history.clone(),
-            status.clone(),
-            Some(metrics.clone()),
-        ));
-        login.set_bridge(bridge.clone());
-        login.set_environment(environment.clone());
-        login.set_tasks(tasks.clone());
-
-        // ---- Layer 7：网络探测 & 监测 ----
+        // ---- Layer 6：网络探测 & 监测（login 前置，供构造注入）----
         let detector = create_detector();
         let monitor = Arc::new(
             MonitorService::new(config.clone(), detector.clone(), None, Some(metrics.clone()))
                 .context("初始化 MonitorService 失败")?,
         );
-        // 登录后网络验证依赖 MonitorService，后置注入（login 已在 Layer 6 构造）
-        login.set_monitor(monitor.clone());
+
+        // ---- Layer 7：登录编排器（构造注入全部依赖，无 setter）----
+        // uptime 取消令牌提前创建：既是 uptime 定时器的取消信号，也是登录会话的 shutdown 信号。
+        let shutdown_token = CancellationToken::new();
+        let login = Arc::new(LoginOrchestrator::new(
+            config.clone(),
+            history.clone(),
+            status.clone(),
+            bridge.clone(),
+            environment.clone(),
+            tasks.clone(),
+            monitor.clone(),
+            shutdown_token.clone(),
+            Some(metrics.clone()),
+        ));
 
         // ---- Layer 8：定时任务调度器 ----
         let scheduler = Arc::new(
@@ -194,7 +196,7 @@ impl ServiceContainer {
             updater,
             engine_handle,
             metrics,
-            uptime_cancel: CancellationToken::new(),
+            uptime_cancel: shutdown_token,
         });
 
         // ---- 启动运行时长更新任务 ----
@@ -212,9 +214,6 @@ impl ServiceContainer {
                 }
             }
         });
-
-        // 激活登录会话的 shutdown 响应：复用 uptime_cancel（Drop 时触发 cancel）
-        container.login.set_shutdown_token(container.uptime_cancel.clone());
 
         // ---- 启动后台服务 ----
         let scheduler_handle = container.startup().await?;

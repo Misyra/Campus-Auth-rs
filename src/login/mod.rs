@@ -5,15 +5,13 @@
 //! 同一时刻最多一个。底层 Worker 执行经 `BridgeSupervisor` 完成，历史经
 //! [`LoginHistoryService`] 落盘。
 //!
-//! 注意：`new` 的签名由 `src/engine/run_loop.rs` 固定调用，仅接受三个服务依赖；
-//! [`BridgeSupervisor`] 与 [`crate::environment::EnvironmentManager`] 通过
-//! [`LoginOrchestrator::set_bridge`] / [`LoginOrchestrator::set_environment`] 在构造后注入。
+//! 全部依赖在 `new` 构造时注入（无 setter），依赖关系在组装期即确定。
 
 pub mod history;
 pub mod preemption;
 pub mod session;
 
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -186,78 +184,54 @@ pub struct LoginOrchestrator {
     history: Arc<LoginHistoryService>,
     /// 状态管理器（广播登录状态）
     status: Arc<StatusManager>,
-    /// Bridge 句柄（构造后由 `set_bridge` 注入）
-    bridge: OnceLock<Arc<BridgeSupervisor>>,
-    /// 环境管理器（构造后由 `set_environment` 注入，浏览器能力预检用）
-    environment: OnceLock<Arc<EnvironmentManager>>,
-    /// 任务管理器（构造后由 `set_tasks` 注入，提供浏览器任务的步骤配置）
-    tasks: OnceLock<Arc<TaskManager>>,
-    /// 网络监测服务（构造后由 `set_monitor` 注入，登录后网络验证用）
-    monitor: OnceLock<Arc<crate::monitor::MonitorService>>,
+    /// Bridge 句柄（构造注入）
+    bridge: Arc<BridgeSupervisor>,
+    /// 环境管理器（浏览器能力预检用）
+    environment: Arc<EnvironmentManager>,
+    /// 任务管理器（提供浏览器任务的步骤配置）
+    tasks: Arc<TaskManager>,
+    /// 网络监测服务（登录后网络验证用）
+    monitor: Arc<crate::monitor::MonitorService>,
     /// 内部状态（活跃会话 + ID 计数器）
     state: Arc<AsyncMutex<OrchestratorState>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
-    /// 应用级 shutdown 信号（注入后会话在 shutdown 时立即退出；未注入则永不取消）
-    shutdown_token: OnceLock<CancellationToken>,
+    /// 应用级 shutdown 信号（会话在 shutdown 时立即退出）
+    shutdown_token: CancellationToken,
 }
 
 impl LoginOrchestrator {
     /// 构造登录编排器
     ///
-    /// 注意：仅接受三个服务依赖（签名由 `src/engine/run_loop.rs` 固定调用）。
-    /// [`BridgeSupervisor`] 与 [`EnvironmentManager`] 需在构造后通过
-    /// [`set_bridge`](Self::set_bridge) / [`set_environment`](Self::set_environment) 注入。
+    /// 全部依赖通过构造注入（无 setter）：依赖关系在组装期即确定，
+    /// 避免运行时未注入导致的隐性空值路径。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<ConfigService>,
         history: Arc<LoginHistoryService>,
         status: Arc<StatusManager>,
+        bridge: Arc<BridgeSupervisor>,
+        environment: Arc<EnvironmentManager>,
+        tasks: Arc<TaskManager>,
+        monitor: Arc<crate::monitor::MonitorService>,
+        shutdown_token: CancellationToken,
         metrics: Option<Arc<Metrics>>,
     ) -> Self {
         Self {
             config,
             history,
             status,
-            bridge: OnceLock::new(),
-            environment: OnceLock::new(),
-            tasks: OnceLock::new(),
-            monitor: OnceLock::new(),
+            bridge,
+            environment,
+            tasks,
+            monitor,
             state: Arc::new(AsyncMutex::new(OrchestratorState {
                 active_session: None,
                 next_session_id: 0,
             })),
             metrics,
-            shutdown_token: OnceLock::new(),
+            shutdown_token,
         }
-    }
-
-    /// 注入 Bridge 句柄（应在首次 `submit` 之前调用）
-    pub fn set_bridge(&self, bridge: Arc<BridgeSupervisor>) {
-        let _ = self.bridge.set(bridge);
-    }
-
-    /// 注入环境管理器（浏览器来源的能力预检使用）
-    pub fn set_environment(&self, env: Arc<EnvironmentManager>) {
-        let _ = self.environment.set(env);
-    }
-
-    /// 注入任务管理器（浏览器任务步骤配置的权威来源，供 `build_worker_config` 嵌入 Worker 命令）
-    pub fn set_tasks(&self, tasks: Arc<TaskManager>) {
-        let _ = self.tasks.set(tasks);
-    }
-
-    /// 注入网络监测服务（登录后网络验证使用，应早于首次 `submit` 调用）
-    pub fn set_monitor(&self, monitor: Arc<crate::monitor::MonitorService>) {
-        let _ = self.monitor.set(monitor);
-    }
-
-    /// 注入应用级 shutdown 信号（应早于首次 `submit` 调用）
-    ///
-    /// `container.rs` 在容器组装完成后已调用本方法并传入 `uptime_cancel`，
-    /// 因此应用退出时（`ServiceContainer::drop` 触发 cancel）登录会话会立即收到取消信号。
-    /// 不改 `new` 签名（由 `src/engine/run_loop.rs` 固定调用），通过 setter 注入。
-    pub fn set_shutdown_token(&self, token: CancellationToken) {
-        let _ = self.shutdown_token.set(token);
     }
 
     /// 提交一次登录，返回控制句柄
@@ -311,18 +285,14 @@ impl LoginOrchestrator {
         }
 
         // 浏览器来源要求环境能力就绪
-        if source == LoginSource::Browser {
-            if let Some(env) = self.environment.get() {
-                if !env.capability_ready() {
-                    warn!("浏览器能力未就绪，无法执行定时任务");
-                    return self.immediate_handle(
-                        source,
-                        false,
-                        "浏览器能力未就绪，无法执行定时任务".into(),
-                        profile.id.clone(),
-                    );
-                }
-            }
+        if source == LoginSource::Browser && !self.environment.capability_ready() {
+            warn!("浏览器能力未就绪，无法执行定时任务");
+            return self.immediate_handle(
+                source,
+                false,
+                "浏览器能力未就绪，无法执行定时任务".into(),
+                profile.id.clone(),
+            );
         }
 
         // 2. auth_url TCP 预检（仅 manual / login_once）
@@ -357,9 +327,7 @@ impl LoginOrchestrator {
             old.cancel_token.cancel();
             *recover_lock(old.cancel_reason.as_ref()) = Some("被更高优先级登录抢占".to_string());
             if let Some(cid) = old.attempt_cancel_id.load_full() {
-                if let Some(b) = self.bridge.get() {
-                    b.cancel(cid.as_str());
-                }
+                self.bridge.cancel(cid.as_str());
             }
             let _ = tokio_timeout(Duration::from_secs(5), old.handle.await_result()).await;
         }
@@ -378,11 +346,7 @@ impl LoginOrchestrator {
         let cancel_token = CancellationToken::new();
         let attempt_cancel_id = Arc::new(ArcSwapOption::<String>::new(None));
         let cancel_reason = Arc::new(StdMutex::new(None::<String>));
-        let shutdown_token = self
-            .shutdown_token
-            .get()
-            .cloned()
-            .unwrap_or_else(CancellationToken::new);
+        let shutdown_token = self.shutdown_token.clone();
         let (result_tx, _rx) = watch::channel(None);
         let result_slot = Arc::new(LoginHandleInner { result_tx });
         let handle = LoginHandle {
@@ -416,8 +380,8 @@ impl LoginOrchestrator {
             attempt_cancel_id.clone(),
             shutdown_token,
             cancel_reason.clone(),
-            self.bridge.get().cloned(),
-            self.monitor.get().cloned(),
+            Some(self.bridge.clone()),
+            Some(self.monitor.clone()),
             self.config.clone(),
             self.status.clone(),
             self.history.clone(),
@@ -485,9 +449,7 @@ impl LoginOrchestrator {
             active.cancel_token.cancel();
             *recover_lock(active.cancel_reason.as_ref()) = Some("用户取消".to_string());
             if let Some(cid) = active.attempt_cancel_id.load_full() {
-                if let Some(b) = self.bridge.get() {
-                    b.cancel(cid.as_str());
-                }
+                self.bridge.cancel(cid.as_str());
             }
         }
     }
@@ -509,9 +471,7 @@ impl LoginOrchestrator {
                 active.cancel_token.cancel();
                 *recover_lock(active.cancel_reason.as_ref()) = Some(reason.to_string());
                 if let Some(cid) = active.attempt_cancel_id.load_full() {
-                    if let Some(b) = self.bridge.get() {
-                        b.cancel(cid.as_str());
-                    }
+                    self.bridge.cancel(cid.as_str());
                 }
             }
         }
@@ -602,19 +562,16 @@ impl LoginOrchestrator {
         }
         // 加载浏览器任务配置并嵌入 task_config（Worker 执行步骤的唯一依据）
         if !task_id.is_empty() {
-            match self.tasks.get() {
-                Some(tasks) => match tasks.load_task(task_id).await {
-                    Ok(TaskKind::Browser(tc)) => {
-                        if let Ok(task_val) = serde_json::to_value(&tc) {
-                            cfg["task_config"] = task_val;
-                        } else {
-                            warn!("任务 {task_id} 序列化失败，未嵌入 task_config");
-                        }
+            match self.tasks.load_task(task_id).await {
+                Ok(TaskKind::Browser(tc)) => {
+                    if let Ok(task_val) = serde_json::to_value(&tc) {
+                        cfg["task_config"] = task_val;
+                    } else {
+                        warn!("任务 {task_id} 序列化失败，未嵌入 task_config");
                     }
-                    Ok(_) => warn!("任务 {task_id} 不是浏览器任务，未嵌入 task_config"),
-                    Err(e) => warn!("加载任务 {task_id} 失败，未嵌入 task_config: {e}"),
-                },
-                None => warn!("TaskManager 未注入，无法加载任务 {task_id} 的 task_config"),
+                }
+                Ok(_) => warn!("任务 {task_id} 不是浏览器任务，未嵌入 task_config"),
+                Err(e) => warn!("加载任务 {task_id} 失败，未嵌入 task_config: {e}"),
             }
         }
         cfg
