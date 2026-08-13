@@ -58,7 +58,8 @@ pub enum LoginSource {
     Manual,
     /// CLI 一次性登录
     LoginOnce,
-    /// 定时任务浏览器任务触发
+    /// 定时浏览器任务触发（历史遗留：现定时任务统一走通用执行，不再经登录编排器；
+    /// 保留以兼容历史记录中的 "browser" 来源反序列化）
     Browser,
 }
 

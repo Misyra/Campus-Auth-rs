@@ -235,46 +235,18 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
     // 任务类型由 target_id 关联的目标任务权威推导（TaskKind），不再冗余存储 task_type。
     let (success, message) = match service.task_manager.load_task(&target_id).await {
         Ok(crate::tasks::TaskKind::Browser(cfg)) => {
-            if task.profile_id.is_some() {
-                // 登录语义：带凭据 → LoginOrchestrator.submit（重试 + 网络验证）
-                let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-                let handle = service
-                    .orchestrator
-                    .submit(
-                        crate::status::LoginSource::Browser,
-                        Some(target_id.clone()),
-                        task.profile_id.clone(),
-                    )
-                    .await;
-                // 与 Script/Shell 分支一致，为等待结果加超时上限，避免登录流程卡住时无限等待（历史遗留 F9）
-                // 超时预算归属：调度器为外层 deadline 所有者。超时时主动 cancel 句柄，让登录
-                // 状态机退出并释放 Worker（cancel 会经 cancel_token → CancelRegistry → Worker 传递），
-                // 而非仅丢弃 await_result future、任登录在后台继续跑。
-                match tokio::time::timeout(
-                    TokioDuration::from_secs(timeout),
-                    handle.await_result(),
-                )
-                .await
-                {
-                    Ok(result) => (result.success, result.message),
-                    Err(_) => {
-                        handle.cancel();
-                        (false, format!("执行超时: {}s", timeout))
-                    }
-                }
-            } else {
-                // 通用语义：打卡/签到 → execute_browser（不注入凭据，步骤完成即成功）
-                let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-                match tokio::time::timeout(
-                    TokioDuration::from_secs(timeout),
-                    service.executor.execute_browser(&cfg),
-                )
-                .await
-                {
-                    Ok(Ok(r)) => (r.success, r.output),
-                    Ok(Err(e)) => (false, format!("执行错误: {}", e)),
-                    Err(_) => (false, format!("执行超时: {}s", timeout)),
-                }
+            // 定时浏览器任务统一走通用语义（打卡/签到等日常自动化），不注入账号密码。
+            // 登录认证由断网自动触发（LoginSource::Auto）或手动登录按钮负责，二者正交。
+            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
+            match tokio::time::timeout(
+                TokioDuration::from_secs(timeout),
+                service.executor.execute_browser(&cfg),
+            )
+            .await
+            {
+                Ok(Ok(r)) => (r.success, r.output),
+                Ok(Err(e)) => (false, format!("执行错误: {}", e)),
+                Err(_) => (false, format!("执行超时: {}s", timeout)),
             }
         }
 

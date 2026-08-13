@@ -77,9 +77,7 @@ pub struct SchedulerService {
     scheduled_dir: PathBuf,
     /// 加载 browser/script/shell 任务配置。
     task_manager: Arc<TaskManager>,
-    /// 浏览器任务提交。
-    orchestrator: Arc<crate::login::LoginOrchestrator>,
-    /// 脚本/Shell 任务执行。
+    /// 脚本/Shell/浏览器任务执行。
     executor: Arc<crate::tasks::TaskExecutor>,
     /// 状态广播。
     status_manager: Arc<StatusManager>,
@@ -116,7 +114,6 @@ impl SchedulerService {
     pub fn new(
         config: Arc<ConfigService>,
         tasks: Arc<TaskManager>,
-        orchestrator: Arc<crate::login::LoginOrchestrator>,
         executor: Arc<crate::tasks::TaskExecutor>,
         status: Arc<StatusManager>,
         reload_rx: mpsc::Receiver<ConfigReloadSignal>,
@@ -132,7 +129,6 @@ impl SchedulerService {
         Ok(Self {
             scheduled_dir,
             task_manager: tasks,
-            orchestrator,
             executor,
             status_manager: status,
             task_change_tx,

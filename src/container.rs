@@ -143,7 +143,6 @@ impl ServiceContainer {
             SchedulerService::new(
                 config.clone(),
                 tasks.clone(),
-                login.clone(),
                 executor.clone(),
                 status.clone(),
                 reload_rx,

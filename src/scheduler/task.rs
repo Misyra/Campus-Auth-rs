@@ -50,7 +50,8 @@ pub struct ScheduledTask {
     pub cron: String,
     /// 关联目标任务 ID（浏览器/脚本/Shell 任务）。
     pub target_id: String,
-    /// 使用的 Profile ID（仅 browser 任务；有值走登录语义，无值走通用执行）。
+    /// 预留字段：未来如需「定时登录」可指定凭据 Profile。
+    /// 当前定时任务统一走通用执行（打卡），不注入账号密码，故此字段暂不生效。
     #[serde(default)]
     pub profile_id: Option<String>,
     /// 执行超时秒数（None = 使用全局默认值）。
