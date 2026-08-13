@@ -750,8 +750,8 @@ async fn graceful_shutdown(state: &mut LauncherState) {
         drop(tray);
     }
 
-    // 2. 关闭 SchedulerService
-    if let Some(handles) = state.startup_handles.take() {
+    // 2. 关闭 SchedulerService（并保留 bridge_handle 供第 4 步统一关闭）
+    let bridge_handle = if let Some(handles) = state.startup_handles.take() {
         if let Err(e) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             handles.scheduler_handle.stop(),
@@ -760,16 +760,26 @@ async fn graceful_shutdown(state: &mut LauncherState) {
         {
             warn!("SchedulerService 关闭超时: {e}");
         }
-    }
+        Some(handles.bridge_handle)
+    } else {
+        None
+    };
 
     // 3. 关闭 Engine（先于 Bridge，因为 Engine 可能正在使用 Bridge）
     if let Some(tx) = state.latest_engine_cmd_tx.lock().await.take() {
         let _ = tx.send(crate::engine::EngineCommand::Shutdown).await;
     }
 
-    // 4. 关闭 BridgeSupervisor
-    if let Some(container) = &state.container {
-        container.bridge.shutdown().await;
+    // 4. 关闭 BridgeSupervisor：停止 supervisor 主循环（内部回收 Worker）并等待 task 退出。
+    // 通过 ServiceHandle::stop 发送停止信号并 join，避免 supervisor task 与残留子进程泄漏
+    // （历史遗留 F4：原实现仅发 shutdown 命令、从不调用 stop，run_supervisor task 常驻）。
+    if let Some(handle) = bridge_handle {
+        if tokio::time::timeout(std::time::Duration::from_secs(8), handle.stop())
+            .await
+            .is_err()
+        {
+            warn!("BridgeSupervisor 关闭超时");
+        }
     }
 
     // 5. 关闭 Axum

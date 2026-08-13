@@ -253,9 +253,8 @@ impl LoginOrchestrator {
 
     /// 注入应用级 shutdown 信号（应早于首次 `submit` 调用）
     ///
-    /// TODO(M1): 当前 `container.rs` 未调用此方法，`shutdown_token` 仍为默认的
-    /// 永不取消令牌，登录会话暂无法响应 app shutdown。待 container.rs 增加一行
-    /// `login.set_shutdown_token(<shutdown_signal>.clone())` 后即可激活。
+    /// `container.rs` 在容器组装完成后已调用本方法并传入 `uptime_cancel`，
+    /// 因此应用退出时（`ServiceContainer::drop` 触发 cancel）登录会话会立即收到取消信号。
     /// 不改 `new` 签名（由 `src/engine/run_loop.rs` 固定调用），通过 setter 注入。
     pub fn set_shutdown_token(&self, token: CancellationToken) {
         let _ = self.shutdown_token.set(token);

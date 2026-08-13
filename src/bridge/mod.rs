@@ -46,6 +46,11 @@ pub const IPC_DELIMITER: u8 = b'\n';
 pub const IPC_MAX_LINE_LEN: usize = 1_048_576;
 /// stdin writer mpsc channel 容量
 pub const IPC_WRITE_CHANNEL_CAP: usize = 16;
+/// shutdown 命令使用的哨兵请求 id
+///
+/// 保留值：真实请求 id 从 1 开始递增，永不复用此值，避免 shutdown 哨兵与
+/// 真实请求（如首次 browser_health_check）的 pending 槽位碰撞（历史遗留 F3）。
+pub const SHUTDOWN_REQUEST_ID: u64 = 0;
 
 /// Bridge 相关错误
 #[derive(Debug, thiserror::Error)]
@@ -173,7 +178,7 @@ impl BridgeSupervisor {
                 worker_state: WorkerState::NotInstalled,
                 process: None,
                 pending_requests: HashMap::new(),
-                next_request_id: 0,
+                next_request_id: 1,
                 last_activity: Instant::now(),
                 idle_timer: None,
                 cancel_registry: CancelRegistry::new(),
@@ -329,6 +334,8 @@ async fn run_supervisor(
             }
         }
     }
+    // 主循环退出：优雅回收 Worker，避免残留子进程与后台 task（历史遗留 F4）
+    handle_shutdown(&this).await;
 }
 
 /// 处理 supervisor 命令
@@ -364,16 +371,25 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
             });
         }
         SupervisorCommand::Cancel { cancel_id } => {
-            // 单次临界区：触发取消令牌 + 发送取消通知，消除 TOCTOU 竞态
-            // （原实现两步独立 lock，process 可能在 check 与 use 之间被置空）
-            let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.cancel_registry.trigger(&cancel_id);
-            if let Some(proc) = &inner.process {
-                let _ = proc
-                    .stdin_tx
-                    .try_send(IpcMessage::Cancel(CancelNotification {
-                        cancel: cancel_id,
-                    }));
+            // 触发取消令牌（同步），并克隆 stdin sender 以便释放锁后可靠发送。
+            // 克隆 sender 而非在锁内 try_send，既消除 TOCTOU 竞态（process 可能在 check 与
+            // use 之间被置空），又用 await send 替代 try_send，避免 channel 满时静默丢弃
+            // 取消通知（历史遗留 F2）。
+            let stdin_tx = {
+                let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+                inner.cancel_registry.trigger(&cancel_id);
+                inner.process.as_ref().map(|p| p.stdin_tx.clone())
+            };
+            if let Some(stdin_tx) = stdin_tx {
+                // 独立 task 中可靠发送，避免阻塞 supervisor 主循环
+                tokio::spawn(async move {
+                    if let Err(e) = stdin_tx
+                        .send(IpcMessage::Cancel(CancelNotification { cancel: cancel_id }))
+                        .await
+                    {
+                        tracing::warn!("发送取消通知失败: {e}");
+                    }
+                });
             }
         }
         SupervisorCommand::Shutdown => {
@@ -395,6 +411,26 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
                 let _ = tx.send(Ok(resp));
             } else {
                 tracing::warn!(target: "python_worker", "收到过期/未知响应 id={}", resp.id);
+            }
+        }
+        ParsedMessage::ResponseError { id, error } => {
+            // 带有效 id 但反序列化失败：以内部错误回收对应在途请求，防止永久泄漏
+            // 与调试会话槽位卡死（历史遗留 F1）
+            let tx = this
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending_requests
+                .remove(&id);
+            if let Some(tx) = tx {
+                let _ = tx.send(Err(BridgeError::Internal(format!(
+                    "IPC 响应解析失败: {error}"
+                ))));
+            } else {
+                tracing::warn!(
+                    target: "python_worker",
+                    "收到无法解析的响应且无对应在途请求 id={id}: {error}"
+                );
             }
         }
         ParsedMessage::Event(ev) => {
@@ -439,14 +475,6 @@ async fn execute_inner(
     // 1. 懒加载 Worker（环境就绪则 spawn）
     ensure_worker(this).await?;
 
-    // 1.5 会话互斥检查（cancel 走独立通道，不受此限）。
-    // 不兼容时立即返回 WorkerBusy，避免状态污染。此检查在注册 cancel_id/request_id
-    // 之前进行，失败时无资源泄漏。
-    {
-        let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-        check_session_compat(inner.current_session, method)?;
-    }
-
     // 2. 会话类型（debug_* 为调试会话，其余为登录/浏览器任务）
     let session = if method.starts_with("debug_") {
         SessionType::Debug
@@ -464,63 +492,24 @@ async fn execute_inner(
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let token = CancellationToken::new();
-    this.inner
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .cancel_registry
-        .register(cancel_id.clone(), token.clone());
 
-    // 4. 分配 request id
-    let request_id = {
+    // 4. 单一原子临界区：互斥检查 → 分配 id → 注册 pending → 发送请求 → 注册 cancel/设置会话。
+    // 全程同步操作，一次加锁完成，消除各步骤之间的窗口。原实现分 6 次独立加解锁，
+    // “compat 检查”与“会话赋值”不原子，两个并发请求可能都通过互斥检查后各自赋值会话；
+    // Cancel / reset_session / handle_ipc_message 均锁同一 Mutex，故本临界区与它们严格串行。
+    let (resp_rx, request_id) = {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let id = inner.next_request_id;
+
+        // 4.1 互斥检查（失败立即返回，此时尚未分配任何资源，无泄漏）
+        check_session_compat(inner.current_session, method)?;
+
+        // 4.2 分配 request id 并注册 pending 响应通道
+        let request_id = inner.next_request_id;
         inner.next_request_id += 1;
-        id
-    };
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<IpcResponse, BridgeError>>();
+        inner.pending_requests.insert(request_id, resp_tx);
 
-    // 5. 创建 oneshot 响应通道并注册到 pending_requests
-    let (resp_tx, resp_rx) = oneshot::channel::<Result<IpcResponse, BridgeError>>();
-    this.inner
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pending_requests
-        .insert(request_id, resp_tx);
-
-    // 6. 设置会话状态 + 取消旧空闲计时器
-    {
-        let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-        // 覆盖前清理旧会话的 cancel_id，防止其泄漏在 CancelRegistry（如 InLogin 时
-        // debug_start 覆盖 current_session，旧 Login 的 cancel_id 不再被追踪）。
-        if let Some(old_cancel_id) = inner.current_cancel_id.take() {
-            inner.cancel_registry.remove(&old_cancel_id);
-        }
-        inner.worker_state = if session == SessionType::Debug {
-            WorkerState::InDebug
-        } else {
-            WorkerState::InLogin
-        };
-        inner.current_session = Some(session);
-        inner.current_cancel_id = Some(cancel_id);
-        inner.current_request_id = Some(request_id);
-        inner.last_activity = Instant::now();
-        if let Some(h) = inner.idle_timer.take() {
-            h.abort();
-        }
-        merge_worker_status(&inner, &this.status);
-    }
-    // RAII 守卫：drop 时复位会话状态并启动空闲计时器
-    let guard = SessionGuard::new(session, {
-        let weak = this.self_weak.clone();
-        move |s| {
-            if let Some(sup) = weak.upgrade() {
-                reset_session(&sup, s);
-            }
-        }
-    });
-
-    // 7. 发送 IpcRequest 到 stdin
-    {
-        let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // 4.3 发送请求（可失败）。失败则回滚 pending；此时会话/取消状态尚未改动，无需额外回滚。
         match &inner.process {
             Some(proc) => {
                 if let Err(e) = proc.stdin_tx.try_send(IpcMessage::Request(IpcRequest {
@@ -539,16 +528,57 @@ async fn execute_inner(
                 return Err(BridgeError::SupervisorNotRunning);
             }
         }
-    }
+
+        // 4.4 发送成功后再改动会话/取消状态（此后不再有可失败操作）。
+        // 先注册新 cancel token，再清理旧会话残留的 cancel_id（如 InLogin 时 debug_start
+        // 覆盖 current_session，旧 Login 的 cancel_id 不再被追踪）。仅当新旧不同才移除，
+        // 避免调用方复用同一 cancel_id 时误删刚注册的 token。
+        inner.cancel_registry.register(cancel_id.clone(), token.clone());
+        if let Some(old_cancel_id) = inner.current_cancel_id.take() {
+            if old_cancel_id != cancel_id {
+                inner.cancel_registry.remove(&old_cancel_id);
+            }
+        }
+        inner.worker_state = if session == SessionType::Debug {
+            WorkerState::InDebug
+        } else {
+            WorkerState::InLogin
+        };
+        inner.current_session = Some(session);
+        inner.current_cancel_id = Some(cancel_id);
+        inner.current_request_id = Some(request_id);
+        inner.last_activity = Instant::now();
+        if let Some(h) = inner.idle_timer.take() {
+            h.abort();
+        }
+        merge_worker_status(&inner, &this.status);
+        (resp_rx, request_id)
+    };
+
+    // RAII 守卫：drop 时复位会话状态并启动空闲计时器。drop 会再次加锁，故在临界区外创建。
+    // 携带 request_id：reset_session 仅在当前会话仍为本请求时才复位，避免已结束会话的
+    // 延迟 drop 误清刚启动的同类型新会话的 pending/cancel。
+    let guard = SessionGuard::new(session, request_id, {
+        let weak = this.self_weak.clone();
+        move |s, rid| {
+            if let Some(sup) = weak.upgrade() {
+                reset_session(&sup, s, rid);
+            }
+        }
+    });
 
     // 8. 返回 oneshot::Receiver、SessionGuard 与 CancellationToken，由调用方（转发 task）等待响应
     Ok((resp_rx, guard, token))
 }
 
 /// 会话守卫 drop 时复位状态
-fn reset_session(this: &Arc<BridgeSupervisor>, session: SessionType) {
+///
+/// 仅当当前会话仍为本守卫拥有的那个（`session` 与 `request_id` 双重匹配）时才复位。
+/// 若已被更新的同类型会话取代（request_id 不同），则跳过，避免误清新会话的
+/// pending/cancel（历史遗留：快速连续 execute 时旧会话延迟 drop 会话竞态）。
+fn reset_session(this: &Arc<BridgeSupervisor>, session: SessionType, request_id: u64) {
     let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-    if inner.current_session != Some(session) {
+    if inner.current_session != Some(session) || inner.current_request_id != Some(request_id) {
         return;
     }
     inner.current_session = None;
@@ -759,7 +789,7 @@ async fn kill_worker_now(this: &BridgeSupervisor) {
     if let Some(p) = proc {
         // 先尝试优雅关闭，超时则由 shutdown 内部强杀
         let _ = p.stdin_tx.try_send(IpcMessage::Request(IpcRequest {
-            id: 0,
+            id: SHUTDOWN_REQUEST_ID,
             method: "shutdown".to_string(),
             params: Value::Null,
         }));
@@ -779,7 +809,7 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
     if let Some(proc) = process {
         // 先发送 shutdown 命令，等待 Worker 自行退出
         let _ = proc.stdin_tx.try_send(IpcMessage::Request(IpcRequest {
-            id: 0,
+            id: SHUTDOWN_REQUEST_ID,
             method: "shutdown".to_string(),
             params: Value::Null,
         }));
@@ -817,7 +847,10 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
     let (pending, handles, crashed_session) = {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         let pending: Vec<_> = inner.pending_requests.drain().map(|(_, tx)| tx).collect();
-        inner.cancel_registry.trigger_all();
+        // 崩溃时以 pending 通道向在途请求送达定性错误（WorkerCrashed / DebugSessionClosed），
+        // 此处仅清空 token 注册表而不触发取消：避免与 pending 送达形成 select! 竞态导致崩溃
+        // 请求非确定地报 Cancelled（Cancelled 语义保留给显式 cancel）。
+        inner.cancel_registry.clear();
         // 捕获崩溃时所在的会话类型，用于区分 DebugSessionClosed / WorkerCrashed
         let crashed_session = inner.current_session.take();
         inner.current_cancel_id = None;

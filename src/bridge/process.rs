@@ -24,9 +24,15 @@ pub enum IpcMessage {
 }
 
 /// Worker 子进程回传给 Supervisor 主循环的解析消息
+#[derive(Debug)]
 pub enum ParsedMessage {
     /// 正常的请求响应
     Response(IpcResponse),
+    /// 带有效 id 但反序列化为 [`IpcResponse`] 失败的响应
+    ///
+    /// 携带原始 id，供 Supervisor 以错误回收对应的在途请求，避免请求永久泄漏、
+    /// 调试会话槽位卡死（历史遗留 F1）。
+    ResponseError { id: u64, error: String },
     /// 事件推送
     Event(IpcEvent),
     /// 无法解析的 IPC 行
@@ -93,6 +99,14 @@ pub async fn spawn_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Windows：设置 CREATE_NO_WINDOW，避免 Worker 子进程弹出黑色控制台窗口
+    // （与 orphan.rs 的进程枚举保持一致的处理，历史遗留 F4-Win）
+    #[cfg(windows)]
+    {
+        // tokio::process::Command 在 Windows 上提供同名 inherent 方法，无需引入 trait
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = cmd.spawn().map_err(BridgeError::SpawnFailed)?;
 
     let stdin = child
@@ -270,12 +284,27 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
 async fn parse_and_send_line(trimmed: &str, ipc_tx: &mpsc::Sender<ParsedMessage>) {
     match serde_json::from_str::<serde_json::Value>(trimmed) {
         Ok(v) => {
-            if v.get("id").is_some() {
+            if let Some(id_val) = v.get("id") {
+                // 先提取 id，确保后续反序列化失败时仍能回收在途请求（历史遗留 F1）
+                let id = id_val.as_u64();
                 match serde_json::from_value::<IpcResponse>(v) {
                     Ok(resp) => {
                         let _ = ipc_tx.send(ParsedMessage::Response(resp)).await;
                     }
-                    Err(e) => tracing::warn!("IPC 响应解析失败: {e}"),
+                    Err(e) => match id {
+                        // 带有效 id：回传 ResponseError，由 Supervisor 以错误结束在途请求，
+                        // 避免调用方永久阻塞、调试会话槽位卡死。
+                        Some(id) => {
+                            let _ = ipc_tx
+                                .send(ParsedMessage::ResponseError {
+                                    id,
+                                    error: e.to_string(),
+                                })
+                                .await;
+                        }
+                        // id 非法（非 u64）：无法定位在途请求，仅记录
+                        None => tracing::warn!("IPC 响应解析失败且 id 非法: {e} | {trimmed}"),
+                    },
                 }
             } else if v.get("event").is_some() {
                 match serde_json::from_value::<IpcEvent>(v) {
