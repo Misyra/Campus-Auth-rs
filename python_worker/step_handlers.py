@@ -373,7 +373,11 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     try:
         import ddddocr  # type: ignore
     except Exception as exc:  # noqa: BLE001
-        raise WorkerError(Outcome.UNKNOWN_ERROR, f"ddddocr 未安装: {exc}") from exc
+        raise WorkerError(
+            Outcome.UNKNOWN_ERROR,
+            f"ddddocr 未安装: {exc}。请执行 `uv sync --project python_worker --extra ocr` "
+            "或 `uv pip install ddddocr` 安装 OCR 依赖后重试",
+        ) from exc
 
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
