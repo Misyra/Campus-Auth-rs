@@ -79,6 +79,7 @@ function closeEditor() { t.editingTask.value = null; }
                   {{ t.activeTaskId.value === task.id ? '使用中' : '使用' }}
                 </button>
                 <button class="btn btn-sm" @click="t.showTaskEditor(task.id)">编辑</button>
+                <button class="btn btn-sm" @click="t.executeTask(task.id)" title="立即执行（打卡/签到）">执行</button>
                 <button class="btn btn-sm" @click="t.duplicateTask(task.id)" title="复制为新任务">复制</button>
                 <button class="btn btn-sm" @click="t.exportTask(task.id)" title="导出为JSON文件">导出</button>
                 <button class="btn btn-sm btn-danger" @click="t.deleteTask(task.id)" :disabled="task.id === 'default'">删除</button>

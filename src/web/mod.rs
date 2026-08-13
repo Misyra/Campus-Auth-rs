@@ -83,6 +83,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/tasks/{id}", get(routes::tasks::get_task))
         .route("/api/tasks/{id}", put(routes::tasks::update_task))
         .route("/api/tasks/{id}", delete(routes::tasks::delete_task))
+        .route("/api/tasks/{id}/execute", post(routes::tasks::execute_task))
         // ---- 仓库（repo）----
         .route("/api/repo/fetch", get(routes::repo::repo_fetch_index))
         .route("/api/repo/task", get(routes::repo::repo_fetch_task))

@@ -183,3 +183,26 @@ pub async fn export_task(
     let detail = state.container.tasks.get_task_detail(&id).await?;
     Ok(data(serde_json::to_value(detail)?))
 }
+
+/// POST /api/tasks/{id}/execute — 手动执行任务（通用语义：浏览器/脚本/Shell）
+///
+/// 浏览器任务走通用执行（不注入账号密码，用于打卡/签到等日常自动化）；
+/// 带凭据的登录语义请走 `POST /api/login`。
+pub async fn execute_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let task = state
+        .container
+        .tasks
+        .load_task(&id)
+        .await
+        .map_err(|e| ApiError::NotFound(format!("任务不存在: {e}")))?;
+    let result = state
+        .container
+        .executor
+        .execute(&task)
+        .await
+        .map_err(|e| ApiError::Internal(format!("执行失败: {e}")))?;
+    Ok(data(serde_json::to_value(&result)?))
+}

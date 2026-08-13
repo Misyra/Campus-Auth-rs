@@ -95,6 +95,18 @@ async function setActiveTask(taskId: string): Promise<void> {
   }
 }
 
+/** 立即执行任务（通用语义：浏览器打卡/脚本/Shell，不注入账号密码） */
+async function executeTask(taskId: string): Promise<void> {
+  try {
+    frontendLogger.info("tasks", `执行任务: ${taskId}`);
+    const data = await tasksApi.execute(taskId);
+    toastOnly(true, extractApiError(data, "执行完成"));
+  } catch (error) {
+    frontendLogger.error("tasks", "执行任务异常", error);
+    toastOnly(false, extractApiError(error, "执行失败"));
+  }
+}
+
 function detectDangerousSteps(config: { steps?: Array<Record<string, unknown>> }): DangerStep[] {
   const steps = config.steps || [];
   const warnings: DangerStep[] = [];
@@ -481,6 +493,7 @@ export function useTasks() {
     fetchActiveTask,
     setActiveTask,
     setActiveTaskId,
+    executeTask,
     saveTask,
     deleteTask,
     showTaskEditor,

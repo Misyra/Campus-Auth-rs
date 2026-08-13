@@ -181,6 +181,7 @@ export const tasksApi = {
   save: (id: string, payload: Record<string, unknown>) => http.put<MutationResult>(`/api/tasks/${id}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${id}`),
   setActive: (id: string) => http.post<MutationResult>(`/api/tasks/active/${id}`),
+  execute: (id: string) => http.post<MutationResult>(`/api/tasks/${id}/execute`),
   order: (order: { all: string[]; scripts: string[] }) => http.post<MutationResult>("/api/tasks/order", order),
   import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),
   export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${id}`),
