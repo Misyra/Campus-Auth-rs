@@ -37,16 +37,17 @@ python_worker/venv/
 python_worker/node_modules/
 
 # 运行时（应用启动时自动创建，不提交）
-environment/
-config/
-tasks/active.txt
-tasks/.order.json
-tasks/scheduled/
-tasks/scripts/
-tasks/browser/
-debug/
-temp/
-logs/
+# 注意：必须锚定到仓库根目录（/ 前缀），否则会误伤 src/config、src/environment 等源码目录
+/environment/
+/config/
+/tasks/active.txt
+/tasks/.order.json
+/tasks/scheduled/
+/tasks/scripts/
+/tasks/browser/
+/debug/
+/temp/
+/logs/
 *.log
 
 # 环境变量
