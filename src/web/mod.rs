@@ -133,8 +133,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/init-status", get(routes::system::init_status))
         .route("/api/agree", post(routes::system::agree_terms))
         .route("/api/logs", get(routes::system::fetch_logs))
-        // ---- 浏览器与安装（browsers / install）----
+        // ---- 浏览器与安装（browsers / install / worker）----
         .route("/api/browsers", get(routes::system::list_browsers))
+        .route("/api/worker/stop", post(routes::system::stop_worker))
         .route(
             "/api/install/playwright",
             post(routes::system::install_playwright),

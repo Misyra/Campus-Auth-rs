@@ -814,35 +814,13 @@ async fn validate_url_not_private(url: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// 解码 base64 字符串
-#[allow(dead_code)]
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if s.len() % 4 != 0 {
-        return Err("base64 长度非法".into());
-    }
-    let mut out = Vec::with_capacity(s.len() / 4 * 3);
-    for chunk in s.as_bytes().chunks(4) {
-        let mut n: u32 = 0;
-        let mut pad = 0;
-        for &c in chunk {
-            n <<= 6;
-            if c == b'=' {
-                pad += 1;
-            } else if let Some(idx) = CHARS.iter().position(|&x| x == c) {
-                n |= idx as u32;
-            } else {
-                return Err(format!("base64 非法字符: {}", c as char));
-            }
-        }
-        out.push(((n >> 16) & 0xFF) as u8);
-        if pad < 2 {
-            out.push(((n >> 8) & 0xFF) as u8);
-        }
-        if pad < 1 {
-            out.push((n & 0xFF) as u8);
-        }
-    }
-    Ok(out)
+/// POST /api/worker/stop — 手动关闭浏览器（优雅停止 Python Worker）
+///
+/// 停止当前运行的 Worker 进程及其浏览器实例。Supervisor 保持运行，
+/// 下次任务到来时会自动重新启动 Worker。
+pub async fn stop_worker(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    state.container.bridge.shutdown().await;
+    Ok(data(serde_json::json!({ "stopped": true })))
 }

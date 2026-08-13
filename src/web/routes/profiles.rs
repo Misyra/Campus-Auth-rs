@@ -104,11 +104,13 @@ pub async fn update_profile(
     if let Some(name) = body.name {
         profile.name = name;
     }
-    if let Some(enc) = body
-        .password
-        .and_then(|p| state.container.config.encrypt_password(&p).ok())
-    {
-        profile.password = enc;
+    if let Some(p) = body.password {
+        // 加密失败需显式报错，不能静默跳过（否则返回 ok 但密码实际未更新）
+        profile.password = state
+            .container
+            .config
+            .encrypt_password(&p)
+            .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?;
     }
     if let Some(username) = body.username {
         profile.username = username;

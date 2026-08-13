@@ -58,7 +58,9 @@ fn asset_response(path: &str, asset: rust_embed::EmbeddedFile) -> Response {
     let cache = if path.contains('.') && !path.ends_with("index.html") {
         "max-age=31536000, immutable"
     } else {
-        "no-cache"
+        // index.html 必须用 no-store：no-cache 依赖 ETag/Last-Modified 验证器，
+        // 但嵌入资源无这些头，浏览器会直接用缓存 → 引用旧 bundle 名 → 前端永远停在旧版本
+        "no-store"
     };
     let body: Vec<u8> = asset.data.into_owned();
     let mut resp = Response::new(body.into());

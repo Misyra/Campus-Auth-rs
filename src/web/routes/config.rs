@@ -20,6 +20,14 @@ pub async fn get_settings(
     let active_id = &settings.active_profile_id;
     let profile = state.container.config.load_profile(active_id).unwrap_or_default();
 
+    // has_password 必须反映"密码可用"（能解密），而非仅"字段非空"。
+    // 否则密钥变更/格式不兼容时，前端误认为已保存 → 不重新输入 → 登录报缺少 password。
+    let has_password = if profile.password.is_empty() {
+        false
+    } else {
+        state.container.config.can_decrypt_password(&profile.password)
+    };
+
     Ok(data(serde_json::json!({
         "browser": settings.global.browser,
         "monitor": monitor_backend_to_frontend(&settings.global.monitor),
@@ -34,7 +42,7 @@ pub async fn get_settings(
         "isp": profile.isp,
         "carrier_custom": "",
         "active_task": profile.active_task,
-        "has_password": !profile.password.is_empty()
+        "has_password": has_password
     })))
 }
 
@@ -160,6 +168,13 @@ pub async fn patch_settings(
     let settings = state.container.config.load_settings();
     let active_id = &settings.active_profile_id;
     let profile = state.container.config.load_profile(active_id).unwrap_or_default();
+    // has_password 应与 GET /api/config 保持一致：反映"密码可解密"而非"字段非空"，
+    // 否则密钥不可用时刚保存显示成功、刷新又提示需重输，造成体验割裂。
+    let has_password = if profile.password.is_empty() {
+        false
+    } else {
+        state.container.config.can_decrypt_password(&profile.password)
+    };
     Ok(data(serde_json::json!({
         "browser": settings.global.browser,
         "monitor": monitor_backend_to_frontend(&settings.global.monitor),
@@ -174,7 +189,7 @@ pub async fn patch_settings(
         "isp": profile.isp,
         "carrier_custom": "",
         "active_task": profile.active_task,
-        "has_password": !profile.password.is_empty()
+        "has_password": has_password
     })))
 }
 
@@ -370,12 +385,11 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         "tcp_enabled": obj.get("enable_tcp_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "http_enabled": obj.get("enable_http_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "url_enabled": obj.get("url_check_urls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
-        "profile_check_interval": 180,
         "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
-        "http_timeout": 10,
-        "url_timeout": 10,
-        "auth_url_timeout": 5,
         "bind_interface_name": obj.get("bind_interface_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        // 注意：profile_check_interval / http_timeout / url_timeout / auth_url_timeout / socks5_port
+        // 前端 MonitorConfig 不包含这些字段，故此处**不输出**。上层用 json_merge 合并，
+        // 省略即可保留 settings.json 中已存储的值，避免每次保存把它们覆盖成硬编码默认值。
     })
 }
 
