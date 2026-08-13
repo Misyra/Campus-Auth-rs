@@ -496,10 +496,25 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BroadcastWriter {
     }
 }
 
-/// 写入器守卫：缓冲写入，flush 时发送到广播通道
+/// 写入器守卫：缓冲写入，flush 或 drop 时发送到广播通道
 struct BroadcastWriterGuard {
     tx: tokio::sync::broadcast::Sender<crate::web::state::LogEntry>,
     buf: Vec<u8>,
+}
+
+impl BroadcastWriterGuard {
+    /// 发送缓冲的日志（无剩余数据或非 UTF-8 时跳过）
+    fn send_buffered(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let text = match String::from_utf8(std::mem::take(&mut self.buf)) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let entry = parse_log_line(&text);
+        let _ = self.tx.send(entry);
+    }
 }
 
 impl std::io::Write for BroadcastWriterGuard {
@@ -509,13 +524,18 @@ impl std::io::Write for BroadcastWriterGuard {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        if let Ok(text) = String::from_utf8(self.buf.clone()) {
-            // 解析 tracing 格式："[LEVEL target] message"
-            let entry = parse_log_line(&text);
-            let _ = self.tx.send(entry);
-        }
-        self.buf.clear();
+        self.send_buffered();
         Ok(())
+    }
+}
+
+/// 关键修复：`tracing-subscriber` 的 fmt layer 在 `on_event` 里只调用
+/// `io::Write::write_all`，**不调用 `flush`**。若仅在 flush 里发送，日志实时推送会
+/// 完全失效（WebSocket 收不到任何后端日志）。因此改为在 Drop 里兜底发送，
+/// flush 仍保留以兼容可能显式调用 flush 的路径。
+impl Drop for BroadcastWriterGuard {
+    fn drop(&mut self) {
+        self.send_buffered();
     }
 }
 
