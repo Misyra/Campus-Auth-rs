@@ -139,6 +139,20 @@ impl ConfigService {
         base_path: PathBuf,
         reload_tx: Sender<ConfigReloadSignal>,
     ) -> Result<Self, ConfigError> {
+        // 同步文件 I/O（建目录/清理 tmp/读配置/迁移/解密）移入 spawn_blocking，
+        // 避免在 async 构造函数内直接阻塞 tokio worker 线程。
+        tokio::task::spawn_blocking(move || Self::new_sync(base_path, reload_tx))
+            .await
+            .map_err(|e| {
+                ConfigError::Io(std::io::Error::other(format!("配置初始化任务失败: {e}")))
+            })?
+    }
+
+    /// `new` 的同步实现：全部磁盘 I/O 与解密在此线程完成。
+    fn new_sync(
+        base_path: PathBuf,
+        reload_tx: Sender<ConfigReloadSignal>,
+    ) -> Result<Self, ConfigError> {
         let config_dir = base_path.join(crate::config::CONFIG_DIR);
         let settings_path = config_dir.join(crate::config::SETTINGS_FILE);
         let profiles_dir = config_dir.join(crate::config::PROFILES_DIR);
