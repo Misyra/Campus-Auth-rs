@@ -9,11 +9,12 @@ import { CARRIER_OPTIONS } from "@/utils/constants";
 
 const config = useConfig();
 // 使用 useConfig 单例中的 password 字段（与 saveConfig 共用同一实例）
-const password = config.password;
+const passwordDisplay = config.passwordDisplay;
 const passwordSaved = config.passwordSaved;
 const editingPassword = config.editingPassword;
 const onPasswordFocus = config.onPasswordFocus;
 const onPasswordBlur = config.onPasswordBlur;
+const onPasswordInput = config.onPasswordInput;
 const { profiles, activeProfileId } = useProfiles();
 const router = useRouter();
 
@@ -50,8 +51,8 @@ onMounted(() => {
         <div class="form-group">
           <label for="settings-password">密码</label>
           <input id="settings-password"
-            :value="passwordSaved && !editingPassword ? '••••••••••' : password.value"
-            @input="password.value = ($event.target as HTMLInputElement).value"
+            :value="passwordDisplay"
+            @input="onPasswordInput"
             @focus="onPasswordFocus()" @blur="onPasswordBlur()"
             name="password" type="password"
             :placeholder="passwordSaved ? '输入新密码，留空不修改' : '输入密码'"

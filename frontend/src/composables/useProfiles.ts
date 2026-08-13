@@ -19,6 +19,8 @@ const profiles = ref<Record<string, Profile>>({});
 const activeProfileId = ref("default");
 const autoSwitch = ref(true);
 const editingProfile = ref<EditingProfile | null>(null);
+// dirty 机制：记录打开编辑器时的原始快照，用于检测未保存改动（历史遗留 F4/F5）
+let editingProfileSnapshot = "";
 const detectResult = ref<NetworkDetectResult | null>(null);
 const editorDetectResult = ref<NetworkDetectResult | null>(null);
 
@@ -39,26 +41,61 @@ async function fetchProfiles(): Promise<void> {
 }
 
 async function showProfileEditor(profileId?: string): Promise<void> {
+  // 打开新编辑器前先检查当前是否有未保存改动，避免静默丢弃（历史遗留 F5）
+  if (!(await confirmDiscardIfDirty())) return;
   editorDetectResult.value = null;
   if (profileId && profiles.value[profileId]) {
     try {
       const data = await profilesApi.get(profileId);
       editingProfile.value = {
-        id: profileId,
         ...data.settings,
+        id: profileId,
         _isNew: false,
       } as EditingProfile;
     } catch {
       frontendLogger.error("profiles", "加载方案失败: " + profileId);
       toastOnly(false, "加载方案失败");
+      return;
     }
   } else {
     editingProfile.value = {
-      id: "",
       ...DEFAULT_PROFILE_SETTINGS,
+      id: "",
       _isNew: true,
     } as EditingProfile;
   }
+  // 记录初始快照作为 dirty 基准
+  editingProfileSnapshot = snapshotOf(editingProfile.value);
+}
+
+/** 计算当前编辑中的方案是否存在未保存改动。 */
+function snapshotOf(p: EditingProfile | null): string {
+  return p ? JSON.stringify(p) : "";
+}
+
+/** 当前编辑器是否有未保存改动。 */
+function isProfileDirty(): boolean {
+  return (
+    editingProfile.value !== null &&
+    snapshotOf(editingProfile.value) !== editingProfileSnapshot
+  );
+}
+
+/** 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。 */
+async function confirmDiscardIfDirty(): Promise<boolean> {
+  if (!isProfileDirty()) return true;
+  return confirm({
+    title: "放弃未保存的修改",
+    message: "当前配置方案有未保存的修改，确定放弃吗？",
+    danger: true,
+  });
+}
+
+/** 关闭编辑器（带 dirty 确认）。 */
+async function closeProfileEditor(): Promise<void> {
+  if (!(await confirmDiscardIfDirty())) return;
+  editingProfile.value = null;
+  editingProfileSnapshot = "";
 }
 
 async function saveProfile(): Promise<void> {
@@ -81,6 +118,7 @@ async function saveProfile(): Promise<void> {
     frontendLogger.info("profiles", "方案保存成功: " + profileId);
     toastOnly(true, data?.message || "方案保存成功");
     editingProfile.value = null;
+    editingProfileSnapshot = "";
     await fetchProfiles();
     if (profileId === activeProfileId.value) {
       await (await import("./useConfig")).useConfig().fetchConfig();
@@ -103,7 +141,10 @@ async function deleteProfile(profileId: string): Promise<void> {
     await profilesApi.delete(profileId);
     frontendLogger.info("profiles", "方案删除成功: " + profileId);
     toastOnly(true, "方案删除成功");
-    if (editingProfile.value?.id === profileId) editingProfile.value = null;
+    if (editingProfile.value?.id === profileId) {
+      editingProfile.value = null;
+      editingProfileSnapshot = "";
+    }
     await fetchProfiles();
     if (!profiles.value[activeProfileId.value]) activeProfileId.value = "default";
   } catch (error) {
@@ -196,5 +237,7 @@ export function useProfiles() {
     detectNetworkForEditor,
     detectNetwork,
     toggleAutoSwitch,
+    isProfileDirty,
+    closeProfileEditor,
   };
 }

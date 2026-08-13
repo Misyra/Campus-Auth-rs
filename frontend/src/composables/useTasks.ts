@@ -4,7 +4,7 @@
  */
 
 import { ref, computed } from "vue";
-import type { TaskItem, DangerStep, RepoTask } from "../api/types";
+import type { TaskItem, DangerStep, RepoTask, TaskConfig } from "../api/types";
 import { tasksApi, repoApi, pureModeApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
@@ -21,7 +21,9 @@ export interface BrowserTaskDraft {
   _isNew: boolean;
 }
 
-const DANGEROUS_STEP_TYPES = new Set(["eval", "custom_js"]);
+// 危险步骤类型：涵盖后端兼容的多个别名。StepEditor 实际产出 `evaluate`（执行 JS），
+// eval / custom_js 为历史别名，三者均需视为危险（历史遗留：前端危险步骤检测失效）
+const DANGEROUS_STEP_TYPES = new Set(["eval", "custom_js", "evaluate"]);
 
 const tasks = ref<TaskItem[]>([]);
 const activeTaskId = ref("default");
@@ -35,7 +37,7 @@ const pureModeLoading = ref(false);
 // ==================== 仓库导入 ====================
 const repoImport = ref({
   visible: false,
-  url: "https://github.com/Misyra/campus-auth-tasks/blob/master/index.json",
+  url: "https://raw.githubusercontent.com/Misyra/campus-auth-tasks/master/index.json",
   source: "github" as "github" | "gitee" | "custom",
   loading: false,
   error: "",
@@ -74,6 +76,11 @@ async function fetchActiveTask(): Promise<void> {
   } catch (error) {
     frontendLogger.error("tasks", "获取活动任务失败", error);
   }
+}
+
+/** 仅同步本地活动任务 id（不调 API），供已自行完成服务端切换的调用方复用。 */
+function setActiveTaskId(taskId: string): void {
+  activeTaskId.value = taskId;
 }
 
 async function setActiveTask(taskId: string): Promise<void> {
@@ -180,12 +187,9 @@ async function showTaskEditor(taskId?: string): Promise<void> {
     try {
       const data = await tasksApi.get(taskId);
       // 后端返回 TaskDetail: { summary: { id, name, description, task_type }, config: {...} }
-      const summary = (data as { summary?: Record<string, unknown> }).summary;
-      const config = (data as { config?: Record<string, unknown> }).config;
-
-      // 如果是嵌套结构，使用 config 作为任务配置
-      const taskConfig = config || data;
-      const taskType = summary?.task_type as string || (taskConfig as { type?: string }).type;
+      const summary = data.summary;
+      const taskConfig: TaskConfig = data.config ?? {};
+      const taskType = summary?.task_type || taskConfig.type;
 
       if (taskType === "script") {
         // 脚本任务交给脚本编辑器处理
@@ -194,9 +198,9 @@ async function showTaskEditor(taskId?: string): Promise<void> {
       }
       editingTask.value = {
         id: taskId,
-        name: (summary?.name as string) || (taskConfig.name as string) || "",
-        description: (summary?.description as string) || (taskConfig.description as string) || "",
-        url: (taskConfig.url as string) || "",
+        name: summary?.name || taskConfig.name || "",
+        description: summary?.description || taskConfig.description || "",
+        url: taskConfig.url || "",
         json: JSON.stringify(taskConfig, null, 2),
         _isNew: false,
       };
@@ -240,13 +244,12 @@ async function loadTemplate(templateId: string): Promise<void> {
   if (!editingTask.value) return;
   try {
     const data = await tasksApi.get(templateId);
-    const summary = (data as { summary?: Record<string, unknown> }).summary;
-    const config = (data as { config?: Record<string, unknown> }).config;
-    const taskConfig = config || data;
+    const summary = data.summary;
+    const taskConfig: TaskConfig = data.config ?? {};
     editingTask.value.json = JSON.stringify(taskConfig, null, 2);
-    const name = (summary?.name as string) || (taskConfig.name as string) || "";
+    const name = summary?.name || taskConfig.name || "";
     if (name) editingTask.value.name = name;
-    const desc = (summary?.description as string) || (taskConfig.description as string) || "";
+    const desc = summary?.description || taskConfig.description || "";
     if (desc) editingTask.value.description = desc;
     jsonError.value = "";
   } catch (error) {
@@ -284,13 +287,12 @@ async function duplicateTask(taskId: string): Promise<void> {
   try {
     const data = await tasksApi.get(taskId);
     // 解包 TaskDetail 嵌套结构
-    const summary = (data as { summary?: Record<string, unknown> }).summary;
-    const config = (data as { config?: Record<string, unknown> }).config;
-    const taskConfig = config || data;
+    const summary = data.summary;
+    const taskConfig: TaskConfig = data.config ?? {};
 
     const baseId = taskId.replace(/_copy(_\d+)?$/, "");
     const existingIds = new Set((tasks.value || []).map((t) => t.id));
-    const baseName = ((summary?.name as string) || (taskConfig.name as string) || "").replace(/\s*\(副本\)(\s*\d+)?$/, "");
+    const baseName = (summary?.name || taskConfig.name || "").replace(/\s*\(副本\)(\s*\d+)?$/, "");
     let newId = baseId + "_copy";
     let suffix = " (副本)";
     let counter = 2;
@@ -302,8 +304,8 @@ async function duplicateTask(taskId: string): Promise<void> {
     editingTask.value = {
       id: newId,
       name: baseName + suffix,
-      description: (summary?.description as string) || (taskConfig.description as string) || "",
-      url: (taskConfig.url as string) || "",
+      description: summary?.description || taskConfig.description || "",
+      url: taskConfig.url || "",
       json: JSON.stringify(taskConfig, null, 2),
       _isNew: true,
     };
@@ -382,7 +384,7 @@ async function persistOrder(): Promise<void> {
 function selectRepoSource(source: "github" | "gitee" | "custom") {
   repoImport.value.source = source;
   if (source === "github") {
-    repoImport.value.url = "https://github.com/Misyra/campus-auth-tasks/blob/master/index.json";
+    repoImport.value.url = "https://raw.githubusercontent.com/Misyra/campus-auth-tasks/master/index.json";
   } else if (source === "gitee") {
     repoImport.value.url = "https://raw.giteeusercontent.com/Misyra/campus-auth-tasks/raw/master/index.gitee.json";
   }
@@ -478,6 +480,7 @@ export function useTasks() {
     fetchTasks,
     fetchActiveTask,
     setActiveTask,
+    setActiveTaskId,
     saveTask,
     deleteTask,
     showTaskEditor,

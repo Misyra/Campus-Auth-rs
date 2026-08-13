@@ -2,7 +2,9 @@
  * API 类型定义
  *
  * 后端使用 snake_case JSON 字段名，前端类型与之一致。
- * 当前为手写类型；后续可通过 `npm run typegen` 从 openapi.json 自动生成。
+ * 本文件为手写、权威的类型来源（source of truth）。
+ * `npm run typegen` 仅从 openapi.json 生成 `types.generated.ts` 供对照参考，
+ * 不会覆盖本文件（openapi.json 仍为不完整的手写 baseline）。
  */
 
 /**
@@ -97,6 +99,12 @@ export interface BrowserConfig {
   bind_proxy: string;
 }
 
+/** Worker（浏览器进程）配置 */
+export interface WorkerConfig {
+  idle_timeout_seconds: number;
+  keep_alive: boolean;
+}
+
 /** 网络监控配置 */
 export interface MonitorConfig {
   check_interval_seconds: number;
@@ -159,6 +167,7 @@ export interface AppSettings {
 /** 完整配置（前端内部表示，凭据嵌套） */
 export interface Config {
   browser: BrowserConfig;
+  worker: WorkerConfig;
   monitor: MonitorConfig;
   pause: PauseConfig;
   logging: LoggingConfig;
@@ -171,6 +180,7 @@ export interface Config {
 /** GET /api/config 返回结构（凭据平铺在顶层） */
 export interface ConfigResponse {
   browser: BrowserConfig;
+  worker: WorkerConfig;
   monitor: MonitorConfig;
   pause: PauseConfig;
   logging: LoggingConfig;
@@ -188,6 +198,7 @@ export interface ConfigResponse {
 /** PATCH /api/config 请求体（凭据平铺） */
 export interface SaveConfigPayload {
   browser: BrowserConfig;
+  worker: WorkerConfig;
   monitor: MonitorConfig;
   pause: PauseConfig;
   logging: LoggingConfig;
@@ -269,6 +280,32 @@ export interface TaskItem {
   type?: string;
   url?: string;
   [key: string]: unknown;
+}
+
+/** 任务摘要（列表/概览用，对应后端 TaskSummary） */
+export interface TaskSummary {
+  id: string;
+  name: string;
+  description: string;
+  /** 任务类型：browser / script / shell */
+  task_type: string;
+}
+
+/** 任务完整配置（对应后端 TaskKind，按 type 区分 browser/script/shell） */
+export interface TaskConfig {
+  type?: string;
+  name?: string;
+  description?: string;
+  url?: string;
+  steps?: Array<Record<string, unknown>>;
+  variables?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** 单个任务详情（对应后端 TaskDetail：{ summary, config }） */
+export interface TaskDetail {
+  summary?: TaskSummary;
+  config?: TaskConfig;
 }
 
 /** 远程仓库任务索引条目 */
@@ -375,6 +412,8 @@ export interface UpdateInfo {
   latest?: string;
   current?: string;
   error?: string;
+  /** 发布页/下载页链接（AboutView 展示“前往下载”按钮） */
+  url?: string;
   [key: string]: unknown;
 }
 

@@ -19,6 +19,7 @@ import { useConfirm } from "./useConfirm";
 function cloneConfig(src: Config): Config {
   return {
     browser: { ...src.browser },
+    worker: { ...src.worker },
     monitor: { ...src.monitor },
     pause: { ...src.pause },
     logging: { ...src.logging },
@@ -52,6 +53,15 @@ watch(
   { deep: true, flush: "sync" },
 );
 
+// password 是独立的 usePasswordField 实例，不在 config 响应对象内，
+// 需单独监听其 value 变化以触发 dirty（否则仅改密码时 saveConfig 会因 !dirty 提前返回）。
+// 注意：password 是普通对象，password.value 取的是内部 ref 对象本身，
+// 直接写成 `() => password.value` 不会对该 ref 的 .value 建立响应式依赖，导致永不触发。
+// 这里直接以 ref 作为 watch 源（等价于监听 password.value.value）才正确。
+watch(password.value, () => {
+  if (!loadingConfig) dirty.value = true;
+});
+
 const { busy } = useStatus();
 
 async function fetchConfig(): Promise<void> {
@@ -59,6 +69,7 @@ async function fetchConfig(): Promise<void> {
     const data = await configApi.fetch();
     loadingConfig = true;
     config.browser = { ...DEFAULT_CONFIG.browser, ...(data.browser || {}) };
+    config.worker = { ...DEFAULT_CONFIG.worker, ...(data.worker || {}) };
     config.monitor = { ...DEFAULT_CONFIG.monitor, ...(data.monitor || {}) };
     config.pause = { ...DEFAULT_CONFIG.pause, ...(data.pause || {}) };
     config.logging = { ...DEFAULT_CONFIG.logging, ...(data.logging || {}) };
@@ -113,6 +124,10 @@ function onPasswordFocus(): void {
 function onPasswordBlur(): void {
   password.onBlur();
 }
+/** 密码输入回调：同步明文值并标记 dirty */
+function onPasswordInput(e: Event): void {
+  password.value.value = (e.target as HTMLInputElement).value;
+}
 
 async function saveConfig(force = false): Promise<void> {
   if (!dirty.value && !force) return;
@@ -137,6 +152,7 @@ async function saveConfig(force = false): Promise<void> {
   const submittedPassword = !!pwdValue;
   const payload: SaveConfigPayload = {
     browser: config.browser,
+    worker: config.worker,
     monitor: config.monitor,
     pause: config.pause,
     logging: config.logging,
@@ -314,6 +330,7 @@ export function useConfig() {
   return {
     config,
     password,
+    passwordDisplay: password.display,
     passwordSaved: password.saved,
     editingPassword: password.editing,
     defaultUrlCheckUrls,
@@ -327,6 +344,7 @@ export function useConfig() {
     ensureAtLeastOneCheckMethod,
     onPasswordFocus,
     onPasswordBlur,
+    onPasswordInput,
     saveConfig,
     resetConfig,
     onShellFileSelected,

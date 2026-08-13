@@ -16,14 +16,16 @@ onMounted(() => { void p.fetchProfiles(); });
 // 编辑模式：true = 显示编辑器，false = 显示列表
 const showEditor = ref(false);
 
-function openEditor(profileId: string | null) {
-  p.showProfileEditor(profileId);
-  showEditor.value = true;
+async function openEditor(profileId: string | null) {
+  await p.showProfileEditor(profileId ?? undefined);
+  // 仅当编辑器真正打开（未被 dirty 确认拦截）时才切到编辑视图
+  if (p.editingProfile.value) showEditor.value = true;
 }
 
-function closeEditor() {
-  showEditor.value = false;
-  p.editingProfile.value = null;
+async function closeEditor() {
+  // 带未保存确认：若用户取消放弃，则保留在编辑视图（历史遗留 F4/F5）
+  await p.closeProfileEditor();
+  if (!p.editingProfile.value) showEditor.value = false;
 }
 
 async function saveAndClose() {

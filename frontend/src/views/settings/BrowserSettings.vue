@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useUi } from "@/composables/useUi";
 import { useTasks } from "@/composables/useTasks";
-import { browsersApi, configApi } from "@/api";
+import { browsersApi, configApi, workerApi } from "@/api";
 
 const config = useConfig();
 const ui = useUi();
@@ -12,6 +12,7 @@ const tasks = useTasks();
 const browsers = ref<{ channel: string; name: string; description: string; installed: boolean; icon: string }[]>([]);
 const browserLoading = ref(true);
 const playwrightDownloading = ref(false);
+const stoppingBrowser = ref(false);
 
 onMounted(async () => {
   try {
@@ -51,6 +52,14 @@ const pureMode = tasks.pureMode;
 
 async function togglePureMode() {
   await tasks.togglePureMode();
+}
+
+async function stopBrowser() {
+  stoppingBrowser.value = true;
+  try {
+    await workerApi.stop();
+  } catch { /* */ }
+  stoppingBrowser.value = false;
 }
 </script>
 
@@ -151,6 +160,33 @@ async function togglePureMode() {
             <label for="settings-browser-timezone">浏览器时区（Timezone）</label>
             <input id="settings-browser-timezone" v-model.trim="config.config.browser.timezone_id" type="text" placeholder="Asia/Shanghai" />
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 浏览器常驻 -->
+    <section class="card settings-panel">
+      <div class="settings-card-header">
+        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+        <h2>浏览器常驻</h2>
+      </div>
+      <div class="card-body">
+        <div class="toggle-group">
+          <div class="toggle-with-help">
+            <label class="toggle toggle-help-inline">
+              <input type="checkbox" v-model="config.config.worker.keep_alive" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">登录后保持浏览器</span>
+            </label>
+            <span class="field-help" tabindex="0" role="note" data-tip="登录完成后不关闭浏览器进程，维持已认证的网页会话。关闭后浏览器将在空闲超时后自动回收。">?</span>
+          </div>
+        </div>
+        <div class="form-row" style="margin-top: 0.5rem;">
+          <button type="button" class="btn btn-sm btn-secondary" :disabled="stoppingBrowser" @click="stopBrowser()">
+            {{ stoppingBrowser ? "正在关闭..." : "立即关闭浏览器" }}
+          </button>
         </div>
       </div>
     </section>

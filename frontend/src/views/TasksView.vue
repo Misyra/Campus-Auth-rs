@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
 import { useTasks } from "@/composables/useTasks";
+import { useDragSort } from "@/utils/drag";
 import { useRouter } from "vue-router";
 
 const t = useTasks();
 const router = useRouter();
+// 拖拽排序：复用 useDragSort（历史遗留：已实现未接入）
+const drag = useDragSort(t.tasks);
 
 onMounted(() => { void t.fetchTasks(); });
 
@@ -54,9 +57,15 @@ function closeEditor() { t.editingTask.value = null; }
             <span>暂无任务配置</span>
           </div>
           <div v-else class="task-list">
-            <div v-for="task in browserTasks" :key="task.id" class="task-item hover-lift"
-              data-draggable-list :class="{ active: t.activeTaskId.value === task.id }">
-              <div class="task-drag-handle" title="拖拽排序" draggable="true">
+            <div v-for="(task, index) in browserTasks" :key="task.id" class="task-item hover-lift"
+              data-draggable-list :class="{ active: t.activeTaskId.value === task.id }"
+              @dragstart="drag.handleDragStart($event, index)"
+              @dragover="drag.onDragOver($event, index)"
+              @drop="drag.onDrop($event, index)"
+              @dragend="drag.onDragEnd($event)">
+              <div class="task-drag-handle" title="拖拽排序"
+                @mousedown="drag.onHandleMouseDown($event)"
+                @mouseup="drag.onHandleMouseUp($event)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
                   <line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="18" x2="16" y2="18"/>
                 </svg>
@@ -70,6 +79,7 @@ function closeEditor() { t.editingTask.value = null; }
                   {{ t.activeTaskId.value === task.id ? '使用中' : '使用' }}
                 </button>
                 <button class="btn btn-sm" @click="t.showTaskEditor(task.id)">编辑</button>
+                <button class="btn btn-sm" @click="t.duplicateTask(task.id)" title="复制为新任务">复制</button>
                 <button class="btn btn-sm" @click="t.exportTask(task.id)" title="导出为JSON文件">导出</button>
                 <button class="btn btn-sm btn-danger" @click="t.deleteTask(task.id)" :disabled="task.id === 'default'">删除</button>
               </div>
@@ -139,7 +149,7 @@ function closeEditor() { t.editingTask.value = null; }
               <li><code>select</code> - 选择下拉框</li>
               <li><code>wait</code> - 等待元素出现</li>
               <li><code>wait_url</code> - 等待URL匹配</li>
-              <li><code>eval</code> - 执行JS</li>
+              <li><code>eval</code> / <code>evaluate</code> - 执行 JS</li>
               <li><code>screenshot</code> - 保存截图</li>
               <li><code>sleep</code> - 等待指定时间</li>
               <li><code>ocr</code> - 验证码识别</li>

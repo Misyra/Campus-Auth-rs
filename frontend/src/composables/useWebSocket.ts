@@ -26,6 +26,9 @@ let pingTimer: ReturnType<typeof setInterval> | undefined;
 let retryCount = 0; // 仅影响退避计算，不再作为硬上限
 let wasConnected = false;
 let visibilityHandler: (() => void) | null = null;
+// 重连回调：断线期间 profiles/config/tasks/scheduled 等非实时推送数据会停留在旧值，
+// 由上层（useUi）注册全量刷新回调，在重连成功时补齐（历史遗留 F1）。
+let reconnectHandlers: Array<() => void | Promise<void>> = [];
 
 const wsReconnecting = ref(false);
 const wsRetryCount = ref(0);
@@ -50,6 +53,15 @@ function isValidLog(data: unknown): data is LogEntry {
     typeof (data as LogEntry).level === "string" &&
     typeof (data as LogEntry).message === "string"
   );
+}
+
+/**
+ * 注册 WebSocket 重连回调。
+ *
+ * 仅在“重连成功”（非首次连接）时触发，用于补齐断线期间无法通过推送同步的数据。
+ */
+function onWsReconnect(cb: () => void | Promise<void>): void {
+  reconnectHandlers.push(cb);
 }
 
 function connectWebSocket(): void {
@@ -83,6 +95,15 @@ function connectWebSocket(): void {
       void status.fetchStatus();
       // 重连场景：补齐断线期间缺失的日志（后端 broadcast 不缓存历史）
       void logs.fetchLogs();
+      // 全量刷新非实时推送数据（profiles/config/tasks/scheduled 等），
+      // 避免它们停留在断线前的旧值（历史遗留 F1）
+      for (const cb of reconnectHandlers) {
+        try {
+          void cb();
+        } catch (e) {
+          frontendLogger.warn("websocket", "重连回调执行失败", e);
+        }
+      }
     }
     wasConnected = true;
   };
@@ -168,6 +189,7 @@ function setupVisibilityChange(): void {
 
 function destroy(): void {
   destroyed = true;
+  reconnectHandlers = [];
   if (retryTimer) clearTimeout(retryTimer);
   if (pingTimer) clearInterval(pingTimer);
   if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
@@ -187,5 +209,5 @@ function destroy(): void {
 }
 
 export function useWebSocket() {
-  return { connectWebSocket, setupVisibilityChange, destroy, wsReconnecting, wsRetryCount };
+  return { connectWebSocket, setupVisibilityChange, destroy, onWsReconnect, wsReconnecting, wsRetryCount };
 }

@@ -54,6 +54,8 @@ const { confirm } = useConfirm();
 
 let timers: ReturnType<typeof setInterval>[] = [];
 let initErrorCount = 0;
+// init 防重入守卫：避免重复调用叠加定时器与 WS 监听器（历史遗留 F7）
+let initialized = false;
 
 function recordInitError(msg: string): void {
   if (initErrorCount < 2) {
@@ -395,6 +397,12 @@ function stripScreenshotHint(message: string): string {
 }
 
 async function init(): Promise<void> {
+  // 防重入：重复 init 会叠加轮询定时器与 WS 监听器（历史遗留 F7）
+  if (initialized) {
+    frontendLogger.warn("app.init", "init 已执行，跳过重复初始化");
+    return;
+  }
+  initialized = true;
   frontendLogger.info("app.init", "开始初始化");
   state.isLoading = true;
   initErrorCount = 0;
@@ -435,6 +443,16 @@ async function init(): Promise<void> {
   state.isLoading = false;
 
   const wsMgr = useWebSocket();
+  // 注册重连全量刷新回调：断线重连后补齐非实时推送的数据（历史遗留 F1）
+  wsMgr.onWsReconnect(async () => {
+    await Promise.allSettled([
+      config.fetchConfig(),
+      profiles.fetchProfiles(),
+      tasks.fetchTasks(),
+      tasks.fetchActiveTask(),
+      scheduled.loadScheduledTasks(),
+    ]);
+  });
   wsMgr.connectWebSocket();
   wsMgr.setupVisibilityChange();
   void autoCheckUpdateOnStartup();
@@ -456,6 +474,7 @@ function destroyApp(): void {
   timers.forEach((t) => clearInterval(t));
   timers = [];
   useWebSocket().destroy();
+  initialized = false;
 }
 
 export function useUi() {

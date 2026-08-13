@@ -56,7 +56,7 @@ const browserTargetOptions = computed<SelectOption[]>(() =>
                 · 每天 {{ task.cron }}
                 <span v-if="task.timeout"> · 超时 {{ task.timeout }}s</span>
                 <span v-if="task.last_run">
-                  · 上次: <span :class="task.last_result === 'success' ? 'text-success' : 'text-danger'">{{ task.last_result === 'success' ? '成功' : '失败' }}</span>
+                  · 上次: <span :class="task.last_result?.startsWith('[success]') ? 'text-success' : 'text-danger'">{{ task.last_result?.startsWith('[success]') ? '成功' : '失败' }}</span>
                 </span>
               </p>
             </div>

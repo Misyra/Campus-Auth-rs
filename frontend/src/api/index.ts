@@ -29,6 +29,7 @@ import type {
   ScheduledTaskHistoryItem,
   Script,
   ShellListResponse,
+  TaskDetail,
   TaskItem,
   UninstallItem,
   UpdateInfo,
@@ -124,6 +125,11 @@ export const browsersApi = {
     http.post<MutationResult>("/api/install/playwright", null, opts),
 };
 
+/** Worker（浏览器进程） */
+export const workerApi = {
+  stop: () => http.post<MutationResult>("/api/worker/stop"),
+};
+
 /** 调试 */
 export const debugApi = {
   start: (taskId: string) => http.post<DebugSession>("/api/debug/start", { task_id: taskId }),
@@ -170,7 +176,7 @@ export const scriptsApi = {
 /** 任务（浏览器任务） */
 export const tasksApi = {
   list: () => http.get<TaskItem[]>("/api/tasks"),
-  get: (id: string) => http.get<Record<string, unknown> & { type?: string; name?: string; description?: string; url?: string; raw_json?: unknown }>(`/api/tasks/${id}`),
+  get: (id: string) => http.get<TaskDetail>(`/api/tasks/${id}`),
   active: () => http.get<{ task_id: string }>("/api/tasks/active"),
   save: (id: string, payload: Record<string, unknown>) => http.put<MutationResult>(`/api/tasks/${id}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${id}`),

@@ -882,9 +882,21 @@
             }
           }
         }
-      },
+      }
+    },
+    "/api/tasks/active/{task_id}": {
       "post": {
-        "operationId": "post___api_tasks_active",
+        "operationId": "post___api_tasks_active_task_id",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",

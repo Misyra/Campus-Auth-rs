@@ -81,6 +81,10 @@ export const DEFAULT_CONFIG: Config = {
     ignore_https_errors: true,
     bind_proxy: "",
   },
+  worker: {
+    idle_timeout_seconds: 300,
+    keep_alive: false,
+  },
   monitor: {
     check_interval_seconds: 300,
     network_check_timeout: 2,

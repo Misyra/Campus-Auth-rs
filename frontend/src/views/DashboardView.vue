@@ -4,6 +4,7 @@ import { useStatus } from "@/composables/useStatus";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
 import { historyApi } from "@/api";
+import { frontendLogger } from "@/utils/logger";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -28,7 +29,13 @@ onUnmounted(() => {
 const loginHistory = ui.loginHistory;
 const fetchLoginHistory = ui.fetchLoginHistory;
 async function clearLoginHistory() {
-  try { await historyApi.clear(); ui.loginHistory.value = []; } catch { /* */ }
+  try {
+    await historyApi.clear();
+    // loginHistory 是 reactive 数组，需 splice 清空（.value 赋值对 reactive 数组无效）
+    ui.loginHistory.splice(0);
+  } catch (error) {
+    frontendLogger.error("history", "清空登录历史失败", error);
+  }
 }
 
 // ---- 日志 ----
