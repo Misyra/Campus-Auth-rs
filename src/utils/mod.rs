@@ -11,3 +11,12 @@ pub mod platform;
 pub use io::atomic_write_json;
 pub use lock::{InstanceInfo, InstanceLock};
 pub use metrics::Metrics;
+
+/// 恢复中毒的 `std::sync::Mutex` 锁守卫。
+///
+/// 持锁期间发生 panic 会标记锁为「中毒」（poisoned）。对于仅保护简单数据的锁，
+/// 内部数据仍是一致的，可直接取出继续使用，避免因一次无关 panic 拖垮后续所有读写。
+/// 用法：`guard.lock().unwrap_or_else(recover_lock)`。
+pub fn recover_lock<T>(poisoned: std::sync::PoisonError<T>) -> T {
+    poisoned.into_inner()
+}

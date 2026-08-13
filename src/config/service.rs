@@ -18,6 +18,7 @@ use crate::config::crypto::PasswordCrypto;
 use crate::config::migration::run_migrations;
 use crate::config::runtime::{build_runtime_config, ConfigReloadSignal, RuntimeConfig};
 use crate::config::schema::{ProfileData, SettingsData};
+use crate::utils::recover_lock;
 
 /// 配置错误类型
 #[derive(Debug, Error)]
@@ -258,7 +259,7 @@ impl ConfigService {
             .ok()
             .and_then(|m| m.modified().ok());
         {
-            let cache = self.settings_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = self.settings_cache.lock().unwrap_or_else(recover_lock);
             if let (Some(data), Some(mt)) = (&cache.data, &cache.mtime) {
                 if Some(*mt) == mtime {
                     return data.clone();
@@ -267,7 +268,7 @@ impl ConfigService {
         }
         match Self::read_settings_from_disk(&self.settings_path) {
             Ok(s) => {
-                let mut c = self.settings_cache.lock().unwrap_or_else(|e| e.into_inner());
+                let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 c.data = Some(s.clone());
                 c.mtime = mtime;
                 s
@@ -286,7 +287,7 @@ impl ConfigService {
         let mtime = std::fs::metadata(&self.settings_path)
             .ok()
             .and_then(|m| m.modified().ok());
-        let mut c = self.settings_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
         c.data = Some(data.clone());
         c.mtime = mtime;
         Ok(())
@@ -297,7 +298,7 @@ impl ConfigService {
         let path = self.profiles_dir.join(format!("{id}.json"));
         let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         {
-            let cache = self.profile_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = self.profile_cache.lock().unwrap_or_else(recover_lock);
             if let Some(pc) = cache.get(id) {
                 if Some(pc.mtime) == mtime {
                     return Ok(pc.data.clone());
@@ -305,7 +306,7 @@ impl ConfigService {
             }
         }
         let p = Self::read_profile_file(&path)?;
-        let mut cache = self.profile_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.profile_cache.lock().unwrap_or_else(recover_lock);
         cache.insert(
             id.to_string(),
             ProfileCache {
@@ -349,7 +350,7 @@ impl ConfigService {
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or_else(SystemTime::now);
-        let mut cache = self.profile_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.profile_cache.lock().unwrap_or_else(recover_lock);
         cache.insert(
             profile.id.clone(),
             ProfileCache {
@@ -374,7 +375,7 @@ impl ConfigService {
         std::fs::create_dir_all(&trash_dir)?;
         let trash_path = trash_dir.join(format!("{id}.json.{}", timestamp()));
         std::fs::rename(&path, &trash_path)?;
-        self.profile_cache.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        self.profile_cache.lock().unwrap_or_else(recover_lock).remove(id);
         Ok(())
     }
 
@@ -383,7 +384,7 @@ impl ConfigService {
         // 保存旧快照，用于比较非热更字段
         let old = self.runtime.load().as_ref().clone();
         // 强制绕过 mtime 缓存
-        self.settings_cache.lock().unwrap_or_else(|e| e.into_inner()).data = None;
+        self.settings_cache.lock().unwrap_or_else(recover_lock).data = None;
         let settings = self.load_settings();
         let active_id = settings.active_profile_id.clone();
         let active_profile = self

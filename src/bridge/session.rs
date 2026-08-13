@@ -5,6 +5,8 @@ use std::sync::Mutex;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::utils::recover_lock;
+
 /// 会话类型，用于互斥判断
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionType {
@@ -29,24 +31,24 @@ impl CancelRegistry {
 
     /// 注册新的取消令牌
     pub fn register(&self, cancel_id: String, token: CancellationToken) {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).insert(cancel_id, token);
+        self.map.lock().unwrap_or_else(recover_lock).insert(cancel_id, token);
     }
 
     /// 触发取消（调用 token.cancel()）
     pub fn trigger(&self, cancel_id: &str) {
-        if let Some(token) = self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(cancel_id) {
+        if let Some(token) = self.map.lock().unwrap_or_else(recover_lock).remove(cancel_id) {
             token.cancel();
         }
     }
 
     /// 清理已完成的注册项
     pub fn remove(&self, cancel_id: &str) {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(cancel_id);
+        self.map.lock().unwrap_or_else(recover_lock).remove(cancel_id);
     }
 
     /// 全部取消（Worker 崩溃时）
     pub fn trigger_all(&self) {
-        let mut guard = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.map.lock().unwrap_or_else(recover_lock);
         for (_, token) in guard.drain() {
             token.cancel();
         }
@@ -58,7 +60,7 @@ impl CancelRegistry {
     /// DebugSessionClosed），无需再 cancel 其 token。避免与 pending 送达形成 `select!` 竞态（
     /// 否则崩溃请求会非确定地报 `Cancelled` 而非 `WorkerCrashed`），同时防止 token 泄漏。
     pub fn clear(&self) {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.map.lock().unwrap_or_else(recover_lock).clear();
     }
 }
 

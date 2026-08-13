@@ -11,6 +11,8 @@ use std::sync::Mutex;
 use snapshot::apply_partial;
 use tokio::sync::watch;
 
+use crate::utils::recover_lock;
+
 /// 默认活跃 Profile ID
 pub const DEFAULT_ACTIVE_PROFILE: &str = "default";
 
@@ -38,7 +40,7 @@ impl StatusManager {
 
     /// 合并部分更新并推送
     pub fn merge(&self, partial: PartialSnapshot) {
-        let mut guard = self.snapshot.lock().unwrap();
+        let mut guard = self.snapshot.lock().unwrap_or_else(recover_lock);
         apply_partial(&mut guard, &partial);
         let cloned = guard.clone();
         drop(guard);
