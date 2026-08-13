@@ -4,24 +4,24 @@
  */
 
 /* 基础变量与重置 */
-@import "./styles/base.css";
+@import "./base.css";
 
 /* 布局（sidebar / topbar / content-wrapper） */
-@import "./styles/layout.css";
+@import "./layout.css";
 
 /* 通用组件（card / btn / form / modal 等） */
-@import "./styles/components.css";
+@import "./components.css";
 
 /* 页面样式 */
-@import "./styles/pages/dashboard.css";
-@import "./styles/pages/tasks.css";
-@import "./styles/pages/scripts.css";
-@import "./styles/pages/settings.css";
-@import "./styles/pages/profiles.css";
-@import "./styles/pages/scheduled_tasks.css";
-@import "./styles/pages/appearance.css";
-@import "./styles/pages/wizard.css";
-@import "./styles/pages/about.css";
+@import "./pages/dashboard.css";
+@import "./pages/tasks.css";
+@import "./pages/scripts.css";
+@import "./pages/settings.css";
+@import "./pages/profiles.css";
+@import "./pages/scheduled_tasks.css";
+@import "./pages/appearance.css";
+@import "./pages/wizard.css";
+@import "./pages/about.css";
 
 /* 响应式断点 */
-@import "./styles/responsive.css";
+@import "./responsive.css";
