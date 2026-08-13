@@ -5,8 +5,11 @@
 .workbuddy/
 
 # 评审报告
-doc/review-report.md
+doc/
 docs/*review*.md
+
+# 工具产物
+.reasonix/
 # Rust
 /target/
 **/*.rs.bk

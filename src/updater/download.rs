@@ -23,9 +23,6 @@ pub struct StagedUpdate {
     pub extracted_exe: PathBuf,
 }
 
-/// 下载连接超时
-#[allow(dead_code)]
-pub(crate) const DOWNLOAD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// 下载总超时（5 分钟）
 pub(crate) const DOWNLOAD_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
