@@ -246,6 +246,8 @@ pub async fn set_log_level(
     let mut settings = state.container.config.load_settings();
     settings.global.logging.level = body.level.clone();
     state.container.config.save_settings(&settings).await?;
+    // 热更新运行时日志级别（tracing filter），而非仅落盘下次启动生效
+    crate::launcher::reload_log_level(&body.level);
     Ok(data(body.level))
 }
 

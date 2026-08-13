@@ -73,6 +73,29 @@ struct WsIncoming {
     /// 消息类型
     #[serde(rename = "type")]
     msg_type: String,
+    /// 消息数据（frontend_log 携带 {level, scope, message, meta}）
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+/// 记录前端回流日志：用 `target="frontend"` 写入 tracing，进入 app.log 与 WebSocket 广播
+fn record_frontend_log(data: &serde_json::Value) {
+    let level = data.get("level").and_then(|v| v.as_str()).unwrap_or("INFO");
+    let scope = data.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+    let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let meta = data.get("meta").cloned().unwrap_or(serde_json::Value::Null);
+    // 附带 meta（非 null 时）与 scope 字段，保持与后端日志结构一致
+    let meta_str = if meta.is_null() {
+        String::new()
+    } else {
+        format!(" meta={meta}")
+    };
+    match level.to_ascii_uppercase().as_str() {
+        "ERROR" => tracing::error!(target: "frontend", scope = %scope, "{message}{meta_str}"),
+        "WARNING" | "WARN" => tracing::warn!(target: "frontend", scope = %scope, "{message}{meta_str}"),
+        "DEBUG" | "TRACE" => tracing::debug!(target: "frontend", scope = %scope, "{message}{meta_str}"),
+        _ => tracing::info!(target: "frontend", scope = %scope, "{message}{meta_str}"),
+    }
 }
 
 /// Ping 定时器间隔（30 秒）
@@ -195,12 +218,22 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Text(text))) => {
                         last_client_msg = tokio::time::Instant::now();
-                        // 处理前端发来的应用层 ping: { "type": "ping" }
+                        // 处理前端发来的应用层消息
                         if let Ok(incoming) = serde_json::from_str::<WsIncoming>(&text) {
-                            if incoming.msg_type == "ping"
-                                && !send_ws(&mut socket, &WsMessage::Pong).await
-                            {
-                                break;
+                            match incoming.msg_type.as_str() {
+                                // 心跳: { "type": "ping" } → 回复 pong
+                                "ping" => {
+                                    if !send_ws(&mut socket, &WsMessage::Pong).await {
+                                        break;
+                                    }
+                                }
+                                // 前端日志回流: { "type": "frontend_log", "data": {...} }
+                                "frontend_log" => {
+                                    if let Some(data) = &incoming.data {
+                                        record_frontend_log(data);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }

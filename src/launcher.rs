@@ -6,7 +6,7 @@
 //! - **login_once**：执行一次登录后退出
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -327,9 +327,87 @@ async fn wait_for_lock_release(base_path: &Path) -> Result<()> {
 #[derive(Clone)]
 struct LocalTimer;
 
+/// 全局日志 filter（`Targets` 支持运行时动态调整 target 级别，实现 set_log_level 热更新）
+static LOG_TARGETS: OnceLock<tracing_subscriber::filter::Targets> = OnceLock::new();
+
+/// 热更新全局日志级别（由 `set_log_level` 调用）
+///
+/// 第三方库保持 WARN，本项目 target（campus_auth/frontend）设为指定级别。无效级别回退 INFO。
+pub fn reload_log_level(level: &str) {
+    use tracing_subscriber::filter::LevelFilter;
+
+    let lf = match level.to_ascii_uppercase().as_str() {
+        "TRACE" => LevelFilter::TRACE,
+        "DEBUG" => LevelFilter::DEBUG,
+        "WARN" | "WARNING" => LevelFilter::WARN,
+        "ERROR" => LevelFilter::ERROR,
+        _ => LevelFilter::INFO,
+    };
+    let Some(targets) = LOG_TARGETS.get() else {
+        tracing::warn!("日志 filter 未初始化，忽略级别切换");
+        return;
+    };
+    // clone 后链式调用：Targets 内部 Arc 指向同一共享状态，with_target 更新共享 filter
+    let _ = targets
+        .clone()
+        .with_target("campus_auth", lf)
+        .with_target("frontend", lf);
+    tracing::info!("日志级别已热更新为 {}", lf);
+}
+
 impl FormatTime for LocalTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
         write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
+    }
+}
+
+/// 从 settings.json 读取日志保留天数（`global.logging.retention_days`），失败回退默认 7
+fn read_retention_days(base_path: &Path) -> u32 {
+    let path = base_path.join("config").join("settings.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("global")?
+                .get("logging")?
+                .get("retention_days")?
+                .as_u64()
+        })
+        .map(|d| d as u32)
+        .unwrap_or(7)
+}
+
+/// 删除 logs/ 目录下超过保留天数的旧日志文件
+///
+/// 仅删除修改时间早于 cutoff 的 `.log` 文件，跳过当前正在写入的 `app.log`
+/// （`tracing_appender::rolling::daily` 生成 `app.log.YYYY-MM-DD` 轮转文件）。
+fn cleanup_old_logs(logs_dir: &Path, retention_days: u32) {
+    let Ok(entries) = std::fs::read_dir(logs_dir) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(u64::from(retention_days) * 86_400);
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // 仅处理日志文件，跳过当前活跃文件
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "app.log" || !name.starts_with("app.log") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if modified < cutoff && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!("清理过期日志文件 {} 个（保留 {} 天）", removed, retention_days);
     }
 }
 
@@ -343,10 +421,17 @@ fn init_file_logging(
     let logs_dir = base_path.join("logs");
     let _ = std::fs::create_dir_all(&logs_dir);
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,campus_auth=info"));
-    let file_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,campus_auth=info"));
+    // 启动时清理过期日志：按 settings.json 的 logging.retention_days 保留，
+    // 删除超过保留天数的旧轮转文件，避免日志无限累积（对齐原项目 loguru retention）。
+    cleanup_old_logs(&logs_dir, read_retention_days(base_path));
+
+    // 动态 filter：`Targets` 支持运行时调整级别（set_log_level 热更新）。
+    // 第三方库默认 WARN，本项目 target（campus_auth/frontend）默认 INFO。
+    let targets = tracing_subscriber::filter::Targets::new()
+        .with_default(tracing_subscriber::filter::LevelFilter::WARN)
+        .with_target("campus_auth", tracing_subscriber::filter::LevelFilter::INFO)
+        .with_target("frontend", tracing_subscriber::filter::LevelFilter::INFO);
+    let _ = LOG_TARGETS.set(targets.clone());
 
     // 本地时区计时器：YYYY-MM-DD HH:MM:SS 格式
     let local_timer = LocalTimer;
@@ -356,7 +441,7 @@ fn init_file_logging(
         .with_target(true)
         .with_writer(std::io::stderr)
         .with_timer(local_timer.clone())
-        .with_filter(env_filter);
+        .with_filter(targets.clone());
 
     // 文件层：JSON 格式按日轮转
     let file_appender = tracing_appender::rolling::daily(&logs_dir, "app.log");
@@ -367,7 +452,7 @@ fn init_file_logging(
         .with_target(true)
         .with_timer(local_timer.clone())
         .json()
-        .with_filter(file_filter);
+        .with_filter(targets.clone());
 
     // 广播层：将 tracing 事件转发到 broadcast channel 供 WebSocket 推送
     let broadcast_layer = tracing_subscriber::fmt::layer()
@@ -375,8 +460,7 @@ fn init_file_logging(
         .with_ansi(false)
         .with_target(true)
         .without_time()
-        .with_filter(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,campus_auth=info")));
+        .with_filter(targets);
 
     if let Err(e) = tracing_subscriber::registry()
         .with(console_layer)
