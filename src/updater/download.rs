@@ -18,13 +18,9 @@ use crate::updater::UpdateInfo;
 #[derive(Clone, Debug)]
 pub struct StagedUpdate {
     /// 暂存的版本号
-    pub(crate) _version: Version,
-    /// staging 目录路径（`update/staging/`）
-    pub(crate) _staging_dir: PathBuf,
+    pub version: Version,
     /// 解压后的 exe 路径
-    pub(crate) _extracted_exe: PathBuf,
-    /// 下载的 zip 文件路径
-    pub(crate) _zip_path: PathBuf,
+    pub extracted_exe: PathBuf,
 }
 
 /// 下载连接超时
@@ -198,9 +194,7 @@ fn extract_to_staging_blocking(
     }
 
     Ok(StagedUpdate {
-        _version: Version::parse(version).map_err(UpdaterError::VersionParseFailed)?,
-        _staging_dir: staging_dir.to_path_buf(),
-        _extracted_exe: extracted_exe,
-        _zip_path: zip_path.to_path_buf(),
+        version: Version::parse(version).map_err(UpdaterError::VersionParseFailed)?,
+        extracted_exe,
     })
 }

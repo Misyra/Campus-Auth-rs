@@ -245,7 +245,17 @@ impl UpdaterService {
         )
         .await?;
 
-        download::extract_to_staging(&zip_path, &staging_dir, &info.latest_version).await?;
+        let staged =
+            download::extract_to_staging(&zip_path, &staging_dir, &info.latest_version).await?;
+        // 校验解压产物确实存在后再写 pending，避免写入无效的待应用更新
+        if !staged.extracted_exe.exists() {
+            return Err(UpdaterError::ExtractFailed("解压产物缺失可执行文件".into()));
+        }
+        tracing::info!(
+            "更新包已暂存：版本 {}，可执行文件 {}",
+            staged.version,
+            staged.extracted_exe.display()
+        );
 
         let target_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
         let pending = PendingUpdate {
