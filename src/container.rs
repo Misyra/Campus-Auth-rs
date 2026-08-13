@@ -34,6 +34,9 @@ pub struct StartupHandles {
 /// 服务容器：持有全部服务的 Arc 句柄
 ///
 /// 构造顺序严格按拓扑排序（15 层），新增服务在此插入。
+///
+/// 字段设计：服务句柄均为 `pub` 的不可变 `Arc<T>`（DI 容器语义），
+/// 外部只能克隆句柄、无法修改内部状态；唯一可变状态 `uptime_cancel` 保持私有。
 pub struct ServiceContainer {
     // ---- Layer 1~2：配置 & 轻量服务 ----
     /// 配置服务（settings.json 读写 + ArcSwap 快照）
