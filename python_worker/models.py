@@ -70,7 +70,8 @@ _STEP_KNOWN_FIELDS = frozenset({
     "id", "step_type", "type", "description", "selector", "value", "code",
     "script", "pattern", "timeout", "required", "store_as", "path",
     "button", "modifiers", "option_value", "option_label", "option_index",
-    "filename", "text",
+    "filename", "text", "clear", "duration", "option_selector",
+    "old", "target_selector",
 })
 
 
@@ -138,6 +139,21 @@ class StepConfig:
 
     text: str | None = None
     """文本内容。"""
+
+    clear: bool = False
+    """input 步骤是否先清空再填写。"""
+
+    duration: int = 0
+    """wait 步骤等待时长（毫秒）。"""
+
+    option_selector: str | None = None
+    """click_select 步骤中目标选项的选择器。"""
+
+    old: bool = False
+    """ocr 步骤是否使用旧版识别模型。"""
+
+    target_selector: str | None = None
+    """ocr 步骤识别结果填入的目标输入框选择器。"""
 
     extras: dict[str, Any] = field(default_factory=dict, repr=False)
     """未在已知字段中定义的扩展参数（替代 Pydantic extra='allow'）。"""

@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 # {{VAR}} 占位符匹配：变量名仅允许字母/数字/下划线
 _VAR_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
@@ -60,26 +59,3 @@ def resolve(
         return str(val)
 
     return _VAR_PATTERN.sub(_sub, template)
-
-
-def resolve_value(value: Any, variables: dict[str, str]) -> Any:
-    """递归解析任意结构中的模板占位符。
-
-    - 字符串：逐处替换 ``{{VAR}}``。
-    - 列表 / 字典：递归处理其元素。
-    - 其他类型：原样返回。
-
-    参数:
-        value: 待解析的任意 JSON 值。
-        variables: 变量映射。
-
-    返回:
-        解析后的同构值。
-    """
-    if isinstance(value, str):
-        return resolve(value, variables)
-    if isinstance(value, list):
-        return [resolve_value(v, variables) for v in value]
-    if isinstance(value, dict):
-        return {k: resolve_value(v, variables) for k, v in value.items()}
-    return value

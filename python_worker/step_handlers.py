@@ -352,33 +352,31 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
         )
 
 
-# 自定义脚本步骤：与 evaluate 同义（执行 JS）
-handle_custom = handle_evaluate
-handle_eval = handle_evaluate
-handle_custom_js = handle_evaluate
+# 步骤类型 → 处理器映射（模块级常量，避免每次调用重建）
+# evaluate 的别名（eval / custom_js / custom）直接指向同一处理器
+_STEP_HANDLERS: dict[str, Callable] = {
+    "input": handle_input,
+    "click": handle_click,
+    "select": handle_select,
+    "click_select": handle_click_select,
+    "wait": handle_wait,
+    "sleep": handle_wait,
+    "wait_for_selector": handle_wait_for_selector,
+    "wait_url": handle_wait_url,
+    "screenshot": handle_screenshot,
+    "evaluate": handle_evaluate,
+    "eval": handle_evaluate,
+    "custom_js": handle_evaluate,
+    "custom": handle_evaluate,
+    "navigate": handle_navigate,
+    "upload_file": handle_upload_file,
+    "ocr": handle_ocr,
+}
 
 
 def _get_handler(step_type: str):
     """根据步骤类型返回处理器，兼容别名。"""
-    handlers = {
-        "input": handle_input,
-        "click": handle_click,
-        "select": handle_select,
-        "click_select": handle_click_select,
-        "wait": handle_wait,
-        "sleep": handle_wait,
-        "wait_for_selector": handle_wait_for_selector,
-        "wait_url": handle_wait_url,
-        "screenshot": handle_screenshot,
-        "evaluate": handle_evaluate,
-        "eval": handle_eval,
-        "custom_js": handle_custom_js,
-        "custom": handle_custom,
-        "navigate": handle_navigate,
-        "upload_file": handle_upload_file,
-        "ocr": handle_ocr,
-    }
-    return handlers.get(step_type)
+    return _STEP_HANDLERS.get(step_type)
 
 
 async def run_step_async(page, raw_step: StepConfig, context: StepContext) -> None:

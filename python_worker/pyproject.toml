@@ -31,7 +31,6 @@ include = [
     "step_handlers.py",
     "variable_resolver.py",
     "models.py",
-    "script_runner.py",
 ]
 
 # uv 镜像源配置：使用清华大学 PyPI 镜像加速依赖下载

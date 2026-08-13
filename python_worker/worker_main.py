@@ -122,39 +122,38 @@ async def _dispatch(msg: dict) -> None:
 
     try:
         if handler is None:
-            result = {"success": False, "data": None, "error": f"未知命令: {method}"}
-        else:
-            data = await handler(params, worker_core)
-            result = {"success": True, "data": data, "error": None}
-    except WorkerError as exc:
-        # 可分类失败：保留 outcome 供 Rust 侧决定重试/回收策略
-        result = {
-            "success": False,
-            "data": {
-                "outcome": exc.outcome,
-                "message": exc.message,
-                "duration_ms": 0,
-                "screenshots": [],
-            },
-            "error": exc.message,
-        }
+            emit_response(msg_id, _error_result(f"未知命令: {method}"))
+            return
+        data = await handler(params, worker_core)
+        emit_response(msg_id, {"success": True, "data": data, "error": None})
     except StepCancelled as exc:
         # 取消：视为成功终态（outcome=cancelled）
-        result = {
-            "success": True,
-            "data": {
-                "outcome": "cancelled",
-                "message": exc.message,
-                "duration_ms": 0,
-                "screenshots": [],
-            },
-            "error": None,
-        }
+        emit_response(msg_id, _structured_result(exc, success=True))
+    except WorkerError as exc:
+        # 可分类失败：保留 outcome 供 Rust 侧决定重试/回收策略
+        emit_response(msg_id, _structured_result(exc, success=False))
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"命令 {method} 执行异常")
-        result = {"success": False, "data": None, "error": str(exc)}
+        emit_response(msg_id, _error_result(str(exc)))
 
-    emit_response(msg_id, result)
+
+def _structured_result(exc: WorkerError, *, success: bool) -> dict:
+    """将 WorkerError / StepCancelled 归一为带 outcome 的 IPC 响应。"""
+    return {
+        "success": success,
+        "data": {
+            "outcome": exc.outcome,
+            "message": exc.message,
+            "duration_ms": 0,
+            "screenshots": [],
+        },
+        "error": exc.message if not success else None,
+    }
+
+
+def _error_result(message: str) -> dict:
+    """构造无 data 的错误响应（未知命令 / 未捕获异常）。"""
+    return {"success": False, "data": None, "error": message}
 
 
 async def _serve() -> None:

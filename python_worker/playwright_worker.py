@@ -18,9 +18,10 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from models import (
     Outcome,
@@ -130,6 +131,9 @@ class CancelRegistry:
         self._events: dict[str, threading.Event] = {}
         self._pending: set[str] = set()
 
+    # pending 集合上限：限制从未被注册的 cancel_id 永久堆积（历史遗留 F10）
+    _MAX_PENDING = 256
+
     def register(self, cancel_id: str) -> threading.Event:
         """注册 cancel_id，返回对应的 Event（若此前已触发取消则立即置位）。"""
         ev = threading.Event()
@@ -147,6 +151,10 @@ class CancelRegistry:
             if ev is not None:
                 ev.set()
             else:
+                # 记录 pending 以支持“取消先于注册到达”；若某些 cancel_id 从未被注册
+                # （请求已完成），达到上限时清空防止永久堆积（历史遗留 F10）
+                if len(self._pending) >= self._MAX_PENDING:
+                    self._pending.clear()
                 self._pending.add(cancel_id)
 
     def unregister(self, cancel_id: str) -> None:
@@ -554,6 +562,26 @@ class WorkerCore:
 
     # ── 命令处理器 ──
 
+    @asynccontextmanager
+    async def _cancel_session(self, params: dict) -> AsyncIterator[tuple]:
+        """一次性命令的公共 setup：注册 cancel_id、解析 TaskConfig，退出时清理。
+
+        仅供 execute_login_attempt / execute_browser_task 这类一次性命令使用。
+        debug_start 不适用：其 cancel_id 需保留至 debug_stop 才清理。
+
+        yields: (cancel_event, bs, task)
+        """
+        bs = params.get("browser_settings", {}) or {}
+        task_raw = params.get("task_config", {}) or {}
+        cancel_id = params.get("cancel_id", "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+        try:
+            task = TaskConfig.from_dict(task_raw)
+            yield cancel_event, bs, task
+        finally:
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
+
     async def handle_browser_health_check(self, params: dict, core: "WorkerCore") -> dict:
         """健康检查：确认 Playwright 与浏览器可用。"""
         channel = (params.get("browser_settings") or {}).get("browser_channel", "playwright")
@@ -566,48 +594,28 @@ class WorkerCore:
 
     async def handle_execute_login_attempt(self, params: dict, core: "WorkerCore") -> dict:
         """执行完整登录流程。"""
-        username = params.get("username", "")
-        password = params.get("password", "")
-        auth_url = params.get("auth_url", "")
-        isp = params.get("isp", "")
-        bs = params.get("browser_settings", {}) or {}
-        task_raw = params.get("task_config", {}) or {}
-        cancel_id = params.get("cancel_id", "")
-        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
-        try:
-            task = TaskConfig.from_dict(task_raw)
+        async with self._cancel_session(params) as (cancel_event, bs, task):
+            auth_url = params.get("auth_url", "")
             variables = {
-                "USERNAME": username,
-                "PASSWORD": password,
-                "ISP": isp,
+                "USERNAME": params.get("username", ""),
+                "PASSWORD": params.get("password", ""),
+                "ISP": params.get("isp", ""),
                 "LOGIN_URL": auth_url,
             }
             variables.update(task.variables or {})
-            nav_url = auth_url
             result = await self._run_task(
-                task, bs, variables, cancel_event, Path("debug"), navigate_url=nav_url
+                task, bs, variables, cancel_event, Path("debug"), navigate_url=auth_url
             )
             return result.to_dict()
-        finally:
-            if cancel_id:
-                cancel_registry.unregister(cancel_id)
 
     async def handle_execute_browser_task(self, params: dict, core: "WorkerCore") -> dict:
         """执行浏览器任务（不含账号密码语义）。"""
-        bs = params.get("browser_settings", {}) or {}
-        task_raw = params.get("task_config", {}) or {}
-        cancel_id = params.get("cancel_id", "")
-        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
-        try:
-            task = TaskConfig.from_dict(task_raw)
+        async with self._cancel_session(params) as (cancel_event, bs, task):
             variables = dict(task.variables or {})
             result = await self._run_task(
                 task, bs, variables, cancel_event, Path("debug")
             )
             return result.to_dict()
-        finally:
-            if cancel_id:
-                cancel_registry.unregister(cancel_id)
 
     async def handle_debug_start(self, params: dict, core: "WorkerCore") -> dict:
         """启动调试会话，保留浏览器上下文供后续 debug_step 复用。"""
@@ -647,6 +655,11 @@ class WorkerCore:
                 local_path = str(Path("debug") / filename)
                 Path("debug").mkdir(parents=True, exist_ok=True)
                 await self._page.screenshot(path=local_path, full_page=True)
+                # 追踪初始截图路径，以便会话结束时统一清理（历史遗留 F5）
+                try:
+                    context.screenshots.append(local_path)
+                except Exception:  # noqa: BLE001
+                    pass
                 self.emit("screenshot", {"path": local_path})
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"调试初始截图失败: {exc}")
@@ -738,12 +751,33 @@ class WorkerCore:
             outcome=Outcome.SUCCESS.value, message="全部步骤执行成功"
         ).to_dict()
 
+    @staticmethod
+    def _cleanup_debug_screenshots(session: "DebugSession") -> None:
+        """删除调试会话期间产生的截图文件。
+
+        调试截图可能包含表单中的明文凭证，会话结束后及时清除，
+        避免长期驻留磁盘（历史遗留 F5）。
+        """
+        paths = list(getattr(session.context, "screenshots", []) or [])
+        for p in paths:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"清理调试截图失败 {p}: {exc}")
+        try:
+            session.context.screenshots.clear()
+        except Exception:  # noqa: BLE001
+            pass
+
     async def handle_debug_stop(self, params: dict, core: "WorkerCore") -> dict:
         """停止调试会话并关闭浏览器。"""
         session_id = params.get("session_id", "")
         session = self._debug_sessions.pop(session_id, None)
-        if session is not None and session.cancel_id:
-            cancel_registry.unregister(session.cancel_id)
+        if session is not None:
+            # 先清理本会话的截图（可能含明文凭证），再注销取消项
+            self._cleanup_debug_screenshots(session)
+            if session.cancel_id:
+                cancel_registry.unregister(session.cancel_id)
         await self._close_browser()
         return {}
 
