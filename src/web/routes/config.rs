@@ -345,6 +345,7 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "auth_url_targets": [],
         "url_check_urls": url_check_urls,
         "script_timeout": 60,
+        "post_login_delay": m.post_login_delay,
         "bind_interface_name": m.bind_interface_name,
     })
 }
@@ -386,6 +387,7 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         "http_enabled": obj.get("enable_http_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "url_enabled": obj.get("url_check_urls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
         "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
+        "post_login_delay": obj.get("post_login_delay").and_then(|v| v.as_u64()).unwrap_or(5),
         "bind_interface_name": obj.get("bind_interface_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         // 注意：profile_check_interval / http_timeout / url_timeout / auth_url_timeout / socks5_port
         // 前端 MonitorConfig 不包含这些字段，故此处**不输出**。上层用 json_merge 合并，

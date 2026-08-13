@@ -104,6 +104,7 @@ export const DEFAULT_CONFIG: Config = {
       "http://detectportal.firefox.com/success.txt|success",
     ],
     script_timeout: 60,
+    post_login_delay: 5,
     bind_interface_name: "",
   },
   pause: {

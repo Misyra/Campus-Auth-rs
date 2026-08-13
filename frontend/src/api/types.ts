@@ -118,6 +118,7 @@ export interface MonitorConfig {
   auth_url_targets: string[];
   url_check_urls: string[];
   script_timeout: number;
+  post_login_delay: number;
   bind_interface_name: string;
 }
 

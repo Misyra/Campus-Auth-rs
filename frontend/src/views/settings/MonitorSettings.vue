@@ -75,6 +75,13 @@ const urlCheckText = computed({
             </div>
             <input id="settings-network-check-timeout" v-model.number="config.config.monitor.network_check_timeout" type="number" min="1" max="30" />
           </div>
+          <div class="form-group">
+            <div class="field-label-row">
+              <label for="settings-post-login-delay">登录后延迟（秒）</label>
+              <span class="field-help" tabindex="0" role="note" data-tip="登录步骤完成后等待认证生效的延迟，再进行网络检测确认。默认 5 秒，范围 0~60 秒。">?</span>
+            </div>
+            <input id="settings-post-login-delay" v-model.number="config.config.monitor.post_login_delay" type="number" min="0" max="60" />
+          </div>
         </div>
         <div class="form-group settings-toggle-spacer">
           <div class="field-label-row">
