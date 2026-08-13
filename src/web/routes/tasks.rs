@@ -151,10 +151,9 @@ pub async fn import_tasks(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let items = if body.is_array() {
-        body.as_array().unwrap().clone()
-    } else {
-        vec![body]
+    let items = match body.as_array() {
+        Some(arr) => arr.clone(),
+        None => vec![body],
     };
     let mut imported = 0u32;
     for item in items {

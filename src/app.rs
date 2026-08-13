@@ -55,10 +55,10 @@ pub fn build_router(
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list([
-            "http://127.0.0.1".parse().unwrap(),
-            "http://127.0.0.1:50721".parse().unwrap(),
-            "http://localhost".parse().unwrap(),
-            "http://localhost:50721".parse().unwrap(),
+            axum::http::HeaderValue::from_static("http://127.0.0.1"),
+            axum::http::HeaderValue::from_static("http://127.0.0.1:50721"),
+            axum::http::HeaderValue::from_static("http://localhost"),
+            axum::http::HeaderValue::from_static("http://localhost:50721"),
         ]))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);

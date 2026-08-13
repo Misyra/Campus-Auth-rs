@@ -699,34 +699,6 @@ async fn launch_login_once(state: &mut LauncherState) -> Result<()> {
 }
 
 // ============================================================
-// 轻量 -> 完整升级
-// ============================================================
-
-/// 轻量模式下托盘 "打开控制台" 触发：按需启动 Axum
-pub(crate) async fn _upgrade_to_full(state: &LauncherState) {
-    let container = state.container.as_ref().unwrap();
-
-    if state.axum_handle.is_some() {
-        open_browser(state.app_config.port);
-        return;
-    }
-
-    match app::start_axum(container.clone(), state.log_tx.clone(), state.app_config.port).await {
-        Ok(handle) => {
-            let port = handle.port;
-            info!("按需启动 Axum 成功，端口: {port}");
-            if let Some(ref lock) = state.instance_lock {
-                let _ = lock.record_port(port);
-            }
-            open_browser(port);
-        }
-        Err(e) => {
-            warn!("按需启动 Axum 失败: {e}");
-        }
-    }
-}
-
-// ============================================================
 // Engine 崩溃恢复
 // ============================================================
 
