@@ -47,35 +47,49 @@ pub fn data<T: Serialize>(payload: T) -> Json<Value> {
 }
 
 /// API 统一错误
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// 请求参数错误（400）
+    #[error("{0}")]
     BadRequest(String),
     /// 资源不存在（404）
+    #[error("{0}")]
     NotFound(String),
     /// 资源冲突（409）
+    #[error("{0}")]
     Conflict(String),
     /// 校验失败（422）
+    #[error("{}", .0.iter().map(|f| format!("{}: {}", f.field, f.message)).collect::<Vec<_>>().join("; "))]
     Validation(Vec<FieldError>),
     /// 内部错误（500）
+    #[error("{0}")]
     Internal(String),
     /// 服务不可用（503）
+    #[error("{0}")]
     ServiceUnavailable(String),
     /// 未实现（501）
+    #[error("{0}")]
     NotImplemented(String),
     /// 凭证无效（401）
+    #[error("{0}")]
     BadCredential(String),
     /// 认证地址不可达（503）
+    #[error("{0}")]
     AuthUrlUnreachable(String),
     /// Worker 未安装（503）
+    #[error("{0}")]
     WorkerNotInstalled(String),
     /// Worker 忙（409）
+    #[error("{0}")]
     WorkerBusy(String),
     /// 操作被取消（409）
+    #[error("{0}")]
     OperationCancelled(String),
     /// 端口被占用（409）
+    #[error("{0}")]
     PortInUse(String),
     /// 触发限流（429）
+    #[error("{0}")]
     RateLimited(String),
 }
 
@@ -120,28 +134,9 @@ impl ApiError {
         }
     }
 
-    /// 人类可读消息
+    /// 人类可读消息（由 thiserror 生成的 Display 提供）
     pub fn message(&self) -> String {
-        match self {
-            ApiError::BadRequest(m)
-            | ApiError::NotFound(m)
-            | ApiError::Conflict(m)
-            | ApiError::Internal(m)
-            | ApiError::ServiceUnavailable(m)
-            | ApiError::NotImplemented(m)
-            | ApiError::BadCredential(m)
-            | ApiError::AuthUrlUnreachable(m)
-            | ApiError::WorkerNotInstalled(m)
-            | ApiError::WorkerBusy(m)
-            | ApiError::OperationCancelled(m)
-            | ApiError::PortInUse(m)
-            | ApiError::RateLimited(m) => m.clone(),
-            ApiError::Validation(fields) => {
-                let parts: Vec<String> =
-                    fields.iter().map(|f| format!("{}: {}", f.field, f.message)).collect();
-                parts.join("; ")
-            }
-        }
+        self.to_string()
     }
 
     /// 补充详情（因错误码而异，可能为 None）
