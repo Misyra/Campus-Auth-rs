@@ -43,12 +43,14 @@ const STEP_TYPES = [
   { value: "screenshot", label: "截图" },
   { value: "evaluate", label: "执行 JS" },
   { value: "navigate", label: "跳转 URL" },
+  { value: "goto", label: "跳转 URL (goto)" },
   { value: "wait_for_selector", label: "等待选择器" },
   { value: "upload_file", label: "上传文件" },
   { value: "click_select", label: "点击选择" },
   { value: "wait_url", label: "等待 URL" },
   { value: "sleep", label: "等待时间" },
   { value: "ocr", label: "验证码识别" },
+  { value: "assert_text", label: "断言文本" },
 ] as const;
 
 /** 当前步骤类型的值 */
@@ -59,14 +61,14 @@ const needsSelector = computed(() =>
   ["input", "click", "select", "wait", "wait_for_selector", "upload_file", "click_select"].includes(stepType.value),
 );
 
-/** 是否需要 value 字段（输入值） */
-const needsValue = computed(() => stepType.value === "input");
+/** 是否需要 value 字段（输入值 / 断言文本） */
+const needsValue = computed(() => ["input", "assert_text"].includes(stepType.value));
 
 /** 是否需要 select_value 字段 */
 const needsSelectValue = computed(() => stepType.value === "select");
 
 /** 是否需要 url 字段 */
-const needsUrl = computed(() => stepType.value === "navigate");
+const needsUrl = computed(() => ["navigate", "goto"].includes(stepType.value));
 
 /** 是否需要 script 字段 */
 const needsScript = computed(() => stepType.value === "evaluate");

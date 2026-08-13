@@ -35,6 +35,7 @@ interface TaskConfig {
   description?: string;
   url?: string;
   navigation_wait?: number;
+  success_condition?: string;
   variables?: Record<string, string>;
   steps?: StepConfig[];
   [key: string]: unknown;
@@ -233,6 +234,18 @@ function formatJson(): void {
           @input="config.navigation_wait = Number(($event.target as HTMLInputElement).value); syncToJson()"
         />
         <span class="hint">页面加载后的额外等待时间</span>
+      </div>
+
+      <div class="form-group">
+        <label for="editor-task-success-condition">成功条件变量</label>
+        <input
+          id="editor-task-success-condition"
+          type="text"
+          :value="config.success_condition || ''"
+          placeholder="留空则自动通过网络检测判断"
+          @input="config.success_condition = ($event.target as HTMLInputElement).value; syncToJson()"
+        />
+        <span class="hint">填写 eval 步骤 store_as 的变量名，登录成功以该变量真值判定（留空则登录后自动网络检测）</span>
       </div>
 
       <template v-if="mode === 'visual'">

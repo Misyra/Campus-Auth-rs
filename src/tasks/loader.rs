@@ -382,6 +382,40 @@ impl TaskManager {
                                         errors.push(format!("步骤[{i}] 需要 script 或 code"));
                                     }
                                 }
+                                "goto" | "navigate" => {
+                                    let has_url = step
+                                        .get("url")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| !s.is_empty())
+                                        .unwrap_or(false)
+                                        || step
+                                            .get("value")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| !s.is_empty())
+                                            .unwrap_or(false);
+                                    if !has_url {
+                                        errors.push(format!("步骤[{i}] 需要 url 或 value"));
+                                    }
+                                }
+                                "assert_text" => {
+                                    if step
+                                        .get("value")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .is_empty()
+                                    {
+                                        errors.push(format!("步骤[{i}] 需要 value"));
+                                    }
+                                }
+                                "upload_file" | "wait_for_selector"
+                                    if step
+                                        .get("selector")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .is_empty() =>
+                                {
+                                    errors.push(format!("步骤[{i}] 需要 selector"));
+                                }
                                 _ => {}
                             }
                         }

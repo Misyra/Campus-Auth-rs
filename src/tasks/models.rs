@@ -32,7 +32,8 @@ pub const OUTPUT_TRUNCATE_LEN: usize = 500;
 /// 有效步骤类型集合
 pub const VALID_STEP_TYPES: &[&str] = &[
     "input", "click", "select", "click_select", "wait", "wait_url", "eval", "screenshot",
-    "sleep", "ocr", "custom_js",
+    "sleep", "ocr", "custom_js", "navigate", "goto", "assert_text", "upload_file",
+    "wait_for_selector",
 ];
 
 fn default_task_timeout_ms() -> u64 {
@@ -97,6 +98,8 @@ pub struct TaskConfig {
     pub variables: HashMap<String, String>,
     /// 步骤列表
     pub steps: Vec<StepConfig>,
+    /// 成功判定变量名（eval 步骤 store_as 写入，非空时登录成功以该变量真值判定）
+    pub success_condition: String,
     /// 成功回调配置
     pub on_success: Value,
     /// 失败回调配置
@@ -116,6 +119,7 @@ impl Default for TaskConfig {
             reveal_hidden: false,
             variables: HashMap::new(),
             steps: Vec::new(),
+            success_condition: String::new(),
             on_success: default_value_obj(),
             on_failure: default_value_obj(),
             metadata: default_value_obj(),
@@ -527,6 +531,23 @@ mod tests {
         assert_eq!(cfg.navigation_wait, DEFAULT_NAVIGATION_WAIT);
         assert!(!cfg.reveal_hidden);
         assert!(cfg.steps.is_empty());
+        assert!(cfg.success_condition.is_empty());
+    }
+
+    #[test]
+    fn test_task_config_deserialize_success_condition() {
+        // success_condition 字段应正确反序列化
+        let json = r#"{ "success_condition": "logged_in" }"#;
+        let cfg: TaskConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.success_condition, "logged_in");
+    }
+
+    #[test]
+    fn test_valid_step_types_include_goto_and_assert_text() {
+        // 功能对齐 v4.2.3：goto / assert_text / navigate 应为合法步骤类型
+        assert!(VALID_STEP_TYPES.contains(&"goto"));
+        assert!(VALID_STEP_TYPES.contains(&"assert_text"));
+        assert!(VALID_STEP_TYPES.contains(&"navigate"));
     }
 
     #[test]

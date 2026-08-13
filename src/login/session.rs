@@ -148,8 +148,7 @@ pub struct LoginSession {
     bridge: Option<Arc<BridgeSupervisor>>,
     /// 网络监测服务（可能为 None，仅当编排器未注入时；登录后网络验证使用）
     monitor: Option<Arc<crate::monitor::MonitorService>>,
-    /// 配置服务（保留引用，供后续扩展按需重读；当前未使用）
-    #[allow(dead_code)]
+    /// 配置服务（读取登录后网络验证延迟 post_login_delay）
     config_service: Arc<ConfigService>,
     /// 状态管理器（广播登录状态）
     status_manager: Arc<StatusManager>,
@@ -365,9 +364,25 @@ impl LoginSession {
             match classify(structured.outcome) {
                 ResultAction::Terminal(kind) => match kind {
                     TerminalKind::Success => {
+                        // 任务声明 success_condition → 信任 Worker 的变量真值判定，跳过网络检测兜底
+                        // （对齐原项目 v4.2.3 login_attempt 的 has_explicit_condition 分支）
+                        if self.has_explicit_success_condition() {
+                            info!("任务声明 success_condition，跳过登录后网络检测");
+                            self.emit(
+                                self.make_result(
+                                    true,
+                                    "登录成功".into(),
+                                    session_start,
+                                    attempts_used,
+                                ),
+                                HistoryResult::Success,
+                            )
+                            .await;
+                            return;
+                        }
                         // 步骤全部成功后做真实网络验证：避免 Worker 假成功（步骤未抛异常
                         // 但页面实际未登录成功）被误报。参考老实现 _check_success：
-                        // 等待 5s 让认证生效 → check_once → 仅 Online 才算真成功。
+                        // 等待 post_login_delay 让认证生效 → check_once → 仅 Online 才算真成功。
                         let net_ok = self.verify_network_after_login().await;
                         if net_ok {
                             self.emit(
@@ -512,7 +527,20 @@ impl LoginSession {
         }
     }
 
-    /// 登录后真实网络验证：等待 5s 让认证生效，再调用 MonitorService 做一次完整探测。
+    /// 任务是否声明了 `success_condition`（以变量真值判定登录成功）
+    ///
+    /// 声明时 Worker 已用变量真值判定过成功，登录路径应跳过网络检测兜底
+    /// （对齐原项目 v4.2.3 `login_attempt` 的 `has_explicit_condition` 分支）。
+    fn has_explicit_success_condition(&self) -> bool {
+        self.worker_config
+            .get("task_config")
+            .and_then(|t| t.get("success_condition"))
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// 登录后真实网络验证：等待 post_login_delay 让认证生效，再调用 MonitorService 做一次完整探测。
     ///
     /// 仅当探测结果为 [`NetworkStatus::Online`] 时返回 true，其余（CaptivePortal /
     /// Offline / Paused / 探测异常 / Monitor 未注入）均返回 false。
@@ -524,8 +552,14 @@ impl LoginSession {
             warn!("MonitorService 未注入，跳过登录后网络验证（按失败处理）");
             return false;
         };
-        // 等待认证服务器处理请求并放行流量
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // 登录后等待 portal 生效的延迟（可配置，默认 5s）
+        let delay = self
+            .config_service
+            .runtime()
+            .load()
+            .monitor
+            .post_login_delay;
+        tokio::time::sleep(Duration::from_secs(delay as u64)).await;
         match monitor.check_once().await {
             Ok(report) => {
                 use crate::status::NetworkStatus;

@@ -295,18 +295,60 @@ async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
 
 
 async def handle_navigate(page, step: StepConfig, context: StepContext) -> None:
-    """导航到指定 URL。"""
+    """导航到指定 URL（`navigate` / `goto` 共用）。
+
+    目标 URL 来源优先级：``extra.url``（原 goto 步骤字段）→ ``value`` → ``selector``。
+    支持 ``wait_until`` 扩展参数，合法值 load/domcontentloaded/networkidle/commit，
+    非法值回退到 load 并告警。
+    """
     _check_cancel(context)
-    url = step.value or step.selector
+    # goto 步骤用 url 字段（落入 extras），navigate 用 value/selector
+    url = step.extra_fields.get("url") or step.value or step.selector
     if not url:
-        raise WorkerError(Outcome.NAVIGATION_TIMEOUT, "navigate 步骤缺少目标 URL")
-    wait_until = step.extra_fields.get("wait_until", "domcontentloaded")
+        raise WorkerError(Outcome.NAVIGATION_TIMEOUT, "导航步骤缺少目标 URL")
+
+    # wait_until 校验：非法值回退到 load
+    _VALID_WAIT_UNTIL = ("load", "domcontentloaded", "networkidle", "commit")
+    raw = step.extra_fields.get("wait_until", "domcontentloaded")
+    wait_until = raw if isinstance(raw, str) and raw in _VALID_WAIT_UNTIL else "load"
+    if wait_until != raw:
+        logger.warning(
+            "[navigate] wait_until 值 '%s' 无效，可选: %s，使用默认 'load'",
+            raw,
+            ", ".join(_VALID_WAIT_UNTIL),
+        )
+
     try:
         await page.goto(url, wait_until=wait_until, timeout=context.navigation_timeout)
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, PlaywrightTimeoutError):
             raise WorkerError(Outcome.NAVIGATION_TIMEOUT, f"导航超时: {url}") from exc
         raise WorkerError(Outcome.NETWORK_ERROR, f"导航失败: {exc}") from exc
+
+
+async def handle_assert_text(page, step: StepConfig, context: StepContext) -> None:
+    """断言页面出现指定文本（等待 document.body.innerText 包含该文本）。"""
+    _check_cancel(context)
+    value = step.value
+    if not value:
+        raise WorkerError(Outcome.SELECTOR_FAILED, "assert_text 步骤需要 value")
+    timeout = step.timeout or context.default_timeout
+    # 转义文本中的反斜杠与单引号，避免破坏 JS 字符串字面量
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    try:
+        await page.wait_for_function(
+            f"() => document.body.innerText.includes('{escaped}')",
+            timeout=timeout,
+        )
+    except PlaywrightTimeoutError as exc:
+        raise WorkerError(
+            Outcome.SELECTOR_FAILED, f"等待文本超时 ({timeout}ms): {value}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise WorkerError(
+            Outcome.UNKNOWN_ERROR, f"等待文本失败: {value}, 错误: {exc}"
+        ) from exc
+    logger.info("[assert_text] 检测到文本: '%s'", value)
 
 
 async def handle_upload_file(page, step: StepConfig, context: StepContext) -> None:
@@ -339,9 +381,13 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
         context, locator.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
     )
     img_bytes = await locator.screenshot()
-    ocr = ddddocr.DdddOcr(show_ad=False)
-    if step.old:
-        ocr = ddddocr.DdddOcr(old=True, show_ad=False)
+    ocr = ddddocr.DdddOcr(old=step.old, show_ad=False)
+    # char_range 限制识别字符集（如 0-7 表示仅识别数字），非 None 时设置
+    if step.char_range is not None:
+        try:
+            ocr.set_ranges(step.char_range)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ocr] set_ranges(%s) 失败，忽略: %s", step.char_range, exc)
     text = ocr.classification(img_bytes)
     if step.store_as:
         context.results[step.store_as] = text
@@ -369,6 +415,8 @@ _STEP_HANDLERS: dict[str, Callable] = {
     "custom_js": handle_evaluate,
     "custom": handle_evaluate,
     "navigate": handle_navigate,
+    "goto": handle_navigate,
+    "assert_text": handle_assert_text,
     "upload_file": handle_upload_file,
     "ocr": handle_ocr,
 }

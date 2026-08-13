@@ -71,7 +71,7 @@ _STEP_KNOWN_FIELDS = frozenset({
     "script", "pattern", "timeout", "required", "store_as", "path",
     "button", "modifiers", "option_value", "option_label", "option_index",
     "filename", "text", "clear", "duration", "option_selector",
-    "old", "target_selector",
+    "old", "target_selector", "frame", "char_range",
 })
 
 
@@ -154,6 +154,12 @@ class StepConfig:
 
     target_selector: str | None = None
     """ocr 步骤识别结果填入的目标输入框选择器。"""
+
+    frame: str | None = None
+    """iframe 选择器（URL、name 或 CSS 选择器）。"""
+
+    char_range: str | int | None = None
+    """OCR 识别字符范围（0-7 或自定义字符串）。"""
 
     extras: dict[str, Any] = field(default_factory=dict, repr=False)
     """未在已知字段中定义的扩展参数（替代 Pydantic extra='allow'）。"""
@@ -244,6 +250,9 @@ class TaskConfig:
     variables: dict[str, str] | None = field(default_factory=dict)
     """自定义模板变量。"""
 
+    success_condition: str = ""
+    """成功判定变量名（eval 步骤 store_as 写入，非空时以该变量真值判定登录成功）。"""
+
     steps: list[StepConfig] = field(default_factory=list)
     """步骤列表。"""
 
@@ -259,7 +268,8 @@ class TaskConfig:
         known_keys = {
             "task_id", "name", "description", "url", "method", "headers",
             "body", "login_url", "on_success", "on_failure", "reveal_hidden",
-            "step_delay", "step_delay_ms", "variables", "steps", "metadata",
+            "step_delay", "step_delay_ms", "variables", "success_condition",
+            "steps", "metadata",
         }
         known: dict[str, Any] = {}
         extras: dict[str, Any] = {}

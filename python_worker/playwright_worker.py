@@ -52,6 +52,26 @@ def _to_ms(bs: dict, key: str, default_ms: int) -> int:
 # ── 步骤执行器（原 browser_runner.py）──
 
 
+def _is_truthy(value: Any) -> bool:
+    """判定 store_as 变量值的真假（对齐原项目 v4.2.3 _is_truthy）。
+
+    - bool: 直接返回
+    - None: False
+    - str: "false"/"0"/""/"no"/"off"（忽略大小写与空白）→ False；其他 → True
+    - int/float: 非零 → True
+    - 其他: bool(value)
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "", "no", "off")
+    if isinstance(value, (int, float)):
+        return value != 0
+    return bool(value)
+
+
 def _build_result(outcome: Outcome, message: str, context: StepContext, start: float) -> StructuredResult:
     """汇总执行结果为 StructuredResult。"""
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError  # noqa: F811
@@ -557,7 +577,27 @@ class WorkerCore:
             self._page, variables, bs, cancel_event, screenshot_dir, task_config
         )
         result = await run_steps(self._page, task_config.steps, context)
-        # 合并 store_as 结果（调试/特殊场景使用）
+        # success_condition 成功判定：声明变量名时，从 store_as 结果取变量真值判定，
+        # 覆盖默认的"步骤全部成功即成功"兜底（对齐原项目 v4.2.3 _check_success）。
+        var_name = (task_config.success_condition or "").strip()
+        if var_name and result.outcome == Outcome.SUCCESS.value:
+            if var_name not in context.results:
+                return _build_result(
+                    Outcome.UNKNOWN_ERROR,
+                    f"成功条件变量未设置: {var_name}（请检查 eval 步骤的 store_as）",
+                    context,
+                    time.perf_counter(),
+                )
+            value = context.results[var_name]
+            if not _is_truthy(value):
+                return _build_result(
+                    Outcome.UNKNOWN_ERROR,
+                    f"成功条件未命中: {var_name}={value}",
+                    context,
+                    time.perf_counter(),
+                )
+            logger.info("[success_condition] 命中成功: %s=%s", var_name, value)
+            result.message = f"成功条件命中: {var_name}={value}"
         return result
 
     # ── 命令处理器 ──

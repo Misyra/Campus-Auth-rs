@@ -153,6 +153,8 @@ function closeEditor() { t.editingTask.value = null; }
               <li><code>screenshot</code> - 保存截图</li>
               <li><code>sleep</code> - 等待指定时间</li>
               <li><code>ocr</code> - 验证码识别</li>
+              <li><code>navigate</code> / <code>goto</code> - 跳转 URL</li>
+              <li><code>assert_text</code> - 断言页面出现文本</li>
             </ul>
             <h4>可用变量</h4>
             <ul>
