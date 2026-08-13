@@ -29,24 +29,12 @@ pub(crate) const CRON_PARSE_PREFIX: &str = "0 ";
 /// 5→7 字段转换：后缀年字段。
 pub(crate) const CRON_PARSE_SUFFIX: &str = " *";
 
-/// 定时任务类型。
-///
-/// 对应浏览器登录、脚本执行与 Shell 命令执行三种触发方式。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ScheduledTaskType {
-    /// 浏览器登录任务（提交给 LoginOrchestrator）。
-    #[default]
-    Browser,
-    /// 脚本执行任务。
-    Script,
-    /// Shell 命令执行任务。
-    Shell,
-}
-
 /// 定时任务数据模型（对应 `tasks/scheduled/{id}.json`）。
 ///
 /// `id` 由文件名推导，不参与 JSON 序列化。
+///
+/// 任务类型（浏览器/脚本/Shell）**不在此冗余存储**：由 `target_id` 关联的目标任务
+/// 通过 [`crate::tasks::TaskKind`] 权威推导，避免与任务定义出现双份类型枚举。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledTask {
     /// 任务 ID（从文件名 stem 推导，不参与 JSON）。
@@ -62,21 +50,12 @@ pub struct ScheduledTask {
     pub cron: String,
     /// 关联目标任务 ID（浏览器/脚本/Shell 任务）。
     pub target_id: String,
-    /// 任务类型。
-    #[serde(default)]
-    pub task_type: ScheduledTaskType,
-    /// 使用的 Profile ID（仅 browser 任务）。
+    /// 使用的 Profile ID（仅 browser 任务；有值走登录语义，无值走通用执行）。
     #[serde(default)]
     pub profile_id: Option<String>,
     /// 执行超时秒数（None = 使用全局默认值）。
     #[serde(default)]
     pub timeout: Option<u64>,
-    /// 命令行参数（script/shell 专用）。
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// 工作目录（script/shell 专用）。
-    #[serde(default)]
-    pub work_dir: Option<String>,
     /// 是否启用。
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -106,11 +85,8 @@ impl ScheduledTask {
             target_id,
             name: default_name(),
             description: String::new(),
-            task_type: ScheduledTaskType::default(),
             profile_id: None,
             timeout: None,
-            args: Vec::new(),
-            work_dir: None,
             enabled: true,
             last_run: None,
             last_result: None,
@@ -207,8 +183,8 @@ mod tests {
         let t = ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string());
         assert_eq!(t.name, "未命名定时任务");
         assert!(t.enabled);
-        assert_eq!(t.task_type, ScheduledTaskType::Browser);
-        assert!(t.args.is_empty());
+        assert_eq!(t.profile_id, None);
+        assert_eq!(t.timeout, None);
     }
 
     #[test]
@@ -226,7 +202,7 @@ mod tests {
         assert!(!json.contains("\"id\""));
         let back: ScheduledTask = serde_json::from_str(&json).unwrap();
         assert_eq!(back.cron, t.cron);
-        assert_eq!(back.task_type, ScheduledTaskType::Browser);
+        assert_eq!(back.target_id, t.target_id);
     }
 
     // ============ is_valid_id 扩展测试 ============
@@ -313,7 +289,6 @@ mod tests {
             "shell1".to_string(),
         );
         task.name = "每5分钟".to_string();
-        task.task_type = ScheduledTaskType::Shell;
         task.timeout = Some(120);
 
         ScheduledTask::save_to(&path, &task).unwrap();
@@ -323,33 +298,7 @@ mod tests {
         assert_eq!(loaded.id, "task1");
         assert_eq!(loaded.name, "每5分钟");
         assert_eq!(loaded.cron, "*/5 * * * *");
-        assert_eq!(loaded.task_type, ScheduledTaskType::Shell);
         assert_eq!(loaded.timeout, Some(120));
-    }
-
-    #[test]
-    fn test_scheduled_task_type_default_is_browser() {
-        // task_type 缺失时默认为 Browser
-        let json = r#"{"cron": "0 * * * *", "target_id": "t1"}"#;
-        let task: ScheduledTask = serde_json::from_str(json).unwrap();
-        assert_eq!(task.task_type, ScheduledTaskType::Browser);
-    }
-
-    #[test]
-    fn test_scheduled_task_type_serde() {
-        // 测试三种类型的序列化/反序列化
-        assert_eq!(
-            serde_json::from_str::<ScheduledTaskType>("\"browser\"").unwrap(),
-            ScheduledTaskType::Browser
-        );
-        assert_eq!(
-            serde_json::from_str::<ScheduledTaskType>("\"script\"").unwrap(),
-            ScheduledTaskType::Script
-        );
-        assert_eq!(
-            serde_json::from_str::<ScheduledTaskType>("\"shell\"").unwrap(),
-            ScheduledTaskType::Shell
-        );
     }
 
     #[test]

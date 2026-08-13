@@ -87,8 +87,11 @@ impl TaskExecutor {
         }
     }
 
-    /// 执行浏览器任务（经 Bridge）
-    async fn execute_browser(&self, cfg: &TaskConfig) -> Result<TaskResult, TaskError> {
+    /// 执行浏览器任务（通用语义：打卡/签到等日常自动化，经 Bridge 的 `execute_browser_task`）
+    ///
+    /// 不注入账号密码、不做登录后网络验证；步骤执行完成即成功。
+    /// 带凭据的登录语义请走 [`crate::login::LoginOrchestrator::submit`]。
+    pub async fn execute_browser(&self, cfg: &TaskConfig) -> Result<TaskResult, TaskError> {
         // 执行前标记 Worker 忙
         self.status
             .merge(PartialSnapshot::Worker { state: WorkerStatus::Busy });

@@ -172,6 +172,18 @@ impl SchedulerService {
             .unwrap_or_default()
     }
 
+    /// 返回目标任务的类型（`browser`/`script`/`shell`），供展示层补充类型标签。
+    ///
+    /// 类型权威来源为 [`crate::tasks::TaskKind`]（由 target_id 关联的任务推导），
+    /// 定时任务存储模型本身不再冗余存类型。
+    pub async fn task_type_of(&self, target_id: &str) -> Option<&'static str> {
+        match self.task_manager.load_task(target_id).await.ok()? {
+            crate::tasks::TaskKind::Browser(_) => Some("browser"),
+            crate::tasks::TaskKind::Script(_) => Some("script"),
+            crate::tasks::TaskKind::Shell(_) => Some("shell"),
+        }
+    }
+
     /// 查询单个任务。
     pub fn get_task(&self, id: &str) -> Option<ScheduledTask> {
         self.state

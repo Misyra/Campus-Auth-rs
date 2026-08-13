@@ -122,12 +122,11 @@ async function saveScheduledTask(): Promise<void> {
   const cron = scheduleToCron(form.schedule.hour, form.schedule.minute);
   try {
     if (editingScheduledTask.value) {
-      // PUT /api/scheduler/jobs/{id} — 发送完整表单数据（ScheduledTask 含 index sig，无类型断言）
+      // PUT /api/scheduler/jobs/{id} — 发送完整表单数据（类型由后端从 target 推导，不再上传）
       const payload = {
         name: form.name,
         description: form.description,
         target_id: form.target_id,
-        task_type: form.task_type,
         cron,
         enabled: form.enabled,
         timeout: form.timeout,
@@ -135,14 +134,13 @@ async function saveScheduledTask(): Promise<void> {
       const data = await scheduledTasksApi.update(editingScheduledTask.value, payload);
       toastOnly(true, data?.message || "保存成功");
     } else {
-      // POST /api/scheduler/jobs — 需要 id, name, target_id, cron, task_type, enabled
+      // POST /api/scheduler/jobs — 需要 id, name, target_id, cron, enabled
       const id = `sched_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const payload = {
         id,
         name: form.name,
         target_id: form.target_id,
         cron,
-        task_type: form.task_type,
         enabled: form.enabled,
       };
       const data = await scheduledTasksApi.create(payload);

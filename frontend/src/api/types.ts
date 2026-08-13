@@ -351,8 +351,6 @@ export interface ScheduledTask {
   cron: string;
   profile_id?: string | null;
   timeout?: number | null;
-  args?: string[];
-  work_dir?: string | null;
   enabled: boolean;
   last_run?: string | null;
   last_result?: string | null;

@@ -6,16 +6,26 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::scheduler::task::ScheduledTaskType;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
 
 /// GET /api/scheduler/jobs — 列出全部定时任务
+///
+/// 返回时补充 `task_type` 展示字段（由 target 关联的任务类型推导），
+/// 存储模型本身不冗余存类型。
 pub async fn list_jobs(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let jobs = state.container.scheduler.list_tasks();
-    Ok(data(jobs))
+    let mut result = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let mut v = serde_json::to_value(&job)?;
+        if let Some(tt) = state.container.scheduler.task_type_of(&job.target_id).await {
+            v["task_type"] = serde_json::json!(tt);
+        }
+        result.push(v);
+    }
+    Ok(data(result))
 }
 
 #[derive(Deserialize)]
@@ -24,31 +34,24 @@ pub struct JobCreateBody {
     pub name: Option<String>,
     pub target_id: String,
     pub cron: String,
-    pub task_type: Option<String>,
     pub enabled: Option<bool>,
 }
 
 /// POST /api/scheduler/jobs — 创建定时任务
+///
+/// 任务类型由 `target_id` 关联的目标任务权威推导，不再单独存储。
 pub async fn create_job(
     State(state): State<AppState>,
     Json(body): Json<JobCreateBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let task_type = match body.task_type.as_deref() {
-        Some("script") => ScheduledTaskType::Script,
-        Some("shell") => ScheduledTaskType::Shell,
-        _ => ScheduledTaskType::Browser,
-    };
     let job = crate::scheduler::task::ScheduledTask {
         id: body.id.clone(),
         name: body.name.unwrap_or_default(),
         description: String::new(),
         cron: body.cron,
         target_id: body.target_id,
-        task_type,
         profile_id: None,
         timeout: None,
-        args: vec![],
-        work_dir: None,
         enabled: body.enabled.unwrap_or(true),
         last_run: None,
         last_result: None,
@@ -64,12 +67,9 @@ pub struct JobUpdateBody {
     pub enabled: Option<bool>,
     pub name: Option<String>,
     pub target_id: Option<String>,
-    pub task_type: Option<String>,
     pub profile_id: Option<String>,
     pub description: Option<String>,
     pub timeout: Option<u64>,
-    pub args: Option<Vec<String>>,
-    pub work_dir: Option<String>,
 }
 
 /// PUT /api/scheduler/jobs/{id} — 更新定时任务
@@ -95,13 +95,6 @@ pub async fn update_job(
     if let Some(t) = body.target_id {
         job.target_id = t;
     }
-    if let Some(tt) = body.task_type {
-        job.task_type = match tt.as_str() {
-            "script" => ScheduledTaskType::Script,
-            "shell" => ScheduledTaskType::Shell,
-            _ => ScheduledTaskType::Browser,
-        };
-    }
     if let Some(p) = body.profile_id {
         job.profile_id = Some(p);
     }
@@ -110,12 +103,6 @@ pub async fn update_job(
     }
     if let Some(t) = body.timeout {
         job.timeout = Some(t);
-    }
-    if let Some(a) = body.args {
-        job.args = a;
-    }
-    if let Some(w) = body.work_dir {
-        job.work_dir = Some(w);
     }
     state.container.scheduler.save_task(&id, &job)?;
     state.container.scheduler.notify_change();
@@ -132,7 +119,12 @@ pub async fn get_job(
         .scheduler
         .get_task(&id)
         .ok_or_else(|| ApiError::NotFound(format!("定时任务 {} 不存在", id)))?;
-    Ok(data(serde_json::to_value(&job)?))
+    let mut v = serde_json::to_value(&job)?;
+    // 补充 task_type 展示字段（由 target 关联任务类型推导）
+    if let Some(tt) = state.container.scheduler.task_type_of(&job.target_id).await {
+        v["task_type"] = serde_json::json!(tt);
+    }
+    Ok(data(v))
 }
 
 /// DELETE /api/scheduler/jobs/{id} — 删除定时任务

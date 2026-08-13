@@ -15,7 +15,6 @@ use tokio::time::{sleep_until, Duration as TokioDuration, Instant as TokioInstan
 use crate::config::runtime::ConfigReloadSignal;
 use crate::scheduler::task::{
     CRON_PARSE_PREFIX, CRON_PARSE_SUFFIX, DEFAULT_SCHEDULED_TIMEOUT, ScheduledTask,
-    ScheduledTaskType,
 };
 use crate::scheduler::{SchedulerError, SchedulerService, TaskChange};
 
@@ -233,83 +232,84 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
     let task_id = task.id.clone();
     let target_id = task.target_id.clone();
 
-    let (success, message) = match task.task_type {
-        ScheduledTaskType::Browser => {
-            // 浏览器任务 → LoginOrchestrator.submit(source=Browser)
-            // target_id 为要执行的浏览器任务，profile_id 指定使用的凭据 Profile（可选）。
-            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-            let handle = service
-                .orchestrator
-                .submit(
-                    crate::status::LoginSource::Browser,
-                    Some(target_id.clone()),
-                    task.profile_id.clone(),
+    // 任务类型由 target_id 关联的目标任务权威推导（TaskKind），不再冗余存储 task_type。
+    let (success, message) = match service.task_manager.load_task(&target_id).await {
+        Ok(crate::tasks::TaskKind::Browser(cfg)) => {
+            if task.profile_id.is_some() {
+                // 登录语义：带凭据 → LoginOrchestrator.submit（重试 + 网络验证）
+                let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
+                let handle = service
+                    .orchestrator
+                    .submit(
+                        crate::status::LoginSource::Browser,
+                        Some(target_id.clone()),
+                        task.profile_id.clone(),
+                    )
+                    .await;
+                // 与 Script/Shell 分支一致，为等待结果加超时上限，避免登录流程卡住时无限等待（历史遗留 F9）
+                // 超时预算归属：调度器为外层 deadline 所有者。超时时主动 cancel 句柄，让登录
+                // 状态机退出并释放 Worker（cancel 会经 cancel_token → CancelRegistry → Worker 传递），
+                // 而非仅丢弃 await_result future、任登录在后台继续跑。
+                match tokio::time::timeout(
+                    TokioDuration::from_secs(timeout),
+                    handle.await_result(),
                 )
-                .await;
-            // 与 Script/Shell 分支一致，为等待结果加超时上限，避免登录流程卡住时无限等待（历史遗留 F9）
-            // 超时预算归属：调度器为外层 deadline 所有者。超时时主动 cancel 句柄，让登录
-            // 状态机退出并释放 Worker（cancel 会经 cancel_token → CancelRegistry → Worker 传递），
-            // 而非仅丢弃 await_result future、任登录在后台继续跑。
+                .await
+                {
+                    Ok(result) => (result.success, result.message),
+                    Err(_) => {
+                        handle.cancel();
+                        (false, format!("执行超时: {}s", timeout))
+                    }
+                }
+            } else {
+                // 通用语义：打卡/签到 → execute_browser（不注入凭据，步骤完成即成功）
+                let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
+                match tokio::time::timeout(
+                    TokioDuration::from_secs(timeout),
+                    service.executor.execute_browser(&cfg),
+                )
+                .await
+                {
+                    Ok(Ok(r)) => (r.success, r.output),
+                    Ok(Err(e)) => (false, format!("执行错误: {}", e)),
+                    Err(_) => (false, format!("执行超时: {}s", timeout)),
+                }
+            }
+        }
+
+        Ok(crate::tasks::TaskKind::Script(cfg)) => {
+            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
             match tokio::time::timeout(
                 TokioDuration::from_secs(timeout),
-                handle.await_result(),
+                service.executor.execute_script(&cfg),
             )
             .await
             {
-                Ok(result) => (result.success, result.message),
-                Err(_) => {
-                    handle.cancel();
-                    (false, format!("执行超时: {}s", timeout))
-                }
+                Ok(Ok(r)) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
+                Ok(Err(e)) => (false, format!("执行错误: {}", e)),
+                Err(_) => (false, format!("执行超时: {}s", timeout)),
             }
         }
 
-        ScheduledTaskType::Script => {
-            // 脚本任务 → TaskManager 加载配置 → TaskExecutor 执行
-            match service.task_manager.load_task(&target_id).await {
-                Ok(crate::tasks::TaskKind::Script(cfg)) => {
-                    let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-                    match tokio::time::timeout(
-                        TokioDuration::from_secs(timeout),
-                        service.executor.execute_script(&cfg),
-                    )
-                    .await
-                    {
-                        Ok(Ok(r)) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
-                        Ok(Err(e)) => (false, format!("执行错误: {}", e)),
-                        Err(_) => (false, format!("执行超时: {}s", timeout)),
-                    }
-                }
-                _ => {
-                    let msg = format!("脚本任务不存在或类型不匹配: {}", task.target_id);
-                    tracing::warn!("{}", msg);
-                    (false, msg)
-                }
+        Ok(crate::tasks::TaskKind::Shell(cfg)) => {
+            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
+            match tokio::time::timeout(
+                TokioDuration::from_secs(timeout),
+                service.executor.execute_shell(&cfg),
+            )
+            .await
+            {
+                Ok(Ok(r)) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
+                Ok(Err(e)) => (false, format!("执行错误: {}", e)),
+                Err(_) => (false, format!("执行超时: {}s", timeout)),
             }
         }
 
-        ScheduledTaskType::Shell => {
-            // Shell 任务 → 通过 target_id 从 TaskManager 加载 ShellTaskConfig → TaskExecutor 执行
-            match service.task_manager.load_task(&target_id).await {
-                Ok(crate::tasks::TaskKind::Shell(cfg)) => {
-                    let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-                    match tokio::time::timeout(
-                        TokioDuration::from_secs(timeout),
-                        service.executor.execute_shell(&cfg),
-                    )
-                    .await
-                    {
-                        Ok(Ok(r)) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
-                        Ok(Err(e)) => (false, format!("执行错误: {}", e)),
-                        Err(_) => (false, format!("执行超时: {}s", timeout)),
-                    }
-                }
-                _ => {
-                    let msg = format!("Shell 任务不存在或类型不匹配: {}", task.target_id);
-                    tracing::warn!("{}", msg);
-                    (false, msg)
-                }
-            }
+        Err(e) => {
+            let msg = format!("加载目标任务失败: {target_id} ({e})");
+            tracing::warn!("{}", msg);
+            (false, msg)
         }
     };
 
