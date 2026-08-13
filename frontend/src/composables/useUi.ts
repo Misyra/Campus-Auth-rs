@@ -9,7 +9,6 @@ import type {
   BrowserInfo,
   UpdateInfo,
   InitStatus,
-  NetworkInterface,
   LoginHistoryItem,
 } from "../api/types";
 import { systemApi, browsersApi, monitorApi } from "../api";
@@ -42,7 +41,6 @@ const state = reactive({
   browserLoading: false,
   playwrightDownloading: false,
   fullscreenSrc: "",
-  networkInterfaces: [] as NetworkInterface[],
 });
 
 const loginHistory = reactive<LoginHistoryItem[]>([]);
@@ -270,15 +268,6 @@ function installPlaywrightChromium(): void {
     });
 }
 
-async function fetchNetworkInterfaces(): Promise<void> {
-  try {
-    const data = await monitorApi.fetchInterfaces();
-    state.networkInterfaces = data;
-  } catch (error) {
-    frontendLogger.error("network", "获取网络接口失败", error);
-  }
-}
-
 async function toggleMonitor(): Promise<void> {
   busy.monitor = true;
   const { status } = useStatus();
@@ -496,7 +485,6 @@ export function useUi() {
     getActiveBrowserChannel,
     handleBrowserClick,
     installPlaywrightChromium,
-    fetchNetworkInterfaces,
     toggleMonitor,
     manualLogin,
     cancelLogin,

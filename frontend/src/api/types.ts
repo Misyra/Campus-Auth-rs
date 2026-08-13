@@ -440,15 +440,6 @@ export interface UninstallItem {
   description?: string;
 }
 
-/** 网络接口 */
-export interface NetworkInterface {
-  id: string;
-  name: string;
-  ip: string;
-  gateway?: string;
-  is_up: boolean;
-}
-
 /** 危险步骤（保存任务前确认） */
 export interface DangerStep {
   stepIndex: number;

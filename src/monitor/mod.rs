@@ -11,7 +11,6 @@ pub use decision::evaluate;
 pub use probes::{PerProbeDetail, ProbeKind, ProbeOutcome};
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +24,6 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::config::runtime::RuntimeConfig;
 use crate::config::ConfigService;
-use crate::network::detect::InterfaceInfo;
 use crate::network::NetworkDetect;
 use crate::status::NetworkStatus;
 use crate::utils::metrics::Metrics;
@@ -93,8 +91,6 @@ pub struct MonitorConfig {
     pub url_timeout: Duration,
     /// auth_url 可达性检查超时
     pub auth_url_timeout: Duration,
-    /// 绑定的网卡名称（用于 TCP 探测出口绑定）
-    pub bind_interface_name: String,
 }
 
 impl MonitorConfig {
@@ -114,7 +110,6 @@ impl MonitorConfig {
             http_timeout: Duration::from_secs(m.http_timeout as u64),
             url_timeout: Duration::from_secs(m.url_timeout as u64),
             auth_url_timeout: Duration::from_secs(m.auth_url_timeout as u64),
-            bind_interface_name: m.bind_interface_name.clone(),
         }
     }
 }
@@ -249,8 +244,8 @@ impl MonitorService {
             ));
         }
 
-        // 步骤 2：物理网卡检测（结果缓存，供 resolve_bind_addr 复用）
-        let interface_list = match tokio::time::timeout(INTERFACE_CHECK_TIMEOUT, self.network_detect.list_interfaces()).await {
+        // 步骤 2：物理网卡检测（决定是否存在在线网卡）
+        match tokio::time::timeout(INTERFACE_CHECK_TIMEOUT, self.network_detect.list_interfaces()).await {
             Ok(Ok(list)) => {
                 debug!("网卡检测通过：发现 {} 个网卡", list.len());
                 if list.is_empty() {
@@ -263,7 +258,6 @@ impl MonitorService {
                         None,
                     ));
                 }
-                list
             }
             Ok(Err(e)) => {
                 warn!("网卡检测失败: {e}");
@@ -287,10 +281,9 @@ impl MonitorService {
                     None,
                 ));
             }
-        };
+        }
 
-        // 步骤 3：并发执行已启用的三类探测
-        let bind_addr = self.resolve_bind_addr(&cfg, &interface_list);
+        // 步骤 3：并发执行已启用的三类探测（不绑定出口网卡，走系统默认路由）
         let client = self.http_client.load();
         let start = Instant::now();
 
@@ -300,9 +293,8 @@ impl MonitorService {
             info!("TCP 探测启动：目标 {:?}，超时 {:?}", cfg.tcp_targets, cfg.tcp_timeout);
             let targets = cfg.tcp_targets.clone();
             let timeout = cfg.tcp_timeout;
-            let bind = bind_addr;
             tasks.push(Box::pin(async move {
-                let (o, d) = probes::TcpProbe::run(&targets, timeout, bind).await;
+                let (o, d) = probes::TcpProbe::run(&targets, timeout, None).await;
                 (ProbeKind::Tcp, o, d)
             }));
         }
@@ -414,25 +406,6 @@ impl MonitorService {
         };
         debug!("auth_url 可达性: {host}:{port} -> {result}");
         result
-    }
-
-    /// 根据网卡名解析绑定出口 IP（仅 TCP 裸 socket 需要）
-    ///
-    /// 使用 `check_once` 阶段已缓存的上次 `list_interfaces()` 结果，避免重复调用。
-    fn resolve_bind_addr(&self, cfg: &MonitorConfig, interfaces: &[InterfaceInfo]) -> Option<IpAddr> {
-        if cfg.bind_interface_name.is_empty() {
-            return None;
-        }
-        match interfaces.iter().find(|i| i.name == cfg.bind_interface_name) {
-            Some(i) => {
-                debug!("绑定网卡解析成功：{} -> {}", cfg.bind_interface_name, i.ipv4);
-                Some(IpAddr::V4(i.ipv4))
-            }
-            None => {
-                debug!("绑定网卡未找到：{}", cfg.bind_interface_name);
-                None
-            }
-        }
     }
 
     /// 组装 ProbeReport 并递增计数/指标

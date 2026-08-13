@@ -169,10 +169,9 @@ pub struct MonitorSettings {
     pub auth_url_timeout: u32,
     /// 登录后等待 portal 生效的延迟（秒，0-60）
     pub post_login_delay: u32,
-    /// 绑定的网卡名称（用于 SOCKS5 转发）
+    /// 预留字段：未来如需「绑定网卡」（让浏览器/探测流量走指定网卡）时生效。
+    /// 当前版本未实现网卡绑定（见 [`crate::network::EgressBinder`] 预留接口）。
     pub bind_interface_name: String,
-    /// SOCKS5 转发监听端口（None 时使用默认端口 [`crate::config::DEFAULT_SOCKS5_PORT`]）
-    pub socks5_port: Option<u16>,
 }
 
 impl Default for MonitorSettings {
@@ -218,7 +217,6 @@ impl Default for MonitorSettings {
             auth_url_timeout: 5,
             post_login_delay: 5,
             bind_interface_name: String::new(),
-            socks5_port: None,
         }
     }
 }

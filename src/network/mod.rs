@@ -1,8 +1,10 @@
-//! 网络接口：网卡检测与 SOCKS5 转发器
+//! 网络接口：网卡检测与出口绑定抽象
+//!
+//! 网卡枚举（[`detect`]）用于 Profile 自动切换与网关/SSID 检测；
+//! 出口绑定（[`EgressBinder`]）为预留接口，当前版本不实现网卡绑定。
 
 pub mod detect;
 pub mod interfaces;
-pub mod socks5;
 
 pub use detect::{
     create_detector, GatewayInfo, InterfaceInfo, LinuxDetect, MacosDetect, NetworkDetect,
@@ -12,7 +14,14 @@ pub use interfaces::{
     filter_interfaces, is_excluded, sort_interfaces, virtual_if_patterns,
     VIRTUAL_IF_PATTERNS_LINUX, VIRTUAL_IF_PATTERNS_MACOS, VIRTUAL_IF_PATTERNS_WINDOWS,
 };
-pub use socks5::{
-    spawn_socks_guard, SocksForwarder, SocksGuard, DEFAULT_SOCKS5_PORT, SOCKS5_BIND_ADDR,
-    SOCKS5_PORT_RETRY_MAX,
-};
+
+/// 出口网卡绑定抽象（预留接口）。
+///
+/// 当前版本不实现网卡绑定：浏览器与探测流量一律走系统默认路由。
+/// 未来如需「绑定网卡」（让流量走指定网卡，例如多网卡分流），实现此 trait
+/// 并在 Engine 中接入即可；配置字段 [`crate::config::MonitorSettings::bind_interface_name`]
+/// 已预留，届时直接读取生效。
+pub trait EgressBinder: Send + Sync {
+    /// 返回绑定的出口 IP 地址；`None` 表示不绑定、走默认路由。
+    fn bind_addr(&self) -> Option<std::net::IpAddr>;
+}

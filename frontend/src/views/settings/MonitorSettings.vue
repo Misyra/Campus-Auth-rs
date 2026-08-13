@@ -1,29 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { computed } from "vue";
 import { useConfig } from "@/composables/useConfig";
-import { monitorApi } from "@/api";
-import CustomSelect from "@/components/common/CustomSelect.vue";
-import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const config = useConfig();
-
-const networkInterfaces = ref<{ name: string; up: boolean }[]>([]);
-const networkInterfaceOptions = computed<SelectOption[]>(() => [
-  { value: "", label: "自动（系统默认路由）" },
-  ...networkInterfaces.value.map((n) => ({ value: n.name, label: `${n.name}${n.up ? "" : " (未连接)"}` })),
-]);
-const selectedInterfaceDown = computed(() => {
-  const name = config.config.monitor.bind_interface_name;
-  if (!name) return false;
-  return networkInterfaces.value.some((n) => n.name === name && !n.up);
-});
-
-async function loadNetworkInterfaces() {
-  try {
-    networkInterfaces.value = await monitorApi.fetchInterfaces();
-  } catch { /* */ }
-}
-onMounted(() => { void loadNetworkInterfaces(); });
 
 const urlCheckEnabled = computed({
   get: () => config.config.monitor.url_check_urls.length > 0,
@@ -82,20 +61,6 @@ const urlCheckText = computed({
             </div>
             <input id="settings-post-login-delay" v-model.number="config.config.monitor.post_login_delay" type="number" min="0" max="60" />
           </div>
-        </div>
-        <div class="form-group settings-toggle-spacer">
-          <div class="field-label-row">
-            <label for="settings-bind-interface">绑定网卡</label>
-            <button type="button" class="btn btn-icon-only" @click="loadNetworkInterfaces" title="刷新网卡列表">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-              </svg>
-            </button>
-            <span class="field-help" tabindex="0" role="note" data-tip="指定网络检测和浏览器流量走哪张网卡。">?</span>
-          </div>
-          <CustomSelect v-model="config.config.monitor.bind_interface_name" :options="networkInterfaceOptions" placeholder="自动（系统默认路由）" />
-          <p v-if="selectedInterfaceDown" class="form-warning">所选网卡当前未连接，网络检测将回退到系统默认路由</p>
         </div>
         <div class="form-row settings-toggle-spacer">
           <div class="form-group">

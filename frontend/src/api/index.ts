@@ -19,7 +19,6 @@ import type {
   LogEntry,
   MutationResult,
   NetworkDetectResult,
-  NetworkInterface,
   OcrStatus,
   Profile,
   ProfileListResponse,
@@ -54,7 +53,6 @@ export const monitorApi = {
   fetchStatus: () => http.get<import("./types").StatusSnapshot>("/api/monitor/status"),
   start: () => http.post<MutationResult>("/api/monitor/start"),
   stop: () => http.post<MutationResult>("/api/monitor/stop"),
-  fetchInterfaces: () => http.get<NetworkInterface[]>("/api/tools/network-interfaces"),
 };
 
 /** 一次性操作 */

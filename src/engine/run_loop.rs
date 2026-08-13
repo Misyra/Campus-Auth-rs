@@ -12,7 +12,6 @@ use crate::engine::{
     Engine, EngineCommand, EngineDeps, EngineError, ProfileSwitchSource, TestNetworkResult,
     ProbeDetails, MAX_IDLE_SLEEP_SECS, PROFILE_CHECK_INTERVAL_MIN, PROFILE_CHECK_INTERVAL_MAX,
 };
-use crate::network::socks5::{spawn_socks_guard, DEFAULT_SOCKS5_PORT};
 use crate::status::{EngineState, LoginSource, NetworkStatus, PartialSnapshot};
 
 /// 连续失败多少次后进入冷却期
@@ -36,8 +35,6 @@ struct EngineInner {
     last_gateway: Option<Ipv4Addr>,
     /// 上次检测到的 WiFi SSID
     last_ssid: Option<String>,
-    /// SOCKS5 Guard RAII 句柄（drop 时清理转发器资源）
-    socks5_guard: Option<crate::network::socks5::SocksGuard>,
     /// 网络检查定时器（常驻，由 monitoring + 暂停状态门控）
     check_timer: Interval,
     /// 连续登录失败次数
@@ -58,7 +55,6 @@ impl EngineInner {
             last_profile_check: Instant::now(),
             last_gateway: None,
             last_ssid: None,
-            socks5_guard: None,
             check_timer: {
                 let mut t = tokio::time::interval(Duration::from_secs(
                     crate::engine::DEFAULT_CHECK_INTERVAL_SECS,
@@ -285,8 +281,6 @@ async fn handle_resume(inner: &mut EngineInner, deps: &EngineDeps) {
 }
 
 async fn handle_shutdown(inner: &mut EngineInner, deps: &EngineDeps) {
-    // 停止 SOCKS5 转发器（drop guard 清理资源）
-    inner.socks5_guard = None;
     merge_engine_state(inner, deps, EngineState::Stopped);
     tracing::info!("引擎正在关闭");
 }
@@ -372,9 +366,6 @@ async fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
         consecutive_failures: inner.consecutive_failures,
     });
 
-    // SOCKS5 转发器健康检查（仅配置了网卡绑定时）
-    socks5_health_check(inner, deps).await;
-
     // 按网络结论决策
     match report.status {
         NetworkStatus::CaptivePortal => {
@@ -403,49 +394,6 @@ async fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
         NetworkStatus::Online | NetworkStatus::Offline | NetworkStatus::Paused => {
             // 无需操作
         }
-    }
-}
-
-/// SOCKS5 转发器健康检查：按 bind_interface_name 配置启动或清理转发器
-async fn socks5_health_check(inner: &mut EngineInner, deps: &EngineDeps) {
-    let runtime = deps.config_service.runtime().load();
-    let bind = runtime.monitor.bind_interface_name.clone();
-    // 未配置端口时使用默认端口
-    let socks5_port = runtime
-        .monitor
-        .socks5_port
-        .unwrap_or(DEFAULT_SOCKS5_PORT);
-    if bind.is_empty() {
-        // 未配置绑定，清理可能存在的旧转发器
-        if inner.socks5_guard.is_some() {
-            inner.socks5_guard = None;
-        }
-        return;
-    }
-    let needs_start = match &inner.socks5_guard {
-        Some(g) => !g.is_alive(),
-        None => true,
-    };
-    if needs_start {
-        // 根据网卡名解析绑定出口 IP
-        let bind_addr = resolve_interface_ipv4(&bind, deps).await;
-        match spawn_socks_guard(bind_addr, socks5_port) {
-            Ok(guard) => inner.socks5_guard = Some(guard),
-            Err(e) => tracing::warn!("SOCKS5 转发器启动失败: {}", e),
-        }
-    }
-}
-
-/// 根据网卡名称解析其 IPv4 地址，未找到时回退到 `Ipv4Addr::LOCALHOST`
-async fn resolve_interface_ipv4(name: &str, deps: &EngineDeps) -> Ipv4Addr {
-    const INTERFACE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
-    match tokio::time::timeout(INTERFACE_CHECK_TIMEOUT, deps.network_detect.list_interfaces()).await {
-        Ok(Ok(list)) => list
-            .iter()
-            .find(|i| i.name == name)
-            .map(|i| i.ipv4)
-            .unwrap_or(Ipv4Addr::LOCALHOST),
-        _ => Ipv4Addr::LOCALHOST,
     }
 }
 

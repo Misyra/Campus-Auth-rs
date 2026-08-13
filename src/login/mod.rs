@@ -569,13 +569,13 @@ impl LoginOrchestrator {
     /// 浏览器设置整体序列化 [`RuntimeConfig::browser`]（`BrowserSettings`）注入
     /// `browser_settings` 键——这是跨 IPC 边界与 Python Worker 约定的键名
     /// （Rust 内部字段名为 `browser`），覆盖原手动拼字段的丢失问题。
-    /// `bind_proxy` 由 `BrowserSettings` 携带，Engine 构造 SOCKS5 后注入其值。
+    /// `bind_proxy`（浏览器代理）由 `BrowserSettings` 携带，随配置一并下发 Worker。
     /// 构造发送给 Worker 的配置字典（凭证、auth_url、浏览器设置、任务步骤等）
     ///
     /// 浏览器设置整体序列化 [`RuntimeConfig::browser`]（`BrowserSettings`）注入
     /// `browser_settings` 键——这是跨 IPC 边界与 Python Worker 约定的键名
     /// （Rust 内部字段名为 `browser`），覆盖原手动拼字段的丢失问题。
-    /// `bind_proxy` 由 `BrowserSettings` 携带，Engine 构造 SOCKS5 后注入其值。
+    /// `bind_proxy`（浏览器代理）由 `BrowserSettings` 携带，随配置一并下发 Worker。
     ///
     /// **关键修复**：按 `task_id` 从 [`TaskManager`] 加载浏览器任务的 [`TaskConfig`]，
     /// 序列化为 `task_config` 键一并发送。Python Worker 仅依据 `task_config.steps`

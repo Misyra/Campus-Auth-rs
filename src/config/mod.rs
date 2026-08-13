@@ -26,9 +26,6 @@ pub const CORRUPT_PREFIX: &str = "settings.corrupt.";
 pub const BACKUP_PREFIX: &str = ".backup.v5.";
 /// Profile 安全删除目录
 pub const TRASH_DIR: &str = ".trash";
-/// SOCKS5 转发默认监听端口
-pub const DEFAULT_SOCKS5_PORT: u16 = 10808;
-
 // 重新导出公共类型，供其他模块直接 `use crate::config::Xxx`
 pub use crypto::PasswordCrypto;
 pub use profiles::ProfileService;
