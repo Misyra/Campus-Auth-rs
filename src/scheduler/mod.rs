@@ -23,7 +23,7 @@ use crate::tasks::TaskManager;
 pub use self::cron_loop::execute_scheduled_task;
 use self::task::{
     append_history, history_dir_of, ScheduledTask, SCHEDULED_DIR_NAME, HISTORY_DIR_NAME,
-    CHANGE_CHANNEL_CAPACITY,
+    CHANGE_CHANNEL_CAPACITY, MAX_CONCURRENT_SCHEDULED_TASKS,
 };
 
 /// 调度器错误类型。
@@ -89,6 +89,8 @@ pub struct SchedulerService {
     task_change_rx: tokio::sync::Mutex<Option<mpsc::Receiver<TaskChange>>>,
     /// 配置重载信号接收端（start 时取出）。
     reload_rx: tokio::sync::Mutex<Option<mpsc::Receiver<ConfigReloadSignal>>>,
+    /// 到期任务并发限制信号量（历史遗留 F10）。
+    concurrency: Arc<tokio::sync::Semaphore>,
     /// 内部状态。
     state: std::sync::Mutex<SchedulerState>,
 }
@@ -136,6 +138,7 @@ impl SchedulerService {
             task_change_tx,
             task_change_rx: tokio::sync::Mutex::new(Some(task_change_rx)),
             reload_rx: tokio::sync::Mutex::new(Some(reload_rx)),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SCHEDULED_TASKS)),
             state: std::sync::Mutex::new(SchedulerState {
                 tasks: Vec::new(),
                 running: true,

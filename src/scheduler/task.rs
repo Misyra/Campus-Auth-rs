@@ -19,6 +19,11 @@ pub(crate) const MAX_HISTORY_RECORDS: usize = 50;
 pub(crate) const CHANGE_CHANNEL_CAPACITY: usize = 16;
 /// 定时任务默认超时秒数（浏览器/脚本/Shell 任务）。
 pub(crate) const DEFAULT_SCHEDULED_TIMEOUT: u64 = 300;
+/// 到期定时任务的最大并发执行数。
+///
+/// 避免同一调度周期内大量到期任务无上限 spawn 压垮系统（历史遗留 F10）。
+/// 超出上限的任务在信号量上排队，按序执行。
+pub(crate) const MAX_CONCURRENT_SCHEDULED_TASKS: usize = 4;
 /// 5→7 字段转换：前缀秒字段。
 pub(crate) const CRON_PARSE_PREFIX: &str = "0 ";
 /// 5→7 字段转换：后缀年字段。

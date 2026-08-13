@@ -157,6 +157,21 @@ pub(crate) fn load_and_parse_all(service: &SchedulerService) -> Vec<TaskSchedule
     schedules
 }
 
+/// [`load_and_parse_all`] 的异步封装。
+///
+/// 磁盘扫描与 cron 解析属同步阻塞 I/O，放入 `spawn_blocking` 执行，
+/// 避免在调度主循环的 tokio worker 线程上同步读盘阻塞 `select!`。
+async fn load_and_parse_all_async(service: &Arc<SchedulerService>) -> Vec<TaskSchedule> {
+    let svc = service.clone();
+    match tokio::task::spawn_blocking(move || load_and_parse_all(&svc)).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("加载定时任务的阻塞任务失败: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// `DateTime<Local>` → `SystemTime`（经 UTC 中转，避免依赖不确定的 `From` 实现）。
 fn systemtime_from_local(dt: DateTime<Local>) -> SystemTime {
     let utc: DateTime<Utc> = dt.into();
@@ -192,8 +207,12 @@ pub(crate) fn fire_due_tasks(
                 continue;
             }
             let svc = service.clone();
+            let sem = service.concurrency.clone();
             tokio::spawn(async move {
-                execute_scheduled_task(task, svc).await;
+                // 获取并发许可，限制同时执行的到期任务数，避免无上限 spawn（历史遗留 F10）
+                if let Ok(_permit) = sem.acquire_owned().await {
+                    execute_scheduled_task(task, svc).await;
+                }
             });
         }
 
@@ -218,6 +237,7 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
         ScheduledTaskType::Browser => {
             // 浏览器任务 → LoginOrchestrator.submit(source=Browser)
             // target_id 为要执行的浏览器任务，profile_id 指定使用的凭据 Profile（可选）。
+            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
             let handle = service
                 .orchestrator
                 .submit(
@@ -226,8 +246,22 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
                     task.profile_id.clone(),
                 )
                 .await;
-            let result = handle.await_result().await;
-            (result.success, result.message)
+            // 与 Script/Shell 分支一致，为等待结果加超时上限，避免登录流程卡住时无限等待（历史遗留 F9）
+            // 超时预算归属：调度器为外层 deadline 所有者。超时时主动 cancel 句柄，让登录
+            // 状态机退出并释放 Worker（cancel 会经 cancel_token → CancelRegistry → Worker 传递），
+            // 而非仅丢弃 await_result future、任登录在后台继续跑。
+            match tokio::time::timeout(
+                TokioDuration::from_secs(timeout),
+                handle.await_result(),
+            )
+            .await
+            {
+                Ok(result) => (result.success, result.message),
+                Err(_) => {
+                    handle.cancel();
+                    (false, format!("执行超时: {}s", timeout))
+                }
+            }
         }
 
         ScheduledTaskType::Script => {
@@ -314,7 +348,7 @@ pub(crate) async fn cron_loop(
     let mut task_change_rx_opt = task_change_rx;
     let mut reload_rx_opt = reload_rx;
 
-    let mut task_schedules = load_and_parse_all(&service);
+    let mut task_schedules = load_and_parse_all_async(&service).await;
 
     loop {
         let nearest = compute_nearest_fire_at(&task_schedules);
@@ -352,7 +386,12 @@ pub(crate) async fn cron_loop(
             } => {
                 match change {
                     Some(TaskChange::Reload) => {
-                        task_schedules = load_and_parse_all(&service);
+                        // 重载前先触发已到期任务，避免 reload 落在“到期~触发”窄窗口内造成静默漏触发（历史遗留 F5）
+                        let fired = fire_due_tasks(service.clone(), &mut task_schedules, SystemTime::now());
+                        if fired > 0 {
+                            tracing::info!("重载前触发 {} 个到期任务", fired);
+                        }
+                        task_schedules = load_and_parse_all_async(&service).await;
                         tracing::debug!("调度器重载任务列表，共 {} 个任务", task_schedules.len());
                     }
                     None => {
@@ -372,7 +411,12 @@ pub(crate) async fn cron_loop(
                 match sig {
                     Some(ConfigReloadSignal::TasksChanged)
                     | Some(ConfigReloadSignal::GlobalChanged) => {
-                        task_schedules = load_and_parse_all(&service);
+                        // 重载前先触发已到期任务，避免窄窗口漏触发（历史遗留 F5）
+                        let fired = fire_due_tasks(service.clone(), &mut task_schedules, SystemTime::now());
+                        if fired > 0 {
+                            tracing::info!("重载前触发 {} 个到期任务", fired);
+                        }
+                        task_schedules = load_and_parse_all_async(&service).await;
                         tracing::debug!(
                             "配置变更触发调度器重载，共 {} 个任务",
                             task_schedules.len()
