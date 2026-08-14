@@ -54,7 +54,7 @@ const taskOptions = computed<SelectOption[]>(() => [
           </svg>
           返回方案列表
         </button>
-        <h2>{{ (p.editingProfile.value as any)._isNew ? '新建方案' : '编辑方案' }}</h2>
+        <h2>{{ p.editingProfile.value._isNew ? '新建方案' : '编辑方案' }}</h2>
         <div></div>
       </div>
 
@@ -66,7 +66,7 @@ const taskOptions = computed<SelectOption[]>(() => [
             <div class="form-row">
               <div class="form-group">
                 <label for="prof-id">方案 ID</label>
-                <input id="prof-id" v-model="p.editingProfile.value.id" type="text" placeholder="dorm" :disabled="!(p.editingProfile.value as any)._isNew" />
+                <input id="prof-id" v-model="p.editingProfile.value.id" type="text" placeholder="dorm" :disabled="!p.editingProfile.value._isNew" />
                 <span class="hint">字母、数字、下划线</span>
               </div>
               <div class="form-group">

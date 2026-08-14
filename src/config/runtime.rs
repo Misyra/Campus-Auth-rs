@@ -20,13 +20,11 @@ use crate::config::ConfigError;
 pub enum ConfigReloadSignal {
     /// 全局配置变更（影响所有服务的公共参数）
     GlobalChanged,
-    /// 活跃 Profile 切换
+    /// 活跃 Profile 切换（仅影响凭证/匹配规则，不影响调度器任务表）
     ProfileSwitched {
         /// 切换后的 Profile ID
         id: String,
     },
-    /// 定时任务配置变更（SchedulerService 需重算调度）
-    TasksChanged,
 }
 
 /// 活跃 Profile 的不可变快照（含解密后的密码）

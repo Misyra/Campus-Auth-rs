@@ -4,6 +4,7 @@
 //! `~/.campus_network_auth/.enc_key.rs`。密文格式：`ENC:` + base64(nonce(12B) || ciphertext+tag(16B))。
 //! 空串与无 `ENC:` 前缀的明文向后兼容直接返回。
 
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use chrono::Local;
@@ -19,6 +20,10 @@ use base64::Engine as _;
 use rand::RngCore;
 use zeroize::Zeroizing;
 
+// MSRV 1.85 兼容：fs4::FileExt 提供文件排他锁（Rust 1.96+ 内置方法优先级更高，不会冲突）
+#[allow(unused_imports)]
+use fs4::FileExt;
+
 use crate::config::ConfigError;
 
 /// 加密密文前缀
@@ -31,7 +36,9 @@ const NONCE_LEN: usize = 12;
 /// 默认加密密钥文件路径：`~/.campus_network_auth/.enc_key.rs`（raw 32 字节）
 ///
 /// 文件名带 `.rs` 后缀以避免与 Python 版的 `.enc_key`（base64 格式）冲突，
-/// 允许两个版本在同一用户目录下共存。
+/// 允许两个版本在同一用户目录下共存。`.enc_key.rs` 不存在时会优先继承
+/// Python 旧版的 `.enc_key`（见 [`PasswordCrypto::read_or_create_key`]），
+/// 保证新旧版本共用同一密钥、密码互通（历史遗留：两版密钥各自生成导致冲突）。
 pub fn default_key_path() -> PathBuf {
     let mut dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     dir.push(".campus_network_auth");
@@ -87,6 +94,10 @@ impl PasswordCrypto {
     }
 
     /// 解密 `ENC:` 密文，返回明文
+    ///
+    /// 生产路径一律使用 [`Self::decrypt_to_zeroizing`]（返回 `Zeroizing<String>` 保证清零）。
+    /// 本非清零版本仅测试使用，故标记 `#[cfg(test)]` 收敛为测试专用，防止误用。
+    #[cfg(test)]
     pub fn decrypt(&self, ciphertext: &str) -> Result<String, ConfigError> {
         if ciphertext.is_empty() {
             return Ok(String::new());
@@ -178,7 +189,53 @@ impl PasswordCrypto {
     }
 
     /// 读取密钥文件，不存在则生成并写入
+    ///
+    /// 生成/继承/异常恢复等"写密钥"路径用文件锁尽力串行化，缓解双实例并发
+    /// 生成密钥互相覆盖（历史遗留 TOCTOU：旧密文解密失败）。
+    /// 锁获取失败仅降级（warn 后继续执行）：密钥生成是低频关键路径，
+    /// 不能因锁文件权限/残留问题阻断加密（曾有真实故障）。
     fn read_or_create_key(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
+        // 锁文件与密钥文件分离（独立 .lock），避免锁住密钥文件本身导致同进程读写冲突
+        let lock_path = {
+            let mut p = key_path.as_os_str().to_owned();
+            p.push(".lock");
+            PathBuf::from(p)
+        };
+        // 非阻塞 try_lock：拿不到锁（权限/残留/他人持有）时降级继续，
+        // 只在能获取锁时提供写路径串行化
+        let lock_held = match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(f) => {
+                // MSRV 1.85 兼容：此处 try_lock() 由 fs4::FileExt trait 提供
+                #[allow(clippy::incompatible_msrv)]
+                match f.try_lock() {
+                    Ok(()) => Some(f), // 锁成功：持有到作用域结束
+                    Err(e) => {
+                        tracing::warn!("密钥文件锁获取失败（降级继续）: {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("密钥锁文件无法打开（降级继续）: {e}");
+                None
+            }
+        };
+
+        let result = Self::read_or_create_key_inner(key_path);
+        drop(lock_held); // 持有锁时关闭并释放
+        result
+    }
+
+    /// 锁保护下的密钥读取/生成核心逻辑
+    fn read_or_create_key_inner(
+        key_path: &Path,
+    ) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
         if key_path.exists() {
             let bytes = std::fs::read(key_path)?;
             if bytes.len() != KEY_LEN {
@@ -196,7 +253,43 @@ impl PasswordCrypto {
             arr.copy_from_slice(&bytes);
             return Ok(Zeroizing::new(arr));
         }
+        // `.enc_key.rs` 不存在：优先继承 Python 旧版密钥，避免两版各持一密钥导致
+        // 旧版加密的密码在 Rust 版无法解密（历史遗留：新旧版本密钥冲突）。
+        if let Some(key) = Self::try_inherit_python_key(key_path) {
+            return Ok(key);
+        }
         Self::generate_and_write_key(key_path)
+    }
+
+    /// 尝试从 Python 旧版密钥文件 `.enc_key`（base64 编码 32 字节）继承密钥。
+    ///
+    /// 成功时把密钥以 raw 32 字节写入 `.enc_key.rs`，此后两版共用同一密钥。
+    /// 旧版密钥缺失 / 解码失败 / 长度异常时返回 `None`（由调用方生成新密钥）。
+    fn try_inherit_python_key(key_path: &Path) -> Option<Zeroizing<[u8; KEY_LEN]>> {
+        let python_path = key_path.with_file_name(".enc_key");
+        let raw = std::fs::read_to_string(&python_path).ok()?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(raw.trim())
+            .ok()?;
+        if bytes.len() != KEY_LEN {
+            tracing::warn!(
+                "Python 旧版密钥长度异常（{} 字节），忽略并生成新密钥",
+                bytes.len()
+            );
+            return None;
+        }
+        let mut arr = [0u8; KEY_LEN];
+        arr.copy_from_slice(&bytes);
+        tracing::info!("检测到 Python 旧版密钥，已继承（新旧版本密码互通）");
+        // 写入 `.enc_key.rs`，后续统一从该文件读取；写入失败不阻断（内存中已持有密钥）
+        if let Some(parent) = key_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(key_path, arr.as_ref()) {
+            Ok(()) => {}
+            Err(e) => tracing::warn!("写入继承密钥到 {} 失败: {e}", key_path.display()),
+        }
+        Some(Zeroizing::new(arr))
     }
 
     /// 生成新密钥并写入文件（Unix 下权限 0600）
@@ -434,5 +527,72 @@ mod tests {
         assert!(tmp.path().join(".corrupt.key").exists()
             || !key_path.exists()
             || std::fs::metadata(&key_path).unwrap().len() == 32);
+    }
+
+    // ============ Python 旧版密钥继承（历史遗留：两版密钥冲突） ============
+
+    #[test]
+    fn test_inherit_python_key_when_rs_key_missing() {
+        // `.enc_key.rs` 不存在而 Python 版 `.enc_key`（base64 32 字节）存在时，
+        // 应继承同一密钥：Rust 版加密的密文能被"直接以该密钥为 .enc_key.rs"的实例解密。
+        let tmp = tempfile::tempdir().unwrap();
+        let python_key = [7u8; KEY_LEN]; // 固定"旧版"密钥
+        let python_path = tmp.path().join(".enc_key");
+        std::fs::write(&python_path, base64::engine::general_purpose::STANDARD.encode(python_key))
+            .unwrap();
+
+        // 继承实例：key_path 指向不存在的 .enc_key.rs
+        let rs_path = tmp.path().join(".enc_key.rs");
+        let inherited = PasswordCrypto::new(rs_path.clone());
+        let encrypted = inherited.encrypt("旧版密码").unwrap();
+
+        // 对照实例：直接把旧密钥当作 .enc_key.rs 内容
+        std::fs::write(&rs_path, python_key).unwrap();
+        let reference = PasswordCrypto::new(rs_path.clone());
+        let decrypted = reference.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, "旧版密码", "继承的密钥应与 Python 旧版一致");
+        // .enc_key.rs 应已被写入且内容为 raw 32 字节
+        let written = std::fs::read(&rs_path).unwrap();
+        assert_eq!(written.len(), KEY_LEN);
+        assert_eq!(written, python_key);
+    }
+
+    #[test]
+    fn test_inherit_python_key_prefers_existing_rs_key() {
+        // `.enc_key.rs` 已存在时，不得被 Python 旧版密钥覆盖
+        let tmp = tempfile::tempdir().unwrap();
+        let rs_path = tmp.path().join(".enc_key.rs");
+        let rs_key = [9u8; KEY_LEN];
+        std::fs::write(&rs_path, rs_key).unwrap();
+        // Python 旧版密钥存在且不同
+        let python_path = tmp.path().join(".enc_key");
+        std::fs::write(
+            &python_path,
+            base64::engine::general_purpose::STANDARD.encode([7u8; KEY_LEN]),
+        )
+        .unwrap();
+
+        let crypto = PasswordCrypto::new(rs_path.clone());
+        let encrypted = crypto.encrypt("test").unwrap();
+        let decrypted = crypto.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, "test");
+        // .enc_key.rs 内容保持不变（仍为 rs_key）
+        assert_eq!(std::fs::read(&rs_path).unwrap(), rs_key);
+    }
+
+    #[test]
+    fn test_inherit_python_key_invalid_base64_falls_back_to_new() {
+        // Python 旧版密钥内容非法（非 base64）时，应正常生成新密钥
+        let tmp = tempfile::tempdir().unwrap();
+        let python_path = tmp.path().join(".enc_key");
+        std::fs::write(&python_path, "not-a-valid-base64!!!").unwrap();
+
+        let rs_path = tmp.path().join(".enc_key.rs");
+        let crypto = PasswordCrypto::new(rs_path.clone());
+        let encrypted = crypto.encrypt("test").unwrap();
+        let decrypted = crypto.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, "test");
+        // 新密钥已写入 .enc_key.rs（32 字节）
+        assert_eq!(std::fs::read(&rs_path).unwrap().len(), KEY_LEN);
     }
 }

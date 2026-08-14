@@ -124,7 +124,7 @@ impl TcpProbe {
     }
 }
 
-/// HTTP 探测：状态码语义（204=Pass，200/3xx=Captive，其他/超时=Fail）
+/// HTTP 探测：状态码语义（204=Pass，200/3xx=Captive，其余状态码=Pass（连通成立），超时/连接失败=Fail）
 pub struct HttpProbe;
 
 impl HttpProbe {
@@ -155,7 +155,13 @@ async fn probe_http_one(client: &Client, url: &str, timeout: Duration) -> (Probe
                 204 => ProbeOutcome::Pass,
                 200 => ProbeOutcome::Captive,
                 301..=308 => ProbeOutcome::Captive,
-                _ => ProbeOutcome::Fail,
+                // 1xx/4xx/5xx：探测目标服务异常，但 TCP+TLS+HTTP 链路完整，
+                // 物理连通成立。判 Fail 会把"在线"误判为 Offline，
+                // 状态永不恢复且永不触发自动登录
+                other => {
+                    tracing::debug!(status = other, "HTTP 探测返回非预期状态码，按连通处理");
+                    ProbeOutcome::Pass
+                }
             };
             (
                 outcome,
@@ -181,7 +187,7 @@ async fn probe_http_one(client: &Client, url: &str, timeout: Duration) -> (Probe
     }
 }
 
-/// URL 标题探测：内容匹配语义（3xx=Captive，200 且内容匹配=Pass，否则 Fail）
+/// URL 标题探测：内容匹配语义（3xx=Captive，200 且内容匹配=Pass，200 不匹配=Captive，其余状态码=Pass（连通成立））
 pub struct UrlProbe;
 
 impl UrlProbe {
@@ -229,20 +235,28 @@ async fn probe_url_one(
                 );
             }
             if status == 200 {
-                // 读取 body（限长 64KB）做内容匹配
-                let body = match resp.bytes().await {
-                    Ok(bytes) => {
-                        if bytes.len() > 64 * 1024 {
-                            String::from_utf8_lossy(&bytes[..64 * 1024]).into_owned()
-                        } else {
-                            String::from_utf8_lossy(&bytes).into_owned()
+                // 流式读取 body（限长 64KB）：逐 chunk 累计，读到目标长度即停止，
+                // 避免大响应全量下载后才截断（历史遗留，恶意/超大页面会白耗带宽）。
+                let mut resp = resp;
+                let mut body = Vec::with_capacity(64 * 1024);
+                while body.len() < 64 * 1024 {
+                    match resp.chunk().await {
+                        Ok(Some(chunk)) => {
+                            let remaining = 64 * 1024 - body.len();
+                            let take = chunk.len().min(remaining);
+                            body.extend_from_slice(&chunk[..take]);
+                            if body.len() >= 64 * 1024 {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            tracing::warn!("读取 URL 探测响应体失败: {e}");
+                            break;
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("读取 URL 探测响应体失败: {e}");
-                        String::new()
-                    }
-                };
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
                 let expected_str = expected.get(url).map(|s| s.as_str());
                 let matched = match expected_str {
                     Some(exp) => body.contains(exp),
@@ -266,10 +280,12 @@ async fn probe_url_one(
                 );
             }
             (
-                ProbeOutcome::Fail,
+                // 1xx/4xx/5xx：能收到 HTTP 响应即物理连通成立（与 HTTP 探测同一原则），
+                // 判 Fail 会因目标服务异常把整体状态拖成 Offline
+                ProbeOutcome::Pass,
                 PerProbeDetail {
                     target: url.to_string(),
-                    success: false,
+                    success: true,
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     http_status: Some(status),
                     error: None,
@@ -322,11 +338,11 @@ pub enum ProbeKind {
 /// 单类探测结果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// 连通 / 204 / 内容匹配
+    /// 连通 / 204 / 内容匹配 / 收到非预期状态码（链路完整）
     Pass,
     /// 200 / 3xx（门户劫持）
     Captive,
-    /// 超时或连接失败
+    /// 超时或连接失败（物理不通）
     Fail,
     /// 该类别未启用
     Disabled,

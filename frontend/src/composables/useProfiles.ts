@@ -121,7 +121,7 @@ async function saveProfile(): Promise<void> {
     editingProfileSnapshot = "";
     await fetchProfiles();
     if (profileId === activeProfileId.value) {
-      await (await import("./useConfig")).useConfig().fetchConfig();
+      await refreshActiveProfileConfig();
     }
   } catch (error) {
     const msg = extractApiError(error, "保存失败");
@@ -160,11 +160,30 @@ async function setActiveProfile(profileId: string): Promise<void> {
     activeProfileId.value = profileId;
     frontendLogger.info("profiles", data?.message || `已切换到方案 ${profileId}`);
     toastOnly(true, data?.message || `已切换到方案 ${profileId}`);
-    await (await import("./useConfig")).useConfig().fetchConfig();
+    await refreshActiveProfileConfig();
   } catch (error) {
     frontendLogger.error("profiles", "切换方案异常", error);
     toastOnly(false, "切换方案失败");
   }
+}
+
+/**
+ * 刷新活跃方案的配置到设置页。
+ *
+ * 若设置页存在未保存修改（dirty），fetchConfig 的整体覆盖会静默丢弃它们（历史遗留 F5），
+ * 因此先弹确认；用户取消则不刷新，保留当前编辑内容。
+ */
+async function refreshActiveProfileConfig(): Promise<void> {
+  const { useConfig } = await import("./useConfig");
+  const { dirty, fetchConfig } = useConfig();
+  if (dirty.value) {
+    const ok = await confirm({
+      title: "未保存的修改",
+      message: "当前设置有未保存的修改，加载方案配置将覆盖它们。确定继续吗？",
+    });
+    if (!ok) return;
+  }
+  await fetchConfig();
 }
 
 async function detectNetworkForEditor(): Promise<void> {

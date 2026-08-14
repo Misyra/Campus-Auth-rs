@@ -138,6 +138,9 @@ async function saveScript(): Promise<void> {
   else if (binaryPath === "__custom_python__") binaryPath = editingTask.value._customPythonBinary || "";
 
   const payload = {
+    // 后端 TaskKind 反序列化在 type 缺失时默认归为 browser 任务，
+    // 会把脚本负载静默转存为空浏览器任务（脚本内容丢失），必须显式声明
+    type: "script" as const,
     name: editingTask.value.name || id,
     description: editingTask.value.description || "",
     content: editingTask.value.content,

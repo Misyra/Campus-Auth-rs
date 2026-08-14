@@ -2,7 +2,7 @@
  * HTTP 客户端封装：fetch + 自动解包 + 统一错误处理。
  * 所有 API 调用通过此模块暴露的端点函数，禁止在业务代码中直接 fetch。
  *
- * 契约（见 rust-rewrite/architecture/data-models.md §7.3）：
+ * 契约（详见根目录 openapi.json 与后端实现）：
  * - 成功响应统一为 `{ "data": <业务负载> }`，列表端点 data 直接是数组；
  * - 错误响应统一为 `{ "error": { "code": "...", "message": "...", "details": {...} } }`；
  * - 无 success 字段，HTTP 状态码非 2xx 即为错误。

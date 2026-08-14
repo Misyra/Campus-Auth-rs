@@ -46,6 +46,7 @@ pub async fn list_profiles(
     let profiles = state.container.profiles.list_profiles();
     let settings = state.container.config.load_settings();
     let mut map = serde_json::Map::new();
+    // ProfileSummary 仅含展示字段（无密码），列表接口天然不泄露密文
     for p in profiles {
         map.insert(p.id.clone(), serde_json::to_value(&p)?);
     }

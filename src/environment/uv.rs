@@ -142,7 +142,7 @@ pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
         }
 
         // 6. 验证可执行
-        let output = tokio::process::Command::new(&uv_dest)
+        let output = uv_command(&uv_dest)
             .arg("--version")
             .output()
             .await
@@ -368,7 +368,7 @@ pub async fn run_uv_sync(mgr: &EnvironmentManager) -> Result<(), EnvironmentErro
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
     // 构造 uv sync 命令，设置 UV_PROJECT_ENVIRONMENT 控制 venv 位置
-    let cmd_future = tokio::process::Command::new(&uv_exe)
+    let cmd_future = uv_command(&uv_exe)
         .args([
             "sync",
             "--project",
@@ -403,7 +403,7 @@ pub async fn run_uv_command(
     args: &[&str],
 ) -> Result<(), EnvironmentError> {
     let uv_exe = mgr.env_path().join(UV_EXE_NAME);
-    let output = tokio::process::Command::new(&uv_exe)
+    let output = uv_command(&uv_exe)
         .args(args)
         .output()
         .await
@@ -481,6 +481,73 @@ async fn download_text_with_mirrors(mgr: &EnvironmentManager, urls: &[String]) -
         }
     }
     Err(EnvironmentError::GitHubApiError(format!("所有镜像均失败: {last_err}")))
+}
+
+/// 构造 uv 子进程 Command（Windows 上隐藏控制台窗口，避免环境引导弹黑窗）
+pub(crate) fn uv_command(uv_exe: &std::path::Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(uv_exe);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// URL 构造：zip 与 sha256 均指向主站对应文件
+    #[test]
+    fn test_uv_urls_format() {
+        let expected = format!("/0.5.0/uv-{UV_TARGET}.zip");
+        let zip = uv_zip_url("0.5.0");
+        assert!(zip.ends_with(&expected), "zip: {zip}");
+        let sha = uv_sha_url("0.5.0");
+        assert!(sha.ends_with(".zip.sha256"), "sha: {sha}");
+    }
+
+    /// 镜像列表：直连在前，代理镜像在后，首项为直连
+    #[test]
+    fn test_uv_mirror_urls() {
+        let zips = uv_zip_urls("0.5.0");
+        assert_eq!(zips[0], uv_zip_url("0.5.0"));
+        assert!(zips.len() > 1, "应包含代理镜像");
+        let shas = uv_sha_urls("0.5.0");
+        assert_eq!(shas[0], uv_sha_url("0.5.0"));
+        assert_eq!(shas.len(), zips.len());
+    }
+
+    /// SHA256 校验：正确值通过，错误值被拒
+    #[tokio::test]
+    async fn test_verify_sha256() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.bin");
+        std::fs::write(&path, b"hello campus-auth").unwrap();
+        let expected = hex::encode(Sha256::digest(b"hello campus-auth"));
+        assert!(verify_sha256(&path, &expected).await.is_ok());
+        assert!(verify_sha256(&path, "0000deadbeef").await.is_err());
+    }
+
+    /// zip 提取：从含 uv.exe 的 zip 中正确提取
+    #[test]
+    fn test_extract_uv_from_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("uv.zip");
+        // 构造一个含 uv-{target}/uv.exe 的 zip
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("uv-0.5.0/uv.exe", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        use std::io::Write;
+        zip.write_all(b"MZ fake-exe").unwrap();
+        let cursor = zip.finish().unwrap();
+        std::fs::write(&zip_path, cursor.into_inner()).unwrap();
+
+        let dest = dir.path().join("uv.exe");
+        extract_uv_from_zip(&zip_path, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"MZ fake-exe");
+    }
 }
 
 

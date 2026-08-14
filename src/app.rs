@@ -11,7 +11,6 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
 
 use crate::container::ServiceContainer;
@@ -53,21 +52,11 @@ pub fn build_router(
     container.bridge.set_event_tx(ws_tx.clone());
     let state = AppState::new(container, log_tx, ws_tx, shutdown_tx);
 
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list([
-            axum::http::HeaderValue::from_static("http://127.0.0.1"),
-            axum::http::HeaderValue::from_static("http://127.0.0.1:50721"),
-            axum::http::HeaderValue::from_static("http://localhost"),
-            axum::http::HeaderValue::from_static("http://localhost:50721"),
-        ]))
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any);
-
+    // CORS 由内层 `web::build_router` 统一处理（mirror_request 放行任意本地来源）。
+    // 不再在此叠加白名单层，避免双层 CORS 挡住 vite dev / 局域网来源（历史遗留 #16）。
     let compression = CompressionLayer::new().gzip(true);
 
-    crate::web::build_router(state)
-        .layer(cors)
-        .layer(compression)
+    crate::web::build_router(state).layer(compression)
 }
 
 /// 启动 Axum 服务器（端口冲突 +1 重试，最多 `PORT_RETRY_MAX` 次）
@@ -152,10 +141,17 @@ pub async fn start_axum(
 }
 
 /// 优雅关闭 Axum 服务器
-pub async fn stop_axum(handle: AxumServeHandle) {
+///
+/// 发送停止信号并等待 serve task 退出；超时则真正 `abort()` 挂起的 task，
+/// 避免 task 常驻泄漏（历史遗留 #18：原实现超时后仅记日志、未中止）。
+pub async fn stop_axum(mut handle: AxumServeHandle) {
     let _ = handle.stop_tx.send(());
-    match handle.handle.await {
-        Ok(()) => info!("Axum 服务已关闭"),
-        Err(e) => warn!("Axum 服务关闭时 task 异常: {e}"),
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle.handle).await {
+        Ok(Ok(())) => info!("Axum 服务已关闭"),
+        Ok(Err(e)) => warn!("Axum 服务关闭时 task 异常: {e}"),
+        Err(_) => {
+            warn!("Axum 关闭超时，强制 abort 挂起的 serve task");
+            handle.handle.abort();
+        }
     }
 }

@@ -107,24 +107,51 @@ fn find_in_path(exe_name: &str) -> Option<String> {
     None
 }
 
-/// GET /api/scripts/{task_id} — 获取脚本内容
+/// GET /api/scripts/{task_id} — 获取脚本完整内容
+///
+/// 返回编辑器所需的全部字段（name/description/content/binary_path 等）。
+/// 内容来源两种存储模式：内联 `content` 字段或 `script_path` 指向的磁盘文件。
 pub async fn get_script(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if let Some(path) = state.container.tasks.get_script_path(&task_id).await {
-        let content = tokio::fs::read_to_string(&path).await?;
-        return Ok(data(serde_json::json!({ "id": task_id, "content": content })));
-    }
-    Err(ApiError::NotFound(format!("脚本 {} 不存在", task_id)))
+    let task = state.container.tasks.load_task(&task_id).await?;
+    let crate::tasks::TaskKind::Script(cfg) = task else {
+        return Err(ApiError::NotFound(format!("脚本 {} 不存在", task_id)));
+    };
+    // script_path 模式：读取磁盘文件；内联模式：直接取 content 字段
+    let content = if let Some(path) = state.container.tasks.get_script_path(&task_id).await {
+        tokio::fs::read_to_string(&path).await?
+    } else {
+        cfg.content.clone().unwrap_or_default()
+    };
+    Ok(data(serde_json::json!({
+        "id": task_id,
+        "name": cfg.common.name,
+        "description": cfg.common.description,
+        "content": content,
+        "binary_path": cfg.binary_path.clone().unwrap_or_default(),
+        "script_path": cfg.script_path,
+        "args": cfg.args,
+        "timeout": cfg.timeout,
+    })))
 }
 
 /// PUT /api/scripts/{task_id} — 更新脚本
+///
+/// 显式要求 `type == "script"`：`TaskKind` 反序列化在 type 缺失时默认归为
+/// browser 任务，会把脚本负载静默转存为空的浏览器任务（脚本内容丢失），
+/// 故在此前置拦截，防止前端回归。
 pub async fn update_script(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    if body.get("type").and_then(Value::as_str) != Some("script") {
+        return Err(ApiError::BadRequest(
+            "脚本接口仅接受 type=script 的负载".into(),
+        ));
+    }
     let task: crate::tasks::TaskKind = serde_json::from_value(body)?;
     state.container.tasks.save_task(&task_id, &task).await?;
     Ok(data(task_id))

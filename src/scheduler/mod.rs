@@ -44,6 +44,9 @@ pub enum SchedulerError {
     /// 文件读写失败。
     #[error("IO 错误: {0}")]
     IoError(#[from] std::io::Error),
+    /// 后台阻塞任务（spawn_blocking）失败。
+    #[error("后台任务失败: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
     /// 序列化/反序列化失败。
     #[error("JSON 错误: {0}")]
     JsonError(#[from] serde_json::Error),
@@ -189,10 +192,13 @@ impl SchedulerService {
     }
 
     /// 保存任务（创建或更新）到磁盘与缓存，并通知主循环重算。
-    pub fn save_task(&self, id: &str, task: &ScheduledTask) -> Result<(), SchedulerError> {
+    pub async fn save_task(&self, id: &str, task: &ScheduledTask) -> Result<(), SchedulerError> {
         if !ScheduledTask::is_valid_id(id) {
             return Err(SchedulerError::InvalidTaskId(id.to_string()));
         }
+        // 校验 cron 表达式：此前仅在加载时解析，非法表达式静默落盘、
+        // 任务永不触发且 API 层返回 ok，用户无从得知
+        crate::scheduler::cron_loop::parse_cron_expr(&task.cron)?;
         // 校验关联目标任务存在
         if !self.task_manager.has_task(&task.target_id) {
             return Err(SchedulerError::TargetNotFound(task.target_id.clone()));
@@ -201,7 +207,11 @@ impl SchedulerService {
         let path = self.scheduled_dir.join(format!("{}.json", id));
         let mut to_save = task.clone();
         to_save.id = id.to_string();
-        ScheduledTask::save_to(&path, &to_save)?;
+        // 同步 fs 写入放入 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
+        let path_for_blocking = path.clone();
+        let to_save_for_blocking = to_save.clone();
+        tokio::task::spawn_blocking(move || ScheduledTask::save_to(&path_for_blocking, &to_save_for_blocking))
+            .await??;
 
         self.update_state(|s| {
             if let Some(existing) = s.tasks.iter_mut().find(|t| t.id == id) {
@@ -216,12 +226,22 @@ impl SchedulerService {
     }
 
     /// 删除任务文件并更新缓存，通知主循环重算。
-    pub fn delete_task(&self, id: &str) -> Result<(), SchedulerError> {
-        let path = self.scheduled_dir.join(format!("{}.json", id));
-        if !path.exists() {
-            return Err(SchedulerError::TaskNotFound(id.to_string()));
+    pub async fn delete_task(&self, id: &str) -> Result<(), SchedulerError> {
+        // id 直接拼接路径，必须先校验防止路径穿越（如 `..%5C` 删除任意 .json）
+        if !ScheduledTask::is_valid_id(id) {
+            return Err(SchedulerError::InvalidTaskId(id.to_string()));
         }
-        std::fs::remove_file(&path).map_err(SchedulerError::IoError)?;
+        let path = self.scheduled_dir.join(format!("{}.json", id));
+        let path_for_blocking = path.clone();
+        let id_for_blocking = id.to_string();
+        // 存在性检查与删除均在阻塞线程完成（历史遗留 #12）
+        tokio::task::spawn_blocking(move || -> Result<(), SchedulerError> {
+            if !path_for_blocking.exists() {
+                return Err(SchedulerError::TaskNotFound(id_for_blocking));
+            }
+            std::fs::remove_file(&path_for_blocking).map_err(SchedulerError::IoError)
+        })
+        .await??;
         self.update_state(|s| s.tasks.retain(|t| t.id != id));
         self.notify_change();
         self.publish_status();
@@ -229,12 +249,12 @@ impl SchedulerService {
     }
 
     /// 启用/禁用任务（复用 save_task 的持久化与通知逻辑）。
-    pub fn toggle_task(&self, id: &str, enabled: bool) -> Result<(), SchedulerError> {
+    pub async fn toggle_task(&self, id: &str, enabled: bool) -> Result<(), SchedulerError> {
         let mut task = self
             .get_task(id)
             .ok_or_else(|| SchedulerError::TaskNotFound(id.to_string()))?;
         task.enabled = enabled;
-        self.save_task(id, &task)
+        self.save_task(id, &task).await
     }
 
     /// 向主循环发送 `TaskChange::Reload` 信号（buffer 满时静默丢弃，重载幂等）。
@@ -285,15 +305,22 @@ impl SchedulerService {
     }
 
     /// 任务执行后更新 `last_run` / `last_result`（内存 + 磁盘）。
-    pub(crate) fn update_last_run(&self, task_id: &str, status: &str, message: &str) {
+    pub(crate) async fn update_last_run(&self, task_id: &str, status: &str, message: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         let result = format!("[{}] {}", status, message);
         let path = self.scheduled_dir.join(format!("{}.json", task_id));
-        if let Ok(mut task) = ScheduledTask::load_from(&path) {
-            task.last_run = Some(now.clone());
-            task.last_result = Some(result.clone());
-            let _ = ScheduledTask::save_to(&path, &task);
-        }
+        // 磁盘读写移至 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
+        let path_for_blocking = path.clone();
+        let now_for_blocking = now.clone();
+        let result_for_blocking = result.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(mut task) = ScheduledTask::load_from(&path_for_blocking) {
+                task.last_run = Some(now_for_blocking);
+                task.last_result = Some(result_for_blocking);
+                let _ = ScheduledTask::save_to(&path_for_blocking, &task);
+            }
+        })
+        .await;
         self.update_state(|s| {
             if let Some(t) = s.tasks.iter_mut().find(|t| t.id == task_id) {
                 t.last_run = Some(now);
@@ -308,7 +335,7 @@ impl SchedulerService {
     }
 
     /// 追加一条执行历史记录。
-    pub(crate) fn add_history_record(
+    pub(crate) async fn add_history_record(
         &self,
         task_id: &str,
         status: &str,
@@ -316,9 +343,30 @@ impl SchedulerService {
         duration: std::time::Duration,
     ) {
         let dir = history_dir_of(&self.scheduled_dir);
-        if let Err(e) = append_history(&dir, task_id, status, message, duration) {
-            tracing::warn!("写入执行历史失败 ({}): {}", task_id, e);
-        }
+        // 历史追加移至 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
+        let dir_for_blocking = dir.clone();
+        let task_id_owned = task_id.to_string();
+        let task_id_for_log = task_id_owned.clone();
+        let status_owned = status.to_string();
+        let message_owned = message.to_string();
+        tokio::task::spawn_blocking(move || {
+            append_history(
+                &dir_for_blocking,
+                &task_id_owned,
+                &status_owned,
+                &message_owned,
+                duration,
+            )
+        })
+        .await
+        .map(|r| {
+            if let Err(e) = r {
+                tracing::warn!("写入执行历史失败 ({}): {}", task_id_for_log, e);
+            }
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!("写入执行历史任务失败: {e}");
+        });
     }
 }
 

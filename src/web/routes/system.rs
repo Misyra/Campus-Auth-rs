@@ -41,20 +41,34 @@ pub async fn system_info(
     Ok(data(info))
 }
 
-/// POST /api/system/restart — 重启应用（spawn 新进程后退出当前进程）
-pub async fn restart_app() -> Result<Json<Value>, ApiError> {
+/// POST /api/system/restart — 重启应用（spawn 带 `--restarting` 的新进程后优雅退出）
+///
+/// 新进程带 `--restarting` 标记，launcher 会先等待旧进程释放实例锁再启动，
+/// 避免双方争锁导致"重启变退出"（旧实现直接 spawn 原参数 + 200ms 后
+/// `exit(0)` 硬退出，新进程抢锁失败即死，最终两个进程都消失）。
+/// 旧进程通过 shutdown_tx 走完整优雅关闭流程（而非 exit(0) 跳过清理）。
+pub async fn restart_app(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     let exe = std::env::current_exe()
         .map_err(|e| ApiError::Internal(format!("获取可执行文件路径失败: {e}")))?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    std::process::Command::new(exe)
-        .args(&args)
-        .spawn()
+    // args_os：参数含非法 Unicode 时 env::args() 会 panic，args_os 不会
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    args.retain(|a| a != "--restarting");
+    args.push("--restarting".into());
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&args);
+    // Windows：避免从 GUI 进程 spawn 出闪烁的控制台窗口（与其他子进程一致）
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn()
         .map_err(|e| ApiError::Internal(format!("启动新进程失败: {e}")))?;
-    // 延迟退出，让响应先返回
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        std::process::exit(0);
-    });
+    // 通知 launcher 优雅关闭当前进程（新进程会等待实例锁释放）
+    let _ = state.shutdown_tx.send(());
     Ok(data(Value::String("正在重启".into())))
 }
 
@@ -823,4 +837,118 @@ pub async fn stop_worker(
 ) -> Result<Json<Value>, ApiError> {
     state.container.bridge.shutdown().await;
     Ok(data(serde_json::json!({ "stopped": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============ tracing JSON 日志解析 ============
+
+    #[test]
+    fn parse_tracing_json_log_extracts_fields() {
+        let line = r#"{"timestamp":"2026-08-14T01:02:03Z","level":"INFO","fields":{"message":"登录成功"},"target":"campus_auth::login"}"#;
+        let entry = parse_tracing_json_log(line).expect("应解析成功");
+        assert_eq!(entry.level, "INFO");
+        assert_eq!(entry.message, "登录成功");
+        // source 经 normalize_source 归一化（去掉 crate 前缀，取首段）
+        assert_eq!(entry.source, "login");
+        assert!(!entry.timestamp.is_empty());
+    }
+
+    #[test]
+    fn parse_tracing_json_log_filters_noise_levels() {
+        for level in ["TRACE", "DEBUG"] {
+            let line = format!(r#"{{"level":"{level}","fields":{{"message":"x"}}}}"#);
+            assert!(parse_tracing_json_log(&line).is_none(), "{level} 应被过滤");
+        }
+        // INFO 级别的普通日志应保留
+        let info = r#"{"level":"INFO","fields":{"message":"x"}}"#;
+        assert!(parse_tracing_json_log(info).is_some());
+    }
+
+    #[test]
+    fn parse_tracing_json_log_handles_invalid_and_missing_fields() {
+        assert!(parse_tracing_json_log("not json").is_none());
+        // 缺少 fields.message 时回退为空字符串而非报错
+        let entry = parse_tracing_json_log(r#"{"level":"WARN"}"#).expect("结构不完整也应解析");
+        assert_eq!(entry.message, "");
+    }
+
+    // ============ 背景图扩展名识别 ============
+
+    #[test]
+    fn ext_from_content_type_maps_known_types() {
+        assert_eq!(ext_from_content_type("image/png"), Some("png"));
+        assert_eq!(ext_from_content_type("image/jpeg"), Some("jpg"));
+        assert_eq!(ext_from_content_type("image/webp"), Some("webp"));
+        assert_eq!(ext_from_content_type("image/svg+xml"), Some("svg"));
+        // 带参数 / 大小写混合 / 未知类型
+        assert_eq!(ext_from_content_type("image/PNG; charset=utf-8"), Some("png"));
+        assert_eq!(ext_from_content_type("application/octet-stream"), None);
+        assert_eq!(ext_from_content_type(""), None);
+    }
+
+    #[test]
+    fn ext_from_magic_recognizes_common_formats() {
+        assert_eq!(ext_from_magic(b"\x89PNG\r\n\x1a\nxxxx"), Some("png"));
+        assert_eq!(ext_from_magic(b"\xFF\xD8\xFF\xE0xxxx"), Some("jpg"));
+        assert_eq!(ext_from_magic(b"GIF89a"), Some("gif"));
+        assert_eq!(ext_from_magic(b"BMxxxx"), Some("bmp"));
+        assert_eq!(ext_from_magic(b"\x00\x00\x01\x00xxxx"), Some("ico"));
+        // WEBP: RIFF....WEBP
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(b"0000WEBP");
+        assert_eq!(ext_from_magic(&webp), Some("webp"));
+        // 未知 magic
+        assert_eq!(ext_from_magic(b"hello"), None);
+    }
+
+    #[test]
+    fn ensure_image_extension_keeps_allowed_and_fills_missing() {
+        // 已合规扩展名：原样保留
+        assert_eq!(ensure_image_extension("bg.png", "image/png", &[]), "bg.png");
+        assert_eq!(ensure_image_extension("bg.JPG", "image/jpeg", &[]), "bg.JPG");
+        // 无扩展名：按 Content-Type 补全
+        assert_eq!(ensure_image_extension("bg", "image/webp", &[]), "bg.webp");
+        // Content-Type 不可信时回退 magic
+        assert_eq!(ensure_image_extension("photo", "", b"\x89PNG\r\n\x1a\n1"), "photo.png");
+        // 不合规扩展名：改成 Content-Type 对应的
+        assert_eq!(ensure_image_extension("bg.exe", "image/jpeg", &[]), "bg.jpg");
+        // 完全无法识别：回退 bin
+        assert_eq!(ensure_image_extension("weird", "", b"zzz"), "weird.bin");
+    }
+
+    // ============ 背景图文件名安全 ============
+
+    #[test]
+    fn safe_filename_strips_path_components() {
+        // 路径穿越尝试：只取 file_name
+        assert_eq!(safe_filename(Some("../../etc/passwd".into())), "passwd");
+        // 正常文件名
+        assert_eq!(safe_filename(Some("sunset.png".into())), "sunset.png");
+    }
+
+    #[test]
+    fn safe_filename_falls_back_to_uuid_on_empty() {
+        let fallback = safe_filename(None);
+        assert!(!fallback.is_empty());
+        assert!(fallback.starts_with("bg-"));
+    }
+
+    // ============ 背景图 URL SSRF 校验（私有 IP 判定） ============
+
+    #[test]
+    fn is_private_ip_detects_private_and_reserved() {
+        use std::net::IpAddr;
+        assert!(is_private_ip(IpAddr::V4("127.0.0.1".parse().unwrap())));
+        assert!(is_private_ip(IpAddr::V4("10.0.0.1".parse().unwrap())));
+        assert!(is_private_ip(IpAddr::V4("192.168.1.1".parse().unwrap())));
+        assert!(is_private_ip(IpAddr::V4("169.254.0.1".parse().unwrap())));
+        assert!(is_private_ip(IpAddr::V6("::1".parse().unwrap())));
+        assert!(is_private_ip(IpAddr::V6("fc00::1".parse().unwrap())));
+        // 公网地址放行
+        assert!(!is_private_ip(IpAddr::V4("8.8.8.8".parse().unwrap())));
+        assert!(!is_private_ip(IpAddr::V6("2606:4700:4700::1111".parse().unwrap())));
+    }
 }

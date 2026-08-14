@@ -116,29 +116,28 @@ pub(crate) fn load_and_parse_all(service: &SchedulerService) -> Vec<TaskSchedule
                     continue;
                 }
             };
-            if !task.enabled {
-                continue;
+            // 所有任务（含禁用）都进缓存：get_task/toggle_task/update_task/run_task
+            // 均基于内存缓存，跳过禁用任务会让它们 404、永远无法被重新启用
+            if task.enabled {
+                let schedule = match parse_cron_expr(&task.cron) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::warn!("定时任务 {} cron 解析失败: {}", id, e);
+                        parse_failures += 1;
+                        None
+                    }
+                };
+                let next_fire_at = schedule
+                    .as_ref()
+                    .and_then(|s| s.upcoming(Local).next())
+                    .map(systemtime_from_local);
+                schedules.push(TaskSchedule {
+                    task_id: id,
+                    schedule,
+                    next_fire_at,
+                });
             }
-
-            let schedule = match parse_cron_expr(&task.cron) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    tracing::warn!("定时任务 {} cron 解析失败: {}", id, e);
-                    parse_failures += 1;
-                    None
-                }
-            };
-            let next_fire_at = schedule
-                .as_ref()
-                .and_then(|s| s.upcoming(Local).next())
-                .map(systemtime_from_local);
-
             loaded.push(task);
-            schedules.push(TaskSchedule {
-                task_id: id,
-                schedule,
-                next_fire_at,
-            });
         }
     }
 
@@ -288,8 +287,8 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
     let duration = start.elapsed();
     let status_str = if success { "success" } else { "failure" };
 
-    service.update_last_run(&task_id, status_str, &message);
-    service.add_history_record(&task_id, status_str, &message, duration);
+    service.update_last_run(&task_id, status_str, &message).await;
+    service.add_history_record(&task_id, status_str, &message, duration).await;
 
     if success {
         tracing::info!(
@@ -381,8 +380,7 @@ pub(crate) async fn cron_loop(
                 }
             } => {
                 match sig {
-                    Some(ConfigReloadSignal::TasksChanged)
-                    | Some(ConfigReloadSignal::GlobalChanged) => {
+                    Some(ConfigReloadSignal::GlobalChanged) => {
                         // 重载前先触发已到期任务，避免窄窗口漏触发（历史遗留 F5）
                         let fired = fire_due_tasks(service.clone(), &mut task_schedules, SystemTime::now());
                         if fired > 0 {

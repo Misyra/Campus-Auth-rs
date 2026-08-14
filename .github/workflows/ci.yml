@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装 Rust 工具链（rustfmt + clippy）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # rust-embed 编译需要 frontend/dist 存在，故前端构建先行
+      - name: 前端构建（vue-tsc 类型检查 + vite build）
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: 格式检查（cargo fmt --check）
+        run: cargo fmt --check
+
+      - name: Clippy 零警告（-D warnings）
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: 单元与集成测试
+        run: cargo test
+
+      - name: Python Worker 语法检查
+        run: python -m compileall python_worker

@@ -24,7 +24,6 @@ no-embed = []
 # 异步运行时 & 网络
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
@@ -72,7 +71,7 @@ uuid = { version = "1", features = ["v4"] }
 zip = "2"
 
 # 网络 & 硬件
-mac_address = "1"
+# （网卡检测自研实现，无 mac_address 依赖）
 
 # 工具 & 更新
 semver = { version = "1", features = ["serde"] }
@@ -83,12 +82,11 @@ self-replace = "1"
 tempfile = "3"
 url = "2"
 
-# Trait & 元编程
+# Trait
 async-trait = "0.1"
-utoipa = { version = "5", features = ["axum_extras"] }
 
 # 嵌入
-rust-embed = "8"
+rust-embed = { version = "8", features = ["include-exclude"] }
 
 # 编码
 encoding_rs = "0.8"
@@ -103,11 +101,9 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-wiremock = "0.6"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-pretty_assertions = "1"
 
 [profile.release]
 strip = true

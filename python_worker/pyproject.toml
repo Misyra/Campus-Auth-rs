@@ -8,12 +8,17 @@ dependencies = [
     "playwright>=1.40",
 ]
 
-# 可选扩展：OCR 识别与模型解密。未安装时对应命令返回错误而非崩溃，
+# 可选扩展：OCR 识别。未安装时对应命令返回错误而非崩溃，
 # 因此不作为强制依赖，避免 uv sync 因原生编译失败而中断。
 [project.optional-dependencies]
 ocr = [
     "ddddocr>=1.4",
-    "cryptography",
+]
+
+# 开发/测试依赖：仅用于本仓库单元测试，不随运行时安装
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
 ]
 
 [project.scripts]
@@ -44,3 +49,8 @@ default = true
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 根目录加入 sys.path，使 tests/ 可直接导入 models / variable_resolver 等顶层模块
+pythonpath = ["."]

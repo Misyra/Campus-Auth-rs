@@ -56,7 +56,7 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
         }
 
         // 执行 uv run playwright install chromium
-        let cmd_future = tokio::process::Command::new(&uv_exe)
+        let cmd_future = crate::environment::uv::uv_command(&uv_exe)
             .args([
                 "run",
                 "--project",

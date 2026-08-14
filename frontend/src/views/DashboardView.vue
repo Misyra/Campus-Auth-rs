@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
+import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useStatus } from "@/composables/useStatus";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
@@ -12,17 +12,9 @@ const s = useStatus();
 const logs = useLogs();
 const ui = useUi();
 
-let logPollTimer: ReturnType<typeof setInterval> | null = null;
-
 onMounted(() => {
   void ui.fetchLoginHistory();
   void logs.fetchLogs();
-  nextTick(scrollToBottom);
-  logPollTimer = setInterval(() => logs.fetchLogs(), 3000);
-});
-
-onUnmounted(() => {
-  if (logPollTimer !== null) clearInterval(logPollTimer);
 });
 
 // ---- 登录历史 — 复用 useUi 共享状态，避免手动登录后 Dashboard 不更新 ----
@@ -54,9 +46,11 @@ function onLogScroll() {
   logs.autoScroll.value = scrollTop + clientHeight >= scrollHeight - 40;
 }
 
-// 日志新增时，若处于自动滚动则自动滚到底部
+// 日志实时追加时自动滚动到底部。
+// 直接 watch 原始 logs 长度（而非 filteredLogs），新日志一旦 push 即触发，
+// 不依赖 computed 的惰性求值，实时性更强。
 watch(
-  () => logs.filteredLogs.value.length,
+  () => logs.logs.length,
   () => {
     if (logs.autoScroll.value) nextTick(scrollToBottom);
   },
@@ -114,9 +108,6 @@ function getSourceLabel(src: string): string {
     tasks: "任务",
   };
   return map[src] || src;
-}
-function getLogClass(item: { level?: string }): string {
-  return item.level ? `log-${item.level.toLowerCase()}` : "";
 }
 function stripScreenshotHint(msg: string): string {
   return (msg || "").replace(/截图已保存[：:]\s*[^\s]*/g, "").trim();
@@ -268,12 +259,17 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
               <span>{{ logs.logFilter.search || logs.logFilter.level || logs.logFilter.source ? '无匹配日志' : '暂无日志' }}</span>
             </div>
             <div v-else class="log-entries">
-              <div v-for="(item, index) in logs.filteredLogs.value" :key="index + '-' + item.timestamp + '-' + item.message" class="log-entry">
+              <div
+                v-for="(item, index) in logs.filteredLogs.value"
+                :key="index + '-' + item.timestamp + '-' + item.message"
+                class="log-entry"
+                :class="[item.level ? 'log-' + item.level.toLowerCase() : '']"
+              >
                 <span class="log-time">{{ formatTime(item.timestamp) }}</span>
                 <span v-if="item.level" class="log-level-badge" :class="'level-' + item.level.toLowerCase()">{{ item.level }}</span>
                 <span v-if="item.source" class="log-source-badge" :class="'source-' + item.source">{{ getSourceLabel(item.source) }}</span>
                 <div class="log-content">
-                  <span class="log-message" :class="getLogClass(item)">{{ stripScreenshotHint(item.message) }}</span>
+                  <span class="log-message">{{ stripScreenshotHint(item.message) }}</span>
                   <div v-if="extractScreenshotUrl(item.message)" class="log-screenshot-wrap">
                     <img :src="extractScreenshotUrl(item.message)!" class="log-screenshot-preview" @click="openFullscreen(extractScreenshotUrl(item.message)!)" loading="lazy" alt="截图" />
                   </div>
@@ -281,6 +277,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
               </div>
             </div>
             <button v-if="logs.newLogCount.value > 0" class="new-logs-btn" @click="scrollToBottom(); logs.newLogCount.value = 0">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
               {{ logs.newLogCount.value }} 条新消息
             </button>
           </div>

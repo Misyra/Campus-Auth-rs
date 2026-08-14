@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::config::schema::ProfileData;
 use crate::config::service::ConfigService;
-use crate::config::ConfigError;
+use crate::config::{ConfigError, ConfigReloadSignal};
 
 /// Profile 摘要（不含密码），用于列表展示
 #[derive(Debug, Clone, serde::Serialize)]
@@ -112,7 +112,12 @@ impl ProfileService {
         let mut settings = self.config.load_settings();
         settings.active_profile_id = id.to_string();
         self.config.save_settings(&settings).await?;
-        self.config.reload().await?;
+        // 仅切换 Profile 不影响定时任务表，发送 ProfileSwitched 信号避免调度器全量重载任务
+        self.config
+            .reload_with_signal(ConfigReloadSignal::ProfileSwitched {
+                id: id.to_string(),
+            })
+            .await?;
         Ok(())
     }
 

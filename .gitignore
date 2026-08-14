@@ -4,10 +4,6 @@
 # Workbuddy
 .workbuddy/
 
-# 评审报告
-doc/
-docs/*review*.md
-
 # 工具产物
 .reasonix/
 # Rust
@@ -31,10 +27,12 @@ desktop.ini
 # 前端
 frontend/node_modules/
 frontend/dist/
+# openapi-typescript 生成物（npm run typegen 产物，手写 types.ts 才是权威来源）
+frontend/src/api/types.generated.ts
 
-# Python Worker
-python_worker/__pycache__/
-python_worker/*.pyc
+# Python Worker（__pycache__ 通配任意子目录，含 tests/）
+__pycache__/
+*.pyc
 python_worker/.venv/
 python_worker/venv/
 python_worker/node_modules/
@@ -64,12 +62,11 @@ frontend-legacy/
 
 # 构建产物
 *.exe
+# 打包输出目录（build.ps1 产物，含可执行文件与资源）
+/dist/
 
 # TypeScript 增量编译缓存
 *.tsbuildinfo
-
-# 旧架构文档（迁移参考，不提交）
-rust-rewrite/
 
 # 问题报告
 issues-report.md

@@ -358,6 +358,9 @@ body {
   bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 16px;
   border-radius: 20px;
   background: var(--accent);
@@ -369,6 +372,11 @@ body {
   box-shadow: var(--shadow);
   animation: fadeIn 0.2s ease;
   z-index: var(--z-dropdown);
+}
+
+.new-logs-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .new-logs-btn:hover {

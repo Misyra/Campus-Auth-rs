@@ -34,6 +34,42 @@ fn guess_mime(path: &str) -> &'static str {
 #[folder = "frontend/dist/"]
 struct Assets;
 
+/// 根目录 `openapi.json` 的嵌入（供 `/openapi.json` 路由服务，生产环境可用）
+#[cfg(not(feature = "no-embed"))]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "."]
+#[include = "openapi.json"]
+struct OpenApiAsset;
+
+#[cfg(not(feature = "no-embed"))]
+/// 返回嵌入的 openapi.json（前端运行时兜底获取版本等契约信息）
+pub async fn openapi_handler() -> impl IntoResponse {
+    match OpenApiAsset::get("openapi.json") {
+        Some(asset) => asset_response("openapi.json", asset),
+        None => (StatusCode::NOT_FOUND, "openapi.json 未嵌入").into_response(),
+    }
+}
+
+#[cfg(feature = "no-embed")]
+pub async fn openapi_handler() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, "openapi.json 未嵌入（no-embed 构建）").into_response()
+}
+
+#[cfg(all(test, not(feature = "no-embed")))]
+mod tests {
+    use super::*;
+
+    /// 嵌入的 openapi.json 应存在且可解析为含 info.version 的对象
+    #[test]
+    fn test_openapi_asset_embedded() {
+        let asset = OpenApiAsset::get("openapi.json").expect("openapi.json 应被嵌入");
+        let text = std::str::from_utf8(&asset.data).expect("openapi.json 应为 UTF-8");
+        let parsed: serde_json::Value =
+            serde_json::from_str(text).expect("openapi.json 应为合法 JSON");
+        assert!(parsed["info"]["version"].is_string(), "应含 info.version");
+    }
+}
+
 #[cfg(not(feature = "no-embed"))]
 pub async fn handler(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');

@@ -256,3 +256,136 @@ impl From<serde_json::Error> for ApiError {
         ApiError::BadRequest(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 全部变体 → HTTP 状态码映射正确性
+    #[test]
+    fn test_status_code_mapping() {
+        assert_eq!(ApiError::BadRequest("x".into()).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(ApiError::NotFound("x".into()).status(), StatusCode::NOT_FOUND);
+        assert_eq!(ApiError::Conflict("x".into()).status(), StatusCode::CONFLICT);
+        assert_eq!(
+            ApiError::Validation(vec![]).status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            ApiError::Internal("x".into()).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ApiError::ServiceUnavailable("x".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(ApiError::NotImplemented("x".into()).status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(ApiError::BadCredential("x".into()).status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            ApiError::AuthUrlUnreachable("x".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            ApiError::WorkerNotInstalled("x".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(ApiError::WorkerBusy("x".into()).status(), StatusCode::CONFLICT);
+        assert_eq!(ApiError::OperationCancelled("x".into()).status(), StatusCode::CONFLICT);
+        assert_eq!(ApiError::PortInUse("x".into()).status(), StatusCode::CONFLICT);
+        assert_eq!(ApiError::RateLimited("x".into()).status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// 错误码稳定且互不相同（前端按 code 分支）
+    #[test]
+    fn test_error_codes_stable_and_unique() {
+        let codes: Vec<&str> = [
+            ApiError::BadRequest("".into()),
+            ApiError::NotFound("".into()),
+            ApiError::Conflict("".into()),
+            ApiError::Validation(vec![]),
+            ApiError::Internal("".into()),
+            ApiError::ServiceUnavailable("".into()),
+            ApiError::NotImplemented("".into()),
+            ApiError::BadCredential("".into()),
+            ApiError::AuthUrlUnreachable("".into()),
+            ApiError::WorkerNotInstalled("".into()),
+            ApiError::WorkerBusy("".into()),
+            ApiError::OperationCancelled("".into()),
+            ApiError::PortInUse("".into()),
+            ApiError::RateLimited("".into()),
+        ]
+        .iter()
+        .map(|e| e.code())
+        .collect();
+        let unique: std::collections::HashSet<&&str> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len(), "错误码必须唯一");
+        assert!(codes.contains(&"INVALID_CREDENTIAL"));
+        assert!(codes.contains(&"RATE_LIMITED"));
+    }
+
+    /// Validation 变体携带字段级 details 载荷
+    #[test]
+    fn test_validation_details() {
+        let e = ApiError::Validation(vec![
+            FieldError { field: "name".into(), message: "必填".into() },
+            FieldError { field: "url".into(), message: "非法".into() },
+        ]);
+        let details = e.details().expect("Validation 应有 details");
+        assert_eq!(details["fields"][0]["field"], "name");
+        assert_eq!(details["fields"][1]["message"], "非法");
+        // 非 Validation 变体无 details
+        assert!(ApiError::BadRequest("x".into()).details().is_none());
+    }
+
+    /// 错误响应体结构：{ "error": { "code", "message", ... } }
+    #[tokio::test]
+    async fn test_into_response_body_shape() {
+        let resp = ApiError::BadRequest("参数错误".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读取响应体");
+        let body: Value = serde_json::from_slice(&bytes).expect("响应体应为 JSON");
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
+        assert_eq!(body["error"]["message"], "参数错误");
+        assert!(body.get("success").is_none(), "禁止 success 字段");
+    }
+
+    /// 服务错误自动转换：ConfigError 代表性分支
+    #[test]
+    fn test_from_config_error() {
+        let e: ApiError = crate::config::ConfigError::ProfileNotFound { id: "x".into() }.into();
+        assert!(matches!(e, ApiError::NotFound(_)));
+        let e: ApiError = crate::config::ConfigError::ProfileIdConflict { id: "x".into() }.into();
+        assert!(matches!(e, ApiError::Conflict(_)));
+        let e: ApiError = crate::config::ConfigError::CannotDeleteDefault.into();
+        assert!(matches!(e, ApiError::Conflict(_)));
+    }
+
+    /// 服务错误自动转换：TaskError / BridgeError 代表性分支
+    #[test]
+    fn test_from_task_and_bridge_error() {
+        let e: ApiError = crate::tasks::TaskError::TaskNotFound("x".into()).into();
+        assert!(matches!(e, ApiError::NotFound(_)));
+        let e: ApiError = crate::tasks::TaskError::DuplicateTaskId("x".into()).into();
+        assert!(matches!(e, ApiError::Conflict(_)));
+        let e: ApiError = crate::tasks::TaskError::ValidationFailed(vec!["a".into()]).into();
+        assert!(matches!(e, ApiError::Validation(_)));
+
+        let e: ApiError = crate::bridge::BridgeError::WorkerNotInstalled.into();
+        assert!(matches!(e, ApiError::WorkerNotInstalled(_)));
+        let e: ApiError = crate::bridge::BridgeError::WorkerBusy.into();
+        assert!(matches!(e, ApiError::WorkerBusy(_)));
+    }
+
+    /// 成功响应包装：{ "data": payload }
+    #[tokio::test]
+    async fn test_data_wrapper() {
+        let json = data(json!({ "ok": true }));
+        let bytes = axum::body::to_bytes(json.into_response().into_body(), 4096)
+            .await
+            .expect("读取响应体");
+        let body: Value = serde_json::from_slice(&bytes).expect("响应体应为 JSON");
+        assert_eq!(body["data"]["ok"], true);
+    }
+}

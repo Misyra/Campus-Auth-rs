@@ -131,7 +131,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
       <!-- 编辑器 -->
       <div v-if="editingTask" class="card task-editor">
         <div class="card-header">
-          <h2>{{ (editingTask as any)._isNew ? '新建脚本' : '编辑脚本' }}</h2>
+          <h2>{{ editingTask._isNew ? '新建脚本' : '编辑脚本' }}</h2>
           <button class="btn btn-icon-only" @click="editingTask = null">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -141,7 +141,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
         <div class="card-body">
           <div class="form-group">
             <label for="script-id">脚本ID</label>
-            <input id="script-id" v-model="editingTask.id" type="text" placeholder="my_script" :disabled="!(editingTask as any)._isNew" />
+            <input id="script-id" v-model="editingTask.id" type="text" placeholder="my_script" :disabled="!editingTask._isNew" />
             <span class="hint">必须以字母开头，且只能包含字母、数字和下划线</span>
           </div>
           <div class="form-group">
@@ -157,10 +157,10 @@ const binaryOptions = computed<SelectOption[]>(() => {
             <div class="binary-input-group">
               <CustomSelect v-model="editingTask.binary_path" :options="binaryOptions" @change="onBinarySelectChange" />
               <input v-if="editingTask.binary_path === '__custom_python__'"
-                v-model="(editingTask as any)._customPythonBinary" type="text"
+                v-model="editingTask._customPythonBinary" type="text"
                 placeholder="输入 Python 解释器的完整路径" class="mt-2" />
               <input v-if="editingTask.binary_path === '__custom__'"
-                v-model="(editingTask as any)._customBinary" type="text"
+                v-model="editingTask._customBinary" type="text"
                 placeholder="输入可执行文件的完整路径" class="mt-2" />
             </div>
             <span class="hint" v-if="editingTask.binary_path && editingTask.binary_path !== '__custom__' && editingTask.binary_path !== '__custom_python__'">当前: {{ editingTask.binary_path }}</span>

@@ -88,3 +88,20 @@ impl AppState {
         self.axum_running.load(Ordering::SeqCst)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// normalize_source：模块路径归一化为短名
+    #[test]
+    fn test_normalize_source_various_targets() {
+        assert_eq!(normalize_source("campus_auth::scheduler::cron_loop"), "scheduler");
+        assert_eq!(normalize_source("campus_auth::launcher"), "launcher");
+        assert_eq!(normalize_source("campus_auth"), "app");
+        assert_eq!(normalize_source("hyper_util::client::legacy"), "hyper_util");
+        assert_eq!(normalize_source("  campus_auth::bridge::mod  "), "bridge");
+        assert_eq!(normalize_source(""), "");
+        assert_eq!(normalize_source("   "), "");
+    }
+}

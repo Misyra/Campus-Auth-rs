@@ -98,7 +98,11 @@ pub async fn spawn_worker(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        // 强制 Python 全层级 UTF-8（stdio/文件系统默认编码）：
+        // 管道重定向下 stdio 默认走 ANSI 代码页（简中为 cp936），
+        // 与本模块严格按 UTF-8 解码 IPC 行的约定冲突（Worker 侧另做 reconfigure 双保险）
+        .env("PYTHONUTF8", "1");
     // Windows：设置 CREATE_NO_WINDOW，避免 Worker 子进程弹出黑色控制台窗口
     // （与 orphan.rs 的进程枚举保持一致的处理，历史遗留 F4-Win）
     #[cfg(windows)]
@@ -435,4 +439,71 @@ async fn health_monitor_task(
         }
     };
     let _ = ipc_tx.send(ParsedMessage::WorkerExited(code)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 解析一行并取回 channel 中的下一条消息
+    async fn parse_line(line: &str) -> Option<ParsedMessage> {
+        let (tx, mut rx) = mpsc::channel(8);
+        parse_and_send_line(line, &tx).await;
+        rx.recv().await
+    }
+
+    #[tokio::test]
+    async fn test_parse_valid_response() {
+        let msg = parse_line(r#"{"id":1,"result":{"success":true,"data":{"ok":true},"error":null}}"#)
+            .await
+            .unwrap();
+        match msg {
+            ParsedMessage::Response(resp) => {
+                assert_eq!(resp.id, 1);
+                assert!(resp.result.success);
+                assert_eq!(resp.result.data["ok"], true);
+            }
+            other => panic!("期望 Response，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_event() {
+        let msg = parse_line(r#"{"event":"step_progress","data":{"step":2}}"#).await.unwrap();
+        match msg {
+            ParsedMessage::Event(ev) => {
+                assert_eq!(ev.event, "step_progress");
+                assert_eq!(ev.data["step"], 2);
+            }
+            other => panic!("期望 Event，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_response_with_invalid_body_recovers_id() {
+        // 响应体反序列化失败但 id 有效 → ResponseError，Supervisor 可回收在途请求（历史遗留 F1）
+        let msg = parse_line(r#"{"id":42,"result":{"success":"not-bool"}}"#).await.unwrap();
+        match msg {
+            ParsedMessage::ResponseError { id, .. } => {
+                assert_eq!(id, 42);
+            }
+            other => panic!("期望 ResponseError，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_non_json_line_is_ignored() {
+        let (tx, mut rx) = mpsc::channel(8);
+        // 非 JSON 行只记日志，不产生消息
+        parse_and_send_line("this is not json", &tx).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parse_event_with_invalid_body_is_ignored() {
+        let (tx, mut rx) = mpsc::channel(8);
+        // event 字段存在但类型非法（event 应为 String，此处为 number）→ 反序列化失败，只记日志
+        parse_and_send_line(r#"{"event":123}"#, &tx).await;
+        assert!(rx.try_recv().is_err());
+    }
 }

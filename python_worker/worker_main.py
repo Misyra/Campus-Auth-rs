@@ -41,6 +41,26 @@ _stdout_lock = threading.Lock()
 shutdown_event = threading.Event()
 
 
+def _force_utf8_stdio() -> None:
+    """强制 stdio 使用 UTF-8 编码。
+
+    Windows 下管道重定向的 stdin/stdout/stderr 默认使用 ANSI 代码页
+    （简体中文系统为 cp936），而 Rust 侧严格按 UTF-8 编解码 IPC 行：
+    写方向会导致中文响应整行被 Rust 丢弃（无 id 可回收，在途请求只能超时），
+    读方向会导致中文命令解码损坏甚至抛 UnicodeDecodeError。
+    Python 3.15 才默认 UTF-8（PEP 686），故必须显式 reconfigure。
+    stdin 用 errors="replace" 保证脏数据不致命（跳过而非崩溃）。
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            if stream is sys.stdin:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):  # 非 TextIOWrapper 时忽略
+            pass
+
+
 def _configure_logging() -> None:
     """将日志输出到 stderr（stdout 仅供 IPC 使用）。"""
     level_name = os.getenv("WORKER_LOG_LEVEL", "INFO").upper()
@@ -92,6 +112,12 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 logger.warning(f"忽略非 JSON 的 stdin 行: {line[:200]}")
+                continue
+            # 合法 JSON 但非对象（字符串/数组/数字）时 `"cancel" in msg`
+            # 会退化为子串判断、`msg["cancel"]` 会抛 TypeError，
+            # 进而被外层 except 捕获导致整个 Worker 关闭——必须逐条拦截
+            if not isinstance(msg, dict):
+                logger.warning(f"忽略非 JSON 对象的 stdin 行: {line[:200]}")
                 continue
 
             # 取消通知：无 id、无响应
@@ -190,6 +216,7 @@ async def _serve() -> None:
 
 def main() -> None:
     """Worker 进程入口。"""
+    _force_utf8_stdio()
     _configure_logging()
     try:
         asyncio.run(_serve())

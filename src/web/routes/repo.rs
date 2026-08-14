@@ -120,6 +120,8 @@ fn is_restricted(ip: IpAddr) -> bool {
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || v6.is_unique_local()
+                // fe80::/10 链路本地地址：内网可寻址，必须拦截（SSRF 缺口修复）
+                || v6.is_unicast_link_local()
         }
     }
 }
@@ -169,4 +171,87 @@ pub async fn repo_fetch_task(
 #[derive(Deserialize)]
 pub struct RepoUrlQuery {
     pub url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    // ============ SSRF 防护：is_restricted ============
+
+    #[test]
+    fn test_is_restricted_rejects_private_and_reserved_ipv4() {
+        // 私有地址段
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        // 回环 / 未指定 / 链路本地 / 组播 / 广播
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
+        assert!(is_restricted(IpAddr::V4(Ipv4Addr::BROADCAST)));
+    }
+
+    #[test]
+    fn test_is_restricted_rejects_reserved_ipv6() {
+        assert!(is_restricted(IpAddr::V6(Ipv6Addr::LOCALHOST))); // ::1
+        assert!(is_restricted(IpAddr::V6(Ipv6Addr::UNSPECIFIED))); // ::
+        assert!(is_restricted(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)))); // fc00::
+        assert!(is_restricted(IpAddr::V6("fe80::1".parse().unwrap()))); // 链路本地
+        assert!(is_restricted(IpAddr::V6("ff02::1".parse().unwrap()))); // 组播
+    }
+
+    #[test]
+    fn test_is_restricted_allows_public_addresses() {
+        assert!(!is_restricted(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_restricted(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(!is_restricted(IpAddr::V6("2606:4700:4700::1111".parse().unwrap())));
+    }
+
+    // ============ URL 归一化 ============
+
+    #[test]
+    fn test_normalize_github_blob_to_raw() {
+        let url = "https://github.com/user/repo/blob/main/tasks/index.json";
+        assert_eq!(
+            normalize_repo_url(url),
+            "https://raw.githubusercontent.com/user/repo/main/tasks/index.json"
+        );
+    }
+
+    #[test]
+    fn test_normalize_gitee_blob_to_raw() {
+        let url = "https://gitee.com/user/repo/blob/master/tasks/x.json";
+        assert_eq!(
+            normalize_repo_url(url),
+            "https://gitee.com/user/repo/raw/master/tasks/x.json"
+        );
+    }
+
+    #[test]
+    fn test_normalize_github_blob_at_branch_root() {
+        // blob/BRANCH 无子路径：转换到分支根目录
+        let url = "https://github.com/user/repo/blob/main";
+        assert_eq!(
+            normalize_repo_url(url),
+            "https://raw.githubusercontent.com/user/repo/main"
+        );
+    }
+
+    #[test]
+    fn test_normalize_keeps_non_blob_and_foreign_urls() {
+        // blob 段不足（仅 user/repo/blob 两段路径）：不满足 splitn(4) 的 4 段条件，原样返回
+        let plain = "https://github.com/user/repo/blob";
+        assert_eq!(normalize_repo_url(plain), plain);
+        // 非 github/gitee 域名：原样返回
+        let foreign = "https://example.com/a/b.txt";
+        assert_eq!(normalize_repo_url(foreign), foreign);
+        // 非法 URL：原样返回（不 panic）
+        assert_eq!(normalize_repo_url("not a url"), "not a url");
+        // 已是 raw 域名：不再重复转换
+        let raw = "https://raw.githubusercontent.com/user/repo/main/x.json";
+        assert_eq!(normalize_repo_url(raw), raw);
+    }
 }

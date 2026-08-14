@@ -90,11 +90,17 @@ pub struct GatewayInfo {
 /// 执行系统命令并返回 stdout，带超时
 async fn run_command(program: &str, args: &[&str]) -> Result<String, NetworkError> {
     let timeout = Duration::from_secs(SUBPROCESS_TIMEOUT_SECS);
-    let fut = tokio::process::Command::new(program)
-        .args(args)
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
+        .stderr(std::process::Stdio::piped());
+    // Windows：设置 CREATE_NO_WINDOW，避免 ipconfig/netsh 等系统命令弹出黑色控制台窗口
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let fut = cmd.output();
     let output = tokio::time::timeout(timeout, fut)
         .await
         .map_err(|_| NetworkError::SubprocessTimeout {

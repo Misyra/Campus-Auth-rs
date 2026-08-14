@@ -47,9 +47,10 @@ export const router = createRouter({
 });
 
 // 离开设置页且存在未保存修改时，确认是否放弃
-router.beforeEach(async (_to, from) => {
+router.beforeEach(async (to, from) => {
   const { dirty, fetchConfig, saveFailed } = useConfig();
-  if (dirty.value && from.path.startsWith("/settings")) {
+  // 仅当真正离开设置区域（含子路由）才拦截；设置页内部切换不打扰用户
+  if (dirty.value && from.path.startsWith("/settings") && !to.path.startsWith("/settings")) {
     const { confirm } = useConfirm();
     const ok = await confirm({
       title: "未保存的修改",

@@ -4,7 +4,7 @@
 
 Campus-Auth 是一个校园网自动认证工具。Rust 重写版为单 binary crate + Python 子进程（浏览器自动化），便携版解压即用。Rust 侧负责控制平面（网络监测、登录状态机、调度、配置、Web API、系统托盘），Python 侧作为按需执行插件负责浏览器自动化（Playwright）和 OCR（ddddocr）。
 
-当前版本：v5.0.0-alpha
+当前版本：5.0.0-alpha.1
 
 ## 技术栈
 
@@ -85,47 +85,53 @@ cd frontend && npm run build
 
 ### Lint
 
-启用 `clippy` 全部默认规则，CI 要求 `-D warnings` 零警告。
+启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `-D warnings` 零警告。
 
 ## 项目结构
 
 ```
 campus-auth/
 ├── Cargo.toml
+├── openapi.json              # Web API 契约（手写 baseline，前端 typegen 数据源）
+├── build.ps1                 # 便携版打包脚本
 ├── src/
-│   ├── main.rs                 # CLI 解析 → 启动分发
-│   ├── app.rs                  # Axum 服务器构建 + 托盘初始化
-│   ├── container.rs            # ServiceContainer: Arc 共享状态
-│   ├── launcher.rs             # 启动状态机 (full / lightweight / once)
-│   ├── engine/                 # 调度引擎（单 tokio task + select!）
-│   ├── monitor/                # 网络监测（TCP/HTTP/URL 探测）
-│   ├── login/                  # 登录编排（状态机、去重、抢占、重试）
-│   ├── config/                 # 配置系统（ArcSwap + 加密 + 迁移）
-│   ├── web/                    # Web API + WebSocket
-│   ├── scheduler/              # 定时任务（独立 tokio task）
-│   ├── tasks/                  # 任务管理
-│   ├── network/                # 网络接口 / SOCKS5
-│   ├── bridge/                 # Python Bridge（NDJSON IPC）
-│   ├── status/                 # StatusManager: 状态快照 + watch 推送
-│   ├── environment/            # 环境管理器（uv/python 按需安装）
-│   ├── updater/                # 版本更新（检查 + 下载 + 应用）
-│   ├── tray/                   # 系统托盘（tray-icon）
-│   └── utils/                  # 工具（PID 文件锁、平台特定代码）
-├── frontend/                   # Vue 3 + TypeScript + Vite
-├── python_worker/              # Python Worker 子进程（Playwright + OCR）
-├── tests/                      # 集成测试
-├── config/                     # 运行时配置（settings.json + profiles/）
-├── tasks/                      # 任务定义（JSON 驱动）
-└── resources/icons/            # 托盘图标
+│   ├── lib.rs                # 库入口：聚合全部模块 + 统一 ServiceHandle
+│   ├── main.rs               # CLI 解析 → 启动分发
+│   ├── helper_main.rs        # 更新替换助手（独立 binary：campus-auth-helper）
+│   ├── app.rs                # Axum 服务器构建 + 托盘初始化
+│   ├── container.rs          # ServiceContainer: Arc 共享状态
+│   ├── launcher.rs           # 启动状态机 (full / lightweight / once)
+│   ├── engine/               # 调度引擎（单 tokio task + select!）
+│   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
+│   ├── login/                # 登录编排（状态机、去重、抢占、重试）
+│   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）
+│   ├── web/                  # Web API + WebSocket
+│   ├── scheduler/            # 定时任务（独立 tokio task）
+│   ├── tasks/                # 任务管理
+│   ├── network/              # 网络接口 / SOCKS5
+│   ├── bridge/               # Python Bridge（NDJSON IPC）
+│   ├── status/               # StatusManager: 状态快照 + watch 推送
+│   ├── environment/          # 环境管理器（uv/python 按需安装）
+│   ├── updater/              # 版本更新（检查 + 下载 + 应用）
+│   ├── tray/                 # 系统托盘（tray-icon）
+│   └── utils/                # 工具（PID 文件锁、平台特定代码）
+├── frontend/                 # Vue 3 + TypeScript + Vite
+├── python_worker/            # Python Worker 子进程（Playwright + OCR）
+├── tests/                    # 集成测试（common/ 为共享辅助）
+├── docs/                     # 文档（changelog / 已知问题清单 / 任务编写指南）
+├── resources/                # 静态资源（icons/ 托盘与浏览器图标、tools/ 脚本）
+└── .github/workflows/        # CI（fmt + clippy + test + 前端构建）
 ```
 
 ## 架构要点
 
-### ServiceContainer（15 服务拓扑排序）
+### ServiceContainer（13 服务拓扑排序）
 
-所有服务通过 `Arc` 构造注入，无延迟绑定、无全局变量。构造顺序：
+所有服务通过 `Arc` 构造注入，无延迟绑定、无全局变量。构造顺序（见 `src/container.rs`）：
 
-ConfigService → ProfileService → LoginHistoryService → TaskManager → StatusManager → BridgeSupervisor → LoginOrchestrator → TaskExecutor → AutoStartService → DebugSessionManager → TaskRegistry + TaskHistoryStore → SchedulerService → Engine → WebSocketManager
+ConfigService → ProfileService → LoginHistoryService → StatusManager → TaskManager → BridgeSupervisor → EnvironmentManager → TaskExecutor → MonitorService → LoginOrchestrator → SchedulerService → UpdaterService → Engine
+
+另有横切组件：`Metrics`（运行指标）与 uptime 定时器。AutoStartService / DebugSessionManager / TaskRegistry / TaskHistoryStore / WebSocketManager 未独立成服务，相关功能由 TrayManager / Scheduler / Bridge 内聚实现。
 
 新增服务时在链中插入 `Arc::new(...)` 即可。
 
@@ -179,7 +185,6 @@ cargo test -- --nocapture
 
 - `tests/` 目录放集成测试（`assert_cmd` + `predicates`）
 - `src/` 内 `#[cfg(test)] mod tests` 放单元测试
-- HTTP mock 用 `wiremock`
 - 临时目录用 `tempfile`
 - 异步测试用 `#[tokio::test]`，时间控制用 `tokio::time::pause()`
 
@@ -189,10 +194,9 @@ cargo test -- --nocapture
 
 | 分支 | 用途 |
 |------|------|
-| `main` | 主分支，稳定版本 |
-| `dev` | 开发分支，功能分支从此创建 |
+| `master` | 主分支，稳定版本 |
 
-功能分支：`git checkout -b feat/my-feature`（从 dev 创建）
+功能分支：`git checkout -b feat/my-feature`（从 master 创建）
 
 ### Commit Message 格式
 

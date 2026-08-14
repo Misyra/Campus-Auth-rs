@@ -88,8 +88,11 @@ pub struct LoginResult {
 /// 分类规则：
 /// - `Success` → 终态（成功）
 /// - `Cancelled` → 终态（取消）
-/// - `InvalidCredential` / `CaptchaFailed` / `UnknownError` → 终态（失败，不重试）
-/// - `NavigationTimeout` / `SelectorFailed` / `NetworkError` → 可重试
+/// - `InvalidCredential` / `UnknownError` → 终态（失败，不重试）
+/// - `CaptchaFailed` / `NavigationTimeout` / `SelectorFailed` / `NetworkError` → 可重试
+///
+/// 验证码失败（OCR 误识别）与网络/导航失败同属瞬时性失败，难以可靠区分具体成因，
+/// 故统一重试整个登录流程（受 `max_retries` 预算约束），达到上限才以失败终态结束（历史遗留 #6）。
 ///
 /// `Outcome` 为 `#[non_exhaustive]`，未知变体兜底为终态（失败）。
 #[allow(unreachable_patterns)]
@@ -98,8 +101,8 @@ pub fn classify(outcome: Outcome) -> ResultAction {
         Outcome::Success => ResultAction::Terminal(TerminalKind::Success),
         Outcome::Cancelled => ResultAction::Terminal(TerminalKind::Cancelled),
         Outcome::InvalidCredential => ResultAction::Terminal(TerminalKind::Failed),
-        Outcome::CaptchaFailed => ResultAction::Terminal(TerminalKind::Failed),
         Outcome::UnknownError => ResultAction::Terminal(TerminalKind::Failed),
+        Outcome::CaptchaFailed => ResultAction::Retry,
         Outcome::NavigationTimeout => ResultAction::Retry,
         Outcome::SelectorFailed => ResultAction::Retry,
         Outcome::NetworkError => ResultAction::Retry,
@@ -361,7 +364,15 @@ impl LoginSession {
             // 本轮 attempt 结束，清除在途 cancel_id
             self.attempt_cancel_id.store(None);
 
-            match classify(structured.outcome) {
+            // 分类结果：可重试但重试预算已耗尽时归入 Exhausted（避免进入 try_retry）
+            // 后再次判断，保持"预算耗尽"这一决策与 classify 一起表达
+            let action = classify(structured.outcome);
+            let action = if action == ResultAction::Retry && attempts_used >= self.max_retries {
+                ResultAction::Exhausted
+            } else {
+                action
+            };
+            match action {
                 ResultAction::Terminal(kind) => match kind {
                     TerminalKind::Success => {
                         // 任务声明 success_condition → 信任 Worker 的变量真值判定，跳过网络检测兜底
@@ -454,7 +465,19 @@ impl LoginSession {
                     }
                 }
                 ResultAction::Exhausted => {
-                    unreachable!("classify() never returns Exhausted")
+                    // 可重试结果但重试预算已耗尽：以"重试耗尽"终态收尾，
+                    // 不再进入 try_retry 重复尝试（由下方 classify 前预算预检产生）
+                    self.emit(
+                        self.make_result(
+                            false,
+                            format!("重试耗尽（共 {} 次）", self.max_retries),
+                            session_start,
+                            attempts_used,
+                        ),
+                        HistoryResult::Failed,
+                    )
+                    .await;
+                    return;
                 }
             }
         }
@@ -728,12 +751,9 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_captcha_failed_is_terminal_failed() {
-        // 验证码失败当前硬编码为终态（DOC-2）
-        assert_eq!(
-            classify(Outcome::CaptchaFailed),
-            ResultAction::Terminal(TerminalKind::Failed)
-        );
+    fn test_classify_captcha_failed_is_retry() {
+        // 验证码失败（OCR 误识别）为瞬时性失败，重试整个流程（受 max_retries 预算约束）
+        assert_eq!(classify(Outcome::CaptchaFailed), ResultAction::Retry);
     }
 
     #[test]

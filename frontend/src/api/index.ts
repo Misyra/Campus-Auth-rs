@@ -2,7 +2,7 @@
  * API 端点函数集合。
  * 所有调用统一走此处，禁止在业务代码中直接 fetch。
  * 每个端点返回 client.ts 解包 .data 后的纯业务负载（成功时）。
- * 路径对齐 rust-rewrite/architecture/data-models.md 附录 A。
+ * 路径与后端 openapi.json 保持一致。
  */
 
 import { http } from "./client";

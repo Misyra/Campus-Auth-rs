@@ -411,3 +411,125 @@ fn json_merge(target: &mut Value, patch: &Value) {
         (t, p) => *t = p.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============ monitor 前后端字段映射（往返一致性） ============
+
+    fn sample_monitor() -> crate::config::MonitorSettings {
+        let mut url_expected = std::collections::HashMap::new();
+        url_expected.insert("http://a.com".to_string(), "OK".to_string());
+        crate::config::MonitorSettings {
+            enabled: true,
+            check_interval: 120,
+            tcp_targets: vec!["8.8.8.8:53".into()],
+            http_targets: vec!["http://b.com".into()],
+            url_targets: vec!["http://a.com".into()],
+            url_expected_responses: url_expected,
+            tcp_enabled: true,
+            http_enabled: false,
+            url_enabled: true,
+            profile_check_interval: 300,
+            tcp_timeout: 5,
+            http_timeout: 5,
+            url_timeout: 5,
+            auth_url_timeout: 5,
+            post_login_delay: 5,
+            bind_interface_name: "eth0".into(),
+        }
+    }
+
+    #[test]
+    fn monitor_backend_to_frontend_maps_url_check_urls() {
+        let front = monitor_backend_to_frontend(&sample_monitor());
+        // url_targets + 期望响应 → "url|expected" 合并
+        assert_eq!(
+            front["url_check_urls"],
+            serde_json::json!(["http://a.com|OK"])
+        );
+        assert_eq!(front["check_interval_seconds"], 120);
+        assert_eq!(front["ping_targets"], serde_json::json!(["8.8.8.8:53"]));
+        assert_eq!(front["enable_tcp_check"], serde_json::json!(true));
+        assert_eq!(front["bind_interface_name"], serde_json::json!("eth0"));
+    }
+
+    #[test]
+    fn monitor_backend_to_frontend_handles_url_without_expected() {
+        // url 无期望响应时，仅保留 url 本身
+        let m = crate::config::MonitorSettings {
+            url_expected_responses: Default::default(),
+            ..sample_monitor()
+        };
+        let front = monitor_backend_to_frontend(&m);
+        assert_eq!(front["url_check_urls"], serde_json::json!(["http://a.com"]));
+    }
+
+    #[test]
+    fn monitor_frontend_to_backend_splits_url_check_urls() {
+        let front = serde_json::json!({
+            "enable_tcp_check": true,
+            "check_interval_seconds": 60,
+            "ping_targets": ["1.1.1.1:53"],
+            "test_urls": ["http://c.com"],
+            "url_check_urls": [" http://a.com | OK ", "http://d.com"],
+            "network_check_timeout": 8,
+            "post_login_delay": 3,
+            "bind_interface_name": "wlan0",
+        });
+        let back = monitor_frontend_to_backend(&front);
+        assert_eq!(back["url_targets"], serde_json::json!(["http://a.com", "http://d.com"]));
+        assert_eq!(
+            back["url_expected_responses"]["http://a.com"],
+            serde_json::json!("OK")
+        );
+        assert!(back["url_expected_responses"].get("http://d.com").is_none());
+        assert_eq!(back["tcp_enabled"], serde_json::json!(true));
+        assert_eq!(back["check_interval"], serde_json::json!(60));
+        assert_eq!(back["bind_interface_name"], serde_json::json!("wlan0"));
+    }
+
+    #[test]
+    fn monitor_frontend_to_backend_ignores_non_object() {
+        assert_eq!(monitor_frontend_to_backend(&serde_json::json!(42)), serde_json::json!(42));
+    }
+
+    #[test]
+    fn monitor_roundtrip_preserves_url_expected() {
+        // backend → frontend → backend 应保持 url_targets 与期望响应
+        let original = sample_monitor();
+        let front = monitor_backend_to_frontend(&original);
+        let back = monitor_frontend_to_backend(&front);
+        assert_eq!(back["url_targets"], serde_json::json!(["http://a.com"]));
+        assert_eq!(back["url_expected_responses"]["http://a.com"], serde_json::json!("OK"));
+    }
+
+    // ============ json_merge ============
+
+    #[test]
+    fn json_merge_overrides_and_removes_keys() {
+        let mut target = serde_json::json!({"a": 1, "b": {"x": 1, "y": 2}, "c": 3});
+        let patch = serde_json::json!({"a": 99, "b": {"y": 20}, "c": null});
+        json_merge(&mut target, &patch);
+        assert_eq!(target["a"], 99);
+        assert_eq!(target["b"]["x"], 1); // 未覆盖的子 key 保留
+        assert_eq!(target["b"]["y"], 20);
+        assert!(target.get("c").is_none()); // null 删除
+    }
+
+    #[test]
+    fn json_merge_null_patch_removes_nested_key() {
+        let mut target = serde_json::json!({"b": {"x": 1, "y": 2}});
+        json_merge(&mut target, &serde_json::json!({"b": {"x": null}}));
+        assert!(target["b"].get("x").is_none());
+        assert_eq!(target["b"]["y"], 2);
+    }
+
+    #[test]
+    fn json_merge_scalar_replaces_object() {
+        let mut target = serde_json::json!({"a": {"nested": true}});
+        json_merge(&mut target, &serde_json::json!({"a": 5}));
+        assert_eq!(target["a"], 5);
+    }
+}

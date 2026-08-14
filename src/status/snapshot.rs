@@ -293,3 +293,127 @@ pub fn apply_partial(snapshot: &mut StatusSnapshot, partial: &PartialSnapshot) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Engine 变体：整体覆盖引擎相关字段，且不触碰其他字段
+    #[test]
+    fn test_apply_engine_partial() {
+        let mut s = StatusSnapshot::default();
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Engine {
+                state: EngineState::Running,
+                network: NetworkStatus::Online,
+                last_check: Local::now(),
+                pause: true,
+                cooling_down: true,
+                cooling_down_remaining: Some(120),
+                consecutive_failures: 3,
+            },
+        );
+        assert_eq!(s.engine_state, EngineState::Running);
+        assert_eq!(s.network_status, NetworkStatus::Online);
+        assert!(s.pause_active);
+        assert!(s.cooling_down);
+        assert_eq!(s.cooling_down_remaining, Some(120));
+        assert_eq!(s.consecutive_failures, 3);
+        assert!(s.last_check_time.is_some());
+        // 无关字段保持默认，不被覆盖
+        assert_eq!(s.login_status, LoginStatus::Idle);
+        assert_eq!(s.active_profile, "default");
+    }
+
+    /// Login 变体：覆盖登录状态字段
+    #[test]
+    fn test_apply_login_partial() {
+        let mut s = StatusSnapshot::default();
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Login {
+                status: LoginStatus::Running,
+                source: Some(LoginSource::Manual),
+                message: Some("正在认证".into()),
+                retry_count: 2,
+            },
+        );
+        assert_eq!(s.login_status, LoginStatus::Running);
+        assert_eq!(s.login_source, Some(LoginSource::Manual));
+        assert_eq!(s.login_message.as_deref(), Some("正在认证"));
+        assert_eq!(s.retry_count, 2);
+    }
+
+    /// Worker / Environment / Update 变体
+    #[test]
+    fn test_apply_worker_environment_update_partials() {
+        let mut s = StatusSnapshot::default();
+        apply_partial(&mut s, &PartialSnapshot::Worker { state: WorkerStatus::Busy });
+        assert_eq!(s.worker_state, WorkerStatus::Busy);
+
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Environment {
+                progress: Some(InstallProgress {
+                    phase: "uv".into(),
+                    percent: 50,
+                    message: "下载中".into(),
+                }),
+            },
+        );
+        assert_eq!(s.environment_progress.as_ref().map(|p| p.phase.as_str()), Some("uv"));
+        assert_eq!(s.environment_progress.as_ref().map(|p| p.percent), Some(50));
+
+        apply_partial(&mut s, &PartialSnapshot::Environment { progress: None });
+        assert!(s.environment_progress.is_none(), "None 应清空安装进度");
+
+        apply_partial(&mut s, &PartialSnapshot::Update { available: true });
+        assert!(s.update_available);
+    }
+
+    /// ActiveProfile / MonitorEnabled / Uptime / Scheduler 变体
+    #[test]
+    fn test_apply_profile_monitor_uptime_scheduler_partials() {
+        let mut s = StatusSnapshot::default();
+        apply_partial(&mut s, &PartialSnapshot::ActiveProfile { id: "dorm".into() });
+        assert_eq!(s.active_profile, "dorm");
+
+        apply_partial(&mut s, &PartialSnapshot::MonitorEnabled { enabled: false });
+        assert!(!s.monitor_enabled);
+
+        apply_partial(&mut s, &PartialSnapshot::Uptime(3600));
+        assert_eq!(s.uptime_seconds, 3600);
+
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Scheduler {
+                running: true,
+                next_fire_at: Some("2026-08-14T00:00:00Z".into()),
+                task_count: 5,
+            },
+        );
+        assert!(s.scheduler_running);
+        assert_eq!(s.scheduler_next_fire_at.as_deref(), Some("2026-08-14T00:00:00Z"));
+        assert_eq!(s.scheduler_task_count, 5);
+    }
+
+    /// 串行合并：多次部分更新按顺序叠加，后写覆盖先写
+    #[test]
+    fn test_serial_merge_accumulates() {
+        let mut s = StatusSnapshot::default();
+        apply_partial(&mut s, &PartialSnapshot::Uptime(10));
+        apply_partial(&mut s, &PartialSnapshot::Uptime(20));
+        assert_eq!(s.uptime_seconds, 20, "后写应覆盖先写");
+
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::ActiveProfile { id: "a".into() },
+        );
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::ActiveProfile { id: "b".into() },
+        );
+        assert_eq!(s.active_profile, "b");
+    }
+}

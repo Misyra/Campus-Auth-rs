@@ -13,6 +13,8 @@ use crate::engine::{
     ProbeDetails, MAX_IDLE_SLEEP_SECS, PROFILE_CHECK_INTERVAL_MIN, PROFILE_CHECK_INTERVAL_MAX,
 };
 use crate::status::{EngineState, LoginSource, NetworkStatus, PartialSnapshot};
+use crate::status::Notifier;
+use crate::login::LoginResult;
 
 /// 连续失败多少次后进入冷却期
 const COOLING_DOWN_THRESHOLD: u32 = 3;
@@ -41,12 +43,21 @@ struct EngineInner {
     consecutive_failures: u32,
     /// 冷却期截止时刻（None 表示不在冷却中）
     cooling_down_until: Option<Instant>,
+    /// 是否有 source=Auto 的登录会话在途
+    ///
+    /// 每轮 CaptivePortal 检测都会提交 Auto 登录，若上一轮会话仍在运行，
+    /// Orchestrator 去重会返回同一句柄——多个后台任务等待同一会话并各自
+    /// 回传结果，同一次登录被重复计数、冷却阈值被提前触发。此标记保证
+    /// 同一时刻只有一个 Auto 结果会被回传计数。
+    auto_login_in_flight: bool,
     /// 登录结果回传 sender（后台 spawn 的登录任务完成后通知主循环）
-    login_result_tx: mpsc::Sender<bool>,
+    login_result_tx: mpsc::Sender<LoginResult>,
+    /// 登录失败通知去重器（同 Profile 仅提醒一次，切换/成功后重置）
+    notifier: Notifier,
 }
 
 impl EngineInner {
-    fn new(login_result_tx: mpsc::Sender<bool>) -> Self {
+    fn new(login_result_tx: mpsc::Sender<LoginResult>) -> Self {
         Self {
             monitoring: false,
             last_network_status: NetworkStatus::Offline,
@@ -64,7 +75,9 @@ impl EngineInner {
             },
             consecutive_failures: 0,
             cooling_down_until: None,
+            auto_login_in_flight: false,
             login_result_tx,
+            notifier: Notifier::new(),
         }
     }
 }
@@ -76,8 +89,8 @@ pub(crate) async fn run_loop(
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
-    // 登录结果回传 channel（后台 spawn 的登录任务完成后通知主循环）
-    let (login_result_tx, mut login_result_rx) = mpsc::channel::<bool>(16);
+    // 登录结果回传 channel（后台 spawn 的登录任务完成后通知主循环，携带完整结果以区分来源）
+    let (login_result_tx, mut login_result_rx) = mpsc::channel::<LoginResult>(16);
     let mut inner = EngineInner::new(login_result_tx);
     loop {
         // 步骤 0：停止信号检查
@@ -110,9 +123,9 @@ pub(crate) async fn run_loop(
                     break;
                 }
             }
-            Some(success) = login_result_rx.recv() => {
+            Some(result) = login_result_rx.recv() => {
                 // 登录结果回传：更新连续失败计数与冷却状态
-                handle_login_result(success, &mut inner, &deps);
+                handle_login_result(result, &mut inner, &deps);
             }
             _ = inner.check_timer.tick() => {
                 // 定时器常驻，仅在监测中且未暂停时执行探测
@@ -168,10 +181,8 @@ async fn handle_start(inner: &mut EngineInner, deps: &EngineDeps) {
     merge_engine_state(inner, deps, EngineState::Running);
     // 立即执行一次检测
     handle_network_check(inner, deps).await;
-    // 用配置间隔重建定时器
-    let mut t = tokio::time::interval(check_interval_duration(deps));
-    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    inner.check_timer = t;
+    // 用配置间隔重建定时器（内部会消费首个立即 tick，避免紧随本次手动检测再探测一轮）
+    reset_check_timer(inner, deps).await;
     tracing::info!("监测已启动");
 }
 
@@ -195,10 +206,8 @@ async fn handle_reload(inner: &mut EngineInner, deps: &EngineDeps) {
             // 继续使用旧配置运行
         }
     }
-    // 用新配置重置检查间隔
-    let mut t = tokio::time::interval(check_interval_duration(deps));
-    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    inner.check_timer = t;
+    // 用新配置重置检查间隔（Reload 语义只改间隔，不应意外触发一次即时探测）
+    reset_check_timer(inner, deps).await;
 }
 
 async fn handle_apply_profile(
@@ -220,9 +229,7 @@ async fn handle_apply_profile(
     // 新 Profile 可能有不同的 auth_url / 凭证，重新判断网络状态
     if inner.monitoring {
         handle_network_check(inner, deps).await;
-        let mut t = tokio::time::interval(check_interval_duration(deps));
-        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        inner.check_timer = t;
+        reset_check_timer(inner, deps).await;
     }
 }
 
@@ -263,19 +270,18 @@ async fn handle_test_network(inner: &EngineInner, deps: &EngineDeps) -> Result<T
 
 async fn handle_pause(inner: &mut EngineInner, deps: &EngineDeps) {
     inner.manual_paused = true;
-    merge_engine_state(inner, deps, EngineState::Running);
+    // 监测未启动时不得把状态合并成 Running
+    merge_engine_state(inner, deps, engine_state_for(inner));
     tracing::info!("监测已暂停");
 }
 
 async fn handle_resume(inner: &mut EngineInner, deps: &EngineDeps) {
     inner.manual_paused = false;
-    merge_engine_state(inner, deps, EngineState::Running);
+    merge_engine_state(inner, deps, engine_state_for(inner));
     // 立即执行一次检测（不等待定时器到期）
     if inner.monitoring {
         handle_network_check(inner, deps).await;
-        let mut t = tokio::time::interval(check_interval_duration(deps));
-        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        inner.check_timer = t;
+        reset_check_timer(inner, deps).await;
     }
     tracing::info!("监测已恢复");
 }
@@ -286,13 +292,31 @@ async fn handle_shutdown(inner: &mut EngineInner, deps: &EngineDeps) {
 }
 
 /// 处理登录结果回传：更新连续失败计数与冷却状态
-fn handle_login_result(success: bool, inner: &mut EngineInner, deps: &EngineDeps) {
-    if success {
+///
+/// 仅 `source=Auto` 的失败计入冷却统计——Engine 的 Auto 提交可能去重复用
+/// Manual/Browser 会话（低优先级 Reuse 高优先级），用户手动登录的结果
+/// 与自动重试预算无关，混入会提前触发冷却。
+fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &EngineDeps) {
+    if result.source == LoginSource::Auto {
+        inner.auto_login_in_flight = false;
+    }
+    // 当前活跃 Profile 作为通知去重的键
+    let profile_id = deps.config_service.load_settings().active_profile_id;
+    if result.success {
         inner.consecutive_failures = 0;
         inner.cooling_down_until = None;
-        tracing::info!("登录成功，重置连续失败计数");
-    } else {
+        inner.notifier.on_login_success(&profile_id);
+        tracing::info!(source = ?result.source, "登录成功，重置连续失败计数");
+    } else if result.source == LoginSource::Auto {
         inner.consecutive_failures += 1;
+        // 登录失败通知去重：同一 Profile 首次失败才提醒，避免每次探测失败都刷屏
+        if inner.notifier.should_notify_login_failure(&profile_id) {
+            tracing::warn!(
+                target: "notification",
+                "登录失败（{} 已通知，后续同 Profile 失败静默）: profile={profile_id}",
+                profile_id
+            );
+        }
         tracing::warn!(
             "登录失败，连续失败次数: {}",
             inner.consecutive_failures
@@ -307,20 +331,28 @@ fn handle_login_result(success: bool, inner: &mut EngineInner, deps: &EngineDeps
             );
         }
     }
-    merge_engine_state(inner, deps, EngineState::Running);
+    // 监测已停止时不得把状态合并回 Running（后台登录任务可能在 Stop 后才完成）
+    let state = if inner.monitoring {
+        EngineState::Running
+    } else {
+        EngineState::Stopped
+    };
+    merge_engine_state(inner, deps, state);
 }
 
 /// 单次网络检查：探测 → 更新状态 → 按结论决定是否触发登录
 async fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
     // 周期性检测入口日志：稳定网络下状态不变也会触发，保证默认 info 级别下可见
     tracing::info!("周期性网络检测触发");
-    // 清除过期的冷却标记
+    // 清除过期的冷却标记；冷却期满后重置失败计数，
+    // 恢复完整的"连续失败 3 次"预算（否则第二轮起退化为失败 1 次即再冷却）
     if inner
         .cooling_down_until
         .map(|until| Instant::now() >= until)
         .unwrap_or(false)
     {
         inner.cooling_down_until = None;
+        inner.consecutive_failures = 0;
     }
     // 冷却期内检查：若仍在冷却则跳过登录
     let cooling_down = inner
@@ -377,15 +409,22 @@ async fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
                 );
                 return;
             }
+            // 上一轮 Auto 会话仍在途：跳过本轮触发。即使再提交也会被
+            // Orchestrator 去重复用同一会话，只会造成结果重复计数
+            if inner.auto_login_in_flight {
+                tracing::debug!("自动登录会话仍在途，跳过本轮触发");
+                return;
+            }
             // auth_url 不可达时不触发登录，避免无效尝试
             if report.auth_url_reachable != Some(false) {
                 tracing::info!("检测到门户劫持，触发自动登录");
+                inner.auto_login_in_flight = true;
                 let orchestrator = deps.orchestrator.clone();
                 let tx = inner.login_result_tx.clone();
                 tokio::spawn(async move {
                     let handle = orchestrator.submit(LoginSource::Auto, None, None).await;
                     let result = handle.await_result().await;
-                    let _ = tx.send(result.success).await;
+                    let _ = tx.send(result).await;
                 });
             } else {
                 tracing::info!("认证地址不可达，跳过本轮登录");
@@ -422,9 +461,32 @@ async fn check_profile_switch(inner: &mut EngineInner, deps: &EngineDeps) {
         let current = deps.config_service.runtime().load().profile.id.clone();
         if matched_id != current {
             tracing::info!("检测到网络变化，自动切换到 Profile: {}", matched_id);
+            // Profile 已切换：重置登录失败通知去重记录，允许新 Profile 失败时再次提醒
+            inner.notifier.on_profile_switch();
             handle_apply_profile(&matched_id, ProfileSwitchSource::AutoSwitch, inner, deps).await;
         }
     }
+}
+
+/// 按监测开关推导对外合并的 Engine 状态
+fn engine_state_for(inner: &EngineInner) -> EngineState {
+    if inner.monitoring {
+        EngineState::Running
+    } else {
+        EngineState::Stopped
+    }
+}
+
+/// 重建网络检查定时器并消费首个立即 tick
+///
+/// `tokio::time::interval` 的第一次 `tick()` 立即完成；调用方通常刚做过一次
+/// 手动检测（Start/Resume/ApplyProfile），不消费首 tick 会导致紧接着重复探测
+/// 一轮；Reload 语义只改间隔，更不应意外触发即时探测。
+async fn reset_check_timer(inner: &mut EngineInner, deps: &EngineDeps) {
+    let mut t = tokio::time::interval(check_interval_duration(deps));
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let _ = t.tick().await;
+    inner.check_timer = t;
 }
 
 /// 合并 Engine 状态到 StatusManager 快照

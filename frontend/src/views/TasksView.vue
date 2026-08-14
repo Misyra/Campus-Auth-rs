@@ -92,7 +92,7 @@ function closeEditor() { t.editingTask.value = null; }
       <!-- 任务编辑器 -->
       <div v-if="t.editingTask.value" class="card task-editor">
         <div class="card-header">
-          <h2>{{ (t.editingTask.value as any)._isNew ? '新建任务' : '编辑任务' }}</h2>
+          <h2>{{ t.editingTask.value._isNew ? '新建任务' : '编辑任务' }}</h2>
           <button class="btn btn-icon-only" @click="closeEditor">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -102,7 +102,7 @@ function closeEditor() { t.editingTask.value = null; }
         <div class="card-body">
           <div class="form-group">
             <label for="task-id">任务ID</label>
-            <input id="task-id" v-model="t.editingTask.value.id" type="text" placeholder="task_id" :disabled="!(t.editingTask.value as any)._isNew" />
+            <input id="task-id" v-model="t.editingTask.value.id" type="text" placeholder="task_id" :disabled="!t.editingTask.value._isNew" />
             <span class="hint">必须以字母开头，且只能包含字母、数字和下划线</span>
           </div>
           <div class="form-group">

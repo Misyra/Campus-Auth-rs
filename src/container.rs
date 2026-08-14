@@ -203,16 +203,21 @@ impl ServiceContainer {
         });
 
         // ---- 启动运行时长更新任务 ----
+        // 每秒周期更新：既写入 Metrics（/api/system 数据源），也通过 PartialSnapshot::Uptime
+        // 推送状态快照，保证 WebSocket 状态里的 uptime_seconds 与 /api/system 保持一致。
         let start_time = std::time::Instant::now();
         let cancel_for_task = container.uptime_cancel.clone();
         let metrics_for_uptime = container.metrics.clone();
+        let status_for_uptime = container.status.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel_for_task.cancelled() => break,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-                        metrics_for_uptime.set_uptime(start_time.elapsed().as_secs());
+                        let secs = start_time.elapsed().as_secs();
+                        metrics_for_uptime.set_uptime(secs);
+                        status_for_uptime.merge(crate::status::PartialSnapshot::Uptime(secs));
                     }
                 }
             }
@@ -246,6 +251,17 @@ impl ServiceContainer {
 impl Drop for ServiceContainer {
     fn drop(&mut self) {
         // 取消 uptime 定时器，使其干净退出（与 TrayManager 的 Drop 惯例一致）
+        self.uptime_cancel.cancel();
+    }
+}
+
+impl ServiceContainer {
+    /// 主动取消应用级关闭令牌
+    ///
+    /// 该令牌同时是 uptime 定时器的取消信号与登录会话的 shutdown 信号。
+    /// 优雅关闭时应在关闭 Bridge 之前调用，使在途登录 task 协作退出，
+    /// 避免其在 Bridge 关闭后仍引用已回收的 Worker（历史遗留 #8，错误洪泛风险）。
+    pub fn cancel_shutdown(&self) {
         self.uptime_cancel.cancel();
     }
 }

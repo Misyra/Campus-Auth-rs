@@ -15,7 +15,6 @@ evaluate / navigate / wait_for_selector / upload_file / custom），并兼容 Ru
 
 from __future__ import annotations
 
-import base64
 import logging
 import threading
 import time

@@ -32,9 +32,9 @@ use crate::utils::lock::InstanceLock;
 #[derive(Parser, Clone)]
 #[command(name = "campus-auth", version, about)]
 pub struct CliArgs {
-    /// 启动模式：完整 / 轻量 / 单次登录
-    #[arg(short, long, value_enum, default_value_t = RuntimeMode::Full)]
-    pub mode: RuntimeMode,
+    /// 启动模式：完整 / 轻量 / 单次登录（缺省时读 settings.json 的 app.runtime_mode）
+    #[arg(short, long, value_enum)]
+    pub mode: Option<RuntimeMode>,
 
     /// 基准路径（配置文件 / 任务 / 日志 的根目录）
     #[arg(long)]
@@ -135,7 +135,7 @@ pub(crate) struct LauncherState {
 /// 启动编排主入口（由 `main.rs` 调用）
 pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     // 1. 配置合并
-    let app_config = load_and_merge_config(&cli, base_path).await?;
+    let app_config = load_and_merge_config(&cli, base_path)?;
 
     // 2. 目录权限检查
     check_directory_permissions(&app_config.base_path)?;
@@ -197,6 +197,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
             log_tx: state.log_tx.clone(),
             port: state.app_config.port,
             lightweight: matches!(state.app_config.runtime_mode, RuntimeMode::Lightweight),
+            shutdown: state.shutdown_token.clone(),
         });
         state.tray_manager = Some(tray);
     }
@@ -219,17 +220,17 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
 // ============================================================
 
 /// 加载并合并配置：defaults -> settings.json -> CLI 覆盖
-async fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig> {
-    // 临时创建 ConfigService 读取 settings.json
-    let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
-    let config_service = crate::config::ConfigService::new(base_path.clone(), reload_tx).await?;
-    let settings = config_service.load_settings();
+fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig> {
+    // 轻量读取 settings.json 的启动字段，不创建完整 ConfigService——
+    // 正式容器在 run() 中统一初始化，避免重复目录 I/O / 迁移 / 解密（历史遗留 M2）。
+    let (file_port, file_show_tray, file_mode) = read_startup_settings(&base_path);
 
-    let port = cli.port.unwrap_or(settings.global.app.port as u16).max(1);
-    let runtime_mode = cli.mode.clone();
+    let port = cli.port.unwrap_or(file_port).max(1);
+    // CLI --mode 显式指定时优先生效；缺省时沿用 settings.json 的 app.runtime_mode
+    let runtime_mode = cli.mode.clone().unwrap_or(file_mode);
     let no_browser = cli.no_browser;
     // 托盘显示：CLI --no-tray 显式禁用，或配置 show_tray=false
-    let no_tray = cli.no_tray || !settings.global.app.show_tray;
+    let no_tray = cli.no_tray || !file_show_tray;
 
     Ok(AppConfig {
         port,
@@ -238,6 +239,43 @@ async fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppC
         no_browser,
         no_tray,
     })
+}
+
+/// 读取 settings.json 中的启动字段：端口、托盘显示、运行模式
+///
+/// 轻量读取（不创建完整 ConfigService——正式容器在 `run()` 中统一初始化，
+/// 避免重复目录 I/O / 迁移 / 解密，历史遗留 M2）。
+fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode) {
+    let default_port = crate::app::DEFAULT_PORT;
+    let default_mode = RuntimeMode::Full;
+    let settings_path = base_path
+        .join(crate::config::CONFIG_DIR)
+        .join(crate::config::SETTINGS_FILE);
+    let Ok(raw) = std::fs::read_to_string(&settings_path) else {
+        return (default_port, true, default_mode);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (default_port, true, default_mode);
+    };
+    let app = value.get("global").and_then(|g| g.get("app"));
+    let port = app
+        .and_then(|a| a.get("port"))
+        .and_then(|p| p.as_u64())
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(default_port);
+    let show_tray = app
+        .and_then(|a| a.get("show_tray"))
+        .and_then(|t| t.as_bool())
+        .unwrap_or(true);
+    // 配置里的 runtime_mode 此前从未被启动逻辑消费（设置页改了也不生效）
+    let runtime_mode = match app
+        .and_then(|a| a.get("runtime_mode"))
+        .and_then(|m| m.as_str())
+    {
+        Some("lightweight") => RuntimeMode::Lightweight,
+        _ => default_mode,
+    };
+    (port, show_tray, runtime_mode)
 }
 
 /// 检查关键目录的写入权限
@@ -327,31 +365,110 @@ async fn wait_for_lock_release(base_path: &Path) -> Result<()> {
 #[derive(Clone)]
 struct LocalTimer;
 
-/// 全局日志 filter（`Targets` 支持运行时动态调整 target 级别，实现 set_log_level 热更新）
-static LOG_TARGETS: OnceLock<tracing_subscriber::filter::Targets> = OnceLock::new();
+/// 全局日志 filter（`SharedTargets` 让多个 layer 共享同一份可变配置，支持热更新）
+static LOG_TARGETS: OnceLock<SharedTargets> = OnceLock::new();
 
-/// 热更新全局日志级别（由 `set_log_level` 调用）
+/// 共享动态日志 filter：多 layer 共享同一份可变 `Targets`
 ///
-/// 第三方库保持 WARN，本项目 target（campus_auth/frontend）设为指定级别。无效级别回退 INFO。
-pub fn reload_log_level(level: &str) {
-    use tracing_subscriber::filter::LevelFilter;
+/// `Targets` 是纯值类型：旧实现 `targets.clone().with_target(...)` 只修改被
+/// 丢弃的副本（且各 layer 持有独立 filter 副本），热更新从不生效。
+/// 此包装让三个 fmt layer 持有同一 `Arc<Mutex<Targets>>`，
+/// `reload_log_level` 整体替换内部值即可对所有层即时生效。
+#[derive(Clone, Default)]
+struct SharedTargets(Arc<std::sync::Mutex<tracing_subscriber::filter::Targets>>);
 
-    let lf = match level.to_ascii_uppercase().as_str() {
+impl SharedTargets {
+    /// 构造默认规则：第三方库 WARN，本项目 target（campus_auth/frontend）指定级别
+    fn build(lf: tracing_subscriber::filter::LevelFilter) -> Self {
+        Self::new(
+            tracing_subscriber::filter::Targets::new()
+                .with_default(tracing_subscriber::filter::LevelFilter::WARN)
+                .with_target("campus_auth", lf)
+                .with_target("frontend", lf),
+        )
+    }
+
+    fn new(targets: tracing_subscriber::filter::Targets) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(targets)))
+    }
+
+    /// 热更新：整体替换内部 Targets（各层下次判定即读到新值）
+    fn replace(&self, targets: tracing_subscriber::filter::Targets) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = targets;
+    }
+}
+
+impl<S> tracing_subscriber::layer::Filter<S> for SharedTargets {
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        cx: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        // UFCS 消歧：Targets 同时实现了 Layer 与 Filter 两个 trait
+        tracing_subscriber::layer::Filter::enabled(&*guard, metadata, cx)
+    }
+
+    fn callsite_enabled(
+        &self,
+        _metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        // filter 会动态变化，必须禁用 Interest 缓存：
+        // 否则级别调整前判为 never 的 callsite 会被缓存结果永久拦截
+        tracing::subscriber::Interest::sometimes()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        tracing_subscriber::layer::Filter::<()>::max_level_hint(&*guard)
+    }
+}
+
+/// 解析日志级别字符串（无效值回退 INFO）
+fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
+    use tracing_subscriber::filter::LevelFilter;
+    match level.to_ascii_uppercase().as_str() {
         "TRACE" => LevelFilter::TRACE,
         "DEBUG" => LevelFilter::DEBUG,
         "WARN" | "WARNING" => LevelFilter::WARN,
         "ERROR" => LevelFilter::ERROR,
         _ => LevelFilter::INFO,
-    };
-    let Some(targets) = LOG_TARGETS.get() else {
+    }
+}
+
+/// 从 settings.json 读取日志级别（`global.logging.level`），失败回退 INFO
+///
+/// 此前启动初始化硬编码 INFO，配置的级别只有重启且恰好走热更新路径才可能生效。
+fn read_initial_log_level(base_path: &Path) -> tracing_subscriber::filter::LevelFilter {
+    let path = base_path.join("config").join("settings.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("global")?
+                .get("logging")?
+                .get("level")?
+                .as_str()
+                .map(parse_level)
+        })
+        .unwrap_or(tracing_subscriber::filter::LevelFilter::INFO)
+}
+
+/// 热更新全局日志级别（由 `set_log_level` 调用）
+///
+/// 第三方库保持 WARN，本项目 target（campus_auth/frontend）设为指定级别。无效级别回退 INFO。
+pub fn reload_log_level(level: &str) {
+    let lf = parse_level(level);
+    let Some(shared) = LOG_TARGETS.get() else {
         tracing::warn!("日志 filter 未初始化，忽略级别切换");
         return;
     };
-    // clone 后链式调用：Targets 内部 Arc 指向同一共享状态，with_target 更新共享 filter
-    let _ = targets
-        .clone()
-        .with_target("campus_auth", lf)
-        .with_target("frontend", lf);
+    shared.replace(
+        tracing_subscriber::filter::Targets::new()
+            .with_default(tracing_subscriber::filter::LevelFilter::WARN)
+            .with_target("campus_auth", lf)
+            .with_target("frontend", lf),
+    );
     tracing::info!("日志级别已热更新为 {}", lf);
 }
 
@@ -425,13 +542,10 @@ fn init_file_logging(
     // 删除超过保留天数的旧轮转文件，避免日志无限累积（对齐原项目 loguru retention）。
     cleanup_old_logs(&logs_dir, read_retention_days(base_path));
 
-    // 动态 filter：`Targets` 支持运行时调整级别（set_log_level 热更新）。
-    // 第三方库默认 WARN，本项目 target（campus_auth/frontend）默认 INFO。
-    let targets = tracing_subscriber::filter::Targets::new()
-        .with_default(tracing_subscriber::filter::LevelFilter::WARN)
-        .with_target("campus_auth", tracing_subscriber::filter::LevelFilter::INFO)
-        .with_target("frontend", tracing_subscriber::filter::LevelFilter::INFO);
-    let _ = LOG_TARGETS.set(targets.clone());
+    // 动态 filter：三个 layer 共享同一 SharedTargets（热更新入口见 reload_log_level）。
+    // 初始级别读自 settings.json 的 logging.level（此前硬编码 INFO 导致配置不生效）。
+    let shared = SharedTargets::build(read_initial_log_level(base_path));
+    let _ = LOG_TARGETS.set(shared.clone());
 
     // 本地时区计时器：YYYY-MM-DD HH:MM:SS 格式
     let local_timer = LocalTimer;
@@ -441,7 +555,7 @@ fn init_file_logging(
         .with_target(true)
         .with_writer(std::io::stderr)
         .with_timer(local_timer.clone())
-        .with_filter(targets.clone());
+        .with_filter(shared.clone());
 
     // 文件层：JSON 格式按日轮转
     let file_appender = tracing_appender::rolling::daily(&logs_dir, "app.log");
@@ -452,7 +566,7 @@ fn init_file_logging(
         .with_target(true)
         .with_timer(local_timer.clone())
         .json()
-        .with_filter(targets.clone());
+        .with_filter(shared.clone());
 
     // 广播层：将 tracing 事件转发到 broadcast channel 供 WebSocket 推送
     let broadcast_layer = tracing_subscriber::fmt::layer()
@@ -460,7 +574,7 @@ fn init_file_logging(
         .with_ansi(false)
         .with_target(true)
         .without_time()
-        .with_filter(targets);
+        .with_filter(shared);
 
     if let Err(e) = tracing_subscriber::registry()
         .with(console_layer)
@@ -608,7 +722,12 @@ fn parse_log_line(line: &str) -> crate::web::state::LogEntry {
 
 /// 完整模式：全部服务 + Axum + 托盘，阻塞等待退出信号
 async fn launch_full(state: &mut LauncherState) -> Result<()> {
-    let container = state.container.as_ref().unwrap().clone();
+    // 容器缺失属逻辑不变量违反，防御性返回错误而非 panic（历史遗留 #11）
+    let container = state
+        .container
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("服务容器尚未初始化"))?
+        .clone();
 
     // 启动 Axum
     match app::start_axum(container.clone(), state.log_tx.clone(), state.app_config.port).await {
@@ -642,6 +761,11 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         state.tray_handle = Some(tray.spawn());
     }
 
+    // 按 startup_action 派发启动动作（Monitor / LoginOnce）
+    if let Some(container) = state.container.as_ref() {
+        apply_startup_action(container).await;
+    }
+
     // 后台更新检查
     spawn_background_update_check(state);
 
@@ -661,6 +785,10 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
         state.tray_handle = Some(tray.spawn());
     }
 
+    if let Some(container) = state.container.as_ref() {
+        apply_startup_action(container).await;
+    }
+
     if let Some(ref lock) = state.instance_lock {
         let _ = lock.record_port(state.app_config.port);
     }
@@ -674,9 +802,51 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     Ok(())
 }
 
+/// 按 settings.global.app.startup_action 派发启动动作
+///
+/// 该配置此前只有写入点（CLI --startup-action / autostart API），从未被启动
+/// 逻辑消费——默认值 Monitor 的语义"启动后进入监测"实际从未生效，
+/// Engine 一直以 monitoring=false 空转等待用户手动触发。
+async fn apply_startup_action(container: &Arc<ServiceContainer>) {
+    let settings = container.config.load_settings();
+    match settings.global.app.startup_action {
+        StartupAction::Monitor => {
+            match container
+                .engine_handle
+                .engine
+                .dispatch(crate::engine::EngineCommand::Start)
+                .await
+            {
+                Ok(()) => info!("按 startup_action=monitor 已启动监测"),
+                Err(e) => warn!("按 startup_action 启动监测失败: {e:?}"),
+            }
+        }
+        StartupAction::LoginOnce => {
+            info!("按 startup_action=login_once 触发单次登录");
+            let orchestrator = container.login.clone();
+            tokio::spawn(async move {
+                let handle = orchestrator
+                    .submit(crate::status::LoginSource::LoginOnce, None, None)
+                    .await;
+                let result = handle.await_result().await;
+                if result.success {
+                    info!(message = %result.message, "启动单次登录成功");
+                } else {
+                    warn!(message = %result.message, "启动单次登录失败");
+                }
+            });
+        }
+        StartupAction::None => {}
+    }
+}
+
 /// 单次登录模式：执行一次登录后退出
 async fn launch_login_once(state: &mut LauncherState) -> Result<()> {
-    let container = state.container.as_ref().unwrap();
+    // 容器缺失属逻辑不变量违反，防御性返回错误而非 panic（历史遗留 #11）
+    let container = state
+        .container
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("服务容器尚未初始化"))?;
 
     info!("单次登录模式");
     let handle = container
@@ -709,7 +879,11 @@ async fn launch_login_once(state: &mut LauncherState) -> Result<()> {
 /// - 重启的 Engine 拥有 `EngineHandle` 所有权，通过 `into_result()` 区分
 ///   panic（Err）与正常退出（Ok），仅在 panic 时继续重启。
 fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
-    let container = state.container.as_ref().unwrap().clone();
+    // 容器缺失属逻辑不变量违反，防御性降级为 no-op 任务，避免 panic（历史遗留 #11）
+    let Some(container_ref) = state.container.as_ref() else {
+        return tokio::spawn(async {});
+    };
+    let container = container_ref.clone();
     let status = container.status.clone();
     let config = container.config.clone();
     let profile_service = container.profiles.clone();
@@ -727,6 +901,12 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
             biased;
             _ = shutdown_token.cancelled() => return,
             _ = container.engine_handle.completed.notified() => {}
+        }
+
+        // 应用正在关闭（graceful_shutdown 会取消令牌）：初始 Engine 的退出
+        // 属预期行为，直接返回，绝不重启
+        if shutdown_token.is_cancelled() {
+            return;
         }
 
         let mut restart_count: u32 = 0;
@@ -816,6 +996,12 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
 async fn graceful_shutdown(state: &mut LauncherState) {
     info!("正在关闭...");
 
+    // 0. 立即取消应用级关闭令牌：
+    // - wait_for_shutdown 各监听分支（若尚未返回）被唤醒
+    // - watch_engine 收到 Engine 完成通知后据此区分"应用关闭"与"Engine 崩溃"，
+    //   避免关闭流程中被重启出新 Engine（托盘退出曾因此留下无托盘的僵尸进程）
+    state.shutdown_token.cancel();
+
     // 1. 关闭 TrayManager（先停泵任务，再 drop）
     if let Some(handle) = state.tray_handle.take() {
         if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(3), handle.stop()).await {
@@ -845,6 +1031,21 @@ async fn graceful_shutdown(state: &mut LauncherState) {
     if let Some(tx) = state.latest_engine_cmd_tx.lock().await.take() {
         let _ = tx.send(crate::engine::EngineCommand::Shutdown).await;
     }
+    // 取消应用级关闭令牌：同时让在途登录 task（detached，Engine 不持有其句柄）协作退出，
+    // 避免其在 Bridge 关闭后仍引用已回收的 Worker（历史遗留 #8，错误洪泛风险）。
+    if let Some(container) = &state.container {
+        container.cancel_shutdown();
+        // 等待 Engine run_loop 完全退出后再关 Bridge，保证 Engine 侧不再发起 Bridge 调用
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            container.engine_handle.completed.notified(),
+        )
+        .await
+        .is_err()
+        {
+            warn!("Engine 关闭超时，继续关闭 Bridge");
+        }
+    }
 
     // 4. 关闭 BridgeSupervisor：停止 supervisor 主循环（内部回收 Worker）并等待 task 退出。
     // 通过 ServiceHandle::stop 发送停止信号并 join，避免 supervisor task 与残留子进程泄漏
@@ -858,14 +1059,9 @@ async fn graceful_shutdown(state: &mut LauncherState) {
         }
     }
 
-    // 5. 关闭 Axum
+    // 5. 关闭 Axum（内部含超时与 abort，历史遗留 #18）
     if let Some(handle) = state.axum_handle.take() {
-        if tokio::time::timeout(std::time::Duration::from_secs(5), app::stop_axum(handle))
-            .await
-            .is_err()
-        {
-            warn!("Axum 关闭超时，强制中止");
-        }
+        app::stop_axum(handle).await;
     }
 
     // 6. 清理运行端口文件

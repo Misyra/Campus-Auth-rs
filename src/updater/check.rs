@@ -220,3 +220,82 @@ pub(crate) fn compare_versions(current: &Version, remote: &Version) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).expect("测试用合法版本号")
+    }
+
+    /// 远程版本不新于当前版本时一律不更新
+    #[test]
+    fn test_compare_versions_not_newer() {
+        assert!(!compare_versions(&v("1.0.0"), &v("0.9.0")));
+        assert!(!compare_versions(&v("1.0.0"), &v("1.0.0")));
+        // 预发布 < 正式版，即使版本号数值前缀相同
+        assert!(!compare_versions(&v("1.0.0"), &v("1.0.0-alpha")));
+    }
+
+    /// 当前为正式版：接受任何更新的远程版本
+    #[test]
+    fn test_compare_versions_stable_accepts_any_newer() {
+        assert!(compare_versions(&v("1.0.0"), &v("1.0.1")));
+        assert!(compare_versions(&v("1.0.0"), &v("2.0.0")));
+        // 远程为预发布且不新于当前正式版 → 拒绝（1.0.0-beta.1 < 1.0.0）
+        assert!(!compare_versions(&v("1.0.0"), &v("1.0.0-beta.1")));
+        // 远程预发布版号高于当前正式版号 → 接受
+        assert!(compare_versions(&v("1.0.0"), &v("1.1.0-beta.1")));
+    }
+
+    /// 当前为预发布版：仅接受预发布标识符前缀一致的远程版本
+    #[test]
+    fn test_compare_versions_prerelease_prefix_match() {
+        // alpha 前缀一致 → 接受
+        assert!(compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0-alpha.2")));
+        assert!(compare_versions(&v("5.0.0-alpha"), &v("5.0.0-alpha.1")));
+        // 前缀不一致 → 拒绝（alpha → beta / 正式版）
+        assert!(!compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0-beta.1")));
+        assert!(!compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0")));
+        assert!(!compare_versions(&v("5.0.0-beta.1"), &v("5.0.0-alpha.2")));
+    }
+
+    /// 平台选择：命中当前平台键返回对应包，否则 None
+    #[test]
+    fn test_select_platform() {
+        let mut platforms = HashMap::new();
+        platforms.insert(
+            CURRENT_PLATFORM_KEY.to_string(),
+            PlatformPackage {
+                url: "https://example.com/pkg.zip".into(),
+                sha256: String::new(),
+                size: None,
+                sig_url: None,
+            },
+        );
+        let manifest = ReleaseManifest {
+            version: v("1.0.0"),
+            release_date: None,
+            changelog: None,
+            platforms,
+        };
+        let picked = select_platform(&manifest).expect("当前平台应有下载包");
+        assert_eq!(picked.url, "https://example.com/pkg.zip");
+
+        let empty = ReleaseManifest {
+            version: v("1.0.0"),
+            release_date: None,
+            changelog: None,
+            platforms: HashMap::new(),
+        };
+        assert!(select_platform(&empty).is_none(), "无匹配平台应返回 None");
+    }
+
+    /// 预发布标识符首分量解析（pre_first 的间接验证）
+    #[test]
+    fn test_compare_versions_same_major_different_minor() {
+        // 预发布链中版本号本身也在推进，须同时满足"更新"与"前缀一致"
+        assert!(compare_versions(&v("5.0.0-alpha.1"), &v("5.1.0-alpha.1")));
+    }
+}

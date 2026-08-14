@@ -152,6 +152,7 @@
   min-height: 0;
   font-family: var(--font-mono);
   font-size: 13px;
+  scroll-behavior: smooth;
   will-change: scroll-position;
 }
 
@@ -178,11 +179,13 @@
 }
 
 .log-entry {
-  display: flex;
-  gap: 12px;
-  padding: 8px 12px;
+  display: grid;
+  grid-template-columns: 108px 44px auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 12px;
   border-radius: 6px;
-  transition: background 0.2s ease;
+  transition: background 0.15s ease;
   contain: content;
   border-left: 2px solid transparent;
 }
@@ -192,9 +195,18 @@
   border-left-color: var(--accent);
 }
 
+/* 级别左边框色条：一眼识别严重程度 */
+.log-entry.log-error { border-left-color: var(--error); }
+.log-entry.log-warn, .log-entry.log-warning { border-left-color: var(--warning); }
+.log-entry.log-info { border-left-color: transparent; }
+.log-entry.log-debug, .log-entry.log-trace { border-left-color: rgba(148, 163, 184, 0.35); }
+
 .log-time {
   color: var(--text-muted);
-  flex-shrink: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .log-meta {
@@ -205,12 +217,18 @@
 .log-message {
   word-break: break-all;
   font-family: var(--font-mono);
+  color: var(--text-secondary);
 }
 
+.log-entry.log-error .log-message { color: var(--error); }
+.log-entry.log-warn .log-message, .log-entry.log-warning .log-message { color: var(--warning); }
+.log-entry.log-success .log-message { color: var(--success); }
+
+/* 消息 + 截图容器 */
 .log-content {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -236,18 +254,6 @@
 .log-screenshot-preview:hover {
   transform: scale(1.02);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-}
-
-.log-message.success {
-  color: var(--success);
-}
-
-.log-message.warning {
-  color: var(--warning);
-}
-
-.log-message.error {
-  color: var(--error);
 }
 
 /* 登录历史卡片 */

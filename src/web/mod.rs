@@ -1,7 +1,7 @@
 //! Web 模块：Axum Router 构建
 //!
 //! 负责组装所有 HTTP 路由、WebSocket 端点与静态文件服务。
-//! 路由路径严格对齐 `rust-rewrite/architecture/data-models.md` 附录 A。
+//! 路由路径与根目录 `openapi.json` 保持一致。
 
 pub mod error;
 mod routes;
@@ -221,9 +221,16 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::tools::task_recorder),
         );
 
-    // CORS：镜像请求 Origin，彻底解除端口耦合（本地前端任意端口均可访问）
+    // CORS：仅放行本机 Origin（开发期 Vite dev server 与生产同源均覆盖）。
+    // 此前使用 mirror_request 镜像任意 Origin，等于允许任意网站跨域读写
+    // 本地 API（配合无鉴权可触发删除任务、关闭应用等危险操作）。
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::mirror_request())
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            let s = origin.to_str().unwrap_or("");
+            s.starts_with("http://127.0.0.1:")
+                || s.starts_with("http://localhost:")
+                || s.starts_with("http://[::1]:")
+        }))
         .allow_methods(AllowMethods::any())
         .allow_headers(AllowHeaders::any());
 
@@ -234,6 +241,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api)
         // WebSocket
         .route("/ws/logs", get(ws::logs_handler))
+        // openapi.json（嵌入，生产可用）
+        .route("/openapi.json", get(static_files::openapi_handler))
         // 静态文件（所有未匹配路由 → SPA 回退）
         .fallback(static_files::handler)
         .layer(compression)

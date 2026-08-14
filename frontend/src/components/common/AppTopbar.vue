@@ -16,7 +16,7 @@ const router = useRouter();
 const { dirty } = useConfig();
 const { status, busy } = useStatus();
 const { notifications, unreadNotifications, showNotifications, toggleNotifications } = useNotifications();
-const { wsReconnecting, wsRetryCount, wsMaxRetries } = useWebSocket();
+const { wsReconnecting, wsRetryCount } = useWebSocket();
 const { toggleMonitor } = useUi();
 
 const pageTitle = computed(() => (route.meta.title as string) || "校园网认证");
@@ -41,7 +41,7 @@ function onActionClick(action: NotificationAction | null): void {
     <div class="top-actions">
       <div v-if="wsReconnecting" class="ws-reconnect-bar ws-reconnect-inline">
         <span class="spinner"></span>
-        重连中 ({{ wsRetryCount }}/{{ wsMaxRetries }})
+        重连中 (第 {{ wsRetryCount + 1 }} 次)
       </div>
       <div class="notification-wrapper">
         <button

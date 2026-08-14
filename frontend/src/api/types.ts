@@ -118,7 +118,8 @@ export interface MonitorConfig {
   url_check_urls: string[];
   script_timeout: number;
   post_login_delay: number;
-  bind_interface_name: string;
+  // 网卡绑定：后端仅预留 EgressBinder 接口未实现，字段暂不暴露（配置往返保真见 constants.ts 注释）
+  // bind_interface_name: string;
 }
 
 /** 暂停时段配置 */

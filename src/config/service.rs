@@ -100,6 +100,8 @@ struct SettingsCache {
     data: Option<SettingsData>,
     /// 上次读取时的文件修改时间
     mtime: Option<SystemTime>,
+    /// 磁盘文件损坏且无缓存可用（隔离态：拒绝保存，防止默认值覆盖用户配置）
+    poisoned: bool,
 }
 
 /// 单个 Profile 的内存缓存 + mtime
@@ -215,6 +217,7 @@ impl ConfigService {
             settings_cache: Mutex::new(SettingsCache {
                 data: Some(settings.clone()),
                 mtime: settings_mtime,
+                poisoned: false,
             }),
             profile_cache: Mutex::new(HashMap::new()),
             crypto,
@@ -271,10 +274,21 @@ impl ConfigService {
                 let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 c.data = Some(s.clone());
                 c.mtime = mtime;
+                // 文件恢复可解析（可能被外部修复），解除隔离
+                c.poisoned = false;
                 s
             }
             Err(e) => {
-                tracing::warn!("settings.json 解析失败，使用默认配置: {e}");
+                // 损坏时绝不静默返回默认值：调用方随后的"读→改→存"会用
+                // 默认值原子覆盖用户的原始配置，造成配置数据丢失。
+                // 有缓存则沿用旧快照；无缓存则进入隔离态并拒绝后续保存。
+                let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
+                if let Some(prev) = c.data.clone() {
+                    tracing::warn!("settings.json 解析失败，沿用内存缓存: {e}");
+                    return prev;
+                }
+                tracing::error!("settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝）: {e}");
+                c.poisoned = true;
                 SettingsData::default()
             }
         }
@@ -282,6 +296,12 @@ impl ConfigService {
 
     /// 原子写入 settings.json
     pub async fn save_settings(&self, data: &SettingsData) -> Result<(), ConfigError> {
+        // 隔离态拒绝保存：防止基于降级默认值的修改覆盖损坏前的用户配置
+        if self.settings_cache.lock().unwrap_or_else(recover_lock).poisoned {
+            return Err(ConfigError::ConfigWriteError {
+                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
+            });
+        }
         let _guard = self.save_mutex.lock().await;
         Self::atomic_write_json(&self.settings_path, data).await?;
         let mtime = std::fs::metadata(&self.settings_path)
@@ -379,8 +399,24 @@ impl ConfigService {
         Ok(())
     }
 
-    /// 重新读取配置 + 构建 RuntimeConfig + 原子替换 + 发通知
+    /// 重新读取配置 + 构建 RuntimeConfig + 原子替换 + 发通知（默认 `GlobalChanged`）
     pub async fn reload(&self) -> Result<(), ConfigError> {
+        self.reload_with_signal(ConfigReloadSignal::GlobalChanged)
+            .await
+    }
+
+    /// 重新读取配置并发送指定变更信号
+    ///
+    /// 供仅改了某个子集的调用方使用（如切换 Profile），避免调度器对无关变更做全量任务重载。
+    pub async fn reload_with_signal(&self, signal: ConfigReloadSignal) -> Result<(), ConfigError> {
+        self.reload_inner(signal).await
+    }
+
+    /// reload 的内部实现：与写路径（save_settings / save_profile / delete_profile）互斥
+    async fn reload_inner(&self, signal: ConfigReloadSignal) -> Result<(), ConfigError> {
+        // settings 与 profile 是两步独立读取，若并发写插入其间会产生混合快照
+        // （新全局配置 + 旧 Profile，或反之）。持锁读完即释放，不阻塞后续写（历史遗留 M8）。
+        let _guard = self.save_mutex.lock().await;
         // 保存旧快照，用于比较非热更字段
         let old = self.runtime.load().as_ref().clone();
         // 强制绕过 mtime 缓存
@@ -393,7 +429,7 @@ impl ConfigService {
         self.build_and_swap_runtime(&settings, &active_profile).await?;
         // 非热更字段变更提示（如端口、运行模式等）
         Self::log_non_hot_reload_changes(&old, self.runtime.load().as_ref());
-        let _ = self.reload_tx.send(ConfigReloadSignal::GlobalChanged).await;
+        let _ = self.reload_tx.send(signal).await;
         Ok(())
     }
 
@@ -472,11 +508,9 @@ impl ConfigService {
                 to: crate::config::CURRENT_CONFIG_VERSION,
                 reason: e.to_string(),
             })?;
-            // commit point：写回迁移后的 settings（原子写入，防止中途崩溃导致文件损坏）
+            // commit point：写回迁移后的 settings（同步 fsync，防止掉电导致版本回退重跑迁移）
             let json = serde_json::to_string_pretty(&value)?;
-            let tmp = settings_path.with_extension("json.tmp");
-            std::fs::write(&tmp, &json)?;
-            std::fs::rename(&tmp, settings_path)?;
+            Self::atomic_write_json_sync(settings_path, &json)?;
         }
 
         serde_json::from_value(value).map_err(|_| ConfigError::ConfigParseError {
@@ -514,6 +548,33 @@ impl ConfigService {
             path: path.to_string_lossy().to_string(),
             backup_path: None,
         })
+    }
+
+    /// 同步原子写入字符串到文件（tmp + sync_all + rename + 父目录 fsync）
+    ///
+    /// 供同步上下文中需要持久化保证的写回使用（如配置迁移写回），
+    /// 与 [`Self::atomic_write_json`] 保证一致。
+    fn atomic_write_json_sync(path: &Path, content: &str) -> Result<(), ConfigError> {
+        let tmp = path.with_extension("json.tmp");
+        {
+            use std::io::Write;
+            let mut file =
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&tmp)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, path)?;
+        // 父目录 fsync（确保目录项持久化）
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
     }
 
     /// 原子写入 JSON 文件（tmp + sync_all + rename + 父目录 fsync）

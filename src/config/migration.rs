@@ -201,3 +201,166 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一个 v5 结构的 settings.json JSON 值（含旧字段名与废弃字段）
+    fn v5_settings() -> Value {
+        serde_json::json!({
+            "config_version": 1,
+            "active_profile_id": "default",
+            "auto_switch": true,
+            "profiles": {
+                "default": {
+                    "name": "默认",
+                    "username": "u",
+                    "password": "ENC:abc",
+                    "carrier": "移动",
+                    "match_gateway_ip": "192.168.1.1",
+                    "match_ssid": "campus",
+                    "carrier_custom": "custom",
+                }
+            },
+            "global": {
+                "monitor": {
+                    "check_interval_seconds": 30,
+                    "enable_tcp_check": true,
+                    "enable_http_check": false,
+                    "enable_local_check": true,
+                    "ping_targets": ["1.1.1.1"],
+                    "test_urls": ["http://test"],
+                    "url_check_urls": ["http://apple|Success"],
+                    "access_log": true,
+                    "block_proxy": false,
+                    "network_check_timeout": 5,
+                    "check_auth_url": true,
+                    "auth_url_targets": []
+                },
+                "logging": {
+                    "log_retention_days": 7
+                },
+                "app": {
+                    "app_port": 50721,
+                    "auto_open_browser": true,
+                    "shell_path": "cmd",
+                    "lightweight_tray": false,
+                    "minimize_to_tray": false,
+                    "proxy": null
+                }
+            }
+        })
+    }
+
+    /// 读取拆分出的 profile 文件内容
+    fn read_profile(config_dir: &Path, id: &str) -> Value {
+        let path = config_dir.join("profiles").join(format!("{id}.json"));
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_migrate_v5_to_v6_renames_global_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = v5_settings();
+
+        migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
+
+        // monitor 子段重命名
+        let monitor = &v["global"]["monitor"];
+        assert_eq!(monitor["check_interval"], 30);
+        assert_eq!(monitor["tcp_enabled"], true);
+        assert_eq!(monitor["http_enabled"], false);
+        assert_eq!(monitor["url_enabled"], true);
+        assert_eq!(monitor["tcp_targets"][0], "1.1.1.1");
+        assert_eq!(monitor["http_targets"][0], "http://test");
+        assert_eq!(monitor["url_targets"][0], "http://apple|Success");
+        // 废弃字段已删除
+        for f in [
+            "check_interval_seconds",
+            "enable_tcp_check",
+            "ping_targets",
+            "access_log",
+            "block_proxy",
+            "network_check_timeout",
+        ] {
+            assert!(monitor.get(f).is_none(), "废弃字段 {f} 应被删除");
+        }
+        // logging / app 重命名
+        assert_eq!(v["global"]["logging"]["retention_days"], 7);
+        assert_eq!(v["global"]["app"]["port"], 50721);
+        assert_eq!(v["global"]["app"]["auto_start_browser"], true);
+        assert!(v["global"]["app"].get("app_port").is_none());
+        assert!(v["global"]["app"].get("shell_path").is_none());
+    }
+
+    #[test]
+    fn test_migrate_v5_to_v6_splits_profiles_and_renames_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = v5_settings();
+
+        migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
+
+        // profiles 已拆分到独立文件
+        let p = read_profile(tmp.path(), "default");
+        assert_eq!(p["id"], "default");
+        assert_eq!(p["name"], "默认");
+        assert_eq!(p["password"], "ENC:abc");
+        // profile 字段重命名
+        assert_eq!(p["isp"], "移动");
+        assert_eq!(p["gateway_ip"], "192.168.1.1");
+        assert_eq!(p["wifi_ssid"], "campus");
+        // 废弃字段删除
+        assert!(p.get("carrier").is_none());
+        assert!(p.get("carrier_custom").is_none());
+        // settings 中不再包含 profiles
+        assert!(v.get("profiles").is_none());
+        // 版本号已提交
+        assert_eq!(v["config_version"], 6);
+    }
+
+    #[test]
+    fn test_run_migrations_skips_when_version_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 已是 v6：不产生任何文件、不修改值
+        let mut v = serde_json::json!({
+            "config_version": 6,
+            "active_profile_id": "default",
+        });
+        let result = run_migrations(tmp.path(), &mut v).unwrap();
+        assert_eq!(result, crate::config::CURRENT_CONFIG_VERSION);
+        assert_eq!(v["active_profile_id"], "default");
+        // 未创建 profiles 目录（无迁移发生）
+        assert!(!tmp.path().join("profiles").exists());
+    }
+
+    #[test]
+    fn test_migrate_v5_to_v6_is_idempotent() {
+        // 迁移后的值再次迁移不改变结构（版本前置检查保证不重复执行，此处验证值本身稳定）
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = v5_settings();
+        migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
+        let first = v.clone();
+
+        // 手动把版本降回 1 再执行（模拟异常路径下的重入）
+        v["config_version"] = serde_json::json!(1);
+        v["profiles"] = serde_json::json!({}); // 无 profiles 时拆分循环跳过
+        migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
+
+        // 字段层面（monitor）与首次一致
+        assert_eq!(v["global"]["monitor"]["check_interval"], first["global"]["monitor"]["check_interval"]);
+        assert_eq!(v["config_version"], 6);
+    }
+
+    #[test]
+    fn test_rename_field_moves_value() {
+        let mut obj = serde_json::json!({ "old": "v", "keep": 1 });
+        rename_field(&mut obj, "old", "new");
+        assert_eq!(obj["new"], "v");
+        assert!(obj.get("old").is_none());
+        assert_eq!(obj["keep"], 1);
+        // 不存在的字段：无操作
+        rename_field(&mut obj, "missing", "also_missing");
+        assert!(obj.get("also_missing").is_none());
+    }
+}

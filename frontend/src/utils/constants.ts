@@ -105,7 +105,9 @@ export const DEFAULT_CONFIG: Config = {
     ],
     script_timeout: 60,
     post_login_delay: 5,
-    bind_interface_name: "",
+    // 网卡绑定：后端仅预留 EgressBinder 接口未实现。保留默认值不提交该字段，
+    // 后端 monitor 配置往返时缺失字段以空串兜底（见 web/routes/config.rs），行为不变。
+    // bind_interface_name: "",
   },
   pause: {
     enabled: true,

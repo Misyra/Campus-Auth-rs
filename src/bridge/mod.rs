@@ -607,6 +607,10 @@ fn start_idle_timer(this: &BridgeSupervisor, inner: &mut BridgeInner) {
         return;
     }
     let idle = (cfg.worker.idle_timeout_seconds as u64).max(1);
+    // 从真实最后活动时刻起算剩余空闲时间：计时器启动若有延迟（如调用方在锁外排队），
+    // 仍保证总共空闲满 `idle` 秒，避免实际空闲被压缩（last_activity 的唯一读取点）。
+    let elapsed = inner.last_activity.elapsed().as_secs();
+    let remaining = idle.saturating_sub(elapsed).max(1);
     let cmd_tx = this.cmd_tx.clone();
     // 订阅停止信号，确保 supervisor 关闭时计时器能及时退出，而非继续 sleep
     let stop_rx = this
@@ -616,7 +620,7 @@ fn start_idle_timer(this: &BridgeSupervisor, inner: &mut BridgeInner) {
         .as_ref()
         .map(|tx| tx.subscribe());
     let handle = tokio::spawn(async move {
-        let sleep = tokio::time::sleep(Duration::from_secs(idle));
+        let sleep = tokio::time::sleep(Duration::from_secs(remaining));
         tokio::pin!(sleep);
         match stop_rx {
             Some(mut rx) => {

@@ -8,7 +8,7 @@
 //! - 退出时由泵任务发送 [`crate::engine::EngineCommand::Shutdown`]，随后通知 OS 线程退出
 //!   并 join。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc as std_mpsc;
@@ -16,6 +16,7 @@ use std::thread;
 
 use tokio::sync::{broadcast, watch};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, MenuId};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -94,6 +95,8 @@ pub struct TrayDeps {
     pub port: u16,
     /// 是否运行在轻量模式（Axum 按需启动）
     pub lightweight: bool,
+    /// 应用级关闭令牌（Quit 时取消，驱动 launcher 走完整优雅关闭流程）
+    pub shutdown: CancellationToken,
 }
 
 /// 托盘管理器：持有各服务 Arc 与跨线程通道，负责创建并驱动托盘
@@ -118,6 +121,8 @@ pub struct TrayManager {
     port: u16,
     /// 是否运行在轻量模式（Axum 按需启动）
     lightweight: bool,
+    /// 应用级关闭令牌（Quit 时取消）
+    shutdown: CancellationToken,
 
     /// 菜单动作发送端（OS 线程 → 泵任务）
     action_tx: mpsc::Sender<TrayAction>,
@@ -149,6 +154,7 @@ impl TrayManager {
             log_tx: deps.log_tx,
             port: deps.port,
             lightweight: deps.lightweight,
+            shutdown: deps.shutdown,
             action_tx,
             action_rx: Mutex::new(Some(action_rx)),
             os_cmd_tx,
@@ -192,6 +198,7 @@ impl TrayManager {
             log_tx: self.log_tx.clone(),
             port: self.port,
             lightweight: self.lightweight,
+            shutdown: self.shutdown.clone(),
         };
         // 轻量模式下按需启动的 Axum 句柄（仅在该模式首次「打开控制台」时创建）
         let axum_handle: Arc<Mutex<Option<AxumServeHandle>>> =
@@ -331,6 +338,10 @@ impl TrayManager {
         let pump = tokio::spawn(async move {
             let mut status_rx = status_for_pump.subscribe();
             let mut action_rx = action_rx;
+            // 去重键：仅当影响 tooltip/图标/菜单文本的字段变化时才请求刷新，
+            // 避免 uptime 等高频无关字段触发冗余的 OS 线程刷新（历史遗留 #10）。
+            let mut last_key: Option<(EngineState, NetworkStatus, LoginStatus, Option<String>)> =
+                None;
 
             loop {
                 tokio::select! {
@@ -357,9 +368,19 @@ impl TrayManager {
                             None => break, // 发送端已丢弃
                         }
                     }
-                    // 状态变化 → 请求 OS 线程刷新 tooltip/图标
+                    // 状态变化 → 仅当展示相关字段变化才请求 OS 线程刷新 tooltip/图标
                     Ok(()) = status_rx.changed() => {
-                        let _ = os_cmd_tx_pump.send(OsCommand::RefreshTray);
+                        let snap = status_rx.borrow_and_update();
+                        let key = (
+                            snap.engine_state,
+                            snap.network_status,
+                            snap.login_status,
+                            snap.login_message.clone(),
+                        );
+                        if last_key.as_ref() != Some(&key) {
+                            last_key = Some(key);
+                            let _ = os_cmd_tx_pump.send(OsCommand::RefreshTray);
+                        }
                     }
                 }
             }
@@ -420,6 +441,11 @@ async fn handle_action(
                             *g = Some(h);
                         }
                         info!("托盘按需启动 Axum 成功");
+                        // 同步实际端口到 `.instance`（PID + PORT），使 --status / --stop
+                        // 读到真实端口：初始 record_port 只记录配置端口，+1 重试后会失配（历史遗留 M5）
+                        if let Some(h) = axum_handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                            write_instance_port(&deps.config.base_path(), h.port);
+                        }
                     }
                     Err(e) => warn!("托盘按需启动 Axum 失败: {e}"),
                 }
@@ -441,7 +467,11 @@ async fn handle_action(
             false
         }
         TrayAction::Quit => {
-            info!("收到退出指令，正在关闭引擎");
+            info!("收到退出指令，正在关闭应用");
+            // 仅派发 Engine Shutdown 不够：launcher 的 wait_for_shutdown 只监听
+            // ctrl_c / 关闭令牌 / Web API 信号，进程会继续常驻（且旧逻辑还会
+            // 重启 Engine，留下无托盘的僵尸进程）。取消令牌驱动完整优雅关闭。
+            deps.shutdown.cancel();
             if let Err(e) = deps.engine.dispatch(EngineCommand::Shutdown).await {
                 warn!("派发 Shutdown 失败: {e:?}");
             }
@@ -539,6 +569,16 @@ fn read_runtime_port(config: &Arc<ConfigService>) -> Option<u16> {
         .and_then(|s| s.trim().parse::<u16>().ok())
 }
 
+/// 重写 `.instance` 信息文件（PID + 端口），与 [`crate::utils::lock::InstanceLock::record_port`]
+/// 保持同一格式；供轻量模式按需启动 Axum 后校正端口用（历史遗留 M5）。
+fn write_instance_port(base_path: &Path, port: u16) {
+    let info_path = base_path.join("config").join(".instance");
+    let data = format!("{}\n{port}\n", std::process::id());
+    if let Err(e) = std::fs::write(&info_path, data) {
+        warn!("更新实例端口信息失败: {e}");
+    }
+}
+
 /// 加载托盘图标 RGBA 像素；若文件缺失或解码失败，回退到生成的纯色缓冲（不 panic）
 fn load_tray_rgba(path: &std::path::Path) -> (Vec<u8>, u32, u32) {
     match image::open(path) {
@@ -621,5 +661,55 @@ fn pump_windows_messages() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// monitor_toggle_label：Running → 停止监测，Stopped/Dead → 启动监测
+    #[test]
+    fn test_monitor_toggle_label() {
+        assert_eq!(monitor_toggle_label(EngineState::Running), "停止监测");
+        assert_eq!(monitor_toggle_label(EngineState::Stopped), "启动监测");
+        assert_eq!(monitor_toggle_label(EngineState::Dead), "启动监测");
+    }
+
+    /// engine_state_str：三个状态均有中文文案
+    #[test]
+    fn test_engine_state_str() {
+        assert_eq!(engine_state_str(EngineState::Running), "运行中");
+        assert_eq!(engine_state_str(EngineState::Stopped), "已停止");
+        assert_eq!(engine_state_str(EngineState::Dead), "已崩溃");
+    }
+
+    /// network_status_str：四个网络状态均有中文文案
+    #[test]
+    fn test_network_status_str() {
+        assert_eq!(network_status_str(NetworkStatus::Online), "在线");
+        assert_eq!(network_status_str(NetworkStatus::CaptivePortal), "需认证");
+        assert_eq!(network_status_str(NetworkStatus::Offline), "离线");
+        assert_eq!(network_status_str(NetworkStatus::Paused), "已暂停");
+    }
+
+    /// login_status_str：五个登录状态均有中文文案
+    #[test]
+    fn test_login_status_str() {
+        assert_eq!(login_status_str(LoginStatus::Idle), "空闲");
+        assert_eq!(login_status_str(LoginStatus::Running), "登录中");
+        assert_eq!(login_status_str(LoginStatus::Success), "成功");
+        assert_eq!(login_status_str(LoginStatus::Failed), "失败");
+        assert_eq!(login_status_str(LoginStatus::Cancelled), "已取消");
+    }
+
+    /// solid_rgba：生成正确尺寸的纯色 RGBA 缓冲（alpha=255）
+    #[test]
+    fn test_solid_rgba() {
+        let (buf, w, h) = solid_rgba([10, 20, 30], 4);
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(buf.len(), 4 * 4 * 4);
+        // 首像素 RGBA
+        assert_eq!(&buf[..4], &[10, 20, 30, 255]);
     }
 }
