@@ -317,3 +317,42 @@ def test_handle_evaluate_hung_script_times_out():
         assert "超时" in ei.value.message
 
     asyncio.run(_run())
+
+
+# ── B5: 任务间脏状态防护 ──
+
+def test_new_page_registers_dialog_dismiss():
+    """_new_page 注册 dialog dismiss 处理器，防残留 alert 卡死后续导航。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+
+        class FakeContext:
+            async def new_page(self):
+                return FakePage()
+
+        class FakePage:
+            def __init__(self):
+                self.handlers = {}
+
+            def on(self, event, handler):
+                self.handlers[event] = handler
+
+        core._context = FakeContext()
+        page = await core._new_page()
+        assert "dialog" in page.handlers, "应注册 dialog 处理器"
+        # 触发 handler：dismiss 被调用
+        dismissed = []
+
+        class FakeDialog:
+            async def dismiss(self):
+                dismissed.append(True)
+
+        page.handlers["dialog"](FakeDialog())
+        # 给 ensure_future 调度时间
+        await asyncio.sleep(0.05)
+        assert dismissed == [True], "dialog 处理器应调用 dismiss"
+
+    asyncio.run(_run())

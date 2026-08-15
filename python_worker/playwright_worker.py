@@ -467,11 +467,21 @@ class WorkerCore:
                 self._context = await self._browser.new_context(**ctx_opts)
                 await self._apply_stealth_and_routes(bs)
 
-            self._page = await self._context.new_page()
+            self._page = await self._new_page()
         except Exception:
             logger.warning("浏览器启动失败，回滚资源", exc_info=True)
             await self.close_browser()
             raise
+
+    async def _new_page(self) -> Any:
+        """创建新页面并注册防残留 dialog 处理器（B5）。
+
+        页面上的 alert/confirm 若不处理会阻塞后续导航与页面加载；注册 dismiss
+        处理器使残留对话框自动关闭，避免卡死后续任务。
+        """
+        page = await self._context.new_page()
+        page.on("dialog", lambda d: asyncio.ensure_future(d.dismiss()))
+        return page
 
     async def ensure_browser(self, config: dict) -> None:
         """确保浏览器就绪（复用已存在的实例，仅在未就绪或配置变更时重建）。"""
@@ -604,7 +614,7 @@ class WorkerCore:
         if self._page is None or self._page.is_closed():
             if self._context is None:
                 raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
-            self._page = await self._context.new_page()
+            self._page = await self._new_page()
 
         target = navigate_url or task_config.url
         if target:
@@ -632,6 +642,18 @@ class WorkerCore:
             self._page, variables, bs, cancel_event, screenshot_dir, task_config
         )
         result = await run_steps(self._page, task_config.steps, context)
+        # B5 取舍：任务失败后在共享 context 上清除 cookies，避免上次任务的残留会话
+        # （登录态等）污染下一个任务。不重建整个页面/浏览器——那会显著增加下一次
+        # 任务的重启开销；在现有 context 复用结构下，清除 cookies 已覆盖绝大多数
+        # 跨任务污染场景（登录态隔离）。重试同任务由 Rust 侧重新调用，页面按
+        # "_run_task 顶部 reload 复用"逻辑刷新，不受此处影响。
+        if result.outcome not in (Outcome.SUCCESS.value, Outcome.CANCELLED.value):
+            if self._context is not None:
+                try:
+                    await self._context.clear_cookies()
+                    logger.info("[_run_task] 任务失败，已清除 context cookies")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {exc}")
         # success_condition 成功判定：声明变量名时，从 store_as 结果取变量真值判定，
         # 覆盖默认的"步骤全部成功即成功"兜底（对齐原项目 v4.2.3 _check_success）。
         var_name = (task_config.success_condition or "").strip()
@@ -734,7 +756,7 @@ class WorkerCore:
             if self._page is None or self._page.is_closed():
                 if self._context is None:
                     raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
-                self._page = await self._context.new_page()
+                self._page = await self._new_page()
             variables = dict(task.variables or {})
             if task.url:
                 await self._navigate(
