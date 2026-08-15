@@ -6,6 +6,7 @@ IPC 响应/事件序列化，以及状态真值判定。
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -240,3 +241,69 @@ def test_structured_result_duration_ms_with_start():
     # 未传 start 时保持 0（兼容直接调用）
     d0 = _structured_result(exc, success=False)
     assert d0["data"]["duration_ms"] == 0
+
+
+# ── A1: Worker 挂起死锁自愈 ──
+
+def test_dispatch_guarded_timeout_emits_unknown_error(monkeypatch, capsys):
+    """命令超时后按 unknown_error 回错误响应，且不堵死后续命令。"""
+
+    async def _run():
+        import worker_main
+        # 缩短命令级超时，避免测试等待默认 300s
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
+
+        async def hang_handler(params, core):
+            await asyncio.sleep(3600)  # 永久挂起
+            return {}
+
+        worker_main.COMMANDS["test_hang"] = hang_handler
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 1, "method": "test_hang", "params": {}}
+            )
+            lines = capsys.readouterr().out.strip().splitlines()
+            assert len(lines) == 1
+            msg = json.loads(lines[0])
+            assert msg["id"] == 1
+            assert msg["result"]["success"] is False
+            assert msg["result"]["data"]["outcome"] == "unknown_error"
+        finally:
+            del worker_main.COMMANDS["test_hang"]
+
+        # 自愈后下一条命令仍能正常执行（不死锁）
+        called = []
+        worker_main.COMMANDS["test_ok"] = lambda params, core: called.append(1) or {}
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 2, "method": "test_ok", "params": {}}
+            )
+            assert called == [1]
+        finally:
+            del worker_main.COMMANDS["test_ok"]
+
+    asyncio.run(_run())
+
+
+def test_handle_evaluate_hung_script_times_out():
+    """handle_evaluate 挂起脚本被单独超时中断。"""
+
+    async def _run():
+        from models import StepConfig
+        from step_handlers import StepContext, WorkerError, handle_evaluate
+
+        class HungPage:
+            async def evaluate(self, script):
+                await asyncio.sleep(3600)  # while(true){} 模拟
+
+            async def close(self):
+                pass
+
+        page = HungPage()
+        step = StepConfig(id="1", step_type="evaluate", code="while(true){}")
+        with pytest.raises(WorkerError) as ei:
+            await handle_evaluate(page, step, StepContext(page=page, default_timeout=100))
+        assert ei.value.outcome == "unknown_error"
+        assert "超时" in ei.value.message
+
+    asyncio.run(_run())

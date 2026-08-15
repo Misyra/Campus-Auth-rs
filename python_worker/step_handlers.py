@@ -305,10 +305,26 @@ async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
     script = step.effective_script
     if not script:
         raise WorkerError(Outcome.UNKNOWN_ERROR, "evaluate 步骤缺少 script/code")
-    try:
-        result = await page.evaluate(script)
-    except Exception as exc:  # noqa: BLE001
-        raise WorkerError(Outcome.UNKNOWN_ERROR, f"JS 执行失败: {exc}") from exc
+    timeout_s = max(0.1, context.default_timeout / 1000)
+    # 单独为 evaluate 加超时：``while(true){}`` 这类死循环脚本会永久挂起
+    # page.evaluate，单靠协程取消无法打断 CDP 调用，需在超时后关闭页面强拆（A1）。
+    task = asyncio.ensure_future(page.evaluate(script))
+    done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    if task in done:
+        try:
+            result = task.result()
+        except Exception as exc:  # noqa: BLE001
+            raise WorkerError(Outcome.UNKNOWN_ERROR, f"JS 执行失败: {exc}") from exc
+    else:
+        task.cancel()
+        # 关闭页面以中断挂起的 CDP evaluate（无限循环仅取消无法打断）
+        try:
+            await page.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise WorkerError(
+            Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已强制中断"
+        )
     # 结果尽量转字符串存储
     if step.store_as:
         if isinstance(result, (dict, list)):

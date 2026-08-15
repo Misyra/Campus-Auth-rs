@@ -249,6 +249,28 @@ impl BridgeSupervisor {
                     .send(SupervisorCommand::Cancel { cancel_id })
                     .await
                     .map_err(|_| BridgeError::SupervisorNotRunning)?;
+                // A1 自愈兜底：Cancel 后给 Worker 一段宽限（Python 侧命令超时 + 关闭
+                // 页面自愈），等待会话槽位释放；仍未释放说明自愈失败，强杀回收，
+                // 避免挂起命令永久占用会话槽位导致死锁。
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let freed = {
+                        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        inner.current_request_id.is_none()
+                    };
+                    if freed || Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                let still_stuck = {
+                    let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    inner.current_request_id.is_some()
+                };
+                if still_stuck {
+                    warn!(target: "python_worker", "命令超时后 Worker 未自愈，强制回收");
+                    kill_worker_now(self).await;
+                }
                 Err(BridgeError::Timeout)
             }
             Ok(Some(r)) => r,

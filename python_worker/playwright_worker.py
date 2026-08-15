@@ -527,6 +527,17 @@ class WorkerCore:
         self._debug_sessions.clear()
         self._last_browser_settings = None
 
+    async def force_interrupt_pending(self) -> None:
+        """强制中断可能挂起的 Playwright 操作：关闭当前页面以打断 CDP await。
+
+        命令级超时自愈时调用：页面关闭会使挂起的 ``page.evaluate``/``goto`` 等
+        以“目标已关闭”异常结束，从而让被取消的任务真正退出，避免残留任务占住
+        浏览器资源。不关闭整个浏览器，避免影响后续轻量请求。
+        """
+        if self._page is not None:
+            await self._safe_close(self._page, "页面")
+            self._page = None
+
     async def _handle_low_resource_request(self, route) -> None:
         """低资源模式请求处理：拦截图片/字体/媒体。"""
         try:

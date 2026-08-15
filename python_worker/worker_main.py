@@ -26,10 +26,12 @@ import time
 
 # 标准库导入完成后，导入本 Worker 模块（其顶层导入 playwright 等重型依赖，
 # 放在此处延后加载，避免 import 阶段即因缺失依赖而崩溃）
+from models import Outcome  # noqa: E402
 from playwright_worker import (  # noqa: E402
     COMMANDS,
     StepCancelled,
     WorkerError,
+    _to_ms,
     cancel_registry,
     worker_core,
 )
@@ -189,6 +191,66 @@ def _error_result(message: str) -> dict:
     return {"success": False, "data": None, "error": message}
 
 
+def _command_timeout(params: dict) -> float:
+    """从命令参数推导命令级超时（秒）。
+
+    Rust 侧总超时 300s，此处以浏览器 settings 的单步默认超时为基准放大，
+    作为 Worker 侧自愈兜底；不新增协议字段（复用 ``_to_ms`` 语义）。
+    """
+    bs = params.get("browser_settings") or {}
+    step_ms = _to_ms(bs, "timeout", 10000)
+    return max(300.0, step_ms / 1000 * 20)
+
+
+def _timeout_result(message: str) -> dict:
+    """命令超时自愈后的错误响应（outcome=unknown_error）。"""
+    return {
+        "success": False,
+        "data": {
+            "outcome": Outcome.UNKNOWN_ERROR.value,
+            "message": message,
+            "duration_ms": 0,
+            "screenshots": [],
+        },
+        "error": message,
+    }
+
+
+async def _dispatch_guarded(msg: dict) -> None:
+    """分发单条命令，带命令级超时兜底。
+
+    每条命令在独立 ``asyncio.Task`` 中执行；超时则取消任务并强制关闭当前页面，
+    以中断挂起的 Playwright await（``page.evaluate``/``goto`` 挂在无限循环时
+    仅取消协程无法打断 CDP 调用），随后按 ``UNKNOWN_ERROR`` 回错误响应，
+    避免一条挂起命令永久堵死后续所有命令（A1 自愈）。
+    """
+    msg_id = msg.get("id")
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    timeout_s = _command_timeout(params)
+    task = asyncio.ensure_future(_dispatch(msg))
+    done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    if task in done:
+        exc = task.exception()
+        if exc is not None:
+            # _dispatch 已捕获绝大多数异常，此处仅兜底
+            logger.error(f"命令 {method} 内部异常: {exc}")
+        return
+    # 超时：取消任务并强制中断挂起的 Playwright 操作
+    logger.error(f"命令 {method} 超时（{timeout_s:.0f}s），强制中断自愈")
+    task.cancel()
+    try:
+        await worker_core.force_interrupt_pending()
+    except Exception:  # noqa: BLE001
+        logger.exception("强制中断挂起操作失败")
+    emit_response(msg_id, _timeout_result(f"命令 {method} 执行超时（{timeout_s:.0f}s）"))
+    # 等待任务收敛：页面关闭后挂起的 Playwright await 应以“目标已关闭”异常结束
+    try:
+        await asyncio.wait_for(task, timeout=5.0)
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
 async def _serve() -> None:
     """主服务循环：从队列取命令并分发，直到收到关闭信号。"""
     loop = asyncio.get_running_loop()
@@ -208,15 +270,18 @@ async def _serve() -> None:
             msg = await queue.get()
             if msg is None:
                 break
-            await _dispatch(msg)
-            if msg.get("method") == "shutdown":
+            method = msg.get("method")
+            # 每条命令独立 Task + 超时兜底，避免一条挂起命令堵死后续命令（A1）
+            await _dispatch_guarded(msg)
+            if method == "shutdown":
                 logger.info("收到 shutdown 命令，准备退出")
                 break
         logger.info("Worker 主循环退出")
     finally:
-        # 在原 event loop 中关闭浏览器，避免 Playwright 连接与新 loop 不兼容
+        # 在原 event loop 中关闭浏览器，避免 Playwright 连接与新 loop 不兼容；
+        # 加超时兜底，防止 close_browser 自身挂起阻塞退出（A1）
         try:
-            await worker_core.close_browser()
+            await asyncio.wait_for(worker_core.close_browser(), timeout=5.0)
         except Exception:  # noqa: BLE001
             pass
 
