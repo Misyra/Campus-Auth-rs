@@ -183,6 +183,22 @@ async function stopBrowser() {
             <span class="field-help" tabindex="0" role="note" data-tip="登录完成后不关闭浏览器进程，维持已认证的网页会话。关闭后浏览器将在空闲超时后自动回收。">?</span>
           </div>
         </div>
+        <div class="toggle-group" v-if="config.config.browser.browser_channel !== 'firefox'">
+          <div class="toggle-with-help">
+            <label class="toggle toggle-help-inline">
+              <input type="checkbox" v-model="config.config.browser.persistent_context" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">保留浏览器数据</span>
+            </label>
+            <span class="field-help" tabindex="0" role="note" data-tip="使用独立的用户数据目录，保留 cookies 和登录状态。适用于需要存储登录状态的场景，不同浏览器的数据相互隔离。">?</span>
+          </div>
+        </div>
+        <div v-if="config.config.browser.persistent_context && config.config.browser.browser_channel !== 'firefox'" class="browser-info-tip">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+          </svg>
+          <div>数据目录: <code>config/browser-data/{{ config.config.browser.browser_channel }}/</code></div>
+        </div>
         <div class="form-row" style="margin-top: 0.5rem;">
           <button type="button" class="btn btn-sm btn-secondary" :disabled="stoppingBrowser" @click="stopBrowser()">
             {{ stoppingBrowser ? "正在关闭..." : "立即关闭浏览器" }}

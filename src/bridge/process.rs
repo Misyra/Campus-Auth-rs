@@ -88,9 +88,12 @@ pub struct ProcessHandles {
 /// spawn Python Worker 子进程，并启动 stdin/stdout/stderr/health 四个后台 task。
 ///
 /// `ipc_tx` 由 Supervisor 主循环持有其对应的 Receiver，用于回收响应/事件/退出通知。
+/// `base_path` 注入给 Worker，供其锚定浏览器持久化数据目录（`<base_path>/config/browser-data`），
+/// 避免依赖 Worker 脚本目录（便携包更新/重建时会被清空）。
 pub async fn spawn_worker(
     python_exe: &Path,
     worker_main: &Path,
+    base_path: &Path,
     ipc_tx: mpsc::Sender<ParsedMessage>,
 ) -> Result<WorkerProcess, BridgeError> {
     let mut cmd = Command::new(python_exe);
@@ -102,7 +105,9 @@ pub async fn spawn_worker(
         // 强制 Python 全层级 UTF-8（stdio/文件系统默认编码）：
         // 管道重定向下 stdio 默认走 ANSI 代码页（简中为 cp936），
         // 与本模块严格按 UTF-8 解码 IPC 行的约定冲突（Worker 侧另做 reconfigure 双保险）
-        .env("PYTHONUTF8", "1");
+        .env("PYTHONUTF8", "1")
+        // 注入应用数据目录，Worker 据此锚定浏览器持久化数据（browser-data）
+        .env("CAMPUS_AUTH_BASE_PATH", base_path);
     // Windows：设置 CREATE_NO_WINDOW，避免 Worker 子进程弹出黑色控制台窗口
     // （与 orphan.rs 的进程枚举保持一致的处理，历史遗留 F4-Win）
     #[cfg(windows)]

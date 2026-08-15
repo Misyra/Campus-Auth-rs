@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import threading
 import time
 import uuid
@@ -34,9 +35,22 @@ from variable_resolver import resolve
 
 logger = logging.getLogger(__name__)
 
-# Worker 脚本所在目录：browser_data / debug 截图等相对目录一律锚定到此，
+# Worker 脚本所在目录：debug 截图等相对目录一律锚定到此，
 # 避免依赖 Rust spawn 继承的 CWD（未设 current_dir，可能是任意目录）
 _WORKER_DIR = Path(__file__).resolve().parent
+
+
+def _browser_data_dir() -> Path:
+    """浏览器持久化数据目录（按 channel 隔离，锚定到应用数据目录）。
+
+    优先使用 Rust 侧注入的 ``CAMPUS_AUTH_BASE_PATH``（spawn 时设置），即
+    ``<base_path>/config/browser-data``，与 Python 原版 ``config/browser-data`` 对齐，
+    避免放在 Worker 脚本目录（便携包更新/重建时会被清空登录态）。
+    环境变量缺失时回退到 Worker 脚本目录。
+    """
+    base = os.environ.get("CAMPUS_AUTH_BASE_PATH")
+    root = Path(base).resolve() if base else _WORKER_DIR
+    return root / "config" / "browser-data"
 
 
 def _debug_screenshot_dir() -> Path:
@@ -428,9 +442,7 @@ class WorkerCore:
         persistent = bs.get("persistent_context", False)
         try:
             if persistent:
-                from pathlib import Path as _P
-
-                user_data_dir = _P(_WORKER_DIR) / "browser_data" / channel
+                user_data_dir = _browser_data_dir() / channel
                 user_data_dir.mkdir(parents=True, exist_ok=True)
                 launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
                 ctx_opts = self._build_context_options(bs)
