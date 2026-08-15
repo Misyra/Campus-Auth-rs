@@ -237,6 +237,7 @@ export interface NetworkDetectResult {
   gateway_ip: string | null;
   ssid: string | null;
   matched_profile_id?: string | null;
+  matched_profile_name?: string | null;
 }
 
 /** 浏览器信息 */
@@ -257,19 +258,6 @@ export interface BrowserListResponse {
 export interface OcrStatus {
   installed: boolean;
   size_mb: number;
-}
-
-/** 可用 Shell */
-export interface ShellInfo {
-  path: string;
-  name: string;
-  description?: string;
-}
-
-/** Shell 列表响应 */
-export interface ShellListResponse {
-  shells: ShellInfo[];
-  default: string;
 }
 
 /** 任务（浏览器任务 / 脚本的列表项） */
@@ -317,11 +305,6 @@ export interface RepoTask {
   author?: string;
   version?: string;
   url: string;
-}
-
-/** 活动任务响应 */
-export interface ActiveTaskResponse {
-  task_id: string;
 }
 
 /** 脚本 */
@@ -429,14 +412,6 @@ export interface InitStatus {
 export interface HealthInfo {
   version?: string;
   python_version?: string;
-}
-
-/** 卸载检测项 */
-export interface UninstallItem {
-  key: string;
-  label?: string;
-  exists: boolean;
-  description?: string;
 }
 
 /** 危险步骤（保存任务前确认） */

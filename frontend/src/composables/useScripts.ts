@@ -230,8 +230,8 @@ async function setActiveScript(taskId: string): Promise<void> {
   try {
     await tasksApi.setActive(taskId);
     const { useTasks } = await import("./useTasks");
-    // 服务端已切换，此处仅同步本地状态（用封装 setter，不直接拨弄其他 composable 的 ref）
-    useTasks().setActiveTaskId(taskId);
+    // 服务端已切换，此处仅同步本地状态
+    useTasks().activeTaskId.value = taskId;
     toastOnly(true, `已将「${taskId}」设为活动任务`);
   } catch (error) {
     toastOnly(false, extractApiError(error, "设置失败"));

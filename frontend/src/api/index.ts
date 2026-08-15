@@ -91,8 +91,6 @@ export const profilesApi = {
 export const autostartApi = {
   fetchStatus: () => http.get<AutostartStatus>("/api/autostart/status"),
   toggle: (enable: boolean) => http.post<MutationResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
-  // 注意：/api/autostart/mode 已无前端调用方（setAutostartMode 已删除），保留端点定义供后端兼容
-  setMode: (runtime_mode: string) => http.post<MutationResult>("/api/autostart/mode", { runtime_mode }),
 };
 
 /** OCR */

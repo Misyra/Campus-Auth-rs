@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useConfig } from "@/composables/useConfig";
-import { useUi } from "@/composables/useUi";
 import { useTasks } from "@/composables/useTasks";
 import { browsersApi, configApi, workerApi } from "@/api";
 
 const config = useConfig();
-const ui = useUi();
 const tasks = useTasks();
 
 const browsers = ref<{ channel: string; name: string; description: string; installed: boolean; icon: string }[]>([]);

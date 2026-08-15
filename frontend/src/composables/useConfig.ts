@@ -5,35 +5,18 @@
  */
 
 import { reactive, ref, watch } from "vue";
-import type { Config, SaveConfigPayload, OcrStatus } from "../api/types";
-import { configApi, autostartApi, ocrApi } from "../api";
+import type { Config, SaveConfigPayload } from "../api/types";
+import { configApi, autostartApi } from "../api";
 import { ApiError, extractApiError } from "../api/client";
 import { DEFAULT_CONFIG } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { useStatus } from "./useStatus";
 import { useToast } from "./useToast";
-import { useNotifications } from "./useNotifications";
 import { usePasswordField } from "./usePasswordField";
-import { useConfirm } from "./useConfirm";
 
-function cloneConfig(src: Config): Config {
-  return {
-    browser: { ...src.browser },
-    worker: { ...src.worker },
-    monitor: { ...src.monitor },
-    pause: { ...src.pause },
-    logging: { ...src.logging },
-    retry: { ...src.retry },
-    credentials: { ...src.credentials },
-    active_task: src.active_task,
-    app_settings: { ...src.app_settings },
-  };
-}
-
-const config = reactive<Config>(cloneConfig(DEFAULT_CONFIG));
+const config = reactive<Config>(structuredClone(DEFAULT_CONFIG));
 const password = usePasswordField(false);
 const defaultUrlCheckUrls = [...DEFAULT_CONFIG.monitor.url_check_urls];
-const ocrStatus = reactive<OcrStatus>({ installed: false, size_mb: 0 });
 const dirty = ref(false);
 const saveFailed = ref(false);
 
@@ -103,14 +86,7 @@ function validateConfig(): string[] {
 }
 
 const { toastOnly } = useToast();
-const { notify } = useNotifications();
 
-function onPasswordFocus(): void {
-  password.onFocus();
-}
-function onPasswordBlur(): void {
-  password.onBlur();
-}
 /** 密码输入回调：同步明文值并标记 dirty */
 function onPasswordInput(e: Event): void {
   password.value.value = (e.target as HTMLInputElement).value;
@@ -175,79 +151,6 @@ async function saveConfig(force = false): Promise<void> {
   }
 }
 
-async function resetConfig(): Promise<void> {
-  const { confirm } = useConfirm();
-  const ok = await confirm({
-    title: "恢复默认设置",
-    message: "确定要恢复默认设置吗？当前修改将丢失。",
-  });
-  if (!ok) return;
-  try {
-    const data = await configApi.fetchDefaults();
-    loadingConfig = true;
-    config.browser = { ...data.browser };
-    config.monitor = { ...data.monitor };
-    config.pause = { ...data.pause };
-    config.logging = { ...data.logging };
-    config.retry = { ...data.retry };
-    config.app_settings = { ...data.app_settings };
-    // 保留凭据不重置
-    loadingConfig = false;
-    dirty.value = false;
-    frontendLogger.info("config", "已恢复默认设置");
-    await saveConfig(true);
-  } catch (error) {
-    frontendLogger.error("config", "获取默认配置失败", error);
-    toastOnly(false, "获取默认配置失败");
-  }
-}
-
-async function loadDefaultStealthScript(): Promise<void> {
-  try {
-    const data = await configApi.fetchStealthScript();
-    config.browser.stealth_custom_script = data.script || "";
-    frontendLogger.info("config", "已加载默认反检测脚本");
-  } catch (error) {
-    frontendLogger.warn("config", "获取默认反检测脚本失败", error);
-  }
-}
-
-async function fetchOcrStatus(): Promise<void> {
-  try {
-    const data = await ocrApi.fetchStatus();
-    Object.assign(ocrStatus, data);
-  } catch {
-    Object.assign(ocrStatus, { installed: false, size_mb: 0 });
-  }
-}
-
-async function toggleOcr(action: "install" | "uninstall"): Promise<void> {
-  const isInstall = action === "install";
-  const { confirm } = useConfirm();
-  const ok = await confirm({
-    title: isInstall ? "安装 OCR 依赖" : "卸载 OCR 依赖",
-    message: isInstall
-      ? "确定要安装 OCR 依赖吗？\nddddocr + onnxruntime 约占用 ~120MB 磁盘空间。"
-      : "确定要卸载 OCR 依赖吗？\n卸载后 OCR 验证码识别步骤将无法使用。",
-    confirmText: isInstall ? "安装" : "卸载",
-    danger: !isInstall,
-  });
-  if (!ok) return;
-  busy.ocr = true;
-  try {
-    const data = isInstall ? await ocrApi.install() : await ocrApi.uninstall();
-    frontendLogger.info("ocr", data?.message || `${isInstall ? "安装" : "卸载"}完成`);
-    notify(true, (data?.message || `${isInstall ? "安装" : "卸载"}完成`) + "，需重启程序后生效", "install");
-    await fetchOcrStatus();
-  } catch (error) {
-    const msg = extractApiError(error, isInstall ? "安装失败" : "卸载失败");
-    frontendLogger.error("ocr", `${isInstall ? "安装" : "卸载"}异常: ${msg}`, error);
-    notify(false, msg, "install");
-  } finally {
-    busy.ocr = false;
-  }
-}
-
 async function fetchLogLevels(): Promise<void> {
   try {
     const data = await configApi.fetchLogLevels();
@@ -299,20 +202,13 @@ export function useConfig() {
     passwordSaved: password.saved,
     editingPassword: password.editing,
     defaultUrlCheckUrls,
-    ocrStatus,
     dirty,
     saveFailed,
     fetchConfig,
-    validateConfig,
-    onPasswordFocus,
-    onPasswordBlur,
+    onPasswordFocus: password.onFocus,
+    onPasswordBlur: password.onBlur,
     onPasswordInput,
     saveConfig,
-    resetConfig,
-    loadDefaultStealthScript,
-    fetchOcrStatus,
-    installOcr: () => toggleOcr("install"),
-    uninstallOcr: () => toggleOcr("uninstall"),
     fetchLogLevels,
     setLogLevel,
     toggleAutostart,

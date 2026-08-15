@@ -162,15 +162,6 @@ const urlCheckText = computed({
             <div class="toggle-group">
               <div class="toggle-with-help">
                 <label class="toggle toggle-help-inline">
-                  <input type="checkbox" v-model="config.config.monitor.enable_local_check" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">物理网络连接检查</span>
-                </label>
-              </div>
-            </div>
-            <div class="toggle-group settings-toggle-spacer">
-              <div class="toggle-with-help">
-                <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.check_auth_url" />
                   <span class="toggle-slider"></span>
                   <span class="toggle-label">登录网址可达性检测</span>

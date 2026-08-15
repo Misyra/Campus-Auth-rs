@@ -84,10 +84,6 @@ async function fetchActiveTask(): Promise<void> {
 }
 
 /** 仅同步本地活动任务 id（不调 API），供已自行完成服务端切换的调用方复用。 */
-function setActiveTaskId(taskId: string): void {
-  activeTaskId.value = taskId;
-}
-
 async function setActiveTask(taskId: string): Promise<void> {
   try {
     frontendLogger.info("tasks", `设置活动任务: ${taskId}`);
@@ -388,14 +384,6 @@ async function togglePureMode(): Promise<void> {
   }
 }
 
-async function persistOrder(): Promise<void> {
-  try {
-    await tasksApi.order({ all: tasks.value.map((t) => t.id), scripts: [] });
-  } catch {
-    /* 静默处理 */
-  }
-}
-
 // ==================== 仓库导入 ====================
 
 function selectRepoSource(source: "github" | "gitee" | "custom") {
@@ -497,7 +485,6 @@ export function useTasks() {
     fetchTasks,
     fetchActiveTask,
     setActiveTask,
-    setActiveTaskId,
     executeTask,
     saveTask,
     deleteTask,
@@ -512,7 +499,6 @@ export function useTasks() {
     importTask,
     fetchPureMode,
     togglePureMode,
-    persistOrder,
     repoImport,
     filteredRepoTasks,
     selectRepoSource,

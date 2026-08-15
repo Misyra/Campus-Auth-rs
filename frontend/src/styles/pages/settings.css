@@ -79,16 +79,6 @@
   min-height: 100%;
 }
 
-.settings-panel--accent {
-  border-left: 3px solid var(--accent-color, #22d3ee);
-}
-
-.settings-log-columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-}
-
 .settings-detect-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -126,18 +116,6 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 24px;
-}
-
-.settings-field {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.settings-field-label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
 }
 
 /* ---- 间距工具类 ---- */
@@ -544,22 +522,6 @@
   margin-bottom: 10px;
 }
 
-/* 系统策略内部分组标题 */
-.settings-section-heading {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin: 0 0 12px;
-}
-
-.settings-section-divider {
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--border), transparent);
-  margin: 20px 0;
-}
-
 .autostart-method-badge {
   display: inline-block;
   font-size: 11px;
@@ -633,45 +595,6 @@
 }
 
 /* ---- OCR 依赖管理 ---- */
-.ocr-section {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.ocr-status-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.ocr-status-label {
-  font-size: 14px;
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.ocr-status-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 10px;
-  border-radius: 12px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.ocr-status-badge.installed {
-  background: rgba(16, 185, 129, 0.12);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.25);
-}
-
-.ocr-status-badge.not-installed {
-  background: rgba(107, 114, 128, 0.12);
-  color: var(--text-muted);
-  border: 1px solid rgba(107, 114, 128, 0.25);
-}
-
 .ocr-size-hint {
   font-size: 12px;
   color: var(--text-muted);
@@ -744,11 +667,6 @@
 .ocr-error {
   font-size: 13px;
   color: var(--danger, #ef4444);
-}
-
-.ocr-actions {
-  display: flex;
-  gap: 10px;
 }
 
 /* 反检测脚本操作按钮 */
@@ -909,37 +827,6 @@
   color: var(--accent, #22d3ee);
 }
 
-.browser-warning {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-  padding: 0.75rem;
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-  border-radius: var(--radius-md, 6px);
-  color: var(--warning, #f59e0b);
-  font-size: 0.8125rem;
-  line-height: 1.5;
-}
-
-.browser-warning svg {
-  flex-shrink: 0;
-  margin-top: 0.125rem;
-}
-
-/* 表单内联警告（如网卡未连接提示） */
-.form-warning {
-  margin-top: 6px;
-  padding: 6px 10px;
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-  border-radius: var(--radius-md, 6px);
-  color: var(--warning, #f59e0b);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .browser-info-tip {
   display: flex;
   align-items: flex-start;
@@ -957,55 +844,5 @@
 .browser-info-tip svg {
   flex-shrink: 0;
   margin-top: 0.125rem;
-}
-
-/* 向导页面浏览器选择布局 */
-.browser-section {
-  margin-bottom: 1.5rem;
-}
-
-.browser-section-title {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  font-weight: 500;
-}
-
-.recommend-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.125rem 0.5rem;
-  background: var(--accent, #22d3ee);
-  color: var(--bg-primary, #000);
-  font-size: 0.75rem;
-  font-weight: 600;
-  border-radius: 0.25rem;
-}
-
-.browser-card.recommended {
-  border-color: var(--accent, #22d3ee);
-  border-width: 2px;
-}
-
-.browser-cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 0.75rem;
-}
-
-.browser-select-hint {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 1rem;
-  padding: 0.75rem;
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  border-radius: var(--radius-md, 6px);
-  color: var(--danger, #ef4444);
-  font-size: 0.875rem;
 }
 

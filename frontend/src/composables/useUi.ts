@@ -32,14 +32,6 @@ const state = reactive({
   isLoading: true,
   showWizard: false,
   agreedToTerms: false,
-  updateInfo: null as UpdateInfo | null,
-  updateLoading: false,
-  appVersion: "unknown",
-  pythonVersion: "",
-  availableBrowsers: [] as BrowserInfo[],
-  selectedBrowser: "chromium",
-  browserLoading: false,
-  playwrightDownloading: false,
 });
 
 const loginHistory = reactive<LoginHistoryItem[]>([]);
@@ -51,37 +43,6 @@ const { confirm } = useConfirm();
 
 // init 防重入守卫：避免重复调用叠加定时器与 WS 监听器（历史遗留 F7）
 let initialized = false;
-
-async function fetchAppVersion(): Promise<void> {
-  try {
-    const data = await systemApi.health();
-    if (data?.version) {
-      state.appVersion = data.version;
-      if (data.python_version) state.pythonVersion = data.python_version;
-      return;
-    }
-  } catch {
-    /* 尝试 openapi 回退 */
-  }
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMING.OPENAPI_TIMEOUT);
-    let resp: Response;
-    try {
-      resp = await fetch("/openapi.json", { cache: "no-cache", signal: controller.signal });
-    } finally {
-      clearTimeout(timeoutId);
-    }
-    if (resp.ok) {
-      const schema = await resp.json();
-      state.appVersion = schema?.info?.version || "unknown";
-      return;
-    }
-  } catch {
-    /* 回退失败 */
-  }
-  state.appVersion = "unknown";
-}
 
 async function fetchLoginHistory(): Promise<void> {
   try {
@@ -136,23 +97,9 @@ async function finishWizard(): Promise<void> {
   }
 }
 
-async function checkUpdate(): Promise<void> {
-  state.updateLoading = true;
-  state.updateInfo = null;
-  try {
-    const data = await systemApi.checkUpdate();
-    state.updateInfo = data;
-  } catch {
-    state.updateInfo = { has_update: false, error: "检查更新失败，请检查网络连接" };
-  } finally {
-    state.updateLoading = false;
-  }
-}
-
 async function autoCheckUpdateOnStartup(): Promise<void> {
   try {
     const data = await systemApi.checkUpdate();
-    state.updateInfo = data;
     if (!data?.has_update) return;
     const latest = data.latest ? `v${data.latest}` : "新版本";
     const current = data.current ? `（当前 v${data.current}）` : "";
@@ -162,95 +109,6 @@ async function autoCheckUpdateOnStartup(): Promise<void> {
   } catch (error) {
     frontendLogger.debug("update", "启动自动检查更新失败", error);
   }
-}
-
-async function fetchBrowsers(): Promise<void> {
-  state.browserLoading = true;
-  try {
-    const data = await browsersApi.fetch();
-    state.availableBrowsers = data.browsers;
-    if (state.selectedBrowser) {
-      state.selectedBrowser = data.current;
-      const { config } = useConfig();
-      config.browser.browser_channel = data.current;
-    }
-  } catch (error) {
-    frontendLogger.error("browser", "获取浏览器列表失败", error);
-  } finally {
-    state.browserLoading = false;
-  }
-}
-
-function selectBrowser(channel: string): void {
-  state.selectedBrowser = channel;
-  const { config } = useConfig();
-  config.browser.browser_channel = channel;
-}
-
-function handleBrowserClick(browser: BrowserInfo): void {
-  if (browser.installed) {
-    if (browser.channel === "firefox") {
-      void confirm({
-        title: "Firefox 兼容性警告",
-        message:
-          "Firefox 可能不支持部分功能（如反检测模式、自定义浏览器参数等）。\n\n建议使用 Chromium 内核浏览器（Playwright Chromium、Edge、Chrome）。\n\n确定要使用 Firefox 吗？",
-      }).then((ok) => {
-        if (ok) selectBrowser(browser.channel);
-      });
-    } else {
-      selectBrowser(browser.channel);
-    }
-  } else if (browser.channel === "custom") {
-    selectBrowser(browser.channel);
-  } else if (browser.channel === "chromium") {
-    void confirm({
-      title: "下载 Playwright Chromium",
-      message: "Playwright Chromium 未安装。\n\n是否自动下载？（约 150MB）",
-    }).then((ok) => {
-      if (ok) installPlaywrightChromium();
-    });
-  } else {
-    const downloadUrls: Record<string, string> = {
-      msedge: "https://www.microsoft.com/edge",
-      chrome: "https://www.google.com/chrome/",
-      firefox: "https://www.firefox.com/",
-    };
-    const url = downloadUrls[browser.channel] || "https://playwright.dev/docs/browsers";
-    void confirm({ title: "浏览器未安装", message: `${browser.name} 未安装。\n\n是否跳转到官网下载？` }).then(
-      (ok) => {
-        if (ok) window.open(url, "_blank");
-      },
-    );
-  }
-}
-
-function installPlaywrightChromium(): void {
-  state.playwrightDownloading = true;
-  notify(true, "Playwright Chromium 下载已开始，你可以继续配置其他选项", "install");
-  frontendLogger.info("browser", "开始下载 Playwright Chromium");
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000);
-  browsersApi
-    .installPlaywright({ signal: controller.signal, timeout: 600000 })
-    .then((data) => {
-      frontendLogger.info("browser", "Playwright Chromium 安装成功");
-      notify(true, extractMsg(data, "Playwright Chromium 安装完成！"), "install");
-      void fetchBrowsers();
-    })
-    .catch((error) => {
-      const err = error as { name?: string };
-      if (err.name === "AbortError" || err.name === "CanceledError") {
-        frontendLogger.error("browser", "安装超时（超过 10 分钟）");
-        notify(false, "安装超时，请检查网络后重试", "install");
-      } else {
-        frontendLogger.error("browser", "安装请求失败", error);
-        notify(false, "安装请求失败，请查看日志", "install");
-      }
-    })
-    .finally(() => {
-      clearTimeout(timeoutId);
-      state.playwrightDownloading = false;
-    });
 }
 
 async function toggleMonitor(): Promise<void> {
@@ -386,7 +244,6 @@ async function init(): Promise<void> {
     config.fetchConfig(),
     status.fetchStatus(),
     fetchLogs(),
-    fetchAppVersion(),
     status.fetchAutostart(),
     checkInitStatus(),
     tasks.fetchTasks(),
@@ -396,9 +253,7 @@ async function init(): Promise<void> {
     tasks.fetchPureMode(),
     fetchLoginHistory(),
     scheduled.loadScheduledTasks(),
-    config.fetchOcrStatus(),
     config.fetchLogLevels(),
-    fetchBrowsers(),
   ]);
   state.isLoading = false;
 
@@ -434,18 +289,12 @@ export function useUi() {
     state,
     loginHistory,
     init,
-    fetchAppVersion,
     fetchLogs,
     fetchLoginHistory,
     clearLoginHistory,
     checkInitStatus,
     finishWizard,
-    checkUpdate,
     autoCheckUpdateOnStartup,
-    fetchBrowsers,
-    selectBrowser,
-    handleBrowserClick,
-    installPlaywrightChromium,
     toggleMonitor,
     manualLogin,
     cancelLogin,

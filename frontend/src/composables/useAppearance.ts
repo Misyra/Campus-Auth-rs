@@ -176,21 +176,6 @@ function applyAppearance(): void {
   }
 }
 
-function saveAppearance(): void {
-  saveStoredAppearance();
-  applyAppearance();
-  toastOnly(true, "外观设置已保存");
-}
-
-function resetAppearance(): void {
-  Object.assign(appearance, DEFAULT_APPEARANCE);
-  Object.assign(customColors, DEFAULT_CUSTOM_COLORS);
-  localStorage.removeItem("appearance");
-  localStorage.removeItem("appearance.custom_colors");
-  applyAppearance();
-  toastOnly(true, "已恢复默认外观");
-}
-
 function addCustomColor(type: keyof CustomColors, hex: string): void {
   if (!hex || !DEFAULT_CUSTOM_COLORS.hasOwnProperty(type)) return;
   const lower = hex.toLowerCase();
@@ -406,8 +391,6 @@ export function useAppearance() {
     customColors: customColors as CustomColors,
     randomWallpaperDialog,
     bgLightbox,
-    saveAppearance,
-    resetAppearance,
     addCustomColor,
     removeCustomColor,
     resetCard,

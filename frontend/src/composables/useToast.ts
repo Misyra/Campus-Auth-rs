@@ -21,7 +21,8 @@ const toast = reactive<ToastState>({
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let toastLeavingTimer: ReturnType<typeof setTimeout> | undefined;
 
-function showToast(success: boolean, message: string): void {
+/** 仅显示 toast（不记入通知历史） */
+function toastOnly(success: boolean, message: string): void {
   toast.success = success;
   toast.message = message;
   toast.leaving = false;
@@ -36,11 +37,6 @@ function showToast(success: boolean, message: string): void {
   }, TIMING.TOAST_DURATION);
 }
 
-/** 仅显示 toast（不记入通知历史） */
-function toastOnly(success: boolean, message: string): void {
-  showToast(success, message);
-}
-
 export function useToast() {
-  return { toast, toastOnly, showToast };
+  return { toast, toastOnly };
 }
