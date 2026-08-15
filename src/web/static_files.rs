@@ -1,12 +1,19 @@
 //! rust-embed 静态文件服务（frontend/dist 经编译嵌入）
 
-use axum::http::{StatusCode, Uri};
-use axum::response::IntoResponse;
+use axum::http::{header, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 
-#[cfg(not(feature = "no-embed"))]
-use axum::http::header;
-#[cfg(not(feature = "no-embed"))]
-use axum::response::Response;
+/// 未注册的 `/api/*` 请求返回的 404 JSON 响应（避免被 SPA 回退吞成 200 + index.html）。
+fn api_not_found() -> Response {
+    let body = r#"{"error":{"code":"NOT_FOUND","message":"接口不存在"}}"#;
+    let mut resp = Response::new(body.into());
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    resp
+}
 
 #[cfg(not(feature = "no-embed"))]
 /// 根据扩展名推断 MIME（避免引入额外依赖）
@@ -72,6 +79,10 @@ mod tests {
 
 #[cfg(not(feature = "no-embed"))]
 pub async fn handler(uri: Uri) -> impl IntoResponse {
+    // 未注册的 /api/* 直接返回 404 JSON，避免被 SPA 回退吞成 200 + index.html
+    if uri.path().starts_with("/api") {
+        return api_not_found();
+    }
     let path = uri.path().trim_start_matches('/');
     if let Some(asset) = Assets::get(path) {
         return asset_response(path, asset);
@@ -111,6 +122,10 @@ fn asset_response(path: &str, asset: rust_embed::EmbeddedFile) -> Response {
 }
 
 #[cfg(feature = "no-embed")]
-pub async fn handler(_uri: Uri) -> impl IntoResponse {
+pub async fn handler(uri: Uri) -> impl IntoResponse {
+    // 未注册的 /api/* 返回 404 JSON（与嵌入版一致）
+    if uri.path().starts_with("/api") {
+        return api_not_found();
+    }
     (StatusCode::NOT_FOUND, "前端未嵌入（no-embed 构建）").into_response()
 }

@@ -14,40 +14,11 @@ use serde::Serialize;
 use super::state::{AppState, LogEntry};
 use crate::status::StatusSnapshot;
 
-/// 调试截图消息
-#[derive(Serialize)]
-pub struct ScreenshotMsg {
-    /// 截图 URL（后端可访问路径）
-    pub url: String,
-    /// 关联步骤索引（可选）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub step_index: Option<usize>,
-    /// 说明（可选）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// 调试步骤进度消息
-#[derive(Serialize)]
-pub struct StepProgressMsg {
-    /// 当前步骤索引
-    pub step_index: usize,
-    /// 步骤总数
-    pub total_steps: usize,
-    /// 步骤说明（可选）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// 步骤类型（可选）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub step_type: Option<String>,
-}
-
 /// WebSocket 消息信封：所有推送消息均包装为 `{ "type": "...", "data": ... }`
 ///
-/// 注：`Screenshot` / `StepProgress` 变体仅由 Bridge 以原始 JSON 形式经 `ws_tx` 通道推送，
-/// 不直接经由此枚举构造，故标记 `allow(dead_code)` 以保留其作为协议契约的文档意义。
+/// 注：调试截图 / 步骤进度由 Bridge 以原始 JSON 形式经 `ws_tx` 通道推送，
+/// 不直接经由此枚举构造。
 #[derive(Serialize)]
-#[allow(dead_code)]
 #[serde(tag = "type", content = "data")]
 enum WsMessage {
     /// 日志条目
@@ -59,12 +30,6 @@ enum WsMessage {
     /// 心跳响应
     #[serde(rename = "pong")]
     Pong,
-    /// 调试截图
-    #[serde(rename = "screenshot")]
-    Screenshot(ScreenshotMsg),
-    /// 调试步骤进度
-    #[serde(rename = "step_progress")]
-    StepProgress(StepProgressMsg),
 }
 
 /// 前端发来的 WebSocket 文本消息信封

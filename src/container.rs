@@ -179,7 +179,6 @@ impl ServiceContainer {
             status_manager: status.clone(),
             monitor_service: monitor.clone(),
             network_detect: detector,
-            base_path: base_path.to_path_buf(),
         };
         let engine_handle = Engine::spawn(engine_deps);
 

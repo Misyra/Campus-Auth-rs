@@ -58,11 +58,11 @@ pub async fn test_network(
 pub async fn start_monitor(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let _ = state
+    state
         .container
         .engine_handle
         .engine
-        .try_dispatch(EngineCommand::Start);
+        .try_dispatch(EngineCommand::Start)?;
     Ok(data(Value::String("监测已启动".into())))
 }
 
@@ -70,10 +70,10 @@ pub async fn start_monitor(
 pub async fn stop_monitor(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let _ = state
+    state
         .container
         .engine_handle
         .engine
-        .try_dispatch(EngineCommand::Stop);
+        .try_dispatch(EngineCommand::Stop)?;
     Ok(data(Value::String("监测已停止".into())))
 }

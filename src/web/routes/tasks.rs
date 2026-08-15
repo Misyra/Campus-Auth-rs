@@ -3,6 +3,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
+use serde_json::json;
 use serde_json::Value;
 
 use crate::web::error::{data, ApiError};
@@ -104,7 +105,8 @@ pub async fn update_task(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let task: crate::tasks::TaskKind = serde_json::from_value(body)?;
+    let task: crate::tasks::TaskKind = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.container.tasks.save_task(&id, &task).await?;
     Ok(data(Value::String("ok".into())))
 }
@@ -156,6 +158,7 @@ pub async fn import_tasks(
         None => vec![body],
     };
     let mut imported = 0u32;
+    let mut failed: Vec<Value> = Vec::new();
     for item in items {
         let id = item
             .get("id")
@@ -165,11 +168,20 @@ pub async fn import_tasks(
         if id.is_empty() {
             continue;
         }
-        let task: crate::tasks::TaskKind = serde_json::from_value(item)?;
-        state.container.tasks.save_task(&id, &task).await?;
-        imported += 1;
+        // 逐条导入：任一条失败不中止整体，收集失败项供前端提示
+        let task: crate::tasks::TaskKind = match serde_json::from_value(item) {
+            Ok(t) => t,
+            Err(e) => {
+                failed.push(json!({ "id": id, "reason": e.to_string() }));
+                continue;
+            }
+        };
+        match state.container.tasks.save_task(&id, &task).await {
+            Ok(()) => imported += 1,
+            Err(e) => failed.push(json!({ "id": id, "reason": e.to_string() })),
+        }
     }
-    Ok(data(serde_json::json!({ "imported": imported })))
+    Ok(data(serde_json::json!({ "imported": imported, "failed": failed })))
 }
 
 /// GET /api/tasks/export/{id} — 导出指定任务的完整配置
@@ -203,6 +215,6 @@ pub async fn execute_task(
         .executor
         .execute(&task)
         .await
-        .map_err(|e| ApiError::Internal(format!("执行失败: {e}")))?;
+        .map_err(ApiError::from)?;
     Ok(data(serde_json::to_value(&result)?))
 }

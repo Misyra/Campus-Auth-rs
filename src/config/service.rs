@@ -88,9 +88,6 @@ pub enum ConfigError {
         /// 代码支持的最高版本号
         max: u32,
     },
-    /// 密钥文件损坏
-    #[error("密钥文件损坏")]
-    KeyFileCorrupt,
 }
 
 /// settings.json 内存缓存 + mtime

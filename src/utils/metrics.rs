@@ -91,20 +91,3 @@ impl Metrics {
         self.uptime_seconds.store(secs, Ordering::Relaxed);
     }
 }
-
-impl Default for Metrics {
-    fn default() -> Self {
-        // 仅用于构造裸实例；共享场景请用 `Metrics::new()` 获取 `Arc<Metrics>`
-        Metrics {
-            login_total: AtomicU64::new(0),
-            login_success_total: AtomicU64::new(0),
-            login_failure_total: AtomicU64::new(0),
-            login_cancel_total: AtomicU64::new(0),
-            probe_total: AtomicU64::new(0),
-            probe_duration_ms_avg: AtomicU64::new(0),
-            worker_spawn_total: AtomicU64::new(0),
-            worker_crash_total: AtomicU64::new(0),
-            uptime_seconds: AtomicU64::new(0),
-        }
-    }
-}

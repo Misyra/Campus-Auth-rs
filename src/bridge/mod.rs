@@ -212,9 +212,25 @@ impl BridgeSupervisor {
     pub async fn execute_with_timeout(
         &self,
         method: &str,
-        params: Value,
+        mut params: Value,
         timeout: std::time::Duration,
     ) -> Result<IpcResponse, BridgeError> {
+        // 自生成 cancel_id 并注入 params（调用方未提供时），使超时后能通过 Cancel 命令
+        // 命中本地已注册的 CancellationToken（见下），立即唤醒转发 task 的 select 分支
+        // → guard drop → 释放会话槽位与 pending（P1-7：超时不清理会导致槽位永久滞留）。
+        let cancel_id = params
+            .get("cancel_id")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let id = Uuid::new_v4().to_string();
+                if params.is_object() {
+                    params["cancel_id"] = Value::String(id.clone());
+                }
+                // params 非 object 时无法注入，但 execute_inner 内部生成同名随机 id 的
+                // 概率可忽略；此处返回生成的 id 仅用于超时后的 Cancel 命令（幂等 no-op）。
+                id
+            });
         let (tx, mut rx) = mpsc::channel(1);
         self.cmd_tx
             .send(SupervisorCommand::Execute {
@@ -224,10 +240,20 @@ impl BridgeSupervisor {
             })
             .await
             .map_err(|_| BridgeError::SupervisorNotRunning)?;
-        tokio::time::timeout(timeout, rx.recv())
-            .await
-            .map_err(|_| BridgeError::Timeout)?
-            .ok_or(BridgeError::SupervisorNotRunning)?
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            // 超时返回前发送 Cancel：cancel_registry.trigger 立即唤醒本地 token →
+            // 转发 task 提前返回并 drop guard → 会话槽位与 pending 被释放。
+            // 幂等：若请求恰在超时瞬间已响应/已取消，trigger 与 stdin 发送均为 no-op。
+            Err(_elapsed) => {
+                self.cmd_tx
+                    .send(SupervisorCommand::Cancel { cancel_id })
+                    .await
+                    .map_err(|_| BridgeError::SupervisorNotRunning)?;
+                Err(BridgeError::Timeout)
+            }
+            Ok(Some(r)) => r,
+            Ok(None) => Err(BridgeError::SupervisorNotRunning),
+        }
     }
 
     /// 触发跨进程取消：向 Worker stdin 发送 {"cancel": cancel_id}
@@ -481,6 +507,9 @@ async fn execute_inner(
     } else {
         SessionType::Login
     };
+    // OCR 轻量请求：与任意会话并发（见 check_session_compat），不占用单会话槽位，
+    // 也不触碰 current_session / worker_state / 空闲计时器（P1-6）。
+    let is_ocr = method == "ocr_recognize";
 
     // 3. 生成 cancel_id + CancellationToken
     // 优先使用调用方传入的 cancel_id（如 LoginSession / OCR 通过 params["cancel_id"] 传入），
@@ -534,38 +563,58 @@ async fn execute_inner(
         // 覆盖 current_session，旧 Login 的 cancel_id 不再被追踪）。仅当新旧不同才移除，
         // 避免调用方复用同一 cancel_id 时误删刚注册的 token。
         inner.cancel_registry.register(cancel_id.clone(), token.clone());
-        if let Some(old_cancel_id) = inner.current_cancel_id.take() {
-            if old_cancel_id != cancel_id {
-                inner.cancel_registry.remove(&old_cancel_id);
-            }
-        }
-        inner.worker_state = if session == SessionType::Debug {
-            WorkerState::InDebug
+        if is_ocr {
+            // OCR 轻量旁路：仅注册 cancel，不触碰会话槽位 / worker_state / 空闲计时器，
+            // 也不移除旧会话的 cancel_id（OCR 与任意会话并发，绝不清他人注册）。
+            // pending 与 cancel 的清理交给 guard drop 的轻量回调（lightweight_cleanup）。
         } else {
-            WorkerState::InLogin
-        };
-        inner.current_session = Some(session);
-        inner.current_cancel_id = Some(cancel_id);
-        inner.current_request_id = Some(request_id);
-        inner.last_activity = Instant::now();
-        if let Some(h) = inner.idle_timer.take() {
-            h.abort();
+            if let Some(old_cancel_id) = inner.current_cancel_id.take() {
+                if old_cancel_id != cancel_id {
+                    inner.cancel_registry.remove(&old_cancel_id);
+                }
+            }
+            inner.worker_state = if session == SessionType::Debug {
+                WorkerState::InDebug
+            } else {
+                WorkerState::InLogin
+            };
+            inner.current_session = Some(session);
+            inner.current_cancel_id = Some(cancel_id.clone());
+            inner.current_request_id = Some(request_id);
+            inner.last_activity = Instant::now();
+            if let Some(h) = inner.idle_timer.take() {
+                h.abort();
+            }
+            merge_worker_status(&inner, &this.status);
         }
-        merge_worker_status(&inner, &this.status);
         (resp_rx, request_id)
     };
 
     // RAII 守卫：drop 时复位会话状态并启动空闲计时器。drop 会再次加锁，故在临界区外创建。
     // 携带 request_id：reset_session 仅在当前会话仍为本请求时才复位，避免已结束会话的
     // 延迟 drop 误清刚启动的同类型新会话的 pending/cancel。
-    let guard = SessionGuard::new(session, request_id, {
-        let weak = this.self_weak.clone();
-        move |s, rid| {
-            if let Some(sup) = weak.upgrade() {
-                reset_session(&sup, s, rid);
+    // OCR 请求使用轻量守卫：drop 只清自身 pending 与 cancel 注册，绝不 reset_session
+    // （否则会把并发登录会话的槽位复位为 Idle 并提前启动空闲计时器，见 5.1）。
+    let guard = if is_ocr {
+        SessionGuard::new({
+            let weak = this.self_weak.clone();
+            let cancel_id = cancel_id.clone();
+            move || {
+                if let Some(sup) = weak.upgrade() {
+                    lightweight_cleanup(&sup, request_id, &cancel_id);
+                }
             }
-        }
-    });
+        })
+    } else {
+        SessionGuard::new({
+            let weak = this.self_weak.clone();
+            move || {
+                if let Some(sup) = weak.upgrade() {
+                    reset_session(&sup, session, request_id);
+                }
+            }
+        })
+    };
 
     // 8. 返回 oneshot::Receiver、SessionGuard 与 CancellationToken，由调用方（转发 task）等待响应
     Ok((resp_rx, guard, token))
@@ -594,6 +643,15 @@ fn reset_session(this: &Arc<BridgeSupervisor>, session: SessionType, request_id:
     merge_worker_status(&inner, &this.status);
     // 启动空闲回收计时器
     start_idle_timer(this, &mut inner);
+}
+
+/// OCR 轻量请求的守卫 drop 清理：只移除自身 pending 与 cancel 注册，**不**复位会话槽位 /
+/// 启动空闲计时器 / 改动 worker_state。仅当 pending 仍为本请求时移除（幂等：响应到达后
+/// handle_ipc_message 已移除，此处为 no-op；取消/Cancel 路径则在此清理残留）。
+fn lightweight_cleanup(this: &BridgeSupervisor, request_id: u64, cancel_id: &str) {
+    let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+    inner.pending_requests.remove(&request_id);
+    inner.cancel_registry.remove(cancel_id);
 }
 
 /// 启动空闲计时器：超时后发送 IdleTimeout
@@ -838,9 +896,29 @@ async fn handle_idle_timeout(this: &Arc<BridgeSupervisor>) {
     }
 }
 
-/// Worker 崩溃恢复：通知在途请求、清理注册表与调试会话、标记 Error
+/// Worker 退出处理：区分正常退出（exit_code=0）与崩溃
 async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
-    warn!(target: "python_worker", "Worker 进程退出，exit_code={code}");
+    // 正常退出（空闲回收 / 用户主动停止 / shutdown）：不记为崩溃，不计入指标，
+    // 不触发孤儿清理，也不置 Error。仅 drain pending 作为防御（正常退出时不应有在途请求）。
+    if code == 0 {
+        info!(target: "python_worker", "Worker 正常退出，exit_code=0");
+        let pending: Vec<_> = {
+            let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.pending_requests.drain().map(|(_, tx)| tx).collect()
+        };
+        for tx in pending {
+            let _ = tx.send(Err(BridgeError::WorkerCrashed {
+                reason: "worker exited (code 0)".to_string(),
+            }));
+        }
+        {
+            let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+            merge_worker_status(&inner, &this.status);
+        }
+        return;
+    }
+    warn!(target: "python_worker", "Worker 进程退出（崩溃），exit_code={code}");
     // 崩溃恢复时清理可能残留的孤儿浏览器进程
     // 同步 /proc 或 powershell 进程枚举，用 spawn_blocking 避免阻塞 async 运行时
     let _ = tokio::task::spawn_blocking(orphan::cleanup_orphan_browsers).await;
@@ -1016,5 +1094,69 @@ mod tests {
         assert_ok(None, "ocr_recognize");
         assert_ok(Some(SessionType::Login), "ocr_recognize");
         assert_ok(Some(SessionType::Debug), "ocr_recognize");
+    }
+
+    /// 5.1：OCR 轻量守卫 drop 只清理自身，保留并发登录会话槽位。
+    ///
+    /// 模拟：登录会话占住单槽位时，一个 OCR 请求注册了自己的 pending 与 cancel；
+    /// OCR 结束（guard drop）后，会话槽位 / worker_state 应保持不变，登录会话的
+    /// pending 与 cancel 注册项应原样保留（旧实现会走 reset_session 把登录会话复位为
+    /// Idle 并提前启动空闲计时器，导致在途登录以 WorkerCrashed 失败）。
+    #[tokio::test]
+    async fn ocr_轻量守卫drop_保留并发登录槽位() {
+        use tokio::sync::oneshot;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
+        let config = Arc::new(
+            crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
+                .await
+                .expect("ConfigService 构造失败"),
+        );
+        let status = Arc::new(crate::status::StatusManager::new());
+        let bridge = BridgeSupervisor::new(dir.path().to_path_buf(), config, status, None);
+
+        // 预置并发登录会话 + OCR 请求自身的注册项
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.current_session = Some(SessionType::Login);
+            inner.worker_state = WorkerState::InLogin;
+            inner.current_cancel_id = Some("login".to_string());
+            inner.current_request_id = Some(1);
+            let (tx, _rx) = oneshot::channel();
+            inner.pending_requests.insert(1, tx);
+            inner
+                .cancel_registry
+                .register("login".to_string(), CancellationToken::new());
+            let (tx, _rx) = oneshot::channel();
+            inner.pending_requests.insert(100, tx);
+            inner
+                .cancel_registry
+                .register("ocr".to_string(), CancellationToken::new());
+        }
+
+        // 构造 OCR 轻量守卫并 drop（模拟 OCR 请求结束）
+        let weak = bridge.self_weak.clone();
+        let guard = SessionGuard::new({
+            let weak = weak.clone();
+            let cancel_id = "ocr".to_string();
+            move || {
+                if let Some(sup) = weak.upgrade() {
+                    lightweight_cleanup(&sup, 100, &cancel_id);
+                }
+            }
+        });
+        drop(guard);
+
+        let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // 会话槽位与 worker_state 保持登录态不变
+        assert_eq!(inner.current_session, Some(SessionType::Login));
+        assert_eq!(inner.current_request_id, Some(1));
+        assert_eq!(inner.worker_state, WorkerState::InLogin);
+        // OCR 自身 pending 与 cancel 已清理；登录会话的注册项保留
+        assert!(!inner.pending_requests.contains_key(&100));
+        assert!(inner.pending_requests.contains_key(&1));
+        assert!(!inner.cancel_registry.contains("ocr"));
+        assert!(inner.cancel_registry.contains("login"));
     }
 }

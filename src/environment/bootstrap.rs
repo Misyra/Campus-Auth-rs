@@ -160,13 +160,13 @@ pub async fn bootstrap_capability(
 pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
     let env_path = mgr.env_path();
 
-    // 1. 检查 uv（优先本地，其次系统 PATH）
+    // 1. 检查 uv（优先本地，其次系统 PATH + 最低版本校验）
     let uv_exe = env_path.join(crate::environment::UV_EXE_NAME);
     let uv_ready = if uv_exe.exists() {
         true
     } else {
-        // 检查系统 PATH 中是否有 uv
-        which::which("uv").is_ok()
+        // PATH 上的 uv 需满足最低版本要求，否则视为未就绪（触发下载最新版）
+        crate::environment::uv::check_uv_on_path().await
     };
 
     // 2. 检查 Python 虚拟环境
@@ -211,68 +211,73 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
 /// 检查 Playwright Chromium 是否已安装
 ///
 /// 通过检查 ms-playwright 缓存目录判断 Chromium 浏览器是否存在。
-/// Windows: %LOCALAPPDATA%/ms-playwright/
+/// 优先读取 `PLAYWRIGHT_BROWSERS_PATH` 环境变量覆盖默认缓存位置；
+/// chromium-* 目录需非空才算已安装（避免下载中断留空的残目录被误判）。
 fn check_playwright_chromium_installed() -> bool {
-    // 方式 1: 检查 ms-playwright 缓存目录
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        let playwright_dir = PathBuf::from(local_app_data).join("ms-playwright");
-        if playwright_dir.exists() {
-            // 检查是否存在 chromium 相关目录
-            if let Ok(entries) = std::fs::read_dir(&playwright_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("chromium-") {
-                        return true;
-                    }
-                }
+    // 方式 0: PLAYWRIGHT_BROWSERS_PATH 环境变量覆盖默认位置
+    if let Some(dir) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+        return playwright_dir_has_chromium(PathBuf::from(dir));
+    }
+
+    // 方式 1: Windows %LOCALAPPDATA%/ms-playwright/
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            if playwright_dir_has_chromium(
+                PathBuf::from(local_app_data).join("ms-playwright"),
+            ) {
+                return true;
             }
         }
     }
 
-    // 方式 2: macOS 路径
+    // 方式 2: macOS ~/Library/Caches/ms-playwright/
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = std::env::var_os("HOME") {
-            let playwright_dir = PathBuf::from(home)
-                .join("Library")
-                .join("Caches")
-                .join("ms-playwright");
-            if playwright_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&playwright_dir) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with("chromium-") {
-                            return true;
-                        }
-                    }
-                }
+            if playwright_dir_has_chromium(
+                PathBuf::from(home)
+                    .join("Library")
+                    .join("Caches")
+                    .join("ms-playwright"),
+            ) {
+                return true;
             }
         }
     }
 
-    // 方式 3: Linux 路径
+    // 方式 3: Linux ~/.cache/ms-playwright/
     #[cfg(target_os = "linux")]
     {
         if let Some(home) = std::env::var_os("HOME") {
-            let playwright_dir = PathBuf::from(home)
-                .join(".cache")
-                .join("ms-playwright");
-            if playwright_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&playwright_dir) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.starts_with("chromium-") {
-                            return true;
-                        }
-                    }
-                }
+            if playwright_dir_has_chromium(
+                PathBuf::from(home).join(".cache").join("ms-playwright"),
+            ) {
+                return true;
             }
         }
     }
 
+    false
+}
+
+/// 检查 ms-playwright 目录下是否存在非空的 chromium-* 子目录
+fn playwright_dir_has_chromium(dir: PathBuf) -> bool {
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("chromium-") {
+            // 目录非空（至少含一个条目）才算已安装；空/下载中断的残目录视为未安装
+            if let Ok(mut sub) = std::fs::read_dir(entry.path()) {
+                if sub.next().is_some() {
+                    return true;
+                }
+            }
+        }
+    }
     false
 }
 

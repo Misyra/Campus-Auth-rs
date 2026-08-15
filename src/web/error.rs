@@ -98,7 +98,7 @@ impl ApiError {
     pub fn code(&self) -> &'static str {
         match self {
             ApiError::BadRequest(_) => "BAD_REQUEST",
-            ApiError::NotFound(_) => "CONFIG_NOT_FOUND",
+            ApiError::NotFound(_) => "NOT_FOUND",
             ApiError::Conflict(_) => "CONFLICT",
             ApiError::Validation(_) => "VALIDATION_ERROR",
             ApiError::Internal(_) => "INTERNAL_ERROR",
@@ -190,6 +190,11 @@ impl From<crate::tasks::TaskError> for ApiError {
                     })
                     .collect(),
             ),
+            // Bridge 错误保留变体：WorkerBusy → 409，其余透传为内部错误
+            crate::tasks::TaskError::Bridge(crate::bridge::BridgeError::WorkerBusy) => {
+                ApiError::WorkerBusy("Worker 忙: 调试会话进行中".into())
+            }
+            crate::tasks::TaskError::Bridge(inner) => ApiError::Internal(inner.to_string()),
             _ => ApiError::Internal(e.to_string()),
         }
     }
@@ -253,7 +258,9 @@ impl From<std::io::Error> for ApiError {
 
 impl From<serde_json::Error> for ApiError {
     fn from(e: serde_json::Error) -> Self {
-        ApiError::BadRequest(e.to_string())
+        // serde_json::Error 在 `?` 路径中多用于内部序列化/反序列化（不含请求体解析，
+        // 后者由各 route 显式映射为 BadRequest）。内部序列化失败应映射 500，而非 400。
+        ApiError::Internal(e.to_string())
     }
 }
 
@@ -371,6 +378,17 @@ mod tests {
         assert!(matches!(e, ApiError::Conflict(_)));
         let e: ApiError = crate::tasks::TaskError::ValidationFailed(vec!["a".into()]).into();
         assert!(matches!(e, ApiError::Validation(_)));
+        // Bridge 类型化错误：WorkerBusy → 409 WorkerBusy
+        let e: ApiError =
+            crate::tasks::TaskError::Bridge(crate::bridge::BridgeError::WorkerBusy).into();
+        assert!(
+            matches!(e, ApiError::WorkerBusy(_)),
+            "Bridge::WorkerBusy 应映射为 409，实际 {e:?}"
+        );
+        // 其他 Bridge 错误 → 500 内部错误
+        let e: ApiError =
+            crate::tasks::TaskError::Bridge(crate::bridge::BridgeError::Timeout).into();
+        assert!(matches!(e, ApiError::Internal(_)));
 
         let e: ApiError = crate::bridge::BridgeError::WorkerNotInstalled.into();
         assert!(matches!(e, ApiError::WorkerNotInstalled(_)));

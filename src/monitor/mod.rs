@@ -135,8 +135,7 @@ pub struct ProbeReport {
 
 /// 网络监测服务
 ///
-/// 持有长生命周期 reqwest 连接池与原子计数器。配置每次探测前从 ConfigService 热读取，
-/// 网卡绑定变更时通过 [`MonitorService::rebuild_client`] 原子替换客户端。
+/// 持有长生命周期 reqwest 连接池与原子计数器。配置每次探测前从 ConfigService 热读取。
 pub struct MonitorService {
     /// 配置服务（用于热读取 RuntimeConfig）
     config_service: Arc<ConfigService>,
@@ -188,16 +187,6 @@ impl MonitorService {
             builder = builder.proxy(proxy);
         }
         builder.build().map_err(|e| MonitorError::ClientBuild(e.to_string()))
-    }
-
-    /// 网卡绑定配置变更时重建 reqwest 客户端（原子替换）。
-    ///
-    /// 设计说明：Engine 以 `Arc<MonitorService>` 持有本服务，故此处使用 `&self` + `ArcSwap`
-    /// 内部可变性，而非 `&mut self`，避免要求 Engine 以可写句柄持有服务。
-    pub fn rebuild_client(&self, proxy: Option<&str>) -> Result<(), MonitorError> {
-        let client = Self::build_client(proxy)?;
-        self.http_client.store(Arc::new(client));
-        Ok(())
     }
 
     /// 执行一次完整探测周期，返回 [`ProbeReport`]。

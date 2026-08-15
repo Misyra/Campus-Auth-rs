@@ -31,14 +31,11 @@ pub struct ReleaseManifest {
 pub struct PlatformPackage {
     /// zip 下载 URL（必须 HTTPS）
     pub url: String,
-    /// 预期 SHA256 hex 摘要（64 字符小写）
+    /// 预期 SHA256 hex 摘要（64 字符小写）；为空时表示未取得校验值（降级信任 HTTPS）
     pub sha256: String,
     /// 预期文件大小（字节），用于进度计算
     #[serde(default)]
     pub size: Option<u64>,
-    /// 签名文件 URL（未来支持签名验证）
-    #[serde(default)]
-    pub sig_url: Option<String>,
 }
 
 /// 当前平台键（编译期常量），如 `"windows-x64"`
@@ -128,18 +125,23 @@ pub(crate) async fn fetch_manifest(
             .get("body")
             .and_then(|v| v.as_str())
             .map(|v| v.to_owned());
-        let assets = body
+        let assets: Vec<_> = body
             .get("assets")
             .and_then(|v| v.as_array())
             .into_iter()
-            .flatten();
+            .flatten()
+            .collect();
         let mut platforms: HashMap<String, PlatformPackage> = HashMap::new();
-        for asset in assets {
+        for asset in &assets {
             let name = asset
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_lowercase();
+            // .sha256 伴随文件不是下载包本身，跳过（由 fetch_sha256_assoc 使用）
+            if name.ends_with(".sha256") {
+                continue;
+            }
             let dl_url = asset
                 .get("browser_download_url")
                 .and_then(|v| v.as_str())
@@ -159,13 +161,20 @@ pub(crate) async fn fetch_manifest(
             } else {
                 continue;
             };
+            // 从 release assets 中找 `.sha256` 伴随文件，拿到真实哈希（U2：默认 GitHub
+            // 源此前 sha256 恒为空，更新包无任何完整性校验）
+            let sha256 = fetch_sha256_assoc(client, &assets, &name).await;
+            if sha256.is_empty() {
+                tracing::warn!(
+                    "GitHub 发布中未找到 {name} 的 .sha256 伴随文件，将降级为信任 HTTPS"
+                );
+            }
             platforms.insert(
                 platform_key.to_string(),
                 PlatformPackage {
                     url: dl_url.to_string(),
-                    sha256: String::new(), // GitHub API 不含 SHA256，下载后需另行校验
+                    sha256,
                     size,
-                    sig_url: None,
                 },
             );
         }
@@ -185,6 +194,61 @@ pub(crate) async fn fetch_manifest(
     Err(UpdaterError::ManifestParseFailed(serde::de::Error::custom(
         "无法识别的发布清单格式：既无 version 也无 tag_name",
     )))
+}
+
+/// 从 GitHub release assets 中查找 zip 对应的 `.sha256` 伴随文件并下载其内容
+///
+/// 返回伴随文件首行首个空白分隔字段（即哈希值）；找不到 / 下载失败时返回空串
+/// （调用方据此降级为信任 HTTPS）。
+async fn fetch_sha256_assoc(
+    client: &reqwest::Client,
+    assets: &[&serde_json::Value],
+    zip_name: &str,
+) -> String {
+    let assoc_name = format!("{zip_name}.sha256");
+    let asset = assets.iter().find(|a| {
+        a.get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| n.to_lowercase() == assoc_name)
+            .unwrap_or(false)
+    });
+    let Some(asset) = asset else {
+        return String::new();
+    };
+    let url = asset
+        .get("browser_download_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if url.is_empty() {
+        return String::new();
+    }
+    let resp = match client
+        .get(url)
+        .timeout(MANIFEST_FETCH_TIMEOUT)
+        .header("User-Agent", "campus-auth-updater")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("下载 .sha256 伴随文件失败 {url}: {e}");
+            return String::new();
+        }
+    };
+    let resp = match resp.error_for_status() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("下载 .sha256 伴随文件失败 {url}: {e}");
+            return String::new();
+        }
+    };
+    match resp.text().await {
+        Ok(t) => t.split_whitespace().next().unwrap_or("").to_string(),
+        Err(e) => {
+            tracing::warn!("读取 .sha256 伴随文件失败 {url}: {e}");
+            String::new()
+        }
+    }
 }
 
 /// 按当前平台选择下载包
@@ -271,7 +335,6 @@ mod tests {
                 url: "https://example.com/pkg.zip".into(),
                 sha256: String::new(),
                 size: None,
-                sig_url: None,
             },
         );
         let manifest = ReleaseManifest {

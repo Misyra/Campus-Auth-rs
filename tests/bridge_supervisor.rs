@@ -246,3 +246,50 @@ async fn supervisor_cancel_返回_cancelled() {
 
     handle.stop().await;
 }
+
+/// 5.2：调用方超时后应释放会话槽位，后续调试类请求不再 WorkerBusy。
+///
+/// `sleep` 请求在 Worker 侧挂起 10s，用 1s 超时触发其超时。修复前超时后槽位滞留
+/// （current_session 仍为 Login），后续 debug_step 会因会话不兼容而 WorkerBusy；
+/// 修复后超时发送 Cancel 触发本地 token → 守卫 drop → 槽位复位，debug_step 应成功。
+#[tokio::test]
+async fn supervisor_超时_释放会话槽位() {
+    let Some(venv) = locate_venv() else {
+        eprintln!("跳过 bridge_supervisor timeout：未找到本地 Python venv");
+        return;
+    };
+    let Some(tree) = setup_worker_tree(&venv) else {
+        eprintln!("跳过 bridge_supervisor timeout：无法创建 .venv 目录链接");
+        return;
+    };
+
+    let (bridge, handle, _config) = make_supervisor(&tree.base).await;
+
+    // 预热：确保 Worker 已 spawn 并通过健康检查
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, Duration::from_secs(40))
+        .await;
+
+    // 发起挂起请求（Worker sleep 10s），用 1s 超时触发超时清理
+    let r = bridge
+        .execute_with_timeout("sleep", json!({}), Duration::from_secs(1))
+        .await;
+    assert!(
+        matches!(r, Err(BridgeError::Timeout)),
+        "挂起请求应超时，实际 {r:?}"
+    );
+
+    // 等待超时后的 Cancel → 本地 token 唤醒 → guard drop → 槽位释放
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 调试类请求应通过（槽位已释放；若滞留则会 WorkerBusy）
+    let r2 = bridge
+        .execute_with_timeout("debug_step", Value::Null, Duration::from_secs(40))
+        .await;
+    assert!(
+        r2.is_ok(),
+        "超时后会话槽位应释放，debug_step 应成功，实际 {r2:?}"
+    );
+
+    handle.stop().await;
+}

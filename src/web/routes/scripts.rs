@@ -152,7 +152,8 @@ pub async fn update_script(
             "脚本接口仅接受 type=script 的负载".into(),
         ));
     }
-    let task: crate::tasks::TaskKind = serde_json::from_value(body)?;
+    let task: crate::tasks::TaskKind = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.container.tasks.save_task(&task_id, &task).await?;
     Ok(data(task_id))
 }

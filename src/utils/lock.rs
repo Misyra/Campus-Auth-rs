@@ -81,11 +81,6 @@ impl InstanceLock {
         std::fs::write(&self.info_path, data)?;
         Ok(())
     }
-
-    /// 主动释放锁（drop 时也会自动释放）
-    pub fn release(self) {
-        // 所有权转移，离开作用域时 _file 关闭、锁释放
-    }
 }
 
 impl Drop for InstanceLock {

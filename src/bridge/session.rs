@@ -62,6 +62,15 @@ impl CancelRegistry {
     pub fn clear(&self) {
         self.map.lock().unwrap_or_else(recover_lock).clear();
     }
+
+    /// 是否已注册指定 cancel_id（测试辅助）
+    #[cfg(test)]
+    pub fn contains(&self, cancel_id: &str) -> bool {
+        self.map
+            .lock()
+            .unwrap_or_else(recover_lock)
+            .contains_key(cancel_id)
+    }
 }
 
 impl Default for CancelRegistry {
@@ -70,51 +79,21 @@ impl Default for CancelRegistry {
     }
 }
 
-/// 会话 RAII 守卫：drop 时复位会话状态
+/// 会话 RAII 守卫：drop 时执行清理回调
+///
+/// 清理逻辑完全由构造时传入的闭包决定，从而支持两种语义：
+/// - 普通会话（登录/调试）：复位会话槽位 + 启动空闲计时器（`reset_session`）；
+/// - OCR 轻量请求：仅清理自身 pending 与 cancel 注册，不触碰会话槽位（避免摧毁
+///   并发登录会话，见 5.1）。闭包捕获校验所需的一切状态（request_id / cancel_id）。
 pub struct SessionGuard {
-    session_type: SessionType,
-    /// 本会话的请求 id（唯一），用于在复位时校验会话归属，避免
-    /// 已结束会话的延迟 drop 误伤刚启动的同类型新会话。
-    request_id: u64,
-    cancelled: bool,
-    on_drop: Option<Box<dyn FnOnce(SessionType, u64) + Send>>,
+    on_drop: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl SessionGuard {
-    /// 创建会话守卫，drop 时回调 `on_drop`（携带会话类型与 request_id）复位状态
-    pub fn new(
-        session_type: SessionType,
-        request_id: u64,
-        on_drop: impl FnOnce(SessionType, u64) + Send + 'static,
-    ) -> Self {
+    /// 创建会话守卫，drop 时回调 `on_drop` 执行清理
+    pub fn new(on_drop: impl FnOnce() + Send + 'static) -> Self {
         Self {
-            session_type,
-            request_id,
-            cancelled: false,
             on_drop: Some(Box::new(on_drop)),
-        }
-    }
-
-    /// 会话类型
-    pub fn session_type(&self) -> SessionType {
-        self.session_type
-    }
-
-    /// 标记已取消
-    pub fn cancel(&mut self) {
-        self.cancelled = true;
-    }
-
-    /// 是否已取消
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled
-    }
-
-    /// 显式强制关闭（调试会话回收）
-    pub fn force_close(&mut self) {
-        self.cancelled = true;
-        if let Some(f) = self.on_drop.take() {
-            f(self.session_type, self.request_id);
         }
     }
 }
@@ -122,7 +101,7 @@ impl SessionGuard {
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         if let Some(f) = self.on_drop.take() {
-            f(self.session_type, self.request_id);
+            f();
         }
     }
 }

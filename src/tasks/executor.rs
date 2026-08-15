@@ -121,7 +121,7 @@ impl TaskExecutor {
             self.bridge
                 .execute("execute_browser_task", params)
                 .await
-                .map_err(|e| TaskError::Bridge(e.to_string()))
+                .map_err(TaskError::Bridge)
         }
         .await;
 
@@ -355,6 +355,8 @@ impl TaskExecutor {
             .kill_on_drop(true);
 
         let child = cmd.spawn().map_err(TaskError::IoError)?;
+        // 记录 PID：超时后需 taskkill /T 递归强杀整个进程树（kill_on_drop 只杀直接子进程）
+        let pid = child.id();
 
         let timeout_dur = Duration::from_secs(timeout);
         let waited = tokio::time::timeout(timeout_dur, child.wait_with_output()).await;
@@ -389,8 +391,18 @@ impl TaskExecutor {
             }
             Ok(Err(e)) => Err(TaskError::IoError(e)),
             Err(_) => {
-                // 超时：child 已被 wait_with_output 的 future 持有，
-                // 超时后该 future 被 drop，配合 kill_on_drop(true) 自动杀死子进程
+                // 超时：child 已被 wait_with_output 的 future 持有，配合 kill_on_drop(true) 杀死直接子进程。
+                // Windows 上 cmd.exe 启动的脚本子树可能响应直接 kill 后仍存活为孤儿（7.3），
+                // 用 taskkill /T 递归强杀整个进程树兜底。
+                #[cfg(windows)]
+                if let Some(pid) = pid {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &pid.to_string()])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .status();
+                }
                 Err(TaskError::ExecutionTimeout(timeout))
             }
         }

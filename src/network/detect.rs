@@ -33,18 +33,6 @@ pub enum NetworkError {
         source: anyhow::Error,
     },
 
-    /// IO 错误（如绑定 SOCKS5 端口）
-    #[error("IO 错误: {0}")]
-    Io(#[source] std::io::Error),
-
-    /// SOCKS5 端口被占用
-    #[error("SOCKS5 端口 {port} 被占用，重试 {retries} 次后仍失败")]
-    Socks5PortBusy { port: u16, retries: u8 },
-
-    /// SOCKS5 转发器异常退出
-    #[error("SOCKS5 转发器异常退出: {reason}")]
-    Socks5Crashed { reason: String },
-
     /// 网络检测不支持当前平台
     #[error("网络检测不支持当前平台")]
     UnsupportedPlatform,
@@ -75,15 +63,6 @@ pub struct InterfaceInfo {
     /// 是否为 WiFi 接口（尽力推断）
     pub is_wifi: bool,
     /// WiFi SSID（仅 WiFi 接口）
-    pub ssid: Option<String>,
-}
-
-/// 网关与 SSID 汇总信息
-#[derive(Debug, Clone, Serialize)]
-pub struct GatewayInfo {
-    /// 所有默认路由网关
-    pub gateways: Vec<Ipv4Addr>,
-    /// 当前 WiFi SSID
     pub ssid: Option<String>,
 }
 
@@ -590,19 +569,19 @@ fn is_macos_virtual(name: &str) -> bool {
         || n.starts_with("awdl")
 }
 
-/// 根据编译目标创建对应平台的检测器
+/// 根据编译目标创建对应平台的检测器（外层套 30s TTL 缓存）
 pub fn create_detector() -> std::sync::Arc<dyn NetworkDetect> {
     #[cfg(target_os = "windows")]
     {
-        std::sync::Arc::new(WindowsDetect)
+        std::sync::Arc::new(CachingDetector::new(std::sync::Arc::new(WindowsDetect)))
     }
     #[cfg(target_os = "linux")]
     {
-        std::sync::Arc::new(LinuxDetect)
+        std::sync::Arc::new(CachingDetector::new(std::sync::Arc::new(LinuxDetect)))
     }
     #[cfg(target_os = "macos")]
     {
-        std::sync::Arc::new(MacosDetect)
+        std::sync::Arc::new(CachingDetector::new(std::sync::Arc::new(MacosDetect)))
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
@@ -630,6 +609,86 @@ impl NetworkDetect for UnsupportedDetect {
 
 /// 系统命令超时（秒）
 pub const SUBPROCESS_TIMEOUT_SECS: u64 = 10;
+
+/// 网卡枚举缓存 TTL（秒）：避免每次探测周期 / Web 请求都新起 ipconfig/netsh/route 子进程
+const DETECT_CACHE_TTL_SECS: u64 = 30;
+
+/// 单项缓存条目
+struct Cached<V> {
+    fetched_at: std::time::Instant,
+    value: V,
+}
+
+/// 带 30s TTL 的网络检测器包装（7.3）
+///
+/// `list_interfaces` / `default_gateways` / `current_ssid` 各自缓存，TTL 内直接返回缓存，
+/// 避免 monitor 每探测周期 + 每个 Web 请求（list_network_interfaces / detect）都重新 spawn
+/// ipconfig、netsh、route 子进程（各 10s 超时，开销大）。
+pub(crate) struct CachingDetector {
+    inner: std::sync::Arc<dyn NetworkDetect>,
+    interfaces: std::sync::Mutex<Option<Cached<Vec<InterfaceInfo>>>>,
+    gateways: std::sync::Mutex<Option<Cached<Vec<Ipv4Addr>>>>,
+    ssid: std::sync::Mutex<Option<Cached<Option<String>>>>,
+}
+
+impl CachingDetector {
+    fn new(inner: std::sync::Arc<dyn NetworkDetect>) -> Self {
+        Self {
+            inner,
+            interfaces: std::sync::Mutex::new(None),
+            gateways: std::sync::Mutex::new(None),
+            ssid: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// 读缓存：未过期则返回 Some（克隆值），否则返回 None（触发重新探测）
+    fn fresh<T: Clone>(entry: &std::sync::Mutex<Option<Cached<T>>>) -> Option<T> {
+        let guard = entry.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .filter(|c| c.fetched_at.elapsed().as_secs() < DETECT_CACHE_TTL_SECS)
+            .map(|c| c.value.clone())
+    }
+
+    /// 写缓存
+    fn store<T>(target: &std::sync::Mutex<Option<Cached<T>>>, value: T) {
+        let mut guard = target.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(Cached {
+            fetched_at: std::time::Instant::now(),
+            value,
+        });
+    }
+}
+
+#[async_trait]
+impl NetworkDetect for CachingDetector {
+    async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
+        if let Some(v) = Self::fresh(&self.interfaces) {
+            return Ok(v);
+        }
+        let value = self.inner.list_interfaces().await?;
+        Self::store(&self.interfaces, value.clone());
+        Ok(value)
+    }
+
+    async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
+        if let Some(v) = Self::fresh(&self.gateways) {
+            return Ok(v);
+        }
+        let value = self.inner.default_gateways().await?;
+        Self::store(&self.gateways, value.clone());
+        Ok(value)
+    }
+
+    async fn current_ssid(&self) -> Result<Option<String>, NetworkError> {
+        if let Some(v) = Self::fresh(&self.ssid) {
+            return Ok(v);
+        }
+        let value = self.inner.current_ssid().await?;
+        Self::store(&self.ssid, value.clone());
+        Ok(value)
+    }
+}
 
 #[cfg(test)]
 #[path = "detect_tests.rs"]

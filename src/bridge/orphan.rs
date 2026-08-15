@@ -112,7 +112,14 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let ppid = parse_ppid_from_stat(&stat)?;
+        // 单个进程 stat 解析失败不应中止整个清理（与同函数其他错误处理一致），跳过该进程
+        let ppid = match parse_ppid_from_stat(&stat) {
+            Ok(p) => p,
+            Err(e) => {
+                debug!("解析进程 {pid} 的 ppid 失败: {e}");
+                continue;
+            }
+        };
         pid_to_ppid.insert(pid);
         // 读取 cmdline 判断是否为 chromium
         let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();

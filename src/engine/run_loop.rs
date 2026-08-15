@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Local, Timelike};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, Interval};
 
 use crate::engine::{
@@ -87,17 +87,11 @@ pub(crate) async fn run_loop(
     _engine: Arc<Engine>,
     deps: EngineDeps,
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
-    mut stop_rx: watch::Receiver<bool>,
 ) {
     // 登录结果回传 channel（后台 spawn 的登录任务完成后通知主循环，携带完整结果以区分来源）
     let (login_result_tx, mut login_result_rx) = mpsc::channel::<LoginResult>(16);
     let mut inner = EngineInner::new(login_result_tx);
     loop {
-        // 步骤 0：停止信号检查
-        if *stop_rx.borrow() {
-            break;
-        }
-
         // 步骤 1：命令优先（try_recv 预检）
         match cmd_rx.try_recv() {
             Ok(cmd) => {
@@ -115,11 +109,6 @@ pub(crate) async fn run_loop(
             biased;
             Some(cmd) = cmd_rx.recv() => {
                 if handle_command(cmd, &mut inner, &deps).await {
-                    break;
-                }
-            }
-            _ = stop_rx.changed() => {
-                if *stop_rx.borrow() {
                     break;
                 }
             }

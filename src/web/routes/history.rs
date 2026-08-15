@@ -37,8 +37,6 @@ pub async fn get_history(
     let from = to - Duration::days(30);
     let mut history = state.container.history.query(from, to).await?;
 
-    let total = history.len();
-
     // 按 limit 截断，保留最近的 N 条（列表已按时间升序排列）
     if let Some(limit) = params.limit {
         let len = history.len();
@@ -46,6 +44,10 @@ pub async fn get_history(
             history.drain(..len - limit);
         }
     }
+
+    // total 在 limit 截断**之后**取值，使分页的 total 与可翻页条目数一致
+    // （否则 total 反映全量条数，而翻页只作用于 limit 截断后的子集，出现 total 与 items 不一致）
+    let total = history.len();
 
     // 分页（page + page_size 同时存在时启用）
     let use_pagination = params.page.is_some();

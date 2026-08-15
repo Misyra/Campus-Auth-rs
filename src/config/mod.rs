@@ -18,8 +18,6 @@ pub const CONFIG_DIR: &str = "config";
 pub const SETTINGS_FILE: &str = "settings.json";
 /// Profile 文件目录（相对于 config_dir）
 pub const PROFILES_DIR: &str = "profiles";
-/// 加密密钥文件名（相对于 AUTH_DATA_DIR）
-pub const ENC_KEY_FILE: &str = ".enc_key.rs";
 /// 损坏文件备份前缀
 pub const CORRUPT_PREFIX: &str = "settings.corrupt.";
 /// 迁移备份目录前缀

@@ -50,12 +50,6 @@ pub enum SchedulerError {
     /// 序列化/反序列化失败。
     #[error("JSON 错误: {0}")]
     JsonError(#[from] serde_json::Error),
-    /// LoginOrchestrator 因抢占/去重拒绝提交。
-    #[error("任务提交被拒绝: {0}")]
-    SubmitRejected(String),
-    /// TaskExecutor 返回错误。
-    #[error("执行器错误: {0}")]
-    ExecutorError(String),
 }
 
 /// 内部任务变更通知（统一触发全量重算）。
@@ -94,17 +88,6 @@ pub struct SchedulerService {
     concurrency: Arc<tokio::sync::Semaphore>,
     /// 内部状态。
     state: std::sync::Mutex<SchedulerState>,
-}
-
-/// 调度器运行时状态（供 API 查询）。
-#[derive(Debug, Clone)]
-pub struct SchedulerStatus {
-    /// 是否运行中。
-    pub running: bool,
-    /// 任务数量。
-    pub task_count: usize,
-    /// 下次触发时间（ISO 8601 字符串）。
-    pub next_fire_at: Option<String>,
 }
 
 pub use crate::ServiceHandle;
@@ -262,25 +245,6 @@ impl SchedulerService {
         let _ = self.task_change_tx.try_send(TaskChange::Reload);
     }
 
-    /// 查询调度器运行状态。
-    pub fn status(&self) -> SchedulerStatus {
-        match self.state.lock() {
-            Ok(s) => {
-                let next = s.next_fire_at.map(systemtime_to_iso);
-                SchedulerStatus {
-                    running: s.running,
-                    task_count: s.tasks.len(),
-                    next_fire_at: next,
-                }
-            }
-            Err(_) => SchedulerStatus {
-                running: false,
-                task_count: 0,
-                next_fire_at: None,
-            },
-        }
-    }
-
     /// 更新内部状态（加锁失败则跳过）。
     pub(crate) fn update_state<F>(&self, f: F)
     where
@@ -325,6 +289,19 @@ impl SchedulerService {
             if let Some(t) = s.tasks.iter_mut().find(|t| t.id == task_id) {
                 t.last_run = Some(now);
                 t.last_result = Some(result);
+            }
+        });
+    }
+
+    /// 手动触发执行定时任务：与 cron 触发共用同一并发信号量闸。
+    /// 手动触发与定时触发走同一执行路径（`execute_scheduled_task`），
+    /// 保证 run_id 不被死数据浪费、手动与 cron 触发共享 concurrency 限制。
+    pub fn spawn_manual_run(self: &Arc<Self>, task: crate::scheduler::task::ScheduledTask) {
+        let svc = self.clone();
+        let sem = self.concurrency.clone();
+        tokio::spawn(async move {
+            if let Ok(_permit) = sem.acquire_owned().await {
+                crate::scheduler::cron_loop::execute_scheduled_task(task, svc).await;
             }
         });
     }

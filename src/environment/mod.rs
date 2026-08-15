@@ -8,7 +8,9 @@ pub mod uv;
 pub use bootstrap::{bootstrap_capability, check_environment, retry_install};
 pub use git::{check_git, download_mingit};
 pub use python::{ensure_venv, install_playwright};
-pub use uv::{download_uv, run_uv_command, run_uv_sync, verify_sha256};
+pub use uv::{
+    check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256,
+};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use std::time::Duration;
 use reqwest::Client;
 use tokio_util::sync::CancellationToken;
 
-use crate::status::{InstallProgress, PartialSnapshot, StatusManager, WorkerStatus};
+use crate::status::{InstallProgress, PartialSnapshot, StatusManager};
 
 /// uv GitHub Releases 基础 URL（主站）
 pub const UV_RELEASES_BASE: &str = "https://github.com/astral-sh/uv/releases/download";
@@ -343,14 +345,5 @@ impl EnvironmentManager {
     /// 是否允许下载 MinGit
     pub(crate) fn git_download_enabled(&self) -> bool {
         self.git_download_enabled
-    }
-}
-
-/// 供环境未就绪时标记 Worker 状态（默认 Stopped/NotInstalled）
-pub(crate) fn _worker_state_for_capability(ready: bool) -> WorkerStatus {
-    if ready {
-        WorkerStatus::Stopped
-    } else {
-        WorkerStatus::NotInstalled
     }
 }

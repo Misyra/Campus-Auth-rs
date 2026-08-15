@@ -55,7 +55,11 @@ fn main() {
 
     // 1. 等待主进程退出
     println!("[helper] 等待主进程 (PID {}) 退出...", cli.pid);
-    wait_for_process_exit(cli.pid);
+    if !wait_for_process_exit(cli.pid) {
+        // 主进程未退出：中止更新，保留 staging 与 pending.json，待主进程下次启动
+        // 时由 apply_pending_on_startup 应用（不执行 cleanup，避免摧毁待应用更新）
+        std::process::exit(1);
+    }
     // 额外等待一小段时间，确保文件句柄完全释放
     sleep(Duration::from_millis(500));
 
@@ -87,7 +91,7 @@ fn main() {
     // 3. 校验 staging 文件存在
     if !extracted_exe.exists() {
         eprintln!("[helper] staging 文件不存在: {}", extracted_exe.display());
-        cleanup(&base_path);
+        cleanup(&base_path, &staging_dir);
         std::process::exit(1);
     }
 
@@ -114,7 +118,7 @@ fn main() {
             let _ = std::fs::copy(&backup_path, &target_exe);
             eprintln!("[helper] 已回退到备份版本");
         }
-        cleanup(&base_path);
+        cleanup(&base_path, &staging_dir);
         std::process::exit(1);
     }
 
@@ -133,7 +137,7 @@ fn main() {
     }
 
     // 7. 清理
-    cleanup(&base_path);
+    cleanup(&base_path, &staging_dir);
 
     // 删除备份（替换成功后不再需要）
     let _ = std::fs::remove_file(&backup_path);
@@ -142,22 +146,27 @@ fn main() {
 }
 
 /// 轮询等待指定 PID 的进程退出（最多等待 60 秒）
-fn wait_for_process_exit(pid: u32) {
+///
+/// 返回 `true` 表示主进程已退出；超时返回 `false`。5.3：超时后**不再强制继续**——
+/// 主进程仍存活时覆盖运行中 exe 的替换必然失败，且强制继续会走 cleanup 摧毁 staging
+/// 与 pending.json，导致更新彻底丢失。改为报错退出并保留 staging/pending，把应用机会
+/// 留给主进程下次启动的 `apply_pending_on_startup`。
+fn wait_for_process_exit(pid: u32) -> bool {
     for _ in 0..600 {
         if !is_process_alive(pid) {
-            return;
+            return true;
         }
         sleep(Duration::from_millis(100));
     }
-    eprintln!("[helper] 等待进程退出超时（60 秒），强制继续");
+    eprintln!("[helper] 等待进程退出超时（60 秒），中止更新");
+    false
 }
 
-/// 清理 staging 目录和 pending.json
-fn cleanup(base_path: &Path) {
+/// 清理 pending.json 标记与 staging 目录（staging 目录用 CLI --staging 传入的实际路径）
+fn cleanup(base_path: &Path, staging_dir: &Path) {
     let pending_path = base_path.join("update").join("pending.json");
-    let staging_dir = base_path.join("update").join("staging");
     let _ = std::fs::remove_file(&pending_path);
-    let _ = std::fs::remove_dir_all(&staging_dir);
+    let _ = std::fs::remove_dir_all(staging_dir);
 }
 
 /// 获取当前平台的可执行文件名

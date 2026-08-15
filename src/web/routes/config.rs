@@ -51,7 +51,8 @@ pub async fn put_settings(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings: crate::config::SettingsData = serde_json::from_value(body)?;
+    let settings: crate::config::SettingsData = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.container.config.save_settings(&settings).await?;
     state.container.config.reload().await?;
     let updated = state.container.config.load_settings();
@@ -102,6 +103,11 @@ pub async fn patch_settings(
         ];
 
         for (k, v) in obj {
+            if k == "carrier_custom" {
+                // 纯前端展示字段（自定义运营商输入框），后端无对应存储；
+                // 实际运营商名已由 `isp` 字段承载。显式忽略，避免落入 other_patch 污染 settings.json。
+                continue;
+            }
             if profile_keys.contains(&k.as_str()) {
                 profile_patch.insert(k.clone(), v.clone());
             } else if k == "monitor" {
@@ -162,7 +168,8 @@ pub async fn patch_settings(
         }
     }
 
-    current = serde_json::from_value(current_value)?;
+    current = serde_json::from_value(current_value)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.container.config.save_settings(&current).await?;
     state.container.config.reload().await?;
     let settings = state.container.config.load_settings();

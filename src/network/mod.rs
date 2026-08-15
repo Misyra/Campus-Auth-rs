@@ -7,12 +7,12 @@ pub mod detect;
 pub mod interfaces;
 
 pub use detect::{
-    create_detector, GatewayInfo, InterfaceInfo, LinuxDetect, MacosDetect, NetworkDetect,
-    NetworkError, UnsupportedDetect, WindowsDetect,
+    create_detector, InterfaceInfo, LinuxDetect, MacosDetect, NetworkDetect, NetworkError,
+    UnsupportedDetect, WindowsDetect,
 };
 pub use interfaces::{
-    filter_interfaces, is_excluded, sort_interfaces, virtual_if_patterns,
-    VIRTUAL_IF_PATTERNS_LINUX, VIRTUAL_IF_PATTERNS_MACOS, VIRTUAL_IF_PATTERNS_WINDOWS,
+    filter_interfaces, is_excluded, virtual_if_patterns, VIRTUAL_IF_PATTERNS_LINUX,
+    VIRTUAL_IF_PATTERNS_MACOS, VIRTUAL_IF_PATTERNS_WINDOWS,
 };
 
 /// 出口网卡绑定抽象（预留接口）。

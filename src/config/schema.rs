@@ -348,8 +348,6 @@ pub struct UpdaterSettings {
     pub check_on_startup: bool,
     /// 发布源 URL
     pub release_source_url: String,
-    /// 更新通道（stable / beta）
-    pub update_channel: String,
     /// 检查间隔（小时）
     pub check_interval_hours: u32,
 }
@@ -360,7 +358,6 @@ impl Default for UpdaterSettings {
             check_on_startup: true,
             release_source_url:
                 "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest".to_string(),
-            update_channel: "stable".to_string(),
             check_interval_hours: 24,
         }
     }

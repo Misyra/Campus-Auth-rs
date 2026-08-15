@@ -84,7 +84,10 @@ pub(crate) async fn download_and_verify(
         downloaded += chunk.len() as u64;
 
         if let (Some(total), Some(cb)) = (content_length, on_progress) {
-            if let Some(percent) = (downloaded * 100).checked_div(total).map(|p| p as u8) {
+            // 进度百分比恒钳制在 0~100：服务端实发字节超 Content-Length 时
+            // (downloaded*100/total) 可能 >255，直接 as u8 会回绕（7.3）
+            if let Some(pct) = (downloaded * 100).checked_div(total) {
+                let percent = pct.min(100) as u8;
                 if last_reported_pct.is_none_or(|last| percent > last) {
                     cb(percent);
                     last_reported_pct = Some(percent);

@@ -64,17 +64,6 @@ pub fn filter_interfaces(interfaces: Vec<InterfaceInfo>) -> Vec<InterfaceInfo> {
         .collect()
 }
 
-/// 排序：有默认网关的接口优先，其余按名称排序
-pub fn sort_interfaces(mut interfaces: Vec<InterfaceInfo>) -> Vec<InterfaceInfo> {
-    use std::cmp::Ordering;
-    interfaces.sort_by(|a, b| match (a.gateway.is_some(), b.gateway.is_some()) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        _ => a.name.cmp(&b.name),
-    });
-    interfaces
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

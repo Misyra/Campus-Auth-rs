@@ -1,8 +1,8 @@
 //! Python 安装：uv sync + Playwright 浏览器安装
 
 use crate::environment::{
-    EnvironmentError, EnvironmentManager, PLAYWRIGHT_INSTALL_MAX_RETRIES,
-    PLAYWRIGHT_INSTALL_RETRY_DELAY, PLAYWRIGHT_INSTALL_TIMEOUT, UV_EXE_NAME,
+    uv_exe_path, EnvironmentError, EnvironmentManager, PLAYWRIGHT_INSTALL_MAX_RETRIES,
+    PLAYWRIGHT_INSTALL_RETRY_DELAY, PLAYWRIGHT_INSTALL_TIMEOUT,
 };
 
 /// 确保 Python 虚拟环境就绪
@@ -33,7 +33,7 @@ pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
 ///
 /// 执行 `uv run playwright install chromium`，带超时和重试。
 pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
-    let uv_exe = mgr.env_path().join(UV_EXE_NAME);
+    let uv_exe = uv_exe_path(mgr);
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
     let mut last_err_msg = String::new();

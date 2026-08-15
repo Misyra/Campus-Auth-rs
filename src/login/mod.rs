@@ -31,44 +31,6 @@ use crate::tasks::TaskKind;
 use crate::tasks::TaskManager;
 use crate::utils::metrics::Metrics;
 
-/// 登录模块错误类型
-///
-/// 当前 `submit` 为无失败返回的设计（错误经由 [`LoginHandle`] 终态与状态广播体现），
-/// 本枚举保留供内部辅助逻辑与未来扩展使用。
-#[derive(Debug, thiserror::Error)]
-pub enum LoginError {
-    /// 配置不完整（缺少必填字段）
-    #[error("配置不完整: {missing_fields}")]
-    IncompleteConfig {
-        /// 缺失字段名（逗号分隔）
-        missing_fields: String,
-    },
-    /// auth_url TCP 预检不可达
-    #[error("auth_url 不可达: {url}")]
-    AuthUrlUnreachable {
-        /// 不可达的 URL
-        url: String,
-    },
-    /// 登录被拒绝
-    #[error("登录被拒绝: {reason}")]
-    Rejected {
-        /// 拒绝原因
-        reason: String,
-    },
-    /// Bridge 执行失败（透传 [`crate::bridge::BridgeError`]）
-    #[error("Bridge 执行失败: {0}")]
-    BridgeError(#[from] crate::bridge::BridgeError),
-    /// Worker 繁忙（调试会话进行中）
-    #[error("Worker 繁忙（调试会话进行中）")]
-    WorkerBusy,
-    /// 登录超时
-    #[error("登录超时")]
-    Timeout,
-    /// 内部错误
-    #[error("内部错误: {0}")]
-    Internal(String),
-}
-
 /// 结果共享槽（句柄与状态机共享，支持 [`LoginHandle`] 可克隆）
 ///
 /// 使用 `watch` channel 替代 `Notify`，避免无等待者时通知丢失导致 `await_result` 永久挂起。

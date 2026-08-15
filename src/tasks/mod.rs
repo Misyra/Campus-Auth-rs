@@ -44,21 +44,15 @@ pub enum TaskError {
     /// 执行超时
     #[error("执行超时: {0}s")]
     ExecutionTimeout(u64),
-    /// 任务被取消
-    #[error("任务已被取消")]
-    ExecutionCancelled,
-    /// 执行队列已满（保留以备串行化模型扩展）
-    #[error("执行队列已满")]
-    QueueFull,
     /// 文件/进程 IO 错误
     #[error("IO 错误: {0}")]
     IoError(#[from] std::io::Error),
     /// 序列化/反序列化错误
     #[error("JSON 错误: {0}")]
     JsonError(#[from] serde_json::Error),
-    /// Bridge IPC 错误
+    /// Bridge IPC 错误（保留变体，供上层映射 409 WorkerBusy 等）
     #[error("Bridge 错误: {0}")]
-    Bridge(String),
+    Bridge(#[from] crate::bridge::BridgeError),
     /// 环境能力错误
     #[error("环境能力错误: {0}")]
     Environment(String),

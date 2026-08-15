@@ -146,7 +146,9 @@ pub async fn fetch_logs(
     let limit = params
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(200);
+        .unwrap_or(200)
+        // 钳制上限，避免传 99999999 全量解析 MB 级日志
+        .min(2000);
     let logs_dir = state.container.config.base_path().join("logs");
     // 日志文件可能达 MB 级，read_dir + read_to_string + JSON 解析为阻塞 I/O 与 CPU 密集操作，
     // 整体放入 spawn_blocking 避免阻塞 tokio worker 线程
@@ -467,7 +469,6 @@ pub async fn uninstall(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let base = state.container.config.base_path();
-    let _helper_path = base.join("campus-auth-helper.exe");
 
     // 如果 helper 存在则直接写入卸载脚本并退出
     let uninstall_script = base.join("uninstall.bat");
@@ -475,9 +476,17 @@ pub async fn uninstall(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    // 卸载脚本：首次运行时把自身副本复制到 %TEMP% 再从副本执行，避免
+    // `rd /s /q "{base}"` 删除正在运行的 bat 自身所在目录时因文件被锁而残留
+    // （7.3：原实现直接运行会残留 base/uninstall.bat）。
     let script = format!(
         "@echo off\r\n\
          chcp 65001 > nul\r\n\
+         if \"%1\"==\"run_from_temp\" goto :run\r\n\
+         copy /y \"%~f0\" \"%TEMP%\\campus-auth-uninstall.bat\" > nul\r\n\
+         start \"\" \"%TEMP%\\campus-auth-uninstall.bat\" run_from_temp\r\n\
+         exit /b 0\r\n\
+         :run\r\n\
          echo Campus-Auth 卸载助手\r\n\
          echo =====================================\r\n\
          echo.\r\n\
@@ -489,6 +498,7 @@ pub async fn uninstall(
          timeout /t 1 /nobreak > nul\r\n\
          rd /s /q \"{base}\" 2>nul\r\n\
          del /f /q \"{exe}\" 2>nul\r\n\
+         del /f /q \"%TEMP%\\campus-auth-uninstall.bat\" 2>nul\r\n\
          echo.\r\n\
          echo 卸载完成。\r\n\
          pause\r\n",
@@ -506,7 +516,7 @@ pub async fn uninstall(
     });
 
     Ok(data(serde_json::json!({
-        "message": "卸载脚本已生成，程序即将退出。请手动运行 config/uninstall.bat 完成清理。",
+        "message": "卸载脚本已生成，程序即将退出。请手动运行 uninstall.bat 完成清理。",
         "script_path": uninstall_script.to_string_lossy(),
     })))
 }

@@ -192,7 +192,6 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
             engine: container.engine_handle.engine.clone(),
             profile_service: container.profiles.clone(),
             updater: container.updater.clone(),
-            orchestrator: container.login.clone(),
             container: container.clone(),
             log_tx: state.log_tx.clone(),
             port: state.app_config.port,
@@ -890,7 +889,6 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
     let orchestrator = container.login.clone();
     let monitor_service = container.monitor.clone();
     let network_detect = crate::network::detect::create_detector();
-    let base_path = container.config.base_path();
     let latest_engine_cmd_tx = state.latest_engine_cmd_tx.clone();
     let shutdown_token = state.shutdown_token.clone();
 
@@ -958,9 +956,13 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
                 status_manager: status.clone(),
                 monitor_service: monitor_service.clone(),
                 network_detect: network_detect.clone(),
-                base_path: base_path.clone(),
             };
             let new_handle = crate::engine::Engine::spawn(deps);
+
+            // 待评估（7.3）：重启后的新 Engine 以 monitoring=false 空转，未按原状态重发 Start；
+            // 且 container.engine_handle / 托盘 / Web 仍持有已死的初始 Engine 引用（引用未收口为
+            // 可替换句柄）。中期方案是将 Engine 引用改为 `Arc<ArcSwap<Arc<Engine>>>` 之类并在
+            // 重启后按原状态重发 Start。改动面较大，本批仅记录，不做大改。
 
             // 更新共享 cmd_tx，使 graceful_shutdown 能向新 Engine 发送 Shutdown
             *latest_engine_cmd_tx.lock().await = Some(new_handle.engine.cmd_sender());
@@ -1084,26 +1086,6 @@ async fn graceful_shutdown(state: &mut LauncherState) {
 
     // 9. 释放日志 guard（flush 剩余日志后关闭文件句柄，必须在最后一条日志之后）
     state._log_guard = None;
-}
-
-// ============================================================
-// 重启
-// ============================================================
-
-/// 重启：spawn 新进程 + --restarting 标记，当前进程优雅退出
-pub(crate) async fn _restart(_state: &LauncherState) -> Result<()> {
-    let exe = std::env::current_exe().context("无法获取当前 exe 路径")?;
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    args.retain(|a| a != "--restarting");
-    args.push("--restarting".to_string());
-
-    info!("正在重启（spawn 新进程）...");
-    std::process::Command::new(&exe)
-        .args(&args)
-        .spawn()
-        .context("无法 spawn 新进程")?;
-
-    Ok(())
 }
 
 // ============================================================

@@ -5,10 +5,9 @@ pub mod run_loop;
 
 pub use commands::{EngineCommand, ProbeDetails, ProfileSwitchSource, TestNetworkResult};
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::config::{ConfigService, ProfileService};
@@ -45,21 +44,9 @@ pub enum EngineError {
     #[error("引擎已关闭")]
     ChannelClosed,
 
-    /// 配置重载失败
-    #[error("配置重载失败: {0}")]
-    ReloadFailed(String),
-
-    /// Profile 不存在
-    #[error("Profile 不存在: {0}")]
-    ProfileNotFound(String),
-
     /// 网络探测失败（内部错误）
     #[error("网络探测执行失败: {0}")]
     ProbeError(String),
-
-    /// Engine task panic 后重启次数耗尽
-    #[error("引擎多次重启失败，需要手动重启应用")]
-    RestartExhausted,
 }
 
 /// Engine 构造依赖包
@@ -76,8 +63,6 @@ pub struct EngineDeps {
     pub monitor_service: Arc<MonitorService>,
     /// 网络检测器
     pub network_detect: Arc<dyn NetworkDetect>,
-    /// 基准路径
-    pub base_path: PathBuf,
 }
 
 /// 调度引擎公共接口
@@ -91,29 +76,12 @@ pub use crate::ServiceHandle;
 pub struct EngineHandle {
     /// Engine 公共接口
     pub engine: Arc<Engine>,
-    stop_tx: watch::Sender<bool>,
     join_handle: JoinHandle<()>,
     /// Engine task 完成通知（用于零延迟崩溃检测，替代 1s 轮询）
     pub completed: Arc<tokio::sync::Notify>,
 }
 
 impl EngineHandle {
-    /// 发送停止信号并等待 task 退出
-    pub async fn stop(self) {
-        let _ = self.stop_tx.send(true);
-        let _ = self.join_handle.await;
-    }
-
-    /// 获取底层 tokio task 的 JoinHandle 引用（用于 is_finished / abort_handle）
-    pub fn task_handle(&self) -> &JoinHandle<()> {
-        &self.join_handle
-    }
-
-    /// 消费句柄，等待 task 自然完成（不发送停止信号，用于崩溃恢复监测）
-    pub async fn into_completion(self) {
-        let _ = self.join_handle.await;
-    }
-
     /// 消费句柄，等待 task 完成并返回 JoinResult（用于区分 panic 与正常退出）
     pub async fn into_result(self) -> Result<(), tokio::task::JoinError> {
         self.join_handle.await
@@ -124,7 +92,6 @@ impl Engine {
     /// 创建 channel + tokio::spawn + 返回 handle
     pub fn spawn(deps: EngineDeps) -> EngineHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAPACITY);
-        let (stop_tx, stop_rx) = watch::channel(false);
         let engine = Arc::new(Engine { cmd_tx });
 
         // 完成通知：Engine task 退出时立即唤醒等待者（零延迟，替代 1s 轮询）
@@ -133,13 +100,12 @@ impl Engine {
         let engine_for_task = Arc::clone(&engine);
         let completed_for_task = completed.clone();
         let join_handle = tokio::spawn(async move {
-            run_loop::run_loop(engine_for_task, deps, cmd_rx, stop_rx).await;
+            run_loop::run_loop(engine_for_task, deps, cmd_rx).await;
             completed_for_task.notify_one();
         });
 
         EngineHandle {
             engine,
-            stop_tx,
             join_handle,
             completed,
         }
@@ -241,13 +207,9 @@ mod tests {
         // 验证各变体 Display 文案（thiserror 模板渲染）
         assert!(EngineError::ChannelFull.to_string().contains("通道已满"));
         assert!(EngineError::ChannelClosed.to_string().contains("已关闭"));
-        assert!(EngineError::ProfileNotFound("p1".into())
-            .to_string()
-            .contains("p1"));
         assert!(EngineError::ProbeError("boom".into())
             .to_string()
             .contains("boom"));
-        assert!(EngineError::ReloadFailed("x".into()).to_string().contains("x"));
     }
 
     // ============ 常量合理性测试 ============

@@ -1,6 +1,5 @@
 //! AppState 类型定义 + 共享状态
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -51,8 +50,6 @@ pub fn normalize_source(target: &str) -> String {
 pub struct AppState {
     /// 服务容器（持有全部服务 Arc）
     pub container: Arc<ServiceContainer>,
-    /// Axum 是否正在运行（轻量模式按需启停）
-    pub axum_running: Arc<AtomicBool>,
     /// 日志广播通道（WebSocket 订阅）
     pub log_tx: broadcast::Sender<LogEntry>,
     /// 通用事件广播通道（WebSocket 订阅，承载 screenshot/step_progress 等）
@@ -71,21 +68,10 @@ impl AppState {
     ) -> Self {
         Self {
             container,
-            axum_running: Arc::new(AtomicBool::new(false)),
             log_tx,
             ws_tx,
             shutdown_tx,
         }
-    }
-
-    /// 标记 Axum 运行状态
-    pub fn set_running(&self, running: bool) {
-        self.axum_running.store(running, Ordering::SeqCst);
-    }
-
-    /// 当前 Axum 是否运行
-    pub fn is_running(&self) -> bool {
-        self.axum_running.load(Ordering::SeqCst)
     }
 }
 

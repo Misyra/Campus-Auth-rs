@@ -4,7 +4,6 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
@@ -35,23 +34,29 @@ pub struct JobCreateBody {
     pub target_id: String,
     pub cron: String,
     pub enabled: Option<bool>,
+    pub description: Option<String>,
+    pub timeout: Option<u64>,
 }
 
 /// POST /api/scheduler/jobs — 创建定时任务
 ///
 /// 任务类型由 `target_id` 关联的目标任务权威推导，不再单独存储。
+/// 已存在的 id 返回 409（`save_task` 为 upsert 语义，此处显式拒绝静默覆盖）。
 pub async fn create_job(
     State(state): State<AppState>,
     Json(body): Json<JobCreateBody>,
 ) -> Result<Json<Value>, ApiError> {
+    if state.container.scheduler.get_task(&body.id).is_some() {
+        return Err(ApiError::Conflict(format!("定时任务 {} 已存在", body.id)));
+    }
     let job = crate::scheduler::task::ScheduledTask {
         id: body.id.clone(),
         name: body.name.unwrap_or_default(),
-        description: String::new(),
+        description: body.description.unwrap_or_default(),
         cron: body.cron,
         target_id: body.target_id,
         profile_id: None,
-        timeout: None,
+        timeout: body.timeout,
         enabled: body.enabled.unwrap_or(true),
         last_run: None,
         last_result: None,
@@ -167,12 +172,9 @@ pub async fn run_job(
         .scheduler
         .get_task(&id)
         .ok_or_else(|| crate::scheduler::SchedulerError::TaskNotFound(id.clone()))?;
-    let run_id = Uuid::new_v4().to_string();
-    let svc = state.container.scheduler.clone();
-    tokio::spawn(async move {
-        crate::scheduler::execute_scheduled_task(task, svc).await;
-    });
-    Ok(data(serde_json::json!({ "run_id": run_id })))
+    // 手动触发与 cron 触发共用同一并发信号量闸（原 run_id 为死数据，不再生成/返回）
+    state.container.scheduler.spawn_manual_run(task);
+    Ok(data(Value::String("ok".into())))
 }
 
 /// GET /api/scheduler/jobs/{id}/history — 读取任务执行历史

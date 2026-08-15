@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use semver::Version;
@@ -72,8 +72,6 @@ pub struct UpdaterService {
     base_path: PathBuf,
     /// 当前版本（`CARGO_PKG_VERSION` 解析）
     current_version: Version,
-    /// 缓存最近一次拉取的 manifest（供下载阶段复用）
-    cached_manifest: Arc<Mutex<Option<ReleaseManifest>>>,
     /// 防止并发触发下载
     update_in_progress: AtomicBool,
 }
@@ -103,45 +101,38 @@ impl UpdaterService {
             http_client,
             base_path,
             current_version,
-            cached_manifest: Arc::new(Mutex::new(None)),
             update_in_progress: AtomicBool::new(false),
         })
     }
 
     /// 启动后台版本检查任务（循环：启动时检查一次，之后按 check_interval_hours 定时检查）
     ///
-    /// 延迟 [`STARTUP_CHECK_DELAY`] 后拉取清单，发现更新则缓存 manifest 并
+    /// 延迟 [`STARTUP_CHECK_DELAY`] 后拉取清单，发现更新则
     /// `merge(PartialSnapshot::Update { available: true })`；失败静默忽略。
     /// `cancel` 用于优雅中止。
+    ///
+    /// 语义（U6 修复）：`check_on_startup` 只决定"启动是否立即检查一次"（循环外读一次），
+    /// 循环内的周期检查不受其影响——否则关闭该开关会连定时检查一并消失。
     pub fn start_background_check(&self, cancel: CancellationToken) {
         let config = self.config.clone();
         let status = self.status.clone();
         let http_client = self.http_client.clone();
         let current_version = self.current_version.clone();
-        let cached = self.cached_manifest.clone();
 
         tokio::spawn(async move {
             tokio::time::sleep(STARTUP_CHECK_DELAY).await;
+            // 启动即查：读一次决定，不随循环迭代变化
+            let check_on_startup = config.load_settings().global.updater.check_on_startup;
+            if check_on_startup {
+                if let Err(e) =
+                    perform_update_check(&config, &status, &http_client, &current_version).await
+                {
+                    tracing::warn!("启动时更新检查失败: {e}");
+                }
+            }
             loop {
                 // 每次迭代重新读取配置（支持运行时修改）
                 let settings = config.load_settings().global.updater;
-                if settings.check_on_startup {
-                    match check::fetch_manifest(&http_client, &settings.release_source_url).await {
-                        Ok(manifest) => {
-                            if check::select_platform(&manifest).is_some()
-                                && check::compare_versions(&current_version, &manifest.version)
-                            {
-                                if let Ok(mut guard) = cached.lock() {
-                                    *guard = Some(manifest.clone());
-                                }
-                                status.merge(PartialSnapshot::Update { available: true });
-                                tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
-                            }
-                        }
-                        Err(e) => tracing::warn!("更新检查失败: {}", e),
-                    }
-                }
-                // 按配置的检查间隔等待，或被取消信号打断
                 // check_interval_hours 为 0 时禁用定时检查（仅保留启动时检查）
                 if settings.check_interval_hours == 0 {
                     cancel.cancelled().await;
@@ -149,6 +140,12 @@ impl UpdaterService {
                 }
                 let interval_secs = (settings.check_interval_hours as u64).saturating_mul(3600);
                 let interval = std::time::Duration::from_secs(interval_secs.max(300)); // 最少 5 分钟
+                // 每周期先执行一次检查，再等待下一间隔
+                if let Err(e) =
+                    perform_update_check(&config, &status, &http_client, &current_version).await
+                {
+                    tracing::warn!("定期更新检查失败: {e}");
+                }
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = tokio::time::sleep(interval) => {},
@@ -174,11 +171,6 @@ impl UpdaterService {
 
         if !check::compare_versions(&self.current_version, &manifest.version) {
             return Ok(None);
-        }
-
-        // 缓存 manifest 供后续 apply_update 复用
-        if let Ok(mut guard) = self.cached_manifest.lock() {
-            *guard = Some(manifest.clone());
         }
 
         Ok(Some(UpdateInfo {
@@ -292,16 +284,22 @@ impl UpdaterService {
 
         let pid = std::process::id();
         let staging_dir = self.base_path.join(apply::STAGING_DIR_NAME);
-        std::process::Command::new(&helper_path)
-            .arg("--apply-update")
+        let mut cmd = std::process::Command::new(&helper_path);
+        cmd.arg("--apply-update")
             .arg("--pid")
             .arg(pid.to_string())
             .arg("--staging")
             .arg(&staging_dir)
             .arg("--base-path")
-            .arg(&self.base_path)
-            .spawn()
-            .map_err(UpdaterError::HelperSpawnFailed)?;
+            .arg(&self.base_path);
+        // U4：helper 内有多行 println，Windows 上隐藏控制台窗口避免闪黑窗
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.spawn().map_err(UpdaterError::HelperSpawnFailed)?;
         Ok(())
     }
 
@@ -330,6 +328,40 @@ impl UpdaterService {
             // staging 缺失，清理后继续正常启动
             apply::cleanup_after_apply(&self.base_path).await;
             return Ok(false);
+        }
+
+        // U3 二次校验：pending 版本不高于当前版本则跳过并清理（下载与启动之间的时间窗内
+        // staging 产物或版本可能已过期/被替换）
+        if let Ok(pending_ver) = Version::parse(&pending.version) {
+            if pending_ver <= self.current_version {
+                tracing::warn!(
+                    "pending 版本 {pending_ver} 不高于当前 {}，跳过应用并清理",
+                    self.current_version
+                );
+                apply::cleanup_after_apply(&self.base_path).await;
+                return Ok(false);
+            }
+        }
+        // U3 二次校验：若可从清单取得当前平台包的 sha256，则重算 staging 产物哈希比对
+        let settings = self.config.load_settings().global.updater;
+        if let Ok(manifest) =
+            check::fetch_manifest(&self.http_client, &settings.release_source_url).await
+        {
+            if let Some(pkg) = check::select_platform(&manifest) {
+                if !pkg.sha256.is_empty() {
+                    let exe = extracted_exe.clone();
+                    let actual = tokio::task::spawn_blocking(move || file_sha256(&exe))
+                        .await
+                        .unwrap_or(None);
+                    if let Some(actual) = actual {
+                        if !actual.eq_ignore_ascii_case(&pkg.sha256) {
+                            tracing::error!("staging 产物哈希不符，跳过应用并清理");
+                            apply::cleanup_after_apply(&self.base_path).await;
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
         }
 
         // 替换前备份当前 exe 到 config/.backup_exe，用于失败回滚
@@ -364,4 +396,39 @@ impl UpdaterService {
             }
         }
     }
+}
+
+/// 拉取清单并判断是否存在对当前版本"感兴趣"的更新；有则推送状态快照
+async fn perform_update_check(
+    config: &ConfigService,
+    status: &StatusManager,
+    http_client: &reqwest::Client,
+    current_version: &Version,
+) -> Result<(), UpdaterError> {
+    let settings = config.load_settings().global.updater;
+    let manifest = check::fetch_manifest(http_client, &settings.release_source_url).await?;
+    if check::select_platform(&manifest).is_some()
+        && check::compare_versions(current_version, &manifest.version)
+    {
+        status.merge(PartialSnapshot::Update { available: true });
+        tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
+    }
+    Ok(())
+}
+
+/// 计算文件 SHA256（用于启动兜底的 staging 产物二次校验）
+fn file_sha256(path: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hex::encode(hasher.finalize()))
 }

@@ -25,7 +25,6 @@ use crate::app::{self, AxumServeHandle, RUNTIME_PORT_FILE};
 use crate::config::{ConfigService, ProfileService};
 use crate::container::ServiceContainer;
 use crate::engine::{Engine, EngineCommand};
-use crate::login::LoginOrchestrator;
 use crate::status::{
     EngineState, LoginStatus, NetworkStatus, StatusManager, StatusSnapshot,
 };
@@ -85,8 +84,6 @@ pub struct TrayDeps {
     pub profile_service: Arc<ProfileService>,
     /// 更新服务（检查更新）
     pub updater: Arc<UpdaterService>,
-    /// 登录编排器（托盘「立即登录」触发一次登录）
-    pub orchestrator: Arc<LoginOrchestrator>,
     /// 服务容器（轻量模式按需启动 Axum 时需要）
     pub container: Arc<ServiceContainer>,
     /// 日志广播通道（按需启动 Axum 时需要）
@@ -111,8 +108,6 @@ pub struct TrayManager {
     profile_service: Arc<ProfileService>,
     /// 更新服务（检查更新）
     updater: Arc<UpdaterService>,
-    /// 登录编排器（托盘「立即登录」触发一次登录）
-    orchestrator: Arc<LoginOrchestrator>,
     /// 服务容器（轻量模式按需启动 Axum 时需要）
     container: Arc<ServiceContainer>,
     /// 日志广播通道（按需启动 Axum 时需要）
@@ -149,7 +144,6 @@ impl TrayManager {
             engine: deps.engine,
             profile_service: deps.profile_service,
             updater: deps.updater,
-            orchestrator: deps.orchestrator,
             container: deps.container,
             log_tx: deps.log_tx,
             port: deps.port,
@@ -186,14 +180,13 @@ impl TrayManager {
         let action_tx = self.action_tx.clone();
         let os_cmd_tx_pump = self.os_cmd_tx.clone();
         let os_join = Arc::clone(&self.os_join);
-        // 泵任务需要的全部业务依赖打包为 TrayDeps（含 orchestrator/container/log_tx/port/lightweight）
+        // 泵任务需要的全部业务依赖打包为 TrayDeps（含 container/log_tx/port/lightweight）
         let deps = TrayDeps {
             config: Arc::clone(&self.config),
             status: Arc::clone(&self.status),
             engine: Arc::clone(&self.engine),
             profile_service: Arc::clone(&self.profile_service),
             updater: Arc::clone(&self.updater),
-            orchestrator: Arc::clone(&self.orchestrator),
             container: Arc::clone(&self.container),
             log_tx: self.log_tx.clone(),
             port: self.port,
