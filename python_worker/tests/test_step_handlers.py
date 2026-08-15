@@ -95,3 +95,80 @@ def test_resolve_returns_copy_without_mutating_original():
     assert raw.value == "{{PASSWORD}}"
     assert resolved.selector == "#u"
     assert resolved.value == "secret"
+
+
+# ── B4/P3: _safe_op 非超时 playwright Error → SELECTOR_FAILED ──
+
+def test_safe_op_maps_playwright_error_to_selector_failed():
+    import asyncio
+
+    from playwright.async_api import Error as PlaywrightError
+    from step_handlers import Outcome, _safe_op
+
+    async def boom():
+        raise PlaywrightError("element is not attached to the DOM")
+
+    async def run():
+        with pytest.raises(WorkerError) as ei:
+            await _safe_op(boom(), Outcome.SELECTOR_FAILED)
+        return ei.value
+
+    err = asyncio.run(run())
+    # 非超时 playwright Error → SELECTOR_FAILED（可重试、不回收 Worker）
+    assert err.outcome == Outcome.SELECTOR_FAILED.value
+
+
+def test_safe_op_still_maps_timeout():
+    import asyncio
+
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    from step_handlers import Outcome, _safe_op
+
+    async def boom():
+        raise PlaywrightTimeoutError("Timeout 30000ms exceeded")
+
+    async def run():
+        with pytest.raises(WorkerError) as ei:
+            await _safe_op(boom(), Outcome.SELECTOR_FAILED)
+        return ei.value
+
+    err = asyncio.run(run())
+    assert err.outcome == Outcome.SELECTOR_FAILED.value
+    assert "超时" in err.message
+
+
+# ── B4/P7: 导航错误分类 ──
+
+def test_classify_navigation_error_connection_errors():
+    from step_handlers import Outcome, _classify_navigation_error
+
+    # 连接级错误（即使以 TimeoutError 形式出现）→ NETWORK_ERROR
+    err = _classify_navigation_error(
+        Exception("net::ERR_CONNECTION_TIMED_OUT at https://x"), "https://x"
+    )
+    assert err.outcome == Outcome.NETWORK_ERROR.value
+    err2 = _classify_navigation_error(
+        Exception("net::ERR_NAME_NOT_RESOLVED"), "https://x"
+    )
+    assert err2.outcome == Outcome.NETWORK_ERROR.value
+
+
+def test_classify_navigation_error_plain_timeout():
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    from step_handlers import Outcome, _classify_navigation_error
+
+    # 无连接错误代码的 Playwright TimeoutError → NAVIGATION_TIMEOUT
+    err = _classify_navigation_error(
+        PlaywrightTimeoutError("Timeout 15000ms exceeded"), "https://x"
+    )
+    assert err.outcome == Outcome.NAVIGATION_TIMEOUT.value
+
+
+def test_classify_navigation_error_generic():
+    from step_handlers import Outcome, _classify_navigation_error
+
+    # 其他异常 → NETWORK_ERROR
+    err = _classify_navigation_error(
+        ValueError("page closed"), "https://x"
+    )
+    assert err.outcome == Outcome.NETWORK_ERROR.value

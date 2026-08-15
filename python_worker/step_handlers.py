@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from models import Outcome, StepConfig
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 logger = logging.getLogger(__name__)
@@ -157,11 +158,49 @@ def _locator(context: StepContext, selector: str):
 
 
 async def _safe_op(coro, outcome_on_timeout: Outcome):
-    """执行 Playwright 操作并归一化超时异常。"""
+    """执行 Playwright 操作并归一化超时异常。
+
+    P3：非超时的 playwright ``Error``（元素在操作间隙被刷新/重定向等瞬时问题）
+    映射为 ``SELECTOR_FAILED``（可重试、不回收 Worker），避免升格 UNKNOWN_ERROR
+    触发 Worker 强制回收。
+    """
     try:
         return await coro
     except PlaywrightTimeoutError as exc:
         raise WorkerError(outcome_on_timeout, f"操作超时: {exc}") from exc
+    except PlaywrightError as exc:
+        raise WorkerError(Outcome.SELECTOR_FAILED, f"元素操作失败: {exc}") from exc
+
+
+# 连接级错误代码（P7）：含这些消息的异常归为 NETWORK_ERROR，回收无意义、可降级处理
+_CONNECTION_ERROR_PATTERNS = (
+    "ERR_CONNECTION_TIMED_OUT",
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_CONNECTION_RESET",
+    "ERR_NETWORK_CHANGED",
+    "ERR_ADDRESS_UNREACHABLE",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_NAME_RESOLUTION_FAILED",
+    "ERR_PROXY_CONNECTION_FAILED",
+)
+
+
+def _classify_navigation_error(exc: Exception, url: str) -> "WorkerError":
+    """按异常消息细分导航错误（P7）。
+
+    - 含连接级错误代码（``ERR_CONNECTION_TIMED_OUT`` 等）→ ``NETWORK_ERROR``
+      （此时回收 Worker 无意义，可降级处理）；
+    - Playwright 自身 ``TimeoutError``（无连接错误）→ ``NAVIGATION_TIMEOUT``；
+    - 其余 → ``NETWORK_ERROR``。
+    """
+    msg = str(exc)
+    if any(p in msg for p in _CONNECTION_ERROR_PATTERNS):
+        return WorkerError(Outcome.NETWORK_ERROR, f"导航失败（网络连接错误）: {url}: {msg}")
+    if isinstance(exc, PlaywrightTimeoutError):
+        return WorkerError(Outcome.NAVIGATION_TIMEOUT, f"导航超时: {url}")
+    return WorkerError(Outcome.NETWORK_ERROR, f"导航失败: {msg}")
 
 
 # ── 各类型处理器 ──
@@ -362,9 +401,7 @@ async def handle_navigate(page, step: StepConfig, context: StepContext) -> None:
     try:
         await page.goto(url, wait_until=wait_until, timeout=context.navigation_timeout)
     except Exception as exc:  # noqa: BLE001
-        if isinstance(exc, PlaywrightTimeoutError):
-            raise WorkerError(Outcome.NAVIGATION_TIMEOUT, f"导航超时: {url}") from exc
-        raise WorkerError(Outcome.NETWORK_ERROR, f"导航失败: {exc}") from exc
+        raise _classify_navigation_error(exc, url)
 
 
 async def handle_assert_text(page, step: StepConfig, context: StepContext) -> None:

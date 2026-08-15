@@ -187,8 +187,21 @@ def _structured_result(exc: WorkerError, *, success: bool, start: float | None =
 
 
 def _error_result(message: str) -> dict:
-    """构造无 data 的错误响应（未知命令 / 未捕获异常）。"""
-    return {"success": False, "data": None, "error": message}
+    """构造无 data 的错误响应（未知命令 / 未捕获异常）。
+
+    P6：补 outcome 字段，保证与结构化响应结构一致（Rust 侧 failure 时仅读
+    error 字段，此处补全 data 仅为协议一致性）。
+    """
+    return {
+        "success": False,
+        "data": {
+            "outcome": Outcome.UNKNOWN_ERROR.value,
+            "message": message,
+            "duration_ms": 0,
+            "screenshots": [],
+        },
+        "error": message,
+    }
 
 
 def _command_timeout(params: dict) -> float:

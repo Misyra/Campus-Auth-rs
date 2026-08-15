@@ -159,7 +159,17 @@ def test_structured_result_format(success, outcome, message):
 def test_error_result_format():
     from worker_main import _error_result
     d = _error_result("未知命令: foo")
-    assert d == {"success": False, "data": None, "error": "未知命令: foo"}
+    # P6：补 outcome 字段，保证 IPC 响应结构一致
+    assert d == {
+        "success": False,
+        "data": {
+            "outcome": "unknown_error",
+            "message": "未知命令: foo",
+            "duration_ms": 0,
+            "screenshots": [],
+        },
+        "error": "未知命令: foo",
+    }
 
 
 # ── 5.5: debug 会话空 session_id 回退（Rust 从不传 session_id）──

@@ -30,7 +30,15 @@ from models import (
     StructuredResult,
     TaskConfig,
 )
-from step_handlers import StepCancelled, StepContext, WorkerError, _check_cancel, _get_ocr, run_step_async
+from step_handlers import (
+    StepCancelled,
+    StepContext,
+    WorkerError,
+    _check_cancel,
+    _classify_navigation_error,
+    _get_ocr,
+    run_step_async,
+)
 from variable_resolver import resolve
 
 logger = logging.getLogger(__name__)
@@ -575,15 +583,11 @@ class WorkerCore:
         )
 
     async def _navigate(self, page: Any, url: str, nav_timeout: int) -> None:
-        """导航到 URL，超时映射为导航错误。"""
-        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
+        """导航到 URL，按异常消息细分错误分类（P7）。"""
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
-        except PlaywrightTimeoutError as exc:
-            raise WorkerError(Outcome.NAVIGATION_TIMEOUT, f"导航超时: {url}") from exc
         except Exception as exc:  # noqa: BLE001
-            raise WorkerError(Outcome.NETWORK_ERROR, f"导航失败: {exc}") from exc
+            raise _classify_navigation_error(exc, url)
 
     async def _run_task(
         self,
