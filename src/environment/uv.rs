@@ -1,10 +1,8 @@
 //! uv 下载 + 调用封装
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
 
 use crate::environment::{
     EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
@@ -296,40 +294,15 @@ async fn download_file_streaming(
     url: &str,
     dest: &Path,
 ) -> Result<(), EnvironmentError> {
-    let resp = mgr
-        .http_client()
-        .get(url)
-        .header("User-Agent", "campus-auth")
-        .send()
+    crate::utils::io::download_streaming(mgr.http_client(), url, dest)
         .await
-        .map_err(|e| EnvironmentError::UvDownloadFailed {
-            retries: 0,
-            source: e,
-        })?;
-
-    let resp = resp
-        .error_for_status()
-        .map_err(|e| EnvironmentError::UvDownloadFailed {
-            retries: 0,
-            source: e,
-        })?;
-
-    let mut file = tokio::fs::File::create(dest)
-        .await
-        .map_err(EnvironmentError::UvExtractFailed)?;
-
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| EnvironmentError::UvDownloadFailed {
-            retries: 0,
-            source: e,
-        })?;
-        file.write_all(chunk.as_ref())
-            .await
-            .map_err(EnvironmentError::UvExtractFailed)?;
-    }
-    file.flush().await.map_err(EnvironmentError::UvExtractFailed)?;
-    Ok(())
+        .map_err(|e| match e {
+            crate::utils::io::DownloadError::Http(e) => EnvironmentError::UvDownloadFailed {
+                retries: 0,
+                source: e,
+            },
+            crate::utils::io::DownloadError::Io(e) => EnvironmentError::UvExtractFailed(e),
+        })
 }
 
 /// 校验文件 SHA256 与期望值一致
@@ -362,41 +335,31 @@ pub async fn verify_sha256(path: &Path, expected: &str) -> Result<(), Environmen
     }
 }
 
-/// 从 zip 中提取 uv.exe 到目标路径
+/// 从 zip 中提取 uv 可执行文件到目标路径
 fn extract_uv_from_zip(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
-    use std::io::Read;
-
-    let file = std::fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-    // 查找 uv.exe（zip 内路径通常为 uv-{target}/uv.exe）
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        let name = match entry.enclosed_name() {
-            Some(n) => n,
-            None => continue,
-        };
-
-        // 匹配 uv.exe 或 uv（Unix）
+    // uv 二进制位于 zip 内 `uv-{target}/uv.exe`（或 `uv`）。先按文件名过滤解压到
+    // 临时目录，再把找到的可执行文件复制到目标路径（复用 extract_zip 模板）。
+    let tmp_dir = tempfile::tempdir()?;
+    let mut found: Option<PathBuf> = None;
+    crate::utils::io::extract_zip(zip_path, tmp_dir.path(), |name| {
         if name
             .file_name()
             .is_some_and(|f| f == UV_EXE_NAME || f == "uv")
         {
-            let mut contents = Vec::new();
-            entry.read_to_end(&mut contents)?;
-            std::fs::write(dest, &contents)?;
-            return Ok(());
+            found = Some(tmp_dir.path().join(name));
+            true
+        } else {
+            false
         }
-    }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "zip 中未找到 uv 可执行文件",
-    ))
+    })?;
+    let src = found.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "zip 中未找到 uv 可执行文件",
+        )
+    })?;
+    std::fs::copy(&src, dest)?;
+    Ok(())
 }
 
 /// 执行 `uv sync` 安装 Python 虚拟环境与依赖

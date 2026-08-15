@@ -8,7 +8,7 @@ pub mod metrics;
 pub mod platform;
 
 // 重新导出公共类型，供其他模块直接 `use crate::utils::Xxx`
-pub use io::atomic_write_json;
+pub use io::{atomic_write_bytes, atomic_write_json, extract_zip, fsync_full};
 pub use lock::{InstanceInfo, InstanceLock};
 pub use metrics::Metrics;
 

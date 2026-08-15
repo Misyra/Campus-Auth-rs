@@ -145,48 +145,16 @@ fn extract_to_staging_blocking(
     staging_dir: &Path,
     version: &str,
 ) -> Result<StagedUpdate, UpdaterError> {
-    let file = std::fs::File::open(zip_path).map_err(UpdaterError::PendingReadFailed)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
-
     let extracted_dir = staging_dir.join("extracted");
     // 清理上一次残留的 extracted/
     if extracted_dir.exists() {
         let _ = std::fs::remove_dir_all(&extracted_dir);
     }
-    std::fs::create_dir_all(&extracted_dir)
-        .map_err(UpdaterError::StagingDirCreateFailed)?;
+    std::fs::create_dir_all(&extracted_dir).map_err(UpdaterError::StagingDirCreateFailed)?;
 
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
-
-        // enclosed_name 已过滤绝对路径与 `..` 穿越，返回 None 直接跳过
-        let name = match entry.enclosed_name() {
-            Some(n) => n.to_path_buf(),
-            None => continue,
-        };
-        let outpath = extracted_dir.join(&name);
-        // 防御性检查：解压结果必须落在 extracted/ 之内
-        if !outpath.starts_with(&extracted_dir) {
-            return Err(UpdaterError::ExtractFailed("检测到 zip 路径穿越".into()));
-        }
-
-        if entry.is_dir() {
-            std::fs::create_dir_all(&outpath)
-                .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
-        } else {
-            if let Some(parent) = outpath.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
-            }
-            let mut outfile = std::fs::File::create(&outpath)
-                .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
-            std::io::copy(&mut entry, &mut outfile)
-                .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
-        }
-    }
+    // 全量解压（zip 打开/解析错误统一映射为 ExtractFailed；路径穿越由 extract_zip 兜底跳过）
+    crate::utils::io::extract_zip(zip_path, &extracted_dir, |_| true)
+        .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
 
     let extracted_exe = extracted_dir.join(EXE_NAME);
     if !extracted_exe.exists() {

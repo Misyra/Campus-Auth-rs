@@ -538,7 +538,7 @@ impl ConfigService {
             })?;
             // commit point：写回迁移后的 settings（同步 fsync，防止掉电导致版本回退重跑迁移）
             let json = serde_json::to_string_pretty(&value)?;
-            Self::atomic_write_json_sync(settings_path, &json)?;
+            crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())?;
         }
 
         serde_json::from_value(value).map_err(|_| ConfigError::ConfigParseError {
@@ -578,65 +578,15 @@ impl ConfigService {
         })
     }
 
-    /// 同步原子写入字符串到文件（tmp + sync_all + rename + 父目录 fsync）
-    ///
-    /// 供同步上下文中需要持久化保证的写回使用（如配置迁移写回），
-    /// 与 [`Self::atomic_write_json`] 保证一致。
-    fn atomic_write_json_sync(path: &Path, content: &str) -> Result<(), ConfigError> {
-        let tmp = path.with_extension("json.tmp");
-        {
-            use std::io::Write;
-            let mut file =
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&tmp)?;
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
-        // 父目录 fsync（确保目录项持久化）
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-        Ok(())
-    }
-
     /// 原子写入 JSON 文件（tmp + sync_all + rename + 父目录 fsync）
     async fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), ConfigError> {
         let json = serde_json::to_vec_pretty(value)?;
-        let tmp = path.with_extension("json.tmp");
-        {
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&tmp)
-                .await?;
-            use tokio::io::AsyncWriteExt;
-            file.write_all(&json).await?;
-            file.sync_all().await?;
-            // macOS 下 sync_all 仅等价于 fsync，需 F_FULLFSYNC 才能刷写至物理介质
-            #[cfg(target_os = "macos")]
-            {
-                use std::os::unix::io::AsRawFd;
-                let fd = file.as_raw_fd();
-                let rc = unsafe { libc::fcntl(fd, libc::F_FULLFSYNC, 0) };
-                if rc != 0 {
-                    tracing::warn!("F_FULLFSYNC 失败（rc={rc}），已退化为 sync_all");
-                }
-            }
-        }
-        tokio::fs::rename(&tmp, path).await?;
-        // 父目录 fsync（确保目录项持久化）
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = tokio::fs::File::open(parent).await {
-                let _ = dir.sync_all().await;
-            }
-        }
+        let path = path.to_path_buf();
+        // 阻塞式落盘（fsync 等）移入阻塞线程池，避免占用 tokio worker（对齐 A2）；
+        // 底层统一走 utils::io::atomic_write_bytes（含 fsync_full 持久化保证，C3）
+        tokio::task::spawn_blocking(move || crate::utils::io::atomic_write_bytes(&path, &json))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))??;
         Ok(())
     }
 }

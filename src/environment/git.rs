@@ -2,9 +2,6 @@
 
 use std::path::PathBuf;
 
-use futures::StreamExt;
-use tokio::io::AsyncWriteExt;
-
 use crate::environment::{
     EnvironmentError, EnvironmentManager, MINGIT_DOWNLOAD_TIMEOUT, MINGIT_RELEASES_BASE,
 };
@@ -177,77 +174,17 @@ async fn download_file(
     url: &str,
     dest: &std::path::Path,
 ) -> Result<(), EnvironmentError> {
-    let resp = mgr
-        .http_client()
-        .get(url)
-        .header("User-Agent", "campus-auth")
-        .send()
+    crate::utils::io::download_streaming(mgr.http_client(), url, dest)
         .await
-        .map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))?;
-
-    let resp = resp
-        .error_for_status()
-        .map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))?;
-
-    let mut file = tokio::fs::File::create(dest)
-        .await
-        .map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))?;
-
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))?;
-        file.write_all(chunk.as_ref())
-            .await
-            .map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))?;
-    }
-    file.flush()
-        .await
-        .map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))?;
-    Ok(())
+        .map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))
 }
 
 /// 解压 MinGit zip 到目标目录（同步，在 spawn_blocking 中执行）
 fn extract_mingit_zip(zip_path: &std::path::Path, dest_dir: &std::path::Path) -> std::io::Result<()> {
-    use std::io::Read;
-
-    let file = std::fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-    // 清理旧目录
+    // 清理旧目录后全量解压（无过滤，保留 MinGit 目录结构）
     if dest_dir.exists() {
         std::fs::remove_dir_all(dest_dir)?;
     }
     std::fs::create_dir_all(dest_dir)?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        let name = match entry.enclosed_name() {
-            Some(n) => n.to_path_buf(),
-            None => continue,
-        };
-
-        let outpath = dest_dir.join(&name);
-
-        // 防御性检查：解压结果必须落在目标目录之内
-        if !outpath.starts_with(dest_dir) {
-            continue;
-        }
-
-        if entry.is_dir() {
-            std::fs::create_dir_all(&outpath)?;
-        } else {
-            if let Some(parent) = outpath.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut contents = Vec::new();
-            entry.read_to_end(&mut contents)?;
-            std::fs::write(&outpath, &contents)?;
-        }
-    }
-
-    Ok(())
+    crate::utils::io::extract_zip(zip_path, dest_dir, |_| true)
 }
