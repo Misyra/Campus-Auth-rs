@@ -105,6 +105,8 @@ pub fn classify(outcome: Outcome) -> ResultAction {
         Outcome::CaptchaFailed => ResultAction::Retry,
         Outcome::NavigationTimeout => ResultAction::Retry,
         Outcome::SelectorFailed => ResultAction::Retry,
+        // P11：断言失败（assert_text 超时/不匹配）可重试、不回收 Worker
+        Outcome::AssertionFailed => ResultAction::Retry,
         Outcome::NetworkError => ResultAction::Retry,
         // 前向兼容：未知 outcome 兜底为终态（失败），避免无限重试
         _ => ResultAction::Terminal(TerminalKind::Failed),
@@ -229,11 +231,8 @@ impl LoginSession {
             Some(b) => b.clone(),
             None => {
                 warn!("LoginSession 缺少 BridgeSupervisor，无法执行登录");
-                self.emit(
-                    self.make_result(false, "Bridge 未初始化，无法执行登录".into(), session_start, 0),
-                    HistoryResult::Failed,
-                )
-                .await;
+                self.finish_with_failure(session_start, 0, "Bridge 未初始化，无法执行登录".into())
+                    .await;
                 return;
             }
         };
@@ -244,11 +243,7 @@ impl LoginSession {
         loop {
             // 取消检查（状态机任意阶段）
             if self.cancel_token.is_cancelled() {
-                self.emit(
-                    self.make_cancelled_result(session_start, attempts_used),
-                    HistoryResult::Cancelled,
-                )
-                .await;
+                self.finish_with_cancelled(session_start, attempts_used, None).await;
                 return;
             }
 
@@ -257,11 +252,8 @@ impl LoginSession {
                 if let Some(cid) = self.attempt_cancel_id.load_full() {
                     bridge.cancel(cid.as_str());
                 }
-                self.emit(
-                    self.make_result(false, "登录超时".into(), session_start, attempts_used),
-                    HistoryResult::Failed,
-                )
-                .await;
+                self.finish_with_failure(session_start, attempts_used, "登录超时".into())
+                    .await;
                 return;
             }
 
@@ -307,36 +299,23 @@ impl LoginSession {
                     biased;
                     _ = ct.cancelled() => {
                         bridge.cancel(&cancel_id);
-                        self.emit(
-                            self.make_cancelled_result(session_start, attempts_used),
-                            HistoryResult::Cancelled,
-                        )
-                        .await;
+                        self.finish_with_cancelled(session_start, attempts_used, None).await;
                         return;
                     }
                     _ = self.shutdown_token.cancelled() => {
                         bridge.cancel(&cancel_id);
-                        *recover_lock(self.cancel_reason.as_ref()) =
-                            Some("应用关闭".to_string());
-                        self.emit(
-                            self.make_cancelled_result(session_start, attempts_used),
-                            HistoryResult::Cancelled,
+                        self.finish_with_cancelled(
+                            session_start,
+                            attempts_used,
+                            Some("应用关闭".to_string()),
                         )
                         .await;
                         return;
                     }
                     _ = sleep(remaining) => {
                         bridge.cancel(&cancel_id);
-                        self.emit(
-                            self.make_result(
-                                false,
-                                "登录超时".into(),
-                                session_start,
-                                attempts_used,
-                            ),
-                            HistoryResult::Failed,
-                        )
-                        .await;
+                        self.finish_with_failure(session_start, attempts_used, "登录超时".into())
+                            .await;
                         return;
                     }
                     res = bridge.execute(method, params) => res,
@@ -347,14 +326,10 @@ impl LoginSession {
                 Ok(resp) => self.parse_response(resp),
                 Err(e) => {
                     warn!("Bridge 执行失败: {e}");
-                    self.emit(
-                        self.make_result(
-                            false,
-                            format!("Bridge 执行失败: {e}"),
-                            session_start,
-                            attempts_used,
-                        ),
-                        HistoryResult::Failed,
+                    self.finish_with_failure(
+                        session_start,
+                        attempts_used,
+                        format!("Bridge 执行失败: {e}"),
                     )
                     .await;
                     return;
@@ -443,14 +418,10 @@ impl LoginSession {
                         return;
                     }
                     TerminalKind::Failed => {
-                        self.emit(
-                            self.make_result(
-                                false,
-                                structured.message.clone(),
-                                session_start,
-                                attempts_used,
-                            ),
-                            HistoryResult::Failed,
+                        self.finish_with_failure(
+                            session_start,
+                            attempts_used,
+                            structured.message.clone(),
                         )
                         .await;
                         return;
@@ -467,14 +438,10 @@ impl LoginSession {
                 ResultAction::Exhausted => {
                     // 可重试结果但重试预算已耗尽：以"重试耗尽"终态收尾，
                     // 不再进入 try_retry 重复尝试（由下方 classify 前预算预检产生）
-                    self.emit(
-                        self.make_result(
-                            false,
-                            format!("重试耗尽（共 {} 次）", self.max_retries),
-                            session_start,
-                            attempts_used,
-                        ),
-                        HistoryResult::Failed,
+                    self.finish_with_failure(
+                        session_start,
+                        attempts_used,
+                        format!("重试耗尽（共 {} 次）", self.max_retries),
                     )
                     .await;
                     return;
@@ -493,14 +460,10 @@ impl LoginSession {
         session_start: Instant,
     ) -> bool {
         if *attempts_used >= self.max_retries {
-            self.emit(
-                self.make_result(
-                    false,
-                    format!("重试耗尽（共 {} 次）", self.max_retries),
-                    session_start,
-                    *attempts_used,
-                ),
-                HistoryResult::Failed,
+            self.finish_with_failure(
+                session_start,
+                *attempts_used,
+                format!("重试耗尽（共 {} 次）", self.max_retries),
             )
             .await;
             return false;
@@ -684,6 +647,40 @@ impl LoginSession {
         debug!("登录会话结束: source={:?} success={}", result.source, result.success);
     }
 
+    /// 以「已取消」终态收尾：写入取消原因（`None` 保留既有原因）→ emit 取消结果 → 写历史。
+    ///
+    /// 收敛 `run` 内多处 `emit(make_cancelled_result)+return` 样板（C4）。
+    /// 注：不做 `-> !`——真实发散需要 panic/挂起，会误伤正常终止路径。
+    async fn finish_with_cancelled(
+        &self,
+        session_start: Instant,
+        attempts_used: u32,
+        reason: Option<String>,
+    ) {
+        if let Some(reason) = reason {
+            *recover_lock(self.cancel_reason.as_ref()) = Some(reason);
+        }
+        self.emit(
+            self.make_cancelled_result(session_start, attempts_used),
+            HistoryResult::Cancelled,
+        )
+        .await;
+    }
+
+    /// 以「失败」终态收尾：emit 失败结果 → 写历史（收敛 `run`/`try_retry` 内样板，C4）。
+    async fn finish_with_failure(
+        &self,
+        session_start: Instant,
+        attempts_used: u32,
+        message: String,
+    ) {
+        self.emit(
+            self.make_result(false, message, session_start, attempts_used),
+            HistoryResult::Failed,
+        )
+        .await;
+    }
+
     /// 将 `IpcResponse` 解析为 [`StructuredResult`]
     ///
     /// 成功时从 `result.data` 反序列化；失败时构造 `UnknownError` 兜底结果。
@@ -772,6 +769,12 @@ mod tests {
     #[test]
     fn test_classify_selector_failed_is_retry() {
         assert_eq!(classify(Outcome::SelectorFailed), ResultAction::Retry);
+    }
+
+    #[test]
+    fn test_classify_assertion_failed_is_retry() {
+        // P11：assert_text 超时/不匹配归为 AssertionFailed，可重试、不回收 Worker
+        assert_eq!(classify(Outcome::AssertionFailed), ResultAction::Retry);
     }
 
     #[test]
