@@ -83,7 +83,7 @@ pub struct ServiceContainer {
     // ---- 横切关注点：运行指标 ----
     /// 共享运行指标（AtomicU64 计数器，通过 `/api/system/info` 暴露）
     pub metrics: Arc<Metrics>,
-    /// uptime 定时器取消令牌（Drop 时触发，使定时任务干净退出）
+    /// uptime 定时器取消令牌（应用级关闭令牌的 child，父令牌取消时自动传播）
     uptime_cancel: CancellationToken,
 }
 
@@ -91,7 +91,12 @@ impl ServiceContainer {
     /// 构造服务容器（拓扑排序）
     ///
     /// 按依赖顺序创建 15 个服务，确保被依赖的服务先于依赖方初始化。
-    pub async fn new(base_path: &Path) -> Result<(Arc<Self>, StartupHandles)> {
+    /// `shutdown_token` 为应用级关闭令牌（由 Launcher 持有），容器内据此派生
+    /// 登录 shutdown 与 uptime 各自的 child，父令牌取消时自动传播（A3）。
+    pub async fn new(
+        base_path: &Path,
+        shutdown_token: CancellationToken,
+    ) -> Result<(Arc<Self>, StartupHandles)> {
         // ---- Layer 0：配置重载信号通道 ----
         let (reload_tx, reload_rx) = mpsc::channel::<ConfigReloadSignal>(32);
 
@@ -129,8 +134,9 @@ impl ServiceContainer {
         );
 
         // ---- Layer 7：登录编排器（构造注入全部依赖，无 setter）----
-        // uptime 取消令牌提前创建：既是 uptime 定时器的取消信号，也是登录会话的 shutdown 信号。
-        let shutdown_token = CancellationToken::new();
+        // 从应用级关闭令牌派生登录 shutdown 的 child：父令牌取消时自动传播，
+        // 无需在优雅关闭中单独二次取消（A3）。
+        let login_shutdown_token = shutdown_token.child_token();
         let login = Arc::new(LoginOrchestrator::new(
             config.clone(),
             history.clone(),
@@ -139,7 +145,7 @@ impl ServiceContainer {
             environment.clone(),
             tasks.clone(),
             monitor.clone(),
-            shutdown_token.clone(),
+            login_shutdown_token,
             Some(metrics.clone()),
         ));
 
@@ -198,7 +204,8 @@ impl ServiceContainer {
             updater,
             engine_handle,
             metrics,
-            uptime_cancel: shutdown_token,
+            // uptime 定时器取消信号：应用级关闭令牌的 child
+            uptime_cancel: shutdown_token.child_token(),
         });
 
         // ---- 启动运行时长更新任务 ----
@@ -244,23 +251,5 @@ impl ServiceContainer {
             scheduler_handle,
             bridge_handle,
         })
-    }
-}
-
-impl Drop for ServiceContainer {
-    fn drop(&mut self) {
-        // 取消 uptime 定时器，使其干净退出（与 TrayManager 的 Drop 惯例一致）
-        self.uptime_cancel.cancel();
-    }
-}
-
-impl ServiceContainer {
-    /// 主动取消应用级关闭令牌
-    ///
-    /// 该令牌同时是 uptime 定时器的取消信号与登录会话的 shutdown 信号。
-    /// 优雅关闭时应在关闭 Bridge 之前调用，使在途登录 task 协作退出，
-    /// 避免其在 Bridge 关闭后仍引用已回收的 Worker（历史遗留 #8，错误洪泛风险）。
-    pub fn cancel_shutdown(&self) {
-        self.uptime_cancel.cancel();
     }
 }

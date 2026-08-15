@@ -153,8 +153,12 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     let log_guard = init_file_logging(&app_config.base_path, log_tx.clone());
 
     // 6. 引导服务容器
+    // 应用级关闭令牌在此创建：传入容器派生 uptime/登录 shutdown 的 child，
+    // 并作为 LauncherState 的 shutdown_token 统一驱动关闭（A3）。
     info!("正在初始化服务...");
-    let (container, handles) = ServiceContainer::new(&app_config.base_path).await?;
+    let shutdown_token = CancellationToken::new();
+    let (container, handles) =
+        ServiceContainer::new(&app_config.base_path, shutdown_token.clone()).await?;
     info!("服务容器初始化完成");
 
     // 7. CLI --startup-action 覆盖配置文件
@@ -176,7 +180,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         axum_handle: None,
         tray_manager: None,
         tray_handle: None,
-        shutdown_token: CancellationToken::new(),
+        shutdown_token,
         log_tx,
         latest_engine_cmd_tx: Arc::new(tokio::sync::Mutex::new(Some(
             container.engine_handle.engine.cmd_sender(),
@@ -1033,10 +1037,10 @@ async fn graceful_shutdown(state: &mut LauncherState) {
     if let Some(tx) = state.latest_engine_cmd_tx.lock().await.take() {
         let _ = tx.send(crate::engine::EngineCommand::Shutdown).await;
     }
-    // 取消应用级关闭令牌：同时让在途登录 task（detached，Engine 不持有其句柄）协作退出，
+    // 应用级关闭令牌已在第 0 步取消，自动传播到容器内 uptime / 登录 shutdown 的
+    // child token，使在途登录 task（detached，Engine 不持有其句柄）协作退出，
     // 避免其在 Bridge 关闭后仍引用已回收的 Worker（历史遗留 #8，错误洪泛风险）。
     if let Some(container) = &state.container {
-        container.cancel_shutdown();
         // 等待 Engine run_loop 完全退出后再关 Bridge，保证 Engine 侧不再发起 Bridge 调用
         if tokio::time::timeout(
             std::time::Duration::from_secs(5),
