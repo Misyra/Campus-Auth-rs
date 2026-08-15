@@ -27,7 +27,6 @@ use crate::config::runtime::RuntimeConfig;
 use crate::config::ConfigService;
 use crate::environment::EnvironmentManager;
 use crate::status::{LoginStatus, StatusManager};
-use crate::tasks::TaskKind;
 use crate::tasks::TaskManager;
 use crate::utils::metrics::Metrics;
 
