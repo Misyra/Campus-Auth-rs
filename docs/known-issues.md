@@ -23,7 +23,7 @@
 
 | # | 问题 | 说明 |
 |---|------|------|
-| E3 | 测试短板 | `web/routes/` handler 层、`environment/`、`tray/` 零测试；python_worker 零测试；集成测试仅 4 个（bridge_ipc / bridge_supervisor / smoke） |
+| E3 | 测试短板 | 核心模块已补测试（web/routes handler 层、environment/、scheduler、tray 纯函数、python_worker 48 项 pytest）；集成测试仍偏少（bridge_ipc / bridge_supervisor / smoke） |
 
 ---
 
