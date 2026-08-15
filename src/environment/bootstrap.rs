@@ -150,6 +150,9 @@ pub async fn bootstrap_capability(
     });
     mgr.report_progress("done", 100, "环境就绪");
 
+    // 环境重建成功：复位 Bridge 连续 spawn 失败熔断（B3）
+    mgr.fire_bootstrap_done();
+
     tracing::info!("浏览器自动化能力引导完成");
     Ok(())
 }

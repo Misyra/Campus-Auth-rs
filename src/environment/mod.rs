@@ -14,7 +14,7 @@ pub use uv::{
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use reqwest::Client;
@@ -222,6 +222,8 @@ pub struct EnvironmentManager {
     cancel_token: CancellationToken,
     /// 是否允许下载 MinGit（仅开发者模式启用）
     git_download_enabled: bool,
+    /// 引导完成回调（成功重建环境时触发，用于复位 Bridge 熔断计数 B3）
+    on_bootstrap_done: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl EnvironmentManager {
@@ -247,7 +249,24 @@ impl EnvironmentManager {
             http_client: Client::new(),
             cancel_token: CancellationToken::new(),
             git_download_enabled,
+            on_bootstrap_done: Mutex::new(None),
         })
+    }
+
+    /// 注册引导完成回调（成功重建环境后触发）
+    ///
+    /// 用于复位 Bridge 的连续 spawn 失败熔断计数（B3）：环境修复后 Worker
+    /// 才有重新 spawn 成功的可能，此时解除熔断。
+    pub fn set_on_bootstrap_done(&self, cb: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_bootstrap_done.lock().expect("on_bootstrap_done 锁中毒") = Some(cb);
+    }
+
+    /// 触发引导完成回调（内部，引导成功路径调用）
+    pub(crate) fn fire_bootstrap_done(&self) {
+        let cb = self.on_bootstrap_done.lock().expect("on_bootstrap_done 锁中毒").clone();
+        if let Some(cb) = cb {
+            cb();
+        }
     }
 
     /// 能力是否就绪

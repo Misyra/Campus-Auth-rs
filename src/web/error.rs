@@ -223,6 +223,9 @@ impl From<crate::bridge::BridgeError> for ApiError {
             crate::bridge::BridgeError::WorkerStartupTimeout => {
                 ApiError::ServiceUnavailable(e.to_string())
             }
+            crate::bridge::BridgeError::WorkerSpawnBlocked => {
+                ApiError::ServiceUnavailable(e.to_string())
+            }
             crate::bridge::BridgeError::WorkerBusy => ApiError::WorkerBusy(e.to_string()),
             _ => ApiError::Internal(e.to_string()),
         }

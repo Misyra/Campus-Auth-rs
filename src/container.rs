@@ -122,6 +122,11 @@ impl ServiceContainer {
         let bridge = BridgeSupervisor::new(base_path.to_path_buf(), config.clone(), status.clone(), Some(metrics.clone()));
         let git_download_enabled = config.runtime().load().app.developer_mode;
         let environment = EnvironmentManager::new(base_path.to_path_buf(), status.clone(), git_download_enabled);
+        // 环境重建成功后复位 Bridge 连续 spawn 失败熔断（B3），解除熔断允许重新 spawn
+        {
+            let bridge_for_cb = bridge.clone();
+            environment.set_on_bootstrap_done(Arc::new(move || bridge_for_cb.reset_spawn_failures()));
+        }
 
         // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
         let executor = TaskExecutor::new(base_path, status.clone(), bridge.clone(), environment.clone(), config.clone());

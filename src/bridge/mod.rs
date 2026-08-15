@@ -109,6 +109,10 @@ pub enum BridgeError {
     /// 内部错误（不应发生）
     #[error("Bridge 内部错误: {0}")]
     Internal(String),
+
+    /// Worker 连续启动失败熔断（B3）
+    #[error("Worker 环境异常，请重新引导")]
+    WorkerSpawnBlocked,
 }
 
 /// Supervisor 后台 task 处理的命令
@@ -141,7 +145,12 @@ struct BridgeInner {
     current_request_id: Option<u64>,
     /// Supervisor 主循环持有的 IPC 消息 Receiver 对应的 Sender
     ipc_tx: Option<mpsc::Sender<ParsedMessage>>,
+    /// 连续 spawn/健康检查失败计数（B3 熔断）
+    consecutive_spawn_failures: u32,
 }
+
+/// 连续 spawn 失败熔断阈值：达到后 ensure_worker 直接快速失败（不再 spawn）
+const SPAWN_FAILURE_THRESHOLD: u32 = 3;
 
 pub use crate::ServiceHandle;
 
@@ -186,6 +195,7 @@ impl BridgeSupervisor {
                 current_cancel_id: None,
                 current_request_id: None,
                 ipc_tx: None,
+                consecutive_spawn_failures: 0,
             }),
             config,
             status,
@@ -352,6 +362,19 @@ impl BridgeSupervisor {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let alive = inner.process.is_some();
         worker_state_to_status(inner.worker_state, alive)
+    }
+
+    /// 复位连续 spawn 失败计数（B3）
+    ///
+    /// 供 EnvironmentManager 成功重建环境后调用，解除熔断；
+    /// worker_state 若为 Error 且无进程则复位为 Idle，允许重新 spawn。
+    pub fn reset_spawn_failures(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.consecutive_spawn_failures = 0;
+        if inner.process.is_none() && inner.worker_state == WorkerState::Error {
+            inner.worker_state = WorkerState::Idle;
+            merge_worker_status(&inner, &self.status);
+        }
     }
 }
 
@@ -728,10 +751,22 @@ fn start_idle_timer(this: &BridgeSupervisor, inner: &mut BridgeInner) {
 /// 串行化启动过程（同一时刻仅一个协程执行 spawn+健康检查），避免并发重复 spawn。
 /// spawn 成功后发送 `browser_health_check` 并等待就绪，超时则强杀子进程返回
 /// [`BridgeError::WorkerStartupTimeout`]。启动时与崩溃恢复时均清理孤儿浏览器进程。
+/// 连续失败次数超阈值（B3）后直接返回 [`BridgeError::WorkerSpawnBlocked`]。
 async fn ensure_worker(this: &Arc<BridgeSupervisor>) -> Result<(), BridgeError> {
     // 快速路径：已就绪
     if is_worker_ready(this) {
         return Ok(());
+    }
+    // 熔断检查：连续 spawn 失败 ≥3 次，快速失败（B3）
+    {
+        let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.consecutive_spawn_failures >= SPAWN_FAILURE_THRESHOLD {
+            tracing::warn!(target: "python_worker",
+                "Worker 连续 {} 次启动失败，触发熔断",
+                inner.consecutive_spawn_failures
+            );
+            return Err(BridgeError::WorkerSpawnBlocked);
+        }
     }
     // 串行化启动：持有 startup_lock 期间其他调用方阻塞，解锁后重新检查快速路径
     let _startup_guard = this.startup_lock.lock().await;
@@ -784,6 +819,8 @@ async fn ensure_worker(this: &Arc<BridgeSupervisor>) -> Result<(), BridgeError> 
         Ok(true) => {
             let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.worker_state = WorkerState::Idle;
+            // 成功启动后复位连续失败计数（B3）
+            inner.consecutive_spawn_failures = 0;
             merge_worker_status(&inner, &this.status);
             info!(target: "python_worker", "Worker 健康检查通过，已就绪");
             Ok(())
@@ -791,6 +828,12 @@ async fn ensure_worker(this: &Arc<BridgeSupervisor>) -> Result<(), BridgeError> 
         _ => {
             warn!(target: "python_worker", "Worker 健康检查失败或超时");
             kill_worker_now(this).await;
+            // 递增连续失败计数（B3）
+            {
+                let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+                inner.consecutive_spawn_failures += 1;
+                merge_worker_status(&inner, &this.status);
+            }
             Err(BridgeError::WorkerStartupTimeout)
         }
     }
@@ -1184,5 +1227,42 @@ mod tests {
         assert!(inner.pending_requests.contains_key(&1));
         assert!(!inner.cancel_registry.contains("ocr"));
         assert!(inner.cancel_registry.contains("login"));
+    }
+
+    /// B3：连续 spawn 失败熔断——达到阈值后 ensure_worker 快速失败而非再等 30s。
+    #[tokio::test]
+    async fn test_ensure_worker_blocks_after_spawn_failures() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
+        let config = Arc::new(
+            crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
+                .await
+                .expect("ConfigService 构造失败"),
+        );
+        let status = Arc::new(crate::status::StatusManager::new());
+        let bridge = BridgeSupervisor::new(dir.path().to_path_buf(), config, status, None);
+        // 模拟已连续失败 3 次（达到熔断阈值）
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.consecutive_spawn_failures = SPAWN_FAILURE_THRESHOLD;
+        }
+        // 第 4 次调用快速返回 WorkerSpawnBlocked，而非再等 30s 健康检查超时
+        let start = Instant::now();
+        let result = ensure_worker(&bridge).await;
+        assert!(
+            matches!(result, Err(BridgeError::WorkerSpawnBlocked)),
+            "熔断后应快速失败，得到 {result:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "熔断快速失败应在 5s 内返回"
+        );
+
+        // reset_spawn_failures 后计数复位
+        bridge.reset_spawn_failures();
+        {
+            let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(inner.consecutive_spawn_failures, 0);
+        }
     }
 }
