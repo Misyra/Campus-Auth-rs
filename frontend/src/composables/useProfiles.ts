@@ -28,6 +28,9 @@ const { busy } = useStatus();
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
+// F3：首次失败 toast 通知（参照 useStatus.fetchStatus 的首败 notify 模式）
+const fetchProfilesFailCount = ref(0);
+
 async function fetchProfiles(): Promise<void> {
   try {
     const data = await profilesApi.list();
@@ -35,8 +38,14 @@ async function fetchProfiles(): Promise<void> {
     Object.assign(profiles.value, data.profiles || {});
     activeProfileId.value = data.active_profile || "default";
     autoSwitch.value = data.auto_switch !== false;
+    if (fetchProfilesFailCount.value > 0) fetchProfilesFailCount.value = 0;
   } catch (error) {
+    fetchProfilesFailCount.value++;
     frontendLogger.error("profiles", "获取方案列表失败", error);
+    // F3：首次失败 toast 通知，后续失败保持静默（log-only）
+    if (fetchProfilesFailCount.value === 1) {
+      toastOnly(false, "加载配置方案失败");
+    }
   }
 }
 

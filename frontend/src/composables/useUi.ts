@@ -43,6 +43,9 @@ const { confirm } = useConfirm();
 
 // init 防重入守卫：避免重复调用叠加定时器与 WS 监听器（历史遗留 F7）
 let initialized = false;
+// F9：记录 init 启动的轮询定时器 id，quitApp 时统一清理
+const statusPollTimerIds: number[] = [];
+const autostartPollTimerIds: number[] = [];
 
 async function fetchLoginHistory(): Promise<void> {
   try {
@@ -179,6 +182,11 @@ async function testNetwork(): Promise<void> {
 async function quitApp(): Promise<void> {
   const ok = await confirm({ title: "退出应用", message: "确定要退出应用吗？", danger: true });
   if (!ok) return;
+  // F9：先清理轮询定时器，避免退出流程中页面仍持续向后端请求
+  statusPollTimerIds.forEach((id) => clearInterval(id));
+  statusPollTimerIds.length = 0;
+  autostartPollTimerIds.forEach((id) => clearInterval(id));
+  autostartPollTimerIds.length = 0;
   try {
     busy.monitor = true;
     useWebSocket().destroy();
@@ -259,25 +267,36 @@ async function init(): Promise<void> {
 
   const wsMgr = useWebSocket();
   // 注册重连全量刷新回调：断线重连后补齐非实时推送的数据（历史遗留 F1）
+  // F1：重连刷新前检查 dirty，设置页有未保存编辑时跳过 fetchConfig，避免覆盖丢弃（对齐 useProfiles 守卫策略）
   wsMgr.onWsReconnect(async () => {
-    await Promise.allSettled([
-      config.fetchConfig(),
+    const pending = [
       profiles.fetchProfiles(),
       tasks.fetchTasks(),
       tasks.fetchActiveTask(),
       scheduled.loadScheduledTasks(),
-    ]);
+      // F8 顺带：补齐重连后遗漏的只读数据源
+      scripts.fetchScripts(),
+      tasks.fetchPureMode(),
+      fetchLoginHistory(),
+    ];
+    if (!config.dirty.value) {
+      pending.unshift(config.fetchConfig());
+    }
+    await Promise.allSettled(pending);
   });
   wsMgr.connectWebSocket();
   wsMgr.setupVisibilityChange();
   void autoCheckUpdateOnStartup();
 
-  setInterval(() => {
+  // F9：保存轮询定时器 id，退出时 clearInterval，避免 quitApp 后页面仍持续轮询
+  const statusPollTimer = setInterval(() => {
     const s = useStatus();
     if (s.fetchStatusFailCount.value > 0) return;
     void s.fetchStatus().catch((err) => frontendLogger.warn("status_poll", err));
   }, TIMING.STATUS_POLL_INTERVAL);
-  setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
+  const autostartPollTimer = setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
+  statusPollTimerIds.push(statusPollTimer);
+  autostartPollTimerIds.push(autostartPollTimer);
 
   // 应用外观
   appearance.applyAppearance();

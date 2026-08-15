@@ -19,6 +19,8 @@ const password = usePasswordField(false);
 const defaultUrlCheckUrls = [...DEFAULT_CONFIG.monitor.url_check_urls];
 const dirty = ref(false);
 const saveFailed = ref(false);
+// F2：配置加载失败标记，为 true 时 SettingsView 保存按钮禁用并提示重试
+const configLoadFailed = ref(false);
 
 let loadingConfig = false;
 let saveSeq = 0;
@@ -66,9 +68,13 @@ async function fetchConfig(): Promise<void> {
     password.reset(!!data.has_password);
     loadingConfig = false;
     dirty.value = false;
+    configLoadFailed.value = false;
     frontendLogger.info("config", "配置已加载");
   } catch (error) {
     frontendLogger.error("config", "获取配置失败", error);
+    // F2：首次失败 toast 提示
+    configLoadFailed.value = true;
+    toastOnly(false, "加载配置失败");
   }
 }
 
@@ -204,6 +210,7 @@ export function useConfig() {
     defaultUrlCheckUrls,
     dirty,
     saveFailed,
+    configLoadFailed,
     fetchConfig,
     onPasswordFocus: password.onFocus,
     onPasswordBlur: password.onBlur,

@@ -58,6 +58,9 @@ const filteredRepoTasks = computed(() => {
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
+// F3：首次失败 toast 通知（参照 useStatus.fetchStatus 的首败 notify 模式）
+const fetchTasksFailCount = ref(0);
+
 async function fetchTasks(): Promise<void> {
   try {
     const data = await tasksApi.list();
@@ -69,8 +72,14 @@ async function fetchTasks(): Promise<void> {
       });
       tasks.value.splice(0, tasks.value.length, ...browserTasks);
     }
+    if (fetchTasksFailCount.value > 0) fetchTasksFailCount.value = 0;
   } catch (error) {
+    fetchTasksFailCount.value++;
     frontendLogger.error("tasks", "获取任务列表失败", error);
+    // F3：首次失败 toast 通知，后续失败保持静默（log-only）
+    if (fetchTasksFailCount.value === 1) {
+      toastOnly(false, "加载任务列表失败");
+    }
   }
 }
 

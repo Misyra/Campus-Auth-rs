@@ -435,6 +435,24 @@
   text-decoration: underline;
 }
 
+/* ---- 配置加载失败提示 ---- */
+.settings-load-failed {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: var(--danger-bg, #fef2f2);
+  border: 1px solid var(--danger, #ef4444);
+  border-radius: 8px;
+  color: var(--danger, #ef4444);
+  font-size: 14px;
+}
+
+.settings-load-failed button {
+  flex-shrink: 0;
+}
+
 /* ---- 保存按钮（右下角浮动） ---- */
 .save-bar {
   position: sticky;

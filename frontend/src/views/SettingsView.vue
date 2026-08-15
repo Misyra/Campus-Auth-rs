@@ -30,6 +30,12 @@ function setTab(tabId: string) {
 
 // 保存状态
 const saveFailed = computed(() => config.saveFailed.value);
+// F2：配置加载失败时禁用保存（避免基于降级默认值的修改覆盖服务端配置），并显示重试提示
+const configLoadFailed = computed(() => config.configLoadFailed.value);
+
+function handleRetryLoad() {
+  void config.fetchConfig();
+}
 
 function handleSave() {
   if (!config.dirty.value) {
@@ -55,6 +61,11 @@ function handleSave() {
     </div>
 
     <!-- 子路由出口 -->
+    <!-- F2：配置加载失败顶部提示，避免误以为配置已就绪而保存降级默认值 -->
+    <div v-if="configLoadFailed" class="settings-load-failed">
+      <span>配置加载失败，当前显示的是默认值。为避免覆盖服务器配置，保存已禁用。</span>
+      <button type="button" class="btn btn-sm" @click="handleRetryLoad">重试</button>
+    </div>
     <form v-if="activeTab !== 'tasks'" autocomplete="on" class="settings-form">
       <router-view />
     </form>
@@ -70,7 +81,7 @@ function handleSave() {
           'save-btn-failed': saveFailed && !busy.save,
         }"
         @click="handleSave"
-        :disabled="busy.save"
+        :disabled="busy.save || configLoadFailed"
       >
         <svg v-if="busy.save" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M21 12a9 9 0 11-6.219-8.56"/>
