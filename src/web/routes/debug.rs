@@ -4,7 +4,6 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::Value;
 
-use crate::tasks::TaskKind;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
 
@@ -18,12 +17,9 @@ pub async fn start_debug(
 ) -> Result<Json<Value>, ApiError> {
     let mut params = body.clone();
     if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
+        // 显式传入 task_config 时不覆盖；否则按 id 嵌入浏览器任务配置
         if !task_id.is_empty() && body.get("task_config").is_none() {
-            if let Ok(TaskKind::Browser(tc)) = state.container.tasks.load_task(task_id).await {
-                if let Ok(v) = serde_json::to_value(&tc) {
-                    params["task_config"] = v;
-                }
-            }
+            state.container.tasks.embed_task_config(task_id, &mut params).await;
         }
     }
     let result = state.container.bridge.execute("debug_start", params).await?;

@@ -420,8 +420,10 @@ async def handle_assert_text(page, step: StepConfig, context: StepContext) -> No
             timeout=timeout,
         )
     except PlaywrightTimeoutError as exc:
+        # P11：断言文本超时归为 ASSERTION_FAILED（区别于选择器缺失），
+        # Rust 侧 classify 同步处理（可重试、不回收 Worker）。
         raise WorkerError(
-            Outcome.SELECTOR_FAILED, f"等待文本超时 ({timeout}ms): {value}"
+            Outcome.ASSERTION_FAILED, f"等待文本超时 ({timeout}ms): {value}"
         ) from exc
     except Exception as exc:  # noqa: BLE001
         raise WorkerError(

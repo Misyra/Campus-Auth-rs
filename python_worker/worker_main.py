@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 _stdout_lock = threading.Lock()
 # 全局关闭事件：stdin EOF 或收到 shutdown 命令时置位
 shutdown_event = threading.Event()
+# stdin 单行大小上限（字节）：超限视为异常/恶意载荷，直接丢弃该行，
+# 避免超大 JSON 解析耗尽内存（P9）
+_MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 
 
 def _force_utf8_stdio() -> None:
@@ -108,6 +111,10 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
 
     try:
         for raw in sys.stdin:
+            # 单行大小上限（P9）：按字节数校验，超限直接丢弃，不尝试 JSON 解析
+            if len(raw.encode("utf-8", errors="replace")) > _MAX_STDIN_LINE_BYTES:
+                logger.warning(f"忽略超过 {_MAX_STDIN_LINE_BYTES // (1024 * 1024)}MB 的 stdin 行，跳过解析")
+                continue
             line = raw.strip()
             if not line:
                 continue

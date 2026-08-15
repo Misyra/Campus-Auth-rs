@@ -136,6 +136,7 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
     start = time.perf_counter()
     if not steps:
         return _build_result(Outcome.UNKNOWN_ERROR, "任务未包含任何步骤，无法执行", context, start)
+    failed_ids: list[str] = []
     try:
         for idx, step in enumerate(steps):
             _check_cancel(context)
@@ -146,7 +147,13 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
             except WorkerError as exc:
                 if step.required:
                     raise
+                failed_ids.append(step.id or f"#{idx}")
                 logger.warning(f"步骤 {step.id} 失败但非必须，继续执行: {exc.message}")
+        if failed_ids:
+            # P12：把非必须步骤失败摘要累积进最终 message，便于定位失败的步骤
+            summary = f"执行成功；{len(failed_ids)} 个非必须步骤失败: {', '.join(failed_ids)}"
+            logger.warning(summary)
+            return _build_result(Outcome.SUCCESS, summary, context, start)
         return _build_result(Outcome.SUCCESS, "执行成功", context, start)
     except StepCancelled:
         return _build_result(Outcome.CANCELLED, "执行已取消", context, start)

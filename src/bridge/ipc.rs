@@ -81,6 +81,8 @@ pub enum Outcome {
     NavigationTimeout,
     /// 选择器失败（可重试）
     SelectorFailed,
+    /// 断言失败（assert_text 超时或不匹配）
+    AssertionFailed,
     /// 验证码识别失败（按配置）
     CaptchaFailed,
     /// 凭证无效

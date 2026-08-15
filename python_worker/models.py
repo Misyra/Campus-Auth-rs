@@ -24,7 +24,10 @@ class Outcome(str, Enum):
     CANCELLED = "cancelled"
     NAVIGATION_TIMEOUT = "navigation_timeout"
     SELECTOR_FAILED = "selector_failed"
+    ASSERTION_FAILED = "assertion_failed"
+    # 由 Rust 侧设置（登录决策/验证码预处理），Worker 不产生（P10）
     CAPTCHA_FAILED = "captcha_failed"
+    # 由 Rust 侧设置（凭证预校验失败），Worker 不产生（P10）
     INVALID_CREDENTIAL = "invalid_credential"
     NETWORK_ERROR = "network_error"
     UNKNOWN_ERROR = "unknown_error"

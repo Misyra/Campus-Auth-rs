@@ -172,6 +172,37 @@ impl TaskManager {
         Ok(task)
     }
 
+    /// 将浏览器任务配置嵌入 `params["task_config"]`（供 Python Worker 执行步骤）。
+    ///
+    /// 收敛 debug 路由与登录侧两处嵌入样板（C6）：任务不存在 / 非浏览器类型 /
+    /// 序列化失败时仅告警、不嵌入，由调用方按原有行为处理（缺失 task_config 时
+    /// Worker 按空步骤执行）。返回是否成功嵌入。
+    pub async fn embed_task_config(&self, task_id: &str, params: &mut Value) -> bool {
+        if task_id.is_empty() {
+            return false;
+        }
+        match self.load_task(task_id).await {
+            Ok(TaskKind::Browser(tc)) => match serde_json::to_value(&tc) {
+                Ok(task_val) => {
+                    params["task_config"] = task_val;
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("任务 {task_id} 序列化失败，未嵌入 task_config: {e}");
+                    false
+                }
+            },
+            Ok(_) => {
+                tracing::warn!("任务 {task_id} 不是浏览器任务，未嵌入 task_config");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("加载任务 {task_id} 失败，未嵌入 task_config: {e}");
+                false
+            }
+        }
+    }
+
     /// 保存任务（存在即更新）。根据 `TaskKind` 选择子目录，并维护 `.order.json`
     pub async fn save_task(&self, task_id: &str, task: &TaskKind) -> Result<(), TaskError> {
         if !is_valid_task_id(task_id) {

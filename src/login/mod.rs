@@ -243,7 +243,7 @@ impl LoginOrchestrator {
         if !missing.is_empty() {
             let msg = missing.join(", ");
             warn!("登录配置不完整，缺少字段: {msg}（source={source:?}）");
-            return self.immediate_handle(source, false, format!("配置不完整: {msg}"), profile.id.clone());
+            return self.immediate_handle(source, false, format!("配置不完整: {msg}"), profile.id.clone()).await;
         }
 
         // 浏览器来源要求环境能力就绪
@@ -254,7 +254,8 @@ impl LoginOrchestrator {
                 false,
                 "浏览器能力未就绪，无法执行定时任务".into(),
                 profile.id.clone(),
-            );
+            )
+            .await;
         }
 
         // 2. auth_url TCP 预检（仅 manual / login_once）
@@ -267,7 +268,8 @@ impl LoginOrchestrator {
                     false,
                     format!("auth_url 不可达: {}", profile.auth_url),
                     profile.id.clone(),
-                );
+                )
+                .await;
             }
         }
 
@@ -434,7 +436,10 @@ impl LoginOrchestrator {
     }
 
     /// 构造“立即终态”的句柄（用于校验失败等无需真正执行的场景）
-    fn immediate_handle(
+    ///
+    /// L2：async 化并直接 await 历史写入，避免 spawn 后台任务在
+    /// graceful_shutdown 时被截断导致历史丢失。
+    async fn immediate_handle(
         &self,
         source: LoginSource,
         success: bool,
@@ -461,13 +466,9 @@ impl LoginOrchestrator {
             message: message.clone(),
             duration_secs: 0.0,
         };
-        // immediate_handle 非 async，后台 spawn 异步写入历史
-        let history = self.history.clone();
-        tokio::spawn(async move {
-            if let Err(e) = history.record(&entry).await {
-                warn!("登录历史写入失败: {e}");
-            }
-        });
+        if let Err(e) = self.history.record(&entry).await {
+            warn!("登录历史写入失败: {e}");
+        }
         LoginHandle {
             source,
             cancel_token: CancellationToken::new(),
@@ -511,20 +512,9 @@ impl LoginOrchestrator {
         if let Ok(browser) = serde_json::to_value(&rt.browser) {
             cfg["browser_settings"] = browser;
         }
-        // 加载浏览器任务配置并嵌入 task_config（Worker 执行步骤的唯一依据）
-        if !task_id.is_empty() {
-            match self.tasks.load_task(task_id).await {
-                Ok(TaskKind::Browser(tc)) => {
-                    if let Ok(task_val) = serde_json::to_value(&tc) {
-                        cfg["task_config"] = task_val;
-                    } else {
-                        warn!("任务 {task_id} 序列化失败，未嵌入 task_config");
-                    }
-                }
-                Ok(_) => warn!("任务 {task_id} 不是浏览器任务，未嵌入 task_config"),
-                Err(e) => warn!("加载任务 {task_id} 失败，未嵌入 task_config: {e}"),
-            }
-        }
+        // 加载浏览器任务配置并嵌入 task_config（Worker 执行步骤的唯一依据）。
+        // 失败时 embed_task_config 内部告警，不嵌入（Worker 按空步骤处理）
+        self.tasks.embed_task_config(task_id, &mut cfg).await;
         cfg
     }
 
