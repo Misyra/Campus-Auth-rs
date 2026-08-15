@@ -128,7 +128,7 @@ pub(crate) async fn run_loop(
         // 步骤 3：低频 Profile 切换检测
         if inner.monitoring
             && !is_any_pause_active(&inner, &deps)
-            && deps.config_service.load_settings().auto_switch
+            && deps.config_service.runtime().load().auto_switch
             && inner.last_profile_check.elapsed() >= profile_check_interval_duration(&deps)
         {
             check_profile_switch(&mut inner, &deps).await;
@@ -290,7 +290,7 @@ fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &Engi
         inner.auto_login_in_flight = false;
     }
     // 当前活跃 Profile 作为通知去重的键
-    let profile_id = deps.config_service.load_settings().active_profile_id;
+    let profile_id = deps.config_service.runtime().load().profile.id.clone();
     if result.success {
         inner.consecutive_failures = 0;
         inner.cooling_down_until = None;

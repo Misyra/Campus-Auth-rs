@@ -416,12 +416,46 @@ impl ConfigService {
         let _guard = self.save_mutex.lock().await;
         // 保存旧快照，用于比较非热更字段
         let old = self.runtime.load().as_ref().clone();
-        // 强制绕过 mtime 缓存
-        self.settings_cache.lock().unwrap_or_else(recover_lock).data = None;
-        let settings = self.load_settings();
+        // 强制绕过 mtime 缓存；磁盘 I/O 移入 spawn_blocking，避免持锁阻塞 async 运行时（A2）
+        let settings_path = self.settings_path.clone();
+        let profiles_dir = self.profiles_dir.clone();
+        let disk = tokio::task::spawn_blocking(move || {
+            let settings = Self::read_settings_from_disk(&settings_path);
+            let mtime = std::fs::metadata(&settings_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            (settings, mtime)
+        })
+        .await
+        .map_err(|e| {
+            ConfigError::Io(std::io::Error::other(format!("配置重读任务失败: {e}")))
+        })?;
+        let (settings_res, mtime) = disk;
+        // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照，无缓存进入隔离态
+        let settings = match settings_res {
+            Ok(s) => {
+                let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
+                c.data = Some(s.clone());
+                c.mtime = mtime;
+                c.poisoned = false;
+                s
+            }
+            Err(e) => {
+                tracing::error!(
+                    "settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝）: {e}"
+                );
+                let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
+                c.poisoned = true;
+                SettingsData::default()
+            }
+        };
         let active_id = settings.active_profile_id.clone();
-        let active_profile = self
-            .load_profile(&active_id)
+        let active_path = profiles_dir.join(format!("{active_id}.json"));
+        let active_profile =
+            tokio::task::spawn_blocking(move || {
+                Self::read_profile_file(&active_path).unwrap_or_else(|_| ProfileData::default())
+            })
+            .await
             .unwrap_or_else(|_| ProfileData::default());
         self.build_and_swap_runtime(&settings, &active_profile).await?;
         // 非热更字段变更提示（如端口、运行模式等）

@@ -17,14 +17,15 @@ use crate::web::state::AppState;
 pub async fn system_info(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings();
+    // 读无锁运行时快照，避免每次请求走磁盘 mtime 校验（A2）
+    let rt = state.container.config.runtime().load();
     let base_path = state.container.config.base_path();
     let m = &state.container.metrics;
     let info = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "base_path": base_path.to_string_lossy(),
-        "port": settings.global.app.port,
-        "active_profile_id": settings.active_profile_id,
+        "port": rt.app.port,
+        "active_profile_id": rt.profile.id,
         "platform": std::env::consts::OS,
         "metrics": {
             "login_total": m.login_total.load(Ordering::Relaxed),
