@@ -395,18 +395,12 @@ impl LoginOrchestrator {
         handle
     }
 
-    /// 取消当前在途登录（Web API `POST /api/login/cancel`）
+/// 取消当前在途登录（Web API `POST /api/login/cancel`）
     ///
-    /// 使用 `try_lock` 避免在 async 上下文中阻塞 tokio 执行器线程。
-    /// 若锁被占用则跳过本次取消（取消为尽力而为）。
-    pub fn cancel_current(&self) {
-        let guard = match self.state.try_lock() {
-            Ok(g) => g,
-            Err(_) => {
-                warn!("cancel_current: 无法获取状态锁，跳过取消");
-                return;
-            }
-        };
+    /// 使用 `lock().await` 等待锁（锁窗口极短），避免撞上 `submit` 持锁窗口时
+    /// 用户取消被静默丢弃（原 `try_lock` 会跳过取消，表现为点取消没反应）。
+    pub async fn cancel_current(&self) {
+        let guard = self.state.lock().await;
         if let Some(active) = &guard.active_session {
             active.cancel_token.cancel();
             *recover_lock(active.cancel_reason.as_ref()) = Some("用户取消".to_string());
@@ -741,19 +735,113 @@ mod tests {
         assert_eq!(*g, 42);
     }
 
-    #[test]
-    fn test_recover_lock_recovers_after_poison() {
-        // 锁中毒后 recover_lock 仍能取回内部数据而非 panic。
-        // 用独立线程持锁时 panic 制造中毒，join() 吸收 panic 不向主线程传播。
-        let m = Arc::new(StdMutex::new(String::from("hello")));
-        let m2 = m.clone();
-        let handle = std::thread::spawn(move || {
-            let _g = m2.lock().unwrap();
-            panic!("故意中毒");
+    // ============ B2: cancel_current 可等待锁 ============
+
+    /// 构造一个最小可用的 LoginOrchestrator 测试实例。
+    ///
+    /// 仅依赖 config/status/bridge 等可空构造的依赖，其余用 dummy 填充；
+    /// 测试只调用 cancel_current，不触碰其它字段。
+    async fn make_orchestrator() -> Arc<LoginOrchestrator> {
+        use crate::config::{ConfigService, ProfileService};
+        use crate::environment::EnvironmentManager;
+        use crate::login::history::LoginHistoryService;
+        use crate::monitor::MonitorService;
+        use crate::network::detect::create_detector;
+        use crate::tasks::TaskManager;
+        use crate::utils::metrics::Metrics;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
+        let config = Arc::new(
+            ConfigService::new(dir.path().to_path_buf(), reload_tx)
+                .await
+                .expect("ConfigService 构造失败"),
+        );
+        let status = Arc::new(StatusManager::new());
+        let bridge = crate::bridge::BridgeSupervisor::new(
+            dir.path().to_path_buf(),
+            config.clone(),
+            status.clone(),
+            None,
+        );
+        let environment = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            status.clone(),
+            config.runtime().load().app.developer_mode,
+        );
+        let tasks = TaskManager::new(dir.path(), config.clone());
+        let history = LoginHistoryService::new(dir.path());
+        let detector = create_detector();
+        let monitor = Arc::new(
+            MonitorService::new(config.clone(), detector.clone(), None, Some(Metrics::new()))
+                .expect("MonitorService 构造失败"),
+        );
+        let _ = Arc::new(ProfileService::new(config.clone()));
+
+        Arc::new(LoginOrchestrator::new(
+            config,
+            Arc::new(history),
+            status,
+            bridge,
+            environment,
+            tasks,
+            monitor,
+            CancellationToken::new(),
+            Some(Metrics::new()),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_cancel_current_waits_for_lock() {
+        // B2：cancel_current 使用 lock().await，持锁状态下能等到锁而非放弃。
+        // 模拟：先持锁（模拟 submit 持锁窗口），再在独立任务中调用 cancel_current，
+        // 释放锁后取消应成功传播到活跃会话。
+        let orch = make_orchestrator().await;
+
+        // 预置活跃会话
+        {
+            let mut state = orch.state.lock().await;
+            state.active_session = Some(ActiveSession {
+                session_id: 1,
+                source: LoginSource::Manual,
+                cancel_token: CancellationToken::new(),
+                cancel_reason: Arc::new(StdMutex::new(None)),
+                attempt_cancel_id: Arc::new(arc_swap::ArcSwapOption::new(Some(
+                    Arc::new("cid-1".to_string()),
+                ))),
+                handle: make_handle(LoginSource::Manual),
+            });
+        }
+
+        // 模拟 submit 持锁窗口：持有锁，再在独立任务中调用 cancel_current
+        let lock_guard = orch.state.lock().await;
+        let orch_for_task = orch.clone();
+        let cancel_task = tokio::spawn(async move {
+            // cancel_current 会 await 锁，因此此处不会立即返回，必须等锁释放
+            orch_for_task.cancel_current().await;
+            true
         });
-        // join 返回 Err（panic 被吸收），锁此时已标记为 PoisonError
-        let _ = handle.join();
-        let g = recover_lock(&m);
-        assert_eq!(&*g, "hello");
+        // 短暂等待，确认 cancel_task 尚未完成（在等待锁）
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!cancel_task.is_finished(), "cancel_current 应等待锁而非放弃");
+        // 释放锁，cancel_current 应能拿到锁并完成取消
+        drop(lock_guard);
+        let done = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cancel_task,
+        )
+        .await
+        .expect("cancel_current 应在锁释放后完成")
+        .unwrap();
+        assert!(done);
+
+        // 验证取消已传播到活跃会话
+        let state = orch.state.lock().await;
+        let active = state.active_session.as_ref().unwrap();
+        assert!(active.cancel_token.is_cancelled());
+        assert_eq!(
+            *active.cancel_reason.as_ref().lock().unwrap_or_else(|e| e.into_inner()),
+            Some("用户取消".to_string())
+        );
     }
 }

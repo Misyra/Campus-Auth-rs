@@ -42,7 +42,8 @@ pub async fn trigger_login(
 pub async fn cancel_login(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    state.container.login.cancel_current();
+    // await 等待状态锁，避免撞上 submit 持锁窗口时取消被静默丢弃（B2）
+    state.container.login.cancel_current().await;
     Ok(data(Value::String("已取消".into())))
 }
 
