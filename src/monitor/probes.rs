@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use futures::future::{join_all, select_all};
+use futures::future::{join_all, select_ok};
 use reqwest::Client;
 use tokio::net::TcpStream;
 use tracing::instrument;
@@ -75,23 +75,31 @@ impl TcpProbe {
                 })
             })
             .collect();
-        // Race 语义：第一个成功连接即视为通过，避免等待慢速失败
-        let mut details = Vec::with_capacity(futs.len());
-        let mut remaining = futs;
-        loop {
-            let (result, _idx, rest) = select_all(remaining).await;
-            let success = result.success;
-            details.push(result);
-            remaining = rest;
-            if success || remaining.is_empty() {
-                break;
+        // Race 语义：第一个成功连接即视为通过，避免等待慢速失败。
+        // 用 select_ok 收敛手写 select_all 循环（C5）：Ok 携带首个成功与其之前
+        // 失败的 future（需 await 取值），Err 携带最后一个失败明细（全部失败）。
+        let futs = futs.into_iter().map(|f| {
+            Box::pin(async move {
+                let detail = f.await;
+                if detail.success {
+                    Ok(detail)
+                } else {
+                    Err(detail)
+                }
+            })
+        });
+        let (outcome, details) = match select_ok(futs).await {
+            Ok((ok_detail, failed_futs)) => {
+                let mut details: Vec<PerProbeDetail> =
+                    Vec::with_capacity(failed_futs.len() + 1);
+                for f in failed_futs {
+                    // 已解析为 Err 的 future，重新 await 立即返回
+                    details.push(f.await.unwrap_err());
+                }
+                details.push(ok_detail);
+                (ProbeOutcome::Pass, details)
             }
-        }
-        let any_pass = details.iter().any(|d| d.success);
-        let outcome = if any_pass {
-            ProbeOutcome::Pass
-        } else {
-            ProbeOutcome::Fail
+            Err(last_err) => (ProbeOutcome::Fail, vec![last_err]),
         };
         (outcome, details)
     }
