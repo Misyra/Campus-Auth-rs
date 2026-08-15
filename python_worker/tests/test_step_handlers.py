@@ -91,3 +91,18 @@ def test_resolve_script_and_code():
     resolved = _resolve(raw, ctx)
     assert resolved.code == "return '42'"
     assert resolved.effective_script == "return '42'"
+
+
+def test_resolve_returns_copy_without_mutating_original():
+    raw = StepConfig.from_dict({
+        "id": "s1", "type": "input",
+        "selector": "#{{FIELD}}", "value": "{{PASSWORD}}",
+    })
+    ctx = StepContext(page=None, variables={"FIELD": "u", "PASSWORD": "secret"})
+    resolved = _resolve(raw, ctx)
+    # 返回副本而非原地改写：调试会话重跑同一步骤不会二次变量解析
+    assert resolved is not raw
+    assert raw.selector == "#{{FIELD}}"
+    assert raw.value == "{{PASSWORD}}"
+    assert resolved.selector == "#u"
+    assert resolved.value == "secret"

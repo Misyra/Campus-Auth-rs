@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import threading
+import time
 
 # 标准库导入完成后，导入本 Worker 模块（其顶层导入 playwright 等重型依赖，
 # 放在此处延后加载，避免 import 阶段即因缺失依赖而崩溃）
@@ -145,6 +146,7 @@ async def _dispatch(msg: dict) -> None:
     method = msg.get("method")
     params = msg.get("params") or {}
     handler = COMMANDS.get(method)
+    start = time.perf_counter()
 
     try:
         if handler is None:
@@ -154,23 +156,28 @@ async def _dispatch(msg: dict) -> None:
         emit_response(msg_id, {"success": True, "data": data, "error": None})
     except StepCancelled as exc:
         # 取消：视为成功终态（outcome=cancelled）
-        emit_response(msg_id, _structured_result(exc, success=True))
+        emit_response(msg_id, _structured_result(exc, success=True, start=start))
     except WorkerError as exc:
         # 可分类失败：保留 outcome 供 Rust 侧决定重试/回收策略
-        emit_response(msg_id, _structured_result(exc, success=False))
+        emit_response(msg_id, _structured_result(exc, success=False, start=start))
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"命令 {method} 执行异常")
         emit_response(msg_id, _error_result(str(exc)))
 
 
-def _structured_result(exc: WorkerError, *, success: bool) -> dict:
-    """将 WorkerError / StepCancelled 归一为带 outcome 的 IPC 响应。"""
+def _structured_result(exc: WorkerError, *, success: bool, start: float | None = None) -> dict:
+    """将 WorkerError / StepCancelled 归一为带 outcome 的 IPC 响应。
+
+    ``start`` 为命令开始时刻（perf_counter），用于计算真实耗时；缺失时
+    duration_ms 取 0（兼容直接调用）。
+    """
+    duration_ms = int((time.perf_counter() - start) * 1000) if start is not None else 0
     return {
         "success": success,
         "data": {
             "outcome": exc.outcome,
             "message": exc.message,
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "screenshots": [],
         },
         "error": exc.message if not success else None,

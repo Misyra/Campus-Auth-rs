@@ -29,10 +29,19 @@ from models import (
     StructuredResult,
     TaskConfig,
 )
-from step_handlers import StepCancelled, StepContext, WorkerError, _check_cancel, run_step_async
+from step_handlers import StepCancelled, StepContext, WorkerError, _check_cancel, _get_ocr, run_step_async
 from variable_resolver import resolve
 
 logger = logging.getLogger(__name__)
+
+# Worker 脚本所在目录：browser_data / debug 截图等相对目录一律锚定到此，
+# 避免依赖 Rust spawn 继承的 CWD（未设 current_dir，可能是任意目录）
+_WORKER_DIR = Path(__file__).resolve().parent
+
+
+def _debug_screenshot_dir() -> Path:
+    """调试截图目录（锚定到 worker 脚本目录，不依赖进程 CWD）。"""
+    return _WORKER_DIR / "debug"
 
 
 def _to_ms(bs: dict, key: str, default_ms: int) -> int:
@@ -84,8 +93,38 @@ def _build_result(outcome: Outcome, message: str, context: StepContext, start: f
     )
 
 
+async def _sleep_cancellable(seconds: float, context: StepContext) -> None:
+    """分片 sleep，每片检查取消事件，避免长时间延迟期间无法响应取消。"""
+    slice_s = 0.2
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        _check_cancel(context)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(slice_s, remaining))
+
+
+def _task_watchdog_timeout_ms(task_config: TaskConfig) -> int | None:
+    """读取任务级超时（毫秒）。
+
+    历史遗留：Rust 侧已确认有超时兜底——``bridge::Bridge::execute`` 默认
+    以 ``tokio::time::timeout`` 包裹整条 IPC 请求（默认 300s），因此 Python
+    侧不在此处重复实现 ``asyncio.wait_for`` watchdog。本函数目前仅作存取辅助，
+    未接入 ``run_steps``。
+    """
+    raw = task_config.extras.get("timeout")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        return None
+    return int(raw)
+
+
 async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) -> StructuredResult:
-    """按序执行步骤列表。"""
+    """按序执行步骤列表。
+
+    任务级 ``TaskConfig.timeout`` 的看门狗由 Rust 侧兜底（``bridge.execute``
+    的 300s 超时），Python 侧不重复实现。
+    """
     start = time.perf_counter()
     if not steps:
         return _build_result(Outcome.UNKNOWN_ERROR, "任务未包含任何步骤，无法执行", context, start)
@@ -93,7 +132,7 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
         for idx, step in enumerate(steps):
             _check_cancel(context)
             if idx > 0 and context.step_delay > 0:
-                await asyncio.sleep(context.step_delay)
+                await _sleep_cancellable(context.step_delay, context)
             try:
                 await run_step_async(page, step, context)
             except WorkerError as exc:
@@ -367,7 +406,8 @@ class WorkerCore:
         if bs.get("low_resource_mode", False):
             await self._context.route("**/*", self._handle_low_resource_request)
         if bs.get("stealth_mode", False):
-            custom = bs.get("stealth_custom_script", "").strip()
+            # 显式 null 时 .get 默认值不生效，需 or 兜底再 strip
+            custom = (bs.get("stealth_custom_script") or "").strip()
             script = custom or _STEALTH_INIT_SCRIPT
             await self._context.add_init_script(script)
 
@@ -390,7 +430,7 @@ class WorkerCore:
             if persistent:
                 from pathlib import Path as _P
 
-                user_data_dir = _P("browser_data") / channel
+                user_data_dir = _P(_WORKER_DIR) / "browser_data" / channel
                 user_data_dir.mkdir(parents=True, exist_ok=True)
                 launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
                 ctx_opts = self._build_context_options(bs)
@@ -482,6 +522,11 @@ class WorkerCore:
             except Exception:  # noqa: BLE001
                 logger.debug("停止 Playwright 时连接已断开（正常）")
             self._playwright = None
+        # 关闭浏览器时顺带清理全部调试会话截图（可能含明文凭据），
+        # 覆盖 debug_stop 未被正确调用（EOF / shutdown 路径）的泄漏场景
+        for session in list(self._debug_sessions.values()):
+            self._cleanup_debug_screenshots(session)
+        self._debug_sessions.clear()
         self._last_browser_settings = None
 
     async def close_browser(self) -> None:
@@ -545,6 +590,7 @@ class WorkerCore:
         navigate_url: str = "",
     ) -> StructuredResult:
         """执行单个浏览器任务：确保浏览器 → 导航 → 运行步骤。"""
+        start = time.perf_counter()
         await self.ensure_browser({"browser_settings": bs})
         if self._page is None or self._page.is_closed():
             if self._context is None:
@@ -586,7 +632,7 @@ class WorkerCore:
                     Outcome.UNKNOWN_ERROR,
                     f"成功条件变量未设置: {var_name}（请检查 eval 步骤的 store_as）",
                     context,
-                    time.perf_counter(),
+                    start,
                 )
             value = context.results[var_name]
             if not _is_truthy(value):
@@ -594,7 +640,7 @@ class WorkerCore:
                     Outcome.UNKNOWN_ERROR,
                     f"成功条件未命中: {var_name}={value}",
                     context,
-                    time.perf_counter(),
+                    start,
                 )
             logger.info("[success_condition] 命中成功: %s=%s", var_name, value)
             result.message = f"成功条件命中: {var_name}={value}"
@@ -626,7 +672,10 @@ class WorkerCore:
         """健康检查：确认 Playwright 与浏览器可用。"""
         channel = (params.get("browser_settings") or {}).get("browser_channel", "playwright")
         try:
-            healthy = _ensure_browser(channel)
+            # _ensure_browser 内部用 sync_playwright，在 asyncio 事件循环内直接调用会抛
+            # "Sync API inside the asyncio loop" 被吞掉而误判 healthy=false（Worker 启动超时）。
+            # 丢到线程池执行，与 OCR classification 的同步 CPU 推理处理一致。
+            healthy = await asyncio.to_thread(_ensure_browser, channel)
         except Exception as exc:
             logger.warning(f"健康检查异常: {exc}")
             healthy = False
@@ -644,7 +693,7 @@ class WorkerCore:
             }
             variables.update(task.variables or {})
             result = await self._run_task(
-                task, bs, variables, cancel_event, Path("debug"), navigate_url=auth_url
+                task, bs, variables, cancel_event, _debug_screenshot_dir(), navigate_url=auth_url
             )
             return result.to_dict()
 
@@ -653,15 +702,21 @@ class WorkerCore:
         async with self._cancel_session(params) as (cancel_event, bs, task):
             variables = dict(task.variables or {})
             result = await self._run_task(
-                task, bs, variables, cancel_event, Path("debug")
+                task, bs, variables, cancel_event, _debug_screenshot_dir()
             )
             return result.to_dict()
 
     async def handle_debug_start(self, params: dict, core: "WorkerCore") -> dict:
-        """启动调试会话，保留浏览器上下文供后续 debug_step 复用。"""
+        """启动调试会话，保留浏览器上下文供后续 debug_step 复用。
+
+        与 Rust 单会话语义一致：同一时刻仅允许一个活跃调试会话，
+        需先 debug_stop 才能再次启动（避免多个会话共享 self._page 互相覆盖）。
+        """
         bs = params.get("browser_settings", {}) or {}
         task_raw = params.get("task_config", {}) or {}
         cancel_id = params.get("cancel_id", "")
+        if self._debug_sessions:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "已存在活跃调试会话，请先停止再启动")
         session_id = uuid.uuid4().hex
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
         try:
@@ -678,7 +733,7 @@ class WorkerCore:
                     _to_ms(bs, "navigation_timeout", 15000),
                 )
             context = self._make_context(
-                self._page, variables, bs, cancel_event, Path("debug"), task
+                self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
             )
             self._debug_sessions[session_id] = DebugSession(
                 session_id=session_id,
@@ -692,8 +747,9 @@ class WorkerCore:
             try:
                 stamp = str(int(time.time() * 1000))
                 filename = f"debug_{session_id}_{stamp}.png"
-                local_path = str(Path("debug") / filename)
-                Path("debug").mkdir(parents=True, exist_ok=True)
+                shot_dir = _debug_screenshot_dir()
+                local_path = str(shot_dir / filename)
+                shot_dir.mkdir(parents=True, exist_ok=True)
                 await self._page.screenshot(path=local_path, full_page=True)
                 # 追踪初始截图路径，以便会话结束时统一清理（历史遗留 F5）
                 try:
@@ -709,6 +765,23 @@ class WorkerCore:
                 cancel_registry.unregister(cancel_id)
             raise
 
+    def _debug_session_for(self, session_id: str) -> "DebugSession":
+        """解析调试会话：显式 session_id 优先；为空时回退到唯一活跃会话。
+
+        Rust 侧从不显式传 session_id（单会话语义），空串时若恰有一个活跃
+        会话则回退到它；存在多个会话时要求显式指定，避免歧义（历史遗留 P1）。
+        """
+        if session_id:
+            session = self._debug_sessions.get(session_id)
+            if session is None:
+                raise WorkerError(Outcome.UNKNOWN_ERROR, "调试会话不存在，请先启动调试")
+            return session
+        if len(self._debug_sessions) == 1:
+            return next(iter(self._debug_sessions.values()))
+        if self._debug_sessions:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "存在多个调试会话，请指定 session_id")
+        raise WorkerError(Outcome.UNKNOWN_ERROR, "调试会话不存在，请先启动调试")
+
     async def handle_debug_step(self, params: dict, core: "WorkerCore") -> dict:
         """执行调试会话中的单个步骤。
 
@@ -718,9 +791,7 @@ class WorkerCore:
         - 两者皆无 → 自动执行“下一步”（由会话内游标维护），便于前端逐步调试。
         """
         session_id = params.get("session_id", "")
-        session = self._debug_sessions.get(session_id)
-        if not session_id or session is None:
-            raise WorkerError(Outcome.UNKNOWN_ERROR, "调试会话不存在，请先启动调试")
+        session = self._debug_session_for(session_id)
 
         steps = session.task_config.steps
         step_raw = params.get("step")
@@ -763,9 +834,7 @@ class WorkerCore:
     async def handle_debug_run_all(self, params: dict, core: "WorkerCore") -> dict:
         """依次执行调试会话中尚未运行的全部步骤（从当前游标到末尾）。"""
         session_id = params.get("session_id", "")
-        session = self._debug_sessions.get(session_id)
-        if not session_id or session is None:
-            raise WorkerError(Outcome.UNKNOWN_ERROR, "调试会话不存在，请先启动调试")
+        session = self._debug_session_for(session_id)
 
         steps = session.task_config.steps
         start = session.current_step
@@ -812,12 +881,12 @@ class WorkerCore:
     async def handle_debug_stop(self, params: dict, core: "WorkerCore") -> dict:
         """停止调试会话并关闭浏览器。"""
         session_id = params.get("session_id", "")
-        session = self._debug_sessions.pop(session_id, None)
-        if session is not None:
-            # 先清理本会话的截图（可能含明文凭证），再注销取消项
-            self._cleanup_debug_screenshots(session)
-            if session.cancel_id:
-                cancel_registry.unregister(session.cancel_id)
+        session = self._debug_session_for(session_id)
+        self._debug_sessions.pop(session.session_id, None)
+        # 先清理本会话的截图（可能含明文凭证），再注销取消项
+        self._cleanup_debug_screenshots(session)
+        if session.cancel_id:
+            cancel_registry.unregister(session.cancel_id)
         await self._close_browser()
         return {}
 
@@ -827,15 +896,15 @@ class WorkerCore:
         if not image_base64:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "ocr_recognize 缺少 image_base64")
         try:
-            import ddddocr  # type: ignore
+            ocr = _get_ocr(bool(params.get("old", False)))
         except Exception as exc:  # noqa: BLE001
             raise WorkerError(Outcome.UNKNOWN_ERROR, f"ddddocr 未安装: {exc}") from exc
         try:
             img_bytes = base64.b64decode(image_base64)
         except Exception as exc:  # noqa: BLE001
             raise WorkerError(Outcome.UNKNOWN_ERROR, f"图片解码失败: {exc}") from exc
-        ocr = ddddocr.DdddOcr(old=bool(params.get("old", False)), show_ad=False)
-        text = ocr.classification(img_bytes)
+        # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环
+        text = await asyncio.to_thread(ocr.classification, img_bytes)
         return {"text": text}
 
     async def handle_shutdown(self, params: dict, core: "WorkerCore") -> dict:

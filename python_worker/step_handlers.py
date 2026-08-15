@@ -15,10 +15,11 @@ evaluate / navigate / wait_for_selector / upload_file / custom），并兼容 Ru
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -99,23 +100,50 @@ def _check_cancel(context: StepContext) -> None:
 
 
 def _resolve(step: StepConfig, context: StepContext) -> StepConfig:
-    """解析步骤中的模板变量（selector / value / pattern / script / path）。"""
+    """解析步骤中的模板变量（selector / value / pattern / script / path）。
+
+    返回解析后的 ``StepConfig`` 副本，不原地改写原始步骤配置。
+    否则调试会话重跑同一步骤时会对已解析字段二次解析——当密码值本身含
+    ``{{VAR}}`` 字面量时会被再次替换（历史遗留 P2）。
+    """
     from variable_resolver import resolve
 
-    if context.variables:
-        if step.selector:
-            step.selector = resolve(step.selector, context.variables)
-        if step.value:
-            step.value = resolve(step.value, context.variables)
-        if step.pattern:
-            step.pattern = resolve(step.pattern, context.variables)
-        if step.path:
-            step.path = resolve(step.path, context.variables)
-        script = step.effective_script
-        if script:
-            step.code = resolve(script, context.variables)
-            step.script = step.code
-    return step
+    if not context.variables:
+        return step
+    resolved = replace(step)
+    if resolved.selector:
+        resolved.selector = resolve(resolved.selector, context.variables)
+    if resolved.value:
+        resolved.value = resolve(resolved.value, context.variables)
+    if resolved.pattern:
+        resolved.pattern = resolve(resolved.pattern, context.variables)
+    if resolved.path:
+        resolved.path = resolve(resolved.path, context.variables)
+    script = resolved.effective_script
+    if script:
+        code = resolve(script, context.variables)
+        resolved.code = code
+        resolved.script = code
+    return resolved
+
+
+# OCR 实例缓存：ddddocr 模型加载开销大，按 ``old`` 参数缓存复用实例，
+# 避免每次调用重新加载模型（历史遗留 P2）。
+_ocr_cache: dict[bool, Any] = {}
+
+
+def _get_ocr(old: bool):
+    """获取（并缓存）ddddocr 实例。
+
+    模型不存在时抛出 ImportError，由调用方转换为 WorkerError。
+    """
+    import ddddocr  # type: ignore
+
+    instance = _ocr_cache.get(old)
+    if instance is None:
+        instance = ddddocr.DdddOcr(old=old, show_ad=False)
+        _ocr_cache[old] = instance
+    return instance
 
 
 def _locator(context: StepContext, selector: str):
@@ -148,15 +176,15 @@ async def handle_input(page, step: StepConfig, context: StepContext) -> None:
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
     if context.reveal_hidden:
-        # 隐藏输入框无法用 fill，改用 JS 直接赋值并派发 input 事件
-        await page.evaluate(
-            "(sel, val) => {"
-            "  const el = document.querySelector(sel);"
+        # 隐藏输入框无法用 fill，改用 JS 直接赋值并派发 input 事件。
+        # 通过 locator.evaluate 在目标元素上执行，_locator 已处理 iframe 定位，
+        # 与 fill 路径保持一致（历史遗留 P2）。
+        await _locator(context, step.selector).evaluate(
+            "(el, val) => {"
             "  if (!el) throw new Error('selector not found');"
             "  el.value = val;"
             "  el.dispatchEvent(new Event('input', {bubbles: true}));"
             "}",
-            step.selector,
             value,
         )
         return
@@ -208,7 +236,7 @@ async def handle_click_select(page, step: StepConfig, context: StepContext) -> N
     timeout = step.timeout or context.default_timeout
     container = _locator(context, step.selector)
     await _safe_op(context, container.click(timeout=timeout), Outcome.SELECTOR_FAILED)
-    option = context.page.locator(step.option_selector)
+    option = _locator(context, step.option_selector)
     await _safe_op(context, option.click(timeout=timeout), Outcome.SELECTOR_FAILED)
 
 
@@ -332,11 +360,12 @@ async def handle_assert_text(page, step: StepConfig, context: StepContext) -> No
     if not value:
         raise WorkerError(Outcome.SELECTOR_FAILED, "assert_text 步骤需要 value")
     timeout = step.timeout or context.default_timeout
-    # 转义文本中的反斜杠与单引号，避免破坏 JS 字符串字面量
-    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    # 通过 wait_for_function 的 arg 参数传递待匹配文本，避免字符串拼接构造 JS
+    # （值含真实换行/引号时不会被转义破坏字面量，历史遗留 P2）。
     try:
         await page.wait_for_function(
-            f"() => document.body.innerText.includes('{escaped}')",
+            "() => document.body.innerText.includes(arg)",
+            arg=value,
             timeout=timeout,
         )
     except PlaywrightTimeoutError as exc:
@@ -370,7 +399,7 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     if not step.selector:
         raise WorkerError(Outcome.SELECTOR_FAILED, "ocr 步骤缺少 selector")
     try:
-        import ddddocr  # type: ignore
+        ocr = _get_ocr(step.old)
     except Exception as exc:  # noqa: BLE001
         raise WorkerError(
             Outcome.UNKNOWN_ERROR,
@@ -384,18 +413,18 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
         context, locator.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
     )
     img_bytes = await locator.screenshot()
-    ocr = ddddocr.DdddOcr(old=step.old, show_ad=False)
     # char_range 限制识别字符集（如 0-7 表示仅识别数字），非 None 时设置
     if step.char_range is not None:
         try:
             ocr.set_ranges(step.char_range)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ocr] set_ranges(%s) 失败，忽略: %s", step.char_range, exc)
-    text = ocr.classification(img_bytes)
+    # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环
+    text = await asyncio.to_thread(ocr.classification, img_bytes)
     if step.store_as:
         context.results[step.store_as] = text
     if step.target_selector:
-        target = context.page.locator(step.target_selector)
+        target = _locator(context, step.target_selector)
         await _safe_op(
             context, target.fill(text, timeout=timeout), Outcome.SELECTOR_FAILED
         )

@@ -192,3 +192,91 @@ def test_error_result_format():
     from worker_main import _error_result
     d = _error_result("未知命令: foo")
     assert d == {"success": False, "data": None, "error": "未知命令: foo"}
+
+
+# ── 5.5: debug 会话空 session_id 回退（Rust 从不传 session_id）──
+
+def _make_debug_session(sid: str):
+    from playwright_worker import DebugSession, StepContext
+    return DebugSession(
+        session_id=sid, page=None, task_config=None, context=StepContext(page=None)
+    )
+
+
+def test_debug_session_for_single_session_fallback():
+    from playwright_worker import WorkerCore
+    core = WorkerCore()
+    s1 = _make_debug_session("s1")
+    core._debug_sessions["s1"] = s1
+    # 空 session_id 且恰有一个活跃会话 → 回退到它
+    assert core._debug_session_for("") is s1
+    # 显式 id 正常命中
+    assert core._debug_session_for("s1") is s1
+
+
+def test_debug_session_for_multiple_sessions_raises():
+    from playwright_worker import WorkerCore
+    from step_handlers import WorkerError
+    core = WorkerCore()
+    core._debug_sessions["s1"] = _make_debug_session("s1")
+    core._debug_sessions["s2"] = _make_debug_session("s2")
+    # 空 session_id 且存在多个会话 → 报错（与 Rust 单会话语义对齐）
+    with pytest.raises(WorkerError):
+        core._debug_session_for("")
+
+
+def test_debug_session_for_no_session_raises():
+    from playwright_worker import WorkerCore
+    from step_handlers import WorkerError
+    core = WorkerCore()
+    with pytest.raises(WorkerError):
+        core._debug_session_for("")
+
+
+def test_debug_session_for_unknown_id_raises():
+    from playwright_worker import WorkerCore
+    from step_handlers import WorkerError
+    core = WorkerCore()
+    core._debug_sessions["s1"] = _make_debug_session("s1")
+    with pytest.raises(WorkerError):
+        core._debug_session_for("nope")
+
+
+# ── 5.7: OCR 模型缓存复用实例 ──
+
+def test_get_ocr_caches_instance(monkeypatch):
+    import sys, types
+    from step_handlers import _get_ocr, _ocr_cache
+
+    fake = types.ModuleType("ddddocr")
+    created = []
+
+    class FakeDdddOcr:
+        def __init__(self, old, show_ad):
+            created.append(old)
+
+    fake.DdddOcr = FakeDdddOcr
+    monkeypatch.setitem(sys.modules, "ddddocr", fake)
+    _ocr_cache.clear()
+    try:
+        a = _get_ocr(False)
+        b = _get_ocr(False)
+        assert a is b  # 两次获取返回同一实例
+        c = _get_ocr(True)
+        assert c is not a  # 不同 old 参数单独缓存
+        assert created == [False, True]  # 每种参数仅构造一次
+    finally:
+        _ocr_cache.clear()
+
+
+def test_structured_result_duration_ms_with_start():
+    import time
+    from step_handlers import WorkerError
+    from worker_main import _structured_result
+    exc = WorkerError("selector_failed", "失败")
+    start = time.perf_counter()
+    d = _structured_result(exc, success=False, start=start)
+    assert d["data"]["duration_ms"] >= 0
+    # 未传 start 时保持 0（兼容直接调用）
+    d0 = _structured_result(exc, success=False)
+    assert d0["data"]["duration_ms"] == 0
