@@ -2,21 +2,28 @@
 import { ref } from "vue";
 import { systemApi, autostartApi } from "@/api";
 import type { UpdateInfo } from "@/api/types";
+import { useConfirm } from "@/composables/useConfirm";
+
+const { confirm } = useConfirm();
 
 // ---- 版本信息 ----
 const version = ref("unknown");
-const pythonVersion = ref("");
+const pythonStatus = ref("未知");
 const platform = ref("");
 const autostartEnabled = ref(false);
 
 async function loadInfo() {
   try {
-    const [health, auto] = await Promise.all([
+    // /api/health 仅返回 status/version，不返回 python_version；
+    // Python 就绪状态改由 /api/init-status 的 environment.python_ready 推导
+    const [health, auto, init] = await Promise.all([
       systemApi.health(),
       autostartApi.fetchStatus(),
+      systemApi.initStatus(),
     ]);
     version.value = health.version || "unknown";
-    pythonVersion.value = health.python_version || "3.12+";
+    const env = (init as { environment?: { python_ready?: boolean } }).environment;
+    pythonStatus.value = env?.python_ready ? "已就绪" : "未就绪";
     platform.value = auto.platform;
     autostartEnabled.value = auto.enabled;
   } catch { /* 静默 */ }
@@ -47,8 +54,21 @@ async function applyUpdate() {
     const data = await systemApi.update();
     updateInfo.value = {
       has_update: false,
-      message: (data.message as string) || "更新已暂存，重启后生效",
+      message: (data.message as string) || "更新已就绪，重启后生效",
     };
+    // 更新已就绪，询问是否立即优雅关闭并重启（联动 Rust 侧优雅关闭接口）
+    const ok = await confirm({
+      title: "更新已就绪",
+      message: "更新已下载完成，是否立即重启应用以生效？",
+      confirmText: "立即重启",
+    });
+    if (ok) {
+      try {
+        await systemApi.shutdown();
+      } catch (e) {
+        updateInfo.value.message = "更新已就绪，但自动重启失败，请手动重启应用";
+      }
+    }
   } catch (e: unknown) {
     updateInfo.value = { has_update: false, error: (e as Error).message || "更新失败" };
   } finally {
@@ -138,7 +158,7 @@ async function applyUpdate() {
             <div class="info-list">
               <div class="info-item">
                 <span class="info-label">Python</span>
-                <span class="info-value">{{ pythonVersion }}</span>
+                <span class="info-value">{{ pythonStatus }}</span>
               </div>
               <div class="info-item">
                 <span class="info-label">平台</span>

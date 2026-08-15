@@ -161,13 +161,13 @@ const browserTargetOptions = computed<SelectOption[]>(() =>
             <p>暂无执行记录</p>
           </div>
           <div v-else class="history-list">
-            <div v-for="(record, index) in st.scheduledTaskHistory.value" :key="index" class="history-item" :class="record.status === 'failure' ? 'failed' : (record.status as string)">
+            <div v-for="(record, index) in st.scheduledTaskHistory.value" :key="index" class="history-item" :class="record.success ? 'success' : 'failed'">
               <div class="history-header">
-                <span class="history-status" :class="record.status === 'failure' ? 'failed' : (record.status as string)">
-                  {{ record.status === 'success' ? '成功' : '失败' }}
+                <span class="history-status" :class="record.success ? 'success' : 'failed'">
+                  {{ record.success ? '成功' : '失败' }}
                 </span>
-                <span class="history-time">{{ record.timestamp.replace('T', ' ').substring(0, 19) }}</span>
-                <span class="history-duration">{{ record.duration }}s</span>
+                <span class="history-time">{{ record.run_at.replace('T', ' ').substring(0, 19) }}</span>
+                <span v-if="record.duration != null" class="history-duration">{{ record.duration }}s</span>
               </div>
               <div class="history-message">{{ record.message }}</div>
             </div>

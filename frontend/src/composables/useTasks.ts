@@ -62,7 +62,12 @@ async function fetchTasks(): Promise<void> {
   try {
     const data = await tasksApi.list();
     if (Array.isArray(data)) {
-      tasks.value.splice(0, tasks.value.length, ...data);
+      // GET /api/tasks 与 /api/scripts 返回同一混合列表，此处仅保留浏览器任务（browser）
+      const browserTasks = data.filter((t) => {
+        const tt = (t.task_type as string) || (t.type as string) || "";
+        return tt === "" || tt === "browser";
+      });
+      tasks.value.splice(0, tasks.value.length, ...browserTasks);
     }
   } catch (error) {
     frontendLogger.error("tasks", "获取任务列表失败", error);

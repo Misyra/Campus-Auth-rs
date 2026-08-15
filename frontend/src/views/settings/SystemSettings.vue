@@ -81,7 +81,7 @@ async function reloadConfig() {
               <label class="toggle toggle-help-inline">
                 <input type="checkbox" v-model="config.config.logging.file_enabled" />
                 <span class="toggle-slider"></span>
-                <span class="toggle-label">显示 HTTP 请求日志</span>
+                <span class="toggle-label">启用文件日志</span>
               </label>
             </div>
           </div>
@@ -90,9 +90,9 @@ async function reloadConfig() {
           <div class="form-group">
             <div class="field-label-row">
               <label>全局日志级别</label>
-              <span class="field-help" tabindex="0" role="note" data-tip="低于该级别的日志将被过滤。">?</span>
+              <span class="field-help" tabindex="0" role="note" data-tip="低于该级别的日志将被过滤。选择后即时热更新。">?</span>
             </div>
-            <CustomSelect v-model="config.config.logging.level" :options="logLevelOptions" />
+            <CustomSelect :model-value="config.config.logging.level" :options="logLevelOptions" @update:model-value="config.setLogLevel($event as string)" />
           </div>
         </div>
       </div>

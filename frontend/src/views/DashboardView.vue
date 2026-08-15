@@ -3,8 +3,6 @@ import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useStatus } from "@/composables/useStatus";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
-import { historyApi } from "@/api";
-import { frontendLogger } from "@/utils/logger";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -20,15 +18,8 @@ onMounted(() => {
 // ---- 登录历史 — 复用 useUi 共享状态，避免手动登录后 Dashboard 不更新 ----
 const loginHistory = ui.loginHistory;
 const fetchLoginHistory = ui.fetchLoginHistory;
-async function clearLoginHistory() {
-  try {
-    await historyApi.clear();
-    // loginHistory 是 reactive 数组，需 splice 清空（.value 赋值对 reactive 数组无效）
-    ui.loginHistory.splice(0);
-  } catch (error) {
-    frontendLogger.error("history", "清空登录历史失败", error);
-  }
-}
+// 清空登录历史：复用 useUi 带确认逻辑的版本（遮蔽本地无确认实现）
+const clearLoginHistory = ui.clearLoginHistory;
 
 // ---- 日志 ----
 const logViewer = ref<HTMLElement | null>(null);

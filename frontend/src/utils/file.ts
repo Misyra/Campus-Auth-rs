@@ -1,6 +1,6 @@
 /**
  * 文件与通用工具。
- * 从 legacy js/methods/utils.js 迁移：pickFile / downloadBlob / getBinaryName / safeApiCall。
+ * 从 legacy js/methods/utils.js 迁移：pickFile / downloadBlob / getBinaryName。
  */
 
 /** 打开文件选择对话框 */
@@ -34,41 +34,4 @@ export function getBinaryName(path: string): string {
   if (!path) return "Python";
   const name = path.split(/[/\\]/).pop() || path;
   return name.replace(/\.(exe|cmd|bat|sh)$/i, "") || name;
-}
-
-/** 包装 API 调用，统一处理错误 toast */
-export async function safeApiCall<T>(
-  fn: () => Promise<T>,
-  fallbackMsg = "操作失败",
-  onError?: (msg: string) => void,
-): Promise<T | null> {
-  try {
-    return await fn();
-  } catch (error) {
-    const msg = extractError(error, fallbackMsg);
-    onError?.(msg);
-    return null;
-  }
-}
-
-/** 从异常提取用户友好消息（与 api/client.extractApiError 一致，避免循环依赖在此复制） */
-function extractError(error: unknown, fallback = "操作失败"): string {
-  const detail = (error as { response?: { data?: { detail?: unknown; message?: string } } })?.response?.data;
-  if (detail) {
-    const d = detail.detail;
-    if (Array.isArray(d)) {
-      return (
-        d
-          .map((x) => {
-            if (typeof x === "string") return x;
-            const loc = x?.loc ? `[${x.loc[x.loc.length - 1]}] ` : "";
-            return loc + (x?.msg || x?.detail || String(x));
-          })
-          .join("; ") || fallback
-      );
-    }
-    if (typeof d === "string") return d;
-    if (detail.message) return detail.message;
-  }
-  return (error as { message?: string })?.message || fallback;
 }

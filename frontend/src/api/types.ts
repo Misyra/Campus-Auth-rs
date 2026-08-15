@@ -32,7 +32,6 @@ export interface StatusSnapshot {
   last_check_time: string | null;
   runtime_seconds: number;
   network_connected: boolean;
-  status_detail: string;
   network_state: string;
   login_status?: string;
   engine_state?: string;
@@ -357,12 +356,12 @@ export interface ScheduledTask {
   [key: string]: unknown;
 }
 
-/** 定时任务执行历史条目 */
+/** 定时任务执行历史条目（后端 job_history 扁平数组：{ run_at, success, message, duration }） */
 export interface ScheduledTaskHistoryItem {
-  timestamp: string;
-  status: string;
+  run_at: string;
+  success: boolean;
   message: string;
-  duration: number;
+  duration?: number;
   [key: string]: unknown;
 }
 

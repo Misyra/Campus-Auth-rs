@@ -6,6 +6,7 @@
 import { reactive, ref, computed } from "vue";
 import type { StatusSnapshot, AutostartStatus } from "../api/types";
 import { monitorApi, autostartApi } from "../api";
+import { ApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { useNotifications } from "./useNotifications";
 
@@ -16,7 +17,6 @@ const status = reactive<StatusSnapshot>({
   last_check_time: null,
   runtime_seconds: 0,
   network_connected: false,
-  status_detail: "已停止",
   network_state: "unknown",
 });
 
@@ -85,7 +85,19 @@ const networkStatus = computed(() => {
 
 const networkStatusText = computed(() => {
   if (!status.monitoring) return "已停止";
-  return status.status_detail || "正在启动监控";
+  // 后端 network_status 实际取值：online / captive_portal / offline / paused / unknown
+  switch (status.network_state) {
+    case "online":
+      return "在线监测中";
+    case "captive_portal":
+      return "检测到门户劫持";
+    case "offline":
+      return "网络断开";
+    case "paused":
+      return "暂停时段";
+    default:
+      return "正在启动监控";
+  }
 });
 
 async function fetchStatus(): Promise<void> {
@@ -115,8 +127,7 @@ async function fetchAutostart(): Promise<void> {
     Object.assign(autostart, data);
   } catch (error) {
     frontendLogger.warn("autostart", "获取自启动状态失败", error);
-    const anyErr = error as { response?: { status?: number } };
-    if (anyErr?.response?.status === 404) {
+    if (error instanceof ApiError && error.status === 404) {
       Object.assign(autostart, {
         platform: "-",
         enabled: false,

@@ -98,23 +98,39 @@ async function closeProfileEditor(): Promise<void> {
   editingProfileSnapshot = "";
 }
 
-async function saveProfile(): Promise<void> {
-  if (!editingProfile.value) return;
+async function saveProfile(): Promise<boolean> {
+  if (!editingProfile.value) return false;
   const profile = editingProfile.value;
   const profileId = profile.id.trim();
   if (!profileId) {
     frontendLogger.warn("profiles", "保存方案被拒绝: 空 ID");
     toastOnly(false, "请输入方案 ID");
-    return;
+    return false;
   }
   if (!/^[a-zA-Z0-9_]+$/.test(profileId)) {
     frontendLogger.warn("profiles", "保存方案被拒绝: ID 格式无效");
     toastOnly(false, "方案 ID 只能包含字母、数字和下划线");
-    return;
+    return false;
   }
   const { id, _isNew, ...settings } = profile;
+  // 自定义运营商：选中"自定义"但未输入关键字时拒绝保存（修复 P1-17）
+  if (settings.isp === "自定义") {
+    toastOnly(false, "请填写自定义运营商关键字");
+    return false;
+  }
   try {
-    const data = await profilesApi.save(profileId, settings as Profile);
+    let data;
+    if (_isNew) {
+      // 新建方案：走 POST /api/profiles/{id}，body 必须含 id/name/username/password（对齐后端 ProfileCreateBody 必填字段）
+      data = await profilesApi.create(profileId, {
+        id: profileId,
+        name: settings.name ?? "",
+        username: settings.username ?? "",
+        password: settings.password ?? "",
+      });
+    } else {
+      data = await profilesApi.save(profileId, settings as Profile);
+    }
     frontendLogger.info("profiles", "方案保存成功: " + profileId);
     toastOnly(true, data?.message || "方案保存成功");
     editingProfile.value = null;
@@ -123,10 +139,12 @@ async function saveProfile(): Promise<void> {
     if (profileId === activeProfileId.value) {
       await refreshActiveProfileConfig();
     }
+    return true;
   } catch (error) {
     const msg = extractApiError(error, "保存失败");
     frontendLogger.error("profiles", "方案保存异常: " + msg, error);
     toastOnly(false, msg);
+    return false;
   }
 }
 

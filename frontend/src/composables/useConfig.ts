@@ -5,9 +5,9 @@
  */
 
 import { reactive, ref, watch } from "vue";
-import type { Config, SaveConfigPayload, ShellInfo, OcrStatus } from "../api/types";
+import type { Config, SaveConfigPayload, OcrStatus } from "../api/types";
 import { configApi, autostartApi, ocrApi } from "../api";
-import { extractApiError } from "../api/client";
+import { ApiError, extractApiError } from "../api/client";
 import { DEFAULT_CONFIG } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { useStatus } from "./useStatus";
@@ -33,8 +33,6 @@ function cloneConfig(src: Config): Config {
 const config = reactive<Config>(cloneConfig(DEFAULT_CONFIG));
 const password = usePasswordField(false);
 const defaultUrlCheckUrls = [...DEFAULT_CONFIG.monitor.url_check_urls];
-const availableShells = reactive<ShellInfo[]>([]);
-const defaultShell = ref("");
 const ocrStatus = reactive<OcrStatus>({ installed: false, size_mb: 0 });
 const dirty = ref(false);
 const saveFailed = ref(false);
@@ -107,17 +105,6 @@ function validateConfig(): string[] {
 const { toastOnly } = useToast();
 const { notify } = useNotifications();
 
-function ensureAtLeastOneCheckMethod(): void {
-  const { enable_tcp_check, enable_http_check, url_check_urls } = config.monitor;
-  if (!enable_tcp_check && !enable_http_check && !(url_check_urls && url_check_urls.length)) {
-    toastOnly(false, "至少需要保留一种网络检测方式");
-    // 等 DOM 更新后恢复勾选
-    Promise.resolve().then(() => {
-      config.monitor.enable_tcp_check = true;
-    });
-  }
-}
-
 function onPasswordFocus(): void {
   password.onFocus();
 }
@@ -131,6 +118,12 @@ function onPasswordInput(e: Event): void {
 
 async function saveConfig(force = false): Promise<void> {
   if (!dirty.value && !force) return;
+
+  // 自定义运营商：选中"自定义"但未输入关键字时拒绝保存（修复 P1-17）
+  if (config.credentials.isp === "自定义") {
+    toastOnly(false, "请填写自定义运营商关键字");
+    return;
+  }
 
   const warnings = validateConfig();
   if (warnings.length > 0) frontendLogger.warn("config", warnings.join("；"));
@@ -206,22 +199,6 @@ async function resetConfig(): Promise<void> {
   } catch (error) {
     frontendLogger.error("config", "获取默认配置失败", error);
     toastOnly(false, "获取默认配置失败");
-  }
-}
-
-async function onShellFileSelected(_file: File | undefined): Promise<void> {
-  // shell_path 已从后端 AppSettings 移除，保留空函数以兼容外部调用
-}
-
-async function fetchShells(): Promise<void> {
-  try {
-    const data = await autostartApi.fetchShells();
-    availableShells.splice(0, availableShells.length, ...(data.shells || []));
-    defaultShell.value = data.default || "";
-  } catch (error) {
-    frontendLogger.warn("config", "获取 Shell 列表失败", error);
-    availableShells.splice(0, availableShells.length);
-    defaultShell.value = "";
   }
 }
 
@@ -301,8 +278,7 @@ async function toggleAutostart(enable: boolean): Promise<void> {
     frontendLogger.info("autostart", data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
     toastOnly(true, data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
   } catch (error) {
-    const anyErr = error as { response?: { status?: number } };
-    if (anyErr?.response?.status === 404) {
+    if (error instanceof ApiError && error.status === 404) {
       frontendLogger.warn("autostart", "后端不支持开机自启动");
       toastOnly(false, "当前后端版本不支持开机自启动，请重启后端");
     } else {
@@ -315,17 +291,6 @@ async function toggleAutostart(enable: boolean): Promise<void> {
   }
 }
 
-async function setAutostartMode(runtimeMode: string): Promise<void> {
-  try {
-    const data = await autostartApi.setMode(runtimeMode);
-    frontendLogger.info("autostart", data?.message || "切换自启动模式成功");
-    toastOnly(true, data?.message || "切换自启动模式成功");
-  } catch (error) {
-    frontendLogger.error("autostart", "切换自启动模式异常", error);
-    toastOnly(false, "切换自启动模式失败");
-  }
-}
-
 export function useConfig() {
   return {
     config,
@@ -334,21 +299,16 @@ export function useConfig() {
     passwordSaved: password.saved,
     editingPassword: password.editing,
     defaultUrlCheckUrls,
-    availableShells,
-    defaultShell,
     ocrStatus,
     dirty,
     saveFailed,
     fetchConfig,
     validateConfig,
-    ensureAtLeastOneCheckMethod,
     onPasswordFocus,
     onPasswordBlur,
     onPasswordInput,
     saveConfig,
     resetConfig,
-    onShellFileSelected,
-    fetchShells,
     loadDefaultStealthScript,
     fetchOcrStatus,
     installOcr: () => toggleOcr("install"),
@@ -356,6 +316,5 @@ export function useConfig() {
     fetchLogLevels,
     setLogLevel,
     toggleAutostart,
-    setAutostartMode,
   };
 }

@@ -11,18 +11,15 @@ export const TIMING = {
   TOAST_DURATION: 3000,
   TOAST_LEAVE_DELAY: 300,
   NOTIFICATION_MAX: 30,
-  WS_READY_TIMEOUT: 2000,
   OPENAPI_TIMEOUT: 5000,
   DRAG_SWAP_COOLDOWN: 120,
   WS_BACKOFF_BASE: 1000,
-  WS_BACKOFF_MAX: 30000,
   WS_PING_INTERVAL: 30000,
 } as const;
 
 export const LIMITS = {
   LOG_MAX_ENTRIES: 100,
   FILE_UPLOAD_MAX: 5 * 1024 * 1024,
-  SCROLL_BOTTOM_THRESHOLD: 50,
   WS_LOG_BUFFER_MAX: 100,
 } as const;
 
@@ -189,8 +186,6 @@ export const LIGHT_BG_COLORS = [
   { value: "#ecfdf5", label: "薄荷绿" },
 ];
 
-export const BG_COLORS = DARK_BG_COLORS;
-
 export const DEFAULT_CUSTOM_COLORS = {
   accent: [] as string[],
   bg: [] as string[],
@@ -227,27 +222,4 @@ export const CARRIER_OPTIONS = [
   { value: "联通", label: "联通" },
   { value: "电信", label: "电信" },
   { value: "自定义", label: "自定义" },
-];
-
-export const LOGIN_ACTION_OPTIONS = [
-  { value: "none", label: "不自动执行" },
-  { value: "monitor", label: "启动后开始监控（推荐）" },
-  { value: "login_once", label: "自动登录，成功后退出" },
-];
-
-export const LOG_SOURCE_OPTIONS = [
-  { value: "", label: "全部来源" },
-  { value: "backend", label: "backend" },
-  { value: "frontend", label: "frontend" },
-];
-
-export const SCHEDULED_TASK_TYPE_OPTIONS = [
-  { value: "browser", label: "浏览器任务" },
-  { value: "script", label: "自定义脚本" },
-  { value: "shell", label: "Shell 命令" },
-];
-
-export const AUTOSTART_MODE_OPTIONS = [
-  { value: "lightweight", label: "轻量模式（推荐）" },
-  { value: "full", label: "完整模式" },
 ];

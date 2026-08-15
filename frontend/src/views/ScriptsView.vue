@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
+import { tasksApi } from "@/api";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -26,7 +27,7 @@ const { activeTaskId } = useTasks();
 
 onMounted(() => { void fetchScripts(); });
 
-// ---- 拖拽排序 ----
+// ---- 拖拽排序（持久化到后端） ----
 let dragIndex = -1;
 let dragListKey = "";
 function handleDragStart(e: DragEvent, index: number, key: string) {
@@ -38,13 +39,17 @@ function onDragOver(e: DragEvent, index: number, key: string) {
   e.preventDefault();
   (e.dataTransfer!).dropEffect = "move";
 }
-function onDrop(e: DragEvent, index: number, key: string) {
+async function onDrop(e: DragEvent, index: number, key: string) {
   e.preventDefault();
   if (dragListKey !== key || dragIndex < 0 || dragIndex === index) return;
   const list = scripts.value;
   const [item] = list.splice(dragIndex, 1);
   list.splice(index, 0, item);
   dragIndex = -1;
+  // 拖拽后持久化排序
+  try {
+    await tasksApi.order({ all: [], scripts: scripts.value.map((s) => s.id) });
+  } catch { /* 静默 */ }
 }
 function onDragEnd(_e: DragEvent) { dragIndex = -1; }
 

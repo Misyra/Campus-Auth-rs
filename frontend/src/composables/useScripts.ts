@@ -34,7 +34,12 @@ async function fetchScripts(): Promise<void> {
   try {
     const data = await scriptsApi.list();
     if (Array.isArray(data)) {
-      scripts.value.splice(0, scripts.value.length, ...data);
+      // GET /api/tasks 与 /api/scripts 返回同一混合列表，此处仅保留脚本类（script/shell）
+      const scriptTasks = data.filter((t) => {
+        const tt = (t.task_type as string) || (t.type as string) || "";
+        return tt === "script" || tt === "shell";
+      });
+      scripts.value.splice(0, scripts.value.length, ...scriptTasks);
     }
   } catch (error) {
     frontendLogger.error("scripts", "获取脚本列表失败", error);

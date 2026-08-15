@@ -21,12 +21,6 @@ export function formatTime(isoString: string): string {
 }
 
 /** 时间戳 → HH:MM:SS */
-export function formatLogTime(timestamp: string): string {
-  if (!timestamp) return "";
-  return timestamp.substring(11, 19);
-}
-
-/** 从日志消息中提取截图 URL（白名单路径，防注入） */
 export function extractScreenshotUrl(message: string): string {
   const text = String(message || "");
   const match = text.match(
@@ -44,14 +38,6 @@ export function stripScreenshotHint(message: string): string {
   return text
     .replace(/\s*[\[(]?\s*截图[:：]\s*\/(?:logs|debug|temp)\/\S+\.(?:png|jpg|jpeg|webp|gif)\s*[\])]?/gi, "")
     .trim();
-}
-
-/** 日志级别 → CSS class */
-export function getLogClass(item: { level?: string }): string {
-  const level = String(item?.level || "").toUpperCase();
-  if (level === "ERROR") return "error";
-  if (level === "WARNING") return "warning";
-  return "";
 }
 
 /** 日志来源 → 展示标签 */

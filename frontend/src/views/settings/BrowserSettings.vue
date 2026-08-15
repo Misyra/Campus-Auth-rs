@@ -25,8 +25,8 @@ onMounted(async () => {
 });
 
 function handleBrowserClick(b: typeof browsers.value[0]) {
-  if (!b.installed && b.channel !== "playwright" && b.channel !== "custom") return;
-  if (b.channel === "playwright" && !b.installed) {
+  if (!b.installed && b.channel !== "chromium" && b.channel !== "custom") return;
+  if (b.channel === "chromium" && !b.installed) {
     void installPlaywright();
     return;
   }
@@ -97,7 +97,7 @@ async function stopBrowser() {
                   <span v-if="b.installed" class="status-installed">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="20 6 9 17 4 12"/></svg> 已安装
                   </span>
-                  <span v-else-if="playwrightDownloading && b.channel === 'playwright'" class="status-downloading">
+                  <span v-else-if="playwrightDownloading && b.channel === 'chromium'" class="status-downloading">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="spin"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg> 下载中...
                   </span>
                   <span v-else class="status-not-installed">

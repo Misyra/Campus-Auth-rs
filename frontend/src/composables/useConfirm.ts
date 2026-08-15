@@ -41,6 +41,8 @@ function confirm(options: ConfirmOptions): Promise<boolean> {
   state.danger = options.danger || false;
   state.visible = true;
   return new Promise((resolve) => {
+    // 并发 confirm：先前挂起的 Promise 先以 false 结算，避免其永挂（历史遗留）
+    if (resolver) resolver(false);
     resolver = resolve;
   });
 }

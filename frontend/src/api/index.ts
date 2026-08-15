@@ -27,10 +27,8 @@ import type {
   ScheduledTask,
   ScheduledTaskHistoryItem,
   Script,
-  ShellListResponse,
   TaskDetail,
   TaskItem,
-  UninstallItem,
   UpdateInfo,
 } from "./types";
 
@@ -78,6 +76,9 @@ export const systemApi = {
 export const profilesApi = {
   list: () => http.get<ProfileListResponse>("/api/profiles"),
   get: (id: string) => http.get<{ settings: Profile }>(`/api/profiles/${id}`),
+  // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password（对齐后端 ProfileCreateBody 必填字段）
+  create: (id: string, payload: { id: string; name: string; username: string; password: string }) =>
+    http.post<MutationResult>(`/api/profiles/${id}`, payload),
   save: (id: string, payload: Profile) => http.put<MutationResult>(`/api/profiles/${id}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${id}`),
   setActive: (id: string) => http.post<MutationResult>("/api/profiles/switch", { profile_id: id }),
@@ -90,8 +91,8 @@ export const profilesApi = {
 export const autostartApi = {
   fetchStatus: () => http.get<AutostartStatus>("/api/autostart/status"),
   toggle: (enable: boolean) => http.post<MutationResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
+  // 注意：/api/autostart/mode 已无前端调用方（setAutostartMode 已删除），保留端点定义供后端兼容
   setMode: (runtime_mode: string) => http.post<MutationResult>("/api/autostart/mode", { runtime_mode }),
-  fetchShells: () => http.get<ShellListResponse>("/api/shells"),
 };
 
 /** OCR */
@@ -108,12 +109,6 @@ export const ocrApi = {
 export const historyApi = {
   fetch: (limit: number) => http.get<LoginHistoryItem[]>(`/api/history?limit=${limit}`),
   clear: () => http.delete<MutationResult>("/api/history"),
-};
-
-/** 卸载 */
-export const uninstallApi = {
-  detect: () => http.get<UninstallItem[]>("/api/uninstall/detect"),
-  perform: (keys: string[]) => http.post<MutationResult & { results?: unknown[] }>("/api/uninstall", { keys }),
 };
 
 /** 浏览器 */

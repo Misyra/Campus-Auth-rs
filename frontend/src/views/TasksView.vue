@@ -2,9 +2,11 @@
 import { computed, onMounted } from "vue";
 import { useTasks } from "@/composables/useTasks";
 import { useDragSort } from "@/utils/drag";
+import { useDebug } from "@/composables/useDebug";
 import { useRouter } from "vue-router";
 
 const t = useTasks();
+const debug = useDebug();
 const router = useRouter();
 // 拖拽排序：复用 useDragSort（历史遗留：已实现未接入）
 const drag = useDragSort(t.tasks);
@@ -129,6 +131,7 @@ function closeEditor() { t.editingTask.value = null; }
           <div class="task-editor-actions">
             <button class="btn btn-secondary" @click="t.loadTemplate('default')">加载默认模板</button>
             <button class="btn btn-secondary" @click="t.formatJson()">格式化</button>
+            <button class="btn btn-secondary" @click="debug.startDebug(t.editingTask.value.id)" :disabled="!t.editingTask.value.id.trim()" title="单步调试当前任务">调试</button>
           </div>
         </div>
         <div class="card-footer">

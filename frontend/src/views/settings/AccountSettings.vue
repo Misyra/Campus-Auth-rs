@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { useProfiles } from "@/composables/useProfiles";
@@ -23,6 +23,20 @@ const currentProfileName = ref("");
 onMounted(() => {
   currentProfileName.value = profiles.value[activeProfileId.value]?.name || activeProfileId.value || "默认方案";
 });
+
+// 自定义运营商：独立状态控制输入框显隐（修复 P1-17 敲第一个字符输入框即消失）。
+// 逻辑统一为：isp 非空且不在预设值列表 → 视为"自定义"（含"自定义"开关项与已加载的自定义关键字）。
+const showCustomCarrier = ref(false);
+// 运营商预设值（不含空与"自定义"开关项）
+const carrierPresetValues = CARRIER_OPTIONS.map((o) => o.value).filter((v) => v !== "" && v !== "自定义");
+watch(
+  () => config.config.credentials.isp,
+  (val) => {
+    const isp = val || "";
+    showCustomCarrier.value = isp !== "" && !carrierPresetValues.includes(isp);
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -73,9 +87,9 @@ onMounted(() => {
             <label for="settings-carrier">运营商</label>
             <span class="field-help" tabindex="0" role="note" data-tip="校园网登录页面的运营商选择。选择&quot;无&quot;则跳过运营商步骤；选择&quot;自定义&quot;可输入关键字匹配。">?</span>
           </div>
-          <CustomSelect v-model="config.config.credentials.isp" :options="carrierOptions" @change="(val: string) => { if (val !== '自定义') config.config.credentials.isp = val; }" />
+          <CustomSelect v-model="config.config.credentials.isp" :options="carrierOptions" />
         </div>
-        <div v-if="config.config.credentials.isp === '自定义'" class="form-group">
+        <div v-if="showCustomCarrier" class="form-group">
           <label for="settings-carrier-custom">自定义运营商关键字</label>
           <input id="settings-carrier-custom" v-model.trim="config.config.credentials.isp" type="text" placeholder="例如：校园专网、宿舍网" />
         </div>

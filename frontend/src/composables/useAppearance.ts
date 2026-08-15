@@ -16,7 +16,7 @@ import {
 import type { Appearance, CustomColors } from "../utils/appearance-types";
 import { hexToRgb, adjustColor } from "../utils/formatters";
 import { pickFile } from "../utils/file";
-import { backgroundApi } from "../api";
+import { backgroundApi, ApiError } from "../api";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 
@@ -331,8 +331,8 @@ async function selectBackgroundImage(): Promise<void> {
       toastOnly(false, data?.message || "上传失败");
     }
   } catch (err) {
-    const e = err as { response?: { data?: { detail?: string } }; message?: string };
-    toastOnly(false, "上传失败: " + (e.response?.data?.detail || e.message));
+    const msg = err instanceof ApiError ? err.message : (err as { message?: string }).message || "上传失败";
+    toastOnly(false, "上传失败: " + msg);
   }
 }
 
@@ -372,8 +372,8 @@ async function confirmRandomWallpaper(): Promise<void> {
       toastOnly(false, data?.message || "获取壁纸失败");
     }
   } catch (err) {
-    const e = err as { response?: { data?: { detail?: string } } };
-    toastOnly(false, (e.response?.data?.detail as string) || "获取壁纸失败");
+    const msg = err instanceof ApiError ? err.message : "获取壁纸失败";
+    toastOnly(false, msg);
   } finally {
     randomWallpaperDialog.loading = false;
   }

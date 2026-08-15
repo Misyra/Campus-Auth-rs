@@ -12,7 +12,7 @@ import type {
   LoginHistoryItem,
 } from "../api/types";
 import { systemApi, browsersApi, monitorApi } from "../api";
-import { extractApiError } from "../api/client";
+import { ApiError, extractApiError } from "../api/client";
 import { LIMITS, TIMING } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { useConfig } from "./useConfig";
@@ -37,10 +37,9 @@ const state = reactive({
   appVersion: "unknown",
   pythonVersion: "",
   availableBrowsers: [] as BrowserInfo[],
-  selectedBrowser: "playwright",
+  selectedBrowser: "chromium",
   browserLoading: false,
   playwrightDownloading: false,
-  fullscreenSrc: "",
 });
 
 const loginHistory = reactive<LoginHistoryItem[]>([]);
@@ -50,17 +49,8 @@ const { toastOnly } = useToast();
 const { notify } = useNotifications();
 const { confirm } = useConfirm();
 
-let timers: ReturnType<typeof setInterval>[] = [];
-let initErrorCount = 0;
 // init 防重入守卫：避免重复调用叠加定时器与 WS 监听器（历史遗留 F7）
 let initialized = false;
-
-function recordInitError(msg: string): void {
-  if (initErrorCount < 2) {
-    initErrorCount++;
-    notify(false, msg);
-  }
-}
 
 async function fetchAppVersion(): Promise<void> {
   try {
@@ -127,8 +117,7 @@ async function checkInitStatus(): Promise<void> {
       notify(false, "密码解密失败，请在设置页面重新输入密码", "security");
     }
   } catch (error) {
-    const anyErr = error as { response?: { status?: number } };
-    if (anyErr?.response?.status) state.showWizard = false;
+    if (error instanceof ApiError && error.status) state.showWizard = false;
     frontendLogger.warn("init", "检查初始化状态失败", error);
   }
 }
@@ -198,10 +187,6 @@ function selectBrowser(channel: string): void {
   config.browser.browser_channel = channel;
 }
 
-function getActiveBrowserChannel(): string {
-  return state.selectedBrowser || useConfig().config.browser.browser_channel;
-}
-
 function handleBrowserClick(browser: BrowserInfo): void {
   if (browser.installed) {
     if (browser.channel === "firefox") {
@@ -217,7 +202,7 @@ function handleBrowserClick(browser: BrowserInfo): void {
     }
   } else if (browser.channel === "custom") {
     selectBrowser(browser.channel);
-  } else if (browser.channel === "playwright") {
+  } else if (browser.channel === "chromium") {
     void confirm({
       title: "下载 Playwright Chromium",
       message: "Playwright Chromium 未安装。\n\n是否自动下载？（约 150MB）",
@@ -333,13 +318,6 @@ async function testNetwork(): Promise<void> {
   }
 }
 
-function openFullscreen(src: string): void {
-  state.fullscreenSrc = src;
-}
-function closeFullscreen(): void {
-  state.fullscreenSrc = "";
-}
-
 async function quitApp(): Promise<void> {
   const ok = await confirm({ title: "退出应用", message: "确定要退出应用吗？", danger: true });
   if (!ok) return;
@@ -394,7 +372,6 @@ async function init(): Promise<void> {
   initialized = true;
   frontendLogger.info("app.init", "开始初始化");
   state.isLoading = true;
-  initErrorCount = 0;
 
   const config = useConfig();
   const status = useStatus();
@@ -404,7 +381,8 @@ async function init(): Promise<void> {
   const scheduled = useScheduledTasks();
   const appearance = useAppearance();
 
-  const results = await Promise.allSettled([
+  // 各 fetch 内部均自行 catch，不会 reject；此处仅需并行触发，无需统计失败项
+  await Promise.allSettled([
     config.fetchConfig(),
     status.fetchStatus(),
     fetchLogs(),
@@ -418,17 +396,10 @@ async function init(): Promise<void> {
     tasks.fetchPureMode(),
     fetchLoginHistory(),
     scheduled.loadScheduledTasks(),
-    config.fetchShells(),
     config.fetchOcrStatus(),
     config.fetchLogLevels(),
     fetchBrowsers(),
   ]);
-  const rejected = results.filter((r) => r.status === "rejected").length;
-  if (rejected > 0) {
-    frontendLogger.warn("app.init", `部分初始化失败: ${rejected} 项`);
-    notify(false, `⚠ 部分数据加载失败（${rejected} 项），请刷新重试`);
-  }
-  initErrorCount = 0;
   state.isLoading = false;
 
   const wsMgr = useWebSocket();
@@ -446,24 +417,16 @@ async function init(): Promise<void> {
   wsMgr.setupVisibilityChange();
   void autoCheckUpdateOnStartup();
 
-  const statusPoll = setInterval(() => {
+  setInterval(() => {
     const s = useStatus();
     if (s.fetchStatusFailCount.value > 0) return;
     void s.fetchStatus().catch((err) => frontendLogger.warn("status_poll", err));
   }, TIMING.STATUS_POLL_INTERVAL);
-  const autostartPoll = setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
-  timers.push(statusPoll, autostartPoll);
+  setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
 
   // 应用外观
   appearance.applyAppearance();
   frontendLogger.info("app.init", "初始化完成");
-}
-
-function destroyApp(): void {
-  timers.forEach((t) => clearInterval(t));
-  timers = [];
-  useWebSocket().destroy();
-  initialized = false;
 }
 
 export function useUi() {
@@ -471,7 +434,6 @@ export function useUi() {
     state,
     loginHistory,
     init,
-    destroyApp,
     fetchAppVersion,
     fetchLogs,
     fetchLoginHistory,
@@ -482,15 +444,12 @@ export function useUi() {
     autoCheckUpdateOnStartup,
     fetchBrowsers,
     selectBrowser,
-    getActiveBrowserChannel,
     handleBrowserClick,
     installPlaywrightChromium,
     toggleMonitor,
     manualLogin,
     cancelLogin,
     testNetwork,
-    openFullscreen,
-    closeFullscreen,
     quitApp,
   };
 }

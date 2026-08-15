@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
 import { useTasks } from "@/composables/useTasks";
 import { useStatus } from "@/composables/useStatus";
@@ -16,6 +16,20 @@ onMounted(() => { void p.fetchProfiles(); });
 // 编辑模式：true = 显示编辑器，false = 显示列表
 const showEditor = ref(false);
 
+// 自定义运营商：独立状态控制输入框显隐（修复 P1-17 敲第一个字符输入框即消失）。
+// 逻辑统一为：isp 非空且不在预设值列表 → 视为"自定义"（含"自定义"开关项与已加载的自定义关键字）。
+const showCustomCarrier = ref(false);
+// 运营商预设值（不含空与"自定义"开关项）
+const carrierPresetValues = CARRIER_OPTIONS.map((o) => o.value).filter((v) => v !== "" && v !== "自定义");
+watch(
+  () => p.editingProfile.value?.isp,
+  (val) => {
+    const isp = val || "";
+    showCustomCarrier.value = isp !== "" && !carrierPresetValues.includes(isp);
+  },
+  { immediate: true },
+);
+
 async function openEditor(profileId: string | null) {
   await p.showProfileEditor(profileId ?? undefined);
   // 仅当编辑器真正打开（未被 dirty 确认拦截）时才切到编辑视图
@@ -29,8 +43,9 @@ async function closeEditor() {
 }
 
 async function saveAndClose() {
-  await p.saveProfile();
-  showEditor.value = false;
+  // 保存成功才关闭编辑器；失败/校验拒绝时保持打开（数据仍在）
+  const ok = await p.saveProfile();
+  if (ok) showEditor.value = false;
 }
 
 // carrierOptions → SelectOption[]
@@ -136,7 +151,7 @@ const taskOptions = computed<SelectOption[]>(() => [
                   <label for="prof-carrier">运营商</label>
                   <CustomSelect v-model="p.editingProfile.value.isp" :options="carrierOptions" />
                 </div>
-                <div v-if="p.editingProfile.value.isp === '自定义'" class="form-group">
+                <div v-if="showCustomCarrier" class="form-group">
                   <label for="prof-carrier-custom">自定义运营商</label>
                   <input id="prof-carrier-custom" v-model.trim="p.editingProfile.value.isp" type="text" placeholder="校园专网" />
                 </div>
