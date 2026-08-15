@@ -69,11 +69,23 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   return out;
 }
 
-/** WebSocket 推送的状态更新入口 */
+// B6：status 双源竞态防护。
+// WS 推送是权威实时源，轮询是低优先级刷新。用一个本地单调递增计数器只标记
+// 每次 WS 推送；轮询请求发出时记录当时计数器，响应返回时若期间发生过 WS 推送
+// （计数器已前进）则判定为过期数据直接丢弃，避免过期轮询响应短暂回退状态。
+let statusEpoch = 0;
+
+/** WebSocket 推送的状态更新入口（权威源，总是应用） */
 function updateStatus(data: Partial<StatusSnapshot>): void {
   if (data && typeof data === "object") {
+    statusEpoch += 1;
     Object.assign(status, mapBackendStatus(data as Record<string, unknown>));
   }
+}
+
+/** 轮询请求发起时记录计数器快照，供响应到达时判定是否已过期 */
+function statusEpochAtRequest(): number {
+  return statusEpoch;
 }
 
 const networkStatus = computed(() => {
@@ -102,8 +114,12 @@ const networkStatusText = computed(() => {
 
 async function fetchStatus(): Promise<void> {
   const { notify } = useNotifications();
+  const startEpoch = statusEpochAtRequest();
   try {
     const data = await monitorApi.fetchStatus();
+    // B6：请求在途期间若有 WS 推送（epoch 前进），本次轮询响应视为过期丢弃，
+    // 避免用旧数据回退 WS 已推送的最新状态
+    if (startEpoch !== statusEpoch) return;
     Object.assign(status, mapBackendStatus(data as unknown as Record<string, unknown>));
     if (fetchStatusFailCount.value > 0) {
       fetchStatusFailCount.value = 0;
