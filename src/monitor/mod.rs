@@ -283,7 +283,7 @@ impl MonitorService {
             let targets = cfg.tcp_targets.clone();
             let timeout = cfg.tcp_timeout;
             tasks.push(Box::pin(async move {
-                let (o, d) = probes::TcpProbe::run(&targets, timeout, None).await;
+                let (o, d) = probes::TcpProbe::run(&targets, timeout).await;
                 (ProbeKind::Tcp, o, d)
             }));
         }

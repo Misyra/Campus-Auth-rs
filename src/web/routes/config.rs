@@ -354,7 +354,6 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "url_check_urls": url_check_urls,
         "script_timeout": 60,
         "post_login_delay": m.post_login_delay,
-        "bind_interface_name": m.bind_interface_name,
     })
 }
 
@@ -396,7 +395,6 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         "url_enabled": obj.get("url_check_urls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
         "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
         "post_login_delay": obj.get("post_login_delay").and_then(|v| v.as_u64()).unwrap_or(5),
-        "bind_interface_name": obj.get("bind_interface_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         // 注意：profile_check_interval / http_timeout / url_timeout / auth_url_timeout / socks5_port
         // 前端 MonitorConfig 不包含这些字段，故此处**不输出**。上层用 json_merge 合并，
         // 省略即可保留 settings.json 中已存储的值，避免每次保存把它们覆盖成硬编码默认值。
@@ -444,7 +442,6 @@ mod tests {
             url_timeout: 5,
             auth_url_timeout: 5,
             post_login_delay: 5,
-            bind_interface_name: "eth0".into(),
         }
     }
 
@@ -459,7 +456,6 @@ mod tests {
         assert_eq!(front["check_interval_seconds"], 120);
         assert_eq!(front["ping_targets"], serde_json::json!(["8.8.8.8:53"]));
         assert_eq!(front["enable_tcp_check"], serde_json::json!(true));
-        assert_eq!(front["bind_interface_name"], serde_json::json!("eth0"));
     }
 
     #[test]
@@ -483,7 +479,6 @@ mod tests {
             "url_check_urls": [" http://a.com | OK ", "http://d.com"],
             "network_check_timeout": 8,
             "post_login_delay": 3,
-            "bind_interface_name": "wlan0",
         });
         let back = monitor_frontend_to_backend(&front);
         assert_eq!(back["url_targets"], serde_json::json!(["http://a.com", "http://d.com"]));
@@ -494,7 +489,6 @@ mod tests {
         assert!(back["url_expected_responses"].get("http://d.com").is_none());
         assert_eq!(back["tcp_enabled"], serde_json::json!(true));
         assert_eq!(back["check_interval"], serde_json::json!(60));
-        assert_eq!(back["bind_interface_name"], serde_json::json!("wlan0"));
     }
 
     #[test]

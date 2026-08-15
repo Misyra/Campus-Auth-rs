@@ -42,7 +42,7 @@ pub async fn trigger_login(
 pub async fn cancel_login(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    state.container.login.cancel();
+    state.container.login.cancel_current();
     Ok(data(Value::String("已取消".into())))
 }
 

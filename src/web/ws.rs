@@ -158,7 +158,7 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                     break;
                 }
                 // 发送协议级 Ping 帧（客户端 WebSocket 库自动回复 Pong）
-                if !send_msg(&mut socket, Message::Ping(bytes::Bytes::new())).await {
+                if !send_msg(&mut socket, Message::Ping(Default::default())).await {
                     break;
                 }
             }

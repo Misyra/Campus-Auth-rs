@@ -169,9 +169,6 @@ pub struct MonitorSettings {
     pub auth_url_timeout: u32,
     /// 登录后等待 portal 生效的延迟（秒，0-60）
     pub post_login_delay: u32,
-    /// 预留字段：未来如需「绑定网卡」（让浏览器/探测流量走指定网卡）时生效。
-    /// 当前版本未实现网卡绑定（见 [`crate::network::EgressBinder`] 预留接口）。
-    pub bind_interface_name: String,
 }
 
 impl Default for MonitorSettings {
@@ -216,7 +213,6 @@ impl Default for MonitorSettings {
             url_timeout: 10,
             auth_url_timeout: 5,
             post_login_delay: 5,
-            bind_interface_name: String::new(),
         }
     }
 }
@@ -303,8 +299,8 @@ impl Default for WorkerSettings {
 pub struct AppSettings {
     /// 启动后是否自动打开浏览器控制台
     pub auto_start_browser: bool,
-    /// 运行模式（full / lightweight）
-    pub runtime_mode: RuntimeMode,
+    /// 运行模式（full / lightweight），启动期由 launcher 按字符串解析消费
+    pub runtime_mode: String,
     /// 启动动作（none / monitor / login_once）
     pub startup_action: StartupAction,
     /// 是否自动检查更新
@@ -327,7 +323,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             auto_start_browser: true,
-            runtime_mode: RuntimeMode::Full,
+            runtime_mode: "full".to_string(),
             startup_action: StartupAction::Monitor,
             auto_update: true,
             port: 50721,
@@ -418,15 +414,4 @@ pub enum StartupAction {
     Monitor,
     /// 启动后执行一次登录
     LoginOnce,
-}
-
-/// 运行模式枚举
-#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeMode {
-    /// 完整模式：Web + Engine + Tray + Python
-    #[default]
-    Full,
-    /// 轻量模式：仅后台 Engine + Tray
-    Lightweight,
 }

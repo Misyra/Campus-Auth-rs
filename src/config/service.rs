@@ -432,15 +432,12 @@ impl ConfigService {
 
     /// 比较新旧运行时配置，对非热更字段的变更记录 WARN 提示需重启
     ///
-    /// 这些字段在程序启动期即被消费（监听端口、运行模式、Worker 空闲超时、绑定网卡），
+    /// 这些字段在程序启动期即被消费（监听端口、运行模式、Worker 空闲超时），
     /// 运行期无法热替换，需重启生效。
     fn log_non_hot_reload_changes(old: &RuntimeConfig, new: &RuntimeConfig) {
         let mut changed = Vec::new();
         if old.app.port != new.app.port {
             changed.push("app.port");
-        }
-        if old.monitor.bind_interface_name != new.monitor.bind_interface_name {
-            changed.push("monitor.bind_interface_name");
         }
         if old.worker.idle_timeout_seconds != new.worker.idle_timeout_seconds {
             changed.push("worker.idle_timeout_seconds");

@@ -4,12 +4,11 @@
 //! [`ProbeOutcome`]。HTTP/URL 探测复用调用方传入的长生命周期 `reqwest::Client` 连接池。
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use futures::future::{join_all, select_all};
 use reqwest::Client;
-use tokio::net::{TcpSocket, TcpStream};
+use tokio::net::TcpStream;
 use tracing::instrument;
 
 /// 解析 "host:port" 为 (host, port)；非法格式返回 None
@@ -24,38 +23,15 @@ fn parse_host_port(target: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
-/// TCP 连接（可选绑定本地出口 IP）
-async fn tcp_connect(host: &str, port: u16, bind: Option<IpAddr>, timeout: Duration) -> std::io::Result<()> {
-    match bind {
-        Some(addr) => {
-            let socket = if addr.is_ipv4() {
-                TcpSocket::new_v4()?
-            } else {
-                TcpSocket::new_v6()?
-            };
-            socket.bind(SocketAddr::new(addr, 0))?;
-            // TcpSocket::connect 仅接受已解析的 SocketAddr，需先异步 DNS 解析
-            let mut addrs = tokio::net::lookup_host((host, port)).await?;
-            let sockaddr = addrs.next().ok_or_else(|| {
-                std::io::Error::other("DNS 解析无结果")
-            })?;
-            match tokio::time::timeout(timeout, socket.connect(sockaddr)).await {
-                Ok(Ok(_stream)) => Ok(()),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "tcp connect timeout",
-                )),
-            }
-        }
-        None => match tokio::time::timeout(timeout, TcpStream::connect((host, port))).await {
-            Ok(Ok(_stream)) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "tcp connect timeout",
-            )),
-        },
+/// TCP 连接
+async fn tcp_connect(host: &str, port: u16, timeout: Duration) -> std::io::Result<()> {
+    match tokio::time::timeout(timeout, TcpStream::connect((host, port))).await {
+        Ok(Ok(_stream)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "tcp connect timeout",
+        )),
     }
 }
 
@@ -64,13 +40,10 @@ pub struct TcpProbe;
 
 impl TcpProbe {
     /// 并发连接所有目标，取首个成功。
-    ///
-    /// `bind_addr` 非空时将出站 socket 绑定到该本地 IP（用于指定网卡出口）。
     #[instrument(skip_all)]
     pub async fn run(
         targets: &[String],
         timeout: Duration,
-        bind_addr: Option<IpAddr>,
     ) -> (ProbeOutcome, Vec<PerProbeDetail>) {
         if targets.is_empty() {
             return (ProbeOutcome::Disabled, Vec::new());
@@ -85,7 +58,7 @@ impl TcpProbe {
                     let start = Instant::now();
                     let (success, err) = match parse_host_port(&target) {
                         Some((host, port)) => {
-                            match tcp_connect(&host, port, bind_addr, timeout).await {
+                            match tcp_connect(&host, port, timeout).await {
                                 Ok(()) => (true, None),
                                 Err(e) => (false, Some(e.to_string())),
                             }

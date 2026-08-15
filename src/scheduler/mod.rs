@@ -148,10 +148,7 @@ impl SchedulerService {
 
     /// 返回内存缓存中的任务列表副本。
     pub fn list_tasks(&self) -> Vec<ScheduledTask> {
-        self.state
-            .lock()
-            .map(|s| s.tasks.clone())
-            .unwrap_or_default()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).tasks.clone()
     }
 
     /// 返回目标任务的类型（`browser`/`script`/`shell`），供展示层补充类型标签。
@@ -245,22 +242,19 @@ impl SchedulerService {
         let _ = self.task_change_tx.try_send(TaskChange::Reload);
     }
 
-    /// 更新内部状态（加锁失败则跳过）。
+    /// 更新内部状态。
     pub(crate) fn update_state<F>(&self, f: F)
     where
         F: FnOnce(&mut SchedulerState),
     {
-        if let Ok(mut s) = self.state.lock() {
-            f(&mut s);
-        }
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut s);
     }
 
     /// 将当前运行状态广播到 StatusManager。
     fn publish_status(&self) {
-        let (running, next, count) = match self.state.lock() {
-            Ok(s) => (s.running, s.next_fire_at.map(systemtime_to_iso), s.tasks.len()),
-            Err(_) => return,
-        };
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (running, next, count) = (s.running, s.next_fire_at.map(systemtime_to_iso), s.tasks.len());
         self.status_manager.merge(crate::status::PartialSnapshot::Scheduler {
             running,
             next_fire_at: next,

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
+use campus_auth::utils::lock::is_process_alive;
 use clap::Parser;
 
 /// campus-auth 更新助手进程
@@ -176,35 +177,4 @@ fn exe_name() -> &'static str {
     } else {
         "campus-auth"
     }
-}
-
-/// 检查指定 PID 的进程是否存活
-#[cfg(target_os = "windows")]
-fn is_process_alive(pid: u32) -> bool {
-    unsafe extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
-    }
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-        CloseHandle(handle);
-        true
-    }
-}
-
-/// 检查指定 PID 的进程是否存活（Linux，通过 procfs 判断）
-#[cfg(all(not(target_os = "windows"), target_os = "linux"))]
-fn is_process_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-}
-
-/// 检查指定 PID 的进程是否存活（macOS，无 procfs，使用 kill -0 探测）
-#[cfg(all(not(target_os = "windows"), target_os = "macos"))]
-fn is_process_alive(pid: u32) -> bool {
-    // kill(pid, 0) 不实际发送信号，仅校验进程存在性与权限；返回 0 表示进程存活
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }

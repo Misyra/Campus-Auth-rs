@@ -405,7 +405,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "bytes",
  "chrono",
  "clap",
  "cron",

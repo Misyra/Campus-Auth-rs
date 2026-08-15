@@ -156,12 +156,10 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
 pub fn force_kill(pid: u32) {
     #[cfg(target_os = "windows")]
     {
-        unsafe extern "system" {
-            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-            fn TerminateProcess(handle: *mut core::ffi::c_void, code: u32) -> i32;
-            fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
-        }
-        const PROCESS_TERMINATE: u32 = 0x0001;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
         unsafe {
             let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
             if !handle.is_null() {
@@ -184,12 +182,11 @@ pub fn force_kill(pid: u32) {
 /// 本模块以文件锁（`InstanceLock`）作为主要互斥机制，PID 检查仅用于辅助状态查询，
 /// 因此 PID 复用场景的实际影响有限。
 #[cfg(target_os = "windows")]
-fn is_process_alive(pid: u32) -> bool {
-    unsafe extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
-    }
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+pub fn is_process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
@@ -203,17 +200,17 @@ fn is_process_alive(pid: u32) -> bool {
 /// 检查指定 PID 的进程是否存活（非 Windows：`kill(pid, 0)` 探测）
 ///
 /// `kill(pid, 0)` 不发送信号，仅检查进程是否存在且有权访问。
-/// 返回 0 表示进程存活；返回 -1 且 errno 为 ESRCH 时进程不存在。
+/// 返回 0 表示进程存活；返回 -1 且 errno 为 EPERM 表示进程存在但无权限
+/// （如 root 下查询其他用户进程），同样视为存活。
 ///
 /// **已知局限**：PID 复用（PID reuse）可能导致误判。本模块以文件锁为主要互斥机制，
 /// PID 检查仅用于辅助状态查询，实际影响有限。
 #[cfg(not(target_os = "windows"))]
-fn is_process_alive(pid: u32) -> bool {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
+pub fn is_process_alive(pid: u32) -> bool {
     // kill(pid, 0): 信号 0 仅做存在性检查，不实际发送信号
-    // 返回 0 = 进程存在且有权限；返回 -1 = 进程不存在或无权限（EPERM）
-    // 此处将 EPERM（非自身进程、无权限）也视为"存活"，符合探测语义
-    unsafe { kill(pid as i32, 0) == 0 }
+    // 返回 0 = 进程存在且有权限；EPERM = 进程存在但无权限，也视为"存活"
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }

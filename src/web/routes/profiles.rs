@@ -179,10 +179,21 @@ pub async fn detect_profile(
         &gateway_ip,
         ssid.as_deref().unwrap_or(""),
     );
+    // 按 id 查询 profile 名称，供前端优先展示（matched 为 None 时为 Null）
+    let matched_profile_name = match &matched {
+        Some(id) => state
+            .container
+            .profiles
+            .get_profile(id)
+            .ok()
+            .map(|p| Value::String(p.name)),
+        None => None,
+    };
     Ok(data(serde_json::json!({
         "gateway_ip": if gateway_ip.is_empty() { Value::Null } else { Value::String(gateway_ip) },
         "ssid": ssid,
         "matched_profile_id": matched.map(Value::String).unwrap_or(Value::Null),
+        "matched_profile_name": matched_profile_name.unwrap_or(Value::Null),
     })))
 }
 

@@ -416,11 +416,6 @@ impl LoginOrchestrator {
         }
     }
 
-    /// 取消当前在途登录（[`cancel_current`] 的别名，供 Web API 引用）
-    pub fn cancel(&self) {
-        self.cancel_current();
-    }
-
     /// 仅取消 `source=Auto` 的活跃会话（Engine 崩溃清理）
     ///
     /// 遍历活跃会话，仅对 `Auto` 来源触发取消；manual/login_once/browser 不受影响。

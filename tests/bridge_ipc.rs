@@ -123,7 +123,9 @@ async fn 进程层_ipc_roundtrip_事件_f1_崩溃() {
     let worker_path = script.path().to_path_buf();
 
     let (tx, mut rx) = mpsc::channel::<ParsedMessage>(64);
-    let proc = spawn_worker(&python, &worker_path, tx)
+    // spawn_worker 需要 base_path 锚定浏览器数据目录，测试用临时目录即可
+    let base_dir = tempfile::tempdir().expect("创建临时 base_path 失败");
+    let proc = spawn_worker(&python, &worker_path, base_dir.path(), tx)
         .await
         .expect("spawn_worker 失败");
 

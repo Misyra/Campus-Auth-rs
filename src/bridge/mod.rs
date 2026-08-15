@@ -735,7 +735,9 @@ async fn ensure_worker(this: &Arc<BridgeSupervisor>) -> Result<(), BridgeError> 
     }
     // 清理上次崩溃残留的孤儿浏览器进程
     // 同步 /proc 或 powershell 进程枚举，用 spawn_blocking 避免阻塞 async 运行时
-    let _ = tokio::task::spawn_blocking(orphan::cleanup_orphan_browsers).await;
+    if let Err(e) = tokio::task::spawn_blocking(orphan::cleanup_orphan_browsers).await {
+        tracing::warn!("孤儿浏览器清理任务失败: {e}");
+    }
     // spawn 子进程 + 四个后台 task
     let ipc_tx = this
         .inner
@@ -921,7 +923,9 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
     warn!(target: "python_worker", "Worker 进程退出（崩溃），exit_code={code}");
     // 崩溃恢复时清理可能残留的孤儿浏览器进程
     // 同步 /proc 或 powershell 进程枚举，用 spawn_blocking 避免阻塞 async 运行时
-    let _ = tokio::task::spawn_blocking(orphan::cleanup_orphan_browsers).await;
+    if let Err(e) = tokio::task::spawn_blocking(orphan::cleanup_orphan_browsers).await {
+        tracing::warn!("孤儿浏览器清理任务失败: {e}");
+    }
     // Worker 崩溃，递增指标
     if let Some(m) = &this.metrics {
         m.inc_worker_crash();
