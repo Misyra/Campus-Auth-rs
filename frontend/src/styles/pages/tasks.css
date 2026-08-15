@@ -234,6 +234,15 @@
   border-color: rgba(34, 211, 238, 0.2);
 }
 
+.debug-step-item.running {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: rgba(148, 163, 184, 0.18);
+}
+
+.debug-step-item.running .debug-step-desc {
+  color: var(--text-secondary);
+}
+
 .debug-step-indicator {
   flex-shrink: 0;
   width: 18px;
@@ -244,8 +253,17 @@
 
 .step-check { color: var(--success); }
 .step-cross { color: var(--error); }
+.step-running {
+  color: var(--accent);
+  animation: debug-step-pulse 1.2s ease-in-out infinite;
+}
 .step-arrow { color: var(--accent); }
 .step-dot { color: var(--text-muted); }
+
+@keyframes debug-step-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
 
 .debug-step-info {
   display: flex;
@@ -285,6 +303,7 @@
 
 .msg-ok { color: var(--success); }
 .msg-fail { color: var(--error); }
+.msg-running { color: var(--text-secondary); }
 
 /* 仓库导入（源标签） */
 .repo-source-label {

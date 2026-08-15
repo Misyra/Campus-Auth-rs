@@ -29,6 +29,8 @@ function statusIcon(status: string): string {
       return "step-check";
     case "failed":
       return "step-cross";
+    case "running":
+      return "step-running";
     case "current":
       return "step-arrow";
     default:
@@ -43,6 +45,8 @@ function statusSymbol(status: string): string {
       return "✓";
     case "failed":
       return "✗";
+    case "running":
+      return "◌";
     case "current":
       return "▶";
     default:
@@ -83,7 +87,7 @@ function handleClose(): void {
               <span
                 v-if="getStepResult(i)?.message"
                 class="debug-step-msg"
-                :class="getStepResult(i)?.success ? 'msg-ok' : 'msg-fail'"
+                :class="getStepResult(i)?.running ? 'msg-running' : getStepResult(i)?.success ? 'msg-ok' : 'msg-fail'"
               >
                 {{ getStepResult(i)?.message }}
               </span>

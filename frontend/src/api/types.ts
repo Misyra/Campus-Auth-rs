@@ -371,6 +371,8 @@ export interface DebugStep {
 export interface DebugStepResult {
   step_index: number;
   success: boolean;
+  /** 进行中标记：WS step_progress 事件置位，步骤真实结果返回后被覆盖（B7 F5） */
+  running?: boolean;
   message?: string;
   screenshot_url?: string | null;
   [key: string]: unknown;

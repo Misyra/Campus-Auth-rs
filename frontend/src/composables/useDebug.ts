@@ -103,9 +103,13 @@ function getStepResult(index: number): DebugStepResult | null {
 }
 
 /** 获取指定步骤的执行状态 */
-function getStepStatus(index: number): "success" | "failed" | "current" | "pending" {
+function getStepStatus(index: number): "success" | "failed" | "running" | "current" | "pending" {
   const result = getStepResult(index);
-  if (result) return result.success ? "success" : "failed";
+  if (result) {
+    // F5：running 标记优先——进行中步骤不再因 success=false 误显失败
+    if (result.running) return "running";
+    return result.success ? "success" : "failed";
+  }
   if (index === session.current_step) return "current";
   return "pending";
 }
@@ -128,15 +132,21 @@ function handleStepProgress(data: {
   if (typeof data?.step_index !== "number") return;
   session.current_step = data.step_index;
   if (typeof data.total_steps === "number") session.total_steps = data.total_steps;
-  const existing = _resultMap.value.get(data.step_index);
   const result: DebugStepResult = {
     step_index: data.step_index,
+    // F5：success 仅作占位，真实成败由 syncSession 覆盖；running 标记才是进行中判定
     success: false,
+    running: true,
     message: data.description || "步骤进行中",
   };
+  // F6：两个分支统一先重建引用再写入，保证 _resultMap 引用变化一致，
+  // 消除对 current_step 副作用的隐式依赖
+  _resultMap.value = new Map(_resultMap.value);
+  const existing = _resultMap.value.get(data.step_index);
   if (existing) {
+    existing.success = result.success;
+    existing.running = true;
     existing.message = result.message;
-    _resultMap.value = new Map(_resultMap.value);
   } else {
     _resultMap.value.set(data.step_index, result);
   }
