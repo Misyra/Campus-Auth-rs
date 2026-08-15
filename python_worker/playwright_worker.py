@@ -61,16 +61,17 @@ def _debug_screenshot_dir() -> Path:
 def _to_ms(bs: dict, key: str, default_ms: int) -> int:
     """从 browser_settings 读取超时并归一化为毫秒。
 
-    Rust 侧 ``BrowserSettings`` 中 ``timeout`` / ``navigation_timeout`` 单位是秒，
-    而 Playwright API 需要毫秒。本函数把 <1000 的值视为秒并 ×1000，
-    >=1000 的值视为毫秒直接返回（兼容旧配置或已转换的调用方）。
+    Rust 侧 ``BrowserSettings`` 中 ``timeout`` / ``navigation_timeout`` 为
+    u32 秒，而 Playwright API 需要毫秒，统一 ×1000；缺省值已是毫秒，原样返回。
     """
-    val = bs.get(key, default_ms)
+    val = bs.get(key)
+    if val is None:
+        return default_ms
     try:
         ival = int(val)
     except (TypeError, ValueError):
         return default_ms
-    return ival * 1000 if ival < 1000 else ival
+    return ival * 1000
 
 # ── 步骤执行器（原 browser_runner.py）──
 
@@ -97,7 +98,6 @@ def _is_truthy(value: Any) -> bool:
 
 def _build_result(outcome: Outcome, message: str, context: StepContext, start: float) -> StructuredResult:
     """汇总执行结果为 StructuredResult。"""
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError  # noqa: F811
     duration_ms = int((time.perf_counter() - start) * 1000)
     return StructuredResult(
         outcome=outcome.value,
@@ -117,20 +117,6 @@ async def _sleep_cancellable(seconds: float, context: StepContext) -> None:
         if remaining <= 0:
             return
         await asyncio.sleep(min(slice_s, remaining))
-
-
-def _task_watchdog_timeout_ms(task_config: TaskConfig) -> int | None:
-    """读取任务级超时（毫秒）。
-
-    历史遗留：Rust 侧已确认有超时兜底——``bridge::Bridge::execute`` 默认
-    以 ``tokio::time::timeout`` 包裹整条 IPC 请求（默认 300s），因此 Python
-    侧不在此处重复实现 ``asyncio.wait_for`` watchdog。本函数目前仅作存取辅助，
-    未接入 ``run_steps``。
-    """
-    raw = task_config.extras.get("timeout")
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
-        return None
-    return int(raw)
 
 
 async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) -> StructuredResult:
@@ -384,7 +370,7 @@ class WorkerCore:
             if not Path(custom_path).exists():
                 raise FileNotFoundError(f"自定义浏览器路径不存在: {custom_path}")
             engine = (self._last_browser_settings or {}).get("custom_browser_engine", "auto")
-            engine = {"firefox": "firefox", "webkit": "webkit"}.get(engine, "chromium")
+            engine = engine if engine in ("firefox", "webkit") else "chromium"
             return getattr(playwright, engine), custom_path
         if channel == "firefox":
             return playwright.firefox, None
@@ -476,7 +462,7 @@ class WorkerCore:
             self._page = await self._context.new_page()
         except Exception:
             logger.warning("浏览器启动失败，回滚资源", exc_info=True)
-            await self._close_browser()
+            await self.close_browser()
             raise
 
     async def ensure_browser(self, config: dict) -> None:
@@ -485,7 +471,7 @@ class WorkerCore:
         has_browser = self._browser is not None or self._context is not None
         if has_browser and await self._health_check() and self._last_browser_settings == bs:
             return
-        await self._close_browser()
+        await self.close_browser()
         await self._start_browser(config)
 
     async def _health_check(self) -> bool:
@@ -517,8 +503,8 @@ class WorkerCore:
             else:
                 logger.error(f"关闭 {name} 异常: {exc}")
 
-    async def _close_browser(self) -> None:
-        """关闭浏览器并释放所有资源。"""
+    async def close_browser(self) -> None:
+        """关闭浏览器并释放所有资源（公开接口，供外部清理调用）。"""
         if self._page is not None:
             await self._safe_close(self._page, "页面")
             self._page = None
@@ -540,10 +526,6 @@ class WorkerCore:
             self._cleanup_debug_screenshots(session)
         self._debug_sessions.clear()
         self._last_browser_settings = None
-
-    async def close_browser(self) -> None:
-        """关闭浏览器并释放所有资源（公开接口，供外部清理调用）。"""
-        await self._close_browser()
 
     async def _handle_low_resource_request(self, route) -> None:
         """低资源模式请求处理：拦截图片/字体/媒体。"""
@@ -885,10 +867,8 @@ class WorkerCore:
                 Path(p).unlink(missing_ok=True)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"清理调试截图失败 {p}: {exc}")
-        try:
-            session.context.screenshots.clear()
-        except Exception:  # noqa: BLE001
-            pass
+        # screenshots 是 StepContext 的 list[str] 字段，list.clear() 不会抛出
+        session.context.screenshots.clear()
 
     async def handle_debug_stop(self, params: dict, core: "WorkerCore") -> dict:
         """停止调试会话并关闭浏览器。"""
@@ -899,7 +879,7 @@ class WorkerCore:
         self._cleanup_debug_screenshots(session)
         if session.cancel_id:
             cancel_registry.unregister(session.cancel_id)
-        await self._close_browser()
+        await self.close_browser()
         return {}
 
     async def handle_ocr_recognize(self, params: dict, core: "WorkerCore") -> dict:

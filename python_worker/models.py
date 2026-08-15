@@ -30,11 +30,6 @@ class Outcome(str, Enum):
     UNKNOWN_ERROR = "unknown_error"
 
 
-def _outcome_value(outcome: Outcome | str) -> str:
-    """将 Outcome 或字符串安全地转换为小写字符串值。"""
-    return outcome.value if isinstance(outcome, Outcome) else str(outcome)
-
-
 @dataclass
 class StructuredResult:
     """单次浏览器动作的结构化结果。
@@ -43,7 +38,7 @@ class StructuredResult:
     execute_browser_task / debug_step）的响应 ``data`` 字段即为此结构。
     """
 
-    outcome: str = _outcome_value(Outcome.UNKNOWN_ERROR)
+    outcome: str = Outcome.UNKNOWN_ERROR.value
     """结果分类，见 ``Outcome``。"""
 
     message: str = ""
@@ -69,8 +64,7 @@ class StructuredResult:
 _STEP_KNOWN_FIELDS = frozenset({
     "id", "step_type", "type", "description", "selector", "value", "code",
     "script", "pattern", "timeout", "required", "store_as", "path",
-    "button", "modifiers", "option_value", "option_label", "option_index",
-    "filename", "text", "clear", "duration", "option_selector",
+    "clear", "duration", "option_selector",
     "old", "target_selector", "frame", "char_range",
 })
 
@@ -118,27 +112,6 @@ class StepConfig:
 
     path: str | None = None
     """文件路径（上传等场景）。"""
-
-    button: str | None = None
-    """鼠标按钮。"""
-
-    modifiers: list[str] | None = None
-    """键盘修饰键列表。"""
-
-    option_value: str | None = None
-    """选项值。"""
-
-    option_label: str | None = None
-    """选项标签。"""
-
-    option_index: int | None = None
-    """选项索引。"""
-
-    filename: str | None = None
-    """文件名。"""
-
-    text: str | None = None
-    """文本内容。"""
 
     clear: bool = False
     """input 步骤是否先清空再填写。"""
@@ -220,18 +193,6 @@ class TaskConfig:
     url: str = ""
     """登录页 URL。"""
 
-    method: str = ""
-    """请求方式（GET / POST）。"""
-
-    headers: dict[str, str] | None = None
-    """自定义请求头。"""
-
-    body: dict[str, str] | None = None
-    """POST 请求体。"""
-
-    login_url: str = ""
-    """登录页 URL（与 url 等价）。"""
-
     on_success: Any = None
     """登录成功后回调。"""
 
@@ -243,9 +204,6 @@ class TaskConfig:
 
     step_delay: float = 0
     """步骤间默认延迟（秒）。"""
-
-    step_delay_ms: int = 0
-    """步骤间默认延迟（毫秒，优先级高于 step_delay）。"""
 
     variables: dict[str, str] | None = field(default_factory=dict)
     """自定义模板变量。"""
@@ -266,9 +224,9 @@ class TaskConfig:
     def from_dict(cls, d: dict[str, Any]) -> TaskConfig:
         """从 JSON 字典构造，递归解析 steps。"""
         known_keys = {
-            "task_id", "name", "description", "url", "method", "headers",
-            "body", "login_url", "on_success", "on_failure", "reveal_hidden",
-            "step_delay", "step_delay_ms", "variables", "success_condition",
+            "task_id", "name", "description", "url",
+            "on_success", "on_failure", "reveal_hidden",
+            "step_delay", "variables", "success_condition",
             "steps", "metadata",
         }
         known: dict[str, Any] = {}

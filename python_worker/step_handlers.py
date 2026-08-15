@@ -156,7 +156,7 @@ def _locator(context: StepContext, selector: str):
     return context.page.locator(selector)
 
 
-async def _safe_op(context: StepContext, coro, outcome_on_timeout: Outcome):
+async def _safe_op(coro, outcome_on_timeout: Outcome):
     """执行 Playwright 操作并归一化超时异常。"""
     try:
         return await coro
@@ -190,11 +190,10 @@ async def handle_input(page, step: StepConfig, context: StepContext) -> None:
         return
     if step.clear:
         await _safe_op(
-            context, locator.fill(value, timeout=timeout), Outcome.SELECTOR_FAILED
+            locator.fill(value, timeout=timeout), Outcome.SELECTOR_FAILED
         )
     else:
         await _safe_op(
-            context,
             locator.press_sequentially(value, timeout=timeout),
             Outcome.SELECTOR_FAILED,
         )
@@ -207,7 +206,7 @@ async def handle_click(page, step: StepConfig, context: StepContext) -> None:
         raise WorkerError(Outcome.SELECTOR_FAILED, "click 步骤缺少 selector")
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
-    await _safe_op(context, locator.click(timeout=timeout), Outcome.SELECTOR_FAILED)
+    await _safe_op(locator.click(timeout=timeout), Outcome.SELECTOR_FAILED)
 
 
 async def handle_select(page, step: StepConfig, context: StepContext) -> None:
@@ -220,7 +219,6 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
     await _safe_op(
-        context,
         locator.select_option(value=step.value, timeout=timeout),
         Outcome.SELECTOR_FAILED,
     )
@@ -235,9 +233,9 @@ async def handle_click_select(page, step: StepConfig, context: StepContext) -> N
         )
     timeout = step.timeout or context.default_timeout
     container = _locator(context, step.selector)
-    await _safe_op(context, container.click(timeout=timeout), Outcome.SELECTOR_FAILED)
+    await _safe_op(container.click(timeout=timeout), Outcome.SELECTOR_FAILED)
     option = _locator(context, step.option_selector)
-    await _safe_op(context, option.click(timeout=timeout), Outcome.SELECTOR_FAILED)
+    await _safe_op(option.click(timeout=timeout), Outcome.SELECTOR_FAILED)
 
 
 async def handle_wait(page, step: StepConfig, context: StepContext) -> None:
@@ -248,7 +246,7 @@ async def handle_wait(page, step: StepConfig, context: StepContext) -> None:
     waited = 0
     while waited < duration:
         _check_cancel(context)
-        await asyncio_sleep(min(slice_ms, duration - waited) / 1000)
+        await asyncio.sleep(min(slice_ms, duration - waited) / 1000)
         waited += slice_ms
 
 
@@ -263,7 +261,7 @@ async def handle_wait_for_selector(page, step: StepConfig, context: StepContext)
     else:
         target = context.page.locator(step.selector)
     await _safe_op(
-        context, target.first.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
+        target.first.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
     )
 
 
@@ -282,7 +280,7 @@ async def handle_wait_url(page, step: StepConfig, context: StepContext) -> None:
         current = context.page.url
         if regex.search(current):
             return
-        await asyncio_sleep(0.2)
+        await asyncio.sleep(0.2)
     raise WorkerError(Outcome.NAVIGATION_TIMEOUT, f"URL 未匹配: {step.pattern}")
 
 
@@ -389,7 +387,7 @@ async def handle_upload_file(page, step: StepConfig, context: StepContext) -> No
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
     await _safe_op(
-        context, locator.set_input_files(step.value, timeout=timeout), Outcome.SELECTOR_FAILED
+        locator.set_input_files(step.value, timeout=timeout), Outcome.SELECTOR_FAILED
     )
 
 
@@ -410,7 +408,7 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
     await _safe_op(
-        context, locator.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
+        locator.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
     )
     img_bytes = await locator.screenshot()
     # char_range 限制识别字符集（如 0-7 表示仅识别数字），非 None 时设置
@@ -426,7 +424,7 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     if step.target_selector:
         target = _locator(context, step.target_selector)
         await _safe_op(
-            context, target.fill(text, timeout=timeout), Outcome.SELECTOR_FAILED
+            target.fill(text, timeout=timeout), Outcome.SELECTOR_FAILED
         )
 
 
@@ -480,10 +478,3 @@ async def run_step_async(page, raw_step: StepConfig, context: StepContext) -> No
         {"step_id": step.id, "step_type": step.step_type, "description": step.description},
     )
     await handler(page, step, context)
-
-
-def asyncio_sleep(seconds: float):
-    """包装 asyncio.sleep，隔离导入。"""
-    import asyncio
-
-    return asyncio.sleep(seconds)

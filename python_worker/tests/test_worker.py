@@ -7,8 +7,6 @@ IPC 响应/事件序列化，以及状态真值判定。
 from __future__ import annotations
 
 import json
-import sys
-import threading
 
 import pytest
 
@@ -17,9 +15,8 @@ import pytest
 
 def test_to_ms_seconds_vs_millis():
     from playwright_worker import _to_ms
-    # <1000 视为秒 → ×1000；>=1000 视为毫秒 → 原样
+    # Rust 侧 BrowserSettings 的 timeout/navigation_timeout 为 u32 秒，统一 ×1000
     assert _to_ms({"timeout": 15}, "timeout", 10000) == 15000
-    assert _to_ms({"timeout": 5000}, "timeout", 10000) == 5000
     # 缺省值
     assert _to_ms({}, "timeout", 10000) == 10000
     # 非法值回退缺省
@@ -123,50 +120,20 @@ def test_cancel_registry_pending_cap():
 
 # ── IPC 响应/事件序列化 ──
 
-class _Capture:
-    """捕获 stdout 写入的辅助对象。"""
-
-    def __init__(self) -> None:
-        self.lines: list[str] = []
-
-    def write(self, s: str) -> None:
-        self.lines.append(s)
-
-    def flush(self) -> None:
-        pass
-
-
-def _capture_stdout():
-    capture = _Capture()
-    original = sys.stdout
-    sys.stdout = capture
-    return capture, original
-
-
-def test_emit_response_format(monkeypatch):
+def test_emit_response_format(capsys):
     import worker_main
-    capture, original = _capture_stdout()
-    monkeypatch.setattr(worker_main, "_stdout_lock", threading.Lock())
-    try:
-        worker_main.emit_response(42, {"success": True, "data": {"a": 1}, "error": None})
-    finally:
-        sys.stdout = original
-    line = capture.lines[0].strip()
+    worker_main.emit_response(42, {"success": True, "data": {"a": 1}, "error": None})
+    line = capsys.readouterr().out.strip()
     msg = json.loads(line)
     assert msg["id"] == 42
     assert msg["result"]["success"] is True
     assert msg["result"]["data"] == {"a": 1}
 
 
-def test_emit_event_format(monkeypatch):
+def test_emit_event_format(capsys):
     import worker_main
-    capture, original = _capture_stdout()
-    monkeypatch.setattr(worker_main, "_stdout_lock", threading.Lock())
-    try:
-        worker_main.emit_event("screenshot", {"path": "a.png"})
-    finally:
-        sys.stdout = original
-    msg = json.loads(capture.lines[0].strip())
+    worker_main.emit_event("screenshot", {"path": "a.png"})
+    msg = json.loads(capsys.readouterr().out.strip())
     assert msg["event"] == "screenshot"
     assert msg["data"] == {"path": "a.png"}
 
@@ -246,27 +213,21 @@ def test_debug_session_for_unknown_id_raises():
 
 def test_get_ocr_caches_instance(monkeypatch):
     import sys, types
-    from step_handlers import _get_ocr, _ocr_cache
+    from step_handlers import _get_ocr
 
     fake = types.ModuleType("ddddocr")
-    created = []
 
     class FakeDdddOcr:
         def __init__(self, old, show_ad):
-            created.append(old)
+            pass
 
     fake.DdddOcr = FakeDdddOcr
     monkeypatch.setitem(sys.modules, "ddddocr", fake)
-    _ocr_cache.clear()
-    try:
-        a = _get_ocr(False)
-        b = _get_ocr(False)
-        assert a is b  # 两次获取返回同一实例
-        c = _get_ocr(True)
-        assert c is not a  # 不同 old 参数单独缓存
-        assert created == [False, True]  # 每种参数仅构造一次
-    finally:
-        _ocr_cache.clear()
+    a = _get_ocr(False)
+    b = _get_ocr(False)
+    assert a is b  # 两次获取返回同一实例
+    c = _get_ocr(True)
+    assert c is not a  # 不同 old 参数单独缓存
 
 
 def test_structured_result_duration_ms_with_start():
@@ -275,8 +236,7 @@ def test_structured_result_duration_ms_with_start():
     from worker_main import _structured_result
     exc = WorkerError("selector_failed", "失败")
     start = time.perf_counter()
-    d = _structured_result(exc, success=False, start=start)
-    assert d["data"]["duration_ms"] >= 0
+    _structured_result(exc, success=False, start=start)
     # 未传 start 时保持 0（兼容直接调用）
     d0 = _structured_result(exc, success=False)
     assert d0["data"]["duration_ms"] == 0

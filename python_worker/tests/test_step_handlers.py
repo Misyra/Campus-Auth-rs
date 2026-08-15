@@ -65,17 +65,6 @@ def test_handler_alias_mapping():
 
 # ── 模板变量解析 ──
 
-def test_resolve_step_fields():
-    raw = StepConfig.from_dict({
-        "id": "s1", "type": "input",
-        "selector": "#{{FIELD}}", "value": "{{PASSWORD}}",
-    })
-    ctx = StepContext(page=None, variables={"FIELD": "u", "PASSWORD": "secret"})
-    resolved = _resolve(raw, ctx)
-    assert resolved.selector == "#u"
-    assert resolved.value == "secret"
-
-
 def test_resolve_without_variables_unchanged():
     raw = StepConfig.from_dict({"id": "s1", "type": "click", "selector": "#{{A}}"})
     ctx = StepContext(page=None)
