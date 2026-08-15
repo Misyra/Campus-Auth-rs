@@ -70,7 +70,22 @@ pub async fn restart_app(
         .map_err(|e| ApiError::Internal(format!("启动新进程失败: {e}")))?;
     // 通知 launcher 优雅关闭当前进程（新进程会等待实例锁释放）
     let _ = state.shutdown_tx.send(());
+    // watchdog：优雅关闭挂死时强制退出，释放实例锁供新进程启动（A4 统一）
+    spawn_exit_watchdog(30);
     Ok(data(Value::String("正在重启".into())))
+}
+
+/// 生成退出 watchdog：优雅关闭超时后强制 `exit(0)`，作为最后防线。
+///
+/// `shutdown_app` / `restart_app` / `uninstall` 三处共用，统一为 30s，
+/// 覆盖优雅关闭总预算（Tray 3s + Scheduler 5s + Engine 5s + Bridge 8s + Axum 5s ≈ 26s），
+/// 避免卸载等场景因强杀过早残留浏览器/子进程（A4）。
+fn spawn_exit_watchdog(secs: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        tracing::warn!("优雅关闭超时 {secs}s，强制退出");
+        std::process::exit(0);
+    });
 }
 
 /// POST /api/system/shutdown — 优雅关闭（通知 launcher 执行完整关闭流程）
@@ -83,12 +98,8 @@ pub async fn shutdown_app(
 ) -> Result<Json<Value>, ApiError> {
     // 通知 launcher 开始优雅关闭
     let _ = state.shutdown_tx.send(());
-    // 安全网：30s 后若 still alive，强制退出（所有服务已本应在 30s 内完成清理）
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        tracing::warn!("优雅关闭超时 30s，强制退出");
-        std::process::exit(0);
-    });
+    // watchdog：30s 后若仍存活则强制退出（所有服务本应在 30s 内完成清理）
+    spawn_exit_watchdog(30);
     Ok(data(Value::String("正在关闭".into())))
 }
 
@@ -510,11 +521,8 @@ pub async fn uninstall(
 
     // 通知 launcher 优雅关闭
     let _ = state.shutdown_tx.send(());
-
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        std::process::exit(0);
-    });
+    // watchdog：统一 30s，覆盖优雅关闭总预算，避免卸载时强杀过早晨残留浏览器/子进程（A4）
+    spawn_exit_watchdog(30);
 
     Ok(data(serde_json::json!({
         "message": "卸载脚本已生成，程序即将退出。请手动运行 uninstall.bat 完成清理。",
