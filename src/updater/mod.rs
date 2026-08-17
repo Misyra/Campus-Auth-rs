@@ -76,6 +76,29 @@ pub struct UpdaterService {
     update_in_progress: AtomicBool,
 }
 
+/// Web 层消费的更新器抽象（M1 细粒度 state：updater 域）
+///
+/// handler 通过 `State<Arc<dyn UpdaterApi>>` 提取依赖（system 路由），
+/// 不再触达 `state.container`，测试可注入内存实现。
+#[async_trait::async_trait]
+pub trait UpdaterApi: Send + Sync {
+    /// 手动触发版本检查；有新版本返回 `Some(UpdateInfo)`。
+    async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError>;
+    /// 执行更新（下载 zip 到 staging 并触发助手替换）。
+    async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError>;
+}
+
+#[async_trait::async_trait]
+impl UpdaterApi for UpdaterService {
+    async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
+        UpdaterService::check_update(self).await
+    }
+
+    async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
+        UpdaterService::apply_update(self, info).await
+    }
+}
+
 impl UpdaterService {
     /// 构造更新器服务
     ///

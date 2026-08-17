@@ -34,6 +34,7 @@ pub use schema::{
 };
 pub use service::ConfigError;
 pub use service::ConfigService;
+pub use profiles::{ProfileApi, ProfileSummary};
 
 /// Web 层消费的配置服务抽象（M1 细粒度 state：config 域）
 ///
@@ -60,6 +61,8 @@ pub trait ConfigApi: Send + Sync {
     fn base_path(&self) -> std::path::PathBuf;
     /// 返回当前运行时配置快照（无锁读，Arc 共享免深拷贝）。
     fn runtime_snapshot(&self) -> std::sync::Arc<RuntimeConfig>;
+    /// 加密明文密码（Profile 凭据写入路径）。
+    fn encrypt_password(&self, raw: &str) -> Result<String, ConfigError>;
 }
 
 #[async_trait::async_trait]
@@ -98,5 +101,9 @@ impl ConfigApi for ConfigService {
 
     fn runtime_snapshot(&self) -> std::sync::Arc<RuntimeConfig> {
         ConfigService::runtime_snapshot(self)
+    }
+
+    fn encrypt_password(&self, raw: &str) -> Result<String, ConfigError> {
+        ConfigService::encrypt_password(self, raw)
     }
 }

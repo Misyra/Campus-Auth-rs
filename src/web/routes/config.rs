@@ -1,8 +1,8 @@
 //! 配置路由：全局设置读写、日志级别、纯净模式
 //!
 //! M1 细粒度 state（config 域）：handler 声明 `State<Arc<dyn ConfigApi>>` 依赖，
-//! 不再触达 `state.container`（patch_settings 除外：还需 ProfileService 保存
-//! 凭据，经 `state.config` 直字段触达配置域）。
+//! 不再触达 `state.container`（patch_settings 凭据保存经
+//! `State<Arc<dyn ProfileApi>>` 提取）。
 
 use std::sync::Arc;
 
@@ -11,9 +11,8 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::config::ConfigApi;
+use crate::config::{ConfigApi, ProfileApi};
 use crate::web::error::{data, ApiError};
-use crate::web::state::AppState;
 
 /// GET /api/config — 获取当前全局设置
 ///
@@ -72,10 +71,11 @@ pub async fn put_settings(
 /// 后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }
 /// 需要将前端的扁平 key 映射到 global 子结构下
 pub async fn patch_settings(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
+    State(profiles): State<Arc<dyn ProfileApi>>,
     Json(patch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut current = state.container.config.load_settings_async().await;
+    let mut current = config.load_settings_async().await;
     let mut current_value = serde_json::to_value(&current)?;
 
     // 将前端的扁平字段映射到 global 子结构
@@ -150,7 +150,7 @@ pub async fn patch_settings(
                 .and_then(|v| v.as_str())
                 .unwrap_or("default")
                 .to_string();
-            if let Ok(mut profile) = state.config.load_profile(&active_id) {
+            if let Ok(mut profile) = config.load_profile(&active_id) {
                 if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
                     profile.username = username.to_string();
                 }
@@ -165,29 +165,27 @@ pub async fn patch_settings(
                 }
                 if let Some(password) = profile_patch.get("password") {
                     let pwd_str = password.as_str().unwrap_or("");
-                    profile.password = state
-                        .container
-                        .profiles
-                        .save_password(Some(pwd_str), &profile.password);
+                    profile.password =
+                        profiles.save_password(Some(pwd_str), &profile.password);
                 }
-                state.config.save_profile(&profile).await?;
+                config.save_profile(&profile).await?;
             }
         }
     }
 
     current = serde_json::from_value(current_value)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    state.config.save_settings(&current).await?;
-    state.config.reload().await?;
-    let settings = state.config.load_settings_async().await;
+    config.save_settings(&current).await?;
+    config.reload().await?;
+    let settings = config.load_settings_async().await;
     let active_id = &settings.active_profile_id;
-    let profile = state.config.load_profile(active_id).unwrap_or_default();
+    let profile = config.load_profile(active_id).unwrap_or_default();
     // has_password 应与 GET /api/config 保持一致：反映"密码可解密"而非"字段非空"，
     // 否则密钥不可用时刚保存显示成功、刷新又提示需重输，造成体验割裂。
     let has_password = if profile.password.is_empty() {
         false
     } else {
-        state.config.can_decrypt_password(&profile.password)
+        config.can_decrypt_password(&profile.password)
     };
     Ok(data(serde_json::json!({
         "browser": settings.global.browser,
@@ -216,9 +214,7 @@ pub async fn reload_settings(
 }
 
 /// GET /api/config/defaults — 返回配置默认值（扁平结构，与 GET /api/config 格式对齐）
-pub async fn get_config_defaults(
-    State(_state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn get_config_defaults() -> Result<Json<Value>, ApiError> {
     let defaults = crate::config::SettingsData::default();
     let g = &defaults.global;
     Ok(data(serde_json::json!({
@@ -266,9 +262,7 @@ pub async fn set_log_level(
 }
 
 /// GET /api/config/default-stealth-script — 默认反检测脚本
-pub async fn get_default_stealth_script(
-    State(_state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn get_default_stealth_script() -> Result<Json<Value>, ApiError> {
     Ok(data(serde_json::json!({
         "script": r#"// Campus-Auth 默认反检测脚本
 // 隐藏 webdriver 属性、伪造 plugins/mimeTypes、覆盖 navigator 检测点
@@ -606,6 +600,10 @@ mod tests {
         fn runtime_snapshot(&self) -> std::sync::Arc<crate::config::RuntimeConfig> {
             std::sync::Arc::new(test_runtime_config())
         }
+
+        fn encrypt_password(&self, raw: &str) -> Result<String, ConfigError> {
+            Ok(format!("ENC:mock:{raw}"))
+        }
     }
 
     /// 构造测试用 RuntimeConfig（类型未派生 Default，字段逐个填充默认值）
@@ -768,5 +766,124 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["data"]["enabled"], true);
         assert!(inner.lock().unwrap().settings.global.browser.pure_mode);
+    }
+
+    // ============ patch_settings（config + profiles 双 state 提取，M1） ============
+
+    /// 内存 ProfileApi：patch_settings 仅消费 save_password
+    struct MockProfileApi;
+
+    #[async_trait::async_trait]
+    impl ProfileApi for MockProfileApi {
+        fn list_profiles(&self) -> Vec<crate::config::ProfileSummary> {
+            Vec::new()
+        }
+        fn get_profile(&self, _id: &str) -> Result<ProfileData, ConfigError> {
+            Err(ConfigError::ProfileNotFound { id: "mock".into() })
+        }
+        async fn create_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn update_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn delete_profile(&self, _id: &str) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn switch_profile(&self, _id: &str) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn set_auto_switch(&self, _enabled: bool) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        fn detect_matching_profile(&self, _gateway_ip: &str, _ssid: &str) -> Option<String> {
+            None
+        }
+        fn save_password(&self, raw: Option<&str>, existing: &str) -> String {
+            match raw {
+                None | Some("") => existing.to_string(),
+                Some(s) => format!("ENC:mock:{s}"),
+            }
+        }
+    }
+
+    /// 双域 state：ConfigApi + ProfileApi 各自经 FromRef 委派提取
+    #[derive(Clone)]
+    struct PatchTestState {
+        config: Arc<dyn ConfigApi>,
+        profiles: Arc<dyn ProfileApi>,
+    }
+
+    impl axum::extract::FromRef<PatchTestState> for Arc<dyn ConfigApi> {
+        fn from_ref(state: &PatchTestState) -> Self {
+            state.config.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<PatchTestState> for Arc<dyn ProfileApi> {
+        fn from_ref(state: &PatchTestState) -> Self {
+            state.profiles.clone()
+        }
+    }
+
+    fn patch_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
+        let inner = Arc::new(std::sync::Mutex::new(MockInner {
+            settings: crate::config::SettingsData::default(),
+            profile: ProfileData::default(),
+            save_calls: 0,
+            reload_calls: 0,
+        }));
+        let state = PatchTestState {
+            config: Arc::new(MockConfigApi(inner.clone())),
+            profiles: Arc::new(MockProfileApi),
+        };
+        let app = axum::Router::new()
+            .route("/api/config", axum::routing::patch(patch_settings))
+            .with_state(state);
+        (app, inner)
+    }
+
+    /// 凭证字段路由到 Profile、密码走 save_password 语义、全局字段落 settings
+    #[tokio::test]
+    async fn test_patch_settings_routes_credentials_and_global() {
+        let (app, inner) = patch_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "username": "alice",
+                            "password": "plain-secret",
+                            "isp": "cmcc",
+                            "carrier_custom": "自定义显示",
+                            "pause": { "enabled": true },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let d = &v["data"];
+        // 凭证已写入 Profile，密码经 save_password 加密语义
+        let g = inner.lock().unwrap();
+        assert_eq!(g.profile.username, "alice");
+        assert_eq!(g.profile.isp, "cmcc");
+        assert_eq!(g.profile.password, "ENC:mock:plain-secret");
+        // carrier_custom 是纯前端展示字段，不落盘
+        // 全局字段保存 + reload
+        assert!(g.settings.global.pause.enabled);
+        assert_eq!(g.save_calls, 1);
+        assert_eq!(g.reload_calls, 1);
+        // 响应回显凭证与 has_password
+        assert_eq!(d["username"], "alice");
+        assert_eq!(d["isp"], "cmcc");
+        assert_eq!(d["carrier_custom"], "");
+        assert_eq!(d["has_password"], true);
     }
 }

@@ -226,6 +226,35 @@ pub struct EnvironmentManager {
     on_bootstrap_done: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
+/// Web 层消费的环境能力抽象（M1 细粒度 state：environment 域）
+///
+/// handler 通过 `State<Arc<dyn EnvironmentApi>>` 提取依赖（ocr/scripts/system
+/// 路由），不再触达 `state.container`，测试可注入内存实现。
+#[async_trait::async_trait]
+pub trait EnvironmentApi: Send + Sync {
+    /// 返回当前环境状态快照。
+    fn status(&self) -> EnvironmentStatus;
+    /// Python 解释器绝对路径。
+    fn python_path(&self) -> PathBuf;
+    /// 确保浏览器自动化能力就绪；若未就绪则触发引导。
+    async fn ensure_capability(&self) -> Result<(), EnvironmentError>;
+}
+
+#[async_trait::async_trait]
+impl EnvironmentApi for EnvironmentManager {
+    fn status(&self) -> EnvironmentStatus {
+        EnvironmentManager::status(self)
+    }
+
+    fn python_path(&self) -> PathBuf {
+        EnvironmentManager::python_path(self)
+    }
+
+    async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
+        EnvironmentManager::ensure_capability(self).await
+    }
+}
+
 impl EnvironmentManager {
     /// 构造环境管理器
     pub fn new(base_path: PathBuf, status_manager: Arc<StatusManager>, git_download_enabled: bool) -> Arc<Self> {

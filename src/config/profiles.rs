@@ -30,6 +30,71 @@ pub struct ProfileService {
     config: Arc<ConfigService>,
 }
 
+/// Web 层消费的 Profile 业务抽象（M1 细粒度 state：profiles 域）
+///
+/// handler 通过 `State<Arc<dyn ProfileApi>>` 提取依赖（profiles 路由），
+/// 不再触达 `state.container`，测试可注入内存实现（见 `web/routes/profiles.rs` 模块测试）。
+#[async_trait::async_trait]
+pub trait ProfileApi: Send + Sync {
+    /// 列出所有 Profile 摘要（不含密码）。
+    fn list_profiles(&self) -> Vec<ProfileSummary>;
+    /// 获取单个 Profile（含密码，调用方需谨慎处理）。
+    fn get_profile(&self, id: &str) -> Result<ProfileData, ConfigError>;
+    /// 创建 Profile（id 已存在则冲突）。
+    async fn create_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError>;
+    /// 更新 Profile（密码字段走 save_password 语义）。
+    async fn update_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError>;
+    /// 删除 Profile（不允许删除 default）。
+    async fn delete_profile(&self, id: &str) -> Result<(), ConfigError>;
+    /// 切换活跃 Profile。
+    async fn switch_profile(&self, id: &str) -> Result<(), ConfigError>;
+    /// 设置自动切换开关。
+    async fn set_auto_switch(&self, enabled: bool) -> Result<(), ConfigError>;
+    /// 按网关 IP / WiFi SSID 匹配 Profile。
+    fn detect_matching_profile(&self, gateway_ip: &str, ssid: &str) -> Option<String>;
+    /// 密码保存语义：None/空串保留原值、ENC: 透传、明文加密。
+    fn save_password(&self, raw: Option<&str>, existing: &str) -> String;
+}
+
+#[async_trait::async_trait]
+impl ProfileApi for ProfileService {
+    fn list_profiles(&self) -> Vec<ProfileSummary> {
+        ProfileService::list_profiles(self)
+    }
+
+    fn get_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {
+        ProfileService::get_profile(self, id)
+    }
+
+    async fn create_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError> {
+        ProfileService::create_profile(self, id, data).await
+    }
+
+    async fn update_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError> {
+        ProfileService::update_profile(self, id, data).await
+    }
+
+    async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
+        ProfileService::delete_profile(self, id).await
+    }
+
+    async fn switch_profile(&self, id: &str) -> Result<(), ConfigError> {
+        ProfileService::switch_profile(self, id).await
+    }
+
+    async fn set_auto_switch(&self, enabled: bool) -> Result<(), ConfigError> {
+        ProfileService::set_auto_switch(self, enabled).await
+    }
+
+    fn detect_matching_profile(&self, gateway_ip: &str, ssid: &str) -> Option<String> {
+        ProfileService::detect_matching_profile(self, gateway_ip, ssid)
+    }
+
+    fn save_password(&self, raw: Option<&str>, existing: &str) -> String {
+        ProfileService::save_password(self, raw, existing)
+    }
+}
+
 impl ProfileService {
     /// 构造 Profile 服务
     pub fn new(config: Arc<ConfigService>) -> Self {

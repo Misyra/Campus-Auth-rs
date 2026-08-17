@@ -6,12 +6,16 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
-use crate::config::ConfigApi;
+use crate::bridge::BridgeApi;
+use crate::config::{ConfigApi, ProfileApi};
 use crate::container::ServiceContainer;
+use crate::environment::EnvironmentApi;
 use crate::login::{HistoryStore, LoginApi};
 use crate::scheduler::SchedulerApi;
 use crate::status::StatusManager;
 use crate::tasks::{TaskApi, TaskRunApi};
+use crate::updater::UpdaterApi;
+use crate::utils::metrics::Metrics;
 
 /// WebSocket 日志条目（由内部事件推入广播通道，供 /ws/logs 订阅）
 #[derive(Clone, Debug, Serialize)]
@@ -91,6 +95,16 @@ pub struct AppState {
     /// 配置服务（M1 第五域：`State<Arc<dyn ConfigApi>>` 提取；混合依赖
     /// handler 亦经 `state.config` 直字段触达）
     pub config: Arc<dyn ConfigApi>,
+    /// Profile 业务（M1 第六域：`state.profiles` 直字段触达）
+    pub profiles: Arc<dyn ProfileApi>,
+    /// Bridge（M1 第七域：`State<Arc<dyn BridgeApi>>` 提取）
+    pub bridge: Arc<dyn BridgeApi>,
+    /// 环境能力（M1 第八域：`State<Arc<dyn EnvironmentApi>>` 提取）
+    pub environment: Arc<dyn EnvironmentApi>,
+    /// 更新器（M1 第九域：`State<Arc<dyn UpdaterApi>>` 提取）
+    pub updater: Arc<dyn UpdaterApi>,
+    /// 运行指标（M1：直字段；Metrics 为内存 AtomicU64 集合，无需 trait 抽象）
+    pub metrics: Arc<Metrics>,
     /// 状态管理器（M1：直字段替代 container.status 触达；StatusManager 本身
     /// 即内存实现，测试可直接构造，无需 trait 抽象）
     pub status: Arc<StatusManager>,
@@ -125,6 +139,11 @@ impl AppState {
         let tasks: Arc<dyn TaskApi> = container.tasks.clone();
         let task_runner: Arc<dyn TaskRunApi> = container.executor.clone();
         let config: Arc<dyn ConfigApi> = container.config.clone();
+        let profiles: Arc<dyn ProfileApi> = container.profiles.clone();
+        let bridge: Arc<dyn BridgeApi> = container.bridge.clone();
+        let environment: Arc<dyn EnvironmentApi> = container.environment.clone();
+        let updater: Arc<dyn UpdaterApi> = container.updater.clone();
+        let metrics = container.metrics.clone();
         let status = container.status.clone();
         Self {
             container,
@@ -134,6 +153,11 @@ impl AppState {
             tasks,
             task_runner,
             config,
+            profiles,
+            bridge,
+            environment,
+            updater,
+            metrics,
             status,
             log_tx,
             ws_tx,
@@ -185,6 +209,41 @@ impl axum::extract::FromRef<AppState> for Arc<dyn TaskRunApi> {
 impl axum::extract::FromRef<AppState> for Arc<dyn ConfigApi> {
     fn from_ref(state: &AppState) -> Self {
         state.config.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn ProfileApi>>`（M1 第六域：profiles）
+impl axum::extract::FromRef<AppState> for Arc<dyn ProfileApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.profiles.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn BridgeApi>>`（M1 第七域：bridge）
+impl axum::extract::FromRef<AppState> for Arc<dyn BridgeApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.bridge.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn EnvironmentApi>>`（M1 第八域：environment）
+impl axum::extract::FromRef<AppState> for Arc<dyn EnvironmentApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.environment.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn UpdaterApi>>`（M1 第九域：updater）
+impl axum::extract::FromRef<AppState> for Arc<dyn UpdaterApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.updater.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<Metrics>>`（M1：metrics 直字段）
+impl axum::extract::FromRef<AppState> for Arc<Metrics> {
+    fn from_ref(state: &AppState) -> Self {
+        state.metrics.clone()
     }
 }
 

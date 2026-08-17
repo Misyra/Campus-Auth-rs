@@ -63,6 +63,35 @@ pub const IPC_WRITE_CHANNEL_CAP: usize = 16;
 /// 真实请求（如首次 browser_health_check）的 pending 槽位碰撞（历史遗留 F3）。
 pub const SHUTDOWN_REQUEST_ID: u64 = 0;
 
+/// Web 层消费的 Bridge 抽象（M1 细粒度 state：bridge 域）
+///
+/// handler 通过 `State<Arc<dyn BridgeApi>>` 提取依赖（debug/ocr/system 路由），
+/// 不再触达 `state.container`，测试可注入内存实现（见 `web/routes/ocr.rs` 模块测试）。
+#[async_trait::async_trait]
+pub trait BridgeApi: Send + Sync {
+    /// 执行 Worker 命令并等待响应。
+    async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError>;
+    /// 取消已注册 cancel_id 的在途命令。
+    fn cancel(&self, cancel_id: &str);
+    /// 优雅关闭 Worker 与 Supervisor。
+    async fn shutdown(&self);
+}
+
+#[async_trait::async_trait]
+impl BridgeApi for BridgeSupervisor {
+    async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError> {
+        BridgeSupervisor::execute(self, method, params).await
+    }
+
+    fn cancel(&self, cancel_id: &str) {
+        BridgeSupervisor::cancel(self, cancel_id);
+    }
+
+    async fn shutdown(&self) {
+        BridgeSupervisor::shutdown(self).await;
+    }
+}
+
 /// Bridge 相关错误
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {

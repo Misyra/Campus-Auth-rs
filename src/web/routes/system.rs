@@ -1,7 +1,11 @@
 //! 系统路由：系统信息、关机、更新、浏览器、图标、卸载、背景图、文档
+//!
+//! M1 细粒度 state：environment/updater/bridge/metrics 经 AppState 直字段
+//! 或 `State<Arc<dyn ...>>` 提取，不再触达 `state.container`。
 
 use std::cmp::Reverse;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::header;
@@ -10,6 +14,8 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::bridge::BridgeApi;
+use crate::updater::UpdaterApi;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
 
@@ -20,7 +26,7 @@ pub async fn system_info(
     // 读无锁运行时快照，避免每次请求走磁盘 mtime 校验（A2）
     let rt = state.config.runtime_snapshot();
     let base_path = state.config.base_path();
-    let m = &state.container.metrics;
+    let m = &state.metrics;
     let info = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "base_path": base_path.to_string_lossy(),
@@ -128,7 +134,7 @@ pub async fn init_status(
 ) -> Result<Json<Value>, ApiError> {
     let config_dir = state.config.base_path().join("config");
     let agreed = config_dir.join(".agreed").exists();
-    let env_status = state.container.environment.status();
+    let env_status = state.environment.status();
     let password_decryption_failed = state.config.has_decryption_error();
     Ok(data(serde_json::json!({
         "agreed": agreed,
@@ -265,10 +271,10 @@ fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
 /// 返回字段对齐前端契约：`has_update`(bool) / `latest`(string) / `current`(string) /
 /// `error`(string,可选)。
 pub async fn check_update(
-    State(state): State<AppState>,
+    State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    match state.container.updater.check_update().await {
+    match updater.check_update().await {
         Ok(Some(info)) => Ok(data(info)),
         Ok(None) => Ok(data(serde_json::json!({
             "has_update": false,
@@ -288,18 +294,14 @@ pub async fn check_update(
 ///
 /// 先调用 `check_update` 获取最新版本信息，再 `apply_update` 执行下载与暂存。
 pub async fn apply_update(
-    State(state): State<AppState>,
+    State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let info = state
-        .container
-        .updater
+    let info = updater
         .check_update()
         .await
         .map_err(|e| ApiError::Internal(format!("检查更新失败: {e}")))?
         .ok_or_else(|| ApiError::BadRequest("当前已是最新版本，无需更新".into()))?;
-    state
-        .container
-        .updater
+    updater
         .apply_update(&info)
         .await
         .map_err(|e| ApiError::Internal(format!("应用更新失败: {e}")))?;
@@ -316,7 +318,7 @@ pub async fn list_browsers(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let settings = state.config.load_settings_async().await;
-    let env_status = state.container.environment.status();
+    let env_status = state.environment.status();
     let playwright_installed = env_status.playwright_ready;
     let custom_path = &settings.global.browser.browser_custom_path;
     let edge_installed = is_edge_installed();
@@ -434,7 +436,7 @@ fn is_edge_installed() -> bool {
 pub async fn install_playwright(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let env = state.container.environment.clone();
+    let env = state.environment.clone();
     // 后台执行安装，避免阻塞响应；进度通过 StatusManager 推送
     tokio::spawn(async move {
         if let Err(e) = env.ensure_capability().await {
@@ -852,9 +854,9 @@ pub async fn task_manual() -> Json<Value> {
 /// 停止当前运行的 Worker 进程及其浏览器实例。Supervisor 保持运行，
 /// 下次任务到来时会自动重新启动 Worker。
 pub async fn stop_worker(
-    State(state): State<AppState>,
+    State(bridge): State<Arc<dyn BridgeApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    state.container.bridge.shutdown().await;
+    bridge.shutdown().await;
     Ok(data(serde_json::json!({ "stopped": true })))
 }
 
@@ -956,4 +958,99 @@ mod tests {
     }
 
     // SSRF 私网 IP 判定测试已随 is_private_ip 收敛至 crate::web::ssrf 模块
+
+    // ============ check_update handler 级单测（内存 MockUpdaterApi，M1） ============
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get as route_get;
+    use tower::ServiceExt; // oneshot
+
+    use crate::updater::{UpdateInfo, UpdaterError};
+
+    enum MockOutcome {
+        None,
+        Info(UpdateInfo),
+        Err(String),
+    }
+
+    struct MockUpdaterApi(MockOutcome);
+
+    #[async_trait::async_trait]
+    impl UpdaterApi for MockUpdaterApi {
+        async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
+            match &self.0 {
+                MockOutcome::None => Ok(None),
+                MockOutcome::Info(i) => Ok(Some(i.clone())),
+                MockOutcome::Err(msg) => Err(UpdaterError::HttpsRequired(msg.clone())),
+            }
+        }
+
+        async fn apply_update(&self, _info: &UpdateInfo) -> Result<(), UpdaterError> {
+            Ok(())
+        }
+    }
+
+    fn sample_info() -> UpdateInfo {
+        UpdateInfo {
+            current_version: "1.0.0".into(),
+            latest_version: "1.1.0".into(),
+            update_available: true,
+            url: "https://example.com/app.zip".into(),
+            sha256: "deadbeef".into(),
+            size: Some(1024),
+            notes: Some("修复若干问题".into()),
+            release_date: None,
+        }
+    }
+
+    async fn run_check(outcome: MockOutcome) -> Value {
+        let api: Arc<dyn UpdaterApi> = Arc::new(MockUpdaterApi(outcome));
+        let app = axum::Router::new()
+            .route("/api/check-update", route_get(check_update))
+            .with_state(api);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/check-update")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// 有新版本：UpdateInfo 原样透传
+    #[tokio::test]
+    async fn test_check_update_with_info() {
+        let v = run_check(MockOutcome::Info(sample_info())).await;
+        let d = &v["data"];
+        assert_eq!(d["has_update"], true);
+        assert_eq!(d["latest"], "1.1.0");
+        assert_eq!(d["current"], "1.0.0");
+    }
+
+    /// 无更新：返回 has_update=false 与当前版本
+    #[tokio::test]
+    async fn test_check_update_no_update() {
+        let v = run_check(MockOutcome::None).await;
+        let d = &v["data"];
+        assert_eq!(d["has_update"], false);
+        assert_eq!(d["latest"], env!("CARGO_PKG_VERSION"));
+        assert!(d.get("error").is_none());
+    }
+
+    /// 检查失败：200 + error 字段（前端提示，非 5xx）
+    #[tokio::test]
+    async fn test_check_update_error_field() {
+        let v = run_check(MockOutcome::Err("网络超时".into())).await;
+        let d = &v["data"];
+        assert_eq!(d["has_update"], false);
+        assert!(d["error"].as_str().unwrap().contains("网络超时"));
+    }
 }

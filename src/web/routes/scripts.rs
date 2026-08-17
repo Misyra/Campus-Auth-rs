@@ -1,8 +1,8 @@
 //! 脚本路由：脚本管理、可执行文件列表、Shell 列表
 //!
-//! M1 细粒度 state（tasks 域）：脚本 CRUD handler 声明
-//! `State<Arc<dyn TaskApi>>` / `State<Arc<dyn TaskRunApi>>` 依赖，
-//! 不再触达 `state.container`（list_binaries 除外：environment 域未 trait 化）。
+//! M1 细粒度 state：脚本 CRUD handler 声明 `State<Arc<dyn TaskApi>>` /
+//! `State<Arc<dyn TaskRunApi>>` 依赖，可执行文件列表经
+//! `State<Arc<dyn EnvironmentApi>>` 提取，不再触达 `state.container`。
 
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::environment::EnvironmentApi;
 use crate::tasks::{TaskApi, TaskRunApi};
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
@@ -85,9 +86,9 @@ pub async fn run_script(
 ///
 /// 扫描系统 PATH 中的常用解释器/可执行文件。
 pub async fn list_binaries(
-    State(state): State<AppState>,
+    State(environment): State<Arc<dyn EnvironmentApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let python_path = state.container.environment.python_path().to_string_lossy().to_string();
+    let python_path = environment.python_path().to_string_lossy().to_string();
     let mut binaries = vec![serde_json::json!({ "name": "python", "path": python_path })];
 
     // 扫描常见系统可执行文件（Windows + Unix 兼容）。
