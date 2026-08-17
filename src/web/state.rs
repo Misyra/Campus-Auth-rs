@@ -6,9 +6,12 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
+use crate::config::ConfigApi;
 use crate::container::ServiceContainer;
 use crate::login::{HistoryStore, LoginApi};
+use crate::scheduler::SchedulerApi;
 use crate::status::StatusManager;
+use crate::tasks::{TaskApi, TaskRunApi};
 
 /// WebSocket 日志条目（由内部事件推入广播通道，供 /ws/logs 订阅）
 #[derive(Clone, Debug, Serialize)]
@@ -79,6 +82,15 @@ pub struct AppState {
     pub history: Arc<dyn HistoryStore>,
     /// 登录编排（M1 第二域：`State<Arc<dyn LoginApi>>` 提取）
     pub login: Arc<dyn LoginApi>,
+    /// 调度器（M1 第三域：`State<Arc<dyn SchedulerApi>>` 提取）
+    pub scheduler: Arc<dyn SchedulerApi>,
+    /// 任务管理（M1 第四域：`State<Arc<dyn TaskApi>>` 提取）
+    pub tasks: Arc<dyn TaskApi>,
+    /// 任务执行（M1：tasks 域伴生，`State<Arc<dyn TaskRunApi>>` 提取）
+    pub task_runner: Arc<dyn TaskRunApi>,
+    /// 配置服务（M1 第五域：`State<Arc<dyn ConfigApi>>` 提取；混合依赖
+    /// handler 亦经 `state.config` 直字段触达）
+    pub config: Arc<dyn ConfigApi>,
     /// 状态管理器（M1：直字段替代 container.status 触达；StatusManager 本身
     /// 即内存实现，测试可直接构造，无需 trait 抽象）
     pub status: Arc<StatusManager>,
@@ -109,11 +121,19 @@ impl AppState {
         // 细粒度依赖从容器抽出（trait object 化），handler 不再触达 container
         let history: Arc<dyn HistoryStore> = container.history.clone();
         let login: Arc<dyn LoginApi> = container.login.clone();
+        let scheduler: Arc<dyn SchedulerApi> = container.scheduler.clone();
+        let tasks: Arc<dyn TaskApi> = container.tasks.clone();
+        let task_runner: Arc<dyn TaskRunApi> = container.executor.clone();
+        let config: Arc<dyn ConfigApi> = container.config.clone();
         let status = container.status.clone();
         Self {
             container,
             history,
             login,
+            scheduler,
+            tasks,
+            task_runner,
+            config,
             status,
             log_tx,
             ws_tx,
@@ -137,6 +157,34 @@ impl axum::extract::FromRef<AppState> for Arc<dyn HistoryStore> {
 impl axum::extract::FromRef<AppState> for Arc<dyn LoginApi> {
     fn from_ref(state: &AppState) -> Self {
         state.login.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn SchedulerApi>>`（M1 第三域：scheduler）
+impl axum::extract::FromRef<AppState> for Arc<dyn SchedulerApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.scheduler.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn TaskApi>>`（M1 第四域：tasks）
+impl axum::extract::FromRef<AppState> for Arc<dyn TaskApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.tasks.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn TaskRunApi>>`（M1：tasks 域伴生执行器）
+impl axum::extract::FromRef<AppState> for Arc<dyn TaskRunApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.task_runner.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn ConfigApi>>`（M1 第五域：config）
+impl axum::extract::FromRef<AppState> for Arc<dyn ConfigApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.config.clone()
     }
 }
 

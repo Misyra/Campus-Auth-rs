@@ -143,11 +143,9 @@ async fn make_supervisor(
     Arc<ConfigService>,
 ) {
     let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
-    let config = Arc::new(
-        ConfigService::new(base.to_path_buf(), reload_tx)
-            .await
-            .expect("ConfigService 构造失败"),
-    );
+    let config = ConfigService::new(base.to_path_buf(), reload_tx)
+        .await
+        .expect("ConfigService 构造失败");
     let status = Arc::new(StatusManager::new());
     let bridge = BridgeSupervisor::new(base.to_path_buf(), config.clone(), status, None);
     let handle = bridge.spawn();

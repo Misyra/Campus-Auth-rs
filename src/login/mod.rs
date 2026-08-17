@@ -797,11 +797,9 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
-        let config = Arc::new(
-            ConfigService::new(dir.path().to_path_buf(), reload_tx)
-                .await
-                .expect("ConfigService 构造失败"),
-        );
+        let config = ConfigService::new(dir.path().to_path_buf(), reload_tx)
+            .await
+            .expect("ConfigService 构造失败");
         let status = Arc::new(StatusManager::new());
         let bridge = crate::bridge::BridgeSupervisor::new(
             dir.path().to_path_buf(),

@@ -30,7 +30,7 @@ pub async fn ocr_status(
     let env = state.container.environment.status();
     let installed = env.python_ready && env.playwright_ready;
     // 统计 environment 目录大小（递归）
-    let env_dir = state.container.config.base_path().join("environment");
+    let env_dir = state.config.base_path().join("environment");
     let size_bytes = if env_dir.exists() {
         // dir_size 递归遍历文件系统（同步阻塞），用 spawn_blocking 避免阻塞 async 运行时
         tokio::task::spawn_blocking(move || dir_size(&env_dir))

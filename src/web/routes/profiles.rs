@@ -44,7 +44,7 @@ pub async fn list_profiles(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let profiles = state.container.profiles.list_profiles();
-    let settings = state.container.config.load_settings_async().await;
+    let settings = state.config.load_settings_async().await;
     let mut map = serde_json::Map::new();
     // ProfileSummary 仅含展示字段（无密码），列表接口天然不泄露密文
     for p in profiles {
@@ -62,7 +62,7 @@ pub async fn get_profile(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut profile = state.container.config.load_profile(&id)?;
+    let mut profile = state.config.load_profile(&id)?;
     // 避免将密码（密文）泄露给前端
     profile.password = String::new();
     Ok(data(serde_json::json!({ "settings": serde_json::to_value(profile)? })))
@@ -77,7 +77,7 @@ pub async fn create_profile(
     // 路径 id 优先于 body id
     let target_id = if id.is_empty() { body.id.clone() } else { id };
     // 查找或构造 ProfileData
-    let existing = state.container.config.load_profile(&target_id).ok();
+    let existing = state.config.load_profile(&target_id).ok();
     let mut profile = existing.unwrap_or_default();
     profile.id = target_id.clone();
     profile.name = body.name;
@@ -101,7 +101,7 @@ pub async fn update_profile(
     Path(id): Path<String>,
     Json(body): Json<ProfileUpdateBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut profile = state.container.config.load_profile(&id)?;
+    let mut profile = state.config.load_profile(&id)?;
     if let Some(name) = body.name {
         profile.name = name;
     }
@@ -207,7 +207,7 @@ pub async fn auto_switch(
         .profiles
         .set_auto_switch(body.enabled)
         .await?;
-    let settings = state.container.config.load_settings_async().await;
+    let settings = state.config.load_settings_async().await;
     Ok(data(serde_json::json!({
         "active_profile": settings.active_profile_id,
         "message": "自动切换已更新",

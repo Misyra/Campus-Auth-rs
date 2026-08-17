@@ -18,8 +18,8 @@ pub async fn system_info(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     // 读无锁运行时快照，避免每次请求走磁盘 mtime 校验（A2）
-    let rt = state.container.config.runtime().load();
-    let base_path = state.container.config.base_path();
+    let rt = state.config.runtime_snapshot();
+    let base_path = state.config.base_path();
     let m = &state.container.metrics;
     let info = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -108,7 +108,7 @@ pub async fn agree_terms(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     // 标记用户已同意协议（写入配置或标记文件）
-    let config_dir = state.container.config.base_path().join("config");
+    let config_dir = state.config.base_path().join("config");
     let agreed_file = config_dir.join(".agreed");
     tokio::fs::write(&agreed_file, chrono::Utc::now().to_rfc3339()).await?;
     Ok(data(Value::String("ok".into())))
@@ -126,10 +126,10 @@ pub async fn health_check() -> Json<Value> {
 pub async fn init_status(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let config_dir = state.container.config.base_path().join("config");
+    let config_dir = state.config.base_path().join("config");
     let agreed = config_dir.join(".agreed").exists();
     let env_status = state.container.environment.status();
-    let password_decryption_failed = state.container.config.has_decryption_error();
+    let password_decryption_failed = state.config.has_decryption_error();
     Ok(data(serde_json::json!({
         "agreed": agreed,
         "ready": env_status.capability_ready,
@@ -191,7 +191,7 @@ pub async fn fetch_logs(
         .unwrap_or(200)
         // 钳制上限，避免传 99999999 全量解析 MB 级日志
         .min(2000);
-    let logs_dir = state.container.config.base_path().join("logs");
+    let logs_dir = state.config.base_path().join("logs");
     // 日志文件可能达 MB 级，read_dir + 尾部读取 + JSON 解析为阻塞 I/O 与 CPU 密集操作，
     // 整体放入 spawn_blocking 避免阻塞 tokio worker 线程
     let entries: Vec<crate::web::state::LogEntry> =
@@ -315,7 +315,7 @@ pub async fn apply_update(
 pub async fn list_browsers(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings_async().await;
+    let settings = state.config.load_settings_async().await;
     let env_status = state.container.environment.status();
     let playwright_installed = env_status.playwright_ready;
     let custom_path = &settings.global.browser.browser_custom_path;
@@ -452,7 +452,7 @@ pub async fn install_playwright(
 pub async fn list_icons(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let icons_dir = state.container.config.base_path().join("resources").join("icons");
+    let icons_dir = state.config.base_path().join("resources").join("icons");
     let mut icons = Vec::new();
     // 目录扫描用 tokio::fs，避免同步 std::fs 阻塞 tokio worker 线程
     if let Ok(mut rd) = tokio::fs::read_dir(&icons_dir).await {
@@ -474,7 +474,7 @@ pub async fn list_icons(
 pub async fn detect_uninstall(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let base = state.container.config.base_path();
+    let base = state.config.base_path();
     let mut items = Vec::new();
     for (key, label, sub) in [
         ("config", "配置目录", "config"),
@@ -516,7 +516,7 @@ fn contains_batch_metachars(s: &str) -> bool {
 pub async fn uninstall(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let base = state.container.config.base_path();
+    let base = state.config.base_path();
 
     // 如果 helper 存在则直接写入卸载脚本并退出
     let uninstall_script = base.join("uninstall.bat");
@@ -584,7 +584,7 @@ pub struct BackgroundFetchBody {
 
 /// 背景图存储目录
 fn background_dir(state: &AppState) -> std::path::PathBuf {
-    state.container.config.base_path().join("config").join("background")
+    state.config.base_path().join("config").join("background")
 }
 
 /// 从文件名中提取安全文件名（防路径穿越），失败则用 UUID 生成

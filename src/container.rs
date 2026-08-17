@@ -104,12 +104,10 @@ impl ServiceContainer {
         // ---- 横切关注点：运行指标 ----
         let metrics = Metrics::new();
 
-        // ---- Layer 1：ConfigService（唯一 async 构造）----
-        let config = Arc::new(
-            ConfigService::new(base_path.to_path_buf(), reload_tx)
-                .await
-                .context("初始化 ConfigService 失败")?,
-        );
+        // ---- Layer 1：ConfigService（唯一 async 构造，直接返回 Arc<Self>）----
+        let config = ConfigService::new(base_path.to_path_buf(), reload_tx)
+            .await
+            .context("初始化 ConfigService 失败")?;
 
         // ---- Layer 2：无依赖轻量服务 ----
         let profiles = Arc::new(ProfileService::new(config.clone()));
@@ -156,16 +154,15 @@ impl ServiceContainer {
         ));
 
         // ---- Layer 8：定时任务调度器 ----
-        let scheduler = Arc::new(
-            SchedulerService::new(
-                config.clone(),
-                tasks.clone(),
-                executor.clone(),
-                status.clone(),
-                reload_rx,
-            )
-            .context("初始化 SchedulerService 失败")?,
-        );
+        // new() 经 Arc::new_cyclic 直接返回 Arc<Self>（自引用弱句柄，M1）
+        let scheduler = SchedulerService::new(
+            config.clone(),
+            tasks.clone(),
+            executor.clone(),
+            status.clone(),
+            reload_rx,
+        )
+        .context("初始化 SchedulerService 失败")?;
 
         // ---- Layer 9：更新器 ----
         let updater = UpdaterService::new(config.clone(), status.clone(), base_path.to_path_buf());

@@ -1220,11 +1220,9 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
-        let config = Arc::new(
-            crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
-                .await
-                .expect("ConfigService 构造失败"),
-        );
+        let config = crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
+            .await
+            .expect("ConfigService 构造失败");
         let status = Arc::new(crate::status::StatusManager::new());
         let bridge = BridgeSupervisor::new(dir.path().to_path_buf(), config, status, None);
 
@@ -1277,11 +1275,9 @@ mod tests {
     async fn test_ensure_worker_blocks_after_spawn_failures() {
         let dir = tempfile::TempDir::new().unwrap();
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
-        let config = Arc::new(
-            crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
-                .await
-                .expect("ConfigService 构造失败"),
-        );
+        let config = crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
+            .await
+            .expect("ConfigService 构造失败");
         let status = Arc::new(crate::status::StatusManager::new());
         let bridge = BridgeSupervisor::new(dir.path().to_path_buf(), config, status, None);
         // 模拟已连续失败 3 次（达到熔断阈值）

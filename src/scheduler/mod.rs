@@ -76,6 +76,9 @@ pub(crate) struct SchedulerState {
 pub struct SchedulerService {
     /// `tasks/scheduled/` 目录。
     scheduled_dir: PathBuf,
+    /// 自引用弱句柄：`spawn_manual_run` 需要在 spawned task 中克隆自身 `Arc`，
+    /// 经此获取而非 `self: &Arc<Self>` 接收者（消除 trait 化的结构摩擦，M1）。
+    self_weak: std::sync::Weak<Self>,
     /// 加载 browser/script/shell 任务配置。
     task_manager: Arc<TaskManager>,
     /// 脚本/Shell/浏览器任务执行。
@@ -100,17 +103,19 @@ pub struct SchedulerService {
 pub use crate::ServiceHandle;
 
 impl SchedulerService {
-    /// 构造调度器服务。
+    /// 构造调度器服务（直接返回 `Arc<Self>`）。
     ///
     /// 从 `ConfigService` 推导 `tasks/scheduled/` 目录并确保其存在；
     /// 创建容量 `CHANGE_CHANNEL_CAPACITY` 的内部变更 channel。
+    /// 经 `Arc::new_cyclic` 初始化自引用弱句柄，使 `spawn_manual_run` 等
+    /// 需要 clone 自身 Arc 的方法可用普通 `&self` 接收者表达（M1）。
     pub fn new(
         config: Arc<ConfigService>,
         tasks: Arc<TaskManager>,
         executor: Arc<crate::tasks::TaskExecutor>,
         status: Arc<StatusManager>,
         reload_rx: mpsc::Receiver<ConfigReloadSignal>,
-    ) -> Result<Self, SchedulerError> {
+    ) -> Result<Arc<Self>, SchedulerError> {
         let base_path = config.base_path();
         let scheduled_dir = base_path.join("tasks").join(SCHEDULED_DIR_NAME);
         std::fs::create_dir_all(&scheduled_dir).map_err(SchedulerError::IoError)?;
@@ -119,8 +124,9 @@ impl SchedulerService {
 
         let (task_change_tx, task_change_rx) = mpsc::channel(CHANGE_CHANNEL_CAPACITY);
 
-        Ok(Self {
+        Ok(Arc::new_cyclic(|weak| Self {
             scheduled_dir,
+            self_weak: weak.clone(),
             task_manager: tasks,
             executor,
             status_manager: status,
@@ -135,7 +141,7 @@ impl SchedulerService {
                 next_fire_at: None,
                 invalid_cron_ids: std::collections::HashSet::new(),
             }),
-        })
+        }))
     }
 
     /// 尝试标记任务为"执行中"：已在执行则返回 false（跳过本轮触发）
@@ -325,13 +331,18 @@ impl SchedulerService {
     /// 手动触发与定时触发走同一执行路径（`execute_scheduled_task`），
     /// 保证 run_id 不被死数据浪费、手动与 cron 触发共享 concurrency 限制。
     /// 同一任务已在执行时拒绝再次触发（与 cron 防重叠规则一致）。
-    pub fn spawn_manual_run(self: &Arc<Self>, task: crate::scheduler::task::ScheduledTask) {
-        if !self.try_mark_running(&task.id) {
+    ///
+    /// 自身 Arc 经 `self_weak` 升级获取（服务由容器持有强引用，运行期必然可达）。
+    pub fn spawn_manual_run(&self, task: crate::scheduler::task::ScheduledTask) {
+        let Some(svc) = self.self_weak.upgrade() else {
+            tracing::warn!(task_id = %task.id, "调度器已释放，忽略手动触发");
+            return;
+        };
+        if !svc.try_mark_running(&task.id) {
             tracing::warn!(task_id = %task.id, "任务正在执行中，拒绝手动重复触发");
             return;
         }
-        let svc = self.clone();
-        let sem = self.concurrency.clone();
+        let sem = svc.concurrency.clone();
         let marked_id = task.id.clone();
         tokio::spawn(async move {
             if let Ok(_permit) = sem.acquire_owned().await {
@@ -380,6 +391,77 @@ impl SchedulerService {
         .unwrap_or_else(|e| {
             tracing::warn!("写入执行历史任务失败: {e}");
         });
+    }
+}
+
+/// Web 层消费的调度器抽象（M1 细粒度 state：scheduler 域）。
+///
+/// handler 通过 `State<Arc<dyn SchedulerApi>>` 提取依赖，不再触达
+/// `state.container`，测试可注入内存实现（见 `web/routes/scheduler.rs` 模块测试）。
+#[async_trait::async_trait]
+pub trait SchedulerApi: Send + Sync {
+    /// 返回内存缓存中的任务列表副本。
+    fn list_tasks(&self) -> Vec<ScheduledTask>;
+    /// 查询单个任务。
+    fn get_task(&self, id: &str) -> Option<ScheduledTask>;
+    /// 返回目标任务的类型（`browser`/`script`/`shell`）。
+    async fn task_type_of(&self, target_id: &str) -> Option<&'static str>;
+    /// 保存任务（创建或更新）。
+    async fn save_task(&self, id: &str, task: &ScheduledTask) -> Result<(), SchedulerError>;
+    /// 删除任务。
+    async fn delete_task(&self, id: &str) -> Result<(), SchedulerError>;
+    /// 启用/禁用任务。
+    async fn toggle_task(&self, id: &str, enabled: bool) -> Result<(), SchedulerError>;
+    /// 通知主循环重算。
+    fn notify_change(&self);
+    /// 查询指定任务的 cron 表达式是否解析失败。
+    fn is_cron_invalid(&self, id: &str) -> bool;
+    /// 手动触发执行定时任务。
+    fn spawn_manual_run(&self, task: ScheduledTask);
+    /// 返回定时任务历史目录路径。
+    fn history_dir(&self) -> PathBuf;
+}
+
+#[async_trait::async_trait]
+impl SchedulerApi for SchedulerService {
+    fn list_tasks(&self) -> Vec<ScheduledTask> {
+        SchedulerService::list_tasks(self)
+    }
+
+    fn get_task(&self, id: &str) -> Option<ScheduledTask> {
+        SchedulerService::get_task(self, id)
+    }
+
+    async fn task_type_of(&self, target_id: &str) -> Option<&'static str> {
+        SchedulerService::task_type_of(self, target_id).await
+    }
+
+    async fn save_task(&self, id: &str, task: &ScheduledTask) -> Result<(), SchedulerError> {
+        SchedulerService::save_task(self, id, task).await
+    }
+
+    async fn delete_task(&self, id: &str) -> Result<(), SchedulerError> {
+        SchedulerService::delete_task(self, id).await
+    }
+
+    async fn toggle_task(&self, id: &str, enabled: bool) -> Result<(), SchedulerError> {
+        SchedulerService::toggle_task(self, id, enabled).await
+    }
+
+    fn notify_change(&self) {
+        SchedulerService::notify_change(self);
+    }
+
+    fn is_cron_invalid(&self, id: &str) -> bool {
+        SchedulerService::is_cron_invalid(self, id)
+    }
+
+    fn spawn_manual_run(&self, task: ScheduledTask) {
+        SchedulerService::spawn_manual_run(self, task);
+    }
+
+    fn history_dir(&self) -> PathBuf {
+        SchedulerService::history_dir(self)
     }
 }
 

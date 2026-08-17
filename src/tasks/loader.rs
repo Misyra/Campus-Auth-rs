@@ -767,7 +767,7 @@ mod tests {
     async fn make_task_manager() -> (tempfile::TempDir, Arc<TaskManager>) {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let config = Arc::new(ConfigService::new(tmp.path().to_path_buf(), tx).await.unwrap());
+        let config = ConfigService::new(tmp.path().to_path_buf(), tx).await.unwrap();
         let mgr = TaskManager::new(tmp.path(), config);
         (tmp, mgr)
     }

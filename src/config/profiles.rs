@@ -212,7 +212,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let service = ConfigService::new(tmp.path().to_path_buf(), tx).await.unwrap();
-        (tmp, Arc::new(service))
+        (tmp, service)
     }
 
     // ============ save_password 三种输入 ============

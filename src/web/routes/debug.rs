@@ -1,9 +1,15 @@
 //! 调试路由：调试会话管理（通过 Bridge 执行调试命令）
+//!
+//! M1 细粒度 state（tasks 域）：`start_debug` 经 `State<Arc<dyn TaskApi>>`
+//! 嵌入任务配置；Bridge 为独立域尚未 trait 化，仍经 `state.container` 触达。
+
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
 use serde_json::Value;
 
+use crate::tasks::TaskApi;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
 
@@ -12,6 +18,7 @@ use crate::web::state::AppState;
 /// 前端仅提供 `task_id` 时，按 id 加载浏览器任务配置并嵌入 `task_config` 键，
 /// 与 Python Worker 的 `debug_start` 契约一致（步骤载体为 `task_config`）。
 pub async fn start_debug(
+    State(tasks): State<Arc<dyn TaskApi>>,
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
@@ -19,7 +26,7 @@ pub async fn start_debug(
     if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
         // 显式传入 task_config 时不覆盖；否则按 id 嵌入浏览器任务配置
         if !task_id.is_empty() && body.get("task_config").is_none() {
-            state.container.tasks.embed_task_config(task_id, &mut params).await;
+            tasks.embed_task_config(task_id, &mut params).await;
         }
     }
     let result = state.container.bridge.execute("debug_start", params).await?;

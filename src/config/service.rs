@@ -142,14 +142,19 @@ pub struct ConfigService {
     crypto: PasswordCrypto,
     /// 配置变更通知通道（仅发信号，不传内容）
     reload_tx: Sender<ConfigReloadSignal>,
+    /// 自引用弱句柄：`load_settings_async` 等需要 clone 自身 Arc 进入
+    /// spawn_blocking 的方法经此获取，消除 `self: &Arc<Self>` 接收者（M1）。
+    self_weak: std::sync::Weak<Self>,
 }
 
 impl ConfigService {
     /// 创建实例：确保目录、加载/迁移配置、构建 RuntimeConfig
+    ///
+    /// 直接返回 `Arc<Self>`（经 `Arc::new_cyclic` 初始化自引用弱句柄，M1）。
     pub async fn new(
         base_path: PathBuf,
         reload_tx: Sender<ConfigReloadSignal>,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Arc<Self>, ConfigError> {
         // 同步文件 I/O（建目录/清理 tmp/读配置/迁移/解密）移入 spawn_blocking，
         // 避免在 async 构造函数内直接阻塞 tokio worker 线程。
         tokio::task::spawn_blocking(move || Self::new_sync(base_path, reload_tx))
@@ -163,7 +168,7 @@ impl ConfigService {
     fn new_sync(
         base_path: PathBuf,
         reload_tx: Sender<ConfigReloadSignal>,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Arc<Self>, ConfigError> {
         let config_dir = base_path.join(crate::config::CONFIG_DIR);
         let settings_path = config_dir.join(crate::config::SETTINGS_FILE);
         let profiles_dir = config_dir.join(crate::config::PROFILES_DIR);
@@ -215,7 +220,7 @@ impl ConfigService {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        let service = Self {
+        let service = Arc::new_cyclic(|weak| Self {
             base_path,
             config_dir,
             settings_path,
@@ -231,13 +236,19 @@ impl ConfigService {
             profile_cache: Mutex::new(HashMap::new()),
             crypto,
             reload_tx,
-        };
+            self_weak: weak.clone(),
+        });
         Ok(service)
     }
 
     /// 获取 RuntimeConfig 无锁快照引用
     pub fn runtime(&self) -> &Arc<ArcSwap<RuntimeConfig>> {
         &self.runtime
+    }
+
+    /// 获取 RuntimeConfig 快照的 Arc 克隆（无锁读，trait 化供 Web 层消费）
+    pub fn runtime_snapshot(&self) -> Arc<RuntimeConfig> {
+        self.runtime.load_full()
     }
 
     /// 为指定 Profile 构建运行时快照（含解密后的密码）
@@ -306,12 +317,15 @@ impl ConfigService {
     /// 加载 settings.json 的异步版本（供 async handler 调用）
     ///
     /// [`Self::load_settings`] 内含 `std::fs::metadata` + `read_to_string` 同步 IO，
-    /// 直接在 async handler 中调用会阻塞 tokio worker 线程。此方法将 self 经
-    /// Arc clone 后移入 `spawn_blocking`，在阻塞线程池中复用同步实现。
-    /// 内部 settings_cache 为 `std::sync::Mutex`，临界区极短（mtime 比对与缓存
-    /// 替换），在阻塞线程中短暂持锁是安全的。
-    pub async fn load_settings_async(self: &Arc<Self>) -> SettingsData {
-        let this = self.clone();
+    /// 直接在 async handler 中调用会阻塞 tokio worker 线程。此方法将自身 Arc
+    /// （经 `self_weak` 升级）clone 后移入 `spawn_blocking`，在阻塞线程池中复用
+    /// 同步实现。内部 settings_cache 为 `std::sync::Mutex`，临界区极短（mtime
+    /// 比对与缓存替换），在阻塞线程中短暂持锁是安全的。
+    pub async fn load_settings_async(&self) -> SettingsData {
+        let Some(this) = self.self_weak.upgrade() else {
+            tracing::error!("ConfigService 已释放，返回默认配置");
+            return SettingsData::default();
+        };
         tokio::task::spawn_blocking(move || this.load_settings())
             .await
             .unwrap_or_else(|e| {
@@ -840,11 +854,9 @@ mod tests {
         // 获取两把锁，此用例暴露死锁/丢失写。
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let svc = Arc::new(
-            ConfigService::new(tmp.path().to_path_buf(), tx)
-                .await
-                .unwrap(),
-        );
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
 
         let mut settings = svc.load_settings();
         settings.active_profile_id = "default".to_string();

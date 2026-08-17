@@ -1,10 +1,17 @@
 //! 配置路由：全局设置读写、日志级别、纯净模式
+//!
+//! M1 细粒度 state（config 域）：handler 声明 `State<Arc<dyn ConfigApi>>` 依赖，
+//! 不再触达 `state.container`（patch_settings 除外：还需 ProfileService 保存
+//! 凭据，经 `state.config` 直字段触达配置域）。
+
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::config::ConfigApi;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
 
@@ -14,18 +21,18 @@ use crate::web::state::AppState;
 /// { browser, monitor, pause, logging, retry, app_settings, credentials, active_task }
 /// monitor 字段做后端→前端字段名映射
 pub async fn get_settings(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings_async().await;
+    let settings = config.load_settings_async().await;
     let active_id = &settings.active_profile_id;
-    let profile = state.container.config.load_profile(active_id).unwrap_or_default();
+    let profile = config.load_profile(active_id).unwrap_or_default();
 
     // has_password 必须反映"密码可用"（能解密），而非仅"字段非空"。
     // 否则密钥变更/格式不兼容时，前端误认为已保存 → 不重新输入 → 登录报缺少 password。
     let has_password = if profile.password.is_empty() {
         false
     } else {
-        state.container.config.can_decrypt_password(&profile.password)
+        config.can_decrypt_password(&profile.password)
     };
 
     Ok(data(serde_json::json!({
@@ -48,14 +55,14 @@ pub async fn get_settings(
 
 /// PUT /api/config — 全量更新设置
 pub async fn put_settings(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let settings: crate::config::SettingsData = serde_json::from_value(body)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    state.container.config.save_settings(&settings).await?;
-    state.container.config.reload().await?;
-    let updated = state.container.config.load_settings_async().await;
+    config.save_settings(&settings).await?;
+    config.reload().await?;
+    let updated = config.load_settings_async().await;
     Ok(data(serde_json::to_value(updated)?))
 }
 
@@ -143,7 +150,7 @@ pub async fn patch_settings(
                 .and_then(|v| v.as_str())
                 .unwrap_or("default")
                 .to_string();
-            if let Ok(mut profile) = state.container.config.load_profile(&active_id) {
+            if let Ok(mut profile) = state.config.load_profile(&active_id) {
                 if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
                     profile.username = username.to_string();
                 }
@@ -163,24 +170,24 @@ pub async fn patch_settings(
                         .profiles
                         .save_password(Some(pwd_str), &profile.password);
                 }
-                state.container.config.save_profile(&profile).await?;
+                state.config.save_profile(&profile).await?;
             }
         }
     }
 
     current = serde_json::from_value(current_value)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    state.container.config.save_settings(&current).await?;
-    state.container.config.reload().await?;
-    let settings = state.container.config.load_settings_async().await;
+    state.config.save_settings(&current).await?;
+    state.config.reload().await?;
+    let settings = state.config.load_settings_async().await;
     let active_id = &settings.active_profile_id;
-    let profile = state.container.config.load_profile(active_id).unwrap_or_default();
+    let profile = state.config.load_profile(active_id).unwrap_or_default();
     // has_password 应与 GET /api/config 保持一致：反映"密码可解密"而非"字段非空"，
     // 否则密钥不可用时刚保存显示成功、刷新又提示需重输，造成体验割裂。
     let has_password = if profile.password.is_empty() {
         false
     } else {
-        state.container.config.can_decrypt_password(&profile.password)
+        state.config.can_decrypt_password(&profile.password)
     };
     Ok(data(serde_json::json!({
         "browser": settings.global.browser,
@@ -202,9 +209,9 @@ pub async fn patch_settings(
 
 /// POST /api/config/reload — 重新加载配置
 pub async fn reload_settings(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    state.container.config.reload().await?;
+    config.reload().await?;
     Ok(data(Value::String("ok".into())))
 }
 
@@ -234,9 +241,9 @@ pub async fn get_config_defaults(
 
 /// GET /api/config/log-levels — 返回当前日志级别
 pub async fn get_log_levels(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings_async().await;
+    let settings = config.load_settings_async().await;
     Ok(data(serde_json::json!({ "level": settings.global.logging.level })))
 }
 
@@ -247,12 +254,12 @@ pub struct SetLogLevelBody {
 
 /// PUT /api/config/log-level — 设置日志级别
 pub async fn set_log_level(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<SetLogLevelBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings_async().await;
+    let mut settings = config.load_settings_async().await;
     settings.global.logging.level = body.level.clone();
-    state.container.config.save_settings(&settings).await?;
+    config.save_settings(&settings).await?;
     // 热更新运行时日志级别（tracing filter），而非仅落盘下次启动生效
     crate::launcher::reload_log_level(&body.level);
     Ok(data(body.level))
@@ -305,9 +312,9 @@ pub async fn get_default_stealth_script(
 
 /// GET /api/pure-mode — 获取纯净模式状态
 pub async fn get_pure_mode(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings_async().await;
+    let settings = config.load_settings_async().await;
     Ok(data(serde_json::json!({ "enabled": settings.global.browser.pure_mode })))
 }
 
@@ -315,12 +322,12 @@ pub async fn get_pure_mode(
 ///
 /// 前端不发送请求体，后端读取当前值取反后保存。
 pub async fn set_pure_mode(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings_async().await;
+    let mut settings = config.load_settings_async().await;
     let new_enabled = !settings.global.browser.pure_mode;
     settings.global.browser.pure_mode = new_enabled;
-    state.container.config.save_settings(&settings).await?;
+    config.save_settings(&settings).await?;
     Ok(data(serde_json::json!({ "enabled": new_enabled, "message": "纯净模式已切换" })))
 }
 
@@ -535,5 +542,231 @@ mod tests {
         let mut target = serde_json::json!({"a": {"nested": true}});
         json_merge(&mut target, &serde_json::json!({"a": 5}));
         assert_eq!(target["a"], 5);
+    }
+
+    // ============ handler 级单测（内存 MockConfigApi，M1） ============
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt; // oneshot
+
+    use crate::config::{ConfigError, ProfileData};
+
+    #[derive(Default)]
+    struct MockInner {
+        settings: crate::config::SettingsData,
+        profile: ProfileData,
+        save_calls: usize,
+        reload_calls: usize,
+    }
+
+    /// 内存 ConfigApi：无需磁盘与完整 ServiceContainer
+    struct MockConfigApi(Arc<std::sync::Mutex<MockInner>>);
+
+    #[async_trait::async_trait]
+    impl ConfigApi for MockConfigApi {
+        async fn load_settings_async(&self) -> crate::config::SettingsData {
+            self.0.lock().unwrap().settings.clone()
+        }
+
+        async fn save_settings(&self, data: &crate::config::SettingsData) -> Result<(), ConfigError> {
+            let mut inner = self.0.lock().unwrap();
+            inner.settings = data.clone();
+            inner.save_calls += 1;
+            Ok(())
+        }
+
+        fn load_profile(&self, _id: &str) -> Result<ProfileData, ConfigError> {
+            Ok(self.0.lock().unwrap().profile.clone())
+        }
+
+        async fn save_profile(&self, profile: &ProfileData) -> Result<(), ConfigError> {
+            self.0.lock().unwrap().profile = profile.clone();
+            Ok(())
+        }
+
+        async fn reload(&self) -> Result<(), ConfigError> {
+            self.0.lock().unwrap().reload_calls += 1;
+            Ok(())
+        }
+
+        fn can_decrypt_password(&self, _ciphertext: &str) -> bool {
+            true
+        }
+
+        fn has_decryption_error(&self) -> bool {
+            false
+        }
+
+        fn base_path(&self) -> std::path::PathBuf {
+            std::path::PathBuf::new()
+        }
+
+        fn runtime_snapshot(&self) -> std::sync::Arc<crate::config::RuntimeConfig> {
+            std::sync::Arc::new(test_runtime_config())
+        }
+    }
+
+    /// 构造测试用 RuntimeConfig（类型未派生 Default，字段逐个填充默认值）
+    fn test_runtime_config() -> crate::config::RuntimeConfig {
+        use crate::config::{
+            AppSettings, BrowserSettings, LoggingSettings, MonitorSettings, PauseSettings,
+            ProfileSnapshot, RetrySettings, RuntimeConfig, UpdaterSettings, WorkerSettings,
+        };
+        RuntimeConfig {
+            browser: BrowserSettings::default(),
+            monitor: MonitorSettings::default(),
+            pause: PauseSettings::default(),
+            logging: LoggingSettings::default(),
+            retry: RetrySettings::default(),
+            worker: WorkerSettings::default(),
+            app: AppSettings::default(),
+            updater: UpdaterSettings::default(),
+            profile: ProfileSnapshot {
+                id: "default".into(),
+                name: String::new(),
+                username: String::new(),
+                password: zeroize::Zeroizing::new(String::new()),
+                auth_url: String::new(),
+                isp: String::new(),
+                gateway_ip: String::new(),
+                wifi_ssid: String::new(),
+                active_task: String::new(),
+                password_reinput_needed: false,
+            },
+            auto_switch: false,
+        }
+    }
+
+    fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
+        let inner = Arc::new(std::sync::Mutex::new(MockInner {
+            settings: crate::config::SettingsData::default(),
+            profile: ProfileData::default(),
+            save_calls: 0,
+            reload_calls: 0,
+        }));
+        let api: Arc<dyn ConfigApi> = Arc::new(MockConfigApi(inner.clone()));
+        let app = axum::Router::new()
+            .route("/api/config", get(get_settings).put(put_settings))
+            .route("/api/config/log-levels", get(get_log_levels))
+            .route("/api/config/log-level", axum::routing::put(set_log_level))
+            .route("/api/pure-mode", get(get_pure_mode).post(set_pure_mode))
+            .with_state(api);
+        (app, inner)
+    }
+
+    async fn body_json(resp: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// GET 返回扁平结构与 has_password 计算字段（密码为空 → false）
+    #[tokio::test]
+    async fn test_get_settings_flat_shape() {
+        let (app, inner) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            g.settings.active_profile_id = "default".into();
+            g.profile.username = "user1".into();
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let d = &v["data"];
+        assert_eq!(d["username"], "user1");
+        assert_eq!(d["has_password"], false);
+        // 扁平结构包含各域
+        for key in ["browser", "monitor", "pause", "logging", "retry", "app_settings"] {
+            assert!(d.get(key).is_some(), "缺少字段 {key}");
+        }
+    }
+
+    /// PUT 全量保存后触发 reload 并回读
+    #[tokio::test]
+    async fn test_put_settings_saves_and_reloads() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"active_profile_id": "default"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        assert_eq!(g.save_calls, 1);
+        assert_eq!(g.reload_calls, 1);
+    }
+
+    /// 日志级别读写往返
+    #[tokio::test]
+    async fn test_log_level_roundtrip() {
+        let (app, inner) = mock_app();
+        // 设置
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/log-level")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"level": "debug"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(inner.lock().unwrap().settings.global.logging.level, "debug");
+        // 读取
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/log-levels")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["level"], "debug");
+    }
+
+    /// 纯净模式 toggle 翻转
+    #[tokio::test]
+    async fn test_pure_mode_toggles() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pure-mode")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["enabled"], true);
+        assert!(inner.lock().unwrap().settings.global.browser.pure_mode);
     }
 }

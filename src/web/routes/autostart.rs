@@ -1,12 +1,17 @@
 //! 自启动路由：自启动状态、启用/禁用、模式
+//!
+//! M1 细粒度 state（config 域）：handler 声明 `State<Arc<dyn ConfigApi>>` 依赖，
+//! 不再触达 `state.container`。
+
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::config::ConfigApi;
 use crate::web::error::{data, ApiError};
-use crate::web::state::AppState;
 
 #[derive(Deserialize)]
 pub struct AutostartModeBody {
@@ -16,9 +21,9 @@ pub struct AutostartModeBody {
 
 /// GET /api/autostart/status — 获取自启动状态
 pub async fn get_autostart(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings_async().await;
+    let settings = config.load_settings_async().await;
     let enabled = settings.global.app.autostart_enabled;
     let runtime_mode = serde_json::to_value(&settings.global.app.startup_action)
         .ok()
@@ -44,11 +49,11 @@ pub async fn get_autostart(
 
 /// POST /api/autostart/enable — 启用自启动
 pub async fn enable_autostart(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings_async().await;
+    let mut settings = config.load_settings_async().await;
     settings.global.app.autostart_enabled = true;
-    state.container.config.save_settings(&settings).await?;
+    config.save_settings(&settings).await?;
     // 真正注册系统自启动（schtasks 计划任务）
     register_self_start(true).await?;
     Ok(data(serde_json::json!({ "message": "已启用开机自启动" })))
@@ -56,11 +61,11 @@ pub async fn enable_autostart(
 
 /// POST /api/autostart/disable — 禁用自启动
 pub async fn disable_autostart(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings_async().await;
+    let mut settings = config.load_settings_async().await;
     settings.global.app.autostart_enabled = false;
-    state.container.config.save_settings(&settings).await?;
+    config.save_settings(&settings).await?;
     // 真正取消系统自启动注册
     register_self_start(false).await?;
     Ok(data(serde_json::json!({ "message": "已禁用开机自启动" })))
@@ -80,10 +85,10 @@ async fn register_self_start(enabled: bool) -> Result<(), ApiError> {
 
 /// POST /api/autostart/mode — 设置自启动模式（startup_action）
 pub async fn set_autostart_mode(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<AutostartModeBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings_async().await;
+    let mut settings = config.load_settings_async().await;
     let action = match body.runtime_mode.as_str() {
         "login_once" => crate::config::StartupAction::LoginOnce,
         "monitor" => crate::config::StartupAction::Monitor,
@@ -95,6 +100,6 @@ pub async fn set_autostart_mode(
         }
     };
     settings.global.app.startup_action = action;
-    state.container.config.save_settings(&settings).await?;
+    config.save_settings(&settings).await?;
     Ok(data(serde_json::json!({ "message": "自启动模式已更新" })))
 }
