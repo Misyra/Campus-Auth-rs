@@ -110,7 +110,7 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
     let mut epoch_rx = state.ws_epoch_tx.subscribe();
 
     let mut log_rx = state.log_tx.subscribe();
-    let mut status_rx = state.container.status.subscribe();
+    let mut status_rx = state.status.subscribe();
     // 通用事件通道（screenshot / step_progress 等），由 Bridge 推送
     let mut ws_rx = state.ws_tx.subscribe();
 

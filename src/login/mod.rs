@@ -111,6 +111,20 @@ impl LoginHandle {
     pub fn source(&self) -> LoginSource {
         self.source
     }
+
+    /// 由既有终态结果构造「立即终态」句柄
+    ///
+    /// 结果创建时已就绪：`await_result` 立即返回、`cancel` 无副作用。
+    /// 供校验失败等无需真正执行的场景，及测试 mock 构造（M1）。
+    pub fn immediate(result: LoginResult) -> Self {
+        let source = result.source;
+        let (result_tx, _rx) = watch::channel(Some(result));
+        Self {
+            source,
+            cancel_token: CancellationToken::new(),
+            inner: Arc::new(LoginHandleInner { result_tx }),
+        }
+    }
 }
 
 /// 活跃会话记录（位于 `OrchestratorState` 中）
@@ -135,6 +149,40 @@ struct OrchestratorState {
     active_session: Option<ActiveSession>,
     /// 会话 ID 自增计数器
     next_session_id: u64,
+}
+
+/// Web 层消费的登录编排抽象（M1 细粒度 state 第二域）
+///
+/// handler 通过 `State<Arc<dyn LoginApi>>` 提取依赖，测试可注入内存实现
+/// （配合 [`LoginHandle::immediate`] 构造立即终态句柄）。
+#[async_trait::async_trait]
+pub trait LoginApi: Send + Sync {
+    /// 提交登录会话，返回控制句柄（校验失败等以立即终态句柄体现，不返回 Result）
+    async fn submit(
+        &self,
+        source: LoginSource,
+        task_id: Option<String>,
+        profile_id: Option<String>,
+    ) -> LoginHandle;
+
+    /// 取消当前登录会话（等待状态锁，不静默丢弃取消）
+    async fn cancel_current(&self);
+}
+
+#[async_trait::async_trait]
+impl LoginApi for LoginOrchestrator {
+    async fn submit(
+        &self,
+        source: LoginSource,
+        task_id: Option<String>,
+        profile_id: Option<String>,
+    ) -> LoginHandle {
+        LoginOrchestrator::submit(self, source, task_id, profile_id).await
+    }
+
+    async fn cancel_current(&self) {
+        LoginOrchestrator::cancel_current(self).await
+    }
 }
 
 /// 登录统一入口（编排器）
@@ -445,14 +493,6 @@ impl LoginOrchestrator {
         message: String,
         profile_id: String,
     ) -> LoginHandle {
-        let (result_tx, _rx) = watch::channel(Some(LoginResult {
-            success,
-            message: message.clone(),
-            source,
-            duration: Duration::ZERO,
-            attempts: 0,
-        }));
-        let inner = Arc::new(LoginHandleInner { result_tx });
         // 与 LoginSession::finish 终态广播保持一致：立即终态同样要合并到
         // StatusManager，否则配置校验失败等场景前端状态停留在 Idle/Running，
         // 用户无从得知失败原因（M4：状态更新协议统一，所有终态必经广播）
@@ -482,11 +522,13 @@ impl LoginOrchestrator {
         if let Err(e) = self.history.record(&entry).await {
             warn!("登录历史写入失败: {e}");
         }
-        LoginHandle {
+        LoginHandle::immediate(LoginResult {
+            success,
+            message,
             source,
-            cancel_token: CancellationToken::new(),
-            inner,
-        }
+            duration: Duration::ZERO,
+            attempts: 0,
+        })
     }
 
     /// 构造发送给 Worker 的配置字典（凭证、auth_url、浏览器设置等）
@@ -575,7 +617,7 @@ fn parse_host_port(url: &str) -> Option<String> {
 // 重新导出公共类型，供 `crate::login::*` 引用
 pub use crate::status::LoginSource;
 pub use crate::bridge::{Outcome as LoginOutcome, StructuredResult};
-pub use history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
+pub use history::{HistoryResult, LoginHistoryEntry, LoginHistoryService, HistoryStore};
 pub use preemption::{decide, PreemptionDecision};
 pub use session::{LoginResult, LoginSession, LoginState, ResultAction, TerminalKind};
 

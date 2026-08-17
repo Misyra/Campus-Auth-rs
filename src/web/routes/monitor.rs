@@ -1,19 +1,22 @@
 //! 监控路由：系统状态快照、网络测试
 
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::Json;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::engine::{EngineCommand, TestNetworkResult};
+use crate::status::StatusManager;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
 
 /// GET /api/monitor/status — 获取当前系统状态快照
 pub async fn get_status(
-    State(state): State<AppState>,
+    State(status): State<Arc<StatusManager>>,
 ) -> Result<Json<Value>, ApiError> {
-    let snapshot = state.container.status.borrow();
+    let snapshot = status.borrow();
     Ok(data(serde_json::to_value(&snapshot)?))
 }
 

@@ -67,6 +67,39 @@ pub struct LoginHistoryService {
     base_path: PathBuf,
 }
 
+/// Web 层消费的历史存储抽象（M1 细粒度 state 试点）
+///
+/// handler 通过 `State<Arc<dyn HistoryStore>>` 提取依赖（AppState 实现了
+/// [`axum::extract::FromRef`] 委派），测试可用内存实现直接构造 mini Router
+/// 做 handler 级单测，无需装配完整 ServiceContainer。
+#[async_trait::async_trait]
+pub trait HistoryStore: Send + Sync {
+    /// 查询日期区间 `[from, to]` 内的全部记录，按时间升序排列
+    async fn query(
+        &self,
+        from: DateTime<Local>,
+        to: DateTime<Local>,
+    ) -> Result<Vec<LoginHistoryEntry>, std::io::Error>;
+
+    /// 清空全部历史
+    async fn clear(&self) -> Result<(), std::io::Error>;
+}
+
+#[async_trait::async_trait]
+impl HistoryStore for LoginHistoryService {
+    async fn query(
+        &self,
+        from: DateTime<Local>,
+        to: DateTime<Local>,
+    ) -> Result<Vec<LoginHistoryEntry>, std::io::Error> {
+        LoginHistoryService::query(self, from, to).await
+    }
+
+    async fn clear(&self) -> Result<(), std::io::Error> {
+        LoginHistoryService::clear(self).await
+    }
+}
+
 impl LoginHistoryService {
     /// 构造历史服务（基准路径通常为 exe 所在目录）
     pub fn new(base_path: &Path) -> Self {

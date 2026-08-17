@@ -7,6 +7,8 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::container::ServiceContainer;
+use crate::login::{HistoryStore, LoginApi};
+use crate::status::StatusManager;
 
 /// WebSocket 日志条目（由内部事件推入广播通道，供 /ws/logs 订阅）
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +74,14 @@ pub fn normalize_source(target: &str) -> String {
 pub struct AppState {
     /// 服务容器（持有全部服务 Arc）
     pub container: Arc<ServiceContainer>,
+    /// 登录历史存储（细粒度依赖，M1 试点：handler 经 FromRef 以
+    /// `State<Arc<dyn HistoryStore>>` 提取，测试可注入内存实现）
+    pub history: Arc<dyn HistoryStore>,
+    /// 登录编排（M1 第二域：`State<Arc<dyn LoginApi>>` 提取）
+    pub login: Arc<dyn LoginApi>,
+    /// 状态管理器（M1：直字段替代 container.status 触达；StatusManager 本身
+    /// 即内存实现，测试可直接构造，无需 trait 抽象）
+    pub status: Arc<StatusManager>,
     /// 日志广播通道（WebSocket 订阅）
     pub log_tx: broadcast::Sender<LogEntry>,
     /// 通用事件广播通道（WebSocket 订阅，承载 screenshot/step_progress 等）
@@ -96,14 +106,44 @@ impl AppState {
     ) -> Self {
         // 初始世代号 0：首个连接接入后 +1 变为 1
         let (ws_epoch_tx, _) = watch::channel(0u64);
+        // 细粒度依赖从容器抽出（trait object 化），handler 不再触达 container
+        let history: Arc<dyn HistoryStore> = container.history.clone();
+        let login: Arc<dyn LoginApi> = container.login.clone();
+        let status = container.status.clone();
         Self {
             container,
+            history,
+            login,
+            status,
             log_tx,
             ws_tx,
             shutdown_tx,
             ws_epoch_tx,
             auth_token,
         }
+    }
+}
+
+/// 委派提取：handler 声明 `State<Arc<dyn HistoryStore>>` 即可从 AppState 取得
+/// 细粒度依赖（M1）。axum 对 `State<S>` 本身的恒等 FromRef 已内建，此 impl
+/// 仅服务于「Router 级 state 为 AppState」的主路由装配。
+impl axum::extract::FromRef<AppState> for Arc<dyn HistoryStore> {
+    fn from_ref(state: &AppState) -> Self {
+        state.history.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn LoginApi>>`（M1 第二域）
+impl axum::extract::FromRef<AppState> for Arc<dyn LoginApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.login.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<StatusManager>>`（M1：status 直字段）
+impl axum::extract::FromRef<AppState> for Arc<StatusManager> {
+    fn from_ref(state: &AppState) -> Self {
+        state.status.clone()
     }
 }
 
