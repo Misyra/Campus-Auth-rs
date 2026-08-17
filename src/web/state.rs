@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use crate::bridge::BridgeApi;
 use crate::config::{ConfigApi, ProfileApi};
 use crate::container::ServiceContainer;
+use crate::engine::EngineApi;
 use crate::environment::EnvironmentApi;
 use crate::login::{HistoryStore, LoginApi};
 use crate::scheduler::SchedulerApi;
@@ -103,6 +104,9 @@ pub struct AppState {
     pub environment: Arc<dyn EnvironmentApi>,
     /// 更新器（M1 第九域：`State<Arc<dyn UpdaterApi>>` 提取）
     pub updater: Arc<dyn UpdaterApi>,
+    /// 引擎（M1 第十域：`State<Arc<dyn EngineApi>>` 提取；实现为
+    /// EngineSlot，崩溃重启后自动指向新实例，引用收口见 engine/slot.rs）
+    pub engine: Arc<dyn EngineApi>,
     /// 运行指标（M1：直字段；Metrics 为内存 AtomicU64 集合，无需 trait 抽象）
     pub metrics: Arc<Metrics>,
     /// 状态管理器（M1：直字段替代 container.status 触达；StatusManager 本身
@@ -143,6 +147,7 @@ impl AppState {
         let bridge: Arc<dyn BridgeApi> = container.bridge.clone();
         let environment: Arc<dyn EnvironmentApi> = container.environment.clone();
         let updater: Arc<dyn UpdaterApi> = container.updater.clone();
+        let engine: Arc<dyn EngineApi> = Arc::new(container.engine.clone());
         let metrics = container.metrics.clone();
         let status = container.status.clone();
         Self {
@@ -157,6 +162,7 @@ impl AppState {
             bridge,
             environment,
             updater,
+            engine,
             metrics,
             status,
             log_tx,
@@ -237,6 +243,13 @@ impl axum::extract::FromRef<AppState> for Arc<dyn EnvironmentApi> {
 impl axum::extract::FromRef<AppState> for Arc<dyn UpdaterApi> {
     fn from_ref(state: &AppState) -> Self {
         state.updater.clone()
+    }
+}
+
+/// 委派提取：`State<Arc<dyn EngineApi>>`（M1 第十域：engine）
+impl axum::extract::FromRef<AppState> for Arc<dyn EngineApi> {
+    fn from_ref(state: &AppState) -> Self {
+        state.engine.clone()
     }
 }
 

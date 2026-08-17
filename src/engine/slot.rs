@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 
-use crate::engine::{Engine, EngineCommand, EngineError, EngineHandle};
+use crate::engine::{Engine, EngineCommand, EngineError, EngineHandle, TestNetworkResult};
 
 /// 可替换的 Engine 句柄槽（Clone 共享同一底层存储）
 #[derive(Clone)]
@@ -64,6 +64,21 @@ impl EngineSlot {
         match self.current_engine() {
             Some(engine) => engine.try_dispatch(cmd),
             None => Err(EngineError::ChannelClosed),
+        }
+    }
+
+    /// 执行一次网络探测并等待回复（30s 超时，Web /api/monitor/test 使用）
+    ///
+    /// 派发 `EngineCommand::TestNetwork` 到当前活跃 Engine 并等待 oneshot 回复；
+    /// reply 通道被对端丢弃（Engine 崩溃）映射为 [`EngineError::ChannelClosed`]，
+    /// 等待超时映射为 [`EngineError::TestNetworkTimeout`]。
+    pub async fn test_network(&self) -> Result<TestNetworkResult, EngineError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.try_dispatch(EngineCommand::TestNetwork { reply: reply_tx })?;
+        match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(EngineError::ChannelClosed),
+            Err(_) => Err(EngineError::TestNetworkTimeout),
         }
     }
 }
@@ -130,6 +145,58 @@ mod tests {
         assert!(Arc::ptr_eq(
             &cloned.current_handle().unwrap(),
             &slot.current_handle().unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_test_network_receives_reply_from_engine() {
+        use crate::engine::ProbeDetails;
+        use crate::status::NetworkStatus;
+
+        let (handle, mut rx) = bare_handle();
+        let slot = EngineSlot::new(handle);
+        // 模拟 Engine 处理 TestNetwork 命令并回传结果
+        tokio::spawn(async move {
+            if let Some(EngineCommand::TestNetwork { reply }) = rx.recv().await {
+                let _ = reply.send(Ok(TestNetworkResult {
+                    status: NetworkStatus::Online,
+                    details: ProbeDetails {
+                        tcp: vec!["Pass".into()],
+                        http: vec![],
+                        url: vec![],
+                    },
+                    duration_ms: 42,
+                }));
+            }
+        });
+        let result = slot.test_network().await.unwrap();
+        assert_eq!(result.duration_ms, 42);
+    }
+
+    #[tokio::test]
+    async fn test_test_network_without_engine_is_channel_closed() {
+        let (handle, _rx) = bare_handle();
+        let slot = EngineSlot::new(handle);
+        slot.clear();
+        assert!(matches!(
+            slot.test_network().await,
+            Err(EngineError::ChannelClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_test_network_reply_dropped_is_channel_closed() {
+        let (handle, mut rx) = bare_handle();
+        let slot = EngineSlot::new(handle);
+        // 模拟 Engine 收到命令但未回复即丢弃（崩溃场景）
+        tokio::spawn(async move {
+            if let Some(EngineCommand::TestNetwork { reply }) = rx.recv().await {
+                drop(reply);
+            }
+        });
+        assert!(matches!(
+            slot.test_network().await,
+            Err(EngineError::ChannelClosed)
         ));
     }
 }

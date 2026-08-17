@@ -50,6 +50,10 @@ pub enum EngineError {
     /// 网络探测失败（内部错误）
     #[error("网络探测执行失败: {0}")]
     ProbeError(String),
+
+    /// 网络测试等待回复超时（EngineSlot::test_network 30s 预算）
+    #[error("网络测试超时")]
+    TestNetworkTimeout,
 }
 
 /// Engine 构造依赖包
@@ -161,6 +165,34 @@ impl EngineHandle {
             join_handle: tokio::spawn(async {}),
             completed: Arc::new(CancellationToken::new()),
         }
+    }
+}
+
+/// Web 层消费的引擎抽象（M1 细粒度 state：engine 域）
+///
+/// handler 经 `State<Arc<dyn EngineApi>>` 提取（AppState 直字段委派），
+/// 不再触达 `state.container.engine`；实现为 [`EngineSlot`]，测试可注入
+/// 内存实现（见 web/routes/monitor.rs 模块测试）。
+#[async_trait::async_trait]
+pub trait EngineApi: Send + Sync {
+    /// 尝试发送命令到当前活跃 Engine（不阻塞）。
+    ///
+    /// 无活跃 Engine（重启次数耗尽 / 已清理）返回
+    /// [`EngineError::ChannelClosed`]，通道饱和返回 [`EngineError::ChannelFull`]。
+    fn try_dispatch(&self, cmd: EngineCommand) -> Result<(), EngineError>;
+
+    /// 执行一次网络探测并等待回复（30s 超时封装在实现内）。
+    async fn test_network(&self) -> Result<TestNetworkResult, EngineError>;
+}
+
+#[async_trait::async_trait]
+impl EngineApi for EngineSlot {
+    fn try_dispatch(&self, cmd: EngineCommand) -> Result<(), EngineError> {
+        EngineSlot::try_dispatch(self, cmd)
+    }
+
+    async fn test_network(&self) -> Result<TestNetworkResult, EngineError> {
+        EngineSlot::test_network(self).await
     }
 }
 
