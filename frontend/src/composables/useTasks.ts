@@ -3,14 +3,15 @@
  * 替代原 taskData + tasks/core.js + tasks/editor.js（浏览器任务部分）+ tasks/debug.js（部分）。
  */
 
-import { ref, computed } from "vue";
-import type { TaskItem, DangerStep, RepoTask, TaskConfig } from "../api/types";
-import { tasksApi, repoApi, pureModeApi } from "../api";
+import { ref, reactive } from "vue";
+import type { TaskItem, DangerStep, TaskConfig } from "../api/types";
+import { tasksApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { downloadBlob, pickFile } from "../utils/file";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
+import { useScripts } from "./useScripts";
 
 export interface BrowserTaskDraft {
   id: string;
@@ -31,29 +32,10 @@ const editingTask = ref<BrowserTaskDraft | null>(null);
 const editingTaskType = ref<"browser" | "script">("browser");
 const jsonError = ref("");
 
-const pureMode = ref(true);
-const pureModeLoading = ref(false);
-
-// ==================== 仓库导入 ====================
-const repoImport = ref({
-  visible: false,
-  url: "https://raw.githubusercontent.com/Misyra/campus-auth-tasks/master/index.json",
-  source: "github" as "github" | "gitee" | "custom",
-  loading: false,
-  error: "",
-  tasks: [] as RepoTask[],
-  searchQuery: "",
-  disclaimer: null as RepoTask | null,
-});
-
-const filteredRepoTasks = computed(() => {
-  const q = repoImport.value.searchQuery.trim().toLowerCase();
-  if (!q) return repoImport.value.tasks;
-  return repoImport.value.tasks.filter((t) => {
-    const searchable = [t.name, t.description, t.author, ...(t.tags || [])].filter(Boolean).join(" ").toLowerCase();
-    return searchable.includes(q);
-  });
-});
+// A11：执行类操作 busy 守卫（响应式 Set），防止连点重复提交
+const executingIds = reactive(new Set<string>()); // executeTask 执行中
+const duplicatingIds = reactive(new Set<string>()); // duplicateTask 复制中
+const exportingIds = reactive(new Set<string>()); // exportTask 导出中
 
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
@@ -61,7 +43,13 @@ const { confirm } = useConfirm();
 // F3：首次失败 toast 通知（参照 useStatus.fetchStatus 的首败 notify 模式）
 const fetchTasksFailCount = ref(0);
 
-async function fetchTasks(): Promise<void> {
+// P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
+// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
+// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
+let lastFetchAt = 0;
+
+async function fetchTasks(force = false): Promise<void> {
+  if (!force && Date.now() - lastFetchAt < 5000) return;
   try {
     const data = await tasksApi.list();
     if (Array.isArray(data)) {
@@ -72,6 +60,7 @@ async function fetchTasks(): Promise<void> {
       });
       tasks.value.splice(0, tasks.value.length, ...browserTasks);
     }
+    lastFetchAt = Date.now();
     if (fetchTasksFailCount.value > 0) fetchTasksFailCount.value = 0;
   } catch (error) {
     fetchTasksFailCount.value++;
@@ -107,6 +96,9 @@ async function setActiveTask(taskId: string): Promise<void> {
 
 /** 立即执行任务（通用语义：浏览器打卡/脚本/Shell，不注入账号密码） */
 async function executeTask(taskId: string): Promise<void> {
+  // A11：busy 守卫，执行中连点直接忽略，避免重复提交
+  if (executingIds.has(taskId)) return;
+  executingIds.add(taskId);
   try {
     frontendLogger.info("tasks", `执行任务: ${taskId}`);
     const data = await tasksApi.execute(taskId);
@@ -114,6 +106,8 @@ async function executeTask(taskId: string): Promise<void> {
   } catch (error) {
     frontendLogger.error("tasks", "执行任务异常", error);
     toastOnly(false, extractApiError(error, "执行失败"));
+  } finally {
+    executingIds.delete(taskId);
   }
 }
 
@@ -175,7 +169,7 @@ async function saveTask(): Promise<void> {
     frontendLogger.info("tasks", data?.message || "任务保存成功");
     editingTask.value = null;
     jsonError.value = "";
-    await fetchTasks();
+    await fetchTasks(true);
   } catch (error) {
     frontendLogger.error("tasks", "保存任务失败", error);
     toastOnly(false, extractApiError(error, "保存失败"));
@@ -193,7 +187,7 @@ async function deleteTask(taskId: string): Promise<void> {
     await tasksApi.delete(taskId);
     frontendLogger.info("tasks", "任务删除成功: " + taskId);
     toastOnly(true, "任务已删除");
-    await fetchTasks();
+    await fetchTasks(true);
     if (activeTaskId.value === taskId) {
       activeTaskId.value = "default";
       await setActiveTask("default");
@@ -215,7 +209,7 @@ async function showTaskEditor(taskId?: string): Promise<void> {
 
       if (taskType === "script") {
         // 脚本任务交给脚本编辑器处理
-        await (await import("./useScripts")).useScripts().showScriptEditor(taskId);
+        await useScripts().showScriptEditor(taskId);
         return;
       }
       editingTask.value = {
@@ -306,6 +300,9 @@ function formatJson(): void {
 }
 
 async function duplicateTask(taskId: string): Promise<void> {
+  // A11：busy 守卫，避免连点生成 _copy 与 _copy_2 等重复草稿
+  if (duplicatingIds.has(taskId)) return;
+  duplicatingIds.add(taskId);
   try {
     const data = await tasksApi.get(taskId);
     // 解包 TaskDetail 嵌套结构
@@ -335,10 +332,15 @@ async function duplicateTask(taskId: string): Promise<void> {
   } catch (error) {
     frontendLogger.error("tasks", "复制任务失败: " + taskId, error);
     toastOnly(false, "复制任务失败");
+  } finally {
+    duplicatingIds.delete(taskId);
   }
 }
 
 async function exportTask(taskId: string): Promise<void> {
+  // A11：busy 守卫，避免连点重复下载导出文件
+  if (exportingIds.has(taskId)) return;
+  exportingIds.add(taskId);
   try {
     // 经后端导出端点获取完整任务配置（与 /api/tasks/import 格式对应）
     const data = await tasksApi.export(taskId);
@@ -347,6 +349,8 @@ async function exportTask(taskId: string): Promise<void> {
   } catch (error) {
     frontendLogger.error("tasks", "导出任务失败", error);
     toastOnly(false, extractApiError(error, "导出失败"));
+  } finally {
+    exportingIds.delete(taskId);
   }
 }
 
@@ -359,126 +363,10 @@ async function importTask(): Promise<void> {
     const payload = Array.isArray(data) ? data : [data];
     const result = await tasksApi.import(payload);
     toastOnly(true, `已导入 ${result?.imported ?? payload.length} 个任务`);
-    await fetchTasks();
+    await fetchTasks(true);
   } catch (e) {
     frontendLogger.warn("tasks", "导入失败: " + (e as Error).message);
     toastOnly(false, "导入失败：" + extractApiError(e, "文件不是有效的任务 JSON"));
-  }
-}
-
-async function fetchPureMode(): Promise<void> {
-  try {
-    const data = await pureModeApi.fetch();
-    pureMode.value = data.enabled;
-  } catch {
-    /* 保持默认值 */
-  }
-}
-
-async function togglePureMode(): Promise<void> {
-  if (pureModeLoading.value) return;
-  pureModeLoading.value = true;
-  try {
-    const data = await pureModeApi.toggle();
-    const enabled = data?.enabled ?? false;
-    pureMode.value = enabled;
-    frontendLogger.info("tasks", `纯净模式已${enabled ? "开启" : "关闭"}`);
-    toastOnly(true, `纯净模式已${enabled ? "开启" : "关闭"}`);
-  } catch (error) {
-    pureMode.value = !pureMode.value;
-    frontendLogger.error("tasks", "切换纯净模式失败", error);
-    toastOnly(false, "切换纯净模式失败");
-  } finally {
-    pureModeLoading.value = false;
-  }
-}
-
-// ==================== 仓库导入 ====================
-
-function selectRepoSource(source: "github" | "gitee" | "custom") {
-  repoImport.value.source = source;
-  if (source === "github") {
-    repoImport.value.url = "https://raw.githubusercontent.com/Misyra/campus-auth-tasks/master/index.json";
-  } else if (source === "gitee") {
-    repoImport.value.url = "https://raw.giteeusercontent.com/Misyra/campus-auth-tasks/raw/master/index.gitee.json";
-  }
-}
-
-function showRepoImport() {
-  repoImport.value.visible = true;
-  repoImport.value.error = "";
-  repoImport.value.tasks = [];
-  repoImport.value.searchQuery = "";
-  repoImport.value.loading = false;
-  repoImport.value.disclaimer = null;
-}
-
-function closeRepoImport() {
-  repoImport.value.visible = false;
-}
-
-async function fetchRepoIndex() {
-  const url = repoImport.value.url.trim();
-  if (!url) {
-    repoImport.value.error = "请输入索引地址";
-    return;
-  }
-  repoImport.value.loading = true;
-  repoImport.value.error = "";
-  repoImport.value.tasks = [];
-  repoImport.value.searchQuery = "";
-  try {
-    const data = await repoApi.fetchIndex(url);
-    if (!Array.isArray(data) || data.length === 0) {
-      repoImport.value.error = "索引为空或格式不正确";
-      return;
-    }
-    repoImport.value.tasks = data;
-  } catch (e) {
-    const msg = extractApiError(e, "加载失败，请检查地址是否正确");
-    repoImport.value.error = msg;
-    toastOnly(false, `获取远程索引失败: ${msg}`);
-  } finally {
-    repoImport.value.loading = false;
-  }
-}
-
-function confirmRepoImport(task: RepoTask) {
-  repoImport.value.disclaimer = task;
-}
-
-function cancelRepoDisclaimer() {
-  repoImport.value.disclaimer = null;
-}
-
-async function acceptRepoDisclaimer() {
-  const task = repoImport.value.disclaimer;
-  repoImport.value.disclaimer = null;
-  if (!task) return;
-
-  try {
-    const data = await repoApi.fetchTask(task.url);
-    let id = (task.id || (data.name as string) || "imported").replace(/[^A-Za-z0-9_]/g, "_");
-    if (/^[0-9]/.test(id)) {
-      id = "task_" + id;
-    }
-    editingTask.value = {
-      id,
-      name: (data.name as string) || task.name || "",
-      description: (data.description as string) || task.description || "",
-      url: (data.url as string) || "",
-      json: JSON.stringify(data, null, 2),
-      _isNew: true,
-    };
-    editingTaskType.value = "browser";
-    jsonError.value = "";
-    closeRepoImport();
-    frontendLogger.info("tasks", `已从仓库导入: ${task.name}`);
-    toastOnly(true, `已导入「${task.name}」，请在右侧编辑器内确认后保存`);
-  } catch (e) {
-    const msg = extractApiError(e, "下载任务失败");
-    frontendLogger.error("tasks", "远程任务下载失败", msg);
-    toastOnly(false, `远程任务下载失败: ${msg}`);
   }
 }
 
@@ -489,8 +377,9 @@ export function useTasks() {
     editingTask,
     editingTaskType,
     jsonError,
-    pureMode,
-    pureModeLoading,
+    executingIds,
+    duplicatingIds,
+    exportingIds,
     fetchTasks,
     fetchActiveTask,
     setActiveTask,
@@ -506,16 +395,5 @@ export function useTasks() {
     duplicateTask,
     exportTask,
     importTask,
-    fetchPureMode,
-    togglePureMode,
-    repoImport,
-    filteredRepoTasks,
-    selectRepoSource,
-    showRepoImport,
-    closeRepoImport,
-    fetchRepoIndex,
-    confirmRepoImport,
-    cancelRepoDisclaimer,
-    acceptRepoDisclaimer,
   };
 }

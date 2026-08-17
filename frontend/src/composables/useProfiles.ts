@@ -12,6 +12,7 @@ import { frontendLogger } from "../utils/logger";
 import { useStatus } from "./useStatus";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
+import { useConfig } from "./useConfig";
 
 export type EditingProfile = Profile & { id: string; _isNew: boolean };
 
@@ -31,13 +32,20 @@ const { confirm } = useConfirm();
 // F3：首次失败 toast 通知（参照 useStatus.fetchStatus 的首败 notify 模式）
 const fetchProfilesFailCount = ref(0);
 
-async function fetchProfiles(): Promise<void> {
+// P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
+// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
+// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
+let lastFetchAt = 0;
+
+async function fetchProfiles(force = false): Promise<void> {
+  if (!force && Date.now() - lastFetchAt < 5000) return;
   try {
     const data = await profilesApi.list();
     Object.keys(profiles.value).forEach((k) => delete profiles.value[k]);
     Object.assign(profiles.value, data.profiles || {});
     activeProfileId.value = data.active_profile || "default";
     autoSwitch.value = data.auto_switch !== false;
+    lastFetchAt = Date.now();
     if (fetchProfilesFailCount.value > 0) fetchProfilesFailCount.value = 0;
   } catch (error) {
     fetchProfilesFailCount.value++;
@@ -90,8 +98,13 @@ function isProfileDirty(): boolean {
   );
 }
 
-/** 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。 */
-async function confirmDiscardIfDirty(): Promise<boolean> {
+/**
+ * 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。
+ *
+ * 返回 true 才允许继续（放弃修改）；false（用户取消）与 null（被新对话框抢占）
+ * 一律不放行——保留现状、不丢弃数据（A10 语义：被抢占≠用户放弃）。
+ */
+async function confirmDiscardIfDirty(): Promise<boolean | null> {
   if (!isProfileDirty()) return true;
   return confirm({
     title: "放弃未保存的修改",
@@ -144,7 +157,7 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(true, data?.message || "方案保存成功");
     editingProfile.value = null;
     editingProfileSnapshot = "";
-    await fetchProfiles();
+    await fetchProfiles(true);
     if (profileId === activeProfileId.value) {
       await refreshActiveProfileConfig();
     }
@@ -172,7 +185,7 @@ async function deleteProfile(profileId: string): Promise<void> {
       editingProfile.value = null;
       editingProfileSnapshot = "";
     }
-    await fetchProfiles();
+    await fetchProfiles(true);
     if (!profiles.value[activeProfileId.value]) activeProfileId.value = "default";
   } catch (error) {
     frontendLogger.error("profiles", "方案删除异常", error);
@@ -201,13 +214,13 @@ async function setActiveProfile(profileId: string): Promise<void> {
  * 因此先弹确认；用户取消则不刷新，保留当前编辑内容。
  */
 async function refreshActiveProfileConfig(): Promise<void> {
-  const { useConfig } = await import("./useConfig");
   const { dirty, fetchConfig } = useConfig();
   if (dirty.value) {
     const ok = await confirm({
       title: "未保存的修改",
       message: "当前设置有未保存的修改，加载方案配置将覆盖它们。确定继续吗？",
     });
+    // 仅 true 才继续覆盖；取消/被抢占（null）都不刷新，保留当前编辑内容
     if (!ok) return;
   }
   await fetchConfig();

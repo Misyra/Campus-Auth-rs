@@ -50,9 +50,11 @@ const fetchStatusFailCount = ref(0);
  * 后端 StatusSnapshot 字段 → 前端字段映射。
  * 后端：monitor_enabled/network_status/consecutive_failures/retry_count/uptime_seconds
  * 前端：monitoring/network_state+network_connected/network_check_count/login_attempt_count/runtime_seconds
+ * P17：仅显式映射前端实际消费的字段，不再 Object.assign(out, raw) 混入后端
+ * 原始字段——索引签名兜底会让拼写错误也能编译，新增字段消费需在此显式登记。
  */
 function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot> {
-  const out: Partial<StatusSnapshot> & Record<string, unknown> = {};
+  const out: Partial<StatusSnapshot> = {};
   // monitoring 映射到 engine_state==="running"（monitor_enabled 是配置层面，stop 后不更新）
   const engineState = String(raw.engine_state ?? "");
   out.monitoring = engineState === "running";
@@ -64,22 +66,34 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   out.runtime_seconds = Number(raw.uptime_seconds ?? status.runtime_seconds ?? 0);
   out.last_check_time = (raw.last_check_time as string | null) ?? status.last_check_time;
   out.login_status = raw.login_status as string | undefined;
-  // 保留后端原始字段也写入，避免遗漏
-  Object.assign(out, raw);
   return out;
 }
 
 // B6：status 双源竞态防护。
-// WS 推送是权威实时源，轮询是低优先级刷新。用一个本地单调递增计数器只标记
-// 每次 WS 推送；轮询请求发出时记录当时计数器，响应返回时若期间发生过 WS 推送
-// （计数器已前进）则判定为过期数据直接丢弃，避免过期轮询响应短暂回退状态。
+// WS 推送是权威实时源，轮询是低优先级刷新。P14：后端快照携带单调新鲜度字段
+// uptime_seconds（运行时长，只增不减），据此比较而非"epoch 不等即丢"：
+// - 轮询响应的 uptime_seconds ≥ 当前已应用状态 → 应用（即使 in-flight 期间
+//   有过 WS 推送，只要数据不比已应用状态旧就不会回退界面）；
+// - < 已应用状态 → 丢弃，避免过期轮询响应回退状态。
+// statusEpoch 计数器保留用于中断明显过旧的请求：in-flight 期间 WS 推送超过
+// 1 次（差值 > 1）说明期间数据已多次演进，直接丢弃不再比较。
 let statusEpoch = 0;
+// 当前已应用状态的新鲜度（后端 uptime_seconds，单调递增；0 表示尚未应用过）
+let appliedUptime = 0;
+
+/** 应用映射后的状态并同步已应用新鲜度（raw 为后端原始快照，可能缺 uptime_seconds） */
+function applyStatus(mapped: Partial<StatusSnapshot>, raw: Record<string, unknown>): void {
+  Object.assign(status, mapped);
+  const uptime = Number(raw.uptime_seconds);
+  if (Number.isFinite(uptime) && uptime > 0) appliedUptime = uptime;
+}
 
 /** WebSocket 推送的状态更新入口（权威源，总是应用） */
 function updateStatus(data: Partial<StatusSnapshot>): void {
   if (data && typeof data === "object") {
     statusEpoch += 1;
-    Object.assign(status, mapBackendStatus(data as Record<string, unknown>));
+    const raw = data as Record<string, unknown>;
+    applyStatus(mapBackendStatus(raw), raw);
   }
 }
 
@@ -117,10 +131,14 @@ async function fetchStatus(): Promise<void> {
   const startEpoch = statusEpochAtRequest();
   try {
     const data = await monitorApi.fetchStatus();
-    // B6：请求在途期间若有 WS 推送（epoch 前进），本次轮询响应视为过期丢弃，
-    // 避免用旧数据回退 WS 已推送的最新状态
-    if (startEpoch !== statusEpoch) return;
-    Object.assign(status, mapBackendStatus(data as unknown as Record<string, unknown>));
+    const raw = data as unknown as Record<string, unknown>;
+    // B6/P14：in-flight 期间 WS 推送超过 1 次（差值 > 1）→ 请求明显过旧，直接丢弃
+    if (statusEpoch - startEpoch > 1) return;
+    // 否则按单调新鲜度比较：仅当响应不早于当前已应用状态（uptime_seconds）才应用，
+    // 替换原"epoch 不等即丢"——相同数据的 WS 推送不再导致轮询响应被无谓丢弃
+    const freshUptime = Number(raw.uptime_seconds ?? 0);
+    if (freshUptime > 0 && freshUptime < appliedUptime) return;
+    applyStatus(mapBackendStatus(raw), raw);
     if (fetchStatusFailCount.value > 0) {
       fetchStatusFailCount.value = 0;
       notify(true, "已重新连接到服务器", "network");

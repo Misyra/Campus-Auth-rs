@@ -4,9 +4,9 @@
  * 修复 P1-12.8：用显式 dirty 标志替代每次 JSON.stringify 全量序列化。
  */
 
-import { reactive, ref, watch } from "vue";
+import { reactive, ref, watch, nextTick } from "vue";
 import type { Config, SaveConfigPayload } from "../api/types";
-import { configApi, autostartApi } from "../api";
+import { configApi, autostartApi, pureModeApi } from "../api";
 import { ApiError, extractApiError } from "../api/client";
 import { DEFAULT_CONFIG } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
@@ -22,18 +22,26 @@ const saveFailed = ref(false);
 // F2：配置加载失败标记，为 true 时 SettingsView 保存按钮禁用并提示重试
 const configLoadFailed = ref(false);
 
+// 纯净模式（本质是 config.browser.pure_mode，API 为 /api/pure-mode，
+// 从 useTasks 迁入：独立于表单 dirty 流程的即时开关状态）
+const pureMode = ref(true);
+const pureModeLoading = ref(false);
+
 let loadingConfig = false;
 let saveSeq = 0;
 let saveAbort: AbortController | null = null;
 
-// 深监听配置变更 → 标记 dirty（加载期间抑制）
-// flush: 'sync' 确保在 loadingConfig 仍为 true 时同步触发，避免异步时序导致 dirty 误触
+// 深监听配置变更 → 标记 dirty（加载期间抑制）。
+// P12：回调仅置 dirty 标志（轻量），无需防抖；原 flush:'sync' 每次按键同步深度遍历
+// 整个 config，改为 'post'（渲染后微任务批量执行）。异步化后 fetchConfig 需在
+// 复位 loadingConfig 前 await nextTick()，让加载期间的赋值在 loadingConfig=true
+// 窗口内跑完回调，避免 dirty 误触（见 fetchConfig 内注释）。
 watch(
   config,
   () => {
     if (!loadingConfig) dirty.value = true;
   },
-  { deep: true, flush: "sync" },
+  { deep: true, flush: "post" },
 );
 
 // password 是独立的 usePasswordField 实例，不在 config 响应对象内，
@@ -66,6 +74,10 @@ async function fetchConfig(): Promise<void> {
     config.active_task = data.active_task ?? "";
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     password.reset(!!data.has_password);
+    // P12：watch 已是异步 flush，上面的加载赋值会在微任务中触发回调；
+    // 先等待一轮刷新（回调在 loadingConfig=true 窗口内执行完、不置 dirty），
+    // 再复位标志与 dirty，保证加载不被误标为未保存修改
+    await nextTick();
     loadingConfig = false;
     dirty.value = false;
     configLoadFailed.value = false;
@@ -200,6 +212,33 @@ async function toggleAutostart(enable: boolean): Promise<void> {
   }
 }
 
+async function fetchPureMode(): Promise<void> {
+  try {
+    const data = await pureModeApi.fetch();
+    pureMode.value = data.enabled;
+  } catch {
+    /* 保持默认值 */
+  }
+}
+
+async function togglePureMode(): Promise<void> {
+  if (pureModeLoading.value) return;
+  pureModeLoading.value = true;
+  try {
+    const data = await pureModeApi.toggle();
+    const enabled = data?.enabled ?? false;
+    pureMode.value = enabled;
+    frontendLogger.info("config", `纯净模式已${enabled ? "开启" : "关闭"}`);
+    toastOnly(true, `纯净模式已${enabled ? "开启" : "关闭"}`);
+  } catch (error) {
+    pureMode.value = !pureMode.value;
+    frontendLogger.error("config", "切换纯净模式失败", error);
+    toastOnly(false, "切换纯净模式失败");
+  } finally {
+    pureModeLoading.value = false;
+  }
+}
+
 export function useConfig() {
   return {
     config,
@@ -211,6 +250,8 @@ export function useConfig() {
     dirty,
     saveFailed,
     configLoadFailed,
+    pureMode,
+    pureModeLoading,
     fetchConfig,
     onPasswordFocus: password.onFocus,
     onPasswordBlur: password.onBlur,
@@ -219,5 +260,7 @@ export function useConfig() {
     fetchLogLevels,
     setLogLevel,
     toggleAutostart,
+    fetchPureMode,
+    togglePureMode,
   };
 }

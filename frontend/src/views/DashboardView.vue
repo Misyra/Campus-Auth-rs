@@ -3,6 +3,7 @@ import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useStatus } from "@/composables/useStatus";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
+import { throttleRaf } from "@/utils/debounce";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -31,17 +32,20 @@ function scrollToBottom() {
   });
 }
 
-function onLogScroll() {
+// P11：滚动节流——同一帧内的多次 scroll 事件合并为一次（rAF 内读取 scrollTop）
+const onLogScroll = throttleRaf(() => {
   if (!logViewer.value) return;
   const { scrollTop, scrollHeight, clientHeight } = logViewer.value;
   logs.autoScroll.value = scrollTop + clientHeight >= scrollHeight - 40;
-}
+});
 
 // 日志实时追加时自动滚动到底部。
-// 直接 watch 原始 logs 长度（而非 filteredLogs），新日志一旦 push 即触发，
-// 不依赖 computed 的惰性求值，实时性更强。
+// P13：监听最后一条的 seq（全局单调递增）而非数组长度——缓冲达上限后长度不变、
+// 每次 splice 裁剪 push 长度恒定，旧写法会导致 autoScroll 开着也不滚动；
+// seq 在缓冲满员后仍持续变化，任何新日志都能触发。
+// 旧后端条目缺 seq 时回退监听长度（与原行为一致）。
 watch(
-  () => logs.logs.length,
+  () => logs.logs[logs.logs.length - 1]?.seq ?? logs.logs.length,
   () => {
     if (logs.autoScroll.value) nextTick(scrollToBottom);
   },
@@ -252,7 +256,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
             <div v-else class="log-entries">
               <div
                 v-for="(item, index) in logs.filteredLogs.value"
-                :key="index + '-' + item.timestamp + '-' + item.message"
+                :key="item.seq ?? index + '-' + item.timestamp + '-' + item.message"
                 class="log-entry"
                 :class="[item.level ? 'log-' + item.level.toLowerCase() : '']"
               >

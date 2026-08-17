@@ -1,0 +1,49 @@
+/* card.css — 卡片容器（card / card-header / card-body / card-footer） */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  -webkit-backdrop-filter: var(--card-blur, var(--blur-md));
+  backdrop-filter: var(--card-blur, var(--blur-md));
+  box-shadow: var(--shadow);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
+  /* 提前告知浏览器将有 transform 变化，优化毛玻璃动画 */
+  will-change: transform;
+}
+
+.card:hover {
+  box-shadow: var(--shadow-lg);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.card-body {
+  padding: 20px;
+}
+
+.card-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+
+/* 卡片副标题 */
+.card-header-sub {
+    font-size: 0.85rem;
+    color: var(--text-secondary, #94a3b8);
+    margin-top: 2px;
+}

@@ -2,11 +2,13 @@
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
+import { useRepoImport } from "@/composables/useRepoImport";
 import { useStatus } from "@/composables/useStatus";
 import { ocrApi } from "@/api";
 import { pickFile } from "@/utils/file";
 
 const t = useTasks();
+const repo = useRepoImport();
 const router = useRouter();
 const { busy } = useStatus();
 
@@ -103,8 +105,8 @@ async function recognizeOcr() {
         </div>
         <div class="task-overview-actions">
           <button class="btn btn-secondary btn-sm" type="button" @click="t.importTask()">从文件导入</button>
-          <button class="btn btn-secondary btn-sm" type="button" @click="t.showRepoImport()">从仓库导入</button>
-          <button class="btn btn-secondary btn-sm" type="button" @click="t.fetchTasks()">刷新列表</button>
+          <button class="btn btn-secondary btn-sm" type="button" @click="repo.showRepoImport()">从仓库导入</button>
+          <button class="btn btn-secondary btn-sm" type="button" @click="t.fetchTasks(true)">刷新列表</button>
           <a href="https://github.com/Misyra/campus-auth-tasks" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">分享任务</a>
         </div>
       </div>

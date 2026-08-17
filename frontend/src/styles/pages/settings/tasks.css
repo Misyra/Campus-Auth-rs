@@ -1,0 +1,267 @@
+/* tasks.css — 任务设置子页（任务概览 / 录制器 / OCR 依赖与识别） */
+.task-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.mini-stat {
+  padding: 16px;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  background: var(--bg-glass);
+  transition: border-color 0.25s ease, transform 0.25s ease;
+}
+
+.mini-stat:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+}
+
+.mini-stat-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mini-stat-value {
+  display: block;
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.task-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.task-overview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.task-overview-card .card-body {
+  padding: 12px 16px;
+}
+
+.task-overview-compact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.task-overview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-overview-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.task-overview-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* 紧凑版：设置页面内的任务概览（字号更小） */
+.task-overview-left .task-overview-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-overview-left .task-overview-desc {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 0;
+}
+
+.task-overview-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.task-overview-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-overview-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.task-overview-desc {
+  display: block;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 任务录制器卡片 */
+.task-recorder-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.task-recorder-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin: 0;
+}
+
+.task-recorder-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.task-recorder-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 10px 14px;
+  background: rgba(34, 211, 238, 0.05);
+  border: 1px solid rgba(34, 211, 238, 0.12);
+  border-radius: var(--radius-md);
+  line-height: 1.6;
+}
+
+.task-recorder-note a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.task-recorder-note a:hover {
+  text-decoration: underline;
+}
+
+.task-recorder-note code {
+  background: rgba(34, 211, 238, 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* 快捷操作 */
+.task-quick-actions {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.task-quick-actions .btn {
+  font-size: 13px;
+  padding: 10px 14px;
+  justify-content: center;
+}
+
+/* ---- OCR 依赖管理 ---- */
+.ocr-size-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ocr-description {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.ocr-description code {
+  background: rgba(34, 211, 238, 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.ocr-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.ocr-recognize {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.ocr-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ocr-filename {
+  font-size: 13px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.ocr-preview {
+  max-width: 220px;
+  max-height: 120px;
+  border-radius: 6px;
+  border: 1px solid rgba(107, 114, 128, 0.3);
+  object-fit: contain;
+}
+
+.ocr-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ocr-result-text {
+  background: rgba(34, 211, 238, 0.12);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 14px;
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.ocr-error {
+  font-size: 13px;
+  color: var(--danger, #ef4444);
+}

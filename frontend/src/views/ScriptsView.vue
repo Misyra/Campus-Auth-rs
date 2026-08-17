@@ -10,6 +10,7 @@ const {
   scripts,
   availableBinaries,
   editingTask,
+  runningIds,
   getBinaryName,
   fetchScripts,
   showScriptEditor,
@@ -55,12 +56,11 @@ function onDragEnd(_e: DragEvent) { dragIndex = -1; }
 
 // ---- 二进制选项 ----
 const binaryOptions = computed<SelectOption[]>(() => {
-  const opts: SelectOption[] = [{ value: "", label: "Python (默认)" }];
+  const opts: SelectOption[] = [{ value: "", label: "Python (项目内解释器)" }];
   for (const b of availableBinaries.value) {
     opts.push({ value: b.path, label: `${b.name} (${b.path})` });
   }
-  opts.push({ value: "__custom_python__", label: "自定义 Python 解释器" });
-  opts.push({ value: "__custom__", label: "自定义可执行文件" });
+  opts.push({ value: "__custom__", label: "自定义可执行文件 (.exe)" });
   return opts;
 });
 </script>
@@ -124,7 +124,9 @@ const binaryOptions = computed<SelectOption[]>(() => {
                   {{ activeTaskId === script.id ? '使用中' : '使用' }}
                 </button>
                 <button class="btn btn-sm" @click="showScriptEditor(script.id)">编辑</button>
-                <button class="btn btn-sm" @click="runScript(script.id)" title="立即执行此脚本">运行</button>
+                <button class="btn btn-sm" @click="runScript(script.id)" :disabled="runningIds.has(script.id)" title="立即执行此脚本">
+                  {{ runningIds.has(script.id) ? '运行中...' : '运行' }}
+                </button>
                 <button class="btn btn-sm" @click="exportScript(script.id)" title="导出脚本文件">导出</button>
                 <button class="btn btn-sm btn-danger" @click="deleteScript(script.id)">删除</button>
               </div>
@@ -161,15 +163,12 @@ const binaryOptions = computed<SelectOption[]>(() => {
             <label for="script-binary">执行程序</label>
             <div class="binary-input-group">
               <CustomSelect v-model="editingTask.binary_path" :options="binaryOptions" @change="onBinarySelectChange" />
-              <input v-if="editingTask.binary_path === '__custom_python__'"
-                v-model="editingTask._customPythonBinary" type="text"
-                placeholder="输入 Python 解释器的完整路径" class="mt-2" />
               <input v-if="editingTask.binary_path === '__custom__'"
                 v-model="editingTask._customBinary" type="text"
-                placeholder="输入可执行文件的完整路径" class="mt-2" />
+                placeholder="输入可执行文件的完整路径（.exe）" class="mt-2" />
             </div>
-            <span class="hint" v-if="editingTask.binary_path && editingTask.binary_path !== '__custom__' && editingTask.binary_path !== '__custom_python__'">当前: {{ editingTask.binary_path }}</span>
-            <span class="hint" v-else>选择执行此脚本的程序，默认使用当前 Python 解释器</span>
+            <span class="hint" v-if="editingTask.binary_path && editingTask.binary_path !== '__custom__'">当前: {{ editingTask.binary_path }}</span>
+            <span class="hint" v-else>选择执行此脚本的程序；Python 使用项目内解释器，仅支持 shell / bat / python / exe 四类</span>
           </div>
           <div class="form-group">
             <label for="script-content">脚本内容</label>
@@ -194,12 +193,13 @@ const binaryOptions = computed<SelectOption[]>(() => {
         <div class="card-body">
           <div class="help-content">
             <h4>执行程序</h4>
-            <p>每个脚本可以指定不同的执行程序：</p>
+            <p>每个脚本可以指定不同的执行程序，仅支持 shell / bat / python / exe 四类：</p>
             <ul>
-              <li><strong>Python</strong>（默认）— 使用 Python 解释器执行</li>
-              <li><strong>Shell</strong> — 支持 cmd/bash，也可自定义 shell 路径</li>
-              <li><strong>自定义</strong> — 任意可执行文件（.exe、.bat 等）</li>
+              <li><strong>Python</strong>（默认）— 使用项目内 Python 解释器执行</li>
+              <li><strong>Shell / Bat</strong> — 支持 cmd（Windows）或 bash/sh（Linux），也可自定义 shell 路径</li>
+              <li><strong>自定义</strong> — 任意可执行文件（.exe）</li>
             </ul>
+            <p>如需其他解释器（如 node、powershell），请写在 bat 或 shell 脚本中自定义调用。</p>
             <h4>工作原理</h4>
             <p>脚本在子进程中执行，通过 HTTP 请求直接登录校园网，无需启动浏览器，资源占用极低。</p>
             <h4>输出说明</h4>

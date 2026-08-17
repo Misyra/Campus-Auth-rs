@@ -31,7 +31,12 @@ const { toastOnly } = useToast();
 /** 根据 API 返回的会话数据同步本地状态 */
 function syncSession(data: DebugSession): void {
   Object.assign(session, data);
-  _resultMap.value = new Map((data.results || []).map((r) => [r.step_index, r]));
+  // 仅当负载带 `results` 时才重建结果表：debug_run_all 返回的是 StructuredResult
+  //（无 results），若在此强制清空会让 WebSocket step_progress 已写入的步骤结果
+  // 全部丢失，调试面板显示为“空”。保留已有结果，避免误清空。
+  if (Array.isArray(data.results)) {
+    _resultMap.value = new Map(data.results.map((r) => [r.step_index, r]));
+  }
 }
 
 /** 启动调试会话 */
@@ -150,7 +155,10 @@ function handleStepProgress(data: {
   } else {
     _resultMap.value.set(data.step_index, result);
   }
-  frontendLogger.info("debug", `调试步骤进度: ${data.step_index}/${data.total_steps ?? "?"}`);
+  frontendLogger.info(
+    "debug",
+    `调试步骤进度: ${data.step_index}/${data.total_steps ?? "?"}${data.description ? " - " + data.description : ""}`,
+  );
 }
 
 export function useDebug() {

@@ -3,7 +3,7 @@
  * 替代原 scheduledTasksData + scheduledTasksMethods。
  */
 
-import { ref } from "vue";
+import { ref, reactive } from "vue";
 import type { ScheduledTask, ScheduledTaskHistoryItem } from "../api/types";
 import { scheduledTasksApi } from "../api";
 import { extractApiError } from "../api/client";
@@ -60,15 +60,25 @@ const scheduledTaskFormLoading = ref(false);
 const scheduledTaskHistoryLoading = ref(false);
 const selectedScheduledTaskId = ref<string | null>(null);
 
+// A11：手动运行 busy 守卫（响应式 Set），防止连点重复提交
+const runningIds = reactive(new Set<string>());
+
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
-async function loadScheduledTasks(): Promise<void> {
+// P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
+// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
+// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
+let lastFetchAt = 0;
+
+async function loadScheduledTasks(force = false): Promise<void> {
+  if (!force && Date.now() - lastFetchAt < 5000) return;
   try {
     const data = await scheduledTasksApi.list();
     if (Array.isArray(data)) {
       scheduledTasks.value.splice(0, scheduledTasks.value.length, ...data);
     }
+    lastFetchAt = Date.now();
   } catch (e) {
     frontendLogger.error("scheduled_tasks", "加载定时任务失败", e);
   }
@@ -147,7 +157,7 @@ async function saveScheduledTask(): Promise<void> {
       toastOnly(true, data?.message || "保存成功");
     }
     closeScheduledTaskModal();
-    await loadScheduledTasks();
+    await loadScheduledTasks(true);
   } catch (e) {
     toastOnly(false, extractApiError(e, "保存失败"));
   } finally {
@@ -161,7 +171,7 @@ async function deleteScheduledTask(taskId: string): Promise<void> {
   try {
     const data = await scheduledTasksApi.delete(taskId);
     toastOnly(true, data?.message || "删除成功");
-    await loadScheduledTasks();
+    await loadScheduledTasks(true);
   } catch (e) {
     toastOnly(false, extractApiError(e, "删除失败"));
   }
@@ -171,19 +181,24 @@ async function toggleScheduledTask(taskId: string): Promise<void> {
   try {
     const data = await scheduledTasksApi.toggle(taskId);
     toastOnly(true, data?.message || "操作成功");
-    await loadScheduledTasks();
+    await loadScheduledTasks(true);
   } catch (e) {
     toastOnly(false, extractApiError(e, "操作失败"));
   }
 }
 
 async function runScheduledTask(taskId: string): Promise<void> {
+  // A11：busy 守卫，运行中连点直接忽略，避免重复触发定时任务
+  if (runningIds.has(taskId)) return;
+  runningIds.add(taskId);
   try {
     const data = await scheduledTasksApi.run(taskId);
     toastOnly(true, data?.message || "执行成功");
-    await loadScheduledTasks();
+    await loadScheduledTasks(true);
   } catch (e) {
     toastOnly(false, extractApiError(e, "执行失败"));
+  } finally {
+    runningIds.delete(taskId);
   }
 }
 
@@ -232,6 +247,7 @@ export function useScheduledTasks() {
     scheduledTaskFormLoading,
     scheduledTaskHistoryLoading,
     selectedScheduledTaskId,
+    runningIds,
     loadScheduledTasks,
     openCreateScheduledTask,
     openEditScheduledTask,

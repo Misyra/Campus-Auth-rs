@@ -24,7 +24,10 @@ export interface BackgroundUploadResult {
   message?: string;
 }
 
-/** 状态快照（WebSocket status 消息 / GET /api/status） */
+/**
+ * 状态快照（前端形态，经 useStatus.mapBackendStatus 从后端原始快照映射而来）。
+ * P17：不保留索引签名——后端原始字段一律显式映射，拼写错误应在编译期暴露。
+ */
 export interface StatusSnapshot {
   monitoring: boolean;
   network_check_count: number;
@@ -35,7 +38,6 @@ export interface StatusSnapshot {
   network_state: string;
   login_status?: string;
   engine_state?: string;
-  [key: string]: unknown;
 }
 
 /** 开机自启动状态 */
@@ -49,6 +51,12 @@ export interface AutostartStatus {
 
 /** 日志条目 */
 export interface LogEntry {
+  /**
+   * 全局单调序号（P10）：/ws/logs 实时推送携带，用于稳定 v-for key 与按 seq 去重。
+   * 注意 /api/logs 历史条目的 seq 每次请求重新分配、不跨请求稳定；
+   * 旧后端与前端本地构造的条目可能缺失该字段（回退内容键逻辑）。
+   */
+  seq?: number;
   timestamp: string;
   level: string;
   source: string;
@@ -115,6 +123,7 @@ export interface MonitorConfig {
   check_auth_url: boolean;
   auth_url_targets: string[];
   url_check_urls: string[];
+  enable_local_check: boolean;
   script_timeout: number;
   post_login_delay: number;
   // 网卡绑定：后端仅预留 EgressBinder 接口未实现，字段暂不暴露（配置往返保真见 constants.ts 注释）
@@ -336,6 +345,8 @@ export interface ScheduledTask {
   enabled: boolean;
   last_run?: string | null;
   last_result?: string | null;
+  /** cron 表达式解析失败（enabled 却永不触发），需编辑修正 */
+  schedule_invalid?: boolean;
   [key: string]: unknown;
 }
 

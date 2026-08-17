@@ -1,0 +1,30 @@
+/* monitor.css — 监控检测设置子页（检测列布局 / 紧凑信息框） */
+.settings-detect-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+}
+
+.settings-detect-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.settings-detect-heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 16px 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.info-box.compact {
+  padding: 18px;
+}

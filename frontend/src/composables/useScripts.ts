@@ -3,7 +3,7 @@
  * 替代原 scriptData + scriptMethods。
  */
 
-import { ref } from "vue";
+import { ref, reactive } from "vue";
 import type { Script, BinaryInfo } from "../api/types";
 import { scriptsApi, tasksApi } from "../api";
 import { extractApiError } from "../api/client";
@@ -11,6 +11,7 @@ import { frontendLogger } from "../utils/logger";
 import { downloadBlob, pickFile, getBinaryName } from "../utils/file";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
+import { useTasks } from "./useTasks";
 
 export interface ScriptDraft {
   id: string;
@@ -19,7 +20,6 @@ export interface ScriptDraft {
   content: string;
   binary_path: string;
   _customBinary: string;
-  _customPythonBinary: string;
   _isNew: boolean;
 }
 
@@ -27,10 +27,19 @@ const scripts = ref<Script[]>([]);
 const availableBinaries = ref<BinaryInfo[]>([]);
 const editingTask = ref<ScriptDraft | null>(null);
 
+// A11：运行 busy 守卫（响应式 Set），防止连点重复提交
+const runningIds = reactive(new Set<string>());
+
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
-async function fetchScripts(): Promise<void> {
+// P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
+// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
+// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
+let lastFetchAt = 0;
+
+async function fetchScripts(force = false): Promise<void> {
+  if (!force && Date.now() - lastFetchAt < 5000) return;
   try {
     const data = await scriptsApi.list();
     if (Array.isArray(data)) {
@@ -41,6 +50,7 @@ async function fetchScripts(): Promise<void> {
       });
       scripts.value.splice(0, scripts.value.length, ...scriptTasks);
     }
+    lastFetchAt = Date.now();
   } catch (error) {
     frontendLogger.error("scripts", "获取脚本列表失败", error);
   }
@@ -63,19 +73,13 @@ async function showScriptEditor(taskId?: string): Promise<void> {
     try {
       const data = await scriptsApi.get(taskId);
       const binaryPath = data.binary_path || "";
-      const realBinaries = availableBinaries.value.filter((b) => b.path !== "__custom_python__");
-      const isKnownBinary = binaryPath && realBinaries.some((b) => b.path === binaryPath);
+      const isKnownBinary = binaryPath && availableBinaries.value.some((b) => b.path === binaryPath);
       let selectValue = binaryPath;
       let customBinary = "";
-      let customPythonBinary = "";
       if (!isKnownBinary && binaryPath) {
-        if (binaryPath.toLowerCase().includes("python")) {
-          selectValue = "__custom_python__";
-          customPythonBinary = binaryPath;
-        } else {
-          selectValue = "__custom__";
-          customBinary = binaryPath;
-        }
+        // 未知路径一律视为自定义可执行文件（exe/bat 等）；Python 应使用项目内解释器（binary_path 留空）
+        selectValue = "__custom__";
+        customBinary = binaryPath;
       }
       editingTask.value = {
         id: taskId,
@@ -84,7 +88,6 @@ async function showScriptEditor(taskId?: string): Promise<void> {
         content: data.content || "",
         binary_path: selectValue,
         _customBinary: customBinary,
-        _customPythonBinary: customPythonBinary,
         _isNew: false,
       };
     } catch (error) {
@@ -98,7 +101,6 @@ async function showScriptEditor(taskId?: string): Promise<void> {
       content: '#!/usr/bin/env python3\n"""自定义登录脚本"""\nimport httpx\n\n',
       binary_path: "",
       _customBinary: "",
-      _customPythonBinary: "",
       _isNew: true,
     };
   }
@@ -110,11 +112,6 @@ function onBinarySelectChange(): void {
     editingTask.value._customBinary = editingTask.value._customBinary || "";
   } else {
     editingTask.value._customBinary = "";
-  }
-  if (editingTask.value.binary_path === "__custom_python__") {
-    editingTask.value._customPythonBinary = editingTask.value._customPythonBinary || "";
-  } else {
-    editingTask.value._customPythonBinary = "";
   }
 }
 
@@ -140,7 +137,15 @@ async function saveScript(): Promise<void> {
   }
   let binaryPath = editingTask.value.binary_path;
   if (binaryPath === "__custom__") binaryPath = editingTask.value._customBinary || "";
-  else if (binaryPath === "__custom_python__") binaryPath = editingTask.value._customPythonBinary || "";
+  // Python 使用项目内解释器：binary_path 留空，由后端使用项目自带 Python
+  if (binaryPath) {
+    const lower = binaryPath.toLowerCase();
+    // 禁止 PowerShell：即使通过自定义路径传入也拒绝
+    if (lower.includes("powershell") || lower.includes("pwsh") || lower.endsWith(".ps1")) {
+      toastOnly(false, "不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本");
+      return;
+    }
+  }
 
   const payload = {
     // 后端 TaskKind 反序列化在 type 缺失时默认归为 browser 任务，
@@ -154,7 +159,7 @@ async function saveScript(): Promise<void> {
   try {
     const data = await scriptsApi.save(id, payload);
     editingTask.value = null;
-    await fetchScripts();
+    await fetchScripts(true);
     toastOnly(true, data?.message || "保存成功");
   } catch (error) {
     toastOnly(false, extractApiError(error, "保存失败"));
@@ -166,7 +171,7 @@ async function deleteScript(taskId: string): Promise<void> {
   if (!ok) return;
   try {
     const data = await scriptsApi.delete(taskId);
-    await fetchScripts();
+    await fetchScripts(true);
     toastOnly(true, data?.message || "删除成功");
   } catch (error) {
     toastOnly(false, extractApiError(error, "删除失败"));
@@ -174,11 +179,16 @@ async function deleteScript(taskId: string): Promise<void> {
 }
 
 async function runScript(taskId: string): Promise<void> {
+  // A11：busy 守卫，运行中连点直接忽略，避免重复提交
+  if (runningIds.has(taskId)) return;
+  runningIds.add(taskId);
   try {
     const data = await scriptsApi.run(taskId);
     toastOnly(true, data?.message || "执行完成");
   } catch (error) {
     toastOnly(false, extractApiError(error, "执行失败"));
+  } finally {
+    runningIds.delete(taskId);
   }
 }
 
@@ -193,7 +203,7 @@ async function exportScript(taskId: string): Promise<void> {
 }
 
 async function importScript(): Promise<void> {
-  const file = await pickFile(".py,.sh,.bat,.ps1,.txt");
+  const file = await pickFile(".py,.sh,.bat,.exe,.cmd,.txt");
   if (!file) return;
   const reader = new FileReader();
   reader.onload = (ev) => {
@@ -220,7 +230,6 @@ function openImportedDraft(id: string, content: string): void {
     content,
     binary_path: "",
     _customBinary: "",
-    _customPythonBinary: "",
     _isNew: true,
   };
   frontendLogger.info("scripts", "已导入脚本文件，请检查后保存");
@@ -229,7 +238,6 @@ function openImportedDraft(id: string, content: string): void {
 async function setActiveScript(taskId: string): Promise<void> {
   try {
     await tasksApi.setActive(taskId);
-    const { useTasks } = await import("./useTasks");
     // 服务端已切换，此处仅同步本地状态
     useTasks().activeTaskId.value = taskId;
     toastOnly(true, `已将「${taskId}」设为活动任务`);
@@ -262,14 +270,13 @@ function inferScriptExtension(binaryPath?: string, content?: string): string {
     const base = binaryPath.split(/[/\\]/).pop()?.toLowerCase() || "";
     if (base.startsWith("python") || base === "py" || (base.endsWith(".exe") && base.includes("python"))) return ".py";
     if (base === "bash" || base === "sh" || base === "zsh") return ".sh";
-    if (base === "cmd" || base === "cmd.exe" || base === "bat") return ".bat";
-    if (base === "powershell" || base === "pwsh") return ".ps1";
+    if (base === "cmd" || base === "cmd.exe" || base === "bat" || base.endsWith(".bat")) return ".bat";
+    if (base.endsWith(".exe")) return ".exe";
   }
   if (content) {
     const firstLine = content.split("\n")[0];
     if (firstLine.includes("python")) return ".py";
     if (firstLine.includes("bash") || firstLine.includes("sh")) return ".sh";
-    if (firstLine.includes("powershell") || firstLine.includes("pwsh")) return ".ps1";
   }
   return ".py";
 }
@@ -279,6 +286,7 @@ export function useScripts() {
     scripts,
     availableBinaries,
     editingTask,
+    runningIds,
     getBinaryName,
     fetchScripts,
     fetchAvailableBinaries,

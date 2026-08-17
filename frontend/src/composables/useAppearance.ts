@@ -2,23 +2,15 @@
  * 外观与主题（单例）。
  * 替代原 appearanceData + appearanceMethods + applyAppearance。
  * 从 localStorage 加载/持久化，并应用到文档 CSS 变量。
+ * 自定义颜色见 useCustomColors，背景图/壁纸见 useBackgroundImage。
  */
 
 import { reactive, watch } from "vue";
-import {
-  DEFAULT_APPEARANCE,
-  DEFAULT_CUSTOM_COLORS,
-  ACCENT_COLORS,
-  DARK_BG_COLORS,
-  LIGHT_BG_COLORS,
-  LIMITS,
-} from "../utils/constants";
-import type { Appearance, CustomColors } from "../utils/appearance-types";
+import { DEFAULT_APPEARANCE } from "../utils/constants";
+import type { Appearance } from "../utils/appearance-types";
 import { hexToRgb, adjustColor } from "../utils/formatters";
-import { pickFile } from "../utils/file";
-import { backgroundApi, ApiError } from "../api";
+import { backgroundApi } from "../api";
 import { useToast } from "./useToast";
-import { useConfirm } from "./useConfirm";
 
 function loadStored<T>(key: string, fallback: T): T {
   const saved = localStorage.getItem(key);
@@ -34,34 +26,17 @@ function loadStored<T>(key: string, fallback: T): T {
 const appearance = reactive<Appearance>(
   loadStored<Appearance>("appearance", { ...DEFAULT_APPEARANCE }),
 );
-const customColors = reactive<CustomColors>(
-  loadStored<CustomColors>("appearance.custom_colors", {
-    accent: [],
-    bg: [],
-    sidebar: [],
-    sidebar_accent: [],
-  }),
-);
-const randomWallpaperDialog = reactive({ visible: false, url: "", loading: false });
-const bgLightbox = reactive({ visible: false });
 
 const { toastOnly } = useToast();
 
 function saveStoredAppearance(): void {
   localStorage.setItem("appearance", JSON.stringify(appearance));
 }
-function saveStoredColors(): void {
-  localStorage.setItem("appearance.custom_colors", JSON.stringify(customColors));
-}
 
 // 外观变更时自动应用 + 持久化（实时预览，无需手动点保存）
 watch(appearance, () => {
   applyAppearance();
   saveStoredAppearance();
-}, { deep: true });
-
-watch(customColors, () => {
-  saveStoredColors();
 }, { deep: true });
 
 function getEffectiveTheme(): "light" | "dark" {
@@ -176,40 +151,6 @@ function applyAppearance(): void {
   }
 }
 
-function addCustomColor(type: keyof CustomColors, hex: string): void {
-  if (!hex || !DEFAULT_CUSTOM_COLORS.hasOwnProperty(type)) return;
-  const lower = hex.toLowerCase();
-  const systemColors =
-    type === "accent"
-      ? ACCENT_COLORS
-      : type === "bg"
-        ? [...DARK_BG_COLORS, ...LIGHT_BG_COLORS]
-        : [];
-  if (systemColors.some((c) => c.value.toLowerCase() === lower)) return;
-  if (customColors[type].some((c) => c.toLowerCase() === lower)) return;
-  customColors[type].push(lower);
-  saveStoredColors();
-}
-
-function removeCustomColor(type: keyof CustomColors, hex: string): void {
-  if (!DEFAULT_CUSTOM_COLORS.hasOwnProperty(type)) return;
-  const idx = customColors[type].findIndex((c) => c.toLowerCase() === hex.toLowerCase());
-  if (idx === -1) return;
-  customColors[type].splice(idx, 1);
-  saveStoredColors();
-  const defaultKey =
-    type === "accent"
-      ? "accent_color"
-      : type === "bg"
-        ? "background_color"
-        : type === "sidebar"
-          ? "sidebar_color"
-          : "sidebar_accent";
-  if (String(appearance[defaultKey as keyof Appearance] || "").toLowerCase() === hex.toLowerCase()) {
-    (appearance as Record<string, unknown>)[defaultKey] = DEFAULT_APPEARANCE[defaultKey as keyof Appearance];
-  }
-}
-
 function resetCard(cardKey: "background" | "theme" | "card" | "sidebar"): void {
   const fields: Record<string, string[]> = {
     background: ["background_url", "background_filename", "wallpaper_api_url", "background_blur", "background_opacity", "backdrop_filter", "card_blur"],
@@ -240,177 +181,20 @@ function cardDirty(cardKey: "background" | "theme" | "card" | "sidebar"): boolea
   );
 }
 
-function pickCustomColor(type: keyof CustomColors): void {
-  const input = document.querySelector<HTMLInputElement>(`input[data-color-picker="${type}"]`);
-  input?.click();
-}
-
-function onCustomColorPicked(type: keyof CustomColors, event: Event): void {
-  const hex = (event.target as HTMLInputElement).value;
-  addCustomColor(type, hex);
-  const fieldMap: Record<string, keyof Appearance> = {
-    accent: "accent_color",
-    bg: "background_color",
-    sidebar: "sidebar_color",
-    sidebar_accent: "sidebar_accent",
-  };
-  (appearance as Record<string, unknown>)[fieldMap[type]] = hex;
-  (event.target as HTMLInputElement).value = "#000000";
-}
-
-function onColorLongPress(type: keyof CustomColors, hex: string): void {
-  const { confirm } = useConfirm();
-  void confirm({
-    title: "删除自定义颜色",
-    message: `删除自定义颜色 ${hex}？`,
-  }).then((ok) => {
-    if (ok) removeCustomColor(type, hex);
-  });
-}
-
-function startLongPress(type: keyof CustomColors, hex: string, event: TouchEvent): void {
-  event.preventDefault();
-  const target = event.target as EventTarget;
-  const timer = setTimeout(() => onColorLongPress(type, hex), 600);
-  const cancel = () => {
-    clearTimeout(timer);
-    target.removeEventListener("touchend", cancel);
-    target.removeEventListener("touchmove", cancel);
-  };
-  target.addEventListener("touchend", cancel);
-  target.addEventListener("touchmove", cancel);
-}
-
-function getColorList(type: keyof CustomColors): { value: string; label: string; custom?: boolean }[] {
-  let systemColors: { value: string; label: string }[] = [];
-  if (type === "bg") {
-    systemColors = getEffectiveTheme() === "dark" ? DARK_BG_COLORS : LIGHT_BG_COLORS;
-  } else if (type === "accent") {
-    systemColors = ACCENT_COLORS;
-  }
-  const custom = (customColors[type] || []).map((hex) => ({ value: hex, label: hex, custom: true }));
-  return [...systemColors, ...custom];
-}
-
 function resetThemeBackground(): void {
   appearance.background_color = "";
   applyAppearance();
   toastOnly(true, "已恢复默认背景色");
 }
 
-async function selectBackgroundImage(): Promise<void> {
-  const file = await pickFile("image/*");
-  if (!file) return;
-  if (file.size > LIMITS.FILE_UPLOAD_MAX) {
-    toastOnly(false, "图片大小不能超过 5MB");
-    return;
-  }
-  try {
-    const data = await backgroundApi.upload(file);
-    if (data.filename && data.url) {
-      appearance.background_url = data.url;
-      appearance.background_filename = data.filename;
-      applyAppearance();
-      toastOnly(true, "背景图片已设置");
-    } else {
-      toastOnly(false, data?.message || "上传失败");
-    }
-  } catch (err) {
-    const msg = err instanceof ApiError ? err.message : (err as { message?: string }).message || "上传失败";
-    toastOnly(false, "上传失败: " + msg);
-  }
-}
-
-function openRandomWallpaperDialog(): void {
-  randomWallpaperDialog.url = appearance.wallpaper_api_url || "https://t.alcy.cc/pc";
-  randomWallpaperDialog.loading = false;
-  randomWallpaperDialog.visible = true;
-}
-
-function closeRandomWallpaperDialog(): void {
-  randomWallpaperDialog.visible = false;
-}
-
-async function confirmRandomWallpaper(): Promise<void> {
-  const url = randomWallpaperDialog.url.trim();
-  if (!url) {
-    toastOnly(false, "请输入壁纸 URL");
-    return;
-  }
-  try {
-    new URL(url);
-  } catch {
-    toastOnly(false, "URL 格式不正确");
-    return;
-  }
-  randomWallpaperDialog.loading = true;
-  try {
-    const data = await backgroundApi.fetchUrl(url);
-    if (data.filename && data.url) {
-      appearance.background_url = data.url;
-      appearance.background_filename = data.filename;
-      appearance.wallpaper_api_url = url;
-      randomWallpaperDialog.visible = false;
-      applyAppearance();
-      toastOnly(true, "已下载并设置为背景");
-    } else {
-      toastOnly(false, data?.message || "获取壁纸失败");
-    }
-  } catch (err) {
-    const msg = err instanceof ApiError ? err.message : "获取壁纸失败";
-    toastOnly(false, msg);
-  } finally {
-    randomWallpaperDialog.loading = false;
-  }
-}
-
-async function clearBackgroundImage(): Promise<void> {
-  if (appearance.background_filename) {
-    try {
-      await backgroundApi.remove(appearance.background_filename);
-    } catch {
-      /* ignore */
-    }
-  }
-  appearance.background_url = "";
-  appearance.background_filename = "";
-  appearance.wallpaper_api_url = "";
-  applyAppearance();
-}
-
-function openBgLightbox(): void {
-  bgLightbox.visible = true;
-}
-function closeBgLightbox(): void {
-  bgLightbox.visible = false;
-}
-
 export function useAppearance() {
   return {
     appearance, // 注意：选择 background_color 时保持类型统一
-    customColors: customColors as CustomColors,
-    randomWallpaperDialog,
-    bgLightbox,
-    addCustomColor,
-    removeCustomColor,
     resetCard,
     cardDirty,
-    pickCustomColor,
-    onCustomColorPicked,
-    onColorLongPress,
-    startLongPress,
-    getColorList,
     getEffectiveTheme,
     resetThemeBackground,
     applyAppearance,
-    selectBackgroundImage,
-    openRandomWallpaperDialog,
-    closeRandomWallpaperDialog,
-    confirmRandomWallpaper,
-    clearBackgroundImage,
-    openBgLightbox,
-    closeBgLightbox,
     saveStoredAppearance,
-    saveStoredColors,
   };
 }

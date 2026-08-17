@@ -4,6 +4,7 @@ import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
 import { autostartApi, configApi } from "@/api";
 import CustomSelect from "@/components/common/CustomSelect.vue";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const config = useConfig();
@@ -71,7 +72,7 @@ async function reloadConfig() {
             <div class="form-group">
               <div class="field-label-row">
                 <label for="settings-log-retention">日志保留天数</label>
-                <span class="field-help" tabindex="0" role="note" data-tip="日志和失败截图按天归档，超过设定天数自动清理。">?</span>
+                <FieldHelp text="日志和失败截图按天归档，超过设定天数自动清理。" />
               </div>
               <input id="settings-log-retention" v-model.number="config.config.logging.retention_days" type="number" min="1" max="365" />
             </div>
@@ -90,7 +91,7 @@ async function reloadConfig() {
           <div class="form-group">
             <div class="field-label-row">
               <label>全局日志级别</label>
-              <span class="field-help" tabindex="0" role="note" data-tip="低于该级别的日志将被过滤。选择后即时热更新。">?</span>
+              <FieldHelp text="低于该级别的日志将被过滤。选择后即时热更新。" />
             </div>
             <CustomSelect :model-value="config.config.logging.level" :options="logLevelOptions" @update:model-value="config.setLogLevel($event as string)" />
           </div>
@@ -110,7 +111,7 @@ async function reloadConfig() {
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-startup-action">启动后执行</label>
-            <span class="field-help" tabindex="0" role="note" data-tip="选择程序启动后自动执行的操作。">?</span>
+            <FieldHelp text="选择程序启动后自动执行的操作。" />
           </div>
           <CustomSelect v-model="config.config.app_settings.startup_action" :options="loginActionOptions" />
           <span class="hint">{{ startupActionHint }}</span>
@@ -140,7 +141,7 @@ async function reloadConfig() {
         <div class="form-group">
           <div class="field-label-row">
             <label>运行模式</label>
-            <span class="field-help" tabindex="0" role="note" data-tip="轻量模式仅后台监控，不启动 Web 界面；完整模式启动 Web 管理界面。">?</span>
+            <FieldHelp text="轻量模式仅后台监控，不启动 Web 界面；完整模式启动 Web 管理界面。" />
           </div>
           <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
         </div>
@@ -200,7 +201,7 @@ async function reloadConfig() {
           <div class="form-group">
             <div class="field-label-row">
               <label for="settings-app-port">控制台端口</label>
-              <span class="field-help" tabindex="0" role="note" data-tip="Web 控制台的监听端口。修改后需要重启服务器。默认 50721。">?</span>
+              <FieldHelp text="Web 控制台的监听端口。修改后需要重启服务器。默认 50721。" />
             </div>
             <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1024" max="65535" />
           </div>
@@ -220,7 +221,7 @@ async function reloadConfig() {
         <div class="form-group">
           <div class="field-label-row">
             <label>配置热重载</label>
-            <span class="field-help" tabindex="0" role="note" data-tip="重新从磁盘读取配置文件，无需重启服务即可应用变更。">?</span>
+            <FieldHelp text="重新从磁盘读取配置文件，无需重启服务即可应用变更。" />
           </div>
           <button class="btn btn-secondary btn-sm" @click="reloadConfig" :disabled="reloading">
             {{ reloading ? "加载中..." : "重新加载配置" }}

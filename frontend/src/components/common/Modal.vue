@@ -9,10 +9,13 @@ const props = withDefaults(
     open: boolean;
     title?: string;
     size?: "default" | "lg";
+    /** 是否允许点击遮罩关闭（默认 true；免责声明等需显式操作的场景设为 false） */
+    closeOnOverlay?: boolean;
   }>(),
   {
     title: "",
     size: "default",
+    closeOnOverlay: true,
   },
 );
 
@@ -22,6 +25,10 @@ const containerRef = ref<HTMLElement | null>(null);
 
 function onClose(): void {
   emit("close");
+}
+
+function onOverlayClick(): void {
+  if (props.closeOnOverlay) onClose();
 }
 
 // ESC 键关闭
@@ -74,7 +81,7 @@ watch(
 <template>
   <Teleport to="body">
     <Transition name="modal-fade">
-      <div v-if="open" class="modal-overlay" @click.self="onClose" @keydown="onKeydown">
+      <div v-if="open" class="modal-overlay" @click.self="onOverlayClick" @keydown="onKeydown">
         <div
           ref="containerRef"
           class="modal-container"

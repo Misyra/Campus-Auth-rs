@@ -1,0 +1,250 @@
+/* misc.css — 杂项（空状态 / 信息框 / 全屏图片 / 加载 / 文本与布局工具类 / 各类遮罩横幅） */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: var(--text-secondary);
+  gap: 12px;
+  opacity: 0.8;
+}
+
+.empty-state svg {
+  width: 48px;
+  height: 48px;
+  opacity: 0.5;
+}
+
+.info-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-top: 20px;
+  backdrop-filter: blur(4px);
+}
+
+.info-box h4 {
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.info-box ul {
+  list-style: none;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.info-box li {
+  padding: 4px 0;
+}
+
+.info-box.success {
+  border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.info-box.warning {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.info-box.error {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+/* ========== Fullscreen Image Overlay ========== */
+.fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-top);
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+  backdrop-filter: blur(4px);
+}
+
+.fullscreen-img {
+  max-width: 95vw;
+  max-height: 95vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* ========== Loading State ========== */
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: var(--text-secondary);
+}
+
+.loading-state .spinner {
+  width: 40px;
+  height: 40px;
+  border-width: 3px;
+  animation-duration: 1s;
+  margin-bottom: 12px;
+}
+
+.spinner-lg {
+  width: 40px;
+  height: 40px;
+  border-width: 3px;
+  animation-duration: 1s;
+}
+
+/* ========== Text Utilities ========== */
+.text-secondary {
+  color: var(--text-secondary);
+}
+
+.text-success {
+  color: var(--success);
+}
+
+.text-danger {
+  color: var(--error);
+}
+
+/* 工具类: SVG sizing */
+.icon-xs { width: 11px; height: 11px; }
+.icon-sm { width: 14px; height: 14px; }
+.icon-md { width: 16px; height: 16px; }
+.icon-lg { width: 20px; height: 20px; }
+.icon-xl { width: 24px; height: 24px; }
+
+/* 工具类: flex/gap */
+.flex-row { display: flex; align-items: center; }
+.gap-xs { gap: 4px; }
+.gap-sm { gap: 6px; }
+.gap-md { gap: 8px; }
+.gap-lg { gap: 12px; }
+
+/* 工具类: alignment */
+.ms-auto { margin-left: auto; }
+
+/* 等宽文本区域 */
+.monospace-textarea {
+    font-family: var(--font-mono, 'Consolas', 'Monaco', monospace);
+    font-size: 0.875rem;
+}
+
+/* 旋转动画（@keyframes spin 统一定义在 base.css） */
+.spin {
+    animation: spin 1s linear infinite;
+}
+
+/* ========== 退出应用遮罩 ========== */
+.exit-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: fixed;
+  inset: 0;
+  flex-direction: column;
+  gap: 16px;
+  font-family: system-ui;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  z-index: var(--z-max);
+}
+
+.exit-overlay svg {
+  color: var(--accent);
+}
+
+.exit-overlay h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.exit-overlay p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.exit-overlay .btn {
+  margin-top: 12px;
+  min-width: 140px;
+}
+
+/* ── 提示条 ── */
+
+.alert-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  margin-bottom: 12px;
+  border-radius: var(--radius-md);
+  background: rgba(34, 211, 238, 0.06);
+  border: 1px solid rgba(34, 211, 238, 0.15);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.alert-hint code {
+  font-size: 11px;
+  padding: 1px 4px;
+  background: rgba(34, 211, 238, 0.1);
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+.alert-hint a {
+  color: var(--accent);
+  text-decoration: none;
+  margin-left: 2px;
+}
+
+.alert-hint a:hover {
+  text-decoration: underline;
+}
+
+/* ========== Init Loading Overlay ========== */
+.init-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-max);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.init-overlay .spinner {
+  width: 40px;
+  height: 40px;
+  border-width: 3px;
+}
+
+/* ========== WebSocket 被顶替提示横幅（多页面单连接限制） ========== */
+.ws-kicked-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--z-toast);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 13px;
+  background: var(--warning-bg, #fffbe6);
+  color: var(--warning-text, #ad6800);
+  border-bottom: 1px solid var(--border);
+}

@@ -1,0 +1,130 @@
+/* btn.css — 按钮（btn 及尺寸/语义变体） */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  min-height: 40px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+  box-shadow: none;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: var(--bg-primary);
+  border: none;
+  font-weight: 600;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary:hover:not(:disabled) {
+  box-shadow: 0 0 24px rgba(34, 211, 238, 0.35), 0 4px 12px rgba(0, 0, 0, 0.2);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: var(--bg-secondary);
+}
+
+.btn-sm {
+  padding: 8px 16px;
+  font-size: 13px;
+  min-height: 36px;
+}
+
+.btn-xs {
+  padding: 4px 10px;
+  font-size: 11px;
+  min-height: 26px;
+}
+
+.btn-lg {
+  padding: 12px 24px;
+  font-size: 15px;
+  min-height: 44px;
+}
+
+.btn-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.btn-icon-only {
+  padding: 8px;
+  background: transparent;
+  border: none;
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.btn-icon-only svg {
+  width: 18px;
+  height: 18px;
+}
+
+.btn.btn-active {
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--accent);
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--error);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.3);
+}
+
+.btn-text {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 10px 16px;
+  min-height: 40px;
+}
+
+.btn-text:hover {
+  color: var(--text-primary);
+}
+
+/* 危险按钮幽灵样式 */
+.btn-danger-ghost {
+    background: transparent;
+    color: var(--error);
+    border: 1px solid var(--error);
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+.btn-danger-ghost:hover {
+    background: var(--error);
+    color: white;
+}

@@ -56,6 +56,7 @@ router.beforeEach(async (to, from) => {
       title: "未保存的修改",
       message: "当前设置有未保存的修改，确定要离开吗？离开后未保存的修改将丢失。",
     });
+    // 仅 true 才放行离开；取消/被抢占（null）都阻止导航，保留 dirty 现状（A10）
     if (!ok) return false;
     await fetchConfig();
     saveFailed.value = false;

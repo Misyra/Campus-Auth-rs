@@ -1,19 +1,12 @@
 <script setup lang="ts">
 import { useAppearance } from "@/composables/useAppearance";
+import { useBackgroundImage } from "@/composables/useBackgroundImage";
+import { useCustomColors } from "@/composables/useCustomColors";
 
+const { appearance, cardDirty, resetCard, resetThemeBackground } = useAppearance();
 const {
-  appearance,
-  customColors,
   randomWallpaperDialog,
   bgLightbox,
-  getColorList,
-  cardDirty,
-  resetCard,
-  pickCustomColor,
-  onCustomColorPicked,
-  onColorLongPress,
-  startLongPress,
-  resetThemeBackground,
   selectBackgroundImage,
   clearBackgroundImage,
   openRandomWallpaperDialog,
@@ -21,7 +14,14 @@ const {
   confirmRandomWallpaper,
   openBgLightbox,
   closeBgLightbox,
-} = useAppearance();
+} = useBackgroundImage();
+const {
+  getColorList,
+  pickCustomColor,
+  onCustomColorPicked,
+  onColorLongPress,
+  startLongPress,
+} = useCustomColors();
 </script>
 
 <template>

@@ -100,6 +100,7 @@ export const DEFAULT_CONFIG: Config = {
       "http://www.msftconnecttest.com/connecttest.txt|Microsoft Connect Test",
       "http://detectportal.firefox.com/success.txt|success",
     ],
+    enable_local_check: true,
     script_timeout: 60,
     post_login_delay: 5,
     // 网卡绑定：后端仅预留 EgressBinder 接口未实现。保留默认值不提交该字段，

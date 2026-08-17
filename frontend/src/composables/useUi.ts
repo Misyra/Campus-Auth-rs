@@ -11,9 +11,9 @@ import type {
   InitStatus,
   LoginHistoryItem,
 } from "../api/types";
-import { systemApi, browsersApi, monitorApi } from "../api";
+import { systemApi, browsersApi, monitorApi, actionsApi, historyApi } from "../api";
 import { ApiError, extractApiError } from "../api/client";
-import { LIMITS, TIMING } from "../utils/constants";
+import { TIMING } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { useConfig } from "./useConfig";
 import { useStatus } from "./useStatus";
@@ -49,7 +49,7 @@ const autostartPollTimerIds: number[] = [];
 
 async function fetchLoginHistory(): Promise<void> {
   try {
-    const data = await import("../api").then((m) => m.historyApi.fetch(30));
+    const data = await historyApi.fetch(30);
     if (Array.isArray(data)) {
       loginHistory.splice(0, loginHistory.length, ...data);
     }
@@ -63,7 +63,6 @@ async function clearLoginHistory(): Promise<void> {
   const ok = await confirm({ title: "清空登录历史", message: `确定要清空所有 ${loginHistory.length} 条登录记录吗？此操作不可撤销。`, danger: true });
   if (!ok) return;
   try {
-    const historyApi = (await import("../api")).historyApi;
     const data = await historyApi.clear();
     loginHistory.splice(0, loginHistory.length);
     toastOnly(true, extractMsg(data, "清空完成"));
@@ -119,7 +118,6 @@ async function toggleMonitor(): Promise<void> {
   const { status } = useStatus();
   try {
     frontendLogger.info("monitor", `${status.monitoring ? "stop" : "start"} monitor`);
-    const monitorApi = (await import("../api")).monitorApi;
     const data = status.monitoring ? await monitorApi.stop() : await monitorApi.start();
     toastOnly(true, extractMsg(data, "操作成功"));
     await useStatus().fetchStatus();
@@ -137,7 +135,6 @@ async function manualLogin(): Promise<void> {
   busy.action = true;
   busy.login = true;
   try {
-    const actionsApi = (await import("../api")).actionsApi;
     const loginTimeoutMs = (useConfig().config.browser.login_timeout || 90) * 1000;
     const data = await actionsApi.login(loginTimeoutMs);
     notify(true, stripScreenshotHint(extractMsg(data, "登录完成")), "login");
@@ -158,7 +155,6 @@ async function manualLogin(): Promise<void> {
 
 async function cancelLogin(): Promise<void> {
   try {
-    const actionsApi = (await import("../api")).actionsApi;
     const data = await actionsApi.cancelLogin();
     toastOnly(true, data?.message || "已取消");
   } catch (error) {
@@ -169,7 +165,6 @@ async function cancelLogin(): Promise<void> {
 async function testNetwork(): Promise<void> {
   busy.action = true;
   try {
-    const actionsApi = (await import("../api")).actionsApi;
     const data = await actionsApi.testNetwork();
     toastOnly(true, extractMsg(data, "测试完成"));
   } catch (error) {
@@ -258,7 +253,7 @@ async function init(): Promise<void> {
     scripts.fetchScripts(),
     tasks.fetchActiveTask(),
     profiles.fetchProfiles(),
-    tasks.fetchPureMode(),
+    config.fetchPureMode(),
     fetchLoginHistory(),
     scheduled.loadScheduledTasks(),
     config.fetchLogLevels(),
@@ -270,13 +265,14 @@ async function init(): Promise<void> {
   // F1：重连刷新前检查 dirty，设置页有未保存编辑时跳过 fetchConfig，避免覆盖丢弃（对齐 useProfiles 守卫策略）
   wsMgr.onWsReconnect(async () => {
     const pending = [
-      profiles.fetchProfiles(),
-      tasks.fetchTasks(),
+      // P15：重连刷新为显式刷新场景，force: true 绕过 5 秒守卫
+      profiles.fetchProfiles(true),
+      tasks.fetchTasks(true),
       tasks.fetchActiveTask(),
-      scheduled.loadScheduledTasks(),
+      scheduled.loadScheduledTasks(true),
       // F8 顺带：补齐重连后遗漏的只读数据源
-      scripts.fetchScripts(),
-      tasks.fetchPureMode(),
+      scripts.fetchScripts(true),
+      config.fetchPureMode(),
       fetchLoginHistory(),
     ];
     if (!config.dirty.value) {

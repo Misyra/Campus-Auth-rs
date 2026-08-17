@@ -9,14 +9,28 @@
 /* 布局（sidebar / topbar / content-wrapper） */
 @import "./layout.css";
 
-/* 通用组件（card / btn / form / modal 等） */
-@import "./components.css";
+/* 通用组件（card / btn / form / modal 等）—— 按原 components.css 规则首现顺序导入 */
+@import "./components/card.css";
+@import "./components/btn.css";
+@import "./components/sidebar.css";
+@import "./components/topbar.css";
+@import "./components/form.css";
+@import "./components/custom-select.css";
+@import "./components/toggle.css";
+@import "./components/notification.css";
+@import "./components/modal.css";
+@import "./components/misc.css";
 
 /* 页面样式 */
 @import "./pages/dashboard.css";
 @import "./pages/tasks.css";
 @import "./pages/scripts.css";
-@import "./pages/settings.css";
+@import "./pages/settings/common.css";
+@import "./pages/settings/account.css";
+@import "./pages/settings/monitor.css";
+@import "./pages/settings/browser.css";
+@import "./pages/settings/system.css";
+@import "./pages/settings/tasks.css";
 @import "./pages/profiles.css";
 @import "./pages/scheduled_tasks.css";
 @import "./pages/appearance.css";

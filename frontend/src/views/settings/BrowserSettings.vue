@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useConfig } from "@/composables/useConfig";
-import { useTasks } from "@/composables/useTasks";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import { browsersApi, configApi, workerApi } from "@/api";
 
 const config = useConfig();
-const tasks = useTasks();
 
 const browsers = ref<{ channel: string; name: string; description: string; installed: boolean; icon: string }[]>([]);
 const browserLoading = ref(true);
@@ -19,7 +18,7 @@ onMounted(async () => {
   } catch { /* */ }
   browserLoading.value = false;
   // 从共享状态加载纯净模式，确保与 TasksSettings 同步
-  await tasks.fetchPureMode();
+  await config.fetchPureMode();
 });
 
 function handleBrowserClick(b: typeof browsers.value[0]) {
@@ -45,11 +44,11 @@ async function loadDefaultStealthScript() {
   } catch { /* */ }
 }
 
-// 纯净模式 — 复用 useTasks 单一状态源，避免多页面间状态不同步
-const pureMode = tasks.pureMode;
+// 纯净模式 — 复用 useConfig 单一状态源，避免多页面间状态不同步
+const pureMode = config.pureMode;
 
 async function togglePureMode() {
-  await tasks.togglePureMode();
+  await config.togglePureMode();
 }
 
 async function stopBrowser() {
@@ -178,7 +177,7 @@ async function stopBrowser() {
               <span class="toggle-slider"></span>
               <span class="toggle-label">登录后保持浏览器</span>
             </label>
-            <span class="field-help" tabindex="0" role="note" data-tip="登录完成后不关闭浏览器进程，维持已认证的网页会话。关闭后浏览器将在空闲超时后自动回收。">?</span>
+            <FieldHelp text="登录完成后不关闭浏览器进程，维持已认证的网页会话。关闭后浏览器将在空闲超时后自动回收。" />
           </div>
         </div>
         <div class="toggle-group" v-if="config.config.browser.browser_channel !== 'firefox'">
@@ -188,7 +187,7 @@ async function stopBrowser() {
               <span class="toggle-slider"></span>
               <span class="toggle-label">保留浏览器数据</span>
             </label>
-            <span class="field-help" tabindex="0" role="note" data-tip="使用独立的用户数据目录，保留 cookies 和登录状态。适用于需要存储登录状态的场景，不同浏览器的数据相互隔离。">?</span>
+            <FieldHelp text="使用独立的用户数据目录，保留 cookies 和登录状态。适用于需要存储登录状态的场景，不同浏览器的数据相互隔离。" />
           </div>
         </div>
         <div v-if="config.config.browser.persistent_context && config.config.browser.browser_channel !== 'firefox'" class="browser-info-tip">

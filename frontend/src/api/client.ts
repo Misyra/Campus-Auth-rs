@@ -24,6 +24,42 @@ export class ApiError extends Error {
 
 const BASE = "";
 
+/**
+ * 本地 API 鉴权 token：首次请求时从 /api/auth/token 懒加载并缓存。
+ *
+ * 后端对所有 /api/* 与 /ws/* 请求校验 X-Auth-Token（防本地恶意网页 CSRF），
+ * token 端点本身豁免鉴权，其响应受 CORS 读保护（仅 localhost Origin 可读）。
+ */
+let authToken: string | null = null;
+let tokenPromise: Promise<string | null> | null = null;
+
+/** 获取（并缓存）鉴权 token；失败返回 null（后端将拒绝后续请求并返回 401） */
+export function ensureAuthToken(): Promise<string | null> {
+  if (authToken) return Promise.resolve(authToken);
+  if (!tokenPromise) {
+    // 注意：此处必须用裸 fetch，经 request() 会因 ensureAuthToken 递归
+    tokenPromise = fetch(`${BASE}/api/auth/token`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json) => {
+        const token = (json as { data?: { token?: string } } | null)?.data?.token;
+        authToken = typeof token === "string" && token ? token : null;
+        tokenPromise = null;
+        return authToken;
+      })
+      .catch(() => {
+        tokenPromise = null;
+        return null;
+      });
+  }
+  return tokenPromise;
+}
+
+/** 重置 token 缓存（401 时调用，后端重启会换发新 token） */
+function resetAuthToken(): void {
+  authToken = null;
+  tokenPromise = null;
+}
+
 export interface RequestOptions {
   signal?: AbortSignal;
   timeout?: number;
@@ -40,19 +76,24 @@ export interface RequestOptions {
  * - 错误响应统一为 `{ "error": { code, message, details } }`，抛出携带 code/message/details 的 ApiError；
  * - HTTP 非 2xx 一律按错误处理；无 success 字段判断。
  */
-async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+async function request<T>(method: string, path: string, opts: RequestOptions = {}, retried = false): Promise<T> {
   const controller = opts.timeout ? new AbortController() : null;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   if (controller) {
     timeoutId = setTimeout(() => controller.abort(), opts.timeout);
   }
   const signal = controller ? controller.signal : opts.signal;
+  const token = await ensureAuthToken();
 
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {
       method,
-      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "X-Auth-Token": token } : {}),
+        ...(opts.headers || {}),
+      },
       body: opts.rawBody !== undefined ? opts.rawBody : undefined,
       signal,
     });
@@ -64,6 +105,12 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
     throw new ApiError("网络连接失败，请检查后端是否已启动", undefined, e);
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
+  }
+
+  // 401：token 可能因后端重启而轮换，重取一次后重试（仅一次，避免循环）
+  if (res.status === 401 && !retried) {
+    resetAuthToken();
+    return request<T>(method, path, opts, true);
   }
 
   const contentType = res.headers.get("content-type") || "";

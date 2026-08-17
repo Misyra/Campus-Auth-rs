@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
 import { useTasks } from "@/composables/useTasks";
+import { useRepoImport } from "@/composables/useRepoImport";
 import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
+import Modal from "@/components/common/Modal.vue";
 import { useRouter } from "vue-router";
 
 const t = useTasks();
+const repo = useRepoImport();
 const debug = useDebug();
 const router = useRouter();
 // 拖拽排序：复用 useDragSort（历史遗留：已实现未接入）
@@ -32,7 +35,7 @@ function closeEditor() { t.editingTask.value = null; }
               </svg>
               导入
             </button>
-            <button class="btn btn-sm" @click="t.showRepoImport()" title="从云端仓库导入">
+            <button class="btn btn-sm" @click="repo.showRepoImport()" title="从云端仓库导入">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
                 <path d="M21 12a9 9 0 0 1-9 9m9-9a9 9 0 0 0-9-9m9 9H3m9 9a9 9 0 0 1-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 0 1 9-9"/>
               </svg>
@@ -81,9 +84,15 @@ function closeEditor() { t.editingTask.value = null; }
                   {{ t.activeTaskId.value === task.id ? '使用中' : '使用' }}
                 </button>
                 <button class="btn btn-sm" @click="t.showTaskEditor(task.id)">编辑</button>
-                <button class="btn btn-sm" @click="t.executeTask(task.id)" title="立即执行（打卡/签到）">执行</button>
-                <button class="btn btn-sm" @click="t.duplicateTask(task.id)" title="复制为新任务">复制</button>
-                <button class="btn btn-sm" @click="t.exportTask(task.id)" title="导出为JSON文件">导出</button>
+                <button class="btn btn-sm" @click="t.executeTask(task.id)" :disabled="t.executingIds.has(task.id)" title="立即执行（打卡/签到）">
+                  {{ t.executingIds.has(task.id) ? '执行中...' : '执行' }}
+                </button>
+                <button class="btn btn-sm" @click="t.duplicateTask(task.id)" :disabled="t.duplicatingIds.has(task.id)" title="复制为新任务">
+                  {{ t.duplicatingIds.has(task.id) ? '复制中...' : '复制' }}
+                </button>
+                <button class="btn btn-sm" @click="t.exportTask(task.id)" :disabled="t.exportingIds.has(task.id)" title="导出为JSON文件">
+                  {{ t.exportingIds.has(task.id) ? '导出中...' : '导出' }}
+                </button>
                 <button class="btn btn-sm btn-danger" @click="t.deleteTask(task.id)" :disabled="task.id === 'default'">删除</button>
               </div>
             </div>
@@ -180,71 +189,55 @@ function closeEditor() { t.editingTask.value = null; }
   </div>
 
 <!-- ==================== 仓库导入弹窗 ==================== -->
-<div v-if="t.repoImport.value.visible" class="repo-import-overlay" @click.self="t.closeRepoImport">
-  <div class="repo-import-dialog">
-    <div class="repo-import-header">
-      <h3>从云端仓库导入任务</h3>
-      <button class="btn-icon" @click="t.closeRepoImport" title="关闭">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </button>
-    </div>
-    <div class="repo-import-source">
-      <span class="repo-source-label">源：</span>
-      <button class="btn btn-sm" :class="{ active: t.repoImport.value.source === 'github' }" @click="t.selectRepoSource('github')">GitHub</button>
-      <button class="btn btn-sm" :class="{ active: t.repoImport.value.source === 'gitee' }" @click="t.selectRepoSource('gitee')">Gitee</button>
-      <button class="btn btn-sm" :class="{ active: t.repoImport.value.source === 'custom' }" @click="t.selectRepoSource('custom')">自定义</button>
-      <div v-if="t.repoImport.value.source === 'custom'" class="repo-custom-url">
-        <input v-model="t.repoImport.value.url" type="text" class="input" placeholder="输入远程索引 URL" />
-      </div>
-    </div>
-    <div class="repo-import-action">
-      <button class="btn btn-primary btn-sm" @click="t.fetchRepoIndex()" :disabled="t.repoImport.value.loading">
-        {{ t.repoImport.value.loading ? '加载中...' : '加载索引' }}
-      </button>
-    </div>
-    <div v-if="t.repoImport.value.error" class="repo-import-error">{{ t.repoImport.value.error }}</div>
-    <div v-if="t.repoImport.value.tasks.length > 0" class="repo-import-search">
-      <input v-model="t.repoImport.value.searchQuery" type="text" class="input" placeholder="搜索任务..." />
-    </div>
-    <div v-if="t.repoImport.value.tasks.length > 0" class="repo-import-list">
-      <div v-for="task in t.filteredRepoTasks.value" :key="task.name" class="repo-import-item" @click="t.confirmRepoImport(task)">
-        <div class="repo-item-name">{{ task.name }}</div>
-        <div class="repo-item-desc">{{ task.description }}</div>
-        <div class="repo-item-meta">
-          <span v-if="task.author" class="repo-item-author">{{ task.author }}</span>
-          <span v-if="task.tags" class="repo-item-tags">{{ task.tags.join(', ') }}</span>
-        </div>
-      </div>
-      <div v-if="t.filteredRepoTasks.value.length === 0" class="repo-import-empty">无匹配</div>
-    </div>
-    <div v-else-if="!t.repoImport.value.loading" class="repo-import-hint">
-      <p>点击「加载索引」从远程仓库获取任务列表。</p>
-      <p>你也可以 <a :href="t.repoImport.value.url" target="_blank" rel="noopener">直接查看仓库</a>。</p>
+<Modal :open="repo.repoImport.value.visible" title="从云端仓库导入任务" size="lg" @close="repo.closeRepoImport">
+  <div class="repo-import-source">
+    <span class="repo-source-label">源：</span>
+    <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'github' }" @click="repo.selectRepoSource('github')">GitHub</button>
+    <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'gitee' }" @click="repo.selectRepoSource('gitee')">Gitee</button>
+    <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'custom' }" @click="repo.selectRepoSource('custom')">自定义</button>
+    <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
+      <input v-model="repo.repoImport.value.url" type="text" class="input" placeholder="输入远程索引 URL" />
     </div>
   </div>
-</div>
+  <div class="repo-import-action">
+    <button class="btn btn-primary btn-sm" @click="repo.fetchRepoIndex()" :disabled="repo.repoImport.value.loading">
+      {{ repo.repoImport.value.loading ? '加载中...' : '加载索引' }}
+    </button>
+  </div>
+  <div v-if="repo.repoImport.value.error" class="repo-import-error">{{ repo.repoImport.value.error }}</div>
+  <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-search">
+    <input v-model="repo.repoImport.value.searchQuery" type="text" class="input" placeholder="搜索任务..." />
+  </div>
+  <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-list">
+    <div v-for="task in repo.filteredRepoTasks.value" :key="task.name" class="repo-import-item" @click="repo.confirmRepoImport(task)">
+      <div class="repo-item-name">{{ task.name }}</div>
+      <div class="repo-item-desc">{{ task.description }}</div>
+      <div class="repo-item-meta">
+        <span v-if="task.author" class="repo-item-author">{{ task.author }}</span>
+        <span v-if="task.tags" class="repo-item-tags">{{ task.tags.join(', ') }}</span>
+      </div>
+    </div>
+    <div v-if="repo.filteredRepoTasks.value.length === 0" class="repo-import-empty">无匹配</div>
+  </div>
+  <div v-else-if="!repo.repoImport.value.loading" class="repo-import-hint">
+    <p>点击「加载索引」从远程仓库获取任务列表。</p>
+    <p>你也可以 <a :href="repo.repoImport.value.url" target="_blank" rel="noopener">直接查看仓库</a>。</p>
+  </div>
+</Modal>
 
-<!-- 免责弹窗 -->
-<div v-if="t.repoImport.value.disclaimer" class="repo-disclaimer-overlay" @click.self="t.cancelRepoDisclaimer()">
-  <div class="repo-disclaimer-dialog">
-    <h3>免责声明</h3>
-    <p>从远程仓库导入的任务由社区成员提供，未经审核验证。</p>
-    <p class="repo-disclaimer-warn"><strong>请仔细阅读并确认任务内容后再使用。</strong>任务中填入的账号密码将在执行时提交到第三方网站，请确认目标网站可靠。</p>
-    <div class="repo-disclaimer-actions">
-      <button class="btn btn-secondary" @click="t.cancelRepoDisclaimer()">取消</button>
-      <button class="btn btn-primary" @click="t.acceptRepoDisclaimer()">确认导入</button>
-    </div>
+<!-- 免责弹窗：必须显式确认/取消，禁用遮罩关闭 -->
+<Modal :open="!!repo.repoImport.value.disclaimer" title="免责声明" :close-on-overlay="false" @close="repo.cancelRepoDisclaimer">
+  <p>从远程仓库导入的任务由社区成员提供，未经审核验证。</p>
+  <p class="repo-disclaimer-warn"><strong>请仔细阅读并确认任务内容后再使用。</strong>任务中填入的账号密码将在执行时提交到第三方网站，请确认目标网站可靠。</p>
+  <div class="repo-disclaimer-actions">
+    <button class="btn btn-secondary" @click="repo.cancelRepoDisclaimer()">取消</button>
+    <button class="btn btn-primary" @click="repo.acceptRepoDisclaimer()">确认导入</button>
   </div>
-</div>
+</Modal>
 
 </template>
 <style scoped>
-.repo-import-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.repo-import-dialog { background: var(--bg-primary); border-radius: 12px; width: 640px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; padding: 20px; }
-.repo-import-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.repo-import-header h3 { margin: 0; }
+/* 弹窗容器/遮罩已由公共 Modal.vue 提供，此处仅保留弹窗内容样式 */
 .repo-import-source { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .repo-source-label { font-size: 0.9em; color: var(--text-secondary); }
 .repo-import-source .btn.active { background: var(--accent); color: #fff; }
@@ -263,9 +256,6 @@ function closeEditor() { t.editingTask.value = null; }
 .repo-import-empty { text-align: center; color: var(--text-tertiary); padding: 24px; }
 .repo-import-hint { color: var(--text-secondary); font-size: 0.9em; }
 .repo-import-hint a { color: var(--accent); }
-.repo-disclaimer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1001; }
-.repo-disclaimer-dialog { background: var(--bg-primary); border-radius: 12px; padding: 24px; max-width: 480px; width: 90vw; }
-.repo-disclaimer-dialog h3 { margin: 0 0 16px; }
 .repo-disclaimer-warn { color: var(--danger); }
 .repo-disclaimer-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
 </style>

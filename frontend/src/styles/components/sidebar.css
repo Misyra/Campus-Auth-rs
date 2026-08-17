@@ -1,0 +1,122 @@
+/* sidebar.css — 侧边栏导航（nav-item / nav-more / quit-btn） */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+  width: 100%;
+  text-align: left;
+}
+
+.nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  /* 渐进增强: 第一行为旧浏览器回退值，第二行为 color-mix() 增强值 */
+  background: rgba(167, 139, 250, 0.08);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--sidebar-accent, var(--accent)) 12%, transparent), rgba(167, 139, 250, 0.08));
+  color: var(--sidebar-accent, var(--accent));
+  border: 1px solid rgba(167, 139, 250, 0.2);
+  border: 1px solid color-mix(in srgb, var(--sidebar-accent, var(--accent)) 20%, transparent);
+  box-shadow: 0 0 20px rgba(167, 139, 250, 0.08);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--sidebar-accent, var(--accent)) 8%, transparent);
+}
+
+.nav-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.nav-more {
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-more-trigger {
+  position: relative;
+}
+
+.nav-more-trigger .nav-more-arrow {
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+  transition: transform 0.2s ease;
+  opacity: 0.5;
+}
+
+.nav-more-trigger .nav-more-arrow.expanded {
+  transform: rotate(180deg);
+}
+
+.nav-more-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 4px 12px;
+  border-left: 2px solid var(--border);
+  margin: 4px 0 4px 20px;
+}
+
+.nav-more-menu .nav-item {
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+/* 更多菜单展开/收起动画 */
+.nav-more-enter-active,
+.nav-more-leave-active {
+  transition: max-height 0.3s ease, opacity 0.3s ease;
+  overflow: hidden;
+}
+
+.nav-more-enter-from,
+.nav-more-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+
+.nav-more-enter-to,
+.nav-more-leave-from {
+  max-height: var(--collapse-anim-max);
+  opacity: 1;
+}
+
+.quit-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  min-height: 40px;
+}
+
+.quit-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: var(--error);
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.15);
+}
+
+.quit-btn svg {
+  width: 16px;
+  height: 16px;
+}
