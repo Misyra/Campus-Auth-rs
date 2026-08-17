@@ -7,23 +7,16 @@ use crate::environment::{
 
 /// 确保 Python 虚拟环境就绪
 ///
-/// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建。
-/// venv 已存在但 ddddocr（OCR 依赖，optional extra）缺失时补装
-/// （历史 venv 由不带 `--extra ocr` 的 sync 创建，需增量补齐）。
+/// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建（基础依赖，
+/// 不含 ddddocr）。OCR 依赖（ddddocr）由前端的显式"安装/卸载"操作经
+/// `uv add/remove ddddocr` 管理（见 environment::uv::install_ocr_dep /
+/// remove_ocr_dep），此处不做自动补装，避免显式卸载后又被自动装回。
 /// 返回 Python 解释器路径。
 pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
     let python_exe = mgr.worker_project_path().join(crate::environment::PYTHON_EXE_RELATIVE);
 
-    // 如果 Python 解释器已存在且 OCR 依赖齐备，直接返回
+    // 如果 Python 解释器已存在，直接返回
     if python_exe.exists() {
-        if ddddocr_installed(mgr) {
-            return Ok(python_exe);
-        }
-        tracing::info!("检测到 OCR 依赖（ddddocr）缺失，执行 uv sync 补装...");
-        if let Err(e) = crate::environment::uv::run_uv_sync(mgr).await {
-            // OCR 为可选能力：补装失败不阻断核心浏览器自动化（playwright）就绪
-            tracing::warn!("OCR 依赖补装失败（不影响核心浏览器能力）: {e}");
-        }
         return Ok(python_exe);
     }
 

@@ -1,6 +1,7 @@
 //! uv 下载 + 调用封装
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -362,12 +363,11 @@ fn extract_uv_from_zip(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 执行 `uv sync` 安装 Python 虚拟环境与依赖
+/// 执行 `uv sync` 安装 Python 虚拟环境与基础依赖（不含 OCR 可选依赖）。
 ///
-/// 携带 `--extra ocr`（ddddocr 等可选依赖组，OCR 识别所需）。若 extra
-/// 安装失败（原生依赖拉取失败等），降级重跑一次不带 extra 的 sync 保底
-/// （核心 playwright 依赖仍可用，OCR 命令返回"未安装"错误），下次启动
-/// 检测到 ddddocr 缺失会再次尝试补装。
+/// OCR 依赖（ddddocr）不随 `uv sync` 默认安装；需要时经
+/// [`install_ocr_dep`]（`uv add ddddocr`）单独添加，卸载经
+/// [`remove_ocr_dep`]（`uv remove ddddocr`）。
 pub async fn run_uv_sync(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
     // 前置检查：worker 项目目录存在
     if !mgr.worker_project_path().exists() {
@@ -385,33 +385,14 @@ pub async fn run_uv_sync(mgr: &EnvironmentManager) -> Result<(), EnvironmentErro
 
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
-    match run_uv_sync_inner(mgr, &uv_exe, &venv_path, true).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            tracing::warn!("uv sync --extra ocr 失败，降级为基础依赖重试: {e}");
-            run_uv_sync_inner(mgr, &uv_exe, &venv_path, false).await
-        }
-    }
-}
-
-/// uv sync 单次执行（with_extra 控制 `--extra ocr`）
-async fn run_uv_sync_inner(
-    mgr: &EnvironmentManager,
-    uv_exe: &std::path::Path,
-    venv_path: &std::path::Path,
-    with_extra: bool,
-) -> Result<(), EnvironmentError> {
     // 构造 uv sync 命令，设置 UV_PROJECT_ENVIRONMENT 控制 venv 位置
-    let mut cmd = uv_command(uv_exe);
-    cmd.arg("sync")
+    let cmd_future = uv_command(&uv_exe)
+        .arg("sync")
         .arg("--project")
         .arg(&*mgr.worker_project_path().to_string_lossy())
-        .env("UV_PROJECT_ENVIRONMENT", venv_path)
-        .current_dir(mgr.base_path());
-    if with_extra {
-        cmd.args(["--extra", "ocr"]);
-    }
-    let cmd_future = cmd.output();
+        .env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .current_dir(mgr.base_path())
+        .output();
 
     // 带超时执行
     let output = tokio::time::timeout(UV_SYNC_TIMEOUT, cmd_future)
@@ -425,6 +406,59 @@ async fn run_uv_sync_inner(
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        Err(EnvironmentError::UvSyncFailed {
+            exit_code: output.status.code(),
+            stderr,
+        })
+    }
+}
+
+/// 安装 OCR 依赖：`uv add ddddocr`
+pub async fn install_ocr_dep(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+    run_uv_dep(mgr, true).await
+}
+
+/// 卸载 OCR 依赖：`uv remove ddddocr`
+pub async fn remove_ocr_dep(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+    run_uv_dep(mgr, false).await
+}
+
+/// 执行 `uv add/remove ddddocr`（安装/卸载 OCR 依赖）
+///
+/// 在 worker 项目目录下执行并设置 UV_PROJECT_ENVIRONMENT 控制 venv 位置，
+/// 与 `uv sync` 保持一致的运行环境。`uv add` 会同步更新 pyproject.toml 与
+/// venv 内的 site-packages；`uv remove` 移除主依赖与已装入的包。
+async fn run_uv_dep(mgr: &EnvironmentManager, add: bool) -> Result<(), EnvironmentError> {
+    if !mgr.worker_project_path().exists() {
+        return Err(EnvironmentError::WorkerProjectNotFound {
+            path: mgr.worker_project_path().clone(),
+        });
+    }
+    let uv_exe = uv_exe_path(mgr);
+    let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
+
+    let mut cmd = uv_command(&uv_exe);
+    cmd.arg(if add { "add" } else { "remove" })
+        .arg("--project")
+        .arg(&*mgr.worker_project_path().to_string_lossy())
+        .arg("ddddocr")
+        .env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .current_dir(mgr.base_path());
+
+    let action = if add { "安装" } else { "卸载" };
+    let output = tokio::time::timeout(Duration::from_secs(300), cmd.output())
+        .await
+        .map_err(|_| EnvironmentError::UvSyncTimeout {
+            timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
+        })?
+        .map_err(EnvironmentError::UvExtractFailed)?;
+
+    if output.status.success() {
+        tracing::info!("OCR 依赖（ddddocr）{action}完成");
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        tracing::error!("OCR 依赖（ddddocr）{action}失败: {stderr}");
         Err(EnvironmentError::UvSyncFailed {
             exit_code: output.status.code(),
             stderr,

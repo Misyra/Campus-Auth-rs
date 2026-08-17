@@ -36,7 +36,7 @@ pub async fn ocr_status(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let env = environment.status();
-    let installed = env.python_ready && env.playwright_ready;
+    let installed = env.python_ready && env.playwright_ready && environment.ocr_ready();
     // 统计 environment 目录大小（递归）
     let env_dir = config.base_path().join("environment");
     let size_bytes = if env_dir.exists() {
@@ -72,24 +72,35 @@ fn dir_size(path: &std::path::Path) -> u64 {
     total
 }
 
-/// POST /api/ocr/uninstall — 卸载 OCR（取消在途任务并释放资源）
+/// POST /api/ocr/uninstall — 卸载 OCR（取消在途任务并移除依赖）
+///
+/// 取消在途 OCR 识别任务（bridge.cancel），并执行 `uv remove ddddocr`
+/// 移除 OCR 依赖（environment.remove_ocr_dep）。
 pub async fn ocr_uninstall(
     State(bridge): State<Arc<dyn BridgeApi>>,
+    State(environment): State<Arc<dyn EnvironmentApi>>,
 ) -> Result<Json<Value>, ApiError> {
     bridge.cancel("ocr");
-    Ok(data(Value::String("ok".into())))
+    environment.remove_ocr_dep().await?;
+    Ok(data(Value::String("OCR 依赖已卸载".into())))
 }
 
-/// POST /api/ocr/install — 触发 OCR 环境安装
+/// POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖
 ///
-/// 后台执行环境能力安装（uv/Python/Playwright），进度通过 StatusManager 推送。
+/// 后台执行环境能力安装（uv/Python/Playwright）并显式 `uv add ddddocr`
+/// 补齐 OCR 依赖，进度通过 StatusManager 推送。
 pub async fn ocr_install(
     State(environment): State<Arc<dyn EnvironmentApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let env = environment.clone();
     tokio::spawn(async move {
+        // 先确保核心能力就绪，再补装 OCR 依赖（uv add ddddocr）
         if let Err(e) = env.ensure_capability().await {
-            tracing::error!("OCR 环境安装失败: {e}");
+            tracing::error!("OCR 环境引导失败: {e}");
+            return;
+        }
+        if let Err(e) = env.install_ocr_dep().await {
+            tracing::error!("OCR 依赖安装失败: {e}");
         }
     });
     Ok(data(serde_json::json!({
@@ -112,6 +123,7 @@ mod tests {
     struct MockInner {
         executed: Vec<(String, Value)>,
         cancelled: Vec<String>,
+        removed: bool,
     }
 
     /// 内存 BridgeApi：记录 execute 的 method/params 与 cancel 的 cancel_id
@@ -142,13 +154,76 @@ mod tests {
         async fn shutdown(&self) {}
     }
 
+    use crate::environment::{BootstrapStage, EnvironmentApi, EnvironmentError, EnvironmentStatus};
+
+    /// 内存 EnvironmentApi：remove_ocr_dep 记录到 inner.removed
+    struct MockEnvironmentApi {
+        removed: Arc<std::sync::Mutex<MockInner>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EnvironmentApi for MockEnvironmentApi {
+        fn status(&self) -> EnvironmentStatus {
+            EnvironmentStatus {
+                uv_ready: false,
+                python_ready: false,
+                playwright_ready: false,
+                git_ready: false,
+                capability_ready: false,
+                stage: BootstrapStage::Idle,
+                progress: None,
+                last_error: None,
+            }
+        }
+        fn python_path(&self) -> std::path::PathBuf {
+            std::path::PathBuf::new()
+        }
+        async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError> {
+            self.removed.lock().unwrap().removed = true;
+            Ok(())
+        }
+        fn ocr_ready(&self) -> bool {
+            false
+        }
+    }
+
+    /// 双域 state：BridgeApi + EnvironmentApi 各自经 FromRef 委派提取
+    #[derive(Clone)]
+    struct TestState {
+        bridge: Arc<dyn BridgeApi>,
+        env: Arc<dyn EnvironmentApi>,
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn BridgeApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.bridge.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn EnvironmentApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.env.clone()
+        }
+    }
+
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner::default()));
         let bridge: Arc<dyn BridgeApi> = Arc::new(MockBridgeApi(inner.clone()));
+        let env: Arc<dyn EnvironmentApi> = Arc::new(MockEnvironmentApi {
+            removed: inner.clone(),
+        });
+        let state = TestState { bridge, env };
         let app = axum::Router::new()
             .route("/api/ocr/recognize", post(ocr_recognize))
             .route("/api/ocr/uninstall", post(ocr_uninstall))
-            .with_state(bridge);
+            .route("/api/ocr/install", post(ocr_install))
+            .with_state(state);
         (app, inner)
     }
 
@@ -175,9 +250,9 @@ mod tests {
         assert_eq!(calls[0].1["image"], "x.png");
     }
 
-    /// uninstall 派发 cancel("ocr")
+    /// uninstall 派发 cancel("ocr") 并触发 uv remove ddddocr
     #[tokio::test]
-    async fn test_ocr_uninstall_cancels_ocr_slot() {
+    async fn test_ocr_uninstall_cancels_and_removes_dep() {
         let (app, inner) = mock_app();
         let resp = app
             .oneshot(
@@ -190,6 +265,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(inner.lock().unwrap().cancelled, vec!["ocr"]);
+        let inner = inner.lock().unwrap();
+        assert_eq!(inner.cancelled, vec!["ocr"]);
+        assert!(inner.removed);
     }
 }
