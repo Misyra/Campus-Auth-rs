@@ -674,12 +674,7 @@ fn parse_log_line(line: &str) -> crate::web::state::LogEntry {
             let parts: Vec<&str> = header.splitn(2, ' ').collect();
             let level = parts.first().unwrap_or(&"INFO").to_string();
             let source = crate::web::state::normalize_source(parts.get(1).copied().unwrap_or(""));
-            return crate::web::state::LogEntry {
-                level,
-                message,
-                timestamp: now,
-                source,
-            };
+            return crate::web::state::LogEntry::new(level, message, now, source);
         }
     }
 
@@ -693,30 +688,25 @@ fn parse_log_line(line: &str) -> crate::web::state::LogEntry {
             if let Some(colon_pos) = rest.find(": ") {
                 let source = crate::web::state::normalize_source(rest[..colon_pos].trim());
                 let message = rest[colon_pos + 2..].trim().to_string();
-                return crate::web::state::LogEntry {
-                    level: lvl.to_string(),
-                    message,
-                    timestamp: now,
-                    source,
-                };
+                return crate::web::state::LogEntry::new(lvl.to_string(), message, now, source);
             }
             // 只有 LEVEL 无 ": " 分隔，rest 全部作为 message
-            return crate::web::state::LogEntry {
-                level: lvl.to_string(),
-                message: rest.to_string(),
-                timestamp: now,
-                source: String::new(),
-            };
+            return crate::web::state::LogEntry::new(
+                lvl.to_string(),
+                rest.to_string(),
+                now,
+                String::new(),
+            );
         }
     }
 
     // 回退：整行作为消息
-    crate::web::state::LogEntry {
-        level: "INFO".to_string(),
-        message: trimmed.to_string(),
-        timestamp: now,
-        source: String::new(),
-    }
+    crate::web::state::LogEntry::new(
+        "INFO".to_string(),
+        trimmed.to_string(),
+        now,
+        String::new(),
+    )
 }
 
 // ============================================================

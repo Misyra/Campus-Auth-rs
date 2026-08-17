@@ -45,18 +45,20 @@ pub fn build_router(
     container: Arc<ServiceContainer>,
     log_tx: broadcast::Sender<LogEntry>,
     shutdown_tx: tokio::sync::watch::Sender<()>,
-) -> axum::Router {
+) -> anyhow::Result<axum::Router> {
     // 通用 WebSocket 事件通道（screenshot / step_progress 等），供 Bridge 推送
     let (ws_tx, _) = broadcast::channel::<String>(WS_EVENT_CAPACITY);
     // 将事件通道注入 Bridge，由其转发 Worker 事件
     container.bridge.set_event_tx(ws_tx.clone());
-    let state = AppState::new(container, log_tx, ws_tx, shutdown_tx);
+    // 本地 API 鉴权 token：加载或生成并持久化到 config/.auth_token
+    let auth_token = crate::web::auth::load_or_create_token(&container.config.base_path())?;
+    let state = AppState::new(container, log_tx, ws_tx, shutdown_tx, auth_token.into());
 
     // CORS 由内层 `web::build_router` 统一处理（mirror_request 放行任意本地来源）。
     // 不再在此叠加白名单层，避免双层 CORS 挡住 vite dev / 局域网来源（历史遗留 #16）。
     let compression = CompressionLayer::new().gzip(true);
 
-    crate::web::build_router(state).layer(compression)
+    Ok(crate::web::build_router(state).layer(compression))
 }
 
 /// 启动 Axum 服务器（端口冲突 +1 重试，最多 `PORT_RETRY_MAX` 次）
@@ -87,7 +89,7 @@ pub async fn start_axum(
                 }
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-                let router = build_router(container, log_tx, shutdown_tx);
+                let router = build_router(container, log_tx, shutdown_tx)?;
                 let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(());
 
                 let handle = tokio::spawn(async move {

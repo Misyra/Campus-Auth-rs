@@ -2018,6 +2018,22 @@
         }
       }
     },
+    "/api/auth/token": {
+      "get": {
+        "operationId": "get___api_auth_token",
+        "summary": "获取本地 API 鉴权 token（响应受 CORS 读保护，仅 localhost Origin 可读）",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/init-status": {
       "get": {
         "operationId": "get___api_init-status",

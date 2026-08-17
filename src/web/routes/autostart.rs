@@ -18,7 +18,7 @@ pub struct AutostartModeBody {
 pub async fn get_autostart(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     let enabled = settings.global.app.autostart_enabled;
     let runtime_mode = serde_json::to_value(&settings.global.app.startup_action)
         .ok()
@@ -46,7 +46,7 @@ pub async fn get_autostart(
 pub async fn enable_autostart(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings();
+    let mut settings = state.container.config.load_settings_async().await;
     settings.global.app.autostart_enabled = true;
     state.container.config.save_settings(&settings).await?;
     // 真正注册系统自启动（schtasks 计划任务）
@@ -58,7 +58,7 @@ pub async fn enable_autostart(
 pub async fn disable_autostart(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings();
+    let mut settings = state.container.config.load_settings_async().await;
     settings.global.app.autostart_enabled = false;
     state.container.config.save_settings(&settings).await?;
     // 真正取消系统自启动注册
@@ -83,7 +83,7 @@ pub async fn set_autostart_mode(
     State(state): State<AppState>,
     Json(body): Json<AutostartModeBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings();
+    let mut settings = state.container.config.load_settings_async().await;
     let action = match body.runtime_mode.as_str() {
         "login_once" => crate::config::StartupAction::LoginOnce,
         "monitor" => crate::config::StartupAction::Monitor,

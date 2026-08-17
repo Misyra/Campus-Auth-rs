@@ -31,6 +31,7 @@ from playwright_worker import (  # noqa: E402
     COMMANDS,
     StepCancelled,
     WorkerError,
+    _purge_stale_debug_screenshots,
     _to_ms,
     cancel_registry,
     worker_core,
@@ -57,14 +58,22 @@ def _force_utf8_stdio() -> None:
     Python 3.15 才默认 UTF-8（PEP 686），故必须显式 reconfigure。
     stdin 用 errors="replace" 保证脏数据不致命（跳过而非崩溃）。
     """
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name)
         try:
             if stream is sys.stdin:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             else:
                 stream.reconfigure(encoding="utf-8")
-        except (AttributeError, ValueError):  # 非 TextIOWrapper 时忽略
-            pass
+        except (AttributeError, ValueError):
+            # reconfigure 失败时检查实际编码：stdout 非 UTF-8 则 IPC 必然乱码，
+            # 静默继续只会让 Rust 侧持续丢弃响应行、在途请求全部超时——
+            # 不如 fail-fast 让 Supervisor 立即感知并重启（M6）
+            enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "").replace("_", "")
+            if name == "stdout" and enc not in ("", "utf8"):
+                # 用最底层的 os.write 绕过可能同样损坏的 stdout/stderr
+                os.write(2, f"[worker] FATAL: stdout encoding={enc} cannot be forced to utf-8, IPC would corrupt; exiting\n".encode("utf-8", "replace"))
+                raise SystemExit(3)
 
 
 def _configure_logging() -> None:
@@ -310,6 +319,8 @@ def main() -> None:
     """Worker 进程入口。"""
     _force_utf8_stdio()
     _configure_logging()
+    # A7：清理上次会话（进程被强杀）残留的截图文件（可能含明文凭据），best-effort
+    _purge_stale_debug_screenshots()
     try:
         asyncio.run(_serve())
     except KeyboardInterrupt:

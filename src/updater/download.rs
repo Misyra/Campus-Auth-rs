@@ -74,6 +74,11 @@ pub(crate) async fn download_and_verify(
     let mut downloaded: u64 = 0u64;
     let mut stream = response.bytes_stream();
     let mut last_reported_pct: Option<u8> = None;
+    // 进度回调节流：仅距上次上报 ≥500ms 或已到 100% 时才触发。
+    // 回调会引发 WS 状态全量广播，逐 chunk 上报（每 1% 一次）在高速下载时
+    // 会形成广播风暴。
+    let mut last_report = std::time::Instant::now();
+    const PROGRESS_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(UpdaterError::DownloadFailed)?;
@@ -88,9 +93,14 @@ pub(crate) async fn download_and_verify(
             // (downloaded*100/total) 可能 >255，直接 as u8 会回绕（7.3）
             if let Some(pct) = (downloaded * 100).checked_div(total) {
                 let percent = pct.min(100) as u8;
-                if last_reported_pct.is_none_or(|last| percent > last) {
+                // 节流放行条件：距上次上报 ≥500ms，或进度已到 100%（最终进度必须送达）；
+                // 且仅对单调递增的百分比上报，避免重复回调
+                if (percent >= 100 || last_report.elapsed() >= PROGRESS_REPORT_INTERVAL)
+                    && last_reported_pct.is_none_or(|last| percent > last)
+                {
                     cb(percent);
                     last_reported_pct = Some(percent);
+                    last_report = std::time::Instant::now();
                 }
             }
         }

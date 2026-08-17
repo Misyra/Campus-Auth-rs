@@ -49,6 +49,10 @@ pub struct WorkerProcess {
     pub handles: ProcessHandles,
     /// 强制退出信号（消耗式）
     kill_tx: Option<oneshot::Sender<()>>,
+    /// Job Object 句柄（Windows）：Drop 时关闭句柄触发内核回收 Worker 进程树
+    /// （含 chromium），主进程被强杀时同样生效（M3 进程树治理第一层防线）
+    #[cfg(windows)]
+    job: Option<crate::bridge::job::JobHandle>,
 }
 
 impl WorkerProcess {
@@ -61,15 +65,32 @@ impl WorkerProcess {
             Ok(_) => {}
             // 超时：强制杀死子进程
             Err(_) => {
+                // Windows：先关 Job 句柄让内核立即回收整棵进程树（Worker 内
+                // Playwright 拉起的 chromium 与 Worker 本身），与 kill_tx 直杀
+                // 双保险；无 Job 时仅靠 kill_tx + orphan 兜底
+                #[cfg(windows)]
+                if let Some(job) = self.job.as_mut() {
+                    job.terminate_tree();
+                }
                 if let Some(tx) = self.kill_tx.take() {
                     let _ = tx.send(());
                 }
-                let _ = self.handles.health_task.await;
+                // kill 后等待 health task 退出同样加超时：Windows 上目标进程
+                // 被 AV/驱动句柄卡住时 child.wait() 可能长期不返回，
+                // 无限等待会卡死 Supervisor 主循环的 shutdown/kill 分支
+                if tokio::time::timeout(Duration::from_secs(2), &mut self.handles.health_task)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("kill 后等待 Worker 退出超时（2s），放弃等待");
+                }
             }
         }
         self.handles.stdin_task.abort();
         self.handles.stdout_task.abort();
         self.handles.stderr_task.abort();
+        // self drop 时关闭 Job 句柄（若仍持有）：正常退出路径下 Worker 已自行
+        // 关闭浏览器，此处仅回收漏网进程
     }
 }
 
@@ -118,6 +139,11 @@ pub async fn spawn_worker(
     }
     let mut child = cmd.spawn().map_err(BridgeError::SpawnFailed)?;
 
+    // Windows：spawn 后立即加入 KILL_ON_JOB_CLOSE 的 Job Object（内核级进程树
+    // 回收，M3）。失败仅告警退回应用层清理（kill_on_drop + orphan.rs 兜底）。
+    #[cfg(windows)]
+    let job = crate::bridge::job::try_assign_job(&child);
+
     let stdin = child
         .stdin
         .take()
@@ -154,6 +180,8 @@ pub async fn spawn_worker(
             health_task,
         },
         kill_tx: Some(kill_tx),
+        #[cfg(windows)]
+        job,
     })
 }
 
@@ -326,8 +354,21 @@ async fn parse_and_send_line(trimmed: &str, ipc_tx: &mpsc::Sender<ParsedMessage>
                 tracing::warn!("未知 IPC 消息格式: {trimmed}");
             }
         }
-        Err(e) => tracing::warn!("非 JSON IPC 行: {e} | {trimmed}"),
+        Err(e) => {
+            // 非 JSON 行意味着 stdout 被第三方库的意外 print 污染：
+            // 若该行本是响应会超时才被发现，累计计数供 Worker 退出时汇总告警（M6）
+            INVALID_IPC_LINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!("非 JSON IPC 行: {e} | {trimmed}");
+        }
     }
+}
+
+/// 非 JSON IPC 行计数（进程级：同一时刻仅一个 Worker，语义足够）
+static INVALID_IPC_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 取走累计的非 JSON IPC 行计数（读后复位）
+pub fn take_invalid_ipc_line_count() -> u64 {
+    INVALID_IPC_LINES.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// stderr forwarder task：逐行转发到 tracing（最后的日志防线）

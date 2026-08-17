@@ -169,13 +169,26 @@ impl ServiceContainer {
         // ---- Layer 9：更新器 ----
         let updater = UpdaterService::new(config.clone(), status.clone(), base_path.to_path_buf());
 
-        // 启动时应用待处理更新（须在 Engine 等主要服务启动之前；日志系统已就绪）。
-        // apply_pending_on_startup 内部已记录各分支日志并清理残留/回滚，
-        // 因此无论成功失败都继续启动：替换失败时以当前（已回滚）版本运行，不阻断用户。
-        match updater.apply_pending_on_startup().await {
-            Ok(true) => tracing::info!("待处理更新已应用，新版本将在下次启动生效"),
-            Ok(false) => {}
-            Err(e) => tracing::warn!("应用待处理更新失败，继续以当前版本启动: {e}"),
+        // 启动时应用待处理更新：改为后台 spawn，不在容器构造内 await——
+        // 其内部含 fetch_manifest 网络请求（staging 产物二次校验），网络慢时
+        // 会阻塞启动数十秒。self_replace 替换运行中的 exe 后新版本在下次启动生效，
+        // 因此运行期后台应用不影响本次进程。
+        // 并发说明：apply_pending_on_startup 未持有 update_in_progress 原子标记
+        // （该标记仅互斥手动"立即更新"路径），原实现依赖"构造期间无用户操作"的
+        // 假设；后台化后先 sleep 2s 错峰——启动最初 2s 内前端尚未加载完成，
+        // 用户手动触发更新的碰撞窗口极小。
+        // 无论成功失败都继续运行：替换失败时已自动回滚，以当前版本运行，不阻断用户。
+        {
+            let updater_bg = updater.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tracing::info!("后台应用待定更新开始");
+                match updater_bg.apply_pending_on_startup().await {
+                    Ok(true) => tracing::info!("后台应用待定更新完成，新版本将在下次启动生效"),
+                    Ok(false) => tracing::info!("后台应用待定更新跳过（无待处理更新或已清理）"),
+                    Err(e) => tracing::warn!("后台应用待定更新失败，继续以当前版本运行: {e}"),
+                }
+            });
         }
 
         // ---- Layer 10：自启动服务（检查平台支持）----

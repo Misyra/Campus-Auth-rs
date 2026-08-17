@@ -131,12 +131,17 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // 发送关机请求（忽略 HTTP 错误，进程可能已开始关闭）
+    // 发送关机请求（忽略 HTTP 错误，进程可能已开始关闭）。
+    // 本地 API 已启用 token 鉴权，必须携带 config/.auth_token 中的 token
     let url = format!("http://127.0.0.1:{}/api/system/shutdown", info.port);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;
-    let _ = client.post(&url).send().await;
+    let mut req = client.post(&url);
+    if let Some(token) = crate::web::auth::read_token_file(base_path) {
+        req = req.header("X-Auth-Token", token);
+    }
+    let _ = req.send().await;
 
     // 轮询等待进程退出
     for _ in 0..100 {

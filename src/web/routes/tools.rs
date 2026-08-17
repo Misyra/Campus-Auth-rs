@@ -22,7 +22,8 @@ pub async fn task_recorder(State(state): State<AppState>) -> Result<Response, Ap
         .join("tools")
         .join("task-recorder.user.js");
 
-    match std::fs::read_to_string(&script_path) {
+    // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
+    match tokio::fs::read_to_string(&script_path).await {
         Ok(script) => {
             Ok(Response::builder()
                 .status(StatusCode::OK)

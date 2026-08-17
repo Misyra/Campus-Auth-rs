@@ -1,0 +1,176 @@
+//! SSRF 防护：私网 IP 判定 + DNS 解析钉扎（pin）+ 逐跳重定向校验
+//!
+//! 旧实现的 TOCTOU 缺口：先 `lookup_host` 校验解析结果，再让 reqwest
+//! 发起请求——reqwest 内部会**二次解析**，攻击者控制的权威 DNS 可在两次
+//! 解析之间切换 IP（先返回公网 IP 通过校验，再返回 169.254.169.254 等
+//! 内网地址命中实际连接），完全绕过校验。
+//!
+//! 本模块的防护方式：
+//! 1. 解析域名并校验全部 IP 为公网地址；
+//! 2. 通过 `ClientBuilder::resolve(host, ip)` 把域名钉扎到已校验的 IP，
+//!    reqwest 不再自行解析；
+//! 3. 禁用自动重定向，手动跟随（最多 5 跳）并对每一跳重新校验，
+//!    防止"公网 URL 302 → 内网地址"的二次跳转攻击。
+
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
+
+use axum::http::header;
+
+/// 最大重定向跟随跳数
+const MAX_REDIRECTS: usize = 5;
+
+/// 判断 IP 是否属于私有/保留地址段（全端点统一规则）
+///
+/// 覆盖：回环、未指定、组播、广播、RFC1918 私有段、IPv4 链路本地、
+/// IPv6 ULA（fc00::/7）、IPv6 链路本地（fe80::/10）
+pub fn is_restricted_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                // fe80::/10 链路本地地址：内网可寻址，必须拦截
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
+/// 解析域名并校验全部结果为公网地址，返回钉扎用地址列表
+///
+/// IP 字面量直接校验；域名解析失败或任一结果命中私网段即拒绝。
+async fn resolve_public(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_restricted_ip(ip) {
+            return Err(format!("禁止访问内网/保留地址: {host}"));
+        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| format!("DNS 解析失败，拒绝访问: {host}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("DNS 解析无结果: {host}"));
+    }
+    for addr in &addrs {
+        if is_restricted_ip(addr.ip()) {
+            return Err(format!("禁止访问内网/保留地址: {host}"));
+        }
+    }
+    Ok(addrs)
+}
+
+/// 构建钉扎到指定 IP 的客户端（禁用自动重定向，由调用方逐跳校验）
+fn pinned_client(host: &str, addr: SocketAddr, timeout: Duration, ua: &str) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(ua)
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(host, addr)
+        .build()
+        .expect("构建 HTTP 客户端失败")
+}
+
+/// SSRF 安全的 GET 请求：校验 scheme → DNS 解析校验并钉扎 → 手动跟随重定向
+///
+/// 每一跳重定向都会重新解析并校验目标地址；返回最终响应与最终 URL
+///（调用方可能需要判断重定向后的地址）。
+pub async fn secure_get(
+    url: &str,
+    timeout: Duration,
+    ua: &str,
+) -> Result<(reqwest::Response, String), String> {
+    let mut current = url.to_string();
+    for _ in 0..MAX_REDIRECTS {
+        let parsed = url::Url::parse(&current).map_err(|e| format!("无效的 URL: {e}"))?;
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(format!("不支持的 URL 协议: {scheme}，仅支持 http/https"));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "URL 缺少主机名".to_string())?
+            .to_string();
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| "URL 缺少端口".to_string())?;
+
+        let addrs = resolve_public(&host, port).await?;
+        // 逐个尝试解析地址（首个连通即用），全部失败才报错
+        let mut last_err = String::from("无可用地址");
+        let mut response: Option<reqwest::Response> = None;
+        for addr in &addrs {
+            let client = pinned_client(&host, *addr, timeout, ua);
+            match client.get(&current).send().await {
+                Ok(resp) => {
+                    response = Some(resp);
+                    break;
+                }
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        let Some(resp) = response else {
+            return Err(format!("请求失败: {last_err}"));
+        };
+
+        // 手动跟随重定向：Location 相对当前 URL 解析后重新走完整校验
+        if resp.status().is_redirection() {
+            let loc = resp
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| "重定向缺少 Location".to_string())?;
+            let next = parsed
+                .join(loc)
+                .map_err(|e| format!("重定向地址无效: {e}"))?;
+            current = next.to_string();
+            continue;
+        }
+        return Ok((resp, current));
+    }
+    Err(format!("重定向超过 {MAX_REDIRECTS} 跳，放弃请求"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn test_is_restricted_rejects_private_and_reserved_ipv4() {
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::BROADCAST)));
+    }
+
+    #[test]
+    fn test_is_restricted_rejects_reserved_ipv6() {
+        assert!(is_restricted_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(is_restricted_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+        assert!(is_restricted_ip(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1))));
+        assert!(is_restricted_ip(IpAddr::V6("fe80::1".parse().unwrap())));
+        assert!(is_restricted_ip(IpAddr::V6("ff02::1".parse().unwrap())));
+    }
+
+    #[test]
+    fn test_is_restricted_allows_public_addresses() {
+        assert!(!is_restricted_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_restricted_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(!is_restricted_ip(IpAddr::V6("2606:4700:4700::1111".parse().unwrap())));
+    }
+}

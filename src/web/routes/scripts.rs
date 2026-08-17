@@ -8,6 +8,27 @@ use serde_json::Value;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
 
+/// 校验脚本执行程序：仅允许 shell / bat / python / exe 四类，拒绝 PowerShell 等。
+fn check_supported_binary(binary_path: Option<&str>, script_path: Option<&str>) -> Result<(), ApiError> {
+    if let Some(bp) = binary_path {
+        let lower = bp.to_lowercase();
+        if lower.contains("powershell") || lower.contains("pwsh") || lower.ends_with(".ps1") {
+            return Err(ApiError::BadRequest("不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本".into()));
+        }
+    }
+    if let Some(sp) = script_path {
+        let ext = std::path::Path::new(sp)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext == "ps1" {
+            return Err(ApiError::BadRequest("不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".into()));
+        }
+    }
+    Ok(())
+}
+
 /// GET /api/scripts — 列出全部脚本（复用任务列表）
 pub async fn list_scripts(
     State(state): State<AppState>,
@@ -61,13 +82,11 @@ pub async fn list_binaries(
     let python_path = state.container.environment.python_path().to_string_lossy().to_string();
     let mut binaries = vec![serde_json::json!({ "name": "python", "path": python_path })];
 
-    // 扫描常见系统可执行文件（Windows + Unix 兼容）
+    // 扫描常见系统可执行文件（Windows + Unix 兼容）。
+    // 仅列出受支持的脚本解释器：shell / bat / python；powershell 不在支持范围。
     #[cfg(target_os = "windows")]
     for (name, exe) in [
-        ("node", "node.exe"),
-        ("powershell", "powershell.exe"),
-        ("pwsh", "pwsh.exe"),
-        ("git", "git.exe"),
+        ("cmd", "cmd.exe"),
     ] {
         if let Some(path) = find_in_path(exe) {
             binaries.push(serde_json::json!({
@@ -78,11 +97,8 @@ pub async fn list_binaries(
     }
     #[cfg(not(target_os = "windows"))]
     for (name, exe) in [
-        ("node", "node"),
         ("bash", "bash"),
-        ("git", "git"),
-        ("curl", "curl"),
-        ("wget", "wget"),
+        ("sh", "sh"),
     ] {
         if let Some(path) = find_in_path(exe) {
             binaries.push(serde_json::json!({
@@ -152,6 +168,11 @@ pub async fn update_script(
             "脚本接口仅接受 type=script 的负载".into(),
         ));
     }
+    // 校验二进制与脚本路径：仅允许 shell / bat / python / exe，拒绝 PowerShell
+    check_supported_binary(
+        body.get("binary_path").and_then(Value::as_str),
+        body.get("script_path").and_then(Value::as_str),
+    )?;
     let task: crate::tasks::TaskKind = serde_json::from_value(body)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.container.tasks.save_task(&task_id, &task).await?;

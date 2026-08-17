@@ -102,6 +102,13 @@ async fn send_ws(socket: &mut WebSocket, msg: &WsMessage) -> bool {
 }
 
 async fn handle_logs(mut socket: WebSocket, state: AppState) {
+    // 单连接限制：接入时递增世代号，旧连接（若存在）监测到世代号变化即断开。
+    // 订阅放在 send 之后，确保本连接不会因自己 +1 而误退；后续任何 +1 都意味着
+    // 有新页面接入 → 本连接被顶替。
+    let epoch = *state.ws_epoch_tx.borrow();
+    let _ = state.ws_epoch_tx.send(epoch + 1);
+    let mut epoch_rx = state.ws_epoch_tx.subscribe();
+
     let mut log_rx = state.log_tx.subscribe();
     let mut status_rx = state.container.status.subscribe();
     // 通用事件通道（screenshot / step_progress 等），由 Bridge 推送
@@ -176,6 +183,17 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
+            }
+            // 世代号变化：有新的前端页面接入，本连接被顶替，主动断开
+            // （避免多个标签页同时接收日志/事件导致重复与状态冲突）
+            result = epoch_rx.changed() => {
+                if result.is_err() {
+                    break;
+                }
+                tracing::debug!("WebSocket 连接被新页面顶替，断开旧连接");
+                // 通知前端"被顶替"，前端据此停止自动重连，避免多标签页互相踢导致死循环
+                let _ = send_msg(&mut socket, Message::Text("{\"type\":\"ws_kicked\"}".into())).await;
+                break;
             }
             // 监听客户端消息（Close / Text ping / Ping / Pong）
             msg = socket.recv() => {

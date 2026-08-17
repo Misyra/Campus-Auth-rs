@@ -16,7 +16,7 @@ use crate::web::state::AppState;
 pub async fn get_settings(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     let active_id = &settings.active_profile_id;
     let profile = state.container.config.load_profile(active_id).unwrap_or_default();
 
@@ -55,7 +55,7 @@ pub async fn put_settings(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.container.config.save_settings(&settings).await?;
     state.container.config.reload().await?;
-    let updated = state.container.config.load_settings();
+    let updated = state.container.config.load_settings_async().await;
     Ok(data(serde_json::to_value(updated)?))
 }
 
@@ -68,7 +68,7 @@ pub async fn patch_settings(
     State(state): State<AppState>,
     Json(patch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut current = state.container.config.load_settings();
+    let mut current = state.container.config.load_settings_async().await;
     let mut current_value = serde_json::to_value(&current)?;
 
     // 将前端的扁平字段映射到 global 子结构
@@ -172,7 +172,7 @@ pub async fn patch_settings(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     state.container.config.save_settings(&current).await?;
     state.container.config.reload().await?;
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     let active_id = &settings.active_profile_id;
     let profile = state.container.config.load_profile(active_id).unwrap_or_default();
     // has_password 应与 GET /api/config 保持一致：反映"密码可解密"而非"字段非空"，
@@ -236,7 +236,7 @@ pub async fn get_config_defaults(
 pub async fn get_log_levels(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     Ok(data(serde_json::json!({ "level": settings.global.logging.level })))
 }
 
@@ -250,7 +250,7 @@ pub async fn set_log_level(
     State(state): State<AppState>,
     Json(body): Json<SetLogLevelBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings();
+    let mut settings = state.container.config.load_settings_async().await;
     settings.global.logging.level = body.level.clone();
     state.container.config.save_settings(&settings).await?;
     // 热更新运行时日志级别（tracing filter），而非仅落盘下次启动生效
@@ -307,7 +307,7 @@ pub async fn get_default_stealth_script(
 pub async fn get_pure_mode(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     Ok(data(serde_json::json!({ "enabled": settings.global.browser.pure_mode })))
 }
 
@@ -317,7 +317,7 @@ pub async fn get_pure_mode(
 pub async fn set_pure_mode(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = state.container.config.load_settings();
+    let mut settings = state.container.config.load_settings_async().await;
     let new_enabled = !settings.global.browser.pure_mode;
     settings.global.browser.pure_mode = new_enabled;
     state.container.config.save_settings(&settings).await?;
@@ -352,6 +352,7 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "check_auth_url": false,
         "auth_url_targets": [],
         "url_check_urls": url_check_urls,
+        "enable_local_check": m.local_check_enabled,
         "script_timeout": 60,
         "post_login_delay": m.post_login_delay,
     })
@@ -393,6 +394,7 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         "tcp_enabled": obj.get("enable_tcp_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "http_enabled": obj.get("enable_http_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "url_enabled": obj.get("url_check_urls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+        "local_check_enabled": obj.get("enable_local_check").and_then(|v| v.as_bool()).unwrap_or(true),
         "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
         "post_login_delay": obj.get("post_login_delay").and_then(|v| v.as_u64()).unwrap_or(5),
         // 注意：profile_check_interval / http_timeout / url_timeout / auth_url_timeout / socks5_port
@@ -436,6 +438,7 @@ mod tests {
             tcp_enabled: true,
             http_enabled: false,
             url_enabled: true,
+            local_check_enabled: false,
             profile_check_interval: 300,
             tcp_timeout: 5,
             http_timeout: 5,

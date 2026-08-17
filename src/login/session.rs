@@ -123,6 +123,24 @@ pub fn should_force_recycle(outcome: Outcome) -> bool {
     matches!(outcome, Outcome::UnknownError | Outcome::NetworkError)
 }
 
+/// 从 StructuredResult.data 提取页面弹窗文案，拼接为可读后缀
+///
+/// Worker 在任务期间捕获页面 alert/confirm 文案（如「账号或密码错误」「登录成功！」），
+/// 存于 `data.dialogs`。此处格式化为 `；页面提示: A / B` 形式，供登录日志展示；
+/// 无弹窗时返回空串。
+fn dialog_note(data: &Value) -> String {
+    let msgs: Vec<&str> = data
+        .get("dialogs")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if msgs.is_empty() {
+        String::new()
+    } else {
+        format!("；页面提示: {}", msgs.join(" / "))
+    }
+}
+
 /// 登录会话：持有配置快照派生参数、服务引用与取消原语，驱动单次登录状态机
 pub struct LoginSession {
     /// 登录来源
@@ -350,17 +368,24 @@ impl LoginSession {
             match action {
                 ResultAction::Terminal(kind) => match kind {
                     TerminalKind::Success => {
+                        // 汇总成功消息：Worker message（如「成功条件命中」「N 个非必须
+                        // 步骤失败」）与页面弹窗文案（如「登录成功！」）一并进入日志
+                        let note = dialog_note(&structured.data);
+                        let detail = {
+                            let m = structured.message.trim();
+                            if !m.is_empty() && m != "执行成功" {
+                                format!("（{m}）")
+                            } else {
+                                String::new()
+                            }
+                        };
+                        let msg = format!("登录成功{detail}{note}");
                         // 任务声明 success_condition → 信任 Worker 的变量真值判定，跳过网络检测兜底
                         // （对齐原项目 v4.2.3 login_attempt 的 has_explicit_condition 分支）
                         if self.has_explicit_success_condition() {
                             info!("任务声明 success_condition，跳过登录后网络检测");
                             self.emit(
-                                self.make_result(
-                                    true,
-                                    "登录成功".into(),
-                                    session_start,
-                                    attempts_used,
-                                ),
+                                self.make_result(true, msg, session_start, attempts_used),
                                 HistoryResult::Success,
                             )
                             .await;
@@ -372,12 +397,7 @@ impl LoginSession {
                         let net_ok = self.verify_network_after_login().await;
                         if net_ok {
                             self.emit(
-                                self.make_result(
-                                    true,
-                                    "登录成功".into(),
-                                    session_start,
-                                    attempts_used,
-                                ),
+                                self.make_result(true, msg, session_start, attempts_used),
                                 HistoryResult::Success,
                             )
                             .await;
@@ -421,7 +441,11 @@ impl LoginSession {
                         self.finish_with_failure(
                             session_start,
                             attempts_used,
-                            structured.message.clone(),
+                            format!(
+                                "{}{}",
+                                structured.message,
+                                dialog_note(&structured.data)
+                            ),
                         )
                         .await;
                         return;
@@ -437,11 +461,17 @@ impl LoginSession {
                 }
                 ResultAction::Exhausted => {
                     // 可重试结果但重试预算已耗尽：以"重试耗尽"终态收尾，
-                    // 不再进入 try_retry 重复尝试（由下方 classify 前预算预检产生）
+                    // 不再进入 try_retry 重复尝试（由下方 classify 前预算预检产生）。
+                    // 附带最后一次失败的步骤错误与页面弹窗文案，便于定位真实原因。
                     self.finish_with_failure(
                         session_start,
                         attempts_used,
-                        format!("重试耗尽（共 {} 次）", self.max_retries),
+                        format!(
+                            "重试耗尽（共 {} 次）: {}{}",
+                            self.max_retries,
+                            structured.message,
+                            dialog_note(&structured.data)
+                        ),
                     )
                     .await;
                     return;
@@ -463,7 +493,12 @@ impl LoginSession {
             self.finish_with_failure(
                 session_start,
                 *attempts_used,
-                format!("重试耗尽（共 {} 次）", self.max_retries),
+                format!(
+                    "重试耗尽（共 {} 次）: {}{}",
+                    self.max_retries,
+                    structured.message,
+                    dialog_note(&structured.data)
+                ),
             )
             .await;
             return false;
@@ -644,7 +679,29 @@ impl LoginSession {
                 reason: result.message.clone(),
             },
         };
-        debug!("登录会话结束: source={:?} success={}", result.source, result.success);
+        // 会话终态后关闭浏览器（对齐原版 BrowserContextManager 的会话级生命周期）：
+        // 会话内重试复用同一浏览器，终态即关闭；Worker 进程保留，下次登录由
+        // ensure_browser 重建。进程已被回收（force_recycle / 空闲超时）时跳过，
+        // 避免仅为关浏览器而重新 spawn 一个 Worker。
+        if let Some(b) = &self.bridge {
+            if b.has_live_worker() {
+                // 超时与 Python 侧 close_browser 内部超时（8s）对齐：
+                // 命令级超时兜底由 bridge.execute_with_timeout 负责，失败仅告警不阻塞收尾
+                if let Err(e) = b
+                    .execute_with_timeout("close_browser", json!({}), Duration::from_secs(8))
+                    .await
+                {
+                    debug!("登录终态关闭浏览器失败（忽略）: {e}");
+                }
+            }
+        }
+        info!(
+            source = ?result.source,
+            success = result.success,
+            "登录会话结束: {}{}",
+            result.message,
+            if result.success { "（成功）" } else { "（失败）" }
+        );
     }
 
     /// 以「已取消」终态收尾：写入取消原因（`None` 保留既有原因）→ emit 取消结果 → 写历史。
@@ -827,5 +884,30 @@ mod tests {
     #[test]
     fn test_should_force_recycle_does_not_recycle_captcha_failed() {
         assert!(!should_force_recycle(Outcome::CaptchaFailed));
+    }
+
+    // ============ dialog_note 纯函数测试 ============
+
+    #[test]
+    fn test_dialog_note_empty_when_no_dialogs() {
+        // 无 dialogs 字段 / 空数组 → 空串
+        assert_eq!(dialog_note(&Value::Null), "");
+        assert_eq!(dialog_note(&serde_json::json!({})), "");
+        assert_eq!(dialog_note(&serde_json::json!({ "dialogs": [] })), "");
+    }
+
+    #[test]
+    fn test_dialog_note_joins_messages() {
+        let data = serde_json::json!({ "dialogs": ["账号或密码错误！", "请先阅读并同意免责声明条款"] });
+        assert_eq!(
+            dialog_note(&data),
+            "；页面提示: 账号或密码错误！ / 请先阅读并同意免责声明条款"
+        );
+    }
+
+    #[test]
+    fn test_dialog_note_ignores_non_string_entries() {
+        let data = serde_json::json!({ "dialogs": [1, true, "登录成功！"] });
+        assert_eq!(dialog_note(&data), "；页面提示: 登录成功！");
     }
 }

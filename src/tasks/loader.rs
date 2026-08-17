@@ -91,10 +91,12 @@ impl TaskManager {
     pub async fn list_all_tasks(&self) -> Vec<TaskSummary> {
         let _guard = self.lock.lock().await;
         // 目录扫描为阻塞 I/O，放到 spawn_blocking 中执行以免阻塞 tokio worker 线程。
-        // 所需路径字段提前 clone 后 move 进闭包。
+        // 所需路径字段提前 clone 后 move 进闭包；`.order.json` 的读取也一并放入
+        // 闭包（同为同步磁盘 I/O，避免回到 async 后持 self.lock 再做同步读）。
         let browser_dir = self.browser_dir.clone();
         let scripts_dir = self.scripts_dir.clone();
-        let mut summaries: Vec<TaskSummary> = tokio::task::spawn_blocking(move || {
+        let order_path = self.order_path();
+        let (mut summaries, order) = tokio::task::spawn_blocking(move || {
             let mut out: Vec<TaskSummary> = Vec::new();
 
             // 浏览器任务（browser/*.json）
@@ -144,13 +146,17 @@ impl TaskManager {
                 }
             }
 
-            out
+            (out, Self::read_order_at(&order_path))
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            // JoinError 意味着扫描任务 panic（如目录元数据异常），
+            // 静默返回空列表会让用户误以为任务全部丢失，必须记录错误
+            tracing::error!("任务目录扫描失败（返回空列表）: {e}");
+            (Vec::new(), OrderData::default())
+        });
 
         // 按 order 排序，未在列表中的排末尾
-        let order = self.read_order();
         summaries.sort_by_key(|s| {
             order
                 .order
@@ -493,8 +499,12 @@ impl TaskManager {
 
     /// 同步读取 `.order.json`（缺失或损坏时返回默认）
     fn read_order(&self) -> OrderData {
-        let p = self.order_path();
-        match std::fs::read_to_string(&p) {
+        Self::read_order_at(&self.order_path())
+    }
+
+    /// 按路径同步读取 `.order.json`（供 spawn_blocking 闭包内使用，无需 &self）
+    fn read_order_at(path: &Path) -> OrderData {
+        match std::fs::read_to_string(path) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => OrderData::default(),
         }

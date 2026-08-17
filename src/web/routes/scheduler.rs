@@ -11,7 +11,7 @@ use crate::web::state::AppState;
 /// GET /api/scheduler/jobs — 列出全部定时任务
 ///
 /// 返回时补充 `task_type` 展示字段（由 target 关联的任务类型推导），
-/// 存储模型本身不冗余存类型。
+/// 以及 `schedule_invalid`（cron 表达式解析失败、enabled 却永不触发的标记）。
 pub async fn list_jobs(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
@@ -22,6 +22,7 @@ pub async fn list_jobs(
         if let Some(tt) = state.container.scheduler.task_type_of(&job.target_id).await {
             v["task_type"] = serde_json::json!(tt);
         }
+        v["schedule_invalid"] = serde_json::json!(state.container.scheduler.is_cron_invalid(&job.id));
         result.push(v);
     }
     Ok(data(result))

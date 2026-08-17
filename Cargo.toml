@@ -97,6 +97,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_System_JobObjects",
 ] }
 
 [dev-dependencies]
@@ -104,6 +105,7 @@ tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 strip = true

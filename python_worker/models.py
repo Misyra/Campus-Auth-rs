@@ -56,6 +56,9 @@ class StructuredResult:
     screenshot_url: str | None = None
     """单张截图的快捷访问地址（调试会话初始截图使用）。"""
 
+    data: dict[str, Any] = field(default_factory=dict)
+    """扩展数据（如 ``dialogs``：本次任务期间页面弹窗文案列表）。"""
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 字典（替代 Pydantic model_dump）。"""
         return asdict(self)

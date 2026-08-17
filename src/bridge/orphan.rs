@@ -10,14 +10,16 @@
 use std::collections::HashSet;
 use std::process::Command;
 
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// 清理上次崩溃残留的孤儿浏览器进程（best-effort）。
 pub fn cleanup_orphan_browsers() {
     let count = match cleanup_orphan_browsers_inner() {
         Ok(n) => n,
         Err(e) => {
-            debug!("孤儿浏览器进程清理跳过: {e}");
+            // 解析失败意味着孤儿清理整体失效（残留进程将持续占用资源），
+            // 必须以 warn 级别暴露，而不是静默跳过
+            warn!("孤儿浏览器进程清理失败: {e}");
             0
         }
     };
@@ -44,11 +46,13 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
 
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     // 首行为表头，用于定位列索引
+    // 注意：ConvertTo-Csv 默认给所有字段加双引号（"ProcessId","123"...），
+    // 必须剥去引号后再比较/解析，否则列定位与 pid 解析全部失败
     let header = lines
         .next()
         .ok_or("进程枚举无输出")?
         .split(',')
-        .map(|s| s.trim().to_string())
+        .map(|s| s.trim().trim_matches('"').to_string())
         .collect::<Vec<_>>();
     let idx_pid = header
         .iter()
@@ -71,8 +75,8 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
         if parts.len() <= idx_cmd {
             continue;
         }
-        let pid = parts[idx_pid].trim().parse::<u32>().ok();
-        let ppid = parts[idx_ppid].trim().parse::<u32>().ok();
+        let pid = parts[idx_pid].trim().trim_matches('"').parse::<u32>().ok();
+        let ppid = parts[idx_ppid].trim().trim_matches('"').parse::<u32>().ok();
         let cmd = parts[idx_cmd];
         let (Some(pid), Some(ppid)) = (pid, ppid) else {
             continue;
@@ -166,11 +170,14 @@ fn is_chromium(cmd: &str) -> bool {
 }
 
 /// 通过 taskkill 强杀（Windows）
+///
+/// `/T` 递归终止进程树：chromium 的 renderer/GPU 等子进程命令行
+/// 不含 `--headless` 等特征，不会被列入候选，仅杀主进程会留下子进程孤儿
 #[cfg(windows)]
 fn kill_pid(pid: u32) -> bool {
     use std::os::windows::process::CommandExt;
     Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
+        .args(["/F", "/T", "/PID", &pid.to_string()])
         .creation_flags(0x08000000)
         .output()
         .map(|o| o.status.success())

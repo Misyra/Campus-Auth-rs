@@ -1,225 +1,170 @@
 //! Web 模块：Axum Router 构建
 //!
 //! 负责组装所有 HTTP 路由、WebSocket 端点与静态文件服务。
-//! 路由路径与根目录 `openapi.json` 保持一致。
+//! `/api/*` 路由以 [`route_table`] 为单一来源声明式注册，
+//! 契约测试据此与根目录 `openapi.json` 做双向一致性校验。
 
+pub mod auth;
 pub mod error;
 mod routes;
+mod ssrf;
 mod static_files;
 pub mod state;
 mod ws;
 
+use axum::middleware;
 use axum::routing::{delete, get, patch, post, put};
+use axum::routing::MethodRouter;
 use axum::Router;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use self::state::AppState;
 
+/// 路由处理器构造器（非捕获闭包，可强转为 fn pointer）
+type RouteBuilder = fn() -> MethodRouter<AppState>;
+
+/// `/api/*` 路由表：method + path + handler 构造器
+///
+/// 单一来源，两处消费：
+/// - [`build_router`] 遍历注册到 Router；
+/// - 契约测试（本模块 tests）遍历与 `openapi.json` 双向比对，
+///   新增/改名路由而漏改 openapi.json 时测试即失败。
+///
+/// 注意：同一路径多 method 拆为多行（axum 对同 path 不同 method 的
+/// 重复 `route()` 调用自动合并）。
+fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
+    vec![
+        // ---- 监控（monitor）----
+        ("GET", "/api/monitor/status", || get(routes::monitor::get_status)),
+        ("POST", "/api/monitor/test", || post(routes::monitor::test_network)),
+        ("POST", "/api/monitor/start", || post(routes::monitor::start_monitor)),
+        ("POST", "/api/monitor/stop", || post(routes::monitor::stop_monitor)),
+        // ---- 配置（config）----
+        ("GET", "/api/config", || get(routes::config::get_settings)),
+        ("PUT", "/api/config", || put(routes::config::put_settings)),
+        ("PATCH", "/api/config", || patch(routes::config::patch_settings)),
+        ("POST", "/api/config/reload", || post(routes::config::reload_settings)),
+        ("GET", "/api/config/defaults", || get(routes::config::get_config_defaults)),
+        ("GET", "/api/config/log-levels", || get(routes::config::get_log_levels)),
+        ("PUT", "/api/config/log-level", || put(routes::config::set_log_level)),
+        ("GET", "/api/config/default-stealth-script", || {
+            get(routes::config::get_default_stealth_script)
+        }),
+        // ---- 纯净模式（pure-mode，读写 config.browser.pure_mode）----
+        ("GET", "/api/pure-mode", || get(routes::config::get_pure_mode)),
+        ("POST", "/api/pure-mode", || post(routes::config::set_pure_mode)),
+        // ---- Profile ----
+        ("GET", "/api/profiles", || get(routes::profiles::list_profiles)),
+        ("GET", "/api/profiles/{id}", || get(routes::profiles::get_profile)),
+        ("POST", "/api/profiles/{id}", || post(routes::profiles::create_profile)),
+        ("PUT", "/api/profiles/{id}", || put(routes::profiles::update_profile)),
+        ("DELETE", "/api/profiles/{id}", || delete(routes::profiles::delete_profile)),
+        ("POST", "/api/profiles/switch", || post(routes::profiles::switch_profile)),
+        ("POST", "/api/profiles/detect", || post(routes::profiles::detect_profile)),
+        ("POST", "/api/profiles/auto-switch", || post(routes::profiles::auto_switch)),
+        // ---- 任务（tasks）----
+        ("GET", "/api/tasks", || get(routes::tasks::list_tasks)),
+        ("POST", "/api/tasks", || post(routes::tasks::create_task)),
+        ("GET", "/api/tasks/active", || get(routes::tasks::get_active_task)),
+        ("POST", "/api/tasks/active/{task_id}", || post(routes::tasks::set_active_task)),
+        ("POST", "/api/tasks/import", || post(routes::tasks::import_tasks)),
+        ("POST", "/api/tasks/order", || post(routes::tasks::order_tasks)),
+        ("GET", "/api/tasks/export/{id}", || get(routes::tasks::export_task)),
+        ("GET", "/api/tasks/{id}", || get(routes::tasks::get_task)),
+        ("PUT", "/api/tasks/{id}", || put(routes::tasks::update_task)),
+        ("DELETE", "/api/tasks/{id}", || delete(routes::tasks::delete_task)),
+        ("POST", "/api/tasks/{id}/execute", || post(routes::tasks::execute_task)),
+        // ---- 仓库（repo）----
+        ("GET", "/api/repo/fetch", || get(routes::repo::repo_fetch_index)),
+        ("GET", "/api/repo/task", || get(routes::repo::repo_fetch_task)),
+        // ---- 登录（login）----
+        ("POST", "/api/login", || post(routes::login::trigger_login)),
+        ("POST", "/api/login/cancel", || post(routes::login::cancel_login)),
+        ("GET", "/api/login/status", || get(routes::login::get_login_status)),
+        ("POST", "/api/login/once", || post(routes::login::login_once)),
+        // ---- 调试（debug）----
+        ("POST", "/api/debug/start", || post(routes::debug::start_debug)),
+        ("POST", "/api/debug/step", || post(routes::debug::step_debug)),
+        ("POST", "/api/debug/stop", || post(routes::debug::stop_debug)),
+        ("POST", "/api/debug/run-all", || post(routes::debug::run_all)),
+        // ---- 调度（scheduler）----
+        ("GET", "/api/scheduler/jobs", || get(routes::scheduler::list_jobs)),
+        ("POST", "/api/scheduler/jobs", || post(routes::scheduler::create_job)),
+        ("GET", "/api/scheduler/jobs/{id}", || get(routes::scheduler::get_job)),
+        ("PUT", "/api/scheduler/jobs/{id}", || put(routes::scheduler::update_job)),
+        ("DELETE", "/api/scheduler/jobs/{id}", || delete(routes::scheduler::delete_job)),
+        ("POST", "/api/scheduler/jobs/{id}/toggle", || post(routes::scheduler::toggle_job)),
+        ("POST", "/api/scheduler/jobs/{id}/run", || post(routes::scheduler::run_job)),
+        ("GET", "/api/scheduler/jobs/{id}/history", || get(routes::scheduler::job_history)),
+        // ---- 历史（history）----
+        ("GET", "/api/history", || get(routes::history::get_history)),
+        ("DELETE", "/api/history", || delete(routes::history::clear_history)),
+        // ---- 系统（system）----
+        ("GET", "/api/system/info", || get(routes::system::system_info)),
+        ("POST", "/api/system/shutdown", || post(routes::system::shutdown_app)),
+        ("POST", "/api/system/restart", || post(routes::system::restart_app)),
+        ("POST", "/api/system/update", || post(routes::system::apply_update)),
+        ("GET", "/api/check-update", || get(routes::system::check_update)),
+        ("GET", "/api/health", || get(routes::system::health_check)),
+        ("GET", "/api/init-status", || get(routes::system::init_status)),
+        ("POST", "/api/agree", || post(routes::system::agree_terms)),
+        ("GET", "/api/logs", || get(routes::system::fetch_logs)),
+        // ---- 浏览器与安装（browsers / install / worker）----
+        ("GET", "/api/browsers", || get(routes::system::list_browsers)),
+        ("POST", "/api/worker/stop", || post(routes::system::stop_worker)),
+        ("POST", "/api/install/playwright", || post(routes::system::install_playwright)),
+        // ---- 图标（icons）----
+        ("GET", "/api/icons", || get(routes::system::list_icons)),
+        // ---- 卸载（uninstall）----
+        ("GET", "/api/uninstall/detect", || get(routes::system::detect_uninstall)),
+        ("POST", "/api/uninstall", || post(routes::system::uninstall)),
+        // ---- 背景图（background）----
+        ("GET", "/api/background/{filename}", || get(routes::system::get_background)),
+        ("POST", "/api/background/upload", || post(routes::system::upload_background)),
+        ("POST", "/api/background/fetch-url", || post(routes::system::fetch_url_background)),
+        ("DELETE", "/api/background/{filename}", || {
+            delete(routes::system::delete_background)
+        }),
+        // ---- 文档（docs）----
+        ("GET", "/api/docs/task-writing-guide", || get(routes::system::task_writing_guide)),
+        ("GET", "/api/docs/task-manual", || get(routes::system::task_manual)),
+        // ---- 自启动（autostart）----
+        ("GET", "/api/autostart/status", || get(routes::autostart::get_autostart)),
+        ("POST", "/api/autostart/enable", || post(routes::autostart::enable_autostart)),
+        ("POST", "/api/autostart/disable", || post(routes::autostart::disable_autostart)),
+        ("POST", "/api/autostart/mode", || post(routes::autostart::set_autostart_mode)),
+        // ---- OCR ----
+        ("POST", "/api/ocr/recognize", || post(routes::ocr::ocr_recognize)),
+        ("GET", "/api/ocr/status", || get(routes::ocr::ocr_status)),
+        ("POST", "/api/ocr/install", || post(routes::ocr::ocr_install)),
+        ("POST", "/api/ocr/uninstall", || post(routes::ocr::ocr_uninstall)),
+        // ---- 脚本（scripts）----
+        ("GET", "/api/scripts", || get(routes::scripts::list_scripts)),
+        ("POST", "/api/scripts/run", || post(routes::scripts::run_script)),
+        ("GET", "/api/scripts/binaries", || get(routes::scripts::list_binaries)),
+        ("GET", "/api/scripts/{task_id}", || get(routes::scripts::get_script)),
+        ("PUT", "/api/scripts/{task_id}", || put(routes::scripts::update_script)),
+        ("DELETE", "/api/scripts/{task_id}", || delete(routes::scripts::delete_script)),
+        ("GET", "/api/shells", || get(routes::scripts::list_shells)),
+        // ---- 工具（tools）----
+        ("GET", "/api/tools/network-interfaces", || {
+            get(routes::monitor::list_network_interfaces)
+        }),
+        ("GET", "/api/tools/task-recorder.user.js", || get(routes::tools::task_recorder)),
+        // ---- 鉴权（auth）----
+        // token 发放端点：响应读取受 CORS 保护（仅 localhost Origin 可读），
+        // 跨域恶意网页无法获取 token，中间件对此路径豁免
+        ("GET", "/api/auth/token", || get(auth::token_handler)),
+    ]
+}
+
 /// 构建完整的 Axum Router（含嵌入前端回退）
 pub fn build_router(state: AppState) -> Router {
-    let api = Router::new()
-        // ---- 监控（monitor）----
-        .route("/api/monitor/status", get(routes::monitor::get_status))
-        .route("/api/monitor/test", post(routes::monitor::test_network))
-        .route("/api/monitor/start", post(routes::monitor::start_monitor))
-        .route("/api/monitor/stop", post(routes::monitor::stop_monitor))
-        // ---- 配置（config）----
-        .route("/api/config", get(routes::config::get_settings))
-        .route("/api/config", put(routes::config::put_settings))
-        .route("/api/config", patch(routes::config::patch_settings))
-        .route("/api/config/reload", post(routes::config::reload_settings))
-        .route(
-            "/api/config/defaults",
-            get(routes::config::get_config_defaults),
-        )
-        .route(
-            "/api/config/log-levels",
-            get(routes::config::get_log_levels),
-        )
-        .route(
-            "/api/config/log-level",
-            put(routes::config::set_log_level),
-        )
-        .route(
-            "/api/config/default-stealth-script",
-            get(routes::config::get_default_stealth_script),
-        )
-        // ---- 纯净模式（pure-mode，读写 config.browser.pure_mode）----
-        .route("/api/pure-mode", get(routes::config::get_pure_mode))
-        .route("/api/pure-mode", post(routes::config::set_pure_mode))
-        // ---- Profile ----
-        .route("/api/profiles", get(routes::profiles::list_profiles))
-        .route("/api/profiles/{id}", get(routes::profiles::get_profile))
-        .route("/api/profiles/{id}", post(routes::profiles::create_profile))
-        .route("/api/profiles/{id}", put(routes::profiles::update_profile))
-        .route(
-            "/api/profiles/{id}",
-            delete(routes::profiles::delete_profile),
-        )
-        .route(
-            "/api/profiles/switch",
-            post(routes::profiles::switch_profile),
-        )
-        .route(
-            "/api/profiles/detect",
-            post(routes::profiles::detect_profile),
-        )
-        .route(
-            "/api/profiles/auto-switch",
-            post(routes::profiles::auto_switch),
-        )
-        // ---- 任务（tasks）----
-        .route("/api/tasks", get(routes::tasks::list_tasks))
-        .route("/api/tasks", post(routes::tasks::create_task))
-        .route("/api/tasks/active", get(routes::tasks::get_active_task))
-        .route(
-            "/api/tasks/active/{task_id}",
-            post(routes::tasks::set_active_task),
-        )
-        .route("/api/tasks/import", post(routes::tasks::import_tasks))
-        .route("/api/tasks/order", post(routes::tasks::order_tasks))
-        .route("/api/tasks/export/{id}", get(routes::tasks::export_task))
-        .route("/api/tasks/{id}", get(routes::tasks::get_task))
-        .route("/api/tasks/{id}", put(routes::tasks::update_task))
-        .route("/api/tasks/{id}", delete(routes::tasks::delete_task))
-        .route("/api/tasks/{id}/execute", post(routes::tasks::execute_task))
-        // ---- 仓库（repo）----
-        .route("/api/repo/fetch", get(routes::repo::repo_fetch_index))
-        .route("/api/repo/task", get(routes::repo::repo_fetch_task))
-        // ---- 登录（login）----
-        .route("/api/login", post(routes::login::trigger_login))
-        .route("/api/login/cancel", post(routes::login::cancel_login))
-        .route("/api/login/status", get(routes::login::get_login_status))
-        .route("/api/login/once", post(routes::login::login_once))
-        // ---- 调试（debug）----
-        .route("/api/debug/start", post(routes::debug::start_debug))
-        .route("/api/debug/step", post(routes::debug::step_debug))
-        .route("/api/debug/stop", post(routes::debug::stop_debug))
-        .route("/api/debug/run-all", post(routes::debug::run_all))
-        // ---- 调度（scheduler）----
-        .route("/api/scheduler/jobs", get(routes::scheduler::list_jobs))
-        .route("/api/scheduler/jobs", post(routes::scheduler::create_job))
-        .route("/api/scheduler/jobs/{id}", get(routes::scheduler::get_job))
-        .route(
-            "/api/scheduler/jobs/{id}",
-            put(routes::scheduler::update_job),
-        )
-        .route(
-            "/api/scheduler/jobs/{id}",
-            delete(routes::scheduler::delete_job),
-        )
-        .route(
-            "/api/scheduler/jobs/{id}/toggle",
-            post(routes::scheduler::toggle_job),
-        )
-        .route(
-            "/api/scheduler/jobs/{id}/run",
-            post(routes::scheduler::run_job),
-        )
-        .route(
-            "/api/scheduler/jobs/{id}/history",
-            get(routes::scheduler::job_history),
-        )
-        // ---- 历史（history）----
-        .route("/api/history", get(routes::history::get_history))
-        .route("/api/history", delete(routes::history::clear_history))
-        // ---- 系统（system）----
-        .route("/api/system/info", get(routes::system::system_info))
-        .route("/api/system/shutdown", post(routes::system::shutdown_app))
-        .route("/api/system/restart", post(routes::system::restart_app))
-        .route("/api/system/update", post(routes::system::apply_update))
-        .route("/api/check-update", get(routes::system::check_update))
-        .route("/api/health", get(routes::system::health_check))
-        .route("/api/init-status", get(routes::system::init_status))
-        .route("/api/agree", post(routes::system::agree_terms))
-        .route("/api/logs", get(routes::system::fetch_logs))
-        // ---- 浏览器与安装（browsers / install / worker）----
-        .route("/api/browsers", get(routes::system::list_browsers))
-        .route("/api/worker/stop", post(routes::system::stop_worker))
-        .route(
-            "/api/install/playwright",
-            post(routes::system::install_playwright),
-        )
-        // ---- 图标（icons）----
-        .route("/api/icons", get(routes::system::list_icons))
-        // ---- 卸载（uninstall）----
-        .route(
-            "/api/uninstall/detect",
-            get(routes::system::detect_uninstall),
-        )
-        .route("/api/uninstall", post(routes::system::uninstall))
-        // ---- 背景图（background）----
-        .route(
-            "/api/background/{filename}",
-            get(routes::system::get_background),
-        )
-        .route(
-            "/api/background/upload",
-            post(routes::system::upload_background),
-        )
-        .route(
-            "/api/background/fetch-url",
-            post(routes::system::fetch_url_background),
-        )
-        .route(
-            "/api/background/{filename}",
-            delete(routes::system::delete_background),
-        )
-        // ---- 文档（docs）----
-        .route(
-            "/api/docs/task-writing-guide",
-            get(routes::system::task_writing_guide),
-        )
-        .route("/api/docs/task-manual", get(routes::system::task_manual))
-        // ---- 自启动（autostart）----
-        .route(
-            "/api/autostart/status",
-            get(routes::autostart::get_autostart),
-        )
-        .route(
-            "/api/autostart/enable",
-            post(routes::autostart::enable_autostart),
-        )
-        .route(
-            "/api/autostart/disable",
-            post(routes::autostart::disable_autostart),
-        )
-        .route(
-            "/api/autostart/mode",
-            post(routes::autostart::set_autostart_mode),
-        )
-        // ---- OCR ----
-        .route("/api/ocr/recognize", post(routes::ocr::ocr_recognize))
-        .route("/api/ocr/status", get(routes::ocr::ocr_status))
-        .route("/api/ocr/install", post(routes::ocr::ocr_install))
-        .route("/api/ocr/uninstall", post(routes::ocr::ocr_uninstall))
-        // ---- 脚本（scripts）----
-        .route("/api/scripts", get(routes::scripts::list_scripts))
-        .route("/api/scripts/run", post(routes::scripts::run_script))
-        .route(
-            "/api/scripts/binaries",
-            get(routes::scripts::list_binaries),
-        )
-        .route("/api/scripts/{task_id}", get(routes::scripts::get_script))
-        .route(
-            "/api/scripts/{task_id}",
-            put(routes::scripts::update_script),
-        )
-        .route(
-            "/api/scripts/{task_id}",
-            delete(routes::scripts::delete_script),
-        )
-        .route("/api/shells", get(routes::scripts::list_shells))
-        // ---- 工具（tools）----
-        .route(
-            "/api/tools/network-interfaces",
-            get(routes::monitor::list_network_interfaces),
-        )
-        .route(
-            "/api/tools/task-recorder.user.js",
-            get(routes::tools::task_recorder),
-        );
+    let mut api = Router::new();
+    for (_method, path, build) in route_table() {
+        api = api.route(path, build());
+    }
 
     // CORS：仅放行本机 Origin（开发期 Vite dev server 与生产同源均覆盖）。
     // 此前使用 mirror_request 镜像任意 Origin，等于允许任意网站跨域读写
@@ -245,7 +190,88 @@ pub fn build_router(state: AppState) -> Router {
         .route("/openapi.json", get(static_files::openapi_handler))
         // 静态文件（所有未匹配路由 → SPA 回退）
         .fallback(static_files::handler)
+        // 本地 API 鉴权：所有 /api/* 与 /ws/* 请求必须携带有效 token，
+        // 防止本地恶意网页（CSRF）与其他进程调用危险接口
+        .layer(middleware::from_fn_with_state(
+            state.auth_token.clone(),
+            auth::auth_middleware,
+        ))
         .layer(compression)
         .layer(cors)
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 路径参数名归一化：`/api/tasks/{id}` 与 `/api/tasks/{task_id}` 等价
+    ///（openapi.json 沿用历史参数名，路由侧参数名可独立演化）
+    fn normalize_path(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut in_brace = false;
+        for c in path.chars() {
+            match c {
+                '{' => {
+                    out.push('{');
+                    in_brace = true;
+                }
+                '}' => {
+                    out.push('}');
+                    in_brace = false;
+                }
+                _ if !in_brace => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// 契约校验：route_table 与根目录 openapi.json 的 /api/* 路径双向一致
+    ///
+    /// 任一侧新增/改名/遗漏路由时此测试失败，消除"改代码漏改文档"的
+    /// 三处手工同步问题（路由 ↔ openapi.json ↔ 前端 types）
+    #[test]
+    fn openapi_json_matches_route_table() {
+        let spec: serde_json::Value =
+            serde_json::from_str(include_str!("../../openapi.json"))
+                .expect("openapi.json 应为合法 JSON");
+        const METHODS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
+
+        let mut spec_set = std::collections::BTreeSet::new();
+        let paths = spec
+            .get("paths")
+            .and_then(|p| p.as_object())
+            .expect("openapi.json 应含 paths 对象");
+        for (path, ops) in paths {
+            // 只校验 /api/*（/ws、/openapi.json 等非本表管辖）
+            if !path.starts_with("/api/") && path != "/api" {
+                continue;
+            }
+            for method in ops
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.keys())
+                .filter(|k| METHODS.contains(&k.as_str()))
+            {
+                spec_set.insert(format!("{} {}", method.to_uppercase(), normalize_path(path)));
+            }
+        }
+
+        let mut table_set = std::collections::BTreeSet::new();
+        for (method, path, _) in route_table() {
+            table_set.insert(format!("{} {}", method, normalize_path(path)));
+        }
+
+        let spec_only: Vec<_> = spec_set.difference(&table_set).collect();
+        let table_only: Vec<_> = table_set.difference(&spec_set).collect();
+        assert!(
+            spec_only.is_empty(),
+            "openapi.json 声明但路由表缺失（文档过期或路由遗漏）: {spec_only:?}"
+        );
+        assert!(
+            table_only.is_empty(),
+            "路由表存在但 openapi.json 未声明（需同步 openapi.json）: {table_only:?}"
+        );
+    }
 }

@@ -93,8 +93,10 @@ impl TcpProbe {
                 let mut details: Vec<PerProbeDetail> =
                     Vec::with_capacity(failed_futs.len() + 1);
                 for f in failed_futs {
-                    // 已解析为 Err 的 future，重新 await 立即返回
-                    details.push(f.await.unwrap_err());
+                    // select_ok 返回时残留 future 仍在 pending（并非已失败）：
+                    // 继续等待其最终结果即可，Ok/Err 两侧都携带明细，不可 unwrap_err
+                    // （多目标可达时残留 future re-await 会返回 Ok，unwrap_err 将 panic）
+                    details.push(f.await.unwrap_or_else(|d| d));
                 }
                 details.push(ok_detail);
                 (ProbeOutcome::Pass, details)
@@ -286,7 +288,7 @@ async fn probe_url_one(
     }
 }
 
-/// 汇总多目标结果（乐观优先级：Pass > Captive > Fail）
+/// 汇总多目标结果（劫持优先级：Captive > Pass > Fail）
 fn summarize(results: Vec<(ProbeOutcome, PerProbeDetail)>) -> (ProbeOutcome, Vec<PerProbeDetail>) {
     let pass = results
         .iter()
@@ -294,10 +296,12 @@ fn summarize(results: Vec<(ProbeOutcome, PerProbeDetail)>) -> (ProbeOutcome, Vec
     let captive = results
         .iter()
         .any(|(o, _)| matches!(o, ProbeOutcome::Captive));
-    let outcome = if pass {
-        ProbeOutcome::Pass
-    } else if captive {
+    // 任一目标被门户劫持即整体 Captive：若 Pass 优先，混合目标场景
+    // （一个直连可达 + 一个被劫持）会漏检 CaptivePortal，不触发自动登录
+    let outcome = if captive {
         ProbeOutcome::Captive
+    } else if pass {
+        ProbeOutcome::Pass
     } else {
         ProbeOutcome::Fail
     };

@@ -6,8 +6,10 @@
 //! - `Script` / `Shell` → 用 `tokio::process::Command` 执行，超时/取消通过 `tokio::time::timeout`
 //!   与 `kill_on_drop` 实现，标准输出/错误截断到 `OUTPUT_TRUNCATE_LEN`。
 //!
-//! 脚本/Shell 执行通过 `tokio::sync::Mutex` 串行化，保证同一时刻最多一个在途。
+//! 脚本/Shell 执行按任务 ID 经各自的 `tokio::sync::Mutex` 串行化：
+//! 同一任务串行执行，不同任务互不阻塞（避免一个长脚本阻塞所有脚本任务）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -52,8 +54,11 @@ pub struct TaskExecutor {
     env: Arc<EnvironmentManager>,
     /// 配置服务（读取浏览器启动设置，随浏览器任务一并下发 Worker）
     config: Arc<ConfigService>,
-    /// 脚本/Shell 执行的串行化锁
-    exec_lock: Mutex<()>,
+    /// 脚本/Shell 执行的按任务 ID 锁注册表：同任务串行、不同任务并行
+    ///
+    /// registry 条目不清理：任务数量有限（数十量级），每个条目仅一个空 Mutex，
+    /// 常驻内存开销可忽略，换取实现简单与并发安全。
+    lock_registry: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl TaskExecutor {
@@ -74,7 +79,7 @@ impl TaskExecutor {
             bridge,
             env,
             config,
-            exec_lock: Mutex::new(()),
+            lock_registry: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -160,7 +165,9 @@ impl TaskExecutor {
         &self,
         cfg: &ScriptTaskConfig,
     ) -> Result<TaskResult, TaskError> {
-        let _guard = self.exec_lock.lock().await;
+        // 同任务串行、不同任务并行：按任务 ID 取各自的执行锁
+        let lock = self.task_exec_lock(&cfg.common.task_id);
+        let _guard = lock.lock().await;
 
         // 解析脚本来源（内联 content → 临时文件，或 script_path）
         let (script_file, _tmp) = self.resolve_script_source(cfg).await?;
@@ -189,7 +196,9 @@ impl TaskExecutor {
         if cfg.command.trim().is_empty() {
             return Err(TaskError::CommandEmpty);
         }
-        let _guard = self.exec_lock.lock().await;
+        // 同任务串行、不同任务并行：按任务 ID 取各自的执行锁
+        let lock = self.task_exec_lock(&cfg.common.task_id);
+        let _guard = lock.lock().await;
 
         let (program, flag) = self.resolve_shell(cfg);
         let args = vec![flag.to_string(), cfg.command.clone()];
@@ -201,6 +210,22 @@ impl TaskExecutor {
     }
 
     // ---------------- 私有辅助 ----------------
+
+    /// 获取指定任务的执行锁（同任务串行、不同任务并行）
+    ///
+    /// 注册表本身用 `std::sync::Mutex` 保护，仅做 entry 查找/插入后立即释放，
+    /// 真正的串行化由返回的 per-task `tokio::sync::Mutex` 保证。
+    /// task_id 为空时（调试等未落盘场景）所有匿名任务共享同一个空键，彼此串行。
+    fn task_exec_lock(&self, task_id: &str) -> Arc<Mutex<()>> {
+        let mut registry = self
+            .lock_registry
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock);
+        registry
+            .entry(task_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
 
     /// 解析脚本来源：content 写入临时文件（后缀按 binary_path 推断），否则用 script_path
     async fn resolve_script_source(
@@ -266,20 +291,6 @@ impl TaskExecutor {
                 args.extend(cfg.args.clone());
                 (python, args)
             }
-            "ps1" => {
-                let ps = cfg.binary_path.clone().unwrap_or_else(detect_powershell);
-                let mut args = vec![
-                    "-NoProfile".to_string(),
-                    "-ExecutionPolicy".to_string(),
-                    "Bypass".to_string(),
-                    "-WindowStyle".to_string(),
-                    "Hidden".to_string(),
-                    "-File".to_string(),
-                    script,
-                ];
-                args.extend(cfg.args.clone());
-                (ps, args)
-            }
             "bat" | "cmd" => {
                 let cmd = cfg.binary_path.clone().unwrap_or_else(|| "cmd.exe".to_string());
                 let mut args = vec!["/c".to_string(), script];
@@ -291,15 +302,6 @@ impl TaskExecutor {
                 let mut args = vec![script];
                 args.extend(cfg.args.clone());
                 (sh, args)
-            }
-            "js" => {
-                let node = cfg
-                    .binary_path
-                    .clone()
-                    .unwrap_or_else(|| "node".to_string());
-                let mut args = vec![script];
-                args.extend(cfg.args.clone());
-                (node, args)
             }
             _ => (String::new(), Vec::new()),
         }
@@ -410,32 +412,28 @@ impl TaskExecutor {
 }
 
 /// 是否受支持的脚本扩展名
+///
+/// 仅支持 shell / bat / python / exe 四类；其他解释器（如 node、powershell）需在 bat/shell 中自定义调用。
 fn is_supported_ext(ext: &str) -> bool {
-    matches!(ext, "exe" | "com" | "py" | "ps1" | "bat" | "cmd" | "sh" | "js")
+    matches!(ext, "exe" | "com" | "py" | "bat" | "cmd" | "sh")
 }
 
 /// 将 binary_path 推断出的临时文件后缀
 fn binary_to_ext(binary: &str) -> &'static str {
     let b = binary.to_lowercase();
-    if b.contains("python") || b.contains("py") {
-        "py"
-    } else if b.contains("node") {
-        "js"
-    } else if b.contains("powershell") || b.contains("pwsh") {
+    // powershell/pwsh 不在支持范围：映射到 ps1 后由 is_supported_ext 拒绝
+    if b.contains("powershell") || b.contains("pwsh") {
         "ps1"
-    } else if b.contains("bash") || b.contains("sh") {
+    } else if b.contains("python") || b.contains("py") {
+        "py"
+    } else if b.ends_with("bash") || b.ends_with("zsh") || b.ends_with("/sh") || b.ends_with("\\sh") {
         "sh"
+    } else if b.contains("cmd") || b.ends_with(".bat") || b.ends_with(".cmd") {
+        "bat"
+    } else if b.ends_with(".exe") || b.ends_with(".com") {
+        "exe"
     } else {
         "py"
-    }
-}
-
-/// 检测 PowerShell 可执行名（优先 pwsh）
-fn detect_powershell() -> String {
-    if find_in_path("pwsh") {
-        "pwsh".to_string()
-    } else {
-        "powershell".to_string()
     }
 }
 
@@ -471,8 +469,12 @@ fn clamp_timeout(t: u64) -> u64 {
 }
 
 /// 截断字符串到最大长度（按字符）
+///
+/// 判定与截断统一按字符数（而非字节）：中文等多字节字符输出按字节判定时
+/// 会长至预期 3 倍才触发截断。
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let char_count = s.chars().count();
+    if char_count <= max {
         return s.to_string();
     }
     let t: String = s.chars().take(max).collect();

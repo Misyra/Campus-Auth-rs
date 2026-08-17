@@ -81,8 +81,10 @@ pub struct MonitorConfig {
     pub http_targets: Vec<String>,
     /// URL 探测目标
     pub url_targets: Vec<String>,
-    /// URL 预期响应内容（URL -> 期望包含的片段）
+    /// URL 期望响应（URL -> 期望包含的标题片段）
     pub url_expected_responses: HashMap<String, String>,
+    /// 是否启用物理网卡连接检查
+    pub local_check_enabled: bool,
     /// TCP 连接超时
     pub tcp_timeout: Duration,
     /// HTTP 请求超时
@@ -106,6 +108,7 @@ impl MonitorConfig {
             http_targets: m.http_targets.clone(),
             url_targets: m.url_targets.clone(),
             url_expected_responses: m.url_expected_responses.clone(),
+            local_check_enabled: m.local_check_enabled,
             tcp_timeout: Duration::from_secs(m.tcp_timeout as u64),
             http_timeout: Duration::from_secs(m.http_timeout as u64),
             url_timeout: Duration::from_secs(m.url_timeout as u64),
@@ -233,11 +236,25 @@ impl MonitorService {
             ));
         }
 
-        // 步骤 2：物理网卡检测（决定是否存在在线网卡）
-        match tokio::time::timeout(INTERFACE_CHECK_TIMEOUT, self.network_detect.list_interfaces()).await {
-            Ok(Ok(list)) => {
-                debug!("网卡检测通过：发现 {} 个网卡", list.len());
-                if list.is_empty() {
+        // 步骤 2：物理网卡连接检查（由 local_check_enabled 控制）
+        // 逻辑：存在在线网卡表明链路已连接；网卡全失联时直接判 Offline，跳过后续探测。
+        if cfg.local_check_enabled {
+            match tokio::time::timeout(INTERFACE_CHECK_TIMEOUT, self.network_detect.list_interfaces()).await {
+                Ok(Ok(list)) => {
+                    debug!("网卡检测通过：发现 {} 个网卡", list.len());
+                    if list.is_empty() {
+                        return Ok(self.finalize_report(
+                            NetworkStatus::Offline,
+                            ProbeOutcome::Disabled,
+                            ProbeOutcome::Disabled,
+                            ProbeOutcome::Disabled,
+                            0,
+                            None,
+                        ));
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!("网卡检测失败: {e}");
                     return Ok(self.finalize_report(
                         NetworkStatus::Offline,
                         ProbeOutcome::Disabled,
@@ -247,28 +264,17 @@ impl MonitorService {
                         None,
                     ));
                 }
-            }
-            Ok(Err(e)) => {
-                warn!("网卡检测失败: {e}");
-                return Ok(self.finalize_report(
-                    NetworkStatus::Offline,
-                    ProbeOutcome::Disabled,
-                    ProbeOutcome::Disabled,
-                    ProbeOutcome::Disabled,
-                    0,
-                    None,
-                ));
-            }
-            Err(_) => {
-                warn!("网卡检测超时");
-                return Ok(self.finalize_report(
-                    NetworkStatus::Offline,
-                    ProbeOutcome::Disabled,
-                    ProbeOutcome::Disabled,
-                    ProbeOutcome::Disabled,
-                    0,
-                    None,
-                ));
+                Err(_) => {
+                    warn!("网卡检测超时");
+                    return Ok(self.finalize_report(
+                        NetworkStatus::Offline,
+                        ProbeOutcome::Disabled,
+                        ProbeOutcome::Disabled,
+                        ProbeOutcome::Disabled,
+                        0,
+                        None,
+                    ));
+                }
             }
         }
 

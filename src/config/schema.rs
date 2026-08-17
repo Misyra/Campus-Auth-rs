@@ -157,6 +157,8 @@ pub struct MonitorSettings {
     pub http_enabled: bool,
     /// 是否启用 URL 标题探测
     pub url_enabled: bool,
+    /// 是否启用物理网卡连接检查（步骤 2：list_interfaces 判定是否存在在线网卡）
+    pub local_check_enabled: bool,
     /// Profile 切换检测间隔（秒）
     pub profile_check_interval: u32,
     /// TCP 探测超时（秒）
@@ -207,6 +209,7 @@ impl Default for MonitorSettings {
             tcp_enabled: false,
             http_enabled: true,
             url_enabled: true,
+            local_check_enabled: true,
             profile_check_interval: 180,
             tcp_timeout: 2,
             http_timeout: 10,

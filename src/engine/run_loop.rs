@@ -285,10 +285,14 @@ async fn handle_shutdown(inner: &mut EngineInner, deps: &EngineDeps) {
 /// 仅 `source=Auto` 的失败计入冷却统计——Engine 的 Auto 提交可能去重复用
 /// Manual/Browser 会话（低优先级 Reuse 高优先级），用户手动登录的结果
 /// 与自动重试预算无关，混入会提前触发冷却。
+///
+/// 注意：该 channel 的发送方只有 Engine 自动登录 spawn 的任务（见
+/// `handle_network_check`），因此收到任意来源的结果都意味着本轮 Auto
+/// 提交已结束，必须无条件重置 `auto_login_in_flight`——若按 source 判断，
+/// 去重复用到非 Auto 会话时回传的是原始来源，标记将永不重置，
+/// 自动登录功能从此永久失效。
 fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &EngineDeps) {
-    if result.source == LoginSource::Auto {
-        inner.auto_login_in_flight = false;
-    }
+    inner.auto_login_in_flight = false;
     // 当前活跃 Profile 作为通知去重的键
     let profile_id = deps.config_service.runtime().load().profile.id.clone();
     if result.success {

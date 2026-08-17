@@ -26,7 +26,7 @@ use crate::config::runtime::ProfileSnapshot;
 use crate::config::runtime::RuntimeConfig;
 use crate::config::ConfigService;
 use crate::environment::EnvironmentManager;
-use crate::status::{LoginStatus, StatusManager};
+use crate::status::{LoginStatus, PartialSnapshot, StatusManager};
 use crate::tasks::TaskManager;
 use crate::utils::metrics::Metrics;
 
@@ -453,6 +453,20 @@ impl LoginOrchestrator {
             attempts: 0,
         }));
         let inner = Arc::new(LoginHandleInner { result_tx });
+        // 与 LoginSession::finish 终态广播保持一致：立即终态同样要合并到
+        // StatusManager，否则配置校验失败等场景前端状态停留在 Idle/Running，
+        // 用户无从得知失败原因（M4：状态更新协议统一，所有终态必经广播）
+        let status = if success {
+            LoginStatus::Success
+        } else {
+            LoginStatus::Failed
+        };
+        self.status.merge(PartialSnapshot::Login {
+            status,
+            source: Some(source),
+            message: Some(message.clone()),
+            retry_count: 0,
+        });
         let entry = LoginHistoryEntry {
             timestamp: chrono::Local::now(),
             source,

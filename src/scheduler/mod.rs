@@ -66,6 +66,10 @@ pub(crate) struct SchedulerState {
     running: bool,
     /// 全局最近触发时间（供 API 查询）。
     next_fire_at: Option<std::time::SystemTime>,
+    /// cron 表达式解析失败的任务 ID 集合（enabled 但永不触发）。
+    /// 暴露给 API 层（`is_cron_invalid`），前端据此显示"表达式无效"，
+    /// 避免任务看似已启用却永远不触发的静默失效（M7）
+    invalid_cron_ids: std::collections::HashSet<String>,
 }
 
 /// 调度器服务主结构。
@@ -86,6 +90,9 @@ pub struct SchedulerService {
     reload_rx: tokio::sync::Mutex<Option<mpsc::Receiver<ConfigReloadSignal>>>,
     /// 到期任务并发限制信号量（历史遗留 F10）。
     concurrency: Arc<tokio::sync::Semaphore>,
+    /// 正在执行的定时任务 ID 集合：同一任务上一轮未结束前跳过下一轮触发，
+    /// 防止执行时间长于 cron 周期的任务重叠运行（如重复操作同一浏览器实例）
+    running_ids: std::sync::Mutex<std::collections::HashSet<String>>,
     /// 内部状态。
     state: std::sync::Mutex<SchedulerState>,
 }
@@ -121,12 +128,30 @@ impl SchedulerService {
             task_change_rx: tokio::sync::Mutex::new(Some(task_change_rx)),
             reload_rx: tokio::sync::Mutex::new(Some(reload_rx)),
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SCHEDULED_TASKS)),
+            running_ids: std::sync::Mutex::new(std::collections::HashSet::new()),
             state: std::sync::Mutex::new(SchedulerState {
                 tasks: Vec::new(),
                 running: true,
                 next_fire_at: None,
+                invalid_cron_ids: std::collections::HashSet::new(),
             }),
         })
+    }
+
+    /// 尝试标记任务为"执行中"：已在执行则返回 false（跳过本轮触发）
+    pub(crate) fn try_mark_running(&self, task_id: &str) -> bool {
+        self.running_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(task_id.to_string())
+    }
+
+    /// 清除"执行中"标记（任务结束，含异常路径，由 RAII 守卫调用）
+    pub(crate) fn clear_running(&self, task_id: &str) {
+        self.running_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(task_id);
     }
 
     /// 启动调度循环，返回可停止的服务句柄。
@@ -251,6 +276,15 @@ impl SchedulerService {
         f(&mut s);
     }
 
+    /// 查询指定任务的 cron 表达式是否解析失败（enabled 但永不触发）
+    pub fn is_cron_invalid(&self, id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalid_cron_ids
+            .contains(id)
+    }
+
     /// 将当前运行状态广播到 StatusManager。
     fn publish_status(&self) {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -290,12 +324,20 @@ impl SchedulerService {
     /// 手动触发执行定时任务：与 cron 触发共用同一并发信号量闸。
     /// 手动触发与定时触发走同一执行路径（`execute_scheduled_task`），
     /// 保证 run_id 不被死数据浪费、手动与 cron 触发共享 concurrency 限制。
+    /// 同一任务已在执行时拒绝再次触发（与 cron 防重叠规则一致）。
     pub fn spawn_manual_run(self: &Arc<Self>, task: crate::scheduler::task::ScheduledTask) {
+        if !self.try_mark_running(&task.id) {
+            tracing::warn!(task_id = %task.id, "任务正在执行中，拒绝手动重复触发");
+            return;
+        }
         let svc = self.clone();
         let sem = self.concurrency.clone();
+        let marked_id = task.id.clone();
         tokio::spawn(async move {
             if let Ok(_permit) = sem.acquire_owned().await {
                 crate::scheduler::cron_loop::execute_scheduled_task(task, svc).await;
+            } else {
+                svc.clear_running(&marked_id);
             }
         });
     }

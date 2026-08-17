@@ -44,7 +44,7 @@ pub async fn list_profiles(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let profiles = state.container.profiles.list_profiles();
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     let mut map = serde_json::Map::new();
     // ProfileSummary 仅含展示字段（无密码），列表接口天然不泄露密文
     for p in profiles {
@@ -207,7 +207,7 @@ pub async fn auto_switch(
         .profiles
         .set_auto_switch(body.enabled)
         .await?;
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     Ok(data(serde_json::json!({
         "active_profile": settings.active_profile_id,
         "message": "自动切换已更新",

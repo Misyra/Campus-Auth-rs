@@ -2,8 +2,19 @@
 //!
 //! 通过 NDJSON IPC 与 Python Worker 子进程通信。Supervisor 单 task 用 `select!` 监听：
 //! 停止信号、外部命令（execute/cancel/shutdown/idle-timeout）、以及 Worker 回传的 IPC 消息。
+//!
+//! ## 锁中毒恢复策略（M5 审查结论）
+//!
+//! 内部状态锁统一以 `lock().unwrap_or_else(|e| e.into_inner())` 从中毒恢复。
+//! 审查确认本模块生产路径无 `unwrap()/expect/panic!`（仅 `spawn` 与 `Arc::get_mut`
+//! 两处构造期不变量断言），且 `execute_inner` 的原子临界区（注册 pending → 发送 →
+//! 改动会话状态）全程无不可回滚的可失败操作，中毒实际无从触发。因此不引入
+//! poison 后的不变量重建逻辑——为不存在的 panic 路径加重建反而引入新复杂度。
+//! 若未来在持锁区间加入可 panic 操作，须同步评估恢复路径的状态一致性。
 
 pub mod ipc;
+#[cfg(windows)]
+pub mod job;
 pub mod orphan;
 pub mod process;
 pub mod session;
@@ -364,6 +375,14 @@ impl BridgeSupervisor {
         worker_state_to_status(inner.worker_state, alive)
     }
 
+    /// Worker 子进程是否存活
+    ///
+    /// 供登录会话终态收尾判断是否需要发送 `close_browser`：
+    /// 进程已被 force_recycle / 空闲回收时跳过，避免仅为关浏览器而重新 spawn。
+    pub fn has_live_worker(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).process.is_some()
+    }
+
     /// 复位连续 spawn 失败计数（B3）
     ///
     /// 供 EnvironmentManager 成功重建环境后调用，解除熔断；
@@ -505,9 +524,12 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
             }
         }
         ParsedMessage::Event(ev) => {
-            // 事件（step_progress/screenshot/ocr_result）转发到 WebSocket 日志流
+            // 事件（step_progress/screenshot/ocr_result/dialog）转发到 WebSocket 日志流
             debug!(target: "python_worker", "event {}: {:?}", ev.event, ev.data);
-            if ev.event == "screenshot" || ev.event == "step_progress" || ev.event == "ocr_result" {
+            if matches!(
+                ev.event.as_str(),
+                "screenshot" | "step_progress" | "ocr_result" | "dialog"
+            ) {
                 if let Some(tx) = this.event_tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                     let payload = json!({ "type": ev.event, "data": ev.data });
                     if let Ok(s) = serde_json::to_string(&payload) {
@@ -925,6 +947,9 @@ async fn kill_worker_now(this: &BridgeSupervisor) {
         // 仅依赖 p.shutdown 内部的 timeout，避免外层再包 timeout 导致可达 2 倍超时
         p.shutdown(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS)).await;
     }
+    // 进程已终止，在途请求不可能再得到响应：立即 drain 并结算，
+    // 否则对应 execute_inner 要挂满 300s 超时才返回（且只能拿到 Timeout 错误）
+    drain_pending_requests(this, "worker killed by supervisor");
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Error;
@@ -945,10 +970,28 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
         // 仅依赖 proc.shutdown 内部的 timeout，避免外层再包 timeout 导致可达 2 倍超时
         proc.shutdown(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS)).await;
     }
+    // 与 kill_worker_now 同理：进程已回收，drain 在途请求避免悬挂至超时
+    drain_pending_requests(this, "worker shut down");
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Idle;
         merge_worker_status(&inner, &this.status);
+    }
+}
+
+/// Drain 所有在途请求并以 `WorkerCrashed` 结算
+///
+/// 进程已终止（正常退出/主动关闭/强杀）时，pending 请求永无响应，
+/// 必须主动结算，否则调用方要挂满 `execute_with_timeout` 的超时才返回
+fn drain_pending_requests(this: &BridgeSupervisor, reason: &str) {
+    let pending: Vec<_> = {
+        let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.pending_requests.drain().map(|(_, tx)| tx).collect()
+    };
+    for tx in pending {
+        let _ = tx.send(Err(BridgeError::WorkerCrashed {
+            reason: reason.to_string(),
+        }));
     }
 }
 
@@ -965,19 +1008,19 @@ async fn handle_idle_timeout(this: &Arc<BridgeSupervisor>) {
 
 /// Worker 退出处理：区分正常退出（exit_code=0）与崩溃
 async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
+    // 汇总本 Worker 生命周期内的非 JSON IPC 行（stdout 被意外 print 污染的信号）
+    let invalid_lines = process::take_invalid_ipc_line_count();
+    if invalid_lines > 0 {
+        warn!(
+            target: "python_worker",
+            "Worker 运行期间累计 {invalid_lines} 行非 JSON IPC 输出（stdout 疑似被第三方库污染），相关请求可能已超时"
+        );
+    }
     // 正常退出（空闲回收 / 用户主动停止 / shutdown）：不记为崩溃，不计入指标，
     // 不触发孤儿清理，也不置 Error。仅 drain pending 作为防御（正常退出时不应有在途请求）。
     if code == 0 {
         info!(target: "python_worker", "Worker 正常退出，exit_code=0");
-        let pending: Vec<_> = {
-            let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.pending_requests.drain().map(|(_, tx)| tx).collect()
-        };
-        for tx in pending {
-            let _ = tx.send(Err(BridgeError::WorkerCrashed {
-                reason: "worker exited (code 0)".to_string(),
-            }));
-        }
+        drain_pending_requests(this, "worker exited (code 0)");
         {
             let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.worker_state = WorkerState::Idle;

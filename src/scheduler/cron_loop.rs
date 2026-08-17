@@ -90,6 +90,8 @@ pub(crate) fn load_and_parse_all(service: &SchedulerService) -> Vec<TaskSchedule
     let mut loaded: Vec<ScheduledTask> = Vec::new();
     let mut schedules: Vec<TaskSchedule> = Vec::new();
     let mut parse_failures: u32 = 0;
+    // cron 解析失败的 enabled 任务 ID：写入状态供 API 查询（M7 失效可见性）
+    let mut invalid_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -124,6 +126,7 @@ pub(crate) fn load_and_parse_all(service: &SchedulerService) -> Vec<TaskSchedule
                     Err(e) => {
                         tracing::warn!("定时任务 {} cron 解析失败: {}", id, e);
                         parse_failures += 1;
+                        invalid_ids.insert(id.clone());
                         None
                     }
                 };
@@ -151,6 +154,7 @@ pub(crate) fn load_and_parse_all(service: &SchedulerService) -> Vec<TaskSchedule
 
     service.update_state(|s| {
         s.tasks = loaded;
+        s.invalid_cron_ids = invalid_ids;
     });
     schedules
 }
@@ -204,12 +208,30 @@ pub(crate) fn fire_due_tasks(
                     .map(systemtime_from_local);
                 continue;
             }
+            // 同一任务上一轮尚未结束：跳过本轮触发，防止执行时间长于
+            // cron 周期的任务重叠运行（如重复操作同一浏览器实例）
+            if !service.try_mark_running(&ts.task_id) {
+                tracing::warn!(
+                    task_id = %ts.task_id,
+                    "上一轮执行仍在进行，跳过本轮定时触发"
+                );
+                ts.next_fire_at = ts
+                    .schedule
+                    .as_ref()
+                    .and_then(|s| s.upcoming(Local).next())
+                    .map(systemtime_from_local);
+                continue;
+            }
             let svc = service.clone();
             let sem = service.concurrency.clone();
+            let marked_id = ts.task_id.clone();
             tokio::spawn(async move {
                 // 获取并发许可，限制同时执行的到期任务数，避免无上限 spawn（历史遗留 F10）
                 if let Ok(_permit) = sem.acquire_owned().await {
                     execute_scheduled_task(task, svc).await;
+                } else {
+                    // 信号量关闭（理论不可达）：补偿清除标记，避免任务永久无法再触发
+                    svc.clear_running(&marked_id);
                 }
             });
         }
@@ -224,12 +246,29 @@ pub(crate) fn fire_due_tasks(
     fired
 }
 
+/// "执行中"标记的 RAII 守卫：drop 时清除标记，覆盖正常结束/超时/异常所有路径
+struct RunningGuard {
+    service: Arc<SchedulerService>,
+    task_id: String,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.service.clear_running(&self.task_id);
+    }
+}
+
 /// 在独立 tokio task 中执行到期任务（不阻塞主循环）。
 /// 此函数同时供定时触发与手动触发使用。
 pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerService>) {
     let start = TokioInstant::now();
     let task_id = task.id.clone();
     let target_id = task.target_id.clone();
+    // 执行结束（含异常）时清除"执行中"标记，恢复该任务的下一轮触发资格
+    let _running_guard = RunningGuard {
+        service: service.clone(),
+        task_id: task_id.clone(),
+    };
 
     // 任务类型由 target_id 关联的目标任务权威推导（TaskKind），不再冗余存储 task_type。
     let (success, message) = match service.task_manager.load_task(&target_id).await {
@@ -321,6 +360,12 @@ pub(crate) async fn cron_loop(
 
     let mut task_schedules = load_and_parse_all_async(&service).await;
 
+    // task_change channel 关闭后的降级轮询定时器（条件守护，channel 正常时不生效）。
+    // 首个 tick 立即就绪，先消费掉避免进入降级模式时连发重载（MissedTick::Skip 兜底）
+    let mut degrade_poll = tokio::time::interval(TokioDuration::from_secs(60));
+    degrade_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    degrade_poll.tick().await;
+
     loop {
         let nearest = compute_nearest_fire_at(&task_schedules);
         service.update_state(|s| {
@@ -400,6 +445,18 @@ pub(crate) async fn cron_loop(
                         reload_rx_opt = None;
                     }
                 }
+            }
+
+            // 降级轮询：task_change channel 关闭后（发送端异常 drop），
+            // CRUD 变更将无法唤醒 select，最长 86400s 内不被感知。
+            // 每 60s 重载一次任务列表兜底（M7），channel 正常时此分支被条件禁用
+            _ = degrade_poll.tick(), if task_change_rx_opt.is_none() => {
+                let fired = fire_due_tasks(service.clone(), &mut task_schedules, SystemTime::now());
+                if fired > 0 {
+                    tracing::info!("降级轮询触发 {} 个到期任务", fired);
+                }
+                task_schedules = load_and_parse_all_async(&service).await;
+                tracing::debug!("降级轮询重载任务列表，共 {} 个任务", task_schedules.len());
             }
 
             // sleep 到期

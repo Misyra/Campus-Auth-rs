@@ -321,8 +321,8 @@ def test_handle_evaluate_hung_script_times_out():
 
 # ── B5: 任务间脏状态防护 ──
 
-def test_new_page_registers_dialog_dismiss():
-    """_new_page 注册 dialog dismiss 处理器，防残留 alert 卡死后续导航。"""
+def test_new_page_registers_dialog_accept():
+    """_new_page 注册 dialog accept 处理器，自动点“确定”继续，防残留 alert 卡死后续导航。"""
 
     async def _run():
         from playwright_worker import WorkerCore
@@ -343,16 +343,44 @@ def test_new_page_registers_dialog_dismiss():
         core._context = FakeContext()
         page = await core._new_page()
         assert "dialog" in page.handlers, "应注册 dialog 处理器"
-        # 触发 handler：dismiss 被调用
-        dismissed = []
+        # 触发 handler：accept 被调用
+        accepted = []
 
         class FakeDialog:
-            async def dismiss(self):
-                dismissed.append(True)
+            message = "账号或密码错误！"
+
+            async def accept(self):
+                accepted.append(True)
 
         page.handlers["dialog"](FakeDialog())
         # 给 ensure_future 调度时间
         await asyncio.sleep(0.05)
-        assert dismissed == [True], "dialog 处理器应调用 dismiss"
+        assert accepted == [True], "dialog 处理器应调用 accept"
+        # 弹窗文案被收集进当前任务列表（随 StructuredResult 上报给 Rust 登录日志）
+        assert core._task_dialogs == ["账号或密码错误！"]
+
+    asyncio.run(_run())
+
+
+def test_handle_close_browser_closes_and_keeps_worker():
+    """close_browser 命令：关闭浏览器资源，Worker 进程语义保留（不触碰 shutdown_event）。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        closed = []
+        orig = WorkerCore.close_browser
+
+        async def fake_close(self):
+            closed.append(True)
+
+        WorkerCore.close_browser = fake_close
+        try:
+            result = await core.handle_close_browser({}, core)
+        finally:
+            WorkerCore.close_browser = orig
+        assert result == {}
+        assert closed == [True], "应调用 close_browser 清理浏览器"
 
     asyncio.run(_run())

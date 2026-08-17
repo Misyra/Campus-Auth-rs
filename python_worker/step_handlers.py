@@ -186,6 +186,27 @@ _CONNECTION_ERROR_PATTERNS = (
     "ERR_PROXY_CONNECTION_FAILED",
 )
 
+# click/input 降级到 attached 元素操作的最小等待时长（毫秒）
+_MIN_ATTACHED_MS = 500
+
+# 强制输入 JS：绕过可见性检查，用原生 setter 写值并派发完整用户事件。
+# 对齐原版 _FORCE_INPUT_JS，用于隐藏输入框（display:none）的兜底填写。
+_FORCE_INPUT_JS = """(el, params) => {
+  const val = params.val;
+  const doClear = params.doClear;
+  const nativeSet = Object.getOwnPropertyDescriptor(el.tagName === 'TEXTAREA'
+    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value').set;
+  el.dispatchEvent(new FocusEvent('focus', {bubbles:true}));
+  if (doClear) nativeSet.call(el, '');
+  const finalVal = doClear ? val : el.value + val;
+  el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType:'insertText', data: finalVal}));
+  nativeSet.call(el, finalVal);
+  el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data: finalVal}));
+  el.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+  el.dispatchEvent(new Event('change', {bubbles:true}));
+  el.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
+}"""
+
 
 def _classify_navigation_error(exc: Exception, url: str) -> "WorkerError":
     """按异常消息细分导航错误（P7）。
@@ -207,45 +228,80 @@ def _classify_navigation_error(exc: Exception, url: str) -> "WorkerError":
 
 
 async def handle_input(page, step: StepConfig, context: StepContext) -> None:
-    """在输入框填写值。"""
+    """在输入框填写值。
+
+    优先按正常 fill/press_sequentially；失败时降级为 JS 强制赋值（_FORCE_INPUT_JS），
+    从而覆盖隐藏输入框（display:none，如样例的密码占位框），对齐原版 InputHandler 兜底。
+    """
     _check_cancel(context)
     if not step.selector:
         raise WorkerError(Outcome.SELECTOR_FAILED, "input 步骤缺少 selector")
     value = step.value or ""
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
-    if context.reveal_hidden:
-        # 隐藏输入框无法用 fill，改用 JS 直接赋值并派发 input 事件。
-        # 通过 locator.evaluate 在目标元素上执行，_locator 已处理 iframe 定位，
-        # 与 fill 路径保持一致（历史遗留 P2）。
+
+    # 强制赋值：打通 reveal_hidden 配置与失败兜底两条路径
+    async def _force_input():
         await _locator(context, step.selector).evaluate(
-            "(el, val) => {"
-            "  if (!el) throw new Error('selector not found');"
-            "  el.value = val;"
-            "  el.dispatchEvent(new Event('input', {bubbles: true}));"
-            "}",
-            value,
+            _FORCE_INPUT_JS, {"val": value, "doClear": bool(step.clear)}
         )
+
+    if context.reveal_hidden:
+        # 隐藏输入框无法用 fill，改用 JS 原生 setter 赋值并派发完整事件
+        await _force_input()
         return
-    if step.clear:
-        await _safe_op(
-            locator.fill(value, timeout=timeout), Outcome.SELECTOR_FAILED
+    try:
+        if step.clear:
+            await _safe_op(
+                locator.fill(value, timeout=timeout), Outcome.SELECTOR_FAILED
+            )
+        else:
+            await _safe_op(
+                locator.press_sequentially(value, timeout=timeout),
+                Outcome.SELECTOR_FAILED,
+            )
+    except WorkerError:
+        # 正常输入失败（元素隐藏等）→ 降级强制赋值
+        await _locator(context, step.selector).first.wait_for(
+            state="attached", timeout=max(_MIN_ATTACHED_MS, min(timeout, 1000))
         )
-    else:
-        await _safe_op(
-            locator.press_sequentially(value, timeout=timeout),
-            Outcome.SELECTOR_FAILED,
-        )
+        await _force_input()
 
 
 async def handle_click(page, step: StepConfig, context: StepContext) -> None:
-    """点击元素。"""
+    """点击元素。
+
+    对齐原版 ClickHandler 的鲁棒策略：
+    - 逗号分隔的候选选择器逐个尝试，规避 Playwright 多元素 strict-mode 报错；
+    - 先正常点击可见元素，失败后降级为 attached + ``dispatch_event`` 强制点击，
+      从而覆盖 ``display:none`` 等隐藏元素（如免责声明勾选框）。
+    """
     _check_cancel(context)
     if not step.selector:
         raise WorkerError(Outcome.SELECTOR_FAILED, "click 步骤缺少 selector")
-    locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
-    await _safe_op(locator.click(timeout=timeout), Outcome.SELECTOR_FAILED)
+    candidates = [s.strip() for s in step.selector.split(",") if s.strip()]
+    deadline = time.monotonic() + timeout / 1000
+    for sel in candidates:
+        remaining = int((deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            break
+        locator = _locator(context, sel).first
+        # 策略1：正常点击可见元素
+        try:
+            await _safe_op(locator.click(timeout=remaining), Outcome.SELECTOR_FAILED)
+            return
+        except WorkerError:
+            pass
+        # 策略2：降级——等待 attached 后强制派发 click（可点隐藏/不可见元素）
+        try:
+            fallback_ms = max(_MIN_ATTACHED_MS, min(remaining, 1000))
+            await locator.wait_for(state="attached", timeout=fallback_ms)
+            await locator.dispatch_event("click")
+            return
+        except Exception:
+            continue
+    raise WorkerError(Outcome.SELECTOR_FAILED, f"未找到可点击元素: {step.selector}")
 
 
 async def handle_select(page, step: StepConfig, context: StepContext) -> None:
@@ -512,13 +568,18 @@ def _get_handler(step_type: str):
     return _STEP_HANDLERS.get(step_type)
 
 
-async def run_step_async(page, raw_step: StepConfig, context: StepContext) -> None:
+async def run_step_async(
+    page, raw_step: StepConfig, context: StepContext,
+    step_index: int | None = None, total_steps: int | None = None,
+) -> None:
     """异步执行单个步骤。
 
     参数:
         page: Playwright Page。
         raw_step: 原始 StepConfig（模板变量未解析）。
         context: 执行上下文。
+        step_index: 步骤序号（0 起），用于 step_progress 事件（可空）。
+        total_steps: 步骤总数，用于 step_progress 事件（可空）。
 
     抛出:
         WorkerError: 可分类失败。
@@ -530,6 +591,12 @@ async def run_step_async(page, raw_step: StepConfig, context: StepContext) -> No
         raise WorkerError(Outcome.UNKNOWN_ERROR, f"未知步骤类型: {step.step_type}")
     context.emit(
         "step_progress",
-        {"step_id": step.id, "step_type": step.step_type, "description": step.description},
+        {
+            "step_id": step.id,
+            "step_type": step.step_type,
+            "description": step.description,
+            **({"step_index": step_index} if step_index is not None else {}),
+            **({"total_steps": total_steps} if total_steps is not None else {}),
+        },
     )
     await handler(page, step, context)

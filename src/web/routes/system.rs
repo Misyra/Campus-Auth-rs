@@ -147,6 +147,36 @@ pub async fn init_status(
     })))
 }
 
+/// 日志尾部读取的最大字节数（512KB）
+///
+/// 日志文件可能达数百 MB，而 limit（≤2000 条）对应的最新日志绝大多数场景
+/// 都在尾部 512KB 内，全量读入内存再解析纯属浪费。
+const LOG_TAIL_BYTES: u64 = 512 * 1024;
+
+/// 读取日志文件尾部（最多 [`LOG_TAIL_BYTES`] 字节），文件较小时全读
+///
+/// 从中间位置起读时，首行可能是不完整的行（且可能以残缺的多字节 UTF-8
+/// 字符开头），统一丢弃第一行；其余行保证完整。
+fn read_log_tail(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size <= LOG_TAIL_BYTES {
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).ok()?;
+        return Some(buf);
+    }
+    file.seek(SeekFrom::Start(size - LOG_TAIL_BYTES)).ok()?;
+    let mut bytes = Vec::with_capacity(LOG_TAIL_BYTES as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    // 丢弃第一行（seek 位置切在行中间时该行不完整）
+    match content.find('\n') {
+        Some(idx) => Some(content[idx + 1..].to_string()),
+        None => Some(String::new()),
+    }
+}
+
 /// GET /api/logs — 读取最新日志文件内容（实时日志通过 WebSocket 推送）
 ///
 /// 日志文件为 tracing JSON 格式（每行一个 JSON 对象），解析后返回前端期望的
@@ -162,7 +192,7 @@ pub async fn fetch_logs(
         // 钳制上限，避免传 99999999 全量解析 MB 级日志
         .min(2000);
     let logs_dir = state.container.config.base_path().join("logs");
-    // 日志文件可能达 MB 级，read_dir + read_to_string + JSON 解析为阻塞 I/O 与 CPU 密集操作，
+    // 日志文件可能达 MB 级，read_dir + 尾部读取 + JSON 解析为阻塞 I/O 与 CPU 密集操作，
     // 整体放入 spawn_blocking 避免阻塞 tokio worker 线程
     let entries: Vec<crate::web::state::LogEntry> =
         tokio::task::spawn_blocking(move || -> Vec<crate::web::state::LogEntry> {
@@ -183,8 +213,7 @@ pub async fn fetch_logs(
                     files.into_iter().next()
                 });
             match latest_file {
-                Some(entry) => std::fs::read_to_string(entry.path())
-                    .ok()
+                Some(entry) => read_log_tail(&entry.path())
                     .map(|content| {
                         // 从最新行开始反向遍历 → 过滤 TRACE/DEBUG → 取 limit 条 → 再反转为从旧到新
                         // 先 filter 后 take 确保返回 limit 条有效日志（不受旧噪音日志影响）
@@ -228,7 +257,7 @@ fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
     let source = crate::web::state::normalize_source(
         v.get("target").and_then(|x| x.as_str()).unwrap_or(""),
     );
-    Some(crate::web::state::LogEntry { level, message, timestamp, source })
+    Some(crate::web::state::LogEntry::new(level, message, timestamp, source))
 }
 
 /// GET /api/check-update — 检查更新
@@ -286,7 +315,7 @@ pub async fn apply_update(
 pub async fn list_browsers(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = state.container.config.load_settings();
+    let settings = state.container.config.load_settings_async().await;
     let env_status = state.container.environment.status();
     let playwright_installed = env_status.playwright_ready;
     let custom_path = &settings.global.browser.browser_custom_path;
@@ -425,8 +454,9 @@ pub async fn list_icons(
 ) -> Result<Json<Value>, ApiError> {
     let icons_dir = state.container.config.base_path().join("resources").join("icons");
     let mut icons = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&icons_dir) {
-        for entry in entries.flatten() {
+    // 目录扫描用 tokio::fs，避免同步 std::fs 阻塞 tokio worker 线程
+    if let Ok(mut rd) = tokio::fs::read_dir(&icons_dir).await {
+        while let Some(entry) = rd.next_entry().await.ok().flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.ends_with(".png") || name.ends_with(".ico") || name.ends_with(".svg") {
                     let stem = name.split('.').next().unwrap_or(name).to_string();
@@ -473,6 +503,12 @@ pub async fn detect_uninstall(
     Ok(data(serde_json::json!(items)))
 }
 
+/// Batch 元字符：路径含这些字符时会被拼入 uninstall.bat 形成 cmd 注入
+/// （如 `--base-path 'C:\x" & del C:\ /s /q "'`），必须整体拒绝
+fn contains_batch_metachars(s: &str) -> bool {
+    s.chars().any(|c| matches!(c, '"' | '%' | '&' | '|' | '<' | '>' | '^'))
+}
+
 /// POST /api/uninstall — 执行卸载
 ///
 /// 生成并写入卸载助手脚本（batch），然后退出程序。
@@ -487,6 +523,14 @@ pub async fn uninstall(
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+
+    // 路径会被直接嵌入 batch 脚本，含元字符即可能注入任意 cmd 命令（A5）
+    let base_str = base.display().to_string();
+    if contains_batch_metachars(&base_str) || contains_batch_metachars(&exe) {
+        return Err(ApiError::BadRequest(format!(
+            "安装路径含 batch 元字符，拒绝生成卸载脚本以防止命令注入: {base_str}"
+        )));
+    }
 
     // 卸载脚本：首次运行时把自身副本复制到 %TEMP% 再从副本执行，避免
     // `rd /s /q "{base}"` 删除正在运行的 bat 自身所在目录时因文件被锁而残留
@@ -688,19 +732,20 @@ pub async fn fetch_url_background(
     State(state): State<AppState>,
     Json(body): Json<BackgroundFetchBody>,
 ) -> Result<Json<Value>, ApiError> {
-    // SSRF 防护：校验 URL 合法性与目标 IP 安全性
-    validate_url_not_private(&body.url).await?;
-
-    let dir = background_dir(&state);
-    tokio::fs::create_dir_all(&dir).await?;
-    let response = state
-        .container
-        .environment
-        .http_client()
-        .get(&body.url)
-        .send()
-        .await
-        .map_err(|e| ApiError::Internal(format!("请求图片失败: {e}")))?;
+    // 本端点仅允许 HTTPS（SSRF 防护：scheme 校验 + DNS 钉扎 + 逐跳重定向
+    // 校验统一由 secure_get 提供，修复"校验与请求二次解析"的 TOCTOU 缺口）
+    let parsed = url::Url::parse(&body.url)
+        .map_err(|e| ApiError::BadRequest(format!("无效 URL: {e}")))?;
+    if parsed.scheme() != "https" {
+        return Err(ApiError::BadRequest("仅允许 HTTPS URL".into()));
+    }
+    let (response, _) = crate::web::ssrf::secure_get(
+        &body.url,
+        std::time::Duration::from_secs(30),
+        "Campus-Auth",
+    )
+    .await
+    .map_err(ApiError::BadRequest)?;
     // 验证 Content-Type 为图片类型，防止下载非图片内容
     let content_type = response
         .headers()
@@ -718,6 +763,8 @@ pub async fn fetch_url_background(
         .bytes()
         .await
         .map_err(|e| ApiError::Internal(format!("读取图片字节失败: {e}")))?;
+    let dir = background_dir(&state);
+    tokio::fs::create_dir_all(&dir).await?;
     // 从 URL 路径提取文件名，失败则用 UUID 生成
     let extracted = body
         .url
@@ -773,7 +820,8 @@ pub async fn task_writing_guide(State(state): State<AppState>) -> Result<Json<Va
         .join("docs")
         .join("guides")
         .join("task-writing-guide.md");
-    match std::fs::read_to_string(&path) {
+    // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
+    match tokio::fs::read_to_string(&path).await {
         Ok(content) => Ok(data(Value::String(content))),
         Err(e) => {
             tracing::warn!("任务编写指南加载失败 ({path:?}): {e}");
@@ -797,55 +845,7 @@ pub async fn task_manual() -> Json<Value> {
 }
 
 // ---- 工具函数 ----
-
-/// 判断 IP 是否属于私有/保留地址段（含回环、链路本地、RFC 1918、IPv6 ULA）
-fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || match ip {
-            std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-            std::net::IpAddr::V6(v6) => v6.is_unique_local(),
-        }
-}
-
-/// SSRF 防护：校验 URL 是否为 HTTPS，并确认目标 IP 不在私有/保留地址段
-///
-/// 对域名先做 DNS 解析，再逐条检查解析结果；任一 IP 命中私有段即拒绝。
-async fn validate_url_not_private(url: &str) -> Result<(), ApiError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| ApiError::BadRequest(format!("无效 URL: {e}")))?;
-    // 仅允许 HTTPS
-    if parsed.scheme() != "https" {
-        return Err(ApiError::BadRequest("仅允许 HTTPS URL".into()));
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ApiError::BadRequest("URL 缺少 host".into()))?;
-    // 若 host 本身是 IP 地址，直接校验
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if is_private_ip(ip) {
-            return Err(ApiError::BadRequest("目标 IP 位于私有/保留地址段".into()));
-        }
-        return Ok(());
-    }
-    // 域名：DNS 解析后逐条校验；解析失败时拒绝（不容忍间歇性 DNS 失败绕过）
-    let addrs: Vec<std::net::SocketAddr> =
-        tokio::net::lookup_host(format!("{}:443", host))
-            .await
-            .map_err(|_| ApiError::BadRequest("DNS 解析失败，拒绝请求".into()))?
-            .collect();
-    if addrs.is_empty() {
-        return Err(ApiError::Internal("DNS 解析无结果".into()));
-    }
-    for addr in &addrs {
-        if is_private_ip(addr.ip()) {
-            return Err(ApiError::BadRequest(
-                "域名解析结果包含私有/保留 IP 地址".into(),
-            ));
-        }
-    }
-    Ok(())
-}
+// SSRF 私网判定与安全 GET（DNS 钉扎 + 逐跳重定向校验）已统一收敛至 crate::web::ssrf
 
 /// POST /api/worker/stop — 手动关闭浏览器（优雅停止 Python Worker）
 ///
@@ -955,19 +955,5 @@ mod tests {
         assert!(fallback.starts_with("bg-"));
     }
 
-    // ============ 背景图 URL SSRF 校验（私有 IP 判定） ============
-
-    #[test]
-    fn is_private_ip_detects_private_and_reserved() {
-        use std::net::IpAddr;
-        assert!(is_private_ip(IpAddr::V4("127.0.0.1".parse().unwrap())));
-        assert!(is_private_ip(IpAddr::V4("10.0.0.1".parse().unwrap())));
-        assert!(is_private_ip(IpAddr::V4("192.168.1.1".parse().unwrap())));
-        assert!(is_private_ip(IpAddr::V4("169.254.0.1".parse().unwrap())));
-        assert!(is_private_ip(IpAddr::V6("::1".parse().unwrap())));
-        assert!(is_private_ip(IpAddr::V6("fc00::1".parse().unwrap())));
-        // 公网地址放行
-        assert!(!is_private_ip(IpAddr::V4("8.8.8.8".parse().unwrap())));
-        assert!(!is_private_ip(IpAddr::V6("2606:4700:4700::1111".parse().unwrap())));
-    }
+    // SSRF 私网 IP 判定测试已随 is_private_ip 收敛至 crate::web::ssrf 模块
 }

@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -64,6 +64,38 @@ def _browser_data_dir() -> Path:
 def _debug_screenshot_dir() -> Path:
     """调试截图目录（锚定到 worker 脚本目录，不依赖进程 CWD）。"""
     return _WORKER_DIR / "debug"
+
+
+# 模块加载时刻：启动清理时用于判定“上次会话残留”（mtime 早于该时刻的文件）
+_MODULE_LOAD_TIME = time.time()
+
+
+def _purge_stale_debug_screenshots() -> None:
+    """Worker 启动时清理上次会话残留的截图文件（A7）。
+
+    Worker 进程被强杀时，任务级（_run_task）与调试级（_cleanup_debug_screenshots）
+    清理均不会执行，debug/ 目录会残留可能含明文凭据的截图。启动时
+    best-effort 删除修改时间早于本进程启动（模块加载时刻）的 ``*.png``；
+    多 Worker 并发启动时，正被其他进程写入的新文件（mtime 较新）不受影响。
+    """
+    directory = _debug_screenshot_dir()
+    try:
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"启动清理残留截图失败（忽略）: {exc}")
+        return
+    for entry in entries:
+        try:
+            if entry.suffix.lower() != ".png" or not entry.is_file():
+                continue
+            if entry.stat().st_mtime >= _MODULE_LOAD_TIME:
+                continue
+            entry.unlink(missing_ok=True)
+            logger.info(f"已清理上次会话残留截图: {entry.name}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"清理残留截图失败 {entry}: {exc}")
 
 
 def _to_ms(bs: dict, key: str, default_ms: int) -> int:
@@ -137,13 +169,14 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
     if not steps:
         return _build_result(Outcome.UNKNOWN_ERROR, "任务未包含任何步骤，无法执行", context, start)
     failed_ids: list[str] = []
+    total = len(steps)
     try:
         for idx, step in enumerate(steps):
             _check_cancel(context)
             if idx > 0 and context.step_delay > 0:
                 await _sleep_cancellable(context.step_delay, context)
             try:
-                await run_step_async(page, step, context)
+                await run_step_async(page, step, context, step_index=idx, total_steps=total)
             except WorkerError as exc:
                 if step.required:
                     raise
@@ -253,6 +286,24 @@ class DebugSession:
     cancel_event: threading.Event | None = None
     # 自动步进游标：前端“下一步”无显式索引时，按顺序执行尚未运行的步骤
     current_step: int = 0
+    # 面向前端的会话数据（对齐原版 debug_to_response）：
+    # steps: [{index,id,type,description}]；results: [{step_index,success,message,running}]
+    task_id: str = ""
+    steps_info: list[dict] = field(default_factory=list)
+    results: list[dict] = field(default_factory=list)
+
+
+def _build_steps_info(task_config: TaskConfig) -> list[dict]:
+    """构建前端可展示的步骤列表（index/id/type/description）。"""
+    return [
+        {
+            "index": i,
+            "id": s.id or f"step_{i}",
+            "type": s.step_type or s.id or "?",
+            "description": s.description or "",
+        }
+        for i, s in enumerate(task_config.steps)
+    ]
 
 
 # ── Worker 核心 ──
@@ -292,6 +343,11 @@ class WorkerCore:
         self._debug_sessions: dict[str, DebugSession] = {}
         self.emit: Callable[[str, dict], None] = lambda event_type, data: None
         self.shutdown_event: threading.Event | None = None
+        # 当前任务期间捕获的页面弹窗文案（_run_task 期间重置，随 StructuredResult 上报）
+        self._task_dialogs: list[str] = []
+        # 当前会话类型（login / debug）：注入 step_progress 事件，供前端区分
+        # 登录会话与调试会话的步骤进度（登录步骤不应污染调试面板）
+        self._session_type: str = "login"
 
     # ── 浏览器启动参数构建 ──
 
@@ -481,14 +537,34 @@ class WorkerCore:
             raise
 
     async def _new_page(self) -> Any:
-        """创建新页面并注册防残留 dialog 处理器（B5）。
+        """创建新页面并注册防残留 dialog 处理器（B5 修正）。
 
-        页面上的 alert/confirm 若不处理会阻塞后续导航与页面加载；注册 dismiss
-        处理器使残留对话框自动关闭，避免卡死后续任务。
+        页面上的 alert/confirm 若不处理会阻塞后续导航与页面加载；注册 accept
+        处理器使残留对话框自动点“确定”继续，避免卡死后续任务。
+        用 accept 而非 dismiss：登录成功等业务弹窗预期向下确认，dismiss 会
+        取消流程导致登录判定失败（历史遗留：误拦截登录成功弹窗）。
+        顺带把弹窗文案通过 ``dialog`` 事件推给前端，使被吞掉的“登录成功！”
+        等提示能在前端日志/通知中显示出来。
         """
         page = await self._context.new_page()
-        page.on("dialog", lambda d: asyncio.ensure_future(d.dismiss()))
+        page.on("dialog", lambda d: asyncio.ensure_future(self._handle_page_dialog(d)))
         return page
+
+    async def _handle_page_dialog(self, dialog) -> None:
+        """处理页面原生弹窗：自动确认并把弹窗文案推给前端。"""
+        try:
+            message = getattr(dialog, "message", None)
+            if message:
+                msg = str(message)
+                self.emit("dialog", {"message": msg, "action": "accept"})
+                # 收集进当前任务的弹窗列表（限长防泄漏），随 StructuredResult 上报，
+                # 使“账号或密码错误”等页面提示能进入 Rust 侧登录日志
+                if len(self._task_dialogs) < 20:
+                    self._task_dialogs.append(msg)
+            await dialog.accept()
+        except Exception as exc:  # noqa: BLE001
+            # 弹窗可能在操作间隙已消失，忽略即可，不影响主流程
+            logger.debug(f"处理页面弹窗异常（忽略）: {exc}")
 
     async def ensure_browser(self, config: dict) -> None:
         """确保浏览器就绪（复用已存在的实例，仅在未就绪或配置变更时重建）。"""
@@ -586,6 +662,15 @@ class WorkerCore:
         task_config: TaskConfig,
     ) -> StepContext:
         """构造步骤执行上下文。"""
+        session_type = self._session_type
+
+        def _emit(event_type: str, data: dict) -> None:
+            """给 step_progress 事件注入 session_type，供前端区分登录/调试会话。"""
+            if event_type == "step_progress" and isinstance(data, dict):
+                data = dict(data)
+                data["session_type"] = session_type
+            self.emit(event_type, data)
+
         return StepContext(
             page=page,
             variables=variables,
@@ -596,7 +681,7 @@ class WorkerCore:
             navigation_timeout=_to_ms(bs, "navigation_timeout", 15000),
             reveal_hidden=task_config.reveal_hidden,
             step_delay=task_config.step_delay,
-            emit=self.emit,
+            emit=_emit,
         )
 
     async def _navigate(self, page: Any, url: str, nav_timeout: int) -> None:
@@ -617,6 +702,7 @@ class WorkerCore:
     ) -> StructuredResult:
         """执行单个浏览器任务：确保浏览器 → 导航 → 运行步骤。"""
         start = time.perf_counter()
+        self._session_type = "login"
         await self.ensure_browser({"browser_settings": bs})
         if self._page is None or self._page.is_closed():
             if self._context is None:
@@ -648,41 +734,49 @@ class WorkerCore:
         context = self._make_context(
             self._page, variables, bs, cancel_event, screenshot_dir, task_config
         )
-        result = await run_steps(self._page, task_config.steps, context)
-        # B5 取舍：任务失败后在共享 context 上清除 cookies，避免上次任务的残留会话
-        # （登录态等）污染下一个任务。不重建整个页面/浏览器——那会显著增加下一次
-        # 任务的重启开销；在现有 context 复用结构下，清除 cookies 已覆盖绝大多数
-        # 跨任务污染场景（登录态隔离）。重试同任务由 Rust 侧重新调用，页面按
-        # "_run_task 顶部 reload 复用"逻辑刷新，不受此处影响。
-        if result.outcome not in (Outcome.SUCCESS.value, Outcome.CANCELLED.value):
-            if self._context is not None:
-                try:
-                    await self._context.clear_cookies()
-                    logger.info("[_run_task] 任务失败，已清除 context cookies")
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {exc}")
-        # success_condition 成功判定：声明变量名时，从 store_as 结果取变量真值判定，
-        # 覆盖默认的"步骤全部成功即成功"兜底（对齐原项目 v4.2.3 _check_success）。
-        var_name = (task_config.success_condition or "").strip()
-        if var_name and result.outcome == Outcome.SUCCESS.value:
-            if var_name not in context.results:
-                return _build_result(
-                    Outcome.UNKNOWN_ERROR,
-                    f"成功条件变量未设置: {var_name}（请检查 eval 步骤的 store_as）",
-                    context,
-                    start,
-                )
-            value = context.results[var_name]
-            if not _is_truthy(value):
-                return _build_result(
-                    Outcome.UNKNOWN_ERROR,
-                    f"成功条件未命中: {var_name}={value}",
-                    context,
-                    start,
-                )
-            logger.info("[success_condition] 命中成功: %s=%s", var_name, value)
-            result.message = f"成功条件命中: {var_name}={value}"
-        return result
+        try:
+            result = await run_steps(self._page, task_config.steps, context)
+            # B5 取舍：任务失败后在共享 context 上清除 cookies，避免上次任务的残留会话
+            # （登录态等）污染下一个任务。不重建整个页面/浏览器——那会显著增加下一次
+            # 任务的重启开销；在现有 context 复用结构下，清除 cookies 已覆盖绝大多数
+            # 跨任务污染场景（登录态隔离）。重试同任务由 Rust 侧重新调用，页面按
+            # "_run_task 顶部 reload 复用"逻辑刷新，不受此处影响。
+            if result.outcome not in (Outcome.SUCCESS.value, Outcome.CANCELLED.value):
+                if self._context is not None:
+                    try:
+                        await self._context.clear_cookies()
+                        logger.info("[_run_task] 任务失败，已清除 context cookies")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {exc}")
+            # success_condition 成功判定：声明变量名时，从 store_as 结果取变量真值判定，
+            # 覆盖默认的"步骤全部成功即成功"兜底（对齐原项目 v4.2.3 _check_success）。
+            var_name = (task_config.success_condition or "").strip()
+            if var_name and result.outcome == Outcome.SUCCESS.value:
+                if var_name not in context.results:
+                    return _build_result(
+                        Outcome.UNKNOWN_ERROR,
+                        f"成功条件变量未设置: {var_name}（请检查 eval 步骤的 store_as）",
+                        context,
+                        start,
+                    )
+                value = context.results[var_name]
+                if not _is_truthy(value):
+                    return _build_result(
+                        Outcome.UNKNOWN_ERROR,
+                        f"成功条件未命中: {var_name}={value}",
+                        context,
+                        start,
+                    )
+                logger.info("[success_condition] 命中成功: %s=%s", var_name, value)
+                result.message = f"成功条件命中: {var_name}={value}"
+            return result
+        finally:
+            # A7：登录/浏览器任务截图可能含表单明文凭据，任务结束（成功/失败/
+            # 取消/异常等所有退出路径）后 best-effort 删除磁盘文件。截图事件
+            # 已在 handle_screenshot 中即时推送（仅携带路径字符串，前端不回读
+            # 文件），删除不影响展示链路；debug 会话不走 _run_task，其截图由
+            # _cleanup_debug_screenshots（debug_stop / close_browser）清理。
+            self._cleanup_task_screenshots(context)
 
     # ── 命令处理器 ──
 
@@ -730,18 +824,23 @@ class WorkerCore:
                 "LOGIN_URL": auth_url,
             }
             variables.update(task.variables or {})
+            self._task_dialogs = []
             result = await self._run_task(
-                task, bs, variables, cancel_event, _debug_screenshot_dir(), navigate_url=auth_url
+                task, bs, variables, cancel_event, _debug_screenshot_dir(),
+                navigate_url=auth_url,
             )
+            result.data = {"dialogs": list(self._task_dialogs)}
             return result.to_dict()
 
     async def handle_execute_browser_task(self, params: dict, core: "WorkerCore") -> dict:
         """执行浏览器任务（不含账号密码语义）。"""
         async with self._cancel_session(params) as (cancel_event, bs, task):
             variables = dict(task.variables or {})
+            self._task_dialogs = []
             result = await self._run_task(
                 task, bs, variables, cancel_event, _debug_screenshot_dir()
             )
+            result.data = {"dialogs": list(self._task_dialogs)}
             return result.to_dict()
 
     async def handle_debug_start(self, params: dict, core: "WorkerCore") -> dict:
@@ -756,6 +855,7 @@ class WorkerCore:
         if self._debug_sessions:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "已存在活跃调试会话，请先停止再启动")
         session_id = uuid.uuid4().hex
+        self._session_type = "debug"
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
         try:
             task = TaskConfig.from_dict(task_raw)
@@ -780,6 +880,8 @@ class WorkerCore:
                 context=context,
                 cancel_id=cancel_id,
                 cancel_event=cancel_event,
+                task_id=task.task_id,
+                steps_info=_build_steps_info(task),
             )
             # 初始截图
             try:
@@ -797,7 +899,7 @@ class WorkerCore:
                 self.emit("screenshot", {"path": local_path})
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"调试初始截图失败: {exc}")
-            return {"session_id": session_id}
+            return self._debug_response(self._debug_sessions[session_id])
         except Exception:
             if cancel_id:
                 cancel_registry.unregister(cancel_id)
@@ -820,6 +922,38 @@ class WorkerCore:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "存在多个调试会话，请指定 session_id")
         raise WorkerError(Outcome.UNKNOWN_ERROR, "调试会话不存在，请先启动调试")
 
+    @staticmethod
+    def _debug_response(session: "DebugSession") -> dict:
+        """序列化调试会话为前端可渲染的完整结构（对齐原版 debug_to_response）。
+
+        返回完整 steps + results，前端据此渲染逐步信息，而非仅返回孤立的
+        结构化结果（修复：调试面板步骤"全空"）。
+        """
+        total = len(session.steps_info)
+        return {
+            "running": session.current_step < total,
+            "task_id": session.task_id,
+            "current_step": session.current_step,
+            "total_steps": total,
+            "steps": session.steps_info,
+            "results": list(session.results),
+            "screenshot_url": None,
+        }
+
+    @staticmethod
+    def _record_debug_result(
+        session: "DebugSession", idx: int, success: bool, message: str
+    ) -> None:
+        """记录单个步骤的调试结果，供前端结果列表展示。"""
+        session.results.append(
+            {
+                "step_index": idx,
+                "success": bool(success),
+                "message": message or ("" if success else "执行失败"),
+                "running": False,
+            }
+        )
+
     async def handle_debug_step(self, params: dict, core: "WorkerCore") -> dict:
         """执行调试会话中的单个步骤。
 
@@ -827,6 +961,8 @@ class WorkerCore:
         - 提供 `step`（完整 StepConfig）→ 执行该步；
         - 提供 `step_index`（整数）→ 执行该索引处的步骤；
         - 两者皆无 → 自动执行“下一步”（由会话内游标维护），便于前端逐步调试。
+
+        执行后记录步骤结果并返回完整会话数据（steps + results），供前端逐步渲染。
         """
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
@@ -849,54 +985,72 @@ class WorkerCore:
             # 自动执行下一步
             idx = session.current_step
             if idx >= len(steps):
-                return StructuredResult(
-                    outcome=Outcome.SUCCESS.value, message="所有步骤已执行完毕"
-                ).to_dict()
+                return self._debug_response(session)
             step = steps[idx]
             auto_advance = True
 
+        success = True
+        message = ""
         try:
-            await run_step_async(session.page, step, session.context)
+            await run_step_async(session.page, step, session.context, step_index=idx, total_steps=len(steps))
         except StepCancelled:
-            return StructuredResult(
-                outcome=Outcome.CANCELLED.value, message="调试步骤已取消"
-            ).to_dict()
+            success, message = False, "步骤已取消"
         except WorkerError as exc:
-            return StructuredResult(
-                outcome=exc.outcome, message=exc.message
-            ).to_dict()
+            success, message = False, exc.message
+        if idx is not None:
+            self._record_debug_result(session, idx, success, message)
         if auto_advance and idx is not None:
             session.current_step = idx + 1
-        return StructuredResult(outcome=Outcome.SUCCESS.value, message="步骤执行成功").to_dict()
+        return self._debug_response(session)
 
     async def handle_debug_run_all(self, params: dict, core: "WorkerCore") -> dict:
-        """依次执行调试会话中尚未运行的全部步骤（从当前游标到末尾）。"""
+        """依次执行调试会话中尚未运行的全部步骤（从当前游标到末尾）。
+
+        逐步骤记录成功/失败结果，遇到失败的必需步骤即停止；返回完整会话数据。
+        """
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
 
         steps = session.task_config.steps
         start = session.current_step
+        stop_idx = len(steps)
         if start >= len(steps):
-            return StructuredResult(
-                outcome=Outcome.SUCCESS.value, message="所有步骤已执行完毕"
-            ).to_dict()
-        try:
-            for idx in range(start, len(steps)):
-                step = steps[idx]
-                session.current_step = idx
-                await run_step_async(session.page, step, session.context)
-            session.current_step = len(steps)
-        except StepCancelled:
-            return StructuredResult(
-                outcome=Outcome.CANCELLED.value, message="调试步骤已取消"
-            ).to_dict()
-        except WorkerError as exc:
-            return StructuredResult(
-                outcome=exc.outcome, message=exc.message
-            ).to_dict()
-        return StructuredResult(
-            outcome=Outcome.SUCCESS.value, message="全部步骤执行成功"
-        ).to_dict()
+            return self._debug_response(session)
+        for idx in range(start, len(steps)):
+            step = steps[idx]
+            session.current_step = idx
+            success = True
+            message = ""
+            try:
+                await run_step_async(session.page, step, session.context, step_index=idx, total_steps=len(steps))
+            except StepCancelled:
+                success, message = False, "步骤已取消"
+            except WorkerError as exc:
+                success, message = False, exc.message
+            self._record_debug_result(session, idx, success, message)
+            if not success:
+                stop_idx = idx + 1
+                break
+        session.current_step = stop_idx
+        return self._debug_response(session)
+
+    @staticmethod
+    def _cleanup_task_screenshots(context: StepContext) -> None:
+        """删除登录/浏览器任务期间产生的截图文件（A7）。
+
+        任务截图可能包含表单中的明文凭证，任务结束后及时清除，避免长期
+        驻留磁盘。仅删除 ``context.screenshots`` 中记录的文件（每个文件
+        best-effort，失败仅记日志不抛出），不递归清理整个 debug/ 目录，
+        避免误删其他并发会话的文件。StructuredResult 中的 screenshots
+        路径列表在 _build_result 时已快照，清理不影响 IPC 响应内容。
+        """
+        for p in list(context.screenshots):
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"清理任务截图失败 {p}: {exc}")
+        # screenshots 是 StepContext 的 list[str] 字段，list.clear() 不会抛出
+        context.screenshots.clear()
 
     @staticmethod
     def _cleanup_debug_screenshots(session: "DebugSession") -> None:
@@ -924,6 +1078,22 @@ class WorkerCore:
         if session.cancel_id:
             cancel_registry.unregister(session.cancel_id)
         await self.close_browser()
+        return {}
+
+    async def handle_close_browser(self, params: dict, core: "WorkerCore") -> dict:
+        """关闭浏览器但保留 Worker 进程。
+
+        登录会话到达终态（成功/失败/取消）后由 Rust 侧调用，对齐原版
+        BrowserContextManager 的会话级生命周期：会话内重试复用同一浏览器，
+        会话结束即关闭。Worker 进程保留，下次登录由 ensure_browser 重建浏览器。
+
+        ``close_browser`` 内含 playwright.stop()，极端情况下可能挂起（如 driver
+        进程未及时退出），此处加内部超时兜底，避免一条挂起命令阻塞 Worker 命令队列。
+        """
+        try:
+            await asyncio.wait_for(self.close_browser(), timeout=8.0)
+        except asyncio.TimeoutError:
+            logger.warning("close_browser 超时（8s），跳过等待继续")
         return {}
 
     async def handle_ocr_recognize(self, params: dict, core: "WorkerCore") -> dict:
@@ -960,6 +1130,7 @@ COMMANDS: dict[str, Callable] = {
     "browser_health_check": worker_core.handle_browser_health_check,
     "execute_login_attempt": worker_core.handle_execute_login_attempt,
     "execute_browser_task": worker_core.handle_execute_browser_task,
+    "close_browser": worker_core.handle_close_browser,
     "debug_start": worker_core.handle_debug_start,
     "debug_step": worker_core.handle_debug_step,
     "debug_run_all": worker_core.handle_debug_run_all,

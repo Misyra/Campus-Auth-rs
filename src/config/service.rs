@@ -1,7 +1,15 @@
 //! ConfigService：配置读写、原子写入、mtime 缓存、ArcSwap 无锁快照
 //!
-//! 持有 [`RuntimeConfig`] 的 `Arc<ArcSwap<>>` 无锁快照，所有写操作通过
-//! `tokio::sync::Mutex` 串行化。配置变更通过 mpsc 通道发送 [`ConfigReloadSignal`]。
+//! 持有 [`RuntimeConfig`] 的 `Arc<ArcSwap<>>` 无锁快照。锁模型（M2）：
+//! - settings 与 profiles 各持一把 `tokio::sync::Mutex` 串行化同域写操作，
+//!   两域互不阻塞（改 Profile 不挡 settings 保存）；
+//! - 读路径与 reload 不持任何 tokio 锁——底层写入均为「随机名 tmp + rename」
+//!   原子替换（`utils::io::atomic_write_bytes`），单文件读要么全旧要么全新，
+//!   reload 的 (settings, active_profile) 快照对按 settings 自带的
+//!   active_profile_id 配对，天然一致；
+//! - 内存缓存为 `std::sync::Mutex` 短临界区，mtime 失配自愈。
+//!
+//! 配置变更通过 mpsc 通道发送 [`ConfigReloadSignal`]。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -121,8 +129,11 @@ pub struct ConfigService {
     profiles_dir: PathBuf,
     /// 运行时配置无锁快照
     runtime: Arc<ArcSwap<RuntimeConfig>>,
-    /// 串行化所有 save() 调用
-    save_mutex: tokio::sync::Mutex<()>,
+    /// 串行化 settings 域写操作（save_settings）
+    settings_lock: tokio::sync::Mutex<()>,
+    /// 串行化 profiles 域写操作（save_profile / delete_profile），
+    /// 与 settings_lock 分离，两域并发写互不阻塞（M2）
+    profiles_lock: tokio::sync::Mutex<()>,
     /// settings.json 内存缓存
     settings_cache: Mutex<SettingsCache>,
     /// Profile 文件内存缓存
@@ -210,7 +221,8 @@ impl ConfigService {
             settings_path,
             profiles_dir,
             runtime: Arc::new(ArcSwap::new(Arc::new(runtime))),
-            save_mutex: tokio::sync::Mutex::new(()),
+            settings_lock: tokio::sync::Mutex::new(()),
+            profiles_lock: tokio::sync::Mutex::new(()),
             settings_cache: Mutex::new(SettingsCache {
                 data: Some(settings.clone()),
                 mtime: settings_mtime,
@@ -291,6 +303,25 @@ impl ConfigService {
         }
     }
 
+    /// 加载 settings.json 的异步版本（供 async handler 调用）
+    ///
+    /// [`Self::load_settings`] 内含 `std::fs::metadata` + `read_to_string` 同步 IO，
+    /// 直接在 async handler 中调用会阻塞 tokio worker 线程。此方法将 self 经
+    /// Arc clone 后移入 `spawn_blocking`，在阻塞线程池中复用同步实现。
+    /// 内部 settings_cache 为 `std::sync::Mutex`，临界区极短（mtime 比对与缓存
+    /// 替换），在阻塞线程中短暂持锁是安全的。
+    pub async fn load_settings_async(self: &Arc<Self>) -> SettingsData {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.load_settings())
+            .await
+            .unwrap_or_else(|e| {
+                // JoinError 仅在内部 panic 时出现：与磁盘损坏且无缓存的降级路径
+                // 一致，返回默认值并记录错误
+                tracing::error!("load_settings 阻塞任务失败，返回默认配置: {e}");
+                SettingsData::default()
+            })
+    }
+
     /// 原子写入 settings.json
     pub async fn save_settings(&self, data: &SettingsData) -> Result<(), ConfigError> {
         // 隔离态拒绝保存：防止基于降级默认值的修改覆盖损坏前的用户配置
@@ -299,7 +330,7 @@ impl ConfigService {
                 reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
             });
         }
-        let _guard = self.save_mutex.lock().await;
+        let _guard = self.settings_lock.lock().await;
         Self::atomic_write_json(&self.settings_path, data).await?;
         let mtime = std::fs::metadata(&self.settings_path)
             .ok()
@@ -360,7 +391,7 @@ impl ConfigService {
 
     /// 原子写入 Profile 文件
     pub async fn save_profile(&self, profile: &ProfileData) -> Result<(), ConfigError> {
-        let _guard = self.save_mutex.lock().await;
+        let _guard = self.profiles_lock.lock().await;
         let path = self.profiles_dir.join(format!("{}.json", profile.id));
         Self::atomic_write_json(&path, profile).await?;
         let mtime = std::fs::metadata(&path)
@@ -383,7 +414,7 @@ impl ConfigService {
         if id == "default" {
             return Err(ConfigError::CannotDeleteDefault);
         }
-        let _guard = self.save_mutex.lock().await;
+        let _guard = self.profiles_lock.lock().await;
         let path = self.profiles_dir.join(format!("{id}.json"));
         if !path.exists() {
             return Err(ConfigError::ProfileNotFound { id: id.to_string() });
@@ -409,11 +440,16 @@ impl ConfigService {
         self.reload_inner(signal).await
     }
 
-    /// reload 的内部实现：与写路径（save_settings / save_profile / delete_profile）互斥
+    /// reload 的内部实现：不持任何写锁（M2）
+    ///
+    /// 一致性依据：所有落盘均为「随机名 tmp + rename」原子替换，单文件读取要么
+    /// 看到完整旧版、要么完整新版，不存在撕裂；(settings, active_profile) 快照对
+    /// 以 settings 自身的 `active_profile_id` 配对读取，即使并发写插入两步之间，
+    /// 得到的也只是「同一 Profile 的稍旧/稍新版本」而非错配，且写路径各自完成后的
+    /// reload 会把最新状态换入（调用方均为 save 完成后触发 reload）。
+    /// 若 reload 与并发 save 在缓存更新上交错（reload 把旧内容写回缓存），mtime
+    /// 失配会让下一次 load_settings 自愈重读。
     async fn reload_inner(&self, signal: ConfigReloadSignal) -> Result<(), ConfigError> {
-        // settings 与 profile 是两步独立读取，若并发写插入其间会产生混合快照
-        // （新全局配置 + 旧 Profile，或反之）。持锁读完即释放，不阻塞后续写（历史遗留 M8）。
-        let _guard = self.save_mutex.lock().await;
         // 保存旧快照，用于比较非热更字段
         let old = self.runtime.load().as_ref().clone();
         // 强制绕过 mtime 缓存；磁盘 I/O 移入 spawn_blocking，避免持锁阻塞 async 运行时（A2）
@@ -431,7 +467,9 @@ impl ConfigService {
             ConfigError::Io(std::io::Error::other(format!("配置重读任务失败: {e}")))
         })?;
         let (settings_res, mtime) = disk;
-        // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照，无缓存进入隔离态
+        // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照；
+        // 无缓存进入隔离态并中止 reload——绝不用默认值替换运行时，
+        // 否则端口 / active_profile 等关键字段全部回退默认，污染正在运行的服务
         let settings = match settings_res {
             Ok(s) => {
                 let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
@@ -441,12 +479,21 @@ impl ConfigService {
                 s
             }
             Err(e) => {
-                tracing::error!(
-                    "settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝）: {e}"
-                );
                 let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
-                c.poisoned = true;
-                SettingsData::default()
+                if let Some(prev) = c.data.clone() {
+                    tracing::warn!("settings.json 解析失败，reload 沿用内存缓存: {e}");
+                    prev
+                } else {
+                    tracing::error!(
+                        "settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝），reload 中止: {e}"
+                    );
+                    c.poisoned = true;
+                    return Err(ConfigError::ConfigWriteError {
+                        reason: format!(
+                            "settings.json 解析失败，已保留当前运行时配置并拒绝保存: {e}"
+                        ),
+                    });
+                }
             }
         };
         let active_id = settings.active_profile_id.clone();
@@ -782,5 +829,39 @@ mod tests {
         let mut value: Value = serde_json::from_str(v6_json).unwrap();
         let new_version = crate::config::migration::run_migrations(config_dir, &mut value).unwrap();
         assert_eq!(new_version, 6);
+    }
+
+    // ============ M2 双域锁并发写测试 ============
+
+    #[tokio::test]
+    async fn test_concurrent_settings_and_profile_saves_both_land() {
+        // settings 与 profiles 已拆分为独立锁：并发写两域应同时成功且互不干扰。
+        // 同时作为未来锁演化的护栏——若有人重新合并锁或在单一路径按相反顺序
+        // 获取两把锁，此用例暴露死锁/丢失写。
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let svc = Arc::new(
+            ConfigService::new(tmp.path().to_path_buf(), tx)
+                .await
+                .unwrap(),
+        );
+
+        let mut settings = svc.load_settings();
+        settings.active_profile_id = "default".to_string();
+        let mut profile = svc.load_profile("default").unwrap();
+        profile.username = "concurrent-user".to_string();
+
+        let a = svc.clone();
+        let b = svc.clone();
+        let (ra, rb) = tokio::join!(
+            async move { a.save_settings(&settings).await },
+            async move { b.save_profile(&profile).await },
+        );
+        ra.unwrap();
+        rb.unwrap();
+
+        // 两域写入均生效（重新加载绕过缓存验证磁盘内容）
+        assert_eq!(svc.load_settings().active_profile_id, "default");
+        assert_eq!(svc.load_profile("default").unwrap().username, "concurrent-user");
     }
 }
