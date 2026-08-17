@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bridge::BridgeSupervisor;
 use crate::config::{ConfigReloadSignal, ConfigService, ProfileService};
-use crate::engine::{Engine, EngineDeps, EngineHandle};
+use crate::engine::{Engine, EngineDeps, EngineSlot};
 use crate::environment::EnvironmentManager;
 use crate::login::{LoginHistoryService, LoginOrchestrator};
 use crate::monitor::MonitorService;
@@ -77,8 +77,9 @@ pub struct ServiceContainer {
     pub updater: Arc<UpdaterService>,
 
     // ---- Layer 11：Engine ----
-    /// Engine 统一启停句柄
-    pub engine_handle: EngineHandle,
+    /// Engine 可替换句柄槽：崩溃重启后由 watch_engine 原子换入新句柄，
+    /// Web/托盘/关闭流程经此取「当前活跃」Engine（引用收口）
+    pub engine: EngineSlot,
 
     // ---- 横切关注点：运行指标 ----
     /// 共享运行指标（AtomicU64 计数器，通过 `/api/system/info` 暴露）
@@ -220,7 +221,7 @@ impl ServiceContainer {
             scheduler,
             monitor,
             updater,
-            engine_handle,
+            engine: EngineSlot::new(engine_handle),
             metrics,
             // uptime 定时器取消信号：应用级关闭令牌的 child
             uptime_cancel: shutdown_token.child_token(),

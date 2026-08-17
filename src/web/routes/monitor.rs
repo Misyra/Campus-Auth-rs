@@ -37,13 +37,13 @@ pub async fn list_network_interfaces(
 /// POST /api/monitor/test — 网络连通性测试
 ///
 /// 派发 `EngineCommand::TestNetwork` 并等待 oneshot 回复（30s 超时）。
+/// 经 EngineSlot 派发到「当前活跃」Engine（崩溃重启后自动指向新实例）。
 pub async fn test_network(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .container
-        .engine_handle
         .engine
         .try_dispatch(EngineCommand::TestNetwork { reply: reply_tx })?;
     let result: TestNetworkResult = tokio::time::timeout(
@@ -63,7 +63,6 @@ pub async fn start_monitor(
 ) -> Result<Json<Value>, ApiError> {
     state
         .container
-        .engine_handle
         .engine
         .try_dispatch(EngineCommand::Start)?;
     Ok(data(Value::String("监测已启动".into())))
@@ -75,7 +74,6 @@ pub async fn stop_monitor(
 ) -> Result<Json<Value>, ApiError> {
     state
         .container
-        .engine_handle
         .engine
         .try_dispatch(EngineCommand::Stop)?;
     Ok(data(Value::String("监测已停止".into())))

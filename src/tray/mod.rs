@@ -24,7 +24,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use crate::app::{self, AxumServeHandle, RUNTIME_PORT_FILE};
 use crate::config::{ConfigService, ProfileService};
 use crate::container::ServiceContainer;
-use crate::engine::{Engine, EngineCommand};
+use crate::engine::{EngineCommand, EngineSlot};
 use crate::status::{
     EngineState, LoginStatus, NetworkStatus, StatusManager, StatusSnapshot,
 };
@@ -78,8 +78,8 @@ pub struct TrayDeps {
     pub config: Arc<ConfigService>,
     /// 状态管理器（订阅状态以更新 tooltip/图标，并取活跃 Profile）
     pub status: Arc<StatusManager>,
-    /// 引擎（派发命令）
-    pub engine: Arc<Engine>,
+    /// 引擎句柄槽（派发命令到「当前活跃」Engine，崩溃重启后自动指向新实例）
+    pub engine: EngineSlot,
     /// Profile 服务（枚举 Profile 构建子菜单）
     pub profile_service: Arc<ProfileService>,
     /// 更新服务（检查更新）
@@ -102,8 +102,8 @@ pub struct TrayManager {
     config: Arc<ConfigService>,
     /// 状态管理器（订阅状态以更新 tooltip/图标，并取活跃 Profile）
     status: Arc<StatusManager>,
-    /// 引擎（派发命令）
-    engine: Arc<Engine>,
+    /// 引擎句柄槽（派发命令）
+    engine: EngineSlot,
     /// Profile 服务（枚举 Profile 构建子菜单）
     profile_service: Arc<ProfileService>,
     /// 更新服务（检查更新）
@@ -184,7 +184,7 @@ impl TrayManager {
         let deps = TrayDeps {
             config: Arc::clone(&self.config),
             status: Arc::clone(&self.status),
-            engine: Arc::clone(&self.engine),
+            engine: self.engine.clone(),
             profile_service: Arc::clone(&self.profile_service),
             updater: Arc::clone(&self.updater),
             container: Arc::clone(&self.container),

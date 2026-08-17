@@ -2,13 +2,16 @@
 
 pub mod commands;
 pub mod run_loop;
+pub mod slot;
 
 pub use commands::{EngineCommand, ProbeDetails, ProfileSwitchSource, TestNetworkResult};
+pub use slot::EngineSlot;
 
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{ConfigService, ProfileService};
 use crate::login::LoginOrchestrator;
@@ -76,15 +79,28 @@ pub use crate::ServiceHandle;
 pub struct EngineHandle {
     /// Engine 公共接口
     pub engine: Arc<Engine>,
+    #[allow(dead_code)] // 持有 JoinHandle 保证 task 生命周期与句柄绑定；drop 即 detach
     join_handle: JoinHandle<()>,
-    /// Engine task 完成通知（用于零延迟崩溃检测，替代 1s 轮询）
-    pub completed: Arc<tokio::sync::Notify>,
+    /// Engine task 完成信号（正常退出与 panic 均触发，任意数量等待者）
+    ///
+    /// `CancellationToken` 而非 `Notify`：Notify 单 permit 在多等待者竞争时会
+    /// 丢失唤醒（watch_engine 与 graceful_shutdown 并发等待）；token 取消对
+    /// 任意数量 `cancelled().await` 全体可见。
+    pub completed: Arc<CancellationToken>,
 }
 
-impl EngineHandle {
-    /// 消费句柄，等待 task 完成并返回 JoinResult（用于区分 panic 与正常退出）
-    pub async fn into_result(self) -> Result<(), tokio::task::JoinError> {
-        self.join_handle.await
+/// 完成信号守卫：spawn 块退出时（含 panic 展开）触发取消
+///
+/// panic 会跳过 `.await` 之后的普通语句，但 Drop 在 unwind 中仍执行——
+/// 原 `notify_one()` 写法在 Engine panic 时从不触发，初始 Engine 的崩溃
+/// 因此从未被 watch_engine 检测到（本批修复）。
+struct CompletionGuard {
+    token: Arc<CancellationToken>,
+}
+
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        self.token.cancel();
     }
 }
 
@@ -94,14 +110,16 @@ impl Engine {
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAPACITY);
         let engine = Arc::new(Engine { cmd_tx });
 
-        // 完成通知：Engine task 退出时立即唤醒等待者（零延迟，替代 1s 轮询）
-        let completed = Arc::new(tokio::sync::Notify::new());
+        // 完成信号：Engine task 退出（含 panic）时立即唤醒等待者
+        let completed = Arc::new(CancellationToken::new());
 
         let engine_for_task = Arc::clone(&engine);
-        let completed_for_task = completed.clone();
+        let guard = CompletionGuard {
+            token: completed.clone(),
+        };
         let join_handle = tokio::spawn(async move {
+            let _guard = guard;
             run_loop::run_loop(engine_for_task, deps, cmd_rx).await;
-            completed_for_task.notify_one();
         });
 
         EngineHandle {
@@ -127,11 +145,23 @@ impl Engine {
         })
     }
 
-    /// 获取命令发送端的克隆（用于崩溃恢复时替换持有者）
-    pub fn cmd_sender(&self) -> mpsc::Sender<EngineCommand> {
-        self.cmd_tx.clone()
+    /// 由既有发送端构造（仅供 slot 单测使用，不 spawn 任务）
+    #[cfg(test)]
+    pub(crate) fn from_sender(cmd_tx: mpsc::Sender<EngineCommand>) -> Self {
+        Self { cmd_tx }
     }
+}
 
+impl EngineHandle {
+    /// 由既有 Engine 构造空壳句柄（仅供 slot 单测使用）
+    #[cfg(test)]
+    pub(crate) fn for_test(engine: Arc<Engine>) -> Self {
+        Self {
+            engine,
+            join_handle: tokio::spawn(async {}),
+            completed: Arc::new(CancellationToken::new()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -191,13 +221,34 @@ mod tests {
         assert!(matches!(cmd, EngineCommand::Pause));
     }
 
-    #[test]
-    fn test_cmd_sender_clones_shared_channel() {
-        // cmd_sender 返回的克隆与原 Engine 共享同一通道
-        let (cmd_tx, _rx) = mpsc::channel::<EngineCommand>(2);
-        let engine = Engine { cmd_tx };
-        let sender = engine.cmd_sender();
-        assert!(sender.try_send(EngineCommand::Start).is_ok());
+    #[tokio::test]
+    async fn test_completion_token_fires_on_normal_exit_and_panic() {
+        // CompletionGuard：spawn 块正常退出与 panic 展开都触发 token 取消
+
+        // 正常退出路径
+        let token = Arc::new(CancellationToken::new());
+        let t2 = token.clone();
+        tokio::spawn(async move {
+            let _guard = CompletionGuard { token: t2 };
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            token.cancelled(),
+        )
+        .await
+        .expect("正常退出应触发完成信号");
+
+        // panic 展开路径（catch_unwind 防止测试进程崩溃）
+        let token = Arc::new(CancellationToken::new());
+        let t2 = token.clone();
+        tokio::spawn(async move {
+            let _guard = CompletionGuard { token: t2 };
+            panic!("模拟 Engine panic");
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("panic 展开也应触发完成信号（Drop 在 unwind 中执行）");
     }
 
     // ============ EngineError Display 测试 ============

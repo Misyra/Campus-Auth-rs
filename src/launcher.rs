@@ -122,8 +122,6 @@ pub(crate) struct LauncherState {
     tray_handle: Option<crate::tray::ServiceHandle>,
     shutdown_token: CancellationToken,
     log_tx: tokio::sync::broadcast::Sender<crate::web::state::LogEntry>,
-    /// 当前活跃 Engine 的命令发送端（崩溃恢复后更新，优雅关闭时使用）
-    latest_engine_cmd_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<crate::engine::EngineCommand>>>>,
     /// 日志文件非阻塞写入的 WorkerGuard，优雅关闭时 drop 以 flush 剩余日志
     _log_guard: Option<WorkerGuard>,
 }
@@ -182,9 +180,6 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         tray_handle: None,
         shutdown_token,
         log_tx,
-        latest_engine_cmd_tx: Arc::new(tokio::sync::Mutex::new(Some(
-            container.engine_handle.engine.cmd_sender(),
-        ))),
         _log_guard: Some(log_guard),
     };
 
@@ -193,7 +188,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         let tray = TrayManager::new(crate::tray::TrayDeps {
             config: container.config.clone(),
             status: container.status.clone(),
-            engine: container.engine_handle.engine.clone(),
+            engine: container.engine.clone(),
             profile_service: container.profiles.clone(),
             updater: container.updater.clone(),
             container: container.clone(),
@@ -805,7 +800,6 @@ async fn apply_startup_action(container: &Arc<ServiceContainer>) {
     match settings.global.app.startup_action {
         StartupAction::Monitor => {
             match container
-                .engine_handle
                 .engine
                 .dispatch(crate::engine::EngineCommand::Start)
                 .await
@@ -867,10 +861,20 @@ async fn launch_login_once(state: &mut LauncherState) -> Result<()> {
 
 /// 监控 Engine task，崩溃后最多重启 `MAX_RESTART_ATTEMPTS` 次
 ///
-/// - 初始 Engine 通过 `Arc<ServiceContainer>` 持有，无法直接消费 JoinHandle，
-///   使用 `is_finished()` 轮询检测完成。
-/// - 重启的 Engine 拥有 `EngineHandle` 所有权，通过 `into_result()` 区分
-///   panic（Err）与正常退出（Ok），仅在 panic 时继续重启。
+/// 完成检测：`EngineHandle.completed`（CancellationToken）在 Engine 退出（含
+/// panic，经 CompletionGuard 的 Drop 触发）时取消，等待者零延迟唤醒。
+///
+/// 引用收口（todo 7.3 中期方案落地）：重启产生的新句柄经
+/// `container.engine.replace()` 原子换入 EngineSlot，Web/托盘/关闭流程
+/// 经 slot 取当前活跃 Engine，不再持有已死引用。
+///
+/// 状态恢复：崩溃前若监测处于 Running，重启完成后按原状态重发 Start，
+/// 消除「崩溃自愈后 Engine 以 monitoring=false 空转、监测静默失效」。
+///
+/// panic 与正常退出不再区分：Engine 正常退出的唯一路径是收到 Shutdown
+/// 命令，而 Shutdown 仅在应用级关闭令牌取消后发送——此时 biased select
+/// 先命中 cancelled 分支返回，不进入重启循环。token 未取消时的任何退出
+/// 均按崩溃处理。
 fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
     // 容器缺失属逻辑不变量违反，防御性降级为 no-op 任务，避免 panic（历史遗留 #11）
     let Some(container_ref) = state.container.as_ref() else {
@@ -883,16 +887,18 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
     let orchestrator = container.login.clone();
     let monitor_service = container.monitor.clone();
     let network_detect = crate::network::detect::create_detector();
-    let latest_engine_cmd_tx = state.latest_engine_cmd_tx.clone();
     let shutdown_token = state.shutdown_token.clone();
 
     tokio::spawn(async move {
-        // 使用 Notify 零延迟等待初始 Engine 完成（替代 1s 轮询 is_finished）。
+        // 等待初始 Engine 完成（completed 在正常退出与 panic 时均触发）。
         // 同时监听 shutdown 信号，避免应用关闭时持续阻塞在此等待。
-        tokio::select! {
-            biased;
-            _ = shutdown_token.cancelled() => return,
-            _ = container.engine_handle.completed.notified() => {}
+        let initial_completed = container.engine.current_handle().map(|h| h.completed.clone());
+        if let Some(token) = initial_completed {
+            tokio::select! {
+                biased;
+                _ = shutdown_token.cancelled() => return,
+                _ = token.cancelled() => {}
+            }
         }
 
         // 应用正在关闭（graceful_shutdown 会取消令牌）：初始 Engine 的退出
@@ -909,14 +915,18 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
                 return;
             }
 
+            // 捕获崩溃前监测状态：Running 表示监测中，重启后需恢复
+            // （Engine 崩溃后快照停留在最后的 Running/Stopped 值，正是恢复依据）
+            let was_monitoring = status.borrow().engine_state == crate::status::EngineState::Running;
+
             // 通知 Orchestrator 取消 source=auto 的在途登录
             orchestrator.cancel_auto_pending("engine_crashed").await;
 
             restart_count += 1;
             if restart_count > MAX_RESTART_ATTEMPTS {
                 error!("Engine 重启次数耗尽（{MAX_RESTART_ATTEMPTS} 次），标记为 Dead");
-                // 清空共享 cmd_tx，避免 graceful_shutdown 向已死 Engine 发送命令
-                *latest_engine_cmd_tx.lock().await = None;
+                // 清空 slot，后续命令派发按 ChannelClosed 快速失败
+                container.engine.clear();
                 status.merge(crate::status::PartialSnapshot::Engine {
                     state: crate::status::EngineState::Dead,
                     network: crate::status::NetworkStatus::Offline,
@@ -952,34 +962,30 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
                 network_detect: network_detect.clone(),
             };
             let new_handle = crate::engine::Engine::spawn(deps);
+            let new_completed = new_handle.completed.clone();
 
-            // 待评估（7.3）：重启后的新 Engine 以 monitoring=false 空转，未按原状态重发 Start；
-            // 且 container.engine_handle / 托盘 / Web 仍持有已死的初始 Engine 引用（引用未收口为
-            // 可替换句柄）。中期方案是将 Engine 引用改为 `Arc<ArcSwap<Arc<Engine>>>` 之类并在
-            // 重启后按原状态重发 Start。改动面较大，本批仅记录，不做大改。
+            // 引用收口：新句柄原子换入 slot，Web/托盘/关闭流程即刻指向新 Engine
+            container.engine.replace(new_handle);
 
-            // 更新共享 cmd_tx，使 graceful_shutdown 能向新 Engine 发送 Shutdown
-            *latest_engine_cmd_tx.lock().await = Some(new_handle.engine.cmd_sender());
-
-            // 通过 into_result() 获取精确的退出结果，区分 panic 与正常退出。
-            // 同时监听 shutdown：收到关闭信号时不再继续重启（新 Engine 由
-            // graceful_shutdown 通过 latest_engine_cmd_tx 发送 Shutdown）。
-            let exit_result = tokio::select! {
-                biased;
-                _ = shutdown_token.cancelled() => return,
-                r = new_handle.into_result() => r,
-            };
-            match exit_result {
-                Err(e) => {
-                    error!("Engine（重启 #{restart_count}）task panic: {e}");
-                    // 继续循环，尝试下一次重启
-                }
-                Ok(()) => {
-                    // 正常退出（可能收到 Shutdown 命令），无需继续重启
-                    info!("Engine（重启 #{restart_count}）正常退出");
-                    return;
+            // 按崩溃前状态恢复监测（monitoring=false 空转会让用户以为还在监测）
+            if was_monitoring {
+                match container
+                    .engine
+                    .dispatch(crate::engine::EngineCommand::Start)
+                    .await
+                {
+                    Ok(()) => info!("Engine（重启 #{restart_count}）已按崩溃前状态恢复监测"),
+                    Err(e) => warn!("Engine（重启 #{restart_count}）恢复监测失败: {e:?}"),
                 }
             }
+
+            // 等待新 Engine 完成；shutdown 优先（正常关闭路径，不重启）
+            tokio::select! {
+                biased;
+                _ = shutdown_token.cancelled() => return,
+                _ = new_completed.cancelled() => {}
+            }
+            error!("Engine（重启 #{restart_count}）退出，继续尝试重启");
         }
     })
 }
@@ -1024,22 +1030,24 @@ async fn graceful_shutdown(state: &mut LauncherState) {
     };
 
     // 3. 关闭 Engine（先于 Bridge，因为 Engine 可能正在使用 Bridge）
-    if let Some(tx) = state.latest_engine_cmd_tx.lock().await.take() {
-        let _ = tx.send(crate::engine::EngineCommand::Shutdown).await;
-    }
-    // 应用级关闭令牌已在第 0 步取消，自动传播到容器内 uptime / 登录 shutdown 的
-    // child token，使在途登录 task（detached，Engine 不持有其句柄）协作退出，
-    // 避免其在 Bridge 关闭后仍引用已回收的 Worker（历史遗留 #8，错误洪泛风险）。
+    // 经 EngineSlot 派发到「当前活跃」Engine（崩溃重启后的新实例也覆盖）
     if let Some(container) = &state.container {
-        // 等待 Engine run_loop 完全退出后再关 Bridge，保证 Engine 侧不再发起 Bridge 调用
-        if tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            container.engine_handle.completed.notified(),
-        )
-        .await
-        .is_err()
-        {
-            warn!("Engine 关闭超时，继续关闭 Bridge");
+        let completed = container.engine.current_handle().map(|h| h.completed.clone());
+        let _ = container
+            .engine
+            .dispatch(crate::engine::EngineCommand::Shutdown)
+            .await;
+        // 应用级关闭令牌已在第 0 步取消，自动传播到容器内 uptime / 登录 shutdown 的
+        // child token，使在途登录 task（detached，Engine 不持有其句柄）协作退出，
+        // 避免其在 Bridge 关闭后仍引用已回收的 Worker（历史遗留 #8，错误洪泛风险）。
+        if let Some(token) = completed {
+            // 等待 Engine run_loop 完全退出后再关 Bridge，保证 Engine 侧不再发起 Bridge 调用
+            if tokio::time::timeout(std::time::Duration::from_secs(5), token.cancelled())
+                .await
+                .is_err()
+            {
+                warn!("Engine 关闭超时，继续关闭 Bridge");
+            }
         }
     }
 
