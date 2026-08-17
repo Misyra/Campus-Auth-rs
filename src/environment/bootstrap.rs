@@ -55,7 +55,11 @@ pub async fn bootstrap_capability(
     }
 
     // ── 阶段 2: 确保 Python 虚拟环境就绪 ──
-    if !mgr.read_status().python_ready {
+    // venv 不存在，或 venv 存在但 OCR 依赖（ddddocr）缺失（历史 venv 由
+    // 不带 --extra ocr 的 sync 创建）时进入；ensure_venv 幂等增量处理。
+    if !mgr.read_status().python_ready
+        || !crate::environment::python::ddddocr_installed(mgr)
+    {
         mgr.write_status(|s| s.stage = BootstrapStage::SyncingVenv);
         mgr.report_progress(
             "syncing_venv",

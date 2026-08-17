@@ -101,6 +101,8 @@ fn token_from_query(query: Option<&str>) -> Option<&str> {
 /// - `OPTIONS` 请求（CORS 预检不携带自定义头）
 /// - `/api/auth/token`（token 发放端点，受 CORS 读保护）
 /// - `/api/health`（无信息量的存活探测）
+/// - `GET /api/background/*`（CSS `url()` / `<img>` 引用无法携带自定义头，
+///   背景图为只读图片资源；写操作（upload/fetch-url/delete）仍需鉴权）
 ///
 /// token 来源：
 /// - HTTP：`X-Auth-Token` 头或 `Authorization: Bearer <token>`
@@ -118,6 +120,9 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
     if path == "/api/auth/token" || path == "/api/health" {
+        return next.run(req).await;
+    }
+    if req.method() == Method::GET && path.starts_with("/api/background/") {
         return next.run(req).await;
     }
 
@@ -318,5 +323,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    /// GET /api/background/* 豁免：CSS url()/img 引用无法携带自定义头；
+    /// 非背景路径与其他方法仍需鉴权
+    #[tokio::test]
+    async fn auth_middleware_background_get_exempt() {
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = test_router();
+
+        // GET 背景图：无 token → 放行（路由层 405 只证明过了中间件）
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/background/bg.png")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // POST /api/background/upload：无 token → 401（写操作不豁免）
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/background/upload")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // GET 非背景 API：无 token → 401（豁免不扩大化）
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/backgrounds")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

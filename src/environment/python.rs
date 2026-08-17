@@ -8,12 +8,22 @@ use crate::environment::{
 /// 确保 Python 虚拟环境就绪
 ///
 /// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建。
+/// venv 已存在但 ddddocr（OCR 依赖，optional extra）缺失时补装
+/// （历史 venv 由不带 `--extra ocr` 的 sync 创建，需增量补齐）。
 /// 返回 Python 解释器路径。
 pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
     let python_exe = mgr.worker_project_path().join(crate::environment::PYTHON_EXE_RELATIVE);
 
-    // 如果 Python 解释器已存在，直接返回
+    // 如果 Python 解释器已存在且 OCR 依赖齐备，直接返回
     if python_exe.exists() {
+        if ddddocr_installed(mgr) {
+            return Ok(python_exe);
+        }
+        tracing::info!("检测到 OCR 依赖（ddddocr）缺失，执行 uv sync 补装...");
+        if let Err(e) = crate::environment::uv::run_uv_sync(mgr).await {
+            // OCR 为可选能力：补装失败不阻断核心浏览器自动化（playwright）就绪
+            tracing::warn!("OCR 依赖补装失败（不影响核心浏览器能力）: {e}");
+        }
         return Ok(python_exe);
     }
 
@@ -27,6 +37,37 @@ pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
     }
 
     Ok(python_exe)
+}
+
+/// 检查 venv 内 ddddocr（OCR 依赖）是否已安装
+///
+/// 通过 site-packages 下存在 `ddddocr` 包目录或 `ddddocr-*.dist-info` 判定，
+/// 兼容 Windows（Lib/site-packages）与 Unix（lib/python3.x/site-packages）布局。
+pub(crate) fn ddddocr_installed(mgr: &EnvironmentManager) -> bool {
+    let venv = mgr.worker_project_path().join(crate::environment::VENV_DIR);
+    let candidates = [
+        // Windows venv 布局
+        venv.join("Lib").join("site-packages"),
+        // Unix venv 布局（python3.12 固定小版本约束下取 3.12）
+        venv.join("lib").join("python3.12").join("site-packages"),
+    ];
+    for site in candidates {
+        if !site.is_dir() {
+            continue;
+        }
+        if site.join("ddddocr").is_dir() {
+            return true;
+        }
+        // wheel 安装记录（egg-info/dists 目录名形如 ddddocr-1.5.x.dist-info）
+        if let Ok(entries) = std::fs::read_dir(&site) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("ddddocr-") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// 安装 Playwright Chromium 浏览器

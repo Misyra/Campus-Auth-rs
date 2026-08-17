@@ -52,33 +52,41 @@ mod imp {
     use anyhow::{bail, Result};
     use std::process::Command;
 
-    /// 注册/取消系统自启动（Windows：schtasks 计划任务）
+    /// 注册/取消系统自启动（Windows：HKCU Run 注册表，经 reg.exe）
+    ///
+    /// 曾用 `schtasks /sc ONLOGON`：非提升权限创建登录触发任务会被拒绝
+    /// （"拒绝访问"），且任务不存在时 /delete 报"系统找不到指定的文件"。
+    /// HKCU Run 键用户级可写、无需提权，登录时由 explorer 拉起；
+    /// 取消时键值不存在视为幂等成功（不报错）。
     pub fn set_self_start(enabled: bool) -> Result<()> {
+        const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
         if enabled {
             let exe = std::env::current_exe()?;
-            let status = Command::new("schtasks")
+            // /d 值需整体加引号，路径含空格时保持一个参数
+            let quoted = format!("\"{}\"", exe.display());
+            let status = Command::new("reg")
                 .args([
-                    "/create",
-                    "/tn",
+                    "add",
+                    RUN_KEY,
+                    "/v",
                     "Campus-Auth",
-                    "/sc",
-                    "ONLOGON",
-                    "/rl",
-                    "LIMITED",
-                    "/tr",
-                    &format!("\"{}\"", exe.display()),
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &quoted,
                     "/f",
                 ])
                 .status()?;
             if !status.success() {
-                bail!("注册自启动失败（schtasks 返回非零退出码）");
+                bail!("注册自启动失败（reg add 返回非零退出码）");
             }
         } else {
-            let status = Command::new("schtasks")
-                .args(["/delete", "/tn", "Campus-Auth", "/f"])
+            let status = Command::new("reg")
+                .args(["delete", RUN_KEY, "/v", "Campus-Auth", "/f"])
                 .status()?;
-            if !status.success() {
-                bail!("取消自启动失败（schtasks 返回非零退出码）");
+            // 键值本就不存在：视为已取消（幂等），不算失败
+            if !status.success() && status.code() != Some(1) {
+                bail!("取消自启动失败（reg delete 返回非零退出码）");
             }
         }
         Ok(())

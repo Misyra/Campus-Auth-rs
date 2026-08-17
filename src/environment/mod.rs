@@ -319,9 +319,15 @@ impl EnvironmentManager {
     }
 
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导
+    ///
+    /// 就绪但 OCR 依赖（ddddocr，optional extra）缺失时也触发引导补装
+    /// （ensure_venv 幂等：仅增量补 ddddocr，不重建 venv）。
     pub async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
         if self.is_ready() {
-            return Ok(());
+            if crate::environment::python::ddddocr_installed(self) {
+                return Ok(());
+            }
+            tracing::info!("OCR 依赖（ddddocr）缺失，触发增量补装...");
         }
         bootstrap_capability(self).await
     }
