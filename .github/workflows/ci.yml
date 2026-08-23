@@ -18,6 +18,18 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: python_worker/uv.lock
+
       - name: 安装 Rust 工具链（rustfmt + clippy）
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,3 +51,7 @@ jobs:
 
       - name: Python Worker 语法检查
         run: python -m compileall python_worker
+
+      - name: Python Worker 单元测试
+        working-directory: python_worker
+        run: uv sync --dev --frozen && uv run pytest
