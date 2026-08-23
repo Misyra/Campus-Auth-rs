@@ -1,5 +1,51 @@
 # 更新日志
 
+## 开发中（2026-08-23 第十轮：OCR 链路修复 + 安全加固 + 服务生命周期收口）
+
+> 三个主题分批提交（`c99a64e` / `18c948b` / `3a5a7a9` / `3dcae6e` / `8fcaab9` / `5be21ea` / `4f8188e`）。
+> 另清理排查期临时产物（worker_main_diag/probe.py、test_ocr/、volar.tgz）。
+
+### OCR 链路（c99a64e）
+
+- **根因修复：模型加载卡死**——ddddocr 链式加载 numpy C 扩展若发生在 Worker 后台线程（`asyncio.to_thread`），Windows loader lock + import lock 会让加载卡住约 100s，前端报「模型加载超时」。已实测主线程加载仅 ~0.1s 且命中 `sys.modules` 缓存后后台线程不再重新加载 DLL。新增 `_preload_ocr_deps()`：主线程、事件循环启动前 best-effort 预加载（缺依赖/失败均静默跳过，不拖垮 Worker）
+- **识别/模型加载超时兜底**：`ocr_recognize` 的模型构造与 classification 均 `asyncio.wait_for(…, OCR_TIMEOUT_SECS)` 丢线程池执行，超时转一句话错误（含「uv add ddddocr」指引）；RGBA 截图先规整为 RGB 提升识别率
+- **OCR 不再被 Chromium 阻断**：Bridge `ensure_worker` 增加 worker-only 健康检查分支——`ocr_recognize` 只验证 Worker IPC，浏览器任务才探测 Playwright/Chromium
+- **Web 层信封修复**：`/api/ocr/recognize` 此前把 Worker 的 `IpcResponse { id, result }` 原样返回，前端契约只认 `{data}`/`{error}`——错误被埋在 200 响应里。现提取 `result.data` 或转 HTTP 错误；新增 15 MiB 请求体上限（对齐 Worker stdin 16 MiB 单行上限）
+- **OCR 可用性权威判定**：`ocr_declared` 解析 `python_worker/pyproject.toml` 依赖块，前端据此展示安装/卸载入口（`declared` 字段）；任务设置页进入即检测、安装后轮询至就绪（最长 5 分钟）、检测失败可重试
+- Worker IPC 加固：stdin 单行超限时从有界前缀提取请求 id 返回明确错误（此前静默丢弃）；stderr loguru 行解析去重前缀后按级别映射 tracing target `python_worker`
+- venv 损坏自愈：解释器存在不代表可用，`python_executable_works` 实际启动 `--version` 验证，失败自动 `uv sync` 修复
+
+### 安全加固（18c948b）
+
+- **Profile ID 路径穿越封堵**：`is_valid_profile_id` 仅接受 1..=64 个 ASCII 字母/数字/`_`/`-`，get/update/delete/create 及 active_id 读取/重载全路径校验（非法 active_id 回退 default 并告警）
+- **背景图验证**：按真实文件签名（magic bytes）判定位图格式并拒绝 SVG（同源脚本执行风险），统一 10 MiB 上限；multipart 请求体限制 = 上限 + 64 KiB 边界预留
+- **下载/解压限流**：`download_streaming` 按 content-length 预检 + 流式累计超限即删档报错（uv/git 环境包 256/512 MiB）；zip 解压加条目数（8192）/单条目（512 MiB）/总量（1 GiB）三重上限
+- `/api/auth/token` 响应补 `Cache-Control: no-store`；`ConfigError::InvalidProfileId` 映射 400
+
+### 服务生命周期（3a5a7a9）
+
+- **`ServiceHandle::stop_with_timeout`**：持有 JoinHandle 的限时停止——超时 abort 并 await 回收，不会丢弃句柄让后台 task 游离；关闭序列按 bridge(3s) → scheduler(5s) → engine(8s) 分级超时
+- **Scheduler 任务收口**：`TaskTracker` + `CancellationToken` 追踪所有定时/手动执行，关闭时统一取消并等待清理；执行等待并发 permit 与取消 select 竞争
+- **任务子进程隔离**：脚本执行 `env_clear`（不继承主进程 token/代理密码/调试变量）+ Windows Job Object（KILL_ON_JOB_CLOSE）——超时/关闭/取消时内核回收整棵进程树；stdout/stderr 持续排空并截断
+- 定时任务缺省超时 clamp 到 1..=3600s；登录活跃任务判定统一走 TaskManager 的全局 `.order.json.active`（手动/自动/CLI 登录共用，定时任务独立 task_id 不受影响）
+
+### 前端稳定性（3dcae6e / 4f8188e）
+
+- **日志不丢不倒退**：HTTP 历史替换保留请求期间到达的实时日志（seq 基准 + 内容键去重回放）；历史接口失败仍开实时流不停留在空白；级别筛选交前端（后端保留全部级别）
+- **WebSocket 防重入**：`connecting` 标志消除并发 connect 各自新建连接导致的「连接风暴」；构造同步抛错降级常规重连不永久卡死
+- HTTP 客户端支持 timeout/signal 组合（AbortController 桥接，超时与取消区分报错）；FormData 不手工设 Content-Type
+- 退出序列：仅后端确认收到关闭请求后才清定时器/销毁 WS/显示遮罩，失败保留可恢复会话
+- 前端回流日志（ws.rs）scope/message/meta 按 128/4096/2048 字符截断，防异常堆栈撑大日志文件
+
+### CI / 杂项（8fcaab9 / 5be21ea）
+
+- CI 增加 Python 3.12 + uv（含 `uv.lock` 缓存）+ `uv run pytest`
+- gitignore 增补 `/.campus_network_auth/` 运行时目录；移除前端 openapi-typescript 开发依赖
+
+### 验证
+
+- `cargo clippy --all-targets --features no-embed -D warnings` 零警告；`cargo test --features no-embed` 385 项全过；pytest 62 项全过；`npm run build`（vue-tsc）通过
+
 ## 开发中（2026-08-17 第九轮：Engine 引用收口 — 可替换句柄 + 崩溃恢复监测）
 
 > todo 7.3 中期方案落地。修复两个问题：① Engine 崩溃自愈后以 monitoring=false
