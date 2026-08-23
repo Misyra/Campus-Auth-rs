@@ -75,6 +75,12 @@ pub enum ConfigError {
         /// 冲突的 Profile ID
         id: String,
     },
+    /// Profile ID 不符合安全文件名规则
+    #[error("无效的 Profile ID: {id}")]
+    InvalidProfileId {
+        /// 非法的 Profile ID
+        id: String,
+    },
     /// 不允许删除 default Profile
     #[error("不允许删除 default Profile")]
     CannotDeleteDefault,
@@ -96,6 +102,18 @@ pub enum ConfigError {
         /// 代码支持的最高版本号
         max: u32,
     },
+}
+
+/// 校验 Profile ID 是否可安全映射为单个文件名。
+///
+/// 仅接受 1..=64 个 ASCII 字母、数字、下划线或连字符，拒绝路径分隔符、点号与
+/// 百分号等可能参与路径穿越或二次解码的字符。
+pub(crate) fn is_valid_profile_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// settings.json 内存缓存 + mtime
@@ -203,7 +221,13 @@ impl ConfigService {
         }
 
         // 解析活跃 Profile（缺失则 fallback 到 default）
-        let active_id = if settings.active_profile_id.is_empty() {
+        let active_id = if !is_valid_profile_id(&settings.active_profile_id) {
+            if !settings.active_profile_id.is_empty() {
+                tracing::warn!(
+                    profile_id = %settings.active_profile_id,
+                    "活跃 Profile ID 非法，回退到 default"
+                );
+            }
             "default".to_string()
         } else {
             settings.active_profile_id.clone()
@@ -357,6 +381,9 @@ impl ConfigService {
 
     /// 加载单个 Profile（mtime 缓存）
     pub fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {
+        if !is_valid_profile_id(id) {
+            return Err(ConfigError::InvalidProfileId { id: id.to_string() });
+        }
         let path = self.profiles_dir.join(format!("{id}.json"));
         let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         {
@@ -405,6 +432,11 @@ impl ConfigService {
 
     /// 原子写入 Profile 文件
     pub async fn save_profile(&self, profile: &ProfileData) -> Result<(), ConfigError> {
+        if !is_valid_profile_id(&profile.id) {
+            return Err(ConfigError::InvalidProfileId {
+                id: profile.id.clone(),
+            });
+        }
         let _guard = self.profiles_lock.lock().await;
         let path = self.profiles_dir.join(format!("{}.json", profile.id));
         Self::atomic_write_json(&path, profile).await?;
@@ -425,6 +457,9 @@ impl ConfigService {
 
     /// 安全删除 Profile（移至 .trash/，不允许删除 default）
     pub async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
+        if !is_valid_profile_id(id) {
+            return Err(ConfigError::InvalidProfileId { id: id.to_string() });
+        }
         if id == "default" {
             return Err(ConfigError::CannotDeleteDefault);
         }
@@ -510,14 +545,34 @@ impl ConfigService {
                 }
             }
         };
-        let active_id = settings.active_profile_id.clone();
+        let active_id = if is_valid_profile_id(&settings.active_profile_id) {
+            settings.active_profile_id.clone()
+        } else {
+            tracing::warn!(
+                profile_id = %settings.active_profile_id,
+                "重载时发现非法活跃 Profile ID，回退到 default"
+            );
+            "default".to_string()
+        };
         let active_path = profiles_dir.join(format!("{active_id}.json"));
+        let default_path = profiles_dir.join("default.json");
         let active_profile =
             tokio::task::spawn_blocking(move || {
-                Self::read_profile_file(&active_path).unwrap_or_else(|_| ProfileData::default())
+                match Self::read_profile_file(&active_path) {
+                    Ok(profile) => Ok(profile),
+                    Err(active_error) if active_path != default_path => {
+                        tracing::warn!(
+                            path = %active_path.display(),
+                            error = %active_error,
+                            "活跃 Profile 无法读取，回退到 default"
+                        );
+                        Self::read_profile_file(&default_path)
+                    }
+                    Err(error) => Err(error),
+                }
             })
             .await
-            .unwrap_or_else(|_| ProfileData::default());
+            .map_err(|e| ConfigError::Io(std::io::Error::other(format!("Profile 重读任务失败: {e}"))))??;
         self.build_and_swap_runtime(&settings, &active_profile).await?;
         // 非热更字段变更提示（如端口、运行模式等）
         Self::log_non_hot_reload_changes(&old, self.runtime.load().as_ref());

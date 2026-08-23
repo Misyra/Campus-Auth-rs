@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::config::schema::ProfileData;
 use crate::config::service::ConfigService;
+use crate::config::service::is_valid_profile_id;
 use crate::config::{ConfigError, ConfigReloadSignal};
 
 /// Profile 摘要（不含密码），用于列表展示
@@ -139,6 +140,9 @@ impl ProfileService {
 
     /// 更新 Profile（密码字段走 `save_password` 语义）
     pub async fn update_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError> {
+        if !is_valid_profile_id(id) {
+            return Err(ConfigError::InvalidProfileId { id: id.to_string() });
+        }
         // 读取既有密码，供 save_password 在空串/未修改时保留
         let existing_pw = self
             .config
@@ -161,6 +165,9 @@ impl ProfileService {
 
     /// 删除 Profile（不允许删除 default）
     pub async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
+        if !is_valid_profile_id(id) {
+            return Err(ConfigError::InvalidProfileId { id: id.to_string() });
+        }
         if id == "default" {
             return Err(ConfigError::CannotDeleteDefault);
         }
@@ -169,6 +176,9 @@ impl ProfileService {
 
     /// 切换活跃 Profile：更新 settings.json 的 active_profile_id 并触发 reload
     pub async fn switch_profile(&self, id: &str) -> Result<(), ConfigError> {
+        if !is_valid_profile_id(id) {
+            return Err(ConfigError::InvalidProfileId { id: id.to_string() });
+        }
         // 校验目标 Profile 存在
         let exists = self.config.load_all_profiles().iter().any(|p| p.id == id);
         if !exists {
@@ -385,6 +395,26 @@ mod tests {
         svc.create_profile("My-Profile", ProfileData::default()).await.unwrap();
         let result = svc.create_profile("my_profile", ProfileData::default()).await;
         assert!(matches!(result, Err(ConfigError::ProfileIdConflict { id }) if id == "my-profile"));
+    }
+
+    #[tokio::test]
+    async fn test_profile_operations_reject_path_like_id() {
+        // 读取、更新和删除必须在服务边界拒绝 Windows/Unix 路径分隔符。
+        let (_tmp, config) = make_config_service().await;
+        let svc = ProfileService::new(config.clone());
+
+        assert!(matches!(
+            svc.get_profile("..\\settings"),
+            Err(ConfigError::InvalidProfileId { .. })
+        ));
+        assert!(matches!(
+            svc.update_profile("../settings", ProfileData::default()).await,
+            Err(ConfigError::InvalidProfileId { .. })
+        ));
+        assert!(matches!(
+            svc.delete_profile("..\\settings").await,
+            Err(ConfigError::InvalidProfileId { .. })
+        ));
     }
 
     #[test]

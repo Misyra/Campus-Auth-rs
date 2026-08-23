@@ -32,6 +32,10 @@ pub enum UpdaterError {
     #[error("校验和不匹配（预期 {expected}，实际 {actual}）")]
     ChecksumMismatch { expected: String, actual: String },
 
+    /// 下载包超过允许大小
+    #[error("更新包超过大小上限 {limit} 字节")]
+    DownloadTooLarge { limit: u64 },
+
     /// zip 解压失败（损坏/格式错误/路径穿越）
     #[error("解压失败: {0}")]
     ExtractFailed(String),

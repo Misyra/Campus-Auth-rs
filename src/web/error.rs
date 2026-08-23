@@ -170,6 +170,9 @@ impl From<crate::config::ConfigError> for ApiError {
             | crate::config::ConfigError::ProfileNotFound { .. } => ApiError::NotFound(e.to_string()),
             crate::config::ConfigError::ProfileIdConflict { .. }
             | crate::config::ConfigError::CannotDeleteDefault => ApiError::Conflict(e.to_string()),
+            crate::config::ConfigError::InvalidProfileId { .. } => {
+                ApiError::BadRequest(e.to_string())
+            }
             _ => ApiError::Internal(e.to_string()),
         }
     }
@@ -370,6 +373,11 @@ mod tests {
         assert!(matches!(e, ApiError::Conflict(_)));
         let e: ApiError = crate::config::ConfigError::CannotDeleteDefault.into();
         assert!(matches!(e, ApiError::Conflict(_)));
+        let e: ApiError = crate::config::ConfigError::InvalidProfileId {
+            id: "../settings".into(),
+        }
+        .into();
+        assert!(matches!(e, ApiError::BadRequest(_)));
     }
 
     /// 服务错误自动转换：TaskError / BridgeError 代表性分支

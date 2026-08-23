@@ -295,7 +295,12 @@ async fn download_file_streaming(
     url: &str,
     dest: &Path,
 ) -> Result<(), EnvironmentError> {
-    crate::utils::io::download_streaming(mgr.http_client(), url, dest)
+    crate::utils::io::download_streaming(
+        mgr.http_client(),
+        url,
+        dest,
+        256 * 1024 * 1024,
+    )
         .await
         .map_err(|e| match e {
             crate::utils::io::DownloadError::Http(e) => EnvironmentError::UvDownloadFailed {
@@ -303,6 +308,12 @@ async fn download_file_streaming(
                 source: e,
             },
             crate::utils::io::DownloadError::Io(e) => EnvironmentError::UvExtractFailed(e),
+            crate::utils::io::DownloadError::TooLarge { limit } => {
+                EnvironmentError::UvDownloadIoFailed {
+                    retries: 0,
+                    message: format!("下载内容超过大小上限 {limit} 字节"),
+                }
+            }
         })
 }
 
@@ -630,5 +641,3 @@ mod tests {
         assert!(parse_uv_version("uv: unrecognized option").is_none());
     }
 }
-
-

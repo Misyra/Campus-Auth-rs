@@ -12,7 +12,12 @@ mod static_files;
 pub mod state;
 mod ws;
 
+use axum::extract::DefaultBodyLimit;
+use axum::body::Body;
+use axum::http::{header, HeaderName, HeaderValue, Request};
 use axum::middleware;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::routing::{delete, get, patch, post, put};
 use axum::routing::MethodRouter;
 use axum::Router;
@@ -121,7 +126,11 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/uninstall", || post(routes::system::uninstall)),
         // ---- 背景图（background）----
         ("GET", "/api/background/{filename}", || get(routes::system::get_background)),
-        ("POST", "/api/background/upload", || post(routes::system::upload_background)),
+        ("POST", "/api/background/upload", || {
+            post(routes::system::upload_background).layer(DefaultBodyLimit::max(
+                routes::system::BACKGROUND_UPLOAD_BODY_LIMIT,
+            ))
+        }),
         ("POST", "/api/background/fetch-url", || post(routes::system::fetch_url_background)),
         ("DELETE", "/api/background/{filename}", || {
             delete(routes::system::delete_background)
@@ -135,7 +144,12 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/autostart/disable", || post(routes::autostart::disable_autostart)),
         ("POST", "/api/autostart/mode", || post(routes::autostart::set_autostart_mode)),
         // ---- OCR ----
-        ("POST", "/api/ocr/recognize", || post(routes::ocr::ocr_recognize)),
+        // recognize 单独放宽请求体限制（见 routes::ocr::RECOGNIZE_BODY_LIMIT），
+        // 避免 >1.5MB 原图 base64 后触发 axum 默认 2MB 上限的 413
+        ("POST", "/api/ocr/recognize", || {
+            post(routes::ocr::ocr_recognize)
+                .layer(DefaultBodyLimit::max(routes::ocr::RECOGNIZE_BODY_LIMIT))
+        }),
         ("GET", "/api/ocr/status", || get(routes::ocr::ocr_status)),
         ("POST", "/api/ocr/install", || post(routes::ocr::ocr_install)),
         ("POST", "/api/ocr/uninstall", || post(routes::ocr::ocr_uninstall)),
@@ -157,6 +171,31 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         // 跨域恶意网页无法获取 token，中间件对此路径豁免
         ("GET", "/api/auth/token", || get(auth::token_handler)),
     ]
+}
+
+/// 为本地管理界面统一附加浏览器安全响应头。
+async fn security_headers(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        ),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 /// 构建完整的 Axum Router（含嵌入前端回退）
@@ -196,6 +235,7 @@ pub fn build_router(state: AppState) -> Router {
             state.auth_token.clone(),
             auth::auth_middleware,
         ))
+        .layer(middleware::from_fn(security_headers))
         .layer(compression)
         .layer(cors)
         .with_state(state)

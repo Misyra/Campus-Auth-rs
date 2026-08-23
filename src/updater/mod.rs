@@ -365,28 +365,6 @@ impl UpdaterService {
                 return Ok(false);
             }
         }
-        // U3 二次校验：若可从清单取得当前平台包的 sha256，则重算 staging 产物哈希比对
-        let settings = self.config.load_settings().global.updater;
-        if let Ok(manifest) =
-            check::fetch_manifest(&self.http_client, &settings.release_source_url).await
-        {
-            if let Some(pkg) = check::select_platform(&manifest) {
-                if !pkg.sha256.is_empty() {
-                    let exe = extracted_exe.clone();
-                    let actual = tokio::task::spawn_blocking(move || file_sha256(&exe))
-                        .await
-                        .unwrap_or(None);
-                    if let Some(actual) = actual {
-                        if !actual.eq_ignore_ascii_case(&pkg.sha256) {
-                            tracing::error!("staging 产物哈希不符，跳过应用并清理");
-                            apply::cleanup_after_apply(&self.base_path).await;
-                            return Ok(false);
-                        }
-                    }
-                }
-            }
-        }
-
         // 替换前备份当前 exe 到 config/.backup_exe，用于失败回滚
         let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
         let backup_path = self.base_path.join(".backup_exe");
@@ -437,21 +415,4 @@ async fn perform_update_check(
         tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
     }
     Ok(())
-}
-
-/// 计算文件 SHA256（用于启动兜底的 staging 产物二次校验）
-fn file_sha256(path: &std::path::Path) -> Option<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = file.read(&mut buf).ok()?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Some(hex::encode(hasher.finalize()))
 }

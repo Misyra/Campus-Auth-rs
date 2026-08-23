@@ -174,7 +174,12 @@ async fn download_file(
     url: &str,
     dest: &std::path::Path,
 ) -> Result<(), EnvironmentError> {
-    crate::utils::io::download_streaming(mgr.http_client(), url, dest)
+    crate::utils::io::download_streaming(
+        mgr.http_client(),
+        url,
+        dest,
+        512 * 1024 * 1024,
+    )
         .await
         .map_err(|e| EnvironmentError::MinGitDownloadFailed(e.to_string()))
 }

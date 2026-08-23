@@ -25,6 +25,8 @@ pub struct StagedUpdate {
 
 /// 下载总超时（5 分钟）
 pub(crate) const DOWNLOAD_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// 更新压缩包大小上限，避免异常响应占满磁盘。
+pub(crate) const MAX_UPDATE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// 流式下载并执行 SHA256 校验
 ///
@@ -55,6 +57,11 @@ pub(crate) async fn download_and_verify(
         .map_err(UpdaterError::DownloadFailed)?;
 
     let content_length = response.content_length();
+    if content_length.is_some_and(|size| size > MAX_UPDATE_ARCHIVE_BYTES) {
+        return Err(UpdaterError::DownloadTooLarge {
+            limit: MAX_UPDATE_ARCHIVE_BYTES,
+        });
+    }
 
     tokio::fs::create_dir_all(staging_dir)
         .await
@@ -87,6 +94,12 @@ pub(crate) async fn download_and_verify(
             .await
             .map_err(UpdaterError::PendingWriteFailed)?;
         downloaded += chunk.len() as u64;
+        if downloaded > MAX_UPDATE_ARCHIVE_BYTES {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(UpdaterError::DownloadTooLarge {
+                limit: MAX_UPDATE_ARCHIVE_BYTES,
+            });
+        }
 
         if let (Some(total), Some(cb)) = (content_length, on_progress) {
             // 进度百分比恒钳制在 0~100：服务端实发字节超 Content-Length 时
@@ -109,6 +122,7 @@ pub(crate) async fn download_and_verify(
     drop(file);
 
     let actual = hex::encode(hasher.finalize());
+    // 完整性校验针对下载的 ZIP 本身；解压后的 exe 不应拿 ZIP 摘要比较。
     if !info.sha256.is_empty() && actual.to_lowercase() != info.sha256.to_lowercase() {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(UpdaterError::ChecksumMismatch {
@@ -116,7 +130,7 @@ pub(crate) async fn download_and_verify(
             actual,
         });
     } else if info.sha256.is_empty() {
-        tracing::warn!("SHA256 校验值为空（GitHub API），跳过校验，信任 HTTPS");
+        tracing::warn!("SHA256 校验值为空，跳过摘要校验，信任 HTTPS");
     }
 
     let zip_path = staging_dir.join(format!("campus-auth-{}.zip", info.latest_version));

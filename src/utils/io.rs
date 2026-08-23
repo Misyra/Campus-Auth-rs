@@ -78,11 +78,20 @@ pub fn extract_zip(
     dest: &Path,
     mut accept: impl FnMut(&Path) -> bool,
 ) -> Result<(), std::io::Error> {
-    use std::io::Read;
+    use std::io::{Read, Write};
+
+    const MAX_ZIP_ENTRIES: usize = 8_192;
+    const MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+    const MAX_ZIP_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return Err(std::io::Error::other("zip 条目数量超过上限"));
+    }
+    let mut total_bytes = 0u64;
 
     for i in 0..archive.len() {
         let mut entry = archive
@@ -105,12 +114,25 @@ pub fn extract_zip(
         if entry.is_dir() {
             std::fs::create_dir_all(&outpath)?;
         } else {
+            if entry.size() > MAX_ZIP_ENTRY_BYTES
+                || total_bytes.saturating_add(entry.size()) > MAX_ZIP_TOTAL_BYTES
+            {
+                return Err(std::io::Error::other("zip 解压大小超过上限"));
+            }
             if let Some(parent) = outpath.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let mut contents = Vec::new();
-            entry.read_to_end(&mut contents)?;
-            std::fs::write(&outpath, &contents)?;
+            let mut output = std::fs::File::create(&outpath)?;
+            let copied = std::io::copy(
+                &mut entry.by_ref().take(MAX_ZIP_ENTRY_BYTES.saturating_add(1)),
+                &mut output,
+            )?;
+            if copied > MAX_ZIP_ENTRY_BYTES {
+                let _ = std::fs::remove_file(&outpath);
+                return Err(std::io::Error::other("zip 文件条目超过大小上限"));
+            }
+            output.flush()?;
+            total_bytes = total_bytes.saturating_add(copied);
         }
     }
     Ok(())
@@ -123,6 +145,8 @@ pub enum DownloadError {
     Http(reqwest::Error),
     /// 落盘错误（创建 / 写入 / flush）
     Io(std::io::Error),
+    /// 响应体超过调用方给定上限。
+    TooLarge { limit: u64 },
 }
 
 impl std::fmt::Display for DownloadError {
@@ -130,6 +154,7 @@ impl std::fmt::Display for DownloadError {
         match self {
             DownloadError::Http(e) => write!(f, "网络请求失败: {e}"),
             DownloadError::Io(e) => write!(f, "文件写入失败: {e}"),
+            DownloadError::TooLarge { limit } => write!(f, "下载内容超过大小上限 {limit} 字节"),
         }
     }
 }
@@ -145,6 +170,7 @@ pub async fn download_streaming(
     client: &reqwest::Client,
     url: &str,
     dest: &Path,
+    max_bytes: u64,
 ) -> Result<(), DownloadError> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -157,14 +183,23 @@ pub async fn download_streaming(
         .map_err(DownloadError::Http)?;
 
     let resp = resp.error_for_status().map_err(DownloadError::Http)?;
+    if resp.content_length().is_some_and(|size| size > max_bytes) {
+        return Err(DownloadError::TooLarge { limit: max_bytes });
+    }
 
     let mut file = tokio::fs::File::create(dest)
         .await
         .map_err(DownloadError::Io)?;
 
     let mut stream = resp.bytes_stream();
+    let mut downloaded = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(DownloadError::Http)?;
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if downloaded > max_bytes {
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(DownloadError::TooLarge { limit: max_bytes });
+        }
         file.write_all(chunk.as_ref())
             .await
             .map_err(DownloadError::Io)?;

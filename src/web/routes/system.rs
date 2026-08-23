@@ -11,6 +11,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::Json;
 use axum::response::IntoResponse;
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -18,6 +19,11 @@ use crate::bridge::BridgeApi;
 use crate::updater::UpdaterApi;
 use crate::web::error::{data, ApiError};
 use crate::web::state::AppState;
+
+/// 背景图文件最大字节数（上传与远程下载统一）。
+pub(crate) const MAX_BACKGROUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+/// multipart 请求体需要为边界与字段头预留少量空间。
+pub(crate) const BACKGROUND_UPLOAD_BODY_LIMIT: usize = MAX_BACKGROUND_IMAGE_BYTES + 64 * 1024;
 
 /// GET /api/system/info — 系统基本信息
 pub async fn system_info(
@@ -221,8 +227,8 @@ pub async fn fetch_logs(
             match latest_file {
                 Some(entry) => read_log_tail(&entry.path())
                     .map(|content| {
-                        // 从最新行开始反向遍历 → 过滤 TRACE/DEBUG → 取 limit 条 → 再反转为从旧到新
-                        // 先 filter 后 take 确保返回 limit 条有效日志（不受旧噪音日志影响）
+                        // 从最新行开始反向解析 → 取 limit 条有效日志 → 再反转为从旧到新。
+                        // 各级别统一保留，展示级别由前端筛选器决定。
                         content
                             .lines()
                             .rev()
@@ -245,14 +251,10 @@ pub async fn fetch_logs(
 /// 解析 tracing JSON 日志行为 LogEntry
 ///
 /// tracing json 格式：`{"timestamp":"...","level":"INFO","fields":{"message":"..."},"target":"..."}`
-/// 过滤 TRACE/DEBUG 级别（这些是噪音日志，不向前端返回）
+/// 保留所有级别；是否展示由前端筛选器决定，保证刷新历史与实时日志一致。
 fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let level = v.get("level").and_then(|x| x.as_str()).unwrap_or("INFO").to_string();
-    // 过滤噪音级别：TRACE/DEBUG 不返回给前端
-    if level == "TRACE" || level == "DEBUG" {
-        return None;
-    }
     let timestamp = v.get("timestamp").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let message = v
         .get("fields")
@@ -606,7 +608,6 @@ fn ext_from_content_type(ct: &str) -> Option<&'static str> {
         "image/jpeg" => Some("jpg"),
         "image/gif" => Some("gif"),
         "image/webp" => Some("webp"),
-        "image/svg+xml" => Some("svg"),
         "image/bmp" => Some("bmp"),
         "image/x-icon" => Some("ico"),
         _ => None,
@@ -632,26 +633,79 @@ fn ext_from_magic(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// 确保文件名带正确的图片扩展名。
-/// 优先沿用原扩展名；无扩展名或不在白名单时，按 Content-Type / magic bytes 补全。
-fn ensure_image_extension(filename: &str, content_type: &str, bytes: &[u8]) -> String {
-    const ALLOWED: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"];
-    let path = std::path::Path::new(filename);
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if ALLOWED.contains(&ext.to_ascii_lowercase().as_str()) {
-            return filename.to_string();
+/// 按真实文件签名验证背景图，返回规范化扩展名。
+fn validate_background_image(bytes: &[u8], content_type: &str) -> Result<&'static str, ApiError> {
+    if bytes.is_empty() {
+        return Err(ApiError::BadRequest("背景图不能为空".into()));
+    }
+    if bytes.len() > MAX_BACKGROUND_IMAGE_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "背景图超过 {}MB 上限",
+            MAX_BACKGROUND_IMAGE_BYTES / (1024 * 1024)
+        )));
+    }
+    // SVG 可在直接导航时以同源文档执行脚本，背景图功能只接受不可执行的位图格式。
+    if content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("image/svg+xml")
+    {
+        return Err(ApiError::BadRequest("不支持 SVG 背景图".into()));
+    }
+    let detected = ext_from_magic(bytes)
+        .ok_or_else(|| ApiError::BadRequest("无法识别图片格式，仅支持 PNG/JPEG/GIF/WebP/BMP/ICO".into()))?;
+    if let Some(declared) = ext_from_content_type(content_type) {
+        if declared != detected {
+            return Err(ApiError::BadRequest(format!(
+                "图片声明类型与实际内容不一致: {declared} != {detected}"
+            )));
         }
     }
-    // 无扩展名或不合规：补全
-    let stem = path
+    Ok(detected)
+}
+
+/// 生成不会与 Windows 设备名、ADS 或已有文件冲突的背景图文件名。
+fn background_filename(original: Option<String>, ext: &str) -> String {
+    let safe = safe_filename(original);
+    let stem = std::path::Path::new(&safe)
         .file_stem()
         .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("bg");
-    let ext = ext_from_content_type(content_type)
-        .or_else(|| ext_from_magic(bytes))
-        .unwrap_or("bin");
-    format!("{stem}.{ext}")
+        .unwrap_or("image");
+    let normalized: String = stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(48)
+        .collect();
+    let stem = if normalized.is_empty() { "image" } else { &normalized };
+    format!("bg-{stem}-{}.{}", uuid::Uuid::new_v4(), ext)
+}
+
+/// 在读取远程响应时执行实际字节数上限，不能只信任可缺失或可伪造的 Content-Length。
+async fn read_response_limited(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ApiError> {
+    if response.content_length().is_some_and(|size| size > limit as u64) {
+        return Err(ApiError::BadRequest(format!(
+            "远程图片超过 {}MB 上限",
+            limit / (1024 * 1024)
+        )));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ApiError::Internal(format!("读取图片字节失败: {e}")))?;
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(ApiError::BadRequest(format!(
+                "远程图片超过 {}MB 上限",
+                limit / (1024 * 1024)
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// GET /api/background/{filename} — 获取背景图
@@ -681,12 +735,14 @@ pub async fn get_background(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
+    if ext == "svg" {
+        return Err(ApiError::BadRequest("不支持 SVG 背景图".into()));
+    }
     let mime = match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        "svg" => "image/svg+xml",
         "bmp" => "image/bmp",
         "ico" => "image/x-icon",
         _ => "application/octet-stream",
@@ -716,8 +772,8 @@ pub async fn upload_background(
                 .bytes()
                 .await
                 .map_err(|e| ApiError::BadRequest(format!("读取文件字节失败: {e}")))?;
-            let safe = safe_filename(original);
-            let filename = ensure_image_extension(&safe, &content_type, &bytes);
+            let ext = validate_background_image(&bytes, &content_type)?;
+            let filename = background_filename(original, ext);
             let path = dir.join(&filename);
             tokio::fs::write(&path, &bytes).await?;
             return Ok(data(serde_json::json!({
@@ -761,10 +817,7 @@ pub async fn fetch_url_background(
             content_type
         )));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| ApiError::Internal(format!("读取图片字节失败: {e}")))?;
+    let bytes = read_response_limited(response, MAX_BACKGROUND_IMAGE_BYTES).await?;
     let dir = background_dir(&state);
     tokio::fs::create_dir_all(&dir).await?;
     // 从 URL 路径提取文件名，失败则用 UUID 生成
@@ -775,8 +828,8 @@ pub async fn fetch_url_background(
         .and_then(|u| u.rsplit('/').next())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let safe = safe_filename(extracted);
-    let filename = ensure_image_extension(&safe, &content_type, &bytes);
+    let ext = validate_background_image(&bytes, &content_type)?;
+    let filename = background_filename(extracted, ext);
     let path = dir.join(&filename);
     tokio::fs::write(&path, &bytes).await?;
     Ok(data(serde_json::json!({
@@ -878,14 +931,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_tracing_json_log_filters_noise_levels() {
-        for level in ["TRACE", "DEBUG"] {
+    fn parse_tracing_json_log_preserves_all_levels() {
+        for level in ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] {
             let line = format!(r#"{{"level":"{level}","fields":{{"message":"x"}}}}"#);
-            assert!(parse_tracing_json_log(&line).is_none(), "{level} 应被过滤");
+            let entry = parse_tracing_json_log(&line).expect("级别应保留");
+            assert_eq!(entry.level, level);
         }
-        // INFO 级别的普通日志应保留
-        let info = r#"{"level":"INFO","fields":{"message":"x"}}"#;
-        assert!(parse_tracing_json_log(info).is_some());
     }
 
     #[test]
@@ -903,7 +954,7 @@ mod tests {
         assert_eq!(ext_from_content_type("image/png"), Some("png"));
         assert_eq!(ext_from_content_type("image/jpeg"), Some("jpg"));
         assert_eq!(ext_from_content_type("image/webp"), Some("webp"));
-        assert_eq!(ext_from_content_type("image/svg+xml"), Some("svg"));
+        assert_eq!(ext_from_content_type("image/svg+xml"), None);
         // 带参数 / 大小写混合 / 未知类型
         assert_eq!(ext_from_content_type("image/PNG; charset=utf-8"), Some("png"));
         assert_eq!(ext_from_content_type("application/octet-stream"), None);
@@ -926,18 +977,21 @@ mod tests {
     }
 
     #[test]
-    fn ensure_image_extension_keeps_allowed_and_fills_missing() {
-        // 已合规扩展名：原样保留
-        assert_eq!(ensure_image_extension("bg.png", "image/png", &[]), "bg.png");
-        assert_eq!(ensure_image_extension("bg.JPG", "image/jpeg", &[]), "bg.JPG");
-        // 无扩展名：按 Content-Type 补全
-        assert_eq!(ensure_image_extension("bg", "image/webp", &[]), "bg.webp");
-        // Content-Type 不可信时回退 magic
-        assert_eq!(ensure_image_extension("photo", "", b"\x89PNG\r\n\x1a\n1"), "photo.png");
-        // 不合规扩展名：改成 Content-Type 对应的
-        assert_eq!(ensure_image_extension("bg.exe", "image/jpeg", &[]), "bg.jpg");
-        // 完全无法识别：回退 bin
-        assert_eq!(ensure_image_extension("weird", "", b"zzz"), "weird.bin");
+    fn validate_background_image_rejects_svg_and_type_mismatch() {
+        let png = b"\x89PNG\r\n\x1a\n1";
+        assert_eq!(validate_background_image(png, "image/png").unwrap(), "png");
+        assert!(validate_background_image(b"<svg></svg>", "image/svg+xml").is_err());
+        assert!(validate_background_image(png, "image/jpeg").is_err());
+        assert!(validate_background_image(b"not-image", "image/png").is_err());
+    }
+
+    #[test]
+    fn background_filename_uses_safe_unique_name() {
+        let filename = background_filename(Some("..\\CON:evil.png".into()), "png");
+        assert!(filename.starts_with("bg-CONevil-"));
+        assert!(filename.ends_with(".png"));
+        assert!(!filename.contains(':'));
+        assert!(!filename.contains(".."));
     }
 
     // ============ 背景图文件名安全 ============

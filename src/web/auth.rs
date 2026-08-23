@@ -18,8 +18,7 @@ use std::path::Path;
 use axum::extract::State;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
-use axum::Json;
+use axum::response::{IntoResponse, Response};
 
 use super::error::data;
 use super::state::AppState;
@@ -66,8 +65,13 @@ pub fn read_token_file(base_path: &Path) -> Option<String> {
 ///
 /// 响应读取受 CORS 保护（仅 localhost Origin 可读），跨域恶意网页
 /// 无法获取 token，因此该端点可以豁免鉴权开放。
-pub async fn token_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
-    data(serde_json::json!({ "token": &*state.auth_token }))
+pub async fn token_handler(State(state): State<AppState>) -> Response {
+    let mut response = data(serde_json::json!({ "token": &*state.auth_token })).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// 无 token 时的 401 响应（沿用统一错误信封格式）
