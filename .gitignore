@@ -46,6 +46,7 @@ python_worker/node_modules/
 /tasks/scheduled/
 /tasks/scripts/
 /tasks/browser/
+/.campus_network_auth/
 /debug/
 /temp/
 /logs/
@@ -70,4 +71,3 @@ frontend-legacy/
 
 # 问题报告
 issues-report.md
-
