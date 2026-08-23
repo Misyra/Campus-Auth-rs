@@ -335,8 +335,8 @@ fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &Engi
 
 /// 单次网络检查：探测 → 更新状态 → 按结论决定是否触发登录
 async fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
-    // 周期性检测入口日志：稳定网络下状态不变也会触发，保证默认 info 级别下可见
-    tracing::info!("周期性网络检测触发");
+    // 周期性检测属于高频内部事件，保持在 debug 级别，避免稳定网络下刷屏。
+    tracing::debug!("周期性网络检测触发");
     // 清除过期的冷却标记；冷却期满后重置失败计数，
     // 恢复完整的"连续失败 3 次"预算（否则第二轮起退化为失败 1 次即再冷却）
     if inner
@@ -377,7 +377,7 @@ async fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
             report.status
         );
     } else {
-        tracing::info!("网络状态未变化: {:?}", report.status);
+        tracing::debug!("网络状态未变化: {:?}", report.status);
     }
     inner.last_network_status = report.status;
     let paused = is_any_pause_active(inner, deps);

@@ -4,7 +4,8 @@
 //! - `Browser` → 经 [`BridgeSupervisor`] 执行浏览器任务，执行前后向 [`StatusManager`] 上报
 //!   Worker 忙/空闲状态，并确保 Python 环境能力就绪（[`EnvironmentManager`]）；
 //! - `Script` / `Shell` → 用 `tokio::process::Command` 执行，超时/取消通过 `tokio::time::timeout`
-//!   与 `kill_on_drop` 实现，标准输出/错误截断到 `OUTPUT_TRUNCATE_LEN`。
+//!   与 `kill_on_drop`/Windows Job Object 实现，标准输出/错误持续排空并截断到
+//!   `OUTPUT_TRUNCATE_LEN`，避免管道阻塞和内存无界增长。
 //!
 //! 脚本/Shell 执行按任务 ID 经各自的 `tokio::sync::Mutex` 串行化：
 //! 同一任务串行执行，不同任务互不阻塞（避免一个长脚本阻塞所有脚本任务）。
@@ -15,8 +16,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use crate::bridge::{BridgeSupervisor, Outcome, StructuredResult};
 use crate::config::ConfigService;
@@ -124,7 +126,11 @@ impl TaskExecutor {
                 "browser_settings": browser_settings,
             });
             self.bridge
-                .execute("execute_browser_task", params)
+                .execute_with_timeout(
+                    "execute_browser_task",
+                    params,
+                    Duration::from_millis(cfg.timeout.max(1)),
+                )
                 .await
                 .map_err(TaskError::Bridge)
         }
@@ -350,27 +356,43 @@ impl TaskExecutor {
         let start = Instant::now();
         let mut cmd = Command::new(&program);
         cmd.args(&args)
+            // 用户任务默认不应继承主进程中的 token、代理密码或调试变量。
+            .env_clear()
             .envs(envs)
             .current_dir(work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd.spawn().map_err(TaskError::IoError)?;
+        let mut child = cmd.spawn().map_err(TaskError::IoError)?;
+        // Windows 下用 KILL_ON_JOB_CLOSE 约束整棵任务进程树。任务超时、调度器
+        // 关闭或 future 被取消时，守卫析构都会由内核回收脚本拉起的后代进程。
+        #[cfg(windows)]
+        let _job = crate::bridge::job::try_assign_job(&child);
         // 记录 PID：超时后需 taskkill /T 递归强杀整个进程树（kill_on_drop 只杀直接子进程）
         let pid = child.id();
+        let stdout = child.stdout.take().ok_or_else(|| {
+            TaskError::IoError(std::io::Error::other("无法捕获子进程 stdout"))
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            TaskError::IoError(std::io::Error::other("无法捕获子进程 stderr"))
+        })?;
 
         let timeout_dur = Duration::from_secs(timeout);
-        let waited = tokio::time::timeout(timeout_dur, child.wait_with_output()).await;
+        let waited = tokio::time::timeout(
+            timeout_dur,
+            wait_with_bounded_output(&mut child, stdout, stderr),
+        )
+        .await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match waited {
-            Ok(Ok(out)) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let success = out.status.success();
-                let exit_code = out.status.code().unwrap_or(-1);
+            Ok(Ok((status, stdout_bytes, stderr_bytes))) => {
+                let stdout = String::from_utf8_lossy(&stdout_bytes);
+                let stderr = String::from_utf8_lossy(&stderr_bytes);
+                let success = status.success();
+                let exit_code = status.code().unwrap_or(-1);
                 let truncated_stdout = truncate(&stdout, OUTPUT_TRUNCATE_LEN);
                 let truncated_stderr = truncate(&stderr, OUTPUT_TRUNCATE_LEN);
                 let output = if truncated_stderr.is_empty() {
@@ -393,22 +415,62 @@ impl TaskExecutor {
             }
             Ok(Err(e)) => Err(TaskError::IoError(e)),
             Err(_) => {
-                // 超时：child 已被 wait_with_output 的 future 持有，配合 kill_on_drop(true) 杀死直接子进程。
-                // Windows 上 cmd.exe 启动的脚本子树可能响应直接 kill 后仍存活为孤儿（7.3），
-                // 用 taskkill /T 递归强杀整个进程树兜底。
+                // Windows 上 cmd.exe 启动的脚本子树可能在直接 kill 后仍存活为孤儿，
+                // 先递归终止进程树，再回收直接子进程句柄。
                 #[cfg(windows)]
                 if let Some(pid) = pid {
-                    use std::os::windows::process::CommandExt;
-                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/T", "/F", "/PID", &pid.to_string()])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .status();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        use std::os::windows::process::CommandExt;
+                        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                        std::process::Command::new("taskkill")
+                            .args(["/T", "/F", "/PID", &pid.to_string()])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .status()
+                    })
+                    .await;
                 }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
                 Err(TaskError::ExecutionTimeout(timeout))
             }
         }
     }
+}
+
+/// 同时等待子进程退出并持续排空 stdout/stderr，只保留有限前缀防止内存无界增长。
+async fn wait_with_bounded_output(
+    child: &mut tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    // UTF-8 单字符最多 4 字节，额外保留少量空间覆盖无效编码与截断提示场景。
+    const CAPTURE_LIMIT: usize = OUTPUT_TRUNCATE_LEN * 4 + 4096;
+    let (status, stdout, stderr) = tokio::join!(
+        child.wait(),
+        read_bounded(stdout, CAPTURE_LIMIT),
+        read_bounded(stderr, CAPTURE_LIMIT)
+    );
+    Ok((status?, stdout?, stderr?))
+}
+
+/// 排空异步读取器并最多保留 `limit` 字节，其余内容丢弃但继续读取以免子进程阻塞。
+async fn read_bounded<R>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut retained = Vec::with_capacity(limit.min(8192));
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        if remaining > 0 {
+            retained.extend_from_slice(&chunk[..read.min(remaining)]);
+        }
+    }
+    Ok(retained)
 }
 
 /// 是否受支持的脚本扩展名
@@ -481,7 +543,7 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{t}...(已截断)")
 }
 
-/// 构建最小环境变量（继承 PATH/HOME/TEMP 等）
+/// 构建最小环境变量（仅保留执行任务所需的 PATH/HOME/TEMP 等）
 fn build_minimal_env() -> Vec<(String, String)> {
     let mut envs: Vec<(String, String)> = Vec::new();
     if let Ok(p) = std::env::var("PATH") {

@@ -1006,9 +1006,9 @@ async fn graceful_shutdown(state: &mut LauncherState) {
 
     // 1. 关闭 TrayManager（先停泵任务，再 drop）
     if let Some(handle) = state.tray_handle.take() {
-        if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(3), handle.stop()).await {
-            warn!("TrayManager 关闭超时: {e}");
-        }
+        handle
+            .stop_with_timeout(std::time::Duration::from_secs(3))
+            .await;
     }
     if let Some(tray) = state.tray_manager.take() {
         drop(tray);
@@ -1016,14 +1016,10 @@ async fn graceful_shutdown(state: &mut LauncherState) {
 
     // 2. 关闭 SchedulerService（并保留 bridge_handle 供第 4 步统一关闭）
     let bridge_handle = if let Some(handles) = state.startup_handles.take() {
-        if let Err(e) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handles.scheduler_handle.stop(),
-        )
-        .await
-        {
-            warn!("SchedulerService 关闭超时: {e}");
-        }
+        handles
+            .scheduler_handle
+            .stop_with_timeout(std::time::Duration::from_secs(5))
+            .await;
         Some(handles.bridge_handle)
     } else {
         None
@@ -1055,12 +1051,9 @@ async fn graceful_shutdown(state: &mut LauncherState) {
     // 通过 ServiceHandle::stop 发送停止信号并 join，避免 supervisor task 与残留子进程泄漏
     // （历史遗留 F4：原实现仅发 shutdown 命令、从不调用 stop，run_supervisor task 常驻）。
     if let Some(handle) = bridge_handle {
-        if tokio::time::timeout(std::time::Duration::from_secs(8), handle.stop())
-            .await
-            .is_err()
-        {
-            warn!("BridgeSupervisor 关闭超时");
-        }
+        handle
+            .stop_with_timeout(std::time::Duration::from_secs(8))
+            .await;
     }
 
     // 5. 关闭 Axum（内部含超时与 abort，历史遗留 #18）

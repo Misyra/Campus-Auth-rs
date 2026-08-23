@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::config::runtime::ConfigReloadSignal;
 use crate::config::ConfigService;
@@ -96,6 +98,10 @@ pub struct SchedulerService {
     /// 正在执行的定时任务 ID 集合：同一任务上一轮未结束前跳过下一轮触发，
     /// 防止执行时间长于 cron 周期的任务重叠运行（如重复操作同一浏览器实例）
     running_ids: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// 所有定时与手动执行任务的生命周期追踪器。
+    task_tracker: TaskTracker,
+    /// 服务关闭时协作取消所有在途任务。
+    task_cancel: CancellationToken,
     /// 内部状态。
     state: std::sync::Mutex<SchedulerState>,
 }
@@ -135,6 +141,8 @@ impl SchedulerService {
             reload_rx: tokio::sync::Mutex::new(Some(reload_rx)),
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SCHEDULED_TASKS)),
             running_ids: std::sync::Mutex::new(std::collections::HashSet::new()),
+            task_tracker: TaskTracker::new(),
+            task_cancel: CancellationToken::new(),
             state: std::sync::Mutex::new(SchedulerState {
                 tasks: Vec::new(),
                 running: true,
@@ -342,15 +350,49 @@ impl SchedulerService {
             tracing::warn!(task_id = %task.id, "任务正在执行中，拒绝手动重复触发");
             return;
         }
-        let sem = svc.concurrency.clone();
+        svc.spawn_tracked_run(task);
+    }
+
+    /// 将一次任务执行纳入服务生命周期，关闭时统一取消并等待清理完成。
+    pub(crate) fn spawn_tracked_run(self: Arc<Self>, task: ScheduledTask) {
         let marked_id = task.id.clone();
-        tokio::spawn(async move {
-            if let Ok(_permit) = sem.acquire_owned().await {
-                crate::scheduler::cron_loop::execute_scheduled_task(task, svc).await;
-            } else {
+        if self.task_cancel.is_cancelled() {
+            self.clear_running(&marked_id);
+            return;
+        }
+
+        let sem = self.concurrency.clone();
+        let cancel = self.task_cancel.clone();
+        let svc = self.clone();
+        self.task_tracker.spawn(async move {
+            let permit = tokio::select! {
+                _ = cancel.cancelled() => {
+                    svc.clear_running(&marked_id);
+                    return;
+                }
+                permit = sem.acquire_owned() => permit,
+            };
+            let Ok(_permit) = permit else {
                 svc.clear_running(&marked_id);
+                return;
+            };
+
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    // 若执行 future 已启动，析构链会触发 RunningGuard 与子进程 Job
+                    // Object 守卫，分别清除运行标记与回收整棵进程树。
+                    svc.clear_running(&marked_id);
+                }
+                _ = crate::scheduler::cron_loop::execute_scheduled_task(task, svc.clone()) => {}
             }
         });
+    }
+
+    /// 停止接收新执行并等待所有在途任务完成取消清理。
+    pub(crate) async fn shutdown_tracked_runs(&self) {
+        self.task_cancel.cancel();
+        self.task_tracker.close();
+        self.task_tracker.wait().await;
     }
 
     /// 返回定时任务历史目录路径（供 API 层读取历史文件）。

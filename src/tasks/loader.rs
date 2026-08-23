@@ -169,6 +169,9 @@ impl TaskManager {
 
     /// 加载单个任务完整 JSON
     pub async fn load_task(&self, task_id: &str) -> Result<TaskKind, TaskError> {
+        if !is_valid_task_id(task_id) {
+            return Err(TaskError::InvalidTaskId(task_id.to_string()));
+        }
         let _guard = self.lock.lock().await;
         let path = self
             .find_task_file(task_id)
@@ -330,6 +333,12 @@ impl TaskManager {
 
     /// 保存 `.order.json`
     pub async fn save_order(&self, order: &OrderData) -> Result<(), TaskError> {
+        if let Some(invalid) = order.order.iter().find(|id| !is_valid_task_id(id)) {
+            return Err(TaskError::InvalidTaskId(invalid.clone()));
+        }
+        if !order.active.is_empty() && !is_valid_task_id(&order.active) {
+            return Err(TaskError::InvalidTaskId(order.active.clone()));
+        }
         let _guard = self.lock.lock().await;
         self.write_order(order)
     }
@@ -351,7 +360,7 @@ impl TaskManager {
 
     /// 判断任务文件是否存在（供调度器校验关联目标任务）
     pub fn has_task(&self, task_id: &str) -> bool {
-        self.find_task_file(task_id).is_some()
+        is_valid_task_id(task_id) && self.find_task_file(task_id).is_some()
     }
 
     /// 校验任务 JSON 格式（公开 API，符合规划 §3.7）
@@ -517,6 +526,9 @@ impl TaskManager {
 
     /// 查找任务文件（browser/ 或 scripts/ 优先）
     fn find_task_file(&self, task_id: &str) -> Option<PathBuf> {
+        if !is_valid_task_id(task_id) {
+            return None;
+        }
         let b = self.browser_dir.join(format!("{task_id}.json"));
         if b.exists() {
             return Some(b);
@@ -839,6 +851,26 @@ mod tests {
         let (_tmp, mgr) = make_task_manager().await;
         let task = TaskKind::Browser(TaskConfig::default());
         let result = mgr.save_task("invalid/id", &task).await;
+        assert!(matches!(result, Err(TaskError::InvalidTaskId(_))));
+    }
+
+    #[tokio::test]
+    async fn test_read_paths_reject_invalid_task_id() {
+        // 读取入口也必须执行与写入入口相同的 ID 校验，防止 Windows 反斜杠穿越。
+        let (_tmp, mgr) = make_task_manager().await;
+        let result = mgr.load_task("..\\config\\settings").await;
+        assert!(matches!(result, Err(TaskError::InvalidTaskId(_))));
+        assert!(!mgr.has_task("../config/settings"));
+    }
+
+    #[tokio::test]
+    async fn test_save_order_rejects_invalid_ids() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let order = OrderData {
+            order: vec!["safe".into(), "..\\outside".into()],
+            active: "safe".into(),
+        };
+        let result = mgr.save_order(&order).await;
         assert!(matches!(result, Err(TaskError::InvalidTaskId(_))));
     }
 

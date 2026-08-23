@@ -222,18 +222,7 @@ pub(crate) fn fire_due_tasks(
                     .map(systemtime_from_local);
                 continue;
             }
-            let svc = service.clone();
-            let sem = service.concurrency.clone();
-            let marked_id = ts.task_id.clone();
-            tokio::spawn(async move {
-                // 获取并发许可，限制同时执行的到期任务数，避免无上限 spawn（历史遗留 F10）
-                if let Ok(_permit) = sem.acquire_owned().await {
-                    execute_scheduled_task(task, svc).await;
-                } else {
-                    // 信号量关闭（理论不可达）：补偿清除标记，避免任务永久无法再触发
-                    svc.clear_running(&marked_id);
-                }
-            });
+            service.clone().spawn_tracked_run(task);
         }
 
         ts.next_fire_at = ts
@@ -275,44 +264,32 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
         Ok(crate::tasks::TaskKind::Browser(cfg)) => {
             // 定时浏览器任务统一走通用语义（打卡/签到等日常自动化），不注入账号密码。
             // 登录认证由断网自动触发（LoginSource::Auto）或手动登录按钮负责，二者正交。
-            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-            match tokio::time::timeout(
-                TokioDuration::from_secs(timeout),
-                service.executor.execute_browser(&cfg),
-            )
-            .await
-            {
-                Ok(Ok(r)) => (r.success, r.output),
-                Ok(Err(e)) => (false, format!("执行错误: {}", e)),
-                Err(_) => (false, format!("执行超时: {}s", timeout)),
+            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT).clamp(1, 3600);
+            let mut cfg = cfg;
+            cfg.timeout = timeout.saturating_mul(1000);
+            match service.executor.execute_browser(&cfg).await {
+                Ok(r) => (r.success, r.output),
+                Err(e) => (false, format!("执行错误: {}", e)),
             }
         }
 
         Ok(crate::tasks::TaskKind::Script(cfg)) => {
-            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-            match tokio::time::timeout(
-                TokioDuration::from_secs(timeout),
-                service.executor.execute_script(&cfg),
-            )
-            .await
-            {
-                Ok(Ok(r)) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
-                Ok(Err(e)) => (false, format!("执行错误: {}", e)),
-                Err(_) => (false, format!("执行超时: {}s", timeout)),
+            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT).clamp(1, 3600);
+            let mut cfg = cfg;
+            cfg.timeout = timeout;
+            match service.executor.execute_script(&cfg).await {
+                Ok(r) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
+                Err(e) => (false, format!("执行错误: {}", e)),
             }
         }
 
         Ok(crate::tasks::TaskKind::Shell(cfg)) => {
-            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);
-            match tokio::time::timeout(
-                TokioDuration::from_secs(timeout),
-                service.executor.execute_shell(&cfg),
-            )
-            .await
-            {
-                Ok(Ok(r)) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
-                Ok(Err(e)) => (false, format!("执行错误: {}", e)),
-                Err(_) => (false, format!("执行超时: {}s", timeout)),
+            let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT).clamp(1, 3600);
+            let mut cfg = cfg;
+            cfg.timeout = timeout;
+            match service.executor.execute_shell(&cfg).await {
+                Ok(r) => (r.success, format!("exit={}, {}", r.exit_code, r.output)),
+                Err(e) => (false, format!("执行错误: {}", e)),
             }
         }
 
@@ -477,6 +454,7 @@ pub(crate) async fn cron_loop(
         }
     }
 
+    service.shutdown_tracked_runs().await;
     service.update_state(|s| s.running = false);
     service.publish_status();
     tracing::info!("调度器主循环已退出");

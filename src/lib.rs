@@ -43,4 +43,21 @@ impl ServiceHandle {
             tracing::warn!("服务任务退出时返回错误: {:?}", e);
         }
     }
+
+    /// 在限定时间内停止服务，超时后中止后台 task 并完成回收。
+    ///
+    /// 与在调用方外层包裹 [`tokio::time::timeout`] 不同，本方法仍持有
+    /// `JoinHandle`，因此超时时不会仅仅丢弃句柄、让后台 task 继续游离运行。
+    pub async fn stop_with_timeout(mut self, timeout: std::time::Duration) {
+        let _ = self.stop_tx.send(true);
+        match tokio::time::timeout(timeout, &mut self.join_handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("服务任务退出时返回错误: {:?}", e),
+            Err(_) => {
+                tracing::warn!("服务任务关闭超时，强制中止后台 task");
+                self.join_handle.abort();
+                let _ = self.join_handle.await;
+            }
+        }
+    }
 }

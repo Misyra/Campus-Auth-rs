@@ -270,6 +270,10 @@ impl LoginOrchestrator {
         };
         let profile = &resolved_profile;
 
+        // 全局唯一起活跃任务：任务页「使用」设置的 `.order.json.active`（TaskManager 层）。
+        // 手动/自动/CLI 登录（task_id 为空）统一走它；定时任务各自携带独立 task_id，不受影响。
+        let global_active_task = self.tasks.get_active_task().await;
+
         // 1. 配置完整性校验
         let mut missing = Vec::new();
         if profile.username.is_empty() {
@@ -281,10 +285,10 @@ impl LoginOrchestrator {
         if profile.auth_url.is_empty() {
             missing.push("auth_url");
         }
-        if source != LoginSource::Browser && profile.active_task.is_empty() {
+        if !matches!(source, LoginSource::Browser) && task_id.is_none() && global_active_task.is_empty() {
             missing.push("active_task");
         }
-        if source == LoginSource::Browser && task_id.is_none() && profile.active_task.is_empty() {
+        if source == LoginSource::Browser && task_id.is_none() && global_active_task.is_empty() {
             missing.push("task");
         }
         if !missing.is_empty() {
@@ -367,10 +371,10 @@ impl LoginOrchestrator {
         };
 
         let effective_task_id = task_id.or_else(|| {
-            if profile.active_task.is_empty() {
+            if global_active_task.is_empty() {
                 None
             } else {
-                Some(profile.active_task.clone())
+                Some(global_active_task.clone())
             }
         });
 
