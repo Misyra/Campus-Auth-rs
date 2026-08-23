@@ -43,22 +43,43 @@ struct WsIncoming {
     data: Option<serde_json::Value>,
 }
 
+/// 截断前端回流日志中的可变文本，避免异常对象或错误堆栈撑大日志文件。
+fn truncate_log_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let result: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{result}…")
+    } else {
+        result
+    }
+}
+
 /// 记录前端回流日志：用 `target="frontend"` 写入 tracing，进入 app.log 与 WebSocket 广播
 fn record_frontend_log(data: &serde_json::Value) {
     let level = data.get("level").and_then(|v| v.as_str()).unwrap_or("INFO");
-    let scope = data.get("scope").and_then(|v| v.as_str()).unwrap_or("");
-    let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let scope = truncate_log_text(
+        data.get("scope").and_then(|v| v.as_str()).unwrap_or(""),
+        128,
+    );
+    let message = truncate_log_text(
+        data.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+        4096,
+    );
     let meta = data.get("meta").cloned().unwrap_or(serde_json::Value::Null);
     // 附带 meta（非 null 时）与 scope 字段，保持与后端日志结构一致
     let meta_str = if meta.is_null() {
         String::new()
     } else {
-        format!(" meta={meta}")
+        format!(" meta={}", truncate_log_text(&meta.to_string(), 2048))
     };
     match level.to_ascii_uppercase().as_str() {
         "ERROR" => tracing::error!(target: "frontend", scope = %scope, "{message}{meta_str}"),
-        "WARNING" | "WARN" => tracing::warn!(target: "frontend", scope = %scope, "{message}{meta_str}"),
-        "DEBUG" | "TRACE" => tracing::debug!(target: "frontend", scope = %scope, "{message}{meta_str}"),
+        "WARNING" | "WARN" => {
+            tracing::warn!(target: "frontend", scope = %scope, "{message}{meta_str}")
+        }
+        "DEBUG" | "TRACE" => {
+            tracing::debug!(target: "frontend", scope = %scope, "{message}{meta_str}")
+        }
         _ => tracing::info!(target: "frontend", scope = %scope, "{message}{meta_str}"),
     }
 }
