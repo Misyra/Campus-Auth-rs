@@ -177,20 +177,21 @@ async function testNetwork(): Promise<void> {
 async function quitApp(): Promise<void> {
   const ok = await confirm({ title: "退出应用", message: "确定要退出应用吗？", danger: true });
   if (!ok) return;
-  // F9：先清理轮询定时器，避免退出流程中页面仍持续向后端请求
-  statusPollTimerIds.forEach((id) => clearInterval(id));
-  statusPollTimerIds.length = 0;
-  autostartPollTimerIds.forEach((id) => clearInterval(id));
-  autostartPollTimerIds.length = 0;
   try {
     busy.monitor = true;
-    useWebSocket().destroy();
     await systemApi.shutdown();
+    // 只有后端确认收到关闭请求后才停止前端活动；请求失败时保留可恢复的现有会话。
+    statusPollTimerIds.forEach((id) => clearInterval(id));
+    statusPollTimerIds.length = 0;
+    autostartPollTimerIds.forEach((id) => clearInterval(id));
+    autostartPollTimerIds.length = 0;
+    useWebSocket().destroy();
+    showExitOverlay();
   } catch (error) {
     frontendLogger.error("app", "退出应用失败", error);
+    toastOnly(false, extractApiError(error, "退出应用失败"));
   } finally {
     busy.monitor = false;
-    showExitOverlay();
   }
 }
 
@@ -287,7 +288,6 @@ async function init(): Promise<void> {
   // F9：保存轮询定时器 id，退出时 clearInterval，避免 quitApp 后页面仍持续轮询
   const statusPollTimer = setInterval(() => {
     const s = useStatus();
-    if (s.fetchStatusFailCount.value > 0) return;
     void s.fetchStatus().catch((err) => frontendLogger.warn("status_poll", err));
   }, TIMING.STATUS_POLL_INTERVAL);
   const autostartPollTimer = setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);

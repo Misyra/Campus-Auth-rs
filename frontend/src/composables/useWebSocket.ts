@@ -26,6 +26,10 @@ let pingTimer: ReturnType<typeof setInterval> | undefined;
 let retryCount = 0; // 仅影响退避计算，不再作为硬上限
 let wasConnected = false;
 let visibilityHandler: (() => void) | null = null;
+// 防重入：并发的 connectWebSocket 调用（onclose 重试 + 可见性恢复 + 手动恢复）
+// 会各自 new WebSocket，瞬间产生大量「连接已关闭/连接错误」警告甚至连接风暴。
+// 用 connecting 标志保证同一时刻只有一条连接尝试在途，避免叠加。
+let connecting = false;
 // 重连回调：断线期间 profiles/config/tasks/scheduled 等非实时推送数据会停留在旧值，
 // 由上层（useUi）注册全量刷新回调，在重连成功时补齐（历史遗留 F1）。
 let reconnectHandlers: Array<() => void | Promise<void>> = [];
@@ -73,8 +77,19 @@ function onWsReconnect(cb: () => void | Promise<void>): () => void {
 
 async function connectWebSocket(): Promise<void> {
   if (destroyed) return;
+  // 防重入：已有连接尝试在途或已存在活跃连接时，不再叠加新建，避免连接风暴
+  if (connecting) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  // 必须在首次 await 前占有连接权，否则多个调用会同时越过上方检查。
+  connecting = true;
   // WS 无法携带自定义头，后端通过 ?token= 查询参数鉴权（缺失将被 403 拒绝升级）
   const token = await ensureAuthToken();
+  if (destroyed) {
+    connecting = false;
+    return;
+  }
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${protocol}//${window.location.host}/ws/logs${token ? `?token=${encodeURIComponent(token)}` : ""}`;
   if (retryTimer) clearTimeout(retryTimer);
@@ -91,10 +106,26 @@ async function connectWebSocket(): Promise<void> {
     }
   }
 
-  ws = new WebSocket(wsUrl);
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (e) {
+    // 极少数情况（wsUrl 非法等）会同步抛错；重置标志并降级为常规重连，避免永久卡死
+    connecting = false;
+    frontendLogger.error("websocket", "创建 WebSocket 失败", e);
+    if (!destroyed && !wsKicked.value) {
+      wsReconnecting.value = true;
+      const delay = Math.min(TIMING.WS_BACKOFF_BASE * Math.pow(2, retryCount), WS_MAX_BACKOFF);
+      retryCount++;
+      retryTimer = setTimeout(() => {
+        if (!destroyed) connectWebSocket();
+      }, delay);
+    }
+    return;
+  }
   frontendLogger.info("websocket", `正在连接 ${wsUrl}`);
 
   ws.onopen = () => {
+    connecting = false;
     retryCount = 0;
     wsRetryCount.value = 0;
     wsReconnecting.value = false;
@@ -187,27 +218,33 @@ async function connectWebSocket(): Promise<void> {
   };
 
   ws.onclose = () => {
+    connecting = false;
     frontendLogger.setWebSocket(null);
-    frontendLogger.warn("websocket", "连接已关闭");
     if (pingTimer) {
       clearInterval(pingTimer);
       pingTimer = undefined;
     }
     if (destroyed) return;
-    // 被另一页面顶替（ws_kicked）：停止自动重连，避免多标签页互相踢下线死循环
-    if (wsKicked.value) return;
+    // 被另一页面顶替（ws_kicked）：停止自动重连，避免多标签页互相踢下线死循环。
+    // 此处不再作为错误告警刷屏，仅以 info 记录（被顶替的横幅由 App.vue 展示）。
+    if (wsKicked.value) {
+      frontendLogger.info("websocket", "连接被另一页面顶替，已停止重连");
+      return;
+    }
     // 无限重连：指数退避 1s→2s→4s→...→上限60s，不再因重试次数耗尽而永久断线
     wsReconnecting.value = true;
     wsRetryCount.value = retryCount;
     const delay = Math.min(TIMING.WS_BACKOFF_BASE * Math.pow(2, retryCount), WS_MAX_BACKOFF);
     retryCount++;
+    frontendLogger.warn("websocket", `连接已断开，${delay / 1000}s 后重连…`);
     retryTimer = setTimeout(() => {
       if (!destroyed) connectWebSocket();
     }, delay);
   };
 
   ws.onerror = () => {
-    frontendLogger.error("websocket", "连接错误");
+    // 建立连接失败时会先触发 onerror 紧随 onclose：此处不单独告警，
+    // 避免与 onclose 的「连接已断开，重连…」重复刷屏（只保留 onclose 一条）。
   };
 
   if (pingTimer) clearInterval(pingTimer);
@@ -235,6 +272,7 @@ function setupVisibilityChange(): void {
 
 function destroy(): void {
   destroyed = true;
+  connecting = false;
   reconnectHandlers = [];
   if (retryTimer) clearTimeout(retryTimer);
   if (pingTimer) clearInterval(pingTimer);

@@ -77,34 +77,50 @@ export interface RequestOptions {
  * - HTTP 非 2xx 一律按错误处理；无 success 字段判断。
  */
 async function request<T>(method: string, path: string, opts: RequestOptions = {}, retried = false): Promise<T> {
-  const controller = opts.timeout ? new AbortController() : null;
+  const controller = opts.timeout || opts.signal ? new AbortController() : null;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  if (controller) {
-    timeoutId = setTimeout(() => controller.abort(), opts.timeout);
+  let timedOut = false;
+  const abortFromCaller = () => controller?.abort(opts.signal?.reason);
+  if (controller && opts.signal) {
+    if (opts.signal.aborted) abortFromCaller();
+    else opts.signal.addEventListener("abort", abortFromCaller, { once: true });
   }
-  const signal = controller ? controller.signal : opts.signal;
+  if (controller) {
+    if (opts.timeout) {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, opts.timeout);
+    }
+  }
+  const signal = controller?.signal;
   const token = await ensureAuthToken();
+
+  const headers: Record<string, string> = {
+    ...(token ? { "X-Auth-Token": token } : {}),
+    ...(opts.headers || {}),
+  };
+  // FormData 的 boundary 必须由浏览器生成；手工设置 Content-Type 会导致后端无法解析 multipart。
+  if (opts.rawBody !== undefined && !(opts.rawBody instanceof FormData)) {
+    headers["Content-Type"] ??= "application/json";
+  }
 
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {
       method,
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { "X-Auth-Token": token } : {}),
-        ...(opts.headers || {}),
-      },
+      headers,
       body: opts.rawBody !== undefined ? opts.rawBody : undefined,
       signal,
     });
   } catch (e) {
-    if (timeoutId) clearTimeout(timeoutId);
     if ((e as Error).name === "AbortError") {
-      throw new ApiError("请求超时", undefined, undefined);
+      throw new ApiError(timedOut ? "请求超时" : "请求已取消", undefined, e);
     }
     throw new ApiError("网络连接失败，请检查后端是否已启动", undefined, e);
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
+    opts.signal?.removeEventListener("abort", abortFromCaller);
   }
 
   // 401：token 可能因后端重启而轮换，重取一次后重试（仅一次，避免循环）

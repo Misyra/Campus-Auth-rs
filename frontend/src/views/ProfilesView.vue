@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
-import { useTasks } from "@/composables/useTasks";
 import { useStatus } from "@/composables/useStatus";
 import { CARRIER_OPTIONS } from "@/utils/constants";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const p = useProfiles();
-const { tasks: browserTasks } = useTasks();
 const { busy } = useStatus();
 
 onMounted(() => { void p.fetchProfiles(); });
@@ -50,12 +48,6 @@ async function saveAndClose() {
 
 // carrierOptions → SelectOption[]
 const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
-
-// taskOptions → from browser tasks
-const taskOptions = computed<SelectOption[]>(() => [
-  { value: "default", label: "默认任务" },
-  ...browserTasks.value.map((t) => ({ value: t.id, label: t.name })),
-]);
 </script>
 
 <template>
@@ -165,10 +157,6 @@ const taskOptions = computed<SelectOption[]>(() => [
             <div class="form-group">
               <label for="prof-auth-url">认证地址</label>
               <input id="prof-auth-url" v-model.trim="p.editingProfile.value.auth_url" type="text" placeholder="http://" />
-            </div>
-            <div class="form-group">
-              <label for="prof-task">执行任务</label>
-              <CustomSelect v-model="p.editingProfile.value.active_task" :options="taskOptions" />
             </div>
           </div>
         </div>

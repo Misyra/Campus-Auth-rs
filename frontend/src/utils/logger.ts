@@ -40,32 +40,39 @@ class FrontendLogger {
 
   private format(level: LogLevel, scope: string, message: string, meta?: unknown): unknown[] {
     const stamp = new Date().toISOString();
-    return [stamp, level, "FRONTEND", scope, message, meta || ""];
+    return [stamp, level, "FRONTEND", scope, message, meta ?? ""];
   }
 
   private send(level: string, scope: string, message: string, meta?: unknown): void {
-    const payload: FrontendLogMessage = { level, scope, message, meta: meta || "" };
+    const payload: FrontendLogMessage = { level, scope, message, meta: meta ?? "" };
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         this.ws.send(JSON.stringify({ type: "frontend_log", data: payload }));
+        return;
       } catch {
-        /* ignore */
+        // WebSocket 可能在 readyState 检查后瞬间关闭，不能静默丢弃这条日志。
       }
-    } else {
-      this.buffer.push(payload);
-      if (this.buffer.length > LIMITS.WS_LOG_BUFFER_MAX) this.buffer.shift();
     }
+    this.buffer.push(payload);
+    if (this.buffer.length > LIMITS.WS_LOG_BUFFER_MAX) this.buffer.shift();
   }
 
   private flushBuffer(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.buffer.length === 0) return;
+    const socket = this.ws;
     const batch = this.buffer.splice(0, this.buffer.length);
+    let sent = 0;
     try {
       for (const msg of batch) {
-        this.ws.send(JSON.stringify({ type: "frontend_log", data: msg }));
+        socket.send(JSON.stringify({ type: "frontend_log", data: msg }));
+        sent += 1;
       }
     } catch {
-      this.buffer.unshift(...batch.slice(0)); // 失败则重新入队
+      // 已成功发送的前缀不能重复入队，只恢复尚未发送的尾部。
+      this.buffer.unshift(...batch.slice(sent));
+      if (this.buffer.length > LIMITS.WS_LOG_BUFFER_MAX) {
+        this.buffer.splice(0, this.buffer.length - LIMITS.WS_LOG_BUFFER_MAX);
+      }
     }
   }
 

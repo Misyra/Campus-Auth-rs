@@ -68,8 +68,9 @@ const logLevelOptions: SelectOption[] = [
   { value: "WARN", label: "WARN" },
   { value: "INFO", label: "INFO" },
   { value: "DEBUG", label: "DEBUG" },
+  { value: "TRACE", label: "TRACE" },
 ];
-const logSourceOptions: SelectOption[] = [
+const baseLogSourceOptions: SelectOption[] = [
   { value: "", label: "全部来源" },
   { value: "app", label: "应用" },
   { value: "launcher", label: "启动器" },
@@ -84,6 +85,10 @@ const logSourceOptions: SelectOption[] = [
   { value: "updater", label: "更新" },
   { value: "network", label: "网络" },
   { value: "tasks", label: "任务" },
+  { value: "environment", label: "环境" },
+  { value: "python_worker", label: "Python Worker" },
+  { value: "frontend", label: "前端" },
+  { value: "notification", label: "通知" },
 ];
 
 function getSourceLabel(src: string): string {
@@ -101,9 +106,26 @@ function getSourceLabel(src: string): string {
     updater: "更新",
     network: "网络",
     tasks: "任务",
+    environment: "环境",
+    python_worker: "Python Worker",
+    frontend: "前端",
+    notification: "通知",
   };
   return map[src] || src;
 }
+
+// 后端 target 和前端 scope 会随模块扩展，动态补充当前日志中尚未预置的来源，
+// 避免日志已显示但下拉框无法筛选的问题。
+const logSourceOptions = computed<SelectOption[]>(() => {
+  const options = new Map(baseLogSourceOptions.map((option) => [option.value, option.label]));
+  for (const entry of logs.logs) {
+    if (entry.source && !options.has(entry.source)) {
+      options.set(entry.source, getSourceLabel(entry.source));
+    }
+  }
+  return Array.from(options, ([value, label]) => ({ value, label }));
+});
+
 function stripScreenshotHint(msg: string): string {
   return (msg || "").replace(/截图已保存[：:]\s*[^\s]*/g, "").trim();
 }
