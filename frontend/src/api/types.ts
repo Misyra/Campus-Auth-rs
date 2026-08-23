@@ -266,6 +266,8 @@ export interface BrowserListResponse {
 /** OCR 状态 */
 export interface OcrStatus {
   installed: boolean;
+  /** 项目是否在 pyproject.toml 中声明了 ddddocr 依赖（即是否支持 OCR） */
+  declared?: boolean;
   size_mb: number;
 }
 

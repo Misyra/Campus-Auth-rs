@@ -99,8 +99,10 @@ export const ocrApi = {
   install: () => http.post<MutationResult>("/api/ocr/install"),
   uninstall: () => http.post<MutationResult>("/api/ocr/uninstall"),
   // 识别 base64 图片中的文本，返回 { text }
+  // 首次构造 ddddocr 需加载 onnx 模型（可达 OCR_TIMEOUT_SECS=90s），
+  // 给客户端一个略大于后端的超时，确保等待过长时前端能报错而非无限转圈
   recognize: (payload: { image_base64: string; old?: boolean }) =>
-    http.post<{ text: string }>("/api/ocr/recognize", payload),
+    http.post<{ text: string }>("/api/ocr/recognize", payload, { timeout: 120000 }),
 };
 
 /** 登录历史 */

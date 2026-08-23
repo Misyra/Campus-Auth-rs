@@ -73,6 +73,8 @@ pub trait BridgeApi: Send + Sync {
     async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError>;
     /// 取消已注册 cancel_id 的在途命令。
     fn cancel(&self, cancel_id: &str);
+    /// 若 Worker 正在运行，则回收它以便下次请求按最新环境重新启动。
+    async fn recycle_if_running(&self);
     /// 优雅关闭 Worker 与 Supervisor。
     async fn shutdown(&self);
 }
@@ -85,6 +87,12 @@ impl BridgeApi for BridgeSupervisor {
 
     fn cancel(&self, cancel_id: &str) {
         BridgeSupervisor::cancel(self, cancel_id);
+    }
+
+    async fn recycle_if_running(&self) {
+        if self.has_live_worker() {
+            self.force_recycle().await;
+        }
     }
 
     async fn shutdown(&self) {
@@ -594,8 +602,11 @@ async fn execute_inner(
     BridgeError,
 >
 {
+    // OCR 只需要 Python Worker 与 ddddocr，不应被 Chromium 可执行文件状态阻断。
+    let is_ocr = method == "ocr_recognize";
+
     // 1. 懒加载 Worker（环境就绪则 spawn）
-    ensure_worker(this).await?;
+    ensure_worker(this, is_ocr).await?;
 
     // 2. 会话类型（debug_* 为调试会话，其余为登录/浏览器任务）
     let session = if method.starts_with("debug_") {
@@ -605,7 +616,6 @@ async fn execute_inner(
     };
     // OCR 轻量请求：与任意会话并发（见 check_session_compat），不占用单会话槽位，
     // 也不触碰 current_session / worker_state / 空闲计时器（P1-6）。
-    let is_ocr = method == "ocr_recognize";
 
     // 3. 生成 cancel_id + CancellationToken
     // 优先使用调用方传入的 cancel_id（如 LoginSession / OCR 通过 params["cancel_id"] 传入），
@@ -803,7 +813,10 @@ fn start_idle_timer(this: &BridgeSupervisor, inner: &mut BridgeInner) {
 /// spawn 成功后发送 `browser_health_check` 并等待就绪，超时则强杀子进程返回
 /// [`BridgeError::WorkerStartupTimeout`]。启动时与崩溃恢复时均清理孤儿浏览器进程。
 /// 连续失败次数超阈值（B3）后直接返回 [`BridgeError::WorkerSpawnBlocked`]。
-async fn ensure_worker(this: &Arc<BridgeSupervisor>) -> Result<(), BridgeError> {
+async fn ensure_worker(
+    this: &Arc<BridgeSupervisor>,
+    worker_only_health_check: bool,
+) -> Result<(), BridgeError> {
     // 快速路径：已就绪
     if is_worker_ready(this) {
         return Ok(());
@@ -865,8 +878,8 @@ async fn ensure_worker(this: &Arc<BridgeSupervisor>) -> Result<(), BridgeError> 
     if let Some(m) = &this.metrics {
         m.inc_worker_spawn();
     }
-    // 发送 browser_health_check 验证就绪，超时则强杀并标记错误
-    match send_health_check(this).await {
+    // 纯 OCR 只验证 Worker IPC；浏览器任务继续验证 Playwright/Chromium。
+    match send_health_check(this, worker_only_health_check).await {
         Ok(true) => {
             let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.worker_state = WorkerState::Idle;
@@ -900,7 +913,10 @@ fn is_worker_ready(this: &BridgeSupervisor) -> bool {
 ///
 /// 复用 `pending_requests` 的 oneshot 通道路由 Worker 响应；本函数不阻塞 supervisor
 /// 主循环（由调用方在独立 task 中 await），响应经主循环 `handle_ipc_message` 投递。
-async fn send_health_check(this: &BridgeSupervisor) -> Result<bool, BridgeError> {
+async fn send_health_check(
+    this: &BridgeSupervisor,
+    worker_only: bool,
+) -> Result<bool, BridgeError> {
     let request_id = {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         let id = inner.next_request_id;
@@ -918,14 +934,18 @@ async fn send_health_check(this: &BridgeSupervisor) -> Result<bool, BridgeError>
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         match &inner.process {
             Some(proc) => {
-                let cfg = this.config.runtime().load();
-                let mut params = Value::Null;
-                if let Ok(bs) = serde_json::to_value(&cfg.browser) {
-                    params = json!({ "browser_settings": bs });
-                }
+                let (method, params) = if worker_only {
+                    ("worker_health_check", Value::Null)
+                } else {
+                    let cfg = this.config.runtime().load();
+                    let params = serde_json::to_value(&cfg.browser)
+                        .map(|bs| json!({ "browser_settings": bs }))
+                        .unwrap_or(Value::Null);
+                    ("browser_health_check", params)
+                };
                 if let Err(e) = proc.stdin_tx.try_send(IpcMessage::Request(IpcRequest {
                     id: request_id,
-                    method: "browser_health_check".to_string(),
+                    method: method.to_string(),
                     params,
                 })) {
                     inner.pending_requests.remove(&request_id);
@@ -1316,7 +1336,7 @@ mod tests {
         }
         // 第 4 次调用快速返回 WorkerSpawnBlocked，而非再等 30s 健康检查超时
         let start = Instant::now();
-        let result = ensure_worker(&bridge).await;
+        let result = ensure_worker(&bridge, false).await;
         assert!(
             matches!(result, Err(BridgeError::WorkerSpawnBlocked)),
             "熔断后应快速失败，得到 {result:?}"

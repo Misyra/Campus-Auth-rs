@@ -37,7 +37,9 @@ from step_handlers import (
     _check_cancel,
     _classify_navigation_error,
     _get_ocr,
+    _preprocess_ocr_image,
     run_step_async,
+    OCR_TIMEOUT_SECS,
 )
 from variable_resolver import resolve
 
@@ -720,7 +722,8 @@ class WorkerCore:
             except Exception:
                 current_url = ""
             if current_url and current_url.rstrip("/") == target.rstrip("/"):
-                logger.info(f"重试复用页面：reload url={target}")
+                # 目标地址可能包含账号、令牌或其他查询参数，日志只记录动作本身。
+                logger.info("重试复用页面：reload")
                 try:
                     await self._page.reload(
                         wait_until="domcontentloaded", timeout=nav_timeout
@@ -812,6 +815,10 @@ class WorkerCore:
             logger.warning(f"健康检查异常: {exc}")
             healthy = False
         return {"healthy": healthy}
+
+    async def handle_worker_health_check(self, params: dict, core: "WorkerCore") -> dict:
+        """轻量健康检查：只确认 Worker IPC/事件循环可用，不探测 Chromium。"""
+        return {"healthy": True}
 
     async def handle_execute_login_attempt(self, params: dict, core: "WorkerCore") -> dict:
         """执行完整登录流程。"""
@@ -1102,15 +1109,45 @@ class WorkerCore:
         if not image_base64:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "ocr_recognize 缺少 image_base64")
         try:
-            ocr = _get_ocr(bool(params.get("old", False)))
+            # 模型构造（DdddOcr()）同步加载 onnx 模型，可能首次下载/加载较慢。
+            # 丢到线程池避免阻塞事件循环，并套上 OCR_TIMEOUT_SECS 超时兜底防止卡死。
+            ocr = await asyncio.wait_for(
+                asyncio.to_thread(_get_ocr, bool(params.get("old", False))),
+                timeout=OCR_TIMEOUT_SECS,
+            )
+        except asyncio.TimeoutError:
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR,
+                f"OCR 模型加载超时（>{OCR_TIMEOUT_SECS}s）。模型为包内自带，仅本地加载，"
+                "若持续超时请检查 OCR 依赖是否完整（uv add ddddocr）",
+            ) from None
         except Exception as exc:  # noqa: BLE001
-            raise WorkerError(Outcome.UNKNOWN_ERROR, f"ddddocr 未安装: {exc}") from exc
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR,
+                f"ddddocr 未安装: {exc}。请在设置页点「安装 OCR 依赖」（uv add ddddocr）后重试",
+            ) from exc
         try:
             img_bytes = base64.b64decode(image_base64)
         except Exception as exc:  # noqa: BLE001
             raise WorkerError(Outcome.UNKNOWN_ERROR, f"图片解码失败: {exc}") from exc
-        # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环
-        text = await asyncio.to_thread(ocr.classification, img_bytes)
+        # 截图/上传图片可能是 RGBA，先规整为 ddddocr 友好的 RGB，提升识别准确率
+        img_bytes = _preprocess_ocr_image(img_bytes)
+        # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环，并加超时兜底
+        try:
+            text = await asyncio.wait_for(
+                asyncio.to_thread(ocr.classification, img_bytes),
+                timeout=OCR_TIMEOUT_SECS,
+            )
+        except asyncio.TimeoutError:
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR, f"OCR 识别超时（>{OCR_TIMEOUT_SECS}s）"
+            ) from None
+        except Exception as exc:  # noqa: BLE001 — ddddocr/PIL 图片不可识别等，转为一句话
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR,
+                f"无法识别该图片: {exc}。请使用清晰的标准图片（png/jpg），"
+                "避免 webp/avif/截图边缘裁剪等 PIL 不支持的格式",
+            ) from exc
         return {"text": text}
 
     async def handle_shutdown(self, params: dict, core: "WorkerCore") -> dict:
@@ -1127,6 +1164,7 @@ worker_core = WorkerCore()
 
 # 命令注册表：method 名 → 处理器
 COMMANDS: dict[str, Callable] = {
+    "worker_health_check": worker_core.handle_worker_health_check,
     "browser_health_check": worker_core.handle_browser_health_check,
     "execute_login_attempt": worker_core.handle_execute_login_attempt,
     "execute_browser_task": worker_core.handle_execute_browser_task,

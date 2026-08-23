@@ -77,12 +77,22 @@ impl Drop for WorkerTree {
 /// 定位本地 Python venv 目录（其下须含 `Scripts/python.exe` 或 `bin/python3`）。
 fn locate_venv() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    [
+    let candidates = [
         manifest.join("python_worker/.venv"),
         manifest.join("environment/.venv"),
-    ]
-    .into_iter()
-    .find(|v| v.join("Scripts/python.exe").exists() || v.join("bin/python3").exists())
+    ];
+    candidates.into_iter().find(|v| {
+        let python = if cfg!(windows) {
+            v.join("Scripts/python.exe")
+        } else {
+            v.join("bin/python3")
+        };
+        python.exists()
+            && std::process::Command::new(python)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+    })
 }
 
 /// 创建目录链接（Windows 用 junction，Unix 用 symlink），均无需管理员权限。

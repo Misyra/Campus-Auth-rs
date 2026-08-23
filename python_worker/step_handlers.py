@@ -20,6 +20,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field, replace
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -128,23 +129,68 @@ def _resolve(step: StepConfig, context: StepContext) -> StepConfig:
     return resolved
 
 
-# OCR 实例缓存：ddddocr 模型加载开销大，按 ``old`` 参数缓存复用实例，
-# 避免每次调用重新加载模型（历史遗留 P2）。
-_ocr_cache: dict[bool, Any] = {}
+# OCR 实例缓存：字符范围会修改模型实例状态，必须纳入 key，避免上一次任务的
+# ``set_ranges`` 污染后续未限制字符集的识别。
+_ocr_cache: dict[tuple[bool, str | int | None], Any] = {}
+
+# OCR 单次识别超时（秒）：覆盖模型加载 + CPU 推理，防止卡死导致任务无限阻塞
+OCR_TIMEOUT_SECS = 90
 
 
-def _get_ocr(old: bool):
+def _get_ocr(old: bool, char_range: str | int | None = None):
     """获取（并缓存）ddddocr 实例。
 
     模型不存在时抛出 ImportError，由调用方转换为 WorkerError。
     """
     import ddddocr  # type: ignore
 
-    instance = _ocr_cache.get(old)
+    # Rust 侧历史配置用 JSON Value 承载；若脏数据传入数组/对象，退回默认范围，
+    # 避免不可哈希值让缓存查找本身崩溃。
+    normalized_range = char_range if isinstance(char_range, (str, int)) else None
+    key = (old, normalized_range)
+    instance = _ocr_cache.get(key)
     if instance is None:
         instance = ddddocr.DdddOcr(old=old, show_ad=False)
-        _ocr_cache[old] = instance
+        if normalized_range is not None:
+            try:
+                instance.set_ranges(normalized_range)
+            except Exception as exc:  # noqa: BLE001 — 非法范围退回模型默认字符集
+                logger.warning("[ocr] set_ranges(%s) 失败，使用默认范围: %s", normalized_range, exc)
+        _ocr_cache[key] = instance
     return instance
+
+
+def _preprocess_ocr_image(img_bytes: bytes) -> bytes:
+    """将验证码图片规整为 ddddocr 友好的 RGB 字节流。
+
+    站点验证码多为彩色/带噪点，而 Playwright 截图是 **RGBA**（含透明通道）。
+    ddddocr 的 ``classification`` 对 alpha 通道敏感，直接将 RGBA 喂入常导致
+    误识别（例如透明区域被当作黑色边角字符）。这里统一：
+
+    - RGBA / LA / 带透明度的调色板图：透明白底合成转 RGB；
+    - 其余（P/CMYK/YCbCr 等）：直接转 RGB；
+    - 解析失败（webp/avif 等 PIL 不支持的格式）则退回原图，交由 ddddocr 自行处理。
+
+    不做强制缩放：ddddocr 内部已做归一化，保留原分辨率反而保真。
+    """
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return img_bytes
+    try:
+        img = Image.open(BytesIO(img_bytes))
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            alpha = img.convert("RGBA").split()[-1]
+            background.paste(img.convert("RGBA"), mask=alpha)
+            img = background
+        else:
+            img = img.convert("RGB")
+        out = BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:  # noqa: BLE001 — 预处理失败不致命，回退原图
+        return img_bytes
 
 
 def _locator(context: StepContext, selector: str):
@@ -507,13 +553,23 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     _check_cancel(context)
     if not step.selector:
         raise WorkerError(Outcome.SELECTOR_FAILED, "ocr 步骤缺少 selector")
+    # 模型构造（DdddOcr()）与 classification（CPU 推理）都是同步阻塞，统一丢到线程池；
+    # 二者都套上 OCR_TIMEOUT_SECS 超时兜底，防止首次加载/下载模型卡死导致步骤无限阻塞。
     try:
-        ocr = _get_ocr(step.old)
+        ocr = await asyncio.wait_for(
+            asyncio.to_thread(_get_ocr, step.old, step.char_range),
+            timeout=OCR_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        raise WorkerError(
+            Outcome.UNKNOWN_ERROR,
+            f"OCR 模型加载超时（>{OCR_TIMEOUT_SECS}s）。模型为包内自带，仅本地加载，"
+            "若持续超时请检查 OCR 依赖是否完整（uv add ddddocr）",
+        ) from None
     except Exception as exc:  # noqa: BLE001
         raise WorkerError(
             Outcome.UNKNOWN_ERROR,
-            f"ddddocr 未安装: {exc}。请执行 `uv sync --project python_worker --extra ocr` "
-            "或 `uv pip install ddddocr` 安装 OCR 依赖后重试",
+            f"ddddocr 未安装: {exc}。请在设置页点「安装 OCR 依赖」（uv add ddddocr）后重试",
         ) from exc
 
     locator = _locator(context, step.selector)
@@ -522,14 +578,18 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
         locator.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
     )
     img_bytes = await locator.screenshot()
-    # char_range 限制识别字符集（如 0-7 表示仅识别数字），非 None 时设置
-    if step.char_range is not None:
-        try:
-            ocr.set_ranges(step.char_range)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ocr] set_ranges(%s) 失败，忽略: %s", step.char_range, exc)
-    # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环
-    text = await asyncio.to_thread(ocr.classification, img_bytes)
+    # 截图通常是 RGBA，先规整为 ddddocr 友好的 RGB，提升识别准确率（见 _preprocess_ocr_image）
+    img_bytes = _preprocess_ocr_image(img_bytes)
+    # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环；并加超时兜底，
+    # 防止首次构造失败/模型加载卡死导致步骤无限阻塞
+    try:
+        text = await asyncio.wait_for(
+            asyncio.to_thread(ocr.classification, img_bytes), timeout=OCR_TIMEOUT_SECS
+        )
+    except asyncio.TimeoutError:
+        raise WorkerError(
+            Outcome.UNKNOWN_ERROR, f"OCR 识别超时（>{OCR_TIMEOUT_SECS}s）"
+        ) from None
     if step.store_as:
         context.results[step.store_as] = text
     if step.target_selector:

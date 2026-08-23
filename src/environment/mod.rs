@@ -244,6 +244,8 @@ pub trait EnvironmentApi: Send + Sync {
     async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError>;
     /// OCR 依赖（ddddocr）是否已安装在 venv 内。
     fn ocr_ready(&self) -> bool;
+    /// 项目是否在 `python_worker/pyproject.toml` 中声明了 ddddocr 依赖。
+    fn ocr_declared(&self) -> bool;
 }
 
 #[async_trait::async_trait]
@@ -270,6 +272,10 @@ impl EnvironmentApi for EnvironmentManager {
 
     fn ocr_ready(&self) -> bool {
         crate::environment::python::ddddocr_installed(self)
+    }
+
+    fn ocr_declared(&self) -> bool {
+        crate::environment::python::ocr_declared(self)
     }
 }
 
@@ -333,7 +339,7 @@ impl EnvironmentManager {
 
     /// Python 解释器绝对路径
     pub fn python_path(&self) -> PathBuf {
-        self.env_path.join(PYTHON_EXE_RELATIVE)
+        self.worker_project_path.join(PYTHON_EXE_RELATIVE)
     }
 
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导
@@ -414,5 +420,25 @@ impl EnvironmentManager {
     /// 是否允许下载 MinGit
     pub(crate) fn git_download_enabled(&self) -> bool {
         self.git_download_enabled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 脚本执行器与 Bridge 必须引用同一个 python_worker/.venv。
+    #[test]
+    fn test_python_path_points_to_worker_project_venv() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            Arc::new(StatusManager::new()),
+            false,
+        );
+        assert_eq!(
+            manager.python_path(),
+            dir.path().join(WORKER_PROJECT_DIR).join(PYTHON_EXE_RELATIVE)
+        );
     }
 }

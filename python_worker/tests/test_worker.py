@@ -119,6 +119,72 @@ def test_cancel_registry_pending_cap():
     assert len(reg._pending) <= reg._MAX_PENDING
 
 
+# ── OCR 依赖主线程预加载 ──
+
+def _patch_imports(monkeypatch, *, ddddocr_ok, numpy_ok):
+    """按需拦截 ddddocr / numpy 顶层 import，返回调用记录。"""
+    calls = {"ddddocr": 0, "numpy": 0}
+
+    def fake_import(name, *args, **kwargs):
+        if name == "ddddocr":
+            calls["ddddocr"] += 1
+            if not ddddocr_ok:
+                raise ImportError("no ddddocr")
+            mod = type("mod", (), {})()
+        elif name == "numpy":
+            calls["numpy"] += 1
+            if not numpy_ok:
+                raise ImportError("no numpy")
+            mod = type("mod", (), {})()
+        else:
+            # 其余模块（含 sys/logger 依赖）照常走真实 import
+            return __import__(name, *args, **kwargs)
+        return mod
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    return calls
+
+
+def test_preload_ocr_deps_full_load_when_ddddocr_present(monkeypatch):
+    import worker_main
+    calls = _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
+    worker_main._preload_ocr_deps()
+    # 完整加载路径：仅 import ddddocr 一次即返回，不再额外 import numpy
+    assert calls["ddddocr"] == 1
+    assert calls["numpy"] == 0
+
+
+def test_preload_ocr_deps_falls_back_to_numpy(monkeypatch):
+    import worker_main
+    calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=True)
+    worker_main._preload_ocr_deps()
+    # ddddocr 缺失（未安装/不完整）时退化为仅预加载 numpy
+    assert calls["ddddocr"] == 1
+    assert calls["numpy"] == 1
+
+
+def test_preload_ocr_deps_silent_when_missing(monkeypatch):
+    import worker_main
+    calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=False)
+    # 两者都缺失时静默跳过，不抛异常（Worker 仍能正常启动）
+    worker_main._preload_ocr_deps()
+    assert calls["ddddocr"] == 1
+    assert calls["numpy"] == 1
+
+
+def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
+    import worker_main
+
+    def fake_import(name, *args, **kwargs):
+        if name in ("ddddocr", "numpy"):
+            raise OSError(f"{name} DLL load failed")
+        return __import__(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    # 损坏的 OCR DLL 不得阻止 Worker 启动，否则普通手动登录也会一起失效。
+    worker_main._preload_ocr_deps()
+
+
 # ── IPC 响应/事件序列化 ──
 
 def test_emit_response_format(capsys):
@@ -137,6 +203,14 @@ def test_emit_event_format(capsys):
     msg = json.loads(capsys.readouterr().out.strip())
     assert msg["event"] == "screenshot"
     assert msg["data"] == {"path": "a.png"}
+
+
+def test_oversized_request_id_only_reads_bounded_prefix():
+    import worker_main
+
+    assert worker_main._oversized_request_id('{"id":42,"method":"ocr_recognize"}') == 42
+    assert worker_main._oversized_request_id('{"method":"x","id":42}') is None
+    assert worker_main._oversized_request_id("not-json") is None
 
 
 @pytest.mark.parametrize("success,outcome,message", [
@@ -230,7 +304,10 @@ def test_get_ocr_caches_instance(monkeypatch):
 
     class FakeDdddOcr:
         def __init__(self, old, show_ad):
-            pass
+            self.ranges = None
+
+        def set_ranges(self, value):
+            self.ranges = value
 
     fake.DdddOcr = FakeDdddOcr
     monkeypatch.setitem(sys.modules, "ddddocr", fake)
@@ -239,6 +316,19 @@ def test_get_ocr_caches_instance(monkeypatch):
     assert a is b  # 两次获取返回同一实例
     c = _get_ocr(True)
     assert c is not a  # 不同 old 参数单独缓存
+    digits = _get_ocr(False, "0123456789")
+    assert digits is not a  # 字符范围不同必须使用独立实例，避免污染默认模型
+    assert digits.ranges == "0123456789"
+    assert _get_ocr(False, "0123456789") is digits
+    assert _get_ocr(False, ["invalid"]) is a  # 脏 JSON 值退回默认模型
+
+
+def test_worker_health_check_does_not_probe_browser():
+    import asyncio
+    from playwright_worker import worker_core
+
+    result = asyncio.run(worker_core.handle_worker_health_check({}, worker_core))
+    assert result == {"healthy": True}
 
 
 def test_structured_result_duration_ms_with_start():

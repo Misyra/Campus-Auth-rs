@@ -434,6 +434,24 @@ async fn stderr_forwarder_task(stderr: ChildStderr) {
     }
 }
 
+/// 解析 Python Worker 的 loguru 行，去掉已经由 Rust 日志层提供的时间和级别前缀。
+/// 返回 `(级别, 消息)`；格式异常时保留原文并让上层按 WARN 处理。
+fn parse_worker_stderr_line(line: &str) -> (String, String) {
+    let trimmed = line.trim_end();
+    let mut fields = trimmed.splitn(4, ' ');
+    let date = fields.next();
+    let time = fields.next();
+    let level = fields.next();
+    let message = fields.next().map(str::trim).filter(|s| !s.is_empty());
+    if date.is_some() && time.is_some() && level.is_some() && message.is_some() {
+        return (
+            level.unwrap_or_default().to_ascii_uppercase(),
+            message.unwrap_or_default().to_string(),
+        );
+    }
+    (String::new(), trimmed.to_string())
+}
+
 /// 按日志级别转发单行 stderr 到 tracing
 fn log_stderr_line(line: &[u8]) {
     let s = match std::str::from_utf8(line) {
@@ -444,20 +462,14 @@ fn log_stderr_line(line: &[u8]) {
     if trimmed.is_empty() {
         return;
     }
-    // loguru 格式: "2026-07-09 21:39:57,938 INFO [module] message"
-    // 取第 3 个空白分隔字段作为级别
-    let level = trimmed
-        .split_whitespace()
-        .nth(2)
-        .unwrap_or("")
-        .to_ascii_uppercase();
+    let (level, message) = parse_worker_stderr_line(trimmed);
     match level.as_str() {
-        "TRACE" | "DEBUG" => tracing::debug!(target: "python_worker", "{trimmed}"),
-        "INFO" => tracing::info!(target: "python_worker", "{trimmed}"),
-        "WARNING" | "WARN" => tracing::warn!(target: "python_worker", "{trimmed}"),
-        "ERROR" => tracing::error!(target: "python_worker", "{trimmed}"),
-        "CRITICAL" | "FATAL" => tracing::error!(target: "python_worker", "{trimmed}"),
-        _ => tracing::warn!(target: "python_worker", "{trimmed}"),
+        "TRACE" | "DEBUG" => tracing::debug!(target: "python_worker", "{message}"),
+        "INFO" => tracing::info!(target: "python_worker", "{message}"),
+        "WARNING" | "WARN" => tracing::warn!(target: "python_worker", "{message}"),
+        "ERROR" => tracing::error!(target: "python_worker", "{message}"),
+        "CRITICAL" | "FATAL" => tracing::error!(target: "python_worker", "{message}"),
+        _ => tracing::warn!(target: "python_worker", "{message}"),
     }
 }
 
@@ -490,6 +502,18 @@ async fn health_monitor_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_worker_stderr_line_removes_duplicate_prefix() {
+        let (level, message) =
+            parse_worker_stderr_line("2026-07-09 21:39:57,938 INFO [login] 页面加载完成");
+        assert_eq!(level, "INFO");
+        assert_eq!(message, "[login] 页面加载完成");
+
+        let (level, message) = parse_worker_stderr_line("worker crashed");
+        assert!(level.is_empty());
+        assert_eq!(message, "worker crashed");
+    }
 
     /// 解析一行并取回 channel 中的下一条消息
     async fn parse_line(line: &str) -> Option<ParsedMessage> {

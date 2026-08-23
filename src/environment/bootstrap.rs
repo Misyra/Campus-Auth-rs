@@ -177,7 +177,7 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     // 2. 检查 Python 虚拟环境
     let worker_project_path = mgr.worker_project_path();
     let python_exe = worker_project_path.join(crate::environment::PYTHON_EXE_RELATIVE);
-    let python_ready = python_exe.exists();
+    let python_ready = crate::environment::python::python_executable_works(&python_exe).await;
 
     // 3. 检查 Playwright Chromium
     //    通过检查 ms-playwright 缓存目录判断

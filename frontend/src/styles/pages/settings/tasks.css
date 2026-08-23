@@ -192,6 +192,42 @@
 }
 
 /* ---- OCR 依赖管理 ---- */
+.ocr-status-row {
+  margin: 8px 0 4px;
+}
+
+.ocr-status {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ocr-status.ok {
+  color: var(--success, #22c55e);
+}
+
+.ocr-status.none {
+  color: var(--text-muted);
+}
+
+.ocr-status.detecting {
+  color: var(--text-secondary);
+}
+
+.ocr-status.error {
+  color: var(--danger, #ef4444);
+}
+
+.ocr-status .btn-link {
+  padding: 0 4px;
+  height: auto;
+  color: var(--accent);
+  background: none;
+  border: none;
+  text-decoration: underline;
+}
+
 .ocr-size-hint {
   font-size: 12px;
   color: var(--text-muted);

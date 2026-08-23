@@ -11,6 +11,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 use campus_auth::bridge::{spawn_worker, IpcMessage, IpcRequest, ParsedMessage};
@@ -76,13 +77,22 @@ fn locate_python() -> Option<PathBuf> {
         manifest.join("environment/.venv/bin/python3"),
     ];
     for c in candidates {
-        if c.exists() {
+        // 仅判断文件存在不够：uv 重建/删除后，venv 的 python.exe 可能仍是
+        // 指向已不存在解释器的启动器，启动会以 101 退出，导致测试误报。
+        if c.exists()
+            && Command::new(&c)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        {
             return Some(c);
         }
     }
-    which::which("python3")
-        .or_else(|_| which::which("python"))
-        .ok()
+    ["python3", "python"].into_iter().find_map(|name| {
+        let path = which::which(name).ok()?;
+        let output = Command::new(&path).arg("--version").output().ok()?;
+        output.status.success().then_some(path)
+    })
 }
 
 /// 带超时地接收一条解析消息。

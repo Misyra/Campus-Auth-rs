@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onActivated } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
 import { useRepoImport } from "@/composables/useRepoImport";
@@ -12,10 +12,29 @@ const repo = useRepoImport();
 const router = useRouter();
 const { busy } = useStatus();
 
-const ocrStatus = ref<{ installed: boolean; size_mb?: number }>({ installed: false });
-onMounted(async () => {
-  try { ocrStatus.value = await ocrApi.fetchStatus(); } catch { /* */ }
+const ocrStatus = ref<{ installed: boolean; declared?: boolean; size_mb?: number }>({
+  installed: false,
 });
+const ocrStatusLoading = ref(false);
+const ocrStatusError = ref(false);
+
+/** 拉取 OCR 依赖安装状态（每次进入本页都会调用，确保状态实时） */
+async function refreshOcrStatus(): Promise<void> {
+  ocrStatusLoading.value = true;
+  ocrStatusError.value = false;
+  try {
+    ocrStatus.value = await ocrApi.fetchStatus();
+  } catch {
+    // 不静默吞掉错误：标记为检测失败，UI 提示可重试，避免停留在过期的「未安装」
+    ocrStatusError.value = true;
+  } finally {
+    ocrStatusLoading.value = false;
+  }
+}
+
+// 进入页面即检测 OCR 依赖安装状态（onMounted 首次挂载 + onActivated 每次重新进入）
+onMounted(refreshOcrStatus);
+onActivated(refreshOcrStatus);
 
 const activeTaskName = computed(() => {
   const id = t.activeTaskId.value;
@@ -25,13 +44,33 @@ const activeTaskName = computed(() => {
 
 async function installOcr() {
   busy.ocr = true;
-  try { await ocrApi.install(); ocrStatus.value = await ocrApi.fetchStatus(); } catch { /* */ }
+  try {
+    await ocrApi.install();
+    // 安装为后台异步，轮询直到 installed=true 或超时，装完自动刷新状态（无需再点一次）
+    await refreshOcrUntilInstalled();
+  } catch { /* */ }
   busy.ocr = false;
+}
+
+/** 轮询 /api/ocr/status，直到 installed 为 true 或到达超时（最大 5 分钟） */
+async function refreshOcrUntilInstalled() {
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < deadline) {
+    try {
+      const status = await ocrApi.fetchStatus();
+      ocrStatus.value = status;
+      if (status.installed) return;
+    } catch { /* 网络抖动忽略，继续轮询 */ }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
 }
 
 async function uninstallOcr() {
   busy.ocr = true;
-  try { await ocrApi.uninstall(); ocrStatus.value = await ocrApi.fetchStatus(); } catch { /* */ }
+  try {
+    await ocrApi.uninstall();
+    await refreshOcrStatus();
+  } catch { /* */ }
   busy.ocr = false;
 }
 
@@ -163,6 +202,15 @@ async function recognizeOcr() {
       </div>
       <div class="card-body">
         <p class="ocr-description">OCR 用于自动识别验证码图片。仅在任务中使用 <code>ocr</code> 步骤时才需要安装。安装后会占用约 120MB 磁盘空间。</p>
+        <div class="ocr-status-row">
+          <span v-if="ocrStatusLoading" class="ocr-status detecting">检测中…</span>
+          <span v-else-if="ocrStatusError" class="ocr-status error">
+            状态检测失败
+            <button class="btn btn-sm btn-link" type="button" @click="refreshOcrStatus">重试</button>
+          </span>
+          <span v-else-if="ocrStatus.installed" class="ocr-status ok">已安装（进入本页会自动检测）</span>
+          <span v-else class="ocr-status none">未安装</span>
+        </div>
         <div v-if="ocrStatus.installed && ocrStatus.size_mb && ocrStatus.size_mb > 0" class="ocr-size-hint">当前占用约 {{ ocrStatus.size_mb }} MB</div>
       </div>
     </section>

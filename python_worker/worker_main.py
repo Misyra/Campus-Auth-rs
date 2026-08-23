@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -46,6 +47,41 @@ shutdown_event = threading.Event()
 # stdin 单行大小上限（字节）：超限视为异常/恶意载荷，直接丢弃该行，
 # 避免超大 JSON 解析耗尽内存（P9）
 _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
+
+
+def _preload_ocr_deps() -> None:
+    """预加载 OCR 依赖到主线程，规避后台线程加载 C 扩展卡死（根因修复）。
+
+    背景：`ddddocr` 链式加载 numpy C 扩展（``numpy._core._multiarray_umath``
+    及其 numpy.libs/ 下的 OpenBLAS DLL）时，若发生在 **Worker 的后台线程**
+    （``asyncio.to_thread``），Windows 的 loader lock 与 Python import lock
+    会让该加载卡住约 100 秒，超过 OCR_TIMEOUT_SECS 后前端报「模型加载超时」。
+
+    已实测：同样依赖在 **主线程** 加载仅需 ~0.1s；且只要主线程预加载出现过一次，
+    后续后台线程 ``import`` 直接命中 ``sys.modules`` 缓存，不再重新加载 DLL，
+    后续识别全程正常（~0.5s）。
+
+    本函数因此在 **主线程、事件循环启动前** 调用。best-effort：
+    - OCR 依赖未安装（numpy/ddddocr 缺失）时静默跳过，不影响 Worker 正常启动，
+      待安装完成后配合重启 Worker 使预加载生效；
+    - 加载失败不抛异常，避免预加载拖垮 Worker 启动。
+    """
+    # 主线程先完整加载 ddddocr（连带 numpy 等 C 扩展一并进入 sys.modules 缓存），
+    # 使后续 to_thread 只命中缓存、不再触发 DLL 加载。若顶层 import 过重/异常，
+    # 退化为仅加载 numpy——它正是卡死的那个 C 扩展，单独预加载即已命中根因。
+    try:
+        import ddddocr  # noqa: F401
+
+        logger.info("OCR 依赖已预加载（完整）")
+        return
+    except Exception as exc:  # noqa: BLE001 — DLL/运行库损坏常表现为 OSError
+        logger.warning(f"OCR 依赖完整预加载失败，尝试仅加载 numpy: {exc}")
+    try:
+        import numpy  # noqa: F401
+
+        logger.info("OCR 依赖未完整安装，已预加载 numpy 核心")
+    except Exception as exc:  # noqa: BLE001 — best-effort，不能拖垮非 OCR 登录
+        logger.info(f"OCR 依赖不可用，跳过预加载: {exc}")
 
 
 def _force_utf8_stdio() -> None:
@@ -106,6 +142,16 @@ def emit_event(event_type: str, data: dict) -> None:
         sys.stdout.flush()
 
 
+def _oversized_request_id(raw: str) -> int | None:
+    """从超限请求的有界前缀提取 id，供 IPC 返回明确错误。
+
+    Rust 的 ``IpcRequest`` 固定先序列化 ``id``；只检查前 512 个字符，避免对恶意
+    超长输入执行无界正则。无法提取时返回 ``None``，该行仍会被丢弃并记录日志。
+    """
+    match = re.match(r'^\s*\{\s*"id"\s*:\s*(\d+)', raw[:512])
+    return int(match.group(1)) if match else None
+
+
 def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
     """守护线程：阻塞读取 stdin NDJSON，分发到队列或取消注册表。
 
@@ -122,7 +168,13 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
         for raw in sys.stdin:
             # 单行大小上限（P9）：按字节数校验，超限直接丢弃，不尝试 JSON 解析
             if len(raw.encode("utf-8", errors="replace")) > _MAX_STDIN_LINE_BYTES:
-                logger.warning(f"忽略超过 {_MAX_STDIN_LINE_BYTES // (1024 * 1024)}MB 的 stdin 行，跳过解析")
+                message = (
+                    f"IPC 请求超过 {_MAX_STDIN_LINE_BYTES // (1024 * 1024)}MiB 上限"
+                )
+                logger.warning(f"{message}，拒绝解析")
+                msg_id = _oversized_request_id(raw)
+                if msg_id is not None:
+                    emit_response(msg_id, _error_result(message))
                 continue
             line = raw.strip()
             if not line:
@@ -321,6 +373,8 @@ def main() -> None:
     _configure_logging()
     # A7：清理上次会话（进程被强杀）残留的截图文件（可能含明文凭据），best-effort
     _purge_stale_debug_screenshots()
+    # 主线程、事件循环启动前预加载 OCR 依赖，规避后台线程加载 numpy C 扩展卡死
+    _preload_ocr_deps()
     try:
         asyncio.run(_serve())
     except KeyboardInterrupt:
