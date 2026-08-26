@@ -229,23 +229,23 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/icons", || get(routes::system::list_icons)),
         // ---- 卸载（uninstall）----
         ("GET", "/api/uninstall/detect", || {
-            get(routes::system::detect_uninstall)
+            get(routes::uninstall::detect_uninstall)
         }),
-        ("POST", "/api/uninstall", || post(routes::system::uninstall)),
+        ("POST", "/api/uninstall", || post(routes::uninstall::uninstall)),
         // ---- 背景图（background）----
         ("GET", "/api/background/{filename}", || {
-            get(routes::system::get_background)
+            get(routes::background::get_background)
         }),
         ("POST", "/api/background/upload", || {
-            post(routes::system::upload_background).layer(DefaultBodyLimit::max(
-                routes::system::BACKGROUND_UPLOAD_BODY_LIMIT,
+            post(routes::background::upload_background).layer(DefaultBodyLimit::max(
+                routes::background::BACKGROUND_UPLOAD_BODY_LIMIT,
             ))
         }),
         ("POST", "/api/background/fetch-url", || {
-            post(routes::system::fetch_url_background)
+            post(routes::background::fetch_url_background)
         }),
         ("DELETE", "/api/background/{filename}", || {
-            delete(routes::system::delete_background)
+            delete(routes::background::delete_background)
         }),
         // ---- 文档（docs）----
         ("GET", "/api/docs/task-writing-guide", || {

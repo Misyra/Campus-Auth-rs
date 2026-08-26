@@ -1,6 +1,7 @@
 //! 路由组汇总：集中声明各子模块的公共 handler
 
 pub mod autostart;
+pub mod background;
 pub mod config;
 pub mod debug;
 pub mod history;
@@ -14,3 +15,4 @@ pub mod scripts;
 pub mod system;
 pub mod tasks;
 pub mod tools;
+pub mod uninstall;
