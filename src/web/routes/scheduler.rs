@@ -6,13 +6,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::scheduler::{SchedulerApi, SchedulerError};
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// GET /api/scheduler/jobs — 列出全部定时任务
 ///
@@ -174,88 +174,22 @@ pub async fn run_job(
 
 /// GET /api/scheduler/jobs/{id}/history — 读取任务执行历史
 ///
-/// 前端期望扁平数组 `[{ run_at, success, message }]`，
-/// 将磁盘存储的 `{ runs: [{ timestamp, status, message, duration }] }` 做字段映射。
+/// id 校验、读盘与字段映射内聚在 `SchedulerApi::read_history`（调度域），
+/// handler 仅做转发；前端期望扁平数组 `[{ run_at, success, message }]`。
 pub async fn job_history(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    // id 直接拼接路径，必须先校验防止路径穿越读取任意 .json
-    if !crate::scheduler::task::ScheduledTask::is_valid_id(&id) {
-        return Err(ApiError::BadRequest(format!("非法任务 ID: {id}")));
-    }
-    let history_dir = scheduler.history_dir();
-    let path = history_dir.join(format!("{}.json", id));
-    let items = if path.exists() {
-        let content = tokio::fs::read_to_string(&path).await?;
-        let raw: Value = serde_json::from_str(&content).unwrap_or(serde_json::json!({"runs": []}));
-        map_history_records(&raw)
-    } else {
-        Vec::new()
-    };
+    let items = scheduler.read_history(&id).await?;
     Ok(data(Value::Array(items)))
-}
-
-/// 将磁盘历史 `{ "runs": [{ timestamp, status, message, ... }] }` 映射为前端扁平数组
-/// `[{ run_at, success, message }]`。`success` 由 `status == "success"` 推导。
-fn map_history_records(raw: &Value) -> Vec<Value> {
-    let runs = raw.get("runs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    runs
-        .into_iter()
-        .map(|record| {
-            let run_at = record.get("timestamp").cloned().unwrap_or(Value::Null);
-            let success = record
-                .get("status")
-                .and_then(|v| v.as_str())
-                .map(|s| s == "success")
-                .unwrap_or(false);
-            let message = record.get("message").cloned().unwrap_or(Value::Null);
-            serde_json::json!({
-                "run_at": run_at,
-                "success": success,
-                "message": message
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ============ 任务历史记录字段映射 ============
-
-    #[test]
-    fn map_history_lossy_mapping() {
-        let raw = serde_json::json!({
-            "runs": [
-                { "timestamp": "2026-08-14T01:00:00Z", "status": "success", "message": "完成", "duration": 1.2 },
-                { "timestamp": "2026-08-14T02:00:00Z", "status": "error", "message": "失败" },
-                { "status": "success" },
-                { "message": "无状态" },
-            ]
-        });
-        let mapped = map_history_records(&raw);
-        assert_eq!(mapped.len(), 4);
-        // success 由 status == "success" 推导
-        assert_eq!(mapped[0]["success"], serde_json::json!(true));
-        assert_eq!(mapped[1]["success"], serde_json::json!(false));
-        // 无 status 时 success 为 false；无 timestamp 时为 null
-        assert_eq!(mapped[2]["success"], serde_json::json!(true));
-        assert_eq!(mapped[2]["run_at"], Value::Null);
-        assert_eq!(mapped[3]["success"], serde_json::json!(false));
-        assert_eq!(mapped[3]["message"], serde_json::json!("无状态"));
-    }
-
-    #[test]
-    fn map_history_missing_or_empty_runs() {
-        // 无 runs 字段 → 空数组
-        assert_eq!(map_history_records(&serde_json::json!({})), Vec::<Value>::new());
-        // runs 为空数组 → 空数组
-        assert_eq!(map_history_records(&serde_json::json!({"runs": []})), Vec::<Value>::new());
-        // runs 非数组 → 空数组
-        assert_eq!(map_history_records(&serde_json::json!({"runs": "x"})), Vec::<Value>::new());
-    }
+    // 注：map_history_records 纯函数及其测试已随 read_history 内聚迁至
+    // src/scheduler/task.rs（M11），此处仅保留 handler 级单测。
 
     // ============ handler 级单测（内存 MockScheduler，M1） ============
 
@@ -344,6 +278,14 @@ mod tests {
             // 空临时目录：history 文件不存在 → 空数组
             std::env::temp_dir()
         }
+
+        async fn read_history(&self, id: &str) -> Result<Vec<Value>, ApiError> {
+            // 与真实实现对齐：非法 id 返回 400（路径穿越测试依赖此行为）
+            if !crate::scheduler::task::ScheduledTask::is_valid_id(id) {
+                return Err(ApiError::BadRequest(format!("非法任务 ID: {id}")));
+            }
+            Ok(Vec::new())
+        }
     }
 
     fn sample_task(id: &str, enabled: bool) -> ScheduledTask {
@@ -369,10 +311,7 @@ mod tests {
         }));
         let api: Arc<dyn SchedulerApi> = Arc::new(MockScheduler(inner.clone()));
         let app = axum::Router::new()
-            .route(
-                "/api/scheduler/jobs",
-                get(list_jobs).post(create_job),
-            )
+            .route("/api/scheduler/jobs", get(list_jobs).post(create_job))
             .route(
                 "/api/scheduler/jobs/{id}",
                 get(get_job).put(update_job).delete(delete_job),
@@ -474,7 +413,9 @@ mod tests {
                     .method("PUT")
                     .uri("/api/scheduler/jobs/missing")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::json!({"cron": "0 7 * * *"}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"cron": "0 7 * * *"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await

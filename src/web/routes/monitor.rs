@@ -6,18 +6,16 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde_json::Value;
 
 use crate::engine::{EngineApi, EngineCommand};
 use crate::status::StatusManager;
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// GET /api/monitor/status — 获取当前系统状态快照
-pub async fn get_status(
-    State(status): State<Arc<StatusManager>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn get_status(State(status): State<Arc<StatusManager>>) -> Result<Json<Value>, ApiError> {
     let snapshot = status.borrow();
     Ok(data(serde_json::to_value(&snapshot)?))
 }
@@ -190,15 +188,17 @@ mod tests {
     /// test_network 探测失败：EngineError → 500（非通道类错误不吞）
     #[tokio::test]
     async fn test_test_network_probe_error_maps_internal() {
-        let app = mock_app(MockEngineApi::new().with_result(Err(EngineError::ProbeError(
-            "探测超时".into(),
-        ))));
+        let app = mock_app(
+            MockEngineApi::new().with_result(Err(EngineError::ProbeError("探测超时".into()))),
+        );
         let (status, v) = post_empty(app, "/api/monitor/test").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(v["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("探测"));
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("探测")
+        );
     }
 
     /// test_network 引擎已关闭：ChannelClosed → 500
@@ -207,9 +207,11 @@ mod tests {
         let app = mock_app(MockEngineApi::new());
         let (status, v) = post_empty(app, "/api/monitor/test").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(v["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("引擎已关闭"));
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("引擎已关闭")
+        );
     }
 }

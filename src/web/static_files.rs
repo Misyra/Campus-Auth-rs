@@ -1,6 +1,6 @@
 //! rust-embed 静态文件服务（frontend/dist 经编译嵌入）
 
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
 /// 未注册的 `/api/*` 请求返回的 404 JSON 响应（避免被 SPA 回退吞成 200 + index.html）。
@@ -59,7 +59,11 @@ pub async fn openapi_handler() -> impl IntoResponse {
 
 #[cfg(feature = "no-embed")]
 pub async fn openapi_handler() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, "openapi.json 未嵌入（no-embed 构建）").into_response()
+    (
+        StatusCode::NOT_FOUND,
+        "openapi.json 未嵌入（no-embed 构建）",
+    )
+        .into_response()
 }
 
 #[cfg(all(test, not(feature = "no-embed")))]

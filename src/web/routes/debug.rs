@@ -5,13 +5,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde_json::Value;
 
 use crate::bridge::BridgeApi;
 use crate::tasks::TaskApi;
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// POST /api/debug/start — 启动调试会话
 ///
@@ -51,17 +51,13 @@ pub async fn step_debug(
 }
 
 /// POST /api/debug/stop — 停止调试会话
-pub async fn stop_debug(
-    State(bridge): State<Arc<dyn BridgeApi>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn stop_debug(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Value>, ApiError> {
     let result = bridge.execute("debug_stop", Value::Null).await?;
     Ok(data(serde_json::to_value(result)?))
 }
 
 /// POST /api/debug/run-all — 执行调试会话中全部剩余步骤
-pub async fn run_all(
-    State(bridge): State<Arc<dyn BridgeApi>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn run_all(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Value>, ApiError> {
     let result = bridge.execute("debug_run_all", Value::Null).await?;
     Ok(data(serde_json::to_value(result)?))
 }

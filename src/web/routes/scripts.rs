@@ -6,22 +6,27 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::environment::EnvironmentApi;
 use crate::tasks::{TaskApi, TaskRunApi};
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 use crate::web::state::AppState;
 
 /// 校验脚本执行程序：仅允许 shell / bat / python / exe 四类，拒绝 PowerShell 等。
-fn check_supported_binary(binary_path: Option<&str>, script_path: Option<&str>) -> Result<(), ApiError> {
+fn check_supported_binary(
+    binary_path: Option<&str>,
+    script_path: Option<&str>,
+) -> Result<(), ApiError> {
     if let Some(bp) = binary_path {
         let lower = bp.to_lowercase();
         if lower.contains("powershell") || lower.contains("pwsh") || lower.ends_with(".ps1") {
-            return Err(ApiError::BadRequest("不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本".into()));
+            return Err(ApiError::BadRequest(
+                "不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本".into(),
+            ));
         }
     }
     if let Some(sp) = script_path {
@@ -31,16 +36,16 @@ fn check_supported_binary(binary_path: Option<&str>, script_path: Option<&str>) 
             .unwrap_or("")
             .to_lowercase();
         if ext == "ps1" {
-            return Err(ApiError::BadRequest("不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".into()));
+            return Err(ApiError::BadRequest(
+                "不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".into(),
+            ));
         }
     }
     Ok(())
 }
 
 /// GET /api/scripts — 列出全部脚本（复用任务列表）
-pub async fn list_scripts(
-    State(tasks): State<Arc<dyn TaskApi>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn list_scripts(State(tasks): State<Arc<dyn TaskApi>>) -> Result<Json<Value>, ApiError> {
     let tasks = tasks.list_all_tasks().await;
     Ok(data(tasks))
 }
@@ -94,9 +99,7 @@ pub async fn list_binaries(
     // 扫描常见系统可执行文件（Windows + Unix 兼容）。
     // 仅列出受支持的脚本解释器：shell / bat / python；powershell 不在支持范围。
     #[cfg(target_os = "windows")]
-    for (name, exe) in [
-        ("cmd", "cmd.exe"),
-    ] {
+    for (name, exe) in [("cmd", "cmd.exe")] {
         if let Some(path) = find_in_path(exe) {
             binaries.push(serde_json::json!({
                 "name": name,
@@ -105,10 +108,7 @@ pub async fn list_binaries(
         }
     }
     #[cfg(not(target_os = "windows"))]
-    for (name, exe) in [
-        ("bash", "bash"),
-        ("sh", "sh"),
-    ] {
+    for (name, exe) in [("bash", "bash"), ("sh", "sh")] {
         if let Some(path) = find_in_path(exe) {
             binaries.push(serde_json::json!({
                 "name": name,
@@ -182,8 +182,8 @@ pub async fn update_script(
         body.get("binary_path").and_then(Value::as_str),
         body.get("script_path").and_then(Value::as_str),
     )?;
-    let task: crate::tasks::TaskKind = serde_json::from_value(body)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let task: crate::tasks::TaskKind =
+        serde_json::from_value(body).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     tasks.save_task(&task_id, &task).await?;
     Ok(data(task_id))
 }
@@ -200,9 +200,7 @@ pub async fn delete_script(
 /// GET /api/shells — Shell 列表
 ///
 /// 返回系统可用 Shell（用于 Shell 任务执行）。
-pub async fn list_shells(
-    State(_state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn list_shells(State(_state): State<AppState>) -> Result<Json<Value>, ApiError> {
     #[cfg(target_os = "windows")]
     {
         Ok(data(serde_json::json!({

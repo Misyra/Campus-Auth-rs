@@ -6,14 +6,14 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use chrono::{Duration, Local};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::login::{HistoryResult, HistoryStore};
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// 查询参数：可选 limit 截断 / page+page_size 分页
 #[derive(Deserialize, Default)]
@@ -107,10 +107,10 @@ pub async fn clear_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use chrono::TimeZone;
     use tower::ServiceExt; // oneshot
 
@@ -143,9 +143,7 @@ mod tests {
 
     fn entry(ts_min: u32, result: HistoryResult) -> LoginHistoryEntry {
         LoginHistoryEntry {
-            timestamp: Local
-                .with_ymd_and_hms(2026, 8, 17, 12, ts_min, 0)
-                .unwrap(),
+            timestamp: Local.with_ymd_and_hms(2026, 8, 17, 12, ts_min, 0).unwrap(),
             source: LoginSource::Manual,
             profile_id: "default".into(),
             result,

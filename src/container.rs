@@ -118,23 +118,44 @@ impl ServiceContainer {
         let tasks = TaskManager::new(base_path, config.clone());
 
         // ---- Layer 4：桥接 & 环境（自返 Arc）----
-        let bridge = BridgeSupervisor::new(base_path.to_path_buf(), config.clone(), status.clone(), Some(metrics.clone()));
+        let bridge = BridgeSupervisor::new(
+            base_path.to_path_buf(),
+            config.clone(),
+            status.clone(),
+            Some(metrics.clone()),
+        );
         let git_download_enabled = config.runtime().load().app.developer_mode;
-        let environment = EnvironmentManager::new(base_path.to_path_buf(), status.clone(), git_download_enabled);
+        let environment = EnvironmentManager::new(
+            base_path.to_path_buf(),
+            status.clone(),
+            git_download_enabled,
+        );
         // 环境重建成功后复位 Bridge 连续 spawn 失败熔断（B3），解除熔断允许重新 spawn
         {
             let bridge_for_cb = bridge.clone();
-            environment.set_on_bootstrap_done(Arc::new(move || bridge_for_cb.reset_spawn_failures()));
+            environment
+                .set_on_bootstrap_done(Arc::new(move || bridge_for_cb.reset_spawn_failures()));
         }
 
         // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
-        let executor = TaskExecutor::new(base_path, status.clone(), bridge.clone(), environment.clone(), config.clone());
+        let executor = TaskExecutor::new(
+            base_path,
+            status.clone(),
+            bridge.clone(),
+            environment.clone(),
+            config.clone(),
+        );
 
         // ---- Layer 6：网络探测 & 监测（login 前置，供构造注入）----
         let detector = create_detector();
         let monitor = Arc::new(
-            MonitorService::new(config.clone(), detector.clone(), None, Some(metrics.clone()))
-                .context("初始化 MonitorService 失败")?,
+            MonitorService::new(
+                config.clone(),
+                detector.clone(),
+                None,
+                Some(metrics.clone()),
+            )
+            .context("初始化 MonitorService 失败")?,
         );
 
         // ---- Layer 7：登录编排器（构造注入全部依赖，无 setter）----
@@ -171,10 +192,11 @@ impl ServiceContainer {
         // 其内部含 fetch_manifest 网络请求（staging 产物二次校验），网络慢时
         // 会阻塞启动数十秒。self_replace 替换运行中的 exe 后新版本在下次启动生效，
         // 因此运行期后台应用不影响本次进程。
-        // 并发说明：apply_pending_on_startup 未持有 update_in_progress 原子标记
-        // （该标记仅互斥手动"立即更新"路径），原实现依赖"构造期间无用户操作"的
-        // 假设；后台化后先 sleep 2s 错峰——启动最初 2s 内前端尚未加载完成，
-        // 用户手动触发更新的碰撞窗口极小。
+        // 并发说明（F9）：apply_pending_on_startup 与手动 apply_update 统一走
+        // update_in_progress 原子标记互斥——后台路径抢不到标记即跳过并记日志，
+        // 不会与手动更新并发双写 pending.json / 重复 spawn helper。此处保留
+        // 2s 延迟仅用于错开启动初期的资源争抢（Web 服务与配置加载），不再是
+        // 并发正确性的依赖。
         // 无论成功失败都继续运行：替换失败时已自动回滚，以当前版本运行，不阻断用户。
         {
             let updater_bg = updater.clone();

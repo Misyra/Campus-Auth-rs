@@ -49,7 +49,7 @@ pub struct PlatformInfo {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     use std::process::Command;
 
     /// 注册/取消系统自启动（Windows：HKCU Run 注册表，经 reg.exe）
@@ -196,7 +196,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -335,7 +335,7 @@ mod imp {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -469,13 +469,9 @@ mod imp {
 }
 
 /// 其它平台（BSD 等）fallback：返回 Unsupported 错误，仅 shell 检测返回 /bin/sh。
-#[cfg(not(any(
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "linux"
-)))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 mod imp {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     use std::path::PathBuf;
 
     use super::{PlatformInfo, ShellInfo, ShellKind};

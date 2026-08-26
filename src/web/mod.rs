@@ -8,19 +8,19 @@ pub mod auth;
 pub mod error;
 mod routes;
 mod ssrf;
-mod static_files;
 pub mod state;
+mod static_files;
 mod ws;
 
-use axum::extract::DefaultBodyLimit;
+use axum::Router;
 use axum::body::Body;
-use axum::http::{header, HeaderName, HeaderValue, Request};
+use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderName, HeaderValue, Request, header};
 use axum::middleware;
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{delete, get, patch, post, put};
 use axum::routing::MethodRouter;
-use axum::Router;
+use axum::routing::{delete, get, patch, post, put};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
@@ -41,108 +41,232 @@ type RouteBuilder = fn() -> MethodRouter<AppState>;
 fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
     vec![
         // ---- 监控（monitor）----
-        ("GET", "/api/monitor/status", || get(routes::monitor::get_status)),
-        ("POST", "/api/monitor/test", || post(routes::monitor::test_network)),
-        ("POST", "/api/monitor/start", || post(routes::monitor::start_monitor)),
-        ("POST", "/api/monitor/stop", || post(routes::monitor::stop_monitor)),
+        ("GET", "/api/monitor/status", || {
+            get(routes::monitor::get_status)
+        }),
+        ("POST", "/api/monitor/test", || {
+            post(routes::monitor::test_network)
+        }),
+        ("POST", "/api/monitor/start", || {
+            post(routes::monitor::start_monitor)
+        }),
+        ("POST", "/api/monitor/stop", || {
+            post(routes::monitor::stop_monitor)
+        }),
         // ---- 配置（config）----
         ("GET", "/api/config", || get(routes::config::get_settings)),
         ("PUT", "/api/config", || put(routes::config::put_settings)),
-        ("PATCH", "/api/config", || patch(routes::config::patch_settings)),
-        ("POST", "/api/config/reload", || post(routes::config::reload_settings)),
-        ("GET", "/api/config/defaults", || get(routes::config::get_config_defaults)),
-        ("GET", "/api/config/log-levels", || get(routes::config::get_log_levels)),
-        ("PUT", "/api/config/log-level", || put(routes::config::set_log_level)),
+        ("PATCH", "/api/config", || {
+            patch(routes::config::patch_settings)
+        }),
+        ("POST", "/api/config/reload", || {
+            post(routes::config::reload_settings)
+        }),
+        ("GET", "/api/config/defaults", || {
+            get(routes::config::get_config_defaults)
+        }),
+        ("GET", "/api/config/log-levels", || {
+            get(routes::config::get_log_levels)
+        }),
+        ("PUT", "/api/config/log-level", || {
+            put(routes::config::set_log_level)
+        }),
         ("GET", "/api/config/default-stealth-script", || {
             get(routes::config::get_default_stealth_script)
         }),
         // ---- 纯净模式（pure-mode，读写 config.browser.pure_mode）----
-        ("GET", "/api/pure-mode", || get(routes::config::get_pure_mode)),
-        ("POST", "/api/pure-mode", || post(routes::config::set_pure_mode)),
+        ("GET", "/api/pure-mode", || {
+            get(routes::config::get_pure_mode)
+        }),
+        ("POST", "/api/pure-mode", || {
+            post(routes::config::set_pure_mode)
+        }),
         // ---- Profile ----
-        ("GET", "/api/profiles", || get(routes::profiles::list_profiles)),
-        ("GET", "/api/profiles/{id}", || get(routes::profiles::get_profile)),
-        ("POST", "/api/profiles/{id}", || post(routes::profiles::create_profile)),
-        ("PUT", "/api/profiles/{id}", || put(routes::profiles::update_profile)),
-        ("DELETE", "/api/profiles/{id}", || delete(routes::profiles::delete_profile)),
-        ("POST", "/api/profiles/switch", || post(routes::profiles::switch_profile)),
-        ("POST", "/api/profiles/detect", || post(routes::profiles::detect_profile)),
-        ("POST", "/api/profiles/auto-switch", || post(routes::profiles::auto_switch)),
+        ("GET", "/api/profiles", || {
+            get(routes::profiles::list_profiles)
+        }),
+        ("GET", "/api/profiles/{id}", || {
+            get(routes::profiles::get_profile)
+        }),
+        ("POST", "/api/profiles/{id}", || {
+            post(routes::profiles::create_profile)
+        }),
+        ("PUT", "/api/profiles/{id}", || {
+            put(routes::profiles::update_profile)
+        }),
+        ("DELETE", "/api/profiles/{id}", || {
+            delete(routes::profiles::delete_profile)
+        }),
+        ("POST", "/api/profiles/switch", || {
+            post(routes::profiles::switch_profile)
+        }),
+        ("POST", "/api/profiles/detect", || {
+            post(routes::profiles::detect_profile)
+        }),
+        ("POST", "/api/profiles/auto-switch", || {
+            post(routes::profiles::auto_switch)
+        }),
         // ---- 任务（tasks）----
         ("GET", "/api/tasks", || get(routes::tasks::list_tasks)),
         ("POST", "/api/tasks", || post(routes::tasks::create_task)),
-        ("GET", "/api/tasks/active", || get(routes::tasks::get_active_task)),
-        ("POST", "/api/tasks/active/{task_id}", || post(routes::tasks::set_active_task)),
-        ("POST", "/api/tasks/import", || post(routes::tasks::import_tasks)),
-        ("POST", "/api/tasks/order", || post(routes::tasks::order_tasks)),
-        ("GET", "/api/tasks/export/{id}", || get(routes::tasks::export_task)),
+        ("GET", "/api/tasks/active", || {
+            get(routes::tasks::get_active_task)
+        }),
+        ("POST", "/api/tasks/active/{task_id}", || {
+            post(routes::tasks::set_active_task)
+        }),
+        ("POST", "/api/tasks/import", || {
+            post(routes::tasks::import_tasks)
+        }),
+        ("POST", "/api/tasks/order", || {
+            post(routes::tasks::order_tasks)
+        }),
+        ("GET", "/api/tasks/export/{id}", || {
+            get(routes::tasks::export_task)
+        }),
         ("GET", "/api/tasks/{id}", || get(routes::tasks::get_task)),
         ("PUT", "/api/tasks/{id}", || put(routes::tasks::update_task)),
-        ("DELETE", "/api/tasks/{id}", || delete(routes::tasks::delete_task)),
-        ("POST", "/api/tasks/{id}/execute", || post(routes::tasks::execute_task)),
+        ("DELETE", "/api/tasks/{id}", || {
+            delete(routes::tasks::delete_task)
+        }),
+        ("POST", "/api/tasks/{id}/execute", || {
+            post(routes::tasks::execute_task)
+        }),
         // ---- 仓库（repo）----
-        ("GET", "/api/repo/fetch", || get(routes::repo::repo_fetch_index)),
-        ("GET", "/api/repo/task", || get(routes::repo::repo_fetch_task)),
+        ("GET", "/api/repo/fetch", || {
+            get(routes::repo::repo_fetch_index)
+        }),
+        ("GET", "/api/repo/task", || {
+            get(routes::repo::repo_fetch_task)
+        }),
         // ---- 登录（login）----
         ("POST", "/api/login", || post(routes::login::trigger_login)),
-        ("POST", "/api/login/cancel", || post(routes::login::cancel_login)),
-        ("GET", "/api/login/status", || get(routes::login::get_login_status)),
-        ("POST", "/api/login/once", || post(routes::login::login_once)),
+        ("POST", "/api/login/cancel", || {
+            post(routes::login::cancel_login)
+        }),
+        ("GET", "/api/login/status", || {
+            get(routes::login::get_login_status)
+        }),
+        ("POST", "/api/login/once", || {
+            post(routes::login::login_once)
+        }),
         // ---- 调试（debug）----
-        ("POST", "/api/debug/start", || post(routes::debug::start_debug)),
-        ("POST", "/api/debug/step", || post(routes::debug::step_debug)),
-        ("POST", "/api/debug/stop", || post(routes::debug::stop_debug)),
-        ("POST", "/api/debug/run-all", || post(routes::debug::run_all)),
+        ("POST", "/api/debug/start", || {
+            post(routes::debug::start_debug)
+        }),
+        ("POST", "/api/debug/step", || {
+            post(routes::debug::step_debug)
+        }),
+        ("POST", "/api/debug/stop", || {
+            post(routes::debug::stop_debug)
+        }),
+        ("POST", "/api/debug/run-all", || {
+            post(routes::debug::run_all)
+        }),
         // ---- 调度（scheduler）----
-        ("GET", "/api/scheduler/jobs", || get(routes::scheduler::list_jobs)),
-        ("POST", "/api/scheduler/jobs", || post(routes::scheduler::create_job)),
-        ("GET", "/api/scheduler/jobs/{id}", || get(routes::scheduler::get_job)),
-        ("PUT", "/api/scheduler/jobs/{id}", || put(routes::scheduler::update_job)),
-        ("DELETE", "/api/scheduler/jobs/{id}", || delete(routes::scheduler::delete_job)),
-        ("POST", "/api/scheduler/jobs/{id}/toggle", || post(routes::scheduler::toggle_job)),
-        ("POST", "/api/scheduler/jobs/{id}/run", || post(routes::scheduler::run_job)),
-        ("GET", "/api/scheduler/jobs/{id}/history", || get(routes::scheduler::job_history)),
+        ("GET", "/api/scheduler/jobs", || {
+            get(routes::scheduler::list_jobs)
+        }),
+        ("POST", "/api/scheduler/jobs", || {
+            post(routes::scheduler::create_job)
+        }),
+        ("GET", "/api/scheduler/jobs/{id}", || {
+            get(routes::scheduler::get_job)
+        }),
+        ("PUT", "/api/scheduler/jobs/{id}", || {
+            put(routes::scheduler::update_job)
+        }),
+        ("DELETE", "/api/scheduler/jobs/{id}", || {
+            delete(routes::scheduler::delete_job)
+        }),
+        ("POST", "/api/scheduler/jobs/{id}/toggle", || {
+            post(routes::scheduler::toggle_job)
+        }),
+        ("POST", "/api/scheduler/jobs/{id}/run", || {
+            post(routes::scheduler::run_job)
+        }),
+        ("GET", "/api/scheduler/jobs/{id}/history", || {
+            get(routes::scheduler::job_history)
+        }),
         // ---- 历史（history）----
         ("GET", "/api/history", || get(routes::history::get_history)),
-        ("DELETE", "/api/history", || delete(routes::history::clear_history)),
+        ("DELETE", "/api/history", || {
+            delete(routes::history::clear_history)
+        }),
         // ---- 系统（system）----
-        ("GET", "/api/system/info", || get(routes::system::system_info)),
-        ("POST", "/api/system/shutdown", || post(routes::system::shutdown_app)),
-        ("POST", "/api/system/restart", || post(routes::system::restart_app)),
-        ("POST", "/api/system/update", || post(routes::system::apply_update)),
-        ("GET", "/api/check-update", || get(routes::system::check_update)),
+        ("GET", "/api/system/info", || {
+            get(routes::system::system_info)
+        }),
+        ("POST", "/api/system/shutdown", || {
+            post(routes::system::shutdown_app)
+        }),
+        ("POST", "/api/system/restart", || {
+            post(routes::system::restart_app)
+        }),
+        ("POST", "/api/system/update", || {
+            post(routes::system::apply_update)
+        }),
+        ("GET", "/api/check-update", || {
+            get(routes::system::check_update)
+        }),
         ("GET", "/api/health", || get(routes::system::health_check)),
-        ("GET", "/api/init-status", || get(routes::system::init_status)),
+        ("GET", "/api/init-status", || {
+            get(routes::system::init_status)
+        }),
         ("POST", "/api/agree", || post(routes::system::agree_terms)),
         ("GET", "/api/logs", || get(routes::system::fetch_logs)),
         // ---- 浏览器与安装（browsers / install / worker）----
-        ("GET", "/api/browsers", || get(routes::system::list_browsers)),
-        ("POST", "/api/worker/stop", || post(routes::system::stop_worker)),
-        ("POST", "/api/install/playwright", || post(routes::system::install_playwright)),
+        ("GET", "/api/browsers", || {
+            get(routes::system::list_browsers)
+        }),
+        ("POST", "/api/worker/stop", || {
+            post(routes::system::stop_worker)
+        }),
+        ("POST", "/api/install/playwright", || {
+            post(routes::system::install_playwright)
+        }),
         // ---- 图标（icons）----
         ("GET", "/api/icons", || get(routes::system::list_icons)),
         // ---- 卸载（uninstall）----
-        ("GET", "/api/uninstall/detect", || get(routes::system::detect_uninstall)),
+        ("GET", "/api/uninstall/detect", || {
+            get(routes::system::detect_uninstall)
+        }),
         ("POST", "/api/uninstall", || post(routes::system::uninstall)),
         // ---- 背景图（background）----
-        ("GET", "/api/background/{filename}", || get(routes::system::get_background)),
+        ("GET", "/api/background/{filename}", || {
+            get(routes::system::get_background)
+        }),
         ("POST", "/api/background/upload", || {
             post(routes::system::upload_background).layer(DefaultBodyLimit::max(
                 routes::system::BACKGROUND_UPLOAD_BODY_LIMIT,
             ))
         }),
-        ("POST", "/api/background/fetch-url", || post(routes::system::fetch_url_background)),
+        ("POST", "/api/background/fetch-url", || {
+            post(routes::system::fetch_url_background)
+        }),
         ("DELETE", "/api/background/{filename}", || {
             delete(routes::system::delete_background)
         }),
         // ---- 文档（docs）----
-        ("GET", "/api/docs/task-writing-guide", || get(routes::system::task_writing_guide)),
-        ("GET", "/api/docs/task-manual", || get(routes::system::task_manual)),
+        ("GET", "/api/docs/task-writing-guide", || {
+            get(routes::system::task_writing_guide)
+        }),
+        ("GET", "/api/docs/task-manual", || {
+            get(routes::system::task_manual)
+        }),
         // ---- 自启动（autostart）----
-        ("GET", "/api/autostart/status", || get(routes::autostart::get_autostart)),
-        ("POST", "/api/autostart/enable", || post(routes::autostart::enable_autostart)),
-        ("POST", "/api/autostart/disable", || post(routes::autostart::disable_autostart)),
-        ("POST", "/api/autostart/mode", || post(routes::autostart::set_autostart_mode)),
+        ("GET", "/api/autostart/status", || {
+            get(routes::autostart::get_autostart)
+        }),
+        ("POST", "/api/autostart/enable", || {
+            post(routes::autostart::enable_autostart)
+        }),
+        ("POST", "/api/autostart/disable", || {
+            post(routes::autostart::disable_autostart)
+        }),
+        ("POST", "/api/autostart/mode", || {
+            post(routes::autostart::set_autostart_mode)
+        }),
         // ---- OCR ----
         // recognize 单独放宽请求体限制（见 routes::ocr::RECOGNIZE_BODY_LIMIT），
         // 避免 >1.5MB 原图 base64 后触发 axum 默认 2MB 上限的 413
@@ -151,21 +275,37 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
                 .layer(DefaultBodyLimit::max(routes::ocr::RECOGNIZE_BODY_LIMIT))
         }),
         ("GET", "/api/ocr/status", || get(routes::ocr::ocr_status)),
-        ("POST", "/api/ocr/install", || post(routes::ocr::ocr_install)),
-        ("POST", "/api/ocr/uninstall", || post(routes::ocr::ocr_uninstall)),
+        ("POST", "/api/ocr/install", || {
+            post(routes::ocr::ocr_install)
+        }),
+        ("POST", "/api/ocr/uninstall", || {
+            post(routes::ocr::ocr_uninstall)
+        }),
         // ---- 脚本（scripts）----
         ("GET", "/api/scripts", || get(routes::scripts::list_scripts)),
-        ("POST", "/api/scripts/run", || post(routes::scripts::run_script)),
-        ("GET", "/api/scripts/binaries", || get(routes::scripts::list_binaries)),
-        ("GET", "/api/scripts/{task_id}", || get(routes::scripts::get_script)),
-        ("PUT", "/api/scripts/{task_id}", || put(routes::scripts::update_script)),
-        ("DELETE", "/api/scripts/{task_id}", || delete(routes::scripts::delete_script)),
+        ("POST", "/api/scripts/run", || {
+            post(routes::scripts::run_script)
+        }),
+        ("GET", "/api/scripts/binaries", || {
+            get(routes::scripts::list_binaries)
+        }),
+        ("GET", "/api/scripts/{task_id}", || {
+            get(routes::scripts::get_script)
+        }),
+        ("PUT", "/api/scripts/{task_id}", || {
+            put(routes::scripts::update_script)
+        }),
+        ("DELETE", "/api/scripts/{task_id}", || {
+            delete(routes::scripts::delete_script)
+        }),
         ("GET", "/api/shells", || get(routes::scripts::list_shells)),
         // ---- 工具（tools）----
         ("GET", "/api/tools/network-interfaces", || {
             get(routes::monitor::list_network_interfaces)
         }),
-        ("GET", "/api/tools/task-recorder.user.js", || get(routes::tools::task_recorder)),
+        ("GET", "/api/tools/task-recorder.user.js", || {
+            get(routes::tools::task_recorder)
+        }),
         // ---- 鉴权（auth）----
         // token 发放端点：响应读取受 CORS 保护（仅 localhost Origin 可读），
         // 跨域恶意网页无法获取 token，中间件对此路径豁免
@@ -273,9 +413,8 @@ mod tests {
     /// 三处手工同步问题（路由 ↔ openapi.json ↔ 前端 types）
     #[test]
     fn openapi_json_matches_route_table() {
-        let spec: serde_json::Value =
-            serde_json::from_str(include_str!("../../openapi.json"))
-                .expect("openapi.json 应为合法 JSON");
+        let spec: serde_json::Value = serde_json::from_str(include_str!("../../openapi.json"))
+            .expect("openapi.json 应为合法 JSON");
         const METHODS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
 
         let mut spec_set = std::collections::BTreeSet::new();
@@ -294,7 +433,11 @@ mod tests {
                 .flat_map(|m| m.keys())
                 .filter(|k| METHODS.contains(&k.as_str()))
             {
-                spec_set.insert(format!("{} {}", method.to_uppercase(), normalize_path(path)));
+                spec_set.insert(format!(
+                    "{} {}",
+                    method.to_uppercase(),
+                    normalize_path(path)
+                ));
             }
         }
 

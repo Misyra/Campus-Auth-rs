@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use semver::Version;
+use serde::{Deserialize, Serialize};
 
 use crate::updater::error::UpdaterError;
 
@@ -41,15 +41,21 @@ pub struct PlatformPackage {
 /// 当前平台键（编译期常量），如 `"windows-x64"`
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "windows-x64";
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+pub(crate) const CURRENT_PLATFORM_KEY: &str = "windows-arm64";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "linux-x64";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub(crate) const CURRENT_PLATFORM_KEY: &str = "linux-arm64";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "macos-arm64";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "macos-x64";
 #[cfg(not(any(
     all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "macos", target_arch = "x86_64")
 )))]
@@ -115,8 +121,7 @@ pub(crate) async fn fetch_manifest(
     // 格式 2：GitHub Release API（含 tag_name 字段）
     if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
         let version_str = tag.strip_prefix('v').unwrap_or(tag);
-        let version = Version::parse(version_str)
-            .map_err(UpdaterError::VersionParseFailed)?;
+        let version = Version::parse(version_str).map_err(UpdaterError::VersionParseFailed)?;
         let release_date = body
             .get("published_at")
             .and_then(|v| v.as_str())
@@ -125,54 +130,32 @@ pub(crate) async fn fetch_manifest(
             .get("body")
             .and_then(|v| v.as_str())
             .map(|v| v.to_owned());
-        let assets: Vec<_> = body
+        let assets: Vec<serde_json::Value> = body
             .get("assets")
             .and_then(|v| v.as_array())
             .into_iter()
             .flatten()
+            .cloned()
             .collect();
         let mut platforms: HashMap<String, PlatformPackage> = HashMap::new();
-        for asset in &assets {
-            let name = asset
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            // .sha256 伴随文件不是下载包本身，跳过（由 fetch_sha256_assoc 使用）
-            if name.ends_with(".sha256") {
-                continue;
-            }
-            let dl_url = asset
-                .get("browser_download_url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let size = asset.get("size").and_then(|v| v.as_u64());
-            // 从 asset 文件名推断平台键
-            let platform_key = if name.contains("windows") {
-                "windows-x64"
-            } else if name.contains("linux") {
-                "linux-x64"
-            } else if name.contains("macos") || name.contains("darwin") {
-                if name.contains("arm") || name.contains("aarch64") {
-                    "macos-arm64"
-                } else {
-                    "macos-x64"
-                }
-            } else {
-                continue;
-            };
+        // G11：抽纯函数按 "os-arch" 推断平台键，多资产 release 中
+        // windows-x64 / windows-arm64 各占一键互不覆盖
+        for (platform_key, dl_url, size, name) in collect_zip_assets(&assets) {
             // 从 release assets 中找 `.sha256` 伴随文件，拿到真实哈希（U2：默认 GitHub
             // 源此前 sha256 恒为空，更新包无任何完整性校验）
-            let sha256 = fetch_sha256_assoc(client, &assets, &name).await;
+            let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
+            let sha256 =
+                fetch_sha256_with_retry(|| fetch_sha256_assoc(client, &asset_refs, &name)).await;
             if sha256.is_empty() {
                 tracing::warn!(
-                    "GitHub 发布中未找到 {name} 的 .sha256 伴随文件，将降级为信任 HTTPS"
+                    "GitHub 发布中未找到 {name} 的 .sha256 伴随文件（重试后仍为空），\
+                     降级为信任 HTTPS"
                 );
             }
             platforms.insert(
-                platform_key.to_string(),
+                platform_key,
                 PlatformPackage {
-                    url: dl_url.to_string(),
+                    url: dl_url,
                     sha256,
                     size,
                 },
@@ -196,11 +179,97 @@ pub(crate) async fn fetch_manifest(
     )))
 }
 
+/// 从资产文件名推断平台键（`"{os}-{arch}"`，G11）
+///
+/// windows / linux 按 `x86_64|x64|amd64` 与 `aarch64|arm64|arm` 关键字区分
+/// 架构；macos 保持旧语义（无架构词默认 x64，兼容 universal 包按 x64 归类）。
+/// 返回 `None` 表示无法识别的组合，调用方 warn 后跳过。
+fn infer_platform_key(name: &str) -> Option<&'static str> {
+    let is_x64 = name.contains("x86_64") || name.contains("x64") || name.contains("amd64");
+    let is_arm = name.contains("aarch64") || name.contains("arm64") || name.contains("arm");
+    if name.contains("windows") {
+        match (is_x64, is_arm) {
+            (true, _) => Some("windows-x64"),
+            (_, true) => Some("windows-arm64"),
+            // windows 资产必须带架构词：盲目归入固定架构会让 arm64 顶掉 x64
+            _ => None,
+        }
+    } else if name.contains("linux") {
+        match (is_x64, is_arm) {
+            (true, _) => Some("linux-x64"),
+            (_, true) => Some("linux-arm64"),
+            _ => None,
+        }
+    } else if name.contains("macos") || name.contains("darwin") {
+        if is_arm {
+            Some("macos-arm64")
+        } else {
+            Some("macos-x64")
+        }
+    } else {
+        None
+    }
+}
+
+/// 从 GitHub release assets 中提取 zip 下载包（纯函数，G11 便于单测）
+///
+/// 过滤规则：
+/// - `.sha256` 伴随文件不是下载包本身，跳过（由 `fetch_sha256_assoc` 使用）；
+/// - 无法推断平台键（含 `os` 但无法识别 `arch`）的资产 warn 后跳过。
+///
+/// 返回 `(平台键, 下载 URL, 大小, 小写资产名)` 列表；资产名供后续
+/// `.sha256` 伴随文件查找复用。
+pub(crate) fn collect_zip_assets(
+    assets: &[serde_json::Value],
+) -> Vec<(String, String, Option<u64>, String)> {
+    let mut result = Vec::new();
+    for asset in assets {
+        let name = asset
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if name.ends_with(".sha256") {
+            continue;
+        }
+        let Some(key) = infer_platform_key(&name) else {
+            tracing::warn!("无法识别资产 {name} 的平台/架构组合，跳过");
+            continue;
+        };
+        let dl_url = asset
+            .get("browser_download_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let size = asset.get("size").and_then(|v| v.as_u64());
+        result.push((key.to_string(), dl_url, size, name));
+    }
+    result
+}
+
+/// 拉取伴随 `.sha256` 内容，为空/缺失时重试一次（G12）
+///
+/// 抽成泛型小函数便于单测重试决策：首次成功非空只拉一次；
+/// 为空（镜像返回空体/未命中伴随文件）再拉一次，仍为空由调用方降级。
+async fn fetch_sha256_with_retry<F, Fut>(mut fetch: F) -> String
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = String>,
+{
+    let first = fetch().await;
+    if !first.is_empty() {
+        return first;
+    }
+    tracing::warn!("伴随 .sha256 拉取为空，重试一次");
+    fetch().await
+}
+
 /// 从 GitHub release assets 中查找 zip 对应的 `.sha256` 伴随文件并下载其内容
 ///
 /// 返回伴随文件首行首个空白分隔字段（即哈希值）；找不到 / 下载失败时返回空串
 /// （调用方据此降级为信任 HTTPS）。
-async fn fetch_sha256_assoc(
+/// pub(crate)：environment/git.rs（MinGit 校验，R3）复用同一伴随文件模式。
+pub(crate) async fn fetch_sha256_assoc(
     client: &reqwest::Client,
     assets: &[&serde_json::Value],
     zip_name: &str,
@@ -288,6 +357,7 @@ pub(crate) fn compare_versions(current: &Version, remote: &Version) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn v(s: &str) -> Version {
         Version::parse(s).expect("测试用合法版本号")
@@ -360,5 +430,113 @@ mod tests {
     fn test_compare_versions_same_major_different_minor() {
         // 预发布链中版本号本身也在推进，须同时满足"更新"与"前缀一致"
         assert!(compare_versions(&v("5.0.0-alpha.1"), &v("5.1.0-alpha.1")));
+    }
+
+    /// G11：平台键按架构区分——windows/linux 资产须带架构词，
+    /// 多资产 release 中 x64 与 arm64 各占一键互不覆盖
+    #[test]
+    fn test_infer_platform_key_arch_aware() {
+        // windows 区分 x64 / arm64
+        assert_eq!(infer_platform_key("campus-auth-windows-x64.zip"), Some("windows-x64"));
+        assert_eq!(
+            infer_platform_key("campus-auth_5.0.0_windows_arm64.zip"),
+            Some("windows-arm64")
+        );
+        assert_eq!(
+            infer_platform_key("campus-auth-aarch64-pc-windows-msvc.zip"),
+            Some("windows-arm64")
+        );
+        // linux 区分 x64 / arm64
+        assert_eq!(infer_platform_key("campus-auth-linux-x86_64.zip"), Some("linux-x64"));
+        assert_eq!(infer_platform_key("campus-auth-linux-arm64.zip"), Some("linux-arm64"));
+        assert_eq!(
+            infer_platform_key("campus-auth-aarch64-unknown-linux-gnu.zip"),
+            Some("linux-arm64")
+        );
+        // macos：arm 词归 arm64，无架构词默认 x64（兼容 universal）
+        assert_eq!(infer_platform_key("campus-auth-macos-arm64.zip"), Some("macos-arm64"));
+        assert_eq!(infer_platform_key("campus-auth-darwin-x64.zip"), Some("macos-x64"));
+        assert_eq!(infer_platform_key("campus-auth-macos-universal.zip"), Some("macos-x64"));
+        // windows/linux 无架构词 → 无法识别（None，调用方 warn 跳过）
+        assert_eq!(infer_platform_key("campus-auth-windows.zip"), None);
+        assert_eq!(infer_platform_key("campus-auth-linux.zip"), None);
+        // 非 OS 关键字
+        assert_eq!(infer_platform_key("checksums.txt"), None);
+    }
+
+    /// G11：多资产 release 中 arm64 不得顶掉 x64（HashMap 键并存）
+    #[test]
+    fn test_collect_zip_assets_multi_arch_coexist() {
+        let assets: Vec<serde_json::Value> = [
+            r#"{"name": "Campus-Auth-5.0.0-windows-x64.zip", "browser_download_url": "https://x64", "size": 100}"#,
+            r#"{"name": "Campus-Auth-5.0.0-windows-arm64.zip", "browser_download_url": "https://arm64", "size": 90}"#,
+            r#"{"name": "Campus-Auth-5.0.0-macos-arm64.zip", "browser_download_url": "https://mac", "size": 80}"#,
+            // 伴随 sha256 文件与无法识别架构的资产都应被过滤
+            r#"{"name": "Campus-Auth-5.0.0-windows-x64.zip.sha256", "browser_download_url": "https://sha"}"#,
+            r#"{"name": "Campus-Auth-5.0.0-windows.zip", "browser_download_url": "https://unknown-arch"}"#,
+        ]
+        .iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+
+        let mut collected = collect_zip_assets(&assets);
+        collected.sort();
+        assert_eq!(collected.len(), 3, "sha256 伴随文件与无架构资产应被跳过");
+        // 三个平台键各自独立，arm64 不再覆盖 x64
+        let keys: Vec<&str> = collected.iter().map(|(k, ..)| k.as_str()).collect();
+        assert_eq!(keys, vec!["macos-arm64", "windows-arm64", "windows-x64"]);
+        let x64 = collected.iter().find(|(k, ..)| k == "windows-x64").unwrap();
+        assert_eq!(x64.1, "https://x64");
+    }
+
+    /// G12：伴随 .sha256 首次拉取非空只拉一次；为空时重试一次
+    #[tokio::test]
+    async fn test_fetch_sha256_with_retry() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // 首次即非空：只调用一次
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls2 = calls.clone();
+        let result = fetch_sha256_with_retry(move || {
+            let calls = calls2.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                "abc123".to_string()
+            }
+        })
+        .await;
+        assert_eq!(result, "abc123");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // 首次为空：重试一次拿到值
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls2 = calls.clone();
+        let result = fetch_sha256_with_retry(move || {
+            let calls = calls2.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    String::new()
+                } else {
+                    "def456".to_string()
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, "def456");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // 两次均为空：维持空串（调用方降级信任 HTTPS）
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls2 = calls.clone();
+        let result = fetch_sha256_with_retry(move || {
+            let calls = calls2.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                String::new()
+            }
+        })
+        .await;
+        assert_eq!(result, "");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

@@ -6,19 +6,17 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use serde::Deserialize;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 
 use crate::tasks::{TaskApi, TaskRunApi};
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// GET /api/tasks — 列出全部自定义任务
-pub async fn list_tasks(
-    State(tasks): State<Arc<dyn TaskApi>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn list_tasks(State(tasks): State<Arc<dyn TaskApi>>) -> Result<Json<Value>, ApiError> {
     let tasks = tasks.list_all_tasks().await;
     Ok(data(tasks))
 }
@@ -55,35 +53,38 @@ pub async fn create_task(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<TaskCreateBody>,
 ) -> Result<Json<Value>, ApiError> {
+    // 共享字段构造一次，三分支复用（原先三处重复构造，TaskKind 访问器收敛）
+    let common = crate::tasks::CommonFields {
+        task_id: body.id.clone(),
+        name: body.name,
+        description: String::new(),
+    };
     let kind = match body.kind.as_deref() {
+        // 与 G6 同语义：缺失/空串/browser → 浏览器任务（向后兼容）；
+        // 存在但未知 → 明确 400，不静默回退
+        None | Some("") | Some("browser") => {
+            crate::tasks::TaskKind::Browser(crate::tasks::TaskConfig {
+                common,
+                url: body.url.unwrap_or_default(),
+                ..Default::default()
+            })
+        }
         Some("shell") => crate::tasks::TaskKind::Shell(crate::tasks::ShellTaskConfig {
-            common: crate::tasks::CommonFields {
-                task_id: body.id.clone(),
-                name: body.name,
-                description: String::new(),
-            },
+            common: common.clone(),
             command: body.command.unwrap_or_default(),
             timeout: 300,
             shell_path: None,
         }),
         Some("script") => crate::tasks::TaskKind::Script(crate::tasks::ScriptTaskConfig {
-            common: crate::tasks::CommonFields {
-                task_id: body.id.clone(),
-                name: body.name,
-                description: String::new(),
-            },
+            common: common.clone(),
             content: body.script,
             ..Default::default()
         }),
-        _ => crate::tasks::TaskKind::Browser(crate::tasks::TaskConfig {
-            common: crate::tasks::CommonFields {
-                task_id: body.id.clone(),
-                name: body.name,
-                description: String::new(),
-            },
-            url: body.url.unwrap_or_default(),
-            ..Default::default()
-        }),
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "未知任务类型 kind: {other}（支持 browser / script / shell）"
+            )));
+        }
     };
     tasks.save_task(&body.id, &kind).await?;
     Ok(data(Value::String("ok".into())))
@@ -107,8 +108,8 @@ pub async fn update_task(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let task: crate::tasks::TaskKind = serde_json::from_value(body)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let task: crate::tasks::TaskKind =
+        serde_json::from_value(body).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     tasks.save_task(&id, &task).await?;
     Ok(data(Value::String("ok".into())))
 }
@@ -183,7 +184,9 @@ pub async fn import_tasks(
             Err(e) => failed.push(json!({ "id": id, "reason": e.to_string() })),
         }
     }
-    Ok(data(serde_json::json!({ "imported": imported, "failed": failed })))
+    Ok(data(
+        serde_json::json!({ "imported": imported, "failed": failed }),
+    ))
 }
 
 /// GET /api/tasks/export/{id} — 导出指定任务的完整配置
@@ -234,22 +237,6 @@ mod tests {
         executed: Vec<String>,
     }
 
-    fn kind_common(kind: &TaskKind) -> &crate::tasks::CommonFields {
-        match kind {
-            TaskKind::Browser(c) => &c.common,
-            TaskKind::Script(c) => &c.common,
-            TaskKind::Shell(c) => &c.common,
-        }
-    }
-
-    fn kind_type_name(kind: &TaskKind) -> &'static str {
-        match kind {
-            TaskKind::Browser(_) => "browser",
-            TaskKind::Script(_) => "script",
-            TaskKind::Shell(_) => "shell",
-        }
-    }
-
     /// 内存 TaskApi：无需磁盘与完整 ServiceContainer（M1）
     struct MockTaskApi(Arc<std::sync::Mutex<MockInner>>);
 
@@ -263,9 +250,9 @@ mod tests {
                 .iter()
                 .map(|(id, kind)| TaskSummary {
                     id: id.clone(),
-                    name: kind_common(kind).name.clone(),
-                    description: kind_common(kind).description.clone(),
-                    task_type: kind_type_name(kind).to_string(),
+                    name: kind.common().name.clone(),
+                    description: kind.common().description.clone(),
+                    task_type: kind.type_name().to_string(),
                 })
                 .collect()
         }
@@ -322,9 +309,9 @@ mod tests {
             Ok(TaskDetail {
                 summary: TaskSummary {
                     id: task_id.to_string(),
-                    name: kind_common(&kind).name.clone(),
-                    description: kind_common(&kind).description.clone(),
-                    task_type: kind_type_name(&kind).to_string(),
+                    name: kind.common().name.clone(),
+                    description: kind.common().description.clone(),
+                    task_type: kind.type_name().to_string(),
                 },
                 config: kind,
             })
@@ -344,7 +331,12 @@ mod tests {
         }
 
         fn has_task(&self, task_id: &str) -> bool {
-            self.0.lock().unwrap().tasks.iter().any(|(id, _)| id == task_id)
+            self.0
+                .lock()
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|(id, _)| id == task_id)
         }
     }
 
@@ -358,7 +350,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .executed
-                .push(kind_common(task).task_id.clone());
+                .push(task.common().task_id.clone());
             Ok(TaskResult {
                 success: true,
                 output: "mock".into(),
@@ -509,7 +501,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let inner = inner.lock().unwrap();
         assert!(matches!(
-            inner.tasks.iter().find(|(id, _)| id == "s1").map(|(_, k)| k),
+            inner
+                .tasks
+                .iter()
+                .find(|(id, _)| id == "s1")
+                .map(|(_, k)| k),
             Some(TaskKind::Script(_))
         ));
     }
@@ -552,7 +548,14 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let inner = inner.lock().unwrap();
-        let TaskKind::Browser(cfg) = inner.tasks.iter().find(|(id, _)| id == "t1").unwrap().1.clone() else {
+        let TaskKind::Browser(cfg) = inner
+            .tasks
+            .iter()
+            .find(|(id, _)| id == "t1")
+            .unwrap()
+            .1
+            .clone()
+        else {
             panic!("应为 browser 任务");
         };
         assert_eq!(cfg.common.name, "改名");
@@ -587,7 +590,8 @@ mod tests {
                     .uri("/api/tasks/order")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"all": ["t1", "t2"], "scripts": ["t2", "s1"]}).to_string(),
+                        serde_json::json!({"all": ["t1", "t2"], "scripts": ["t2", "s1"]})
+                            .to_string(),
                     ))
                     .unwrap(),
             )

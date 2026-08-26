@@ -5,13 +5,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::ConfigApi;
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 #[derive(Deserialize)]
 pub struct AutostartModeBody {
@@ -93,11 +93,7 @@ pub async fn set_autostart_mode(
         "login_once" => crate::config::StartupAction::LoginOnce,
         "monitor" => crate::config::StartupAction::Monitor,
         "none" => crate::config::StartupAction::None,
-        other => {
-            return Err(ApiError::BadRequest(format!(
-                "未知的自启动模式: {other}"
-            )))
-        }
+        other => return Err(ApiError::BadRequest(format!("未知的自启动模式: {other}"))),
     };
     settings.global.app.startup_action = action;
     config.save_settings(&settings).await?;

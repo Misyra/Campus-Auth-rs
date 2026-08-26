@@ -14,9 +14,7 @@ use crate::environment::{
 /// 2. 确保 Python 虚拟环境就绪（uv sync 或跳过）
 /// 3. 安装 Playwright Chromium 浏览器
 /// 4. 可选安装 MinGit（仅开发者模式按需）
-pub async fn bootstrap_capability(
-    mgr: &EnvironmentManager,
-) -> Result<(), EnvironmentError> {
+pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
     tracing::info!("开始引导浏览器自动化能力...");
 
     // 先做一次快速检查，跳过已就绪的阶段
@@ -25,20 +23,12 @@ pub async fn bootstrap_capability(
     // ── 阶段 1: 确保 uv 就绪 ──
     if !mgr.read_status().uv_ready {
         mgr.write_status(|s| s.stage = BootstrapStage::DownloadingUv);
-        mgr.report_progress(
-            "downloading_uv",
-            PROGRESS_UV_DOWNLOAD.0,
-            "正在下载 uv...",
-        );
+        mgr.report_progress("downloading_uv", PROGRESS_UV_DOWNLOAD.0, "正在下载 uv...");
 
         match crate::environment::uv::download_uv(mgr).await {
             Ok(_) => {
                 mgr.write_status(|s| s.uv_ready = true);
-                mgr.report_progress(
-                    "downloading_uv",
-                    PROGRESS_UV_DOWNLOAD.1,
-                    "uv 下载完成",
-                );
+                mgr.report_progress("downloading_uv", PROGRESS_UV_DOWNLOAD.1, "uv 下载完成");
             }
             Err(e) => {
                 let msg = format!("uv 下载失败: {}", e);
@@ -68,11 +58,7 @@ pub async fn bootstrap_capability(
         match crate::environment::python::ensure_venv(mgr).await {
             Ok(_) => {
                 mgr.write_status(|s| s.python_ready = true);
-                mgr.report_progress(
-                    "syncing_venv",
-                    PROGRESS_VENV_SYNC.1,
-                    "Python 环境安装完成",
-                );
+                mgr.report_progress("syncing_venv", PROGRESS_VENV_SYNC.1, "Python 环境安装完成");
             }
             Err(e) => {
                 let msg = format!("Python 环境安装失败: {}", e);
@@ -132,11 +118,7 @@ pub async fn bootstrap_capability(
         match crate::environment::git::download_mingit(mgr).await {
             Ok(_) => {
                 mgr.write_status(|s| s.git_ready = true);
-                mgr.report_progress(
-                    "downloading_mingit",
-                    PROGRESS_MINGIT.1,
-                    "MinGit 下载完成",
-                );
+                mgr.report_progress("downloading_mingit", PROGRESS_MINGIT.1, "MinGit 下载完成");
             }
             Err(e) => {
                 // MinGit 为可选组件，失败不阻断引导流程
@@ -168,7 +150,10 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     // 1. 检查 uv（优先本地，其次系统 PATH + 最低版本校验）
     let uv_exe = env_path.join(crate::environment::UV_EXE_NAME);
     let uv_ready = if uv_exe.exists() {
-        true
+        // F11：本地文件存在不等于可用——上次安装的 copy 回退若中途失败会残留
+        // 半成品 uv.exe，下次启动仅凭 exists() 即被误判就绪。改为实际执行
+        // `uv --version` 验证可启动（与 python_executable_works 模式一致）。
+        crate::environment::uv::uv_executable_works(&uv_exe).await
     } else {
         // PATH 上的 uv 需满足最低版本要求，否则视为未就绪（触发下载最新版）
         crate::environment::uv::check_uv_on_path().await
@@ -188,7 +173,9 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     };
 
     // 4. 检查 Git（可选）
-    let git_ready = crate::environment::git::check_git(mgr).await.unwrap_or(false);
+    let git_ready = crate::environment::git::check_git(mgr)
+        .await
+        .unwrap_or(false);
 
     // 5. 综合判定
     let capability_ready = uv_ready && python_ready && playwright_ready;
@@ -228,9 +215,7 @@ fn check_playwright_chromium_installed() -> bool {
     #[cfg(target_os = "windows")]
     {
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            if playwright_dir_has_chromium(
-                PathBuf::from(local_app_data).join("ms-playwright"),
-            ) {
+            if playwright_dir_has_chromium(PathBuf::from(local_app_data).join("ms-playwright")) {
                 return true;
             }
         }
@@ -255,9 +240,8 @@ fn check_playwright_chromium_installed() -> bool {
     #[cfg(target_os = "linux")]
     {
         if let Some(home) = std::env::var_os("HOME") {
-            if playwright_dir_has_chromium(
-                PathBuf::from(home).join(".cache").join("ms-playwright"),
-            ) {
+            if playwright_dir_has_chromium(PathBuf::from(home).join(".cache").join("ms-playwright"))
+            {
                 return true;
             }
         }
@@ -288,15 +272,21 @@ fn playwright_dir_has_chromium(dir: PathBuf) -> bool {
 
 /// 重试安装（POST /api/system/retry-install 触发）
 ///
-/// 重置状态后重新开始引导。
+/// 重置状态后重新开始引导。经 BootstrapGate 排他执行（F1）：
+/// 显式重装与 ensure_capability 触发的引导共享同一把互斥锁，
+/// 防止并发重置/引导踩踏同一 .venv 与固定临时名。
 pub async fn retry_install(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
-    // 重置状态后重新开始引导
-    mgr.write_status(|s| {
-        s.stage = BootstrapStage::Idle;
-        s.progress = None;
-        s.last_error = None;
-    });
-    bootstrap_capability(mgr).await
+    mgr.bootstrap_gate
+        .run_exclusive(async {
+            // 重置状态后重新开始引导
+            mgr.write_status(|s| {
+                s.stage = BootstrapStage::Idle;
+                s.progress = None;
+                s.last_error = None;
+            });
+            bootstrap_capability(mgr).await
+        })
+        .await
 }
 
 /// 标记安装失败状态

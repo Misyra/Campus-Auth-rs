@@ -8,12 +8,11 @@ pub mod uv;
 pub use bootstrap::{bootstrap_capability, check_environment, retry_install};
 pub use git::{check_git, download_mingit};
 pub use python::{ensure_venv, install_playwright};
-pub use uv::{
-    check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256,
-};
+pub use uv::{check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256};
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
@@ -78,8 +77,7 @@ pub const PLAYWRIGHT_INSTALL_MAX_RETRIES: u32 = 3;
 /// playwright install 重试间隔
 pub const PLAYWRIGHT_INSTALL_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// MinGit GitHub Releases 基础 URL
-pub const MINGIT_RELEASES_BASE: &str =
-    "https://github.com/git-for-windows/git/releases/download";
+pub const MINGIT_RELEASES_BASE: &str = "https://github.com/git-for-windows/git/releases/download";
 /// MinGit 下载目标
 pub const MINGIT_TARGET: &str = "64-bit";
 /// MinGit 下载超时
@@ -108,6 +106,13 @@ pub enum EnvironmentError {
     #[error("environment 目录无写权限: {path}")]
     DirectoryNotWritable { path: PathBuf },
 
+    /// 并发等待者复用前一轮引导的失败结果（F1）
+    ///
+    /// `EnvironmentError` 内含 reqwest/io 错误不可 Clone，BootstrapGate 的
+    /// 失败复用改为存 Display 字符串、经本变体重构，消息保真、变体信息有损。
+    #[error("环境引导失败（复用并发前一轮结果）: {0}")]
+    BootstrapFailedShared(String),
+
     /// uv 下载失败（HTTP 层错误）
     #[error("uv 下载失败 (重试 {retries} 次): {source}")]
     UvDownloadFailed {
@@ -133,7 +138,10 @@ pub enum EnvironmentError {
 
     /// uv sync 失败
     #[error("uv sync 失败 (exit code={exit_code:?}): {stderr}")]
-    UvSyncFailed { exit_code: Option<i32>, stderr: String },
+    UvSyncFailed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 
     /// uv sync 超时
     #[error("uv sync 超时 (>{timeout_secs}s)")]
@@ -158,6 +166,10 @@ pub enum EnvironmentError {
     /// MinGit 下载失败
     #[error("MinGit 下载失败: {0}")]
     MinGitDownloadFailed(String),
+
+    /// MinGit 下载文件 SHA256 校验失败
+    #[error("MinGit 下载文件 SHA256 校验失败: expected={expected}, got={got}")]
+    MinGitChecksumMismatch { expected: String, got: String },
 
     /// 安装被取消
     #[error("安装被取消")]
@@ -204,6 +216,82 @@ pub struct EnvironmentStatus {
     pub last_error: Option<String>,
 }
 
+/// 引导互斥门（F1）：串行化并发的 `ensure_capability` / `retry_install`
+///
+/// 此前三处调用（tasks/executor、web/routes/ocr、web/routes/system）可并发
+/// check-then-act 触发 bootstrap，踩踏同一 `.venv` 与固定临时名（uv.zip.tmp /
+/// uv.exe.tmp）。本门以单把 tokio Mutex 串行化，语义：
+/// - 快速路径：已就绪直接返回（无锁开销）；
+/// - 并发等待者获得锁后**重新检查就绪状态**（双检），已就绪则跳过引导；
+/// - 等待期间若已有一轮引导结束（无论成败，以代数判断）且仍未就绪，
+///   直接复用该轮的失败结果，避免每个等待者各自重跑完整下载/引导流程；
+/// - `run_exclusive` 供显式重装（retry_install）使用：不双检、不复用，
+///   但与 ensure 共享同一把锁，防止重装与引导并发踩踏。
+pub(crate) struct BootstrapGate {
+    /// 引导互斥锁：持锁跨越整个 bootstrap 过程（含全部下载/解压/同步 await）
+    lock: tokio::sync::Mutex<()>,
+    /// 引导完成代数：每次 bootstrap 结束（无论成败）单调递增
+    generation: AtomicU64,
+    /// 上一次引导的失败结果（成功时清除），供并发等待者复用；
+    /// 存 Display 字符串而非错误值（EnvironmentError 含不可 Clone 的源错误）
+    last_error: Mutex<Option<String>>,
+}
+
+impl BootstrapGate {
+    /// 构造初始门（空闲、零代、无失败记录）
+    fn new() -> Self {
+        Self {
+            lock: tokio::sync::Mutex::new(()),
+            generation: AtomicU64::new(0),
+            last_error: Mutex::new(None),
+        }
+    }
+
+    /// 串行化执行引导（见类型级注释的完整语义）
+    pub(crate) async fn ensure<B, F>(&self, is_ready: impl Fn() -> bool, bootstrap: B) -> Result<(), EnvironmentError>
+    where
+        B: FnOnce() -> F,
+        F: std::future::Future<Output = Result<(), EnvironmentError>>,
+    {
+        // 快速路径：已就绪直接返回，不触碰互斥锁
+        if is_ready() {
+            return Ok(());
+        }
+        // 记录进入时的代数：等待期间已有引导结束则以代数差识别
+        let entry_generation = self.generation.load(Ordering::Acquire);
+        let _guard = self.lock.lock().await;
+        // 双检：持锁期间可能已被前一个执行者完成引导
+        if is_ready() {
+            return Ok(());
+        }
+        if self.generation.load(Ordering::Acquire) > entry_generation {
+            // 等待期间已有一轮引导结束且仍未就绪 → 复用该轮失败结果
+            if let Some(message) = self
+                .last_error
+                .lock()
+                .expect("BootstrapGate last_error 锁中毒")
+                .clone()
+            {
+                return Err(EnvironmentError::BootstrapFailedShared(message));
+            }
+            // 防御性兜底：成功引导必然置 ready，理论上不可达
+            return Ok(());
+        }
+        let result = bootstrap().await;
+        // 记录失败结果供后续等待者复用（成功时清除）；存 Display 字符串
+        *self.last_error.lock().expect("BootstrapGate last_error 锁中毒") =
+            result.as_ref().err().map(|e| e.to_string());
+        self.generation.fetch_add(1, Ordering::Release);
+        result
+    }
+
+    /// 仅持锁执行（显式重装路径）：与 ensure 互斥但不做双检/结果复用
+    pub(crate) async fn run_exclusive<T>(&self, f: impl std::future::Future<Output = T>) -> T {
+        let _guard = self.lock.lock().await;
+        f.await
+    }
+}
+
 /// 环境管理器：管理 uv/Python/Playwright 浏览器能力
 pub struct EnvironmentManager {
     /// 基准路径（exe 所在目录）
@@ -224,6 +312,8 @@ pub struct EnvironmentManager {
     git_download_enabled: bool,
     /// 引导完成回调（成功重建环境时触发，用于复位 Bridge 熔断计数 B3）
     on_bootstrap_done: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// 引导互斥门（F1）：串行化并发 ensure_capability / retry_install
+    pub(crate) bootstrap_gate: BootstrapGate,
 }
 
 /// Web 层消费的环境能力抽象（M1 细粒度 state：environment 域）
@@ -281,7 +371,11 @@ impl EnvironmentApi for EnvironmentManager {
 
 impl EnvironmentManager {
     /// 构造环境管理器
-    pub fn new(base_path: PathBuf, status_manager: Arc<StatusManager>, git_download_enabled: bool) -> Arc<Self> {
+    pub fn new(
+        base_path: PathBuf,
+        status_manager: Arc<StatusManager>,
+        git_download_enabled: bool,
+    ) -> Arc<Self> {
         let env_path = base_path.join(ENV_DIR);
         let worker_project_path = base_path.join(WORKER_PROJECT_DIR);
         Arc::new(Self {
@@ -303,6 +397,7 @@ impl EnvironmentManager {
             cancel_token: CancellationToken::new(),
             git_download_enabled,
             on_bootstrap_done: Mutex::new(None),
+            bootstrap_gate: BootstrapGate::new(),
         })
     }
 
@@ -311,12 +406,19 @@ impl EnvironmentManager {
     /// 用于复位 Bridge 的连续 spawn 失败熔断计数（B3）：环境修复后 Worker
     /// 才有重新 spawn 成功的可能，此时解除熔断。
     pub fn set_on_bootstrap_done(&self, cb: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_bootstrap_done.lock().expect("on_bootstrap_done 锁中毒") = Some(cb);
+        *self
+            .on_bootstrap_done
+            .lock()
+            .expect("on_bootstrap_done 锁中毒") = Some(cb);
     }
 
     /// 触发引导完成回调（内部，引导成功路径调用）
     pub(crate) fn fire_bootstrap_done(&self) {
-        let cb = self.on_bootstrap_done.lock().expect("on_bootstrap_done 锁中毒").clone();
+        let cb = self
+            .on_bootstrap_done
+            .lock()
+            .expect("on_bootstrap_done 锁中毒")
+            .clone();
         if let Some(cb) = cb {
             cb();
         }
@@ -324,17 +426,26 @@ impl EnvironmentManager {
 
     /// 能力是否就绪
     pub fn is_ready(&self) -> bool {
-        self.status.read().expect("EnvironmentStatus 读锁中毒").capability_ready
+        self.status
+            .read()
+            .expect("EnvironmentStatus 读锁中毒")
+            .capability_ready
     }
 
     /// 能力是否就绪（capability_ready 别名，供 Bridge 等调用）
     pub fn capability_ready(&self) -> bool {
-        self.status.read().expect("EnvironmentStatus 读锁中毒").capability_ready
+        self.status
+            .read()
+            .expect("EnvironmentStatus 读锁中毒")
+            .capability_ready
     }
 
     /// 返回当前环境状态快照
     pub fn status(&self) -> EnvironmentStatus {
-        self.status.read().expect("EnvironmentStatus 读锁中毒").clone()
+        self.status
+            .read()
+            .expect("EnvironmentStatus 读锁中毒")
+            .clone()
     }
 
     /// Python 解释器绝对路径
@@ -346,14 +457,23 @@ impl EnvironmentManager {
     ///
     /// OCR 依赖（ddddocr）不在此自动补装：由前端显式"安装/卸载"经
     /// `uv add/remove ddddocr` 管理，避免自动化与显式卸载互相冲突。
+    ///
+    /// F1：经 BootstrapGate 串行化——并发调用者等待锁后二次检查就绪状态，
+    /// 只有一个调用者真正执行引导，其余复用其结果，避免并发 bootstrap
+    /// 踩踏同一 .venv 与固定临时名（uv.zip.tmp / uv.exe.tmp）。
     pub async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
-        if self.is_ready() {
-            return Ok(());
-        }
-        bootstrap_capability(self).await
+        self.bootstrap_gate
+            .ensure(
+                || self.is_ready(),
+                || async { bootstrap_capability(self).await },
+            )
+            .await
     }
 
     /// 重新安装环境能力
+    ///
+    /// 经 BootstrapGate 的排他执行与 ensure_capability 互斥（F1）：
+    /// 显式重装不允许与引导并发进行。
     pub async fn retry_install(&self) -> Result<(), EnvironmentError> {
         retry_install(self).await
     }
@@ -426,6 +546,7 @@ impl EnvironmentManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     /// 脚本执行器与 Bridge 必须引用同一个 python_worker/.venv。
     #[test]
@@ -438,7 +559,123 @@ mod tests {
         );
         assert_eq!(
             manager.python_path(),
-            dir.path().join(WORKER_PROJECT_DIR).join(PYTHON_EXE_RELATIVE)
+            dir.path()
+                .join(WORKER_PROJECT_DIR)
+                .join(PYTHON_EXE_RELATIVE)
         );
+    }
+
+    /// F1：并发 ensure 只触发一次真实引导——抢到锁的执行者跑引导，
+    /// 其余等待者复用其失败结果，避免并发 bootstrap 踩踏
+    /// 同一 .venv 与固定临时名（uv.zip.tmp / uv.exe.tmp）
+    #[tokio::test]
+    async fn test_bootstrap_gate_concurrent_single_execution() {
+        let gate = Arc::new(BootstrapGate::new());
+        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let gate = gate.clone();
+            let attempts = attempts.clone();
+            handles.push(tokio::spawn(async move {
+                // 模拟环境未就绪（is_ready 恒 false），强制走引导路径
+                gate.ensure(
+                    || false,
+                    move || {
+                        let attempts = attempts.clone();
+                        async move {
+                            attempts.fetch_add(1, Ordering::SeqCst);
+                            // 模拟一次耗时的引导过程（下载/sync）
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            Err(EnvironmentError::Cancelled)
+                        }
+                    },
+                )
+                .await
+            }));
+        }
+
+        let mut failures = 0;
+        for h in handles {
+            assert!(
+                matches!(
+                    h.await.unwrap(),
+                    Err(EnvironmentError::Cancelled)
+                        | Err(EnvironmentError::BootstrapFailedShared(_))
+                ),
+                "所有并发调用者应复用首个执行者的失败结果（首个拿到原始错误，\
+                 等待者经 BootstrapFailedShared 复用其摘要）"
+            );
+            failures += 1;
+        }
+        assert_eq!(failures, 8);
+        // 8 个并发请求只触发一次真实引导
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "并发 ensure 只允许触发一次 bootstrap"
+        );
+    }
+
+    /// F1：已就绪时走无锁快速路径，不触发引导
+    #[tokio::test]
+    async fn test_bootstrap_gate_ready_short_circuit() {
+        let gate = Arc::new(BootstrapGate::new());
+        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_in_bootstrap = attempts.clone();
+
+        let result = gate
+            .ensure(
+                || true, // 已就绪
+                move || {
+                    let attempts = attempts_in_bootstrap.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "就绪时不得触发引导");
+    }
+
+    /// F1：首个执行者成功置就绪后，并发等待者双检直接返回成功
+    #[tokio::test]
+    async fn test_bootstrap_gate_success_double_check() {
+        let gate = Arc::new(BootstrapGate::new());
+        let ready = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let gate = gate.clone();
+            let ready_check = ready.clone();
+            let ready_boot = ready.clone();
+            let attempts_boot = attempts.clone();
+            handles.push(tokio::spawn(async move {
+                gate.ensure(
+                    move || ready_check.load(Ordering::SeqCst),
+                    move || {
+                        let ready = ready_boot;
+                        let attempts = attempts_boot;
+                        async move {
+                            attempts.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            ready.store(true, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+            }));
+        }
+
+        for h in handles {
+            assert!(h.await.unwrap().is_ok());
+        }
+        // 引导只执行一次，三个并发调用者全部成功
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(ready.load(Ordering::SeqCst));
     }
 }

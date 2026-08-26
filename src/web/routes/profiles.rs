@@ -6,14 +6,14 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use serde::Deserialize;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::config::{ConfigApi, ProfileApi};
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 #[derive(Deserialize)]
 pub struct ProfileCreateBody {
@@ -72,7 +72,9 @@ pub async fn get_profile(
     let mut profile = config.load_profile(&id)?;
     // 避免将密码（密文）泄露给前端
     profile.password = String::new();
-    Ok(data(serde_json::json!({ "settings": serde_json::to_value(profile)? })))
+    Ok(data(
+        serde_json::json!({ "settings": serde_json::to_value(profile)? }),
+    ))
 }
 
 /// POST /api/profiles/{id} — 创建 Profile
@@ -410,7 +412,10 @@ mod tests {
                     .delete(delete_profile),
             )
             .route("/api/profiles/switch", axum::routing::post(switch_profile))
-            .route("/api/profiles/auto-switch", axum::routing::post(auto_switch))
+            .route(
+                "/api/profiles/auto-switch",
+                axum::routing::post(auto_switch),
+            )
             .with_state(state);
         (app, inner)
     }

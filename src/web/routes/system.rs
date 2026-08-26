@@ -4,12 +4,12 @@
 //! 或 `State<Arc<dyn ...>>` 提取，不再触达 `state.container`。
 
 use std::cmp::Reverse;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
-use axum::Json;
 use axum::response::IntoResponse;
 use futures::StreamExt;
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::bridge::BridgeApi;
 use crate::updater::UpdaterApi;
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 use crate::web::state::AppState;
 
 /// 背景图文件最大字节数（上传与远程下载统一）。
@@ -26,9 +26,7 @@ pub(crate) const MAX_BACKGROUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const BACKGROUND_UPLOAD_BODY_LIMIT: usize = MAX_BACKGROUND_IMAGE_BYTES + 64 * 1024;
 
 /// GET /api/system/info — 系统基本信息
-pub async fn system_info(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 读无锁运行时快照，避免每次请求走磁盘 mtime 校验（A2）
     let rt = state.config.runtime_snapshot();
     let base_path = state.config.base_path();
@@ -60,9 +58,7 @@ pub async fn system_info(
 /// 避免双方争锁导致"重启变退出"（旧实现直接 spawn 原参数 + 200ms 后
 /// `exit(0)` 硬退出，新进程抢锁失败即死，最终两个进程都消失）。
 /// 旧进程通过 shutdown_tx 走完整优雅关闭流程（而非 exit(0) 跳过清理）。
-pub async fn restart_app(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let exe = std::env::current_exe()
         .map_err(|e| ApiError::Internal(format!("获取可执行文件路径失败: {e}")))?;
     // args_os：参数含非法 Unicode 时 env::args() 会 panic，args_os 不会
@@ -105,9 +101,7 @@ fn spawn_exit_watchdog(secs: u64) {
 /// 不再使用 exit(0)；launcher 收到 shutdown_tx 信号后依次停止 Engine/Scheduler/
 /// Bridge/Tray/Axum，所有服务在各自 event loop 内清理资源后再退出进程。
 /// 若 30s 后仍未退出（优雅关闭挂死），最后防线才是 exit(0)。
-pub async fn shutdown_app(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 通知 launcher 开始优雅关闭
     let _ = state.shutdown_tx.send(());
     // watchdog：30s 后若仍存活则强制退出（所有服务本应在 30s 内完成清理）
@@ -116,9 +110,7 @@ pub async fn shutdown_app(
 }
 
 /// POST /api/agree — 用户同意协议（设置向导完成）
-pub async fn agree_terms(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn agree_terms(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 标记用户已同意协议（写入配置或标记文件）
     let config_dir = state.config.base_path().join("config");
     let agreed_file = config_dir.join(".agreed");
@@ -135,9 +127,7 @@ pub async fn health_check() -> Json<Value> {
 }
 
 /// GET /api/init-status — 初始化状态
-pub async fn init_status(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn init_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let config_dir = state.config.base_path().join("config");
     let agreed = config_dir.join(".agreed").exists();
     let env_status = state.environment.status();
@@ -209,21 +199,19 @@ pub async fn fetch_logs(
     let entries: Vec<crate::web::state::LogEntry> =
         tokio::task::spawn_blocking(move || -> Vec<crate::web::state::LogEntry> {
             // 查找最新的日志文件（按文件名排序，app.log.YYYY-MM-DD 格式）
-            let latest_file = std::fs::read_dir(&logs_dir)
-                .ok()
-                .and_then(|entries| {
-                    let mut files: Vec<_> = entries
-                        .filter_map(|e| e.ok())
-                        .filter(|e| {
-                            e.file_name()
-                                .to_str()
-                                .map(|n| n.starts_with("app.log"))
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    files.sort_by_key(|a| Reverse(a.file_name()));
-                    files.into_iter().next()
-                });
+            let latest_file = std::fs::read_dir(&logs_dir).ok().and_then(|entries| {
+                let mut files: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("app.log"))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                files.sort_by_key(|a| Reverse(a.file_name()));
+                files.into_iter().next()
+            });
             match latest_file {
                 Some(entry) => read_log_tail(&entry.path())
                     .map(|content| {
@@ -254,18 +242,27 @@ pub async fn fetch_logs(
 /// 保留所有级别；是否展示由前端筛选器决定，保证刷新历史与实时日志一致。
 fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let level = v.get("level").and_then(|x| x.as_str()).unwrap_or("INFO").to_string();
-    let timestamp = v.get("timestamp").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let level = v
+        .get("level")
+        .and_then(|x| x.as_str())
+        .unwrap_or("INFO")
+        .to_string();
+    let timestamp = v
+        .get("timestamp")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let message = v
         .get("fields")
         .and_then(|f| f.get("message"))
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_string();
-    let source = crate::web::state::normalize_source(
-        v.get("target").and_then(|x| x.as_str()).unwrap_or(""),
-    );
-    Some(crate::web::state::LogEntry::new(level, message, timestamp, source))
+    let source =
+        crate::web::state::normalize_source(v.get("target").and_then(|x| x.as_str()).unwrap_or(""));
+    Some(crate::web::state::LogEntry::new(
+        level, message, timestamp, source,
+    ))
 }
 
 /// GET /api/check-update — 检查更新
@@ -316,9 +313,7 @@ pub async fn apply_update(
 /// GET /api/browsers — 可用浏览器列表
 ///
 /// 返回基于配置的可用浏览器列表（自定义路径优先，其次 Playwright 内置浏览器）。
-pub async fn list_browsers(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let settings = state.config.load_settings_async().await;
     let env_status = state.environment.status();
     let playwright_installed = env_status.playwright_ready;
@@ -355,27 +350,21 @@ pub async fn list_browsers(
 #[cfg(target_os = "windows")]
 fn is_chrome_installed() -> bool {
     let candidates = [
-        std::path::PathBuf::from(
-            std::env::var("PROGRAMFILES").unwrap_or_default(),
-        )
-        .join("Google")
-        .join("Chrome")
-        .join("Application")
-        .join("chrome.exe"),
-        std::path::PathBuf::from(
-            std::env::var("PROGRAMFILES(X86)").unwrap_or_default(),
-        )
-        .join("Google")
-        .join("Chrome")
-        .join("Application")
-        .join("chrome.exe"),
-        std::path::PathBuf::from(
-            std::env::var("LOCALAPPDATA").unwrap_or_default(),
-        )
-        .join("Google")
-        .join("Chrome")
-        .join("Application")
-        .join("chrome.exe"),
+        std::path::PathBuf::from(std::env::var("PROGRAMFILES").unwrap_or_default())
+            .join("Google")
+            .join("Chrome")
+            .join("Application")
+            .join("chrome.exe"),
+        std::path::PathBuf::from(std::env::var("PROGRAMFILES(X86)").unwrap_or_default())
+            .join("Google")
+            .join("Chrome")
+            .join("Application")
+            .join("chrome.exe"),
+        std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
+            .join("Google")
+            .join("Chrome")
+            .join("Application")
+            .join("chrome.exe"),
     ];
     candidates.iter().any(|p| p.exists())
 }
@@ -398,20 +387,16 @@ fn is_chrome_installed() -> bool {
 #[cfg(target_os = "windows")]
 fn is_edge_installed() -> bool {
     let candidates = [
-        std::path::PathBuf::from(
-            std::env::var("PROGRAMFILES(X86)").unwrap_or_default(),
-        )
-        .join("Microsoft")
-        .join("Edge")
-        .join("Application")
-        .join("msedge.exe"),
-        std::path::PathBuf::from(
-            std::env::var("PROGRAMFILES").unwrap_or_default(),
-        )
-        .join("Microsoft")
-        .join("Edge")
-        .join("Application")
-        .join("msedge.exe"),
+        std::path::PathBuf::from(std::env::var("PROGRAMFILES(X86)").unwrap_or_default())
+            .join("Microsoft")
+            .join("Edge")
+            .join("Application")
+            .join("msedge.exe"),
+        std::path::PathBuf::from(std::env::var("PROGRAMFILES").unwrap_or_default())
+            .join("Microsoft")
+            .join("Edge")
+            .join("Application")
+            .join("msedge.exe"),
     ];
     candidates.iter().any(|p| p.exists())
 }
@@ -435,9 +420,7 @@ fn is_edge_installed() -> bool {
 /// POST /api/install/playwright — 安装 Playwright Chromium
 ///
 /// 触发环境管理器安装 Playwright 浏览器（异步执行，进度通过 StatusManager 推送）。
-pub async fn install_playwright(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn install_playwright(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let env = state.environment.clone();
     // 后台执行安装，避免阻塞响应；进度通过 StatusManager 推送
     tokio::spawn(async move {
@@ -453,9 +436,7 @@ pub async fn install_playwright(
 /// GET /api/icons — 可用图标列表
 ///
 /// 扫描资源图标目录返回可用图标。目录不存在时返回空列表。
-pub async fn list_icons(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let icons_dir = state.config.base_path().join("resources").join("icons");
     let mut icons = Vec::new();
     // 目录扫描用 tokio::fs，避免同步 std::fs 阻塞 tokio worker 线程
@@ -475,9 +456,7 @@ pub async fn list_icons(
 /// GET /api/uninstall/detect — 卸载检测
 ///
 /// 返回卸载时将清理的目录与文件清单（不执行实际删除），每项为一个 UninstallItem。
-pub async fn detect_uninstall(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn detect_uninstall(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let base = state.config.base_path();
     let mut items = Vec::new();
     for (key, label, sub) in [
@@ -510,16 +489,15 @@ pub async fn detect_uninstall(
 /// Batch 元字符：路径含这些字符时会被拼入 uninstall.bat 形成 cmd 注入
 /// （如 `--base-path 'C:\x" & del C:\ /s /q "'`），必须整体拒绝
 fn contains_batch_metachars(s: &str) -> bool {
-    s.chars().any(|c| matches!(c, '"' | '%' | '&' | '|' | '<' | '>' | '^'))
+    s.chars()
+        .any(|c| matches!(c, '"' | '%' | '&' | '|' | '<' | '>' | '^'))
 }
 
 /// POST /api/uninstall — 执行卸载
 ///
 /// 生成并写入卸载助手脚本（batch），然后退出程序。
 /// 用户手动运行该脚本完成残留文件清理。
-pub async fn uninstall(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn uninstall(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let base = state.config.base_path();
 
     // 如果 helper 存在则直接写入卸载脚本并退出
@@ -603,7 +581,14 @@ fn safe_filename(original: Option<String>) -> String {
 
 /// 根据 Content-Type 返回图片扩展名（不含 `.`）
 fn ext_from_content_type(ct: &str) -> Option<&'static str> {
-    match ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+    match ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "image/png" => Some("png"),
         "image/jpeg" => Some("jpg"),
         "image/gif" => Some("gif"),
@@ -654,8 +639,9 @@ fn validate_background_image(bytes: &[u8], content_type: &str) -> Result<&'stati
     {
         return Err(ApiError::BadRequest("不支持 SVG 背景图".into()));
     }
-    let detected = ext_from_magic(bytes)
-        .ok_or_else(|| ApiError::BadRequest("无法识别图片格式，仅支持 PNG/JPEG/GIF/WebP/BMP/ICO".into()))?;
+    let detected = ext_from_magic(bytes).ok_or_else(|| {
+        ApiError::BadRequest("无法识别图片格式，仅支持 PNG/JPEG/GIF/WebP/BMP/ICO".into())
+    })?;
     if let Some(declared) = ext_from_content_type(content_type) {
         if declared != detected {
             return Err(ApiError::BadRequest(format!(
@@ -678,7 +664,11 @@ fn background_filename(original: Option<String>, ext: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(48)
         .collect();
-    let stem = if normalized.is_empty() { "image" } else { &normalized };
+    let stem = if normalized.is_empty() {
+        "image"
+    } else {
+        &normalized
+    };
     format!("bg-{stem}-{}.{}", uuid::Uuid::new_v4(), ext)
 }
 
@@ -687,7 +677,10 @@ async fn read_response_limited(
     response: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, ApiError> {
-    if response.content_length().is_some_and(|size| size > limit as u64) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > limit as u64)
+    {
         return Err(ApiError::BadRequest(format!(
             "远程图片超过 {}MB 上限",
             limit / (1024 * 1024)
@@ -792,18 +785,15 @@ pub async fn fetch_url_background(
 ) -> Result<Json<Value>, ApiError> {
     // 本端点仅允许 HTTPS（SSRF 防护：scheme 校验 + DNS 钉扎 + 逐跳重定向
     // 校验统一由 secure_get 提供，修复"校验与请求二次解析"的 TOCTOU 缺口）
-    let parsed = url::Url::parse(&body.url)
-        .map_err(|e| ApiError::BadRequest(format!("无效 URL: {e}")))?;
+    let parsed =
+        url::Url::parse(&body.url).map_err(|e| ApiError::BadRequest(format!("无效 URL: {e}")))?;
     if parsed.scheme() != "https" {
         return Err(ApiError::BadRequest("仅允许 HTTPS URL".into()));
     }
-    let (response, _) = crate::web::ssrf::secure_get(
-        &body.url,
-        std::time::Duration::from_secs(30),
-        "Campus-Auth",
-    )
-    .await
-    .map_err(ApiError::BadRequest)?;
+    let (response, _) =
+        crate::web::ssrf::secure_get(&body.url, std::time::Duration::from_secs(30), "Campus-Auth")
+            .await
+            .map_err(ApiError::BadRequest)?;
     // 验证 Content-Type 为图片类型，防止下载非图片内容
     let content_type = response
         .headers()
@@ -956,7 +946,10 @@ mod tests {
         assert_eq!(ext_from_content_type("image/webp"), Some("webp"));
         assert_eq!(ext_from_content_type("image/svg+xml"), None);
         // 带参数 / 大小写混合 / 未知类型
-        assert_eq!(ext_from_content_type("image/PNG; charset=utf-8"), Some("png"));
+        assert_eq!(
+            ext_from_content_type("image/PNG; charset=utf-8"),
+            Some("png")
+        );
         assert_eq!(ext_from_content_type("application/octet-stream"), None);
         assert_eq!(ext_from_content_type(""), None);
     }

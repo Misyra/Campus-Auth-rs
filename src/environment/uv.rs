@@ -36,7 +36,11 @@ fn parse_uv_version<N: AsRef<str>>(output: N) -> Option<semver::Version> {
 /// 供 `check_environment` 的 PATH 回退分支使用：PATH 上的 uv 过旧则视为未就绪，
 /// 触发引导下载最新版，避免旧版 uv 语法/行为不兼容导致 sync 失败。
 pub async fn check_uv_on_path() -> bool {
-    let out = match tokio::process::Command::new("uv").arg("--version").output().await {
+    let out = match tokio::process::Command::new("uv")
+        .arg("--version")
+        .output()
+        .await
+    {
         Ok(o) => o,
         Err(_) => return false,
     };
@@ -51,6 +55,23 @@ pub async fn check_uv_on_path() -> bool {
         return false;
     };
     ver >= min
+}
+
+/// 实际启动本地 uv 并检查退出状态（F11）
+///
+/// 仅凭 `uv.exe` 文件存在会误判半成品为就绪（上次安装 copy 回退失败残留），
+/// 参照 `python_executable_works` 模式：执行 `uv --version` 验证确实可启动，
+/// Windows 上加 CREATE_NO_WINDOW 避免环境检查弹黑窗。
+pub(crate) async fn uv_executable_works(uv_exe: &Path) -> bool {
+    if !uv_exe.is_file() {
+        return false;
+    }
+    let mut cmd = uv_command(uv_exe);
+    cmd.arg("--version");
+    matches!(
+        tokio::time::timeout(Duration::from_secs(5), cmd.output()).await,
+        Ok(Ok(output)) if output.status.success()
+    )
 }
 
 /// 从 GitHub Releases 下载 uv 二进制、SHA256 校验、解压到 environment/uv.exe
@@ -86,10 +107,7 @@ pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
 
         // 1. 下载 SHA256 校验文件（多镜像）
         let expected_hash = match download_text_with_mirrors(mgr, &sha_urls).await {
-            Ok(text) => text.split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string(),
+            Ok(text) => text.split_whitespace().next().unwrap_or("").to_string(),
             Err(e) => {
                 tracing::warn!(
                     "下载 uv SHA256 文件失败 (尝试 {}/{}): {}",
@@ -170,17 +188,15 @@ pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
             return Err(EnvironmentError::UvExtractFailed(e));
         }
 
-        // 5. 原子安装：rename 到目标位置
+        // 5. 原子安装：rename 到目标位置（跨卷回退走 copy→临时名→rename）
         let _ = tokio::fs::remove_file(&tmp_zip).await;
 
-        if let Err(e) = tokio::fs::rename(&tmp_exe, &uv_dest).await {
-            // Windows 跨卷 rename 可能失败，回退到 copy + delete
-            tracing::warn!("rename 失败，尝试 copy: {}", e);
-            if let Err(e2) = tokio::fs::copy(&tmp_exe, &uv_dest).await {
-                let _ = tokio::fs::remove_file(&tmp_exe).await;
-                return Err(EnvironmentError::UvExtractFailed(e2));
-            }
+        // F11/A6：统一走 utils::io::rename_or_copy——rename 失败（跨卷）时
+        // copy 到目标同目录临时名再原子 rename，目标位置永远不会出现半成品；
+        // copy 失败自动清理临时文件，残留的 tmp_exe 一并清除。
+        if let Err(e) = crate::utils::io::rename_or_copy(&tmp_exe, &uv_dest).await {
             let _ = tokio::fs::remove_file(&tmp_exe).await;
+            return Err(EnvironmentError::UvExtractFailed(e));
         }
 
         // 6. 验证可执行
@@ -229,7 +245,11 @@ async fn fetch_latest_uv_version(mgr: &EnvironmentManager) -> Result<String, Env
                 continue;
             }
             Err(_) => {
-                tracing::debug!("GitHub API 镜像超时 {}: {}", url, UV_DOWNLOAD_TIMEOUT.as_secs());
+                tracing::debug!(
+                    "GitHub API 镜像超时 {}: {}",
+                    url,
+                    UV_DOWNLOAD_TIMEOUT.as_secs()
+                );
                 last_err = format!("下载超时 (超过 {}s)", UV_DOWNLOAD_TIMEOUT.as_secs());
                 continue;
             }
@@ -295,12 +315,7 @@ async fn download_file_streaming(
     url: &str,
     dest: &Path,
 ) -> Result<(), EnvironmentError> {
-    crate::utils::io::download_streaming(
-        mgr.http_client(),
-        url,
-        dest,
-        256 * 1024 * 1024,
-    )
+    crate::utils::io::download_streaming(mgr.http_client(), url, dest, 256 * 1024 * 1024)
         .await
         .map_err(|e| match e {
             crate::utils::io::DownloadError::Http(e) => EnvironmentError::UvDownloadFailed {
@@ -365,10 +380,7 @@ fn extract_uv_from_zip(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
         }
     })?;
     let src = found.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "zip 中未找到 uv 可执行文件",
-        )
+        std::io::Error::new(std::io::ErrorKind::NotFound, "zip 中未找到 uv 可执行文件")
     })?;
     std::fs::copy(&src, dest)?;
     Ok(())
@@ -523,7 +535,10 @@ fn github_api_urls() -> Vec<String> {
 }
 
 /// 尝试从多个镜像下载文本，第一个成功即返回
-async fn download_text_with_mirrors(mgr: &EnvironmentManager, urls: &[String]) -> Result<String, EnvironmentError> {
+async fn download_text_with_mirrors(
+    mgr: &EnvironmentManager,
+    urls: &[String],
+) -> Result<String, EnvironmentError> {
     let mut last_err = String::new();
     tracing::info!("尝试 {} 个镜像下载", urls.len());
     for (i, url) in urls.iter().enumerate() {
@@ -539,7 +554,9 @@ async fn download_text_with_mirrors(mgr: &EnvironmentManager, urls: &[String]) -
             }
         }
     }
-    Err(EnvironmentError::GitHubApiError(format!("所有镜像均失败: {last_err}")))
+    Err(EnvironmentError::GitHubApiError(format!(
+        "所有镜像均失败: {last_err}"
+    )))
 }
 
 /// 构造 uv 子进程 Command（Windows 上隐藏控制台窗口，避免环境引导弹黑窗）
@@ -639,5 +656,25 @@ mod tests {
             Some(semver::Version::parse("0.6.1").unwrap())
         );
         assert!(parse_uv_version("uv: unrecognized option").is_none());
+    }
+
+    /// F11：本地 uv 就绪判定加 --version 实启校验——
+    /// 不存在的文件与不可执行的半成品内容都不得判为就绪
+    #[tokio::test]
+    async fn test_uv_executable_works_rejects_broken_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // 不存在的文件：文件级快速拒绝
+        assert!(
+            !uv_executable_works(&dir.path().join("missing-uv.exe")).await,
+            "不存在的文件应判不可用"
+        );
+        // 半成品内容：文件存在但不是可执行映像，实际启动必然失败
+        // （Windows 上 CreateProcess 拒绝非 PE 文件；Unix 上 execve 报 Exec 格式错误）
+        let broken = dir.path().join("uv.exe");
+        std::fs::write(&broken, b"half-written garbage").unwrap();
+        assert!(
+            !uv_executable_works(&broken).await,
+            "半成品文件不得因 exists() 被判就绪"
+        );
     }
 }

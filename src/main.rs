@@ -4,8 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use campus_auth::launcher::{AutostartAction, CliArgs};
 use clap::Parser;
-use campus_auth::launcher::{CliArgs, AutostartAction};
 
 /// 解析基准路径：CLI 参数 > exe 所在目录 > 当前目录
 fn resolve_base_path(cli: &CliArgs) -> PathBuf {

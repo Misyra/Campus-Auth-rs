@@ -8,8 +8,8 @@
 //! 并以其 `original_args` 重启，最后清理 staging 与 pending 标记。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use semver::Version;
@@ -19,7 +19,9 @@ use crate::config::ConfigService;
 use crate::status::{InstallProgress, LoginStatus, PartialSnapshot, StatusManager};
 
 mod apply;
-mod check;
+/// pub(crate)：environment/git.rs（MinGit sha256 校验，R3）复用
+/// fetch_sha256_assoc 伴随文件查找模式
+pub(crate) mod check;
 mod download;
 pub mod error;
 
@@ -182,7 +184,8 @@ impl UpdaterService {
     /// 拉取清单 → 平台选择 → 版本比较；有新版本返回 `Some(UpdateInfo)`，否则 `None`。
     pub async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
         let settings = self.config.load_settings().global.updater;
-        let manifest = check::fetch_manifest(&self.http_client, &settings.release_source_url).await?;
+        let manifest =
+            check::fetch_manifest(&self.http_client, &settings.release_source_url).await?;
 
         let pkg = match check::select_platform(&manifest) {
             Some(p) => p,
@@ -278,6 +281,8 @@ impl UpdaterService {
             staging_dir: staging_dir.to_string_lossy().into_owned(),
             target_exe: target_exe.to_string_lossy().into_owned(),
             original_args: std::env::args().skip(1).collect(),
+            // G13：helper 替换前据此复核 staging exe 完整性（空 = 降级跳过复核）
+            sha256: info.sha256.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         apply::write_pending(&pending, &self.base_path)?;
@@ -286,8 +291,7 @@ impl UpdaterService {
 
     /// spawn 助手进程（不在此处退出主进程）
     fn spawn_helper(&self) -> Result<(), UpdaterError> {
-        let current_exe =
-            std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
+        let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
         let helper_path = current_exe
             .parent()
             .map(|p| p.join(apply::HELPER_EXE_NAME))
@@ -330,11 +334,32 @@ impl UpdaterService {
     ///
     /// 若 `pending.json` 存在且 staging/extracted exe 完好，则直接 `self_replace`
     /// 替换当前运行中的 exe 并清理；否则清理残留并返回 `false`。
+    ///
+    /// F9：与手动 `apply_update` 统一走 `update_in_progress` 原子标记互斥——
+    /// 后台路径抢不到标记说明手动"立即更新"正在进行（可能正在重写
+    /// pending.json / 重复 spawn helper），此时跳过本次后台应用并记日志，
+    /// pending.json 留待下次启动处理，不再依赖 sleep 错峰。
     pub async fn apply_pending_on_startup(&self) -> Result<bool, UpdaterError> {
         if !apply::has_pending_update(&self.base_path) {
             return Ok(false);
         }
+        // F9：抢不到标记 = 手动更新正在进行 → 跳过（不清理、不替换）
+        if self
+            .update_in_progress
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::info!("手动更新进行中，跳过后台待定更新应用（下次启动再试）");
+            return Ok(false);
+        }
+        let result = self.apply_pending_locked().await;
+        // 无论成败均释放互斥（后台应用为一次性启动动作，手动路径可继续）
+        self.update_in_progress.store(false, Ordering::SeqCst);
+        result
+    }
 
+    /// apply_pending_on_startup 的实际执行体（调用方已持有互斥标记）
+    async fn apply_pending_locked(&self) -> Result<bool, UpdaterError> {
         let pending = match apply::read_pending(&self.base_path) {
             Ok(p) => p,
             Err(e) => {
@@ -415,4 +440,94 @@ async fn perform_update_check(
         tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造测试用 UpdaterService（base_path = tempdir）
+    async fn make_service(base_path: &std::path::Path) -> Arc<UpdaterService> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let config = crate::config::ConfigService::new(base_path.to_path_buf(), tx)
+            .await
+            .expect("构造 ConfigService 失败");
+        let status = Arc::new(StatusManager::new());
+        UpdaterService::new(config, status, base_path.to_path_buf())
+    }
+
+    /// F9：无 pending.json 时直接跳过，且不遗留占用互斥标记
+    #[tokio::test]
+    async fn test_apply_pending_skips_without_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+        assert!(matches!(svc.apply_pending_on_startup().await, Ok(false)));
+        assert!(
+            !svc.update_in_progress.load(Ordering::SeqCst),
+            "跳过路径不得遗留占用标记"
+        );
+    }
+
+    /// F9：手动更新进行中（标记被占）时后台路径跳过，
+    /// pending.json 与 staging 保持原样（不清理、不替换、不释放他人标记）
+    #[tokio::test]
+    async fn test_apply_pending_skips_when_update_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+
+        // 伪造合法待应用更新：版本更高 + staging exe 存在
+        // （抢不到标记时二者均不应被触碰）
+        let staging = dir.path().join("update/staging/extracted");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join(apply::EXE_NAME), b"fake-exe").unwrap();
+        let pending = PendingUpdate {
+            version: "999.0.0".into(),
+            staging_dir: dir
+                .path()
+                .join("update/staging")
+                .to_string_lossy()
+                .into_owned(),
+            target_exe: dir
+                .path()
+                .join("campus-auth.exe")
+                .to_string_lossy()
+                .into_owned(),
+            original_args: vec![],
+            sha256: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        apply::write_pending(&pending, dir.path()).unwrap();
+
+        // 模拟手动"立即更新"持有互斥标记
+        svc.update_in_progress.store(true, Ordering::SeqCst);
+        let result = svc.apply_pending_on_startup().await;
+        assert!(matches!(result, Ok(false)), "抢不到标记应跳过而非执行");
+        // pending 与 staging 均未被清理
+        assert!(apply::has_pending_update(dir.path()));
+        assert!(staging.join(apply::EXE_NAME).exists());
+        // 手动路径持有的标记未被后台路径释放
+        assert!(svc.update_in_progress.load(Ordering::SeqCst));
+    }
+
+    /// F9：标记被占时手动 apply_update 立即拒绝（与后台路径同一互斥）
+    #[tokio::test]
+    async fn test_apply_update_rejected_when_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+        svc.update_in_progress.store(true, Ordering::SeqCst);
+        let info = UpdateInfo {
+            current_version: "5.0.0".into(),
+            latest_version: "5.0.1".into(),
+            update_available: true,
+            url: "https://example.com/x.zip".into(),
+            sha256: String::new(),
+            size: None,
+            notes: None,
+            release_date: None,
+        };
+        assert!(matches!(
+            svc.apply_update(&info).await,
+            Err(UpdaterError::UpdateInProgress)
+        ));
+    }
 }

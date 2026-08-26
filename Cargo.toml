@@ -22,7 +22,20 @@ no-embed = []
 
 [dependencies]
 # 异步运行时 & 网络
-tokio = { version = "1", features = ["full"] }
+# feature 按实际使用裁剪（原 full）：rt-multi-thread 多线程 runtime、macros
+# 属性宏、net Tcp 监听/探测、fs 配置落盘、process Worker 子进程、signal
+# ctrl_c、sync channel/锁、time 定时与超时、io-util 异步读写扩展
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "fs",
+    "process",
+    "signal",
+    "sync",
+    "time",
+    "io-util",
+] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
@@ -43,8 +56,6 @@ arc-swap = "1"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive", "alloc", "serde"] }
 rand = "0.8"
-# macOS F_FULLFSYNC 持久化保证（仅 macOS 编译路径使用）
-libc = "0.2"
 
 # CLI & 日志
 clap = { version = "4", features = ["derive", "env"] }
@@ -89,6 +100,10 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 
 # 编码
 encoding_rs = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+# Unix 平台系统调用（进程存活探测 kill(pid,0)）与 macOS F_FULLFSYNC 持久化保证
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # tray-icon Windows 平台实现靠隐藏窗口的窗口过程处理 WM_USER_TRAYICON，

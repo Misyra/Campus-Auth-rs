@@ -522,7 +522,11 @@ fn cleanup_old_logs(logs_dir: &Path, retention_days: u32) {
         }
     }
     if removed > 0 {
-        tracing::info!("清理过期日志文件 {} 个（保留 {} 天）", removed, retention_days);
+        tracing::info!(
+            "清理过期日志文件 {} 个（保留 {} 天）",
+            removed,
+            retention_days
+        );
     }
 }
 
@@ -696,12 +700,7 @@ fn parse_log_line(line: &str) -> crate::web::state::LogEntry {
     }
 
     // 回退：整行作为消息
-    crate::web::state::LogEntry::new(
-        "INFO".to_string(),
-        trimmed.to_string(),
-        now,
-        String::new(),
-    )
+    crate::web::state::LogEntry::new("INFO".to_string(), trimmed.to_string(), now, String::new())
 }
 
 // ============================================================
@@ -718,7 +717,13 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         .clone();
 
     // 启动 Axum
-    match app::start_axum(container.clone(), state.log_tx.clone(), state.app_config.port).await {
+    match app::start_axum(
+        container.clone(),
+        state.log_tx.clone(),
+        state.app_config.port,
+    )
+    .await
+    {
         Ok(handle) => {
             let port = handle.port;
             if let Some(ref lock) = state.instance_lock {
@@ -734,7 +739,8 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         Err(e) => {
             let msg = e.to_string();
             // 中英双语端口占用检测
-            if msg.contains("被占用") || msg.contains("address in use") || msg.contains("AddrInUse") {
+            if msg.contains("被占用") || msg.contains("address in use") || msg.contains("AddrInUse")
+            {
                 anyhow::bail!("端口 {} 被占用: {e}", state.app_config.port);
             }
             warn!("Axum 启动失败 ({e})，降级到轻量模式");
@@ -892,7 +898,10 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
     tokio::spawn(async move {
         // 等待初始 Engine 完成（completed 在正常退出与 panic 时均触发）。
         // 同时监听 shutdown 信号，避免应用关闭时持续阻塞在此等待。
-        let initial_completed = container.engine.current_handle().map(|h| h.completed.clone());
+        let initial_completed = container
+            .engine
+            .current_handle()
+            .map(|h| h.completed.clone());
         if let Some(token) = initial_completed {
             tokio::select! {
                 biased;
@@ -917,7 +926,8 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
 
             // 捕获崩溃前监测状态：Running 表示监测中，重启后需恢复
             // （Engine 崩溃后快照停留在最后的 Running/Stopped 值，正是恢复依据）
-            let was_monitoring = status.borrow().engine_state == crate::status::EngineState::Running;
+            let was_monitoring =
+                status.borrow().engine_state == crate::status::EngineState::Running;
 
             // 通知 Orchestrator 取消 source=auto 的在途登录
             orchestrator.cancel_auto_pending("engine_crashed").await;
@@ -1028,7 +1038,10 @@ async fn graceful_shutdown(state: &mut LauncherState) {
     // 3. 关闭 Engine（先于 Bridge，因为 Engine 可能正在使用 Bridge）
     // 经 EngineSlot 派发到「当前活跃」Engine（崩溃重启后的新实例也覆盖）
     if let Some(container) = &state.container {
-        let completed = container.engine.current_handle().map(|h| h.completed.clone());
+        let completed = container
+            .engine
+            .current_handle()
+            .map(|h| h.completed.clone());
         let _ = container
             .engine
             .dispatch(crate::engine::EngineCommand::Shutdown)

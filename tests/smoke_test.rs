@@ -5,5 +5,7 @@ use assert_cmd::Command;
 fn binary_prints_version() {
     let mut cmd = Command::cargo_bin("campus-auth").unwrap();
     cmd.arg("--version");
-    cmd.assert().success().stdout(predicates::str::contains("5.0.0"));
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("5.0.0"));
 }

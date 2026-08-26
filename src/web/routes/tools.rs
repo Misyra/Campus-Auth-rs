@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use tracing::warn;
 
@@ -24,16 +24,17 @@ pub async fn task_recorder(State(state): State<AppState>) -> Result<Response, Ap
 
     // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
     match tokio::fs::read_to_string(&script_path).await {
-        Ok(script) => {
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/javascript; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-cache")
-                .body(Body::from(script))
-                .unwrap_or_else(|_| {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response()
-                }))
-        }
+        Ok(script) => Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            )
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from(script))
+            .unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response()
+            })),
         Err(e) => {
             warn!("任务录制器脚本加载失败 ({script_path:?}): {e}");
             Err(ApiError::NotFound(

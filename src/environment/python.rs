@@ -1,8 +1,8 @@
 //! Python 安装：uv sync + Playwright 浏览器安装
 
 use crate::environment::{
-    uv_exe_path, EnvironmentError, EnvironmentManager, PLAYWRIGHT_INSTALL_MAX_RETRIES,
-    PLAYWRIGHT_INSTALL_RETRY_DELAY, PLAYWRIGHT_INSTALL_TIMEOUT,
+    EnvironmentError, EnvironmentManager, PLAYWRIGHT_INSTALL_MAX_RETRIES,
+    PLAYWRIGHT_INSTALL_RETRY_DELAY, PLAYWRIGHT_INSTALL_TIMEOUT, uv_exe_path,
 };
 
 use std::path::Path;
@@ -34,7 +34,9 @@ pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
 /// remove_ocr_dep），此处不做自动补装，避免显式卸载后又被自动装回。
 /// 返回 Python 解释器路径。
 pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
-    let python_exe = mgr.worker_project_path().join(crate::environment::PYTHON_EXE_RELATIVE);
+    let python_exe = mgr
+        .worker_project_path()
+        .join(crate::environment::PYTHON_EXE_RELATIVE);
 
     // 文件存在不代表 uv 管理的基础解释器仍存在，必须实际启动一次。
     if python_executable_works(&python_exe).await {
@@ -167,7 +169,12 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
             Ok(Ok(output)) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                last_err_msg = format!("exit code={:?}, stderr={}, stdout={}", output.status.code(), stderr, stdout);
+                last_err_msg = format!(
+                    "exit code={:?}, stderr={}, stdout={}",
+                    output.status.code(),
+                    stderr,
+                    stdout
+                );
                 tracing::warn!(
                     "Playwright 安装失败 (尝试 {}/{}): {}",
                     attempt + 1,

@@ -58,9 +58,8 @@ impl InstanceLock {
         // MSRV 1.85 兼容：此处 try_lock() 由 fs4::FileExt trait 提供，
         // 而非 std::fs::File 内置方法（后者要求 Rust 1.96+）。
         #[allow(clippy::incompatible_msrv)]
-        file.try_lock().map_err(|e| {
-            anyhow::anyhow!("无法获取实例锁（可能已有实例在运行）: {e}")
-        })?;
+        file.try_lock()
+            .map_err(|e| anyhow::anyhow!("无法获取实例锁（可能已有实例在运行）: {e}"))?;
         // 清理可能残留的旧实例信息文件
         let info_path = config_dir.join(".instance");
         let _ = std::fs::remove_file(&info_path);
@@ -122,8 +121,8 @@ pub fn query_instance(base_path: &Path) -> Option<InstanceInfo> {
 ///
 /// 通过 HTTP POST `/api/system/shutdown` 通知实例关闭，然后轮询等待进程退出（最多 10 秒）。
 pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
-    let info = query_instance(base_path)
-        .ok_or_else(|| anyhow::anyhow!("未找到运行中的实例信息"))?;
+    let info =
+        query_instance(base_path).ok_or_else(|| anyhow::anyhow!("未找到运行中的实例信息"))?;
 
     if !info.running {
         // 进程已退出，清理残留信息文件即可
@@ -163,7 +162,7 @@ pub fn force_kill(pid: u32) {
     {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
         };
         unsafe {
             let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
@@ -189,9 +188,7 @@ pub fn force_kill(pid: u32) {
 #[cfg(target_os = "windows")]
 pub fn is_process_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
