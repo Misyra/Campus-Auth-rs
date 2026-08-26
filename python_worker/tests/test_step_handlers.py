@@ -455,3 +455,30 @@ def test_frame_scoped_locators_use_frame_locator():
         assert page2.evaluates, "_force_input 注入应经 frame_locator 定位后在框架内执行"
 
     asyncio.run(run())
+
+def test_assert_text_passes_arg_as_function_parameter():
+    """assert_text 的 wait_for_function 必须用带形参的箭头函数（E2E 回归）。
+
+    无参形式 `() => ...includes(arg)` 会抛 ReferenceError: arg is not defined
+    （Playwright 的 arg= 经函数入参注入），真实页面断言全部失败。
+    """
+    import asyncio
+
+    from step_handlers import handle_assert_text
+
+    class FakePage:
+        def __init__(self):
+            self.captured_js = None
+
+        async def wait_for_function(self, js, arg=None, timeout=None):
+            self.captured_js = js
+            # 模拟 Playwright 语义：形参未声明时 arg 不可见
+            if "arg =>" not in js:
+                raise RuntimeError("ReferenceError: arg is not defined")
+
+    page = FakePage()
+    step = StepConfig.from_dict(
+        {"id": "s1", "type": "assert_text", "selector": "#result", "value": "登录成功"}
+    )
+    asyncio.run(handle_assert_text(page, step, StepContext(page=page, default_timeout=500)))
+    assert page.captured_js.startswith("arg =>"), f"JS 应声明 arg 形参: {page.captured_js}"

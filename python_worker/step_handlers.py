@@ -472,8 +472,10 @@ async def handle_assert_text(page, step: StepConfig, context: StepContext) -> No
     # 通过 wait_for_function 的 arg 参数传递待匹配文本，避免字符串拼接构造 JS
     # （值含真实换行/引号时不会被转义破坏字面量，历史遗留 P2）。
     try:
+        # 箭头函数必须声明形参 arg（Playwright 的 arg= 经由函数入参注入），
+        # 无参形式会抛 ReferenceError: arg is not defined
         await page.wait_for_function(
-            "() => document.body.innerText.includes(arg)",
+            "arg => document.body.innerText.includes(arg)",
             arg=value,
             timeout=timeout,
         )
