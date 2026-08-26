@@ -286,7 +286,9 @@ async def handle_input(page, step: StepConfig, context: StepContext) -> None:
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
 
-    # 强制赋值：打通 reveal_hidden 配置与失败兜底两条路径
+    # 强制赋值：打通 reveal_hidden 配置与失败兜底两条路径。
+    # B2：经 _locator 定位后 evaluate 在元素所属 frame 的上下文执行（JS 只操作
+    # 传入的 el，不查顶层 document），context.frame 生效后注入天然落在 iframe 内
     async def _force_input():
         await _locator(context, step.selector).evaluate(
             _FORCE_INPUT_JS, {"val": value, "doClear": bool(step.clear)}
@@ -307,9 +309,14 @@ async def handle_input(page, step: StepConfig, context: StepContext) -> None:
                 Outcome.SELECTOR_FAILED,
             )
     except WorkerError:
-        # 正常输入失败（元素隐藏等）→ 降级强制赋值
-        await _locator(context, step.selector).first.wait_for(
-            state="attached", timeout=max(_MIN_ATTACHED_MS, min(timeout, 1000))
+        # 正常输入失败（元素隐藏等）→ 降级强制赋值。
+        # G1：降级前的 wait_for 也要走 _safe_op——元素未 attach 的瞬时失败
+        # （页面刷新间隙）应是可重试的 SELECTOR_FAILED，而非裸抛 UNKNOWN_ERROR
+        await _safe_op(
+            _locator(context, step.selector).first.wait_for(
+                state="attached", timeout=max(_MIN_ATTACHED_MS, min(timeout, 1000))
+            ),
+            Outcome.SELECTOR_FAILED,
         )
         await _force_input()
 
@@ -418,7 +425,14 @@ async def handle_wait_url(page, step: StepConfig, context: StepContext) -> None:
     regex = re.compile(step.pattern)
     while time.monotonic() < deadline:
         _check_cancel(context)
-        current = context.page.url
+        try:
+            current = context.page.url
+        except Exception as exc:  # noqa: BLE001 — 页面关闭抛 Target closed 等
+            # G1：页面已关闭时 URL 等待无法继续，按导航超时归类（可重试），
+            # 避免裸异常一路升格 UNKNOWN_ERROR 终态
+            raise WorkerError(
+                Outcome.NAVIGATION_TIMEOUT, f"读取页面 URL 失败: {exc}"
+            ) from exc
         if regex.search(current):
             return
         await asyncio.sleep(0.2)
@@ -435,7 +449,9 @@ async def handle_screenshot(page, step: StepConfig, context: StepContext) -> Non
         filename = f"{filename}.png"
     local_path = str(directory / Path(filename).name)
     full_page = bool(step.extra_fields.get("full_page", True))
-    await page.screenshot(path=local_path, full_page=full_page)
+    # G1：截图失败（页面刷新间隙/已关闭等瞬时问题）按 SELECTOR_FAILED 归类
+    # （可重试），截图步骤失败不应直接终态
+    await _safe_op(page.screenshot(path=local_path, full_page=full_page), Outcome.SELECTOR_FAILED)
     context.screenshots.append(local_path)
     context.emit("screenshot", {"path": local_path, "step_id": step.id})
 
@@ -577,7 +593,9 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     await _safe_op(
         locator.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED
     )
-    img_bytes = await locator.screenshot()
+    # G1：locator.screenshot 裸调用会以 UNKNOWN_ERROR 终态——元素在等待可见
+    # 与截图之间被刷新/移除属瞬时失败，包 _safe_op 归类 SELECTOR_FAILED（可重试）
+    img_bytes = await _safe_op(locator.screenshot(), Outcome.SELECTOR_FAILED)
     # 截图通常是 RGBA，先规整为 ddddocr 友好的 RGB，提升识别准确率（见 _preprocess_ocr_image）
     img_bytes = _preprocess_ocr_image(img_bytes)
     # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环；并加超时兜底，
@@ -659,4 +677,13 @@ async def run_step_async(
             **({"total_steps": total_steps} if total_steps is not None else {}),
         },
     )
-    await handler(page, step, context)
+    # B2：frame 字段断链修复——步骤的 frame 配置此前全链路无赋值点，_locator
+    # 永远在顶层文档定位，任务 JSON 的 frame 字段静默失效。每个步骤执行前注入
+    # 自身 frame（空串/None 统一归一为 None），try/finally 恢复前值：
+    # context 跨步骤共享（同一任务/调试会话），不能让本步骤的 frame 污染后续步骤。
+    prev_frame = context.frame
+    context.frame = step.frame or None
+    try:
+        await handler(page, step, context)
+    finally:
+        context.frame = prev_frame

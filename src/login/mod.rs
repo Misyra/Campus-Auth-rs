@@ -15,16 +15,15 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
-use tokio::net::TcpStream;
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio::time::timeout as tokio_timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::bridge::BridgeSupervisor;
+use crate::config::ConfigService;
 use crate::config::runtime::ProfileSnapshot;
 use crate::config::runtime::RuntimeConfig;
-use crate::config::ConfigService;
 use crate::environment::EnvironmentManager;
 use crate::status::{LoginStatus, PartialSnapshot, StatusManager};
 use crate::tasks::TaskManager;
@@ -141,6 +140,28 @@ struct ActiveSession {
     cancel_reason: Arc<StdMutex<Option<String>>>,
     /// 对外句柄（去重时克隆返回）
     handle: LoginHandle,
+    /// 会话任务完全收尾通知（`session.run()` 返回后 `notify_one`）
+    ///
+    /// 区别于 `handle.await_result()`（emit 中 `set_result` 后即返回，随后的
+    /// `close_browser` 仍在途）：本通知在**全部收尾动作**（含 close_browser）
+    /// 完成后触发，供抢占方等待旧会话完全退出再放行新会话（历史遗留 F6）。
+    /// `Notify::notify_one` 无等待者时会存储许可，旧会话先于等待结束的场景
+    /// 不丢失通知、也不会挂起（防死锁）。
+    finished: Arc<tokio::sync::Notify>,
+}
+
+impl ActiveSession {
+    /// 取消传播三连：会话取消令牌 → 记录取消原因 → 取消在途 attempt
+    ///
+    /// 收敛 submit 抢占 / cancel_current / cancel_auto_pending 三处同构样板
+    /// （原三处逐字重复 cancel + recover_lock + attempt_cancel_id → bridge.cancel）。
+    fn propagate_cancel(&self, bridge: &BridgeSupervisor, reason: &str) {
+        self.cancel_token.cancel();
+        *recover_lock(self.cancel_reason.as_ref()) = Some(reason.to_string());
+        if let Some(cid) = self.attempt_cancel_id.load_full() {
+            bridge.cancel(cid.as_str());
+        }
+    }
 }
 
 /// 编排器内部状态（由 `tokio::sync::Mutex` 保护，跨 await 安全）
@@ -285,7 +306,10 @@ impl LoginOrchestrator {
         if profile.auth_url.is_empty() {
             missing.push("auth_url");
         }
-        if !matches!(source, LoginSource::Browser) && task_id.is_none() && global_active_task.is_empty() {
+        if !matches!(source, LoginSource::Browser)
+            && task_id.is_none()
+            && global_active_task.is_empty()
+        {
             missing.push("active_task");
         }
         if source == LoginSource::Browser && task_id.is_none() && global_active_task.is_empty() {
@@ -294,33 +318,44 @@ impl LoginOrchestrator {
         if !missing.is_empty() {
             let msg = missing.join(", ");
             warn!("登录配置不完整，缺少字段: {msg}（source={source:?}）");
-            return self.immediate_handle(source, false, format!("配置不完整: {msg}"), profile.id.clone()).await;
+            return self
+                .immediate_handle(
+                    source,
+                    false,
+                    format!("配置不完整: {msg}"),
+                    profile.id.clone(),
+                )
+                .await;
         }
 
         // 浏览器来源要求环境能力就绪
         if source == LoginSource::Browser && !self.environment.capability_ready() {
             warn!("浏览器能力未就绪，无法执行定时任务");
-            return self.immediate_handle(
-                source,
-                false,
-                "浏览器能力未就绪，无法执行定时任务".into(),
-                profile.id.clone(),
-            )
-            .await;
-        }
-
-        // 2. auth_url TCP 预检（仅 manual / login_once）
-        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce) {
-            let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
-            if self.check_auth_url(&profile.auth_url, timeout).await.is_err() {
-                warn!("auth_url 预检不可达: {}", profile.auth_url);
-                return self.immediate_handle(
+            return self
+                .immediate_handle(
                     source,
                     false,
-                    format!("auth_url 不可达: {}", profile.auth_url),
+                    "浏览器能力未就绪，无法执行定时任务".into(),
                     profile.id.clone(),
                 )
                 .await;
+        }
+
+        // 2. auth_url TCP 预检（仅 manual / login_once）
+        // 地址解析统一走 MonitorService 的单点实现（parse_url_host_port，
+        // 支持 IPv6 方括号与裸地址），登录侧不再维护私有副本
+        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce) {
+            let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
+            if !self.monitor.check_auth_url(&profile.auth_url, timeout).await {
+                warn!("auth_url 预检不可达: {}", profile.auth_url);
+                return self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("auth_url 不可达: {}", profile.auth_url),
+                        profile.id.clone(),
+                    )
+                    .await;
             }
         }
 
@@ -337,20 +372,22 @@ impl LoginOrchestrator {
                 PreemptionDecision::Create => None,
             }
         };
-        // 锁已释放，安全执行异步取消
+        // 锁已释放，安全执行异步取消与收尾等待
         if let Some(old) = old_session {
-            old.cancel_token.cancel();
-            *recover_lock(old.cancel_reason.as_ref()) = Some("被更高优先级登录抢占".to_string());
-            if let Some(cid) = old.attempt_cancel_id.load_full() {
-                self.bridge.cancel(cid.as_str());
-            }
-            let _ = tokio_timeout(Duration::from_secs(5), old.handle.await_result()).await;
+            old.propagate_cancel(&self.bridge, "被更高优先级登录抢占");
+            self.wait_old_session_finished(old).await;
         }
 
         // 4. 创建新会话
-        // 统计登录次数
+        // 统计登录次数，并同步推送累计指标快照（G23）：login_total 在此单点
+        // 递增后立即把计数器当前值 merge 进 StatusManager（与 Engine 的
+        // Totals merge 调用点写法一致，覆盖式合并即最新值）
         if let Some(m) = &self.metrics {
             m.inc_login();
+            self.status.merge(PartialSnapshot::Totals {
+                probe_total: m.probe_total.load(std::sync::atomic::Ordering::Relaxed),
+                login_total: m.login_total.load(std::sync::atomic::Ordering::Relaxed),
+            });
         }
         let session_id = {
             let mut g = self.state.lock().await;
@@ -362,6 +399,8 @@ impl LoginOrchestrator {
         let attempt_cancel_id = Arc::new(ArcSwapOption::<String>::new(None));
         let cancel_reason = Arc::new(StdMutex::new(None::<String>));
         let shutdown_token = self.shutdown_token.clone();
+        // 会话完全收尾通知（F6）：spawn 的会话任务在 run() 返回后触发
+        let finished = Arc::new(tokio::sync::Notify::new());
         let (result_tx, _rx) = watch::channel(None);
         let result_slot = Arc::new(LoginHandleInner { result_tx });
         let handle = LoginHandle {
@@ -379,7 +418,11 @@ impl LoginOrchestrator {
         });
 
         let worker_config = self
-            .build_worker_config(&rt, &resolved_profile, effective_task_id.as_deref().unwrap_or(""))
+            .build_worker_config(
+                &rt,
+                &resolved_profile,
+                effective_task_id.as_deref().unwrap_or(""),
+            )
             .await;
 
         let session = LoginSession::new(
@@ -414,6 +457,7 @@ impl LoginOrchestrator {
                     attempt_cancel_id,
                     cancel_reason,
                     handle: handle.clone(),
+                    finished: finished.clone(),
                 });
                 true
             } else {
@@ -424,8 +468,12 @@ impl LoginOrchestrator {
         // 5. 仅当成功占据活跃会话槽位时才 spawn 状态机 task
         if became_active {
             let state_arc = self.state.clone();
+            let finished_notifier = finished.clone();
             tokio::spawn(async move {
                 session.run().await;
+                // F6：run() 返回即全部收尾动作（含 emit 的 close_browser）完成，
+                // 触发通知供抢占方放行新会话；无等待者时存储许可，不丢失
+                finished_notifier.notify_one();
                 let mut g = state_arc.lock().await;
                 let should_clear =
                     matches!(&g.active_session, Some(a) if a.session_id == session_id);
@@ -448,18 +496,49 @@ impl LoginOrchestrator {
         handle
     }
 
-/// 取消当前在途登录（Web API `POST /api/login/cancel`）
+    /// 等待被抢占的旧会话**完全收尾**（历史遗留 F6）
+    ///
+    /// 旧实现只等 `await_result`（5s）：emit 先 `set_result` 再 `close_browser`
+    /// （≤8s），抢占方一返回就建新会话复用同一 Worker——旧会话仍在途的
+    /// close_browser 可能关掉新会话刚复用/重建的浏览器，或其 ensure_browser
+    /// 复位掉新会话的上下文。
+    ///
+    /// 时序设计：改为等待 `finished` 通知（run() 返回 = set_result + 指标 +
+    /// 状态广播 + 历史落盘 + close_browser 全部完成）。总预算 13s = 5s 等终态
+    /// 结果 + 8s close_browser 上限（与 emit 内 close_browser 的命令级超时对齐）。
+    /// 超时兜底：`force_recycle` Worker——kill 掉旧会话可能仍挂起的
+    /// close_browser/execute（pending 被 drain、取消令牌全部触发），确保旧会话
+    /// 失去对 Worker 的一切影响后再放行新会话；旧会话随后收尾时
+    /// `has_live_worker()` 为 false（或属新会话的 Worker 已重建），不再互相干扰。
+    ///
+    /// 防死锁：`Notify::notify_one` 无等待者时存储许可——旧会话先于本等待
+    /// 完成时 `notified()` 立即返回，不挂起。
+    async fn wait_old_session_finished(&self, old: ActiveSession) {
+        // F6 总预算：5s（旧版等结果预算）+ 8s（emit 内 close_browser 上限）
+        const PREEMPT_WAIT_BUDGET: Duration = Duration::from_secs(13);
+        match tokio_timeout(PREEMPT_WAIT_BUDGET, old.finished.notified()).await {
+            Ok(()) => {
+                // 完全收尾：结果必然已写入（notify 在 run() 返回后触发），
+                // 无需再等 await_result
+            }
+            Err(_) => {
+                warn!(
+                    "等待旧会话完全收尾超时（{}s），强制回收 Worker 后放行新会话",
+                    PREEMPT_WAIT_BUDGET.as_secs()
+                );
+                self.bridge.force_recycle().await;
+            }
+        }
+    }
+
+    /// 取消当前在途登录（Web API `POST /api/login/cancel`）
     ///
     /// 使用 `lock().await` 等待锁（锁窗口极短），避免撞上 `submit` 持锁窗口时
     /// 用户取消被静默丢弃（原 `try_lock` 会跳过取消，表现为点取消没反应）。
     pub async fn cancel_current(&self) {
         let guard = self.state.lock().await;
         if let Some(active) = &guard.active_session {
-            active.cancel_token.cancel();
-            *recover_lock(active.cancel_reason.as_ref()) = Some("用户取消".to_string());
-            if let Some(cid) = active.attempt_cancel_id.load_full() {
-                self.bridge.cancel(cid.as_str());
-            }
+            active.propagate_cancel(&self.bridge, "用户取消");
         }
     }
 
@@ -472,11 +551,7 @@ impl LoginOrchestrator {
         let guard = self.state.lock().await;
         if let Some(active) = &guard.active_session {
             if active.source == LoginSource::Auto {
-                active.cancel_token.cancel();
-                *recover_lock(active.cancel_reason.as_ref()) = Some(reason.to_string());
-                if let Some(cid) = active.attempt_cancel_id.load_full() {
-                    self.bridge.cancel(cid.as_str());
-                }
+                active.propagate_cancel(&self.bridge, reason);
             }
         }
     }
@@ -535,12 +610,6 @@ impl LoginOrchestrator {
         })
     }
 
-    /// 构造发送给 Worker 的配置字典（凭证、auth_url、浏览器设置等）
-    ///
-    /// 浏览器设置整体序列化 [`RuntimeConfig::browser`]（`BrowserSettings`）注入
-    /// `browser_settings` 键——这是跨 IPC 边界与 Python Worker 约定的键名
-    /// （Rust 内部字段名为 `browser`），覆盖原手动拼字段的丢失问题。
-    /// `bind_proxy`（浏览器代理）由 `BrowserSettings` 携带，随配置一并下发 Worker。
     /// 构造发送给 Worker 的配置字典（凭证、auth_url、浏览器设置、任务步骤等）
     ///
     /// 浏览器设置整体序列化 [`RuntimeConfig::browser`]（`BrowserSettings`）注入
@@ -576,53 +645,13 @@ impl LoginOrchestrator {
         self.tasks.embed_task_config(task_id, &mut cfg).await;
         cfg
     }
-
-    /// auth_url TCP 预检：解析 host:port 并限时连接
-    async fn check_auth_url(&self, auth_url: &str, timeout: Duration) -> Result<(), ()> {
-        let Some(addr) = parse_host_port(auth_url) else {
-            return Err(());
-        };
-        match tokio_timeout(timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(_)) => Ok(()),
-            _ => Err(()),
-        }
-    }
-}
-
-/// 从 URL 解析 `host:port`（无端口时按协议推断 80/443）
-///
-/// 正确处理 IPv6 方括号格式（如 `http://[::1]:8080/login`）。
-fn parse_host_port(url: &str) -> Option<String> {
-    let without_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let hostport = without_scheme.split('/').next().unwrap_or(without_scheme);
-    // 处理 IPv6 方括号格式：[host]:port
-    if let Some(rest) = hostport.strip_prefix('[') {
-        if let Some((host, port_str)) = rest.split_once("]:") {
-            if port_str.parse::<u16>().is_ok() {
-                return Some(format!("[{host}]:{port_str}"));
-            }
-        }
-        // 有方括号但无端口，去除方括号后拼接推断端口
-        let host = rest.strip_suffix(']').unwrap_or(rest);
-        let is_https = url.starts_with("https://");
-        let port: u16 = if is_https { 443 } else { 80 };
-        return Some(format!("[{host}]:{port}"));
-    }
-    if let Some((host, port)) = hostport.rsplit_once(':') {
-        if port.parse::<u16>().is_ok() {
-            return Some(format!("{host}:{port}"));
-        }
-    }
-    let is_https = url.starts_with("https://");
-    let port: u16 = if is_https { 443 } else { 80 };
-    Some(format!("{hostport}:{port}"))
 }
 
 // 重新导出公共类型，供 `crate::login::*` 引用
-pub use crate::status::LoginSource;
 pub use crate::bridge::{Outcome as LoginOutcome, StructuredResult};
-pub use history::{HistoryResult, LoginHistoryEntry, LoginHistoryService, HistoryStore};
-pub use preemption::{decide, PreemptionDecision};
+pub use crate::status::LoginSource;
+pub use history::{HistoryResult, HistoryStore, LoginHistoryEntry, LoginHistoryService};
+pub use preemption::{PreemptionDecision, decide};
 pub use session::{LoginResult, LoginSession, LoginState, ResultAction, TerminalKind};
 
 #[cfg(test)]
@@ -630,89 +659,6 @@ mod tests {
     use super::*;
     use crate::status::LoginSource;
     use tokio_util::sync::CancellationToken;
-
-    // ============ parse_host_port 纯函数测试 ============
-
-    #[test]
-    fn test_parse_host_port_http_default_80() {
-        // http 无显式端口 → 80
-        assert_eq!(
-            parse_host_port("http://example.com/login"),
-            Some("example.com:80".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_https_default_443() {
-        // https 无显式端口 → 443
-        assert_eq!(
-            parse_host_port("https://example.com"),
-            Some("example.com:443".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_explicit_port_with_path() {
-        // 显式端口 + 路径 + 查询参数：仅保留 host:port
-        assert_eq!(
-            parse_host_port("http://example.com:8080/login?next=/home"),
-            Some("example.com:8080".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_no_scheme_with_port() {
-        // 无 scheme 但含端口 → 按显式端口解析
-        assert_eq!(
-            parse_host_port("example.com:8080"),
-            Some("example.com:8080".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_no_scheme_no_port_defaults_80() {
-        // 无 scheme 无端口 → 默认 80（非 https）
-        assert_eq!(
-            parse_host_port("example.com"),
-            Some("example.com:80".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_ipv6_with_port() {
-        // IPv6 方括号 + 端口
-        assert_eq!(
-            parse_host_port("http://[::1]:8080/login"),
-            Some("[::1]:8080".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_ipv6_no_port_http() {
-        // IPv6 方括号无端口 → http 80
-        assert_eq!(
-            parse_host_port("http://[::1]/login"),
-            Some("[::1]:80".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_ipv6_no_port_https() {
-        // IPv6 方括号无端口 → https 443
-        assert_eq!(
-            parse_host_port("https://[2001:db8::1]"),
-            Some("[2001:db8::1]:443".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_host_port_https_with_explicit_port() {
-        // https + 显式端口：保留显式端口（不强制 443）
-        assert_eq!(
-            parse_host_port("https://example.com:8443/api"),
-            Some("example.com:8443".to_string())
-        );
-    }
 
     // ============ decide Reuse 分支测试（需 LoginHandle，字段为 mod.rs 私有） ============
 
@@ -853,10 +799,11 @@ mod tests {
                 source: LoginSource::Manual,
                 cancel_token: CancellationToken::new(),
                 cancel_reason: Arc::new(StdMutex::new(None)),
-                attempt_cancel_id: Arc::new(arc_swap::ArcSwapOption::new(Some(
-                    Arc::new("cid-1".to_string()),
-                ))),
+                attempt_cancel_id: Arc::new(arc_swap::ArcSwapOption::new(Some(Arc::new(
+                    "cid-1".to_string(),
+                )))),
                 handle: make_handle(LoginSource::Manual),
+                finished: Arc::new(tokio::sync::Notify::new()),
             });
         }
 
@@ -870,16 +817,16 @@ mod tests {
         });
         // 短暂等待，确认 cancel_task 尚未完成（在等待锁）
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!cancel_task.is_finished(), "cancel_current 应等待锁而非放弃");
+        assert!(
+            !cancel_task.is_finished(),
+            "cancel_current 应等待锁而非放弃"
+        );
         // 释放锁，cancel_current 应能拿到锁并完成取消
         drop(lock_guard);
-        let done = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            cancel_task,
-        )
-        .await
-        .expect("cancel_current 应在锁释放后完成")
-        .unwrap();
+        let done = tokio::time::timeout(std::time::Duration::from_secs(2), cancel_task)
+            .await
+            .expect("cancel_current 应在锁释放后完成")
+            .unwrap();
         assert!(done);
 
         // 验证取消已传播到活跃会话
@@ -887,8 +834,92 @@ mod tests {
         let active = state.active_session.as_ref().unwrap();
         assert!(active.cancel_token.is_cancelled());
         assert_eq!(
-            *active.cancel_reason.as_ref().lock().unwrap_or_else(|e| e.into_inner()),
+            *active
+                .cancel_reason
+                .as_ref()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
             Some("用户取消".to_string())
+        );
+    }
+
+    // ============ F6：抢占等待旧会话完全收尾 ============
+
+    /// 构造测试用 ActiveSession（finished 通知可外部控制）
+    fn make_active(source: LoginSource) -> ActiveSession {
+        ActiveSession {
+            source,
+            session_id: 1,
+            cancel_token: CancellationToken::new(),
+            cancel_reason: Arc::new(StdMutex::new(None)),
+            attempt_cancel_id: Arc::new(arc_swap::ArcSwapOption::new(None)),
+            handle: make_handle(source),
+            finished: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// F6：旧会话已先于等待完成（notify 许可已存储）→ 立即返回，不挂起（防死锁）
+    #[tokio::test]
+    async fn f6_旧会话已完成_立即返回不挂起() {
+        let orch = make_orchestrator().await;
+        let old = make_active(LoginSource::Manual);
+        // 会话任务已退出并触发通知（无等待者时存储许可）
+        old.finished.notify_one();
+        let start = std::time::Instant::now();
+        orch.wait_old_session_finished(old).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "旧会话已收尾应立即返回"
+        );
+    }
+
+    /// F6：旧会话延迟收尾（模拟 set_result 后 close_browser 仍在途）→
+    /// 抢占方等到**完全收尾**（notify 触发）才返回，且不触发 force_recycle
+    #[tokio::test]
+    async fn f6_旧会话延迟收尾_等待完全完成后放行() {
+        let orch = make_orchestrator().await;
+        let old = make_active(LoginSource::Manual);
+        let finished = old.finished.clone();
+        // 模拟旧会话 emit：set_result 后仍需 150ms 才完成 close_browser
+        old.handle.inner.set_result(LoginResult {
+            success: false,
+            message: "被抢占".into(),
+            source: LoginSource::Manual,
+            duration: Duration::ZERO,
+            attempts: 1,
+        });
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            finished.notify_one();
+        });
+        let start = std::time::Instant::now();
+        orch.wait_old_session_finished(old).await;
+        // 等待覆盖了 close_browser 在途时间（旧实现 await_result 即返回 ≈0ms）
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(140),
+            "应等待旧会话完全收尾而非仅终态结果"
+        );
+        // 未超时 → 不应 force_recycle（Worker 状态保持非 Error）
+        let ws = orch.bridge.worker_status();
+        assert!(
+            !matches!(ws, crate::status::WorkerStatus::Error),
+            "正常收尾不应触发 Worker 强制回收，实际 {ws:?}"
+        );
+    }
+
+    /// F6：旧会话超预算未收尾 → force_recycle 兜底后放行
+    /// （start_paused 让 13s 预算瞬间耗尽；force_recycle 将 Worker 置 Error 可观测）
+    #[tokio::test(start_paused = true)]
+    async fn f6_旧会话超时未收尾_强制回收后放行() {
+        let orch = make_orchestrator().await;
+        let old = make_active(LoginSource::Manual);
+        // 不触发 finished：模拟收尾挂死
+        orch.wait_old_session_finished(old).await;
+        // force_recycle（无真实进程）仍会把 worker_state 置为 Error
+        let ws = orch.bridge.worker_status();
+        assert!(
+            matches!(ws, crate::status::WorkerStatus::Error),
+            "超时兜底应强制回收 Worker，实际 {ws:?}"
         );
     }
 }

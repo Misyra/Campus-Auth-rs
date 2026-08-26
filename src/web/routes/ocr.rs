@@ -5,14 +5,14 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde_json::Value;
 
 use crate::bridge::BridgeApi;
 use crate::config::ConfigApi;
 use crate::environment::EnvironmentApi;
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// recognize 请求体上限：Worker 的 NDJSON stdin 单行上限为 16 MiB，这里预留 1 MiB
 /// 给 IPC 外壳与 JSON 字段，保证 Web 已接受的请求一定能完整送达 Worker。
@@ -55,7 +55,11 @@ pub async fn ocr_recognize(
 /// - `declared`：项目是否在 `python_worker/pyproject.toml` 中声明了 ddddocr 依赖，
 ///   作为「是否支持 OCR」的权威来源（用户要求依 pyproject.toml 判定）。
 /// - `size_mb`：environment 目录估算体积。
+/// - `runtime_ocr`（任务 10，向后兼容新增）：Worker 存活时最近一次健康检查
+///   上报的运行时 OCR 能力（`capabilities.ocr`）；Worker 未存活/未上报时为
+///   `null`，前端未消费该字段前不破坏既有契约。
 pub async fn ocr_status(
+    State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -65,6 +69,9 @@ pub async fn ocr_status(
     // 避免这些偶发/滞后状态把已安装的 OCR 误报成「未安装」。
     let installed = environment.ocr_ready();
     let declared = environment.ocr_declared();
+    // 运行时能力（任务 10）：Worker 存活时优先用最近健康检查缓存的 capabilities
+    // （BridgeInner 内缓存），未存活回退文件探测（installed）
+    let runtime_ocr = bridge.runtime_ocr_capability();
     // 统计 environment 目录大小（递归）
     let env_dir = config.base_path().join("environment");
     let size_bytes = if env_dir.exists() {
@@ -78,6 +85,7 @@ pub async fn ocr_status(
     let status = serde_json::json!({
         "installed": installed,
         "declared": declared,
+        "runtime_ocr": runtime_ocr,
         "size_mb": (size_bytes as f64 / (1024.0 * 1024.0)).round(),
     });
     Ok(data(status))
@@ -164,6 +172,8 @@ mod tests {
         installed: bool,
         /// execute 的预置响应：(success, data, error)，默认成功并返回识别文本
         respond: (bool, Value, Option<String>),
+        /// runtime_ocr_capability 的预置返回值（任务 10）
+        ocr_capability: Option<bool>,
     }
 
     impl Default for MockInner {
@@ -175,6 +185,7 @@ mod tests {
                 recycled: 0,
                 installed: false,
                 respond: (true, serde_json::json!({ "text": "abcd" }), None),
+                ocr_capability: None,
             }
         }
     }
@@ -207,6 +218,10 @@ mod tests {
         }
 
         async fn shutdown(&self) {}
+
+        fn runtime_ocr_capability(&self) -> Option<bool> {
+            self.0.lock().unwrap().ocr_capability
+        }
     }
 
     use crate::environment::{BootstrapStage, EnvironmentApi, EnvironmentError, EnvironmentStatus};
@@ -271,6 +286,32 @@ mod tests {
         }
     }
 
+    /// status 路由专用 state：额外携带真实 ConfigService（base_path 指向临时目录，
+    /// environment 子目录不存在 → size_mb=0，避免真实磁盘遍历）
+    #[derive(Clone)]
+    struct StatusState {
+        base: TestState,
+        config: Arc<crate::config::ConfigService>,
+    }
+
+    impl axum::extract::FromRef<StatusState> for Arc<dyn BridgeApi> {
+        fn from_ref(state: &StatusState) -> Self {
+            state.base.bridge.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<StatusState> for Arc<dyn EnvironmentApi> {
+        fn from_ref(state: &StatusState) -> Self {
+            state.base.env.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<StatusState> for Arc<dyn crate::config::ConfigApi> {
+        fn from_ref(state: &StatusState) -> Self {
+            state.config.clone()
+        }
+    }
+
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner::default()));
         let bridge: Arc<dyn BridgeApi> = Arc::new(MockBridgeApi(inner.clone()));
@@ -288,6 +329,75 @@ mod tests {
             .route("/api/ocr/install", post(ocr_install))
             .with_state(state);
         (app, inner)
+    }
+
+    /// status 路由测试 app（Bridge 能力 mock + 真实 ConfigService 锚定临时目录）
+    async fn status_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
+        let inner = Arc::new(std::sync::Mutex::new(MockInner::default()));
+        let bridge: Arc<dyn BridgeApi> = Arc::new(MockBridgeApi(inner.clone()));
+        let env: Arc<dyn EnvironmentApi> = Arc::new(MockEnvironmentApi {
+            removed: inner.clone(),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
+        let config = crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
+            .await
+            .expect("ConfigService 构造失败");
+        let state = StatusState {
+            base: TestState { bridge, env },
+            config,
+        };
+        let app = axum::Router::new()
+            .route("/api/ocr/status", axum::routing::get(ocr_status))
+            .with_state(state);
+        (app, inner)
+    }
+
+    /// 任务 10：status 响应包含 runtime_ocr 字段，取自 Bridge 缓存的运行时能力；
+    /// 未上报时为 null（前端未消费前不破坏既有字段）
+    #[tokio::test]
+    async fn test_ocr_status_reports_runtime_capability() {
+        let (app, inner) = status_app().await;
+
+        // 未上报（Worker 未存活/无缓存）→ null
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ocr/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["data"]["runtime_ocr"], Value::Null);
+        assert_eq!(body["data"]["declared"], true);
+
+        // Worker 上报 capabilities.ocr=true → runtime_ocr=true
+        inner.lock().unwrap().ocr_capability = Some(true);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ocr/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["data"]["runtime_ocr"], true);
     }
 
     /// recognize 注入 cancel_id="ocr" 后派发命令，成功时仅提取 result.data 入信封
@@ -327,11 +437,7 @@ mod tests {
     #[tokio::test]
     async fn test_ocr_recognize_worker_failure_maps_to_error() {
         let (app, inner) = mock_app();
-        inner.lock().unwrap().respond = (
-            false,
-            Value::Null,
-            Some("ddddocr 未安装".to_string()),
-        );
+        inner.lock().unwrap().respond = (false, Value::Null, Some("ddddocr 未安装".to_string()));
         let resp = app
             .oneshot(
                 Request::builder()

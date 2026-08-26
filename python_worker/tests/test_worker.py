@@ -152,6 +152,8 @@ def test_preload_ocr_deps_full_load_when_ddddocr_present(monkeypatch):
     # 完整加载路径：仅 import ddddocr 一次即返回，不再额外 import numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 0
+    # 任务 10：完整加载 → 能力上报 ocr=True
+    assert worker_main.OCR_CAPABILITIES == {"ocr": True}
 
 
 def test_preload_ocr_deps_falls_back_to_numpy(monkeypatch):
@@ -161,6 +163,8 @@ def test_preload_ocr_deps_falls_back_to_numpy(monkeypatch):
     # ddddocr 缺失（未安装/不完整）时退化为仅预加载 numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
+    # numpy-only 不具备 OCR 识别能力（任务 10）
+    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_silent_when_missing(monkeypatch):
@@ -170,6 +174,7 @@ def test_preload_ocr_deps_silent_when_missing(monkeypatch):
     worker_main._preload_ocr_deps()
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
+    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
@@ -324,11 +329,20 @@ def test_get_ocr_caches_instance(monkeypatch):
 
 
 def test_worker_health_check_does_not_probe_browser():
+    """轻量健康检查：不探测浏览器，且携带版本与能力上报（任务 10）。"""
     import asyncio
-    from playwright_worker import worker_core
+    from playwright_worker import WORKER_VERSION, worker_core
 
-    result = asyncio.run(worker_core.handle_worker_health_check({}, worker_core))
-    assert result == {"healthy": True}
+    worker_core.capabilities = {"ocr": True}
+    result = asyncio.run(worker_core.handle_worker_health_check({}))
+    assert result["healthy"] is True
+    # 向后兼容新增字段：version 与 pyproject 同步常量一致；capabilities 透传
+    assert result["version"] == WORKER_VERSION
+    assert result["capabilities"] == {"ocr": True}
+    # 未注入能力时 capabilities 为空 dict（Rust 侧回退文件探测）
+    worker_core.capabilities = {}
+    result2 = asyncio.run(worker_core.handle_worker_health_check({}))
+    assert result2["capabilities"] == {}
 
 
 def test_structured_result_duration_ms_with_start():
@@ -353,7 +367,7 @@ def test_dispatch_guarded_timeout_emits_unknown_error(monkeypatch, capsys):
         # 缩短命令级超时，避免测试等待默认 300s
         monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
 
-        async def hang_handler(params, core):
+        async def hang_handler(params):
             await asyncio.sleep(3600)  # 永久挂起
             return {}
 
@@ -373,7 +387,7 @@ def test_dispatch_guarded_timeout_emits_unknown_error(monkeypatch, capsys):
 
         # 自愈后下一条命令仍能正常执行（不死锁）
         called = []
-        worker_main.COMMANDS["test_ok"] = lambda params, core: called.append(1) or {}
+        worker_main.COMMANDS["test_ok"] = lambda params: called.append(1) or {}
         try:
             await worker_main._dispatch_guarded(
                 {"id": 2, "method": "test_ok", "params": {}}
@@ -467,10 +481,74 @@ def test_handle_close_browser_closes_and_keeps_worker():
 
         WorkerCore.close_browser = fake_close
         try:
-            result = await core.handle_close_browser({}, core)
+            result = await core.handle_close_browser({})
         finally:
             WorkerCore.close_browser = orig
         assert result == {}
         assert closed == [True], "应调用 close_browser 清理浏览器"
 
     asyncio.run(_run())
+
+
+# ── B3: 调试会话期间拒绝登录/浏览器任务（Python 半防御）──
+
+
+def test_execute_login_attempt_rejected_while_debug_session_active():
+    """调试会话存续期内 execute_login_attempt 快速失败（BUSY 语义→UNKNOWN_ERROR）。"""
+
+    async def _run():
+        from models import Outcome
+        from playwright_worker import DebugSession, WorkerCore, StepContext
+        from step_handlers import WorkerError
+
+        core = WorkerCore()
+        core._debug_sessions["d1"] = DebugSession(
+            session_id="d1", page=None, task_config=None, context=StepContext(page=None)
+        )
+        with pytest.raises(WorkerError) as ei:
+            await core.handle_execute_login_attempt({})
+        # 无 BUSY 变体（避免破坏与 Rust 的 serde 契约），复用 UNKNOWN_ERROR，
+        # 消息明确说明「调试会话进行中」
+        assert ei.value.outcome == Outcome.UNKNOWN_ERROR.value
+        assert "调试会话进行中" in ei.value.message
+
+    asyncio.run(_run())
+
+
+def test_execute_browser_task_rejected_while_debug_session_active():
+    """调试会话存续期内 execute_browser_task 同样快速失败。"""
+
+    async def _run():
+        from playwright_worker import DebugSession, WorkerCore, StepContext
+        from step_handlers import WorkerError
+
+        core = WorkerCore()
+        core._debug_sessions["d1"] = DebugSession(
+            session_id="d1", page=None, task_config=None, context=StepContext(page=None)
+        )
+        with pytest.raises(WorkerError) as ei:
+            await core.handle_execute_browser_task({})
+        assert "调试会话进行中" in ei.value.message
+
+    asyncio.run(_run())
+
+
+# ── B6: 命令级超时兜底为 Rust 默认的 0.9 倍 ──
+
+
+def test_command_timeout_floor_is_270s():
+    """无 browser_settings 时兜底 270s（Rust 默认 300s × 0.9，先于 Rust 触发自愈）。"""
+    import worker_main
+
+    assert worker_main._command_timeout({}) == 270.0
+    assert worker_main._command_timeout({"browser_settings": {}}) == 270.0
+
+
+def test_command_timeout_scales_with_step_timeout():
+    """超大 step timeout 配置仍按基准放大（不低于 270s 兜底）。"""
+    import worker_main
+
+    # timeout 单位为秒（_to_ms ×1000），20s × 20 = 400s
+    assert worker_main._command_timeout(
+        {"browser_settings": {"timeout": 20}}
+    ) == 400.0

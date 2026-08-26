@@ -23,17 +23,17 @@ pub mod worker;
 pub use ipc::{
     CancelNotification, IpcEvent, IpcRequest, IpcResponse, IpcResult, Outcome, StructuredResult,
 };
-pub use process::{spawn_worker, IpcMessage, ParsedMessage, ProcessHandles, WorkerProcess};
+pub use process::{IpcMessage, ParsedMessage, ProcessHandles, WorkerProcess, spawn_worker};
 pub use session::{CancelRegistry, SessionGuard, SessionType};
-pub use worker::{worker_state_to_status, WorkerState};
+pub use worker::{WorkerState, worker_state_to_status};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex as AsyncMutex};
+use serde_json::{Value, json};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -77,6 +77,13 @@ pub trait BridgeApi: Send + Sync {
     async fn recycle_if_running(&self);
     /// 优雅关闭 Worker 与 Supervisor。
     async fn shutdown(&self);
+    /// Worker 存活时最近一次健康检查上报的运行时 OCR 能力（任务 10）。
+    ///
+    /// `None` 表示 Worker 未存活或未上报能力，调用方回退文件探测。
+    /// 默认实现返回 `None`，供内存 mock 等实现复用。
+    fn runtime_ocr_capability(&self) -> Option<bool> {
+        None
+    }
 }
 
 #[async_trait::async_trait]
@@ -97,6 +104,10 @@ impl BridgeApi for BridgeSupervisor {
 
     async fn shutdown(&self) {
         BridgeSupervisor::shutdown(self).await;
+    }
+
+    fn runtime_ocr_capability(&self) -> Option<bool> {
+        BridgeSupervisor::runtime_ocr_capability(self)
     }
 }
 
@@ -195,6 +206,12 @@ struct BridgeInner {
     ipc_tx: Option<mpsc::Sender<ParsedMessage>>,
     /// 连续 spawn/健康检查失败计数（B3 熔断）
     consecutive_spawn_failures: u32,
+    /// 最近一次 Worker 健康检查上报的运行时能力（如 `{"ocr": true}`）
+    ///
+    /// 任务 10：由 `send_health_check`（worker_health_check 路径）捕获，
+    /// Worker 回收/退出时失效。供 `/api/ocr/status` 在 Worker 存活时
+    /// 优先展示运行时能力，替代文件探测。
+    worker_capabilities: Option<Value>,
 }
 
 /// 连续 spawn 失败熔断阈值：达到后 ensure_worker 直接快速失败（不再 spawn）
@@ -244,6 +261,7 @@ impl BridgeSupervisor {
                 current_request_id: None,
                 ipc_tx: None,
                 consecutive_spawn_failures: 0,
+                worker_capabilities: None,
             }),
             config,
             status,
@@ -304,30 +322,27 @@ impl BridgeSupervisor {
             // 幂等：若请求恰在超时瞬间已响应/已取消，trigger 与 stdin 发送均为 no-op。
             Err(_elapsed) => {
                 self.cmd_tx
-                    .send(SupervisorCommand::Cancel { cancel_id })
+                    .send(SupervisorCommand::Cancel {
+                        cancel_id: cancel_id.clone(),
+                    })
                     .await
                     .map_err(|_| BridgeError::SupervisorNotRunning)?;
                 // A1 自愈兜底：Cancel 后给 Worker 一段宽限（Python 侧命令超时 + 关闭
                 // 页面自愈），等待会话槽位释放；仍未释放说明自愈失败，强杀回收，
                 // 避免挂起命令永久占用会话槽位导致死锁。
-                let deadline = Instant::now() + Duration::from_secs(10);
-                loop {
-                    let freed = {
-                        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                        inner.current_request_id.is_none()
-                    };
-                    if freed || Instant::now() >= deadline {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                let still_stuck = {
+                //
+                // 归属校验（历史遗留 F2）：仅当超时时刻会话槽位确实由**本请求**
+                // （current_cancel_id 与本请求 cancel_id 一致）占有时才进入宽限等待。
+                // 槽位空闲（本请求已自愈，或本请求是 OCR 轻量旁路从不占槽位）或
+                // 被其他请求持有（并发登录）时，本请求与槽位滞留无关，直接返回超时。
+                let stuck_request_id = {
                     let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    inner.current_request_id.is_some()
+                    (inner.current_cancel_id.as_deref() == Some(cancel_id.as_str()))
+                        .then(|| inner.current_request_id)
+                        .flatten()
                 };
-                if still_stuck {
-                    warn!(target: "python_worker", "命令超时后 Worker 未自愈，强制回收");
-                    kill_worker_now(self).await;
+                if let Some(request_id) = stuck_request_id {
+                    grace_wait_slot_release(self, request_id, Duration::from_secs(10)).await;
                 }
                 Err(BridgeError::Timeout)
             }
@@ -347,7 +362,6 @@ impl BridgeSupervisor {
     pub fn set_event_tx(&self, tx: broadcast::Sender<String>) {
         *self.event_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
-
     /// 优雅关闭 Worker（shutdown 命令 → 等超时 → kill）
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(SupervisorCommand::Shutdown).await;
@@ -355,8 +369,10 @@ impl BridgeSupervisor {
 
     /// 强制回收 Worker：立即强杀子进程并复位状态
     ///
-    /// 供 [`crate::login::LoginSession`] 在 `NetworkError`/`UnknownError` 后调用，
-    /// 强制回收可能已损坏的浏览器上下文。会清理会话与取消注册表。
+    /// 供 [`crate::login::LoginSession`] 在可重试结果触发 `should_force_recycle`
+    /// （当前仅 `NetworkError`）时调用，强制回收可能已损坏的浏览器上下文。
+    /// 注意 `UnknownError` 不走此路径：`classify` 将其归为终态失败，在
+    /// `try_retry` 之前即 return，不触发回收。会清理会话与取消注册表。
     pub async fn force_recycle(&self) {
         // 清理会话与取消注册表
         {
@@ -394,13 +410,21 @@ impl BridgeSupervisor {
             stop_tx: stop_tx.clone(),
             join_handle,
         };
-        *self.service_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(stop_tx);
+        *self
+            .service_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(stop_tx);
         handle
     }
 
     /// 停止 supervisor task（ServiceHandle 模式）
     pub async fn stop(&self) {
-        if let Some(tx) = self.service_handle.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(tx) = self
+            .service_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             let _ = tx.send(true);
         }
     }
@@ -417,7 +441,26 @@ impl BridgeSupervisor {
     /// 供登录会话终态收尾判断是否需要发送 `close_browser`：
     /// 进程已被 force_recycle / 空闲回收时跳过，避免仅为关浏览器而重新 spawn。
     pub fn has_live_worker(&self) -> bool {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).process.is_some()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .process
+            .is_some()
+    }
+
+    /// 读取 Worker 运行时 OCR 能力（任务 10）
+    ///
+    /// 仅当 Worker 存活**且**最近一次 worker_health_check 上报了
+    /// `capabilities.ocr` 时返回 `Some(bool)`；否则返回 `None`，
+    /// 由调用方回退到文件探测（environment.ocr_ready）。
+    pub fn runtime_ocr_capability(&self) -> Option<bool> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.process.as_ref()?;
+        inner
+            .worker_capabilities
+            .as_ref()?
+            .get("ocr")?
+            .as_bool()
     }
 
     /// 复位连续 spawn 失败计数（B3）
@@ -463,6 +506,36 @@ async fn run_supervisor(
     }
     // 主循环退出：优雅回收 Worker，避免残留子进程与后台 task（历史遗留 F4）
     handle_shutdown(&this).await;
+}
+
+/// 超时自愈宽限等待与卡死强杀（历史遗留 F2 修复）
+///
+/// 超时请求 Cancel 后给 Worker 一段宽限期，等待 Python 侧命令超时自愈
+/// （guard drop 释放会话槽位）。**归属校验**：仅当宽限期结束时槽位仍被
+/// **同一请求**（`current_request_id == Some(stuck_request_id)`）占用才判定
+/// 卡死并强杀回收；槽位已空（自愈成功）或已被**新请求**占用（旧请求已
+/// 释放槽位、新会话合法进入）均视为自愈成功放行——旧实现只看
+/// `current_request_id.is_some()`，会把新请求 B 占用的槽位误判为 A 卡死而强杀 B。
+async fn grace_wait_slot_release(this: &BridgeSupervisor, stuck_request_id: u64, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    loop {
+        let freed = {
+            let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.current_request_id != Some(stuck_request_id)
+        };
+        if freed || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let still_stuck = {
+        let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.current_request_id == Some(stuck_request_id)
+    };
+    if still_stuck {
+        warn!(target: "python_worker", "命令超时后 Worker 未自愈，强制回收");
+        kill_worker_now(this).await;
+    }
 }
 
 /// 处理 supervisor 命令
@@ -532,7 +605,12 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
 async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
     match msg {
         ParsedMessage::Response(resp) => {
-            let tx = this.inner.lock().unwrap_or_else(|e| e.into_inner()).pending_requests.remove(&resp.id);
+            let tx = this
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending_requests
+                .remove(&resp.id);
             if let Some(tx) = tx {
                 // oneshot::send 是同步操作，不会阻塞 supervisor 主循环
                 let _ = tx.send(Ok(resp));
@@ -561,13 +639,18 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
             }
         }
         ParsedMessage::Event(ev) => {
-            // 事件（step_progress/screenshot/ocr_result/dialog）转发到 WebSocket 日志流
+            // 事件转发白名单（step_progress/screenshot/dialog，均由 Python 侧实际
+            // emit）转发到 WebSocket 日志流；其余事件仅 debug 记录。
+            // 曾经白名单中的 `ocr_result` 为死臂：Python 侧从未 emit 该事件
+            //（OCR 走 ocr_recognize 请求-响应，不走事件推送），已删除。
             debug!(target: "python_worker", "event {}: {:?}", ev.event, ev.data);
-            if matches!(
-                ev.event.as_str(),
-                "screenshot" | "step_progress" | "ocr_result" | "dialog"
-            ) {
-                if let Some(tx) = this.event_tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if matches!(ev.event.as_str(), "screenshot" | "step_progress" | "dialog") {
+                if let Some(tx) = this
+                    .event_tx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
                     let payload = json!({ "type": ev.event, "data": ev.data });
                     if let Ok(s) = serde_json::to_string(&payload) {
                         let _ = tx.send(s);
@@ -600,8 +683,7 @@ async fn execute_inner(
         CancellationToken,
     ),
     BridgeError,
->
-{
+> {
     // OCR 只需要 Python Worker 与 ddddocr，不应被 Chromium 可执行文件状态阻断。
     let is_ocr = method == "ocr_recognize";
 
@@ -653,9 +735,9 @@ async fn execute_inner(
                     params,
                 })) {
                     inner.pending_requests.remove(&request_id);
-                    return Err(BridgeError::IpcWriteError(std::io::Error::other(
-                        format!("IPC channel send failed: {e}"),
-                    )));
+                    return Err(BridgeError::IpcWriteError(std::io::Error::other(format!(
+                        "IPC channel send failed: {e}"
+                    ))));
                 }
             }
             None => {
@@ -668,7 +750,9 @@ async fn execute_inner(
         // 先注册新 cancel token，再清理旧会话残留的 cancel_id（如 InLogin 时 debug_start
         // 覆盖 current_session，旧 Login 的 cancel_id 不再被追踪）。仅当新旧不同才移除，
         // 避免调用方复用同一 cancel_id 时误删刚注册的 token。
-        inner.cancel_registry.register(cancel_id.clone(), token.clone());
+        inner
+            .cancel_registry
+            .register(cancel_id.clone(), token.clone());
         if is_ocr {
             // OCR 轻量旁路：仅注册 cancel，不触碰会话槽位 / worker_state / 空闲计时器，
             // 也不移除旧会话的 cancel_id（OCR 与任意会话并发，绝不清他人注册）。
@@ -846,7 +930,10 @@ async fn ensure_worker(
         }
     }
     // 校验 Python 解释器是否存在
-    let python_exe = this.base_path.join(WORKER_PROJECT_DIR).join(PYTHON_EXE_RELATIVE);
+    let python_exe = this
+        .base_path
+        .join(WORKER_PROJECT_DIR)
+        .join(PYTHON_EXE_RELATIVE);
     let worker_main = this
         .base_path
         .join(WORKER_PROJECT_DIR)
@@ -949,9 +1036,9 @@ async fn send_health_check(
                     params,
                 })) {
                     inner.pending_requests.remove(&request_id);
-                    return Err(BridgeError::IpcWriteError(std::io::Error::other(
-                        format!("IPC channel send failed: {e}"),
-                    )));
+                    return Err(BridgeError::IpcWriteError(std::io::Error::other(format!(
+                        "IPC channel send failed: {e}"
+                    ))));
                 }
             }
             None => {
@@ -973,6 +1060,15 @@ async fn send_health_check(
         Ok(Ok(r)) => r,
     };
     let resp = resp.map_err(|_| BridgeError::WorkerStartupTimeout)?;
+    // 任务 10：Worker 轻量健康检查会随响应上报运行时能力（capabilities），
+    // 此处缓存供 /api/ocr/status 等读取；缺失该字段时清空旧缓存（回退文件探测）。
+    if worker_only {
+        let caps = resp.result.data.get("capabilities").cloned();
+        this.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .worker_capabilities = caps;
+    }
     // 健康检查成功且 Worker 报告浏览器可用
     Ok(resp.result.success
         && resp
@@ -985,7 +1081,12 @@ async fn send_health_check(
 
 /// 强杀当前 Worker 子进程并标记 Error（不清理 cancel 注册表/会话）
 async fn kill_worker_now(this: &BridgeSupervisor) {
-    let proc = this.inner.lock().unwrap_or_else(|e| e.into_inner()).process.take();
+    let proc = this
+        .inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .process
+        .take();
     if let Some(p) = proc {
         // 先尝试优雅关闭，超时则由 shutdown 内部强杀
         let _ = p.stdin_tx.try_send(IpcMessage::Request(IpcRequest {
@@ -994,7 +1095,8 @@ async fn kill_worker_now(this: &BridgeSupervisor) {
             params: Value::Null,
         }));
         // 仅依赖 p.shutdown 内部的 timeout，避免外层再包 timeout 导致可达 2 倍超时
-        p.shutdown(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS)).await;
+        p.shutdown(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS))
+            .await;
     }
     // 进程已终止，在途请求不可能再得到响应：立即 drain 并结算，
     // 否则对应 execute_inner 要挂满 300s 超时才返回（且只能拿到 Timeout 错误）
@@ -1002,13 +1104,20 @@ async fn kill_worker_now(this: &BridgeSupervisor) {
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Error;
+        // 能力缓存随进程失效（任务 10），避免对已死 Worker 上报运行时能力
+        inner.worker_capabilities = None;
         merge_worker_status(&inner, &this.status);
     }
 }
 
 /// 优雅关闭 Worker（shutdown 命令 → 等超时 → kill）
 async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
-    let process = this.inner.lock().unwrap_or_else(|e| e.into_inner()).process.take();
+    let process = this
+        .inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .process
+        .take();
     if let Some(proc) = process {
         // 先发送 shutdown 命令，等待 Worker 自行退出
         let _ = proc.stdin_tx.try_send(IpcMessage::Request(IpcRequest {
@@ -1017,13 +1126,16 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
             params: Value::Null,
         }));
         // 仅依赖 proc.shutdown 内部的 timeout，避免外层再包 timeout 导致可达 2 倍超时
-        proc.shutdown(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS)).await;
+        proc.shutdown(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS))
+            .await;
     }
     // 与 kill_worker_now 同理：进程已回收，drain 在途请求避免悬挂至超时
     drain_pending_requests(this, "worker shut down");
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Idle;
+        // 能力缓存随进程失效（任务 10）
+        inner.worker_capabilities = None;
         merge_worker_status(&inner, &this.status);
     }
 }
@@ -1045,10 +1157,33 @@ fn drain_pending_requests(this: &BridgeSupervisor, reason: &str) {
 }
 
 /// 空闲计时器触发：若仍处于 Idle 则回收 Worker
+///
+/// 历史遗留 F3：`Idle` 只代表会话槽位空闲，OCR 等轻量在途请求**不占槽位、
+/// 不改 worker_state**，仅体现在 `pending_requests` 中。存在在途请求时不能
+/// 回收 Worker（否则请求被 drain 为 `WorkerCrashed`），重置活动时刻并重启
+/// 空闲计时器顺延一个完整空闲周期；待请求结束后再由计时器正常回收。
 async fn handle_idle_timeout(this: &Arc<BridgeSupervisor>) {
     let should_shutdown = {
-        let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-        matches!(inner.worker_state, WorkerState::Idle) && inner.process.is_some()
+        let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(inner.worker_state, WorkerState::Idle) {
+            return;
+        }
+        // F3：在途请求检查优先于回收判定——OCR 轻量旁路不占会话槽位、
+        // 不改 worker_state，仅体现在 pending_requests 中，Idle 状态下仍可能有
+        // 在途请求。此时顺延而非 shutdown，否则请求被 drain 为 WorkerCrashed。
+        if !inner.pending_requests.is_empty() {
+            // 重置 last_activity 保证顺延后仍空闲满完整 idle 周期才回收；
+            // 重启计时器接管已被消耗的旧计时器。
+            inner.last_activity = Instant::now();
+            start_idle_timer(this, &mut inner);
+            debug!(
+                target: "python_worker",
+                "空闲回收触发但存在 {} 个在途请求，顺延一个空闲周期",
+                inner.pending_requests.len()
+            );
+            return;
+        }
+        inner.process.is_some()
     };
     if should_shutdown {
         handle_shutdown(this).await;
@@ -1100,6 +1235,8 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
         inner.current_request_id = None;
         let handles = inner.process.take().map(|p| p.handles);
         inner.worker_state = WorkerState::Error;
+        // 能力缓存随进程失效（任务 10）
+        inner.worker_capabilities = None;
         merge_worker_status(&inner, &this.status);
         (pending, handles, crashed_session)
     };
@@ -1122,8 +1259,14 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
     }
     // 调试会话因崩溃被强制终止：通知 WebSocket 日志流
     if crashed_session == Some(SessionType::Debug) {
-        if let Some(tx) = this.event_tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            let payload = json!({ "type": "debug_session_closed", "data": { "reason": "worker_crashed" } });
+        if let Some(tx) = this
+            .event_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let payload =
+                json!({ "type": "debug_session_closed", "data": { "reason": "worker_crashed" } });
             if let Ok(s) = serde_json::to_string(&payload) {
                 let _ = tx.send(s);
             }
@@ -1352,5 +1495,135 @@ mod tests {
             let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
             assert_eq!(inner.consecutive_spawn_failures, 0);
         }
+    }
+
+    /// 构造测试用 BridgeSupervisor（临时目录，不 spawn 后台 task）。
+    /// 同时返回 TempDir 供调用方保活（避免 Windows 下目录提前删除影响配置读取）。
+    async fn make_bridge() -> (Arc<BridgeSupervisor>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
+        let config = crate::config::ConfigService::new(dir.path().to_path_buf(), reload_tx)
+            .await
+            .expect("ConfigService 构造失败");
+        let status = Arc::new(crate::status::StatusManager::new());
+        (
+            BridgeSupervisor::new(dir.path().to_path_buf(), config, status, None),
+            dir,
+        )
+    }
+
+    /// F2：宽限期内槽位仍被**同一**超时请求占用 → 判定卡死，强杀回收。
+    /// 可观测效果：kill_worker_now 将 worker_state 置为 Error 并 drain pending。
+    #[tokio::test]
+    async fn f2_宽限期槽位仍被同一请求占用_判定卡死强杀() {
+        let (bridge, _dir) = make_bridge().await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::InLogin;
+            inner.current_request_id = Some(7);
+            let (tx, _rx) = oneshot::channel();
+            inner.pending_requests.insert(7, tx);
+        }
+        grace_wait_slot_release(&bridge, 7, Duration::from_millis(50)).await;
+        let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(inner.worker_state, WorkerState::Error, "卡死应触发强杀置 Error");
+        assert!(inner.pending_requests.is_empty(), "强杀应 drain 在途请求");
+    }
+
+    /// F2 核心回归：请求 A 超时自愈释放槽位后，新请求 B 占位——宽限循环不得
+    /// 把 B 误判为 A 卡死而强杀（旧实现只看 is_some，B 会被误杀）。
+    #[tokio::test]
+    async fn f2_宽限期槽位被新请求占用_不误杀新会话() {
+        let (bridge, _dir) = make_bridge().await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+            // 模拟：A（request 7）已释放，B（request 8）已占用槽位
+            inner.current_request_id = Some(8);
+        }
+        // 以 A 的 request id 进入宽限等待；B 占位应被视为自愈成功放行
+        grace_wait_slot_release(&bridge, 7, Duration::from_millis(50)).await;
+        let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert_ne!(
+            inner.worker_state,
+            WorkerState::Error,
+            "新请求占位不得触发强杀"
+        );
+        assert_eq!(inner.current_request_id, Some(8), "B 的槽位不应被复位");
+    }
+
+    /// F2：宽限期内槽位释放为空 → 自愈成功，不杀。
+    #[tokio::test]
+    async fn f2_宽限期槽位释放为空_不杀() {
+        let (bridge, _dir) = make_bridge().await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+            inner.current_request_id = None;
+        }
+        grace_wait_slot_release(&bridge, 7, Duration::from_millis(50)).await;
+        let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert_ne!(inner.worker_state, WorkerState::Error, "槽位已空不应强杀");
+    }
+
+    /// F3：空闲计时器触发但存在在途请求（OCR 轻量旁路）→ 顺延而非 shutdown。
+    /// 可观测效果：pending 不被 drain（oneshot 未收到 WorkerCrashed）、
+    /// idle_timer 被重启。
+    #[tokio::test]
+    async fn f3_idle触发但有在途请求_顺延不回收() {
+        use tokio::sync::oneshot;
+
+        let (bridge, _dir) = make_bridge().await;
+        let mut rx = {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+            let (tx, rx) = oneshot::channel();
+            inner.pending_requests.insert(100, tx);
+            rx
+        };
+        handle_idle_timeout(&bridge).await;
+        {
+            let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            // 在途请求未被 drain（未被结算为 WorkerCrashed）
+            assert!(
+                inner.pending_requests.contains_key(&100),
+                "顺延路径不应 drain 在途请求"
+            );
+            // 空闲计时器被重启（顺延一个周期）
+            assert!(inner.idle_timer.is_some(), "顺延路径应重启空闲计时器");
+        }
+        // oneshot 未收到任何结算（shutdown 路径会立即收到 WorkerCrashed）
+        assert!(
+            rx.try_recv().is_err(),
+            "顺延路径不应向在途请求结算错误"
+        );
+        // 清理：中止重启的计时器，避免测试运行时后台 task 残留
+        if let Some(h) = bridge
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .idle_timer
+            .take()
+        {
+            h.abort();
+        }
+    }
+
+    /// 任务 10：runtime_ocr_capability 在 Worker 未存活时一律 None（回退文件探测）。
+    #[tokio::test]
+    async fn 能力上报_worker未存活时返回none() {
+        let (bridge, _dir) = make_bridge().await;
+        // 无进程时即使缓存存在也不得上报
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_capabilities = Some(json!({ "ocr": true }));
+        }
+        assert_eq!(bridge.runtime_ocr_capability(), None);
+        // 无缓存同样 None
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_capabilities = None;
+        }
+        assert_eq!(bridge.runtime_ocr_capability(), None);
     }
 }

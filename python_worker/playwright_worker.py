@@ -49,6 +49,10 @@ logger = logging.getLogger(__name__)
 # 避免依赖 Rust spawn 继承的 CWD（未设 current_dir，可能是任意目录）
 _WORKER_DIR = Path(__file__).resolve().parent
 
+# Worker 版本（任务 10）：与 pyproject.toml 的 project.version 保持同步（手动维护），
+# 随 worker_health_check 响应上报给 Rust 侧。
+WORKER_VERSION = "5.0.0a1"
+
 
 def _browser_data_dir() -> Path:
     """浏览器持久化数据目录（按 channel 隔离，锚定到应用数据目录）。
@@ -350,6 +354,9 @@ class WorkerCore:
         # 当前会话类型（login / debug）：注入 step_progress 事件，供前端区分
         # 登录会话与调试会话的步骤进度（登录步骤不应污染调试面板）
         self._session_type: str = "login"
+        # 运行时能力（任务 10）：由 worker_main._serve 注入（OCR 预加载探测结果），
+        # 随 worker_health_check 响应上报；未注入时为空 dict（Rust 侧回退文件探测）
+        self.capabilities: dict[str, bool] = {}
 
     # ── 浏览器启动参数构建 ──
 
@@ -803,7 +810,7 @@ class WorkerCore:
             if cancel_id:
                 cancel_registry.unregister(cancel_id)
 
-    async def handle_browser_health_check(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_browser_health_check(self, params: dict) -> dict:
         """健康检查：确认 Playwright 与浏览器可用。"""
         channel = (params.get("browser_settings") or {}).get("browser_channel", "playwright")
         try:
@@ -816,12 +823,31 @@ class WorkerCore:
             healthy = False
         return {"healthy": healthy}
 
-    async def handle_worker_health_check(self, params: dict, core: "WorkerCore") -> dict:
-        """轻量健康检查：只确认 Worker IPC/事件循环可用，不探测 Chromium。"""
-        return {"healthy": True}
+    async def handle_worker_health_check(self, params: dict) -> dict:
+        """轻量健康检查：确认 Worker IPC/事件循环可用，不探测 Chromium。
 
-    async def handle_execute_login_attempt(self, params: dict, core: "WorkerCore") -> dict:
+        任务 10：响应向后兼容地扩展 ``version`` 与 ``capabilities``——
+        Rust 侧（BridgeSupervisor.send_health_check）会缓存 capabilities，
+        供 /api/ocr/status 在 Worker 存活时优先展示运行时 OCR 能力。
+        """
+        return {
+            "healthy": True,
+            "version": WORKER_VERSION,
+            "capabilities": dict(self.capabilities),
+        }
+
+    async def handle_execute_login_attempt(self, params: dict) -> dict:
         """执行完整登录流程。"""
+        # B3 防御（Python 半）：调试会话持有 Worker 浏览器上下文期间拒绝登录
+        # 任务，避免登录重建浏览器把调试会话的 page/context 连根拔掉。
+        # Outcome 无 BUSY 变体（新增会破坏与 Rust 的 serde 契约），复用最贴近的
+        # UNKNOWN_ERROR（终态失败、不重试），消息中明确说明原因。
+        # 根治方案（Rust 侧会话槽位覆盖调试会话整个存活期，而非仅 debug_start
+        # 命令期间）另行立项，此处仅作纵深防御。
+        if self._debug_sessions:
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR, "调试会话进行中，无法执行登录任务，请先停止调试"
+            )
         async with self._cancel_session(params) as (cancel_event, bs, task):
             auth_url = params.get("auth_url", "")
             variables = {
@@ -839,8 +865,14 @@ class WorkerCore:
             result.data = {"dialogs": list(self._task_dialogs)}
             return result.to_dict()
 
-    async def handle_execute_browser_task(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_execute_browser_task(self, params: dict) -> dict:
         """执行浏览器任务（不含账号密码语义）。"""
+        # B3 防御（Python 半）：同 handle_execute_login_attempt，调试会话存续期
+        # 内拒绝浏览器任务，避免上下文互踩。
+        if self._debug_sessions:
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR, "调试会话进行中，无法执行浏览器任务，请先停止调试"
+            )
         async with self._cancel_session(params) as (cancel_event, bs, task):
             variables = dict(task.variables or {})
             self._task_dialogs = []
@@ -850,7 +882,7 @@ class WorkerCore:
             result.data = {"dialogs": list(self._task_dialogs)}
             return result.to_dict()
 
-    async def handle_debug_start(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_debug_start(self, params: dict) -> dict:
         """启动调试会话，保留浏览器上下文供后续 debug_step 复用。
 
         与 Rust 单会话语义一致：同一时刻仅允许一个活跃调试会话，
@@ -961,7 +993,7 @@ class WorkerCore:
             }
         )
 
-    async def handle_debug_step(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_debug_step(self, params: dict) -> dict:
         """执行调试会话中的单个步骤。
 
         优先级：
@@ -1010,7 +1042,7 @@ class WorkerCore:
             session.current_step = idx + 1
         return self._debug_response(session)
 
-    async def handle_debug_run_all(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_debug_run_all(self, params: dict) -> dict:
         """依次执行调试会话中尚未运行的全部步骤（从当前游标到末尾）。
 
         逐步骤记录成功/失败结果，遇到失败的必需步骤即停止；返回完整会话数据。
@@ -1075,7 +1107,7 @@ class WorkerCore:
         # screenshots 是 StepContext 的 list[str] 字段，list.clear() 不会抛出
         session.context.screenshots.clear()
 
-    async def handle_debug_stop(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_debug_stop(self, params: dict) -> dict:
         """停止调试会话并关闭浏览器。"""
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
@@ -1087,7 +1119,7 @@ class WorkerCore:
         await self.close_browser()
         return {}
 
-    async def handle_close_browser(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_close_browser(self, params: dict) -> dict:
         """关闭浏览器但保留 Worker 进程。
 
         登录会话到达终态（成功/失败/取消）后由 Rust 侧调用，对齐原版
@@ -1103,7 +1135,7 @@ class WorkerCore:
             logger.warning("close_browser 超时（8s），跳过等待继续")
         return {}
 
-    async def handle_ocr_recognize(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_ocr_recognize(self, params: dict) -> dict:
         """识别 base64 图片中的文本（ddddocr）。"""
         image_base64 = params.get("image_base64", "")
         if not image_base64:
@@ -1150,7 +1182,7 @@ class WorkerCore:
             ) from exc
         return {"text": text}
 
-    async def handle_shutdown(self, params: dict, core: "WorkerCore") -> dict:
+    async def handle_shutdown(self, params: dict) -> dict:
         """关闭 Worker：置位 shutdown_event，主循环随后退出。"""
         if self.shutdown_event is not None:
             self.shutdown_event.set()

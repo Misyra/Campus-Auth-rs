@@ -119,11 +119,15 @@ class StepConfig:
     path: str | None = None
     """文件路径（上传等场景）。"""
 
-    clear: bool = False
-    """input 步骤是否先清空再填写。"""
+    clear: bool = True
+    """input 步骤是否先清空再填写。
 
-    duration: int = 0
-    """wait 步骤等待时长（毫秒）。"""
+    默认 True，与 Rust 侧 ``StepHelper::default``（tasks/models.rs）对齐（B5 契约）：
+    前端编辑器不写 clear 字段，默认清空可避免残留值与新值拼接造成假输入。
+    """
+
+    duration: int = 1000
+    """wait/sleep 步骤等待时长（毫秒）。默认 1000，与 Rust 侧默认对齐（B5 契约）。"""
 
     option_selector: str | None = None
     """click_select 步骤中目标选项的选择器。"""

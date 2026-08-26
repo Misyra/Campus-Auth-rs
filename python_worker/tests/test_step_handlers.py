@@ -172,3 +172,286 @@ def test_classify_navigation_error_generic():
         ValueError("page closed"), "https://x"
     )
     assert err.outcome == Outcome.NETWORK_ERROR.value
+
+
+# ── G1: _safe_op 缺口（四处裸调用应归类而非 UNKNOWN_ERROR）──
+
+
+def _playwright_error_classes():
+    from playwright.async_api import Error as PlaywrightError
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    return PlaywrightError, PlaywrightTimeoutError
+
+
+def test_input_fallback_wait_for_maps_to_selector_failed():
+    """input 降级路径的 wait_for 包 _safe_op：瞬时未 attach → SELECTOR_FAILED 可重试。"""
+    import asyncio
+
+    from step_handlers import Outcome, handle_input
+
+    PlaywrightError, _PT = _playwright_error_classes()
+
+    class FlakyLocator:
+        async def fill(self, value, timeout=None):
+            raise PlaywrightError("element is not visible")
+
+        async def press_sequentially(self, value, timeout=None):
+            raise PlaywrightError("element is not visible")
+
+        @property
+        def first(self):
+            return self
+
+        async def wait_for(self, state=None, timeout=None):
+            # 元素未 attach 的瞬时失败（页面刷新间隙）
+            raise PlaywrightError("element is not attached to the DOM")
+
+        async def evaluate(self, *args, **kwargs):
+            raise AssertionError("wait_for 失败后不应再走 _force_input")
+
+    class FakePage:
+        def locator(self, selector):
+            return FlakyLocator()
+
+    async def run():
+        step = StepConfig.from_dict(
+            {"id": "s1", "type": "input", "selector": "#u", "value": "x", "clear": True}
+        )
+        ctx = StepContext(page=FakePage(), default_timeout=500)
+        with pytest.raises(WorkerError) as ei:
+            await handle_input(FakePage(), step, ctx)
+        return ei.value
+
+    err = asyncio.run(run())
+    assert err.outcome == Outcome.SELECTOR_FAILED.value
+    assert "元素操作失败" in err.message
+
+
+def test_screenshot_failure_maps_to_selector_failed():
+    """handle_screenshot 的 page.screenshot 包 _safe_op：截图步骤失败可重试。"""
+    import asyncio
+    import tempfile
+    from pathlib import Path
+
+    from step_handlers import Outcome, handle_screenshot
+
+    PlaywrightError, _PT = _playwright_error_classes()
+
+    class FakePage:
+        async def screenshot(self, **kwargs):
+            raise PlaywrightError("Target closed")
+
+    async def run(tmp: Path):
+        step = StepConfig.from_dict({"id": "s1", "type": "screenshot"})
+        ctx = StepContext(page=FakePage(), screenshot_dir=tmp)
+        with pytest.raises(WorkerError) as ei:
+            await handle_screenshot(FakePage(), step, ctx)
+        return ei.value
+
+    with tempfile.TemporaryDirectory() as td:
+        err = asyncio.run(run(Path(td)))
+    assert err.outcome == Outcome.SELECTOR_FAILED.value
+
+
+def test_ocr_locator_screenshot_maps_to_selector_failed(monkeypatch):
+    """handle_ocr 的 locator.screenshot 包 _safe_op：瞬时失败 → SELECTOR_FAILED。"""
+    import asyncio
+    import tempfile
+    from pathlib import Path
+
+    import step_handlers
+    from step_handlers import Outcome, handle_ocr
+
+    PlaywrightError, _PT = _playwright_error_classes()
+
+    # 屏蔽真实 ddddocr 加载（本测试只关心截图分类）
+    monkeypatch.setattr(step_handlers, "_get_ocr", lambda old, char_range=None: object())
+
+    class FlakyLocator:
+        async def wait_for(self, state=None, timeout=None):
+            return None
+
+        async def screenshot(self):
+            raise PlaywrightError("element was detached")
+
+    class FakePage:
+        def locator(self, selector):
+            return FlakyLocator()
+
+    async def run(tmp: Path):
+        step = StepConfig.from_dict(
+            {"id": "s1", "type": "ocr", "selector": "#captcha"}
+        )
+        ctx = StepContext(page=FakePage(), screenshot_dir=tmp)
+        with pytest.raises(WorkerError) as ei:
+            await handle_ocr(FakePage(), step, ctx)
+        return ei.value
+
+    with tempfile.TemporaryDirectory() as td:
+        err = asyncio.run(run(Path(td)))
+    assert err.outcome == Outcome.SELECTOR_FAILED.value
+
+
+def test_wait_url_page_closed_maps_to_navigation_timeout():
+    """handle_wait_url 读取 page.url 抛 Target closed → NAVIGATION_TIMEOUT（可重试）。"""
+    import asyncio
+
+    from step_handlers import Outcome, handle_wait_url
+
+    PlaywrightError, _PT = _playwright_error_classes()
+
+    class ClosedPage:
+        @property
+        def url(self):
+            raise PlaywrightError("Target page has been closed")
+
+    async def run():
+        step = StepConfig.from_dict(
+            {"id": "s1", "type": "wait_url", "pattern": "ok"}
+        )
+        ctx = StepContext(page=ClosedPage())
+        with pytest.raises(WorkerError) as ei:
+            await handle_wait_url(ClosedPage(), step, ctx)
+        return ei.value
+
+    err = asyncio.run(run())
+    assert err.outcome == Outcome.NAVIGATION_TIMEOUT.value
+    assert "读取页面 URL 失败" in err.message
+
+
+# ── B2: frame 字段断链修复 ──
+
+
+def test_run_step_async_sets_and_restores_frame():
+    """每个步骤执行前注入自身 frame，结束后恢复前值（context 跨步骤共享）。"""
+    import asyncio
+
+    import step_handlers
+    from step_handlers import run_step_async
+
+    seen = []
+
+    async def probe(page, step, context):
+        seen.append(context.frame)
+
+    original = step_handlers._STEP_HANDLERS.get("probe")
+    step_handlers._STEP_HANDLERS["probe"] = probe
+    try:
+        ctx = StepContext(page=None)
+        ctx.frame = "PREV"
+        s1 = StepConfig.from_dict({"id": "a", "type": "probe", "frame": "#f1"})
+        s2 = StepConfig.from_dict({"id": "b", "type": "probe"})
+        s3 = StepConfig.from_dict({"id": "c", "type": "probe", "frame": ""})
+
+        async def run():
+            await run_step_async(None, s1, ctx)
+            await run_step_async(None, s2, ctx)
+            await run_step_async(None, s3, ctx)
+
+        asyncio.run(run())
+    finally:
+        if original is None:
+            step_handlers._STEP_HANDLERS.pop("probe", None)
+        else:
+            step_handlers._STEP_HANDLERS["probe"] = original
+
+    # 步骤内可见自身 frame；空串归一 None；步骤间互不泄漏
+    assert seen == ["#f1", None, None]
+    # 步骤结束后 context.frame 恢复前值
+    assert ctx.frame == "PREV"
+
+
+def test_run_step_async_restores_frame_on_error():
+    """步骤抛错时 finally 同样恢复 frame 前值。"""
+    import asyncio
+
+    import step_handlers
+    from step_handlers import run_step_async
+
+    async def boom(page, step, context):
+        raise WorkerError(Outcome.SELECTOR_FAILED, "失败")
+
+    original = step_handlers._STEP_HANDLERS.get("probe_boom")
+    step_handlers._STEP_HANDLERS["probe_boom"] = boom
+    try:
+        ctx = StepContext(page=None)
+        ctx.frame = "PREV"
+        step = StepConfig.from_dict({"id": "a", "type": "probe_boom", "frame": "#f"})
+
+        async def run():
+            with pytest.raises(WorkerError):
+                await run_step_async(None, step, ctx)
+
+        asyncio.run(run())
+    finally:
+        if original is None:
+            step_handlers._STEP_HANDLERS.pop("probe_boom", None)
+        else:
+            step_handlers._STEP_HANDLERS["probe_boom"] = original
+    assert ctx.frame == "PREV"
+
+
+def test_frame_scoped_locators_use_frame_locator():
+    """步骤声明 frame 时（经 run_step_async 注入），定位链路走
+    page.frame_locator(...).locator(...)。"""
+    import asyncio
+
+    from step_handlers import run_step_async
+
+    class FakeScopedLocator:
+        def __init__(self, page):
+            self._page = page
+
+        @property
+        def first(self):
+            return self
+
+        async def click(self, timeout=None):
+            self._page.clicks.append("click")
+            return None
+
+        async def evaluate(self, script, arg=None):
+            self._page.evaluates.append((script, arg))
+
+        async def wait_for(self, state=None, timeout=None):
+            return None
+
+    class FakePage:
+        def __init__(self):
+            self.frame_calls = []
+            self.locator_calls = []
+            self.clicks = []
+            self.evaluates = []
+
+        def frame_locator(self, frame):
+            self.frame_calls.append(frame)
+            return self
+
+        def locator(self, selector):
+            self.locator_calls.append(selector)
+            return FakeScopedLocator(self)
+
+    async def run():
+        # click：frame 生效 → frame_locator 被调用（frame 由 run_step_async 注入）
+        page = FakePage()
+        click_step = StepConfig.from_dict(
+            {"id": "c1", "type": "click", "selector": "#btn", "frame": "#my-iframe"}
+        )
+        await run_step_async(page, click_step, StepContext(page=page))
+        assert page.frame_calls == ["#my-iframe"]
+        assert page.locator_calls == ["#btn"]
+        assert page.clicks, "点击应在 frame 作用域内执行"
+
+        # input（reveal_hidden 强制注入路径）：evaluate 在 frame 定位的 locator 上执行
+        page2 = FakePage()
+        input_step = StepConfig.from_dict(
+            {"id": "i1", "type": "input", "selector": "#u", "value": "v",
+             "frame": "iframe[name=x]"}
+        )
+        ctx = StepContext(page=page2, reveal_hidden=True)
+        await run_step_async(page2, input_step, ctx)
+        # handle_input 顶部预定位 + _force_input 注入各走一次 frame_locator
+        assert page2.frame_calls == ["iframe[name=x]", "iframe[name=x]"]
+        assert page2.evaluates, "_force_input 注入应经 frame_locator 定位后在框架内执行"
+
+    asyncio.run(run())

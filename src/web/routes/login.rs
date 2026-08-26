@@ -5,13 +5,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde_json::Value;
 
 use crate::login::LoginApi;
 use crate::status::{LoginSource, StatusManager};
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// POST /api/login — 触发手动登录
 ///
@@ -44,9 +44,7 @@ pub async fn trigger_login(
 }
 
 /// POST /api/login/cancel — 取消当前登录流程
-pub async fn cancel_login(
-    State(login): State<Arc<dyn LoginApi>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn cancel_login(State(login): State<Arc<dyn LoginApi>>) -> Result<Json<Value>, ApiError> {
     // await 等待状态锁，避免撞上 submit 持锁窗口时取消被静默丢弃（B2）
     login.cancel_current().await;
     Ok(data(Value::String("已取消".into())))
@@ -91,10 +89,10 @@ pub async fn login_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::{get, post};
-    use axum::Router;
     use tower::ServiceExt;
 
     use crate::login::{LoginHandle, LoginResult};
@@ -127,15 +125,11 @@ mod tests {
             task_id: Option<String>,
             profile_id: Option<String>,
         ) -> LoginHandle {
-            self.inner
-                .submits
-                .lock()
-                .unwrap()
-                .push(SubmitCall {
-                    source,
-                    task_id,
-                    profile_id,
-                });
+            self.inner.submits.lock().unwrap().push(SubmitCall {
+                source,
+                task_id,
+                profile_id,
+            });
             LoginHandle::immediate(self.result.clone())
         }
 
@@ -147,7 +141,12 @@ mod tests {
     fn result(success: bool) -> LoginResult {
         LoginResult {
             success,
-            message: if success { "登录成功" } else { "凭证缺失" }.into(),
+            message: if success {
+                "登录成功"
+            } else {
+                "凭证缺失"
+            }
+            .into(),
             source: LoginSource::Manual,
             duration: Duration::from_millis(1500),
             attempts: 1,
@@ -155,9 +154,7 @@ mod tests {
     }
 
     /// 测试路由：登录路由 + 真实 StatusManager（内存实现）
-    fn mock_app(
-        result: LoginResult,
-    ) -> (Router, Arc<MockLoginInner>, Arc<StatusManager>) {
+    fn mock_app(result: LoginResult) -> (Router, Arc<MockLoginInner>, Arc<StatusManager>) {
         let inner = Arc::new(MockLoginInner::default());
         let status = Arc::new(StatusManager::new());
         let login: Arc<dyn LoginApi> = Arc::new(MockLogin {

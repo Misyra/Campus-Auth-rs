@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use campus_auth::bridge::{spawn_worker, IpcMessage, IpcRequest, ParsedMessage};
+use campus_auth::bridge::{IpcMessage, IpcRequest, ParsedMessage, spawn_worker};
 use serde_json::Value;
 use tokio::sync::mpsc;
 

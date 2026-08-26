@@ -18,7 +18,7 @@ use std::time::Duration;
 use campus_auth::bridge::{BridgeError, BridgeSupervisor};
 use campus_auth::config::ConfigService;
 use campus_auth::status::StatusManager;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 假 worker_main.py：仅依赖标准库，按 method 返回不同响应。
 const FAKE_WORKER_MAIN: &str = r#"
@@ -53,7 +53,9 @@ for line in sys.stdin:
     elif method == "emit_malformed":
         emit({"id": mid, "garbage": True})
     elif method == "sleep":
-        time.sleep(10)
+        # 挂起指定秒数（默认 10s）：模拟不响应 cancel 的挂起命令
+        secs = (msg.get("params") or {}).get("secs", 10)
+        time.sleep(float(secs))
         emit({"id": mid, "result": {"success": True, "data": {}, "error": None}})
     else:
         emit({"id": mid, "result": {"success": True, "data": {"echo": method}, "error": None}})
@@ -135,9 +137,7 @@ fn setup_worker_tree(venv: &Path) -> Option<WorkerTree> {
         return None; // tree 在此 drop，清理已创建的目录
     }
     // 校验链接后 Python 可达，否则视为环境不支持而跳过
-    if !venv_link.join("Scripts/python.exe").exists()
-        && !venv_link.join("bin/python3").exists()
-    {
+    if !venv_link.join("Scripts/python.exe").exists() && !venv_link.join("bin/python3").exists() {
         return None;
     }
     std::fs::write(worker_dir.join("worker_main.py"), FAKE_WORKER_MAIN).ok()?;
@@ -235,7 +235,11 @@ async fn supervisor_cancel_返回_cancelled() {
     let bridge2 = bridge.clone();
     let jh = tokio::spawn(async move {
         bridge2
-            .execute_with_timeout("sleep", json!({ "cancel_id": "c1" }), Duration::from_secs(40))
+            .execute_with_timeout(
+                "sleep",
+                json!({ "cancel_id": "c1" }),
+                Duration::from_secs(40),
+            )
             .await
     });
 
@@ -300,4 +304,88 @@ async fn supervisor_超时_释放会话槽位() {
     );
 
     handle.stop().await;
+}
+
+/// F2 回归：请求 A 超时后若槽位已被新请求 B 接管（FIFO 语义），超时宽限循环
+/// 不得把 B 误判为 A 卡死而强杀——B 应正常完成。
+///
+/// 时序：A（sleep 12s，1s 超时）占位 → 0.5s 后 B（echo 快命令）经 FIFO 接管
+/// 槽位（Python 侧串行队列使其排队在 A 的 sleep 之后）→ A 超时时刻
+/// current_cancel_id 已属 B，归属校验判定本请求与槽位滞留无关，直接返回
+/// Timeout；B 在 A 的 sleep 结束后正常回包。旧实现只看 current_request_id
+/// .is_some()，会在宽限期结束时（槽位仍被 B 占用）强杀 Worker，B 被 drain
+/// 为 WorkerCrashed。
+#[tokio::test]
+async fn supervisor_超时宽限_不误杀接管槽位的新会话() {
+    let Some(venv) = locate_venv() else {
+        eprintln!("跳过 bridge_supervisor F2：未找到本地 Python venv");
+        return;
+    };
+    let Some(tree) = setup_worker_tree(&venv) else {
+        eprintln!("跳过 bridge_supervisor F2：无法创建 .venv 目录链接");
+        return;
+    };
+
+    let (bridge, handle, _config) = make_supervisor(&tree.base).await;
+
+    // 预热：确保 Worker 已 spawn 并通过健康检查
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, Duration::from_secs(40))
+        .await;
+
+    // A：挂起 12s（不响应 cancel），1s 超时触发超时路径
+    let bridge_a = bridge.clone();
+    let task_a = tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let r = bridge_a
+            .execute_with_timeout("sleep", json!({ "secs": 12 }), Duration::from_secs(1))
+            .await;
+        (r, start.elapsed())
+    });
+
+    // 等 A 占位后发送 B：FIFO 接管槽位（Login + browser_task 兼容），
+    // Python 串行队列让 B 排在 A 的 sleep 之后
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let task_b = {
+        let bridge_b = bridge.clone();
+        tokio::spawn(async move {
+            bridge_b
+                .execute_with_timeout("browser_task", Value::Null, Duration::from_secs(40))
+                .await
+        })
+    };
+
+    // A 应快速返回 Timeout（归属不匹配跳过宽限等待，无需耗满 10s）
+    let (r_a, elapsed_a) = join_with_timeout(task_a, 8).await;
+    assert!(
+        matches!(r_a, Err(BridgeError::Timeout)),
+        "A 应返回 Timeout，实际 {r_a:?}"
+    );
+    assert!(
+        elapsed_a < Duration::from_secs(5),
+        "A 的超时返回应跳过宽限等待（<5s），实际 {elapsed_a:?}"
+    );
+
+    // B 不被误杀：A 的 sleep 结束（~12s）后正常回包
+    let r_b = join_with_timeout(task_b, 35).await;
+    match r_b {
+        Ok(resp) => {
+            assert!(resp.result.success, "B 不应被误杀，实际 {resp:?}");
+            assert_eq!(
+                resp.result.data.get("echo").and_then(Value::as_str),
+                Some("browser_task")
+            );
+        }
+        other => panic!("期望 B 成功，实际 {other:?}（误杀会表现为 WorkerCrashed）"),
+    }
+
+    handle.stop().await;
+}
+
+/// 带超时地等待一个返回 (T, Duration) 的 JoinHandle（测试辅助）
+async fn join_with_timeout<T>(handle: tokio::task::JoinHandle<T>, secs: u64) -> T {
+    tokio::time::timeout(Duration::from_secs(secs), handle)
+        .await
+        .expect("任务应在超时窗口内完成")
+        .expect("任务不应 panic")
 }

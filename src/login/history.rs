@@ -55,7 +55,9 @@ fn de_source<'de, D: Deserializer<'de>>(de: D) -> Result<LoginSource, D::Error> 
         "manual" => Ok(LoginSource::Manual),
         "login_once" => Ok(LoginSource::LoginOnce),
         "browser" => Ok(LoginSource::Browser),
-        other => Err(serde::de::Error::custom(format!("未知 LoginSource: {other}"))),
+        other => Err(serde::de::Error::custom(format!(
+            "未知 LoginSource: {other}"
+        ))),
     }
 }
 
@@ -202,8 +204,8 @@ fn date_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use chrono::NaiveDate;
+    use chrono::TimeZone;
     use tempfile::TempDir;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -335,9 +337,7 @@ mod tests {
         svc.record(&e2).await.unwrap();
 
         // 查询同一天区间
-        let from = chrono::Local
-            .with_ymd_and_hms(2025, 7, 9, 0, 0, 0)
-            .unwrap();
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
         let to = chrono::Local
             .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
             .unwrap();
@@ -352,12 +352,8 @@ mod tests {
     async fn test_history_query_empty_dir() {
         // 目录不存在时返回空 vec（不报错）
         let (_dir, svc) = make_service();
-        let from = chrono::Local
-            .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
-            .unwrap();
-        let to = chrono::Local
-            .with_ymd_and_hms(2025, 1, 2, 0, 0, 0)
-            .unwrap();
+        let from = chrono::Local.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let to = chrono::Local.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
         let rows = svc.query(from, to).await.unwrap();
         assert!(rows.is_empty());
     }
@@ -369,9 +365,7 @@ mod tests {
         svc.record(&e).await.unwrap();
         svc.record(&e).await.unwrap();
         // 清空前能查到
-        let from = chrono::Local
-            .with_ymd_and_hms(2025, 7, 9, 0, 0, 0)
-            .unwrap();
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
         let to = chrono::Local
             .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
             .unwrap();
@@ -396,7 +390,9 @@ mod tests {
         svc.record(&e).await.unwrap();
         // 手动追加损坏行与空行
         let day = e.timestamp.date_naive();
-        let path = svc.history_dir().join(format!("{}.jsonl", day.format("%Y-%m-%d")));
+        let path = svc
+            .history_dir()
+            .join(format!("{}.jsonl", day.format("%Y-%m-%d")));
         use tokio::io::AsyncWriteExt;
         let mut f = tokio::fs::OpenOptions::new()
             .append(true)
@@ -406,9 +402,7 @@ mod tests {
         f.write_all(b"this is not json\n").await.unwrap();
         f.write_all(b"\n").await.unwrap(); // 空行也应跳过
 
-        let from = chrono::Local
-            .with_ymd_and_hms(2025, 7, 9, 0, 0, 0)
-            .unwrap();
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
         let to = chrono::Local
             .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
             .unwrap();

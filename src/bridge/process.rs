@@ -8,11 +8,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, ChildStderr, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::bridge::ipc::{CancelNotification, IpcEvent, IpcRequest, IpcResponse};
+use crate::bridge::ipc::{CancelNotification, IpcEvent, IpcRequest, IpcResponse, IpcResult};
 use crate::bridge::{BridgeError, IPC_DELIMITER, IPC_MAX_LINE_LEN, IPC_WRITE_CHANNEL_CAP};
 
 /// 发送给 stdin writer task 的消息
@@ -251,10 +251,11 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
                     // 找到换行符
                     if !exceeded && line_buf.len() + pos > IPC_MAX_LINE_LEN {
                         exceeded = true;
-                        tracing::warn!(
-                            "IPC 行超长，已丢弃: {} 字节",
-                            line_buf.len() + pos
-                        );
+                        tracing::warn!("IPC 行超长，已丢弃: {} 字节", line_buf.len() + pos);
+                        // G18：保留有界前缀（至多补齐到上限）供请求 id 提取，
+                        // 结算对应在途请求，避免其挂满 execute 超时
+                        let keep = IPC_MAX_LINE_LEN.saturating_sub(line_buf.len()).min(pos);
+                        line_buf.extend_from_slice(&available[..keep]);
                     }
                     if !exceeded {
                         line_buf.extend_from_slice(&available[..pos]);
@@ -268,6 +269,9 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
                     if !exceeded && line_buf.len() + available.len() > IPC_MAX_LINE_LEN {
                         exceeded = true;
                         tracing::warn!("IPC 行超长，已丢弃");
+                        // G18：同上，保留有界前缀供请求 id 提取
+                        let keep = IPC_MAX_LINE_LEN.saturating_sub(line_buf.len()).min(available.len());
+                        line_buf.extend_from_slice(&available[..keep]);
                     }
                     if !exceeded {
                         line_buf.extend_from_slice(available);
@@ -293,6 +297,10 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
         }
 
         if exceeded {
+            // G18：超限行无法作为响应整体解析，但保留的有界前缀仍可能携带
+            // 请求 id——构造错误 IpcResponse 结算对应在途请求（仿 worker_main
+            // 的 _oversized_request_id），否则该请求要挂满 execute 超时才返回。
+            settle_oversized_line(&line_buf, &ipc_tx).await;
             continue;
         }
 
@@ -363,6 +371,76 @@ async fn parse_and_send_line(trimmed: &str, ipc_tx: &mpsc::Sender<ParsedMessage>
     }
 }
 
+/// 从超限响应行的有界前缀提取请求 id（G18）
+///
+/// 仿 worker_main `_oversized_request_id`：`IpcResponse` 序列化时 `id` 位于
+/// 行首附近，仅扫描前 512 字符即足够；用手写扫描替代引入 regex 依赖。
+/// 仅接受 `{"id": N` 起始形态（忽略空白），避免误提取正文中的其他 id 字段。
+fn extract_leading_id(head: &str) -> Option<u64> {
+    let b = head.as_bytes();
+    let mut i = 0usize;
+    let skip_ws = |mut i: usize| {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    i = skip_ws(i);
+    if i >= b.len() || b[i] != b'{' {
+        return None;
+    }
+    i = skip_ws(i + 1);
+    if !head[i..].starts_with("\"id\"") {
+        return None;
+    }
+    i = skip_ws(i + 4);
+    if i >= b.len() || b[i] != b':' {
+        return None;
+    }
+    i = skip_ws(i + 1);
+    let start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    head[start..i].parse().ok()
+}
+
+/// 超长 IPC 响应行的结算（G18）
+///
+/// 从有界前缀提取请求 id，构造错误 [`IpcResponse`]（消息说明超出单行上限）
+/// 回传 Supervisor 结算对应在途请求；提取不到 id 时无法定位请求，仅保留
+/// 上方读取路径的 warn 日志。
+async fn settle_oversized_line(prefix: &[u8], ipc_tx: &mpsc::Sender<ParsedMessage>) {
+    let head = &prefix[..prefix.len().min(512)];
+    let head = match std::str::from_utf8(head) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(target: "python_worker", "超长 IPC 行前缀非 UTF-8，无法提取请求 id");
+            return;
+        }
+    };
+    let Some(id) = extract_leading_id(head) else {
+        tracing::warn!(target: "python_worker", "超长 IPC 行前缀无法提取请求 id，在途请求可能需等待超时");
+        return;
+    };
+    tracing::warn!(target: "python_worker", "IPC 响应超长（>1MiB），以错误结算请求 id={id}");
+    let resp = IpcResponse {
+        id,
+        result: IpcResult {
+            success: false,
+            data: serde_json::Value::Null,
+            error: Some(format!(
+                "IPC 响应超过 {} MiB 单行上限，已丢弃",
+                IPC_MAX_LINE_LEN / (1024 * 1024)
+            )),
+        },
+    };
+    let _ = ipc_tx.send(ParsedMessage::Response(resp)).await;
+}
+
 /// 非 JSON IPC 行计数（进程级：同一时刻仅一个 Worker，语义足够）
 static INVALID_IPC_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -373,8 +451,9 @@ pub fn take_invalid_ipc_line_count() -> u64 {
 
 /// stderr forwarder task：逐行转发到 tracing（最后的日志防线）
 ///
-/// 解析 Python loguru 日志行中的级别字段（如 `INFO` / `WARNING` / `ERROR`），
-/// 按实际级别调用对应的 tracing 宏，避免所有 stderr 输出都被误记为 WARN。
+/// 解析 Python Worker（stdlib `logging`，格式 `时间 级别 [名称] 消息`）
+/// 日志行中的级别字段（如 `INFO` / `WARNING` / `ERROR`），按实际级别调用
+/// 对应的 tracing 宏，避免所有 stderr 输出都被误记为 WARN。
 /// 非日志行（无级别字段）回退为 WARN。
 ///
 /// 使用 `fill_buf`/`consume` 逐块读取并施加行长度限制（`IPC_MAX_LINE_LEN`），
@@ -434,7 +513,8 @@ async fn stderr_forwarder_task(stderr: ChildStderr) {
     }
 }
 
-/// 解析 Python Worker 的 loguru 行，去掉已经由 Rust 日志层提供的时间和级别前缀。
+/// 解析 Python Worker 的 stdlib logging 行（`时间 级别 [名称] 消息`），
+/// 去掉已经由 Rust 日志层提供的时间和级别前缀。
 /// 返回 `(级别, 消息)`；格式异常时保留原文并让上层按 WARN 处理。
 fn parse_worker_stderr_line(line: &str) -> (String, String) {
     let trimmed = line.trim_end();
@@ -524,9 +604,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_valid_response() {
-        let msg = parse_line(r#"{"id":1,"result":{"success":true,"data":{"ok":true},"error":null}}"#)
-            .await
-            .unwrap();
+        let msg =
+            parse_line(r#"{"id":1,"result":{"success":true,"data":{"ok":true},"error":null}}"#)
+                .await
+                .unwrap();
         match msg {
             ParsedMessage::Response(resp) => {
                 assert_eq!(resp.id, 1);
@@ -539,7 +620,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_event() {
-        let msg = parse_line(r#"{"event":"step_progress","data":{"step":2}}"#).await.unwrap();
+        let msg = parse_line(r#"{"event":"step_progress","data":{"step":2}}"#)
+            .await
+            .unwrap();
         match msg {
             ParsedMessage::Event(ev) => {
                 assert_eq!(ev.event, "step_progress");
@@ -552,7 +635,9 @@ mod tests {
     #[tokio::test]
     async fn test_parse_response_with_invalid_body_recovers_id() {
         // 响应体反序列化失败但 id 有效 → ResponseError，Supervisor 可回收在途请求（历史遗留 F1）
-        let msg = parse_line(r#"{"id":42,"result":{"success":"not-bool"}}"#).await.unwrap();
+        let msg = parse_line(r#"{"id":42,"result":{"success":"not-bool"}}"#)
+            .await
+            .unwrap();
         match msg {
             ParsedMessage::ResponseError { id, .. } => {
                 assert_eq!(id, 42);
@@ -574,6 +659,53 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         // event 字段存在但类型非法（event 应为 String，此处为 number）→ 反序列化失败，只记日志
         parse_and_send_line(r#"{"event":123}"#, &tx).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    // ============ G18：超长响应行结算 ============
+
+    #[test]
+    fn test_extract_leading_id_valid_forms() {
+        // 标准形态（忽略空白）
+        assert_eq!(extract_leading_id(r#"{"id":42,"result":{}}"#), Some(42));
+        assert_eq!(extract_leading_id(r#"  {  "id" :  7  }"#), Some(7));
+        assert_eq!(extract_leading_id(r#"{"id":0}"#), Some(0));
+    }
+
+    #[test]
+    fn test_extract_leading_id_rejects_non_leading_or_invalid() {
+        // id 不在行首附近（前面有其他字段）→ 拒绝，避免误提取正文中的 id
+        assert_eq!(extract_leading_id(r#"{"result":{"id":42}}"#), None);
+        // 非 JSON / 缺冒号 / 缺数字
+        assert_eq!(extract_leading_id("not json"), None);
+        assert_eq!(extract_leading_id(r#"{"id" 42}"#), None);
+        assert_eq!(extract_leading_id(r#"{"id":"abc"}"#), None);
+        // 空串
+        assert_eq!(extract_leading_id(""), None);
+    }
+
+    /// G18：超限行前缀携带 id → 构造错误 IpcResponse 结算该请求
+    #[tokio::test]
+    async fn test_settle_oversized_line_sends_error_response() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let prefix = br#"{"id":99,"result":{"success":true,"data":"AAAA"#;
+        settle_oversized_line(prefix, &tx).await;
+        match rx.recv().await {
+            Some(ParsedMessage::Response(resp)) => {
+                assert_eq!(resp.id, 99);
+                assert!(!resp.result.success);
+                let err = resp.result.error.expect("应携带错误消息");
+                assert!(err.contains("1 MiB"), "错误消息应说明单行上限: {err}");
+            }
+            other => panic!("期望 Response，得到 {other:?}"),
+        }
+    }
+
+    /// G18：前缀提取不到 id → 不产生任何消息（仅 warn）
+    #[tokio::test]
+    async fn test_settle_oversized_line_without_id_is_silent() {
+        let (tx, mut rx) = mpsc::channel(8);
+        settle_oversized_line(b"garbage without id field", &tx).await;
         assert!(rx.try_recv().is_err());
     }
 }

@@ -22,9 +22,8 @@ pub struct JobHandle(usize);
 fn create_kill_on_close_job() -> std::io::Result<JobHandle> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::JobObjects::{
-        CreateJobObjectW, JobObjectExtendedLimitInformation,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        SetInformationJobObject,
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
     };
 
     // SAFETY: CreateJobObjectW 仅按值复制入参（此处均为 null），返回裸句柄。
@@ -34,8 +33,7 @@ fn create_kill_on_close_job() -> std::io::Result<JobHandle> {
     }
     // 全零初始化后仅置 LimitFlags：JOBOBJECT_EXTENDED_LIMIT_INFORMATION 的
     // 其余字段为零值时表示「不施加对应限制」（整数/句柄字段的 POD 结构）
-    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
-        unsafe { std::mem::zeroed() };
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     // SAFETY: job 为本函数刚创建的有效句柄；info 指针与长度匹配。
     let ok = unsafe {

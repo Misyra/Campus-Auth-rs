@@ -76,6 +76,27 @@ def test_step_required_default_true():
     assert step.required is True
 
 
+# ── B5: 步骤默认值契约（与 Rust StepHelper::default 对齐）──
+
+
+def test_step_clear_default_true():
+    # B5：未写 clear 字段默认 True（Rust 侧同），避免残留值与新值拼接
+    step = StepConfig.from_dict({"id": "s1", "type": "input", "selector": "#u"})
+    assert step.clear is True
+    # 显式 False 仍应保留（真正的追加输入场景）
+    step2 = StepConfig.from_dict({"id": "s1", "type": "input", "clear": False})
+    assert step2.clear is False
+
+
+def test_step_duration_default_1000():
+    # B5：未写 duration 字段默认 1000ms（Rust 侧同）
+    step = StepConfig.from_dict({"id": "s1", "type": "wait"})
+    assert step.duration == 1000
+    # 显式值覆盖默认
+    step2 = StepConfig.from_dict({"id": "s1", "type": "wait", "duration": 2500})
+    assert step2.duration == 2500
+
+
 # ── TaskConfig 解析 ──
 
 def test_task_from_dict_recursive_steps():

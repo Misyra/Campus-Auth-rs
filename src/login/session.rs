@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 use crate::bridge::{BridgeSupervisor, IpcResponse, Outcome, StructuredResult};
 use crate::config::ConfigService;
 use crate::login::history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
-use crate::login::{recover_lock, LoginHandleInner};
+use crate::login::{LoginHandleInner, recover_lock};
 use crate::status::{LoginSource, LoginStatus, PartialSnapshot, StatusManager};
 use crate::utils::metrics::Metrics;
 
@@ -115,12 +115,18 @@ pub fn classify(outcome: Outcome) -> ResultAction {
 
 /// 判断某次失败结果是否需要强制回收 Worker
 ///
-/// `UnknownError` 语义不明，浏览器上下文可能已损坏，保守回收；
-/// `NetworkError` 可能伴随 Worker 网络栈异常（与 IPC 枚举文档一致：网络错误强制回收），
-/// 回收后由 `ensure_worker` 重新 spawn，避免已损坏上下文被复用导致后续重试持续失败。
-/// 其余可重试结果（NavigationTimeout / SelectorFailed）上下文未损坏，复用即可。
+/// 仅 `NetworkError` 回收：它可能伴随 Worker 网络栈异常（与 IPC 枚举文档一致：
+/// 网络错误强制回收），回收后由 `ensure_worker` 重新 spawn，避免已损坏上下文
+/// 被复用导致后续重试持续失败。
+///
+/// 注意 `UnknownError` **不在**回收之列——`classify(UnknownError)` 返回
+/// `Terminal(Failed)`，在 `try_retry` 之前即以失败终态 return，本函数对其的
+/// 判定分支实际不可达；终态路径不回收 Worker（emit 仅在 Worker 存活时发
+/// `close_browser` 收尾，进程保留）。
+/// 其余可重试结果（NavigationTimeout / SelectorFailed / AssertionFailed /
+/// CaptchaFailed）上下文未损坏，复用即可。
 pub fn should_force_recycle(outcome: Outcome) -> bool {
-    matches!(outcome, Outcome::UnknownError | Outcome::NetworkError)
+    matches!(outcome, Outcome::NetworkError)
 }
 
 /// 从 StructuredResult.data 提取页面弹窗文案，拼接为可读后缀
@@ -261,7 +267,8 @@ impl LoginSession {
         loop {
             // 取消检查（状态机任意阶段）
             if self.cancel_token.is_cancelled() {
-                self.finish_with_cancelled(session_start, attempts_used, None).await;
+                self.finish_with_cancelled(session_start, attempts_used, None)
+                    .await;
                 return;
             }
 
@@ -310,9 +317,7 @@ impl LoginSession {
             // biased 保证取消类信号先于 execute/timeout 生效，避免取消被延迟。
             let exec = {
                 let ct = self.cancel_token.clone();
-                let remaining = self
-                    .login_timeout
-                    .saturating_sub(session_start.elapsed());
+                let remaining = self.login_timeout.saturating_sub(session_start.elapsed());
                 tokio::select! {
                     biased;
                     _ = ct.cancelled() => {
@@ -418,7 +423,8 @@ impl LoginSession {
                             screenshot_url: structured.screenshot_url.clone(),
                             duration_ms: structured.duration_ms,
                         };
-                        if !self.try_retry(&retry_structured, &mut attempts_used, session_start)
+                        if !self
+                            .try_retry(&retry_structured, &mut attempts_used, session_start)
                             .await
                         {
                             return;
@@ -441,11 +447,7 @@ impl LoginSession {
                         self.finish_with_failure(
                             session_start,
                             attempts_used,
-                            format!(
-                                "{}{}",
-                                structured.message,
-                                dialog_note(&structured.data)
-                            ),
+                            format!("{}{}", structured.message, dialog_note(&structured.data)),
                         )
                         .await;
                         return;
@@ -849,9 +851,10 @@ mod tests {
     }
 
     #[test]
-    fn test_should_force_recycle_unknown_error() {
-        // UnknownError 语义不明，保守回收
-        assert!(should_force_recycle(Outcome::UnknownError));
+    fn test_should_force_recycle_unknown_error_not_recycled() {
+        // UnknownError 走终态失败（classify 在 try_retry 之前 return），
+        // 不进入重试/回收路径；此处断言其即使被误传也不触发回收
+        assert!(!should_force_recycle(Outcome::UnknownError));
     }
 
     #[test]
@@ -898,7 +901,8 @@ mod tests {
 
     #[test]
     fn test_dialog_note_joins_messages() {
-        let data = serde_json::json!({ "dialogs": ["账号或密码错误！", "请先阅读并同意免责声明条款"] });
+        let data =
+            serde_json::json!({ "dialogs": ["账号或密码错误！", "请先阅读并同意免责声明条款"] });
         assert_eq!(
             dialog_note(&data),
             "；页面提示: 账号或密码错误！ / 请先阅读并同意免责声明条款"

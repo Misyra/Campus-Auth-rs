@@ -48,11 +48,20 @@ shutdown_event = threading.Event()
 # 避免超大 JSON 解析耗尽内存（P9）
 _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 
+# Worker 版本（与 pyproject.toml 的 project.version 保持同步，手动维护）
+WORKER_VERSION = "5.0.0a1"
+
+# OCR 运行时能力（任务 10）：由 _preload_ocr_deps 探测结果填充，
+# 随 worker_health_check 响应上报给 Rust 侧缓存（/api/ocr/status 消费）。
+# 仅 ddddocr 完整加载成功才视为 True；numpy-only/均缺失为 False
+#（识别请求会在运行时报「ddddocr 未安装」）。
+OCR_CAPABILITIES: dict[str, bool] = {"ocr": False}
+
 
 def _preload_ocr_deps() -> None:
     """预加载 OCR 依赖到主线程，规避后台线程加载 C 扩展卡死（根因修复）。
 
-    背景：`ddddocr` 链式加载 numpy C 扩展（``numpy._core._multiarray_umath``
+    背景：``ddddocr`` 链式加载 numpy C 扩展（``numpy._core._multiarray_umath``
     及其 numpy.libs/ 下的 OpenBLAS DLL）时，若发生在 **Worker 的后台线程**
     （``asyncio.to_thread``），Windows 的 loader lock 与 Python import lock
     会让该加载卡住约 100 秒，超过 OCR_TIMEOUT_SECS 后前端报「模型加载超时」。
@@ -65,7 +74,12 @@ def _preload_ocr_deps() -> None:
     - OCR 依赖未安装（numpy/ddddocr 缺失）时静默跳过，不影响 Worker 正常启动，
       待安装完成后配合重启 Worker 使预加载生效；
     - 加载失败不抛异常，避免预加载拖垮 Worker 启动。
+
+    探测结果同步写入模块级 ``OCR_CAPABILITIES``（任务 10）：
+    完整加载 → ``{"ocr": True}``；numpy-only / 均不可用 → ``{"ocr": False}``。
     """
+    # 探测前先复位（幂等）：仅完整加载成功才置 True
+    OCR_CAPABILITIES["ocr"] = False
     # 主线程先完整加载 ddddocr（连带 numpy 等 C 扩展一并进入 sys.modules 缓存），
     # 使后续 to_thread 只命中缓存、不再触发 DLL 加载。若顶层 import 过重/异常，
     # 退化为仅加载 numpy——它正是卡死的那个 C 扩展，单独预加载即已命中根因。
@@ -73,6 +87,7 @@ def _preload_ocr_deps() -> None:
         import ddddocr  # noqa: F401
 
         logger.info("OCR 依赖已预加载（完整）")
+        OCR_CAPABILITIES["ocr"] = True
         return
     except Exception as exc:  # noqa: BLE001 — DLL/运行库损坏常表现为 OSError
         logger.warning(f"OCR 依赖完整预加载失败，尝试仅加载 numpy: {exc}")
@@ -135,7 +150,7 @@ def emit_response(msg_id: int | None, result: dict) -> None:
 
 
 def emit_event(event_type: str, data: dict) -> None:
-    """向 stdout 推送事件（step_progress / screenshot / log）。"""
+    """向 stdout 推送事件（实际事件类型：step_progress / screenshot / dialog）。"""
     line = json.dumps({"event": event_type, "data": data}, ensure_ascii=False)
     with _stdout_lock:
         sys.stdout.write(line + "\n")
@@ -222,7 +237,7 @@ async def _dispatch(msg: dict) -> None:
         if handler is None:
             emit_response(msg_id, _error_result(f"未知命令: {method}"))
             return
-        data = await handler(params, worker_core)
+        data = await handler(params)
         emit_response(msg_id, {"success": True, "data": data, "error": None})
     except StepCancelled as exc:
         # 取消：视为成功终态（outcome=cancelled）
@@ -254,37 +269,31 @@ def _structured_result(exc: WorkerError, *, success: bool, start: float | None =
     }
 
 
-def _error_result(message: str) -> dict:
-    """构造无 data 的错误响应（未知命令 / 未捕获异常）。
-
-    P6：补 outcome 字段，保证与结构化响应结构一致（Rust 侧 failure 时仅读
-    error 字段，此处补全 data 仅为协议一致性）。
-    """
-    return {
-        "success": False,
-        "data": {
-            "outcome": Outcome.UNKNOWN_ERROR.value,
-            "message": message,
-            "duration_ms": 0,
-            "screenshots": [],
-        },
-        "error": message,
-    }
-
-
 def _command_timeout(params: dict) -> float:
     """从命令参数推导命令级超时（秒）。
 
-    Rust 侧总超时 300s，此处以浏览器 settings 的单步默认超时为基准放大，
-    作为 Worker 侧自愈兜底；不新增协议字段（复用 ``_to_ms`` 语义）。
+    固定兜底 270s = Rust 侧 ``execute``/``execute_with_timeout`` 默认 300s 的
+    0.9 倍（B6 竞速修复）：两端同时起跑时 Python 侧必须**先于** Rust 超时
+    触发轻量自愈（取消任务 + 关页打断挂起的 CDP await → 响应错误 → Rust 收到
+    结果而非超时），否则同值 300s 下 Python 自愈基本抢不到，Rust 超时后还要
+    走 Cancel + 10s 宽限 + 可能的强杀回收，代价高得多。
+    0.9 倍预留 30s（≥10s 宽限期的 3 倍）确保自愈完成并回包。
+
+    浏览器 settings 存在时以单步默认超时为基准放大（覆盖超大 step timeout
+    配置），但不低于固定兜底；不新增协议字段（复用 ``_to_ms`` 语义）。
     """
     bs = params.get("browser_settings") or {}
     step_ms = _to_ms(bs, "timeout", 10000)
-    return max(300.0, step_ms / 1000 * 20)
+    return max(270.0, step_ms / 1000 * 20)
 
 
-def _timeout_result(message: str) -> dict:
-    """命令超时自愈后的错误响应（outcome=unknown_error）。"""
+def _error_result(message: str) -> dict:
+    """构造无 data 的错误响应（未知命令 / 未捕获异常 / 命令超时自愈）。
+
+    P6：补 outcome 字段，保证与结构化响应结构一致（Rust 侧 failure 时仅读
+    error 字段，此处补全 data 仅为协议一致性）。原 ``_timeout_result`` 与本
+    函数逐字段相同，已合并（调用处以注释区分语义）。
+    """
     return {
         "success": False,
         "data": {
@@ -324,7 +333,8 @@ async def _dispatch_guarded(msg: dict) -> None:
         await worker_core.force_interrupt_pending()
     except Exception:  # noqa: BLE001
         logger.exception("强制中断挂起操作失败")
-    emit_response(msg_id, _timeout_result(f"命令 {method} 执行超时（{timeout_s:.0f}s）"))
+    # 超时自愈错误响应（原 _timeout_result，与 _error_result 同构已合一）
+    emit_response(msg_id, _error_result(f"命令 {method} 执行超时（{timeout_s:.0f}s）"))
     # 等待任务收敛：页面关闭后挂起的 Playwright await 应以“目标已关闭”异常结束
     try:
         await asyncio.wait_for(task, timeout=5.0)
@@ -339,9 +349,11 @@ async def _serve() -> None:
     reader = threading.Thread(target=stdin_reader, args=(queue, loop), daemon=True)
     reader.start()
 
-    # 注入事件推送与关闭事件到核心
+    # 注入事件推送、关闭事件与运行时能力到核心（任务 10：能力随
+    # worker_health_check 响应上报给 Rust 侧缓存）
     worker_core.emit = emit_event
     worker_core.shutdown_event = shutdown_event
+    worker_core.capabilities = dict(OCR_CAPABILITIES)
 
     logger.info("Worker 已启动，等待 Rust 侧命令")
     try:

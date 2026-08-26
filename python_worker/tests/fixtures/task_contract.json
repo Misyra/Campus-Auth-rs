@@ -1,0 +1,129 @@
+{
+  "_comment": "跨语言任务配置契约样例（B5）：与 Rust src/tasks/models.rs 的浏览器 TaskConfig 序列化形状对齐（Rust 侧经 TaskManager::embed_task_config 以 serde_json::to_value(&TaskConfig) 嵌入 task_config 键下发 Worker），两端 CI 共同护航：Rust 侧以 serde 反序列化测试为准，Python 侧由 tests/test_task_contract.py 加载本文件走 TaskConfig.from_dict 断言全字段解析往返一致。注：script/shell 任务不经 IPC 下发 Python（embed 仅嵌入浏览器任务），故本契约只覆盖浏览器任务；步骤默认契约：required=true / clear=true / duration=1000。本 _comment 键为文档说明，Python 侧应落入 TaskConfig.extras。",
+  "task_id": "contract_sample",
+  "name": "契约样例任务",
+  "description": "覆盖全字段与全步骤类型的浏览器任务样例",
+  "url": "http://192.168.7.1:8081/login",
+  "timeout": 30000,
+  "step_delay": 0.5,
+  "navigation_wait": 1.0,
+  "reveal_hidden": true,
+  "variables": {
+    "USERNAME": "{{USERNAME}}",
+    "GATEWAY": "192.168.7.1"
+  },
+  "success_condition": "logged_in",
+  "on_success": { "type": "notify", "message": "登录成功" },
+  "on_failure": { "type": "notify", "message": "登录失败" },
+  "metadata": { "author": "ci", "tags": ["contract", "browser"] },
+  "steps": [
+    {
+      "id": "s_input_username",
+      "type": "input",
+      "description": "填写用户名（iframe 内）",
+      "selector": "#username",
+      "value": "{{USERNAME}}",
+      "timeout": 8000,
+      "required": true,
+      "clear": true,
+      "frame": "#login-iframe"
+    },
+    {
+      "id": "s_input_password_minimal",
+      "type": "input",
+      "selector": "input[name='password']",
+      "value": "{{PASSWORD}}",
+      "required": false
+    },
+    {
+      "id": "s_click_login",
+      "type": "click",
+      "description": "点击登录按钮（逗号分隔候选选择器）",
+      "selector": "#login-btn, button[type=submit]"
+    },
+    {
+      "id": "s_select_isp",
+      "type": "select",
+      "selector": "#isp-select",
+      "value": "cmcc"
+    },
+    {
+      "id": "s_click_select_campus",
+      "type": "click_select",
+      "selector": "#campus-dropdown",
+      "option_selector": "#campus-option-south"
+    },
+    {
+      "id": "s_wait_fixed",
+      "type": "wait",
+      "duration": 1500
+    },
+    {
+      "id": "s_sleep_alias",
+      "type": "sleep",
+      "duration": 500
+    },
+    {
+      "id": "s_wait_selector",
+      "type": "wait_for_selector",
+      "selector": ".status-online",
+      "timeout": 5000
+    },
+    {
+      "id": "s_wait_url",
+      "type": "wait_url",
+      "pattern": "https?://[^/]+/success",
+      "timeout": 10000
+    },
+    {
+      "id": "s_screenshot_page",
+      "type": "screenshot",
+      "path": "after_login",
+      "full_page": false
+    },
+    {
+      "id": "s_eval_store",
+      "type": "eval",
+      "script": "document.querySelector('.user-name')?.textContent ?? ''",
+      "store_as": "logged_in"
+    },
+    {
+      "id": "s_custom_js",
+      "type": "custom_js",
+      "script": "window.scrollTo(0, document.body.scrollHeight)"
+    },
+    {
+      "id": "s_navigate_portal",
+      "type": "navigate",
+      "value": "http://{{GATEWAY}}:8081/portal",
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "id": "s_goto_alias",
+      "type": "goto",
+      "url": "http://{{GATEWAY}}:8081/home"
+    },
+    {
+      "id": "s_assert_text",
+      "type": "assert_text",
+      "value": "登录成功",
+      "timeout": 6000
+    },
+    {
+      "id": "s_upload_avatar",
+      "type": "upload_file",
+      "selector": "input[type=file]",
+      "value": "C:/tmp/avatar.png"
+    },
+    {
+      "id": "s_ocr_captcha",
+      "type": "ocr",
+      "selector": "#captcha-img",
+      "target_selector": "#captcha-input",
+      "old": false,
+      "char_range": "0123456789",
+      "store_as": "captcha_text",
+      "frame": "iframe[name=verify]"
+    }
+  ]
+}
