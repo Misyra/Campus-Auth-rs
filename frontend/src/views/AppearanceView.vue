@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
+import Modal from "@/components/common/Modal.vue";
 import { useAppearance } from "@/composables/useAppearance";
 import { useBackgroundImage } from "@/composables/useBackgroundImage";
 import { useCustomColors } from "@/composables/useCustomColors";
@@ -49,9 +51,7 @@ const {
                 </svg>
               </div>
               <button type="button" class="appearance-bg-thumb-remove" @click.stop="clearBackgroundImage" title="移除背景">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
+                <IconApp name="close" class="icon-sm" />
               </button>
             </div>
             <div v-else class="appearance-bg-thumb empty" @click="selectBackgroundImage">
@@ -128,9 +128,7 @@ const {
                   @touchstart="color.custom ? startLongPress('accent', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <svg v-if="appearance.accent_color === color.value" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" class="icon-sm">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
+                  <IconApp name="check" v-if="appearance.accent_color === color.value" class="icon-sm" />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('accent')" title="自定义颜色">+</button>
               </div>
@@ -156,9 +154,7 @@ const {
                   @touchstart="color.custom ? startLongPress('bg', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <svg v-if="appearance.background_color === color.value" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" class="icon-sm">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
+                  <IconApp name="check" v-if="appearance.background_color === color.value" class="icon-sm" />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('bg')" title="自定义颜色">+</button>
               </div>
@@ -224,9 +220,7 @@ const {
                   @touchstart="color.custom ? startLongPress('sidebar', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <svg v-if="appearance.sidebar_color === color.value" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" class="icon-sm">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
+                  <IconApp name="check" v-if="appearance.sidebar_color === color.value" class="icon-sm" />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('sidebar')" title="自定义颜色">+</button>
               </div>
@@ -248,9 +242,7 @@ const {
                   @touchstart="color.custom ? startLongPress('sidebar_accent', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <svg v-if="appearance.sidebar_accent === color.value" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" class="icon-sm">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
+                  <IconApp name="check" v-if="appearance.sidebar_accent === color.value" class="icon-sm" />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('sidebar_accent')" title="自定义颜色">+</button>
               </div>
@@ -267,37 +259,27 @@ const {
       <div class="bg-lightbox-content">
         <img :src="appearance.background_url" alt="背景预览" />
         <button type="button" class="bg-lightbox-close" @click.stop="closeBgLightbox" title="关闭">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-lg">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
+          <IconApp name="close" class="icon-lg" />
         </button>
       </div>
     </div>
 
-    <!-- 从链接下载壁纸弹窗 -->
-    <div v-if="randomWallpaperDialog.visible" class="random-wallpaper-overlay" @click.self="closeRandomWallpaperDialog">
-      <div class="random-wallpaper-modal" role="dialog" aria-modal="true" aria-label="从链接下载壁纸">
-        <div class="random-wallpaper-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-lg">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-            <path d="M3 15l4-4a2 2 0 012.8 0L15 16"/><path d="M14 14l1-1a2 2 0 012.8 0L21 16"/>
-            <circle cx="8.5" cy="8.5" r="1.5"/>
-          </svg>
-          <h3>从链接下载壁纸</h3>
-        </div>
-        <p class="random-wallpaper-hint">输入图片链接地址，将下载并设置为背景（如 https://picsum.photos/1920/1080）</p>
-        <input type="text" class="form-input" v-model="randomWallpaperDialog.url"
-          placeholder="https://t.alcy.cc/pc" @keyup.enter="confirmRandomWallpaper" />
-        <div class="random-wallpaper-footer">
-          <button class="btn btn-secondary btn-sm" @click="closeRandomWallpaperDialog" :disabled="randomWallpaperDialog.loading">取消</button>
-          <button class="btn btn-primary btn-sm" @click="confirmRandomWallpaper" :disabled="randomWallpaperDialog.loading">
-            <svg v-if="randomWallpaperDialog.loading" class="spin icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 11-6.219-8.56"/>
-            </svg>
-            {{ randomWallpaperDialog.loading ? '加载中...' : '确定' }}
-          </button>
-        </div>
+    <!-- 从链接下载壁纸弹窗：复用公共 Modal（原手搓遮罩/居中样式已删） -->
+    <Modal
+      v-if="randomWallpaperDialog.visible"
+      title="从链接下载壁纸"
+      @close="closeRandomWallpaperDialog"
+    >
+      <p class="random-wallpaper-hint">输入图片链接地址，将下载并设置为背景（如 https://picsum.photos/1920/1080）</p>
+      <input type="text" class="form-input" v-model="randomWallpaperDialog.url"
+        placeholder="https://t.alcy.cc/pc" @keyup.enter="confirmRandomWallpaper" />
+      <div class="random-wallpaper-footer">
+        <button class="btn btn-secondary btn-sm" @click="closeRandomWallpaperDialog" :disabled="randomWallpaperDialog.loading">取消</button>
+        <button class="btn btn-primary btn-sm" @click="confirmRandomWallpaper" :disabled="randomWallpaperDialog.loading">
+          <IconApp name="refresh" v-if="randomWallpaperDialog.loading" class="spin icon-sm" />
+          {{ randomWallpaperDialog.loading ? '加载中...' : '确定' }}
+        </button>
       </div>
-    </div>
+    </Modal>
   </div>
 </template>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import FieldHelp from "@/components/common/FieldHelp.vue";
@@ -92,18 +93,18 @@ async function stopBrowser() {
                 <div class="browser-name">{{ b.name }}</div>
                 <div class="browser-status">
                   <span v-if="b.installed" class="status-installed">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="20 6 9 17 4 12"/></svg> 已安装
+                    <IconApp name="check" width="14" height="14" /> 已安装
                   </span>
                   <span v-else-if="playwrightDownloading && b.channel === 'chromium'" class="status-downloading">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="spin"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg> 下载中...
+                    <IconApp name="refresh" width="14" height="14" class="spin" /> 下载中...
                   </span>
                   <span v-else class="status-not-installed">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 未安装
+                    <IconApp name="upload" width="14" height="14" /> 未安装
                   </span>
                 </div>
               </div>
               <div v-if="config.config.browser.browser_channel === b.channel" class="browser-check">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><polyline points="20 6 9 17 4 12"/></svg>
+                <IconApp name="check" width="20" height="20" />
               </div>
             </div>
           </div>

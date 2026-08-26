@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
@@ -80,9 +81,7 @@ function handleSave() {
         @click="handleSave"
         :disabled="busy.save || configLoadFailed"
       >
-        <svg v-if="busy.save" class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 12a9 9 0 11-6.219-8.56"/>
-        </svg>
+        <IconApp name="refresh" v-if="busy.save" class="spin" />
         <svg v-else-if="saveFailed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/>
         </svg>

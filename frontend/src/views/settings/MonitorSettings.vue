@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { computed } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import FieldHelp from "@/components/common/FieldHelp.vue";
@@ -187,9 +188,7 @@ const urlCheckText = computed({
     <!-- 暂停时段 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-        </svg>
+        <IconApp name="clock" class="settings-card-icon" />
         <h2>暂停时段</h2>
       </div>
       <div class="card-body">

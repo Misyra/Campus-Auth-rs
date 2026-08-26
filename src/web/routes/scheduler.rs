@@ -274,11 +274,6 @@ mod tests {
             self.0.lock().unwrap().manual_run_ids.push(task.id);
         }
 
-        fn history_dir(&self) -> std::path::PathBuf {
-            // 空临时目录：history 文件不存在 → 空数组
-            std::env::temp_dir()
-        }
-
         async fn read_history(&self, id: &str) -> Result<Vec<Value>, ApiError> {
             // 与真实实现对齐：非法 id 返回 400（路径穿越测试依赖此行为）
             if !crate::scheduler::task::ScheduledTask::is_valid_id(id) {

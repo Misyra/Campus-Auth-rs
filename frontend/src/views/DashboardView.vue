@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useStatus } from "@/composables/useStatus";
 import { useLogs } from "@/composables/useLogs";
@@ -115,7 +116,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-icon green">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <IconApp name="clock" />
         </div>
         <div class="stat-info">
           <span class="stat-label">运行时长</span>
@@ -163,7 +164,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
           <div class="card-body">
             <div class="action-buttons">
               <button v-if="s.busy.login" class="btn btn-danger" @click="ui.cancelLogin()" title="取消正在执行的登录">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                <IconApp name="close" />
                 取消登录
               </button>
               <button v-else class="btn btn-secondary" @click="ui.manualLogin()" :disabled="s.busy.action || s.busy.loginCooldown" title="立即执行一次登录认证">
@@ -184,23 +185,23 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
             <h2>登录历史</h2>
             <div class="flex-row gap-sm">
               <button class="btn btn-icon-only" @click="fetchLoginHistory" title="刷新">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                <IconApp name="download" />
               </button>
               <button class="btn btn-icon-only" @click="clearLoginHistory" title="清空" :disabled="!loginHistory.length">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                <IconApp name="trash" />
               </button>
             </div>
           </div>
           <div class="card-body">
             <div v-if="!loginHistory.length" class="empty-state">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <IconApp name="clock" />
               <span>暂无登录记录</span>
             </div>
             <div v-else class="history-list">
               <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">
                 <div class="history-status">
-                  <svg v-if="item.result === 'success'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-                  <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                  <IconApp name="check" v-if="item.result === 'success'" />
+                  <IconApp name="x-circle" />
                 </div>
                 <div class="history-info">
                   <div class="history-row">
@@ -229,10 +230,10 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
               </svg>
             </button>
             <button class="btn btn-icon-only" @click="logs.fetchLogs()" title="刷新">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              <IconApp name="download" />
             </button>
             <button class="btn btn-icon-only" @click="logs.clearLogs()" title="清空">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              <IconApp name="trash" />
             </button>
           </div>
         </div>

@@ -12,7 +12,14 @@ use tokio::net::TcpStream;
 use tracing::instrument;
 
 /// 解析 "host:port" 为 (host, port)；非法格式返回 None
+///
+/// 裸 IPv6 字面量（未加方括号、含 ≥2 个冒号）无法与 `host:port` 区分，
+/// 直接拒绝——TCP 探测目标应写 `[::1]:53` 方括号形式，避免 `::1` 被
+/// rsplit 拆成 `(":" , 1)` 这类畸形结果。
 fn parse_host_port(target: &str) -> Option<(String, u16)> {
+    if !target.starts_with('[') && target.matches(':').count() >= 2 {
+        return None;
+    }
     let (host, port) = target.rsplit_once(':')?;
     if host.is_empty() {
         return None;
@@ -120,13 +127,7 @@ impl TcpProbe {
                         },
                         None => (false, Some("非法地址格式".to_string())),
                     };
-                    PerProbeDetail {
-                        target,
-                        success,
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                        http_status: None,
-                        error: err,
-                    }
+                    PerProbeDetail::new(target, success, start, None, err)
                 })
             })
             .collect();
@@ -206,24 +207,12 @@ async fn probe_http_one(
             };
             (
                 outcome,
-                PerProbeDetail {
-                    target: url.to_string(),
-                    success: matches!(outcome, ProbeOutcome::Pass),
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    http_status: Some(status),
-                    error: None,
-                },
+                PerProbeDetail::new(url.to_string(), matches!(outcome, ProbeOutcome::Pass), start, Some(status), None),
             )
         }
         Err(e) => (
             ProbeOutcome::Fail,
-            PerProbeDetail {
-                target: url.to_string(),
-                success: false,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                http_status: None,
-                error: Some(e.to_string()),
-            },
+            PerProbeDetail::new(url.to_string(), false, start, None, Some(e.to_string())),
         ),
     }
 }
@@ -266,13 +255,7 @@ async fn probe_url_one(
                 // 重定向即视为门户劫持
                 return (
                     ProbeOutcome::Captive,
-                    PerProbeDetail {
-                        target: url.to_string(),
-                        success: false,
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                        http_status: Some(status),
-                        error: None,
-                    },
+                    PerProbeDetail::new(url.to_string(), false, start, Some(status), None),
                 );
             }
             if status == 200 {
@@ -311,37 +294,19 @@ async fn probe_url_one(
                 };
                 return (
                     outcome,
-                    PerProbeDetail {
-                        target: url.to_string(),
-                        success: matched,
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                        http_status: Some(status),
-                        error: None,
-                    },
+                    PerProbeDetail::new(url.to_string(), matched, start, Some(status), None),
                 );
             }
             (
                 // 1xx/4xx/5xx：能收到 HTTP 响应即物理连通成立（与 HTTP 探测同一原则），
                 // 判 Fail 会因目标服务异常把整体状态拖成 Offline
                 ProbeOutcome::Pass,
-                PerProbeDetail {
-                    target: url.to_string(),
-                    success: true,
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    http_status: Some(status),
-                    error: None,
-                },
+                PerProbeDetail::new(url.to_string(), true, start, Some(status), None),
             )
         }
         Err(e) => (
             ProbeOutcome::Fail,
-            PerProbeDetail {
-                target: url.to_string(),
-                success: false,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                http_status: None,
-                error: Some(e.to_string()),
-            },
+            PerProbeDetail::new(url.to_string(), false, start, None, Some(e.to_string())),
         ),
     }
 }
@@ -402,6 +367,25 @@ pub struct PerProbeDetail {
     pub http_status: Option<u16>,
     /// 失败原因
     pub error: Option<String>,
+}
+
+impl PerProbeDetail {
+    /// 构造探测明细（耗时由调用方传入的探测起点统一换算）
+    fn new(
+        target: String,
+        success: bool,
+        start: std::time::Instant,
+        http_status: Option<u16>,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            target,
+            success,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            http_status,
+            error,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -483,5 +467,11 @@ mod tests {
         // scheme 推断语义区分；裸 IPv6 的正确解析归 parse_url_host_port 管）
         assert_eq!(parse_host_port("no-port-host"), None);
         assert_eq!(parse_host_port(""), None);
+        // 裸 IPv6 无端口：拒绝而非误拆（怪癖修正）
+        assert_eq!(parse_host_port("::1"), None);
+        assert_eq!(
+            parse_host_port("[::1]:53"),
+            Some(("::1".to_string(), 53))
+        );
     }
 }

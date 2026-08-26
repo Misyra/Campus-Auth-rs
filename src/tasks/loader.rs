@@ -134,8 +134,8 @@ impl TaskManager {
                     if name == ".order.json" || name.ends_with(".meta.json") {
                         continue;
                     }
-                    let ttype = Self::read_type(&path).unwrap_or_else(|| "script".to_string());
-                    if let Some(s) = Self::read_summary(&path, &ttype) {
+                    // 单次读盘同时取 type 与摘要（原 read_type + read_summary 各读一次）
+                    if let Some(s) = Self::read_summary_typed(&path, None) {
                         out.push(s);
                     }
                 }
@@ -596,11 +596,38 @@ impl TaskManager {
         }
     }
 
+    /// 读取任务 JSON 的 `type` 字段并构造摘要（单次读盘，A 组小尾巴）
+    ///
+    /// 此前 scripts 扫描对同一文件先 `read_type` 再 `read_summary` 各完整
+    /// 读盘解析一次；合并后一次读取同时取 type/name/description。
+    /// `ttype` 为 None 时从 JSON `type` 字段推导（缺省 script）。
+    fn read_summary_typed(path: &Path, ttype: Option<&str>) -> Option<TaskSummary> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let v: Value = serde_json::from_str(&content).ok()?;
+        let ttype = ttype
+            .map(|t| t.to_string())
+            .or_else(|| {
+                v.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "script".to_string());
+        Some(Self::summary_from_value(&v, path, &ttype))
+    }
+
     /// 读取任务摘要（从 JSON 的 name/description 字段）
     fn read_summary(path: &Path, ttype: &str) -> Option<TaskSummary> {
         let content = std::fs::read_to_string(path).ok()?;
         let v: Value = serde_json::from_str(&content).ok()?;
-        let stem = path.file_stem()?.to_string_lossy().to_string();
+        Some(Self::summary_from_value(&v, path, ttype))
+    }
+
+    /// 从已解析的 JSON 值提取摘要字段（供两个读取入口复用）
+    fn summary_from_value(v: &Value, path: &Path, ttype: &str) -> TaskSummary {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         let name = v
             .get("name")
             .and_then(|n| n.as_str())
@@ -611,21 +638,12 @@ impl TaskManager {
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_string();
-        Some(TaskSummary {
+        TaskSummary {
             id: stem,
             name,
             description,
             task_type: ttype.to_string(),
-        })
-    }
-
-    /// 读取任务 JSON 的 `type` 字段（默认 script）
-    fn read_type(path: &Path) -> Option<String> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let v: Value = serde_json::from_str(&content).ok()?;
-        v.get("type")
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
+        }
     }
 
     /// 读取裸 `.py` 脚本摘要（`.meta.json` 优先，否则解析 `# name:` / `# description:` 注释）

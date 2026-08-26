@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { onMounted, ref, watch } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
 import { useStatus } from "@/composables/useStatus";
@@ -198,9 +199,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
             {{ busy.detect ? '检测中...' : '检测网络' }}
           </button>
           <button class="btn btn-sm btn-primary" @click="openEditor(null)">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
+            <IconApp name="plus" class="icon-sm" />
             新建方案
           </button>
         </div>
@@ -230,9 +229,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
           </span>
         </div>
         <button class="btn btn-icon-only btn-sm" @click="p.detectResult.value = null" title="关闭">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
+          <IconApp name="close" class="icon-sm" />
         </button>
       </div>
 
@@ -291,9 +288,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
                 {{ info.wifi_ssid }}
               </span>
               <span v-if="!info.gateway_ip && !info.wifi_ssid" class="profile-tag">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-xs">
-                  <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
-                </svg>
+                <IconApp name="x-circle" class="icon-xs" />
                 无匹配规则
               </span>
             </div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { ref } from "vue";
 import { systemApi, autostartApi } from "@/api";
 import type { UpdateInfo } from "@/api/types";
@@ -104,16 +105,12 @@ async function applyUpdate() {
               <a :href="updateInfo.url" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm">前往下载</a>
             </div>
             <div v-else class="update-latest">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                <polyline points="20 6 9 17 4 12"/>
-              </svg>
+              <IconApp name="check" width="16" height="16" />
               <span>当前已是最新版本</span>
             </div>
           </div>
           <div v-else-if="updateInfo && updateInfo.message" class="update-success">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
+            <IconApp name="check" width="16" height="16" />
             <span>{{ updateInfo.message }}，请重启程序生效</span>
           </div>
           <div v-else-if="updateInfo && updateInfo.error" class="update-error">
@@ -143,11 +140,11 @@ async function applyUpdate() {
           <div class="card-header"><h2>特性</h2></div>
           <div class="card-body">
             <ul class="feature-list">
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>前后端分离架构</li>
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>自动网络检测与登录</li>
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>实时日志与状态监控</li>
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>验证码 OCR 自动识别</li>
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>开机自启动支持</li>
+              <li><IconApp name="check" />前后端分离架构</li>
+              <li><IconApp name="check" />自动网络检测与登录</li>
+              <li><IconApp name="check" />实时日志与状态监控</li>
+              <li><IconApp name="check" />验证码 OCR 自动识别</li>
+              <li><IconApp name="check" />开机自启动支持</li>
             </ul>
           </div>
         </div>

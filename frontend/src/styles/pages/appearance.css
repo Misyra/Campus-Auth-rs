@@ -456,68 +456,7 @@ body.has-custom-bg::before {
   z-index: -1;
 }
 
-/* 随机壁纸弹窗 */
-.random-wallpaper-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: var(--z-modal);
-  -webkit-backdrop-filter: var(--blur-sm);
-  backdrop-filter: var(--blur-sm);
-}
-
-.random-wallpaper-modal {
-  background: var(--bg-modal);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  width: 420px;
-  max-width: 90vw;
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.random-wallpaper-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text-primary);
-}
-
-.random-wallpaper-header h3 {
-  font-size: 16px;
-  font-weight: 600;
-  margin: 0;
-}
-
-.random-wallpaper-hint {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin: 0;
-  line-height: 1.5;
-}
-
-.random-wallpaper-modal .form-input {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 13px;
-  outline: none;
-  transition: border-color 0.2s;
-  box-sizing: border-box;
-}
-
-.random-wallpaper-modal .form-input:focus-visible {
-  border-color: var(--accent);
-}
-
+/* 随机壁纸弹窗：遮罩/容器样式已随迁移公共 Modal 删除，仅保留内容元素样式 */
 .random-wallpaper-footer {
   display: flex;
   justify-content: flex-end;

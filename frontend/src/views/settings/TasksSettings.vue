@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted, onActivated } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
@@ -180,9 +181,7 @@ async function recognizeOcr() {
           <p class="task-recorder-desc">任务录制器是一个浏览器脚本，可在登录页面上点击账号框、密码框、验证码等位置，自动生成配置。</p>
           <div class="task-recorder-actions">
             <a href="/api/tools/task-recorder.user.js" class="btn btn-primary">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
+              <IconApp name="upload" class="icon-sm" />
               安装录制器脚本
             </a>
             <a href="/api/docs/task-writing-guide" class="btn btn-secondary">

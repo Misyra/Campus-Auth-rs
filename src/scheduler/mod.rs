@@ -418,11 +418,6 @@ impl SchedulerService {
         self.task_tracker.wait().await;
     }
 
-    /// 返回定时任务历史目录路径（供 API 层读取历史文件）。
-    pub fn history_dir(&self) -> PathBuf {
-        history_dir_of(&self.scheduled_dir)
-    }
-
     /// 读取定时任务执行历史并映射为前端期望的扁平数组（内聚 id 校验 + 读盘 +
     /// 字段映射；此前由 web 层 handler 直接读盘跨层实现，M11 收敛入调度域）。
     ///
@@ -503,8 +498,6 @@ pub trait SchedulerApi: Send + Sync {
     fn is_cron_invalid(&self, id: &str) -> bool;
     /// 手动触发执行定时任务。
     fn spawn_manual_run(&self, task: ScheduledTask);
-    /// 返回定时任务历史目录路径。
-    fn history_dir(&self) -> PathBuf;
     /// 读取任务执行历史（内聚 id 校验 + 读盘 + 前端字段映射），
     /// 返回扁平数组 `[{ run_at, success, message }]`。
     async fn read_history(&self, id: &str) -> Result<Vec<serde_json::Value>, ApiError>;
@@ -546,10 +539,6 @@ impl SchedulerApi for SchedulerService {
 
     fn spawn_manual_run(&self, task: ScheduledTask) {
         SchedulerService::spawn_manual_run(self, task);
-    }
-
-    fn history_dir(&self) -> PathBuf {
-        SchedulerService::history_dir(self)
     }
 
     async fn read_history(&self, id: &str) -> Result<Vec<serde_json::Value>, ApiError> {

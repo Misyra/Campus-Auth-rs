@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 // 侧边导航栏（替代原 sidebar.html）。
 // 路由驱动高亮；"更多"菜单在位于子页面时自动展开。
 
@@ -90,9 +91,7 @@ function navigate(name: string): void {
             <circle cx="12" cy="19" r="1" />
           </svg>
           <span>更多</span>
-          <svg class="nav-more-arrow" :class="{ expanded }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
+          <IconApp name="chevron-down" class="nav-more-arrow" :class="{ expanded }" aria-hidden="true" />
         </button>
 
         <transition name="nav-more">

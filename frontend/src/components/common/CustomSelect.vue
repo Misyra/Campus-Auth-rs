@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 // 自定义下拉选择组件（替代原 components.js 的 CustomSelect）。
 // 支持键盘导航（↑↓ Enter Esc 空格）、点击外部关闭、无障碍属性。
 
@@ -129,17 +130,7 @@ onBeforeUnmount(() => {
     >
       <span v-if="!selectedLabel" class="custom-select-placeholder">{{ placeholder }}</span>
       <span v-else>{{ selectedLabel }}</span>
-      <svg
-        class="custom-select-arrow"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2.5"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <polyline points="6 9 12 15 18 9" />
-      </svg>
+      <IconApp name="chevron-down" class="custom-select-arrow" stroke-linecap="round" stroke-linejoin="round" />
     </button>
     <div v-if="open" class="custom-select-dropdown" role="listbox">
       <div

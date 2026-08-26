@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted } from "vue";
 import { useTasks } from "@/composables/useTasks";
 import { useScripts } from "@/composables/useScripts";
@@ -34,9 +35,7 @@ function closeEditor() { void t.closeTaskEditor(); }
           <h2>任务列表</h2>
           <div class="flex-row gap-sm">
             <button class="btn btn-sm" @click="t.importTask()" title="从文件导入任务">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
+              <IconApp name="upload" class="icon-sm" />
               导入
             </button>
             <button class="btn btn-sm" @click="repo.showRepoImport()" title="从云端仓库导入">
@@ -53,9 +52,7 @@ function closeEditor() { void t.closeTaskEditor(); }
               分享适配
             </a>
             <button class="btn btn-sm btn-primary" @click="t.showTaskEditor(null)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-              </svg>
+              <IconApp name="plus" class="icon-sm" />
               新建任务
             </button>
           </div>
@@ -109,9 +106,7 @@ function closeEditor() { void t.closeTaskEditor(); }
         <div class="card-header">
           <h2>{{ t.editingTask.value._isNew ? '新建任务' : '编辑任务' }}</h2>
           <button class="btn btn-icon-only" @click="closeEditor">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
+            <IconApp name="close" />
           </button>
         </div>
         <div class="card-body">
