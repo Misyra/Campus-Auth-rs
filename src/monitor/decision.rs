@@ -25,16 +25,10 @@ pub fn evaluate(results: &[(ProbeKind, ProbeOutcome)]) -> NetworkStatus {
     if active.is_empty() {
         return NetworkStatus::Offline;
     }
-    if active
-        .iter()
-        .any(|o| matches!(o, ProbeOutcome::Fail))
-    {
+    if active.iter().any(|o| matches!(o, ProbeOutcome::Fail)) {
         return NetworkStatus::Offline;
     }
-    if active
-        .iter()
-        .any(|o| matches!(o, ProbeOutcome::Captive))
-    {
+    if active.iter().any(|o| matches!(o, ProbeOutcome::Captive)) {
         return NetworkStatus::CaptivePortal;
     }
     NetworkStatus::Online
@@ -89,5 +83,4 @@ mod tests {
         let r = [pair(ProbeKind::Tcp, ProbeOutcome::Disabled)];
         assert_eq!(evaluate(&r), NetworkStatus::Offline);
     }
-
 }

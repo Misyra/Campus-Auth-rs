@@ -24,7 +24,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::config::crypto::PasswordCrypto;
 use crate::config::migration::run_migrations;
-use crate::config::runtime::{build_runtime_config, ConfigReloadSignal, RuntimeConfig};
+use crate::config::runtime::{ConfigReloadSignal, RuntimeConfig, build_runtime_config};
 use crate::config::schema::{ProfileData, SettingsData};
 use crate::utils::recover_lock;
 
@@ -44,10 +44,12 @@ pub enum ConfigError {
         path: String,
     },
     /// 配置解析失败，已备份
-    #[error("配置解析失败: {path}{}", backup_path.as_ref().map(|p| format!("（已备份至 {p}）")).unwrap_or_default())]
+    #[error("配置解析失败: {path}（原因: {reason}）{}", backup_path.as_ref().map(|p| format!("（已备份至 {p}）")).unwrap_or_default())]
     ConfigParseError {
         /// 出错的文件路径
         path: String,
+        /// 解析失败原因
+        reason: String,
         /// 备份文件路径（如有）
         backup_path: Option<String>,
     },
@@ -199,12 +201,17 @@ impl ConfigService {
             let _ = std::fs::create_dir_all(p);
         }
 
-        // 清理上次崩溃残留的 .tmp 文件
-        if let Ok(entries) = std::fs::read_dir(&config_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension().map(|e| e == "tmp").unwrap_or(false) {
-                    let _ = std::fs::remove_file(p);
+        // 清理上次崩溃残留的临时文件：原子写入（utils::io::atomic_write_bytes）
+        // 生成的前缀为 `.tmp_` 的随机名中间产物（后缀仍是 .json），历史实现按
+        // extension=="tmp" 匹配永远不命中；且 profiles 目录同样会产生残留，
+        // 一并覆盖（F8）
+        for dir in [&config_dir, &profiles_dir] {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with(crate::config::TMP_PREFIX) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
                 }
             }
         }
@@ -232,11 +239,12 @@ impl ConfigService {
         } else {
             settings.active_profile_id.clone()
         };
-        let active_profile = match Self::read_profile_file(&profiles_dir.join(format!("{active_id}.json"))) {
-            Ok(p) => p,
-            Err(_) => Self::read_profile_file(&default_path)
-                .unwrap_or_else(|_| ProfileData::default()),
-        };
+        let active_profile =
+            match Self::read_profile_file(&profiles_dir.join(format!("{active_id}.json"))) {
+                Ok(p) => p,
+                Err(_) => Self::read_profile_file(&default_path)
+                    .unwrap_or_else(|_| ProfileData::default()),
+            };
 
         let runtime = build_runtime_config(&settings, &active_profile, &crypto)?;
 
@@ -331,7 +339,9 @@ impl ConfigService {
                     tracing::warn!("settings.json 解析失败，沿用内存缓存: {e}");
                     return prev;
                 }
-                tracing::error!("settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝）: {e}");
+                tracing::error!(
+                    "settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝）: {e}"
+                );
                 c.poisoned = true;
                 SettingsData::default()
             }
@@ -363,12 +373,49 @@ impl ConfigService {
     /// 原子写入 settings.json
     pub async fn save_settings(&self, data: &SettingsData) -> Result<(), ConfigError> {
         // 隔离态拒绝保存：防止基于降级默认值的修改覆盖损坏前的用户配置
-        if self.settings_cache.lock().unwrap_or_else(recover_lock).poisoned {
+        if self.settings_poisoned() {
             return Err(ConfigError::ConfigWriteError {
                 reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
             });
         }
         let _guard = self.settings_lock.lock().await;
+        self.write_settings_locked(data).await
+    }
+
+    /// 持锁执行 settings 读-改-写（F7）
+    ///
+    /// `f` 在持有 `settings_lock` 的临界区内执行「加载当前 settings → 应用闭包
+    /// 修改 → 原子写回」的完整序列。历史实现（switch_profile / set_auto_switch）
+    /// 在锁外做三步 load→改→save，两个并发调用会在中间步读到彼此的旧值，
+    /// 后写者覆盖前写者的更新（丢更新）。本方法把整个临界区串行化在同一把
+    /// `settings_lock` 上——与 `save_settings` 的锁同源且内部不再获取，无嵌套
+    /// 加锁，不存在死锁路径。
+    pub async fn modify_settings<F>(&self, f: F) -> Result<(), ConfigError>
+    where
+        F: FnOnce(&mut SettingsData),
+    {
+        // 隔离态拒绝保存（与 save_settings 同语义）
+        if self.settings_poisoned() {
+            return Err(ConfigError::ConfigWriteError {
+                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
+            });
+        }
+        let _guard = self.settings_lock.lock().await;
+        let mut settings = self.load_settings();
+        f(&mut settings);
+        self.write_settings_locked(&settings).await
+    }
+
+    /// 是否处于 settings 隔离态（损坏且无缓存可用）
+    fn settings_poisoned(&self) -> bool {
+        self.settings_cache
+            .lock()
+            .unwrap_or_else(recover_lock)
+            .poisoned
+    }
+
+    /// 写入 settings.json 并同步内存缓存（调用方必须已持有 settings_lock）
+    async fn write_settings_locked(&self, data: &SettingsData) -> Result<(), ConfigError> {
         Self::atomic_write_json(&self.settings_path, data).await?;
         let mtime = std::fs::metadata(&self.settings_path)
             .ok()
@@ -385,7 +432,9 @@ impl ConfigService {
             return Err(ConfigError::InvalidProfileId { id: id.to_string() });
         }
         let path = self.profiles_dir.join(format!("{id}.json"));
-        let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         {
             let cache = self.profile_cache.lock().unwrap_or_else(recover_lock);
             if let Some(pc) = cache.get(id) {
@@ -407,8 +456,11 @@ impl ConfigService {
     }
 
     /// 检查给定密文是否能被当前密钥成功解密（用于前端 has_password 判断）
+    ///
+    /// 纯查询（F10）：走 [`PasswordCrypto::can_decrypt`] 的无副作用路径，
+    /// 不触发解密失败标志的置位/清除。
     pub fn can_decrypt_password(&self, ciphertext: &str) -> bool {
-        self.crypto.decrypt_to_zeroizing(ciphertext).is_ok()
+        self.crypto.can_decrypt(ciphertext)
     }
 
     /// 加载所有 Profile 文件（解析失败跳过并记 WARN）
@@ -420,6 +472,12 @@ impl ConfigService {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            // 跳过崩溃残留的临时文件（`.tmp_` 前缀，后缀仍为 .json，按扩展名
+            // 过滤无法排除，防止半成品被当作 Profile 解析，F8）
+            if name.starts_with(crate::config::TMP_PREFIX) {
+                continue;
+            }
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 match Self::read_profile_file(&path) {
                     Ok(p) => result.push(p),
@@ -456,6 +514,10 @@ impl ConfigService {
     }
 
     /// 安全删除 Profile（移至 .trash/，不允许删除 default）
+    ///
+    /// 删除目标是活跃 Profile 时先把 `active_profile_id` 回落 default（G5）：
+    /// 否则删除后 settings 仍指向已不存在的 id，RuntimeConfig 快照会滞留
+    /// 已删除 Profile 的旧凭证直到下次 reload。
     pub async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
         if !is_valid_profile_id(id) {
             return Err(ConfigError::InvalidProfileId { id: id.to_string() });
@@ -468,11 +530,28 @@ impl ConfigService {
         if !path.exists() {
             return Err(ConfigError::ProfileNotFound { id: id.to_string() });
         }
+        // 删除活跃 Profile：先经 modify_settings（持 settings_lock 的读-改-写）
+        // 把 active 回落 default。此处持有 profiles_lock 的同时获取 settings_lock：
+        // 全仓不存在反向（先 settings 后 profiles）的嵌套持锁路径，无死锁风险。
+        if self.load_settings().active_profile_id == id {
+            tracing::info!("删除的是活跃 Profile，active_profile_id 回落 default: {id}");
+            self.modify_settings(|s| s.active_profile_id = "default".to_string())
+                .await?;
+        }
         let trash_dir = self.config_dir.join(crate::config::TRASH_DIR);
         std::fs::create_dir_all(&trash_dir)?;
         let trash_path = trash_dir.join(format!("{id}.json.{}", timestamp()));
         std::fs::rename(&path, &trash_path)?;
-        self.profile_cache.lock().unwrap_or_else(recover_lock).remove(id);
+        self.profile_cache
+            .lock()
+            .unwrap_or_else(recover_lock)
+            .remove(id);
+        // active 已变更：重载使 RuntimeConfig 同步切换到 default 凭证，
+        // 避免快照继续暴露已删除 Profile 的凭据；重载失败不回滚删除
+        //（文件已移入 .trash，重试 reload 即可恢复一致），仅告警
+        if let Err(e) = self.reload_inner(ConfigReloadSignal::GlobalChanged).await {
+            tracing::warn!("删除 Profile 后配置重载失败（active 可能滞后至下次 reload）: {e}");
+        }
         Ok(())
     }
 
@@ -512,9 +591,7 @@ impl ConfigService {
             (settings, mtime)
         })
         .await
-        .map_err(|e| {
-            ConfigError::Io(std::io::Error::other(format!("配置重读任务失败: {e}")))
-        })?;
+        .map_err(|e| ConfigError::Io(std::io::Error::other(format!("配置重读任务失败: {e}"))))?;
         let (settings_res, mtime) = disk;
         // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照；
         // 无缓存进入隔离态并中止 reload——绝不用默认值替换运行时，
@@ -557,23 +634,24 @@ impl ConfigService {
         let active_path = profiles_dir.join(format!("{active_id}.json"));
         let default_path = profiles_dir.join("default.json");
         let active_profile =
-            tokio::task::spawn_blocking(move || {
-                match Self::read_profile_file(&active_path) {
-                    Ok(profile) => Ok(profile),
-                    Err(active_error) if active_path != default_path => {
-                        tracing::warn!(
-                            path = %active_path.display(),
-                            error = %active_error,
-                            "活跃 Profile 无法读取，回退到 default"
-                        );
-                        Self::read_profile_file(&default_path)
-                    }
-                    Err(error) => Err(error),
+            tokio::task::spawn_blocking(move || match Self::read_profile_file(&active_path) {
+                Ok(profile) => Ok(profile),
+                Err(active_error) if active_path != default_path => {
+                    tracing::warn!(
+                        path = %active_path.display(),
+                        error = %active_error,
+                        "活跃 Profile 无法读取，回退到 default"
+                    );
+                    Self::read_profile_file(&default_path)
                 }
+                Err(error) => Err(error),
             })
             .await
-            .map_err(|e| ConfigError::Io(std::io::Error::other(format!("Profile 重读任务失败: {e}"))))??;
-        self.build_and_swap_runtime(&settings, &active_profile).await?;
+            .map_err(|e| {
+                ConfigError::Io(std::io::Error::other(format!("Profile 重读任务失败: {e}")))
+            })??;
+        self.build_and_swap_runtime(&settings, &active_profile)
+            .await?;
         // 非热更字段变更提示（如端口、运行模式等）
         Self::log_non_hot_reload_changes(&old, self.runtime.load().as_ref());
         let _ = self.reload_tx.send(signal).await;
@@ -652,14 +730,27 @@ impl ConfigService {
                 to: crate::config::CURRENT_CONFIG_VERSION,
                 reason: e.to_string(),
             })?;
-            // commit point：写回迁移后的 settings（同步 fsync，防止掉电导致版本回退重跑迁移）
+            // G4：commit point 前先在内存中完成构造校验——迁移产物必须能被
+            // 当前 schema 解析才允许落盘新版本号。若先写 version 再 from_value，
+            // 解析失败时版本已提交（下次启动不再重跑迁移）、迁移备份也已删除，
+            // 用户配置停留在「已迁移但不可解析」的不可恢复状态。
+            let migrated: SettingsData = serde_json::from_value(value.clone()).map_err(|e| {
+                ConfigError::ConfigParseError {
+                    path: settings_path.to_string_lossy().to_string(),
+                    backup_path: None,
+                    reason: e.to_string(),
+                }
+            })?;
+            // 校验通过后落盘（同步 fsync，防止掉电导致版本回退重跑迁移）
             let json = serde_json::to_string_pretty(&value)?;
             crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())?;
+            return Ok(migrated);
         }
 
-        serde_json::from_value(value).map_err(|_| ConfigError::ConfigParseError {
+        serde_json::from_value(value).map_err(|e| ConfigError::ConfigParseError {
             path: settings_path.to_string_lossy().to_string(),
             backup_path: None,
+            reason: e.to_string(),
         })
     }
 
@@ -669,11 +760,10 @@ impl ConfigService {
             return Ok(SettingsData::default());
         }
         let raw = std::fs::read_to_string(path)?;
-        serde_json::from_str(&raw).map_err(|_| {
-            ConfigError::ConfigParseError {
-                path: path.to_string_lossy().to_string(),
-                backup_path: None,
-            }
+        serde_json::from_str(&raw).map_err(|e| ConfigError::ConfigParseError {
+            path: path.to_string_lossy().to_string(),
+            reason: e.to_string(),
+            backup_path: None,
         })
     }
 
@@ -688,8 +778,9 @@ impl ConfigService {
             });
         }
         let raw = std::fs::read_to_string(path)?;
-        serde_json::from_str(&raw).map_err(|_| ConfigError::ConfigParseError {
+        serde_json::from_str(&raw).map_err(|e| ConfigError::ConfigParseError {
             path: path.to_string_lossy().to_string(),
+            reason: e.to_string(),
             backup_path: None,
         })
     }
@@ -715,6 +806,7 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::profiles::ProfileService;
     use crate::config::schema::GlobalConfig;
 
     // ============ ConfigError Display 测试 ============
@@ -724,10 +816,12 @@ mod tests {
         // 测试 ConfigParseError 不含 backup_path 时的 Display 输出
         let err = ConfigError::ConfigParseError {
             path: "config/settings.json".to_string(),
+            reason: "invalid type".to_string(),
             backup_path: None,
         };
         let display = format!("{err}");
         assert!(display.contains("config/settings.json"));
+        assert!(display.contains("invalid type"));
         assert!(!display.contains("已备份"));
     }
 
@@ -736,6 +830,7 @@ mod tests {
         // 测试 ConfigParseError 含 backup_path 时的 Display 输出
         let err = ConfigError::ConfigParseError {
             path: "config/settings.json".to_string(),
+            reason: "invalid type".to_string(),
             backup_path: Some("config/.trash/backup.json".to_string()),
         };
         let display = format!("{err}");
@@ -791,7 +886,10 @@ mod tests {
     fn test_settings_data_default_values() {
         // 测试 SettingsData 默认值的正确性
         let settings = SettingsData::default();
-        assert_eq!(settings.config_version, crate::config::CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            settings.config_version,
+            crate::config::CURRENT_CONFIG_VERSION
+        );
         assert_eq!(settings.active_profile_id, "default");
         assert!(settings.auto_switch);
     }
@@ -802,7 +900,10 @@ mod tests {
         let json = r#"{"active_profile_id": "custom"}"#;
         let settings: SettingsData = serde_json::from_str(json).unwrap();
         assert_eq!(settings.active_profile_id, "custom");
-        assert_eq!(settings.config_version, crate::config::CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            settings.config_version,
+            crate::config::CURRENT_CONFIG_VERSION
+        );
         assert!(settings.auto_switch);
     }
 
@@ -856,8 +957,14 @@ mod tests {
         assert!(monitor["tcp_enabled"].as_bool().unwrap());
         assert!(!monitor["http_enabled"].as_bool().unwrap());
         assert_eq!(monitor["tcp_targets"][0].as_str().unwrap(), "8.8.8.8:53");
-        assert_eq!(monitor["http_targets"][0].as_str().unwrap(), "https://example.com");
-        assert_eq!(monitor["url_targets"][0].as_str().unwrap(), "https://captive.apple.com");
+        assert_eq!(
+            monitor["http_targets"][0].as_str().unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            monitor["url_targets"][0].as_str().unwrap(),
+            "https://captive.apple.com"
+        );
         assert!(monitor.get("check_interval_seconds").is_none());
         assert!(monitor.get("enable_tcp_check").is_none());
         assert!(monitor.get("ping_targets").is_none());
@@ -929,6 +1036,252 @@ mod tests {
 
         // 两域写入均生效（重新加载绕过缓存验证磁盘内容）
         assert_eq!(svc.load_settings().active_profile_id, "default");
-        assert_eq!(svc.load_profile("default").unwrap().username, "concurrent-user");
+        assert_eq!(
+            svc.load_profile("default").unwrap().username,
+            "concurrent-user"
+        );
+    }
+
+    // ============ F7：modify_settings 持锁读-改-写 ============
+
+    #[tokio::test]
+    async fn test_concurrent_modify_settings_no_lost_update() {
+        // 并发的 active_profile_id 切换与 auto_switch 开关互不覆盖：
+        // 历史锁外 load→改→save 三步会互相丢弃对方的字段更新
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+
+        let a = svc.clone();
+        let b = svc.clone();
+        let (ra, rb) = tokio::join!(
+            async {
+                for i in 0..10 {
+                    a.modify_settings(|s| s.active_profile_id = format!("p{i}"))
+                        .await
+                        .unwrap();
+                }
+            },
+            async {
+                for i in 0..10 {
+                    b.modify_settings(|s| s.auto_switch = i % 2 == 0)
+                        .await
+                        .unwrap();
+                }
+            },
+        );
+        let _ = (ra, rb);
+
+        // 两个闭包各执行 10 次后均生效（最后写入者语义，但任何一次都不允许
+        // 把另一字段的并发更新回滚成旧值——此处校验磁盘终态可解析且字段在
+        // 各自最后一次写入的候选集合内）
+        let s = svc.load_settings();
+        assert!(
+            s.active_profile_id.starts_with('p'),
+            "active 被并发回滚: {s:?}"
+        );
+        // auto_switch 最后一次写入是 i=9 → false；若发生丢更新可能读到 true
+        assert!(!s.auto_switch, "auto_switch 被并发回滚: {s:?}");
+    }
+
+    #[tokio::test]
+    async fn test_modify_settings_concurrent_switch_and_toggle_field_isolation() {
+        // 更直接的丢更新回归：并发切换 profile 与翻转 auto_switch 各 8 次，
+        // 用「读到的旧值决定新值」的写法放大竞态——若锁失效，
+        // auto_switch 的最终值将与切换次数的奇偶性不一致
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+
+        // 显式设定起点值（默认 auto_switch 恰为 true，与 8 次取反的偶数终值相同，
+        // 无法暴露回归——先把起点翻转为 false）
+        svc.modify_settings(|s| s.auto_switch = false)
+            .await
+            .unwrap();
+
+        let toggler = svc.clone();
+        let switcher = svc.clone();
+        let (ra, rb) = tokio::join!(
+            async {
+                // 7 次（奇数）原子取反：false → true 终值确定
+                for _ in 0..7 {
+                    // 读与写都在闭包内完成（F7 的正确用法）
+                    toggler
+                        .modify_settings(|s| s.auto_switch = !s.auto_switch)
+                        .await
+                        .unwrap();
+                }
+            },
+            async {
+                for i in 0..8 {
+                    switcher
+                        .modify_settings(|s| s.active_profile_id = format!("sw-{i}"))
+                        .await
+                        .unwrap();
+                }
+            },
+        );
+        let _ = (ra, rb);
+
+        // 起点显式置 false（消除与默认值的耦合），8 次（偶数）原子取反后
+        // 终值确定为 true；并发写覆盖 / 读旧值翻转都会打破该奇偶性
+        assert!(svc.load_settings().auto_switch, "auto_switch 丢更新");
+        assert!(svc.load_settings().active_profile_id.starts_with("sw-"));
+    }
+
+    // ============ F8：tmp 残留清理与加载跳过 ============
+
+    #[tokio::test]
+    async fn test_startup_cleans_tmp_residue_in_config_and_profiles_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        // 第一次构造：建立目录结构与默认配置
+        let _svc = ConfigService::new(tmp.path().to_path_buf(), tx.clone())
+            .await
+            .unwrap();
+
+        // 模拟崩溃残留：原子写入的中间产物名为 .tmp_XXXX.json（前缀 .tmp_、后缀 .json）
+        let config_tmp = tmp.path().join("config").join(".tmp_abc123.json");
+        let profiles_tmp = tmp
+            .path()
+            .join("config")
+            .join("profiles")
+            .join(".tmp_xyz.json");
+        std::fs::write(&config_tmp, "{ half").unwrap();
+        std::fs::write(&profiles_tmp, "{ half").unwrap();
+        // 同目录的普通损坏文件不受清理影响（只清 .tmp_ 前缀）
+        let keep = tmp
+            .path()
+            .join("config")
+            .join("settings.corrupt.20250101.json");
+        std::fs::write(&keep, "keep").unwrap();
+
+        // 第二次构造：启动清理应删除两个目录中的 .tmp_ 残留
+        let _svc2 = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        assert!(!config_tmp.exists(), "config 目录的 tmp 残留应被清理");
+        assert!(!profiles_tmp.exists(), "profiles 目录的 tmp 残留应被清理");
+        assert!(keep.exists(), "非 tmp 前缀文件不应被误删");
+    }
+
+    #[tokio::test]
+    async fn test_load_all_profiles_skips_tmp_residue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+
+        // 写入一个内容合法的 .tmp_ 残留：不得被当作 Profile 加载
+        let residue_path = tmp
+            .path()
+            .join("config")
+            .join("profiles")
+            .join(".tmp_half.json");
+        let residue = ProfileData {
+            id: "tmp-half".to_string(),
+            ..ProfileData::default()
+        };
+        std::fs::write(
+            &residue_path,
+            serde_json::to_string_pretty(&residue).unwrap(),
+        )
+        .unwrap();
+
+        let ids: Vec<String> = svc.load_all_profiles().into_iter().map(|p| p.id).collect();
+        assert!(!ids.contains(&"tmp-half".to_string()), "tmp 残留不应被加载");
+        assert!(ids.contains(&"default".to_string()));
+    }
+
+    // ============ G5：删除活跃 Profile 回落 default ============
+
+    #[tokio::test]
+    async fn test_delete_active_profile_falls_back_to_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        let profiles = ProfileService::new(svc.clone());
+
+        // 创建并切换到 dorm
+        profiles
+            .create_profile("dorm", ProfileData::default())
+            .await
+            .unwrap();
+        profiles.switch_profile("dorm").await.unwrap();
+        assert_eq!(svc.runtime().load().profile.id, "dorm");
+
+        // 删除活跃的 dorm：active 应回落 default 且 runtime 快照同步
+        svc.delete_profile("dorm").await.unwrap();
+        assert_eq!(svc.load_settings().active_profile_id, "default");
+        assert_eq!(svc.runtime().load().profile.id, "default");
+        // 文件已移入 .trash
+        assert!(
+            !tmp.path()
+                .join("config")
+                .join("profiles")
+                .join("dorm.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_inactive_profile_keeps_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        let profiles = ProfileService::new(svc.clone());
+
+        profiles
+            .create_profile("home", ProfileData::default())
+            .await
+            .unwrap();
+        profiles.switch_profile("home").await.unwrap();
+
+        // 创建并删除非活跃的 other：active 保持 home 不变
+        profiles
+            .create_profile("other", ProfileData::default())
+            .await
+            .unwrap();
+        svc.delete_profile("other").await.unwrap();
+        assert_eq!(svc.load_settings().active_profile_id, "home");
+    }
+
+    // ============ G4：迁移 commit 顺序 ============
+
+    #[test]
+    fn test_migration_parse_failure_keeps_old_version_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("profiles")).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        // v5 配置，但 check_interval_seconds 类型错误：迁移重命名后无法解析为 u32
+        let v5_bad = r#"{
+            "config_version": 5,
+            "active_profile_id": "default",
+            "global": { "monitor": { "check_interval_seconds": "not-a-number" } }
+        }"#;
+        std::fs::write(&settings_path, v5_bad).unwrap();
+
+        let result = ConfigService::load_or_init_settings(&settings_path, &config_dir);
+        assert!(result.is_err(), "迁移产物不可解析应返回错误");
+
+        // 关键回归断言：磁盘上的版本号未被提交（仍为 5），
+        // 下次启动会重跑迁移而非把坏结构当作已迁移的 v6
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            v["config_version"].as_u64().unwrap_or(0),
+            5,
+            "版本不得在解析失败时提交"
+        );
     }
 }

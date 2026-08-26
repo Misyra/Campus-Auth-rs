@@ -4,19 +4,19 @@
 //! `~/.campus_network_auth/.enc_key.rs`。密文格式：`ENC:` + base64(nonce(12B) || ciphertext+tag(16B))。
 //! 空串与无 `ENC:` 前缀的明文向后兼容直接返回。
 
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::Local;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 
-use aes_gcm::aead::generic_array::GenericArray;
-use aes_gcm::aead::consts::{U12, U32};
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::Aes256Gcm;
-use base64::engine::general_purpose::STANDARD;
+use aes_gcm::aead::consts::{U12, U32};
+use aes_gcm::aead::generic_array::GenericArray;
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use rand::RngCore;
 use zeroize::Zeroizing;
 
@@ -52,8 +52,13 @@ pub struct PasswordCrypto {
     key: OnceLock<Zeroizing<[u8; KEY_LEN]>>,
     /// 密钥文件路径
     key_path: PathBuf,
-    /// 全局解密失败标记（供前端检测是否需要重新输入密码）
-    decryption_failed: AtomicBool,
+    /// 解密失败的 Profile ID 集合（按 profile 记录，F10）
+    ///
+    /// 历史实现为全局单布尔：任一密文解密成功即清全局标志，A Profile 的损坏
+    /// 提示会被 B Profile 的成功解密抹掉。改为按 id 的集合后，清位只清对应
+    /// Profile，`/api/system` 的 `password_decryption_failed` 汇总语义保持为
+    /// 「任一 Profile 失败即 true」（集合非空）。
+    decryption_failed_profiles: Mutex<HashSet<String>>,
 }
 
 impl PasswordCrypto {
@@ -62,7 +67,7 @@ impl PasswordCrypto {
         Self {
             key: OnceLock::new(),
             key_path,
-            decryption_failed: AtomicBool::new(false),
+            decryption_failed_profiles: Mutex::new(HashSet::new()),
         }
     }
 
@@ -81,9 +86,9 @@ impl PasswordCrypto {
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = GenericArray::<u8, U12>::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes()).map_err(|e| {
-            ConfigError::Io(std::io::Error::other(format!("密码加密失败: {e}")))
-        })?;
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_bytes())
+            .map_err(|e| ConfigError::Io(std::io::Error::other(format!("密码加密失败: {e}"))))?;
 
         // 组装 payload：nonce || ciphertext+tag
         let mut payload = Vec::with_capacity(NONCE_LEN + ciphertext.len());
@@ -97,6 +102,7 @@ impl PasswordCrypto {
     ///
     /// 生产路径一律使用 [`Self::decrypt_to_zeroizing`]（返回 `Zeroizing<String>` 保证清零）。
     /// 本非清零版本仅测试使用，故标记 `#[cfg(test)]` 收敛为测试专用，防止误用。
+    /// 走无副作用路径（不更新失败标记），标记行为专门由 `decrypt_to_zeroizing` 测试覆盖。
     #[cfg(test)]
     pub fn decrypt(&self, ciphertext: &str) -> Result<String, ConfigError> {
         if ciphertext.is_empty() {
@@ -106,32 +112,76 @@ impl PasswordCrypto {
         if !ciphertext.starts_with(ENC_PREFIX) {
             return Ok(ciphertext.to_string());
         }
-        Ok(self.decrypt_inner(ciphertext)?.to_string())
+        self.decrypt_core(ciphertext)
     }
 
     /// 解密 `ENC:` 密文，返回 `Zeroizing<String>`（drop 时自动清零）
-    pub fn decrypt_to_zeroizing(&self, ciphertext: &str) -> Result<Zeroizing<String>, ConfigError> {
+    ///
+    /// 携带 `profile_id` 用于按 Profile 记录/清除解密失败标志（F10）：
+    /// 失败时仅登记该 Profile，成功时仅清除该 Profile 的记录，
+    /// 不再影响其他 Profile 的失败状态。
+    pub fn decrypt_to_zeroizing(
+        &self,
+        profile_id: &str,
+        ciphertext: &str,
+    ) -> Result<Zeroizing<String>, ConfigError> {
         if ciphertext.is_empty() {
             return Ok(Zeroizing::new(String::new()));
         }
         if !ciphertext.starts_with(ENC_PREFIX) {
             return Ok(Zeroizing::new(ciphertext.to_string()));
         }
-        Ok(Zeroizing::new(self.decrypt_inner(ciphertext)?))
+        match self.decrypt_core(ciphertext) {
+            Ok(plain) => {
+                self.clear_decryption_failed(profile_id);
+                Ok(Zeroizing::new(plain))
+            }
+            Err(e) => {
+                self.mark_decryption_failed(profile_id);
+                Err(e)
+            }
+        }
     }
 
-    /// 检查是否发生过解密失败
+    /// 纯查询：给定密文在当前密钥下是否可解密
+    ///
+    /// 供 `can_decrypt_password`（前端 has_password 判断）使用。必须走无副作用
+    /// 的 [`Self::decrypt_core`]：历史实现经 `decrypt_inner` 带置位/清位副作用，
+    /// 一次查询就会污染失败标志集合（F10）。
+    pub fn can_decrypt(&self, ciphertext: &str) -> bool {
+        if ciphertext.is_empty() || !ciphertext.starts_with(ENC_PREFIX) {
+            return true;
+        }
+        self.decrypt_core(ciphertext).is_ok()
+    }
+
+    /// 是否存在任一 Profile 的解密失败记录（汇总语义：集合非空即 true）
     pub fn has_decryption_error(&self) -> bool {
-        self.decryption_failed.load(Ordering::SeqCst)
+        !self
+            .decryption_failed_profiles
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock)
+            .is_empty()
     }
 
-    /// 清除解密失败标记
-    pub fn clear_decryption_error(&self) {
-        self.decryption_failed.store(false, Ordering::SeqCst);
+    /// 登记某个 Profile 的解密失败记录
+    fn mark_decryption_failed(&self, profile_id: &str) {
+        self.decryption_failed_profiles
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock)
+            .insert(profile_id.to_string());
     }
 
-    /// 内部解密逻辑，返回明文 String
-    fn decrypt_inner(&self, ciphertext: &str) -> Result<String, ConfigError> {
+    /// 清除某个 Profile 的解密失败记录（仅该 Profile，不影响其他记录）
+    fn clear_decryption_failed(&self, profile_id: &str) {
+        self.decryption_failed_profiles
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock)
+            .remove(profile_id);
+    }
+
+    /// 内部解密核心逻辑：纯计算，无失败标志副作用
+    fn decrypt_core(&self, ciphertext: &str) -> Result<String, ConfigError> {
         self.ensure_key()?;
         let key = self.key.get().expect("密钥已确保加载");
 
@@ -139,7 +189,6 @@ impl PasswordCrypto {
         let payload = match STANDARD.decode(b64) {
             Ok(p) => p,
             Err(_) => {
-                self.decryption_failed.store(true, Ordering::SeqCst);
                 return Err(ConfigError::DecryptFailed {
                     profile_id: String::new(),
                 });
@@ -147,7 +196,6 @@ impl PasswordCrypto {
         };
 
         if payload.len() < NONCE_LEN {
-            self.decryption_failed.store(true, Ordering::SeqCst);
             return Err(ConfigError::DecryptFailed {
                 profile_id: String::new(),
             });
@@ -159,21 +207,15 @@ impl PasswordCrypto {
         let cipher = Aes256Gcm::new(key_arr);
 
         match cipher.decrypt(nonce, ct) {
-            Ok(plain) => {
-                self.clear_decryption_error();
-                String::from_utf8(plain).map_err(|e| {
-                    ConfigError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("解密结果非 UTF-8: {e}"),
-                    ))
-                })
-            }
-            Err(_) => {
-                self.decryption_failed.store(true, Ordering::SeqCst);
-                Err(ConfigError::DecryptFailed {
-                    profile_id: String::new(),
-                })
-            }
+            Ok(plain) => String::from_utf8(plain).map_err(|e| {
+                ConfigError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("解密结果非 UTF-8: {e}"),
+                ))
+            }),
+            Err(_) => Err(ConfigError::DecryptFailed {
+                profile_id: String::new(),
+            }),
         }
     }
 
@@ -233,13 +275,13 @@ impl PasswordCrypto {
     }
 
     /// 锁保护下的密钥读取/生成核心逻辑
-    fn read_or_create_key_inner(
-        key_path: &Path,
-    ) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
+    fn read_or_create_key_inner(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
         if key_path.exists() {
             let bytes = std::fs::read(key_path)?;
             if bytes.len() != KEY_LEN {
-                // 密钥长度异常：备份旧文件并生成新密钥
+                // 密钥长度异常：备份旧文件并生成新密钥。
+                // 换钥意味着旧密钥加密的全部密码将无法解密（用户需重新输入），
+                // 静默换钥会让用户误以为密码丢失——显式告警并给出旧钥备份路径（G26）。
                 let ts = Local::now().format("%Y%m%d%H%M%S");
                 let backup = {
                     let mut b = key_path.to_path_buf();
@@ -247,6 +289,13 @@ impl PasswordCrypto {
                     b
                 };
                 let _ = std::fs::rename(key_path, &backup);
+                tracing::warn!(
+                    "加密密钥文件长度异常（{} 字节，应为 {}），已备份至 {} 并生成新密钥；\
+                     旧密钥加密的密码将无法解密，需要重新输入",
+                    bytes.len(),
+                    KEY_LEN,
+                    backup.display()
+                );
                 return Self::generate_and_write_key(key_path);
             }
             let mut arr = [0u8; KEY_LEN];
@@ -420,9 +469,9 @@ mod tests {
 
     #[test]
     fn test_decrypt_invalid_base64_fails() {
-        // ENC: 后跟无效 base64 应返回错误
+        // ENC: 后跟无效 base64 应返回错误（经带标记的生产路径验证）
         let (_tmp, crypto) = make_crypto();
-        let result = crypto.decrypt("ENC:not_valid_base64!!!");
+        let result = crypto.decrypt_to_zeroizing("p1", "ENC:not_valid_base64!!!");
         assert!(result.is_err());
         assert!(crypto.has_decryption_error());
     }
@@ -432,7 +481,7 @@ mod tests {
         // ENC: 后跟有效 base64 但 payload 太短（< nonce 长度）应返回错误
         let (_tmp, crypto) = make_crypto();
         let short = STANDARD.encode([0u8; 4]); // 4 字节 < NONCE_LEN(12)
-        let result = crypto.decrypt(&format!("{ENC_PREFIX}{short}"));
+        let result = crypto.decrypt_to_zeroizing("p1", &format!("{ENC_PREFIX}{short}"));
         assert!(result.is_err());
         assert!(crypto.has_decryption_error());
     }
@@ -449,37 +498,82 @@ mod tests {
         let crypto2 = PasswordCrypto::new(key2);
 
         let encrypted = crypto1.encrypt("secret").unwrap();
-        let result = crypto2.decrypt(&encrypted);
+        let result = crypto2.decrypt_to_zeroizing("p1", &encrypted);
         assert!(result.is_err());
     }
 
-    // ============ has_decryption_error / clear_decryption_error ============
+    // ============ 按 Profile 的解密失败标志（F10） ============
 
     #[test]
-    fn test_decryption_error_flag_lifecycle() {
-        // 测试解密失败标记的设置与清除
+    fn test_decryption_error_flag_lifecycle_per_profile() {
+        // 失败登记对应 Profile；同一 Profile 后续成功解密仅清除该 Profile 记录
         let (_tmp, crypto) = make_crypto();
         assert!(!crypto.has_decryption_error());
 
-        // 触发一个解密错误
-        let _ = crypto.decrypt("ENC:AAAA");
+        // 触发一个解密错误（登记 profile-a）
+        let _ = crypto.decrypt_to_zeroizing("profile-a", "ENC:AAAA");
         assert!(crypto.has_decryption_error());
 
-        // 清除标记
-        crypto.clear_decryption_error();
+        // profile-a 成功解密后清除自身记录
+        let encrypted = crypto.encrypt("ok").unwrap();
+        let _ = crypto.decrypt_to_zeroizing("profile-a", &encrypted);
         assert!(!crypto.has_decryption_error());
+    }
+
+    #[test]
+    fn test_failed_profile_not_cleared_by_other_profile_success() {
+        // F10 核心：A 解密失败后，B 的成功解密不得清除 A 的失败标志
+        let (_tmp, crypto) = make_crypto();
+        let encrypted_ok = crypto.encrypt("good").unwrap();
+
+        // profile-a 失败、profile-b 成功
+        let _ = crypto.decrypt_to_zeroizing("profile-a", "ENC:AAAA");
+        assert!(
+            crypto
+                .decrypt_to_zeroizing("profile-b", &encrypted_ok)
+                .is_ok()
+        );
+
+        // 汇总语义仍为 true（A 仍未修复）
+        assert!(crypto.has_decryption_error());
+
+        // B 再次成功也不影响 A
+        let _ = crypto.decrypt_to_zeroizing("profile-b", &encrypted_ok);
+        assert!(crypto.has_decryption_error());
+
+        // A 自身成功后才整体清除
+        let _ = crypto.decrypt_to_zeroizing("profile-a", &encrypted_ok);
+        assert!(!crypto.has_decryption_error());
+    }
+
+    #[test]
+    fn test_can_decrypt_is_pure_query_without_flag_side_effect() {
+        // can_decrypt 查询不得置位失败标志，也不得清除既有失败记录
+        let (_tmp, crypto) = make_crypto();
+        let encrypted = crypto.encrypt("ok").unwrap();
+        let bad = "ENC:AAAA";
+
+        // 查询坏密文：返回 false 但不置位
+        assert!(!crypto.can_decrypt(bad));
+        assert!(!crypto.has_decryption_error());
+
+        // 经生产路径登记失败后，查询好密文不清除标志
+        let _ = crypto.decrypt_to_zeroizing("profile-a", bad);
+        assert!(crypto.has_decryption_error());
+        assert!(crypto.can_decrypt(&encrypted));
+        assert!(crypto.has_decryption_error());
     }
 
     #[test]
     fn test_successful_decrypt_clears_error_flag() {
-        // 成功解密后应自动清除失败标记
+        // 保留历史用例语义：同一 Profile 成功解密后标志清除
         let (_tmp, crypto) = make_crypto();
         // 先触发错误
-        let _ = crypto.decrypt("ENC:AAAA");
+        let _ = crypto.decrypt_to_zeroizing("p", "ENC:AAAA");
         assert!(crypto.has_decryption_error());
         // 成功解密后标记应清除
         let encrypted = crypto.encrypt("ok").unwrap();
-        let _ = crypto.decrypt(&encrypted);
+        let _ = crypto.decrypt_to_zeroizing("p", &encrypted);
         assert!(!crypto.has_decryption_error());
     }
 
@@ -490,14 +584,14 @@ mod tests {
         let (_tmp, crypto) = make_crypto();
         let plaintext = "sensitive_data";
         let encrypted = crypto.encrypt(plaintext).unwrap();
-        let result = crypto.decrypt_to_zeroizing(&encrypted).unwrap();
+        let result = crypto.decrypt_to_zeroizing("p1", &encrypted).unwrap();
         assert_eq!(&*result, plaintext);
     }
 
     #[test]
     fn test_decrypt_to_zeroizing_empty() {
         let (_tmp, crypto) = make_crypto();
-        let result = crypto.decrypt_to_zeroizing("").unwrap();
+        let result = crypto.decrypt_to_zeroizing("p1", "").unwrap();
         assert!(result.is_empty());
     }
 
@@ -505,7 +599,7 @@ mod tests {
     fn test_decrypt_to_zeroizing_plaintext_passthrough() {
         // 不带 ENC: 前缀应直接返回明文
         let (_tmp, crypto) = make_crypto();
-        let result = crypto.decrypt_to_zeroizing("plain").unwrap();
+        let result = crypto.decrypt_to_zeroizing("p1", "plain").unwrap();
         assert_eq!(&*result, "plain");
     }
 
@@ -524,9 +618,11 @@ mod tests {
         let decrypted = crypto.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, "test");
         // 旧文件应被备份
-        assert!(tmp.path().join(".corrupt.key").exists()
-            || !key_path.exists()
-            || std::fs::metadata(&key_path).unwrap().len() == 32);
+        assert!(
+            tmp.path().join(".corrupt.key").exists()
+                || !key_path.exists()
+                || std::fs::metadata(&key_path).unwrap().len() == 32
+        );
     }
 
     // ============ Python 旧版密钥继承（历史遗留：两版密钥冲突） ============
@@ -538,8 +634,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let python_key = [7u8; KEY_LEN]; // 固定"旧版"密钥
         let python_path = tmp.path().join(".enc_key");
-        std::fs::write(&python_path, base64::engine::general_purpose::STANDARD.encode(python_key))
-            .unwrap();
+        std::fs::write(
+            &python_path,
+            base64::engine::general_purpose::STANDARD.encode(python_key),
+        )
+        .unwrap();
 
         // 继承实例：key_path 指向不存在的 .enc_key.rs
         let rs_path = tmp.path().join(".enc_key.rs");

@@ -23,6 +23,66 @@ fn parse_host_port(target: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
+/// 解析 URL / host:port 为 `(host, port)`（auth_url 地址解析的单点实现，G2）
+///
+/// 输入兼容三种形态：
+/// - 完整 URL：`http(s)://host[:port][/path]?query`（path/query/fragment 均剥除）
+/// - 裸 `host:port`：如 `127.0.0.1:80`、`example.com:443`
+/// - 裸主机名 / 裸 IPv6：如 `example.com`、`::1`（端口按 scheme 推断 80/443）
+///
+/// IPv6 支持方括号形式（`[::1]:8080`、`[2001:db8::1]:80`，返回的 host 已剥除
+/// 方括号）与裸地址形式（含 2 个以上冒号视为无端口的 IPv6 字面量，整体作 host，
+/// 避免 `::1` 被误拆成空 host + 端口 `1`）。返回值可直接用于
+/// `TcpStream::connect((host.as_str(), port))`。
+pub fn parse_url_host_port(input: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = match input.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("http", input),
+    };
+    let default_port: u16 = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else {
+        80
+    };
+    // authority 段：到首个 path / query / fragment 分隔符为止
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+
+    // IPv6 方括号形式：[host] 或 [host]:port
+    if let Some(stripped) = authority.strip_prefix('[') {
+        let (host, tail) = stripped.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let port = match tail {
+            "" => default_port,
+            t if t.starts_with(':') => t[1..].parse().ok()?,
+            // `]` 后跟非端口内容（如 `[::1]x`）视为非法
+            _ => return None,
+        };
+        return Some((host.to_string(), port));
+    }
+
+    // 冒号数 >= 2：裸 IPv6 字面量（如 ::1、2001:db8::1），整体作 host、无显式端口
+    if authority.matches(':').count() >= 2 {
+        return Some((authority.to_string(), default_port));
+    }
+
+    match authority.split_once(':') {
+        Some((host, port_str)) => {
+            if host.is_empty() {
+                return None;
+            }
+            Some((host.to_string(), port_str.parse().ok()?))
+        }
+        None => {
+            if authority.is_empty() {
+                return None;
+            }
+            Some((authority.to_string(), default_port))
+        }
+    }
+}
+
 /// TCP 连接
 async fn tcp_connect(host: &str, port: u16, timeout: Duration) -> std::io::Result<()> {
     match tokio::time::timeout(timeout, TcpStream::connect((host, port))).await {
@@ -41,10 +101,7 @@ pub struct TcpProbe;
 impl TcpProbe {
     /// 并发连接所有目标，取首个成功。
     #[instrument(skip_all)]
-    pub async fn run(
-        targets: &[String],
-        timeout: Duration,
-    ) -> (ProbeOutcome, Vec<PerProbeDetail>) {
+    pub async fn run(targets: &[String], timeout: Duration) -> (ProbeOutcome, Vec<PerProbeDetail>) {
         if targets.is_empty() {
             return (ProbeOutcome::Disabled, Vec::new());
         }
@@ -57,12 +114,10 @@ impl TcpProbe {
                 Box::pin(async move {
                     let start = Instant::now();
                     let (success, err) = match parse_host_port(&target) {
-                        Some((host, port)) => {
-                            match tcp_connect(&host, port, timeout).await {
-                                Ok(()) => (true, None),
-                                Err(e) => (false, Some(e.to_string())),
-                            }
-                        }
+                        Some((host, port)) => match tcp_connect(&host, port, timeout).await {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(e.to_string())),
+                        },
                         None => (false, Some("非法地址格式".to_string())),
                     };
                     PerProbeDetail {
@@ -90,8 +145,7 @@ impl TcpProbe {
         });
         let (outcome, details) = match select_ok(futs).await {
             Ok((ok_detail, failed_futs)) => {
-                let mut details: Vec<PerProbeDetail> =
-                    Vec::with_capacity(failed_futs.len() + 1);
+                let mut details: Vec<PerProbeDetail> = Vec::with_capacity(failed_futs.len() + 1);
                 for f in failed_futs {
                     // select_ok 返回时残留 future 仍在 pending（并非已失败）：
                     // 继续等待其最终结果即可，Ok/Err 两侧都携带明细，不可 unwrap_err
@@ -128,7 +182,11 @@ impl HttpProbe {
     }
 }
 
-async fn probe_http_one(client: &Client, url: &str, timeout: Duration) -> (ProbeOutcome, PerProbeDetail) {
+async fn probe_http_one(
+    client: &Client,
+    url: &str,
+    timeout: Duration,
+) -> (ProbeOutcome, PerProbeDetail) {
     let start = Instant::now();
     match client.get(url).timeout(timeout).send().await {
         Ok(resp) => {
@@ -290,9 +348,7 @@ async fn probe_url_one(
 
 /// 汇总多目标结果（劫持优先级：Captive > Pass > Fail）
 fn summarize(results: Vec<(ProbeOutcome, PerProbeDetail)>) -> (ProbeOutcome, Vec<PerProbeDetail>) {
-    let pass = results
-        .iter()
-        .any(|(o, _)| matches!(o, ProbeOutcome::Pass));
+    let pass = results.iter().any(|(o, _)| matches!(o, ProbeOutcome::Pass));
     let captive = results
         .iter()
         .any(|(o, _)| matches!(o, ProbeOutcome::Captive));
@@ -346,4 +402,86 @@ pub struct PerProbeDetail {
     pub http_status: Option<u16>,
     /// 失败原因
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============ parse_url_host_port：auth_url 地址解析单点（G2） ============
+
+    #[test]
+    fn test_parse_url_host_port_required_forms() {
+        // 任务要求的五个基准形态
+        assert_eq!(
+            parse_url_host_port("127.0.0.1:80"),
+            Some(("127.0.0.1".to_string(), 80))
+        );
+        assert_eq!(
+            parse_url_host_port("[::1]:8080"),
+            Some(("::1".to_string(), 8080))
+        );
+        // 裸 IPv6 无端口：不得被误拆为空 host + 端口 1
+        assert_eq!(parse_url_host_port("::1"), Some(("::1".to_string(), 80)));
+        assert_eq!(
+            parse_url_host_port("example.com:443"),
+            Some(("example.com".to_string(), 443))
+        );
+        assert_eq!(
+            parse_url_host_port("[2001:db8::1]:80"),
+            Some(("2001:db8::1".to_string(), 80))
+        );
+    }
+
+    #[test]
+    fn test_parse_url_host_port_full_urls() {
+        // 完整 URL：path / query / fragment 剥除，端口显式优先
+        assert_eq!(
+            parse_url_host_port("http://10.10.1.1:8080/srun_portal_pc?ac_id=1&theme=basic"),
+            Some(("10.10.1.1".to_string(), 8080))
+        );
+        // https 无端口 → 443，http 无端口 → 80
+        assert_eq!(
+            parse_url_host_port("https://portal.example.edu/login#main"),
+            Some(("portal.example.edu".to_string(), 443))
+        );
+        assert_eq!(
+            parse_url_host_port("http://portal.example.edu/"),
+            Some(("portal.example.edu".to_string(), 80))
+        );
+        // 方括号 IPv6 完整 URL
+        assert_eq!(
+            parse_url_host_port("http://[::1]:8080/login"),
+            Some(("::1".to_string(), 8080))
+        );
+        assert_eq!(
+            parse_url_host_port("https://[2001:db8::1]/"),
+            Some(("2001:db8::1".to_string(), 443))
+        );
+    }
+
+    #[test]
+    fn test_parse_url_host_port_invalid_forms() {
+        // 非法形态返回 None：空 host、非数字端口、端口越界
+        assert_eq!(parse_url_host_port(""), None);
+        assert_eq!(parse_url_host_port("http://"), None);
+        assert_eq!(parse_url_host_port("host:abc"), None);
+        assert_eq!(parse_url_host_port("host:99999"), None);
+        // 方括号不闭合
+        assert_eq!(parse_url_host_port("[::1:8080"), None);
+    }
+
+    // ============ parse_host_port：TCP 目标严格 host:port ============
+
+    #[test]
+    fn test_parse_host_port_forms() {
+        assert_eq!(
+            parse_host_port("8.8.8.8:53"),
+            Some(("8.8.8.8".to_string(), 53))
+        );
+        // TCP 目标要求显式端口：无端口的裸主机名拒绝（与 auth_url 的
+        // scheme 推断语义区分；裸 IPv6 的正确解析归 parse_url_host_port 管）
+        assert_eq!(parse_host_port("no-port-host"), None);
+        assert_eq!(parse_host_port(""), None);
+    }
 }

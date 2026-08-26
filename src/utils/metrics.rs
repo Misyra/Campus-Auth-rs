@@ -3,8 +3,8 @@
 //! 用 `AtomicU64` 维护关键运行指标，通过 `Arc<Metrics>` 注入多个服务。各服务在关键路径上
 //! `fetch_add` 递增，不做额外同步。
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 关键运行指标（全部为 `AtomicU64`）
 pub struct Metrics {

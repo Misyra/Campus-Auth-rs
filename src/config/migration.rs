@@ -4,12 +4,15 @@
 //! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用覆盖写入，
 //! `settings.json` 的 `config_version` 更新是 commit point。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use serde_json::Value;
 
 use crate::config::ConfigError;
+use crate::config::schema::SettingsData;
+use crate::config::service::is_valid_profile_id;
 
 /// 单个迁移函数的签名
 ///
@@ -68,7 +71,18 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
     if let Some(profiles) = value.get_mut("profiles").and_then(Value::as_object_mut) {
         let profiles_dir = config_dir.join("profiles");
         std::fs::create_dir_all(&profiles_dir)?;
+        // R4：被跳过的非法 id 集合——若其中包含 active_profile_id，
+        // 迁移结束后需回退 default，避免活跃 Profile 指向不存在的文件
+        let mut skipped_invalid_ids: HashSet<String> = HashSet::new();
         for (id, profile) in profiles.iter_mut() {
+            // 写盘前校验 id：非法 id（路径分隔符/点号等）直接拼进文件名会造成
+            // 路径穿越（如 `../evil` 写到 profiles 目录之外）。跳过该 Profile 并
+            // 告警，保留原始数据由用户处置，不做 slugify（避免静默改名后无法对应）
+            if !is_valid_profile_id(id) {
+                tracing::warn!("迁移跳过非法 Profile ID（含不安全字符，已保留在原配置中）: {id}");
+                skipped_invalid_ids.insert(id.clone());
+                continue;
+            }
             // 2. 字段重命名（仅当旧字段存在）
             rename_field(profile, "carrier", "isp");
             rename_field(profile, "match_gateway_ip", "gateway_ip");
@@ -85,6 +99,21 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             let path = profiles_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(profile)?;
             std::fs::write(&path, json)?;
+        }
+        // 被跳过的 id 若是活跃 Profile：回退 default，防止活跃指向悬空文件
+        let active = value
+            .get("active_profile_id")
+            .and_then(Value::as_str)
+            .unwrap_or("default")
+            .to_string();
+        if skipped_invalid_ids.contains(&active) {
+            tracing::warn!("活跃 Profile ID 「{active}」非法已被跳过，迁移后回退到 default");
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "active_profile_id".to_string(),
+                    Value::String("default".to_string()),
+                );
+            }
         }
     }
 
@@ -122,7 +151,12 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             rename_field(app, "app_port", "port");
             rename_field(app, "auto_open_browser", "auto_start_browser");
             if let Some(a) = app.as_object_mut() {
-                for f in ["shell_path", "lightweight_tray", "minimize_to_tray", "proxy"] {
+                for f in [
+                    "shell_path",
+                    "lightweight_tray",
+                    "minimize_to_tray",
+                    "proxy",
+                ] {
                     a.remove(f);
                 }
             }
@@ -136,6 +170,19 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             "config_version".to_string(),
             Value::Number(serde_json::Number::from(6u32)),
         );
+    }
+
+    // 5.5 迁移结果自检（G4）：确保产物能被当前 schema 解析后才允许删备份。
+    // 若解析失败（迁移函数产生了非法结构）立即返回 Err 并保留备份目录——
+    // 此时 settings.json 尚未写入新版本号（commit point 在调用方），
+    // 下次启动会重跑迁移，用户也可从备份目录手动回滚。
+    if let Err(e) = serde_json::from_value::<SettingsData>(value.clone()) {
+        tracing::error!("迁移产物无法解析为当前 schema，保留备份目录: {e}");
+        return Err(ConfigError::ConfigParseError {
+            path: config_dir.display().to_string(),
+            reason: format!("迁移产物无法解析为当前 schema: {e}"),
+            backup_path: backup_dir.as_ref().map(|d| d.display().to_string()),
+        });
     }
 
     // 6. 迁移成功，清理备份目录
@@ -164,17 +211,26 @@ fn rename_field(obj: &mut Value, from: &str, to: &str) {
 /// 仅用于迁移失败时的手动回滚，备份目录以 [`crate::config::BACKUP_PREFIX`] 前缀命名，
 /// 不会被 `load_all_profiles` 等逻辑误读。
 fn backup_config_dir(config_dir: &Path) -> std::io::Result<PathBuf> {
-    let backup_dir = config_dir.join(format!(
-        "{}{}",
-        crate::config::BACKUP_PREFIX,
-        Local::now().format("%Y%m%d%H%M%S")
-    ));
-    // 极端情况下时间戳冲突则跳过（极少发生）
-    if backup_dir.exists() {
-        return Ok(backup_dir);
-    }
+    let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
+    let backup_dir = unique_backup_dir(config_dir, &stamp);
     copy_dir_recursive(config_dir, &backup_dir)?;
     Ok(backup_dir)
+}
+
+/// 生成不与现有目录冲突的备份目录路径（G24）
+///
+/// 同一秒内多次迁移（崩溃重试/测试）会出现时间戳冲突：直接复用旧目录会让
+/// 「不含本次配置」的旧备份被误当成有效备份，且迁移成功后的
+/// `remove_dir_all` 会把他人尚未回滚的备份连带误删。冲突时加 `-2`、`-3` …
+/// 序号后缀重试，保证每次迁移都得到独立的新目录。
+fn unique_backup_dir(config_dir: &Path, stamp: &str) -> PathBuf {
+    let mut candidate = config_dir.join(format!("{}{}", crate::config::BACKUP_PREFIX, stamp));
+    let mut n: u32 = 2;
+    while candidate.exists() {
+        candidate = config_dir.join(format!("{}{}-{n}", crate::config::BACKUP_PREFIX, stamp));
+        n += 1;
+    }
+    candidate
 }
 
 /// 递归拷贝目录内容（跳过备份目录自身，避免自我嵌套）
@@ -189,7 +245,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             // 不递归进入已有的备份目录
             if src_path
                 .file_name()
-                .map(|n| n.to_string_lossy().starts_with(crate::config::BACKUP_PREFIX))
+                .map(|n| {
+                    n.to_string_lossy()
+                        .starts_with(crate::config::BACKUP_PREFIX)
+                })
                 .unwrap_or(false)
             {
                 continue;
@@ -348,7 +407,10 @@ mod tests {
         migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
 
         // 字段层面（monitor）与首次一致
-        assert_eq!(v["global"]["monitor"]["check_interval"], first["global"]["monitor"]["check_interval"]);
+        assert_eq!(
+            v["global"]["monitor"]["check_interval"],
+            first["global"]["monitor"]["check_interval"]
+        );
         assert_eq!(v["config_version"], 6);
     }
 
@@ -362,5 +424,115 @@ mod tests {
         // 不存在的字段：无操作
         rename_field(&mut obj, "missing", "also_missing");
         assert!(obj.get("also_missing").is_none());
+    }
+
+    // ============ G24：备份目录时间戳冲突 ============
+
+    #[test]
+    fn test_unique_backup_dir_appends_suffix_on_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 预占同时间戳目录（模拟同秒内的上一次迁移备份）
+        let occupied = tmp
+            .path()
+            .join(format!("{}20250101000000", crate::config::BACKUP_PREFIX));
+        std::fs::create_dir_all(&occupied).unwrap();
+        std::fs::write(occupied.join("sentinel"), "old-backup").unwrap();
+
+        let got = unique_backup_dir(tmp.path(), "20250101000000");
+        assert_eq!(
+            got,
+            tmp.path()
+                .join(format!("{}20250101000000-2", crate::config::BACKUP_PREFIX))
+        );
+        // 二级冲突继续递增
+        std::fs::create_dir_all(&got).unwrap();
+        let got2 = unique_backup_dir(tmp.path(), "20250101000000");
+        assert!(got2.to_string_lossy().ends_with("-3"));
+        // 原备份目录不被触碰
+        assert!(occupied.join("sentinel").exists());
+    }
+
+    #[test]
+    fn test_backup_config_dir_collision_does_not_reuse_old_dir() {
+        // 同秒内连续两次备份：第二次不复用第一次的目录（改名重试），
+        // 两个目录均存在且相互独立——防止 remove_dir_all 误删他人备份
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("settings.json"), "{}").unwrap();
+
+        let first = backup_config_dir(tmp.path()).unwrap();
+        let second = backup_config_dir(tmp.path()).unwrap();
+        assert!(first.exists());
+        assert!(second.exists());
+        assert_ne!(first, second, "冲突时必须改名而不是复用旧目录");
+        // 两次备份均包含源内容
+        assert!(first.join("settings.json").exists());
+        assert!(second.join("settings.json").exists());
+    }
+
+    // ============ R4：迁移 profile id 路径穿越 ============
+
+    #[test]
+    fn test_migrate_skips_path_traversal_profile_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().parent().unwrap().to_path_buf();
+        let mut v = v5_settings();
+        v["active_profile_id"] = serde_json::json!("../evil");
+        v["profiles"]["../evil"] = serde_json::json!({
+            "name": "恶意",
+            "username": "x",
+            "password": "ENC:abc",
+        });
+
+        migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
+
+        // 不产生穿越文件（profiles 目录之外无 evil.json）
+        assert!(
+            !outside.join("evil.json").exists(),
+            "不得写出 profiles 目录"
+        );
+        assert!(!tmp.path().join("evil.json").exists());
+        // profiles 目录只含合法 id 的文件
+        let profiles_dir = tmp.path().join("profiles");
+        let names: Vec<String> = std::fs::read_dir(&profiles_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["default.json".to_string()]);
+        // 非法 id 是活跃 Profile 时回退 default
+        assert_eq!(v["active_profile_id"], "default");
+    }
+
+    // ============ G4：迁移产物解析失败保留备份、不提交版本 ============
+
+    #[test]
+    fn test_migrate_invalid_result_keeps_backup_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        std::fs::write(&settings_path, r#"{"config_version": 5}"#).unwrap();
+        let mut v = v5_settings();
+        // check_interval_seconds 类型错误（字符串）：重命名后 check_interval 无法解析为 u32
+        v["global"]["monitor"]["check_interval_seconds"] = serde_json::json!("not-a-number");
+
+        let result = migrate_v5_to_v6(tmp.path(), &mut v);
+        assert!(result.is_err(), "迁移产物不可解析应返回错误");
+
+        // 备份目录保留（未因「迁移成功」路径被清理），可供手动回滚
+        let backups: Vec<std::path::PathBuf> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| {
+                        n.to_string_lossy()
+                            .starts_with(crate::config::BACKUP_PREFIX)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "应保留恰好一个备份目录");
+        assert!(
+            backups[0].join("settings.json").exists(),
+            "备份应包含原配置"
+        );
     }
 }

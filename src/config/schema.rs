@@ -355,8 +355,8 @@ impl Default for UpdaterSettings {
     fn default() -> Self {
         Self {
             check_on_startup: true,
-            release_source_url:
-                "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest".to_string(),
+            release_source_url: "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest"
+                .to_string(),
             check_interval_hours: 24,
         }
     }

@@ -184,23 +184,23 @@ impl ProfileService {
         if !exists {
             return Err(ConfigError::ProfileNotFound { id: id.to_string() });
         }
-        let mut settings = self.config.load_settings();
-        settings.active_profile_id = id.to_string();
-        self.config.save_settings(&settings).await?;
+        // 持锁读-改-写（F7）：锁外的 load→改→save 三步在并发切换时会丢更新
+        self.config
+            .modify_settings(|s| s.active_profile_id = id.to_string())
+            .await?;
         // 仅切换 Profile 不影响定时任务表，发送 ProfileSwitched 信号避免调度器全量重载任务
         self.config
-            .reload_with_signal(ConfigReloadSignal::ProfileSwitched {
-                id: id.to_string(),
-            })
+            .reload_with_signal(ConfigReloadSignal::ProfileSwitched { id: id.to_string() })
             .await?;
         Ok(())
     }
 
     /// 设置自动切换开关
     pub async fn set_auto_switch(&self, enabled: bool) -> Result<(), ConfigError> {
-        let mut settings = self.config.load_settings();
-        settings.auto_switch = enabled;
-        self.config.save_settings(&settings).await?;
+        // 持锁读-改-写（F7）：与并发的 switch_profile 串行化，避免相互覆盖
+        self.config
+            .modify_settings(|s| s.auto_switch = enabled)
+            .await?;
         // 触发 reload，使 ArcSwap<RuntimeConfig> 权威源同步更新，
         // 避免其他服务读取到旧快照造成读取来源双轨（历史遗留 F14）
         self.config.reload().await?;
@@ -286,7 +286,9 @@ mod tests {
     async fn make_config_service() -> (tempfile::TempDir, Arc<ConfigService>) {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let service = ConfigService::new(tmp.path().to_path_buf(), tx).await.unwrap();
+        let service = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
         (tmp, service)
     }
 
@@ -357,7 +359,9 @@ mod tests {
         let (_tmp, config) = make_config_service().await;
         let svc = ProfileService::new(config);
 
-        svc.create_profile("dup", ProfileData::default()).await.unwrap();
+        svc.create_profile("dup", ProfileData::default())
+            .await
+            .unwrap();
         let result = svc.create_profile("dup", ProfileData::default()).await;
         assert!(matches!(result, Err(ConfigError::ProfileIdConflict { id }) if id == "dup"));
     }
@@ -392,8 +396,12 @@ mod tests {
         // 规范化后与已有 ID 冲突应返回冲突错误
         let (_tmp, config) = make_config_service().await;
         let svc = ProfileService::new(config.clone());
-        svc.create_profile("My-Profile", ProfileData::default()).await.unwrap();
-        let result = svc.create_profile("my_profile", ProfileData::default()).await;
+        svc.create_profile("My-Profile", ProfileData::default())
+            .await
+            .unwrap();
+        let result = svc
+            .create_profile("my_profile", ProfileData::default())
+            .await;
         assert!(matches!(result, Err(ConfigError::ProfileIdConflict { id }) if id == "my-profile"));
     }
 
@@ -408,7 +416,8 @@ mod tests {
             Err(ConfigError::InvalidProfileId { .. })
         ));
         assert!(matches!(
-            svc.update_profile("../settings", ProfileData::default()).await,
+            svc.update_profile("../settings", ProfileData::default())
+                .await,
             Err(ConfigError::InvalidProfileId { .. })
         ));
         assert!(matches!(

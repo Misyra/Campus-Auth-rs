@@ -20,6 +20,8 @@ pub const SETTINGS_FILE: &str = "settings.json";
 pub const PROFILES_DIR: &str = "profiles";
 /// 损坏文件备份前缀
 pub const CORRUPT_PREFIX: &str = "settings.corrupt.";
+/// 原子写入临时文件前缀（`utils::io::atomic_write_bytes` 生成的 `.tmp_XXXX.json`）
+pub const TMP_PREFIX: &str = ".tmp_";
 /// 迁移备份目录前缀
 pub const BACKUP_PREFIX: &str = ".backup.v5.";
 /// Profile 安全删除目录
@@ -27,14 +29,14 @@ pub const TRASH_DIR: &str = ".trash";
 // 重新导出公共类型，供其他模块直接 `use crate::config::Xxx`
 pub use crypto::PasswordCrypto;
 pub use profiles::ProfileService;
-pub use runtime::{build_runtime_config, ConfigReloadSignal, ProfileSnapshot, RuntimeConfig};
+pub use profiles::{ProfileApi, ProfileSummary};
+pub use runtime::{ConfigReloadSignal, ProfileSnapshot, RuntimeConfig, build_runtime_config};
 pub use schema::{
     AppSettings, BrowserSettings, GlobalConfig, LoggingSettings, MonitorSettings, PauseSettings,
     ProfileData, RetrySettings, SettingsData, StartupAction, UpdaterSettings, WorkerSettings,
 };
 pub use service::ConfigError;
 pub use service::ConfigService;
-pub use profiles::{ProfileApi, ProfileSummary};
 
 /// Web 层消费的配置服务抽象（M1 细粒度 state：config 域）
 ///

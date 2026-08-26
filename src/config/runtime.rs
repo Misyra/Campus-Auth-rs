@@ -6,12 +6,12 @@
 
 use zeroize::Zeroizing;
 
+use crate::config::ConfigError;
 use crate::config::crypto::PasswordCrypto;
 use crate::config::schema::{
     AppSettings, BrowserSettings, LoggingSettings, MonitorSettings, PauseSettings, ProfileData,
     RetrySettings, SettingsData, UpdaterSettings, WorkerSettings,
 };
-use crate::config::ConfigError;
 
 /// 配置变更信号，通过 mpsc 通道从 ConfigService 通知 SchedulerService 等消费者
 ///
@@ -31,7 +31,11 @@ pub enum ConfigReloadSignal {
 ///
 /// 内嵌于 [`RuntimeConfig`]，不独立序列化。密码字段为 [`Zeroizing<String>]，
 /// drop 时自动清零。
-#[derive(Clone, Debug)]
+///
+/// 手动实现 `Debug`（G25）：`Zeroizing<String>` 的派生 Debug 会输出明文密码，
+/// 而 `RuntimeConfig` 的 Debug 输出会进入日志与错误信息——密码字段一律以
+/// `[REDACTED]` 占位，其余字段保持与 derive 等价的格式。
+#[derive(Clone)]
 pub struct ProfileSnapshot {
     /// Profile ID
     pub id: String,
@@ -51,10 +55,23 @@ pub struct ProfileSnapshot {
     pub wifi_ssid: String,
     /// 活跃任务 ID
     pub active_task: String,
-    /// 密码是否解密失败、需要用户重新输入
-    ///
-    /// 解密失败（旧格式/密钥不匹配）时置 `true`，前端据此弹出重新输入提示。
-    pub password_reinput_needed: bool,
+}
+
+impl std::fmt::Debug for ProfileSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 密码字段脱敏：绝不输出明文（G25）
+        f.debug_struct("ProfileSnapshot")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("auth_url", &self.auth_url)
+            .field("isp", &self.isp)
+            .field("gateway_ip", &self.gateway_ip)
+            .field("wifi_ssid", &self.wifi_ssid)
+            .field("active_task", &self.active_task)
+            .finish()
+    }
 }
 
 /// 运行时配置不可变快照
@@ -86,18 +103,19 @@ pub struct RuntimeConfig {
 
 /// 由全局配置与活跃 Profile 构建运行时快照
 ///
-/// 密码字段从 `ENC:` 密文解密为明文；解密失败时使用空密码并保留解密失败标记，
-/// 由前端检测后提示用户重新输入。
+/// 密码字段从 `ENC:` 密文解密为明文；解密失败时使用空密码并按 Profile 记录
+/// 解密失败标志（由 `/api/system` 的 `password_decryption_failed` 汇总暴露，
+/// 前端据此提示用户重新输入）。
 pub fn build_runtime_config(
     settings: &SettingsData,
     profile: &ProfileData,
     crypto: &PasswordCrypto,
 ) -> Result<RuntimeConfig, ConfigError> {
-    // 解密密码；失败则置空并记录重新输入标记（供前端提示）
-    let (password, reinput) = match crypto.decrypt_to_zeroizing(&profile.password) {
-        Ok(p) => (p, false),
-        Err(_) => (Zeroizing::new(String::new()), true),
-    };
+    // 解密密码；失败置空并按 Profile 登记解密失败（F10：标志按 profile id 记录，
+    // 其他 Profile 的成功解密不会抹掉该提示）
+    let password = crypto
+        .decrypt_to_zeroizing(&profile.id, &profile.password)
+        .unwrap_or_else(|_| Zeroizing::new(String::new()));
 
     let profile_snapshot = ProfileSnapshot {
         id: profile.id.clone(),
@@ -109,7 +127,6 @@ pub fn build_runtime_config(
         gateway_ip: profile.gateway_ip.clone(),
         wifi_ssid: profile.wifi_ssid.clone(),
         active_task: profile.active_task.clone(),
-        password_reinput_needed: reinput,
     };
 
     Ok(RuntimeConfig {
@@ -124,4 +141,73 @@ pub fn build_runtime_config(
         profile: profile_snapshot,
         auto_switch: settings.auto_switch,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一个含敏感密码的 ProfileSnapshot
+    fn snapshot_with_password(pw: &str) -> ProfileSnapshot {
+        ProfileSnapshot {
+            id: "default".to_string(),
+            name: "默认".to_string(),
+            username: "user@example.com".to_string(),
+            password: Zeroizing::new(pw.to_string()),
+            auth_url: "http://10.0.0.1/login".to_string(),
+            isp: "移动".to_string(),
+            gateway_ip: "10.0.0.1".to_string(),
+            wifi_ssid: "Campus".to_string(),
+            active_task: String::new(),
+        }
+    }
+
+    // ============ Debug 脱敏（G25） ============
+
+    #[test]
+    fn test_debug_output_redacts_password() {
+        // Debug 输出不得包含密码明文
+        let s = snapshot_with_password("SUPER_SECRET_PASSWORD_123");
+        let dbg = format!("{s:?}");
+        assert!(
+            !dbg.contains("SUPER_SECRET_PASSWORD_123"),
+            "Debug 泄密: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "密码字段应以 [REDACTED] 占位: {dbg}"
+        );
+    }
+
+    #[test]
+    fn test_debug_output_keeps_other_fields() {
+        // 其余字段保持与 derive 等价的可见性（排障所需）
+        let s = snapshot_with_password("pw");
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("ProfileSnapshot"));
+        assert!(dbg.contains("user@example.com"));
+        assert!(dbg.contains("http://10.0.0.1/login"));
+        assert!(dbg.contains("id: \"default\""));
+    }
+
+    #[test]
+    fn test_runtime_config_debug_redacts_nested_password() {
+        // RuntimeConfig 的派生 Debug 嵌套输出 ProfileSnapshot 时同样脱敏
+        let snapshot = snapshot_with_password("NESTED_SECRET");
+        let rc = RuntimeConfig {
+            browser: BrowserSettings::default(),
+            monitor: MonitorSettings::default(),
+            pause: PauseSettings::default(),
+            logging: LoggingSettings::default(),
+            retry: RetrySettings::default(),
+            worker: WorkerSettings::default(),
+            app: AppSettings::default(),
+            updater: UpdaterSettings::default(),
+            profile: snapshot,
+            auto_switch: true,
+        };
+        let dbg = format!("{rc:?}");
+        assert!(!dbg.contains("NESTED_SECRET"), "嵌套 Debug 泄密: {dbg}");
+        assert!(dbg.contains("[REDACTED]"));
+    }
 }

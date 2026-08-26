@@ -264,12 +264,9 @@ mod tests {
             let _guard = CompletionGuard { token: t2 };
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            token.cancelled(),
-        )
-        .await
-        .expect("正常退出应触发完成信号");
+        tokio::time::timeout(std::time::Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("正常退出应触发完成信号");
 
         // panic 展开路径（catch_unwind 防止测试进程崩溃）
         let token = Arc::new(CancellationToken::new());
@@ -290,9 +287,11 @@ mod tests {
         // 验证各变体 Display 文案（thiserror 模板渲染）
         assert!(EngineError::ChannelFull.to_string().contains("通道已满"));
         assert!(EngineError::ChannelClosed.to_string().contains("已关闭"));
-        assert!(EngineError::ProbeError("boom".into())
-            .to_string()
-            .contains("boom"));
+        assert!(
+            EngineError::ProbeError("boom".into())
+                .to_string()
+                .contains("boom")
+        );
     }
 
     // ============ 常量合理性测试 ============

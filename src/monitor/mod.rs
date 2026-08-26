@@ -8,22 +8,22 @@ pub mod decision;
 pub mod probes;
 
 pub use decision::evaluate;
-pub use probes::{PerProbeDetail, ProbeKind, ProbeOutcome};
+pub use probes::{PerProbeDetail, ProbeKind, ProbeOutcome, parse_url_host_port};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use futures::future::{join_all, BoxFuture};
-use reqwest::redirect::Policy;
+use futures::future::{BoxFuture, join_all};
 use reqwest::Client;
+use reqwest::redirect::Policy;
 use tokio::net::TcpStream;
 use tracing::{debug, info, instrument, warn};
 
-use crate::config::runtime::RuntimeConfig;
 use crate::config::ConfigService;
+use crate::config::runtime::RuntimeConfig;
 use crate::network::NetworkDetect;
 use crate::status::NetworkStatus;
 use crate::utils::metrics::Metrics;
@@ -186,10 +186,13 @@ impl MonitorService {
             .no_proxy()
             .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT);
         if let Some(p) = proxy {
-            let proxy = reqwest::Proxy::all(p).map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
+            let proxy =
+                reqwest::Proxy::all(p).map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
             builder = builder.proxy(proxy);
         }
-        builder.build().map_err(|e| MonitorError::ClientBuild(e.to_string()))
+        builder
+            .build()
+            .map_err(|e| MonitorError::ClientBuild(e.to_string()))
     }
 
     /// 执行一次完整探测周期，返回 [`ProbeReport`]。
@@ -239,7 +242,12 @@ impl MonitorService {
         // 步骤 2：物理网卡连接检查（由 local_check_enabled 控制）
         // 逻辑：存在在线网卡表明链路已连接；网卡全失联时直接判 Offline，跳过后续探测。
         if cfg.local_check_enabled {
-            match tokio::time::timeout(INTERFACE_CHECK_TIMEOUT, self.network_detect.list_interfaces()).await {
+            match tokio::time::timeout(
+                INTERFACE_CHECK_TIMEOUT,
+                self.network_detect.list_interfaces(),
+            )
+            .await
+            {
                 Ok(Ok(list)) => {
                     debug!("网卡检测通过：发现 {} 个网卡", list.len());
                     if list.is_empty() {
@@ -285,7 +293,10 @@ impl MonitorService {
         let mut tasks: Vec<BoxFuture<(ProbeKind, ProbeOutcome, Vec<PerProbeDetail>)>> = Vec::new();
 
         if cfg.tcp_enabled {
-            info!("TCP 探测启动：目标 {:?}，超时 {:?}", cfg.tcp_targets, cfg.tcp_timeout);
+            info!(
+                "TCP 探测启动：目标 {:?}，超时 {:?}",
+                cfg.tcp_targets, cfg.tcp_timeout
+            );
             let targets = cfg.tcp_targets.clone();
             let timeout = cfg.tcp_timeout;
             tasks.push(Box::pin(async move {
@@ -294,7 +305,10 @@ impl MonitorService {
             }));
         }
         if cfg.http_enabled {
-            info!("HTTP 探测启动：目标 {:?}，超时 {:?}", cfg.http_targets, cfg.http_timeout);
+            info!(
+                "HTTP 探测启动：目标 {:?}，超时 {:?}",
+                cfg.http_targets, cfg.http_timeout
+            );
             let targets = cfg.http_targets.clone();
             let timeout = cfg.http_timeout;
             let c = client.clone();
@@ -304,7 +318,10 @@ impl MonitorService {
             }));
         }
         if cfg.url_enabled {
-            info!("URL 探测启动：目标 {:?}，超时 {:?}", cfg.url_targets, cfg.url_timeout);
+            info!(
+                "URL 探测启动：目标 {:?}，超时 {:?}",
+                cfg.url_targets, cfg.url_timeout
+            );
             let targets = cfg.url_targets.clone();
             let expected = cfg.url_expected_responses.clone();
             let timeout = cfg.url_timeout;
@@ -356,10 +373,20 @@ impl MonitorService {
         // 步骤 5：CaptivePortal 时前置检查 auth_url 可达性
         let mut auth_url_reachable = None;
         if status == NetworkStatus::CaptivePortal && !rt.profile.auth_url.is_empty() {
-            auth_url_reachable = Some(self.check_auth_url(&rt.profile.auth_url, cfg.auth_url_timeout).await);
+            auth_url_reachable = Some(
+                self.check_auth_url(&rt.profile.auth_url, cfg.auth_url_timeout)
+                    .await,
+            );
         }
 
-        let report = self.finalize_report(status, tcp_outcome, http_outcome, url_outcome, latency, auth_url_reachable);
+        let report = self.finalize_report(
+            status,
+            tcp_outcome,
+            http_outcome,
+            url_outcome,
+            latency,
+            auth_url_reachable,
+        );
         // 增强完成日志：补充各探测 outcome、auth_url 可达性与启用的探测类型
         let enabled = [
             (ProbeKind::Tcp, cfg.tcp_enabled),
@@ -373,8 +400,12 @@ impl MonitorService {
         .join(",");
         info!(
             "探测完成 #{}: status={:?}, latency={}ms, tcp={:?}, http={:?}, url={:?}, auth_url={}, enabled=[{}]",
-            report.check_number, report.status, report.latency_ms,
-            report.tcp_outcome, report.http_outcome, report.url_outcome,
+            report.check_number,
+            report.status,
+            report.latency_ms,
+            report.tcp_outcome,
+            report.http_outcome,
+            report.url_outcome,
             match report.auth_url_reachable {
                 Some(true) => "reachable",
                 Some(false) => "unreachable",
@@ -386,24 +417,46 @@ impl MonitorService {
     }
 
     /// 检查 auth_url 的 TCP 可达性（仅在 CaptivePortal 时调用）
+    ///
+    /// 地址解析统一走 [`probes::parse_url_host_port`] 单点实现（G2）：
+    /// 支持 IPv6 方括号与裸地址形式，返回的 host 已剥除方括号。
     #[instrument(skip(self))]
     pub async fn check_auth_url(&self, auth_url: &str, timeout: Duration) -> bool {
-        let (host, port) = match parse_auth_host_port(auth_url) {
+        let (host, port) = match parse_url_host_port(auth_url) {
             Some(hp) => hp,
             None => {
                 debug!("auth_url 解析失败: {auth_url}");
                 return false;
             }
         };
-        let result = match tokio::time::timeout(timeout, TcpStream::connect((host.as_str(), port))).await {
-            Ok(Ok(_)) => true,
-            Ok(Err(_)) | Err(_) => false,
-        };
+        let result =
+            match tokio::time::timeout(timeout, TcpStream::connect((host.as_str(), port))).await {
+                Ok(Ok(_)) => true,
+                Ok(Err(_)) | Err(_) => false,
+            };
         debug!("auth_url 可达性: {host}:{port} -> {result}");
         result
     }
 
+    /// 读取累计指标快照（G23）
+    ///
+    /// 返回 `(probe_total, login_total)` 的当前计数器值，供 Engine 在探测状态
+    /// merge 的同一位置推送 `PartialSnapshot::Totals`。probe_total 由本服务的
+    /// `check_once` 完成路径单点递增（周期/手动/启动检测均计入）；
+    /// login_total 由登录侧递增，此处只读。未注入 Metrics 时返回 None。
+    pub fn metrics_totals(&self) -> Option<(u64, u64)> {
+        let m = self.metrics.as_ref()?;
+        Some((
+            m.probe_total.load(Ordering::Relaxed),
+            m.login_total.load(Ordering::Relaxed),
+        ))
+    }
+
     /// 组装 ProbeReport 并递增计数/指标
+    ///
+    /// `Metrics::probe_total` 的唯一递增点（G23）：`check_once` 的所有出口
+    /// （含全部禁用 / 网卡检查提前返回）都经此方法收尾，因此周期检测、
+    /// 启动/恢复触发的立即检测与手动 TestNetwork 全部计入探测总数。
     fn finalize_report(
         &self,
         status: NetworkStatus,
@@ -428,22 +481,4 @@ impl MonitorService {
             check_number: n,
         }
     }
-}
-
-/// 解析 auth_url（http/https）为 (host, port)，不依赖 `url` crate
-fn parse_auth_host_port(auth_url: &str) -> Option<(String, u16)> {
-    let (scheme, rest) = if let Some(idx) = auth_url.find("://") {
-        (&auth_url[..idx], &auth_url[idx + 3..])
-    } else {
-        ("http", auth_url)
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
-        None => (authority.to_string(), if scheme == "https" { 443 } else { 80 }),
-    };
-    if host.is_empty() {
-        return None;
-    }
-    Some((host, port))
 }
