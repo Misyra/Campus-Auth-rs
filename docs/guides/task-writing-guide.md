@@ -287,6 +287,27 @@
 { "id": "wait_load", "type": "sleep", "description": "等待加载", "duration": 2000 }
 ```
 
+### goto — 导航（navigate 别名）
+
+导航到指定 URL，与 `navigate` 共用实现。目标 URL 优先级：`extras.url` → `value` → `selector`；支持 `wait_until`（`load`/`domcontentloaded`/`networkidle`/`commit`，非法回退 `load`）。
+
+```json
+{ "id": "go_login", "type": "goto", "url": "{{LOGIN_URL}}", "wait_until": "domcontentloaded" }
+```
+
+### assert_text — 文本断言
+
+等待 `document.body.innerText` 包含指定文本。
+
+| 参数 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `value` | 是 | — | 待匹配文本（经 `wait_for_function` 的 `arg` 参数传递） |
+| `timeout` | 否 | `10000` | 超时时间（毫秒） |
+
+```json
+{ "id": "assert_ok", "type": "assert_text", "value": "登录成功" }
+```
+
 ### ocr — 验证码识别
 
 使用 ddddocr 识别验证码图片。截取 `selector` 指定的图片元素，进行 OCR 识别，结果自动填入 `target_selector` 输入框或存储到 `store_as` 变量。
@@ -773,8 +794,10 @@ A: 两种方式可以提高识别准确度：
 | `screenshot` | 截图 | `path` | — |
 | `sleep` | 休眠 | `duration` | 最大 300000ms |
 | `ocr` | 验证码识别 | `selector`, `target_selector`, `store_as`, `char_range`, `old` | 支持新旧模型切换；`char_range` 限定识别字符范围提高准确度 |
+| `goto` | 导航（`navigate` 别名） | `url`（落 extras）/ `value`/`selector`, `wait_until` | 与 `navigate` 共用 `handle_navigate`，`wait_until` 仅 `load/domcontentloaded/networkidle/commit` |
+| `assert_text` | 文本断言 | `value` | 等 `document.body.innerText.includes(arg)`，`arg` 经 `wait_for_function` 参数传递（避免拼接） |
 
-> 所有操作类步骤都支持 `frame` 公共字段，用于在 frameset/iframe 页面中定位子 frame 内的元素。
+> 所有操作类步骤都支持 `frame` 公共字段，用于在 frameset/iframe 页面中定位子 frame 内的元素。支持的步骤类型共 12 种（含 `goto`/`assert_text`，见上）。
 
 ---
 

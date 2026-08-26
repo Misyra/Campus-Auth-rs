@@ -3,7 +3,7 @@
 校园网自动认证工具的浏览器自动化子进程。由 Rust 主进程（控制平面）通过
 **stdin/stdout NDJSON IPC** 驱动，负责 Playwright 浏览器操作与 OCR 识别。
 
-> 版本：`v5.0.0-alpha`。本目录为 Rust 重写版的 Python Worker，已移除对旧
+> 版本：`v5.0.0-alpha.1`。本目录为 Rust 重写版的 Python Worker，已移除对旧
 > 项目 `app.*` 模块的全部依赖。
 
 ## 设计要点

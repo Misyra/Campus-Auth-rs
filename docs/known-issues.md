@@ -1,7 +1,7 @@
 # 已知问题清单
 
 > 本文档沉淀代码审查中**仍然有效**的未修复项（已逐项对照当前代码核实，2026-08）。
-> 原审查报告（`docs/*review-*.md`、`doc/*.md`）已删除，有效结论迁移至此。
+> 原审查报告（`docs/*review-*.md`、`doc/*.md`）已删除，有效结论迁移至此；历史规划见 `docs/archive/`。
 > 条目的修复记录归档于 `docs/changelog.md`（按版本归档，不再在本文档保留已修复节）。
 
 ---
@@ -23,7 +23,7 @@
 
 | # | 问题 | 说明 |
 |---|------|------|
-| E3 | 测试短板 | 核心模块已补测试（web/routes handler 层、environment/、scheduler、tray 纯函数、python_worker 48 项 pytest）；集成测试仍偏少（bridge_ipc / bridge_supervisor / smoke） |
+| E3 | 测试短板 | 核心模块已补测试（web/routes handler 层、environment/、scheduler、tray 纯函数、python_worker 83 项 pytest、engine slot 6 项等）；集成测试仍偏少（bridge_ipc / bridge_supervisor / smoke），较 08-15 已收敛 |
 
 ---
 
@@ -34,4 +34,4 @@
 
 ---
 
-> 历史已修复条目已归档至 `docs/changelog.md`（2026-08-14 三轮：初轮 + 第二轮 + 第三轮）。
+> 历史已修复条目已归档至 `docs/changelog.md`（2026-08 全量，含第十一~十三轮）；过时规划见 `docs/archive/` 与 `docs/plan-next.md`。

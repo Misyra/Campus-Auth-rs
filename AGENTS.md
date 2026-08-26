@@ -11,7 +11,7 @@ Campus-Auth 是一个校园网自动认证工具。Rust 重写版为单 binary c
 | 领域 | 选型 |
 |------|------|
 | 语言 / Edition | Rust 2024, MSRV 1.85 |
-| 异步运行时 | tokio (full) |
+| 异步运行时 | tokio（按需裁剪，原 full：rt-multi-thread / macros / net / fs / process / signal / sync / time / io-util，见 Cargo.toml） |
 | HTTP 框架 | axum 0.8 + tower-http |
 | HTTP 客户端 | reqwest (rustls-tls) |
 | 序列化 | serde + serde_json |
@@ -85,7 +85,7 @@ cd frontend && npm run build
 
 ### Lint
 
-启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `-D warnings` 零警告。
+启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test` / `frontend build + vitest` / `compileall` / `uv run pytest`）。
 
 ## 项目结构
 
@@ -99,17 +99,17 @@ campus-auth/
 │   ├── main.rs               # CLI 解析 → 启动分发
 │   ├── helper_main.rs        # 更新替换助手（独立 binary：campus-auth-helper）
 │   ├── app.rs                # Axum 服务器构建 + 托盘初始化
-│   ├── container.rs          # ServiceContainer: Arc 共享状态
+│   ├── container.rs          # ServiceContainer: Arc 共享状态（13 服务 + Metrics/uptime 2 横切，共 15 字段）
 │   ├── launcher.rs           # 启动状态机 (full / lightweight / once)
 │   ├── logging.rs            # 日志子系统（初始化 / 动态级别 / WS 广播 Layer）
-│   ├── engine/               # 调度引擎（单 tokio task + select!）
+│   ├── engine/               # 调度引擎（单 tokio task + select!，含 slot.rs 可替换句柄槽）
 │   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
 │   ├── login/                # 登录编排（状态机、去重、抢占、重试）
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）
-│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分，细粒度 state 注入）
+│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分：config/profiles/login/monitor/scheduler/tasks/scripts/system/autostart/debug/history/repo/background/uninstall/ocr 等，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
 │   ├── tasks/                # 任务管理
-│   ├── network/              # 网络接口 / SOCKS5
+│   ├── network/              # 网络接口
 │   ├── bridge/               # Python Bridge（NDJSON IPC）
 │   ├── status/               # StatusManager: 状态快照 + watch 推送
 │   ├── environment/          # 环境管理器（uv/python 按需安装）
@@ -119,26 +119,26 @@ campus-auth/
 ├── frontend/                 # Vue 3 + TypeScript + Vite
 ├── python_worker/            # Python Worker 子进程（Playwright + OCR）
 ├── tests/                    # 集成测试（common/ 为共享辅助）
-├── docs/                     # 文档（changelog / 已知问题清单 / 任务编写指南）
+├── docs/                     # 文档（changelog / 已知问题清单 / 任务编写指南 / plan-next 活跃计划 / archive 归档）
 ├── resources/                # 静态资源（icons/ 托盘与浏览器图标、tools/ 脚本）
-└── .github/workflows/        # CI（fmt + clippy + test + 前端构建）
+└── .github/workflows/        # CI（fmt + clippy + test + 前端构建 + vitest + pytest）
 ```
 
 ## 架构要点
 
-### ServiceContainer（13 服务拓扑排序）
+### ServiceContainer（13 服务 + 2 横切，共 15 字段拓扑排序）
 
-所有服务通过 `Arc` 构造注入，无延迟绑定、无全局变量。构造顺序（见 `src/container.rs`）：
+所有服务通过 `Arc` 构造注入，无延迟绑定、无全局变量。构造顺序（见 `src/container.rs`，文件头与 `new()` 注释均为 15）：
 
 ConfigService → ProfileService → LoginHistoryService → StatusManager → TaskManager → BridgeSupervisor → EnvironmentManager → TaskExecutor → MonitorService → LoginOrchestrator → SchedulerService → UpdaterService → Engine
 
-另有横切组件：`Metrics`（运行指标）与 uptime 定时器。AutoStartService / DebugSessionManager / TaskRegistry / TaskHistoryStore / WebSocketManager 未独立成服务，相关功能由 TrayManager / Scheduler / Bridge 内聚实现。
+另有横切组件：`Metrics`（运行指标，`Arc<Metrics>`）与 uptime 定时器（`CancellationToken` child）。二者与 13 服务合计 15 字段，即 `src/container.rs:1` 的“15 服务拓扑排序”口径。AutoStartService / DebugSessionManager / TaskRegistry / TaskHistoryStore / WebSocketManager 未独立成服务，相关功能由 TrayManager / Scheduler / Bridge 内聚实现。
 
 新增服务时在链中插入 `Arc::new(...)` 即可。
 
 ### ServiceHandle 统一模式
 
-所有可启停的后台服务（Engine、SchedulerService、Bridge Supervisor）遵循统一句柄：
+可启停的后台服务遵循统一句柄（见 `src/lib.rs`）：
 
 ```rust
 struct ServiceHandle {
@@ -146,6 +146,8 @@ struct ServiceHandle {
     join_handle: JoinHandle<()>,
 }
 ```
+
+`BridgeSupervisor` / `SchedulerService` / `TrayManager` 使用 `ServiceHandle`（`stop_tx: watch` + `stop_with_timeout`）。`Engine` 为可崩溃重启特例，使用 `EngineSlot(Arc<ArcSwapOption<EngineHandle>>)` + `EngineHandle { engine: Arc<Engine>, join_handle, completed: CancellationToken }`，命令经 `slot.dispatch/try_dispatch` 派发（见 `src/engine/slot.rs` 与 `src/engine/mod.rs`），`ServiceHandle` 的 `watch` 语义不适用于 Engine。
 
 服务主循环用 `tokio::select!` 同时等待业务逻辑和停止信号。
 
@@ -157,7 +159,7 @@ struct ServiceHandle {
 | channel (mpsc/oneshot) | 一次性命令/结果 |
 | `Arc<ArcSwap<T>>` | 高频读低频写的共享快照（仅 ConfigService 的 RuntimeConfig） |
 
-禁止跨模块直接访问内部状态或共享 `Mutex`（ConfigService 内部 `tokio::sync::Mutex` 除外）。
+禁止跨模块直接访问内部状态或共享 `Mutex`；服务内部可用 `tokio::sync::Mutex` / `std::sync::Mutex`（按需 `into_inner` 处理 poison），见 `bridge` / `scheduler` / `status` 现状。
 
 ### Engine
 

@@ -55,7 +55,7 @@ campus-auth/
 ├── frontend/            # Vue 3 + TypeScript + Vite Web 控制台
 ├── python_worker/       # Python Worker 子进程（Playwright + OCR）
 ├── tests/               # Rust 集成测试
-├── docs/                # 文档（changelog / 已知问题 / 任务编写指南）
+├── docs/                # 文档（changelog / 已知问题 / 任务编写指南 / plan-next 活跃计划 / archive 归档）
 ├── resources/           # 静态资源（图标 / 脚本）
 └── openapi.json         # Web API 契约
 ```
@@ -66,7 +66,7 @@ campus-auth/
 
 - 提交规范：Conventional Commits，中文描述（详见 [AGENTS.md](AGENTS.md) 的 Git 规范）
 - 开发命令：`cargo build` / `cargo test` / `cargo clippy -- -D warnings` / `cargo fmt`
-- CI：fmt + clippy（`-D warnings`）+ 全量测试 + 前端构建 + Python 语法检查
+- CI：`cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test` + 前端构建（`vue-tsc` + `vite build`）+ `vitest` + `compileall` + `uv run pytest`（见 `.github/workflows/ci.yml`）
 - 变更记录见 [docs/changelog.md](docs/changelog.md)，已知问题见 [docs/known-issues.md](docs/known-issues.md)
 
 ## 许可证
