@@ -13,7 +13,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::bridge::{BridgeSupervisor, IpcResponse, Outcome, StructuredResult};
+use crate::bridge::{IpcResponse, Outcome, StructuredResult};
 use crate::config::ConfigService;
 use crate::login::history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
 use crate::login::{LoginHandleInner, recover_lock};
@@ -147,24 +147,46 @@ fn dialog_note(data: &Value) -> String {
     }
 }
 
-/// 登录会话：持有配置快照派生参数、服务引用与取消原语，驱动单次登录状态机
-pub struct LoginSession {
+/// 会话跨实例共享的服务依赖集（由 LoginOrchestrator 构造一次并复用，A-2）
+pub(crate) struct SessionDeps {
+    /// Bridge 句柄（trait 化：可注入 mock 做状态机单测）
+    pub bridge: std::sync::Arc<dyn crate::bridge::BridgeApi>,
+    /// 网络监测服务（登录后网络验证使用）
+    pub monitor: std::sync::Arc<crate::monitor::MonitorService>,
+    /// 配置服务（读取登录后网络验证延迟 post_login_delay）
+    pub config_service: std::sync::Arc<ConfigService>,
+    /// 状态管理器（广播登录状态）
+    pub status_manager: std::sync::Arc<StatusManager>,
+    /// 历史服务（终态写入）
+    pub history_service: std::sync::Arc<LoginHistoryService>,
+    /// 运行指标（可选）
+    pub metrics: Option<std::sync::Arc<Metrics>>,
+}
+
+/// 单次会话的值参数（从配置快照派生，A-2）
+pub(crate) struct SessionParams {
     /// 登录来源
-    source: LoginSource,
+    pub source: LoginSource,
     /// 浏览器任务 ID（仅 `Browser` 来源有值），为空时回退到 Profile 的 `active_task`
-    task_id: Option<String>,
+    pub task_id: Option<String>,
+    /// 最大重试次数（不含首次尝试）
+    pub max_retries: u32,
+    /// 重试间隔
+    pub retry_interval: Duration,
+    /// 单次登录会话总超时
+    pub login_timeout: Duration,
+    /// 关联 Profile ID（写入历史）
+    pub profile_id: String,
+    /// 发送给 Worker 的配置字典（凭证、auth_url、浏览器设置等）
+    pub worker_config: Value,
+}
+
+/// 登录会话：持有会话参数、取消原语与服务依赖，驱动单次登录状态机
+pub struct LoginSession {
+    /// 会话参数（来源/重试预算/凭证等）
+    params: SessionParams,
     /// 会话级取消令牌（整个会话生命周期）
     cancel_token: CancellationToken,
-    /// 最大重试次数（不含首次尝试）
-    max_retries: u32,
-    /// 重试间隔
-    retry_interval: Duration,
-    /// 单次登录会话总超时
-    login_timeout: Duration,
-    /// 关联 Profile ID（写入历史）
-    profile_id: String,
-    /// 发送给 Worker 的配置字典（凭证、auth_url、浏览器设置等）
-    worker_config: Value,
     /// 结果共享槽（与 [`crate::login::LoginHandle`] 共享）
     result_slot: Arc<LoginHandleInner>,
     /// 当前在途 attempt 的 cancel_id（供取消传播读取）
@@ -173,64 +195,31 @@ pub struct LoginSession {
     shutdown_token: CancellationToken,
     /// 取消原因（由 `cancel_current` / `cancel_auto_pending` 设置，供终态消息使用）
     cancel_reason: Arc<StdMutex<Option<String>>>,
-    /// Bridge 句柄（可能为 None，仅当编排器未注入时）
-    bridge: Option<Arc<BridgeSupervisor>>,
-    /// 网络监测服务（可能为 None，仅当编排器未注入时；登录后网络验证使用）
-    monitor: Option<Arc<crate::monitor::MonitorService>>,
-    /// 配置服务（读取登录后网络验证延迟 post_login_delay）
-    config_service: Arc<ConfigService>,
-    /// 状态管理器（广播登录状态）
-    status_manager: Arc<StatusManager>,
-    /// 历史服务（终态写入）
-    history_service: Arc<LoginHistoryService>,
-    /// 运行指标（可选）
-    metrics: Option<Arc<Metrics>>,
+    /// 服务依赖集
+    deps: SessionDeps,
     /// 内部状态机当前状态
     state: StdMutex<LoginState>,
 }
 
 impl LoginSession {
     /// 构造登录会话
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        source: LoginSource,
-        task_id: Option<String>,
+        params: SessionParams,
         cancel_token: CancellationToken,
-        max_retries: u32,
-        retry_interval: Duration,
-        login_timeout: Duration,
-        profile_id: String,
-        worker_config: Value,
         result_slot: Arc<LoginHandleInner>,
         attempt_cancel_id: Arc<ArcSwapOption<String>>,
         shutdown_token: CancellationToken,
         cancel_reason: Arc<StdMutex<Option<String>>>,
-        bridge: Option<Arc<BridgeSupervisor>>,
-        monitor: Option<Arc<crate::monitor::MonitorService>>,
-        config_service: Arc<ConfigService>,
-        status_manager: Arc<StatusManager>,
-        history_service: Arc<LoginHistoryService>,
-        metrics: Option<Arc<Metrics>>,
+        deps: SessionDeps,
     ) -> Self {
         Self {
-            source,
-            task_id,
+            params,
             cancel_token,
-            max_retries,
-            retry_interval,
-            login_timeout,
-            profile_id,
-            worker_config,
             result_slot,
             attempt_cancel_id,
             shutdown_token,
             cancel_reason,
-            bridge,
-            monitor,
-            config_service,
-            status_manager,
-            history_service,
-            metrics,
+            deps,
             state: StdMutex::new(LoginState::Idle),
         }
     }
@@ -244,24 +233,17 @@ impl LoginSession {
     pub async fn run(self) {
         let session_start = Instant::now();
         *recover_lock(&self.state) = LoginState::Running;
-        self.status_manager.merge(PartialSnapshot::Login {
+        self.deps.status_manager.merge(PartialSnapshot::Login {
             status: LoginStatus::Running,
-            source: Some(self.source),
+            source: Some(self.params.source),
             message: Some("登录中...".into()),
             retry_count: 0,
         });
 
-        let bridge = match &self.bridge {
-            Some(b) => b.clone(),
-            None => {
-                warn!("LoginSession 缺少 BridgeSupervisor，无法执行登录");
-                self.finish_with_failure(session_start, 0, "Bridge 未初始化，无法执行登录".into())
-                    .await;
-                return;
-            }
-        };
+        // A-2：依赖 trait 化且非 Option——编排器构造会话时必然注入
+        let bridge = self.deps.bridge.clone();
 
-        let total_attempts = self.max_retries + 1;
+        let total_attempts = self.params.max_retries + 1;
         let mut attempts_used: u32 = 0;
 
         loop {
@@ -273,7 +255,7 @@ impl LoginSession {
             }
 
             // 会话总超时检查
-            if session_start.elapsed() > self.login_timeout {
+            if session_start.elapsed() > self.params.login_timeout {
                 if let Some(cid) = self.attempt_cancel_id.load_full() {
                     bridge.cancel(cid.as_str());
                 }
@@ -288,22 +270,22 @@ impl LoginSession {
                 .store(Some(Arc::new(cancel_id.clone())));
 
             let attempt_no = attempts_used + 1;
-            self.status_manager.merge(PartialSnapshot::Login {
+            self.deps.status_manager.merge(PartialSnapshot::Login {
                 status: LoginStatus::Running,
-                source: Some(self.source),
+                source: Some(self.params.source),
                 message: Some(format!("尝试 {attempt_no}/{total_attempts}")),
                 retry_count: attempts_used,
             });
 
             // 根据来源选择 Bridge 命令
-            let method = match self.source {
+            let method = match self.params.source {
                 LoginSource::Browser => "execute_browser_task",
                 _ => "execute_login_attempt",
             };
 
-            let mut params = self.worker_config.clone();
+            let mut params = self.params.worker_config.clone();
             params["cancel_id"] = json!(cancel_id.clone());
-            if let Some(tid) = &self.task_id {
+            if let Some(tid) = &self.params.task_id {
                 params["task_id"] = json!(tid.clone());
             }
 
@@ -317,7 +299,7 @@ impl LoginSession {
             // biased 保证取消类信号先于 execute/timeout 生效，避免取消被延迟。
             let exec = {
                 let ct = self.cancel_token.clone();
-                let remaining = self.login_timeout.saturating_sub(session_start.elapsed());
+                let remaining = self.params.login_timeout.saturating_sub(session_start.elapsed());
                 tokio::select! {
                     biased;
                     _ = ct.cancelled() => {
@@ -365,7 +347,7 @@ impl LoginSession {
             // 分类结果：可重试但重试预算已耗尽时归入 Exhausted（避免进入 try_retry）
             // 后再次判断，保持"预算耗尽"这一决策与 classify 一起表达
             let action = classify(structured.outcome);
-            let action = if action == ResultAction::Retry && attempts_used >= self.max_retries {
+            let action = if action == ResultAction::Retry && attempts_used >= self.params.max_retries {
                 ResultAction::Exhausted
             } else {
                 action
@@ -470,7 +452,7 @@ impl LoginSession {
                         attempts_used,
                         format!(
                             "重试耗尽（共 {} 次）: {}{}",
-                            self.max_retries,
+                            self.params.max_retries,
                             structured.message,
                             dialog_note(&structured.data)
                         ),
@@ -491,13 +473,13 @@ impl LoginSession {
         attempts_used: &mut u32,
         session_start: Instant,
     ) -> bool {
-        if *attempts_used >= self.max_retries {
+        if *attempts_used >= self.params.max_retries {
             self.finish_with_failure(
                 session_start,
                 *attempts_used,
                 format!(
                     "重试耗尽（共 {} 次）: {}{}",
-                    self.max_retries,
+                    self.params.max_retries,
                     structured.message,
                     dialog_note(&structured.data)
                 ),
@@ -509,10 +491,10 @@ impl LoginSession {
         *recover_lock(&self.state) = LoginState::Retrying {
             attempt: *attempts_used,
         };
-        self.status_manager.merge(PartialSnapshot::Login {
+        self.deps.status_manager.merge(PartialSnapshot::Login {
             status: LoginStatus::Running,
-            source: Some(self.source),
-            message: Some(format!("重试中 {attempts_used}/{}", self.max_retries)),
+            source: Some(self.params.source),
+            message: Some(format!("重试中 {attempts_used}/{}", self.params.max_retries)),
             retry_count: *attempts_used,
         });
         if should_force_recycle(structured.outcome) {
@@ -520,12 +502,10 @@ impl LoginSession {
             // 下一次 bridge.execute() 内部的 ensure_worker 会自动重新 spawn。
             // 同步 await（而非 spawn）确保 kill 在重试间隔之前完成，避免下一轮
             // ensure_worker 复用即将被 kill 的 Worker（force_recycle 与 retry 竞态）。
-            if let Some(b) = &self.bridge {
-                warn!("登录结果 {:?} 触发 Worker 强制回收", structured.outcome);
-                b.force_recycle().await;
-            }
+            warn!("登录结果 {:?} 触发 Worker 强制回收", structured.outcome);
+            self.deps.bridge.force_recycle().await;
         }
-        let retry_interval = self.retry_interval.max(Duration::from_secs(1));
+        let retry_interval = self.params.retry_interval.max(Duration::from_secs(1));
         let ct = self.cancel_token.clone();
         tokio::select! {
             biased;
@@ -555,7 +535,7 @@ impl LoginSession {
     /// 声明时 Worker 已用变量真值判定过成功，登录路径应跳过网络检测兜底
     /// （对齐原项目 v4.2.3 `login_attempt` 的 `has_explicit_condition` 分支）。
     fn has_explicit_success_condition(&self) -> bool {
-        self.worker_config
+        self.params.worker_config
             .get("task_config")
             .and_then(|t| t.get("success_condition"))
             .and_then(|v| v.as_str())
@@ -571,13 +551,10 @@ impl LoginSession {
     /// 与老实现 `BrowserTaskRunner._network_detection_check` 等价：防止 Worker 步骤
     /// 全部成功但页面实际未登录成功（如填入字面量 `{{USERNAME}}` 却没点登录按钮）。
     async fn verify_network_after_login(&self) -> bool {
-        let Some(monitor) = self.monitor.as_ref() else {
-            warn!("MonitorService 未注入，跳过登录后网络验证（按失败处理）");
-            return false;
-        };
+        let monitor = &self.deps.monitor;
         // 登录后等待 portal 生效的延迟（可配置，默认 5s）
         let delay = self
-            .config_service
+            .deps.config_service
             .runtime()
             .load()
             .monitor
@@ -615,7 +592,7 @@ impl LoginSession {
         LoginResult {
             success,
             message,
-            source: self.source,
+            source: self.params.source,
             duration: start.elapsed(),
             attempts: attempts_used + 1,
         }
@@ -629,7 +606,7 @@ impl LoginSession {
         LoginResult {
             success: false,
             message: reason,
-            source: self.source,
+            source: self.params.source,
             duration: start.elapsed(),
             attempts: attempts_used + 1,
         }
@@ -640,7 +617,7 @@ impl LoginSession {
         self.result_slot.set_result(result.clone());
 
         // 统计登录终态指标
-        if let Some(m) = &self.metrics {
+        if let Some(m) = &self.deps.metrics {
             match history {
                 HistoryResult::Success => m.inc_login_success(),
                 HistoryResult::Failed => m.inc_login_failure(),
@@ -653,7 +630,7 @@ impl LoginSession {
             HistoryResult::Cancelled => (LoginStatus::Cancelled, result.message.clone()),
             HistoryResult::Failed => (LoginStatus::Failed, result.message.clone()),
         };
-        self.status_manager.merge(PartialSnapshot::Login {
+        self.deps.status_manager.merge(PartialSnapshot::Login {
             status,
             source: None,
             message: Some(msg),
@@ -663,12 +640,12 @@ impl LoginSession {
         let entry = LoginHistoryEntry {
             timestamp: chrono::Local::now(),
             source: result.source,
-            profile_id: self.profile_id.clone(),
+            profile_id: self.params.profile_id.clone(),
             result: history,
             message: result.message.clone(),
             duration_secs: result.duration.as_secs_f64(),
         };
-        if let Err(e) = self.history_service.record(&entry).await {
+        if let Err(e) = self.deps.history_service.record(&entry).await {
             warn!("登录历史写入失败: {e}");
         }
 
@@ -685,7 +662,8 @@ impl LoginSession {
         // 会话内重试复用同一浏览器，终态即关闭；Worker 进程保留，下次登录由
         // ensure_browser 重建。进程已被回收（force_recycle / 空闲超时）时跳过，
         // 避免仅为关浏览器而重新 spawn 一个 Worker。
-        if let Some(b) = &self.bridge {
+        {
+            let b = &self.deps.bridge;
             if b.has_live_worker() {
                 // 超时与 Python 侧 close_browser 内部超时（8s）对齐：
                 // 命令级超时兜底由 bridge.execute_with_timeout 负责，失败仅告警不阻塞收尾
@@ -776,6 +754,7 @@ impl LoginSession {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
     use super::*;
     use crate::bridge::Outcome;
 
@@ -913,5 +892,193 @@ mod tests {
     fn test_dialog_note_ignores_non_string_entries() {
         let data = serde_json::json!({ "dialogs": [1, true, "登录成功！"] });
         assert_eq!(dialog_note(&data), "；页面提示: 登录成功！");
+    }
+
+    // ============ A-2：BridgeApi trait 化后的状态机单测 ============
+
+    use crate::bridge::BridgeError;
+    use crate::login::session::{SessionDeps, SessionParams};
+    use std::collections::VecDeque;
+
+    /// 脚本化 mock Bridge：按序回放预设响应，记录调用次数
+    struct ScriptedBridge {
+        /// 队列元素：(success, outcome_value, message)
+        script: std::sync::Mutex<VecDeque<(bool, &'static str, &'static str)>>,
+        /// 已调用的方法名（诊断）
+        methods: std::sync::Mutex<Vec<String>>,
+        calls: std::sync::atomic::AtomicU32,
+        recycled: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::bridge::BridgeApi for ScriptedBridge {
+        async fn execute(
+            &self,
+            _method: &str,
+            _params: Value,
+        ) -> Result<crate::bridge::IpcResponse, BridgeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.methods.lock().unwrap().push(_method.to_string());
+            let (success, outcome, message) = match self.script.lock().unwrap().pop_front() {
+                Some(v) => v,
+                None => panic!("脚本耗尽，已调用: {:?}", self.methods.lock().unwrap()),
+            };
+            Ok(crate::bridge::IpcResponse {
+                id: 1,
+                result: crate::bridge::IpcResult {
+                    success,
+                    data: serde_json::json!({
+                        "outcome": outcome,
+                        "message": message,
+                        "duration_ms": 1,
+                    }),
+                    error: None,
+                },
+            })
+        }
+
+        fn cancel(&self, _cancel_id: &str) {}
+
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: Value,
+            _timeout: Duration,
+        ) -> Result<crate::bridge::IpcResponse, BridgeError> {
+            self.execute(method, params).await
+        }
+
+        async fn force_recycle(&self) {
+            self.recycled.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn has_live_worker(&self) -> bool {
+            false
+        }
+
+        async fn recycle_if_running(&self) {}
+
+        async fn shutdown(&self) {}
+    }
+
+    /// 构造带脚本 Bridge 的会话依赖集（真实 ConfigService/StatusManager/History）
+    async fn make_deps(bridge: Arc<ScriptedBridge>) -> SessionDeps {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
+        let config = ConfigService::new(dir.path().to_path_buf(), reload_tx)
+            .await
+            .expect("ConfigService 构造失败");
+        SessionDeps {
+            bridge,
+            monitor: Arc::new(
+                crate::monitor::MonitorService::new(
+                    config.clone(),
+                    crate::network::detect::create_detector(),
+                    None,
+                    Some(crate::utils::metrics::Metrics::new()),
+                )
+                .expect("MonitorService 构造失败"),
+            ),
+            config_service: config,
+            status_manager: Arc::new(StatusManager::new()),
+            history_service: Arc::new(LoginHistoryService::new(dir.path())),
+            metrics: None,
+        }
+    }
+
+    fn make_params() -> SessionParams {
+        SessionParams {
+            source: LoginSource::Auto,
+            task_id: None,
+            max_retries: 2,
+            retry_interval: Duration::from_secs(0),
+            login_timeout: Duration::from_secs(30),
+            profile_id: "default".to_string(),
+            worker_config: serde_json::json!({}),
+        }
+    }
+
+    /// 可重试失败持续到预算耗尽：验证重试次数与终态 Failed
+    ///
+    /// 注：Success 终态依赖登录后真实网络验证（MonitorService 探测 Online），
+    /// 测试环境无法稳定通过，故以「可重试失败耗尽预算」路径覆盖 Retry 分支。
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_exhaustion_via_mock_bridge() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (true, "selector_failed", "按钮未找到"),
+                (true, "selector_failed", "按钮未找到"),
+                (true, "selector_failed", "按钮未找到"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner {
+                result_tx,
+            }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        let mut result_rx = result_rx;
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            3,
+            "max_retries=2 应共尝试 3 次"
+        );
+        assert_eq!(
+            bridge.recycled.load(Ordering::SeqCst),
+            0,
+            "SelectorFailed 不应触发 Worker 回收"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert!(!result.success, "预算耗尽应为失败终态");
+        assert_eq!(result.attempts, 3);
+        assert!(result.message.contains("重试耗尽"));
+    }
+
+    /// UnknownError 终态：不重试、不回收（G1 语义改齐的回归验证）
+    #[tokio::test(start_paused = true)]
+    async fn test_unknown_error_is_terminal_without_recycle() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (true, "unknown_error", "意外错误"),
+                (true, "success", "不应到达"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner {
+                result_tx,
+            }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        let mut result_rx = result_rx;
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            1,
+            "UnknownError 必须立即终态，不得重试"
+        );
+        assert_eq!(bridge.recycled.load(Ordering::SeqCst), 0);
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert!(!result.success);
     }
 }

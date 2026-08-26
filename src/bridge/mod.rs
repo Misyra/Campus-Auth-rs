@@ -73,6 +73,17 @@ pub trait BridgeApi: Send + Sync {
     async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError>;
     /// 取消已注册 cancel_id 的在途命令。
     fn cancel(&self, cancel_id: &str);
+    /// 带超时执行 Worker 命令（自生成 cancel_id，超时后可经 Cancel 立即打断）。
+    async fn execute_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<IpcResponse, BridgeError>;
+    /// 强制回收当前 Worker（kill 子进程并标记 Error，下次请求重新 spawn）。
+    async fn force_recycle(&self);
+    /// 是否存在存活 Worker 子进程。
+    fn has_live_worker(&self) -> bool;
     /// 若 Worker 正在运行，则回收它以便下次请求按最新环境重新启动。
     async fn recycle_if_running(&self);
     /// 优雅关闭 Worker 与 Supervisor。
@@ -94,6 +105,23 @@ impl BridgeApi for BridgeSupervisor {
 
     fn cancel(&self, cancel_id: &str) {
         BridgeSupervisor::cancel(self, cancel_id);
+    }
+
+    async fn execute_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<IpcResponse, BridgeError> {
+        BridgeSupervisor::execute_with_timeout(self, method, params, timeout).await
+    }
+
+    async fn force_recycle(&self) {
+        BridgeSupervisor::force_recycle(self).await
+    }
+
+    fn has_live_worker(&self) -> bool {
+        BridgeSupervisor::has_live_worker(self)
     }
 
     async fn recycle_if_running(&self) {

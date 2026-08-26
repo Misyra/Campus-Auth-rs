@@ -213,6 +213,21 @@ mod tests {
             self.0.lock().unwrap().cancelled.push(cancel_id.to_string());
         }
 
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: Value,
+            _timeout: std::time::Duration,
+        ) -> Result<IpcResponse, BridgeError> {
+            self.execute(method, params).await
+        }
+
+        async fn force_recycle(&self) {}
+
+        fn has_live_worker(&self) -> bool {
+            false
+        }
+
         async fn recycle_if_running(&self) {
             self.0.lock().unwrap().recycled += 1;
         }

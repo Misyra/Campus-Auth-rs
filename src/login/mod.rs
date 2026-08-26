@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::bridge::BridgeSupervisor;
+
 use crate::config::ConfigService;
 use crate::config::runtime::ProfileSnapshot;
 use crate::config::runtime::RuntimeConfig;
@@ -426,24 +427,28 @@ impl LoginOrchestrator {
             .await;
 
         let session = LoginSession::new(
-            source,
-            effective_task_id,
+            session::SessionParams {
+                source,
+                task_id: effective_task_id,
+                max_retries: rt.retry.max_retries,
+                retry_interval: Duration::from_secs(rt.retry.retry_interval as u64),
+                login_timeout: Duration::from_secs(rt.browser.login_timeout as u64),
+                profile_id: profile.id.clone(),
+                worker_config,
+            },
             cancel_token.clone(),
-            rt.retry.max_retries,
-            Duration::from_secs(rt.retry.retry_interval as u64),
-            Duration::from_secs(rt.browser.login_timeout as u64),
-            profile.id.clone(),
-            worker_config,
             result_slot,
             attempt_cancel_id.clone(),
             shutdown_token,
             cancel_reason.clone(),
-            Some(self.bridge.clone()),
-            Some(self.monitor.clone()),
-            self.config.clone(),
-            self.status.clone(),
-            self.history.clone(),
-            self.metrics.clone(),
+            session::SessionDeps {
+                bridge: self.bridge.clone(),
+                monitor: self.monitor.clone(),
+                config_service: self.config.clone(),
+                status_manager: self.status.clone(),
+                history_service: self.history.clone(),
+                metrics: self.metrics.clone(),
+            },
         );
 
         // 写入活跃会话；若抢占等待期间已有并发会话写入，则放弃本会话，避免泄漏
