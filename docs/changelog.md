@@ -1,5 +1,37 @@
 # 更新日志
 
+## 开发中（2026-08-26 第十二轮：C 组收尾 — A-4/A-5/B3 根治 + 小尾巴五件）
+
+> `docs/review-2026-08-24.md` C 组计划四个批次全部落地（`af249e1` / `11c2233` / `207d9cd` / `5505faa`）。
+
+### A-4 孤儿清理降频 + 防护（af249e1）
+
+- 决策：Toolhelp32 替换 PowerShell 的原设想**否决**——现清理依赖 CommandLine 匹配区分 Playwright Chromium 与用户自装 Chrome，快照拿不到命令行，纯替换有误杀风险
+- 落地：清理从「每次 Worker spawn/退出都跑」降频为「Supervisor 首次 spawn 前 + 崩溃路径」；PowerShell 枚举统一包 5s 超时防 CIM 卡死拖住 spawn/恢复流程
+
+### 批次六：小尾巴五件（11c2233）
+
+- `PerProbeDetail::new` 构造器收敛 probes.rs 内联构造 ×8
+- scripts 目录扫描单次读盘（原 read_type + read_summary 各完整解析一次）
+- 删除无调用方的 `SchedulerApi::history_dir` trait 方法
+- `parse_host_port` 拒绝裸 IPv6 无端口输入（原 `"::1"` 被误拆为 `(":" , 1)` 还能通过校验）
+- 前端新增 IconApp 组件收敛高频重复 SVG 图标（42 处 ×14 文件）；壁纸下载弹窗迁公共 Modal 并清理手搓遮罩样式
+
+### A-5 system.rs 按域拆分（207d9cd）
+
+- 背景图域迁 `routes/background.rs`、卸载域迁 `routes/uninstall.rs`（1103→627 行）
+- 最后一个 container 旁路关闭：`task_writing_guide` 改 `State<Arc<dyn ConfigApi>>`，全路由层 `state.container` 触达归零
+
+### B3 根治：调试会话存活期纳入槽位（5505faa）
+
+- `debug_start` 成功后会话槽位保持 Debug 态直至 stop/失败/进程退出：命令间隙自动登录不再能插入与调试共用 `_page`（此前 Rust 槽位仅覆盖命令在途窗口）；空闲计时器存活期不启动，调试静置不再被回收
+- 逃逸路径保留：登录抢占超预算后 force_recycle 兜底可打断僵死调试会话；Worker 崩溃/优雅关闭同步清除断开标记
+- 实现：转发 task 在结果已知后经 `execute_debug_settle` 纯函数结算开合，守卫按开合语义分流（`debug_guard_cleanup`），均可无浏览器直测（+7 测试）
+
+### 验证
+
+- clippy `-D warnings` 双 feature 零警告；cargo test 479 lib + 14 集成全过；pytest 82 全过；前端构建通过
+
 ## 开发中（2026-08-26 第十一轮：全库审查修复 — R/F/G/A 四组 + B 组二轮增补）
 
 > 来源：`docs/review-2026-08-24.md` 执行计划（7 路并行模块审查 → 逐条核实，47 条确认 40 / 部分成立 6 / 不成立 1）
