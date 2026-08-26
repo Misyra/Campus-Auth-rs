@@ -135,6 +135,12 @@ pub struct StatusSnapshot {
     pub scheduler_next_fire_at: Option<String>,
     /// 调度器管理的任务数量
     pub scheduler_task_count: usize,
+    /// 累计网络检测次数（源自 Metrics::probe_total，由 Engine/监测循环递增；
+    /// 接线完成前恒为 0）
+    pub probe_total: u64,
+    /// 累计登录尝试次数（源自 Metrics::login_total，由 LoginOrchestrator 递增；
+    /// 接线完成前恒为 0）
+    pub login_total: u64,
 }
 
 impl Default for StatusSnapshot {
@@ -160,6 +166,8 @@ impl Default for StatusSnapshot {
             scheduler_running: false,
             scheduler_next_fire_at: None,
             scheduler_task_count: 0,
+            probe_total: 0,
+            login_total: 0,
         }
     }
 }
@@ -231,6 +239,16 @@ pub enum PartialSnapshot {
         /// 任务数量
         task_count: usize,
     },
+    /// 累计指标更新（probe_total / login_total，取自 `Metrics` 原子计数器）
+    ///
+    /// 由 Engine（每次网络检测后）与 LoginOrchestrator（每次登录尝试后）
+    /// 推送当前计数器值；合并语义为直接覆盖（计数器只增，覆盖即最新值）。
+    Totals {
+        /// 累计网络检测次数（Metrics::probe_total 当前值）
+        probe_total: u64,
+        /// 累计登录尝试次数（Metrics::login_total 当前值）
+        login_total: u64,
+    },
 }
 
 /// 将单个 [`PartialSnapshot`] 应用到快照上（就地修改）
@@ -291,6 +309,13 @@ pub fn apply_partial(snapshot: &mut StatusSnapshot, partial: &PartialSnapshot) {
             snapshot.scheduler_next_fire_at = next_fire_at.clone();
             snapshot.scheduler_task_count = *task_count;
         }
+        PartialSnapshot::Totals {
+            probe_total,
+            login_total,
+        } => {
+            snapshot.probe_total = *probe_total;
+            snapshot.login_total = *login_total;
+        }
     }
 }
 
@@ -349,7 +374,12 @@ mod tests {
     #[test]
     fn test_apply_worker_environment_update_partials() {
         let mut s = StatusSnapshot::default();
-        apply_partial(&mut s, &PartialSnapshot::Worker { state: WorkerStatus::Busy });
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Worker {
+                state: WorkerStatus::Busy,
+            },
+        );
         assert_eq!(s.worker_state, WorkerStatus::Busy);
 
         apply_partial(
@@ -362,7 +392,10 @@ mod tests {
                 }),
             },
         );
-        assert_eq!(s.environment_progress.as_ref().map(|p| p.phase.as_str()), Some("uv"));
+        assert_eq!(
+            s.environment_progress.as_ref().map(|p| p.phase.as_str()),
+            Some("uv")
+        );
         assert_eq!(s.environment_progress.as_ref().map(|p| p.percent), Some(50));
 
         apply_partial(&mut s, &PartialSnapshot::Environment { progress: None });
@@ -376,7 +409,10 @@ mod tests {
     #[test]
     fn test_apply_profile_monitor_uptime_scheduler_partials() {
         let mut s = StatusSnapshot::default();
-        apply_partial(&mut s, &PartialSnapshot::ActiveProfile { id: "dorm".into() });
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::ActiveProfile { id: "dorm".into() },
+        );
         assert_eq!(s.active_profile, "dorm");
 
         apply_partial(&mut s, &PartialSnapshot::MonitorEnabled { enabled: false });
@@ -394,7 +430,10 @@ mod tests {
             },
         );
         assert!(s.scheduler_running);
-        assert_eq!(s.scheduler_next_fire_at.as_deref(), Some("2026-08-14T00:00:00Z"));
+        assert_eq!(
+            s.scheduler_next_fire_at.as_deref(),
+            Some("2026-08-14T00:00:00Z")
+        );
         assert_eq!(s.scheduler_task_count, 5);
     }
 
@@ -406,14 +445,56 @@ mod tests {
         apply_partial(&mut s, &PartialSnapshot::Uptime(20));
         assert_eq!(s.uptime_seconds, 20, "后写应覆盖先写");
 
-        apply_partial(
-            &mut s,
-            &PartialSnapshot::ActiveProfile { id: "a".into() },
-        );
-        apply_partial(
-            &mut s,
-            &PartialSnapshot::ActiveProfile { id: "b".into() },
-        );
+        apply_partial(&mut s, &PartialSnapshot::ActiveProfile { id: "a".into() });
+        apply_partial(&mut s, &PartialSnapshot::ActiveProfile { id: "b".into() });
         assert_eq!(s.active_profile, "b");
+    }
+
+    /// Totals 变体：覆盖累计指标字段，不触碰其他字段
+    #[test]
+    fn test_apply_totals_partial() {
+        let mut s = StatusSnapshot::default();
+        assert_eq!(s.probe_total, 0);
+        assert_eq!(s.login_total, 0);
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Totals {
+                probe_total: 42,
+                login_total: 7,
+            },
+        );
+        assert_eq!(s.probe_total, 42);
+        assert_eq!(s.login_total, 7);
+        // 计数器语义为「覆盖为最新值」：再次推送更大值直接覆盖
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Totals {
+                probe_total: 43,
+                login_total: 8,
+            },
+        );
+        assert_eq!(s.probe_total, 43);
+        assert_eq!(s.login_total, 8);
+        // 无关字段保持默认，不被覆盖
+        assert_eq!(s.uptime_seconds, 0);
+        assert_eq!(s.login_status, LoginStatus::Idle);
+    }
+
+    /// 序列化契约：probe_total / login_total 字段名精确且默认输出（非 Option、不省略）
+    #[test]
+    fn test_snapshot_serializes_total_fields() {
+        let s = StatusSnapshot::default();
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["probe_total"], serde_json::json!(0));
+        assert_eq!(json["login_total"], serde_json::json!(0));
+
+        let s = StatusSnapshot {
+            probe_total: 123,
+            login_total: 45,
+            ..StatusSnapshot::default()
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["probe_total"], serde_json::json!(123));
+        assert_eq!(json["login_total"], serde_json::json!(45));
     }
 }

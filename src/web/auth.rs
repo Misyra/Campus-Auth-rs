@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use axum::extract::State;
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -28,7 +28,11 @@ const AUTH_TOKEN_FILE: &str = ".auth_token";
 
 /// 生成 64 位十六进制随机 token（两个 UUIDv4 拼接，复用现有 uuid 依赖）
 fn generate_token() -> String {
-    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// 加载（或首次生成）API 鉴权 token
@@ -39,8 +43,8 @@ pub fn load_or_create_token(base_path: &Path) -> std::io::Result<String> {
     if let Ok(text) = std::fs::read_to_string(&path) {
         let token = text.trim();
         // 合法形态：32~128 位十六进制
-        let valid = (32..=128).contains(&token.len())
-            && token.bytes().all(|b| b.is_ascii_hexdigit());
+        let valid =
+            (32..=128).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_hexdigit());
         if valid {
             return Ok(token.to_string());
         }
@@ -84,6 +88,26 @@ fn unauthorized() -> Response {
         header::HeaderValue::from_static("application/json"),
     );
     resp
+}
+
+/// 常量时间字符串比较（token 专用，防时间侧信道）
+///
+/// `==` 对字符串逐字节短路比较：token 前缀匹配越多耗时越长，攻击者可据此
+/// 逐段猜解。本实现把长度差异与逐字节 XOR 差异累积到同一个 `diff`，
+/// 无论内容差异出现在第几个字节，循环都完整走完最长长度，耗时只与
+/// 输入长度相关、与内容无关。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    // 长度差异用 usize 记录（避免截断为 u8 后恰好归零），不提前返回，
+    // 保证长度不同时也走完整个循环
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        // 越界侧取 0：另一侧的非零字节必然污染 diff
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= (x ^ y) as usize;
+    }
+    diff == 0
 }
 
 /// 从 query string 提取 `token=` 参数（token 为纯十六进制，无需 URL 解码）
@@ -150,7 +174,8 @@ pub async fn auth_middleware(
     };
 
     match provided {
-        Some(token) if token == expected => next.run(req).await,
+        // 常量时间比较：防止逐字节短路比较泄露 token 前缀匹配程度
+        Some(token) if constant_time_eq(token, expected) => next.run(req).await,
         _ => unauthorized(),
     }
 }
@@ -175,6 +200,30 @@ mod tests {
         assert_eq!(token_from_query(Some("token=&foo=1")), None);
         assert_eq!(token_from_query(Some("foo=1")), None);
         assert_eq!(token_from_query(None), None);
+    }
+
+    /// 常量时间比较：相等 / 不等 / 大小写敏感 / 长度差异
+    #[test]
+    fn test_constant_time_eq() {
+        // 完全相等 → true
+        assert!(constant_time_eq(TEST_TOKEN, TEST_TOKEN));
+        assert!(constant_time_eq("", ""));
+        // 内容不等 → false（含仅首字节/末字节不同的最坏情形）
+        assert!(!constant_time_eq(
+            &format!("X{}", &TEST_TOKEN[1..]),
+            TEST_TOKEN
+        ));
+        assert!(!constant_time_eq(
+            &format!("{}X", &TEST_TOKEN[..TEST_TOKEN.len() - 1]),
+            TEST_TOKEN
+        ));
+        // 大小写敏感：十六进制 token 中 a 与 A 必须不等
+        assert!(!constant_time_eq("abcdef0123456789", "ABCDEF0123456789"));
+        // 长度不同 → false（长度差异不得被截断归零，长输入覆盖短输入）
+        assert!(!constant_time_eq("short", TEST_TOKEN));
+        assert!(!constant_time_eq(TEST_TOKEN, "short"));
+        // 互为前缀也不相等
+        assert!(!constant_time_eq(TEST_TOKEN, &TEST_TOKEN[..16]));
     }
 
     /// load_or_create_token：首次生成 → 持久化复用 → 损坏时重建
@@ -227,7 +276,12 @@ mod tests {
         // 无 token → 401
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri("/api/ping").body(axum::body::Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ping")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
@@ -284,7 +338,12 @@ mod tests {
         // 静态资源（非 /api、/ws）→ 放行
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri("/index.html").body(axum::body::Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/index.html")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);

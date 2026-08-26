@@ -6,13 +6,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::{ConfigApi, ProfileApi};
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 
 /// GET /api/config — 获取当前全局设置
 ///
@@ -23,77 +23,79 @@ pub async fn get_settings(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let settings = config.load_settings_async().await;
-    let active_id = &settings.active_profile_id;
-    let profile = config.load_profile(active_id).unwrap_or_default();
-
-    // has_password 必须反映"密码可用"（能解密），而非仅"字段非空"。
-    // 否则密钥变更/格式不兼容时，前端误认为已保存 → 不重新输入 → 登录报缺少 password。
-    let has_password = if profile.password.is_empty() {
-        false
-    } else {
-        config.can_decrypt_password(&profile.password)
-    };
-
-    Ok(data(serde_json::json!({
-        "browser": settings.global.browser,
-        "monitor": monitor_backend_to_frontend(&settings.global.monitor),
-        "pause": settings.global.pause,
-        "logging": settings.global.logging,
-        "retry": settings.global.retry_settings,
-        "app_settings": settings.global.app,
-        "worker": settings.global.worker,
-        "updater": settings.global.updater,
-        "username": profile.username,
-        "auth_url": profile.auth_url,
-        "isp": profile.isp,
-        "carrier_custom": "",
-        "active_task": profile.active_task,
-        "has_password": has_password
-    })))
+    let profile = config
+        .load_profile(&settings.active_profile_id)
+        .unwrap_or_default();
+    let has_password = effective_has_password(config.as_ref(), &profile);
+    Ok(data(settings_flat_response(
+        &settings,
+        &profile,
+        has_password,
+    )))
 }
 
-/// PUT /api/config — 全量更新设置
+/// PUT /api/config — 保存设置（按扁平 payload 合并更新）
+///
+/// 前端对 /api/config 的唯一实际用法是发送与 GET 响应同形的扁平 payload。
+/// 旧实现把 body 按嵌套 `SettingsData` 反序列化，serde default 全兜底导致
+/// 扁平 payload 中未指定的字段被整体清成默认值（一次误调用即清空整份配置）。
+/// 现复用 PATCH 的扁平字段映射：PUT 语义从「全量替换」收敛为「合并更新」，
+/// 未指定字段保持原值，凭证照常写入活跃 Profile，响应与 GET/PATCH 一致。
 pub async fn put_settings(
     State(config): State<Arc<dyn ConfigApi>>,
+    State(profiles): State<Arc<dyn ProfileApi>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings: crate::config::SettingsData = serde_json::from_value(body)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    config.save_settings(&settings).await?;
-    config.reload().await?;
-    let updated = config.load_settings_async().await;
-    Ok(data(serde_json::to_value(updated)?))
+    let settings = apply_flat_settings_patch(&config, &profiles, &body).await?;
+    save_and_flat_response(&config, &settings).await
 }
 
 /// PATCH /api/config — 局部更新全局设置（合并后保存）
 ///
 /// 前端发送扁平结构 { browser, monitor, pause, logging, retry, app_settings, ... }
 /// 后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }
-/// 需要将前端的扁平 key 映射到 global 子结构下
+/// 扁平 key → global 子结构 / 活跃 Profile 的映射由
+/// [`apply_flat_settings_patch`] 统一实现（与 PUT 共用）
 pub async fn patch_settings(
     State(config): State<Arc<dyn ConfigApi>>,
     State(profiles): State<Arc<dyn ProfileApi>>,
     Json(patch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut current = config.load_settings_async().await;
-    let mut current_value = serde_json::to_value(&current)?;
+    let settings = apply_flat_settings_patch(&config, &profiles, &patch).await?;
+    save_and_flat_response(&config, &settings).await
+}
 
-    // 将前端的扁平字段映射到 global 子结构
+/// 将前端扁平 patch 合并进当前设置（PUT / PATCH /api/config 共用）
+///
+/// 返回合并后的 `SettingsData`（未落盘，由调用方保存）。
+/// 凭证字段（username/password/auth_url/isp/active_task）直接写入活跃 Profile。
+async fn apply_flat_settings_patch(
+    config: &Arc<dyn ConfigApi>,
+    profiles: &Arc<dyn ProfileApi>,
+    patch: &Value,
+) -> Result<crate::config::SettingsData, ApiError> {
+    let mut current_value = serde_json::to_value(config.load_settings_async().await)?;
+
     if let Some(obj) = patch.as_object() {
         let mut global_patch = serde_json::Map::new();
         let mut profile_patch = serde_json::Map::new();
         let mut other_patch = serde_json::Map::new();
 
         // 前端字段名 → 后端字段名映射
-        let field_map: std::collections::HashMap<&str, &str> = [
-            ("retry", "retry_settings"),
-            ("app_settings", "app"),
-        ]
-        .into_iter()
-        .collect();
+        let field_map: std::collections::HashMap<&str, &str> =
+            [("retry", "retry_settings"), ("app_settings", "app")]
+                .into_iter()
+                .collect();
 
         // 凭证字段属于 Profile 而非全局设置
-        let profile_keys = ["username", "password", "auth_url", "isp", "carrier_custom", "active_task"];
+        let profile_keys = [
+            "username",
+            "password",
+            "auth_url",
+            "isp",
+            "carrier_custom",
+            "active_task",
+        ];
 
         // 全局设置字段
         let global_keys = [
@@ -150,44 +152,66 @@ pub async fn patch_settings(
                 .and_then(|v| v.as_str())
                 .unwrap_or("default")
                 .to_string();
-            if let Ok(mut profile) = config.load_profile(&active_id) {
-                if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
-                    profile.username = username.to_string();
-                }
-                if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
-                    profile.auth_url = auth_url.to_string();
-                }
-                if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
-                    profile.isp = isp.to_string();
-                }
-                if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str()) {
-                    profile.active_task = active_task.to_string();
-                }
-                if let Some(password) = profile_patch.get("password") {
-                    let pwd_str = password.as_str().unwrap_or("");
-                    profile.password =
-                        profiles.save_password(Some(pwd_str), &profile.password);
-                }
-                config.save_profile(&profile).await?;
+            // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
+            // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
+            let mut profile = config.load_profile(&active_id).map_err(|e| {
+                ApiError::BadRequest(format!(
+                    "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
+                ))
+            })?;
+            if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
+                profile.username = username.to_string();
             }
+            if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
+                profile.auth_url = auth_url.to_string();
+            }
+            if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
+                profile.isp = isp.to_string();
+            }
+            if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str()) {
+                profile.active_task = active_task.to_string();
+            }
+            if let Some(password) = profile_patch.get("password") {
+                let pwd_str = password.as_str().unwrap_or("");
+                profile.password = profiles.save_password(Some(pwd_str), &profile.password);
+            }
+            config.save_profile(&profile).await?;
         }
     }
 
-    current = serde_json::from_value(current_value)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    config.save_settings(&current).await?;
+    serde_json::from_value(current_value).map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
+/// 保存设置 → reload → 回读设置与活跃 Profile → 构造扁平响应（PUT / PATCH 共用）
+///
+/// 与 GET /api/config 响应字节保持一致（现有前端契约护航）
+async fn save_and_flat_response(
+    config: &Arc<dyn ConfigApi>,
+    settings: &crate::config::SettingsData,
+) -> Result<Json<Value>, ApiError> {
+    config.save_settings(settings).await?;
     config.reload().await?;
     let settings = config.load_settings_async().await;
-    let active_id = &settings.active_profile_id;
-    let profile = config.load_profile(active_id).unwrap_or_default();
-    // has_password 应与 GET /api/config 保持一致：反映"密码可解密"而非"字段非空"，
-    // 否则密钥不可用时刚保存显示成功、刷新又提示需重输，造成体验割裂。
-    let has_password = if profile.password.is_empty() {
-        false
-    } else {
-        config.can_decrypt_password(&profile.password)
-    };
-    Ok(data(serde_json::json!({
+    let profile = config
+        .load_profile(&settings.active_profile_id)
+        .unwrap_or_default();
+    let has_password = effective_has_password(config.as_ref(), &profile);
+    Ok(data(settings_flat_response(
+        &settings,
+        &profile,
+        has_password,
+    )))
+}
+
+/// 构造设置扁平响应（GET / PUT / PATCH /api/config 与 GET /api/config/defaults 共用）
+///
+/// 字段顺序与历史响应完全一致；monitor 字段做后端→前端字段名映射
+fn settings_flat_response(
+    settings: &crate::config::SettingsData,
+    profile: &crate::config::ProfileData,
+    has_password: bool,
+) -> Value {
+    serde_json::json!({
         "browser": settings.global.browser,
         "monitor": monitor_backend_to_frontend(&settings.global.monitor),
         "pause": settings.global.pause,
@@ -202,7 +226,19 @@ pub async fn patch_settings(
         "carrier_custom": "",
         "active_task": profile.active_task,
         "has_password": has_password
-    })))
+    })
+}
+
+/// 计算 has_password：必须反映「密码可用」（能解密），而非仅「字段非空」
+///
+/// 否则密钥变更/格式不兼容时，前端误认为已保存 → 不重新输入 →
+/// 登录报缺少 password；刚保存显示成功、刷新又提示需重输，体验割裂。
+fn effective_has_password(config: &dyn ConfigApi, profile: &crate::config::ProfileData) -> bool {
+    if profile.password.is_empty() {
+        false
+    } else {
+        config.can_decrypt_password(&profile.password)
+    }
 }
 
 /// POST /api/config/reload — 重新加载配置
@@ -216,23 +252,12 @@ pub async fn reload_settings(
 /// GET /api/config/defaults — 返回配置默认值（扁平结构，与 GET /api/config 格式对齐）
 pub async fn get_config_defaults() -> Result<Json<Value>, ApiError> {
     let defaults = crate::config::SettingsData::default();
-    let g = &defaults.global;
-    Ok(data(serde_json::json!({
-        "browser": g.browser,
-        "monitor": monitor_backend_to_frontend(&g.monitor),
-        "pause": g.pause,
-        "logging": g.logging,
-        "retry": g.retry_settings,
-        "app_settings": g.app,
-        "worker": g.worker,
-        "updater": g.updater,
-        "username": "",
-        "auth_url": "",
-        "isp": "",
-        "carrier_custom": "",
-        "active_task": "",
-        "has_password": false
-    })))
+    // 默认 Profile 无凭证：username/auth_url/isp/active_task 均为空、has_password 恒 false
+    Ok(data(settings_flat_response(
+        &defaults,
+        &crate::config::ProfileData::default(),
+        false,
+    )))
 }
 
 /// GET /api/config/log-levels — 返回当前日志级别
@@ -240,7 +265,9 @@ pub async fn get_log_levels(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let settings = config.load_settings_async().await;
-    Ok(data(serde_json::json!({ "level": settings.global.logging.level })))
+    Ok(data(
+        serde_json::json!({ "level": settings.global.logging.level }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -309,7 +336,9 @@ pub async fn get_pure_mode(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let settings = config.load_settings_async().await;
-    Ok(data(serde_json::json!({ "enabled": settings.global.browser.pure_mode })))
+    Ok(data(
+        serde_json::json!({ "enabled": settings.global.browser.pure_mode }),
+    ))
 }
 
 /// POST /api/pure-mode — 切换纯净模式（toggle，无需请求体）
@@ -322,7 +351,9 @@ pub async fn set_pure_mode(
     let new_enabled = !settings.global.browser.pure_mode;
     settings.global.browser.pure_mode = new_enabled;
     config.save_settings(&settings).await?;
-    Ok(data(serde_json::json!({ "enabled": new_enabled, "message": "纯净模式已切换" })))
+    Ok(data(
+        serde_json::json!({ "enabled": new_enabled, "message": "纯净模式已切换" }),
+    ))
 }
 
 /// 后端 MonitorSettings → 前端 MonitorConfig 字段映射
@@ -335,11 +366,9 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
     let url_check_urls: Vec<String> = m
         .url_targets
         .iter()
-        .map(|url| {
-            match m.url_expected_responses.get(url) {
-                Some(expected) => format!("{}|{}", url, expected),
-                None => url.clone(),
-            }
+        .map(|url| match m.url_expected_responses.get(url) {
+            Some(expected) => format!("{}|{}", url, expected),
+            None => url.clone(),
         })
         .collect();
 
@@ -376,8 +405,10 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
             if let Some(s) = entry.as_str() {
                 if let Some((url, expected)) = s.split_once('|') {
                     url_targets.push(url.trim().to_string());
-                    url_expected_responses
-                        .insert(url.trim().to_string(), Value::String(expected.trim().to_string()));
+                    url_expected_responses.insert(
+                        url.trim().to_string(),
+                        Value::String(expected.trim().to_string()),
+                    );
                 } else {
                     url_targets.push(s.trim().to_string());
                 }
@@ -485,7 +516,10 @@ mod tests {
             "post_login_delay": 3,
         });
         let back = monitor_frontend_to_backend(&front);
-        assert_eq!(back["url_targets"], serde_json::json!(["http://a.com", "http://d.com"]));
+        assert_eq!(
+            back["url_targets"],
+            serde_json::json!(["http://a.com", "http://d.com"])
+        );
         assert_eq!(
             back["url_expected_responses"]["http://a.com"],
             serde_json::json!("OK")
@@ -497,7 +531,10 @@ mod tests {
 
     #[test]
     fn monitor_frontend_to_backend_ignores_non_object() {
-        assert_eq!(monitor_frontend_to_backend(&serde_json::json!(42)), serde_json::json!(42));
+        assert_eq!(
+            monitor_frontend_to_backend(&serde_json::json!(42)),
+            serde_json::json!(42)
+        );
     }
 
     #[test]
@@ -507,7 +544,10 @@ mod tests {
         let front = monitor_backend_to_frontend(&original);
         let back = monitor_frontend_to_backend(&front);
         assert_eq!(back["url_targets"], serde_json::json!(["http://a.com"]));
-        assert_eq!(back["url_expected_responses"]["http://a.com"], serde_json::json!("OK"));
+        assert_eq!(
+            back["url_expected_responses"]["http://a.com"],
+            serde_json::json!("OK")
+        );
     }
 
     // ============ json_merge ============
@@ -553,6 +593,8 @@ mod tests {
         profile: ProfileData,
         save_calls: usize,
         reload_calls: usize,
+        /// 打开后 load_profile 返回错误，用于验证凭证写入失败路径（G16）
+        profile_load_fails: bool,
     }
 
     /// 内存 ConfigApi：无需磁盘与完整 ServiceContainer
@@ -564,15 +606,22 @@ mod tests {
             self.0.lock().unwrap().settings.clone()
         }
 
-        async fn save_settings(&self, data: &crate::config::SettingsData) -> Result<(), ConfigError> {
+        async fn save_settings(
+            &self,
+            data: &crate::config::SettingsData,
+        ) -> Result<(), ConfigError> {
             let mut inner = self.0.lock().unwrap();
             inner.settings = data.clone();
             inner.save_calls += 1;
             Ok(())
         }
 
-        fn load_profile(&self, _id: &str) -> Result<ProfileData, ConfigError> {
-            Ok(self.0.lock().unwrap().profile.clone())
+        fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {
+            let inner = self.0.lock().unwrap();
+            if inner.profile_load_fails {
+                return Err(ConfigError::ProfileNotFound { id: id.to_string() });
+            }
+            Ok(inner.profile.clone())
         }
 
         async fn save_profile(&self, profile: &ProfileData) -> Result<(), ConfigError> {
@@ -631,9 +680,66 @@ mod tests {
                 gateway_ip: String::new(),
                 wifi_ssid: String::new(),
                 active_task: String::new(),
-                password_reinput_needed: false,
             },
             auto_switch: false,
+        }
+    }
+
+    /// 内存 ProfileApi：patch/put 凭证路径仅消费 save_password
+    struct MockProfileApi;
+
+    #[async_trait::async_trait]
+    impl ProfileApi for MockProfileApi {
+        fn list_profiles(&self) -> Vec<crate::config::ProfileSummary> {
+            Vec::new()
+        }
+        fn get_profile(&self, _id: &str) -> Result<ProfileData, ConfigError> {
+            Err(ConfigError::ProfileNotFound { id: "mock".into() })
+        }
+        async fn create_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn update_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn delete_profile(&self, _id: &str) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn switch_profile(&self, _id: &str) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        async fn set_auto_switch(&self, _enabled: bool) -> Result<(), ConfigError> {
+            Ok(())
+        }
+        fn detect_matching_profile(&self, _gateway_ip: &str, _ssid: &str) -> Option<String> {
+            None
+        }
+        fn save_password(&self, raw: Option<&str>, existing: &str) -> String {
+            match raw {
+                None | Some("") => existing.to_string(),
+                Some(s) => format!("ENC:mock:{s}"),
+            }
+        }
+    }
+
+    /// 双域 state：ConfigApi + ProfileApi 各自经 FromRef 委派提取
+    ///
+    /// put_settings / patch_settings 均声明双 State 依赖（凭证写入活跃 Profile）
+    #[derive(Clone)]
+    struct PatchTestState {
+        config: Arc<dyn ConfigApi>,
+        profiles: Arc<dyn ProfileApi>,
+    }
+
+    impl axum::extract::FromRef<PatchTestState> for Arc<dyn ConfigApi> {
+        fn from_ref(state: &PatchTestState) -> Self {
+            state.config.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<PatchTestState> for Arc<dyn ProfileApi> {
+        fn from_ref(state: &PatchTestState) -> Self {
+            state.profiles.clone()
         }
     }
 
@@ -643,14 +749,21 @@ mod tests {
             profile: ProfileData::default(),
             save_calls: 0,
             reload_calls: 0,
+            profile_load_fails: false,
         }));
-        let api: Arc<dyn ConfigApi> = Arc::new(MockConfigApi(inner.clone()));
+        let state = PatchTestState {
+            config: Arc::new(MockConfigApi(inner.clone())),
+            profiles: Arc::new(MockProfileApi),
+        };
         let app = axum::Router::new()
-            .route("/api/config", get(get_settings).put(put_settings))
+            .route(
+                "/api/config",
+                get(get_settings).put(put_settings).patch(patch_settings),
+            )
             .route("/api/config/log-levels", get(get_log_levels))
             .route("/api/config/log-level", axum::routing::put(set_log_level))
             .route("/api/pure-mode", get(get_pure_mode).post(set_pure_mode))
-            .with_state(api);
+            .with_state(state);
         (app, inner)
     }
 
@@ -685,7 +798,14 @@ mod tests {
         assert_eq!(d["username"], "user1");
         assert_eq!(d["has_password"], false);
         // 扁平结构包含各域
-        for key in ["browser", "monitor", "pause", "logging", "retry", "app_settings"] {
+        for key in [
+            "browser",
+            "monitor",
+            "pause",
+            "logging",
+            "retry",
+            "app_settings",
+        ] {
             assert!(d.get(key).is_some(), "缺少字段 {key}");
         }
     }
@@ -768,85 +888,12 @@ mod tests {
         assert!(inner.lock().unwrap().settings.global.browser.pure_mode);
     }
 
-    // ============ patch_settings（config + profiles 双 state 提取，M1） ============
-
-    /// 内存 ProfileApi：patch_settings 仅消费 save_password
-    struct MockProfileApi;
-
-    #[async_trait::async_trait]
-    impl ProfileApi for MockProfileApi {
-        fn list_profiles(&self) -> Vec<crate::config::ProfileSummary> {
-            Vec::new()
-        }
-        fn get_profile(&self, _id: &str) -> Result<ProfileData, ConfigError> {
-            Err(ConfigError::ProfileNotFound { id: "mock".into() })
-        }
-        async fn create_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
-            Ok(())
-        }
-        async fn update_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
-            Ok(())
-        }
-        async fn delete_profile(&self, _id: &str) -> Result<(), ConfigError> {
-            Ok(())
-        }
-        async fn switch_profile(&self, _id: &str) -> Result<(), ConfigError> {
-            Ok(())
-        }
-        async fn set_auto_switch(&self, _enabled: bool) -> Result<(), ConfigError> {
-            Ok(())
-        }
-        fn detect_matching_profile(&self, _gateway_ip: &str, _ssid: &str) -> Option<String> {
-            None
-        }
-        fn save_password(&self, raw: Option<&str>, existing: &str) -> String {
-            match raw {
-                None | Some("") => existing.to_string(),
-                Some(s) => format!("ENC:mock:{s}"),
-            }
-        }
-    }
-
-    /// 双域 state：ConfigApi + ProfileApi 各自经 FromRef 委派提取
-    #[derive(Clone)]
-    struct PatchTestState {
-        config: Arc<dyn ConfigApi>,
-        profiles: Arc<dyn ProfileApi>,
-    }
-
-    impl axum::extract::FromRef<PatchTestState> for Arc<dyn ConfigApi> {
-        fn from_ref(state: &PatchTestState) -> Self {
-            state.config.clone()
-        }
-    }
-
-    impl axum::extract::FromRef<PatchTestState> for Arc<dyn ProfileApi> {
-        fn from_ref(state: &PatchTestState) -> Self {
-            state.profiles.clone()
-        }
-    }
-
-    fn patch_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
-        let inner = Arc::new(std::sync::Mutex::new(MockInner {
-            settings: crate::config::SettingsData::default(),
-            profile: ProfileData::default(),
-            save_calls: 0,
-            reload_calls: 0,
-        }));
-        let state = PatchTestState {
-            config: Arc::new(MockConfigApi(inner.clone())),
-            profiles: Arc::new(MockProfileApi),
-        };
-        let app = axum::Router::new()
-            .route("/api/config", axum::routing::patch(patch_settings))
-            .with_state(state);
-        (app, inner)
-    }
+    // ============ patch_settings / put_settings 共用映射（双 state 提取，M1） ============
 
     /// 凭证字段路由到 Profile、密码走 save_password 语义、全局字段落 settings
     #[tokio::test]
     async fn test_patch_settings_routes_credentials_and_global() {
-        let (app, inner) = patch_app();
+        let (app, inner) = mock_app();
         let resp = app
             .oneshot(
                 Request::builder()
@@ -885,5 +932,156 @@ mod tests {
         assert_eq!(d["isp"], "cmcc");
         assert_eq!(d["carrier_custom"], "");
         assert_eq!(d["has_password"], true);
+    }
+
+    // ============ B4：PUT 扁平 payload 不得清空未指定字段 ============
+
+    /// PUT 扁平 payload：未指定字段保持原值（不清空），响应为扁平结构
+    #[tokio::test]
+    async fn test_put_settings_flat_payload_keeps_unspecified_fields() {
+        let (app, inner) = mock_app();
+        // 预置非默认值：pause.enabled=true、monitor.check_interval=120、username=orig
+        {
+            let mut g = inner.lock().unwrap();
+            g.settings.global.pause.enabled = true;
+            g.settings.global.monitor.check_interval = 120;
+            g.profile.username = "orig".into();
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "username": "alice" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let d = &v["data"];
+        let g = inner.lock().unwrap();
+        // 未指定字段保持原值：旧实现会被 serde default 清成默认值
+        assert!(g.settings.global.pause.enabled, "pause.enabled 不应被清空");
+        assert_eq!(
+            g.settings.global.monitor.check_interval, 120,
+            "monitor.check_interval 不应被清空"
+        );
+        // 指定字段生效：username 写入 Profile
+        assert_eq!(g.profile.username, "alice");
+        assert_eq!(g.save_calls, 1);
+        assert_eq!(g.reload_calls, 1);
+        // 响应与 GET/PATCH 同形（扁平结构 + 回显凭证）
+        assert_eq!(d["username"], "alice");
+        assert_eq!(d["pause"]["enabled"], true);
+        for key in [
+            "browser",
+            "monitor",
+            "logging",
+            "retry",
+            "app_settings",
+            "worker",
+            "updater",
+        ] {
+            assert!(d.get(key).is_some(), "PUT 响应缺少扁平字段 {key}");
+        }
+        assert!(
+            d.get("global").is_none(),
+            "PUT 响应不应再返回嵌套 SettingsData 结构"
+        );
+    }
+
+    /// PUT 不合法字段值返回 400（类型不匹配在合并反序列化时暴露）
+    #[tokio::test]
+    async fn test_put_settings_rejects_invalid_field_value() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "pause": { "enabled": "not-a-bool" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // 校验失败时不应落盘
+        assert_eq!(inner.lock().unwrap().save_calls, 0);
+    }
+
+    // ============ G16：profile 加载失败不得静默丢弃凭证修改 ============
+
+    /// 携带凭证字段的 PATCH 在 Profile 加载失败时返回 400，且全局设置不落盘
+    #[tokio::test]
+    async fn test_patch_settings_reports_profile_load_failure() {
+        let (app, inner) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            g.profile_load_fails = true;
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "username": "alice",
+                            "password": "plain-secret",
+                            "pause": { "enabled": true },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("加载失败"),
+            "错误消息应指明 profile 加载失败: {msg}"
+        );
+        assert!(msg.contains("凭证"), "错误消息应说明凭证修改未生效: {msg}");
+        // 凭证与全局设置均未落盘（不出现“部分成功”）
+        let g = inner.lock().unwrap();
+        assert_eq!(g.profile.username, "");
+        assert_eq!(g.profile.password, "");
+        assert!(!g.settings.global.pause.enabled);
+        assert_eq!(g.save_calls, 0);
+    }
+
+    /// PUT 同样走凭证路径：Profile 加载失败返回 400（与 PATCH 行为一致）
+    #[tokio::test]
+    async fn test_put_settings_reports_profile_load_failure() {
+        let (app, inner) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            g.profile_load_fails = true;
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "username": "alice" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(inner.lock().unwrap().save_calls, 0);
     }
 }

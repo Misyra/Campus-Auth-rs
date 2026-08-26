@@ -4,11 +4,11 @@
 //! `{ "error": { "code": "...", "message": "...", "details": {...} } }`。
 //! 禁止 `success` 字段。
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// 字段级校验错误
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +47,11 @@ pub fn data<T: Serialize>(payload: T) -> Json<Value> {
 }
 
 /// API 统一错误
+///
+/// 变体与 `code()` 错误码一一对应；仅保留实际被构造或属于文档化契约的
+/// 变体（历史死变体 BadCredential/AuthUrlUnreachable/NotImplemented/
+/// OperationCancelled/PortInUse/RateLimited 已删除：全仓零构造，
+/// openapi.json 与 docs/ 均无对应错误码契约）。
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// 请求参数错误（400）
@@ -67,34 +72,16 @@ pub enum ApiError {
     /// 服务不可用（503）
     #[error("{0}")]
     ServiceUnavailable(String),
-    /// 未实现（501）
-    #[error("{0}")]
-    NotImplemented(String),
-    /// 凭证无效（401）
-    #[error("{0}")]
-    BadCredential(String),
-    /// 认证地址不可达（503）
-    #[error("{0}")]
-    AuthUrlUnreachable(String),
     /// Worker 未安装（503）
     #[error("{0}")]
     WorkerNotInstalled(String),
     /// Worker 忙（409）
     #[error("{0}")]
     WorkerBusy(String),
-    /// 操作被取消（409）
-    #[error("{0}")]
-    OperationCancelled(String),
-    /// 端口被占用（409）
-    #[error("{0}")]
-    PortInUse(String),
-    /// 触发限流（429）
-    #[error("{0}")]
-    RateLimited(String),
 }
 
 impl ApiError {
-    /// 错误码（稳定的机器可读字符串，参见 data-models.md 错误码表）
+    /// 错误码（稳定的机器可读字符串，参见 openapi.json / docs 错误码表）
     pub fn code(&self) -> &'static str {
         match self {
             ApiError::BadRequest(_) => "BAD_REQUEST",
@@ -103,14 +90,8 @@ impl ApiError {
             ApiError::Validation(_) => "VALIDATION_ERROR",
             ApiError::Internal(_) => "INTERNAL_ERROR",
             ApiError::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
-            ApiError::NotImplemented(_) => "NOT_IMPLEMENTED",
-            ApiError::BadCredential(_) => "INVALID_CREDENTIAL",
-            ApiError::AuthUrlUnreachable(_) => "AUTH_URL_UNREACHABLE",
             ApiError::WorkerNotInstalled(_) => "WORKER_NOT_INSTALLED",
             ApiError::WorkerBusy(_) => "WORKER_BUSY",
-            ApiError::OperationCancelled(_) => "OPERATION_CANCELLED",
-            ApiError::PortInUse(_) => "PORT_IN_USE",
-            ApiError::RateLimited(_) => "RATE_LIMITED",
         }
     }
 
@@ -123,14 +104,8 @@ impl ApiError {
             ApiError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
-            ApiError::BadCredential(_) => StatusCode::UNAUTHORIZED,
-            ApiError::AuthUrlUnreachable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::WorkerNotInstalled(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::WorkerBusy(_) => StatusCode::CONFLICT,
-            ApiError::OperationCancelled(_) => StatusCode::CONFLICT,
-            ApiError::PortInUse(_) => StatusCode::CONFLICT,
-            ApiError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -167,7 +142,9 @@ impl From<crate::config::ConfigError> for ApiError {
     fn from(e: crate::config::ConfigError) -> Self {
         match e {
             crate::config::ConfigError::ConfigNotFound { .. }
-            | crate::config::ConfigError::ProfileNotFound { .. } => ApiError::NotFound(e.to_string()),
+            | crate::config::ConfigError::ProfileNotFound { .. } => {
+                ApiError::NotFound(e.to_string())
+            }
             crate::config::ConfigError::ProfileIdConflict { .. }
             | crate::config::ConfigError::CannotDeleteDefault => ApiError::Conflict(e.to_string()),
             crate::config::ConfigError::InvalidProfileId { .. } => {
@@ -277,9 +254,18 @@ mod tests {
     /// 全部变体 → HTTP 状态码映射正确性
     #[test]
     fn test_status_code_mapping() {
-        assert_eq!(ApiError::BadRequest("x".into()).status(), StatusCode::BAD_REQUEST);
-        assert_eq!(ApiError::NotFound("x".into()).status(), StatusCode::NOT_FOUND);
-        assert_eq!(ApiError::Conflict("x".into()).status(), StatusCode::CONFLICT);
+        assert_eq!(
+            ApiError::BadRequest("x".into()).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ApiError::NotFound("x".into()).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            ApiError::Conflict("x".into()).status(),
+            StatusCode::CONFLICT
+        );
         assert_eq!(
             ApiError::Validation(vec![]).status(),
             StatusCode::UNPROCESSABLE_ENTITY
@@ -292,20 +278,14 @@ mod tests {
             ApiError::ServiceUnavailable("x".into()).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(ApiError::NotImplemented("x".into()).status(), StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(ApiError::BadCredential("x".into()).status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            ApiError::AuthUrlUnreachable("x".into()).status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
         assert_eq!(
             ApiError::WorkerNotInstalled("x".into()).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(ApiError::WorkerBusy("x".into()).status(), StatusCode::CONFLICT);
-        assert_eq!(ApiError::OperationCancelled("x".into()).status(), StatusCode::CONFLICT);
-        assert_eq!(ApiError::PortInUse("x".into()).status(), StatusCode::CONFLICT);
-        assert_eq!(ApiError::RateLimited("x".into()).status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            ApiError::WorkerBusy("x".into()).status(),
+            StatusCode::CONFLICT
+        );
     }
 
     /// 错误码稳定且互不相同（前端按 code 分支）
@@ -318,30 +298,28 @@ mod tests {
             ApiError::Validation(vec![]),
             ApiError::Internal("".into()),
             ApiError::ServiceUnavailable("".into()),
-            ApiError::NotImplemented("".into()),
-            ApiError::BadCredential("".into()),
-            ApiError::AuthUrlUnreachable("".into()),
             ApiError::WorkerNotInstalled("".into()),
             ApiError::WorkerBusy("".into()),
-            ApiError::OperationCancelled("".into()),
-            ApiError::PortInUse("".into()),
-            ApiError::RateLimited("".into()),
         ]
         .iter()
         .map(|e| e.code())
         .collect();
         let unique: std::collections::HashSet<&&str> = codes.iter().collect();
         assert_eq!(unique.len(), codes.len(), "错误码必须唯一");
-        assert!(codes.contains(&"INVALID_CREDENTIAL"));
-        assert!(codes.contains(&"RATE_LIMITED"));
     }
 
     /// Validation 变体携带字段级 details 载荷
     #[test]
     fn test_validation_details() {
         let e = ApiError::Validation(vec![
-            FieldError { field: "name".into(), message: "必填".into() },
-            FieldError { field: "url".into(), message: "非法".into() },
+            FieldError {
+                field: "name".into(),
+                message: "必填".into(),
+            },
+            FieldError {
+                field: "url".into(),
+                message: "非法".into(),
+            },
         ]);
         let details = e.details().expect("Validation 应有 details");
         assert_eq!(details["fields"][0]["field"], "name");

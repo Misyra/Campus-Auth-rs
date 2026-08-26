@@ -6,8 +6,8 @@
 
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use serde::Serialize;
 
@@ -100,6 +100,13 @@ pub async fn logs_handler(
 /// 发送超时（200ms），防止慢消费者阻塞事件循环
 const SEND_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// WebSocket 单连接世代号：进程级原子递增计数器
+///
+/// 每个新连接接入时 `fetch_add(1)` 原子取号，号码严格按接入顺序分配且全局唯一。
+/// AppState 中的 `ws_epoch_tx`（watch 通道）仅作「世代变化」的唤醒信号，
+/// 新旧比较一律以此原子计数为准。
+static WS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 通过 socket 发送一条消息，超时则断开连接返回 false
 async fn send_msg(socket: &mut WebSocket, msg: Message) -> bool {
     match tokio::time::timeout(SEND_TIMEOUT, socket.send(msg)).await {
@@ -123,12 +130,26 @@ async fn send_ws(socket: &mut WebSocket, msg: &WsMessage) -> bool {
 }
 
 async fn handle_logs(mut socket: WebSocket, state: AppState) {
-    // 单连接限制：接入时递增世代号，旧连接（若存在）监测到世代号变化即断开。
-    // 订阅放在 send 之后，确保本连接不会因自己 +1 而误退；后续任何 +1 都意味着
-    // 有新页面接入 → 本连接被顶替。
-    let epoch = *state.ws_epoch_tx.borrow();
-    let _ = state.ws_epoch_tx.send(epoch + 1);
+    // 单连接限制（并发安全）：接入时原子取号（号码即接入顺序），再经 watch 通道
+    // 广播唤醒旧连接；旧连接醒来后比较「最新世代号是否大于自己的号」，大于则被顶替。
+    //
+    // 旧实现 borrow→send(+1)→subscribe 三步非原子：两个连接并发接入时都 borrow 到
+    // 同一世代号 N 并各自 send(N+1)，两方订阅时通道值同为 N+1，谁都看不到变化，
+    // 顶替失效、多连接并存。原子 fetch_add 保证并发接入取号唯一且有序，
+    // 订阅前后只需分别核对一次最新世代号即可覆盖所有交错：
+    // - 更早接入的连接（号码更小）要么在订阅后核对时发现更大号码，要么被
+    //   后续连接的唤醒信号触发核对后断开；
+    // - 更晚接入的连接（号码更大）收到旧连接迟到的唤醒信号时，核对发现最新
+    //   世代号不大于自己的号，继续存活。
+    let my_epoch = WS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let _ = state.ws_epoch_tx.send(my_epoch);
     let mut epoch_rx = state.ws_epoch_tx.subscribe();
+    // 订阅后核对：取号与订阅之间若有更新连接接入，其唤醒信号在本次订阅之前
+    // 发送、不会再触发 changed()，必须主动比较一次，否则新旧并存
+    if WS_EPOCH.load(std::sync::atomic::Ordering::SeqCst) > my_epoch {
+        tracing::debug!("WebSocket 连接接入即被更新页面顶替，直接断开");
+        return;
+    }
 
     let mut log_rx = state.log_tx.subscribe();
     let mut status_rx = state.status.subscribe();
@@ -205,16 +226,22 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-            // 世代号变化：有新的前端页面接入，本连接被顶替，主动断开
-            // （避免多个标签页同时接收日志/事件导致重复与状态冲突）
+            // 世代号变化唤醒：有新连接接入（也可能是旧连接迟到的唤醒信号）。
+            // 仅当最新世代号大于本连接号码时才视为被顶替——原子计数只增不减，
+            // 大于本连接号码必然意味着有更晚接入的连接存活。
+            // （避免多个前端页面同时接收日志/事件导致重复与状态冲突）
             result = epoch_rx.changed() => {
                 if result.is_err() {
                     break;
                 }
-                tracing::debug!("WebSocket 连接被新页面顶替，断开旧连接");
-                // 通知前端"被顶替"，前端据此停止自动重连，避免多标签页互相踢导致死循环
-                let _ = send_msg(&mut socket, Message::Text("{\"type\":\"ws_kicked\"}".into())).await;
-                break;
+                if WS_EPOCH.load(std::sync::atomic::Ordering::SeqCst) > my_epoch {
+                    tracing::debug!("WebSocket 连接被新页面顶替，断开旧连接");
+                    // 通知前端"被顶替"，前端据此停止自动重连，避免多标签页互相踢导致死循环
+                    let _ = send_msg(&mut socket, Message::Text("{\"type\":\"ws_kicked\"}".into())).await;
+                    break;
+                }
+                // 最新世代号不大于本连接：是更旧连接迟到的唤醒信号，继续存活
+                continue;
             }
             // 监听客户端消息（Close / Text ping / Ping / Pong）
             msg = socket.recv() => {

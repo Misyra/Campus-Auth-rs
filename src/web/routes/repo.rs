@@ -6,13 +6,32 @@
 
 use std::time::Duration;
 
-use axum::extract::Query;
 use axum::Json;
+use axum::extract::Query;
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::web::error::{data, ApiError};
+use crate::web::error::{ApiError, data};
 use crate::web::ssrf::secure_get;
+
+/// 代理响应体大小上限（8 MiB）
+///
+/// 仓库索引/任务配置是小型 JSON；恶意或误配置的远端可能返回超大响应，
+/// 无上限的 `resp.json()` 会将其整体读入内存。
+const MAX_REPO_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// 将一个 chunk 追加到缓冲区，超过上限返回 None（不追加任何字节）
+///
+/// 独立成纯函数以便单测覆盖边界判定逻辑
+fn append_within_limit(buf: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Option<()> {
+    // 先判后拼：超限 chunk 一个字节都不落入缓冲，避免无谓的内存增长
+    if buf.len().checked_add(chunk.len()).is_none_or(|n| n > limit) {
+        return None;
+    }
+    buf.extend_from_slice(chunk);
+    Some(())
+}
 
 /// 归一化仓库 URL：将 GitHub/Gitee blob 页面链接转换为 raw 链接
 fn normalize_repo_url(raw: &str) -> String {
@@ -70,29 +89,43 @@ async fn repo_fetch_json(url: &str, expected_list: bool, label: &str) -> Result<
             "远程返回 HTTP {status} ({url})"
         )));
     }
-    let json: Value = resp.json().await.map_err(|e| {
-        ApiError::Internal(format!("{label} JSON 解析失败: {e}"))
-    })?;
-    let type_name = if expected_list { "JSON 数组" } else { "JSON 对象" };
+    // 流式累积读取响应体，超过上限立即中止；
+    // bytes_stream 已由 secure_get 内部的 reqwest 客户端完成 gzip 解码
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ApiError::Internal(format!("{label}响应读取失败: {e}")))?;
+        append_within_limit(&mut body, &chunk, MAX_REPO_BODY_BYTES).ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "{label}响应体超过 {} MiB 上限，已中止下载",
+                MAX_REPO_BODY_BYTES / (1024 * 1024)
+            ))
+        })?;
+    }
+    let json: Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::Internal(format!("{label} JSON 解析失败: {e}")))?;
+    let type_name = if expected_list {
+        "JSON 数组"
+    } else {
+        "JSON 对象"
+    };
     if (expected_list && !json.is_array()) || (!expected_list && !json.is_object()) {
-        return Err(ApiError::Internal(format!("{label}格式不正确，应为 {type_name}")));
+        return Err(ApiError::Internal(format!(
+            "{label}格式不正确，应为 {type_name}"
+        )));
     }
     Ok(json)
 }
 
 /// GET /api/repo/fetch — 代理获取远程任务仓库索引（返回 JSON 数组）
-pub async fn repo_fetch_index(
-    Query(params): Query<RepoUrlQuery>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn repo_fetch_index(Query(params): Query<RepoUrlQuery>) -> Result<Json<Value>, ApiError> {
     let url = normalize_repo_url(&params.url);
     let index = repo_fetch_json(&url, true, "索引").await?;
     Ok(data(index))
 }
 
 /// GET /api/repo/task — 代理获取远程任务配置（返回 JSON 对象）
-pub async fn repo_fetch_task(
-    Query(params): Query<RepoUrlQuery>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn repo_fetch_task(Query(params): Query<RepoUrlQuery>) -> Result<Json<Value>, ApiError> {
     let url = normalize_repo_url(&params.url);
     let task = repo_fetch_json(&url, false, "任务").await?;
     Ok(data(task))
@@ -108,6 +141,37 @@ mod tests {
     use super::*;
 
     // SSRF 私网判定测试已随 is_restricted 移至 crate::web::ssrf
+
+    // ============ 响应体上限判定 ============
+
+    /// 追加不超过上限时成功，恰好达到上限仍允许（边界为“不超过”）
+    #[test]
+    fn test_append_within_limit_accepts_up_to_boundary() {
+        let mut buf = Vec::new();
+        assert!(append_within_limit(&mut buf, b"abc", 8).is_some());
+        assert_eq!(buf, b"abc");
+        // 恰好填满到上限：允许
+        assert!(append_within_limit(&mut buf, b"defgh", 8).is_some());
+        assert_eq!(buf.len(), 8);
+    }
+
+    /// 超过上限返回 None 且不追加任何字节（缓冲长度保持不变）
+    #[test]
+    fn test_append_within_limit_rejects_overflow_without_append() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"0123456789"); // 已有 10 字节
+        assert!(append_within_limit(&mut buf, b"abc", 12).is_none());
+        assert_eq!(buf.len(), 10, "超限 chunk 不应部分或全部落入缓冲");
+        // 恰好等于上限（10 + 2 = 12）仍允许
+        assert!(append_within_limit(&mut buf, b"ab", 12).is_some());
+        assert_eq!(buf.len(), 12);
+    }
+
+    /// 常量与换算：上限为 8 MiB
+    #[test]
+    fn test_repo_body_limit_constant() {
+        assert_eq!(MAX_REPO_BODY_BYTES, 8 * 1024 * 1024);
+    }
 
     // ============ URL 归一化 ============
 

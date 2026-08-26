@@ -65,8 +65,8 @@ impl Default for StatusManager {
 }
 
 // 重新导出公共类型，供其他模块直接 `use crate::status::Xxx`
+pub use notifier::{Notifier, StatusError};
 pub use snapshot::{
     EngineState, InstallProgress, LoginSource, LoginStatus, NetworkStatus, PartialSnapshot,
     StatusSnapshot, WorkerStatus,
 };
-pub use notifier::{Notifier, StatusError};
