@@ -6,17 +6,19 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use tracing::warn;
 
+use std::sync::Arc;
+
+use crate::config::ConfigApi;
 use crate::web::error::ApiError;
-use crate::web::state::AppState;
 
 /// GET /api/tools/task-recorder.user.js — 任务录制用户脚本
 ///
 /// 从 `resources/tools/task-recorder.user.js` 读取并返回 Tampermonkey 用户脚本。
 /// 文件缺失时返回 404。
-pub async fn task_recorder(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let script_path = state
-        .container
-        .config
+pub async fn task_recorder(
+    State(config): State<Arc<dyn ConfigApi>>,
+) -> Result<Response, ApiError> {
+    let script_path = config
         .base_path()
         .join("resources")
         .join("tools")
