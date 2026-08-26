@@ -50,6 +50,9 @@ fn main() -> anyhow::Result<()> {
 
     if let Err(e) = runtime.block_on(campus_auth::launcher::run(cli, base_path)) {
         tracing::error!("启动失败: {e}");
+        // 实例锁等早期错误发生在日志系统初始化之前（tracing 无 subscriber，
+        // error! 会丢失），必须同步落 stderr 才能让用户看见失败原因
+        eprintln!("启动失败: {e:#}");
         std::process::exit(1);
     }
     Ok(())

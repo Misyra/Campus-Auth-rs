@@ -146,15 +146,16 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     }
     let _ = req.send().await;
 
-    // 轮询等待进程退出
-    for _ in 0..100 {
+    // 轮询等待进程退出；上限须覆盖优雅关闭的最坏预算
+    // （bridge 3s + scheduler 5s + engine 8s = 16s），取 20s 留余量
+    for _ in 0..200 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !is_process_alive(info.pid) {
             return Ok(());
         }
     }
 
-    anyhow::bail!("等待进程退出超时（10 秒）")
+    anyhow::bail!("等待进程退出超时（20 秒）")
 }
 
 /// 强制杀死指定 PID 的进程
@@ -192,14 +193,24 @@ pub fn force_kill(pid: u32) {
 #[cfg(target_os = "windows")]
 pub fn is_process_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
             return false;
         }
+        // 仅凭 OpenProcess 成功不足以判定存活：父进程持有未关闭的子进程句柄时
+        // （如更新助手、测试框架），已退出的进程对象仍可被打开。必须再查退出码——
+        // 进程终止后退出码固化为实际值，不再是 STILL_ACTIVE(259)。
+        let mut exit_code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut exit_code);
         CloseHandle(handle);
-        true
+        if ok == 0 {
+            return false;
+        }
+        exit_code == 259 // STILL_ACTIVE
     }
 }
 
