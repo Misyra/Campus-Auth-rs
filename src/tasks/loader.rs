@@ -12,8 +12,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::config::ConfigService;
-use crate::tasks::models::*;
 use crate::tasks::TaskError;
+use crate::tasks::models::*;
 
 /// 任务排序与活跃任务记录（`.order.json`）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -106,7 +106,11 @@ impl TaskManager {
                     if path.extension().and_then(|e| e.to_str()) != Some("json") {
                         continue;
                     }
-                    if path.file_name().map(|n| n == ".order.json").unwrap_or(false) {
+                    if path
+                        .file_name()
+                        .map(|n| n == ".order.json")
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                     if let Some(s) = Self::read_summary(&path, "browser") {
@@ -122,7 +126,11 @@ impl TaskManager {
                     if path.extension().and_then(|e| e.to_str()) != Some("json") {
                         continue;
                     }
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     if name == ".order.json" || name.ends_with(".meta.json") {
                         continue;
                     }
@@ -133,11 +141,20 @@ impl TaskManager {
                 }
             }
 
-            // 旧版裸 .py 脚本兼容
+            // 旧版裸 .py 脚本兼容：同名 .json 任务已存在时跳过（G7），
+            // 避免 scripts/foo.json 与 scripts/foo.py 以相同 id 重复出现在列表中
+            let seen_ids: std::collections::HashSet<String> =
+                out.iter().map(|s| s.id.clone()).collect();
             if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) != Some("py") {
+                        continue;
+                    }
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if seen_ids.contains(stem) {
                         continue;
                     }
                     if let Some(s) = Self::read_py_summary(&path) {
@@ -176,8 +193,21 @@ impl TaskManager {
         let path = self
             .find_task_file(task_id)
             .ok_or_else(|| TaskError::TaskNotFound(task_id.to_string()))?;
-        let content = tokio::fs::read_to_string(&path).await.map_err(TaskError::IoError)?;
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(TaskError::IoError)?;
         let task: TaskKind = serde_json::from_str(&content).map_err(TaskError::JsonError)?;
+        // 「保存强校验、加载宽校验 + 告警」（G8）：磁盘上被外部工具改坏的任务仍尽量
+        // 加载（容错，不拒绝），但通过日志暴露校验失败，便于排查"看似正常却执行异常"
+        if let Ok(value) = serde_json::to_value(&task) {
+            if let Err(errors) = self.validate_task(&value) {
+                tracing::warn!(
+                    "任务 {} 语义校验失败（仍按原样加载）: {:?}",
+                    task_id,
+                    errors
+                );
+            }
+        }
         Ok(task)
     }
 
@@ -230,9 +260,9 @@ impl TaskManager {
         };
         let path = subdir.join(format!("{task_id}.json"));
 
-        // 将 task_id 写回 common（避免 JSON 中遗漏）
         let mut task = task.clone();
-        set_task_id(&mut task, task_id);
+        // 将 task_id 写回 common（避免 JSON 中遗漏）
+        task.common_mut().task_id = task_id.to_string();
 
         atomic_write_json(&path, &task)?;
 
@@ -258,12 +288,16 @@ impl TaskManager {
         let mut found = false;
         let b = self.browser_dir.join(format!("{task_id}.json"));
         if b.exists() {
-            tokio::fs::remove_file(&b).await.map_err(TaskError::IoError)?;
+            tokio::fs::remove_file(&b)
+                .await
+                .map_err(TaskError::IoError)?;
             found = true;
         }
         let s = self.scripts_dir.join(format!("{task_id}.json"));
         if s.exists() {
-            tokio::fs::remove_file(&s).await.map_err(TaskError::IoError)?;
+            tokio::fs::remove_file(&s)
+                .await
+                .map_err(TaskError::IoError)?;
             found = true;
         }
         // 清理关联 .meta.json / .py
@@ -319,11 +353,14 @@ impl TaskManager {
         let task = self.load_task(task_id).await?;
         let summary = TaskSummary {
             id: task_id.to_string(),
-            name: task_name(&task),
-            description: task_description(&task),
-            task_type: task_type_name(&task).to_string(),
+            name: task.common().name.clone(),
+            description: task.common().description.clone(),
+            task_type: task.type_name().to_string(),
         };
-        Ok(TaskDetail { summary, config: task })
+        Ok(TaskDetail {
+            summary,
+            config: task,
+        })
     }
 
     /// 读取 `.order.json`
@@ -395,8 +432,7 @@ impl TaskManager {
                             } else if !ids.insert(id.to_string()) {
                                 errors.push(format!("步骤 id 重复: {id}"));
                             }
-                            let stype =
-                                step.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            let stype = step.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             if !VALID_STEP_TYPES.contains(&stype) {
                                 errors.push(format!("步骤[{i}] 未知类型: {stype}"));
                                 continue;
@@ -423,7 +459,8 @@ impl TaskManager {
                                     }
                                 }
                                 "eval" | "custom_js" => {
-                                    let has = step.get("script").is_some() || step.get("code").is_some();
+                                    let has =
+                                        step.get("script").is_some() || step.get("code").is_some();
                                     if !has {
                                         errors.push(format!("步骤[{i}] 需要 script 或 code"));
                                     }
@@ -596,10 +633,19 @@ impl TaskManager {
         let stem = path.file_stem()?.to_string_lossy().to_string();
         let meta_path = path.with_extension("meta.json");
         let (name, description) = if meta_path.exists() {
-            match std::fs::read_to_string(&meta_path).ok().and_then(|c| serde_json::from_str::<Value>(&c).ok()) {
+            match std::fs::read_to_string(&meta_path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+            {
                 Some(v) => (
-                    v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                    v.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+                    v.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    v.get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 ),
                 None => (String::new(), String::new()),
             }
@@ -634,42 +680,6 @@ fn is_valid_task_id(id: &str) -> bool {
     }
     id.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-/// 将 task_id 写回 TaskKind 的 common 字段
-fn set_task_id(task: &mut TaskKind, id: &str) {
-    match task {
-        TaskKind::Browser(c) => c.common.task_id = id.to_string(),
-        TaskKind::Script(c) => c.common.task_id = id.to_string(),
-        TaskKind::Shell(c) => c.common.task_id = id.to_string(),
-    }
-}
-
-/// 提取任务名称
-fn task_name(task: &TaskKind) -> String {
-    match task {
-        TaskKind::Browser(c) => c.common.name.clone(),
-        TaskKind::Script(c) => c.common.name.clone(),
-        TaskKind::Shell(c) => c.common.name.clone(),
-    }
-}
-
-/// 提取任务描述
-fn task_description(task: &TaskKind) -> String {
-    match task {
-        TaskKind::Browser(c) => c.common.description.clone(),
-        TaskKind::Script(c) => c.common.description.clone(),
-        TaskKind::Shell(c) => c.common.description.clone(),
-    }
-}
-
-/// 提取任务类型名
-fn task_type_name(task: &TaskKind) -> &'static str {
-    match task {
-        TaskKind::Browser(_) => "browser",
-        TaskKind::Script(_) => "script",
-        TaskKind::Shell(_) => "shell",
-    }
 }
 
 /// 原子写入 JSON（委托给 utils::io::atomic_write_json）
@@ -730,33 +740,27 @@ mod tests {
         assert!(!is_valid_task_id("任务ID"));
     }
 
-    // ============ 辅助函数 ============
+    // ============ TaskKind 访问器（经 TaskManager 写回路径间接覆盖） ============
 
     #[test]
-    fn test_set_task_id_browser() {
+    fn test_common_mut_task_id_browser() {
         let mut task = TaskKind::Browser(TaskConfig::default());
-        set_task_id(&mut task, "new_id");
-        if let TaskKind::Browser(cfg) = &task {
-            assert_eq!(cfg.common.task_id, "new_id");
-        }
+        task.common_mut().task_id = "new_id".to_string();
+        assert_eq!(task.common().task_id, "new_id");
     }
 
     #[test]
-    fn test_set_task_id_script() {
+    fn test_common_mut_task_id_script() {
         let mut task = TaskKind::Script(ScriptTaskConfig::default());
-        set_task_id(&mut task, "script_id");
-        if let TaskKind::Script(cfg) = &task {
-            assert_eq!(cfg.common.task_id, "script_id");
-        }
+        task.common_mut().task_id = "script_id".to_string();
+        assert_eq!(task.common().task_id, "script_id");
     }
 
     #[test]
-    fn test_set_task_id_shell() {
+    fn test_common_mut_task_id_shell() {
         let mut task = TaskKind::Shell(ShellTaskConfig::default());
-        set_task_id(&mut task, "shell_id");
-        if let TaskKind::Shell(cfg) = &task {
-            assert_eq!(cfg.common.task_id, "shell_id");
-        }
+        task.common_mut().task_id = "shell_id".to_string();
+        assert_eq!(task.common().task_id, "shell_id");
     }
 
     #[test]
@@ -764,14 +768,23 @@ mod tests {
         let mut cfg = TaskConfig::default();
         cfg.common.name = "测试任务".to_string();
         let task = TaskKind::Browser(cfg);
-        assert_eq!(task_name(&task), "测试任务");
+        assert_eq!(task.common().name, "测试任务");
     }
 
     #[test]
     fn test_task_type_name() {
-        assert_eq!(task_type_name(&TaskKind::Browser(TaskConfig::default())), "browser");
-        assert_eq!(task_type_name(&TaskKind::Script(ScriptTaskConfig::default())), "script");
-        assert_eq!(task_type_name(&TaskKind::Shell(ShellTaskConfig::default())), "shell");
+        assert_eq!(
+            TaskKind::Browser(TaskConfig::default()).type_name(),
+            "browser"
+        );
+        assert_eq!(
+            TaskKind::Script(ScriptTaskConfig::default()).type_name(),
+            "script"
+        );
+        assert_eq!(
+            TaskKind::Shell(ShellTaskConfig::default()).type_name(),
+            "shell"
+        );
     }
 
     // ============ TaskManager CRUD（需要临时目录 + ConfigService） ============
@@ -779,7 +792,9 @@ mod tests {
     async fn make_task_manager() -> (tempfile::TempDir, Arc<TaskManager>) {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let config = ConfigService::new(tmp.path().to_path_buf(), tx).await.unwrap();
+        let config = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
         let mgr = TaskManager::new(tmp.path(), config);
         (tmp, mgr)
     }
@@ -906,12 +921,18 @@ mod tests {
         // 任务列表应按 .order.json 排序
         let (_tmp, mgr) = make_task_manager().await;
         let shell1 = TaskKind::Shell(ShellTaskConfig {
-            common: CommonFields { name: "任务B".to_string(), ..Default::default() },
+            common: CommonFields {
+                name: "任务B".to_string(),
+                ..Default::default()
+            },
             command: "echo b".to_string(),
             ..Default::default()
         });
         let shell2 = TaskKind::Shell(ShellTaskConfig {
-            common: CommonFields { name: "任务A".to_string(), ..Default::default() },
+            common: CommonFields {
+                name: "任务A".to_string(),
+                ..Default::default()
+            },
             command: "echo a".to_string(),
             ..Default::default()
         });
@@ -942,7 +963,10 @@ mod tests {
         // 设置活跃任务后可正确查询
         let (_tmp, mgr) = make_task_manager().await;
         let task = TaskKind::Shell(ShellTaskConfig {
-            common: CommonFields { name: "活跃任务".to_string(), ..Default::default() },
+            common: CommonFields {
+                name: "活跃任务".to_string(),
+                ..Default::default()
+            },
             command: "echo active".to_string(),
             ..Default::default()
         });
@@ -960,11 +984,45 @@ mod tests {
         assert!(!mgr.has_task("no_such_task"));
 
         let task = TaskKind::Shell(ShellTaskConfig {
-            common: CommonFields { name: "存在".to_string(), ..Default::default() },
+            common: CommonFields {
+                name: "存在".to_string(),
+                ..Default::default()
+            },
             command: "echo exists".to_string(),
             ..Default::default()
         });
         mgr.save_task("exists", &task).await.unwrap();
         assert!(mgr.has_task("exists"));
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_dedupes_py_and_json_same_id() {
+        // 同名 .json 与 .py 只保留 .json 条目（G7），裸 .py 单独存在时仍列出
+        let (_tmp, mgr) = make_task_manager().await;
+        std::fs::write(
+            mgr.scripts_dir.join("foo.json"),
+            r#"{"type":"script","name":"foo 脚本"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            mgr.scripts_dir.join("foo.py"),
+            "#!/usr/bin/env python\nprint(1)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            mgr.scripts_dir.join("bar.py"),
+            "#!/usr/bin/env python\nprint(2)\n",
+        )
+        .unwrap();
+
+        let tasks = mgr.list_all_tasks().await;
+        let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        // foo 只出现一次（.json 优先），bar 为裸 .py 正常列出
+        assert_eq!(ids.iter().filter(|id| **id == "foo").count(), 1);
+        assert!(ids.contains(&"bar"));
+        // foo 的名称来自 .json 定义
+        let foo = tasks.iter().find(|t| t.id == "foo").unwrap();
+        assert_eq!(foo.name, "foo 脚本");
+        assert_eq!(foo.task_type, "script");
     }
 }

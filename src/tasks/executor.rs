@@ -24,8 +24,8 @@ use crate::bridge::{BridgeSupervisor, Outcome, StructuredResult};
 use crate::config::ConfigService;
 use crate::environment::EnvironmentManager;
 use crate::status::{PartialSnapshot, StatusManager, WorkerStatus};
-use crate::tasks::models::*;
 use crate::tasks::TaskError;
+use crate::tasks::models::*;
 
 /// 任务执行统一结果
 #[derive(Debug, Clone, serde::Serialize)]
@@ -94,14 +94,47 @@ impl TaskExecutor {
         }
     }
 
+    /// 统一执行入口（带超时覆写）：按任务类型分派，并用 `timeout_secs` 覆盖任务配置
+    /// 中的超时字段（供调度器等需要按定时任务定义统一覆盖超时的调用方使用）。
+    ///
+    /// 超时单位差异在此集中消化：浏览器任务的 `TaskConfig::timeout` 单位是**毫秒**，
+    /// 脚本/Shell 任务的单位是**秒**（且执行时钳制到 `[1, 3600]`）。调用方统一传秒，
+    /// 由本方法按类型换算，避免各调用点自行重复处理单位与钳制。
+    pub async fn execute_with_timeout_override(
+        &self,
+        task: &TaskKind,
+        timeout_secs: u64,
+    ) -> Result<TaskResult, TaskError> {
+        let timeout_secs = clamp_timeout(timeout_secs);
+        match task {
+            TaskKind::Browser(cfg) => {
+                let mut cfg = cfg.clone();
+                // 浏览器超时单位为毫秒：秒 → 毫秒（饱和乘法防溢出）
+                cfg.timeout = timeout_secs.saturating_mul(1000);
+                self.execute_browser(&cfg).await
+            }
+            TaskKind::Script(cfg) => {
+                let mut cfg = cfg.clone();
+                cfg.timeout = timeout_secs;
+                self.execute_script(&cfg).await
+            }
+            TaskKind::Shell(cfg) => {
+                let mut cfg = cfg.clone();
+                cfg.timeout = timeout_secs;
+                self.execute_shell(&cfg).await
+            }
+        }
+    }
+
     /// 执行浏览器任务（通用语义：打卡/签到等日常自动化，经 Bridge 的 `execute_browser_task`）
     ///
     /// 不注入账号密码、不做登录后网络验证；步骤执行完成即成功。
     /// 带凭据的登录语义请走 [`crate::login::LoginOrchestrator::submit`]。
     pub async fn execute_browser(&self, cfg: &TaskConfig) -> Result<TaskResult, TaskError> {
         // 执行前标记 Worker 忙
-        self.status
-            .merge(PartialSnapshot::Worker { state: WorkerStatus::Busy });
+        self.status.merge(PartialSnapshot::Worker {
+            state: WorkerStatus::Busy,
+        });
 
         // 确保 Python 环境能力就绪
         let ensure = if self.env.capability_ready() {
@@ -118,9 +151,8 @@ impl TaskExecutor {
             // 序列化浏览器任务配置并包装为 `task_config`（Worker 约定的步骤载体键），
             // 同时下发现运行时浏览器设置，与登录路径保持一致。
             let task_val = serde_json::to_value(cfg).map_err(TaskError::JsonError)?;
-            let browser_settings =
-                serde_json::to_value(&self.config.runtime().load_full().browser)
-                    .unwrap_or(serde_json::Value::Null);
+            let browser_settings = serde_json::to_value(&self.config.runtime().load_full().browser)
+                .unwrap_or(serde_json::Value::Null);
             let params = serde_json::json!({
                 "task_config": task_val,
                 "browser_settings": browser_settings,
@@ -147,7 +179,11 @@ impl TaskExecutor {
         let data = resp.result.data.clone();
         let structured: StructuredResult =
             serde_json::from_value(data.clone()).unwrap_or_else(|_| StructuredResult {
-                outcome: if success { Outcome::Success } else { Outcome::UnknownError },
+                outcome: if success {
+                    Outcome::Success
+                } else {
+                    Outcome::UnknownError
+                },
                 message: String::new(),
                 data,
                 screenshot_url: None,
@@ -167,10 +203,7 @@ impl TaskExecutor {
     }
 
     /// 执行脚本任务
-    pub async fn execute_script(
-        &self,
-        cfg: &ScriptTaskConfig,
-    ) -> Result<TaskResult, TaskError> {
+    pub async fn execute_script(&self, cfg: &ScriptTaskConfig) -> Result<TaskResult, TaskError> {
         // 同任务串行、不同任务并行：按任务 ID 取各自的执行锁
         let lock = self.task_exec_lock(&cfg.common.task_id);
         let _guard = lock.lock().await;
@@ -189,8 +222,9 @@ impl TaskExecutor {
         }
 
         // 构建命令
-        let (program, args) = self.build_script_command(cfg, &script_file, &ext);
-        let work_dir = self.resolve_work_dir(cfg, &script_file);
+        let python_default = self.env.python_path().to_string_lossy().to_string();
+        let (program, args) = build_script_command(cfg, &script_file, &ext, &python_default);
+        let work_dir = resolve_work_dir(cfg, &script_file, &self.scripts_dir);
         let envs = build_minimal_env();
 
         self.run_command(program, args, &work_dir, envs, clamp_timeout(cfg.timeout))
@@ -206,7 +240,7 @@ impl TaskExecutor {
         let lock = self.task_exec_lock(&cfg.common.task_id);
         let _guard = lock.lock().await;
 
-        let (program, flag) = self.resolve_shell(cfg);
+        let (program, flag) = resolve_shell(cfg);
         let args = vec![flag.to_string(), cfg.command.clone()];
         let work_dir = self.tasks_dir.clone();
         let envs = build_minimal_env();
@@ -241,7 +275,8 @@ impl TaskExecutor {
         if let Some(content) = &cfg.content {
             if content.len() > MAX_SCRIPT_CONTENT_SIZE {
                 return Err(TaskError::ScriptNotFound(format!(
-                    "脚本内容超过大小上限 {}", MAX_SCRIPT_CONTENT_SIZE
+                    "脚本内容超过大小上限 {}",
+                    MAX_SCRIPT_CONTENT_SIZE
                 )));
             }
             let ext = cfg
@@ -275,75 +310,6 @@ impl TaskExecutor {
         }
     }
 
-    /// 根据扩展名与 binary_path 构建命令（program, args）
-    fn build_script_command(
-        &self,
-        cfg: &ScriptTaskConfig,
-        script_file: &Path,
-        ext: &str,
-    ) -> (String, Vec<String>) {
-        let script = script_file.to_string_lossy().to_string();
-        match ext {
-            "exe" | "com" => {
-                // 直接启动可执行文件
-                (script, cfg.args.clone())
-            }
-            "py" => {
-                let python = cfg
-                    .binary_path
-                    .clone()
-                    .unwrap_or_else(|| self.env.python_path().to_string_lossy().to_string());
-                let mut args = vec![script];
-                args.extend(cfg.args.clone());
-                (python, args)
-            }
-            "bat" | "cmd" => {
-                let cmd = cfg.binary_path.clone().unwrap_or_else(|| "cmd.exe".to_string());
-                let mut args = vec!["/c".to_string(), script];
-                args.extend(cfg.args.clone());
-                (cmd, args)
-            }
-            "sh" => {
-                let sh = cfg.binary_path.clone().unwrap_or_else(|| "sh".to_string());
-                let mut args = vec![script];
-                args.extend(cfg.args.clone());
-                (sh, args)
-            }
-            _ => (String::new(), Vec::new()),
-        }
-    }
-
-    /// 解析工作目录：config.work_dir 优先，否则脚本所在目录
-    fn resolve_work_dir(&self, cfg: &ScriptTaskConfig, script_file: &Path) -> PathBuf {
-        if let Some(wd) = &cfg.work_dir {
-            if Path::new(wd).is_absolute() {
-                return PathBuf::from(wd);
-            }
-            return self.scripts_dir.join(wd);
-        }
-        script_file
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| self.scripts_dir.clone())
-    }
-
-    /// 解析 Shell 路径与参数标志
-    fn resolve_shell(&self, cfg: &ShellTaskConfig) -> (String, &'static str) {
-        let shell = if let Some(s) = &cfg.shell_path {
-            s.clone()
-        } else {
-            default_shell()
-        };
-        let lower = shell.to_lowercase();
-        if lower.contains("powershell") || lower.contains("pwsh") {
-            (shell, "-Command")
-        } else if lower.contains("cmd") && cfg!(windows) {
-            (shell, "/c")
-        } else {
-            (shell, "-c")
-        }
-    }
-
     /// 执行子进程，带超时与输出捕获
     async fn run_command(
         &self,
@@ -371,12 +337,14 @@ impl TaskExecutor {
         let _job = crate::bridge::job::try_assign_job(&child);
         // 记录 PID：超时后需 taskkill /T 递归强杀整个进程树（kill_on_drop 只杀直接子进程）
         let pid = child.id();
-        let stdout = child.stdout.take().ok_or_else(|| {
-            TaskError::IoError(std::io::Error::other("无法捕获子进程 stdout"))
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            TaskError::IoError(std::io::Error::other("无法捕获子进程 stderr"))
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| TaskError::IoError(std::io::Error::other("无法捕获子进程 stdout")))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| TaskError::IoError(std::io::Error::other("无法捕获子进程 stderr")))?;
 
         let timeout_dur = Duration::from_secs(timeout);
         let waited = tokio::time::timeout(
@@ -437,6 +405,82 @@ impl TaskExecutor {
     }
 }
 
+/// 根据扩展名与 binary_path 构建命令（program, args）。
+///
+/// 自由函数而非方法：`py` 扩展名在未指定 `binary_path` 时需要回退到环境管理器
+/// 检测的 Python 路径，通过 `python_default` 参数注入，使本函数可脱离完整执行器
+/// 做单元测试（A7）。
+fn build_script_command(
+    cfg: &ScriptTaskConfig,
+    script_file: &Path,
+    ext: &str,
+    python_default: &str,
+) -> (String, Vec<String>) {
+    let script = script_file.to_string_lossy().to_string();
+    match ext {
+        "exe" | "com" => {
+            // 直接启动可执行文件
+            (script, cfg.args.clone())
+        }
+        "py" => {
+            let python = cfg
+                .binary_path
+                .clone()
+                .unwrap_or_else(|| python_default.to_string());
+            let mut args = vec![script];
+            args.extend(cfg.args.clone());
+            (python, args)
+        }
+        "bat" | "cmd" => {
+            let cmd = cfg
+                .binary_path
+                .clone()
+                .unwrap_or_else(|| "cmd.exe".to_string());
+            let mut args = vec!["/c".to_string(), script];
+            args.extend(cfg.args.clone());
+            (cmd, args)
+        }
+        "sh" => {
+            let sh = cfg.binary_path.clone().unwrap_or_else(|| "sh".to_string());
+            let mut args = vec![script];
+            args.extend(cfg.args.clone());
+            (sh, args)
+        }
+        _ => (String::new(), Vec::new()),
+    }
+}
+
+/// 解析工作目录：config.work_dir 优先，否则脚本所在目录（A7：自由函数便于单测）
+fn resolve_work_dir(cfg: &ScriptTaskConfig, script_file: &Path, scripts_dir: &Path) -> PathBuf {
+    if let Some(wd) = &cfg.work_dir {
+        if Path::new(wd).is_absolute() {
+            return PathBuf::from(wd);
+        }
+        return scripts_dir.join(wd);
+    }
+    script_file
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| scripts_dir.to_path_buf())
+}
+
+/// 解析 Shell 路径与参数标志（A7：自由函数便于单测）
+fn resolve_shell(cfg: &ShellTaskConfig) -> (String, &'static str) {
+    let shell = if let Some(s) = &cfg.shell_path {
+        s.clone()
+    } else {
+        default_shell()
+    };
+    let lower = shell.to_lowercase();
+    if lower.contains("powershell") || lower.contains("pwsh") {
+        (shell, "-Command")
+    } else if lower.contains("cmd") && cfg!(windows) {
+        (shell, "/c")
+    } else {
+        (shell, "-c")
+    }
+}
+
 /// 同时等待子进程退出并持续排空 stdout/stderr，只保留有限前缀防止内存无界增长。
 async fn wait_with_bounded_output(
     child: &mut tokio::process::Child,
@@ -488,7 +532,8 @@ fn binary_to_ext(binary: &str) -> &'static str {
         "ps1"
     } else if b.contains("python") || b.contains("py") {
         "py"
-    } else if b.ends_with("bash") || b.ends_with("zsh") || b.ends_with("/sh") || b.ends_with("\\sh") {
+    } else if b.ends_with("bash") || b.ends_with("zsh") || b.ends_with("/sh") || b.ends_with("\\sh")
+    {
         "sh"
     } else if b.contains("cmd") || b.ends_with(".bat") || b.ends_with(".cmd") {
         "bat"
@@ -567,4 +612,227 @@ fn build_minimal_env() -> Vec<(String, String)> {
         }
     }
     envs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn script_cfg(args: Vec<String>) -> ScriptTaskConfig {
+        ScriptTaskConfig {
+            args,
+            ..Default::default()
+        }
+    }
+
+    // ============ build_script_command ============
+
+    #[test]
+    fn test_build_script_command_exe_empty_args() {
+        // exe 直接启动，空 args 时仅脚本本身
+        let cfg = script_cfg(vec![]);
+        let (program, args) =
+            build_script_command(&cfg, Path::new("C:\\tools\\job.exe"), "exe", "python");
+        assert_eq!(program, "C:\\tools\\job.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_build_script_command_exe_with_args() {
+        // args 原样透传
+        let cfg = script_cfg(vec!["--flag".into(), "值".into()]);
+        let (program, args) = build_script_command(&cfg, Path::new("/opt/tool"), "com", "python");
+        assert_eq!(program, "/opt/tool");
+        assert_eq!(args, vec!["--flag", "值"]);
+    }
+
+    #[test]
+    fn test_build_script_command_py_binary_path_override() {
+        // 指定 binary_path 时优先于默认 Python
+        let cfg = ScriptTaskConfig {
+            binary_path: Some("C:\\py310\\python.exe".into()),
+            args: vec!["-u".into()],
+            ..Default::default()
+        };
+        let (program, args) = build_script_command(&cfg, Path::new("a.py"), "py", "default_py");
+        assert_eq!(program, "C:\\py310\\python.exe");
+        assert_eq!(args, vec!["a.py".to_string(), "-u".to_string()]);
+    }
+
+    #[test]
+    fn test_build_script_command_py_default_python() {
+        // 未指定 binary_path 时回退到环境管理器提供的默认 Python
+        let cfg = script_cfg(vec![]);
+        let (program, args) = build_script_command(&cfg, Path::new("b.py"), "py", "env_python");
+        assert_eq!(program, "env_python");
+        assert_eq!(args, vec!["b.py".to_string()]);
+    }
+
+    #[test]
+    fn test_build_script_command_bat_defaults_to_cmd() {
+        // bat/cmd 未指定 binary_path 时用 cmd.exe /c
+        let cfg = script_cfg(vec![]);
+        let (program, args) = build_script_command(&cfg, Path::new("run.bat"), "bat", "python");
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(args, vec!["/c".to_string(), "run.bat".to_string()]);
+    }
+
+    #[test]
+    fn test_build_script_command_sh_defaults() {
+        let cfg = script_cfg(vec![]);
+        let (program, args) = build_script_command(&cfg, Path::new("s.sh"), "sh", "python");
+        assert_eq!(program, "sh");
+        assert_eq!(args, vec!["s.sh".to_string()]);
+    }
+
+    #[test]
+    fn test_build_script_command_unknown_ext_returns_empty() {
+        // 未知扩展名返回空命令（调用前 is_supported_ext 已拒绝，此处为兜底行为）
+        let cfg = script_cfg(vec![]);
+        let (program, args) = build_script_command(&cfg, Path::new("x.ps1"), "ps1", "python");
+        assert!(program.is_empty());
+        assert!(args.is_empty());
+    }
+
+    // ============ resolve_work_dir（绝对/相对路径） ============
+
+    #[test]
+    fn test_resolve_work_dir_absolute() {
+        // 绝对 work_dir 原样使用
+        let cfg = ScriptTaskConfig {
+            work_dir: Some("D:\\data".into()),
+            ..Default::default()
+        };
+        let wd = resolve_work_dir(
+            &cfg,
+            Path::new("C:\\t\\a.py"),
+            Path::new("C:\\tasks\\scripts"),
+        );
+        assert_eq!(wd, PathBuf::from("D:\\data"));
+    }
+
+    #[test]
+    fn test_resolve_work_dir_relative_joined() {
+        // 相对 work_dir 相对 scripts 目录解析
+        let cfg = ScriptTaskConfig {
+            work_dir: Some("sub".into()),
+            ..Default::default()
+        };
+        let wd = resolve_work_dir(&cfg, Path::new("/tmp/a.py"), Path::new("/tasks/scripts"));
+        assert_eq!(wd, PathBuf::from("/tasks/scripts").join("sub"));
+    }
+
+    #[test]
+    fn test_resolve_work_dir_defaults_to_script_parent() {
+        // 未指定 work_dir 时用脚本所在目录
+        let cfg = ScriptTaskConfig::default();
+        let wd = resolve_work_dir(
+            &cfg,
+            Path::new("/tasks/scripts/deep/a.py"),
+            Path::new("/tasks/scripts"),
+        );
+        assert_eq!(wd, PathBuf::from("/tasks/scripts/deep"));
+    }
+
+    // ============ resolve_shell ============
+
+    #[test]
+    fn test_resolve_shell_powershell_flag() {
+        let cfg = ShellTaskConfig {
+            shell_path: Some(
+                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe".into(),
+            ),
+            ..Default::default()
+        };
+        let (shell, flag) = resolve_shell(&cfg);
+        assert!(shell.contains("powershell"));
+        assert_eq!(flag, "-Command");
+    }
+
+    #[test]
+    fn test_resolve_shell_pwsh_flag() {
+        let cfg = ShellTaskConfig {
+            shell_path: Some("pwsh.exe".into()),
+            ..Default::default()
+        };
+        let (_, flag) = resolve_shell(&cfg);
+        assert_eq!(flag, "-Command");
+    }
+
+    #[test]
+    fn test_resolve_shell_cmd_flag_platform_dependent() {
+        // cmd.exe 的参数标志平台相关：Windows 用 /c，其余平台按通用 -c 处理
+        let cfg = ShellTaskConfig {
+            shell_path: Some("cmd.exe".into()),
+            ..Default::default()
+        };
+        let (_, flag) = resolve_shell(&cfg);
+        assert_eq!(flag, if cfg!(windows) { "/c" } else { "-c" });
+    }
+
+    #[test]
+    fn test_resolve_shell_custom_path_generic_flag() {
+        // 自定义 shell（如 bash）用通用 -c
+        let cfg = ShellTaskConfig {
+            shell_path: Some("/bin/bash".into()),
+            ..Default::default()
+        };
+        let (shell, flag) = resolve_shell(&cfg);
+        assert_eq!(shell, "/bin/bash");
+        assert_eq!(flag, "-c");
+    }
+
+    // ============ clamp_timeout 边界 ============
+
+    #[test]
+    fn test_clamp_timeout_boundaries() {
+        // 0 钳制到下限 1
+        assert_eq!(clamp_timeout(0), 1);
+        // 恰在下限/正常值/恰在上限保持不变
+        assert_eq!(clamp_timeout(1), 1);
+        assert_eq!(clamp_timeout(60), 60);
+        assert_eq!(clamp_timeout(3600), 3600);
+        // 超上限钳制到 3600
+        assert_eq!(clamp_timeout(3601), 3600);
+        assert_eq!(clamp_timeout(u64::MAX), 3600);
+    }
+
+    // ============ binary_to_ext ============
+
+    #[test]
+    fn test_binary_to_ext_known() {
+        assert_eq!(binary_to_ext("C:\\Python311\\python.exe"), "py");
+        assert_eq!(binary_to_ext("PYTHON.EXE"), "py");
+        assert_eq!(binary_to_ext("/usr/bin/bash"), "sh");
+        assert_eq!(binary_to_ext("/usr/bin/zsh"), "sh");
+        assert_eq!(binary_to_ext("C:\\Windows\\System32\\cmd.exe"), "bat");
+        assert_eq!(binary_to_ext("run.bat"), "bat");
+        assert_eq!(binary_to_ext("tool.exe"), "exe");
+        assert_eq!(binary_to_ext("old.com"), "exe");
+    }
+
+    #[test]
+    fn test_binary_to_ext_powershell_maps_ps1() {
+        // powershell 不在支持范围：映射到 ps1 后由 is_supported_ext 拒绝
+        assert_eq!(binary_to_ext("powershell.exe"), "ps1");
+        assert_eq!(binary_to_ext("pwsh"), "ps1");
+    }
+
+    #[test]
+    fn test_binary_to_ext_unknown_falls_back_to_py() {
+        // 未知二进制回退为 py（与历史行为一致）
+        assert_eq!(binary_to_ext("some-mystery-bin"), "py");
+    }
+
+    // ============ is_supported_ext ============
+
+    #[test]
+    fn test_is_supported_ext() {
+        for ext in ["exe", "com", "py", "bat", "cmd", "sh"] {
+            assert!(is_supported_ext(ext), "{ext} 应受支持");
+        }
+        for ext in ["ps1", "txt", "", "js"] {
+            assert!(!is_supported_ext(ext), "{ext} 不应受支持");
+        }
+    }
 }

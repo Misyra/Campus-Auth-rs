@@ -7,8 +7,8 @@
 //! `TaskExecutor` / `StatusManager`，并通过 `ConfigReloadSignal` 流感知配置变更；
 //! `start` 启动后台调度 task 并返回可停止的 `ServiceHandle`。
 
-pub mod task;
 pub mod cron_loop;
+pub mod task;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,15 +17,16 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::config::runtime::ConfigReloadSignal;
 use crate::config::ConfigService;
+use crate::config::runtime::ConfigReloadSignal;
 use crate::status::StatusManager;
 use crate::tasks::TaskManager;
+use crate::web::error::ApiError;
 
 pub use self::cron_loop::execute_scheduled_task;
 use self::task::{
-    append_history, history_dir_of, ScheduledTask, SCHEDULED_DIR_NAME, HISTORY_DIR_NAME,
-    CHANGE_CHANNEL_CAPACITY, MAX_CONCURRENT_SCHEDULED_TASKS,
+    CHANGE_CHANNEL_CAPACITY, HISTORY_DIR_NAME, MAX_CONCURRENT_SCHEDULED_TASKS, SCHEDULED_DIR_NAME,
+    ScheduledTask, append_history, history_dir_of, map_history_records,
 };
 
 /// 调度器错误类型。
@@ -171,9 +172,17 @@ impl SchedulerService {
     /// 启动调度循环，返回可停止的服务句柄。
     pub async fn start(self: Arc<Self>) -> ServiceHandle {
         let (stop_tx, stop_rx) = watch::channel(false);
-        let task_change_rx = self.task_change_rx.lock().await.take()
+        let task_change_rx = self
+            .task_change_rx
+            .lock()
+            .await
+            .take()
             .expect("SchedulerService::start() 只能调用一次");
-        let reload_rx = self.reload_rx.lock().await.take()
+        let reload_rx = self
+            .reload_rx
+            .lock()
+            .await
+            .take()
             .expect("SchedulerService::start() 只能调用一次");
         let svc = self.clone();
         let join_handle = tokio::spawn(async move {
@@ -187,7 +196,11 @@ impl SchedulerService {
 
     /// 返回内存缓存中的任务列表副本。
     pub fn list_tasks(&self) -> Vec<ScheduledTask> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).tasks.clone()
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tasks
+            .clone()
     }
 
     /// 返回目标任务的类型（`browser`/`script`/`shell`），供展示层补充类型标签。
@@ -195,11 +208,11 @@ impl SchedulerService {
     /// 类型权威来源为 [`crate::tasks::TaskKind`]（由 target_id 关联的任务推导），
     /// 定时任务存储模型本身不再冗余存类型。
     pub async fn task_type_of(&self, target_id: &str) -> Option<&'static str> {
-        match self.task_manager.load_task(target_id).await.ok()? {
-            crate::tasks::TaskKind::Browser(_) => Some("browser"),
-            crate::tasks::TaskKind::Script(_) => Some("script"),
-            crate::tasks::TaskKind::Shell(_) => Some("shell"),
-        }
+        self.task_manager
+            .load_task(target_id)
+            .await
+            .ok()
+            .map(|task| task.type_name())
     }
 
     /// 查询单个任务。
@@ -229,8 +242,10 @@ impl SchedulerService {
         // 同步 fs 写入放入 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
         let path_for_blocking = path.clone();
         let to_save_for_blocking = to_save.clone();
-        tokio::task::spawn_blocking(move || ScheduledTask::save_to(&path_for_blocking, &to_save_for_blocking))
-            .await??;
+        tokio::task::spawn_blocking(move || {
+            ScheduledTask::save_to(&path_for_blocking, &to_save_for_blocking)
+        })
+        .await??;
 
         self.update_state(|s| {
             if let Some(existing) = s.tasks.iter_mut().find(|t| t.id == id) {
@@ -302,12 +317,17 @@ impl SchedulerService {
     /// 将当前运行状态广播到 StatusManager。
     fn publish_status(&self) {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let (running, next, count) = (s.running, s.next_fire_at.map(systemtime_to_iso), s.tasks.len());
-        self.status_manager.merge(crate::status::PartialSnapshot::Scheduler {
-            running,
-            next_fire_at: next,
-            task_count: count,
-        });
+        let (running, next, count) = (
+            s.running,
+            s.next_fire_at.map(systemtime_to_iso),
+            s.tasks.len(),
+        );
+        self.status_manager
+            .merge(crate::status::PartialSnapshot::Scheduler {
+                running,
+                next_fire_at: next,
+                task_count: count,
+            });
     }
 
     /// 任务执行后更新 `last_run` / `last_result`（内存 + 磁盘）。
@@ -400,6 +420,26 @@ impl SchedulerService {
         history_dir_of(&self.scheduled_dir)
     }
 
+    /// 读取定时任务执行历史并映射为前端期望的扁平数组（内聚 id 校验 + 读盘 +
+    /// 字段映射；此前由 web 层 handler 直接读盘跨层实现，M11 收敛入调度域）。
+    ///
+    /// 历史文件不存在时返回空数组；JSON 损坏时按空历史容错（不因历史文件
+    /// 损坏让 API 报错）。
+    pub(crate) async fn read_history(&self, id: &str) -> Result<Vec<serde_json::Value>, ApiError> {
+        // id 直接拼接路径，必须先校验防止路径穿越读取任意 .json
+        if !ScheduledTask::is_valid_id(id) {
+            return Err(ApiError::BadRequest(format!("非法任务 ID: {id}")));
+        }
+        let path = history_dir_of(&self.scheduled_dir).join(format!("{id}.json"));
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = tokio::fs::read_to_string(&path).await?;
+        let raw: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or(serde_json::json!({"runs": []}));
+        Ok(map_history_records(&raw))
+    }
+
     /// 追加一条执行历史记录。
     pub(crate) async fn add_history_record(
         &self,
@@ -462,6 +502,9 @@ pub trait SchedulerApi: Send + Sync {
     fn spawn_manual_run(&self, task: ScheduledTask);
     /// 返回定时任务历史目录路径。
     fn history_dir(&self) -> PathBuf;
+    /// 读取任务执行历史（内聚 id 校验 + 读盘 + 前端字段映射），
+    /// 返回扁平数组 `[{ run_at, success, message }]`。
+    async fn read_history(&self, id: &str) -> Result<Vec<serde_json::Value>, ApiError>;
 }
 
 #[async_trait::async_trait]
@@ -504,6 +547,10 @@ impl SchedulerApi for SchedulerService {
 
     fn history_dir(&self) -> PathBuf {
         SchedulerService::history_dir(self)
+    }
+
+    async fn read_history(&self, id: &str) -> Result<Vec<serde_json::Value>, ApiError> {
+        SchedulerService::read_history(self, id).await
     }
 }
 

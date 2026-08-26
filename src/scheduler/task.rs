@@ -112,16 +112,15 @@ impl ScheduledTask {
     /// 校验任务 id 是否符合命名规则（字母数字、下划线、连字符，且不以 `.` 开头）。
     pub(crate) fn is_valid_id(id: &str) -> bool {
         !id.is_empty()
-            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
             && !id.starts_with('.')
     }
 }
 
 /// 原子写入 JSON（委托给 utils::io::atomic_write_json）
-pub(crate) fn atomic_write_json(
-    path: &Path,
-    value: &impl Serialize,
-) -> Result<(), SchedulerError> {
+pub(crate) fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), SchedulerError> {
     crate::utils::atomic_write_json(path, value).map_err(SchedulerError::IoError)
 }
 
@@ -172,6 +171,36 @@ pub(crate) fn append_history(
 /// 返回某任务目录对应的历史目录。
 pub(crate) fn history_dir_of(scheduled_dir: &Path) -> PathBuf {
     scheduled_dir.join(HISTORY_DIR_NAME)
+}
+
+/// 将磁盘历史 `{ "runs": [{ timestamp, status, message, ... }] }` 映射为前端期望的
+/// 扁平数组 `[{ run_at, success, message }]`。`success` 由 `status == "success"` 推导。
+///
+/// 纯函数：无 I/O，供 [`crate::scheduler::SchedulerService::read_history`]（原
+/// web/routes/scheduler.rs 的 job_history handler）复用；字段缺失时按 null/false 容错。
+pub(crate) fn map_history_records(raw: &serde_json::Value) -> Vec<serde_json::Value> {
+    use serde_json::Value;
+    let runs = raw
+        .get("runs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    runs.into_iter()
+        .map(|record| {
+            let run_at = record.get("timestamp").cloned().unwrap_or(Value::Null);
+            let success = record
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "success")
+                .unwrap_or(false);
+            let message = record.get("message").cloned().unwrap_or(Value::Null);
+            serde_json::json!({
+                "run_at": run_at,
+                "success": success,
+                "message": message
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -368,7 +397,10 @@ mod tests {
         let file: HistoryFile = serde_json::from_str(&content).unwrap();
         assert_eq!(file.runs.len(), MAX_HISTORY_RECORDS);
         // 最旧的记录应被裁剪，保留的最后一条应是 "run {total-1}"
-        assert_eq!(file.runs.last().unwrap().message, format!("run {}", total - 1));
+        assert_eq!(
+            file.runs.last().unwrap().message,
+            format!("run {}", total - 1)
+        );
     }
 
     #[test]
@@ -402,6 +434,49 @@ mod tests {
         let scheduled = PathBuf::from("/tasks/scheduled");
         let history = history_dir_of(&scheduled);
         assert_eq!(history, PathBuf::from("/tasks/scheduled/history"));
+    }
+
+    // ============ map_history_records 测试（自 web/routes/scheduler.rs 随迁） ============
+
+    #[test]
+    fn map_history_lossy_mapping() {
+        let raw = serde_json::json!({
+            "runs": [
+                { "timestamp": "2026-08-14T01:00:00Z", "status": "success", "message": "完成", "duration": 1.2 },
+                { "timestamp": "2026-08-14T02:00:00Z", "status": "error", "message": "失败" },
+                { "status": "success" },
+                { "message": "无状态" },
+            ]
+        });
+        let mapped = map_history_records(&raw);
+        assert_eq!(mapped.len(), 4);
+        // success 由 status == "success" 推导
+        assert_eq!(mapped[0]["success"], serde_json::json!(true));
+        assert_eq!(mapped[1]["success"], serde_json::json!(false));
+        // 无 status 时 success 为 false；无 timestamp 时为 null
+        assert_eq!(mapped[2]["success"], serde_json::json!(true));
+        assert_eq!(mapped[2]["run_at"], serde_json::Value::Null);
+        assert_eq!(mapped[3]["success"], serde_json::json!(false));
+        assert_eq!(mapped[3]["message"], serde_json::json!("无状态"));
+    }
+
+    #[test]
+    fn map_history_missing_or_empty_runs() {
+        // 无 runs 字段 → 空数组
+        assert_eq!(
+            map_history_records(&serde_json::json!({})),
+            Vec::<serde_json::Value>::new()
+        );
+        // runs 为空数组 → 空数组
+        assert_eq!(
+            map_history_records(&serde_json::json!({"runs": []})),
+            Vec::<serde_json::Value>::new()
+        );
+        // runs 非数组 → 空数组
+        assert_eq!(
+            map_history_records(&serde_json::json!({"runs": "x"})),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     // ============ 常量测试 ============

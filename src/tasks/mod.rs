@@ -4,13 +4,13 @@
 //! （[`TaskExecutor`]）。任务数据模型见 [`models`]；任务执行统一结果见 [`TaskResult`]；
 //! 统一错误类型见 [`TaskError`]。
 
-pub mod models;
-pub mod loader;
 pub mod executor;
+pub mod loader;
+pub mod models;
 
-pub use models::*;
-pub use loader::{TaskManager, TaskSummary, OrderData, TaskDetail};
 pub use executor::{TaskExecutor, TaskResult};
+pub use loader::{OrderData, TaskDetail, TaskManager, TaskSummary};
+pub use models::*;
 
 use thiserror::Error;
 

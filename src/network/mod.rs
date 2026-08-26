@@ -7,10 +7,10 @@ pub mod detect;
 pub mod interfaces;
 
 pub use detect::{
-    create_detector, InterfaceInfo, LinuxDetect, MacosDetect, NetworkDetect, NetworkError,
-    UnsupportedDetect, WindowsDetect,
+    InterfaceInfo, LinuxDetect, MacosDetect, NetworkDetect, NetworkError, UnsupportedDetect,
+    WindowsDetect, create_detector,
 };
 pub use interfaces::{
-    filter_interfaces, is_excluded, virtual_if_patterns, VIRTUAL_IF_PATTERNS_LINUX,
-    VIRTUAL_IF_PATTERNS_MACOS, VIRTUAL_IF_PATTERNS_WINDOWS,
+    VIRTUAL_IF_PATTERNS_LINUX, VIRTUAL_IF_PATTERNS_MACOS, VIRTUAL_IF_PATTERNS_WINDOWS,
+    filter_interfaces, is_excluded, virtual_if_patterns,
 };

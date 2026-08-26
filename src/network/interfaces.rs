@@ -3,23 +3,49 @@
 use crate::network::detect::InterfaceInfo;
 
 /// Windows 虚拟网卡特征模式（全小写，用于 case-insensitive contains 匹配）
+///
+/// 单一权威特征表（A3）：原 detect.rs 的 `is_virtual_interface`（7 条）已删除，
+/// 差异特征（npcap / docker / 隧道）并入本表；并补充 tap / tun / wireguard /
+/// clash 等常见 VPN 与虚拟化接口模式。
 pub const VIRTUAL_IF_PATTERNS_WINDOWS: &[&str] = &[
-    "vethernet",    // Hyper-V Virtual Ethernet
-    "hyper-v",      // Hyper-V Virtual Ethernet Adapter
-    "vmware",       // VMware Network Adapter
-    "virtualbox",   // VirtualBox Host-Only Network
-    "loopback",     // Loopback Pseudo-Interface
-    "virtual",      // Virtual Ethernet / Virtual Adapter
-    "pseudo",       // Pseudo-Interface
-    "tunnel",       // Tunnel / Tunneling
-    "miniport",     // WAN Miniport
-    "teredo",       // Teredo Tunneling
+    "vethernet",  // Hyper-V Virtual Ethernet
+    "hyper-v",    // Hyper-V Virtual Ethernet Adapter
+    "vmware",     // VMware Network Adapter
+    "virtualbox", // VirtualBox Host-Only Network
+    "loopback",   // Loopback Pseudo-Interface
+    "virtual",    // Virtual Ethernet / Virtual Adapter
+    "pseudo",     // Pseudo-Interface
+    "tunnel",     // Tunnel / Tunneling
+    "miniport",   // WAN Miniport
+    "teredo",     // Teredo Tunneling
+    "npcap",      // Npcap Loopback Adapter（自 detect.rs 并入）
+    "docker",     // DockerNAT / Docker Virtual NIC（自 detect.rs 并入）
+    "隧道",       // 中文"隧道适配器"（自 detect.rs 并入）
+    "tap",        // TAP-Windows Adapter（OpenVPN 等）
+    "tun",        // Wintun（WireGuard 系隧道）
+    "wireguard",  // WireGuard Tunnel
+    "clash",      // Clash / Clash Verge 虚拟网卡
 ];
-/// Linux 虚拟网卡特征模式
-pub const VIRTUAL_IF_PATTERNS_LINUX: &[&str] =
-    &["docker", "veth", "br-", "virbr", "tun", "tap", "bond", "dummy", "vmnet", "vboxnet"];
-/// macOS 虚拟网卡特征模式
-pub const VIRTUAL_IF_PATTERNS_MACOS: &[&str] = &["bridge", "vboxnet", "vmnet"];
+/// Linux 虚拟网卡特征模式（补充 wireguard / clash 系隧道，A3）
+pub const VIRTUAL_IF_PATTERNS_LINUX: &[&str] = &[
+    "docker",
+    "veth",
+    "br-",
+    "virbr",
+    "tun",
+    "tap",
+    "bond",
+    "dummy",
+    "vmnet",
+    "vboxnet",
+    "wireguard",
+    "wg",
+    "clash",
+];
+/// macOS 虚拟网卡特征模式（补充 wireguard / clash 系隧道，A3；utun/awdl 由
+/// detect.rs 的 `is_macos_virtual` 前缀判定覆盖，此处为兜底过滤补充）
+pub const VIRTUAL_IF_PATTERNS_MACOS: &[&str] =
+    &["bridge", "vboxnet", "vmnet", "wireguard", "clash"];
 
 /// 返回当前平台的虚拟网卡特征模式
 pub fn virtual_if_patterns() -> &'static [&'static str] {

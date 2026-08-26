@@ -10,24 +10,22 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use tokio::sync::{broadcast, watch};
 use tokio::sync::mpsc;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, MenuId};
+use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::app::{self, AxumServeHandle, RUNTIME_PORT_FILE};
 use crate::config::{ConfigService, ProfileService};
 use crate::container::ServiceContainer;
 use crate::engine::{EngineCommand, EngineSlot};
-use crate::status::{
-    EngineState, LoginStatus, NetworkStatus, StatusManager, StatusSnapshot,
-};
+use crate::status::{EngineState, LoginStatus, NetworkStatus, StatusManager, StatusSnapshot};
 use crate::updater::UpdaterService;
 use crate::web::state::LogEntry;
 
@@ -73,6 +71,7 @@ pub enum TrayAction {
 pub use crate::ServiceHandle;
 
 /// 托盘业务依赖集合（构造时一次性注入，避免函数参数过多触发 clippy `too_many_arguments`）
+#[derive(Clone)]
 pub struct TrayDeps {
     /// 配置服务（读取端口、Profile 列表等）
     pub config: Arc<ConfigService>,
@@ -96,28 +95,11 @@ pub struct TrayDeps {
     pub shutdown: CancellationToken,
 }
 
-/// 托盘管理器：持有各服务 Arc 与跨线程通道，负责创建并驱动托盘
+/// 托盘管理器：整体持有 [`TrayDeps`]（单一字段，不再逐字段镜像复制），
+/// 另持有自身专属的跨线程通道，负责创建并驱动托盘
 pub struct TrayManager {
-    /// 配置服务（读取端口、Profile 列表等）
-    config: Arc<ConfigService>,
-    /// 状态管理器（订阅状态以更新 tooltip/图标，并取活跃 Profile）
-    status: Arc<StatusManager>,
-    /// 引擎句柄槽（派发命令）
-    engine: EngineSlot,
-    /// Profile 服务（枚举 Profile 构建子菜单）
-    profile_service: Arc<ProfileService>,
-    /// 更新服务（检查更新）
-    updater: Arc<UpdaterService>,
-    /// 服务容器（轻量模式按需启动 Axum 时需要）
-    container: Arc<ServiceContainer>,
-    /// 日志广播通道（按需启动 Axum 时需要）
-    log_tx: broadcast::Sender<LogEntry>,
-    /// 默认监听端口（Axum 未运行时回退使用）
-    port: u16,
-    /// 是否运行在轻量模式（Axum 按需启动）
-    lightweight: bool,
-    /// 应用级关闭令牌（Quit 时取消）
-    shutdown: CancellationToken,
+    /// 业务依赖集合（spawn 时 clone 移入泵任务）
+    deps: TrayDeps,
 
     /// 菜单动作发送端（OS 线程 → 泵任务）
     action_tx: mpsc::Sender<TrayAction>,
@@ -139,16 +121,7 @@ impl TrayManager {
         let (action_tx, action_rx) = mpsc::channel(ACTION_CHANNEL_CAPACITY);
         let (os_cmd_tx, os_cmd_rx) = std_mpsc::channel();
         Arc::new(Self {
-            config: deps.config,
-            status: deps.status,
-            engine: deps.engine,
-            profile_service: deps.profile_service,
-            updater: deps.updater,
-            container: deps.container,
-            log_tx: deps.log_tx,
-            port: deps.port,
-            lightweight: deps.lightweight,
-            shutdown: deps.shutdown,
+            deps,
             action_tx,
             action_rx: Mutex::new(Some(action_rx)),
             os_cmd_tx,
@@ -175,27 +148,15 @@ impl TrayManager {
             .expect("spawn 仅可被调用一次");
 
         // 跨线程共享的数据（OS 线程独占持有 TrayIcon，仅取所需 Arc）
-        let status = Arc::clone(&self.status);
+        let status = Arc::clone(&self.deps.status);
         let status_for_pump = status.clone();
         let action_tx = self.action_tx.clone();
         let os_cmd_tx_pump = self.os_cmd_tx.clone();
         let os_join = Arc::clone(&self.os_join);
-        // 泵任务需要的全部业务依赖打包为 TrayDeps（含 container/log_tx/port/lightweight）
-        let deps = TrayDeps {
-            config: Arc::clone(&self.config),
-            status: Arc::clone(&self.status),
-            engine: self.engine.clone(),
-            profile_service: Arc::clone(&self.profile_service),
-            updater: Arc::clone(&self.updater),
-            container: Arc::clone(&self.container),
-            log_tx: self.log_tx.clone(),
-            port: self.port,
-            lightweight: self.lightweight,
-            shutdown: self.shutdown.clone(),
-        };
+        // 泵任务需要的全部业务依赖：整体 clone 一份（不再逐字段手工重建镜像）
+        let deps = self.deps.clone();
         // 轻量模式下按需启动的 Axum 句柄（仅在该模式首次「打开控制台」时创建）
-        let axum_handle: Arc<Mutex<Option<AxumServeHandle>>> =
-            Arc::new(Mutex::new(None));
+        let axum_handle: Arc<Mutex<Option<AxumServeHandle>>> = Arc::new(Mutex::new(None));
 
         // ---- OS 托盘线程：构建菜单与图标，独占持有 TrayIcon，等待命令 ----
         let os_handle = thread::spawn(move || {
@@ -262,7 +223,12 @@ impl TrayManager {
 
             // 注册全局托盘图标事件处理器：左键单击打开 Web 控制台
             TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-                if let TrayIconEvent::Click { button, button_state, .. } = event {
+                if let TrayIconEvent::Click {
+                    button,
+                    button_state,
+                    ..
+                } = event
+                {
                     if button == tray_icon::MouseButton::Left
                         && button_state == tray_icon::MouseButtonState::Up
                     {
@@ -397,7 +363,12 @@ impl Drop for TrayManager {
     fn drop(&mut self) {
         // 若泵任务尚未触发退出，这里确保 OS 线程被通知并 join
         let _ = self.os_cmd_tx.send(OsCommand::Quit);
-        if let Some(h) = self.os_join.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(h) = self
+            .os_join
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             let _ = h.join();
         }
     }
@@ -425,33 +396,31 @@ async fn handle_action(
             false
         }
         TrayAction::OpenWeb => {
-            // 轻量模式：Axum 未常驻，首次打开控制台时按需启动
-            if deps.lightweight && axum_handle.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
-                match app::start_axum(deps.container.clone(), deps.log_tx.clone(), deps.port).await {
+            // 轻量模式：Axum 未常驻，首次打开控制台时按需启动。
+            // std Mutex 守卫不可跨 await 持有（会破坏泵任务的 Send 约束），
+            // 故存在性检查、启动、写回分别短锁
+            if deps.lightweight
+                && axum_handle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_none()
+            {
+                match app::start_axum(deps.container.clone(), deps.log_tx.clone(), deps.port).await
+                {
                     Ok(h) => {
+                        // 同步实际端口到 `.instance`（PID + PORT），使 --status / --stop
+                        // 读到真实端口：初始 record_port 只记录配置端口，+1 重试后会失配（历史遗留 M5）
+                        write_instance_port(&deps.config.base_path(), h.port);
                         let mut g = axum_handle.lock().unwrap_or_else(|e| e.into_inner());
                         if g.is_none() {
                             *g = Some(h);
                         }
                         info!("托盘按需启动 Axum 成功");
-                        // 同步实际端口到 `.instance`（PID + PORT），使 --status / --stop
-                        // 读到真实端口：初始 record_port 只记录配置端口，+1 重试后会失配（历史遗留 M5）
-                        if let Some(h) = axum_handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                            write_instance_port(&deps.config.base_path(), h.port);
-                        }
                     }
                     Err(e) => warn!("托盘按需启动 Axum 失败: {e}"),
                 }
             }
-            // 优先读取运行时端口文件（按需启动后写入），回退到默认端口
-            let eff_port = match read_runtime_port(&deps.config) {
-                Some(p) => p,
-                None => match axum_handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                    Some(h) => h.port,
-                    None => deps.port,
-                },
-            };
-            let url = format!("http://127.0.0.1:{eff_port}");
+            let url = format!("http://127.0.0.1:{}", resolve_web_port(deps, axum_handle));
             if let Err(e) = open::that(&url) {
                 warn!("打开浏览器失败 ({url}): {e}");
             } else {
@@ -524,7 +493,12 @@ fn build_menu() -> MenuBuildResult {
     let toggle_item = MenuItem::with_id(MenuId::new("monitor_toggle"), "启动监测", true, None);
     let menu_items: Vec<Box<dyn IsMenuItem>> = vec![
         Box::new(toggle_item.clone()),
-        Box::new(MenuItem::with_id(MenuId::new("open_web"), "打开控制台", true, None)),
+        Box::new(MenuItem::with_id(
+            MenuId::new("open_web"),
+            "打开控制台",
+            true,
+            None,
+        )),
         Box::new(MenuItem::with_id(MenuId::new("quit"), "退出", true, None)),
     ];
 
@@ -553,13 +527,26 @@ fn icon_path() -> PathBuf {
 
 /// 读取运行时端口文件（`config/.runtime_port`，轻量模式按需启动 Axum 后写入）
 fn read_runtime_port(config: &Arc<ConfigService>) -> Option<u16> {
-    let path = config
-        .base_path()
-        .join("config")
-        .join(RUNTIME_PORT_FILE);
+    let path = config.base_path().join("config").join(RUNTIME_PORT_FILE);
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
+}
+
+/// 解析 Web 控制台的实际打开端口：优先运行时端口文件（按需启动 Axum 后写入），
+/// 回退到按需启动的 Axum 句柄端口，最后回退默认端口。
+///
+/// 收敛原 OpenWeb 分支两段冗余回退读端口的样板：对 `axum_handle` 仅加锁一次。
+fn resolve_web_port(deps: &TrayDeps, axum_handle: &Arc<Mutex<Option<AxumServeHandle>>>) -> u16 {
+    read_runtime_port(&deps.config)
+        .or_else(|| {
+            axum_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|h| h.port)
+        })
+        .unwrap_or(deps.port)
 }
 
 /// 重写 `.instance` 信息文件（PID + 端口），与 [`crate::utils::lock::InstanceLock::record_port`]
@@ -646,7 +633,7 @@ fn login_status_str(s: LoginStatus) -> &'static str {
 #[cfg(windows)]
 fn pump_windows_messages() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
     };
     unsafe {
         let mut msg: MSG = std::mem::zeroed();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::network::interfaces::is_excluded;
 
 // ============ extract_ipv4 测试 ============
 
@@ -64,41 +65,51 @@ fn test_adapter_name_no_prefix() {
     assert_eq!(adapter_name(header), "SomeHeader");
 }
 
-// ============ is_virtual_interface 测试 ============
+// ============ 虚拟网卡特征表（A3：统一走 interfaces::is_excluded） ============
 
 #[test]
 fn test_is_virtual_vmware() {
-    assert!(is_virtual_interface("VMware Network Adapter"));
-    assert!(is_virtual_interface("vmware8"));
+    assert!(is_excluded("VMware Network Adapter"));
+    assert!(is_excluded("vmware8"));
 }
 
 #[test]
 fn test_is_virtual_vbox() {
-    assert!(is_virtual_interface("VirtualBox Host-Only Ethernet Adapter"));
+    assert!(is_excluded("VirtualBox Host-Only Ethernet Adapter"));
 }
 
 #[test]
 fn test_is_virtual_docker() {
-    assert!(is_virtual_interface("DockerNAT"));
-    assert!(is_virtual_interface("docker0"));
+    assert!(is_excluded("DockerNAT"));
+    assert!(is_excluded("docker0"));
 }
 
 #[test]
 fn test_is_virtual_tunnel() {
-    assert!(is_virtual_interface("隧道适配器 Tunnel"));
-    assert!(is_virtual_interface("Tunnel Adapter"));
+    assert!(is_excluded("隧道适配器 Tunnel"));
+    assert!(is_excluded("Tunnel Adapter"));
 }
 
 #[test]
 fn test_is_virtual_npcap() {
-    assert!(is_virtual_interface("Npcap Loopback Adapter"));
+    assert!(is_excluded("Npcap Loopback Adapter"));
+}
+
+#[test]
+fn test_is_virtual_vpn_tun_tap_wireguard_clash() {
+    // A3 补充的常见 VPN / 隧道接口模式
+    assert!(is_excluded("TAP-Windows Adapter V9"));
+    assert!(is_excluded("Wintun Userspace Tunnel"));
+    assert!(is_excluded("WireGuard Tunnel"));
+    assert!(is_excluded("Clash Verge Virtual NIC"));
 }
 
 #[test]
 fn test_is_not_virtual_normal_interface() {
-    assert!(!is_virtual_interface("以太网"));
-    assert!(!is_virtual_interface("WLAN"));
-    assert!(!is_virtual_interface("Wi-Fi"));
+    assert!(!is_excluded("以太网"));
+    assert!(!is_excluded("WLAN"));
+    assert!(!is_excluded("Wi-Fi"));
+    assert!(!is_excluded("Ethernet"));
 }
 
 // ============ parse_netsh_ssid 测试（Windows 格式） ============
@@ -252,7 +263,10 @@ fn test_parse_ipconfig_gbk_chinese_labels() {
     let decoded = decode_console_output(gbk_bytes);
     // 确认解码后包含中文标签
     assert!(decoded.contains("适配器"), "decode 应正确解码 '适配器'");
-    assert!(decoded.contains("IPv4 地址"), "decode 应正确解码 'IPv4 地址'");
+    assert!(
+        decoded.contains("IPv4 地址"),
+        "decode 应正确解码 'IPv4 地址'"
+    );
     assert!(decoded.contains("WLAN 2:"), "decode 应保留 'WLAN 2:'");
     let interfaces = parse_ipconfig(&decoded);
     assert_eq!(
@@ -340,6 +354,44 @@ inet 10.0.0.5/24 scope global eth1
 fn test_parse_ip_addr_empty() {
     let interfaces = parse_ip_addr("");
     assert!(interfaces.is_empty());
+}
+
+#[test]
+fn test_parse_ip_addr_multidigit_interface_index() {
+    // G10：接口序号 ≥10（"10:" / "255:"）应正确开新块，inet 行不得并入上一接口。
+    // 原 strip_prefix(is_ascii_digit) 只剥一个数字，"10: eth0:" 无法识别。
+    let input = r#"1: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+inet 192.168.1.1/24 scope global eth1
+9: eth9: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+inet 192.168.1.9/24 scope global eth9
+10: eth10: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+inet 192.168.1.10/24 scope global eth10
+255: eth255: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+inet 192.168.1.255/24 scope global eth255
+"#;
+    let interfaces = parse_ip_addr(input);
+    assert_eq!(interfaces.len(), 4, "四个接口都应独立解析: {interfaces:?}");
+    assert_eq!(interfaces[0].name, "eth1");
+    assert_eq!(interfaces[0].ipv4, Ipv4Addr::new(192, 168, 1, 1));
+    assert_eq!(interfaces[1].name, "eth9");
+    assert_eq!(interfaces[1].ipv4, Ipv4Addr::new(192, 168, 1, 9));
+    assert_eq!(interfaces[2].name, "eth10");
+    assert_eq!(interfaces[2].ipv4, Ipv4Addr::new(192, 168, 1, 10));
+    assert_eq!(interfaces[3].name, "eth255");
+    assert_eq!(interfaces[3].ipv4, Ipv4Addr::new(192, 168, 1, 255));
+}
+
+#[test]
+fn test_parse_ip_addr_non_digit_prefix_not_header() {
+    // 冒号前段非纯数字的行（如 IPv6 地址行）不应被误认为接口标题
+    let input = r#"2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+inet 192.168.1.100/24 scope global eth0
+inet6 2001:db8::1/64 scope global eth0
+"#;
+    let interfaces = parse_ip_addr(input);
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].name, "eth0");
+    assert_eq!(interfaces[0].ipv4, Ipv4Addr::new(192, 168, 1, 100));
 }
 
 // ============ parse_ifconfig 测试（macOS 格式） ============

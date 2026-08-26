@@ -20,10 +20,7 @@ pub enum NetworkError {
 
     /// 子进程超时
     #[error("子进程超时: {command} ({timeout_secs}s)")]
-    SubprocessTimeout {
-        command: String,
-        timeout_secs: u64,
-    },
+    SubprocessTimeout { command: String, timeout_secs: u64 },
 
     /// 解析系统命令输出失败
     #[error("解析系统命令输出失败: {command}")]
@@ -109,7 +106,10 @@ async fn run_command(program: &str, args: &[&str]) -> Result<String, NetworkErro
 fn decode_console_output(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
-        Err(_) => encoding_rs::GBK.decode_without_bom_handling(bytes).0.into_owned(),
+        Err(_) => encoding_rs::GBK
+            .decode_without_bom_handling(bytes)
+            .0
+            .into_owned(),
     }
 }
 
@@ -121,7 +121,8 @@ fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
     for line in text.lines() {
         let trimmed = line.trim();
         // 适配器标题行：形如 “以太网适配器 以太网:” / “Wireless LAN adapter WLAN:”
-        let is_header = (trimmed.contains("适配器") || trimmed.to_ascii_lowercase().contains("adapter"))
+        let is_header = (trimmed.contains("适配器")
+            || trimmed.to_ascii_lowercase().contains("adapter"))
             && trimmed.ends_with(':');
         if is_header {
             if in_block && !current.is_empty() {
@@ -180,7 +181,9 @@ fn parse_adapter_block(block: &str) -> Option<InterfaceInfo> {
         return None;
     }
     let name = adapter_name(header);
-    if name.is_empty() || is_virtual_interface(&name) {
+    // 虚拟网卡特征统一查 interfaces::is_excluded 的单一权威表（A3）：
+    // 原 detect.rs 私有的 7 条 is_virtual_interface 已并入该表
+    if name.is_empty() || crate::network::interfaces::is_excluded(&name) {
         return None;
     }
     let ipv4 = ipv4?;
@@ -255,18 +258,6 @@ fn parse_netsh_ssid(text: &str) -> Option<String> {
     None
 }
 
-/// 是否为虚拟/隧道接口（不参与联网状态判断）
-fn is_virtual_interface(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    n.contains("vmware")
-        || n.contains("virtualbox")
-        || n.contains("vethernet")
-        || n.contains("docker")
-        || n.contains("npcap")
-        || n.contains("隧道")
-        || n.contains("tunnel")
-}
-
 /// Windows 网络检测器
 pub struct WindowsDetect;
 
@@ -275,9 +266,9 @@ impl NetworkDetect for WindowsDetect {
     async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
         let out = run_command("ipconfig", &["/all"]).await?;
         // 解析后兜底过滤：排除虚拟/回环/链路本地/未指定地址
-        Ok(crate::network::interfaces::filter_interfaces(parse_ipconfig(
-            &out,
-        )))
+        Ok(crate::network::interfaces::filter_interfaces(
+            parse_ipconfig(&out),
+        ))
     }
 
     async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
@@ -316,9 +307,9 @@ impl NetworkDetect for LinuxDetect {
     async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
         let out = run_command("ip", &["addr", "show"]).await?;
         // 解析后兜底过滤：排除虚拟/回环/链路本地/未指定地址
-        Ok(crate::network::interfaces::filter_interfaces(parse_ip_addr(
-            &out,
-        )))
+        Ok(crate::network::interfaces::filter_interfaces(
+            parse_ip_addr(&out),
+        ))
     }
 
     async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
@@ -428,31 +419,43 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
     let mut in_block = false;
 
     for line in text.lines() {
-        // 接口标题行: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> ..."
-        if let Some(rest) = line.strip_prefix(|c: char| c.is_ascii_digit()) {
-            if let Some(rest) = rest.strip_prefix(": ") {
-                // 提取接口名（去掉 @ 后缀）
-                let name = rest.split(':').next().unwrap_or("").split('@').next().unwrap_or("").trim();
-                // 保存上一个接口
-                if in_block {
-                    if let Some(ipv4) = current_ipv4 {
-                        if !is_linux_virtual(&current_name) && current_is_up {
-                            let is_wifi = current_name.starts_with("wl");
-                            result.push(InterfaceInfo {
-                                name: current_name.clone(),
-                                ipv4,
-                                gateway: None,
-                                is_wifi,
-                                ssid: None,
-                            });
-                        }
+        // 接口标题行: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> ..."。
+        // 序号可为多位数字（接口数 ≥10 时出现 "10:"、"255:"），原先
+        // strip_prefix(is_ascii_digit) 只剥一个数字，"10: eth0:" 无法识别且
+        // 其 inet 行被并入上一个接口（G10）。改为按首个冒号切分，校验冒号
+        // 前段非空且全为数字才认定是标题行。
+        let header_rest = line
+            .split_once(':')
+            .filter(|(idx, _)| !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()));
+        if let Some((_, rest)) = header_rest {
+            // 提取接口名（去掉第二个冒号后的标志位与 @ifindex 后缀）
+            let name = rest
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .split('@')
+                .next()
+                .unwrap_or("")
+                .trim();
+            // 保存上一个接口
+            if in_block {
+                if let Some(ipv4) = current_ipv4 {
+                    if !is_linux_virtual(&current_name) && current_is_up {
+                        let is_wifi = current_name.starts_with("wl");
+                        result.push(InterfaceInfo {
+                            name: current_name.clone(),
+                            ipv4,
+                            gateway: None,
+                            is_wifi,
+                            ssid: None,
+                        });
                     }
                 }
-                current_name = name.to_string();
-                current_ipv4 = None;
-                current_is_up = line.contains("UP");
-                in_block = true;
             }
+            current_name = name.to_string();
+            current_ipv4 = None;
+            current_is_up = line.contains("UP");
+            in_block = true;
         }
         if !in_block {
             continue;

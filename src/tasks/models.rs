@@ -1,7 +1,9 @@
 //! 任务数据模型：TaskKind / TaskConfig / StepConfig 等
 //!
 //! 定义浏览器/脚本/Shell 三类任务的 serde 数据模型。`TaskKind` 为内部标记枚举，
-//! `type` 字段缺失时默认归为浏览器任务。步骤配置做 `code`→`script` 与 `frame` 类型规范化。
+//! `type` 字段缺失或为空时默认归为浏览器任务（旧版 JSON 兼容），存在但未知时
+//! 反序列化报错（与保存路径的校验一致）。步骤配置做 `code`→`script` 与 `frame`
+//! 类型规范化。
 
 use std::collections::HashMap;
 
@@ -31,8 +33,21 @@ pub const MAX_SCRIPT_CONTENT_SIZE: usize = 100 * 1024;
 pub const OUTPUT_TRUNCATE_LEN: usize = 500;
 /// 有效步骤类型集合
 pub const VALID_STEP_TYPES: &[&str] = &[
-    "input", "click", "select", "click_select", "wait", "wait_url", "eval", "screenshot",
-    "sleep", "ocr", "custom_js", "navigate", "goto", "assert_text", "upload_file",
+    "input",
+    "click",
+    "select",
+    "click_select",
+    "wait",
+    "wait_url",
+    "eval",
+    "screenshot",
+    "sleep",
+    "ocr",
+    "custom_js",
+    "navigate",
+    "goto",
+    "assert_text",
+    "upload_file",
     "wait_for_selector",
 ];
 
@@ -192,7 +207,9 @@ impl Default for ShellTaskConfig {
 
 /// 统一任务类型（内部标记枚举）
 ///
-/// `type` 字段缺失或 = "browser" 时归为浏览器任务；"script"/"shell" 分别归为对应类型。
+/// `type` 字段缺失、为空或 = "browser" 时归为浏览器任务；"script"/"shell" 分别归为
+/// 对应类型；其余未知值在反序列化时报错（与保存路径 `validate_task` 拒绝未知类型
+/// 的行为一致，避免拼错类型名时被静默当作浏览器任务执行）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskKind {
@@ -204,26 +221,69 @@ pub enum TaskKind {
     Shell(ShellTaskConfig),
 }
 
+impl TaskKind {
+    /// 借用三类任务共享的 [`CommonFields`]（收敛三臂 match 样板）
+    pub fn common(&self) -> &CommonFields {
+        match self {
+            TaskKind::Browser(c) => &c.common,
+            TaskKind::Script(c) => &c.common,
+            TaskKind::Shell(c) => &c.common,
+        }
+    }
+
+    /// 可变借用共享字段（写回 task_id / name 等）
+    pub fn common_mut(&mut self) -> &mut CommonFields {
+        match self {
+            TaskKind::Browser(c) => &mut c.common,
+            TaskKind::Script(c) => &mut c.common,
+            TaskKind::Shell(c) => &mut c.common,
+        }
+    }
+
+    /// 任务类型名（`"browser"` / `"script"` / `"shell"`，与 serde tag 取值一致）
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            TaskKind::Browser(_) => "browser",
+            TaskKind::Script(_) => "script",
+            TaskKind::Shell(_) => "shell",
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for TaskKind {
     fn deserialize<D>(d: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let value = Value::deserialize(d)?;
-        let kind = value
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("browser");
+        // 区分「type 缺失/为空 → 默认 Browser」与「type 存在但未知 → 报错」：
+        // 前者是旧版 JSON（无 type 字段）的向后兼容，后者若静默回退为浏览器任务
+        // 会与保存路径 loader::validate_task 拒绝未知类型的行为不一致（G6）
+        let kind = match value.get("type") {
+            None => "browser",
+            Some(v) if v.as_str() == Some("") => "browser",
+            Some(v) => match v.as_str() {
+                Some(s) => s,
+                None => {
+                    return Err(serde::de::Error::custom(format!(
+                        "type 字段必须为字符串: {v}"
+                    )));
+                }
+            },
+        };
         match kind {
+            "browser" => Ok(TaskKind::Browser(
+                parse::<TaskConfig>(value).map_err(serde::de::Error::custom)?,
+            )),
             "script" => Ok(TaskKind::Script(
                 parse::<ScriptTaskConfig>(value).map_err(serde::de::Error::custom)?,
             )),
             "shell" => Ok(TaskKind::Shell(
                 parse::<ShellTaskConfig>(value).map_err(serde::de::Error::custom)?,
             )),
-            _ => Ok(TaskKind::Browser(
-                parse::<TaskConfig>(value).map_err(serde::de::Error::custom)?,
-            )),
+            other => Err(serde::de::Error::custom(format!(
+                "未知任务类型: {other}（有效值: browser / script / shell）"
+            ))),
         }
     }
 }
@@ -325,7 +385,11 @@ impl Default for StepHelper {
             path: None,
             duration: 1000,
             frame: Value::Null,
-            required: false,
+            // 与 Python 侧 models.py 的步骤默认值契约对齐（B5）：required 默认 true，
+            // 登录步骤失败不应被当作可选而静默吞掉（前端编辑器不写 required 字段，
+            // 若默认 false 会全部落入"假成功"陷阱）。clear 保持 true、duration 保持
+            // 1000ms，与 Python 侧的最终对齐由双方各自确认。
+            required: true,
             option_selector: None,
             target_selector: None,
             old: false,
@@ -440,16 +504,61 @@ mod tests {
     }
 
     #[test]
-    fn test_task_kind_unknown_type_falls_back_to_browser() {
-        // 未知 type 值应 fallback 到 browser
+    fn test_task_kind_empty_type_is_browser() {
+        // type 为空串视同缺失，默认归为浏览器任务（向后兼容）
+        let json = r#"{
+            "type": "",
+            "name": "空类型",
+            "url": "http://example.com",
+            "steps": []
+        }"#;
+        let task: TaskKind = serde_json::from_str(json).unwrap();
+        assert!(matches!(task, TaskKind::Browser(_)));
+    }
+
+    #[test]
+    fn test_task_kind_unknown_type_rejected() {
+        // 未知 type 值应反序列化报错，不再静默回退为浏览器任务（G6）
         let json = r#"{
             "type": "unknown_type",
             "name": "未知类型",
             "url": "http://example.com",
             "steps": []
         }"#;
-        let task: TaskKind = serde_json::from_str(json).unwrap();
-        assert!(matches!(task, TaskKind::Browser(_)));
+        let result: Result<TaskKind, _> = serde_json::from_str(json);
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("未知任务类型"));
+        assert!(err.to_string().contains("unknown_type"));
+    }
+
+    #[test]
+    fn test_task_kind_non_string_type_rejected() {
+        // type 为非字符串（如数字）应报错，而不是误路由到浏览器任务
+        let json = r#"{
+            "type": 123,
+            "name": "数字类型",
+            "url": "http://example.com"
+        }"#;
+        let result: Result<TaskKind, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_task_kind_accessors() {
+        // common()/common_mut()/type_name() 访问器覆盖三个变体
+        let mut browser = TaskKind::Browser(TaskConfig::default());
+        assert_eq!(browser.type_name(), "browser");
+        assert_eq!(browser.common().name, "未命名任务");
+        browser.common_mut().task_id = "b1".to_string();
+        assert_eq!(browser.common().task_id, "b1");
+
+        let script = TaskKind::Script(ScriptTaskConfig::default());
+        assert_eq!(script.type_name(), "script");
+        assert_eq!(script.common().description, "");
+
+        let shell = TaskKind::Shell(ShellTaskConfig::default());
+        assert_eq!(shell.type_name(), "shell");
+        assert_eq!(shell.common().task_id, "");
     }
 
     // ============ StepConfig 反序列化 ============
@@ -579,6 +688,30 @@ mod tests {
         }"#;
         let step: StepConfig = serde_json::from_str(json).unwrap();
         assert_eq!(step.duration, 500);
+    }
+
+    #[test]
+    fn test_step_config_default_required_true() {
+        // 未写 required 字段的步骤默认为 true（B5：与 Python 侧 models.py 契约对齐，
+        // 登录步骤失败不应被当作可选而静默吞掉）
+        let json = r##"{
+            "id": "s1",
+            "type": "input",
+            "selector": "#user",
+            "value": "u"
+        }"##;
+        let step: StepConfig = serde_json::from_str(json).unwrap();
+        assert!(step.required);
+        // 显式 false 仍应保留（真正的可选步骤）
+        let json = r##"{
+            "id": "s1",
+            "type": "input",
+            "selector": "#user",
+            "value": "u",
+            "required": false
+        }"##;
+        let step: StepConfig = serde_json::from_str(json).unwrap();
+        assert!(!step.required);
     }
 
     #[test]
