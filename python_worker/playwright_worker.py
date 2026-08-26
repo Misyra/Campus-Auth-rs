@@ -36,11 +36,12 @@ from step_handlers import (
     WorkerError,
     _check_cancel,
     _classify_navigation_error,
-    _get_ocr,
-    _preprocess_ocr_image,
+
     run_step_async,
     OCR_TIMEOUT_SECS,
 )
+from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image
+from debug_session import DebugSession, _build_steps_info
 from variable_resolver import resolve
 
 logger = logging.getLogger(__name__)
@@ -281,37 +282,6 @@ class CancelRegistry:
 
 
 @dataclass
-class DebugSession:
-    """调试会话状态。"""
-
-    session_id: str
-    page: Any
-    task_config: TaskConfig
-    context: StepContext
-    cancel_id: str = ""
-    cancel_event: threading.Event | None = None
-    # 自动步进游标：前端“下一步”无显式索引时，按顺序执行尚未运行的步骤
-    current_step: int = 0
-    # 面向前端的会话数据（对齐原版 debug_to_response）：
-    # steps: [{index,id,type,description}]；results: [{step_index,success,message,running}]
-    task_id: str = ""
-    steps_info: list[dict] = field(default_factory=list)
-    results: list[dict] = field(default_factory=list)
-
-
-def _build_steps_info(task_config: TaskConfig) -> list[dict]:
-    """构建前端可展示的步骤列表（index/id/type/description）。"""
-    return [
-        {
-            "index": i,
-            "id": s.id or f"step_{i}",
-            "type": s.step_type or s.id or "?",
-            "description": s.description or "",
-        }
-        for i, s in enumerate(task_config.steps)
-    ]
-
-
 # ── Worker 核心 ──
 
 
