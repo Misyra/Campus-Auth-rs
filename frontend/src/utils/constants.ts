@@ -34,10 +34,30 @@ export const LEVEL_VALUES: Record<string, number> = {
   ERROR: 4,
 };
 
-export const LOG_SOURCES = [
-  { value: "backend", label: "backend", color: "#60a5fa" },
-  { value: "frontend", label: "frontend", color: "#a78bfa" },
-] as const;
+/**
+ * 日志来源 → 中文标签的唯一映射。
+ * Dashboard 的来源筛选下拉与日志条目来源徽标均由此派生；
+ * 未登记的来源（后端新模块 / 前端新 scope）回退显示原始标识。
+ */
+export const LOG_SOURCE_LABELS: Record<string, string> = {
+  app: "应用",
+  launcher: "启动器",
+  engine: "引擎",
+  login: "登录",
+  monitor: "监测",
+  bridge: "Bridge",
+  scheduler: "调度",
+  web: "Web",
+  config: "配置",
+  tray: "托盘",
+  updater: "更新",
+  network: "网络",
+  tasks: "任务",
+  environment: "环境",
+  python_worker: "Python Worker",
+  frontend: "前端",
+  notification: "通知",
+};
 
 export const BROWSER_ARGS_DEFAULT = [
   "--disable-blink-features=AutomationControlled",
@@ -143,12 +163,13 @@ export const DEFAULT_CONFIG: Config = {
   },
 };
 
+/** 设置页 Tab 清单（SettingsView 消费的单一来源；hint 作为 Tab 的悬停提示） */
 export const SETTINGS_TABS = [
-  { id: "account", label: "账号设置", hint: "账号、密码与认证地址" },
-  { id: "monitor", label: "网络与监控", hint: "检测策略、重试与代理" },
-  { id: "system", label: "系统与日志", hint: "日志、自启动与启动行为" },
-  { id: "browser", label: "浏览器设置", hint: "请求头、图片与浏览器参数" },
-  { id: "tasks", label: "任务设置", hint: "活动任务与模板入口" },
+  { id: "account", label: "账号", hint: "账号、密码与认证地址" },
+  { id: "monitor", label: "监测", hint: "检测策略、重试与代理" },
+  { id: "system", label: "系统", hint: "日志、自启动与启动行为" },
+  { id: "browser", label: "浏览器", hint: "请求头、图片与浏览器参数" },
+  { id: "tasks", label: "任务", hint: "活动任务与模板入口" },
 ] as const;
 
 export const DEFAULT_APPEARANCE: Appearance = {

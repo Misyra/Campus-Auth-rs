@@ -102,15 +102,14 @@ async function acceptRepoDisclaimer() {
       id = "task_" + id;
     }
     const tasks = useTasks();
-    tasks.editingTask.value = {
+    tasks.setTaskDraft({
       id,
       name: (data.name as string) || task.name || "",
       description: (data.description as string) || task.description || "",
       url: (data.url as string) || "",
       json: JSON.stringify(data, null, 2),
       _isNew: true,
-    };
-    tasks.editingTaskType.value = "browser";
+    });
     tasks.jsonError.value = "";
     closeRepoImport();
     frontendLogger.info("tasks", `已从仓库导入: ${task.name}`);

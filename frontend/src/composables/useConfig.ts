@@ -30,6 +30,9 @@ const pureModeLoading = ref(false);
 let loadingConfig = false;
 let saveSeq = 0;
 let saveAbort: AbortController | null = null;
+// G20：fetchConfig 请求序号（epoch）守卫——并发/迟到的旧响应不得写入状态，
+// 否则会无条件把 dirty 置 false 清掉用户编辑标记
+let fetchConfigEpoch = 0;
 
 // 深监听配置变更 → 标记 dirty（加载期间抑制）。
 // P12：回调仅置 dirty 标志（轻量），无需防抖；原 flush:'sync' 每次按键同步深度遍历
@@ -56,8 +59,11 @@ watch(password.value, () => {
 const { busy } = useStatus();
 
 async function fetchConfig(): Promise<void> {
+  // G20：仅最新一次请求可写状态；迟到的旧响应直接丢弃
+  const epoch = ++fetchConfigEpoch;
   try {
     const data = await configApi.fetch();
+    if (epoch !== fetchConfigEpoch) return;
     loadingConfig = true;
     config.browser = { ...DEFAULT_CONFIG.browser, ...(data.browser || {}) };
     config.worker = { ...DEFAULT_CONFIG.worker, ...(data.worker || {}) };
@@ -78,11 +84,15 @@ async function fetchConfig(): Promise<void> {
     // 先等待一轮刷新（回调在 loadingConfig=true 窗口内执行完、不置 dirty），
     // 再复位标志与 dirty，保证加载不被误标为未保存修改
     await nextTick();
+    // G20：nextTick 窗口内若又有更新的 fetchConfig 接管，交由它负责复位状态
+    if (epoch !== fetchConfigEpoch) return;
     loadingConfig = false;
     dirty.value = false;
     configLoadFailed.value = false;
     frontendLogger.info("config", "配置已加载");
   } catch (error) {
+    // G20：迟到/被取代的旧请求失败同样不写状态（避免覆盖新请求的结果或误报）
+    if (epoch !== fetchConfigEpoch) return;
     frontendLogger.error("config", "获取配置失败", error);
     // F2：首次失败 toast 提示
     configLoadFailed.value = true;
@@ -158,8 +168,10 @@ async function saveConfig(force = false): Promise<void> {
     dirty.value = false;
     frontendLogger.info("config", "配置保存成功");
   } catch (error) {
-    const err = error as { name?: string };
-    if (err.name === "AbortError") return;
+    // G19：被 saveAbort.abort() 顶替的旧保存请求属预期取消（client.ts 已把
+    // AbortError 转为 name="ApiError" 的 ApiError，此处检查 aborted 标记），
+    // 静默返回：不弹失败 toast、不置 saveFailed
+    if (error instanceof ApiError && error.aborted) return;
     const msg = extractApiError(error, "保存失败");
     frontendLogger.error("config", "保存配置失败", error);
     toastOnly(false, msg);

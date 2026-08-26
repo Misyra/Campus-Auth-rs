@@ -8,6 +8,7 @@ import type { Profile, ProfileListResponse, NetworkDetectResult } from "../api/t
 import { profilesApi } from "../api";
 import { extractApiError } from "../api/client";
 import { DEFAULT_PROFILE_SETTINGS } from "../utils/constants";
+import { createFetchGuard, createFirstFailNotifier } from "../utils/guards";
 import { frontendLogger } from "../utils/logger";
 import { useStatus } from "./useStatus";
 import { useToast } from "./useToast";
@@ -30,28 +31,27 @@ const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
 // F3：首次失败 toast 通知（参照 useStatus.fetchStatus 的首败 notify 模式）
-const fetchProfilesFailCount = ref(0);
+const fetchProfilesFail = createFirstFailNotifier();
 
 // P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
-// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
-// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
-let lastFetchAt = 0;
+// 不再重复请求）。失败不记录时间戳以便重试；force: true 供变更后刷新 /
+// 重连回调等显式刷新场景绕过守卫。
+const fetchGuard = createFetchGuard(5000);
 
 async function fetchProfiles(force = false): Promise<void> {
-  if (!force && Date.now() - lastFetchAt < 5000) return;
+  if (!fetchGuard.shouldFetch(force)) return;
   try {
     const data = await profilesApi.list();
     Object.keys(profiles.value).forEach((k) => delete profiles.value[k]);
     Object.assign(profiles.value, data.profiles || {});
     activeProfileId.value = data.active_profile || "default";
     autoSwitch.value = data.auto_switch !== false;
-    lastFetchAt = Date.now();
-    if (fetchProfilesFailCount.value > 0) fetchProfilesFailCount.value = 0;
+    fetchGuard.markSuccess();
+    fetchProfilesFail.trackRecovery();
   } catch (error) {
-    fetchProfilesFailCount.value++;
     frontendLogger.error("profiles", "获取方案列表失败", error);
     // F3：首次失败 toast 通知，后续失败保持静默（log-only）
-    if (fetchProfilesFailCount.value === 1) {
+    if (fetchProfilesFail.trackFailure()) {
       toastOnly(false, "加载配置方案失败");
     }
   }

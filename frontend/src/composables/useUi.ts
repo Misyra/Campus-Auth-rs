@@ -20,7 +20,6 @@ import { useStatus } from "./useStatus";
 import { useLogs } from "./useLogs";
 import { useProfiles } from "./useProfiles";
 import { useTasks } from "./useTasks";
-import { useScripts } from "./useScripts";
 import { useScheduledTasks } from "./useScheduledTasks";
 import { useAppearance } from "./useAppearance";
 import { useWebSocket } from "./useWebSocket";
@@ -238,12 +237,12 @@ async function init(): Promise<void> {
   const config = useConfig();
   const status = useStatus();
   const tasks = useTasks();
-  const scripts = useScripts();
   const profiles = useProfiles();
   const scheduled = useScheduledTasks();
   const appearance = useAppearance();
 
   // 各 fetch 内部均自行 catch，不会 reject；此处仅需并行触发，无需统计失败项
+  // 任务与脚本共用任务目录（useTaskDirectory）的单次拉取，fetchTasks 即同时刷新两者
   await Promise.allSettled([
     config.fetchConfig(),
     status.fetchStatus(),
@@ -251,7 +250,6 @@ async function init(): Promise<void> {
     status.fetchAutostart(),
     checkInitStatus(),
     tasks.fetchTasks(),
-    scripts.fetchScripts(),
     tasks.fetchActiveTask(),
     profiles.fetchProfiles(),
     config.fetchPureMode(),
@@ -267,12 +265,12 @@ async function init(): Promise<void> {
   wsMgr.onWsReconnect(async () => {
     const pending = [
       // P15：重连刷新为显式刷新场景，force: true 绕过 5 秒守卫
+      // 任务/脚本由任务目录单次拉取同时刷新，无需再调 fetchScripts
       profiles.fetchProfiles(true),
       tasks.fetchTasks(true),
       tasks.fetchActiveTask(),
       scheduled.loadScheduledTasks(true),
       // F8 顺带：补齐重连后遗漏的只读数据源
-      scripts.fetchScripts(true),
       config.fetchPureMode(),
       fetchLoginHistory(),
     ];
@@ -304,7 +302,6 @@ export function useUi() {
     state,
     loginHistory,
     init,
-    fetchLogs,
     fetchLoginHistory,
     clearLoginHistory,
     checkInitStatus,

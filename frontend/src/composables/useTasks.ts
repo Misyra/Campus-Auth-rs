@@ -1,17 +1,19 @@
 /**
  * 浏览器任务状态与操作（单例）。
  * 替代原 taskData + tasks/core.js + tasks/editor.js（浏览器任务部分）+ tasks/debug.js（部分）。
+ * 列表数据由 useTaskDirectory 单次拉取提供（任务/脚本共用一个混合列表源）。
  */
 
-import { ref, reactive } from "vue";
-import type { TaskItem, DangerStep, TaskConfig } from "../api/types";
+import { ref } from "vue";
+import type { DangerStep, TaskConfig } from "../api/types";
 import { tasksApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { downloadBlob, pickFile } from "../utils/file";
+import { useBusyIds } from "../utils/guards";
+import { useTaskDirectory } from "./useTaskDirectory";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
-import { useScripts } from "./useScripts";
 
 export interface BrowserTaskDraft {
   id: string;
@@ -26,50 +28,23 @@ export interface BrowserTaskDraft {
 // eval / custom_js 为历史别名，三者均需视为危险（历史遗留：前端危险步骤检测失效）
 const DANGEROUS_STEP_TYPES = new Set(["eval", "custom_js", "evaluate"]);
 
-const tasks = ref<TaskItem[]>([]);
+// 列表来自任务目录（与脚本共用单次拉取，含 5 秒守卫与首败通知）
+const { browserTasks: tasks, fetchDirectory } = useTaskDirectory();
 const activeTaskId = ref("default");
 const editingTask = ref<BrowserTaskDraft | null>(null);
-const editingTaskType = ref<"browser" | "script">("browser");
 const jsonError = ref("");
 
 // A11：执行类操作 busy 守卫（响应式 Set），防止连点重复提交
-const executingIds = reactive(new Set<string>()); // executeTask 执行中
-const duplicatingIds = reactive(new Set<string>()); // duplicateTask 复制中
-const exportingIds = reactive(new Set<string>()); // exportTask 导出中
+const executingIds = useBusyIds(); // executeTask 执行中
+const duplicatingIds = useBusyIds(); // duplicateTask 复制中
+const exportingIds = useBusyIds(); // exportTask 导出中
 
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
-// F3：首次失败 toast 通知（参照 useStatus.fetchStatus 的首败 notify 模式）
-const fetchTasksFailCount = ref(0);
-
-// P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
-// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
-// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
-let lastFetchAt = 0;
-
-async function fetchTasks(force = false): Promise<void> {
-  if (!force && Date.now() - lastFetchAt < 5000) return;
-  try {
-    const data = await tasksApi.list();
-    if (Array.isArray(data)) {
-      // GET /api/tasks 与 /api/scripts 返回同一混合列表，此处仅保留浏览器任务（browser）
-      const browserTasks = data.filter((t) => {
-        const tt = (t.task_type as string) || (t.type as string) || "";
-        return tt === "" || tt === "browser";
-      });
-      tasks.value.splice(0, tasks.value.length, ...browserTasks);
-    }
-    lastFetchAt = Date.now();
-    if (fetchTasksFailCount.value > 0) fetchTasksFailCount.value = 0;
-  } catch (error) {
-    fetchTasksFailCount.value++;
-    frontendLogger.error("tasks", "获取任务列表失败", error);
-    // F3：首次失败 toast 通知，后续失败保持静默（log-only）
-    if (fetchTasksFailCount.value === 1) {
-      toastOnly(false, "加载任务列表失败");
-    }
-  }
+// 拉取统一委托任务目录（force 语义与其他 fetch 一致）
+function fetchTasks(force = false): Promise<void> {
+  return fetchDirectory(force);
 }
 
 async function fetchActiveTask(): Promise<void> {
@@ -82,15 +57,22 @@ async function fetchActiveTask(): Promise<void> {
 }
 
 /** 仅同步本地活动任务 id（不调 API），供已自行完成服务端切换的调用方复用。 */
-async function setActiveTask(taskId: string): Promise<void> {
+function syncActiveTaskLocal(taskId: string): void {
+  activeTaskId.value = taskId;
+}
+
+/** 设置活动任务（调 API + 本地同步）。返回是否成功。 */
+async function setActiveTask(taskId: string): Promise<boolean> {
   try {
     frontendLogger.info("tasks", `设置活动任务: ${taskId}`);
     await tasksApi.setActive(taskId);
-    activeTaskId.value = taskId;
+    syncActiveTaskLocal(taskId);
     frontendLogger.info("tasks", `活动任务已设置: ${taskId}`);
+    return true;
   } catch (error) {
     frontendLogger.error("tasks", "设置活动任务异常", error);
     toastOnly(false, "设置活动任务失败");
+    return false;
   }
 }
 
@@ -126,6 +108,55 @@ function detectDangerousSteps(config: { steps?: Array<Record<string, unknown>> }
   return warnings;
 }
 
+// ---- 编辑器 dirty 快照（对齐 useProfiles 的快照模式）----
+// 记录打开编辑器时的原始快照，用于关闭/切换编辑目标时确认未保存改动
+let editingTaskSnapshot = "";
+
+/** 计算草稿的快照基准（JSON 全量序列化，草稿字段均为小体量标量） */
+function snapshotOf(draft: BrowserTaskDraft | null): string {
+  return draft ? JSON.stringify(draft) : "";
+}
+
+/** 统一的草稿写入入口：赋值并同步刷新 dirty 基准快照。 */
+function setTaskDraft(draft: BrowserTaskDraft): void {
+  editingTask.value = draft;
+  editingTaskSnapshot = snapshotOf(draft);
+}
+
+/** 当前编辑器是否有未保存改动。 */
+function isTaskDirty(): boolean {
+  return editingTask.value !== null && snapshotOf(editingTask.value) !== editingTaskSnapshot;
+}
+
+/**
+ * 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。
+ * 返回 true 才允许继续（放弃修改）；false（用户取消）与 null（被新对话框抢占）
+ * 一律不放行——保留现状、不丢弃数据（A10 语义：被抢占≠用户放弃）。
+ */
+async function confirmDiscardTaskIfDirty(): Promise<boolean | null> {
+  if (!isTaskDirty()) return true;
+  return confirm({
+    title: "放弃未保存的修改",
+    message: "当前任务有未保存的修改，确定放弃吗？",
+    danger: true,
+  });
+}
+
+/** 关闭任务编辑器（带 dirty 确认）。 */
+async function closeTaskEditor(): Promise<void> {
+  if (!(await confirmDiscardTaskIfDirty())) return;
+  editingTask.value = null;
+  editingTaskSnapshot = "";
+  jsonError.value = "";
+}
+
+/** 清空草稿（保存成功等无需确认的场景）。 */
+function clearTaskDraft(): void {
+  editingTask.value = null;
+  editingTaskSnapshot = "";
+  jsonError.value = "";
+}
+
 async function saveTask(): Promise<void> {
   if (!editingTask.value || !editingTask.value.id) {
     toastOnly(false, "请输入任务ID");
@@ -147,9 +178,9 @@ async function saveTask(): Promise<void> {
   payload.name = editingTask.value.name || (config.name as string);
   payload.description = editingTask.value.description || (config.description as string);
   payload.url = editingTask.value.url || (config.url as string) || "{{LOGIN_URL}}";
-  // 确保 type 字段存在（后端 TaskKind 反序列化需要）
+  // 确保 type 字段存在（后端 TaskKind 反序列化需要；本编辑器只产出浏览器任务）
   if (!payload.type) {
-    payload.type = editingTaskType.value || "browser";
+    payload.type = "browser";
   }
   delete payload.version;
   delete payload.source;
@@ -167,8 +198,7 @@ async function saveTask(): Promise<void> {
   try {
     const data = await tasksApi.save(editingTask.value.id, payload);
     frontendLogger.info("tasks", data?.message || "任务保存成功");
-    editingTask.value = null;
-    jsonError.value = "";
+    clearTaskDraft();
     await fetchTasks(true);
   } catch (error) {
     frontendLogger.error("tasks", "保存任务失败", error);
@@ -199,6 +229,8 @@ async function deleteTask(taskId: string): Promise<void> {
 }
 
 async function showTaskEditor(taskId?: string): Promise<void> {
+  // 打开/切换编辑器前先确认当前草稿是否有未保存改动，避免静默丢弃
+  if (!(await confirmDiscardTaskIfDirty())) return;
   if (taskId) {
     try {
       const data = await tasksApi.get(taskId);
@@ -207,26 +239,27 @@ async function showTaskEditor(taskId?: string): Promise<void> {
       const taskConfig: TaskConfig = data.config ?? {};
       const taskType = summary?.task_type || taskConfig.type;
 
-      if (taskType === "script") {
-        // 脚本任务交给脚本编辑器处理
-        await useScripts().showScriptEditor(taskId);
+      if (taskType === "script" || taskType === "shell") {
+        // 脚本类型由「自定义脚本」页面的编辑器负责；此处不跨模块转交（避免 useTasks→useScripts 循环依赖），
+        // 任务列表本身已过滤为浏览器任务，正常流程不会走到该分支
+        toastOnly(false, "该任务为脚本类型，请在「自定义脚本」页面编辑");
         return;
       }
-      editingTask.value = {
+      setTaskDraft({
         id: taskId,
         name: summary?.name || taskConfig.name || "",
         description: summary?.description || taskConfig.description || "",
         url: taskConfig.url || "",
         json: JSON.stringify(taskConfig, null, 2),
         _isNew: false,
-      };
+      });
       jsonError.value = "";
     } catch (error) {
       frontendLogger.error("tasks", "加载任务失败: " + taskId, error);
       toastOnly(false, "加载任务失败");
     }
   } else {
-    editingTask.value = { id: "", name: "", description: "", url: "", json: "", _isNew: true };
+    setTaskDraft({ id: "", name: "", description: "", url: "", json: "", _isNew: true });
     jsonError.value = "";
   }
 }
@@ -300,6 +333,8 @@ function formatJson(): void {
 }
 
 async function duplicateTask(taskId: string): Promise<void> {
+  // 复制会整体替换当前草稿，先确认未保存改动
+  if (!(await confirmDiscardTaskIfDirty())) return;
   // A11：busy 守卫，避免连点生成 _copy 与 _copy_2 等重复草稿
   if (duplicatingIds.has(taskId)) return;
   duplicatingIds.add(taskId);
@@ -320,14 +355,14 @@ async function duplicateTask(taskId: string): Promise<void> {
       suffix = ` (副本${counter})`;
       counter++;
     }
-    editingTask.value = {
+    setTaskDraft({
       id: newId,
       name: baseName + suffix,
       description: summary?.description || taskConfig.description || "",
       url: taskConfig.url || "",
       json: JSON.stringify(taskConfig, null, 2),
       _isNew: true,
-    };
+    });
     jsonError.value = "";
   } catch (error) {
     frontendLogger.error("tasks", "复制任务失败: " + taskId, error);
@@ -375,18 +410,21 @@ export function useTasks() {
     tasks,
     activeTaskId,
     editingTask,
-    editingTaskType,
     jsonError,
     executingIds,
     duplicatingIds,
     exportingIds,
     fetchTasks,
     fetchActiveTask,
+    syncActiveTaskLocal,
     setActiveTask,
     executeTask,
     saveTask,
     deleteTask,
     showTaskEditor,
+    closeTaskEditor,
+    setTaskDraft,
+    isTaskDirty,
     syncMetaToJson,
     syncJsonToMeta,
     loadTemplate,

@@ -3,11 +3,12 @@
  * 替代原 scheduledTasksData + scheduledTasksMethods。
  */
 
-import { ref, reactive } from "vue";
+import { ref } from "vue";
 import type { ScheduledTask, ScheduledTaskHistoryItem } from "../api/types";
 import { scheduledTasksApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
+import { createFetchGuard, useBusyIds } from "../utils/guards";
 import { formatScheduleTime, formatTimeValue } from "../utils/formatters";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
@@ -61,24 +62,24 @@ const scheduledTaskHistoryLoading = ref(false);
 const selectedScheduledTaskId = ref<string | null>(null);
 
 // A11：手动运行 busy 守卫（响应式 Set），防止连点重复提交
-const runningIds = reactive(new Set<string>());
+const runningIds = useBusyIds();
 
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
 // P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
-// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
-// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
-let lastFetchAt = 0;
+// 不再重复请求）。失败不记录时间戳以便重试；force: true 供变更后刷新 /
+// 重连回调等显式刷新场景绕过守卫。
+const fetchGuard = createFetchGuard(5000);
 
 async function loadScheduledTasks(force = false): Promise<void> {
-  if (!force && Date.now() - lastFetchAt < 5000) return;
+  if (!fetchGuard.shouldFetch(force)) return;
   try {
     const data = await scheduledTasksApi.list();
     if (Array.isArray(data)) {
       scheduledTasks.value.splice(0, scheduledTasks.value.length, ...data);
     }
-    lastFetchAt = Date.now();
+    fetchGuard.markSuccess();
   } catch (e) {
     frontendLogger.error("scheduled_tasks", "加载定时任务失败", e);
   }
@@ -205,16 +206,24 @@ async function runScheduledTask(taskId: string): Promise<void> {
 async function loadScheduledTaskHistory(taskId: string): Promise<void> {
   selectedScheduledTaskId.value = taskId;
   scheduledTaskHistoryLoading.value = true;
+  // G21：以发起时的 taskId 为准（参考 useStatus 的 epoch 设计）：快速切换 A→B 时，
+  // 慢的 A 响应后到则丢弃，避免覆盖 B 的历史。关闭面板（置 null）后迟到的响应同样丢弃。
+  const requestTaskId = taskId;
   try {
     const data = await scheduledTasksApi.history(taskId);
+    if (selectedScheduledTaskId.value !== requestTaskId) return;
     // 后端返回 { runs: [...] } 包装结构
     const runs = Array.isArray(data) ? data : (data as { runs?: ScheduledTaskHistoryItem[] }).runs || [];
     scheduledTaskHistory.value.splice(0, scheduledTaskHistory.value.length, ...runs);
   } catch (e) {
+    if (selectedScheduledTaskId.value !== requestTaskId) return;
     frontendLogger.error("scheduled_tasks", "加载执行历史失败", e);
     scheduledTaskHistory.value.splice(0, scheduledTaskHistory.value.length);
   } finally {
-    scheduledTaskHistoryLoading.value = false;
+    // 仅当仍是当前选中任务时才复位 loading（后发起的请求负责自己的状态）
+    if (selectedScheduledTaskId.value === requestTaskId) {
+      scheduledTaskHistoryLoading.value = false;
+    }
   }
 }
 

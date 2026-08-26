@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
 import { useTasks } from "@/composables/useTasks";
+import { useScripts } from "@/composables/useScripts";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
@@ -8,18 +9,21 @@ import Modal from "@/components/common/Modal.vue";
 import { useRouter } from "vue-router";
 
 const t = useTasks();
+const s = useScripts();
 const repo = useRepoImport();
 const debug = useDebug();
 const router = useRouter();
-// 拖拽排序：复用 useDragSort（历史遗留：已实现未接入）
-const drag = useDragSort(t.tasks);
+// B1：拖拽排序必须互传全量——后端 order 接口会整体替换任务与脚本两组顺序，
+// 漏传的一组会被清空，因此脚本列表也要一并传入用于持久化
+const drag = useDragSort(t.tasks, { tasks: t.tasks, scripts: s.scripts });
 
 onMounted(() => { void t.fetchTasks(); });
 
 // browserTasks 是实际列表
 const browserTasks = computed(() => t.tasks.value);
 
-function closeEditor() { t.editingTask.value = null; }
+// 关闭编辑器走 composable 的 dirty 确认路径（对齐 ProfilesView 行为）
+function closeEditor() { void t.closeTaskEditor(); }
 </script>
 
 <template>

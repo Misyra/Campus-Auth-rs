@@ -1,14 +1,20 @@
 /**
  * 自定义脚本状态与操作（单例）。
  * 替代原 scriptData + scriptMethods。
+ * 列表数据由 useTaskDirectory 单次拉取提供（任务/脚本共用一个混合列表源）。
+ *
+ * 依赖方向：useScripts → useTasks（单向）。useTasks 不再反向引用本模块，
+ * 脚本列表与任务列表通过共享的任务目录（useTaskDirectory）取数，无循环依赖。
  */
 
-import { ref, reactive } from "vue";
+import { ref } from "vue";
 import type { Script, BinaryInfo } from "../api/types";
-import { scriptsApi, tasksApi } from "../api";
+import { scriptsApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { downloadBlob, pickFile, getBinaryName } from "../utils/file";
+import { useBusyIds } from "../utils/guards";
+import { useTaskDirectory } from "./useTaskDirectory";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 import { useTasks } from "./useTasks";
@@ -23,37 +29,20 @@ export interface ScriptDraft {
   _isNew: boolean;
 }
 
-const scripts = ref<Script[]>([]);
+// 列表来自任务目录（与任务共用单次拉取，含 5 秒守卫与首败通知）
+const { scripts, fetchDirectory } = useTaskDirectory();
 const availableBinaries = ref<BinaryInfo[]>([]);
 const editingTask = ref<ScriptDraft | null>(null);
 
 // A11：运行 busy 守卫（响应式 Set），防止连点重复提交
-const runningIds = reactive(new Set<string>());
+const runningIds = useBusyIds();
 
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
-// P15：5 秒内已成功拉取则跳过（useUi.init 已拉全部数据，View mount / 路由往返
-// 不再重复请求）。lastFetchAt 仅成功后更新（失败不更新以便重试）；
-// force: true 供变更后刷新 / 重连回调等显式刷新场景绕过守卫。
-let lastFetchAt = 0;
-
-async function fetchScripts(force = false): Promise<void> {
-  if (!force && Date.now() - lastFetchAt < 5000) return;
-  try {
-    const data = await scriptsApi.list();
-    if (Array.isArray(data)) {
-      // GET /api/tasks 与 /api/scripts 返回同一混合列表，此处仅保留脚本类（script/shell）
-      const scriptTasks = data.filter((t) => {
-        const tt = (t.task_type as string) || (t.type as string) || "";
-        return tt === "script" || tt === "shell";
-      });
-      scripts.value.splice(0, scripts.value.length, ...scriptTasks);
-    }
-    lastFetchAt = Date.now();
-  } catch (error) {
-    frontendLogger.error("scripts", "获取脚本列表失败", error);
-  }
+// 拉取统一委托任务目录（force 语义与其他 fetch 一致）
+function fetchScripts(force = false): Promise<void> {
+  return fetchDirectory(force);
 }
 
 async function fetchAvailableBinaries(): Promise<void> {
@@ -67,7 +56,53 @@ async function fetchAvailableBinaries(): Promise<void> {
   }
 }
 
+// ---- 编辑器 dirty 快照（对齐 useProfiles 的快照模式）----
+let editingScriptSnapshot = "";
+
+function snapshotOf(draft: ScriptDraft | null): string {
+  return draft ? JSON.stringify(draft) : "";
+}
+
+/** 统一的草稿写入入口：赋值并同步刷新 dirty 基准快照。 */
+function setScriptDraft(draft: ScriptDraft): void {
+  editingTask.value = draft;
+  editingScriptSnapshot = snapshotOf(draft);
+}
+
+/** 当前编辑器是否有未保存改动。 */
+function isScriptDirty(): boolean {
+  return editingTask.value !== null && snapshotOf(editingTask.value) !== editingScriptSnapshot;
+}
+
+/**
+ * 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。
+ * 返回 true 才允许继续（放弃修改）；false（用户取消）与 null（被新对话框抢占）
+ * 一律不放行——保留现状、不丢弃数据（A10 语义：被抢占≠用户放弃）。
+ */
+async function confirmDiscardScriptIfDirty(): Promise<boolean | null> {
+  if (!isScriptDirty()) return true;
+  return confirm({
+    title: "放弃未保存的修改",
+    message: "当前脚本有未保存的修改，确定放弃吗？",
+    danger: true,
+  });
+}
+
+/** 关闭脚本编辑器（带 dirty 确认）。 */
+async function closeScriptEditor(): Promise<void> {
+  if (!(await confirmDiscardScriptIfDirty())) return;
+  clearScriptDraft();
+}
+
+/** 清空草稿（保存成功等无需确认的场景）。 */
+function clearScriptDraft(): void {
+  editingTask.value = null;
+  editingScriptSnapshot = "";
+}
+
 async function showScriptEditor(taskId?: string): Promise<void> {
+  // 打开/切换编辑器前先确认当前草稿是否有未保存改动，避免静默丢弃
+  if (!(await confirmDiscardScriptIfDirty())) return;
   if (!availableBinaries.value.length) await fetchAvailableBinaries();
   if (taskId) {
     try {
@@ -81,7 +116,7 @@ async function showScriptEditor(taskId?: string): Promise<void> {
         selectValue = "__custom__";
         customBinary = binaryPath;
       }
-      editingTask.value = {
+      setScriptDraft({
         id: taskId,
         name: data.name || "",
         description: data.description || "",
@@ -89,12 +124,12 @@ async function showScriptEditor(taskId?: string): Promise<void> {
         binary_path: selectValue,
         _customBinary: customBinary,
         _isNew: false,
-      };
+      });
     } catch (error) {
       toastOnly(false, extractApiError(error, "加载脚本失败"));
     }
   } else {
-    editingTask.value = {
+    setScriptDraft({
       id: "",
       name: "",
       description: "",
@@ -102,7 +137,7 @@ async function showScriptEditor(taskId?: string): Promise<void> {
       binary_path: "",
       _customBinary: "",
       _isNew: true,
-    };
+    });
   }
 }
 
@@ -158,7 +193,7 @@ async function saveScript(): Promise<void> {
   };
   try {
     const data = await scriptsApi.save(id, payload);
-    editingTask.value = null;
+    clearScriptDraft();
     await fetchScripts(true);
     toastOnly(true, data?.message || "保存成功");
   } catch (error) {
@@ -205,6 +240,8 @@ async function exportScript(taskId: string): Promise<void> {
 async function importScript(): Promise<void> {
   const file = await pickFile(".py,.sh,.bat,.exe,.cmd,.txt");
   if (!file) return;
+  // 导入会整体替换当前草稿，先确认未保存改动
+  if (!(await confirmDiscardScriptIfDirty())) return;
   const reader = new FileReader();
   reader.onload = (ev) => {
     const content = ev.target?.result as string;
@@ -223,7 +260,7 @@ async function importScript(): Promise<void> {
 }
 
 function openImportedDraft(id: string, content: string): void {
-  editingTask.value = {
+  setScriptDraft({
     id,
     name: "",
     description: "",
@@ -231,18 +268,15 @@ function openImportedDraft(id: string, content: string): void {
     binary_path: "",
     _customBinary: "",
     _isNew: true,
-  };
+  });
   frontendLogger.info("scripts", "已导入脚本文件，请检查后保存");
 }
 
 async function setActiveScript(taskId: string): Promise<void> {
-  try {
-    await tasksApi.setActive(taskId);
-    // 服务端已切换，此处仅同步本地状态
-    useTasks().activeTaskId.value = taskId;
+  // 走 useTasks 的正规 setActiveTask（API + 本地同步），不再直捅 activeTaskId
+  const ok = await useTasks().setActiveTask(taskId);
+  if (ok) {
     toastOnly(true, `已将「${taskId}」设为活动任务`);
-  } catch (error) {
-    toastOnly(false, extractApiError(error, "设置失败"));
   }
 }
 
@@ -291,6 +325,8 @@ export function useScripts() {
     fetchScripts,
     fetchAvailableBinaries,
     showScriptEditor,
+    closeScriptEditor,
+    isScriptDirty,
     onBinarySelectChange,
     saveScript,
     deleteScript,

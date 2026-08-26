@@ -4,6 +4,7 @@ import { useStatus } from "@/composables/useStatus";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
 import { throttleRaf } from "@/utils/debounce";
+import { LOG_SOURCE_LABELS } from "@/utils/constants";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -70,48 +71,14 @@ const logLevelOptions: SelectOption[] = [
   { value: "DEBUG", label: "DEBUG" },
   { value: "TRACE", label: "TRACE" },
 ];
+// 来源标签单一来源：constants.LOG_SOURCE_LABELS（筛选选项与徽标展示共用一份映射）
 const baseLogSourceOptions: SelectOption[] = [
   { value: "", label: "全部来源" },
-  { value: "app", label: "应用" },
-  { value: "launcher", label: "启动器" },
-  { value: "engine", label: "引擎" },
-  { value: "login", label: "登录" },
-  { value: "monitor", label: "监测" },
-  { value: "bridge", label: "Bridge" },
-  { value: "scheduler", label: "调度" },
-  { value: "web", label: "Web" },
-  { value: "config", label: "配置" },
-  { value: "tray", label: "托盘" },
-  { value: "updater", label: "更新" },
-  { value: "network", label: "网络" },
-  { value: "tasks", label: "任务" },
-  { value: "environment", label: "环境" },
-  { value: "python_worker", label: "Python Worker" },
-  { value: "frontend", label: "前端" },
-  { value: "notification", label: "通知" },
+  ...Object.entries(LOG_SOURCE_LABELS).map(([value, label]) => ({ value, label })),
 ];
 
 function getSourceLabel(src: string): string {
-  const map: Record<string, string> = {
-    app: "应用",
-    launcher: "启动器",
-    engine: "引擎",
-    login: "登录",
-    monitor: "监测",
-    bridge: "Bridge",
-    scheduler: "调度",
-    web: "Web",
-    config: "配置",
-    tray: "托盘",
-    updater: "更新",
-    network: "网络",
-    tasks: "任务",
-    environment: "环境",
-    python_worker: "Python Worker",
-    frontend: "前端",
-    notification: "通知",
-  };
-  return map[src] || src;
+  return LOG_SOURCE_LABELS[src] || src;
 }
 
 // 后端 target 和前端 scope 会随模块扩展，动态补充当前日志中尚未预置的来源，
@@ -162,6 +129,8 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
         <div class="stat-info">
           <span class="stat-label">检测次数</span>
           <span class="stat-value">{{ s.status.network_check_count }}</span>
+          <!-- G23：主数值为累计探测次数，连续失败计数降级为副文案展示 -->
+          <span v-if="s.status.consecutive_failures > 0" class="stat-sub stat-sub-warn">连续失败 {{ s.status.consecutive_failures }} 次</span>
         </div>
       </div>
       <div class="stat-card">
@@ -171,6 +140,8 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
         <div class="stat-info">
           <span class="stat-label">登录次数</span>
           <span class="stat-value">{{ s.status.login_attempt_count }}</span>
+          <!-- G23：主数值为累计登录次数，当前重试进度降级为副文案展示 -->
+          <span v-if="s.status.retry_count > 0" class="stat-sub stat-sub-warn">重试中 第 {{ s.status.retry_count }} 次</span>
         </div>
       </div>
       <div class="stat-card">

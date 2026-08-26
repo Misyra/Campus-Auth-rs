@@ -2,9 +2,8 @@
  * API 类型定义
  *
  * 后端使用 snake_case JSON 字段名，前端类型与之一致。
- * 本文件为手写、权威的类型来源（source of truth）。
- * `npm run typegen` 仅从 openapi.json 生成 `types.generated.ts` 供对照参考，
- * 不会覆盖本文件（openapi.json 仍为不完整的手写 baseline）。
+ * 本文件的手写类型是唯一来源（source of truth）；
+ * 根目录 openapi.json 仅作为 API 路径清单参考，不参与类型生成。
  */
 
 /**
@@ -30,8 +29,14 @@ export interface BackgroundUploadResult {
  */
 export interface StatusSnapshot {
   monitoring: boolean;
+  /** 网络探测累计次数（后端 probe_total；旧后端缺字段时沿用当前值） */
   network_check_count: number;
+  /** 登录尝试累计次数（后端 login_total；旧后端缺字段时沿用当前值） */
   login_attempt_count: number;
+  /** 当前连续探测失败次数（瞬时计数，用于状态卡片副文案） */
+  consecutive_failures: number;
+  /** 当前登录重试计数（瞬时计数，用于状态卡片副文案） */
+  retry_count: number;
   last_check_time: string | null;
   runtime_seconds: number;
   network_connected: boolean;

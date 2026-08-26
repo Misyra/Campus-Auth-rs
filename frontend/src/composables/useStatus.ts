@@ -3,17 +3,20 @@
  * 替代原 statusData / websocketData 中的状态字段 + lifecycleMethods.fetchStatus/fetchAutostart。
  */
 
-import { reactive, ref, computed } from "vue";
+import { reactive, computed } from "vue";
 import type { StatusSnapshot, AutostartStatus } from "../api/types";
 import { monitorApi, autostartApi } from "../api";
 import { ApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
+import { createFirstFailNotifier } from "../utils/guards";
 import { useNotifications } from "./useNotifications";
 
 const status = reactive<StatusSnapshot>({
   monitoring: false,
   network_check_count: 0,
   login_attempt_count: 0,
+  consecutive_failures: 0,
+  retry_count: 0,
   last_check_time: null,
   runtime_seconds: 0,
   network_connected: false,
@@ -44,11 +47,11 @@ const busy = reactive({
   ocrRec: false,
 });
 
-const fetchStatusFailCount = ref(0);
+const fetchStatusFail = createFirstFailNotifier();
 
 /**
  * 后端 StatusSnapshot 字段 → 前端字段映射。
- * 后端：monitor_enabled/network_status/consecutive_failures/retry_count/uptime_seconds
+ * 后端：monitor_enabled/network_status/consecutive_failures/retry_count/uptime_seconds/probe_total/login_total
  * 前端：monitoring/network_state+network_connected/network_check_count/login_attempt_count/runtime_seconds
  * P17：仅显式映射前端实际消费的字段，不再 Object.assign(out, raw) 混入后端
  * 原始字段——索引签名兜底会让拼写错误也能编译，新增字段消费需在此显式登记。
@@ -61,8 +64,13 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   out.engine_state = engineState || undefined;
   out.network_state = String(raw.network_status ?? status.network_state ?? "unknown");
   out.network_connected = raw.network_status === "online";
-  out.network_check_count = Number(raw.consecutive_failures ?? status.network_check_count ?? 0);
-  out.login_attempt_count = Number(raw.retry_count ?? status.login_attempt_count ?? 0);
+  // G23：检测/登录次数改用后端新增的累计字段 probe_total / login_total
+  //（consecutive_failures / retry_count 是瞬时重试计数，此前被误当作次数展示）。
+  // 后端字段缺失时沿用当前值兜底（旧版本后端不至于把计数清零）
+  out.network_check_count = Number(raw.probe_total ?? status.network_check_count ?? 0);
+  out.login_attempt_count = Number(raw.login_total ?? status.login_attempt_count ?? 0);
+  out.consecutive_failures = Number(raw.consecutive_failures ?? status.consecutive_failures ?? 0);
+  out.retry_count = Number(raw.retry_count ?? status.retry_count ?? 0);
   out.runtime_seconds = Number(raw.uptime_seconds ?? status.runtime_seconds ?? 0);
   out.last_check_time = (raw.last_check_time as string | null) ?? status.last_check_time;
   out.login_status = raw.login_status as string | undefined;
@@ -139,14 +147,13 @@ async function fetchStatus(): Promise<void> {
     const freshUptime = Number(raw.uptime_seconds ?? 0);
     if (freshUptime > 0 && freshUptime < appliedUptime) return;
     applyStatus(mapBackendStatus(raw), raw);
-    if (fetchStatusFailCount.value > 0) {
-      fetchStatusFailCount.value = 0;
+    // F3：从失败恢复时提示已重连（trackRecovery 仅在之前处于失败状态时返回 true）
+    if (fetchStatusFail.trackRecovery()) {
       notify(true, "已重新连接到服务器", "network");
     }
   } catch (error) {
-    fetchStatusFailCount.value++;
     frontendLogger.warn("status", "获取状态失败", error);
-    if (fetchStatusFailCount.value === 1) {
+    if (fetchStatusFail.trackFailure()) {
       notify(false, "无法连接到服务器，请检查后端是否已关闭", "network");
     }
   }
@@ -180,7 +187,6 @@ export function useStatus() {
     status,
     autostart,
     busy,
-    fetchStatusFailCount,
     networkStatus,
     networkStatusText,
     updateStatus,

@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useStatus } from "@/composables/useStatus";
+import { useToast } from "@/composables/useToast";
 import { ocrApi } from "@/api";
 import { pickFile } from "@/utils/file";
 
@@ -11,6 +12,7 @@ const t = useTasks();
 const repo = useRepoImport();
 const router = useRouter();
 const { busy } = useStatus();
+const { toastOnly } = useToast();
 
 const ocrStatus = ref<{ installed: boolean; declared?: boolean; size_mb?: number }>({
   installed: false,
@@ -47,22 +49,32 @@ async function installOcr() {
   try {
     await ocrApi.install();
     // 安装为后台异步，轮询直到 installed=true 或超时，装完自动刷新状态（无需再点一次）
-    await refreshOcrUntilInstalled();
-  } catch { /* */ }
-  busy.ocr = false;
+    const installed = await refreshOcrUntilInstalled();
+    if (!installed) {
+      // G22：5 分钟超时退出时给出提示——安装可能仍在后台进行，并非失败
+      toastOnly(false, "OCR 安装耗时较长，仍在后台安装中，可稍后回到本页查看状态");
+    }
+  } catch {
+    // G22：不静默吞掉安装异常——复用 ocrStatusError 标记 + toast 报错，用户可感知并重试
+    ocrStatusError.value = true;
+    toastOnly(false, "OCR 依赖安装失败，请查看后端日志后重试");
+  } finally {
+    busy.ocr = false;
+  }
 }
 
-/** 轮询 /api/ocr/status，直到 installed 为 true 或到达超时（最大 5 分钟） */
-async function refreshOcrUntilInstalled() {
+/** 轮询 /api/ocr/status，直到 installed 为 true 或到达超时（最大 5 分钟）；返回最终是否已安装 */
+async function refreshOcrUntilInstalled(): Promise<boolean> {
   const deadline = Date.now() + 5 * 60 * 1000;
   while (Date.now() < deadline) {
     try {
       const status = await ocrApi.fetchStatus();
       ocrStatus.value = status;
-      if (status.installed) return;
+      if (status.installed) return true;
     } catch { /* 网络抖动忽略，继续轮询 */ }
     await new Promise((r) => setTimeout(r, 1500));
   }
+  return ocrStatus.value.installed;
 }
 
 async function uninstallOcr() {
@@ -70,8 +82,12 @@ async function uninstallOcr() {
   try {
     await ocrApi.uninstall();
     await refreshOcrStatus();
-  } catch { /* */ }
-  busy.ocr = false;
+  } catch {
+    // G22：卸载失败同样不静默，toast 报错提示用户
+    toastOnly(false, "OCR 依赖卸载失败，请查看后端日志后重试");
+  } finally {
+    busy.ocr = false;
+  }
 }
 
 // 验证码识别：选择本地图片 → 转 base64 → 调用后端 OCR

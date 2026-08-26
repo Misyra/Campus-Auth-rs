@@ -37,7 +37,8 @@ export { ApiError, extractApiError } from "./client";
 /** 配置相关 */
 export const configApi = {
   fetch: () => http.get<ConfigResponse>("/api/config"),
-  save: (payload: SaveConfigPayload) => http.put<MutationResult>("/api/config", payload),
+  // B4：原 PUT /api/config 全量保存方法已删除（全库零调用，且扁平整体替换
+  // 的载荷形状容易在后端演变为清空配置的地雷）；保存统一走 patch 增量语义
   patch: (payload: SaveConfigPayload, opts?: RequestOptions) => http.patch<MutationResult>("/api/config", payload, opts),
   fetchDefaults: () => http.get<ConfigResponse>("/api/config/defaults"),
   fetchLogLevels: () => http.get<{ level: string }>("/api/config/log-levels"),

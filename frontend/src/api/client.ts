@@ -13,12 +13,20 @@ export class ApiError extends Error {
   status?: number;
   code?: string;
   detail?: unknown;
-  constructor(message: string, status?: number, detail?: unknown, code?: string) {
+  /**
+   * 请求因调用方 AbortSignal 被主动取消（非超时）。
+   * G19：AbortError 在此被转为 ApiError（name 固定为 "ApiError"），
+   * 调用方不能再用 `err.name === "AbortError"` 判断，应检查本标记；
+   * 被 abort 的旧请求属预期行为，应静默处理而非当作失败提示。
+   */
+  aborted?: boolean;
+  constructor(message: string, status?: number, detail?: unknown, code?: string, aborted?: boolean) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.code = code;
+    this.aborted = aborted;
   }
 }
 
@@ -115,7 +123,8 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
     });
   } catch (e) {
     if ((e as Error).name === "AbortError") {
-      throw new ApiError(timedOut ? "请求超时" : "请求已取消", undefined, e);
+      // timedOut 区分超时与调用方主动取消；后者置 aborted 标记供调用方静默处理
+      throw new ApiError(timedOut ? "请求超时" : "请求已取消", undefined, e, undefined, !timedOut);
     }
     throw new ApiError("网络连接失败，请检查后端是否已启动", undefined, e);
   } finally {
@@ -188,11 +197,6 @@ function extractDetailMessage(detail: unknown): string | null {
 /** 从任意异常提取用户友好消息 */
 export function extractApiError(error: unknown, fallback = "操作失败"): string {
   if (error instanceof ApiError) return error.message;
-  const detail = (error as { response?: { data?: { detail?: unknown; message?: string } } })?.response?.data;
-  if (detail) {
-    const msg = extractDetailMessage(detail.detail) || detail.message;
-    if (msg) return msg;
-  }
   const message = (error as { message?: string })?.message;
   return message || fallback;
 }

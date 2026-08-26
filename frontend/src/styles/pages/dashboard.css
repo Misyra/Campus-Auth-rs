@@ -86,6 +86,16 @@
   font-family: var(--font-mono);
 }
 
+/* 状态卡片副文案（G23：连续失败 / 重试进度等瞬时计数） */
+.stat-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.stat-sub.stat-sub-warn {
+  color: var(--warning);
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(280px, 320px) 1fr;

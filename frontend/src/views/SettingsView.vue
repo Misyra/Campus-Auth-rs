@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
 import { useToast } from "@/composables/useToast";
+import { SETTINGS_TABS } from "@/utils/constants";
 
 const route = useRoute();
 const router = useRouter();
@@ -11,13 +12,8 @@ const config = useConfig();
 const { busy } = useStatus();
 const { toastOnly } = useToast();
 
-const TABS = [
-  { id: "account", label: "账号" },
-  { id: "monitor", label: "监测" },
-  { id: "system", label: "系统" },
-  { id: "browser", label: "浏览器" },
-  { id: "tasks", label: "任务" },
-];
+// Tab 清单统一由 constants 维护（消除视图内重复定义的三重维护）
+const TABS = SETTINGS_TABS;
 
 const activeTab = computed(() => {
   const name = route.name as string;
@@ -54,6 +50,7 @@ function handleSave() {
         v-for="tab in TABS" :key="tab.id" type="button"
         class="settings-tab"
         :class="{ active: activeTab === tab.id }"
+        :title="tab.hint"
         @click="setTab(tab.id)"
       >
         <span>{{ tab.label }}</span>

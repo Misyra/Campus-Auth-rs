@@ -14,11 +14,19 @@ interface DragState {
   currentIndex: number;
 }
 
+interface DragSortOptions {
+  /** 浏览器任务 id 全量序列（持久化到 order.all） */
+  tasks: Ref<{ id: string }[]>;
+  /** 脚本 id 全量序列（持久化到 order.scripts） */
+  scripts: Ref<{ id: string }[]>;
+}
+
 /**
- * @param tasks 完整任务列表（拖拽在此列表上重排）
- * @param scripts 脚本列表（仅用于持久化顺序，可选）
+ * @param list 拖拽重排的目标列表（本视图持有的列表）
+ * @param order 顺序持久化用的全量清单。B1：后端 order 接口会整体替换两组顺序，
+ *   漏传的一组会被清空，任务与脚本两个视图都必须互传全量。
  */
-export function useDragSort(tasks: Ref<TaskItem[]>, scripts?: Ref<{ id: string }[]>) {
+export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
   const dragging = ref(false);
   let dragState: DragState | null = null;
   let allowDrag = false;
@@ -40,9 +48,9 @@ export function useDragSort(tasks: Ref<TaskItem[]>, scripts?: Ref<{ id: string }
       e.preventDefault();
       return;
     }
-    const list = tasks.value;
-    if (!list[index]) return;
-    dragState = { taskId: list[index].id, currentIndex: index };
+    const items = list.value;
+    if (!items[index]) return;
+    dragState = { taskId: items[index].id, currentIndex: index };
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", "");
@@ -54,8 +62,8 @@ export function useDragSort(tasks: Ref<TaskItem[]>, scripts?: Ref<{ id: string }
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
     if (!dragState || swapCooldown) return;
-    const list = tasks.value;
-    if (!list[index] || list[index].id === dragState.taskId) return;
+    const items = list.value;
+    if (!items[index] || items[index].id === dragState.taskId) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const midY = rect.top + rect.height / 2;
     const crossed =
@@ -66,12 +74,12 @@ export function useDragSort(tasks: Ref<TaskItem[]>, scripts?: Ref<{ id: string }
     setTimeout(() => {
       swapCooldown = false;
     }, TIMING.DRAG_SWAP_COOLDOWN);
-    const from = tasks.value.findIndex((t) => t.id === dragState!.taskId);
+    const from = list.value.findIndex((t) => t.id === dragState!.taskId);
     if (from === -1) return;
-    const item = tasks.value.splice(from, 1)[0];
-    let to = tasks.value.findIndex((t) => t.id === list[index].id);
+    const item = list.value.splice(from, 1)[0];
+    let to = list.value.findIndex((t) => t.id === items[index].id);
     if (dragState.currentIndex < index) to++;
-    tasks.value.splice(to, 0, item);
+    list.value.splice(to, 0, item);
     dragState.currentIndex = to;
   }
 
@@ -95,8 +103,8 @@ export function useDragSort(tasks: Ref<TaskItem[]>, scripts?: Ref<{ id: string }
   async function persistOrder(): Promise<void> {
     try {
       await tasksApi.order({
-        all: tasks.value.map((t) => t.id),
-        scripts: (scripts?.value || []).map((s) => s.id),
+        all: order.tasks.value.map((t) => t.id),
+        scripts: order.scripts.value.map((s) => s.id),
       });
     } catch {
       /* 静默处理 */

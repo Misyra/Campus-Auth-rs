@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted } from "vue";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
-import { tasksApi } from "@/api";
+import { useDragSort } from "@/utils/drag";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -14,6 +14,7 @@ const {
   getBinaryName,
   fetchScripts,
   showScriptEditor,
+  closeScriptEditor,
   saveScript,
   deleteScript,
   runScript,
@@ -24,35 +25,16 @@ const {
   onBinarySelectChange,
 } = useScripts();
 
-const { activeTaskId } = useTasks();
+const { activeTaskId, tasks: browserTasks } = useTasks();
 
 onMounted(() => { void fetchScripts(); });
 
-// ---- 拖拽排序（持久化到后端） ----
-let dragIndex = -1;
-let dragListKey = "";
-function handleDragStart(e: DragEvent, index: number, key: string) {
-  dragIndex = index;
-  dragListKey = key;
-  (e.dataTransfer!).effectAllowed = "move";
-}
-function onDragOver(e: DragEvent, index: number, key: string) {
-  e.preventDefault();
-  (e.dataTransfer!).dropEffect = "move";
-}
-async function onDrop(e: DragEvent, index: number, key: string) {
-  e.preventDefault();
-  if (dragListKey !== key || dragIndex < 0 || dragIndex === index) return;
-  const list = scripts.value;
-  const [item] = list.splice(dragIndex, 1);
-  list.splice(index, 0, item);
-  dragIndex = -1;
-  // 拖拽后持久化排序
-  try {
-    await tasksApi.order({ all: [], scripts: scripts.value.map((s) => s.id) });
-  } catch { /* 静默 */ }
-}
-function onDragEnd(_e: DragEvent) { dragIndex = -1; }
+// B1：拖拽排序复用 useDragSort——本列表（脚本）重排，任务与脚本两组顺序
+// 均随请求全量持久化（后端 order 接口整体替换，漏传的一组会被清空）
+const drag = useDragSort(scripts, { tasks: browserTasks, scripts });
+
+// 关闭编辑器走 composable 的 dirty 确认路径（对齐 ProfilesView 行为）
+function closeEditor() { void closeScriptEditor(); }
 
 // ---- 二进制选项 ----
 const binaryOptions = computed<SelectOption[]>(() => {
@@ -101,12 +83,14 @@ const binaryOptions = computed<SelectOption[]>(() => {
               class="task-item hover-lift"
               data-draggable-list
               :class="{ active: activeTaskId === script.id }"
-              @dragstart="handleDragStart($event, index, 'scripts')"
-              @dragover="onDragOver($event, index, 'scripts')"
-              @drop="onDrop($event, index, 'scripts')"
-              @dragend="onDragEnd($event)"
+              @dragstart="drag.handleDragStart($event, index)"
+              @dragover="drag.onDragOver($event, index)"
+              @drop="drag.onDrop($event, index)"
+              @dragend="drag.onDragEnd($event)"
             >
-              <div class="task-drag-handle" title="拖拽排序" draggable="true">
+              <div class="task-drag-handle" title="拖拽排序"
+                @mousedown="drag.onHandleMouseDown($event)"
+                @mouseup="drag.onHandleMouseUp($event)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
                   <line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="18" x2="16" y2="18"/>
                 </svg>
@@ -139,7 +123,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
       <div v-if="editingTask" class="card task-editor">
         <div class="card-header">
           <h2>{{ editingTask._isNew ? '新建脚本' : '编辑脚本' }}</h2>
-          <button class="btn btn-icon-only" @click="editingTask = null">
+          <button class="btn btn-icon-only" @click="closeEditor">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
@@ -182,7 +166,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
           </div>
         </div>
         <div class="card-footer">
-          <button class="btn btn-secondary" @click="editingTask = null">取消</button>
+          <button class="btn btn-secondary" @click="closeEditor">取消</button>
           <button class="btn btn-primary" @click="saveScript()">保存脚本</button>
         </div>
       </div>
