@@ -1,5 +1,47 @@
 # 更新日志
 
+## 开发中（2026-08-26 第十一轮：全库审查修复 — R/F/G/A 四组 + B 组二轮增补）
+
+> 来源：`docs/review-2026-08-24.md` 执行计划（7 路并行模块审查 → 逐条核实，47 条确认 40 / 部分成立 6 / 不成立 1）
+> 加上二轮三域深挖的 6 条缺陷级新发现（B1-B6）。按域分波次施工：波次 1（Web 层 / 调度任务域 / 前端）、
+> 波次 2（引擎配置监测 / Bridge 登录 Worker / 更新器环境）、波次 3（logging 抽取 / LoginSession trait 化 / WorkerCore 拆分）、
+> 波次 4（实例生命周期集成测试）。共 10 个域级 commit（`04ae875`..`b7f1678`）。
+
+### 安全（R 组 + G13/G25/G26）
+
+- **R1 SSRF**：V6 分支先 `to_ipv4_mapped()` 解包按 V4 规则判定（堵 `::ffff:127.0.0.1`、`::ffff:169.254.169.254` 等全部映射形式）；V4 补 CGNAT `100.64.0.0/10` 与 `198.18.0.0/15`
+- **R2** API token 改手写 XOR 累积式常量时间比较；**R5** repo 代理响应体流式累积 8 MiB 上限；**G16** PATCH config 中 Profile 加载失败显式 400（不再静默丢凭证）；**B4** PUT /api/config 复用扁平映射（原嵌套反序列化 + serde default 会把整份配置清成默认值）；**G14** WS epoch 改 AtomicU64 fetch_add 原子取号消除并发接入竞态；ApiError 六个零构造变体删除
+- **R3** MinGit 下载补 sha256 校验（对照 uv 既有流程）；**G11** 更新资产平台键加架构区分；**G12** .sha256 缺失重试一次；**G13** 更新助手复核 staging SHA256 / 路径归属 base_path / 新版存活 5s 后才删 .bak；**G25** ProfileSnapshot 手动 Debug 输出 `[REDACTED]`；**G26** 换钥分支补告警并删除死字段 password_reinput_needed
+
+### 并发与状态一致性（F 组）
+
+- **F1** EnvironmentManager 引导经 BootstrapGate 串行化（双检 + 失败结果复用），并发 bootstrap 不再踩踏 .venv；**F2** Bridge 超时宽限循环校验 stuck_request_id 归属，不再误杀新会话；**F3** idle 回收让位在途请求（OCR 轻量旁路不再被回收打断）；**F9** 后台待应用更新与手动更新统一 update_in_progress 标记
+- **F4** Start/Resume/ApplyProfile 立即检测纳入暂停门控；**F5** 引擎探测后台化（mpsc 回传，Shutdown/Stop 不再被探测阻塞，在途合并不积压）；**F6** 抢占等待旧会话完全收尾（预算 + force_recycle 兜底）；**F7** settings 读-改-写持锁（modify_settings）；**F8** tmp 清理按 `.tmp_` 前缀覆盖 profiles_dir；**F10** 解密失败标志按 profile 作用域 + can_decrypt 纯查询；**F11** uv copy 回退原子化 + 就绪实测启动校验；**F12** 调度器睡眠 ≤60s 分片墙钟重估 + 5 分钟外部删除兜底扫描
+
+### 缺陷修复（G 组 + B 组）
+
+- **B1** 任务/脚本两处拖拽排序互传残缺载荷互相清空对方顺序 → 互传全量；**B2** 步骤 `frame`（iframe）字段全链路断链接通（context.frame 从未被赋值）；**B5** 步骤 required 默认对齐 true（省略该字段的登录步骤此前被当可选静默吞掉假成功）+ 手写 fixture 跨语言契约测试锁 Rust↔Python schema 漂移；**B6** Worker 命令超时改 Rust 的 0.9 倍让轻量自愈先于强杀生效；**B3** 调试会话进行中拒绝登录/浏览器任务插入
+- **G1+同类四处** input 降级 wait_for、ocr 截图、screenshot、wait_url 裸 Playwright 调用包 `_safe_op` 分类（瞬时失败不再升格 UNKNOWN_ERROR 不可重试终态）；should_force_recycle 的 UnknownError 不可达语义在注释/测试中改齐
+- 其余：G3 last_check 不被登录结果污染、G4 迁移先校验后提交、G5 删除活跃 Profile 回落 default、G6/G7/G8/G9/G10 任务类型与加载校验系列、G15 轻量模式哨兵端口 0、G18 超长响应行结算在途请求、G23 快照新增 probe_total/login_total 真实计数、G24 备份目录冲突改名重试
+
+### 重构（A 组 + B 组重构项）
+
+- **A-1** 日志子系统抽出 `src/logging.rs`（launcher 减重 343 行）：广播层由「fmt 格式化文本→正则反解析」改为真实 Layer 直接从 metadata 构造 LogEntry，消除时间戳伪造与非标准行降级 INFO
+- **A-2** LoginSession 依赖 BridgeApi trait（扩孔 execute_with_timeout/force_recycle/has_live_worker）+ SessionParams/SessionDeps 拆分（18 参数收敛为 7），新增脚本化 mock 驱动的状态机单测（重试耗尽 / UnknownError 终态语义回归）
+- **WorkerCore 拆分**：`ocr_runtime.py` 归拢 ddddocr 实例缓存/图片预处理，`debug_session.py` 抽出调试会话纯状态机（无 Playwright 直测）
+- 其余：TaskKind 访问器收敛 6 文件 match 样板、cron_loop 三臂 timeout 塌缩、job_history 内聚 SchedulerApi、TrayDeps 镜像收敛、auth_url 三份解析器单点化、设置扁平响应三连去重、前端任务/脚本单次拉取（useTaskDirectory）+ 循环依赖消解 + 横切样板收敛（guards.ts）+ 全局 errorHandler、tokio 裁剪 feature/libc 移 unix target
+
+### 附带发现的真实缺陷（测试驱动挖出）
+
+- **Windows is_process_alive 误判**：父进程持有未关闭的子进程句柄时（更新助手、测试框架），已退出进程对象仍可 OpenProcess 成功 → `--stop` 空转超时。补 GetExitCodeProcess 退出码判定
+- 启动早期错误（如实例锁冲突）发生在日志初始化前，tracing 无 subscriber 导致静默退出 → 同步落 stderr
+- create_task 路由 kind 字段未知值静默回退 browser → 400；死配置开关五件套处置（task_notification/auto_start_browser 接线，auto_update/task_script_timeout/monitor.enabled 删除）
+
+### 验证
+
+- `cargo clippy --all-targets --features no-embed -D warnings` 零警告；cargo test 双 feature 全过（474 lib + 12 集成，含新增 SSRF/常量时间比较/gate 并发/mock 状态机/生命周期等 60+ 测试）；pytest 82 项全过（含跨语言契约测试）；前端 vue-tsc 构建通过
+- 审计证据文件 `debug/review-findings.md`、`debug/review-verification.md` 已随本轮落地删除
+
 ## 开发中（2026-08-23 第十轮：OCR 链路修复 + 安全加固 + 服务生命周期收口）
 
 > 三个主题分批提交（`c99a64e` / `18c948b` / `3a5a7a9` / `3dcae6e` / `8fcaab9` / `5be21ea` / `4f8188e`）。
