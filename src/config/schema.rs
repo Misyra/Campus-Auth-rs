@@ -136,11 +136,12 @@ impl Default for BrowserSettings {
 }
 
 /// 网络探测目标与参数
+///
+/// 注：原 `enabled` 死字段已删除——监测启停由引擎 Start/Stop 控制，各探测
+/// 类型另有 tcp_enabled/http_enabled/url_enabled 独立开关。
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct MonitorSettings {
-    /// 是否启用网络监测
-    pub enabled: bool,
     /// 探测间隔（秒）
     pub check_interval: u32,
     /// TCP 探测目标列表（host:port）
@@ -189,7 +190,6 @@ impl Default for MonitorSettings {
             "Microsoft Connect Test".to_string(),
         );
         Self {
-            enabled: true,
             check_interval: 300,
             tcp_targets: vec![
                 "8.8.8.8:53".to_string(),
@@ -306,15 +306,11 @@ pub struct AppSettings {
     pub runtime_mode: String,
     /// 启动动作（none / monitor / login_once）
     pub startup_action: StartupAction,
-    /// 是否自动检查更新
-    pub auto_update: bool,
     /// Web 服务监听端口
     pub port: u16,
     /// 是否已注册系统自启动
     pub autostart_enabled: bool,
-    /// 任务脚本超时（秒）
-    pub task_script_timeout: u32,
-    /// 是否发送任务相关系统通知
+    /// 是否发送任务相关系统通知（任务完成后经 notification 日志源提示）
     pub task_notification: bool,
     /// 是否启用开发者模式（启用后将下载 MinGit 等开发者工具）
     pub developer_mode: bool,
@@ -328,10 +324,8 @@ impl Default for AppSettings {
             auto_start_browser: true,
             runtime_mode: "full".to_string(),
             startup_action: StartupAction::Monitor,
-            auto_update: true,
             port: 50721,
             autostart_enabled: false,
-            task_script_timeout: 30,
             task_notification: true,
             developer_mode: false,
             show_tray: true,

@@ -170,10 +170,8 @@ export interface AppSettings {
   auto_start_browser: boolean;
   runtime_mode: string;
   startup_action: string;
-  auto_update: boolean;
   port: number;
   autostart_enabled: boolean;
-  task_script_timeout: number;
   task_notification: boolean;
   show_tray: boolean;
 }

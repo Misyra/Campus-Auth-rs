@@ -284,7 +284,7 @@ pub async fn set_log_level(
     settings.global.logging.level = body.level.clone();
     config.save_settings(&settings).await?;
     // 热更新运行时日志级别（tracing filter），而非仅落盘下次启动生效
-    crate::launcher::reload_log_level(&body.level);
+    crate::logging::reload_log_level(&body.level);
     Ok(data(body.level))
 }
 
@@ -417,7 +417,6 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
     }
 
     serde_json::json!({
-        "enabled": obj.get("enable_tcp_check").or_else(|| obj.get("enable_http_check")).and_then(|v| v.as_bool()).unwrap_or(true),
         "check_interval": obj.get("check_interval_seconds").and_then(|v| v.as_u64()).unwrap_or(300),
         "tcp_targets": obj.get("ping_targets").cloned().unwrap_or(serde_json::json!([])),
         "http_targets": obj.get("test_urls").cloned().unwrap_or(serde_json::json!([])),
@@ -461,7 +460,6 @@ mod tests {
         let mut url_expected = std::collections::HashMap::new();
         url_expected.insert("http://a.com".to_string(), "OK".to_string());
         crate::config::MonitorSettings {
-            enabled: true,
             check_interval: 120,
             tcp_targets: vec!["8.8.8.8:53".into()],
             http_targets: vec!["http://b.com".into()],

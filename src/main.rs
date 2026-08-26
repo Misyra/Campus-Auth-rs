@@ -61,7 +61,11 @@ fn handle_status(base_path: &Path) -> anyhow::Result<()> {
         Some(info) => {
             println!("实例运行中");
             println!("  PID:      {}", info.pid);
-            println!("  端口:     {}", info.port);
+            if info.port == 0 {
+                println!("  端口:     未监听（轻量模式，Web 控制台按需启动）");
+            } else {
+                println!("  端口:     {}", info.port);
+            }
             println!("  进程存活: {}", info.running);
             if let Some(uptime) = info.uptime {
                 println!("  运行时长: {:.0}s", uptime.as_secs_f64());

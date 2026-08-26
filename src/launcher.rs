@@ -6,16 +6,14 @@
 //! - **login_once**：执行一次登录后退出
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::fmt::time::FormatTime;
-use tracing_subscriber::prelude::*;
+use crate::logging::{init_logging, log_broadcast_tx, LogEntry, WorkerGuard};
 
 use crate::app::{self, AxumServeHandle};
 use crate::config::schema::StartupAction;
@@ -121,7 +119,7 @@ pub(crate) struct LauncherState {
     /// 托盘泵任务句柄（spawn 后填充，优雅关闭时 stop）
     tray_handle: Option<crate::tray::ServiceHandle>,
     shutdown_token: CancellationToken,
-    log_tx: tokio::sync::broadcast::Sender<crate::web::state::LogEntry>,
+    log_tx: tokio::sync::broadcast::Sender<LogEntry>,
     /// 日志文件非阻塞写入的 WorkerGuard，优雅关闭时 drop 以 flush 剩余日志
     _log_guard: Option<WorkerGuard>,
 }
@@ -148,7 +146,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
 
     // 5. 日志广播通道 + 文件日志层
     let log_tx = log_broadcast_tx();
-    let log_guard = init_file_logging(&app_config.base_path, log_tx.clone());
+    let log_guard = init_logging(&app_config.base_path, log_tx.clone());
 
     // 6. 引导服务容器
     // 应用级关闭令牌在此创建：传入容器派生 uptime/登录 shutdown 的 child，
@@ -356,354 +354,6 @@ async fn wait_for_lock_release(base_path: &Path) -> Result<()> {
 }
 
 // ============================================================
-// 日志
-// ============================================================
-
-/// 自定义日志计时器：YYYY-MM-DD HH:MM:SS 本地时间
-#[derive(Clone)]
-struct LocalTimer;
-
-/// 全局日志 filter（`SharedTargets` 让多个 layer 共享同一份可变配置，支持热更新）
-static LOG_TARGETS: OnceLock<SharedTargets> = OnceLock::new();
-
-/// 共享动态日志 filter：多 layer 共享同一份可变 `Targets`
-///
-/// `Targets` 是纯值类型：旧实现 `targets.clone().with_target(...)` 只修改被
-/// 丢弃的副本（且各 layer 持有独立 filter 副本），热更新从不生效。
-/// 此包装让三个 fmt layer 持有同一 `Arc<Mutex<Targets>>`，
-/// `reload_log_level` 整体替换内部值即可对所有层即时生效。
-#[derive(Clone, Default)]
-struct SharedTargets(Arc<std::sync::Mutex<tracing_subscriber::filter::Targets>>);
-
-impl SharedTargets {
-    /// 构造默认规则：第三方库 WARN，本项目 target（campus_auth/frontend）指定级别
-    fn build(lf: tracing_subscriber::filter::LevelFilter) -> Self {
-        Self::new(
-            tracing_subscriber::filter::Targets::new()
-                .with_default(tracing_subscriber::filter::LevelFilter::WARN)
-                .with_target("campus_auth", lf)
-                .with_target("frontend", lf),
-        )
-    }
-
-    fn new(targets: tracing_subscriber::filter::Targets) -> Self {
-        Self(Arc::new(std::sync::Mutex::new(targets)))
-    }
-
-    /// 热更新：整体替换内部 Targets（各层下次判定即读到新值）
-    fn replace(&self, targets: tracing_subscriber::filter::Targets) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = targets;
-    }
-}
-
-impl<S> tracing_subscriber::layer::Filter<S> for SharedTargets {
-    fn enabled(
-        &self,
-        metadata: &tracing::Metadata<'_>,
-        cx: &tracing_subscriber::layer::Context<'_, S>,
-    ) -> bool {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        // UFCS 消歧：Targets 同时实现了 Layer 与 Filter 两个 trait
-        tracing_subscriber::layer::Filter::enabled(&*guard, metadata, cx)
-    }
-
-    fn callsite_enabled(
-        &self,
-        _metadata: &'static tracing::Metadata<'static>,
-    ) -> tracing::subscriber::Interest {
-        // filter 会动态变化，必须禁用 Interest 缓存：
-        // 否则级别调整前判为 never 的 callsite 会被缓存结果永久拦截
-        tracing::subscriber::Interest::sometimes()
-    }
-
-    fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        tracing_subscriber::layer::Filter::<()>::max_level_hint(&*guard)
-    }
-}
-
-/// 解析日志级别字符串（无效值回退 INFO）
-fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
-    use tracing_subscriber::filter::LevelFilter;
-    match level.to_ascii_uppercase().as_str() {
-        "TRACE" => LevelFilter::TRACE,
-        "DEBUG" => LevelFilter::DEBUG,
-        "WARN" | "WARNING" => LevelFilter::WARN,
-        "ERROR" => LevelFilter::ERROR,
-        _ => LevelFilter::INFO,
-    }
-}
-
-/// 从 settings.json 读取日志级别（`global.logging.level`），失败回退 INFO
-///
-/// 此前启动初始化硬编码 INFO，配置的级别只有重启且恰好走热更新路径才可能生效。
-fn read_initial_log_level(base_path: &Path) -> tracing_subscriber::filter::LevelFilter {
-    let path = base_path.join("config").join("settings.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| {
-            v.get("global")?
-                .get("logging")?
-                .get("level")?
-                .as_str()
-                .map(parse_level)
-        })
-        .unwrap_or(tracing_subscriber::filter::LevelFilter::INFO)
-}
-
-/// 热更新全局日志级别（由 `set_log_level` 调用）
-///
-/// 第三方库保持 WARN，本项目 target（campus_auth/frontend）设为指定级别。无效级别回退 INFO。
-pub fn reload_log_level(level: &str) {
-    let lf = parse_level(level);
-    let Some(shared) = LOG_TARGETS.get() else {
-        tracing::warn!("日志 filter 未初始化，忽略级别切换");
-        return;
-    };
-    shared.replace(
-        tracing_subscriber::filter::Targets::new()
-            .with_default(tracing_subscriber::filter::LevelFilter::WARN)
-            .with_target("campus_auth", lf)
-            .with_target("frontend", lf),
-    );
-    tracing::info!("日志级别已热更新为 {}", lf);
-}
-
-impl FormatTime for LocalTimer {
-    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
-    }
-}
-
-/// 从 settings.json 读取日志保留天数（`global.logging.retention_days`），失败回退默认 7
-fn read_retention_days(base_path: &Path) -> u32 {
-    let path = base_path.join("config").join("settings.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| {
-            v.get("global")?
-                .get("logging")?
-                .get("retention_days")?
-                .as_u64()
-        })
-        .map(|d| d as u32)
-        .unwrap_or(7)
-}
-
-/// 删除 logs/ 目录下超过保留天数的旧日志文件
-///
-/// 仅删除修改时间早于 cutoff 的 `.log` 文件，跳过当前正在写入的 `app.log`
-/// （`tracing_appender::rolling::daily` 生成 `app.log.YYYY-MM-DD` 轮转文件）。
-fn cleanup_old_logs(logs_dir: &Path, retention_days: u32) {
-    let Ok(entries) = std::fs::read_dir(logs_dir) else {
-        return;
-    };
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(u64::from(retention_days) * 86_400);
-    let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        // 仅处理日志文件，跳过当前活跃文件
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == "app.log" || !name.starts_with("app.log") {
-            continue;
-        }
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if modified < cutoff && std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
-            }
-        }
-    }
-    if removed > 0 {
-        tracing::info!(
-            "清理过期日志文件 {} 个（保留 {} 天）",
-            removed,
-            retention_days
-        );
-    }
-}
-
-/// 初始化日志系统：控制台层 + 文件层（按日期轮转）+ 广播层（WebSocket 推送）
-///
-/// 全局 subscriber 只能 init 一次，所有层在此统一注册。
-fn init_file_logging(
-    base_path: &Path,
-    log_tx: tokio::sync::broadcast::Sender<crate::web::state::LogEntry>,
-) -> WorkerGuard {
-    let logs_dir = base_path.join("logs");
-    let _ = std::fs::create_dir_all(&logs_dir);
-
-    // 启动时清理过期日志：按 settings.json 的 logging.retention_days 保留，
-    // 删除超过保留天数的旧轮转文件，避免日志无限累积（对齐原项目 loguru retention）。
-    cleanup_old_logs(&logs_dir, read_retention_days(base_path));
-
-    // 动态 filter：三个 layer 共享同一 SharedTargets（热更新入口见 reload_log_level）。
-    // 初始级别读自 settings.json 的 logging.level（此前硬编码 INFO 导致配置不生效）。
-    let shared = SharedTargets::build(read_initial_log_level(base_path));
-    let _ = LOG_TARGETS.set(shared.clone());
-
-    // 本地时区计时器：YYYY-MM-DD HH:MM:SS 格式
-    let local_timer = LocalTimer;
-
-    // 控制台层：人类可读格式输出到 stderr
-    let console_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_writer(std::io::stderr)
-        .with_timer(local_timer.clone())
-        .with_filter(shared.clone());
-
-    // 文件层：JSON 格式按日轮转
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "app.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .with_target(true)
-        .with_timer(local_timer.clone())
-        .json()
-        .with_filter(shared.clone());
-
-    // 广播层：将 tracing 事件转发到 broadcast channel 供 WebSocket 推送
-    let broadcast_layer = tracing_subscriber::fmt::layer()
-        .with_writer(BroadcastWriter::new(log_tx))
-        .with_ansi(false)
-        .with_target(true)
-        .without_time()
-        .with_filter(shared);
-
-    if let Err(e) = tracing_subscriber::registry()
-        .with(console_layer)
-        .with(file_layer)
-        .with(broadcast_layer)
-        .try_init()
-    {
-        eprintln!("日志层注册失败（可能已初始化）: {e}");
-    }
-
-    guard
-}
-
-/// 广播写入器：将格式化的日志发送到 broadcast channel
-struct BroadcastWriter {
-    tx: tokio::sync::broadcast::Sender<crate::web::state::LogEntry>,
-}
-
-impl BroadcastWriter {
-    fn new(tx: tokio::sync::broadcast::Sender<crate::web::state::LogEntry>) -> Self {
-        Self { tx }
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BroadcastWriter {
-    type Writer = BroadcastWriterGuard;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        BroadcastWriterGuard {
-            tx: self.tx.clone(),
-            buf: Vec::new(),
-        }
-    }
-}
-
-/// 写入器守卫：缓冲写入，flush 或 drop 时发送到广播通道
-struct BroadcastWriterGuard {
-    tx: tokio::sync::broadcast::Sender<crate::web::state::LogEntry>,
-    buf: Vec<u8>,
-}
-
-impl BroadcastWriterGuard {
-    /// 发送缓冲的日志（无剩余数据或非 UTF-8 时跳过）
-    fn send_buffered(&mut self) {
-        if self.buf.is_empty() {
-            return;
-        }
-        let text = match String::from_utf8(std::mem::take(&mut self.buf)) {
-            Ok(t) => t,
-            Err(_) => return,
-        };
-        let entry = parse_log_line(&text);
-        let _ = self.tx.send(entry);
-    }
-}
-
-impl std::io::Write for BroadcastWriterGuard {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.send_buffered();
-        Ok(())
-    }
-}
-
-/// 关键修复：`tracing-subscriber` 的 fmt layer 在 `on_event` 里只调用
-/// `io::Write::write_all`，**不调用 `flush`**。若仅在 flush 里发送，日志实时推送会
-/// 完全失效（WebSocket 收不到任何后端日志）。因此改为在 Drop 里兜底发送，
-/// flush 仍保留以兼容可能显式调用 flush 的路径。
-impl Drop for BroadcastWriterGuard {
-    fn drop(&mut self) {
-        self.send_buffered();
-    }
-}
-
-/// 解析 tracing fmt 层输出为 LogEntry
-///
-/// tracing fmt 层（with_target(true).without_time().with_ansi(false)）输出格式：
-/// `  INFO campus_auth::launcher: 正在初始化服务...`
-/// `  WARN campus_auth::bridge: 某警告: key=value`
-/// 也兼容 `[LEVEL target] message` 和裸消息格式。
-fn parse_log_line(line: &str) -> crate::web::state::LogEntry {
-    let trimmed = line.trim();
-    let now = chrono::Local::now().to_rfc3339();
-
-    // 格式 1：[LEVEL target] message
-    if trimmed.starts_with('[') {
-        if let Some(end_bracket) = trimmed.find(']') {
-            let header = &trimmed[1..end_bracket];
-            let message = trimmed[end_bracket + 1..].trim().to_string();
-            let parts: Vec<&str> = header.splitn(2, ' ').collect();
-            let level = parts.first().unwrap_or(&"INFO").to_string();
-            let source = crate::web::state::normalize_source(parts.get(1).copied().unwrap_or(""));
-            return crate::web::state::LogEntry::new(level, message, now, source);
-        }
-    }
-
-    // 格式 2：tracing fmt 层输出 "LEVEL target: message"
-    // LEVEL 是 TRACE/DEBUG/INFO/WARN/ERROR，前面可能有空格
-    let upper = trimmed.to_uppercase();
-    for lvl in ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] {
-        if upper.starts_with(lvl) {
-            let rest = trimmed[lvl.len()..].trim_start();
-            // rest 形如 "campus_auth::launcher: 消息"
-            if let Some(colon_pos) = rest.find(": ") {
-                let source = crate::web::state::normalize_source(rest[..colon_pos].trim());
-                let message = rest[colon_pos + 2..].trim().to_string();
-                return crate::web::state::LogEntry::new(lvl.to_string(), message, now, source);
-            }
-            // 只有 LEVEL 无 ": " 分隔，rest 全部作为 message
-            return crate::web::state::LogEntry::new(
-                lvl.to_string(),
-                rest.to_string(),
-                now,
-                String::new(),
-            );
-        }
-    }
-
-    // 回退：整行作为消息
-    crate::web::state::LogEntry::new("INFO".to_string(), trimmed.to_string(), now, String::new())
-}
-
-// ============================================================
 // 模式分发
 // ============================================================
 
@@ -732,7 +382,16 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
             state.axum_handle = Some(handle);
             info!("Web 控制台已启动: http://127.0.0.1:{port}");
 
-            if !state.app_config.no_browser {
+            // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
+            // 此前配置项是死开关，UI「静默启动」切换无任何效果
+            let auto_open = !state.app_config.no_browser
+                && container
+                    .config
+                    .runtime()
+                    .load()
+                    .app
+                    .auto_start_browser;
+            if auto_open {
                 open_browser(port);
             }
         }
@@ -783,8 +442,12 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
         apply_startup_action(container).await;
     }
 
+    // G15：轻量模式下此刻 Axum 尚未监听（按需启动），记录哨兵端口 0——
+    // `.instance` 文件仍提供 PID/存活状态供 --status 查询，但 --stop 不会向
+    // 未监听端口发无效请求。真实端口在 Axum 绑定后由托盘按需启动路径
+    // （write_instance_port）回写。
     if let Some(ref lock) = state.instance_lock {
-        let _ = lock.record_port(state.app_config.port);
+        let _ = lock.record_port(0);
     }
 
     spawn_background_update_check(state);
@@ -1099,12 +762,6 @@ async fn graceful_shutdown(state: &mut LauncherState) {
 // ============================================================
 // 辅助函数
 // ============================================================
-
-/// 创建日志广播通道的发送端
-fn log_broadcast_tx() -> tokio::sync::broadcast::Sender<crate::web::state::LogEntry> {
-    let (tx, _) = tokio::sync::broadcast::channel(1024);
-    tx
-}
 
 /// 打开系统默认浏览器
 fn open_browser(port: u16) {

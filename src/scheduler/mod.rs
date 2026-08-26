@@ -82,6 +82,8 @@ pub struct SchedulerService {
     /// 自引用弱句柄：`spawn_manual_run` 需要在 spawned task 中克隆自身 `Arc`，
     /// 经此获取而非 `self: &Arc<Self>` 接收者（消除 trait 化的结构摩擦，M1）。
     self_weak: std::sync::Weak<Self>,
+    /// 配置服务（任务通知开关 app.task_notification 读取）
+    config: Arc<ConfigService>,
     /// 加载 browser/script/shell 任务配置。
     task_manager: Arc<TaskManager>,
     /// 脚本/Shell/浏览器任务执行。
@@ -132,6 +134,7 @@ impl SchedulerService {
         let (task_change_tx, task_change_rx) = mpsc::channel(CHANGE_CHANNEL_CAPACITY);
 
         Ok(Arc::new_cyclic(|weak| Self {
+            config,
             scheduled_dir,
             self_weak: weak.clone(),
             task_manager: tasks,

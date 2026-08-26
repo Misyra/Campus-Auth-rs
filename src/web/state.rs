@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
@@ -18,64 +17,9 @@ use crate::tasks::{TaskApi, TaskRunApi};
 use crate::updater::UpdaterApi;
 use crate::utils::metrics::Metrics;
 
-/// WebSocket 日志条目（由内部事件推入广播通道，供 /ws/logs 订阅）
-#[derive(Clone, Debug, Serialize)]
-pub struct LogEntry {
-    /// 全局单调递增序号（进程生命周期内唯一）
-    ///
-    /// 用途：前端 v-for 稳定 key（index key 在缓冲裁剪后导致整列表重建）、
-    /// 实时日志去重（同毫秒同文案的两条日志不再被误判为重复）、
-    /// 自动滚动触发依据（watch 长度在缓冲满员后不再变化）
-    pub seq: u64,
-    /// 日志级别（INFO/WARN/ERROR…）
-    pub level: String,
-    /// 日志消息
-    pub message: String,
-    /// ISO8601 时间戳
-    pub timestamp: String,
-    /// 日志来源（归一化后的短模块名，如 `launcher`/`scheduler`，由 tracing target 派生）
-    #[serde(default)]
-    pub source: String,
-}
-
-/// 日志序号发生器（全局单调递增）
-static NEXT_LOG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-impl LogEntry {
-    /// 构造日志条目并分配单调序号（所有构造路径统一走此入口）
-    pub fn new(level: String, message: String, timestamp: String, source: String) -> Self {
-        Self {
-            seq: NEXT_LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            level,
-            message,
-            timestamp,
-            source,
-        }
-    }
-}
-
-/// 将 tracing target 归一化为短模块名，供前端来源过滤与展示
-///
-/// - `campus_auth::scheduler::cron_loop` → `scheduler`
-/// - `campus_auth::launcher` → `launcher`
-/// - `campus_auth`（crate 根） → `app`
-/// - 外部 crate（如 `hyper_util::client`）→ 取首段 `hyper_util`
-///
-/// 归一化后前后端来源过滤（精确匹配短名）与徽章展示才能一致工作。
-pub fn normalize_source(target: &str) -> String {
-    let t = target.trim();
-    if t.is_empty() {
-        return String::new();
-    }
-    // 去掉 crate 前缀 `campus_auth::`
-    let rest = t.strip_prefix("campus_auth::").unwrap_or(t);
-    let first = rest.split("::").next().unwrap_or("").trim();
-    if first.is_empty() || first == "campus_auth" {
-        // crate 根模块（target 恰好为 `campus_auth`）
-        return "app".to_string();
-    }
-    first.to_ascii_lowercase()
-}
+// WebSocket 日志条目与来源归一化已迁至 src/logging.rs（A-1）；
+// 此处再导出保持既有 `state::LogEntry` 路径的消费方兼容。
+pub use crate::logging::{normalize_source, LogEntry};
 
 /// 应用共享状态：注入到所有 Axum handler 的 `State<AppState>`
 #[derive(Clone)]

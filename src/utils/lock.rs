@@ -130,6 +130,10 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if info.port == 0 {
+        anyhow::bail!("实例运行于轻量模式且 Web 控制台尚未启动，无法远程停止；请通过系统托盘退出");
+    }
+
     // 发送关机请求（忽略 HTTP 错误，进程可能已开始关闭）。
     // 本地 API 已启用 token 鉴权，必须携带 config/.auth_token 中的 token
     let url = format!("http://127.0.0.1:{}/api/system/shutdown", info.port);

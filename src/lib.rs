@@ -13,6 +13,7 @@ pub mod container;
 pub mod engine;
 pub mod environment;
 pub mod launcher;
+pub mod logging;
 pub mod login;
 pub mod monitor;
 pub mod network;
