@@ -39,16 +39,11 @@ function closeEditor() { void t.closeTaskEditor(); }
               导入
             </button>
             <button class="btn btn-sm" @click="repo.showRepoImport()" title="从云端仓库导入">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                <path d="M21 12a9 9 0 0 1-9 9m9-9a9 9 0 0 0-9-9m9 9H3m9 9a9 9 0 0 1-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 0 1 9-9"/>
-              </svg>
+              <IconApp name="globe-grid" class="icon-sm" />
               仓库导入
             </button>
             <a href="https://github.com/Misyra/Campus-Auth" target="_blank" rel="noopener" class="btn btn-sm" title="分享你的适配方案">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-              </svg>
+              <IconApp name="share-2" class="icon-sm" />
               分享适配
             </a>
             <button class="btn btn-sm btn-primary" @click="t.showTaskEditor(null)">
@@ -59,7 +54,7 @@ function closeEditor() { void t.closeTaskEditor(); }
         </div>
         <div class="card-body">
           <div v-if="!browserTasks.length" class="empty-state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h18"/></svg>
+            <IconApp name="layout" :stroke-width="1.5" />
             <span>暂无任务配置</span>
           </div>
           <div v-else class="task-list">
@@ -72,9 +67,7 @@ function closeEditor() { void t.closeTaskEditor(); }
               <div class="task-drag-handle" title="拖拽排序"
                 @mousedown="drag.onHandleMouseDown($event)"
                 @mouseup="drag.onHandleMouseUp($event)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                  <line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="18" x2="16" y2="18"/>
-                </svg>
+                <IconApp name="list" class="icon-sm" />
               </div>
               <div class="task-info">
                 <h3>{{ task.name }}</h3>
@@ -187,74 +180,4 @@ function closeEditor() { void t.closeTaskEditor(); }
     </div>
   </div>
 
-<!-- ==================== 仓库导入弹窗 ==================== -->
-<Modal :open="repo.repoImport.value.visible" title="从云端仓库导入任务" size="lg" @close="repo.closeRepoImport">
-  <div class="repo-import-source">
-    <span class="repo-source-label">源：</span>
-    <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'github' }" @click="repo.selectRepoSource('github')">GitHub</button>
-    <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'gitee' }" @click="repo.selectRepoSource('gitee')">Gitee</button>
-    <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'custom' }" @click="repo.selectRepoSource('custom')">自定义</button>
-    <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
-      <input v-model="repo.repoImport.value.url" type="text" class="input" placeholder="输入远程索引 URL" />
-    </div>
-  </div>
-  <div class="repo-import-action">
-    <button class="btn btn-primary btn-sm" @click="repo.fetchRepoIndex()" :disabled="repo.repoImport.value.loading">
-      {{ repo.repoImport.value.loading ? '加载中...' : '加载索引' }}
-    </button>
-  </div>
-  <div v-if="repo.repoImport.value.error" class="repo-import-error">{{ repo.repoImport.value.error }}</div>
-  <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-search">
-    <input v-model="repo.repoImport.value.searchQuery" type="text" class="input" placeholder="搜索任务..." />
-  </div>
-  <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-list">
-    <div v-for="task in repo.filteredRepoTasks.value" :key="task.name" class="repo-import-item" @click="repo.confirmRepoImport(task)">
-      <div class="repo-item-name">{{ task.name }}</div>
-      <div class="repo-item-desc">{{ task.description }}</div>
-      <div class="repo-item-meta">
-        <span v-if="task.author" class="repo-item-author">{{ task.author }}</span>
-        <span v-if="task.tags" class="repo-item-tags">{{ task.tags.join(', ') }}</span>
-      </div>
-    </div>
-    <div v-if="repo.filteredRepoTasks.value.length === 0" class="repo-import-empty">无匹配</div>
-  </div>
-  <div v-else-if="!repo.repoImport.value.loading" class="repo-import-hint">
-    <p>点击「加载索引」从远程仓库获取任务列表。</p>
-    <p>你也可以 <a :href="repo.repoImport.value.url" target="_blank" rel="noopener">直接查看仓库</a>。</p>
-  </div>
-</Modal>
-
-<!-- 免责弹窗：必须显式确认/取消，禁用遮罩关闭 -->
-<Modal :open="!!repo.repoImport.value.disclaimer" title="免责声明" :close-on-overlay="false" @close="repo.cancelRepoDisclaimer">
-  <p>从远程仓库导入的任务由社区成员提供，未经审核验证。</p>
-  <p class="repo-disclaimer-warn"><strong>请仔细阅读并确认任务内容后再使用。</strong>任务中填入的账号密码将在执行时提交到第三方网站，请确认目标网站可靠。</p>
-  <div class="repo-disclaimer-actions">
-    <button class="btn btn-secondary" @click="repo.cancelRepoDisclaimer()">取消</button>
-    <button class="btn btn-primary" @click="repo.acceptRepoDisclaimer()">确认导入</button>
-  </div>
-</Modal>
-
 </template>
-<style scoped>
-/* 弹窗容器/遮罩已由公共 Modal.vue 提供，此处仅保留弹窗内容样式 */
-.repo-import-source { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-.repo-source-label { font-size: 0.9em; color: var(--text-secondary); }
-.repo-import-source .btn.active { background: var(--accent); color: #fff; }
-.repo-custom-url { width: 100%; margin-top: 8px; }
-.repo-custom-url .input { width: 100%; }
-.repo-import-action { margin-bottom: 12px; }
-.repo-import-error { color: var(--danger); font-size: 0.9em; margin-bottom: 8px; }
-.repo-import-search { margin-bottom: 12px; }
-.repo-import-search .input { width: 100%; }
-.repo-import-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-.repo-import-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: background 0.15s; }
-.repo-import-item:hover { background: var(--bg-hover); }
-.repo-item-name { font-weight: 600; }
-.repo-item-desc { font-size: 0.85em; color: var(--text-secondary); margin-top: 2px; }
-.repo-item-meta { display: flex; gap: 12px; margin-top: 6px; font-size: 0.8em; color: var(--text-tertiary); }
-.repo-import-empty { text-align: center; color: var(--text-tertiary); padding: 24px; }
-.repo-import-hint { color: var(--text-secondary); font-size: 0.9em; }
-.repo-import-hint a { color: var(--accent); }
-.repo-disclaimer-warn { color: var(--danger); }
-.repo-disclaimer-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
-</style>

@@ -1,9 +1,7 @@
 /**
  * WebSocket 连接管理（单例）。
- * 替代原 websocketData + lifecycleMethods.connectWebSocket/_setupVisibilityChange。
- * 自动重连（指数退避 1s→30s）、应用层 ping、状态/日志消息分发到对应 composable。
- *
- * 修复 P2-12.10：入站消息做类型校验，非法消息记日志并丢弃。
+ * 多标签页共存：所有页面同时订阅同一广播通道，互不顶替；多标签页可同时在线。
+ * 自动重连（指数退避 1s→60s，仅网络断开时触发）、应用层 ping、状态/日志消息分发到对应 composable。
  */
 
 import { ref } from "vue";
@@ -15,30 +13,20 @@ import { useStatus } from "./useStatus";
 import { useLogs } from "./useLogs";
 import { useDebug } from "./useDebug";
 
-// 无上限重连：每次重连间隔指数退避（1s → 2s → ... → 上限60s），
-// 页面可见性变化时重置计数器。避免网络短暂波动后永久断线。
 const WS_MAX_BACKOFF = 60_000;
 
 let ws: WebSocket | null = null;
 let destroyed = false;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let pingTimer: ReturnType<typeof setInterval> | undefined;
-let retryCount = 0; // 仅影响退避计算，不再作为硬上限
+let retryCount = 0;
 let wasConnected = false;
 let visibilityHandler: (() => void) | null = null;
-// 防重入：并发的 connectWebSocket 调用（onclose 重试 + 可见性恢复 + 手动恢复）
-// 会各自 new WebSocket，瞬间产生大量「连接已关闭/连接错误」警告甚至连接风暴。
-// 用 connecting 标志保证同一时刻只有一条连接尝试在途，避免叠加。
 let connecting = false;
-// 重连回调：断线期间 profiles/config/tasks/scheduled 等非实时推送数据会停留在旧值，
-// 由上层（useUi）注册全量刷新回调，在重连成功时补齐（历史遗留 F1）。
 let reconnectHandlers: Array<() => void | Promise<void>> = [];
 
 const wsReconnecting = ref(false);
 const wsRetryCount = ref(0);
-// 本页面连接被另一个页面顶替（后端 ws_kicked）：置位后停止自动重连，
-// 避免多标签页互相踢下线形成死循环
-const wsKicked = ref(false);
 
 const status = useStatus();
 const logs = useLogs();
@@ -61,12 +49,6 @@ function isValidLog(data: unknown): data is LogEntry {
   );
 }
 
-/**
- * 注册 WebSocket 重连回调。
- *
- * 仅在“重连成功”（非首次连接）时触发，用于补齐断线期间无法通过推送同步的数据。
- * 返回注销函数：调用方销毁时应主动退订，避免回调泄漏（M4 生命周期修复）。
- */
 function onWsReconnect(cb: () => void | Promise<void>): () => void {
   reconnectHandlers.push(cb);
   return () => {
@@ -77,14 +59,11 @@ function onWsReconnect(cb: () => void | Promise<void>): () => void {
 
 async function connectWebSocket(): Promise<void> {
   if (destroyed) return;
-  // 防重入：已有连接尝试在途或已存在活跃连接时，不再叠加新建，避免连接风暴
   if (connecting) return;
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
   }
-  // 必须在首次 await 前占有连接权，否则多个调用会同时越过上方检查。
   connecting = true;
-  // WS 无法携带自定义头，后端通过 ?token= 查询参数鉴权（缺失将被 403 拒绝升级）
   const token = await ensureAuthToken();
   if (destroyed) {
     connecting = false;
@@ -109,10 +88,9 @@ async function connectWebSocket(): Promise<void> {
   try {
     ws = new WebSocket(wsUrl);
   } catch (e) {
-    // 极少数情况（wsUrl 非法等）会同步抛错；重置标志并降级为常规重连，避免永久卡死
     connecting = false;
     frontendLogger.error("websocket", "创建 WebSocket 失败", e);
-    if (!destroyed && !wsKicked.value) {
+    if (!destroyed) {
       wsReconnecting.value = true;
       const delay = Math.min(TIMING.WS_BACKOFF_BASE * Math.pow(2, retryCount), WS_MAX_BACKOFF);
       retryCount++;
@@ -122,22 +100,18 @@ async function connectWebSocket(): Promise<void> {
     }
     return;
   }
-  frontendLogger.info("websocket", `正在连接 ${wsUrl}`);
+  frontendLogger.info("websocket", `正在连接日志通道 ${wsUrl.split("?")[0]}`);
 
   ws.onopen = () => {
     connecting = false;
     retryCount = 0;
     wsRetryCount.value = 0;
     wsReconnecting.value = false;
-    wsKicked.value = false;
     if (ws) frontendLogger.setWebSocket(ws);
     frontendLogger.info("websocket", "已连接");
     if (wasConnected) {
       void status.fetchStatus();
-      // 重连场景：补齐断线期间缺失的日志（后端 broadcast 不缓存历史）
       void logs.fetchLogs();
-      // 全量刷新非实时推送数据（profiles/config/tasks/scheduled 等），
-      // 避免它们停留在断线前的旧值（历史遗留 F1）
       for (const cb of reconnectHandlers) {
         try {
           void cb();
@@ -165,7 +139,6 @@ async function connectWebSocket(): Promise<void> {
       if (isValidStatus(parsed.data)) status.updateStatus(parsed.data);
       else frontendLogger.warn("websocket", "status 消息数据无效");
     } else if (parsed.type === "log") {
-      // 根据当前是否处于底部决定：在底部→自动滚动，不在底部→累计“新消息”计数
       if (isValidLog(parsed.data)) logs.appendLogs([parsed.data], logs.autoScroll.value);
       else frontendLogger.warn("websocket", "log 消息数据无效");
     } else if (parsed.type === "screenshot") {
@@ -177,12 +150,9 @@ async function connectWebSocket(): Promise<void> {
     } else if (parsed.type === "step_progress") {
       if (parsed.data && typeof parsed.data === "object") {
         const d = parsed.data as { step_index: number; total_steps?: number; description?: string; step_type?: string; session_type?: string };
-        // 仅调试会话（worker 注入 session_type=debug）的步骤进度才写入调试面板；
-        // 登录/浏览器任务的步骤进度只进日志流，避免登录步骤被误显示为“调试步骤进度”
         if (d.session_type === "debug") {
           useDebug().handleStepProgress(d);
         }
-        // 无论哪种会话都写入主日志流，使任务逐步运行的过程可见
         const desc = (typeof d.description === "string" && d.description.trim()) || "执行步骤";
         const total = typeof d.total_steps === "number" ? d.total_steps : "";
         const entry: LogEntry = {
@@ -197,9 +167,6 @@ async function connectWebSocket(): Promise<void> {
       }
     } else if (parsed.type === "dialog") {
       const d = parsed.data as { message?: string; action?: string } | null;
-      // 浏览器原生弹窗被自动确认（accept）后无法可视化弹出，这里把文案写入日志，
-      // 使“登录成功！”等被吞掉的提示仍可见（对应 worker 的 dialog 事件）。
-      // 仅记录日志、不弹 toast/通知，避免页面弹窗打扰用户（P3）。
       if (d && typeof d.message === "string" && d.message.trim()) {
         logs.appendLogs(
           [{ timestamp: new Date().toISOString(), level: "INFO", source: "task", message: `弹窗提示: ${d.message}` }],
@@ -208,10 +175,6 @@ async function connectWebSocket(): Promise<void> {
       }
     } else if (parsed.type === "pong") {
       /* 心跳响应 */
-    } else if (parsed.type === "ws_kicked") {
-      // 被另一个页面顶替：停止自动重连，避免互相踢死循环
-      wsKicked.value = true;
-      frontendLogger.warn("websocket", "连接被另一页面顶替，停止重连");
     } else {
       frontendLogger.warn("websocket", "未知消息类型: " + parsed.type);
     }
@@ -225,13 +188,6 @@ async function connectWebSocket(): Promise<void> {
       pingTimer = undefined;
     }
     if (destroyed) return;
-    // 被另一页面顶替（ws_kicked）：停止自动重连，避免多标签页互相踢下线死循环。
-    // 此处不再作为错误告警刷屏，仅以 info 记录（被顶替的横幅由 App.vue 展示）。
-    if (wsKicked.value) {
-      frontendLogger.info("websocket", "连接被另一页面顶替，已停止重连");
-      return;
-    }
-    // 无限重连：指数退避 1s→2s→4s→...→上限60s，不再因重试次数耗尽而永久断线
     wsReconnecting.value = true;
     wsRetryCount.value = retryCount;
     const delay = Math.min(TIMING.WS_BACKOFF_BASE * Math.pow(2, retryCount), WS_MAX_BACKOFF);
@@ -242,10 +198,7 @@ async function connectWebSocket(): Promise<void> {
     }, delay);
   };
 
-  ws.onerror = () => {
-    // 建立连接失败时会先触发 onerror 紧随 onclose：此处不单独告警，
-    // 避免与 onclose 的「连接已断开，重连…」重复刷屏（只保留 onclose 一条）。
-  };
+  ws.onerror = () => {};
 
   if (pingTimer) clearInterval(pingTimer);
   pingTimer = setInterval(() => {
@@ -256,13 +209,11 @@ async function connectWebSocket(): Promise<void> {
 }
 
 function setupVisibilityChange(): void {
-  // 幂等：重复调用不叠加 listener（此前直接覆盖赋值会泄漏前一次注册，M4）
   if (visibilityHandler) return;
   visibilityHandler = () => {
-    // 被顶替的页面不再重连（即使恢复可见）
-    if (wsKicked.value) return;
-    if (document.visibilityState === "visible" && ws?.readyState !== WebSocket.OPEN) {
-      retryCount = 0;
+    // 仅当真正断开且未销毁时才重连；避免可见性切换在连接正常时触发不必要的重连
+    // 后端已改为多连接共存，无需因可见性变化强行重连
+    if (document.visibilityState === "visible" && !destroyed && ws?.readyState === WebSocket.CLOSED) {
       frontendLogger.info("websocket", "页面恢复可见，尝试重连");
       connectWebSocket();
     }
@@ -295,23 +246,6 @@ function destroy(): void {
   }
 }
 
-/**
- * 被顶替（ws_kicked）后手动恢复本页连接（A12）。
- *
- * 重置 wsKicked 并主动发起一次全新连接；connectWebSocket 内部会先清理旧
- * 连接（handlers 置空 + close）再新建，因此旧连接残留不会阻断本次连接。
- * 新连接会被后端视为最新世代（顶替另一页面）；若随后 onclose 且非 kicked，
- * 正常自动重连逻辑自然接管（wsKicked 已复位，不会被残留状态卡住）。
- */
-function resumeFromKicked(): void {
-  if (!wsKicked.value || destroyed) return;
-  wsKicked.value = false;
-  retryCount = 0;
-  wsRetryCount.value = 0;
-  frontendLogger.info("websocket", "用户请求在本页恢复连接");
-  connectWebSocket();
-}
-
 export function useWebSocket() {
-  return { connectWebSocket, setupVisibilityChange, destroy, onWsReconnect, resumeFromKicked, wsReconnecting, wsRetryCount, wsKicked };
+  return { connectWebSocket, setupVisibilityChange, destroy, onWsReconnect, wsReconnecting, wsRetryCount };
 }

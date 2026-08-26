@@ -19,7 +19,7 @@ use crate::utils::metrics::Metrics;
 
 // WebSocket 日志条目与来源归一化已迁至 src/logging.rs（A-1）；
 // 此处再导出保持既有 `state::LogEntry` 路径的消费方兼容。
-pub use crate::logging::{normalize_source, LogEntry};
+pub use crate::logging::{LogEntry, normalize_source};
 
 /// 应用共享状态：注入到所有 Axum handler 的 `State<AppState>`
 #[derive(Clone)]
@@ -62,9 +62,6 @@ pub struct AppState {
     pub ws_tx: broadcast::Sender<String>,
     /// 优雅关闭信号发送端（由 shutdown_app 等触发，通知 launcher 开始优雅关闭流程）
     pub shutdown_tx: watch::Sender<()>,
-    /// WebSocket 单连接世代号：新连接接入时 +1，旧连接监测到世代号变化即断开。
-    /// 实现「同一时刻只一个前端页面接收事件」，新标签页顶掉旧标签页。
-    pub ws_epoch_tx: watch::Sender<u64>,
     /// 本地 API 鉴权 token（见 `web::auth` 模块说明）
     pub auth_token: Arc<str>,
 }
@@ -78,8 +75,6 @@ impl AppState {
         shutdown_tx: watch::Sender<()>,
         auth_token: Arc<str>,
     ) -> Self {
-        // 初始世代号 0：首个连接接入后 +1 变为 1
-        let (ws_epoch_tx, _) = watch::channel(0u64);
         // 细粒度依赖从容器抽出（trait object 化），handler 不再触达 container
         let history: Arc<dyn HistoryStore> = container.history.clone();
         let login: Arc<dyn LoginApi> = container.login.clone();
@@ -112,7 +107,6 @@ impl AppState {
             log_tx,
             ws_tx,
             shutdown_tx,
-            ws_epoch_tx,
             auth_token,
         }
     }
