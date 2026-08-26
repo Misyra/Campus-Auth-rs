@@ -101,11 +101,12 @@ campus-auth/
 │   ├── app.rs                # Axum 服务器构建 + 托盘初始化
 │   ├── container.rs          # ServiceContainer: Arc 共享状态
 │   ├── launcher.rs           # 启动状态机 (full / lightweight / once)
+│   ├── logging.rs            # 日志子系统（初始化 / 动态级别 / WS 广播 Layer）
 │   ├── engine/               # 调度引擎（单 tokio task + select!）
 │   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
 │   ├── login/                # 登录编排（状态机、去重、抢占、重试）
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）
-│   ├── web/                  # Web API + WebSocket
+│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
 │   ├── tasks/                # 任务管理
 │   ├── network/              # 网络接口 / SOCKS5
