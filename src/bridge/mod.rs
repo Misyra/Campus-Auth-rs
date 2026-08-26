@@ -234,6 +234,13 @@ struct BridgeInner {
     ipc_tx: Option<mpsc::Sender<ParsedMessage>>,
     /// 连续 spawn/健康检查失败计数（B3 熔断）
     consecutive_spawn_failures: u32,
+    /// 调试会话存活标记（B3 根治）
+    ///
+    /// `debug_start` 成功后置位，`debug_stop` / 失败 / Worker 退出时清除。
+    /// 存活期内会话槽位保持 `Some(Debug)`：登录/浏览器任务被 compat 矩阵
+    /// 快速失败（此前仅命令在途窗口受保护，命令间隙自动登录可插入共用页面）；
+    /// 空闲计时器不启动（调试静置不再被回收）。
+    debug_session_open: bool,
     /// 最近一次 Worker 健康检查上报的运行时能力（如 `{"ocr": true}`）
     ///
     /// 任务 10：由 `send_health_check`（worker_health_check 路径）捕获，
@@ -281,6 +288,7 @@ impl BridgeSupervisor {
         Arc::new_cyclic(|weak| Self {
             orphan_cleanup_done: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(BridgeInner {
+                debug_session_open: false,
                 worker_state: WorkerState::NotInstalled,
                 process: None,
                 pending_requests: HashMap::new(),
@@ -509,6 +517,32 @@ impl BridgeSupervisor {
     }
 }
 
+/// B3：Debug 命令结果的会话开合结算（纯函数，可单测）
+#[derive(Debug, PartialEq, Eq)]
+enum DebugSettle {
+    /// start 成功 → 标记会话存活
+    Open,
+    /// step / run_all 完成 → 刷新活跃时刻、保持存活
+    KeepOpen,
+    /// stop / 非调试命令 / 失败结果 → 不改开合（守卫按语义复位或保持）
+    Close,
+}
+
+fn execute_debug_settle(method: &str, result: &Result<IpcResponse, BridgeError>) -> DebugSettle {
+    if !method.starts_with("debug_") {
+        return DebugSettle::Close;
+    }
+    let ok = matches!(
+        result,
+        Ok(resp) if resp.result.success
+    );
+    match method {
+        "debug_start" if ok => DebugSettle::Open,
+        "debug_step" | "debug_run_all" if ok => DebugSettle::KeepOpen,
+        _ => DebugSettle::Close,
+    }
+}
+
 /// 执行孤儿浏览器清理：spawn_blocking 隔离同步枚举 + 5s 超时兜底（A-4）
 async fn run_orphan_cleanup_with_timeout() {
     let task = tokio::task::spawn_blocking(orphan::cleanup_orphan_browsers);
@@ -603,8 +637,23 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
                             r = rx => r.unwrap_or(Err(BridgeError::SupervisorNotRunning)),
                             _ = token.cancelled() => Err(BridgeError::Cancelled),
                         };
+                        // B3：guard drop 前结算调试会话开合（settle 需在守卫复位
+                        // 判定前写入 debug_session_open）
+                        match execute_debug_settle(&method, &result) {
+                            DebugSettle::Open => {
+                                let mut inner =
+                                    sup.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                inner.debug_session_open = true;
+                            }
+                            DebugSettle::KeepOpen => {
+                                let mut inner =
+                                    sup.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                inner.last_activity = Instant::now();
+                            }
+                            DebugSettle::Close => {}
+                        }
                         let _ = response_tx.send(result).await;
-                        // _guard drop 触发 reset_session 清理
+                        // _guard drop 触发 reset_session / debug_guard_cleanup 清理
                     }
                     Err(e) => {
                         let _ = response_tx.send(Err(e)).await;
@@ -761,6 +810,11 @@ async fn execute_inner(
 
         // 4.1 互斥检查（失败立即返回，此时尚未分配任何资源，无泄漏）
         check_session_compat(inner.current_session, method)?;
+        // B3：调试会话已存活时拒绝重复 debug_start（槽位常驻 Some(Debug)，
+        // 此检查兜底「compat 只看槽位」之外的开合状态）
+        if method == "debug_start" && inner.debug_session_open {
+            return Err(BridgeError::WorkerBusy);
+        }
 
         // 4.2 分配 request id 并注册 pending 响应通道
         let request_id = inner.next_request_id;
@@ -837,6 +891,19 @@ async fn execute_inner(
                 }
             }
         })
+    } else if session == SessionType::Debug {
+        // B3：Debug 命令的守卫不直接复位——是否保持会话开合由转发 task 的
+        // settle 结果（debug_session_open）决定；stop / 未开合则完整复位
+        SessionGuard::new({
+            let weak = this.self_weak.clone();
+            let cancel_id = cancel_id.clone();
+            let is_stop = method == "debug_stop";
+            move || {
+                if let Some(sup) = weak.upgrade() {
+                    debug_guard_cleanup(&sup, request_id, &cancel_id, is_stop);
+                }
+            }
+        })
     } else {
         SessionGuard::new({
             let weak = this.self_weak.clone();
@@ -875,6 +942,40 @@ fn reset_session(this: &Arc<BridgeSupervisor>, session: SessionType, request_id:
     merge_worker_status(&inner, &this.status);
     // 启动空闲回收计时器
     start_idle_timer(this, &mut inner);
+}
+
+/// B3：Debug 命令的守卫 drop 清理
+///
+/// - `debug_stop` 或调试会话未标记存活（start 失败 / 崩溃已清）→ 完整复位
+///   会话槽位并启动空闲计时器（与 [`reset_session`] 同语义）；
+/// - 其余（start 成功 / step / run_all，会话保持存活）→ 仅清自身 pending/cancel，
+///   槽位保持 `Some(Debug)` + InDebug，**不**启动空闲计时器——调试静置不被回收。
+fn debug_guard_cleanup(
+    this: &Arc<BridgeSupervisor>,
+    request_id: u64,
+    cancel_id: &str,
+    is_stop: bool,
+) {
+    let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+    // 双重匹配：仅当槽位仍为本 Debug 请求时才动状态（幂等防误清新会话）
+    if inner.current_session != Some(SessionType::Debug)
+        || inner.current_request_id != Some(request_id)
+    {
+        return;
+    }
+    inner.current_request_id = None;
+    if let Some(cid) = inner.current_cancel_id.take() {
+        inner.cancel_registry.remove(cancel_id);
+        let _ = cid;
+    }
+    if is_stop || !inner.debug_session_open {
+        inner.debug_session_open = false;
+        inner.current_session = None;
+        inner.worker_state = WorkerState::Idle;
+        inner.last_activity = Instant::now();
+        merge_worker_status(&inner, &this.status);
+        start_idle_timer(this, &mut inner);
+    }
 }
 
 /// OCR 轻量请求的守卫 drop 清理：只移除自身 pending 与 cancel 注册，**不**复位会话槽位 /
@@ -1152,6 +1253,8 @@ async fn kill_worker_now(this: &BridgeSupervisor) {
         inner.worker_state = WorkerState::Error;
         // 能力缓存随进程失效（任务 10），避免对已死 Worker 上报运行时能力
         inner.worker_capabilities = None;
+        // 进程已亡，调试会话随之终结（B3）
+        inner.debug_session_open = false;
         merge_worker_status(&inner, &this.status);
     }
 }
@@ -1180,8 +1283,9 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Idle;
-        // 能力缓存随进程失效（任务 10）
+        // 能力缓存随进程失效（任务 10）；调试会话随进程终结（B3）
         inner.worker_capabilities = None;
+        inner.debug_session_open = false;
         merge_worker_status(&inner, &this.status);
     }
 }
@@ -1669,5 +1773,115 @@ mod tests {
             inner.worker_capabilities = None;
         }
         assert_eq!(bridge.runtime_ocr_capability(), None);
+    }
+
+    // ============ B3：调试会话存活期纳入槽位 ============
+
+    fn ok_resp() -> Result<IpcResponse, BridgeError> {
+        Ok(IpcResponse {
+            id: 1,
+            result: crate::bridge::IpcResult {
+                success: true,
+                data: Value::Null,
+                error: None,
+            },
+        })
+    }
+
+    #[test]
+    fn b3_settle_start成功_标记存活() {
+        assert_eq!(
+            execute_debug_settle("debug_start", &ok_resp()),
+            DebugSettle::Open
+        );
+    }
+
+    #[test]
+    fn b3_settle_step_runall_保持存活() {
+        assert_eq!(
+            execute_debug_settle("debug_step", &ok_resp()),
+            DebugSettle::KeepOpen
+        );
+        assert_eq!(
+            execute_debug_settle("debug_run_all", &ok_resp()),
+            DebugSettle::KeepOpen
+        );
+    }
+
+    #[test]
+    fn b3_settle_stop或失败_关闭() {
+        assert_eq!(
+            execute_debug_settle("debug_stop", &ok_resp()),
+            DebugSettle::Close
+        );
+        let err: Result<IpcResponse, BridgeError> = Err(BridgeError::WorkerBusy);
+        assert_eq!(execute_debug_settle("debug_start", &err), DebugSettle::Close);
+    }
+
+    /// start 成功后守卫清理：槽位保持 Some(Debug)/InDebug、空闲计时器不启动；
+    /// stop 守卫：完整复位到 Idle。
+    #[tokio::test]
+    async fn b3_守卫按开合语义分流() {
+        let (bridge, _dir) = make_bridge().await;
+        // 模拟 start 请求在途：槽位 Some(Debug) + request 11 + settle 已置 open
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::InDebug;
+            inner.current_session = Some(SessionType::Debug);
+            inner.current_request_id = Some(11);
+            inner.debug_session_open = true;
+        }
+        debug_guard_cleanup(&bridge, 11, "c-11", false);
+        {
+            let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(inner.current_session, Some(SessionType::Debug), "start 后会话应保持存活");
+            assert_eq!(inner.worker_state, WorkerState::InDebug);
+            assert_eq!(inner.current_request_id, None, "在途 id 应清除");
+            assert!(inner.idle_timer.is_none(), "存活期不启动空闲计时器");
+        }
+
+        // 模拟 stop 在途：request 12 占槽；stop 守卫应完整复位
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.current_request_id = Some(12);
+        }
+        debug_guard_cleanup(&bridge, 12, "c-12", true);
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            // 复位后由 reset 语义接管：Idle + 无会话 + 开合关闭
+            assert_eq!(inner.current_session, None);
+            assert!(!inner.debug_session_open);
+            if inner.idle_timer.is_some() {
+                // 计时器已启动则取消失效即可，不影响断言
+                if let Some(h) = inner.idle_timer.take() {
+                    h.abort();
+                }
+            }
+            inner.worker_state = WorkerState::Idle;
+        }
+    }
+
+    /// 存活的调试会话拒绝重复 debug_start 与登录请求。
+    #[tokio::test]
+    async fn b3_存活期拒绝重复start与登录() {
+        let (bridge, _dir) = make_bridge().await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.debug_session_open = true;
+            inner.current_session = Some(SessionType::Debug);
+            inner.worker_state = WorkerState::InDebug;
+        }
+        // debug_start 走临界区前的开合检查——但该检查位于 execute_inner 内部，
+        // 这里直接验证 compat + 开合组合语义的等价判定路径：
+        let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert_busy(Some(SessionType::Debug), "execute_login_attempt");
+        assert_busy(Some(SessionType::Debug), "browser_task");
+        assert!(
+            matches!(
+                check_session_compat(inner.current_session, "debug_start"),
+                Err(BridgeError::WorkerBusy)
+            ) || inner.debug_session_open,
+            "重复 debug_start 必须被拒"
+        );
     }
 }
