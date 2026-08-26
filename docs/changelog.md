@@ -1,5 +1,27 @@
 # 更新日志
 
+## 开发中（2026-08-26 第十三轮：打包验证 + 端到端冒烟）
+
+> 针对第十一~十二轮约 8000 行改动的发布前验证。
+
+### 打包链路（478d1b9）
+
+- **build.ps1 修复 UTF-8 BOM 缺失**：Windows PowerShell 5.1 按 ANSI 解析无 BOM 的 UTF-8 脚本，中文注释乱码并触发语法解析错误，完整打包流程在默认环境下不可用。补 BOM 后 release 构建（2m06s）+ 便携包组装（14.5 MB）+ 新产物启动/`--status`/`--stop` 冒烟全通过
+- AGENTS.md 模块清单补 logging.rs 与路由按域拆分说明；review 挂账核实修订：M1 config/tasks 大域已在早前轮次完成、「Pinia store 收敛」不适用（前端从未引入 Pinia）、utoipa 缓办
+
+### 端到端冒烟（a640afa）
+
+以真实二进制 + 本地登录测试页走通 API 全链路（axum → executor → bridge → Python Worker → Playwright）：
+
+- **浏览器任务执行**：创建任务 → 填表/点击/断言四步全部成功
+- **抓到真 bug 并修复**：assert_text 的 `wait_for_function("() => ...includes(arg)")` 箭头函数未声明形参，Playwright 抛 `ReferenceError: arg is not defined`——真实页面断言步骤全部失败（单测的 mock 未暴露该语义）。改为 `arg => ...` 并补回归测试
+- **自动登录全链路**：Profile 配置后 `/api/login` 走完状态机 + 浏览器登录 + 登录后网络验证，返回「登录成功」（12.3s）
+- **B3 互斥实测**：调试会话存活期内 `/api/login` 即时失败（0.14ms，互斥生效）；debug_stop 后登录恢复正常
+
+### 验证
+
+- pytest 83 全过（+assert_text 回归）；clippy/test 双 feature 全过；前端构建通过；release 产物冒烟通过
+
 ## 开发中（2026-08-26 第十二轮：C 组收尾 — A-4/A-5/B3 根治 + 小尾巴五件）
 
 > `docs/review-2026-08-24.md` C 组计划四个批次全部落地（`af249e1` / `11c2233` / `207d9cd` / `5505faa`）。
