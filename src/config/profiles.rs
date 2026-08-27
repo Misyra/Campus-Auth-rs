@@ -245,7 +245,15 @@ impl ProfileService {
         match raw {
             None => existing.to_string(),
             Some("") => existing.to_string(),
-            Some(s) if s.starts_with("ENC:") => s.to_string(),
+            Some(s) if s.starts_with("ENC:") => {
+                // 校验 ENC: 载荷可解密，无效密文回退原密码避免持久化损坏数据
+                if self.config.can_decrypt_password(s) {
+                    s.to_string()
+                } else {
+                    tracing::warn!("ENC: 密码校验失败（无效密文），保留原密码");
+                    existing.to_string()
+                }
+            }
             Some(s) => match self.config.encrypt_password(s) {
                 Ok(encrypted) => encrypted,
                 Err(e) => {
@@ -314,12 +322,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_password_enc_prefix_passthrough() {
-        // 已是 ENC: 前缀的密文应原样返回
+        // 合法 ENC: 密文应原样返回
+        let (_tmp, config) = make_config_service().await;
+        let svc = ProfileService::new(config.clone());
+        let enc = svc.config.encrypt_password("secret").unwrap();
+        let result = svc.save_password(Some(&enc), "old_password");
+        assert_eq!(result, enc);
+    }
+
+    #[tokio::test]
+    async fn test_save_password_invalid_enc_falls_back_to_existing() {
+        // 无效 ENC: 密文应回退原密码，避免持久化损坏数据
         let (_tmp, config) = make_config_service().await;
         let svc = ProfileService::new(config);
-        let enc = "ENC:base64encodeddata";
-        let result = svc.save_password(Some(enc), "old_password");
-        assert_eq!(result, enc);
+        let result = svc.save_password(Some("ENC:not-valid-base64!!!"), "old_password");
+        assert_eq!(result, "old_password");
     }
 
     #[tokio::test]

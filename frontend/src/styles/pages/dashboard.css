@@ -21,7 +21,7 @@
   align-items: center;
   gap: 16px;
   backdrop-filter: blur(10px);
-  transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+  transition: transform var(--dur-slow) var(--ease-out), border-color var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out);
 }
 
 .stat-card:hover {
@@ -37,7 +37,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.25s ease;
+  transition: transform var(--dur-slow) var(--ease-out);
 }
 
 .stat-card:hover .stat-icon {
@@ -50,17 +50,17 @@
 }
 
 .stat-icon.green {
-  background: rgba(16, 185, 129, 0.15);
+  background: rgba(var(--success-rgb), 0.15);
   color: var(--success);
 }
 
 .stat-icon.blue {
-  background: rgba(34, 211, 238, 0.15);
+  background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
 }
 
 .stat-icon.orange {
-  background: rgba(245, 158, 11, 0.15);
+  background: rgba(var(--warning-rgb), 0.15);
   color: var(--warning);
 }
 
@@ -76,19 +76,19 @@
 }
 
 .stat-label {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
 }
 
 .stat-value {
-  font-size: 20px;
+  font-size: var(--text-xl);
   font-weight: 600;
   font-family: var(--font-mono);
 }
 
 /* 状态卡片副文案（G23：连续失败 / 重试进度等瞬时计数） */
 .stat-sub {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
@@ -161,7 +161,7 @@
   overflow-y: auto;
   min-height: 0;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-md);
   scroll-behavior: smooth;
   will-change: scroll-position;
 }
@@ -190,12 +190,13 @@
 
 .log-entry {
   display: grid;
-  grid-template-columns: 108px 44px auto 1fr;
+  /* 时间列需容纳 "YYYY-MM-DD HH:mm:ss"（12px 等宽约 130px） */
+  grid-template-columns: 134px 44px auto 1fr;
   gap: 8px;
   align-items: baseline;
   padding: 5px 12px;
   border-radius: 6px;
-  transition: background 0.15s ease;
+  transition: background var(--dur-fast) var(--ease-out);
   contain: content;
   border-left: 2px solid transparent;
 }
@@ -213,7 +214,7 @@
 
 .log-time {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -258,7 +259,7 @@
   border-radius: 8px;
   background: var(--bg-primary);
   cursor: zoom-in;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 
 .log-screenshot-preview:hover {
@@ -356,4 +357,84 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ═══ 网络状态横幅 ═══ */
+.network-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-radius: var(--radius-lg);
+  margin-bottom: 16px;
+  border: 1px solid;
+  backdrop-filter: var(--blur-md);
+  transition: border-color var(--dur-slow) var(--ease-out), background var(--dur-slow) var(--ease-out), color var(--dur-slow) var(--ease-out);
+  flex-shrink: 0;
+}
+
+.network-status-banner .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.network-status-banner.connected {
+  background: rgba(var(--success-rgb), 0.08);
+  border-color: rgba(var(--success-rgb), 0.2);
+  color: var(--success);
+}
+
+.network-status-banner.connected .status-dot {
+  background: var(--success);
+}
+
+.network-status-banner.disconnected {
+  background: rgba(var(--error-rgb), 0.08);
+  border-color: rgba(var(--error-rgb), 0.2);
+  color: var(--error);
+}
+
+.network-status-banner.disconnected .status-dot {
+  background: var(--error);
+  animation: pulse 2s infinite;
+}
+
+.network-status-banner.idle {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: rgba(148, 163, 184, 0.15);
+  color: var(--text-secondary);
+}
+
+.network-status-banner.idle .status-dot {
+  background: var(--text-secondary);
+}
+
+.network-status-banner.checking {
+  background: rgba(var(--primary-rgb), 0.08);
+  border-color: rgba(var(--primary-rgb), 0.2);
+  color: var(--primary);
+}
+
+.network-status-banner.checking .status-dot {
+  background: var(--primary);
+  animation: pulse 2s infinite;
+}
+
+.network-status-banner .status-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.network-status-banner .status-text {
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+
+.network-status-banner .status-detail {
+  font-size: var(--text-sm);
+  opacity: 0.8;
+  margin-left: auto;
 }

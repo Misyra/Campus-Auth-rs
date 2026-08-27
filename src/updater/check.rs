@@ -233,7 +233,9 @@ pub(crate) fn collect_zip_assets(
             continue;
         }
         let Some(key) = infer_platform_key(&name) else {
-            tracing::warn!("无法识别资产 {name} 的平台/架构组合，跳过");
+            // 旧命名规范的资产（无平台/架构关键字，如 4.x 的 campus-auth-4.2.3.zip）
+            // 属发布源常态，每次检查都会经过这里，降为 debug 避免反复刷 WARN
+            tracing::debug!("更新源资产 {name} 不含可识别的平台/架构标识，跳过");
             continue;
         };
         let dl_url = asset
@@ -437,7 +439,10 @@ mod tests {
     #[test]
     fn test_infer_platform_key_arch_aware() {
         // windows 区分 x64 / arm64
-        assert_eq!(infer_platform_key("campus-auth-windows-x64.zip"), Some("windows-x64"));
+        assert_eq!(
+            infer_platform_key("campus-auth-windows-x64.zip"),
+            Some("windows-x64")
+        );
         assert_eq!(
             infer_platform_key("campus-auth_5.0.0_windows_arm64.zip"),
             Some("windows-arm64")
@@ -447,16 +452,31 @@ mod tests {
             Some("windows-arm64")
         );
         // linux 区分 x64 / arm64
-        assert_eq!(infer_platform_key("campus-auth-linux-x86_64.zip"), Some("linux-x64"));
-        assert_eq!(infer_platform_key("campus-auth-linux-arm64.zip"), Some("linux-arm64"));
+        assert_eq!(
+            infer_platform_key("campus-auth-linux-x86_64.zip"),
+            Some("linux-x64")
+        );
+        assert_eq!(
+            infer_platform_key("campus-auth-linux-arm64.zip"),
+            Some("linux-arm64")
+        );
         assert_eq!(
             infer_platform_key("campus-auth-aarch64-unknown-linux-gnu.zip"),
             Some("linux-arm64")
         );
         // macos：arm 词归 arm64，无架构词默认 x64（兼容 universal）
-        assert_eq!(infer_platform_key("campus-auth-macos-arm64.zip"), Some("macos-arm64"));
-        assert_eq!(infer_platform_key("campus-auth-darwin-x64.zip"), Some("macos-x64"));
-        assert_eq!(infer_platform_key("campus-auth-macos-universal.zip"), Some("macos-x64"));
+        assert_eq!(
+            infer_platform_key("campus-auth-macos-arm64.zip"),
+            Some("macos-arm64")
+        );
+        assert_eq!(
+            infer_platform_key("campus-auth-darwin-x64.zip"),
+            Some("macos-x64")
+        );
+        assert_eq!(
+            infer_platform_key("campus-auth-macos-universal.zip"),
+            Some("macos-x64")
+        );
         // windows/linux 无架构词 → 无法识别（None，调用方 warn 跳过）
         assert_eq!(infer_platform_key("campus-auth-windows.zip"), None);
         assert_eq!(infer_platform_key("campus-auth-linux.zip"), None);

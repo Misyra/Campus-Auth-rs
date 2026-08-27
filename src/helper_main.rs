@@ -192,10 +192,7 @@ fn main() {
         }
         Err(e) => {
             eprintln!("[helper] 启动新版本失败: {e}");
-            eprintln!(
-                "[helper] 保留备份 {} 供手动回退",
-                backup_path.display()
-            );
+            eprintln!("[helper] 保留备份 {} 供手动回退", backup_path.display());
         }
     }
 

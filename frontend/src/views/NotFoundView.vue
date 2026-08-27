@@ -34,7 +34,7 @@ const router = useRouter();
 .not-found-icon {
   font-size: 5rem;
   font-weight: 700;
-  color: var(--c-border);
+  color: var(--text-muted);
   line-height: 1.2;
 }
 
@@ -44,7 +44,7 @@ const router = useRouter();
 }
 
 .not-found-card p {
-  color: var(--c-text-secondary);
+  color: var(--text-secondary);
   margin-bottom: 1.5rem;
 }
 </style>

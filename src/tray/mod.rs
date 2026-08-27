@@ -8,7 +8,7 @@
 //! - 退出时由泵任务发送 [`crate::engine::EngineCommand::Shutdown`]，随后通知 OS 线程退出
 //!   并 join。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -31,10 +31,8 @@ use crate::web::state::LogEntry;
 
 /// 托盘图标默认尺寸（生成回退图标时使用）
 const FALLBACK_ICON_SIZE: u32 = 32;
-/// 运行时图标颜色（绿色，表示运行中）
+/// 运行时图标颜色（绿色，表示运行中）——仅解码失败兜底色块使用
 const ACTIVE_COLOR: [u8; 3] = [80, 200, 120];
-/// 停止/崩溃图标颜色（红色）
-const INACTIVE_COLOR: [u8; 3] = [220, 80, 80];
 /// 动作通道容量
 const ACTION_CHANNEL_CAPACITY: usize = 64;
 
@@ -167,11 +165,17 @@ impl TrayManager {
             // 首次按当前状态设置文本
             toggle_item.set_text(monitor_toggle_label(status.borrow().engine_state));
 
-            // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标
-            let (rgba, w, h) = load_tray_rgba(&icon_path());
-            let active_icon = make_icon(rgba, w, h);
-            let (inactive_rgba, iw, ih) = solid_rgba(INACTIVE_COLOR, FALLBACK_ICON_SIZE);
-            let inactive_icon = make_icon(inactive_rgba, iw, ih);
+            // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
+            // 停止态用同一 logo 的灰色版保持品牌识别（此前是纯红色块，无信息量）
+            let (rgba, w, h) = load_tray_rgba();
+            let active_icon = make_icon(rgba.clone(), w, h);
+            let mut inactive_rgba = rgba;
+            for px in inactive_rgba.chunks_mut(4) {
+                px[0] = 150;
+                px[1] = 150;
+                px[2] = 150;
+            }
+            let inactive_icon = make_icon(inactive_rgba, w, h);
 
             let built = match active_icon.as_ref() {
                 Some(icon) => TrayIconBuilder::new()
@@ -516,15 +520,6 @@ fn monitor_toggle_label(state: EngineState) -> &'static str {
     }
 }
 
-/// 计算托盘图标路径（相对于当前 exe 目录的 resources/icons/tray.png）
-fn icon_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .map(|d| d.join("resources").join("icons").join("tray.png"))
-        .unwrap_or_else(|| PathBuf::from("resources/icons/tray.png"))
-}
-
 /// 读取运行时端口文件（`config/.runtime_port`，轻量模式按需启动 Axum 后写入）
 fn read_runtime_port(config: &Arc<ConfigService>) -> Option<u16> {
     let path = config.base_path().join("config").join(RUNTIME_PORT_FILE);
@@ -559,16 +554,20 @@ fn write_instance_port(base_path: &Path, port: u16) {
     }
 }
 
-/// 加载托盘图标 RGBA 像素；若文件缺失或解码失败，回退到生成的纯色缓冲（不 panic）
-fn load_tray_rgba(path: &std::path::Path) -> (Vec<u8>, u32, u32) {
-    match image::open(path) {
+/// 托盘图标直接编入二进制：dev 下 exe 在 `target/debug/`、发布期在便携目录，
+/// 布局不同；嵌入后不再依赖运行时文件路径（此前 dev 下必现 WARN + 色块回退）。
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../../resources/icons/tray.png");
+
+/// 加载托盘图标 RGBA 像素；解码失败时回退到生成的纯色缓冲（不 panic）
+fn load_tray_rgba() -> (Vec<u8>, u32, u32) {
+    match image::load_from_memory(TRAY_ICON_PNG) {
         Ok(img) => {
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();
             (rgba.into_raw(), w, h)
         }
         Err(e) => {
-            warn!("托盘图标加载失败 ({path:?})，使用回退色块: {e}");
+            warn!("托盘图标解码失败，使用回退色块: {e}");
             solid_rgba(ACTIVE_COLOR, FALLBACK_ICON_SIZE)
         }
     }

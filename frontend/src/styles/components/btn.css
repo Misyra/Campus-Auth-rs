@@ -9,10 +9,10 @@
   border-radius: var(--radius-md);
   background: var(--bg-secondary);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   min-height: 40px;
   white-space: nowrap;
   text-decoration: none;
@@ -37,7 +37,7 @@
 
 .btn-primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-  color: var(--bg-primary);
+  color: var(--on-accent);
   border: none;
   font-weight: 600;
   position: relative;
@@ -45,7 +45,7 @@
 }
 
 .btn-primary:hover:not(:disabled) {
-  box-shadow: 0 0 24px rgba(34, 211, 238, 0.35), 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 0 24px rgba(var(--accent-rgb), 0.35), 0 4px 12px rgba(0, 0, 0, 0.2);
   transform: translateY(-1px);
 }
 
@@ -55,13 +55,13 @@
 
 .btn-sm {
   padding: 8px 16px;
-  font-size: 13px;
+  font-size: var(--text-md);
   min-height: 36px;
 }
 
 .btn-xs {
   padding: 4px 10px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   min-height: 26px;
 }
 
@@ -90,18 +90,18 @@
 }
 
 .btn.btn-active {
-  background: rgba(34, 211, 238, 0.15);
+  background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
 }
 
 .btn-danger {
-  background: rgba(239, 68, 68, 0.2);
+  background: rgba(var(--error-rgb), 0.2);
   color: var(--error);
-  border-color: rgba(239, 68, 68, 0.3);
+  border-color: rgba(var(--error-rgb), 0.3);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.3);
+  background: rgba(var(--error-rgb), 0.3);
 }
 
 .btn-text {
@@ -122,7 +122,7 @@
     background: transparent;
     color: var(--error);
     border: 1px solid var(--error);
-    transition: background-color 0.2s ease, color 0.2s ease;
+    transition: background-color var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
 }
 .btn-danger-ghost:hover {
     background: var(--error);

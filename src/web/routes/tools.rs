@@ -15,9 +15,7 @@ use crate::web::error::ApiError;
 ///
 /// 从 `resources/tools/task-recorder.user.js` 读取并返回 Tampermonkey 用户脚本。
 /// 文件缺失时返回 404。
-pub async fn task_recorder(
-    State(config): State<Arc<dyn ConfigApi>>,
-) -> Result<Response, ApiError> {
+pub async fn task_recorder(State(config): State<Arc<dyn ConfigApi>>) -> Result<Response, ApiError> {
     let script_path = config
         .base_path()
         .join("resources")

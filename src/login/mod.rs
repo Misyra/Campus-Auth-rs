@@ -347,7 +347,11 @@ impl LoginOrchestrator {
         // 支持 IPv6 方括号与裸地址），登录侧不再维护私有副本
         if matches!(source, LoginSource::Manual | LoginSource::LoginOnce) {
             let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
-            if !self.monitor.check_auth_url(&profile.auth_url, timeout).await {
+            if !self
+                .monitor
+                .check_auth_url(&profile.auth_url, timeout)
+                .await
+            {
                 warn!("auth_url 预检不可达: {}", profile.auth_url);
                 return self
                     .immediate_handle(
@@ -432,7 +436,7 @@ impl LoginOrchestrator {
                 task_id: effective_task_id,
                 max_retries: rt.retry.max_retries,
                 retry_interval: Duration::from_secs(rt.retry.retry_interval as u64),
-                login_timeout: Duration::from_secs(rt.browser.login_timeout as u64),
+                login_timeout: Duration::from_secs((rt.browser.login_timeout as u64).max(1)),
                 profile_id: profile.id.clone(),
                 worker_config,
             },

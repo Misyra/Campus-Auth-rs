@@ -12,13 +12,13 @@
   border: 1px solid var(--border);
   backdrop-filter: var(--blur-lg) saturate(1.2);
   box-shadow: var(--shadow-lg);
-  animation: slideIn 0.3s ease;
+  animation: slideIn var(--dur-slow) var(--ease-out);
   z-index: var(--z-toast);
-  transition: opacity 0.3s ease, transform 0.3s ease;
+  transition: opacity var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
 }
 
 .toast.leaving {
-  animation: slideOut 0.3s ease forwards;
+  animation: slideOut var(--dur-slow) var(--ease-out) forwards;
 }
 
 .toast svg {
@@ -27,7 +27,7 @@
 }
 
 .toast.success {
-  border-color: rgba(16, 185, 129, 0.3);
+  border-color: rgba(var(--success-rgb), 0.3);
 }
 
 .toast.success svg {
@@ -35,7 +35,7 @@
 }
 
 .toast.error {
-  border-color: rgba(239, 68, 68, 0.3);
+  border-color: rgba(var(--error-rgb), 0.3);
 }
 
 .toast.error svg {
@@ -56,7 +56,7 @@
   border-radius: 50%;
   background: var(--error);
   color: var(--text-on-accent);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -76,7 +76,7 @@
   box-shadow: var(--shadow-lg);
   z-index: var(--z-overlay);
   margin-top: 8px;
-  animation: dropdownEnter 0.2s ease;
+  animation: dropdownEnter var(--dur-base) var(--ease-out);
 }
 
 @keyframes dropdownEnter {
@@ -99,7 +99,7 @@
 }
 
 .notification-header span {
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 600;
 }
 
@@ -107,14 +107,14 @@
   padding: 24px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .notification-item {
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
-  transition: background 0.15s ease;
+  font-size: var(--text-sm);
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 .notification-item:hover {
@@ -138,13 +138,13 @@
 }
 
 .notification-item-header .notify-label {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
 }
 
 .notification-item-header .time {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   margin-left: auto;
 }
 
@@ -161,7 +161,7 @@
 
 .notify-action {
   margin-left: 6px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   cursor: pointer;
   text-decoration: underline;
   opacity: 0.8;

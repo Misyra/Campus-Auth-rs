@@ -4,6 +4,7 @@
 
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import IconApp from "./IconApp.vue";
 import type { NotificationAction } from "../../api/types";
 import { useConfig } from "../../composables/useConfig";
 import { useStatus } from "../../composables/useStatus";
@@ -51,10 +52,7 @@ function onActionClick(action: NotificationAction | null): void {
           aria-haspopup="true"
           :aria-expanded="showNotifications"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-          </svg>
+          <IconApp name="bell" />
           <span v-if="unreadNotifications > 0" class="notification-badge">{{ unreadNotifications > 9 ? "9+" : unreadNotifications }}</span>
         </button>
         <div v-if="showNotifications" class="notification-dropdown" role="menu">
@@ -86,14 +84,8 @@ function onActionClick(action: NotificationAction | null): void {
         :disabled="busy.monitor"
         :title="status.monitoring ? '停止网络监控和自动登录' : '开始监控网络，断网时自动登录'"
       >
-        <span v-if="busy.monitor" class="spinner" style="border-top-color: var(--bg-primary)"></span>
-        <svg v-else class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <polygon v-if="!status.monitoring" points="5 3 19 12 5 21 5 3" />
-          <g v-else>
-            <rect x="6" y="4" width="4" height="16" />
-            <rect x="14" y="4" width="4" height="16" />
-          </g>
-        </svg>
+        <span v-if="busy.monitor" class="spinner" style="border-top-color: var(--on-accent)"></span>
+        <IconApp v-else class="btn-icon" :name="status.monitoring ? 'pause' : 'play'" />
         {{ busy.monitor ? "处理中..." : (status.monitoring ? "停止监控" : "启动监控") }}
       </button>
     </div>

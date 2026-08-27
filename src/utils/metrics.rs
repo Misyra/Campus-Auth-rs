@@ -66,14 +66,25 @@ impl Metrics {
 
     /// 记录一次探测并更新平均耗时（毫秒）
     pub fn record_probe(&self, duration_ms: u64) {
-        let total = self.probe_total.fetch_add(1, Ordering::Relaxed) + 1;
-        let prev = self.probe_duration_ms_avg.load(Ordering::Relaxed);
-        let new_avg = if total > 1 {
-            (prev * (total - 1) + duration_ms) / total
-        } else {
-            duration_ms
-        };
-        self.probe_duration_ms_avg.store(new_avg, Ordering::Relaxed);
+        // CAS 循环保证 total 与 avg 的读改写原子性，避免并发探测丢样本
+        loop {
+            let total = self.probe_total.load(Ordering::Relaxed);
+            let prev = self.probe_duration_ms_avg.load(Ordering::Relaxed);
+            let new_total = total + 1;
+            let new_avg = if new_total > 1 {
+                (prev * total + duration_ms) / new_total
+            } else {
+                duration_ms
+            };
+            if self
+                .probe_total
+                .compare_exchange(total, new_total, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.probe_duration_ms_avg.store(new_avg, Ordering::Relaxed);
+                break;
+            }
+        }
     }
 
     /// 增加 Worker 启动次数

@@ -35,9 +35,7 @@ const urlCheckText = computed({
     <!-- 检测与重试 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>
-        </svg>
+        <IconApp name="eye" class="settings-card-icon" />
         <h2>检测与重试</h2>
       </div>
       <div class="card-body">
@@ -56,6 +54,8 @@ const urlCheckText = computed({
             </div>
             <input id="settings-network-check-timeout" v-model.number="config.config.monitor.network_check_timeout" type="number" min="1" max="30" />
           </div>
+        </div>
+        <div class="form-row settings-toggle-spacer">
           <div class="form-group">
             <div class="field-label-row">
               <label for="settings-post-login-delay">登录后延迟（秒）</label>
@@ -63,8 +63,6 @@ const urlCheckText = computed({
             </div>
             <input id="settings-post-login-delay" v-model.number="config.config.monitor.post_login_delay" type="number" min="0" max="60" />
           </div>
-        </div>
-        <div class="form-row settings-toggle-spacer">
           <div class="form-group">
             <div class="field-label-row">
               <label for="settings-login-timeout">登录请求超时（秒）</label>
@@ -72,6 +70,8 @@ const urlCheckText = computed({
             </div>
             <input id="settings-login-timeout" v-model.number="config.config.browser.login_timeout" type="number" min="10" max="600" />
           </div>
+        </div>
+        <div class="form-row">
           <div class="form-group">
             <div class="field-label-row">
               <label for="settings-max-retries">最大登录重试次数</label>
@@ -79,13 +79,13 @@ const urlCheckText = computed({
             </div>
             <input id="settings-max-retries" v-model.number="config.config.retry.max_retries" type="number" min="1" max="5" />
           </div>
-        </div>
-        <div class="form-group">
-          <div class="field-label-row">
-            <label for="settings-retry-interval">重试间隔（秒）</label>
-            <FieldHelp text="每次重试之间的固定间隔秒数。" />
+          <div class="form-group">
+            <div class="field-label-row">
+              <label for="settings-retry-interval">重试间隔（秒）</label>
+              <FieldHelp text="每次重试之间的固定间隔秒数。" />
+            </div>
+            <input id="settings-retry-interval" v-model.number="config.config.retry.retry_interval" type="number" min="1" max="300" />
           </div>
-          <input id="settings-retry-interval" v-model.number="config.config.retry.retry_interval" type="number" min="1" max="300" />
         </div>
       </div>
     </section>
@@ -93,9 +93,7 @@ const urlCheckText = computed({
     <!-- 网络检测方式 -->
     <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/>
-        </svg>
+        <IconApp name="wifi" class="settings-card-icon" />
         <h2>网络检测方式</h2>
       </div>
       <div class="card-body">

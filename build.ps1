@@ -58,12 +58,12 @@ New-Item -ItemType Directory -Path $Out | Out-Null
 
 Copy-Item (Join-Path $Root "target\release\campus-auth.exe") $Out
 Copy-Item (Join-Path $Root "target\release\campus-auth-helper.exe") $Out
-Copy-Item (Join-Path $Root "python_worker") (Join-Path $Out "python_worker") -Recurse
 Copy-Item (Join-Path $Root "resources") (Join-Path $Out "resources") -Recurse
-
-# 排除 Worker 本地虚拟环境（运行时按需重建）
-if (Test-Path (Join-Path $Out "python_worker\.venv")) {
-    Remove-Item (Join-Path $Out "python_worker\.venv") -Recurse -Force
+# 复制 python_worker 时排除本地虚拟环境（运行时按需重建），避免先全量复制再删除的双重 IO
+$workerDst = Join-Path $Out "python_worker"
+New-Item -ItemType Directory -Path $workerDst | Out-Null
+Get-ChildItem (Join-Path $Root "python_worker") -Force | Where-Object { $_.Name -ne ".venv" } | ForEach-Object {
+    Copy-Item $_.FullName (Join-Path $workerDst $_.Name) -Recurse -Force
 }
 
 # ---- 4/4 完成 ----

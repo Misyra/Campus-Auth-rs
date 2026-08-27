@@ -6,18 +6,24 @@ playwright_worker 两个文件，归拢到单点便于测试与复用。本模�
 
 from __future__ import annotations
 
+import logging
+import threading
 from io import BytesIO
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # OCR 实例缓存：字符范围会修改模型实例状态，必须纳入 key，避免上一次任务的
 # ``set_ranges`` 污染后续未限制字符集的识别。
 _ocr_cache: dict[tuple[bool, str | int | None], Any] = {}
+_ocr_lock = threading.Lock()
 
 # OCR 单次识别超时（秒）：覆盖模型加载 + CPU 推理，防止卡死导致任务无限阻塞
 OCR_TIMEOUT_SECS = 90
 
 
 def _get_ocr(old: bool, char_range: str | int | None = None):
+
     """获取（并缓存）ddddocr 实例。
 
     模型不存在时抛出 ImportError，由调用方转换为 WorkerError。
@@ -30,13 +36,16 @@ def _get_ocr(old: bool, char_range: str | int | None = None):
     key = (old, normalized_range)
     instance = _ocr_cache.get(key)
     if instance is None:
-        instance = ddddocr.DdddOcr(old=old, show_ad=False)
-        if normalized_range is not None:
-            try:
-                instance.set_ranges(normalized_range)
-            except Exception as exc:  # noqa: BLE001 — 非法范围退回模型默认字符集
-                logger.warning("[ocr] set_ranges(%s) 失败，使用默认范围: %s", normalized_range, exc)
-        _ocr_cache[key] = instance
+        with _ocr_lock:
+            instance = _ocr_cache.get(key)
+            if instance is None:
+                instance = ddddocr.DdddOcr(old=old, show_ad=False)
+                if normalized_range is not None:
+                    try:
+                        instance.set_ranges(normalized_range)
+                    except Exception as exc:  # noqa: BLE001 — 非法范围退回模型默认字符集
+                        logger.warning("[ocr] set_ranges(%s) 失败，使用默认范围: %s", normalized_range, exc)
+                _ocr_cache[key] = instance
     return instance
 
 

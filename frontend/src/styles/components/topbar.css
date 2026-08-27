@@ -5,22 +5,22 @@
   gap: 8px;
   padding: 10px 14px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 500;
   min-height: 40px;
 }
 
 .status-badge.online {
-  background: rgba(16, 185, 129, 0.1);
+  background: rgba(var(--success-rgb), 0.1);
   color: var(--success);
-  border: 1px solid rgba(16, 185, 129, 0.2);
-  box-shadow: 0 0 12px rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(var(--success-rgb), 0.2);
+  box-shadow: 0 0 12px rgba(var(--success-rgb), 0.1);
 }
 
 .status-badge.offline {
-  background: rgba(239, 68, 68, 0.1);
+  background: rgba(var(--error-rgb), 0.1);
   color: var(--error);
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(var(--error-rgb), 0.2);
 }
 
 .status-dot {

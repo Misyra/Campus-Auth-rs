@@ -10,11 +10,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
-use tracing_subscriber::fmt::time::FormatTime;
 use tracing::Subscriber;
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
 
 pub use tracing_appender::non_blocking::WorkerGuard;
 
@@ -289,7 +289,8 @@ impl tracing::field::Visit for EventFields {
                 None => self.message = Some(value.to_string()),
             }
         } else {
-            self.extras.push((field.name().to_string(), value.to_string()));
+            self.extras
+                .push((field.name().to_string(), value.to_string()));
         }
     }
 }
@@ -314,7 +315,9 @@ impl<S: Subscriber> Layer<S> for BroadcastLayer {
             message.push_str(&format!(" {key}={value}"));
         }
         let timestamp = chrono::Local::now().to_rfc3339();
-        let _ = self.tx.send(LogEntry::new(level, message, timestamp, source));
+        let _ = self
+            .tx
+            .send(LogEntry::new(level, message, timestamp, source));
     }
 }
 
@@ -328,12 +331,27 @@ pub fn log_broadcast_tx() -> tokio::sync::broadcast::Sender<LogEntry> {
 // 初始化
 // ============================================================
 
+/// 本次会话的起始时间（日志子系统初始化时刻，格式与文件日志行一致）。
+/// `/api/logs` 据此只返回本次启动后的日志，面板不回显历史运行的旧内容。
+static SESSION_STARTED_AT: OnceLock<String> = OnceLock::new();
+
+/// 会话起始时间戳（`%Y-%m-%d %H:%M:%S`）；日志系统未初始化时返回 None
+pub fn session_started_at() -> Option<&'static str> {
+    SESSION_STARTED_AT.get().map(String::as_str)
+}
+
 /// 初始化日志系统：控制台层 + 文件层（按日期轮转）+ 广播层（WebSocket 推送）
 ///
 /// 全局 subscriber 只能 init 一次，所有层在此统一注册。
-pub fn init_logging(base_path: &Path, log_tx: tokio::sync::broadcast::Sender<LogEntry>) -> WorkerGuard {
+pub fn init_logging(
+    base_path: &Path,
+    log_tx: tokio::sync::broadcast::Sender<LogEntry>,
+) -> WorkerGuard {
     let logs_dir = base_path.join("logs");
     let _ = std::fs::create_dir_all(&logs_dir);
+
+    // 会话起始时间：与 LocalTimer 同格式，供 /api/logs 过滤历史运行日志
+    let _ = SESSION_STARTED_AT.set(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
 
     // 启动时清理过期日志：按 settings.json 的 logging.retention_days 保留，
     // 删除超过保留天数的旧轮转文件，避免日志无限累积（对齐原项目 loguru retention）。

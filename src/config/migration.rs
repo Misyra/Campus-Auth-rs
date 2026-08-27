@@ -201,7 +201,11 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
 fn rename_field(obj: &mut Value, from: &str, to: &str) {
     if let Some(map) = obj.as_object_mut() {
         if let Some(v) = map.remove(from) {
-            map.insert(to.to_string(), v);
+            if map.contains_key(to) {
+                tracing::warn!("迁移重命名跳过：{to} 已存在，丢弃旧字段 {from}");
+            } else {
+                map.insert(to.to_string(), v);
+            }
         }
     }
 }

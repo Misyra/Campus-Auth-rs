@@ -145,13 +145,15 @@ impl TcpProbe {
             })
         });
         let (outcome, details) = match select_ok(futs).await {
-            Ok((ok_detail, failed_futs)) => {
-                let mut details: Vec<PerProbeDetail> = Vec::with_capacity(failed_futs.len() + 1);
-                for f in failed_futs {
-                    // select_ok 返回时残留 future 仍在 pending（并非已失败）：
-                    // 继续等待其最终结果即可，Ok/Err 两侧都携带明细，不可 unwrap_err
-                    // （多目标可达时残留 future re-await 会返回 Ok，unwrap_err 将 panic）
-                    details.push(f.await.unwrap_or_else(|d| d));
+            Ok((ok_detail, remaining)) => {
+                // Race 已赢：首个成功即视为通过，不再等待慢速剩余 future
+                // 以免整体耗时退化为 max(单目标超时)。剩余 pending 的 future
+                // 仅给 50ms 宽限用于收集已快速失败的明细，超时则丢弃
+                let mut details: Vec<PerProbeDetail> = Vec::with_capacity(remaining.len() + 1);
+                for f in remaining {
+                    if let Ok(detail) = tokio::time::timeout(Duration::from_millis(50), f).await {
+                        details.push(detail.unwrap_or_else(|d| d));
+                    }
                 }
                 details.push(ok_detail);
                 (ProbeOutcome::Pass, details)
@@ -207,7 +209,13 @@ async fn probe_http_one(
             };
             (
                 outcome,
-                PerProbeDetail::new(url.to_string(), matches!(outcome, ProbeOutcome::Pass), start, Some(status), None),
+                PerProbeDetail::new(
+                    url.to_string(),
+                    matches!(outcome, ProbeOutcome::Pass),
+                    start,
+                    Some(status),
+                    None,
+                ),
             )
         }
         Err(e) => (
@@ -469,9 +477,6 @@ mod tests {
         assert_eq!(parse_host_port(""), None);
         // 裸 IPv6 无端口：拒绝而非误拆（怪癖修正）
         assert_eq!(parse_host_port("::1"), None);
-        assert_eq!(
-            parse_host_port("[::1]:53"),
-            Some(("::1".to_string(), 53))
-        );
+        assert_eq!(parse_host_port("[::1]:53"), Some(("::1".to_string(), 53)));
     }
 }

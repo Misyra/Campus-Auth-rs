@@ -18,6 +18,7 @@ const status = reactive<StatusSnapshot>({
   consecutive_failures: 0,
   retry_count: 0,
   last_check_time: null,
+  monitoring_seconds: 0,
   runtime_seconds: 0,
   network_connected: false,
   network_state: "unknown",
@@ -71,6 +72,7 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   out.login_attempt_count = Number(raw.login_total ?? status.login_attempt_count ?? 0);
   out.consecutive_failures = Number(raw.consecutive_failures ?? status.consecutive_failures ?? 0);
   out.retry_count = Number(raw.retry_count ?? status.retry_count ?? 0);
+  out.monitoring_seconds = Number(raw.monitoring_seconds ?? status.monitoring_seconds ?? 0);
   out.runtime_seconds = Number(raw.uptime_seconds ?? status.runtime_seconds ?? 0);
   out.last_check_time = (raw.last_check_time as string | null) ?? status.last_check_time;
   out.login_status = raw.login_status as string | undefined;

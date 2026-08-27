@@ -19,7 +19,7 @@
   background: var(--bg-glass);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+  transition: border-color var(--dur-slow) var(--ease-out), background var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
   cursor: default;
 }
 
@@ -27,7 +27,7 @@
 
 .task-item.active {
   border-color: var(--accent);
-  background: rgba(34, 211, 238, 0.05);
+  background: rgba(var(--accent-rgb), 0.05);
 }
 
 /* 拖拽样式 */
@@ -36,7 +36,7 @@
   color: var(--text-muted);
   padding: 4px;
   border-radius: var(--radius-xs);
-  transition: color 0.2s ease, background 0.2s ease;
+  transition: color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
   flex-shrink: 0;
   user-select: none;
   -webkit-user-select: none;
@@ -59,7 +59,7 @@
 }
 
 .task-info h3 {
-  font-size: 14px;
+  font-size: var(--text-base);
   margin-bottom: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -67,12 +67,12 @@
 }
 
 .task-info p {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
 .task-desc {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   margin: 4px 0 0;
   overflow: hidden;
@@ -98,9 +98,9 @@
   border-radius: var(--radius-lg);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-md);
   resize: vertical;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 
 .task-editor textarea:focus-visible {
@@ -121,7 +121,7 @@
 }
 
 .help-content h4 {
-  font-size: 14px;
+  font-size: var(--text-base);
   margin: 16px 0 8px;
 }
 
@@ -131,7 +131,7 @@
 
 .help-content ul {
   list-style: none;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
 }
 
@@ -144,7 +144,7 @@
   padding: 2px 6px;
   border-radius: 4px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .help-content pre {
@@ -152,7 +152,7 @@
   padding: 12px;
   border-radius: var(--radius-md);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   overflow-x: auto;
   margin-top: 8px;
   border: 1px solid var(--border);
@@ -162,9 +162,9 @@
 
 .debug-step-counter {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--accent);
-  background: rgba(34, 211, 238, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   padding: 4px 10px;
   border-radius: 6px;
 }
@@ -198,7 +198,7 @@
 
 .debug-screenshot-placeholder {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .debug-steps {
@@ -216,22 +216,22 @@
   padding: 8px 10px;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
-  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
 }
 
 .debug-step-item.success {
-  background: rgba(16, 185, 129, 0.06);
-  border-color: rgba(16, 185, 129, 0.15);
+  background: rgba(var(--success-rgb), 0.06);
+  border-color: rgba(var(--success-rgb), 0.15);
 }
 
 .debug-step-item.failed {
-  background: rgba(239, 68, 68, 0.06);
-  border-color: rgba(239, 68, 68, 0.15);
+  background: rgba(var(--error-rgb), 0.06);
+  border-color: rgba(var(--error-rgb), 0.15);
 }
 
 .debug-step-item.current {
-  background: rgba(34, 211, 238, 0.06);
-  border-color: rgba(34, 211, 238, 0.2);
+  background: rgba(var(--accent-rgb), 0.06);
+  border-color: rgba(var(--accent-rgb), 0.2);
 }
 
 .debug-step-item.running {
@@ -247,7 +247,7 @@
   flex-shrink: 0;
   width: 18px;
   text-align: center;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 20px;
 }
 
@@ -270,7 +270,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   min-width: 0;
 }
 
@@ -278,7 +278,7 @@
   display: inline-block;
   padding: 1px 6px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: var(--text-2xs);
   font-weight: 600;
   font-family: var(--font-mono);
   background: rgba(148, 163, 184, 0.15);
@@ -294,7 +294,7 @@
 }
 
 .debug-step-msg {
-  font-size: 11px;
+  font-size: var(--text-xs);
   width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -307,7 +307,7 @@
 
 /* 仓库导入（源标签） */
 .repo-source-label {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   margin-right: 2px;
   flex-shrink: 0;
@@ -340,7 +340,7 @@
 }
 
 .debug-task-id {
-  font-size: 13px;
+  font-size: var(--text-md);
   font-family: var(--font-mono);
   color: var(--text-secondary);
 }

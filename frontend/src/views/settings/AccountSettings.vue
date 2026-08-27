@@ -5,6 +5,7 @@ import { useConfig } from "@/composables/useConfig";
 import { useProfiles } from "@/composables/useProfiles";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
+import IconApp from "@/components/common/IconApp.vue";
 import { CARRIER_OPTIONS } from "@/utils/constants";
 
 const config = useConfig();
@@ -43,18 +44,14 @@ watch(
   <div class="settings-panel-grid">
     <!-- 当前方案提示 -->
     <div class="current-profile-hint">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
-      </svg>
+      <IconApp name="user" class="icon-sm" />
       <span>当前方案：<strong>{{ currentProfileName }}</strong></span>
       <a href="#" @click.prevent="router.push({ name: 'profiles' })" class="hint-link">管理方案</a>
     </div>
 
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
-        </svg>
+        <IconApp name="user" class="settings-card-icon" />
         <h2>账号配置</h2>
       </div>
       <div class="card-body">
@@ -96,17 +93,9 @@ watch(
       </div>
     </section>
 
-    <!-- 自定义变量（已移除） -->
-    <section class="card settings-panel">
-      <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-        </svg>
-        <h2>自定义变量</h2>
-      </div>
-      <div class="card-body">
-        <p class="form-help-text">自定义变量功能已移除。如需在任务中使用变量，请直接在任务 JSON 的 <code>variables</code> 字段中硬编码定义。</p>
-      </div>
-    </section>
+    <!-- 自定义变量（已移除）：保留一行迁移提示，不再占用整卡 -->
+    <p class="form-help-text">
+      自定义变量功能已移除。如需在任务中使用变量，请直接在任务 JSON 的 <code>variables</code> 字段中硬编码定义。
+    </p>
   </div>
 </template>

@@ -1,7 +1,7 @@
 /* system.css — 系统设置子页（自启动方式徽标） */
 .autostart-method-badge {
   display: inline-block;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   background: var(--bg-glass);
   border: 1px solid var(--border);

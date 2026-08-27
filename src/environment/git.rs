@@ -103,19 +103,13 @@ pub async fn download_mingit(mgr: &EnvironmentManager) -> Result<PathBuf, Enviro
     // 4. SHA256 完整性校验（R3）：取 release assets 中的 .sha256 伴随文件；
     //    校验失败不落盘（删除临时 zip）不解压，直接返回明确错误
     let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
-    let expected_hash = crate::updater::check::fetch_sha256_assoc(
-        mgr.http_client(),
-        &asset_refs,
-        &zip_name,
-    )
-    .await;
+    let expected_hash =
+        crate::updater::check::fetch_sha256_assoc(mgr.http_client(), &asset_refs, &zip_name).await;
     if expected_hash.is_empty() {
         // 降级：官方 release 未提供伴随 .sha256 文件，无法强校验。
         // 与 updater::check 的降级一致（warn + 信任 HTTPS）；
         // uv.rs 不降级是因为 uv 官方 release 恒有 .sha256 伴随文件。
-        tracing::warn!(
-            "MinGit 发布中无 {zip_name} 的 .sha256 伴随文件，降级为信任 HTTPS 安装"
-        );
+        tracing::warn!("MinGit 发布中无 {zip_name} 的 .sha256 伴随文件，降级为信任 HTTPS 安装");
     } else {
         if let Err(e) = crate::environment::uv::verify_sha256(&tmp_zip, &expected_hash).await {
             let _ = tokio::fs::remove_file(&tmp_zip).await;
@@ -190,10 +184,7 @@ async fn fetch_latest_mingit_version(
     let version_str = parse_mingit_tag(tag_name)?;
 
     // assets 列表（可能为空——官方 release 无 .sha256 伴随文件时降级）
-    let assets: Vec<serde_json::Value> = json["assets"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let assets: Vec<serde_json::Value> = json["assets"].as_array().cloned().unwrap_or_default();
 
     Ok((tag_name.to_string(), version_str, assets))
 }
@@ -255,14 +246,8 @@ mod tests {
     /// tag 解析：windows 修订号并入四段版本；非法格式被拒
     #[test]
     fn test_parse_mingit_tag() {
-        assert_eq!(
-            parse_mingit_tag("v2.55.0.windows.2").unwrap(),
-            "2.55.0.2"
-        );
-        assert_eq!(
-            parse_mingit_tag("v2.47.1.windows.1").unwrap(),
-            "2.47.1.1"
-        );
+        assert_eq!(parse_mingit_tag("v2.55.0.windows.2").unwrap(), "2.55.0.2");
+        assert_eq!(parse_mingit_tag("v2.47.1.windows.1").unwrap(), "2.47.1.1");
         assert!(parse_mingit_tag("2.55.0.windows.2").is_err(), "缺 v 前缀");
         assert!(
             parse_mingit_tag("v2.55.0").is_err(),

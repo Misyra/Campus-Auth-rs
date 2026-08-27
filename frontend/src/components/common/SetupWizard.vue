@@ -13,7 +13,7 @@ const { state, finishWizard } = useUi();
   <div v-if="state.showWizard" class="wizard-overlay">
     <div class="wizard-container">
       <div class="wizard-header">
-        <img src="/black-cat.svg" alt="Campus-Auth 校园网认证助手" class="wizard-logo" />
+        <span class="wizard-logo logo-mark" role="img" aria-label="Campus-Auth 校园网认证助手"></span>
         <h1>欢迎使用 Campus-Auth 校园网自动认证</h1>
         <p>请阅读以下协议内容，同意后方可使用本软件</p>
       </div>

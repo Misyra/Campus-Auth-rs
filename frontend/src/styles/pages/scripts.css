@@ -8,11 +8,11 @@
   border-radius: var(--radius-lg);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.6;
   resize: vertical;
   tab-size: 4;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 
 .script-editor:focus-visible {
@@ -26,7 +26,7 @@
 }
 
 .binary-badge {
-  font-size: 12px;
+  font-size: var(--text-sm);
   padding: 2px 6px;
   border-radius: 4px;
   font-weight: 500;
@@ -36,7 +36,7 @@
 }
 
 .binary-default {
-  background: rgba(16, 185, 129, 0.15);
+  background: rgba(var(--success-rgb), 0.15);
   color: #34d399;
 }
 

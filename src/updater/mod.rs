@@ -152,7 +152,7 @@ impl UpdaterService {
                 if let Err(e) =
                     perform_update_check(&config, &status, &http_client, &current_version).await
                 {
-                    tracing::warn!("启动时更新检查失败: {e}");
+                    log_check_failure("启动时", &e);
                 }
             }
             loop {
@@ -169,7 +169,7 @@ impl UpdaterService {
                 if let Err(e) =
                     perform_update_check(&config, &status, &http_client, &current_version).await
                 {
-                    tracing::warn!("定期更新检查失败: {e}");
+                    log_check_failure("定期", &e);
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -440,6 +440,18 @@ async fn perform_update_check(
         tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
     }
     Ok(())
+}
+
+/// 更新检查失败的分级日志：远程发布没有当前平台的安装包属预期情况
+/// （如预发布版指向仅含旧命名资产的正式发布），记 info 即可；
+/// 其余（网络/解析/速率限制）才是真异常，记 warn。
+fn log_check_failure(stage: &str, e: &UpdaterError) {
+    match e {
+        UpdaterError::PlatformNotAvailable(_) => {
+            tracing::info!("更新检查（{stage}）：远程发布无当前平台的安装包，跳过");
+        }
+        other => tracing::warn!("更新检查（{stage}）失败: {other}"),
+    }
 }
 
 #[cfg(test)]

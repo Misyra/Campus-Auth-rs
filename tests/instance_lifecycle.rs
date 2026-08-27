@@ -96,12 +96,7 @@ fn instance_lock_status_and_graceful_stop() {
     // 2. 二次启动被实例锁拒绝
     Command::cargo_bin("campus-auth")
         .unwrap()
-        .args([
-            "--base-path",
-            &base,
-            "--no-tray",
-            "--no-browser",
-        ])
+        .args(["--base-path", &base, "--no-tray", "--no-browser"])
         .timeout(Duration::from_secs(40))
         .assert()
         .failure()

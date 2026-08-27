@@ -1,0 +1,142 @@
+/* log-viewer.css — 日志查看器（Dashboard 实时日志与 DebugPanel 共用） */
+
+/* 日志级别/来源标签 */
+.log-level-badge,
+.log-source-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.log-name {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-width: 160px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+}
+
+.log-level-badge {
+  min-width: 52px;
+  justify-content: center;
+  text-align: center;
+}
+
+.log-level-badge.level-info { color: #60a5fa; }
+.log-level-badge.level-warning { color: #fbbf24; }
+.log-level-badge.level-error { color: #f87171; }
+.log-level-badge.level-debug { color: #94a3b8; }
+
+.log-source-badge {
+  min-width: 30px;
+  justify-content: center;
+  text-align: center;
+}
+
+.log-source-badge.source-backend { color: #94a3b8; }
+.log-source-badge.source-frontend { color: #93c5fd; }
+
+[data-theme="light"] .log-source-badge.source-backend { color: #475569; }
+[data-theme="light"] .log-source-badge.source-frontend { color: #1d4ed8; }
+
+[data-theme="light"] .log-entry:hover {
+  background: rgba(148, 163, 184, 0.1);
+}
+
+/* 日志过滤工具栏 */
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.log-toolbar .custom-select {
+  width: auto;
+  min-width: 90px;
+}
+
+.log-toolbar .log-search {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+}
+
+.log-toolbar .log-search:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+
+.log-filter-chip {
+  padding: 4px 10px;
+  border-radius: var(--radius-lg);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.log-filter-chip:hover {
+  border-color: var(--border-hover);
+  color: var(--text-secondary);
+}
+
+.log-filter-chip.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: var(--on-accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.2);
+}
+
+/* 新消息提示按钮 */
+.new-logs-btn {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-radius: 20px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  animation: fadeIn var(--dur-base) var(--ease-out);
+  z-index: var(--z-dropdown);
+}
+
+.new-logs-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.new-logs-btn:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.3);
+}

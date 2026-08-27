@@ -611,6 +611,20 @@ fn build_minimal_env() -> Vec<(String, String)> {
             envs.push(("ComSpec".to_string(), s));
         }
     }
+    // Windows 关键用户目录变量：缺失会导致 PowerShell 配置、pip/uv 缓存、
+    // 脚本中 %USERPROFILE% / %LOCALAPPDATA% 展开失败
+    for key in [
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "USERNAME",
+        "ProgramData",
+        "PATHEXT",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            envs.push((key.to_string(), v));
+        }
+    }
     envs
 }
 

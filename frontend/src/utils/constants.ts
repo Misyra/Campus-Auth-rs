@@ -42,6 +42,7 @@ export const LEVEL_VALUES: Record<string, number> = {
 export const LOG_SOURCE_LABELS: Record<string, string> = {
   app: "应用",
   launcher: "启动器",
+  container: "容器",
   engine: "引擎",
   login: "登录",
   monitor: "监测",

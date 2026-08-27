@@ -12,7 +12,7 @@
 }
 
 .settings-detect-heading {
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: uppercase;

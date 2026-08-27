@@ -248,7 +248,11 @@ impl BootstrapGate {
     }
 
     /// 串行化执行引导（见类型级注释的完整语义）
-    pub(crate) async fn ensure<B, F>(&self, is_ready: impl Fn() -> bool, bootstrap: B) -> Result<(), EnvironmentError>
+    pub(crate) async fn ensure<B, F>(
+        &self,
+        is_ready: impl Fn() -> bool,
+        bootstrap: B,
+    ) -> Result<(), EnvironmentError>
     where
         B: FnOnce() -> F,
         F: std::future::Future<Output = Result<(), EnvironmentError>>,
@@ -279,7 +283,10 @@ impl BootstrapGate {
         }
         let result = bootstrap().await;
         // 记录失败结果供后续等待者复用（成功时清除）；存 Display 字符串
-        *self.last_error.lock().expect("BootstrapGate last_error 锁中毒") =
+        *self
+            .last_error
+            .lock()
+            .expect("BootstrapGate last_error 锁中毒") =
             result.as_ref().err().map(|e| e.to_string());
         self.generation.fetch_add(1, Ordering::Release);
         result

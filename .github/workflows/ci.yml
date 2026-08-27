@@ -40,6 +40,11 @@ jobs:
         working-directory: frontend
         run: npm ci && npm run build
 
+      # 复用上一步的 node_modules
+      - name: 前端单元测试（vitest）
+        working-directory: frontend
+        run: npm test
+
       - name: 格式检查（cargo fmt --check）
         run: cargo fmt --check
 

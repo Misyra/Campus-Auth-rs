@@ -129,6 +129,11 @@ pub struct StatusSnapshot {
     pub environment_progress: Option<InstallProgress>,
     /// 应用运行时长（秒）
     pub uptime_seconds: u64,
+    /// 本次监控连续运行时长（秒）；未监控时为 0
+    pub monitoring_seconds: u64,
+    /// 监控连续运行的起点（本次进入 Running 的时刻）；内部计时用，不序列化
+    #[serde(skip)]
+    pub monitoring_started_at: Option<DateTime<Local>>,
     /// 调度器是否运行中
     pub scheduler_running: bool,
     /// 调度器下次触发时间（ISO 8601 字符串）
@@ -163,6 +168,8 @@ impl Default for StatusSnapshot {
             worker_state: WorkerStatus::NotInstalled,
             environment_progress: None,
             uptime_seconds: 0,
+            monitoring_seconds: 0,
+            monitoring_started_at: None,
             scheduler_running: false,
             scheduler_next_fire_at: None,
             scheduler_task_count: 0,
@@ -263,6 +270,15 @@ pub fn apply_partial(snapshot: &mut StatusSnapshot, partial: &PartialSnapshot) {
             cooling_down_remaining,
             consecutive_failures,
         } => {
+            // 监控时长起点：进入 Running 时记录，离开时清零（每次启动重新计时）
+            match state {
+                EngineState::Running => {
+                    if snapshot.engine_state != EngineState::Running {
+                        snapshot.monitoring_started_at = Some(Local::now());
+                    }
+                }
+                _ => snapshot.monitoring_started_at = None,
+            }
             snapshot.engine_state = *state;
             snapshot.network_status = *network;
             snapshot.last_check_time = Some(*last_check);
@@ -299,6 +315,11 @@ pub fn apply_partial(snapshot: &mut StatusSnapshot, partial: &PartialSnapshot) {
         }
         PartialSnapshot::Uptime(secs) => {
             snapshot.uptime_seconds = *secs;
+            // 监控时长随每秒心跳一并刷新；未监控时归零
+            snapshot.monitoring_seconds = snapshot
+                .monitoring_started_at
+                .map(|t| (Local::now() - t).num_seconds().max(0) as u64)
+                .unwrap_or(0);
         }
         PartialSnapshot::Scheduler {
             running,

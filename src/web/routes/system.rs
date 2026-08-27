@@ -206,12 +206,18 @@ pub async fn fetch_logs(
             match latest_file {
                 Some(entry) => read_log_tail(&entry.path())
                     .map(|content| {
-                        // 从最新行开始反向解析 → 取 limit 条有效日志 → 再反转为从旧到新。
+                        // 从最新行开始反向解析 → 过滤本次会话 → 取 limit 条 → 再反转为从旧到新。
                         // 各级别统一保留，展示级别由前端筛选器决定。
+                        // 会话过滤：面板只显示本次启动后的日志，不回显历史运行的旧内容。
+                        let session_start =
+                            crate::logging::session_started_at().unwrap_or_default();
                         content
                             .lines()
                             .rev()
                             .filter_map(parse_tracing_json_log)
+                            .filter(|e| {
+                                session_start.is_empty() || e.timestamp.as_str() >= session_start
+                            })
                             .take(limit)
                             .collect::<Vec<_>>()
                             .into_iter()

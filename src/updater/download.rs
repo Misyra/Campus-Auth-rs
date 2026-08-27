@@ -135,7 +135,9 @@ pub(crate) async fn download_and_verify(
         // G12 降级路径：清单中的 sha256 为空说明发布源未提供伴随 .sha256 文件
         // （check.rs 已在拉取阶段重试一次仍为空），此处维持已文档化的降级——
         // warn 并信任 HTTPS 传输完整性，拒绝静默安装以外的额外放行。
-        tracing::warn!("SHA256 校验值为空（发布源无伴随 .sha256，重试后仍为空），跳过摘要校验，信任 HTTPS");
+        tracing::warn!(
+            "SHA256 校验值为空（发布源无伴随 .sha256，重试后仍为空），跳过摘要校验，信任 HTTPS"
+        );
     }
 
     let zip_path = staging_dir.join(format!("campus-auth-{}.zip", info.latest_version));

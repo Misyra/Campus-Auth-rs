@@ -26,13 +26,13 @@
 }
 
 .info-box h4 {
-  font-size: 14px;
+  font-size: var(--text-base);
   margin-bottom: 12px;
 }
 
 .info-box ul {
   list-style: none;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
 }
 
@@ -41,18 +41,18 @@
 }
 
 .info-box.success {
-  border-color: rgba(16, 185, 129, 0.3);
-  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(var(--success-rgb), 0.3);
+  background: rgba(var(--success-rgb), 0.1);
 }
 
 .info-box.warning {
-  border-color: rgba(245, 158, 11, 0.3);
-  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(var(--warning-rgb), 0.3);
+  background: rgba(var(--warning-rgb), 0.1);
 }
 
 .info-box.error {
-  border-color: rgba(239, 68, 68, 0.3);
-  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(var(--error-rgb), 0.3);
+  background: rgba(var(--error-rgb), 0.1);
 }
 
 /* ========== Fullscreen Image Overlay ========== */
@@ -163,13 +163,13 @@
 
 .exit-overlay h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--text-xl);
 }
 
 .exit-overlay p {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .exit-overlay .btn {
@@ -186,16 +186,16 @@
   padding: 6px 12px;
   margin-bottom: 12px;
   border-radius: var(--radius-md);
-  background: rgba(34, 211, 238, 0.06);
-  border: 1px solid rgba(34, 211, 238, 0.15);
-  font-size: 12px;
+  background: rgba(var(--accent-rgb), 0.06);
+  border: 1px solid rgba(var(--accent-rgb), 0.15);
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
 .alert-hint code {
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 1px 4px;
-  background: rgba(34, 211, 238, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   border-radius: 3px;
   color: var(--accent);
 }
@@ -243,8 +243,112 @@
   justify-content: center;
   flex-wrap: wrap;
   gap: 12px;
-  font-size: 13px;
+  font-size: var(--text-md);
   background: var(--warning-bg, #fffbe6);
   color: var(--warning-text, #ad6800);
   border-bottom: 1px solid var(--border);
+}
+
+/* ═══ 内联加载旋转 ═══ */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+/* ═══ 通用 hover 上浮效果 ═══ */
+.hover-lift {
+  transition: border-color var(--dur-slow) var(--ease-out), background var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
+}
+
+.hover-lift:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+/* ═══ WS 重连指示器 ═══ */
+.ws-reconnect-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(var(--warning-rgb), 0.12);
+  border-bottom: 1px solid rgba(var(--warning-rgb), 0.2);
+  color: var(--warning);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  backdrop-filter: blur(4px);
+}
+
+.ws-reconnect-inline {
+  position: static;
+  border: none;
+  border-radius: var(--radius-md);
+}
+
+.ws-reconnect-bar .spinner {
+  border-top-color: var(--warning);
+}
+
+/* ═══ 骨架屏加载 ═══ */
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--bg-card) 25%,
+    var(--bg-hover) 37%,
+    var(--bg-card) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+  border-radius: var(--radius-xl);
+}
+
+@keyframes shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.skeleton-card {
+  height: 80px;
+  border: 1px solid var(--border);
+}
+
+.skeleton-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 1024px) {
+  .skeleton-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .skeleton-grid,
+  .skeleton-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ═══ 品牌 Logo：CSS mask 渲染，颜色跟随 --text-primary 自动适配深浅主题 ═══ */
+.logo-mark {
+  display: inline-block;
+  background: var(--text-primary);
+  -webkit-mask: url("/logo.png") center / contain no-repeat;
+  mask: url("/logo.png") center / contain no-repeat;
 }

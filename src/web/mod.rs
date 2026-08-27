@@ -231,7 +231,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/uninstall/detect", || {
             get(routes::uninstall::detect_uninstall)
         }),
-        ("POST", "/api/uninstall", || post(routes::uninstall::uninstall)),
+        ("POST", "/api/uninstall", || {
+            post(routes::uninstall::uninstall)
+        }),
         // ---- 背景图（background）----
         ("GET", "/api/background/{filename}", || {
             get(routes::background::get_background)

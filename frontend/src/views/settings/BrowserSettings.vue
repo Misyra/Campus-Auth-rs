@@ -66,9 +66,7 @@ async function stopBrowser() {
     <!-- 浏览器选择 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="21.17" y1="8" x2="12" y2="8"/>
-        </svg>
+        <IconApp name="chrome" class="settings-card-icon" />
         <h2>浏览器类型</h2>
       </div>
       <div class="card-body">
@@ -115,9 +113,7 @@ async function stopBrowser() {
     <!-- 基本设置 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
-        </svg>
+        <IconApp name="sliders" class="settings-card-icon" />
         <h2>基本设置</h2>
       </div>
       <div class="card-body">
@@ -165,9 +161,7 @@ async function stopBrowser() {
     <!-- 浏览器常驻 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-        </svg>
+        <IconApp name="monitor" class="settings-card-icon" />
         <h2>浏览器常驻</h2>
       </div>
       <div class="card-body">
@@ -192,9 +186,7 @@ async function stopBrowser() {
           </div>
         </div>
         <div v-if="config.config.browser.persistent_context && config.config.browser.browser_channel !== 'firefox'" class="browser-info-tip">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-            <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
-          </svg>
+          <IconApp name="info" width="16" height="16" />
           <div>数据目录: <code>config/browser-data/{{ config.config.browser.browser_channel }}/</code></div>
         </div>
         <div class="form-row" style="margin-top: 0.5rem;">
@@ -208,9 +200,7 @@ async function stopBrowser() {
     <!-- 安全与反检测 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-        </svg>
+        <IconApp name="shield" class="settings-card-icon" />
         <h2>安全与反检测</h2>
       </div>
       <div class="card-body">
@@ -244,9 +234,7 @@ async function stopBrowser() {
     <!-- 纯净模式与高级设置 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-        </svg>
+        <IconApp name="star" class="settings-card-icon" />
         <h2>纯净模式与高级设置</h2>
       </div>
       <div class="card-body">

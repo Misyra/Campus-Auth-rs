@@ -71,3 +71,12 @@ frontend-legacy/
 
 # 问题报告
 issues-report.md
+
+# Mimosa 扫描产物（本地审计缓存，不提交）
+.mimosa/
+
+# ZCode 本地产物（会话计划与审计缓存，不提交）
+.zcode/
+
+# Campus-Auth 运行时加密密钥（本地生成，不提交）
+.campus_network_auth/

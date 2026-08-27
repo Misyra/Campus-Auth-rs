@@ -19,6 +19,7 @@
 @import "./components/toggle.css";
 @import "./components/notification.css";
 @import "./components/modal.css";
+@import "./components/log-viewer.css";
 @import "./components/misc.css";
 
 /* 页面样式 */

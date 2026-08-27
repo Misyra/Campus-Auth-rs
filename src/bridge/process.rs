@@ -270,7 +270,9 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
                         exceeded = true;
                         tracing::warn!("IPC 行超长，已丢弃");
                         // G18：同上，保留有界前缀供请求 id 提取
-                        let keep = IPC_MAX_LINE_LEN.saturating_sub(line_buf.len()).min(available.len());
+                        let keep = IPC_MAX_LINE_LEN
+                            .saturating_sub(line_buf.len())
+                            .min(available.len());
                         line_buf.extend_from_slice(&available[..keep]);
                     }
                     if !exceeded {

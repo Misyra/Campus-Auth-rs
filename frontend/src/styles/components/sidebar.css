@@ -7,11 +7,11 @@
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 500;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
   width: 100%;
   text-align: left;
 }
@@ -51,7 +51,7 @@
   width: 16px;
   height: 16px;
   margin-left: auto;
-  transition: transform 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out);
   opacity: 0.5;
 }
 
@@ -70,13 +70,13 @@
 
 .nav-more-menu .nav-item {
   padding: 10px 12px;
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 /* 更多菜单展开/收起动画 */
 .nav-more-enter-active,
 .nav-more-leave-active {
-  transition: max-height 0.3s ease, opacity 0.3s ease;
+  transition: max-height var(--dur-slow) var(--ease-out), opacity var(--dur-slow) var(--ease-out);
   overflow: hidden;
 }
 
@@ -100,23 +100,30 @@
   gap: 6px;
   padding: 10px 14px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 500;
-  background: rgba(239, 68, 68, 0.1);
+  background: rgba(var(--error-rgb), 0.1);
   color: var(--error);
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(var(--error-rgb), 0.2);
   cursor: pointer;
-  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   min-height: 40px;
 }
 
 .quit-btn:hover {
-  background: rgba(239, 68, 68, 0.2);
+  background: rgba(var(--error-rgb), 0.2);
   border-color: var(--error);
-  box-shadow: 0 0 16px rgba(239, 68, 68, 0.15);
+  box-shadow: 0 0 16px rgba(var(--error-rgb), 0.15);
 }
 
 .quit-btn svg {
   width: 16px;
   height: 16px;
+}
+
+/* 浅色主题下 logo 文字改用主题色渐变 */
+[data-theme="light"] .logo-text {
+  background: linear-gradient(135deg, var(--accent), #6366f1);
+  -webkit-background-clip: text;
+  background-clip: text;
 }

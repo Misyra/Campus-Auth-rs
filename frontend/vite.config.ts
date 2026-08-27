@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { resolve } from "path";
@@ -23,4 +24,9 @@ export default defineConfig({
     emptyOutDir: true,
   },
   base: "/",
+  test: {
+    // 纯函数与 composable 测试，无需 DOM
+    environment: "node",
+    include: ["src/**/*.test.ts"],
+  },
 });

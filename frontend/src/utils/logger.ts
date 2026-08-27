@@ -44,7 +44,13 @@ class FrontendLogger {
   }
 
   private send(level: string, scope: string, message: string, meta?: unknown): void {
-    const payload: FrontendLogMessage = { level, scope, message, meta: meta ?? "" };
+    // 无 meta 时发 null：后端按 null 省略 meta 字段，避免日志里出现 meta="" 噪音
+    const payload: FrontendLogMessage = {
+      level,
+      scope,
+      message,
+      meta: meta === undefined || meta === "" ? null : meta,
+    };
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         this.ws.send(JSON.stringify({ type: "frontend_log", data: payload }));

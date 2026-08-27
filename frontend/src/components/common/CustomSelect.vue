@@ -5,6 +5,9 @@ import IconApp from "@/components/common/IconApp.vue";
 
 import { ref, computed, nextTick, onBeforeUnmount } from "vue";
 
+let selectIdCounter = 0;
+const selectUid = `cs-${++selectIdCounter}`;
+
 interface SelectOption {
   value: string;
   label: string;
@@ -124,7 +127,7 @@ onBeforeUnmount(() => {
       role="combobox"
       :aria-expanded="open"
       aria-haspopup="listbox"
-      :aria-activedescendant="open && activeIndex >= 0 ? 'cs-opt-' + activeIndex : undefined"
+      :aria-activedescendant="open && activeIndex >= 0 ? selectUid + '-opt-' + activeIndex : undefined"
       @click="toggle"
       @keydown="onKeydown"
     >
@@ -135,7 +138,7 @@ onBeforeUnmount(() => {
     <div v-if="open" class="custom-select-dropdown" role="listbox">
       <div
         v-for="(opt, i) in options"
-        :id="'cs-opt-' + i"
+        :id="selectUid + '-opt-' + i"
         :key="opt.value"
         class="custom-select-option"
         role="option"

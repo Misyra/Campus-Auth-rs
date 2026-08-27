@@ -198,7 +198,9 @@ async function connectWebSocket(): Promise<void> {
     }, delay);
   };
 
-  ws.onerror = () => {};
+  ws.onerror = (e) => {
+    frontendLogger.warn("websocket", "连接错误", e);
+  };
 
   if (pingTimer) clearInterval(pingTimer);
   pingTimer = setInterval(() => {

@@ -38,6 +38,8 @@ export interface StatusSnapshot {
   /** 当前登录重试计数（瞬时计数，用于状态卡片副文案） */
   retry_count: number;
   last_check_time: string | null;
+  /** 本次监控连续运行时长（秒）；未监控时为 0 */
+  monitoring_seconds: number;
   runtime_seconds: number;
   network_connected: boolean;
   network_state: string;

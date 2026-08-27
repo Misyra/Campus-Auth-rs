@@ -8,7 +8,7 @@
 import { reactive, watch } from "vue";
 import { DEFAULT_APPEARANCE } from "../utils/constants";
 import type { Appearance } from "../utils/appearance-types";
-import { hexToRgb, adjustColor } from "../utils/formatters";
+import { hexToRgb, adjustColor, pickOnColor } from "../utils/formatters";
 import { backgroundApi } from "../api";
 import { useToast } from "./useToast";
 
@@ -77,6 +77,11 @@ function applyAppearance(): void {
     if (accentRgb) {
       root.style.setProperty("--accent-rgb", `${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}`);
     }
+    // 自定义强调色深浅不可预设：按亮度切换其上的文字色，保证可读
+    root.style.setProperty("--on-accent", pickOnColor(appearance.accent_color));
+  } else {
+    // 清除自定义值，回落到 CSS 中按主题预置的默认组合
+    root.style.removeProperty("--on-accent");
   }
 
   const isLight = getEffectiveTheme() === "light";

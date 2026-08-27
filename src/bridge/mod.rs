@@ -340,11 +340,14 @@ impl BridgeSupervisor {
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
                 let id = Uuid::new_v4().to_string();
-                if params.is_object() {
-                    params["cancel_id"] = Value::String(id.clone());
+                if let Some(map) = params.as_object_mut() {
+                    map.insert("cancel_id".to_string(), Value::String(id.clone()));
+                } else {
+                    // 非 Object 入参（如 Value::Null 健康检查）：包装为 Object 以承载 cancel_id，
+                    // 保证内外 cancel_id 一致，超时 Cancel 才能命中已注册的 token
+                    params =
+                        serde_json::json!({ "cancel_id": id.clone(), "value": params.clone() });
                 }
-                // params 非 object 时无法注入，但 execute_inner 内部生成同名随机 id 的
-                // 概率可忽略；此处返回生成的 id 仅用于超时后的 Cancel 命令（幂等 no-op）。
                 id
             });
         let (tx, mut rx) = mpsc::channel(1);
@@ -496,11 +499,7 @@ impl BridgeSupervisor {
     pub fn runtime_ocr_capability(&self) -> Option<bool> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.process.as_ref()?;
-        inner
-            .worker_capabilities
-            .as_ref()?
-            .get("ocr")?
-            .as_bool()
+        inner.worker_capabilities.as_ref()?.get("ocr")?.as_bool()
     }
 
     /// 复位连续 spawn 失败计数（B3）
@@ -641,13 +640,11 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
                         // 判定前写入 debug_session_open）
                         match execute_debug_settle(&method, &result) {
                             DebugSettle::Open => {
-                                let mut inner =
-                                    sup.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut inner = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
                                 inner.debug_session_open = true;
                             }
                             DebugSettle::KeepOpen => {
-                                let mut inner =
-                                    sup.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut inner = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
                                 inner.last_activity = Instant::now();
                             }
                             DebugSettle::Close => {}
@@ -1674,7 +1671,11 @@ mod tests {
         }
         grace_wait_slot_release(&bridge, 7, Duration::from_millis(50)).await;
         let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(inner.worker_state, WorkerState::Error, "卡死应触发强杀置 Error");
+        assert_eq!(
+            inner.worker_state,
+            WorkerState::Error,
+            "卡死应触发强杀置 Error"
+        );
         assert!(inner.pending_requests.is_empty(), "强杀应 drain 在途请求");
     }
 
@@ -1741,10 +1742,7 @@ mod tests {
             assert!(inner.idle_timer.is_some(), "顺延路径应重启空闲计时器");
         }
         // oneshot 未收到任何结算（shutdown 路径会立即收到 WorkerCrashed）
-        assert!(
-            rx.try_recv().is_err(),
-            "顺延路径不应向在途请求结算错误"
-        );
+        assert!(rx.try_recv().is_err(), "顺延路径不应向在途请求结算错误");
         // 清理：中止重启的计时器，避免测试运行时后台 task 残留
         if let Some(h) = bridge
             .inner
@@ -1815,7 +1813,10 @@ mod tests {
             DebugSettle::Close
         );
         let err: Result<IpcResponse, BridgeError> = Err(BridgeError::WorkerBusy);
-        assert_eq!(execute_debug_settle("debug_start", &err), DebugSettle::Close);
+        assert_eq!(
+            execute_debug_settle("debug_start", &err),
+            DebugSettle::Close
+        );
     }
 
     /// start 成功后守卫清理：槽位保持 Some(Debug)/InDebug、空闲计时器不启动；
@@ -1834,7 +1835,11 @@ mod tests {
         debug_guard_cleanup(&bridge, 11, "c-11", false);
         {
             let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
-            assert_eq!(inner.current_session, Some(SessionType::Debug), "start 后会话应保持存活");
+            assert_eq!(
+                inner.current_session,
+                Some(SessionType::Debug),
+                "start 后会话应保持存活"
+            );
             assert_eq!(inner.worker_state, WorkerState::InDebug);
             assert_eq!(inner.current_request_id, None, "在途 id 应清除");
             assert!(inner.idle_timer.is_none(), "存活期不启动空闲计时器");

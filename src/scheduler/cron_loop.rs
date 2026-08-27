@@ -432,19 +432,17 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
 
     // 任务通知（接线原死开关 app.task_notification）：与登录失败通知同机制，
     // 经 notification 日志源推送到前端日志流，由用户在设置页开关
-    if service
-        .config
-        .runtime()
-        .load()
-        .app
-        .task_notification
-    {
+    if service.config.runtime().load().app.task_notification {
         // 安全截断：按 Unicode 字符边界截取，避免 UTF-8 字节索引 panic
         let preview: String = message.chars().take(120).collect();
         let notify = format!(
             "定时任务「{}」{} ({:.1}s）：{}",
             task.name,
-            if success { "执行成功" } else { "执行失败" },
+            if success {
+                "执行成功"
+            } else {
+                "执行失败"
+            },
             duration.as_secs_f64(),
             preview
         );

@@ -8,12 +8,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::logging::{LogEntry, WorkerGuard, init_logging, log_broadcast_tx};
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use crate::logging::{init_logging, log_broadcast_tx, LogEntry, WorkerGuard};
 
 use crate::app::{self, AxumServeHandle};
 use crate::config::schema::StartupAction;
@@ -385,12 +385,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
             // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
             // 此前配置项是死开关，UI「静默启动」切换无任何效果
             let auto_open = !state.app_config.no_browser
-                && container
-                    .config
-                    .runtime()
-                    .load()
-                    .app
-                    .auto_start_browser;
+                && container.config.runtime().load().app.auto_start_browser;
             if auto_open {
                 open_browser(port);
             }

@@ -5,7 +5,7 @@
 
 .form-group label {
   display: block;
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 500;
   color: var(--text-secondary);
   margin-bottom: 8px;
@@ -20,8 +20,8 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--text-primary);
-  font-size: 14px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  font-size: var(--text-base);
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
   color-scheme: light dark;
 }
 
@@ -36,7 +36,7 @@
 .form-group textarea:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12), 0 0 16px rgba(34, 211, 238, 0.06);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
 }
 
 /* ========== Custom Select Dropdown ========== */
@@ -74,7 +74,7 @@
 
 .hint {
   display: block;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   margin-top: 6px;
 }
@@ -101,13 +101,13 @@
   cursor: help;
   isolation: isolate;
   z-index: var(--z-overlay);
-  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
 }
 
 .field-help:hover,
 .field-help:focus-visible {
-  border-color: rgba(34, 211, 238, 0.5);
-  background: rgba(34, 211, 238, 0.12);
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.12);
   color: var(--accent);
 }
 
@@ -134,7 +134,7 @@
   white-space: normal;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
   z-index: var(--z-modal);
   backdrop-filter: var(--blur-md);
 }
@@ -202,12 +202,55 @@
 
 .radio-label {
   font-weight: 500;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-primary);
 }
 
 .radio-desc {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+/* ═══ JSON 校验反馈 ═══ */
+.json-error {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: rgba(var(--error-rgb), 0.08);
+  border: 1px solid rgba(var(--error-rgb), 0.2);
+  border-radius: var(--radius-sm);
+  color: var(--error);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  word-break: break-all;
+  backdrop-filter: var(--blur-sm);
+}
+
+textarea.json-invalid {
+  border-color: var(--error);
+}
+
+textarea.json-valid {
+  border-color: var(--success);
+}
+
+/* ═══ 浅色主题 — field-help ═══ */
+[data-theme="light"] .field-help {
+  border-color: rgba(100, 116, 139, 0.35);
+  background: rgba(100, 116, 139, 0.1);
+  color: #64748b;
+}
+[data-theme="light"] .field-help:hover,
+[data-theme="light"] .field-help:focus-visible {
+  border-color: rgba(6, 182, 212, 0.5);
+  background: rgba(6, 182, 212, 0.1);
+  color: #0891b2;
+}
+[data-theme="light"] .field-help::after {
+  background: rgba(30, 41, 59, 0.96);
+  border-color: rgba(51, 65, 85, 0.3);
+  color: #e2e8f0;
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.18),
+    0 0 0 1px rgba(51, 65, 85, 0.1);
 }

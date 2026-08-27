@@ -19,6 +19,7 @@ pub enum SessionType {
 /// cancel_id（UUID）到 CancellationToken 的注册表
 pub struct CancelRegistry {
     map: Mutex<HashMap<String, CancellationToken>>,
+    pending: Mutex<std::collections::HashSet<String>>,
 }
 
 impl CancelRegistry {
@@ -26,18 +27,27 @@ impl CancelRegistry {
     pub fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
+            pending: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
-    /// 注册新的取消令牌
+    /// 注册新的取消令牌（若已有 pending 取消则立即触发）
     pub fn register(&self, cancel_id: String, token: CancellationToken) {
+        let was_pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(recover_lock)
+            .remove(&cancel_id);
+        if was_pending {
+            token.cancel();
+        }
         self.map
             .lock()
             .unwrap_or_else(recover_lock)
             .insert(cancel_id, token);
     }
 
-    /// 触发取消（调用 token.cancel()）
+    /// 触发取消（调用 token.cancel()），若尚未注册则记为 pending
     pub fn trigger(&self, cancel_id: &str) {
         if let Some(token) = self
             .map
@@ -46,6 +56,11 @@ impl CancelRegistry {
             .remove(cancel_id)
         {
             token.cancel();
+        } else {
+            self.pending
+                .lock()
+                .unwrap_or_else(recover_lock)
+                .insert(cancel_id.to_string());
         }
     }
 
@@ -63,6 +78,7 @@ impl CancelRegistry {
         for (_, token) in guard.drain() {
             token.cancel();
         }
+        self.pending.lock().unwrap_or_else(recover_lock).clear();
     }
 
     /// 清空全部注册项但**不触发取消**
@@ -72,6 +88,7 @@ impl CancelRegistry {
     /// 否则崩溃请求会非确定地报 `Cancelled` 而非 `WorkerCrashed`），同时防止 token 泄漏。
     pub fn clear(&self) {
         self.map.lock().unwrap_or_else(recover_lock).clear();
+        self.pending.lock().unwrap_or_else(recover_lock).clear();
     }
 
     /// 是否已注册指定 cancel_id（测试辅助）

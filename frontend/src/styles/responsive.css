@@ -41,7 +41,7 @@
 @media (max-width: 1200px) {
   .task-actions .btn:not(.btn-danger) {
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--text-sm);
   }
 }
 
@@ -105,8 +105,8 @@
 }
 
 @media (max-width: 720px) {
-  .settings-tabs {
-    grid-template-columns: 1fr 1fr;
+  .settings-tab {
+    flex: 1 1 40%;
   }
 
   .task-mini-grid,

@@ -62,9 +62,7 @@ async function reloadConfig() {
     <!-- 日志设置 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><polyline points="14 2 14 8 20 8"/>
-        </svg>
+        <IconApp name="file-text" class="settings-card-icon" />
         <h2>日志设置</h2>
       </div>
       <div class="card-body settings-grid-2col">
@@ -103,9 +101,7 @@ async function reloadConfig() {
     <!-- 启动行为 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
-        </svg>
+        <IconApp name="power" class="settings-card-icon" />
         <h2>启动行为</h2>
       </div>
       <div class="card-body">
@@ -133,9 +129,7 @@ async function reloadConfig() {
     <!-- 运行模式 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72 1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-        </svg>
+        <IconApp name="sun" class="settings-card-icon" />
         <h2>运行模式</h2>
       </div>
       <div class="card-body">
@@ -152,9 +146,7 @@ async function reloadConfig() {
     <!-- 界面行为 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-        </svg>
+        <IconApp name="monitor" class="settings-card-icon" />
         <h2>界面行为</h2>
       </div>
       <div class="card-body">
@@ -192,9 +184,7 @@ async function reloadConfig() {
     <!-- 网络与端口 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
-        <svg class="settings-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
-        </svg>
+        <IconApp name="server" class="settings-card-icon" />
         <h2>网络与端口</h2>
       </div>
       <div class="card-body">

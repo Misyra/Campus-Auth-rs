@@ -6,7 +6,7 @@
   -webkit-backdrop-filter: var(--card-blur, var(--blur-md));
   backdrop-filter: var(--card-blur, var(--blur-md));
   box-shadow: var(--shadow);
-  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
+  transition: border-color var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
   /* 提前告知浏览器将有 transform 变化，优化毛玻璃动画 */
   will-change: transform;
 }
@@ -24,7 +24,7 @@
 }
 
 .card-header h2 {
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 600;
 }
 
@@ -46,4 +46,34 @@
     font-size: 0.85rem;
     color: var(--text-secondary, #94a3b8);
     margin-top: 2px;
+}
+
+/* ═══ 通用毛玻璃卡片 ═══ */
+.glass-card {
+  background: var(--bg-glass);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-lg);
+  -webkit-backdrop-filter: var(--card-blur, none);
+  backdrop-filter: var(--card-blur, none);
+  box-shadow: var(--shadow);
+}
+
+/* 毛玻璃效果降级：低端设备或用户偏好 */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .glass-card {
+    background: var(--bg-secondary);
+  }
+}
+
+/* 禁用毛玻璃效果（外观设置开关） */
+body.no-backdrop-filter * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.no-backdrop-filter .card {
+  background: var(--bg-card) !important;
 }

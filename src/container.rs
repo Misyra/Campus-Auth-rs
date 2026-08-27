@@ -200,13 +200,17 @@ impl ServiceContainer {
         // 无论成功失败都继续运行：替换失败时已自动回滚，以当前版本运行，不阻断用户。
         {
             let updater_bg = updater.clone();
+            let shutdown_for_update = shutdown_token.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                tracing::info!("后台应用待定更新开始");
+                tokio::select! {
+                    _ = shutdown_for_update.cancelled() => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
+                tracing::info!("检查待定更新（后台）");
                 match updater_bg.apply_pending_on_startup().await {
-                    Ok(true) => tracing::info!("后台应用待定更新完成，新版本将在下次启动生效"),
-                    Ok(false) => tracing::info!("后台应用待定更新跳过（无待处理更新或已清理）"),
-                    Err(e) => tracing::warn!("后台应用待定更新失败，继续以当前版本运行: {e}"),
+                    Ok(true) => tracing::info!("待定更新已应用，新版本将在下次启动生效"),
+                    Ok(false) => tracing::info!("无待定更新，跳过"),
+                    Err(e) => tracing::warn!("待定更新应用失败，继续以当前版本运行: {e}"),
                 }
             });
         }
@@ -284,7 +288,7 @@ impl ServiceContainer {
         // 启动 Bridge Supervisor（懒加载 Worker，仅启动 supervisor 主循环）
         let bridge_handle = self.bridge.spawn();
 
-        tracing::info!("服务容器全部启动完成");
+        tracing::info!("后台服务已启动（定时调度器 + Bridge）");
         Ok(StartupHandles {
             scheduler_handle,
             bridge_handle,

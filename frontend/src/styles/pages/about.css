@@ -27,13 +27,13 @@
   left: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(ellipse at center, rgba(34, 211, 238, 0.08) 0%, transparent 60%);
+  background: radial-gradient(ellipse at center, rgba(var(--accent-rgb), 0.08) 0%, transparent 60%);
   pointer-events: none;
 }
 
 .about-logo {
-  width: 80px;
-  height: 80px;
+  width: 96px;
+  height: 96px;
   margin-bottom: 16px;
 }
 
@@ -43,7 +43,7 @@
 }
 
 .about-subtitle {
-  font-size: 20px;
+  font-size: var(--text-xl);
   color: var(--text-secondary);
   margin-bottom: 8px;
   font-weight: 500;
@@ -52,7 +52,7 @@
 .version {
   color: var(--accent);
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: var(--text-base);
   margin-bottom: 8px;
 }
 
@@ -69,7 +69,7 @@
 }
 
 .update-result {
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .update-available {
@@ -78,8 +78,8 @@
   gap: 8px;
   color: var(--accent);
   padding: 10px 16px;
-  background: rgba(34, 211, 238, 0.08);
-  border: 1px solid rgba(34, 211, 238, 0.2);
+  background: rgba(var(--accent-rgb), 0.08);
+  border: 1px solid rgba(var(--accent-rgb), 0.2);
   border-radius: 8px;
 }
 
@@ -96,7 +96,7 @@
 
 .update-error {
   color: var(--error);
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .about-grid {
@@ -107,7 +107,7 @@
 }
 
 .about-grid .card {
-  transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+  transition: transform var(--dur-slow) var(--ease-out), border-color var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out);
 }
 
 .about-grid .card:hover {
@@ -125,12 +125,12 @@
 .tech-badge {
   padding: 8px 14px;
   border-radius: 20px;
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 500;
   display: inline-flex;
   align-items: center;
   min-height: 36px;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   /* color-mix 回退：旧浏览器显示半透明灰 */
   background: rgba(148, 163, 184, 0.12);
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -199,7 +199,7 @@
   gap: 10px;
   padding: 8px 0;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .feature-list svg {
@@ -228,19 +228,19 @@
 
 .info-label {
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .info-value {
   font-weight: 500;
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .about-footer {
   text-align: center;
   padding: 24px;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .about-links {
@@ -261,7 +261,7 @@
   color: var(--text-primary);
   text-decoration: none;
   font-weight: 500;
-  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   min-height: 40px;
 }
 
@@ -299,8 +299,8 @@
   gap: 16px;
   padding: 16px 20px;
   margin-top: 16px;
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  background: rgba(239, 68, 68, 0.04);
+  border: 1px solid rgba(var(--error-rgb), 0.2);
+  background: rgba(var(--error-rgb), 0.04);
 }
 
 .uninstall-header {
@@ -316,14 +316,14 @@
 }
 
 .uninstall-header h3 {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   margin: 0;
   color: var(--text-primary);
 }
 
 .uninstall-desc {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   margin: 2px 0 0;
 }
@@ -360,11 +360,11 @@
 
 .uninstall-modal-header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 .uninstall-subtitle {
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   margin: 4px 0 0;
 }
@@ -376,7 +376,7 @@
   gap: 8px;
   padding: 40px 20px;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 /* .spinner 和 @keyframes spin 已统一定义在 base.css 中 */
@@ -393,7 +393,7 @@
   text-align: center;
   padding: 24px;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
 .uninstall-item {
@@ -432,12 +432,12 @@
 }
 
 .uninstall-item-label {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 500;
 }
 
 .uninstall-item-path {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   font-family: var(--font-mono);
   overflow: hidden;
@@ -446,12 +446,12 @@
 }
 
 .uninstall-item-size {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
 .uninstall-item-tag {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   background: var(--bg-primary);
   padding: 2px 8px;
@@ -462,10 +462,10 @@
 .uninstall-hint-box {
   margin-top: 8px;
   padding: 10px 12px;
-  background: rgba(34, 211, 238, 0.06);
-  border: 1px solid rgba(34, 211, 238, 0.15);
+  background: rgba(var(--accent-rgb), 0.06);
+  border: 1px solid rgba(var(--accent-rgb), 0.15);
   border-radius: 8px;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   line-height: 1.5;
 }
@@ -497,29 +497,29 @@
   align-items: center;
   gap: 8px;
   padding: 6px 0;
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .result-ok {
   color: var(--success);
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--text-sm);
   min-width: 32px;
 }
 
 .result-fail {
   color: var(--error);
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--text-sm);
   min-width: 32px;
 }
 
 .uninstall-final-hint {
   margin-top: 16px;
   padding: 10px 12px;
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: rgba(var(--error-rgb), 0.08);
+  border: 1px solid rgba(var(--error-rgb), 0.2);
   border-radius: 8px;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
 }

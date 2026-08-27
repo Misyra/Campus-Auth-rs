@@ -56,10 +56,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
           <h2>自定义脚本</h2>
           <div class="flex-row gap-sm">
             <button class="btn btn-sm" @click="importScript" title="从文件导入脚本">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
+              <IconApp name="upload" class="icon-sm" />
               导入
             </button>
             <button class="btn btn-sm btn-primary" @click="showScriptEditor(null)">
@@ -70,9 +67,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
         </div>
         <div class="card-body">
           <div v-if="!scripts.length" class="empty-state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-            </svg>
+            <IconApp name="code" :stroke-width="1.5" />
             <span>暂无自定义脚本</span>
             <span class="hint">支持 Python、Shell 或任意可执行程序，无需浏览器，资源占用更低</span>
           </div>
@@ -90,9 +85,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
               <div class="task-drag-handle" title="拖拽排序"
                 @mousedown="drag.onHandleMouseDown($event)"
                 @mouseup="drag.onHandleMouseUp($event)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                  <line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="18" x2="16" y2="18"/>
-                </svg>
+                <IconApp name="list" class="icon-sm" />
               </div>
               <div class="task-info">
                 <h3>{{ script.name }}</h3>

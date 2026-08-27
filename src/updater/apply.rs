@@ -70,10 +70,7 @@ pub(crate) fn write_pending(pending: &PendingUpdate, base_path: &Path) -> Result
         std::fs::create_dir_all(parent).map_err(UpdaterError::PendingWriteFailed)?;
     }
     let json = serde_json::to_vec(pending).map_err(|e| {
-        UpdaterError::PendingWriteFailed(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            e,
-        ))
+        UpdaterError::PendingWriteFailed(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     })?;
     crate::utils::io::atomic_write_bytes(&path, &json).map_err(UpdaterError::PendingWriteFailed)
 }
@@ -109,8 +106,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pending = PendingUpdate {
             version: "5.0.1".into(),
-            staging_dir: dir.path().join("update/staging").to_string_lossy().into_owned(),
-            target_exe: dir.path().join("campus-auth.exe").to_string_lossy().into_owned(),
+            staging_dir: dir
+                .path()
+                .join("update/staging")
+                .to_string_lossy()
+                .into_owned(),
+            target_exe: dir
+                .path()
+                .join("campus-auth.exe")
+                .to_string_lossy()
+                .into_owned(),
             original_args: vec!["--port".into(), "8800".into()],
             sha256: "abc123".into(),
             created_at: "2026-08-24T00:00:00Z".into(),

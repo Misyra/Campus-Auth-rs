@@ -32,11 +32,7 @@ const {
       <!-- 卡片 1：背景与氛围 -->
       <div class="card appearance-card appearance-section-card">
         <div class="appearance-card-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="appearance-card-icon">
-            <rect x="3" y="3" width="18" height="18" rx="2"/>
-            <circle cx="8.5" cy="8.5" r="1.5"/>
-            <polyline points="21 15 16 10 5 21"/>
-          </svg>
+          <IconApp name="image" class="appearance-card-icon" />
           <h3>背景与氛围</h3>
           <button v-if="cardDirty('background')" type="button" class="appearance-reset-btn" @click="resetCard('background')">恢复默认</button>
         </div>
@@ -45,21 +41,14 @@ const {
             <div v-if="appearance.background_url" class="appearance-bg-thumb" @click="openBgLightbox">
               <img :src="appearance.background_url" alt="背景预览" />
               <div class="appearance-bg-thumb-zoom">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                  <line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>
-                </svg>
+                <IconApp name="zoom-in" class="icon-sm" />
               </div>
               <button type="button" class="appearance-bg-thumb-remove" @click.stop="clearBackgroundImage" title="移除背景">
                 <IconApp name="close" class="icon-sm" />
               </button>
             </div>
             <div v-else class="appearance-bg-thumb empty" @click="selectBackgroundImage">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:24px;height:24px">
-                <rect x="3" y="3" width="18" height="18" rx="2"/>
-                <circle cx="8.5" cy="8.5" r="1.5"/>
-                <polyline points="21 15 16 10 5 21"/>
-              </svg>
+              <IconApp name="image" :stroke-width="1.5" style="width:24px;height:24px" />
               <span>选择图片</span>
             </div>
             <div class="appearance-bg-thumb-actions">
@@ -96,10 +85,7 @@ const {
       <!-- 卡片 2：主题与配色 -->
       <div class="card appearance-card appearance-section-card">
         <div class="appearance-card-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="appearance-card-icon">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M12 2a10 10 0 0 1 0 20"/>
-          </svg>
+          <IconApp name="contrast" class="appearance-card-icon" />
           <h3>主题与配色</h3>
           <button v-if="cardDirty('theme')" type="button" class="appearance-reset-btn" @click="resetCard('theme')">恢复默认</button>
         </div>
@@ -168,10 +154,7 @@ const {
       <!-- 卡片 3：卡片样式 -->
       <div class="card appearance-card appearance-section-card">
         <div class="appearance-card-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="appearance-card-icon">
-            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
-            <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
-          </svg>
+          <IconApp name="grid" class="appearance-card-icon" />
           <h3>卡片样式</h3>
           <button v-if="cardDirty('card')" type="button" class="appearance-reset-btn" @click="resetCard('card')">恢复默认</button>
         </div>
@@ -192,10 +175,7 @@ const {
       <!-- 卡片 4：侧边栏 -->
       <div class="card appearance-card appearance-section-card">
         <div class="appearance-card-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="appearance-card-icon">
-            <rect x="3" y="3" width="18" height="18" rx="2"/>
-            <line x1="9" y1="3" x2="9" y2="21"/>
-          </svg>
+          <IconApp name="sidebar" class="appearance-card-icon" />
           <h3>侧边栏</h3>
           <button v-if="cardDirty('sidebar')" type="button" class="appearance-reset-btn" @click="resetCard('sidebar')">恢复默认</button>
         </div>
@@ -264,9 +244,9 @@ const {
       </div>
     </div>
 
-    <!-- 从链接下载壁纸弹窗：复用公共 Modal（原手搓遮罩/居中样式已删） -->
+    <!-- 从链接下载壁纸弹窗：复用公共 Modal（open prop 控制显隐，与 TasksView 用法一致） -->
     <Modal
-      v-if="randomWallpaperDialog.visible"
+      :open="randomWallpaperDialog.visible"
       title="从链接下载壁纸"
       @close="closeRandomWallpaperDialog"
     >

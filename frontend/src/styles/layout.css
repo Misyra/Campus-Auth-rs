@@ -30,8 +30,8 @@
 }
 
 .logo-icon {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
 }
 
 .logo-text {
@@ -79,7 +79,7 @@
 }
 
 .page-title {
-  font-size: 24px;
+  font-size: var(--text-2xl);
   font-weight: 600;
 }
 
@@ -99,14 +99,14 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 600;
   color: var(--warning);
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid rgba(245, 158, 11, 0.2);
+  background: rgba(var(--warning-rgb), 0.1);
+  border: 1px solid rgba(var(--warning-rgb), 0.2);
   padding: 3px 10px;
   border-radius: 20px;
-  animation: fadeIn 0.2s ease;
+  animation: fadeIn var(--dur-base) var(--ease-out);
 }
 
 .top-dirty-dot {

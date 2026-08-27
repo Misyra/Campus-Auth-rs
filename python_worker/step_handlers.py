@@ -180,17 +180,34 @@ _MIN_ATTACHED_MS = 500
 _FORCE_INPUT_JS = """(el, params) => {
   const val = params.val;
   const doClear = params.doClear;
-  const nativeSet = Object.getOwnPropertyDescriptor(el.tagName === 'TEXTAREA'
-    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value').set;
-  el.dispatchEvent(new FocusEvent('focus', {bubbles:true}));
-  if (doClear) nativeSet.call(el, '');
-  const finalVal = doClear ? val : el.value + val;
-  el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType:'insertText', data: finalVal}));
-  nativeSet.call(el, finalVal);
-  el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data: finalVal}));
-  el.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
-  el.dispatchEvent(new Event('change', {bubbles:true}));
-  el.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
+  // contenteditable 用 textContent，其余用 value
+  if (el.isContentEditable) {
+    if (doClear) el.textContent = '';
+    const finalVal = doClear ? val : (el.textContent || '') + val;
+    el.focus();
+    el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType:'insertText', data: finalVal}));
+    el.textContent = finalVal;
+    el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data: finalVal}));
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+    el.blur();
+    return;
+  }
+  const isTextarea = el.tagName === 'TEXTAREA';
+  const proto = isTextarea ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  const nativeSet = desc && desc.set;
+  if (!nativeSet) { el.value = doClear ? val : el.value + val; }
+  else {
+    el.dispatchEvent(new FocusEvent('focus', {bubbles:true}));
+    if (doClear) nativeSet.call(el, '');
+    const finalVal = doClear ? val : el.value + val;
+    el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType:'insertText', data: finalVal}));
+    nativeSet.call(el, finalVal);
+    el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data: finalVal}));
+    el.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+    el.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
+  }
 }"""
 
 
@@ -273,6 +290,8 @@ async def handle_click(page, step: StepConfig, context: StepContext) -> None:
     if not step.selector:
         raise WorkerError(Outcome.SELECTOR_FAILED, "click 步骤缺少 selector")
     timeout = step.timeout or context.default_timeout
+    # 逗号分割的候选选择器：简单按逗号切分，:is()/:where() 内逗号会被误切
+    # 但任务编写规范不建议在候选列表中使用 :is(,)，为保持兼容此处保留简单切分
     candidates = [s.strip() for s in step.selector.split(",") if s.strip()]
     deadline = time.monotonic() + timeout / 1000
     for sel in candidates:

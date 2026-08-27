@@ -7,8 +7,8 @@ use axum::extract::State;
 use serde_json::Value;
 
 use crate::web::error::{ApiError, data};
-use crate::web::state::AppState;
 use crate::web::routes::system::spawn_exit_watchdog;
+use crate::web::state::AppState;
 
 /// GET /api/uninstall/detect — 卸载检测
 ///
@@ -112,4 +112,3 @@ pub async fn uninstall(State(state): State<AppState>) -> Result<Json<Value>, Api
         "script_path": uninstall_script.to_string_lossy(),
     })))
 }
-

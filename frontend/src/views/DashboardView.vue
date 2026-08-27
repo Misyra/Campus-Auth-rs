@@ -6,6 +6,7 @@ import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
 import { throttleRaf } from "@/utils/debounce";
 import { LOG_SOURCE_LABELS } from "@/utils/constants";
+import { formatDuration, formatTimestamp, formatShortTime } from "@/utils/formatters";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -52,16 +53,6 @@ watch(
     if (logs.autoScroll.value) nextTick(scrollToBottom);
   },
 );
-
-// ---- 格式化 ----
-function formatDuration(sec: number): string {
-  if (sec === 0) return "0h 0m 0s";
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  return `${h}h ${m}m ${s}s`;
-}
-function formatTime(ts: string): string {
-  return ts.replace("T", " ").substring(0, 19);
-}
 
 // ---- 日志筛选 ----
 const logLevelOptions: SelectOption[] = [
@@ -119,13 +110,13 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
           <IconApp name="clock" />
         </div>
         <div class="stat-info">
-          <span class="stat-label">运行时长</span>
-          <span class="stat-value">{{ formatDuration(s.status.runtime_seconds) }}</span>
+          <span class="stat-label">开始监控时长</span>
+          <span class="stat-value">{{ formatDuration(s.status.monitoring_seconds) }}</span>
         </div>
       </div>
       <div class="stat-card">
         <div class="stat-icon blue">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          <IconApp name="activity" />
         </div>
         <div class="stat-info">
           <span class="stat-label">检测次数</span>
@@ -136,7 +127,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
       </div>
       <div class="stat-card">
         <div class="stat-icon orange">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <IconApp name="alert-triangle" />
         </div>
         <div class="stat-info">
           <span class="stat-label">登录次数</span>
@@ -147,11 +138,11 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
       </div>
       <div class="stat-card">
         <div class="stat-icon purple">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <IconApp name="calendar" />
         </div>
         <div class="stat-info">
           <span class="stat-label">最后检测</span>
-          <span class="stat-value">{{ s.status.last_check_time ? formatTime(s.status.last_check_time) : '-' }}</span>
+          <span class="stat-value">{{ s.status.last_check_time ? formatShortTime(s.status.last_check_time) : '-' }}</span>
         </div>
       </div>
     </div>
@@ -168,11 +159,11 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
                 取消登录
               </button>
               <button v-else class="btn btn-secondary" @click="ui.manualLogin()" :disabled="s.busy.action || s.busy.loginCooldown" title="立即执行一次登录认证">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                <IconApp name="log-in" />
                 手动登录
               </button>
               <button class="btn btn-secondary" @click="ui.testNetwork()" :disabled="s.busy.action">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg>
+                <IconApp name="wifi" />
                 网络测试
               </button>
             </div>
@@ -225,9 +216,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
           <h2>实时日志</h2>
           <div class="flex-row gap-sm">
             <button class="btn btn-icon-only" :class="{ 'btn-active': logs.autoScroll.value }" @click="logs.autoScroll.value = !logs.autoScroll.value" :title="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path v-if="logs.autoScroll.value" d="M12 19V5M5 12l7-7 7 7"/><path v-else d="M12 5v14M5 12l7 7 7-7"/>
-              </svg>
+              <IconApp :name="logs.autoScroll.value ? 'arrow-up' : 'arrow-down'" />
             </button>
             <button class="btn btn-icon-only" @click="logs.fetchLogs()" title="刷新">
               <IconApp name="download" />
@@ -254,7 +243,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
                 class="log-entry"
                 :class="[item.level ? 'log-' + item.level.toLowerCase() : '']"
               >
-                <span class="log-time">{{ formatTime(item.timestamp) }}</span>
+                <span class="log-time">{{ formatTimestamp(item.timestamp) }}</span>
                 <span v-if="item.level" class="log-level-badge" :class="'level-' + item.level.toLowerCase()">{{ item.level }}</span>
                 <span v-if="item.source" class="log-source-badge" :class="'source-' + item.source">{{ getSourceLabel(item.source) }}</span>
                 <div class="log-content">
@@ -266,7 +255,7 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
               </div>
             </div>
             <button v-if="logs.newLogCount.value > 0" class="new-logs-btn" @click="scrollToBottom(); logs.newLogCount.value = 0">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+              <IconApp name="arrow-down" />
               {{ logs.newLogCount.value }} 条新消息
             </button>
           </div>

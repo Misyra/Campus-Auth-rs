@@ -254,8 +254,8 @@ impl LoginSession {
                 return;
             }
 
-            // 会话总超时检查
-            if session_start.elapsed() > self.params.login_timeout {
+            // 会话总超时检查（login_timeout 至少 1s，见 SessionParams 构造 clamp）
+            if session_start.elapsed() > self.params.login_timeout.max(Duration::from_secs(1)) {
                 if let Some(cid) = self.attempt_cancel_id.load_full() {
                     bridge.cancel(cid.as_str());
                 }
@@ -299,7 +299,11 @@ impl LoginSession {
             // biased 保证取消类信号先于 execute/timeout 生效，避免取消被延迟。
             let exec = {
                 let ct = self.cancel_token.clone();
-                let remaining = self.params.login_timeout.saturating_sub(session_start.elapsed());
+                let remaining = self
+                    .params
+                    .login_timeout
+                    .max(Duration::from_secs(1))
+                    .saturating_sub(session_start.elapsed());
                 tokio::select! {
                     biased;
                     _ = ct.cancelled() => {
@@ -347,11 +351,12 @@ impl LoginSession {
             // 分类结果：可重试但重试预算已耗尽时归入 Exhausted（避免进入 try_retry）
             // 后再次判断，保持"预算耗尽"这一决策与 classify 一起表达
             let action = classify(structured.outcome);
-            let action = if action == ResultAction::Retry && attempts_used >= self.params.max_retries {
-                ResultAction::Exhausted
-            } else {
-                action
-            };
+            let action =
+                if action == ResultAction::Retry && attempts_used >= self.params.max_retries {
+                    ResultAction::Exhausted
+                } else {
+                    action
+                };
             match action {
                 ResultAction::Terminal(kind) => match kind {
                     TerminalKind::Success => {
@@ -494,7 +499,10 @@ impl LoginSession {
         self.deps.status_manager.merge(PartialSnapshot::Login {
             status: LoginStatus::Running,
             source: Some(self.params.source),
-            message: Some(format!("重试中 {attempts_used}/{}", self.params.max_retries)),
+            message: Some(format!(
+                "重试中 {attempts_used}/{}",
+                self.params.max_retries
+            )),
             retry_count: *attempts_used,
         });
         if should_force_recycle(structured.outcome) {
@@ -535,7 +543,8 @@ impl LoginSession {
     /// 声明时 Worker 已用变量真值判定过成功，登录路径应跳过网络检测兜底
     /// （对齐原项目 v4.2.3 `login_attempt` 的 `has_explicit_condition` 分支）。
     fn has_explicit_success_condition(&self) -> bool {
-        self.params.worker_config
+        self.params
+            .worker_config
             .get("task_config")
             .and_then(|t| t.get("success_condition"))
             .and_then(|v| v.as_str())
@@ -554,7 +563,8 @@ impl LoginSession {
         let monitor = &self.deps.monitor;
         // 登录后等待 portal 生效的延迟（可配置，默认 5s）
         let delay = self
-            .deps.config_service
+            .deps
+            .config_service
             .runtime()
             .load()
             .monitor
@@ -754,9 +764,9 @@ impl LoginSession {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
     use super::*;
     use crate::bridge::Outcome;
+    use std::sync::atomic::Ordering;
 
     // ============ classify 纯函数测试 ============
 
@@ -1019,9 +1029,7 @@ mod tests {
         let session = LoginSession::new(
             make_params(),
             CancellationToken::new(),
-            Arc::new(crate::login::LoginHandleInner {
-                result_tx,
-            }),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
             Arc::new(arc_swap::ArcSwapOption::new(None)),
             CancellationToken::new(),
             Arc::new(std::sync::Mutex::new(None)),
@@ -1062,9 +1070,7 @@ mod tests {
         let session = LoginSession::new(
             make_params(),
             CancellationToken::new(),
-            Arc::new(crate::login::LoginHandleInner {
-                result_tx,
-            }),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
             Arc::new(arc_swap::ArcSwapOption::new(None)),
             CancellationToken::new(),
             Arc::new(std::sync::Mutex::new(None)),

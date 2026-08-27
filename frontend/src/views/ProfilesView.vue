@@ -57,9 +57,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
     <template v-if="showEditor && p.editingProfile.value">
       <div class="profile-editor-topbar">
         <button class="btn btn-sm" @click="closeEditor">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-            <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
-          </svg>
+          <IconApp name="arrow-left" class="icon-sm" />
           返回方案列表
         </button>
         <h2>{{ p.editingProfile.value._isNew ? '新建方案' : '编辑方案' }}</h2>
@@ -92,10 +90,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
             </div>
             <div class="editor-network-detect">
               <button class="btn btn-sm" @click="p.detectNetworkForEditor()" :disabled="busy.editorDetect">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-                  <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
-                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-                </svg>
+                <IconApp name="globe" class="icon-sm" />
                 {{ busy.editorDetect ? '检测中...' : '检测当前网络' }}
               </button>
               <span v-if="p.editorDetectResult.value" class="editor-detect-info">
@@ -173,12 +168,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
       <div class="profiles-topbar card">
         <div class="profiles-topbar-left">
           <div class="profiles-status-icon" :class="p.autoSwitch.value ? 'on' : 'off'">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
-              <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
-              <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
-              <line x1="12" y1="20" x2="12.01" y2="20"/>
-            </svg>
+            <IconApp name="wifi" />
           </div>
           <div class="profiles-topbar-info">
             <h2>配置方案</h2>
@@ -192,10 +182,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
             <span class="toggle-label">自动切换</span>
           </label>
           <button class="btn btn-sm" @click="p.detectNetwork()" :disabled="busy.detect" title="检测当前网络环境">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sm">
-              <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-            </svg>
+            <IconApp name="globe" class="icon-sm" />
             {{ busy.detect ? '检测中...' : '检测网络' }}
           </button>
           <button class="btn btn-sm btn-primary" @click="openEditor(null)">
@@ -208,14 +195,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
       <!-- 检测结果 -->
       <div v-if="p.detectResult.value" class="detect-banner card" :class="p.detectResult.value.matched_profile_id ? 'matched' : 'unmatched'">
         <div class="detect-banner-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <template v-if="p.detectResult.value.matched_profile_id">
-              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-            </template>
-            <template v-else>
-              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-            </template>
-          </svg>
+          <IconApp :name="p.detectResult.value.matched_profile_id ? 'check-circle' : 'info'" />
         </div>
         <div class="detect-banner-info">
           <template v-if="p.detectResult.value.matched_profile_id">
@@ -250,12 +230,7 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
       <!-- 空状态 -->
       <div v-if="!Object.keys(p.profiles.value).length" class="card">
         <div class="profiles-empty">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-            <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
-            <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
-            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
-            <line x1="12" y1="20" x2="12.01" y2="20"/>
-          </svg>
+          <IconApp name="wifi" :stroke-width="1.5" />
           <span class="profiles-empty-title">暂无配置方案</span>
           <span class="profiles-empty-desc">为不同网络环境创建独立的认证配置</span>
           <button class="btn btn-sm btn-primary" @click="openEditor(null)">创建第一个方案</button>
@@ -275,16 +250,11 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
             </div>
             <div class="profile-card-meta">
               <span v-if="info.gateway_ip" class="profile-tag">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-xs">
-                  <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
-                  <line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
-                </svg>
+                <IconApp name="server" class="icon-xs" />
                 {{ info.gateway_ip }}
               </span>
               <span v-if="info.wifi_ssid" class="profile-tag">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-xs">
-                  <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
-                </svg>
+                <IconApp name="wifi" class="icon-xs" />
                 {{ info.wifi_ssid }}
               </span>
               <span v-if="!info.gateway_ip && !info.wifi_ssid" class="profile-tag">

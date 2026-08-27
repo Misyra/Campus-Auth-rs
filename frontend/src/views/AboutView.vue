@@ -82,7 +82,7 @@ async function applyUpdate() {
   <div class="page-content">
     <div class="about-container">
       <div class="about-hero card">
-        <img src="/black-cat.svg" alt="Logo" class="about-logo" />
+        <span class="about-logo logo-mark" role="img" aria-label="Logo"></span>
         <h1>校园网自动认证</h1>
         <p class="about-subtitle">Campus Network Auth</p>
         <p class="version">Version {{ version }}</p>
@@ -93,11 +93,7 @@ async function applyUpdate() {
           </button>
           <div v-if="updateInfo && !updateInfo.error && !updateInfo.message" class="update-result">
             <div v-if="updateInfo.has_update" class="update-available">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="7 10 12 15 17 10"/>
-                <line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
+              <IconApp name="upload" width="16" height="16" />
               <span>发现新版本 <strong>v{{ updateInfo.latest }}</strong></span>
               <button class="btn btn-primary btn-sm" @click="applyUpdate" :disabled="updating">
                 {{ updating ? "更新中..." : "立即更新" }}
@@ -187,12 +183,7 @@ async function applyUpdate() {
       <!-- 卸载提示 -->
       <div class="uninstall-section card">
         <div class="uninstall-header">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
-            <polyline points="3 6 5 6 21 6"/>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-            <line x1="10" y1="11" x2="10" y2="17"/>
-            <line x1="14" y1="11" x2="14" y2="17"/>
-          </svg>
+          <IconApp name="trash" width="20" height="20" />
           <div>
             <h3>卸载程序</h3>
             <p class="uninstall-desc">

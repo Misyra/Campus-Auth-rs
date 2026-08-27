@@ -31,7 +31,7 @@
   background: var(--bg-primary);
   border-radius: var(--radius-lg);
   position: relative;
-  transition: background 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out);
   border: 1px solid var(--border);
 }
 
@@ -44,13 +44,13 @@
   border-radius: 50%;
   top: 2px;
   left: 2px;
-  transition: transform 0.2s ease, background 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
 }
 
 .toggle input:checked + .toggle-slider {
   background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   border-color: var(--accent);
-  box-shadow: 0 0 12px rgba(34, 211, 238, 0.25);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.25);
 }
 
 .toggle input:checked + .toggle-slider::after {
@@ -79,13 +79,13 @@
 }
 
 .toggle-label {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 500;
   color: var(--text-primary);
 }
 
 .toggle-desc {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
@@ -99,7 +99,7 @@
   border: 1px solid var(--border);
   border-radius: 12px;
   cursor: pointer;
-  transition: background-color 0.2s ease, transform 0.2s ease;
+  transition: background-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
   flex-shrink: 0;
   padding: 0;
 }
@@ -120,7 +120,7 @@
   left: 2px;
   background-color: var(--text-on-accent);
   border-radius: 50%;
-  transition: transform 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 

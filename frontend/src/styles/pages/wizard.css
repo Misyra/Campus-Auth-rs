@@ -5,7 +5,7 @@
   right: 0;
   bottom: 0;
   background:
-    radial-gradient(ellipse 70% 50% at 30% 30%, rgba(34, 211, 238, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 70% 50% at 30% 30%, rgba(var(--accent-rgb), 0.06) 0%, transparent 60%),
     radial-gradient(ellipse 50% 40% at 70% 70%, rgba(167, 139, 250, 0.05) 0%, transparent 60%),
     rgba(15, 23, 42, 0.95);
   display: flex;
@@ -34,13 +34,13 @@
 }
 
 .wizard-logo {
-  width: 64px;
+  width: 80px;
   height: 64px;
   margin-bottom: 16px;
 }
 
 .wizard-header h1 {
-  font-size: 24px;
+  font-size: var(--text-2xl);
   margin-bottom: 8px;
 }
 
@@ -53,7 +53,7 @@
 }
 
 .wizard-page h2 {
-  font-size: 20px;
+  font-size: var(--text-xl);
   margin-bottom: 8px;
 }
 
@@ -93,7 +93,7 @@
 }
 
 .terms-content p {
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.6;
   color: var(--text-secondary);
   margin-bottom: 12px;
@@ -106,7 +106,7 @@
 }
 
 .terms-content li {
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.6;
   color: var(--text-secondary);
   margin-bottom: 6px;
@@ -126,7 +126,7 @@
 }
 
 .terms-checkbox .toggle-label {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 500;
   color: var(--text-primary);
 }

@@ -2,6 +2,7 @@
 // Toast 通知（单例状态展示）。替代原 toast.html 的全局 toast 节点。
 
 import { useToast } from "../../composables/useToast";
+import IconApp from "./IconApp.vue";
 
 const { toast } = useToast();
 </script>
@@ -14,15 +15,8 @@ const { toast } = useToast();
     role="alert"
     aria-live="assertive"
   >
-    <svg v-if="toast.success" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-      <polyline points="22 4 12 14.01 9 11.01" />
-    </svg>
-    <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-      <circle cx="12" cy="12" r="10" />
-      <line x1="15" y1="9" x2="9" y2="15" />
-      <line x1="9" y1="9" x2="15" y2="15" />
-    </svg>
+    <IconApp v-if="toast.success" name="check-circle" aria-hidden="true" />
+    <IconApp v-else name="x-circle" aria-hidden="true" />
     <span>{{ toast.message }}</span>
   </div>
 </template>

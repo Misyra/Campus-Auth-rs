@@ -82,12 +82,8 @@ function handleSave() {
         :disabled="busy.save || configLoadFailed"
       >
         <IconApp name="refresh" v-if="busy.save" class="spin" />
-        <svg v-else-if="saveFailed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/>
-        </svg>
-        <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
-        </svg>
+        <IconApp name="refresh-cw" v-else-if="saveFailed" />
+        <IconApp name="save" v-else />
         <span>{{ busy.save ? '保存中' : (saveFailed ? '重试' : '立即保存') }}</span>
       </button>
     </div>

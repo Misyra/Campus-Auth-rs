@@ -204,10 +204,10 @@ export function extractApiError(error: unknown, fallback = "操作失败"): stri
 export const http = {
   get: <T>(path: string, opts?: RequestOptions) => request<T>("GET", path, opts),
   post: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
-    request<T>("POST", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined }),
+    request<T>("POST", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined && body !== null ? JSON.stringify(body) : undefined }),
   put: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
-    request<T>("PUT", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined }),
+    request<T>("PUT", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined && body !== null ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
-    request<T>("PATCH", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined }),
+    request<T>("PATCH", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined && body !== null ? JSON.stringify(body) : undefined }),
   delete: <T>(path: string, opts?: RequestOptions) => request<T>("DELETE", path, opts),
 };

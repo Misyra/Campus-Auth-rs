@@ -31,7 +31,7 @@
 }
 
 .appearance-card-header h3 {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   margin: 0;
   color: var(--text-primary);
@@ -42,33 +42,33 @@
   background: transparent;
   border: none;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   cursor: pointer;
   padding: 4px 8px;
   border-radius: var(--radius-sm);
-  transition: color 0.2s ease, background 0.2s ease, opacity 0.2s ease;
+  transition: color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out);
 }
 
 .appearance-reset-btn:hover {
   color: var(--accent);
-  background: rgba(34, 211, 238, 0.08);
+  background: rgba(var(--accent-rgb), 0.08);
 }
 
 .appearance-reset-btn-inline {
   background: transparent;
   border: none;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   cursor: pointer;
   padding: 2px 6px;
   margin-left: 8px;
   border-radius: var(--radius-sm);
-  transition: color 0.2s ease, background 0.2s ease;
+  transition: color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
 }
 
 .appearance-reset-btn-inline:hover {
   color: var(--accent);
-  background: rgba(34, 211, 238, 0.08);
+  background: rgba(var(--accent-rgb), 0.08);
 }
 
 .appearance-card-body {
@@ -98,7 +98,7 @@
 }
 
 .appearance-field-label {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   font-weight: 500;
 }
@@ -118,11 +118,11 @@
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 500;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
 }
 
 .appearance-segmented button:hover {
@@ -130,7 +130,7 @@
 }
 
 .appearance-segmented button.active {
-  background: rgba(34, 211, 238, 0.15);
+  background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
 }
 
@@ -157,7 +157,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
   flex-shrink: 0;
   position: relative;
 }
@@ -187,7 +187,7 @@
   background: transparent;
   border: 2px dashed var(--border-hover);
   color: var(--text-muted);
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 300;
   line-height: 1;
 }
@@ -199,7 +199,7 @@
 }
 
 .appearance-color-hex {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   font-family: var(--font-mono);
 }
@@ -213,13 +213,13 @@
 }
 
 .appearance-slider-item label {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   margin: 0;
 }
 
 .appearance-slider-item span {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   text-align: right;
   font-family: var(--font-mono);
@@ -244,7 +244,7 @@
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
-  transition: transform 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 
 .appearance-slider-item input[type="range"]::-webkit-slider-thumb:hover {
@@ -312,9 +312,9 @@
   gap: 4px;
   border: 2px dashed var(--border-hover);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--text-xs);
   background: var(--bg-glass-light);
-  transition: border-color 0.2s ease, color 0.2s ease;
+  transition: border-color var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
 }
 
 .appearance-bg-thumb.empty:hover {
@@ -335,7 +335,7 @@
   align-items: center;
   justify-content: center;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--dur-base) var(--ease-out);
   -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
 }
@@ -358,7 +358,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.2s ease, transform 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
 
 .appearance-bg-thumb-remove:hover {
@@ -388,7 +388,7 @@
 
 /* form-hint */
 .form-hint {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   margin-top: 4px;
   margin-bottom: 0;
@@ -403,7 +403,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  animation: fadeIn 0.2s ease;
+  animation: fadeIn var(--dur-base) var(--ease-out);
   cursor: zoom-out;
 }
 
@@ -435,7 +435,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.2s ease, transform 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
 
 .bg-lightbox-close:hover {

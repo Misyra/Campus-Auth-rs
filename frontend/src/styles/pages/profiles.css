@@ -38,8 +38,8 @@
 
 .profiles-status-icon.on {
   background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-  color: var(--bg-primary);
-  box-shadow: 0 0 12px rgba(34, 211, 238, 0.25);
+  color: var(--on-accent);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.25);
 }
 
 .profiles-status-icon.off {
@@ -49,13 +49,13 @@
 
 .profiles-topbar-info h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 600;
 }
 
 .profiles-topbar-info p {
   margin: 2px 0 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
@@ -74,7 +74,7 @@
   padding: 12px 16px;
   margin-bottom: 16px;
   border-radius: var(--radius-lg);
-  animation: fadeIn 0.3s ease;
+  animation: fadeIn var(--dur-slow) var(--ease-out);
   backdrop-filter: blur(8px);
 }
 
@@ -104,12 +104,12 @@
 }
 
 .detect-banner.matched .detect-banner-icon {
-  background: rgba(16, 185, 129, 0.15);
+  background: rgba(var(--success-rgb), 0.15);
   color: var(--success);
 }
 
 .detect-banner.unmatched .detect-banner-icon {
-  background: rgba(245, 158, 11, 0.15);
+  background: rgba(var(--warning-rgb), 0.15);
   color: var(--warning);
 }
 
@@ -120,12 +120,12 @@
 
 .detect-banner-info strong {
   display: block;
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 600;
 }
 
 .detect-details {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   margin-top: 2px;
 }
@@ -145,7 +145,7 @@
 
 .profiles-guide-intro p {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-secondary);
   line-height: 1.7;
 }
@@ -173,26 +173,26 @@
   height: 28px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--purple));
-  color: var(--bg-primary);
-  font-size: 13px;
+  color: var(--on-accent);
+  font-size: var(--text-md);
   font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 0 12px rgba(34, 211, 238, 0.2);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.2);
 }
 
 .guide-step-content strong {
   display: block;
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 600;
   margin-bottom: 1px;
 }
 
 .guide-step-content p {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.4;
 }
@@ -233,13 +233,13 @@
 
 
 .profile-card.active {
-  border-color: rgba(34, 211, 238, 0.4);
-  box-shadow: inset 3px 0 0 var(--accent), 0 0 16px rgba(34, 211, 238, 0.08);
+  border-color: rgba(var(--accent-rgb), 0.4);
+  box-shadow: inset 3px 0 0 var(--accent), 0 0 16px rgba(var(--accent-rgb), 0.08);
 }
 
 .profile-card.active:hover {
-  border-color: rgba(34, 211, 238, 0.5);
-  box-shadow: inset 3px 0 0 var(--accent), 0 4px 16px rgba(34, 211, 238, 0.12);
+  border-color: rgba(var(--accent-rgb), 0.5);
+  box-shadow: inset 3px 0 0 var(--accent), 0 4px 16px rgba(var(--accent-rgb), 0.12);
   transform: translateY(-1px);
 }
 
@@ -272,7 +272,7 @@
 }
 
 .profile-card-name {
-  font-size: 14px;
+  font-size: var(--text-base);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -281,14 +281,13 @@
 }
 
 .profile-card-id {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   font-family: var(--font-mono);
-  opacity: 0.6;
 }
 
 .profile-badge {
-  font-size: 10px;
+  font-size: var(--text-2xs);
   padding: 2px 8px;
   border-radius: 4px;
   font-weight: 600;
@@ -299,8 +298,8 @@
 
 .profile-badge.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-  color: var(--bg-primary);
-  box-shadow: 0 0 8px rgba(34, 211, 238, 0.3);
+  color: var(--on-accent);
+  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.3);
 }
 
 .profile-card-actions {
@@ -320,7 +319,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--bg-glass);
@@ -356,9 +355,9 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
-  animation: fadeIn 0.3s ease;
+  animation: fadeIn var(--dur-slow) var(--ease-out);
 }
 
 .editor-detect-tag {
@@ -380,7 +379,7 @@
 
 .editor-detect-tag code {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-primary);
 }
 
@@ -389,7 +388,7 @@
   border: none;
   padding: 0;
   margin: 0;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--accent);
   cursor: pointer;
   text-decoration: none;
@@ -418,7 +417,7 @@
 
 .profile-editor-topbar h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 600;
 }
 
@@ -441,7 +440,7 @@
 
 /* 区域标题：左侧 accent 竖线 + 加粗文字 */
 .editor-section-label {
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 700;
   color: var(--text-primary);
   margin-bottom: 12px;
@@ -498,7 +497,7 @@
 
 .profiles-empty-desc {
   display: block;
-  font-size: 13px;
+  font-size: var(--text-md);
   color: var(--text-muted);
   margin-bottom: var(--space-md);
 }

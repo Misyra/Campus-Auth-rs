@@ -63,11 +63,11 @@
   max-width: 440px;
   padding: 24px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
-  animation: modalFadeIn 0.2s ease;
+  animation: modalFadeIn var(--dur-base) var(--ease-out);
 }
 
 .confirm-dialog.danger {
-  border-color: rgba(239, 68, 68, 0.35);
+  border-color: rgba(var(--error-rgb), 0.35);
 }
 
 .confirm-title {
@@ -81,7 +81,7 @@
 }
 
 .confirm-message {
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.6;
   color: var(--text-secondary);
   white-space: pre-line;
@@ -97,7 +97,7 @@
 /* ========== Modal Transition ========== */
 .modal-fade-enter-active,
 .modal-fade-leave-active {
-  transition: opacity 0.2s ease;
+  transition: opacity var(--dur-base) var(--ease-out);
 }
 
 .modal-fade-enter-from,
@@ -107,7 +107,7 @@
 
 .modal-fade-enter-active .modal-container,
 .modal-fade-leave-active .modal-container {
-  transition: transform 0.2s ease, opacity 0.2s ease;
+  transition: transform var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out);
 }
 
 .modal-fade-enter-from .modal-container,
