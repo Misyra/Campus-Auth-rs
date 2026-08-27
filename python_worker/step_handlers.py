@@ -189,7 +189,7 @@ _CONNECTION_ERROR_PATTERNS = (
     "ERR_PROXY_CONNECTION_FAILED",
 )
 
-# click/input 降级到 attached 元素操作的最小等待时长（毫秒）
+# click/input 降级路径希望至少预留的等待预算（毫秒）；小 timeout 会自动按比例收缩
 _MIN_ATTACHED_MS = 500
 
 # click_select 展开面板后的默认动画/渲染缓冲（毫秒）
@@ -354,6 +354,22 @@ def _remaining_ms(deadline: float) -> int:
     return max(0, int((deadline - time.monotonic()) * 1000))
 
 
+def _primary_timeout_ms(total_ms: int) -> int:
+    """给正常元素操作分配预算，并为 attached/JS 降级路径预留时间。
+
+    长 timeout 最多预留 1s；短 timeout 最多预留一半，避免降级机制因为正常
+    Playwright 操作把整个预算吃光而形同虚设。
+    """
+    total_ms = max(0, int(total_ms))
+    if total_ms <= 1:
+        return total_ms
+    reserve = min(
+        total_ms // 2,
+        max(_MIN_ATTACHED_MS, min(total_ms // 5, 1000)),
+    )
+    return max(1, total_ms - reserve)
+
+
 async def _safe_op(coro, outcome_on_timeout: Outcome):
     """执行 Playwright 操作并归一化超时/瞬时元素异常。"""
     try:
@@ -377,13 +393,14 @@ async def _sleep_cancellable_ms(duration_ms: int, context: StepContext) -> None:
 
 
 async def _click_locator(locator, timeout_ms: int) -> bool:
-    """在同一预算内尝试正常点击和 attached 强制点击。"""
+    """在同一个截止时间内尝试正常点击和 attached 强制点击。"""
     if timeout_ms <= 0:
         return False
     target = locator.first
     deadline = time.monotonic() + timeout_ms / 1000
+    primary_timeout = _primary_timeout_ms(timeout_ms)
     try:
-        await _safe_op(target.click(timeout=timeout_ms), Outcome.SELECTOR_FAILED)
+        await _safe_op(target.click(timeout=primary_timeout), Outcome.SELECTOR_FAILED)
         return True
     except WorkerError:
         pass
@@ -392,10 +409,11 @@ async def _click_locator(locator, timeout_ms: int) -> bool:
     if remaining <= 0:
         return False
     try:
-        await target.wait_for(
-            state="attached", timeout=max(_MIN_ATTACHED_MS, min(remaining, 1000))
-        )
-        await target.dispatch_event("click")
+        await target.wait_for(state="attached", timeout=min(remaining, 1000))
+        remaining = _remaining_ms(deadline)
+        if remaining <= 0:
+            return False
+        await target.dispatch_event("click", timeout=remaining)
         return True
     except Exception:  # noqa: BLE001 — 候选失败后由调用方继续尝试
         return False
@@ -432,30 +450,47 @@ async def handle_input(page, step: StepConfig, context: StepContext) -> None:
     value = step.value or ""
     locator = _locator(context, step.selector)
     timeout = step.timeout or context.default_timeout
+    deadline = time.monotonic() + timeout / 1000
 
-    async def _force_input() -> None:
+    async def _force_input(timeout_ms: int) -> None:
         await _locator(context, step.selector).evaluate(
-            _FORCE_INPUT_JS, {"val": value, "doClear": bool(step.clear)}
+            _FORCE_INPUT_JS,
+            {"val": value, "doClear": bool(step.clear)},
+            timeout=max(1, timeout_ms),
         )
 
     if context.reveal_hidden:
-        await _force_input()
+        await _safe_op(_force_input(timeout), Outcome.SELECTOR_FAILED)
         return
+
+    primary_timeout = _primary_timeout_ms(timeout)
     try:
         if step.clear:
-            await _safe_op(locator.fill(value, timeout=timeout), Outcome.SELECTOR_FAILED)
+            await _safe_op(
+                locator.fill(value, timeout=primary_timeout), Outcome.SELECTOR_FAILED
+            )
         else:
             await _safe_op(
-                locator.press_sequentially(value, timeout=timeout), Outcome.SELECTOR_FAILED
+                locator.press_sequentially(value, timeout=primary_timeout),
+                Outcome.SELECTOR_FAILED,
             )
+        return
     except WorkerError:
-        await _safe_op(
-            _locator(context, step.selector).first.wait_for(
-                state="attached", timeout=max(_MIN_ATTACHED_MS, min(timeout, 1000))
-            ),
-            Outcome.SELECTOR_FAILED,
-        )
-        await _force_input()
+        pass
+
+    remaining = _remaining_ms(deadline)
+    if remaining <= 0:
+        raise WorkerError(Outcome.SELECTOR_FAILED, f"输入元素操作超时: {step.selector}")
+    await _safe_op(
+        _locator(context, step.selector).first.wait_for(
+            state="attached", timeout=min(remaining, 1000)
+        ),
+        Outcome.SELECTOR_FAILED,
+    )
+    remaining = _remaining_ms(deadline)
+    if remaining <= 0:
+        raise WorkerError(Outcome.SELECTOR_FAILED, f"输入元素降级操作超时: {step.selector}")
+    await _safe_op(_force_input(remaining), Outcome.SELECTOR_FAILED)
 
 
 async def handle_click(page, step: StepConfig, context: StepContext) -> None:
@@ -492,7 +527,8 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
     """原生 select 选择。
 
     先按 option value / 精确文本匹配，再按唯一子串文本匹配。空 value 自动跳过；
-    元素或选项找不到时由 ``required`` 决定失败还是跳过。
+    元素或选项找不到时由 ``required`` 决定失败还是跳过。元素等待与最终选择
+    共用同一个步骤 timeout 截止时间。
     """
     _check_cancel(context)
     if not step.selector:
@@ -502,6 +538,7 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
         return
 
     timeout = step.timeout or context.default_timeout
+    deadline = time.monotonic() + timeout / 1000
     locator = _locator(context, step.selector).first
     try:
         await _safe_op(
@@ -534,9 +571,14 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
         await _skip_or_fail(step, f"下拉框未找到唯一匹配选项: {value}")
         return
 
+    remaining = _remaining_ms(deadline)
+    if remaining <= 0:
+        await _skip_or_fail(step, f"选择下拉项超时: {value}")
+        return
     try:
         await _safe_op(
-            locator.select_option(value=chosen_value, timeout=timeout), Outcome.SELECTOR_FAILED
+            locator.select_option(value=chosen_value, timeout=remaining),
+            Outcome.SELECTOR_FAILED,
         )
     except WorkerError as exc:
         await _skip_or_fail(step, f"选择下拉项失败: {value}: {exc.message}")
