@@ -5,8 +5,96 @@ on:
     branches: [master]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-test:
+  rust-clippy:
+    name: Rust Clippy
+    runs-on: windows-latest
+    env:
+      # CI 不消费本地调试符号；关闭 dev/test debuginfo 可显著降低 Windows PDB/codegen 成本。
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取 Rust 工具链版本
+        id: rust-toolchain
+        shell: pwsh
+        run: |
+          $config = Get-Content rust-toolchain.toml -Raw
+          if ($config -notmatch 'channel\s*=\s*"([^"]+)"') {
+            throw "rust-toolchain.toml 缺少 toolchain.channel"
+          }
+          "channel=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - name: 安装 Rust 工具链（rustfmt + clippy）
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      # 格式错误在该 job 编译前尽早失败。
+      - name: 格式检查（cargo fmt --check）
+        run: cargo fmt --check
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 默认特性的 rust-embed 编译需要 frontend/dist；保留真实生产构建路径。
+      - name: 构建前端资源
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: Clippy 零警告（-D warnings）
+        run: cargo clippy --all-targets -- -D warnings
+
+  rust-tests:
+    name: Rust Tests
+    runs-on: windows-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取 Rust 工具链版本
+        id: rust-toolchain
+        shell: pwsh
+        run: |
+          $config = Get-Content rust-toolchain.toml -Raw
+          if ($config -notmatch 'channel\s*=\s*"([^"]+)"') {
+            throw "rust-toolchain.toml 缺少 toolchain.channel"
+          }
+          "channel=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 构建前端资源
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: 单元与集成测试
+        run: cargo test
+
+  frontend-python:
+    name: Frontend + Python
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,40 +118,9 @@ jobs:
           enable-cache: true
           cache-dependency-glob: python_worker/uv.lock
 
-      - name: 读取 Rust 工具链版本
-        id: rust-toolchain
-        shell: pwsh
-        run: |
-          $config = Get-Content rust-toolchain.toml -Raw
-          if ($config -notmatch 'channel\s*=\s*"([^"]+)"') {
-            throw "rust-toolchain.toml 缺少 toolchain.channel"
-          }
-          "channel=$($Matches[1])" >> $env:GITHUB_OUTPUT
-
-      - name: 安装 Rust 工具链（rustfmt + clippy）
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-        with:
-          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
-          components: rustfmt, clippy
-
-      # rust-embed 编译需要 frontend/dist 存在，故前端构建先行
-      - name: 前端构建（vue-tsc 类型检查 + vite build）
-        working-directory: frontend
-        run: npm ci && npm run build
-
-      # 复用上一步的 node_modules
       - name: 前端单元测试（vitest）
         working-directory: frontend
-        run: npm test
-
-      - name: 格式检查（cargo fmt --check）
-        run: cargo fmt --check
-
-      - name: Clippy 零警告（-D warnings）
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: 单元与集成测试
-        run: cargo test
+        run: npm ci && npm test
 
       - name: Python Worker 语法检查
         run: python -m compileall python_worker
