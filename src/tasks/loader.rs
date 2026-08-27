@@ -459,25 +459,40 @@ impl TaskManager {
                                     }
                                 }
                                 "eval" | "custom_js" => {
-                                    let has =
-                                        step.get("script").is_some() || step.get("code").is_some();
+                                    let has = step
+                                        .get("script")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| !s.trim().is_empty())
+                                        .unwrap_or(false)
+                                        || step
+                                            .get("code")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| !s.trim().is_empty())
+                                            .unwrap_or(false);
                                     if !has {
-                                        errors.push(format!("步骤[{i}] 需要 script 或 code"));
+                                        errors.push(format!("步骤[{i}] 需要非空 script 或 code"));
                                     }
                                 }
                                 "goto" | "navigate" => {
                                     let has_url = step
                                         .get("url")
                                         .and_then(|v| v.as_str())
-                                        .map(|s| !s.is_empty())
+                                        .map(|s| !s.trim().is_empty())
                                         .unwrap_or(false)
                                         || step
                                             .get("value")
                                             .and_then(|v| v.as_str())
-                                            .map(|s| !s.is_empty())
+                                            .map(|s| !s.trim().is_empty())
+                                            .unwrap_or(false)
+                                        || step
+                                            .get("selector")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| !s.trim().is_empty())
                                             .unwrap_or(false);
                                     if !has_url {
-                                        errors.push(format!("步骤[{i}] 需要 url 或 value"));
+                                        errors.push(format!(
+                                            "步骤[{i}] 需要 url、value 或 selector"
+                                        ));
                                     }
                                 }
                                 "assert_text" => {
@@ -490,7 +505,30 @@ impl TaskManager {
                                         errors.push(format!("步骤[{i}] 需要 value"));
                                     }
                                 }
-                                "upload_file" | "wait_for_selector"
+                                "upload_file" => {
+                                    if step
+                                        .get("selector")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .is_empty()
+                                    {
+                                        errors.push(format!("步骤[{i}] 需要 selector"));
+                                    }
+                                    let has_path = step
+                                        .get("path")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| !s.trim().is_empty())
+                                        .unwrap_or(false)
+                                        || step
+                                            .get("value")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| !s.trim().is_empty())
+                                            .unwrap_or(false);
+                                    if !has_path {
+                                        errors.push(format!("步骤[{i}] 需要 path 或 value"));
+                                    }
+                                }
+                                "wait_for_selector"
                                     if step
                                         .get("selector")
                                         .and_then(|v| v.as_str())
@@ -815,6 +853,65 @@ mod tests {
             .unwrap();
         let mgr = TaskManager::new(tmp.path(), config);
         (tmp, mgr)
+    }
+
+    #[tokio::test]
+    async fn test_validate_goto_accepts_selector_url() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let task = serde_json::json!({
+            "type": "browser",
+            "name": "导航任务",
+            "steps": [{
+                "id": "go",
+                "type": "goto",
+                "selector": "https://example.com/login"
+            }]
+        });
+        assert!(mgr.validate_task(&task).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_upload_file_requires_file_path() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let invalid = serde_json::json!({
+            "type": "browser",
+            "name": "上传任务",
+            "steps": [{
+                "id": "upload",
+                "type": "upload_file",
+                "selector": "input[type=file]"
+            }]
+        });
+        let errors = mgr.validate_task(&invalid).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("需要 path 或 value")));
+
+        let valid = serde_json::json!({
+            "type": "browser",
+            "name": "上传任务",
+            "steps": [{
+                "id": "upload",
+                "type": "upload_file",
+                "selector": "input[type=file]",
+                "path": "C:/tmp/avatar.png"
+            }]
+        });
+        assert!(mgr.validate_task(&valid).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_eval_rejects_empty_script() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let task = serde_json::json!({
+            "type": "browser",
+            "name": "脚本任务",
+            "steps": [{
+                "id": "check",
+                "type": "eval",
+                "script": "   "
+            }]
+        });
+        let errors = mgr.validate_task(&task).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("需要非空 script 或 code")));
     }
 
     #[tokio::test]
