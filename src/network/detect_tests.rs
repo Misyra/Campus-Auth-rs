@@ -287,7 +287,7 @@ async fn test_run_ipconfig_actual() {
             eprintln!("ipconfig output length: {}", out.len());
             eprintln!(
                 "First 200 chars: {:?}",
-                &out.chars().take(200).collect::<String>()
+                out.chars().take(200).collect::<String>()
             );
             assert!(!out.is_empty(), "ipconfig 输出不应为空");
             // 中英文 Windows 均包含冒号（用于键值分隔，如 "IPv4 地址 : x.x.x.x"）
@@ -297,7 +297,7 @@ async fn test_run_ipconfig_actual() {
             assert!(
                 !interfaces.is_empty(),
                 "应至少解析出一个网络接口, 输出前500字符: {:?}",
-                &out.chars().take(500).collect::<String>()
+                out.chars().take(500).collect::<String>()
             );
         }
         Err(e) => {
