@@ -20,7 +20,6 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -36,9 +35,7 @@ from step_handlers import (
     WorkerError,
     _check_cancel,
     _classify_navigation_error,
-
     run_step_async,
-    OCR_TIMEOUT_SECS,
 )
 from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image
 from debug_session import DebugSession, _build_steps_info
@@ -169,8 +166,8 @@ async def _sleep_cancellable(seconds: float, context: StepContext) -> None:
 async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) -> StructuredResult:
     """按序执行步骤列表。
 
-    任务级 ``TaskConfig.timeout`` 的看门狗由 Rust 侧兜底（``bridge.execute``
-    的 300s 超时），Python 侧不重复实现。
+    任务级 ``TaskConfig.timeout`` 由 Rust 调用侧按任务/登录会话语义执行看门狗，
+    Python 侧只负责单步超时与可取消的步骤间延迟，避免两层总超时互相竞争。
     """
     start = time.perf_counter()
     if not steps:
@@ -278,10 +275,6 @@ class CancelRegistry:
             self._pending.discard(cancel_id)
 
 
-# ── 调试会话 ──
-
-
-@dataclass
 # ── Worker 核心 ──
 
 
@@ -670,6 +663,12 @@ class WorkerCore:
         except Exception as exc:  # noqa: BLE001
             raise _classify_navigation_error(exc, url)
 
+    @staticmethod
+    async def _wait_after_navigation(task_config: TaskConfig, context: StepContext) -> None:
+        """按任务配置在初始导航后额外等待，并保持取消可响应。"""
+        if task_config.navigation_wait > 0:
+            await _sleep_cancellable(task_config.navigation_wait, context)
+
     async def _run_task(
         self,
         task_config: TaskConfig,
@@ -688,6 +687,9 @@ class WorkerCore:
                 raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
             self._page = await self._new_page()
 
+        context = self._make_context(
+            self._page, variables, bs, cancel_event, screenshot_dir, task_config
+        )
         target = navigate_url or task_config.url
         if target:
             target = resolve(target, variables)
@@ -710,10 +712,8 @@ class WorkerCore:
                     await self._navigate(self._page, target, nav_timeout)
             else:
                 await self._navigate(self._page, target, nav_timeout)
+            await self._wait_after_navigation(task_config, context)
 
-        context = self._make_context(
-            self._page, variables, bs, cancel_event, screenshot_dir, task_config
-        )
         try:
             result = await run_steps(self._page, task_config.steps, context)
             # B5 取舍：任务失败后在共享 context 上清除 cookies，避免上次任务的残留会话
@@ -874,14 +874,15 @@ class WorkerCore:
                     raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
                 self._page = await self._new_page()
             variables = dict(task.variables or {})
+            context = self._make_context(
+                self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
+            )
             if task.url:
                 await self._navigate(
                     self._page, resolve(task.url, variables),
                     _to_ms(bs, "navigation_timeout", 15000),
                 )
-            context = self._make_context(
-                self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
-            )
+                await self._wait_after_navigation(task, context)
             self._debug_sessions[session_id] = DebugSession(
                 session_id=session_id,
                 page=self._page,
@@ -1006,6 +1007,9 @@ class WorkerCore:
             success, message = False, "步骤已取消"
         except WorkerError as exc:
             success, message = False, exc.message
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("调试步骤执行未预期异常")
+            success, message = False, f"执行异常: {exc}"
         if idx is not None:
             self._record_debug_result(session, idx, success, message)
         if auto_advance and idx is not None:
@@ -1015,7 +1019,8 @@ class WorkerCore:
     async def handle_debug_run_all(self, params: dict) -> dict:
         """依次执行调试会话中尚未运行的全部步骤（从当前游标到末尾）。
 
-        逐步骤记录成功/失败结果，遇到失败的必需步骤即停止；返回完整会话数据。
+        与正式执行保持一致：步骤间应用 ``step_delay``；可选步骤失败记录后继续，
+        必需步骤失败、取消或未预期异常则停止。返回完整会话数据。
         """
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
@@ -1030,14 +1035,27 @@ class WorkerCore:
             session.current_step = idx
             success = True
             message = ""
+            fatal = False
             try:
-                await run_step_async(session.page, step, session.context, step_index=idx, total_steps=len(steps))
+                if idx > start and session.context.step_delay > 0:
+                    await _sleep_cancellable(session.context.step_delay, session.context)
+                await run_step_async(
+                    session.page,
+                    step,
+                    session.context,
+                    step_index=idx,
+                    total_steps=len(steps),
+                )
             except StepCancelled:
-                success, message = False, "步骤已取消"
+                success, message, fatal = False, "步骤已取消", True
             except WorkerError as exc:
                 success, message = False, exc.message
+                fatal = step.required
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("调试批量执行未预期异常")
+                success, message, fatal = False, f"执行异常: {exc}", True
             self._record_debug_result(session, idx, success, message)
-            if not success:
+            if fatal:
                 stop_idx = idx + 1
                 break
         session.current_step = stop_idx
@@ -1047,7 +1065,7 @@ class WorkerCore:
     def _cleanup_task_screenshots(context: StepContext) -> None:
         """删除登录/浏览器任务期间产生的截图文件（A7）。
 
-        任务截图可能包含表单中的明文凭证，任务结束后及时清除，避免长期
+        任务截图可能包含表单中的明文凭据，任务结束后及时清除，避免长期
         驻留磁盘。仅删除 ``context.screenshots`` 中记录的文件（每个文件
         best-effort，失败仅记日志不抛出），不递归清理整个 debug/ 目录，
         避免误删其他并发会话的文件。StructuredResult 中的 screenshots
@@ -1065,7 +1083,7 @@ class WorkerCore:
     def _cleanup_debug_screenshots(session: "DebugSession") -> None:
         """删除调试会话期间产生的截图文件。
 
-        调试截图可能包含表单中的明文凭证，会话结束后及时清除，
+        调试截图可能包含表单中的明文凭据，会话结束后及时清除，
         避免长期驻留磁盘（历史遗留 F5）。
         """
         paths = list(getattr(session.context, "screenshots", []) or [])
@@ -1082,7 +1100,7 @@ class WorkerCore:
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
         self._debug_sessions.pop(session.session_id, None)
-        # 先清理本会话的截图（可能含明文凭证），再注销取消项
+        # 先清理本会话的截图（可能含明文凭据），再注销取消项
         self._cleanup_debug_screenshots(session)
         if session.cancel_id:
             cancel_registry.unregister(session.cancel_id)
