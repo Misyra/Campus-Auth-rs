@@ -917,7 +917,8 @@ mod tests {
     /// 凭证字段路由到 Profile、密码走 save_password 语义、全局字段落 settings
     #[tokio::test]
     async fn test_patch_settings_routes_credentials_and_global() {
-        let raw_password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test-password".into());
+        let raw_password =
+            std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test-password".into());
         let (app, inner) = mock_app();
         let resp = app
             .oneshot(
@@ -1046,7 +1047,8 @@ mod tests {
     /// 携带凭证字段的 PATCH 在 Profile 加载失败时返回 400，且全局设置不落盘
     #[tokio::test]
     async fn test_patch_settings_reports_profile_load_failure() {
-        let raw_password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test-password".into());
+        let raw_password =
+            std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test-password".into());
         let (app, inner) = mock_app();
         {
             let mut g = inner.lock().unwrap();
