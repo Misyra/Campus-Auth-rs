@@ -150,11 +150,7 @@ async fn prepare_bridge_event(text: &str, state: &AppState) -> String {
     };
     data.insert("filename".into(), filename.clone().into());
 
-    let debug_dir = state
-        .config
-        .base_path()
-        .join("python_worker")
-        .join("debug");
+    let debug_dir = state.config.base_path().join("python_worker").join("debug");
     let path = debug_dir.join(&filename);
     let Ok(meta) = tokio::fs::symlink_metadata(&path).await else {
         return serde_json::to_string(&envelope).unwrap_or_default();
@@ -341,7 +337,7 @@ mod tests {
     #[test]
     fn debug_screenshot_filename_strips_parent_path() {
         assert_eq!(
-            debug_screenshot_filename(r"C:\\app\\python_worker\\debug\\debug_123.png"),
+            debug_screenshot_filename(r"C:\app\python_worker\debug\debug_123.png"),
             Some("debug_123.png".into())
         );
         assert_eq!(
@@ -352,7 +348,10 @@ mod tests {
 
     #[test]
     fn debug_screenshot_filename_rejects_unsafe_names() {
-        assert_eq!(debug_screenshot_filename("../secret.png"), Some("secret.png".into()));
+        assert_eq!(
+            debug_screenshot_filename("../secret.png"),
+            Some("secret.png".into())
+        );
         assert_eq!(debug_screenshot_filename("bad<script>.png"), None);
         assert_eq!(debug_screenshot_filename("shot.svg"), None);
     }
