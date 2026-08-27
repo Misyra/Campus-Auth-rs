@@ -36,6 +36,14 @@ __pycache__/
 python_worker/.venv/
 python_worker/venv/
 python_worker/node_modules/
+# Worker 本地缓存（pytest / uv 临时目录）
+python_worker/.pytest_cache/
+python_worker/.tmp-uv-cache/
+python_worker/debug/
+python_worker/.mypy_cache/
+python_worker/.ruff_cache/
+python_worker/build/
+python_worker/dist/
 
 # 运行时（应用启动时自动创建，不提交）
 # 注意：必须锚定到仓库根目录（/ 前缀），否则会误伤 src/config、src/environment 等源码目录
@@ -65,6 +73,7 @@ frontend-legacy/
 *.exe
 # 打包输出目录（build.ps1 产物，含可执行文件与资源）
 /dist/
+/dist-portable/
 
 # TypeScript 增量编译缓存
 *.tsbuildinfo
@@ -74,6 +83,11 @@ issues-report.md
 
 # Mimosa 扫描产物（本地审计缓存，不提交）
 .mimosa/
+frontend/.mimosa/
+
+# 前端本地缓存（Vite / 覆盖率）
+frontend/.vite/
+frontend/coverage/
 
 # ZCode 本地产物（会话计划与审计缓存，不提交）
 .zcode/
