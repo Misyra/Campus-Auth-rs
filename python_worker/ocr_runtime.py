@@ -46,6 +46,10 @@ class _OcrSession:
         self._budgets: deque[float] = deque()
         self._budget_lock = threading.Lock()
 
+    def __getattr__(self, name: str) -> Any:
+        """除受控 classification 外，其余属性透明委托给底层 ddddocr 实例。"""
+        return getattr(self._instance, name)
+
     def add_budget(self, inference_timeout_secs: float) -> None:
         """登记下一次识别可使用的剩余共享预算。"""
         with self._budget_lock:
