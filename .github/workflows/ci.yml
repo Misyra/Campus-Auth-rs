@@ -31,11 +31,6 @@ jobs:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           components: rustfmt, clippy
 
-      # 固定 rust-cache v2.9.2，缓存 Cargo registry 与 target 编译产物。
-      # 对只改 Python/前端或小幅 Rust 改动的连续 PR 提交收益最大。
-      - name: 恢复 Rust 编译缓存
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-
       # 最便宜的 Rust 检查优先执行，格式错误无需继续安装 Node/Python 或编译依赖。
       - name: 格式检查（cargo fmt --check）
         run: cargo fmt --check
@@ -69,11 +64,12 @@ jobs:
         working-directory: frontend
         run: npm test
 
-      - name: Clippy 零警告（-D warnings）
-        run: cargo clippy --all-targets -- -D warnings
-
+      # 先做 test codegen；随后 Clippy 可尝试复用已构建的依赖产物。
       - name: 单元与集成测试
         run: cargo test
+
+      - name: Clippy 零警告（-D warnings）
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Python Worker 语法检查
         run: python -m compileall python_worker
