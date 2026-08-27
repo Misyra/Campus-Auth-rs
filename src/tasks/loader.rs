@@ -42,7 +42,7 @@ pub struct TaskSummary {
 pub struct TaskDetail {
     /// 任务摘要
     pub summary: TaskSummary,
-    /// 完整任务配置
+    /// 完整配置
     pub config: TaskKind,
 }
 
@@ -490,9 +490,8 @@ impl TaskManager {
                                             .map(|s| !s.trim().is_empty())
                                             .unwrap_or(false);
                                     if !has_url {
-                                        errors.push(format!(
-                                            "步骤[{i}] 需要 url、value 或 selector"
-                                        ));
+                                        errors
+                                            .push(format!("步骤[{i}] 需要 url、value 或 selector"));
                                     }
                                 }
                                 "assert_text" => {
