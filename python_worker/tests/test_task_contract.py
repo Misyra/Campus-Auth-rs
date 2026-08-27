@@ -45,11 +45,12 @@ def test_contract_task_level_fields_roundtrip():
     assert task.variables == {"USERNAME": "{{USERNAME}}", "GATEWAY": "192.168.7.1"}
     assert task.success_condition == "logged_in"
     assert task.reveal_hidden is True
-    # Rust 侧 TaskConfig 的 timeout / navigation_wait 未在 Python 模型显式建模
-    #（落入 extras 由两端按需读取）；step_delay 为 Python 显式字段
+    # timeout / navigation_wait / step_delay 均为 Python 显式字段，与 Rust TaskConfig 对齐
+    assert task.timeout == 30000
+    assert task.navigation_wait == 1.0
     assert task.step_delay == 0.5
-    assert task.extras["timeout"] == 30000
-    assert task.extras["navigation_wait"] == 1.0
+    assert "timeout" not in task.extras
+    assert "navigation_wait" not in task.extras
     # on_success / on_failure / metadata 整体透传
     assert task.on_success == {"type": "notify", "message": "登录成功"}
     assert task.on_failure == {"type": "notify", "message": "登录失败"}
@@ -151,7 +152,7 @@ def test_contract_roundtrip_preserves_shape():
     assert back["url"] == raw["url"]
     assert back["variables"] == raw["variables"]
     assert back["success_condition"] == raw["success_condition"]
-    assert back["timeout"] == 30000  # extras 回填
+    assert back["timeout"] == 30000  # 显式字段序列化保留
     assert back["_comment"] == raw["_comment"]
 
     # 步骤往返：type 别名还原、extras 合并、显式字段值不变
