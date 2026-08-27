@@ -312,9 +312,9 @@ pub async fn apply_update(
 /// Playwright 管理的浏览器按实际缓存分别探测；核心引导默认只安装 Chromium。
 pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let settings = state.config.load_settings_async().await;
-    let chromium_installed = crate::environment::playwright_browser_installed("chromium");
-    let firefox_installed = crate::environment::playwright_browser_installed("firefox");
-    let webkit_installed = crate::environment::playwright_browser_installed("webkit");
+    let chromium_installed = crate::environment::bootstrap::playwright_browser_installed("chromium");
+    let firefox_installed = crate::environment::bootstrap::playwright_browser_installed("firefox");
+    let webkit_installed = crate::environment::bootstrap::playwright_browser_installed("webkit");
     let custom_path = &settings.global.browser.browser_custom_path;
     let edge_installed = is_edge_installed();
     let chrome_installed = is_chrome_installed();
