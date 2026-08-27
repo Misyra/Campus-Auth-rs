@@ -2880,7 +2880,7 @@
         }
         const descMap = {
           username: '账号输入框 → {{USERNAME}}',
-          password: '密码输入框 → {{PASSWORD}}',
+          password: '口令输入框 → {{PASSWORD}}',
           submit: '提交按钮',
           checkbox: '勾选: ' + (el.name || el.id || el.tagName),
           click: '点击: ' + (el.name || el.id || el.tagName),

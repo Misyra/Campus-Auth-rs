@@ -120,7 +120,30 @@ pub async fn update_profile(
         profile.username = username;
     }
     if let Some(auth_url) = body.auth_url {
-        profile.auth_url = auth_url;
+        let trimmed = auth_url.trim().to_string();
+        if !trimmed.is_empty() {
+            let parsed = trimmed.parse::<url::Url>().map_err(|_| {
+                crate::web::error::ApiError::BadRequest(format!("认证地址格式非法: {trimmed}"))
+            })?;
+            match parsed.scheme() {
+                "http" | "https" => {}
+                _ => {
+                    return Err(crate::web::error::ApiError::BadRequest(format!(
+                        "认证地址仅支持 http/https，当前为: {}",
+                        parsed.scheme()
+                    )));
+                }
+            }
+            let host = parsed.host_str().ok_or_else(|| {
+                crate::web::error::ApiError::BadRequest(format!("认证地址缺少主机名: {trimmed}"))
+            })?;
+            if host.is_empty() {
+                return Err(crate::web::error::ApiError::BadRequest(format!(
+                    "认证地址缺少主机名: {trimmed}"
+                )));
+            }
+        }
+        profile.auth_url = trimmed;
     }
     if let Some(isp) = body.isp {
         profile.isp = isp;

@@ -74,10 +74,12 @@ struct EngineInner {
     auto_login_in_flight: bool,
     /// 是否有网络探测任务在途（F5）
     ///
-    /// 探测移入后台任务后的防重入标记：在途时周期定时器 / Resume / Start
-    /// 再触发的检测直接忽略（合并为等待当前探测完成），避免并发探测
-    /// 重复计数与重复触发登录。
+    /// 探测移入后台任务后的防重入标记：周期定时器在途时直接忽略
+    /// （高频事件无需排队）；用户主动的 Resume/Start/ApplyProfile 在途
+    /// 时排队一次，避免“恢复监测后立即检测被吞”导致延迟一个间隔。
     probe_in_flight: bool,
+    /// 在途期间排队的即时检测请求（仅用户主动触发时置位，结果回传后补发一次）
+    probe_pending: bool,
     /// 探测结果回传 sender（后台探测任务完成后通知主循环）
     probe_result_tx: mpsc::Sender<ProbeMessage>,
     /// 登录结果回传 sender（后台 spawn 的登录任务完成后通知主循环）
@@ -110,6 +112,7 @@ impl EngineInner {
             cooling_down_until: None,
             auto_login_in_flight: false,
             probe_in_flight: false,
+            probe_pending: false,
             probe_result_tx,
             login_result_tx,
             notifier: Notifier::new(),
@@ -242,8 +245,9 @@ async fn handle_start(inner: &mut EngineInner, deps: &EngineDeps) {
     inner.monitoring = true;
     merge_engine_state(inner, deps, EngineState::Running);
     // 立即执行一次检测（暂停窗口内跳过，F4；探测在后台任务执行，F5）
+    // 用户主动触发，使用优先级标记以在在途时排队一次
     if !immediate_check_blocked_by_pause(inner, deps) {
-        handle_network_check(inner, deps);
+        handle_network_check_with_priority(inner, deps, true);
     }
     // 用配置间隔重建定时器（内部会消费首个立即 tick，避免紧随本次手动检测再探测一轮）
     reset_check_timer(inner, deps).await;
@@ -292,7 +296,7 @@ async fn handle_apply_profile(
     // 新 Profile 可能有不同的 auth_url / 凭证，重新判断网络状态。
     // 与 Start/Resume 相同的暂停门控（F4）：暂停窗口内只切换不探测
     if inner.monitoring && !immediate_check_blocked_by_pause(inner, deps) {
-        handle_network_check(inner, deps);
+        handle_network_check_with_priority(inner, deps, true);
         reset_check_timer(inner, deps).await;
     }
 }
@@ -364,7 +368,7 @@ async fn handle_resume(inner: &mut EngineInner, deps: &EngineDeps) {
     // 立即执行一次检测（不等待定时器到期）。手动 Resume 只解除手动暂停，
     // 定时暂停窗口可能仍然生效——沿用同一门控跳过检测（F4）
     if inner.monitoring && !immediate_check_blocked_by_pause(inner, deps) {
-        handle_network_check(inner, deps);
+        handle_network_check_with_priority(inner, deps, true);
         reset_check_timer(inner, deps).await;
     }
     tracing::info!("监测已恢复");
@@ -439,10 +443,25 @@ fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &Engi
 /// - 结果经 `probe_result_tx` 回传主循环统一处理（last_check / 状态合并 /
 ///   登录决策都留在主循环，保证与命令处理的串行一致性）。
 fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
+    handle_network_check_with_priority(inner, deps, false);
+}
+
+/// 带优先级标记的网络探测触发
+///
+/// `priority=true` 表示用户主动触发（Resume/Start/ApplyProfile），在途时排队一次；
+/// `priority=false` 表示周期定时器触发，在途时直接忽略（高频事件不积压）。
+fn handle_network_check_with_priority(inner: &mut EngineInner, deps: &EngineDeps, priority: bool) {
     // 周期性检测属于高频内部事件，保持在 debug 级别，避免稳定网络下刷屏。
     tracing::debug!("触发网络检测（后台执行）");
     if inner.probe_in_flight {
-        tracing::debug!("网络探测任务仍在途，忽略本次触发（完成后由周期定时器继续）");
+        if priority {
+            if !inner.probe_pending {
+                tracing::debug!("在途期间收到优先级探测请求，已排队一次（结果回传后补发）");
+            }
+            inner.probe_pending = true;
+        } else {
+            tracing::debug!("网络探测任务仍在途，忽略本次触发（完成后由周期定时器继续）");
+        }
         return;
     }
     inner.probe_in_flight = true;
@@ -465,6 +484,8 @@ fn handle_network_check(inner: &mut EngineInner, deps: &EngineDeps) {
 fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
     // 无论成败都先复位在途标记，否则后续检测被永久忽略
     inner.probe_in_flight = false;
+    // 若在途期间有优先级检测排队，立即补发一次（仅一次，避免无限自激）
+    let pending = std::mem::replace(&mut inner.probe_pending, false);
     // 清除过期的冷却标记；冷却期满后重置失败计数，
     // 恢复完整的"连续失败 3 次"预算（否则第二轮起退化为失败 1 次即再冷却）
     if inner
@@ -564,6 +585,12 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
         NetworkStatus::Online | NetworkStatus::Offline | NetworkStatus::Paused => {
             // 无需操作
         }
+    }
+
+    // 补发排队的优先级探测（在当前批次的决策与合并完成后触发，避免递归）
+    if pending {
+        tracing::debug!("补发排队的优先级探测");
+        handle_network_check(inner, deps);
     }
 }
 

@@ -156,25 +156,26 @@ const urlCheckText = computed({
               <textarea id="settings-url-check" v-model="urlCheckText" rows="4"
                 placeholder="https://captive.apple.com|Success&#10;https://detectportal.firefox.com|success&#10;https://msftconnecttest.com|Microsoft Connect Test"></textarea>
             </div>
-            <div class="toggle-group settings-toggle-spacer">
-              <div class="toggle-with-help">
-                <label class="toggle toggle-help-inline">
-                  <input type="checkbox" v-model="config.config.monitor.enable_local_check" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">物理网络连接检查</span>
-                  <FieldHelp text="启用后检测物理网卡是否存在在线连接；若网卡全失联则直接判定为离线，跳过后续探测。" />
-                </label>
-              </div>
-            </div>
           </div>
           <div class="settings-detect-col">
             <h4 class="settings-detect-heading">登录前检测</h4>
             <div class="toggle-group">
               <div class="toggle-with-help">
                 <label class="toggle toggle-help-inline">
+                  <input type="checkbox" v-model="config.config.monitor.enable_local_check" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">物理网络连接检查</span>
+                  <FieldHelp text="登录前检测物理网卡是否有在线连接；若网卡全失联则直接判定离线，跳过外网探测与登录尝试。" />
+                </label>
+              </div>
+            </div>
+            <div class="toggle-group settings-toggle-spacer">
+              <div class="toggle-with-help">
+                <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.check_auth_url" />
                   <span class="toggle-slider"></span>
                   <span class="toggle-label">登录网址可达性检测</span>
+                  <FieldHelp text="登录前检测认证地址是否可达（TCP 探测），不可达时跳过本次登录。" />
                 </label>
               </div>
             </div>

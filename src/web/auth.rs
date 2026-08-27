@@ -129,6 +129,7 @@ fn token_from_query(query: Option<&str>) -> Option<&str> {
 /// - `OPTIONS` 请求（CORS 预检不携带自定义头）
 /// - `/api/auth/token`（token 发放端点，受 CORS 读保护）
 /// - `/api/health`（无信息量的存活探测）
+/// - `GET /api/system/info` / `GET /api/monitor/status`（B 方案只读状态开放，轮询/探活）
 /// - `GET /api/background/*`（CSS `url()` / `<img>` 引用无法携带自定义头，
 ///   背景图为只读图片资源；写操作（upload/fetch-url/delete）仍需鉴权）
 ///
@@ -150,7 +151,14 @@ pub async fn auth_middleware(
     if path == "/api/auth/token" || path == "/api/health" {
         return next.run(req).await;
     }
-    if req.method() == Method::GET && path.starts_with("/api/background/") {
+    if req.method() == Method::GET
+        && (path.starts_with("/api/background/")
+            || path == "/api/tools/task-recorder.user.js"
+            || path == "/api/docs/task-writing-guide"
+            || path == "/api/docs/task-manual"
+            || path == "/api/system/info"
+            || path == "/api/monitor/status")
+    {
         return next.run(req).await;
     }
 

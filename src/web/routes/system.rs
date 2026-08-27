@@ -452,6 +452,28 @@ pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, Ap
 
 // ---- 文档 ----
 
+/// 在候选目录中查找首个存在的任务编写指南
+fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
+    let rel = std::path::Path::new("docs")
+        .join("guides")
+        .join("task-writing-guide.md");
+    let primary = base_path.join(&rel);
+    if primary.exists() {
+        return primary;
+    }
+    if let Some(repo) = base_path.parent().and_then(|p| p.parent()) {
+        let fallback = repo.join(&rel);
+        if fallback.exists() {
+            return fallback;
+        }
+    }
+    let manifest_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&rel);
+    if manifest_fallback.exists() {
+        return manifest_fallback;
+    }
+    primary
+}
+
 /// GET /api/docs/task-writing-guide — 任务编写指南
 ///
 /// 从 `docs/guides/task-writing-guide.md` 读取并返回 Markdown 文本。
@@ -459,11 +481,7 @@ pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, Ap
 pub async fn task_writing_guide(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = config
-        .base_path()
-        .join("docs")
-        .join("guides")
-        .join("task-writing-guide.md");
+    let path = resolve_guide_path(&config.base_path());
     // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
     match tokio::fs::read_to_string(&path).await {
         Ok(content) => Ok(data(Value::String(content))),

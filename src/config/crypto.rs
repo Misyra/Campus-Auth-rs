@@ -360,7 +360,8 @@ impl PasswordCrypto {
         }
         #[cfg(windows)]
         {
-            // Windows 无 std 级 ACL API，借助系统 icacls 移除继承权限并仅授予当前用户读取
+            // Windows 无 std 级 ACL API，借助系统 icacls 移除继承权限并授予当前用户完全控制：
+            // 仅授 (R) 会导致同用户后续轮转密钥时写入被拒（ACCESS_DENIED），需授 (F)
             let username = std::env::var("USERNAME").unwrap_or_default();
             let domain = std::env::var("USERDOMAIN").unwrap_or_default();
             if !username.is_empty() {
@@ -374,7 +375,7 @@ impl PasswordCrypto {
                 let _ = std::process::Command::new("icacls")
                     .arg(key_path)
                     .arg("/inheritance:r")
-                    .arg(format!("/grant:r \"{account}\":(R)"))
+                    .arg(format!("/grant:r \"{account}\":(F)"))
                     .stderr(std::process::Stdio::null())
                     .status();
             }

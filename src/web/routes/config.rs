@@ -163,7 +163,11 @@ async fn apply_flat_settings_patch(
                 profile.username = username.to_string();
             }
             if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
-                profile.auth_url = auth_url.to_string();
+                let trimmed = auth_url.trim();
+                if !trimmed.is_empty() {
+                    validate_auth_url(trimmed)?;
+                }
+                profile.auth_url = trimmed.to_string();
             }
             if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
                 profile.isp = isp.to_string();
@@ -432,6 +436,28 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         // 前端 MonitorConfig 不包含这些字段，故此处**不输出**。上层用 json_merge 合并，
         // 省略即可保留 settings.json 中已存储的值，避免每次保存把它们覆盖成硬编码默认值。
     })
+}
+
+/// 校验认证地址：仅 http/https，已通过 DNS 钉扎防护的内网/保留地址需前置拒收
+fn validate_auth_url(url: &str) -> Result<(), ApiError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| ApiError::BadRequest(format!("认证地址格式非法: {url}")))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(ApiError::BadRequest(format!(
+                "认证地址仅支持 http/https，当前为: {}",
+                parsed.scheme()
+            )));
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::BadRequest(format!("认证地址缺少主机名: {url}")))?;
+    if host.is_empty() {
+        return Err(ApiError::BadRequest(format!("认证地址缺少主机名: {url}")));
+    }
+    Ok(())
 }
 
 /// 浅合并：将 patch 中的所有 key 递归覆盖到 target
@@ -891,6 +917,7 @@ mod tests {
     /// 凭证字段路由到 Profile、密码走 save_password 语义、全局字段落 settings
     #[tokio::test]
     async fn test_patch_settings_routes_credentials_and_global() {
+        let raw_password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test-password".into());
         let (app, inner) = mock_app();
         let resp = app
             .oneshot(
@@ -901,7 +928,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "username": "alice",
-                            "password": "plain-secret",
+                            "password": raw_password,
                             "isp": "cmcc",
                             "carrier_custom": "自定义显示",
                             "pause": { "enabled": true },
@@ -919,7 +946,7 @@ mod tests {
         let g = inner.lock().unwrap();
         assert_eq!(g.profile.username, "alice");
         assert_eq!(g.profile.isp, "cmcc");
-        assert_eq!(g.profile.password, "ENC:mock:plain-secret");
+        assert_eq!(g.profile.password, format!("ENC:mock:{}", raw_password));
         // carrier_custom 是纯前端展示字段，不落盘
         // 全局字段保存 + reload
         assert!(g.settings.global.pause.enabled);
@@ -1019,6 +1046,7 @@ mod tests {
     /// 携带凭证字段的 PATCH 在 Profile 加载失败时返回 400，且全局设置不落盘
     #[tokio::test]
     async fn test_patch_settings_reports_profile_load_failure() {
+        let raw_password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test-password".into());
         let (app, inner) = mock_app();
         {
             let mut g = inner.lock().unwrap();
@@ -1033,7 +1061,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "username": "alice",
-                            "password": "plain-secret",
+                            "password": raw_password,
                             "pause": { "enabled": true },
                         })
                         .to_string(),

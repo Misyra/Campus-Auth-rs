@@ -383,17 +383,7 @@ impl LoginOrchestrator {
             self.wait_old_session_finished(old).await;
         }
 
-        // 4. 创建新会话
-        // 统计登录次数，并同步推送累计指标快照（G23）：login_total 在此单点
-        // 递增后立即把计数器当前值 merge 进 StatusManager（与 Engine 的
-        // Totals merge 调用点写法一致，覆盖式合并即最新值）
-        if let Some(m) = &self.metrics {
-            m.inc_login();
-            self.status.merge(PartialSnapshot::Totals {
-                probe_total: m.probe_total.load(std::sync::atomic::Ordering::Relaxed),
-                login_total: m.login_total.load(std::sync::atomic::Ordering::Relaxed),
-            });
-        }
+        // 4. 创建新会话（计数延后到 became_active 判定后，避免抢占失败的“被取代”请求污染 login_total）
         let session_id = {
             let mut g = self.state.lock().await;
             let id = g.next_session_id;
@@ -474,8 +464,15 @@ impl LoginOrchestrator {
             }
         };
 
-        // 5. 仅当成功占据活跃会话槽位时才 spawn 状态机 task
+        // 5. 仅当成功占据活跃会话槽位时才计数并 spawn 状态机 task
         if became_active {
+            if let Some(m) = &self.metrics {
+                m.inc_login();
+                self.status.merge(PartialSnapshot::Totals {
+                    probe_total: m.probe_total.load(std::sync::atomic::Ordering::Relaxed),
+                    login_total: m.login_total.load(std::sync::atomic::Ordering::Relaxed),
+                });
+            }
             let state_arc = self.state.clone();
             let finished_notifier = finished.clone();
             tokio::spawn(async move {

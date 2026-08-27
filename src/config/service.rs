@@ -110,12 +110,33 @@ pub enum ConfigError {
 ///
 /// 仅接受 1..=64 个 ASCII 字母、数字、下划线或连字符，拒绝路径分隔符、点号与
 /// 百分号等可能参与路径穿越或二次解码的字符。
+/// Windows 保留设备名（不区分大小写，任意扩展名均保留）
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_reserved_name(id: &str) -> bool {
+    let upper = id.to_ascii_uppercase();
+    // 保留名本身或保留名 + "." 后缀（如 CON.json 的 stem）
+    let stem = upper.split('.').next().unwrap_or(&upper);
+    WINDOWS_RESERVED_NAMES.contains(&stem)
+}
+
 pub(crate) fn is_valid_profile_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return false;
+    }
+    if is_windows_reserved_name(id) {
+        return false;
+    }
+    true
 }
 
 /// settings.json 内存缓存 + mtime

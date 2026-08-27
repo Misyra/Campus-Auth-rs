@@ -129,6 +129,9 @@ impl ProfileService {
         if slug.is_empty() {
             return Err(ConfigError::ProfileIdConflict { id: id.to_string() });
         }
+        if !is_valid_profile_id(&slug) {
+            return Err(ConfigError::InvalidProfileId { id: slug });
+        }
         // 已存在则视为冲突
         if self.config.load_all_profiles().iter().any(|p| p.id == slug) {
             return Err(ConfigError::ProfileIdConflict { id: slug });
