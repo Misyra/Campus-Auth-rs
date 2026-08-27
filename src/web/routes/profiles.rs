@@ -91,9 +91,15 @@ pub async fn create_profile(
     let mut profile = existing.unwrap_or_default();
     profile.id = target_id.clone();
     profile.name = body.name;
-    profile.password = config
-        .encrypt_password(&body.password)
-        .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?;
+    // 空密码表示“不设置独立密码”，必须保持为空；若把空串加密成 ENC:，
+    // 后续 has_password 会误判为已有密码，而运行时解密后仍为空。
+    profile.password = if body.password.is_empty() {
+        String::new()
+    } else {
+        config
+            .encrypt_password(&body.password)
+            .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?
+    };
     profile.username = body.username;
     profiles.create_profile(&target_id, profile).await?;
     Ok(data(Value::String("ok".into())))
@@ -111,10 +117,15 @@ pub async fn update_profile(
         profile.name = name;
     }
     if let Some(p) = body.password {
-        // 加密失败需显式报错，不能静默跳过（否则返回 ok 但密码实际未更新）
-        profile.password = config
-            .encrypt_password(&p)
-            .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?;
+        // GET /api/profiles/{id} 会出于安全考虑把密码清空，前端编辑后保存时
+        // 因此会回传 password=""。空串的既有契约是“未修改，保留原密码”，
+        // 不能先加密成合法 ENC: 再交给 ProfileService，否则会把原密码覆盖为空。
+        if !p.is_empty() {
+            // 非空新密码仍需显式传播加密失败，不能返回 ok 但实际未更新。
+            profile.password = config
+                .encrypt_password(&p)
+                .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?;
+        }
     }
     if let Some(username) = body.username {
         profile.username = username;
@@ -546,6 +557,75 @@ mod tests {
         assert!(inner.lock().unwrap().auto_switch);
         let v = body_json(resp).await;
         assert_eq!(v["data"]["active_profile"], "default");
+    }
+
+    /// Profile 编辑保存时空密码表示“未修改”，必须保留既有密文
+    #[tokio::test]
+    async fn test_update_profile_empty_password_preserves_existing() {
+        let (app, inner) = mock_app();
+        {
+            let mut guard = inner.lock().unwrap();
+            guard
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == "dorm")
+                .unwrap()
+                .password = "ENC:old-secret".into();
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "改名后", "password": ""}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.name, "改名后");
+        assert_eq!(dorm.password, "ENC:old-secret");
+    }
+
+    /// 新建 Profile 时空密码应保持为空，不能生成“可解密但明文为空”的假密文
+    #[tokio::test]
+    async fn test_create_profile_empty_password_stays_empty() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/new-profile")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "new-profile",
+                            "name": "新方案",
+                            "username": "student",
+                            "password": ""
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let guard = inner.lock().unwrap();
+        let created = guard
+            .profiles
+            .iter()
+            .find(|p| p.id == "new-profile")
+            .unwrap();
+        assert!(created.password.is_empty());
     }
 
     /// 单个 Profile 读取不泄露密码
