@@ -200,8 +200,10 @@ pub fn playwright_browser_installed(browser: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            if playwright_dir_has_browser(PathBuf::from(local_app_data).join("ms-playwright"), prefix)
-            {
+            if playwright_dir_has_browser(
+                PathBuf::from(local_app_data).join("ms-playwright"),
+                prefix,
+            ) {
                 return true;
             }
         }
@@ -293,12 +295,14 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("chromium-123").join("chrome"))
             .expect("创建 chromium 缓存");
         std::fs::write(
-            dir.path().join("chromium-123").join("chrome").join("marker"),
+            dir.path()
+                .join("chromium-123")
+                .join("chrome")
+                .join("marker"),
             b"ok",
         )
         .expect("写入 marker");
-        std::fs::create_dir_all(dir.path().join("firefox-456"))
-            .expect("创建空 firefox 缓存");
+        std::fs::create_dir_all(dir.path().join("firefox-456")).expect("创建空 firefox 缓存");
 
         assert!(playwright_dir_has_browser(
             dir.path().to_path_buf(),
