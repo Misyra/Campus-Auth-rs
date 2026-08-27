@@ -12,6 +12,10 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    env:
+      # CI 不消费本地调试符号；关闭 dev/test debuginfo 可显著降低 Windows PDB/codegen 成本。
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -64,12 +68,11 @@ jobs:
         working-directory: frontend
         run: npm test
 
-      # 先做 test codegen；随后 Clippy 可尝试复用已构建的依赖产物。
-      - name: 单元与集成测试
-        run: cargo test
-
       - name: Clippy 零警告（-D warnings）
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: 单元与集成测试
+        run: cargo test
 
       - name: Python Worker 语法检查
         run: python -m compileall python_worker
