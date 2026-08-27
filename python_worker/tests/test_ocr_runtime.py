@@ -20,7 +20,8 @@ class _FakeOcr:
 def test_ocr_session_returns_classification_result() -> None:
     from ocr_runtime import _OcrSession
 
-    session = _OcrSession(_FakeOcr("5678"), (False, None), 0.5)
+    session = _OcrSession(_FakeOcr("5678"), (False, None))
+    session.add_budget(0.5)
     assert session.classification(b"image") == "5678"
 
 
@@ -35,10 +36,10 @@ def test_ocr_session_timeout_evicts_stuck_instance() -> None:
             return "late"
 
     key = (False, None)
-    instance = SlowOcr()
+    session = ocr_runtime._OcrSession(SlowOcr(), key)
+    session.add_budget(0.01)
     ocr_runtime._ocr_cache.clear()
-    ocr_runtime._ocr_cache[key] = instance
-    session = ocr_runtime._OcrSession(instance, key, 0.01)
+    ocr_runtime._ocr_cache[key] = session
 
     try:
         with pytest.raises(TimeoutError, match="共享预算"):
@@ -64,6 +65,23 @@ def test_get_ocr_subtracts_model_acquire_time(monkeypatch) -> None:
     try:
         session = ocr_runtime._get_ocr(False)
         assert session._instance is fake
-        assert session._inference_timeout_secs == pytest.approx(0.6)
+        assert list(session._budgets) == pytest.approx([0.6])
+    finally:
+        ocr_runtime._ocr_cache.clear()
+
+
+def test_get_ocr_keeps_cached_session_identity(monkeypatch) -> None:
+    import ocr_runtime
+
+    fake = _FakeOcr()
+    fake_module = SimpleNamespace(DdddOcr=lambda **_kwargs: fake)
+    monkeypatch.setitem(sys.modules, "ddddocr", fake_module)
+    ocr_runtime._ocr_cache.clear()
+    try:
+        first = ocr_runtime._get_ocr(False)
+        second = ocr_runtime._get_ocr(False)
+        assert first is second
+        assert first._instance is fake
+        assert len(first._budgets) == 2
     finally:
         ocr_runtime._ocr_cache.clear()
