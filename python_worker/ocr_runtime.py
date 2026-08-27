@@ -9,14 +9,15 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from io import BytesIO
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# OCR 实例缓存：字符范围会修改模型实例状态，必须纳入 key，避免上一次任务的
-# ``set_ranges`` 污染后续未限制字符集的识别。
-_ocr_cache: dict[tuple[bool, str | int | None], Any] = {}
+# OCR 缓存保存稳定的会话对象。字符范围会修改底层模型实例状态，必须纳入 key，
+# 避免上一次任务的 ``set_ranges`` 污染后续未限制字符集的识别。
+_ocr_cache: dict[tuple[bool, str | int | None], "_OcrSession"] = {}
 _ocr_lock = threading.Lock()
 
 # OCR 模型获取 + CPU 推理共享总预算（秒）。
@@ -26,28 +27,42 @@ OCR_TIMEOUT_SECS = 90
 
 
 class _OcrSession:
-    """单次 OCR 调用会话，为推理保留模型获取后的剩余预算。
+    """可缓存的 OCR 会话，为每次获取登记独立的推理剩余预算。
+
+    返回对象本身保持缓存身份稳定，兼容既有 ``_get_ocr`` 契约；每次调用
+    ``_get_ocr`` 都会把本次模型获取后的剩余预算加入队列，后续一次
+    ``classification`` 消费一个预算。这样底层模型和 wrapper 都可复用，又不会让
+    冷启动和推理各自获得完整 90 秒。
 
     ``step_handlers`` 会把 ``classification`` 放入 ``asyncio.to_thread``。Python
-    无法安全终止一个已经进入第三方 native/CPU 代码的线程，因此这里再用 daemon
-    线程包一层：到达共享预算后立即把控制权交还调用方，并淘汰对应缓存实例。
-    即使底层识别稍后才自行结束，后续任务也不会复用这个可能仍在工作的实例。
+    无法安全终止已经进入第三方 native/CPU 代码的线程，因此这里再用 daemon 线程
+    包一层；共享预算耗尽时立即返回并淘汰该缓存会话，后续任务不会复用可能仍在
+    工作的底层实例。
     """
 
-    def __init__(
-        self,
-        instance: Any,
-        key: tuple[bool, str | int | None],
-        inference_timeout_secs: float,
-    ) -> None:
+    def __init__(self, instance: Any, key: tuple[bool, str | int | None]) -> None:
         self._instance = instance
         self._key = key
-        self._inference_timeout_secs = max(0.0, inference_timeout_secs)
+        self._budgets: deque[float] = deque()
+        self._budget_lock = threading.Lock()
+
+    def add_budget(self, inference_timeout_secs: float) -> None:
+        """登记下一次识别可使用的剩余共享预算。"""
+        with self._budget_lock:
+            self._budgets.append(max(0.0, inference_timeout_secs))
+
+    def _take_budget(self) -> float:
+        """消费一次预算；异常直接调用时回退到完整 OCR 预算。"""
+        with self._budget_lock:
+            if self._budgets:
+                return self._budgets.popleft()
+        return float(OCR_TIMEOUT_SECS)
 
     def classification(self, img_bytes: bytes):
         """在本次剩余共享预算内执行识别。"""
-        if self._inference_timeout_secs <= 0:
-            _evict_ocr_instance(self._key, self._instance)
+        inference_timeout_secs = self._take_budget()
+        if inference_timeout_secs <= 0:
+            _evict_ocr_session(self._key, self)
             raise TimeoutError("OCR 模型获取已耗尽共享预算")
 
         done = threading.Event()
@@ -63,8 +78,8 @@ class _OcrSession:
 
         worker = threading.Thread(target=run, name="ocr-classification", daemon=True)
         worker.start()
-        if not done.wait(self._inference_timeout_secs):
-            _evict_ocr_instance(self._key, self._instance)
+        if not done.wait(inference_timeout_secs):
+            _evict_ocr_session(self._key, self)
             raise TimeoutError(
                 f"OCR 模型获取与推理超过共享预算 {OCR_TIMEOUT_SECS}s"
             )
@@ -75,20 +90,20 @@ class _OcrSession:
         return result.get("value")
 
 
-def _evict_ocr_instance(
-    key: tuple[bool, str | int | None], instance: Any
+def _evict_ocr_session(
+    key: tuple[bool, str | int | None], session: _OcrSession
 ) -> None:
-    """仅当缓存仍指向指定实例时淘汰，避免误删并发创建的新实例。"""
+    """仅当缓存仍指向指定会话时淘汰，避免误删并发创建的新实例。"""
     with _ocr_lock:
-        if _ocr_cache.get(key) is instance:
+        if _ocr_cache.get(key) is session:
             _ocr_cache.pop(key, None)
 
 
 def _get_ocr(old: bool, char_range: str | int | None = None):
-    """获取缓存实例并创建一次调用级 OCR 会话。
+    """获取缓存 OCR 会话，并登记本次模型获取后的推理剩余预算。
 
-    模型不存在时抛出 ImportError，由调用方转换为 WorkerError。模型获取实际耗时会
-    从 ``OCR_TIMEOUT_SECS`` 中扣除，返回会话的 ``classification`` 只能使用剩余预算。
+    模型不存在时抛出 ImportError，由调用方转换为 WorkerError。返回对象保持缓存身份
+    稳定；实际 ddddocr 实例只在对应 ``old + char_range`` key 首次使用时创建。
     """
     started = time.monotonic()
     import ddddocr  # type: ignore
@@ -97,11 +112,11 @@ def _get_ocr(old: bool, char_range: str | int | None = None):
     # 避免不可哈希值让缓存查找本身崩溃。
     normalized_range = char_range if isinstance(char_range, (str, int)) else None
     key = (old, normalized_range)
-    instance = _ocr_cache.get(key)
-    if instance is None:
+    session = _ocr_cache.get(key)
+    if session is None:
         with _ocr_lock:
-            instance = _ocr_cache.get(key)
-            if instance is None:
+            session = _ocr_cache.get(key)
+            if session is None:
                 instance = ddddocr.DdddOcr(old=old, show_ad=False)
                 if normalized_range is not None:
                     try:
@@ -112,10 +127,12 @@ def _get_ocr(old: bool, char_range: str | int | None = None):
                             normalized_range,
                             exc,
                         )
-                _ocr_cache[key] = instance
+                session = _OcrSession(instance, key)
+                _ocr_cache[key] = session
 
     elapsed = time.monotonic() - started
-    return _OcrSession(instance, key, OCR_TIMEOUT_SECS - elapsed)
+    session.add_budget(OCR_TIMEOUT_SECS - elapsed)
+    return session
 
 
 def _preprocess_ocr_image(img_bytes: bytes) -> bytes:
