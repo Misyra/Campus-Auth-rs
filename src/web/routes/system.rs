@@ -52,13 +52,11 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
 pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let exe = std::env::current_exe()
         .map_err(|e| ApiError::Internal(format!("获取可执行文件路径失败: {e}")))?;
-    // args_os：参数含非法 Unicode 时 env::args() 会 panic，args_os 不会
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     args.retain(|a| a != "--restarting");
     args.push("--restarting".into());
     let mut cmd = std::process::Command::new(exe);
     cmd.args(&args);
-    // Windows：避免从 GUI 进程 spawn 出闪烁的控制台窗口（与其他子进程一致）
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -67,9 +65,7 @@ pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, A
     }
     cmd.spawn()
         .map_err(|e| ApiError::Internal(format!("启动新进程失败: {e}")))?;
-    // 通知 launcher 优雅关闭当前进程（新进程会等待实例锁释放）
     let _ = state.shutdown_tx.send(());
-    // watchdog：优雅关闭挂死时强制退出，释放实例锁供新进程启动（A4 统一）
     spawn_exit_watchdog(30);
     Ok(data(Value::String("正在重启".into())))
 }
@@ -88,21 +84,14 @@ pub(crate) fn spawn_exit_watchdog(secs: u64) {
 }
 
 /// POST /api/system/shutdown — 优雅关闭（通知 launcher 执行完整关闭流程）
-///
-/// 不再使用 exit(0)；launcher 收到 shutdown_tx 信号后依次停止 Engine/Scheduler/
-/// Bridge/Tray/Axum，所有服务在各自 event loop 内清理资源后再退出进程。
-/// 若 30s 后仍未退出（优雅关闭挂死），最后防线才是 exit(0)。
 pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    // 通知 launcher 开始优雅关闭
     let _ = state.shutdown_tx.send(());
-    // watchdog：30s 后若仍存活则强制退出（所有服务本应在 30s 内完成清理）
     spawn_exit_watchdog(30);
     Ok(data(Value::String("正在关闭".into())))
 }
 
 /// POST /api/agree — 用户同意协议（设置向导完成）
 pub async fn agree_terms(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    // 标记用户已同意协议（写入配置或标记文件）
     let config_dir = state.config.base_path().join("config");
     let agreed_file = config_dir.join(".agreed");
     tokio::fs::write(&agreed_file, chrono::Utc::now().to_rfc3339()).await?;
@@ -140,16 +129,8 @@ pub async fn init_status(State(state): State<AppState>) -> Result<Json<Value>, A
     })))
 }
 
-/// 日志尾部读取的最大字节数（512KB）
-///
-/// 日志文件可能达数百 MB，而 limit（≤2000 条）对应的最新日志绝大多数场景
-/// 都在尾部 512KB 内，全量读入内存再解析纯属浪费。
 const LOG_TAIL_BYTES: u64 = 512 * 1024;
 
-/// 读取日志文件尾部（最多 [`LOG_TAIL_BYTES`] 字节），文件较小时全读
-///
-/// 从中间位置起读时，首行可能是不完整的行（且可能以残缺的多字节 UTF-8
-/// 字符开头），统一丢弃第一行；其余行保证完整。
 fn read_log_tail(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
@@ -163,7 +144,6 @@ fn read_log_tail(path: &std::path::Path) -> Option<String> {
     let mut bytes = Vec::with_capacity(LOG_TAIL_BYTES as usize);
     file.read_to_end(&mut bytes).ok()?;
     let content = String::from_utf8_lossy(&bytes).into_owned();
-    // 丢弃第一行（seek 位置切在行中间时该行不完整）
     match content.find('\n') {
         Some(idx) => Some(content[idx + 1..].to_string()),
         None => Some(String::new()),
@@ -171,9 +151,6 @@ fn read_log_tail(path: &std::path::Path) -> Option<String> {
 }
 
 /// GET /api/logs — 读取最新日志文件内容（实时日志通过 WebSocket 推送）
-///
-/// 日志文件为 tracing JSON 格式（每行一个 JSON 对象），解析后返回前端期望的
-/// `LogEntry[]`（`{timestamp, level, message, source}`）。
 pub async fn fetch_logs(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -182,14 +159,10 @@ pub async fn fetch_logs(
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(200)
-        // 钳制上限，避免传 99999999 全量解析 MB 级日志
         .min(2000);
     let logs_dir = state.config.base_path().join("logs");
-    // 日志文件可能达 MB 级，read_dir + 尾部读取 + JSON 解析为阻塞 I/O 与 CPU 密集操作，
-    // 整体放入 spawn_blocking 避免阻塞 tokio worker 线程
     let entries: Vec<crate::web::state::LogEntry> =
         tokio::task::spawn_blocking(move || -> Vec<crate::web::state::LogEntry> {
-            // 查找最新的日志文件（按文件名排序，app.log.YYYY-MM-DD 格式）
             let latest_file = std::fs::read_dir(&logs_dir).ok().and_then(|entries| {
                 let mut files: Vec<_> = entries
                     .filter_map(|e| e.ok())
@@ -206,9 +179,6 @@ pub async fn fetch_logs(
             match latest_file {
                 Some(entry) => read_log_tail(&entry.path())
                     .map(|content| {
-                        // 从最新行开始反向解析 → 过滤本次会话 → 取 limit 条 → 再反转为从旧到新。
-                        // 各级别统一保留，展示级别由前端筛选器决定。
-                        // 会话过滤：面板只显示本次启动后的日志，不回显历史运行的旧内容。
                         let session_start =
                             crate::logging::session_started_at().unwrap_or_default();
                         content
@@ -233,10 +203,6 @@ pub async fn fetch_logs(
     Ok(data(serde_json::to_value(entries)?))
 }
 
-/// 解析 tracing JSON 日志行为 LogEntry
-///
-/// tracing json 格式：`{"timestamp":"...","level":"INFO","fields":{"message":"..."},"target":"..."}`
-/// 保留所有级别；是否展示由前端筛选器决定，保证刷新历史与实时日志一致。
 fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let level = v
@@ -263,9 +229,6 @@ fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
 }
 
 /// GET /api/check-update — 检查更新
-///
-/// 返回字段对齐前端契约：`has_update`(bool) / `latest`(string) / `current`(string) /
-/// `error`(string,可选)。
 pub async fn check_update(
     State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -286,9 +249,7 @@ pub async fn check_update(
     }
 }
 
-/// POST /api/system/update — 执行更新（下载 zip 到 staging 并触发助手替换）
-///
-/// 先调用 `check_update` 获取最新版本信息，再 `apply_update` 执行下载与暂存。
+/// POST /api/system/update — 执行更新
 pub async fn apply_update(
     State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -309,20 +270,22 @@ pub async fn apply_update(
 
 /// GET /api/browsers — 可用浏览器列表
 ///
-/// 返回基于配置的可用浏览器列表（自定义路径优先，其次 Playwright 内置浏览器）。
+/// Playwright 管理的三种引擎按各自实际缓存探测。核心引导默认只安装 Chromium，
+/// Firefox/WebKit 未安装时必须返回 installed=false，避免 UI 把 Chromium 就绪误报成全引擎可用。
 pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let settings = state.config.load_settings_async().await;
-    let env_status = state.environment.status();
-    let playwright_installed = env_status.playwright_ready;
+    let chromium_installed = crate::environment::playwright_browser_installed("chromium");
+    let firefox_installed = crate::environment::playwright_browser_installed("firefox");
+    let webkit_installed = crate::environment::playwright_browser_installed("webkit");
     let custom_path = &settings.global.browser.browser_custom_path;
     let edge_installed = is_edge_installed();
     let chrome_installed = is_chrome_installed();
     let mut browsers = vec![
-        serde_json::json!({ "name": "Chromium", "channel": "chromium", "engine": "chromium", "installed": playwright_installed }),
+        serde_json::json!({ "name": "Chromium", "channel": "chromium", "engine": "chromium", "installed": chromium_installed }),
         serde_json::json!({ "name": "Edge", "channel": "msedge", "engine": "chromium", "installed": edge_installed }),
         serde_json::json!({ "name": "Chrome", "channel": "chrome", "engine": "chromium", "installed": chrome_installed }),
-        serde_json::json!({ "name": "Firefox", "channel": "firefox", "engine": "firefox", "installed": playwright_installed }),
-        serde_json::json!({ "name": "WebKit", "channel": "webkit", "engine": "webkit", "installed": playwright_installed }),
+        serde_json::json!({ "name": "Firefox", "channel": "firefox", "engine": "firefox", "installed": firefox_installed }),
+        serde_json::json!({ "name": "WebKit", "channel": "webkit", "engine": "webkit", "installed": webkit_installed }),
     ];
     if !custom_path.is_empty() {
         browsers.insert(
@@ -343,7 +306,6 @@ pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>,
     })))
 }
 
-/// 检测系统是否安装了 Google Chrome
 #[cfg(target_os = "windows")]
 fn is_chrome_installed() -> bool {
     let candidates = [
@@ -380,7 +342,6 @@ fn is_chrome_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// 检测系统是否安装了 Microsoft Edge
 #[cfg(target_os = "windows")]
 fn is_edge_installed() -> bool {
     let candidates = [
@@ -398,13 +359,11 @@ fn is_edge_installed() -> bool {
     candidates.iter().any(|p| p.exists())
 }
 
-/// 检测系统是否安装了 Microsoft Edge（macOS）
 #[cfg(target_os = "macos")]
 fn is_edge_installed() -> bool {
     std::path::Path::new("/Applications/Microsoft Edge.app").exists()
 }
 
-/// 检测系统是否安装了 Microsoft Edge（Linux）
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn is_edge_installed() -> bool {
     std::process::Command::new("which")
@@ -415,11 +374,8 @@ fn is_edge_installed() -> bool {
 }
 
 /// POST /api/install/playwright — 安装 Playwright Chromium
-///
-/// 触发环境管理器安装 Playwright 浏览器（异步执行，进度通过 StatusManager 推送）。
 pub async fn install_playwright(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let env = state.environment.clone();
-    // 后台执行安装，避免阻塞响应；进度通过 StatusManager 推送
     tokio::spawn(async move {
         if let Err(e) = env.ensure_capability().await {
             tracing::error!("Playwright 安装失败: {e}");
@@ -431,12 +387,9 @@ pub async fn install_playwright(State(state): State<AppState>) -> Result<Json<Va
 }
 
 /// GET /api/icons — 可用图标列表
-///
-/// 扫描资源图标目录返回可用图标。目录不存在时返回空列表。
 pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let icons_dir = state.config.base_path().join("resources").join("icons");
     let mut icons = Vec::new();
-    // 目录扫描用 tokio::fs，避免同步 std::fs 阻塞 tokio worker 线程
     if let Ok(mut rd) = tokio::fs::read_dir(&icons_dir).await {
         while let Some(entry) = rd.next_entry().await.ok().flatten() {
             if let Some(name) = entry.file_name().to_str() {
@@ -450,9 +403,6 @@ pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, Ap
     Ok(data(icons))
 }
 
-// ---- 文档 ----
-
-/// 在候选目录中查找首个存在的任务编写指南
 fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
     let rel = std::path::Path::new("docs")
         .join("guides")
@@ -474,15 +424,10 @@ fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
     primary
 }
 
-/// GET /api/docs/task-writing-guide — 任务编写指南
-///
-/// 从 `docs/guides/task-writing-guide.md` 读取并返回 Markdown 文本。
-/// 文件缺失时返回 404。
 pub async fn task_writing_guide(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let path = resolve_guide_path(&config.base_path());
-    // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
     match tokio::fs::read_to_string(&path).await {
         Ok(content) => Ok(data(Value::String(content))),
         Err(e) => {
@@ -494,7 +439,6 @@ pub async fn task_writing_guide(
     }
 }
 
-/// GET /api/docs/task-manual — 任务使用手册
 pub async fn task_manual() -> Json<Value> {
     data(Value::String(
         "# 任务使用手册\n\n\
@@ -506,13 +450,6 @@ pub async fn task_manual() -> Json<Value> {
     ))
 }
 
-// ---- 工具函数 ----
-// SSRF 私网判定与安全 GET（DNS 钉扎 + 逐跳重定向校验）已统一收敛至 crate::web::ssrf
-
-/// POST /api/worker/stop — 手动关闭浏览器（优雅停止 Python Worker）
-///
-/// 停止当前运行的 Worker 进程及其浏览器实例。Supervisor 保持运行，
-/// 下次任务到来时会自动重新启动 Worker。
 pub async fn stop_worker(
     State(bridge): State<Arc<dyn BridgeApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -524,15 +461,12 @@ pub async fn stop_worker(
 mod tests {
     use super::*;
 
-    // ============ tracing JSON 日志解析 ============
-
     #[test]
     fn parse_tracing_json_log_extracts_fields() {
         let line = r#"{"timestamp":"2026-08-14T01:02:03Z","level":"INFO","fields":{"message":"登录成功"},"target":"campus_auth::login"}"#;
         let entry = parse_tracing_json_log(line).expect("应解析成功");
         assert_eq!(entry.level, "INFO");
         assert_eq!(entry.message, "登录成功");
-        // source 经 normalize_source 归一化（去掉 crate 前缀，取首段）
         assert_eq!(entry.source, "login");
         assert!(!entry.timestamp.is_empty());
     }
@@ -549,17 +483,14 @@ mod tests {
     #[test]
     fn parse_tracing_json_log_handles_invalid_and_missing_fields() {
         assert!(parse_tracing_json_log("not json").is_none());
-        // 缺少 fields.message 时回退为空字符串而非报错
         let entry = parse_tracing_json_log(r#"{"level":"WARN"}"#).expect("结构不完整也应解析");
         assert_eq!(entry.message, "");
     }
 
-    // ============ check_update handler 级单测（内存 MockUpdaterApi，M1） ============
-
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::get as route_get;
-    use tower::ServiceExt; // oneshot
+    use tower::ServiceExt;
 
     use crate::updater::{UpdateInfo, UpdaterError};
 
@@ -620,7 +551,6 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    /// 有新版本：UpdateInfo 原样透传
     #[tokio::test]
     async fn test_check_update_with_info() {
         let v = run_check(MockOutcome::Info(sample_info())).await;
@@ -630,7 +560,6 @@ mod tests {
         assert_eq!(d["current"], "1.0.0");
     }
 
-    /// 无更新：返回 has_update=false 与当前版本
     #[tokio::test]
     async fn test_check_update_no_update() {
         let v = run_check(MockOutcome::None).await;
@@ -640,7 +569,6 @@ mod tests {
         assert!(d.get("error").is_none());
     }
 
-    /// 检查失败：200 + error 字段（前端提示，非 5xx）
     #[tokio::test]
     async fn test_check_update_error_field() {
         let v = run_check(MockOutcome::Err("网络超时".into())).await;
