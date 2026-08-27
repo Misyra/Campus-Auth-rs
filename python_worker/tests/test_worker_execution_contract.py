@@ -1,7 +1,7 @@
 """Worker 浏览器执行/调试路径的契约回归测试。
 
-不启动真实浏览器，重点锁住 TaskConfig 顶层时序参数与 Debug Run All
-相对正式 run_steps 的一致性，避免调试成功/失败表现与实际执行不同。
+不启动真实浏览器，重点锁住 TaskConfig 顶层时序参数、浏览器启动语义与
+Debug Run All 相对正式 run_steps 的一致性，避免调试/生产路径契约漂移。
 """
 
 from __future__ import annotations
@@ -65,6 +65,137 @@ def test_navigation_wait_zero_skips_sleep(monkeypatch):
     asyncio.run(WorkerCore._wait_after_navigation(task, context))
 
     assert called is False
+
+
+def test_webkit_uses_webkit_launcher_and_no_chromium_flags():
+    chromium = object()
+    firefox = object()
+    webkit = object()
+    playwright = type(
+        "FakePlaywright",
+        (),
+        {"chromium": chromium, "firefox": firefox, "webkit": webkit},
+    )()
+    core = WorkerCore()
+    core._last_browser_settings = {}
+
+    launcher, path = core._resolve_launcher(playwright, "webkit", "")
+
+    assert launcher is webkit
+    assert path is None
+    assert "--no-sandbox" not in core._build_launch_args({}, "webkit")
+    assert "--disable-gpu" not in core._build_launch_args({}, "webkit")
+
+
+def test_custom_webkit_filters_chromium_only_flags():
+    core = WorkerCore()
+    args = core._build_launch_args(
+        {
+            "custom_browser_engine": "webkit",
+            "browser_args": "--no-sandbox\n--custom-safe-flag",
+        },
+        "custom",
+    )
+
+    assert "--no-sandbox" not in args
+    assert args == ["--custom-safe-flag"]
+
+
+def test_pure_mode_keeps_context_options(monkeypatch):
+    core = WorkerCore()
+    core._playwright = object()
+    captured: dict = {}
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    async def fake_launch(*_args, **_kwargs):
+        return FakeBrowser()
+
+    async def fake_new_page():
+        return object()
+
+    monkeypatch.setattr(core, "_launch_browser", fake_launch)
+    monkeypatch.setattr(core, "_new_page", fake_new_page)
+
+    asyncio.run(
+        core._start_browser(
+            {
+                "browser_settings": {
+                    "pure_mode": True,
+                    "persistent_context": False,
+                    "browser_channel": "playwright",
+                    "locale": "en-US",
+                    "timezone_id": "UTC",
+                    "user_agent": "CampusAuth-Test",
+                    "extra_headers_json": '{"X-Test":"1"}',
+                    "bind_proxy": "http://127.0.0.1:7890",
+                    "ignore_https_errors": False,
+                    "viewport_width": 1024,
+                    "viewport_height": 768,
+                }
+            }
+        )
+    )
+
+    assert captured["locale"] == "en-US"
+    assert captured["timezone_id"] == "UTC"
+    assert captured["user_agent"] == "CampusAuth-Test"
+    assert captured["extra_http_headers"] == {"X-Test": "1"}
+    assert captured["proxy"] == {"server": "http://127.0.0.1:7890"}
+    assert captured["ignore_https_errors"] is False
+    assert captured["viewport"] == {"width": 1024, "height": 768}
+
+
+def test_login_system_variables_override_task_variables(monkeypatch):
+    core = WorkerCore()
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        data = None
+
+        def to_dict(self):
+            return {"success": True, "data": self.data}
+
+    async def fake_run_task(
+        _task, _bs, variables, _cancel_event, _screenshot_dir, navigate_url=""
+    ):
+        captured.update(variables)
+        assert navigate_url == "https://portal.example/login"
+        return FakeResult()
+
+    monkeypatch.setattr(core, "_run_task", fake_run_task)
+
+    response = asyncio.run(
+        core.handle_execute_login_attempt(
+            {
+                "username": "profile-user",
+                "password": "profile-pass",
+                "isp": "profile-isp",
+                "auth_url": "https://portal.example/login",
+                "task_config": {
+                    "variables": {
+                        "USERNAME": "stale-user",
+                        "PASSWORD": "stale-pass",
+                        "ISP": "stale-isp",
+                        "LOGIN_URL": "https://stale.invalid",
+                        "CUSTOM": "keep-me",
+                    }
+                },
+            }
+        )
+    )
+
+    assert response["success"] is True
+    assert captured == {
+        "USERNAME": "profile-user",
+        "PASSWORD": "profile-pass",
+        "ISP": "profile-isp",
+        "LOGIN_URL": "https://portal.example/login",
+        "CUSTOM": "keep-me",
+    }
 
 
 def test_debug_run_all_continues_after_optional_failure_and_applies_delay(monkeypatch):
