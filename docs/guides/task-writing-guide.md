@@ -1,6 +1,6 @@
 # Campus-Auth 浏览器任务编写指南
 
-本文以当前 Rust `TaskConfig` / `StepConfig` 与 Python Worker 的实际执行语义为准。任务使用 JSON 描述，由 Playwright 按顺序执行。
+本文以当前 Rust 任务保存校验与 Python Worker 的共同契约为准。任务使用 JSON 描述，由 Playwright 按顺序执行。
 
 ## 1. 最小任务结构
 
@@ -40,8 +40,8 @@
 | --- | --- | --- |
 | `name` | `"未命名任务"` | 显示名称 |
 | `description` | `""` | 任务说明 |
-| `url` | `""` | 初始登录页；非空时执行器会先自动导航 |
-| `timeout` | `30000` | 任务级总超时，毫秒；由 Rust Bridge 统一兜底 |
+| `url` | `""` | 初始登录页；非空时执行器先自动导航 |
+| `timeout` | `30000` | 任务级总超时，毫秒；由 Rust 调用侧统一兜底 |
 | `navigation_wait` | `1.0` | 初始导航完成后的额外等待，秒 |
 | `step_delay` | `0.5` | 相邻步骤之间的等待，秒 |
 | `reveal_hidden` | `false` | 是否在执行前揭示隐藏输入元素 |
@@ -51,7 +51,7 @@
 | `metadata` | 可选 | 自定义元数据，执行器不解释 |
 | `on_success` / `on_failure` | 可选 | 保留的结果处理配置 |
 
-`url` 是初始导航地址，不代表任务中不能再次跳转。多页面认证可以继续使用 `goto` / `navigate` 步骤。
+顶层 `url` 只负责第一次自动导航。多页面 SSO 或认证流程可以继续使用 `goto` / `navigate`。
 
 ## 3. 步骤公共字段
 
@@ -72,14 +72,39 @@
 | `type` | 必填 | 步骤类型 |
 | `description` | `""` | 日志和调试界面显示的描述 |
 | `timeout` | 浏览器默认值 | 单步超时，毫秒 |
-| `required` | **`true`** | 步骤失败时是否终止任务；这是当前 Rust/Python 的真实默认值 |
+| `required` | **`true`** | 步骤失败时是否终止任务 |
 | `frame` | 无 | frame name、`url=片段` 或 iframe/frame CSS 选择器 |
 
 未知字段会作为扩展字段保留，并由对应处理器按需读取，例如 `goto.wait_until`、`screenshot.full_page`、`click_select.select_delay`。
 
-## 4. 变量系统
+## 4. 公开步骤类型
 
-模板格式为：
+Rust 保存层当前正式接受以下类型：
+
+```text
+input
+click
+select
+click_select
+wait
+wait_url
+eval
+screenshot
+sleep
+ocr
+custom_js
+navigate
+goto
+assert_text
+upload_file
+wait_for_selector
+```
+
+Python Worker 内部还保留 `evaluate`、`custom` 等历史兼容别名，但它们不是 Rust 保存 API 的公开类型。新任务请使用 `eval`；需要历史自定义脚本别名时使用 `custom_js`。
+
+## 5. 变量系统
+
+模板格式：
 
 ```text
 {{VARIABLE_NAME}}
@@ -92,15 +117,15 @@
 - `{{ISP}}`：当前 Profile 的运营商
 - `{{LOGIN_URL}}`：当前认证地址
 
-变量优先级从低到高为：
+变量优先级从低到高：
 
 1. 任务 `variables`
-2. 系统保留登录变量（`USERNAME` / `PASSWORD` / `ISP` / `LOGIN_URL`）
+2. 系统保留登录变量 `USERNAME` / `PASSWORD` / `ISP` / `LOGIN_URL`
 3. 前序步骤通过 `store_as` 产生的运行时结果
 
-因此任务自定义变量不能伪造或覆盖当前 Profile 的真实登录凭据；运行时结果则可以在后续步骤中覆盖同名模板值。
+因此任务自定义变量不能覆盖当前 Profile 的真实登录凭据；运行时结果可以在后续步骤中覆盖同名模板值。
 
-模板不仅支持 `selector` / `value`，也会解析 `frame`、`option_selector`、`target_selector`、`path`、`pattern`、脚本内容，以及扩展字段中的嵌套字符串，例如：
+模板解析覆盖 `selector`、`value`、`frame`、`option_selector`、`target_selector`、`path`、`pattern`、脚本内容，以及扩展字段中的嵌套字符串，例如：
 
 ```json
 {
@@ -110,9 +135,9 @@
 }
 ```
 
-`store_as` 保存原生 JavaScript/OCR 结果；引用到字符串模板时才会稳定转换：`null -> ""`、布尔值 -> `true/false`、对象/数组 -> JSON 字符串。
+`store_as` 保存原生 JavaScript/OCR 结果；插入字符串模板时稳定转换为字符串，其中 `null -> ""`、布尔值 -> `true/false`、对象/数组 -> JSON 字符串。
 
-## 5. input — 输入文本
+## 6. input — 输入文本
 
 ```json
 {
@@ -127,10 +152,10 @@
 - `selector`：目标输入框。
 - `value`：输入文本。
 - `clear`：默认 `true`，先清空再填写。
-- 普通填写失败时，执行器会保留一部分单步 timeout 给 attached/JavaScript 降级路径，而不是让第一次 `fill` 吃掉全部预算。
-- `reveal_hidden=true` 只应作为特殊门户的兼容手段，不建议默认开启。
+- 普通 `fill` 失败后，执行器会为 attached/JavaScript 降级路径保留一部分单步 timeout，不让第一次尝试吞掉全部预算。
+- `reveal_hidden=true` 只适合特殊门户兼容，不建议默认开启。
 
-## 6. click — 点击
+## 7. click — 点击
 
 ```json
 {
@@ -140,7 +165,7 @@
 }
 ```
 
-点击支持多个候选选择器。候选只会在**顶层逗号**处分割，因此下面这些合法 CSS 不会被错误拆开：
+点击支持多个候选选择器。候选只在**顶层逗号**处分割，因此以下合法 CSS 不会被错误拆开：
 
 ```text
 :is(.login,.submit)
@@ -149,9 +174,9 @@
 
 普通 Playwright 点击失败后，会在剩余预算内尝试 attached + `dispatch_event("click")` 降级。
 
-历史任务中的纯文本 selector 仍有兼容回退，但新任务建议显式使用 `text="登录"`、`text=登录` 或稳定 CSS。
+历史任务中的纯文本 selector 仍有兼容回退；新任务建议显式使用 `text="登录"`、`text=登录` 或稳定 CSS。
 
-## 7. select — 原生 `<select>`
+## 8. select — 原生 `<select>`
 
 ```json
 {
@@ -169,9 +194,9 @@
 2. option 显示文本精确匹配；
 3. 显示文本唯一子串匹配。
 
-`value` 为空时直接跳过。没有唯一匹配时：`required=true` 失败，`required=false` 跳过。不要依赖旧文档中“默认会忽略失败”的说法——`required` 默认是 `true`。
+`value` 为空时直接跳过。没有唯一匹配时，`required=true` 失败，`required=false` 跳过。`required` 的默认值是 `true`。
 
-## 8. click_select — 自定义下拉框 / 按钮组
+## 9. click_select — 自定义下拉框 / 按钮组
 
 ```json
 {
@@ -185,16 +210,16 @@
 }
 ```
 
-语义：
+执行语义：
 
 1. 点击 `selector` 展开选项；
 2. 可选等待 `select_delay` 毫秒，默认 500；
 3. 在 `option_selector` 范围内按 `value` 文本寻找唯一选项；
 4. 点击匹配项。
 
-`option_selector` **只是搜索范围，不是最终要点击的值**。触发器点击、展开等待和选项点击共用同一个步骤 timeout 预算。
+`option_selector` 只是搜索范围，不是最终要点击的值。触发器点击、展开等待和选项点击共用同一个步骤 timeout 预算。
 
-## 9. wait / sleep / wait_for_selector
+## 10. wait / sleep / wait_for_selector
 
 ### 等元素出现
 
@@ -211,7 +236,7 @@
 
 ### 固定等待
 
-新任务应使用 `sleep`：
+新任务使用 `sleep`：
 
 ```json
 {
@@ -221,11 +246,11 @@
 }
 ```
 
-为兼容历史任务，`wait` **没有 selector** 时仍按 `duration` 做固定等待；但不要在新任务中继续依赖这种双重语义。
+为兼容历史任务，`wait` 没有 selector 时仍按 `duration` 做固定等待；新任务不要继续依赖这种双重语义。
 
-`wait_for_selector` 仍作为显式别名支持，语义与带 selector 的 `wait` 一致。
+`wait_for_selector` 是显式兼容类型，语义与带 selector 的 `wait` 一致。
 
-## 10. wait_url — 等待 URL
+## 11. wait_url — 等待 URL
 
 ```json
 {
@@ -236,11 +261,11 @@
 }
 ```
 
-`pattern` 是正则表达式。非法正则会直接报配置/执行错误，而不是静默等待到超时。
+`pattern` 是正则表达式。非法正则会直接报执行错误，而不是静默等到超时。
 
-## 11. eval / evaluate — 执行 JavaScript
+## 12. eval / custom_js — 执行 JavaScript
 
-推荐使用 `eval` 或 `evaluate`：
+新任务推荐使用 `eval`：
 
 ```json
 {
@@ -252,11 +277,11 @@
 }
 ```
 
-兼容别名：`eval`、`evaluate`、`custom_js`、`custom`。`code` 仍可作为 `script` 的历史别名。
+`custom_js` 是 Rust 保存层接受的历史兼容类型。`code` 仍可作为 `script` 的历史字段别名，并在加载时规范化为 `script`。
 
-`timeout` 会真正约束该步骤；若脚本长期不返回，Worker 会中断该页面以避免悬挂。`store_as` 保留结果原生类型。
+`timeout` 会真正约束该步骤；若脚本长期不返回，Worker 会中断对应页面以避免悬挂。`store_as` 保留结果原生类型。
 
-## 12. goto / navigate — 页面导航
+## 13. goto / navigate — 页面导航
 
 两种类型都受支持：
 
@@ -270,13 +295,13 @@
 }
 ```
 
-URL 可写在扩展字段 `url`，历史任务也可使用 `value` 或 `selector`。推荐新任务使用 `url`。
+URL 推荐写在扩展字段 `url`；历史任务也可使用 `value` 或 `selector`。
 
 `wait_until` 支持：`load`、`domcontentloaded`、`networkidle`、`commit`。
 
-任务顶层 `url` 已经负责第一次自动导航，因此单页登录通常不需要再写第一条 `goto`；多页 SSO/认证流程则可以正常使用。
+任务顶层 `url` 已经负责第一次自动导航，因此单页登录通常不需要再写第一条 `goto`；多页 SSO/认证流程可以正常使用。
 
-## 13. screenshot — 截图
+## 14. screenshot — 截图
 
 ```json
 {
@@ -287,9 +312,9 @@ URL 可写在扩展字段 `url`，历史任务也可使用 `value` 或 `selector
 }
 ```
 
-调试截图保存在 Worker 的调试目录。Web 调试面板不会接触 Worker 的绝对本地路径；服务端会校验文件名、固定目录、文件类型和大小，再通过已鉴权 WebSocket 内联图片。
+调试截图保存在 Worker 调试目录。Web 调试面板不会接触 Worker 绝对本地路径；服务端会校验文件名、固定目录、文件类型和大小，再通过已鉴权 WebSocket 内联图片。
 
-## 14. upload_file — 上传文件
+## 15. upload_file — 上传文件
 
 ```json
 {
@@ -300,9 +325,9 @@ URL 可写在扩展字段 `url`，历史任务也可使用 `value` 或 `selector
 }
 ```
 
-新任务使用 `path`。历史任务把路径写在 `value` 中仍兼容。
+新任务使用 `path`。历史任务把文件路径写在 `value` 中仍兼容。
 
-## 15. ocr — 验证码识别
+## 16. ocr — 验证码识别
 
 ```json
 {
@@ -318,11 +343,13 @@ URL 可写在扩展字段 `url`，历史任务也可使用 `value` 或 `selector
 
 - `selector`：验证码图片元素。
 - `target_selector`：可选；识别后自动填写的输入框。
-- `store_as`：可选；保存识别结果，供后续模板或脚本引用。
+- `store_as`：可选；保存识别结果供后续模板或脚本引用。
 - `old`：是否使用 ddddocr 旧模型，默认 `false`。
 - `char_range`：可选字符范围。
 
-OCR 依赖是可选能力；未安装时普通非 OCR 浏览器任务仍可运行。
+OCR 依赖是可选能力；未安装 OCR 依赖时，普通非 OCR 浏览器任务仍可运行。
+
+OCR 模型冷启动与 CPU 推理共享 OCR 总预算，避免模型加载和识别分别吃满一轮超时。识别卡死时该缓存实例会被淘汰，后续任务不会继续复用。
 
 数学验证码可采用 OCR + eval 链：
 
@@ -349,9 +376,9 @@ OCR 依赖是可选能力；未安装时普通非 OCR 浏览器任务仍可运�
 ]
 ```
 
-仅对可信、受控的简单算术字符串这样处理；不要把任意页面文本直接拼入脚本执行。
+只对可信、受控的简单算术字符串这样处理；不要把任意页面文本直接拼入脚本执行。
 
-## 16. assert_text — 文本断言
+## 17. assert_text — 文本断言
 
 ```json
 {
@@ -364,9 +391,9 @@ OCR 依赖是可选能力；未安装时普通非 OCR 浏览器任务仍可运�
 
 等待页面正文包含指定文本；超时归类为断言失败。
 
-## 17. Frame / iframe
+## 18. Frame / iframe
 
-每个步骤都可使用 `frame`：
+每个元素步骤都可以使用 `frame`：
 
 ```json
 {
@@ -388,7 +415,7 @@ iframe#login-frame          # iframe/frame CSS selector
 
 name 或 URL 匹配到多个 frame 时会失败，避免静默操作错误页面。
 
-## 18. success_condition
+## 19. success_condition
 
 当任务配置：
 
@@ -398,7 +425,7 @@ name 或 URL 匹配到多个 frame 时会失败，避免静默操作错误页面
 }
 ```
 
-执行器会读取同名 `store_as` 结果作为最终成功判定。例如：
+执行器读取同名 `store_as` 结果作为最终成功判定：
 
 ```json
 {
@@ -409,16 +436,16 @@ name 或 URL 匹配到多个 frame 时会失败，避免静默操作错误页面
 }
 ```
 
-布尔 `false`、`null`、数值 `0`、空字符串，以及字符串 `"false"` / `"0"` / `"no"` / `"off"` 会按失败值处理；不要故意把布尔结果转成含糊字符串。
+布尔 `false`、`null`、数值 `0`、空字符串，以及字符串 `"false"` / `"0"` / `"no"` / `"off"` 按失败值处理。
 
-## 19. 选择器建议
+## 20. 选择器建议
 
 优先级建议：
 
 1. 稳定 `id`
 2. 稳定 `name`
 3. `data-testid` / `data-*`
-4. 明确的属性组合
+4. 明确属性组合
 5. Playwright text selector
 6. 结构性 CSS
 7. XPath 作为最后选择
@@ -435,7 +462,7 @@ xpath=//button[contains(., '登录')]
 
 避免只依赖自动生成、每次刷新变化的 class 或过长 DOM 路径。
 
-## 20. required 的使用原则
+## 21. required 的使用原则
 
 `required` 默认是 **true**。
 
@@ -454,7 +481,7 @@ xpath=//button[contains(., '登录')]
 
 不要为了“任务不报错”把所有步骤都设为 `false`，那会把真实页面变更隐藏成假成功。
 
-## 21. 完整示例
+## 22. 完整示例
 
 ```json
 {
@@ -500,21 +527,21 @@ xpath=//button[contains(., '登录')]
 }
 ```
 
-## 22. 快速排错
+## 23. 快速排错
 
 ### 任务总是找不到元素
 
 - 检查是否在 iframe 中；必要时加 `frame`。
-- 动态页面增大 `navigation_wait`。
-- 不要把固定延时误写成带错误 selector 的 `wait`。
-- 优先重新确认稳定 CSS，而不是不断拉长 timeout。
+- 动态页面可适当增大 `navigation_wait`。
+- 固定延时使用 `sleep`，不要给 `wait` 写一个并不存在的 selector。
+- 优先重新确认稳定 CSS，而不是无限拉长 timeout。
 
 ### 运营商选择找不到
 
 - 原生 `<select>` 用 `select`。
 - div/span 自定义下拉用 `click_select`。
 - `option_selector` 是选项搜索范围，不是运营商值。
-- 页面确实可能没有运营商选择时设 `required:false`。
+- 页面确实可能没有运营商选择时设置 `required:false`。
 
 ### 后续步骤拿不到 OCR/eval 结果
 
@@ -533,4 +560,4 @@ store_as: "ticket"
 
 ### 想在任务中主动跳转
 
-直接使用 `goto` 或 `navigate`。旧文档中“系统不识别 navigate”的说法已过时。
+直接使用 `goto` 或 `navigate`。旧文档中“系统不识别 navigate”的说法已经过时。
