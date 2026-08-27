@@ -5,11 +5,13 @@
 //! 新连接建立时立即发送当前状态快照（首帧同步）。
 //! 多标签页共存：所有页面同时订阅同一广播通道，互不顶替。
 
+use std::path::Path;
 use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
+use base64::Engine;
 use serde::Serialize;
 
 use super::state::{AppState, LogEntry};
@@ -83,6 +85,96 @@ fn record_frontend_log(data: &serde_json::Value) {
         }
         _ => tracing::info!(target: "frontend", scope = %scope, "{message}{meta_str}"),
     }
+}
+
+/// 单张调试截图经 WebSocket 内联时的最大原始字节数。
+///
+/// 截图仅用于本机调试面板；限制 8MiB 避免 full_page 极端页面把单条广播消息
+/// 膨胀到数十 MiB。超过上限时仍转发截图事件元数据，但不附带 `url`。
+const DEBUG_SCREENSHOT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 从 Worker 提供的本地路径中提取可安全回读的截图文件名。
+///
+/// 浏览器端绝不接触绝对路径；只允许 ASCII 文件名和 Playwright 实际输出的
+/// PNG/JPEG 后缀，后续固定拼接到 `<base>/python_worker/debug`。
+fn debug_screenshot_filename(raw_path: &str) -> Option<String> {
+    let name = Path::new(raw_path).file_name()?.to_str()?;
+    if name.is_empty() || name.len() > 160 || name.contains("..") {
+        return None;
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return None;
+    }
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg").then(|| name.to_string())
+}
+
+/// 将 Bridge 的截图事件从 `{path}` 转换为浏览器可直接显示的 `{filename,url}`。
+///
+/// 安全边界：
+/// - 丢弃 Worker 绝对路径，只保留 basename；
+/// - 只从固定 `python_worker/debug` 目录回读，不跟随符号链接；
+/// - 限制文件大小并校验 PNG/JPEG magic bytes；
+/// - 图片通过已鉴权 WebSocket 内联为 `data:` URL，不新增匿名 HTTP 文件接口。
+async fn prepare_bridge_event(text: &str, state: &AppState) -> String {
+    let Ok(mut envelope) = serde_json::from_str::<serde_json::Value>(text) else {
+        return text.to_string();
+    };
+    if envelope.get("type").and_then(|v| v.as_str()) != Some("screenshot") {
+        return text.to_string();
+    }
+
+    let Some(data) = envelope.get_mut("data").and_then(|v| v.as_object_mut()) else {
+        return serde_json::to_string(&envelope).unwrap_or_default();
+    };
+    let raw_path = data
+        .remove("path")
+        .and_then(|v| v.as_str().map(str::to_string));
+    let Some(filename) = raw_path
+        .as_deref()
+        .and_then(debug_screenshot_filename)
+        .or_else(|| {
+            data.get("filename")
+                .and_then(|v| v.as_str())
+                .and_then(debug_screenshot_filename)
+        })
+    else {
+        return serde_json::to_string(&envelope).unwrap_or_default();
+    };
+    data.insert("filename".into(), filename.clone().into());
+
+    let debug_dir = state
+        .config
+        .base_path()
+        .join("python_worker")
+        .join("debug");
+    let path = debug_dir.join(&filename);
+    let Ok(meta) = tokio::fs::symlink_metadata(&path).await else {
+        return serde_json::to_string(&envelope).unwrap_or_default();
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > DEBUG_SCREENSHOT_MAX_BYTES {
+        return serde_json::to_string(&envelope).unwrap_or_default();
+    }
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return serde_json::to_string(&envelope).unwrap_or_default();
+    };
+    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else {
+        return serde_json::to_string(&envelope).unwrap_or_default();
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    data.insert("url".into(), format!("data:{mime};base64,{encoded}").into());
+    serde_json::to_string(&envelope).unwrap_or_default()
 }
 
 /// Ping 定时器间隔（30 秒）
@@ -188,6 +280,7 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
             msg = ws_rx.recv() => {
                 match msg {
                     Ok(text) => {
+                        let text = prepare_bridge_event(&text, &state).await;
                         if !send_msg(&mut socket, Message::Text(text.into())).await {
                             break;
                         }
@@ -238,5 +331,29 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::debug_screenshot_filename;
+
+    #[test]
+    fn debug_screenshot_filename_strips_parent_path() {
+        assert_eq!(
+            debug_screenshot_filename(r"C:\\app\\python_worker\\debug\\debug_123.png"),
+            Some("debug_123.png".into())
+        );
+        assert_eq!(
+            debug_screenshot_filename("/opt/app/python_worker/debug/step_login.jpg"),
+            Some("step_login.jpg".into())
+        );
+    }
+
+    #[test]
+    fn debug_screenshot_filename_rejects_unsafe_names() {
+        assert_eq!(debug_screenshot_filename("../secret.png"), Some("secret.png".into()));
+        assert_eq!(debug_screenshot_filename("bad<script>.png"), None);
+        assert_eq!(debug_screenshot_filename("shot.svg"), None);
     }
 }
