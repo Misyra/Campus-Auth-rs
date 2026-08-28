@@ -220,8 +220,8 @@ pub struct EnvironmentStatus {
     pub last_error: Option<String>,
 }
 
-/// 引导互斥门（F1）：串行化并发的 `ensure_capability` / `retry_install` /
-/// OCR 依赖同步 / 显式 Playwright 浏览器安装
+/// 引导互斥门（F1）：串行化并发的 `ensure_capability` / `ensure_python_runtime` /
+/// `retry_install` / OCR 依赖同步 / 显式 Playwright 浏览器安装
 ///
 /// 此前三处调用（tasks/executor、web/routes/ocr、web/routes/system）可并发
 /// check-then-act 触发 bootstrap，踩踏同一 `.venv` 与固定临时名（uv.zip.tmp /
@@ -487,6 +487,33 @@ impl EnvironmentManager {
     /// Python 解释器绝对路径
     pub fn python_path(&self) -> PathBuf {
         self.worker_project_path.join(PYTHON_EXE_RELATIVE)
+    }
+
+    /// 项目内 Python 运行时是否就绪。
+    pub fn python_runtime_ready(&self) -> bool {
+        self.status
+            .read()
+            .expect("EnvironmentStatus 读锁中毒")
+            .python_ready
+    }
+
+    /// 确保项目内 Python 运行时就绪，只准备 uv + venv，不安装 Playwright 浏览器。
+    ///
+    /// 与完整浏览器引导共用 BootstrapGate：若两类首次使用并发发生，只允许一轮
+    /// 环境写操作进入 `.venv`，等待者获得锁后会按 python_ready 再次双检。
+    pub async fn ensure_python_runtime(&self) -> Result<(), EnvironmentError> {
+        self.bootstrap_gate
+            .ensure(
+                || self.python_runtime_ready(),
+                || async {
+                    let cancel = self.begin_install_generation();
+                    bootstrap::bootstrap_python_runtime(self, &cancel).await?;
+                    self.write_status(|s| s.stage = BootstrapStage::Done);
+                    self.report_progress("python_ready", PROGRESS_VENV_SYNC.1, "Python 环境就绪");
+                    Ok(())
+                },
+            )
+            .await
     }
 
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导
