@@ -433,6 +433,10 @@ fn normalize_playwright_browser(browser: Option<&str>) -> Result<String, ApiErro
     }
 }
 
+fn should_explicitly_install_after_ensure(browser: &str, core_was_ready: bool) -> bool {
+    browser != "chromium" || core_was_ready
+}
+
 /// POST /api/install/playwright — 安装 Playwright 管理浏览器
 ///
 /// `?browser=chromium|firefox|webkit`；省略参数保持旧行为，默认 Chromium。
@@ -444,13 +448,16 @@ pub async fn install_playwright(
     let browser = normalize_playwright_browser(params.browser.as_deref())?;
     let env = environment.clone();
     let install_target = browser.clone();
+    let core_was_ready = environment.status().capability_ready;
     tokio::spawn(async move {
         if let Err(e) = env.ensure_capability().await {
             tracing::error!("Playwright 核心环境安装失败: {e}");
             return;
         }
-        if let Err(e) = env.install_playwright_browser(&install_target).await {
-            tracing::error!("Playwright {install_target} 安装失败: {e}");
+        if should_explicitly_install_after_ensure(&install_target, core_was_ready) {
+            if let Err(e) = env.install_playwright_browser(&install_target).await {
+                tracing::error!("Playwright {install_target} 安装失败: {e}");
+            }
         }
     });
     Ok(data(serde_json::json!({
@@ -568,6 +575,14 @@ mod tests {
             normalize_playwright_browser(Some("chrome")),
             Err(ApiError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn playwright_browser_install_decision_avoids_first_chromium_duplicate() {
+        assert!(!should_explicitly_install_after_ensure("chromium", false));
+        assert!(should_explicitly_install_after_ensure("chromium", true));
+        assert!(should_explicitly_install_after_ensure("firefox", false));
+        assert!(should_explicitly_install_after_ensure("webkit", false));
     }
 
     // ============ tracing JSON 日志解析 ============
