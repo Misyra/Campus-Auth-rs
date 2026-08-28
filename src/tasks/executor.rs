@@ -63,6 +63,11 @@ pub struct TaskExecutor {
     lock_registry: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
+/// 仅 `.py` 且未指定自定义解释器时使用项目内 Python。
+fn uses_project_python(ext: &str, binary_path: Option<&str>) -> bool {
+    ext == "py" && binary_path.is_none_or(|path| path.trim().is_empty())
+}
+
 impl TaskExecutor {
     /// 构造执行器。`base_path` 即任务根目录（`tasks/`），脚本位于其 `scripts/` 子目录
     pub fn new(
@@ -219,6 +224,15 @@ impl TaskExecutor {
             .to_lowercase();
         if !is_supported_ext(&ext) {
             return Err(TaskError::UnsupportedExtension(ext));
+        }
+
+        // 默认项目 Python 来自 python_worker/.venv；发布包不携带该目录，首次使用时
+        // 只准备 uv + venv，不为了脚本任务额外安装 Playwright Chromium。
+        if uses_project_python(&ext, cfg.binary_path.as_deref()) {
+            self.env
+                .ensure_python_runtime()
+                .await
+                .map_err(|e| TaskError::Environment(e.to_string()))?;
         }
 
         // 构建命令
@@ -848,5 +862,20 @@ mod tests {
         for ext in ["ps1", "txt", "", "js"] {
             assert!(!is_supported_ext(ext), "{ext} 不应受支持");
         }
+    }
+}
+
+#[cfg(test)]
+mod python_runtime_tests {
+    use super::uses_project_python;
+
+    #[test]
+    fn uses_project_python_only_for_default_python() {
+        assert!(uses_project_python("py", None));
+        assert!(uses_project_python("py", Some("")));
+        assert!(uses_project_python("py", Some("   ")));
+        assert!(!uses_project_python("py", Some("C:/Python312/python.exe")));
+        assert!(!uses_project_python("bat", None));
+        assert!(!uses_project_python("exe", None));
     }
 }

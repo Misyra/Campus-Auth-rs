@@ -9,20 +9,14 @@ use crate::environment::{
     PROGRESS_UV_DOWNLOAD, PROGRESS_VENV_SYNC,
 };
 
-/// 引导安装完整浏览器自动化能力（uv -> Python venv -> Playwright）
+/// 引导轻量 Python 运行时（uv -> Python venv）。
 ///
-/// 三阶段流程：
-/// 1. 确保 uv 就绪（下载或跳过）
-/// 2. 确保 Python 虚拟环境就绪（uv sync 或跳过）
-/// 3. 安装 Playwright Chromium 浏览器
-///
-/// Git 不属于浏览器自动化核心能力。开发者模式只检测系统/已有 Git，
-/// 引导流程不会隐式下载 MinGit。
-pub async fn bootstrap_capability(
+/// 供默认项目 Python 脚本首次执行使用；不会安装 Playwright 浏览器。
+pub async fn bootstrap_python_runtime(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    tracing::info!("开始引导浏览器自动化能力...");
+    tracing::info!("开始引导 Python 运行时...");
 
     // 先做一次快速检查，跳过已就绪的阶段
     check_environment(mgr).await?;
@@ -77,6 +71,19 @@ pub async fn bootstrap_capability(
     if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
     }
+
+    Ok(())
+}
+
+/// 引导安装完整浏览器自动化能力（uv -> Python venv -> Playwright）。
+///
+/// Python 运行时阶段与脚本执行共用，避免维护两套 uv / venv 引导逻辑。
+pub async fn bootstrap_capability(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    tracing::info!("开始引导浏览器自动化能力...");
+    bootstrap_python_runtime(mgr, cancel).await?;
 
     // ── 阶段 3: 安装 Playwright Chromium 浏览器 ──
     // 核心自动化能力只要求 Chromium；Firefox/WebKit 为可选浏览器，
