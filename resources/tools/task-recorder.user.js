@@ -138,7 +138,7 @@
   function isLikelyCaptchaInput(el) {
     if (!el) return false;
     if (isElementCaptcha(el)) return true;
-    return /captcha|verify|verification|checkcode|randcode|validcode|vcode|验证码|校验码|图形码/.test(inputSemanticSignal(el));
+    return /captcha|verify|verification|checkcode|randcode|validcode|vcode|otp|one[-_ ]?time[-_ ]?code|sms[-_ ]?code|auth[-_ ]?code|security[-_ ]?code|验证码|校验码|图形码|短信码/.test(inputSemanticSignal(el));
   }
 
   function isLikelyLoginForm(el) {
