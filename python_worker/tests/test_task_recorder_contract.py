@@ -82,3 +82,11 @@ def test_recorder_smart_detect_listeners_are_not_duplicated_on_reopen() -> None:
     source = _source()
     # createPanel 会在面板关闭后重建；全局 input/change 监听必须有一次性注册护栏。
     assert "_smartDetectListenersAttached" in source
+
+
+def test_recorder_smart_detect_listeners_do_nothing_when_inactive() -> None:
+    source = _source()
+    # 一次性 document 监听会跨面板生命周期存在，因此回调必须同时检查 active + recording。
+    assert source.count("if (!state.active || !state.recording) return;") >= 2
+    deactivate = _function_body(source, "deactivate")
+    assert "state.currentStepType = null" in deactivate
