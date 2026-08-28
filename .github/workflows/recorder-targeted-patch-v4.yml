@@ -1,0 +1,57 @@
+name: recorder-targeted-patch-v4
+
+on:
+  push:
+    branches:
+      - fix/task-recorder-contract
+
+permissions:
+  contents: write
+
+jobs:
+  patch-recorder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fix/task-recorder-contract
+          fetch-depth: 0
+
+      - name: 修复 reveal 面板剩余 raw HTML
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('resources/tools/task-recorder.user.js')
+          source = path.read_text(encoding='utf-8')
+          replacements = [
+              (
+                  "elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : '',",
+                  "elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : '',",
+              ),
+              (
+                  "elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || '',",
+                  "elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ''; })(),",
+              ),
+          ]
+          for old, new in replacements:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one reveal anchor, got {count}: {old}')
+              source = source.replace(old, new, 1)
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: 校验 userscript 语法
+        run: node --check resources/tools/task-recorder.user.js
+
+      - name: 提交并移除临时 workflow
+        shell: bash
+        run: |
+          git config user.name "Misyra"
+          git config user.email "140050141+Misyra@users.noreply.github.com"
+          git add resources/tools/task-recorder.user.js
+          git rm .github/workflows/recorder-targeted-patch-v4.yml
+          git commit -m "fix: 补齐录制器提示词脱敏"
+          git push origin HEAD:fix/task-recorder-contract
