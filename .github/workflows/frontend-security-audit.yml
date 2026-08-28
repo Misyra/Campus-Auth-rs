@@ -5,11 +5,17 @@ on:
     branches:
       - chore/frontend-security-audit
 
+permissions:
+  contents: write
+
 jobs:
-  audit:
+  audit-fix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: chore/frontend-security-audit
+          fetch-depth: 0
 
       - name: 安装 Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -18,35 +24,32 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: 安装锁定依赖
-        working-directory: frontend
-        run: npm ci
-
-      - name: 输出 npm audit 依赖链
+      - name: 安装并显示漏洞依赖链
         working-directory: frontend
         shell: bash
         run: |
-          npm audit --json > audit.json || true
-          node - <<'NODE'
-          const audit = require('./audit.json');
-          console.log('AUDIT_METADATA=' + JSON.stringify(audit.metadata?.vulnerabilities || {}));
-          for (const [name, v] of Object.entries(audit.vulnerabilities || {})) {
-            console.log(JSON.stringify({
-              name,
-              severity: v.severity,
-              direct: v.isDirect,
-              range: v.range,
-              nodes: v.nodes,
-              via: (v.via || []).map(x => typeof x === 'string' ? x : ({
-                source: x.source,
-                name: x.name,
-                severity: x.severity,
-                title: x.title,
-                url: x.url,
-                range: x.range,
-              })),
-              effects: v.effects,
-              fixAvailable: v.fixAvailable,
-            }));
-          }
-          NODE
+          npm ci
+          npm ls brace-expansion nanoid postcss --all || true
+
+      - name: 最小修复 lockfile
+        working-directory: frontend
+        run: npm audit fix --package-lock-only
+
+      - name: 验证构建与测试
+        working-directory: frontend
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm audit --audit-level=high
+
+      - name: 提交 lockfile 修复并移除审计 workflow
+        shell: bash
+        run: |
+          git config user.name "Misyra"
+          git config user.email "140050141+Misyra@users.noreply.github.com"
+          git add frontend/package-lock.json
+          git rm .github/workflows/frontend-security-audit.yml
+          git commit -m "fix: 修复前端传递依赖安全告警"
+          git push origin HEAD:chore/frontend-security-audit
