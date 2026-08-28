@@ -11,6 +11,34 @@ use crate::environment::{
     UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME, UV_MIN_VERSION, UV_RELEASES_BASE, UV_SYNC_TIMEOUT, UV_TARGET,
 };
 
+/// 等待环境子进程，同时响应用户取消与阶段超时。
+///
+/// `kill_on_drop(true)` 保证 select/timeout 放弃 `output()` future 时，已经 spawn 的
+/// 子进程不会脱离 Rust 任务继续占用 `.venv`、缓存目录或安装锁。
+#[derive(Debug)]
+pub(crate) enum CommandOutputError {
+    Cancelled,
+    Timeout,
+    Io(std::io::Error),
+}
+
+pub(crate) async fn command_output_with_cancel(
+    mut cmd: tokio::process::Command,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<std::process::Output, CommandOutputError> {
+    cmd.kill_on_drop(true);
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(CommandOutputError::Cancelled),
+        result = tokio::time::timeout(timeout, cmd.output()) => match result {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(error)) => Err(CommandOutputError::Io(error)),
+            Err(_) => Err(CommandOutputError::Timeout),
+        },
+    }
+}
+
 /// 确定 uv 可执行文件路径：本地 `environment/uv.exe` 存在则用本地路径，否则回退到
 /// PATH 中的 `uv`（`Command::new("uv")` 自动走 PATH 解析）。
 ///
@@ -439,21 +467,21 @@ async fn run_uv_sync_with_ocr(
     if include_ocr {
         cmd.arg("--extra").arg("ocr");
     }
-    let cmd_future = cmd
-        .env("UV_PROJECT_ENVIRONMENT", &venv_path)
-        .current_dir(mgr.base_path())
-        .output();
+    cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .current_dir(mgr.base_path());
 
-    let output = tokio::time::timeout(UV_SYNC_TIMEOUT, cmd_future)
-        .await
-        .map_err(|_| EnvironmentError::UvSyncTimeout {
-            timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
-        })?
-        .map_err(EnvironmentError::UvExtractFailed)?;
-
-    if cancel.is_cancelled() {
-        return Err(EnvironmentError::Cancelled);
-    }
+    let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
+        Ok(output) => output,
+        Err(CommandOutputError::Cancelled) => return Err(EnvironmentError::Cancelled),
+        Err(CommandOutputError::Timeout) => {
+            return Err(EnvironmentError::UvSyncTimeout {
+                timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
+            });
+        }
+        Err(CommandOutputError::Io(error)) => {
+            return Err(EnvironmentError::UvExtractFailed(error));
+        }
+    };
 
     if output.status.success() {
         Ok(())
@@ -590,6 +618,9 @@ async fn download_text_with_mirrors(
 /// 构造 uv 子进程 Command（Windows 上隐藏控制台窗口，避免环境引导弹黑窗）
 pub(crate) fn uv_command(uv_exe: &std::path::Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(uv_exe);
+    // Tokio 默认 drop Child 不会结束子进程；环境安装命令一律在 future 被取消/超时
+    // 时终止，避免后台残留 uv/playwright 继续修改同一环境。
+    cmd.kill_on_drop(true);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -603,6 +634,45 @@ mod tests {
     use super::*;
     use crate::status::StatusManager;
     use std::sync::Arc;
+
+    #[test]
+    fn cancellable_command_child_process() {
+        let Ok(marker) = std::env::var("CAMPUS_AUTH_CANCEL_CHILD_MARKER") else {
+            return;
+        };
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::fs::write(marker, b"finished").unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_command_output_with_cancel_kills_inflight_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("child-finished.marker");
+        let test_exe = std::env::current_exe().unwrap();
+        let mut cmd = uv_command(&test_exe);
+        cmd.arg("cancellable_command_child_process")
+            .arg("--nocapture")
+            .env("CAMPUS_AUTH_CANCEL_CHILD_MARKER", &marker);
+
+        let cancel = CancellationToken::new();
+        let cancel_later = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cancel_later.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let result =
+            command_output_with_cancel(cmd, std::time::Duration::from_secs(10), &cancel).await;
+        assert!(matches!(result, Err(CommandOutputError::Cancelled)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "取消应快速结束等待"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!marker.exists(), "被取消的子进程不得继续运行到写入完成标记");
+    }
 
     /// URL 构造：zip 与 sha256 均指向主站对应文件
     #[test]
