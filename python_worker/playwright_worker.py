@@ -43,6 +43,24 @@ from variable_resolver import resolve
 
 logger = logging.getLogger(__name__)
 
+
+# Isolate Web Storage per top-level task/debug session while keeping context cookies.
+# A new Page gives each session fresh sessionStorage. The marker makes the init script
+# clear local/session storage only on the first document for each origin in that Page.
+_TASK_STORAGE_ISOLATION_SCRIPT = r"""
+(() => {
+  const marker = "__campus_auth_storage_isolated_v1__";
+  try {
+    if (sessionStorage.getItem(marker) === "1") return;
+  } catch (_) {}
+  try { localStorage.clear(); } catch (_) {}
+  try {
+    sessionStorage.clear();
+    sessionStorage.setItem(marker, "1");
+  } catch (_) {}
+})();
+"""
+
 # Worker 脚本所在目录：debug 截图等相对目录一律锚定到此，
 # 避免依赖 Rust spawn 继承的 CWD（未设 current_dir，可能是任意目录）
 _WORKER_DIR = Path(__file__).resolve().parent
@@ -523,6 +541,30 @@ class WorkerCore:
         page.on("dialog", lambda d: asyncio.ensure_future(self._handle_page_dialog(d)))
         return page
 
+    async def _prepare_session_page(self) -> Any:
+        """Create an isolated top-level Page while retaining BrowserContext cookies."""
+        if self._context is None:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "Browser context is not initialized")
+
+        # The worker has single-active-page semantics. Close all old/restored tabs so
+        # their sessionStorage/background scripts cannot bleed into the new session.
+        try:
+            old_pages = list(self._context.pages)
+        except Exception:
+            old_pages = [self._page] if self._page is not None else []
+        for old_page in old_pages:
+            await self._safe_close(old_page, "old session page")
+        self._page = None
+
+        page = await self._new_page()
+        try:
+            await page.add_init_script(_TASK_STORAGE_ISOLATION_SCRIPT)
+        except Exception:
+            await self._safe_close(page, "isolated page")
+            raise
+        self._page = page
+        return page
+
     async def _handle_page_dialog(self, dialog) -> None:
         """处理页面原生弹窗：自动确认并把弹窗文案推给前端。"""
         try:
@@ -684,10 +726,8 @@ class WorkerCore:
         start = time.perf_counter()
         self._session_type = "login"
         await self.ensure_browser({"browser_settings": bs})
-        if self._page is None or self._page.is_closed():
-            if self._context is None:
-                raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
-            self._page = await self._new_page()
+        # Top-level task boundary: keep context/cookies, replace the Page.
+        await self._prepare_session_page()
 
         context = self._make_context(
             self._page, variables, bs, cancel_event, screenshot_dir, task_config
@@ -696,24 +736,8 @@ class WorkerCore:
         if target:
             target = resolve(target, variables)
             nav_timeout = _to_ms(bs, "navigation_timeout", 15000)
-            # 重试复用：若页面已存在且 URL 已是目标，直接 reload（更轻、避免重新加载耗时）；
-            # 否则正常 goto 导航。设计目标：重试时不重新走完整导航流程，刷新页面即可重试登录动作。
-            try:
-                current_url = self._page.url
-            except Exception:
-                current_url = ""
-            if current_url and current_url.rstrip("/") == target.rstrip("/"):
-                # 目标地址可能包含账号、令牌或其他查询参数，日志只记录动作本身。
-                logger.info("重试复用页面：reload")
-                try:
-                    await self._page.reload(
-                        wait_until="domcontentloaded", timeout=nav_timeout
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"reload 失败，回退到 goto: {exc}")
-                    await self._navigate(self._page, target, nav_timeout)
-            else:
-                await self._navigate(self._page, target, nav_timeout)
+            # Fresh Page keeps the browser/context hot while enforcing storage isolation.
+            await self._navigate(self._page, target, nav_timeout)
             await self._wait_after_navigation(task_config, context)
 
         try:
@@ -874,10 +898,8 @@ class WorkerCore:
         try:
             task = TaskConfig.from_dict(task_raw)
             await self.ensure_browser({"browser_settings": bs})
-            if self._page is None or self._page.is_closed():
-                if self._context is None:
-                    raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
-                self._page = await self._new_page()
+            # Debug session is also a top-level storage-isolation boundary.
+            await self._prepare_session_page()
             variables = dict(task.variables or {})
             context = self._make_context(
                 self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
