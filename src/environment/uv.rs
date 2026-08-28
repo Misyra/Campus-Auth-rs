@@ -457,12 +457,17 @@ pub async fn install_ocr_dep(mgr: &EnvironmentManager) -> Result<(), Environment
         .await
         .map_err(EnvironmentError::UvExtractFailed)?;
     let marker = ocr_marker_path(mgr);
-    tokio::fs::write(&marker, b"enabled")
-        .await
-        .map_err(EnvironmentError::UvExtractFailed)?;
+    let had_marker = marker.is_file();
+    if !had_marker {
+        tokio::fs::write(&marker, b"enabled")
+            .await
+            .map_err(EnvironmentError::UvExtractFailed)?;
+    }
 
     if let Err(error) = run_uv_sync_with_ocr(mgr, true).await {
-        let _ = tokio::fs::remove_file(&marker).await;
+        if !had_marker {
+            let _ = tokio::fs::remove_file(&marker).await;
+        }
         return Err(error);
     }
 
