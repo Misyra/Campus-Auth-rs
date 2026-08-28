@@ -149,6 +149,56 @@ def test_pure_mode_keeps_context_options(monkeypatch):
     assert captured["viewport"] == {"width": 1024, "height": 768}
 
 
+
+def test_top_level_session_page_isolates_web_storage_without_clearing_cookies(monkeypatch):
+    core = WorkerCore()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.closed = False
+            self.init_scripts: list[str] = []
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def add_init_script(self, script: str) -> None:
+            self.init_scripts.append(script)
+
+    old_a = FakePage()
+    old_b = FakePage()
+    fresh = FakePage()
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.pages = [old_a, old_b]
+            self.clear_cookies_calls = 0
+
+        async def clear_cookies(self) -> None:
+            self.clear_cookies_calls += 1
+
+    context = FakeContext()
+    core._context = context
+    core._page = old_a
+
+    async def fake_new_page():
+        return fresh
+
+    monkeypatch.setattr(core, "_new_page", fake_new_page)
+    page = asyncio.run(core._prepare_session_page())
+
+    assert page is fresh
+    assert core._page is fresh
+    assert old_a.closed is True
+    assert old_b.closed is True
+    assert context.clear_cookies_calls == 0
+    assert len(fresh.init_scripts) == 1
+    script = fresh.init_scripts[0]
+    assert "localStorage.clear()" in script
+    assert "sessionStorage.clear()" in script
+    assert "sessionStorage.getItem(marker)" in script
+    assert "sessionStorage.setItem(marker" in script
+
+
 def test_login_system_variables_override_task_variables(monkeypatch):
     core = WorkerCore()
     captured: dict[str, str] = {}
