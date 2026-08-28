@@ -16,6 +16,7 @@ pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
         return false;
     }
     let mut cmd = tokio::process::Command::new(python_exe);
+    cmd.kill_on_drop(true);
     cmd.arg("--version");
     #[cfg(windows)]
     {
@@ -191,31 +192,39 @@ pub async fn install_playwright_browser(
             );
             tracing::info!("{}", msg);
             mgr.report_progress("installing_playwright", 70, &msg);
-            tokio::time::sleep(PLAYWRIGHT_INSTALL_RETRY_DELAY).await;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(EnvironmentError::Cancelled),
+                _ = tokio::time::sleep(PLAYWRIGHT_INSTALL_RETRY_DELAY) => {}
+            }
         }
 
-        // 执行 uv run playwright install chromium
-        let cmd_future = crate::environment::uv::uv_command(&uv_exe)
-            .args([
-                "run",
-                "--project",
-                &mgr.worker_project_path().to_string_lossy(),
-                "playwright",
-                "install",
-                browser,
-            ])
-            .env("UV_PROJECT_ENVIRONMENT", &venv_path)
-            .current_dir(mgr.base_path())
-            .output();
+        // 执行 uv run playwright install <browser>；取消/超时都会终止子进程。
+        let mut cmd = crate::environment::uv::uv_command(&uv_exe);
+        cmd.args([
+            "run",
+            "--project",
+            &mgr.worker_project_path().to_string_lossy(),
+            "playwright",
+            "install",
+            browser,
+        ])
+        .env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .current_dir(mgr.base_path());
 
-        let result = tokio::time::timeout(PLAYWRIGHT_INSTALL_TIMEOUT, cmd_future).await;
+        let result = crate::environment::uv::command_output_with_cancel(
+            cmd,
+            PLAYWRIGHT_INSTALL_TIMEOUT,
+            cancel,
+        )
+        .await;
 
         match result {
-            Ok(Ok(output)) if output.status.success() => {
+            Ok(output) if output.status.success() => {
                 tracing::info!("Playwright {browser} 安装成功");
                 return Ok(());
             }
-            Ok(Ok(output)) => {
+            Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 last_err_msg = format!(
@@ -231,7 +240,10 @@ pub async fn install_playwright_browser(
                     last_err_msg
                 );
             }
-            Ok(Err(e)) => {
+            Err(crate::environment::uv::CommandOutputError::Cancelled) => {
+                return Err(EnvironmentError::Cancelled);
+            }
+            Err(crate::environment::uv::CommandOutputError::Io(e)) => {
                 last_err_msg = e.to_string();
                 tracing::warn!(
                     "Playwright 安装 IO 错误 (尝试 {}/{}): {}",
@@ -240,7 +252,7 @@ pub async fn install_playwright_browser(
                     last_err_msg
                 );
             }
-            Err(_elapsed) => {
+            Err(crate::environment::uv::CommandOutputError::Timeout) => {
                 last_err_msg = format!("安装超时 (超过 {}s)", PLAYWRIGHT_INSTALL_TIMEOUT.as_secs());
                 tracing::warn!(
                     "{} (尝试 {}/{})",
