@@ -7,8 +7,12 @@ name = "campus-auth-worker"
 version = "5.0.0a1"
 source = { editable = "." }
 dependencies = [
-    { name = "ddddocr" },
     { name = "playwright" },
+]
+
+[package.optional-dependencies]
+ocr = [
+    { name = "ddddocr" },
 ]
 
 [package.dev-dependencies]
@@ -18,9 +22,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ddddocr", specifier = ">=1.6.1" },
+    { name = "ddddocr", marker = "extra == 'ocr'", specifier = ">=1.6.1" },
     { name = "playwright", specifier = ">=1.40" },
 ]
+provides-extras = ["ocr"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0" }]

@@ -44,7 +44,7 @@ pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), Enviro
     }
 
     // ── 阶段 2: 确保 Python 虚拟环境就绪 ──
-    // 仅创建 venv（基础依赖）；OCR 依赖由前端显式管理，不在此自动补装。
+    // OCR 是否随 venv 同步由用户持久启用标记决定；未启用时仅安装基础依赖。
     if !mgr.read_status().python_ready {
         mgr.write_status(|s| s.stage = BootstrapStage::SyncingVenv);
         mgr.report_progress(
