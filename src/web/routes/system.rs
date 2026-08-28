@@ -309,20 +309,22 @@ pub async fn apply_update(
 
 /// GET /api/browsers — 可用浏览器列表
 ///
-/// 返回基于配置的可用浏览器列表（自定义路径优先，其次 Playwright 内置浏览器）。
+/// Playwright 管理的浏览器按实际缓存分别探测；核心引导默认只安装 Chromium。
 pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let settings = state.config.load_settings_async().await;
-    let env_status = state.environment.status();
-    let playwright_installed = env_status.playwright_ready;
+    let chromium_installed =
+        crate::environment::bootstrap::playwright_browser_installed("chromium");
+    let firefox_installed = crate::environment::bootstrap::playwright_browser_installed("firefox");
+    let webkit_installed = crate::environment::bootstrap::playwright_browser_installed("webkit");
     let custom_path = &settings.global.browser.browser_custom_path;
     let edge_installed = is_edge_installed();
     let chrome_installed = is_chrome_installed();
     let mut browsers = vec![
-        serde_json::json!({ "name": "Chromium", "channel": "chromium", "engine": "chromium", "installed": playwright_installed }),
+        serde_json::json!({ "name": "Chromium", "channel": "chromium", "engine": "chromium", "installed": chromium_installed }),
         serde_json::json!({ "name": "Edge", "channel": "msedge", "engine": "chromium", "installed": edge_installed }),
         serde_json::json!({ "name": "Chrome", "channel": "chrome", "engine": "chromium", "installed": chrome_installed }),
-        serde_json::json!({ "name": "Firefox", "channel": "firefox", "engine": "firefox", "installed": playwright_installed }),
-        serde_json::json!({ "name": "WebKit", "channel": "webkit", "engine": "webkit", "installed": playwright_installed }),
+        serde_json::json!({ "name": "Firefox", "channel": "firefox", "engine": "firefox", "installed": firefox_installed }),
+        serde_json::json!({ "name": "WebKit", "channel": "webkit", "engine": "webkit", "installed": webkit_installed }),
     ];
     if !custom_path.is_empty() {
         browsers.insert(
@@ -643,7 +645,8 @@ mod tests {
     /// 检查失败：200 + error 字段（前端提示，非 5xx）
     #[tokio::test]
     async fn test_check_update_error_field() {
-        let v = run_check(MockOutcome::Err("网络超时".into())).await;
+        let v = run_check(MockOutcome::Err("网络超时".into()));
+        let v = v.await;
         let d = &v["data"];
         assert_eq!(d["has_update"], false);
         assert!(d["error"].as_str().unwrap().contains("网络超时"));

@@ -1,811 +1,563 @@
-# Campus-Auth 任务编写指南
+# Campus-Auth 浏览器任务编写指南
 
-本指南帮助你（或 AI）为 Campus-Auth 编写标准化的浏览器认证任务。任务以 JSON 格式定义，由 Playwright 驱动浏览器自动执行。
+本文以当前 Rust 任务保存校验与 Python Worker 的共同契约为准。任务使用 JSON 描述，由 Playwright 按顺序执行。
 
-## 目录
-
-1. [任务 JSON 完整结构](#任务-json-完整结构)
-2. [步骤公共字段](#步骤公共字段)
-3. [步骤类型详解](#步骤类型详解)
-4. [变量系统](#变量系统)
-5. [成功条件](#成功条件)
-6. [Frame 支持](#frame-支持)
-7. [选择器建议](#选择器建议)
-8. [自动导航](#自动导航)
-9. [完整示例](#完整示例)
-10. [最佳实践](#最佳实践)
-11. [常见问题](#常见问题)
-12. [步骤类型速查表](#步骤类型速查表)
-13. [分享你创建的任务](#分享你创建的任务)
-
----
-
-## 任务 JSON 完整结构
+## 1. 最小任务结构
 
 ```json
 {
   "name": "校园网登录",
-  "description": "适用于 XX 型号认证页面",
-  "metadata": {},
   "url": "{{LOGIN_URL}}",
   "timeout": 30000,
-  "variables": {
-    "username": "{{USERNAME}}",
-    "password": "{{PASSWORD}}",
-    "isp": "{{ISP}}"
-  },
-  "steps": [],
-  "on_success": { "message": "登录成功" },
-  "on_failure": { "message": "登录失败", "screenshot": true }
-}
-```
-
-### 顶层字段
-
-| 字段 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `name` | 是 | — | 任务名称，显示在任务列表中 |
-| `description` | 否 | `""` | 任务描述 |
-| `metadata` | 否 | `{}` | 自由结构的附加信息（作者、适配型号等），执行器不读取，建议放在靠前位置便于阅读 |
-| `url` | 否 | `""` | 自定义认证地址。**提交/分享任务时请留空**，由用户自行在系统中设置认证地址或手动填入 |
-| `timeout` | 否 | `30000` | 全局超时时间（毫秒） |
-| `variables` | 否 | `{}` | 任务级变量，支持 `{{VAR}}` 模板引用其他变量 |
-| `steps` | 是 | `[]` | 步骤列表，按顺序执行 |
-| `reveal_hidden` | 否 | `false` | 执行前强制显示所有隐藏输入框。通常无需开启——每个步骤在普通操作失败后会自动降级到强制模式处理隐藏元素 |
-| `step_delay` | 否 | `0.5` | 步骤间休眠时间（秒），上一步完成后 → 休眠 → 执行下一步。第一步前不休眠。值越小任务执行越快，但网络延迟较大时可适当增大 |
-| `navigation_wait` | 否 | `1` | 页面加载后额外等待时间（秒）。适用于页面加载后通过 AJAX 动态渲染表单的场景——等待时间不足会导致后续步骤找不到元素 |
-| ~~`success_conditions`~~ | ~~否~~ | — | ~~已废弃，系统不再使用，无需添加~~ |
-| `on_success` | 否 | `{}` | 成功时的处理，如 `{ "message": "登录成功" }` |
-| `on_failure` | 否 | `{}` | 失败时的处理，如 `{ "message": "登录失败", "screenshot": true }`。`screenshot` 默认值为 `true`（不设也会截图） |
-
-> **步骤间延时：** 默认情况下，执行器在每一步执行完后会休眠 0.5 秒，为页面渲染留出缓冲。你可以在任务 JSON 顶层设置 `step_delay` 字段来调整这个间隔。
-
-> **页面加载等待：** 如果认证页面在 HTML 加载完成后通过 AJAX 动态渲染表单（如 ePortal 的 `fillData()` / `getServices()`），自动导航完成后立即执行步骤可能找不到元素。`navigation_wait`（默认 1 秒）控制页面加载后的额外等待时间。如果 1 秒不够，可适当增大到 3-5 秒。
-
----
-
-## 步骤公共字段
-
-所有步骤类型都支持以下字段：
-
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| `id` | 是 | 唯一标识，仅支持字母、数字、下划线和连字符，长度不超过 64，建议用描述性名称如 `fill_username`、`click_login` |
-| `type` | 是 | 步骤类型 |
-| `description` | 否 | 步骤描述，会输出到日志 |
-| `timeout` | 否 | 超时时间（毫秒），默认值因类型而异 |
-| `frame` | 否 | 目标 frame 的 name、URL 片段或 CSS 选择器（字符串，不支持布尔值），用于 frameset/iframe 页面 |
-| `required` | 否 | 设为 `true` 时，元素/选项未找到则步骤失败（适用于 `select`、`click_select` 等自带容错的步骤），默认 `false` |
-
-**扩展字段（extra）：** 步骤中任何未被识别的字段会被自动收集并在序列化时保留，你可以在步骤中添加自定义字段而不影响执行逻辑。
-
----
-
-## 步骤类型详解
-
-### input — 文本输入
-
-在输入框中填写文本。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `selector` | 是 | — | 元素选择器，多个用逗号分隔 |
-| `value` | 是 | — | 输入值，支持 `{{变量}}` 模板 |
-| `clear` | 否 | `true` | 是否先清空输入框 |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-
-**隐藏输入框处理：** 部分校园网认证页面的输入框是隐藏的（`display:none`），有两种常见模式：
-
-- **假占位框模式**：可见的 `type="text"` 假占位框 + 隐藏的 `type="password"` 真实密码框
-- **readonly 占位框模式**：可见的 `readonly` tip 占位框 + 隐藏的真实输入框（账号和密码都隐藏）
-
-**自动降级（推荐）：** 执行器在普通输入失败后会自动降级到强制输入模式，无需额外配置。如果是 readonly 占位框模式，建议在输入步骤前加一个 `click` 步骤先点击 tip 占位框以触发门户的状态切换。
-
-**强制显示所有隐藏输入框：** 如果自动降级仍无法解决问题，可以在任务 JSON 顶层添加 `"reveal_hidden": true`，执行器会在步骤执行前强制将页面上所有隐藏的 input 显示出来。注意：这会同时显示验证码等本该隐藏的元素，可能导致部分校园网页面异常。
-
-**AJAX 动态渲染：** 如果页面在 HTML 加载后通过 AJAX 动态渲染表单，`reveal_hidden` 可能无效——因为执行器跑完 reveal 时 AJAX 回调还没返回，回调回来后又可能覆盖 reveal 的效果。此时应同时设置 `"navigation_wait": 3`（秒），等待 AJAX 完成后再执行步骤。
-
-```json
-{
-  "id": "fill_username",
-  "type": "input",
-  "description": "输入账号",
-  "selector": "input[name='DDDDD'], #username",
-  "value": "{{USERNAME}}",
-  "clear": true
-}
-```
-
-```json
-{
-  "id": "fill_password",
-  "type": "input",
-  "description": "输入密码",
-  "selector": "#password",
-  "value": "{{PASSWORD}}"
-}
-```
-
-### click — 点击元素
-
-点击页面元素。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `selector` | 是 | — | 元素选择器，多个用逗号分隔 |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-
-**自动降级：** 如果普通 click 失败（元素不可见或不可交互），执行器会自动降级到强制模式，通过 JavaScript `dispatch_event('click')` 执行点击。此过程无需手动配置。
-
-```json
-{
-  "id": "click_login",
-  "type": "click",
-  "description": "点击登录按钮",
-  "selector": "input[name='0MKKey'], button[type='submit']"
-}
-```
-
-### select — 下拉选择
-
-选择下拉框选项。有特殊容错行为：
-
-- `value` 为空 → 步骤自动跳过（视为成功）
-- 找不到下拉框元素 → 步骤自动跳过（视为成功）
-- 精确匹配 `value` 失败 → 回退到按选项文本**子字符串包含**匹配（仅唯一匹配时采用，多个匹配时跳过以防误选）
-
-这些设计是为了兼容不同校园网页面中运营商选择框的差异。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `selector` | 是 | — | 下拉框选择器 |
-| `value` | 是 | — | 选项值，支持变量和模糊匹配 |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-
-```json
-{
-  "id": "select_carrier",
-  "type": "select",
-  "description": "选择运营商",
-  "selector": "select[name='ISP_select'], select[name='isp']",
-  "value": "{{ISP}}"
-}
-```
-
-### click_select — 点击式选择（自定义 div 下拉框）
-
-用于自定义 div/span 实现的非原生下拉框选择（常见于运营商选择）。先点击触发器展开列表，再按文字匹配点击选项。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `selector` | 是 | — | 触发器的 CSS 选择器（点击它展开下拉列表） |
-| `value` | 是 | — | 要选择的选项文本，支持 `{{ISP}}` 变量和子串模糊匹配 |
-| `option_selector` | 否 | — | 选项容器的 CSS 选择器（如 `.service-option`），限定文本搜索范围，避免误匹配 |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-
-**容错行为：**
-- `value` 为空 → 步骤自动跳过
-- 找不到触发器 → 步骤自动跳过
-- 找不到匹配的选项文本 → 步骤自动跳过
-
-**高级参数（通过 extra 传递）：**
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `select_delay` | `500` | 点击触发器后等待选项面板展开的延迟时间（毫秒） |
-
-```json
-{
-  "id": "select_carrier",
-  "type": "click_select",
-  "description": "选择运营商",
-  "selector": "#serviceSelector, .service-selector",
-  "value": "{{ISP}}",
-  "option_selector": ".service-option"
-}
-```
-
-### wait — 等待元素
-
-等待指定元素出现在页面上。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `selector` | 是 | — | 等待的元素选择器 |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-
-```json
-{
-  "id": "wait_result",
-  "type": "wait",
-  "description": "等待结果弹出",
-  "selector": ".success, .error, #msg",
-  "timeout": 10000
-}
-```
-
-### wait_url — 等待 URL 匹配
-
-等待当前 URL 匹配指定正则表达式。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `pattern` | 是 | — | URL 正则表达式 |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-
-```json
-{
-  "id": "wait_redirect",
-  "type": "wait_url",
-  "description": "等待跳转到成功页",
-  "pattern": "success|welcome",
-  "timeout": 10000
-}
-```
-
-### eval — JavaScript 求值
-
-执行 JavaScript 表达式并可选保存结果到变量。`code` 字段是 `script` 的已废弃别名，仍然支持但建议使用 `script`。`custom_js` 步骤类型已合并到 `eval`，旧任务中的 `custom_js` 仍会被自动映射到 `eval` 执行。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `script` | 是 | — | JavaScript 代码（支持变量模板） |
-| `store_as` | 否 | — | 结果存储到的变量名，后续步骤可用 `{{变量名}}` 引用 |
-
-```json
-{
-  "id": "check_login_status",
-  "type": "eval",
-  "description": "检查登录状态",
-  "script": "() => { const text = document.body.innerText; return text.includes('成功') || text.includes('已连接'); }",
-  "store_as": "login_success"
-}
-```
-
-> **安全提示：** 包含 `eval` 步骤的任务在 Web 控制台保存时会弹出安全确认对话框，显示待执行的代码内容，需要用户明确确认。
-
-### screenshot — 截图
-
-截取当前页面截图。截图保存到 `debug/` 目录下按日期分类的子目录中。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `path` | 否 | 自动生成 | 截图保存路径（仅文件名生效，目录由系统管理） |
-
-```json
-{ "id": "screenshot_after", "type": "screenshot", "description": "截图保存" }
-```
-
-### sleep — 休眠等待
-
-暂停指定时间。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `duration` | 否 | `1000` | 休眠时间（毫秒），最大 300000 |
-
-```json
-{ "id": "wait_load", "type": "sleep", "description": "等待加载", "duration": 2000 }
-```
-
-### goto — 导航（navigate 别名）
-
-导航到指定 URL，与 `navigate` 共用实现。目标 URL 优先级：`extras.url` → `value` → `selector`；支持 `wait_until`（`load`/`domcontentloaded`/`networkidle`/`commit`，非法回退 `load`）。
-
-```json
-{ "id": "go_login", "type": "goto", "url": "{{LOGIN_URL}}", "wait_until": "domcontentloaded" }
-```
-
-### assert_text — 文本断言
-
-等待 `document.body.innerText` 包含指定文本。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `value` | 是 | — | 待匹配文本（经 `wait_for_function` 的 `arg` 参数传递） |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-
-```json
-{ "id": "assert_ok", "type": "assert_text", "value": "登录成功" }
-```
-
-### ocr — 验证码识别
-
-使用 ddddocr 识别验证码图片。截取 `selector` 指定的图片元素，进行 OCR 识别，结果自动填入 `target_selector` 输入框或存储到 `store_as` 变量。
-
-| 参数 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `selector` | 是 | — | 验证码图片元素选择器 |
-| `target_selector` | 否 | — | 验证码输入框选择器，识别后自动填入 |
-| `store_as` | 否 | — | 识别结果存储到的变量名 |
-| `char_range` | 否 | — | 限定 OCR 识别的字符范围，提高准确度（见下方说明） |
-| `timeout` | 否 | `10000` | 超时时间（毫秒） |
-| `frame` | 否 | — | 验证码所在的 frame（字符串，不支持布尔值），可选值为 frame name、URL 片段或 CSS 选择器 |
-| `old` | 否 | `false` | 使用旧版 OCR 模型（见下方说明） |
-
-**关于 `char_range`：**
-
-`char_range` 用于限定 ddddocr 识别时考虑的字符范围，排除不相关的字符以提高准确度。传入**字符串**限定允许的字符：
-- `"0123456789"`：纯数字
-- `"abcdefghijklmnopqrstuvwxyz"`：纯小写英文
-- `"0123456789+-*/=xX÷"`：数字 + 运算符
-
-用法举例：
-- 纯数字验证码 → `"0123456789"`
-- 数学运算验证码 → `"0123456789+-*/=xX÷"`
-- 大写字母 + 数字 → `"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"`
-
-```json
-// 纯数字验证码
-{ "id": "ocr_captcha", "type": "ocr", "selector": "#captcha-img", "target_selector": "#captcha-input", "char_range": "0123456789" }
-
-// 数学运算验证码（数字 + 运算符）
-{ "id": "ocr_captcha", "type": "ocr", "selector": "#captcha-img", "store_as": "captcha_expr", "char_range": "0123456789+-*/=xX÷" }
-```
-
-> **提示：** 数学运算验证码建议配合 `store_as` + `eval` 两步使用——`ocr` 识别图片存入变量，`eval` 从变量读取算式并计算结果填入输入框。
->
-> **eval 脚本建议采用多重匹配策略：**
-> 1. **字符修正**：`x`/`X`→`*`、`o`/`O`→`0`、`l`/`I`/`|`→`1`、`÷`→`/`、中文数字→阿拉伯数字
-> 2. **末尾运算符修复**：OCR 可能把 `22-17` 识别成 `2217-`（运算符跑到末尾），检测末尾单个运算符后拆分数字并插入
-> 3. **标准匹配**：正则 `/(\d+)\s*([+\-*\/])\s*(\d+)/` 匹配 `数字 运算符 数字`
-> 4. **宽松匹配兜底**：分别提取所有数字和运算符，按出现顺序组合（处理运算符完全丢失，如 `2217`）
-
-**关于新旧模型：**
-
-ddddocr 内置两套模型，`old` 参数控制使用哪一套：
-
-| `old` | 模型 | 说明 |
-|-------|------|------|
-| `false`（默认） | 新版模型 | 通用场景 |
-| `true` | 旧版模型 | 部分校园网系统上识别率可能更高 |
-
-如果你的校园网验证码识别不准，可以尝试切换 `old` 参数值（true/false），或使用 `char_range` 限定字符范围。
-
-**三种使用模式：**
-
-```json
-// 模式一：自动填入（推荐）
-{ "id": "ocr_captcha", "type": "ocr", "selector": "#captcha-img", "target_selector": "#captcha-input" }
-
-// 模式二：存储到变量，后续步骤再填入
-{ "id": "ocr_captcha", "type": "ocr", "selector": "#captcha-img", "store_as": "captcha_code" }
-
-// 模式三：同时自动填入并存储
-{ "id": "ocr_captcha", "type": "ocr", "selector": "#captcha-img", "target_selector": "#captcha-input", "store_as": "captcha_code" }
-```
-
-**超时与错误处理：**
-- 找不到验证码图片元素或输入框时，步骤失败并返回错误信息
-- 建议 `timeout` 设置 >= 5000ms，给页面加载留足时间
-
----
-
-## 变量系统
-
-### 预定义变量
-
-| 变量 | 来源 | 说明 |
-|------|------|------|
-| `{{USERNAME}}` | 系统 | 校园网用户名 |
-| `{{PASSWORD}}` | 系统 | 校园网密码 |
-| `{{LOGIN_URL}}` | 系统 | 认证页面地址 |
-| `{{ISP}}` | 系统 | 运营商后缀 |
-| `{{url}}` | 任务 | 任务定义的 url 字段 |
-| `{{name}}` | 任务 | 任务名称 |
-| `{{description}}` | 任务 | 任务描述 |
-
-### 变量类型
-
-- **任务级变量：** 在任务 JSON 的 `variables` 字段中定义，支持模板语法引用其他变量
-- **运行时变量：** 通过 `eval` 步骤的 `store_as` 写入，仅在当前执行过程中有效
-
-### 模板语法
-
-使用 `{{变量名}}` 引用变量，可用于 `value`、`url`、`selector` 等任何字段。支持递归引用（最大 8 层深度），系统会自动检测循环引用并报错。
-
-```json
-{
-  "variables": {
-    "username": "{{USERNAME}}",
-    "full_user": "{{USERNAME}}{{ISP}}"
-  }
-}
-```
-
-### 变量解析优先级
-
-1. 运行时变量（`eval` 步骤的 `store_as` 产生的变量）
-2. 模板变量（认证地址、账号密码、运营商等运行时配置）
-3. 任务文件内 `variables` 字段
-
-未找到的变量会原样保留在输出中（不会报错）。
-
----
-
-## 成功判断
-
-系统统一使用网络连通性检测判断任务成功与否：任务步骤全部完成后，默认等待 5 秒（配置项 `post_login_delay`），然后自动检测网络是否可达。网络通 = 认证成功，网络断 = 认证失败。检测失败时会在日志中显示具体原因。
-
-> **注意：** 原有 `success_conditions` 字段已被废弃，不再参与成功判断。任务文件中无需再添加该字段。
-
----
-
-## Frame 支持
-
-部分校园网认证页面使用 `<frameset>` 或 `<iframe>` 嵌套结构，登录表单在子 frame 中。通过步骤的 `frame` 字段指定目标 frame，执行器会自动切换上下文后再查找元素。
-
-`frame` 值必须是字符串，可以是以下三种之一（按优先级依次尝试）：
-- **frame 的 name 属性**，如 `"main"`、`"loginFrame"`
-- **URL 匹配字符串**，如 `"url=user/unionautologin.do"`（匹配 frame.src 包含该片段）
-- **CSS 选择器**，如 `"iframe[name='login']"`、`"#frameId"`、`"frame:nth-of-type(2)"`
-
-> ⚠️ `frame` 不接收布尔值（`true`/`false`）。如果填写 `"frame": true`，系统会忽略该字段并回退到主页面执行。
-
-所有操作类步骤（`input`、`click`、`select`、`wait`、`ocr`）都支持 `frame` 字段。如果指定的 frame 找不到，系统会回退到主页面继续执行（不会直接失败）。
-
-```json
-{
-  "id": "fill_username",
-  "type": "input",
-  "description": "在 iframe 中输入账号",
-  "selector": "#username",
-  "value": "{{USERNAME}}",
-  "frame": "mainFrame"
-}
-```
-
----
-
-## 选择器建议
-
-- **优先使用稳定的属性**：`id`、`name` 等，避免使用易变的 `class`
-- **提供多个备选选择器**，逗号分隔提高兼容性：`"input[name='user'], #username, .login-user"`
-- 支持标准 CSS 选择器语法
-- 验证码图片通常用 `img[src*='captcha']`、`#captcha-img`、`.code-img`
-
----
-
-## 自动导航
-
-系统会在执行步骤前**自动导航**到认证地址，**无需在任务中添加 navigate 步骤**（系统不识别 navigate 步骤类型，旧任务如果包含 navigate 步骤需手动移除）。导航地址优先级：
-
-1. 任务 `url` 字段（支持变量模板）
-2. 系统设置的认证地址（`LOGIN_URL`）
-
-如果任务定义了 `url` 字段，执行时会用该值覆盖 `{{LOGIN_URL}}` 变量。
-
----
-
-## 完整示例
-
-### 标准登录任务
-
-```json
-{
-  "name": "校园网登录",
-  "description": "适用于标准 Portal 认证页面",
-  "metadata": {
-    "author": "your-name",
-    "device": "校园网设备型号",
-    "created": "2025-01-01"
-  },
-  "url": "{{LOGIN_URL}}",
-  "timeout": 30000,
-  "variables": {
-    "username": "{{USERNAME}}",
-    "password": "{{PASSWORD}}",
-    "isp": "{{ISP}}"
-  },
+  "navigation_wait": 1.0,
+  "step_delay": 0.5,
+  "variables": {},
   "steps": [
     {
       "id": "fill_username",
       "type": "input",
-      "description": "输入账号",
-      "selector": "input[name='DDDDD'], input[name='username'], #username",
-      "value": "{{username}}",
-      "clear": true
-    },
-    {
-      "id": "fill_password",
-      "type": "input",
-      "description": "输入密码",
-      "selector": "input[name='upass'], input[type='password'], #password",
-      "value": "{{password}}",
-      "clear": true
-    },
-    {
-      "id": "select_carrier",
-      "type": "select",
-      "description": "选择运营商",
-      "selector": "select[name='ISP_select'], select[name='isp']",
-      "value": "{{isp}}"
-    },
-    {
-      "id": "click_login",
-      "type": "click",
-      "description": "点击登录",
-      "selector": "input[name='0MKKey'], button[type='submit'], #login-btn"
-    }
-  ],
-  "on_success": { "message": "登录成功" },
-  "on_failure": { "message": "登录失败", "screenshot": true }
-}
-```
-
-### 精简登录任务
-
-利用自动导航的简化任务：
-
-```json
-{
-  "name": "精简登录",
-  "description": "适用于简单认证页面",
-  "url": "{{LOGIN_URL}}",
-  "timeout": 15000,
-  "steps": [
-    { "id": "fill_username", "type": "input", "selector": "#username", "value": "{{USERNAME}}" },
-    { "id": "fill_password", "type": "input", "selector": "#password", "value": "{{PASSWORD}}" },
-    { "id": "click_login", "type": "click", "selector": "#login-btn" }
-  ],
-  "on_success": { "message": "登录成功" },
-  "on_failure": { "message": "登录失败", "screenshot": true }
-}
-```
-
-### 带验证码的登录任务
-
-```json
-{
-  "name": "验证码登录",
-  "description": "需要输入验证码的校园网登录",
-  "url": "{{LOGIN_URL}}",
-  "timeout": 30000,
-  "steps": [
-    { "id": "fill_username", "type": "input", "selector": "#username", "value": "{{USERNAME}}" },
-    { "id": "fill_password", "type": "input", "selector": "#password", "value": "{{PASSWORD}}" },
-    {
-      "id": "ocr_captcha",
-      "type": "ocr",
-      "description": "识别验证码并填入",
-      "selector": "#captcha-img",
-      "target_selector": "#captcha-input",
-      "char_range": "0123456789"
-    },
-    { "id": "click_login", "type": "click", "selector": "#login-btn" }
-  ],
-  "on_success": { "message": "登录成功" },
-  "on_failure": { "message": "登录失败", "screenshot": true }
-}
-```
-
-### 带数学运算验证码的登录任务
-
-```json
-{
-  "name": "数学验证码登录",
-  "description": "需要计算数学运算验证码的校园网登录",
-  "url": "{{LOGIN_URL}}",
-  "timeout": 30000,
-  "steps": [
-    { "id": "fill_username", "type": "input", "selector": "#username", "value": "{{USERNAME}}" },
-    { "id": "fill_password", "type": "input", "selector": "#password", "value": "{{PASSWORD}}" },
-    {
-      "id": "ocr_captcha",
-      "type": "ocr",
-      "description": "识别数学验证码图片",
-      "selector": "#captchaCanvas",
-      "store_as": "captcha_expr",
-      "char_range": "0123456789+-*/=xX÷"
-    },
-    {
-      "id": "solve_captcha",
-      "type": "eval",
-      "description": "计算验证码结果并填入",
-      "script": "() => { let expr = '{{captcha_expr}}'; const cnMap={'一':'1','二':'2','三':'3','四':'4','五':'5','六':'6','七':'7','八':'8','九':'9','零':'0'}; expr=expr.replace(/[xX]/g,'*').replace(/[oO]/g,'0').replace(/[lI|]/g,'1').replace(/记/g,'1').replace(/÷/g,'/').replace(/[一二三四五六七八九零]/g,c=>cnMap[c]||c); const tail=expr.match(/^(\\d+)([+\\-*\\/])$/); if(tail){const n=tail[1],op=tail[2];const mid=Math.ceil(n.length/2);expr=n.slice(0,mid)+op+n.slice(mid);} let m=expr.match(/(\\d+)\\s*([+\\-*\\/])\\s*(\\d+)/); if(!m){const ops=expr.match(/[+\\-*\\/]/g);const nums=expr.match(/\\d+/g);if(nums&&nums.length>=2&&ops&&ops.length>=1)m=[null,nums[0],ops[0],nums[1]];} if(!m)return'NO_MATCH:'+expr; const a=parseInt(m[1]),b=parseInt(m[3]),op=m[2]; let r; if(op==='+')r=a+b; else if(op==='-')r=a-b; else if(op==='*')r=a*b; else r=b!==0?Math.floor(a/b):0; const v=r.toString(); const el=document.querySelector('#captchaInput'); if(el){el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));} return v; }",
-      "store_as": "captcha_result"
-    },
-    { "id": "click_login", "type": "click", "selector": "#login-btn" }
-  ],
-  "on_success": { "message": "登录成功" },
-  "on_failure": { "message": "登录失败", "screenshot": true }
-}
-```
-
-### 带 Frame 的登录任务
-
-```json
-{
-  "name": "iframe 登录",
-  "description": "登录表单在 iframe 中的认证页面",
-  "url": "{{LOGIN_URL}}",
-  "timeout": 30000,
-  "steps": [
-    {
-      "id": "fill_username",
-      "type": "input",
-      "description": "在 iframe 中输入账号",
-      "selector": "#username",
-      "value": "{{USERNAME}}",
-      "frame": "mainFrame"
-    },
-    {
-      "id": "fill_password",
-      "type": "input",
-      "description": "在 iframe 中输入密码",
-      "selector": "#password",
-      "value": "{{PASSWORD}}",
-      "frame": "mainFrame"
-    },
-    {
-      "id": "click_login",
-      "type": "click",
-      "description": "在 iframe 中点击登录",
-      "selector": "#login-btn",
-      "frame": "mainFrame"
-    }
-  ],
-  "on_success": { "message": "登录成功" },
-  "on_failure": { "message": "登录失败", "screenshot": true }
-}
-```
-
-### 带隐藏输入框的登录任务
-
-部分校园网认证页面的真实输入框是 `display:none` 的，页面上只有装饰性的 tip/占位元素。
-
-**推荐做法：** 无需额外配置——执行器在普通操作失败后会自动降级到强制模式处理隐藏输入框。如果自动降级不生效，再在任务 JSON 顶层添加 `"reveal_hidden": true`。
-
-```json
-{
-  "name": "隐藏输入框登录",
-  "description": "适用于隐藏输入框的认证页面",
-  "url": "{{LOGIN_URL}}",
-  "timeout": 30000,
-  "steps": [
-    {
-      "id": "fill_username",
-      "type": "input",
-      "description": "输入账号",
       "selector": "#username",
       "value": "{{USERNAME}}"
     },
     {
       "id": "fill_password",
       "type": "input",
-      "description": "输入密码",
       "selector": "#password",
       "value": "{{PASSWORD}}"
     },
     {
-      "id": "click_login",
+      "id": "submit",
       "type": "click",
-      "description": "点击登录按钮",
-      "selector": "#login_button"
+      "selector": "button[type='submit']"
     }
-  ],
-  "on_success": { "message": "登录成功" },
-  "on_failure": { "message": "登录失败", "screenshot": true }
+  ]
 }
 ```
 
-> **提示：** 无需 `reveal_hidden`，执行器会在 `fill()` 失败时自动降级到强制模式。如果自动降级不生效，再添加 `"reveal_hidden": true`。Campus-Auth 任务录制器（油猴脚本）的「隐藏检测」开关可以自动识别这种模式。
+## 2. 顶层字段
 
----
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `name` | `"未命名任务"` | 显示名称 |
+| `description` | `""` | 任务说明 |
+| `url` | `""` | 初始登录页；非空时执行器先自动导航 |
+| `timeout` | `30000` | 任务级总超时，毫秒；由 Rust 调用侧统一兜底 |
+| `navigation_wait` | `1.0` | 初始导航完成后的额外等待，秒 |
+| `step_delay` | `0.5` | 相邻步骤之间的等待，秒 |
+| `reveal_hidden` | `false` | 是否在执行前揭示隐藏输入元素 |
+| `variables` | `{}` | 任务自定义模板变量 |
+| `success_condition` | `""` | 指定一个 `store_as` 变量作为最终成功条件 |
+| `steps` | `[]` | 按顺序执行的步骤列表 |
+| `metadata` | 可选 | 自定义元数据，执行器不解释 |
+| `on_success` / `on_failure` | 可选 | 保留的结果处理配置 |
 
-## 最佳实践
+顶层 `url` 只负责第一次自动导航。多页面 SSO 或认证流程可以继续使用 `goto` / `navigate`。
 
-### 选择器编写
+## 3. 步骤公共字段
 
-- 使用多个备选选择器提高兼容性：
-  ```json
-  "selector": "input[name='username'], #username, .login-user"
-  ```
-- 优先使用稳定的属性（`id`、`name`），避免使用易变的 `class`
+```json
+{
+  "id": "step_id",
+  "type": "click",
+  "description": "可选描述",
+  "timeout": 10000,
+  "required": true,
+  "frame": "loginFrame"
+}
+```
 
-### 错误处理
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `id` | `""` | 步骤标识；正式任务应提供稳定且唯一的 ID |
+| `type` | 必填 | 步骤类型 |
+| `description` | `""` | 日志和调试界面显示的描述 |
+| `timeout` | 浏览器默认值 | 单步超时，毫秒 |
+| `required` | **`true`** | 步骤失败时是否终止任务 |
+| `frame` | 无 | frame name、`url=片段` 或 iframe/frame CSS 选择器 |
 
-- 设置合理的超时时间，网络慢时适当调大
-- 启用失败截图（`on_failure.screenshot: true`）便于调试
-- 提供清晰的步骤描述，方便排查问题
+未知字段会作为扩展字段保留，并由对应处理器按需读取，例如 `goto.wait_until`、`screenshot.full_page`、`click_select.select_delay`。
 
-### 变量使用
+## 4. 公开步骤类型
 
-- 将重复的值定义为变量，避免硬编码
-- 使用有意义的变量名
-- 避免变量循环引用（系统会检测并报错）
+Rust 保存层当前正式接受以下类型：
 
-### 任务分享
+```text
+input
+click
+select
+click_select
+wait
+wait_url
+eval
+screenshot
+sleep
+ocr
+custom_js
+navigate
+goto
+assert_text
+upload_file
+wait_for_selector
+```
 
-- **不要填写 `url` 字段**：分享或提交任务 JSON 时，将 `url` 留空或设为 `"{{LOGIN_URL}}"`，由用户自行在系统中设置认证地址。认证地址因学校/区域而异，硬编码会导致任务无法通用
+Python Worker 内部还保留 `evaluate`、`custom` 等历史兼容别名，但它们不是 Rust 保存 API 的公开类型。新任务请使用 `eval`；需要历史自定义脚本别名时使用 `custom_js`。
 
-### 步骤组织
+## 5. 变量系统
 
-- 为每个步骤设置 `description`
-- 使用有意义的步骤 ID（如 `input_username`、`click_login`）
-- 合理拆分复杂操作，每步只做一件事
+模板格式：
 
-### 成功判定
+```text
+{{VARIABLE_NAME}}
+```
 
-- 系统统一使用网络检测兜底判断成功，无需配置成功条件
-- 任务 JSON 中无需添加 `success_conditions` 字段
+常用系统变量：
 
----
+- `{{USERNAME}}`：当前 Profile 的账号
+- `{{PASSWORD}}`：当前 Profile 的密码
+- `{{ISP}}`：当前 Profile 的运营商
+- `{{LOGIN_URL}}`：当前认证地址
 
-## 常见问题
+变量优先级从低到高：
 
-**Q: 选择器怎么写？**
+1. 任务 `variables`
+2. 系统保留登录变量 `USERNAME` / `PASSWORD` / `ISP` / `LOGIN_URL`
+3. 前序步骤通过 `store_as` 产生的运行时结果
 
-A: 支持 CSS 选择器，多个选择器用逗号分隔。常用形式：
-- `input[name='username']` — 属性选择
-- `#username` — ID 选择
-- `.login-input` — 类选择
-- `button[type='submit']` — 组合选择
+因此任务自定义变量不能覆盖当前 Profile 的真实登录凭据；运行时结果可以在后续步骤中覆盖同名模板值。
 
-**Q: 变量不生效怎么办？**
+模板解析覆盖 `selector`、`value`、`frame`、`option_selector`、`target_selector`、`path`、`pattern`、脚本内容，以及扩展字段中的嵌套字符串，例如：
 
-A: 检查以下几点：
-1. 变量名是否正确（区分大小写）
-2. 模板语法是否正确（使用双大括号 `{{}}`）
-3. 变量来源是否正确：系统变量（账号、密码等）自动可用；任务变量需在任务 JSON 的 `variables` 字段中定义
+```json
+{
+  "id": "goto_next",
+  "type": "goto",
+  "url": "https://example.edu/next?ticket={{ticket}}"
+}
+```
 
-**Q: 如何判断登录成功？**
+`store_as` 保存原生 JavaScript/OCR 结果；插入字符串模板时稳定转换为字符串，其中 `null -> ""`、布尔值 -> `true/false`、对象/数组 -> JSON 字符串。
 
-A: 系统自动在网络检测成功后判定为登录成功，无需额外配置。网络检测失败通常表示密码错误或运营商不匹配。
+## 6. input — 输入文本
 
-**Q: 保存任务时弹出安全警告？**
+```json
+{
+  "id": "fill_username",
+  "type": "input",
+  "selector": "input[name='DDDDD'], #username",
+  "value": "{{USERNAME}}",
+  "clear": true
+}
+```
 
-A: 因为任务中包含 `eval` 步骤，该步骤可以执行任意 JavaScript 代码。系统会显示代码内容要求确认，确认代码安全后点击确认即可。
+- `selector`：目标输入框。
+- `value`：输入文本。
+- `clear`：默认 `true`，先清空再填写。
+- 普通 `fill` 失败后，执行器会为 attached/JavaScript 降级路径保留一部分单步 timeout，不让第一次尝试吞掉全部预算。
+- `reveal_hidden=true` 只适合特殊门户兼容，不建议默认开启。
 
-**Q: 内置任务和普通任务有什么区别？**
+## 7. click — 点击
 
-A: 内置任务是随项目分发的预设任务。你可以在内置任务的基础上复制、修改来创建自己的任务。
+```json
+{
+  "id": "click_login",
+  "type": "click",
+  "selector": "button[type='submit'], input[name='0MKKey']"
+}
+```
 
-**Q: 输入框是隐藏的（display:none）怎么办？**
+点击支持多个候选选择器。候选只在**顶层逗号**处分割，因此以下合法 CSS 不会被错误拆开：
 
-A: 部分校园网认证页面的真实输入框是隐藏的，页面上只显示占位 tip 或假输入框。解决方案：
+```text
+:is(.login,.submit)
+[data-value='a,b']
+```
 
-1. 无需额外配置——执行器会在普通输入失败时自动降级到强制模式（JS 原生 setter），通常直接可用
-2. 如果自动降级不生效，在任务 JSON 顶层添加 `"reveal_hidden": true`，执行器会在步骤执行前强制显示所有隐藏输入框。注意：这会同时显示验证码等本该隐藏的元素，可能导致部分页面异常
-3. 如果页面通过 AJAX 动态渲染表单（如 ePortal），`reveal_hidden` 可能无效——需要同时设置 `"navigation_wait": 3` 等待 AJAX 完成
-4. 使用 Campus-Auth 任务录制器（油猴脚本）的「隐藏检测」功能，打开 🔍 开关后点击占位区域即可自动识别
+普通 Playwright 点击失败后，会在剩余预算内尝试 attached + `dispatch_event("click")` 降级。
 
-详见上方「带隐藏输入框的登录任务」完整示例。
+历史任务中的纯文本 selector 仍有兼容回退；新任务建议显式使用 `text="登录"`、`text=登录` 或稳定 CSS。
 
-**Q: 验证码识别不准怎么办？**
+## 8. select — 原生 `<select>`
 
-A: 两种方式可以提高识别准确度：
+```json
+{
+  "id": "select_isp",
+  "type": "select",
+  "selector": "select[name='isp']",
+  "value": "{{ISP}}",
+  "required": false
+}
+```
 
-1. **限定字符范围**（推荐）：在 `ocr` 步骤中添加 `char_range` 参数，排除不相关的字符。例如纯数字验证码用 `"0123456789"`，数学验证码用 `"0123456789+-*/=xX÷"`
-2. **切换模型**：尝试切换 `old` 参数（`true`/`false`），两套模型对不同风格的验证码效果不同
+匹配顺序：
 
----
+1. option `value` 精确匹配；
+2. option 显示文本精确匹配；
+3. 显示文本唯一子串匹配。
 
-## 步骤类型速查表
+`value` 为空时直接跳过。没有唯一匹配时，`required=true` 失败，`required=false` 跳过。`required` 的默认值是 `true`。
 
-| 类型 | 用途 | 关键参数 | 特殊行为 |
-|------|------|----------|----------|
-| `input` | 输入文本 | `selector`, `value`, `clear` | 支持 `reveal_hidden` 全局配置，自动处理隐藏输入框 |
-| `click` | 点击元素 | `selector` | — |
-| `select` | 下拉选择 | `selector`, `value` | value 为空或元素不存在时自动跳过；支持模糊匹配 |
-| `click_select` | 点击式选择 | `selector`, `value`, `option_selector`(可选) | 点击触发器后按文字匹配选项；`option_selector` 限定搜索容器 |
-| `wait` | 等待元素 | `selector` | — |
-| `wait_url` | 等待 URL | `pattern` | — |
-| `eval` | JS 求值 | `script`, `store_as` | 结果可存入变量；`code` 为已废弃别名；`custom_js` 已合并到此类型 |
-| `screenshot` | 截图 | `path` | — |
-| `sleep` | 休眠 | `duration` | 最大 300000ms |
-| `ocr` | 验证码识别 | `selector`, `target_selector`, `store_as`, `char_range`, `old` | 支持新旧模型切换；`char_range` 限定识别字符范围提高准确度 |
-| `goto` | 导航（`navigate` 别名） | `url`（落 extras）/ `value`/`selector`, `wait_until` | 与 `navigate` 共用 `handle_navigate`，`wait_until` 仅 `load/domcontentloaded/networkidle/commit` |
-| `assert_text` | 文本断言 | `value` | 等 `document.body.innerText.includes(arg)`，`arg` 经 `wait_for_function` 参数传递（避免拼接） |
+## 9. click_select — 自定义下拉框 / 按钮组
 
-> 所有操作类步骤都支持 `frame` 公共字段，用于在 frameset/iframe 页面中定位子 frame 内的元素。支持的步骤类型共 12 种（含 `goto`/`assert_text`，见上）。
+```json
+{
+  "id": "select_isp_custom",
+  "type": "click_select",
+  "selector": ".service-selector",
+  "option_selector": ".service-options",
+  "value": "{{ISP}}",
+  "select_delay": 300,
+  "required": false
+}
+```
 
----
+执行语义：
 
-## 分享你创建的任务
+1. 点击 `selector` 展开选项；
+2. 可选等待 `select_delay` 毫秒，默认 500；
+3. 在 `option_selector` 范围内按 `value` 文本寻找唯一选项；
+4. 点击匹配项。
 
-如果你编写了一个适用于特定校园网的认证任务，欢迎将它分享给社区！分享的任务会收录在 [Campus-Auth 任务仓库](https://github.com/Misyra/campus-auth-tasks)，其他用户可以直接从仓库导入使用。
+`option_selector` 只是搜索范围，不是最终要点击的值。触发器点击、展开等待和选项点击共用同一个步骤 timeout 预算。
 
-**分享方式：**
+## 10. wait / sleep / wait_for_selector
 
-- **快速分享**：在 Web 控制台导出任务 JSON，到 [Issues](https://github.com/Misyra/campus-auth-tasks/issues/new) 提交
-- **提交 PR**：Fork 仓库 → 添加任务文件 → 提交 Pull Request，详见 [任务仓库贡献指南](https://github.com/Misyra/campus-auth-tasks#贡献)
+### 等元素出现
+
+```json
+{
+  "id": "wait_form",
+  "type": "wait",
+  "selector": "#login-form",
+  "timeout": 10000
+}
+```
+
+`wait` 有 `selector` 时等待元素进入 `visible` 状态。
+
+### 固定等待
+
+新任务使用 `sleep`：
+
+```json
+{
+  "id": "wait_animation",
+  "type": "sleep",
+  "duration": 800
+}
+```
+
+为兼容历史任务，`wait` 没有 selector 时仍按 `duration` 做固定等待；新任务不要继续依赖这种双重语义。
+
+`wait_for_selector` 是显式兼容类型，语义与带 selector 的 `wait` 一致。
+
+## 11. wait_url — 等待 URL
+
+```json
+{
+  "id": "wait_redirect",
+  "type": "wait_url",
+  "pattern": "success|welcome",
+  "timeout": 10000
+}
+```
+
+`pattern` 是正则表达式。非法正则会直接报执行错误，而不是静默等到超时。
+
+## 12. eval / custom_js — 执行 JavaScript
+
+新任务推荐使用 `eval`：
+
+```json
+{
+  "id": "read_ticket",
+  "type": "eval",
+  "script": "() => document.querySelector('#ticket')?.textContent || null",
+  "store_as": "ticket",
+  "timeout": 5000
+}
+```
+
+`custom_js` 是 Rust 保存层接受的历史兼容类型。`code` 仍可作为 `script` 的历史字段别名，并在加载时规范化为 `script`。
+
+`timeout` 会真正约束该步骤；若脚本长期不返回，Worker 会中断对应页面以避免悬挂。`store_as` 保留结果原生类型。
+
+## 13. goto / navigate — 页面导航
+
+两种类型都受支持：
+
+```json
+{
+  "id": "goto_sso",
+  "type": "goto",
+  "url": "https://sso.example.edu/login",
+  "wait_until": "domcontentloaded",
+  "timeout": 15000
+}
+```
+
+URL 推荐写在扩展字段 `url`；历史任务也可使用 `value` 或 `selector`。
+
+`wait_until` 支持：`load`、`domcontentloaded`、`networkidle`、`commit`。
+
+任务顶层 `url` 已经负责第一次自动导航，因此单页登录通常不需要再写第一条 `goto`；多页 SSO/认证流程可以正常使用。
+
+## 14. screenshot — 截图
+
+```json
+{
+  "id": "capture_result",
+  "type": "screenshot",
+  "path": "result.png",
+  "full_page": true
+}
+```
+
+调试截图保存在 Worker 调试目录。Web 调试面板不会接触 Worker 绝对本地路径；服务端会校验文件名、固定目录、文件类型和大小，再通过已鉴权 WebSocket 内联图片。
+
+## 15. upload_file — 上传文件
+
+```json
+{
+  "id": "upload_cert",
+  "type": "upload_file",
+  "selector": "input[type='file']",
+  "path": "C:/path/to/file.txt"
+}
+```
+
+新任务使用 `path`。历史任务把文件路径写在 `value` 中仍兼容。
+
+## 16. ocr — 验证码识别
+
+```json
+{
+  "id": "ocr_captcha",
+  "type": "ocr",
+  "selector": "#captchaImage",
+  "target_selector": "#captchaInput",
+  "store_as": "captcha_text",
+  "char_range": "0123456789",
+  "required": true
+}
+```
+
+- `selector`：验证码图片元素。
+- `target_selector`：可选；识别后自动填写的输入框。
+- `store_as`：可选；保存识别结果供后续模板或脚本引用。
+- `old`：是否使用 ddddocr 旧模型，默认 `false`。
+- `char_range`：可选字符范围。
+
+OCR 依赖是可选能力；未安装 OCR 依赖时，普通非 OCR 浏览器任务仍可运行。
+
+OCR 模型冷启动与 CPU 推理共享 OCR 总预算，避免模型加载和识别分别吃满一轮超时。识别卡死时该缓存实例会被淘汰，后续任务不会继续复用。
+
+数学验证码可采用 OCR + eval 链：
+
+```json
+[
+  {
+    "id": "ocr_math",
+    "type": "ocr",
+    "selector": "#captcha",
+    "store_as": "captcha_expr"
+  },
+  {
+    "id": "calc_math",
+    "type": "eval",
+    "script": "() => { const s = '{{captcha_expr}}'.replace(/[^0-9+\\-*/().]/g, ''); try { return Function('return (' + s + ')')(); } catch { return null; } }",
+    "store_as": "captcha_answer"
+  },
+  {
+    "id": "fill_captcha",
+    "type": "input",
+    "selector": "#captchaInput",
+    "value": "{{captcha_answer}}"
+  }
+]
+```
+
+只对可信、受控的简单算术字符串这样处理；不要把任意页面文本直接拼入脚本执行。
+
+## 17. assert_text — 文本断言
+
+```json
+{
+  "id": "assert_success",
+  "type": "assert_text",
+  "value": "登录成功",
+  "timeout": 5000
+}
+```
+
+等待页面正文包含指定文本；超时归类为断言失败。
+
+## 18. Frame / iframe
+
+每个元素步骤都可以使用 `frame`：
+
+```json
+{
+  "id": "fill_iframe_user",
+  "type": "input",
+  "frame": "loginFrame",
+  "selector": "#username",
+  "value": "{{USERNAME}}"
+}
+```
+
+支持三种格式：
+
+```text
+loginFrame                  # frame name
+url=/portal/login           # URL 包含指定片段
+iframe#login-frame          # iframe/frame CSS selector
+```
+
+name 或 URL 匹配到多个 frame 时会失败，避免静默操作错误页面。
+
+## 19. success_condition
+
+当任务配置：
+
+```json
+{
+  "success_condition": "login_success"
+}
+```
+
+执行器读取同名 `store_as` 结果作为最终成功判定：
+
+```json
+{
+  "id": "check_success",
+  "type": "eval",
+  "script": "() => document.body.innerText.includes('登录成功')",
+  "store_as": "login_success"
+}
+```
+
+布尔 `false`、`null`、数值 `0`、空字符串，以及字符串 `"false"` / `"0"` / `"no"` / `"off"` 按失败值处理。
+
+## 20. 选择器建议
+
+优先级建议：
+
+1. 稳定 `id`
+2. 稳定 `name`
+3. `data-testid` / `data-*`
+4. 明确属性组合
+5. Playwright text selector
+6. 结构性 CSS
+7. XPath 作为最后选择
+
+示例：
+
+```text
+#username
+input[name='DDDDD']
+button[data-action='login']
+text="登录"
+xpath=//button[contains(., '登录')]
+```
+
+避免只依赖自动生成、每次刷新变化的 class 或过长 DOM 路径。
+
+## 21. required 的使用原则
+
+`required` 默认是 **true**。
+
+应该保持 `true`：
+
+- 用户名、密码输入
+- 登录按钮
+- 必须完成的跳转
+- 成功状态校验
+
+适合设为 `false`：
+
+- 某些学校才存在的运营商选择器
+- 可有可无的协议勾选
+- 非关键提示框关闭按钮
+
+不要为了“任务不报错”把所有步骤都设为 `false`，那会把真实页面变更隐藏成假成功。
+
+## 22. 完整示例
+
+```json
+{
+  "name": "示例校园网",
+  "description": "账号密码 + 可选运营商 + 成功判定",
+  "url": "{{LOGIN_URL}}",
+  "timeout": 30000,
+  "navigation_wait": 1.0,
+  "step_delay": 0.3,
+  "steps": [
+    {
+      "id": "fill_username",
+      "type": "input",
+      "selector": "#username",
+      "value": "{{USERNAME}}"
+    },
+    {
+      "id": "fill_password",
+      "type": "input",
+      "selector": "#password",
+      "value": "{{PASSWORD}}"
+    },
+    {
+      "id": "select_isp",
+      "type": "select",
+      "selector": "#isp",
+      "value": "{{ISP}}",
+      "required": false
+    },
+    {
+      "id": "submit",
+      "type": "click",
+      "selector": "button[type='submit']"
+    },
+    {
+      "id": "check_success",
+      "type": "eval",
+      "script": "() => document.body.innerText.includes('登录成功') || document.body.innerText.includes('已连接')",
+      "store_as": "login_success"
+    }
+  ],
+  "success_condition": "login_success"
+}
+```
+
+## 23. 快速排错
+
+### 任务总是找不到元素
+
+- 检查是否在 iframe 中；必要时加 `frame`。
+- 动态页面可适当增大 `navigation_wait`。
+- 固定延时使用 `sleep`，不要给 `wait` 写一个并不存在的 selector。
+- 优先重新确认稳定 CSS，而不是无限拉长 timeout。
+
+### 运营商选择找不到
+
+- 原生 `<select>` 用 `select`。
+- div/span 自定义下拉用 `click_select`。
+- `option_selector` 是选项搜索范围，不是运营商值。
+- 页面确实可能没有运营商选择时设置 `required:false`。
+
+### 后续步骤拿不到 OCR/eval 结果
+
+确认前一步存在 `store_as`，后一步使用相同名称：
+
+```text
+store_as: "ticket"
+{{ticket}}
+```
+
+运行时结果优先于静态变量。
+
+### 想固定等待一段时间
+
+使用 `sleep + duration`。`wait` 无 selector 的固定等待只为兼容旧任务保留。
+
+### 想在任务中主动跳转
+
+直接使用 `goto` 或 `navigate`。旧文档中“系统不识别 navigate”的说法已经过时。

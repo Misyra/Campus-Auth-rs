@@ -20,7 +20,6 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -36,9 +35,7 @@ from step_handlers import (
     WorkerError,
     _check_cancel,
     _classify_navigation_error,
-
     run_step_async,
-    OCR_TIMEOUT_SECS,
 )
 from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image
 from debug_session import DebugSession, _build_steps_info
@@ -169,8 +166,8 @@ async def _sleep_cancellable(seconds: float, context: StepContext) -> None:
 async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) -> StructuredResult:
     """按序执行步骤列表。
 
-    任务级 ``TaskConfig.timeout`` 的看门狗由 Rust 侧兜底（``bridge.execute``
-    的 300s 超时），Python 侧不重复实现。
+    任务级 ``TaskConfig.timeout`` 由 Rust 调用侧按任务/登录会话语义执行看门狗，
+    Python 侧只负责单步超时与可取消的步骤间延迟，避免两层总超时互相竞争。
     """
     start = time.perf_counter()
     if not steps:
@@ -200,7 +197,7 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
     except WorkerError as exc:
         return _build_result(Outcome(exc.outcome), exc.message, context, start)
     except Exception as exc:
-        logger.exception(f"步骤执行未预期异常")
+        logger.exception("步骤执行未预期异常")
         return _build_result(Outcome.UNKNOWN_ERROR, f"执行异常: {exc}", context, start)
 
 
@@ -208,26 +205,23 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
 
 
 def _ensure_browser(channel: str = "playwright") -> bool:
-    """确保目标浏览器可用。系统浏览器直接视为就绪。"""
+    """确保目标浏览器可用；Playwright 管理的引擎按实际 executable 检测。"""
     if channel in ("msedge", "chrome", "custom"):
         return True
     try:
-        import playwright  # noqa: F401
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            if channel == "firefox":
+                browser_type = p.firefox
+            elif channel == "webkit":
+                browser_type = p.webkit
+            else:
+                browser_type = p.chromium
+            executable = browser_type.executable_path
+            return bool(executable and Path(executable).exists())
     except Exception:
         return False
-    if channel == "firefox":
-        import shutil
-        if shutil.which("firefox") is not None:
-            return True
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            executable = p.chromium.executable_path
-            if executable and Path(executable).exists():
-                return True
-    except Exception:
-        pass
-    return False
 
 
 # ── 取消注册表（跨线程安全）──
@@ -278,10 +272,6 @@ class CancelRegistry:
             self._pending.discard(cancel_id)
 
 
-# ── 调试会话 ──
-
-
-@dataclass
 # ── Worker 核心 ──
 
 
@@ -331,9 +321,14 @@ class WorkerCore:
     # ── 浏览器启动参数构建 ──
 
     def _build_launch_args(self, bs: dict, channel: str = "playwright") -> list[str]:
-        """构建浏览器启动参数。"""
+        """构建浏览器启动参数；非 Chromium 引擎过滤 Chromium-only 参数。"""
+        custom_engine = (bs.get("custom_browser_engine") or "auto").strip().lower()
+        is_chromium = channel not in ("firefox", "webkit")
+        if channel == "custom":
+            is_chromium = custom_engine not in ("firefox", "webkit")
+
         args: list[str] = []
-        if channel != "firefox":
+        if is_chromium:
             args.extend(
                 [
                     "--no-sandbox",
@@ -353,7 +348,7 @@ class WorkerCore:
                 flag = flag.strip()
                 if not flag or flag.startswith("#"):
                     continue
-                if channel == "firefox" and flag in self._CHROMIUM_ONLY_FLAGS:
+                if not is_chromium and flag in self._CHROMIUM_ONLY_FLAGS:
                     continue
                 flag_name = flag.split("=", 1)[0]
                 if flag_name in self._BLOCKED_BROWSER_ARGS:
@@ -424,7 +419,9 @@ class WorkerCore:
             return getattr(playwright, engine), custom_path
         if channel == "firefox":
             return playwright.firefox, None
-        # playwright / msedge / chrome 等系统浏览器均走 chromium
+        if channel == "webkit":
+            return playwright.webkit, None
+        # playwright / chromium / msedge / chrome 走 Chromium launcher。
         return playwright.chromium, None
 
     async def _launch_browser(self, playwright, channel, custom_path, headless, launch_args):
@@ -433,7 +430,7 @@ class WorkerCore:
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
         if resolved_path:
             kwargs["executable_path"] = resolved_path
-        elif channel not in ("firefox", "playwright"):
+        elif channel in ("msedge", "chrome"):
             kwargs["channel"] = channel
         return await launcher.launch(**kwargs)
 
@@ -445,7 +442,7 @@ class WorkerCore:
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args, **ctx_opts}
         if resolved_path:
             kwargs["executable_path"] = resolved_path
-        elif channel not in ("firefox", "playwright"):
+        elif channel in ("msedge", "chrome"):
             kwargs["channel"] = channel
         return await launcher.launch_persistent_context(user_data_dir, **kwargs)
 
@@ -493,12 +490,9 @@ class WorkerCore:
                 self._browser = await self._launch_browser(
                     self._playwright, channel, custom_path, headless, []
                 )
-                ctx_opts = {
-                    "viewport": {
-                        "width": int(bs.get("viewport_width", 1280)),
-                        "height": int(bs.get("viewport_height", 720)),
-                    }
-                }
+                # pure mode 只禁用额外启动参数、stealth 与资源路由；
+                # locale/timezone/UA/header/proxy 等 BrowserContext 契约仍应一致生效。
+                ctx_opts = self._build_context_options(bs)
                 self._context = await self._browser.new_context(**ctx_opts)
             else:
                 launch_args = self._build_launch_args(bs, channel)
@@ -670,6 +664,12 @@ class WorkerCore:
         except Exception as exc:  # noqa: BLE001
             raise _classify_navigation_error(exc, url)
 
+    @staticmethod
+    async def _wait_after_navigation(task_config: TaskConfig, context: StepContext) -> None:
+        """按任务配置在初始导航后额外等待，并保持取消可响应。"""
+        if task_config.navigation_wait > 0:
+            await _sleep_cancellable(task_config.navigation_wait, context)
+
     async def _run_task(
         self,
         task_config: TaskConfig,
@@ -688,6 +688,9 @@ class WorkerCore:
                 raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
             self._page = await self._new_page()
 
+        context = self._make_context(
+            self._page, variables, bs, cancel_event, screenshot_dir, task_config
+        )
         target = navigate_url or task_config.url
         if target:
             target = resolve(target, variables)
@@ -710,10 +713,8 @@ class WorkerCore:
                     await self._navigate(self._page, target, nav_timeout)
             else:
                 await self._navigate(self._page, target, nav_timeout)
+            await self._wait_after_navigation(task_config, context)
 
-        context = self._make_context(
-            self._page, variables, bs, cancel_event, screenshot_dir, task_config
-        )
         try:
             result = await run_steps(self._page, task_config.steps, context)
             # B5 取舍：任务失败后在共享 context 上清除 cookies，避免上次任务的残留会话
@@ -820,13 +821,16 @@ class WorkerCore:
             )
         async with self._cancel_session(params) as (cancel_event, bs, task):
             auth_url = params.get("auth_url", "")
-            variables = {
-                "USERNAME": params.get("username", ""),
-                "PASSWORD": params.get("password", ""),
-                "ISP": params.get("isp", ""),
-                "LOGIN_URL": auth_url,
-            }
-            variables.update(task.variables or {})
+            # 任务变量可自定义普通模板值，但系统保留变量必须始终反映当前 Profile。
+            variables = dict(task.variables or {})
+            variables.update(
+                {
+                    "USERNAME": params.get("username", ""),
+                    "PASSWORD": params.get("password", ""),
+                    "ISP": params.get("isp", ""),
+                    "LOGIN_URL": auth_url,
+                }
+            )
             self._task_dialogs = []
             result = await self._run_task(
                 task, bs, variables, cancel_event, _debug_screenshot_dir(),
@@ -874,14 +878,15 @@ class WorkerCore:
                     raise WorkerError(Outcome.UNKNOWN_ERROR, "浏览器页面初始化失败")
                 self._page = await self._new_page()
             variables = dict(task.variables or {})
+            context = self._make_context(
+                self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
+            )
             if task.url:
                 await self._navigate(
                     self._page, resolve(task.url, variables),
                     _to_ms(bs, "navigation_timeout", 15000),
                 )
-            context = self._make_context(
-                self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
-            )
+                await self._wait_after_navigation(task, context)
             self._debug_sessions[session_id] = DebugSession(
                 session_id=session_id,
                 page=self._page,
@@ -1006,6 +1011,9 @@ class WorkerCore:
             success, message = False, "步骤已取消"
         except WorkerError as exc:
             success, message = False, exc.message
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("调试步骤执行未预期异常")
+            success, message = False, f"执行异常: {exc}"
         if idx is not None:
             self._record_debug_result(session, idx, success, message)
         if auto_advance and idx is not None:
@@ -1015,7 +1023,8 @@ class WorkerCore:
     async def handle_debug_run_all(self, params: dict) -> dict:
         """依次执行调试会话中尚未运行的全部步骤（从当前游标到末尾）。
 
-        逐步骤记录成功/失败结果，遇到失败的必需步骤即停止；返回完整会话数据。
+        与正式执行保持一致：步骤间应用 ``step_delay``；可选步骤失败记录后继续，
+        必需步骤失败、取消或未预期异常则停止。返回完整会话数据。
         """
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
@@ -1030,14 +1039,27 @@ class WorkerCore:
             session.current_step = idx
             success = True
             message = ""
+            fatal = False
             try:
-                await run_step_async(session.page, step, session.context, step_index=idx, total_steps=len(steps))
+                if idx > start and session.context.step_delay > 0:
+                    await _sleep_cancellable(session.context.step_delay, session.context)
+                await run_step_async(
+                    session.page,
+                    step,
+                    session.context,
+                    step_index=idx,
+                    total_steps=len(steps),
+                )
             except StepCancelled:
-                success, message = False, "步骤已取消"
+                success, message, fatal = False, "步骤已取消", True
             except WorkerError as exc:
                 success, message = False, exc.message
+                fatal = step.required
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("调试批量执行未预期异常")
+                success, message, fatal = False, f"执行异常: {exc}", True
             self._record_debug_result(session, idx, success, message)
-            if not success:
+            if fatal:
                 stop_idx = idx + 1
                 break
         session.current_step = stop_idx
@@ -1047,7 +1069,7 @@ class WorkerCore:
     def _cleanup_task_screenshots(context: StepContext) -> None:
         """删除登录/浏览器任务期间产生的截图文件（A7）。
 
-        任务截图可能包含表单中的明文凭证，任务结束后及时清除，避免长期
+        任务截图可能包含表单中的明文凭据，任务结束后及时清除，避免长期
         驻留磁盘。仅删除 ``context.screenshots`` 中记录的文件（每个文件
         best-effort，失败仅记日志不抛出），不递归清理整个 debug/ 目录，
         避免误删其他并发会话的文件。StructuredResult 中的 screenshots
@@ -1065,7 +1087,7 @@ class WorkerCore:
     def _cleanup_debug_screenshots(session: "DebugSession") -> None:
         """删除调试会话期间产生的截图文件。
 
-        调试截图可能包含表单中的明文凭证，会话结束后及时清除，
+        调试截图可能包含表单中的明文凭据，会话结束后及时清除，
         避免长期驻留磁盘（历史遗留 F5）。
         """
         paths = list(getattr(session.context, "screenshots", []) or [])
@@ -1082,7 +1104,7 @@ class WorkerCore:
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
         self._debug_sessions.pop(session.session_id, None)
-        # 先清理本会话的截图（可能含明文凭证），再注销取消项
+        # 先清理本会话的截图（可能含明文凭据），再注销取消项
         self._cleanup_debug_screenshots(session)
         if session.cancel_id:
             cancel_registry.unregister(session.cancel_id)
@@ -1106,27 +1128,36 @@ class WorkerCore:
         return {}
 
     async def handle_ocr_recognize(self, params: dict) -> dict:
-        """识别 base64 图片中的文本（ddddocr）。"""
+        """识别 base64 图片中的文本（ddddocr），模型加载与推理共享总超时预算。"""
         image_base64 = params.get("image_base64", "")
         if not image_base64:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "ocr_recognize 缺少 image_base64")
+
+        deadline = time.monotonic() + OCR_TIMEOUT_SECS
+
+        def remaining_timeout() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         try:
-            # 模型构造（DdddOcr()）同步加载 onnx 模型，可能首次下载/加载较慢。
-            # 丢到线程池避免阻塞事件循环，并套上 OCR_TIMEOUT_SECS 超时兜底防止卡死。
+            # 模型构造（DdddOcr()）同步加载 onnx 模型，可能首次加载较慢。
+            # 与后续 classification 共用 OCR_TIMEOUT_SECS 总预算，避免两阶段各吃满一次超时。
+            remaining = remaining_timeout()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
             ocr = await asyncio.wait_for(
                 asyncio.to_thread(_get_ocr, bool(params.get("old", False))),
-                timeout=OCR_TIMEOUT_SECS,
+                timeout=remaining,
             )
         except asyncio.TimeoutError:
             raise WorkerError(
                 Outcome.UNKNOWN_ERROR,
-                f"OCR 模型加载超时（>{OCR_TIMEOUT_SECS}s）。模型为包内自带，仅本地加载，"
-                "若持续超时请检查 OCR 依赖是否完整（uv add ddddocr）",
+                f"OCR 处理超时（>{OCR_TIMEOUT_SECS}s，模型加载阶段）。"
+                "若持续超时请检查 OCR 依赖是否完整",
             ) from None
         except Exception as exc:  # noqa: BLE001
             raise WorkerError(
                 Outcome.UNKNOWN_ERROR,
-                f"ddddocr 未安装: {exc}。请在设置页点「安装 OCR 依赖」（uv add ddddocr）后重试",
+                f"ddddocr 未安装或加载失败: {exc}。请在设置页安装 OCR 依赖后重试",
             ) from exc
         try:
             img_bytes = base64.b64decode(image_base64)
@@ -1134,15 +1165,19 @@ class WorkerCore:
             raise WorkerError(Outcome.UNKNOWN_ERROR, f"图片解码失败: {exc}") from exc
         # 截图/上传图片可能是 RGBA，先规整为 ddddocr 友好的 RGB，提升识别准确率
         img_bytes = _preprocess_ocr_image(img_bytes)
-        # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环，并加超时兜底
+        # classification 是同步 CPU 推理，丢到线程池避免阻塞事件循环；
+        # 只使用模型加载后的剩余预算，保证单次 OCR 的墙钟上限稳定。
         try:
+            remaining = remaining_timeout()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
             text = await asyncio.wait_for(
                 asyncio.to_thread(ocr.classification, img_bytes),
-                timeout=OCR_TIMEOUT_SECS,
+                timeout=remaining,
             )
         except asyncio.TimeoutError:
             raise WorkerError(
-                Outcome.UNKNOWN_ERROR, f"OCR 识别超时（>{OCR_TIMEOUT_SECS}s）"
+                Outcome.UNKNOWN_ERROR, f"OCR 处理超时（>{OCR_TIMEOUT_SECS}s）"
             ) from None
         except Exception as exc:  # noqa: BLE001 — ddddocr/PIL 图片不可识别等，转为一句话
             raise WorkerError(

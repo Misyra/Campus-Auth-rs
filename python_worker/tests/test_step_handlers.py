@@ -410,7 +410,7 @@ def test_frame_scoped_locators_use_frame_locator():
             self._page.clicks.append("click")
             return None
 
-        async def evaluate(self, script, arg=None):
+        async def evaluate(self, script, arg=None, timeout=None):
             self._page.evaluates.append((script, arg))
 
         async def wait_for(self, state=None, timeout=None):
