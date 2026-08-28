@@ -5,17 +5,19 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 use crate::environment::{
-    BootstrapStage, EnvironmentError, EnvironmentManager, EnvironmentStatus, PROGRESS_MINGIT,
-    PROGRESS_PLAYWRIGHT, PROGRESS_UV_DOWNLOAD, PROGRESS_VENV_SYNC,
+    BootstrapStage, EnvironmentError, EnvironmentManager, EnvironmentStatus, PROGRESS_PLAYWRIGHT,
+    PROGRESS_UV_DOWNLOAD, PROGRESS_VENV_SYNC,
 };
 
 /// 引导安装完整浏览器自动化能力（uv -> Python venv -> Playwright）
 ///
-/// 四阶段流程：
+/// 三阶段流程：
 /// 1. 确保 uv 就绪（下载或跳过）
 /// 2. 确保 Python 虚拟环境就绪（uv sync 或跳过）
 /// 3. 安装 Playwright Chromium 浏览器
-/// 4. 可选安装 MinGit（仅开发者模式按需）
+///
+/// Git 不属于浏览器自动化核心能力。开发者模式只检测系统/已有 Git，
+/// 引导流程不会隐式下载 MinGit。
 pub async fn bootstrap_capability(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
@@ -109,26 +111,6 @@ pub async fn bootstrap_capability(
         return Err(EnvironmentError::Cancelled);
     }
 
-    // ── 阶段 4: 可选安装 MinGit（仅开发者模式启用） ──
-    if !mgr.read_status().git_ready && mgr.git_download_enabled() {
-        mgr.write_status(|s| s.stage = BootstrapStage::DownloadingMinGit);
-        mgr.report_progress(
-            "downloading_mingit",
-            PROGRESS_MINGIT.0,
-            "正在下载 MinGit...",
-        );
-
-        match crate::environment::git::download_mingit(mgr).await {
-            Ok(_) => {
-                mgr.write_status(|s| s.git_ready = true);
-                mgr.report_progress("downloading_mingit", PROGRESS_MINGIT.1, "MinGit 下载完成");
-            }
-            Err(e) => {
-                tracing::warn!("MinGit 下载失败（可选组件，不影响核心功能）: {}", e);
-            }
-        }
-    }
-
     mgr.write_status(|s| {
         s.stage = BootstrapStage::Done;
         s.capability_ready = true;
@@ -159,9 +141,14 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
 
     let playwright_ready = python_ready && playwright_browser_installed("chromium");
 
-    let git_ready = crate::environment::git::check_git(mgr)
-        .await
-        .unwrap_or(false);
+    // Git 仅是开发者辅助能力：开发者模式下检测系统/已有 MinGit，但不自动安装。
+    let git_ready = if mgr.git_download_enabled() {
+        crate::environment::git::check_git(mgr)
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     let capability_ready = uv_ready && python_ready && playwright_ready;
 

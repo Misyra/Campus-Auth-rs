@@ -312,7 +312,7 @@ pub struct AppSettings {
     pub autostart_enabled: bool,
     /// 是否发送任务相关系统通知（任务完成后经 notification 日志源提示）
     pub task_notification: bool,
-    /// 是否启用开发者模式（启用后将下载 MinGit 等开发者工具）
+    /// 是否启用开发者模式（仅开放/检测开发者能力，不隐式下载 Git 等工具）
     pub developer_mode: bool,
     /// 是否显示系统托盘图标（关闭后程序仅在 Web 控制台运行，无桌面图标）
     pub show_tray: bool,
