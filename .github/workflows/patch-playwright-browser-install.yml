@@ -1,0 +1,54 @@
+name: patch-playwright-browser-install
+
+on:
+  push:
+    branches:
+      - fix/playwright-browser-install
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fix/playwright-browser-install
+          fetch-depth: 0
+
+      - name: 应用目标补丁
+        run: python3 .github/scripts/patch-playwright-browser-install.py
+
+      - name: 安装 Rust 1.98
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+          rustup default 1.98.0
+
+      - name: Rust 格式化与定向测试
+        run: |
+          cargo fmt
+          cargo test playwright_browser --lib
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 前端构建与测试
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      - name: 提交并删除辅助文件
+        run: |
+          git config user.name "Misyra"
+          git config user.email "140050141+Misyra@users.noreply.github.com"
+          git add src/environment/python.rs src/environment/mod.rs src/web/routes/ocr.rs src/web/routes/system.rs frontend/src/api/index.ts frontend/src/views/settings/BrowserSettings.vue
+          git rm .github/scripts/patch-playwright-browser-install.py .github/workflows/patch-playwright-browser-install.yml
+          git commit -m "fix: 支持按需安装 Playwright 浏览器"
+          git push origin HEAD:fix/playwright-browser-install
