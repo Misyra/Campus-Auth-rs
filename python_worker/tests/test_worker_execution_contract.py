@@ -277,3 +277,54 @@ def test_debug_run_all_records_unexpected_exception_and_stops(monkeypatch):
     assert response["current_step"] == 1
     assert response["results"][0]["success"] is False
     assert "boom" in response["results"][0]["message"]
+
+
+def test_health_check_rejects_closed_context_even_if_browser_process_is_connected():
+    core = WorkerCore()
+
+    class FakeBrowser:
+        def is_connected(self) -> bool:
+            return True
+
+    class ClosedContext:
+        async def cookies(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    core._browser = FakeBrowser()
+    core._context = ClosedContext()
+
+    assert asyncio.run(core._health_check()) is False
+
+
+def test_health_check_accepts_live_context_and_connected_browser():
+    core = WorkerCore()
+    calls = 0
+
+    class FakeBrowser:
+        def is_connected(self) -> bool:
+            return True
+
+    class LiveContext:
+        async def cookies(self):
+            nonlocal calls
+            calls += 1
+            return []
+
+    core._browser = FakeBrowser()
+    core._context = LiveContext()
+
+    assert asyncio.run(core._health_check()) is True
+    assert calls == 1
+
+
+def test_health_check_accepts_live_persistent_context_without_browser_handle():
+    core = WorkerCore()
+
+    class LiveContext:
+        async def cookies(self):
+            return []
+
+    core._browser = None
+    core._context = LiveContext()
+
+    assert asyncio.run(core._health_check()) is True

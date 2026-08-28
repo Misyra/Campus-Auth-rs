@@ -549,17 +549,18 @@ class WorkerCore:
         await self._start_browser(config)
 
     async def _health_check(self) -> bool:
-        """检查浏览器健康状态。"""
-        if self._browser is None:
-            if self._context is None:
-                return False
-            try:
-                _ = self._context.pages
-                return True
-            except Exception:
-                return False
+        """检查 Browser 与 BrowserContext 是否都仍可用。"""
+        if self._context is None:
+            return False
         try:
-            return self._browser.is_connected()
+            # 非 persistent 模式下 Browser 进程在线不代表 context 仍然存活；
+            # context 可能已被关闭，而 browser.is_connected() 依旧返回 True。
+            if self._browser is not None and not self._browser.is_connected():
+                return False
+            # pages 只是本地对象快照，关闭后的 context 也可能还能读取；cookies()
+            # 会走一次真实协议调用，可可靠暴露 "Target page/context closed"。
+            await self._context.cookies()
+            return True
         except Exception:
             return False
 
