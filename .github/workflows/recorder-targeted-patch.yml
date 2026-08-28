@@ -1,0 +1,292 @@
+name: recorder-targeted-patch
+
+on:
+  push:
+    branches:
+      - fix/task-recorder-contract
+
+permissions:
+  contents: write
+
+jobs:
+  patch-recorder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fix/task-recorder-contract
+          fetch-depth: 0
+
+      - name: 应用最小补丁
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("resources/tools/task-recorder.user.js")
+          source = path.read_text(encoding="utf-8")
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global source
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: 预期 1 个锚点，实际 {count}")
+              source = source.replace(old, new, 1)
+
+          def replace_all(old: str, new: str, label: str, minimum: int = 1) -> None:
+              global source
+              count = source.count(old)
+              if count < minimum:
+                  raise SystemExit(f"{label}: 预期至少 {minimum} 个锚点，实际 {count}")
+              source = source.replace(old, new)
+              print(f"{label}: 替换 {count} 处")
+
+          replace_once("// @version      4.2.0", "// @version      4.2.1", "metadata version")
+          replace_once('const VERSION = "4.2.0";', 'const VERSION = "4.2.1";', "runtime version")
+
+          privacy_helpers = r'''
+          const SENSITIVE_ATTR_RE = /(?:password|passwd|pwd|secret|token|authorization|credential|session|cookie|csrf|xsrf)/i;
+
+          function isSensitiveAttributeName(name) {
+            return String(name || "").toLowerCase() === "value" || SENSITIVE_ATTR_RE.test(String(name || ""));
+          }
+
+          function sanitizeAttributeValue(name, value) {
+            const raw = String(value || "");
+            if (["href", "src", "action"].includes(String(name || "").toLowerCase())) {
+              return raw.split(/[?#]/, 1)[0];
+            }
+            return raw;
+          }
+
+          function sanitizeDomHtml(el, inner, maxLen) {
+            if (!el) return "";
+            try {
+              const clone = el.cloneNode(true);
+              const nodes = [clone, ...clone.querySelectorAll("*")];
+              for (const node of nodes) {
+                if (node.attributes) {
+                  for (const attr of Array.from(node.attributes)) {
+                    if (isSensitiveAttributeName(attr.name)) {
+                      node.removeAttribute(attr.name);
+                    } else if (["href", "src", "action"].includes(attr.name.toLowerCase())) {
+                      node.setAttribute(attr.name, sanitizeAttributeValue(attr.name, attr.value));
+                    }
+                  }
+                }
+                const tag = (node.tagName || "").toLowerCase();
+                if (tag === "textarea") node.textContent = "";
+                if (tag === "input") node.removeAttribute("checked");
+                if (tag === "option") node.removeAttribute("selected");
+              }
+              const html = inner ? clone.innerHTML : clone.outerHTML;
+              return html.substring(0, maxLen);
+            } catch (_) {
+              return "";
+            }
+          }
+
+          function inputSemanticSignal(el) {
+            return [
+              el?.name,
+              el?.id,
+              el?.placeholder,
+              el?.getAttribute?.("aria-label"),
+              el?.getAttribute?.("autocomplete"),
+            ].filter(Boolean).join(" ").toLowerCase();
+          }
+
+          function isLikelySearchInput(el) {
+            if (!el) return false;
+            if (el.closest?.("[role='search'], [role='searchbox']")) return true;
+            return /search|query|find|filter|keyword|搜索|查找|检索/.test(inputSemanticSignal(el));
+          }
+
+          function isLikelyCaptchaInput(el) {
+            if (!el) return false;
+            if (isElementCaptcha(el)) return true;
+            return /captcha|verify|verification|checkcode|randcode|validcode|vcode|验证码|校验码|图形码/.test(inputSemanticSignal(el));
+          }
+
+          function isLikelyLoginForm(el) {
+            if (!el) return false;
+            const form = el.closest?.("form");
+            if (form) {
+              const formSignal = [form.action, form.id, form.className, form.name]
+                .filter(Boolean).join(" ").toLowerCase();
+              if (/login|auth|signin|sign-in|sso|portal|认证|登录/.test(formSignal)) return true;
+              if (form.querySelector?.('input[type="password"]')) return true;
+            }
+            let cur = el.parentElement;
+            let depth = 0;
+            while (cur && depth < 5) {
+              const signal = [cur.id, typeof cur.className === "string" ? cur.className : ""]
+                .filter(Boolean).join(" ").toLowerCase();
+              if (/login|auth|signin|sign-in|sso|portal|认证|登录/.test(signal)) return true;
+              cur = cur.parentElement;
+              depth += 1;
+            }
+            return false;
+          }
+
+          function isLikelyUsernameInput(el) {
+            if (!el) return false;
+            const type = String(el.type || "text").toLowerCase();
+            if (!["text", "email", "tel", ""].includes(type)) return false;
+            if (isLikelySearchInput(el) || isLikelyCaptchaInput(el)) return false;
+            const signal = inputSemanticSignal(el);
+            if (/username|user_name|userid|user_id|account|login|student|number|email|mobile|phone|学号|工号|账号|用户名|手机号|邮箱/.test(signal)) {
+              return true;
+            }
+            const autocomplete = String(el.getAttribute?.("autocomplete") || "").toLowerCase();
+            if (autocomplete === "username" || autocomplete === "email") return true;
+            return isLikelyLoginForm(el);
+          }
+          '''
+          replace_once(
+              "  function saveState() {",
+              privacy_helpers + "\n  function saveState() {",
+              "privacy/helper insertion",
+          )
+
+          old_attrs = '''    for (const attr of el.attributes) {
+              if (["id", "class", "name", "type", "placeholder", "value", "href", "src", "action",
+                   "data-testid", "aria-label", "aria-describedby", "role"].includes(attr.name)) {
+                attrs[attr.name] = attr.value;
+              }
+              // 收集所有 data-* 属性作为候选
+              if (attr.name.startsWith("data-")) {
+                attrs[attr.name] = attr.value;
+              }
+            }'''
+          new_attrs = '''    for (const attr of el.attributes) {
+              if (isSensitiveAttributeName(attr.name)) continue;
+              if (["id", "class", "name", "type", "placeholder", "href", "src", "action",
+                   "data-testid", "aria-label", "aria-describedby", "role"].includes(attr.name)) {
+                attrs[attr.name] = sanitizeAttributeValue(attr.name, attr.value);
+              }
+              // 收集非敏感 data-* 属性作为候选
+              if (attr.name.startsWith("data-") && !isSensitiveAttributeName(attr.name)) {
+                attrs[attr.name] = sanitizeAttributeValue(attr.name, attr.value);
+              }
+            }'''
+          replace_once(old_attrs, new_attrs, "element attrs redaction")
+
+          replace_all(
+              "result.hiddenRealHTML = hiddenEl.outerHTML.substring(0, LIMITS.HTML_HIDDEN);",
+              "result.hiddenRealHTML = sanitizeDomHtml(hiddenEl, false, LIMITS.HTML_HIDDEN);",
+              "hidden input html",
+          )
+          replace_all(
+              "elementHTML: el.outerHTML,",
+              "elementHTML: sanitizeDomHtml(el, false, LIMITS.HTML_ELEMENT),",
+              "element outerHTML",
+          )
+          replace_all(
+              'elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : "",',
+              'elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : "",',
+              "parent innerHTML double quote",
+          )
+          replace_all(
+              "elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : '',",
+              "elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : '',",
+              "parent innerHTML single quote",
+          )
+          replace_all(
+              'elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || "",',
+              'elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ""; })(),',
+              "container innerHTML double quote",
+          )
+          replace_all(
+              "elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || '',",
+              "elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ''; })(),",
+              "container innerHTML single quote",
+          )
+          replace_all(
+              "common.innerHTML.substring(0, LIMITS.HTML_CONTEXT)",
+              "sanitizeDomHtml(common, true, LIMITS.HTML_CONTEXT)",
+              "common prompt html",
+          )
+
+          replace_once(
+              'const groupContainerInfo = groupContainer ? getElementInfo(groupContainer) : { selectors: [], bestSelector: "" };',
+              'const groupContainerInfo = groupContainer ? getElementInfo(groupContainer) : { selectors: [] };\n    const groupContainerSelector = groupContainerInfo.selectors[0]?.value || "";',
+              "button group selector setup",
+          )
+          replace_all(
+              'groupContainerInfo.bestSelector || ""',
+              'groupContainerSelector',
+              "button group missing field",
+              minimum=2,
+          )
+
+          replace_once(
+              "  function createPanel() {",
+              "  let _smartDetectListenersAttached = false;\n\n  function createPanel() {",
+              "smart listener guard declaration",
+          )
+          replace_once(
+              '    document.addEventListener("input", (e) => {\n      const el = e.composedPath()[0];',
+              '    if (!_smartDetectListenersAttached) {\n      document.addEventListener("input", (e) => {\n      if (!state.active || !state.recording) return;\n      const el = e.composedPath()[0];',
+              "smart input listener guard",
+          )
+
+          smart_pattern = re.compile(
+              r'''      // 智能检测模式：按 input type 自动分类记录\n      if \(state\.currentStepType === "smart_detect"\) \{.*?        return;\n      \}\n(?=    \}, true\);  // capture phase)''',
+              re.S,
+          )
+          replacement = '''      // 智能检测模式：只记录有明确登录语义的账号/密码输入框。
+              if (state.currentStepType === "smart_detect") {
+                if (isLikelySearchInput(el) || isLikelyCaptchaInput(el)) return;
+                let stepType;
+                if (el.type === "password") {
+                  const signal = inputSemanticSignal(el);
+                  if (!isLikelyLoginForm(el) && !/password|passwd|pwd|pass|密码/.test(signal)) return;
+                  stepType = "password";
+                } else {
+                  if (!isLikelyUsernameInput(el)) return;
+                  stepType = "username";
+                }
+                const desc = stepType === "password" ? "密码输入框 → {{PASSWORD}}" : "账号输入框 → {{USERNAME}}";
+                addManualFillStep(stepType, el, desc);
+                setStatus("🔍 已记录。继续点击或输入，按 Esc 停止", "recording");
+                return;
+              }
+          '''
+          source, count = smart_pattern.subn(replacement, source, count=1)
+          if count != 1:
+              raise SystemExit(f"smart detect classification: 预期替换 1 处，实际 {count}")
+
+          replace_once(
+              '    document.addEventListener("change", (e) => {\n      if (state.currentStepType !== "smart_detect") return;',
+              '    document.addEventListener("change", (e) => {\n      if (!state.active || !state.recording) return;\n      if (state.currentStepType !== "smart_detect") return;',
+              "smart change listener active guard",
+          )
+          replace_once(
+              '    }, true);  // capture phase\n\n    // 事件绑定',
+              '    }, true);  // capture phase\n      _smartDetectListenersAttached = true;\n    }\n\n    // 事件绑定',
+              "smart listener guard close",
+          )
+          replace_once(
+              '    state.recording = false;\n    state.carrierClickPhase = null;\n    // 恢复被强制显示的隐藏输入框 + 移除面板和高亮',
+              '    state.recording = false;\n    state.currentStepType = null;\n    state.carrierClickPhase = null;\n    // 恢复被强制显示的隐藏输入框 + 移除面板和高亮',
+              "deactivate smart state",
+          )
+
+          path.write_text(source, encoding="utf-8")
+          print(f"patched recorder: {len(source)} chars")
+          PY
+
+      - name: 校验 userscript 语法
+        run: node --check resources/tools/task-recorder.user.js
+
+      - name: 提交最小修复并移除辅助 workflow
+        shell: bash
+        run: |
+          git config user.name "Misyra"
+          git config user.email "140050141+Misyra@users.noreply.github.com"
+          git add resources/tools/task-recorder.user.js
+          git rm .github/workflows/recorder-targeted-patch.yml
+          git commit -m "fix: 加固任务录制器隐私与智能检测"
+          git push origin HEAD:fix/task-recorder-contract
