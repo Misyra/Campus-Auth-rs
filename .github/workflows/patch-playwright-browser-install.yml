@@ -25,28 +25,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 收紧边界并应用目标补丁
-        shell: pwsh
+      - name: 应用目标补丁
         run: |
-          $path = ".github/scripts/patch-playwright-browser-install.py"
-          $text = Get-Content $path -Raw
-          $text = $text.Replace('await new Promise((resolve) => window.setTimeout(resolve, 1500));', 'await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));')
-          $old = @'
-        if install_target != "chromium" {
-            if let Err(e) = env.install_playwright_browser(&install_target).await {
-                tracing::error!("Playwright {install_target} 安装失败: {e}");
-            }
-        }
-'@
-          $new = @'
-        if let Err(e) = env.install_playwright_browser(&install_target).await {
-            tracing::error!("Playwright {install_target} 安装失败: {e}");
-        }
-'@
-          if (-not $text.Contains($old)) { throw "未找到 Chromium 显式重装补丁锚点" }
-          $text = $text.Replace($old, $new)
-          Set-Content -Path $path -Value $text -Encoding utf8
-          python $path
+          python .github/scripts/patch-playwright-browser-install.py
+          python .github/scripts/finalize-playwright-browser-install.py
 
       - name: 安装 Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -79,6 +61,6 @@ jobs:
           git config user.name "Misyra"
           git config user.email "140050141+Misyra@users.noreply.github.com"
           git add src/environment/python.rs src/environment/mod.rs src/web/routes/ocr.rs src/web/routes/system.rs frontend/src/api/index.ts frontend/src/views/settings/BrowserSettings.vue
-          git rm .github/scripts/patch-playwright-browser-install.py .github/workflows/patch-playwright-browser-install.yml
+          git rm .github/scripts/patch-playwright-browser-install.py .github/scripts/finalize-playwright-browser-install.py .github/workflows/patch-playwright-browser-install.yml
           git commit -m "fix: 支持按需安装 Playwright 浏览器"
           git push origin HEAD:fix/playwright-browser-install
