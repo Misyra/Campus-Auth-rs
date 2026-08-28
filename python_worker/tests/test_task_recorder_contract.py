@@ -17,8 +17,16 @@ def _source() -> str:
     return RECORDER.read_text(encoding="utf-8")
 
 
+def _function_body(source: str, name: str) -> str:
+    """提取简单 function 声明附近的源码片段，足够用于静态契约断言。"""
+    marker = f"function {name}("
+    start = source.find(marker)
+    assert start >= 0, f"缺少函数 {name}"
+    return source[start : start + 5000]
+
+
 def test_recorder_javascript_syntax() -> None:
-    """userscript 必须至少能被当前 Node 解析，避免发布语法损坏的录制器。"""
+    """userscript 必须能被当前 Node 解析，避免发布语法损坏的录制器。"""
     node = shutil.which("node")
     if node is None:
         pytest.skip("当前环境未安装 Node.js")
@@ -40,24 +48,37 @@ def test_recorder_metadata_version_matches_runtime_version() -> None:
     assert metadata.group(1) == runtime.group(1)
 
 
-def test_recorder_keeps_selector_engines_and_prompt_redaction() -> None:
+def test_recorder_button_group_uses_existing_selector_field() -> None:
     source = _source()
-    assert "selectorForPlayback" in source
-    assert "sanitizeDomHtml" in source
-    assert 'return `text=${JSON.stringify(candidate.value)}`' in source
-    assert 'return `xpath=${candidate.value}`' in source
-
-
-def test_recorder_button_group_does_not_use_missing_best_selector() -> None:
-    source = _source()
-    # getElementInfo() 返回 selectors 数组，不存在 bestSelector 字段。
+    # getElementInfo() 只提供 selectors 数组，不提供 bestSelector；按钮组不得读取不存在字段。
     assert "groupContainerInfo.bestSelector" not in source
 
 
-def test_recorder_smart_detect_keeps_login_input_filter() -> None:
+def test_recorder_redacts_sensitive_dom_before_prompt() -> None:
     source = _source()
-    # 智能检测不能把搜索框、验证码框等任意文本输入都记录成 USERNAME。
+    get_info = _function_body(source, "getElementInfo")
+
+    assert "sanitizeDomHtml" in source
+    assert "SENSITIVE_ATTR_RE" in source
+    # 元素属性摘要不能收集 value；token/session/csrf 等 data-* 也必须经过敏感属性过滤。
+    assert '"value"' not in get_info[:1800]
+    assert "isSensitiveAttributeName" in get_info[:2200]
+    # 录制步骤和页面公共上下文都不能再直接把 raw HTML 塞进 AI prompt。
+    assert "elementHTML: el.outerHTML" not in source
+    assert "elementParentContext: el.parentElement ? el.parentElement.innerHTML" not in source
+    assert "common.innerHTML.substring" not in source
+
+
+def test_recorder_smart_detect_filters_non_login_inputs() -> None:
+    source = _source()
+    # 智能检测必须显式区分登录表单、账号、验证码和搜索输入，不能把任意 text input 当 USERNAME。
     assert "isLikelyLoginForm" in source
     assert "isLikelyUsernameInput" in source
     assert "isLikelyCaptchaInput" in source
     assert "isLikelySearchInput" in source
+
+
+def test_recorder_smart_detect_listeners_are_not_duplicated_on_reopen() -> None:
+    source = _source()
+    # createPanel 会在面板关闭后重建；全局 input/change 监听必须有一次性注册护栏。
+    assert "_smartDetectListenersAttached" in source
