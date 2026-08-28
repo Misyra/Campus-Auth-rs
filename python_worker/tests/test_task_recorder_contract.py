@@ -66,7 +66,11 @@ def test_recorder_redacts_sensitive_dom_before_prompt() -> None:
     # 录制步骤和页面公共上下文都不能再直接把 raw HTML 塞进 AI prompt。
     assert "elementHTML: el.outerHTML" not in source
     assert "elementParentContext: el.parentElement ? el.parentElement.innerHTML" not in source
+    assert "findStepContainer(el)?.innerHTML.substring" not in source
     assert "common.innerHTML.substring" not in source
+    # 页面/iframe/图片 URL 必须先去掉 query/hash，避免 token 被提示词带出。
+    assert 'url = sanitizeAttributeValue("href", url)' in source
+    assert 'sanitizeAttributeValue("src", frame.src)' in source
 
 
 def test_recorder_smart_detect_filters_non_login_inputs() -> None:
@@ -76,6 +80,10 @@ def test_recorder_smart_detect_filters_non_login_inputs() -> None:
     assert "isLikelyUsernameInput" in source
     assert "isLikelyCaptchaInput" in source
     assert "isLikelySearchInput" in source
+    # OTP/短信验证码也属于验证码类输入，不能因位于 login form 中而回退成 username。
+    assert "|otp|" in source
+    assert "one[-_ ]?time[-_ ]?code" in source
+    assert "短信码" in source
 
 
 def test_recorder_smart_detect_listeners_are_not_duplicated_on_reopen() -> None:
