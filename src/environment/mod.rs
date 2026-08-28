@@ -318,8 +318,11 @@ pub struct EnvironmentManager {
     status_manager: Arc<StatusManager>,
     /// HTTP 客户端
     http_client: Client,
-    /// 取消令牌
-    cancel_token: CancellationToken,
+    /// 当前正在执行的安装 generation 的取消令牌。
+    ///
+    /// 每个真正获得 BootstrapGate 执行权的 operation 都会替换它，并把自己的
+    /// token clone 显式传入整个调用链；旧 operation 因此永远不会读取到新代 token。
+    current_cancel_token: RwLock<CancellationToken>,
     /// 是否允许下载 MinGit（仅开发者模式启用）
     git_download_enabled: bool,
     /// 引导完成回调（成功重建环境时触发，用于复位 Bridge 熔断计数 B3）
@@ -368,21 +371,28 @@ impl EnvironmentApi for EnvironmentManager {
 
     async fn install_playwright_browser(&self, browser: &str) -> Result<(), EnvironmentError> {
         self.bootstrap_gate
-            .run_exclusive(crate::environment::python::install_playwright_browser(
-                self, browser,
-            ))
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                crate::environment::python::install_playwright_browser(self, browser, &cancel).await
+            })
             .await
     }
 
     async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
         self.bootstrap_gate
-            .run_exclusive(crate::environment::uv::install_ocr_dep(self))
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                crate::environment::uv::install_ocr_dep(self, &cancel).await
+            })
             .await
     }
 
     async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError> {
         self.bootstrap_gate
-            .run_exclusive(crate::environment::uv::remove_ocr_dep(self))
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                crate::environment::uv::remove_ocr_dep(self, &cancel).await
+            })
             .await
     }
 
@@ -420,7 +430,7 @@ impl EnvironmentManager {
             })),
             status_manager,
             http_client: Client::new(),
-            cancel_token: CancellationToken::new(),
+            current_cancel_token: RwLock::new(CancellationToken::new()),
             git_download_enabled,
             on_bootstrap_done: Mutex::new(None),
             bootstrap_gate: BootstrapGate::new(),
@@ -491,7 +501,12 @@ impl EnvironmentManager {
         self.bootstrap_gate
             .ensure(
                 || self.is_ready(),
-                || async { bootstrap_capability(self).await },
+                || async {
+                    // 只有真正获得本轮 bootstrap 执行权的调用者才创建新 generation。
+                    // token 随后按值 clone/按引用显式传入调用链，等待者不会触碰它。
+                    let cancel = self.begin_install_generation();
+                    bootstrap_capability(self, &cancel).await
+                },
             )
             .await
     }
@@ -504,9 +519,15 @@ impl EnvironmentManager {
         retry_install(self).await
     }
 
-    /// 取消在途安装
+    /// 取消当前在途安装 generation。
+    ///
+    /// 新一轮 operation 只有在获得 BootstrapGate 排他执行权后才会注册全新 token，
+    /// 因此这里永远不会把已排队但尚未开始的下一轮误取消。
     pub fn cancel(&self) {
-        self.cancel_token.cancel();
+        self.current_cancel_token
+            .read()
+            .expect("Environment current_cancel_token 读锁中毒")
+            .cancel();
     }
 
     /// 读取环境状态（供 uv.rs/python.rs/git.rs 复用）
@@ -558,9 +579,17 @@ impl EnvironmentManager {
         &self.http_client
     }
 
-    /// 取消令牌
-    pub(crate) fn cancel_token(&self) -> &CancellationToken {
-        &self.cancel_token
+    /// 开始一轮新的安装 generation，并返回该轮独占的取消令牌 clone。
+    ///
+    /// 必须仅在持有 BootstrapGate 排他执行权时调用。调用方把返回值显式传给
+    /// 本轮所有子操作，禁止子操作再回到 EnvironmentManager 动态读取当前 token。
+    pub(crate) fn begin_install_generation(&self) -> CancellationToken {
+        let token = CancellationToken::new();
+        *self
+            .current_cancel_token
+            .write()
+            .expect("Environment current_cancel_token 写锁中毒") = token.clone();
+        token
     }
 
     /// 是否允许下载 MinGit
@@ -589,6 +618,30 @@ mod tests {
                 .join(WORKER_PROJECT_DIR)
                 .join(PYTHON_EXE_RELATIVE)
         );
+    }
+
+    /// 每轮安装持有独立 token：取消旧轮后，新 generation 必须自动获得全新 scope。
+    #[test]
+    fn test_install_generation_uses_independent_cancellation_scopes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            Arc::new(StatusManager::new()),
+            false,
+        );
+
+        let first = manager.begin_install_generation();
+        assert!(!first.is_cancelled());
+        manager.cancel();
+        assert!(first.is_cancelled());
+
+        let second = manager.begin_install_generation();
+        assert!(!second.is_cancelled(), "新 generation 不得继承旧轮取消状态");
+        assert!(first.is_cancelled(), "创建新 generation 不得复活旧 token");
+
+        manager.cancel();
+        assert!(second.is_cancelled(), "cancel 只能命中当前 generation");
+        assert!(first.is_cancelled());
     }
 
     /// F1：并发 ensure 只触发一次真实引导——抢到锁的执行者跑引导，

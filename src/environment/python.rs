@@ -8,6 +8,8 @@ use crate::environment::{
 use std::path::Path;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 /// 实际启动 Python 并检查退出状态，避免仅凭 `python.exe` 存在误判损坏的 uv venv。
 pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
     if !python_exe.is_file() {
@@ -32,7 +34,10 @@ pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
 /// （ddddocr）属于 `ocr` extra；是否随环境修复安装由 environment/ocr.enabled
 /// 持久标记决定，显式安装/卸载不会再修改 pyproject.toml。
 /// 返回 Python 解释器路径。
-pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
+pub async fn ensure_venv(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<std::path::PathBuf, EnvironmentError> {
     let python_exe = mgr
         .worker_project_path()
         .join(crate::environment::PYTHON_EXE_RELATIVE);
@@ -48,7 +53,7 @@ pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
 
     // 不存在则执行 uv sync 创建虚拟环境并安装依赖
     tracing::info!("虚拟环境不存在，执行 uv sync 创建...");
-    crate::environment::uv::run_uv_sync(mgr).await?;
+    crate::environment::uv::run_uv_sync(mgr, cancel).await?;
 
     // 验证创建成功
     if !python_executable_works(&python_exe).await {
@@ -145,8 +150,11 @@ fn ocr_declared_in_pyproject(content: &str) -> bool {
 /// 安装核心 Playwright Chromium 浏览器。
 ///
 /// 核心引导继续只安装 Chromium；Firefox/WebKit 由设置页显式按需安装。
-pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
-    install_playwright_browser(mgr, "chromium").await
+pub async fn install_playwright(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    install_playwright_browser(mgr, "chromium", cancel).await
 }
 
 /// 安装指定的 Playwright 管理浏览器。
@@ -156,6 +164,7 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
 pub async fn install_playwright_browser(
     mgr: &EnvironmentManager,
     browser: &str,
+    cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
     if !matches!(browser, "chromium" | "firefox" | "webkit") {
         return Err(EnvironmentError::UnsupportedPlaywrightBrowser {
@@ -170,7 +179,7 @@ pub async fn install_playwright_browser(
 
     for attempt in 0..PLAYWRIGHT_INSTALL_MAX_RETRIES {
         // 检查取消
-        if mgr.cancel_token().is_cancelled() {
+        if cancel.is_cancelled() {
             return Err(EnvironmentError::Cancelled);
         }
 
@@ -269,11 +278,27 @@ mod tests {
             std::sync::Arc::new(crate::status::StatusManager::new()),
             false,
         );
-        let result = install_playwright_browser(&mgr, "chrome").await;
+        let cancel = CancellationToken::new();
+        let result = install_playwright_browser(&mgr, "chrome", &cancel).await;
         assert!(matches!(
             result,
             Err(EnvironmentError::UnsupportedPlaywrightBrowser { browser }) if browser == "chrome"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_install_playwright_browser_observes_supplied_cancel_scope_before_io() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mgr = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(crate::status::StatusManager::new()),
+            false,
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = install_playwright_browser(&mgr, "chromium", &cancel).await;
+        assert!(matches!(result, Err(EnvironmentError::Cancelled)));
     }
 
     #[test]
