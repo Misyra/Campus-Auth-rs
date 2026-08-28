@@ -86,12 +86,11 @@ jobs:
           text = text.replace(old_handler, new_handler, 1)
 
           old_test = '''        assert!(matches!(
-                  normalize_playwright_browser(Some("chrome")),
-                  Err(ApiError::BadRequest(_))
-              ));
+              normalize_playwright_browser(Some("chrome")),
+              Err(ApiError::BadRequest(_))
+          ));
           '''
-          new_test = old_test + '''
-              assert!(!should_explicitly_install_after_ensure("chromium", false));
+          new_test = old_test + '''        assert!(!should_explicitly_install_after_ensure("chromium", false));
               assert!(should_explicitly_install_after_ensure("chromium", true));
               assert!(should_explicitly_install_after_ensure("firefox", false));
               assert!(should_explicitly_install_after_ensure("webkit", false));
