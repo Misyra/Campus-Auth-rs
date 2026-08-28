@@ -8,7 +8,7 @@ dependencies = [
     "playwright>=1.40",
 ]
 
-# OCR 为显式可选能力，默认环境不安装 ddddocr/ONNX/OpenCV。
+# OCR 为显式可选能力，默认环境不安装；应用按用户偏好通过 --extra ocr 同步。
 [project.optional-dependencies]
 ocr = [
     "ddddocr>=1.6.1",
