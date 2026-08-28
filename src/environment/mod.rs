@@ -335,13 +335,13 @@ pub trait EnvironmentApi: Send + Sync {
     fn python_path(&self) -> PathBuf;
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导。
     async fn ensure_capability(&self) -> Result<(), EnvironmentError>;
-    /// 安装 OCR 依赖（`uv add ddddocr`）。
+    /// 安装 OCR optional extra，并持久记录用户启用偏好。
     async fn install_ocr_dep(&self) -> Result<(), EnvironmentError>;
-    /// 卸载 OCR 依赖（`uv remove ddddocr`）。
+    /// 卸载 OCR optional extra，并清除用户启用偏好。
     async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError>;
     /// OCR 依赖（ddddocr）是否已安装在 venv 内。
     fn ocr_ready(&self) -> bool;
-    /// 项目是否在 `python_worker/pyproject.toml` 中声明了 ddddocr 依赖。
+    /// 项目是否声明支持 `ocr` optional extra。
     fn ocr_declared(&self) -> bool;
 }
 
@@ -360,11 +360,15 @@ impl EnvironmentApi for EnvironmentManager {
     }
 
     async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
-        crate::environment::uv::install_ocr_dep(self).await
+        self.bootstrap_gate
+            .run_exclusive(crate::environment::uv::install_ocr_dep(self))
+            .await
     }
 
     async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError> {
-        crate::environment::uv::remove_ocr_dep(self).await
+        self.bootstrap_gate
+            .run_exclusive(crate::environment::uv::remove_ocr_dep(self))
+            .await
     }
 
     fn ocr_ready(&self) -> bool {
