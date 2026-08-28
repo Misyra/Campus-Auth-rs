@@ -1,0 +1,45 @@
+name: recorder-targeted-patch-v5
+
+on:
+  push:
+    branches:
+      - fix/task-recorder-contract
+
+permissions:
+  contents: write
+
+jobs:
+  patch-recorder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fix/task-recorder-contract
+          fetch-depth: 0
+
+      - name: 补齐 OTP/短信码过滤
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('resources/tools/task-recorder.user.js')
+          source = path.read_text(encoding='utf-8')
+          old = 'return /captcha|verify|verification|checkcode|randcode|validcode|vcode|验证码|校验码|图形码/.test(inputSemanticSignal(el));'
+          new = 'return /captcha|verify|verification|checkcode|randcode|validcode|vcode|otp|one[-_ ]?time[-_ ]?code|sms[-_ ]?code|auth[-_ ]?code|security[-_ ]?code|验证码|校验码|图形码|短信码/.test(inputSemanticSignal(el));'
+          if source.count(old) != 1:
+              raise SystemExit(f'expected one OTP anchor, got {source.count(old)}')
+          path.write_text(source.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: 校验 userscript 语法
+        run: node --check resources/tools/task-recorder.user.js
+
+      - name: 提交并移除临时 workflow
+        shell: bash
+        run: |
+          git config user.name "Misyra"
+          git config user.email "140050141+Misyra@users.noreply.github.com"
+          git add resources/tools/task-recorder.user.js
+          git rm .github/workflows/recorder-targeted-patch-v5.yml
+          git commit -m "fix: 避免 OTP 被误判为账号输入框"
+          git push origin HEAD:fix/task-recorder-contract
