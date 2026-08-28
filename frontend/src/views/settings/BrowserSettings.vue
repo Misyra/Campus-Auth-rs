@@ -38,7 +38,7 @@ async function installPlaywright(channel: string) {
   browserInstallError.value = "";
   try {
     await browsersApi.installPlaywright(channel);
-    const deadline = Date.now() + 10 * 60 * 1000;
+    const deadline = Date.now() + 31 * 60 * 1000;
     while (Date.now() < deadline) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
       const data = await browsersApi.fetch();
