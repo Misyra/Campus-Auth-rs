@@ -2993,8 +2993,8 @@
           text: info.text,
           visible: true,
           elementHTML: sanitizeDomHtml(el, false, LIMITS.HTML_ELEMENT),
-          elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : '',
-          elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || '',
+          elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : '',
+          elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ''; })(),
           _revealRecorded: true,
         };
         state.steps.push(step);
