@@ -142,10 +142,27 @@ fn ocr_declared_in_pyproject(content: &str) -> bool {
     false
 }
 
-/// 安装 Playwright Chromium 浏览器
+/// 安装核心 Playwright Chromium 浏览器。
 ///
-/// 执行 `uv run playwright install chromium`，带超时和重试。
+/// 核心引导继续只安装 Chromium；Firefox/WebKit 由设置页显式按需安装。
 pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+    install_playwright_browser(mgr, "chromium").await
+}
+
+/// 安装指定的 Playwright 管理浏览器。
+///
+/// 仅允许 Chromium / Firefox / WebKit，执行 `uv run playwright install <browser>`，
+/// 带统一超时和重试。调用方负责通过 BootstrapGate 串行化显式安装。
+pub async fn install_playwright_browser(
+    mgr: &EnvironmentManager,
+    browser: &str,
+) -> Result<(), EnvironmentError> {
+    if !matches!(browser, "chromium" | "firefox" | "webkit") {
+        return Err(EnvironmentError::UnsupportedPlaywrightBrowser {
+            browser: browser.to_string(),
+        });
+    }
+
     let uv_exe = uv_exe_path(mgr);
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
@@ -160,7 +177,7 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
         // 重试时更新进度消息
         if attempt > 0 {
             let msg = format!(
-                "重试安装浏览器 ({}/{})...",
+                "重试安装 {browser} ({}/{})...",
                 attempt, PLAYWRIGHT_INSTALL_MAX_RETRIES
             );
             tracing::info!("{}", msg);
@@ -176,7 +193,7 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
                 &mgr.worker_project_path().to_string_lossy(),
                 "playwright",
                 "install",
-                "chromium",
+                browser,
             ])
             .env("UV_PROJECT_ENVIRONMENT", &venv_path)
             .current_dir(mgr.base_path())
@@ -186,7 +203,7 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
 
         match result {
             Ok(Ok(output)) if output.status.success() => {
-                tracing::info!("Playwright Chromium 安装成功");
+                tracing::info!("Playwright {browser} 安装成功");
                 return Ok(());
             }
             Ok(Ok(output)) => {
@@ -242,6 +259,21 @@ mod tests {
     async fn test_python_executable_works_rejects_missing_file() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(!python_executable_works(&dir.path().join("missing-python.exe")).await);
+    }
+
+    #[tokio::test]
+    async fn test_install_playwright_browser_rejects_unknown_before_io() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mgr = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(crate::status::StatusManager::new()),
+            false,
+        );
+        let result = install_playwright_browser(&mgr, "chrome").await;
+        assert!(matches!(
+            result,
+            Err(EnvironmentError::UnsupportedPlaywrightBrowser { browser }) if browser == "chrome"
+        ));
     }
 
     #[test]

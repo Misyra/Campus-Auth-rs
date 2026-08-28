@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::{Query, State};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::bridge::BridgeApi;
@@ -416,19 +417,45 @@ fn is_edge_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// POST /api/install/playwright — 安装 Playwright Chromium
+#[derive(Debug, Default, Deserialize)]
+pub struct InstallPlaywrightQuery {
+    browser: Option<String>,
+}
+
+fn normalize_playwright_browser(browser: Option<&str>) -> Result<String, ApiError> {
+    let browser = browser.unwrap_or("chromium").trim().to_ascii_lowercase();
+    if matches!(browser.as_str(), "chromium" | "firefox" | "webkit") {
+        Ok(browser)
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "不支持安装浏览器 {browser:?}，仅支持 chromium/firefox/webkit"
+        )))
+    }
+}
+
+/// POST /api/install/playwright — 安装 Playwright 管理浏览器
 ///
-/// 触发环境管理器安装 Playwright 浏览器（异步执行，进度通过 StatusManager 推送）。
-pub async fn install_playwright(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let env = state.environment.clone();
-    // 后台执行安装，避免阻塞响应；进度通过 StatusManager 推送
+/// `?browser=chromium|firefox|webkit`；省略参数保持旧行为，默认 Chromium。
+/// 后台先确保核心 Chromium 环境就绪，再按需安装 Firefox/WebKit。
+pub async fn install_playwright(
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+    Query(params): Query<InstallPlaywrightQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let browser = normalize_playwright_browser(params.browser.as_deref())?;
+    let env = environment.clone();
+    let install_target = browser.clone();
     tokio::spawn(async move {
         if let Err(e) = env.ensure_capability().await {
-            tracing::error!("Playwright 安装失败: {e}");
+            tracing::error!("Playwright 核心环境安装失败: {e}");
+            return;
+        }
+        if let Err(e) = env.install_playwright_browser(&install_target).await {
+            tracing::error!("Playwright {install_target} 安装失败: {e}");
         }
     });
     Ok(data(serde_json::json!({
-        "message": "Playwright 安装已启动，进度请通过状态推送查看",
+        "browser": browser,
+        "message": "Playwright 浏览器安装已启动，请等待浏览器列表更新",
     })))
 }
 
@@ -525,6 +552,23 @@ pub async fn stop_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_playwright_browser_defaults_and_validates() {
+        assert_eq!(normalize_playwright_browser(None).unwrap(), "chromium");
+        assert_eq!(
+            normalize_playwright_browser(Some(" Firefox ")).unwrap(),
+            "firefox"
+        );
+        assert_eq!(
+            normalize_playwright_browser(Some("WEBKIT")).unwrap(),
+            "webkit"
+        );
+        assert!(matches!(
+            normalize_playwright_browser(Some("chrome")),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
 
     // ============ tracing JSON 日志解析 ============
 
