@@ -25,12 +25,26 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 收紧前端轮询类型并应用目标补丁
+      - name: 收紧边界并应用目标补丁
         shell: pwsh
         run: |
           $path = ".github/scripts/patch-playwright-browser-install.py"
           $text = Get-Content $path -Raw
           $text = $text.Replace('await new Promise((resolve) => window.setTimeout(resolve, 1500));', 'await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));')
+          $old = @'
+        if install_target != "chromium" {
+            if let Err(e) = env.install_playwright_browser(&install_target).await {
+                tracing::error!("Playwright {install_target} 安装失败: {e}");
+            }
+        }
+'@
+          $new = @'
+        if let Err(e) = env.install_playwright_browser(&install_target).await {
+            tracing::error!("Playwright {install_target} 安装失败: {e}");
+        }
+'@
+          if (-not $text.Contains($old)) { throw "未找到 Chromium 显式重装补丁锚点" }
+          $text = $text.Replace($old, $new)
           Set-Content -Path $path -Value $text -Encoding utf8
           python $path
 
