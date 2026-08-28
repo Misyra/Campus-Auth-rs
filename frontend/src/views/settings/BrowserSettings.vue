@@ -3,7 +3,7 @@ import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import FieldHelp from "@/components/common/FieldHelp.vue";
-import { browsersApi, configApi, workerApi } from "@/api";
+import { browsersApi, configApi, workerApi, extractApiError } from "@/api";
 
 const config = useConfig();
 
@@ -38,19 +38,15 @@ async function installPlaywright(channel: string) {
   browserInstallError.value = "";
   try {
     await browsersApi.installPlaywright(channel);
-    const deadline = Date.now() + 31 * 60 * 1000;
-    while (Date.now() < deadline) {
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
-      const data = await browsersApi.fetch();
-      browsers.value = data.browsers;
-      if (browsers.value.find((b) => b.channel === channel)?.installed) {
-        config.config.browser.browser_channel = channel;
-        return;
-      }
+    const data = await browsersApi.fetch();
+    browsers.value = data.browsers;
+    if (browsers.value.find((b) => b.channel === channel)?.installed) {
+      config.config.browser.browser_channel = channel;
+      return;
     }
-    browserInstallError.value = `${channel} 安装超时，请检查日志后重试`;
-  } catch {
-    browserInstallError.value = `${channel} 安装失败，请检查日志后重试`;
+    browserInstallError.value = `${channel} 安装完成，但未检测到浏览器，请检查日志后重试`;
+  } catch (error) {
+    browserInstallError.value = `${channel} 安装失败：${extractApiError(error, "未知错误")}`;
   } finally {
     installingBrowser.value = null;
   }
