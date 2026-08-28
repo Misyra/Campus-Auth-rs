@@ -28,10 +28,9 @@ pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
 
 /// 确保 Python 虚拟环境就绪
 ///
-/// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建（基础依赖，
-/// 不含 ddddocr）。OCR 依赖（ddddocr）由前端的显式"安装/卸载"操作经
-/// `uv add/remove ddddocr` 管理（见 environment::uv::install_ocr_dep /
-/// remove_ocr_dep），此处不做自动补装，避免显式卸载后又被自动装回。
+/// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建。OCR 依赖
+/// （ddddocr）属于 `ocr` extra；是否随环境修复安装由 environment/ocr.enabled
+/// 持久标记决定，显式安装/卸载不会再修改 pyproject.toml。
 /// 返回 Python 解释器路径。
 pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
     let python_exe = mgr
@@ -90,32 +89,56 @@ pub(crate) fn ddddocr_installed(mgr: &EnvironmentManager) -> bool {
     false
 }
 
-/// OCR 依赖（ddddocr）是否在 `python_worker/pyproject.toml` 中声明
+/// OCR extra 是否在 `python_worker/pyproject.toml` 中声明 ddddocr。
 ///
-/// 作为 OCR 可用性的权威来源：仅当项目声明了该依赖，前端才展示「安装/卸载」
-/// 入口与识别能力。文件缺失或读取失败时返回 false，避免把损坏的环境误报为可用。
+/// `declared` 表示该构建支持 OCR 可选能力，并不等于用户已安装 OCR。
+/// 文件缺失或声明损坏时返回 false，避免前端误报能力。
 pub(crate) fn ocr_declared(mgr: &EnvironmentManager) -> bool {
     let pyproject = mgr.worker_project_path().join("pyproject.toml");
     let content = match std::fs::read_to_string(&pyproject) {
         Ok(c) => c,
         Err(_) => return false,
     };
-    // 简单稳健的判定：依赖列表中出现 ddddocr（>=1.6.1 之类约束），无需完整 TOML 解析
-    let mut in_deps = false;
+    ocr_declared_in_pyproject(&content)
+}
+
+fn ocr_declared_in_pyproject(content: &str) -> bool {
+    let mut in_optional_dependencies = false;
+    let mut in_ocr_extra = false;
+
     for raw_line in content.lines() {
         let line = raw_line.trim();
-        if line.starts_with("dependencies") {
-            in_deps = true;
+        if line.starts_with('[') {
+            in_optional_dependencies = line == "[project.optional-dependencies]";
+            in_ocr_extra = false;
             continue;
         }
-        // 进入其它顶层表头（如 [build-system] / [tool.*]）则退出依赖块
-        if in_deps && line.starts_with('[') {
-            in_deps = false;
+        if !in_optional_dependencies || line.is_empty() || line.starts_with('#') {
+            continue;
         }
-        if in_deps && line.contains("ddddocr") {
+
+        if !in_ocr_extra {
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            if name.trim() != "ocr" {
+                continue;
+            }
+            if value.contains("ddddocr") {
+                return true;
+            }
+            in_ocr_extra = !value.contains(']');
+            continue;
+        }
+
+        if line.contains("ddddocr") {
             return true;
         }
+        if line.contains(']') {
+            in_ocr_extra = false;
+        }
     }
+
     false
 }
 
@@ -219,5 +242,35 @@ mod tests {
     async fn test_python_executable_works_rejects_missing_file() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(!python_executable_works(&dir.path().join("missing-python.exe")).await);
+    }
+
+    #[test]
+    fn test_ocr_declared_requires_ocr_optional_extra() {
+        let optional = r#"
+[project]
+dependencies = ["playwright>=1.40"]
+
+[project.optional-dependencies]
+ocr = [
+    "ddddocr>=1.6.1",
+]
+"#;
+        assert!(ocr_declared_in_pyproject(optional));
+
+        let legacy_main_dependency = r#"
+[project]
+dependencies = [
+    "ddddocr>=1.6.1",
+    "playwright>=1.40",
+]
+"#;
+        assert!(!ocr_declared_in_pyproject(legacy_main_dependency));
+
+        let unrelated_extra = r#"
+[project.optional-dependencies]
+devtools = ["ddddocr>=1.6.1"]
+ocr = ["pillow"]
+"#;
+        assert!(!ocr_declared_in_pyproject(unrelated_extra));
     }
 }
