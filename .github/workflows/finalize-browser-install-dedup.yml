@@ -85,19 +85,19 @@ jobs:
               raise SystemExit(f"handler anchor count={text.count(old_handler)}")
           text = text.replace(old_handler, new_handler, 1)
 
-          old_test = '''        assert!(matches!(
-              normalize_playwright_browser(Some("chrome")),
-              Err(ApiError::BadRequest(_))
-          ));
+          marker = '    // ============ tracing JSON 日志解析 ============\n'
+          test = '''    #[test]
+              fn playwright_browser_install_decision_avoids_first_chromium_duplicate() {
+                  assert!(!should_explicitly_install_after_ensure("chromium", false));
+                  assert!(should_explicitly_install_after_ensure("chromium", true));
+                  assert!(should_explicitly_install_after_ensure("firefox", false));
+                  assert!(should_explicitly_install_after_ensure("webkit", false));
+              }
+
           '''
-          new_test = old_test + '''        assert!(!should_explicitly_install_after_ensure("chromium", false));
-              assert!(should_explicitly_install_after_ensure("chromium", true));
-              assert!(should_explicitly_install_after_ensure("firefox", false));
-              assert!(should_explicitly_install_after_ensure("webkit", false));
-          '''
-          if text.count(old_test) != 1:
-              raise SystemExit(f"test anchor count={text.count(old_test)}")
-          path.write_text(text.replace(old_test, new_test, 1), encoding="utf-8")
+          if text.count(marker) != 1:
+              raise SystemExit(f"test marker count={text.count(marker)}")
+          path.write_text(text.replace(marker, test + marker, 1), encoding="utf-8")
           '@ | Set-Content .github/finalize-browser-install-dedup.py -Encoding utf8
           python .github/finalize-browser-install-dedup.py
 
@@ -123,7 +123,7 @@ jobs:
       - name: 格式化与定向测试
         run: |
           cargo fmt
-          cargo test normalize_playwright_browser_defaults_and_validates --lib
+          cargo test playwright_browser --lib
 
       - name: 提交并删除辅助文件
         shell: pwsh
