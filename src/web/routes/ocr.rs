@@ -52,8 +52,8 @@ pub async fn ocr_recognize(
 /// 返回：
 /// - `installed`：OCR **依赖（ddddocr）** 是否已实际安装（仅需 Python venv 就绪 +
 ///   dddddcr 已装入 venv，不依赖 Playwright 浏览器是否就绪——OCR 识别只用 CPU 推理）。
-/// - `declared`：项目是否在 `python_worker/pyproject.toml` 中声明了 ddddocr 依赖，
-///   作为「是否支持 OCR」的权威来源（用户要求依 pyproject.toml 判定）。
+/// - `declared`：项目是否在 `python_worker/pyproject.toml` 的 `ocr` optional extra
+///   中声明 ddddocr，表示当前构建支持 OCR 可选能力。
 /// - `size_mb`：environment 目录估算体积。
 /// - `runtime_ocr`（任务 10，向后兼容新增）：Worker 存活时最近一次健康检查
 ///   上报的运行时 OCR 能力（`capabilities.ocr`）；Worker 未存活/未上报时为
@@ -111,8 +111,8 @@ fn dir_size(path: &std::path::Path) -> u64 {
 
 /// POST /api/ocr/uninstall — 卸载 OCR（取消在途任务并移除依赖）
 ///
-/// 取消在途 OCR 识别任务（bridge.cancel），并执行 `uv remove ddddocr`
-/// 移除 OCR 依赖（environment.remove_ocr_dep）。
+/// 取消在途 OCR 识别任务（bridge.cancel），并通过基础 `uv sync`
+/// 移除 OCR extra（environment.remove_ocr_dep）。
 pub async fn ocr_uninstall(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
@@ -126,7 +126,7 @@ pub async fn ocr_uninstall(
 
 /// POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖
 ///
-/// 后台执行环境能力安装（uv/Python/Playwright）并显式 `uv add ddddocr`
+/// 后台执行环境能力安装（uv/Python/Playwright）并显式同步 `ocr` extra，
 /// 补齐 OCR 依赖，进度通过 StatusManager 推送。
 pub async fn ocr_install(
     State(bridge): State<Arc<dyn BridgeApi>>,
@@ -134,7 +134,7 @@ pub async fn ocr_install(
 ) -> Result<Json<Value>, ApiError> {
     let env = environment.clone();
     tokio::spawn(async move {
-        // 先确保核心能力就绪，再补装 OCR 依赖（uv add ddddocr）
+        // 先确保核心能力就绪，再同步 OCR optional extra
         if let Err(e) = env.ensure_capability().await {
             tracing::error!("OCR 环境引导失败: {e}");
             return;
