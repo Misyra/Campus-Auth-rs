@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::environment::{
     BootstrapStage, EnvironmentError, EnvironmentManager, EnvironmentStatus, PROGRESS_MINGIT,
     PROGRESS_PLAYWRIGHT, PROGRESS_UV_DOWNLOAD, PROGRESS_VENV_SYNC,
@@ -14,7 +16,10 @@ use crate::environment::{
 /// 2. 确保 Python 虚拟环境就绪（uv sync 或跳过）
 /// 3. 安装 Playwright Chromium 浏览器
 /// 4. 可选安装 MinGit（仅开发者模式按需）
-pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+pub async fn bootstrap_capability(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
     tracing::info!("开始引导浏览器自动化能力...");
 
     // 先做一次快速检查，跳过已就绪的阶段
@@ -25,7 +30,7 @@ pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), Enviro
         mgr.write_status(|s| s.stage = BootstrapStage::DownloadingUv);
         mgr.report_progress("downloading_uv", PROGRESS_UV_DOWNLOAD.0, "正在下载 uv...");
 
-        match crate::environment::uv::download_uv(mgr).await {
+        match crate::environment::uv::download_uv(mgr, cancel).await {
             Ok(_) => {
                 mgr.write_status(|s| s.uv_ready = true);
                 mgr.report_progress("downloading_uv", PROGRESS_UV_DOWNLOAD.1, "uv 下载完成");
@@ -39,7 +44,7 @@ pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), Enviro
         }
     }
 
-    if mgr.cancel_token().is_cancelled() {
+    if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
     }
 
@@ -53,7 +58,7 @@ pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), Enviro
             "正在安装 Python 环境和依赖...",
         );
 
-        match crate::environment::python::ensure_venv(mgr).await {
+        match crate::environment::python::ensure_venv(mgr, cancel).await {
             Ok(_) => {
                 mgr.write_status(|s| s.python_ready = true);
                 mgr.report_progress("syncing_venv", PROGRESS_VENV_SYNC.1, "Python 环境安装完成");
@@ -67,7 +72,7 @@ pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), Enviro
         }
     }
 
-    if mgr.cancel_token().is_cancelled() {
+    if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
     }
 
@@ -82,7 +87,7 @@ pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), Enviro
             "正在安装浏览器...",
         );
 
-        match crate::environment::python::install_playwright(mgr).await {
+        match crate::environment::python::install_playwright(mgr, cancel).await {
             Ok(_) => {
                 mgr.write_status(|s| s.playwright_ready = true);
                 mgr.report_progress(
@@ -100,7 +105,7 @@ pub async fn bootstrap_capability(mgr: &EnvironmentManager) -> Result<(), Enviro
         }
     }
 
-    if mgr.cancel_token().is_cancelled() {
+    if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
     }
 
@@ -266,12 +271,14 @@ fn playwright_dir_has_browser(dir: PathBuf, prefix: &str) -> bool {
 pub async fn retry_install(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
     mgr.bootstrap_gate
         .run_exclusive(async {
+            // retry 在获得 gate 后才创建新 generation；旧安装此时已经完全退出。
+            let cancel = mgr.begin_install_generation();
             mgr.write_status(|s| {
                 s.stage = BootstrapStage::Idle;
                 s.progress = None;
                 s.last_error = None;
             });
-            bootstrap_capability(mgr).await
+            bootstrap_capability(mgr, &cancel).await
         })
         .await
 }

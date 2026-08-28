@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::environment::{
     EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
@@ -75,7 +76,10 @@ pub(crate) async fn uv_executable_works(uv_exe: &Path) -> bool {
 }
 
 /// 从 GitHub Releases 下载 uv 二进制、SHA256 校验、解压到 environment/uv.exe
-pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
+pub async fn download_uv(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<std::path::PathBuf, EnvironmentError> {
     let env_path = mgr.env_path();
     let uv_dest = env_path.join(UV_EXE_NAME);
 
@@ -89,7 +93,7 @@ pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
 
     for attempt in 0..UV_DOWNLOAD_MAX_RETRIES {
         // 检查取消
-        if mgr.cancel_token().is_cancelled() {
+        if cancel.is_cancelled() {
             return Err(EnvironmentError::Cancelled);
         }
 
@@ -125,7 +129,7 @@ pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
         let tmp_zip = env_path.join("uv.zip.tmp");
         let mut zip_downloaded = false;
         for zip_url in &zip_urls {
-            if mgr.cancel_token().is_cancelled() {
+            if cancel.is_cancelled() {
                 return Err(EnvironmentError::Cancelled);
             }
             let _ = tokio::fs::remove_file(&tmp_zip).await;
@@ -401,14 +405,21 @@ fn ocr_extra_enabled(mgr: &EnvironmentManager) -> bool {
 ///
 /// 默认只同步基础依赖；用户显式安装过 OCR 时，根据 environment/ocr.enabled
 /// 持久标记追加 `--extra ocr`，保证环境修复不会悄悄丢失用户选择。
-pub async fn run_uv_sync(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
-    run_uv_sync_with_ocr(mgr, ocr_extra_enabled(mgr)).await
+pub async fn run_uv_sync(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    run_uv_sync_with_ocr(mgr, ocr_extra_enabled(mgr), cancel).await
 }
 
 async fn run_uv_sync_with_ocr(
     mgr: &EnvironmentManager,
     include_ocr: bool,
+    cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
+    if cancel.is_cancelled() {
+        return Err(EnvironmentError::Cancelled);
+    }
     if !mgr.worker_project_path().exists() {
         return Err(EnvironmentError::WorkerProjectNotFound {
             path: mgr.worker_project_path().clone(),
@@ -440,6 +451,10 @@ async fn run_uv_sync_with_ocr(
         })?
         .map_err(EnvironmentError::UvExtractFailed)?;
 
+    if cancel.is_cancelled() {
+        return Err(EnvironmentError::Cancelled);
+    }
+
     if output.status.success() {
         Ok(())
     } else {
@@ -452,7 +467,10 @@ async fn run_uv_sync_with_ocr(
 }
 
 /// 安装 OCR 可选依赖，并持久记录用户启用偏好。
-pub async fn install_ocr_dep(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+pub async fn install_ocr_dep(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
     tokio::fs::create_dir_all(mgr.env_path())
         .await
         .map_err(EnvironmentError::UvExtractFailed)?;
@@ -464,7 +482,7 @@ pub async fn install_ocr_dep(mgr: &EnvironmentManager) -> Result<(), Environment
             .map_err(EnvironmentError::UvExtractFailed)?;
     }
 
-    if let Err(error) = run_uv_sync_with_ocr(mgr, true).await {
+    if let Err(error) = run_uv_sync_with_ocr(mgr, true, cancel).await {
         if !had_marker {
             let _ = tokio::fs::remove_file(&marker).await;
         }
@@ -476,7 +494,10 @@ pub async fn install_ocr_dep(mgr: &EnvironmentManager) -> Result<(), Environment
 }
 
 /// 卸载 OCR 可选依赖，并清除用户启用偏好。
-pub async fn remove_ocr_dep(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+pub async fn remove_ocr_dep(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
     let marker = ocr_marker_path(mgr);
     let had_marker = marker.is_file();
     if had_marker {
@@ -485,7 +506,7 @@ pub async fn remove_ocr_dep(mgr: &EnvironmentManager) -> Result<(), EnvironmentE
             .map_err(EnvironmentError::UvExtractFailed)?;
     }
 
-    if let Err(error) = run_uv_sync_with_ocr(mgr, false).await {
+    if let Err(error) = run_uv_sync_with_ocr(mgr, false, cancel).await {
         if had_marker {
             let _ = tokio::fs::write(&marker, b"enabled").await;
         }
