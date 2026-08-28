@@ -266,6 +266,9 @@ mod tests {
         async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
             Ok(())
         }
+        async fn install_playwright_browser(&self, _browser: &str) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
         async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
             self.removed.lock().unwrap().installed = true;
             Ok(())

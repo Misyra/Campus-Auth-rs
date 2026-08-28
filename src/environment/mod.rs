@@ -7,7 +7,7 @@ pub mod uv;
 
 pub use bootstrap::{bootstrap_capability, check_environment, retry_install};
 pub use git::{check_git, download_mingit};
-pub use python::{ensure_venv, install_playwright};
+pub use python::{ensure_venv, install_playwright, install_playwright_browser};
 pub use uv::{check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256};
 
 use std::path::PathBuf;
@@ -70,7 +70,7 @@ pub const PYTHON_VERSION_CONSTRAINT: &str = ">=3.12,<3.13";
 pub const UV_SYNC_TIMEOUT: Duration = Duration::from_secs(600);
 /// uv sync 重试次数
 pub const UV_SYNC_MAX_RETRIES: u32 = 1;
-/// playwright install chromium 超时
+/// playwright install 浏览器超时
 pub const PLAYWRIGHT_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// playwright install 重试次数
 pub const PLAYWRIGHT_INSTALL_MAX_RETRIES: u32 = 3;
@@ -155,6 +155,10 @@ pub enum EnvironmentError {
     #[error("Playwright 安装超时 (>{timeout_secs}s)")]
     PlaywrightInstallTimeout { timeout_secs: u64 },
 
+    /// 请求安装了不受支持的 Playwright 浏览器
+    #[error("不支持的 Playwright 浏览器: {browser}")]
+    UnsupportedPlaywrightBrowser { browser: String },
+
     /// .venv 损坏，需要重建
     #[error(".venv 损坏，需要重建")]
     VenvCorrupted,
@@ -216,7 +220,8 @@ pub struct EnvironmentStatus {
     pub last_error: Option<String>,
 }
 
-/// 引导互斥门（F1）：串行化并发的 `ensure_capability` / `retry_install`
+/// 引导互斥门（F1）：串行化并发的 `ensure_capability` / `retry_install` /
+/// OCR 依赖同步 / 显式 Playwright 浏览器安装
 ///
 /// 此前三处调用（tasks/executor、web/routes/ocr、web/routes/system）可并发
 /// check-then-act 触发 bootstrap，踩踏同一 `.venv` 与固定临时名（uv.zip.tmp /
@@ -335,6 +340,8 @@ pub trait EnvironmentApi: Send + Sync {
     fn python_path(&self) -> PathBuf;
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导。
     async fn ensure_capability(&self) -> Result<(), EnvironmentError>;
+    /// 显式安装指定 Playwright 管理浏览器（chromium/firefox/webkit）。
+    async fn install_playwright_browser(&self, browser: &str) -> Result<(), EnvironmentError>;
     /// 安装 OCR optional extra，并持久记录用户启用偏好。
     async fn install_ocr_dep(&self) -> Result<(), EnvironmentError>;
     /// 卸载 OCR optional extra，并清除用户启用偏好。
@@ -357,6 +364,14 @@ impl EnvironmentApi for EnvironmentManager {
 
     async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
         EnvironmentManager::ensure_capability(self).await
+    }
+
+    async fn install_playwright_browser(&self, browser: &str) -> Result<(), EnvironmentError> {
+        self.bootstrap_gate
+            .run_exclusive(crate::environment::python::install_playwright_browser(
+                self, browser,
+            ))
+            .await
     }
 
     async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
