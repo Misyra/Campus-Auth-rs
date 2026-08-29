@@ -221,6 +221,16 @@ impl TaskExecutor {
             return Err(TaskError::UnsupportedExtension(ext));
         }
 
+        // Python 脚本且未指定解释器时，确保项目 venv 就绪（全新安装 os error 3 的根因）。
+        // .py 默认走项目 .venv，显式 binary_path 则跳过引导（符合 P0 要求“显式解释器不建 venv”）。
+        let is_python_default = ext == "py" && cfg.binary_path.is_none();
+        if is_python_default && !self.env.capability_ready() {
+            self.env
+                .ensure_capability()
+                .await
+                .map_err(|e| TaskError::Environment(e.to_string()))?;
+        }
+
         // 构建命令
         let python_default = self.env.python_path().to_string_lossy().to_string();
         let (program, args) = build_script_command(cfg, &script_file, &ext, &python_default);

@@ -118,7 +118,10 @@ impl UpdaterService {
                 Version::new(0, 0, 0)
             }
         };
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         Arc::new(Self {
             config,
@@ -276,13 +279,36 @@ impl UpdaterService {
         );
 
         let target_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
+        // 修复：pending 的 sha256 应为解压后 exe 的哈希，而非 zip 的哈希。
+        // 之前直接克隆 info.sha256（zip sha）导致 helper 对 extracted_exe 的复核恒失败（P0 阻断）。
+        // 现在下载阶段已校验 zip 完整性，此处额外计算 exe sha 存入 pending 供 helper 二次复核。
+        let exe_sha256 = tokio::task::spawn_blocking({
+            let exe_path = staged.extracted_exe.clone();
+            move || -> Result<String, std::io::Error> {
+                use sha2::Digest;
+                use std::io::Read;
+                let mut f = std::fs::File::open(&exe_path)?;
+                let mut h = sha2::Sha256::new();
+                let mut buf = [0u8; 65536];
+                loop {
+                    let n = f.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    h.update(&buf[..n]);
+                }
+                Ok(hex::encode(h.finalize()))
+            }
+        })
+        .await
+        .map_err(|e| UpdaterError::ExtractFailed(format!("计算 exe SHA 失败: {e}")))?
+        .map_err(|e| UpdaterError::ExtractFailed(format!("计算 exe SHA 失败: {e}")))?;
         let pending = PendingUpdate {
             version: info.latest_version.clone(),
             staging_dir: staging_dir.to_string_lossy().into_owned(),
             target_exe: target_exe.to_string_lossy().into_owned(),
             original_args: std::env::args().skip(1).collect(),
-            // G13：helper 替换前据此复核 staging exe 完整性（空 = 降级跳过复核）
-            sha256: info.sha256.clone(),
+            sha256: exe_sha256,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         apply::write_pending(&pending, &self.base_path)?;
