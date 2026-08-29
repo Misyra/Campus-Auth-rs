@@ -164,7 +164,7 @@ pub enum EnvironmentError {
     VenvCorrupted,
 
     /// python_worker/ 目录不存在
-    #[error("python_worker/ 目录不存在: {path}")]
+    #[error("python_worker/ 目录不存在: {}", path.display())]
     WorkerProjectNotFound { path: PathBuf },
 
     /// MinGit 下载失败
@@ -413,7 +413,28 @@ impl EnvironmentManager {
         git_download_enabled: bool,
     ) -> Arc<Self> {
         let env_path = base_path.join(ENV_DIR);
-        let worker_project_path = base_path.join(WORKER_PROJECT_DIR);
+        // 开发模式 base_path=target/e2e-* 时 python_worker 不在该目录，回退到仓库根（与 docs 背景图的多路径兜底一致）。
+        let worker_project_path = {
+            let candidate = base_path.join(WORKER_PROJECT_DIR);
+            if candidate.exists() {
+                candidate
+            } else if let Some(repo) = base_path
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join(WORKER_PROJECT_DIR))
+            {
+                if repo.exists() {
+                    repo
+                } else {
+                    let mf =
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
+                    if mf.exists() { mf } else { candidate }
+                }
+            } else {
+                let mf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
+                if mf.exists() { mf } else { candidate }
+            }
+        };
         Arc::new(Self {
             base_path,
             env_path,
@@ -634,6 +655,9 @@ mod tests {
     #[test]
     fn test_python_path_points_to_worker_project_venv() {
         let dir = tempfile::TempDir::new().unwrap();
+        // 主路径前提：base_path 下须存在 python_worker/，否则会回退到
+        // 仓库根 / CARGO_MANIFEST_DIR 的兜底目录（dev 环境下命中仓库）
+        std::fs::create_dir(dir.path().join(WORKER_PROJECT_DIR)).unwrap();
         let manager = EnvironmentManager::new(
             dir.path().to_path_buf(),
             Arc::new(StatusManager::new()),

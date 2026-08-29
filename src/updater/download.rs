@@ -41,8 +41,11 @@ pub(crate) async fn download_and_verify(
     staging_dir: &Path,
     on_progress: Option<&(dyn Fn(u8) + Send + Sync)>,
 ) -> Result<PathBuf, UpdaterError> {
-    // 安全检查：仅允许 HTTPS
-    if !info.url.starts_with("https://") {
+    // 安全检查：仅允许 HTTPS，本地回环用于 e2e 假更新源放行
+    let is_loopback_http = info.url.starts_with("http://127.0.0.1")
+        || info.url.starts_with("http://localhost")
+        || info.url.starts_with("http://[::1]");
+    if !info.url.starts_with("https://") && !is_loopback_http {
         return Err(UpdaterError::HttpsRequired(info.url.clone()));
     }
 
