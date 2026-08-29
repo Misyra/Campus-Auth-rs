@@ -115,8 +115,12 @@ export const historyApi = {
 /** 浏览器 */
 export const browsersApi = {
   fetch: () => http.get<BrowserListResponse>("/api/browsers"),
-  installPlaywright: (opts?: { signal?: AbortSignal; timeout?: number }) =>
-    http.post<MutationResult>("/api/install/playwright", null, opts),
+  installPlaywright: (browser = "chromium", opts?: { signal?: AbortSignal; timeout?: number }) =>
+    http.post<MutationResult & { browser?: string }>(
+      `/api/install/playwright?browser=${encodeURIComponent(browser)}`,
+      null,
+      opts,
+    ),
 };
 
 /** Worker（浏览器进程） */

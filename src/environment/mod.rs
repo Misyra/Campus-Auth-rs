@@ -7,7 +7,7 @@ pub mod uv;
 
 pub use bootstrap::{bootstrap_capability, check_environment, retry_install};
 pub use git::{check_git, download_mingit};
-pub use python::{ensure_venv, install_playwright};
+pub use python::{ensure_venv, install_playwright, install_playwright_browser};
 pub use uv::{check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256};
 
 use std::path::PathBuf;
@@ -70,7 +70,7 @@ pub const PYTHON_VERSION_CONSTRAINT: &str = ">=3.12,<3.13";
 pub const UV_SYNC_TIMEOUT: Duration = Duration::from_secs(600);
 /// uv sync 重试次数
 pub const UV_SYNC_MAX_RETRIES: u32 = 1;
-/// playwright install chromium 超时
+/// playwright install 浏览器超时
 pub const PLAYWRIGHT_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// playwright install 重试次数
 pub const PLAYWRIGHT_INSTALL_MAX_RETRIES: u32 = 3;
@@ -155,6 +155,10 @@ pub enum EnvironmentError {
     #[error("Playwright 安装超时 (>{timeout_secs}s)")]
     PlaywrightInstallTimeout { timeout_secs: u64 },
 
+    /// 请求安装了不受支持的 Playwright 浏览器
+    #[error("不支持的 Playwright 浏览器: {browser}")]
+    UnsupportedPlaywrightBrowser { browser: String },
+
     /// .venv 损坏，需要重建
     #[error(".venv 损坏，需要重建")]
     VenvCorrupted,
@@ -216,7 +220,8 @@ pub struct EnvironmentStatus {
     pub last_error: Option<String>,
 }
 
-/// 引导互斥门（F1）：串行化并发的 `ensure_capability` / `retry_install`
+/// 引导互斥门（F1）：串行化并发的 `ensure_capability` / `ensure_python_runtime` /
+/// `retry_install` / OCR 依赖同步 / 显式 Playwright 浏览器安装
 ///
 /// 此前三处调用（tasks/executor、web/routes/ocr、web/routes/system）可并发
 /// check-then-act 触发 bootstrap，踩踏同一 `.venv` 与固定临时名（uv.zip.tmp /
@@ -313,8 +318,11 @@ pub struct EnvironmentManager {
     status_manager: Arc<StatusManager>,
     /// HTTP 客户端
     http_client: Client,
-    /// 取消令牌
-    cancel_token: CancellationToken,
+    /// 当前正在执行的安装 generation 的取消令牌。
+    ///
+    /// 每个真正获得 BootstrapGate 执行权的 operation 都会替换它，并把自己的
+    /// token clone 显式传入整个调用链；旧 operation 因此永远不会读取到新代 token。
+    current_cancel_token: RwLock<CancellationToken>,
     /// 是否允许下载 MinGit（仅开发者模式启用）
     git_download_enabled: bool,
     /// 引导完成回调（成功重建环境时触发，用于复位 Bridge 熔断计数 B3）
@@ -335,13 +343,15 @@ pub trait EnvironmentApi: Send + Sync {
     fn python_path(&self) -> PathBuf;
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导。
     async fn ensure_capability(&self) -> Result<(), EnvironmentError>;
-    /// 安装 OCR 依赖（`uv add ddddocr`）。
+    /// 显式安装指定 Playwright 管理浏览器（chromium/firefox/webkit）。
+    async fn install_playwright_browser(&self, browser: &str) -> Result<(), EnvironmentError>;
+    /// 安装 OCR optional extra，并持久记录用户启用偏好。
     async fn install_ocr_dep(&self) -> Result<(), EnvironmentError>;
-    /// 卸载 OCR 依赖（`uv remove ddddocr`）。
+    /// 卸载 OCR optional extra，并清除用户启用偏好。
     async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError>;
     /// OCR 依赖（ddddocr）是否已安装在 venv 内。
     fn ocr_ready(&self) -> bool;
-    /// 项目是否在 `python_worker/pyproject.toml` 中声明了 ddddocr 依赖。
+    /// 项目是否声明支持 `ocr` optional extra。
     fn ocr_declared(&self) -> bool;
 }
 
@@ -359,12 +369,31 @@ impl EnvironmentApi for EnvironmentManager {
         EnvironmentManager::ensure_capability(self).await
     }
 
+    async fn install_playwright_browser(&self, browser: &str) -> Result<(), EnvironmentError> {
+        self.bootstrap_gate
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                crate::environment::python::install_playwright_browser(self, browser, &cancel).await
+            })
+            .await
+    }
+
     async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
-        crate::environment::uv::install_ocr_dep(self).await
+        self.bootstrap_gate
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                crate::environment::uv::install_ocr_dep(self, &cancel).await
+            })
+            .await
     }
 
     async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError> {
-        crate::environment::uv::remove_ocr_dep(self).await
+        self.bootstrap_gate
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                crate::environment::uv::remove_ocr_dep(self, &cancel).await
+            })
+            .await
     }
 
     fn ocr_ready(&self) -> bool {
@@ -422,7 +451,7 @@ impl EnvironmentManager {
             })),
             status_manager,
             http_client: Client::new(),
-            cancel_token: CancellationToken::new(),
+            current_cancel_token: RwLock::new(CancellationToken::new()),
             git_download_enabled,
             on_bootstrap_done: Mutex::new(None),
             bootstrap_gate: BootstrapGate::new(),
@@ -481,10 +510,37 @@ impl EnvironmentManager {
         self.worker_project_path.join(PYTHON_EXE_RELATIVE)
     }
 
+    /// 项目内 Python 运行时是否就绪。
+    pub fn python_runtime_ready(&self) -> bool {
+        self.status
+            .read()
+            .expect("EnvironmentStatus 读锁中毒")
+            .python_ready
+    }
+
+    /// 确保项目内 Python 运行时就绪，只准备 uv + venv，不安装 Playwright 浏览器。
+    ///
+    /// 与完整浏览器引导共用 BootstrapGate：若两类首次使用并发发生，只允许一轮
+    /// 环境写操作进入 `.venv`，等待者获得锁后会按 python_ready 再次双检。
+    pub async fn ensure_python_runtime(&self) -> Result<(), EnvironmentError> {
+        self.bootstrap_gate
+            .ensure(
+                || self.python_runtime_ready(),
+                || async {
+                    let cancel = self.begin_install_generation();
+                    bootstrap::bootstrap_python_runtime(self, &cancel).await?;
+                    self.write_status(|s| s.stage = BootstrapStage::Done);
+                    self.report_progress("python_ready", PROGRESS_VENV_SYNC.1, "Python 环境就绪");
+                    Ok(())
+                },
+            )
+            .await
+    }
+
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导
     ///
-    /// OCR 依赖（ddddocr）不在此自动补装：由前端显式"安装/卸载"经
-    /// `uv add/remove ddddocr` 管理，避免自动化与显式卸载互相冲突。
+    /// OCR 依赖由前端显式安装/卸载；用户启用后会写入持久标记，后续环境
+    /// 修复通过 `uv sync --extra ocr` 保留该选择，未启用时只同步基础依赖。
     ///
     /// F1：经 BootstrapGate 串行化——并发调用者等待锁后二次检查就绪状态，
     /// 只有一个调用者真正执行引导，其余复用其结果，避免并发 bootstrap
@@ -493,7 +549,12 @@ impl EnvironmentManager {
         self.bootstrap_gate
             .ensure(
                 || self.is_ready(),
-                || async { bootstrap_capability(self).await },
+                || async {
+                    // 只有真正获得本轮 bootstrap 执行权的调用者才创建新 generation。
+                    // token 随后按值 clone/按引用显式传入调用链，等待者不会触碰它。
+                    let cancel = self.begin_install_generation();
+                    bootstrap_capability(self, &cancel).await
+                },
             )
             .await
     }
@@ -506,9 +567,15 @@ impl EnvironmentManager {
         retry_install(self).await
     }
 
-    /// 取消在途安装
+    /// 取消当前在途安装 generation。
+    ///
+    /// 新一轮 operation 只有在获得 BootstrapGate 排他执行权后才会注册全新 token，
+    /// 因此这里永远不会把已排队但尚未开始的下一轮误取消。
     pub fn cancel(&self) {
-        self.cancel_token.cancel();
+        self.current_cancel_token
+            .read()
+            .expect("Environment current_cancel_token 读锁中毒")
+            .cancel();
     }
 
     /// 读取环境状态（供 uv.rs/python.rs/git.rs 复用）
@@ -560,9 +627,17 @@ impl EnvironmentManager {
         &self.http_client
     }
 
-    /// 取消令牌
-    pub(crate) fn cancel_token(&self) -> &CancellationToken {
-        &self.cancel_token
+    /// 开始一轮新的安装 generation，并返回该轮独占的取消令牌 clone。
+    ///
+    /// 必须仅在持有 BootstrapGate 排他执行权时调用。调用方把返回值显式传给
+    /// 本轮所有子操作，禁止子操作再回到 EnvironmentManager 动态读取当前 token。
+    pub(crate) fn begin_install_generation(&self) -> CancellationToken {
+        let token = CancellationToken::new();
+        *self
+            .current_cancel_token
+            .write()
+            .expect("Environment current_cancel_token 写锁中毒") = token.clone();
+        token
     }
 
     /// 是否允许下载 MinGit
@@ -591,6 +666,30 @@ mod tests {
                 .join(WORKER_PROJECT_DIR)
                 .join(PYTHON_EXE_RELATIVE)
         );
+    }
+
+    /// 每轮安装持有独立 token：取消旧轮后，新 generation 必须自动获得全新 scope。
+    #[test]
+    fn test_install_generation_uses_independent_cancellation_scopes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            Arc::new(StatusManager::new()),
+            false,
+        );
+
+        let first = manager.begin_install_generation();
+        assert!(!first.is_cancelled());
+        manager.cancel();
+        assert!(first.is_cancelled());
+
+        let second = manager.begin_install_generation();
+        assert!(!second.is_cancelled(), "新 generation 不得继承旧轮取消状态");
+        assert!(first.is_cancelled(), "创建新 generation 不得复活旧 token");
+
+        manager.cancel();
+        assert!(second.is_cancelled(), "cancel 只能命中当前 generation");
+        assert!(first.is_cancelled());
     }
 
     /// F1：并发 ensure 只触发一次真实引导——抢到锁的执行者跑引导，

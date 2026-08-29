@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Campus-Auth 任务录制器
 // @namespace    https://github.com/Misyra/Campus-Auth
-// @version      4.2.0
+// @version      4.2.1
 // @description  可视化选取校园网登录页面元素，自动生成任务 JSON 或结构化文档
 // @author       Misyra
 // @match        http://*/*
@@ -19,7 +19,7 @@
 
   // ==================== 配置 ====================
 
-  const VERSION = "4.2.0"; // 同步修改顶部 @version
+  const VERSION = "4.2.1"; // 同步修改顶部 @version
 
   const STEP_TYPES = {
     username: { category: "basic", label: "账号输入框", icon: "👤", color: "#4CAF50", primary: true, hint: "点击页面上真实的账号输入框（不是旁边的文字标签），支持自动检测隐藏输入框" },
@@ -77,6 +77,102 @@
     TOOLTIP_MAX_WIDTH: 420,              // showTooltip 右边界预留宽度
     POPUP_MAX_WIDTH: 300,                // showRevealPopup 右边界预留宽度
   };
+
+  const SENSITIVE_ATTR_RE = /(?:password|passwd|pwd|secret|token|authorization|credential|session|cookie|csrf|xsrf)/i;
+
+  function isSensitiveAttributeName(name) {
+    return String(name || "").toLowerCase() === "value" || SENSITIVE_ATTR_RE.test(String(name || ""));
+  }
+
+  function sanitizeAttributeValue(name, value) {
+    const raw = String(value || "");
+    if (["href", "src", "action"].includes(String(name || "").toLowerCase())) {
+      return raw.split(/[?#]/, 1)[0];
+    }
+    return raw;
+  }
+
+  function sanitizeDomHtml(el, inner, maxLen) {
+    if (!el) return "";
+    try {
+      const clone = el.cloneNode(true);
+      const nodes = [clone, ...clone.querySelectorAll("*")];
+      for (const node of nodes) {
+        if (node.attributes) {
+          for (const attr of Array.from(node.attributes)) {
+            if (isSensitiveAttributeName(attr.name)) {
+              node.removeAttribute(attr.name);
+            } else if (["href", "src", "action"].includes(attr.name.toLowerCase())) {
+              node.setAttribute(attr.name, sanitizeAttributeValue(attr.name, attr.value));
+            }
+          }
+        }
+        const tag = (node.tagName || "").toLowerCase();
+        if (tag === "textarea") node.textContent = "";
+        if (tag === "input") node.removeAttribute("checked");
+        if (tag === "option") node.removeAttribute("selected");
+      }
+      const html = inner ? clone.innerHTML : clone.outerHTML;
+      return html.substring(0, maxLen);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function inputSemanticSignal(el) {
+    return [
+      el?.name,
+      el?.id,
+      el?.placeholder,
+      el?.getAttribute?.("aria-label"),
+      el?.getAttribute?.("autocomplete"),
+    ].filter(Boolean).join(" ").toLowerCase();
+  }
+
+  function isLikelySearchInput(el) {
+    if (!el) return false;
+    if (el.closest?.("[role='search'], [role='searchbox']")) return true;
+    return /search|query|find|filter|keyword|搜索|查找|检索/.test(inputSemanticSignal(el));
+  }
+
+  function isLikelyCaptchaInput(el) {
+    if (!el) return false;
+    if (isElementCaptcha(el)) return true;
+    return /captcha|verify|verification|checkcode|randcode|validcode|vcode|otp|one[-_ ]?time[-_ ]?code|sms[-_ ]?code|auth[-_ ]?code|security[-_ ]?code|验证码|校验码|图形码|短信码/.test(inputSemanticSignal(el));
+  }
+
+  function isLikelyLoginForm(el) {
+    if (!el) return false;
+    const form = el.closest?.("form");
+    if (form) {
+      const formSignal = [form.action, form.id, form.className, form.name]
+        .filter(Boolean).join(" ").toLowerCase();
+      if (/login|auth|signin|sign-in|sso|portal|认证|登录/.test(formSignal)) return true;
+      if (form.querySelector?.('input[type="password"]')) return true;
+    }
+    let cur = el.parentElement;
+    let depth = 0;
+    while (cur && depth < 5) {
+      const signal = [cur.id, typeof cur.className === "string" ? cur.className : ""]
+        .filter(Boolean).join(" ").toLowerCase();
+      if (/login|auth|signin|sign-in|sso|portal|认证|登录/.test(signal)) return true;
+      cur = cur.parentElement;
+      depth += 1;
+    }
+    return false;
+  }
+
+  function isLikelyUsernameInput(el) {
+    if (!el) return false;
+    const type = String(el.type || "text").toLowerCase();
+    if (!["text", "email", "tel", ""].includes(type)) return false;
+    if (isLikelySearchInput(el) || isLikelyCaptchaInput(el)) return false;
+    const signal = inputSemanticSignal(el);
+    if (/username|user_name|userid|user_id|account|login|student|number|email|mobile|phone|学号|工号|账号|用户名|手机号|邮箱/.test(signal)) return true;
+    const autocomplete = String(el.getAttribute?.("autocomplete") || "").toLowerCase();
+    if (autocomplete === "username" || autocomplete === "email") return true;
+    return isLikelyLoginForm(el);
+  }
 
   function saveState() {
     try {
@@ -668,7 +764,7 @@
                 const tag = frame.tagName.toLowerCase();
                 return {
                   inIframe: true,
-                  frameSrc: frame.src || "",
+                  frameSrc: sanitizeAttributeValue("src", frame.src),
                   frameName: frame.name || "",
                   frameId: frame.id || "",
                   frameSelector: frame.id
@@ -700,7 +796,7 @@
                 crossOriginFallback = {
                   inIframe: true,
                   crossOrigin: true,
-                  frameSrc: frame.src || "",
+                  frameSrc: sanitizeAttributeValue("src", frame.src),
                   frameName: frame.name || "",
                   frameId: frame.id || "",
                   frameSelector: fallbackSelector,
@@ -727,7 +823,7 @@
           const tag = frameEl.tagName.toLowerCase();
           return {
             inIframe: true,
-            frameSrc: frameEl.src || "",
+            frameSrc: sanitizeAttributeValue("src", frameEl.src),
             frameName: frameEl.name || "",
             frameId: frameEl.id || "",
             frameSelector: frameEl.id
@@ -767,17 +863,17 @@
     const tag = el.tagName.toLowerCase();
     const attrs = {};
     for (const attr of el.attributes) {
-      if (["id", "class", "name", "type", "placeholder", "value", "href", "src", "action",
-           "data-testid", "aria-label", "aria-describedby", "role"].includes(attr.name)) {
-        attrs[attr.name] = attr.value;
-      }
-      // 收集所有 data-* 属性作为候选
-      if (attr.name.startsWith("data-")) {
-        attrs[attr.name] = attr.value;
-      }
+    if (isSensitiveAttributeName(attr.name)) continue;
+    if (["id", "class", "name", "type", "placeholder", "href", "src", "action",
+         "data-testid", "aria-label", "aria-describedby", "role"].includes(attr.name)) {
+      attrs[attr.name] = sanitizeAttributeValue(attr.name, attr.value);
     }
+    if (attr.name.startsWith("data-") && !isSensitiveAttributeName(attr.name)) {
+      attrs[attr.name] = sanitizeAttributeValue(attr.name, attr.value);
+    }
+  }
 
-    return {
+  return {
       tag,
       attrs,
       text: (el.textContent || "").trim().substring(0, 100),
@@ -1028,6 +1124,8 @@
 
   // ==================== UI: 主面板 ====================
 
+  let _smartDetectListenersAttached = false;
+
   function createPanel() {
     if (state.panel) return;
 
@@ -1173,42 +1271,36 @@
     });
 
     // 全局 input 事件监听（手动填写 & 智能检测共用 — capture 阶段确保最先捕获）
-    document.addEventListener("input", (e) => {
+    if (!_smartDetectListenersAttached) {
+      document.addEventListener("input", (e) => {
+      if (!state.active || !state.recording) return;
       const el = e.composedPath()[0];
       if (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA") return;
       if (el.type === "checkbox" || el.type === "radio" || el.type === "submit" || el.type === "button") return;
       if (document.activeElement !== el) return;
 
-      // 智能检测模式：按 input type 自动分类记录
-      if (state.currentStepType === "smart_detect") {
-        // 区分搜索框和登录输入框：检查是否在 login/auth 相关 form 内
-        let inLoginForm = false;
-        let cur = el.closest("form");
-        if (cur) {
-          const action = (cur.action || "").toLowerCase();
-          const cls = (cur.className || "").toLowerCase();
-          const id = (cur.id || "").toLowerCase();
-          inLoginForm = /login|auth|signin|sso/.test(action) || /login|auth|signin/.test(cls) || /login|auth|signin/.test(id);
-        }
-        // 不在登录表单内的输入框，记录为 click 而非 username/password
-        if (!inLoginForm && !el.closest("[role='search'], [role='searchbox']")) {
-          const name = (el.name || "").toLowerCase();
-          const placeholder = (el.placeholder || "").toLowerCase();
-          if (/search|query|find|filter/.test(name) || /search|query|find|filter/.test(placeholder)) {
-            return; // 跳过搜索框
-          }
-        }
-
-        const stepType = el.type === "password" ? "password" : "username";
-        const desc = stepType === "password" ? "密码输入框 → {{PASSWORD}}" : "账号输入框 → {{USERNAME}}";
-        addManualFillStep(stepType, el, desc);
-        setStatus("🔍 已记录。继续点击或输入，按 Esc 停止", "recording");
-        return;
+      // 智能检测模式：只记录有明确登录语义的账号/密码输入框。
+    if (state.currentStepType === "smart_detect") {
+      if (isLikelySearchInput(el) || isLikelyCaptchaInput(el)) return;
+      let stepType;
+      if (el.type === "password") {
+        const signal = inputSemanticSignal(el);
+        if (!isLikelyLoginForm(el) && !/password|passwd|pwd|pass|密码/.test(signal)) return;
+        stepType = "password";
+      } else {
+        if (!isLikelyUsernameInput(el)) return;
+        stepType = "username";
       }
+      const desc = stepType === "password" ? "密码输入框 → {{PASSWORD}}" : "账号输入框 → {{USERNAME}}";
+      addManualFillStep(stepType, el, desc);
+      setStatus("🔍 已记录。继续点击或输入，按 Esc 停止", "recording");
+      return;
+    }
     }, true);  // capture phase
 
     // change 事件监听（智能检测模式：勾选/下拉框变动后记录）
     document.addEventListener("change", (e) => {
+      if (!state.active || !state.recording) return;
       if (state.currentStepType !== "smart_detect") return;
       const el = e.target;
       if (el === state.panel || state.panel?.contains(el)) return;
@@ -1224,6 +1316,8 @@
         setStatus("🔍 已记录运营商选择。继续操作或按 Esc 停止", "recording");
       }
     }, true);  // capture phase
+      _smartDetectListenersAttached = true;
+    }
 
     // 事件绑定
     // 已录制列表的删除/编辑用事件委托，避免 updateRecordedList 每次重渲染重复绑定监听器
@@ -1524,7 +1618,7 @@
     try {
       const hiddenEl = document.querySelector(result.hiddenRealSelector);
       if (hiddenEl) {
-        result.hiddenRealHTML = hiddenEl.outerHTML.substring(0, LIMITS.HTML_HIDDEN);
+        result.hiddenRealHTML = sanitizeDomHtml(hiddenEl, false, LIMITS.HTML_HIDDEN);
         result.hiddenRealTag = hiddenEl.tagName.toLowerCase();
         if (hiddenEl.parentElement === el.parentElement) {
           result.hiddenRealRelation = `同一 <${el.parentElement.tagName.toLowerCase()}> 内的兄弟元素`;
@@ -1553,9 +1647,9 @@
       attrs: info.attrs,
       text: info.text,
       visible: info.visible,
-      elementHTML: el.outerHTML,
-      elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : "",
-      elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || "",
+      elementHTML: sanitizeDomHtml(el, false, LIMITS.HTML_ELEMENT),
+      elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : "",
+      elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ""; })(),
     };
   }
 
@@ -1685,7 +1779,7 @@
     }
     // 图片 → 验证码
     if (tag === "img") {
-      const imgDesc = (el.alt || el.src || "").substring(0, 50);
+      const imgDesc = (el.alt || sanitizeAttributeValue("src", el.src) || "").substring(0, 50);
       addStepFromElement("captcha_img", el, info, "验证码图片" + (imgDesc ? `: ${imgDesc}` : ""));
       selectStepType("captcha_input");
       return;
@@ -1771,9 +1865,9 @@
       optionText: optionText,
       optionTag: info.tag,
       optionSelector: optionContainerSelector || info.selectors[0]?.value || "",
-      elementHTML: el.outerHTML,
-      elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : "",
-      elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || "",
+      elementHTML: sanitizeDomHtml(el, false, LIMITS.HTML_ELEMENT),
+      elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : "",
+      elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ""; })(),
     };
 
     state.steps.push(step);
@@ -1823,7 +1917,8 @@
 
   function recordButtonGroupCarrier(el, info, group) {
     const groupContainer = group[0].parentElement;
-    const groupContainerInfo = groupContainer ? getElementInfo(groupContainer) : { selectors: [], bestSelector: "" };
+    const groupContainerInfo = groupContainer ? getElementInfo(groupContainer) : { selectors: [] };
+    const groupContainerSelector = groupContainerInfo.selectors[0]?.value || "";
     const optionText = (el.textContent || "").trim().substring(0, 50);
     const allOptions = group.map(s => (s.textContent || "").trim().substring(0, 30)).filter(Boolean);
 
@@ -1840,13 +1935,13 @@
       visible: info.visible,
       optionText: optionText,
       optionTag: info.tag,
-      optionSelector: groupContainerInfo.bestSelector || "",
+      optionSelector: groupContainerSelector,
       carrierMode: "button_group",
       allOptions: allOptions,
-      containerSelector: groupContainerInfo.bestSelector || "",
-      elementHTML: el.outerHTML,
-      elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : "",
-      elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || "",
+      containerSelector: groupContainerSelector,
+      elementHTML: sanitizeDomHtml(el, false, LIMITS.HTML_ELEMENT),
+      elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : "",
+      elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ""; })(),
     };
 
     state.steps.push(step);
@@ -2126,6 +2221,7 @@
   }
 
   function generatePrompt(url) {
+    url = sanitizeAttributeValue("href", url);
     let prompt = `请根据以下校园网登录页面的元素信息，生成 Campus-Auth 的任务 JSON 配置。\n\n`;
     prompt += `任务编写规范请参考 Campus-Auth 项目中的 docs/guides/task-writing-guide.md 文档。\n\n`;
     prompt += `## 输出要求\n\n`;
@@ -2323,7 +2419,7 @@
         common = common.parentElement;
       }
       if (common) {
-        prompt += `- 页面上下文 HTML:\n\`\`\`html\n${common.innerHTML.substring(0, LIMITS.HTML_CONTEXT)}\n\`\`\`\n`;
+        prompt += `- 页面上下文 HTML:\n\`\`\`html\n${sanitizeDomHtml(common, true, LIMITS.HTML_CONTEXT)}\n\`\`\`\n`;
       }
     }
 
@@ -2896,9 +2992,9 @@
           attrs: info.attrs,
           text: info.text,
           visible: true,
-          elementHTML: el.outerHTML,
-          elementParentContext: el.parentElement ? el.parentElement.innerHTML.substring(0, LIMITS.HTML_ELEMENT) : '',
-          elementContainerHTML: findStepContainer(el)?.innerHTML.substring(0, LIMITS.HTML_CONTAINER) || '',
+          elementHTML: sanitizeDomHtml(el, false, LIMITS.HTML_ELEMENT),
+          elementParentContext: el.parentElement ? sanitizeDomHtml(el.parentElement, true, LIMITS.HTML_ELEMENT) : '',
+          elementContainerHTML: (() => { const c = findStepContainer(el); return c ? sanitizeDomHtml(c, true, LIMITS.HTML_CONTAINER) : ''; })(),
           _revealRecorded: true,
         };
         state.steps.push(step);
@@ -3001,6 +3097,7 @@
     if (!state.active) return;
     state.active = false;
     state.recording = false;
+    state.currentStepType = null;
     state.carrierClickPhase = null;
     // 恢复被强制显示的隐藏输入框 + 移除面板和高亮
     hideRevealedInputs();

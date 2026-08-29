@@ -80,7 +80,7 @@ class StepConfig:
     """步骤配置（扁平结构，由 ``type`` 字段区分步骤类型）。
 
     字段与 Rust 侧 ``StepConfig`` 对齐。未知字段保留在 ``extras`` 中，
-    由各处理器按需读取（如 ``full_page``、``wait_until``）。
+    由各处理器按需读取（如 ``full_page``、``wait_until``、``url``）。
     """
 
     id: str = ""
@@ -93,7 +93,7 @@ class StepConfig:
     """步骤描述。"""
 
     selector: str | None = None
-    """目标元素选择器（CSS / XPath / text）。"""
+    """目标元素选择器（CSS / XPath / Playwright text selector）。"""
 
     value: str | None = None
     """目标值（填写内容 / 导航 URL / 正则模式）。"""
@@ -111,13 +111,13 @@ class StepConfig:
     """步骤超时（毫秒）。"""
 
     required: bool = True
-    """步骤是否必须成功。"""
+    """步骤是否必须成功。默认 True，与 Rust 侧契约一致。"""
 
     store_as: str | None = None
     """结果存储键名。"""
 
     path: str | None = None
-    """文件路径（上传等场景）。"""
+    """文件路径（截图 / 上传文件等场景）。"""
 
     clear: bool = True
     """input 步骤是否先清空再填写。
@@ -130,7 +130,7 @@ class StepConfig:
     """wait/sleep 步骤等待时长（毫秒）。默认 1000，与 Rust 侧默认对齐（B5 契约）。"""
 
     option_selector: str | None = None
-    """click_select 步骤中目标选项的选择器。"""
+    """click_select 的选项范围选择器；为空时在当前页面/frame 全局按文字查找。"""
 
     old: bool = False
     """ocr 步骤是否使用旧版识别模型。"""
@@ -139,7 +139,7 @@ class StepConfig:
     """ocr 步骤识别结果填入的目标输入框选择器。"""
 
     frame: str | None = None
-    """iframe 选择器（URL、name 或 CSS 选择器）。"""
+    """iframe 定位规格（frame name、``url=`` URL 片段或 CSS 选择器）。"""
 
     char_range: str | int | None = None
     """OCR 识别字符范围（0-7 或自定义字符串）。"""
@@ -203,6 +203,9 @@ class TaskConfig:
     url: str = ""
     """登录页 URL。"""
 
+    timeout: int = 30000
+    """任务级总超时（毫秒）。实际超时由 Rust Bridge 统一执行，此处保留契约字段。"""
+
     on_success: Any = None
     """登录成功后回调。"""
 
@@ -212,8 +215,11 @@ class TaskConfig:
     reveal_hidden: bool = False
     """是否揭示隐藏元素。"""
 
-    step_delay: float = 0
-    """步骤间默认延迟（秒）。"""
+    step_delay: float = 0.5
+    """步骤间默认延迟（秒）。与 Rust 默认值保持一致。"""
+
+    navigation_wait: float = 1.0
+    """初始页面导航完成后的额外等待时间（秒）。"""
 
     variables: dict[str, str] | None = field(default_factory=dict)
     """自定义模板变量。"""
@@ -234,9 +240,9 @@ class TaskConfig:
     def from_dict(cls, d: dict[str, Any]) -> TaskConfig:
         """从 JSON 字典构造，递归解析 steps。"""
         known_keys = {
-            "task_id", "name", "description", "url",
+            "task_id", "name", "description", "url", "timeout",
             "on_success", "on_failure", "reveal_hidden",
-            "step_delay", "variables", "success_condition",
+            "step_delay", "navigation_wait", "variables", "success_condition",
             "steps", "metadata",
         }
         known: dict[str, Any] = {}

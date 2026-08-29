@@ -5,8 +5,13 @@ description = "Campus-Auth 浏览器自动化 Python Worker（NDJSON IPC 子进�
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "ddddocr>=1.6.1",
     "playwright>=1.40",
+]
+
+# OCR 为显式可选能力；锁文件保留该 extra，但默认同步不安装，应用按用户偏好启用。
+[project.optional-dependencies]
+ocr = [
+    "ddddocr>=1.6.1",
 ]
 
 # 开发/测试依赖：仅用于本仓库单元测试，不随运行时安装

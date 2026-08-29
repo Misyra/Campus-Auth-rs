@@ -3,14 +3,16 @@ import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import FieldHelp from "@/components/common/FieldHelp.vue";
-import { browsersApi, configApi, workerApi } from "@/api";
+import { browsersApi, configApi, workerApi, extractApiError } from "@/api";
 
 const config = useConfig();
 
 const browsers = ref<{ channel: string; name: string; description: string; installed: boolean; icon: string }[]>([]);
 const browserLoading = ref(true);
-const playwrightDownloading = ref(false);
+const installingBrowser = ref<string | null>(null);
+const browserInstallError = ref("");
 const stoppingBrowser = ref(false);
+const playwrightInstallable = new Set(["chromium", "firefox", "webkit"]);
 
 onMounted(async () => {
   try {
@@ -23,18 +25,31 @@ onMounted(async () => {
 });
 
 function handleBrowserClick(b: typeof browsers.value[0]) {
-  if (!b.installed && b.channel !== "chromium" && b.channel !== "custom") return;
-  if (b.channel === "chromium" && !b.installed) {
-    void installPlaywright();
+  if (!b.installed) {
+    if (playwrightInstallable.has(b.channel)) void installPlaywright(b.channel);
     return;
   }
   config.config.browser.browser_channel = b.channel;
 }
 
-async function installPlaywright() {
-  playwrightDownloading.value = true;
-  try { await browsersApi.installPlaywright(); } catch { /* */ }
-  playwrightDownloading.value = false;
+async function installPlaywright(channel: string) {
+  if (installingBrowser.value) return;
+  installingBrowser.value = channel;
+  browserInstallError.value = "";
+  try {
+    await browsersApi.installPlaywright(channel);
+    const data = await browsersApi.fetch();
+    browsers.value = data.browsers;
+    if (browsers.value.find((b) => b.channel === channel)?.installed) {
+      config.config.browser.browser_channel = channel;
+      return;
+    }
+    browserInstallError.value = `${channel} 安装完成，但未检测到浏览器，请检查日志后重试`;
+  } catch (error) {
+    browserInstallError.value = `${channel} 安装失败：${extractApiError(error, "未知错误")}`;
+  } finally {
+    installingBrowser.value = null;
+  }
 }
 
 // Stealth script
@@ -75,7 +90,7 @@ async function stopBrowser() {
           <div v-if="browserLoading" class="loading">正在检测浏览器...</div>
           <div v-else class="browser-cards">
             <div v-for="b in browsers" :key="b.channel" class="browser-card"
-              :class="{ active: config.config.browser.browser_channel === b.channel, disabled: !b.installed }"
+              :class="{ active: config.config.browser.browser_channel === b.channel, disabled: !b.installed && !playwrightInstallable.has(b.channel) }"
               @click="handleBrowserClick(b)">
               <div class="browser-icon">
                 <img v-if="b.channel === 'chromium'" src="/icons/chromium.svg" width="32" height="32" alt="chromium" />
@@ -93,8 +108,11 @@ async function stopBrowser() {
                   <span v-if="b.installed" class="status-installed">
                     <IconApp name="check" width="14" height="14" /> 已安装
                   </span>
-                  <span v-else-if="playwrightDownloading && b.channel === 'chromium'" class="status-downloading">
+                  <span v-else-if="installingBrowser === b.channel" class="status-downloading">
                     <IconApp name="refresh" width="14" height="14" class="spin" /> 下载中...
+                  </span>
+                  <span v-else-if="playwrightInstallable.has(b.channel)" class="status-not-installed">
+                    <IconApp name="upload" width="14" height="14" /> 点击安装
                   </span>
                   <span v-else class="status-not-installed">
                     <IconApp name="upload" width="14" height="14" /> 未安装
@@ -107,6 +125,7 @@ async function stopBrowser() {
             </div>
           </div>
         </div>
+        <p v-if="browserInstallError" class="form-help-text">{{ browserInstallError }}</p>
       </div>
     </section>
 

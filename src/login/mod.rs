@@ -225,6 +225,11 @@ pub struct LoginOrchestrator {
     monitor: Arc<crate::monitor::MonitorService>,
     /// 内部状态（活跃会话 + ID 计数器）
     state: Arc<AsyncMutex<OrchestratorState>>,
+    /// submit 串行门：覆盖“抢占决策 → 等旧会话完全收尾 → 新会话占槽”的整个窗口。
+    ///
+    /// 与 `state` 锁分离，因此等待旧会话的最长 13s 期间不会阻塞 cancel_current；
+    /// 只阻止其他 submit 趁 active_session 被 take 后的空窗插队，避免优先级反转。
+    submit_gate: AsyncMutex<()>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
     /// 应用级 shutdown 信号（会话在 shutdown 时立即退出）
@@ -260,6 +265,7 @@ impl LoginOrchestrator {
                 active_session: None,
                 next_session_id: 0,
             })),
+            submit_gate: AsyncMutex::new(()),
             metrics,
             shutdown_token,
         }
@@ -364,7 +370,12 @@ impl LoginOrchestrator {
             }
         }
 
-        // 3. 去重/抢占判断（决策与 take 在同一把锁内完成，避免 TOCTOU 竞态）
+        // 3. 从抢占决策开始串行化所有 submit，直到新会话真正占据 active_session。
+        // 不能只依赖 state 锁：抢占会 take 旧会话后释放 state 锁并 await 最长 13s，
+        // 若无本 gate，低优先级 submit 可趁空槽抢先写入，反而把高优先级请求挤掉。
+        let _submit_guard = self.submit_gate.lock().await;
+
+        // 4. 去重/抢占判断（决策与 take 在同一把 state 锁内完成，避免 TOCTOU 竞态）
         let old_session = {
             let mut guard = self.state.lock().await;
             let decision = match &guard.active_session {
@@ -377,13 +388,14 @@ impl LoginOrchestrator {
                 PreemptionDecision::Create => None,
             }
         };
-        // 锁已释放，安全执行异步取消与收尾等待
+        // state 锁已释放，安全执行异步取消与收尾等待；submit_gate 仍持有，
+        // 因此其他 submit 无法利用 active_session 的临时空窗插队。
         if let Some(old) = old_session {
             old.propagate_cancel(&self.bridge, "被更高优先级登录抢占");
             self.wait_old_session_finished(old).await;
         }
 
-        // 4. 创建新会话（计数延后到 became_active 判定后，避免抢占失败的“被取代”请求污染 login_total）
+        // 5. 创建新会话（计数延后到 became_active 判定后，避免抢占失败的“被取代”请求污染 login_total）
         let session_id = {
             let mut g = self.state.lock().await;
             let id = g.next_session_id;
@@ -445,7 +457,8 @@ impl LoginOrchestrator {
             },
         );
 
-        // 写入活跃会话；若抢占等待期间已有并发会话写入，则放弃本会话，避免泄漏
+        // 写入活跃会话。submit_gate 保证此窗口没有其他 submit 可写入；
+        // 仍保留 is_none 防御性检查，避免未来新增非 submit 写路径时泄漏会话。
         let became_active = {
             let mut g = self.state.lock().await;
             if g.active_session.is_none() {
@@ -464,7 +477,7 @@ impl LoginOrchestrator {
             }
         };
 
-        // 5. 仅当成功占据活跃会话槽位时才计数并 spawn 状态机 task
+        // 6. 仅当成功占据活跃会话槽位时才计数并 spawn 状态机 task
         if became_active {
             if let Some(m) = &self.metrics {
                 m.inc_login();
@@ -498,7 +511,8 @@ impl LoginOrchestrator {
             });
         }
 
-        // 6. 返回句柄
+        // 7. 返回句柄；_submit_guard 随函数返回释放，后续 submit 此时只能看到
+        // 已安装的新 active_session，不再能看到抢占过程中的临时空槽。
         handle
     }
 
@@ -734,6 +748,28 @@ mod tests {
         let m = StdMutex::new(42u32);
         let g = recover_lock(&m);
         assert_eq!(*g, 42);
+    }
+
+    // ============ submit gate：抢占切换窗口串行化 ============
+
+    #[tokio::test]
+    async fn test_submit_gate_serializes_submit_window() {
+        let orch = make_orchestrator().await;
+        let guard = orch.submit_gate.lock().await;
+        let orch2 = orch.clone();
+        let waiter = tokio::spawn(async move {
+            let _next = orch2.submit_gate.lock().await;
+            true
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "第二个 submit 窗口必须等待 gate");
+        drop(guard);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .expect("释放 gate 后应立即放行")
+                .unwrap()
+        );
     }
 
     // ============ B2: cancel_current 可等待锁 ============

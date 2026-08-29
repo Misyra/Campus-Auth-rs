@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::{Query, State};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::bridge::BridgeApi;
@@ -309,20 +310,22 @@ pub async fn apply_update(
 
 /// GET /api/browsers — 可用浏览器列表
 ///
-/// 返回基于配置的可用浏览器列表（自定义路径优先，其次 Playwright 内置浏览器）。
+/// Playwright 管理的浏览器按实际缓存分别探测；核心引导默认只安装 Chromium。
 pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let settings = state.config.load_settings_async().await;
-    let env_status = state.environment.status();
-    let playwright_installed = env_status.playwright_ready;
+    let chromium_installed =
+        crate::environment::bootstrap::playwright_browser_installed("chromium");
+    let firefox_installed = crate::environment::bootstrap::playwright_browser_installed("firefox");
+    let webkit_installed = crate::environment::bootstrap::playwright_browser_installed("webkit");
     let custom_path = &settings.global.browser.browser_custom_path;
     let edge_installed = is_edge_installed();
     let chrome_installed = is_chrome_installed();
     let mut browsers = vec![
-        serde_json::json!({ "name": "Chromium", "channel": "chromium", "engine": "chromium", "installed": playwright_installed }),
+        serde_json::json!({ "name": "Chromium", "channel": "chromium", "engine": "chromium", "installed": chromium_installed }),
         serde_json::json!({ "name": "Edge", "channel": "msedge", "engine": "chromium", "installed": edge_installed }),
         serde_json::json!({ "name": "Chrome", "channel": "chrome", "engine": "chromium", "installed": chrome_installed }),
-        serde_json::json!({ "name": "Firefox", "channel": "firefox", "engine": "firefox", "installed": playwright_installed }),
-        serde_json::json!({ "name": "WebKit", "channel": "webkit", "engine": "webkit", "installed": playwright_installed }),
+        serde_json::json!({ "name": "Firefox", "channel": "firefox", "engine": "firefox", "installed": firefox_installed }),
+        serde_json::json!({ "name": "WebKit", "channel": "webkit", "engine": "webkit", "installed": webkit_installed }),
     ];
     if !custom_path.is_empty() {
         browsers.insert(
@@ -414,19 +417,55 @@ fn is_edge_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// POST /api/install/playwright — 安装 Playwright Chromium
+#[derive(Debug, Default, Deserialize)]
+pub struct InstallPlaywrightQuery {
+    browser: Option<String>,
+}
+
+fn normalize_playwright_browser(browser: Option<&str>) -> Result<String, ApiError> {
+    let browser = browser.unwrap_or("chromium").trim().to_ascii_lowercase();
+    if matches!(browser.as_str(), "chromium" | "firefox" | "webkit") {
+        Ok(browser)
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "不支持安装浏览器 {browser:?}，仅支持 chromium/firefox/webkit"
+        )))
+    }
+}
+
+fn should_explicitly_install_after_ensure(browser: &str, core_was_ready: bool) -> bool {
+    browser != "chromium" || core_was_ready
+}
+
+async fn perform_playwright_install(
+    environment: &dyn crate::environment::EnvironmentApi,
+    browser: &str,
+    core_was_ready: bool,
+) -> Result<(), crate::environment::EnvironmentError> {
+    environment.ensure_capability().await?;
+    if should_explicitly_install_after_ensure(browser, core_was_ready) {
+        environment.install_playwright_browser(browser).await?;
+    }
+    Ok(())
+}
+
+/// POST /api/install/playwright — 安装 Playwright 管理浏览器
 ///
-/// 触发环境管理器安装 Playwright 浏览器（异步执行，进度通过 StatusManager 推送）。
-pub async fn install_playwright(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let env = state.environment.clone();
-    // 后台执行安装，避免阻塞响应；进度通过 StatusManager 推送
-    tokio::spawn(async move {
-        if let Err(e) = env.ensure_capability().await {
-            tracing::error!("Playwright 安装失败: {e}");
-        }
-    });
+/// `?browser=chromium|firefox|webkit`；省略参数保持旧行为，默认 Chromium。
+/// 请求会等待安装完成：后端失败直接返回错误，避免前端只能长时间轮询猜测结果。
+pub async fn install_playwright(
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+    Query(params): Query<InstallPlaywrightQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let browser = normalize_playwright_browser(params.browser.as_deref())?;
+    let core_was_ready = environment.status().capability_ready;
+    perform_playwright_install(environment.as_ref(), &browser, core_was_ready)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Playwright {browser} 安装失败: {e}")))?;
     Ok(data(serde_json::json!({
-        "message": "Playwright 安装已启动，进度请通过状态推送查看",
+        "browser": browser,
+        "installed": true,
+        "message": "Playwright 浏览器安装完成",
     })))
 }
 
@@ -523,6 +562,121 @@ pub async fn stop_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_playwright_browser_defaults_and_validates() {
+        assert_eq!(normalize_playwright_browser(None).unwrap(), "chromium");
+        assert_eq!(
+            normalize_playwright_browser(Some(" Firefox ")).unwrap(),
+            "firefox"
+        );
+        assert_eq!(
+            normalize_playwright_browser(Some("WEBKIT")).unwrap(),
+            "webkit"
+        );
+        assert!(matches!(
+            normalize_playwright_browser(Some("chrome")),
+            Err(ApiError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn playwright_browser_install_decision_avoids_first_chromium_duplicate() {
+        assert!(!should_explicitly_install_after_ensure("chromium", false));
+        assert!(should_explicitly_install_after_ensure("chromium", true));
+        assert!(should_explicitly_install_after_ensure("firefox", false));
+        assert!(should_explicitly_install_after_ensure("webkit", false));
+    }
+
+    struct MockInstallEnvironment {
+        ensure_fails: bool,
+        install_fails: bool,
+        ensure_calls: std::sync::atomic::AtomicUsize,
+        install_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockInstallEnvironment {
+        fn new(ensure_fails: bool, install_fails: bool) -> Self {
+            Self {
+                ensure_fails,
+                install_fails,
+                ensure_calls: std::sync::atomic::AtomicUsize::new(0),
+                install_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::environment::EnvironmentApi for MockInstallEnvironment {
+        fn status(&self) -> crate::environment::EnvironmentStatus {
+            panic!("status is not used by perform_playwright_install")
+        }
+
+        fn python_path(&self) -> std::path::PathBuf {
+            std::path::PathBuf::new()
+        }
+
+        async fn ensure_capability(&self) -> Result<(), crate::environment::EnvironmentError> {
+            self.ensure_calls.fetch_add(1, Ordering::SeqCst);
+            if self.ensure_fails {
+                Err(crate::environment::EnvironmentError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn install_playwright_browser(
+            &self,
+            _browser: &str,
+        ) -> Result<(), crate::environment::EnvironmentError> {
+            self.install_calls.fetch_add(1, Ordering::SeqCst);
+            if self.install_fails {
+                Err(crate::environment::EnvironmentError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn install_ocr_dep(&self) -> Result<(), crate::environment::EnvironmentError> {
+            Ok(())
+        }
+
+        async fn remove_ocr_dep(&self) -> Result<(), crate::environment::EnvironmentError> {
+            Ok(())
+        }
+
+        fn ocr_ready(&self) -> bool {
+            false
+        }
+
+        fn ocr_declared(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn playwright_install_propagates_core_failure_without_explicit_install() {
+        let env = MockInstallEnvironment::new(true, false);
+        let result = perform_playwright_install(&env, "firefox", false).await;
+        assert!(matches!(
+            result,
+            Err(crate::environment::EnvironmentError::Cancelled)
+        ));
+        assert_eq!(env.ensure_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(env.install_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn playwright_install_waits_for_requested_browser_and_propagates_failure() {
+        let env = MockInstallEnvironment::new(false, true);
+        let result = perform_playwright_install(&env, "firefox", false).await;
+        assert!(matches!(
+            result,
+            Err(crate::environment::EnvironmentError::Cancelled)
+        ));
+        assert_eq!(env.ensure_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(env.install_calls.load(Ordering::SeqCst), 1);
+    }
 
     // ============ tracing JSON 日志解析 ============
 
@@ -643,7 +797,8 @@ mod tests {
     /// 检查失败：200 + error 字段（前端提示，非 5xx）
     #[tokio::test]
     async fn test_check_update_error_field() {
-        let v = run_check(MockOutcome::Err("网络超时".into())).await;
+        let v = run_check(MockOutcome::Err("网络超时".into()));
+        let v = v.await;
         let d = &v["data"];
         assert_eq!(d["has_update"], false);
         assert!(d["error"].as_str().unwrap().contains("网络超时"));

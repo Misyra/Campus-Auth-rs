@@ -147,7 +147,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
           <div class="form-group">
             <label for="script-content">脚本内容</label>
             <textarea id="script-content" v-model="editingTask.content" rows="18"
-              placeholder="#!/usr/bin/env python3&#10;import httpx&#10;&#10;resp = httpx.post('http://...', data={...})&#10;..."
+              placeholder="#!/usr/bin/env python3&#10;from urllib.request import urlopen&#10;&#10;..."
               class="script-editor"></textarea>
             <span class="hint">脚本可直接硬编码账号密码等参数，stdout 输出会记录到日志，方便调试</span>
           </div>
@@ -178,16 +178,19 @@ const binaryOptions = computed<SelectOption[]>(() => {
             <p>脚本在子进程中执行，通过 HTTP 请求直接登录校园网，无需启动浏览器，资源占用极低。</p>
             <h4>输出说明</h4>
             <p>脚本只需发送请求，<strong>登录是否成功由系统网络检测自动判断</strong>。</p>
-            <h4>示例（Python httpx）</h4>
+            <h4>示例（Python 标准库）</h4>
             <pre>#!/usr/bin/env python3
-import httpx
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-resp = httpx.post("http://10.0.0.1/login", data={
+payload = urlencode({
     "username": "your_username",
     "password": "your_password",
     "operator": "cmcc",
-})
-print(f"HTTP {resp.status_code}")</pre>
+}).encode("utf-8")
+request = Request("http://10.0.0.1/login", data=payload, method="POST")
+with urlopen(request, timeout=30) as response:
+    print(f"HTTP {response.status}")</pre>
             <h4>注意事项</h4>
             <ul>
               <li>脚本超时默认 60 秒</li>

@@ -4,11 +4,40 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::environment::{
     EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
     UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME, UV_MIN_VERSION, UV_RELEASES_BASE, UV_SYNC_TIMEOUT, UV_TARGET,
 };
+
+/// 等待环境子进程，同时响应用户取消与阶段超时。
+///
+/// `kill_on_drop(true)` 保证 select/timeout 放弃 `output()` future 时，已经 spawn 的
+/// 子进程不会脱离 Rust 任务继续占用 `.venv`、缓存目录或安装锁。
+#[derive(Debug)]
+pub(crate) enum CommandOutputError {
+    Cancelled,
+    Timeout,
+    Io(std::io::Error),
+}
+
+pub(crate) async fn command_output_with_cancel(
+    mut cmd: tokio::process::Command,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<std::process::Output, CommandOutputError> {
+    cmd.kill_on_drop(true);
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(CommandOutputError::Cancelled),
+        result = tokio::time::timeout(timeout, cmd.output()) => match result {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(error)) => Err(CommandOutputError::Io(error)),
+            Err(_) => Err(CommandOutputError::Timeout),
+        },
+    }
+}
 
 /// 确定 uv 可执行文件路径：本地 `environment/uv.exe` 存在则用本地路径，否则回退到
 /// PATH 中的 `uv`（`Command::new("uv")` 自动走 PATH 解析）。
@@ -75,7 +104,10 @@ pub(crate) async fn uv_executable_works(uv_exe: &Path) -> bool {
 }
 
 /// 从 GitHub Releases 下载 uv 二进制、SHA256 校验、解压到 environment/uv.exe
-pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
+pub async fn download_uv(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<std::path::PathBuf, EnvironmentError> {
     let env_path = mgr.env_path();
     let uv_dest = env_path.join(UV_EXE_NAME);
 
@@ -89,7 +121,7 @@ pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
 
     for attempt in 0..UV_DOWNLOAD_MAX_RETRIES {
         // 检查取消
-        if mgr.cancel_token().is_cancelled() {
+        if cancel.is_cancelled() {
             return Err(EnvironmentError::Cancelled);
         }
 
@@ -125,7 +157,7 @@ pub async fn download_uv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
         let tmp_zip = env_path.join("uv.zip.tmp");
         let mut zip_downloaded = false;
         for zip_url in &zip_urls {
-            if mgr.cancel_token().is_cancelled() {
+            if cancel.is_cancelled() {
                 return Err(EnvironmentError::Cancelled);
             }
             let _ = tokio::fs::remove_file(&tmp_zip).await;
@@ -386,13 +418,36 @@ fn extract_uv_from_zip(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 执行 `uv sync` 安装 Python 虚拟环境与基础依赖（不含 OCR 可选依赖）。
+/// 用户显式启用 OCR 的持久标记。项目更新/venv 修复后仍按该偏好同步 `ocr` extra。
+const OCR_ENABLED_MARKER: &str = "ocr.enabled";
+
+fn ocr_marker_path(mgr: &EnvironmentManager) -> PathBuf {
+    mgr.env_path().join(OCR_ENABLED_MARKER)
+}
+
+fn ocr_extra_enabled(mgr: &EnvironmentManager) -> bool {
+    ocr_marker_path(mgr).is_file()
+}
+
+/// 执行 `uv sync` 安装 Python 虚拟环境。
 ///
-/// OCR 依赖（ddddocr）不随 `uv sync` 默认安装；需要时经
-/// [`install_ocr_dep`]（`uv add ddddocr`）单独添加，卸载经
-/// [`remove_ocr_dep`]（`uv remove ddddocr`）。
-pub async fn run_uv_sync(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
-    // 前置检查：worker 项目目录存在
+/// 默认只同步基础依赖；用户显式安装过 OCR 时，根据 environment/ocr.enabled
+/// 持久标记追加 `--extra ocr`，保证环境修复不会悄悄丢失用户选择。
+pub async fn run_uv_sync(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    run_uv_sync_with_ocr(mgr, ocr_extra_enabled(mgr), cancel).await
+}
+
+async fn run_uv_sync_with_ocr(
+    mgr: &EnvironmentManager,
+    include_ocr: bool,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    if cancel.is_cancelled() {
+        return Err(EnvironmentError::Cancelled);
+    }
     if !mgr.worker_project_path().exists() {
         return Err(EnvironmentError::WorkerProjectNotFound {
             path: mgr.worker_project_path().clone(),
@@ -400,93 +455,94 @@ pub async fn run_uv_sync(mgr: &EnvironmentManager) -> Result<(), EnvironmentErro
     }
 
     let uv_exe = uv_exe_path(mgr);
-
-    // 确保 environment/ 目录存在
     tokio::fs::create_dir_all(mgr.env_path())
         .await
         .map_err(EnvironmentError::UvExtractFailed)?;
-
-    let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
-
-    // 构造 uv sync 命令，设置 UV_PROJECT_ENVIRONMENT 控制 venv 位置
-    let cmd_future = uv_command(&uv_exe)
-        .arg("sync")
-        .arg("--project")
-        .arg(&*mgr.worker_project_path().to_string_lossy())
-        .env("UV_PROJECT_ENVIRONMENT", &venv_path)
-        .current_dir(mgr.base_path())
-        .output();
-
-    // 带超时执行
-    let output = tokio::time::timeout(UV_SYNC_TIMEOUT, cmd_future)
-        .await
-        .map_err(|_| EnvironmentError::UvSyncTimeout {
-            timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
-        })?
-        .map_err(EnvironmentError::UvExtractFailed)?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        Err(EnvironmentError::UvSyncFailed {
-            exit_code: output.status.code(),
-            stderr,
-        })
-    }
-}
-
-/// 安装 OCR 依赖：`uv add ddddocr`
-pub async fn install_ocr_dep(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
-    run_uv_dep(mgr, true).await
-}
-
-/// 卸载 OCR 依赖：`uv remove ddddocr`
-pub async fn remove_ocr_dep(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
-    run_uv_dep(mgr, false).await
-}
-
-/// 执行 `uv add/remove ddddocr`（安装/卸载 OCR 依赖）
-///
-/// 在 worker 项目目录下执行并设置 UV_PROJECT_ENVIRONMENT 控制 venv 位置，
-/// 与 `uv sync` 保持一致的运行环境。`uv add` 会同步更新 pyproject.toml 与
-/// venv 内的 site-packages；`uv remove` 移除主依赖与已装入的包。
-async fn run_uv_dep(mgr: &EnvironmentManager, add: bool) -> Result<(), EnvironmentError> {
-    if !mgr.worker_project_path().exists() {
-        return Err(EnvironmentError::WorkerProjectNotFound {
-            path: mgr.worker_project_path().clone(),
-        });
-    }
-    let uv_exe = uv_exe_path(mgr);
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
     let mut cmd = uv_command(&uv_exe);
-    cmd.arg(if add { "add" } else { "remove" })
+    cmd.arg("sync")
         .arg("--project")
-        .arg(&*mgr.worker_project_path().to_string_lossy())
-        .arg("ddddocr")
-        .env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .arg(&*mgr.worker_project_path().to_string_lossy());
+    if include_ocr {
+        cmd.arg("--extra").arg("ocr");
+    }
+    cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
         .current_dir(mgr.base_path());
 
-    let action = if add { "安装" } else { "卸载" };
-    let output = tokio::time::timeout(Duration::from_secs(300), cmd.output())
-        .await
-        .map_err(|_| EnvironmentError::UvSyncTimeout {
-            timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
-        })?
-        .map_err(EnvironmentError::UvExtractFailed)?;
+    let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
+        Ok(output) => output,
+        Err(CommandOutputError::Cancelled) => return Err(EnvironmentError::Cancelled),
+        Err(CommandOutputError::Timeout) => {
+            return Err(EnvironmentError::UvSyncTimeout {
+                timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
+            });
+        }
+        Err(CommandOutputError::Io(error)) => {
+            return Err(EnvironmentError::UvExtractFailed(error));
+        }
+    };
 
     if output.status.success() {
-        tracing::info!("OCR 依赖（ddddocr）{action}完成");
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        tracing::error!("OCR 依赖（ddddocr）{action}失败: {stderr}");
         Err(EnvironmentError::UvSyncFailed {
             exit_code: output.status.code(),
             stderr,
         })
     }
+}
+
+/// 安装 OCR 可选依赖，并持久记录用户启用偏好。
+pub async fn install_ocr_dep(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    tokio::fs::create_dir_all(mgr.env_path())
+        .await
+        .map_err(EnvironmentError::UvExtractFailed)?;
+    let marker = ocr_marker_path(mgr);
+    let had_marker = marker.is_file();
+    if !had_marker {
+        tokio::fs::write(&marker, b"enabled")
+            .await
+            .map_err(EnvironmentError::UvExtractFailed)?;
+    }
+
+    if let Err(error) = run_uv_sync_with_ocr(mgr, true, cancel).await {
+        if !had_marker {
+            let _ = tokio::fs::remove_file(&marker).await;
+        }
+        return Err(error);
+    }
+
+    tracing::info!("OCR 可选依赖安装完成");
+    Ok(())
+}
+
+/// 卸载 OCR 可选依赖，并清除用户启用偏好。
+pub async fn remove_ocr_dep(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    let marker = ocr_marker_path(mgr);
+    let had_marker = marker.is_file();
+    if had_marker {
+        tokio::fs::remove_file(&marker)
+            .await
+            .map_err(EnvironmentError::UvExtractFailed)?;
+    }
+
+    if let Err(error) = run_uv_sync_with_ocr(mgr, false, cancel).await {
+        if had_marker {
+            let _ = tokio::fs::write(&marker, b"enabled").await;
+        }
+        return Err(error);
+    }
+
+    tracing::info!("OCR 可选依赖卸载完成");
+    Ok(())
 }
 
 /// 构造 uv 下载 URL（zip）— 主站
@@ -562,6 +618,9 @@ async fn download_text_with_mirrors(
 /// 构造 uv 子进程 Command（Windows 上隐藏控制台窗口，避免环境引导弹黑窗）
 pub(crate) fn uv_command(uv_exe: &std::path::Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(uv_exe);
+    // Tokio 默认 drop Child 不会结束子进程；环境安装命令一律在 future 被取消/超时
+    // 时终止，避免后台残留 uv/playwright 继续修改同一环境。
+    cmd.kill_on_drop(true);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -575,6 +634,45 @@ mod tests {
     use super::*;
     use crate::status::StatusManager;
     use std::sync::Arc;
+
+    #[test]
+    fn cancellable_command_child_process() {
+        let Ok(marker) = std::env::var("CAMPUS_AUTH_CANCEL_CHILD_MARKER") else {
+            return;
+        };
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::fs::write(marker, b"finished").unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_command_output_with_cancel_kills_inflight_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("child-finished.marker");
+        let test_exe = std::env::current_exe().unwrap();
+        let mut cmd = uv_command(&test_exe);
+        cmd.arg("cancellable_command_child_process")
+            .arg("--nocapture")
+            .env("CAMPUS_AUTH_CANCEL_CHILD_MARKER", &marker);
+
+        let cancel = CancellationToken::new();
+        let cancel_later = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cancel_later.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let result =
+            command_output_with_cancel(cmd, std::time::Duration::from_secs(10), &cancel).await;
+        assert!(matches!(result, Err(CommandOutputError::Cancelled)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "取消应快速结束等待"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!marker.exists(), "被取消的子进程不得继续运行到写入完成标记");
+    }
 
     /// URL 构造：zip 与 sha256 均指向主站对应文件
     #[test]
@@ -642,6 +740,18 @@ mod tests {
         std::fs::create_dir_all(&env).unwrap();
         std::fs::write(env.join(UV_EXE_NAME), b"fake").unwrap();
         assert_eq!(uv_exe_path(&mgr), env.join(UV_EXE_NAME));
+    }
+
+    #[test]
+    fn test_ocr_extra_enabled_uses_persistent_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = Arc::new(StatusManager::new());
+        let mgr = EnvironmentManager::new(dir.path().to_path_buf(), status, false);
+        assert!(!ocr_extra_enabled(&mgr));
+
+        std::fs::create_dir_all(mgr.env_path()).unwrap();
+        std::fs::write(ocr_marker_path(&mgr), b"enabled").unwrap();
+        assert!(ocr_extra_enabled(&mgr));
     }
 
     /// 5.4：uv --version 输出解析（含 Windows 可能的括号后缀）

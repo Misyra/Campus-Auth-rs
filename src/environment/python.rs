@@ -8,12 +8,15 @@ use crate::environment::{
 use std::path::Path;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 /// 实际启动 Python 并检查退出状态，避免仅凭 `python.exe` 存在误判损坏的 uv venv。
 pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
     if !python_exe.is_file() {
         return false;
     }
     let mut cmd = tokio::process::Command::new(python_exe);
+    cmd.kill_on_drop(true);
     cmd.arg("--version");
     #[cfg(windows)]
     {
@@ -28,12 +31,14 @@ pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
 
 /// 确保 Python 虚拟环境就绪
 ///
-/// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建（基础依赖，
-/// 不含 ddddocr）。OCR 依赖（ddddocr）由前端的显式"安装/卸载"操作经
-/// `uv add/remove ddddocr` 管理（见 environment::uv::install_ocr_dep /
-/// remove_ocr_dep），此处不做自动补装，避免显式卸载后又被自动装回。
+/// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建。OCR 依赖
+/// （ddddocr）属于 `ocr` extra；是否随环境修复安装由 environment/ocr.enabled
+/// 持久标记决定，显式安装/卸载不会再修改 pyproject.toml。
 /// 返回 Python 解释器路径。
-pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf, EnvironmentError> {
+pub async fn ensure_venv(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<std::path::PathBuf, EnvironmentError> {
     let python_exe = mgr
         .worker_project_path()
         .join(crate::environment::PYTHON_EXE_RELATIVE);
@@ -49,7 +54,7 @@ pub async fn ensure_venv(mgr: &EnvironmentManager) -> Result<std::path::PathBuf,
 
     // 不存在则执行 uv sync 创建虚拟环境并安装依赖
     tracing::info!("虚拟环境不存在，执行 uv sync 创建...");
-    crate::environment::uv::run_uv_sync(mgr).await?;
+    crate::environment::uv::run_uv_sync(mgr, cancel).await?;
 
     // 验证创建成功
     if !python_executable_works(&python_exe).await {
@@ -90,39 +95,84 @@ pub(crate) fn ddddocr_installed(mgr: &EnvironmentManager) -> bool {
     false
 }
 
-/// OCR 依赖（ddddocr）是否在 `python_worker/pyproject.toml` 中声明
+/// OCR extra 是否在 `python_worker/pyproject.toml` 中声明 ddddocr。
 ///
-/// 作为 OCR 可用性的权威来源：仅当项目声明了该依赖，前端才展示「安装/卸载」
-/// 入口与识别能力。文件缺失或读取失败时返回 false，避免把损坏的环境误报为可用。
+/// `declared` 表示该构建支持 OCR 可选能力，并不等于用户已安装 OCR。
+/// 文件缺失或声明损坏时返回 false，避免前端误报能力。
 pub(crate) fn ocr_declared(mgr: &EnvironmentManager) -> bool {
     let pyproject = mgr.worker_project_path().join("pyproject.toml");
     let content = match std::fs::read_to_string(&pyproject) {
         Ok(c) => c,
         Err(_) => return false,
     };
-    // 简单稳健的判定：依赖列表中出现 ddddocr（>=1.6.1 之类约束），无需完整 TOML 解析
-    let mut in_deps = false;
+    ocr_declared_in_pyproject(&content)
+}
+
+fn ocr_declared_in_pyproject(content: &str) -> bool {
+    let mut in_optional_dependencies = false;
+    let mut in_ocr_extra = false;
+
     for raw_line in content.lines() {
         let line = raw_line.trim();
-        if line.starts_with("dependencies") {
-            in_deps = true;
+        if line.starts_with('[') {
+            in_optional_dependencies = line == "[project.optional-dependencies]";
+            in_ocr_extra = false;
             continue;
         }
-        // 进入其它顶层表头（如 [build-system] / [tool.*]）则退出依赖块
-        if in_deps && line.starts_with('[') {
-            in_deps = false;
+        if !in_optional_dependencies || line.is_empty() || line.starts_with('#') {
+            continue;
         }
-        if in_deps && line.contains("ddddocr") {
+
+        if !in_ocr_extra {
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            if name.trim() != "ocr" {
+                continue;
+            }
+            if value.contains("ddddocr") {
+                return true;
+            }
+            in_ocr_extra = !value.contains(']');
+            continue;
+        }
+
+        if line.contains("ddddocr") {
             return true;
         }
+        if line.contains(']') {
+            in_ocr_extra = false;
+        }
     }
+
     false
 }
 
-/// 安装 Playwright Chromium 浏览器
+/// 安装核心 Playwright Chromium 浏览器。
 ///
-/// 执行 `uv run playwright install chromium`，带超时和重试。
-pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+/// 核心引导继续只安装 Chromium；Firefox/WebKit 由设置页显式按需安装。
+pub async fn install_playwright(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    install_playwright_browser(mgr, "chromium", cancel).await
+}
+
+/// 安装指定的 Playwright 管理浏览器。
+///
+/// 仅允许 Chromium / Firefox / WebKit，执行 `uv run playwright install <browser>`，
+/// 带统一超时和重试。调用方负责通过 BootstrapGate 串行化显式安装。
+pub async fn install_playwright_browser(
+    mgr: &EnvironmentManager,
+    browser: &str,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    if !matches!(browser, "chromium" | "firefox" | "webkit") {
+        return Err(EnvironmentError::UnsupportedPlaywrightBrowser {
+            browser: browser.to_string(),
+        });
+    }
+
     let uv_exe = uv_exe_path(mgr);
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
@@ -130,43 +180,51 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
 
     for attempt in 0..PLAYWRIGHT_INSTALL_MAX_RETRIES {
         // 检查取消
-        if mgr.cancel_token().is_cancelled() {
+        if cancel.is_cancelled() {
             return Err(EnvironmentError::Cancelled);
         }
 
         // 重试时更新进度消息
         if attempt > 0 {
             let msg = format!(
-                "重试安装浏览器 ({}/{})...",
+                "重试安装 {browser} ({}/{})...",
                 attempt, PLAYWRIGHT_INSTALL_MAX_RETRIES
             );
             tracing::info!("{}", msg);
             mgr.report_progress("installing_playwright", 70, &msg);
-            tokio::time::sleep(PLAYWRIGHT_INSTALL_RETRY_DELAY).await;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(EnvironmentError::Cancelled),
+                _ = tokio::time::sleep(PLAYWRIGHT_INSTALL_RETRY_DELAY) => {}
+            }
         }
 
-        // 执行 uv run playwright install chromium
-        let cmd_future = crate::environment::uv::uv_command(&uv_exe)
-            .args([
-                "run",
-                "--project",
-                &mgr.worker_project_path().to_string_lossy(),
-                "playwright",
-                "install",
-                "chromium",
-            ])
-            .env("UV_PROJECT_ENVIRONMENT", &venv_path)
-            .current_dir(mgr.base_path())
-            .output();
+        // 执行 uv run playwright install <browser>；取消/超时都会终止子进程。
+        let mut cmd = crate::environment::uv::uv_command(&uv_exe);
+        cmd.args([
+            "run",
+            "--project",
+            &mgr.worker_project_path().to_string_lossy(),
+            "playwright",
+            "install",
+            browser,
+        ])
+        .env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .current_dir(mgr.base_path());
 
-        let result = tokio::time::timeout(PLAYWRIGHT_INSTALL_TIMEOUT, cmd_future).await;
+        let result = crate::environment::uv::command_output_with_cancel(
+            cmd,
+            PLAYWRIGHT_INSTALL_TIMEOUT,
+            cancel,
+        )
+        .await;
 
         match result {
-            Ok(Ok(output)) if output.status.success() => {
-                tracing::info!("Playwright Chromium 安装成功");
+            Ok(output) if output.status.success() => {
+                tracing::info!("Playwright {browser} 安装成功");
                 return Ok(());
             }
-            Ok(Ok(output)) => {
+            Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 last_err_msg = format!(
@@ -182,7 +240,10 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
                     last_err_msg
                 );
             }
-            Ok(Err(e)) => {
+            Err(crate::environment::uv::CommandOutputError::Cancelled) => {
+                return Err(EnvironmentError::Cancelled);
+            }
+            Err(crate::environment::uv::CommandOutputError::Io(e)) => {
                 last_err_msg = e.to_string();
                 tracing::warn!(
                     "Playwright 安装 IO 错误 (尝试 {}/{}): {}",
@@ -191,7 +252,7 @@ pub async fn install_playwright(mgr: &EnvironmentManager) -> Result<(), Environm
                     last_err_msg
                 );
             }
-            Err(_elapsed) => {
+            Err(crate::environment::uv::CommandOutputError::Timeout) => {
                 last_err_msg = format!("安装超时 (超过 {}s)", PLAYWRIGHT_INSTALL_TIMEOUT.as_secs());
                 tracing::warn!(
                     "{} (尝试 {}/{})",
@@ -219,5 +280,66 @@ mod tests {
     async fn test_python_executable_works_rejects_missing_file() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(!python_executable_works(&dir.path().join("missing-python.exe")).await);
+    }
+
+    #[tokio::test]
+    async fn test_install_playwright_browser_rejects_unknown_before_io() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mgr = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(crate::status::StatusManager::new()),
+            false,
+        );
+        let cancel = CancellationToken::new();
+        let result = install_playwright_browser(&mgr, "chrome", &cancel).await;
+        assert!(matches!(
+            result,
+            Err(EnvironmentError::UnsupportedPlaywrightBrowser { browser }) if browser == "chrome"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_install_playwright_browser_observes_supplied_cancel_scope_before_io() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mgr = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(crate::status::StatusManager::new()),
+            false,
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = install_playwright_browser(&mgr, "chromium", &cancel).await;
+        assert!(matches!(result, Err(EnvironmentError::Cancelled)));
+    }
+
+    #[test]
+    fn test_ocr_declared_requires_ocr_optional_extra() {
+        let optional = r#"
+[project]
+dependencies = ["playwright>=1.40"]
+
+[project.optional-dependencies]
+ocr = [
+    "ddddocr>=1.6.1",
+]
+"#;
+        assert!(ocr_declared_in_pyproject(optional));
+
+        let legacy_main_dependency = r#"
+[project]
+dependencies = [
+    "ddddocr>=1.6.1",
+    "playwright>=1.40",
+]
+"#;
+        assert!(!ocr_declared_in_pyproject(legacy_main_dependency));
+
+        let unrelated_extra = r#"
+[project.optional-dependencies]
+devtools = ["ddddocr>=1.6.1"]
+ocr = ["pillow"]
+"#;
+        assert!(!ocr_declared_in_pyproject(unrelated_extra));
     }
 }

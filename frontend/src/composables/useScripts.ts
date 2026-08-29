@@ -13,6 +13,7 @@ import { scriptsApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { downloadBlob, pickFile, getBinaryName } from "../utils/file";
+import { LOGIN_SCRIPT_TEMPLATE, NEW_SCRIPT_STUB } from "../utils/scriptTemplates";
 import { useBusyIds } from "../utils/guards";
 import { useTaskDirectory } from "./useTaskDirectory";
 import { useToast } from "./useToast";
@@ -133,7 +134,7 @@ async function showScriptEditor(taskId?: string): Promise<void> {
       id: "",
       name: "",
       description: "",
-      content: '#!/usr/bin/env python3\n"""自定义登录脚本"""\nimport httpx\n\n',
+      content: NEW_SCRIPT_STUB,
       binary_path: "",
       _customBinary: "",
       _isNew: true,
@@ -282,21 +283,7 @@ async function setActiveScript(taskId: string): Promise<void> {
 
 function loadScriptTemplate(): void {
   if (!editingTask.value) return;
-  editingTask.value.content = `#!/usr/bin/env python3
-"""自定义登录脚本示例
-
-脚本只需发送登录请求，登录是否成功由系统网络检测自动判断。
-"""
-
-LOGIN_URL = "http://10.0.0.1/login"
-USERNAME = "your_username"
-PASSWORD = "your_password"
-ISP = "cmcc"
-
-import httpx
-resp = httpx.post(LOGIN_URL, data={"username": USERNAME, "password": PASSWORD, "operator": ISP}, timeout=30)
-print(f"HTTP {resp.status_code}")
-`;
+  editingTask.value.content = LOGIN_SCRIPT_TEMPLATE;
 }
 
 function inferScriptExtension(binaryPath?: string, content?: string): string {

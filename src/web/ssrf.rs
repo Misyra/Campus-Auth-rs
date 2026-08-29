@@ -23,9 +23,10 @@ const MAX_REDIRECTS: usize = 5;
 /// 判断 IP 是否属于私有/保留地址段（全端点统一规则）
 ///
 /// 覆盖：回环、未指定、组播、广播、RFC1918 私有段、IPv4 链路本地、
-/// CGNAT（100.64.0.0/10）、基准测试段（198.18.0.0/15）、
-/// IPv4-mapped IPv6（解包后按 IPv4 规则判定）、
-/// IPv6 ULA（fc00::/7）、IPv6 链路本地（fe80::/10）
+/// CGNAT（100.64.0.0/10）、基准测试段（198.18.0.0/15）、文档示例段、
+/// 240.0.0.0/4 保留高地址段、IPv4-mapped IPv6（解包后按 IPv4 规则判定）、
+/// IPv6 ULA（fc00::/7）、IPv6 链路本地（fe80::/10）、discard-only、
+/// benchmarking 与文档示例前缀。
 pub fn is_restricted_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_restricted_ipv4(v4),
@@ -36,12 +37,20 @@ pub fn is_restricted_ip(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_restricted_ipv4(v4);
             }
+            let segments = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || v6.is_unique_local()
                 // fe80::/10 链路本地地址：内网可寻址，必须拦截
                 || v6.is_unicast_link_local()
+                // 100::/64 discard-only（RFC 6666）：不可作为公网目标
+                || (segments[0] == 0x0100
+                    && segments[1..].iter().all(|segment| *segment == 0))
+                // 2001:2::/48 benchmarking（RFC 5180）
+                || (segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0)
+                // 2001:db8::/32 documentation（RFC 3849）
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
         }
     }
 }
@@ -54,11 +63,26 @@ fn is_restricted_ipv4(v4: std::net::Ipv4Addr) -> bool {
         || v4.is_multicast()
         || v4.is_link_local()
         || v4.is_broadcast()
+        // 0.0.0.0/8 "this network"：除 UNSPECIFIED 外其余地址标准库不会自动拦截
+        || (std::net::Ipv4Addr::new(0, 0, 0, 0)..=std::net::Ipv4Addr::new(0, 255, 255, 255))
+            .contains(&v4)
         // 100.64.0.0/10 CGNAT 运营商级 NAT 段：标准库无判定，显式区间检查
         || (std::net::Ipv4Addr::new(100, 64, 0, 0)..=std::net::Ipv4Addr::new(100, 127, 255, 255))
             .contains(&v4)
+        // TEST-NET 文档示例地址，不应被 SSRF 端点视作公网目标
+        || (std::net::Ipv4Addr::new(192, 0, 2, 0)..=std::net::Ipv4Addr::new(192, 0, 2, 255))
+            .contains(&v4)
+        || (std::net::Ipv4Addr::new(198, 51, 100, 0)
+            ..=std::net::Ipv4Addr::new(198, 51, 100, 255))
+            .contains(&v4)
+        || (std::net::Ipv4Addr::new(203, 0, 113, 0)
+            ..=std::net::Ipv4Addr::new(203, 0, 113, 255))
+            .contains(&v4)
         // 198.18.0.0/15 网络基准测试段：保留地址，正常业务不应访问
         || (std::net::Ipv4Addr::new(198, 18, 0, 0)..=std::net::Ipv4Addr::new(198, 19, 255, 255))
+            .contains(&v4)
+        // 240.0.0.0/4 保留高地址段（含 255.255.255.255；broadcast 已在上方覆盖）
+        || (std::net::Ipv4Addr::new(240, 0, 0, 0)..=std::net::Ipv4Addr::BROADCAST)
             .contains(&v4)
 }
 
@@ -170,8 +194,10 @@ mod tests {
         assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
         assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
         assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 1))));
         assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
         assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1))));
         assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::BROADCAST)));
     }
 
@@ -184,6 +210,9 @@ mod tests {
         ))));
         assert!(is_restricted_ip(IpAddr::V6("fe80::1".parse().unwrap())));
         assert!(is_restricted_ip(IpAddr::V6("ff02::1".parse().unwrap())));
+        assert!(is_restricted_ip(IpAddr::V6("100::".parse().unwrap())));
+        assert!(is_restricted_ip(IpAddr::V6("2001:2::1".parse().unwrap())));
+        assert!(is_restricted_ip(IpAddr::V6("2001:db8::1".parse().unwrap())));
     }
 
     /// IPv4-mapped IPv6 必须解包后按 IPv4 规则拦截，
@@ -238,15 +267,21 @@ mod tests {
     }
 
     #[test]
+    fn test_is_restricted_rejects_documentation_ipv4_ranges() {
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))));
+        assert!(is_restricted_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))));
+    }
+
+    #[test]
     fn test_is_restricted_allows_public_addresses() {
         assert!(!is_restricted_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
         assert!(!is_restricted_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
         assert!(!is_restricted_ip(IpAddr::V6(
             "2606:4700:4700::1111".parse().unwrap()
         )));
-        // 2001:db8::/32 文档示例段不是保留拦截段，公网语义不受影响
         assert!(!is_restricted_ip(IpAddr::V6(
-            "2001:db8::1".parse().unwrap()
+            "2001:4860:4860::8888".parse().unwrap()
         )));
     }
 }
