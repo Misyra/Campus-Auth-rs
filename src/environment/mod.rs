@@ -655,6 +655,9 @@ mod tests {
     #[test]
     fn test_python_path_points_to_worker_project_venv() {
         let dir = tempfile::TempDir::new().unwrap();
+        // 主路径前提：base_path 下须存在 python_worker/，否则会回退到
+        // 仓库根 / CARGO_MANIFEST_DIR 的兜底目录（dev 环境下命中仓库）
+        std::fs::create_dir(dir.path().join(WORKER_PROJECT_DIR)).unwrap();
         let manager = EnvironmentManager::new(
             dir.path().to_path_buf(),
             Arc::new(StatusManager::new()),
