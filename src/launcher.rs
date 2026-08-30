@@ -848,12 +848,17 @@ async fn wait_for_shutdown(state: &mut LauncherState) {
         }
         _ = async {
             if let Some(mut rx) = shutdown_rx {
-                let _ = rx.changed().await;
+                match rx.changed().await {
+                    // 正常路径：/api/system/shutdown 等主动发送
+                    Ok(()) => info!("收到 Web API 关闭信号"),
+                    // Err = 所有发送端已丢弃（Axum 任务退出），服务已先行终止
+                    Err(_) => info!("Web API 关闭通道已关闭"),
+                }
             } else {
                 std::future::pending::<()>().await;
             }
         } => {
-            info!("收到 Web API 关闭信号");
+            // 信号来源已在分支内区分记录
         }
     }
 }

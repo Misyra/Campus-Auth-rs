@@ -147,10 +147,16 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     let _ = req.send().await;
 
     // 轮询等待进程退出；上限须覆盖优雅关闭的最坏预算
-    // （bridge 3s + scheduler 5s + engine 8s = 16s），取 20s 留余量
+    // （bridge 3s + scheduler 5s + engine 8s = 16s），取 20s 留余量。
+    // unix 附加"监听端口已关闭"判据：若父进程未回收子进程，已退出的实例
+    // 会以僵尸形态存在，kill(pid,0) 仍返回成功——此时端口关闭才是可靠的
+    // 停止信号（shutdown POST 已送达，Axum 关闭即代表实例已停止）。
     for _ in 0..200 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !is_process_alive(info.pid) {
+            return Ok(());
+        }
+        if std::net::TcpStream::connect(("127.0.0.1", info.port)).is_err() {
             return Ok(());
         }
     }

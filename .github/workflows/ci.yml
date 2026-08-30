@@ -120,13 +120,13 @@ jobs:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           components: clippy
 
-      # tray-icon 的 Linux 后端链接 GTK3 与 appindicator，构建期需要 -dev 头文件
-      # （与 release.yml 保持一致）
+      # tray-icon 的 Linux 后端链接 GTK3 / appindicator / xdo（muda 菜单模拟点击），
+      # 构建期需要 -dev 头文件（与 release.yml 保持一致）
       - name: 安装 Linux 托盘构建依赖
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev pkg-config
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev pkg-config
 
       - name: 安装 Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
