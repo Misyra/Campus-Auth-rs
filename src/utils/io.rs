@@ -621,10 +621,14 @@ mod tests {
 
         let dest = dir.path().join("out");
         extract_zip(&zip_path, &dest, |_| true).unwrap();
-        let mode = std::fs::metadata(dest.join("bin/tool"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dest.join("bin/tool"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
     }
 }

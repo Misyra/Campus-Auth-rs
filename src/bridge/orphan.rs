@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::process::Command;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// 清理上次崩溃残留的孤儿浏览器进程（best-effort）。
 pub fn cleanup_orphan_browsers() {

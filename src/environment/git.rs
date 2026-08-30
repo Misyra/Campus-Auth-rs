@@ -22,7 +22,10 @@ pub async fn check_git(mgr: &EnvironmentManager) -> Result<bool, EnvironmentErro
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // Linux/macOS：检查系统 git 是否可用（`which git`）
+        // Linux/macOS 分支不消费 mgr（MinGit 仅 Windows 需要），显式吞掉避免
+        // unused_variables 在 -D warnings 下报错
+        let _ = mgr;
+        // 检查系统 git 是否可用（`which git`）
         let result = tokio::process::Command::new("which")
             .arg("git")
             .stdout(std::process::Stdio::null())
