@@ -1,6 +1,32 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“开发中（第十三轮）”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“开发中（第十四轮）”。
+
+## 开发中（2026-08-30 第十四轮：钉底误报 + 调试面板修复 + 发布流水线）
+
+> 发布前 e2e 验收发现的用户可见缺陷修复 + 三平台发布工作流。
+
+### 仪表盘日志"N 条新消息"钉底误报（探针实测定位）
+
+- **根因一（启动窗口翻转）**：`.log-viewer { scroll-behavior: smooth }`（00f9ea8 批次引入）把 scrollToBottom 的跳底变成 ~800ms 逐帧动画，动画中间帧让 onLogScroll 判定"不在底部"把 autoScroll 翻 false（实测 87 帧/约 670ms），窗口内到达的日志全被计入新消息计数；动画进入 40px 容差后又翻回 true
+- **根因二（残留计数）**：newLogCount 仅按钮点击与 clearLogs 清零，手动滚回底部后残留
+- **修复**：删除 smooth（程序化滚动仅自动跟随与回底按钮两处，瞬时跳底是日志面板标准行为；scrollToBottom 留防回归注释）；onLogScroll 判定在底部时调 useLogs::markAtBottom 清零；补回底清零单测
+
+### 调试面板"该任务没有可执行的步骤"（两层根因）
+
+- **主因（后端）**：debug 路由 start/step/stop/run_all 把整个 IpcResponse 信封 `{id, result:{data}}` 序列化进响应，前端 request() 只解一层 data，syncSession 拿到包装结构后 steps/running/task_id 全丢——步骤列表从未渲染，3/5 计数是 WS step_progress 撑的假象。四路由改 `Ok(data(resp.result.data))`，与 debug_status 的正确写法对齐
+- **辅因（前端）**：刷新恢复时"执行全部"占死 Worker 命令队列，status 详情查询 5s 超时只剩骨架——新增 refillSessionDetails 退避补全（5/10/20/30/30s，拿到步骤或会话结束即停），骨架文案改"会话详情恢复中，当前执行结束后自动补全"
+- **裂图**：last_screenshot_url 跨会话残留指向已被停止流程删除的截图文件——startDebug 清空残留 URL + 截图 img @error 兜底回退占位
+- useDebug.test.ts 新增 4 用例（fake timers 覆盖骨架→退避补全→外部结束清理→停止取消）
+
+### Release 流水线
+
+- 新增 `.github/workflows/release.yml`：推送 `v*` 标签触发，四产物直传 GitHub Release——Windows x64、macOS arm64、macOS x64（Apple Silicon 主机交叉编译，规避 Intel 云主机退役）、Linux x64（ubuntu-22.04 旧 glibc 兼容）；各产物附 SHA256 校验文件（更新器校验的前置数据）
+- 全部第三方 action 沿用 ci.yml 已锁 SHA，发布走预装 gh CLI 不新增依赖；tag 与 Cargo.toml 版本一致性校验；产物口径与 build.ps1 一致（主程序 + helper + resources + python_worker，额外排除 `__pycache__`）
+
+### 验证
+
+- vitest 45/45（+5 新用例）；cargo build / clippy --all-targets 零警告；真实 UI 实测：调试面板 5 步渲染、单步执行状态 success/current/pending 正确；仪表盘钉底不再出现误报计数、回底即清零
 
 ## 开发中（2026-08-26 第十三轮：打包验证 + 端到端冒烟）
 
