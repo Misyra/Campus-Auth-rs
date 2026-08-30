@@ -60,8 +60,10 @@ pub async fn start_debug(
     entry
         .entry("auth_url".to_string())
         .or_insert_with(|| profile.auth_url.clone().into());
-    let result = bridge.execute("debug_start", params).await?;
-    Ok(data(serde_json::to_value(result)?))
+    let resp = bridge.execute("debug_start", params).await?;
+    // 只取 IPC 载荷（result.data）：序列化整个 IpcResponse 会带上 id/result 包装，
+    // 前端 request() 只解一层 data，syncSession 拿到包装结构后 steps/running 全丢
+    Ok(data(resp.result.data))
 }
 
 /// POST /api/debug/step — 调试单步执行
@@ -77,14 +79,14 @@ pub async fn step_debug(
     } else {
         body
     };
-    let result = bridge.execute("debug_step", params).await?;
-    Ok(data(serde_json::to_value(result)?))
+    let resp = bridge.execute("debug_step", params).await?;
+    Ok(data(resp.result.data))
 }
 
 /// POST /api/debug/stop — 停止调试会话
 pub async fn stop_debug(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Value>, ApiError> {
-    let result = bridge.execute("debug_stop", Value::Null).await?;
-    Ok(data(serde_json::to_value(result)?))
+    let resp = bridge.execute("debug_stop", Value::Null).await?;
+    Ok(data(resp.result.data))
 }
 
 /// GET /api/debug/status — 查询是否存在活跃调试会话
@@ -120,8 +122,8 @@ pub async fn debug_status(State(bridge): State<Arc<dyn BridgeApi>>) -> Json<Valu
 
 /// POST /api/debug/run-all — 执行调试会话中全部剩余步骤
 pub async fn run_all(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Value>, ApiError> {
-    let result = bridge.execute("debug_run_all", Value::Null).await?;
-    Ok(data(serde_json::to_value(result)?))
+    let resp = bridge.execute("debug_run_all", Value::Null).await?;
+    Ok(data(resp.result.data))
 }
 
 /// GET /api/debug/screenshot/{filename} — 读取调试截图文件
