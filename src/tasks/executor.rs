@@ -770,17 +770,21 @@ mod tests {
 
     #[test]
     fn test_resolve_work_dir_absolute() {
-        // 绝对 work_dir 原样使用
-        let cfg = ScriptTaskConfig {
-            work_dir: Some("D:\\data".into()),
-            ..Default::default()
-        };
-        let wd = resolve_work_dir(
-            &cfg,
+        // 绝对 work_dir 原样使用（绝对性判定随平台，路径字面量按平台取）
+        #[cfg(windows)]
+        let (script, scripts, work) = (
             Path::new("C:\\t\\a.py"),
             Path::new("C:\\tasks\\scripts"),
+            "D:\\data",
         );
-        assert_eq!(wd, PathBuf::from("D:\\data"));
+        #[cfg(not(windows))]
+        let (script, scripts, work) = (Path::new("/t/a.py"), Path::new("/tasks/scripts"), "/data");
+        let cfg = ScriptTaskConfig {
+            work_dir: Some(work.into()),
+            ..Default::default()
+        };
+        let wd = resolve_work_dir(&cfg, script, scripts);
+        assert_eq!(wd, PathBuf::from(work));
     }
 
     #[test]

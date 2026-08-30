@@ -66,35 +66,45 @@ fn test_adapter_name_no_prefix() {
 }
 
 // ============ 虚拟网卡特征表（A3：统一走 interfaces::is_excluded） ============
+//
+// is_excluded 按平台返回各自的虚拟网卡特征表（interfaces::virtual_if_patterns），
+// 以下用 Windows 专属适配器名（VMware/Npcap/Wintun 等）的用例仅在 Windows 编译；
+// linux / macOS 的特征表断言见下方 test_is_linux_virtual_* / test_is_macos_virtual_*。
 
+#[cfg(windows)]
 #[test]
 fn test_is_virtual_vmware() {
     assert!(is_excluded("VMware Network Adapter"));
     assert!(is_excluded("vmware8"));
 }
 
+#[cfg(windows)]
 #[test]
 fn test_is_virtual_vbox() {
     assert!(is_excluded("VirtualBox Host-Only Ethernet Adapter"));
 }
 
+#[cfg(windows)]
 #[test]
 fn test_is_virtual_docker() {
     assert!(is_excluded("DockerNAT"));
     assert!(is_excluded("docker0"));
 }
 
+#[cfg(windows)]
 #[test]
 fn test_is_virtual_tunnel() {
     assert!(is_excluded("隧道适配器 Tunnel"));
     assert!(is_excluded("Tunnel Adapter"));
 }
 
+#[cfg(windows)]
 #[test]
 fn test_is_virtual_npcap() {
     assert!(is_excluded("Npcap Loopback Adapter"));
 }
 
+#[cfg(windows)]
 #[test]
 fn test_is_virtual_vpn_tun_tap_wireguard_clash() {
     // A3 补充的常见 VPN / 隧道接口模式
@@ -194,6 +204,8 @@ fn test_parse_ipconfig_basic() {
     assert!(interfaces[1].is_wifi);
 }
 
+// 虚拟适配器过滤依赖 Windows 特征表（Npcap 等），仅 Windows 编译
+#[cfg(windows)]
 #[test]
 fn test_parse_ipconfig_filters_virtual() {
     // 虚拟接口（如 Npcap）应被过滤
@@ -278,6 +290,8 @@ fn test_parse_ipconfig_gbk_chinese_labels() {
     assert_eq!(interfaces[0].ipv4, Ipv4Addr::new(192, 168, 31, 178));
 }
 
+// 实际调用 Windows 的 ipconfig，unix 上无此命令，仅 Windows 编译
+#[cfg(windows)]
 #[tokio::test]
 async fn test_run_ipconfig_actual() {
     // 实际调用 ipconfig /all 验证 run_command 是否正常工作

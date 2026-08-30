@@ -127,23 +127,29 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_excludes_loopback_and_virtual() {
-        let interfaces = vec![
-            InterfaceInfo {
-                name: "lo".into(),
-                ipv4: Ipv4Addr::LOCALHOST,
-                gateway: None,
-                is_wifi: false,
-                ssid: None,
-            },
-            InterfaceInfo {
-                name: "vEthernet (Default Switch)".into(),
-                ipv4: Ipv4Addr::new(172, 16, 0, 1),
-                gateway: None,
-                is_wifi: false,
-                ssid: None,
-            },
-        ];
+    fn test_filter_excludes_loopback() {
+        // "lo" 经 filter_interfaces 的 is_loopback 兜底排除，跨平台一致
+        let interfaces = vec![InterfaceInfo {
+            name: "lo".into(),
+            ipv4: Ipv4Addr::LOCALHOST,
+            gateway: None,
+            is_wifi: false,
+            ssid: None,
+        }];
+        assert!(filter_interfaces(interfaces).is_empty());
+    }
+
+    // "vEthernet" 仅存在于 Windows 特征表（Hyper-V），仅 Windows 编译
+    #[cfg(windows)]
+    #[test]
+    fn test_filter_excludes_windows_virtual_adapter() {
+        let interfaces = vec![InterfaceInfo {
+            name: "vEthernet (Default Switch)".into(),
+            ipv4: Ipv4Addr::new(172, 16, 0, 1),
+            gateway: None,
+            is_wifi: false,
+            ssid: None,
+        }];
         assert!(filter_interfaces(interfaces).is_empty());
     }
 }

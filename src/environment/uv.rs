@@ -401,9 +401,11 @@ fn extract_uv_from_archive(archive_path: &Path, dest: &Path) -> std::io::Result<
     let tmp_dir = tempfile::tempdir()?;
     let mut found: Option<PathBuf> = None;
     crate::utils::io::extract_archive(archive_path, tmp_dir.path(), |name| {
+        // 同时接受 uv / uv.exe：官方 unix 资产为 uv，Windows zip 为 uv.exe；
+        // 宽松匹配让解压逻辑与当前平台的 UV_EXE_NAME 解耦
         if name
             .file_name()
-            .is_some_and(|f| f == UV_EXE_NAME || f == "uv")
+            .is_some_and(|f| f == UV_EXE_NAME || f == "uv" || f == "uv.exe")
         {
             found = Some(tmp_dir.path().join(name));
             true

@@ -339,13 +339,17 @@ mod tests {
 
     #[test]
     fn debug_screenshot_filename_strips_parent_path() {
-        assert_eq!(
-            debug_screenshot_filename(r"C:\app\python_worker\debug\debug_123.png"),
-            Some("debug_123.png".into())
-        );
+        // '/' 分隔的路径 Rust 在 Windows 上同样按分隔符解析，跨平台一致
         assert_eq!(
             debug_screenshot_filename("/opt/app/python_worker/debug/step_login.jpg"),
             Some("step_login.jpg".into())
+        );
+        // 反斜杠仅在 Windows 上被识别为路径分隔符，unix 上整串是文件名（含
+        // 非法字符被拒），该断言仅 Windows 编译
+        #[cfg(windows)]
+        assert_eq!(
+            debug_screenshot_filename(r"C:\app\python_worker\debug\debug_123.png"),
+            Some("debug_123.png".into())
         );
     }
 
