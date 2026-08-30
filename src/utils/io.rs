@@ -176,9 +176,152 @@ pub fn extract_zip(
             }
             output.flush()?;
             total_bytes = total_bytes.saturating_add(copied);
+            // unix：恢复 zip entry 记录的权限位（Info-ZIP 打包的官方资产保留 +x；
+            // Windows 打包器通常不写 unix mode，缺失时跳过）——否则解压出的
+            // 二进制无执行权限，uv 引导与自更新在 unix 上必然失败
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(mode) = entry.unix_mode() {
+                    let _ =
+                        std::fs::set_permissions(&outpath, std::fs::Permissions::from_mode(mode));
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// 通用 tar.gz 解压：按 `accept` 过滤条目后解压到 `dest` 目录（保留相对路径与权限位）。
+///
+/// 与 [`extract_zip`] 同一契约（路径穿越防护、大小上限、`accept` 过滤），供
+/// uv 引导与自更新解包 unix 平台的官方 `.tar.gz` 资产复用。安全策略：
+/// - `..` 穿越（tar slip）：tar crate 在 `entry.path()` 校验时直接报错，按
+///   "跳过不写出" 处理（与 zip 链路的 enclosed_name 兜底跳过一致）；绝对路径与
+///   `ParentDir` 自查 + `starts_with` 兜底仍保留作纵深防御；
+/// - 拒绝符号链接 / 硬链接 / 其他特殊条目（可借此把写入重定向到 dest 之外）；
+/// - 文件条目按 tar header 的 mode 恢复权限位（含可执行位）。
+pub fn extract_tar_gz(
+    tar_path: &Path,
+    dest: &Path,
+    mut accept: impl FnMut(&Path) -> bool,
+) -> Result<(), std::io::Error> {
+    use flate2::read::GzDecoder;
+
+    const MAX_TAR_ENTRIES: usize = 8_192;
+    const MAX_TAR_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+    const MAX_TAR_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+
+    let file = std::fs::File::open(tar_path)?;
+    let gz = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+
+    let mut total_bytes = 0u64;
+    let mut entries = archive.entries()?;
+    let mut count = 0usize;
+    for entry in entries.by_ref() {
+        count += 1;
+        if count > MAX_TAR_ENTRIES {
+            return Err(std::io::Error::other("tar 条目数量超过上限"));
+        }
+        let mut entry = entry?;
+        // tar crate 对含 `..` 的条目在 path() 校验时报错——跳过不写出（与 zip
+        // 链路"兜底跳过"一致）；随后仍有 ParentDir 自查与 starts_with 兜底
+        let raw_path = match entry.path() {
+            Ok(p) => p.to_path_buf(),
+            Err(e) => {
+                tracing::debug!("tar 条目路径非法，跳过: {e}");
+                continue;
+            }
+        };
+        // tar slip 纵深防御：剥掉前导根/前缀分量后要求不含 `..`
+        let rel: std::path::PathBuf = raw_path
+            .components()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+            })
+            .collect();
+        if rel.as_os_str().is_empty()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+        // 防御性兜底：解压结果必须落在目标目录之内
+        let outpath = dest.join(&rel);
+        if !outpath.starts_with(dest) || !accept(&rel) {
+            continue;
+        }
+
+        use tar::EntryType;
+        match entry.header().entry_type() {
+            EntryType::Directory => {
+                std::fs::create_dir_all(&outpath)?;
+            }
+            EntryType::Regular | EntryType::GNUSparse => {
+                let size = entry.header().size()?;
+                if size > MAX_TAR_ENTRY_BYTES
+                    || total_bytes.saturating_add(size) > MAX_TAR_TOTAL_BYTES
+                {
+                    return Err(std::io::Error::other("tar 解压大小超过上限"));
+                }
+                if let Some(parent) = outpath.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut output = std::fs::File::create(&outpath)?;
+                std::io::copy(&mut entry, &mut output)?;
+                total_bytes = total_bytes.saturating_add(size);
+                // tar header 原生携带 mode（含可执行位），恢复之
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(mode) = entry.header().mode() {
+                        let _ = std::fs::set_permissions(
+                            &outpath,
+                            std::fs::Permissions::from_mode(mode),
+                        );
+                    }
+                }
+            }
+            // 链接条目可把写入路径重定向到目标目录之外，一律拒绝
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "tar 包包含不支持的特殊条目（{other:?}），拒绝解压"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 判断压缩包是否为 tar.gz（按文件名后缀 `.tar.gz` / `.tgz`）
+pub fn is_tar_gz(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.ends_with(".tar.gz") || name.ends_with(".tgz")
+}
+
+/// 按扩展名分派的通用解压入口：`.tar.gz` / `.tgz` 走 [`extract_tar_gz`]，其余按
+/// [`extract_zip`]。
+///
+/// uv 引导与自更新的下载资产扩展名跟随官方发布（Windows zip / unix tar.gz），
+/// 调用方无需自行感知平台差异。
+pub fn extract_archive(
+    archive_path: &Path,
+    dest: &Path,
+    accept: impl FnMut(&Path) -> bool,
+) -> Result<(), std::io::Error> {
+    if is_tar_gz(archive_path) {
+        extract_tar_gz(archive_path, dest, accept)
+    } else {
+        extract_zip(archive_path, dest, accept)
+    }
 }
 
 /// 流式下载错误：网络层（reqwest）或落盘（IO）
@@ -300,5 +443,188 @@ mod tests {
         copy_via_temp(&src, &dst).await.unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"moved-content");
         assert!(!src.exists());
+    }
+
+    /// tar.gz 解压：目录结构还原、accept 过滤生效、文件按 header mode 恢复权限
+    #[test]
+    fn test_extract_tar_gz_layout_and_permissions() {
+        use flate2::write::GzEncoder;
+        use tar::{Builder, Header};
+
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("pkg.tar.gz");
+        let gz = GzEncoder::new(
+            std::fs::File::create(&tar_path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut builder = Builder::new(gz);
+
+        // 目录条目 + 可执行文件（mode 0755）+ 被过滤文件
+        // 注意：tar header 的 size 必须与数据长度一致（tar 按大小寻址）
+        let exe_content: &[u8] = b"#!/bin/sh\nfake-uv\n";
+        let mut hdr = Header::new_gnu();
+        hdr.set_size(exe_content.len() as u64);
+        hdr.set_mode(0o755);
+        hdr.set_cksum();
+        builder
+            .append_data(&mut hdr, "uv-x/uv", exe_content)
+            .unwrap();
+        let doc_content: &[u8] = b"doc\n";
+        let mut hdr2 = Header::new_gnu();
+        hdr2.set_size(doc_content.len() as u64);
+        hdr2.set_mode(0o644);
+        hdr2.set_cksum();
+        builder
+            .append_data(&mut hdr2, "uv-x/readme.txt", doc_content)
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = dir.path().join("out");
+        extract_tar_gz(&tar_path, &dest, |name| {
+            name.file_name().is_some_and(|f| f == "uv")
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("uv-x/uv")).unwrap(),
+            b"#!/bin/sh\nfake-uv\n"
+        );
+        assert!(
+            !dest.join("uv-x/readme.txt").exists(),
+            "accept 过滤应跳过非目标文件"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dest.join("uv-x/uv"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "可执行位应从 tar header 恢复");
+        }
+    }
+
+    /// tar slip 防护：`../` 穿越条目被跳过、不写出（tar crate 在 path() 校验报错）。
+    /// tar::Builder 自身拒绝写入 `..` 路径，故手工构造 ustar 头字节生成恶意包。
+    #[test]
+    fn test_extract_tar_gz_skips_traversal() {
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        // 最小 ustar 头构造：八进制字段为右对齐 + NUL 结尾
+        fn set_octal(buf: &mut [u8], value: u64) {
+            let s = format!("{:0width$o}\0", value, width = buf.len() - 1);
+            buf.copy_from_slice(s.as_bytes());
+        }
+        let mut hdr = [0u8; 512];
+        hdr[..11].copy_from_slice(b"../evil.txt");
+        set_octal(&mut hdr[100..108], 0o644); // mode
+        set_octal(&mut hdr[108..116], 0); // uid
+        set_octal(&mut hdr[116..124], 0); // gid
+        set_octal(&mut hdr[124..136], 4); // size
+        set_octal(&mut hdr[136..148], 0); // mtime
+        hdr[156] = b'0'; // typeflag: regular file
+        hdr[257..263].copy_from_slice(b"ustar\0");
+        hdr[263..265].copy_from_slice(b"00");
+        // checksum：全 512 字节求和，chksum 字段按惯例以空格占位
+        hdr[148..156].fill(b' ');
+        let sum: u64 = hdr.iter().map(|b| *b as u64).sum();
+        let chk = format!("{sum:06o}\0 ");
+        hdr[148..156].copy_from_slice(chk.as_bytes());
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&hdr);
+        raw.extend_from_slice(b"evil");
+        raw.resize(raw.len() + 508, 0); // 数据块补齐 512
+        raw.extend_from_slice(&[0u8; 1024]); // 两块全零 EOF
+
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("evil.tar.gz");
+        let mut gz = GzEncoder::new(
+            std::fs::File::create(&tar_path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        gz.write_all(&raw).unwrap();
+        gz.finish().unwrap();
+
+        let dest = dir.path().join("out");
+        extract_tar_gz(&tar_path, &dest, |_| true).unwrap();
+        assert!(!dest.parent().unwrap().join("evil.txt").exists());
+        assert!(!dest.join("evil.txt").exists());
+    }
+
+    /// extract_archive 分派：.tar.gz 走 tar 解压、.zip 走 zip 解压
+    #[test]
+    fn test_extract_archive_dispatch() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+
+        // zip 分支
+        let zip_path = dir.path().join("pkg.zip");
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("bin/tool", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"from-zip").unwrap();
+        let cursor = zip.finish().unwrap();
+        std::fs::write(&zip_path, cursor.into_inner()).unwrap();
+        let out_zip = dir.path().join("out-zip");
+        extract_archive(&zip_path, &out_zip, |_| true).unwrap();
+        assert_eq!(
+            std::fs::read(out_zip.join("bin/tool")).unwrap(),
+            b"from-zip"
+        );
+
+        // tar.gz 分支
+        use flate2::write::GzEncoder;
+        use tar::{Builder, Header};
+        let tar_path = dir.path().join("pkg.tar.gz");
+        let gz = GzEncoder::new(
+            std::fs::File::create(&tar_path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut builder = Builder::new(gz);
+        let targz_content: &[u8] = b"from-targz";
+        let mut hdr = Header::new_gnu();
+        hdr.set_size(targz_content.len() as u64);
+        hdr.set_mode(0o755);
+        hdr.set_cksum();
+        builder
+            .append_data(&mut hdr, "bin/tool", targz_content)
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        let out_tar = dir.path().join("out-tar");
+        extract_archive(&tar_path, &out_tar, |_| true).unwrap();
+        assert_eq!(
+            std::fs::read(out_tar.join("bin/tool")).unwrap(),
+            b"from-targz"
+        );
+
+        assert!(is_tar_gz(&tar_path));
+        assert!(!is_tar_gz(&zip_path));
+    }
+
+    /// unix：zip entry 的 unix 权限位在解压时恢复（官方资产依赖此行为获得 +x）
+    #[cfg(unix)]
+    #[test]
+    fn test_extract_zip_restores_unix_mode() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("perm.zip");
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "bin/tool",
+            zip::write::SimpleFileOptions::default().unix_permissions(0o755),
+        )
+        .unwrap();
+        zip.write_all(b"#!/bin/sh\n").unwrap();
+        let cursor = zip.finish().unwrap();
+        std::fs::write(&zip_path, cursor.into_inner()).unwrap();
+
+        let dest = dir.path().join("out");
+        extract_zip(&zip_path, &dest, |_| true).unwrap();
+        let mode = std::fs::metadata(dest.join("bin/tool"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
     }
 }

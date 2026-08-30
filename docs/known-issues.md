@@ -34,4 +34,18 @@
 
 ---
 
+## 四、三端兼容性（Windows / macOS / Linux）
+
+> 2026-08-30 全量审计发现的 16 项问题（W1–W16）中，12 项已于同日修复并归档至 changelog（第十六轮）：W1 uv 资产格式、W2 venv 路径、W3 解压权限位、W4 更新器 tar.gz、W5 force_kill、W7 unix 卸载脚本、W10 CI unix job、W11 SIGTERM/SIGHUP、W12 进程组终止、W14 __pycache__、W15 备份名、W16 .bat 拒绝 + XDG 环境变量。
+> W6（托盘）按用户决策收敛：**macOS 托盘禁用**（`TrayManager::spawn` 内单点拦截返回空句柄，轻量模式自动降级完整模式，Web 控制台 / `--stop` 仍可用），Linux 侧已修复（托盘线程内 gtk::init + gtk::main 事件循环，与 tray-icon 内部 gtk 0.18 同版本，待真机验证），不再跟踪；主力平台为 Windows。
+> 剩余未修项如下（均为有指引或降级方案的低危）。
+
+| # | 严重度 | 问题 | 位置 |
+|---|--------|------|------|
+| W8 | 🟢 低 | Linux 二进制动态链接 GTK3 / libayatana-appindicator / librsvg（托盘代价），无桌面发行版起不来；运行时依赖与安装命令已写入 Release 发布说明 | `.github/workflows/release.yml` |
+| W9 | 🟢 低 | macOS 未 codesign / 公证，浏览器下载后带 quarantine 被 Gatekeeper 拦截；`xattr -cr` 解除指引已写入 Release 发布说明，真签名需 Apple 开发者证书 | `.github/workflows/release.yml` |
+| W13 | 🟢 低 | linux-arm64 平台键存在但无产物（交叉链接缺 aarch64 GTK 库，暂不产包）；windows-arm64 已补 | `src/updater/check.rs` vs `release.yml` |
+
+---
+
 > 历史已修复条目已归档至 `docs/changelog.md`（2026-08 全量，含第十一~十三轮）；过时规划见 `docs/archive/` 与 `docs/plan-next.md`。

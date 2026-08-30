@@ -104,8 +104,10 @@ struct AppConfig {
     port: u16,
     base_path: PathBuf,
     runtime_mode: RuntimeMode,
-    no_browser: bool,
     no_tray: bool,
+    /// 自动打开浏览器：CLI --no-browser 或 settings.json 关闭时为 false。
+    /// 同时约束"启动后打开"与"重复启动时打开已有实例的 Web 控制台"两条路径
+    auto_open_browser: bool,
 }
 
 /// 启动过程中累积的中间状态
@@ -142,7 +144,31 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     }
 
     // 4. 实例锁
-    let instance_lock = acquire_lock(&app_config.base_path, cli.force)?;
+    let instance_lock = match acquire_lock(&app_config.base_path, cli.force) {
+        Ok(lock) => lock,
+        Err(e) => {
+            // 已有实例运行时（典型的双击 exe 重复启动场景）不再直接报错退出，
+            // 而是打开运行中实例的 Web 控制台后正常退出——GUI 子系统下 stderr
+            // 不可见，静默失败会让用户以为双击无响应。轻量模式（端口 0）没有
+            // Web 入口，维持原报错。
+            if !cli.force {
+                if let Some(info) = crate::utils::lock::query_instance(&app_config.base_path) {
+                    if info.running && info.port > 0 && app_config.auto_open_browser {
+                        let url = format!("http://127.0.0.1:{}", info.port);
+                        if open::that(&url).is_ok() {
+                            // 此刻日志系统尚未初始化（tracing 无 subscriber），同步落 stderr
+                            eprintln!(
+                                "已有实例运行中（PID {}），已在浏览器打开 Web 控制台: {url}",
+                                info.pid
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            return Err(e);
+        }
+    };
 
     // 5. 日志广播通道 + 文件日志层
     let log_tx = log_broadcast_tx();
@@ -182,6 +208,8 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     };
 
     // 8. 创建系统托盘
+    // macOS 也照常创建（纯通道结构，无副作用），真正的禁用拦截在
+    // TrayManager::spawn 内部单点执行——macOS 返回空句柄，托盘永不启动
     if !state.app_config.no_tray {
         let tray = TrayManager::new(crate::tray::TrayDeps {
             config: container.config.clone(),
@@ -219,39 +247,51 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
 fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig> {
     // 轻量读取 settings.json 的启动字段，不创建完整 ConfigService——
     // 正式容器在 run() 中统一初始化，避免重复目录 I/O / 迁移 / 解密（历史遗留 M2）。
-    let (file_port, file_show_tray, file_mode) = read_startup_settings(&base_path);
+    let (file_port, file_show_tray, file_mode, file_auto_open) = read_startup_settings(&base_path);
 
     let port = cli.port.unwrap_or(file_port).max(1);
     // CLI --mode 显式指定时优先生效；缺省时沿用 settings.json 的 app.runtime_mode
     let runtime_mode = cli.mode.clone().unwrap_or(file_mode);
-    let no_browser = cli.no_browser;
+    // macOS：托盘已禁用（用户决策，W6——tray-icon 要求主线程 NSApplication
+    // 事件循环，主线程运行 tokio runtime 无法满足）；轻量模式在 mac 上会既无
+    // 托盘也无 Web 入口，统一降级为完整模式保证可用
+    #[cfg(target_os = "macos")]
+    let runtime_mode = match runtime_mode {
+        RuntimeMode::Lightweight => {
+            warn!("macOS 暂不支持托盘，轻量模式降级为完整模式");
+            RuntimeMode::Full
+        }
+        other => other,
+    };
     // 托盘显示：CLI --no-tray 显式禁用，或配置 show_tray=false
     let no_tray = cli.no_tray || !file_show_tray;
+    // CLI --no-browser 与 settings.json 的 auto_start_browser 任一关闭即不打开
+    let auto_open_browser = !cli.no_browser && file_auto_open;
 
     Ok(AppConfig {
         port,
         base_path,
         runtime_mode,
-        no_browser,
         no_tray,
+        auto_open_browser,
     })
 }
 
-/// 读取 settings.json 中的启动字段：端口、托盘显示、运行模式
+/// 读取 settings.json 中的启动字段：端口、托盘显示、运行模式、自动打开浏览器
 ///
 /// 轻量读取（不创建完整 ConfigService——正式容器在 `run()` 中统一初始化，
 /// 避免重复目录 I/O / 迁移 / 解密，历史遗留 M2）。
-fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode) {
+fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode, bool) {
     let default_port = crate::app::DEFAULT_PORT;
     let default_mode = RuntimeMode::Full;
     let settings_path = base_path
         .join(crate::config::CONFIG_DIR)
         .join(crate::config::SETTINGS_FILE);
     let Ok(raw) = std::fs::read_to_string(&settings_path) else {
-        return (default_port, true, default_mode);
+        return (default_port, true, default_mode, true);
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return (default_port, true, default_mode);
+        return (default_port, true, default_mode, true);
     };
     let app = value.get("global").and_then(|g| g.get("app"));
     let port = app
@@ -271,7 +311,15 @@ fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode) {
         Some("lightweight") => RuntimeMode::Lightweight,
         _ => default_mode,
     };
-    (port, show_tray, runtime_mode)
+    // 兼容迁移前的旧字段名 auto_open_browser（迁移在 ConfigService 初始化时才执行）
+    let auto_open_browser = app
+        .and_then(|a| {
+            a.get("auto_start_browser")
+                .or_else(|| a.get("auto_open_browser"))
+        })
+        .and_then(|t| t.as_bool())
+        .unwrap_or(true);
+    (port, show_tray, runtime_mode, auto_open_browser)
 }
 
 /// 检查关键目录的写入权限
@@ -384,9 +432,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
 
             // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
             // 此前配置项是死开关，UI「静默启动」切换无任何效果
-            let auto_open = !state.app_config.no_browser
-                && container.config.runtime().load().app.auto_start_browser;
-            if auto_open {
+            if state.app_config.auto_open_browser {
                 open_browser(port);
             }
         }
@@ -405,6 +451,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
     let watch_handle = watch_engine(state);
 
     // 启动托盘（在专用 OS 线程上构建图标与菜单）
+    // macOS 的禁用拦截收敛在 TrayManager::spawn 内部单点执行（W6 用户决策）
     if let Some(tray) = state.tray_manager.as_ref() {
         state.tray_handle = Some(tray.spawn());
     }
@@ -428,7 +475,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
 async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     let watch_handle = watch_engine(state);
 
-    // 启动托盘（轻量模式也显示托盘）
+    // 启动托盘（轻量模式也显示托盘；macOS 由 spawn 内部单点拦截返回空句柄）
     if let Some(tray) = state.tray_manager.as_ref() {
         state.tray_handle = Some(tray.spawn());
     }
@@ -777,14 +824,24 @@ fn spawn_background_update_check(state: &LauncherState) {
     }
 }
 
-/// 等待退出信号（Ctrl+C / 托盘退出 / Web API 关闭）
+/// 等待退出信号（Ctrl+C / SIGTERM/SIGHUP / 托盘退出 / Web API 关闭）
 async fn wait_for_shutdown(state: &mut LauncherState) {
     let token = state.shutdown_token.clone();
     // 克隆 shutdown_rx 而非 take 出 handle，避免 drop stop_tx 导致 Axum 过早关闭
     let shutdown_rx = state.axum_handle.as_ref().map(|h| h.shutdown_rx.clone());
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
+        _ = async {
+            // GUI 子系统（Windows release 双击启动）下无控制台，ctrl_c 注册可能
+            // 直接返回 Err——若放任该分支在启动瞬间完成，进程会秒退。注册失败时
+            // 退化为永久挂起，退出路径交由关闭令牌 / Web API / 托盘。
+            if tokio::signal::ctrl_c().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        } => {
             info!("收到 Ctrl+C 信号");
+        }
+        _ = wait_terminate_signal() => {
+            info!("收到 SIGTERM/SIGHUP 信号");
         }
         _ = token.cancelled() => {
             info!("收到关闭令牌取消信号");
@@ -798,5 +855,38 @@ async fn wait_for_shutdown(state: &mut LauncherState) {
         } => {
             info!("收到 Web API 关闭信号");
         }
+    }
+}
+
+/// unix 终止信号监听（SIGTERM / SIGHUP 任一触发）
+///
+/// 外部 `kill <pid>`、launchd / systemd 停服、会话注销等都以这两个信号送达，
+/// 此前只听 Ctrl+C，unix 上的非交互停止会把 Worker 与 chromium 变成孤儿
+/// （unix 无 Job Object）。注册失败（极罕见）时退化为永久挂起，与 ctrl_c
+/// 分支同策略，避免 select 分支瞬间完成导致秒退。非 unix 平台永不触发。
+async fn wait_terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate());
+        let mut hup = signal(SignalKind::hangup());
+        tokio::select! {
+            _ = async {
+                match term.as_mut() {
+                    Ok(s) => { let _ = s.recv().await; }
+                    Err(_) => std::future::pending::<()>().await,
+                }
+            } => {}
+            _ = async {
+                match hup.as_mut() {
+                    Ok(s) => { let _ = s.recv().await; }
+                    Err(_) => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending::<()>().await;
     }
 }

@@ -129,8 +129,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 4. 备份旧 exe
-    let backup_path = target_exe.with_extension("exe.bak");
+    // 4. 备份旧 exe（统一 "<原名>.bak"：unix 上 with_extension("exe.bak") 会产出
+    // campus-auth.exe.bak 的怪名——无扩展名文件被凭空拼出 .exe）
+    let backup_path = target_exe
+        .file_name()
+        .map(|n| target_exe.with_file_name(format!("{}.bak", n.to_string_lossy())))
+        .unwrap_or_else(|| target_exe.with_extension("exe.bak"));
     if target_exe.exists() {
         println!("[helper] 备份旧版本 -> {}", backup_path.display());
         if let Err(e) = std::fs::copy(&target_exe, &backup_path) {
@@ -154,6 +158,13 @@ fn main() {
         }
         cleanup(&base_path, &staging_dir);
         std::process::exit(1);
+    }
+    // unix：fs::copy 只复制源文件权限，为防解压链路丢 +x，替换后显式确保
+    // 新二进制可执行——否则重启必然 Exec format/permission 失败
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target_exe, std::fs::Permissions::from_mode(0o755));
     }
 
     // 6. 启动新 exe（传递原始启动参数）

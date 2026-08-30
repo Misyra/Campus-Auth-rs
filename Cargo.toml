@@ -78,7 +78,9 @@ open = "5"
 fs4 = { version = "1", features = ["tokio"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
-zip = "2"
+# zip 仅用于读取发布包（deflate/stored）；默认 features 会拉入 lzma/bzip2/zstd
+# 三个 C 依赖，_unix 交叉编译与构建速度都受累
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # 网络 & 硬件
 # （网卡检测自研实现，无 mac_address 依赖）
@@ -101,6 +103,11 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 # 编码
 encoding_rs = "0.8"
 
+# 归档解压：uv 引导与自更新在 unix 平台的发布资产为 tar.gz（官方 zip 资产仅有 Windows），
+# 与 zip crate 并列，按资产扩展名分派
+tar = "0.4"
+flate2 = "1"
+
 [target.'cfg(unix)'.dependencies]
 # Unix 平台系统调用（进程存活探测 kill(pid,0)）与 macOS F_FULLFSYNC 持久化保证
 libc = "0.2"
@@ -113,7 +120,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_System_JobObjects",
+    # GUI 子系统下重新附着父控制台（AttachConsole / SetStdHandle）
+    "Win32_System_Console",
+    # CONOUT$ 标准句柄重建（CreateFileW）
+    "Win32_Storage_FileSystem",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tray-icon Linux 后端要求 gtk::init 与 gtk 主循环运行在同一线程，
+# 托盘/菜单事件经 glib 主循环分发（与 tray-icon 内部依赖同版本，共享 gtk 状态）
+gtk = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

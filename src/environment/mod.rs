@@ -89,7 +89,14 @@ pub const WORKER_PROJECT_DIR: &str = "python_worker";
 /// 虚拟环境目录名（相对于 worker_project_path）
 pub const VENV_DIR: &str = ".venv";
 /// Python 解释器相对路径（相对于 worker_project_path）
+///
+/// venv 目录布局因平台而异：Windows 为 `Scripts/python.exe`，
+/// macOS / Linux 为 `bin/python`——硬编码 Windows 布局会让 unix 上
+/// venv 检测、引导与 Bridge spawn 全链路误判"未安装"。
+#[cfg(target_os = "windows")]
 pub const PYTHON_EXE_RELATIVE: &str = ".venv/Scripts/python.exe";
+#[cfg(not(target_os = "windows"))]
+pub const PYTHON_EXE_RELATIVE: &str = ".venv/bin/python";
 
 /// 解析 python_worker 工程目录（单一事实源，Bridge spawn 检查与 EnvironmentManager 共用）
 ///

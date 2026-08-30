@@ -140,7 +140,7 @@ pub(crate) async fn fetch_manifest(
         let mut platforms: HashMap<String, PlatformPackage> = HashMap::new();
         // G11：抽纯函数按 "os-arch" 推断平台键，多资产 release 中
         // windows-x64 / windows-arm64 各占一键互不覆盖
-        for (platform_key, dl_url, size, name) in collect_zip_assets(&assets) {
+        for (platform_key, dl_url, size, name) in collect_package_assets(&assets) {
             // 从 release assets 中找 `.sha256` 伴随文件，拿到真实哈希（U2：默认 GitHub
             // 源此前 sha256 恒为空，更新包无任何完整性校验）
             let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
@@ -211,7 +211,7 @@ fn infer_platform_key(name: &str) -> Option<&'static str> {
     }
 }
 
-/// 从 GitHub release assets 中提取 zip 下载包（纯函数，G11 便于单测）
+/// 从 GitHub release assets 中提取平台压缩包（zip / tar.gz，纯函数，G11 便于单测）
 ///
 /// 过滤规则：
 /// - `.sha256` 伴随文件不是下载包本身，跳过（由 `fetch_sha256_assoc` 使用）；
@@ -219,7 +219,7 @@ fn infer_platform_key(name: &str) -> Option<&'static str> {
 ///
 /// 返回 `(平台键, 下载 URL, 大小, 小写资产名)` 列表；资产名供后续
 /// `.sha256` 伴随文件查找复用。
-pub(crate) fn collect_zip_assets(
+pub(crate) fn collect_package_assets(
     assets: &[serde_json::Value],
 ) -> Vec<(String, String, Option<u64>, String)> {
     let mut result = Vec::new();
@@ -486,7 +486,7 @@ mod tests {
 
     /// G11：多资产 release 中 arm64 不得顶掉 x64（HashMap 键并存）
     #[test]
-    fn test_collect_zip_assets_multi_arch_coexist() {
+    fn test_collect_package_assets_multi_arch_coexist() {
         let assets: Vec<serde_json::Value> = [
             r#"{"name": "Campus-Auth-5.0.0-windows-x64.zip", "browser_download_url": "https://x64", "size": 100}"#,
             r#"{"name": "Campus-Auth-5.0.0-windows-arm64.zip", "browser_download_url": "https://arm64", "size": 90}"#,
@@ -499,7 +499,7 @@ mod tests {
         .map(|s| serde_json::from_str(s).unwrap())
         .collect();
 
-        let mut collected = collect_zip_assets(&assets);
+        let mut collected = collect_package_assets(&assets);
         collected.sort();
         assert_eq!(collected.len(), 3, "sha256 伴随文件与无架构资产应被跳过");
         // 三个平台键各自独立，arm64 不再覆盖 x64

@@ -59,12 +59,14 @@ New-Item -ItemType Directory -Path $Out | Out-Null
 Copy-Item (Join-Path $Root "target\release\campus-auth.exe") $Out
 Copy-Item (Join-Path $Root "target\release\campus-auth-helper.exe") $Out
 Copy-Item (Join-Path $Root "resources") (Join-Path $Out "resources") -Recurse
-# 复制 python_worker 时排除本地虚拟环境（运行时按需重建），避免先全量复制再删除的双重 IO
+# 复制 python_worker 时排除本地虚拟环境（运行时按需重建），避免先全量复制再删除的双重 IO；
+# __pycache__ 与 release.yml 口径对齐一并排除（运行时自动再生）
 $workerDst = Join-Path $Out "python_worker"
 New-Item -ItemType Directory -Path $workerDst | Out-Null
 Get-ChildItem (Join-Path $Root "python_worker") -Force | Where-Object { $_.Name -ne ".venv" } | ForEach-Object {
     Copy-Item $_.FullName (Join-Path $workerDst $_.Name) -Recurse -Force
 }
+Get-ChildItem $workerDst -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
 
 # ---- 4/4 完成 ----
 $sizeMB = [math]::Round(

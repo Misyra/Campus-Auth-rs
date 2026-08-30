@@ -1,6 +1,72 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“开发中（第十四轮）”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“开发中（第十六轮）”。
+
+## 开发中（2026-08-30 第十六轮：三端兼容性修复）
+
+> 修复第十五轮审计发现的 16 项三端问题中的 12 项（known-issues 第四节 W 编号），剩余 4 项为有降级方案的低中危遗留。
+
+### 环境引导链（W1–W3，mac / Linux 高危）
+
+- **W2 venv 路径**：`PYTHON_EXE_RELATIVE` 按 cfg 分支——Windows `.venv/Scripts/python.exe`，unix `.venv/bin/python`；此前硬编码 Windows 布局使 mac / Linux 的 venv 检测、引导、Bridge Worker spawn 全链路误判"未安装"，浏览器登录整体不可用
+- **W1 uv 资产格式**：下载 URL 按平台拼 `.{UV_ASSET_EXT}`（Windows zip / unix tar.gz，官方 unix release 只发 tar.gz，实测资产列表确认含 `.sha256`）；`extract_uv_from_zip` 泛化为 `extract_uv_from_archive`，unix 解压后显式补 0755 兜底
+- **W3 权限位**：`extract_zip` 恢复 zip entry 的 unix_mode；新增 `extract_tar_gz`（tar slip 防护 + 链接条目拒绝 + 大小上限 + mode 恢复）；统一分派入口 `extract_archive` 按扩展名选 zip / tar.gz
+
+### 更新器（W4 + W15，mac / Linux 高危）
+
+- 下载落盘文件名跟随资产 URL（截断 query），解压经 `extract_archive` 按扩展名分派——unix 产 tar.gz 不再被按 zip 硬解；`collect_zip_assets` 更名 `collect_package_assets`
+- helper 替换后在 unix 上对目标 exe 显式 chmod 0755（防解压链路丢 +x）；备份名统一 `<原名>.bak`（unix 上不再产出 `campus-auth.exe.bak` 怪名）
+
+### 进程治理（W5 / W11 / W12）
+
+- **W5**：`force_kill` unix 实现改为 `kill(pid, SIGKILL)`，`--force` 抢锁可用
+- **W11**：`wait_for_shutdown` 新增 SIGTERM / SIGHUP 监听，外部 `kill` / launchd / systemd 停止走优雅关闭，Worker + chromium 不再变孤儿
+- **W12**：unix 任务子进程以独立进程组启动（`process_group(0)`），超时 `killpg` 连带回收整棵 shell 子树，对标 Windows Job Object + taskkill /T
+
+### 托盘与卸载（W6 / W7）
+
+- **W6 Linux**：托盘线程改为 gtk::init（构建前）+ glib 主循环（50ms 轮询命令通道兼顾刷新与退出）——tray-icon 要求 gtk 循环与托盘构建同线程，此前仅阻塞 recv 事件永不分发；gtk 0.18 与 tray-icon 内部依赖同版本共享状态（cargo tree 验证单版本）
+- **W6 macOS**：按用户决策**禁用 macOS 托盘**——tray-icon 要求主线程 NSApplication 事件循环，主线程运行 tokio runtime 的架构无法满足，非主线程构建有崩溃风险；拦截收敛在 `TrayManager::spawn` 内部单点（`cfg!` 运行时判断提前返回空句柄，后续任何调用路径都开不起来，且避免 macOS CI 的 dead_code / unreachable 告警）；轻量模式在 macOS 自动降级为完整模式（保住 Web 入口）
+- **W7 卸载**：unix 生成可执行 `uninstall.sh`（/tmp 自复制 exec + pkill -x 精确按可执行名杀进程 + comm 截断名兜底），Windows 保留 uninstall.bat；unix 增补 shell 元字符注入校验
+
+### 发布配套（W10 / W13 / W14 / W8 / W9）
+
+- **W10 CI**：新增 `rust-tests-unix` job（macos-latest + ubuntu-22.04：clippy -D warnings + cargo test，Linux 装 GTK -dev），unix 分支编译错误不再首发于 tag 发布时
+- **W13**：release 矩阵补 windows-arm64 产物（MSVC 自带 ARM64 工具链交叉编译）；linux-arm64 因 aarch64 GTK 交叉链接暂缺（workflow 注释说明，平台键保留）
+- **W14**：build.ps1 打包排除 `__pycache__`，与 release.yml 口径对齐
+- **W8 / W9**：Release 发布说明写入平台运行前提——Linux GTK 运行时库 apt 命令、macOS `xattr -cr` quarantine 解除指引
+- zip 依赖 features 裁剪为 `deflate`（默认 features 拉入 lzma/bzip2/zstd 三个 C 依赖，构建与交叉编译都受累）
+
+### 新增依赖
+
+- `tar 0.4` + `flate2 1`（unix 资产解包）；`gtk 0.18`（仅 linux target，托盘事件循环）
+
+### 验证
+
+- cargo test 522/522（含新增 tar.gz 解压布局 / 权限恢复 / tar slip 跳过 / extract_archive 分派 / uv tar.gz 提取 5 用例，其中 zip 权限位用例仅 unix 编译运行）；clippy `--all-targets -D warnings` 零警告；release 冒烟复测（HTTP 200 / 重复启动 / --stop 优雅退出）通过
+- unix 平台无法本地编译（ring 等依赖需目标平台 C 工具链），已做 API 级自查（tokio `process_group`、glib `ControlFlow`/`timeout_add_local`、cfg 语句属性均对照源码验证）并以新增的 CI unix job 兜底，推送后首次生效
+- tar header size 必须与数据长度一致（tar 按大小寻址）——测试初版 set_size 与数据不等导致 4 例失败，已改为由内容长度推导
+
+## 开发中（2026-08-30 第十五轮：启动 GUI 化 + 三端兼容审计）
+
+> Windows release 双击启动不再弹控制台并直接打开 Web 界面；完成三平台兼容性全面审计，问题清单登记至 known-issues 待圈定修复范围。
+
+### 启动方式 GUI 化
+
+- **隐藏控制台窗口**：`main.rs` 增加 `windows_subsystem = "windows"`（仅 release 生效，debug 保持控制台子系统以兼容 cargo run / 集成测试的 stdout 捕获），PE 头实测 Subsystem=2，双击 exe 不再弹出命令行窗口
+- **终端输出兜底**：新增 `attach_parent_console`——release 从 cmd / PowerShell 启动时附着父进程控制台并只为缺失的标准句柄补 CONOUT$，`--status` / `--stop` 等子命令输出可见；重定向句柄（> 文件 / 管道）原样保留不覆写；双击启动（父进程 explorer 无控制台）附着失败静默返回——`Start-Process` 实证 Rust std 对 NULL 标准句柄按静默丢弃处理（退出码 0 无 panic）
+- **ctrl_c 秒退防护**：无控制台环境下 `tokio::signal::ctrl_c()` 注册可能立即返回 Err，select 分支会瞬间完成导致进程秒退；注册失败时退化为永久挂起，退出路径交由关闭令牌 / Web API / 托盘
+- **重复启动直接打开界面**：实例锁获取失败且运行中实例记录了 Web 端口时，改为在浏览器打开该实例的 Web 控制台后正常退出（受 `--no-browser` / settings `auto_start_browser` 约束），双击 exe 不再"静默无响应"；轻量模式（端口 0）维持原报错
+- `read_startup_settings` 轻读补 `auto_start_browser`（兼容迁移前旧字段名 `auto_open_browser`）；`AppConfig.no_browser` 收敛为 `auto_open_browser` 单一字段，同时约束"启动后打开"与"重复启动打开"两条路径
+
+### 三端兼容性审计（Windows / macOS / Linux）
+
+- 全量排查 cfg 分支、隐含平台假设、进程与信号、打包分发、前端平台逻辑：自启动 / 网络检测 / 孤儿清理 / 平台键等已有健康的三分支实现，但环境引导链与更新器在 mac / Linux 上成套失效
+- 16 项分级问题（高 7 / 中 5 / 低 4）登记至 `docs/known-issues.md` 第四节，高危集中在：uv 下载 URL 对 unix 目标拼 `.zip`（官方仅发 tar.gz）、`PYTHON_EXE_RELATIVE` 硬编码 `.venv/Scripts/python.exe`、解压 / 复制不恢复 unix 可执行位、自更新 tar.gz 被按 zip 解压、`--force` 的 kill 在非 Windows 为 stub、tray-icon 平台线程约束未满足、卸载仅产 `.bat`
+
+### 验证
+
+- cargo test 518/518（0 失败）；clippy `--all-targets -D warnings` 零警告；release 实测：PE Subsystem=2、后台启动 Web 200、重复启动报错路径与 `--stop` 退出正常、无标准句柄启动退出码 0
 
 ## 开发中（2026-08-30 第十四轮：钉底误报 + 调试面板修复 + 发布流水线）
 

@@ -247,6 +247,12 @@ impl TaskExecutor {
         // 构建命令
         let python_default = self.env.python_path().to_string_lossy().to_string();
         let (program, args) = build_script_command(cfg, &script_file, &ext, &python_default);
+        // .bat/.cmd 是 cmd.exe 专属脚本语义，unix 上无法执行——显式拒绝，
+        // 避免落到 spawn ENOENT 的难懂报错（known-issues W16）
+        #[cfg(not(windows))]
+        if program == "cmd.exe" {
+            return Err(TaskError::UnsupportedExtension(ext));
+        }
         let work_dir = resolve_work_dir(cfg, &script_file, &self.scripts_dir);
         let envs = build_minimal_env();
 
@@ -352,6 +358,10 @@ impl TaskExecutor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // unix：子进程放入独立进程组（pgid = 子进程 PID），超时后可 killpg
+        // 连带回收 shell 拉起的整棵子树（对标 Windows 的 Job Object + taskkill /T）
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(TaskError::IoError)?;
         // Windows 下用 KILL_ON_JOB_CLOSE 约束整棵任务进程树。任务超时、调度器
@@ -419,6 +429,14 @@ impl TaskExecutor {
                             .status()
                     })
                     .await;
+                }
+                // unix：killpg 按进程组终止整棵子树（子进程已 setpgid 为组长）；
+                // 进程可能已自行退出（ESRCH），静默忽略
+                #[cfg(unix)]
+                if let Some(pid) = pid {
+                    unsafe {
+                        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                    }
                 }
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -646,6 +664,23 @@ fn build_minimal_env() -> Vec<(String, String)> {
     ] {
         if let Ok(v) = std::env::var(key) {
             envs.push((key.to_string(), v));
+        }
+    }
+    // unix 关键目录变量：XDG 基目录规范缺失会让 pip/uv/字体等工具落到非常规
+    // 路径或直接报错；未显式设置时注入规范默认值（env_clear 后子进程无从推断）
+    if cfg!(unix) {
+        if let Ok(h) = std::env::var("HOME") {
+            for (key, default) in [
+                ("XDG_CONFIG_HOME", ".config"),
+                ("XDG_CACHE_HOME", ".cache"),
+                ("XDG_DATA_HOME", ".local/share"),
+            ] {
+                let val = std::env::var(key).unwrap_or_else(|_| format!("{h}/{default}"));
+                envs.push((key.to_string(), val));
+            }
+        }
+        if let Ok(t) = std::env::var("TMPDIR") {
+            envs.push(("TMPDIR".to_string(), t));
         }
     }
     envs

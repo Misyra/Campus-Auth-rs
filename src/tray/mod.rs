@@ -131,7 +131,21 @@ impl TrayManager {
     /// 启动托盘：在专用 OS 线程上构建图标与菜单，并 spawn 一个 tokio 泵任务消费 [`TrayAction`]。
     ///
     /// 返回 [`ServiceHandle`]，调用其 [`ServiceHandle::stop`] 可优雅停止并 join OS 线程。
+    ///
+    /// **macOS 平台禁用**（用户决策，known-issues W6）：tray-icon 要求托盘构建与
+    /// NSApplication 事件循环都在主线程，而本应用主线程运行 tokio runtime，无法满足；
+    /// 非主线程构建有崩溃风险。macOS 下本方法返回空句柄、不创建任何托盘资源，
+    /// 单点拦截保证任何调用路径都开不起来。轻量模式在 macOS 已降级为完整模式。
     pub fn spawn(self: &Arc<Self>) -> ServiceHandle {
+        if cfg!(target_os = "macos") {
+            info!("macOS 暂不支持系统托盘（known-issues W6），已跳过启动");
+            let (stop_tx, _stop_rx) = watch::channel(false);
+            return ServiceHandle {
+                stop_tx,
+                join_handle: tokio::spawn(async {}),
+            };
+        }
+
         let action_rx = self
             .action_rx
             .lock()
@@ -158,6 +172,15 @@ impl TrayManager {
 
         // ---- OS 托盘线程：构建菜单与图标，独占持有 TrayIcon，等待命令 ----
         let os_handle = thread::spawn(move || {
+            // Linux：tray-icon 后端基于 gtk/libappindicator，构建图标前必须完成
+            // gtk::init，且 gtk 主循环要在同一线程持续运行（见下方 gtk::main）——
+            // 否则菜单/图标事件永远不会分发，托盘完全无响应
+            #[cfg(target_os = "linux")]
+            if let Err(e) = gtk::init() {
+                error!("gtk 初始化失败，托盘不可用: {e}");
+                return;
+            }
+
             // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
             // menu_items 绑定本身保持对象存活到线程结束；toggle_item 用于动态改文本
             let (menu, menu_items, toggle_item) = build_menu();
@@ -268,8 +291,40 @@ impl TrayManager {
                     }
                 }
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
             {
+                // gtk 主循环驱动事件分发；以 50ms 轮询命令通道兼顾刷新与退出，
+                // 避免引入跨线程唤醒 glib 主循环的复杂度
+                gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                    match os_cmd_rx.try_recv() {
+                        Ok(OsCommand::Quit) => {
+                            gtk::main_quit();
+                            return gtk::glib::ControlFlow::Break;
+                        }
+                        Ok(OsCommand::RefreshTray) => {
+                            update_tray(
+                                &tray,
+                                &status.borrow(),
+                                &active_icon,
+                                &inactive_icon,
+                                &toggle_item,
+                            );
+                        }
+                        Err(std_mpsc::TryRecvError::Empty) => {}
+                        Err(std_mpsc::TryRecvError::Disconnected) => {
+                            // 发送端已丢弃，结束线程
+                            gtk::main_quit();
+                            return gtk::glib::ControlFlow::Break;
+                        }
+                    }
+                    gtk::glib::ControlFlow::Continue
+                });
+                gtk::main();
+            }
+            #[cfg(all(not(windows), not(target_os = "linux")))]
+            {
+                // 其余平台（macOS 等）：托盘暂不支持（tray-icon 要求主线程事件循环，
+                // 见 known-issues W6），仅保持线程等待退出命令
                 loop {
                     match os_cmd_rx.recv() {
                         Ok(OsCommand::Quit) => break,

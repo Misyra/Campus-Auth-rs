@@ -1,7 +1,8 @@
 //! 下载执行：流式下载 + SHA256 增量校验 + staging 管理
 //!
-//! 从下载包 URL 流式拉取 zip 到 staging 目录，下载过程中增量计算 SHA256，
-//! 完成后与清单中的预期摘要比对；校验通过后解压到 `extracted/`。
+//! 从下载包 URL 流式拉取压缩包到 staging 目录，下载过程中增量计算 SHA256，
+//! 完成后与清单中的预期摘要比对；校验通过后按资产扩展名分派解压到 `extracted/`
+//! （Windows `.zip` / unix `.tar.gz`）。
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +33,7 @@ pub(crate) const MAX_UPDATE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 ///
 /// 下载前强制校验 URL 为 HTTPS；流式写入临时文件时增量更新 `Sha256`，
 /// 完成后比对摘要，不匹配则删除临时文件并返回 [`UpdaterError::ChecksumMismatch`]。
-/// 校验通过后将临时文件原子重命名为正式 zip 路径。
+/// 校验通过后将临时文件原子重命名为正式压缩包路径。
 ///
 /// `on_progress` 在每收到一个 chunk 后被调用（传入 0~100 的进度百分比），可用于推送状态。
 pub(crate) async fn download_and_verify(
@@ -70,7 +71,10 @@ pub(crate) async fn download_and_verify(
         .await
         .map_err(UpdaterError::StagingDirCreateFailed)?;
 
-    let tmp_path = staging_dir.join(format!("campus-auth-{}.zip.tmp", info.latest_version));
+    // 资产文件名跟随下载 URL（Windows 发布 zip / unix 发布 tar.gz），
+    // 落盘命名与后续解压分派都以此为据，不再硬编码 .zip
+    let archive_name = archive_name_from_url(&info.url);
+    let tmp_path = staging_dir.join(format!("{archive_name}.tmp"));
     // 简单策略：存在旧 tmp 则删除后重新下载（不实现断点续传）
     if tokio::fs::try_exists(&tmp_path).await.unwrap_or(false) {
         let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -143,39 +147,54 @@ pub(crate) async fn download_and_verify(
         );
     }
 
-    let zip_path = staging_dir.join(format!("campus-auth-{}.zip", info.latest_version));
-    tokio::fs::rename(&tmp_path, &zip_path)
+    let archive_path = staging_dir.join(&archive_name);
+    tokio::fs::rename(&tmp_path, &archive_path)
         .await
         .map_err(UpdaterError::PendingWriteFailed)?;
-    Ok(zip_path)
+    Ok(archive_path)
 }
 
-/// 将 zip 解压到 `staging_dir/extracted/`，并校验解压出的 exe 存在
+/// 从下载 URL 提取资产文件名（截断 query / fragment）
 ///
-/// 使用 `zip::ZipFile::enclosed_name()` 过滤绝对/穿越路径，并额外做 `starts_with`
-/// 防御性检查（防止 zip slip 攻击）。
+/// 更新包落盘与解压分派都跟随官方资产名（Windows `.zip` / unix `.tar.gz`）；
+/// URL 无可解析段时回退固定名（zip 兜底）。
+fn archive_name_from_url(url: &str) -> String {
+    let path_only = url.split(['?', '#']).next().unwrap_or("");
+    path_only
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("campus-auth-update.zip")
+        .to_string()
+}
+
+/// 将压缩包解压到 `staging_dir/extracted/`，并校验解压出的 exe 存在
+///
+/// 解压按资产扩展名分派（`.zip` / `.tar.gz`，见 `utils::io::extract_archive`）：
+/// - 路径穿越由 `enclosed_name()` / tar slip 防护过滤，并额外做 `starts_with`
+///   防御性检查（防止 zip/tar slip 攻击）；unix 上恢复条目权限位（含 +x）。
 ///
 /// 解压为 CPU+I/O 密集操作，大更新包可能持续数秒~数十秒；通过
 /// `tokio::task::spawn_blocking` 在阻塞线程池执行，避免长时间占用 tokio worker 线程。
 pub(crate) async fn extract_to_staging(
-    zip_path: &Path,
+    archive_path: &Path,
     staging_dir: &Path,
     version: &str,
 ) -> Result<StagedUpdate, UpdaterError> {
     // 参数为引用，clone 为 owned 后 move 进 spawn_blocking 闭包（闭包需 'static + Send）
-    let zip_path = zip_path.to_path_buf();
+    let archive_path = archive_path.to_path_buf();
     let staging_dir = staging_dir.to_path_buf();
     let version = version.to_string();
     tokio::task::spawn_blocking(move || {
-        extract_to_staging_blocking(&zip_path, &staging_dir, &version)
+        extract_to_staging_blocking(&archive_path, &staging_dir, &version)
     })
     .await
     .map_err(|e| UpdaterError::ExtractFailed(format!("解压任务执行失败: {e}")))?
 }
 
-/// 同步解压实现：实际执行 zip 解压与 exe 校验（由 `extract_to_staging` 在阻塞线程池调用）
+/// 同步解压实现：实际执行压缩包解压与 exe 校验（由 `extract_to_staging` 在阻塞线程池调用）
 fn extract_to_staging_blocking(
-    zip_path: &Path,
+    archive_path: &Path,
     staging_dir: &Path,
     version: &str,
 ) -> Result<StagedUpdate, UpdaterError> {
@@ -186,8 +205,9 @@ fn extract_to_staging_blocking(
     }
     std::fs::create_dir_all(&extracted_dir).map_err(UpdaterError::StagingDirCreateFailed)?;
 
-    // 全量解压（zip 打开/解析错误统一映射为 ExtractFailed；路径穿越由 extract_zip 兜底跳过）
-    crate::utils::io::extract_zip(zip_path, &extracted_dir, |_| true)
+    // 全量解压（压缩包打开/解析错误统一映射为 ExtractFailed；路径穿越由
+    // extract_archive 兜底跳过）
+    crate::utils::io::extract_archive(archive_path, &extracted_dir, |_| true)
         .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
 
     let extracted_exe = extracted_dir.join(EXE_NAME);

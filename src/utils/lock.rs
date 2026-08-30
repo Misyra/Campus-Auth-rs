@@ -161,7 +161,8 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
 /// 强制杀死指定 PID 的进程
 ///
 /// - Windows: `TerminateProcess`
-/// - 非 Windows: 当前为 stub，仅记录日志
+/// - unix: `kill(pid, SIGKILL)`（SIGKILL 不可被捕获或忽略，进程必然终止；
+///   进程已退出时返回 ESRCH，静默忽略）
 pub fn force_kill(pid: u32) {
     #[cfg(target_os = "windows")]
     {
@@ -179,8 +180,11 @@ pub fn force_kill(pid: u32) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = pid;
-        tracing::warn!("force_kill: 当前平台暂不支持强制杀进程");
+        // SIGKILL 直接由内核终止目标；失败（进程已退出 / 无权限）不影响
+        // 调用方随后的抢锁重试逻辑
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 }
 

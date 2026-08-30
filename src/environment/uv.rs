@@ -135,7 +135,7 @@ pub async fn download_uv(
             }
         };
         let sha_urls = uv_sha_urls(&ver);
-        let zip_urls = uv_zip_urls(&ver);
+        let archive_urls = uv_archive_urls(&ver);
 
         // 1. 下载 SHA256 校验文件（多镜像）
         let expected_hash = match download_text_with_mirrors(mgr, &sha_urls).await {
@@ -153,37 +153,37 @@ pub async fn download_uv(
             }
         };
 
-        // 2. 流式下载 zip 到临时文件（多镜像 + 带超时）
-        let tmp_zip = env_path.join("uv.zip.tmp");
-        let mut zip_downloaded = false;
-        for zip_url in &zip_urls {
+        // 2. 流式下载压缩包到临时文件（多镜像 + 带超时）
+        let tmp_archive = env_path.join("uv-archive.tmp");
+        let mut archive_downloaded = false;
+        for archive_url in &archive_urls {
             if cancel.is_cancelled() {
                 return Err(EnvironmentError::Cancelled);
             }
-            let _ = tokio::fs::remove_file(&tmp_zip).await;
+            let _ = tokio::fs::remove_file(&tmp_archive).await;
             let dl_result = tokio::time::timeout(
                 UV_DOWNLOAD_TIMEOUT,
-                download_file_streaming(mgr, zip_url, &tmp_zip),
+                download_file_streaming(mgr, archive_url, &tmp_archive),
             )
             .await;
             match dl_result {
                 Ok(Ok(())) => {
-                    zip_downloaded = true;
+                    archive_downloaded = true;
                     break;
                 }
                 Ok(Err(e)) => {
-                    tracing::debug!("zip 下载失败 {}: {}", zip_url, e);
+                    tracing::debug!("压缩包下载失败 {}: {}", archive_url, e);
                     last_err_msg = e.to_string();
                 }
                 Err(_) => {
-                    tracing::debug!("zip 下载超时: {}", zip_url);
+                    tracing::debug!("压缩包下载超时: {}", archive_url);
                     last_err_msg = format!("下载超时 (超过 {}s)", UV_DOWNLOAD_TIMEOUT.as_secs());
                 }
             }
         }
-        if !zip_downloaded {
+        if !archive_downloaded {
             tracing::warn!(
-                "下载 uv zip 全部镜像失败 (尝试 {}/{}): {}",
+                "下载 uv 压缩包全部镜像失败 (尝试 {}/{}): {}",
                 attempt + 1,
                 UV_DOWNLOAD_MAX_RETRIES,
                 last_err_msg
@@ -193,35 +193,35 @@ pub async fn download_uv(
         }
 
         // 3. SHA256 校验
-        if let Err(e) = verify_sha256(&tmp_zip, &expected_hash).await {
+        if let Err(e) = verify_sha256(&tmp_archive, &expected_hash).await {
             tracing::warn!(
                 "uv SHA256 校验失败 (尝试 {}/{}): {}",
                 attempt + 1,
                 UV_DOWNLOAD_MAX_RETRIES,
                 e
             );
-            let _ = tokio::fs::remove_file(&tmp_zip).await;
+            let _ = tokio::fs::remove_file(&tmp_archive).await;
             last_err_msg = e.to_string();
             tokio::time::sleep(UV_DOWNLOAD_RETRY_DELAY).await;
             continue;
         }
 
-        // 4. 解压 zip 提取 uv.exe
-        let tmp_exe = env_path.join("uv.exe.tmp");
-        if let Err(e) = extract_uv_from_zip(&tmp_zip, &tmp_exe) {
+        // 4. 解压提取 uv 可执行文件
+        let tmp_exe = env_path.join("uv.tmp");
+        if let Err(e) = extract_uv_from_archive(&tmp_archive, &tmp_exe) {
             tracing::warn!(
                 "uv 解压失败 (尝试 {}/{}): {}",
                 attempt + 1,
                 UV_DOWNLOAD_MAX_RETRIES,
                 e
             );
-            let _ = tokio::fs::remove_file(&tmp_zip).await;
+            let _ = tokio::fs::remove_file(&tmp_archive).await;
             let _ = tokio::fs::remove_file(&tmp_exe).await;
             return Err(EnvironmentError::UvExtractFailed(e));
         }
 
         // 5. 原子安装：rename 到目标位置（跨卷回退走 copy→临时名→rename）
-        let _ = tokio::fs::remove_file(&tmp_zip).await;
+        let _ = tokio::fs::remove_file(&tmp_archive).await;
 
         // F11/A6：统一走 utils::io::rename_or_copy——rename 失败（跨卷）时
         // copy 到目标同目录临时名再原子 rename，目标位置永远不会出现半成品；
@@ -394,13 +394,13 @@ pub async fn verify_sha256(path: &Path, expected: &str) -> Result<(), Environmen
     }
 }
 
-/// 从 zip 中提取 uv 可执行文件到目标路径
-fn extract_uv_from_zip(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
-    // uv 二进制位于 zip 内 `uv-{target}/uv.exe`（或 `uv`）。先按文件名过滤解压到
-    // 临时目录，再把找到的可执行文件复制到目标路径（复用 extract_zip 模板）。
+/// 从压缩包（zip / tar.gz，按扩展名分派）中提取 uv 可执行文件到目标路径
+fn extract_uv_from_archive(archive_path: &Path, dest: &Path) -> std::io::Result<()> {
+    // uv 二进制位于压缩包内 `uv-{target}/uv.exe`（或 `uv`）。先按文件名过滤解压到
+    // 临时目录，再把找到的可执行文件复制到目标路径（复用 extract_archive 模板）。
     let tmp_dir = tempfile::tempdir()?;
     let mut found: Option<PathBuf> = None;
-    crate::utils::io::extract_zip(zip_path, tmp_dir.path(), |name| {
+    crate::utils::io::extract_archive(archive_path, tmp_dir.path(), |name| {
         if name
             .file_name()
             .is_some_and(|f| f == UV_EXE_NAME || f == "uv")
@@ -412,9 +412,16 @@ fn extract_uv_from_zip(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
         }
     })?;
     let src = found.ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "zip 中未找到 uv 可执行文件")
+        std::io::Error::new(std::io::ErrorKind::NotFound, "压缩包中未找到 uv 可执行文件")
     })?;
     std::fs::copy(&src, dest)?;
+    // unix：显式补 0755 兜底——uv 不可执行 = 环境引导整体失败，不依赖
+    // 解压/复制链路上任何一环的权限位传递是否完整
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
+    }
     Ok(())
 }
 
@@ -545,19 +552,26 @@ pub async fn remove_ocr_dep(
     Ok(())
 }
 
-/// 构造 uv 下载 URL（zip）— 主站
-pub(crate) fn uv_zip_url(version: &str) -> String {
-    format!("{UV_RELEASES_BASE}/{version}/uv-{UV_TARGET}.zip")
+/// uv 发布资产扩展名：Windows 为 zip；官方 Linux / macOS release 只提供 tar.gz
+/// （zip 资产在 unix 目标上 404，是环境引导链的第一处平台断点）
+#[cfg(target_os = "windows")]
+pub(crate) const UV_ASSET_EXT: &str = "zip";
+#[cfg(not(target_os = "windows"))]
+pub(crate) const UV_ASSET_EXT: &str = "tar.gz";
+
+/// 构造 uv 下载 URL — 主站
+pub(crate) fn uv_archive_url(version: &str) -> String {
+    format!("{UV_RELEASES_BASE}/{version}/uv-{UV_TARGET}.{UV_ASSET_EXT}")
 }
 
 /// 构造 uv SHA256 文件 URL — 主站
 pub(crate) fn uv_sha_url(version: &str) -> String {
-    format!("{UV_RELEASES_BASE}/{version}/uv-{UV_TARGET}.zip.sha256")
+    format!("{UV_RELEASES_BASE}/{version}/uv-{UV_TARGET}.{UV_ASSET_EXT}.sha256")
 }
 
 /// 生成所有镜像的下载 URL 列表（主站 + 代理镜像）
-fn uv_zip_urls(version: &str) -> Vec<String> {
-    let base = uv_zip_url(version);
+fn uv_archive_urls(version: &str) -> Vec<String> {
+    let base = uv_archive_url(version);
     let mut urls = Vec::with_capacity(1 + crate::environment::GITHUB_MIRRORS.len());
     // 先尝试直连
     urls.push(base.clone());
@@ -674,25 +688,29 @@ mod tests {
         assert!(!marker.exists(), "被取消的子进程不得继续运行到写入完成标记");
     }
 
-    /// URL 构造：zip 与 sha256 均指向主站对应文件
+    /// URL 构造：压缩包与 sha256 均指向主站对应文件（资产扩展名按平台：
+    /// Windows zip / unix tar.gz）
     #[test]
     fn test_uv_urls_format() {
-        let expected = format!("/0.5.0/uv-{UV_TARGET}.zip");
-        let zip = uv_zip_url("0.5.0");
-        assert!(zip.ends_with(&expected), "zip: {zip}");
+        let expected = format!("/0.5.0/uv-{UV_TARGET}.{UV_ASSET_EXT}");
+        let archive = uv_archive_url("0.5.0");
+        assert!(archive.ends_with(&expected), "archive: {archive}");
         let sha = uv_sha_url("0.5.0");
-        assert!(sha.ends_with(".zip.sha256"), "sha: {sha}");
+        assert!(
+            sha.ends_with(&format!(".{UV_ASSET_EXT}.sha256")),
+            "sha: {sha}"
+        );
     }
 
     /// 镜像列表：直连在前，代理镜像在后，首项为直连
     #[test]
     fn test_uv_mirror_urls() {
-        let zips = uv_zip_urls("0.5.0");
-        assert_eq!(zips[0], uv_zip_url("0.5.0"));
-        assert!(zips.len() > 1, "应包含代理镜像");
+        let archives = uv_archive_urls("0.5.0");
+        assert_eq!(archives[0], uv_archive_url("0.5.0"));
+        assert!(archives.len() > 1, "应包含代理镜像");
         let shas = uv_sha_urls("0.5.0");
         assert_eq!(shas[0], uv_sha_url("0.5.0"));
-        assert_eq!(shas.len(), zips.len());
+        assert_eq!(shas.len(), archives.len());
     }
 
     /// SHA256 校验：正确值通过，错误值被拒
@@ -706,7 +724,7 @@ mod tests {
         assert!(verify_sha256(&path, "0000deadbeef").await.is_err());
     }
 
-    /// zip 提取：从含 uv.exe 的 zip 中正确提取
+    /// zip 提取：从含 uv.exe 的 zip 中正确提取（Windows 资产格式）
     #[test]
     fn test_extract_uv_from_zip() {
         let dir = tempfile::tempdir().unwrap();
@@ -721,8 +739,44 @@ mod tests {
         std::fs::write(&zip_path, cursor.into_inner()).unwrap();
 
         let dest = dir.path().join("uv.exe");
-        extract_uv_from_zip(&zip_path, &dest).unwrap();
+        extract_uv_from_archive(&zip_path, &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"MZ fake-exe");
+    }
+
+    /// tar.gz 提取：unix 官方资产格式（uv-{target}/uv）跨平台可解，且
+    /// 解出的可执行文件在 unix 上具备 0755 权限
+    #[test]
+    fn test_extract_uv_from_tar_gz() {
+        use flate2::write::GzEncoder;
+        use tar::{Builder, Header};
+
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("uv.tar.gz");
+        let gz = GzEncoder::new(
+            std::fs::File::create(&tar_path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut builder = Builder::new(gz);
+        let uv_content: &[u8] = b"ELF fake-uv";
+        let mut hdr = Header::new_gnu();
+        // tar header 的 size 必须与数据长度一致（tar 按大小寻址）
+        hdr.set_size(uv_content.len() as u64);
+        hdr.set_mode(0o755);
+        hdr.set_cksum();
+        builder
+            .append_data(&mut hdr, "uv-x86_64-unknown-linux-gnu/uv", uv_content)
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = dir.path().join("uv");
+        extract_uv_from_archive(&tar_path, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"ELF fake-uv");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "解压出的 uv 必须可执行");
+        }
     }
 
     /// 5.4：uv_exe_path 两分支——本地存在返回本地路径，否则回退到 PATH 的 `uv`
