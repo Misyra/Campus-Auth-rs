@@ -10,7 +10,7 @@ import { computed } from "vue";
 import { useDebug } from "@/composables/useDebug";
 import Modal from "./common/Modal.vue";
 
-const { session, loading, visible, nextStep, runAll, stopDebug, getStepStatus, getStepResult } =
+const { session, loading, visible, nextStep, runAll, stopDebug, getStepStatus, getStepResult, clearScreenshot } =
   useDebug();
 
 /** 当前步骤索引 */
@@ -109,7 +109,7 @@ function handleClose(): void {
 
           <div v-if="!session.steps.length" class="debug-empty">
             <span class="debug-empty-icon">◻</span>
-            <span>{{ loading ? "正在获取会话数据..." : "该任务没有可执行的步骤" }}</span>
+            <span>{{ loading ? "正在获取会话数据..." : session.running ? "会话详情恢复中，当前执行结束后自动补全" : "该任务没有可执行的步骤" }}</span>
           </div>
         </div>
 
@@ -125,6 +125,7 @@ function handleClose(): void {
               :src="session.screenshot_url"
               alt="截图预览"
               class="debug-screenshot"
+              @error="clearScreenshot"
             />
             <span v-else class="debug-screenshot-placeholder">
               {{ loading ? "执行中..." : "暂无截图" }}

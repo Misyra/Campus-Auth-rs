@@ -47,6 +47,9 @@ function syncSession(data: DebugSession): void {
 async function startDebug(taskId: string): Promise<void> {
   loading.value = true;
   try {
+    // 新会话不带旧截图：screenshot_url 若保留上一场的残留 URL（文件已被
+    // 停止流程清理），面板会显示裂图；置空等 WS 推送本场首张截图
+    session.screenshot_url = null;
     const data = await debugApi.start(taskId);
     syncSession(data);
     visible.value = true;
@@ -100,7 +103,8 @@ async function stopDebug(): Promise<void> {
     frontendLogger.error("debug", "停止调试失败", error);
     toastOnly(false, "停止调试失败");
   } finally {
-    // 无论 API 成功失败都重置本地状态
+    // 无论 API 成功失败都重置本地状态；顺带取消未触发的详情补全定时器
+    clearDetailRefill();
     syncSession(emptySession());
     visible.value = false;
   }
@@ -110,7 +114,7 @@ async function stopDebug(): Promise<void> {
  *
  * 调试会话是 Worker 侧持久状态：不恢复的话界面上没有任何停止入口，
  * 登录等命令会一直撞上"Worker 忙: 调试会话进行中"。恢复为"进行中"骨架
- * 面板（详情由用户点"下一步"时的完整会话响应补全），可立即停止。
+ * 面板（详情由 refillSessionDetails 退避补全），可立即停止。
  */
 async function restoreIfActive(): Promise<void> {
   if (session.running || visible.value) return;
@@ -118,17 +122,59 @@ async function restoreIfActive(): Promise<void> {
     const st = await debugApi.status();
     if (!st?.active) return;
     if (st.screenshot_url) session.screenshot_url = st.screenshot_url;
-    // Worker 返回完整会话（步骤/结果）时整体恢复，否则退化为"进行中"骨架
+    // Worker 返回完整会话（步骤/结果）时整体恢复；拿不到时（典型场景："执行全部"
+    // 正在执行，Worker 命令队列被占住，详情查询 5s 超时）退化为骨架并排队补全
     if (st.session && Array.isArray(st.session.steps)) {
       syncSession(st.session);
     } else {
       session.running = true;
+      refillSessionDetails();
     }
     visible.value = true;
     frontendLogger.info("debug", "检测到服务端仍活跃的调试会话，已恢复面板");
   } catch {
     // 查询失败不阻塞启动（后端未升级/网络问题），静默忽略
   }
+}
+
+// 骨架会话详情补全：恢复时"执行全部"在 Worker 内部循环执行、占住命令队列，
+// 详情查询只能排队直到整个执行结束，立即重试必然超时；按退避等它跑完，
+// 任意一次查询成功即整体补全步骤列表（总预算约 95s，覆盖常见任务时长）。
+const DETAIL_REFILL_DELAYS = [5_000, 10_000, 20_000, 30_000, 30_000];
+let refillTimer: ReturnType<typeof setTimeout> | undefined;
+
+function clearDetailRefill(): void {
+  if (refillTimer) {
+    clearTimeout(refillTimer);
+    refillTimer = undefined;
+  }
+}
+
+function refillSessionDetails(attempt = 0): void {
+  if (attempt >= DETAIL_REFILL_DELAYS.length) return;
+  clearDetailRefill();
+  refillTimer = setTimeout(() => {
+    void (async () => {
+      // 面板已关/会话已停止/步骤已就位则无需补全
+      if (!visible.value || !session.running || session.steps.length > 0) return;
+      try {
+        const st = await debugApi.status();
+        if (!st?.active) {
+          // 会话在骨架期间被外部结束：清理面板残留
+          syncSession(emptySession());
+          visible.value = false;
+          return;
+        }
+        if (st.session && Array.isArray(st.session.steps) && st.session.steps.length > 0) {
+          syncSession(st.session);
+          return;
+        }
+      } catch {
+        // 查询失败（Worker 忙/未启动）走下一轮退避
+      }
+      refillSessionDetails(attempt + 1);
+    })();
+  }, DETAIL_REFILL_DELAYS[attempt]);
 }
 
 /** 获取指定步骤的执行结果 */
@@ -154,6 +200,11 @@ function handleScreenshot(data: { url?: string; step_index?: number; description
     session.screenshot_url = data.url;
     frontendLogger.info("debug", `收到调试截图: ${data.url}`);
   }
+}
+
+/** 截图加载失败（残留 URL 指向已清理文件等）时清空，回退占位文案 */
+function clearScreenshot(): void {
+  session.screenshot_url = null;
 }
 
 /** 处理来自 WebSocket 的调试步骤进度事件 */
@@ -203,6 +254,7 @@ export function useDebug() {
     getStepStatus,
     handleScreenshot,
     handleStepProgress,
+    clearScreenshot,
     restoreIfActive,
   };
 }
