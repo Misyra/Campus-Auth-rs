@@ -77,6 +77,14 @@ describe("实时追加与去重", () => {
     logs.newLogCount.value = 0;
   });
 
+  it("回到底部时 markAtBottom 清零计数", async () => {
+    logs.appendLogs([entry(404), entry(405)], false);
+    await flush();
+    expect(logs.newLogCount.value).toBe(2);
+    logs.markAtBottom();
+    expect(logs.newLogCount.value).toBe(0);
+  });
+
   it("超过 LOG_MAX_ENTRIES(100) 后裁剪最旧日志", async () => {
     logs.clearLogs();
     for (let i = 1; i <= 150; i++) logs.appendLogs([entry(i)]);

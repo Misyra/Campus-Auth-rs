@@ -30,6 +30,8 @@ const logViewer = ref<HTMLElement | null>(null);
 
 function scrollToBottom() {
   logs.autoScroll.value = true;
+  // 必须瞬时跳底：平滑滚动的中间帧会触发 onLogScroll 把 autoScroll 翻成 false，
+  // 启动窗口内到达的日志会被误计入"新消息"（勿给 .log-viewer 加 scroll-behavior: smooth）
   nextTick(() => {
     if (logViewer.value) logViewer.value.scrollTop = logViewer.value.scrollHeight;
   });
@@ -39,7 +41,10 @@ function scrollToBottom() {
 const onLogScroll = throttleRaf(() => {
   if (!logViewer.value) return;
   const { scrollTop, scrollHeight, clientHeight } = logViewer.value;
-  logs.autoScroll.value = scrollTop + clientHeight >= scrollHeight - 40;
+  const atBottom = scrollTop + clientHeight >= scrollHeight - 40;
+  logs.autoScroll.value = atBottom;
+  // 回到底部即视为已读：清零滞留的"新消息"计数，避免钉底后按钮残留
+  if (atBottom) logs.markAtBottom();
 });
 
 // 日志实时追加时自动滚动到底部。

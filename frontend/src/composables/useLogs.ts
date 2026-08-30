@@ -176,6 +176,11 @@ function appendLogs(entries: LogEntry[], atBottom = true): void {
   }
 }
 
+/** 视图滚动回日志底部时调用：清零"新消息"计数（回到底部即视为已读最新日志） */
+function markAtBottom(): void {
+  newLogCount.value = 0;
+}
+
 function clearLogs(): void {
   logs.splice(0, logs.length);
   pendingLogs.length = 0;
@@ -187,5 +192,5 @@ function clearLogs(): void {
 }
 
 export function useLogs() {
-  return { logs, logFilter, autoScroll, newLogCount, initialized, filteredLogs, fetchLogs, appendLogs, clearLogs };
+  return { logs, logFilter, autoScroll, newLogCount, initialized, filteredLogs, fetchLogs, appendLogs, markAtBottom, clearLogs };
 }

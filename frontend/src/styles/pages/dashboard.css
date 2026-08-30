@@ -162,7 +162,6 @@
   min-height: 0;
   font-family: var(--font-mono);
   font-size: var(--text-md);
-  scroll-behavior: smooth;
   will-change: scroll-position;
 }
 
