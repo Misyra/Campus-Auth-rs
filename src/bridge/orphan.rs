@@ -141,10 +141,8 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
     let mut killed = 0;
     for (pid, ppid) in candidates {
         // 父进程不存在（含被 init 收养 ppid==1 的情况）即视为孤儿
-        if ppid == 1 || !pid_to_ppid.contains(&ppid) {
-            if kill_pid(pid) {
-                killed += 1;
-            }
+        if (ppid == 1 || !pid_to_ppid.contains(&ppid)) && kill_pid(pid) {
+            killed += 1;
         }
     }
     Ok(killed)
