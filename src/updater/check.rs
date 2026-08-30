@@ -63,7 +63,7 @@ pub(crate) const CURRENT_PLATFORM_KEY: &str = "unknown";
 
 /// 发布清单默认 URL（配置为空时回退）
 pub(crate) const DEFAULT_MANIFEST_URL: &str =
-    "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest";
+    "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest";
 /// 清单拉取超时
 pub(crate) const MANIFEST_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 

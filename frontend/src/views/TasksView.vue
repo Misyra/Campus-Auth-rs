@@ -42,7 +42,7 @@ function closeEditor() { void t.closeTaskEditor(); }
               <IconApp name="globe-grid" class="icon-sm" />
               仓库导入
             </button>
-            <a href="https://github.com/Misyra/Campus-Auth" target="_blank" rel="noopener" class="btn btn-sm" title="分享你的适配方案">
+            <a href="https://github.com/Misyra/Campus-Auth-rs" target="_blank" rel="noopener" class="btn btn-sm" title="分享你的适配方案">
               <IconApp name="share-2" class="icon-sm" />
               分享适配
             </a>
