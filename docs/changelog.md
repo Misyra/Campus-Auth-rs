@@ -41,6 +41,14 @@
 
 - `tar 0.4` + `flate2 1`（unix 资产解包）；`gtk 0.18`（仅 linux target，托盘事件循环）
 
+### 发布流水线首跑修复（tag 触发 Action 后暴露）
+
+- **更新源指向错误仓库**：updater 默认 URL 与设置默认值指向旧仓库 `Misyra/Campus-Auth`，前端两处仓库链接同源——统一修正为 `Campus-Auth-rs`，否则首个发布版的更新检查会查到旧 Python 项目
+- **unix 存量编译错误**（CI 新增 unix job 首次暴露）：`bridge/orphan.rs` unix 分支 `debug!` 宏未导入、`environment/git.rs` unix 分支 `mgr` 未使用、孤儿清理嵌套 if（clippy collapsible_if）、`utils/io.rs` 权限测试缺 `PermissionsExt` 导入
+- **Linux 链接缺库**：tray-icon→muda 在 Linux 链接 `-lxdo`，CI 与 release 的 Linux 构建依赖补 `libxdo-dev`（clippy/check 不链接故此前未暴露）
+- **测试平台假设**：虚拟网卡特征表断言（VMware/Npcap 等仅 Windows 表）、ipconfig 实调、Windows 路径绝对性/反斜杠断言——按 `#[cfg(windows)]` 圈定，跨平台断言保留；uv 解包过滤放宽为同时接受 `uv`/`uv.exe`
+- **--stop 兼容 unix 僵尸进程**：实例作为测试/脚本子进程退出后若父进程未回收，`kill(pid,0)` 仍判定存活导致 20s 空等——`stop_instance` 增加"监听端口已关闭"第二判据（shutdown POST 已送达时端口关闭即停止）
+
 ### 验证
 
 - cargo test 522/522（含新增 tar.gz 解压布局 / 权限恢复 / tar slip 跳过 / extract_archive 分派 / uv tar.gz 提取 5 用例，其中 zip 权限位用例仅 unix 编译运行）；clippy `--all-targets -D warnings` 零警告；release 冒烟复测（HTTP 200 / 重复启动 / --stop 优雅退出）通过
