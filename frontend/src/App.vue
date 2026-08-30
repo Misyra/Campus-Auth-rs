@@ -10,8 +10,17 @@ import ConfirmDialog from "./components/common/ConfirmDialog.vue";
 import SetupWizard from "./components/common/SetupWizard.vue";
 import DebugPanel from "./components/DebugPanel.vue";
 import RepoImportModals from "./components/RepoImportModals.vue";
+import { onMounted } from "vue";
+import { useDebug } from "./composables/useDebug";
 
 const { state } = useUi();
+const debug = useDebug();
+
+// 启动时恢复服务端仍活跃的调试会话：否则页面刷新后界面"失忆"，
+// 用户既看不到会话在跑也没有停止入口，登录会一直撞"Worker 忙"错误
+onMounted(() => {
+  void debug.restoreIfActive();
+});
 </script>
 
 <template>

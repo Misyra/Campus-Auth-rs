@@ -2,7 +2,7 @@
 // 顶栏（替代原 topbar.html）。
 // 展示页面标题、未保存提示、WebSocket 重连状态、通知中心、监控开关。
 
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import IconApp from "./IconApp.vue";
 import type { NotificationAction } from "../../api/types";
@@ -29,6 +29,20 @@ function onActionClick(action: NotificationAction | null): void {
     showNotifications.value = false;
   }
 }
+
+// 通知面板点击外部/路由跳转后关闭（此前只能再次点铃铛，容易残留遮挡）
+const notificationWrapperRef = ref<HTMLElement | null>(null);
+
+function onDocClick(e: MouseEvent): void {
+  if (!showNotifications.value) return;
+  const wrapper = notificationWrapperRef.value;
+  if (wrapper && e.target instanceof Node && !wrapper.contains(e.target)) {
+    showNotifications.value = false;
+  }
+}
+
+onMounted(() => document.addEventListener("click", onDocClick));
+onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
 </script>
 
 <template>
@@ -44,7 +58,7 @@ function onActionClick(action: NotificationAction | null): void {
         <span class="spinner"></span>
         重连中 (第 {{ wsRetryCount + 1 }} 次)
       </div>
-      <div class="notification-wrapper">
+      <div ref="notificationWrapperRef" class="notification-wrapper">
         <button
           class="btn btn-icon-only"
           @click="toggleNotifications"

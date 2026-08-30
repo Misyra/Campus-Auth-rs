@@ -158,7 +158,79 @@
   border: 1px solid var(--border);
 }
 
-/* ==================== 调试模式 ==================== */
+/* ==================== 调试模式（面板 + 步骤 + 截图） ==================== */
+
+.debug-panel-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.debug-info-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.debug-task-id {
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-task-unknown {
+  color: var(--text-muted);
+}
+
+.debug-info-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.debug-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.debug-status-pill.active {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1);
+  border-color: rgba(var(--accent-rgb), 0.25);
+}
+
+.debug-status-pill.done {
+  color: var(--success);
+  background: rgba(var(--success-rgb), 0.1);
+  border-color: rgba(var(--success-rgb), 0.25);
+}
+
+.debug-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.debug-status-pill.active .debug-status-dot {
+  animation: debug-step-pulse 1.2s ease-in-out infinite;
+}
 
 .debug-step-counter {
   font-family: var(--font-mono);
@@ -171,34 +243,10 @@
 
 .debug-body {
   display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 16px;
-  padding: 16px 20px;
-  overflow-y: auto;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 14px;
   flex: 1;
-  min-height: 0;
-}
-
-.debug-screenshot-container {
-  min-height: 300px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-glass);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-}
-
-.debug-screenshot {
-  max-width: 100%;
-  max-height: 400px;
-  object-fit: contain;
-}
-
-.debug-screenshot-placeholder {
-  color: var(--text-muted);
-  font-size: var(--text-md);
+  min-height: 320px;
 }
 
 .debug-steps {
@@ -206,7 +254,8 @@
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
-  max-height: 400px;
+  max-height: 420px;
+  padding-right: 2px;
 }
 
 .debug-step-item {
@@ -215,37 +264,61 @@
   gap: 8px;
   padding: 8px 10px;
   border-radius: var(--radius-md);
-  border: 1px solid transparent;
-  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  background: var(--bg-glass-heavy);
+  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
 }
 
 .debug-step-item.success {
   background: rgba(var(--success-rgb), 0.06);
-  border-color: rgba(var(--success-rgb), 0.15);
+  border-color: rgba(var(--success-rgb), 0.2);
 }
 
 .debug-step-item.failed {
   background: rgba(var(--error-rgb), 0.06);
-  border-color: rgba(var(--error-rgb), 0.15);
+  border-color: rgba(var(--error-rgb), 0.25);
 }
 
 .debug-step-item.current {
   background: rgba(var(--accent-rgb), 0.06);
-  border-color: rgba(var(--accent-rgb), 0.2);
+  border-color: rgba(var(--accent-rgb), 0.3);
 }
 
 .debug-step-item.running {
   background: rgba(148, 163, 184, 0.08);
-  border-color: rgba(148, 163, 184, 0.18);
+  border-color: rgba(148, 163, 184, 0.25);
 }
 
-.debug-step-item.running .debug-step-desc {
-  color: var(--text-secondary);
+.debug-step-index {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+
+.debug-step-item.success .debug-step-index {
+  color: var(--success);
+  border-color: rgba(var(--success-rgb), 0.35);
+}
+
+.debug-step-item.current .debug-step-index {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.35);
 }
 
 .debug-step-indicator {
   flex-shrink: 0;
-  width: 18px;
+  width: 16px;
   text-align: center;
   font-size: var(--text-sm);
   line-height: 20px;
@@ -266,31 +339,41 @@
 }
 
 .debug-step-info {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.debug-step-line {
+  display: flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--text-sm);
   min-width: 0;
 }
 
 .debug-step-badge {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: var(--text-2xs);
-  font-weight: 600;
-  font-family: var(--font-mono);
-  background: rgba(148, 163, 184, 0.15);
-  color: var(--text-secondary);
   flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
 }
 
 .debug-step-desc {
+  font-size: var(--text-sm);
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.debug-step-item.running .debug-step-desc {
+  color: var(--text-secondary);
 }
 
 .debug-step-msg {
@@ -304,6 +387,84 @@
 .msg-ok { color: var(--success); }
 .msg-fail { color: var(--error); }
 .msg-running { color: var(--text-secondary); }
+
+.debug-empty {
+  flex: 1;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+}
+
+.debug-empty-icon {
+  font-size: 20px;
+  opacity: 0.6;
+}
+
+.debug-screenshot-container {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-glass);
+  align-self: start;
+  position: sticky;
+  top: 0;
+}
+
+.debug-screenshot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.debug-screenshot-hint {
+  color: var(--text-muted);
+}
+
+.debug-screenshot-frame {
+  min-height: 280px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  background: var(--bg-glass-heavy);
+}
+
+.debug-screenshot {
+  max-width: 100%;
+  max-height: 380px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+}
+
+.debug-screenshot-placeholder {
+  color: var(--text-muted);
+  font-size: var(--text-md);
+}
+
+.debug-footer-hint {
+  margin-right: auto;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.debug-footer-actions {
+  display: flex;
+  gap: 8px;
+}
 
 /* 仓库导入（源标签） */
 .repo-source-label {
@@ -324,23 +485,3 @@
   height: 14px;
 }
 
-/* ==================== 调试面板（嵌入 Modal） ==================== */
-
-.debug-panel-content {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.debug-info-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.debug-task-id {
-  font-size: var(--text-md);
-  font-family: var(--font-mono);
-  color: var(--text-secondary);
-}

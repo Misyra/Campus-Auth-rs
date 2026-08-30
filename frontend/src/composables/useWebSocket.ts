@@ -9,6 +9,7 @@ import type { StatusSnapshot, LogEntry } from "../api/types";
 import { ensureAuthToken } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { TIMING } from "../utils/constants";
+import { localNowTimestamp } from "../utils/formatters";
 import { useStatus } from "./useStatus";
 import { useLogs } from "./useLogs";
 import { useDebug } from "./useDebug";
@@ -156,7 +157,7 @@ async function connectWebSocket(): Promise<void> {
         const desc = (typeof d.description === "string" && d.description.trim()) || "执行步骤";
         const total = typeof d.total_steps === "number" ? d.total_steps : "";
         const entry: LogEntry = {
-          timestamp: new Date().toISOString(),
+          timestamp: localNowTimestamp(),
           level: "INFO",
           source: "task",
           message: `步骤 ${(d.step_index ?? 0) + 1}${total ? `/${total}` : ""}: ${desc}`,
@@ -169,7 +170,7 @@ async function connectWebSocket(): Promise<void> {
       const d = parsed.data as { message?: string; action?: string } | null;
       if (d && typeof d.message === "string" && d.message.trim()) {
         logs.appendLogs(
-          [{ timestamp: new Date().toISOString(), level: "INFO", source: "task", message: `弹窗提示: ${d.message}` }],
+          [{ timestamp: localNowTimestamp(), level: "INFO", source: "task", message: `弹窗提示: ${d.message}` }],
           logs.autoScroll.value,
         );
       }

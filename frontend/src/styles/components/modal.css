@@ -11,7 +11,11 @@
 }
 
 .modal-container {
-  background: var(--bg-card);
+  /* 专用 --bg-modal（高不透明）：内容密集的弹窗（调试面板等）用 --bg-card 会
+     明显透出底层文字，可读性差 */
+  background: var(--bg-modal);
+  backdrop-filter: blur(20px) saturate(1.15);
+  -webkit-backdrop-filter: blur(20px) saturate(1.15);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   width: 90%;

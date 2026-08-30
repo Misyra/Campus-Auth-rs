@@ -90,6 +90,29 @@ pub const WORKER_PROJECT_DIR: &str = "python_worker";
 pub const VENV_DIR: &str = ".venv";
 /// Python 解释器相对路径（相对于 worker_project_path）
 pub const PYTHON_EXE_RELATIVE: &str = ".venv/Scripts/python.exe";
+
+/// 解析 python_worker 工程目录（单一事实源，Bridge spawn 检查与 EnvironmentManager 共用）
+///
+/// 主路径为 `<base_path>/python_worker`；开发模式（如 cargo run 时 base_path=target/debug）
+/// 该目录不存在，回退到仓库根 / CARGO_MANIFEST_DIR 下的 python_worker（与 docs 背景图的多路径兜底一致）。
+/// Bridge 的 spawn 前检查必须使用本函数结果，否则 dev 模式会误报"Worker 环境未安装"。
+pub(crate) fn resolve_worker_project_path(base_path: &std::path::Path) -> PathBuf {
+    let candidate = base_path.join(WORKER_PROJECT_DIR);
+    if candidate.exists() {
+        return candidate;
+    }
+    if let Some(repo) = base_path
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join(WORKER_PROJECT_DIR))
+    {
+        if repo.exists() {
+            return repo;
+        }
+    }
+    let mf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
+    if mf.exists() { mf } else { candidate }
+}
 /// 进度百分比区间
 pub const PROGRESS_UV_DOWNLOAD: (u8, u8) = (0, 20);
 /// 进度百分比区间
@@ -413,28 +436,7 @@ impl EnvironmentManager {
         git_download_enabled: bool,
     ) -> Arc<Self> {
         let env_path = base_path.join(ENV_DIR);
-        // 开发模式 base_path=target/e2e-* 时 python_worker 不在该目录，回退到仓库根（与 docs 背景图的多路径兜底一致）。
-        let worker_project_path = {
-            let candidate = base_path.join(WORKER_PROJECT_DIR);
-            if candidate.exists() {
-                candidate
-            } else if let Some(repo) = base_path
-                .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.join(WORKER_PROJECT_DIR))
-            {
-                if repo.exists() {
-                    repo
-                } else {
-                    let mf =
-                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
-                    if mf.exists() { mf } else { candidate }
-                }
-            } else {
-                let mf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
-                if mf.exists() { mf } else { candidate }
-            }
-        };
+        let worker_project_path = resolve_worker_project_path(&base_path);
         Arc::new(Self {
             base_path,
             env_path,

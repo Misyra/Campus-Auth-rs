@@ -133,8 +133,9 @@ impl TaskExecutor {
 
     /// 执行浏览器任务（通用语义：打卡/签到等日常自动化，经 Bridge 的 `execute_browser_task`）
     ///
-    /// 不注入账号密码、不做登录后网络验证；步骤执行完成即成功。
-    /// 带凭据的登录语义请走 [`crate::login::LoginOrchestrator::submit`]。
+    /// 注入活跃 Profile 的系统保留变量（{{USERNAME}} 等），任务模板可正常引用；
+    /// 不做登录后网络验证，步骤执行完成即成功。带凭据的登录语义（含登录重试
+    /// 状态机与抢占）请走 [`crate::login::LoginOrchestrator::submit`]。
     pub async fn execute_browser(&self, cfg: &TaskConfig) -> Result<TaskResult, TaskError> {
         // 执行前标记 Worker 忙
         self.status.merge(PartialSnapshot::Worker {
@@ -156,11 +157,19 @@ impl TaskExecutor {
             // 序列化浏览器任务配置并包装为 `task_config`（Worker 约定的步骤载体键），
             // 同时下发现运行时浏览器设置，与登录路径保持一致。
             let task_val = serde_json::to_value(cfg).map_err(TaskError::JsonError)?;
-            let browser_settings = serde_json::to_value(&self.config.runtime().load_full().browser)
-                .unwrap_or(serde_json::Value::Null);
+            let rt = self.config.runtime().load();
+            let browser_settings =
+                serde_json::to_value(&rt.browser).unwrap_or(serde_json::Value::Null);
+            // 注入活跃 Profile 的系统保留变量（{{USERNAME}}/{{PASSWORD}}/{{ISP}}/{{LOGIN_URL}}），
+            // 与任务页文档契约一致；定时任务/任务卡执行/调试面板共用本路径。
+            let profile = &rt.profile;
             let params = serde_json::json!({
                 "task_config": task_val,
                 "browser_settings": browser_settings,
+                "username": profile.username,
+                "password": profile.password.to_string(),
+                "isp": profile.isp,
+                "auth_url": profile.auth_url,
             });
             self.bridge
                 .execute_with_timeout(

@@ -160,7 +160,11 @@ pub async fn import_tasks(
         Some(arr) => arr.clone(),
         None => vec![body],
     };
+    if items.is_empty() {
+        return Err(ApiError::BadRequest("导入列表为空".into()));
+    }
     let mut imported = 0u32;
+    let mut skipped_no_id = 0u32;
     let mut failed: Vec<Value> = Vec::new();
     for item in items {
         let id = item
@@ -169,6 +173,7 @@ pub async fn import_tasks(
             .unwrap_or("")
             .to_string();
         if id.is_empty() {
+            skipped_no_id += 1;
             continue;
         }
         // 逐条导入：任一条失败不中止整体，收集失败项供前端提示
@@ -183,6 +188,18 @@ pub async fn import_tasks(
             Ok(()) => imported += 1,
             Err(e) => failed.push(json!({ "id": id, "reason": e.to_string() })),
         }
+    }
+    // 一条都没导入且无具体失败项：必然是载荷格式问题（如对象缺 id、外层多包了一层
+    // {"tasks": [...]}），此前静默返回 imported:0 让用户误以为导入成功，现明确报错
+    if imported == 0 && failed.is_empty() {
+        let hint = if skipped_no_id > 0 {
+            format!("{skipped_no_id} 条记录缺少 id 字段")
+        } else {
+            "载荷无法识别为任务".to_string()
+        };
+        return Err(ApiError::BadRequest(format!(
+            "没有可导入的任务：{hint}（应为任务对象数组，每个任务需包含 id 字段，格式可参考导出结果）"
+        )));
     }
     Ok(data(
         serde_json::json!({ "imported": imported, "failed": failed }),

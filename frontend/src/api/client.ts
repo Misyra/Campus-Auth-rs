@@ -203,11 +203,13 @@ export function extractApiError(error: unknown, fallback = "操作失败"): stri
 
 export const http = {
   get: <T>(path: string, opts?: RequestOptions) => request<T>("GET", path, opts),
+  // 写方法对缺失 body 统一发送 "{}" 并携带 application/json：后端 Json 提取器
+  // 要求该 Content-Type 与非空 body，缺一即 415（曾导致"手动登录"按钮不可用）
   post: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
-    request<T>("POST", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined && body !== null ? JSON.stringify(body) : undefined }),
+    request<T>("POST", path, { ...opts, rawBody: body instanceof FormData ? body : JSON.stringify(body ?? {}) }),
   put: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
-    request<T>("PUT", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined && body !== null ? JSON.stringify(body) : undefined }),
+    request<T>("PUT", path, { ...opts, rawBody: body instanceof FormData ? body : JSON.stringify(body ?? {}) }),
   patch: <T>(path: string, body?: unknown, opts?: RequestOptions) =>
-    request<T>("PATCH", path, { ...opts, rawBody: body instanceof FormData ? body : body !== undefined && body !== null ? JSON.stringify(body) : undefined }),
+    request<T>("PATCH", path, { ...opts, rawBody: body instanceof FormData ? body : JSON.stringify(body ?? {}) }),
   delete: <T>(path: string, opts?: RequestOptions) => request<T>("DELETE", path, opts),
 };

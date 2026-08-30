@@ -5,6 +5,7 @@
  */
 
 import { LEVEL_VALUES, LIMITS } from "./constants";
+import { localNowTimestamp } from "./formatters";
 
 type LogLevel = "DEBUG" | "INFO" | "WARNING" | "ERROR";
 
@@ -39,7 +40,7 @@ class FrontendLogger {
   }
 
   private format(level: LogLevel, scope: string, message: string, meta?: unknown): unknown[] {
-    const stamp = new Date().toISOString();
+    const stamp = localNowTimestamp();
     return [stamp, level, "FRONTEND", scope, message, meta ?? ""];
   }
 

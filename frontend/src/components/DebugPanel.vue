@@ -63,10 +63,19 @@ function handleClose(): void {
 <template>
   <Modal :open="visible" title="任务调试" size="lg" @close="handleClose">
     <div class="debug-panel-content">
-      <!-- 头部信息 -->
+      <!-- 头部信息：任务 + 状态 + 进度 -->
       <div class="debug-info-bar">
-        <span v-if="session.task_id" class="debug-task-id">任务: {{ session.task_id }}</span>
-        <span class="debug-step-counter">{{ currentStep }} / {{ totalSteps }}</span>
+        <span v-if="session.task_id" class="debug-task-id" :title="session.task_id">
+          {{ session.task_id }}
+        </span>
+        <span v-else class="debug-task-id debug-task-unknown">调试会话</span>
+        <div class="debug-info-right">
+          <span class="debug-status-pill" :class="isDone ? 'done' : 'active'">
+            <span class="debug-status-dot"></span>
+            {{ isDone ? "已完成" : loading ? "执行中" : "进行中" }}
+          </span>
+          <span class="debug-step-counter">{{ currentStep }} / {{ totalSteps }}</span>
+        </div>
       </div>
 
       <div class="debug-body">
@@ -78,50 +87,64 @@ function handleClose(): void {
             class="debug-step-item"
             :class="getStepStatus(i)"
           >
+            <span class="debug-step-index">{{ i + 1 }}</span>
             <span class="debug-step-indicator" :class="statusIcon(getStepStatus(i))">
               {{ statusSymbol(getStepStatus(i)) }}
             </span>
             <div class="debug-step-info">
-              <span class="debug-step-badge">{{ step.type || "?" }}</span>
-              <span class="debug-step-desc">{{ step.description || `步骤 ${i + 1}` }}</span>
+              <div class="debug-step-line">
+                <span class="debug-step-badge">{{ step.type || "?" }}</span>
+                <span class="debug-step-desc">{{ step.description || `步骤 ${i + 1}` }}</span>
+              </div>
               <span
                 v-if="getStepResult(i)?.message"
                 class="debug-step-msg"
                 :class="getStepResult(i)?.running ? 'msg-running' : getStepResult(i)?.success ? 'msg-ok' : 'msg-fail'"
+                :title="getStepResult(i)?.message"
               >
                 {{ getStepResult(i)?.message }}
               </span>
             </div>
           </div>
 
-          <div v-if="!session.steps.length && !loading" class="empty-state">
-            <span>无步骤数据</span>
+          <div v-if="!session.steps.length" class="debug-empty">
+            <span class="debug-empty-icon">◻</span>
+            <span>{{ loading ? "正在获取会话数据..." : "该任务没有可执行的步骤" }}</span>
           </div>
         </div>
 
         <!-- 右侧：截图预览 -->
         <div class="debug-screenshot-container">
-          <img
-            v-if="session.screenshot_url"
-            :src="session.screenshot_url"
-            alt="截图预览"
-            class="debug-screenshot"
-          />
-          <span v-else class="debug-screenshot-placeholder">
-            {{ loading ? "执行中..." : "暂无截图" }}
-          </span>
+          <div class="debug-screenshot-head">
+            <span>实时截图</span>
+            <span class="debug-screenshot-hint">调试浏览器</span>
+          </div>
+          <div class="debug-screenshot-frame">
+            <img
+              v-if="session.screenshot_url"
+              :src="session.screenshot_url"
+              alt="截图预览"
+              class="debug-screenshot"
+            />
+            <span v-else class="debug-screenshot-placeholder">
+              {{ loading ? "执行中..." : "暂无截图" }}
+            </span>
+          </div>
         </div>
       </div>
     </div>
 
     <template #footer>
-      <button class="btn btn-secondary" :disabled="loading || isDone" @click="nextStep">
-        {{ loading ? "执行中..." : "单步执行" }}
-      </button>
-      <button class="btn btn-secondary" :disabled="loading || isDone" @click="runAll">
-        {{ loading ? "执行中..." : "执行全部" }}
-      </button>
-      <button class="btn btn-danger" @click="handleClose">停止调试</button>
+      <span class="debug-footer-hint">步骤将在调试浏览器中实时执行</span>
+      <div class="debug-footer-actions">
+        <button class="btn btn-secondary" :disabled="loading || isDone" @click="nextStep">
+          {{ loading ? "执行中..." : "单步执行" }}
+        </button>
+        <button class="btn btn-secondary" :disabled="loading || isDone" @click="runAll">
+          {{ loading ? "执行中..." : "执行全部" }}
+        </button>
+        <button class="btn btn-danger" @click="handleClose">停止调试</button>
+      </div>
     </template>
   </Modal>
 </template>

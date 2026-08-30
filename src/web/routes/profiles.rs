@@ -17,7 +17,8 @@ use crate::web::error::{ApiError, data};
 
 #[derive(Deserialize)]
 pub struct ProfileCreateBody {
-    pub id: String,
+    /// 与路径参数冗余的历史字段：路径已携带 id，body 内可省略（路径优先）
+    pub id: Option<String>,
     pub name: String,
     pub username: String,
     pub password: Zeroizing<String>,
@@ -84,8 +85,17 @@ pub async fn create_profile(
     Path(id): Path<String>,
     Json(body): Json<ProfileCreateBody>,
 ) -> Result<Json<Value>, ApiError> {
-    // 路径 id 优先于 body id
-    let target_id = if id.is_empty() { body.id.clone() } else { id };
+    // 路径 id 优先于 body id；两者皆空则明确拒绝（body.id 已改为可选）
+    let target_id = if id.is_empty() {
+        body.id.clone().unwrap_or_default()
+    } else {
+        id
+    };
+    if target_id.is_empty() {
+        return Err(ApiError::BadRequest(
+            "缺少 profile id（路径或 body 至少提供一处）".into(),
+        ));
+    }
     // 查找或构造 ProfileData
     let existing = config.load_profile(&target_id).ok();
     let mut profile = existing.unwrap_or_default();

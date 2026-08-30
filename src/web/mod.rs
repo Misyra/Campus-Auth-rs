@@ -163,6 +163,12 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/debug/run-all", || {
             post(routes::debug::run_all)
         }),
+        ("GET", "/api/debug/status", || {
+            get(routes::debug::debug_status)
+        }),
+        ("GET", "/api/debug/screenshot/{filename}", || {
+            get(routes::debug::debug_screenshot)
+        }),
         // ---- 调度（scheduler）----
         ("GET", "/api/scheduler/jobs", || {
             get(routes::scheduler::list_jobs)

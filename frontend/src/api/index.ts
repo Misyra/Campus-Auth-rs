@@ -134,6 +134,10 @@ export const debugApi = {
   next: () => http.post<DebugSession>("/api/debug/step"),
   runAll: () => http.post<DebugSession>("/api/debug/run-all"),
   stop: () => http.post<MutationResult>("/api/debug/stop"),
+  status: () =>
+    http.get<{ active: boolean; screenshot_url?: string; session?: DebugSession }>(
+      "/api/debug/status",
+    ),
 };
 
 /** 远程仓库 */

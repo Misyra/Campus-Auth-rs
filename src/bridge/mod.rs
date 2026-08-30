@@ -41,7 +41,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::ConfigService;
-use crate::environment::{PYTHON_EXE_RELATIVE, WORKER_PROJECT_DIR};
+use crate::environment::{PYTHON_EXE_RELATIVE, resolve_worker_project_path};
 use crate::status::{PartialSnapshot, StatusManager, WorkerStatus};
 use crate::utils::metrics::Metrics;
 
@@ -95,10 +95,35 @@ pub trait BridgeApi: Send + Sync {
     fn runtime_ocr_capability(&self) -> Option<bool> {
         None
     }
+    /// 是否存在活跃调试会话（登录类命令会被"Worker 忙"拒绝）。
+    /// 默认实现返回 `false`，供内存 mock 等实现复用。
+    fn debug_session_active(&self) -> bool {
+        false
+    }
+    /// 调试会话存续期最近一次截图的预览 URL（无会话或未截图时 `None`）。
+    /// 默认实现返回 `None`，供内存 mock 等实现复用。
+    fn last_screenshot_url(&self) -> Option<String> {
+        None
+    }
 }
 
 #[async_trait::async_trait]
 impl BridgeApi for BridgeSupervisor {
+    fn debug_session_active(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .debug_session_open
+    }
+
+    fn last_screenshot_url(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_screenshot_url
+            .clone()
+    }
+
     async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError> {
         BridgeSupervisor::execute(self, method, params).await
     }
@@ -241,6 +266,10 @@ struct BridgeInner {
     /// 快速失败（此前仅命令在途窗口受保护，命令间隙自动登录可插入共用页面）；
     /// 空闲计时器不启动（调试静置不再被回收）。
     debug_session_open: bool,
+    /// 调试会话存续期最近一次截图的预览 URL（screenshot 事件转发时更新，
+    /// debug_start 置会话时清空）。供 /api/debug/status 在前端刷新"失忆"后
+    /// 恢复截图预览——WS 事件不会重放。
+    last_screenshot_url: Option<String>,
     /// 最近一次 Worker 健康检查上报的运行时能力（如 `{"ocr": true}`）
     ///
     /// 任务 10：由 `send_health_check`（worker_health_check 路径）捕获，
@@ -260,6 +289,8 @@ pub struct BridgeSupervisor {
     config: Arc<ConfigService>,
     status: Arc<StatusManager>,
     base_path: PathBuf,
+    /// python_worker 工程目录（与 EnvironmentManager 同一解析，含 dev 模式仓库根回退）
+    worker_project_dir: PathBuf,
     cmd_tx: mpsc::Sender<SupervisorCommand>,
     cmd_rx: Mutex<Option<mpsc::Receiver<SupervisorCommand>>>,
     service_handle: Mutex<Option<watch::Sender<bool>>>,
@@ -285,10 +316,14 @@ impl BridgeSupervisor {
         metrics: Option<Arc<Metrics>>,
     ) -> Arc<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        // 与 EnvironmentManager 共用同一解析（dev 模式回退仓库根），避免 spawn 检查
+        // 与环境就绪判定各说各话（曾导致 cargo run 下误报"Worker 环境未安装"）
+        let worker_project_dir = resolve_worker_project_path(&base_path);
         Arc::new_cyclic(|weak| Self {
             orphan_cleanup_done: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(BridgeInner {
                 debug_session_open: false,
+                last_screenshot_url: None,
                 worker_state: WorkerState::NotInstalled,
                 process: None,
                 pending_requests: HashMap::new(),
@@ -306,6 +341,7 @@ impl BridgeSupervisor {
             config,
             status,
             base_path,
+            worker_project_dir,
             cmd_tx,
             cmd_rx: Mutex::new(Some(cmd_rx)),
             service_handle: Mutex::new(None),
@@ -642,6 +678,8 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
                             DebugSettle::Open => {
                                 let mut inner = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
                                 inner.debug_session_open = true;
+                                // 注意：不在此清空 last_screenshot_url——初始截图事件先于
+                                // 本响应到达并已写入缓存，此处清空会抹掉它
                             }
                             DebugSettle::KeepOpen => {
                                 let mut inner = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -726,13 +764,27 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
                 );
             }
         }
-        ParsedMessage::Event(ev) => {
+        ParsedMessage::Event(mut ev) => {
             // 事件转发白名单（step_progress/screenshot/dialog，均由 Python 侧实际
             // emit）转发到 WebSocket 日志流；其余事件仅 debug 记录。
             // 曾经白名单中的 `ocr_result` 为死臂：Python 侧从未 emit 该事件
             //（OCR 走 ocr_recognize 请求-响应，不走事件推送），已删除。
             debug!(target: "python_worker", "event {}: {:?}", ev.event, ev.data);
             if matches!(ev.event.as_str(), "screenshot" | "step_progress" | "dialog") {
+                // screenshot 事件负载为本地落盘 path，浏览器不可达；换算成
+                // HTTP 预览 URL（GET /api/debug/screenshot/{filename}）供前端 <img> 使用
+                if ev.event == "screenshot" {
+                    if let Some(path_str) = ev.data.get("path").and_then(|v| v.as_str()) {
+                        if let Some(name) = std::path::Path::new(path_str).file_name() {
+                            let url = format!("/api/debug/screenshot/{}", name.to_string_lossy());
+                            ev.data["url"] = json!(url);
+                            this.inner
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .last_screenshot_url = Some(url);
+                        }
+                    }
+                }
                 if let Some(tx) = this
                     .event_tx
                     .lock()
@@ -774,6 +826,15 @@ async fn execute_inner(
 > {
     // OCR 只需要 Python Worker 与 ddddocr，不应被 Chromium 可执行文件状态阻断。
     let is_ocr = method == "ocr_recognize";
+
+    // debug_start 发起时清空上一会话的截图缓存：新会话的初始截图事件先于响应
+    // 到达（Worker 先 emit 再返回），清空若放在响应结算处会把新缓存抹掉
+    if method == "debug_start" {
+        this.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_screenshot_url = None;
+    }
 
     // 1. 懒加载 Worker（环境就绪则 spawn）
     ensure_worker(this, is_ocr).await?;
@@ -967,6 +1028,7 @@ fn debug_guard_cleanup(
     }
     if is_stop || !inner.debug_session_open {
         inner.debug_session_open = false;
+        inner.last_screenshot_url = None;
         inner.current_session = None;
         inner.worker_state = WorkerState::Idle;
         inner.last_activity = Instant::now();
@@ -1069,15 +1131,9 @@ async fn ensure_worker(
             return Ok(());
         }
     }
-    // 校验 Python 解释器是否存在
-    let python_exe = this
-        .base_path
-        .join(WORKER_PROJECT_DIR)
-        .join(PYTHON_EXE_RELATIVE);
-    let worker_main = this
-        .base_path
-        .join(WORKER_PROJECT_DIR)
-        .join("worker_main.py");
+    // 校验 Python 解释器是否存在（路径解析与 EnvironmentManager 一致，含 dev 回退）
+    let python_exe = this.worker_project_dir.join(PYTHON_EXE_RELATIVE);
+    let worker_main = this.worker_project_dir.join("worker_main.py");
     if !python_exe.exists() {
         return Err(BridgeError::WorkerNotInstalled);
     }
@@ -1455,7 +1511,8 @@ fn check_session_compat(current: Option<SessionType>, method: &str) -> Result<()
         Some(SessionType::Debug) => {
             if method.starts_with("debug_") {
                 match method {
-                    "debug_step" | "debug_stop" | "debug_run_all" => Ok(()),
+                    // debug_status 为无副作用查询，允许在会话存续期随时调用
+                    "debug_step" | "debug_stop" | "debug_run_all" | "debug_status" => Ok(()),
                     _ => Err(BridgeError::WorkerBusy),
                 }
             } else {

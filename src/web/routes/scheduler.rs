@@ -25,6 +25,10 @@ pub async fn list_jobs(
     let mut result = Vec::with_capacity(jobs.len());
     for job in jobs {
         let mut v = serde_json::to_value(&job)?;
+        // ScheduledTask.id 标记 #[serde(skip)]（id 从文件名 stem 推导，不参与 JSON 落盘），
+        // 此处必须显式回填，否则前端 task.id 为 undefined，查看历史/运行/编辑/删除/启停
+        // 等所有按 id 的行级操作全部失效（曾表现为"查看历史"点击无任何反应）。
+        v["id"] = serde_json::json!(job.id);
         if let Some(tt) = scheduler.task_type_of(&job.target_id).await {
             v["task_type"] = serde_json::json!(tt);
         }
@@ -128,6 +132,8 @@ pub async fn get_job(
         .get_task(&id)
         .ok_or_else(|| ApiError::NotFound(format!("定时任务 {} 不存在", id)))?;
     let mut v = serde_json::to_value(&job)?;
+    // 同 list_jobs：id 被 serde(skip)，显式回填保证单个响应也带 id
+    v["id"] = serde_json::json!(job.id);
     // 补充 task_type 展示字段（由 target 关联任务类型推导）
     if let Some(tt) = scheduler.task_type_of(&job.target_id).await {
         v["task_type"] = serde_json::json!(tt);

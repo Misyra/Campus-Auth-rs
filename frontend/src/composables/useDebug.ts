@@ -30,7 +30,11 @@ const { toastOnly } = useToast();
 
 /** 根据 API 返回的会话数据同步本地状态 */
 function syncSession(data: DebugSession): void {
+  // start/step 响应的 screenshot_url 恒为 null（截图只经 WS 事件推送），
+  // 直接 Object.assign 会用 null 抹掉 WS 先行写入的截图 URL，面板永远"暂无截图"
+  const prevScreenshot = session.screenshot_url;
   Object.assign(session, data);
+  session.screenshot_url = data.screenshot_url || prevScreenshot || null;
   // 仅当负载带 `results` 时才重建结果表：debug_run_all 返回的是 StructuredResult
   //（无 results），若在此强制清空会让 WebSocket step_progress 已写入的步骤结果
   // 全部丢失，调试面板显示为“空”。保留已有结果，避免误清空。
@@ -99,6 +103,31 @@ async function stopDebug(): Promise<void> {
     // 无论 API 成功失败都重置本地状态
     syncSession(emptySession());
     visible.value = false;
+  }
+}
+
+/** 恢复服务端仍活跃、但前端已"失忆"的调试会话（页面刷新/换页后本地状态丢失）。
+ *
+ * 调试会话是 Worker 侧持久状态：不恢复的话界面上没有任何停止入口，
+ * 登录等命令会一直撞上"Worker 忙: 调试会话进行中"。恢复为"进行中"骨架
+ * 面板（详情由用户点"下一步"时的完整会话响应补全），可立即停止。
+ */
+async function restoreIfActive(): Promise<void> {
+  if (session.running || visible.value) return;
+  try {
+    const st = await debugApi.status();
+    if (!st?.active) return;
+    if (st.screenshot_url) session.screenshot_url = st.screenshot_url;
+    // Worker 返回完整会话（步骤/结果）时整体恢复，否则退化为"进行中"骨架
+    if (st.session && Array.isArray(st.session.steps)) {
+      syncSession(st.session);
+    } else {
+      session.running = true;
+    }
+    visible.value = true;
+    frontendLogger.info("debug", "检测到服务端仍活跃的调试会话，已恢复面板");
+  } catch {
+    // 查询失败不阻塞启动（后端未升级/网络问题），静默忽略
   }
 }
 
@@ -174,5 +203,6 @@ export function useDebug() {
     getStepStatus,
     handleScreenshot,
     handleStepProgress,
+    restoreIfActive,
   };
 }

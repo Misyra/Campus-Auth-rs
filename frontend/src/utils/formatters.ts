@@ -25,6 +25,13 @@ export function formatDuration(sec: number): string {
   return `${h}h ${m}m ${s}s`;
 }
 
+/** 当前本地时间 → "YYYY-MM-DD HH:mm:ss"（前端生成的日志条目用，与后端日志时间戳格式/时区一致） */
+export function localNowTimestamp(): string {
+  const d = new Date();
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 /** ISO 时间戳 → "YYYY-MM-DD HH:mm:ss"（日志/历史列表展示用） */
 export function formatTimestamp(ts: string): string {
   return (ts || "").replace("T", " ").substring(0, 19);

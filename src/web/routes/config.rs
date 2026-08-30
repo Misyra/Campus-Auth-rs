@@ -120,7 +120,9 @@ async fn apply_flat_settings_patch(
             if profile_keys.contains(&k.as_str()) {
                 profile_patch.insert(k.clone(), v.clone());
             } else if k == "monitor" {
-                // monitor 字段需要前端→后端字段名映射
+                // monitor 字段需要前端→后端字段名映射；先校验字段名白名单，
+                // 非法字段（如误传后端字段名 http_targets）直接报错而非静默清空配置
+                validate_monitor_patch(v)?;
                 let backend_monitor = monitor_frontend_to_backend(v);
                 global_patch.insert("monitor".to_string(), backend_monitor);
             } else if global_keys.contains(&k.as_str()) {
@@ -395,11 +397,56 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
 /// 前端 MonitorConfig → 后端 MonitorSettings 字段映射
 ///
 /// 拆分 url_check_urls ("url|expected" 格式) → url_targets + url_expected_responses
+/// monitor patch 允许的前端字段名（与 `monitor_frontend_to_backend` 的取值键一一对应）
+const MONITOR_PATCH_ALLOWED_KEYS: &[&str] = &[
+    "check_interval_seconds",
+    "ping_targets",
+    "test_urls",
+    "url_check_urls",
+    "enable_tcp_check",
+    "enable_http_check",
+    "enable_local_check",
+    "network_check_timeout",
+    "post_login_delay",
+    // 以下三个为 GET 响应的往返保真字段：前端保存时原样回传，映射函数有意忽略
+    // （不覆盖后端对应存储），见前端 constants.ts 的配置往返保真注释
+    "check_auth_url",
+    "auth_url_targets",
+    "script_timeout",
+];
+
+/// 校验 monitor patch 的字段名，白名单外（如误传后端字段名 `http_targets`）直接报错，
+/// 避免映射函数取不到值后把探测配置静默覆盖成默认值。
+fn validate_monitor_patch(v: &Value) -> Result<(), ApiError> {
+    let Some(obj) = v.as_object() else {
+        return Ok(()); // 非对象交给 serde 校验类型错误
+    };
+    let unknown: Vec<&String> = obj
+        .keys()
+        .filter(|k| !MONITOR_PATCH_ALLOWED_KEYS.contains(&k.as_str()))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest(format!(
+        "monitor 配置包含未知字段: {}（合法字段: {}）",
+        unknown
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        MONITOR_PATCH_ALLOWED_KEYS.join(", ")
+    )))
+}
+
 fn monitor_frontend_to_backend(v: &Value) -> Value {
     let obj = match v.as_object() {
         Some(o) => o,
         None => return v.clone(),
     };
+
+    // 注意：调用方（apply_flat_settings_patch）须先经 validate_monitor_patch 校验字段名，
+    // 本函数不做校验（返回 Value 无法传播错误），非法字段名会被静默忽略。
 
     // 拆分 url_check_urls → url_targets + url_expected_responses
     let mut url_targets: Vec<String> = Vec::new();

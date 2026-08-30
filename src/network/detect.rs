@@ -252,10 +252,43 @@ fn parse_netsh_ssid(text: &str) -> Option<String> {
         };
         let ssid = rest[idx + 1..].trim();
         if !ssid.is_empty() {
-            return Some(ssid.to_string());
+            return Some(decode_netsh_ssid_hex(ssid));
         }
     }
     None
+}
+
+/// 还原 netsh 对非 ASCII SSID 的 hex 转义输出
+///
+/// `netsh wlan show interfaces` 在 SSID 含非 ASCII 字符时会把整个 SSID 输出为
+/// hex 字符串（UTF-8 字节序列，如 "4369616C6C6FEFBD9E..." → "Ciallo～..."），
+/// 原样透传会导致 Profile 的 wifi_ssid 匹配永远失败。仅当字符串为偶数长度的
+/// 合法 hex、可解码为 UTF-8、且解码结果含非 ASCII 可打印字符时才还原，避免把
+/// 名字恰好是 hex 形态的普通 SSID（如 "12345678"、"41424344"）误转换。
+fn decode_netsh_ssid_hex(ssid: &str) -> String {
+    let looks_hex =
+        ssid.len() >= 8 && ssid.len() % 2 == 0 && ssid.bytes().all(|b| b.is_ascii_hexdigit());
+    if !looks_hex {
+        return ssid.to_string();
+    }
+    let bytes: Vec<u8> = match (0..ssid.len() / 2)
+        .map(|i| u8::from_str_radix(&ssid[i * 2..i * 2 + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+    {
+        Ok(b) => b,
+        Err(_) => return ssid.to_string(),
+    };
+    let decoded = match String::from_utf8(bytes) {
+        Ok(d) => d,
+        Err(_) => return ssid.to_string(),
+    };
+    let has_non_ascii = !decoded.is_ascii();
+    let all_printable = decoded.chars().all(|c| !c.is_control());
+    if has_non_ascii && all_printable {
+        decoded
+    } else {
+        ssid.to_string()
+    }
 }
 
 /// Windows 网络检测器

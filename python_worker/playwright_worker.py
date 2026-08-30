@@ -874,12 +874,28 @@ class WorkerCore:
             )
         async with self._cancel_session(params) as (cancel_event, bs, task):
             variables = dict(task.variables or {})
+            variables.update(self._system_variables(params))
             self._task_dialogs = []
             result = await self._run_task(
                 task, bs, variables, cancel_event, _debug_screenshot_dir()
             )
             result.data = {"dialogs": list(self._task_dialogs)}
             return result.to_dict()
+
+    @staticmethod
+    def _system_variables(params: dict) -> dict:
+        """提取命令参数中的系统保留变量（{{USERNAME}} 等），仅覆盖调用方显式提供的键。
+
+        Rust 侧登录编排总是传全量四项；任务执行/调试路径经同一注入保证任务模板
+        与文档契约一致。键缺失时不注入，避免空串覆盖任务自定义 variables。
+        """
+        mapping = {
+            "USERNAME": "username",
+            "PASSWORD": "password",
+            "ISP": "isp",
+            "LOGIN_URL": "auth_url",
+        }
+        return {sys_key: str(params[src_key]) for sys_key, src_key in mapping.items() if src_key in params}
 
     async def handle_debug_start(self, params: dict) -> dict:
         """启动调试会话，保留浏览器上下文供后续 debug_step 复用。
@@ -901,6 +917,7 @@ class WorkerCore:
             # Debug session is also a top-level storage-isolation boundary.
             await self._prepare_session_page()
             variables = dict(task.variables or {})
+            variables.update(self._system_variables(params))
             context = self._make_context(
                 self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
             )
@@ -1122,6 +1139,13 @@ class WorkerCore:
         # screenshots 是 StepContext 的 list[str] 字段，list.clear() 不会抛出
         session.context.screenshots.clear()
 
+    async def handle_debug_status(self, params: dict) -> dict:
+        """查询当前调试会话详情（无副作用）。供前端刷新后恢复步骤数据。"""
+        if not self._debug_sessions:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "调试会话不存在，请先启动调试")
+        session = self._debug_session_for(params.get("session_id", ""))
+        return self._debug_response(session)
+
     async def handle_debug_stop(self, params: dict) -> dict:
         """停止调试会话并关闭浏览器。"""
         session_id = params.get("session_id", "")
@@ -1233,6 +1257,7 @@ COMMANDS: dict[str, Callable] = {
     "debug_step": worker_core.handle_debug_step,
     "debug_run_all": worker_core.handle_debug_run_all,
     "debug_stop": worker_core.handle_debug_stop,
+    "debug_status": worker_core.handle_debug_status,
     "ocr_recognize": worker_core.handle_ocr_recognize,
     "shutdown": worker_core.handle_shutdown,
 }

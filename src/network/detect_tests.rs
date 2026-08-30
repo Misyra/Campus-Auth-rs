@@ -499,3 +499,33 @@ fn test_network_error_display_unsupported() {
     let err = NetworkError::UnsupportedPlatform;
     assert!(format!("{err}").contains("不支持"));
 }
+
+// ============ decode_netsh_ssid_hex 测试 ============
+
+#[test]
+fn test_decode_netsh_ssid_hex_utf8() {
+    // "Ciallo～(∠・ω< )⌒★" 的 UTF-8 hex 转义（netsh 对非 ASCII SSID 的输出形态）
+    let hex = "4369616C6C6FEFBD9E28E288A0E383BBCF893C2029E28C92E29885";
+    assert_eq!(decode_netsh_ssid_hex(hex), "Ciallo～(∠・ω< )⌒★");
+}
+
+#[test]
+fn test_decode_netsh_ssid_hex_plain_names_untouched() {
+    // 解码结果全 ASCII（"ABCD"）→ 不满足"含非 ASCII"，保留原样
+    assert_eq!(decode_netsh_ssid_hex("41424344"), "41424344");
+    // 非 hex 字符 / 奇数长度 / 解码非法 UTF-8 → 保留原样
+    assert_eq!(decode_netsh_ssid_hex("HomeWiFi"), "HomeWiFi");
+    assert_eq!(decode_netsh_ssid_hex("abc"), "abc");
+    assert_eq!(decode_netsh_ssid_hex("abcdef12"), "abcdef12");
+    // 短于 8 的合法 hex 串不处理（避免误伤常见短名）
+    assert_eq!(decode_netsh_ssid_hex("4142"), "4142");
+}
+
+#[test]
+fn test_parse_netsh_ssid_applies_hex_decode() {
+    let text = "    SSID                   : 4369616C6C6FEFBD9E28E288A0E383BBCF893C2029E28C92E29885\n    BSSID                 : aa:bb:cc:dd:ee:ff";
+    assert_eq!(
+        parse_netsh_ssid(text),
+        Some("Ciallo～(∠・ω< )⌒★".to_string())
+    );
+}
