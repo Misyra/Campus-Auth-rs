@@ -10,6 +10,11 @@
 use std::collections::HashSet;
 use std::process::Command;
 
+// debug! 仅 unix 分支（/proc 扫描）使用：按平台拆分导入，避免 Windows 上
+// unused_imports 在 -D warnings 下报错
+#[cfg(not(unix))]
+use tracing::warn;
+#[cfg(unix)]
 use tracing::{debug, warn};
 
 /// 清理上次崩溃残留的孤儿浏览器进程（best-effort）。
