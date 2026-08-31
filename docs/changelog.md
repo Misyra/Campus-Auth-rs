@@ -1,6 +1,31 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.3（第十八轮）”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.4（第十九轮）”。
+
+## v5.0.0-alpha.4（2026-08-31 第十九轮：代理体系 + 更新全量分发 + 状态一致性）
+
+### 代理体系（三路解耦）
+
+- **更新/仓库任务代理**：系统设置新增“更新与代理”卡片（`updater.use_proxy` + `updater.proxy_port`，如 Clash 7890）；启用后更新检查/下载走 `127.0.0.1:{port}` 显式代理，`/api/repo/*` 仓库任务下载共用同一配置（国内访问 GitHub/raw 常需代理）；未启用时跟随系统代理
+- **网络检测默认不走代理**：监测设置新增“禁用代理”开关（`monitor.disable_proxy`，默认开启直连，避免代理故障误判 Offline；关闭后 HTTP/URL 探测跟随系统代理，重启生效）；MonitorService 构造时按配置固定客户端策略
+- **仓库下载 SSRF 兼容**：`secure_get` 拆出代理版本 `secure_get_proxied`，DNS 钉扎 + 逐跳重定向校验流程不变；本地回环关机请求保留 `.no_proxy()` 防劫持
+
+### 更新机制（承 a8d8648）
+
+- 更新器移除全局 `.no_proxy()`（国内直连 GitHub 极慢是更新“等好久”主因），reqwest 启用 `system-proxy` 特性
+- **helper 全量同步分发内容**：替换 exe 的同时 overlay 同步 `python_worker/`、`resources/`、`docs/`（覆盖同名、新增缺失、跳过 `.venv`/`__pycache__`、不删用户数据），Python 侧修复此后可随应用内更新到达用户；helper 自身支持自更新（rename-then-copy 避开 Windows 文件锁）
+
+### 状态与配置一致性（同轮合入）
+
+- **快照原子发布**：`StatusManager.merge` 改 `watch::send_modify`（修改+唤醒在 watch 内部锁内原子完成），消除“锁内修改、释放锁后 send 旧快照”的回退窗口；新增 `snapshot_version` 单调递增，前端 `useStatus` 据此做新鲜度比较（优先于 `uptime_seconds`，可区分同秒多次变化）
+- **Engine 配置版本订阅**：Engine 订阅 ConfigService 版本广播，配置变更（保存/切 Profile）后派生状态即时重建；探测结果携带发起时配置版本，版本失配的结果不用于自动登录决策
+- **登录准备期可取消**：`LoginOrchestrator` 登记准备阶段（环境初始化/auth_url 预检）的取消令牌（PendingGuard 守卫自动注销），准备期点取消不再“假成功”
+- **卸载清理 Web 化**：新增 `GET /api/uninstall/detect` + `POST /api/uninstall`，清理 `~/.campus_network_auth` 用户数据、开机自启注册与 Playwright 浏览器缓存（env 指定目录只删浏览器前缀子目录）；关于页提供卸载向导
+- ConfigService 设置修改统一走 `modify_settings_tx` 提交事务（读-改-写在同一临界区，消除并发丢更新）
+
+### 验证
+
+- `cargo test --lib`、前端 `vue-tsc` + vite 构建、`build.ps1` 四步全通过
 
 ## v5.0.0-alpha.3（2026-08-31 第十八轮：调试体验 + 反馈包资源快照 + 环境就绪一致性）
 

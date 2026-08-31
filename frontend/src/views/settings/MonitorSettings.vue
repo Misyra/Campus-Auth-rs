@@ -179,6 +179,16 @@ const urlCheckText = computed({
                 </label>
               </div>
             </div>
+            <div class="toggle-group settings-toggle-spacer">
+              <div class="toggle-with-help">
+                <label class="toggle toggle-help-inline">
+                  <input type="checkbox" v-model="config.config.monitor.disable_proxy" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">禁用代理<span class="hint">（重启生效）</span></span>
+                  <FieldHelp text="开启后网络检测直连，避免代理故障时误判离线；关闭后 HTTP/URL 探测跟随系统代理。代理端口在“系统 → 更新与代理”中配置，用于更新与仓库任务下载。" />
+                </label>
+              </div>
+            </div>
           </div>
         </div>
       </div>

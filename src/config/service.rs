@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -21,6 +22,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 
 use crate::config::crypto::PasswordCrypto;
 use crate::config::migration::run_migrations;
@@ -175,6 +177,22 @@ pub struct ConfigService {
     /// 串行化 profiles 域写操作（save_profile / delete_profile），
     /// 与 settings_lock 分离，两域并发写互不阻塞（M2）
     profiles_lock: tokio::sync::Mutex<()>,
+    /// 串行化 reload 全流程（读取 → 构建 → 发布 RuntimeConfig）
+    ///
+    /// ArcSwap 只保证单次替换的原子性，不保证发布顺序：并发 reload 若交错
+    /// 执行（较早读取旧配置的任务较晚完成 store），旧 RuntimeConfig 会覆盖
+    /// 已发布的新快照。本锁把 reload 变为串行临界区，发布顺序与读取顺序
+    /// 一致，后完成的 reload 必然读到不早于前者的磁盘状态。
+    /// 锁序：profiles_lock（delete_profile）→ reload_lock，全仓无反向嵌套。
+    reload_lock: tokio::sync::Mutex<()>,
+    /// 配置版本号：每次成功 reload 严格 +1
+    ///
+    /// 供两处消费：Engine 的探测结果携带发起时的版本，回传后版本失配即拒绝
+    /// 用于登录决策（防止切换 Profile 前的过期探测触发自动登录）；Engine
+    /// 订阅版本变化以重建派生状态（检测定时器等）。
+    config_version: AtomicU64,
+    /// 配置版本变更通知（watch，Engine 订阅）
+    version_tx: watch::Sender<u64>,
     /// settings.json 内存缓存
     settings_cache: Mutex<SettingsCache>,
     /// Profile 文件内存缓存
@@ -281,6 +299,9 @@ impl ConfigService {
             runtime: Arc::new(ArcSwap::new(Arc::new(runtime))),
             settings_lock: tokio::sync::Mutex::new(()),
             profiles_lock: tokio::sync::Mutex::new(()),
+            reload_lock: tokio::sync::Mutex::new(()),
+            config_version: AtomicU64::new(0),
+            version_tx: watch::channel(0).0,
             settings_cache: Mutex::new(SettingsCache {
                 data: Some(settings.clone()),
                 mtime: settings_mtime,
@@ -302,6 +323,16 @@ impl ConfigService {
     /// 获取 RuntimeConfig 快照的 Arc 克隆（无锁读，trait 化供 Web 层消费）
     pub fn runtime_snapshot(&self) -> Arc<RuntimeConfig> {
         self.runtime.load_full()
+    }
+
+    /// 当前配置版本号（每次成功 reload 严格 +1；0 表示从未 reload 过）
+    pub fn config_version(&self) -> u64 {
+        self.config_version.load(Ordering::Acquire)
+    }
+
+    /// 订阅配置版本变化（Engine 用于重建派生状态，如检测定时器间隔）
+    pub fn subscribe_version(&self) -> watch::Receiver<u64> {
+        self.version_tx.subscribe()
     }
 
     /// 为指定 Profile 构建运行时快照（含解密后的密码）
@@ -425,6 +456,35 @@ impl ConfigService {
         let mut settings = self.load_settings();
         f(&mut settings);
         self.write_settings_locked(&settings).await
+    }
+
+    /// 持锁执行 settings 读-改-写，闭包可失败（失败不落盘）
+    ///
+    /// 与 [`Self::modify_settings`] 同一临界区语义，供「合并 + 校验」需要返回
+    /// 错误的调用方（Web PATCH/PUT 的扁平 patch 合并）使用：闭包接收当前
+    /// 设置（按值），返回修改后的完整设置或校验错误。外层 `Err` 为
+    /// IO/隔离态错误，内层 `Err(String)` 为闭包校验失败（未落盘）。
+    /// 历史实现在锁外读取并合并整份设置再 `save_settings`，两个并发修改
+    /// 不同字段的请求会互相覆盖；本方法把「读取—修改—校验—持久化」收敛为
+    /// ConfigService 内的完整提交事务。
+    pub async fn modify_settings_tx(
+        &self,
+        f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        // 隔离态拒绝保存（与 save_settings 同语义）
+        if self.settings_poisoned() {
+            return Err(ConfigError::ConfigWriteError {
+                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
+            });
+        }
+        let _guard = self.settings_lock.lock().await;
+        let settings = self.load_settings();
+        let new_settings = match f(settings) {
+            Ok(s) => s,
+            Err(msg) => return Ok(Err(msg)),
+        };
+        self.write_settings_locked(&new_settings).await?;
+        Ok(Ok(()))
     }
 
     /// 是否处于 settings 隔离态（损坏且无缓存可用）
@@ -589,16 +649,21 @@ impl ConfigService {
         self.reload_inner(signal).await
     }
 
-    /// reload 的内部实现：不持任何写锁（M2）
+    /// reload 的内部实现：持 `reload_lock` 串行执行（发布顺序保证）
     ///
-    /// 一致性依据：所有落盘均为「随机名 tmp + rename」原子替换，单文件读取要么
-    /// 看到完整旧版、要么完整新版，不存在撕裂；(settings, active_profile) 快照对
-    /// 以 settings 自身的 `active_profile_id` 配对读取，即使并发写插入两步之间，
-    /// 得到的也只是「同一 Profile 的稍旧/稍新版本」而非错配，且写路径各自完成后的
-    /// reload 会把最新状态换入（调用方均为 save 完成后触发 reload）。
+    /// 单文件一致性依据：所有落盘均为「随机名 tmp + rename」原子替换，单文件读取
+    /// 要么看到完整旧版、要么完整新版，不存在撕裂；(settings, active_profile)
+    /// 快照对以 settings 自身的 `active_profile_id` 配对读取，即使并发写插入两步
+    /// 之间，得到的也只是「同一 Profile 的稍旧/稍新版本」而非错配。
+    ///
+    /// 发布顺序：ArcSwap 只保证单次 store 原子，不保证并发 reload 的完成顺序。
+    /// `reload_lock` 使 reload 全流程串行——后进入的 reload 必然在前者 store
+    /// 完成后才开始读盘，读到的是不早于前者的状态，杜绝「较早读取的旧配置
+    /// 较晚完成、覆盖已发布的新 RuntimeConfig」的交错。
     /// 若 reload 与并发 save 在缓存更新上交错（reload 把旧内容写回缓存），mtime
     /// 失配会让下一次 load_settings 自愈重读。
     async fn reload_inner(&self, signal: ConfigReloadSignal) -> Result<(), ConfigError> {
+        let _reload_guard = self.reload_lock.lock().await;
         // 保存旧快照，用于比较非热更字段
         let old = self.runtime.load().as_ref().clone();
         // 强制绕过 mtime 缓存；磁盘 I/O 移入 spawn_blocking，避免持锁阻塞 async 运行时（A2）
@@ -675,6 +740,10 @@ impl ConfigService {
             .await?;
         // 非热更字段变更提示（如端口、运行模式等）
         Self::log_non_hot_reload_changes(&old, self.runtime.load().as_ref());
+        // 发布配置版本：严格递增 + watch 广播（Engine 据此拒绝过期探测结果、
+        // 重建派生状态）。失败路径（上方 return Err）不递增——配置未变更。
+        let version = self.config_version.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.version_tx.send(version);
         let _ = self.reload_tx.send(signal).await;
         Ok(())
     }
@@ -1152,6 +1221,137 @@ mod tests {
         // 终值确定为 true；并发写覆盖 / 读旧值翻转都会打破该奇偶性
         assert!(svc.load_settings().auto_switch, "auto_switch 丢更新");
         assert!(svc.load_settings().active_profile_id.starts_with("sw-"));
+    }
+
+    // ============ 配置版本发布与 reload 串行化 ============
+
+    /// 成功 reload 递增配置版本并经 watch 广播；失败路径不递增
+    #[tokio::test]
+    async fn test_reload_increments_config_version_and_broadcasts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        assert_eq!(svc.config_version(), 0, "初始版本为 0");
+
+        let mut version_rx = svc.subscribe_version();
+        svc.modify_settings(|s| s.global.monitor.check_interval = 77)
+            .await
+            .unwrap();
+        svc.reload().await.unwrap();
+        assert_eq!(svc.config_version(), 1);
+        version_rx.changed().await.unwrap();
+        assert_eq!(*version_rx.borrow_and_update(), 1);
+        assert_eq!(svc.runtime().load().monitor.check_interval, 77);
+    }
+
+    /// 并发 reload 串行执行：版本号精确递增（无丢失/重复），终态为磁盘最新配置
+    #[tokio::test]
+    async fn test_concurrent_reloads_serialize_and_publish_latest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+
+        // 连续两次保存不同间隔后并发 reload 两次
+        let mut s1 = svc.load_settings();
+        s1.global.monitor.check_interval = 111;
+        svc.save_settings(&s1).await.unwrap();
+        let mut s2 = svc.load_settings();
+        s2.global.monitor.check_interval = 222;
+        svc.save_settings(&s2).await.unwrap();
+
+        let a = svc.clone();
+        let b = svc.clone();
+        let (ra, rb) = tokio::join!(
+            async move { a.reload().await },
+            async move { b.reload().await },
+        );
+        ra.unwrap();
+        rb.unwrap();
+
+        // 两次成功 reload → 版本恰好 2；发布顺序受 reload_lock 串行保证，
+        // 后完成者读到的磁盘状态不早于先完成者 → 终态必为最新值
+        assert_eq!(svc.config_version(), 2);
+        assert_eq!(svc.runtime().load().monitor.check_interval, 222);
+    }
+
+    // ============ modify_settings_tx 提交事务 ============
+
+    /// 闭包校验失败：不落盘（设置保持原值），返回内层 Err
+    #[tokio::test]
+    async fn test_modify_settings_tx_rejects_without_persisting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        svc.modify_settings(|s| s.global.monitor.check_interval = 300)
+            .await
+            .unwrap();
+
+        let result = svc
+            .modify_settings_tx(Box::new(|mut s| {
+                s.global.monitor.check_interval = 999;
+                Err("校验失败".to_string())
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(ref msg) if msg == "校验失败"));
+        // 闭包内的修改未落盘
+        assert_eq!(svc.load_settings().global.monitor.check_interval, 300);
+    }
+
+    /// 并发提交不同字段的修改互不覆盖（读-改-写在同一临界区）
+    #[tokio::test]
+    async fn test_modify_settings_tx_concurrent_fields_do_not_clobber() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+
+        let a = svc.clone();
+        let b = svc.clone();
+        let (ra, rb) = tokio::join!(
+            async {
+                for i in 0..10 {
+                    a.modify_settings_tx(Box::new(move |mut s| {
+                        s.global.monitor.check_interval = 100 + i;
+                        Ok(s)
+                    }))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                }
+            },
+            async {
+                for i in 0..10 {
+                    b.modify_settings_tx(Box::new(move |mut s| {
+                        s.active_profile_id = format!("p{i}");
+                        Ok(s)
+                    }))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                }
+            },
+        );
+        let _ = (ra, rb);
+
+        // 两字段均在各自最后一次写入的候选集合内（无丢更新回滚）
+        let s = svc.load_settings();
+        assert!(
+            (100..110).contains(&s.global.monitor.check_interval),
+            "check_interval 被并发回滚: {}",
+            s.global.monitor.check_interval
+        );
+        assert!(
+            s.active_profile_id.starts_with('p'),
+            "active_profile_id 被并发回滚: {s:?}"
+        );
     }
 
     // ============ F8：tmp 残留清理与加载跳过 ============

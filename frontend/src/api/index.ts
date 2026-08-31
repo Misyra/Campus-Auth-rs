@@ -30,6 +30,8 @@ import type {
   Script,
   TaskDetail,
   TaskItem,
+  UninstallDetectItem,
+  UninstallResponse,
   UpdateInfo,
 } from "./types";
 
@@ -113,6 +115,14 @@ export const profilesApi = {
 export const autostartApi = {
   fetchStatus: () => http.get<AutostartStatus>("/api/autostart/status"),
   toggle: (enable: boolean) => http.post<MutationResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
+};
+
+/** 卸载 */
+export const uninstallApi = {
+  detect: () => http.get<UninstallDetectItem[]>("/api/uninstall/detect"),
+  // 删除 ms-playwright 浏览器缓存可能耗时较长（数百 MB），放宽客户端超时
+  uninstall: () =>
+    http.post<UninstallResponse>("/api/uninstall", null, { timeout: 300000 }),
 };
 
 /** OCR */

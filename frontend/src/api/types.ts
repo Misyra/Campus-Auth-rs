@@ -45,6 +45,8 @@ export interface StatusSnapshot {
   network_state: string;
   login_status?: string;
   engine_state?: string;
+  /** 快照单调版本号（后端每次发布 +1；旧后端缺字段时为 0，回退 uptime 比较） */
+  snapshot_version?: number;
 }
 
 /** 开机自启动状态 */
@@ -54,6 +56,28 @@ export interface AutostartStatus {
   method: string;
   location: string;
   runtime_mode: string;
+}
+
+/** 卸载检测项（GET /api/uninstall/detect） */
+export interface UninstallDetectItem {
+  key: string;
+  label: string;
+  exists: boolean;
+  description: string;
+}
+
+/** 卸载清理单步结果（POST /api/uninstall） */
+export interface UninstallStepResult {
+  key: string;
+  label: string;
+  success: boolean;
+  message: string;
+}
+
+/** 卸载清理响应 */
+export interface UninstallResponse {
+  results: UninstallStepResult[];
+  message: string;
 }
 
 /** 日志条目 */
@@ -131,6 +155,8 @@ export interface MonitorConfig {
   auth_url_targets: string[];
   url_check_urls: string[];
   enable_local_check: boolean;
+  /** 网络检测禁用代理（默认 true 直连；关闭后 HTTP/URL 探测跟随系统代理，重启生效） */
+  disable_proxy: boolean;
   script_timeout: number;
   post_login_delay: number;
   // 网卡绑定：后端仅预留 EgressBinder 接口未实现，字段暂不暴露（配置往返保真见 constants.ts 注释）
@@ -178,6 +204,17 @@ export interface AppSettings {
   show_tray: boolean;
 }
 
+/** 更新器设置（GET/PATCH /api/config 的 updater 段） */
+export interface UpdaterConfig {
+  check_on_startup: boolean;
+  release_source_url: string;
+  check_interval_hours: number;
+  /** 下载更新走本地代理 127.0.0.1:proxy_port */
+  use_proxy: boolean;
+  /** 本地代理端口（如 Clash 默认 7890） */
+  proxy_port: number;
+}
+
 /** 完整配置（前端内部表示，凭据嵌套） */
 export interface Config {
   browser: BrowserConfig;
@@ -189,6 +226,7 @@ export interface Config {
   credentials: CredentialsConfig;
   active_task: string;
   app_settings: AppSettings;
+  updater: UpdaterConfig;
 }
 
 /** GET /api/config 返回结构（凭据平铺在顶层） */
@@ -200,6 +238,7 @@ export interface ConfigResponse {
   logging: LoggingConfig;
   retry: RetryConfig;
   app_settings: AppSettings;
+  updater?: UpdaterConfig;
   active_task: string;
   has_password: boolean;
   username: string;
@@ -218,6 +257,7 @@ export interface SaveConfigPayload {
   logging: LoggingConfig;
   retry: RetryConfig;
   app_settings: AppSettings;
+  updater: UpdaterConfig;
   active_task: string;
   username: string;
   auth_url: string;

@@ -49,6 +49,16 @@ pub trait ConfigApi: Send + Sync {
     async fn load_settings_async(&self) -> SettingsData;
     /// 原子写入 settings.json。
     async fn save_settings(&self, data: &SettingsData) -> Result<(), ConfigError>;
+    /// 持锁执行 settings 读-改-写（提交事务，闭包失败不落盘）。
+    ///
+    /// 闭包接收当前设置（按值），返回修改后的完整设置或校验错误。
+    /// 外层 `Err` 为 IO/隔离态错误；内层 `Err(String)` 为闭包校验失败
+    /// （设置未落盘）。Web PATCH/PUT 的合并保存必须走本方法，锁外的
+    /// load→改→save 会丢并发更新。
+    async fn modify_settings_tx(
+        &self,
+        f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
+    ) -> Result<Result<(), String>, ConfigError>;
     /// 加载单个 Profile。
     fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError>;
     /// 保存 Profile。
@@ -75,6 +85,13 @@ impl ConfigApi for ConfigService {
 
     async fn save_settings(&self, data: &SettingsData) -> Result<(), ConfigError> {
         ConfigService::save_settings(self, data).await
+    }
+
+    async fn modify_settings_tx(
+        &self,
+        f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        ConfigService::modify_settings_tx(self, f).await
     }
 
     fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {

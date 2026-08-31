@@ -79,6 +79,7 @@ async function fetchConfig(): Promise<void> {
     };
     config.active_task = data.active_task ?? "";
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
+    config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
     password.reset(!!data.has_password);
     // P12：watch 已是异步 flush，上面的加载赋值会在微任务中触发回调；
     // 先等待一轮刷新（回调在 loadingConfig=true 窗口内执行完、不置 dirty），
@@ -155,6 +156,7 @@ async function saveConfig(force = false): Promise<void> {
     logging: config.logging,
     retry: config.retry,
     app_settings: config.app_settings,
+    updater: config.updater,
     active_task: config.active_task || "",
     username: config.credentials.username ?? "",
     auth_url: config.credentials.auth_url ?? "",

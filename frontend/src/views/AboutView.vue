@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
 import { ref } from "vue";
-import { systemApi, autostartApi } from "@/api";
-import type { UpdateInfo } from "@/api/types";
+import { systemApi, autostartApi, uninstallApi } from "@/api";
+import type { UninstallDetectItem, UninstallStepResult, UpdateInfo } from "@/api/types";
 import { useConfirm } from "@/composables/useConfirm";
 
 const { confirm } = useConfirm();
@@ -75,6 +75,58 @@ async function applyUpdate() {
   } finally {
     updating.value = false;
   }
+}
+
+// ---- 卸载 ----
+const uninstallOpen = ref(false);
+const uninstallDetecting = ref(false);
+const uninstallItems = ref<UninstallDetectItem[]>([]);
+const uninstallError = ref("");
+const uninstallRunning = ref(false);
+const uninstallDone = ref(false);
+const uninstallResults = ref<UninstallStepResult[]>([]);
+const uninstallMessage = ref("");
+
+async function openUninstall() {
+  uninstallOpen.value = true;
+  uninstallDetecting.value = true;
+  uninstallItems.value = [];
+  uninstallError.value = "";
+  uninstallDone.value = false;
+  uninstallResults.value = [];
+  try {
+    uninstallItems.value = await uninstallApi.detect();
+  } catch (e: unknown) {
+    uninstallError.value = (e as Error).message || "检测失败";
+  } finally {
+    uninstallDetecting.value = false;
+  }
+}
+
+async function runUninstall() {
+  const ok = await confirm({
+    title: "确认卸载清理",
+    message: "将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。是否继续？",
+    confirmText: "开始清理",
+  });
+  if (!ok) return;
+  uninstallRunning.value = true;
+  uninstallError.value = "";
+  try {
+    const data = await uninstallApi.uninstall();
+    uninstallResults.value = data.results ?? [];
+    uninstallMessage.value = data.message ?? "";
+    uninstallDone.value = true;
+  } catch (e: unknown) {
+    uninstallError.value = (e as Error).message || "卸载清理失败";
+  } finally {
+    uninstallRunning.value = false;
+  }
+}
+
+function closeUninstall() {
+  if (uninstallRunning.value) return;
+  uninstallOpen.value = false;
 }
 </script>
 
@@ -180,17 +232,77 @@ async function applyUpdate() {
         <p class="muted">Made with ❤️ for campus network users</p>
       </div>
 
-      <!-- 卸载提示 -->
+      <!-- 卸载 -->
       <div class="uninstall-section card">
         <div class="uninstall-header">
           <IconApp name="trash" width="20" height="20" />
           <div>
             <h3>卸载程序</h3>
             <p class="uninstall-desc">
-              如需完整卸载，请先关闭本程序，然后手动删除整个项目文件夹即可。
-              若需清理开机自启项、浏览器缓存或 Playwright 浏览器等附加组件，可在项目目录运行
-              <code>campus-auth uninstall</code> 命令。
+              清理开机自启动、用户数据目录与 Playwright 浏览器缓存；完成后删除程序所在文件夹即可完成卸载。
             </p>
+          </div>
+        </div>
+        <button class="btn btn-danger-ghost btn-sm" @click="openUninstall">卸载</button>
+      </div>
+
+      <!-- 卸载弹窗 -->
+      <div v-if="uninstallOpen" class="uninstall-overlay" @click.self="closeUninstall">
+        <div class="uninstall-modal">
+          <div class="uninstall-modal-header">
+            <IconApp name="trash" width="20" height="20" />
+            <div>
+              <h3>卸载程序</h3>
+              <p class="uninstall-subtitle">将清理以下系统残留项</p>
+            </div>
+          </div>
+
+          <div v-if="uninstallDetecting" class="uninstall-modal-body">
+            <div class="uninstall-scanning"><span class="spinner"></span>正在检测...</div>
+          </div>
+
+          <div v-else-if="!uninstallDone" class="uninstall-modal-body">
+            <div v-if="uninstallError" class="uninstall-empty">{{ uninstallError }}</div>
+            <template v-else>
+              <div v-for="item in uninstallItems" :key="item.key" class="uninstall-item disabled">
+                <div class="uninstall-item-info">
+                  <span class="uninstall-item-label">{{ item.label }}</span>
+                  <span class="uninstall-item-path">{{ item.description }}</span>
+                </div>
+                <span class="uninstall-item-tag">{{ item.exists ? "存在" : "无" }}</span>
+              </div>
+              <div class="uninstall-hint-box">
+                将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。
+                清理完成后，手动删除程序所在文件夹即可完成卸载。
+              </div>
+            </template>
+          </div>
+
+          <div v-else class="uninstall-results">
+            <div class="uninstall-result-header">
+              <IconApp name="check" width="16" height="16" />
+              清理结果
+            </div>
+            <div v-for="r in uninstallResults" :key="r.key" class="uninstall-result-row">
+              <span :class="r.success ? 'result-ok' : 'result-fail'">{{ r.success ? "✓" : "✗" }}</span>
+              <span>{{ r.label }}</span>
+              <span class="uninstall-item-path">{{ r.message }}</span>
+            </div>
+            <div class="uninstall-final-hint">{{ uninstallMessage }}</div>
+          </div>
+
+          <div class="uninstall-modal-footer">
+            <template v-if="!uninstallDone">
+              <button class="btn btn-ghost btn-sm" @click="closeUninstall" :disabled="uninstallRunning">取消</button>
+              <button
+                class="btn btn-danger btn-sm"
+                @click="runUninstall"
+                :disabled="uninstallRunning || !!uninstallError"
+              >
+                {{ uninstallRunning ? "清理中..." : "开始清理" }}
+              </button>
+            </template>
+            <button v-else class="btn btn-primary btn-sm" @click="closeUninstall">关闭</button>
           </div>
         </div>
       </div>

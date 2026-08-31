@@ -112,14 +112,28 @@ async fn resolve_public(host: &str, port: u16) -> Result<Vec<SocketAddr>, String
 }
 
 /// 构建钉扎到指定 IP 的客户端（禁用自动重定向，由调用方逐跳校验）
-fn pinned_client(host: &str, addr: SocketAddr, timeout: Duration, ua: &str) -> reqwest::Client {
-    reqwest::Client::builder()
+///
+/// `proxy` 为可选的代理 URL（如 `http://127.0.0.1:7890`）：设置后请求经代理
+/// 转发。注意此场景下实际连接目标是代理地址（本机），目标主机的公网校验
+/// 仍由 [`resolve_public`] 在发起前完成——代理侧的出口 IP 由代理自身决定。
+fn pinned_client(
+    host: &str,
+    addr: SocketAddr,
+    timeout: Duration,
+    ua: &str,
+    proxy: Option<&str>,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(ua)
         .redirect(reqwest::redirect::Policy::none())
-        .resolve(host, addr)
-        .build()
-        .expect("构建 HTTP 客户端失败")
+        .resolve(host, addr);
+    if let Some(p) = proxy {
+        // 构建失败（非法代理 URL）直接 panic 与原行为一致：代理值来自本地配置
+        // 而非用户输入，配置错误应在启动/保存时暴露
+        builder = builder.proxy(reqwest::Proxy::all(p).expect("代理 URL 非法"));
+    }
+    builder.build().expect("构建 HTTP 客户端失败")
 }
 
 /// SSRF 安全的 GET 请求：校验 scheme → DNS 解析校验并钉扎 → 手动跟随重定向
@@ -130,6 +144,19 @@ pub async fn secure_get(
     url: &str,
     timeout: Duration,
     ua: &str,
+) -> Result<(reqwest::Response, String), String> {
+    secure_get_proxied(url, timeout, ua, None).await
+}
+
+/// [`secure_get`] 的代理版本：请求经 `proxy`（如 `http://127.0.0.1:7890`）转发。
+///
+/// 用于仓库任务/背景图等下载场景（国内访问 GitHub raw 常需代理）。
+/// 校验流程与 [`secure_get`] 完全一致。
+pub async fn secure_get_proxied(
+    url: &str,
+    timeout: Duration,
+    ua: &str,
+    proxy: Option<&str>,
 ) -> Result<(reqwest::Response, String), String> {
     let mut current = url.to_string();
     for _ in 0..MAX_REDIRECTS {
@@ -151,7 +178,7 @@ pub async fn secure_get(
         let mut last_err = String::from("无可用地址");
         let mut response: Option<reqwest::Response> = None;
         for addr in &addrs {
-            let client = pinned_client(&host, *addr, timeout, ua);
+            let client = pinned_client(&host, *addr, timeout, ua, proxy);
             match client.get(&current).send().await {
                 Ok(resp) => {
                     response = Some(resp);

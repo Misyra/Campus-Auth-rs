@@ -145,6 +145,9 @@ pub struct MonitorService {
     /// 物理网络检测器
     network_detect: Arc<dyn NetworkDetect>,
     /// HTTP/URL 探测共用的长生命周期客户端（连接池复用）
+    ///
+    /// 代理策略在构造时按 `monitor.disable_proxy` 一次性固定（true=直连 no_proxy，
+    /// false=跟随系统代理）；切换需重启程序生效。
     http_client: Arc<ArcSwap<Client>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
@@ -164,7 +167,9 @@ impl MonitorService {
         proxy: Option<&str>,
         metrics: Option<Arc<Metrics>>,
     ) -> Result<Self, MonitorError> {
-        let http_client = Self::build_client(proxy)?;
+        // 代理策略启动时一次性固定：监测设置修改 disable_proxy 后需重启生效
+        let disable_proxy = config.load_settings().global.monitor.disable_proxy;
+        let http_client = Self::build_client(proxy, disable_proxy)?;
         Ok(Self {
             config_service: config,
             network_detect: detect,
@@ -175,16 +180,22 @@ impl MonitorService {
         })
     }
 
-    /// 构建 reqwest 客户端（redirect=none、忽略证书错误、禁用系统代理、连接池复用）
+    /// 构建 reqwest 客户端（redirect=none、忽略证书错误、连接池复用）
     ///
-    /// 禁用系统代理（no_proxy）与原版 `set_block_proxy()` 一致：网络检测应走直连，
-    /// 避免系统代理干扰探测结果（代理挂了误判 Offline）。
-    fn build_client(proxy: Option<&str>) -> Result<Client, MonitorError> {
+    /// `disable_system_proxy=true`（监测设置"禁用代理"默认值）时显式 no_proxy——
+    /// 网络检测直连，避免系统代理故障时误判 Offline（与原版 `set_block_proxy()`
+    /// 一致）；false 时跟随系统代理。
+    fn build_client(
+        proxy: Option<&str>,
+        disable_system_proxy: bool,
+    ) -> Result<Client, MonitorError> {
         let mut builder = Client::builder()
             .redirect(Policy::none())
             .danger_accept_invalid_certs(true)
-            .no_proxy()
             .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT);
+        if disable_system_proxy {
+            builder = builder.no_proxy();
+        }
         if let Some(p) = proxy {
             let proxy =
                 reqwest::Proxy::all(p).map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
@@ -287,6 +298,7 @@ impl MonitorService {
         }
 
         // 步骤 3：并发执行已启用的三类探测（不绑定出口网卡，走系统默认路由）
+        // 客户端代理策略已在构造时按 disable_proxy 固定（切换需重启）
         let client = self.http_client.load();
         let start = Instant::now();
 

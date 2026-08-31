@@ -11,6 +11,7 @@ pub mod history;
 pub mod preemption;
 pub mod session;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Duration;
 
@@ -173,6 +174,43 @@ struct OrchestratorState {
     next_session_id: u64,
 }
 
+/// 待处理请求登记守卫：submit 接纳即注册取消令牌，任意退出路径自动注销
+///
+/// 历史实现的取消边界只覆盖「已成为活跃会话」之后的阶段：环境初始化
+/// （uv sync，可达分钟级）与 auth_url 预检发生在会话创建之前，取消接口
+/// 只遍历 `active_session`——准备阶段点取消返回「已取消」，原请求却继续
+/// 创建会话并登录。登记后 [`LoginOrchestrator::cancel_current`] 可取消
+/// 准备阶段的在途请求（select 竞速取消令牌），守卫 Drop 保证任意退出
+/// 路径（含 early return）不泄漏登记项。
+struct PendingGuard<'a> {
+    registry: &'a StdMutex<HashMap<u64, (LoginSource, CancellationToken)>>,
+    id: u64,
+}
+
+impl<'a> PendingGuard<'a> {
+    fn register(
+        registry: &'a StdMutex<HashMap<u64, (LoginSource, CancellationToken)>>,
+        id: u64,
+        source: LoginSource,
+        token: CancellationToken,
+    ) -> Self {
+        registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, (source, token));
+        Self { registry, id }
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
 /// Web 层消费的登录编排抽象（M1 细粒度 state 第二域）
 ///
 /// handler 通过 `State<Arc<dyn LoginApi>>` 提取依赖，测试可注入内存实现
@@ -230,6 +268,11 @@ pub struct LoginOrchestrator {
     /// 与 `state` 锁分离，因此等待旧会话的最长 13s 期间不会阻塞 cancel_current；
     /// 只阻止其他 submit 趁 active_session 被 take 后的空窗插队，避免优先级反转。
     submit_gate: AsyncMutex<()>,
+    /// 已接纳、尚未成为活跃会话的请求（准备阶段取消登记）
+    ///
+    /// 见 [`PendingGuard`]：键为会话 ID，值为（来源, 取消令牌）。会话创建后
+    /// 复用同一令牌，登记项随 submit 返回自动注销。
+    pending_cancels: StdMutex<HashMap<u64, (LoginSource, CancellationToken)>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
     /// 应用级 shutdown 信号（会话在 shutdown 时立即退出）
@@ -266,6 +309,7 @@ impl LoginOrchestrator {
                 next_session_id: 0,
             })),
             submit_gate: AsyncMutex::new(()),
+            pending_cancels: StdMutex::new(HashMap::new()),
             metrics,
             shutdown_token,
         }
@@ -276,12 +320,34 @@ impl LoginOrchestrator {
     /// 流程：配置校验 → auth_url 预检（仅 manual/login_once）→ 去重/抢占判断 →
     /// 创建会话并 `spawn` 状态机 → 返回 [`LoginHandle`]。本方法不返回 `Result`：
     /// 校验失败等会以“立即终态失败”的句柄体现。
+    ///
+    /// 取消边界覆盖完整生命周期：接纳请求即创建操作 ID 与取消令牌并登记
+    /// （[`PendingGuard`]），环境初始化、auth_url 预检、抢占等待与随后的
+    /// 会话执行/重试共享同一令牌——准备阶段点取消即可中断整个流程，而非
+    /// 仅取消「已创建活跃会话」之后的部分。
     pub async fn submit(
         &self,
         source: LoginSource,
         task_id: Option<String>,
         profile_id: Option<String>,
     ) -> LoginHandle {
+        // 0. 接纳即登记：分配操作 ID（复用为会话 ID）并注册取消令牌
+        let session_id = {
+            let mut g = self.state.lock().await;
+            let id = g.next_session_id;
+            g.next_session_id += 1;
+            id
+        };
+        let cancel_token = CancellationToken::new();
+        let attempt_cancel_id = Arc::new(ArcSwapOption::<String>::new(None));
+        let cancel_reason = Arc::new(StdMutex::new(None::<String>));
+        let _pending_guard = PendingGuard::register(
+            &self.pending_cancels,
+            session_id,
+            source,
+            cancel_token.clone(),
+        );
+
         // 读取最新运行时配置（每次 submit 重新读取，不缓存）
         let rt = self.config.runtime().load_full();
         // 解析凭据来源 Profile：profile_id 指定时加载该 Profile 快照，否则用全局活跃 Profile。
@@ -339,9 +405,16 @@ impl LoginOrchestrator {
         // 仍未就绪则以失败终态返回（携带 last_error 便于前端提示并引导至“初始化 Python 环境”按钮）。
         // Manual 场景不走此分支——其 Worker 缺失会在会话内 Bridge 执行阶段以 WorkerNotInstalled 失败，
         // 已在 session 层统一处理；此处仅守 Browser 定时任务路径。
+        // 环境初始化可达分钟级：与取消令牌竞速，准备阶段即可被取消中断。
         if source == LoginSource::Browser && !self.environment.capability_ready() {
             tracing::info!("浏览器能力未就绪，尝试自动初始化环境...");
-            if let Err(e) = self.environment.ensure_capability().await {
+            let init_result = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return self.cancelled_handle(source, profile.id.clone()).await;
+                }
+                r = self.environment.ensure_capability() => r,
+            };
+            if let Err(e) = init_result {
                 let detail = self
                     .environment
                     .status()
@@ -388,7 +461,13 @@ impl LoginOrchestrator {
                 message: Some("正在初始化 Python 环境...".into()),
                 retry_count: 0,
             });
-            if let Err(e) = self.environment.ensure_capability().await {
+            let init_result = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return self.cancelled_handle(source, profile.id.clone()).await;
+                }
+                r = self.environment.ensure_capability() => r,
+            };
+            if let Err(e) = init_result {
                 let detail = self
                     .environment
                     .status()
@@ -427,11 +506,13 @@ impl LoginOrchestrator {
         // 支持 IPv6 方括号与裸地址），登录侧不再维护私有副本
         if matches!(source, LoginSource::Manual | LoginSource::LoginOnce) {
             let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
-            if !self
-                .monitor
-                .check_auth_url(&profile.auth_url, timeout)
-                .await
-            {
+            let reachable = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return self.cancelled_handle(source, profile.id.clone()).await;
+                }
+                r = self.monitor.check_auth_url(&profile.auth_url, timeout) => r,
+            };
+            if !reachable {
                 warn!("auth_url 预检不可达: {}", profile.auth_url);
                 return self
                     .immediate_handle(
@@ -466,19 +547,17 @@ impl LoginOrchestrator {
         // 因此其他 submit 无法利用 active_session 的临时空窗插队。
         if let Some(old) = old_session {
             old.propagate_cancel(&self.bridge, "被更高优先级登录抢占");
-            self.wait_old_session_finished(old).await;
+            // 抢占等待（最长 13s）同样处于取消边界内：等待期间点取消即放弃本次提交
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return self.cancelled_handle(source, profile.id.clone()).await;
+                }
+                _ = self.wait_old_session_finished(old) => {}
+            }
         }
 
-        // 5. 创建新会话（计数延后到 became_active 判定后，避免抢占失败的“被取代”请求污染 login_total）
-        let session_id = {
-            let mut g = self.state.lock().await;
-            let id = g.next_session_id;
-            g.next_session_id += 1;
-            id
-        };
-        let cancel_token = CancellationToken::new();
-        let attempt_cancel_id = Arc::new(ArcSwapOption::<String>::new(None));
-        let cancel_reason = Arc::new(StdMutex::new(None::<String>));
+        // 5. 创建新会话（计数延后到 became_active 判定后，避免抢占失败的“被取代”请求污染 login_total）。
+        // 会话 ID / 取消令牌复用接纳阶段创建的实例：准备阶段与会话阶段共享完整生命周期
         let shutdown_token = self.shutdown_token.clone();
         // 会话完全收尾通知（F6）：spawn 的会话任务在 run() 返回后触发
         let finished = Arc::new(tokio::sync::Notify::new());
@@ -629,10 +708,24 @@ impl LoginOrchestrator {
     ///
     /// 使用 `lock().await` 等待锁（锁窗口极短），避免撞上 `submit` 持锁窗口时
     /// 用户取消被静默丢弃（原 `try_lock` 会跳过取消，表现为点取消没反应）。
+    ///
+    /// 取消范围覆盖完整生命周期：活跃会话之外，还包括已接纳、仍在准备阶段
+    /// （环境初始化 / auth_url 预检 / 抢占等待）的在途请求——历史实现只遍历
+    /// `active_session`，准备阶段的请求无法取消，接口返回「已取消」后原请求
+    /// 仍会继续创建会话并登录。
     pub async fn cancel_current(&self) {
         let guard = self.state.lock().await;
         if let Some(active) = &guard.active_session {
             active.propagate_cancel(&self.bridge, "用户取消");
+        }
+        // 取消尚未成为活跃会话的准备阶段请求（submit 内以 select 竞速感知）
+        for (_, token) in self
+            .pending_cancels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
+            token.cancel();
         }
     }
 
@@ -648,11 +741,54 @@ impl LoginOrchestrator {
                 active.propagate_cancel(&self.bridge, reason);
             }
         }
+        // Engine 崩溃清理同样覆盖准备阶段的 Auto 请求（环境初始化可达分钟级）
+        for (_, (source, token)) in self
+            .pending_cancels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+        {
+            if *source == LoginSource::Auto {
+                token.cancel();
+            }
+        }
     }
 
     /// 查询当前登录状态
     pub fn status(&self) -> LoginStatus {
         self.status.borrow().login_status
+    }
+
+    /// 构造「已取消」的立即终态句柄（准备阶段被取消时使用）
+    ///
+    /// 与会话内取消的终态语义一致：登录状态广播 Cancelled（而非 Failed），
+    /// 历史记录 Cancelled 结果。
+    async fn cancelled_handle(&self, source: LoginSource, profile_id: String) -> LoginHandle {
+        // M4：所有终态必经广播——取消终态同样合并到 StatusManager
+        self.status.merge(PartialSnapshot::Login {
+            status: LoginStatus::Cancelled,
+            source: Some(source),
+            message: Some("登录已取消".into()),
+            retry_count: 0,
+        });
+        let entry = LoginHistoryEntry {
+            timestamp: chrono::Local::now(),
+            source,
+            profile_id,
+            result: HistoryResult::Cancelled,
+            message: "登录已取消（准备阶段）".into(),
+            duration_secs: 0.0,
+        };
+        if let Err(e) = self.history.record(&entry).await {
+            warn!("登录历史写入失败: {e}");
+        }
+        LoginHandle::immediate(LoginResult {
+            success: false,
+            message: "登录已取消".into(),
+            source,
+            duration: Duration::ZERO,
+            attempts: 0,
+        })
     }
 
     /// 构造“立即终态”的句柄（用于校验失败等无需真正执行的场景）
@@ -957,6 +1093,55 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner()),
             Some("用户取消".to_string())
         );
+    }
+
+    // ============ 准备阶段取消（pending 登记与传播） ============
+
+    /// cancel_current 覆盖准备阶段登记的请求；守卫 Drop 后自动注销
+    #[tokio::test]
+    async fn cancel_current_cancels_registered_pending_request() {
+        let orch = make_orchestrator().await;
+        let token = CancellationToken::new();
+        let guard = PendingGuard::register(
+            &orch.pending_cancels,
+            99,
+            LoginSource::Manual,
+            token.clone(),
+        );
+        assert!(!token.is_cancelled());
+        orch.cancel_current().await;
+        assert!(token.is_cancelled(), "准备阶段登记的请求应被取消");
+        drop(guard);
+        assert!(
+            orch.pending_cancels
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "守卫 Drop 后登记应自动注销"
+        );
+    }
+
+    /// cancel_auto_pending 仅取消 Auto 来源的准备阶段请求
+    #[tokio::test]
+    async fn cancel_auto_pending_only_cancels_auto_registered_requests() {
+        let orch = make_orchestrator().await;
+        let auto_token = CancellationToken::new();
+        let manual_token = CancellationToken::new();
+        let _g_auto = PendingGuard::register(
+            &orch.pending_cancels,
+            1,
+            LoginSource::Auto,
+            auto_token.clone(),
+        );
+        let _g_manual = PendingGuard::register(
+            &orch.pending_cancels,
+            2,
+            LoginSource::Manual,
+            manual_token.clone(),
+        );
+        orch.cancel_auto_pending("引擎崩溃清理").await;
+        assert!(auto_token.is_cancelled(), "Auto 准备请求应被取消");
+        assert!(!manual_token.is_cancelled(), "Manual 准备请求不受影响");
     }
 
     // ============ F6：抢占等待旧会话完全收尾 ============

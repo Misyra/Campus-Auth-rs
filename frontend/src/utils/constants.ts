@@ -122,6 +122,8 @@ export const DEFAULT_CONFIG: Config = {
       "http://detectportal.firefox.com/success.txt|success",
     ],
     enable_local_check: true,
+    // 网络检测默认禁用代理（直连），避免代理故障误判离线；关闭后跟随系统代理（重启生效）
+    disable_proxy: true,
     script_timeout: 60,
     post_login_delay: 5,
     // 网卡绑定：后端仅预留 EgressBinder 接口未实现。保留默认值不提交该字段，
@@ -159,6 +161,13 @@ export const DEFAULT_CONFIG: Config = {
     autostart_enabled: false,
     task_notification: true,
     show_tray: true,
+  },
+  updater: {
+    check_on_startup: true,
+    release_source_url: "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest",
+    check_interval_hours: 24,
+    use_proxy: false,
+    proxy_port: 7890,
   },
 };
 

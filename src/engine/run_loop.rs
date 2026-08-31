@@ -33,11 +33,24 @@ const COOLING_DOWN_DURATION_SECS: u64 = 300;
 ///
 /// 成败均须回传：主循环靠它重置 `probe_in_flight` 在途标记，
 /// 只回传成功会导致标记永不复位、自动监测永久停摆。
+///
+/// 携带探测发起时的配置版本：结果回传时版本失配说明期间发生过配置变更
+///（如切换 Profile），该结果的 `auth_url_reachable` 等派生判断基于旧配置，
+/// 不得用于自动登录决策。
 enum ProbeMessage {
-    /// 探测成功完成，携带报告
-    Report(ProbeReport),
-    /// 探测执行失败（错误描述）
-    Failed(String),
+    /// 探测成功完成，携带报告与发起时的配置版本
+    Report(ProbeReport, u64),
+    /// 探测执行失败（错误描述）与发起时的配置版本
+    Failed(String, u64),
+}
+
+impl ProbeMessage {
+    /// 探测发起时的配置版本
+    fn config_version(&self) -> u64 {
+        match self {
+            ProbeMessage::Report(_, v) | ProbeMessage::Failed(_, v) => *v,
+        }
+    }
 }
 
 /// Engine 内部栈上状态（单 task 独占，不跨 Arc）
@@ -131,6 +144,11 @@ pub(crate) async fn run_loop(
     // 登录结果回传 channel（后台 spawn 的登录任务完成后通知主循环，携带完整结果以区分来源）
     let (login_result_tx, mut login_result_rx) = mpsc::channel::<LoginResult>(16);
     let mut inner = EngineInner::new(probe_result_tx, login_result_tx);
+    // 配置版本订阅：任何入口的配置变更（Web 保存 / 切换 Profile / CLI）都会经
+    // ConfigService reload 广播版本号，Engine 据此重建派生状态。此前只有
+    // Scheduler 收到 reload 信号，Engine 的检测定时器等派生状态不随保存刷新
+    //（修改检测间隔后旧定时器继续按旧间隔运行直到下次 Start/Reload 命令）。
+    let mut config_version_rx = deps.config_service.subscribe_version();
     loop {
         // 步骤 1：命令优先（try_recv 预检）
         match cmd_rx.try_recv() {
@@ -159,6 +177,15 @@ pub(crate) async fn run_loop(
             Some(msg) = probe_result_rx.recv() => {
                 // 探测结果回传：更新网络状态并决策是否触发登录（F5）
                 handle_probe_message(msg, &mut inner, &deps);
+            }
+            Ok(()) = config_version_rx.changed() => {
+                // 配置版本变化：RuntimeConfig 已由 ConfigService 原子替换，
+                // Engine 只需重建派生状态（检测定时器间隔等），不再二次 reload。
+                // Ok 模式：通道关闭（Err）时本分支在本轮 select 中被禁用，
+                // 等待其它分支事件，不会忙轮询
+                let _ = config_version_rx.borrow_and_update();
+                tracing::debug!("配置版本变化，重建引擎派生状态（检测定时器）");
+                reset_check_timer(&mut inner, &deps).await;
             }
             _ = inner.check_timer.tick() => {
                 // 定时器常驻，仅在监测中且未暂停时执行探测
@@ -284,10 +311,16 @@ async fn handle_apply_profile(
     inner: &mut EngineInner,
     deps: &EngineDeps,
 ) {
-    // 切换活跃 Profile（内部重建 RuntimeConfig 并原子替换）
-    if let Err(e) = deps.profile_service.switch_profile(profile_id).await {
-        tracing::warn!("切换 Profile 失败: {} ({})", profile_id, e);
-        return;
+    // 幂等切换：Web 路由已同步完成切换时（保留「响应即生效」的前端契约），
+    // 此处跳过重复落盘/reload，只执行派生状态同步；自动切换等其它入口
+    // 仍由此处完成切换本体
+    let current = deps.config_service.runtime().load().profile.id.clone();
+    if current != profile_id {
+        // 切换活跃 Profile（内部重建 RuntimeConfig 并原子替换）
+        if let Err(e) = deps.profile_service.switch_profile(profile_id).await {
+            tracing::warn!("切换 Profile 失败: {} ({})", profile_id, e);
+            return;
+        }
     }
     deps.status_manager.merge(PartialSnapshot::ActiveProfile {
         id: profile_id.to_string(),
@@ -467,10 +500,12 @@ fn handle_network_check_with_priority(inner: &mut EngineInner, deps: &EngineDeps
     inner.probe_in_flight = true;
     let monitor = deps.monitor_service.clone();
     let tx = inner.probe_result_tx.clone();
+    // 探测发起时的配置版本：结果回传后与当前版本比对，失配即拒绝用于登录决策
+    let config_version = deps.config_service.config_version();
     tokio::spawn(async move {
         let msg = match monitor.check_once().await {
-            Ok(report) => ProbeMessage::Report(report),
-            Err(e) => ProbeMessage::Failed(e.to_string()),
+            Ok(report) => ProbeMessage::Report(report, config_version),
+            Err(e) => ProbeMessage::Failed(e.to_string(), config_version),
         };
         // 主循环退出后接收端已 drop：send 失败即丢弃（shutdown 弃在途探测）
         let _ = tx.send(msg).await;
@@ -481,6 +516,13 @@ fn handle_network_check_with_priority(inner: &mut EngineInner, deps: &EngineDeps
 ///
 /// 原 `handle_network_check` 内联探测后的后置逻辑整体迁移至此；
 /// 冷却清理/判定改在结果到达时执行（比探测发起时更接近决策时刻）。
+///
+/// 登录决策前的三重门（在途探测可能跨越 Stop/Pause/配置变更）：
+/// - 监测已停止：探测发起后用户点了停止，结果不得触发登录；
+/// - 暂停生效中：暂停语义必须覆盖在途探测的迟到结果；
+/// - 配置版本失配：探测发起后发生过配置变更（如切换 Profile），
+///   结果中基于旧配置的判断（auth_url 可达性）不得触发自动登录。
+/// 状态合并不受前两者影响——迟到的网络事实仍值得呈现给前端。
 fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
     // 无论成败都先复位在途标记，否则后续检测被永久忽略
     inner.probe_in_flight = false;
@@ -496,10 +538,19 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
         inner.cooling_down_until = None;
         inner.consecutive_failures = 0;
     }
-
+    let probe_config_version = msg.config_version();
+    let current_config_version = deps.config_service.config_version();
+    // 配置版本失配：期间发生过 reload（切换 Profile / 保存配置）。
+    // 网络状态仍合并（迟到的事实仍真实），但登录决策必须丢弃。
+    let config_stale = probe_config_version != current_config_version;
+    if config_stale {
+        tracing::info!(
+            "探测结果基于过期配置（发起时版本 {probe_config_version}，当前 {current_config_version}），跳过自动登录决策"
+        );
+    }
     let report = match msg {
-        ProbeMessage::Report(r) => r,
-        ProbeMessage::Failed(e) => {
+        ProbeMessage::Report(r, _) => r,
+        ProbeMessage::Failed(e, _) => {
             tracing::warn!("网络探测执行失败: {}", e);
             return;
         }
@@ -553,8 +604,24 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
     // 按网络结论决策
     match report.status {
         NetworkStatus::CaptivePortal => {
+            // 监测已停止：探测发起后用户停止了监测，迟到结果不得触发登录。
+            // （下方「补发排队的探测」同样受此门控）
+            if !inner.monitoring {
+                tracing::info!("监测已停止，跳过本轮自动登录（迟到探测结果）");
+                return;
+            }
+            // 暂停生效中：暂停语义覆盖在途探测的迟到结果
+            if paused {
+                tracing::info!("监测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
+                return;
+            }
+            // 探测发起后配置已变更（如切换 Profile）：旧结果的门户判断不作数。
+            // 不 return——排队的优先级探测（切 Profile 触发的新鲜探测）仍需补发
+            if config_stale {
+                tracing::info!("探测结果基于过期配置，跳过本轮自动登录");
+            }
             // 冷却期内跳过登录
-            if cooling_down {
+            else if cooling_down {
                 tracing::info!(
                     "冷却期中（连续失败 {} 次），跳过本轮登录",
                     inner.consecutive_failures
@@ -563,12 +630,12 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             }
             // 上一轮 Auto 会话仍在途：跳过本轮触发。即使再提交也会被
             // Orchestrator 去重复用同一会话，只会造成结果重复计数
-            if inner.auto_login_in_flight {
+            else if inner.auto_login_in_flight {
                 tracing::debug!("自动登录会话仍在途，跳过本轮触发");
                 return;
             }
             // auth_url 不可达时不触发登录，避免无效尝试
-            if report.auth_url_reachable != Some(false) {
+            else if report.auth_url_reachable != Some(false) {
                 tracing::info!("检测到门户劫持，触发自动登录");
                 inner.auto_login_in_flight = true;
                 let orchestrator = deps.orchestrator.clone();
@@ -587,8 +654,9 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
         }
     }
 
-    // 补发排队的优先级探测（在当前批次的决策与合并完成后触发，避免递归）
-    if pending {
+    // 补发排队的优先级探测（在当前批次的决策与合并完成后触发，避免递归）。
+    // 门控与定时器分支一致：停止/暂停期间不补发，避免停止后又自动开始探测
+    if pending && inner.monitoring && !is_any_pause_active(inner, deps) {
         tracing::debug!("补发排队的优先级探测");
         handle_network_check(inner, deps);
     }

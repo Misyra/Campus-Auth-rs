@@ -46,8 +46,8 @@ pub async fn put_settings(
     State(profiles): State<Arc<dyn ProfileApi>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = apply_flat_settings_patch(&config, &profiles, &body).await?;
-    save_and_flat_response(&config, &settings).await
+    apply_flat_settings_patch(&config, &profiles, &body).await?;
+    reload_and_flat_response(&config).await
 }
 
 /// PATCH /api/config — 局部更新全局设置（合并后保存）
@@ -61,141 +61,159 @@ pub async fn patch_settings(
     State(profiles): State<Arc<dyn ProfileApi>>,
     Json(patch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let settings = apply_flat_settings_patch(&config, &profiles, &patch).await?;
-    save_and_flat_response(&config, &settings).await
+    apply_flat_settings_patch(&config, &profiles, &patch).await?;
+    reload_and_flat_response(&config).await
 }
 
-/// 将前端扁平 patch 合并进当前设置（PUT / PATCH /api/config 共用）
+/// 将前端扁平 patch 应用并保存（PUT / PATCH /api/config 共用）
 ///
-/// 返回合并后的 `SettingsData`（未落盘，由调用方保存）。
-/// 凭证字段（username/password/auth_url/isp/active_task）直接写入活跃 Profile。
+/// 凭证字段（username/password/auth_url/isp/active_task）直接写入活跃 Profile；
+/// 全局设置经 [`ConfigApi::modify_settings_tx`] 的提交事务落盘——「读取→合并→
+/// 校验→持久化」在同一 `settings_lock` 临界区内完成。历史实现锁外读取合并
+/// 整份设置再 `save_settings`（仅锁最终写入），两个并发修改不同字段的请求
+/// 会相互覆盖（丢更新）。
 async fn apply_flat_settings_patch(
     config: &Arc<dyn ConfigApi>,
     profiles: &Arc<dyn ProfileApi>,
     patch: &Value,
-) -> Result<crate::config::SettingsData, ApiError> {
-    let mut current_value = serde_json::to_value(config.load_settings_async().await)?;
+) -> Result<(), ApiError> {
+    let Some(obj) = patch.as_object() else {
+        // 非对象 patch：无字段可合并（与旧实现一致，不落盘直接成功）
+        return Ok(());
+    };
 
-    if let Some(obj) = patch.as_object() {
-        let mut global_patch = serde_json::Map::new();
-        let mut profile_patch = serde_json::Map::new();
-        let mut other_patch = serde_json::Map::new();
+    let mut global_patch = serde_json::Map::new();
+    let mut profile_patch = serde_json::Map::new();
+    let mut other_patch = serde_json::Map::new();
 
-        // 前端字段名 → 后端字段名映射
-        let field_map: std::collections::HashMap<&str, &str> =
-            [("retry", "retry_settings"), ("app_settings", "app")]
-                .into_iter()
-                .collect();
+    // 前端字段名 → 后端字段名映射
+    let field_map: std::collections::HashMap<&str, &str> =
+        [("retry", "retry_settings"), ("app_settings", "app")]
+            .into_iter()
+            .collect();
 
-        // 凭证字段属于 Profile 而非全局设置
-        let profile_keys = [
-            "username",
-            "password",
-            "auth_url",
-            "isp",
-            "carrier_custom",
-            "active_task",
-        ];
+    // 凭证字段属于 Profile 而非全局设置
+    let profile_keys = [
+        "username",
+        "password",
+        "auth_url",
+        "isp",
+        "carrier_custom",
+        "active_task",
+    ];
 
-        // 全局设置字段
-        let global_keys = [
-            "browser",
-            "monitor",
-            "pause",
-            "logging",
-            "retry",
-            "app_settings",
-            "retry_settings",
-            "app",
-            "worker",
-            "updater",
-        ];
+    // 全局设置字段
+    let global_keys = [
+        "browser",
+        "monitor",
+        "pause",
+        "logging",
+        "retry",
+        "app_settings",
+        "retry_settings",
+        "app",
+        "worker",
+        "updater",
+    ];
 
-        for (k, v) in obj {
-            if k == "carrier_custom" {
-                // 纯前端展示字段（自定义运营商输入框），后端无对应存储；
-                // 实际运营商名已由 `isp` 字段承载。显式忽略，避免落入 other_patch 污染 settings.json。
-                continue;
-            }
-            if profile_keys.contains(&k.as_str()) {
-                profile_patch.insert(k.clone(), v.clone());
-            } else if k == "monitor" {
-                // monitor 字段需要前端→后端字段名映射；先校验字段名白名单，
-                // 非法字段（如误传后端字段名 http_targets）直接报错而非静默清空配置
-                validate_monitor_patch(v)?;
-                let backend_monitor = monitor_frontend_to_backend(v);
-                global_patch.insert("monitor".to_string(), backend_monitor);
-            } else if global_keys.contains(&k.as_str()) {
-                // 映射前端字段名到后端字段名
-                let default_key = k.as_str();
-                let mapped_key = field_map.get(k.as_str()).copied().unwrap_or(default_key);
-                global_patch.insert(mapped_key.to_string(), v.clone());
-            } else {
-                other_patch.insert(k.clone(), v.clone());
-            }
+    for (k, v) in obj {
+        if k == "carrier_custom" {
+            // 纯前端展示字段（自定义运营商输入框），后端无对应存储；
+            // 实际运营商名已由 `isp` 字段承载。显式忽略，避免落入 other_patch 污染 settings.json。
+            continue;
         }
-
-        // 合并 global 字段
-        if !global_patch.is_empty() {
-            if let Some(global) = current_value.get_mut("global") {
-                json_merge(global, &Value::Object(global_patch));
-            }
-        }
-
-        // 合并其他字段（如 active_profile_id, active_task 等）
-        if !other_patch.is_empty() {
-            json_merge(&mut current_value, &Value::Object(other_patch));
-        }
-
-        // 保存凭证到活跃 Profile
-        if !profile_patch.is_empty() {
-            let active_id = current_value
-                .get("active_profile_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default")
-                .to_string();
-            // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
-            // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
-            let mut profile = config.load_profile(&active_id).map_err(|e| {
-                ApiError::BadRequest(format!(
-                    "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
-                ))
-            })?;
-            if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
-                profile.username = username.to_string();
-            }
-            if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
-                let trimmed = auth_url.trim();
-                if !trimmed.is_empty() {
-                    validate_auth_url(trimmed)?;
-                }
-                profile.auth_url = trimmed.to_string();
-            }
-            if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
-                profile.isp = isp.to_string();
-            }
-            if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str()) {
-                profile.active_task = active_task.to_string();
-            }
-            if let Some(password) = profile_patch.get("password") {
-                let pwd_str = password.as_str().unwrap_or("");
-                profile.password = profiles.save_password(Some(pwd_str), &profile.password);
-            }
-            config.save_profile(&profile).await?;
+        if profile_keys.contains(&k.as_str()) {
+            profile_patch.insert(k.clone(), v.clone());
+        } else if k == "monitor" {
+            // monitor 字段需要前端→后端字段名映射；先校验字段名白名单，
+            // 非法字段（如误传后端字段名 http_targets）直接报错而非静默清空配置
+            validate_monitor_patch(v)?;
+            let backend_monitor = monitor_frontend_to_backend(v);
+            global_patch.insert("monitor".to_string(), backend_monitor);
+        } else if global_keys.contains(&k.as_str()) {
+            // 映射前端字段名到后端字段名
+            let default_key = k.as_str();
+            let mapped_key = field_map.get(k.as_str()).copied().unwrap_or(default_key);
+            global_patch.insert(mapped_key.to_string(), v.clone());
+        } else {
+            other_patch.insert(k.clone(), v.clone());
         }
     }
 
-    serde_json::from_value(current_value).map_err(|e| ApiError::BadRequest(e.to_string()))
+    // 保存凭证到活跃 Profile（active_id 优先取 patch 显式指定值，其次当前设置）
+    if !profile_patch.is_empty() {
+        let active_id = match obj.get("active_profile_id").and_then(|v| v.as_str()) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => config.load_settings_async().await.active_profile_id,
+        };
+        // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
+        // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
+        let mut profile = config.load_profile(&active_id).map_err(|e| {
+            ApiError::BadRequest(format!(
+                "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
+            ))
+        })?;
+        if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
+            profile.username = username.to_string();
+        }
+        if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
+            let trimmed = auth_url.trim();
+            if !trimmed.is_empty() {
+                validate_auth_url(trimmed)?;
+            }
+            profile.auth_url = trimmed.to_string();
+        }
+        if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
+            profile.isp = isp.to_string();
+        }
+        if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str()) {
+            profile.active_task = active_task.to_string();
+        }
+        if let Some(password) = profile_patch.get("password") {
+            let pwd_str = password.as_str().unwrap_or("");
+            profile.password = profiles.save_password(Some(pwd_str), &profile.password);
+        }
+        config.save_profile(&profile).await?;
+    }
+
+    // 全局设置合并：提交事务（持锁读-改-写，闭包失败不落盘）
+    if !global_patch.is_empty() || !other_patch.is_empty() {
+        let global_patch = Value::Object(global_patch);
+        let other_patch = Value::Object(other_patch);
+        match config
+            .modify_settings_tx(Box::new(move |settings| {
+                let mut current_value =
+                    serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
+                // 合并 global 字段
+                if !global_patch.as_object().unwrap().is_empty() {
+                    if let Some(global) = current_value.get_mut("global") {
+                        json_merge(global, &global_patch);
+                    }
+                }
+                // 合并其他字段（如 active_profile_id 等）
+                if !other_patch.as_object().unwrap().is_empty() {
+                    json_merge(&mut current_value, &other_patch);
+                }
+                serde_json::from_value(current_value)
+                    .map_err(|e| format!("设置合并后校验失败: {e}"))
+            }))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
 }
 
-/// 保存设置 → reload → 回读设置与活跃 Profile → 构造扁平响应（PUT / PATCH 共用）
+/// reload → 回读设置与活跃 Profile → 构造扁平响应（PUT / PATCH 共用）
 ///
-/// 与 GET /api/config 响应字节保持一致（现有前端契约护航）
-async fn save_and_flat_response(
-    config: &Arc<dyn ConfigApi>,
-    settings: &crate::config::SettingsData,
-) -> Result<Json<Value>, ApiError> {
-    config.save_settings(settings).await?;
+/// 与 GET /api/config 响应字节保持一致（现有前端契约护航）。
+/// 设置已在 [`apply_flat_settings_patch`] 的提交事务内落盘，此处只负责
+/// 发布（reload 触发 RuntimeConfig 替换 + 配置版本广播）与回读。
+async fn reload_and_flat_response(config: &Arc<dyn ConfigApi>) -> Result<Json<Value>, ApiError> {
     config.reload().await?;
     let settings = config.load_settings_async().await;
     let profile = config
@@ -286,9 +304,19 @@ pub async fn set_log_level(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<SetLogLevelBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = config.load_settings_async().await;
-    settings.global.logging.level = body.level.clone();
-    config.save_settings(&settings).await?;
+    // 持锁读-改-写：锁外的 load→改→save 会丢并发的其他字段更新
+    let level = body.level.clone();
+    match config
+        .modify_settings_tx(Box::new(move |mut s| {
+            s.global.logging.level = level;
+            Ok(s)
+        }))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
+        Err(e) => return Err(e.into()),
+    }
     // 热更新运行时日志级别（tracing filter），而非仅落盘下次启动生效
     crate::logging::reload_log_level(&body.level);
     Ok(data(body.level))
@@ -353,10 +381,20 @@ pub async fn get_pure_mode(
 pub async fn set_pure_mode(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = config.load_settings_async().await;
-    let new_enabled = !settings.global.browser.pure_mode;
-    settings.global.browser.pure_mode = new_enabled;
-    config.save_settings(&settings).await?;
+    // 持锁读-改-写：并发请求各自读到相同旧值取反会互相覆盖（两次 toggle 终值不变）
+    match config
+        .modify_settings_tx(Box::new(|mut s| {
+            s.global.browser.pure_mode = !s.global.browser.pure_mode;
+            Ok(s)
+        }))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
+        Err(e) => return Err(e.into()),
+    }
+    // 回读终值（并发 toggle 下以落盘结果为准）
+    let new_enabled = config.load_settings_async().await.global.browser.pure_mode;
     Ok(data(
         serde_json::json!({ "enabled": new_enabled, "message": "纯净模式已切换" }),
     ))
@@ -389,6 +427,7 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "auth_url_targets": [],
         "url_check_urls": url_check_urls,
         "enable_local_check": m.local_check_enabled,
+        "disable_proxy": m.disable_proxy,
         "script_timeout": 60,
         "post_login_delay": m.post_login_delay,
     })
@@ -406,6 +445,7 @@ const MONITOR_PATCH_ALLOWED_KEYS: &[&str] = &[
     "enable_tcp_check",
     "enable_http_check",
     "enable_local_check",
+    "disable_proxy",
     "network_check_timeout",
     "post_login_delay",
     // 以下三个为 GET 响应的往返保真字段：前端保存时原样回传，映射函数有意忽略
@@ -477,6 +517,7 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         "http_enabled": obj.get("enable_http_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "url_enabled": obj.get("url_check_urls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
         "local_check_enabled": obj.get("enable_local_check").and_then(|v| v.as_bool()).unwrap_or(true),
+        "disable_proxy": obj.get("disable_proxy").and_then(|v| v.as_bool()).unwrap_or(true),
         "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
         "post_login_delay": obj.get("post_login_delay").and_then(|v| v.as_u64()).unwrap_or(5),
         // 注意：profile_check_interval / http_timeout / url_timeout / auth_url_timeout / socks5_port
@@ -542,6 +583,7 @@ mod tests {
             http_enabled: false,
             url_enabled: true,
             local_check_enabled: false,
+            disable_proxy: true,
             profile_check_interval: 300,
             tcp_timeout: 5,
             http_timeout: 5,
@@ -685,6 +727,26 @@ mod tests {
             inner.settings = data.clone();
             inner.save_calls += 1;
             Ok(())
+        }
+
+        async fn modify_settings_tx(
+            &self,
+            f: Box<
+                dyn FnOnce(
+                        crate::config::SettingsData,
+                    ) -> Result<crate::config::SettingsData, String>
+                    + Send,
+            >,
+        ) -> Result<Result<(), String>, ConfigError> {
+            let mut inner = self.0.lock().unwrap();
+            match f(inner.settings.clone()) {
+                Ok(new_settings) => {
+                    inner.settings = new_settings;
+                    inner.save_calls += 1;
+                    Ok(Ok(()))
+                }
+                Err(msg) => Ok(Err(msg)),
+            }
         }
 
         fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {
@@ -1045,7 +1107,9 @@ mod tests {
         );
         // 指定字段生效：username 写入 Profile
         assert_eq!(g.profile.username, "alice");
-        assert_eq!(g.save_calls, 1);
+        // 仅含 Profile 字段的 payload 不触发 settings 落盘（无可合并的全局字段，
+        // 旧实现会做一次无变化的 save），但 reload 照常发布
+        assert_eq!(g.save_calls, 0);
         assert_eq!(g.reload_calls, 1);
         // 响应与 GET/PATCH 同形（扁平结构 + 回显凭证）
         assert_eq!(d["username"], "alice");

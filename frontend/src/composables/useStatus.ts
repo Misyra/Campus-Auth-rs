@@ -77,24 +77,28 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   out.runtime_seconds = Number(raw.uptime_seconds ?? status.runtime_seconds ?? 0);
   out.last_check_time = (raw.last_check_time as string | null) ?? status.last_check_time;
   out.login_status = raw.login_status as string | undefined;
+  out.snapshot_version = Number(raw.snapshot_version ?? 0);
   return out;
 }
 
 // B6：status 双源竞态防护。
-// WS 推送是权威实时源，轮询是低优先级刷新。P14：后端快照携带单调新鲜度字段
-// uptime_seconds（运行时长，只增不减），据此比较而非"epoch 不等即丢"：
-// - 轮询响应的 uptime_seconds ≥ 当前已应用状态 → 应用（即使 in-flight 期间
-//   有过 WS 推送，只要数据不比已应用状态旧就不会回退界面）；
-// - < 已应用状态 → 丢弃，避免过期轮询响应回退状态。
+// WS 推送是权威实时源，轮询是低优先级刷新。P14：后端快照携带单调新鲜度字段，
+// 据此比较而非"epoch 不等即丢"：
+// - 优先用 snapshot_version（每次发布严格 +1，可区分同一秒内的多次变化）；
+// - 旧后端无该字段（0）时回退 uptime_seconds（运行时长，秒级单调递增）：
+//   轮询响应不早于当前已应用状态 → 应用；更早 → 丢弃，避免过期响应回退状态。
 // statusEpoch 计数器保留用于中断明显过旧的请求：in-flight 期间 WS 推送超过
 // 1 次（差值 > 1）说明期间数据已多次演进，直接丢弃不再比较。
 let statusEpoch = 0;
-// 当前已应用状态的新鲜度（后端 uptime_seconds，单调递增；0 表示尚未应用过）
+// 当前已应用状态的新鲜度（后端 snapshot_version / uptime_seconds，单调递增；0 表示尚未应用过）
+let appliedVersion = 0;
 let appliedUptime = 0;
 
-/** 应用映射后的状态并同步已应用新鲜度（raw 为后端原始快照，可能缺 uptime_seconds） */
+/** 应用映射后的状态并同步已应用新鲜度（raw 为后端原始快照，可能缺新鲜度字段） */
 function applyStatus(mapped: Partial<StatusSnapshot>, raw: Record<string, unknown>): void {
   Object.assign(status, mapped);
+  const version = Number(raw.snapshot_version);
+  if (Number.isFinite(version) && version > 0) appliedVersion = version;
   const uptime = Number(raw.uptime_seconds);
   if (Number.isFinite(uptime) && uptime > 0) appliedUptime = uptime;
 }
@@ -145,10 +149,16 @@ async function fetchStatus(): Promise<void> {
     const raw = data as unknown as Record<string, unknown>;
     // B6/P14：in-flight 期间 WS 推送超过 1 次（差值 > 1）→ 请求明显过旧，直接丢弃
     if (statusEpoch - startEpoch > 1) return;
-    // 否则按单调新鲜度比较：仅当响应不早于当前已应用状态（uptime_seconds）才应用，
-    // 替换原"epoch 不等即丢"——相同数据的 WS 推送不再导致轮询响应被无谓丢弃
+    // 否则按单调新鲜度比较：仅当响应不早于当前已应用状态才应用，
+    // 替换原"epoch 不等即丢"——相同数据的 WS 推送不再导致轮询响应被无谓丢弃。
+    // 优先 snapshot_version（严格单调）；旧后端缺字段时回退 uptime_seconds 比较
+    const freshVersion = Number(raw.snapshot_version ?? 0);
     const freshUptime = Number(raw.uptime_seconds ?? 0);
-    if (freshUptime > 0 && freshUptime < appliedUptime) return;
+    if (freshVersion > 0) {
+      if (appliedVersion > 0 && freshVersion < appliedVersion) return;
+    } else if (freshUptime > 0 && freshUptime < appliedUptime) {
+      return;
+    }
     applyStatus(mapBackendStatus(raw), raw);
     // F3：从失败恢复时提示已重连（trackRecovery 仅在之前处于失败状态时返回 true）
     if (fetchStatusFail.trackRecovery()) {

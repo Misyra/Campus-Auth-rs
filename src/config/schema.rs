@@ -160,6 +160,9 @@ pub struct MonitorSettings {
     pub url_enabled: bool,
     /// 是否启用物理网卡连接检查（步骤 2：list_interfaces 判定是否存在在线网卡）
     pub local_check_enabled: bool,
+    /// 网络检测是否禁用代理（默认 true：检测直连，避免代理故障误判离线；
+    /// 关闭后 HTTP/URL 探测跟随系统代理）
+    pub disable_proxy: bool,
     /// Profile 切换检测间隔（秒）
     pub profile_check_interval: u32,
     /// TCP 探测超时（秒）
@@ -210,6 +213,7 @@ impl Default for MonitorSettings {
             http_enabled: true,
             url_enabled: true,
             local_check_enabled: true,
+            disable_proxy: true,
             profile_check_interval: 180,
             tcp_timeout: 2,
             http_timeout: 10,
@@ -343,6 +347,10 @@ pub struct UpdaterSettings {
     pub release_source_url: String,
     /// 检查间隔（小时）
     pub check_interval_hours: u32,
+    /// 是否使用本地代理下载更新（127.0.0.1:proxy_port）
+    pub use_proxy: bool,
+    /// 本地代理端口（如 Clash 默认 7890）
+    pub proxy_port: u16,
 }
 
 impl Default for UpdaterSettings {
@@ -352,6 +360,8 @@ impl Default for UpdaterSettings {
             release_source_url:
                 "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest".to_string(),
             check_interval_hours: 24,
+            use_proxy: false,
+            proxy_port: 7890,
         }
     }
 }

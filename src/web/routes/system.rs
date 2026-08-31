@@ -1,4 +1,4 @@
-//! 系统路由：系统信息、关机、更新、浏览器、图标、卸载、背景图、文档
+//! 系统路由：系统信息、关机、更新、浏览器、图标、背景图、文档
 //!
 //! M1 细粒度 state：environment/updater/bridge/metrics 经 AppState 直字段
 //! 或 `State<Arc<dyn ...>>` 提取，不再触达 `state.container`。
@@ -77,9 +77,9 @@ pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, A
 
 /// 生成退出 watchdog：优雅关闭超时后强制 `exit(0)`，作为最后防线。
 ///
-/// `shutdown_app` / `restart_app` / `uninstall` 三处共用，统一为 30s，
+/// `shutdown_app` / `restart_app` 共用，统一为 30s，
 /// 覆盖优雅关闭总预算（Tray 3s + Scheduler 5s + Engine 5s + Bridge 8s + Axum 5s ≈ 26s），
-/// 避免卸载等场景因强杀过早残留浏览器/子进程（A4）。
+/// 避免强杀过早残留浏览器/子进程（A4）。
 pub(crate) fn spawn_exit_watchdog(secs: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
@@ -267,7 +267,8 @@ fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
 /// GET /api/check-update — 检查更新
 ///
 /// 返回字段对齐前端契约：`has_update`(bool) / `latest`(string) / `current`(string) /
-/// `error`(string,可选)。
+/// `error`(string,可选)。网络路径同下载：显式代理（设置 use_proxy）优先，
+/// 未配置跟随系统代理。
 pub async fn check_update(
     State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -291,6 +292,7 @@ pub async fn check_update(
 /// POST /api/system/update — 执行更新（下载 zip 到 staging 并触发助手替换）
 ///
 /// 先调用 `check_update` 获取最新版本信息，再 `apply_update` 执行下载与暂存。
+/// 检查与下载使用同一网络路径（显式代理优先，未配置跟随系统代理）。
 pub async fn apply_update(
     State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {

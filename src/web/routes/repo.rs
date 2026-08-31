@@ -4,16 +4,18 @@
 //! SSRF 防护（scheme 校验、私网地址拒绝、DNS 钉扎防 TOCTOU、逐跳重定向
 //! 校验）统一由 `crate::web::ssrf` 提供；本模块负责 URL 归一化与 JSON 校验。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
-use crate::web::ssrf::secure_get;
+use crate::web::ssrf::secure_get_proxied;
 
 /// 代理响应体大小上限（8 MiB）
 ///
@@ -76,11 +78,24 @@ fn normalize_repo_url(raw: &str) -> String {
     raw.to_string()
 }
 
+/// 读取更新器代理设置：启用时返回 `http://127.0.0.1:{port}`（仓库任务与更新
+/// 共用同一代理配置——国内访问 GitHub raw 常需代理），未启用返回 None（直连/系统代理）。
+async fn updater_proxy(config: &Arc<dyn ConfigApi>) -> Option<String> {
+    let updater = config.load_settings_async().await.global.updater;
+    (updater.use_proxy && updater.proxy_port > 0)
+        .then(|| format!("http://127.0.0.1:{}", updater.proxy_port))
+}
+
 /// 获取远程 JSON 并校验类型（数组或对象）
 ///
-/// SSRF 防护由 `secure_get` 统一提供（DNS 钉扎 + 逐跳重定向校验）
-async fn repo_fetch_json(url: &str, expected_list: bool, label: &str) -> Result<Value, ApiError> {
-    let (resp, _) = secure_get(url, Duration::from_secs(15), "Campus-Auth")
+/// SSRF 防护由 `secure_get_proxied` 统一提供（DNS 钉扎 + 逐跳重定向校验）
+async fn repo_fetch_json(
+    url: &str,
+    expected_list: bool,
+    label: &str,
+    proxy: Option<&str>,
+) -> Result<Value, ApiError> {
+    let (resp, _) = secure_get_proxied(url, Duration::from_secs(15), "Campus-Auth", proxy)
         .await
         .map_err(ApiError::BadRequest)?;
     let status = resp.status();
@@ -118,16 +133,24 @@ async fn repo_fetch_json(url: &str, expected_list: bool, label: &str) -> Result<
 }
 
 /// GET /api/repo/fetch — 代理获取远程任务仓库索引（返回 JSON 数组）
-pub async fn repo_fetch_index(Query(params): Query<RepoUrlQuery>) -> Result<Json<Value>, ApiError> {
+pub async fn repo_fetch_index(
+    State(config): State<Arc<dyn ConfigApi>>,
+    Query(params): Query<RepoUrlQuery>,
+) -> Result<Json<Value>, ApiError> {
     let url = normalize_repo_url(&params.url);
-    let index = repo_fetch_json(&url, true, "索引").await?;
+    let proxy = updater_proxy(&config).await;
+    let index = repo_fetch_json(&url, true, "索引", proxy.as_deref()).await?;
     Ok(data(index))
 }
 
 /// GET /api/repo/task — 代理获取远程任务配置（返回 JSON 对象）
-pub async fn repo_fetch_task(Query(params): Query<RepoUrlQuery>) -> Result<Json<Value>, ApiError> {
+pub async fn repo_fetch_task(
+    State(config): State<Arc<dyn ConfigApi>>,
+    Query(params): Query<RepoUrlQuery>,
+) -> Result<Json<Value>, ApiError> {
     let url = normalize_repo_url(&params.url);
-    let task = repo_fetch_json(&url, false, "任务").await?;
+    let proxy = updater_proxy(&config).await;
+    let task = repo_fetch_json(&url, false, "任务", proxy.as_deref()).await?;
     Ok(data(task))
 }
 

@@ -501,15 +501,25 @@ mod tests {
         // 目标：旧版同名文件 + 用户运行态 .venv + 目标独有文件
         std::fs::create_dir_all(dst.join(".venv").join("Scripts")).unwrap();
         std::fs::write(dst.join("playwright_worker.py"), b"OLD").unwrap();
-        std::fs::write(dst.join(".venv").join("Scripts").join("python.exe"), b"USER-VENV").unwrap();
+        std::fs::write(
+            dst.join(".venv").join("Scripts").join("python.exe"),
+            b"USER-VENV",
+        )
+        .unwrap();
         std::fs::write(dst.join("user-config-only.txt"), b"KEEP").unwrap();
 
         copy_dir_overlay(&src, &dst, &[".venv", "__pycache__"]).unwrap();
 
         // 同名覆盖
-        assert_eq!(std::fs::read(dst.join("playwright_worker.py")).unwrap(), b"NEW");
+        assert_eq!(
+            std::fs::read(dst.join("playwright_worker.py")).unwrap(),
+            b"NEW"
+        );
         // 新增缺失
-        assert_eq!(std::fs::read(dst.join("tests").join("t.py")).unwrap(), b"new-test");
+        assert_eq!(
+            std::fs::read(dst.join("tests").join("t.py")).unwrap(),
+            b"new-test"
+        );
         // 目标侧 .venv 保留（用户运行态），src 侧 .venv 不入侵
         assert_eq!(
             std::fs::read(dst.join(".venv").join("Scripts").join("python.exe")).unwrap(),

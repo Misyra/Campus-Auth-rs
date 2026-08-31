@@ -68,7 +68,7 @@ pub struct UpdaterService {
     config: Arc<ConfigService>,
     /// 状态管理器（推送 update_available / 下载进度）
     status: Arc<StatusManager>,
-    /// 共享 HTTP 客户端（全局复用连接池）
+    /// 跟随系统/环境代理的客户端（未配置显式代理时的回退）
     http_client: reqwest::Client,
     /// 项目根目录（用于构造 update/ staging 路径）
     base_path: PathBuf,
@@ -84,7 +84,8 @@ pub struct UpdaterService {
 /// 不再触达 `state.container`，测试可注入内存实现。
 #[async_trait::async_trait]
 pub trait UpdaterApi: Send + Sync {
-    /// 手动触发版本检查；有新版本返回 `Some(UpdateInfo)`。
+    /// 手动触发版本检查（网络路径同下载：显式代理优先，未配置跟随系统代理）；
+    /// 有新版本返回 `Some(UpdateInfo)`。
     async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError>;
     /// 执行更新（下载 zip 到 staging 并触发助手替换）。
     async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError>;
@@ -118,9 +119,8 @@ impl UpdaterService {
                 Version::new(0, 0, 0)
             }
         };
-        // 跟随系统/环境代理（system-proxy feature 已启用）：国内直连 GitHub
-        // 极慢是更新"等好久"的主因。原 no_proxy 是 e2e 回环假更新源防本地代理
-        // 劫持所加，现在系统代理 bypass 列表默认含 <local>，回环场景不受影响。
+        // 回退客户端跟随系统/环境代理（system-proxy feature 已启用）：
+        // 显式代理未启用/构建失败时使用。
         let http_client = reqwest::Client::builder()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
@@ -135,6 +135,14 @@ impl UpdaterService {
         })
     }
 
+    /// 更新网络路径客户端（检查与下载共用）
+    ///
+    /// 委托 [`effective_client_for`]：显式代理优先，未配置/构建失败回退系统代理。
+    fn effective_client(&self) -> reqwest::Client {
+        let settings = self.config.load_settings().global.updater;
+        effective_client_for(&settings, self.http_client.clone())
+    }
+
     /// 启动后台版本检查任务（循环：启动时检查一次，之后按 check_interval_hours 定时检查）
     ///
     /// 延迟 [`STARTUP_CHECK_DELAY`] 后拉取清单，发现更新则
@@ -146,16 +154,19 @@ impl UpdaterService {
     pub fn start_background_check(&self, cancel: CancellationToken) {
         let config = self.config.clone();
         let status = self.status.clone();
-        let http_client = self.http_client.clone();
+        // 回退客户端（跟随系统代理）；每次检查按当前配置构建实际客户端，
+        // 运行时修改 use_proxy / proxy_port 无需重启即生效
+        let fallback_client = self.http_client.clone();
         let current_version = self.current_version.clone();
 
         tokio::spawn(async move {
             tokio::time::sleep(STARTUP_CHECK_DELAY).await;
             // 启动即查：读一次决定，不随循环迭代变化
-            let check_on_startup = config.load_settings().global.updater.check_on_startup;
-            if check_on_startup {
+            let startup_settings = config.load_settings().global.updater;
+            if startup_settings.check_on_startup {
+                let client = effective_client_for(&startup_settings, fallback_client.clone());
                 if let Err(e) =
-                    perform_update_check(&config, &status, &http_client, &current_version).await
+                    perform_update_check(&config, &status, &client, &current_version).await
                 {
                     log_check_failure("启动时", &e);
                 }
@@ -171,8 +182,9 @@ impl UpdaterService {
                 let interval_secs = (settings.check_interval_hours as u64).saturating_mul(3600);
                 let interval = std::time::Duration::from_secs(interval_secs.max(300)); // 最少 5 分钟
                 // 每周期先执行一次检查，再等待下一间隔
+                let client = effective_client_for(&settings, fallback_client.clone());
                 if let Err(e) =
-                    perform_update_check(&config, &status, &http_client, &current_version).await
+                    perform_update_check(&config, &status, &client, &current_version).await
                 {
                     log_check_failure("定期", &e);
                 }
@@ -187,10 +199,11 @@ impl UpdaterService {
     /// 手动触发版本检查（API 端点调用）
     ///
     /// 拉取清单 → 平台选择 → 版本比较；有新版本返回 `Some(UpdateInfo)`，否则 `None`。
+    /// 网络路径同下载：显式代理（use_proxy）优先，未配置跟随系统代理。
     pub async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
         let settings = self.config.load_settings().global.updater;
-        let manifest =
-            check::fetch_manifest(&self.http_client, &settings.release_source_url).await?;
+        let client = self.effective_client();
+        let manifest = check::fetch_manifest(&client, &settings.release_source_url).await?;
 
         let pkg = match check::select_platform(&manifest) {
             Some(p) => p,
@@ -252,8 +265,9 @@ impl UpdaterService {
             .await
             .map_err(UpdaterError::StagingDirCreateFailed)?;
 
+        let download_client = self.effective_client();
         let zip_path = download::download_and_verify(
-            &self.http_client,
+            &download_client,
             info,
             &staging_dir,
             Some(&|percent| {
@@ -450,6 +464,39 @@ impl UpdaterService {
             }
         }
     }
+}
+
+/// 构建指向本地代理端口的 HTTP 客户端（`http://127.0.0.1:{port}`）
+///
+/// 每次调用新建（Client 构造纯配置无 I/O，开销可忽略）；检查/下载为低频操作，
+/// 连接池复用收益有限。
+fn build_proxied_client(port: u16) -> Result<reqwest::Client, String> {
+    let proxy =
+        reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?;
+    reqwest::Client::builder()
+        .proxy(proxy)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// 按更新器配置选择客户端（后台检查任务用，与 [`UpdaterService::effective_client`] 同语义）
+///
+/// `use_proxy` 开启且端口合法 → 显式代理客户端；否则返回 `fallback`
+/// （跟随系统代理的共享客户端）。
+fn effective_client_for(
+    settings: &crate::config::UpdaterSettings,
+    fallback: reqwest::Client,
+) -> reqwest::Client {
+    if settings.use_proxy && settings.proxy_port > 0 {
+        if let Ok(c) = build_proxied_client(settings.proxy_port) {
+            return c;
+        }
+        tracing::warn!(
+            "构建代理客户端失败（端口 {}），回退系统代理",
+            settings.proxy_port
+        );
+    }
+    fallback
 }
 
 /// 拉取清单并判断是否存在对当前版本"感兴趣"的更新；有则推送状态快照

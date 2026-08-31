@@ -13,6 +13,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::config::{ConfigApi, ProfileApi};
+use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
 use crate::web::error::{ApiError, data};
 
 #[derive(Deserialize)]
@@ -192,11 +193,22 @@ pub async fn delete_profile(
 }
 
 /// POST /api/profiles/switch — 切换活跃 Profile
+///
+/// 切换本体同步完成（保留前端「响应即已生效」的时序契约：切换后立即
+/// fetchConfig 必须拿到新 Profile 凭证），随后派发 Engine 的 ApplyProfile
+/// 命令同步引擎派生状态（ActiveProfile 状态广播 + 监测中的即时探测与
+/// 定时器重建）。历史实现只调 ProfileService、绕过 Engine：切换后引擎内
+/// 的探测上下文不随切换刷新，Web 与自动切换两个入口的生效行为不一致。
 pub async fn switch_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
+    State(engine): State<Arc<dyn EngineApi>>,
     Json(body): Json<SwitchBody>,
 ) -> Result<Json<Value>, ApiError> {
     profiles.switch_profile(&body.profile_id).await?;
+    engine.try_dispatch(EngineCommand::ApplyProfile {
+        profile_id: body.profile_id,
+        source: ProfileSwitchSource::Manual,
+    })?;
     Ok(data(Value::String("ok".into())))
 }
 
@@ -256,12 +268,36 @@ mod tests {
     use tower::ServiceExt; // oneshot
 
     use crate::config::{ConfigError, ProfileData, ProfileSummary, SettingsData};
+    use crate::engine::EngineError;
 
     #[derive(Default)]
     struct MockInner {
         profiles: Vec<ProfileData>,
         active: String,
         auto_switch: bool,
+        /// switch_profile 派发的 ApplyProfile 目标 ID（验证 Engine 联动）
+        dispatched_apply_profile: Vec<String>,
+    }
+
+    /// 内存 EngineApi：仅记录 ApplyProfile 派发（switch 路由联动验证）
+    struct MockEngineApi(Arc<std::sync::Mutex<MockInner>>);
+
+    #[async_trait::async_trait]
+    impl EngineApi for MockEngineApi {
+        fn try_dispatch(&self, cmd: EngineCommand) -> Result<(), EngineError> {
+            if let EngineCommand::ApplyProfile { profile_id, .. } = cmd {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .dispatched_apply_profile
+                    .push(profile_id);
+            }
+            Ok(())
+        }
+
+        async fn test_network(&self) -> Result<crate::engine::TestNetworkResult, EngineError> {
+            Err(EngineError::ChannelClosed)
+        }
     }
 
     /// 内存 ProfileApi（M1）
@@ -369,6 +405,15 @@ mod tests {
             Ok(())
         }
 
+        async fn modify_settings_tx(
+            &self,
+            f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
+        ) -> Result<Result<(), String>, ConfigError> {
+            // profiles handler 测试不触达 settings 事务路径，按原样接受
+            let _ = f;
+            Ok(Ok(()))
+        }
+
         fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {
             self.0
                 .lock()
@@ -417,11 +462,12 @@ mod tests {
         }
     }
 
-    /// 双 State 提取的测试 Router：ProfileApi + ConfigApi 组合为单一 state 类型
+    /// 双 State 提取的测试 Router：ProfileApi + ConfigApi + EngineApi 组合为单一 state 类型
     #[derive(Clone)]
     struct TestState {
         profiles: Arc<dyn ProfileApi>,
         config: Arc<dyn ConfigApi>,
+        engine: Arc<dyn EngineApi>,
     }
 
     impl axum::extract::FromRef<TestState> for Arc<dyn ProfileApi> {
@@ -436,15 +482,23 @@ mod tests {
         }
     }
 
+    impl axum::extract::FromRef<TestState> for Arc<dyn EngineApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.engine.clone()
+        }
+    }
+
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner {
             profiles: vec![profile_of("default"), profile_of("dorm")],
             active: "default".into(),
             auto_switch: false,
+            dispatched_apply_profile: Vec::new(),
         }));
         let state = TestState {
             profiles: Arc::new(MockProfileApi(inner.clone())),
             config: Arc::new(MockConfigApi(inner.clone())),
+            engine: Arc::new(MockEngineApi(inner.clone())),
         };
         let app = axum::Router::new()
             .route("/api/profiles", get(list_profiles))
@@ -493,7 +547,7 @@ mod tests {
         assert_eq!(d["profiles"]["dorm"]["name"], "档案 dorm");
     }
 
-    /// 切换到存在的 Profile 成功；不存在的返回错误
+    /// 切换到存在的 Profile 成功且派发 Engine ApplyProfile；不存在的返回错误
     #[tokio::test]
     async fn test_switch_profile() {
         let (app, inner) = mock_app();
@@ -512,7 +566,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(inner.lock().unwrap().active, "dorm");
+        {
+            let g = inner.lock().unwrap();
+            assert_eq!(g.active, "dorm");
+            // Engine 联动：切换成功后必须派发 ApplyProfile 同步派生状态
+            assert_eq!(g.dispatched_apply_profile, vec!["dorm".to_string()]);
+        }
 
         let resp = app
             .oneshot(
@@ -528,6 +587,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // 切换失败时不得派发 Engine 命令
+        assert_eq!(
+            inner.lock().unwrap().dispatched_apply_profile,
+            vec!["dorm".to_string()]
+        );
     }
 
     /// 删除 default 被拒绝（业务错误 → 非 200）

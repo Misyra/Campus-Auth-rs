@@ -267,6 +267,41 @@ async function reloadConfig() {
       </div>
     </section>
 
+    <!-- 更新与代理 -->
+    <section class="card settings-panel">
+      <div class="settings-card-header">
+        <IconApp name="globe" class="settings-card-icon" />
+        <h2>更新与代理</h2>
+      </div>
+      <div class="card-body">
+        <div class="toggle-group">
+          <div class="toggle-with-help">
+            <label class="toggle toggle-help-inline">
+              <input type="checkbox" v-model="config.config.updater.use_proxy" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">使用代理下载更新</span>
+              <FieldHelp text="启用后更新检查/下载与仓库任务下载走本地代理 127.0.0.1:端口（如 Clash）；未启用时跟随系统代理。网络检测的代理行为在监测设置中单独控制。" />
+            </label>
+          </div>
+        </div>
+        <div class="form-group">
+          <div class="field-label-row">
+            <label for="settings-proxy-port">代理端口</label>
+            <FieldHelp text="本地 HTTP 代理端口，如 Clash 默认 7890。仅在启用“使用代理下载更新”后生效。" />
+          </div>
+          <input
+            id="settings-proxy-port"
+            v-model.number="config.config.updater.proxy_port"
+            type="number"
+            min="1"
+            max="65535"
+            :disabled="!config.config.updater.use_proxy"
+          />
+          <span class="hint">更新与仓库任务下载共用此代理；网络检测默认不走代理（监测设置可调）。</span>
+        </div>
+      </div>
+    </section>
+
     <!-- 维护操作 -->
     <section class="card settings-panel">
       <div class="settings-card-header">

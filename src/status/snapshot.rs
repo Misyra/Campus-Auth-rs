@@ -95,6 +95,11 @@ pub struct InstallProgress {
 /// 全局状态快照
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StatusSnapshot {
+    /// 快照单调版本号（每次 merge +1）
+    ///
+    /// 前端据此判断状态新旧：`uptime_seconds` 仅秒级精度，同一秒内的多次
+    /// 状态变化无法区分先后；版本号随每次发布严格递增。
+    pub snapshot_version: u64,
     /// 引擎运行状态
     pub engine_state: EngineState,
     /// 是否处于冷却期（连续失败后的等待）
@@ -151,6 +156,7 @@ pub struct StatusSnapshot {
 impl Default for StatusSnapshot {
     fn default() -> Self {
         Self {
+            snapshot_version: 0,
             engine_state: EngineState::Stopped,
             cooling_down: false,
             cooling_down_remaining: None,
