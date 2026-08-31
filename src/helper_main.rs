@@ -167,6 +167,15 @@ fn main() {
         let _ = std::fs::set_permissions(&target_exe, std::fs::Permissions::from_mode(0o755));
     }
 
+    // 5.5 同步全量分发内容：更新包不只有 exe——python_worker/（Python 代码）、
+    // resources/、docs/ 同为新版本的一部分，只换 exe 会让 Python 侧修复
+    // （如反馈资源快照）永远到不了走应用内更新的用户。overlay 语义：覆盖同名
+    // 文件、新增缺失文件、绝不删除目标侧多余内容（python_worker/.venv 是
+    // 用户运行态，config/tasks/logs 等用户数据不在 staging 内天然不受影响）。
+    let extracted_dir = staging_dir.join("extracted");
+    sync_distribution_files(&extracted_dir, &base_path);
+    replace_helper(&extracted_dir, &base_path);
+
     // 6. 启动新 exe（传递原始启动参数）
     let original_args = pending
         .as_ref()
@@ -228,6 +237,88 @@ fn wait_for_process_exit(pid: u32) -> bool {
     }
     eprintln!("[helper] 等待进程退出超时（60 秒），中止更新");
     false
+}
+
+/// overlay 同步更新包内的分发目录到 base_path（步骤 5.5）
+///
+/// 覆盖 `resources/`、`docs/`、`python_worker/`（Python 源码与 pyproject/uv.lock）。
+/// `skip_names` 命中的目录名整棵子树跳过——发布包本就不含这些（release.yml 已排除），
+/// 此处是防御性双保险：`.venv` 是用户引导出的运行态，`__pycache__` 运行时自动再生。
+/// best-effort：单文件失败仅告警继续，不回滚（exe 已替换，半新半旧由下次更新收敛）。
+fn sync_distribution_files(extracted_dir: &Path, base_path: &Path) {
+    for dir in ["resources", "docs", "python_worker"] {
+        let src = extracted_dir.join(dir);
+        if !src.exists() {
+            continue;
+        }
+        let dst = base_path.join(dir);
+        println!("[helper] 同步 {dir}/ -> {}", dst.display());
+        if let Err(e) = copy_dir_overlay(&src, &dst, &[".venv", "__pycache__"]) {
+            eprintln!("[helper] 同步 {dir}/ 失败（继续）: {e}");
+        }
+    }
+}
+
+/// 递归 overlay 复制目录：目标侧不存在的路径创建，已存在的文件覆盖
+fn copy_dir_overlay(src: &Path, dst: &Path, skip_names: &[&str]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if skip_names.contains(&name_str) {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        if src_path.is_dir() {
+            copy_dir_overlay(&src_path, &dst_path, skip_names)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// 替换 helper 自身（步骤 5.5，best-effort）
+///
+/// Windows 不允许覆盖写运行中的 exe，但允许 rename：先把旧 helper 改名
+/// `<原名>.old` 让位，再复制新版本；最后尝试删 .old（运行中删除会失败，
+/// 残留一个无害文件，下次更新覆盖重试）。任一步失败仅告警——旧 helper
+/// 依然能完成未来的 exe 替换（接口仅依赖 pending.json 文件，保持稳定）。
+fn replace_helper(extracted_dir: &Path, base_path: &Path) {
+    let helper_name = if cfg!(target_os = "windows") {
+        "campus-auth-helper.exe"
+    } else {
+        "campus-auth-helper"
+    };
+    let new_helper = extracted_dir.join(helper_name);
+    if !new_helper.exists() {
+        return;
+    }
+    let target = base_path.join(helper_name);
+    let old = base_path.join(format!("{helper_name}.old"));
+    let _ = std::fs::remove_file(&old);
+    if target.exists() {
+        if let Err(e) = std::fs::rename(&target, &old) {
+            eprintln!("[helper] 旧 helper 改名失败，跳过 helper 自更新: {e}");
+            return;
+        }
+    }
+    if let Err(e) = std::fs::copy(&new_helper, &target) {
+        eprintln!("[helper] helper 替换失败: {e}，恢复旧版本");
+        let _ = std::fs::rename(&old, &target);
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+    }
+    println!("[helper] helper 已更新");
+    let _ = std::fs::remove_file(&old);
 }
 
 /// 清理 pending.json 标记与 staging 目录（staging 目录用 CLI --staging 传入的实际路径）
@@ -390,6 +481,42 @@ mod tests {
         // 任一次探测失败 → 保留（保守）
         assert!(!decide_backup_deletion(Ok(None), Err(())));
         assert!(!decide_backup_deletion(Err(()), Err(())));
+    }
+
+    /// overlay 同步：覆盖同名文件、新增缺失文件、跳过 .venv/__pycache__、
+    /// 不删除目标侧独有内容
+    #[test]
+    fn test_copy_dir_overlay() {
+        let base = tempfile::tempdir().unwrap();
+        let src = base.path().join("src");
+        let dst = base.path().join("dst");
+
+        // 源：worker 新版文件 + 意外混入的 .venv（防御性跳过）
+        std::fs::create_dir_all(src.join("tests")).unwrap();
+        std::fs::write(src.join("playwright_worker.py"), b"NEW").unwrap();
+        std::fs::write(src.join("tests").join("t.py"), b"new-test").unwrap();
+        std::fs::create_dir_all(src.join(".venv").join("Scripts")).unwrap();
+        std::fs::write(src.join(".venv").join("Scripts").join("python.exe"), b"x").unwrap();
+
+        // 目标：旧版同名文件 + 用户运行态 .venv + 目标独有文件
+        std::fs::create_dir_all(dst.join(".venv").join("Scripts")).unwrap();
+        std::fs::write(dst.join("playwright_worker.py"), b"OLD").unwrap();
+        std::fs::write(dst.join(".venv").join("Scripts").join("python.exe"), b"USER-VENV").unwrap();
+        std::fs::write(dst.join("user-config-only.txt"), b"KEEP").unwrap();
+
+        copy_dir_overlay(&src, &dst, &[".venv", "__pycache__"]).unwrap();
+
+        // 同名覆盖
+        assert_eq!(std::fs::read(dst.join("playwright_worker.py")).unwrap(), b"NEW");
+        // 新增缺失
+        assert_eq!(std::fs::read(dst.join("tests").join("t.py")).unwrap(), b"new-test");
+        // 目标侧 .venv 保留（用户运行态），src 侧 .venv 不入侵
+        assert_eq!(
+            std::fs::read(dst.join(".venv").join("Scripts").join("python.exe")).unwrap(),
+            b"USER-VENV"
+        );
+        // 目标独有内容不删除
+        assert!(dst.join("user-config-only.txt").exists());
     }
 
     /// file_sha256 与已知摘要一致

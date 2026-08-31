@@ -38,7 +38,7 @@ tokio = { version = "1", features = [
 ] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy"] }
 
 # HTTP 框架 & 中间件
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }

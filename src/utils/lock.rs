@@ -139,6 +139,8 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{}/api/system/shutdown", info.port);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        // 纯回环请求：system-proxy 全局启用后显式禁代理，防异常代理配置劫持关机路径
+        .no_proxy()
         .build()?;
     let mut req = client.post(&url);
     if let Some(token) = crate::web::auth::read_token_file(base_path) {

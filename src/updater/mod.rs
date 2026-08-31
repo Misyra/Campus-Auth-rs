@@ -118,8 +118,10 @@ impl UpdaterService {
                 Version::new(0, 0, 0)
             }
         };
+        // 跟随系统/环境代理（system-proxy feature 已启用）：国内直连 GitHub
+        // 极慢是更新"等好久"的主因。原 no_proxy 是 e2e 回环假更新源防本地代理
+        // 劫持所加，现在系统代理 bypass 列表默认含 <local>，回环场景不受影响。
         let http_client = reqwest::Client::builder()
-            .no_proxy()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
