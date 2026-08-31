@@ -64,7 +64,7 @@ function handleClose(): void {
   stopDebug();
 }
 
-/** 一键反馈打包：日志 + 活动任务 + 当前页 HTML/截图 */
+/** 导出问题报告：日志 + 活动任务 + 当前页完整 MHTML/截图 */
 async function handleFeedback(): Promise<void> {
   if (downloading.value) return;
   downloading.value = true;
@@ -73,9 +73,9 @@ async function handleFeedback(): Promise<void> {
     const blob = await debugApi.feedbackBundle();
     const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
     downloadBlob(blob, `campus-auth-feedback-${stamp}.zip`, "application/zip");
-    toastOnly(true, "反馈包已下载");
+    toastOnly(true, "问题报告已导出");
   } catch (e) {
-    toastOnly(false, extractApiError(e as Error, "反馈打包失败"));
+    toastOnly(false, extractApiError(e as Error, "导出问题报告失败"));
   } finally {
     downloading.value = false;
   }
@@ -83,7 +83,16 @@ async function handleFeedback(): Promise<void> {
 </script>
 
 <template>
-  <Modal :open="visible" title="任务调试" size="lg" @close="handleClose">
+  <!-- 关闭通道收紧：点击空白/ESC 无反应；右上角 X 与右下角"停止调试"
+       按钮同语义（都执行 stopDebug），保持两条显式关闭路径 -->
+  <Modal
+    :open="visible"
+    title="任务调试"
+    size="lg"
+    :close-on-overlay="false"
+    :close-on-esc="false"
+    @close="handleClose"
+  >
     <div class="debug-panel-content">
       <!-- 头部信息：任务 + 状态 + 进度 -->
       <div class="debug-info-bar">
@@ -167,7 +176,7 @@ async function handleFeedback(): Promise<void> {
           {{ loading ? "执行中..." : "执行全部" }}
         </button>
         <button class="btn btn-secondary" :disabled="downloading" @click="handleFeedback">
-          {{ downloading ? "打包中..." : "反馈打包" }}
+          {{ downloading ? "导出中..." : "导出问题报告" }}
         </button>
         <button class="btn btn-danger" @click="handleClose">停止调试</button>
       </div>

@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import os
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from html import escape as _html_escape
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -240,6 +242,115 @@ def _ensure_browser(channel: str = "playwright") -> bool:
             return bool(executable and Path(executable).exists())
     except Exception:
         return False
+
+
+# ── 反馈资源快照（feedback_capture 的 CSS/JS 落盘辅助）──
+
+#: MIME → 扩展名（仅覆盖资源快照关注的类型，其余按 txt 兜底）
+_RESOURCE_EXT_BY_MIME = {
+    "text/css": "css",
+    "application/javascript": "js",
+    "text/javascript": "js",
+    "application/x-javascript": "js",
+}
+
+#: 单文件与总量上限：防资源列表异常的页面把反馈包撑到不可分发
+_RESOURCE_MAX_FILES = 200
+_RESOURCE_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _resource_ext(mime: str) -> str:
+    """按 MIME 推导资源文件扩展名（未知类型统一 txt）。"""
+    key = (mime or "").split(";")[0].strip().lower()
+    return _RESOURCE_EXT_BY_MIME.get(key, "txt")
+
+
+def _url_scheme_variants(url: str) -> list[str]:
+    """派生同一资源的 URL 形态：绝对 https/http 与协议相对 `//host/path`。
+
+    DOM 属性里常见协议相对写法（`//s1.example.com/x.js`），而 CDP 资源树
+    上报绝对 URL，逐形态替换才能把引用全部改写到本地文件。
+    绝对形态在前、协议相对在后：先把长的替换掉，剩余的 `//` 前缀才是
+    真正的协议相对用法（避免 `http://` 内含 `//` 被二次误替换）。
+    """
+    if url.startswith("https://"):
+        rest = url[len("https://") :]
+        return [url, f"http://{rest}", f"//{rest}"]
+    if url.startswith("http://"):
+        rest = url[len("http://") :]
+        return [url, f"https://{rest}", f"//{rest}"]
+    return [url]
+
+
+def _rewrite_resource_urls(html: str, mapping: dict[str, str]) -> str:
+    """把 HTML 中出现的资源 URL 改写为本地相对路径。
+
+    URL 在 HTML 属性里可能是原样形态，也可能是 `&amp;` 转义形态，两种都替换；
+    简单字符串替换可能误伤 JS 字符串中的同 URL 文本，对离线还原无实际影响。
+    """
+    for url, local in mapping.items():
+        if not url:
+            continue
+        for variant in _url_scheme_variants(url):
+            html = html.replace(variant, local)
+            escaped = _html_escape(variant, quote=True)
+            if escaped != variant:
+                html = html.replace(escaped, local)
+    return html
+
+
+async def _capture_page_resources(
+    page: Any, target_dir: Path
+) -> tuple[dict[str, str], str | None]:
+    """经 CDP 抓取主框架已加载的 Script/Stylesheet 资源并落盘到 target_dir。
+
+    返回 (url → resources/<name> 相对路径映射, 说明文本或 None)，
+    相对路径可直接替换 HTML 中的原始 URL。逐项容错：缓存已逐出/取回失败的
+    单个资源跳过，不中断整体快照。
+    """
+    cdp = await page.context.new_cdp_session(page)
+    try:
+        # getResourceContent 要求本会话启用 Page 域（Playwright 的 CDP 会话
+        # 不会自动启用，缺省时报 "Agent is not enabled"）
+        await cdp.send("Page.enable")
+        tree = await cdp.send("Page.getResourceTree")
+        frame_tree = tree.get("frameTree", {})
+        frame_id = frame_tree.get("frame", {}).get("id", "")
+        entries = frame_tree.get("resources", []) or []
+        saved: dict[str, str] = {}
+        note: str | None = None
+        for res in entries:
+            if len(saved) >= _RESOURCE_MAX_FILES:
+                note = f"资源数超过 {_RESOURCE_MAX_FILES}，其余跳过"
+                break
+            rtype = (res.get("type") or "").lower()
+            if rtype not in ("stylesheet", "script"):
+                continue
+            url = res.get("url") or ""
+            if not url.startswith(("http://", "https://")) or url in saved:
+                continue
+            try:
+                got = await cdp.send(
+                    "Page.getResourceContent", {"frameId": frame_id, "url": url}
+                )
+            except Exception:  # noqa: BLE001 — 缓存逐出等，逐项跳过
+                continue
+            if got.get("base64Encoded"):
+                data = base64.b64decode(got.get("content") or "")
+            else:
+                data = (got.get("content") or "").encode("utf-8")
+            if not data or len(data) > _RESOURCE_MAX_BYTES:
+                continue
+            name = (
+                f"{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}"
+                f".{_resource_ext(res.get('mimeType') or '')}"
+            )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / name).write_bytes(data)
+            saved[url] = f"resources/{name}"
+        return saved, note
+    finally:
+        await cdp.detach()
 
 
 # ── 取消注册表（跨线程安全）──
@@ -1175,21 +1286,73 @@ class WorkerCore:
         return {}
 
     async def handle_feedback_capture(self, params: dict) -> dict:
-        """捕获当前调试页面的 HTML 与截图（供反馈打包）。"""
+        """捕获当前调试页面的完整 MHTML、截图与 CSS/JS 资源（供导出问题报告）。
+
+        `page.content()` 仅含 HTML，外链 CSS/图片离线无法还原完整布局。
+        能取到 CDP MHTML 时优先使用，否则回退 HTML；大内容统一落盘避免 IPC 1MiB 超限。
+        Chromium 的 MHTML 序列化按设计不保存 JS（CSS 也只嵌内存缓存命中的部分），
+        故额外经 Page.getResourceTree/getResourceContent 把已加载的脚本与样式表
+        落盘到 resources/，并生成引用改写后的 page.html 供源码级离线还原。
+        """
         if self._page is None:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "无活跃页面，无法捕获")
+        # 落盘根目录先定（资源快照需要直接写入子目录），避免 IPC 1MiB 超限
+        stamp = str(int(time.time() * 1000))
+        base = Path(os.environ.get("CAMPUS_AUTH_BASE_PATH", str(_WORKER_DIR))).resolve()
+        fb_dir = base / "logs" / f"feedback-{stamp}"
+        # 尝试 MHTML（完整离线快照，含样式与图片），失败回退 HTML
+        mhtml_bytes: bytes | None = None
         try:
-            html = await self._page.content()
-        except Exception as exc:  # noqa: BLE001
-            raise WorkerError(Outcome.UNKNOWN_ERROR, f"获取页面内容失败: {exc}") from exc
+            cdp = await self._page.context.new_cdp_session(self._page)
+            mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
+            cdp_data = mhtml.get("data", "")
+            if cdp_data:
+                mhtml_bytes = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
+            await cdp.detach()
+        except Exception:  # noqa: BLE001 — CDP 不可用时回退 content()
+            mhtml_bytes = None
+        # CSS/JS 资源快照：MHTML 不含 JS，这里补齐脚本与样式表（主框架资源）
+        resources: dict[str, str] = {}  # url -> resources/<name>
+        resource_note: str | None = None
+        try:
+            resources, resource_note = await _capture_page_resources(
+                self._page, fb_dir / "resources"
+            )
+        except Exception as exc:  # noqa: BLE001 — 资源快照失败不影响其余产物
+            resource_note = f"资源快照失败: {exc}"
+        # 有资源时 HTML 也必须导出（MHTML 内无 JS，resources 需要引用方）；
+        # MHTML 不可用时同样回退 HTML
+        html: str | None = None
+        if mhtml_bytes is None or resources:
+            try:
+                html = _rewrite_resource_urls(await self._page.content(), resources)
+            except Exception as exc:  # noqa: BLE001
+                raise WorkerError(Outcome.UNKNOWN_ERROR, f"获取页面内容失败: {exc}") from exc
         try:
             png_bytes = await self._page.screenshot(full_page=True)
         except Exception as exc:  # noqa: BLE001
             raise WorkerError(Outcome.UNKNOWN_ERROR, f"截图失败: {exc}") from exc
-        return {
-            "html_b64": base64.b64encode(html.encode("utf-8")).decode("ascii"),
-            "png_b64": base64.b64encode(png_bytes).decode("ascii"),
-        }
+        try:
+            fb_dir.mkdir(parents=True, exist_ok=True)
+            png_path = fb_dir / "screenshot.png"
+            png_path.write_bytes(png_bytes)
+            result: dict = {"png_path": str(png_path)}
+            if mhtml_bytes is not None:
+                mhtml_path = fb_dir / "page.mhtml"
+                mhtml_path.write_bytes(mhtml_bytes)
+                result["mhtml_path"] = str(mhtml_path)
+            if html is not None:
+                html_path = fb_dir / "page.html"
+                html_path.write_bytes(html.encode("utf-8"))
+                result["html_path"] = str(html_path)
+            if resources:
+                result["resources_dir"] = str(fb_dir / "resources")
+                result["resources_count"] = len(resources)
+            if resource_note:
+                result["resources_note"] = resource_note
+            return result
+        except Exception as exc:  # noqa: BLE001
+            raise WorkerError(Outcome.UNKNOWN_ERROR, f"落盘失败: {exc}") from exc
 
     async def handle_ocr_recognize(self, params: dict) -> dict:
         """识别 base64 图片中的文本（ddddocr），模型加载与推理共享总超时预算。"""

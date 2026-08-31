@@ -1,6 +1,6 @@
 [package]
 name = "campus-auth"
-version = "5.0.0-alpha.2"
+version = "5.0.0-alpha.3"
 edition = "2024"
 rust-version = "1.85"
 default-run = "campus-auth"

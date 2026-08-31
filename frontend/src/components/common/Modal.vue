@@ -12,11 +12,14 @@ const props = withDefaults(
     size?: "default" | "lg";
     /** 是否允许点击遮罩关闭（默认 true；免责声明等需显式操作的场景设为 false） */
     closeOnOverlay?: boolean;
+    /** 是否允许 ESC 键关闭（默认 true；调试面板等误触代价高的场景设为 false） */
+    closeOnEsc?: boolean;
   }>(),
   {
     title: "",
     size: "default",
     closeOnOverlay: true,
+    closeOnEsc: true,
   },
 );
 
@@ -36,7 +39,7 @@ function onOverlayClick(): void {
 function onKeydown(e: KeyboardEvent): void {
   if (e.key === "Escape") {
     e.stopPropagation();
-    onClose();
+    if (props.closeOnEsc) onClose();
   }
 }
 

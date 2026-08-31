@@ -159,7 +159,7 @@ export const debugApi = {
     http.get<{ active: boolean; screenshot_url?: string; session?: DebugSession }>(
       "/api/debug/status",
     ),
-  /** 一键反馈打包：日志+活动任务+页面 HTML/截图（后端打 zip，返回 Blob） */
+  /** 导出问题报告：日志+活动任务+页面 MHTML/截图（后端打 zip，返回 Blob） */
   async feedbackBundle(): Promise<Blob> {
     const token = await import("./client").then((m) => m.ensureAuthToken());
     const res = await fetch("/api/debug/feedback-bundle", {
@@ -168,7 +168,7 @@ export const debugApi = {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      let msg = `打包失败 (${res.status})`;
+      let msg = `导出失败 (${res.status})`;
       try {
         const j = JSON.parse(text) as { error?: { message?: string } };
         if (j?.error?.message) msg = j.error.message;

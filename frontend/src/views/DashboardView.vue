@@ -22,7 +22,15 @@ const showEnvBanner = computed(() => envStatus.value != null && !envStatus.value
 onMounted(() => {
   void ui.fetchLoginHistory();
   void logs.fetchLogs();
-  void refreshEnv();
+  void refreshEnv().then(() => {
+    // 后端启动时的环境探测是后台任务，可能晚于本次请求完成：首次取到
+    // "未就绪"时延迟复查一次，避免磁盘环境完好却误挂未就绪横幅
+    if (envStatus.value && !envStatus.value.capability_ready) {
+      setTimeout(() => {
+        void refreshEnv();
+      }, 5000);
+    }
+  });
 });
 
 // ---- 登录历史 — 复用 useUi 共享状态，避免手动登录后 Dashboard 不更新 ----

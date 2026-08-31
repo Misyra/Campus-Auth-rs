@@ -119,7 +119,68 @@ def test_cancel_registry_pending_cap():
     assert len(reg._pending) <= reg._MAX_PENDING
 
 
+# ── 反馈资源快照（feedback_capture 纯函数）──
+
+
+def test_resource_ext_by_mime():
+    from playwright_worker import _resource_ext
+
+    assert _resource_ext("text/css") == "css"
+    assert _resource_ext("text/css; charset=utf-8") == "css"
+    for js in ("application/javascript", "text/javascript", "application/x-javascript"):
+        assert _resource_ext(js) == "js", js
+    # 未知/缺失类型统一 txt 兜底
+    assert _resource_ext("image/png") == "txt"
+    assert _resource_ext("") == "txt"
+    assert _resource_ext(None) == "txt"
+
+
+def test_rewrite_resource_urls_raw_and_escaped():
+    from playwright_worker import _rewrite_resource_urls
+
+    mapping = {
+        "https://cdn.example.com/app.js?v=1&t=2": "resources/abc123.js",
+        "https://cdn.example.com/style.css": "resources/def456.css",
+    }
+    html = (
+        '<script src="https://cdn.example.com/app.js?v=1&amp;t=2"></script>'
+        '<link rel="stylesheet" href="https://cdn.example.com/style.css">'
+    )
+    out = _rewrite_resource_urls(html, mapping)
+    # 原样与 &amp; 转义两种形态都要被改写为本地相对路径
+    assert "cdn.example.com/app.js" not in out
+    assert "cdn.example.com/style.css" not in out
+    assert 'src="resources/abc123.js"' in out
+    assert 'href="resources/def456.css"' in out
+    # 空映射原样返回
+    assert _rewrite_resource_urls(html, {}) == html
+
+
+def test_rewrite_resource_urls_protocol_relative():
+    from playwright_worker import _rewrite_resource_urls
+
+    # DOM 属性常见协议相对写法（//host/path），资源树上报绝对 URL，也需改写
+    mapping = {"https://s1.example.com/bfs/app.js": "resources/abc123.js"}
+    html = '<script src="//s1.example.com/bfs/app.js"></script>'
+    out = _rewrite_resource_urls(html, mapping)
+    assert 'src="resources/abc123.js"' in out
+    assert "s1.example.com" not in out
+
+
+def test_url_scheme_variants_order():
+    from playwright_worker import _url_scheme_variants
+
+    # 绝对形态在前、协议相对在后（http:// 内含 // 不能先被替换）
+    assert _url_scheme_variants("https://a.com/x.js") == [
+        "https://a.com/x.js",
+        "http://a.com/x.js",
+        "//a.com/x.js",
+    ]
+    assert _url_scheme_variants("//a.com/x.js") == ["//a.com/x.js"]
+
+
 # ── OCR 依赖主线程预加载 ──
+
 
 def _patch_imports(monkeypatch, *, ddddocr_ok, numpy_ok):
     """按需拦截 ddddocr / numpy 顶层 import，返回调用记录。"""

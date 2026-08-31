@@ -1499,7 +1499,7 @@ fn merge_worker_status(inner: &BridgeInner, status: &StatusManager) {
 ///
 /// `ocr_recognize` 轻量且单线程串行，允许与任意会话并发。
 fn check_session_compat(current: Option<SessionType>, method: &str) -> Result<(), BridgeError> {
-    if method == "ocr_recognize" {
+    if method == "ocr_recognize" || method == "feedback_capture" {
         return Ok(());
     }
     match current {
@@ -1511,8 +1511,9 @@ fn check_session_compat(current: Option<SessionType>, method: &str) -> Result<()
         Some(SessionType::Debug) => {
             if method.starts_with("debug_") {
                 match method {
-                    // debug_status 为无副作用查询，允许在会话存续期随时调用
-                    "debug_step" | "debug_stop" | "debug_run_all" | "debug_status" => Ok(()),
+                    // debug_status / feedback_capture 为无副作用查询，允许在会话存续期随时调用
+                    "debug_step" | "debug_stop" | "debug_run_all" | "debug_status"
+                    | "feedback_capture" => Ok(()),
                     _ => Err(BridgeError::WorkerBusy),
                 }
             } else {

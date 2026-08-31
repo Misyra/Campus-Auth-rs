@@ -137,6 +137,20 @@ impl ServiceContainer {
                 .set_on_bootstrap_done(Arc::new(move || bridge_for_cb.reset_spawn_failures()));
         }
 
+        // 启动即后台探测环境真实状态：EnvironmentStatus 初始全 false（未就绪），
+        // 只有 ensure_capability（登录/任务/调试/手动初始化）才会刷新。此前磁盘上
+        // 环境完好时重启程序，/api/init-status 仍报"未就绪"，直到首次使用才纠正。
+        // check_environment 仅做只读探测（uv/python --version + 浏览器缓存目录），
+        // 不触发下载；失败仅记日志，不阻断启动。
+        {
+            let env_bg = environment.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::environment::check_environment(&env_bg).await {
+                    tracing::warn!("启动环境探测失败: {e}");
+                }
+            });
+        }
+
         // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
         let executor = TaskExecutor::new(
             base_path,

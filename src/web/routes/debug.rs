@@ -28,8 +28,17 @@ pub async fn start_debug(
     State(tasks): State<Arc<dyn TaskApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
     State(bridge): State<Arc<dyn BridgeApi>>,
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    // 环境就绪门槛与登录/任务执行对齐：此前调试直接走 Bridge，spawn 前只检查
+    // .venv/python.exe 文件存在——环境面板显示"未就绪"时调试却仍能启动浏览器。
+    // ensure_capability 的引导前快速检查会顺带刷新 EnvironmentStatus（面板自愈）；
+    // 环境真缺失时自动触发引导（与手动登录同语义），失败以 503 明确回报。
+    environment
+        .ensure_capability()
+        .await
+        .map_err(|e| ApiError::ServiceUnavailable(format!("Python 环境未就绪: {e}")))?;
     let mut params = body.clone();
     if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
         // 显式传入 task_config 时不覆盖；否则按 id 嵌入浏览器任务配置
@@ -150,9 +159,10 @@ pub async fn debug_screenshot(
     Ok(([(header::CONTENT_TYPE, "image/png")], bytes))
 }
 
-/// POST /api/debug/feedback-bundle — 一键反馈打包（zip）
+/// POST /api/debug/feedback-bundle — 导出问题报告（zip）
 ///
-/// 收集：日志尾段 + 当前活动任务 JSON + 脱敏配置快照 + 调试页 HTML/截图（若有会话）。
+/// 收集：日志尾段 + 当前活动任务 JSON + 脱敏配置快照 + 调试页 MHTML/page.html/
+/// 截图/CSS-JS 资源快照（若有会话；Chromium MHTML 不含 JS，资源由 Worker 经 CDP 补齐）。
 /// 失败项写占位 txt，不以 500 打断整包；无活跃调试会话时页面项为占位说明。
 pub async fn feedback_bundle(
     State(bridge): State<std::sync::Arc<dyn crate::bridge::BridgeApi>>,
@@ -220,9 +230,12 @@ pub async fn feedback_bundle(
     });
     let meta_str = serde_json::to_string_pretty(&meta).unwrap_or_default();
 
-    // 4) 页面捕获（有调试会话时经 Worker 拿 HTML + 截图）
+    // 4) 页面捕获（有调试会话时经 Worker 拿 MHTML/HTML + 截图 + CSS/JS 资源）
     let mut page_html: Option<String> = None;
+    let mut page_mhtml: Option<Vec<u8>> = None;
     let mut page_png: Option<Vec<u8>> = None;
+    // CSS/JS 资源快照（debug/resources/，Chromium MHTML 不含 JS 故由 Worker 补齐）
+    let mut page_resources: Vec<(String, Vec<u8>)> = Vec::new();
     let mut page_note: Option<String> = None;
     if bridge.debug_session_active() {
         match bridge
@@ -234,28 +247,93 @@ pub async fn feedback_bundle(
             .await
         {
             Ok(resp) => {
-                if let Some(s) = resp.result.data.get("html_b64").and_then(|v| v.as_str()) {
-                    if let Ok(bytes) =
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
-                    {
-                        page_html = String::from_utf8(bytes).ok();
+                let mhtml_path = resp.result.data.get("mhtml_path").and_then(|v| v.as_str());
+                let html_path = resp.result.data.get("html_path").and_then(|v| v.as_str());
+                let png_path = resp.result.data.get("png_path").and_then(|v| v.as_str());
+                let resources_dir = resp.result.data.get("resources_dir").and_then(|v| v.as_str());
+                if let Some(path) = mhtml_path {
+                    match tokio::fs::read(path).await {
+                        Ok(b) => page_mhtml = Some(b),
+                        Err(e) => page_note = Some(format!("读取落盘 MHTML 失败 {path}: {e}")),
                     }
                 }
-                if let Some(s) = resp.result.data.get("png_b64").and_then(|v| v.as_str()) {
+                // 有资源快照时 HTML 与 MHTML 并存：MHTML 供视觉还原，page.html
+                // + resources/ 供源码级离线还原（JS 仅存在于后者）
+                if let Some(path) = html_path {
+                    match tokio::fs::read_to_string(path).await {
+                        Ok(s) => page_html = Some(s),
+                        Err(e) if page_note.is_none() => {
+                            page_note = Some(format!("读取落盘 HTML 失败 {path}: {e}"))
+                        }
+                        Err(_) => {}
+                    }
+                } else if page_mhtml.is_none() {
+                    if let Some(s) = resp.result.data.get("html_b64").and_then(|v| v.as_str()) {
+                        if let Ok(bytes) =
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                        {
+                            page_html = String::from_utf8(bytes).ok();
+                        }
+                    }
+                }
+                if let Some(dir) = resources_dir {
+                    // 排序保证 zip 内容确定；单文件读取失败跳过不中断
+                    let mut entries: Vec<tokio::fs::DirEntry> = Vec::new();
+                    if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
+                        while let Ok(Some(e)) = rd.next_entry().await {
+                            entries.push(e);
+                        }
+                    }
+                    entries.sort_by_key(|e| e.file_name());
+                    for e in entries {
+                        let name = e.file_name();
+                        let Some(name) = name.to_str() else { continue };
+                        if let Ok(bytes) = tokio::fs::read(e.path()).await {
+                            page_resources.push((name.to_string(), bytes));
+                        }
+                    }
+                }
+                if let Some(path) = png_path {
+                    match tokio::fs::read(path).await {
+                        Ok(b) => page_png = Some(b),
+                        Err(e) if page_note.is_none() => {
+                            page_note = Some(format!("读取落盘截图失败 {path}: {e}"))
+                        }
+                        Err(_) => {}
+                    }
+                } else if let Some(s) = resp.result.data.get("png_b64").and_then(|v| v.as_str()) {
                     if let Ok(bytes) =
                         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
                     {
                         page_png = Some(bytes);
                     }
                 }
-                if page_html.is_none() && page_png.is_none() {
+                if let Some(note) = resp.result.data.get("resources_note").and_then(|v| v.as_str())
+                {
+                    page_note = Some(match page_note {
+                        Some(p) => format!("{p}\n{note}"),
+                        None => note.to_string(),
+                    });
+                }
+                let cleanup_path = mhtml_path.or(html_path).or(png_path).or(resources_dir);
+                if let Some(p) = cleanup_path {
+                    if let Some(dir) = std::path::Path::new(p).parent() {
+                        let _ = tokio::fs::remove_dir_all(dir).await;
+                    }
+                }
+                if page_html.is_none()
+                    && page_png.is_none()
+                    && page_mhtml.is_none()
+                    && page_resources.is_empty()
+                    && page_note.is_none()
+                {
                     page_note = Some(format!("feedback_capture 返回空: {}", resp.result.data));
                 }
             }
             Err(e) => page_note = Some(format!("feedback_capture 失败: {e}")),
         }
     } else {
-        page_note = Some("无活跃调试会话，页面捕获跳过（先启动调试再打包可含页面）".into());
+        page_note = Some("无活跃调试会话，页面捕获跳过（先启动调试再导出可含页面）".into());
     }
 
     // 5) 打 zip（内存）
@@ -298,11 +376,24 @@ pub async fn feedback_bundle(
         zw.write_all(meta_str.as_bytes())
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        // page
+        // page：MHTML（视觉离线还原，含样式与图片）；page.html（引用已改写为
+        // resources/ 本地路径，与 CSS/JS 资源快照配合供源码级离线还原）
+        if let Some(mhtml) = page_mhtml {
+            zw.start_file("debug/page.mhtml", opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(&mhtml)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
         if let Some(html) = page_html {
             zw.start_file("debug/page.html", opts)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             zw.write_all(html.as_bytes())
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        for (name, bytes) in &page_resources {
+            zw.start_file(format!("debug/resources/{name}"), opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(bytes)
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
         if let Some(png) = page_png {

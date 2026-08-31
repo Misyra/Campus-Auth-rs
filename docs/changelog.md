@@ -1,8 +1,29 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“开发中（第十七轮）”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.3（第十八轮）”。
 
-## 开发中（2026-08-31 第十七轮：环境自举 + 前端一致性 + 文档收敛）
+## v5.0.0-alpha.3（2026-08-31 第十八轮：调试体验 + 反馈包资源快照 + 环境就绪一致性）
+
+### 调试面板
+
+- **关闭通道收紧**：点击遮罩空白/ESC 不再终止调试会话（误触代价高），右上角 X 与右下角"停止调试"按钮保留且同语义（均执行 `debug_stop`）；`Modal` 新增 `closeOnEsc` 属性供同类场景复用
+- **调试入口环境门槛**：`POST /api/debug/start` 前置 `ensure_capability`，与登录/任务执行对齐——环境缺失自动引导（同手动登录语义），失败返回 503；此前调试直接走 Bridge，绕过就绪检查
+
+### 问题报告导出
+
+- **CSS/JS 资源快照**：Chromium 的 MHTML 序列化按设计不保存 JS（CSS 也只嵌内存缓存命中部分），导出时经 CDP `Page.getResourceTree`/`getResourceContent` 额外抓取主框架已加载的脚本与样式表，落盘 `debug/resources/`（SHA1 短名，上限 200 文件/单文件 5MB），并生成引用改写后的 `debug/page.html`（绝对/协议相对/`&amp;` 转义三种 URL 形态均改写）；zip 内 MHTML 与 page.html 并存——前者供视觉离线还原，后者配合 resources 供源码级还原
+- 会话兼容表放行 `feedback_capture`（无副作用查询，调试会话存续期可随时导出）
+
+### 环境就绪一致性
+
+- **启动即探测**：程序启动时后台执行 `check_environment`（只读探测，不触发下载）刷新 `EnvironmentStatus`——此前状态初始全 false，磁盘环境完好时重启程序 `/api/init-status` 仍报"未就绪"，直到首次登录/任务才纠正
+- Dashboard 首次取到"未就绪"时 5s 后自动复查一次，接住后台探测结果，避免误挂未就绪横幅
+
+### 验证
+
+- e2e 实测（bilibili）：调试会话 → 导出反馈包 2.37MB，含 MHTML 1.7MB + 整页截图 + 12 个资源文件（10 JS + 1 CSS）+ 引用改写后的 page.html；`cargo test --lib web::` 112 项、python_worker 127 项、build.ps1 四步全通过
+
+## v5.0.0-alpha.2（2026-08-31 第十七轮：环境自举 + 前端一致性 + 文档收敛）
 
 > 本轮前 `tasks/browser/hidden_input.json` 等旧任务的 `{{username}}` 裸模板经变量桥接虽可执行，但裸写法已改为带引号示例；`wait` 无 selector 的遗留语义改为仅执行兼容、保存拦截；前端任务 ID 校验与后端 `TASK_ID_PATTERN` 对齐。
 
