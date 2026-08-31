@@ -3318,6 +3318,48 @@
      }
     }
    }
+  },
+  "/api/debug/feedback-bundle": {
+   "post": {
+    "operationId": "post___api_debug_feedback-bundle",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/zip": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     }
+    }
+   }
   }
  }
 }

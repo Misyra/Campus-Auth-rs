@@ -59,11 +59,10 @@ New-Item -ItemType Directory -Path $Out | Out-Null
 Copy-Item (Join-Path $Root "target\release\campus-auth.exe") $Out
 Copy-Item (Join-Path $Root "target\release\campus-auth-helper.exe") $Out
 Copy-Item (Join-Path $Root "resources") (Join-Path $Out "resources") -Recurse
-# 任务编写指南：运行时优先读包内 docs/guides/task-writing-guide.md（支持手动热更），
-# 编译期已 embed 兜底；此处随包附带一份，避免仅靠 embed 时无法离线查阅
+# 指南随包：task-writing-guide 已 embed 兜底，此处附带全部 docs/guides/*.md 供离线查阅（不含 archive）
 $docsDst = Join-Path $Out "docs/guides"
 New-Item -ItemType Directory -Path $docsDst -Force | Out-Null
-Copy-Item (Join-Path $Root "docs/guides/task-writing-guide.md") $docsDst -Force
+Copy-Item (Join-Path $Root "docs/guides/*.md") $docsDst -Force
 # 复制 python_worker 时排除本地虚拟环境（运行时按需重建），避免先全量复制再删除的双重 IO；
 # __pycache__ 与 release.yml 口径对齐一并排除（运行时自动再生）
 $workerDst = Join-Path $Out "python_worker"

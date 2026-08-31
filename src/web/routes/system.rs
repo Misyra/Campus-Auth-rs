@@ -151,7 +151,8 @@ const LOG_TAIL_BYTES: u64 = 512 * 1024;
 ///
 /// 从中间位置起读时，首行可能是不完整的行（且可能以残缺的多字节 UTF-8
 /// 字符开头），统一丢弃第一行；其余行保证完整。
-fn read_log_tail(path: &std::path::Path) -> Option<String> {
+/// `pub(crate)` 供 `routes::debug::feedback_bundle` 复用（同文件内尾段语义）。
+pub(crate) fn read_log_tail(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();

@@ -1174,6 +1174,23 @@ class WorkerCore:
             logger.warning("close_browser 超时（8s），跳过等待继续")
         return {}
 
+    async def handle_feedback_capture(self, params: dict) -> dict:
+        """捕获当前调试页面的 HTML 与截图（供反馈打包）。"""
+        if self._page is None:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "无活跃页面，无法捕获")
+        try:
+            html = await self._page.content()
+        except Exception as exc:  # noqa: BLE001
+            raise WorkerError(Outcome.UNKNOWN_ERROR, f"获取页面内容失败: {exc}") from exc
+        try:
+            png_bytes = await self._page.screenshot(full_page=True)
+        except Exception as exc:  # noqa: BLE001
+            raise WorkerError(Outcome.UNKNOWN_ERROR, f"截图失败: {exc}") from exc
+        return {
+            "html_b64": base64.b64encode(html.encode("utf-8")).decode("ascii"),
+            "png_b64": base64.b64encode(png_bytes).decode("ascii"),
+        }
+
     async def handle_ocr_recognize(self, params: dict) -> dict:
         """识别 base64 图片中的文本（ddddocr），模型加载与推理共享总超时预算。"""
         image_base64 = params.get("image_base64", "")
@@ -1258,6 +1275,7 @@ COMMANDS: dict[str, Callable] = {
     "debug_run_all": worker_core.handle_debug_run_all,
     "debug_stop": worker_core.handle_debug_stop,
     "debug_status": worker_core.handle_debug_status,
+    "feedback_capture": worker_core.handle_feedback_capture,
     "ocr_recognize": worker_core.handle_ocr_recognize,
     "shutdown": worker_core.handle_shutdown,
 }

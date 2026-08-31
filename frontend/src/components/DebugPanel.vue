@@ -6,12 +6,17 @@
  * 使用 useDebug composable 管理会话状态，通过 Modal 弹出。
  */
 
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useDebug } from "@/composables/useDebug";
+import { debugApi } from "@/api";
+import { downloadBlob } from "@/utils/file";
+import { extractApiError } from "@/api/client";
+import { useToast } from "@/composables/useToast";
 import Modal from "./common/Modal.vue";
 
 const { session, loading, visible, nextStep, runAll, stopDebug, getStepStatus, getStepResult, clearScreenshot } =
   useDebug();
+const downloading = ref(false);
 
 /** 当前步骤索引 */
 const currentStep = computed(() => session.current_step);
@@ -57,6 +62,23 @@ function statusSymbol(status: string): string {
 /** 关闭面板并停止调试 */
 function handleClose(): void {
   stopDebug();
+}
+
+/** 一键反馈打包：日志 + 活动任务 + 当前页 HTML/截图 */
+async function handleFeedback(): Promise<void> {
+  if (downloading.value) return;
+  downloading.value = true;
+  const { toastOnly } = useToast();
+  try {
+    const blob = await debugApi.feedbackBundle();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    downloadBlob(blob, `campus-auth-feedback-${stamp}.zip`, "application/zip");
+    toastOnly(true, "反馈包已下载");
+  } catch (e) {
+    toastOnly(false, extractApiError(e as Error, "反馈打包失败"));
+  } finally {
+    downloading.value = false;
+  }
 }
 </script>
 
@@ -143,6 +165,9 @@ function handleClose(): void {
         </button>
         <button class="btn btn-secondary" :disabled="loading || isDone" @click="runAll">
           {{ loading ? "执行中..." : "执行全部" }}
+        </button>
+        <button class="btn btn-secondary" :disabled="downloading" @click="handleFeedback">
+          {{ downloading ? "打包中..." : "反馈打包" }}
         </button>
         <button class="btn btn-danger" @click="handleClose">停止调试</button>
       </div>

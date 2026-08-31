@@ -159,6 +159,26 @@ export const debugApi = {
     http.get<{ active: boolean; screenshot_url?: string; session?: DebugSession }>(
       "/api/debug/status",
     ),
+  /** 一键反馈打包：日志+活动任务+页面 HTML/截图（后端打 zip，返回 Blob） */
+  async feedbackBundle(): Promise<Blob> {
+    const token = await import("./client").then((m) => m.ensureAuthToken());
+    const res = await fetch("/api/debug/feedback-bundle", {
+      method: "POST",
+      headers: token ? { "X-Auth-Token": token } : undefined,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let msg = `打包失败 (${res.status})`;
+      try {
+        const j = JSON.parse(text) as { error?: { message?: string } };
+        if (j?.error?.message) msg = j.error.message;
+      } catch {
+        if (text) msg = text.slice(0, 200);
+      }
+      throw new Error(msg);
+    }
+    return res.blob();
+  },
 };
 
 /** 远程仓库 */

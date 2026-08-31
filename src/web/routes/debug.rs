@@ -149,3 +149,189 @@ pub async fn debug_screenshot(
     let bytes = tokio::fs::read(&path).await?;
     Ok(([(header::CONTENT_TYPE, "image/png")], bytes))
 }
+
+/// POST /api/debug/feedback-bundle — 一键反馈打包（zip）
+///
+/// 收集：日志尾段 + 当前活动任务 JSON + 脱敏配置快照 + 调试页 HTML/截图（若有会话）。
+/// 失败项写占位 txt，不以 500 打断整包；无活跃调试会话时页面项为占位说明。
+pub async fn feedback_bundle(
+    State(bridge): State<std::sync::Arc<dyn crate::bridge::BridgeApi>>,
+    State(tasks): State<std::sync::Arc<dyn crate::tasks::TaskApi>>,
+    State(config): State<std::sync::Arc<dyn crate::config::ConfigApi>>,
+) -> Result<impl axum::response::IntoResponse, ApiError> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    let rt = config.runtime_snapshot();
+    let active_task_id = tasks.get_active_task().await;
+    let now = chrono::Local::now();
+    let stamp = now.format("%Y%m%d-%H%M%S").to_string();
+
+    // 1) 日志尾段（spawn_blocking 避免阻塞）
+    let base = config.base_path();
+    let log_tail: Option<String> = tokio::task::spawn_blocking(move || {
+        let logs_dir = base.join("logs");
+        let latest = std::fs::read_dir(&logs_dir).ok().and_then(|entries| {
+            let mut files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.starts_with("app.log"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            files.sort_by_key(|a| std::cmp::Reverse(a.file_name()));
+            files.into_iter().next()
+        });
+        latest.and_then(|e| super::system::read_log_tail(&e.path()))
+    })
+    .await
+    .ok()
+    .flatten();
+
+    // 2) 活动任务 JSON（不存在则占位）
+    let (task_json, task_filename) = if active_task_id.is_empty() {
+        (None, "active_task-missing.txt".to_string())
+    } else {
+        match tasks.load_task(&active_task_id).await {
+            Ok(kind) => {
+                let v = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
+                let s = serde_json::to_string_pretty(&v).unwrap_or_else(|e| format!("{e}"));
+                (Some(s), format!("tasks/{}.json", active_task_id))
+            }
+            Err(e) => (
+                Some(format!("加载活动任务 {active_task_id} 失败: {e}")),
+                "active_task-missing.txt".to_string(),
+            ),
+        }
+    };
+
+    // 3) 脱敏配置快照
+    let meta = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "timestamp": now.to_rfc3339(),
+        "active_task": active_task_id,
+        "active_profile": rt.profile.id,
+        "browser_channel": rt.browser.browser_channel,
+        "has_password": !rt.profile.password.as_str().is_empty(),
+        "auth_url": rt.profile.auth_url,
+        "isp": rt.profile.isp,
+    });
+    let meta_str = serde_json::to_string_pretty(&meta).unwrap_or_default();
+
+    // 4) 页面捕获（有调试会话时经 Worker 拿 HTML + 截图）
+    let mut page_html: Option<String> = None;
+    let mut page_png: Option<Vec<u8>> = None;
+    let mut page_note: Option<String> = None;
+    if bridge.debug_session_active() {
+        match bridge
+            .execute_with_timeout(
+                "feedback_capture",
+                serde_json::json!({}),
+                std::time::Duration::from_secs(15),
+            )
+            .await
+        {
+            Ok(resp) => {
+                if let Some(s) = resp.result.data.get("html_b64").and_then(|v| v.as_str()) {
+                    if let Ok(bytes) =
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                    {
+                        page_html = String::from_utf8(bytes).ok();
+                    }
+                }
+                if let Some(s) = resp.result.data.get("png_b64").and_then(|v| v.as_str()) {
+                    if let Ok(bytes) =
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                    {
+                        page_png = Some(bytes);
+                    }
+                }
+                if page_html.is_none() && page_png.is_none() {
+                    page_note = Some(format!("feedback_capture 返回空: {}", resp.result.data));
+                }
+            }
+            Err(e) => page_note = Some(format!("feedback_capture 失败: {e}")),
+        }
+    } else {
+        page_note = Some("无活跃调试会话，页面捕获跳过（先启动调试再打包可含页面）".into());
+    }
+
+    // 5) 打 zip（内存）
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+
+        // logs
+        if let Some(tail) = log_tail {
+            let t = if tail.len() > 1024 * 1024 {
+                tail[tail.len() - 1024 * 1024..].to_string()
+            } else {
+                tail
+            };
+            zw.start_file("logs/app-tail.log", opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(t.as_bytes())
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        } else {
+            zw.start_file("logs/app-tail.log", opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all("(无日志)".as_bytes())
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+
+        // task
+        if let Some(s) = task_json {
+            zw.start_file(&task_filename, opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(s.as_bytes())
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+
+        // meta
+        zw.start_file("meta.json", opts)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        zw.write_all(meta_str.as_bytes())
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        // page
+        if let Some(html) = page_html {
+            zw.start_file("debug/page.html", opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(html.as_bytes())
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        if let Some(png) = page_png {
+            zw.start_file("debug/screenshot.png", opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(&png)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        if let Some(note) = page_note {
+            // 无会话或捕获失败时留说明，避免解压后疑惑缺文件
+            zw.start_file("debug/README.txt", opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(note.as_bytes())
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+
+        zw.finish().map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    let bytes = buf.into_inner();
+    let filename = format!("campus-auth-feedback-{stamp}.zip");
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/zip".to_string(),
+            ),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    ))
+}

@@ -166,6 +166,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/debug/status", || {
             get(routes::debug::debug_status)
         }),
+        ("POST", "/api/debug/feedback-bundle", || {
+            post(routes::debug::feedback_bundle)
+        }),
         ("GET", "/api/debug/screenshot/{filename}", || {
             get(routes::debug::debug_screenshot)
         }),
