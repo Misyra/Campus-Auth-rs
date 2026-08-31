@@ -250,7 +250,11 @@ pub async fn feedback_bundle(
                 let mhtml_path = resp.result.data.get("mhtml_path").and_then(|v| v.as_str());
                 let html_path = resp.result.data.get("html_path").and_then(|v| v.as_str());
                 let png_path = resp.result.data.get("png_path").and_then(|v| v.as_str());
-                let resources_dir = resp.result.data.get("resources_dir").and_then(|v| v.as_str());
+                let resources_dir = resp
+                    .result
+                    .data
+                    .get("resources_dir")
+                    .and_then(|v| v.as_str());
                 if let Some(path) = mhtml_path {
                     match tokio::fs::read(path).await {
                         Ok(b) => page_mhtml = Some(b),
@@ -308,7 +312,11 @@ pub async fn feedback_bundle(
                         page_png = Some(bytes);
                     }
                 }
-                if let Some(note) = resp.result.data.get("resources_note").and_then(|v| v.as_str())
+                if let Some(note) = resp
+                    .result
+                    .data
+                    .get("resources_note")
+                    .and_then(|v| v.as_str())
                 {
                     page_note = Some(match page_note {
                         Some(p) => format!("{p}\n{note}"),
