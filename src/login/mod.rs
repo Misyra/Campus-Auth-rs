@@ -742,11 +742,11 @@ impl LoginOrchestrator {
             }
         }
         // Engine 崩溃清理同样覆盖准备阶段的 Auto 请求（环境初始化可达分钟级）
-        for (_, (source, token)) in self
+        for (source, token) in self
             .pending_cancels
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .iter()
+            .values()
         {
             if *source == LoginSource::Auto {
                 token.cancel();

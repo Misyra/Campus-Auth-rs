@@ -522,7 +522,8 @@ fn handle_network_check_with_priority(inner: &mut EngineInner, deps: &EngineDeps
 /// - 暂停生效中：暂停语义必须覆盖在途探测的迟到结果；
 /// - 配置版本失配：探测发起后发生过配置变更（如切换 Profile），
 ///   结果中基于旧配置的判断（auth_url 可达性）不得触发自动登录。
-/// 状态合并不受前两者影响——迟到的网络事实仍值得呈现给前端。
+///
+/// 状态合并不受前三者影响——迟到的网络事实仍值得呈现给前端。
 fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
     // 无论成败都先复位在途标记，否则后续检测被永久忽略
     inner.probe_in_flight = false;
