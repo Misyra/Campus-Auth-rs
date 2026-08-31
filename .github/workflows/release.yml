@@ -116,6 +116,8 @@ jobs:
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth.exe" $out
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth-helper.exe" $out
           Copy-Item "resources" "$out/resources" -Recurse
+          New-Item -ItemType Directory -Path "$out/docs/guides" -Force | Out-Null
+          Copy-Item "docs/guides/task-writing-guide.md" "$out/docs/guides" -Force
           Get-ChildItem "python_worker" -Force | Where-Object { $_.Name -ne ".venv" } |
             ForEach-Object { Copy-Item $_.FullName (Join-Path "$out/python_worker" $_.Name) -Recurse -Force }
           Get-ChildItem "$out/python_worker" -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
@@ -128,6 +130,7 @@ jobs:
           cp "target/$RELEASE_TARGET/release/campus-auth" pkg/
           cp "target/$RELEASE_TARGET/release/campus-auth-helper" pkg/
           cp -R resources pkg/resources
+          mkdir -p pkg/docs/guides && cp docs/guides/task-writing-guide.md pkg/docs/guides/
           tar -C python_worker --exclude=.venv --exclude=__pycache__ -cf - . | tar -C pkg/python_worker -xf -
           tar -czf "$ARCHIVE" -C pkg .
 

@@ -110,7 +110,7 @@ impl Default for BrowserSettings {
     fn default() -> Self {
         Self {
             headless: true,
-            browser_channel: "playwright".to_string(),
+            browser_channel: "msedge".to_string(),
             browser_custom_path: String::new(),
             custom_browser_engine: "chromium".to_string(),
             persistent_context: false,

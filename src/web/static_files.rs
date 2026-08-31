@@ -48,6 +48,13 @@ struct Assets;
 #[include = "openapi.json"]
 struct OpenApiAsset;
 
+/// `docs/guides/task-writing-guide.md` 嵌入（供 `/api/docs/task-writing-guide`，避免便携包缺 docs 导致 404）
+#[cfg(not(feature = "no-embed"))]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "docs/guides/"]
+#[include = "task-writing-guide.md"]
+pub(crate) struct GuideAsset;
+
 #[cfg(not(feature = "no-embed"))]
 /// 返回嵌入的 openapi.json（前端运行时兜底获取版本等契约信息）
 pub async fn openapi_handler() -> impl IntoResponse {

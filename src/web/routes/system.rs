@@ -515,6 +515,19 @@ pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, Ap
 
 // ---- 文档 ----
 
+/// 便携包/开发期均可用：优先读磁盘 `docs/guides/task-writing-guide.md`（便于热更），
+/// 缺失时回退到编译期嵌入的 `GuideAsset`（release 包不含 `docs/` 目录时不 404）。
+#[cfg(not(feature = "no-embed"))]
+fn embedded_guide() -> Option<String> {
+    crate::web::static_files::GuideAsset::get("task-writing-guide.md")
+        .and_then(|a| String::from_utf8(a.data.into_owned()).ok())
+}
+
+#[cfg(feature = "no-embed")]
+fn embedded_guide() -> Option<String> {
+    None
+}
+
 /// 在候选目录中查找首个存在的任务编写指南
 fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
     let rel = std::path::Path::new("docs")
@@ -539,8 +552,8 @@ fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
 
 /// GET /api/docs/task-writing-guide — 任务编写指南
 ///
-/// 从 `docs/guides/task-writing-guide.md` 读取并返回 Markdown 文本。
-/// 文件缺失时返回 404。
+/// 优先从 `docs/guides/task-writing-guide.md` 读取并返回 Markdown 文本；
+/// 便携包缺 `docs/` 时回退到编译期嵌入的副本，避免 404。
 pub async fn task_writing_guide(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -549,6 +562,10 @@ pub async fn task_writing_guide(
     match tokio::fs::read_to_string(&path).await {
         Ok(content) => Ok(data(Value::String(content))),
         Err(e) => {
+            if let Some(content) = embedded_guide() {
+                tracing::debug!("任务编写指南回退到嵌入副本: {e}");
+                return Ok(data(Value::String(content)));
+            }
             tracing::warn!("任务编写指南加载失败 ({path:?}): {e}");
             Err(ApiError::NotFound(
                 "任务编写指南文件缺失，可能需要重新安装或更新软件".to_string(),
