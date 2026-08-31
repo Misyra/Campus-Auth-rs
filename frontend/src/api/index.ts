@@ -13,6 +13,7 @@ import type {
   BrowserListResponse,
   ConfigResponse,
   DebugSession,
+  EnvironmentStatus,
   HealthInfo,
   InitStatus,
   LoginHistoryItem,
@@ -71,6 +72,26 @@ export const systemApi = {
   shutdown: () => http.post<MutationResult>("/api/system/shutdown"),
   update: () => http.post<MutationResult & { message?: string; version?: string }>("/api/system/update"),
   fetchLogs: (limit: number) => http.get<LogEntry[]>(`/api/logs?limit=${limit}`),
+};
+
+/** 环境初始化（uv sync + Chromium，POST /api/environment/bootstrap） */
+export const environmentApi = {
+  bootstrap: (opts?: RequestOptions) =>
+    http.post<
+      MutationResult & {
+        capability_ready: boolean;
+        uv_ready: boolean;
+        python_ready: boolean;
+        playwright_ready: boolean;
+        stage: string;
+        progress: { phase: string; percent: number; message: string } | null;
+        last_error: string | null;
+      }
+    >("/api/environment/bootstrap", null, { timeout: 650000, ...opts }),
+  fetchStatus: async (): Promise<EnvironmentStatus | null> => {
+    const data = await http.get<InitStatus>("/api/init-status");
+    return (data as InitStatus & { environment?: EnvironmentStatus }).environment ?? null;
+  },
 };
 
 /** 配置方案 */

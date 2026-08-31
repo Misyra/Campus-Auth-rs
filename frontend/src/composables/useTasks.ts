@@ -162,8 +162,8 @@ async function saveTask(): Promise<void> {
     toastOnly(false, "请输入任务ID");
     return;
   }
-  if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(editingTask.value.id)) {
-    toastOnly(false, "任务ID必须以字母开头，且只能包含字母、数字和下划线");
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(editingTask.value.id)) {
+    toastOnly(false, "任务ID需为 1-64 位字母、数字、下划线或连字符");
     return;
   }
   let config: Record<string, unknown>;

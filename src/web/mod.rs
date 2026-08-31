@@ -231,6 +231,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/install/playwright", || {
             post(routes::system::install_playwright)
         }),
+        ("POST", "/api/environment/bootstrap", || {
+            post(routes::system::bootstrap_environment)
+        }),
         // ---- 图标（icons）----
         ("GET", "/api/icons", || get(routes::system::list_icons)),
         // ---- 卸载（uninstall）----

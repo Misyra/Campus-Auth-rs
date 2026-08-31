@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, onActivated } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
+import { useEnvironment } from "@/composables/useEnvironment";
 import { autostartApi, configApi } from "@/api";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
@@ -10,6 +11,7 @@ import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const config = useConfig();
 const { busy, autostart } = useStatus();
+const { envStatus, envLoading, envError, refreshEnv, bootstrapEnv } = useEnvironment();
 
 // 启动操作选项
 const loginActionOptions: SelectOption[] = [
@@ -40,6 +42,24 @@ const logLevelOptions: SelectOption[] = [
   { value: "ERROR", label: "ERROR" },
 ];
 
+// Python 环境卡片
+onMounted(() => { void refreshEnv(); });
+onActivated(() => { void refreshEnv(); });
+
+const envReady = computed(() => Boolean(envStatus.value?.capability_ready));
+const envStageLabel = computed(() => {
+  const s = envStatus.value?.stage;
+  if (!s || s === "Done" || s === "Idle") return "";
+  const map: Record<string, string> = {
+    DownloadingUv: "下载 uv",
+    SyncingVenv: "同步虚拟环境",
+    InstallingPlaywright: "安装浏览器",
+    DownloadingMinGit: "下载 Git",
+    Error: "失败",
+  };
+  return map[s] ?? s;
+});
+
 // 配置热重载
 const reloading = ref(false);
 const reloadMsg = ref("");
@@ -59,6 +79,53 @@ async function reloadConfig() {
 
 <template>
   <div class="settings-panel-grid">
+    <!-- Python 环境（uv sync + Chromium） -->
+    <section class="card settings-panel">
+      <div class="settings-card-header">
+        <IconApp name="terminal" class="settings-card-icon" />
+        <h2>Python 环境</h2>
+        <button
+          v-if="envReady"
+          class="btn btn-secondary btn-sm"
+          :disabled="busy.env"
+          @click="void bootstrapEnv()"
+          title="重新同步 Python 虚拟环境与浏览器"
+        >
+          <IconApp v-if="busy.env" name="refresh" class="spin" />
+          {{ busy.env ? "同步中..." : "重新同步" }}
+        </button>
+        <button
+          v-else
+          class="btn btn-primary btn-sm"
+          :disabled="busy.env"
+          @click="void bootstrapEnv()"
+          title="初始化 Python 虚拟环境（uv sync）"
+        >
+          <IconApp v-if="busy.env" name="refresh" class="spin" />
+          {{ busy.env ? "初始化中..." : "初始化 Python 环境" }}
+        </button>
+      </div>
+      <div class="card-body">
+        <p class="hint" style="margin:0 0 0.5rem 0">
+          初始化项目内 Python 虚拟环境（<code>uv sync</code>）并安装 Chromium，约需 1–10 分钟。
+          手动登录若环境缺失会自动触发；此按钮用于网络中断后的手动修复。
+        </p>
+        <div class="env-status-row" style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center">
+          <span v-if="envLoading" class="hint">检测中…</span>
+          <template v-else-if="envError && !envStatus"> <span style="color:var(--error)">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
+          <template v-else>
+            <span v-if="envReady" class="autostart-method-badge" style="background:var(--success-bg, #dcfce7);color:var(--success, #15803d)">已就绪</span>
+            <span v-else class="autostart-method-badge" style="background:var(--warning-bg, #fef3c7);color:var(--warning, #92400e)">未就绪</span>
+            <span v-if="envStatus?.playwright_ready" class="autostart-method-badge">Chromium 已安装</span>
+            <span v-if="envStageLabel" class="autostart-method-badge">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
+          </template>
+        </div>
+        <p v-if="envStatus?.progress?.message" class="hint" style="margin-top:0.35rem">{{ envStatus.progress.message }}</p>
+        <p v-if="envStatus?.last_error" class="hint" style="margin-top:0.35rem;color:var(--error)">{{ envStatus.last_error }}</p>
+        <p v-if="envError && envStatus" class="hint" style="color:var(--error)">{{ envError }}</p>
+      </div>
+    </section>
+
     <!-- 日志设置 -->
     <section class="card settings-panel">
       <div class="settings-card-header">

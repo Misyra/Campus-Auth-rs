@@ -1,6 +1,24 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“开发中（第十六轮）”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“开发中（第十七轮）”。
+
+## 开发中（2026-08-31 第十七轮：环境自举 + 前端一致性 + 文档收敛）
+
+> 本轮前 `tasks/browser/hidden_input.json` 等旧任务的 `{{username}}` 裸模板经变量桥接虽可执行，但裸写法已改为带引号示例；`wait` 无 selector 的遗留语义改为仅执行兼容、保存拦截；前端任务 ID 校验与后端 `TASK_ID_PATTERN` 对齐。
+
+### 环境自举
+
+- 登录链路自动初始化：`Browser` 定时任务与 `Manual`/`LoginOnce` 在 `capability_ready=false` 时经 `BootstrapGate` 同步 `ensure_capability`（uv sync + Chromium），失败回失败终态并携带 `last_error`；`src/tasks/executor.rs` 浏览器任务同路径
+- 新增 `POST /api/environment/bootstrap`（幂等、同步等待完成）与前端卡片：`SystemSettings` 的 Python 环境状态/进度/重试按钮 + `Dashboard` 未就绪横幅 + `BrowserSettings` 未就绪提示；`openapi.json`/`route_table` 已补契约
+
+### 前端与文档
+
+- 任务 ID 前端校验改为 `^[a-zA-Z0-9_-]{1,64}$` 与后端一致（此前 `^[a-zA-Z][a-zA-Z0-9_]*$` 误拒 `e2e-smoke` 等带连字符任务）；`hidden_input.json` 的 eval 脚本 `({{username}})` 改 `('{{username}}')` 加引号防 `ReferenceError`
+- `docs/guides/task-writing-guide.md` 10 节补"新任务固定等待必须用 `sleep`，`wait` 无 selector 仅为历史兼容、保存时被拒绝"
+
+### 验证
+
+- 白名单 16 项在 Rust/Python/文档三端一致；7 个存量浏览器任务复刻保存校验全 `OK`；Python `ocr_runtime/step_handlers/variable_resolver` 无阻塞性逻辑错误；`cargo test --lib tasks` 80 项、`python_worker` 123 项、`cargo test` 522 项、`clippy -D warnings` 零警告
 
 ## 开发中（2026-08-30 第十六轮：三端兼容性修复）
 

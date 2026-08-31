@@ -335,17 +335,91 @@ impl LoginOrchestrator {
                 .await;
         }
 
-        // 浏览器来源要求环境能力就绪
+        // 浏览器来源要求环境能力就绪：未就绪时自动触发 uv sync 初始化（经 BootstrapGate 幂等），
+        // 仍未就绪则以失败终态返回（携带 last_error 便于前端提示并引导至“初始化 Python 环境”按钮）。
+        // Manual 场景不走此分支——其 Worker 缺失会在会话内 Bridge 执行阶段以 WorkerNotInstalled 失败，
+        // 已在 session 层统一处理；此处仅守 Browser 定时任务路径。
         if source == LoginSource::Browser && !self.environment.capability_ready() {
-            warn!("浏览器能力未就绪，无法执行定时任务");
-            return self
-                .immediate_handle(
-                    source,
-                    false,
-                    "浏览器能力未就绪，无法执行定时任务".into(),
-                    profile.id.clone(),
-                )
-                .await;
+            tracing::info!("浏览器能力未就绪，尝试自动初始化环境...");
+            if let Err(e) = self.environment.ensure_capability().await {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| e.to_string());
+                warn!("浏览器任务环境自动初始化失败: {detail}");
+                return self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("浏览器能力未就绪，自动初始化失败: {detail}"),
+                        profile.id.clone(),
+                    )
+                    .await;
+            }
+            if !self.environment.capability_ready() {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| "未知原因".to_string());
+                warn!("环境初始化完成但仍未就绪: {detail}");
+                return self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("浏览器能力未就绪（初始化后仍未就绪）: {detail}"),
+                        profile.id.clone(),
+                    )
+                    .await;
+            }
+            tracing::info!("浏览器任务环境自动初始化成功，继续执行登录");
+        }
+
+        // 手动登录同样自动初始化：未安装时直接拒绝会让全新安装用户无从操作。
+        // 复用同一 BootstrapGate，显式按钮与登录并发时只跑一次 uv sync。
+        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
+            && !self.environment.capability_ready()
+        {
+            tracing::info!("手动登录触发环境自动初始化...");
+            self.status.merge(crate::status::PartialSnapshot::Login {
+                status: crate::status::LoginStatus::Running,
+                source: Some(source),
+                message: Some("正在初始化 Python 环境...".into()),
+                retry_count: 0,
+            });
+            if let Err(e) = self.environment.ensure_capability().await {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| e.to_string());
+                warn!("手动登录环境自动初始化失败: {detail}");
+                return self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("环境未就绪，自动初始化失败: {detail}"),
+                        profile.id.clone(),
+                    )
+                    .await;
+            }
+            if !self.environment.capability_ready() {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| "未知原因".to_string());
+                return self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("环境初始化后仍未就绪: {detail}"),
+                        profile.id.clone(),
+                    )
+                    .await;
+            }
+            tracing::info!("手动登录环境自动初始化成功，继续执行登录");
         }
 
         // 2. auth_url TCP 预检（仅 manual / login_once）

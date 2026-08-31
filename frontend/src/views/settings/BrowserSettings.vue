@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted } from "vue";
+import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
+import { useEnvironment } from "@/composables/useEnvironment";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import { browsersApi, configApi, workerApi, extractApiError } from "@/api";
 
 const config = useConfig();
+const router = useRouter();
+const { envStatus } = useEnvironment();
+const pythonNotReady = computed(() => envStatus.value != null && !envStatus.value.python_ready);
 
 const browsers = ref<{ channel: string; name: string; description: string; installed: boolean; icon: string }[]>([]);
 const browserLoading = ref(true);
@@ -85,6 +90,9 @@ async function stopBrowser() {
         <h2>浏览器类型</h2>
       </div>
       <div class="card-body">
+        <div v-if="pythonNotReady" class="browser-safe-info browser-safe-info--warning" style="margin-bottom:0.75rem">
+          <p>Python 环境未就绪，浏览器功能不可用。请先前往 <a style="cursor:pointer;text-decoration:underline" @click.prevent="router.push({ name: 'settings-system' })">设置 · 系统 → Python 环境</a> 初始化。</p>
+        </div>
         <p class="form-help-text">选择用于自动登录的浏览器</p>
         <div class="browser-selection">
           <div v-if="browserLoading" class="loading">正在检测浏览器...</div>

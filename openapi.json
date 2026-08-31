@@ -3279,6 +3279,45 @@
      }
     }
    }
+  },
+  "/api/environment/bootstrap": {
+   "post": {
+    "operationId": "post___api_environment_bootstrap",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     }
+    }
+   }
   }
  }
 }

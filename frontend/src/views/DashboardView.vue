@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted, nextTick, watch } from "vue";
+import { useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
+import { useEnvironment } from "@/composables/useEnvironment";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
 import { throttleRaf } from "@/utils/debounce";
@@ -13,10 +15,14 @@ import type { SelectOption } from "@/components/common/CustomSelect.vue";
 const s = useStatus();
 const logs = useLogs();
 const ui = useUi();
+const router = useRouter();
+const { envStatus, refreshEnv } = useEnvironment();
+const showEnvBanner = computed(() => envStatus.value != null && !envStatus.value.capability_ready);
 
 onMounted(() => {
   void ui.fetchLoginHistory();
   void logs.fetchLogs();
+  void refreshEnv();
 });
 
 // ---- 登录历史 — 复用 useUi 共享状态，避免手动登录后 Dashboard 不更新 ----
@@ -106,6 +112,12 @@ function openFullscreen(url: string) { window.open(url, "_blank"); }
     <div v-if="s.status.monitoring" class="network-status-banner" :class="s.networkStatus.value">
       <span class="status-dot"></span>
       <span>{{ s.networkStatusText.value }}</span>
+    </div>
+
+    <!-- 环境未就绪提示（非阻塞，仅链接到 系统 → Python 环境） -->
+    <div v-if="showEnvBanner" class="network-status-banner disconnected" style="cursor:pointer" @click="router.push({ name: 'settings-system' })">
+      <span class="status-dot"></span>
+      <span>Python 环境未就绪，手动登录将自动初始化或可前往 设置 · 系统 手动修复</span>
     </div>
 
     <!-- 统计卡片 -->

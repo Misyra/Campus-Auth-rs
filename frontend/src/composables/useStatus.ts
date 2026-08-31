@@ -46,6 +46,7 @@ const busy = reactive({
   uninstall: false,
   ocr: false,
   ocrRec: false,
+  env: false,
 });
 
 const fetchStatusFail = createFirstFailNotifier();

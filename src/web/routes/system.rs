@@ -469,6 +469,30 @@ pub async fn install_playwright(
     })))
 }
 
+/// POST /api/environment/bootstrap — 初始化 Python 环境（uv sync + Chromium）
+///
+/// 复用 `EnvironmentApi::ensure_capability`，经 `BootstrapGate` 保证并发幂等：
+/// 并发点击只跑一次下载/同步，其余等待者复用首个结果。同步等待完成直接返回
+/// 结果供按钮展示成功/失败，避免前端额外轮询竞态（对齐 `install_playwright` 的同步模型）。
+pub async fn bootstrap_environment(
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+) -> Result<Json<Value>, ApiError> {
+    environment
+        .ensure_capability()
+        .await
+        .map_err(|e| ApiError::Internal(format!("环境初始化失败: {e}")))?;
+    let st = environment.status();
+    Ok(data(serde_json::json!({
+        "capability_ready": st.capability_ready,
+        "uv_ready": st.uv_ready,
+        "python_ready": st.python_ready,
+        "playwright_ready": st.playwright_ready,
+        "stage": format!("{:?}", st.stage),
+        "progress": st.progress,
+        "last_error": st.last_error,
+    })))
+}
+
 /// GET /api/icons — 可用图标列表
 ///
 /// 扫描资源图标目录返回可用图标。目录不存在时返回空列表。

@@ -418,14 +418,35 @@ export interface UpdateInfo {
   [key: string]: unknown;
 }
 
+/** 环境安装进度（后端 InstallProgress） */
+export interface InstallProgress {
+  phase: string;
+  percent: number;
+  message: string;
+}
+
+/** 环境状态（后端 EnvironmentStatus，经 GET /api/init-status.environment 透出） */
+export interface EnvironmentStatus {
+  uv_ready: boolean;
+  python_ready: boolean;
+  playwright_ready: boolean;
+  git_ready: boolean;
+  capability_ready: boolean;
+  stage: string;
+  progress: InstallProgress | null;
+  last_error: string | null;
+}
+
 /** 初始化状态 */
 export interface InitStatus {
   agreed: boolean;
+  ready?: boolean;
   password_decryption_failed?: boolean;
-  /** Python 运行环境是否已就绪（env 自动安装） */
+  /** @deprecated 扁平兼容字段，优先读 environment.* */
   python_ready?: boolean;
-  /** Playwright 浏览器是否已安装 */
+  /** @deprecated 扁平兼容字段，优先读 environment.* */
   playwright_ready?: boolean;
+  environment?: EnvironmentStatus;
 }
 
 /** 健康检查 */

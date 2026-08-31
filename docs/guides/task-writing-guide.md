@@ -246,7 +246,7 @@ Python Worker 内部还保留 `evaluate`、`custom` 等历史兼容别名，但�
 }
 ```
 
-为兼容历史任务，`wait` 没有 selector 时仍按 `duration` 做固定等待；新任务不要继续依赖这种双重语义。
+为兼容历史任务，`wait` 没有 selector 时仍按 `duration` 做固定等待；新任务不要继续依赖这种双重语义。新任务固定等待必须用 `sleep`——`wait` 无 selector 仅为执行历史任务保留的兼容行为，保存新任务时会被校验拒绝（`步骤[n] 需要 selector`）。
 
 `wait_for_selector` 是显式兼容类型，语义与带 selector 的 `wait` 一致。
 
