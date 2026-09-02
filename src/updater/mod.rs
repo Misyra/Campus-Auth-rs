@@ -121,9 +121,10 @@ impl UpdaterService {
         };
         // 回退客户端跟随系统/环境代理（system-proxy feature 已启用）：
         // 显式代理未启用/构建失败时使用。
-        let http_client = reqwest::Client::builder()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http_client = reqwest::Client::builder().build().unwrap_or_else(|e| {
+            tracing::warn!("默认 HTTP 客户端构建失败，回退无配置客户端: {e}");
+            reqwest::Client::new()
+        });
 
         Arc::new(Self {
             config,
@@ -155,7 +156,7 @@ impl UpdaterService {
         let config = self.config.clone();
         let status = self.status.clone();
         // 回退客户端（跟随系统代理）；每次检查按当前配置构建实际客户端，
-        // 运行时修改 use_proxy / proxy_port 无需重启即生效
+        // 运行时修改 use_proxy / proxy_url 无需重启即生效
         let fallback_client = self.http_client.clone();
         let current_version = self.current_version.clone();
 
@@ -208,7 +209,8 @@ impl UpdaterService {
         let pkg = match check::select_platform(&manifest) {
             Some(p) => p,
             None => {
-                tracing::info!("当前平台无可用更新包: {}", check::CURRENT_PLATFORM_KEY);
+                // 手动检查路径的预期情况（远程发布可能没有当前平台安装包），仅 debug
+                tracing::debug!("当前平台无可用更新包: {}", check::CURRENT_PLATFORM_KEY);
                 return Ok(None);
             }
         };
@@ -442,7 +444,9 @@ impl UpdaterService {
         match self_replace::self_replace(extracted_exe.as_path()) {
             Ok(()) => {
                 // 替换成功，删除备份并清理 staging
-                let _ = std::fs::remove_file(&backup_path);
+                if let Err(e) = std::fs::remove_file(&backup_path) {
+                    tracing::debug!("删除更新前 exe 备份失败（忽略）: {e}");
+                }
                 apply::cleanup_after_apply(&self.base_path).await;
                 tracing::info!("启动时已应用更新: v{}", pending.version);
                 Ok(true)
@@ -466,13 +470,31 @@ impl UpdaterService {
     }
 }
 
-/// 构建指向本地代理端口的 HTTP 客户端（`http://127.0.0.1:{port}`）
+/// 代理地址脱敏：仅保留 scheme + host——代理 URL 可能内嵌 `user:pass` 凭据，
+/// 整串入日志会泄露凭证
+fn sanitize_proxy_url(proxy_url: &str) -> String {
+    let (scheme, rest) = match proxy_url.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => return proxy_url.to_string(),
+    };
+    match rest.split_once('@') {
+        Some((_credentials, host)) => format!("{scheme}://{host}"),
+        None => proxy_url.to_string(),
+    }
+}
+
+/// 构建走显式代理的 HTTP 客户端
 ///
 /// 每次调用新建（Client 构造纯配置无 I/O，开销可忽略）；检查/下载为低频操作，
-/// 连接池复用收益有限。
-fn build_proxied_client(port: u16) -> Result<reqwest::Client, String> {
-    let proxy =
-        reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?;
+/// 连接池复用收益有限。仅接受 http/https 代理地址。
+fn build_proxied_client(proxy_url: &str) -> Result<reqwest::Client, String> {
+    let lower = proxy_url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(format!(
+            "代理地址必须是 http:// 或 https:// 开头：{proxy_url}"
+        ));
+    }
+    let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| e.to_string())?;
     reqwest::Client::builder()
         .proxy(proxy)
         .build()
@@ -481,20 +503,24 @@ fn build_proxied_client(port: u16) -> Result<reqwest::Client, String> {
 
 /// 按更新器配置选择客户端（后台检查任务用，与 [`UpdaterService::effective_client`] 同语义）
 ///
-/// `use_proxy` 开启且端口合法 → 显式代理客户端；否则返回 `fallback`
+/// `use_proxy` 开启且代理地址有效 → 显式代理客户端；否则返回 `fallback`
 /// （跟随系统代理的共享客户端）。
 fn effective_client_for(
     settings: &crate::config::UpdaterSettings,
     fallback: reqwest::Client,
 ) -> reqwest::Client {
-    if settings.use_proxy && settings.proxy_port > 0 {
-        if let Ok(c) = build_proxied_client(settings.proxy_port) {
-            return c;
+    if settings.use_proxy {
+        let proxy_url = settings.resolved_proxy_url();
+        if !proxy_url.is_empty() {
+            match build_proxied_client(&proxy_url) {
+                Ok(c) => return c,
+                // 脱敏后仅记录 scheme+host，避免 user:pass 凭据进日志
+                Err(e) => tracing::warn!(
+                    "构建代理客户端失败（{}）：{e}，回退系统代理",
+                    sanitize_proxy_url(&proxy_url)
+                ),
+            }
         }
-        tracing::warn!(
-            "构建代理客户端失败（端口 {}），回退系统代理",
-            settings.proxy_port
-        );
     }
     fallback
 }

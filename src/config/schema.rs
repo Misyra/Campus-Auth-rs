@@ -320,6 +320,11 @@ pub struct AppSettings {
     pub developer_mode: bool,
     /// 是否显示系统托盘图标（关闭后程序仅在 Web 控制台运行，无桌面图标）
     pub show_tray: bool,
+    /// 定时自重启间隔（小时，0 = 不启用）
+    ///
+    /// 长期运行场景下浏览器/Worker 常驻内存会缓慢增长，按周期优雅自重启回收。
+    /// 运行时修改无需重启即生效（重启计时任务每分钟读一次该值）。
+    pub auto_restart_hours: u32,
 }
 
 impl Default for AppSettings {
@@ -333,6 +338,7 @@ impl Default for AppSettings {
             task_notification: true,
             developer_mode: false,
             show_tray: true,
+            auto_restart_hours: 0,
         }
     }
 }
@@ -347,10 +353,30 @@ pub struct UpdaterSettings {
     pub release_source_url: String,
     /// 检查间隔（小时）
     pub check_interval_hours: u32,
-    /// 是否使用本地代理下载更新（127.0.0.1:proxy_port）
+    /// 是否使用显式代理下载更新（地址见 [`Self::resolved_proxy_url`])
     pub use_proxy: bool,
-    /// 本地代理端口（如 Clash 默认 7890）
+    /// 代理地址（如 `http://127.0.0.1:7890`，支持非本机代理）
+    pub proxy_url: String,
+    /// 旧版"本地代理端口"字段：仅用于兼容读取，新配置一律写 `proxy_url`
     pub proxy_port: u16,
+}
+
+impl UpdaterSettings {
+    /// 解析实际生效的代理地址：
+    /// `proxy_url` 非空优先；为空时回退旧版 `proxy_port` 派生 `http://127.0.0.1:{port}`
+    /// （兼容只写了端口的存量配置），两者都无则返回空串（跟随系统代理）。
+    ///
+    /// 注意 `Default` 里 `proxy_url` 必须保持空串：serde 缺字段时按 Default 填充，
+    /// 若填完整地址会让旧配置自定义的 `proxy_port` 被默认值覆盖。
+    pub fn resolved_proxy_url(&self) -> String {
+        if !self.proxy_url.is_empty() {
+            return self.proxy_url.clone();
+        }
+        if self.proxy_port > 0 {
+            return format!("http://127.0.0.1:{}", self.proxy_port);
+        }
+        String::new()
+    }
 }
 
 impl Default for UpdaterSettings {
@@ -361,6 +387,7 @@ impl Default for UpdaterSettings {
                 "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest".to_string(),
             check_interval_hours: 24,
             use_proxy: false,
+            proxy_url: String::new(),
             proxy_port: 7890,
         }
     }
@@ -421,4 +448,42 @@ pub enum StartupAction {
     Monitor,
     /// 启动后执行一次登录
     LoginOnce,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolved_proxy_url() {
+        // 新配置：proxy_url 优先
+        let s = UpdaterSettings {
+            proxy_url: "http://192.168.1.5:7890".into(),
+            proxy_port: 7891,
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_proxy_url(), "http://192.168.1.5:7890");
+
+        // 旧配置：proxy_url 为空时回退 proxy_port 派生
+        let legacy = UpdaterSettings {
+            proxy_url: String::new(),
+            proxy_port: 7891,
+            ..Default::default()
+        };
+        assert_eq!(legacy.resolved_proxy_url(), "http://127.0.0.1:7891");
+
+        // 两者皆无 → 空串（跟随系统代理）
+        let none = UpdaterSettings {
+            proxy_url: String::new(),
+            proxy_port: 0,
+            ..Default::default()
+        };
+        assert_eq!(none.resolved_proxy_url(), "");
+
+        // serde 缺字段兼容：旧 JSON（无 proxy_url）反序列化后走端口派生，
+        // 且自定义端口不被新字段默认值覆盖
+        let legacy_json = r#"{"check_on_startup":true,"release_source_url":"https://x","check_interval_hours":24,"use_proxy":true,"proxy_port":7891}"#;
+        let parsed: UpdaterSettings = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.resolved_proxy_url(), "http://127.0.0.1:7891");
+    }
 }

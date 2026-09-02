@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::logging::{LogEntry, WorkerGuard, init_logging, log_broadcast_tx};
 use anyhow::{Context, Result};
@@ -174,6 +175,25 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     let log_tx = log_broadcast_tx();
     let log_guard = init_logging(&app_config.base_path, log_tx.clone());
 
+    // 启动信息留痕（日志系统刚就绪，此前的 tracing 日志无 subscriber）：版本 /
+    // 根目录 / 运行模式；非完整模式的实际端口按需分配（配置值无意义），省略该字段
+    if matches!(app_config.runtime_mode, RuntimeMode::Full) {
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            base_path = %app_config.base_path.display(),
+            port = app_config.port,
+            mode = "full",
+            "应用启动"
+        );
+    } else {
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            base_path = %app_config.base_path.display(),
+            mode = ?app_config.runtime_mode,
+            "应用启动"
+        );
+    }
+
     // 6. 引导服务容器
     // 应用级关闭令牌在此创建：传入容器派生 uptime/登录 shutdown 的 child，
     // 并作为 LauncherState 的 shutdown_token 统一驱动关闭（A3）。
@@ -190,6 +210,8 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
             settings.global.app.startup_action = action;
             if let Err(e) = container.config.save_settings(&settings).await {
                 tracing::warn!("保存 startup_action 配置失败: {e}");
+            } else {
+                info!(action = ?settings.global.app.startup_action, "已按 CLI 参数覆盖 startup_action 配置");
             }
         }
     }
@@ -287,10 +309,26 @@ fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode, bool) {
     let settings_path = base_path
         .join(crate::config::CONFIG_DIR)
         .join(crate::config::SETTINGS_FILE);
-    let Ok(raw) = std::fs::read_to_string(&settings_path) else {
-        return (default_port, true, default_mode, true);
+    let raw = match std::fs::read_to_string(&settings_path) {
+        Ok(raw) => raw,
+        // 文件不存在属正常路径（首次运行），静默回退默认
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (default_port, true, default_mode, true);
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %settings_path.display(),
+                error = %e,
+                "读取启动配置失败，使用默认启动参数"
+            );
+            return (default_port, true, default_mode, true);
+        }
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        tracing::debug!(
+            path = %settings_path.display(),
+            "settings.json 解析失败，使用默认启动参数"
+        );
         return (default_port, true, default_mode, true);
     };
     let app = value.get("global").and_then(|g| g.get("app"));
@@ -372,7 +410,9 @@ fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
                     anyhow::bail!("强制终止后无法获取锁");
                 }
             }
-            let _ = std::fs::remove_file(base_path.join("config").join(".instance"));
+            if let Err(e) = std::fs::remove_file(base_path.join("config").join(".instance")) {
+                tracing::debug!(error = %e, "清理残留的 .instance 锁文件失败");
+            }
             InstanceLock::try_acquire(base_path).context("强制终止后仍无法获取锁")
         }
         Err(e) => Err(e).context("无法获取实例锁（已有实例在运行，使用 --force 强制终止）"),
@@ -385,6 +425,7 @@ async fn wait_for_lock_release(base_path: &Path) -> Result<()> {
     let interval = std::time::Duration::from_millis(200);
     let start = std::time::Instant::now();
 
+    info!("重启场景：等待旧进程释放实例锁...");
     loop {
         match InstanceLock::try_acquire(base_path) {
             Ok(lock) => {
@@ -395,6 +436,7 @@ async fn wait_for_lock_release(base_path: &Path) -> Result<()> {
                 tokio::time::sleep(interval).await;
             }
             Err(_) => {
+                error!("等待旧进程释放锁超时（30 秒），本次启动中止");
                 anyhow::bail!("等待旧进程释放锁超时（30 秒）");
             }
         }
@@ -425,7 +467,9 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         Ok(handle) => {
             let port = handle.port;
             if let Some(ref lock) = state.instance_lock {
-                let _ = lock.record_port(port);
+                if let Err(e) = lock.record_port(port) {
+                    warn!(port = port, error = %e, "记录运行端口到实例锁失败");
+                }
             }
             state.axum_handle = Some(handle);
             info!("Web 控制台已启动: http://127.0.0.1:{port}");
@@ -464,6 +508,12 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
     // 后台更新检查
     spawn_background_update_check(state);
 
+    // 定时自重启计时
+    spawn_auto_restart_timer(state);
+
+    // 与 lightweight / login_once 模式对称的运行中留痕
+    info!("完整模式运行中");
+
     // 事件循环
     wait_for_shutdown(state).await;
     watch_handle.abort();
@@ -489,10 +539,14 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     // 未监听端口发无效请求。真实端口在 Axum 绑定后由托盘按需启动路径
     // （write_instance_port）回写。
     if let Some(ref lock) = state.instance_lock {
-        let _ = lock.record_port(0);
+        if let Err(e) = lock.record_port(0) {
+            tracing::debug!(error = %e, "记录哨兵端口 0 失败（--status 将看不到端口）");
+        }
     }
 
     spawn_background_update_check(state);
+
+    spawn_auto_restart_timer(state);
 
     info!("轻量模式运行中（Axum 按需启动）");
     wait_for_shutdown(state).await;
@@ -534,7 +588,9 @@ async fn apply_startup_action(container: &Arc<ServiceContainer>) {
                 }
             });
         }
-        StartupAction::None => {}
+        StartupAction::None => {
+            tracing::debug!("startup_action=None，不派发启动动作");
+        }
     }
 }
 
@@ -620,6 +676,10 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
         if shutdown_token.is_cancelled() {
             return;
         }
+
+        // 首次（初始 Engine）非正常退出：重启循环内的后续退出各有 error 留痕，
+        // 此处补首崩记录，避免「只在重启 info 中隐含崩溃」导致误判为正常重启
+        error!("Engine 异常退出（疑似崩溃），进入重启流程");
 
         let mut restart_count: u32 = 0;
 
@@ -824,6 +884,95 @@ fn spawn_background_update_check(state: &LauncherState) {
     }
 }
 
+/// 启动定时自重启计时任务（full / lightweight 模式）
+///
+/// 每分钟读取一次 `app.auto_restart_hours` 与运行时长（Metrics.uptime_seconds），
+/// 达到阈值即复用 `POST /api/system/restart` 同款机制：先 spawn 带 `--restarting`
+/// 的后继进程（它会等待本进程释放实例锁），再取消应用级关闭令牌走优雅关闭，
+/// 并武装 30s 退出 watchdog。配置运行时修改无需重启即生效。
+fn spawn_auto_restart_timer(state: &LauncherState) {
+    // 单次登录模式进程本就即用即退，无需定时重启
+    if matches!(state.app_config.runtime_mode, RuntimeMode::LoginOnce) {
+        return;
+    }
+    let Some(container) = state.container.clone() else {
+        return;
+    };
+    let token = state.shutdown_token.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+            }
+            let hours = container
+                .config
+                .load_settings()
+                .global
+                .app
+                .auto_restart_hours;
+            if !should_auto_restart(
+                hours,
+                container.metrics.uptime_seconds.load(Ordering::Relaxed),
+            ) {
+                continue;
+            }
+            info!("运行时长已达 {hours} 小时，执行定时自重启");
+            if let Err(e) = spawn_restart_successor() {
+                // 后继进程启动失败时放弃本轮重启（保持当前进程运行），避免每分钟重试刷屏
+                error!("定时自重启：启动后继进程失败（{e}），本次已放弃，保持当前进程运行");
+                return;
+            }
+            spawn_exit_watchdog(30);
+            token.cancel();
+            return;
+        }
+    });
+}
+
+/// 定时自重启触发判定（纯函数，便于单测）
+///
+/// `hours == 0` 表示未启用；运行时长达到 `hours * 3600` 秒即触发。
+fn should_auto_restart(hours: u32, uptime_secs: u64) -> bool {
+    hours > 0 && uptime_secs >= u64::from(hours) * 3600
+}
+
+/// spawn 带 `--restarting` 标记的后继进程（定时自重启与 Web 重启接口共用）///
+/// 后继进程会先等待本进程释放实例锁再启动（见 [`wait_for_lock_release`]），
+/// 因此调用方必须**先 spawn 后继、再触发本进程优雅关闭**。
+pub(crate) fn spawn_restart_successor() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("获取可执行文件路径失败: {e}"))?;
+    // args_os：参数含非法 Unicode 时 env::args() 会 panic，args_os 不会
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    args.retain(|a| a != "--restarting");
+    args.push("--restarting".into());
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&args);
+    // Windows：避免从 GUI 进程 spawn 出闪烁的控制台窗口（与其他子进程一致）
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn().map_err(|e| format!("启动新进程失败: {e}"))?;
+    Ok(())
+}
+
+/// 生成退出 watchdog：优雅关闭超时后强制 `exit(0)`，作为最后防线。
+///
+/// Web 重启/关闭接口与定时自重启共用，统一为 30s，
+/// 覆盖优雅关闭总预算（Tray 3s + Scheduler 5s + Engine 5s + Bridge 8s + Axum 5s ≈ 26s），
+/// 避免强杀过早残留浏览器/子进程（A4）。
+pub(crate) fn spawn_exit_watchdog(secs: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        tracing::warn!("优雅关闭超时 {secs}s，强制退出");
+        std::process::exit(0);
+    });
+}
+
 /// 等待退出信号（Ctrl+C / SIGTERM/SIGHUP / 托盘退出 / Web API 关闭）
 async fn wait_for_shutdown(state: &mut LauncherState) {
     let token = state.shutdown_token.clone();
@@ -893,5 +1042,21 @@ async fn wait_terminate_signal() {
     #[cfg(not(unix))]
     {
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_auto_restart;
+
+    #[test]
+    fn test_should_auto_restart() {
+        // 未启用
+        assert!(!should_auto_restart(0, 100 * 3600));
+        // 未到阈值
+        assert!(!should_auto_restart(24, 23 * 3600 + 3599));
+        // 恰好到达与超过
+        assert!(should_auto_restart(24, 24 * 3600));
+        assert!(should_auto_restart(6, 7 * 3600));
     }
 }

@@ -78,12 +78,12 @@ fn normalize_repo_url(raw: &str) -> String {
     raw.to_string()
 }
 
-/// 读取更新器代理设置：启用时返回 `http://127.0.0.1:{port}`（仓库任务与更新
-/// 共用同一代理配置——国内访问 GitHub raw 常需代理），未启用返回 None（直连/系统代理）。
+/// 读取更新器代理设置：启用时返回 `proxy_url`（仓库任务与更新共用同一代理配置
+/// ——国内访问 GitHub raw 常需代理），未启用或地址为空返回 None（直连/系统代理）。
 async fn updater_proxy(config: &Arc<dyn ConfigApi>) -> Option<String> {
     let updater = config.load_settings_async().await.global.updater;
-    (updater.use_proxy && updater.proxy_port > 0)
-        .then(|| format!("http://127.0.0.1:{}", updater.proxy_port))
+    (updater.use_proxy && !updater.resolved_proxy_url().is_empty())
+        .then(|| updater.resolved_proxy_url())
 }
 
 /// 获取远程 JSON 并校验类型（数组或对象）
@@ -95,11 +95,20 @@ async fn repo_fetch_json(
     label: &str,
     proxy: Option<&str>,
 ) -> Result<Value, ApiError> {
+    // 失败路径的 debug 日志只记 host，不记录完整 URL（query 可能携带敏感参数）
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
     let (resp, _) = secure_get_proxied(url, Duration::from_secs(15), "Campus-Auth", proxy)
         .await
-        .map_err(ApiError::BadRequest)?;
+        .map_err(|e| {
+            tracing::debug!(host = %host, "仓库请求失败: {e}");
+            ApiError::BadRequest(e)
+        })?;
     let status = resp.status();
     if !status.is_success() {
+        tracing::debug!(host = %host, status = %status, "仓库请求返回非成功状态");
         return Err(ApiError::ServiceUnavailable(format!(
             "远程返回 HTTP {status} ({url})"
         )));
@@ -109,22 +118,29 @@ async fn repo_fetch_json(
     let mut body: Vec<u8> = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| ApiError::Internal(format!("{label}响应读取失败: {e}")))?;
+        let chunk = chunk.map_err(|e| {
+            tracing::debug!(host = %host, "仓库响应读取失败: {e}");
+            ApiError::Internal(format!("{label}响应读取失败: {e}"))
+        })?;
         append_within_limit(&mut body, &chunk, MAX_REPO_BODY_BYTES).ok_or_else(|| {
+            tracing::debug!(host = %host, "仓库响应体超过大小上限，已中止下载");
             ApiError::BadRequest(format!(
                 "{label}响应体超过 {} MiB 上限，已中止下载",
                 MAX_REPO_BODY_BYTES / (1024 * 1024)
             ))
         })?;
     }
-    let json: Value = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::Internal(format!("{label} JSON 解析失败: {e}")))?;
+    let json: Value = serde_json::from_slice(&body).map_err(|e| {
+        tracing::debug!(host = %host, "仓库响应 JSON 解析失败: {e}");
+        ApiError::Internal(format!("{label} JSON 解析失败: {e}"))
+    })?;
     let type_name = if expected_list {
         "JSON 数组"
     } else {
         "JSON 对象"
     };
     if (expected_list && !json.is_array()) || (!expected_list && !json.is_object()) {
+        tracing::debug!(host = %host, expected = type_name, "仓库响应类型不正确");
         return Err(ApiError::Internal(format!(
             "{label}格式不正确，应为 {type_name}"
         )));

@@ -50,42 +50,16 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
 /// 避免双方争锁导致"重启变退出"（旧实现直接 spawn 原参数 + 200ms 后
 /// `exit(0)` 硬退出，新进程抢锁失败即死，最终两个进程都消失）。
 /// 旧进程通过 shutdown_tx 走完整优雅关闭流程（而非 exit(0) 跳过清理）。
+/// 后继进程生成逻辑与定时自重启共用 [`crate::launcher::spawn_restart_successor`]。
 pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let exe = std::env::current_exe()
-        .map_err(|e| ApiError::Internal(format!("获取可执行文件路径失败: {e}")))?;
-    // args_os：参数含非法 Unicode 时 env::args() 会 panic，args_os 不会
-    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    args.retain(|a| a != "--restarting");
-    args.push("--restarting".into());
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(&args);
-    // Windows：避免从 GUI 进程 spawn 出闪烁的控制台窗口（与其他子进程一致）
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd.spawn()
-        .map_err(|e| ApiError::Internal(format!("启动新进程失败: {e}")))?;
+    // 生命周期事件：重启是关键用户操作，info 留痕
+    tracing::info!("收到重启请求，生成后继进程并开始优雅关闭");
+    crate::launcher::spawn_restart_successor().map_err(ApiError::Internal)?;
     // 通知 launcher 优雅关闭当前进程（新进程会等待实例锁释放）
     let _ = state.shutdown_tx.send(());
     // watchdog：优雅关闭挂死时强制退出，释放实例锁供新进程启动（A4 统一）
-    spawn_exit_watchdog(30);
+    crate::launcher::spawn_exit_watchdog(30);
     Ok(data(Value::String("正在重启".into())))
-}
-
-/// 生成退出 watchdog：优雅关闭超时后强制 `exit(0)`，作为最后防线。
-///
-/// `shutdown_app` / `restart_app` 共用，统一为 30s，
-/// 覆盖优雅关闭总预算（Tray 3s + Scheduler 5s + Engine 5s + Bridge 8s + Axum 5s ≈ 26s），
-/// 避免强杀过早残留浏览器/子进程（A4）。
-pub(crate) fn spawn_exit_watchdog(secs: u64) {
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-        tracing::warn!("优雅关闭超时 {secs}s，强制退出");
-        std::process::exit(0);
-    });
 }
 
 /// POST /api/system/shutdown — 优雅关闭（通知 launcher 执行完整关闭流程）
@@ -94,10 +68,12 @@ pub(crate) fn spawn_exit_watchdog(secs: u64) {
 /// Bridge/Tray/Axum，所有服务在各自 event loop 内清理资源后再退出进程。
 /// 若 30s 后仍未退出（优雅关闭挂死），最后防线才是 exit(0)。
 pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    // 生命周期事件：关闭是关键用户操作，info 留痕
+    tracing::info!("收到关闭请求，开始优雅关闭");
     // 通知 launcher 开始优雅关闭
     let _ = state.shutdown_tx.send(());
     // watchdog：30s 后若仍存活则强制退出（所有服务本应在 30s 内完成清理）
-    spawn_exit_watchdog(30);
+    crate::launcher::spawn_exit_watchdog(30);
     Ok(data(Value::String("正在关闭".into())))
 }
 
@@ -301,10 +277,11 @@ pub async fn apply_update(
         .await
         .map_err(|e| ApiError::Internal(format!("检查更新失败: {e}")))?
         .ok_or_else(|| ApiError::BadRequest("当前已是最新版本，无需更新".into()))?;
-    updater
-        .apply_update(&info)
-        .await
-        .map_err(|e| ApiError::Internal(format!("应用更新失败: {e}")))?;
+    tracing::info!(version = %info.latest_version, "开始下载并暂存更新");
+    updater.apply_update(&info).await.map_err(|e| {
+        tracing::warn!(version = %info.latest_version, "应用更新失败: {e}");
+        ApiError::Internal(format!("应用更新失败: {e}"))
+    })?;
     Ok(data(serde_json::json!({
         "message": "更新已暂存，重启后生效",
         "version": info.latest_version,
@@ -461,10 +438,14 @@ pub async fn install_playwright(
     Query(params): Query<InstallPlaywrightQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let browser = normalize_playwright_browser(params.browser.as_deref())?;
+    tracing::info!(browser = %browser, "开始安装 Playwright 浏览器");
     let core_was_ready = environment.status().capability_ready;
     perform_playwright_install(environment.as_ref(), &browser, core_was_ready)
         .await
-        .map_err(|e| ApiError::Internal(format!("Playwright {browser} 安装失败: {e}")))?;
+        .map_err(|e| {
+            tracing::warn!(browser = %browser, "Playwright {browser} 安装失败: {e}");
+            ApiError::Internal(format!("Playwright {browser} 安装失败: {e}"))
+        })?;
     Ok(data(serde_json::json!({
         "browser": browser,
         "installed": true,
