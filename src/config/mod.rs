@@ -11,7 +11,7 @@ pub mod schema;
 pub mod service;
 
 /// 当前代码支持的最高 schema 版本
-pub const CURRENT_CONFIG_VERSION: u32 = 6;
+pub const CURRENT_CONFIG_VERSION: u32 = 7;
 /// 配置目录（相对于 base_path）
 pub const CONFIG_DIR: &str = "config";
 /// 主配置文件名

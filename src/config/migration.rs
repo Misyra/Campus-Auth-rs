@@ -1,4 +1,4 @@
-//! 配置 schema 版本迁移 pipeline（v5 → v6）
+//! 配置 schema 版本迁移 pipeline（v5 → v6 → v7）
 //!
 //! 启动时若 `settings.json` 的 `config_version` 低于当前版本，按 `MIGRATIONS` 顺序
 //! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用覆盖写入，
@@ -22,8 +22,8 @@ type MigrationFn = fn(config_dir: &Path, value: &mut Value) -> Result<(), Config
 
 /// 迁移表：目标版本 -> 迁移函数
 ///
-/// 当前仅有 v5 → v6。新增版本时在末尾追加 `(新版本, 迁移函数)` 即可。
-pub const MIGRATIONS: &[(u32, MigrationFn)] = &[(6, migrate_v5_to_v6)];
+/// 新增版本时在末尾追加 `(新版本, 迁移函数)` 即可。
+pub const MIGRATIONS: &[(u32, MigrationFn)] = &[(6, migrate_v5_to_v6), (7, migrate_v6_to_v7)];
 
 /// 执行所有需要的迁移
 ///
@@ -267,6 +267,32 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else if file_type.is_file() {
             std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// v6 → v7 迁移
+///
+/// 修复历史遗留的更新源指向：`4ae78a7` 将默认更新源从旧仓库 `Misyra/Campus-Auth`
+/// 改指 `Misyra/Campus-Auth-rs`，但仅改了代码默认值——此前创建的配置文件已把旧
+/// 地址持久化进 `global.updater.release_source_url`，不会自动跟进。旧仓库 latest
+/// 是无平台标识的单资产发布（如 `Campus-Auth-4.2.3.zip`），导致"检查更新"永远
+/// 报"发布中未找到平台下载包"。此处将旧地址改写为新仓库。
+fn migrate_v6_to_v7(_config_dir: &Path, value: &mut Value) -> Result<(), ConfigError> {
+    const OLD_SOURCE_URL: &str = "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest";
+    const NEW_SOURCE_URL: &str =
+        "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest";
+
+    let Some(updater) = value.get_mut("global").and_then(|g| g.get_mut("updater")) else {
+        return Ok(());
+    };
+    if updater.get("release_source_url").and_then(Value::as_str) == Some(OLD_SOURCE_URL) {
+        if let Some(obj) = updater.as_object_mut() {
+            obj.insert(
+                "release_source_url".to_string(),
+                Value::String(NEW_SOURCE_URL.to_string()),
+            );
         }
     }
     Ok(())
@@ -544,6 +570,56 @@ mod tests {
         assert!(
             backups[0].join("settings.json").exists(),
             "备份应包含原配置"
+        );
+    }
+
+    // ============ v6 → v7：更新源旧仓库地址改写 ============
+
+    #[test]
+    fn test_migrate_v6_to_v7_rewrites_old_source_url() {
+        let mut v = serde_json::json!({
+            "config_version": 6,
+            "global": {
+                "updater": {
+                    "check_on_startup": true,
+                    "release_source_url": "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest",
+                    "use_proxy": true,
+                    "proxy_port": 7890
+                }
+            }
+        });
+
+        migrate_v6_to_v7(tempfile::tempdir().unwrap().path(), &mut v).unwrap();
+        assert_eq!(
+            v["global"]["updater"]["release_source_url"],
+            "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest",
+            "旧仓库更新源应改写为新仓库"
+        );
+        // 同文件其他字段不受影响
+        assert_eq!(v["global"]["updater"]["proxy_port"], 7890);
+    }
+
+    #[test]
+    fn test_migrate_v6_to_v7_keeps_other_urls() {
+        // 已是新地址 / 自定义地址 / updater 缺失：均不动
+        let mut v = serde_json::json!({
+            "global": {
+                "updater": {
+                    "release_source_url": "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest"
+                }
+            }
+        });
+        migrate_v6_to_v7(tempfile::tempdir().unwrap().path(), &mut v).unwrap();
+        assert_eq!(
+            v["global"]["updater"]["release_source_url"],
+            "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest"
+        );
+
+        let mut v = serde_json::json!({ "global": {} });
+        migrate_v6_to_v7(tempfile::tempdir().unwrap().path(), &mut v).unwrap();
+        assert!(
+            v["global"].get("updater").is_none(),
+            "无 updater 不应凭空创建"
         );
     }
 }
