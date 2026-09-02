@@ -7,15 +7,15 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  backdrop-filter: blur(4px);
+  backdrop-filter: var(--blur-sm);
 }
 
 .modal-container {
   /* 专用 --bg-modal（高不透明）：内容密集的弹窗（调试面板等）用 --bg-card 会
      明显透出底层文字，可读性差 */
   background: var(--bg-modal);
-  backdrop-filter: blur(20px) saturate(1.15);
-  -webkit-backdrop-filter: blur(20px) saturate(1.15);
+  backdrop-filter: var(--blur-xl) saturate(1.15);
+  -webkit-backdrop-filter: var(--blur-xl) saturate(1.15);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   width: 90%;
@@ -23,7 +23,7 @@
   max-height: 85vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-xl);
 }
 
 .modal-container.modal-lg {
@@ -34,18 +34,18 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 24px;
+  padding: 20px var(--space-lg);
   border-bottom: 1px solid var(--border);
 }
 
 .modal-header h3 {
-  font-size: 18px;
+  font-size: var(--text-lg);
   font-weight: 600;
   margin: 0;
 }
 
 .modal-body {
-  padding: 24px;
+  padding: var(--space-lg);
   overflow-y: auto;
   flex: 1;
 }
@@ -54,7 +54,7 @@
   display: flex;
   justify-content: flex-end;
   gap: 12px;
-  padding: 16px 24px;
+  padding: var(--space-md) var(--space-lg);
   border-top: 1px solid var(--border);
 }
 
@@ -65,8 +65,8 @@
   border-radius: var(--radius-xl);
   width: 90%;
   max-width: 440px;
-  padding: 24px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  padding: var(--space-lg);
+  box-shadow: var(--shadow-xl);
   animation: modalFadeIn var(--dur-base) var(--ease-out);
 }
 
@@ -75,7 +75,7 @@
 }
 
 .confirm-title {
-  font-size: 17px;
+  font-size: var(--text-lg);
   font-weight: 600;
   margin: 0 0 12px;
 }
@@ -89,7 +89,7 @@
   line-height: 1.6;
   color: var(--text-secondary);
   white-space: pre-line;
-  margin: 0 0 24px;
+  margin: 0 0 var(--space-lg);
 }
 
 .confirm-actions {

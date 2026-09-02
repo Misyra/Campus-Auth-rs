@@ -3,11 +3,11 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 16px;
+  margin-top: var(--space-md);
 }
 
 .mini-stat {
-  padding: 16px;
+  padding: var(--space-md);
   border-radius: var(--radius-xl);
   border: 1px solid var(--border);
   background: var(--bg-glass);
@@ -21,7 +21,7 @@
 
 .mini-stat-label {
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
   font-size: var(--text-sm);
   color: var(--text-muted);
 }
@@ -45,21 +45,21 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-  padding-bottom: 16px;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+  padding-bottom: var(--space-md);
   border-bottom: 1px solid var(--border);
 }
 
 .task-overview-card .card-body {
-  padding: 12px 16px;
+  padding: 12px var(--space-md);
 }
 
 .task-overview-compact {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-md);
   margin-bottom: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
@@ -68,14 +68,14 @@
 .task-overview-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-wrap: wrap;
 }
 
 .task-overview-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
   flex: 1;
 }
@@ -118,7 +118,7 @@
 }
 
 .task-overview-name {
-  font-size: 15px;
+  font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -127,7 +127,7 @@
   display: block;
   font-size: var(--text-md);
   color: var(--text-secondary);
-  margin-top: 4px;
+  margin-top: var(--space-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -174,7 +174,7 @@
 .task-recorder-note code {
   background: rgba(var(--accent-rgb), 0.1);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: var(--text-sm);
 }
 
@@ -193,18 +193,18 @@
 
 /* ---- OCR 依赖管理 ---- */
 .ocr-status-row {
-  margin: 8px 0 4px;
+  margin: var(--space-sm) 0 var(--space-xs);
 }
 
 .ocr-status {
   font-size: var(--text-sm);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-xs);
 }
 
 .ocr-status.ok {
-  color: var(--success, #22c55e);
+  color: var(--success);
 }
 
 .ocr-status.none {
@@ -216,11 +216,11 @@
 }
 
 .ocr-status.error {
-  color: var(--danger, #ef4444);
+  color: var(--error);
 }
 
 .ocr-status .btn-link {
-  padding: 0 4px;
+  padding: 0 var(--space-xs);
   height: auto;
   color: var(--accent);
   background: none;
@@ -243,7 +243,7 @@
 .ocr-description code {
   background: rgba(var(--accent-rgb), 0.1);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: var(--text-sm);
   color: var(--accent);
 }
@@ -257,7 +257,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin-top: 4px;
+  margin-top: var(--space-xs);
 }
 
 .ocr-pick-row {
@@ -275,23 +275,23 @@
 .ocr-preview {
   max-width: 220px;
   max-height: 120px;
-  border-radius: 6px;
-  border: 1px solid rgba(107, 114, 128, 0.3);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(var(--slate-rgb), 0.3);
   object-fit: contain;
 }
 
 .ocr-result {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   font-size: var(--text-md);
   color: var(--text-secondary);
 }
 
 .ocr-result-text {
   background: rgba(var(--accent-rgb), 0.12);
-  padding: 3px 8px;
-  border-radius: 4px;
+  padding: 3px var(--space-sm);
+  border-radius: var(--radius-xs);
   font-size: var(--text-base);
   color: var(--accent);
   word-break: break-all;
@@ -299,5 +299,5 @@
 
 .ocr-error {
   font-size: var(--text-md);
-  color: var(--danger, #ef4444);
+  color: var(--error);
 }

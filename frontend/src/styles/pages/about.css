@@ -14,8 +14,8 @@
 
 .about-hero {
   text-align: center;
-  padding: 48px 24px;
-  margin-bottom: 24px;
+  padding: 48px var(--space-lg);
+  margin-bottom: var(--space-lg);
   position: relative;
   overflow: hidden;
 }
@@ -34,18 +34,18 @@
 .about-logo {
   width: 96px;
   height: 96px;
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
 }
 
 .about-hero h1 {
-  font-size: 28px;
-  margin-bottom: 8px;
+  font-size: var(--text-2xl);
+  margin-bottom: var(--space-sm);
 }
 
 .about-subtitle {
   font-size: var(--text-xl);
   color: var(--text-secondary);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
   font-weight: 500;
 }
 
@@ -53,7 +53,7 @@
   color: var(--accent);
   font-family: var(--font-mono);
   font-size: var(--text-base);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 
 .description {
@@ -61,7 +61,7 @@
 }
 
 .update-section {
-  margin-top: 16px;
+  margin-top: var(--space-md);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -75,12 +75,12 @@
 .update-available {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   color: var(--accent);
-  padding: 10px 16px;
+  padding: 10px var(--space-md);
   background: rgba(var(--accent-rgb), 0.08);
   border: 1px solid rgba(var(--accent-rgb), 0.2);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .update-available svg {
@@ -90,7 +90,7 @@
 .update-latest {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   color: var(--success);
 }
 
@@ -102,8 +102,8 @@
 .about-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
 }
 
 .about-grid .card {
@@ -113,18 +113,18 @@
 .about-grid .card:hover {
   transform: translateY(-2px);
   border-color: var(--border-hover);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-float);
 }
 
 .tech-stack {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .tech-badge {
-  padding: 8px 14px;
-  border-radius: 20px;
+  padding: var(--space-sm) 14px;
+  border-radius: var(--radius-full);
   font-size: var(--text-md);
   font-weight: 500;
   display: inline-flex;
@@ -132,13 +132,13 @@
   min-height: 36px;
   transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   /* color-mix 回退：旧浏览器显示半透明灰 */
-  background: rgba(148, 163, 184, 0.12);
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(var(--slate-rgb), 0.12);
+  border: 1px solid rgba(var(--slate-rgb), 0.2);
 }
 
 .tech-badge:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-hover);
 }
 
 .tech-badge.python {
@@ -197,7 +197,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 0;
+  padding: var(--space-sm) 0;
   color: var(--text-secondary);
   font-size: var(--text-base);
 }
@@ -218,7 +218,7 @@
 .info-item {
   display: flex;
   justify-content: space-between;
-  padding: 8px 0;
+  padding: var(--space-sm) 0;
   border-bottom: 1px solid var(--border);
 }
 
@@ -238,7 +238,7 @@
 
 .about-footer {
   text-align: center;
-  padding: 24px;
+  padding: var(--space-lg);
   color: var(--text-secondary);
   font-size: var(--text-base);
 }
@@ -246,14 +246,14 @@
 .about-links {
   display: flex;
   justify-content: center;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
 }
 
 .github-link {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   padding: 10px 20px;
   background: var(--bg-primary);
   border: 1px solid var(--border);
@@ -269,7 +269,7 @@
   background: var(--bg-hover);
   border-color: var(--border-hover);
   transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-hover);
 }
 
 .github-link svg {
@@ -279,11 +279,11 @@
 
 .muted {
   color: var(--text-muted);
-  margin-top: 8px;
+  margin-top: var(--space-sm);
 }
 
 .qq-group {
-  margin-top: 8px;
+  margin-top: var(--space-sm);
 }
 
 .qq-group strong {
@@ -296,9 +296,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 16px 20px;
-  margin-top: 16px;
+  gap: var(--space-md);
+  padding: var(--space-md) 20px;
+  margin-top: var(--space-md);
   border: 1px solid rgba(var(--error-rgb), 0.2);
   background: rgba(var(--error-rgb), 0.04);
 }
@@ -348,7 +348,7 @@
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-xl);
 }
 
 .uninstall-modal-header {
@@ -366,15 +366,15 @@
 .uninstall-subtitle {
   font-size: var(--text-md);
   color: var(--text-secondary);
-  margin: 4px 0 0;
+  margin: var(--space-xs) 0 0;
 }
 
 .uninstall-scanning {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 40px 20px;
+  gap: var(--space-sm);
+  padding: var(--space-2xl) 20px;
   color: var(--text-secondary);
   font-size: var(--text-base);
 }
@@ -382,16 +382,16 @@
 /* .spinner 和 @keyframes spin 已统一定义在 base.css 中 */
 
 .uninstall-modal-body {
-  padding: 16px 20px;
+  padding: var(--space-md) 20px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .uninstall-empty {
   text-align: center;
-  padding: 24px;
+  padding: var(--space-lg);
   color: var(--text-secondary);
   font-size: var(--text-base);
 }
@@ -402,9 +402,9 @@
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color var(--dur-fast) var(--ease-out);
 }
 
 .uninstall-item:hover:not(.disabled) {
@@ -454,17 +454,17 @@
   font-size: var(--text-xs);
   color: var(--text-muted);
   background: var(--bg-primary);
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-xs);
   flex-shrink: 0;
 }
 
 .uninstall-hint-box {
-  margin-top: 8px;
+  margin-top: var(--space-sm);
   padding: 10px 12px;
   background: rgba(var(--accent-rgb), 0.06);
   border: 1px solid rgba(var(--accent-rgb), 0.15);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: var(--text-md);
   color: var(--text-secondary);
   line-height: 1.5;
@@ -473,21 +473,21 @@
 .uninstall-modal-footer {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 16px 20px;
+  gap: var(--space-sm);
+  padding: var(--space-md) 20px;
   border-top: 1px solid var(--border);
 }
 
 /* 清理结果 */
 .uninstall-results {
-  padding: 16px 20px;
+  padding: var(--space-md) 20px;
   overflow-y: auto;
 }
 
 .uninstall-result-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   font-weight: 600;
   margin-bottom: 12px;
 }
@@ -495,7 +495,7 @@
 .uninstall-result-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   padding: 6px 0;
   font-size: var(--text-md);
 }
@@ -515,11 +515,11 @@
 }
 
 .uninstall-final-hint {
-  margin-top: 16px;
+  margin-top: var(--space-md);
   padding: 10px 12px;
   background: rgba(var(--error-rgb), 0.08);
   border: 1px solid rgba(var(--error-rgb), 0.2);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: var(--text-md);
   color: var(--text-secondary);
 }

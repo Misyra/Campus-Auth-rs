@@ -1,6 +1,6 @@
 /* form.css — 表单（form-group / select 美化 / form-row / hint / field-help / radio-group） */
 .form-group {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
 }
 
 .form-group label {
@@ -8,7 +8,7 @@
   font-size: var(--text-md);
   font-weight: 500;
   color: var(--text-secondary);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 
 .form-group input,
@@ -69,7 +69,7 @@
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: var(--space-md);
 }
 
 .hint {
@@ -91,10 +91,10 @@
   justify-content: center;
   width: 14px;
   height: 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  background: rgba(148, 163, 184, 0.1);
-  color: rgba(203, 213, 225, 0.8);
+  border-radius: var(--radius-full);
+  border: 1px solid rgba(var(--slate-rgb), 0.3);
+  background: rgba(var(--slate-rgb), 0.1);
+  color: var(--text-secondary);
   font-size: 8px;
   font-weight: 700;
   line-height: 1;
@@ -120,14 +120,14 @@
   width: max-content;
   max-width: min(320px, calc(100vw - 80px));
   padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.15);
-  background: rgba(15, 23, 42, 0.96);
-  color: rgba(226, 232, 240, 0.95);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--tooltip-border);
+  background: var(--tooltip-bg);
+  color: var(--tooltip-text);
   box-shadow:
     0 4px 16px rgba(0, 0, 0, 0.25),
-    0 0 0 1px rgba(148, 163, 184, 0.06);
-  font-size: 12.5px;
+    0 0 0 1px rgba(var(--slate-rgb), 0.06);
+  font-size: var(--text-sm);
   font-weight: 500;
   line-height: 1.65;
   letter-spacing: 0.01em;
@@ -163,7 +163,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 4px;
+  margin-top: var(--space-xs);
 }
 
 .radio-option {
@@ -174,17 +174,17 @@
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
 }
 
 .radio-option:hover {
   background: var(--bg-glass);
-  border-color: var(--border-hover, var(--border));
+  border-color: var(--border-hover);
 }
 
 .radio-option:has(input:checked) {
   border-color: var(--accent);
-  background: var(--accent-bg, rgba(var(--accent-rgb, 99, 102, 241), 0.06));
+  background: rgba(var(--accent-rgb), 0.06);
 }
 
 .radio-option input[type="radio"] {
@@ -215,7 +215,7 @@
 /* ═══ JSON 校验反馈 ═══ */
 .json-error {
   margin-top: 6px;
-  padding: 8px 12px;
+  padding: var(--space-sm) 12px;
   background: rgba(var(--error-rgb), 0.08);
   border: 1px solid rgba(var(--error-rgb), 0.2);
   border-radius: var(--radius-sm);
@@ -234,23 +234,4 @@ textarea.json-valid {
   border-color: var(--success);
 }
 
-/* ═══ 浅色主题 — field-help ═══ */
-[data-theme="light"] .field-help {
-  border-color: rgba(100, 116, 139, 0.35);
-  background: rgba(100, 116, 139, 0.1);
-  color: #64748b;
-}
-[data-theme="light"] .field-help:hover,
-[data-theme="light"] .field-help:focus-visible {
-  border-color: rgba(6, 182, 212, 0.5);
-  background: rgba(6, 182, 212, 0.1);
-  color: #0891b2;
-}
-[data-theme="light"] .field-help::after {
-  background: rgba(30, 41, 59, 0.96);
-  border-color: rgba(51, 65, 85, 0.3);
-  color: #e2e8f0;
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.18),
-    0 0 0 1px rgba(51, 65, 85, 0.1);
-}
+/* ═══ 浅色主题 — field-help 气泡的底色由 --tooltip-* token 重映射，无需组件级覆盖 ═══ */

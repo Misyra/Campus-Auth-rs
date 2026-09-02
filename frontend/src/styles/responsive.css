@@ -7,7 +7,7 @@
 
   .settings-detect-columns {
     grid-template-columns: 1fr;
-    gap: 24px;
+    gap: var(--space-lg);
   }
 }
 
@@ -48,11 +48,11 @@
 @media (max-width: 768px) {
   .sidebar {
     width: 64px;
-    padding: 16px 8px;
+    padding: var(--space-md) var(--space-sm);
   }
 
   .sidebar-header {
-    margin-bottom: 24px;
+    margin-bottom: var(--space-lg);
   }
 
   .logo-text,
@@ -68,8 +68,8 @@
   }
 
   .nav-more-menu {
-    margin: 4px 0;
-    padding: 4px 0;
+    margin: var(--space-xs) 0;
+    padding: var(--space-xs) 0;
     border-left: none;
   }
 
@@ -78,7 +78,7 @@
   }
 
   .top-bar {
-    padding: 16px;
+    padding: var(--space-md);
   }
 
   .notification-dropdown {
@@ -87,7 +87,7 @@
   }
 
   .content-wrapper {
-    padding: 16px;
+    padding: var(--space-md);
   }
 
   .stats-grid,
@@ -135,7 +135,7 @@
   }
 
   .wizard-steps {
-    padding: 16px 20px;
+    padding: var(--space-md) 20px;
     flex-wrap: wrap;
   }
 

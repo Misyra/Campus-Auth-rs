@@ -78,7 +78,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
-  padding: 4px;
+  padding: var(--space-xs);
   max-height: 250px;
   overflow-y: auto;
   animation: cs-dropdown-enter var(--dur-fast) var(--ease-out);
@@ -96,7 +96,7 @@
 }
 
 .custom-select-option {
-  padding: 8px 12px;
+  padding: var(--space-sm) 12px;
   border-radius: calc(var(--radius-md) - 4px);
   color: var(--text-primary);
   font-size: var(--text-md);
@@ -117,7 +117,7 @@
 
 /* 筛选场景的紧凑样式 */
 .custom-select.compact .custom-select-trigger {
-  padding: 5px 28px 5px 8px;
+  padding: 5px 28px 5px var(--space-sm);
   font-size: var(--text-sm);
   min-height: auto;
   border-radius: var(--radius-sm);

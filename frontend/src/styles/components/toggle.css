@@ -1,9 +1,9 @@
 /* toggle.css — 开关（label 型 toggle / ToggleSwitch 按钮型开关） */
 .toggle-group {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .toggle {

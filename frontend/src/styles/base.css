@@ -25,6 +25,8 @@
   --text-secondary: #b3b3b3;
   --text-muted: #999999;
   --text-tertiary: #808080;
+  /* 注意与 --on-accent 双轨：--text-on-accent 是"永远白色"（开关旋钮、红点数字等
+     需要在任意底色上保持白色的元素）；--on-accent 是强调色底上的对比度自适应文字 */
   --text-on-accent: #ffffff;
 
   /* 主题色 */
@@ -37,12 +39,23 @@
      保证自定义强调色时发光、边框、选中态同步跟随 */
   --accent-rgb: 34, 211, 238;
   --primary-rgb: 59, 130, 246;
+  --purple-rgb: 167, 139, 250;
+  /* 中性灰蓝原语（slate）：滚动条/占位符/骨架等中性半透明色统一引用，浅色主题下整体加深 */
+  --slate-rgb: 148, 163, 184;
 
   /* 状态色 */
   --success: #10b981;
   --success-bg: rgba(var(--success-rgb), 0.15);
   --success-border: rgba(var(--success-rgb), 0.3);
   --warning: #f59e0b;
+  --warning-soft: #fbbf24;
+  --warning-deep: #d97706;
+  --warning-bg: rgba(var(--warning-rgb), 0.12);
+  --warning-text: var(--warning);
+  /* 危险色：--danger 是 --error 的语义别名，供提示条等场景使用（浅色下加深保证对比度） */
+  --danger: var(--error);
+  --danger-bg: rgba(var(--error-rgb), 0.12);
+  --danger-border: rgba(var(--error-rgb), 0.35);
   --error: #ef4444;
   --error-bg: rgba(var(--error-rgb), 0.15);
   --error-border: rgba(var(--error-rgb), 0.3);
@@ -50,10 +63,16 @@
   --warning-rgb: 245, 158, 11;
   --error-rgb: 239, 68, 68;
   --purple: #a78bfa;
+  --primary: #3b82f6;
+  /* 警示底色上的文字：琥珀/黄色底永远配深字（浅色主题同理，不走 --on-accent 的对比度切换） */
+  --on-warning: #0f172a;
 
-  /* 阴影 */
+  /* 阴影（--shadow-* 在浅色主题下整体变淡，写死 rgba(0,0,0,α) 的阴影不会跟随） */
   --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
+  --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.4);
   --shadow-accent: 0 0 10px rgba(var(--accent-rgb), 0.2);
 
   /* 圆角 */
@@ -64,18 +83,22 @@
   --radius-xl: 12px;
   --radius-2xl: 14px;
   --radius-3xl: 16px;
+  --radius-full: 999px;
 
-  /* 间距 */
+  /* 间距：粗粒度节奏档位。6/10/12/20 这类局部微调值允许直接写 px，
+     不为它们扩档（避免 token 集合膨胀到没人记得住） */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 16px;
   --space-lg: 24px;
   --space-xl: 32px;
+  --space-2xl: 40px;
 
   /* 毛玻璃效果 */
   --blur-sm: blur(4px);
   --blur-md: blur(8px);
   --blur-lg: blur(12px);
+  --blur-xl: blur(20px);
 
   /* 字体：正文走系统中文字体栈（Inter 未随包分发，不再声明）；
      中文显式声明避免 Windows/macOS 各自回退链接导致的渲染不一致 */
@@ -105,6 +128,17 @@
   --collapse-anim-max: 300px;
   --editor-min-height: 300px;
 
+  /* 侧栏/顶栏底色：CSS 静态默认值（与 useAppearance.applyAppearance 注入的
+     默认计算结果一致），配合 index.html 的首屏主题预置脚本消除浅色主题 FOUC；
+     自定义侧栏色时由 JS 运行时覆盖 */
+  --sidebar-bg-1: rgba(30, 38, 57, 0.95);
+  --sidebar-bg-2: rgba(5, 13, 32, 0.98);
+
+  /* 帮助气泡（field-help tooltip）底/字/边 */
+  --tooltip-bg: rgba(15, 23, 42, 0.96);
+  --tooltip-text: rgba(226, 232, 240, 0.95);
+  --tooltip-border: rgba(var(--slate-rgb), 0.15);
+
   /* z-index 层级 */
   --z-base: 1;
   --z-dropdown: 10;
@@ -132,7 +166,7 @@
   position: absolute;
   top: -100%;
   left: 16px;
-  z-index: 9999;
+  z-index: var(--z-max);
   padding: 8px 16px;
   background: var(--accent);
   color: var(--on-accent);
@@ -181,12 +215,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.2);
+  background: rgba(var(--slate-rgb), 0.2);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.35);
+  background: rgba(var(--slate-rgb), 0.35);
 }
 
 #app {
@@ -256,35 +290,54 @@ body {
 
 /* ═══ 浅色主题：仅 token 重映射，组件级覆盖在各组件样式文件内 ═══ */
 [data-theme="light"] {
-  /* 基础色 — 柔和灰调，避免刺眼 */
-  --bg-primary: #dfe4ec;
-  --bg-secondary: #d5dbe5;
+  /* 基础色 — 柔和灰调，避免刺眼（与 useAppearance 注入的默认值一致） */
+  --bg-primary: #eef2f7;
+  --bg-secondary: #e4e9f0;
   --bg-hover: rgba(186, 196, 210, 0.5);
   --bg-glass: rgba(255, 255, 255, 0.7);
   --bg-glass-light: rgba(255, 255, 255, 0.4);
   --bg-glass-heavy: rgba(255, 255, 255, 0.85);
   --bg-card: rgba(255, 255, 255, 0.75);
   --bg-card-elevated: rgba(255, 255, 255, 0.55);
-  --bg-modal: #d5dbe5;
+  --bg-modal: #e4e9f0;
   --border: rgba(100, 116, 139, 0.25);
   --border-hover: rgba(100, 116, 139, 0.3);
   --text-primary: #000000;
   --text-secondary: #4a4a4a;
   --text-muted: #666666;
-  --text-tertiary: #7a7a7a;
+  --text-tertiary: #6b7280;
+  --slate-rgb: 100, 116, 139;
   --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.06);
+  --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.15);
   --shadow-accent: 0 0 10px rgba(var(--accent-rgb), 0.15);
   --border-accent: rgba(56, 189, 248, 0.2);
   --border-accent-hover: rgba(56, 189, 248, 0.3);
   --border-accent-strong: rgba(56, 189, 248, 0.4);
-  --text-tertiary: #6b7280;
   --accent: #0891b2;
   --accent-hover: #0e7490;
   /* 浅色下强调色更深，配白字保证对比度 */
   --on-accent: #ffffff;
   --accent-rgb: 8, 145, 178;
   --purple: #8b5cf6;
+  --purple-rgb: 139, 92, 246;
+  --primary: #2563eb;
+  --primary-rgb: 37, 99, 235;
+  --warning: #d97706;
+  --warning-soft: #f59e0b;
+  --warning-deep: #b45309;
+  --warning-bg: rgba(var(--warning-rgb), 0.1);
+  --warning-text: #b45309;
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+  --sidebar-bg-1: rgba(253, 255, 255, 0.95);
+  --sidebar-bg-2: rgba(228, 232, 237, 0.98);
+  --tooltip-bg: rgba(30, 41, 59, 0.96);
+  --tooltip-text: rgba(226, 232, 240, 0.95);
+  --tooltip-border: rgba(var(--slate-rgb), 0.3);
   --success-bg: rgba(var(--success-rgb), 0.1);
   --success-border: rgba(var(--success-rgb), 0.25);
   --error-bg: rgba(var(--error-rgb), 0.1);

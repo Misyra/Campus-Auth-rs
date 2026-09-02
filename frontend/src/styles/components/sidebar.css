@@ -3,7 +3,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 12px var(--space-md);
   border: none;
   background: transparent;
   color: var(--text-secondary);
@@ -22,13 +22,13 @@
 }
 
 .nav-item.active {
-  /* 渐进增强: 第一行为旧浏览器回退值，第二行为 color-mix() 增强值 */
-  background: rgba(167, 139, 250, 0.08);
-  background: linear-gradient(135deg, color-mix(in srgb, var(--sidebar-accent, var(--accent)) 12%, transparent), rgba(167, 139, 250, 0.08));
+  /* 渐进增强: 第一行为旧浏览器回退值，第二行为 color-mix() 增强值（回退值同样走 token 跟随主题） */
+  background: rgba(var(--accent-rgb), 0.08);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--sidebar-accent, var(--accent)) 12%, transparent), rgba(var(--accent-rgb), 0.08));
   color: var(--sidebar-accent, var(--accent));
-  border: 1px solid rgba(167, 139, 250, 0.2);
+  border: 1px solid rgba(var(--accent-rgb), 0.2);
   border: 1px solid color-mix(in srgb, var(--sidebar-accent, var(--accent)) 20%, transparent);
-  box-shadow: 0 0 20px rgba(167, 139, 250, 0.08);
+  box-shadow: 0 0 20px rgba(var(--accent-rgb), 0.08);
   box-shadow: 0 0 20px color-mix(in srgb, var(--sidebar-accent, var(--accent)) 8%, transparent);
 }
 
@@ -63,9 +63,9 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px 0 4px 12px;
+  padding: var(--space-xs) 0 var(--space-xs) 12px;
   border-left: 2px solid var(--border);
-  margin: 4px 0 4px 20px;
+  margin: var(--space-xs) 0 var(--space-xs) 20px;
 }
 
 .nav-more-menu .nav-item {

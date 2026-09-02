@@ -5,8 +5,8 @@
   color: var(--text-secondary);
   background: var(--bg-glass);
   border: 1px solid var(--border);
-  padding: 1px 8px;
-  border-radius: 10px;
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-lg);
   font-family: var(--font-mono);
-  margin-left: 4px;
+  margin-left: var(--space-xs);
 }

@@ -18,12 +18,13 @@ const router = useRouter();
 </template>
 
 <style scoped>
+/* 404 页为装饰性大字号，px 直接对齐全局字号档位 */
 .not-found-page {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: calc(100vh - 3.5rem);
-  padding: 2rem;
+  min-height: calc(100vh - 56px);
+  padding: var(--space-xl);
 }
 
 .not-found-card {
@@ -32,19 +33,19 @@ const router = useRouter();
 }
 
 .not-found-icon {
-  font-size: 5rem;
+  font-size: 80px;
   font-weight: 700;
   color: var(--text-muted);
   line-height: 1.2;
 }
 
 .not-found-card h1 {
-  margin: 0.5rem 0;
-  font-size: 1.25rem;
+  margin: var(--space-sm) 0;
+  font-size: var(--text-xl);
 }
 
 .not-found-card p {
   color: var(--text-secondary);
-  margin-bottom: 1.5rem;
+  margin-bottom: var(--space-lg);
 }
 </style>

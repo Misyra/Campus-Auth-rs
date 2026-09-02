@@ -5,14 +5,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
-  margin-bottom: 16px;
-  gap: 16px;
+  padding: var(--space-md) 20px;
+  margin-bottom: var(--space-md);
+  gap: var(--space-md);
   flex-wrap: wrap;
   background: var(--bg-card-elevated);
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
-  backdrop-filter: blur(8px);
+  backdrop-filter: var(--blur-md);
 }
 
 .profiles-topbar-left {
@@ -71,21 +71,21 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
+  padding: 12px var(--space-md);
+  margin-bottom: var(--space-md);
   border-radius: var(--radius-lg);
   animation: fadeIn var(--dur-slow) var(--ease-out);
-  backdrop-filter: blur(8px);
+  backdrop-filter: var(--blur-md);
 }
 
 .detect-banner.matched {
-  background: rgba(34, 197, 94, 0.08);
-  border: 1px solid rgba(34, 197, 94, 0.25);
+  background: rgba(var(--success-rgb), 0.08);
+  border: 1px solid rgba(var(--success-rgb), 0.25);
 }
 
 .detect-banner.unmatched {
-  background: rgba(234, 179, 8, 0.08);
-  border: 1px solid rgba(234, 179, 8, 0.25);
+  background: rgba(var(--warning-rgb), 0.08);
+  border: 1px solid rgba(var(--warning-rgb), 0.25);
 }
 
 .detect-banner-icon {
@@ -132,9 +132,9 @@
 
 /* 使用说明横条 */
 .profiles-guide {
-  padding: 16px 20px;
-  margin-bottom: 16px;
-  backdrop-filter: blur(4px);
+  padding: var(--space-md) 20px;
+  margin-bottom: var(--space-md);
+  backdrop-filter: var(--blur-sm);
 }
 
 .profiles-guide-intro {
@@ -216,18 +216,18 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-md);
   padding: 14px 18px;
   background: var(--bg-card-elevated);
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
-  transition: border-color 0.25s, background 0.25s, box-shadow 0.25s, transform 0.25s;
+  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
 
 .profile-card:hover {
   border-color: var(--border-hover);
   background: var(--bg-hover);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-hover);
   transform: translateY(-1px);
 }
 
@@ -266,7 +266,7 @@
 .profile-card-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
   flex: 1;
 }
@@ -288,8 +288,8 @@
 
 .profile-badge {
   font-size: var(--text-2xs);
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-xs);
   font-weight: 600;
   flex-shrink: 0;
   text-transform: uppercase;
@@ -304,24 +304,24 @@
 
 .profile-card-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-shrink: 0;
 }
 
 .profile-card-meta {
   display: flex;
   gap: 6px;
-  margin-top: 8px;
+  margin-top: var(--space-sm);
   flex-wrap: wrap;
 }
 
 .profile-tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-xs);
   font-size: var(--text-xs);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-glass);
   color: var(--text-secondary);
   font-family: var(--font-mono);
@@ -346,14 +346,14 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
   flex-wrap: wrap;
 }
 
 .editor-detect-info {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-wrap: wrap;
   font-size: var(--text-sm);
   color: var(--text-secondary);
@@ -363,12 +363,12 @@
 .editor-detect-tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-xs);
   padding: 3px 10px;
-  border-radius: 6px;
-  background: rgba(34, 197, 94, 0.08);
-  border: 1px solid rgba(34, 197, 94, 0.2);
-  backdrop-filter: blur(4px);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--success-rgb), 0.08);
+  border: 1px solid rgba(var(--success-rgb), 0.2);
+  backdrop-filter: var(--blur-sm);
 }
 
 .editor-detect-tag.muted {
@@ -406,13 +406,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
-  gap: 16px;
+  margin-bottom: var(--space-md);
+  gap: var(--space-md);
   padding: 14px 20px;
   background: var(--bg-card-elevated);
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
-  backdrop-filter: blur(8px);
+  backdrop-filter: var(--blur-md);
 }
 
 .profile-editor-topbar h2 {
@@ -423,19 +423,19 @@
 
 .profile-editor-card {
   width: 100%;
-  backdrop-filter: blur(8px);
+  backdrop-filter: var(--blur-md);
 }
 
 .profile-editor-body {
-  padding: 0 24px 24px;
+  padding: 0 var(--space-lg) var(--space-lg);
 }
 
 .editor-section {
-  padding-top: 24px;
+  padding-top: var(--space-lg);
 }
 
 .editor-section + .editor-section {
-  margin-top: 4px;
+  margin-top: var(--space-xs);
 }
 
 /* 区域标题：左侧 accent 竖线 + 加粗文字 */
@@ -463,14 +463,14 @@
 
 /* Toggle — 使用更具体的选择器避免覆盖 components.css */
 .profile-editor-card .toggle-group {
-  margin-top: 4px;
+  margin-top: var(--space-xs);
 }
 
 .profile-editor-card .toggle-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
-  margin-top: 8px;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
 }
 
 /* .field-help 已统一定义在 components.css 中 */
@@ -491,8 +491,8 @@
 
 .profiles-empty-title {
   display: block;
-  font-size: 15px;
-  margin-bottom: 4px;
+  font-size: var(--text-base);
+  margin-bottom: var(--space-xs);
 }
 
 .profiles-empty-desc {
@@ -504,7 +504,7 @@
 
 /* 独立账号区域 */
 .profile-credentials-section {
-  margin-top: 8px;
+  margin-top: var(--space-sm);
 }
 
 .profiles-empty p {
@@ -512,7 +512,7 @@
 }
 
 /* 响应式 */
-@media (max-width: 700px) {
+@media (max-width: 720px) {
   .profiles-guide-steps {
     flex-direction: column;
     gap: 12px;

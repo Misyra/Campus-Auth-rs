@@ -4,7 +4,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: var(--space-2xl);
   color: var(--text-secondary);
   gap: 12px;
   opacity: 0.8;
@@ -20,9 +20,9 @@
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 16px;
+  padding: var(--space-md);
   margin-top: 20px;
-  backdrop-filter: blur(4px);
+  backdrop-filter: var(--blur-sm);
 }
 
 .info-box h4 {
@@ -37,7 +37,7 @@
 }
 
 .info-box li {
-  padding: 4px 0;
+  padding: var(--space-xs) 0;
 }
 
 .info-box.success {
@@ -65,15 +65,15 @@
   align-items: center;
   justify-content: center;
   cursor: zoom-out;
-  backdrop-filter: blur(4px);
+  backdrop-filter: var(--blur-sm);
 }
 
 .fullscreen-img {
   max-width: 95vw;
   max-height: 95vh;
   object-fit: contain;
-  border-radius: 8px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xl);
 }
 
 /* ========== Loading State ========== */
@@ -82,23 +82,22 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: var(--space-2xl);
   color: var(--text-secondary);
 }
 
-.loading-state .spinner {
+/* 大号 spinner：统一在此处定义尺寸，各使用处不再重复 */
+.spinner-lg,
+.loading-state .spinner,
+.init-overlay .spinner {
   width: 40px;
   height: 40px;
   border-width: 3px;
   animation-duration: 1s;
-  margin-bottom: 12px;
 }
 
-.spinner-lg {
-  width: 40px;
-  height: 40px;
-  border-width: 3px;
-  animation-duration: 1s;
+.loading-state .spinner {
+  margin-bottom: 12px;
 }
 
 /* ========== Text Utilities ========== */
@@ -121,20 +120,20 @@
 .icon-lg { width: 20px; height: 20px; }
 .icon-xl { width: 24px; height: 24px; }
 
-/* 工具类: flex/gap */
+/* 工具类: flex/gap（数值对齐 --space-* 档位） */
 .flex-row { display: flex; align-items: center; }
-.gap-xs { gap: 4px; }
-.gap-sm { gap: 6px; }
-.gap-md { gap: 8px; }
-.gap-lg { gap: 12px; }
+.gap-xs { gap: var(--space-xs); }
+.gap-sm { gap: var(--space-sm); }
+.gap-md { gap: var(--space-md); }
+.gap-lg { gap: var(--space-lg); }
 
 /* 工具类: alignment */
 .ms-auto { margin-left: auto; }
 
 /* 等宽文本区域 */
 .monospace-textarea {
-    font-family: var(--font-mono, 'Consolas', 'Monaco', monospace);
-    font-size: 0.875rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-base);
 }
 
 /* 旋转动画（@keyframes spin 统一定义在 base.css） */
@@ -150,8 +149,7 @@
   position: fixed;
   inset: 0;
   flex-direction: column;
-  gap: 16px;
-  font-family: system-ui;
+  gap: var(--space-md);
   color: var(--text-primary);
   background: var(--bg-primary);
   z-index: var(--z-max);
@@ -194,9 +192,9 @@
 
 .alert-hint code {
   font-size: var(--text-xs);
-  padding: 1px 4px;
+  padding: 1px var(--space-xs);
   background: rgba(var(--accent-rgb), 0.1);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   color: var(--accent);
 }
 
@@ -219,33 +217,26 @@
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-md);
   background: var(--bg-primary);
   color: var(--text-secondary);
 }
 
-.init-overlay .spinner {
-  width: 40px;
-  height: 40px;
-  border-width: 3px;
-}
-
-/* ========== WebSocket 被顶替提示横幅（多页面单连接限制） ========== */
-.ws-kicked-banner {
+/* ========== WebSocket 被顶替提示横幅（多页面单连接限制） ========== */.ws-kicked-banner {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   z-index: var(--z-toast);
-  padding: 10px 16px;
+  padding: 10px var(--space-md);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-wrap: wrap;
   gap: 12px;
   font-size: var(--text-md);
-  background: var(--warning-bg, #fffbe6);
-  color: var(--warning-text, #ad6800);
+  background: var(--warning-bg);
+  color: var(--warning-text);
   border-bottom: 1px solid var(--border);
 }
 
@@ -268,7 +259,7 @@
 .hover-lift:hover {
   border-color: var(--border-hover);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-hover);
 }
 
 /* ═══ WS 重连指示器 ═══ */
@@ -276,14 +267,14 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-sm);
   padding: 6px 12px;
   background: rgba(var(--warning-rgb), 0.12);
   border-bottom: 1px solid rgba(var(--warning-rgb), 0.2);
   color: var(--warning);
   font-size: var(--text-sm);
   font-weight: 500;
-  backdrop-filter: blur(4px);
+  backdrop-filter: var(--blur-sm);
 }
 
 .ws-reconnect-inline {
@@ -317,8 +308,8 @@
 .skeleton-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
 }
 
 .skeleton-card {
@@ -329,7 +320,7 @@
 .skeleton-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: var(--space-md);
 }
 
 @media (max-width: 1024px) {

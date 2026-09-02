@@ -7,8 +7,8 @@
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
   flex-shrink: 0;
 }
 
@@ -19,7 +19,7 @@
   padding: 20px;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--space-md);
   backdrop-filter: blur(10px);
   transition: transform var(--dur-slow) var(--ease-out), border-color var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out);
 }
@@ -27,7 +27,7 @@
 .stat-card:hover {
   transform: translateY(-2px);
   border-color: var(--border-hover);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-float);
 }
 
 .stat-icon {
@@ -65,14 +65,14 @@
 }
 
 .stat-icon.purple {
-  background: rgba(167, 139, 250, 0.15);
+  background: rgba(var(--purple-rgb), 0.15);
   color: var(--purple);
 }
 
 .stat-info {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-xs);
 }
 
 .stat-label {
@@ -99,7 +99,7 @@
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(280px, 320px) 1fr;
-  gap: 16px;
+  gap: var(--space-md);
   flex: 1;
   min-height: 0;
 }
@@ -107,7 +107,7 @@
 .dashboard-left {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-md);
   min-height: 0;
 }
 
@@ -170,7 +170,7 @@
 }
 
 .log-viewer::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.15);
+  background: rgba(var(--slate-rgb), 0.15);
   border-radius: 2px;
 }
 
@@ -179,7 +179,7 @@
 }
 
 .history-list::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.15);
+  background: rgba(var(--slate-rgb), 0.15);
   border-radius: 2px;
 }
 
@@ -191,17 +191,17 @@
   display: grid;
   /* 时间列需容纳 "YYYY-MM-DD HH:mm:ss"（12px 等宽约 130px） */
   grid-template-columns: 134px 44px auto 1fr;
-  gap: 8px;
+  gap: var(--space-sm);
   align-items: baseline;
   padding: 5px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   transition: background var(--dur-fast) var(--ease-out);
   contain: content;
   border-left: 2px solid transparent;
 }
 
 .log-entry:hover {
-  background: rgba(51, 65, 85, 0.3);
+  background: var(--bg-hover);
   border-left-color: var(--accent);
 }
 
@@ -209,7 +209,7 @@
 .log-entry.log-error { border-left-color: var(--error); }
 .log-entry.log-warn, .log-entry.log-warning { border-left-color: var(--warning); }
 .log-entry.log-info { border-left-color: transparent; }
-.log-entry.log-debug, .log-entry.log-trace { border-left-color: rgba(148, 163, 184, 0.35); }
+.log-entry.log-debug, .log-entry.log-trace { border-left-color: rgba(var(--slate-rgb), 0.35); }
 
 .log-time {
   color: var(--text-muted);
@@ -238,14 +238,14 @@
 .log-content {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-xs);
   min-width: 0;
 }
 
 .log-screenshot-wrap {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .log-screenshot-preview {
@@ -255,7 +255,7 @@
   object-fit: cover;
   object-position: top center;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-primary);
   cursor: zoom-in;
   transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
@@ -263,7 +263,7 @@
 
 .log-screenshot-preview:hover {
   transform: scale(1.02);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-hover);
 }
 
 /* 登录历史卡片 */
@@ -281,7 +281,7 @@
   padding: 10px 12px;
   border-radius: var(--radius-md);
   border-left: 3px solid transparent;
-  transition: background 0.2s;
+  transition: background var(--dur-base) var(--ease-out);
 }
 
 .history-item.success {
@@ -333,24 +333,24 @@
 }
 
 .history-time {
-  font-size: 0.8rem;
+  font-size: var(--text-md);
   color: var(--text-primary);
   font-family: var(--font-mono);
 }
 
 .history-duration {
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
 
 .history-profile {
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
 .history-error {
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
   color: var(--error);
   opacity: 0.85;
   overflow: hidden;
@@ -365,17 +365,15 @@
   gap: 12px;
   padding: 14px 20px;
   border-radius: var(--radius-lg);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
   border: 1px solid;
   backdrop-filter: var(--blur-md);
   transition: border-color var(--dur-slow) var(--ease-out), background var(--dur-slow) var(--ease-out), color var(--dur-slow) var(--ease-out);
   flex-shrink: 0;
 }
 
+/* 圆点基础样式（尺寸/呼吸）来自 topbar.css 的 .status-dot，此处仅补充布局 */
 .network-status-banner .status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
   flex-shrink: 0;
 }
 
@@ -397,12 +395,12 @@
 
 .network-status-banner.disconnected .status-dot {
   background: var(--error);
-  animation: pulse 2s infinite;
+  animation: pulse 2s ease-in-out infinite;
 }
 
 .network-status-banner.idle {
-  background: rgba(148, 163, 184, 0.08);
-  border-color: rgba(148, 163, 184, 0.15);
+  background: rgba(var(--slate-rgb), 0.08);
+  border-color: rgba(var(--slate-rgb), 0.15);
   color: var(--text-secondary);
 }
 
@@ -418,7 +416,7 @@
 
 .network-status-banner.checking .status-dot {
   background: var(--primary);
-  animation: pulse 2s infinite;
+  animation: pulse 2s ease-in-out infinite;
 }
 
 .network-status-banner .status-icon {

@@ -2,7 +2,7 @@
 .status-badge {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   padding: 10px 14px;
   border-radius: var(--radius-md);
   font-size: var(--text-md);

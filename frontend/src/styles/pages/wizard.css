@@ -6,7 +6,7 @@
   bottom: 0;
   background:
     radial-gradient(ellipse 70% 50% at 30% 30%, rgba(var(--accent-rgb), 0.06) 0%, transparent 60%),
-    radial-gradient(ellipse 50% 40% at 70% 70%, rgba(167, 139, 250, 0.05) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 70% 70%, rgba(var(--purple-rgb), 0.05) 0%, transparent 60%),
     rgba(15, 23, 42, 0.95);
   display: flex;
   align-items: center;
@@ -18,30 +18,30 @@
 .wizard-container {
   background: var(--bg-modal);
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: var(--radius-3xl);
   width: 100%;
   max-width: 760px;
   max-height: 90vh;
   overflow-y: auto;
-  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-xl);
   backdrop-filter: var(--blur-lg) saturate(1.2);
 }
 
 .wizard-header {
   text-align: center;
-  padding: 40px 40px 24px;
+  padding: var(--space-2xl) var(--space-2xl) var(--space-lg);
   border-bottom: 1px solid var(--border);
 }
 
 .wizard-logo {
   width: 80px;
   height: 64px;
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
 }
 
 .wizard-header h1 {
   font-size: var(--text-2xl);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 
 .wizard-header p {
@@ -49,18 +49,18 @@
 }
 
 .wizard-content {
-  padding: 24px 40px;
+  padding: var(--space-lg) var(--space-2xl);
 }
 
 .wizard-page h2 {
   font-size: var(--text-xl);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 
 .wizard-footer {
   display: flex;
   align-items: center;
-  padding: 20px 40px;
+  padding: 20px var(--space-2xl);
   border-top: 1px solid var(--border);
   gap: 12px;
 }
@@ -82,11 +82,11 @@
   max-height: 300px;
   overflow-y: auto;
   margin-bottom: 20px;
-  backdrop-filter: blur(4px);
+  backdrop-filter: var(--blur-sm);
 }
 
 .terms-content h4 {
-  font-size: 15px;
+  font-size: var(--text-base);
   font-weight: 600;
   margin-bottom: 12px;
   color: var(--text-primary);
@@ -102,7 +102,7 @@
 .terms-content ul {
   list-style: disc;
   padding-left: 20px;
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
 }
 
 .terms-content li {
@@ -113,7 +113,7 @@
 }
 
 .terms-checkbox {
-  padding: 16px;
+  padding: var(--space-md);
   background: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);

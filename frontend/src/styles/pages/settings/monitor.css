@@ -2,7 +2,7 @@
 .settings-detect-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 32px;
+  gap: var(--space-xl);
 }
 
 .settings-detect-col {
@@ -17,7 +17,7 @@
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  margin: 0 0 16px 0;
+  margin: 0 0 var(--space-md) 0;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
   display: flex;

@@ -1,19 +1,4 @@
-.scheduled-task-type {
-  font-size: var(--text-sm);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-weight: 500;
-}
-
-.badge-script {
-  background: rgba(99, 102, 241, 0.15);
-  color: #818cf8;
-}
-
-.badge-browser {
-  background: rgba(var(--success-rgb), 0.15);
-  color: #34d399;
-}
+/* .scheduled-task-type / .badge-script / .badge-browser 统一定义在 components/badge.css */
 
 .task-item.disabled {
   opacity: 0.6;
@@ -22,7 +7,7 @@
 .scheduled-task-item {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--space-md);
 }
 
 .scheduled-task-item .task-info {
@@ -36,7 +21,7 @@
 
 .scheduled-task-item .task-toggle {
   flex-shrink: 0;
-  padding-left: 16px;
+  padding-left: var(--space-md);
   border-left: 1px solid var(--border);
 }
 
@@ -55,7 +40,7 @@
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 12px;
-  padding-bottom: 8px;
+  padding-bottom: var(--space-sm);
   border-bottom: 1px solid var(--border);
 }
 
@@ -93,7 +78,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 
 .scheduled-tasks-page .history-status {

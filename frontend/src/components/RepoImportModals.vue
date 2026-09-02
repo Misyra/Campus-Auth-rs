@@ -61,22 +61,22 @@ const repo = useRepoImport();
 
 <style scoped>
 .repo-import-source { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-.repo-source-label { font-size: 0.9em; color: var(--text-secondary); }
+.repo-source-label { font-size: var(--text-md); color: var(--text-secondary); }
 .repo-import-source .btn.active { background: var(--accent); color: var(--on-accent); }
 .repo-custom-url { width: 100%; margin-top: 8px; }
 .repo-custom-url .input { width: 100%; }
 .repo-import-action { margin-bottom: 12px; }
-.repo-import-error { color: var(--error); font-size: 0.9em; margin-bottom: 8px; }
+.repo-import-error { color: var(--error); font-size: var(--text-md); margin-bottom: 8px; }
 .repo-import-search { margin-bottom: 12px; }
 .repo-import-search .input { width: 100%; }
 .repo-import-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-.repo-import-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: background var(--dur-fast) var(--ease-out); }
+.repo-import-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: background var(--dur-fast) var(--ease-out); }
 .repo-import-item:hover { background: var(--bg-hover); }
 .repo-item-name { font-weight: 600; }
-.repo-item-desc { font-size: 0.85em; color: var(--text-secondary); margin-top: 2px; }
-.repo-item-meta { display: flex; gap: 12px; margin-top: 6px; font-size: 0.8em; color: var(--text-tertiary); }
+.repo-item-desc { font-size: var(--text-sm); color: var(--text-secondary); margin-top: 2px; }
+.repo-item-meta { display: flex; gap: 12px; margin-top: 6px; font-size: var(--text-xs); color: var(--text-tertiary); }
 .repo-import-empty { text-align: center; color: var(--text-tertiary); padding: 24px; }
-.repo-import-hint { color: var(--text-secondary); font-size: 0.9em; }
+.repo-import-hint { color: var(--text-secondary); font-size: var(--text-md); }
 .repo-import-hint a { color: var(--accent); }
 .repo-disclaimer-warn { color: var(--error); }
 .repo-disclaimer-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }

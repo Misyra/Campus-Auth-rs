@@ -1,0 +1,26 @@
+/* badge.css — 类型徽标（脚本/浏览器二选一的小胶囊，scripts 与 scheduled_tasks 共用结构） */
+.binary-badge,
+.scheduled-task-type {
+  font-size: var(--text-sm);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  font-weight: 500;
+}
+
+/* 脚本类：主色系 */
+.binary-badge,
+.badge-script {
+  background: rgba(var(--primary-rgb), 0.15);
+  color: var(--primary);
+}
+
+.binary-badge {
+  font-family: var(--font-mono);
+}
+
+/* 浏览器/默认标记：成功色系 */
+.binary-default,
+.badge-browser {
+  background: rgba(var(--success-rgb), 0.15);
+  color: var(--success);
+}

@@ -4,7 +4,7 @@
   background: rgba(var(--accent-rgb), 0.06);
   border: 1px solid rgba(var(--accent-rgb), 0.15);
   border-radius: var(--radius-lg);
-  margin-top: 4px;
+  margin-top: var(--space-xs);
 }
 
 .browser-safe-info p {
@@ -15,8 +15,8 @@
 }
 
 .browser-safe-info--warning {
-  border-color: rgba(255, 152, 0, 0.3);
-  background: rgba(255, 152, 0, 0.06);
+  border-color: rgba(var(--warning-rgb), 0.3);
+  background: rgba(var(--warning-rgb), 0.06);
 }
 
 /* 视口尺寸输入 */
@@ -29,7 +29,7 @@
 .viewport-input-group {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-xs);
 }
 
 .viewport-label {
@@ -48,15 +48,15 @@
 /* 反检测脚本操作按钮 */
 .stealth-script-actions {
   display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
 }
 
 /* Shell 自定义路径输入 */
 .shell-custom-input {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
 }
 
 .shell-custom-input input[type="text"] {
@@ -65,35 +65,35 @@
 
 /* 浏览器选择 */
 .browser-selection {
-  margin-top: 0.5rem;
+  margin-top: var(--space-sm);
 }
 
 .browser-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 0.75rem;
+  gap: 12px;
 }
 
 .browser-card {
   display: flex;
   align-items: flex-start;
-  gap: 0.75rem;
-  border: 2px solid var(--border, #333);
-  border-radius: var(--radius-lg, 8px);
-  padding: 1rem;
+  gap: 12px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md);
   cursor: pointer;
-  transition: all var(--dur-base) var(--ease-out);
+  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
   position: relative;
-  background: var(--bg-card, transparent);
+  background: var(--bg-card);
 }
 
 .browser-card:hover {
-  border-color: var(--accent, #22d3ee);
-  background: var(--bg-hover, rgba(var(--accent-rgb), 0.04));
+  border-color: var(--accent);
+  background: var(--bg-hover);
 }
 
 .browser-card.active {
-  border-color: var(--accent, #22d3ee);
+  border-color: var(--accent);
   background: rgba(var(--accent-rgb), 0.08);
 }
 
@@ -103,8 +103,8 @@
 }
 
 .browser-card.disabled:hover {
-  border-color: var(--accent, #22d3ee);
-  background: var(--bg-hover, rgba(var(--accent-rgb), 0.04));
+  border-color: var(--accent);
+  background: var(--bg-hover);
 }
 
 .browser-icon {
@@ -129,17 +129,17 @@
 
 .browser-name {
   font-weight: 600;
-  font-size: 0.9375rem;
-  margin-bottom: 0.25rem;
+  font-size: var(--text-base);
+  margin-bottom: 2px;
   color: var(--text-primary);
 }
 
 .browser-status {
-  font-size: 0.8125rem;
-  margin-bottom: 0.25rem;
+  font-size: var(--text-md);
+  margin-bottom: 2px;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 2px;
 }
 
 .browser-status svg {
@@ -147,49 +147,49 @@
 }
 
 .status-installed {
-  color: var(--success, #22c55e);
+  color: var(--success);
 }
 
 .status-not-installed {
-  color: var(--warning, #f59e0b);
+  color: var(--warning);
 }
 
 .status-downloading {
-  color: var(--accent, #22d3ee);
+  color: var(--accent);
 }
 
 .status-custom {
-  color: var(--accent, #22d3ee);
+  color: var(--accent);
 }
 
 .browser-desc {
-  font-size: 0.75rem;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.4;
 }
 
 .browser-check {
   position: absolute;
-  top: 0.75rem;
-  right: 0.75rem;
-  color: var(--accent, #22d3ee);
+  top: 12px;
+  right: 12px;
+  color: var(--accent);
 }
 
 .browser-info-tip {
   display: flex;
   align-items: flex-start;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-  padding: 0.75rem;
+  gap: var(--space-sm);
+  margin-top: 12px;
+  padding: 12px;
   background: rgba(var(--accent-rgb), 0.1);
   border: 1px solid rgba(var(--accent-rgb), 0.3);
-  border-radius: var(--radius-md, 6px);
-  color: var(--accent, #22d3ee);
-  font-size: 0.8125rem;
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  font-size: var(--text-md);
   line-height: 1.5;
 }
 
 .browser-info-tip svg {
   flex-shrink: 0;
-  margin-top: 0.125rem;
+  margin-top: 2px;
 }

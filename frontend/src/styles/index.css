@@ -12,6 +12,7 @@
 /* 通用组件（card / btn / form / modal 等）—— 按原 components.css 规则首现顺序导入 */
 @import "./components/card.css";
 @import "./components/btn.css";
+@import "./components/badge.css";
 @import "./components/sidebar.css";
 @import "./components/topbar.css";
 @import "./components/form.css";
