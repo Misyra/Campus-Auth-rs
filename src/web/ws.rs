@@ -76,7 +76,9 @@ fn record_frontend_log(data: &serde_json::Value) {
         format!(" meta={}", truncate_log_text(&meta.to_string(), 2048))
     };
     match level.to_ascii_uppercase().as_str() {
-        "ERROR" => tracing::error!(target: "frontend", scope = %scope, "{message}{meta_str}"),
+        // 前端回流 ERROR 统一降为 warn：前端 JS 异常不应稀释后端 error 告警面，
+        // 保留 target="frontend" 来源标识即可区分
+        "ERROR" => tracing::warn!(target: "frontend", scope = %scope, "{message}{meta_str}"),
         "WARNING" | "WARN" => {
             tracing::warn!(target: "frontend", scope = %scope, "{message}{meta_str}")
         }
@@ -181,40 +183,44 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Pong 超时（60 秒内未收到客户端任何消息则视为断线）
 const PONG_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// WebSocket 连接序号生成器（升级时分配，日志用于区分多标签页并发连接）
+static WS_CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// GET /ws/logs → 升级为 WebSocket，持续推送日志与状态
 pub async fn logs_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_logs(socket, state))
+    let conn_id = WS_CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    ws.on_upgrade(move |socket| handle_logs(socket, state, conn_id))
 }
 
 /// 发送超时（200ms），防止慢消费者阻塞事件循环
 const SEND_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// 通过 socket 发送一条消息，超时则断开连接返回 false
-async fn send_msg(socket: &mut WebSocket, msg: Message) -> bool {
+async fn send_msg(socket: &mut WebSocket, msg: Message, conn_id: u64) -> bool {
     match tokio::time::timeout(SEND_TIMEOUT, socket.send(msg)).await {
         Ok(result) => result.is_ok(),
         Err(_) => {
-            tracing::warn!("WebSocket 发送超时，断开慢消费者");
+            tracing::warn!(conn_id, "WebSocket 发送超时，断开慢消费者");
             false
         }
     }
 }
 
 /// 序列化 WsMessage 并通过 socket 发送，失败返回 false 表示客户端已断开
-async fn send_ws(socket: &mut WebSocket, msg: &WsMessage) -> bool {
+async fn send_ws(socket: &mut WebSocket, msg: &WsMessage, conn_id: u64) -> bool {
     match serde_json::to_string(msg) {
-        Ok(json) => send_msg(socket, Message::Text(json.into())).await,
+        Ok(json) => send_msg(socket, Message::Text(json.into()), conn_id).await,
         Err(e) => {
-            tracing::warn!("WebSocket 序列化失败: {e}");
+            tracing::warn!(conn_id, "WebSocket 序列化失败: {e}");
             true // 序列化失败不中断连接
         }
     }
 }
 
-async fn handle_logs(mut socket: WebSocket, state: AppState) {
+async fn handle_logs(mut socket: WebSocket, state: AppState, conn_id: u64) {
     let mut log_rx = state.log_tx.subscribe();
     let mut status_rx = state.status.subscribe();
     // 通用事件通道（screenshot / step_progress 等），由 Bridge 推送
@@ -223,7 +229,7 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
     // 首帧同步：立即发送当前状态快照
     {
         let snapshot = status_rx.borrow().clone();
-        if !send_ws(&mut socket, &WsMessage::Status(snapshot)).await {
+        if !send_ws(&mut socket, &WsMessage::Status(snapshot), conn_id).await {
             return;
         }
     }
@@ -241,13 +247,17 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
             msg = log_rx.recv() => {
                 match msg {
                     Ok(entry) => {
-                        if !send_ws(&mut socket, &WsMessage::Log(entry)).await {
+                        if !send_ws(&mut socket, &WsMessage::Log(entry), conn_id).await {
                             break;
                         }
                     }
                     // 广播发送端丢弃 → 通道关闭
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("WebSocket 客户端丢弃 {n} 条历史日志");
+                        tracing::warn!(
+                            conn_id,
+                            source = "log",
+                            "WebSocket 客户端消费过慢，丢弃 {n} 条历史日志"
+                        );
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -259,7 +269,7 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                     break;
                 }
                 let snapshot = status_rx.borrow().clone();
-                if !send_ws(&mut socket, &WsMessage::Status(snapshot)).await {
+                if !send_ws(&mut socket, &WsMessage::Status(snapshot), conn_id).await {
                     break;
                 }
             }
@@ -267,11 +277,11 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
             _ = ping_interval.tick() => {
                 // 检查 Pong 超时：客户端超过 PONG_TIMEOUT 未发送任何消息
                 if last_client_msg.elapsed() > PONG_TIMEOUT {
-                    tracing::debug!("WebSocket 客户端 Pong 超时，断开连接");
+                    tracing::debug!(conn_id, "WebSocket 客户端 Pong 超时，断开连接");
                     break;
                 }
                 // 发送协议级 Ping 帧（客户端 WebSocket 库自动回复 Pong）
-                if !send_msg(&mut socket, Message::Ping(Default::default())).await {
+                if !send_msg(&mut socket, Message::Ping(Default::default()), conn_id).await {
                     break;
                 }
             }
@@ -280,12 +290,16 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                 match msg {
                     Ok(text) => {
                         let text = prepare_bridge_event(&text, &state).await;
-                        if !send_msg(&mut socket, Message::Text(text.into())).await {
+                        if !send_msg(&mut socket, Message::Text(text.into()), conn_id).await {
                             break;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("WebSocket 客户端丢弃 {n} 条历史日志");
+                        tracing::warn!(
+                            conn_id,
+                            source = "event",
+                            "WebSocket 客户端消费过慢，丢弃 {n} 条历史日志"
+                        );
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -302,7 +316,7 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                             match incoming.msg_type.as_str() {
                                 // 心跳: { "type": "ping" } → 回复 pong
                                 "ping" => {
-                                    if !send_ws(&mut socket, &WsMessage::Pong).await {
+                                    if !send_ws(&mut socket, &WsMessage::Pong, conn_id).await {
                                         break;
                                     }
                                 }
@@ -318,7 +332,7 @@ async fn handle_logs(mut socket: WebSocket, state: AppState) {
                     }
                     Some(Ok(Message::Ping(data))) => {
                         last_client_msg = tokio::time::Instant::now();
-                        let _ = send_msg(&mut socket, Message::Pong(data)).await;
+                        let _ = send_msg(&mut socket, Message::Pong(data), conn_id).await;
                     }
                     Some(Ok(Message::Pong(_))) => {
                         last_client_msg = tokio::time::Instant::now();

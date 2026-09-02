@@ -67,6 +67,10 @@ pub(crate) const DEFAULT_MANIFEST_URL: &str =
 /// 清单拉取超时
 pub(crate) const MANIFEST_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// ".sha256 伴随文件缺失"告警是否已发出（首次 warn，后续 debug，防每次检查刷屏）
+static SHA_ASSOC_MISSING_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 拉取并解析发布清单
 ///
 /// 支持两种格式：
@@ -83,6 +87,7 @@ pub(crate) async fn fetch_manifest(
     } else {
         source_url
     };
+    tracing::debug!(url = %url, "拉取发布清单");
     let response = client
         .get(url)
         .timeout(MANIFEST_FETCH_TIMEOUT)
@@ -115,6 +120,7 @@ pub(crate) async fn fetch_manifest(
     if body.get("version").is_some() {
         let manifest: ReleaseManifest =
             serde_json::from_value(body).map_err(UpdaterError::ManifestParseFailed)?;
+        tracing::debug!(url = %url, version = %manifest.version, "已获取发布清单");
         return Ok(manifest);
     }
 
@@ -122,6 +128,7 @@ pub(crate) async fn fetch_manifest(
     if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
         let version_str = tag.strip_prefix('v').unwrap_or(tag);
         let version = Version::parse(version_str).map_err(UpdaterError::VersionParseFailed)?;
+        tracing::debug!(url = %url, version = %version, "已获取 GitHub 发布清单");
         let release_date = body
             .get("published_at")
             .and_then(|v| v.as_str())
@@ -145,12 +152,21 @@ pub(crate) async fn fetch_manifest(
             // 源此前 sha256 恒为空，更新包无任何完整性校验）
             let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
             let sha256 =
-                fetch_sha256_with_retry(|| fetch_sha256_assoc(client, &asset_refs, &name)).await;
+                fetch_sha256_with_retry(&name, || fetch_sha256_assoc(client, &asset_refs, &name))
+                    .await;
             if sha256.is_empty() {
-                tracing::warn!(
-                    "GitHub 发布中未找到 {name} 的 .sha256 伴随文件（重试后仍为空），\
-                     降级为信任 HTTPS"
-                );
+                // 降级是发布源常态（老资产无伴随文件）：首次 warn 暴露，
+                // 后续同类情况降为 debug 避免每次检查都刷 WARN
+                if !SHA_ASSOC_MISSING_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        "GitHub 发布中未找到 {name} 的 .sha256 伴随文件（重试后仍为空），\
+                         降级为信任 HTTPS（后续同类告警仅 DEBUG）"
+                    );
+                } else {
+                    tracing::debug!(
+                        "GitHub 发布中未找到 {name} 的 .sha256 伴随文件，降级为信任 HTTPS"
+                    );
+                }
             }
             platforms.insert(
                 platform_key,
@@ -253,7 +269,8 @@ pub(crate) fn collect_package_assets(
 ///
 /// 抽成泛型小函数便于单测重试决策：首次成功非空只拉一次；
 /// 为空（镜像返回空体/未命中伴随文件）再拉一次，仍为空由调用方降级。
-async fn fetch_sha256_with_retry<F, Fut>(mut fetch: F) -> String
+/// `asset_name` 仅用于日志定位是哪个资产的伴随文件缺失。
+async fn fetch_sha256_with_retry<F, Fut>(asset_name: &str, mut fetch: F) -> String
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = String>,
@@ -262,7 +279,7 @@ where
     if !first.is_empty() {
         return first;
     }
-    tracing::warn!("伴随 .sha256 拉取为空，重试一次");
+    tracing::warn!(asset = %asset_name, "伴随 .sha256 拉取为空，重试一次");
     fetch().await
 }
 
@@ -302,14 +319,14 @@ pub(crate) async fn fetch_sha256_assoc(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("下载 .sha256 伴随文件失败 {url}: {e}");
+            tracing::warn!("下载 .sha256 伴随文件失败（网络错误）{url}: {e}");
             return String::new();
         }
     };
     let resp = match resp.error_for_status() {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("下载 .sha256 伴随文件失败 {url}: {e}");
+            tracing::warn!("下载 .sha256 伴随文件失败（HTTP 状态异常）{url}: {e}");
             return String::new();
         }
     };
@@ -517,7 +534,7 @@ mod tests {
         // 首次即非空：只调用一次
         let calls = Arc::new(AtomicU32::new(0));
         let calls2 = calls.clone();
-        let result = fetch_sha256_with_retry(move || {
+        let result = fetch_sha256_with_retry("test.zip", move || {
             let calls = calls2.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -531,7 +548,7 @@ mod tests {
         // 首次为空：重试一次拿到值
         let calls = Arc::new(AtomicU32::new(0));
         let calls2 = calls.clone();
-        let result = fetch_sha256_with_retry(move || {
+        let result = fetch_sha256_with_retry("test.zip", move || {
             let calls = calls2.clone();
             async move {
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -548,7 +565,7 @@ mod tests {
         // 两次均为空：维持空串（调用方降级信任 HTTPS）
         let calls = Arc::new(AtomicU32::new(0));
         let calls2 = calls.clone();
-        let result = fetch_sha256_with_retry(move || {
+        let result = fetch_sha256_with_retry("test.zip", move || {
             let calls = calls2.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);

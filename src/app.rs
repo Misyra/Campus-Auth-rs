@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tower_http::compression::CompressionLayer;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::container::ServiceContainer;
 use crate::web::state::{AppState, LogEntry};
@@ -76,7 +76,8 @@ pub async fn start_axum(
         match TcpListener::bind(addr).await {
             Ok(listener) => {
                 let actual_port = listener.local_addr()?.port();
-                info!(port = actual_port, "Axum 服务绑定成功");
+                // launcher 已有"服务已启动"类 info，绑定成功降为 debug 防重复播报
+                debug!(port = actual_port, "Axum 服务绑定成功");
 
                 // 写入运行端口记录
                 let port_path = container

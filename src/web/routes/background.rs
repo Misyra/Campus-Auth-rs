@@ -231,6 +231,7 @@ pub async fn upload_background(
             let filename = background_filename(original, ext);
             let path = dir.join(&filename);
             tokio::fs::write(&path, &bytes).await?;
+            tracing::info!(file = %filename, size = bytes.len() as u64, "背景图上传成功");
             return Ok(data(serde_json::json!({
                 "filename": filename,
                 "url": format!("/api/background/{}", filename),
@@ -284,6 +285,13 @@ pub async fn fetch_url_background(
     let filename = background_filename(extracted, ext);
     let path = dir.join(&filename);
     tokio::fs::write(&path, &bytes).await?;
+    // 只记目标 host，不记录完整 URL（query 可能携带敏感参数）
+    tracing::info!(
+        host = parsed.host_str().unwrap_or(""),
+        file = %filename,
+        size = bytes.len() as u64,
+        "背景图从 URL 拉取成功"
+    );
     Ok(data(serde_json::json!({
         "filename": filename,
         "url": format!("/api/background/{}", filename),
@@ -310,6 +318,7 @@ pub async fn delete_background(
         return Err(ApiError::NotFound(format!("背景图 {} 不存在", safe_name)));
     }
     tokio::fs::remove_file(&path).await?;
+    tracing::info!(file = %safe_name, "背景图已删除");
     Ok(data(Value::String("ok".into())))
 }
 

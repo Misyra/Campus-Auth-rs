@@ -48,6 +48,7 @@ pub async fn start_monitor(
     State(engine): State<Arc<dyn EngineApi>>,
 ) -> Result<Json<Value>, ApiError> {
     engine.try_dispatch(EngineCommand::Start)?;
+    tracing::info!("网络监测已启动");
     Ok(data(Value::String("监测已启动".into())))
 }
 
@@ -56,6 +57,7 @@ pub async fn stop_monitor(
     State(engine): State<Arc<dyn EngineApi>>,
 ) -> Result<Json<Value>, ApiError> {
     engine.try_dispatch(EngineCommand::Stop)?;
+    tracing::info!("网络监测已停止");
     Ok(data(Value::String("监测已停止".into())))
 }
 

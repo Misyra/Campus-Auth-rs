@@ -34,6 +34,8 @@ pub struct ServiceHandle {
     pub stop_tx: watch::Sender<bool>,
     /// tokio task 句柄
     pub join_handle: JoinHandle<()>,
+    /// 服务名（最小传入：仅用于退出/超时日志定位是哪个服务）
+    pub name: &'static str,
 }
 
 impl ServiceHandle {
@@ -41,7 +43,7 @@ impl ServiceHandle {
     pub async fn stop(self) {
         let _ = self.stop_tx.send(true);
         if let Err(e) = self.join_handle.await {
-            tracing::warn!("服务任务退出时返回错误: {:?}", e);
+            tracing::warn!(service = self.name, "服务任务退出时返回错误: {:?}", e);
         }
     }
 
@@ -53,9 +55,11 @@ impl ServiceHandle {
         let _ = self.stop_tx.send(true);
         match tokio::time::timeout(timeout, &mut self.join_handle).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!("服务任务退出时返回错误: {:?}", e),
+            Ok(Err(e)) => {
+                tracing::warn!(service = self.name, "服务任务退出时返回错误: {:?}", e)
+            }
             Err(_) => {
-                tracing::warn!("服务任务关闭超时，强制中止后台 task");
+                tracing::warn!(service = self.name, "服务任务关闭超时，强制中止后台 task");
                 self.join_handle.abort();
                 let _ = self.join_handle.await;
             }

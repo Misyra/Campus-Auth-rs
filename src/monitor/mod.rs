@@ -20,7 +20,7 @@ use futures::future::{BoxFuture, join_all};
 use reqwest::Client;
 use reqwest::redirect::Policy;
 use tokio::net::TcpStream;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::config::ConfigService;
 use crate::config::runtime::RuntimeConfig;
@@ -214,7 +214,8 @@ impl MonitorService {
         let rt = self.config_service.runtime().load();
         let cfg = MonitorConfig::from_runtime(&rt);
 
-        // 检测周期开始：以 INFO 记录启用类型与计数，保证默认 info 级别下可见（此前均为 debug 被过滤）
+        // 检测周期开始：每轮探测的高频事件，降为 debug 避免默认 info 级别刷屏
+        //（网络状态变化由 Engine 的"网络状态变化" info 单点记录）
         let check_no = self.check_count.load(Ordering::Relaxed) + 1;
         let mut enabled_list: Vec<&str> = Vec::new();
         if cfg.tcp_enabled {
@@ -226,7 +227,7 @@ impl MonitorService {
         if cfg.url_enabled {
             enabled_list.push("URL");
         }
-        info!(
+        debug!(
             "网络检测 #{} 开始：启用探测 [{}]，间隔 {}s",
             check_no,
             enabled_list.join("/"),
@@ -305,7 +306,7 @@ impl MonitorService {
         let mut tasks: Vec<BoxFuture<(ProbeKind, ProbeOutcome, Vec<PerProbeDetail>)>> = Vec::new();
 
         if cfg.tcp_enabled {
-            info!(
+            debug!(
                 "TCP 探测启动：目标 {:?}，超时 {:?}",
                 cfg.tcp_targets, cfg.tcp_timeout
             );
@@ -317,7 +318,7 @@ impl MonitorService {
             }));
         }
         if cfg.http_enabled {
-            info!(
+            debug!(
                 "HTTP 探测启动：目标 {:?}，超时 {:?}",
                 cfg.http_targets, cfg.http_timeout
             );
@@ -330,7 +331,7 @@ impl MonitorService {
             }));
         }
         if cfg.url_enabled {
-            info!(
+            debug!(
                 "URL 探测启动：目标 {:?}，超时 {:?}",
                 cfg.url_targets, cfg.url_timeout
             );
@@ -373,9 +374,10 @@ impl MonitorService {
                     );
                 }
             }
-            // 单类探测整体 Fail 时提升为告警
+            // 单类探测整体 Fail 仅记 debug：断网期间每轮重复告警会刷屏，
+            // 真正的状态转换已由 Engine 的"网络状态变化" info 记录
             if matches!(outcome, ProbeOutcome::Fail) {
-                warn!("{kind:?} 探测整体失败（所有目标均不可达）");
+                debug!("{kind:?} 探测整体失败（所有目标均不可达）");
             }
         }
 
@@ -399,31 +401,17 @@ impl MonitorService {
             latency,
             auth_url_reachable,
         );
-        // 增强完成日志：补充各探测 outcome、auth_url 可达性与启用的探测类型
-        let enabled = [
-            (ProbeKind::Tcp, cfg.tcp_enabled),
-            (ProbeKind::Http, cfg.http_enabled),
-            (ProbeKind::Url, cfg.url_enabled),
-        ]
-        .into_iter()
-        .filter(|(_, on)| *on)
-        .map(|(k, _)| format!("{k:?}"))
-        .collect::<Vec<_>>()
-        .join(",");
-        info!(
-            "探测完成 #{}: status={:?}, latency={}ms, tcp={:?}, http={:?}, url={:?}, auth_url={}, enabled=[{}]",
-            report.check_number,
-            report.status,
-            report.latency_ms,
-            report.tcp_outcome,
-            report.http_outcome,
-            report.url_outcome,
-            match report.auth_url_reachable {
-                Some(true) => "reachable",
-                Some(false) => "unreachable",
-                None => "N/A",
-            },
-            enabled
+        // 完成日志（debug）：结构化字段承载结论与耗时；启用的探测类型已在
+        // 开始日志中列出，此处不再重复
+        debug!(
+            status = ?report.status,
+            latency_ms = report.latency_ms,
+            tcp = ?report.tcp_outcome,
+            http = ?report.http_outcome,
+            url = ?report.url_outcome,
+            auth_url = ?report.auth_url_reachable,
+            "探测完成 #{}",
+            report.check_number
         );
         Ok(report)
     }
@@ -437,7 +425,8 @@ impl MonitorService {
         let (host, port) = match parse_url_host_port(auth_url) {
             Some(hp) => hp,
             None => {
-                debug!("auth_url 解析失败: {auth_url}");
+                // 解析失败会被上游误报为"认证地址不可达"，属配置异常，升为 warn
+                warn!("auth_url 解析失败: {auth_url}");
                 return false;
             }
         };

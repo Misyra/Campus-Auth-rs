@@ -240,7 +240,8 @@ def _ensure_browser(channel: str = "playwright") -> bool:
                 browser_type = p.chromium
             executable = browser_type.executable_path
             return bool(executable and Path(executable).exists())
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("浏览器探测失败（channel=%s）: %s", channel, exc)
         return False
 
 
@@ -633,8 +634,14 @@ class WorkerCore:
                 await self._apply_stealth_and_routes(bs)
 
             self._page = await self._new_page()
+            logger.info(
+                "浏览器已启动: channel=%s, headless=%s, persistent=%s",
+                channel,
+                headless,
+                persistent,
+            )
         except Exception:
-            logger.warning("浏览器启动失败，回滚资源", exc_info=True)
+            logger.error("浏览器启动失败，回滚资源", exc_info=True)
             await self.close_browser()
             raise
 
@@ -661,7 +668,8 @@ class WorkerCore:
         # their sessionStorage/background scripts cannot bleed into the new session.
         try:
             old_pages = list(self._context.pages)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("列举旧页面失败，降级为当前页: %s", exc)
             old_pages = [self._page] if self._page is not None else []
         for old_page in old_pages:
             await self._safe_close(old_page, "old session page")
@@ -698,6 +706,7 @@ class WorkerCore:
         has_browser = self._browser is not None or self._context is not None
         if has_browser and await self._health_check() and self._last_browser_settings == bs:
             return
+        logger.info("浏览器未就绪或配置变更，重建浏览器")
         await self.close_browser()
         await self._start_browser(config)
 
@@ -754,6 +763,7 @@ class WorkerCore:
             self._cleanup_debug_screenshots(session)
         self._debug_sessions.clear()
         self._last_browser_settings = None
+        logger.info("浏览器及资源已关闭")
 
     async def force_interrupt_pending(self) -> None:
         """强制中断可能挂起的 Playwright 操作：关闭当前页面以打断 CDP await。
@@ -884,7 +894,8 @@ class WorkerCore:
                         context,
                         start,
                     )
-                logger.info("[success_condition] 命中成功: %s=%s", var_name, value)
+                # 变量值可能含凭据（如 eval 提取的 token），只记真值判定结果，不打印 value
+                logger.info("[success_condition] 命中成功: 变量 %s 真值判定通过", var_name)
                 result.message = f"成功条件命中: {var_name}={value}"
             return result
         finally:
@@ -1057,13 +1068,10 @@ class WorkerCore:
                 shot_dir.mkdir(parents=True, exist_ok=True)
                 await self._page.screenshot(path=local_path, full_page=True)
                 # 追踪初始截图路径，以便会话结束时统一清理（历史遗留 F5）
-                try:
-                    context.screenshots.append(local_path)
-                except Exception:  # noqa: BLE001
-                    pass
+                context.screenshots.append(local_path)
                 self.emit("screenshot", {"path": local_path})
             except Exception as exc:  # noqa: BLE001
-                logger.debug(f"调试初始截图失败: {exc}")
+                logger.warning(f"调试会话初始截图失败: {exc}")
             return self._debug_response(self._debug_sessions[session_id])
         except Exception:
             if cancel_id:
@@ -1309,7 +1317,8 @@ class WorkerCore:
             if cdp_data:
                 mhtml_bytes = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
             await cdp.detach()
-        except Exception:  # noqa: BLE001 — CDP 不可用时回退 content()
+        except Exception as exc:  # noqa: BLE001 — CDP 不可用时回退 content()
+            logger.debug("CDP MHTML 快照失败，回退 HTML: %s", exc)
             mhtml_bytes = None
         # CSS/JS 资源快照：MHTML 不含 JS，这里补齐脚本与样式表（主框架资源）
         resources: dict[str, str] = {}  # url -> resources/<name>
@@ -1412,6 +1421,7 @@ class WorkerCore:
                 f"无法识别该图片: {exc}。请使用清晰的标准图片（png/jpg），"
                 "避免 webp/avif/截图边缘裁剪等 PIL 不支持的格式",
             ) from exc
+        logger.info("[ocr] 识别完成，结果长度=%d", len(text or ""))
         return {"text": text}
 
     async def handle_shutdown(self, params: dict) -> dict:

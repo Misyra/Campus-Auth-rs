@@ -66,6 +66,7 @@ pub struct InterfaceInfo {
 /// 执行系统命令并返回 stdout，带超时
 async fn run_command(program: &str, args: &[&str]) -> Result<String, NetworkError> {
     let timeout = Duration::from_secs(SUBPROCESS_TIMEOUT_SECS);
+    let start = std::time::Instant::now();
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .stdout(std::process::Stdio::piped())
@@ -79,15 +80,37 @@ async fn run_command(program: &str, args: &[&str]) -> Result<String, NetworkErro
     let fut = cmd.output();
     let output = tokio::time::timeout(timeout, fut)
         .await
-        .map_err(|_| NetworkError::SubprocessTimeout {
-            command: program.to_string(),
-            timeout_secs: SUBPROCESS_TIMEOUT_SECS,
+        .map_err(|_| {
+            // 网络探测失败默认对上层表现为空结果，留 debug 便于区分「命令异常」与「真无网络」
+            tracing::debug!(
+                command = program,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "网络探测命令执行超时"
+            );
+            NetworkError::SubprocessTimeout {
+                command: program.to_string(),
+                timeout_secs: SUBPROCESS_TIMEOUT_SECS,
+            }
         })?
-        .map_err(|source| NetworkError::SubprocessFailed {
-            command: program.to_string(),
-            source,
+        .map_err(|source| {
+            tracing::debug!(
+                command = program,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                error = %source,
+                "网络探测命令启动失败"
+            );
+            NetworkError::SubprocessFailed {
+                command: program.to_string(),
+                source,
+            }
         })?;
     if !output.status.success() {
+        tracing::debug!(
+            command = program,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            exit_code = ?output.status.code(),
+            "网络探测命令非零退出"
+        );
         return Err(NetworkError::ParseFailed {
             command: program.to_string(),
             source: anyhow::anyhow!("命令退出码 {:?}", output.status.code()),
@@ -322,7 +345,15 @@ impl NetworkDetect for WindowsDetect {
     async fn current_ssid(&self) -> Result<Option<String>, NetworkError> {
         match run_command("netsh", &["wlan", "show", "interfaces"]).await {
             Ok(out) => Ok(parse_netsh_ssid(&out)),
-            Err(_) => Ok(None),
+            Err(e) => {
+                // 命令失败（无无线网卡等）与「已连接但无 SSID」不同，留 debug 区分
+                tracing::debug!(
+                    command = "netsh wlan show interfaces",
+                    error = %e,
+                    "查询 WiFi SSID 的命令执行失败，视为无 WiFi"
+                );
+                Ok(None)
+            }
         }
     }
 }
@@ -371,7 +402,15 @@ impl NetworkDetect for LinuxDetect {
                     Ok(Some(ssid.to_string()))
                 }
             }
-            Err(_) => Ok(None),
+            Err(e) => {
+                // iwgetid 缺失/无权限等命令级失败与「未连接」不同，留 debug 区分
+                tracing::debug!(
+                    command = "iwgetid -r",
+                    error = %e,
+                    "查询 WiFi SSID 的命令执行失败，视为无 WiFi"
+                );
+                Ok(None)
+            }
         }
     }
 }
@@ -407,7 +446,14 @@ impl NetworkDetect for MacosDetect {
         // 先获取 WiFi 设备名（通常为 en0 或 en1）
         let hw_out = match run_command("networksetup", &["-listallhardwareports"]).await {
             Ok(o) => o,
-            Err(_) => return Ok(None),
+            Err(e) => {
+                tracing::debug!(
+                    command = "networksetup -listallhardwareports",
+                    error = %e,
+                    "查询 WiFi 硬件端口的命令执行失败，视为无 WiFi"
+                );
+                return Ok(None);
+            }
         };
         let mut wifi_device: Option<String> = None;
         let mut lines = hw_out.lines().peekable();
@@ -438,7 +484,15 @@ impl NetworkDetect for MacosDetect {
                 }
                 Ok(None)
             }
-            Err(_) => Ok(None),
+            Err(e) => {
+                tracing::debug!(
+                    command = "networksetup -getairportnetwork",
+                    device = %device,
+                    error = %e,
+                    "查询当前 WiFi 网络的命令执行失败，视为无 WiFi"
+                );
+                Ok(None)
+            }
         }
     }
 }

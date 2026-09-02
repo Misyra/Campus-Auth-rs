@@ -66,6 +66,12 @@ pub(crate) async fn download_and_verify(
             limit: MAX_UPDATE_ARCHIVE_BYTES,
         });
     }
+    let download_start = std::time::Instant::now();
+    tracing::info!(
+        url = %info.url,
+        expected_size = ?content_length,
+        "开始下载更新包"
+    );
 
     tokio::fs::create_dir_all(staging_dir)
         .await
@@ -102,7 +108,9 @@ pub(crate) async fn download_and_verify(
             .map_err(UpdaterError::PendingWriteFailed)?;
         downloaded += chunk.len() as u64;
         if downloaded > MAX_UPDATE_ARCHIVE_BYTES {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
+            if let Err(e) = tokio::fs::remove_file(&tmp_path).await {
+                tracing::debug!("清理超限临时下载文件失败: {e}");
+            }
             return Err(UpdaterError::DownloadTooLarge {
                 limit: MAX_UPDATE_ARCHIVE_BYTES,
             });
@@ -130,10 +138,18 @@ pub(crate) async fn download_and_verify(
         .map_err(UpdaterError::PendingWriteFailed)?;
     drop(file);
 
+    tracing::info!(
+        bytes = downloaded,
+        elapsed_ms = download_start.elapsed().as_millis() as u64,
+        "更新包下载完成"
+    );
+
     let actual = hex::encode(hasher.finalize());
     // 完整性校验针对下载的 ZIP 本身；解压后的 exe 不应拿 ZIP 摘要比较。
     if !info.sha256.is_empty() && actual.to_lowercase() != info.sha256.to_lowercase() {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+        if let Err(e) = tokio::fs::remove_file(&tmp_path).await {
+            tracing::debug!("清理校验失败的临时下载文件失败: {e}");
+        }
         return Err(UpdaterError::ChecksumMismatch {
             expected: info.sha256.clone(),
             actual,

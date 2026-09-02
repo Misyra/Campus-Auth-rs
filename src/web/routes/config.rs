@@ -23,9 +23,17 @@ pub async fn get_settings(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let settings = config.load_settings_async().await;
-    let profile = config
-        .load_profile(&settings.active_profile_id)
-        .unwrap_or_default();
+    let profile = match config.load_profile(&settings.active_profile_id) {
+        Ok(p) => p,
+        Err(e) => {
+            // 活跃 Profile 加载失败时回退空凭据（与原 unwrap_or_default 同语义），warn 留痕
+            tracing::warn!(
+                profile_id = %settings.active_profile_id,
+                "活跃 Profile 加载失败，返回空凭据: {e}"
+            );
+            crate::config::ProfileData::default()
+        }
+    };
     let has_password = effective_has_password(config.as_ref(), &profile);
     Ok(data(settings_flat_response(
         &settings,
@@ -85,6 +93,8 @@ async fn apply_flat_settings_patch(
     let mut global_patch = serde_json::Map::new();
     let mut profile_patch = serde_json::Map::new();
     let mut other_patch = serde_json::Map::new();
+    // 记录变更字段名（仅字段名，绝不记录值：payload 可能含密码/密钥）
+    let mut changed_fields: Vec<String> = Vec::new();
 
     // 前端字段名 → 后端字段名映射
     let field_map: std::collections::HashMap<&str, &str> =
@@ -122,6 +132,7 @@ async fn apply_flat_settings_patch(
             // 实际运营商名已由 `isp` 字段承载。显式忽略，避免落入 other_patch 污染 settings.json。
             continue;
         }
+        changed_fields.push(k.clone());
         if profile_keys.contains(&k.as_str()) {
             profile_patch.insert(k.clone(), v.clone());
         } else if k == "monitor" {
@@ -203,6 +214,11 @@ async fn apply_flat_settings_patch(
             Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
             Err(e) => return Err(e.into()),
         }
+    }
+
+    // 保存成功后统一记录变更字段名列表（严禁记录字段值，尤其密码/密钥）
+    if !changed_fields.is_empty() {
+        tracing::info!(fields = %changed_fields.join(","), "设置已保存");
     }
 
     Ok(())
@@ -319,6 +335,7 @@ pub async fn set_log_level(
     }
     // 热更新运行时日志级别（tracing filter），而非仅落盘下次启动生效
     crate::logging::reload_log_level(&body.level);
+    tracing::info!(level = %body.level, "日志级别已更新");
     Ok(data(body.level))
 }
 
@@ -503,6 +520,9 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
                 } else {
                     url_targets.push(s.trim().to_string());
                 }
+            } else {
+                // 非法条目（非字符串）此前静默跳过，debug 留痕便于发现前端脏数据
+                tracing::debug!("monitor 配置 url_check_urls 含非字符串条目，已跳过");
             }
         }
     }

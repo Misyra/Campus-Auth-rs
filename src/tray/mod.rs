@@ -143,6 +143,7 @@ impl TrayManager {
             return ServiceHandle {
                 stop_tx,
                 join_handle: tokio::spawn(async {}),
+                name: "tray",
             };
         }
 
@@ -244,7 +245,7 @@ impl TrayManager {
                 };
                 // OS 线程用 try_send（非阻塞）转发；通道满/关闭时丢弃
                 if action_tx.try_send(action).is_err() {
-                    debug!("托盘泵任务已退出，丢弃菜单事件");
+                    warn!("托盘泵任务已退出，丢弃菜单事件");
                 }
             }));
 
@@ -259,7 +260,9 @@ impl TrayManager {
                     if button == tray_icon::MouseButton::Left
                         && button_state == tray_icon::MouseButtonState::Up
                     {
-                        let _ = action_tx_tray.try_send(TrayAction::OpenWeb);
+                        if let Err(e) = action_tx_tray.try_send(TrayAction::OpenWeb) {
+                            debug!("托盘点击事件转发失败（通道满或泵任务已退出）: {e}");
+                        }
                     }
                 }
             }));
@@ -397,7 +400,9 @@ impl TrayManager {
                         );
                         if last_key.as_ref() != Some(&key) {
                             last_key = Some(key);
-                            let _ = os_cmd_tx_pump.send(OsCommand::RefreshTray);
+                            if let Err(e) = os_cmd_tx_pump.send(OsCommand::RefreshTray) {
+                                debug!("托盘刷新请求发送失败（OS 线程可能已退出）: {e}");
+                            }
                         }
                     }
                 }
@@ -414,6 +419,7 @@ impl TrayManager {
         ServiceHandle {
             stop_tx,
             join_handle: pump,
+            name: "tray",
         }
     }
 }
@@ -563,7 +569,9 @@ fn build_menu() -> MenuBuildResult {
 
     let menu_refs: Vec<&dyn IsMenuItem> = menu_items.iter().map(|b| b.as_ref()).collect();
     let menu = Menu::new();
-    let _ = menu.append_items(&menu_refs);
+    if let Err(e) = menu.append_items(&menu_refs) {
+        error!("托盘菜单项追加失败，菜单可能不完整: {e}");
+    }
     (menu, menu_items, toggle_item)
 }
 
@@ -641,9 +649,16 @@ fn solid_rgba(color: [u8; 3], size: u32) -> (Vec<u8>, u32, u32) {
 fn make_icon(rgba: Vec<u8>, w: u32, h: u32) -> Option<Icon> {
     match Icon::from_rgba(rgba, w, h) {
         Ok(icon) => Some(icon),
-        Err(_) => {
+        Err(e) => {
+            debug!("托盘图标 RGBA 构造失败，回退纯色图标: {e}");
             let (buf, bw, bh) = solid_rgba(ACTIVE_COLOR, FALLBACK_ICON_SIZE);
-            Icon::from_rgba(buf, bw, bh).ok()
+            match Icon::from_rgba(buf, bw, bh) {
+                Ok(icon) => Some(icon),
+                Err(e) => {
+                    debug!("托盘回退纯色图标构造失败: {e}");
+                    None
+                }
+            }
         }
     }
 }

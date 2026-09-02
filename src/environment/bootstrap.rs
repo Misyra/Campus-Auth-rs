@@ -141,10 +141,27 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     } else {
         crate::environment::uv::check_uv_on_path().await
     };
+    if !uv_ready {
+        // 探测函数仅返回 bool（拿不到命令错误细节），按探测对象区分失败原因
+        if uv_exe.exists() {
+            tracing::debug!(
+                path = %uv_exe.display(),
+                "uv --version 探测未通过（文件存在但无法执行），视为未就绪"
+            );
+        } else {
+            tracing::debug!("PATH 上未找到可用的 uv，视为未就绪");
+        }
+    }
 
     let worker_project_path = mgr.worker_project_path();
     let python_exe = worker_project_path.join(crate::environment::PYTHON_EXE_RELATIVE);
     let python_ready = crate::environment::python::python_executable_works(&python_exe).await;
+    if !python_ready {
+        tracing::debug!(
+            path = %python_exe.display(),
+            "python --version 探测未通过（文件缺失或无法执行），视为未就绪"
+        );
+    }
 
     let playwright_ready = python_ready && playwright_browser_installed("chromium");
 
@@ -167,17 +184,24 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
         s.capability_ready = capability_ready;
     });
 
-    tracing::debug!(
-        "环境检查: uv={}, python={}, playwright={}, git={}, capability={}",
-        uv_ready,
-        python_ready,
-        playwright_ready,
-        git_ready,
-        capability_ready
+    // 首轮探测（容器启动路径）升 info，供用户从日志确认环境真实状态；
+    // 后续（引导流程内的复用探测）保持 debug，避免刷屏。进程级静态标记是
+    // 不改函数签名的最小区分方式——容器启动即 spawn 本函数，几乎必然是首调用方。
+    let summary = format!(
+        "uv={}, python={}, playwright={}, git={}, capability={}",
+        uv_ready, python_ready, playwright_ready, git_ready, capability_ready
     );
+    if !FIRST_CHECK_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::info!("环境检查: {summary}");
+    } else {
+        tracing::debug!("环境检查: {summary}");
+    }
 
     Ok(())
 }
+
+/// 是否已完成过首轮环境探测（首个调用方视为容器启动路径，探测摘要升 info）
+static FIRST_CHECK_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 检查 Playwright 管理的指定浏览器是否实际安装。
 ///

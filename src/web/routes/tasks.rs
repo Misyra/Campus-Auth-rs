@@ -201,6 +201,18 @@ pub async fn import_tasks(
             "没有可导入的任务：{hint}（应为任务对象数组，每个任务需包含 id 字段，格式可参考导出结果）"
         )));
     }
+    if !failed.is_empty() {
+        // 部分失败仅进响应体易被忽略，warn 留痕失败条目数与名称列表
+        let names: Vec<String> = failed
+            .iter()
+            .filter_map(|f| f.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        tracing::warn!(
+            failed = failed.len() as u64,
+            tasks = %names.join(","),
+            "任务导入部分失败"
+        );
+    }
     Ok(data(
         serde_json::json!({ "imported": imported, "failed": failed }),
     ))

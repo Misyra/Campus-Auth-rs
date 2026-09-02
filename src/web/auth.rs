@@ -43,12 +43,18 @@ pub fn load_or_create_token(base_path: &Path) -> std::io::Result<String> {
     if let Ok(text) = std::fs::read_to_string(&path) {
         let token = text.trim();
         // 合法形态：32~128 位十六进制
-        let valid =
-            (32..=128).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_hexdigit());
+        let len_ok = (32..=128).contains(&token.len());
+        let valid = len_ok && token.bytes().all(|b| b.is_ascii_hexdigit());
         if valid {
             return Ok(token.to_string());
         }
-        tracing::warn!("鉴权 token 文件异常，已重新生成");
+        // 记录具体校验失败原因便于排查篡改/损坏（严禁打印 token 内容本身）
+        let reason = if len_ok {
+            "包含非十六进制字符".to_string()
+        } else {
+            format!("长度 {} 不在 32~128 位合法范围", token.len())
+        };
+        tracing::warn!("鉴权 token 文件异常（{reason}），已重新生成");
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -186,7 +192,11 @@ pub async fn auth_middleware(
     match provided {
         // 常量时间比较：防止逐字节短路比较泄露 token 前缀匹配程度
         Some(token) if constant_time_eq(token, expected) => next.run(req).await,
-        _ => unauthorized(),
+        _ => {
+            // 仅记 method/path 便于定位调用方，绝不记录请求提供的 token 值
+            tracing::debug!(method = %req.method(), path, "鉴权失败，返回 401");
+            unauthorized()
+        }
     }
 }
 

@@ -4,11 +4,14 @@
 //! 从 `<base_path>/update/pending.json` 读取 staging / target 信息，
 //! 等待主进程退出后完成替换并重启新版本。
 
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
 use campus_auth::utils::lock::is_process_alive;
+use chrono::Local;
 use clap::Parser;
 
 /// campus-auth 更新助手进程
@@ -49,6 +52,58 @@ struct PendingInfo {
     version: String,
 }
 
+/// helper 的 best-effort 落盘日志
+///
+/// GUI 子系统（Windows release 双击启动）下 stdout/stderr 完全不可见，更新失败
+/// 将不可诊断。每条消息同时写入 `<base_path>/logs/helper.log`（追加）与 stderr：
+/// 目录不存在则尝试创建；文件打开/写入失败仅退回 stderr，绝不 panic、绝不阻断
+/// 更新流程（日志是尽力而为的旁路）。
+struct HelperLog {
+    file: Option<std::fs::File>,
+}
+
+impl HelperLog {
+    /// 打开日志文件（失败则退回仅 stderr 模式）
+    fn open(base_path: &Path) -> Self {
+        let log_path = base_path.join("logs").join("helper.log");
+        let file = std::fs::create_dir_all(log_path.parent().unwrap_or_else(|| Path::new(".")))
+            .ok()
+            .and_then(|()| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .ok()
+            });
+        Self { file }
+    }
+
+    /// 写一条日志：stderr（带 [helper] 前缀与时间戳）+ 文件追加
+    fn write(&mut self, level: &str, msg: &str) {
+        let line = format!(
+            "[helper] {} [{level}] {msg}",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        eprintln!("{line}");
+        if let Some(f) = self.file.as_mut() {
+            // 写日志失败（磁盘满/句柄失效）静默放弃，不影响主流程
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    fn info(&mut self, msg: &str) {
+        self.write("INFO", msg);
+    }
+
+    fn error(&mut self, msg: &str) {
+        self.write("ERROR", msg);
+    }
+
+    fn debug(&mut self, msg: &str) {
+        self.write("DEBUG", msg);
+    }
+}
+
 fn main() {
     let cli = HelperCli::parse();
 
@@ -57,8 +112,18 @@ fn main() {
         return;
     }
 
+    // 0. 计算基准路径并初始化 best-effort 落盘日志
+    // （GUI 子系统下 stdout/stderr 不可见，更新失败必须可从 helper.log 诊断）
+    let base_path = cli.base_path.unwrap_or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
+    let mut log = HelperLog::open(&base_path);
+
     // 1. 等待主进程退出
-    println!("[helper] 等待主进程 (PID {}) 退出...", cli.pid);
+    log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
     if !wait_for_process_exit(cli.pid) {
         // 主进程未退出：中止更新，保留 staging 与 pending.json，待主进程下次启动
         // 时由 apply_pending_on_startup 应用（不执行 cleanup，避免摧毁待应用更新）
@@ -68,43 +133,66 @@ fn main() {
     sleep(Duration::from_millis(500));
 
     // 2. 从 pending.json 读取配置（CLI 参数优先）
-    let base_path = cli.base_path.unwrap_or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-    });
-
     let pending_path = base_path.join("update").join("pending.json");
-    let pending: Option<PendingInfo> = std::fs::read_to_string(&pending_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
+    // 区分三种情形：不存在（正常，按 CLI 参数继续）/ 解析失败（丢失 sha256 与
+    // original_args，告警）/ 其他读取错误（告警）
+    let pending: Option<PendingInfo> = match std::fs::read_to_string(&pending_path) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                log.error(&format!(
+                    "pending.json 存在但解析失败（{e}），sha256/original_args 信息丢失，将按 CLI 参数继续"
+                ));
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log.debug("无 pending.json，按 CLI 参数继续");
+            None
+        }
+        Err(e) => {
+            log.error(&format!("读取 pending.json 失败（{e}），将按 CLI 参数继续"));
+            None
+        }
+    };
 
-    let staging_dir = cli
+    let staging_dir = match cli
         .staging
         .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.staging_dir)))
-        .expect("缺少 staging 目录路径（需 --staging 或 pending.json）");
+    {
+        Some(p) => p,
+        None => {
+            log.error("缺少 staging 目录路径（需 --staging 或 pending.json）");
+            std::process::exit(1);
+        }
+    };
 
-    let target_exe = cli
+    let target_exe = match cli
         .target
         .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.target_exe)))
-        .expect("缺少目标 exe 路径（需 --target 或 pending.json）");
+    {
+        Some(p) => p,
+        None => {
+            log.error("缺少目标 exe 路径（需 --target 或 pending.json）");
+            std::process::exit(1);
+        }
+    };
 
     // G13：staging / target 路径必须位于 base_path 之内（canonicalize 后
     // starts_with 检查）。二者取值可能来自 pending.json——文件被篡改时会把
     // 任意系统路径变成替换目标（任意位置覆写）或清理对象，必须先拒绝。
     if !is_within_base(&staging_dir, &base_path) {
-        eprintln!(
-            "[helper] 拒绝执行：staging 路径不在 base_path 之内: {}",
+        log.error(&format!(
+            "拒绝执行：staging 路径不在 base_path 之内: {}",
             staging_dir.display()
-        );
+        ));
         std::process::exit(1);
     }
     if !is_within_base(&target_exe, &base_path) {
-        eprintln!(
-            "[helper] 拒绝执行：target 路径不在 base_path 之内: {}",
+        log.error(&format!(
+            "拒绝执行：target 路径不在 base_path 之内: {}",
             target_exe.display()
-        );
+        ));
         std::process::exit(1);
     }
 
@@ -112,8 +200,8 @@ fn main() {
 
     // 3. 校验 staging 文件存在
     if !extracted_exe.exists() {
-        eprintln!("[helper] staging 文件不存在: {}", extracted_exe.display());
-        cleanup(&base_path, &staging_dir);
+        log.error(&format!("staging 文件不存在: {}", extracted_exe.display()));
+        cleanup(&base_path, &staging_dir, &mut log);
         std::process::exit(1);
     }
 
@@ -124,8 +212,8 @@ fn main() {
         .map(|p| p.sha256.as_str())
         .unwrap_or_default();
     if !verify_staging_sha256(&extracted_exe, expected_sha) {
-        eprintln!("[helper] staging exe SHA256 复核失败，中止替换");
-        cleanup(&base_path, &staging_dir);
+        log.error("staging exe SHA256 复核失败，中止替换");
+        cleanup(&base_path, &staging_dir, &mut log);
         std::process::exit(1);
     }
 
@@ -136,27 +224,34 @@ fn main() {
         .map(|n| target_exe.with_file_name(format!("{}.bak", n.to_string_lossy())))
         .unwrap_or_else(|| target_exe.with_extension("exe.bak"));
     if target_exe.exists() {
-        println!("[helper] 备份旧版本 -> {}", backup_path.display());
+        log.info(&format!("备份旧版本 -> {}", backup_path.display()));
         if let Err(e) = std::fs::copy(&target_exe, &backup_path) {
-            eprintln!("[helper] 备份失败: {e}");
+            log.error(&format!(
+                "备份失败: {e}，将在无备份情况下继续替换，失败后无法回滚"
+            ));
             // 备份失败不阻断替换流程
         }
     }
 
     // 5. 替换 exe（helper 复制新文件覆盖旧 exe，而非替换自身）
-    println!(
-        "[helper] 替换 {} -> {}",
+    log.info(&format!(
+        "替换 {} -> {}",
         extracted_exe.display(),
         target_exe.display()
-    );
+    ));
     if let Err(e) = std::fs::copy(&extracted_exe, &target_exe) {
-        eprintln!("[helper] 替换失败: {e}");
+        log.error(&format!("替换失败: {e}"));
         // 尝试回退：从备份恢复
         if backup_path.exists() {
-            let _ = std::fs::copy(&backup_path, &target_exe);
-            eprintln!("[helper] 已回退到备份版本");
+            match std::fs::copy(&backup_path, &target_exe) {
+                Ok(_) => log.error("已回退到备份版本"),
+                Err(e) => log.error(&format!(
+                    "回退失败（{e}），exe 处于未知状态，请手动用备份 {} 恢复",
+                    backup_path.display()
+                )),
+            }
         }
-        cleanup(&base_path, &staging_dir);
+        cleanup(&base_path, &staging_dir, &mut log);
         std::process::exit(1);
     }
     // unix：fs::copy 只复制源文件权限，为防解压链路丢 +x，替换后显式确保
@@ -164,7 +259,11 @@ fn main() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&target_exe, std::fs::Permissions::from_mode(0o755));
+        if let Err(e) =
+            std::fs::set_permissions(&target_exe, std::fs::Permissions::from_mode(0o755))
+        {
+            log.debug(&format!("设置新 exe 可执行权限失败: {e}"));
+        }
     }
 
     // 5.5 同步全量分发内容：更新包不只有 exe——python_worker/（Python 代码）、
@@ -174,20 +273,20 @@ fn main() {
     // 用户运行态，config/tasks/logs 等用户数据不在 staging 内天然不受影响）。
     let extracted_dir = staging_dir.join("extracted");
     sync_distribution_files(&extracted_dir, &base_path);
-    replace_helper(&extracted_dir, &base_path);
+    replace_helper(&extracted_dir, &base_path, &mut log);
 
     // 6. 启动新 exe（传递原始启动参数）
     let original_args = pending
         .as_ref()
         .map(|p| p.original_args.clone())
         .unwrap_or_default();
-    println!("[helper] 启动新版本...");
+    log.info("启动新版本...");
     match std::process::Command::new(&target_exe)
         .args(&original_args)
         .spawn()
     {
         Ok(mut child) => {
-            println!("[helper] 新版本已启动");
+            log.info("新版本已启动");
             // G13：延迟删 .bak——spawn 成功不代表新 exe 能正常运行（依赖缺失、
             // 版本不兼容时会秒退），立即删备份会让用户失去回退手段。
             // 权衡：多等 5 秒 + try_wait 两次探活，仅在确认新进程持续存活后才
@@ -201,25 +300,27 @@ fn main() {
                 first_probe
             };
             if decide_backup_deletion(first_probe, second_probe) {
-                let _ = std::fs::remove_file(&backup_path);
-                println!("[helper] 新版本持续运行，已清理备份");
+                if let Err(e) = std::fs::remove_file(&backup_path) {
+                    log.debug(&format!("清理备份文件失败: {e}"));
+                }
+                log.info("新版本持续运行，已清理备份");
             } else {
-                eprintln!(
-                    "[helper] 新版本启动后疑似异常退出，保留备份 {} 供手动回退",
+                log.error(&format!(
+                    "新版本启动后疑似异常退出，保留备份 {} 供手动回退",
                     backup_path.display()
-                );
+                ));
             }
         }
         Err(e) => {
-            eprintln!("[helper] 启动新版本失败: {e}");
-            eprintln!("[helper] 保留备份 {} 供手动回退", backup_path.display());
+            log.error(&format!("启动新版本失败: {e}"));
+            log.error(&format!("保留备份 {} 供手动回退", backup_path.display()));
         }
     }
 
     // 7. 清理
-    cleanup(&base_path, &staging_dir);
+    cleanup(&base_path, &staging_dir, &mut log);
 
-    println!("[helper] 更新完成");
+    log.info("更新完成");
 }
 
 /// 轮询等待指定 PID 的进程退出（最多等待 60 秒）
@@ -288,7 +389,7 @@ fn copy_dir_overlay(src: &Path, dst: &Path, skip_names: &[&str]) -> std::io::Res
 /// `<原名>.old` 让位，再复制新版本；最后尝试删 .old（运行中删除会失败，
 /// 残留一个无害文件，下次更新覆盖重试）。任一步失败仅告警——旧 helper
 /// 依然能完成未来的 exe 替换（接口仅依赖 pending.json 文件，保持稳定）。
-fn replace_helper(extracted_dir: &Path, base_path: &Path) {
+fn replace_helper(extracted_dir: &Path, base_path: &Path, log: &mut HelperLog) {
     let helper_name = if cfg!(target_os = "windows") {
         "campus-auth-helper.exe"
     } else {
@@ -300,7 +401,9 @@ fn replace_helper(extracted_dir: &Path, base_path: &Path) {
     }
     let target = base_path.join(helper_name);
     let old = base_path.join(format!("{helper_name}.old"));
-    let _ = std::fs::remove_file(&old);
+    if let Err(e) = std::fs::remove_file(&old) {
+        log.debug(&format!("清理残留的 {} 失败: {e}", old.display()));
+    }
     if target.exists() {
         if let Err(e) = std::fs::rename(&target, &old) {
             eprintln!("[helper] 旧 helper 改名失败，跳过 helper 自更新: {e}");
@@ -309,27 +412,41 @@ fn replace_helper(extracted_dir: &Path, base_path: &Path) {
     }
     if let Err(e) = std::fs::copy(&new_helper, &target) {
         eprintln!("[helper] helper 替换失败: {e}，恢复旧版本");
-        let _ = std::fs::rename(&old, &target);
+        if let Err(e) = std::fs::rename(&old, &target) {
+            log.debug(&format!(
+                "恢复旧 helper 失败（{} -> {}）: {e}",
+                old.display(),
+                target.display()
+            ));
+        }
         return;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+        if let Err(e) = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)) {
+            log.debug(&format!("设置新 helper 可执行权限失败: {e}"));
+        }
     }
     println!("[helper] helper 已更新");
-    let _ = std::fs::remove_file(&old);
+    if let Err(e) = std::fs::remove_file(&old) {
+        log.debug(&format!("清理 {} 失败: {e}", old.display()));
+    }
 }
 
 /// 清理 pending.json 标记与 staging 目录（staging 目录用 CLI --staging 传入的实际路径）
 ///
 /// G13：staging 取值可能来自被篡改的 pending.json，remove_dir_all 前复核其
 /// 确实位于 base_path 之内，避免 cleanup 变成任意目录删除。
-fn cleanup(base_path: &Path, staging_dir: &Path) {
+fn cleanup(base_path: &Path, staging_dir: &Path, log: &mut HelperLog) {
     let pending_path = base_path.join("update").join("pending.json");
-    let _ = std::fs::remove_file(&pending_path);
+    if let Err(e) = std::fs::remove_file(&pending_path) {
+        log.debug(&format!("清理 pending.json 失败: {e}"));
+    }
     if is_within_base(staging_dir, base_path) {
-        let _ = std::fs::remove_dir_all(staging_dir);
+        if let Err(e) = std::fs::remove_dir_all(staging_dir) {
+            log.debug(&format!("清理 staging 目录失败: {e}"));
+        }
     } else {
         eprintln!(
             "[helper] 拒绝清理 base_path 之外的 staging 目录: {}",

@@ -332,6 +332,9 @@ pub(crate) fn fire_due_tasks(
                 continue;
             }
             service.clone().spawn_tracked_run(task);
+        } else {
+            // 到期瞬间任务刚被删除（内存缓存已无）：仅 debug 留痕，下一轮调度表重载后消失
+            tracing::debug!(task_id = %ts.task_id, "到期任务已不存在于内存缓存，跳过触发");
         }
 
         ts.next_fire_at = ts
@@ -398,7 +401,7 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
 
         Err(e) => {
             let msg = format!("加载目标任务失败: {target_id} ({e})");
-            tracing::warn!("{}", msg);
+            tracing::warn!(task_id = %task_id, target_id = %target_id, error = %e, "加载目标任务失败");
             (false, msg)
         }
     };
@@ -555,7 +558,7 @@ pub(crate) async fn cron_loop(
                         // 仅切换 Profile，不影响定时任务表
                     }
                     None => {
-                        tracing::debug!("配置重载 channel 已关闭，停止监听配置变更");
+                        tracing::warn!("配置重载 channel 已关闭，停止监听配置变更");
                         reload_rx_opt = None;
                     }
                 }
@@ -589,7 +592,7 @@ pub(crate) async fn cron_loop(
                 let now = SystemTime::now();
                 let fired = fire_due_tasks(service.clone(), &mut task_schedules, now);
                 if fired > 0 {
-                    tracing::info!("调度周期: 触发 {} 个到期任务", fired);
+                    tracing::info!(count = fired, "调度周期：触发到期任务");
                 }
             }
         }

@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # {{VAR}} 占位符匹配：变量名仅允许字母/数字/下划线
 _VAR_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
@@ -41,6 +44,7 @@ def resolve(
     if "{{" not in template:
         return template
     if _depth > _MAX_DEPTH:
+        logger.debug("变量解析超过最大深度 %d，保留原样: %.100s", _MAX_DEPTH, template)
         return template
     visited = _visited or set()
 
@@ -48,10 +52,12 @@ def resolve(
         key = match.group(1)
         if key in visited:
             # 循环引用：保留原占位符，避免无限递归
+            logger.debug("变量循环引用，保留原占位符: %s", key)
             return match.group(0)
         val = variables.get(key)
         if val is None:
             # 未找到：保留原占位符
+            logger.debug("变量未命中，保留原占位符: %s", key)
             return match.group(0)
         # 值中若仍含 {{...}}，递归展开（如 username -> {{USERNAME}} -> admin）
         if isinstance(val, str) and "{{" in val:

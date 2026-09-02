@@ -100,6 +100,8 @@ pub async fn get_history(
 pub async fn clear_history(
     State(history): State<Arc<dyn HistoryStore>>,
 ) -> Result<Json<Value>, ApiError> {
+    // 破坏性操作（不可恢复地清空全部登录历史），warn 留痕
+    tracing::warn!("收到清空登录历史请求，执行清空");
     history.clear().await?;
     Ok(data(Value::String("ok".into())))
 }

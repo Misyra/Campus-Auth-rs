@@ -13,6 +13,7 @@ import {
   LIGHT_BG_COLORS,
 } from "../utils/constants";
 import type { Appearance, CustomColors } from "../utils/appearance-types";
+import { frontendLogger } from "../utils/logger";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 import { useAppearance } from "./useAppearance";
@@ -22,7 +23,8 @@ function loadStored<T>(key: string, fallback: T): T {
   if (!saved) return fallback;
   try {
     return { ...(fallback as object), ...JSON.parse(saved) } as T;
-  } catch {
+  } catch (error) {
+    frontendLogger.debug("appearance", "本地外观配置损坏，已重置", error);
     localStorage.removeItem(key);
     return fallback;
   }

@@ -11,7 +11,7 @@ use arc_swap::ArcSwapOption;
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::bridge::{IpcResponse, Outcome, StructuredResult};
 use crate::config::ConfigService;
@@ -239,6 +239,11 @@ impl LoginSession {
             message: Some("登录中...".into()),
             retry_count: 0,
         });
+        info!(
+            source = ?self.params.source,
+            max_retries = self.params.max_retries,
+            "登录会话开始"
+        );
 
         // A-2：依赖 trait 化且非 Option——编排器构造会话时必然注入
         let bridge = self.deps.bridge.clone();
@@ -334,7 +339,7 @@ impl LoginSession {
             let structured = match exec {
                 Ok(resp) => self.parse_response(resp),
                 Err(e) => {
-                    warn!("Bridge 执行失败: {e}");
+                    error!(attempt = attempts_used + 1, "Bridge 执行失败: {e}");
                     self.finish_with_failure(
                         session_start,
                         attempts_used,
@@ -375,7 +380,7 @@ impl LoginSession {
                         // 任务声明 success_condition → 信任 Worker 的变量真值判定，跳过网络检测兜底
                         // （对齐原项目 v4.2.3 login_attempt 的 has_explicit_condition 分支）
                         if self.has_explicit_success_condition() {
-                            info!("任务声明 success_condition，跳过登录后网络检测");
+                            debug!("任务声明 success_condition，跳过登录后网络检测");
                             self.emit(
                                 self.make_result(true, msg, session_start, attempts_used),
                                 HistoryResult::Success,
@@ -399,8 +404,8 @@ impl LoginSession {
                         // 理由：网络探测可能因瞬时波动误判，重试一次登录比直接判死更稳妥。
                         // 策略与 Worker 返回 NetworkError 时一致（classify → Retry）。
                         warn!(
-                            "Worker 返回 Success 但网络验证未通过，转入重试（attempt {}）",
-                            attempts_used + 1
+                            attempt = attempts_used + 1,
+                            "Worker 返回 Success 但网络验证未通过，转入重试"
                         );
                         // 构造一个 NetworkError 的 structured 以复用下方 Retry 分支
                         let retry_structured = StructuredResult {
@@ -578,8 +583,11 @@ impl LoginSession {
                     info!("登录后网络验证通过：Online");
                 } else {
                     warn!(
-                        "登录后网络验证未通过：status={:?}, tcp={:?}, http={:?}, url={:?}",
-                        report.status, report.tcp_outcome, report.http_outcome, report.url_outcome
+                        status = ?report.status,
+                        tcp = ?report.tcp_outcome,
+                        http = ?report.http_outcome,
+                        url = ?report.url_outcome,
+                        "登录后网络验证未通过"
                     );
                 }
                 ok
@@ -681,16 +689,15 @@ impl LoginSession {
                     .execute_with_timeout("close_browser", json!({}), Duration::from_secs(8))
                     .await
                 {
-                    debug!("登录终态关闭浏览器失败（忽略）: {e}");
+                    warn!("登录终态关闭浏览器失败（忽略）: {e}");
                 }
             }
         }
         info!(
             source = ?result.source,
             success = result.success,
-            "登录会话结束: {}{}",
-            result.message,
-            if result.success { "（成功）" } else { "（失败）" }
+            "登录会话结束: {}",
+            result.message
         );
     }
 

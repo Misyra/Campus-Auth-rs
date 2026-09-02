@@ -8,6 +8,7 @@ import type { Ref } from "vue";
 import type { TaskItem } from "../api/types";
 import { tasksApi } from "../api";
 import { TIMING } from "./constants";
+import { frontendLogger } from "./logger";
 
 interface DragState {
   taskId: string;
@@ -106,8 +107,8 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
         all: order.tasks.value.map((t) => t.id),
         scripts: order.scripts.value.map((s) => s.id),
       });
-    } catch {
-      /* 静默处理 */
+    } catch (error) {
+      frontendLogger.warn("tasks", "保存任务排序失败", error);
     }
   }
 

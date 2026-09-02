@@ -113,8 +113,15 @@ pub async fn download_uv(
 
     // 获取版本号：优先使用锁定版本，否则查询 GitHub API
     let version = match crate::environment::UV_PINNED_VERSION {
-        Some(v) => v.to_string(),
-        None => fetch_latest_uv_version(mgr).await?,
+        Some(v) => {
+            tracing::debug!(version = %v, "uv 版本决策：使用锁定版本");
+            v.to_string()
+        }
+        None => {
+            let v = fetch_latest_uv_version(mgr).await?;
+            tracing::debug!(version = %v, "uv 版本决策：未锁定，使用 latest 最新版");
+            v
+        }
     };
 
     let mut last_err_msg = String::new();
@@ -607,21 +614,24 @@ fn github_api_urls() -> Vec<String> {
 }
 
 /// 尝试从多个镜像下载文本，第一个成功即返回
+///
+/// 镜像逐个尝试属常规路径（部分镜像不可达是常态），逐镜像日志降为 debug，
+/// 仅最终成功（调用方 `uv 下载安装成功`）与整体失败保留可见级别。
 async fn download_text_with_mirrors(
     mgr: &EnvironmentManager,
     urls: &[String],
 ) -> Result<String, EnvironmentError> {
     let mut last_err = String::new();
-    tracing::info!("尝试 {} 个镜像下载", urls.len());
+    tracing::debug!("尝试 {} 个镜像下载", urls.len());
     for (i, url) in urls.iter().enumerate() {
-        tracing::info!("镜像 {}/{}: {}", i + 1, urls.len(), url);
+        tracing::debug!("镜像 {}/{}: {}", i + 1, urls.len(), url);
         match download_text(mgr, url).await {
             Ok(text) => {
-                tracing::info!("镜像 {} 下载成功", url);
+                tracing::debug!("镜像 {} 下载成功", url);
                 return Ok(text);
             }
             Err(e) => {
-                tracing::warn!("镜像 {} 失败: {}", url, e);
+                tracing::debug!("镜像 {} 失败: {}", url, e);
                 last_err = e.to_string();
             }
         }

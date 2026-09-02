@@ -109,7 +109,7 @@ pub fn try_assign_job(child: &tokio::process::Child) -> Option<JobHandle> {
     };
     match job.assign(child) {
         Ok(()) => {
-            tracing::debug!("Worker 已加入 KILL_ON_JOB_CLOSE Job Object（内核级进程树回收）");
+            tracing::info!("Worker 已加入 KILL_ON_JOB_CLOSE Job Object（内核级进程树回收）");
             Some(job)
         }
         Err(e) => {

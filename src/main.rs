@@ -58,6 +58,8 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     if let Err(e) = runtime.block_on(campus_auth::launcher::run(cli, base_path)) {
+        // 双写系有意：subscriber 初始化失败（或尚未注册）时 error! 无处输出，
+        // eprintln 是此时唯一可见通道
         tracing::error!("启动失败: {e}");
         // 实例锁等早期错误发生在日志系统初始化之前（tracing 无 subscriber，
         // error! 会丢失），必须同步落 stderr 才能让用户看见失败原因

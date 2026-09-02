@@ -88,11 +88,22 @@ pub(crate) fn read_pending(base_path: &Path) -> Result<PendingUpdate, UpdaterErr
 }
 
 /// 替换成功后清理 pending 标记与 staging 目录（best-effort）
+///
+/// 清理失败会留下待应用标记/暂存残留（下次启动可能误触发再次应用），需以 warn 暴露；
+/// NotFound 属正常路径（可能已被此前清理），不告警。
 pub(crate) async fn cleanup_after_apply(base_path: &Path) {
     let path = pending_path(base_path);
-    let _ = tokio::fs::remove_file(&path).await;
+    if let Err(e) = tokio::fs::remove_file(&path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("清理 pending 标记失败: {e}");
+        }
+    }
     let staging = base_path.join(STAGING_DIR_NAME);
-    let _ = tokio::fs::remove_dir_all(&staging).await;
+    if let Err(e) = tokio::fs::remove_dir_all(&staging).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("清理 staging 目录失败: {e}");
+        }
+    }
 }
 
 #[cfg(test)]

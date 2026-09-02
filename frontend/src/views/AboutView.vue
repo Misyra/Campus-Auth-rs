@@ -4,6 +4,7 @@ import { ref } from "vue";
 import { systemApi, autostartApi, uninstallApi } from "@/api";
 import type { UninstallDetectItem, UninstallStepResult, UpdateInfo } from "@/api/types";
 import { useConfirm } from "@/composables/useConfirm";
+import { frontendLogger } from "@/utils/logger";
 
 const { confirm } = useConfirm();
 
@@ -27,7 +28,9 @@ async function loadInfo() {
     pythonStatus.value = env?.python_ready ? "已就绪" : "未就绪";
     platform.value = auto.platform;
     autostartEnabled.value = auto.enabled;
-  } catch { /* 静默 */ }
+  } catch (error) {
+    frontendLogger.warn("about", "系统信息加载失败", error);
+  }
 }
 void loadInfo();
 

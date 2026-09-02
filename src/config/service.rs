@@ -237,7 +237,9 @@ impl ConfigService {
         std::fs::create_dir_all(&config_dir)?;
         std::fs::create_dir_all(&profiles_dir)?;
         if let Some(p) = key_path.parent() {
-            let _ = std::fs::create_dir_all(p);
+            if let Err(e) = std::fs::create_dir_all(p) {
+                tracing::debug!(path = %p.display(), error = %e, "创建密钥目录失败");
+            }
         }
 
         // 清理上次崩溃残留的临时文件：原子写入（utils::io::atomic_write_bytes）
@@ -249,7 +251,13 @@ impl ConfigService {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.starts_with(crate::config::TMP_PREFIX) {
-                        let _ = std::fs::remove_file(entry.path());
+                        if let Err(e) = std::fs::remove_file(entry.path()) {
+                            tracing::debug!(
+                                path = %entry.path().display(),
+                                error = %e,
+                                "清理崩溃残留的临时配置文件失败"
+                            );
+                        }
                     }
                 }
             }
@@ -278,12 +286,28 @@ impl ConfigService {
         } else {
             settings.active_profile_id.clone()
         };
-        let active_profile =
-            match Self::read_profile_file(&profiles_dir.join(format!("{active_id}.json"))) {
-                Ok(p) => p,
-                Err(_) => Self::read_profile_file(&default_path)
-                    .unwrap_or_else(|_| ProfileData::default()),
-            };
+        let active_profile_path = profiles_dir.join(format!("{active_id}.json"));
+        let active_profile = match Self::read_profile_file(&active_profile_path) {
+            Ok(p) => p,
+            Err(active_error) => {
+                // 与 reload 路径（reload_inner）的告警口径一致：活跃 Profile 读取
+                // 失败静默回退会让用户困惑凭据为何"失效"，必须留痕
+                tracing::warn!(
+                    profile_id = %active_id,
+                    path = %active_profile_path.display(),
+                    error = %active_error,
+                    "启动时活跃 Profile 无法读取，回退到 default"
+                );
+                Self::read_profile_file(&default_path).unwrap_or_else(|default_error| {
+                    tracing::error!(
+                        path = %default_path.display(),
+                        error = %default_error,
+                        "启动时 default Profile 也无法读取，使用内存默认值"
+                    );
+                    ProfileData::default()
+                })
+            }
+        };
 
         let runtime = build_runtime_config(&settings, &active_profile, &crypto)?;
 
@@ -549,7 +573,14 @@ impl ConfigService {
         let mut result = Vec::new();
         let entries = match std::fs::read_dir(&self.profiles_dir) {
             Ok(e) => e,
-            Err(_) => return result,
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.profiles_dir.display(),
+                    error = %e,
+                    "读取 profiles 目录失败，返回空 Profile 列表"
+                );
+                return result;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -793,13 +824,28 @@ impl ConfigService {
         let raw = std::fs::read_to_string(settings_path)?;
         let mut value: Value = match serde_json::from_str(&raw) {
             Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
                 let backup = config_dir.join(format!(
                     "{}{}.json",
                     crate::config::CORRUPT_PREFIX,
                     timestamp()
                 ));
-                let _ = std::fs::rename(settings_path, &backup);
+                // 备份失败意味着原配置无法找回（后续以默认值继续），属潜在数据丢失，必须留痕
+                match std::fs::rename(settings_path, &backup) {
+                    Ok(()) => tracing::error!(
+                        path = %settings_path.display(),
+                        backup = %backup.display(),
+                        error = %e,
+                        "settings.json 解析失败，已隔离至备份文件并使用默认配置继续"
+                    ),
+                    Err(rename_err) => tracing::error!(
+                        path = %settings_path.display(),
+                        error = %e,
+                        "settings.json 解析失败，且备份到 {} 失败（{}），原文件保留在原地，使用默认配置继续",
+                        backup.display(),
+                        rename_err
+                    ),
+                }
                 return Ok(SettingsData::default());
             }
         };

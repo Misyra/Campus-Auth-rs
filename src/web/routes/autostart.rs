@@ -53,9 +53,16 @@ pub async fn enable_autostart(
 ) -> Result<Json<Value>, ApiError> {
     let mut settings = config.load_settings_async().await;
     settings.global.app.autostart_enabled = true;
-    config.save_settings(&settings).await?;
+    if let Err(e) = config.save_settings(&settings).await {
+        tracing::warn!("启用自启动：保存配置失败: {e}");
+        return Err(e.into());
+    }
     // 真正注册系统自启动（schtasks 计划任务）
-    register_self_start(true).await?;
+    if let Err(e) = register_self_start(true).await {
+        tracing::warn!("启用自启动：系统注册失败: {e}");
+        return Err(e);
+    }
+    tracing::info!("已启用开机自启动");
     Ok(data(serde_json::json!({ "message": "已启用开机自启动" })))
 }
 
@@ -65,9 +72,16 @@ pub async fn disable_autostart(
 ) -> Result<Json<Value>, ApiError> {
     let mut settings = config.load_settings_async().await;
     settings.global.app.autostart_enabled = false;
-    config.save_settings(&settings).await?;
+    if let Err(e) = config.save_settings(&settings).await {
+        tracing::warn!("禁用自启动：保存配置失败: {e}");
+        return Err(e.into());
+    }
     // 真正取消系统自启动注册
-    register_self_start(false).await?;
+    if let Err(e) = register_self_start(false).await {
+        tracing::warn!("禁用自启动：取消系统注册失败: {e}");
+        return Err(e);
+    }
+    tracing::info!("已禁用开机自启动");
     Ok(data(serde_json::json!({ "message": "已禁用开机自启动" })))
 }
 

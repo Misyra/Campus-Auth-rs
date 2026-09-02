@@ -67,8 +67,21 @@ impl TaskManager {
         let tasks_dir = base_path.join("tasks");
         let browser_dir = tasks_dir.join("browser");
         let scripts_dir = tasks_dir.join("scripts");
-        let _ = std::fs::create_dir_all(&browser_dir);
-        let _ = std::fs::create_dir_all(&scripts_dir);
+        // 构造期目录创建失败会导致后续所有任务读写连锁失败，必须告警
+        if let Err(e) = std::fs::create_dir_all(&browser_dir) {
+            tracing::warn!(
+                path = %browser_dir.display(),
+                error = %e,
+                "创建浏览器任务目录失败，后续任务读写可能连锁失败"
+            );
+        }
+        if let Err(e) = std::fs::create_dir_all(&scripts_dir) {
+            tracing::warn!(
+                path = %scripts_dir.display(),
+                error = %e,
+                "创建脚本任务目录失败，后续任务读写可能连锁失败"
+            );
+        }
 
         let mgr = Self {
             tasks_dir,
@@ -82,7 +95,13 @@ impl TaskManager {
         mgr.migrate_active_file();
         // 不存在则创建默认 .order.json
         if !mgr.order_path().exists() {
-            let _ = mgr.write_order(&OrderData::default());
+            if let Err(e) = mgr.write_order(&OrderData::default()) {
+                tracing::warn!(
+                    path = %mgr.order_path().display(),
+                    error = %e,
+                    "初始化默认 .order.json 失败，后续任务排序/活跃任务记录可能异常"
+                );
+            }
         }
         Arc::new(mgr)
     }
@@ -227,16 +246,21 @@ impl TaskManager {
                     true
                 }
                 Err(e) => {
-                    tracing::warn!("任务 {task_id} 序列化失败，未嵌入 task_config: {e}");
+                    tracing::warn!(task_id = task_id, reason = %e, "任务序列化失败，未嵌入 task_config");
                     false
                 }
             },
             Ok(_) => {
-                tracing::warn!("任务 {task_id} 不是浏览器任务，未嵌入 task_config");
+                // 非浏览器任务属可预期分支，降为 debug
+                tracing::debug!(
+                    task_id = task_id,
+                    reason = "非浏览器任务",
+                    "未嵌入 task_config"
+                );
                 false
             }
             Err(e) => {
-                tracing::warn!("加载任务 {task_id} 失败，未嵌入 task_config: {e}");
+                tracing::warn!(task_id = task_id, reason = %e, "加载任务失败，未嵌入 task_config");
                 false
             }
         }
@@ -300,14 +324,18 @@ impl TaskManager {
                 .map_err(TaskError::IoError)?;
             found = true;
         }
-        // 清理关联 .meta.json / .py
+        // 清理关联 .meta.json / .py（best-effort，失败仅 debug）
         let meta = self.scripts_dir.join(format!("{task_id}.meta.json"));
         if meta.exists() {
-            let _ = tokio::fs::remove_file(&meta).await;
+            if let Err(e) = tokio::fs::remove_file(&meta).await {
+                tracing::debug!(path = %meta.display(), error = %e, "清理关联 .meta.json 失败");
+            }
         }
         let py = self.scripts_dir.join(format!("{task_id}.py"));
         if py.exists() {
-            let _ = tokio::fs::remove_file(&py).await;
+            if let Err(e) = tokio::fs::remove_file(&py).await {
+                tracing::debug!(path = %py.display(), error = %e, "清理关联 .py 文件失败");
+            }
         }
 
         if !found {
@@ -588,7 +616,19 @@ impl TaskManager {
     /// 按路径同步读取 `.order.json`（供 spawn_blocking 闭包内使用，无需 &self）
     fn read_order_at(path: &Path) -> OrderData {
         match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(o) => o,
+                Err(e) => {
+                    // 损坏即静默重置会丢失用户自定义排序与活跃任务，必须留痕
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        ".order.json 损坏，已重置为默认排序与活跃任务"
+                    );
+                    OrderData::default()
+                }
+            },
+            // 文件不存在属正常路径（首次使用），静默返回默认
             Err(_) => OrderData::default(),
         }
     }
@@ -627,9 +667,21 @@ impl TaskManager {
                     .unwrap_or_else(|| "default".to_string());
                 let mut order = self.read_order();
                 order.active = id;
-                let _ = self.write_order(&order);
+                if let Err(e) = self.write_order(&order) {
+                    tracing::debug!(
+                        path = %self.order_path().display(),
+                        error = %e,
+                        "迁移 active.txt 到 .order.json 写入失败"
+                    );
+                }
             }
-            let _ = std::fs::remove_file(&active_txt);
+            if let Err(e) = std::fs::remove_file(&active_txt) {
+                tracing::debug!(
+                    path = %active_txt.display(),
+                    error = %e,
+                    "清理旧版 active.txt 失败"
+                );
+            }
         }
     }
 
@@ -639,8 +691,29 @@ impl TaskManager {
     /// 读盘解析一次；合并后一次读取同时取 type/name/description。
     /// `ttype` 为 None 时从 JSON `type` 字段推导（缺省 script）。
     fn read_summary_typed(path: &Path, ttype: Option<&str>) -> Option<TaskSummary> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let v: Value = serde_json::from_str(&content).ok()?;
+        // 读取/解析失败的任务从列表静默消失会让用户误以为任务丢失，必须留痕
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "读取任务文件失败，已从任务列表跳过"
+                );
+                return None;
+            }
+        };
+        let v: Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "任务文件解析失败，已从任务列表跳过"
+                );
+                return None;
+            }
+        };
         let ttype = ttype
             .map(|t| t.to_string())
             .or_else(|| {
@@ -654,8 +727,29 @@ impl TaskManager {
 
     /// 读取任务摘要（从 JSON 的 name/description 字段）
     fn read_summary(path: &Path, ttype: &str) -> Option<TaskSummary> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let v: Value = serde_json::from_str(&content).ok()?;
+        // 读取/解析失败的任务从列表静默消失会让用户误以为任务丢失，必须留痕
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "读取任务文件失败，已从任务列表跳过"
+                );
+                return None;
+            }
+        };
+        let v: Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "任务文件解析失败，已从任务列表跳过"
+                );
+                return None;
+            }
+        };
         Some(Self::summary_from_value(&v, path, ttype))
     }
 

@@ -10,10 +10,27 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+/// 取字符串末尾至多 `max_chars` 个字符；超出时按字符边界截断并注明省略长度
+///（Playwright 安装输出可达数 MB，全量进错误消息会撑爆日志与状态快照）
+fn tail_chars(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.to_string();
+    }
+    let skipped = total - max_chars;
+    let tail: String = s.chars().skip(skipped).collect();
+    format!("…（前 {skipped} 字符已截断）{tail}")
+}
+
 /// 实际启动 Python 并检查退出状态，避免仅凭 `python.exe` 存在误判损坏的 uv venv。
 pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
+    python_executable_status(python_exe).await.is_ok()
+}
+
+/// 同 [`python_executable_works`]，但携带失败原因（缺失 / 启动失败 / 超时），供日志定位。
+async fn python_executable_status(python_exe: &Path) -> Result<(), String> {
     if !python_exe.is_file() {
-        return false;
+        return Err("解释器文件不存在".to_string());
     }
     let mut cmd = tokio::process::Command::new(python_exe);
     cmd.kill_on_drop(true);
@@ -23,10 +40,12 @@ pub(crate) async fn python_executable_works(python_exe: &Path) -> bool {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    matches!(
-        tokio::time::timeout(Duration::from_secs(5), cmd.output()).await,
-        Ok(Ok(output)) if output.status.success()
-    )
+    match tokio::time::timeout(Duration::from_secs(5), cmd.output()).await {
+        Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) => Err(format!("退出码 {:?}", output.status.code())),
+        Ok(Err(e)) => Err(format!("启动失败: {e}")),
+        Err(_) => Err("执行超时（5s）".to_string()),
+    }
 }
 
 /// 确保 Python 虚拟环境就绪
@@ -44,16 +63,19 @@ pub async fn ensure_venv(
         .join(crate::environment::PYTHON_EXE_RELATIVE);
 
     // 文件存在不代表 uv 管理的基础解释器仍存在，必须实际启动一次。
-    if python_executable_works(&python_exe).await {
+    if let Err(reason) = python_executable_status(&python_exe).await {
+        // 补充探测失败的具体原因（缺失 / 启动失败 / 超时），便于定位 venv 损坏
+        tracing::debug!(reason = %reason, "Python 解释器探测未通过，虚拟环境需要修复");
+    } else {
         return Ok(python_exe);
     }
 
     if python_exe.exists() {
-        tracing::warn!("虚拟环境解释器无法启动，执行 uv sync 修复");
+        tracing::warn!("虚拟环境不可用（缺失或损坏），执行 uv sync 修复");
+    } else {
+        // 不存在则执行 uv sync 创建虚拟环境并安装依赖
+        tracing::info!("虚拟环境不存在，执行 uv sync 创建...");
     }
-
-    // 不存在则执行 uv sync 创建虚拟环境并安装依赖
-    tracing::info!("虚拟环境不存在，执行 uv sync 创建...");
     crate::environment::uv::run_uv_sync(mgr, cancel).await?;
 
     // 验证创建成功
@@ -227,11 +249,13 @@ pub async fn install_playwright_browser(
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                // stdout/stderr 各只保留末尾 500 字符（安装失败的报错通常在结尾），
+                // 避免超长输出撑爆错误消息
                 last_err_msg = format!(
-                    "exit code={:?}, stderr={}, stdout={}",
+                    "exit code={:?}, stderr={}, stdout={}（stdout/stderr 各保留末尾 500 字符）",
                     output.status.code(),
-                    stderr,
-                    stdout
+                    tail_chars(&stderr, 500),
+                    tail_chars(&stdout, 500)
                 );
                 tracing::warn!(
                     "Playwright 安装失败 (尝试 {}/{}): {}",

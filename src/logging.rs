@@ -150,7 +150,7 @@ impl<S> tracing_subscriber::layer::Filter<S> for SharedTargets {
     }
 }
 
-/// 解析日志级别字符串（无效值回退 INFO）
+/// 解析日志级别字符串（无效值回退 INFO 并告警）
 fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
     use tracing_subscriber::filter::LevelFilter;
     match level.to_ascii_uppercase().as_str() {
@@ -158,7 +158,11 @@ fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
         "DEBUG" => LevelFilter::DEBUG,
         "WARN" | "WARNING" => LevelFilter::WARN,
         "ERROR" => LevelFilter::ERROR,
-        _ => LevelFilter::INFO,
+        // 无效级别静默回退会让"配置了却不生效"无从排查，至少 warn 一次
+        _ => {
+            tracing::warn!(raw = %level, "无效的日志级别配置，回退 INFO");
+            LevelFilter::INFO
+        }
     }
 }
 
@@ -167,7 +171,7 @@ fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
 /// 此前启动初始化硬编码 INFO，配置的级别只有重启且恰好走热更新路径才可能生效。
 fn read_initial_log_level(base_path: &Path) -> tracing_subscriber::filter::LevelFilter {
     let path = base_path.join("config").join("settings.json");
-    std::fs::read_to_string(&path)
+    let level = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| {
@@ -176,8 +180,12 @@ fn read_initial_log_level(base_path: &Path) -> tracing_subscriber::filter::Level
                 .get("level")?
                 .as_str()
                 .map(parse_level)
-        })
-        .unwrap_or(tracing_subscriber::filter::LevelFilter::INFO)
+        });
+    if level.is_none() {
+        // 文件缺失/损坏/无该字段属常见情形（首次启动）：debug 留痕即可，不告警
+        tracing::debug!("未能从 settings.json 读取日志级别，回退 INFO");
+    }
+    level.unwrap_or(tracing_subscriber::filter::LevelFilter::INFO)
 }
 
 /// 热更新全局日志级别（由 `set_log_level` 调用）
@@ -186,7 +194,7 @@ fn read_initial_log_level(base_path: &Path) -> tracing_subscriber::filter::Level
 pub fn reload_log_level(level: &str) {
     let lf = parse_level(level);
     let Some(shared) = LOG_TARGETS.get() else {
-        tracing::warn!("日志 filter 未初始化，忽略级别切换");
+        tracing::warn!(level = %level, "日志 filter 未初始化，忽略级别切换");
         return;
     };
     shared.replace(
@@ -195,7 +203,7 @@ pub fn reload_log_level(level: &str) {
             .with_target("campus_auth", lf)
             .with_target("frontend", lf),
     );
-    tracing::info!("日志级别已热更新为 {}", lf);
+    tracing::info!(level = %lf, "日志级别已热更新");
 }
 
 // ============================================================
@@ -205,7 +213,7 @@ pub fn reload_log_level(level: &str) {
 /// 从 settings.json 读取日志保留天数（`global.logging.retention_days`），失败回退默认 7
 fn read_retention_days(base_path: &Path) -> u32 {
     let path = base_path.join("config").join("settings.json");
-    std::fs::read_to_string(&path)
+    let days = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| {
@@ -214,8 +222,11 @@ fn read_retention_days(base_path: &Path) -> u32 {
                 .get("retention_days")?
                 .as_u64()
         })
-        .map(|d| d as u32)
-        .unwrap_or(7)
+        .map(|d| d as u32);
+    if days.is_none() {
+        tracing::debug!("未能从 settings.json 读取日志保留天数，回退默认 7 天");
+    }
+    days.unwrap_or(7)
 }
 
 /// 删除 logs/ 目录下超过保留天数的旧日志文件
@@ -224,6 +235,7 @@ fn read_retention_days(base_path: &Path) -> u32 {
 /// （`tracing_appender::rolling::daily` 生成 `app.log.YYYY-MM-DD` 轮转文件）。
 fn cleanup_old_logs(logs_dir: &Path, retention_days: u32) {
     let Ok(entries) = std::fs::read_dir(logs_dir) else {
+        tracing::warn!("读取日志目录失败，跳过过期日志清理");
         return;
     };
     let cutoff = std::time::SystemTime::now()
@@ -241,8 +253,11 @@ fn cleanup_old_logs(logs_dir: &Path, retention_days: u32) {
         }
         if let Ok(meta) = entry.metadata() {
             if let Ok(modified) = meta.modified() {
-                if modified < cutoff && std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
+                if modified < cutoff {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => removed += 1,
+                        Err(e) => tracing::debug!("删除过期日志文件失败 {}: {e}", path.display()),
+                    }
                 }
             }
         }
@@ -348,7 +363,9 @@ pub fn init_logging(
     log_tx: tokio::sync::broadcast::Sender<LogEntry>,
 ) -> WorkerGuard {
     let logs_dir = base_path.join("logs");
-    let _ = std::fs::create_dir_all(&logs_dir);
+    if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+        tracing::warn!("创建日志目录失败: {e}");
+    }
 
     // 会话起始时间：与 LocalTimer 同格式，供 /api/logs 过滤历史运行日志
     let _ = SESSION_STARTED_AT.set(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());

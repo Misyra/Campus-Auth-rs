@@ -70,6 +70,7 @@ pub async fn start_debug(
         .entry("auth_url".to_string())
         .or_insert_with(|| profile.auth_url.clone().into());
     let resp = bridge.execute("debug_start", params).await?;
+    tracing::info!("调试会话已启动");
     // 只取 IPC 载荷（result.data）：序列化整个 IpcResponse 会带上 id/result 包装，
     // 前端 request() 只解一层 data，syncSession 拿到包装结构后 steps/running 全丢
     Ok(data(resp.result.data))
@@ -95,6 +96,7 @@ pub async fn step_debug(
 /// POST /api/debug/stop — 停止调试会话
 pub async fn stop_debug(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Value>, ApiError> {
     let resp = bridge.execute("debug_stop", Value::Null).await?;
+    tracing::info!("调试会话已停止");
     Ok(data(resp.result.data))
 }
 

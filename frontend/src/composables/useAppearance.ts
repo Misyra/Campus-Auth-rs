@@ -10,6 +10,7 @@ import { DEFAULT_APPEARANCE } from "../utils/constants";
 import type { Appearance } from "../utils/appearance-types";
 import { hexToRgb, adjustColor, pickOnColor } from "../utils/formatters";
 import { backgroundApi } from "../api";
+import { frontendLogger } from "../utils/logger";
 import { useToast } from "./useToast";
 
 function loadStored<T>(key: string, fallback: T): T {
@@ -17,7 +18,8 @@ function loadStored<T>(key: string, fallback: T): T {
   if (!saved) return fallback;
   try {
     return { ...(fallback as object), ...JSON.parse(saved) } as T;
-  } catch {
+  } catch (error) {
+    frontendLogger.debug("appearance", "本地外观配置损坏，已重置", error);
     localStorage.removeItem(key);
     return fallback;
   }

@@ -203,7 +203,7 @@ async fn probe_http_one(
                 // 物理连通成立。判 Fail 会把"在线"误判为 Offline，
                 // 状态永不恢复且永不触发自动登录
                 other => {
-                    tracing::debug!(status = other, "HTTP 探测返回非预期状态码，按连通处理");
+                    tracing::debug!(url = %url, status = other, "HTTP 探测返回非预期状态码，按连通处理");
                     ProbeOutcome::Pass
                 }
             };
@@ -283,7 +283,8 @@ async fn probe_url_one(
                         }
                         Ok(None) => break,
                         Err(e) => {
-                            tracing::warn!("读取 URL 探测响应体失败: {e}");
+                            // 读 body 中断属瞬态网络问题，仅 debug 避免断网期间刷屏
+                            tracing::debug!(url = %url, "读取 URL 探测响应体失败: {e}");
                             break;
                         }
                     }

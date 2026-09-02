@@ -46,6 +46,13 @@ pub fn run_migrations(config_dir: &Path, value: &mut Value) -> Result<u32, Confi
         }
     }
 
+    // 迁移成功留痕：配置结构发生了不可逆的结构性变更，用户应能从日志确认
+    tracing::info!(
+        from = version,
+        to = current,
+        "配置已迁移 v{version} → v{current}"
+    );
+
     Ok(current)
 }
 

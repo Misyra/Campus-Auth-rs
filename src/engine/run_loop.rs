@@ -315,7 +315,8 @@ async fn handle_apply_profile(
     // 此处跳过重复落盘/reload，只执行派生状态同步；自动切换等其它入口
     // 仍由此处完成切换本体
     let current = deps.config_service.runtime().load().profile.id.clone();
-    if current != profile_id {
+    let switched = current != profile_id;
+    if switched {
         // 切换活跃 Profile（内部重建 RuntimeConfig 并原子替换）
         if let Err(e) = deps.profile_service.switch_profile(profile_id).await {
             tracing::warn!("切换 Profile 失败: {} ({})", profile_id, e);
@@ -325,7 +326,12 @@ async fn handle_apply_profile(
     deps.status_manager.merge(PartialSnapshot::ActiveProfile {
         id: profile_id.to_string(),
     });
-    tracing::info!("Profile 已切换: {} (来源: {:?})", profile_id, _source);
+    // 实际发生切换才记 info；幂等重复 ApplyProfile（Web 路由已切换）降为 debug
+    if switched {
+        tracing::info!("Profile 已切换: {} (来源: {:?})", profile_id, _source);
+    } else {
+        tracing::debug!("Profile 无变化（已确认）: {}", profile_id);
+    }
     // 新 Profile 可能有不同的 auth_url / 凭证，重新判断网络状态。
     // 与 Start/Resume 相同的暂停门控（F4）：暂停窗口内只切换不探测
     if inner.monitoring && !immediate_check_blocked_by_pause(inner, deps) {
@@ -381,7 +387,10 @@ fn handle_test_network(
                     duration_ms,
                 })
             }
-            Err(e) => Err(EngineError::ProbeError(e.to_string())),
+            Err(e) => {
+                tracing::warn!("网络测试执行失败: {e}");
+                Err(EngineError::ProbeError(e.to_string()))
+            }
         };
         // 主循环退出后 reply 接收端可能已 drop：发送失败即丢弃
         let _ = reply.send(result);
@@ -431,18 +440,20 @@ fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &Engi
         inner.consecutive_failures = 0;
         inner.cooling_down_until = None;
         inner.notifier.on_login_success(&profile_id);
-        tracing::info!(source = ?result.source, "登录成功，重置连续失败计数");
+        tracing::debug!(source = ?result.source, "登录成功，重置连续失败计数");
     } else if result.source == LoginSource::Auto {
         inner.consecutive_failures += 1;
-        // 登录失败通知去重：同一 Profile 首次失败才提醒，避免每次探测失败都刷屏
-        if inner.notifier.should_notify_login_failure(&profile_id) {
-            tracing::warn!(
-                target: "notification",
-                "登录失败（{} 已通知，后续同 Profile 失败静默）: profile={profile_id}",
-                profile_id
-            );
-        }
-        tracing::warn!("登录失败，连续失败次数: {}", inner.consecutive_failures);
+        // 登录失败日志合并为一条结构化 warn（target=notification 保持前端通知源）：
+        // 首败通知与否经 first_failure 字段表达（notifier 仍负责同 Profile 去重）
+        let first_failure = inner.notifier.should_notify_login_failure(&profile_id);
+        tracing::warn!(
+            target: "notification",
+            profile = %profile_id,
+            consecutive_failures = inner.consecutive_failures,
+            reason = %result.message,
+            first_failure,
+            "登录失败"
+        );
         if inner.consecutive_failures >= COOLING_DOWN_THRESHOLD
             && inner.cooling_down_until.is_none()
         {
@@ -608,12 +619,12 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             // 监测已停止：探测发起后用户停止了监测，迟到结果不得触发登录。
             // （下方「补发排队的探测」同样受此门控）
             if !inner.monitoring {
-                tracing::info!("监测已停止，跳过本轮自动登录（迟到探测结果）");
+                tracing::debug!("监测已停止，跳过本轮自动登录（迟到探测结果）");
                 return;
             }
             // 暂停生效中：暂停语义覆盖在途探测的迟到结果
             if paused {
-                tracing::info!("监测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
+                tracing::debug!("监测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
                 return;
             }
             // 探测发起后配置已变更（如切换 Profile）：旧结果的门户判断不作数。
@@ -623,9 +634,9 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             }
             // 冷却期内跳过登录
             else if cooling_down {
-                tracing::info!(
-                    "冷却期中（连续失败 {} 次），跳过本轮登录",
-                    inner.consecutive_failures
+                tracing::debug!(
+                    consecutive_failures = inner.consecutive_failures,
+                    "冷却期中，跳过本轮登录"
                 );
                 return;
             }
@@ -647,7 +658,7 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
                     let _ = tx.send(result).await;
                 });
             } else {
-                tracing::info!("认证地址不可达，跳过本轮登录");
+                tracing::debug!("认证地址不可达，跳过本轮登录");
             }
         }
         NetworkStatus::Online | NetworkStatus::Offline | NetworkStatus::Paused => {
@@ -668,14 +679,15 @@ async fn check_profile_switch(inner: &mut EngineInner, deps: &EngineDeps) {
     let gateways = match deps.network_detect.default_gateways().await {
         Ok(g) => g,
         Err(e) => {
-            tracing::debug!("网关探测失败: {}", e);
+            // 无 WiFi 网卡/受限环境下每轮都会失败，保持 debug 防止刷屏
+            tracing::debug!(error = %e, "网关探测失败");
             return;
         }
     };
     let ssid = match deps.network_detect.current_ssid().await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!("SSID 探测失败: {}", e);
+            tracing::debug!(error = %e, "SSID 探测失败");
             return;
         }
     };

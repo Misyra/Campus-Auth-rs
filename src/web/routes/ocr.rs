@@ -135,18 +135,20 @@ pub async fn ocr_install(
     let env = environment.clone();
     tokio::spawn(async move {
         // 先确保核心能力就绪，再同步 OCR optional extra
+        // 后台安装失败可通过再次点击重试恢复（非进程级故障），降为 warn 避免误告警
         if let Err(e) = env.ensure_capability().await {
-            tracing::error!("OCR 环境引导失败: {e}");
+            tracing::warn!("OCR 环境引导失败: {e}");
             return;
         }
         if let Err(e) = env.install_ocr_dep().await {
-            tracing::error!("OCR 依赖安装失败: {e}");
+            tracing::warn!("OCR 依赖安装失败: {e}");
             return;
         }
         // Worker 可能在安装 OCR 前已经启动；若不回收，首次识别仍会在线程池中
         // 首次导入 numpy/onnxruntime，Windows 下可能卡在 DLL loader lock。
         bridge.recycle_if_running().await;
     });
+    tracing::info!("OCR 依赖安装已在后台启动");
     Ok(data(serde_json::json!({
         "message": "OCR 环境安装已启动",
     })))

@@ -138,6 +138,7 @@ pub async fn spawn_worker(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = cmd.spawn().map_err(BridgeError::SpawnFailed)?;
+    tracing::info!(pid = ?child.id(), "Worker 子进程已启动");
 
     // Windows：spawn 后立即加入 KILL_ON_JOB_CLOSE 的 Job Object（内核级进程树
     // 回收，M3）。失败仅告警退回应用层清理（kill_on_drop + orphan.rs 兜底）。
@@ -188,25 +189,28 @@ pub async fn spawn_worker(
 /// stdin writer task：从 channel 读取 IpcMessage 序列化为 NDJSON 写入 Worker stdin
 async fn stdin_writer_task(mut rx: mpsc::Receiver<IpcMessage>, mut stdin: ChildStdin) {
     while let Some(msg) = rx.recv().await {
-        let value = match &msg {
+        // 序列化（to_value + to_string）任一失败统一记为一条 warn（内部错误，
+        // 不值得 error 级别），kind 字段区分 Request/Cancel 阶段
+        let kind = match &msg {
+            IpcMessage::Request(_) => "request",
+            IpcMessage::Cancel(_) => "cancel",
+        };
+        let serialized = match &msg {
             IpcMessage::Request(r) => serde_json::to_value(r),
             IpcMessage::Cancel(c) => serde_json::to_value(c),
-        };
-        let value = match value {
-            Ok(v) => v,
+        }
+        .and_then(|v| serde_json::to_string(&v));
+        let bytes = match serialized {
+            Ok(s) => {
+                let mut b = s.into_bytes();
+                b.push(IPC_DELIMITER);
+                b
+            }
             Err(e) => {
-                tracing::error!("IPC 消息序列化失败: {e}");
+                tracing::warn!(kind, error = %e, "IPC 消息序列化失败，跳过该消息");
                 continue;
             }
         };
-        let mut bytes = match serde_json::to_string(&value) {
-            Ok(s) => s.into_bytes(),
-            Err(e) => {
-                tracing::error!("IPC 消息序列化失败: {e}");
-                continue;
-            }
-        };
-        bytes.push(IPC_DELIMITER);
         if let Err(e) = stdin.write_all(&bytes).await {
             tracing::error!("IPC 写入 stdin 失败: {e}（Worker 可能已退出）");
             break;
@@ -251,7 +255,7 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
                     // 找到换行符
                     if !exceeded && line_buf.len() + pos > IPC_MAX_LINE_LEN {
                         exceeded = true;
-                        tracing::warn!("IPC 行超长，已丢弃: {} 字节", line_buf.len() + pos);
+                        tracing::warn!(len = line_buf.len() + pos, "IPC stdout 行超长，已丢弃");
                         // G18：保留有界前缀（至多补齐到上限）供请求 id 提取，
                         // 结算对应在途请求，避免其挂满 execute 超时
                         let keep = IPC_MAX_LINE_LEN.saturating_sub(line_buf.len()).min(pos);
@@ -268,7 +272,10 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
                     // 当前缓冲区中无换行符
                     if !exceeded && line_buf.len() + available.len() > IPC_MAX_LINE_LEN {
                         exceeded = true;
-                        tracing::warn!("IPC 行超长，已丢弃");
+                        tracing::warn!(
+                            len = line_buf.len() + available.len(),
+                            "IPC stdout 行超长，已丢弃"
+                        );
                         // G18：同上，保留有界前缀供请求 id 提取
                         let keep = IPC_MAX_LINE_LEN
                             .saturating_sub(line_buf.len())
@@ -327,6 +334,22 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
     }
 }
 
+/// 原始 IPC 行写入日志的最大预览长度：单行可达 1MiB 且可能携带凭据，
+/// 整行入日志存在泄露与刷屏风险，超长部分截断
+const IPC_LOG_PREVIEW_LEN: usize = 200;
+
+/// 截取原始 IPC 行的日志预览（按 UTF-8 字符边界安全截断）
+fn log_line_preview(line: &str) -> &str {
+    if line.len() <= IPC_LOG_PREVIEW_LEN {
+        return line;
+    }
+    let mut end = IPC_LOG_PREVIEW_LEN;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
 /// 解析单行 IPC JSON 并发送到 Supervisor
 async fn parse_and_send_line(trimmed: &str, ipc_tx: &mpsc::Sender<ParsedMessage>) {
     match serde_json::from_str::<serde_json::Value>(trimmed) {
@@ -350,7 +373,11 @@ async fn parse_and_send_line(trimmed: &str, ipc_tx: &mpsc::Sender<ParsedMessage>
                                 .await;
                         }
                         // id 非法（非 u64）：无法定位在途请求，仅记录
-                        None => tracing::warn!("IPC 响应解析失败且 id 非法: {e} | {trimmed}"),
+                        None => tracing::warn!(
+                            line_len = trimmed.len(),
+                            "IPC 响应解析失败且 id 非法: {e} | {}",
+                            log_line_preview(trimmed)
+                        ),
                     },
                 }
             } else if v.get("event").is_some() {
@@ -361,14 +388,22 @@ async fn parse_and_send_line(trimmed: &str, ipc_tx: &mpsc::Sender<ParsedMessage>
                     Err(e) => tracing::warn!("IPC 事件解析失败: {e}"),
                 }
             } else {
-                tracing::warn!("未知 IPC 消息格式: {trimmed}");
+                tracing::warn!(
+                    line_len = trimmed.len(),
+                    "未知 IPC 消息格式: {}",
+                    log_line_preview(trimmed)
+                );
             }
         }
         Err(e) => {
             // 非 JSON 行意味着 stdout 被第三方库的意外 print 污染：
             // 若该行本是响应会超时才被发现，累计计数供 Worker 退出时汇总告警（M6）
             INVALID_IPC_LINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::warn!("非 JSON IPC 行: {e} | {trimmed}");
+            tracing::warn!(
+                line_len = trimmed.len(),
+                "非 JSON IPC 行: {e} | {}",
+                log_line_preview(trimmed)
+            );
         }
     }
 }
@@ -471,7 +506,10 @@ async fn stderr_forwarder_task(stderr: ChildStderr) {
         loop {
             let available = match reader.fill_buf().await {
                 Ok(b) => b,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::warn!("读取 Worker stderr 失败，stderr 转发终止: {e}");
+                    return;
+                }
             };
             if available.is_empty() {
                 break;
@@ -480,7 +518,7 @@ async fn stderr_forwarder_task(stderr: ChildStderr) {
                 Some(pos) => {
                     if !exceeded && line_buf.len() + pos > IPC_MAX_LINE_LEN {
                         exceeded = true;
-                        tracing::warn!(target: "python_worker", "stderr 行超长，已丢弃");
+                        tracing::warn!(target: "python_worker", len = line_buf.len() + pos, "IPC stderr 行超长，已丢弃");
                     }
                     if !exceeded {
                         line_buf.extend_from_slice(&available[..pos]);
@@ -492,7 +530,7 @@ async fn stderr_forwarder_task(stderr: ChildStderr) {
                 None => {
                     if !exceeded && line_buf.len() + available.len() > IPC_MAX_LINE_LEN {
                         exceeded = true;
-                        tracing::warn!(target: "python_worker", "stderr 行超长，已丢弃");
+                        tracing::warn!(target: "python_worker", len = line_buf.len() + available.len(), "IPC stderr 行超长，已丢弃");
                     }
                     if !exceeded {
                         line_buf.extend_from_slice(available);

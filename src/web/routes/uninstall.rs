@@ -159,10 +159,17 @@ pub async fn detect_uninstall(
 /// 每一步尽力而为、互不阻断，逐项返回结果；完成后由用户手动删除程序所在
 /// 文件夹完成卸载（不生成卸载脚本、不主动退出程序）。
 pub async fn uninstall(State(config): State<Arc<dyn ConfigApi>>) -> Result<Json<Value>, ApiError> {
+    // 卸载为破坏性操作（删用户数据/加密密钥/浏览器缓存/自启动注册），info 留痕各步骤
+    tracing::info!("开始执行卸载清理（自启动 / 用户数据 / Playwright 缓存）");
     let mut results: Vec<Value> = Vec::new();
 
     // ---- 步骤 1：关闭开机自启动 ----
     let (ok, msg) = disable_autostart(&config).await;
+    if ok {
+        tracing::info!("卸载步骤 1/3（关闭开机自启动）完成: {msg}");
+    } else {
+        tracing::warn!("卸载步骤 1/3（关闭开机自启动）失败: {msg}");
+    }
     results.push(step_result("autostart", "关闭开机自启动", ok, &msg));
 
     // ---- 步骤 2：删除用户数据目录 ----
@@ -174,6 +181,11 @@ pub async fn uninstall(State(config): State<Arc<dyn ConfigApi>>) -> Result<Json<
         },
         None => (false, "无法确定用户主目录".to_string()),
     };
+    if ok {
+        tracing::info!("卸载步骤 2/3（删除用户数据目录）完成: {msg}");
+    } else {
+        tracing::warn!("卸载步骤 2/3（删除用户数据目录）失败: {msg}");
+    }
     results.push(step_result("user_data", "删除用户数据目录", ok, &msg));
 
     // ---- 步骤 3：清理 Playwright 浏览器缓存 ----
@@ -187,6 +199,11 @@ pub async fn uninstall(State(config): State<Arc<dyn ConfigApi>>) -> Result<Json<
         }
         None => (true, "无独立缓存目录，已跳过".to_string()),
     };
+    if ok {
+        tracing::info!("卸载步骤 3/3（清理 Playwright 浏览器缓存）完成: {msg}");
+    } else {
+        tracing::warn!("卸载步骤 3/3（清理 Playwright 浏览器缓存）失败: {msg}");
+    }
     results.push(step_result(
         "playwright",
         "清理 Playwright 浏览器缓存",
@@ -197,6 +214,7 @@ pub async fn uninstall(State(config): State<Arc<dyn ConfigApi>>) -> Result<Json<
     let all_ok = results
         .iter()
         .all(|r| r["success"].as_bool().unwrap_or(false));
+    tracing::info!(all_ok, "卸载清理执行完毕");
     let message = if all_ok {
         "清理完成，删除程序所在文件夹即可完成卸载"
     } else {

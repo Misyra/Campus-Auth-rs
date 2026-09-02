@@ -288,14 +288,24 @@ impl PasswordCrypto {
                     b.set_extension(format!("corrupt.{ts}.key"));
                     b
                 };
-                let _ = std::fs::rename(key_path, &backup);
-                tracing::warn!(
-                    "加密密钥文件长度异常（{} 字节，应为 {}），已备份至 {} 并生成新密钥；\
-                     旧密钥加密的密码将无法解密，需要重新输入",
-                    bytes.len(),
-                    KEY_LEN,
-                    backup.display()
-                );
+                // 备份成功与否区分记录：失败时"已备份至 X"的日志会失实，
+                // 且旧密钥内容彻底丢失，必须明确告知
+                match std::fs::rename(key_path, &backup) {
+                    Ok(()) => tracing::warn!(
+                        "加密密钥文件长度异常（{} 字节，应为 {}），已备份至 {} 并生成新密钥；\
+                         旧密钥加密的密码将无法解密，需要重新输入",
+                        bytes.len(),
+                        KEY_LEN,
+                        backup.display()
+                    ),
+                    Err(e) => tracing::warn!(
+                        "加密密钥文件长度异常（{} 字节，应为 {}），备份旧密钥失败（{e}），\
+                         已直接换新密钥（旧密钥内容未保留）；\
+                         旧密钥加密的密码将无法解密，需要重新输入",
+                        bytes.len(),
+                        KEY_LEN
+                    ),
+                }
                 return Self::generate_and_write_key(key_path);
             }
             let mut arr = [0u8; KEY_LEN];
@@ -316,10 +326,22 @@ impl PasswordCrypto {
     /// 旧版密钥缺失 / 解码失败 / 长度异常时返回 `None`（由调用方生成新密钥）。
     fn try_inherit_python_key(key_path: &Path) -> Option<Zeroizing<[u8; KEY_LEN]>> {
         let python_path = key_path.with_file_name(".enc_key");
-        let raw = std::fs::read_to_string(&python_path).ok()?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(raw.trim())
-            .ok()?;
+        // 文件不存在属正常路径（首次安装），静默返回
+        let Ok(raw) = std::fs::read_to_string(&python_path) else {
+            return None;
+        };
+        // 存在但解码失败：旧文件损坏，静默换新钥会让旧版密码全部失效，留 debug 痕迹
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!(
+                    path = %python_path.display(),
+                    error = %e,
+                    "Python 旧版密钥 base64 解码失败，忽略并生成新密钥"
+                );
+                return None;
+            }
+        };
         if bytes.len() != KEY_LEN {
             tracing::warn!(
                 "Python 旧版密钥长度异常（{} 字节），忽略并生成新密钥",
@@ -351,6 +373,11 @@ impl PasswordCrypto {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(key_path, key.as_ref())?;
+        // 首次生成新密钥属关键安全事件：旧密文（若有）此后均不可解，必须留痕
+        tracing::info!(
+            path = %key_path.display(),
+            "已生成新的加密密钥文件（此后使用旧密钥加密的密码将无法解密）"
+        );
 
         #[cfg(unix)]
         {

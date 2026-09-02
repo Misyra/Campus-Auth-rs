@@ -8,6 +8,7 @@ import { reactive } from "vue";
 import { LIMITS } from "../utils/constants";
 import { pickFile } from "../utils/file";
 import { backgroundApi, ApiError } from "../api";
+import { frontendLogger } from "../utils/logger";
 import { useToast } from "./useToast";
 import { useAppearance } from "./useAppearance";
 
@@ -90,8 +91,8 @@ async function clearBackgroundImage(): Promise<void> {
   if (appearance.background_filename) {
     try {
       await backgroundApi.remove(appearance.background_filename);
-    } catch {
-      /* ignore */
+    } catch (error) {
+      frontendLogger.warn("appearance", "删除背景文件失败", error);
     }
   }
   appearance.background_url = "";

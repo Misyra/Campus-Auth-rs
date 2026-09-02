@@ -402,8 +402,8 @@ async def _click_locator(locator, timeout_ms: int) -> bool:
     try:
         await _safe_op(target.click(timeout=primary_timeout), Outcome.SELECTOR_FAILED)
         return True
-    except WorkerError:
-        pass
+    except WorkerError as exc:
+        logger.debug("常规点击失败，尝试强制点击降级: %s", exc.message)
 
     remaining = _remaining_ms(deadline)
     if remaining <= 0:
@@ -436,7 +436,7 @@ async def _skip_or_fail(step: StepConfig, message: str) -> None:
     """按 required 语义决定容错跳过还是失败。"""
     if step.required:
         raise WorkerError(Outcome.SELECTOR_FAILED, message)
-    logger.info("[step:%s] 可选步骤跳过: %s", step.id or step.step_type, message)
+    logger.warning("[step:%s] 可选步骤执行失败，已跳过: %s", step.id or step.step_type, message)
 
 
 # ── 各类型处理器 ──
@@ -475,8 +475,8 @@ async def handle_input(page, step: StepConfig, context: StepContext) -> None:
                 Outcome.SELECTOR_FAILED,
             )
         return
-    except WorkerError:
-        pass
+    except WorkerError as exc:
+        logger.debug("常规输入失败，尝试 JS 强制输入降级: %s", exc.message)
 
     remaining = _remaining_ms(deadline)
     if remaining <= 0:
@@ -517,8 +517,8 @@ async def handle_click(page, step: StepConfig, context: StepContext) -> None:
                 text_locator = _frame_scope(context).get_by_text(selector.strip(), exact=True)
                 if await _click_locator(text_locator, remaining):
                     return
-            except Exception:  # noqa: BLE001 — 继续尝试下一候选
-                pass
+            except Exception as exc:  # noqa: BLE001 — 继续尝试下一候选
+                logger.debug("文本候选 %s 点击失败，继续尝试下一候选: %s", selector, exc)
 
     raise WorkerError(Outcome.SELECTOR_FAILED, f"未找到可点击元素: {step.selector}")
 
@@ -613,7 +613,8 @@ async def _find_click_select_option(
     first = base.first
     try:
         own_text = (await first.inner_text()).strip()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读取选项自身文本失败，按空处理: %s", exc)
         own_text = ""
     if own_text.casefold() == value.strip().casefold():
         return first
@@ -754,16 +755,16 @@ async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
             task.cancel()
             try:
                 await page.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("取消中断时关闭页面失败: %s", exc)
             raise StepCancelled("JS 执行已取消，页面已中断")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             task.cancel()
             try:
                 await page.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("超时中断时关闭页面失败: %s", exc)
             raise WorkerError(
                 Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已强制中断"
             )
@@ -876,6 +877,9 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
         raise WorkerError(
             Outcome.UNKNOWN_ERROR, f"OCR 识别超时（>{OCR_TIMEOUT_SECS}s）"
         ) from None
+
+    # 与 ocr_recognize 命令口径一致：验证码文本可能被用户视为敏感内容，只记长度
+    logger.info("[step:%s] [ocr] 识别完成，结果长度=%d", step.id or "", len(text or ""))
 
     if step.store_as:
         context.results[step.store_as] = text

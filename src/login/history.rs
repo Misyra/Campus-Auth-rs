@@ -152,7 +152,16 @@ impl LoginHistoryService {
             let path = self.file_for(day);
             let file = match tokio::fs::File::open(&path).await {
                 Ok(f) => f,
-                Err(_) => continue,
+                // 文件缺失属正常路径（当天无记录），静默跳过
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "打开登录历史文件失败，跳过该日期"
+                    );
+                    continue;
+                }
             };
             let reader = tokio::io::BufReader::new(file);
             let mut lines = reader.lines();
@@ -163,6 +172,9 @@ impl LoginHistoryService {
                 }
                 if let Ok(entry) = serde_json::from_str::<LoginHistoryEntry>(&line) {
                     results.push(entry);
+                } else {
+                    // 损坏行静默丢弃会让用户误以为记录丢失，留 debug 痕迹
+                    tracing::debug!(path = %path.display(), "登录历史行解析失败，已跳过");
                 }
             }
         }

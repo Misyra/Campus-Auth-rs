@@ -137,6 +137,13 @@ impl TaskExecutor {
     /// 不做登录后网络验证，步骤执行完成即成功。带凭据的登录语义（含登录重试
     /// 状态机与抢占）请走 [`crate::login::LoginOrchestrator::submit`]。
     pub async fn execute_browser(&self, cfg: &TaskConfig) -> Result<TaskResult, TaskError> {
+        // 手动执行任务全链路此前零日志，排障困难；入口记录任务标识与超时配置
+        tracing::info!(
+            task_id = %cfg.common.task_id,
+            timeout_ms = cfg.timeout,
+            "开始执行浏览器任务"
+        );
+
         // 执行前标记 Worker 忙
         self.status.merge(PartialSnapshot::Worker {
             state: WorkerStatus::Busy,
@@ -206,6 +213,21 @@ impl TaskExecutor {
         let mut out = structured.message.clone();
         if let Some(e) = &resp.result.error {
             out = format!("{out}\n{e}");
+        }
+        // 出口留痕：成功 info，失败 warn（含错误摘要），耗时用于观测 Worker 性能
+        if success {
+            tracing::info!(
+                task_id = %cfg.common.task_id,
+                duration_ms = structured.duration_ms,
+                "浏览器任务执行完成"
+            );
+        } else {
+            tracing::warn!(
+                task_id = %cfg.common.task_id,
+                duration_ms = structured.duration_ms,
+                error = %resp.result.error.as_deref().unwrap_or("未知错误"),
+                "浏览器任务执行失败"
+            );
         }
         Ok(TaskResult {
             success,
@@ -363,7 +385,17 @@ impl TaskExecutor {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        let mut child = cmd.spawn().map_err(TaskError::IoError)?;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    program = %program,
+                    error = %e,
+                    "任务进程启动失败"
+                );
+                return Err(TaskError::IoError(e));
+            }
+        };
         // Windows 下用 KILL_ON_JOB_CLOSE 约束整棵任务进程树。任务超时、调度器
         // 关闭或 future 被取消时，守卫析构都会由内核回收脚本拉起的后代进程。
         #[cfg(windows)]
@@ -416,11 +448,16 @@ impl TaskExecutor {
             }
             Ok(Err(e)) => Err(TaskError::IoError(e)),
             Err(_) => {
+                tracing::warn!(
+                    program = %program,
+                    timeout_secs = timeout,
+                    "任务执行超时，强杀进程树"
+                );
                 // Windows 上 cmd.exe 启动的脚本子树可能在直接 kill 后仍存活为孤儿，
                 // 先递归终止进程树，再回收直接子进程句柄。
                 #[cfg(windows)]
                 if let Some(pid) = pid {
-                    let _ = tokio::task::spawn_blocking(move || {
+                    let killed = tokio::task::spawn_blocking(move || {
                         use std::os::windows::process::CommandExt;
                         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
                         std::process::Command::new("taskkill")
@@ -429,6 +466,12 @@ impl TaskExecutor {
                             .status()
                     })
                     .await;
+                    if !matches!(&killed, Ok(Ok(status)) if status.success()) {
+                        tracing::debug!(
+                            program = %program,
+                            "taskkill 强杀进程树未确认成功"
+                        );
+                    }
                 }
                 // unix：killpg 按进程组终止整棵子树（子进程已 setpgid 为组长）；
                 // 进程可能已自行退出（ESRCH），静默忽略
@@ -438,8 +481,13 @@ impl TaskExecutor {
                         libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                     }
                 }
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                // 清理失败仅 debug：超时路径已尽力强杀，无法进一步补救
+                if let Err(e) = child.kill().await {
+                    tracing::debug!(program = %program, error = %e, "任务子进程 kill 失败");
+                }
+                if let Err(e) = child.wait().await {
+                    tracing::debug!(program = %program, error = %e, "任务子进程 wait 失败");
+                }
                 Err(TaskError::ExecutionTimeout(timeout))
             }
         }

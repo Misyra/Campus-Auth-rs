@@ -30,7 +30,7 @@ class FrontendLogger {
     const next = String(level || "").toUpperCase();
     this.currentLevel = LEVEL_VALUES[next] !== undefined && LEVEL_VALUES[next] >= 0 ? next : "INFO";
     // eslint-disable-next-line no-console
-    console.info(...this.format("INFO", "logger", `frontend log level => ${this.currentLevel}`));
+    console.info(...this.format("INFO", "logger", `前端日志级别已切换为 ${this.currentLevel}`));
   }
 
   private shouldLog(level: string): boolean {

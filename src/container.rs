@@ -220,10 +220,10 @@ impl ServiceContainer {
                     _ = shutdown_for_update.cancelled() => return,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
                 }
-                tracing::info!("检查待定更新（后台）");
                 match updater_bg.apply_pending_on_startup().await {
                     Ok(true) => tracing::info!("待定更新已应用，新版本将在下次启动生效"),
-                    Ok(false) => tracing::info!("无待定更新，跳过"),
+                    // 无待定更新是常态，与"后台检查"合并为一条 debug 避免每次启动两条噪音
+                    Ok(false) => tracing::debug!("后台检查待定更新：无待定更新，跳过"),
                     Err(e) => tracing::warn!("待定更新应用失败，继续以当前版本运行: {e}"),
                 }
             });

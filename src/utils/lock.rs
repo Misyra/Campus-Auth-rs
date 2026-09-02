@@ -146,7 +146,10 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     if let Some(token) = crate::web::auth::read_token_file(base_path) {
         req = req.header("X-Auth-Token", token);
     }
-    let _ = req.send().await;
+    if let Err(e) = req.send().await {
+        // 进程可能已自行退出导致连接失败，属可容忍情况，debug 留痕即可
+        tracing::debug!("停止请求发送失败（目标进程可能已退出）: {e}");
+    }
 
     // 轮询等待进程退出；上限须覆盖优雅关闭的最坏预算
     // （bridge 3s + scheduler 5s + engine 8s = 16s），取 20s 留余量。

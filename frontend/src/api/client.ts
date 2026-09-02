@@ -8,6 +8,8 @@
  * - 无 success 字段，HTTP 状态码非 2xx 即为错误。
  */
 
+import { frontendLogger } from "../utils/logger";
+
 /** 统一 API 错误，携带解析出的 code / 用户友好消息 / details */
 export class ApiError extends Error {
   status?: number;
@@ -54,7 +56,8 @@ export function ensureAuthToken(): Promise<string | null> {
         tokenPromise = null;
         return authToken;
       })
-      .catch(() => {
+      .catch((e) => {
+        frontendLogger.debug("auth", "获取 token 失败，将以匿名请求继续", e);
         tokenPromise = null;
         return null;
       });

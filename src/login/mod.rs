@@ -489,6 +489,8 @@ impl LoginOrchestrator {
                     .status()
                     .last_error
                     .unwrap_or_else(|| "未知原因".to_string());
+                // 与 Browser 分支的告警口径一致：环境初始化后仍未就绪直接失败，需留痕
+                warn!("环境初始化完成但仍未就绪: {detail}");
                 return self
                     .immediate_handle(
                         source,
@@ -538,7 +540,16 @@ impl LoginOrchestrator {
                 Some(active) => decide(source, Some(active.source), Some(active.handle.clone())),
             };
             match decision {
-                PreemptionDecision::Reuse(handle) => return handle,
+                PreemptionDecision::Reuse(handle) => {
+                    // 去重命中静默返回会让用户以为触发了新登录，留 info 便于观测
+                    let old_source = guard.active_session.as_ref().map(|a| a.source);
+                    tracing::info!(
+                        old_source = ?old_source,
+                        new_source = ?source,
+                        "登录请求去重命中，复用既有会话"
+                    );
+                    return handle;
+                }
                 PreemptionDecision::Preempt => guard.active_session.take(),
                 PreemptionDecision::Create => None,
             }
@@ -546,6 +557,12 @@ impl LoginOrchestrator {
         // state 锁已释放，安全执行异步取消与收尾等待；submit_gate 仍持有，
         // 因此其他 submit 无法利用 active_session 的临时空窗插队。
         if let Some(old) = old_session {
+            // 抢占（高优先级请求挤掉低优先级会话）此前零日志，排障无从下手
+            tracing::info!(
+                old_source = ?old.source,
+                new_source = ?source,
+                "登录请求被更高优先级抢占，取消旧会话"
+            );
             old.propagate_cancel(&self.bridge, "被更高优先级登录抢占");
             // 抢占等待（最长 13s）同样处于取消边界内：等待期间点取消即放弃本次提交
             tokio::select! {
@@ -655,6 +672,8 @@ impl LoginOrchestrator {
             });
         } else {
             // 活跃槽位已被占用，立即写入终态（避免 await_result 永久挂起）
+            // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
+            warn!("登录请求未能占据活跃会话槽位，写入终态「被更新的登录请求取代」");
             handle.inner.set_result(LoginResult {
                 success: false,
                 message: "被更新的登录请求取代".into(),
@@ -866,9 +885,13 @@ impl LoginOrchestrator {
             "wifi_ssid": profile.wifi_ssid,
             "active_task": task_id,
         });
-        // 整体序列化 BrowserSettings，避免字段遗漏
-        if let Ok(browser) = serde_json::to_value(&rt.browser) {
-            cfg["browser_settings"] = browser;
+        // 整体序列化 BrowserSettings，避免字段遗漏；失败会导致 Worker 配置不完整
+        match serde_json::to_value(&rt.browser) {
+            Ok(browser) => cfg["browser_settings"] = browser,
+            Err(e) => warn!(
+                error = %e,
+                "浏览器设置序列化失败，Worker 配置将缺少 browser_settings"
+            ),
         }
         // 加载浏览器任务配置并嵌入 task_config（Worker 执行步骤的唯一依据）。
         // 失败时 embed_task_config 内部告警，不嵌入（Worker 按空步骤处理）

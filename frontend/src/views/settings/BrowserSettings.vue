@@ -6,6 +6,7 @@ import { useConfig } from "@/composables/useConfig";
 import { useEnvironment } from "@/composables/useEnvironment";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import { browsersApi, configApi, workerApi, extractApiError } from "@/api";
+import { frontendLogger } from "@/utils/logger";
 
 const config = useConfig();
 const router = useRouter();
@@ -23,7 +24,9 @@ onMounted(async () => {
   try {
     const data = await browsersApi.fetch();
     browsers.value = data.browsers;
-  } catch { /* */ }
+  } catch (error) {
+    frontendLogger.error("browser", "获取浏览器列表失败", error);
+  }
   browserLoading.value = false;
   // 从共享状态加载纯净模式，确保与 TasksSettings 同步
   await config.fetchPureMode();
@@ -76,7 +79,9 @@ async function stopBrowser() {
   stoppingBrowser.value = true;
   try {
     await workerApi.stop();
-  } catch { /* */ }
+  } catch (error) {
+    frontendLogger.warn("browser", "停止 Worker 失败", error);
+  }
   stoppingBrowser.value = false;
 }
 </script>

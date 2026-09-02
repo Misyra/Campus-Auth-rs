@@ -221,8 +221,8 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
         shutdown_event.set()
         try:
             enqueue(None)  # 哨兵：唤醒主循环退出
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("入队退出哨兵失败（事件循环可能已关闭）: %r", exc)
 
 
 async def _dispatch(msg: dict) -> None:
@@ -238,6 +238,12 @@ async def _dispatch(msg: dict) -> None:
             emit_response(msg_id, _error_result(f"未知命令: {method}"))
             return
         data = await handler(params)
+        # 命令完成日志：debug 常规记录，超过 5s 的慢命令升为 info 便于观察
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        if duration_ms > 5000:
+            logger.info("命令 %s 完成，耗时 %dms", method, duration_ms)
+        else:
+            logger.debug("命令 %s 完成，耗时 %dms", method, duration_ms)
         emit_response(msg_id, {"success": True, "data": data, "error": None})
     except StepCancelled as exc:
         # 取消：视为成功终态（outcome=cancelled）
@@ -338,8 +344,11 @@ async def _dispatch_guarded(msg: dict) -> None:
     # 等待任务收敛：页面关闭后挂起的 Playwright await 应以“目标已关闭”异常结束
     try:
         await asyncio.wait_for(task, timeout=5.0)
-    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+    except asyncio.CancelledError:
+        # 任务被本函数主动取消后的正常收敛路径，静默即可
         pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("超时任务收敛异常: %r", exc)
 
 
 async def _serve() -> None:
@@ -376,7 +385,7 @@ async def _serve() -> None:
         try:
             await asyncio.wait_for(worker_core.close_browser(), timeout=5.0)
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("退出时关闭浏览器失败", exc_info=True)
 
 
 def main() -> None:

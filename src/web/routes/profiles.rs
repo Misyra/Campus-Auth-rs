@@ -97,9 +97,14 @@ pub async fn create_profile(
             "缺少 profile id（路径或 body 至少提供一处）".into(),
         ));
     }
-    // 查找或构造 ProfileData
-    let existing = config.load_profile(&target_id).ok();
-    let mut profile = existing.unwrap_or_default();
+    // 查找或构造 ProfileData：加载失败（不存在/损坏）按新建处理，debug 留痕区分
+    let mut profile = match config.load_profile(&target_id) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(profile_id = %target_id, "加载既有 Profile 失败，按新建处理: {e}");
+            crate::config::ProfileData::default()
+        }
+    };
     profile.id = target_id.clone();
     profile.name = body.name;
     // 空密码表示“不设置独立密码”，必须保持为空；若把空串加密成 ENC:，
@@ -113,6 +118,7 @@ pub async fn create_profile(
     };
     profile.username = body.username;
     profiles.create_profile(&target_id, profile).await?;
+    tracing::info!(profile_id = %target_id, "创建 Profile");
     Ok(data(Value::String("ok".into())))
 }
 
@@ -180,6 +186,7 @@ pub async fn update_profile(
         profile.active_task = active_task;
     }
     profiles.update_profile(&id, profile).await?;
+    tracing::info!(profile_id = %id, "更新 Profile");
     Ok(data(Value::String("ok".into())))
 }
 
@@ -189,6 +196,7 @@ pub async fn delete_profile(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     profiles.delete_profile(&id).await?;
+    tracing::info!(profile_id = %id, "删除 Profile");
     Ok(data(Value::String("ok".into())))
 }
 
@@ -205,6 +213,7 @@ pub async fn switch_profile(
     Json(body): Json<SwitchBody>,
 ) -> Result<Json<Value>, ApiError> {
     profiles.switch_profile(&body.profile_id).await?;
+    tracing::info!(profile_id = %body.profile_id, "切换活跃 Profile");
     engine.try_dispatch(EngineCommand::ApplyProfile {
         profile_id: body.profile_id,
         source: ProfileSwitchSource::Manual,

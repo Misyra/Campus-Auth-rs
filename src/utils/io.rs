@@ -52,10 +52,18 @@ pub fn fsync_full(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::io::AsRawFd;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // F_FULLFSYNC 在部分文件系统（如网络盘）恒失败：仅首次 warn，
+        // 后续同类失败降为 debug，避免高频持久化路径刷屏
+        static FULLFSYNC_WARNED: AtomicBool = AtomicBool::new(false);
         let fd = file.as_raw_fd();
         let rc = unsafe { libc::fcntl(fd, libc::F_FULLFSYNC, 0) };
-        if rc != 0 {
-            tracing::warn!("F_FULLFSYNC 失败（rc={rc}），已退化为 sync_all");
+        if rc != 0 && !FULLFSYNC_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "F_FULLFSYNC 失败（rc={rc}），已退化为 sync_all（后续同类告警仅 DEBUG）"
+            );
+        } else if rc != 0 {
+            tracing::debug!("F_FULLFSYNC 失败（rc={rc}），已退化为 sync_all");
         }
     }
     Ok(())
@@ -100,8 +108,9 @@ pub async fn rename_or_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
     match tokio::fs::rename(src, dst).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            // 跨卷或目标被占用等场景：回退 copy 路径（保持移动语义）
-            tracing::warn!("rename 失败，回退 copy 安装: {e}");
+            // 跨卷或目标被占用等场景：回退 copy 路径（保持移动语义）。
+            // 这是预期内的正常回退而非故障，info 即可
+            tracing::info!("rename 失败，回退 copy 安装: {e}");
             copy_via_temp(src, dst).await
         }
     }
@@ -143,7 +152,11 @@ pub fn extract_zip(
 
         let name = match entry.enclosed_name() {
             Some(n) => n.to_path_buf(),
-            None => continue,
+            None => {
+                // zip slip 条目（绝对路径 / .. 穿越）被安全过滤，仅 debug 留痕
+                tracing::debug!("zip 条目路径非法（zip slip），跳过: {}", entry.name());
+                continue;
+            }
         };
         // 防御性兜底：解压结果必须落在目标目录之内
         let outpath = dest.join(&name);
@@ -171,7 +184,9 @@ pub fn extract_zip(
                 &mut output,
             )?;
             if copied > MAX_ZIP_ENTRY_BYTES {
-                let _ = std::fs::remove_file(&outpath);
+                if let Err(e) = std::fs::remove_file(&outpath) {
+                    tracing::debug!("清理超限 zip 条目文件失败: {e}");
+                }
                 return Err(std::io::Error::other("zip 文件条目超过大小上限"));
             }
             output.flush()?;

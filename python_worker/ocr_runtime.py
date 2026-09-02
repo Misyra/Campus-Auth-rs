@@ -66,6 +66,7 @@ class _OcrSession:
         """在本次剩余共享预算内执行识别。"""
         inference_timeout_secs = self._take_budget()
         if inference_timeout_secs <= 0:
+            logger.warning("[ocr] 会话预算已耗尽，淘汰缓存会话: key=%s", self._key)
             _evict_ocr_session(self._key, self)
             raise TimeoutError("OCR 模型获取已耗尽共享预算")
 
@@ -83,6 +84,11 @@ class _OcrSession:
         worker = threading.Thread(target=run, name="ocr-classification", daemon=True)
         worker.start()
         if not done.wait(inference_timeout_secs):
+            logger.warning(
+                "[ocr] 推理超过共享预算 %ss，淘汰缓存会话: key=%s",
+                inference_timeout_secs,
+                self._key,
+            )
             _evict_ocr_session(self._key, self)
             raise TimeoutError(
                 f"OCR 模型获取与推理超过共享预算 {OCR_TIMEOUT_SECS}s"
@@ -168,5 +174,6 @@ def _preprocess_ocr_image(img_bytes: bytes) -> bytes:
         out = BytesIO()
         img.save(out, format="PNG")
         return out.getvalue()
-    except Exception:  # noqa: BLE001 — 预处理失败不致命，回退原图
+    except Exception as exc:  # noqa: BLE001 — 预处理失败不致命，回退原图
+        logger.debug("OCR 图片预处理失败，回退原图: %s", exc)
         return img_bytes

@@ -432,9 +432,11 @@ impl BridgeSupervisor {
 
     /// 触发跨进程取消：向 Worker stdin 发送 {"cancel": cancel_id}
     pub fn cancel(&self, cancel_id: &str) {
-        let _ = self.cmd_tx.try_send(SupervisorCommand::Cancel {
+        if let Err(e) = self.cmd_tx.try_send(SupervisorCommand::Cancel {
             cancel_id: cancel_id.to_string(),
-        });
+        }) {
+            debug!("发送取消命令失败（supervisor 可能已停止）: {e}");
+        }
     }
 
     /// 注入 WebSocket 事件广播通道（由 app 层在构建 Router 时调用）
@@ -443,7 +445,9 @@ impl BridgeSupervisor {
     }
     /// 优雅关闭 Worker（shutdown 命令 → 等超时 → kill）
     pub async fn shutdown(&self) {
-        let _ = self.cmd_tx.send(SupervisorCommand::Shutdown).await;
+        if let Err(e) = self.cmd_tx.send(SupervisorCommand::Shutdown).await {
+            debug!("发送 shutdown 命令失败（supervisor 可能已停止）: {e}");
+        }
     }
 
     /// 强制回收 Worker：立即强杀子进程并复位状态
@@ -488,6 +492,7 @@ impl BridgeSupervisor {
         let handle = ServiceHandle {
             stop_tx: stop_tx.clone(),
             join_handle,
+            name: "bridge",
         };
         *self
             .service_handle
@@ -504,7 +509,9 @@ impl BridgeSupervisor {
             .unwrap_or_else(|e| e.into_inner())
             .take()
         {
-            let _ = tx.send(true);
+            if let Err(e) = tx.send(true) {
+                debug!("发送停止信号失败（无活跃接收端）: {e}");
+            }
         }
     }
 
@@ -798,8 +805,8 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
                 }
             }
         }
-        ParsedMessage::InvalidLine(s) => {
-            tracing::warn!(target: "python_worker", "IPC 非法行: {s}");
+        ParsedMessage::InvalidLine(_) => {
+            // 非 JSON 行已在 process.rs 的解析路径记录（含截断预览），此处不再重复
         }
         ParsedMessage::WorkerExited(code) => {
             handle_worker_exited(this, code).await;
@@ -1330,6 +1337,7 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
         // 仅依赖 proc.shutdown 内部的 timeout，避免外层再包 timeout 导致可达 2 倍超时
         proc.shutdown(Duration::from_secs(DEFAULT_SHUTDOWN_TIMEOUT_SECS))
             .await;
+        info!(target: "python_worker", "Worker 已关闭");
     }
     // 与 kill_worker_now 同理：进程已回收，drain 在途请求避免悬挂至超时
     drain_pending_requests(this, "worker shut down");
@@ -1415,7 +1423,18 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
         }
         return;
     }
-    warn!(target: "python_worker", "Worker 进程退出（崩溃），exit_code={code}");
+    // 崩溃日志单点记录：是否正处于调试会话经 debug_session 字段表达
+    //（替代原先"崩溃 + 调试会话被强制终止"两条相邻 warn）
+    let debug_session = {
+        let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.current_session == Some(SessionType::Debug)
+    };
+    warn!(
+        target: "python_worker",
+        debug_session,
+        exit_code = code,
+        "Worker 进程崩溃退出"
+    );
     // 崩溃恢复时清理可能残留的孤儿浏览器进程（异常退出路径，A-4 不降频）；
     // 同样包 5s 超时防枚举卡死拖住恢复流程
     run_orphan_cleanup_with_timeout().await;
@@ -1472,7 +1491,6 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
                 let _ = tx.send(s);
             }
         }
-        warn!(target: "python_worker", "Worker 崩溃，调试会话被强制终止");
     }
 }
 

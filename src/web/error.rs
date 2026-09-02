@@ -125,6 +125,23 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // 5xx 代表服务端故障必须留痕（error 级）；4xx 多为参数/权限问题，
+        // 用 debug 级避免每个参数错刷屏。仅记录状态码、错误码与消息，不记录请求体内容。
+        if self.status().is_server_error() {
+            tracing::error!(
+                status = self.status().as_u16(),
+                code = self.code(),
+                "API 服务端错误: {}",
+                self.message()
+            );
+        } else {
+            tracing::debug!(
+                status = self.status().as_u16(),
+                code = self.code(),
+                "API 请求错误: {}",
+                self.message()
+            );
+        }
         let mut err = serde_json::Map::new();
         err.insert("code".into(), json!(self.code()));
         err.insert("message".into(), json!(self.message()));

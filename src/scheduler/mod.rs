@@ -194,6 +194,7 @@ impl SchedulerService {
         ServiceHandle {
             stop_tx,
             join_handle,
+            name: "scheduler",
         }
     }
 
@@ -259,6 +260,7 @@ impl SchedulerService {
         });
         self.notify_change();
         self.publish_status();
+        tracing::info!(task_id = %id, "定时任务已保存");
         Ok(())
     }
 
@@ -282,6 +284,7 @@ impl SchedulerService {
         self.update_state(|s| s.tasks.retain(|t| t.id != id));
         self.notify_change();
         self.publish_status();
+        tracing::info!(task_id = %id, "定时任务已删除");
         Ok(())
     }
 
@@ -296,7 +299,10 @@ impl SchedulerService {
 
     /// 向主循环发送 `TaskChange::Reload` 信号（buffer 满时静默丢弃，重载幂等）。
     pub fn notify_change(&self) {
-        let _ = self.task_change_tx.try_send(TaskChange::Reload);
+        if let Err(e) = self.task_change_tx.try_send(TaskChange::Reload) {
+            // 丢弃是可接受的（重载幂等，低频兜底扫描会补齐），仅 debug 留痕
+            tracing::debug!("发送任务变更通知失败（channel 满或已关闭）: {e}");
+        }
     }
 
     /// 更新内部状态。
@@ -342,11 +348,14 @@ impl SchedulerService {
         let path_for_blocking = path.clone();
         let now_for_blocking = now.clone();
         let result_for_blocking = result.clone();
+        let task_id_for_blocking = task_id.to_string();
         let _ = tokio::task::spawn_blocking(move || {
             if let Ok(mut task) = ScheduledTask::load_from(&path_for_blocking) {
                 task.last_run = Some(now_for_blocking);
                 task.last_result = Some(result_for_blocking);
-                let _ = ScheduledTask::save_to(&path_for_blocking, &task);
+                if let Err(e) = ScheduledTask::save_to(&path_for_blocking, &task) {
+                    tracing::warn!(task_id = %task_id_for_blocking, "定时任务 last_run 持久化失败: {e}");
+                }
             }
         })
         .await;
