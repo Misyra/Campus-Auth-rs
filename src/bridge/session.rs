@@ -2,10 +2,19 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::utils::recover_lock;
+
+/// pending 取消请求的保留时长
+///
+/// pending 的唯一用途：cancel 先于 register 到达时（同一 cancel_id 随后立刻注册，
+/// 如登录重试循环先生成 id 再注册），保证取消不丢。超过此时长仍未被同 id 注册，
+/// 即可断定是会话结束后迟到的取消（UUID 不会复用，永远等不到 register），
+/// 及时丢弃防止无界累积。
+const PENDING_TTL: Duration = Duration::from_secs(60);
 
 /// 会话类型，用于互斥判断
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +28,8 @@ pub enum SessionType {
 /// cancel_id（UUID）到 CancellationToken 的注册表
 pub struct CancelRegistry {
     map: Mutex<HashMap<String, CancellationToken>>,
-    pending: Mutex<std::collections::HashSet<String>>,
+    /// 尚未注册就被取消的 cancel_id -> 请求时间（带 TTL，防止迟到的取消请求无界累积）
+    pending: Mutex<HashMap<String, Instant>>,
 }
 
 impl CancelRegistry {
@@ -27,17 +37,27 @@ impl CancelRegistry {
     pub fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
-            pending: Mutex::new(std::collections::HashSet::new()),
+            pending: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 清理 pending 中超过 TTL 的过期项
+    fn prune_pending(&self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(recover_lock)
+            .retain(|_, t| t.elapsed() < PENDING_TTL);
     }
 
     /// 注册新的取消令牌（若已有 pending 取消则立即触发）
     pub fn register(&self, cancel_id: String, token: CancellationToken) {
+        self.prune_pending();
         let was_pending = self
             .pending
             .lock()
             .unwrap_or_else(recover_lock)
-            .remove(&cancel_id);
+            .remove(&cancel_id)
+            .is_some();
         if was_pending {
             token.cancel();
         }
@@ -47,7 +67,7 @@ impl CancelRegistry {
             .insert(cancel_id, token);
     }
 
-    /// 触发取消（调用 token.cancel()），若尚未注册则记为 pending
+    /// 触发取消（调用 token.cancel()），若尚未注册则记为 pending（带 TTL）
     pub fn trigger(&self, cancel_id: &str) {
         if let Some(token) = self
             .map
@@ -57,16 +77,22 @@ impl CancelRegistry {
         {
             token.cancel();
         } else {
+            self.prune_pending();
             self.pending
                 .lock()
                 .unwrap_or_else(recover_lock)
-                .insert(cancel_id.to_string());
+                .insert(cancel_id.to_string(), Instant::now());
         }
     }
 
-    /// 清理已完成的注册项
+    /// 清理已完成的注册项（连同 pending 一并清除：会话已结束，
+    /// 此后同 id 的迟到取消无意义，避免滞留到 TTL 过期）
     pub fn remove(&self, cancel_id: &str) {
         self.map
+            .lock()
+            .unwrap_or_else(recover_lock)
+            .remove(cancel_id);
+        self.pending
             .lock()
             .unwrap_or_else(recover_lock)
             .remove(cancel_id);
@@ -131,5 +157,45 @@ impl Drop for SessionGuard {
         if let Some(f) = self.on_drop.take() {
             f();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cancel 先于 register 到达（pending 命中）→ 注册时立即取消
+    #[test]
+    fn test_pending_cancel_fires_on_register() {
+        let reg = CancelRegistry::new();
+        reg.trigger("id-1");
+        let token = CancellationToken::new();
+        reg.register("id-1".into(), token.clone());
+        assert!(token.is_cancelled());
+    }
+
+    /// 会话结束后 remove 清掉 pending：迟到的取消不再滞留（内存泄露回归）
+    #[test]
+    fn test_remove_clears_pending() {
+        let reg = CancelRegistry::new();
+        reg.trigger("id-1");
+        reg.remove("id-1");
+        let token = CancellationToken::new();
+        reg.register("id-1".into(), token.clone());
+        assert!(!token.is_cancelled());
+    }
+
+    /// 超过 TTL 的 pending 过期：迟到的取消不再影响之后同 id 的注册
+    #[test]
+    fn test_pending_ttl_expires() {
+        let reg = CancelRegistry::new();
+        reg.trigger("id-1");
+        // 手动把时间戳拨回 TTL 之前（同一模块内可访问私有字段）
+        let past = Instant::now() - PENDING_TTL - Duration::from_secs(1);
+        reg.pending.lock().unwrap().insert("id-1".into(), past);
+        let token = CancellationToken::new();
+        reg.register("id-1".into(), token.clone());
+        assert!(!token.is_cancelled());
+        assert!(reg.pending.lock().unwrap().is_empty());
     }
 }
