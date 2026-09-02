@@ -49,7 +49,7 @@ shutdown_event = threading.Event()
 _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 
 # Worker 版本（与 pyproject.toml 的 project.version 保持同步，手动维护）
-WORKER_VERSION = "5.0.0"
+WORKER_VERSION = "5.0.0-alpha.6"
 
 # OCR 运行时能力（任务 10）：由 _preload_ocr_deps 探测结果填充，
 # 随 worker_health_check 响应上报给 Rust 侧缓存（/api/ocr/status 消费）。

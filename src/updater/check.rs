@@ -351,33 +351,14 @@ pub(crate) fn select_platform(manifest: &ReleaseManifest) -> Option<&PlatformPac
     manifest.platforms.get(CURRENT_PLATFORM_KEY)
 }
 
-/// 取版本预发布标识符的第一个分量（如 `alpha`）的字符串表示
-fn pre_first(version: &Version) -> Option<String> {
-    let pre = version.pre.as_str();
-    if pre.is_empty() {
-        return None;
-    }
-    // 取第一个 `.` 分隔的分量（如 `alpha.1` → `alpha`）
-    Some(pre.split('.').next().unwrap_or(pre).to_string())
-}
-
 /// 判断远程版本是否对当前版本构成"感兴趣"的更新
 ///
-/// - 远程版本不新于当前版本 → `false`
-/// - 当前为正式版（无预发布标签）→ 接受任何更新的远程版本
-/// - 当前为预发布版 → 仅接受预发布标识符前缀一致的远程版本
-///   （例如当前 `alpha`，则仅匹配 `alpha.*`，不匹配 `beta` 或正式版）
+/// 统一通道：仅按 semver 大小比较，`remote > current` 即视为更新。
+/// 此前按 `alpha`/`beta` 前缀隔离的逻辑会导致 `5.0.0-alpha.5 → 5.0.0`
+/// 这类正式版升级被误判为不感兴趣；现改为“哪个高收哪个”，预发布
+/// 与正式版在同一比较通道内按 semver 排序（`5.0.0 > 5.0.0-alpha.*`）。
 pub(crate) fn compare_versions(current: &Version, remote: &Version) -> bool {
-    if *remote <= *current {
-        return false;
-    }
-    if current.pre.is_empty() {
-        return true;
-    }
-    match (pre_first(current), pre_first(remote)) {
-        (Some(c), Some(r)) => c == r,
-        _ => false,
-    }
+    *remote > *current
 }
 
 #[cfg(test)]
@@ -409,16 +390,18 @@ mod tests {
         assert!(compare_versions(&v("1.0.0"), &v("1.1.0-beta.1")));
     }
 
-    /// 当前为预发布版：仅接受预发布标识符前缀一致的远程版本
+    /// 统一通道：预发布与正式版按 semver 大小一起比较
     #[test]
     fn test_compare_versions_prerelease_prefix_match() {
-        // alpha 前缀一致 → 接受
+        // 同前缀递增 → 接受
         assert!(compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0-alpha.2")));
         assert!(compare_versions(&v("5.0.0-alpha"), &v("5.0.0-alpha.1")));
-        // 前缀不一致 → 拒绝（alpha → beta / 正式版）
-        assert!(!compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0-beta.1")));
-        assert!(!compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0")));
-        assert!(!compare_versions(&v("5.0.0-beta.1"), &v("5.0.0-alpha.2")));
+        // 跨通道只要 semver 更大即接受（此前隔离，现统一）
+        assert!(compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0-beta.1")));
+        assert!(compare_versions(&v("5.0.0-alpha.1"), &v("5.0.0")));
+        assert!(compare_versions(&v("5.0.0-beta.1"), &v("5.0.0")));
+        // 旧正式版 → 新预发布（版号更大）也接受
+        assert!(compare_versions(&v("5.0.0"), &v("5.1.0-alpha.1")));
     }
 
     /// 平台选择：命中当前平台键返回对应包，否则 None
