@@ -1,6 +1,35 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.4（第十九轮）”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.5（第二十轮）”。
+
+## v5.0.0-alpha.5（2026-09-02 第二十轮：定时自重启 + 显式代理 + 日志体系全面优化）
+
+### 定时自重启与显式代理
+
+- **定时自重启**：系统设置新增选项（`app.auto_restart_hours`），按本次运行总时长周期性优雅自重启回收长期运行累积的内存，运行时修改即生效；重启后继进程生成收敛为 `launcher::spawn_restart_successor`，与手动重启共用（避免争锁导致"重启变退出"）
+- **显式更新代理**：`updater.proxy_port` 端口制改为 `updater.proxy_url` 完整地址制（支持非本机代理，如局域网代理机）；旧配置仅填端口时由 `resolved_proxy_url` 兼容派生；仓库任务下载共用；前端输入框同步替换并按后端口径校验
+- **设置 dirty 快照比对**：设置表单由"动过即置位"的单向闩锁改为与最近保存快照比对，值改回原样未保存标记自动消失；日志级别独立保存期间抑制比对；补 useConfig 单元测试
+
+### 稳定性
+
+- Bridge 取消注册表 pending 项加 60s TTL：会话结束后迟到的取消不再无界累积（内存泄露回归），remove 时连同 pending 一并清除
+
+### 日志体系全面优化（约 170 处）
+
+- **补缺失**：helper 日志落盘 `logs/helper.log`（GUI 子系统下 stdout 不可见，更新失败自此可诊断）、5xx 服务端留痕、任务执行器全链路、登录抢占/去重/槽位取代、Engine 首次崩溃、损坏配置隔离备份、启动序列版本/模式留痕、卸载/自启动等破坏性与生命周期操作审计
+- **级别修正**：monitor 每轮探测、引擎冷却/暂停跳过、uv 镜像枚举等高频轮询 info 降 debug；终态失败升 error；断链/丢弃类升 warn
+- **去冗余与措辞**：登录失败相邻双 warn 合并、Worker 崩溃双 warn 合并、Profile 幂等未切换不再误报"已切换"等
+- **脱敏**：proxy_url 凭据仅留 scheme+host、IPC 原始行截断 200 字符、配置保存审计只记字段名不记值、success_condition 不再打印变量值
+- Python Worker 补浏览器启停/重建、OCR 识别与会话淘汰、点击/输入强制降级路径日志；前端静默 catch 接入 frontendLogger
+
+### 界面
+
+- 全局样式 token 档位对齐（字号/间距/圆角），index.html 预置主题脚本消除首帧闪烁，新增 badge 组件样式
+- 卸载弹窗状态标签区分：存在（黑体加重）/ 无（浅黑弱化）
+
+### 验证
+
+- `cargo fmt --check` / `clippy -D warnings` / `cargo test` 全绿；前端 vitest 49 通过；Python pytest 127 通过；CI 全绿
 
 ## v5.0.0-alpha.4（2026-08-31 第十九轮：代理体系 + 更新全量分发 + 状态一致性）
 
