@@ -272,7 +272,7 @@ function closeUninstall() {
                   <span class="uninstall-item-label">{{ item.label }}</span>
                   <span class="uninstall-item-path">{{ item.description }}</span>
                 </div>
-                <span class="uninstall-item-tag">{{ item.exists ? "存在" : "无" }}</span>
+                <span class="uninstall-item-tag" :class="item.exists ? 'tag-exists' : 'tag-missing'">{{ item.exists ? "存在" : "无" }}</span>
               </div>
               <div class="uninstall-hint-box">
                 将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。

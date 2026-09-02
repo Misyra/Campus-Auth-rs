@@ -459,6 +459,17 @@
   flex-shrink: 0;
 }
 
+/* 存在：黑体加重（700，中文系统字体无 600 档会回落常规）；
+   不存在：浅黑弱化，一眼区分可清理项 */
+.uninstall-item-tag.tag-exists {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.uninstall-item-tag.tag-missing {
+  color: var(--text-muted);
+}
+
 .uninstall-hint-box {
   margin-top: var(--space-sm);
   padding: 10px 12px;
