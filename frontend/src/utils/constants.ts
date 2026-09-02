@@ -161,12 +161,14 @@ export const DEFAULT_CONFIG: Config = {
     autostart_enabled: false,
     task_notification: true,
     show_tray: true,
+    auto_restart_hours: 0,
   },
   updater: {
     check_on_startup: true,
     release_source_url: "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest",
     check_interval_hours: 24,
     use_proxy: false,
+    proxy_url: "http://127.0.0.1:7890",
     proxy_port: 7890,
   },
 };

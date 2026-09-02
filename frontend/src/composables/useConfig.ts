@@ -34,15 +34,20 @@ let saveAbort: AbortController | null = null;
 // 否则会无条件把 dirty 置 false 清掉用户编辑标记
 let fetchConfigEpoch = 0;
 
-// 深监听配置变更 → 标记 dirty（加载期间抑制）。
-// P12：回调仅置 dirty 标志（轻量），无需防抖；原 flush:'sync' 每次按键同步深度遍历
-// 整个 config，改为 'post'（渲染后微任务批量执行）。异步化后 fetchConfig 需在
-// 复位 loadingConfig 前 await nextTick()，让加载期间的赋值在 loadingConfig=true
-// 窗口内跑完回调，避免 dirty 误触（见 fetchConfig 内注释）。
+// 深监听配置变更 → 与最近一次已保存快照比对得出 dirty（加载期间抑制）。
+// 早先版本是单向闩锁（动过即 dirty=true，仅保存/重载复位），开关关了再打开
+// 仍显示"已变更"；现改为快照比对：值回原样 dirty 自动消失。
+// P12：回调仅做一次 JSON.stringify 比对（配置体量小，开销可忽略），无需防抖；
+// flush 'post'（渲染后微任务批量执行）。异步化后 fetchConfig 需在复位 loadingConfig
+// 前 await nextTick()，让加载期间的赋值在抑制窗口内跑完回调（见 fetchConfig 内注释）。
+let savedSnapshot = JSON.stringify(config);
+// 程序化写入（服务端已即时保存的日志级别等）期间抑制 dirty 比对，结束后同步快照
+let suppressDirty = false;
 watch(
   config,
   () => {
-    if (!loadingConfig) dirty.value = true;
+    if (loadingConfig || suppressDirty) return;
+    dirty.value = JSON.stringify(config) !== savedSnapshot;
   },
   { deep: true, flush: "post" },
 );
@@ -80,14 +85,20 @@ async function fetchConfig(): Promise<void> {
     config.active_task = data.active_task ?? "";
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
+    // 旧配置只有 proxy_port（可能非默认值）：派生完整地址，
+    // 保证输入框显示与后端 resolved_proxy_url 实际使用一致
+    if (!config.updater.proxy_url && config.updater.proxy_port > 0) {
+      config.updater.proxy_url = `http://127.0.0.1:${config.updater.proxy_port}`;
+    }
     password.reset(!!data.has_password);
     // P12：watch 已是异步 flush，上面的加载赋值会在微任务中触发回调；
-    // 先等待一轮刷新（回调在 loadingConfig=true 窗口内执行完、不置 dirty），
-    // 再复位标志与 dirty，保证加载不被误标为未保存修改
+    // 先等待一轮刷新（回调在 loadingConfig=true 窗口内执行完、不计入 dirty），
+    // 再以加载结果为新快照，保证加载不被误标为未保存修改
     await nextTick();
     // G20：nextTick 窗口内若又有更新的 fetchConfig 接管，交由它负责复位状态
     if (epoch !== fetchConfigEpoch) return;
     loadingConfig = false;
+    savedSnapshot = JSON.stringify(config);
     dirty.value = false;
     configLoadFailed.value = false;
     frontendLogger.info("config", "配置已加载");
@@ -106,6 +117,11 @@ function validateConfig(): string[] {
   const url = config.credentials.auth_url;
   if (url && !/^https?:\/\//.test(url)) {
     warnings.push("认证地址必须以 http:// 或 https:// 开头");
+  }
+  // 与后端 build_proxied_client 的校验口径一致
+  const proxyUrl = config.updater.proxy_url;
+  if (config.updater.use_proxy && proxyUrl && !/^https?:\/\//.test(proxyUrl)) {
+    warnings.push("代理地址必须以 http:// 或 https:// 开头");
   }
   const port = config.app_settings.port;
   if (port && (port < 1 || port > 65535)) {
@@ -167,6 +183,8 @@ async function saveConfig(force = false): Promise<void> {
   try {
     await configApi.patch(payload, { signal: controller.signal });
     if (submittedPassword) password.markSaved(true);
+    // 保存成功后以当前表单为新快照：用户把值改回原样时 dirty 自动消失
+    savedSnapshot = JSON.stringify(config);
     dirty.value = false;
     frontendLogger.info("config", "配置保存成功");
   } catch (error) {
@@ -186,7 +204,13 @@ async function saveConfig(force = false): Promise<void> {
 async function fetchLogLevels(): Promise<void> {
   try {
     const data = await configApi.fetchLogLevels();
-    if (data.level) config.logging.level = data.level;
+    // 读取的是服务端已保存值：抑制 dirty 并在无未保存编辑时同步快照
+    const wasDirty = dirty.value;
+    suppressDirty = true;
+    config.logging.level = data.level;
+    await nextTick();
+    if (!wasDirty) savedSnapshot = JSON.stringify(config);
+    suppressDirty = false;
   } catch (error) {
     frontendLogger.warn("config", "获取日志级别配置失败", error);
   }
@@ -195,13 +219,19 @@ async function fetchLogLevels(): Promise<void> {
 async function setLogLevel(level: string): Promise<void> {
   try {
     const data = await configApi.setLogLevel(level);
+    // 日志级别走独立 API 即时保存，不算表单未保存变更
+    const wasDirty = dirty.value;
+    suppressDirty = true;
     config.logging.level = level;
+    await nextTick();
+    if (!wasDirty) savedSnapshot = JSON.stringify(config);
+    suppressDirty = false;
     frontendLogger.setLevel(level);
     frontendLogger.info("config", `日志级别已设置: ${level}`);
     toastOnly(true, data?.message || "日志级别已设置");
   } catch (error) {
     const msg = extractApiError(error, "设置失败");
-    frontendLogger.error("config", `设置日志级别失败: ${msg}`, error);
+    frontendLogger.error("config", "设置日志级别失败", error);
     toastOnly(false, msg);
   }
 }
@@ -230,8 +260,8 @@ async function fetchPureMode(): Promise<void> {
   try {
     const data = await pureModeApi.fetch();
     pureMode.value = data.enabled;
-  } catch {
-    /* 保持默认值 */
+  } catch (error) {
+    frontendLogger.debug("config", "获取纯净模式失败，保持默认", error);
   }
 }
 

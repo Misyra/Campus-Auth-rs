@@ -202,6 +202,8 @@ export interface AppSettings {
   autostart_enabled: boolean;
   task_notification: boolean;
   show_tray: boolean;
+  /** 定时自重启间隔（小时，0 = 不启用） */
+  auto_restart_hours: number;
 }
 
 /** 更新器设置（GET/PATCH /api/config 的 updater 段） */
@@ -209,9 +211,11 @@ export interface UpdaterConfig {
   check_on_startup: boolean;
   release_source_url: string;
   check_interval_hours: number;
-  /** 下载更新走本地代理 127.0.0.1:proxy_port */
+  /** 下载更新与仓库任务走显式代理（地址见 proxy_url） */
   use_proxy: boolean;
-  /** 本地代理端口（如 Clash 默认 7890） */
+  /** 代理地址，如 http://127.0.0.1:7890（支持非本机代理） */
+  proxy_url: string;
+  /** 旧版"本地代理端口"字段：仅兼容保留，后端在 proxy_url 为空时用它派生 */
   proxy_port: number;
 }
 

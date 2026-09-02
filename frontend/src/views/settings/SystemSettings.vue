@@ -280,21 +280,21 @@ async function reloadConfig() {
               <input type="checkbox" v-model="config.config.updater.use_proxy" />
               <span class="toggle-slider"></span>
               <span class="toggle-label">使用代理下载更新</span>
-              <FieldHelp text="启用后更新检查/下载与仓库任务下载走本地代理 127.0.0.1:端口（如 Clash）；未启用时跟随系统代理。网络检测的代理行为在监测设置中单独控制。" />
+              <FieldHelp text="启用后更新检查/下载与仓库任务下载走下方代理地址（如 Clash 默认 http://127.0.0.1:7890）；未启用时跟随系统代理。网络检测的代理行为在监测设置中单独控制。" />
             </label>
           </div>
         </div>
         <div class="form-group">
           <div class="field-label-row">
-            <label for="settings-proxy-port">代理端口</label>
-            <FieldHelp text="本地 HTTP 代理端口，如 Clash 默认 7890。仅在启用“使用代理下载更新”后生效。" />
+            <label for="settings-proxy-url">代理地址</label>
+            <FieldHelp text="完整的 HTTP 代理地址（http:// 或 https:// 开头），如 http://127.0.0.1:7890，也支持局域网内其他机器上的代理。仅在启用“使用代理下载更新”后生效。" />
           </div>
           <input
-            id="settings-proxy-port"
-            v-model.number="config.config.updater.proxy_port"
-            type="number"
-            min="1"
-            max="65535"
+            id="settings-proxy-url"
+            v-model="config.config.updater.proxy_url"
+            type="text"
+            placeholder="http://127.0.0.1:7890"
+            spellcheck="false"
             :disabled="!config.config.updater.use_proxy"
           />
           <span class="hint">更新与仓库任务下载共用此代理；网络检测默认不走代理（监测设置可调）。</span>
@@ -309,6 +309,24 @@ async function reloadConfig() {
         <h2>维护操作</h2>
       </div>
       <div class="card-body">
+        <div class="form-group">
+          <div class="field-label-row">
+            <label for="settings-auto-restart">定时自重启</label>
+            <FieldHelp text="按运行时长周期性地优雅重启本程序（重新打开浏览器会短暂断开），用于回收长期运行累积的内存。计时基准是本次运行的总时长，修改后无需手动重启即生效。" />
+          </div>
+          <select
+            id="settings-auto-restart"
+            v-model.number="config.config.app_settings.auto_restart_hours"
+          >
+            <option :value="0">不启用</option>
+            <option :value="6">每 6 小时</option>
+            <option :value="12">每 12 小时</option>
+            <option :value="24">每 24 小时</option>
+            <option :value="48">每 2 天</option>
+            <option :value="168">每 7 天</option>
+          </select>
+          <span class="hint">重启采用与手动重启相同的优雅关闭流程，不会丢失配置；到点时会先启动新进程再退出旧进程。</span>
+        </div>
         <div class="form-group">
           <div class="field-label-row">
             <label>配置热重载</label>
