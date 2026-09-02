@@ -61,6 +61,32 @@ pub fn load_or_create_token(base_path: &Path) -> std::io::Result<String> {
     }
     let token = generate_token();
     std::fs::write(&path, &token)?;
+    // 收紧权限：与 `config/crypto.rs:generate_and_write_key` 同口径，
+    // 使同机其他用户不可读。失败仅告警不阻断（token 已写入，仅权限未收紧）
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&path, perms);
+    }
+    #[cfg(windows)]
+    {
+        let username = std::env::var("USERNAME").unwrap_or_default();
+        let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+        if !username.is_empty() {
+            let account = if domain.is_empty() {
+                username
+            } else {
+                format!("{domain}\\{username}")
+            };
+            let _ = std::process::Command::new("icacls")
+                .arg(&path)
+                .arg("/inheritance:r")
+                .arg(format!("/grant:r \"{account}\":(F)"))
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
     Ok(token)
 }
 

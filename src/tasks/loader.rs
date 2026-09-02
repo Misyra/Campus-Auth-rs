@@ -584,6 +584,43 @@ impl TaskManager {
                 if !has_content && !has_path {
                     errors.push("script 任务需提供 content 或 script_path".to_string());
                 }
+                // 统一拦截 PowerShell：与 `web/routes/scripts.rs:check_supported_binary`
+                // + `executor::is_supported_ext` 同口径，避免经 `POST /api/tasks`
+                // 创建 script 任务绕过 PUT /api/scripts/{id} 的拦截
+                if let Some(bp) = config.get("binary_path").and_then(|v| v.as_str()) {
+                    let lower = bp.to_lowercase();
+                    if lower.contains("powershell")
+                        || lower.contains("pwsh")
+                        || lower.ends_with(".ps1")
+                    {
+                        errors.push(
+                            "不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本"
+                                .to_string(),
+                        );
+                    }
+                }
+                if let Some(sp) = config.get("script_path").and_then(|v| v.as_str()) {
+                    if sp.to_lowercase().ends_with(".ps1") {
+                        errors.push(
+                            "不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".to_string(),
+                        );
+                    }
+                    // 显式含 `..` 的穿越写法提前拦截（与 executor::resolve_script_source 同口径）
+                    if std::path::Path::new(sp)
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        errors.push(format!("script_path 含非法穿越: {sp}"));
+                    }
+                }
+                if let Some(wd) = config.get("work_dir").and_then(|v| v.as_str()) {
+                    if std::path::Path::new(wd)
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        errors.push(format!("work_dir 含非法穿越: {wd}"));
+                    }
+                }
             }
             "shell" => {
                 let cmd = config.get("command").and_then(|v| v.as_str()).unwrap_or("");

@@ -418,6 +418,13 @@ impl MonitorService {
 
     /// 检查 auth_url 的 TCP 可达性（仅在 CaptivePortal 时调用）
     ///
+    /// 必须直连（`TcpStream::connect`），禁止走系统代理/`http_client`：
+    /// `auth_url` 指向校园内网认证服务器（常见 `10.x`/`172.16.x` 或校内域名的私网 IP），
+    /// Captive 态下尚未获得公网访问能力，公网代理此时不可达且不会回源内网；若走代理
+    /// 则 `auth_url_reachable` 将恒为 `false` 导致 Engine 永不触发登录。外网三类探测
+    /// 已由 `build_client(disable_proxy=true → no_proxy)` 屏蔽代理，本方法将该原则
+    /// 贯彻到内网：内网更不应经过代理。
+    ///
     /// 地址解析统一走 [`probes::parse_url_host_port`] 单点实现（G2）：
     /// 支持 IPv6 方括号与裸地址形式，返回的 host 已剥除方括号。
     #[instrument(skip(self))]

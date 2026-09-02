@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tower_http::compression::CompressionLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::container::ServiceContainer;
@@ -54,11 +53,10 @@ pub fn build_router(
     let auth_token = crate::web::auth::load_or_create_token(&container.config.base_path())?;
     let state = AppState::new(container, log_tx, ws_tx, shutdown_tx, auth_token.into());
 
-    // CORS 由内层 `web::build_router` 统一处理（mirror_request 放行任意本地来源）。
-    // 不再在此叠加白名单层，避免双层 CORS 挡住 vite dev / 局域网来源（历史遗留 #16）。
-    let compression = CompressionLayer::new().gzip(true);
-
-    Ok(crate::web::build_router(state).layer(compression))
+    // CORS 与 gzip 均由内层 `web::build_router` 统一处理（历史遗留 #16）：
+    // 此处不再叠加 CompressionLayer，避免双层 gzip 判定（外层因 `Content-Encoding`
+    // 已存在而退化为 Identity，但仍多一次 `should_compress` 开销）。
+    Ok(crate::web::build_router(state))
 }
 
 /// 启动 Axum 服务器（端口冲突 +1 重试，最多 `PORT_RETRY_MAX` 次）

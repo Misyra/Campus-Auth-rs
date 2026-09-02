@@ -2,7 +2,7 @@
  "openapi": "3.0.3",
  "info": {
   "title": "Campus-Auth Web API",
-  "version": "5.0.0-alpha.1",
+  "version": "5.0.0",
   "description": "Baseline OpenAPI document for Campus-Auth. Generated as a static snapshot to enable `npm run typegen`. NOTE: handlers are not yet annotated with utoipa derive macros; this file is a manual baseline and should be regenerated from #[derive(utoipa::OpenApi)] once that integration lands. The hand-written frontend/src/api/types.ts remains the source of truth until then."
  },
  "servers": [

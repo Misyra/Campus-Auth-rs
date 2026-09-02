@@ -566,7 +566,9 @@ impl LoginSession {
     /// 全部成功但页面实际未登录成功（如填入字面量 `{{USERNAME}}` 却没点登录按钮）。
     async fn verify_network_after_login(&self) -> bool {
         let monitor = &self.deps.monitor;
-        // 登录后等待 portal 生效的延迟（可配置，默认 5s）
+        // 登录后等待 portal 生效的延迟（可配置，默认 5s，最大 60s）：
+        // 期间监听 cancel_token / shutdown_token，取消立即以 false 返回，
+        // 避免用户点"取消"后仍阻塞至多 60s+探测耗时才退出
         let delay = self
             .deps
             .config_service
@@ -574,8 +576,29 @@ impl LoginSession {
             .load()
             .monitor
             .post_login_delay;
-        tokio::time::sleep(Duration::from_secs(delay as u64)).await;
-        match monitor.check_once().await {
+        let sleep_ok = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => false,
+            _ = self.shutdown_token.cancelled() => false,
+            _ = tokio::time::sleep(Duration::from_secs(delay as u64)) => true,
+        };
+        if !sleep_ok {
+            info!("登录后网络验证已取消（等待 portal 延迟期间）");
+            return false;
+        }
+        let report = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                info!("登录后网络验证已取消（探测期间）");
+                return false;
+            }
+            _ = self.shutdown_token.cancelled() => {
+                info!("登录后网络验证已取消（应用关闭）");
+                return false;
+            }
+            r = monitor.check_once() => r,
+        };
+        match report {
             Ok(report) => {
                 use crate::status::NetworkStatus;
                 let ok = matches!(report.status, NetworkStatus::Online);

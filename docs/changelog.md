@@ -1,6 +1,24 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.5（第二十轮）”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0（正式版）”。
+
+## v5.0.0（2026-09-02 正式版：全面检查修复 + 正式发布）
+
+### 全面检查与安全加固
+
+- **更新器校验收紧**：`fetch_manifest` 清单拉取新增 `https` 强制校验（仅放行 `127.0.0.1` 回环用于 e2e），`download_and_verify` 已有同口径校验；此前旧仓库地址在用迁移已落地（v6→v7）
+- **脚本执行加固**：`executor::resolve_script_source` 拦截 `..` 穿越写法 + `canonicalize` 前缀校验防 symlink 绕过；`loader::validate_task` 补 `powershell/pwsh/.ps1` 白名单与 `script_path`/`work_dir` 穿越校验，避免经 `POST /api/tasks` 绕过 `PUT /api/scripts/{id}` 的拦截；`resolve_work_dir` 防御性二次校验
+- **Web 层修正**：`app::build_router` 移除与 `web::build_router` 重叠的外层 `CompressionLayer`（避免双重 gzip 判定）；`autostart` 三端点 `enable/disable/mode` 改 `modify_settings_tx` 原子锁消除与 `PATCH /api/config` 的丢更新并发；`auth::load_or_create_token` 补 `0600`/`icacls` 权限收紧与 `monitor/mod.rs:check_auth_url` 内网直连注释（Captive 态代理不可达）
+- **登录可取消**：`session::verify_network_after_login` 的 `sleep(post_login_delay)` 与 `check_once` 均监听 `cancel_token`/`shutdown_token`，点取消不再阻塞 60s
+- **文档区分**：`GET /api/shells` 补 Script/Shell 域注释（Shell 任务支持 `powershell`，Script 任务禁止，二者正交）
+
+### 版本与发布
+
+- 四端版本统一到 `5.0.0`（`Cargo.toml` / `frontend/package.json` / `openapi.json` / `python_worker/pyproject.toml` + `WORKER_VERSION`），`uv.lock` 同步；`AGENTS.md` 更新
+
+### 验证
+
+- `cargo fmt --check` / `clippy --all-targets -- -D warnings` / `cargo test`（532 passed）/ `cargo check --features no-embed` 全绿；`frontend` vitest 49 passed；`python_worker` pytest 127 passed
 
 ## v5.0.0-alpha.5（2026-09-02 第二十轮：定时自重启 + 显式代理 + 日志体系全面优化）
 

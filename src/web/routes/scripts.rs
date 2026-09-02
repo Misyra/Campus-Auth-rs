@@ -197,9 +197,12 @@ pub async fn delete_script(
     Ok(data(Value::String("ok".into())))
 }
 
-/// GET /api/shells — Shell 列表
+/// GET /api/shells — Shell 列表（Shell 任务专用，与 Script 任务正交）
 ///
-/// 返回系统可用 Shell（用于 Shell 任务执行）。
+/// 返回系统可用 Shell（用于 `TaskKind::Shell.shell_path`），支持
+/// `powershell/pwsh`；Script 任务（`TaskKind::Script`）的 `binary_path`
+/// 禁止 PowerShell（见 `check_supported_binary` 与 `is_supported_ext`），
+/// 二者域不同，不视为矛盾。
 pub async fn list_shells(State(_state): State<AppState>) -> Result<Json<Value>, ApiError> {
     #[cfg(target_os = "windows")]
     {

@@ -87,6 +87,13 @@ pub(crate) async fn fetch_manifest(
     } else {
         source_url
     };
+    // 纵深校验：清单 URL 必须为 https，本地回环 http 仅在测试/自托管 e2e 时放行
+    let is_loopback_http = url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://localhost")
+        || url.starts_with("http://[::1]");
+    if !url.starts_with("https://") && !is_loopback_http {
+        return Err(UpdaterError::HttpsRequired(url.to_string()));
+    }
     tracing::debug!(url = %url, "拉取发布清单");
     let response = client
         .get(url)

@@ -345,11 +345,31 @@ impl TaskExecutor {
             let path = tmp.path().to_path_buf();
             Ok((path, Some(tmp)))
         } else if let Some(sp) = &cfg.script_path {
-            let path = if Path::new(sp).is_absolute() {
-                PathBuf::from(sp)
+            let raw = PathBuf::from(sp);
+            // 拒绝显式含 `..` 分隔的穿越写法（canonicalize 需文件存在，提前拦截更清晰）
+            if raw
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(TaskError::ScriptNotFound(format!(
+                    "script_path 含非法穿越: {sp}"
+                )));
+            }
+            let path = if raw.is_absolute() {
+                raw.clone()
             } else {
-                self.scripts_dir.join(sp)
+                self.scripts_dir.join(&raw)
             };
+            // 已落盘文件：canonicalize 后校验仍位于 scripts_dir 内（防 symlink 绕过）
+            if path.exists() {
+                if let (Ok(canon), Ok(base)) =
+                    (path.canonicalize(), self.scripts_dir.canonicalize())
+                {
+                    if !canon.starts_with(&base) {
+                        return Err(TaskError::ScriptNotFound(format!("script_path 越界: {sp}")));
+                    }
+                }
+            }
             if !path.exists() {
                 return Err(TaskError::ScriptNotFound(sp.clone()));
             }
@@ -540,8 +560,21 @@ fn build_script_command(
 }
 
 /// 解析工作目录：config.work_dir 优先，否则脚本所在目录（A7：自由函数便于单测）
+///
+/// `work_dir` 含 `..` 时在落盘校验层（`loader::validate_task`）已拦截，
+/// 此处仅做防御性二次校验，避免未走校验路径的调用绕过。
 fn resolve_work_dir(cfg: &ScriptTaskConfig, script_file: &Path, scripts_dir: &Path) -> PathBuf {
     if let Some(wd) = &cfg.work_dir {
+        if Path::new(wd)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            tracing::warn!("work_dir 含非法穿越，已回退到脚本所在目录: {wd}");
+            return script_file
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| scripts_dir.to_path_buf());
+        }
         if Path::new(wd).is_absolute() {
             return PathBuf::from(wd);
         }

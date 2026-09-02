@@ -51,11 +51,16 @@ pub async fn get_autostart(
 pub async fn enable_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = config.load_settings_async().await;
-    settings.global.app.autostart_enabled = true;
-    if let Err(e) = config.save_settings(&settings).await {
-        tracing::warn!("启用自启动：保存配置失败: {e}");
-        return Err(e.into());
+    // 原子读-改-写：与 `PATCH /api/config` 的 `modify_settings_tx` 同锁，
+    // 避免并发保存不同字段时互相覆盖（丢更新）
+    let res = config
+        .modify_settings_tx(Box::new(|mut s| {
+            s.global.app.autostart_enabled = true;
+            Ok(s)
+        }))
+        .await?;
+    if let Err(msg) = res {
+        return Err(ApiError::BadRequest(msg));
     }
     // 真正注册系统自启动（schtasks 计划任务）
     if let Err(e) = register_self_start(true).await {
@@ -70,11 +75,14 @@ pub async fn enable_autostart(
 pub async fn disable_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = config.load_settings_async().await;
-    settings.global.app.autostart_enabled = false;
-    if let Err(e) = config.save_settings(&settings).await {
-        tracing::warn!("禁用自启动：保存配置失败: {e}");
-        return Err(e.into());
+    let res = config
+        .modify_settings_tx(Box::new(|mut s| {
+            s.global.app.autostart_enabled = false;
+            Ok(s)
+        }))
+        .await?;
+    if let Err(msg) = res {
+        return Err(ApiError::BadRequest(msg));
     }
     // 真正取消系统自启动注册
     if let Err(e) = register_self_start(false).await {
@@ -102,14 +110,20 @@ pub async fn set_autostart_mode(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<AutostartModeBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut settings = config.load_settings_async().await;
     let action = match body.runtime_mode.as_str() {
         "login_once" => crate::config::StartupAction::LoginOnce,
         "monitor" => crate::config::StartupAction::Monitor,
         "none" => crate::config::StartupAction::None,
         other => return Err(ApiError::BadRequest(format!("未知的自启动模式: {other}"))),
     };
-    settings.global.app.startup_action = action;
-    config.save_settings(&settings).await?;
+    let res = config
+        .modify_settings_tx(Box::new(move |mut s| {
+            s.global.app.startup_action = action;
+            Ok(s)
+        }))
+        .await?;
+    if let Err(msg) = res {
+        return Err(ApiError::BadRequest(msg));
+    }
     Ok(data(serde_json::json!({ "message": "自启动模式已更新" })))
 }
