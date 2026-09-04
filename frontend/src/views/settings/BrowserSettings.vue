@@ -11,14 +11,19 @@ import { frontendLogger } from "@/utils/logger";
 const config = useConfig();
 const router = useRouter();
 const { envStatus } = useEnvironment();
-const pythonNotReady = computed(() => envStatus.value != null && !envStatus.value.python_ready);
-
 const browsers = ref<{ channel: string; name: string; description: string; installed: boolean; icon: string }[]>([]);
 const browserLoading = ref(true);
 const installingBrowser = ref<string | null>(null);
 const browserInstallError = ref("");
 const stoppingBrowser = ref(false);
 const playwrightInstallable = new Set(["chromium", "firefox", "webkit"]);
+const currentNotInstalled = computed(() => {
+  const cur = config.config.browser.browser_channel;
+  if (!cur || browsers.value.length === 0) return false;
+  const found = browsers.value.find((b) => b.channel === cur);
+  return found ? !found.installed : false;
+});
+const currentOfficialUrl = computed(() => OFFICIAL_URL[config.config.browser.browser_channel] ?? "");
 
 onMounted(async () => {
   try {
@@ -32,9 +37,29 @@ onMounted(async () => {
   await config.fetchPureMode();
 });
 
+const OFFICIAL_URL: Record<string, string> = {
+  msedge: "https://www.microsoft.com/edge/download",
+  chrome: "https://www.google.com/chrome/",
+};
+
 function handleBrowserClick(b: typeof browsers.value[0]) {
   if (!b.installed) {
-    if (playwrightInstallable.has(b.channel)) void installPlaywright(b.channel);
+    if (playwrightInstallable.has(b.channel)) {
+      void installPlaywright(b.channel);
+      return;
+    }
+    // 系统浏览器未安装：给明确提示与官网链接
+    const url = OFFICIAL_URL[b.channel];
+    const name = b.name || b.channel;
+    if (url) {
+      // 用 confirm 风格的 toast 提示，用户可点链接跳转
+      const msg = `${name} 未安装，请先从官网下载安装：${url}`;
+      browserInstallError.value = msg;
+      frontendLogger.warn("browser", msg);
+      // 同时用 window.open 兜底时由用户主动点击错误区的链接，避免弹窗被拦截
+    } else {
+      browserInstallError.value = `${name} 未安装`;
+    }
     return;
   }
   config.config.browser.browser_channel = b.channel;
@@ -138,10 +163,17 @@ async function stopBrowser() {
             </div>
           </div>
         </div>
-        <p v-if="browserInstallError" class="form-help-text">{{ browserInstallError }}</p>
+        <p v-if="browserInstallError" class="form-help-text">
+          <template v-if="browserInstallError.includes('https://')">
+            {{ browserInstallError.split('https://')[0] }}<a :href="'https://' + browserInstallError.split('https://')[1]" target="_blank" rel="noopener noreferrer" style="text-decoration:underline">{{ 'https://' + browserInstallError.split('https://')[1] }}</a>
+          </template>
+          <template v-else>{{ browserInstallError }}</template>
+        </p>
+        <div v-if="currentNotInstalled" class="browser-safe-info browser-safe-info--warning" style="margin-top:0.75rem">
+          <p>当前选择的浏览器未安装，启动将失败。请先安装 <strong>{{ config.config.browser.browser_channel }}</strong><template v-if="currentOfficialUrl">，或前往 <a :href="currentOfficialUrl" target="_blank" rel="noopener noreferrer" style="text-decoration:underline">官网下载</a></template>，或切换到已安装的浏览器后保存。</p>
+        </div>
       </div>
     </section>
-
     <!-- 基本设置 -->
     <section class="card settings-panel">
       <div class="settings-card-header">

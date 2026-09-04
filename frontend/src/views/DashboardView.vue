@@ -111,7 +111,7 @@ function extractScreenshotUrl(msg: string): string | null {
   const m = (msg || "").match(/截图已保存[：:]\s*([^\s]+)/);
   return m ? m[1] : null;
 }
-function openFullscreen(url: string) { window.open(url, "_blank"); }
+function openFullscreen(url: string) { window.open(url, "_blank", "noopener,noreferrer"); }
 </script>
 
 <template>

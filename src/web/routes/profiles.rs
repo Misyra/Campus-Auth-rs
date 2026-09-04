@@ -214,10 +214,15 @@ pub async fn switch_profile(
 ) -> Result<Json<Value>, ApiError> {
     profiles.switch_profile(&body.profile_id).await?;
     tracing::info!(profile_id = %body.profile_id, "切换活跃 Profile");
-    engine.try_dispatch(EngineCommand::ApplyProfile {
+    // 磁盘+RuntimeConfig 为权威源，Engine 为派生状态：switch 已触发 reload 信号，
+    // Engine 即使收不到 ApplyProfile 也会经 reload 收敛。此处派发失败不视为切换
+    // 失败（否则前端看到错误但下次读取已是新 Profile，造成双状态困惑）。
+    if let Err(e) = engine.try_dispatch(EngineCommand::ApplyProfile {
         profile_id: body.profile_id,
         source: ProfileSwitchSource::Manual,
-    })?;
+    }) {
+        tracing::warn!("Profile 已持久化，Engine 即时同步派发失败（将经 reload 收敛）: {e}");
+    }
     Ok(data(Value::String("ok".into())))
 }
 

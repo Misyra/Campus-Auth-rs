@@ -10,8 +10,10 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
+use std::sync::Arc;
+
+use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
-use crate::web::state::AppState;
 
 /// 背景图文件最大字节数（上传与远程下载统一）。
 pub(crate) const MAX_BACKGROUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -27,8 +29,8 @@ pub struct BackgroundFetchBody {
 }
 
 /// 背景图存储目录
-fn background_dir(state: &AppState) -> std::path::PathBuf {
-    state.config.base_path().join("config").join("background")
+fn background_dir(config: &Arc<dyn ConfigApi>) -> std::path::PathBuf {
+    config.base_path().join("config").join("background")
 }
 
 /// 从文件名中提取安全文件名（防路径穿越），失败则用 UUID 生成
@@ -167,7 +169,7 @@ async fn read_response_limited(
 ///
 /// 返回原始图片字节 + 正确 Content-Type，供前端 CSS url() 直接引用。
 pub async fn get_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     // 防路径穿越：提取安全文件名，并拒绝包含 `..` 的输入
@@ -175,7 +177,7 @@ pub async fn get_background(
         return Err(ApiError::BadRequest("非法文件名".into()));
     }
     let safe_name = safe_filename(Some(filename));
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     let path = dir.join(&safe_name);
     // 确保最终路径仍在背景图目录之内
     if !path.starts_with(&dir) {
@@ -207,10 +209,10 @@ pub async fn get_background(
 
 /// POST /api/background/upload — 上传背景图（multipart/form-data，字段名 file）
 pub async fn upload_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<Value>, ApiError> {
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     tokio::fs::create_dir_all(&dir).await?;
     while let Some(field) = multipart
         .next_field()
@@ -243,7 +245,7 @@ pub async fn upload_background(
 
 /// POST /api/background/fetch-url — 从 URL 获取背景图
 pub async fn fetch_url_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<BackgroundFetchBody>,
 ) -> Result<Json<Value>, ApiError> {
     // 本端点仅允许 HTTPS（SSRF 防护：scheme 校验 + DNS 钉扎 + 逐跳重定向
@@ -271,7 +273,7 @@ pub async fn fetch_url_background(
         )));
     }
     let bytes = read_response_limited(response, MAX_BACKGROUND_IMAGE_BYTES).await?;
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     tokio::fs::create_dir_all(&dir).await?;
     // 从 URL 路径提取文件名，失败则用 UUID 生成
     let extracted = body
@@ -300,7 +302,7 @@ pub async fn fetch_url_background(
 
 /// DELETE /api/background/{filename} — 删除背景图
 pub async fn delete_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     // 防路径穿越：提取安全文件名，并拒绝包含 `..` 的输入
@@ -308,7 +310,7 @@ pub async fn delete_background(
         return Err(ApiError::BadRequest("非法文件名".into()));
     }
     let safe_name = safe_filename(Some(filename));
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     let path = dir.join(&safe_name);
     // 确保最终路径仍在背景图目录之内
     if !path.starts_with(&dir) {

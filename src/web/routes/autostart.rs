@@ -51,6 +51,11 @@ pub async fn get_autostart(
 pub async fn enable_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
+    // 先系统注册，成功后再落盘（防配置与系统分叉）
+    if let Err(e) = register_self_start(true).await {
+        tracing::warn!("启用自启动：系统注册失败（配置未改）: {e}");
+        return Err(e);
+    }
     // 原子读-改-写：与 `PATCH /api/config` 的 `modify_settings_tx` 同锁，
     // 避免并发保存不同字段时互相覆盖（丢更新）
     let res = config
@@ -60,12 +65,9 @@ pub async fn enable_autostart(
         }))
         .await?;
     if let Err(msg) = res {
+        // 落盘失败时回滚系统注册，保持一致
+        let _ = register_self_start(false).await;
         return Err(ApiError::BadRequest(msg));
-    }
-    // 真正注册系统自启动（schtasks 计划任务）
-    if let Err(e) = register_self_start(true).await {
-        tracing::warn!("启用自启动：系统注册失败: {e}");
-        return Err(e);
     }
     tracing::info!("已启用开机自启动");
     Ok(data(serde_json::json!({ "message": "已启用开机自启动" })))
@@ -75,6 +77,11 @@ pub async fn enable_autostart(
 pub async fn disable_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
+    // 先取消系统注册，成功后再落盘
+    if let Err(e) = register_self_start(false).await {
+        tracing::warn!("禁用自启动：取消系统注册失败（配置未改）: {e}");
+        return Err(e);
+    }
     let res = config
         .modify_settings_tx(Box::new(|mut s| {
             s.global.app.autostart_enabled = false;
@@ -82,12 +89,8 @@ pub async fn disable_autostart(
         }))
         .await?;
     if let Err(msg) = res {
+        let _ = register_self_start(true).await;
         return Err(ApiError::BadRequest(msg));
-    }
-    // 真正取消系统自启动注册
-    if let Err(e) = register_self_start(false).await {
-        tracing::warn!("禁用自启动：取消系统注册失败: {e}");
-        return Err(e);
     }
     tracing::info!("已禁用开机自启动");
     Ok(data(serde_json::json!({ "message": "已禁用开机自启动" })))

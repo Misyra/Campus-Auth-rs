@@ -432,18 +432,29 @@ impl ConfigService {
     /// 同步实现。内部 settings_cache 为 `std::sync::Mutex`，临界区极短（mtime
     /// 比对与缓存替换），在阻塞线程中短暂持锁是安全的。
     pub async fn load_settings_async(&self) -> SettingsData {
-        let Some(this) = self.self_weak.upgrade() else {
-            tracing::error!("ConfigService 已释放，返回默认配置");
-            return SettingsData::default();
+        // 降级不回默认：优先沿用内存缓存并置隔离态，防默认值覆盖用户配置
+        let fallback_cached = || {
+            let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
+            if let Some(prev) = c.data.clone() {
+                tracing::warn!("load_settings_async 异常，沿用内存缓存");
+                return prev;
+            }
+            tracing::error!("load_settings_async 异常且无缓存可用，进入隔离态");
+            c.poisoned = true;
+            SettingsData::default()
         };
-        tokio::task::spawn_blocking(move || this.load_settings())
-            .await
-            .unwrap_or_else(|e| {
-                // JoinError 仅在内部 panic 时出现：与磁盘损坏且无缓存的降级路径
-                // 一致，返回默认值并记录错误
-                tracing::error!("load_settings 阻塞任务失败，返回默认配置: {e}");
-                SettingsData::default()
-            })
+        let Some(this) = self.self_weak.upgrade() else {
+            tracing::error!("ConfigService 已释放");
+            return fallback_cached();
+        };
+        match tokio::task::spawn_blocking(move || this.load_settings()).await {
+            Ok(v) => v,
+            Err(e) => {
+                // JoinError 仅内部 panic 可达：不直接回默认，走缓存/隔离降级
+                tracing::error!("load_settings 阻塞任务失败: {e}");
+                fallback_cached()
+            }
+        }
     }
 
     /// 原子写入 settings.json
@@ -608,6 +619,11 @@ impl ConfigService {
             });
         }
         let _guard = self.profiles_lock.lock().await;
+        self.save_profile_locked(profile).await
+    }
+
+    /// 持锁写入（调用方已持有 `profiles_lock`）
+    async fn save_profile_locked(&self, profile: &ProfileData) -> Result<(), ConfigError> {
         let path = self.profiles_dir.join(format!("{}.json", profile.id));
         Self::atomic_write_json(&path, profile).await?;
         let mtime = std::fs::metadata(&path)
@@ -623,6 +639,26 @@ impl ConfigService {
             },
         );
         Ok(())
+    }
+
+    /// 原子创建：检查+写入同持 `profiles_lock`，防并发同 id 覆盖
+    pub(crate) async fn create_profile_atomic(
+        &self,
+        profile: &ProfileData,
+    ) -> Result<(), ConfigError> {
+        if !is_valid_profile_id(&profile.id) {
+            return Err(ConfigError::InvalidProfileId {
+                id: profile.id.clone(),
+            });
+        }
+        let _guard = self.profiles_lock.lock().await;
+        let path = self.profiles_dir.join(format!("{}.json", profile.id));
+        if path.exists() {
+            return Err(ConfigError::ProfileIdConflict {
+                id: profile.id.clone(),
+            });
+        }
+        self.save_profile_locked(profile).await
     }
 
     /// 安全删除 Profile（移至 .trash/，不允许删除 default）
@@ -694,6 +730,7 @@ impl ConfigService {
     /// 若 reload 与并发 save 在缓存更新上交错（reload 把旧内容写回缓存），mtime
     /// 失配会让下一次 load_settings 自愈重读。
     async fn reload_inner(&self, signal: ConfigReloadSignal) -> Result<(), ConfigError> {
+        // 持锁范围仅覆盖读盘+swap，通知放到锁外（防 channel 满时持锁等待阻塞后续 reload）
         let _reload_guard = self.reload_lock.lock().await;
         // 保存旧快照，用于比较非热更字段
         let old = self.runtime.load().as_ref().clone();
@@ -771,6 +808,8 @@ impl ConfigService {
             .await?;
         // 非热更字段变更提示（如端口、运行模式等）
         Self::log_non_hot_reload_changes(&old, self.runtime.load().as_ref());
+        // 锁外通知：先释放 reload_lock，再广播版本与信号，避免 channel 满时持锁等待
+        drop(_reload_guard);
         // 发布配置版本：严格递增 + watch 广播（Engine 据此拒绝过期探测结果、
         // 重建派生状态）。失败路径（上方 return Err）不递增——配置未变更。
         let version = self.config_version.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1085,7 +1124,7 @@ mod tests {
 
         let mut value: Value = serde_json::from_str(v5_json).unwrap();
         let new_version = crate::config::migration::run_migrations(config_dir, &mut value).unwrap();
-        assert_eq!(new_version, 7);
+        assert_eq!(new_version, 8);
 
         // 验证全局字段重命名发生在正确的子段内，且旧字段名已移除
         let monitor = &value["global"]["monitor"];
@@ -1140,7 +1179,7 @@ mod tests {
         let v6_json = r#"{"config_version": 6, "active_profile_id": "default"}"#;
         let mut value: Value = serde_json::from_str(v6_json).unwrap();
         let new_version = crate::config::migration::run_migrations(config_dir, &mut value).unwrap();
-        assert_eq!(new_version, 7);
+        assert_eq!(new_version, 8);
     }
 
     // ============ M2 双域锁并发写测试 ============

@@ -14,7 +14,6 @@ use serde_json::Value;
 use crate::environment::EnvironmentApi;
 use crate::tasks::{TaskApi, TaskRunApi};
 use crate::web::error::{ApiError, data};
-use crate::web::state::AppState;
 
 /// 校验脚本执行程序：仅允许 shell / bat / python / exe 四类，拒绝 PowerShell 等。
 fn check_supported_binary(
@@ -203,7 +202,7 @@ pub async fn delete_script(
 /// `powershell/pwsh`；Script 任务（`TaskKind::Script`）的 `binary_path`
 /// 禁止 PowerShell（见 `check_supported_binary` 与 `is_supported_ext`），
 /// 二者域不同，不视为矛盾。
-pub async fn list_shells(State(_state): State<AppState>) -> Result<Json<Value>, ApiError> {
+pub async fn list_shells() -> Result<Json<Value>, ApiError> {
     #[cfg(target_os = "windows")]
     {
         Ok(data(serde_json::json!({

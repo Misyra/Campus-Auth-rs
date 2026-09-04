@@ -373,6 +373,39 @@ impl UpdaterService {
         cmd.spawn().map_err(UpdaterError::HelperSpawnFailed)?;
         Ok(())
     }
+    /// 关机时补唤醒 helper（幂等 best-effort）
+    ///
+    /// 场景：`apply_update` 时 `spawn_helper` 失败（如 helper.exe 被占用/杀软拦截），
+    /// 但 `pending.json` 已落盘，主进程随后收到 `shutdown` 退出后无人替换，下次启动
+    /// 只能走 `self_replace` 兜底产生 `.__relocated__.exe`。此处在优雅关闭入口再次
+    /// 尝试 `spawn_helper`，确保至少有一个 helper 在等待本 PID 退出。
+    /// 重复 spawn 双 helper 竞争时由实例锁互斥，新 exe 第二次 spawn 会抢锁失败即退，
+    /// 无害且 `cleanup` 幂等。
+    pub(crate) fn ensure_helper_for_shutdown(&self) {
+        if !apply::has_pending_update(&self.base_path) {
+            return;
+        }
+        // 校验 staging 实物，避免 pending 残留但文件已删时无意义 spawn
+        match apply::read_pending(&self.base_path) {
+            Ok(p) => {
+                let exe = PathBuf::from(&p.staging_dir)
+                    .join("extracted")
+                    .join(apply::EXE_NAME);
+                if !exe.exists() {
+                    tracing::warn!("关机时 pending 存在但 staging exe 缺失，跳过 helper 唤醒");
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("关机时读取 pending.json 失败，跳过 helper 唤醒: {e}");
+                return;
+            }
+        }
+        match self.spawn_helper() {
+            Ok(()) => tracing::info!("关机时已补唤醒 helper，等待主进程退出后替换"),
+            Err(e) => tracing::warn!("关机时补唤醒 helper 失败，下次启动走 self_replace 兜底: {e}"),
+        }
+    }
 
     /// 启动时检测并应用待处理更新
     ///
@@ -414,12 +447,44 @@ impl UpdaterService {
         };
 
         let staging_dir = PathBuf::from(&pending.staging_dir);
+        let target_exe = PathBuf::from(&pending.target_exe);
+        // G13 对齐 helper：staging/target 必须位于 base_path 之内（防 pending 篡改逃逸）
+        if !is_within_base(&staging_dir, &self.base_path)
+            || !is_within_base(&target_exe, &self.base_path)
+        {
+            tracing::error!("pending 路径不在 base_path 之内，已拒绝应用并清理");
+            apply::cleanup_after_apply(&self.base_path).await;
+            return Ok(false);
+        }
+        // 缺失 SHA256 直接拒绝（与下载/helper 一致，不降级）
+        if pending.sha256.is_empty() {
+            tracing::error!("pending 缺失 SHA256，已拒绝应用并清理");
+            apply::cleanup_after_apply(&self.base_path).await;
+            return Ok(false);
+        }
         let extracted_exe = staging_dir.join("extracted").join(apply::EXE_NAME);
 
         if !extracted_exe.exists() {
             // staging 缺失，清理后继续正常启动
             apply::cleanup_after_apply(&self.base_path).await;
             return Ok(false);
+        }
+        // 复核 staging exe 摘要（与 helper 同逻辑）
+        match file_sha256(&extracted_exe) {
+            Ok(actual) if actual.eq_ignore_ascii_case(&pending.sha256) => {}
+            Ok(actual) => {
+                tracing::error!(
+                    expected = %pending.sha256, %actual,
+                    "staging SHA256 不匹配，已拒绝应用并清理"
+                );
+                apply::cleanup_after_apply(&self.base_path).await;
+                return Ok(false);
+            }
+            Err(e) => {
+                tracing::error!("计算 staging SHA256 失败，已拒绝应用并清理: {e}");
+                apply::cleanup_after_apply(&self.base_path).await;
+                return Ok(false);
+            }
         }
 
         // U3 二次校验：pending 版本不高于当前版本则跳过并清理（下载与启动之间的时间窗内
@@ -434,7 +499,6 @@ impl UpdaterService {
                 return Ok(false);
             }
         }
-        // 替换前备份当前 exe 到 config/.backup_exe，用于失败回滚
         let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
         let backup_path = self.base_path.join(".backup_exe");
         if let Err(e) = std::fs::copy(&current_exe, &backup_path) {
@@ -468,6 +532,34 @@ impl UpdaterService {
             }
         }
     }
+}
+
+/// 校验路径位于 base_path 之内（与 helper 同逻辑，防 pending 篡改逃逸）
+///
+/// 双方 canonicalize 后做前缀比较；任一不存在均视为不合法。
+fn is_within_base(path: &std::path::Path, base_path: &std::path::Path) -> bool {
+    let (Ok(canonical), Ok(base_canonical)) = (path.canonicalize(), base_path.canonicalize())
+    else {
+        return false;
+    };
+    canonical.starts_with(&base_canonical)
+}
+
+/// 计算文件 SHA256（hex 小写，与 helper 同逻辑）
+fn file_sha256(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// 代理地址脱敏：仅保留 scheme + host——代理 URL 可能内嵌 `user:pass` 凭据，

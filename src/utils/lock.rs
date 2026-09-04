@@ -169,6 +169,44 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     anyhow::bail!("等待进程退出超时（20 秒）")
 }
 
+/// 校验 PID 是否为本程序实例（防 PID 复用误杀）
+///
+/// 比对目标进程可执行文件名是否含 `campus-auth`；取不到路径时保守返回 false。
+pub fn is_own_process(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, MAX_PATH};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut len = MAX_PATH;
+            let mut buf = [0u16; 260];
+            let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+            CloseHandle(handle);
+            if ok == 0 {
+                return false;
+            }
+            let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+            path.contains("campus-auth")
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // /proc/<pid>/exe 读不到（已退出/无权限）即视为非本程序
+        if let Ok(link) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+            let s = link.to_string_lossy().to_lowercase();
+            s.contains("campus-auth")
+        }
+        // macOS 无 /proc：退化为保守拒绝（由调用方清理残留文件后抢锁）
+        return false;
+    }
+}
+
 /// 强制杀死指定 PID 的进程
 ///
 /// - Windows: `TerminateProcess`

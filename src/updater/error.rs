@@ -32,6 +32,9 @@ pub enum UpdaterError {
     #[error("校验和不匹配（预期 {expected}，实际 {actual}）")]
     ChecksumMismatch { expected: String, actual: String },
 
+    /// 更新包缺失 SHA256（已拒绝安装，不再降级信任 HTTPS）
+    #[error("更新包缺失 SHA256 校验值，已拒绝安装")]
+    MissingChecksum,
     /// 下载包超过允许大小
     #[error("更新包超过大小上限 {limit} 字节")]
     DownloadTooLarge { limit: u64 },

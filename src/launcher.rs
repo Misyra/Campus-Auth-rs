@@ -416,14 +416,22 @@ fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
             warn!("已有实例运行中，--force 终止...");
             if let Some(info) = crate::utils::lock::query_instance(base_path) {
                 if info.running {
-                    crate::utils::lock::force_kill(info.pid);
-                    for retry in 0..5 {
-                        std::thread::sleep(std::time::Duration::from_millis(200 * (retry + 1)));
-                        if let Ok(lock) = InstanceLock::try_acquire(base_path) {
-                            return Ok(lock);
+                    // PID 复用防护：非本程序进程拒绝误杀，仅清理残留后抢锁
+                    if !crate::utils::lock::is_own_process(info.pid) {
+                        warn!(
+                            pid = info.pid,
+                            "目标 PID 非本程序实例（疑似 PID 复用/残留），跳过 kill，仅清理后抢锁"
+                        );
+                    } else {
+                        crate::utils::lock::force_kill(info.pid);
+                        for retry in 0..5 {
+                            std::thread::sleep(std::time::Duration::from_millis(200 * (retry + 1)));
+                            if let Ok(lock) = InstanceLock::try_acquire(base_path) {
+                                return Ok(lock);
+                            }
                         }
+                        anyhow::bail!("强制终止后无法获取锁");
                     }
-                    anyhow::bail!("强制终止后无法获取锁");
                 }
             }
             if let Err(e) = std::fs::remove_file(base_path.join("config").join(".instance")) {
@@ -483,7 +491,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
     {
         Ok(handle) => {
             let port = handle.port;
-            if let Some(ref lock) = state.instance_lock {
+            if let Some(lock) = &state.instance_lock {
                 if let Err(e) = lock.record_port(port) {
                     warn!(port = port, error = %e, "记录运行端口到实例锁失败");
                 }
@@ -796,6 +804,12 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
 /// 按逆序关闭所有服务
 async fn graceful_shutdown(state: &mut LauncherState) {
     info!("正在关闭...");
+
+    // 0.5 关机时补唤醒 helper：若 apply_update 时 spawn 失败但 pending 已落盘，
+    // 此处再次尝试启动 helper，确保主进程退出后有人完成替换（幂等、无 pending 时空操作）
+    if let Some(container) = &state.container {
+        container.updater.ensure_helper_for_shutdown();
+    }
 
     // 0. 立即取消应用级关闭令牌：
     // - wait_for_shutdown 各监听分支（若尚未返回）被唤醒

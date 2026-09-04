@@ -42,12 +42,13 @@ pub(crate) async fn download_and_verify(
     staging_dir: &Path,
     on_progress: Option<&(dyn Fn(u8) + Send + Sync)>,
 ) -> Result<PathBuf, UpdaterError> {
-    // 安全检查：仅允许 HTTPS，本地回环用于 e2e 假更新源放行
-    let is_loopback_http = info.url.starts_with("http://127.0.0.1")
-        || info.url.starts_with("http://localhost")
-        || info.url.starts_with("http://[::1]");
-    if !info.url.starts_with("https://") && !is_loopback_http {
+    // 严格校验：https 放行，http 仅精确回环（拒绝前缀绕过与 userinfo）
+    if !crate::updater::check::is_allowed_update_url(&info.url) {
         return Err(UpdaterError::HttpsRequired(info.url.clone()));
+    }
+    // 缺失 SHA256 直接拒绝（不上签名，但不降级）
+    if info.sha256.is_empty() {
+        return Err(UpdaterError::MissingChecksum);
     }
 
     let response = client
@@ -59,7 +60,10 @@ pub(crate) async fn download_and_verify(
         .map_err(UpdaterError::DownloadFailed)?
         .error_for_status()
         .map_err(UpdaterError::DownloadFailed)?;
-
+    // 重定向收敛：最终 URL 仍须通过白名单
+    if !crate::updater::check::is_allowed_update_url(response.url().as_str()) {
+        return Err(UpdaterError::HttpsRequired(response.url().to_string()));
+    }
     let content_length = response.content_length();
     if content_length.is_some_and(|size| size > MAX_UPDATE_ARCHIVE_BYTES) {
         return Err(UpdaterError::DownloadTooLarge {
@@ -145,8 +149,8 @@ pub(crate) async fn download_and_verify(
     );
 
     let actual = hex::encode(hasher.finalize());
-    // 完整性校验针对下载的 ZIP 本身；解压后的 exe 不应拿 ZIP 摘要比较。
-    if !info.sha256.is_empty() && actual.to_lowercase() != info.sha256.to_lowercase() {
+    // 完整性校验针对下载的 ZIP 本身；缺失已在入口拒绝，此处仅比对
+    if actual.to_lowercase() != info.sha256.to_lowercase() {
         if let Err(e) = tokio::fs::remove_file(&tmp_path).await {
             tracing::debug!("清理校验失败的临时下载文件失败: {e}");
         }
@@ -154,13 +158,6 @@ pub(crate) async fn download_and_verify(
             expected: info.sha256.clone(),
             actual,
         });
-    } else if info.sha256.is_empty() {
-        // G12 降级路径：清单中的 sha256 为空说明发布源未提供伴随 .sha256 文件
-        // （check.rs 已在拉取阶段重试一次仍为空），此处维持已文档化的降级——
-        // warn 并信任 HTTPS 传输完整性，拒绝静默安装以外的额外放行。
-        tracing::warn!(
-            "SHA256 校验值为空（发布源无伴随 .sha256，重试后仍为空），跳过摘要校验，信任 HTTPS"
-        );
     }
 
     let archive_path = staging_dir.join(&archive_name);

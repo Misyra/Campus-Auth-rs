@@ -105,6 +105,9 @@ pub struct SchedulerService {
     task_tracker: TaskTracker,
     /// 服务关闭时协作取消所有在途任务。
     task_cancel: CancellationToken,
+    /// 定时任务文件写入串行锁：`save_task` 与 `update_last_run` 均为读-改-写，
+    /// 无锁并发会导致 cron/last_run 互相覆盖
+    file_mutex: tokio::sync::Mutex<()>,
     /// 内部状态。
     state: std::sync::Mutex<SchedulerState>,
 }
@@ -147,6 +150,7 @@ impl SchedulerService {
             running_ids: std::sync::Mutex::new(std::collections::HashSet::new()),
             task_tracker: TaskTracker::new(),
             task_cancel: CancellationToken::new(),
+            file_mutex: tokio::sync::Mutex::new(()),
             state: std::sync::Mutex::new(SchedulerState {
                 tasks: Vec::new(),
                 running: true,
@@ -243,6 +247,8 @@ impl SchedulerService {
         let path = self.scheduled_dir.join(format!("{}.json", id));
         let mut to_save = task.clone();
         to_save.id = id.to_string();
+        // 文件写入串行化：与 update_last_run 同锁，防读-改-写互相覆盖
+        let _file_guard = self.file_mutex.lock().await;
         // 同步 fs 写入放入 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
         let path_for_blocking = path.clone();
         let to_save_for_blocking = to_save.clone();
@@ -250,7 +256,6 @@ impl SchedulerService {
             ScheduledTask::save_to(&path_for_blocking, &to_save_for_blocking)
         })
         .await??;
-
         self.update_state(|s| {
             if let Some(existing) = s.tasks.iter_mut().find(|t| t.id == id) {
                 *existing = to_save.clone();
@@ -344,6 +349,8 @@ impl SchedulerService {
         let now = chrono::Utc::now().to_rfc3339();
         let result = format!("[{}] {}", status, message);
         let path = self.scheduled_dir.join(format!("{}.json", task_id));
+        // 与 save_task 同锁串行化，防全量重写互相覆盖
+        let _file_guard = self.file_mutex.lock().await;
         // 磁盘读写移至 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
         let path_for_blocking = path.clone();
         let now_for_blocking = now.clone();

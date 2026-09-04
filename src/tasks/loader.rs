@@ -283,13 +283,21 @@ impl TaskManager {
             TaskKind::Script(_) | TaskKind::Shell(_) => &self.scripts_dir,
         };
         let path = subdir.join(format!("{task_id}.json"));
+        // 同 ID 切换类型时删除另一目录残留（防 browser 优先的影子文件）
+        let stale = if std::ptr::eq(subdir, &self.browser_dir) {
+            self.scripts_dir.join(format!("{task_id}.json"))
+        } else {
+            self.browser_dir.join(format!("{task_id}.json"))
+        };
 
         let mut task = task.clone();
         // 将 task_id 写回 common（避免 JSON 中遗漏）
         task.common_mut().task_id = task_id.to_string();
 
         atomic_write_json(&path, &task)?;
-
+        if stale.exists() {
+            let _ = std::fs::remove_file(&stale);
+        }
         // 追加到 order（如不存在）
         let mut order = self.read_order();
         if !order.order.contains(&task_id.to_string()) {
