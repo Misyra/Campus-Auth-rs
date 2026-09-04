@@ -42,12 +42,13 @@ pub(crate) async fn download_and_verify(
     staging_dir: &Path,
     on_progress: Option<&(dyn Fn(u8) + Send + Sync)>,
 ) -> Result<PathBuf, UpdaterError> {
-    // 安全检查：仅允许 HTTPS，本地回环用于 e2e 假更新源放行
-    let is_loopback_http = info.url.starts_with("http://127.0.0.1")
-        || info.url.starts_with("http://localhost")
-        || info.url.starts_with("http://[::1]");
-    if !info.url.starts_with("https://") && !is_loopback_http {
+    // 严格校验：https 放行，http 仅精确回环（拒绝前缀绕过与 userinfo）
+    if !crate::updater::check::is_allowed_update_url(&info.url) {
         return Err(UpdaterError::HttpsRequired(info.url.clone()));
+    }
+    // 缺失 SHA256 直接拒绝（不上签名，但不降级）
+    if info.sha256.is_empty() {
+        return Err(UpdaterError::MissingChecksum);
     }
 
     let response = client
@@ -59,7 +60,10 @@ pub(crate) async fn download_and_verify(
         .map_err(UpdaterError::DownloadFailed)?
         .error_for_status()
         .map_err(UpdaterError::DownloadFailed)?;
-
+    // 重定向收敛：最终 URL 仍须通过白名单
+    if !crate::updater::check::is_allowed_update_url(response.url().as_str()) {
+        return Err(UpdaterError::HttpsRequired(response.url().to_string()));
+    }
     let content_length = response.content_length();
     if content_length.is_some_and(|size| size > MAX_UPDATE_ARCHIVE_BYTES) {
         return Err(UpdaterError::DownloadTooLarge {
@@ -145,8 +149,8 @@ pub(crate) async fn download_and_verify(
     );
 
     let actual = hex::encode(hasher.finalize());
-    // 完整性校验针对下载的 ZIP 本身；解压后的 exe 不应拿 ZIP 摘要比较。
-    if !info.sha256.is_empty() && actual.to_lowercase() != info.sha256.to_lowercase() {
+    // 完整性校验针对下载的 ZIP 本身；缺失已在入口拒绝，此处仅比对
+    if actual.to_lowercase() != info.sha256.to_lowercase() {
         if let Err(e) = tokio::fs::remove_file(&tmp_path).await {
             tracing::debug!("清理校验失败的临时下载文件失败: {e}");
         }
@@ -154,13 +158,6 @@ pub(crate) async fn download_and_verify(
             expected: info.sha256.clone(),
             actual,
         });
-    } else if info.sha256.is_empty() {
-        // G12 降级路径：清单中的 sha256 为空说明发布源未提供伴随 .sha256 文件
-        // （check.rs 已在拉取阶段重试一次仍为空），此处维持已文档化的降级——
-        // warn 并信任 HTTPS 传输完整性，拒绝静默安装以外的额外放行。
-        tracing::warn!(
-            "SHA256 校验值为空（发布源无伴随 .sha256，重试后仍为空），跳过摘要校验，信任 HTTPS"
-        );
     }
 
     let archive_path = staging_dir.join(&archive_name);
@@ -235,4 +232,130 @@ fn extract_to_staging_blocking(
         version: Version::parse(version).map_err(UpdaterError::VersionParseFailed)?,
         extracted_exe,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    fn test_info(url: &str, sha256: &str) -> crate::updater::UpdateInfo {
+        crate::updater::UpdateInfo {
+            current_version: "5.0.0-alpha.6".to_string(),
+            latest_version: "5.0.1-alpha.1".to_string(),
+            update_available: true,
+            url: url.to_string(),
+            sha256: sha256.to_string(),
+            size: None,
+            notes: None,
+            release_date: None,
+        }
+    }
+
+    /// 起本地文件服务：固定字节 + Content-Length（回环 http 在更新白名单内）
+    async fn serve_bytes(payload: Vec<u8>) -> SocketAddr {
+        // Body::from(Vec<u8>) 自带精确 Content-Length，走进度上报分支
+        let app = axum::Router::new().route(
+            "/pkg.zip",
+            get(move || {
+                let payload = payload.clone();
+                async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/zip")],
+                        Body::from(payload),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    /// 回环直连：测试机代理（如 127.0.0.1:7890）会劫持 reqwest 回环请求导致 502
+    fn loopback_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(data))
+    }
+
+    /// 成功路径：下载字节一致、落盘重命名完成、tmp 清理
+    #[tokio::test]
+    async fn download_and_verify_roundtrip() {
+        let payload = b"fake-update-payload-12345".to_vec();
+        let addr = serve_bytes(payload.clone()).await;
+        let url = format!("http://{addr}/pkg.zip");
+        let info = test_info(&url, &sha256_hex(&payload));
+        let tmp = tempfile::tempdir().unwrap();
+        let client = loopback_client();
+
+        let path = download_and_verify(&client, &info, tmp.path(), None)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), payload);
+        // tmp 中间文件已重命名，无残留 .tmp
+        let mut rd = tokio::fs::read_dir(tmp.path()).await.unwrap();
+        let mut names = Vec::new();
+        while let Ok(Some(e)) = rd.next_entry().await {
+            names.push(e.file_name().to_string_lossy().to_string());
+        }
+        assert_eq!(names, vec!["pkg.zip"]);
+    }
+
+    /// 摘要不符 → ChecksumMismatch 且不留文件
+    #[tokio::test]
+    async fn download_rejects_checksum_mismatch() {
+        let payload = b"fake-update-payload-12345".to_vec();
+        let addr = serve_bytes(payload).await;
+        let url = format!("http://{addr}/pkg.zip");
+        let info = test_info(&url, &"0".repeat(64));
+        let tmp = tempfile::tempdir().unwrap();
+        let client = loopback_client();
+
+        let err = download_and_verify(&client, &info, tmp.path(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UpdaterError::ChecksumMismatch { .. }),
+            "{err}"
+        );
+        let mut rd = tokio::fs::read_dir(tmp.path()).await.unwrap();
+        assert!(rd.next_entry().await.unwrap().is_none());
+    }
+
+    /// 非白名单 URL 不出网直接拒绝；缺 SHA 不出网直接拒绝
+    #[tokio::test]
+    async fn download_rejects_url_and_missing_sha_without_network() {
+        let client = loopback_client();
+        let tmp = tempfile::tempdir().unwrap();
+        let err = download_and_verify(
+            &client,
+            &test_info("http://example.com/pkg.zip", &"0".repeat(64)),
+            tmp.path(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpdaterError::HttpsRequired(_)), "{err}");
+        let err = download_and_verify(
+            &client,
+            &test_info("http://127.0.0.1:9/pkg.zip", ""),
+            tmp.path(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpdaterError::MissingChecksum), "{err}");
+    }
 }

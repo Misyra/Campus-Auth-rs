@@ -1,12 +1,10 @@
-//! 环境管理器：uv/Python/Git 引导
+//! 环境管理器：uv/Python/浏览器引导
 
 pub mod bootstrap;
-pub mod git;
 pub mod python;
 pub mod uv;
 
 pub use bootstrap::{bootstrap_capability, check_environment, retry_install};
-pub use git::{check_git, download_mingit};
 pub use python::{ensure_venv, install_playwright, install_playwright_browser};
 pub use uv::{check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256};
 
@@ -76,18 +74,23 @@ pub const PLAYWRIGHT_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 pub const PLAYWRIGHT_INSTALL_MAX_RETRIES: u32 = 3;
 /// playwright install 重试间隔
 pub const PLAYWRIGHT_INSTALL_RETRY_DELAY: Duration = Duration::from_secs(10);
-/// MinGit GitHub Releases 基础 URL
-pub const MINGIT_RELEASES_BASE: &str = "https://github.com/git-for-windows/git/releases/download";
-/// MinGit 下载目标
-pub const MINGIT_TARGET: &str = "64-bit";
-/// MinGit 下载超时
-pub const MINGIT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
-/// environment/ 子目录名
-pub const ENV_DIR: &str = "environment";
-/// python_worker/ 子目录名
-pub const WORKER_PROJECT_DIR: &str = "python_worker";
-/// 虚拟环境目录名（相对于 worker_project_path）
-pub const VENV_DIR: &str = ".venv";
+/// Playwright 浏览器下载源（npmmirror 镜像，默认替代微软 CDN 直连）
+pub const PLAYWRIGHT_DOWNLOAD_HOST: &str = "https://npmmirror.com/mirrors/playwright";
+/// Playwright 下载建连超时（毫秒，透传官方 `PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT`）
+pub const PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT_MS: u64 = 120_000;
+
+/// 解析 Playwright 浏览器下载源：进程环境已显式设置非空
+/// `PLAYWRIGHT_DOWNLOAD_HOST`（如内网制品库）则尊重，否则默认 npmmirror 镜像。
+pub(crate) fn playwright_download_host() -> String {
+    std::env::var("PLAYWRIGHT_DOWNLOAD_HOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| PLAYWRIGHT_DOWNLOAD_HOST.to_string())
+}
+/// 用户显式启用 OCR 的持久标记文件名（位于 `environment/` 下，见 `EnvironmentManager::ocr_marker_path`）
+pub(crate) const OCR_ENABLED_MARKER: &str = "ocr.enabled";
+// 运行时目录布局单一事实源（见 `utils::paths`）：re-export 保持调用路径稳定。
+pub use crate::utils::paths::{ENV_DIR, VENV_DIR, WORKER_PROJECT_DIR};
 /// Python 解释器相对路径（相对于 worker_project_path）
 ///
 /// venv 目录布局因平台而异：Windows 为 `Scripts/python.exe`，
@@ -98,36 +101,14 @@ pub const PYTHON_EXE_RELATIVE: &str = ".venv/Scripts/python.exe";
 #[cfg(not(target_os = "windows"))]
 pub const PYTHON_EXE_RELATIVE: &str = ".venv/bin/python";
 
-/// 解析 python_worker 工程目录（单一事实源，Bridge spawn 检查与 EnvironmentManager 共用）
-///
-/// 主路径为 `<base_path>/python_worker`；开发模式（如 cargo run 时 base_path=target/debug）
-/// 该目录不存在，回退到仓库根 / CARGO_MANIFEST_DIR 下的 python_worker（与 docs 背景图的多路径兜底一致）。
-/// Bridge 的 spawn 前检查必须使用本函数结果，否则 dev 模式会误报"Worker 环境未安装"。
-pub(crate) fn resolve_worker_project_path(base_path: &std::path::Path) -> PathBuf {
-    let candidate = base_path.join(WORKER_PROJECT_DIR);
-    if candidate.exists() {
-        return candidate;
-    }
-    if let Some(repo) = base_path
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join(WORKER_PROJECT_DIR))
-    {
-        if repo.exists() {
-            return repo;
-        }
-    }
-    let mf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
-    if mf.exists() { mf } else { candidate }
-}
+// `worker_project_dir` 已收敛至 `utils::paths`（消除 bridge/web/environment 三方分歧），
+// 历史名 `resolve_worker_project_path` 不再保留，调用方统一用 `crate::utils::paths::worker_project_dir`。
 /// 进度百分比区间
 pub const PROGRESS_UV_DOWNLOAD: (u8, u8) = (0, 20);
 /// 进度百分比区间
 pub const PROGRESS_VENV_SYNC: (u8, u8) = (20, 60);
 /// 进度百分比区间
 pub const PROGRESS_PLAYWRIGHT: (u8, u8) = (60, 85);
-/// 进度百分比区间（可选 MinGit）
-pub const PROGRESS_MINGIT: (u8, u8) = (85, 100);
 
 /// 环境安装错误
 #[derive(Debug, thiserror::Error)]
@@ -176,6 +157,13 @@ pub enum EnvironmentError {
     /// uv sync 超时
     #[error("uv sync 超时 (>{timeout_secs}s)")]
     UvSyncTimeout { timeout_secs: u64 },
+    /// uv add/remove 失败（OCR 依赖增删）
+    #[error("uv {op} 失败 (exit code={exit_code:?}): {stderr}")]
+    UvPackageAlterFailed {
+        op: &'static str,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 
     /// Playwright 安装失败
     #[error("Playwright 安装失败 (重试 {retries} 次): {message}")]
@@ -196,15 +184,6 @@ pub enum EnvironmentError {
     /// python_worker/ 目录不存在
     #[error("python_worker/ 目录不存在: {}", path.display())]
     WorkerProjectNotFound { path: PathBuf },
-
-    /// MinGit 下载失败
-    #[error("MinGit 下载失败: {0}")]
-    MinGitDownloadFailed(String),
-
-    /// MinGit 下载文件 SHA256 校验失败
-    #[error("MinGit 下载文件 SHA256 校验失败: expected={expected}, got={got}")]
-    MinGitChecksumMismatch { expected: String, got: String },
-
     /// 安装被取消
     #[error("安装被取消")]
     Cancelled,
@@ -221,8 +200,6 @@ pub enum BootstrapStage {
     SyncingVenv,
     /// 正在安装 Playwright 浏览器
     InstallingPlaywright,
-    /// 正在下载 MinGit（可选）
-    DownloadingMinGit,
     /// 全部完成
     Done,
     /// 安装失败
@@ -238,8 +215,6 @@ pub struct EnvironmentStatus {
     pub python_ready: bool,
     /// Playwright 浏览器是否已安装
     pub playwright_ready: bool,
-    /// Git 是否可用（仅开发者模式）
-    pub git_ready: bool,
     /// 浏览器自动化能力是否完全就绪
     pub capability_ready: bool,
     /// 当前安装阶段
@@ -353,8 +328,6 @@ pub struct EnvironmentManager {
     /// 每个真正获得 BootstrapGate 执行权的 operation 都会替换它，并把自己的
     /// token clone 显式传入整个调用链；旧 operation 因此永远不会读取到新代 token。
     current_cancel_token: RwLock<CancellationToken>,
-    /// 是否允许下载 MinGit（仅开发者模式启用）
-    git_download_enabled: bool,
     /// 引导完成回调（成功重建环境时触发，用于复位 Bridge 熔断计数 B3）
     on_bootstrap_done: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// 引导互斥门（F1）：串行化并发 ensure_capability / retry_install
@@ -437,13 +410,9 @@ impl EnvironmentApi for EnvironmentManager {
 
 impl EnvironmentManager {
     /// 构造环境管理器
-    pub fn new(
-        base_path: PathBuf,
-        status_manager: Arc<StatusManager>,
-        git_download_enabled: bool,
-    ) -> Arc<Self> {
-        let env_path = base_path.join(ENV_DIR);
-        let worker_project_path = resolve_worker_project_path(&base_path);
+    pub fn new(base_path: PathBuf, status_manager: Arc<StatusManager>) -> Arc<Self> {
+        let env_path = crate::utils::paths::env_dir(&base_path);
+        let worker_project_path = crate::utils::paths::worker_project_dir(&base_path);
         Arc::new(Self {
             base_path,
             env_path,
@@ -452,7 +421,6 @@ impl EnvironmentManager {
                 uv_ready: false,
                 python_ready: false,
                 playwright_ready: false,
-                git_ready: false,
                 capability_ready: false,
                 stage: BootstrapStage::Idle,
                 progress: None,
@@ -461,7 +429,6 @@ impl EnvironmentManager {
             status_manager,
             http_client: Client::new(),
             current_cancel_token: RwLock::new(CancellationToken::new()),
-            git_download_enabled,
             on_bootstrap_done: Mutex::new(None),
             bootstrap_gate: BootstrapGate::new(),
         })
@@ -548,8 +515,8 @@ impl EnvironmentManager {
 
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导
     ///
-    /// OCR 依赖由前端显式安装/卸载；用户启用后会写入持久标记，后续环境
-    /// 修复通过 `uv sync --extra ocr` 保留该选择，未启用时只同步基础依赖。
+    /// OCR 依赖由前端显式安装/卸载（`uv add/remove ddddocr` 写入项目主依赖）；
+    /// 后续环境修复的裸 `uv sync` 按声明对齐，天然保留用户选择。
     ///
     /// F1：经 BootstrapGate 串行化——并发调用者等待锁后二次检查就绪状态，
     /// 只有一个调用者真正执行引导，其余复用其结果，避免并发 bootstrap
@@ -649,9 +616,12 @@ impl EnvironmentManager {
         token
     }
 
-    /// 是否允许下载 MinGit
-    pub(crate) fn git_download_enabled(&self) -> bool {
-        self.git_download_enabled
+    /// 旧版 OCR 启用标记路径（`environment/ocr.enabled`，仅存量迁移消费）。
+    ///
+    /// 新版偏好载体为 `pyproject.toml` 主依赖；`run_uv_sync` 入口检测到该文件即跑
+    /// 一次 `uv add` 认领后删除，见 `uv::migrate_legacy_ocr_marker`。
+    pub(crate) fn ocr_marker_path(&self) -> PathBuf {
+        self.env_path.join(OCR_ENABLED_MARKER)
     }
 }
 
@@ -667,11 +637,8 @@ mod tests {
         // 主路径前提：base_path 下须存在 python_worker/，否则会回退到
         // 仓库根 / CARGO_MANIFEST_DIR 的兜底目录（dev 环境下命中仓库）
         std::fs::create_dir(dir.path().join(WORKER_PROJECT_DIR)).unwrap();
-        let manager = EnvironmentManager::new(
-            dir.path().to_path_buf(),
-            Arc::new(StatusManager::new()),
-            false,
-        );
+        let manager =
+            EnvironmentManager::new(dir.path().to_path_buf(), Arc::new(StatusManager::new()));
         assert_eq!(
             manager.python_path(),
             dir.path()
@@ -679,16 +646,41 @@ mod tests {
                 .join(PYTHON_EXE_RELATIVE)
         );
     }
+    /// 下载源默认 npmmirror；显式设置（如内网制品库）则尊重，空值回退默认。
+    #[test]
+    fn test_playwright_download_host_defaults_to_npmmirror() {
+        const KEY: &str = "PLAYWRIGHT_DOWNLOAD_HOST";
+        let saved = std::env::var_os(KEY);
+        // 缺省 → 默认镜像（2024 edition 下 env 写操作为 unsafe；全仓仅本单测触碰该 key）
+        unsafe {
+            std::env::remove_var(KEY);
+        }
+        assert_eq!(playwright_download_host(), PLAYWRIGHT_DOWNLOAD_HOST);
+        // 显式设置 → 尊重
+        unsafe {
+            std::env::set_var(KEY, "http://192.0.2.1");
+        }
+        assert_eq!(playwright_download_host(), "http://192.0.2.1");
+        // 空值 → 回退默认
+        unsafe {
+            std::env::set_var(KEY, "  ");
+        }
+        assert_eq!(playwright_download_host(), PLAYWRIGHT_DOWNLOAD_HOST);
+        // 恢复现场，避免污染并行测试
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(KEY, v),
+                None => std::env::remove_var(KEY),
+            }
+        }
+    }
 
     /// 每轮安装持有独立 token：取消旧轮后，新 generation 必须自动获得全新 scope。
     #[test]
     fn test_install_generation_uses_independent_cancellation_scopes() {
         let dir = tempfile::TempDir::new().unwrap();
-        let manager = EnvironmentManager::new(
-            dir.path().to_path_buf(),
-            Arc::new(StatusManager::new()),
-            false,
-        );
+        let manager =
+            EnvironmentManager::new(dir.path().to_path_buf(), Arc::new(StatusManager::new()));
 
         let first = manager.begin_install_generation();
         assert!(!first.is_cancelled());

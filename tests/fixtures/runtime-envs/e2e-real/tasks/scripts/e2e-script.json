@@ -1,0 +1,12 @@
+{
+  "type": "script",
+  "task_id": "e2e-script",
+  "name": "E2E",
+  "description": "",
+  "script_path": null,
+  "content": "print(42)",
+  "args": [],
+  "work_dir": null,
+  "timeout": 60,
+  "binary_path": null
+}

@@ -1013,7 +1013,7 @@ mod tests {
             status.clone(),
             Some(metrics.clone()),
         );
-        let environment = EnvironmentManager::new(tmp.path().to_path_buf(), status.clone(), false);
+        let environment = EnvironmentManager::new(tmp.path().to_path_buf(), status.clone());
         let tasks = TaskManager::new(tmp.path(), config.clone());
         let orchestrator = Arc::new(LoginOrchestrator::new(
             config.clone(),

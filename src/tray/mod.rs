@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use crate::app::{self, AxumServeHandle, RUNTIME_PORT_FILE};
+use crate::app::{self, AxumServeHandle};
 use crate::config::{ConfigService, ProfileService};
 use crate::container::ServiceContainer;
 use crate::engine::{EngineCommand, EngineSlot};
@@ -87,6 +87,8 @@ pub struct TrayDeps {
     pub log_tx: broadcast::Sender<LogEntry>,
     /// 默认监听端口（Axum 未运行时回退使用）
     pub port: u16,
+    /// 绑定地址（按需启动 Axum 时使用）
+    pub host: Option<String>,
     /// 是否运行在轻量模式（Axum 按需启动）
     pub lightweight: bool,
     /// 应用级关闭令牌（Quit 时取消，驱动 launcher 走完整优雅关闭流程）
@@ -470,7 +472,13 @@ async fn handle_action(
                     .unwrap_or_else(|e| e.into_inner())
                     .is_none()
             {
-                match app::start_axum(deps.container.clone(), deps.log_tx.clone(), deps.port).await
+                match app::start_axum(
+                    deps.container.clone(),
+                    deps.log_tx.clone(),
+                    deps.port,
+                    deps.host.as_deref(),
+                )
+                .await
                 {
                     Ok(h) => {
                         // 同步实际端口到 `.instance`（PID + PORT），使 --status / --stop
@@ -585,7 +593,7 @@ fn monitor_toggle_label(state: EngineState) -> &'static str {
 
 /// 读取运行时端口文件（`config/.runtime_port`，轻量模式按需启动 Axum 后写入）
 fn read_runtime_port(config: &Arc<ConfigService>) -> Option<u16> {
-    let path = config.base_path().join("config").join(RUNTIME_PORT_FILE);
+    let path = crate::utils::paths::runtime_port_path(&config.base_path());
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())

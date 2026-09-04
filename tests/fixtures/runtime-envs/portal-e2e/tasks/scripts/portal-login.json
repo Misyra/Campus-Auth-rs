@@ -1,0 +1,12 @@
+{
+  "type": "script",
+  "task_id": "portal-login",
+  "name": "portal",
+  "description": "",
+  "script_path": null,
+  "content": "print(\"portal\")",
+  "args": [],
+  "work_dir": null,
+  "timeout": 60,
+  "binary_path": null
+}

@@ -1,0 +1,25 @@
+# tests/fixtures 运行时瞬态 — 模板中已清理，运行时重建
+fixtures/runtime-envs/*/config/.auth_token
+fixtures/runtime-envs/*/config/.lock
+fixtures/runtime-envs/*/config/.runtime_port
+fixtures/runtime-envs/*/config/.agreed
+fixtures/runtime-envs/*/logs/*
+!fixtures/runtime-envs/*/logs/.gitkeep
+fixtures/runtime-envs/*/environment/*
+!fixtures/runtime-envs/*/environment/.gitkeep
+
+# 大二进制不入库（按需本地生成）
+fixtures/runtime-envs/**/*.exe
+fixtures/runtime-envs/**/*.bak
+fixtures/update/**/*.zip
+# 例外：路径穿越用例小 zip 已入库
+!fixtures/update/fake-traversal/traversal.zip
+
+# Python 缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 本地临时
+*.log
+.DS_Store

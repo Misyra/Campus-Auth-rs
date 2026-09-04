@@ -54,7 +54,6 @@ const envStageLabel = computed(() => {
     DownloadingUv: "下载 uv",
     SyncingVenv: "同步虚拟环境",
     InstallingPlaywright: "安装浏览器",
-    DownloadingMinGit: "下载 Git",
     Error: "失败",
   };
   return map[s] ?? s;
@@ -121,7 +120,7 @@ async function reloadConfig() {
           </template>
         </div>
         <p v-if="envStatus?.progress?.message" class="hint" style="margin-top:0.35rem">{{ envStatus.progress.message }}</p>
-        <p v-if="envStatus?.last_error" class="hint" style="margin-top:0.35rem;color:var(--error)">{{ envStatus.last_error }}</p>
+        <p v-if="envStatus?.last_error" class="hint" style="margin-top:0.35rem;color:var(--error);white-space:pre-line">{{ envStatus.last_error }}</p>
         <p v-if="envError && envStatus" class="hint" style="color:var(--error)">{{ envError }}</p>
       </div>
     </section>

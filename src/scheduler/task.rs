@@ -9,10 +9,9 @@ use std::path::{Path, PathBuf};
 
 use crate::scheduler::SchedulerError;
 
-/// 定时任务目录名（位于 `tasks/` 下）。
-pub(crate) const SCHEDULED_DIR_NAME: &str = "scheduled";
-/// 执行历史子目录名。
-pub(crate) const HISTORY_DIR_NAME: &str = "history";
+// 运行时目录布局单一事实源（见 `utils::paths`）：`HISTORY_DIR_NAME` re-export 保持调用路径稳定；
+// `SCHEDULED_DIR_NAME` 已由调用方直引 `utils::paths`，此处不再转出口以避免未使用告警。
+pub(crate) use crate::utils::paths::HISTORY_DIR_NAME;
 /// 每个任务的历史记录上限（与 Python 版 `MAX_HISTORY_SIZE` 一致）。
 pub(crate) const MAX_HISTORY_RECORDS: usize = 50;
 /// 任务变更 mpsc channel 容量。

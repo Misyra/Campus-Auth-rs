@@ -38,6 +38,138 @@ pub(crate) async fn command_output_with_cancel(
         },
     }
 }
+/// 流式输出上限：stdout/stderr 各自最多保留字节数（Playwright 安装输出可达
+/// 数 MB，全缓冲既"假死"又吃内存；超限后仍透出回调，仅截断最终 `Output`）。
+const STREAM_CAPTURE_CAP: usize = 256 * 1024;
+
+/// 有上限累积输出：总量超 [`STREAM_CAPTURE_CAP`] 后丢弃新字节（回调不受影响）。
+fn push_capped(buf: &mut Vec<u8>, bytes: &[u8]) {
+    let room = STREAM_CAPTURE_CAP.saturating_sub(buf.len());
+    if room == 0 {
+        return;
+    }
+    buf.extend_from_slice(&bytes[..bytes.len().min(room)]);
+}
+
+/// 单行切段上限：`\r` 进度行无换行，超限即切段透出，防行缓冲无界增长。
+const LINE_SPLIT_CAP: usize = 1024 * 1024;
+
+/// 透出无换行尾行（EOF/读错时）：非空才回调并清空，不重复累积。
+fn flush_tail(line: &mut String, on_line: &mut impl FnMut(&str)) {
+    if !line.trim_end().is_empty() {
+        on_line(line.trim_end());
+    }
+    line.clear();
+}
+
+/// 终止子进程整棵树：Windows 先 `taskkill /T`（uv 拉起的 node/下载孙进程否则残留
+/// 并咬住缓存锁），再 `start_kill` 兜底；均为 best-effort。
+pub(crate) fn kill_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let Some(id) = child.id() {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &id.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(0x0800_0000)
+            .spawn();
+    }
+    let _ = child.start_kill();
+}
+
+/// 执行长耗时子进程：双管道流式透出（防全缓冲"假死"与内存膨胀），超时/取消时杀整棵树。
+///
+/// `on_line` 逐行回调（含 stderr 行，不带行尾换行）；返回的 `Output` 与
+/// [`command_output_with_cancel`] 同构（超 [`STREAM_CAPTURE_CAP`] 截断）。
+pub(crate) async fn command_output_streaming(
+    mut cmd: tokio::process::Command,
+    timeout: Duration,
+    cancel: &CancellationToken,
+    mut on_line: impl FnMut(&str),
+) -> Result<std::process::Output, CommandOutputError> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    cmd.kill_on_drop(true);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(CommandOutputError::Io)?;
+
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout 已管道化"));
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr 已管道化"));
+    let mut out_buf: Vec<u8> = Vec::new();
+    let mut err_buf: Vec<u8> = Vec::new();
+    let mut out_line = String::new();
+    let mut err_line = String::new();
+    let mut out_eof = false;
+    let mut err_eof = false;
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+
+    // 双管道必须同时排空，否则子进程写满管道缓冲即阻塞；任一 EOF 后只读另一侧。
+    while !(out_eof && err_eof) {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                kill_process_tree(&mut child);
+                return Err(CommandOutputError::Cancelled);
+            }
+            _ = &mut deadline => {
+                kill_process_tree(&mut child);
+                return Err(CommandOutputError::Timeout);
+            }
+            r = stdout.read_line(&mut out_line), if !out_eof => {
+                match r {
+                    Ok(0) => {
+                        flush_tail(&mut out_line, &mut on_line);
+                        out_eof = true;
+                    }
+                    Ok(_) => {
+                        push_capped(&mut out_buf, out_line.as_bytes());
+                        // 正常行（`\n` 结尾）即时回调；`\r` 进度行无换行，超限切段透出。
+                        if out_line.ends_with('\n') || out_line.len() > LINE_SPLIT_CAP {
+                            on_line(out_line.trim_end());
+                            out_line.clear();
+                        }
+                    }
+                    Err(_) => {
+                        push_capped(&mut out_buf, out_line.as_bytes());
+                        flush_tail(&mut out_line, &mut on_line);
+                        out_eof = true;
+                    }
+                }
+            }
+            r = stderr.read_line(&mut err_line), if !err_eof => {
+                match r {
+                    Ok(0) => {
+                        flush_tail(&mut err_line, &mut on_line);
+                        err_eof = true;
+                    }
+                    Ok(_) => {
+                        push_capped(&mut err_buf, err_line.as_bytes());
+                        // 正常行（`\n` 结尾）即时回调；`\r` 进度行无换行，超限切段透出。
+                        if err_line.ends_with('\n') || err_line.len() > LINE_SPLIT_CAP {
+                            on_line(err_line.trim_end());
+                            err_line.clear();
+                        }
+                    }
+                    Err(_) => {
+                        push_capped(&mut err_buf, err_line.as_bytes());
+                        flush_tail(&mut err_line, &mut on_line);
+                        err_eof = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await.map_err(CommandOutputError::Io)?;
+    Ok(std::process::Output {
+        status,
+        stdout: out_buf,
+        stderr: err_buf,
+    })
+}
 
 /// 确定 uv 可执行文件路径：本地 `environment/uv.exe` 存在则用本地路径，否则回退到
 /// PATH 中的 `uv`（`Command::new("uv")` 自动走 PATH 解析）。
@@ -434,33 +566,21 @@ fn extract_uv_from_archive(archive_path: &Path, dest: &Path) -> std::io::Result<
     Ok(())
 }
 
-/// 用户显式启用 OCR 的持久标记。项目更新/venv 修复后仍按该偏好同步 `ocr` extra。
-const OCR_ENABLED_MARKER: &str = "ocr.enabled";
-
-fn ocr_marker_path(mgr: &EnvironmentManager) -> PathBuf {
-    mgr.env_path().join(OCR_ENABLED_MARKER)
-}
-
-fn ocr_extra_enabled(mgr: &EnvironmentManager) -> bool {
-    ocr_marker_path(mgr).is_file()
-}
+/// ddddocr 依赖声明（`uv add` 用，版本下限与旧 `ocr` extra 一致）
+const DDDDOCR_REQUIREMENT: &str = "ddddocr>=1.6.1";
+/// ddddocr 包名（`uv remove` 用）
+const DDDDOCR_PACKAGE: &str = "ddddocr";
 
 /// 执行 `uv sync` 安装 Python 虚拟环境。
 ///
-/// 默认只同步基础依赖；用户显式安装过 OCR 时，根据 environment/ocr.enabled
-/// 持久标记追加 `--extra ocr`，保证环境修复不会悄悄丢失用户选择。
+/// 用户偏好已收敛进 `pyproject.toml` 主依赖（见 `install_ocr_dep` 的 `uv add`），
+/// 同步天然保留用户选择，无需 `--extra` 开关。
 pub async fn run_uv_sync(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    run_uv_sync_with_ocr(mgr, ocr_extra_enabled(mgr), cancel).await
-}
-
-async fn run_uv_sync_with_ocr(
-    mgr: &EnvironmentManager,
-    include_ocr: bool,
-    cancel: &CancellationToken,
-) -> Result<(), EnvironmentError> {
+    // 存量迁移：旧版 `ocr.enabled` 标记 → 主依赖认领（一次性，失败保留标记下次重试）
+    migrate_legacy_ocr_marker(mgr, cancel).await?;
     if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
     }
@@ -480,9 +600,6 @@ async fn run_uv_sync_with_ocr(
     cmd.arg("sync")
         .arg("--project")
         .arg(&*mgr.worker_project_path().to_string_lossy());
-    if include_ocr {
-        cmd.arg("--extra").arg("ocr");
-    }
     cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
         .current_dir(mgr.base_path());
 
@@ -510,55 +627,175 @@ async fn run_uv_sync_with_ocr(
     }
 }
 
-/// 安装 OCR 可选依赖，并持久记录用户启用偏好。
+/// 存量迁移：旧版 `environment/ocr.enabled` 标记 → `uv add` 认领为项目主依赖。
+///
+/// 旧版经 `uv sync --extra ocr` 安装 ddddocr；新版裸 `sync` 会按声明对齐环境而卸载它。
+/// 标记存在时跑一次 `uv add`（已安装即增量认领），成功后删除标记。
+async fn migrate_legacy_ocr_marker(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    if !mgr.ocr_marker_path().is_file() {
+        return Ok(());
+    }
+    tracing::info!("检测到旧版 OCR 启用标记，迁移为项目主依赖...");
+    run_uv_package_alter(mgr, "add", cancel).await?;
+    if let Err(e) = tokio::fs::remove_file(mgr.ocr_marker_path()).await {
+        tracing::warn!("旧版 OCR 标记清理失败（下次同步会再次认领）: {e}");
+    }
+    Ok(())
+}
+
+/// 安装 OCR 依赖：`uv add ddddocr` 写入项目主依赖并自动重锁 + 同步。
 pub async fn install_ocr_dep(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    tokio::fs::create_dir_all(mgr.env_path())
-        .await
-        .map_err(EnvironmentError::UvExtractFailed)?;
-    let marker = ocr_marker_path(mgr);
-    let had_marker = marker.is_file();
-    if !had_marker {
-        tokio::fs::write(&marker, b"enabled")
-            .await
-            .map_err(EnvironmentError::UvExtractFailed)?;
+    run_uv_package_alter(mgr, "add", cancel).await?;
+    if !crate::environment::python::ddddocr_installed(mgr) {
+        return Err(EnvironmentError::UvPackageAlterFailed {
+            op: "add",
+            exit_code: None,
+            stderr: "uv add 成功但 venv 内未探测到 ddddocr".to_string(),
+        });
     }
-
-    if let Err(error) = run_uv_sync_with_ocr(mgr, true, cancel).await {
-        if !had_marker {
-            let _ = tokio::fs::remove_file(&marker).await;
-        }
-        return Err(error);
-    }
-
     tracing::info!("OCR 可选依赖安装完成");
     Ok(())
 }
 
-/// 卸载 OCR 可选依赖，并清除用户启用偏好。
+/// 卸载 OCR 依赖：`uv remove ddddocr` 移出项目主依赖并自动重锁 + 同步。
+///
+/// 幂等：venv 内无 ddddocr 且无旧标记时直接成功；`uv remove` 因"未声明"报错
+/// 但环境已为空时同样按成功计（旧 extra 残留态）。
 pub async fn remove_ocr_dep(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    let marker = ocr_marker_path(mgr);
-    let had_marker = marker.is_file();
-    if had_marker {
-        tokio::fs::remove_file(&marker)
-            .await
-            .map_err(EnvironmentError::UvExtractFailed)?;
+    if !crate::environment::python::ddddocr_installed(mgr) && !mgr.ocr_marker_path().is_file() {
+        return Ok(());
     }
-
-    if let Err(error) = run_uv_sync_with_ocr(mgr, false, cancel).await {
-        if had_marker {
-            let _ = tokio::fs::write(&marker, b"enabled").await;
+    match run_uv_package_alter(mgr, "remove", cancel).await {
+        Ok(()) => {}
+        Err(e) if !crate::environment::python::ddddocr_installed(mgr) => {
+            tracing::debug!("uv remove 未改变已为空的环境: {e}");
         }
-        return Err(error);
+        Err(e) => return Err(e),
+    }
+    let _ = tokio::fs::remove_file(mgr.ocr_marker_path()).await;
+    Ok(())
+}
+
+/// 执行 `uv add/remove`（自动重锁 + 同步）：改写前备份 `pyproject.toml`/`uv.lock`，
+/// 失败或取消时回滚，成功提交。
+async fn run_uv_package_alter(
+    mgr: &EnvironmentManager,
+    op: &'static str,
+    cancel: &CancellationToken,
+) -> Result<(), EnvironmentError> {
+    debug_assert!(op == "add" || op == "remove");
+    if cancel.is_cancelled() {
+        return Err(EnvironmentError::Cancelled);
+    }
+    if !mgr.worker_project_path().exists() {
+        return Err(EnvironmentError::WorkerProjectNotFound {
+            path: mgr.worker_project_path().clone(),
+        });
     }
 
-    tracing::info!("OCR 可选依赖卸载完成");
-    Ok(())
+    let uv_exe = uv_exe_path(mgr);
+    tokio::fs::create_dir_all(mgr.env_path())
+        .await
+        .map_err(EnvironmentError::UvExtractFailed)?;
+    let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
+    let backup = ProjectFilesBackup::take(mgr.worker_project_path())
+        .await
+        .map_err(EnvironmentError::UvExtractFailed)?;
+
+    let mut cmd = uv_command(&uv_exe);
+    cmd.arg(op);
+    if op == "add" {
+        cmd.arg(DDDDOCR_REQUIREMENT);
+    } else {
+        cmd.arg(DDDDOCR_PACKAGE);
+    }
+    cmd.arg("--project")
+        .arg(&*mgr.worker_project_path().to_string_lossy());
+    cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .current_dir(mgr.base_path());
+
+    let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
+        Ok(output) => output,
+        Err(CommandOutputError::Cancelled) => {
+            backup.restore().await;
+            return Err(EnvironmentError::Cancelled);
+        }
+        Err(CommandOutputError::Timeout) => {
+            backup.restore().await;
+            return Err(EnvironmentError::UvSyncTimeout {
+                timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
+            });
+        }
+        Err(CommandOutputError::Io(error)) => {
+            backup.restore().await;
+            return Err(EnvironmentError::UvExtractFailed(error));
+        }
+    };
+
+    if output.status.success() {
+        backup.discard().await;
+        Ok(())
+    } else {
+        backup.restore().await;
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        Err(EnvironmentError::UvPackageAlterFailed {
+            op,
+            exit_code: output.status.code(),
+            stderr,
+        })
+    }
+}
+
+/// `pyproject.toml` + `uv.lock` 快照：`uv add/remove` 改写前备份，失败/取消回滚。
+struct ProjectFilesBackup {
+    pairs: Vec<(PathBuf, PathBuf)>,
+}
+
+impl ProjectFilesBackup {
+    async fn take(project_dir: &Path) -> std::io::Result<Self> {
+        let mut pairs = Vec::with_capacity(2);
+        for name in ["pyproject.toml", "uv.lock"] {
+            let orig = project_dir.join(name);
+            if !orig.is_file() {
+                continue;
+            }
+            let bak = {
+                let mut name = orig.as_os_str().to_owned();
+                name.push(".bak");
+                PathBuf::from(name)
+            };
+            tokio::fs::copy(&orig, &bak).await?;
+            pairs.push((orig, bak));
+        }
+        Ok(Self { pairs })
+    }
+
+    /// 失败回滚：备份覆盖回原位（best-effort，逐个告警）。
+    async fn restore(self) {
+        for (orig, bak) in &self.pairs {
+            if let Err(e) = tokio::fs::copy(bak, orig).await {
+                tracing::warn!("回滚 {} 失败: {e}", orig.display());
+                continue;
+            }
+            let _ = tokio::fs::remove_file(bak).await;
+        }
+    }
+
+    /// 成功提交：删除备份。
+    async fn discard(self) {
+        for (_, bak) in &self.pairs {
+            let _ = tokio::fs::remove_file(bak).await;
+        }
+    }
 }
 
 /// uv 发布资产扩展名：Windows 为 zip；官方 Linux / macOS release 只提供 tar.gz
@@ -700,6 +937,82 @@ mod tests {
         assert!(!marker.exists(), "被取消的子进程不得继续运行到写入完成标记");
     }
 
+    #[test]
+    fn streaming_lines_child_process() {
+        if let Ok(secs) = std::env::var("CAMPUS_AUTH_STREAM_SLEEP_SECS") {
+            if let Ok(secs) = secs.parse::<u64>() {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+            }
+        }
+        let Ok(count) = std::env::var("CAMPUS_AUTH_STREAM_LINES") else {
+            return;
+        };
+        let Ok(count) = count.parse::<usize>() else {
+            return;
+        };
+        for i in 0..count {
+            println!("stream-line-{i}");
+        }
+        eprintln!("stream-err-done");
+        // 无换行尾行：EOF 时也必须透出（回归 flush_tail）。
+        print!("stream-tail-nonewline");
+    }
+
+    /// 流式执行：逐行回调（stdout + stderr）与最终 Output 均完整。
+    #[tokio::test]
+    async fn test_command_output_streaming_captures_lines() {
+        let test_exe = std::env::current_exe().unwrap();
+        let mut cmd = uv_command(&test_exe);
+        cmd.arg("streaming_lines_child_process")
+            .arg("--nocapture")
+            .env("CAMPUS_AUTH_STREAM_LINES", "50");
+
+        let cancel = CancellationToken::new();
+        let mut lines: Vec<String> = Vec::new();
+        let result =
+            command_output_streaming(cmd, std::time::Duration::from_secs(30), &cancel, |line| {
+                lines.push(line.to_string())
+            })
+            .await;
+        let output = result.expect("流式执行应成功");
+        assert!(output.status.success());
+        // 子进程即测试二进制自身，harness 自身输出也会进管道，只断言超集。
+        for i in 0..50 {
+            assert!(
+                lines.iter().any(|l| l == &format!("stream-line-{i}")),
+                "缺 stdout 行 stream-line-{i}"
+            );
+        }
+        assert!(lines.iter().any(|l| l == "stream-err-done"));
+        assert!(
+            lines.iter().any(|l| l.starts_with("stream-tail-nonewline")),
+            "无换行尾行应在 EOF 时透出（可能与 harness 后续输出同行）"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("stream-line-49"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stream-err-done"));
+    }
+
+    /// 流式执行超时：快速返回 Timeout（超时路径同样走进程树 kill）。
+    #[tokio::test]
+    async fn test_command_output_streaming_timeout() {
+        let test_exe = std::env::current_exe().unwrap();
+        let mut cmd = uv_command(&test_exe);
+        cmd.arg("streaming_lines_child_process")
+            .arg("--nocapture")
+            .env("CAMPUS_AUTH_STREAM_SLEEP_SECS", "30")
+            .env("CAMPUS_AUTH_STREAM_LINES", "1");
+
+        let cancel = CancellationToken::new();
+        let started = std::time::Instant::now();
+        let result =
+            command_output_streaming(cmd, std::time::Duration::from_secs(2), &cancel, |_| {}).await;
+        assert!(matches!(result, Err(CommandOutputError::Timeout)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "超时应快速结束等待"
+        );
+    }
+
     /// URL 构造：压缩包与 sha256 均指向主站对应文件（资产扩展名按平台：
     /// Windows zip / unix tar.gz）
     #[test]
@@ -796,7 +1109,7 @@ mod tests {
     fn test_uv_exe_path_two_branches() {
         let dir = tempfile::tempdir().unwrap();
         let status = Arc::new(StatusManager::new());
-        let mgr = EnvironmentManager::new(dir.path().to_path_buf(), status, false);
+        let mgr = EnvironmentManager::new(dir.path().to_path_buf(), status);
 
         // 本地不存在 → 回退 PATH
         assert_eq!(uv_exe_path(&mgr), std::path::PathBuf::from("uv"));
@@ -808,16 +1121,34 @@ mod tests {
         assert_eq!(uv_exe_path(&mgr), env.join(UV_EXE_NAME));
     }
 
-    #[test]
-    fn test_ocr_extra_enabled_uses_persistent_marker() {
+    /// 项目文件备份：take 快照 → 改写 → restore 还原；discard 仅清备份留原文件。
+    #[tokio::test]
+    async fn test_project_files_backup_restore_and_discard() {
         let dir = tempfile::tempdir().unwrap();
-        let status = Arc::new(StatusManager::new());
-        let mgr = EnvironmentManager::new(dir.path().to_path_buf(), status, false);
-        assert!(!ocr_extra_enabled(&mgr));
+        let pyproject = dir.path().join("pyproject.toml");
+        let lock = dir.path().join("uv.lock");
+        std::fs::write(&pyproject, b"[project]\nname = \"x\"\n").unwrap();
+        std::fs::write(&lock, b"# lock\n").unwrap();
 
-        std::fs::create_dir_all(mgr.env_path()).unwrap();
-        std::fs::write(ocr_marker_path(&mgr), b"enabled").unwrap();
-        assert!(ocr_extra_enabled(&mgr));
+        let backup = ProjectFilesBackup::take(dir.path()).await.unwrap();
+        std::fs::write(&pyproject, b"dirty").unwrap();
+        std::fs::write(&lock, b"dirty").unwrap();
+        backup.restore().await;
+        assert_eq!(
+            std::fs::read(&pyproject).unwrap(),
+            b"[project]\nname = \"x\"\n"
+        );
+        assert_eq!(std::fs::read(&lock).unwrap(), b"# lock\n");
+        assert!(!dir.path().join("pyproject.toml.bak").exists());
+        assert!(!dir.path().join("uv.lock.bak").exists());
+
+        let backup = ProjectFilesBackup::take(dir.path()).await.unwrap();
+        backup.discard().await;
+        assert!(!dir.path().join("pyproject.toml.bak").exists());
+        assert_eq!(
+            std::fs::read(&pyproject).unwrap(),
+            b"[project]\nname = \"x\"\n"
+        );
     }
 
     /// 5.4：uv --version 输出解析（含 Windows 可能的括号后缀）

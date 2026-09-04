@@ -36,12 +36,15 @@ pub struct CliArgs {
     pub mode: Option<RuntimeMode>,
 
     /// 基准路径（配置文件 / 任务 / 日志 的根目录）
-    #[arg(long)]
+    #[arg(long, env = "CAMPUS_AUTH_BASE_PATH")]
     pub base_path: Option<PathBuf>,
-
     /// 监听端口（默认从 settings.json 读取）
-    #[arg(short, long)]
+    #[arg(short, long, env = "CAMPUS_AUTH_PORT")]
     pub port: Option<u16>,
+
+    /// 监听地址（默认 127.0.0.1，Docker 环境默认 0.0.0.0；可用 CAMPUS_AUTH_HOST 环境变量覆盖）
+    #[arg(long, env = "CAMPUS_AUTH_HOST")]
+    pub host: Option<String>,
 
     /// 启动后不自动打开浏览器
     #[arg(long)]
@@ -103,12 +106,17 @@ pub enum AutostartAction {
 /// 合并后的启动配置（CLI + settings.json + 默认值）
 struct AppConfig {
     port: u16,
+    host: Option<String>,
     base_path: PathBuf,
     runtime_mode: RuntimeMode,
     no_tray: bool,
     /// 自动打开浏览器：CLI --no-browser 或 settings.json 关闭时为 false。
     /// 同时约束"启动后打开"与"重复启动时打开已有实例的 Web 控制台"两条路径
     auto_open_browser: bool,
+    /// 日志初始级别（与 settings.json 单次解析得出，透传给 `init_logging`）
+    log_level: tracing_subscriber::filter::LevelFilter,
+    /// 日志保留天数（同上，避免日志模块重复读文件）
+    log_retention_days: u32,
 }
 
 /// 启动过程中累积的中间状态
@@ -171,9 +179,14 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         }
     };
 
-    // 5. 日志广播通道 + 文件日志层
+    // 5. 日志广播通道 + 文件日志层（级别/保留天数由步骤 1 单次解析透传，不再重复读文件）
     let log_tx = log_broadcast_tx();
-    let log_guard = init_logging(&app_config.base_path, log_tx.clone());
+    let log_guard = init_logging(
+        &app_config.base_path,
+        log_tx.clone(),
+        app_config.log_level,
+        app_config.log_retention_days,
+    );
 
     // 启动信息留痕（日志系统刚就绪，此前的 tracing 日志无 subscriber）：版本 /
     // 根目录 / 运行模式；非完整模式的实际端口按需分配（配置值无意义），省略该字段
@@ -232,7 +245,9 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     // 8. 创建系统托盘
     // macOS 也照常创建（纯通道结构，无副作用），真正的禁用拦截在
     // TrayManager::spawn 内部单点执行——macOS 返回空句柄，托盘永不启动
-    if !state.app_config.no_tray {
+    // Docker 环境无显示服务器，强制禁用托盘
+    let no_tray_effective = state.app_config.no_tray || crate::app::is_docker_env();
+    if !no_tray_effective {
         let tray = TrayManager::new(crate::tray::TrayDeps {
             config: container.config.clone(),
             status: container.status.clone(),
@@ -242,6 +257,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
             container: container.clone(),
             log_tx: state.log_tx.clone(),
             port: state.app_config.port,
+            host: state.app_config.host.clone(),
             lightweight: matches!(state.app_config.runtime_mode, RuntimeMode::Lightweight),
             shutdown: state.shutdown_token.clone(),
         });
@@ -269,11 +285,11 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
 fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig> {
     // 轻量读取 settings.json 的启动字段，不创建完整 ConfigService——
     // 正式容器在 run() 中统一初始化，避免重复目录 I/O / 迁移 / 解密（历史遗留 M2）。
-    let (file_port, file_show_tray, file_mode, file_auto_open) = read_startup_settings(&base_path);
+    let startup = read_startup_settings(&base_path);
 
-    let port = cli.port.unwrap_or(file_port).max(1);
+    let port = cli.port.unwrap_or(startup.port).max(1);
     // CLI --mode 显式指定时优先生效；缺省时沿用 settings.json 的 app.runtime_mode
-    let runtime_mode = cli.mode.clone().unwrap_or(file_mode);
+    let runtime_mode = cli.mode.clone().unwrap_or(startup.mode);
     // macOS：托盘已禁用（用户决策，W6——tray-icon 要求主线程 NSApplication
     // 事件循环，主线程运行 tokio runtime 无法满足）；轻量模式在 mac 上会既无
     // 托盘也无 Web 入口，统一降级为完整模式保证可用
@@ -286,42 +302,71 @@ fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig>
         other => other,
     };
     // 托盘显示：CLI --no-tray 显式禁用，或配置 show_tray=false
-    let no_tray = cli.no_tray || !file_show_tray;
+    let no_tray = cli.no_tray || !startup.show_tray;
     // CLI --no-browser 与 settings.json 的 auto_start_browser 任一关闭即不打开
-    let auto_open_browser = !cli.no_browser && file_auto_open;
+    let auto_open_browser = !cli.no_browser && startup.auto_open_browser;
+    // 绑定地址：CLI --host 显式指定时优先生效；否则 Docker 环境默认 0.0.0.0
+    let host = cli.host.clone().or_else(|| {
+        if crate::app::is_docker_env() {
+            Some("0.0.0.0".to_string())
+        } else {
+            None
+        }
+    });
 
     Ok(AppConfig {
         port,
+        host,
         base_path,
         runtime_mode,
         no_tray,
         auto_open_browser,
+        log_level: startup.log_level,
+        log_retention_days: startup.log_retention_days,
     })
 }
 
-/// 读取 settings.json 中的启动字段：端口、托盘显示、运行模式、自动打开浏览器
+/// 预读的启动子集（settings.json 单次解析产物）
+///
+/// 历史包袱：启动字段 / 日志级别 / 保留天数曾由三处各自读文件解析。
+/// 现由 [`read_startup_settings`] 一次读出，日志配置透传 `init_logging`，
+/// 避免 `launcher` / `logging` 重复 I/O。
+struct StartupSettings {
+    port: u16,
+    show_tray: bool,
+    mode: RuntimeMode,
+    auto_open_browser: bool,
+    log_level: tracing_subscriber::filter::LevelFilter,
+    log_retention_days: u32,
+}
+
+/// 读取 settings.json 中的启动字段：端口、托盘显示、运行模式、自动打开浏览器 + 日志配置
 ///
 /// 轻量读取（不创建完整 ConfigService——正式容器在 `run()` 中统一初始化，
 /// 避免重复目录 I/O / 迁移 / 解密，历史遗留 M2）。
-fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode, bool) {
-    let default_port = crate::app::DEFAULT_PORT;
-    let default_mode = RuntimeMode::Full;
-    let settings_path = base_path
-        .join(crate::config::CONFIG_DIR)
-        .join(crate::config::SETTINGS_FILE);
+/// 单次文件读取 + 单次 JSON 解析，日志部分委托 `logging::logging_config_from_value`。
+fn read_startup_settings(base_path: &Path) -> StartupSettings {
+    use tracing_subscriber::filter::LevelFilter;
+    let default = StartupSettings {
+        port: crate::app::DEFAULT_PORT,
+        show_tray: true,
+        mode: RuntimeMode::Full,
+        auto_open_browser: true,
+        log_level: LevelFilter::INFO,
+        log_retention_days: 7,
+    };
+    let settings_path = crate::utils::paths::settings_path(base_path);
     let raw = match std::fs::read_to_string(&settings_path) {
         Ok(raw) => raw,
         // 文件不存在属正常路径（首次运行），静默回退默认
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return (default_port, true, default_mode, true);
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return default,
         Err(e) => {
             tracing::debug!(
                 path = %settings_path.display(),
                 error = %e,
                 "读取启动配置失败，使用默认启动参数"
             );
-            return (default_port, true, default_mode, true);
+            return default;
         }
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -329,25 +374,25 @@ fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode, bool) {
             path = %settings_path.display(),
             "settings.json 解析失败，使用默认启动参数"
         );
-        return (default_port, true, default_mode, true);
+        return default;
     };
     let app = value.get("global").and_then(|g| g.get("app"));
     let port = app
         .and_then(|a| a.get("port"))
         .and_then(|p| p.as_u64())
         .and_then(|p| u16::try_from(p).ok())
-        .unwrap_or(default_port);
+        .unwrap_or(default.port);
     let show_tray = app
         .and_then(|a| a.get("show_tray"))
         .and_then(|t| t.as_bool())
         .unwrap_or(true);
     // 配置里的 runtime_mode 此前从未被启动逻辑消费（设置页改了也不生效）
-    let runtime_mode = match app
+    let mode = match app
         .and_then(|a| a.get("runtime_mode"))
         .and_then(|m| m.as_str())
     {
         Some("lightweight") => RuntimeMode::Lightweight,
-        _ => default_mode,
+        _ => RuntimeMode::Full,
     };
     // 兼容迁移前的旧字段名 auto_open_browser（迁移在 ConfigService 初始化时才执行）
     let auto_open_browser = app
@@ -357,35 +402,30 @@ fn read_startup_settings(base_path: &Path) -> (u16, bool, RuntimeMode, bool) {
         })
         .and_then(|t| t.as_bool())
         .unwrap_or(true);
-    (port, show_tray, runtime_mode, auto_open_browser)
+    let (log_level, log_retention_days) = crate::logging::logging_config_from_value(&value);
+    StartupSettings {
+        port,
+        show_tray,
+        mode,
+        auto_open_browser,
+        log_level,
+        log_retention_days,
+    }
 }
 
 /// 检查关键目录的写入权限
+///
+/// 先经 `utils::paths::ensure_runtime_dirs` 一次性预建全部运行时目录，
+/// 再对四类顶层目录做写探测（`config`/`tasks` 必需，`logs`/`environment` 降级）。
 fn check_directory_permissions(base_path: &Path) -> Result<()> {
-    check_dir_writable(&base_path.join("config"), "config", true)?;
-    check_dir_writable(&base_path.join("tasks"), "tasks", true)?;
-    check_dir_writable(&base_path.join("logs"), "logs", false)?;
-    check_dir_writable(&base_path.join("environment"), "environment", false)?;
+    use crate::utils::paths;
+    // 预建失败直接阻断：后续 ConfigService / TaskManager / 日志均依赖目录存在。
+    paths::ensure_runtime_dirs(base_path)?;
+    paths::check_dir_writable(&paths::config_dir(base_path), "config", true)?;
+    paths::check_dir_writable(&paths::tasks_dir(base_path), "tasks", true)?;
+    paths::check_dir_writable(&paths::logs_dir(base_path), "logs", false)?;
+    paths::check_dir_writable(&paths::env_dir(base_path), "environment", false)?;
     Ok(())
-}
-
-/// 检查单个目录可写性
-fn check_dir_writable(path: &Path, name: &str, required: bool) -> Result<()> {
-    std::fs::create_dir_all(path)?;
-    let test_file = path.join(format!(".write_test_{}", std::process::id()));
-    match std::fs::write(&test_file, b"test") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&test_file);
-            Ok(())
-        }
-        Err(e) if required => {
-            anyhow::bail!("{name} 目录不可写 ({}): {e}", path.display());
-        }
-        Err(e) => {
-            warn!("{name} 目录不可写 ({}): {e}（功能降级）", path.display());
-            Ok(())
-        }
-    }
 }
 
 // ============================================================
@@ -400,17 +440,26 @@ fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
             warn!("已有实例运行中，--force 终止...");
             if let Some(info) = crate::utils::lock::query_instance(base_path) {
                 if info.running {
-                    crate::utils::lock::force_kill(info.pid);
-                    for retry in 0..5 {
-                        std::thread::sleep(std::time::Duration::from_millis(200 * (retry + 1)));
-                        if let Ok(lock) = InstanceLock::try_acquire(base_path) {
-                            return Ok(lock);
+                    // PID 复用防护：非本程序进程拒绝误杀，仅清理残留后抢锁
+                    if !crate::utils::lock::is_own_process(info.pid) {
+                        warn!(
+                            pid = info.pid,
+                            "目标 PID 非本程序实例（疑似 PID 复用/残留），跳过 kill，仅清理后抢锁"
+                        );
+                    } else {
+                        crate::utils::lock::force_kill(info.pid);
+                        for retry in 0..5 {
+                            std::thread::sleep(std::time::Duration::from_millis(200 * (retry + 1)));
+                            if let Ok(lock) = InstanceLock::try_acquire(base_path) {
+                                return Ok(lock);
+                            }
                         }
+                        anyhow::bail!("强制终止后无法获取锁");
                     }
-                    anyhow::bail!("强制终止后无法获取锁");
                 }
             }
-            if let Err(e) = std::fs::remove_file(base_path.join("config").join(".instance")) {
+            if let Err(e) = std::fs::remove_file(crate::utils::paths::instance_info_path(base_path))
+            {
                 tracing::debug!(error = %e, "清理残留的 .instance 锁文件失败");
             }
             InstanceLock::try_acquire(base_path).context("强制终止后仍无法获取锁")
@@ -461,18 +510,26 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         container.clone(),
         state.log_tx.clone(),
         state.app_config.port,
+        state.app_config.host.as_deref(),
     )
     .await
     {
         Ok(handle) => {
             let port = handle.port;
-            if let Some(ref lock) = state.instance_lock {
+            if let Some(lock) = &state.instance_lock {
                 if let Err(e) = lock.record_port(port) {
                     warn!(port = port, error = %e, "记录运行端口到实例锁失败");
                 }
             }
             state.axum_handle = Some(handle);
-            info!("Web 控制台已启动: http://127.0.0.1:{port}");
+            let bind_host = state.app_config.host.as_deref().unwrap_or("127.0.0.1");
+            // Docker 环境绑定 0.0.0.0 时，提示地址仍显示为可访问的 host:port
+            let display_host = if bind_host == "0.0.0.0" {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            };
+            info!("Web 控制台已启动: http://{display_host}:{port}");
 
             // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
             // 此前配置项是死开关，UI「静默启动」切换无任何效果
@@ -773,6 +830,12 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
 async fn graceful_shutdown(state: &mut LauncherState) {
     info!("正在关闭...");
 
+    // 0.5 关机时补唤醒 helper：若 apply_update 时 spawn 失败但 pending 已落盘，
+    // 此处再次尝试启动 helper，确保主进程退出后有人完成替换（幂等、无 pending 时空操作）
+    if let Some(container) = &state.container {
+        container.updater.ensure_helper_for_shutdown();
+    }
+
     // 0. 立即取消应用级关闭令牌：
     // - wait_for_shutdown 各监听分支（若尚未返回）被唤醒
     // - watch_engine 收到 Engine 完成通知后据此区分"应用关闭"与"Engine 崩溃"，
@@ -839,13 +902,9 @@ async fn graceful_shutdown(state: &mut LauncherState) {
         app::stop_axum(handle).await;
     }
 
-    // 6. 清理运行端口文件
+    // 6. 清理运行端口文件（路径经 `utils::paths` 统一）
     if let Some(container) = &state.container {
-        let port_file = container
-            .config
-            .base_path()
-            .join("config")
-            .join(app::RUNTIME_PORT_FILE);
+        let port_file = crate::utils::paths::runtime_port_path(&container.config.base_path());
         let _ = std::fs::remove_file(&port_file);
     }
 

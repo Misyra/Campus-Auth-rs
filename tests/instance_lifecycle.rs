@@ -4,79 +4,11 @@
 //! 端口文件记录（G15 哨兵端口）→ `--stop` 经 Web API 的优雅退出。
 //! 测试以真实二进制跑完整启动流程，注意用 `--no-tray --no-browser` 隔离桌面副作用。
 
+mod common;
+
 use assert_cmd::Command;
-use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command as StdCommand, Stdio};
+use common::{free_port, spawn_instance, wait_exit_or_kill, wait_listening};
 use std::time::{Duration, Instant};
-
-/// 子进程守卫：无论测试从哪条路径失败（panic/断言），Drop 都会强杀实例，
-/// 防止残留进程占住测试管道或锁文件
-struct InstanceGuard(Child);
-
-impl Drop for InstanceGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// 取一个当前空闲的高位端口（存在 TOCTOU 窗口，但测试环境可接受）
-fn free_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("绑定临时端口失败")
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// 启动一个完整模式实例（托盘与浏览器均禁用）
-fn err_log_path(port: u16) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("campus-auth-itl-{port}.log"))
-}
-
-fn spawn_instance(base: &str, port: u16, err_log: &std::path::Path) -> InstanceGuard {
-    let err_file = std::fs::File::create(err_log).expect("创建 stderr 日志失败");
-    let child = StdCommand::new(env!("CARGO_BIN_EXE_campus-auth"))
-        .args([
-            "--base-path",
-            base,
-            "--port",
-            &port.to_string(),
-            "--no-tray",
-            "--no-browser",
-            "--mode",
-            "full",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(err_file))
-        .spawn()
-        .expect("启动实例进程失败");
-    InstanceGuard(child)
-}
-
-/// 等待 Axum 端口开始接受 TCP 连接（最多 15s）
-fn wait_listening(port: u16) -> bool {
-    for _ in 0..60 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    false
-}
-
-/// 在限期内等待子进程退出；超时则强杀并失败
-fn wait_exit_or_kill(child: &mut Child, label: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let _ = child.kill();
-    panic!("{label} 未在期限内退出");
-}
 
 #[test]
 fn instance_lock_status_and_graceful_stop() {
@@ -85,8 +17,8 @@ fn instance_lock_status_and_graceful_stop() {
     let port = free_port();
 
     // 1. 首个实例正常启动并监听
-    let err_log = err_log_path(port);
-    let mut first = spawn_instance(&base, port, &err_log);
+    let mut first = spawn_instance(&base, port);
+    let err_log = first.stderr_path().to_path_buf();
     assert!(
         wait_listening(port),
         "首个实例未在期限内开始监听端口 {port}；stderr: {}",

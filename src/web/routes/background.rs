@@ -10,8 +10,10 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
+use std::sync::Arc;
+
+use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
-use crate::web::state::AppState;
 
 /// 背景图文件最大字节数（上传与远程下载统一）。
 pub(crate) const MAX_BACKGROUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -27,8 +29,8 @@ pub struct BackgroundFetchBody {
 }
 
 /// 背景图存储目录
-fn background_dir(state: &AppState) -> std::path::PathBuf {
-    state.config.base_path().join("config").join("background")
+fn background_dir(config: &Arc<dyn ConfigApi>) -> std::path::PathBuf {
+    config.base_path().join("config").join("background")
 }
 
 /// 从文件名中提取安全文件名（防路径穿越），失败则用 UUID 生成
@@ -167,7 +169,7 @@ async fn read_response_limited(
 ///
 /// 返回原始图片字节 + 正确 Content-Type，供前端 CSS url() 直接引用。
 pub async fn get_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     // 防路径穿越：提取安全文件名，并拒绝包含 `..` 的输入
@@ -175,7 +177,7 @@ pub async fn get_background(
         return Err(ApiError::BadRequest("非法文件名".into()));
     }
     let safe_name = safe_filename(Some(filename));
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     let path = dir.join(&safe_name);
     // 确保最终路径仍在背景图目录之内
     if !path.starts_with(&dir) {
@@ -207,10 +209,10 @@ pub async fn get_background(
 
 /// POST /api/background/upload — 上传背景图（multipart/form-data，字段名 file）
 pub async fn upload_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<Value>, ApiError> {
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     tokio::fs::create_dir_all(&dir).await?;
     while let Some(field) = multipart
         .next_field()
@@ -243,7 +245,7 @@ pub async fn upload_background(
 
 /// POST /api/background/fetch-url — 从 URL 获取背景图
 pub async fn fetch_url_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<BackgroundFetchBody>,
 ) -> Result<Json<Value>, ApiError> {
     // 本端点仅允许 HTTPS（SSRF 防护：scheme 校验 + DNS 钉扎 + 逐跳重定向
@@ -271,7 +273,7 @@ pub async fn fetch_url_background(
         )));
     }
     let bytes = read_response_limited(response, MAX_BACKGROUND_IMAGE_BYTES).await?;
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     tokio::fs::create_dir_all(&dir).await?;
     // 从 URL 路径提取文件名，失败则用 UUID 生成
     let extracted = body
@@ -300,7 +302,7 @@ pub async fn fetch_url_background(
 
 /// DELETE /api/background/{filename} — 删除背景图
 pub async fn delete_background(
-    State(state): State<AppState>,
+    State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     // 防路径穿越：提取安全文件名，并拒绝包含 `..` 的输入
@@ -308,7 +310,7 @@ pub async fn delete_background(
         return Err(ApiError::BadRequest("非法文件名".into()));
     }
     let safe_name = safe_filename(Some(filename));
-    let dir = background_dir(&state);
+    let dir = background_dir(&config);
     let path = dir.join(&safe_name);
     // 确保最终路径仍在背景图目录之内
     if !path.starts_with(&dir) {
@@ -394,4 +396,225 @@ mod tests {
     }
 
     // SSRF 私网 IP 判定测试已随 is_private_ip 收敛至 crate::web::ssrf 模块
+}
+
+#[cfg(test)]
+mod route_tests {
+    use std::sync::Arc;
+
+    use super::{delete_background, fetch_url_background, get_background, upload_background};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use tower::ServiceExt; // oneshot
+
+    use super::super::test_support::{MockConfigApi, body_json};
+
+    fn mock_app(
+        base: &std::path::Path,
+    ) -> (
+        axum::Router,
+        Arc<std::sync::Mutex<super::super::test_support::MockConfigInner>>,
+    ) {
+        let (config, inner) = MockConfigApi::mocked();
+        inner.lock().unwrap().base_path = base.to_path_buf();
+        let app = axum::Router::new()
+            .route(
+                "/api/background/{filename}",
+                get(get_background).delete(delete_background),
+            )
+            .route("/api/background/upload", post(upload_background))
+            .route("/api/background/fetch-url", post(fetch_url_background))
+            .with_state(config);
+        (app, inner)
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        // 最小合法 PNG：magic + 1 字节载荷（validate 仅校验 magic 与类型一致）
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.push(0);
+        v
+    }
+
+    /// 路径穿越直接 400，不触盘
+    #[tokio::test]
+    async fn get_and_delete_reject_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, _) = mock_app(tmp.path());
+        for (method, uri) in [
+            ("GET", "/api/background/..%2Fsecret"),
+            ("DELETE", "/api/background/..%2Fsecret"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
+                "{method}: {}",
+                resp.status()
+            );
+        }
+    }
+
+    /// 缺失文件 → 404；存在 → 200 + MIME
+    #[tokio::test]
+    async fn get_missing_and_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("config").join("background");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.png"), png_bytes()).unwrap();
+        let (app, _) = mock_app(tmp.path());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/background/nope.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/background/a.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "image/png");
+    }
+
+    fn multipart_file(boundary: &str, filename: &str, content_type: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        body
+    }
+
+    /// 上传 PNG 落盘并返回可访问 URL；缺 file 字段 → 400
+    #[tokio::test]
+    async fn upload_roundtrip_and_missing_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, _) = mock_app(tmp.path());
+        let boundary = "TESTBOUNDARY";
+        let body = multipart_file(boundary, "up.png", "image/png", &png_bytes());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/background/upload")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let url = v["data"]["url"].as_str().unwrap().to_string();
+        assert!(url.starts_with("/api/background/"));
+        // 返回的 URL 立即可读
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // 缺 file 字段
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nx\r\n--{boundary}--\r\n"
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/background/upload")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 删除往返：删后再次读取 404
+    #[tokio::test]
+    async fn delete_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("config").join("background");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("d.png"), png_bytes()).unwrap();
+        let (app, _) = mock_app(tmp.path());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/background/d.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/background/d.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 非 HTTPS 直接 400（SSRF，第一道门；不断网、不出环）
+    #[tokio::test]
+    async fn fetch_url_rejects_non_https() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, _) = mock_app(tmp.path());
+        for url in [
+            "http://127.0.0.1:18765/captcha",
+            "ftp://example.com/a.png",
+            "not-a-url",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/background/fetch-url")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"url":{url:?}}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "url={url}");
+        }
+    }
 }

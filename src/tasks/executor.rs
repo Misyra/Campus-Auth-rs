@@ -77,8 +77,8 @@ impl TaskExecutor {
         env: Arc<EnvironmentManager>,
         config: Arc<ConfigService>,
     ) -> Arc<Self> {
-        let tasks_dir = base_path.join("tasks");
-        let scripts_dir = tasks_dir.join("scripts");
+        let tasks_dir = crate::utils::paths::tasks_dir(base_path);
+        let scripts_dir = crate::utils::paths::scripts_dir(base_path);
         Arc::new(Self {
             tasks_dir,
             scripts_dir,
@@ -360,14 +360,19 @@ impl TaskExecutor {
             } else {
                 self.scripts_dir.join(&raw)
             };
-            // 已落盘文件：canonicalize 后校验仍位于 scripts_dir 内（防 symlink 绕过）
+            // 已落盘文件：canonicalize 后校验仍位于 scripts_dir 内（防 symlink 绕过）；
+            // 任一 canonicalize 失败即拒绝（fail-closed，不静默放行）
             if path.exists() {
-                if let (Ok(canon), Ok(base)) =
-                    (path.canonicalize(), self.scripts_dir.canonicalize())
-                {
-                    if !canon.starts_with(&base) {
-                        return Err(TaskError::ScriptNotFound(format!("script_path 越界: {sp}")));
-                    }
+                let (canon, base) = (
+                    path.canonicalize().map_err(|e| {
+                        TaskError::ScriptNotFound(format!("script_path 校验失败: {sp} ({e})"))
+                    })?,
+                    self.scripts_dir.canonicalize().map_err(|e| {
+                        TaskError::ScriptNotFound(format!("scripts 目录校验失败 ({e})"))
+                    })?,
+                );
+                if !canon.starts_with(&base) {
+                    return Err(TaskError::ScriptNotFound(format!("script_path 越界: {sp}")));
                 }
             }
             if !path.exists() {

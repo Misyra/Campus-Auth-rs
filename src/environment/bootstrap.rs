@@ -165,22 +165,12 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
 
     let playwright_ready = python_ready && playwright_browser_installed("chromium");
 
-    // Git 仅是开发者辅助能力：开发者模式下检测系统/已有 MinGit，但不自动安装。
-    let git_ready = if mgr.git_download_enabled() {
-        crate::environment::git::check_git(mgr)
-            .await
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
     let capability_ready = uv_ready && python_ready && playwright_ready;
 
     mgr.write_status(|s: &mut EnvironmentStatus| {
         s.uv_ready = uv_ready;
         s.python_ready = python_ready;
         s.playwright_ready = playwright_ready;
-        s.git_ready = git_ready;
         s.capability_ready = capability_ready;
     });
 
@@ -188,8 +178,7 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     // 后续（引导流程内的复用探测）保持 debug，避免刷屏。进程级静态标记是
     // 不改函数签名的最小区分方式——容器启动即 spawn 本函数，几乎必然是首调用方。
     let summary = format!(
-        "uv={}, python={}, playwright={}, git={}, capability={}",
-        uv_ready, python_ready, playwright_ready, git_ready, capability_ready
+        "uv={uv_ready}, python={python_ready}, playwright={playwright_ready}, capability={capability_ready}"
     );
     if !FIRST_CHECK_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
         tracing::info!("环境检查: {summary}");
@@ -207,7 +196,8 @@ static FIRST_CHECK_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 ///
 /// 支持 `chromium` / `firefox` / `webkit`。判断依据是 Playwright 缓存目录中
 /// 对应 `<browser>-*` 子目录存在且非空；未知名称直接返回 false。
-/// 优先尊重 `PLAYWRIGHT_BROWSERS_PATH`，否则按操作系统检查 Playwright 默认缓存。
+/// 优先尊重 `PLAYWRIGHT_BROWSERS_PATH`，否则按操作系统检查 Playwright 默认缓存；
+/// 空值 / `"0"` 表示无独立缓存（与卸载侧 `playwright_cache_dir` 同口径），同样走默认缓存。
 pub fn playwright_browser_installed(browser: &str) -> bool {
     let prefix = match browser {
         "chromium" => "chromium-",
@@ -216,8 +206,10 @@ pub fn playwright_browser_installed(browser: &str) -> bool {
         _ => return false,
     };
 
-    if let Some(dir) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
-        return playwright_dir_has_browser(PathBuf::from(dir), prefix);
+    if let Some(dir) =
+        resolve_custom_browsers_dir(std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").as_deref())
+    {
+        return playwright_dir_has_browser(dir, prefix);
     }
 
     #[cfg(target_os = "windows")]
@@ -260,6 +252,14 @@ pub fn playwright_browser_installed(browser: &str) -> bool {
     }
 
     false
+}
+/// 解析自定义浏览器缓存目录：未设置 / 空 / `"0"` 返回 `None`（回退 OS 默认），纯函数便于单测。
+fn resolve_custom_browsers_dir(var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let dir = var?;
+    if dir.is_empty() || dir == "0" {
+        return None;
+    }
+    Some(PathBuf::from(dir))
 }
 
 /// 检查 ms-playwright 目录下是否存在指定前缀且非空的浏览器子目录。
@@ -341,5 +341,17 @@ mod tests {
             dir.path().to_path_buf(),
             "webkit-"
         ));
+    }
+    /// 自定义目录解析：未设置/空/"0" 回退默认（None），其余原样透出。
+    #[test]
+    fn custom_browsers_dir_exempts_empty_and_zero() {
+        use std::ffi::OsStr;
+        assert_eq!(resolve_custom_browsers_dir(None), None);
+        assert_eq!(resolve_custom_browsers_dir(Some(OsStr::new(""))), None);
+        assert_eq!(resolve_custom_browsers_dir(Some(OsStr::new("0"))), None);
+        assert_eq!(
+            resolve_custom_browsers_dir(Some(OsStr::new("/tmp/pw-browsers"))),
+            Some(PathBuf::from("/tmp/pw-browsers"))
+        );
     }
 }

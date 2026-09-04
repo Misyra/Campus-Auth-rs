@@ -1,0 +1,11 @@
+{
+  "id": "default",
+  "name": "默认网络",
+  "username": "",
+  "password": "",
+  "auth_url": "",
+  "isp": "",
+  "gateway_ip": "",
+  "wifi_ssid": "",
+  "active_task": ""
+}

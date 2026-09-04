@@ -189,6 +189,10 @@ async fn apply_flat_settings_patch(
 
     // 全局设置合并：提交事务（持锁读-改-写，闭包失败不落盘）
     if !global_patch.is_empty() || !other_patch.is_empty() {
+        // 空否以前置 Map 判定为准：Value::Object 包裹后 as_object() 恒为 Some，
+        // 此处不再 unwrap（此前写法正确但制造 panic 观感）
+        let global_empty = global_patch.is_empty();
+        let other_empty = other_patch.is_empty();
         let global_patch = Value::Object(global_patch);
         let other_patch = Value::Object(other_patch);
         match config
@@ -196,13 +200,13 @@ async fn apply_flat_settings_patch(
                 let mut current_value =
                     serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
                 // 合并 global 字段
-                if !global_patch.as_object().unwrap().is_empty() {
+                if !global_empty {
                     if let Some(global) = current_value.get_mut("global") {
                         json_merge(global, &global_patch);
                     }
                 }
                 // 合并其他字段（如 active_profile_id 等）
-                if !other_patch.as_object().unwrap().is_empty() {
+                if !other_empty {
                     json_merge(&mut current_value, &other_patch);
                 }
                 serde_json::from_value(current_value)

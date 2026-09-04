@@ -64,9 +64,11 @@ pub struct TaskManager {
 impl TaskManager {
     /// 构造管理器，确保子目录存在，并迁移旧版 `active.txt`、初始化 `.order.json`
     pub fn new(base_path: &Path, config: Arc<ConfigService>) -> Arc<Self> {
-        let tasks_dir = base_path.join("tasks");
-        let browser_dir = tasks_dir.join("browser");
-        let scripts_dir = tasks_dir.join("scripts");
+        // 路径经 `utils::paths` 统一；`ensure_runtime_dirs` 已在启动预建，
+        // 此处保留幂等创建以兼容测试直构（防御性，不作为权威）。
+        let tasks_dir = crate::utils::paths::tasks_dir(base_path);
+        let browser_dir = crate::utils::paths::browser_tasks_dir(base_path);
+        let scripts_dir = crate::utils::paths::scripts_dir(base_path);
         // 构造期目录创建失败会导致后续所有任务读写连锁失败，必须告警
         if let Err(e) = std::fs::create_dir_all(&browser_dir) {
             tracing::warn!(
@@ -283,13 +285,21 @@ impl TaskManager {
             TaskKind::Script(_) | TaskKind::Shell(_) => &self.scripts_dir,
         };
         let path = subdir.join(format!("{task_id}.json"));
+        // 同 ID 切换类型时删除另一目录残留（防 browser 优先的影子文件）
+        let stale = if std::ptr::eq(subdir, &self.browser_dir) {
+            self.scripts_dir.join(format!("{task_id}.json"))
+        } else {
+            self.browser_dir.join(format!("{task_id}.json"))
+        };
 
         let mut task = task.clone();
         // 将 task_id 写回 common（避免 JSON 中遗漏）
         task.common_mut().task_id = task_id.to_string();
 
         atomic_write_json(&path, &task)?;
-
+        if stale.exists() {
+            let _ = std::fs::remove_file(&stale);
+        }
         // 追加到 order（如不存在）
         let mut order = self.read_order();
         if !order.order.contains(&task_id.to_string()) {

@@ -5,7 +5,10 @@
  * 路径与后端 openapi.json 保持一致。
  */
 
-import { http } from "./client";
+import { ensureAuthToken, http } from "./client";
+
+/** 路径段编码：所有 id/filename 插值前必经此函数 */
+const pathSegment = (s: string) => encodeURIComponent(s);
 import type { RequestOptions } from "./client";
 import type {
   AutostartStatus,
@@ -99,12 +102,12 @@ export const environmentApi = {
 /** 配置方案 */
 export const profilesApi = {
   list: () => http.get<ProfileListResponse>("/api/profiles"),
-  get: (id: string) => http.get<{ settings: Profile }>(`/api/profiles/${id}`),
+  get: (id: string) => http.get<{ settings: Profile }>(`/api/profiles/${pathSegment(id)}`),
   // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password（对齐后端 ProfileCreateBody 必填字段）
   create: (id: string, payload: { id: string; name: string; username: string; password: string }) =>
-    http.post<MutationResult>(`/api/profiles/${id}`, payload),
-  save: (id: string, payload: Profile) => http.put<MutationResult>(`/api/profiles/${id}`, payload),
-  delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${id}`),
+    http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
+  save: (id: string, payload: Profile) => http.put<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${pathSegment(id)}`),
   setActive: (id: string) => http.post<MutationResult>("/api/profiles/switch", { profile_id: id }),
   detect: () => http.post<NetworkDetectResult>("/api/profiles/detect"),
   toggleAutoSwitch: (enabled: boolean) =>
@@ -171,7 +174,7 @@ export const debugApi = {
     ),
   /** 导出问题报告：日志+活动任务+页面 MHTML/截图（后端打 zip，返回 Blob） */
   async feedbackBundle(): Promise<Blob> {
-    const token = await import("./client").then((m) => m.ensureAuthToken());
+    const token = await ensureAuthToken();
     const res = await fetch("/api/debug/feedback-bundle", {
       method: "POST",
       headers: token ? { "X-Auth-Token": token } : undefined,
@@ -212,32 +215,32 @@ export const backgroundApi = {
   },
   fetchUrl: (url: string) =>
     http.post<BackgroundUploadResult>("/api/background/fetch-url", { url }),
-  remove: (filename: string) => http.delete<MutationResult>(`/api/background/${filename}`),
+  remove: (filename: string) => http.delete<MutationResult>(`/api/background/${pathSegment(filename)}`),
 };
 
 /** 脚本 */
 export const scriptsApi = {
   list: () => http.get<Script[]>("/api/scripts"),
-  get: (id: string) => http.get<Script>(`/api/scripts/${id}`),
+  get: (id: string) => http.get<Script>(`/api/scripts/${pathSegment(id)}`),
   binaries: () => http.get<import("./types").BinaryInfo[]>("/api/scripts/binaries"),
   save: (id: string, payload: { name: string; description: string; content: string; binary_path: string }) =>
-    http.put<MutationResult>(`/api/scripts/${id}`, payload),
-  delete: (id: string) => http.delete<MutationResult>(`/api/scripts/${id}`),
+    http.put<MutationResult>(`/api/scripts/${pathSegment(id)}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/scripts/${pathSegment(id)}`),
   run: (id: string) => http.post<MutationResult>("/api/scripts/run", { task_id: id }),
 };
 
 /** 任务（浏览器任务） */
 export const tasksApi = {
   list: () => http.get<TaskItem[]>("/api/tasks"),
-  get: (id: string) => http.get<TaskDetail>(`/api/tasks/${id}`),
+  get: (id: string) => http.get<TaskDetail>(`/api/tasks/${pathSegment(id)}`),
   active: () => http.get<{ task_id: string }>("/api/tasks/active"),
-  save: (id: string, payload: Record<string, unknown>) => http.put<MutationResult>(`/api/tasks/${id}`, payload),
-  delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${id}`),
-  setActive: (id: string) => http.post<MutationResult>(`/api/tasks/active/${id}`),
-  execute: (id: string) => http.post<MutationResult>(`/api/tasks/${id}/execute`),
+  save: (id: string, payload: Record<string, unknown>) => http.put<MutationResult>(`/api/tasks/${pathSegment(id)}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${pathSegment(id)}`),
+  setActive: (id: string) => http.post<MutationResult>(`/api/tasks/active/${pathSegment(id)}`),
+  execute: (id: string) => http.post<MutationResult>(`/api/tasks/${pathSegment(id)}/execute`),
   order: (order: { all: string[]; scripts: string[] }) => http.post<MutationResult>("/api/tasks/order", order),
   import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),
-  export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${id}`),
+  export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${pathSegment(id)}`),
 };
 
 /** 定时任务 */

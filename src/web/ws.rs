@@ -155,7 +155,7 @@ async fn prepare_bridge_event(text: &str, state: &AppState) -> String {
     // 与 Bridge spawn / EnvironmentManager 同一解析：dev 模式（junction 不存在）
     // 时 python_worker 回退到仓库根，硬路径会导致内联静默失败、面板"暂无截图"
     let debug_dir =
-        crate::environment::resolve_worker_project_path(&state.config.base_path()).join("debug");
+        crate::utils::paths::worker_project_dir(&state.config.base_path()).join("debug");
     let path = debug_dir.join(&filename);
     let Ok(meta) = tokio::fs::symlink_metadata(&path).await else {
         return serde_json::to_string(&envelope).unwrap_or_default();

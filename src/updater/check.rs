@@ -11,7 +11,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::updater::error::UpdaterError;
 
-/// 发布清单（latest.json）数据模型
+/// 更新源 URL 白名单：`https` 任意主机放行（拒绝 userinfo）；`http` 仅精确回环主机
+///
+/// 拒绝字符串前缀校验（`http://127.0.0.1.evil.com` 曾被误放行）；
+/// 回环白名单为精确 host：`127.0.0.1` / `localhost` / `::1`。
+pub(crate) fn is_allowed_update_url(url_str: &str) -> bool {
+    let Ok(url) = url::Url::parse(url_str) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => true,
+        "http" => matches!(
+            url.host_str(),
+            Some("127.0.0.1") | Some("localhost") | Some("::1") | Some("[::1]")
+        ),
+        _ => false,
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReleaseManifest {
     /// 远程版本号（serde 直接反序列化为 `semver::Version`）
@@ -87,11 +106,8 @@ pub(crate) async fn fetch_manifest(
     } else {
         source_url
     };
-    // 纵深校验：清单 URL 必须为 https，本地回环 http 仅在测试/自托管 e2e 时放行
-    let is_loopback_http = url.starts_with("http://127.0.0.1")
-        || url.starts_with("http://localhost")
-        || url.starts_with("http://[::1]");
-    if !url.starts_with("https://") && !is_loopback_http {
+    // 严格校验：https 放行，http 仅精确回环 host（拒绝前缀绕过与 userinfo）
+    if !is_allowed_update_url(url) {
         return Err(UpdaterError::HttpsRequired(url.to_string()));
     }
     tracing::debug!(url = %url, "拉取发布清单");
@@ -103,6 +119,10 @@ pub(crate) async fn fetch_manifest(
         .send()
         .await
         .map_err(UpdaterError::ManifestFetchFailed)?;
+    // 重定向收敛：最终 URL 仍须通过白名单（防 https→http evil 跳转）
+    if !is_allowed_update_url(response.url().as_str()) {
+        return Err(UpdaterError::HttpsRequired(response.url().to_string()));
+    }
 
     // 处理 GitHub API 速率限制（429 Too Many Requests）
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -155,25 +175,23 @@ pub(crate) async fn fetch_manifest(
         // G11：抽纯函数按 "os-arch" 推断平台键，多资产 release 中
         // windows-x64 / windows-arm64 各占一键互不覆盖
         for (platform_key, dl_url, size, name) in collect_package_assets(&assets) {
-            // 从 release assets 中找 `.sha256` 伴随文件，拿到真实哈希（U2：默认 GitHub
-            // 源此前 sha256 恒为空，更新包无任何完整性校验）
+            // 完整性强制：无伴随 .sha256 的平台包直接跳过（不再降级信任 HTTPS）
             let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
             let sha256 =
                 fetch_sha256_with_retry(&name, || fetch_sha256_assoc(client, &asset_refs, &name))
                     .await;
             if sha256.is_empty() {
-                // 降级是发布源常态（老资产无伴随文件）：首次 warn 暴露，
-                // 后续同类情况降为 debug 避免每次检查都刷 WARN
+                // 缺失即不可用：首次 warn，后续 debug，避免刷屏但不放行
                 if !SHA_ASSOC_MISSING_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     tracing::warn!(
-                        "GitHub 发布中未找到 {name} 的 .sha256 伴随文件（重试后仍为空），\
-                         降级为信任 HTTPS（后续同类告警仅 DEBUG）"
+                        "GitHub 发布中未找到 {name} 的 .sha256 伴随文件，已跳过该平台包（需补伴随文件）"
                     );
                 } else {
                     tracing::debug!(
-                        "GitHub 发布中未找到 {name} 的 .sha256 伴随文件，降级为信任 HTTPS"
+                        "GitHub 发布中未找到 {name} 的 .sha256 伴随文件，已跳过该平台包"
                     );
                 }
+                continue;
             }
             platforms.insert(
                 platform_key,
@@ -294,8 +312,7 @@ where
 ///
 /// 返回伴随文件首行首个空白分隔字段（即哈希值）；找不到 / 下载失败时返回空串
 /// （调用方据此降级为信任 HTTPS）。
-/// pub(crate)：environment/git.rs（MinGit 校验，R3）复用同一伴随文件模式。
-pub(crate) async fn fetch_sha256_assoc(
+async fn fetch_sha256_assoc(
     client: &reqwest::Client,
     assets: &[&serde_json::Value],
     zip_name: &str,
@@ -565,5 +582,22 @@ mod tests {
         .await;
         assert_eq!(result, "");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// URL 白名单：https 放行，http 仅精确回环，拒绝前缀绕过与 userinfo
+    #[test]
+    fn test_is_allowed_update_url() {
+        assert!(is_allowed_update_url("https://example.com/latest.json"));
+        assert!(is_allowed_update_url("https://127.0.0.1.evil.com/x"));
+        assert!(is_allowed_update_url("http://127.0.0.1:8765/latest.json"));
+        assert!(is_allowed_update_url("http://localhost:8765/x.zip"));
+        assert!(is_allowed_update_url("http://[::1]:8765/x"));
+        assert!(!is_allowed_update_url("http://127.0.0.1.evil.com/x"));
+        assert!(!is_allowed_update_url("http://localhost.evil.com/x"));
+        assert!(!is_allowed_update_url("http://127.0.0.1@evil.com/x"));
+        assert!(!is_allowed_update_url("http://example.com/x"));
+        assert!(!is_allowed_update_url("ftp://example.com/x"));
+        assert!(!is_allowed_update_url("https://user:pass@example.com/x"));
+        assert!(!is_allowed_update_url("not a url"));
     }
 }

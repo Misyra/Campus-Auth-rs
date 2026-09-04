@@ -41,9 +41,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::ConfigService;
-use crate::environment::{PYTHON_EXE_RELATIVE, resolve_worker_project_path};
+use crate::environment::PYTHON_EXE_RELATIVE;
 use crate::status::{PartialSnapshot, StatusManager, WorkerStatus};
 use crate::utils::metrics::Metrics;
+use crate::utils::paths::worker_project_dir;
 
 /// Worker 空闲回收默认阈值（秒）
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
@@ -316,9 +317,9 @@ impl BridgeSupervisor {
         metrics: Option<Arc<Metrics>>,
     ) -> Arc<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
-        // 与 EnvironmentManager 共用同一解析（dev 模式回退仓库根），避免 spawn 检查
-        // 与环境就绪判定各说各话（曾导致 cargo run 下误报"Worker 环境未安装"）
-        let worker_project_dir = resolve_worker_project_path(&base_path);
+        // 与 EnvironmentManager 共用 `utils::paths::worker_project_dir`（dev 模式回退仓库根），
+        // 避免 spawn 检查与环境就绪判定各说各话（曾导致 cargo run 下误报"Worker 环境未安装"）
+        let worker_project_dir = worker_project_dir(&base_path);
         Arc::new_cyclic(|weak| Self {
             orphan_cleanup_done: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(BridgeInner {

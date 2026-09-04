@@ -352,12 +352,14 @@ impl LoginOrchestrator {
         let rt = self.config.runtime().load_full();
         // 解析凭据来源 Profile：profile_id 指定时加载该 Profile 快照，否则用全局活跃 Profile。
         // 多 Profile 场景下的定时浏览器任务可借此使用各自独立的账号凭据。
+        // 指定 Profile 加载失败直接失败（不回退全局，避免账号 A/B 错配）。
         let resolved_profile: ProfileSnapshot = match &profile_id {
             Some(pid) if !pid.is_empty() => match self.config.runtime_config_for_profile(pid) {
                 Ok(rc) => rc.profile,
                 Err(e) => {
-                    warn!("加载指定 Profile {pid} 失败，回退全局活跃 Profile: {e}");
-                    rt.profile.clone()
+                    let msg = format!("指定 Profile {pid} 加载失败，已拒绝登录: {e}");
+                    warn!("{msg}");
+                    return self.immediate_handle(source, false, msg, pid.clone()).await;
                 }
             },
             _ => rt.profile.clone(),
@@ -1032,11 +1034,7 @@ mod tests {
             status.clone(),
             None,
         );
-        let environment = EnvironmentManager::new(
-            dir.path().to_path_buf(),
-            status.clone(),
-            config.runtime().load().app.developer_mode,
-        );
+        let environment = EnvironmentManager::new(dir.path().to_path_buf(), status.clone());
         let tasks = TaskManager::new(dir.path(), config.clone());
         let history = LoginHistoryService::new(dir.path());
         let detector = create_detector();

@@ -6,7 +6,7 @@ use crate::environment::{
 };
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
@@ -50,9 +50,8 @@ async fn python_executable_status(python_exe: &Path) -> Result<(), String> {
 
 /// 确保 Python 虚拟环境就绪
 ///
-/// 检查 `.venv` 目录是否存在，不存在则执行 `uv sync` 创建。OCR 依赖
-/// （ddddocr）属于 `ocr` extra；是否随环境修复安装由 environment/ocr.enabled
-/// 持久标记决定，显式安装/卸载不会再修改 pyproject.toml。
+/// 检查解释器是否真实可启动，不可用则执行 `uv sync` 创建/修复。OCR 依赖
+/// （ddddocr）经 `uv add` 进入项目主依赖，同步天然保留，无需额外开关。
 /// 返回 Python 解释器路径。
 pub async fn ensure_venv(
     mgr: &EnvironmentManager,
@@ -199,7 +198,7 @@ pub async fn install_playwright_browser(
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
     let mut last_err_msg = String::new();
-
+    let mut timed_out = false;
     for attempt in 0..PLAYWRIGHT_INSTALL_MAX_RETRIES {
         // 检查取消
         if cancel.is_cancelled() {
@@ -222,6 +221,8 @@ pub async fn install_playwright_browser(
         }
 
         // 执行 uv run playwright install <browser>；取消/超时都会终止子进程。
+        // 下载源默认走 npmmirror 镜像（见 `playwright_download_host`，已显式设置则尊重）；
+        // 代理不显式设置：子进程默认继承系统环境（HTTPS_PROXY 等），即系统代理。
         let mut cmd = crate::environment::uv::uv_command(&uv_exe);
         cmd.args([
             "run",
@@ -232,12 +233,54 @@ pub async fn install_playwright_browser(
             browser,
         ])
         .env("UV_PROJECT_ENVIRONMENT", &venv_path)
+        .env(
+            "PLAYWRIGHT_DOWNLOAD_HOST",
+            crate::environment::playwright_download_host(),
+        )
+        .env(
+            "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT",
+            crate::environment::PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT_MS.to_string(),
+        )
         .current_dir(mgr.base_path());
 
-        let result = crate::environment::uv::command_output_with_cancel(
+        // 流式执行：输出透出 + 存活进度（防数分钟"假死"观感），超时/取消杀整棵树。
+        let started = Instant::now();
+        let mut last_report = started;
+        let mut last_line = String::new();
+        let result = crate::environment::uv::command_output_streaming(
             cmd,
             PLAYWRIGHT_INSTALL_TIMEOUT,
             cancel,
+            |line| {
+                let line = line.trim();
+                if line.is_empty() {
+                    return;
+                }
+                tracing::debug!(target: "playwright_install", "{line}");
+                last_line.clear();
+                last_line.push_str(line);
+                // 至多 5s 上报一次：60→84 按耗时爬行，消息带最新输出行（截断防刷屏）。
+                let now = Instant::now();
+                if now.duration_since(last_report) >= Duration::from_secs(5) {
+                    last_report = now;
+                    let elapsed = now.duration_since(started).as_secs();
+                    let pct = 60 + (elapsed * 24 / PLAYWRIGHT_INSTALL_TIMEOUT.as_secs()).min(24);
+                    let tail: String = last_line
+                        .chars()
+                        .rev()
+                        .take(80)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    let msg = if tail.len() < last_line.len() {
+                        format!("正在安装 {browser}（…{tail}）...")
+                    } else {
+                        format!("正在安装 {browser}（{tail}）...")
+                    };
+                    mgr.report_progress("installing_playwright", pct as u8, &msg);
+                }
+            },
         )
         .await;
 
@@ -277,6 +320,7 @@ pub async fn install_playwright_browser(
                 );
             }
             Err(crate::environment::uv::CommandOutputError::Timeout) => {
+                timed_out = true;
                 last_err_msg = format!("安装超时 (超过 {}s)", PLAYWRIGHT_INSTALL_TIMEOUT.as_secs());
                 tracing::warn!(
                     "{} (尝试 {}/{})",
@@ -288,11 +332,93 @@ pub async fn install_playwright_browser(
         }
     }
 
-    // 所有重试均失败
+    // 所有重试均失败：原因归类 + 可操作建议（设置页原样展示，见 SystemSettings）。
+    let (cause, hint) = if timed_out {
+        classify_playwright_failure("timeout")
+    } else {
+        classify_playwright_failure(&last_err_msg)
+    };
+    let detail = tail_chars(&last_err_msg, 300);
+    let mut message = format!("原因：{cause}\n建议：{hint}\n详情：{detail}");
+    // 设置页单段展示，上限防刷屏（原因+建议常驻，只截详情）。
+    const MAX_FAILURE_CHARS: usize = 600;
+    if message.chars().count() > MAX_FAILURE_CHARS {
+        let keep = detail
+            .chars()
+            .take(
+                detail
+                    .chars()
+                    .count()
+                    .saturating_sub(message.chars().count() - MAX_FAILURE_CHARS),
+            )
+            .collect::<String>();
+        message = format!("原因：{cause}\n建议：{hint}\n详情：{keep}");
+    }
     Err(EnvironmentError::PlaywrightInstallFailed {
         retries: PLAYWRIGHT_INSTALL_MAX_RETRIES,
-        message: last_err_msg,
+        message,
     })
+}
+
+/// 归类浏览器下载失败原因 →（原因，操作建议），供失败提示展示。
+///
+/// 纯函数：输入为各次尝试的末尾输出拼接（小写匹配，兼容中英文报错）。
+fn classify_playwright_failure(text: &str) -> (&'static str, &'static str) {
+    let lower = text.to_lowercase();
+    // 超时：连接太慢或被拦截（调用方超时即传 "timeout" 直达本分支）。
+    if lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("超时")
+        || lower.contains("deadline")
+    {
+        return (
+            "下载超时",
+            "网络太慢或连接被拦截：检查系统代理与防火墙，点“初始化 Python 环境”重试",
+        );
+    }
+    // 建连失败：DNS/拒连/重置/代理。
+    if lower.contains("refused")
+        || lower.contains("reset by peer")
+        || lower.contains("failed to connect")
+        || lower.contains("could not resolve")
+        || lower.contains("getaddrinfo")
+        || lower.contains("unreachable")
+        || lower.contains("proxy")
+        || lower.contains("代理")
+    {
+        return (
+            "无法连接下载源",
+            "检查系统代理与网络，确认能访问 npmmirror 后重试",
+        );
+    }
+    // 镜像侧错误：缺构建/限流。
+    if lower.contains("404")
+        || lower.contains("403")
+        || lower.contains("429")
+        || lower.contains("http error")
+    {
+        return (
+            "下载源返回错误",
+            "镜像可能缺该版本构建或被限流：稍后重试，持续失败请反馈",
+        );
+    }
+    // 磁盘空间。
+    if lower.contains("no space")
+        || lower.contains("disk full")
+        || lower.contains("not enough space")
+        || lower.contains("enospc")
+        || lower.contains("空间不足")
+    {
+        return ("磁盘空间不足", "清理磁盘后点“初始化 Python 环境”重试");
+    }
+    // 证书（企业网关 MITM）。
+    if lower.contains("certificate") || lower.contains("ssl") || lower.contains("证书") {
+        return (
+            "证书校验失败",
+            "多为公司网关拦截：检查代理设置，或配置 NODE_EXTRA_CA_CERTS 后重试",
+        );
+    }
+    ("安装失败", "点“初始化 Python 环境”重试，仍失败请附日志反馈")
 }
 
 #[cfg(test)]
@@ -312,7 +438,6 @@ mod tests {
         let mgr = EnvironmentManager::new(
             dir.path().to_path_buf(),
             std::sync::Arc::new(crate::status::StatusManager::new()),
-            false,
         );
         let cancel = CancellationToken::new();
         let result = install_playwright_browser(&mgr, "chrome", &cancel).await;
@@ -328,7 +453,6 @@ mod tests {
         let mgr = EnvironmentManager::new(
             dir.path().to_path_buf(),
             std::sync::Arc::new(crate::status::StatusManager::new()),
-            false,
         );
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -365,5 +489,23 @@ devtools = ["ddddocr>=1.6.1"]
 ocr = ["pillow"]
 "#;
         assert!(!ocr_declared_in_pyproject(unrelated_extra));
+    }
+    /// 失败归类：超时/建连/镜像/磁盘/证书/兜底各走对应原因与建议。
+    #[test]
+    fn test_classify_playwright_failure_branches() {
+        let (cause, _) = classify_playwright_failure("安装超时 (超过 600s)");
+        assert_eq!(cause, "下载超时");
+        let (cause, hint) = classify_playwright_failure("exit code=1, stderr=Connection refused");
+        assert_eq!(cause, "无法连接下载源");
+        assert!(hint.contains("npmmirror"));
+        let (cause, _) = classify_playwright_failure("HTTP error 404 Not Found");
+        assert_eq!(cause, "下载源返回错误");
+        let (cause, _) = classify_playwright_failure("ENOSPC: no space left on device");
+        assert_eq!(cause, "磁盘空间不足");
+        let (cause, _) = classify_playwright_failure("self signed certificate in chain");
+        assert_eq!(cause, "证书校验失败");
+        let (cause, hint) = classify_playwright_failure("exit code=1, stderr=boom");
+        assert_eq!(cause, "安装失败");
+        assert!(hint.contains("重试"));
     }
 }

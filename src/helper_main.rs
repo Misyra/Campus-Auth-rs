@@ -496,13 +496,12 @@ fn file_sha256(path: &Path) -> std::io::Result<String> {
 
 /// G13：替换前复核 staging exe 的 SHA256
 ///
-/// `expected` 为空（发布源未提供伴随 .sha256，与 G12 的"信任 HTTPS"降级一致）
-/// 时跳过复核；非空但与实际不符时返回 false——staging 损坏或被篡改，必须中止
-/// 替换（调用方随后清理不可信的 staging）。
+/// `expected` 为空直接拒绝（不再降级信任 HTTPS）；非空但与实际不符时返回
+/// false——staging 损坏或被篡改，必须中止替换（调用方随后清理不可信 staging）。
 fn verify_staging_sha256(extracted_exe: &Path, expected: &str) -> bool {
     if expected.is_empty() {
-        eprintln!("[helper] pending.json 未携带 SHA256，跳过 staging 复核（信任 HTTPS 下载链路）");
-        return true;
+        eprintln!("[helper] pending.json 未携带 SHA256，已拒绝替换（需补校验值）");
+        return false;
     }
     match file_sha256(extracted_exe) {
         Ok(actual) if actual.eq_ignore_ascii_case(expected) => true,
@@ -562,7 +561,7 @@ mod tests {
         ));
     }
 
-    /// G13：SHA 复核——正确值通过、错误值拒绝、空值降级跳过、缺失文件拒绝
+    /// G13：SHA 复核——正确值通过、错误值拒绝、空值拒绝（P1-3：缺失拒绝，不降级）、文件缺失拒绝
     #[test]
     fn test_verify_staging_sha256() {
         let dir = tempfile::tempdir().unwrap();
@@ -572,8 +571,8 @@ mod tests {
         use sha2::{Digest, Sha256};
         let correct = hex::encode(Sha256::digest(b"staged-binary-content"));
 
-        // 空期望：降级跳过复核（返回 true，允许继续替换）
-        assert!(verify_staging_sha256(&exe, ""));
+        // 空期望：拒绝（缺失拒绝，不降级跳过）
+        assert!(!verify_staging_sha256(&exe, ""));
         // 正确摘要：通过（大小写不敏感）
         assert!(verify_staging_sha256(&exe, &correct));
         assert!(verify_staging_sha256(&exe, &correct.to_uppercase()));

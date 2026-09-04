@@ -1,0 +1,6 @@
+<!doctype html><html><body><canvas id="c" width="400" height="300" style="border:1px solid #000"></canvas><script>
+let c=document.getElementById("c"),ctx=c.getContext("2d"),x=50,y=50;
+function draw(){ctx.clearRect(0,0,400,300);ctx.fillRect(x,y,30,30)}
+draw();
+c.addEventListener("click",e=>{let r=c.getBoundingClientRect();x=e.clientX-r.left-15;y=e.clientY-r.top-15;draw()});
+</script><p>Click canvas to move square — manual game for E2E</p></body></html>

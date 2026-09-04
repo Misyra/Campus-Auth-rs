@@ -70,8 +70,9 @@ async fn run_command(program: &str, args: &[&str]) -> Result<String, NetworkErro
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    // Windows：设置 CREATE_NO_WINDOW，避免 ipconfig/netsh 等系统命令弹出黑色控制台窗口
+        .stderr(std::process::Stdio::piped())
+        // 超时丢弃 future 后显式杀子进程，防 ipconfig/route/netsh 残留堆积
+        .kill_on_drop(true);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;

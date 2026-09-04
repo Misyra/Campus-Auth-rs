@@ -14,7 +14,6 @@ use serde_json::Value;
 use crate::environment::EnvironmentApi;
 use crate::tasks::{TaskApi, TaskRunApi};
 use crate::web::error::{ApiError, data};
-use crate::web::state::AppState;
 
 /// 校验脚本执行程序：仅允许 shell / bat / python / exe 四类，拒绝 PowerShell 等。
 fn check_supported_binary(
@@ -203,7 +202,7 @@ pub async fn delete_script(
 /// `powershell/pwsh`；Script 任务（`TaskKind::Script`）的 `binary_path`
 /// 禁止 PowerShell（见 `check_supported_binary` 与 `is_supported_ext`），
 /// 二者域不同，不视为矛盾。
-pub async fn list_shells(State(_state): State<AppState>) -> Result<Json<Value>, ApiError> {
+pub async fn list_shells() -> Result<Json<Value>, ApiError> {
     #[cfg(target_os = "windows")]
     {
         Ok(data(serde_json::json!({
@@ -223,5 +222,466 @@ pub async fn list_shells(State(_state): State<AppState>) -> Result<Json<Value>, 
             ],
             "default": "/bin/bash"
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use tower::ServiceExt; // oneshot
+
+    use crate::environment::{BootstrapStage, EnvironmentApi, EnvironmentError, EnvironmentStatus};
+    use crate::tasks::{
+        CommonFields, OrderData, ScriptTaskConfig, TaskApi, TaskDetail, TaskError, TaskKind,
+        TaskResult, TaskRunApi, TaskSummary,
+    };
+
+    use super::super::test_support::body_json;
+
+    struct MockInner {
+        tasks: Vec<(String, TaskKind)>,
+        ran: Vec<String>,
+    }
+
+    fn script_kind(id: &str, content: &str) -> TaskKind {
+        TaskKind::Script(ScriptTaskConfig {
+            common: CommonFields {
+                task_id: id.to_string(),
+                name: format!("{id} 脚本"),
+                description: String::new(),
+            },
+            content: Some(content.to_string()),
+            ..Default::default()
+        })
+    }
+
+    struct MockTaskApi(Arc<std::sync::Mutex<MockInner>>);
+
+    #[async_trait::async_trait]
+    impl TaskApi for MockTaskApi {
+        async fn list_all_tasks(&self) -> Vec<TaskSummary> {
+            self.0
+                .lock()
+                .unwrap()
+                .tasks
+                .iter()
+                .map(|(id, kind)| TaskSummary {
+                    id: id.clone(),
+                    name: kind.common().name.clone(),
+                    description: kind.common().description.clone(),
+                    task_type: kind.type_name().to_string(),
+                })
+                .collect()
+        }
+
+        async fn load_task(&self, task_id: &str) -> Result<TaskKind, TaskError> {
+            self.0
+                .lock()
+                .unwrap()
+                .tasks
+                .iter()
+                .find(|(id, _)| id == task_id)
+                .map(|(_, k)| k.clone())
+                .ok_or_else(|| TaskError::TaskNotFound(task_id.to_string()))
+        }
+
+        async fn embed_task_config(&self, _task_id: &str, _params: &mut Value) -> bool {
+            false
+        }
+
+        async fn save_task(&self, task_id: &str, task: &TaskKind) -> Result<(), TaskError> {
+            let mut inner = self.0.lock().unwrap();
+            match inner.tasks.iter_mut().find(|(id, _)| id == task_id) {
+                Some(slot) => slot.1 = task.clone(),
+                None => inner.tasks.push((task_id.to_string(), task.clone())),
+            }
+            Ok(())
+        }
+
+        async fn delete_task(&self, task_id: &str) -> Result<(), TaskError> {
+            let mut inner = self.0.lock().unwrap();
+            match inner.tasks.iter().position(|(id, _)| id == task_id) {
+                Some(idx) => {
+                    inner.tasks.remove(idx);
+                    Ok(())
+                }
+                None => Err(TaskError::TaskNotFound(task_id.to_string())),
+            }
+        }
+
+        async fn get_active_task(&self) -> String {
+            String::new()
+        }
+
+        async fn set_active_task(&self, _task_id: &str) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn get_task_detail(&self, task_id: &str) -> Result<TaskDetail, TaskError> {
+            let kind = self.load_task(task_id).await?;
+            Ok(TaskDetail {
+                summary: TaskSummary {
+                    id: task_id.to_string(),
+                    name: kind.common().name.clone(),
+                    description: String::new(),
+                    task_type: kind.type_name().to_string(),
+                },
+                config: kind,
+            })
+        }
+
+        async fn load_order(&self) -> OrderData {
+            OrderData::default()
+        }
+
+        async fn save_order(&self, _order: &OrderData) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn get_script_path(&self, _task_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn has_task(&self, task_id: &str) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|(id, _)| id == task_id)
+        }
+    }
+
+    struct MockTaskRunApi(Arc<std::sync::Mutex<MockInner>>);
+
+    #[async_trait::async_trait]
+    impl TaskRunApi for MockTaskRunApi {
+        async fn execute(&self, task: &TaskKind) -> Result<TaskResult, TaskError> {
+            let mut inner = self.0.lock().unwrap();
+            inner.ran.push(task.common().task_id.clone());
+            Ok(TaskResult {
+                success: true,
+                output: "mock-ok".to_string(),
+                exit_code: 0,
+                duration_ms: 1,
+                error: None,
+            })
+        }
+    }
+
+    struct MockEnvironmentApi;
+
+    #[async_trait::async_trait]
+    impl EnvironmentApi for MockEnvironmentApi {
+        fn status(&self) -> EnvironmentStatus {
+            EnvironmentStatus {
+                uv_ready: true,
+                python_ready: true,
+                playwright_ready: true,
+                capability_ready: true,
+                stage: BootstrapStage::Idle,
+                progress: None,
+                last_error: None,
+            }
+        }
+        fn python_path(&self) -> std::path::PathBuf {
+            std::path::PathBuf::from("/mock/python")
+        }
+        async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        async fn install_playwright_browser(&self, _browser: &str) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        fn ocr_ready(&self) -> bool {
+            false
+        }
+        fn ocr_declared(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestState {
+        tasks: Arc<dyn TaskApi>,
+        runner: Arc<dyn TaskRunApi>,
+        env: Arc<dyn EnvironmentApi>,
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn TaskApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.tasks.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn TaskRunApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.runner.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn EnvironmentApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.env.clone()
+        }
+    }
+
+    fn mock_app(seed: Vec<(String, TaskKind)>) -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
+        let inner = Arc::new(std::sync::Mutex::new(MockInner {
+            tasks: seed,
+            ran: Vec::new(),
+        }));
+        let state = TestState {
+            tasks: Arc::new(MockTaskApi(inner.clone())),
+            runner: Arc::new(MockTaskRunApi(inner.clone())),
+            env: Arc::new(MockEnvironmentApi),
+        };
+        let app = axum::Router::new()
+            .route("/api/scripts", get(list_scripts))
+            .route("/api/scripts/run", post(run_script))
+            .route("/api/scripts/binaries", get(list_binaries))
+            .route(
+                "/api/scripts/{task_id}",
+                get(get_script).put(update_script).delete(delete_script),
+            )
+            .route("/api/shells", get(list_shells))
+            .with_state(state);
+        (app, inner)
+    }
+
+    /// 空列表形状：data 为 []
+    #[tokio::test]
+    async fn list_empty_returns_array() {
+        let (app, _) = mock_app(vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/scripts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["data"], serde_json::json!([]));
+    }
+
+    /// task_id 与 script 双缺 → 400（不触达执行器）
+    #[tokio::test]
+    async fn run_without_id_or_script_is_bad_request() {
+        let (app, inner) = mock_app(vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scripts/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(inner.lock().unwrap().ran.is_empty());
+    }
+
+    /// 临时脚本直跑：构造 adhoc Script 任务并执行，结果透出 success
+    #[tokio::test]
+    async fn run_adhoc_script_executes() {
+        let (app, inner) = mock_app(vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scripts/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"script":"print(1)"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["success"], true);
+        assert_eq!(inner.lock().unwrap().ran, vec!["adhoc_script"]);
+    }
+
+    /// 未知 task_id → 404
+    #[tokio::test]
+    async fn run_unknown_id_is_not_found() {
+        let (app, _) = mock_app(vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scripts/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"task_id":"nope"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 内联 content 直取：不读盘
+    #[tokio::test]
+    async fn get_script_returns_inline_content() {
+        let (app, _) = mock_app(vec![("s1".into(), script_kind("s1", "print(1)"))]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/scripts/s1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["content"], "print(1)");
+        assert_eq!(v["data"]["id"], "s1");
+    }
+
+    /// 非脚本类型（browser）→ 404（防编辑器误读）
+    #[tokio::test]
+    async fn get_script_rejects_non_script_type() {
+        let browser: TaskKind =
+            serde_json::from_value(serde_json::json!({"type":"browser","task_id":"b","name":"b"}))
+                .unwrap();
+        let (app, _) = mock_app(vec![("b".into(), browser)]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/scripts/b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 更新缺 type → 400（防静默转存为空浏览器任务）；ps1 → 400
+    #[tokio::test]
+    async fn update_validates_type_and_binary() {
+        let (app, _) = mock_app(vec![]);
+        for body in [
+            r#"{"name":"x"}"#,
+            r#"{"type":"script","task_id":"s","name":"x","binary_path":"C:\\w\\p.ps1"}"#,
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/scripts/s")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body={body}");
+        }
+    }
+
+    /// 合法脚本更新落盘到内存存储
+    #[tokio::test]
+    async fn update_persists_valid_script() {
+        let (app, inner) = mock_app(vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/scripts/s2")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"type":"script","task_id":"s2","name":"n","content":"print(2)"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(inner.lock().unwrap().tasks.iter().any(|(id, _)| id == "s2"));
+    }
+
+    /// 删除成功与删除不存在
+    #[tokio::test]
+    async fn delete_ok_and_not_found() {
+        let (app, _) = mock_app(vec![("s1".into(), script_kind("s1", "x"))]);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/scripts/s1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/scripts/s1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// binaries 首项恒为 python（路径取自环境）
+    #[tokio::test]
+    async fn binaries_lists_python_first() {
+        let (app, _) = mock_app(vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/scripts/binaries")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"][0]["name"], "python");
+        assert_eq!(v["data"][0]["path"], "/mock/python");
+    }
+
+    /// shells 按编译目标返回（无状态依赖）
+    #[tokio::test]
+    async fn shells_match_platform() {
+        let (app, _) = mock_app(vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/shells")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        #[cfg(target_os = "windows")]
+        assert_eq!(v["data"]["default"], "powershell.exe");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(v["data"]["default"], "/bin/bash");
     }
 }

@@ -1,0 +1,87 @@
+{
+  "config_version": 6,
+  "active_profile_id": "default",
+  "auto_switch": true,
+  "global": {
+    "browser": {
+      "headless": true,
+      "browser_channel": "playwright",
+      "browser_custom_path": "",
+      "custom_browser_engine": "chromium",
+      "persistent_context": false,
+      "pure_mode": false,
+      "stealth_mode": false,
+      "stealth_custom_script": "",
+      "low_resource_mode": false,
+      "disable_web_security": false,
+      "browser_args": "",
+      "viewport_width": 1280,
+      "viewport_height": 720,
+      "locale": "zh-CN",
+      "timezone_id": "Asia/Shanghai",
+      "ignore_https_errors": true,
+      "user_agent": "",
+      "extra_headers_json": "",
+      "timeout": 30,
+      "navigation_timeout": 15,
+      "login_timeout": 120,
+      "bind_proxy": ""
+    },
+    "monitor": {
+      "check_interval": 300,
+      "tcp_targets": [],
+      "http_targets": [],
+      "url_targets": [],
+      "url_expected_responses": {
+        "http://detectportal.firefox.com/success.txt": "success",
+        "http://www.msftconnecttest.com/connecttest.txt": "Microsoft Connect Test",
+        "http://captive.apple.com/hotspot-detect.html": "Success"
+      },
+      "tcp_enabled": false,
+      "http_enabled": false,
+      "url_enabled": false,
+      "local_check_enabled": true,
+      "profile_check_interval": 180,
+      "tcp_timeout": 5,
+      "http_timeout": 10,
+      "url_timeout": 10,
+      "auth_url_timeout": 5,
+      "post_login_delay": 5
+    },
+    "pause": {
+      "enabled": false,
+      "start_hour": 1,
+      "start_minute": 0,
+      "end_hour": 2,
+      "end_minute": 0
+    },
+    "logging": {
+      "level": "INFO",
+      "file_enabled": true,
+      "retention_days": 7
+    },
+    "retry_settings": {
+      "max_retries": 3,
+      "retry_interval": 5
+    },
+    "worker": {
+      "idle_timeout_seconds": 300,
+      "keep_alive": false
+    },
+    "app": {
+      "auto_start_browser": true,
+      "runtime_mode": "full",
+      "startup_action": "monitor",
+      "port": 50721,
+      "autostart_enabled": false,
+      "task_notification": true,
+      "developer_mode": false,
+      "show_tray": true
+    },
+    "updater": {
+      "check_on_startup": true,
+      "release_source_url": "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest",
+      "check_interval_hours": 24
+    }
+  }
+}

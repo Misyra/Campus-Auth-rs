@@ -23,7 +23,11 @@ type MigrationFn = fn(config_dir: &Path, value: &mut Value) -> Result<(), Config
 /// 迁移表：目标版本 -> 迁移函数
 ///
 /// 新增版本时在末尾追加 `(新版本, 迁移函数)` 即可。
-pub const MIGRATIONS: &[(u32, MigrationFn)] = &[(6, migrate_v5_to_v6), (7, migrate_v6_to_v7)];
+pub const MIGRATIONS: &[(u32, MigrationFn)] = &[
+    (6, migrate_v5_to_v6),
+    (7, migrate_v6_to_v7),
+    (8, migrate_v7_to_v8),
+];
 
 /// 执行所有需要的迁移
 ///
@@ -292,6 +296,26 @@ fn migrate_v6_to_v7(_config_dir: &Path, value: &mut Value) -> Result<(), ConfigE
             obj.insert(
                 "release_source_url".to_string(),
                 Value::String(NEW_SOURCE_URL.to_string()),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// v7 → v8 迁移
+///
+/// 旧默认 `browser_channel = "playwright"` 为历史别名，实际等价 `chromium`。
+/// `list_browsers` 已无 `playwright` 项，遗留值会导致前端无卡高亮、后端虽能
+/// 回退但语义不一致。此处归一到 `chromium`。
+fn migrate_v7_to_v8(_config_dir: &Path, value: &mut Value) -> Result<(), ConfigError> {
+    let Some(browser) = value.get_mut("global").and_then(|g| g.get_mut("browser")) else {
+        return Ok(());
+    };
+    if browser.get("browser_channel").and_then(Value::as_str) == Some("playwright") {
+        if let Some(obj) = browser.as_object_mut() {
+            obj.insert(
+                "browser_channel".to_string(),
+                Value::String("chromium".to_string()),
             );
         }
     }

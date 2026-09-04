@@ -226,8 +226,52 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
 
 def _ensure_browser(channel: str = "playwright") -> bool:
     """确保目标浏览器可用；Playwright 管理的引擎按实际 executable 检测。"""
-    if channel in ("msedge", "chrome", "custom"):
+    # 系统浏览器（Edge/Chrome/自定义路径）需真实探测可执行文件，而非恒 True。
+    # 否则健康检查假成功，启动时才抛 obscure Playwright error。
+    if channel == "custom":
+        # 自定义路径在 _resolve_launcher 中校验存在性，此处仅作轻量判断
         return True
+    if channel in ("msedge", "chrome"):
+        # 复用 Rust 侧 is_edge/chrome_installed 的同口径判定（多路径 + which）
+        # 此处为 Python 侧二次校验：优先 which，其次 Windows 固定路径
+        import shutil
+        import os
+
+        if channel == "msedge":
+            bins = ["msedge", "microsoft-edge", "microsoft-edge-stable"]
+        else:
+            bins = ["chrome", "google-chrome", "google-chrome-stable"]
+        for b in bins:
+            if shutil.which(b):
+                return True
+        # Windows 固定路径兜底（与 Rust 侧一致，含 LOCALAPPDATA 用户级安装）
+        candidates = []
+        if os.name == "nt":
+            for env_key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+                base = os.environ.get(env_key)
+                if not base:
+                    continue
+                if channel == "msedge":
+                    candidates.append(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe")
+                else:
+                    candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+            if any(p.exists() for p in candidates):
+                return True
+        else:
+            # macOS /Applications 与 ~/Applications
+            if channel == "msedge":
+                if Path("/Applications/Microsoft Edge.app").exists():
+                    return True
+                home = os.environ.get("HOME")
+                if home and Path(home, "Applications/Microsoft Edge.app").exists():
+                    return True
+            else:
+                if Path("/Applications/Google Chrome.app").exists():
+                    return True
+                home = os.environ.get("HOME")
+                if home and Path(home, "Applications/Google Chrome.app").exists():
+                    return True
+        return False
     try:
         from playwright.sync_api import sync_playwright
 
@@ -258,6 +302,7 @@ _RESOURCE_EXT_BY_MIME = {
 #: 单文件与总量上限：防资源列表异常的页面把反馈包撑到不可分发
 _RESOURCE_MAX_FILES = 200
 _RESOURCE_MAX_BYTES = 5 * 1024 * 1024
+_RESOURCE_MAX_TOTAL_BYTES = 50 * 1024 * 1024
 
 
 def _resource_ext(mime: str) -> str:
@@ -320,6 +365,7 @@ async def _capture_page_resources(
         entries = frame_tree.get("resources", []) or []
         saved: dict[str, str] = {}
         note: str | None = None
+        total_bytes = 0
         for res in entries:
             if len(saved) >= _RESOURCE_MAX_FILES:
                 note = f"资源数超过 {_RESOURCE_MAX_FILES}，其余跳过"
@@ -342,6 +388,10 @@ async def _capture_page_resources(
                 data = (got.get("content") or "").encode("utf-8")
             if not data or len(data) > _RESOURCE_MAX_BYTES:
                 continue
+            if total_bytes + len(data) > _RESOURCE_MAX_TOTAL_BYTES:
+                note = f"资源总量超 {_RESOURCE_MAX_TOTAL_BYTES // (1024*1024)}MiB，已截断"
+                break
+            total_bytes += len(data)
             name = (
                 f"{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}"
                 f".{_resource_ext(res.get('mimeType') or '')}"
@@ -522,6 +572,11 @@ class WorkerCore:
             headers = json.loads(raw)
             if isinstance(headers, dict):
                 result: dict[str, str] = {}
+                blocked = {
+                    "cookie", "authorization", "proxy-authorization",
+                    "proxy-authenticate", "host", "content-length",
+                    "transfer-encoding", "connection",
+                }
                 for k, v in headers.items():
                     if k is None:
                         continue
@@ -529,8 +584,11 @@ class WorkerCore:
                     if len(k_str) > 256 or len(v_str) > 4096:
                         logger.warning(f"请求头过长，已跳过: {k_str[:32]}")
                         continue
-                    if "\r" in k_str or "\n" in k_str:
-                        logger.warning(f"请求头 key 含换行符，已跳过: {k_str[:32]}")
+                    if "\r" in k_str or "\n" in k_str or "\r" in v_str or "\n" in v_str:
+                        logger.warning(f"请求头含换行符，已跳过: {k_str[:32]}")
+                        continue
+                    if k_str.strip().lower() in blocked:
+                        logger.warning(f"敏感请求头已拒绝: {k_str[:32]}")
                         continue
                     result[k_str] = v_str
                 return result
@@ -890,13 +948,13 @@ class WorkerCore:
                 if not _is_truthy(value):
                     return _build_result(
                         Outcome.UNKNOWN_ERROR,
-                        f"成功条件未命中: {var_name}={value}",
+                        f"成功条件未命中: {var_name}（真值判定不通过）",
                         context,
                         start,
                     )
                 # 变量值可能含凭据（如 eval 提取的 token），只记真值判定结果，不打印 value
                 logger.info("[success_condition] 命中成功: 变量 %s 真值判定通过", var_name)
-                result.message = f"成功条件命中: {var_name}={value}"
+                result.message = f"成功条件命中: {var_name}（真值判定通过）"
             return result
         finally:
             # A7：登录/浏览器任务截图可能含表单明文凭据，任务结束（成功/失败/

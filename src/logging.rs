@@ -151,7 +151,7 @@ impl<S> tracing_subscriber::layer::Filter<S> for SharedTargets {
 }
 
 /// 解析日志级别字符串（无效值回退 INFO 并告警）
-fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
+pub(crate) fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
     use tracing_subscriber::filter::LevelFilter;
     match level.to_ascii_uppercase().as_str() {
         "TRACE" => LevelFilter::TRACE,
@@ -166,26 +166,28 @@ fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
     }
 }
 
-/// 从 settings.json 读取日志级别（`global.logging.level`），失败回退 INFO
+/// 从已解析的 settings.json `Value` 一次性提取日志配置（级别 + 保留天数）
 ///
-/// 此前启动初始化硬编码 INFO，配置的级别只有重启且恰好走热更新路径才可能生效。
-fn read_initial_log_level(base_path: &Path) -> tracing_subscriber::filter::LevelFilter {
-    let path = base_path.join("config").join("settings.json");
-    let level = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| {
-            v.get("global")?
-                .get("logging")?
-                .get("level")?
-                .as_str()
-                .map(parse_level)
-        });
-    if level.is_none() {
-        // 文件缺失/损坏/无该字段属常见情形（首次启动）：debug 留痕即可，不告警
-        tracing::debug!("未能从 settings.json 读取日志级别，回退 INFO");
-    }
-    level.unwrap_or(tracing_subscriber::filter::LevelFilter::INFO)
+/// 由 `launcher` 在单次文件读取后调用，避免启动期对同一文件三次读解析
+///（启动字段 / 日志级别 / 保留天数各读一次的历史包袱）。缺失/非法时回退 INFO / 7 天。
+pub(crate) fn logging_config_from_value(
+    value: &serde_json::Value,
+) -> (tracing_subscriber::filter::LevelFilter, u32) {
+    let level = value
+        .get("global")
+        .and_then(|g| g.get("logging"))
+        .and_then(|l| l.get("level"))
+        .and_then(|v| v.as_str())
+        .map(parse_level)
+        .unwrap_or(tracing_subscriber::filter::LevelFilter::INFO);
+    let retention = value
+        .get("global")
+        .and_then(|g| g.get("logging"))
+        .and_then(|l| l.get("retention_days"))
+        .and_then(|v| v.as_u64())
+        .map(|d| d as u32)
+        .unwrap_or(7);
+    (level, retention)
 }
 
 /// 热更新全局日志级别（由 `set_log_level` 调用）
@@ -209,25 +211,6 @@ pub fn reload_log_level(level: &str) {
 // ============================================================
 // 文件保留清理
 // ============================================================
-
-/// 从 settings.json 读取日志保留天数（`global.logging.retention_days`），失败回退默认 7
-fn read_retention_days(base_path: &Path) -> u32 {
-    let path = base_path.join("config").join("settings.json");
-    let days = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| {
-            v.get("global")?
-                .get("logging")?
-                .get("retention_days")?
-                .as_u64()
-        })
-        .map(|d| d as u32);
-    if days.is_none() {
-        tracing::debug!("未能从 settings.json 读取日志保留天数，回退默认 7 天");
-    }
-    days.unwrap_or(7)
-}
 
 /// 删除 logs/ 目录下超过保留天数的旧日志文件
 ///
@@ -358,11 +341,15 @@ pub fn session_started_at() -> Option<&'static str> {
 /// 初始化日志系统：控制台层 + 文件层（按日期轮转）+ 广播层（WebSocket 推送）
 ///
 /// 全局 subscriber 只能 init 一次，所有层在此统一注册。
+/// 日志级别与保留天数由 `launcher` 单次解析 settings.json 后传入，
+/// 本函数不再重复读文件（历史三读：启动字段 / 级别 / 保留天数各一次）。
 pub fn init_logging(
     base_path: &Path,
     log_tx: tokio::sync::broadcast::Sender<LogEntry>,
+    log_level: tracing_subscriber::filter::LevelFilter,
+    retention_days: u32,
 ) -> WorkerGuard {
-    let logs_dir = base_path.join("logs");
+    let logs_dir = crate::utils::paths::logs_dir(base_path);
     if let Err(e) = std::fs::create_dir_all(&logs_dir) {
         tracing::warn!("创建日志目录失败: {e}");
     }
@@ -370,13 +357,12 @@ pub fn init_logging(
     // 会话起始时间：与 LocalTimer 同格式，供 /api/logs 过滤历史运行日志
     let _ = SESSION_STARTED_AT.set(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
 
-    // 启动时清理过期日志：按 settings.json 的 logging.retention_days 保留，
+    // 启动时清理过期日志：按传入的 logging.retention_days 保留，
     // 删除超过保留天数的旧轮转文件，避免日志无限累积（对齐原项目 loguru retention）。
-    cleanup_old_logs(&logs_dir, read_retention_days(base_path));
+    cleanup_old_logs(&logs_dir, retention_days);
 
     // 动态 filter：三个 layer 共享同一 SharedTargets（热更新入口见 reload_log_level）。
-    // 初始级别读自 settings.json 的 logging.level（此前硬编码 INFO 导致配置不生效）。
-    let shared = SharedTargets::build(read_initial_log_level(base_path));
+    let shared = SharedTargets::build(log_level);
     let _ = LOG_TARGETS.set(shared.clone());
 
     // 本地时区计时器：YYYY-MM-DD HH:MM:SS 格式

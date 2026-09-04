@@ -2,6 +2,21 @@
 
 > 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.6”。
 
+## 未发布（安全加固 + 测试体系）
+
+### 安全加固
+
+- 更新器：更新 URL 严格校验（拒 userinfo/前缀绕过）+ 重定向终点复核；SHA256 缺失三处拒绝（下载入口/helper/启动 pending），无伴随文件的平台包跳过；staging 应用加目录穿越与摘要复核
+- 登录：指定 Profile 失败不再回退全局；切换失败仅告警（磁盘为权威，Engine 经 reload 收敛）；创建 Profile 检查与写入同锁原子化
+- 任务调度：成功条件脱敏（只记变量名，不拼值）；类型切换删旧目录残留；脚本路径解析失败直接拒绝；调度器文件写入串行化；自定义请求头黑名单 + 换行拦截
+- 系统边界：配置 reload 锁外通知；JoinError 走缓存沿用；探测子进程 kill_on_drop；监测代理/证书热更新；自启动先注册后落盘（失败回滚）；--force 杀进程前校验可执行文件名（防 PID 复用误杀）
+- 反馈与杂项：反馈包路径收敛 worker/debug + 50MiB 总量上限；OCR 目录统计不跟随 symlink；前端路径段编码 + window.open noopener；动态导入改静态；package-lock 对齐 alpha.6
+
+### 测试体系
+
+- 目录规范：散落 `target/` 的 mock/基座归档至 `tests/mock-servers/` + `tests/fixtures/`；`mock_portal/` 搬迁 `tests/mock-servers/full-portal/`；`tests/common/` 共享脚手架接线；fixture 剥离运行时状态、端口收敛 18765
+- 覆盖补齐：debug/background/autostart/scripts/tools 路由 oneshot 单测 33 个；`download_and_verify` 本地服务真实下载 3 个；`tests/login_chain.rs` 全链路（mock→二进制→Playwright→success＋failonce 重试）；手动 E2E 脚本环境变量 + 预检 SKIP；CI 新增 `e2e-login-chain`（ddddocr pin 1.6.1）
+
 ## v5.0.0-alpha.6（2026-09-03 统一更新通道 + 迁移过渡）
 
 ### 更新逻辑
@@ -9,9 +24,15 @@
 - 统一预发布与正式版到同一版本比较通道：`compare_versions` 改为仅按 semver 大小 `remote > current` 判定，不再按 `alpha`/`beta` 前缀隔离；`5.0.0-alpha.5` 此后可正常收到 `5.0.0` 正式版与后续 `alpha.6+` 的更新
 - 存量 `alpha.5` 用户通过本版过渡，后续正式版将直接可达
 
+### Docker 部署
+
+- 新增 `Dockerfile`（多阶段：Node 前端 → Rust 构建 → Python 3.12-slim 运行时）+ `docker-compose.yml`（命名卷 `campus-auth-data:/data` + 健康检查）+ `docker/entrypoint.sh` + `.dockerignore` + `docker/README.md`
+- 运行时预装 `python_worker` 依赖与 Playwright Chromium（含 OS 依赖），加速首次启动；`CAMPUS_AUTH_HOST=0.0.0.0` / `CAMPUS_AUTH_PORT` / `CAMPUS_AUTH_BASE_PATH` 环境变量 + CLI `--host` / `--port` / `--base-path` 支持容器化配置
+- 代码适配：`src/app.rs` 绑定地址可配置（`parse_bind_addr` + `is_docker_env` 自动 0.0.0.0，`start_axum` 新增 `host` 参数）；`src/launcher.rs` 新增 `--host`（`env=CAMPUS_AUTH_HOST`）、`--base-path`/`--port` 环境变量、Docker 环境自动禁用托盘与 `AppConfig.host` 透传；`src/tray/mod.rs` `TrayDeps.host` 随按需 Axum 启动透传；`src/environment/mod.rs` `resolve_worker_project_path` 新增 `/app/python_worker` 与 `CAMPUS_AUTH_WORKER_DIR` 回退，便于镜像内预装 venv 命中
+
 ### 验证
 
-- `cargo test --lib compare_versions` 4 项通过；`cargo clippy --all-targets -- -D warnings` 零警告
+- `cargo check` / `cargo check --features no-embed` / `cargo clippy --all-targets -- -D warnings` 零警告；`cargo run -- --help` 确认新增 `--host` / 环境变量生效；`docker-compose.yml` YAML 解析通过（宿主机无 Docker，静态校验）
 
 ## v5.0.0（2026-09-02 正式版：全面检查修复 + 正式发布）
 

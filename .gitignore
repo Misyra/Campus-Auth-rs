@@ -40,6 +40,7 @@ python_worker/node_modules/
 python_worker/.pytest_cache/
 python_worker/.tmp-uv-cache/
 python_worker/debug/
+!python_worker/debug/.gitkeep
 python_worker/.mypy_cache/
 python_worker/.ruff_cache/
 python_worker/build/
@@ -49,6 +50,7 @@ python_worker/dist/
 # 注意：必须锚定到仓库根目录（/ 前缀），否则会误伤 src/config、src/environment 等源码目录
 /environment/
 /config/
+/data/
 /tasks/active.txt
 /tasks/.order.json
 /tasks/scheduled/
@@ -59,7 +61,6 @@ python_worker/dist/
 /temp/
 /logs/
 *.log
-
 # 环境变量
 .env
 .env.bak
@@ -94,4 +95,6 @@ frontend/coverage/
 
 # Campus-Auth 运行时加密密钥（本地生成，不提交）
 .campus_network_auth/
+tests/mock-servers/full-portal/*.log
 mock_portal/*.log
+tests/mock-servers/**/*.log

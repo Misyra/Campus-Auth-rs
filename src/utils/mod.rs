@@ -5,6 +5,7 @@
 pub mod io;
 pub mod lock;
 pub mod metrics;
+pub mod paths;
 pub mod platform;
 
 // 重新导出公共类型，供其他模块直接 `use crate::utils::Xxx`

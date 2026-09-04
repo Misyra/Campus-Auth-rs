@@ -1,0 +1,9 @@
+{
+  "name": "e2e",
+  "description": "",
+  "cron": "*/5 * * * *",
+  "target_id": "e2e-script",
+  "profile_id": null,
+  "timeout": null,
+  "enabled": true
+}

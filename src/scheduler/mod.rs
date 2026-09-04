@@ -25,8 +25,8 @@ use crate::web::error::ApiError;
 
 pub use self::cron_loop::execute_scheduled_task;
 use self::task::{
-    CHANGE_CHANNEL_CAPACITY, HISTORY_DIR_NAME, MAX_CONCURRENT_SCHEDULED_TASKS, SCHEDULED_DIR_NAME,
-    ScheduledTask, append_history, history_dir_of, map_history_records,
+    CHANGE_CHANNEL_CAPACITY, MAX_CONCURRENT_SCHEDULED_TASKS, ScheduledTask, append_history,
+    history_dir_of, map_history_records,
 };
 
 /// 调度器错误类型。
@@ -105,6 +105,9 @@ pub struct SchedulerService {
     task_tracker: TaskTracker,
     /// 服务关闭时协作取消所有在途任务。
     task_cancel: CancellationToken,
+    /// 定时任务文件写入串行锁：`save_task` 与 `update_last_run` 均为读-改-写，
+    /// 无锁并发会导致 cron/last_run 互相覆盖
+    file_mutex: tokio::sync::Mutex<()>,
     /// 内部状态。
     state: std::sync::Mutex<SchedulerState>,
 }
@@ -126,9 +129,10 @@ impl SchedulerService {
         reload_rx: mpsc::Receiver<ConfigReloadSignal>,
     ) -> Result<Arc<Self>, SchedulerError> {
         let base_path = config.base_path();
-        let scheduled_dir = base_path.join("tasks").join(SCHEDULED_DIR_NAME);
+        // 路径经 `utils::paths` 统一；启动已预建，此处保留幂等创建（测试直构兼容）。
+        let scheduled_dir = crate::utils::paths::scheduled_dir(&base_path);
         std::fs::create_dir_all(&scheduled_dir).map_err(SchedulerError::IoError)?;
-        let history_dir = scheduled_dir.join(HISTORY_DIR_NAME);
+        let history_dir = crate::utils::paths::scheduled_history_dir(&base_path);
         std::fs::create_dir_all(&history_dir).map_err(SchedulerError::IoError)?;
 
         let (task_change_tx, task_change_rx) = mpsc::channel(CHANGE_CHANNEL_CAPACITY);
@@ -147,6 +151,7 @@ impl SchedulerService {
             running_ids: std::sync::Mutex::new(std::collections::HashSet::new()),
             task_tracker: TaskTracker::new(),
             task_cancel: CancellationToken::new(),
+            file_mutex: tokio::sync::Mutex::new(()),
             state: std::sync::Mutex::new(SchedulerState {
                 tasks: Vec::new(),
                 running: true,
@@ -243,6 +248,8 @@ impl SchedulerService {
         let path = self.scheduled_dir.join(format!("{}.json", id));
         let mut to_save = task.clone();
         to_save.id = id.to_string();
+        // 文件写入串行化：与 update_last_run 同锁，防读-改-写互相覆盖
+        let _file_guard = self.file_mutex.lock().await;
         // 同步 fs 写入放入 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
         let path_for_blocking = path.clone();
         let to_save_for_blocking = to_save.clone();
@@ -250,7 +257,6 @@ impl SchedulerService {
             ScheduledTask::save_to(&path_for_blocking, &to_save_for_blocking)
         })
         .await??;
-
         self.update_state(|s| {
             if let Some(existing) = s.tasks.iter_mut().find(|t| t.id == id) {
                 *existing = to_save.clone();
@@ -344,6 +350,8 @@ impl SchedulerService {
         let now = chrono::Utc::now().to_rfc3339();
         let result = format!("[{}] {}", status, message);
         let path = self.scheduled_dir.join(format!("{}.json", task_id));
+        // 与 save_task 同锁串行化，防全量重写互相覆盖
+        let _file_guard = self.file_mutex.lock().await;
         // 磁盘读写移至 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
         let path_for_blocking = path.clone();
         let now_for_blocking = now.clone();

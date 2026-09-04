@@ -118,7 +118,7 @@ pub async fn rename_or_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// 通用 zip 解压：按 `accept` 过滤条目后解压到 `dest` 目录（保留相对路径）。
 ///
-/// 统一环境引导（MinGit / uv）与更新包 staging 三处解压模板（C1）：
+/// 统一环境引导（uv）与更新包 staging 两处解压模板（C1）：
 /// - 使用 `entry.enclosed_name()` 过滤绝对路径与 `..` 穿越（zip slip）；
 /// - 额外以 `outpath.starts_with(dest)` 做防御性兜底；
 /// - 目录条目创建目录，文件条目写入内容。

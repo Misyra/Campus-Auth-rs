@@ -132,13 +132,10 @@ impl ProfileService {
         if !is_valid_profile_id(&slug) {
             return Err(ConfigError::InvalidProfileId { id: slug });
         }
-        // 已存在则视为冲突
-        if self.config.load_all_profiles().iter().any(|p| p.id == slug) {
-            return Err(ConfigError::ProfileIdConflict { id: slug });
-        }
+        // 检查+写入同持 profiles_lock（原子创建，防并发同 id 覆盖）
         let mut profile = data;
         profile.id = slug;
-        self.config.save_profile(&profile).await
+        self.config.create_profile_atomic(&profile).await
     }
 
     /// 更新 Profile（密码字段走 `save_password` 语义）

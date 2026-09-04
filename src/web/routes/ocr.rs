@@ -91,17 +91,35 @@ pub async fn ocr_status(
     Ok(data(status))
 }
 
-/// 递归统计目录大小
+/// 递归统计目录大小（不跟随符号链接，防循环与虚高）
 fn dir_size(path: &std::path::Path) -> u64 {
+    dir_size_inner(path, 0)
+}
+
+/// 内层实现：深度上限 8，符号链接直接跳过
+fn dir_size_inner(path: &std::path::Path, depth: u8) -> u64 {
+    if depth > 8 {
+        return 0;
+    }
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let p = entry.path();
+            // 不跟随链接：链接本身不计入，避免环与外部目录放大
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_symlink() {
+                    continue;
+                }
+            }
             if let Ok(meta) = entry.metadata() {
                 if meta.is_dir() {
-                    total += dir_size(&p);
+                    total += dir_size_inner(&p, depth + 1);
                 } else {
-                    total += meta.len();
+                    total = total.saturating_add(meta.len());
+                }
+                // 总量封顶 10GiB，防超大目录长时间占用
+                if total > 10 * 1024 * 1024 * 1024 {
+                    break;
                 }
             }
         }
@@ -111,8 +129,8 @@ fn dir_size(path: &std::path::Path) -> u64 {
 
 /// POST /api/ocr/uninstall — 卸载 OCR（取消在途任务并移除依赖）
 ///
-/// 取消在途 OCR 识别任务（bridge.cancel），并通过基础 `uv sync`
-/// 移除 OCR extra（environment.remove_ocr_dep）。
+/// 取消在途 OCR 识别任务（bridge.cancel），并 `uv remove` 项目主依赖中的 ddddocr
+///（见 `environment.remove_ocr_dep`）。
 pub async fn ocr_uninstall(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
@@ -126,8 +144,8 @@ pub async fn ocr_uninstall(
 
 /// POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖
 ///
-/// 后台执行环境能力安装（uv/Python/Playwright）并显式同步 `ocr` extra，
-/// 补齐 OCR 依赖，进度通过 StatusManager 推送。
+/// 后台执行环境能力安装（uv/Python/Playwright）并 `uv add` ddddocr，
+/// 进度通过 StatusManager 推送。
 pub async fn ocr_install(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
@@ -255,7 +273,6 @@ mod tests {
                 uv_ready: false,
                 python_ready: false,
                 playwright_ready: false,
-                git_ready: false,
                 capability_ready: false,
                 stage: BootstrapStage::Idle,
                 progress: None,

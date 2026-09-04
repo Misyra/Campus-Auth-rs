@@ -146,9 +146,14 @@ pub struct MonitorService {
     network_detect: Arc<dyn NetworkDetect>,
     /// HTTP/URL 探测共用的长生命周期客户端（连接池复用）
     ///
-    /// 代理策略在构造时按 `monitor.disable_proxy` 一次性固定（true=直连 no_proxy，
-    /// false=跟随系统代理）；切换需重启程序生效。
+    /// 代理/证书策略按当前设置热重建（见 `ensure_client`），不再需重启生效
     http_client: Arc<ArcSwap<Client>>,
+    /// 上次构建客户端时的 `disable_proxy` 快照（热重建比对用）
+    last_disable_proxy: std::sync::atomic::AtomicBool,
+    /// 上次构建客户端时的 `ignore_https_errors` 快照（热重建比对用）
+    last_ignore_certs: std::sync::atomic::AtomicBool,
+    /// 构造时传入的网卡绑定代理（热重建时复用）
+    bind_proxy: std::sync::Mutex<Option<String>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
     /// 累计检测次数
@@ -167,17 +172,49 @@ impl MonitorService {
         proxy: Option<&str>,
         metrics: Option<Arc<Metrics>>,
     ) -> Result<Self, MonitorError> {
-        // 代理策略启动时一次性固定：监测设置修改 disable_proxy 后需重启生效
-        let disable_proxy = config.load_settings().global.monitor.disable_proxy;
-        let http_client = Self::build_client(proxy, disable_proxy)?;
+        let settings = config.load_settings();
+        let disable_proxy = settings.global.monitor.disable_proxy;
+        let ignore_certs = settings.global.browser.ignore_https_errors;
+        let http_client = Self::build_client(proxy, disable_proxy, ignore_certs)?;
         Ok(Self {
             config_service: config,
             network_detect: detect,
             http_client: Arc::new(ArcSwap::from_pointee(http_client)),
+            last_disable_proxy: std::sync::atomic::AtomicBool::new(disable_proxy),
+            last_ignore_certs: std::sync::atomic::AtomicBool::new(ignore_certs),
+            bind_proxy: std::sync::Mutex::new(proxy.map(|s| s.to_string())),
             metrics,
             check_count: AtomicU64::new(0),
             all_disabled_warned: AtomicBool::new(false),
         })
+    }
+
+    /// 探测前热重建客户端：代理/证书开关变化即重建，无需重启
+    fn ensure_client(&self) {
+        let settings = self.config_service.load_settings();
+        let disable_proxy = settings.global.monitor.disable_proxy;
+        let ignore_certs = settings.global.browser.ignore_https_errors;
+        let last_disable = self
+            .last_disable_proxy
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let last_ignore = self
+            .last_ignore_certs
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if disable_proxy == last_disable && ignore_certs == last_ignore {
+            return;
+        }
+        let bind = self.bind_proxy.lock().ok().and_then(|g| g.clone());
+        match Self::build_client(bind.as_deref(), disable_proxy, ignore_certs) {
+            Ok(client) => {
+                self.http_client.store(std::sync::Arc::new(client));
+                self.last_disable_proxy
+                    .store(disable_proxy, std::sync::atomic::Ordering::Relaxed);
+                self.last_ignore_certs
+                    .store(ignore_certs, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!("监测客户端已按新配置重建");
+            }
+            Err(e) => tracing::warn!("监测客户端重建失败，沿用旧客户端: {e}"),
+        }
     }
 
     /// 构建 reqwest 客户端（redirect=none、忽略证书错误、连接池复用）
@@ -188,10 +225,11 @@ impl MonitorService {
     fn build_client(
         proxy: Option<&str>,
         disable_system_proxy: bool,
+        ignore_certs: bool,
     ) -> Result<Client, MonitorError> {
         let mut builder = Client::builder()
             .redirect(Policy::none())
-            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_certs(ignore_certs)
             .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT);
         if disable_system_proxy {
             builder = builder.no_proxy();
@@ -211,6 +249,7 @@ impl MonitorService {
     /// 暂停时段由 Engine 在调用前检查，本方法不重复判断。
     #[instrument(skip_all)]
     pub async fn check_once(&self) -> Result<ProbeReport, MonitorError> {
+        self.ensure_client();
         let rt = self.config_service.runtime().load();
         let cfg = MonitorConfig::from_runtime(&rt);
 
@@ -299,7 +338,7 @@ impl MonitorService {
         }
 
         // 步骤 3：并发执行已启用的三类探测（不绑定出口网卡，走系统默认路由）
-        // 客户端代理策略已在构造时按 disable_proxy 固定（切换需重启）
+        // 客户端已按当前配置热重建（ensure_client）
         let client = self.http_client.load();
         let start = Instant::now();
 

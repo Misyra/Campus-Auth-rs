@@ -474,7 +474,6 @@ export interface EnvironmentStatus {
   uv_ready: boolean;
   python_ready: boolean;
   playwright_ready: boolean;
-  git_ready: boolean;
   capability_ready: boolean;
   stage: string;
   progress: InstallProgress | null;

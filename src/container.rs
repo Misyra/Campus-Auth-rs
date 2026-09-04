@@ -124,32 +124,12 @@ impl ServiceContainer {
             status.clone(),
             Some(metrics.clone()),
         );
-        let git_download_enabled = config.runtime().load().app.developer_mode;
-        let environment = EnvironmentManager::new(
-            base_path.to_path_buf(),
-            status.clone(),
-            git_download_enabled,
-        );
-        // 环境重建成功后复位 Bridge 连续 spawn 失败熔断（B3），解除熔断允许重新 spawn
-        {
-            let bridge_for_cb = bridge.clone();
-            environment
-                .set_on_bootstrap_done(Arc::new(move || bridge_for_cb.reset_spawn_failures()));
-        }
+        let environment = EnvironmentManager::new(base_path.to_path_buf(), status.clone());
+        // 环境重建成功后复位 Bridge 连续 spawn 失败熔断（B3），解除熔断允许重新 spawn。
+        Self::wire_environment_bridge(&bridge, &environment);
 
-        // 启动即后台探测环境真实状态：EnvironmentStatus 初始全 false（未就绪），
-        // 只有 ensure_capability（登录/任务/调试/手动初始化）才会刷新。此前磁盘上
-        // 环境完好时重启程序，/api/init-status 仍报"未就绪"，直到首次使用才纠正。
-        // check_environment 仅做只读探测（uv/python --version + 浏览器缓存目录），
-        // 不触发下载；失败仅记日志，不阻断启动。
-        {
-            let env_bg = environment.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::environment::check_environment(&env_bg).await {
-                    tracing::warn!("启动环境探测失败: {e}");
-                }
-            });
-        }
+        // 启动即后台探测环境真实状态（只读，不触发下载，不阻断启动）。
+        Self::spawn_environment_probe(&environment);
 
         // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
         let executor = TaskExecutor::new(
@@ -202,32 +182,10 @@ impl ServiceContainer {
         // ---- Layer 9：更新器 ----
         let updater = UpdaterService::new(config.clone(), status.clone(), base_path.to_path_buf());
 
-        // 启动时应用待处理更新：改为后台 spawn，不在容器构造内 await——
-        // 其内部含 fetch_manifest 网络请求（staging 产物二次校验），网络慢时
-        // 会阻塞启动数十秒。self_replace 替换运行中的 exe 后新版本在下次启动生效，
-        // 因此运行期后台应用不影响本次进程。
-        // 并发说明（F9）：apply_pending_on_startup 与手动 apply_update 统一走
-        // update_in_progress 原子标记互斥——后台路径抢不到标记即跳过并记日志，
-        // 不会与手动更新并发双写 pending.json / 重复 spawn helper。此处保留
-        // 2s 延迟仅用于错开启动初期的资源争抢（Web 服务与配置加载），不再是
-        // 并发正确性的依赖。
-        // 无论成功失败都继续运行：替换失败时已自动回滚，以当前版本运行，不阻断用户。
-        {
-            let updater_bg = updater.clone();
-            let shutdown_for_update = shutdown_token.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = shutdown_for_update.cancelled() => return,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-                }
-                match updater_bg.apply_pending_on_startup().await {
-                    Ok(true) => tracing::info!("待定更新已应用，新版本将在下次启动生效"),
-                    // 无待定更新是常态，与"后台检查"合并为一条 debug 避免每次启动两条噪音
-                    Ok(false) => tracing::debug!("后台检查待定更新：无待定更新，跳过"),
-                    Err(e) => tracing::warn!("待定更新应用失败，继续以当前版本运行: {e}"),
-                }
-            });
-        }
+        // 启动时应用待处理更新：后台 spawn，不在构造内 await（内含网络请求，慢网会阻塞启动）。
+        // 并发说明（F9）：与手动 apply_update 统一走 update_in_progress 原子标记互斥，
+        // 后台路径抢不到标记即跳过并记日志；2s 延迟仅错开启动初期资源争抢。
+        Self::spawn_pending_update_check(&updater, &shutdown_token);
 
         // ---- Layer 10：自启动服务（检查平台支持）----
         // AutoStartService / DebugSessionManager / TaskRegistry / WebSocketManager
@@ -264,9 +222,59 @@ impl ServiceContainer {
             uptime_cancel: shutdown_token.child_token(),
         });
 
-        // ---- 启动运行时长更新任务 ----
-        // 每秒周期更新：既写入 Metrics（/api/system 数据源），也通过 PartialSnapshot::Uptime
-        // 推送状态快照，保证 WebSocket 状态里的 uptime_seconds 与 /api/system 保持一致。
+        Self::spawn_uptime_tracker(&container);
+
+        // ---- 启动后台服务 ----
+        let scheduler_handle = container.startup().await?;
+
+        Ok((container, scheduler_handle))
+    }
+
+    /// 接线环境引导完成回调：环境重建成功后复位 Bridge 熔断（B3）
+    fn wire_environment_bridge(
+        bridge: &Arc<BridgeSupervisor>,
+        environment: &Arc<EnvironmentManager>,
+    ) {
+        let bridge_for_cb = bridge.clone();
+        environment.set_on_bootstrap_done(Arc::new(move || bridge_for_cb.reset_spawn_failures()));
+    }
+
+    /// 后台只读探测环境真实状态（uv/python --version + 浏览器缓存目录）
+    ///
+    /// `EnvironmentStatus` 初始全 false，磁盘完好时重启后需纠正 `/api/init-status`，
+    /// 失败仅记日志，不阻断启动，不触发下载。
+    fn spawn_environment_probe(environment: &Arc<EnvironmentManager>) {
+        let env_bg = environment.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::environment::check_environment(&env_bg).await {
+                tracing::warn!("启动环境探测失败: {e}");
+            }
+        });
+    }
+
+    /// 后台应用待定更新（2s 延迟错峰启动资源争抢，失败回滚继续以当前版本运行）
+    fn spawn_pending_update_check(
+        updater: &Arc<UpdaterService>,
+        shutdown_token: &CancellationToken,
+    ) {
+        let updater_bg = updater.clone();
+        let shutdown_for_update = shutdown_token.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_for_update.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            }
+            match updater_bg.apply_pending_on_startup().await {
+                Ok(true) => tracing::info!("待定更新已应用，新版本将在下次启动生效"),
+                // 无待定更新是常态，与"后台检查"合并为一条 debug 避免每次启动两条噪音
+                Ok(false) => tracing::debug!("后台检查待定更新：无待定更新，跳过"),
+                Err(e) => tracing::warn!("待定更新应用失败，继续以当前版本运行: {e}"),
+            }
+        });
+    }
+
+    /// 每秒更新运行时长：写入 Metrics 并推送 `PartialSnapshot::Uptime`，保证两处一致
+    fn spawn_uptime_tracker(container: &Arc<Self>) {
         let start_time = std::time::Instant::now();
         let cancel_for_task = container.uptime_cancel.clone();
         let metrics_for_uptime = container.metrics.clone();
@@ -284,11 +292,6 @@ impl ServiceContainer {
                 }
             }
         });
-
-        // ---- 启动后台服务 ----
-        let scheduler_handle = container.startup().await?;
-
-        Ok((container, scheduler_handle))
     }
 
     /// 启动后台服务：Scheduler + Bridge Supervisor
