@@ -1,0 +1,58 @@
+{
+  "runs": [
+    {
+      "timestamp": "2026-08-28T17:02:00.166030300+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.1568488
+    },
+    {
+      "timestamp": "2026-08-28T17:03:00.067396800+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0511151
+    },
+    {
+      "timestamp": "2026-08-28T17:04:00.077257500+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0528379
+    },
+    {
+      "timestamp": "2026-08-28T17:05:00.065696400+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0518905
+    },
+    {
+      "timestamp": "2026-08-28T17:06:00.076135200+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0537341
+    },
+    {
+      "timestamp": "2026-08-28T17:07:00.076005900+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0481552
+    },
+    {
+      "timestamp": "2026-08-28T17:08:00.059978+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0520911
+    },
+    {
+      "timestamp": "2026-08-28T17:09:00.097380+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0552666
+    },
+    {
+      "timestamp": "2026-08-28T17:10:00.073385700+00:00",
+      "status": "success",
+      "message": "exit=0, portal login ok\r\n",
+      "duration": 0.0537971
+    }
+  ]
+}

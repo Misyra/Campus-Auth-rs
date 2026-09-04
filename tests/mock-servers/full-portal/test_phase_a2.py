@@ -4,23 +4,9 @@ import json
 import time
 import urllib.request
 
-import os
+from _common import BASE, TOKEN, preflight
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _load_token() -> str:
-    """读取本地实例 token（target/debug/config/.auth_token，随实例轮换，不入库）。"""
-    try:
-        with open(os.path.join(_REPO_ROOT, "target", "debug", "config", ".auth_token"),
-                  encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-TOKEN = _load_token()
-BASE = "http://127.0.0.1:50721"
+preflight()
 
 
 def api(path, method="GET", body=None, timeout=20):
@@ -34,6 +20,8 @@ def api(path, method="GET", body=None, timeout=20):
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         return {"http_error": e.code, "body": e.read().decode("utf-8", "replace")[:300]}
+    except OSError as e:
+        return {"connection_error": str(e)[:200]}
 
 
 print("=== T4 TCP/URL 探测 ===")
@@ -61,15 +49,15 @@ print("=== T5 Profile 管理 ===")
 print("create:", api("/api/profiles/test2", "POST", {
     "name": "备用网络", "username": "e2euser", "password": "e2epass",
     "auth_url": "http://127.0.0.1:18765/"}))
-print("list:", [p["id"] for p in api("/api/profiles")["data"]])
-print("switch:", api("/api/profiles/switch", "POST", {"id": "test2"}))
+print("list:", [p.get("id", k) for k, p in api("/api/profiles")["data"]["profiles"].items()])
+print("switch:", api("/api/profiles/switch", "POST", {"profile_id": "test2"}))
 cfg = api("/api/config")["data"]
 print("active now:", cfg.get("active_profile_id"), "| auth_url:", cfg.get("auth_url"), "| user:", cfg.get("username"))
 print("detect:", json.dumps(api("/api/profiles/detect", "POST", {}), ensure_ascii=False)[:250])
-print("auto-switch:", json.dumps(api("/api/profiles/auto-switch", "POST", {}), ensure_ascii=False)[:250])
-print("switch back:", api("/api/profiles/switch", "POST", {"id": "default"}))
+print("auto-switch:", json.dumps(api("/api/profiles/auto-switch", "POST", {"enabled": True}), ensure_ascii=False)[:250])
+print("switch back:", api("/api/profiles/switch", "POST", {"profile_id": "default"}))
 cfg = api("/api/config")["data"]
 print("active restored:", cfg.get("active_profile_id"), "| user:", cfg.get("username"))
 # 清理：删除 test2（default 不可删）
 print("delete test2:", api("/api/profiles/test2", "DELETE"))
-print("list after:", [p["id"] for p in api("/api/profiles")["data"]])
+print("list after:", [p.get("id", k) for k, p in api("/api/profiles")["data"]["profiles"].items()])

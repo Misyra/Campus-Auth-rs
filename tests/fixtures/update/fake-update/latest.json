@@ -1,0 +1,12 @@
+{
+  "version": "5.0.1-alpha.1",
+  "release_date": "2026-08-28",
+  "changelog": "测试更新：验证自动更新链路",
+  "platforms": {
+    "windows-x64": {
+      "url": "http://127.0.0.1:8765/campus-auth-windows-x64.zip",
+      "sha256": "57c4407b7021a5afae2ae5e777e477ea658b3a5750d39a22eab29dfdb44344c3",
+      "size": 30298240
+    }
+  }
+}

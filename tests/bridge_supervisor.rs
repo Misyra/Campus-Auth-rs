@@ -1,16 +1,18 @@
 //! Bridge Supervisor 状态机集成测试
 //!
-//! 在工作区内 `target/` 下搭建临时 base_path，挂载真实 `.venv`（目录 junction/symlink）+
+//! 在系统临时目录搭建 base_path，挂载真实 `.venv`（目录 junction/symlink）+
 //! 一个仅依赖标准库的假 `worker_main.py`，驱动真实的 `BridgeSupervisor`，覆盖：
 //! - `execute` 正常往返（含懒加载 spawn + browser_health_check）；
 //! - 历史遗留 F1：Worker 回传带 id 但无法解析的响应 → 在途请求以错误回收（不再永久阻塞）；
 //! - Worker 崩溃 → 在途请求收到 `WorkerCrashed`，状态机恢复；
 //! - 历史遗留 F2：`cancel` 可靠触发 → `execute` 返回 `Cancelled`。
 //!
-//! 说明：临时目录建在工作区 `target/` 内（沙箱仅允许工作区内写入）；清理时**仅移除 junction
-//! 链接本身**（`remove_dir`，不跟随），绝不删除真实 `.venv`。找不到本地 Python 或无法创建
-//! 目录链接时跳过。
+//! 说明：清理时**仅移除 junction 链接本身**（`remove_dir`，不跟随），绝不删除真实
+//! `.venv`。找不到本地 Python 或无法创建目录链接时跳过。
 
+mod common;
+
+use common::locate_venv;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,41 +62,24 @@ for line in sys.stdin:
     else:
         emit({"id": mid, "result": {"success": True, "data": {"echo": method}, "error": None}})
 "#;
-
-/// 临时 worker 目录树的 RAII 守卫：Drop 时安全清理（先移除 junction 链接，再删目录树）。
+/// 临时 worker 目录树的 RAII 守卫：`TempDir` 存活即目录存活。
+///
+/// Drop 时先以 `remove_dir` 移除 `.venv` 链接本身（不跟随、不触碰真实 venv），
+/// 再让 `TempDir` 删除剩余目录树。绝不能让 `remove_dir_all` 跟随链接删到真实 `.venv`。
 struct WorkerTree {
     base: PathBuf,
+    // `Drop::drop` 先于字段析构执行（此时 `_tmp` 目录仍存活），随后 `_tmp`
+    // 删除剩余目录树。时序安全。
+    _tmp: tempfile::TempDir,
 }
 
 impl Drop for WorkerTree {
     fn drop(&mut self) {
-        // 关键安全点：先以 remove_dir 移除 .venv junction 链接本身（不跟随、不触碰 target），
-        // 再删除整个临时 base。绝不能让 remove_dir_all 跟随 junction 删到真实 .venv。
+        // 关键安全点：先以 remove_dir 移除 .venv 链接本身（不跟随、不触碰 target），
+        // 再删除整个临时 base。绝不能让 remove_dir_all 跟随链接删到真实 .venv。
         let venv_link = self.base.join("python_worker").join(".venv");
         let _ = std::fs::remove_dir(&venv_link);
-        let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-/// 定位本地 Python venv 目录（其下须含 `Scripts/python.exe` 或 `bin/python3`）。
-fn locate_venv() -> Option<PathBuf> {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest.join("python_worker/.venv"),
-        manifest.join("environment/.venv"),
-    ];
-    candidates.into_iter().find(|v| {
-        let python = if cfg!(windows) {
-            v.join("Scripts/python.exe")
-        } else {
-            v.join("bin/python3")
-        };
-        python.exists()
-            && std::process::Command::new(python)
-                .arg("--version")
-                .output()
-                .is_ok_and(|output| output.status.success())
-    })
 }
 
 /// 创建目录链接（Windows 用 junction，Unix 用 symlink），均无需管理员权限。
@@ -122,26 +107,25 @@ fn link_dir(target: &Path, link: &Path) -> bool {
     }
 }
 
-/// 在工作区 `target/` 下搭建 `python_worker/{.venv(链接), worker_main.py}`。
+/// 在系统临时目录搭建 `python_worker/{.venv(链接), worker_main.py}`（`TempDir` 保活）。
 ///
 /// 成功返回持有清理逻辑的 `WorkerTree`（其 `base` 即 supervisor 的 base_path）。
 fn setup_worker_tree(venv: &Path) -> Option<WorkerTree> {
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join(format!("bridge_it_{}", uuid::Uuid::new_v4()));
+    let tmp = tempfile::TempDir::new().ok()?;
+    let base = tmp.path().to_path_buf();
     let worker_dir = base.join("python_worker");
     std::fs::create_dir_all(&worker_dir).ok()?;
-    let tree = WorkerTree { base: base.clone() };
     let venv_link = worker_dir.join(".venv");
+    // link 失败时直接返回，`tmp` drop 即清理已创建目录
     if !link_dir(venv, &venv_link) {
-        return None; // tree 在此 drop，清理已创建的目录
+        return None;
     }
     // 校验链接后 Python 可达，否则视为环境不支持而跳过
     if !venv_link.join("Scripts/python.exe").exists() && !venv_link.join("bin/python3").exists() {
         return None;
     }
     std::fs::write(worker_dir.join("worker_main.py"), FAKE_WORKER_MAIN).ok()?;
-    Some(tree)
+    Some(WorkerTree { base, _tmp: tmp })
 }
 
 /// 构造一个已 spawn 的 BridgeSupervisor（附带停止句柄与需保活的 ConfigService）。

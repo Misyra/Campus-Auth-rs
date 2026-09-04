@@ -9,9 +9,10 @@
 //!
 //! 该测试是 Bridge 后续演进（如 supervisor actor 化）的安全网。找不到 Python 时跳过。
 
+mod common;
+
+use common::locate_python;
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use campus_auth::bridge::{IpcMessage, IpcRequest, ParsedMessage, spawn_worker};
@@ -66,34 +67,6 @@ for line in sys.stdin:
     else:
         emit({"id": mid, "result": {"success": True, "data": {"echo": method}, "error": None}})
 "#;
-
-/// 定位本地 Python 解释器（优先项目内 venv，其次 PATH）。
-fn locate_python() -> Option<PathBuf> {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest.join("python_worker/.venv/Scripts/python.exe"),
-        manifest.join("environment/.venv/Scripts/python.exe"),
-        manifest.join("python_worker/.venv/bin/python3"),
-        manifest.join("environment/.venv/bin/python3"),
-    ];
-    for c in candidates {
-        // 仅判断文件存在不够：uv 重建/删除后，venv 的 python.exe 可能仍是
-        // 指向已不存在解释器的启动器，启动会以 101 退出，导致测试误报。
-        if c.exists()
-            && Command::new(&c)
-                .arg("--version")
-                .output()
-                .is_ok_and(|output| output.status.success())
-        {
-            return Some(c);
-        }
-    }
-    ["python3", "python"].into_iter().find_map(|name| {
-        let path = which::which(name).ok()?;
-        let output = Command::new(&path).arg("--version").output().ok()?;
-        output.status.success().then_some(path)
-    })
-}
 
 /// 带超时地接收一条解析消息。
 async fn recv_timeout(rx: &mut mpsc::Receiver<ParsedMessage>, secs: u64) -> Option<ParsedMessage> {

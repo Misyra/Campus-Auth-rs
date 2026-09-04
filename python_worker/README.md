@@ -1,8 +1,8 @@
 # Campus-Auth Python Worker
 
-校园网自动认证工具的浏览器自动化子进程。由 Rust 主进程（控制平面）通过
-**stdin/stdout NDJSON IPC** 驱动，负责 Playwright 浏览器操作与 OCR 识别。
+> Rust 侧对应模块 `src/bridge/`（`BridgeSupervisor` 通过 NDJSON IPC 驱动本 Worker），IPC 契约见本 README 与 `worker_main.py` docstring。
 
+校园网自动认证工具的浏览器自动化子进程。由 Rust 主进程（控制平面）通过
 > 版本：`v5.0.0-alpha.1`。本目录为 Rust 重写版的 Python Worker，已移除对旧
 > 项目 `app.*` 模块的全部依赖。
 

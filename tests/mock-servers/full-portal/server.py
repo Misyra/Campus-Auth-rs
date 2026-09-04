@@ -277,9 +277,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="模拟校园网认证门户（本地 e2e 用）")
+    ap.add_argument("--port", type=int, default=PORT, help="监听端口（默认 18765）")
+    port = ap.parse_args().port
     random.seed()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"mock portal listening on http://127.0.0.1:{PORT}", flush=True)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(f"mock portal listening on http://127.0.0.1:{port}", flush=True)
     server.serve_forever()
 
 

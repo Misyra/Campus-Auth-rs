@@ -1,0 +1,12 @@
+{
+  "type": "script",
+  "task_id": "hello-py",
+  "name": "hello",
+  "description": "",
+  "script_path": null,
+  "content": "print(\"hello\")",
+  "args": [],
+  "work_dir": null,
+  "timeout": 60,
+  "binary_path": null
+}

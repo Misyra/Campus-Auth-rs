@@ -1,0 +1,12 @@
+{
+  "type": "script",
+  "task_id": "hello-explicit2",
+  "name": "explicit",
+  "description": "",
+  "script_path": null,
+  "content": "import sys; print(sys.executable)",
+  "args": [],
+  "work_dir": null,
+  "timeout": 60,
+  "binary_path": null
+}

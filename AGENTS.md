@@ -105,22 +105,22 @@ campus-auth/
 │   ├── engine/               # 调度引擎（单 tokio task + select!，含 slot.rs 可替换句柄槽）
 │   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
 │   ├── login/                # 登录编排（状态机、去重、抢占、重试）
-│   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）
+│   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）— 源码模块，对应运行时 /config（.gitignore / 锚定，勿混淆）
 │   ├── web/                  # Web API + WebSocket（routes/ 按域拆分：config/profiles/login/monitor/scheduler/tasks/scripts/system/autostart/debug/history/repo/background/uninstall/ocr 等，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
-│   ├── tasks/                # 任务管理
+│   ├── tasks/                # 任务管理 — 源码模块，对应运行时 /tasks（.gitignore / 锚定）
 │   ├── network/              # 网络接口
-│   ├── bridge/               # Python Bridge（NDJSON IPC）
+│   ├── bridge/               # Python Bridge（NDJSON IPC）— Rust 侧桥，对应 python_worker/ 执行侧
 │   ├── status/               # StatusManager: 状态快照 + watch 推送
-│   ├── environment/          # 环境管理器（uv/python 按需安装）
+│   ├── environment/          # 环境管理器（uv/python 按需安装）— 源码模块，对应运行时 /environment（.gitignore / 锚定，空目录按需生成）
 │   ├── updater/              # 版本更新（检查 + 下载 + 应用）
 │   ├── tray/                 # 系统托盘（tray-icon）
 │   └── utils/                # 工具（PID 文件锁、平台特定代码）
-├── frontend/                 # Vue 3 + TypeScript + Vite
-├── python_worker/            # Python Worker 子进程（Playwright + OCR）
-├── tests/                    # 集成测试（common/ 为共享辅助）
-├── docs/                     # 文档（changelog / 已知问题清单 / 任务编写指南 / plan-next 活跃计划 / archive 归档）
-├── resources/                # 静态资源（icons/ 托盘与浏览器图标、tools/ 脚本）
+├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略），与 resources/ 职责分离
+├── python_worker/            # Python Worker 子进程（Playwright + OCR）— 执行侧，对应 Rust 侧 src/bridge/，IPC 契约见 python_worker/README.md
+├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；mock_portal/ 已搬迁至 tests/mock-servers/full-portal/（根保留 README 重定向）
+├── docs/                     # 文档（changelog / 已知问题清单 / 任务编写指南 / plan-next 活跃计划 / archive 归档，已兑现 docs/archive/）
+├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入，区别于 frontend/public 与 frontend/dist）
 └── .github/workflows/        # CI（fmt + clippy + test + 前端构建 + vitest + pytest）
 ```
 

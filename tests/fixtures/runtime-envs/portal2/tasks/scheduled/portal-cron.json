@@ -1,0 +1,9 @@
+{
+  "name": "cron",
+  "description": "",
+  "cron": "*/1 * * * *",
+  "target_id": "login-script",
+  "profile_id": null,
+  "timeout": null,
+  "enabled": true
+}

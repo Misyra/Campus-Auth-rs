@@ -1,0 +1,12 @@
+{
+  "type": "script",
+  "task_id": "login-script",
+  "name": "login",
+  "description": "",
+  "script_path": null,
+  "content": "print(\"portal login ok\")",
+  "args": [],
+  "work_dir": null,
+  "timeout": 60,
+  "binary_path": null
+}

@@ -1,0 +1,11 @@
+{
+  "id": "default",
+  "name": "默认网络",
+  "username": "testuser",
+  "password": "ENC:au2oZJb+tc8CUkDGofQUubff7oURYFVAaWtbkChQo4iIFfmM",
+  "auth_url": "http://127.0.0.1:18765/login.html",
+  "isp": "",
+  "gateway_ip": "",
+  "wifi_ssid": "",
+  "active_task": ""
+}

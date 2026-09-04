@@ -4,24 +4,9 @@ import json
 import time
 import urllib.request
 
-import os
+from _common import BASE, MOCK, TOKEN, preflight
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _load_token() -> str:
-    """读取本地实例 token（target/debug/config/.auth_token，随实例轮换，不入库）。"""
-    try:
-        with open(os.path.join(_REPO_ROOT, "target", "debug", "config", ".auth_token"),
-                  encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-TOKEN = _load_token()
-BASE = "http://127.0.0.1:50721"
-MOCK = "http://127.0.0.1:18765"
+preflight()
 
 
 def api(path, method="GET", body=None, base=BASE, timeout=20):
@@ -37,6 +22,8 @@ def api(path, method="GET", body=None, base=BASE, timeout=20):
         return {"http_error": e.code, "body": e.read().decode("utf-8", "replace")[:200]}
     except TimeoutError:
         return {"trigger_timeout": True}  # /api/login 同步等结果，超时只说明还在跑
+    except OSError as e:
+        return {"connection_error": str(e)[:200]}
 
 
 def login_status():

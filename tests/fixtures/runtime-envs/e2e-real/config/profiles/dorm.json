@@ -1,0 +1,11 @@
+{
+  "id": "dorm",
+  "name": "宿舍",
+  "username": "testuser",
+  "password": "ENC:AOh+sDphNUkFHbKUo64A/qD2/rNlxf4AGb3eY1e6Tzv8s6LG",
+  "auth_url": "http://127.0.0.1:18765/",
+  "isp": "",
+  "gateway_ip": "",
+  "wifi_ssid": "",
+  "active_task": "browser-login"
+}
