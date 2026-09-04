@@ -69,8 +69,8 @@ function handleSave() {
     </form>
     <router-view v-else />
 
-    <!-- 保存栏 -->
-    <div class="save-bar">
+    <!-- 保存栏（任务页独立持久化，无需全局保存） -->
+    <div v-if="activeTab !== 'tasks'" class="save-bar">
       <button
         class="btn save-btn"
         :class="{

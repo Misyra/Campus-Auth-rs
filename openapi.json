@@ -2542,10 +2542,12 @@
     "operationId": "get___api_docs_task-writing-guide",
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "Markdown 文件原文",
       "content": {
-       "application/json": {
-        "schema": {}
+       "text/markdown": {
+        "schema": {
+         "type": "string"
+        }
        }
       }
      },
@@ -2573,10 +2575,12 @@
     "operationId": "get___api_docs_task-manual",
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "Markdown 文件原文",
       "content": {
-       "application/json": {
-        "schema": {}
+       "text/markdown": {
+        "schema": {
+         "type": "string"
+        }
        }
       }
      },

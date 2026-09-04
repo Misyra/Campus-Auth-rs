@@ -48,11 +48,12 @@ struct Assets;
 #[include = "openapi.json"]
 struct OpenApiAsset;
 
-/// `docs/guides/task-writing-guide.md` 嵌入（供 `/api/docs/task-writing-guide`，避免便携包缺 docs 导致 404）
+/// `docs/guides/` 文档嵌入（供 `/api/docs/*`，避免便携包缺 docs 导致 404）
 #[cfg(not(feature = "no-embed"))]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "docs/guides/"]
 #[include = "task-writing-guide.md"]
+#[include = "task-manual.md"]
 pub(crate) struct GuideAsset;
 
 #[cfg(not(feature = "no-embed"))]

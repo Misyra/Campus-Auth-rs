@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Query, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -467,19 +470,20 @@ fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
 
 /// GET /api/docs/task-writing-guide — 任务编写指南
 ///
-/// 优先从 `docs/guides/task-writing-guide.md` 读取并返回 Markdown 文本；
+/// 优先从 `docs/guides/task-writing-guide.md` 读取并以 Markdown 文件形式返回；
 /// 便携包缺 `docs/` 时回退到编译期嵌入的副本，避免 404。
+/// 注意与 `Json` 信封区分：浏览器直接打开显示文本，`download` 链接触发下载。
 pub async fn task_writing_guide(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let path = resolve_guide_path(&config.base_path());
     // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
     match tokio::fs::read_to_string(&path).await {
-        Ok(content) => Ok(data(Value::String(content))),
+        Ok(content) => Ok(markdown_response("task-writing-guide.md", content)),
         Err(e) => {
             if let Some(content) = embedded_guide() {
                 tracing::debug!("任务编写指南回退到嵌入副本: {e}");
-                return Ok(data(Value::String(content)));
+                return Ok(markdown_response("task-writing-guide.md", content));
             }
             tracing::warn!("任务编写指南加载失败 ({path:?}): {e}");
             Err(ApiError::NotFound(
@@ -489,16 +493,75 @@ pub async fn task_writing_guide(
     }
 }
 
+/// Markdown 文本以文件形式返回（与 tools.rs 的脚本直返保持一致）：
+/// `text/markdown` 让浏览器显示为文本，`download` 属性的链接触发下载。
+fn markdown_response(filename: &str, content: String) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{filename}\""),
+        )
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(content))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response())
+}
+
 /// GET /api/docs/task-manual — 任务使用手册
-pub async fn task_manual() -> Json<Value> {
-    data(Value::String(
-        "# 任务使用手册\n\n\
-         - 通过 `POST /api/tasks` 创建任务\n\
-         - 通过 `POST /api/tasks/active/{task_id}` 设置活跃任务\n\
-         - 通过 `POST /api/login` 触发登录，将自动执行活跃任务\n\n\
-         调试请使用 `POST /api/debug/start` 启动调试会话。"
-            .into(),
-    ))
+///
+/// 与编写指南同策略：优先读磁盘 `docs/guides/task-manual.md`（便于热更），
+/// 缺失时回退到编译期嵌入的副本，避免 404。
+pub async fn task_manual(
+    State(config): State<Arc<dyn crate::config::ConfigApi>>,
+) -> Result<Response, ApiError> {
+    let path = resolve_manual_path(&config.base_path());
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Ok(markdown_response("task-manual.md", content)),
+        Err(e) => {
+            if let Some(content) = embedded_manual() {
+                tracing::debug!("任务使用手册回退到嵌入副本: {e}");
+                return Ok(markdown_response("task-manual.md", content));
+            }
+            tracing::warn!("任务使用手册加载失败 ({path:?}): {e}");
+            Err(ApiError::NotFound(
+                "任务使用手册文件缺失，可能需要重新安装或更新软件".to_string(),
+            ))
+        }
+    }
+}
+
+/// 在候选目录中查找首个存在的任务使用手册（与编写指南同目录）
+fn resolve_manual_path(base_path: &std::path::Path) -> std::path::PathBuf {
+    let rel = std::path::Path::new("docs")
+        .join("guides")
+        .join("task-manual.md");
+    let primary = base_path.join(&rel);
+    if primary.exists() {
+        return primary;
+    }
+    if let Some(repo) = base_path.parent().and_then(|p| p.parent()) {
+        let fallback = repo.join(&rel);
+        if fallback.exists() {
+            return fallback;
+        }
+    }
+    let manifest_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&rel);
+    if manifest_fallback.exists() {
+        return manifest_fallback;
+    }
+    primary
+}
+
+#[cfg(not(feature = "no-embed"))]
+fn embedded_manual() -> Option<String> {
+    crate::web::static_files::GuideAsset::get("task-manual.md")
+        .and_then(|a| String::from_utf8(a.data.into_owned()).ok())
+}
+
+#[cfg(feature = "no-embed")]
+fn embedded_manual() -> Option<String> {
+    None
 }
 
 // ---- 工具函数 ----

@@ -117,6 +117,35 @@
   color: var(--text-primary);
 }
 
+/* 链接型按钮：行内重试/文字操作 */
+.btn-link {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  padding: 4px 8px;
+  min-height: 0;
+  white-space: nowrap;
+}
+.btn-link:hover:not(:disabled) {
+  text-decoration: underline;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
+}
+/* 幽灵按钮：最低强调的次要操作（外部链接、装饰性入口） */
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+}
+.btn-ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: transparent;
+  box-shadow: none;
+}
+
 /* 危险按钮幽灵样式 */
 .btn-danger-ghost {
     background: transparent;

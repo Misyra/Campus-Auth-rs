@@ -75,8 +75,20 @@
   gap: var(--space-md);
 }
 
+/* 单列（任务页等卡片少或需纵览的场景） */
 .settings-panel-grid--task {
   grid-template-columns: 1fr;
+}
+
+/* 双列（宽屏下减少纵向滚动；--wide 卡独占整行） */
+@media (min-width: 1080px) {
+  .settings-panel-grid--cols2 {
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+  .settings-panel-grid--cols2 .settings-panel--wide {
+    grid-column: 1 / -1;
+  }
 }
 
 .settings-panel {
@@ -228,22 +240,15 @@
   box-shadow: 0 6px 20px rgba(var(--accent-rgb), 0.4);
 }
 
-/* 未保存：黄色高亮 */
+/* 未保存：黄色高亮（静态，不用呼吸动画，避免与全局克制动效冲突） */
 .btn.save-btn-dirty {
   background: linear-gradient(135deg, var(--warning), var(--warning-deep));
   color: var(--on-warning);
   box-shadow: var(--shadow-hover);
-  animation: save-pulse 2s ease-in-out infinite;
 }
 
 .btn.save-btn-dirty:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--warning-soft), var(--warning));
   box-shadow: 0 6px 24px rgba(var(--warning-rgb), 0.45);
-}
-
-@keyframes save-pulse {
-  0%, 100% { box-shadow: var(--shadow-hover); }
-  50% { box-shadow: 0 4px 24px rgba(var(--warning-rgb), 0.4); }
 }
 
 /* 保存中 */

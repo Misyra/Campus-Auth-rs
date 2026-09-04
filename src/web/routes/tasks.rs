@@ -152,14 +152,71 @@ pub async fn order_tasks(
 }
 
 /// POST /api/tasks/import — 导入任务（支持单个对象或数组）
+///
+/// 标准格式即导出结果：`GET /api/tasks/export/{id}` 原样的
+/// `{ "summary": { "id": ... }, "config": { ... } }`（批量为其数组），导出文件可直接回导。
+/// 另向后兼容两种写法：顶层 `id` 的扁平任务对象、`tasks/` 磁盘文件的 `task_id` 形态；
+/// 外层另兼容 `{ "tasks"|"data"|"items": [...] }` 包裹与单个对象。
+fn unwrap_import_items(body: Value) -> Vec<Value> {
+    if let Some(arr) = body.as_array() {
+        return arr.clone();
+    }
+    if let Some(obj) = body.as_object() {
+        for key in ["tasks", "items", "data"] {
+            if let Some(arr) = obj.get(key).and_then(|v| v.as_array()) {
+                return arr.clone();
+            }
+        }
+        // API 信封原样 `{ "code":..,"data":{...} }`：data 为单个任务对象
+        if let Some(inner) = obj.get("data").filter(|v| v.is_object()) {
+            return vec![inner.clone()];
+        }
+    }
+    vec![body]
+}
+
+/// 从单条导入记录提取 `(任务 ID, 任务配置 JSON)`，空 ID 表示无法识别
+fn normalize_import_item(item: &Value) -> (String, Value) {
+    if let Some(id) = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return (id.to_string(), item.clone());
+    }
+    // 导出端点形态：{ summary: { id }, config: {...} }
+    if let Some(cfg) = item.get("config").filter(|v| v.is_object()) {
+        let id = item
+            .pointer("/summary/id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                cfg.get("task_id")
+                    .or_else(|| cfg.get("id"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        return (id, cfg.clone());
+    }
+    // 磁盘文件形态：task_id 即 ID
+    if let Some(task_id) = item
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return (task_id.to_string(), item.clone());
+    }
+    (String::new(), item.clone())
+}
+
 pub async fn import_tasks(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let items = match body.as_array() {
-        Some(arr) => arr.clone(),
-        None => vec![body],
-    };
+    let items = unwrap_import_items(body);
     if items.is_empty() {
         return Err(ApiError::BadRequest("导入列表为空".into()));
     }
@@ -167,17 +224,13 @@ pub async fn import_tasks(
     let mut skipped_no_id = 0u32;
     let mut failed: Vec<Value> = Vec::new();
     for item in items {
-        let id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let (id, task_value) = normalize_import_item(&item);
         if id.is_empty() {
             skipped_no_id += 1;
             continue;
         }
         // 逐条导入：任一条失败不中止整体，收集失败项供前端提示
-        let task: crate::tasks::TaskKind = match serde_json::from_value(item) {
+        let task: crate::tasks::TaskKind = match serde_json::from_value(task_value) {
             Ok(t) => t,
             Err(e) => {
                 failed.push(json!({ "id": id, "reason": e.to_string() }));
@@ -189,16 +242,15 @@ pub async fn import_tasks(
             Err(e) => failed.push(json!({ "id": id, "reason": e.to_string() })),
         }
     }
-    // 一条都没导入且无具体失败项：必然是载荷格式问题（如对象缺 id、外层多包了一层
-    // {"tasks": [...]}），此前静默返回 imported:0 让用户误以为导入成功，现明确报错
+    // 一条都没导入且无具体失败项：载荷中没有任何可识别 ID 的任务记录，明确报错
     if imported == 0 && failed.is_empty() {
         let hint = if skipped_no_id > 0 {
-            format!("{skipped_no_id} 条记录缺少 id 字段")
+            format!("{skipped_no_id} 条记录缺少任务 ID（顶层 id / summary.id / task_id 均未找到）")
         } else {
             "载荷无法识别为任务".to_string()
         };
         return Err(ApiError::BadRequest(format!(
-            "没有可导入的任务：{hint}（应为任务对象数组，每个任务需包含 id 字段，格式可参考导出结果）"
+            "没有可导入的任务：{hint}（应为任务对象/数组，ID 可为顶层 id、导出结果 summary.id 或磁盘文件的 task_id；外层可用 {{\"tasks\": [...]}} 包裹）"
         )));
     }
     if !failed.is_empty() {
@@ -659,6 +711,58 @@ mod tests {
         assert_eq!(v["data"]["failed"].as_array().unwrap().len(), 1);
         assert_eq!(inner.lock().unwrap().tasks.len(), 2);
     }
+    /// 导入：导出结果原样（{ summary, config }）可直接回导
+    #[tokio::test]
+    async fn test_import_tasks_accepts_export_envelope() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!([{
+                            "summary": { "id": "e1", "name": "导出", "description": "", "task_type": "browser" },
+                            "config": { "type": "browser", "task_id": "e1", "name": "导出", "url": "https://a.example.com", "steps": [] }
+                        }])
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["imported"], 1);
+        assert!(inner.lock().unwrap().tasks.iter().any(|(id, _)| id == "e1"));
+    }
+
+    /// 导入：磁盘文件原样（task_id）与 {"tasks": [...]} 包裹可直接导入
+    #[tokio::test]
+    async fn test_import_tasks_accepts_task_id_and_wrapper() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"tasks": [
+                            { "type": "browser", "task_id": "d1", "name": "磁盘", "url": "https://a.example.com", "steps": [] }
+                        ]})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["imported"], 1);
+        assert!(inner.lock().unwrap().tasks.iter().any(|(id, _)| id == "d1"));
+    }
 
     /// 导出返回任务详情
     #[tokio::test]
@@ -676,6 +780,38 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["data"]["summary"]["id"], "t1");
+    }
+    /// 导出 → 导入往返：导出结果原样即标准导入格式
+    #[tokio::test]
+    async fn test_export_import_roundtrip() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/export/t1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let exported = body_json(resp).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(exported["data"].to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["imported"], 1);
+        assert!(inner.lock().unwrap().tasks.iter().any(|(id, _)| id == "t1"));
     }
 
     /// 手动执行：加载任务并交给执行器

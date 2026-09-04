@@ -6,6 +6,7 @@ import { useProfiles } from "@/composables/useProfiles";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import { CARRIER_OPTIONS } from "@/utils/constants";
 
 const config = useConfig();
@@ -56,46 +57,52 @@ watch(
       </div>
       <div class="card-body">
         <div class="form-group">
-          <label for="settings-username">账号</label>
-          <input id="settings-username" v-model.trim="config.config.credentials.username" name="username" type="text" placeholder="学号/账号" autocomplete="username" />
+          <div class="field-label-row">
+            <label for="settings-username">账号</label>
+            <FieldHelp text="学校分配的上网账号，通常为学号。留空将无法自动认证。" />
+          </div>
+          <input id="settings-username" v-model.trim="config.config.credentials.username" name="username" type="text" placeholder="学号" autocomplete="username" />
         </div>
         <div class="form-group">
-          <label for="settings-password">密码</label>
+          <div class="field-label-row">
+            <label for="settings-password">密码</label>
+            <FieldHelp text="加密保存于本地配置文件。更换时直接输入新密码并保存。" />
+          </div>
           <input id="settings-password"
             :value="passwordDisplay"
             @input="onPasswordInput"
             @focus="onPasswordFocus()" @blur="onPasswordBlur()"
             name="password" type="password"
-            :placeholder="passwordSaved ? '输入新密码，留空不修改' : '输入密码'"
+            :placeholder="passwordSaved ? '已保存，输入新密码可更换' : '输入上网密码'"
             autocomplete="current-password" />
-          <span class="hint" v-if="passwordSaved && !editingPassword">密码已加密保存，点击修改</span>
-          <span class="hint" v-else-if="passwordSaved && editingPassword">留空保存则不修改原密码</span>
-          <span class="hint" v-else>密码本地存储，不保证意外删除后可恢复</span>
+          <span class="hint" v-if="passwordSaved && !editingPassword">密码已加密保存于本地，点击输入框可更换</span>
+          <span class="hint" v-else-if="passwordSaved && editingPassword">为空则保留原密码，输入则替换为新密码</span>
+          <span class="hint" v-else>首次设置，保存后加密存放于本地</span>
         </div>
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-auth-url">认证地址</label>
-            <span class="field-help" tabindex="0" role="note" data-tip="校园网认证页面的地址，以 http:// 或 https:// 开头。">?</span>
+            <FieldHelp text="校园网登录页的完整地址，以 http:// 或 https:// 开头。可在断网后从浏览器地址栏获取。" />
           </div>
-          <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="http://" />
+          <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="https://auth.example.edu.cn" />
         </div>
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-carrier">运营商</label>
-            <span class="field-help" tabindex="0" role="note" data-tip="校园网登录页面的运营商选择。选择&quot;无&quot;则跳过运营商步骤；选择&quot;自定义&quot;可输入关键字匹配。">?</span>
+            <FieldHelp text="仅当登录页包含运营商选项时需要选择。选“不选择”跳过该步骤；选“自定义”按关键字匹配。" />
           </div>
           <CustomSelect v-model="config.config.credentials.isp" :options="carrierOptions" />
         </div>
         <div v-if="showCustomCarrier" class="form-group">
           <label for="settings-carrier-custom">自定义运营商关键字</label>
-          <input id="settings-carrier-custom" v-model.trim="config.config.credentials.isp" type="text" placeholder="例如：校园专网、宿舍网" />
+          <input id="settings-carrier-custom" v-model.trim="config.config.credentials.isp" type="text" placeholder="例如：宿舍宽带" />
         </div>
       </div>
     </section>
 
     <!-- 自定义变量（已移除）：保留一行迁移提示，不再占用整卡 -->
     <p class="form-help-text">
-      自定义变量功能已移除。如需在任务中使用变量，请直接在任务 JSON 的 <code>variables</code> 字段中硬编码定义。
+      自定义变量功能已移除。如需在任务中使用变量，请在任务 JSON 的 <code>variables</code> 字段中直接定义。
     </p>
   </div>
 </template>
