@@ -200,10 +200,10 @@ pub fn is_own_process(pid: u32) -> bool {
         // /proc/<pid>/exe 读不到（已退出/无权限）即视为非本程序
         if let Ok(link) = std::fs::read_link(format!("/proc/{pid}/exe")) {
             let s = link.to_string_lossy().to_lowercase();
-            s.contains("campus-auth")
+            s.contains("campus-auth");
         }
         // macOS 无 /proc：退化为保守拒绝（由调用方清理残留文件后抢锁）
-        return false;
+        false
     }
 }
 
