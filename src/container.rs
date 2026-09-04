@@ -124,12 +124,7 @@ impl ServiceContainer {
             status.clone(),
             Some(metrics.clone()),
         );
-        let git_download_enabled = config.runtime().load().app.developer_mode;
-        let environment = EnvironmentManager::new(
-            base_path.to_path_buf(),
-            status.clone(),
-            git_download_enabled,
-        );
+        let environment = EnvironmentManager::new(base_path.to_path_buf(), status.clone());
         // 环境重建成功后复位 Bridge 连续 spawn 失败熔断（B3），解除熔断允许重新 spawn。
         Self::wire_environment_bridge(&bridge, &environment);
 

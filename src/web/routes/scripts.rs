@@ -381,7 +381,6 @@ mod tests {
                 uv_ready: true,
                 python_ready: true,
                 playwright_ready: true,
-                git_ready: true,
                 capability_ready: true,
                 stage: BootstrapStage::Idle,
                 progress: None,

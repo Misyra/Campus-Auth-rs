@@ -129,8 +129,8 @@ fn dir_size_inner(path: &std::path::Path, depth: u8) -> u64 {
 
 /// POST /api/ocr/uninstall — 卸载 OCR（取消在途任务并移除依赖）
 ///
-/// 取消在途 OCR 识别任务（bridge.cancel），并通过基础 `uv sync`
-/// 移除 OCR extra（environment.remove_ocr_dep）。
+/// 取消在途 OCR 识别任务（bridge.cancel），并 `uv remove` 项目主依赖中的 ddddocr
+///（见 `environment.remove_ocr_dep`）。
 pub async fn ocr_uninstall(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
@@ -144,8 +144,8 @@ pub async fn ocr_uninstall(
 
 /// POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖
 ///
-/// 后台执行环境能力安装（uv/Python/Playwright）并显式同步 `ocr` extra，
-/// 补齐 OCR 依赖，进度通过 StatusManager 推送。
+/// 后台执行环境能力安装（uv/Python/Playwright）并 `uv add` ddddocr，
+/// 进度通过 StatusManager 推送。
 pub async fn ocr_install(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
@@ -273,7 +273,6 @@ mod tests {
                 uv_ready: false,
                 python_ready: false,
                 playwright_ready: false,
-                git_ready: false,
                 capability_ready: false,
                 stage: BootstrapStage::Idle,
                 progress: None,

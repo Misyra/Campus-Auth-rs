@@ -108,7 +108,6 @@ pub async fn init_status(State(state): State<AppState>) -> Result<Json<Value>, A
             "uv_ready": env_status.uv_ready,
             "python_ready": env_status.python_ready,
             "playwright_ready": env_status.playwright_ready,
-            "git_ready": env_status.git_ready,
             "capability_ready": env_status.capability_ready,
             "stage": format!("{:?}", env_status.stage),
             "progress": env_status.progress,

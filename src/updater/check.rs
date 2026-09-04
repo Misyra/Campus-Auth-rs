@@ -312,8 +312,7 @@ where
 ///
 /// 返回伴随文件首行首个空白分隔字段（即哈希值）；找不到 / 下载失败时返回空串
 /// （调用方据此降级为信任 HTTPS）。
-/// pub(crate)：environment/git.rs（MinGit 校验，R3）复用同一伴随文件模式。
-pub(crate) async fn fetch_sha256_assoc(
+async fn fetch_sha256_assoc(
     client: &reqwest::Client,
     assets: &[&serde_json::Value],
     zip_name: &str,

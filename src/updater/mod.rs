@@ -19,8 +19,6 @@ use crate::config::ConfigService;
 use crate::status::{InstallProgress, LoginStatus, PartialSnapshot, StatusManager};
 
 mod apply;
-/// pub(crate)：environment/git.rs（MinGit sha256 校验，R3）复用
-/// fetch_sha256_assoc 伴随文件查找模式
 pub(crate) mod check;
 mod download;
 pub mod error;
