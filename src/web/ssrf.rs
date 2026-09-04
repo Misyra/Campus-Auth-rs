@@ -122,18 +122,20 @@ fn pinned_client(
     timeout: Duration,
     ua: &str,
     proxy: Option<&str>,
-) -> reqwest::Client {
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(ua)
         .redirect(reqwest::redirect::Policy::none())
         .resolve(host, addr);
     if let Some(p) = proxy {
-        // 构建失败（非法代理 URL）直接 panic 与原行为一致：代理值来自本地配置
-        // 而非用户输入，配置错误应在启动/保存时暴露
-        builder = builder.proxy(reqwest::Proxy::all(p).expect("代理 URL 非法"));
+        // 代理地址来自用户配置（updater.proxy_url），非法值转错误而非 panic：
+        // 此处 panic 会直接砸掉当次请求任务（连接重置而非 400）
+        builder = builder.proxy(reqwest::Proxy::all(p).map_err(|e| format!("代理 URL 非法: {e}"))?);
     }
-    builder.build().expect("构建 HTTP 客户端失败")
+    builder
+        .build()
+        .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))
 }
 
 /// SSRF 安全的 GET 请求：校验 scheme → DNS 解析校验并钉扎 → 手动跟随重定向
@@ -178,7 +180,8 @@ pub async fn secure_get_proxied(
         let mut last_err = String::from("无可用地址");
         let mut response: Option<reqwest::Response> = None;
         for addr in &addrs {
-            let client = pinned_client(&host, *addr, timeout, ua, proxy);
+            // 代理非法等构造失败直接返回（换地址重试无意义，同代理必同错）
+            let client = pinned_client(&host, *addr, timeout, ua, proxy)?;
             match client.get(&current).send().await {
                 Ok(resp) => {
                     response = Some(resp);
@@ -310,5 +313,49 @@ mod tests {
         assert!(!is_restricted_ip(IpAddr::V6(
             "2001:4860:4860::8888".parse().unwrap()
         )));
+    }
+}
+
+#[cfg(test)]
+mod proxy_client_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn loopback() -> SocketAddr {
+        "127.0.0.1:9".parse().unwrap()
+    }
+
+    /// 非法代理 URL 转错误而非 panic（代理值来自用户配置，曾 expect 直接砸掉请求任务）
+    #[test]
+    fn pinned_client_rejects_invalid_proxy_url() {
+        for bad in ["http://", "http://[::1", "not a url!!!", "http://a b"] {
+            let err = pinned_client(
+                "example.com",
+                loopback(),
+                Duration::from_secs(1),
+                "t",
+                Some(bad),
+            )
+            .unwrap_err();
+            assert!(err.contains("代理 URL 非法"), "{bad}: {err}");
+        }
+    }
+
+    /// 合法代理正常构造（不发起连接）
+    #[test]
+    fn pinned_client_accepts_valid_proxy() {
+        assert!(
+            pinned_client(
+                "example.com",
+                loopback(),
+                Duration::from_secs(1),
+                "t",
+                Some("http://127.0.0.1:7890")
+            )
+            .is_ok()
+        );
+        assert!(
+            pinned_client("example.com", loopback(), Duration::from_secs(1), "t", None).is_ok()
+        );
     }
 }
