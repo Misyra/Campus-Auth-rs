@@ -64,3 +64,80 @@ pub async fn task_recorder(State(config): State<Arc<dyn ConfigApi>>) -> Result<R
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt; // oneshot
+
+    use super::super::test_support::MockConfigApi;
+
+    fn mock_app_with_base(base: &std::path::Path) -> axum::Router {
+        let (config, inner) = MockConfigApi::mocked();
+        inner.lock().unwrap().base_path = base.to_path_buf();
+        axum::Router::new()
+            .route("/api/tools/task-recorder.user.js", get(task_recorder))
+            .with_state(config)
+    }
+
+    /// 主路径命中：base_path 下 resources/tools/task-recorder.user.js 原样返回
+    #[tokio::test]
+    async fn recorder_serves_primary_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("resources").join("tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("task-recorder.user.js"), "// test-recorder").unwrap();
+        let app = mock_app_with_base(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tools/task-recorder.user.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()["content-type"],
+            "application/javascript; charset=utf-8"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"// test-recorder");
+    }
+
+    /// 兜底：base_path 为空时回退到仓库 resources（开发布局），仍 200
+    #[tokio::test]
+    async fn recorder_falls_back_to_repo_resources() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 用一个两级深度的空目录：primary 缺失，开发布局回退也缺失，
+        // 最终命中 CARGO_MANIFEST_DIR 兜底（仓库内始终存在该脚本）
+        let nested = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        // 若仓库兜底脚本不存在则跳过（打包布局差异），不误报失败
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("tools")
+            .join("task-recorder.user.js");
+        if !manifest.exists() {
+            eprintln!("跳过：仓库 resources/tools/task-recorder.user.js 不存在");
+            return;
+        }
+        let app = mock_app_with_base(&nested);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tools/task-recorder.user.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}

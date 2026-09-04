@@ -130,3 +130,131 @@ pub async fn set_autostart_mode(
     }
     Ok(data(serde_json::json!({ "message": "自启动模式已更新" })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use tower::ServiceExt; // oneshot
+
+    use super::super::test_support::{MockConfigApi, body_json};
+
+    fn mock_app() -> (
+        axum::Router,
+        Arc<std::sync::Mutex<super::super::test_support::MockConfigInner>>,
+    ) {
+        let (config, inner) = MockConfigApi::mocked();
+        let app = axum::Router::new()
+            .route("/api/autostart/status", get(get_autostart))
+            .route("/api/autostart/mode", post(set_autostart_mode))
+            .with_state(config);
+        (app, inner)
+    }
+
+    /// 默认关闭：enabled=false，method 占位 "-"，platform 与编译目标一致
+    #[tokio::test]
+    async fn status_reports_disabled_by_default() {
+        let (app, _) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/autostart/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["enabled"], false);
+        assert_eq!(v["data"]["method"], "-");
+        assert_eq!(v["data"]["platform"], std::env::consts::OS);
+    }
+
+    /// 开启后 method 不再是占位符（Windows=Registry，其余见实现）
+    #[tokio::test]
+    async fn status_reports_method_when_enabled() {
+        let (app, inner) = mock_app();
+        inner.lock().unwrap().settings.global.app.autostart_enabled = true;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/autostart/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["enabled"], true);
+        assert_ne!(v["data"]["method"], "-");
+    }
+
+    /// mode 落盘：monitor 写入 settings 并返回确认
+    #[tokio::test]
+    async fn set_mode_persists_startup_action() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/autostart/mode")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"runtime_mode":"login_once"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let action = &inner.lock().unwrap().settings.global.app.startup_action;
+        assert_eq!(
+            serde_json::to_value(action).unwrap(),
+            serde_json::json!("login_once")
+        );
+    }
+
+    /// 未知模式直接 400，不触达系统注册
+    #[tokio::test]
+    async fn set_mode_rejects_unknown() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/autostart/mode")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"runtime_mode":"bogus"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(inner.lock().unwrap().save_calls, 0);
+    }
+
+    /// 落盘失败路径：modify 失败转 400（enable/disable 的系统注册分支
+    /// 会动真实注册表/schtasks，不在单测覆盖，见手动 E2E T14）
+    #[tokio::test]
+    async fn set_mode_maps_modify_failure_to_bad_request() {
+        let (config, inner) = MockConfigApi::mocked();
+        inner.lock().unwrap().modify_fails = true;
+        let app = axum::Router::new()
+            .route("/api/autostart/mode", post(set_autostart_mode))
+            .with_state(config);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/autostart/mode")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"runtime_mode":"monitor"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}

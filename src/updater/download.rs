@@ -233,3 +233,129 @@ fn extract_to_staging_blocking(
         extracted_exe,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    fn test_info(url: &str, sha256: &str) -> crate::updater::UpdateInfo {
+        crate::updater::UpdateInfo {
+            current_version: "5.0.0-alpha.6".to_string(),
+            latest_version: "5.0.1-alpha.1".to_string(),
+            update_available: true,
+            url: url.to_string(),
+            sha256: sha256.to_string(),
+            size: None,
+            notes: None,
+            release_date: None,
+        }
+    }
+
+    /// 起本地文件服务：固定字节 + Content-Length（回环 http 在更新白名单内）
+    async fn serve_bytes(payload: Vec<u8>) -> SocketAddr {
+        // Body::from(Vec<u8>) 自带精确 Content-Length，走进度上报分支
+        let app = axum::Router::new().route(
+            "/pkg.zip",
+            get(move || {
+                let payload = payload.clone();
+                async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/zip")],
+                        Body::from(payload),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    /// 回环直连：测试机代理（如 127.0.0.1:7890）会劫持 reqwest 回环请求导致 502
+    fn loopback_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(data))
+    }
+
+    /// 成功路径：下载字节一致、落盘重命名完成、tmp 清理
+    #[tokio::test]
+    async fn download_and_verify_roundtrip() {
+        let payload = b"fake-update-payload-12345".to_vec();
+        let addr = serve_bytes(payload.clone()).await;
+        let url = format!("http://{addr}/pkg.zip");
+        let info = test_info(&url, &sha256_hex(&payload));
+        let tmp = tempfile::tempdir().unwrap();
+        let client = loopback_client();
+
+        let path = download_and_verify(&client, &info, tmp.path(), None)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), payload);
+        // tmp 中间文件已重命名，无残留 .tmp
+        let mut rd = tokio::fs::read_dir(tmp.path()).await.unwrap();
+        let mut names = Vec::new();
+        while let Ok(Some(e)) = rd.next_entry().await {
+            names.push(e.file_name().to_string_lossy().to_string());
+        }
+        assert_eq!(names, vec!["pkg.zip"]);
+    }
+
+    /// 摘要不符 → ChecksumMismatch 且不留文件
+    #[tokio::test]
+    async fn download_rejects_checksum_mismatch() {
+        let payload = b"fake-update-payload-12345".to_vec();
+        let addr = serve_bytes(payload).await;
+        let url = format!("http://{addr}/pkg.zip");
+        let info = test_info(&url, &"0".repeat(64));
+        let tmp = tempfile::tempdir().unwrap();
+        let client = loopback_client();
+
+        let err = download_and_verify(&client, &info, tmp.path(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UpdaterError::ChecksumMismatch { .. }),
+            "{err}"
+        );
+        let mut rd = tokio::fs::read_dir(tmp.path()).await.unwrap();
+        assert!(rd.next_entry().await.unwrap().is_none());
+    }
+
+    /// 非白名单 URL 不出网直接拒绝；缺 SHA 不出网直接拒绝
+    #[tokio::test]
+    async fn download_rejects_url_and_missing_sha_without_network() {
+        let client = loopback_client();
+        let tmp = tempfile::tempdir().unwrap();
+        let err = download_and_verify(
+            &client,
+            &test_info("http://example.com/pkg.zip", &"0".repeat(64)),
+            tmp.path(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpdaterError::HttpsRequired(_)), "{err}");
+        let err = download_and_verify(
+            &client,
+            &test_info("http://127.0.0.1:9/pkg.zip", ""),
+            tmp.path(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, UpdaterError::MissingChecksum), "{err}");
+    }
+}

@@ -14,5 +14,7 @@ pub mod scheduler;
 pub mod scripts;
 pub mod system;
 pub mod tasks;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tools;
 pub mod uninstall;

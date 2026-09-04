@@ -491,3 +491,473 @@ pub async fn feedback_bundle(
         bytes,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use tower::ServiceExt; // oneshot
+
+    use crate::bridge::{BridgeError, IpcResponse, IpcResult};
+    use crate::environment::{BootstrapStage, EnvironmentApi, EnvironmentError, EnvironmentStatus};
+    use crate::tasks::{OrderData, TaskApi, TaskDetail, TaskError, TaskKind, TaskSummary};
+
+    use super::super::test_support::{MockConfigApi, body_json};
+
+    struct MockInner {
+        executed: Vec<(String, Value)>,
+        respond_data: Value,
+        session_active: bool,
+        screenshot_url: Option<String>,
+        ensure_fails: bool,
+        embedded: bool,
+    }
+
+    impl Default for MockInner {
+        fn default() -> Self {
+            Self {
+                executed: Vec::new(),
+                respond_data: serde_json::json!({"ok": true}),
+                session_active: false,
+                screenshot_url: None,
+                ensure_fails: false,
+                embedded: false,
+            }
+        }
+    }
+
+    struct MockBridgeApi(Arc<std::sync::Mutex<MockInner>>);
+
+    fn ipc_ok(data: Value) -> IpcResponse {
+        IpcResponse {
+            id: 1,
+            result: IpcResult {
+                success: true,
+                data,
+                error: None,
+            },
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BridgeApi for MockBridgeApi {
+        async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError> {
+            let mut inner = self.0.lock().unwrap();
+            inner.executed.push((method.to_string(), params));
+            Ok(ipc_ok(inner.respond_data.clone()))
+        }
+
+        fn cancel(&self, _cancel_id: &str) {}
+
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: Value,
+            _timeout: std::time::Duration,
+        ) -> Result<IpcResponse, BridgeError> {
+            self.execute(method, params).await
+        }
+
+        async fn force_recycle(&self) {}
+
+        fn has_live_worker(&self) -> bool {
+            false
+        }
+
+        async fn recycle_if_running(&self) {}
+
+        async fn shutdown(&self) {}
+
+        fn debug_session_active(&self) -> bool {
+            self.0.lock().unwrap().session_active
+        }
+
+        fn last_screenshot_url(&self) -> Option<String> {
+            self.0.lock().unwrap().screenshot_url.clone()
+        }
+    }
+
+    struct MockTaskApi(Arc<std::sync::Mutex<MockInner>>);
+
+    #[async_trait::async_trait]
+    impl TaskApi for MockTaskApi {
+        async fn list_all_tasks(&self) -> Vec<TaskSummary> {
+            Vec::new()
+        }
+
+        async fn load_task(&self, task_id: &str) -> Result<TaskKind, TaskError> {
+            Err(TaskError::TaskNotFound(task_id.to_string()))
+        }
+
+        async fn embed_task_config(&self, _task_id: &str, params: &mut Value) -> bool {
+            let mut inner = self.0.lock().unwrap();
+            inner.embedded = true;
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("embedded".to_string(), Value::Bool(true));
+            }
+            true
+        }
+
+        async fn save_task(&self, _task_id: &str, _task: &TaskKind) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn delete_task(&self, _task_id: &str) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn get_active_task(&self) -> String {
+            String::new()
+        }
+
+        async fn set_active_task(&self, _task_id: &str) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn get_task_detail(&self, task_id: &str) -> Result<TaskDetail, TaskError> {
+            Err(TaskError::TaskNotFound(task_id.to_string()))
+        }
+
+        async fn load_order(&self) -> OrderData {
+            OrderData::default()
+        }
+
+        async fn save_order(&self, _order: &OrderData) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn get_script_path(&self, _task_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn has_task(&self, _task_id: &str) -> bool {
+            false
+        }
+    }
+
+    struct MockEnvironmentApi(Arc<std::sync::Mutex<MockInner>>);
+
+    #[async_trait::async_trait]
+    impl EnvironmentApi for MockEnvironmentApi {
+        fn status(&self) -> EnvironmentStatus {
+            EnvironmentStatus {
+                uv_ready: true,
+                python_ready: true,
+                playwright_ready: true,
+                git_ready: true,
+                capability_ready: true,
+                stage: BootstrapStage::Idle,
+                progress: None,
+                last_error: None,
+            }
+        }
+        fn python_path(&self) -> std::path::PathBuf {
+            std::path::PathBuf::new()
+        }
+        async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
+            if self.0.lock().unwrap().ensure_fails {
+                return Err(EnvironmentError::BootstrapFailedShared(
+                    "mock 环境缺失".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        async fn install_playwright_browser(&self, _browser: &str) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        async fn install_ocr_dep(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError> {
+            Ok(())
+        }
+        fn ocr_ready(&self) -> bool {
+            false
+        }
+        fn ocr_declared(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestState {
+        tasks: Arc<dyn TaskApi>,
+        config: Arc<dyn ConfigApi>,
+        bridge: Arc<dyn BridgeApi>,
+        env: Arc<dyn crate::environment::EnvironmentApi>,
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn TaskApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.tasks.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn ConfigApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.config.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn BridgeApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.bridge.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn crate::environment::EnvironmentApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.env.clone()
+        }
+    }
+
+    fn mock_app() -> (
+        axum::Router,
+        Arc<std::sync::Mutex<MockInner>>,
+        Arc<std::sync::Mutex<super::super::test_support::MockConfigInner>>,
+    ) {
+        let inner = Arc::new(std::sync::Mutex::new(MockInner::default()));
+        let (config, cfg_inner) = MockConfigApi::mocked();
+        let state = TestState {
+            tasks: Arc::new(MockTaskApi(inner.clone())),
+            config,
+            bridge: Arc::new(MockBridgeApi(inner.clone())),
+            env: Arc::new(MockEnvironmentApi(inner.clone())),
+        };
+        let app = axum::Router::new()
+            .route("/api/debug/start", post(start_debug))
+            .route("/api/debug/step", post(step_debug))
+            .route("/api/debug/stop", post(stop_debug))
+            .route("/api/debug/status", get(debug_status))
+            .route("/api/debug/run-all", post(run_all))
+            .route("/api/debug/screenshot/{filename}", get(debug_screenshot))
+            .route("/api/debug/feedback-bundle", post(feedback_bundle))
+            .with_state(state);
+        (app, inner, cfg_inner)
+    }
+
+    fn post_json(uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// 环境未就绪 → 503，不触达 Bridge
+    #[tokio::test]
+    async fn start_requires_ready_environment() {
+        let (app, inner, _) = mock_app();
+        inner.lock().unwrap().ensure_fails = true;
+        let resp = app
+            .oneshot(post_json("/api/debug/start", r#"{"task_id":"t1"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(inner.lock().unwrap().executed.is_empty());
+    }
+
+    /// 启动注入 Profile 变量 + 浏览器设置，并嵌入任务配置后下发 debug_start
+    #[tokio::test]
+    async fn start_injects_profile_and_embeds_task() {
+        let (app, inner, cfg) = mock_app();
+        {
+            let mut g = cfg.lock().unwrap();
+            g.runtime.profile.username = "dbguser".into();
+            g.runtime.profile.auth_url = "http://127.0.0.1:18765/".into();
+        }
+        let resp = app
+            .oneshot(post_json("/api/debug/start", r#"{"task_id":"t1"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let guard = inner.lock().unwrap();
+        assert_eq!(guard.executed.len(), 1);
+        let (method, params) = &guard.executed[0];
+        assert_eq!(method, "debug_start");
+        assert_eq!(params["username"], "dbguser");
+        assert_eq!(params["auth_url"], "http://127.0.0.1:18765/");
+        assert!(params.get("browser_settings").is_some());
+        assert_eq!(params["embedded"], true);
+        assert!(guard.embedded);
+    }
+
+    /// 非对象体 → 400（环境检查之后、Bridge 之前）
+    #[tokio::test]
+    async fn start_rejects_non_object_body() {
+        let (app, inner, _) = mock_app();
+        let resp = app
+            .oneshot(post_json("/api/debug/start", r#"[1,2]"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(inner.lock().unwrap().executed.is_empty());
+    }
+
+    /// step 空体转 {} 并透传 debug_step
+    #[tokio::test]
+    async fn step_passes_empty_object_on_null() {
+        let (app, inner, _) = mock_app();
+        let resp = app
+            .oneshot(post_json("/api/debug/step", r#"null"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let guard = inner.lock().unwrap();
+        assert_eq!(guard.executed[0].0, "debug_step");
+        assert_eq!(guard.executed[0].1, serde_json::json!({}));
+    }
+
+    /// stop/run-all 透传对应命令
+    #[tokio::test]
+    async fn stop_and_run_all_forward_commands() {
+        let (app, inner, _) = mock_app();
+        for (uri, method) in [
+            ("/api/debug/stop", "debug_stop"),
+            ("/api/debug/run-all", "debug_run_all"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(post_json(uri, r#"null"#))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "uri={uri}");
+            assert_eq!(inner.lock().unwrap().executed.last().unwrap().0, method);
+        }
+    }
+
+    /// 无会话 → active:false（不查询 Worker）
+    #[tokio::test]
+    async fn status_inactive_skips_worker() {
+        let (app, inner, _) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/debug/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["active"], false);
+        assert!(inner.lock().unwrap().executed.is_empty());
+    }
+
+    /// 有会话 → 查 Worker 回会话详情并带截图 URL
+    #[tokio::test]
+    async fn status_active_queries_worker() {
+        let (app, inner, _) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            g.session_active = true;
+            g.screenshot_url = Some("/api/debug/screenshot/s.png".into());
+            g.respond_data = serde_json::json!({"steps": []});
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/debug/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["active"], true);
+        assert_eq!(v["data"]["screenshot_url"], "/api/debug/screenshot/s.png");
+        assert_eq!(v["data"]["session"], serde_json::json!({"steps": []}));
+        assert_eq!(inner.lock().unwrap().executed[0].0, "debug_status");
+    }
+
+    /// 截图路径穿越 → 400（落盘前拒绝）
+    #[tokio::test]
+    async fn screenshot_rejects_traversal() {
+        let (app, _, _) = mock_app();
+        for name in ["..%2Fsecret", "..%5Csecret"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/debug/screenshot/{name}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            // `%2F` 进 Path 后为字面 `%2F`（不含 '/')，走文件名不存在分支；
+            // 此断言只锁“不 500、不越目录读盘”：允许 400 或 404
+            assert!(
+                resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
+                "name={name}: {}",
+                resp.status()
+            );
+        }
+    }
+
+    /// 缺失截图 → 404；存在 → 200 image/png
+    #[tokio::test]
+    async fn screenshot_missing_and_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        // worker 工程目录：base_path 下 python_worker/（resolve 优先命中）
+        let dbg = tmp.path().join("python_worker").join("debug");
+        std::fs::create_dir_all(&dbg).unwrap();
+        std::fs::write(dbg.join("s1.png"), b"\x89PNG-hit").unwrap();
+        let (app, _, cfg) = mock_app();
+        cfg.lock().unwrap().base_path = tmp.path().to_path_buf();
+        let uri = "/api/debug/screenshot/missing.png";
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/debug/screenshot/s1.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "image/png");
+    }
+
+    /// 无会话反馈包：200 zip，含 meta.json（has_password 真但无明文）与占位说明
+    #[tokio::test]
+    async fn feedback_bundle_without_session_has_meta_and_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, _, cfg) = mock_app();
+        {
+            let mut g = cfg.lock().unwrap();
+            g.base_path = tmp.path().to_path_buf();
+            g.runtime.profile.password = zeroize::Zeroizing::new("s3cr3t-pw".to_string());
+        }
+        let resp = app
+            .oneshot(post_json("/api/debug/feedback-bundle", r#"null"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "application/zip");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"meta.json".to_string()), "{names:?}");
+        assert!(names.contains(&"debug/README.txt".to_string()), "{names:?}");
+        let mut meta = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("meta.json").unwrap(), &mut meta).unwrap();
+        assert!(meta.contains("\"has_password\":true") || meta.contains("\"has_password\": true"));
+        assert!(!meta.contains("s3cr3t-pw"), "密码明文不得进包: {meta}");
+    }
+}
