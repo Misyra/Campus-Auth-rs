@@ -382,15 +382,34 @@ impl MonitorService {
         }
 
         // 步骤 4：综合判定
-        let status = evaluate(&results);
+        let mut status = evaluate(&results);
 
-        // 步骤 5：CaptivePortal 时前置检查 auth_url 可达性
+        // 步骤 5：检查 auth_url 可达性。
+        //
+        // 前提是状态为 CaptivePortal 或 Offline：此时外网可能已被门户阻断，
+        // 需要确认校内认证服务器是否仍可达，据此区分「真断网」与「认证门户劫持」。
+        // 前者（auth 不可达）维持 Offline 不触发登录；后者（auth 可达）重分类为
+        // CaptivePortal，让 Engine 的自动登录分支得以触发——否则外网被阻断、
+        // 校内认证服务器可达的典型 captive portal 会被误判成 Offline，自动登录永不发生。
+        // Online 时无需检查（无意义）。
         let mut auth_url_reachable = None;
-        if status == NetworkStatus::CaptivePortal && !rt.profile.auth_url.is_empty() {
-            auth_url_reachable = Some(
-                self.check_auth_url(&rt.profile.auth_url, cfg.auth_url_timeout)
-                    .await,
-            );
+        if (status == NetworkStatus::CaptivePortal || status == NetworkStatus::Offline)
+            && !rt.profile.auth_url.is_empty()
+        {
+            let reachable = self
+                .check_auth_url(&rt.profile.auth_url, cfg.auth_url_timeout)
+                .await;
+            let (derived, reach) = derive_captive_status(status, false, reachable);
+            if derived == NetworkStatus::CaptivePortal && status == NetworkStatus::Offline {
+                tracing::info!(
+                    "外网探测失败但认证地址可达 ({}), 判为认证门户劫持",
+                    parse_url_host_port(&rt.profile.auth_url)
+                        .map(|(h, p)| format!("{h}:{p}"))
+                        .unwrap_or_else(|| rt.profile.auth_url.clone())
+                );
+            }
+            status = derived;
+            auth_url_reachable = reach;
         }
 
         let report = self.finalize_report(
@@ -488,5 +507,65 @@ impl MonitorService {
             latency_ms,
             check_number: n,
         }
+    }
+}
+
+/// 派生认证门户判定：仅在可能是门户的状态（CaptivePortal / Offline）下，
+/// 依据 `auth_url` 可达性得出最终状态与可达性标记。
+///
+/// 根因修复：外网探测失败（Offline）但 `auth_url` 可达 → 实为认证门户劫持
+/// （外网被阻断、校内认证服务器仍可达），重分类为 `CaptivePortal`，否则
+/// Engine 因 Offline 永不触发自动登录。`auth_url` 未配置或状态为 Online 时
+/// 不改判、可达性保持 `None`。
+fn derive_captive_status(
+    status: NetworkStatus,
+    auth_url_empty: bool,
+    auth_reachable: bool,
+) -> (NetworkStatus, Option<bool>) {
+    if auth_url_empty {
+        return (status, None);
+    }
+    match status {
+        NetworkStatus::CaptivePortal => (NetworkStatus::CaptivePortal, Some(auth_reachable)),
+        NetworkStatus::Offline if auth_reachable => (NetworkStatus::CaptivePortal, Some(true)),
+        NetworkStatus::Offline => (NetworkStatus::Offline, Some(false)),
+        _ => (status, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offline_but_auth_reachable_derives_captive() {
+        // 根因场景：外网探测 Fail → Offline，但校内认证地址可达 → 判为门户劫持
+        let (status, reach) = derive_captive_status(NetworkStatus::Offline, false, true);
+        assert_eq!(status, NetworkStatus::CaptivePortal);
+        assert_eq!(reach, Some(true));
+    }
+
+    #[test]
+    fn offline_and_auth_unreachable_stays_offline() {
+        // 真断网：auth 不可达 → 维持 Offline，且可达性标记为 false（Engine 据此不登录）
+        let (status, reach) = derive_captive_status(NetworkStatus::Offline, false, false);
+        assert_eq!(status, NetworkStatus::Offline);
+        assert_eq!(reach, Some(false));
+    }
+
+    #[test]
+    fn online_untouched() {
+        // Online 不检查 auth
+        let (status, reach) = derive_captive_status(NetworkStatus::Online, false, true);
+        assert_eq!(status, NetworkStatus::Online);
+        assert_eq!(reach, None);
+    }
+
+    #[test]
+    fn empty_auth_url_keeps_status() {
+        // auth_url 未配置：不改判、无可达性标记
+        let (status, reach) = derive_captive_status(NetworkStatus::Offline, true, true);
+        assert_eq!(status, NetworkStatus::Offline);
+        assert_eq!(reach, None);
     }
 }
