@@ -434,16 +434,6 @@ fn extract_uv_from_archive(archive_path: &Path, dest: &Path) -> std::io::Result<
     Ok(())
 }
 
-/// 用户显式启用 OCR 的持久标记。项目更新/venv 修复后仍按该偏好同步 `ocr` extra。
-const OCR_ENABLED_MARKER: &str = "ocr.enabled";
-
-fn ocr_marker_path(mgr: &EnvironmentManager) -> PathBuf {
-    mgr.env_path().join(OCR_ENABLED_MARKER)
-}
-
-fn ocr_extra_enabled(mgr: &EnvironmentManager) -> bool {
-    ocr_marker_path(mgr).is_file()
-}
 
 /// 执行 `uv sync` 安装 Python 虚拟环境。
 ///
@@ -453,7 +443,7 @@ pub async fn run_uv_sync(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    run_uv_sync_with_ocr(mgr, ocr_extra_enabled(mgr), cancel).await
+    run_uv_sync_with_ocr(mgr, mgr.ocr_extra_enabled(), cancel).await
 }
 
 async fn run_uv_sync_with_ocr(
@@ -518,7 +508,7 @@ pub async fn install_ocr_dep(
     tokio::fs::create_dir_all(mgr.env_path())
         .await
         .map_err(EnvironmentError::UvExtractFailed)?;
-    let marker = ocr_marker_path(mgr);
+    let marker = mgr.ocr_marker_path();
     let had_marker = marker.is_file();
     if !had_marker {
         tokio::fs::write(&marker, b"enabled")
@@ -542,7 +532,7 @@ pub async fn remove_ocr_dep(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    let marker = ocr_marker_path(mgr);
+    let marker = mgr.ocr_marker_path();
     let had_marker = marker.is_file();
     if had_marker {
         tokio::fs::remove_file(&marker)
@@ -813,11 +803,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let status = Arc::new(StatusManager::new());
         let mgr = EnvironmentManager::new(dir.path().to_path_buf(), status, false);
-        assert!(!ocr_extra_enabled(&mgr));
+        assert!(!mgr.ocr_extra_enabled());
 
         std::fs::create_dir_all(mgr.env_path()).unwrap();
-        std::fs::write(ocr_marker_path(&mgr), b"enabled").unwrap();
-        assert!(ocr_extra_enabled(&mgr));
+        std::fs::write(mgr.ocr_marker_path(), b"enabled").unwrap();
+        assert!(mgr.ocr_extra_enabled());
     }
 
     /// 5.4：uv --version 输出解析（含 Windows 可能的括号后缀）

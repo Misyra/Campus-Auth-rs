@@ -110,9 +110,9 @@ impl LoginHistoryService {
         }
     }
 
-    /// 历史文件目录 `<base_path>/logs/login_history`
+    /// 历史文件目录 `<base_path>/logs/login_history`（路径经 `utils::paths` 统一）
     fn history_dir(&self) -> PathBuf {
-        self.base_path.join("logs").join("login_history")
+        crate::utils::paths::login_history_dir(&self.base_path)
     }
 
     /// 指定日期对应的 JSONL 文件路径

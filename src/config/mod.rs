@@ -12,11 +12,8 @@ pub mod service;
 
 /// 当前代码支持的最高 schema 版本
 pub const CURRENT_CONFIG_VERSION: u32 = 8;
-pub const CONFIG_DIR: &str = "config";
-/// 主配置文件名
-pub const SETTINGS_FILE: &str = "settings.json";
-/// Profile 文件目录（相对于 config_dir）
-pub const PROFILES_DIR: &str = "profiles";
+// 运行时目录布局单一事实源（见 `utils::paths`）：此处 re-export 保持调用路径稳定。
+pub use crate::utils::paths::{CONFIG_DIR, PROFILES_DIR, SETTINGS_FILE};
 /// 损坏文件备份前缀
 pub const CORRUPT_PREFIX: &str = "settings.corrupt.";
 /// 原子写入临时文件前缀（`utils::io::atomic_write_bytes` 生成的 `.tmp_XXXX.json`）

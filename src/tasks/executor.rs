@@ -77,8 +77,8 @@ impl TaskExecutor {
         env: Arc<EnvironmentManager>,
         config: Arc<ConfigService>,
     ) -> Arc<Self> {
-        let tasks_dir = base_path.join("tasks");
-        let scripts_dir = tasks_dir.join("scripts");
+        let tasks_dir = crate::utils::paths::tasks_dir(base_path);
+        let scripts_dir = crate::utils::paths::scripts_dir(base_path);
         Arc::new(Self {
             tasks_dir,
             scripts_dir,

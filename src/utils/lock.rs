@@ -46,9 +46,9 @@ impl InstanceLock {
     ///
     /// 成功返回 RAII 句柄；已被其他实例占用或无法创建锁文件时返回错误。
     pub fn try_acquire(base_path: &Path) -> anyhow::Result<Self> {
-        let config_dir = base_path.join("config");
+        let config_dir = crate::utils::paths::config_dir(base_path);
         std::fs::create_dir_all(&config_dir)?;
-        let lock_path = config_dir.join(".lock");
+        let lock_path = crate::utils::paths::instance_lock_path(base_path);
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -60,8 +60,8 @@ impl InstanceLock {
         #[allow(clippy::incompatible_msrv)]
         file.try_lock()
             .map_err(|e| anyhow::anyhow!("无法获取实例锁（可能已有实例在运行）: {e}"))?;
-        // 清理可能残留的旧实例信息文件
-        let info_path = config_dir.join(".instance");
+        // 清理可能残留的旧实例信息文件（路径经 `utils::paths` 统一）
+        let info_path = crate::utils::paths::instance_info_path(base_path);
         let _ = std::fs::remove_file(&info_path);
         Ok(Self {
             _file: file,
@@ -94,7 +94,7 @@ impl Drop for InstanceLock {
 /// 读取 `config/.instance` 中的 PID 和端口，检查进程是否存活。
 /// 未找到信息文件、格式异常或进程已退出时返回 `None`。
 pub fn query_instance(base_path: &Path) -> Option<InstanceInfo> {
-    let info_path = base_path.join("config").join(".instance");
+    let info_path = crate::utils::paths::instance_info_path(base_path);
     let content = std::fs::read_to_string(&info_path).ok()?;
     let mut lines = content.lines();
     let pid: u32 = lines.next()?.trim().parse().ok()?;

@@ -82,12 +82,10 @@ pub const MINGIT_RELEASES_BASE: &str = "https://github.com/git-for-windows/git/r
 pub const MINGIT_TARGET: &str = "64-bit";
 /// MinGit 下载超时
 pub const MINGIT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
-/// environment/ 子目录名
-pub const ENV_DIR: &str = "environment";
-/// python_worker/ 子目录名
-pub const WORKER_PROJECT_DIR: &str = "python_worker";
-/// 虚拟环境目录名（相对于 worker_project_path）
-pub const VENV_DIR: &str = ".venv";
+/// 用户显式启用 OCR 的持久标记文件名（位于 `environment/` 下，见 `EnvironmentManager::ocr_marker_path`）
+pub(crate) const OCR_ENABLED_MARKER: &str = "ocr.enabled";
+// 运行时目录布局单一事实源（见 `utils::paths`）：re-export 保持调用路径稳定。
+pub use crate::utils::paths::{ENV_DIR, VENV_DIR, WORKER_PROJECT_DIR};
 /// Python 解释器相对路径（相对于 worker_project_path）
 ///
 /// venv 目录布局因平台而异：Windows 为 `Scripts/python.exe`，
@@ -98,44 +96,8 @@ pub const PYTHON_EXE_RELATIVE: &str = ".venv/Scripts/python.exe";
 #[cfg(not(target_os = "windows"))]
 pub const PYTHON_EXE_RELATIVE: &str = ".venv/bin/python";
 
-/// 解析 python_worker 工程目录（单一事实源，Bridge spawn 检查与 EnvironmentManager 共用）
-///
-/// 主路径为 `<base_path>/python_worker`；开发模式（如 cargo run 时 base_path=target/debug）
-/// 该目录不存在，回退到仓库根 / CARGO_MANIFEST_DIR 下的 python_worker（与 docs 背景图的多路径兜底一致）。
-/// Bridge 的 spawn 前检查必须使用本函数结果，否则 dev 模式会误报"Worker 环境未安装"。
-pub(crate) fn resolve_worker_project_path(base_path: &std::path::Path) -> PathBuf {
-    let candidate = base_path.join(WORKER_PROJECT_DIR);
-    if candidate.exists() {
-        return candidate;
-    }
-    // Docker 镜像将 python_worker 置于 /app/python_worker（见 Dockerfile）
-    let docker_path = std::path::Path::new("/app").join(WORKER_PROJECT_DIR);
-    if docker_path.exists() {
-        return docker_path;
-    }
-    // 环境变量覆盖（便于自定义挂载路径）
-    if let Ok(env_path) = std::env::var("CAMPUS_AUTH_WORKER_DIR") {
-        let pp = PathBuf::from(&env_path);
-        if pp.exists() {
-            return pp;
-        }
-        let p = pp.join(WORKER_PROJECT_DIR);
-        if p.exists() {
-            return p;
-        }
-    }
-    if let Some(repo) = base_path
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join(WORKER_PROJECT_DIR))
-    {
-        if repo.exists() {
-            return repo;
-        }
-    }
-    let mf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
-    if mf.exists() { mf } else { candidate }
-}
+// `worker_project_dir` 已收敛至 `utils::paths`（消除 bridge/web/environment 三方分歧），
+// 历史名 `resolve_worker_project_path` 不再保留，调用方统一用 `crate::utils::paths::worker_project_dir`。
 /// 进度百分比区间
 pub const PROGRESS_UV_DOWNLOAD: (u8, u8) = (0, 20);
 /// 进度百分比区间
@@ -458,8 +420,8 @@ impl EnvironmentManager {
         status_manager: Arc<StatusManager>,
         git_download_enabled: bool,
     ) -> Arc<Self> {
-        let env_path = base_path.join(ENV_DIR);
-        let worker_project_path = resolve_worker_project_path(&base_path);
+        let env_path = crate::utils::paths::env_dir(&base_path);
+        let worker_project_path = crate::utils::paths::worker_project_dir(&base_path);
         Arc::new(Self {
             base_path,
             env_path,
@@ -668,6 +630,19 @@ impl EnvironmentManager {
     /// 是否允许下载 MinGit
     pub(crate) fn git_download_enabled(&self) -> bool {
         self.git_download_enabled
+    }
+
+    /// 用户显式启用 OCR 的持久标记路径（`environment/ocr.enabled`）
+    ///
+    /// 历史位置 `uv::ocr_marker_path`：偏好归属环境而非某次 `uv sync` 调用，
+    /// 收归此处后 `uv` 仅负责执行同步，标记读写统一经管理器。
+    pub(crate) fn ocr_marker_path(&self) -> PathBuf {
+        self.env_path.join(OCR_ENABLED_MARKER)
+    }
+
+    /// OCR extra 是否被用户持久启用(环境修复/venv 重建后仍按此同步 `--extra ocr`)
+    pub(crate) fn ocr_extra_enabled(&self) -> bool {
+        self.ocr_marker_path().is_file()
     }
 }
 

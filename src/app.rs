@@ -26,8 +26,8 @@ pub const PORT_RETRY_MAX: u16 = 5;
 pub const BIND_ADDR: [u8; 4] = [127, 0, 0, 1];
 /// Docker 默认绑定地址
 pub const DOCKER_BIND_ADDR: [u8; 4] = [0, 0, 0, 0];
-/// 运行端口记录文件名（相对于 config/）
-pub const RUNTIME_PORT_FILE: &str = ".runtime_port";
+// 运行端口记录文件名（相对于 config/）：单一事实源见 `utils::paths`，此处 re-export 保持调用路径稳定。
+pub use crate::utils::paths::RUNTIME_PORT_FILE;
 
 /// 解析绑定地址字符串为 `IpAddr`
 ///
@@ -110,12 +110,9 @@ pub async fn start_axum(
                 let actual_port = listener.local_addr()?.port();
                 // launcher 已有"服务已启动"类 info，绑定成功降为 debug 防重复播报
                 debug!(port = actual_port, "Axum 服务绑定成功");
-                // 写入运行端口记录
-                let port_path = container
-                    .config
-                    .base_path()
-                    .join("config")
-                    .join(RUNTIME_PORT_FILE);
+                // 写入运行端口记录（路径经 `utils::paths` 统一）
+                let port_path =
+                    crate::utils::paths::runtime_port_path(&container.config.base_path());
                 if let Err(e) = std::fs::write(&port_path, actual_port.to_string()) {
                     warn!("写入运行端口文件失败: {e}");
                 }

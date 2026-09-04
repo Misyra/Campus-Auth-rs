@@ -64,9 +64,11 @@ pub struct TaskManager {
 impl TaskManager {
     /// 构造管理器，确保子目录存在，并迁移旧版 `active.txt`、初始化 `.order.json`
     pub fn new(base_path: &Path, config: Arc<ConfigService>) -> Arc<Self> {
-        let tasks_dir = base_path.join("tasks");
-        let browser_dir = tasks_dir.join("browser");
-        let scripts_dir = tasks_dir.join("scripts");
+        // 路径经 `utils::paths` 统一；`ensure_runtime_dirs` 已在启动预建，
+        // 此处保留幂等创建以兼容测试直构（防御性，不作为权威）。
+        let tasks_dir = crate::utils::paths::tasks_dir(base_path);
+        let browser_dir = crate::utils::paths::browser_tasks_dir(base_path);
+        let scripts_dir = crate::utils::paths::scripts_dir(base_path);
         // 构造期目录创建失败会导致后续所有任务读写连锁失败，必须告警
         if let Err(e) = std::fs::create_dir_all(&browser_dir) {
             tracing::warn!(

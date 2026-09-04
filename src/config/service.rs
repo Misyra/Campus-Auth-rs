@@ -228,9 +228,9 @@ impl ConfigService {
         base_path: PathBuf,
         reload_tx: Sender<ConfigReloadSignal>,
     ) -> Result<Arc<Self>, ConfigError> {
-        let config_dir = base_path.join(crate::config::CONFIG_DIR);
-        let settings_path = config_dir.join(crate::config::SETTINGS_FILE);
-        let profiles_dir = config_dir.join(crate::config::PROFILES_DIR);
+        let config_dir = crate::utils::paths::config_dir(&base_path);
+        let settings_path = crate::utils::paths::settings_path(&base_path);
+        let profiles_dir = crate::utils::paths::profiles_dir(&base_path);
         let key_path = crate::config::crypto::default_key_path();
         let crypto = PasswordCrypto::new(key_path.clone());
 

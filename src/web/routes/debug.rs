@@ -144,11 +144,11 @@ pub async fn debug_screenshot(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    use crate::environment::resolve_worker_project_path;
+    use crate::utils::paths::worker_project_dir;
     if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
         return Err(ApiError::BadRequest("非法文件名".into()));
     }
-    let dir = resolve_worker_project_path(&config.base_path()).join("debug");
+    let dir = worker_project_dir(&config.base_path()).join("debug");
     let path = dir.join(&filename);
     if !path.starts_with(&dir) {
         return Err(ApiError::BadRequest("非法文件路径".into()));
@@ -240,7 +240,7 @@ pub async fn feedback_bundle(
     let mut page_note: Option<String> = None;
     // Worker 返回路径必须位于当前 debug 会话目录内（防 IPC 信任边界逃逸）
     let allowed_debug_dir =
-        crate::environment::resolve_worker_project_path(&config.base_path()).join("debug");
+        crate::utils::paths::worker_project_dir(&config.base_path()).join("debug");
     let path_allowed = |p: &str| -> bool {
         let path = std::path::Path::new(p);
         let (Ok(canon), Ok(base)) = (path.canonicalize(), allowed_debug_dir.canonicalize()) else {

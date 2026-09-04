@@ -25,8 +25,8 @@ use crate::web::error::ApiError;
 
 pub use self::cron_loop::execute_scheduled_task;
 use self::task::{
-    CHANGE_CHANNEL_CAPACITY, HISTORY_DIR_NAME, MAX_CONCURRENT_SCHEDULED_TASKS, SCHEDULED_DIR_NAME,
-    ScheduledTask, append_history, history_dir_of, map_history_records,
+    CHANGE_CHANNEL_CAPACITY, MAX_CONCURRENT_SCHEDULED_TASKS, ScheduledTask, append_history,
+    history_dir_of, map_history_records,
 };
 
 /// 调度器错误类型。
@@ -129,9 +129,10 @@ impl SchedulerService {
         reload_rx: mpsc::Receiver<ConfigReloadSignal>,
     ) -> Result<Arc<Self>, SchedulerError> {
         let base_path = config.base_path();
-        let scheduled_dir = base_path.join("tasks").join(SCHEDULED_DIR_NAME);
+        // 路径经 `utils::paths` 统一；启动已预建，此处保留幂等创建（测试直构兼容）。
+        let scheduled_dir = crate::utils::paths::scheduled_dir(&base_path);
         std::fs::create_dir_all(&scheduled_dir).map_err(SchedulerError::IoError)?;
-        let history_dir = scheduled_dir.join(HISTORY_DIR_NAME);
+        let history_dir = crate::utils::paths::scheduled_history_dir(&base_path);
         std::fs::create_dir_all(&history_dir).map_err(SchedulerError::IoError)?;
 
         let (task_change_tx, task_change_rx) = mpsc::channel(CHANGE_CHANNEL_CAPACITY);
