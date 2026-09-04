@@ -2,6 +2,21 @@
 
 > 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.6”。
 
+## 未发布（安全加固 + 测试体系）
+
+### 安全加固
+
+- 更新器：更新 URL 严格校验（拒 userinfo/前缀绕过）+ 重定向终点复核；SHA256 缺失三处拒绝（下载入口/helper/启动 pending），无伴随文件的平台包跳过；staging 应用加目录穿越与摘要复核
+- 登录：指定 Profile 失败不再回退全局；切换失败仅告警（磁盘为权威，Engine 经 reload 收敛）；创建 Profile 检查与写入同锁原子化
+- 任务调度：成功条件脱敏（只记变量名，不拼值）；类型切换删旧目录残留；脚本路径解析失败直接拒绝；调度器文件写入串行化；自定义请求头黑名单 + 换行拦截
+- 系统边界：配置 reload 锁外通知；JoinError 走缓存沿用；探测子进程 kill_on_drop；监测代理/证书热更新；自启动先注册后落盘（失败回滚）；--force 杀进程前校验可执行文件名（防 PID 复用误杀）
+- 反馈与杂项：反馈包路径收敛 worker/debug + 50MiB 总量上限；OCR 目录统计不跟随 symlink；前端路径段编码 + window.open noopener；动态导入改静态；package-lock 对齐 alpha.6
+
+### 测试体系
+
+- 目录规范：散落 `target/` 的 mock/基座归档至 `tests/mock-servers/` + `tests/fixtures/`；`mock_portal/` 搬迁 `tests/mock-servers/full-portal/`；`tests/common/` 共享脚手架接线；fixture 剥离运行时状态、端口收敛 18765
+- 覆盖补齐：debug/background/autostart/scripts/tools 路由 oneshot 单测 33 个；`download_and_verify` 本地服务真实下载 3 个；`tests/login_chain.rs` 全链路（mock→二进制→Playwright→success＋failonce 重试）；手动 E2E 脚本环境变量 + 预检 SKIP；CI 新增 `e2e-login-chain`（ddddocr pin 1.6.1）
+
 ## v5.0.0-alpha.6（2026-09-03 统一更新通道 + 迁移过渡）
 
 ### 更新逻辑
