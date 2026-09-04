@@ -15,6 +15,9 @@ use super::{ProbeKind, ProbeOutcome};
 /// - 任一 `Fail` → `Offline`（物理断网优先于门户劫持）
 /// - 任一 `Captive` → `CaptivePortal`
 /// - 全部 `Pass` → `Online`
+///
+/// 注意：`Offline` 仅为第一阶段结论，上游 `check_once` 会在 Offline 时追加
+/// `auth_url` 直连探测，可达则二次纠正为 `CaptivePortal`（真断网保持 Offline）。
 pub fn evaluate(results: &[(ProbeKind, ProbeOutcome)]) -> NetworkStatus {
     let active: Vec<&ProbeOutcome> = results
         .iter()
