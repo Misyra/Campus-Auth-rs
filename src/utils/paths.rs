@@ -82,6 +82,17 @@ pub fn runtime_port_path(base: &Path) -> PathBuf {
     config_dir(base).join(RUNTIME_PORT_FILE)
 }
 
+/// 读取运行时实际监听端口（`config/.runtime_port`，Axum 绑定成功后写入）
+///
+/// `--port` CLI 覆盖与端口冲突 +1 重试都只体现在该文件；配置快照的
+/// `app.port` 仍是 settings.json 的值，不能代表实际监听端口。文件缺失 /
+/// 内容非法时返回 `None`，调用方回退到配置值。
+pub fn read_runtime_port(base_path: &Path) -> Option<u16> {
+    std::fs::read_to_string(runtime_port_path(base_path))
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+}
+
 /// 任务根目录 `<base>/tasks`
 pub fn tasks_dir(base: &Path) -> PathBuf {
     base.join(TASKS_DIR)
@@ -216,5 +227,24 @@ pub fn check_dir_writable(path: &Path, name: &str, required: bool) -> anyhow::Re
             tracing::warn!("{name} 目录不可写 ({}): {e}（功能降级）", path.display());
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_runtime_port_roundtrip_and_fallbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        // 文件缺失 → None（调用方回退配置端口）
+        assert_eq!(read_runtime_port(dir.path()), None);
+        // 正常写入（含空白） → 解析成功
+        std::fs::create_dir_all(config_dir(dir.path())).unwrap();
+        std::fs::write(runtime_port_path(dir.path()), "18080\n").unwrap();
+        assert_eq!(read_runtime_port(dir.path()), Some(18080));
+        // 非法内容 → None
+        std::fs::write(runtime_port_path(dir.path()), "not-a-port").unwrap();
+        assert_eq!(read_runtime_port(dir.path()), None);
     }
 }

@@ -88,7 +88,9 @@ pub async fn bootstrap_capability(
     // ── 阶段 3: 安装 Playwright Chromium 浏览器 ──
     // 核心自动化能力只要求 Chromium；Firefox/WebKit 为可选浏览器，
     // /api/browsers 会按实际缓存分别探测，不能把本标记等价为三种引擎均已安装。
-    if !mgr.read_status().playwright_ready {
+    // 系统已装 Edge/Chrome 时跳过下载：Playwright 经 channel 直连系统浏览器，
+    // 无需 Chromium 内核；全无可用浏览器时仍下载 Chromium 兜底自愈。
+    if !mgr.read_status().playwright_ready && !crate::browser::system_browser_available() {
         mgr.write_status(|s| s.stage = BootstrapStage::InstallingPlaywright);
         mgr.report_progress(
             "installing_playwright",
@@ -112,6 +114,8 @@ pub async fn bootstrap_capability(
                 return Err(e);
             }
         }
+    } else if !mgr.read_status().playwright_ready {
+        tracing::info!("检测到系统浏览器（Edge/Chrome），跳过 Chromium 下载");
     }
 
     if cancel.is_cancelled() {
@@ -131,7 +135,8 @@ pub async fn bootstrap_capability(
 /// 快速路径：检测各组件是否已就绪，更新 EnvironmentStatus。
 ///
 /// `playwright_ready` 特指核心能力需要的 Chromium 是否存在；Firefox/WebKit
-/// 通过 [`playwright_browser_installed`] 单独按实际缓存探测。
+/// 通过 [`playwright_browser_installed`] 单独按实际缓存探测。`capability_ready`
+/// 另计系统浏览器：有 Edge/Chrome 即视为具备自动化能力，不强制下载 Chromium。
 pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
     let env_path = mgr.env_path();
 
@@ -164,8 +169,9 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     }
 
     let playwright_ready = python_ready && playwright_browser_installed("chromium");
+    let system_browser_ready = crate::browser::system_browser_available();
 
-    let capability_ready = uv_ready && python_ready && playwright_ready;
+    let capability_ready = uv_ready && python_ready && (playwright_ready || system_browser_ready);
 
     mgr.write_status(|s: &mut EnvironmentStatus| {
         s.uv_ready = uv_ready;
@@ -178,7 +184,7 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     // 后续（引导流程内的复用探测）保持 debug，避免刷屏。进程级静态标记是
     // 不改函数签名的最小区分方式——容器启动即 spawn 本函数，几乎必然是首调用方。
     let summary = format!(
-        "uv={uv_ready}, python={python_ready}, playwright={playwright_ready}, capability={capability_ready}"
+        "uv={uv_ready}, python={python_ready}, playwright={playwright_ready}, system_browser={system_browser_ready}, capability={capability_ready}"
     );
     if !FIRST_CHECK_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
         tracing::info!("环境检查: {summary}");

@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 
 pub mod app;
 pub mod bridge;
+pub mod browser;
 pub mod config;
 pub mod container;
 pub mod engine;
