@@ -1,0 +1,36 @@
+services:
+  campus-auth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: campus-auth:latest
+    container_name: campus-auth
+    restart: unless-stopped
+    ports:
+      # Web 控制台
+      - "50721:50721"
+    volumes:
+      # 持久化数据：配置 / Profile / 任务 / 日志 / Python 环境
+      - campus-auth-data:/data
+      # 可选：如需持久化浏览器数据（登录态），已包含在 /data/config/browser-data
+    environment:
+      # 监听地址与端口（容器内需 0.0.0.0 才能从宿主机访问）
+      - CAMPUS_AUTH_HOST=0.0.0.0
+      - CAMPUS_AUTH_PORT=50721
+      # 数据根目录（容器内固定为 /data，与 VOLUME 对应）
+      - CAMPUS_AUTH_BASE_PATH=/data
+      # 可选：自定义日志级别（debug / info / warn / error）
+      # - RUST_LOG=info
+      # 可选：GitHub 代理（国内网络加速 uv/playwright 下载）
+      # - GITHUB_MIRROR=https://ghproxy.example.com
+    # 健康检查（与 Dockerfile HEALTHCHECK 互补，compose 可覆盖）
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:50721/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  campus-auth-data:
+    name: campus-auth-data

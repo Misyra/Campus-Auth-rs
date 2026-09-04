@@ -108,6 +108,22 @@ pub(crate) fn resolve_worker_project_path(base_path: &std::path::Path) -> PathBu
     if candidate.exists() {
         return candidate;
     }
+    // Docker 镜像将 python_worker 置于 /app/python_worker（见 Dockerfile）
+    let docker_path = std::path::Path::new("/app").join(WORKER_PROJECT_DIR);
+    if docker_path.exists() {
+        return docker_path;
+    }
+    // 环境变量覆盖（便于自定义挂载路径）
+    if let Ok(env_path) = std::env::var("CAMPUS_AUTH_WORKER_DIR") {
+        let pp = PathBuf::from(&env_path);
+        if pp.exists() {
+            return pp;
+        }
+        let p = pp.join(WORKER_PROJECT_DIR);
+        if p.exists() {
+            return p;
+        }
+    }
     if let Some(repo) = base_path
         .parent()
         .and_then(|p| p.parent())

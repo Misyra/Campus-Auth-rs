@@ -36,12 +36,15 @@ pub struct CliArgs {
     pub mode: Option<RuntimeMode>,
 
     /// 基准路径（配置文件 / 任务 / 日志 的根目录）
-    #[arg(long)]
+    #[arg(long, env = "CAMPUS_AUTH_BASE_PATH")]
     pub base_path: Option<PathBuf>,
-
     /// 监听端口（默认从 settings.json 读取）
-    #[arg(short, long)]
+    #[arg(short, long, env = "CAMPUS_AUTH_PORT")]
     pub port: Option<u16>,
+
+    /// 监听地址（默认 127.0.0.1，Docker 环境默认 0.0.0.0；可用 CAMPUS_AUTH_HOST 环境变量覆盖）
+    #[arg(long, env = "CAMPUS_AUTH_HOST")]
+    pub host: Option<String>,
 
     /// 启动后不自动打开浏览器
     #[arg(long)]
@@ -103,6 +106,7 @@ pub enum AutostartAction {
 /// 合并后的启动配置（CLI + settings.json + 默认值）
 struct AppConfig {
     port: u16,
+    host: Option<String>,
     base_path: PathBuf,
     runtime_mode: RuntimeMode,
     no_tray: bool,
@@ -232,7 +236,9 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     // 8. 创建系统托盘
     // macOS 也照常创建（纯通道结构，无副作用），真正的禁用拦截在
     // TrayManager::spawn 内部单点执行——macOS 返回空句柄，托盘永不启动
-    if !state.app_config.no_tray {
+    // Docker 环境无显示服务器，强制禁用托盘
+    let no_tray_effective = state.app_config.no_tray || crate::app::is_docker_env();
+    if !no_tray_effective {
         let tray = TrayManager::new(crate::tray::TrayDeps {
             config: container.config.clone(),
             status: container.status.clone(),
@@ -242,6 +248,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
             container: container.clone(),
             log_tx: state.log_tx.clone(),
             port: state.app_config.port,
+            host: state.app_config.host.clone(),
             lightweight: matches!(state.app_config.runtime_mode, RuntimeMode::Lightweight),
             shutdown: state.shutdown_token.clone(),
         });
@@ -289,9 +296,18 @@ fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig>
     let no_tray = cli.no_tray || !file_show_tray;
     // CLI --no-browser 与 settings.json 的 auto_start_browser 任一关闭即不打开
     let auto_open_browser = !cli.no_browser && file_auto_open;
+    // 绑定地址：CLI --host 显式指定时优先生效；否则 Docker 环境默认 0.0.0.0
+    let host = cli.host.clone().or_else(|| {
+        if crate::app::is_docker_env() {
+            Some("0.0.0.0".to_string())
+        } else {
+            None
+        }
+    });
 
     Ok(AppConfig {
         port,
+        host,
         base_path,
         runtime_mode,
         no_tray,
@@ -461,6 +477,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         container.clone(),
         state.log_tx.clone(),
         state.app_config.port,
+        state.app_config.host.as_deref(),
     )
     .await
     {
@@ -472,7 +489,14 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
                 }
             }
             state.axum_handle = Some(handle);
-            info!("Web 控制台已启动: http://127.0.0.1:{port}");
+            let bind_host = state.app_config.host.as_deref().unwrap_or("127.0.0.1");
+            // Docker 环境绑定 0.0.0.0 时，提示地址仍显示为可访问的 host:port
+            let display_host = if bind_host == "0.0.0.0" {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            };
+            info!("Web 控制台已启动: http://{display_host}:{port}");
 
             // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
             // 此前配置项是死开关，UI「静默启动」切换无任何效果

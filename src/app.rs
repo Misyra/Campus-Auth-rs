@@ -22,10 +22,31 @@ pub const WS_EVENT_CAPACITY: usize = 1024;
 pub const DEFAULT_PORT: u16 = 50721;
 /// 端口冲突重试上限
 pub const PORT_RETRY_MAX: u16 = 5;
-/// 绑定地址
+/// 默认绑定地址（本地回环，Docker 环境由 launcher 覆盖为 0.0.0.0）
 pub const BIND_ADDR: [u8; 4] = [127, 0, 0, 1];
+/// Docker 默认绑定地址
+pub const DOCKER_BIND_ADDR: [u8; 4] = [0, 0, 0, 0];
 /// 运行端口记录文件名（相对于 config/）
 pub const RUNTIME_PORT_FILE: &str = ".runtime_port";
+
+/// 解析绑定地址字符串为 `IpAddr`
+///
+/// 支持 `127.0.0.1` / `0.0.0.0` / `::` 等格式，解析失败则回退到
+/// `BIND_ADDR`（127.0.0.1）。
+pub fn parse_bind_addr(host: &str) -> std::net::IpAddr {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    IpAddr::from_str(host).unwrap_or_else(|_| IpAddr::from(BIND_ADDR))
+}
+
+/// 判断是否运行在 Docker 容器内
+///
+/// 通过 `/.dockerenv` 文件或 `CAMPUS_AUTH_DOCKER` / `DOCKER_CONTAINER` 环境变量判断。
+pub fn is_docker_env() -> bool {
+    std::path::Path::new("/.dockerenv").exists()
+        || std::env::var("CAMPUS_AUTH_DOCKER").is_ok()
+        || std::env::var("DOCKER_CONTAINER").is_ok()
+}
 
 /// Axum 服务器运行句柄
 pub struct AxumServeHandle {
@@ -62,21 +83,33 @@ pub fn build_router(
 /// 启动 Axum 服务器（端口冲突 +1 重试，最多 `PORT_RETRY_MAX` 次）
 ///
 /// 成功后将实际监听端口写入 `config/.runtime_port`。
+/// `host` 为绑定地址字符串（如 `127.0.0.1` / `0.0.0.0`），为空则根据环境自动选择。
 pub async fn start_axum(
     container: Arc<ServiceContainer>,
     log_tx: broadcast::Sender<LogEntry>,
     port: u16,
+    host: Option<&str>,
 ) -> anyhow::Result<AxumServeHandle> {
+    let bind_ip = match host {
+        Some(h) if !h.is_empty() => parse_bind_addr(h),
+        _ => {
+            if is_docker_env() {
+                std::net::IpAddr::from(DOCKER_BIND_ADDR)
+            } else {
+                std::net::IpAddr::from(BIND_ADDR)
+            }
+        }
+    };
+    info!(%bind_ip, port, "Axum 绑定地址");
     let mut bind_port = port;
 
     for attempt in 0..=PORT_RETRY_MAX {
-        let addr = SocketAddr::from((BIND_ADDR, bind_port));
+        let addr = SocketAddr::new(bind_ip, bind_port);
         match TcpListener::bind(addr).await {
             Ok(listener) => {
                 let actual_port = listener.local_addr()?.port();
                 // launcher 已有"服务已启动"类 info，绑定成功降为 debug 防重复播报
                 debug!(port = actual_port, "Axum 服务绑定成功");
-
                 // 写入运行端口记录
                 let port_path = container
                     .config

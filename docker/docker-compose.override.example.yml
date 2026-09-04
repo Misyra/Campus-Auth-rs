@@ -1,0 +1,14 @@
+# 示例：宿主机目录直接挂载（便于备份/迁移），替代命名卷
+# 使用：docker compose -f docker-compose.yml -f docker/docker-compose.override.example.yml up -d
+
+services:
+  campus-auth:
+    volumes:
+      # 将宿主机 ./data 映射为容器 /data（需手动创建 ./data 目录）
+      - ./data:/data
+    # 自定义端口映射示例
+    ports:
+      - "8080:50721"
+    environment:
+      - CAMPUS_AUTH_PORT=50721
+      - RUST_LOG=info

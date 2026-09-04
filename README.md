@@ -40,6 +40,26 @@ cargo run
 
 > 要求：Rust 1.85+（Edition 2024）、Node.js（构建前端时）。
 
+### Docker 部署
+
+```bash
+# 一键启动（后台，自动构建镜像 + 持久化数据卷）
+docker compose up -d --build
+
+# 日志与健康检查
+docker compose logs -f
+curl http://localhost:50721/api/health
+```
+
+Web 控制台 `http://localhost:50721`，数据持久化于命名卷 `campus-auth-data`（`config/` / `tasks/` / `logs/`）。
+宿主机目录挂载、host 网络等进阶用法见 [docker/README.md](docker/README.md)。
+
+```bash
+# 仅用 Docker CLI（不使用 compose）
+docker build -t campus-auth .
+docker run -d --name campus-auth -p 50721:50721 -v campus-auth-data:/data campus-auth
+```
+
 ## 使用说明
 
 - **Web 控制台**：默认 `http://127.0.0.1:50721`（端口冲突自动 +1 重试）

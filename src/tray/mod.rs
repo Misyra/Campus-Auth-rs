@@ -87,6 +87,8 @@ pub struct TrayDeps {
     pub log_tx: broadcast::Sender<LogEntry>,
     /// 默认监听端口（Axum 未运行时回退使用）
     pub port: u16,
+    /// 绑定地址（按需启动 Axum 时使用）
+    pub host: Option<String>,
     /// 是否运行在轻量模式（Axum 按需启动）
     pub lightweight: bool,
     /// 应用级关闭令牌（Quit 时取消，驱动 launcher 走完整优雅关闭流程）
@@ -470,7 +472,13 @@ async fn handle_action(
                     .unwrap_or_else(|e| e.into_inner())
                     .is_none()
             {
-                match app::start_axum(deps.container.clone(), deps.log_tx.clone(), deps.port).await
+                match app::start_axum(
+                    deps.container.clone(),
+                    deps.log_tx.clone(),
+                    deps.port,
+                    deps.host.as_deref(),
+                )
+                .await
                 {
                     Ok(h) => {
                         // 同步实际端口到 `.instance`（PID + PORT），使 --status / --stop
