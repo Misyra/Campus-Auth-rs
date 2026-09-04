@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::bridge::BridgeApi;
+use crate::browser::{is_chrome_installed, is_edge_installed};
 use crate::updater::UpdaterApi;
 use crate::web::error::{ApiError, data};
 use crate::web::state::AppState;
@@ -26,7 +27,9 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
     let info = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "base_path": base_path.to_string_lossy(),
-        "port": rt.app.port,
+        // 实际监听端口优先读运行时端口文件：`--port` CLI 覆盖与冲突重试
+        // 只体现在该文件；无文件（如轻量模式未启动 Web）时回退配置值。
+        "port": crate::utils::paths::read_runtime_port(&base_path).unwrap_or(rt.app.port),
         "active_profile_id": rt.profile.id,
         "platform": std::env::consts::OS,
         "metrics": {
@@ -323,121 +326,6 @@ pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>,
         "browsers": browsers,
         "current": settings.global.browser.browser_channel,
     })))
-}
-
-/// 检测系统是否安装了 Google Chrome
-#[cfg(target_os = "windows")]
-fn is_chrome_installed() -> bool {
-    let candidates = [
-        std::path::PathBuf::from(std::env::var("PROGRAMFILES").unwrap_or_default())
-            .join("Google")
-            .join("Chrome")
-            .join("Application")
-            .join("chrome.exe"),
-        std::path::PathBuf::from(std::env::var("PROGRAMFILES(X86)").unwrap_or_default())
-            .join("Google")
-            .join("Chrome")
-            .join("Application")
-            .join("chrome.exe"),
-        std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
-            .join("Google")
-            .join("Chrome")
-            .join("Application")
-            .join("chrome.exe"),
-    ];
-    candidates.iter().any(|p| p.exists())
-}
-
-#[cfg(target_os = "macos")]
-fn is_chrome_installed() -> bool {
-    // 系统级 /Applications 与用户级 ~/Applications 均可能
-    if std::path::Path::new("/Applications/Google Chrome.app").exists() {
-        return true;
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        if std::path::Path::new(&format!(
-            "{}/Applications/Google Chrome.app",
-            home.to_string_lossy()
-        ))
-        .exists()
-        {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn is_chrome_installed() -> bool {
-    for bin in ["google-chrome", "google-chrome-stable"] {
-        if std::process::Command::new("which")
-            .arg(bin)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// 检测系统是否安装了 Microsoft Edge
-#[cfg(target_os = "windows")]
-fn is_edge_installed() -> bool {
-    let candidates = [
-        std::path::PathBuf::from(std::env::var("PROGRAMFILES(X86)").unwrap_or_default())
-            .join("Microsoft")
-            .join("Edge")
-            .join("Application")
-            .join("msedge.exe"),
-        std::path::PathBuf::from(std::env::var("PROGRAMFILES").unwrap_or_default())
-            .join("Microsoft")
-            .join("Edge")
-            .join("Application")
-            .join("msedge.exe"),
-        std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
-            .join("Microsoft")
-            .join("Edge")
-            .join("Application")
-            .join("msedge.exe"),
-    ];
-    candidates.iter().any(|p| p.exists())
-}
-
-/// 检测系统是否安装了 Microsoft Edge（macOS）
-#[cfg(target_os = "macos")]
-fn is_edge_installed() -> bool {
-    if std::path::Path::new("/Applications/Microsoft Edge.app").exists() {
-        return true;
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        if std::path::Path::new(&format!(
-            "{}/Applications/Microsoft Edge.app",
-            home.to_string_lossy()
-        ))
-        .exists()
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// 检测系统是否安装了 Microsoft Edge（Linux）
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn is_edge_installed() -> bool {
-    for bin in ["microsoft-edge", "microsoft-edge-stable"] {
-        if std::process::Command::new("which")
-            .arg(bin)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 #[derive(Debug, Default, Deserialize)]

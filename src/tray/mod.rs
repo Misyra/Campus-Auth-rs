@@ -591,20 +591,12 @@ fn monitor_toggle_label(state: EngineState) -> &'static str {
     }
 }
 
-/// 读取运行时端口文件（`config/.runtime_port`，轻量模式按需启动 Axum 后写入）
-fn read_runtime_port(config: &Arc<ConfigService>) -> Option<u16> {
-    let path = crate::utils::paths::runtime_port_path(&config.base_path());
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-}
-
 /// 解析 Web 控制台的实际打开端口：优先运行时端口文件（按需启动 Axum 后写入），
 /// 回退到按需启动的 Axum 句柄端口，最后回退默认端口。
 ///
 /// 收敛原 OpenWeb 分支两段冗余回退读端口的样板：对 `axum_handle` 仅加锁一次。
 fn resolve_web_port(deps: &TrayDeps, axum_handle: &Arc<Mutex<Option<AxumServeHandle>>>) -> u16 {
-    read_runtime_port(&deps.config)
+    crate::utils::paths::read_runtime_port(&deps.config.base_path())
         .or_else(|| {
             axum_handle
                 .lock()

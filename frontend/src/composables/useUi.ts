@@ -4,7 +4,7 @@
  * 协调各 composable 完成初始化、浏览器管理、更新检查、协议向导、退出等。
  */
 
-import { reactive } from "vue";
+import { router } from "../router";
 import type {
   BrowserInfo,
   UpdateInfo,
@@ -12,7 +12,7 @@ import type {
   LoginHistoryItem,
 } from "../api/types";
 import { systemApi, browsersApi, monitorApi, actionsApi, historyApi } from "../api";
-import { ApiError, extractApiError } from "../api/client";
+import { ApiError, extractApiError, isNoBrowserMessage } from "../api/client";
 import { TIMING } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { useConfig } from "./useConfig";
@@ -136,7 +136,22 @@ async function manualLogin(): Promise<void> {
   try {
     const loginTimeoutMs = (useConfig().config.browser.login_timeout || 90) * 1000;
     const data = await actionsApi.login(loginTimeoutMs);
-    notify(true, stripScreenshotHint(extractMsg(data, "登录完成")), "login");
+    const msg = stripScreenshotHint(extractMsg(data, "登录完成"));
+    // 无可用浏览器：弹窗引导去安装 Chromium（后端文案见 browser::NO_BROWSER_MESSAGE，
+    // 由 isNoBrowserMessage 统一识别），确认后直达浏览器设置页。
+    if (!data.success && isNoBrowserMessage(msg)) {
+      notify(false, msg, "login", { label: "前往安装", page: "settings-browser" });
+      const go = await confirm({
+        title: "无可用浏览器",
+        message: `${msg}。是否前往「设置 · 浏览器」安装 Chromium？`,
+        confirmText: "前往安装",
+        cancelText: "稍后",
+      });
+      if (go) await router.push({ name: "settings-browser" });
+      await fetchLoginHistory();
+      return;
+    }
+    notify(true, msg, "login");
     await fetchLoginHistory();
   } catch (error) {
     const msg = extractApiError(error, "手动登录失败");

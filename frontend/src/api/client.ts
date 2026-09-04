@@ -204,6 +204,15 @@ export function extractApiError(error: unknown, fallback = "操作失败"): stri
   return message || fallback;
 }
 
+/**
+ * 是否为"无可用浏览器"失败（后端 `browser::NO_BROWSER_MESSAGE` 及其兜底后缀）。
+ * 匹配子串固定为"无可用浏览器"：改动后端文案时必须同步此处，否则手动登录
+ * 的弹窗引导会静默退化成普通通知（见 `useUi.manualLogin` 与 `client.test.ts`）。
+ */
+export function isNoBrowserMessage(message: unknown): boolean {
+  return typeof message === "string" && message.includes("无可用浏览器");
+}
+
 export const http = {
   get: <T>(path: string, opts?: RequestOptions) => request<T>("GET", path, opts),
   // 写方法对缺失 body 统一发送 "{}" 并携带 application/json：后端 Json 提取器

@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::bridge::BridgeSupervisor;
+use crate::browser::{self, NO_BROWSER_MESSAGE};
 
 use crate::config::ConfigService;
 use crate::config::runtime::ProfileSnapshot;
@@ -61,6 +62,22 @@ pub(crate) fn recover_lock<T>(m: &StdMutex<T>) -> MutexGuard<'_, T> {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     }
+}
+
+/// 在可用性快照上做浏览器自动选择决策（纯函数）
+///
+/// - 配置渠道可用 → `None`（沿用，不动作）
+/// - 不可用但有兜底渠道 → `Some(兜底)`（调用方切换并落盘）
+/// - 全无可用 → `None`（调用方走环境引导兜底或报无浏览器可用；
+///   与"沿用"同为 `None`，调用方以传入时的可用性区分，不在此处二义）
+fn decide_browser_override(
+    configured_available: bool,
+    first_available: Option<&str>,
+) -> Option<String> {
+    if configured_available {
+        return None;
+    }
+    first_available.map(str::to_string)
 }
 
 /// 登录提交后返回的控制句柄（可克隆，多次复用共享同一终态结果）
@@ -403,6 +420,13 @@ impl LoginOrchestrator {
                 .await;
         }
 
+        // 1b. 浏览器渠道预检：当前渠道不可用时自动切换到首个可用浏览器
+        // （落盘持久化，本次请求立即生效）；全无可用时不直接失败——环境引导
+        // 会尝试下载 Chromium 兜底，引导结束后再终验（见 1c）。
+        let mut browser_override = self
+            .resolve_browser_channel(&rt.browser.browser_channel, &rt.browser.browser_custom_path)
+            .await;
+
         // 浏览器来源要求环境能力就绪：未就绪时自动触发 uv sync 初始化（经 BootstrapGate 幂等），
         // 仍未就绪则以失败终态返回（携带 last_error 便于前端提示并引导至“初始化 Python 环境”按钮）。
         // Manual 场景不走此分支——其 Worker 缺失会在会话内 Bridge 执行阶段以 WorkerNotInstalled 失败，
@@ -480,7 +504,10 @@ impl LoginOrchestrator {
                     .immediate_handle(
                         source,
                         false,
-                        format!("环境未就绪，自动初始化失败: {detail}"),
+                        format!(
+                            "环境未就绪，自动初始化失败: {detail}{}",
+                            Self::no_browser_hint()
+                        ),
                         profile.id.clone(),
                     )
                     .await;
@@ -497,12 +524,42 @@ impl LoginOrchestrator {
                     .immediate_handle(
                         source,
                         false,
-                        format!("环境初始化后仍未就绪: {detail}"),
+                        format!("环境初始化后仍未就绪: {detail}{}", Self::no_browser_hint()),
                         profile.id.clone(),
                     )
                     .await;
             }
             tracing::info!("手动登录环境自动初始化成功，继续执行登录");
+        }
+
+        // 1c. 浏览器可用性终验（环境引导兜底之后）：引导中新装好的 Chromium
+        // 纳入复检，命中则自动切换后继续；仍全无可用则直接失败，前端据文案
+        // 弹窗引导下载 Chromium，不再把缺浏览器误报成登录失败深埋日志。
+        if !browser::is_channel_available(
+            browser_override
+                .as_deref()
+                .unwrap_or(&rt.browser.browser_channel),
+            &rt.browser.browser_custom_path,
+        ) {
+            browser_override = self
+                .resolve_browser_channel(
+                    browser_override
+                        .as_deref()
+                        .unwrap_or(&rt.browser.browser_channel),
+                    &rt.browser.browser_custom_path,
+                )
+                .await;
+            if browser_override.is_none() {
+                warn!("无可用浏览器且环境引导未能提供，已拒绝登录");
+                return self
+                    .immediate_handle(
+                        source,
+                        false,
+                        NO_BROWSER_MESSAGE.to_string(),
+                        profile.id.clone(),
+                    )
+                    .await;
+            }
         }
 
         // 2. auth_url TCP 预检（仅 manual / login_once）
@@ -601,6 +658,7 @@ impl LoginOrchestrator {
                 &rt,
                 &resolved_profile,
                 effective_task_id.as_deref().unwrap_or(""),
+                browser_override.as_deref(),
             )
             .await;
 
@@ -860,6 +918,40 @@ impl LoginOrchestrator {
             attempts: 0,
         })
     }
+    /// 无浏览器兜底提示：环境引导失败时若当前无任何可用浏览器，把文案指向
+    /// Chromium 安装（前端据"无可用浏览器"子串弹窗）；有可用浏览器时为空串。
+    fn no_browser_hint() -> &'static str {
+        if browser::first_available_channel().is_none() {
+            "；当前无可用浏览器，请下载 Chromium（设置 · 浏览器页可一键安装）"
+        } else {
+            ""
+        }
+    }
+
+    /// 解析本次登录应使用的浏览器渠道
+    ///
+    /// 当前渠道可用返回 `None`（无动作）；不可用且存在其他可用浏览器时返回
+    /// 新渠道并落盘持久化（best-effort：落盘失败本次请求仍用新渠道继续）。
+    /// 全无可用返回 `None`，由调用方走环境引导兜底或报无浏览器可用。
+    async fn resolve_browser_channel(&self, channel: &str, custom_path: &str) -> Option<String> {
+        let next = decide_browser_override(
+            browser::is_channel_available(channel, custom_path),
+            browser::first_available_channel(),
+        )?;
+        tracing::warn!(
+            old = %channel,
+            new = next,
+            "配置的浏览器不可用，已自动切换到可用浏览器"
+        );
+        if let Err(e) = self
+            .config
+            .modify_settings(|s| s.global.browser.browser_channel = next.to_string())
+            .await
+        {
+            tracing::warn!(error = %e, "自动切换浏览器落盘失败，本次登录仍使用可用渠道继续");
+        }
+        Some(next.to_string())
+    }
 
     /// 构造发送给 Worker 的配置字典（凭证、auth_url、浏览器设置、任务步骤等）
     ///
@@ -877,6 +969,7 @@ impl LoginOrchestrator {
         rt: &RuntimeConfig,
         profile: &ProfileSnapshot,
         task_id: &str,
+        browser_channel_override: Option<&str>,
     ) -> serde_json::Value {
         let mut cfg = serde_json::json!({
             "username": profile.username,
@@ -889,7 +982,14 @@ impl LoginOrchestrator {
         });
         // 整体序列化 BrowserSettings，避免字段遗漏；失败会导致 Worker 配置不完整
         match serde_json::to_value(&rt.browser) {
-            Ok(browser) => cfg["browser_settings"] = browser,
+            Ok(mut browser) => {
+                // 登录预检发生过自动切换时，本次请求直接使用可用渠道（配置落盘与
+                // 运行时快照存在刷新延迟，不能依赖重读快照）。
+                if let Some(channel) = browser_channel_override {
+                    browser["browser_channel"] = serde_json::json!(channel);
+                }
+                cfg["browser_settings"] = browser;
+            }
             Err(e) => warn!(
                 error = %e,
                 "浏览器设置序列化失败，Worker 配置将缺少 browser_settings"
@@ -925,6 +1025,20 @@ mod tests {
             cancel_token: CancellationToken::new(),
             inner: Arc::new(LoginHandleInner { result_tx }),
         }
+    }
+
+    #[test]
+    fn test_decide_browser_override_truth_table() {
+        // 可用 → 沿用（无动作）
+        assert_eq!(decide_browser_override(true, Some("msedge")), None);
+        assert_eq!(decide_browser_override(true, None), None);
+        // 不可用 + 有兜底 → 切换
+        assert_eq!(
+            decide_browser_override(false, Some("msedge")),
+            Some("msedge".to_string())
+        );
+        // 不可用 + 全无 → 缺浏览器（调用方报 NO_BROWSER_MESSAGE）
+        assert_eq!(decide_browser_override(false, None), None);
     }
 
     #[test]
