@@ -395,7 +395,8 @@ impl LoginOrchestrator {
         if profile.password.as_str().is_empty() {
             missing.push("password");
         }
-        if profile.auth_url.is_empty() {
+        // 重定向模式允许 auth_url 为空：首导航用 trigger_url 触发 302，固定门户地址未知或不可直连
+        if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
             missing.push("auth_url");
         }
         if !matches!(source, LoginSource::Browser)
@@ -562,10 +563,12 @@ impl LoginOrchestrator {
             }
         }
 
-        // 2. auth_url TCP 预检（仅 manual / login_once）
+        // 2. auth_url TCP 预检（仅 manual / login_once；重定向模式跳过：触发器是公网 http，劫持下 TCP 必失败，交给 Worker 导航跟随 302）
         // 地址解析统一走 MonitorService 的单点实现（parse_url_host_port，
         // 支持 IPv6 方括号与裸地址），登录侧不再维护私有副本
-        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce) {
+        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
+            && profile.trigger_url.is_empty()
+        {
             let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
             let reachable = tokio::select! {
                 _ = cancel_token.cancelled() => {
@@ -975,6 +978,7 @@ impl LoginOrchestrator {
             "username": profile.username,
             "password": profile.password.as_str(),
             "auth_url": profile.auth_url,
+            "trigger_url": profile.trigger_url,
             "isp": profile.isp,
             "gateway_ip": profile.gateway_ip,
             "wifi_ssid": profile.wifi_ssid,

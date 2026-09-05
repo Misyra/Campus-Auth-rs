@@ -80,6 +80,7 @@ async function fetchConfig(): Promise<void> {
       username: data.username ?? "",
       password: "",
       auth_url: data.auth_url ?? "",
+      trigger_url: data.trigger_url ?? "",
       isp: data.isp ?? "",
     };
     config.active_task = data.active_task ?? "";
@@ -118,6 +119,10 @@ function validateConfig(): string[] {
   if (url && !/^https?:\/\//.test(url)) {
     warnings.push("认证地址必须以 http:// 或 https:// 开头");
   }
+  const trigger = config.credentials.trigger_url;
+  if (trigger && !/^https?:\/\//.test(trigger)) {
+    warnings.push("重定向触发地址必须以 http:// 或 https:// 开头");
+  }
   // 与后端 build_proxied_client 的校验口径一致
   const proxyUrl = config.updater.proxy_url;
   if (config.updater.use_proxy && proxyUrl && !/^https?:\/\//.test(proxyUrl)) {
@@ -148,8 +153,7 @@ async function saveConfig(force = false): Promise<void> {
 
   const warnings = validateConfig();
   if (warnings.length > 0) frontendLogger.warn("config", warnings.join("；"));
-  if (!config.credentials.auth_url) frontendLogger.warn("config", "认证地址为空，自动认证将无法工作");
-  if (!config.credentials.username) frontendLogger.warn("config", "账号为空，自动认证将无法工作");
+  if (!config.credentials.auth_url && !config.credentials.trigger_url) frontendLogger.warn("config", "认证地址与触发地址均为空，自动认证将无法工作");
   if (!config.monitor.enable_tcp_check && !config.monitor.enable_http_check && !(config.monitor.url_check_urls && config.monitor.url_check_urls.length)) {
     frontendLogger.warn("config", "未启用任何网络检测方式，自动认证可能无法正常工作");
   }
@@ -176,6 +180,7 @@ async function saveConfig(force = false): Promise<void> {
     active_task: config.active_task || "",
     username: config.credentials.username ?? "",
     auth_url: config.credentials.auth_url ?? "",
+    trigger_url: config.credentials.trigger_url ?? "",
     isp: config.credentials.isp ?? "",
     password: pwdValue as string | null,
   };

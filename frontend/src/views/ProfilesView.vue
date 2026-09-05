@@ -152,7 +152,12 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
             <div class="editor-section-label">认证设置</div>
             <div class="form-group">
               <label for="prof-auth-url">认证地址</label>
-              <input id="prof-auth-url" v-model.trim="p.editingProfile.value.auth_url" type="text" placeholder="http://" />
+              <input id="prof-auth-url" v-model.trim="p.editingProfile.value.auth_url" type="text" placeholder="http://（重定向模式可留空）" />
+            </div>
+            <div class="form-group">
+              <label for="prof-trigger-url">重定向触发地址</label>
+              <input id="prof-trigger-url" v-model.trim="p.editingProfile.value.trigger_url" type="text" placeholder="http://captive.apple.com/hotspot-detect.html（直连留空）" />
+              <span class="hint">仅劫持型门户填写：明文 http 地址，Worker 跟随 302 到真门户</span>
             </div>
           </div>
         </div>

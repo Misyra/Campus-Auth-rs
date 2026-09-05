@@ -410,6 +410,8 @@ pub struct ProfileData {
     pub password: String,
     /// 认证页面 URL
     pub auth_url: String,
+    /// 重定向触发地址（仅劫持型门户）：非空即重定向模式，Worker 首导航到此 http 地址并跟随 302 到真门户；为空保持直连模式
+    pub trigger_url: String,
     /// 运营商（已从 carrier 重命名）
     pub isp: String,
     /// 网关 IP 匹配规则
@@ -428,6 +430,7 @@ impl Default for ProfileData {
             username: String::new(),
             password: String::new(),
             auth_url: String::new(),
+            trigger_url: String::new(),
             isp: String::new(),
             gateway_ip: String::new(),
             wifi_ssid: String::new(),

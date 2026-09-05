@@ -107,6 +107,7 @@ async fn apply_flat_settings_patch(
         "username",
         "password",
         "auth_url",
+        "trigger_url",
         "isp",
         "carrier_custom",
         "active_task",
@@ -173,6 +174,13 @@ async fn apply_flat_settings_patch(
                 validate_auth_url(trimmed)?;
             }
             profile.auth_url = trimmed.to_string();
+        }
+        if let Some(trigger_url) = profile_patch.get("trigger_url").and_then(|v| v.as_str()) {
+            let trimmed = trigger_url.trim();
+            if !trimmed.is_empty() {
+                validate_trigger_url(trimmed)?;
+            }
+            profile.trigger_url = trimmed.to_string();
         }
         if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
             profile.isp = isp.to_string();
@@ -266,6 +274,7 @@ fn settings_flat_response(
         "updater": settings.global.updater,
         "username": profile.username,
         "auth_url": profile.auth_url,
+        "trigger_url": profile.trigger_url,
         "isp": profile.isp,
         "carrier_custom": "",
         "active_task": profile.active_task,
@@ -552,22 +561,32 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
 
 /// 校验认证地址：仅 http/https，已通过 DNS 钉扎防护的内网/保留地址需前置拒收
 fn validate_auth_url(url: &str) -> Result<(), ApiError> {
+    validate_http_url(url, "认证地址")
+}
+
+/// 校验重定向触发地址：与认证地址同口径（仅 http/https + 主机名），标签区分报错文案
+fn validate_trigger_url(url: &str) -> Result<(), ApiError> {
+    validate_http_url(url, "重定向触发地址")
+}
+
+/// http/https URL 通用校验（认证地址与触发地址共用，G2 单点语义）
+fn validate_http_url(url: &str, label: &str) -> Result<(), ApiError> {
     let parsed = url::Url::parse(url)
-        .map_err(|_| ApiError::BadRequest(format!("认证地址格式非法: {url}")))?;
+        .map_err(|_| ApiError::BadRequest(format!("{label}格式非法: {url}")))?;
     match parsed.scheme() {
         "http" | "https" => {}
         _ => {
             return Err(ApiError::BadRequest(format!(
-                "认证地址仅支持 http/https，当前为: {}",
+                "{label}仅支持 http/https，当前为: {}",
                 parsed.scheme()
             )));
         }
     }
     let host = parsed
         .host_str()
-        .ok_or_else(|| ApiError::BadRequest(format!("认证地址缺少主机名: {url}")))?;
+        .ok_or_else(|| ApiError::BadRequest(format!("{label}缺少主机名: {url}")))?;
     if host.is_empty() {
-        return Err(ApiError::BadRequest(format!("认证地址缺少主机名: {url}")));
+        return Err(ApiError::BadRequest(format!("{label}缺少主机名: {url}")));
     }
     Ok(())
 }
@@ -833,6 +852,7 @@ mod tests {
                 username: String::new(),
                 password: zeroize::Zeroizing::new(String::new()),
                 auth_url: String::new(),
+                trigger_url: String::new(),
                 isp: String::new(),
                 gateway_ip: String::new(),
                 wifi_ssid: String::new(),

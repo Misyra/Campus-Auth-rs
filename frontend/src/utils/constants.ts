@@ -154,6 +154,7 @@ export const DEFAULT_CONFIG: Config = {
     username: "",
     password: "",
     auth_url: "",
+    trigger_url: "",
     isp: "",
   },
   active_task: "",
@@ -249,6 +250,7 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
   username: "",
   password: "",
   auth_url: "",
+  trigger_url: "",
   active_task: "",
   isp: "",
 };

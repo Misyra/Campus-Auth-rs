@@ -247,6 +247,51 @@ def test_login_system_variables_override_task_variables(monkeypatch):
         "CUSTOM": "keep-me",
     }
 
+def test_login_trigger_url_overrides_auth_url(monkeypatch):
+    core = WorkerCore()
+    captured: dict[str, str] = {}
+    seen: dict[str, str] = {}
+
+    class FakeResult:
+        data = None
+
+        def to_dict(self):
+            return {"success": True, "data": self.data}
+
+    async def fake_run_task(
+        _task, _bs, variables, _cancel_event, _screenshot_dir, navigate_url=""
+    ):
+        captured.update(variables)
+        seen["navigate_url"] = navigate_url
+        return FakeResult()
+
+    monkeypatch.setattr(core, "_run_task", fake_run_task)
+
+    asyncio.run(
+        core.handle_execute_login_attempt(
+            {
+                "username": "u",
+                "password": "p",
+                "isp": "",
+                "auth_url": "http://10.0.0.1/login",
+                "trigger_url": "http://captive.apple.com/hotspot-detect.html",
+                "task_config": {"variables": {}},
+            }
+        )
+    )
+
+    assert seen["navigate_url"] == "http://captive.apple.com/hotspot-detect.html"
+    assert captured["LOGIN_URL"] == "http://captive.apple.com/hotspot-detect.html"
+
+
+def test_system_variables_prefers_trigger():
+    out = WorkerCore._system_variables(
+        {"auth_url": "http://10.0.0.1/login", "trigger_url": "http://detectportal.firefox.com/success.txt"}
+    )
+    assert out["LOGIN_URL"] == "http://detectportal.firefox.com/success.txt"
+    out2 = WorkerCore._system_variables({"auth_url": "http://10.0.0.1/login", "trigger_url": ""})
+    assert out2["LOGIN_URL"] == "http://10.0.0.1/login"
+
 
 def test_debug_run_all_continues_after_optional_failure_and_applies_delay(monkeypatch):
     task = TaskConfig(

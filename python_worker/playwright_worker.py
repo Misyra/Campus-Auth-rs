@@ -1025,7 +1025,10 @@ class WorkerCore:
                 Outcome.UNKNOWN_ERROR, "调试会话进行中，无法执行登录任务，请先停止调试"
             )
         async with self._cancel_session(params) as (cancel_event, bs, task):
-            auth_url = params.get("auth_url", "")
+            auth_url = params.get("auth_url", "") or ""
+            trigger_url = params.get("trigger_url", "") or ""
+            # 重定向模式：触发器非空即用它首导航，Playwright 自动跟随 302 到真门户；LOGIN_URL 同步为实际导航地址，存量任务零改动
+            navigate_url = trigger_url.strip() or auth_url
             # 任务变量可自定义普通模板值，但系统保留变量必须始终反映当前 Profile。
             variables = dict(task.variables or {})
             variables.update(
@@ -1033,13 +1036,13 @@ class WorkerCore:
                     "USERNAME": params.get("username", ""),
                     "PASSWORD": params.get("password", ""),
                     "ISP": params.get("isp", ""),
-                    "LOGIN_URL": auth_url,
+                    "LOGIN_URL": navigate_url,
                 }
             )
             self._task_dialogs = []
             result = await self._run_task(
                 task, bs, variables, cancel_event, _debug_screenshot_dir(),
-                navigate_url=auth_url,
+                navigate_url=navigate_url,
             )
             result.data = {"dialogs": list(self._task_dialogs)}
             return result.to_dict()
@@ -1068,6 +1071,7 @@ class WorkerCore:
 
         Rust 侧登录编排总是传全量四项；任务执行/调试路径经同一注入保证任务模板
         与文档契约一致。键缺失时不注入，避免空串覆盖任务自定义 variables。
+        重定向模式下 {{LOGIN_URL}} 优先取非空 trigger_url（回落 auth_url），与登录首导航一致。
         """
         mapping = {
             "USERNAME": "username",
@@ -1075,7 +1079,11 @@ class WorkerCore:
             "ISP": "isp",
             "LOGIN_URL": "auth_url",
         }
-        return {sys_key: str(params[src_key]) for sys_key, src_key in mapping.items() if src_key in params}
+        out = {sys_key: str(params[src_key]) for sys_key, src_key in mapping.items() if src_key in params}
+        trigger = params.get("trigger_url", "") or ""
+        if isinstance(trigger, str) and trigger.strip():
+            out["LOGIN_URL"] = trigger
+        return out
 
     async def handle_debug_start(self, params: dict) -> dict:
         """启动调试会话，保留浏览器上下文供后续 debug_step 复用。

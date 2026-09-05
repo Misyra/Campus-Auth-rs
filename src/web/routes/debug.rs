@@ -68,6 +68,9 @@ pub async fn start_debug(
     entry
         .entry("auth_url".to_string())
         .or_insert_with(|| profile.auth_url.clone().into());
+    entry
+        .entry("trigger_url".to_string())
+        .or_insert_with(|| profile.trigger_url.clone().into());
     let resp = bridge.execute("debug_start", params).await?;
     tracing::info!("调试会话已启动");
     // 只取 IPC 载荷（result.data）：序列化整个 IpcResponse 会带上 id/result 包装，
