@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { useProfiles } from "@/composables/useProfiles";
@@ -7,7 +7,7 @@ import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
-import { CARRIER_OPTIONS } from "@/utils/constants";
+import { CARRIER_OPTIONS, DEFAULT_TRIGGER_URL } from "@/utils/constants";
 
 const config = useConfig();
 // 使用 useConfig 单例中的 password 字段（与 saveConfig 共用同一实例）
@@ -39,6 +39,15 @@ watch(
   },
   { immediate: true },
 );
+// 重定向模式开关：以 trigger_url 非空为唯一状态源；打开且为空时填默认触发地址，关闭则清空（=直连）
+const redirectEnabled = computed({
+  get: () => !!config.config.credentials.trigger_url,
+  set: (v: boolean) => {
+    config.config.credentials.trigger_url = v
+      ? config.config.credentials.trigger_url || DEFAULT_TRIGGER_URL
+      : "";
+  },
+});
 </script>
 
 <template>
@@ -87,11 +96,19 @@ watch(
           <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="https://auth.example.edu.cn" />
         </div>
         <div class="form-group">
+          <label class="toggle toggle-help-inline">
+            <input type="checkbox" v-model="redirectEnabled" />
+            <span class="toggle-slider"></span>
+            <span class="toggle-label">重定向模式（劫持型门户）</span>
+          </label>
+          <FieldHelp text="打开则自动填入默认触发地址并走重定向登录；关闭则清空触发地址回到直连。" />
+        </div>
+        <div v-if="redirectEnabled" class="form-group">
           <div class="field-label-row">
             <label for="settings-trigger-url">重定向触发地址</label>
-            <FieldHelp text="仅劫持型门户填写：明文 http 探测地址（如 http://captive.apple.com/hotspot-detect.html），留空即直连模式。填写后首导航到此地址并跟随 302 到真门户。" />
+            <FieldHelp text="明文 http 探测地址，留空会回落默认值。填写后首导航到此地址并跟随 302 到真门户。" />
           </div>
-          <input id="settings-trigger-url" v-model.trim="config.config.credentials.trigger_url" type="text" placeholder="http://captive.apple.com/hotspot-detect.html" />
+          <input id="settings-trigger-url" v-model.trim="config.config.credentials.trigger_url" type="text" :placeholder="DEFAULT_TRIGGER_URL" />
         </div>
         <div class="form-group">
           <div class="field-label-row">

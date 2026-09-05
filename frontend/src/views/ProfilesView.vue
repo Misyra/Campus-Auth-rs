@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
 import { useStatus } from "@/composables/useStatus";
-import { CARRIER_OPTIONS } from "@/utils/constants";
+import { CARRIER_OPTIONS, DEFAULT_TRIGGER_URL } from "@/utils/constants";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
@@ -49,6 +49,15 @@ async function saveAndClose() {
 
 // carrierOptions → SelectOption[]
 const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
+// 重定向模式开关：以编辑中方案的 trigger_url 非空为唯一状态源
+const redirectEnabled = computed({
+  get: () => !!p.editingProfile.value?.trigger_url,
+  set: (v: boolean) => {
+    const ep = p.editingProfile.value;
+    if (!ep) return;
+    ep.trigger_url = v ? ep.trigger_url || DEFAULT_TRIGGER_URL : "";
+  },
+});
 </script>
 
 <template>
@@ -155,8 +164,15 @@ const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
               <input id="prof-auth-url" v-model.trim="p.editingProfile.value.auth_url" type="text" placeholder="http://（重定向模式可留空）" />
             </div>
             <div class="form-group">
+              <label class="toggle toggle-help-inline">
+                <input type="checkbox" v-model="redirectEnabled" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">重定向模式（劫持型门户）</span>
+              </label>
+            </div>
+            <div v-if="redirectEnabled" class="form-group">
               <label for="prof-trigger-url">重定向触发地址</label>
-              <input id="prof-trigger-url" v-model.trim="p.editingProfile.value.trigger_url" type="text" placeholder="http://captive.apple.com/hotspot-detect.html（直连留空）" />
+              <input id="prof-trigger-url" v-model.trim="p.editingProfile.value.trigger_url" type="text" :placeholder="DEFAULT_TRIGGER_URL + '（直连留空）'" />
               <span class="hint">仅劫持型门户填写：明文 http 地址，Worker 跟随 302 到真门户</span>
             </div>
           </div>
