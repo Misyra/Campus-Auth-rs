@@ -30,6 +30,7 @@ pub fn test_runtime_config() -> RuntimeConfig {
             username: String::new(),
             password: zeroize::Zeroizing::new(String::new()),
             auth_url: String::new(),
+            trigger_url: String::new(),
             isp: String::new(),
             gateway_ip: String::new(),
             wifi_ssid: String::new(),

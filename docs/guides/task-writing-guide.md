@@ -115,7 +115,9 @@ Python Worker 内部还保留 `evaluate`、`custom` 等历史兼容别名，但�
 - `{{USERNAME}}`：当前 Profile 的账号
 - `{{PASSWORD}}`：当前 Profile 的密码
 - `{{ISP}}`：当前 Profile 的运营商
-- `{{LOGIN_URL}}`：当前认证地址
+- `{{LOGIN_URL}}`：当前认证地址（重定向模式下为触发地址，Worker 首导航跟随 302 到真门户，存量任务零改动）
+
+> 重定向模式（仅劫持型门户）：Profile 的 `trigger_url` 非空即启用，`auth_url` 可留空。触发地址须为明文 `http`（如 `http://captive.apple.com/hotspot-detect.html`，`https` 不可劫持）。监测跳过 `auth` TCP 探测、登录跳过预检，自动登录依赖 URL 探测的 `Captive` 判定。
 
 变量优先级从低到高：
 

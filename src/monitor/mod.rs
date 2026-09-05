@@ -431,8 +431,11 @@ impl MonitorService {
         // CaptivePortal，让 Engine 的自动登录分支得以触发——否则外网被阻断、
         // 校内认证服务器可达的典型 captive portal 会被误判成 Offline，自动登录永不发生。
         // Online 时无需检查（无意义）。
+        // 重定向模式（trigger_url 非空）跳过本步：首导航靠触发器跟随 302，auth 可能是公网触发器或为空，
+        // TCP 预检必失败会导致 Engine 因 Some(false) 跳过登录；劫持判定已由 evaluate 的 Captive 优先覆盖。
         let mut auth_url_reachable = None;
         if (status == NetworkStatus::CaptivePortal || status == NetworkStatus::Offline)
+            && rt.profile.trigger_url.is_empty()
             && !rt.profile.auth_url.is_empty()
         {
             let reachable = self

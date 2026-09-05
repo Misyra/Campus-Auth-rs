@@ -47,6 +47,8 @@ pub struct ProfileSnapshot {
     pub password: Zeroizing<String>,
     /// 认证页面 URL
     pub auth_url: String,
+    /// 重定向触发地址：非空即重定向模式（直连预检/监测 auth 探测跳过，Worker 首导航用它）
+    pub trigger_url: String,
     /// 运营商
     pub isp: String,
     /// 网关 IP 匹配规则
@@ -66,6 +68,7 @@ impl std::fmt::Debug for ProfileSnapshot {
             .field("username", &self.username)
             .field("password", &"[REDACTED]")
             .field("auth_url", &self.auth_url)
+            .field("trigger_url", &self.trigger_url)
             .field("isp", &self.isp)
             .field("gateway_ip", &self.gateway_ip)
             .field("wifi_ssid", &self.wifi_ssid)
@@ -123,6 +126,7 @@ pub fn build_runtime_config(
         username: profile.username.clone(),
         password,
         auth_url: profile.auth_url.clone(),
+        trigger_url: profile.trigger_url.clone(),
         isp: profile.isp.clone(),
         gateway_ip: profile.gateway_ip.clone(),
         wifi_ssid: profile.wifi_ssid.clone(),
@@ -155,6 +159,7 @@ mod tests {
             username: "user@example.com".to_string(),
             password: Zeroizing::new(pw.to_string()),
             auth_url: "http://10.0.0.1/login".to_string(),
+            trigger_url: String::new(),
             isp: "移动".to_string(),
             gateway_ip: "10.0.0.1".to_string(),
             wifi_ssid: "Campus".to_string(),
