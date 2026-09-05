@@ -38,6 +38,7 @@
 @import "./pages/appearance.css";
 @import "./pages/wizard.css";
 @import "./pages/about.css";
+@import "./pages/ai_task.css";
 
 /* 响应式断点 */
 @import "./responsive.css";

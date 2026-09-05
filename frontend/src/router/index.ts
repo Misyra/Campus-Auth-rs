@@ -33,6 +33,7 @@ const routes = [
   },
   { path: "/profiles", name: "profiles", meta: { title: "配置方案" }, component: () => import("@/views/ProfilesView.vue") },
   { path: "/tasks", name: "tasks", meta: { title: "任务管理" }, component: () => import("@/views/TasksView.vue") },
+  { path: "/ai-task", name: "ai-task", meta: { title: "AI 生成任务" }, component: () => import("@/views/AiTaskView.vue") },
   { path: "/scheduled", name: "scheduled", meta: { title: "定时任务" }, component: () => import("@/views/ScheduledTasksView.vue") },
   { path: "/scripts", name: "scripts", meta: { title: "自定义脚本" }, component: () => import("@/views/ScriptsView.vue") },
   { path: "/appearance", name: "appearance", meta: { title: "外观" }, component: () => import("@/views/AppearanceView.vue") },

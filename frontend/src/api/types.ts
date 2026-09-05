@@ -523,3 +523,34 @@ export interface DangerStep {
   description: string;
   code: string;
 }
+
+/** LLM 服务配置（AI 任务生成，脱敏视图：key 只回是否已设置） */
+export interface AiLlmConfig {
+  base_url: string;
+  model: string;
+  has_api_key: boolean;
+}
+
+/** 登录页捕获结果（产物落盘服务端，响应只带元数据） */
+export interface AiCaptureResult {
+  final_url: string;
+  title?: string;
+  html_chars?: number;
+  png_bytes?: number;
+  resources_count?: number;
+  note?: string | null;
+  /** 捕获截图预览地址（GET 免鉴权，加时间戳防缓存） */
+  screenshot_url?: string;
+}
+
+/** AI 生成任务结果 */
+export interface AiGenerateResult {
+  /** 生成的任务 JSON（未含 task_id，保存时由前端注入） */
+  task: Record<string, unknown>;
+  /** 实际生成轮数（1 = 首轮通过校验） */
+  attempts: number;
+  /** 非致命提示（截断/资源跳过/自动重试说明） */
+  warnings: string[];
+  model: string;
+  base_url: string;
+}

@@ -98,3 +98,6 @@ frontend/coverage/
 tests/mock-servers/full-portal/*.log
 mock_portal/*.log
 tests/mock-servers/**/*.log
+
+# AI 任务生成的页面捕获产物（运行时生成）
+python_worker/captures/

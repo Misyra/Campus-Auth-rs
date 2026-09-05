@@ -281,6 +281,18 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/autostart/mode", || {
             post(routes::autostart::set_autostart_mode)
         }),
+        // ---- AI 任务生成（ai）----
+        ("GET", "/api/ai/llm-config", || {
+            get(routes::ai::get_llm_config)
+        }),
+        ("PUT", "/api/ai/llm-config", || {
+            put(routes::ai::put_llm_config)
+        }),
+        ("POST", "/api/ai/capture", || post(routes::ai::capture)),
+        ("GET", "/api/ai/capture/screenshot", || {
+            get(routes::ai::capture_screenshot)
+        }),
+        ("POST", "/api/ai/generate", || post(routes::ai::generate)),
         // ---- OCR ----
         // recognize 单独放宽请求体限制（见 routes::ocr::RECOGNIZE_BODY_LIMIT），
         // 避免 >1.5MB 原图 base64 后触发 axum 默认 2MB 上限的 413

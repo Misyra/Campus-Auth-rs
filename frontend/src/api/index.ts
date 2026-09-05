@@ -11,6 +11,9 @@ import { ensureAuthToken, http } from "./client";
 const pathSegment = (s: string) => encodeURIComponent(s);
 import type { RequestOptions } from "./client";
 import type {
+  AiCaptureResult,
+  AiGenerateResult,
+  AiLlmConfig,
   AutostartStatus,
   BackgroundUploadResult,
   BrowserListResponse,
@@ -143,6 +146,22 @@ export const ocrApi = {
   // 给客户端一个略大于后端的超时，确保等待过长时前端能报错而非无限转圈
   recognize: (payload: { image_base64: string; old?: boolean }) =>
     http.post<{ text: string }>("/api/ocr/recognize", payload, { timeout: 120000 }),
+};
+
+/** AI 任务生成（LLM 配置 + 登录页捕获 + 生成任务 JSON） */
+export const aiApi = {
+  fetchLlmConfig: () => http.get<AiLlmConfig>("/api/ai/llm-config"),
+  // api_key 缺省=保持不变；空串=清除；非空=更新
+  saveLlmConfig: (payload: { base_url: string; model: string; api_key?: string }) =>
+    http.put<AiLlmConfig>("/api/ai/llm-config", payload),
+  // 捕获含导航 + networkidle 等待 + CDP 资源快照，放宽客户端超时
+  capture: (url: string) =>
+    http.post<AiCaptureResult>("/api/ai/capture", { url }, { timeout: 90000 }),
+  // 截图经 <img> 直接引用（GET 免鉴权），不走 http 封装
+  captureScreenshotUrl: () => `/api/ai/capture/screenshot?t=${Date.now()}`,
+  // 生成含 1~2 轮 LLM 调用（每轮最长 120s），放宽客户端超时
+  generate: (payload: { extra_prompt?: string }) =>
+    http.post<AiGenerateResult>("/api/ai/generate", payload, { timeout: 300000 }),
 };
 
 /** 登录历史 */

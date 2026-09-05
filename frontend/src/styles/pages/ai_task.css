@@ -1,0 +1,84 @@
+/**
+ * AI 生成任务页样式：三步向导卡片 + 截图预览 + JSON 编辑。
+ * 复用全局 card / form-group / btn 体系，本文件只做布局与特化。
+ */
+
+.ai-task-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 880px;
+}
+
+/* 卡片头图标与标题对齐 */
+.card-header h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: var(--space-sm);
+}
+
+/* 隐私/流程提示条 */
+.ai-privacy-hint {
+  margin-bottom: 12px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--slate-rgb), 0.08);
+}
+
+/* 捕获结果元信息 */
+.ai-capture-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0 var(--space-sm);
+  font-size: 0.86rem;
+  opacity: 0.9;
+  word-break: break-all;
+}
+
+.ai-capture-meta code {
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  background: rgba(var(--slate-rgb), 0.12);
+}
+
+/* 捕获截图预览：限制高度防长页截图撑爆视口，等比缩放 */
+.ai-screenshot {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  margin-top: var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+}
+
+/* 校验回喂/截断提示 */
+.ai-warnings {
+  margin: var(--space-sm) 0 0;
+  padding-left: 20px;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+/* 任务 JSON 编辑区：等宽字体 + 语法可读性 */
+.ai-json {
+  font-family: var(--font-mono);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.ai-json-error {
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 0.85rem;
+}

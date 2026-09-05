@@ -3377,6 +3377,217 @@
      }
     }
    }
+  },
+  "/api/ai/llm-config": {
+   "get": {
+    "operationId": "get___api_ai_llm_config",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   },
+   "put": {
+    "operationId": "put___api_ai_llm_config",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "base_url": {
+          "type": "string",
+          "description": "OpenAI 兼容 API 根地址（允许 http 回环/私网供本地模型）"
+         },
+         "model": {
+          "type": "string",
+          "description": "视觉模型名"
+         },
+         "api_key": {
+          "type": "string",
+          "description": "缺省=保持不变；空串=清除；非空=更新（AES-GCM 加密落盘，响应永不回显）"
+         }
+        },
+        "required": [
+         "base_url",
+         "model"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/ai/capture": {
+   "post": {
+    "operationId": "post___api_ai_capture",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "409": {
+      "description": "Worker Busy（调试会话互斥）",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "503": {
+      "description": "Service Unavailable（Python 环境未就绪）",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "url": {
+          "type": "string",
+          "description": "登录页地址（http/https）"
+         }
+        },
+        "required": [
+         "url"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/ai/capture/screenshot": {
+   "get": {
+    "operationId": "get___api_ai_capture_screenshot",
+    "responses": {
+     "200": {
+      "description": "PNG 截图",
+      "content": {
+       "image/png": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "尚无捕获截图",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/ai/generate": {
+   "post": {
+    "operationId": "post___api_ai_generate",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request（未配置/未捕获/校验失败）",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "extra_prompt": {
+          "type": "string",
+          "description": "用户补充说明（可选）"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
   }
  }
 }

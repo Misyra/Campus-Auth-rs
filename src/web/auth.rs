@@ -165,6 +165,7 @@ fn token_from_query(query: Option<&str>) -> Option<&str> {
 /// - `GET /api/background/*`（CSS `url()` / `<img>` 引用无法携带自定义头，
 ///   背景图为只读图片资源；写操作（upload/fetch-url/delete）仍需鉴权）
 /// - `GET /api/debug/screenshot/*`（同理：调试面板 `<img>` 预览截图，只读 PNG）
+/// - `GET /api/ai/capture/screenshot`（同理：AI 生成页 `<img>` 预览捕获截图，只读 PNG）
 ///
 /// token 来源：
 /// - HTTP：`X-Auth-Token` 头或 `Authorization: Bearer <token>`
@@ -187,6 +188,7 @@ pub async fn auth_middleware(
     if req.method() == Method::GET
         && (path.starts_with("/api/background/")
             || path.starts_with("/api/debug/screenshot/")
+            || path == "/api/ai/capture/screenshot"
             || path == "/api/tools/task-recorder.user.js"
             || path == "/api/docs/task-writing-guide"
             || path == "/api/docs/task-manual"

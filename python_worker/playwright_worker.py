@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -88,6 +90,11 @@ def _browser_data_dir() -> Path:
 def _debug_screenshot_dir() -> Path:
     """调试截图目录（锚定到 worker 脚本目录，不依赖进程 CWD）。"""
     return _WORKER_DIR / "debug"
+
+
+def _capture_dir() -> Path:
+    """AI 任务生成的页面捕获目录（与 debug 截图同语义锚定，latest 每次覆盖）。"""
+    return _WORKER_DIR / "captures" / "latest"
 
 
 # 模块加载时刻：启动清理时用于判定“上次会话残留”（mtime 早于该时刻的文件）
@@ -563,8 +570,6 @@ class WorkerCore:
 
     def _get_extra_http_headers(self, bs: dict) -> dict[str, str]:
         """解析自定义 HTTP 请求头（extra_headers_json）。"""
-        import json
-
         raw = str(bs.get("extra_headers_json", "") or "").strip()
         if not raw:
             return {}
@@ -1359,6 +1364,92 @@ class WorkerCore:
             logger.warning("close_browser 超时（8s），跳过等待继续")
         return {}
 
+    async def handle_page_capture(self, params: dict) -> dict:
+        """导航到目标页面并落盘 HTML / CSS-JS 资源 / 全页截图（供 AI 任务生成）。
+
+        与 ``feedback_capture`` 的差异：本命令自带导航（无活跃页面也可用），
+        产物固定写到 ``captures/latest/``（每次覆盖），内容只经 Rust 侧读盘消费，
+        不走 IPC 回传——NDJSON 单行上限 1 MiB，门户页 HTML/JS 普遍超限。
+        会话语义与 ``execute_login_attempt`` 一致：占用浏览器会话槽位（Rust 侧
+        FIFO 排队），导航会替换当前页；存在活跃调试会话时由 Rust 互斥矩阵快速失败。
+        """
+        url = str(params.get("url") or "").strip()
+        if not url:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "page_capture 缺少 url")
+        if not url.startswith(("http://", "https://")):
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "仅支持 http/https 页面捕获")
+        if self._debug_sessions:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "存在活跃调试会话，请先停止调试再捕获")
+        bs = params.get("browser_settings", {}) or {}
+        cancel_id = params.get("cancel_id", "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+        try:
+            await self.ensure_browser({"browser_settings": bs})
+            await self._prepare_session_page()
+            nav_timeout = _to_ms(bs, "navigation_timeout", 15000)
+            await self._navigate(self._page, url, nav_timeout)
+            # 门户页常在加载后异步拉验证码/配置脚本，等一轮 networkidle 让 DOM
+            # 与已加载资源尽量齐全；长轮询页面等满超时即按当前状态继续（不致命）
+            try:
+                await self._page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:  # noqa: BLE001
+                logger.debug("networkidle 等待超时，按当前页面状态继续捕获")
+            # 取消事件是裸 threading.Event（非 StepContext），直接检查置位
+            if cancel_event is not None and cancel_event.is_set():
+                raise WorkerError(Outcome.UNKNOWN_ERROR, "页面捕获已取消")
+            # 落盘目录与 _debug_screenshot_dir 同语义：锚定 Worker 脚本目录，
+            # 不依赖进程 CWD；固定 captures/latest 每次覆盖，避免产物无界堆积
+            cap_dir = _capture_dir()
+            shutil.rmtree(cap_dir, ignore_errors=True)
+            cap_dir.mkdir(parents=True, exist_ok=True)
+            html = await self._page.content()
+            (cap_dir / "page.html").write_text(html, encoding="utf-8")
+            png_bytes = await self._page.screenshot(full_page=True)
+            (cap_dir / "screenshot.png").write_bytes(png_bytes)
+            resources: dict[str, str] = {}
+            note: str | None = None
+            try:
+                resources, note = await _capture_page_resources(self._page, cap_dir / "resources")
+            except Exception as exc:  # noqa: BLE001 — 资源快照失败不阻断 HTML/截图
+                note = f"资源快照失败: {exc}"
+            try:
+                title = await self._page.title()
+            except Exception:  # noqa: BLE001 — 页面标题读取失败不致命
+                title = ""
+            meta: dict[str, Any] = {
+                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "request_url": url,
+                "final_url": self._page.url,
+                "title": title,
+                "html_path": str(cap_dir / "page.html"),
+                "screenshot_path": str(cap_dir / "screenshot.png"),
+                "resources_dir": str(cap_dir / "resources") if resources else None,
+                "resources_count": len(resources),
+            }
+            if note:
+                meta["note"] = note
+            (cap_dir / "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            logger.info(
+                "[capture] 页面捕获完成: %s (html=%d chars, resources=%d)",
+                meta["final_url"],
+                len(html),
+                len(resources),
+            )
+            return {
+                "final_url": meta["final_url"],
+                "title": title,
+                "html_chars": len(html),
+                "png_bytes": len(png_bytes),
+                "resources_count": len(resources),
+                "note": note,
+            }
+        except Exception:
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
+            raise
+
     async def handle_feedback_capture(self, params: dict) -> dict:
         """捕获当前调试页面的完整 MHTML、截图与 CSS/JS 资源（供导出问题报告）。
 
@@ -1515,6 +1606,7 @@ COMMANDS: dict[str, Callable] = {
     "debug_stop": worker_core.handle_debug_stop,
     "debug_status": worker_core.handle_debug_status,
     "feedback_capture": worker_core.handle_feedback_capture,
+    "page_capture": worker_core.handle_page_capture,
     "ocr_recognize": worker_core.handle_ocr_recognize,
     "shutdown": worker_core.handle_shutdown,
 }

@@ -53,6 +53,11 @@ function navigate(name: string): void {
         <span>任务管理</span>
       </button>
 
+      <button class="nav-item" :class="{ active: route.name === 'ai-task' }" @click="navigate('ai-task')" title="AI 生成任务">
+        <IconApp name="sparkles" class="nav-icon" />
+        <span>AI 任务</span>
+      </button>
+
       <button class="nav-item" :class="{ active: route.name === 'about' }" @click="navigate('about')" title="关于">
         <IconApp name="info" class="nav-icon" />
         <span>关于</span>

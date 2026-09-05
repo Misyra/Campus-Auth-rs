@@ -6,6 +6,7 @@
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+pub mod ai;
 pub mod app;
 pub mod bridge;
 pub mod browser;

@@ -44,6 +44,13 @@ pub trait TaskApi: Send + Sync {
     async fn get_script_path(&self, task_id: &str) -> Option<std::path::PathBuf>;
     /// 任务是否存在（同步内存/磁盘检查）。
     fn has_task(&self, task_id: &str) -> bool;
+    /// 校验任务 JSON（不落盘）：AI 任务生成等外部来源在入库前的程序化校验入口。
+    ///
+    /// 默认放行仅供测试 mock 免实现；真实实现必须转发 `TaskManager::validate_task`
+    /// 的强校验，否则外部来源的非法任务会绕过 `save_task` 之外的预检。
+    async fn validate_task_json(&self, _config: &serde_json::Value) -> Result<(), Vec<String>> {
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -94,6 +101,10 @@ impl TaskApi for TaskManager {
 
     fn has_task(&self, task_id: &str) -> bool {
         TaskManager::has_task(self, task_id)
+    }
+
+    async fn validate_task_json(&self, config: &serde_json::Value) -> Result<(), Vec<String>> {
+        TaskManager::validate_task(self, config)
     }
 }
 

@@ -1,5 +1,6 @@
 //! 路由组汇总：集中声明各子模块的公共 handler
 
+pub mod ai;
 pub mod autostart;
 pub mod background;
 pub mod config;
