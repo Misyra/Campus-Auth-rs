@@ -363,6 +363,19 @@ async function stopBrowser() {
             </div>
             <input id="settings-browser-ua" v-model.trim="config.config.browser.user_agent" type="text" placeholder="留空使用当前浏览器的默认值" />
           </div>
+          <div class="form-group">
+            <div class="field-label-row">
+              <label for="settings-browser-args">启动参数（Playwright args）</label>
+              <FieldHelp text="每行一个参数，附加到浏览器启动命令，# 开头为注释。--proxy-server、--load-extension、--remote-debugging-port 等安全敏感参数会被自动过滤；非 Chromium 引擎下 Chromium 专属参数不生效。" />
+            </div>
+            <textarea
+              id="settings-browser-args"
+              v-model="config.config.browser.browser_args"
+              rows="4"
+              class="settings-monospace-textarea"
+              placeholder="每行一个，例如：--disable-notifications"
+            ></textarea>
+          </div>
         </template>
       </div>
     </section>
