@@ -3,25 +3,18 @@
 //! 设计取舍：docs/guides/task-writing-guide.md 全文 565 行直接进 prompt 偏贵，
 //! 此处固定一份浓缩版 schema 指南（覆盖步骤类型、必填字段、占位符与输出约束），
 //! 与强校验 `validate_task` 的硬性规则一一对应——提示词约束失守时仍有校验兜底。
+//! HTML 以登录表单为中心开窗口（头部 CSS/导航可能数十 KB，硬截头部会丢表单）；
+//! JS/CSS 不进上下文（体积大、价值低），完整资源由「保存页面文件」按钮下载。
 
 use serde_json::{Value, json};
 
-/// 页面上下文截断预算（字符数）。门户页 HTML/JS 可能数 MB，视觉模型上下文有限：
-/// HTML 保骨架与内联脚本，外链 JS 按登录相关关键词优先、逐文件截断、总量封顶。
+/// 页面 HTML 截断预算（字符数）。视觉模型上下文有限，超预算按表单中心开窗口。
 pub const HTML_MAX_CHARS: usize = 80_000;
-/// 单个外部脚本文件的最大字符数
-pub const SCRIPT_MAX_CHARS: usize = 40_000;
-/// 全部外部脚本的累计字符预算
-pub const SCRIPTS_TOTAL_CHARS: usize = 120_000;
-
-/// 登录实现线索：文件名/URL 含这些关键词的外链脚本优先纳入上下文
-/// （门户登录加密几乎总是 MD5/Base64/AES + 盐值，藏在含此类命名的脚本里）
-const LOGIN_SCRIPT_HINTS: [&str; 10] = [
-    "login", "auth", "encrypt", "md5", "base64", "aes", "des", "rsa", "crypt", "portal",
-];
+/// 窗口不对称比例：锚点前 3/10、后 7/10——提交按钮/协议勾选/内联脚本在表单之后，向后偏重
+const WINDOW_BEFORE_TENTHS: usize = 3;
 
 /// 系统提示词：任务 schema 浓缩指南（中文，与 `TaskManager::validate_task` 硬规则对齐）
-pub const SYSTEM_PROMPT: &str = r#"你是校园网门户登录自动化专家。根据用户提供的登录页面截图、HTML 与 JS 源码，生成一个可被 Campus-Auth 执行器直接运行的浏览器任务 JSON。
+pub const SYSTEM_PROMPT: &str = r#"你是校园网门户登录自动化专家。根据用户提供的登录页面截图与 HTML 片段，生成一个可被 Campus-Auth 执行器直接运行的浏览器任务 JSON。
 
 ## 输出要求（最高优先级）
 只输出一个 JSON 对象，不要任何解释、markdown 围栏或多余文本。
@@ -70,7 +63,7 @@ pub const SYSTEM_PROMPT: &str = r#"你是校园网门户登录自动化专家。
 
 ## 常见门户模式提示
 - 表单在 iframe 里时，所有相关步骤都要带 frame 字段。
-- 密码框被 JS 加密（找 password、md5、encrypt、salt 相关代码）时，只需填明文占位符到输入框，加密由页面 JS 自动完成；不要用 eval 自己实现加密。
+- 密码若由页面 JS 自动加密，直接填明文占位符到输入框即可，加密由页面自身完成；不要用 eval 自己实现加密。
 - 有验证码图片时用 ocr 步骤：selector 指向验证码 <img>，target_selector 指向验证码输入框。
 - 提交后如需判定成功，可加一个 eval 步骤用 store_as 写入结果变量（如检查页面无错误提示返回 true），顶层 success_condition 填该变量名。
 - 优先选择稳定的 selector（id、name、placeholder），避免脆弱的绝对路径。
@@ -88,8 +81,6 @@ pub struct CaptureContext {
     pub title: String,
     /// 页面 HTML（原始 content）
     pub html: String,
-    /// 外链脚本 (url, 内容)，CSS 已过滤
-    pub scripts: Vec<(String, String)>,
     /// 截图 PNG 字节
     pub screenshot_png: Vec<u8>,
     /// 资源快照备注（截断说明等）
@@ -126,7 +117,7 @@ pub fn append_retry_messages(messages: &mut Vec<Value>, assistant_text: &str, er
     }));
 }
 
-/// 组装用户文本上下文（含截断）
+/// 组装用户文本上下文（HTML 按表单中心开窗口）
 pub fn build_user_text(ctx: &CaptureContext, extra_prompt: Option<&str>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
@@ -135,18 +126,13 @@ pub fn build_user_text(ctx: &CaptureContext, extra_prompt: Option<&str>) -> Stri
         ctx.request_url, ctx.final_url, ctx.title
     ));
 
+    let (html_text, html_note) = windowed_html_with_note(&ctx.html, HTML_MAX_CHARS);
     sections.push(format!(
-        "## 页面 HTML（可能已截断，共 {} 字符）\n```html\n{}\n```",
+        "## 页面 HTML（{}，原始共 {} 字符）\n```html\n{}\n```",
+        html_note,
         ctx.html.chars().count(),
-        truncate_chars(&ctx.html, HTML_MAX_CHARS)
+        html_text
     ));
-
-    let scripts_text = build_scripts_text(&ctx.scripts);
-    if !scripts_text.is_empty() {
-        sections.push(format!(
-            "## 已加载的 JS 脚本（按登录相关性筛选，可能已截断）\n{scripts_text}"
-        ));
-    }
 
     if let Some(note) = &ctx.note {
         sections.push(format!("## 捕获备注\n{note}"));
@@ -162,34 +148,93 @@ pub fn build_user_text(ctx: &CaptureContext, extra_prompt: Option<&str>) -> Stri
     sections.join("\n\n")
 }
 
-/// 拼接外链脚本内容：登录相关命名的脚本优先，单文件与总量双重截断
-fn build_scripts_text(scripts: &[(String, String)]) -> String {
-    let mut ordered: Vec<&(String, String)> = scripts.iter().collect();
-    ordered.sort_by_key(|(url, _)| {
-        let lower = url.to_lowercase();
-        let hits = LOGIN_SCRIPT_HINTS
-            .iter()
-            .filter(|h| lower.contains(*h))
-            .count();
-        // 命中线索多的排前；同分按原顺序（stable sort）
-        std::cmp::Reverse(hits)
-    });
-
-    let mut out = String::new();
-    let mut budget = SCRIPTS_TOTAL_CHARS;
-    for (url, content) in ordered {
-        if budget == 0 {
-            out.push_str(&format!(
-                "\n（其余 {} 个脚本超出总量预算已省略）\n",
-                scripts.len()
-            ));
-            break;
-        }
-        let text = truncate_chars(content, SCRIPT_MAX_CHARS.min(budget));
-        budget = budget.saturating_sub(text.chars().count());
-        out.push_str(&format!("\n### {url}\n```javascript\n{text}\n```\n"));
+/// HTML 截断：预算内原文直出；超预算以登录表单为中心开窗口，找不到锚点回退从头截断
+///
+/// 返回 (文本, 给模型的裁剪说明)。
+pub fn windowed_html_with_note(html: &str, budget: usize) -> (String, String) {
+    if html.chars().count() <= budget {
+        return (html.to_string(), "完整".to_string());
     }
-    out.trim().to_string()
+    let Some(anchor) = find_login_anchor(html) else {
+        return (truncate_chars(html, budget), "超长已从头部截断".to_string());
+    };
+    let chars: Vec<char> = html.chars().collect();
+    let total = chars.len();
+    let before = budget * WINDOW_BEFORE_TENTHS / 10;
+    let mut start = anchor.saturating_sub(before);
+    let mut end = (anchor + (budget - before)).min(total);
+
+    // 边界修正：起点落在标签内部时回退到该标签的 '<'；终点落在标签内部时
+    // 前进到当前标签的 '>' 之后，保证窗口首尾都是完整的标签边界
+    if start > 0 {
+        let lt = chars[..start].iter().rposition(|&c| c == '<');
+        let gt = chars[..start].iter().rposition(|&c| c == '>');
+        match (lt, gt) {
+            (Some(l), Some(g)) if l > g => start = l,
+            (Some(l), None) => start = l,
+            _ => {}
+        }
+    }
+    let lt = chars[start..end].iter().rposition(|&c| c == '<');
+    let gt = chars[start..end].iter().rposition(|&c| c == '>');
+    if let (Some(l), Some(g)) = (lt, gt) {
+        if l > g {
+            end = (start + g + 1).min(total);
+        }
+    }
+
+    let head_omitted = start;
+    let tail_omitted = total - end;
+    let window: String = chars[start..end].iter().collect();
+    let text = format!(
+        "<!-- 前方已省略 {head_omitted} 字符（页面头部） -->\n{window}\n<!-- 后方已省略 {tail_omitted} 字符 -->"
+    );
+    (text, "已以登录表单为中心截取".to_string())
+}
+
+/// 在 HTML 中定位登录表单锚点（返回字符偏移），按信号强度逐级降级：
+/// 密码输入框 > 用户名/账号类字段 > 提交按钮/登录文案。全部未命中返回 None。
+fn find_login_anchor(html: &str) -> Option<usize> {
+    // 小写副本上扫描（ASCII 小写不改变字节长度，偏移换算安全；中文不受影响）
+    let lower = html.to_lowercase();
+    let byte_to_char = |pos: usize| html[..pos].chars().count();
+
+    // 1) 密码框（引号 / 无引号两种写法）
+    for needle in ["type=\"password\"", "type=password", "type='password'"] {
+        if let Some(pos) = lower.find(needle) {
+            return Some(byte_to_char(pos));
+        }
+    }
+
+    // 2) 用户名/账号类字段：多个词取最早命中
+    let mut best: Option<usize> = None;
+    for needle in [
+        "username",
+        "user_name",
+        "account",
+        "userid",
+        "user-id",
+        "学号",
+        "工号",
+        "账号",
+        "用户名",
+    ] {
+        if let Some(pos) = lower.find(needle) {
+            let char_pos = byte_to_char(pos);
+            best = Some(best.map_or(char_pos, |b: usize| b.min(char_pos)));
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+
+    // 3) 提交按钮 / 登录文案
+    for needle in ["type=\"submit\"", "type=submit", "登录", "login", "sign in"] {
+        if let Some(pos) = lower.find(needle) {
+            return Some(byte_to_char(pos));
+        }
+    }
+    None
 }
 
 /// 按字符截断（非字节），保证不劈开 UTF-8 多字节字符
@@ -217,7 +262,6 @@ mod tests {
             final_url: "http://portal.example.com/login".into(),
             title: "校园网登录".into(),
             html: "<html><body><form></form></body></html>".into(),
-            scripts: Vec::new(),
             screenshot_png: vec![1, 2, 3],
             note: None,
         }
@@ -233,42 +277,86 @@ mod tests {
         assert!(cut.chars().count() < 20);
     }
 
-    #[test]
-    fn test_scripts_sorted_by_login_hints_and_capped() {
-        let scripts = vec![
-            (
-                "https://cdn.example.com/jquery.js".to_string(),
-                "a".repeat(50),
-            ),
-            (
-                "https://portal.example.com/js/login-md5.js".to_string(),
-                "b".repeat(50),
-            ),
-        ];
-        let text = build_scripts_text(&scripts);
-        // login-md5 命中 2 个关键词，应排在 jquery 前
-        let pos_login = text.find("login-md5").unwrap();
-        let pos_jquery = text.find("jquery").unwrap();
-        assert!(pos_login < pos_jquery);
+    // ---- 表单中心窗口 ----
+
+    /// 构造"长头部 + 表单 + 长尾部"的 HTML：头部 head 填充、中部 password 表单、尾部脚本
+    fn big_html(head_chars: usize, tail_chars: usize) -> String {
+        let mut s = String::from("<html><head>");
+        s.push_str(&"x".repeat(head_chars));
+        s.push_str("</head><body><form><input id=\"username\"><input type=\"password\" name=\"pwd\"><button type=\"submit\">登录</button></form><script>");
+        s.push_str(&"y".repeat(tail_chars));
+        s.push_str("</script></body></html>");
+        s
     }
 
     #[test]
-    fn test_scripts_budget_zero_stops() {
-        let scripts: Vec<(String, String)> = (0..10)
-            .map(|i| {
-                (
-                    format!("https://x/{i}/login.js"),
-                    "c".repeat(SCRIPT_MAX_CHARS + 1),
-                )
-            })
-            .collect();
-        let text = build_scripts_text(&scripts);
-        // 总预算 120k，单文件 40k → 最多 3 个文件
-        assert_eq!(text.matches("### https://x/").count(), 3);
+    fn test_windowed_html_short_untouched() {
+        let (text, note) = windowed_html_with_note("<p>hi</p>", 80_000);
+        assert_eq!(text, "<p>hi</p>");
+        assert_eq!(note, "完整");
     }
 
     #[test]
-    fn test_build_messages_contains_image_and_placeholders_doc() {
+    fn test_windowed_html_centers_on_password_field() {
+        let html = big_html(100_000, 5_000);
+        let (text, note) = windowed_html_with_note(&html, 1_000);
+        assert_eq!(note, "已以登录表单为中心截取");
+        // 密码框与提交按钮必须保留在窗口内
+        assert!(text.contains("type=\"password\""), "表单被截掉: {text}");
+        assert!(text.contains("submit"));
+        // 尾部 5000 字符脚本只应按预算部分进入窗口，不能整段包含
+        assert!(!text.contains(&"y".repeat(2_000)), "尾部脚本不应整段进入窗口");
+        // 头部大量内容被省略
+        assert!(text.contains("前方已省略"));
+    }
+
+    #[test]
+    fn test_windowed_html_tail_budget_when_form_early() {
+        // 表单在文档很靠前、其后是超长脚本：窗口向脚本侧扩展（后 70% 预算）
+        let html = big_html(1_000, 100_000);
+        let (text, _) = windowed_html_with_note(&html, 1_000);
+        assert!(text.contains("type=\"password\""));
+        assert!(text.contains("后方已省略"));
+    }
+
+    #[test]
+    fn test_windowed_html_falls_back_to_head_truncation_without_anchor() {
+        let html = format!("<html><head>{}{}", "z".repeat(90_000), "</head></html>");
+        let (text, note) = windowed_html_with_note(&html, 1_000);
+        assert_eq!(note, "超长已从头部截断");
+        assert!(text.starts_with("<html><head>"));
+        assert!(text.contains("已截断"));
+    }
+
+    #[test]
+    fn test_windowed_html_boundaries_on_tag_edges() {
+        // 窗口边界必须落在 '<' / '>' 上：去掉省略注释后 '<' 与 '>' 数量配平
+        let html = big_html(50_000, 50_000);
+        let (text, _) = windowed_html_with_note(&html, 2_000);
+        let body = text
+            .lines()
+            .filter(|l| !l.starts_with("<!--") && !l.ends_with("-->"))
+            .collect::<String>();
+        assert_eq!(body.matches('<').count(), body.matches('>').count());
+    }
+
+    #[test]
+    fn test_windowed_html_multibyte_anchor_safe() {
+        // 锚点是中文文案（"账号"），中文与窗口边界混合时不劈字符
+        let mut html = String::from("<html><body><div>");
+        html.push_str(&"页".repeat(50_000));
+        html.push_str("<input name=\"username\" placeholder=\"请输入账号\">");
+        html.push_str(&"页".repeat(50_000));
+        html.push_str("</div></body></html>");
+        let (text, note) = windowed_html_with_note(&html, 800);
+        assert_eq!(note, "已以登录表单为中心截取");
+        assert!(text.contains("username"));
+        // 未劈开 UTF-8（劈开会产生替换符 U+FFFD）
+        assert!(!text.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_build_messages_contains_image_and_no_scripts() {
         let messages = build_messages(&ctx(), Some("运营商选择电信"));
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");
@@ -277,6 +365,7 @@ mod tests {
         assert!(text.contains("http://portal.example.com/login"));
         assert!(text.contains("运营商选择电信"));
         assert!(text.contains("<html>"));
+        assert!(!text.contains("### "), "JS 段已移出上下文");
         let img = content[1]["image_url"]["url"].as_str().unwrap();
         assert!(img.starts_with("data:image/png;base64,"));
     }

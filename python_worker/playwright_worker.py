@@ -1406,6 +1406,20 @@ class WorkerCore:
             (cap_dir / "page.html").write_text(html, encoding="utf-8")
             png_bytes = await self._page.screenshot(full_page=True)
             (cap_dir / "screenshot.png").write_bytes(png_bytes)
+            # MHTML 完整布局快照（单文件自包含样式/图片，供"保存页面文件"离线还原；
+            # Chromium 按设计不含 JS，脚本由下方 resources/ 补齐）
+            mhtml_ok = False
+            try:
+                cdp = await self._page.context.new_cdp_session(self._page)
+                mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
+                cdp_data = mhtml.get("data", "")
+                if cdp_data:
+                    payload = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
+                    (cap_dir / "page.mhtml").write_bytes(payload)
+                    mhtml_ok = True
+                await cdp.detach()
+            except Exception as exc:  # noqa: BLE001 — MHTML 失败不影响其余产物
+                logger.debug("MHTML 快照失败（跳过）: %s", exc)
             resources: dict[str, str] = {}
             note: str | None = None
             try:
@@ -1426,6 +1440,8 @@ class WorkerCore:
                 "resources_dir": str(cap_dir / "resources") if resources else None,
                 "resources_count": len(resources),
             }
+            if mhtml_ok:
+                meta["mhtml_path"] = str(cap_dir / "page.mhtml")
             if note:
                 meta["note"] = note
             (cap_dir / "meta.json").write_text(

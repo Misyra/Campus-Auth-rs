@@ -67,7 +67,7 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 | `debug_start` | 启动调试会话，保持页面上下文 |
 | `debug_step` | 执行调试会话中的单步 |
 | `debug_stop` | 停止调试会话并释放页面 |
-| `page_capture` | 导航到目标页并落盘 HTML/CSS-JS 资源与全页截图到 `captures/latest/`（AI 任务生成） |
+| `page_capture` | 导航到目标页并落盘 MHTML 完整布局、HTML、CSS-JS 资源与全页截图到 `captures/latest/`（AI 任务生成） |
 | `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖） |
 | `shutdown` | 优雅关闭 Worker 进程 |
 

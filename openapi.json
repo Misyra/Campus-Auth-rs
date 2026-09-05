@@ -3588,6 +3588,32 @@
      }
     }
    }
+  },
+  "/api/ai/capture/bundle": {
+   "get": {
+    "operationId": "get___api_ai_capture_bundle",
+    "responses": {
+     "200": {
+      "description": "zip（MHTML + HTML + resources + 截图 + meta）",
+      "content": {
+       "application/zip": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "尚无捕获产物",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
   }
  }
 }

@@ -292,6 +292,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/ai/capture/screenshot", || {
             get(routes::ai::capture_screenshot)
         }),
+        ("GET", "/api/ai/capture/bundle", || {
+            get(routes::ai::capture_bundle)
+        }),
         ("POST", "/api/ai/generate", || post(routes::ai::generate)),
         // ---- OCR ----
         // recognize 单独放宽请求体限制（见 routes::ocr::RECOGNIZE_BODY_LIMIT），

@@ -167,7 +167,6 @@ mod tests {
             final_url: "http://p/login".into(),
             title: "t".into(),
             html: "<html></html>".into(),
-            scripts: Vec::new(),
             screenshot_png: vec![0],
             note: None,
         }

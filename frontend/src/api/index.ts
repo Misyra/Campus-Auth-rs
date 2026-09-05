@@ -159,6 +159,26 @@ export const aiApi = {
     http.post<AiCaptureResult>("/api/ai/capture", { url }, { timeout: 90000 }),
   // 截图经 <img> 直接引用（GET 免鉴权），不走 http 封装
   captureScreenshotUrl: () => `/api/ai/capture/screenshot?t=${Date.now()}`,
+  /** 保存页面文件：MHTML 完整布局 + HTML + CSS/JS 资源 + 截图（后端打 zip，返回 Blob） */
+  async captureBundle(): Promise<Blob> {
+    const token = await ensureAuthToken();
+    const res = await fetch("/api/ai/capture/bundle", {
+      method: "GET",
+      headers: token ? { "X-Auth-Token": token } : undefined,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let msg = `导出失败 (${res.status})`;
+      try {
+        const j = JSON.parse(text) as { error?: { message?: string } };
+        if (j?.error?.message) msg = j.error.message;
+      } catch {
+        if (text) msg = text.slice(0, 200);
+      }
+      throw new Error(msg);
+    }
+    return await res.blob();
+  },
   // 生成含 1~2 轮 LLM 调用（每轮最长 120s），放宽客户端超时
   generate: (payload: { extra_prompt?: string }) =>
     http.post<AiGenerateResult>("/api/ai/generate", payload, { timeout: 300000 }),

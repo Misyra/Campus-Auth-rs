@@ -213,8 +213,8 @@ pub async fn generate(
 
 /// 从落盘产物组装生成上下文；(上下文, 非致命提示)
 ///
-/// `meta.json` 为捕获契约锚点；截图是视觉模型的核心输入，缺失直接报错；
-/// JS 资源逐文件容错（读取失败跳过）。
+/// `meta.json` 为捕获契约锚点；截图是视觉模型的核心输入，缺失直接报错。
+/// JS/CSS 不进 LLM 上下文（完整资源走「保存页面文件」下载），仅读 HTML + 截图。
 async fn load_capture_context(
     base: &std::path::Path,
 ) -> Result<(CaptureContext, Vec<String>), ApiError> {
@@ -243,32 +243,6 @@ async fn load_capture_context(
         .map_err(|_| ApiError::BadRequest("捕获截图缺失，请重新执行页面捕获".into()))?;
 
     let mut warnings: Vec<String> = Vec::new();
-    let mut scripts: Vec<(String, String)> = Vec::new();
-    let resources_dir = meta
-        .get("resources_dir")
-        .and_then(Value::as_str)
-        .map(std::path::PathBuf::from);
-    if let Some(rdir) = resources_dir {
-        if let Ok(mut rd) = tokio::fs::read_dir(&rdir).await {
-            while let Ok(Some(entry)) = rd.next_entry().await {
-                let name = entry.file_name().to_string_lossy().to_string();
-                // LLM 只需要 JS；CSS/图片资源仅贡献噪声
-                if !name.ends_with(".js") {
-                    continue;
-                }
-                match tokio::fs::read_to_string(entry.path()).await {
-                    Ok(content) => scripts.push((name, content)),
-                    Err(e) => warnings.push(format!("脚本 {name} 读取失败已跳过: {e}")),
-                }
-            }
-        }
-        // 非文本脚本（如 GBK 编码）读取会失败：统一提示而非逐条刷屏
-        if scripts.is_empty() && warnings.is_empty() {
-            warnings.push("资源快照中没有可读的 JS 脚本（可能为非 UTF-8 编码）".into());
-        }
-    } else {
-        warnings.push("本次捕获未获取到 JS 资源快照（页面可能全部内联或 CDP 不可用）".into());
-    }
     if let Some(note) = meta.get("note").and_then(Value::as_str) {
         warnings.push(note.to_string());
     }
@@ -278,11 +252,74 @@ async fn load_capture_context(
         final_url: field("final_url"),
         title: field("title"),
         html,
-        scripts,
         screenshot_png,
         note: None,
     };
     Ok((ctx, warnings))
+}
+
+/// GET /api/ai/capture/bundle — 下载最近一次捕获的完整页面文件（zip）
+///
+/// 内容：MHTML 完整布局（自包含样式/图片）+ page.html + CSS/JS 资源快照 +
+/// 截图 + meta.json。供离线分析或分享适配；需鉴权（不同于只读截图豁免）。
+pub async fn capture_bundle(
+    State(config): State<Arc<dyn ConfigApi>>,
+) -> Result<impl IntoResponse, ApiError> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    let dir = ai::capture_dir(&config.base_path());
+    if !dir.join("meta.json").exists() {
+        return Err(ApiError::NotFound("尚无捕获产物，请先执行页面捕获".into()));
+    }
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+
+        // meta / HTML / MHTML / 截图：顶层固定名
+        for name in ["meta.json", "page.html", "page.mhtml", "screenshot.png"] {
+            let path = dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = tokio::fs::read(&path).await?;
+            zw.start_file(name, opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(&bytes)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        // resources/：捕获时经 CDP 抓取的 CSS/JS 快照
+        let resources_dir = dir.join("resources");
+        if let Ok(mut rd) = tokio::fs::read_dir(&resources_dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if let Ok(bytes) = tokio::fs::read(entry.path()).await {
+                    zw.start_file(format!("resources/{name}"), opts)
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                    zw.write_all(&bytes)
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                }
+            }
+        }
+        zw.finish().map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    let bytes = buf.into_inner();
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let filename = format!("campus-auth-capture-{stamp}.zip");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    ))
 }
 
 #[cfg(test)]
@@ -525,6 +562,7 @@ mod tests {
                 "/api/ai/capture/screenshot",
                 get(capture_screenshot).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
             )
+            .route("/api/ai/capture/bundle", get(capture_bundle))
             .route("/api/ai/generate", post(generate))
             .with_state(state);
         (app, inner, cfg_inner, dir)
@@ -796,6 +834,70 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()["content-type"], "image/png");
+    }
+
+    /// bundle：无产物 404；有产物 200 zip 且包含 MHTML/HTML/资源/截图/meta
+    #[tokio::test]
+    async fn test_capture_bundle_hit_and_miss() {
+        let (app, _, _, dir) = mock_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ai/capture/bundle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let cap = ai::capture_dir(dir.path());
+        let res = cap.join("resources");
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::write(cap.join("meta.json"), b"{}").unwrap();
+        std::fs::write(cap.join("page.html"), b"<html></html>").unwrap();
+        std::fs::write(cap.join("page.mhtml"), b"MIME-Version: 1.0").unwrap();
+        std::fs::write(cap.join("screenshot.png"), b"\x89PNG").unwrap();
+        std::fs::write(res.join("main.js"), b"console.log(1)").unwrap();
+        std::fs::write(res.join("style.css"), b"body{}").unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ai/capture/bundle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "application/zip");
+        assert!(
+            resp.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment; filename=\"campus-auth-capture-")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        for expect in [
+            "meta.json",
+            "page.html",
+            "page.mhtml",
+            "screenshot.png",
+            "resources/main.js",
+            "resources/style.css",
+        ] {
+            assert!(
+                names.contains(&expect.to_string()),
+                "missing {expect}: {names:?}"
+            );
+        }
     }
 
     /// generate：未配置 LLM → 400；未捕获 → 400

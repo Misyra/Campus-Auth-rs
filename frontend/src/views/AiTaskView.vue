@@ -11,6 +11,7 @@ import type { AiCaptureResult, AiGenerateResult, AiLlmConfig } from "@/api/types
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { useToast } from "@/composables/useToast";
+import { downloadBlob } from "@/utils/file";
 
 const router = useRouter();
 const { toastOnly } = useToast();
@@ -75,6 +76,7 @@ const captureUrl = ref("");
 const capturing = ref(false);
 const captureResult = ref<AiCaptureResult | null>(null);
 const screenshotUrl = ref("");
+const savingBundle = ref(false);
 
 async function capture(): Promise<void> {
   if (!captureUrl.value.trim()) {
@@ -92,6 +94,22 @@ async function capture(): Promise<void> {
     toastOnly(false, extractApiError(error, "页面捕获失败"));
   } finally {
     capturing.value = false;
+  }
+}
+
+/** 保存页面文件：MHTML 完整布局 + HTML + CSS/JS 资源 + 截图（zip） */
+async function saveBundle(): Promise<void> {
+  if (savingBundle.value) return;
+  savingBundle.value = true;
+  try {
+    const blob = await aiApi.captureBundle();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    downloadBlob(blob, `campus-auth-capture-${stamp}.zip`, "application/zip");
+    toastOnly(true, "页面文件已保存");
+  } catch (error) {
+    toastOnly(false, extractApiError(error as Error, "保存页面文件失败"));
+  } finally {
+    savingBundle.value = false;
   }
 }
 
@@ -257,6 +275,12 @@ onMounted(() => {
               <div>落地地址：<code>{{ captureResult.final_url }}</code></div>
               <div v-if="captureResult.title">页面标题：{{ captureResult.title }}</div>
               <div>资源快照：{{ captureResult.resources_count ?? 0 }} 个文件<span v-if="captureResult.note">（{{ captureResult.note }}）</span></div>
+            </div>
+            <div class="ai-actions">
+              <button class="btn btn-secondary btn-sm" :disabled="savingBundle" @click="saveBundle" title="下载 MHTML 完整布局 + HTML + CSS/JS 资源 + 截图">
+                <IconApp name="download" class="icon-sm" />
+                {{ savingBundle ? "打包中…" : "保存页面文件" }}
+              </button>
             </div>
             <img
               v-if="screenshotUrl"
