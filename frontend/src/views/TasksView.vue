@@ -78,10 +78,10 @@ function closeEditor() { void t.closeTaskEditor(); }
                   {{ t.activeTaskId.value === task.id ? '使用中' : '使用' }}
                 </button>
                 <button class="btn btn-sm btn-icon-only" @click="t.showTaskEditor(task.id)" title="编辑任务">
-                  <IconApp name="sliders" class="icon-sm" />
+                  <IconApp name="pencil" class="icon-sm" />
                 </button>
                 <button class="btn btn-sm btn-icon-only" @click="debug.startDebug(task.id)" title="调试（单步执行当前任务步骤）">
-                  <IconApp name="play" class="icon-sm" />
+                  <IconApp name="bug" class="icon-sm" />
                 </button>
                 <button class="btn btn-sm btn-icon-only" @click="t.duplicateTask(task.id)" :disabled="t.duplicatingIds.has(task.id)" title="复制为新任务">
                   <IconApp name="copy" class="icon-sm" />
