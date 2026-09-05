@@ -1,6 +1,6 @@
 //! OpenAI 兼容 chat/completions 客户端（AI 任务生成的出站调用）
 //!
-//! DeepSeek / 智谱 GLM / 硅基流动等主流服务商均兼容 OpenAI `/chat/completions`
+//! DeepSeek / 智谱 GLM 等主流服务商均兼容 OpenAI `/chat/completions`
 //! 协议；视觉输入统一走 `image_url`（data URL）消息部件。调用为低频一次性
 //! 请求，client 按次构建（超时预算独立于其他出站模块）。
 

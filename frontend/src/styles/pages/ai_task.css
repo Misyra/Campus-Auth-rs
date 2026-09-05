@@ -3,18 +3,13 @@
  * 复用全局 card / form-group / btn 体系，本文件只做布局与特化。
  */
 
-/* 宽屏双列：第 1 步（配置）+ 第 2 步（捕获）并排，第 3 步（生成）全宽；
-   窄屏 auto-fit 自动回退单列 */
+/* 三步卡片单列纵向排列（第 1/2/3 步上下堆叠），限宽保持可读性 */
 .ai-task-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: 1fr;
   gap: 20px;
   max-width: 1200px;
   align-items: start;
-}
-
-.ai-generate-card {
-  grid-column: 1 / -1;
 }
 
 /* 卡片头图标与标题对齐 */
@@ -112,4 +107,90 @@
 .ai-json {
   max-height: 420px;
   overflow-y: auto;
+}
+
+/* 开发中提示条：AI 生成尚不稳定，引导备选录制器路径（配色沿用 layout 警告 banner） */
+.ai-dev-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 1200px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--warning-rgb), 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--warning-rgb), 0.1);
+  color: var(--warning);
+  font-size: 0.9rem;
+}
+
+.ai-dev-notice a {
+  color: var(--warning);
+  font-weight: 600;
+  text-underline-offset: 2px;
+}
+
+/* 使用步骤提示：三步向导前的流程总览 */
+.ai-steps-hint {
+  max-width: 1200px;
+  margin-bottom: 20px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--slate-rgb), 0.08);
+}
+
+.ai-steps-hint ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.ai-steps-hint li + li {
+  margin-top: 4px;
+}
+
+/* 模型配置收起开关行：已保存配置时默认收起，点击整行展开 */
+.ai-config-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--slate-rgb), 0.06);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ai-config-toggle:hover {
+  background: rgba(var(--slate-rgb), 0.1);
+}
+
+.ai-config-toggle-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 摘要展示当前模型名，过长截断 */
+.ai-config-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+
+/* 展开时箭头翻转指示当前状态 */
+.ai-config-chevron {
+  flex: none;
+  transition: transform 0.15s ease;
+}
+
+.ai-config-chevron.open {
+  transform: rotate(180deg);
 }

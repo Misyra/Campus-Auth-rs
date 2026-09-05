@@ -20,16 +20,16 @@ const { toastOnly } = useToast();
 
 // ---- LLM 配置 ----
 /**
- * 服务商预设：均为 OpenAI 兼容 + 支持视觉输入的端点（2026-09 核对）。
+ * 服务商预设：均为 OpenAI 兼容 + 支持视觉输入的端点（2026-09 逐一对照官方文档核对）。
+ * 其余服务商选"自定义"，按 OpenAI 兼容格式填 base_url（后端统一追加 /chat/completions）。
  * 模型名随服务商版本演进会过时，可手动修改；defaultKey 非空时切换预设自动填入
  * （OpenCode Zen 公共网关免注册，key 固定 public）。
  */
 const PRESETS = [
   { label: "OpenCode Zen（免费）", base: "https://opencode.ai/zen/v1", model: "mimo-v2.5-free", defaultKey: "public" },
-  { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.1v-thinking-flash", defaultKey: "" },
+  { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.3-flash", defaultKey: "" },
   { label: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-v4-flash-vision-exp", defaultKey: "" },
-  { label: "硅基流动", base: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen3-VL-32B-Instruct", defaultKey: "" },
-  { label: "自定义 / 本地模型", base: "", model: "", defaultKey: "" },
+  { label: "自定义 / 本地模型（OpenAI 兼容）", base: "", model: "", defaultKey: "" },
 ];
 
 /** 选中预设的下标（CustomSelect 的 value 为字符串） */
@@ -41,6 +41,13 @@ const baseUrl = ref("");
 const model = ref("");
 const apiKey = ref("");
 const hasApiKey = ref(false);
+/** 模型配置收起状态：已有完整配置时默认收起，点击摘要行展开 */
+const configExpanded = ref(true);
+/** 收起时摘要行展示当前模型，未配置则提示 */
+const configSummary = computed(() => {
+  if (!baseUrl.value && !model.value) return "未配置";
+  return model.value || baseUrl.value;
+});
 const savingConfig = ref(false);
 
 function applyPreset(): void {
@@ -58,6 +65,8 @@ async function loadConfig(): Promise<void> {
     baseUrl.value = cfg.base_url || "";
     model.value = cfg.model || "";
     hasApiKey.value = cfg.has_api_key;
+    // 已保存完整配置则默认收起减少首屏噪音；不完整保持展开引导补全
+    if (cfg.base_url && cfg.model) configExpanded.value = false;
   } catch (error) {
     toastOnly(false, extractApiError(error, "读取 LLM 配置失败"));
   }
@@ -75,6 +84,8 @@ async function saveConfig(): Promise<void> {
     const saved = await aiApi.saveLlmConfig(payload);
     hasApiKey.value = saved.has_api_key;
     apiKey.value = "";
+    // 填好即收起：保存成功后折叠为摘要行
+    configExpanded.value = false;
     toastOnly(true, "LLM 配置已保存");
   } catch (error) {
     toastOnly(false, extractApiError(error, "保存 LLM 配置失败"));
@@ -135,7 +146,7 @@ const savingTask = ref(false);
 
 async function generate(): Promise<void> {
   if (!hasApiKey.value && !apiKey.value.trim()) {
-    toastOnly(false, "部分服务商要求 API Key，请先在上方保存配置");
+    toastOnly(false, "部分服务商要求 API Key，请先在第 1 步展开模型配置并保存");
   }
   generating.value = true;
   generateResult.value = null;
@@ -199,12 +210,44 @@ onMounted(() => {
 
 <template>
   <div class="page-content">
+    <div class="ai-dev-notice">
+      <IconApp name="alert-triangle" class="icon-sm" />
+      <span>
+        当前功能仍在开发，可能不稳定。如果无法生成正确任务，请到
+        <router-link to="/settings/tasks">设置 → 任务</router-link>
+        手动下载录制器，按照视频教程操作。
+      </span>
+    </div>
+    <div class="hint ai-steps-hint">
+      <b>使用步骤</b>
+      <ol>
+        <li>打开应用后，退出校园网登录。</li>
+        <li>输入校园网登录的链接，点击“开始捕获”。</li>
+        <li>连接好校园网或者手机热点后，使用大模型填好配置，点击“生成任务”。</li>
+      </ol>
+    </div>
     <div class="ai-task-grid">
       <div class="card">
         <div class="card-header">
           <h2><IconApp name="sparkles" class="icon-sm" /> 第 1 步 · 配置 LLM 服务</h2>
         </div>
         <div class="card-body">
+          <button
+            type="button"
+            class="ai-config-toggle"
+            :aria-expanded="configExpanded"
+            title="点击展开或收起模型配置"
+            @click="configExpanded = !configExpanded"
+          >
+            <span class="ai-config-toggle-label">模型配置</span>
+            <span class="ai-config-summary">{{ configSummary }}</span>
+            <IconApp
+              name="chevron-down"
+              class="icon-sm ai-config-chevron"
+              :class="{ open: configExpanded }"
+            />
+          </button>
+          <div v-show="configExpanded" class="ai-config-body">
           <div class="hint ai-privacy-hint">
             API Key 使用 AES-256-GCM 加密存储在本机（与校园网密码同一密钥体系），不会明文落盘。
           </div>
@@ -237,7 +280,7 @@ onMounted(() => {
                 id="ai-model"
                 v-model="model"
                 type="text"
-                placeholder="例如 glm-4.1v-thinking-flash"
+                placeholder="例如 glm-5.3-flash"
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -258,6 +301,7 @@ onMounted(() => {
               <IconApp name="save" class="icon-sm" />
               {{ savingConfig ? "保存中…" : "保存配置" }}
             </button>
+          </div>
           </div>
         </div>
       </div>
@@ -311,7 +355,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="card ai-generate-card">
+      <div class="card">
         <div class="card-header">
           <h2><IconApp name="code" class="icon-sm" /> 第 3 步 · 生成并保存任务</h2>
         </div>
