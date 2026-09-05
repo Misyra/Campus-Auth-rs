@@ -5,10 +5,12 @@
  * 三段向导按序依赖：保存配置 → 捕获 → 生成 → 保存任务。
  */
 import IconApp from "@/components/common/IconApp.vue";
+import CustomSelect from "@/components/common/CustomSelect.vue";
+import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import { aiApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import type { AiCaptureResult, AiGenerateResult, AiLlmConfig } from "@/api/types";
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { useToast } from "@/composables/useToast";
 import { downloadBlob } from "@/utils/file";
@@ -30,7 +32,11 @@ const PRESETS = [
   { label: "自定义 / 本地模型", base: "", model: "", defaultKey: "" },
 ];
 
-const preset = ref(0);
+/** 选中预设的下标（CustomSelect 的 value 为字符串） */
+const preset = ref("0");
+const presetOptions = computed<SelectOption[]>(() =>
+  PRESETS.map((p, i) => ({ value: String(i), label: p.label })),
+);
 const baseUrl = ref("");
 const model = ref("");
 const apiKey = ref("");
@@ -38,7 +44,7 @@ const hasApiKey = ref(false);
 const savingConfig = ref(false);
 
 function applyPreset(): void {
-  const p = PRESETS[preset.value];
+  const p = PRESETS[Number(preset.value)];
   if (p.base) {
     baseUrl.value = p.base;
     model.value = p.model;
@@ -205,9 +211,12 @@ onMounted(() => {
           <div class="ai-config-row-wide">
             <div class="form-group">
               <label for="ai-preset">服务商预设</label>
-              <select id="ai-preset" v-model.number="preset" @change="applyPreset">
-                <option v-for="(p, i) in PRESETS" :key="i" :value="i">{{ p.label }}</option>
-              </select>
+              <CustomSelect
+                v-model="preset"
+                :options="presetOptions"
+                placeholder="选择服务商"
+                @change="applyPreset"
+              />
             </div>
             <div class="form-group">
               <label for="ai-base-url" class="required">Base URL</label>
