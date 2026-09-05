@@ -31,6 +31,8 @@ pub struct ProfileUpdateBody {
     pub username: Option<String>,
     pub password: Option<Zeroizing<String>>,
     pub auth_url: Option<String>,
+    /// 重定向触发地址：非空即重定向模式（劫持型门户），为空保持直连
+    pub trigger_url: Option<String>,
     pub isp: Option<String>,
     pub gateway_ip: Option<String>,
     pub wifi_ssid: Option<String>,
@@ -172,6 +174,36 @@ pub async fn update_profile(
             }
         }
         profile.auth_url = trimmed;
+    }
+    if let Some(trigger_url) = body.trigger_url {
+        let trimmed = trigger_url.trim().to_string();
+        if !trimmed.is_empty() {
+            let parsed = trimmed.parse::<url::Url>().map_err(|_| {
+                crate::web::error::ApiError::BadRequest(format!(
+                    "重定向触发地址格式非法: {trimmed}"
+                ))
+            })?;
+            match parsed.scheme() {
+                "http" | "https" => {}
+                _ => {
+                    return Err(crate::web::error::ApiError::BadRequest(format!(
+                        "重定向触发地址仅支持 http/https，当前为: {}",
+                        parsed.scheme()
+                    )));
+                }
+            }
+            let host = parsed.host_str().ok_or_else(|| {
+                crate::web::error::ApiError::BadRequest(format!(
+                    "重定向触发地址缺少主机名: {trimmed}"
+                ))
+            })?;
+            if host.is_empty() {
+                return Err(crate::web::error::ApiError::BadRequest(format!(
+                    "重定向触发地址缺少主机名: {trimmed}"
+                )));
+            }
+        }
+        profile.trigger_url = trimmed;
     }
     if let Some(isp) = body.isp {
         profile.isp = isp;

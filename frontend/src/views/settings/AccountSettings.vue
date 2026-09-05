@@ -75,9 +75,16 @@ watch(
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-auth-url">认证地址</label>
-            <span class="field-help" tabindex="0" role="note" data-tip="校园网认证页面的地址，以 http:// 或 https:// 开头。">?</span>
+            <span class="field-help" tabindex="0" role="note" data-tip="校园网认证页面的地址，以 http:// 或 https:// 开头。重定向模式下可留空，仅填触发地址。">?</span>
           </div>
           <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="http://" />
+        </div>
+        <div class="form-group">
+          <div class="field-label-row">
+            <label for="settings-trigger-url">重定向触发地址</label>
+            <span class="field-help" tabindex="0" role="note" data-tip="仅劫持型门户填写：明文 http 探测地址（如 http://captive.apple.com/hotspot-detect.html），留空即直连模式。填写后首导航到此地址并跟随 302 到真门户。">?</span>
+          </div>
+          <input id="settings-trigger-url" v-model.trim="config.config.credentials.trigger_url" type="text" placeholder="http://captive.apple.com/hotspot-detect.html" />
         </div>
         <div class="form-group">
           <div class="field-label-row">

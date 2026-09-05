@@ -177,6 +177,7 @@ impl TaskExecutor {
                 "password": profile.password.to_string(),
                 "isp": profile.isp,
                 "auth_url": profile.auth_url,
+                "trigger_url": profile.trigger_url,
             });
             self.bridge
                 .execute_with_timeout(

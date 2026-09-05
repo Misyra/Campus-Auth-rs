@@ -190,6 +190,7 @@ export interface CredentialsConfig {
   username: string;
   password: string;
   auth_url: string;
+  trigger_url: string;
   isp: string;
 }
 
@@ -247,6 +248,7 @@ export interface ConfigResponse {
   has_password: boolean;
   username: string;
   auth_url: string;
+  trigger_url: string;
   isp: string;
   carrier_custom: string;
   password?: string;
@@ -265,6 +267,7 @@ export interface SaveConfigPayload {
   active_task: string;
   username: string;
   auth_url: string;
+  trigger_url: string;
   isp: string;
   password: string | null;
 }
@@ -276,6 +279,7 @@ export interface Profile {
   username: string;
   password: string;
   auth_url: string;
+  trigger_url: string;
   isp: string;
   gateway_ip: string;
   wifi_ssid: string;
