@@ -338,7 +338,9 @@ impl Default for AppSettings {
             task_notification: true,
             developer_mode: false,
             show_tray: true,
-            auto_restart_hours: 0,
+            // 默认启用 24h 周期自重启：长期运行内存缓慢增长的主要回收手段，
+            // 新装即受保护；存量用户 settings.json 已显式存值，不受默认值影响
+            auto_restart_hours: 24,
         }
     }
 }

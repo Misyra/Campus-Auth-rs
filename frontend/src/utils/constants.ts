@@ -168,7 +168,7 @@ export const DEFAULT_CONFIG: Config = {
     autostart_enabled: false,
     task_notification: true,
     show_tray: true,
-    auto_restart_hours: 0,
+    auto_restart_hours: 24,
   },
   updater: {
     check_on_startup: true,
