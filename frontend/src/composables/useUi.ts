@@ -4,6 +4,7 @@
  * 协调各 composable 完成初始化、浏览器管理、更新检查、协议向导、退出等。
  */
 
+import { reactive } from "vue";
 import { router } from "../router";
 import type {
   BrowserInfo,
