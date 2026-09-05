@@ -13,6 +13,13 @@
   cursor: pointer;
 }
 
+/* form-group 内 `label` 规则（0,1,1）会覆盖 `.toggle` 的 display，必须显式赢回；
+   否则 label 退化为 block，滑块被压扁、圆点叠字（既有 MonitorSettings 开关同病） */
+.form-group label.toggle {
+  display: flex;
+  margin-bottom: 0;
+}
+
 .toggle input {
   position: absolute;
   width: 1px;
@@ -28,6 +35,7 @@
 .toggle-slider {
   width: 44px;
   height: 24px;
+  flex-shrink: 0;
   background: var(--bg-primary);
   border-radius: var(--radius-lg);
   position: relative;
