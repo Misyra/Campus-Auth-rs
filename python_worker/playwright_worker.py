@@ -71,7 +71,7 @@ _WORKER_DIR = Path(__file__).resolve().parent
 
 # Worker 版本（任务 10）：与 pyproject.toml 的 project.version 保持同步（手动维护），
 # 随 worker_health_check 响应上报给 Rust 侧。
-WORKER_VERSION = "5.0.0-alpha.7"
+WORKER_VERSION = "5.0.0-alpha.8"
 
 
 def _browser_data_dir() -> Path:

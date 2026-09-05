@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "campus-auth"
-version = "5.0.0-alpha.7"
+version = "5.0.0-alpha.8"
 dependencies = [
  "aes-gcm",
  "anyhow",
