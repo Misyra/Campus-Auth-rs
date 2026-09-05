@@ -3,11 +3,18 @@
  * 复用全局 card / form-group / btn 体系，本文件只做布局与特化。
  */
 
+/* 宽屏双列：第 1 步（配置）+ 第 2 步（捕获）并排，第 3 步（生成）全宽；
+   窄屏 auto-fit 自动回退单列 */
 .ai-task-grid {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
   gap: 20px;
-  max-width: 880px;
+  max-width: 1200px;
+  align-items: start;
+}
+
+.ai-generate-card {
+  grid-column: 1 / -1;
 }
 
 /* 卡片头图标与标题对齐 */
@@ -81,4 +88,28 @@
   margin-top: 4px;
   color: var(--danger);
   font-size: 0.85rem;
+}
+
+/* 配置表单紧凑化：非等分行（预设窄、URL 宽）+ 收紧行距 */
+.ai-config-row-wide {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr);
+  gap: 12px;
+}
+
+.ai-config-row-eq {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.ai-config-row-wide .form-group,
+.ai-config-row-eq .form-group {
+  margin-bottom: 12px;
+}
+
+/* JSON 预览：限高滚动，避免超长生成把页面拉长 */
+.ai-json {
+  max-height: 420px;
+  overflow-y: auto;
 }

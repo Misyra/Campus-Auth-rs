@@ -196,43 +196,47 @@ onMounted(() => {
           <div class="hint ai-privacy-hint">
             API Key 使用 AES-256-GCM 加密存储在本机（与校园网密码同一密钥体系），不会明文落盘。
           </div>
-          <div class="form-group">
-            <label for="ai-preset">服务商预设</label>
-            <select id="ai-preset" v-model.number="preset" @change="applyPreset">
-              <option v-for="(p, i) in PRESETS" :key="i" :value="i">{{ p.label }}</option>
-            </select>
+          <div class="ai-config-row-wide">
+            <div class="form-group">
+              <label for="ai-preset">服务商预设</label>
+              <select id="ai-preset" v-model.number="preset" @change="applyPreset">
+                <option v-for="(p, i) in PRESETS" :key="i" :value="i">{{ p.label }}</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ai-base-url" class="required">Base URL</label>
+              <input
+                id="ai-base-url"
+                v-model="baseUrl"
+                type="text"
+                placeholder="https://open.bigmodel.cn/api/paas/v4"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
           </div>
-          <div class="form-group">
-            <label for="ai-base-url" class="required">Base URL</label>
-            <input
-              id="ai-base-url"
-              v-model="baseUrl"
-              type="text"
-              placeholder="https://open.bigmodel.cn/api/paas/v4"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </div>
-          <div class="form-group">
-            <label for="ai-model" class="required">模型名（需支持视觉输入）</label>
-            <input
-              id="ai-model"
-              v-model="model"
-              type="text"
-              placeholder="例如 glm-4v-flash"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </div>
-          <div class="form-group">
-            <label for="ai-api-key">API Key</label>
-            <input
-              id="ai-api-key"
-              v-model="apiKey"
-              type="password"
-              :placeholder="hasApiKey ? '已保存（留空保持不变）' : 'sk-...'"
-              autocomplete="new-password"
-            />
+          <div class="ai-config-row-eq">
+            <div class="form-group">
+              <label for="ai-model" class="required">模型名（需支持视觉输入）</label>
+              <input
+                id="ai-model"
+                v-model="model"
+                type="text"
+                placeholder="例如 glm-4v-flash"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <div class="form-group">
+              <label for="ai-api-key">API Key</label>
+              <input
+                id="ai-api-key"
+                v-model="apiKey"
+                type="password"
+                :placeholder="hasApiKey ? '已保存（留空保持不变）' : 'sk-...'"
+                autocomplete="new-password"
+              />
+            </div>
           </div>
           <div class="ai-actions">
             <button class="btn btn-primary" :disabled="savingConfig" @click="saveConfig">

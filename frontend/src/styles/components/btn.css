@@ -104,6 +104,18 @@
   background: rgba(var(--error-rgb), 0.3);
 }
 
+/* 图标版危险按钮：行内删除等高频危险操作，红图标保证可见性，hover 实底强化确认感 */
+.btn-danger.btn-icon-only {
+  background: rgba(var(--error-rgb), 0.08);
+  color: var(--error);
+  border-color: rgba(var(--error-rgb), 0.35);
+}
+.btn-danger.btn-icon-only:hover:not(:disabled) {
+  background: var(--error);
+  color: var(--text-on-accent);
+  border-color: var(--error);
+}
+
 .btn-text {
   background: transparent;
   border: none;

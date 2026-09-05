@@ -77,17 +77,21 @@ function closeEditor() { void t.closeTaskEditor(); }
                 <button class="btn btn-sm" @click="t.setActiveTask(task.id)" :disabled="t.activeTaskId.value === task.id">
                   {{ t.activeTaskId.value === task.id ? '使用中' : '使用' }}
                 </button>
-                <button class="btn btn-sm" @click="t.showTaskEditor(task.id)">编辑</button>
-                <button class="btn btn-sm" @click="debug.startDebug(task.id)" title="打开调试面板（单步执行当前任务步骤）">
-                  调试
+                <button class="btn btn-sm btn-icon-only" @click="t.showTaskEditor(task.id)" title="编辑任务">
+                  <IconApp name="sliders" class="icon-sm" />
                 </button>
-                <button class="btn btn-sm" @click="t.duplicateTask(task.id)" :disabled="t.duplicatingIds.has(task.id)" title="复制为新任务">
-                  {{ t.duplicatingIds.has(task.id) ? '复制中...' : '复制' }}
+                <button class="btn btn-sm btn-icon-only" @click="debug.startDebug(task.id)" title="调试（单步执行当前任务步骤）">
+                  <IconApp name="play" class="icon-sm" />
                 </button>
-                <button class="btn btn-sm" @click="t.exportTask(task.id)" :disabled="t.exportingIds.has(task.id)" title="导出为JSON文件">
-                  {{ t.exportingIds.has(task.id) ? '导出中...' : '导出' }}
+                <button class="btn btn-sm btn-icon-only" @click="t.duplicateTask(task.id)" :disabled="t.duplicatingIds.has(task.id)" title="复制为新任务">
+                  <IconApp name="copy" class="icon-sm" />
                 </button>
-                <button class="btn btn-sm btn-danger" @click="t.deleteTask(task.id)" :disabled="task.id === 'default'">删除</button>
+                <button class="btn btn-sm btn-icon-only" @click="t.exportTask(task.id)" :disabled="t.exportingIds.has(task.id)" title="导出为JSON文件">
+                  <IconApp name="download" class="icon-sm" />
+                </button>
+                <button class="btn btn-sm btn-icon-only btn-danger" @click="t.deleteTask(task.id)" :disabled="task.id === 'default'" title="删除任务">
+                  <IconApp name="trash" class="icon-sm" />
+                </button>
               </div>
             </div>
           </div>

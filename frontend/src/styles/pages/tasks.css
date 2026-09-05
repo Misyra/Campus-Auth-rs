@@ -1,7 +1,13 @@
 .tasks-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* 左（任务列表）宽右（编辑器/帮助）窄：列表行含名称+按钮组，是空间大头；
+     min-width:0 防 grid 子项被长代码行撑破视口（帮助栏溢出缺陷） */
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
   gap: var(--space-md);
+}
+
+.tasks-grid > .card {
+  min-width: 0;
 }
 
 .task-list {
@@ -145,6 +151,8 @@
   border-radius: var(--radius-xs);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
+  /* 长变量名/路径在窄栏内换行而非撑破容器 */
+  word-break: break-all;
 }
 
 .help-content pre {
