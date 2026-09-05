@@ -10,3 +10,39 @@
   font-family: var(--font-mono);
   margin-left: var(--space-xs);
 }
+/* Python 环境状态行 */
+.env-lead {
+  margin: 0 0 0.5rem 0;
+}
+.env-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.env-error {
+  color: var(--error);
+}
+.env-preline {
+  white-space: pre-line;
+}
+/* 状态小徽标（成功/警告/中性） */
+.env-pill {
+  display: inline-block;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-lg);
+}
+.env-pill--ok {
+  background: rgba(var(--success-rgb), 0.12);
+  color: var(--success);
+  border-color: rgba(var(--success-rgb), 0.3);
+}
+.env-pill--warn {
+  background: rgba(var(--warning-rgb), 0.12);
+  color: var(--warning);
+  border-color: rgba(var(--warning-rgb), 0.3);
+}

@@ -76,25 +76,28 @@ export const BROWSER_ARGS_DEFAULT = [
 export const DEFAULT_CONFIG: Config = {
   browser: {
     headless: true,
-    timeout: 8,
-    navigation_timeout: 8,
-    login_timeout: 90,
-    user_agent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    // 以下数值以后端 schema.rs 的 impl Default 为准（加载失败兜底显示用，正常以服务端下发为准）：
+    // 页面操作超时 30s、导航超时 15s、登录等待 120s
+    timeout: 30,
+    navigation_timeout: 15,
+    login_timeout: 120,
+    // 留空使用浏览器默认值；勿填死 UA，否则换 Firefox/WebKit 通道后仍伪装 Chrome
+    user_agent: "",
     low_resource_mode: false,
     disable_web_security: false,
     extra_headers_json: "",
-    browser_args: BROWSER_ARGS_DEFAULT,
+    // 后端默认为空（不追加额外参数）；历史预设保留在 BROWSER_ARGS_DEFAULT 备查
+    browser_args: "",
     stealth_mode: false,
     stealth_custom_script: "",
     locale: "zh-CN",
     timezone_id: "Asia/Shanghai",
     viewport_width: 1280,
     viewport_height: 720,
-    pure_mode: true,
+    pure_mode: false,
     browser_channel: "msedge",
     browser_custom_path: "",
-    custom_browser_engine: "auto",
+    custom_browser_engine: "chromium",
     persistent_context: false,
     ignore_https_errors: true,
     bind_proxy: "",
@@ -131,7 +134,8 @@ export const DEFAULT_CONFIG: Config = {
     // bind_interface_name: "",
   },
   pause: {
-    enabled: true,
+    // 后端 PauseSettings 派生 Default：默认不启用（enabled=false），此处镜像后端
+    enabled: false,
     start_hour: 0,
     start_minute: 0,
     end_hour: 6,
@@ -169,18 +173,20 @@ export const DEFAULT_CONFIG: Config = {
     release_source_url: "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest",
     check_interval_hours: 24,
     use_proxy: false,
-    proxy_url: "http://127.0.0.1:7890",
+    // 必须保持空串：后端 resolved_proxy_url 靠空串回退旧版 proxy_port，
+    // 填完整地址会覆盖存量配置的自定义端口（见 schema.rs 注释）
+    proxy_url: "",
     proxy_port: 7890,
   },
 };
 
 /** 设置页 Tab 清单（SettingsView 消费的单一来源；hint 作为 Tab 的悬停提示） */
 export const SETTINGS_TABS = [
-  { id: "account", label: "账号", hint: "账号、密码与认证地址" },
-  { id: "monitor", label: "监测", hint: "检测策略、重试与代理" },
-  { id: "system", label: "系统", hint: "日志、自启动与启动行为" },
-  { id: "browser", label: "浏览器", hint: "请求头、图片与浏览器参数" },
-  { id: "tasks", label: "任务", hint: "活动任务与模板入口" },
+  { id: "account", label: "账号", hint: "账号、密码、认证地址与运营商" },
+  { id: "monitor", label: "监测", hint: "在线检测、登录重试与暂停时段" },
+  { id: "system", label: "系统", hint: "启动行为、日志、端口与代理" },
+  { id: "browser", label: "浏览器", hint: "浏览器选择、超时与反检测参数" },
+  { id: "tasks", label: "任务", hint: "任务录制器、OCR 与任务入口" },
 ] as const;
 
 export const DEFAULT_APPEARANCE: Appearance = {
@@ -251,7 +257,7 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
 
 /** 派生选项（原 app-options.js data 中的静态选项） */
 export const CARRIER_OPTIONS = [
-  { value: "", label: "无" },
+  { value: "", label: "不选择" },
   { value: "移动", label: "移动" },
   { value: "联通", label: "联通" },
   { value: "电信", label: "电信" },

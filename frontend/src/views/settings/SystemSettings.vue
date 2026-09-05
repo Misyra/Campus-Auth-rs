@@ -13,15 +13,15 @@ const config = useConfig();
 const { busy, autostart } = useStatus();
 const { envStatus, envLoading, envError, refreshEnv, bootstrapEnv } = useEnvironment();
 
-// 启动操作选项
+// 启动后动作选项
 const loginActionOptions: SelectOption[] = [
-  { value: "monitor", label: "开始监控" },
-  { value: "login_once", label: "自动登录，成功后退出" },
+  { value: "monitor", label: "开始监测" },
+  { value: "login_once", label: "登录一次后退出" },
   { value: "none", label: "无操作" },
 ];
 const startupActionHint = computed(() => {
   switch (config.config.app_settings.startup_action) {
-    case "monitor": return "启动后自动开启网络监测，确保持续在线";
+    case "monitor": return "启动后开始持续监测，断线自动重连";
     case "login_once": return "启动后执行一次登录，成功后自动退出程序";
     default: return "启动后不执行任何操作";
   }
@@ -29,9 +29,14 @@ const startupActionHint = computed(() => {
 
 // 运行模式
 const autostartModeOptions: SelectOption[] = [
-  { value: "full", label: "完整模式（Web 界面 + 后台监控）" },
-  { value: "lightweight", label: "轻量模式（仅后台监控，降低内存占用）" },
+  { value: "full", label: "完整模式" },
+  { value: "lightweight", label: "轻量模式" },
 ];
+const runtimeModeHint = computed(() =>
+  config.config.app_settings.runtime_mode === "lightweight"
+    ? "仅运行后台监测，不启动 Web 控制台"
+    : "保留 Web 控制台，可查看状态与手动操作",
+);
 
 // 日志级别
 const logLevelOptions: SelectOption[] = [
@@ -77,9 +82,9 @@ async function reloadConfig() {
 </script>
 
 <template>
-  <div class="settings-panel-grid">
-    <!-- Python 环境（uv sync + Chromium） -->
-    <section class="card settings-panel">
+  <div class="settings-panel-grid settings-panel-grid--cols2">
+    <!-- Python 环境（uv sync + Chromium）：状态行较宽，独占整行 -->
+    <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
         <IconApp name="terminal" class="settings-card-icon" />
         <h2>Python 环境</h2>
@@ -105,23 +110,22 @@ async function reloadConfig() {
         </button>
       </div>
       <div class="card-body">
-        <p class="hint" style="margin:0 0 0.5rem 0">
-          初始化项目内 Python 虚拟环境（<code>uv sync</code>）并安装 Chromium，约需 1–10 分钟。
-          手动登录若环境缺失会自动触发；此按钮用于网络中断后的手动修复。
+        <p class="hint env-lead">
+          自动登录与 OCR 依赖该环境。首次使用需初始化一次（约 1–10 分钟），缺失时会自动补装。
         </p>
-        <div class="env-status-row" style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center">
+        <div class="env-status-row">
           <span v-if="envLoading" class="hint">检测中…</span>
-          <template v-else-if="envError && !envStatus"> <span style="color:var(--error)">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
+          <template v-else-if="envError && !envStatus"> <span class="env-error">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
           <template v-else>
-            <span v-if="envReady" class="autostart-method-badge" style="background:var(--success-bg, #dcfce7);color:var(--success, #15803d)">已就绪</span>
-            <span v-else class="autostart-method-badge" style="background:var(--warning-bg, #fef3c7);color:var(--warning, #92400e)">未就绪</span>
-            <span v-if="envStatus?.playwright_ready" class="autostart-method-badge">Chromium 已安装</span>
-            <span v-if="envStageLabel" class="autostart-method-badge">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
+            <span v-if="envReady" class="env-pill env-pill--ok">已就绪</span>
+            <span v-else class="env-pill env-pill--warn">未就绪</span>
+            <span v-if="envStatus?.playwright_ready" class="env-pill">Chromium 已安装</span>
+            <span v-if="envStageLabel" class="env-pill">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
           </template>
         </div>
-        <p v-if="envStatus?.progress?.message" class="hint" style="margin-top:0.35rem">{{ envStatus.progress.message }}</p>
-        <p v-if="envStatus?.last_error" class="hint" style="margin-top:0.35rem;color:var(--error);white-space:pre-line">{{ envStatus.last_error }}</p>
-        <p v-if="envError && envStatus" class="hint" style="color:var(--error)">{{ envError }}</p>
+        <p v-if="envStatus?.progress?.message" class="hint">{{ envStatus.progress.message }}</p>
+        <p v-if="envStatus?.last_error" class="hint env-error env-preline">{{ envStatus.last_error }}</p>
+        <p v-if="envError && envStatus" class="hint env-error">{{ envError }}</p>
       </div>
     </section>
 
@@ -164,20 +168,28 @@ async function reloadConfig() {
       </div>
     </section>
 
-    <!-- 启动行为 -->
+    <!-- 启动与运行 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
         <IconApp name="power" class="settings-card-icon" />
-        <h2>启动行为</h2>
+        <h2>启动与运行</h2>
       </div>
       <div class="card-body">
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-startup-action">启动后执行</label>
-            <FieldHelp text="选择程序启动后自动执行的操作。" />
+            <FieldHelp text="程序启动后自动执行的操作。" />
           </div>
           <CustomSelect v-model="config.config.app_settings.startup_action" :options="loginActionOptions" />
           <span class="hint">{{ startupActionHint }}</span>
+        </div>
+        <div class="form-group">
+          <div class="field-label-row">
+            <label>运行模式</label>
+            <FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台监测。切换后重启生效。" />
+          </div>
+          <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
+          <span class="hint">{{ runtimeModeHint }}</span>
         </div>
         <div class="toggle-group">
           <div class="toggle-with-help">
@@ -187,24 +199,8 @@ async function reloadConfig() {
               <span class="toggle-label">开机自启动</span>
               <span v-if="autostart.method !== '-'" class="autostart-method-badge">{{ autostart.method }}</span>
             </label>
+            <FieldHelp text="开机登录后自动启动本程序，注册方式显示于开关右侧。" />
           </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 运行模式 -->
-    <section class="card settings-panel">
-      <div class="settings-card-header">
-        <IconApp name="sun" class="settings-card-icon" />
-        <h2>运行模式</h2>
-      </div>
-      <div class="card-body">
-        <div class="form-group">
-          <div class="field-label-row">
-            <label>运行模式</label>
-            <FieldHelp text="轻量模式仅后台监控，不启动 Web 界面；完整模式启动 Web 管理界面。" />
-          </div>
-          <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
         </div>
       </div>
     </section>
@@ -219,19 +215,20 @@ async function reloadConfig() {
         <div class="toggle-group">
           <div class="toggle-with-help">
             <label class="toggle toggle-help-inline">
-              <input type="checkbox" :checked="!config.config.app_settings.auto_start_browser" @change="config.config.app_settings.auto_start_browser = !($event.target as HTMLInputElement).checked" />
+              <input type="checkbox" v-model="config.config.app_settings.auto_start_browser" />
               <span class="toggle-slider"></span>
-              <span class="toggle-label">静默启动（不自动打开浏览器）</span>
+              <span class="toggle-label">启动时打开控制台</span>
             </label>
+            <FieldHelp text="启用后，程序启动时自动打开 Web 控制台。" />
           </div>
         </div>
         <div class="toggle-group">
           <div class="toggle-with-help">
             <label class="toggle toggle-help-inline">
               <input type="checkbox" v-model="config.config.app_settings.task_notification" />
-              <span class="toggle-slider"></span>
               <span class="toggle-label">任务通知</span>
             </label>
+            <FieldHelp text="关键事件完成时弹出系统通知。" />
           </div>
         </div>
         <div class="toggle-group">
@@ -240,53 +237,42 @@ async function reloadConfig() {
               <input type="checkbox" v-model="config.config.app_settings.show_tray" />
               <span class="toggle-slider"></span>
               <span class="toggle-label">显示系统托盘图标</span>
-              <span class="hint">关闭后程序仅在 Web 控制台运行，无桌面图标（重启生效）</span>
             </label>
+            <FieldHelp text="关闭后无托盘图标，仅可通过 Web 控制台操作。修改后重启生效。" />
           </div>
         </div>
       </div>
     </section>
 
-    <!-- 网络与端口 -->
-    <section class="card settings-panel">
-      <div class="settings-card-header">
-        <IconApp name="server" class="settings-card-icon" />
-        <h2>网络与端口</h2>
-      </div>
-      <div class="card-body">
-        <div class="form-row">
-          <div class="form-group">
-            <div class="field-label-row">
-              <label for="settings-app-port">控制台端口</label>
-              <FieldHelp text="Web 控制台的监听端口。修改后需要重启服务器。默认 50721。" />
-            </div>
-            <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1024" max="65535" />
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 更新与代理 -->
+    <!-- 网络、端口与代理 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
         <IconApp name="globe" class="settings-card-icon" />
-        <h2>更新与代理</h2>
+        <h2>网络、端口与代理</h2>
       </div>
       <div class="card-body">
+        <div class="form-group">
+          <div class="field-label-row">
+            <label for="settings-app-port">控制台端口</label>
+            <FieldHelp text="Web 控制台的监听端口。修改后重启生效，默认 50721。" />
+          </div>
+          <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1024" max="65535" />
+          <span class="hint">本机访问地址一般为 http://127.0.0.1:端口</span>
+        </div>
         <div class="toggle-group">
           <div class="toggle-with-help">
             <label class="toggle toggle-help-inline">
               <input type="checkbox" v-model="config.config.updater.use_proxy" />
               <span class="toggle-slider"></span>
               <span class="toggle-label">使用代理下载更新</span>
-              <FieldHelp text="启用后更新检查/下载与仓库任务下载走下方代理地址（如 Clash 默认 http://127.0.0.1:7890）；未启用时跟随系统代理。网络检测的代理行为在监测设置中单独控制。" />
             </label>
+            <FieldHelp text="仅影响版本更新检查、下载与任务仓库。监测流量的代理设置见“监测”页。" />
           </div>
         </div>
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-proxy-url">代理地址</label>
-            <FieldHelp text="完整的 HTTP 代理地址（http:// 或 https:// 开头），如 http://127.0.0.1:7890，也支持局域网内其他机器上的代理。仅在启用“使用代理下载更新”后生效。" />
+            <FieldHelp text="完整的 HTTP 代理地址，如 http://127.0.0.1:7890。仅在启用后生效。" />
           </div>
           <input
             id="settings-proxy-url"
@@ -296,13 +282,12 @@ async function reloadConfig() {
             spellcheck="false"
             :disabled="!config.config.updater.use_proxy"
           />
-          <span class="hint">更新与仓库任务下载共用此代理；网络检测默认不走代理（监测设置可调）。</span>
         </div>
       </div>
     </section>
 
-    <!-- 维护操作 -->
-    <section class="card settings-panel">
+    <!-- 维护操作：内容窄，独占整行避免右列空洞 -->
+    <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
         <IconApp name="download" class="settings-card-icon" />
         <h2>维护操作</h2>
@@ -311,7 +296,7 @@ async function reloadConfig() {
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-auto-restart">定时自重启</label>
-            <FieldHelp text="按运行时长周期性地优雅重启本程序（重新打开浏览器会短暂断开），用于回收长期运行累积的内存。计时基准是本次运行的总时长，修改后无需手动重启即生效。" />
+            <FieldHelp text="按运行时长周期性重启本程序，以回收内存。先启动新进程再退出旧进程，修改即时生效。" />
           </div>
           <select
             id="settings-auto-restart"
@@ -321,15 +306,14 @@ async function reloadConfig() {
             <option :value="6">每 6 小时</option>
             <option :value="12">每 12 小时</option>
             <option :value="24">每 24 小时</option>
-            <option :value="48">每 2 天</option>
-            <option :value="168">每 7 天</option>
+            <option :value="48">每 48 小时</option>
+            <option :value="168">每 168 小时</option>
           </select>
-          <span class="hint">重启采用与手动重启相同的优雅关闭流程，不会丢失配置；到点时会先启动新进程再退出旧进程。</span>
         </div>
         <div class="form-group">
           <div class="field-label-row">
             <label>配置热重载</label>
-            <FieldHelp text="重新从磁盘读取配置文件，无需重启服务即可应用变更。" />
+            <FieldHelp text="从磁盘重新读取配置文件并应用，无需重启。日常修改请使用下方的保存按钮。" />
           </div>
           <button class="btn btn-secondary btn-sm" @click="reloadConfig" :disabled="reloading">
             {{ reloading ? "加载中..." : "重新加载配置" }}

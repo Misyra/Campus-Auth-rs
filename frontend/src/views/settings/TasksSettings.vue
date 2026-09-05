@@ -161,7 +161,7 @@ async function recognizeOcr() {
           <button class="btn btn-secondary btn-sm" type="button" @click="t.importTask()">从文件导入</button>
           <button class="btn btn-secondary btn-sm" type="button" @click="repo.showRepoImport()">从仓库导入</button>
           <button class="btn btn-secondary btn-sm" type="button" @click="t.fetchTasks(true)">刷新列表</button>
-          <a href="https://github.com/Misyra/campus-auth-tasks" target="_blank" rel="noopener" class="btn btn-secondary btn-sm">分享任务</a>
+          <a href="https://github.com/Misyra/campus-auth-tasks" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">任务仓库 →</a>
         </div>
       </div>
     </section>
@@ -174,19 +174,19 @@ async function recognizeOcr() {
       </div>
       <div class="card-body">
         <div class="task-recorder-section">
-          <p class="task-recorder-desc">任务录制器是一个浏览器脚本，可在登录页面上点击账号框、密码框、验证码等位置，自动生成配置。</p>
+          <p class="task-recorder-desc">在登录页点选账号框、密码框、登录按钮等元素，自动生成任务步骤。</p>
           <div class="task-recorder-actions">
             <a href="/api/tools/task-recorder.user.js" class="btn btn-primary">
               <IconApp name="upload" class="icon-sm" />
               安装录制器脚本
             </a>
-            <a href="/api/docs/task-writing-guide" class="btn btn-secondary">
+            <a href="/api/docs/task-writing-guide" download="task-writing-guide.md" class="btn btn-secondary">
               <IconApp name="file-text" class="icon-sm" />
               导出编写指南
             </a>
           </div>
-          <div class="task-recorder-note">需要 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 浏览器扩展支持。安装后在登录页面点击浮动按钮即可开始录制。</div>
-          <div class="task-recorder-note">详细文档请查看 <a href="/api/docs/task-writing-guide" target="_blank">任务编写指南</a> 和 <a href="/api/docs/task-manual" target="_blank">任务手册</a></div>
+          <div class="task-recorder-note">需先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 扩展，再安装录制器脚本；在登录页点击浮动按钮开始录制。</div>
+          <div class="task-recorder-note">编写规范见 <a href="/api/docs/task-writing-guide" target="_blank">任务编写指南</a> 与 <a href="/api/docs/task-manual" target="_blank">任务手册</a>。</div>
         </div>
       </div>
     </section>
@@ -204,15 +204,15 @@ async function recognizeOcr() {
         </button>
       </div>
       <div class="card-body">
-        <p class="ocr-description">OCR 用于自动识别验证码图片。仅在任务中使用 <code>ocr</code> 步骤时才需要安装。安装后会占用约 120MB 磁盘空间。</p>
+        <p class="ocr-description">OCR 用于自动识别验证码图片，仅在任务中使用 <code>ocr</code> 步骤时才需要安装，约占用 120MB 磁盘空间。</p>
         <div class="ocr-status-row">
           <span v-if="ocrStatusLoading" class="ocr-status detecting">检测中…</span>
           <span v-else-if="ocrStatusError" class="ocr-status error">
             状态检测失败
             <button class="btn btn-sm btn-link" type="button" @click="refreshOcrStatus">重试</button>
           </span>
-          <span v-else-if="ocrStatus.installed" class="ocr-status ok">已安装（进入本页会自动检测）</span>
-          <span v-else class="ocr-status none">未安装</span>
+          <span v-else-if="ocrStatus.installed" class="ocr-status ok">已安装</span>
+          <span v-else class="ocr-status none">未安装，请点击右上按钮安装</span>
         </div>
         <div v-if="ocrStatus.installed && ocrStatus.size_mb && ocrStatus.size_mb > 0" class="ocr-size-hint">当前占用约 {{ ocrStatus.size_mb }} MB</div>
       </div>
@@ -225,8 +225,8 @@ async function recognizeOcr() {
         <h2>验证码识别</h2>
       </div>
       <div class="card-body">
-        <p class="ocr-description">选择一张本地验证码图片，调用 OCR 引擎识别其中的文本。需先安装 OCR 依赖。</p>
-        <div v-if="!ocrStatus.installed" class="ocr-hint">请先在上方安装 OCR 依赖。</div>
+        <p class="ocr-description">选择本地验证码图片进行识别，用于验证 OCR 是否正常工作，需先安装 OCR 依赖。</p>
+        <div v-if="!ocrStatus.installed" class="ocr-hint">请先安装 OCR 依赖，再进行识别。</div>
         <div v-else class="ocr-recognize">
           <div class="ocr-pick-row">
             <button class="btn btn-secondary btn-sm" type="button" @click="pickOcrImage" :disabled="busy.ocrRec">
