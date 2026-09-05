@@ -17,12 +17,17 @@ const router = useRouter();
 const { toastOnly } = useToast();
 
 // ---- LLM 配置 ----
-/** 服务商预设：填好后可手动改（模型名随服务商版本更新） */
+/**
+ * 服务商预设：均为 OpenAI 兼容 + 支持视觉输入的端点（2026-09 核对）。
+ * 模型名随服务商版本演进会过时，可手动修改；defaultKey 非空时切换预设自动填入
+ * （OpenCode Zen 公共网关免注册，key 固定 public）。
+ */
 const PRESETS = [
-  { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4v-flash" },
-  { label: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-chat" },
-  { label: "硅基流动", base: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-VL-32B-Instruct" },
-  { label: "自定义 / 本地模型", base: "", model: "" },
+  { label: "OpenCode Zen（免费）", base: "https://opencode.ai/zen/v1", model: "mimo-v2.5-free", defaultKey: "public" },
+  { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.1v-thinking-flash", defaultKey: "" },
+  { label: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-v4-flash-vision-exp", defaultKey: "" },
+  { label: "硅基流动", base: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen3-VL-32B-Instruct", defaultKey: "" },
+  { label: "自定义 / 本地模型", base: "", model: "", defaultKey: "" },
 ];
 
 const preset = ref(0);
@@ -38,6 +43,7 @@ function applyPreset(): void {
     baseUrl.value = p.base;
     model.value = p.model;
   }
+  if (p.defaultKey) apiKey.value = p.defaultKey;
 }
 
 async function loadConfig(): Promise<void> {
@@ -222,7 +228,7 @@ onMounted(() => {
                 id="ai-model"
                 v-model="model"
                 type="text"
-                placeholder="例如 glm-4v-flash"
+                placeholder="例如 glm-4.1v-thinking-flash"
                 autocomplete="off"
                 spellcheck="false"
               />
