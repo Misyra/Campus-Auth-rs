@@ -646,7 +646,7 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
                 tracing::debug!("自动登录会话仍在途，跳过本轮触发");
                 return;
             }
-            // auth_url 不可达时不触发登录，避免无效尝试
+            // 仅在确认认证地址不可达时跳过（未知/可达都触发，避免无效等待）
             else if report.auth_url_reachable != Some(false) {
                 tracing::info!("检测到门户劫持，触发自动登录");
                 inner.auto_login_in_flight = true;
@@ -658,7 +658,7 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
                     let _ = tx.send(result).await;
                 });
             } else {
-                tracing::debug!("认证地址不可达，跳过本轮登录");
+                tracing::debug!("认证地址不可达，跳过本轮自动登录（请检查认证地址或校园网连接）");
             }
         }
         NetworkStatus::Online | NetworkStatus::Offline | NetworkStatus::Paused => {

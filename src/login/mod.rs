@@ -387,30 +387,33 @@ impl LoginOrchestrator {
         // 手动/自动/CLI 登录（task_id 为空）统一走它；定时任务各自携带独立 task_id，不受影响。
         let global_active_task = self.tasks.get_active_task().await;
 
-        // 1. 配置完整性校验
+        // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
         let mut missing = Vec::new();
         if profile.username.is_empty() {
-            missing.push("username");
+            missing.push("账号为空，请在设置页填写账号");
         }
         if profile.password.as_str().is_empty() {
-            missing.push("password");
+            missing.push("密码为空，请在设置页填写密码");
         }
         // 重定向模式允许 auth_url 为空：首导航用 trigger_url 触发 302，固定门户地址未知或不可直连
         if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
-            missing.push("auth_url");
+            missing.push("认证地址与触发地址均为空，请至少填写一个");
         }
         if !matches!(source, LoginSource::Browser)
             && task_id.is_none()
             && global_active_task.is_empty()
         {
-            missing.push("active_task");
+            missing.push("当前无启用任务，请手动启用一个任务");
         }
         if source == LoginSource::Browser && task_id.is_none() && global_active_task.is_empty() {
-            missing.push("task");
+            missing.push("当前无启用任务，请手动启用一个任务");
         }
         if !missing.is_empty() {
-            let msg = missing.join(", ");
-            warn!("登录配置不完整，缺少字段: {msg}（source={source:?}）");
+            let msg = missing.join("；");
+            warn!(
+                "登录配置不完整: {msg}（source={source:?}，profile={}）",
+                profile.id
+            );
             return self
                 .immediate_handle(
                     source,
@@ -577,12 +580,18 @@ impl LoginOrchestrator {
                 r = self.monitor.check_auth_url(&profile.auth_url, timeout) => r,
             };
             if !reachable {
-                warn!("auth_url 预检不可达: {}", profile.auth_url);
+                warn!(
+                    "认证地址预检不可达: {}（请检查认证地址是否正确、是否已连校园网）",
+                    profile.auth_url
+                );
                 return self
                     .immediate_handle(
                         source,
                         false,
-                        format!("auth_url 不可达: {}", profile.auth_url),
+                        format!(
+                            "认证地址不可达: {}（请检查地址或校园网连接）",
+                            profile.auth_url
+                        ),
                         profile.id.clone(),
                     )
                     .await;
