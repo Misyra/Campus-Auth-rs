@@ -96,12 +96,14 @@ const redirectEnabled = computed({
           <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="https://auth.example.edu.cn" />
         </div>
         <div class="form-group">
-          <label class="toggle toggle-help-inline">
-            <input type="checkbox" v-model="redirectEnabled" />
-            <span class="toggle-slider"></span>
-            <span class="toggle-label">重定向模式（劫持型门户）</span>
-          </label>
-          <FieldHelp text="打开则自动填入默认触发地址并走重定向登录；关闭则清空触发地址回到直连。" />
+          <div class="toggle-with-help">
+            <label class="toggle toggle-help-inline">
+              <input type="checkbox" v-model="redirectEnabled" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">重定向模式（劫持型门户）</span>
+            </label>
+            <FieldHelp text="打开则自动填入默认触发地址并走重定向登录；关闭则清空触发地址回到直连。" />
+          </div>
         </div>
         <div v-if="redirectEnabled" class="form-group">
           <div class="field-label-row">
