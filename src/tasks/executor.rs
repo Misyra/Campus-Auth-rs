@@ -197,11 +197,11 @@ impl TaskExecutor {
 
         let resp = result?;
 
-        let success = resp.result.success;
+        let envelope_success = resp.result.success;
         let data = resp.result.data.clone();
         let structured: StructuredResult =
             serde_json::from_value(data.clone()).unwrap_or_else(|_| StructuredResult {
-                outcome: if success {
+                outcome: if envelope_success {
                     Outcome::Success
                 } else {
                     Outcome::UnknownError
@@ -211,6 +211,9 @@ impl TaskExecutor {
                 screenshot_url: None,
                 duration_ms: 0,
             });
+        // 任务成败以结构化 outcome 为准：信封 success 只表示"命令完成并回包"——
+        // 步骤失败经 run_steps 吞异常后仍正常返回（如 OCR 依赖缺失），信封为 success=true
+        let success = structured.outcome == Outcome::Success;
         let mut out = structured.message.clone();
         if let Some(e) = &resp.result.error {
             out = format!("{out}\n{e}");
