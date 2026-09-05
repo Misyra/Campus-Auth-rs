@@ -289,7 +289,7 @@ async function reloadConfig() {
     <!-- 维护操作：内容窄，独占整行避免右列空洞 -->
     <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
-        <IconApp name="download" class="settings-card-icon" />
+        <IconApp name="sliders" class="settings-card-icon" />
         <h2>维护操作</h2>
       </div>
       <div class="card-body">

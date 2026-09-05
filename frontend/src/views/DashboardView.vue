@@ -201,7 +201,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
             <h2>登录历史</h2>
             <div class="flex-row gap-sm">
               <button class="btn btn-icon-only" @click="fetchLoginHistory" title="刷新">
-                <IconApp name="download" />
+                <IconApp name="refresh" />
               </button>
               <button class="btn btn-icon-only" @click="clearLoginHistory" title="清空" :disabled="!loginHistory.length">
                 <IconApp name="trash" />
@@ -244,7 +244,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
               <IconApp :name="logs.autoScroll.value ? 'arrow-up' : 'arrow-down'" />
             </button>
             <button class="btn btn-icon-only" @click="logs.fetchLogs()" title="刷新">
-              <IconApp name="download" />
+              <IconApp name="refresh" />
             </button>
             <button class="btn btn-icon-only" @click="logs.clearLogs()" title="清空">
               <IconApp name="trash" />
