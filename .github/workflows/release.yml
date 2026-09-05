@@ -149,20 +149,27 @@ jobs:
 
       # Release 创建存在并发竞态（五个 job 同时打首个包）：
       # create 失败仅可能是"已存在"，容忍后由 upload 继续幂等上传（--clobber 可重跑覆盖）
-      # 发布说明写明三端运行前提：macOS quarantine 指引（W9）、Linux GTK 运行时依赖（W8）
+      # 发布说明 = 本版更新日志（docs/changelog.md 对应章节）+ 三端运行前提；
+      # 五个 job 算出同一份内容，首个 create 生效（macOS quarantine 指引 W9、Linux GTK 依赖 W8）
       - name: 上传到 GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '%s\n' \
-            '## 平台运行说明' \
-            '' \
-            '- **Windows**：解压后直接运行 campus-auth.exe（GUI 程序，无控制台窗口，自动打开浏览器 Web 控制台）' \
-            '- **macOS**：浏览器下载的二进制带 quarantine 属性，Gatekeeper 会拦截，首次运行前先执行 `xattr -cr campus-auth`（或对解压后的整个目录 `xattr -cr .`）；解压用 `tar -xzf`' \
-            '- **Linux**：二进制动态链接 GTK3 / libayatana-appindicator / librsvg（托盘），最小系统需先安装运行时库，Debian/Ubuntu：`sudo apt install libgtk-3-0 libayatana-appindicator3-1 librsvg2-2`；解压用 `tar -xzf`，执行 `./campus-auth`' \
-            '- 各平台 .sha256 为对应压缩包的 SHA256 校验文件' \
-            > /tmp/release-notes.md
+          section="$(awk -v tag="$GITHUB_REF_NAME" '/^## /{t=substr($0,4); n=substr(t,length(tag)+1,1); on=(substr(t,1,length(tag))==tag&&(t==tag||(n!=""&&n!="."&&n!="-"&&!(n>="0"&&n<="9")&&index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",n)==0))); if(on){sub(/\r$/,"");print;next}} on{sub(/\r$/,"");print}' docs/changelog.md)"
+          {
+            echo "## 更新日志"
+            echo
+            if [ -n "$section" ]; then printf '%s\n' "$section"; else echo "见仓库 docs/changelog.md"; fi
+            echo
+            printf '%s\n' \
+              '## 平台运行说明' \
+              '' \
+              '- **Windows**：解压后直接运行 campus-auth.exe（GUI 程序，无控制台窗口，自动打开浏览器 Web 控制台）' \
+              '- **macOS**：浏览器下载的二进制带 quarantine 属性，Gatekeeper 会拦截，首次运行前先执行 `xattr -cr campus-auth`（或对解压后的整个目录 `xattr -cr .`）；解压用 `tar -xzf`' \
+              '- **Linux**：二进制动态链接 GTK3 / libayatana-appindicator / librsvg（托盘），最小系统需先安装运行时库，Debian/Ubuntu：`sudo apt install libgtk-3-0 libayatana-appindicator3-1 librsvg2-2`；解压用 `tar -xzf`，执行 `./campus-auth`' \
+              '- 各平台 .sha256 为对应压缩包的 SHA256 校验文件'
+          } > /tmp/release-notes.md
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md || true
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
