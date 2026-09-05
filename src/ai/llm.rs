@@ -37,6 +37,10 @@ pub async fn chat_completion(
 
     let client = reqwest::Client::builder()
         .timeout(CHAT_TIMEOUT)
+        // 屏蔽系统代理：LLM 端点（国内服务商/本地网关/直连可达的中转）走本机代理
+        // 客户端的全局模式反而会失败或绕行；需要代理出网的场景后续按 monitor 的
+        // 代理设置模式做成可配置项
+        .no_proxy()
         .build()
         .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
 
