@@ -28,6 +28,10 @@ pub enum UpdaterError {
     #[error("更新包下载失败: {0}")]
     DownloadFailed(#[source] reqwest::Error),
 
+    /// 下载停滞：等待响应头或相邻数据块超过上限时间仍未收到数据
+    #[error("下载停滞：{idle_secs} 秒内未收到数据（已接收 {received_bytes} 字节）")]
+    DownloadStalled { idle_secs: u64, received_bytes: u64 },
+
     /// SHA256 校验不匹配
     #[error("校验和不匹配（预期 {expected}，实际 {actual}）")]
     ChecksumMismatch { expected: String, actual: String },

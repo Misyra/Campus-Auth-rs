@@ -186,6 +186,21 @@ pub fn worker_project_dir(base_path: &Path) -> PathBuf {
     if mf.exists() { mf } else { candidate }
 }
 
+/// 判定两条路径指向同一已存在的文件（canonicalize 后逐分量比较）
+///
+/// 更新替换路径的校验基元：`pending.json` 提供的 `target_exe` 必须与运行时
+/// 推导出的真实目标一致，否则判定为被篡改。任一路径不存在即返回 `false`
+/// （合法流程走到校验处时两者必然已存在）。
+///
+/// 放在 `utils::paths` 供主程序（`updater`）与助手进程（`helper_main`）共用，
+/// 避免两个 binary 各写一份产生分歧。
+pub fn same_existing_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 // ---- 预建 + 权限探测 ----
 
 /// 启动时一次性预建全部运行时目录（幂等）
@@ -246,5 +261,27 @@ mod tests {
         // 非法内容 → None
         std::fs::write(runtime_port_path(dir.path()), "not-a-port").unwrap();
         assert_eq!(read_runtime_port(dir.path()), None);
+    }
+
+    /// 同一文件判定：存在且一致放行，不一致 / 任一不存在均拒绝
+    #[test]
+    fn test_same_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("campus-auth.exe");
+        std::fs::write(&file, b"exe").unwrap();
+
+        // 同一路径（含不同写法）→ true
+        assert!(same_existing_path(&file, &file));
+        assert!(same_existing_path(
+            &file,
+            &dir.path().join("./campus-auth.exe")
+        ));
+        // 不同文件 → false
+        let other = dir.path().join("other.exe");
+        std::fs::write(&other, b"exe").unwrap();
+        assert!(!same_existing_path(&file, &other));
+        // 任一不存在 → false
+        assert!(!same_existing_path(&file, &dir.path().join("missing.exe")));
+        assert!(!same_existing_path(&dir.path().join("missing.exe"), &file));
     }
 }

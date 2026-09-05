@@ -55,7 +55,13 @@ async function checkUpdate() {
 async function applyUpdate() {
   updating.value = true;
   try {
-    const data = await systemApi.update();
+    // 回传"检查更新"阶段已确认的版本，避免服务端重查导致下到与展示不一致的版本
+    const info = updateInfo.value;
+    const pin =
+      info?.latest && info.url && typeof info.sha256 === "string"
+        ? { version: info.latest, url: info.url, sha256: info.sha256 }
+        : undefined;
+    const data = await systemApi.update(pin);
     updateInfo.value = {
       has_update: false,
       message: (data.message as string) || "更新已就绪，重启后生效",

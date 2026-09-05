@@ -11,6 +11,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use campus_auth::utils::lock::is_process_alive;
+use campus_auth::utils::paths::same_existing_path;
 use chrono::Local;
 use clap::Parser;
 
@@ -167,31 +168,30 @@ fn main() {
         }
     };
 
-    let target_exe = match cli
+    // 目标 exe 由 helper 自身位置推导：helper 与主程序同目录、主程序文件名固定，
+    // 因此无需信任 pending.json / CLI 提供的 target。
+    // 比"位于 base_path 之内"更强——后者在 --base-path 与 exe 目录分离时恒不成立，
+    // 会导致 helper 拒绝替换、staging 被下次启动的 Rust 侧清理，更新静默作废。
+    let derived_target = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(exe_name())));
+    let provided_target = cli
         .target
-        .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.target_exe)))
-    {
+        .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.target_exe)));
+    let target_exe = match resolve_target_exe(derived_target, provided_target, &base_path) {
         Some(p) => p,
         None => {
-            log.error("缺少目标 exe 路径（需 --target 或 pending.json）");
+            log.error("拒绝执行：无法确定目标 exe（与推导的主程序不一致，或不在 base_path 内）");
             std::process::exit(1);
         }
     };
 
-    // G13：staging / target 路径必须位于 base_path 之内（canonicalize 后
-    // starts_with 检查）。二者取值可能来自 pending.json——文件被篡改时会把
-    // 任意系统路径变成替换目标（任意位置覆写）或清理对象，必须先拒绝。
+    // G13：staging 是 remove_dir_all 的目标，取值可能来自 pending.json——
+    // 被篡改时会把任意系统目录变成清理对象，必须锁在 base_path 之内。
     if !is_within_base(&staging_dir, &base_path) {
         log.error(&format!(
             "拒绝执行：staging 路径不在 base_path 之内: {}",
             staging_dir.display()
-        ));
-        std::process::exit(1);
-    }
-    if !is_within_base(&target_exe, &base_path) {
-        log.error(&format!(
-            "拒绝执行：target 路径不在 base_path 之内: {}",
-            target_exe.display()
         ));
         std::process::exit(1);
     }
@@ -271,9 +271,17 @@ fn main() {
     // （如反馈资源快照）永远到不了走应用内更新的用户。overlay 语义：覆盖同名
     // 文件、新增缺失文件、绝不删除目标侧多余内容（python_worker/.venv 是
     // 用户运行态，config/tasks/logs 等用户数据不在 staging 内天然不受影响）。
+    // 数据目录（python_worker/ resources/ docs/）均由 base_path 解析，overlay 到 base_path
     let extracted_dir = staging_dir.join("extracted");
     sync_distribution_files(&extracted_dir, &base_path);
-    replace_helper(&extracted_dir, &base_path, &mut log);
+    // helper 自更新落点必须是 exe 所在目录，而非 base_path：spawn_helper 从主程序
+    // 同级目录查找 helper，--base-path 与 exe 目录分离时，写进 base_path 的 helper
+    // 永远不会被调用（同时在数据目录留下一份无用副本）。
+    let install_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| base_path.clone());
+    replace_helper(&extracted_dir, &install_dir, &mut log);
 
     // 6. 启动新 exe（传递原始启动参数）
     let original_args = pending
@@ -464,11 +472,43 @@ fn exe_name() -> &'static str {
     }
 }
 
+/// 解析待替换的目标 exe（纯函数，便于单测）
+///
+/// `derived` 为 helper 按自身位置推导出的主程序路径，`provided` 为 `--target` /
+/// pending.json 提供的值，`base_path` 用于推导值缺失时的兜底约束。
+///
+/// 分支：
+/// - 推导值存在 → 以它为准；提供值必须与其一致，否则判定 pending 被篡改（返回 `None`）；
+/// - 推导值缺失（主程序被重命名/删除）→ 退回提供值，但要求其确实是文件且位于
+///   base_path 之内（保留 G13 旧约束，不退化为"任意已存在文件"）；
+/// - 其余 → `None`，调用方拒绝执行。
+fn resolve_target_exe(
+    derived: Option<PathBuf>,
+    provided: Option<PathBuf>,
+    base_path: &Path,
+) -> Option<PathBuf> {
+    match (derived, provided) {
+        (Some(derived), provided) if derived.is_file() => {
+            if let Some(p) = provided {
+                if !same_existing_path(&p, &derived) {
+                    return None;
+                }
+            }
+            Some(derived)
+        }
+        (_, Some(p)) if p.is_file() && is_within_base(&p, base_path) => Some(p),
+        _ => None,
+    }
+}
+
 /// 校验路径位于 base_path 之内（G13，防 pending.json 篡改的路径逃逸）
 ///
 /// 双方 canonicalize（解析为绝对真实路径，含符号链接折叠与 Windows `\\?\`
 /// 前缀归一）后做 `starts_with` 前缀比较；任一路径不存在（canonicalize 失败）
-/// 均视为不合法——合法流程走到此处时 staging 与 target 必然已经存在。
+/// 均视为不合法。
+///
+/// 现用于 staging（remove_dir_all 的目标）与 target 的兜底分支；
+/// target 的主校验已改为与推导值比对（见 [`resolve_target_exe`]）。
 fn is_within_base(path: &Path, base_path: &Path) -> bool {
     let (Ok(canonical), Ok(base_canonical)) = (path.canonicalize(), base_path.canonicalize())
     else {
@@ -559,6 +599,54 @@ mod tests {
             &base.path().join("does-not-exist"),
             base.path()
         ));
+    }
+
+    /// target 解析三分支：推导命中且一致放行 / 不一致拒绝 / 推导缺失按 base 内约束兜底
+    #[test]
+    fn test_resolve_target_exe() {
+        let base = tempfile::tempdir().unwrap();
+        let derived = base.path().join("campus-auth.exe");
+        std::fs::write(&derived, b"exe").unwrap();
+
+        // 推导命中 + 提供值一致（路径写法不同）→ 放行，返回推导值
+        assert_eq!(
+            resolve_target_exe(
+                Some(derived.clone()),
+                Some(base.path().join("./campus-auth.exe")),
+                base.path()
+            ),
+            Some(derived.clone())
+        );
+        // 推导命中 + 未提供值 → 放行
+        assert_eq!(
+            resolve_target_exe(Some(derived.clone()), None, base.path()),
+            Some(derived.clone())
+        );
+        // 推导命中 + 提供值不一致（pending 被篡改）→ 拒绝
+        let evil = base.path().join("evil.exe");
+        std::fs::write(&evil, b"x").unwrap();
+        assert_eq!(
+            resolve_target_exe(Some(derived.clone()), Some(evil), base.path()),
+            None
+        );
+
+        // 推导缺失（主程序被重命名）+ 提供值在 base 内 → 兜底放行
+        let renamed = base.path().join("auth-renamed.exe");
+        std::fs::write(&renamed, b"exe").unwrap();
+        assert_eq!(
+            resolve_target_exe(None, Some(renamed.clone()), base.path()),
+            Some(renamed)
+        );
+        // 推导缺失 + 提供值在 base 之外 → 拒绝（不得退化为任意文件覆写）
+        let outside = tempfile::tempdir().unwrap();
+        let outside_exe = outside.path().join("target.exe");
+        std::fs::write(&outside_exe, b"x").unwrap();
+        assert_eq!(
+            resolve_target_exe(None, Some(outside_exe), base.path()),
+            None
+        );
+        // 两者皆无 → 拒绝
+        assert_eq!(resolve_target_exe(None, None, base.path()), None);
     }
 
     /// G13：SHA 复核——正确值通过、错误值拒绝、空值拒绝（P1-3：缺失拒绝，不降级）、文件缺失拒绝

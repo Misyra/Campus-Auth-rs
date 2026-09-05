@@ -40,7 +40,7 @@ const ACTION_CHANNEL_CAPACITY: usize = 64;
 ///
 /// `toggle_item` 是 `menu_items[0]` 的克隆引用（MenuItem 内部为 Rc，clone 廉价），
 /// 单独返回以便状态变化时调用 `set_text` 动态切换「启动监测/停止监测」文本。
-type MenuBuildResult = (Menu, Vec<Box<dyn IsMenuItem>>, MenuItem);
+type MenuBuildResult = (Menu, Vec<Box<dyn IsMenuItem>>, MenuItem, MenuItem);
 
 /// OS 线程内部命令（泵任务 / Drop → OS 线程），单通道承载退出与托盘刷新。
 ///
@@ -62,6 +62,8 @@ pub enum TrayAction {
     StopMonitor,
     /// 打开 Web 控制台（open::that）
     OpenWeb,
+    /// 手动检查更新（调用 UpdaterService，有更新时打开关于页）
+    CheckUpdate,
     /// 退出（EngineCommand::Shutdown + 停止自身）
     Quit,
 }
@@ -185,11 +187,14 @@ impl TrayManager {
             }
 
             // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
-            // menu_items 绑定本身保持对象存活到线程结束；toggle_item 用于动态改文本
-            let (menu, menu_items, toggle_item) = build_menu();
+            // menu_items 绑定本身保持对象存活到线程结束；toggle_item / update_item 用于动态改文本
+            let (menu, menu_items, toggle_item, update_item) = build_menu();
             let _ = &menu_items;
             // 首次按当前状态设置文本
-            toggle_item.set_text(monitor_toggle_label(status.borrow().engine_state));
+            let first_snapshot = status.borrow();
+            toggle_item.set_text(monitor_toggle_label(first_snapshot.engine_state));
+            update_item.set_text(update_menu_label(first_snapshot.update_available));
+            drop(first_snapshot);
 
             // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
             // 停止态用同一 logo 的灰色版保持品牌识别（此前是纯红色块，无信息量）
@@ -242,6 +247,7 @@ impl TrayManager {
                         }
                     }
                     "open_web" => TrayAction::OpenWeb,
+                    "check_update" => TrayAction::CheckUpdate,
                     "quit" => TrayAction::Quit,
                     _ => return,
                 };
@@ -289,6 +295,7 @@ impl TrayManager {
                                 &active_icon,
                                 &inactive_icon,
                                 &toggle_item,
+                                &update_item,
                             );
                         }
                         Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
@@ -313,6 +320,7 @@ impl TrayManager {
                                 &active_icon,
                                 &inactive_icon,
                                 &toggle_item,
+                                &update_item,
                             );
                         }
                         Err(std_mpsc::TryRecvError::Empty) => {}
@@ -340,6 +348,7 @@ impl TrayManager {
                                 &active_icon,
                                 &inactive_icon,
                                 &toggle_item,
+                                &update_item,
                             );
                         }
                         Err(_) => break, // 发送端已丢弃，结束线程
@@ -501,6 +510,32 @@ async fn handle_action(
             }
             false
         }
+        TrayAction::CheckUpdate => {
+            // 托盘用户的更新入口：检查后有更新直接打开控制台关于页
+            // （关于页展示版本/changelog，并可一键应用）；无更新/失败仅记日志
+            let updater = deps.updater.clone();
+            let base = deps.config.base_path();
+            let default_port = deps.port;
+            tokio::spawn(async move {
+                match updater.check_update().await {
+                    Ok(Some(info)) => {
+                        info!(
+                            version = %info.latest_version,
+                            "发现新版本，打开控制台关于页"
+                        );
+                        let port =
+                            crate::utils::paths::read_runtime_port(&base).unwrap_or(default_port);
+                        let url = format!("http://127.0.0.1:{port}/about");
+                        if let Err(e) = open::that(&url) {
+                            warn!("打开浏览器失败 ({url}): {e}");
+                        }
+                    }
+                    Ok(None) => info!("托盘检查更新：已是最新版本"),
+                    Err(e) => warn!("托盘检查更新失败: {e}"),
+                }
+            });
+            false
+        }
         TrayAction::Quit => {
             info!("收到退出指令，正在关闭应用");
             // 仅派发 Engine Shutdown 不够：launcher 的 wait_for_shutdown 只监听
@@ -522,9 +557,12 @@ fn update_tray(
     active: &Option<Icon>,
     inactive: &Option<Icon>,
     toggle_item: &MenuItem,
+    update_item: &MenuItem,
 ) {
     // 动态切换「启动监测/停止监测」菜单项文本
     toggle_item.set_text(monitor_toggle_label(snap.engine_state));
+    // 动态切换「检查更新」菜单项文本（update_available 由后台检查 merge 维护）
+    update_item.set_text(update_menu_label(snap.update_available));
 
     // 登录行：成功/失败时附带上次登录结果信息
     let login_line = match (&snap.login_status, &snap.login_message) {
@@ -553,19 +591,22 @@ fn update_tray(
     }
 }
 
-/// 构建托盘右键菜单（精简三项：监测切换 / 打开控制台 / 退出）。
+/// 构建托盘右键菜单（四项：监测切换 / 检查更新 / 打开控制台 / 退出）。
 ///
-/// 返回 `(Menu, 顶层菜单项容器, 监测切换 MenuItem)`：muda 内部持有对菜单项对象的引用，
-/// 因此 `menu_items` 必须比 [`Menu`]/[`TrayIcon`] 存活更久（由调用方持有）。
-/// `toggle_item` 是 `menu_items[0]` 的克隆（MenuItem 内部为 Rc，clone 廉价），
-/// 供 [`update_tray`] 在状态变化时调用 `set_text` 动态切换文本。
+/// 返回 `(Menu, 顶层菜单项容器, 监测切换 MenuItem, 检查更新 MenuItem)`：
+/// muda 内部持有对菜单项对象的引用，因此 `menu_items` 必须比 [`Menu`]/[`TrayIcon`]
+/// 存活更久（由调用方持有）。`toggle_item` 是 `menu_items[0]` 的克隆（MenuItem
+/// 内部为 Rc，clone 廉价），供 [`update_tray`] 在状态变化时调用 `set_text` 动态切换文本；
+/// `update_item` 同理，文本随 `update_available` 切换。
 ///
 /// 监测切换项使用固定 id `monitor_toggle`，具体动作（启动/停止）由菜单事件 handler
 /// 根据当前引擎状态决定，从而实现「id 不变、文本随状态切换」。
 fn build_menu() -> MenuBuildResult {
     let toggle_item = MenuItem::with_id(MenuId::new("monitor_toggle"), "启动监测", true, None);
+    let update_item = MenuItem::with_id(MenuId::new("check_update"), "检查更新", true, None);
     let menu_items: Vec<Box<dyn IsMenuItem>> = vec![
         Box::new(toggle_item.clone()),
+        Box::new(update_item.clone()),
         Box::new(MenuItem::with_id(
             MenuId::new("open_web"),
             "打开控制台",
@@ -580,7 +621,7 @@ fn build_menu() -> MenuBuildResult {
     if let Err(e) = menu.append_items(&menu_refs) {
         error!("托盘菜单项追加失败，菜单可能不完整: {e}");
     }
-    (menu, menu_items, toggle_item)
+    (menu, menu_items, toggle_item, update_item)
 }
 
 /// 引擎状态 → 监测切换菜单项文本
@@ -588,6 +629,18 @@ fn monitor_toggle_label(state: EngineState) -> &'static str {
     match state {
         EngineState::Running => "停止监测",
         EngineState::Stopped | EngineState::Dead => "启动监测",
+    }
+}
+
+/// 更新可用性 → 检查更新菜单项文本
+///
+/// 文本由 `snapshot.update_available` 驱动（含"无更新时清 false"的 else 分支），
+/// 这是该字段在托盘侧的消费点；后台检查的 merge 结果由此实时反映。
+fn update_menu_label(update_available: bool) -> &'static str {
+    if update_available {
+        "发现新版本，点击更新"
+    } else {
+        "检查更新"
     }
 }
 

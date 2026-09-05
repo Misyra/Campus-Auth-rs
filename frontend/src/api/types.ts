@@ -463,7 +463,21 @@ export interface UpdateInfo {
   error?: string;
   /** 发布页/下载页链接（AboutView 展示“前往下载”按钮） */
   url?: string;
+  /** 下载包预期 SHA256（点击“立即更新”时回传，固定本次确认的版本） */
+  sha256?: string;
   [key: string]: unknown;
+}
+
+/**
+ * 更新固定版本快照
+ *
+ * 点击“立即更新”时把“检查更新”阶段已确认的 version/url/sha256 回传，
+ * 避免服务端重查导致的版本漂移（展示 v5.0.1 却下到 v5.0.2）。
+ */
+export interface UpdatePin {
+  version: string;
+  url: string;
+  sha256: string;
 }
 
 /** 环境安装进度（后端 InstallProgress） */

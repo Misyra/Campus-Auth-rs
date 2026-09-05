@@ -270,18 +270,84 @@ pub async fn check_update(
     }
 }
 
+/// 前端"检查更新"已确认的版本快照（请求体，可省略）
+///
+/// 省略时服务端重新拉取清单（兼容旧调用方）；提供时必须三项齐备且通过
+/// 安全校验（URL 白名单 / 摘要格式 / semver 比较），任一不通过即回退重查。
+/// 目的：消除"检查更新展示 v5.0.1 → 点击更新时服务端重查已发布 v5.0.2"的
+/// 版本漂移窗口，同时省一次全量清单 + sha 伴随文件拉取。
+#[derive(Debug, Default, Deserialize)]
+pub struct ApplyUpdateBody {
+    /// 已确认的目标版本号
+    version: Option<String>,
+    /// 已确认的下载包 URL
+    url: Option<String>,
+    /// 已确认的下载包 SHA256（64 位 hex）
+    sha256: Option<String>,
+}
+
+impl ApplyUpdateBody {
+    /// 三项齐备且通过安全校验时，构造可直接下发的 [`UpdateInfo`]
+    ///
+    /// 任一校验不通过返回 `None`，调用方回退到服务端重新拉取清单。
+    fn into_pinned(self) -> Option<crate::updater::UpdateInfo> {
+        let (version, url, sha256) = (self.version?, self.url?, self.sha256?);
+        // 与下载路径同一白名单：https 放行，http 仅精确回环。
+        // pin 允许任意 https host 并未放宽信任面——release_source_url 本就
+        // 可由 config API 修改且走同一白名单
+        if !crate::updater::check::is_allowed_update_url(&url) {
+            tracing::warn!(%url, "拒绝固定版本更新：URL 未通过白名单校验");
+            return None;
+        }
+        // 摘要须为 64 位 hex（后续 download_and_verify 仍会复核一次内容）
+        if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            tracing::warn!("拒绝固定版本更新：SHA256 格式非法");
+            return None;
+        }
+        // 版本闸门：U3 的"pending 版本不高于当前则跳过"只存在于启动
+        // self_replace 路径（updater/mod.rs），helper 替换路径完全没有版本
+        // 检查——缺此闸门时 pin 一个旧版本号可畅通走完"下载 → helper 替换"，
+        // 形成降级通道
+        let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+        let remote = semver::Version::parse(&version).ok()?;
+        if !crate::updater::check::compare_versions(&current, &remote) {
+            tracing::warn!(%version, "拒绝固定版本更新：不高于当前版本");
+            return None;
+        }
+        Some(crate::updater::UpdateInfo {
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: version,
+            update_available: true,
+            url,
+            sha256,
+            // size 不参与下载（进度取响应 Content-Length），pin 路径置空无副作用
+            size: None,
+            notes: None,
+            release_date: None,
+        })
+    }
+}
+
 /// POST /api/system/update — 执行更新（下载 zip 到 staging 并触发助手替换）
 ///
-/// 先调用 `check_update` 获取最新版本信息，再 `apply_update` 执行下载与暂存。
+/// 请求体可携带"检查更新"阶段已确认的版本快照（version/url/sha256）以固定版本；
+/// 省略或校验不通过时服务端重新拉取清单（行为与旧版一致）。
 /// 检查与下载使用同一网络路径（显式代理优先，未配置跟随系统代理）。
 pub async fn apply_update(
     State(updater): State<Arc<dyn UpdaterApi>>,
+    body: Option<Json<ApplyUpdateBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let info = updater
-        .check_update()
-        .await
-        .map_err(|e| ApiError::Internal(format!("检查更新失败: {e}")))?
-        .ok_or_else(|| ApiError::BadRequest("当前已是最新版本，无需更新".into()))?;
+    let info = match body.and_then(|Json(b)| b.into_pinned()) {
+        Some(pinned) => {
+            tracing::info!(version = %pinned.latest_version, "使用前端确认的固定版本");
+            pinned
+        }
+        None => updater
+            .check_update()
+            .await
+            .map_err(|e| ApiError::Internal(format!("检查更新失败: {e}")))?
+            .ok_or_else(|| ApiError::BadRequest("当前已是最新版本，无需更新".into()))?,
+    };
     tracing::info!(version = %info.latest_version, "开始下载并暂存更新");
     updater.apply_update(&info).await.map_err(|e| {
         tracing::warn!(version = %info.latest_version, "应用更新失败: {e}");

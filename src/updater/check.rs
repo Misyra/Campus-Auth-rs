@@ -124,15 +124,26 @@ pub(crate) async fn fetch_manifest(
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
     }
 
-    // 处理 GitHub API 速率限制（429 Too Many Requests）
-    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(60);
-        return Err(UpdaterError::RateLimited { retry_after });
+    // 处理 GitHub API 速率限制：未认证 REST 配额耗尽回 403 + 配额头耗尽
+    // （GitHub 主限流按类型可能回 403 或 429），只认 429 会把主限流误报成
+    // ManifestFetchFailed(403)，用户既看不懂也拿不到建议等待时间
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::FORBIDDEN
+    ) {
+        if let Some(retry_after) = rate_limit_retry_after(response.headers()) {
+            return Err(UpdaterError::RateLimited { retry_after });
+        }
+        // 429 但无配额头（代理/网关限流）：沿用 retry-after 头，缺省 60s
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60);
+            return Err(UpdaterError::RateLimited { retry_after });
+        }
     }
 
     let response = response
@@ -250,6 +261,28 @@ fn infer_platform_key(name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// 从响应头判定是否为配额耗尽，并折算建议等待秒数
+///
+/// GitHub 限流响应携带 `X-RateLimit-Remaining: 0`；`X-RateLimit-Reset` 为
+/// 配额重置的 Unix 秒时间戳。未认证 REST 超限通常回 403（而非 429），
+/// 故 403 也需走此判定；无 `X-RateLimit-Reset` 时回退 60s，reset 时间过去/
+/// 过远分别夹取为 1s / 3600s。纯函数（只读 HeaderMap）便于单测覆盖各组合。
+fn rate_limit_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let remaining_is_zero = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.trim() == "0");
+    if !remaining_is_zero {
+        return None;
+    }
+    let until_reset = headers
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|reset| (reset - chrono::Utc::now().timestamp()).clamp(1, 3600) as u64);
+    Some(until_reset.unwrap_or(60))
 }
 
 /// 从 GitHub release assets 中提取平台压缩包（zip / tar.gz，纯函数，G11 便于单测）
@@ -599,5 +632,40 @@ mod tests {
         assert!(!is_allowed_update_url("ftp://example.com/x"));
         assert!(!is_allowed_update_url("https://user:pass@example.com/x"));
         assert!(!is_allowed_update_url("not a url"));
+    }
+
+    /// 配额头判定：剩余非 0 / 无头 → None；剩余 0 时按 reset 折算并夹取
+    #[test]
+    fn test_rate_limit_retry_after() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        // 无任何头 → None
+        let h = HeaderMap::new();
+        assert_eq!(rate_limit_retry_after(&h), None);
+        // 剩余非 0 → None（正常限流响应不触发）
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining", HeaderValue::from_static("59"));
+        assert_eq!(rate_limit_retry_after(&h), None);
+
+        // 剩余 0 但无 reset → 回退 60s
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        assert_eq!(rate_limit_retry_after(&h), Some(60));
+
+        // 剩余 0 + reset 在过去 → 夹取为 1s
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        h.insert("x-ratelimit-reset", HeaderValue::from_static("1"));
+        assert_eq!(rate_limit_retry_after(&h), Some(1));
+
+        // 剩余 0 + reset 在远未来 → 夹取为 3600s
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        let far = chrono::Utc::now().timestamp() + 999_999;
+        h.insert(
+            "x-ratelimit-reset",
+            HeaderValue::from_str(&far.to_string()).unwrap(),
+        );
+        assert_eq!(rate_limit_retry_after(&h), Some(3600));
     }
 }

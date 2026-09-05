@@ -36,6 +36,7 @@ import type {
   UninstallDetectItem,
   UninstallResponse,
   UpdateInfo,
+  UpdatePin,
 } from "./types";
 
 export { ApiError, extractApiError } from "./client";
@@ -75,7 +76,11 @@ export const systemApi = {
   checkUpdate: () => http.get<UpdateInfo>("/api/check-update"),
   agree: () => http.post<MutationResult>("/api/agree"),
   shutdown: () => http.post<MutationResult>("/api/system/shutdown"),
-  update: () => http.post<MutationResult & { message?: string; version?: string }>("/api/system/update"),
+  update: (pin?: UpdatePin) =>
+    http.post<MutationResult & { message?: string; version?: string }>(
+      "/api/system/update",
+      pin ?? null,
+    ),
   fetchLogs: (limit: number) => http.get<LogEntry[]>(`/api/logs?limit=${limit}`),
 };
 

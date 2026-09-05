@@ -24,8 +24,15 @@ pub struct StagedUpdate {
     pub extracted_exe: PathBuf,
 }
 
-/// 下载总超时（5 分钟）
-pub(crate) const DOWNLOAD_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// 建立连接超时（TCP + TLS 握手，客户端级；见 [`crate::updater`] 的客户端构建）
+pub(crate) const DOWNLOAD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// 停滞判定：等待响应头 / 相邻 chunk 之间的最大空闲时间。
+///
+/// v5.0.0-alpha.7 前为"300s 总超时"——reqwest 的请求级 timeout 覆盖整个
+/// 响应体读取，等于给下载设置了隐式速度下限（300s 内必须拉完整个包，
+/// 大包/慢网必然失败且无断点续传），故改为连接超时 + 空闲超时模型：
+/// 慢网只要还在出数据就允许继续，只有"彻底不出数据"才判失败。
+pub(crate) const DOWNLOAD_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// 更新压缩包大小上限，避免异常响应占满磁盘。
 pub(crate) const MAX_UPDATE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -51,15 +58,29 @@ pub(crate) async fn download_and_verify(
         return Err(UpdaterError::MissingChecksum);
     }
 
-    let response = client
-        .get(&info.url)
-        .timeout(DOWNLOAD_TOTAL_TIMEOUT)
-        .header("User-Agent", "campus-auth-updater")
-        .send()
-        .await
-        .map_err(UpdaterError::DownloadFailed)?
-        .error_for_status()
-        .map_err(UpdaterError::DownloadFailed)?;
+    // send() 阶段（等待响应头）同样受停滞超时保护：连接握手完成后服务端
+    // 拖着不发响应头会无限挂起，connect_timeout 管不到这一段
+    let response = match tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, async {
+        client
+            .get(&info.url)
+            .header("User-Agent", "campus-auth-updater")
+            .send()
+            .await
+            .map_err(UpdaterError::DownloadFailed)?
+            .error_for_status()
+            .map_err(UpdaterError::DownloadFailed)
+    })
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(UpdaterError::DownloadStalled {
+                idle_secs: DOWNLOAD_STALL_TIMEOUT.as_secs(),
+                received_bytes: 0,
+            });
+        }
+    };
     // 重定向收敛：最终 URL 仍须通过白名单
     if !crate::updater::check::is_allowed_update_url(response.url().as_str()) {
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
@@ -104,8 +125,18 @@ pub(crate) async fn download_and_verify(
     let mut last_report = std::time::Instant::now();
     const PROGRESS_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(UpdaterError::DownloadFailed)?;
+    loop {
+        // chunk 间停滞判定：超时内未收到任何数据即判失败（正常 EOF 走 Ok(None)）
+        let chunk = match tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, stream.next()).await {
+            Ok(Some(c)) => c.map_err(UpdaterError::DownloadFailed)?,
+            Ok(None) => break,
+            Err(_) => {
+                return Err(UpdaterError::DownloadStalled {
+                    idle_secs: DOWNLOAD_STALL_TIMEOUT.as_secs(),
+                    received_bytes: downloaded,
+                });
+            }
+        };
         hasher.update(chunk.as_ref());
         file.write_all(chunk.as_ref())
             .await

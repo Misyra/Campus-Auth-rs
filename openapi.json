@@ -1950,7 +1950,20 @@
      "required": false,
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "type": "object",
+        "properties": {
+         "version": {
+          "type": "string"
+         },
+         "url": {
+          "type": "string"
+         },
+         "sha256": {
+          "type": "string"
+         }
+        }
+       }
       }
      }
     }

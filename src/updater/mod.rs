@@ -118,11 +118,15 @@ impl UpdaterService {
             }
         };
         // 回退客户端跟随系统/环境代理（system-proxy feature 已启用）：
-        // 显式代理未启用/构建失败时使用。
-        let http_client = reqwest::Client::builder().build().unwrap_or_else(|e| {
-            tracing::warn!("默认 HTTP 客户端构建失败，回退无配置客户端: {e}");
-            reqwest::Client::new()
-        });
+        // 显式代理未启用/构建失败时使用。连接超时与下载停滞超时同源配置，
+        // 避免握手挂死（总超时已移除，见 download.rs）
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(download::DOWNLOAD_CONNECT_TIMEOUT)
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!("默认 HTTP 客户端构建失败，回退无配置客户端: {e}");
+                reqwest::Client::new()
+            });
 
         Arc::new(Self {
             config,
@@ -145,11 +149,15 @@ impl UpdaterService {
     /// 启动后台版本检查任务（循环：启动时检查一次，之后按 check_interval_hours 定时检查）
     ///
     /// 延迟 [`STARTUP_CHECK_DELAY`] 后拉取清单，发现更新则
-    /// `merge(PartialSnapshot::Update { available: true })`；失败静默忽略。
+    /// `merge(PartialSnapshot::Update { .. })`；失败静默忽略。
     /// `cancel` 用于优雅中止。
     ///
     /// 语义（U6 修复）：`check_on_startup` 只决定"启动是否立即检查一次"（循环外读一次），
     /// 循环内的周期检查不受其影响——否则关闭该开关会连定时检查一并消失。
+    ///
+    /// 双查修复：循环改为"先等待再检查"。旧实现每轮"先查再睡"，与启动检查
+    /// 相邻执行造成同一时刻 2×清单 + 2N×伴随 sha 拉取；关闭启动检查的用户
+    /// 首轮 `due_now` 立即为真，首查时机（T+5s）保持不变。
     pub fn start_background_check(&self, cancel: CancellationToken) {
         let config = self.config.clone();
         let status = self.status.clone();
@@ -170,6 +178,9 @@ impl UpdaterService {
                     log_check_failure("启动时", &e);
                 }
             }
+            // 启动检查已执行过则首轮先等待一个间隔；未执行（check_on_startup=false）
+            // 则首轮立即查一次，补上"启动时首查"的时机
+            let mut due_now = !startup_settings.check_on_startup;
             loop {
                 // 每次迭代重新读取配置（支持运行时修改）
                 let settings = config.load_settings().global.updater;
@@ -180,16 +191,19 @@ impl UpdaterService {
                 }
                 let interval_secs = (settings.check_interval_hours as u64).saturating_mul(3600);
                 let interval = std::time::Duration::from_secs(interval_secs.max(300)); // 最少 5 分钟
-                // 每周期先执行一次检查，再等待下一间隔
+                if !due_now {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(interval) => {},
+                    }
+                }
+                due_now = false;
+                // 每周期等待结束后执行一次检查
                 let client = effective_client_for(&settings, fallback_client.clone());
                 if let Err(e) =
                     perform_update_check(&config, &status, &client, &current_version).await
                 {
                     log_check_failure("定期", &e);
-                }
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tokio::time::sleep(interval) => {},
                 }
             }
         });
@@ -359,6 +373,10 @@ impl UpdaterService {
             .arg(pid.to_string())
             .arg("--staging")
             .arg(&staging_dir)
+            // 显式传 target：让 helper 的 CLI 分支在生产路径上真正生效，
+            // pending.json 的同名字段降级为回退（helper 侧仍会与推导值比对）
+            .arg("--target")
+            .arg(&current_exe)
             .arg("--base-path")
             .arg(&self.base_path);
         // U4：helper 内有多行 println，Windows 上隐藏控制台窗口避免闪黑窗
@@ -446,11 +464,21 @@ impl UpdaterService {
 
         let staging_dir = PathBuf::from(&pending.staging_dir);
         let target_exe = PathBuf::from(&pending.target_exe);
-        // G13 对齐 helper：staging/target 必须位于 base_path 之内（防 pending 篡改逃逸）
-        if !is_within_base(&staging_dir, &self.base_path)
-            || !is_within_base(&target_exe, &self.base_path)
-        {
-            tracing::error!("pending 路径不在 base_path 之内，已拒绝应用并清理");
+        // 替换与备份都基于运行时取到的 current_exe，提前解析供校验与后续复用
+        let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
+        // G13 对齐 helper 的防篡改基线：
+        // - staging 是 remove_dir_all 的目标，必须锁在 base 之内，否则被篡改的
+        //   pending 能把任意目录变成清理对象；
+        // - target 的合法值恒等于「当前进程自身」（self_replace 替换的就是
+        //   current_exe），与 base_path 无关，故直接与 current_exe 比对——
+        //   比"位于 base 内"更强，且允许 --base-path / CAMPUS_AUTH_BASE_PATH
+        //   与 exe 目录分离（旧逻辑下 target 恒越界，更新会被静默作废）。
+        if !is_pending_path_valid(&staging_dir, &target_exe, &self.base_path, &current_exe) {
+            tracing::error!(
+                staging = %staging_dir.display(),
+                target = %target_exe.display(),
+                "pending 路径校验失败（staging 不在 base 内 / target 非当前进程），已拒绝应用并清理"
+            );
             apply::cleanup_after_apply(&self.base_path).await;
             return Ok(false);
         }
@@ -497,7 +525,6 @@ impl UpdaterService {
                 return Ok(false);
             }
         }
-        let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
         let backup_path = self.base_path.join(".backup_exe");
         if let Err(e) = std::fs::copy(&current_exe, &backup_path) {
             tracing::warn!("备份当前 exe 失败，跳过回滚保护: {}", e);
@@ -530,6 +557,24 @@ impl UpdaterService {
             }
         }
     }
+}
+
+/// pending 路径校验（G13 防篡改基线，纯函数便于单测）
+///
+/// - `staging_dir` 是 `remove_dir_all` 的目标，必须锁在 `base_path` 之内，
+///   否则被篡改的 pending 能把任意目录变成清理对象；
+/// - `target_exe` 的合法值恒等于「当前进程自身」（`self_replace` 替换的就是
+///   `current_exe`），与 `base_path` 无关——直接比对真实路径既比"位于 base 内"
+///   更强，也允许 `--base-path` / `CAMPUS_AUTH_BASE_PATH` 与 exe 目录分离
+///   （旧逻辑下 target 恒越界，更新会被静默作废）。
+fn is_pending_path_valid(
+    staging_dir: &std::path::Path,
+    target_exe: &std::path::Path,
+    base_path: &std::path::Path,
+    current_exe: &std::path::Path,
+) -> bool {
+    is_within_base(staging_dir, base_path)
+        && crate::utils::paths::same_existing_path(target_exe, current_exe)
 }
 
 /// 校验路径位于 base_path 之内（与 helper 同逻辑，防 pending 篡改逃逸）
@@ -587,6 +632,7 @@ fn build_proxied_client(proxy_url: &str) -> Result<reqwest::Client, String> {
     let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| e.to_string())?;
     reqwest::Client::builder()
         .proxy(proxy)
+        .connect_timeout(download::DOWNLOAD_CONNECT_TIMEOUT)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -629,6 +675,10 @@ async fn perform_update_check(
     {
         status.merge(PartialSnapshot::Update { available: true });
         tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
+    } else {
+        // 无更新时显式清 false：同进程内一次置 true 后若不清除，
+        // 快照会跨"无更新"检查残留（重启归零，但长跑进程会一直误报）
+        status.merge(PartialSnapshot::Update { available: false });
     }
     Ok(())
 }
@@ -731,6 +781,52 @@ mod tests {
         assert!(matches!(
             svc.apply_update(&info).await,
             Err(UpdaterError::UpdateInProgress)
+        ));
+    }
+
+    /// G13 基线：staging 在 base 内 + target 为当前进程 → 放行；任一不满足 → 拒绝
+    ///
+    /// 关键回归：`current_exe` 天然不在测试用 base（tempdir）之内，正是
+    /// `--base-path` 与 exe 目录分离的场景——旧逻辑（target 也要求在 base 内）
+    /// 会在此拒绝并清理，导致下载作废。
+    #[test]
+    fn test_is_pending_path_valid() {
+        let base = tempfile::tempdir().unwrap();
+        let staging = base.path().join("update").join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let current_exe = std::env::current_exe().unwrap();
+
+        // 合法：staging 在 base 内 + target 为当前进程（base 与 exe 目录分离亦成立）
+        assert!(is_pending_path_valid(
+            &staging,
+            &current_exe,
+            base.path(),
+            &current_exe
+        ));
+
+        // staging 存在但位于 base 之外 → 拒绝
+        let outside = tempfile::tempdir().unwrap();
+        assert!(!is_pending_path_valid(
+            outside.path(),
+            &current_exe,
+            base.path(),
+            &current_exe
+        ));
+        // staging 不存在 → 拒绝
+        assert!(!is_pending_path_valid(
+            &base.path().join("missing-staging"),
+            &current_exe,
+            base.path(),
+            &current_exe
+        ));
+        // target 非当前进程（被篡改指向同目录内其他文件）→ 拒绝
+        let other_exe = base.path().join("other.exe");
+        std::fs::write(&other_exe, b"x").unwrap();
+        assert!(!is_pending_path_valid(
+            &staging,
+            &other_exe,
+            base.path(),
+            &current_exe
         ));
     }
 }
