@@ -14,7 +14,6 @@ use tokio::sync::Mutex;
 use crate::config::ConfigService;
 use crate::tasks::TaskError;
 use crate::tasks::models::*;
-
 /// 任务排序与活跃任务记录（`.order.json`）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrderData {
@@ -23,6 +22,15 @@ pub struct OrderData {
     /// 当前活跃任务 ID
     pub active: String,
 }
+
+/// 内置默认登录任务种子（`browser/default.json` 不存在时首启写入）。
+///
+/// 经 `include_str!` 编进二进制，便携包/新装同样可用；内容与历史 `通用登录`
+/// 任务一致（JS 语义填表，`url` 取 `{{LOGIN_URL}}`，重定向模式由 Worker 先行导航）。
+const DEFAULT_TASK_SEED: &str = include_str!("seed_default.json");
+
+/// 内置默认任务 ID（不可删除，删除其他任务回退到它）
+pub const DEFAULT_TASK_ID: &str = "default";
 
 /// 任务摘要（列表/概览用，不含完整配置）
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +113,8 @@ impl TaskManager {
                 );
             }
         }
+        // 首启播种：缺内置默认任务则写入并自动启用（新装开箱即用，登录不再报无启用任务）
+        mgr.ensure_default_task();
         Arc::new(mgr)
     }
 
@@ -314,7 +324,7 @@ impl TaskManager {
         if !is_valid_task_id(task_id) {
             return Err(TaskError::InvalidTaskId(task_id.to_string()));
         }
-        if task_id == "default" {
+        if task_id == DEFAULT_TASK_ID {
             return Err(TaskError::DeleteDefaultTask);
         }
         let _guard = self.lock.lock().await;
@@ -355,7 +365,7 @@ impl TaskManager {
         let mut order = self.read_order();
         order.order.retain(|id| id != task_id);
         if order.active == task_id {
-            order.active = "default".to_string();
+            order.active = DEFAULT_TASK_ID.to_string();
         }
         self.write_order(&order)?;
         Ok(())
@@ -711,7 +721,7 @@ impl TaskManager {
                     .split(':')
                     .nth(1)
                     .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|| "default".to_string());
+                    .unwrap_or_else(|| DEFAULT_TASK_ID.to_string());
                 let mut order = self.read_order();
                 order.active = id;
                 if let Err(e) = self.write_order(&order) {
@@ -728,6 +738,42 @@ impl TaskManager {
                     error = %e,
                     "清理旧版 active.txt 失败"
                 );
+            }
+        }
+    }
+    /// 首启播种内置默认任务并自动启用（幂等）。
+    ///
+    /// 仅当 `browser/default.json` 缺失时写入种子（用户删改过的不碰——`default`
+    /// 本就不可删除，能缺失只会是新装/手工清目录）；写入后若当前无启用任务，
+    /// 则把 `active` 置为 `default`（已有启用的不动）。排序列表不碰：未收录的
+    /// 任务在列表末尾展示，不影响既有顺序断言。
+    fn ensure_default_task(&self) {
+        let seed_path = self.browser_dir.join(format!("{DEFAULT_TASK_ID}.json"));
+        if !seed_path.exists() {
+            match std::fs::write(&seed_path, DEFAULT_TASK_SEED) {
+                Ok(()) => tracing::info!(
+                    path = %seed_path.display(),
+                    "已内置默认登录任务 default（通用登录），新装开箱即用"
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %seed_path.display(),
+                        error = %e,
+                        "写入内置默认登录任务失败，登录前需手动创建任务"
+                    );
+                    return;
+                }
+            }
+        }
+        let mut order = self.read_order();
+        if order.active.is_empty() && self.has_task(DEFAULT_TASK_ID) {
+            order.active = DEFAULT_TASK_ID.to_string();
+            match self.write_order(&order) {
+                Ok(()) => tracing::info!("当前无启用任务，已自动启用默认任务 default"),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "自动启用默认任务 default 失败，请在任务页手动启用一个任务"
+                ),
             }
         }
     }
@@ -1279,5 +1325,75 @@ mod tests {
         let foo = tasks.iter().find(|t| t.id == "foo").unwrap();
         assert_eq!(foo.name, "foo 脚本");
         assert_eq!(foo.task_type, "script");
+    }
+    // ============ 首启播种内置默认任务 ============
+
+    #[tokio::test]
+    async fn test_first_run_seeds_and_enables_default_task() {
+        // 新目录首启：写入种子并自动启用
+        let (_tmp, mgr) = make_task_manager().await;
+        let seed_path = mgr.browser_dir.join("default.json");
+        assert!(seed_path.exists(), "首启应写入内置默认任务");
+        let kind = mgr.load_task("default").await.expect("种子应为合法任务");
+        assert!(matches!(kind, TaskKind::Browser(_)));
+        assert_eq!(mgr.get_active_task().await, "default");
+    }
+
+    #[tokio::test]
+    async fn test_seed_never_overwrites_existing_default() {
+        // 已有 default.json（用户改过）的不覆盖，但无启用时仍自动启用它
+        let tmp = tempfile::tempdir().unwrap();
+        let browser = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::write(
+            browser.join("default.json"),
+            r#"{"type":"browser","name":"我的定制"}"#,
+        )
+        .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let config = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        let mgr = TaskManager::new(tmp.path(), config);
+        let kept = std::fs::read_to_string(browser.join("default.json")).unwrap();
+        assert!(kept.contains("我的定制"), "已有默认任务不得被种子覆盖");
+        assert_eq!(mgr.get_active_task().await, "default");
+    }
+
+    #[tokio::test]
+    async fn test_seed_keeps_existing_active_task() {
+        // 已有启用的不动：只补文件，不抢 active
+        let tmp = tempfile::tempdir().unwrap();
+        let browser = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        let task = TaskKind::Shell(ShellTaskConfig {
+            common: CommonFields {
+                name: "mine".to_string(),
+                ..Default::default()
+            },
+            command: "echo mine".to_string(),
+            ..Default::default()
+        });
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let config = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        // 先手写 mine 任务与指向它的 order，再构造管理器
+        std::fs::write(
+            browser.join("mine.json"),
+            serde_json::to_string(&task).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("tasks").join(".order.json"),
+            r#"{"order":["mine"],"active":"mine"}"#,
+        )
+        .unwrap();
+        let mgr = TaskManager::new(tmp.path(), config);
+        assert_eq!(mgr.get_active_task().await, "mine");
+        assert!(
+            mgr.browser_dir.join("default.json").exists(),
+            "缺失的种子仍应补上"
+        );
     }
 }

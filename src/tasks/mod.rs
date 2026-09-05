@@ -127,7 +127,7 @@ pub enum TaskError {
     #[error("任务ID重复: {0}")]
     DuplicateTaskId(String),
     /// 尝试删除 `default` 任务
-    #[error("不能删除默认任务")]
+    #[error("不能删除默认任务 default（系统内置登录任务）")]
     DeleteDefaultTask,
     /// JSON 格式/字段校验不通过
     #[error("任务验证失败: {0:?}")]
