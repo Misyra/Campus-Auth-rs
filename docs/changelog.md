@@ -1,6 +1,33 @@
 # 更新日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.6”。
+> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.7”。
+
+## v5.0.0-alpha.7（2026-09-05 重定向登录 + 开箱即用）
+
+### 重定向型门户登录
+
+- Profile 新增 `trigger_url`：非空即重定向模式（`auth_url` 可留空），Worker 首导航到明文 http 触发地址并跟随 302 到真门户，`{{LOGIN_URL}}` 同步；监测跳过 auth 探测、登录跳过 TCP 预检，劫持判定优先于断网
+- 账号页与方案页新增重定向模式开关：打开自动填入默认触发地址（`http://www.msftconnecttest.com/connecttest.txt`，与 Windows NCSI 同源），关闭清空回直连
+
+### 开箱即用
+
+- 内置默认登录任务（通用登录，经 `include_str!` 编进二进制）：首启缺失则写入并自动启用，已有启用/已改动的不碰；删默认任务、删除回退、`active.txt` 迁移缺省收敛常量
+- 登录缺配置与相关失败全部改中文指引：无启用任务→“当前无启用任务，请手动启用一个任务”；空账号/密码/地址、认证地址不可达、自动登录跳过均带下一步动作
+
+### 前端修复
+
+- 修复白屏：`useUi` 补缺失的 vue 导入（附入口求值回归单测）；首屏主题脚本外置过 `script-src 'self'`
+- 修复表单内开关滑块叠字：`form-group label` 权重覆盖 `toggle` 的 flex，显式赢回并禁滑块压缩（监测页既有开关同病）
+
+### 监测与登录
+
+- 外网探测失败但认证地址可达判为认证门户劫持，自动登录得以触发；门户二次判定签名简化
+- 浏览器自动选择、按需下载与无浏览器预检；非法代理 URL 转错误与配置合并去 unwrap；启动装配收敛与运行时目录单一事实源
+
+### 环境与发布
+
+- 环境下载链切 npmmirror 并改用 uv 管理 OCR（含锁文件）；流式尾行覆盖改纯函数单测去 flake
+- 文档接口改 markdown 直返与任务导入兼容；测试目录整理与共享脚手架；路由单测与登录全链路覆盖补齐
 
 ## 未发布（安全加固 + 测试体系）
 
@@ -10,7 +37,7 @@
 - 登录：指定 Profile 失败不再回退全局；切换失败仅告警（磁盘为权威，Engine 经 reload 收敛）；创建 Profile 检查与写入同锁原子化
 - 任务调度：成功条件脱敏（只记变量名，不拼值）；类型切换删旧目录残留；脚本路径解析失败直接拒绝；调度器文件写入串行化；自定义请求头黑名单 + 换行拦截
 - 系统边界：配置 reload 锁外通知；JoinError 走缓存沿用；探测子进程 kill_on_drop；监测代理/证书热更新；自启动先注册后落盘（失败回滚）；--force 杀进程前校验可执行文件名（防 PID 复用误杀）
-- 反馈与杂项：反馈包路径收敛 worker/debug + 50MiB 总量上限；OCR 目录统计不跟随 symlink；前端路径段编码 + window.open noopener；动态导入改静态；package-lock 对齐 alpha.6
+- 反馈与杂项：反馈包路径收敛 worker/debug + 50MiB 总量上限；OCR 目录统计不跟随 symlink；前端路径段编码 + window.open noopener；动态导入改静态；package-lock 对齐 alpha.7
 
 ### 测试体系
 

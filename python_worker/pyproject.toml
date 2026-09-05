@@ -1,6 +1,6 @@
 [project]
 name = "campus-auth-worker"
-version = "5.0.0-alpha.6"
+version = "5.0.0-alpha.7"
 description = "Campus-Auth 浏览器自动化 Python Worker（NDJSON IPC 子进程）"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
