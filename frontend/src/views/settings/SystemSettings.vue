@@ -27,6 +27,20 @@ const startupActionHint = computed(() => {
   }
 });
 
+// 定时自重启间隔（小时）：CustomSelect 值为字符串，经 computed 与 number 字段互转
+const autoRestartOptions: SelectOption[] = [
+  { value: "0", label: "不启用" },
+  { value: "6", label: "每 6 小时" },
+  { value: "12", label: "每 12 小时" },
+  { value: "24", label: "每 24 小时" },
+  { value: "48", label: "每 48 小时" },
+  { value: "168", label: "每 168 小时（每周）" },
+];
+const autoRestartHours = computed<string>({
+  get: () => String(config.config.app_settings.auto_restart_hours ?? 0),
+  set: (v) => { config.config.app_settings.auto_restart_hours = Number(v); },
+});
+
 // 运行模式
 const autostartModeOptions: SelectOption[] = [
   { value: "full", label: "完整模式" },
@@ -298,17 +312,7 @@ async function reloadConfig() {
             <label for="settings-auto-restart">定时自重启</label>
             <FieldHelp text="按运行时长周期性重启本程序，以回收内存。先启动新进程再退出旧进程，修改即时生效。" />
           </div>
-          <select
-            id="settings-auto-restart"
-            v-model.number="config.config.app_settings.auto_restart_hours"
-          >
-            <option :value="0">不启用</option>
-            <option :value="6">每 6 小时</option>
-            <option :value="12">每 12 小时</option>
-            <option :value="24">每 24 小时</option>
-            <option :value="48">每 48 小时</option>
-            <option :value="168">每 168 小时</option>
-          </select>
+          <CustomSelect v-model="autoRestartHours" :options="autoRestartOptions" />
         </div>
         <div class="form-group">
           <div class="field-label-row">
