@@ -19,10 +19,10 @@ const { toastOnly } = useToast();
 // ---- LLM 配置 ----
 /** 服务商预设：填好后可手动改（模型名随服务商版本更新） */
 const PRESETS = [
-  { label: "智谱 GLM（glm-4v 系列）", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4v-flash" },
+  { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4v-flash" },
   { label: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-chat" },
   { label: "硅基流动", base: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-VL-32B-Instruct" },
-  { label: "自定义 / 本地模型（Ollama 等）", base: "", model: "" },
+  { label: "自定义 / 本地模型", base: "", model: "" },
 ];
 
 const preset = ref(0);
