@@ -150,6 +150,13 @@ function closeEditor() { void t.closeTaskEditor(); }
         <div class="card-header"><h2>JSON 配置说明</h2></div>
         <div class="card-body">
           <div class="help-content">
+            <div class="help-tip">
+              <span>不想手写 JSON？<b>仓库导入</b>里有其他人适配好的校园网登录任务，一键即可获取。</span>
+              <button class="btn btn-sm" @click="repo.showRepoImport()" title="从云端仓库浏览并导入现成任务">
+                <IconApp name="globe-grid" class="icon-sm" />
+                从仓库导入
+              </button>
+            </div>
             <h4>支持的步骤类型</h4>
             <ul>
               <li><code>input</code> - 输入文本</li>

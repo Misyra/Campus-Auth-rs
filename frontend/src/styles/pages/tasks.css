@@ -126,6 +126,28 @@
   min-width: 120px;
 }
 
+/* 仓库导入引导条：帮助栏首屏提示（不想手写 JSON 的用户直达入口） */
+.help-tip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: var(--space-md);
+  border: 1px solid rgba(var(--accent-rgb), 0.25);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--accent-rgb), 0.07);
+  font-size: 0.86rem;
+}
+
+.help-tip span {
+  flex: 1;
+  min-width: 0;
+}
+
+.help-tip .btn {
+  flex-shrink: 0;
+}
+
 .help-content h4 {
   font-size: var(--text-base);
   margin: var(--space-md) 0 var(--space-sm);
