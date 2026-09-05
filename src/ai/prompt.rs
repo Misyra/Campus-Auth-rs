@@ -305,7 +305,10 @@ mod tests {
         assert!(text.contains("type=\"password\""), "表单被截掉: {text}");
         assert!(text.contains("submit"));
         // 尾部 5000 字符脚本只应按预算部分进入窗口，不能整段包含
-        assert!(!text.contains(&"y".repeat(2_000)), "尾部脚本不应整段进入窗口");
+        assert!(
+            !text.contains(&"y".repeat(2_000)),
+            "尾部脚本不应整段进入窗口"
+        );
         // 头部大量内容被省略
         assert!(text.contains("前方已省略"));
     }
