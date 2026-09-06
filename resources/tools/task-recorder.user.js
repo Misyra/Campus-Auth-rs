@@ -51,6 +51,7 @@
   const state = {
     active: false,
     recording: false,
+    modalOpen: false,
     multiStepMode: false,
     hiddenDetectionEnabled: true,
     revealEnabled: false,   // 强制显示隐藏输入框开关
@@ -1968,6 +1969,12 @@
   // onSubmit(values, { close }): 确定回调，返回 false 阻止关闭（用于校验失败）
   // onCancel(): 取消回调（可选），默认 state.recording = true
   function createModal({ title, fields, onSubmit, onCancel, ctx }) {
+    // 弹窗互斥标记：全局 onKeyDown 与本弹窗的 onKey 都挂在 document capture 上，
+    // 同节点按注册顺序先后执行，stopPropagation 拦不住同节点的后续监听。
+    // 不置标记的话按 Esc 会先被全局处理器清掉 currentStepType，再被本弹窗的
+    // defaultCancel 复位 recording=true，留下"recording=true 但无步骤类型"
+    // 的脏状态——下次点击页面元素会弹出 "📝 null" 垃圾弹窗并吞掉真实点击
+    state.modalOpen = true;
     const overlay = document.createElement("div");
     overlay.className = "ca-modal-overlay";
 
@@ -2029,6 +2036,7 @@
     function close() {
       if (closed) return;
       closed = true;
+      state.modalOpen = false;
       document.removeEventListener("keydown", onKey, true);
       overlay.remove();
     }
@@ -3127,6 +3135,12 @@
 
   function onKeyDown(e) {
     if (e.key === "Escape") {
+      // 弹窗打开期间 Esc 完全归 createModal 的 onKey 处理（见 createModal
+      // 的 modalOpen 注释）：此处若再清状态，会被 defaultCancel 复位
+      // recording=true，留下脏状态
+      if (state.modalOpen) {
+        return;
+      }
       if (state.recording) {
         state.recording = false;
         state.currentStepType = null;
