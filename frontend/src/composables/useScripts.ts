@@ -151,7 +151,11 @@ function onBinarySelectChange(): void {
   }
 }
 
+/** 保存请求 in-flight 标记：防连点并发两次保存 */
+const scriptSaving = ref(false);
+
 async function saveScript(): Promise<void> {
+  if (scriptSaving.value) return;
   if (!editingTask.value) return;
   const id = editingTask.value.id.trim();
   if (!id) {
@@ -192,6 +196,7 @@ async function saveScript(): Promise<void> {
     content: editingTask.value.content,
     binary_path: binaryPath,
   };
+  scriptSaving.value = true;
   try {
     const data = await scriptsApi.save(id, payload);
     clearScriptDraft();
@@ -199,6 +204,8 @@ async function saveScript(): Promise<void> {
     toastOnly(true, data?.message || "保存成功");
   } catch (error) {
     toastOnly(false, extractApiError(error, "保存失败"));
+  } finally {
+    scriptSaving.value = false;
   }
 }
 
@@ -316,6 +323,7 @@ export function useScripts() {
     isScriptDirty,
     onBinarySelectChange,
     saveScript,
+    scriptSaving,
     deleteScript,
     runScript,
     exportScript,

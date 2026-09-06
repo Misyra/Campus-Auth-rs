@@ -17,6 +17,7 @@ const {
   showScriptEditor,
   closeScriptEditor,
   saveScript,
+  scriptSaving,
   deleteScript,
   runScript,
   exportScript,
@@ -157,7 +158,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
         </div>
         <div class="card-footer">
           <button class="btn btn-secondary" @click="closeEditor">取消</button>
-          <button class="btn btn-primary" @click="saveScript()">保存脚本</button>
+          <button class="btn btn-primary" @click="saveScript()" :disabled="scriptSaving">保存脚本</button>
         </div>
       </div>
 

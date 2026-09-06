@@ -14,7 +14,7 @@ import { extractApiError } from "@/api/client";
 import { useToast } from "@/composables/useToast";
 import Modal from "./common/Modal.vue";
 
-const { session, loading, visible, nextStep, runAll, stopDebug, getStepStatus, getStepResult, clearScreenshot } =
+const { session, loading, visible, nextStep, runAll, stopDebug, stopping, getStepStatus, getStepResult, clearScreenshot } =
   useDebug();
 const downloading = ref(false);
 
@@ -178,7 +178,7 @@ async function handleFeedback(): Promise<void> {
         <button class="btn btn-secondary" :disabled="downloading" @click="handleFeedback">
           {{ downloading ? "导出中..." : "导出问题报告" }}
         </button>
-        <button class="btn btn-danger" @click="handleClose">停止调试</button>
+        <button class="btn btn-danger" @click="handleClose" :disabled="stopping">停止调试</button>
       </div>
     </template>
   </Modal>

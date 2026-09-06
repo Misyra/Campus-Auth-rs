@@ -179,7 +179,7 @@ const redirectEnabled = computed({
         </div>
         <div class="card-footer">
           <button class="btn btn-secondary" @click="closeEditor">取消</button>
-          <button class="btn btn-primary" @click="saveAndClose">保存方案</button>
+          <button class="btn btn-primary" @click="saveAndClose" :disabled="p.profileSaving.value">保存方案</button>
         </div>
       </div>
     </template>

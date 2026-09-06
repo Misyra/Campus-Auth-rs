@@ -113,7 +113,9 @@ async function fetchConfig(): Promise<void> {
   }
 }
 
-function validateConfig(): string[] {
+/** 保存前配置校验：errors 为阻断性硬错误，warnings 为需要用户知悉的疑点 */
+function validateConfig(): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
   const warnings: string[] = [];
   const url = config.credentials.auth_url;
   if (url && !/^https?:\/\//.test(url)) {
@@ -129,10 +131,11 @@ function validateConfig(): string[] {
     warnings.push("代理地址必须以 http:// 或 https:// 开头");
   }
   const port = config.app_settings.port;
+  // 端口非法是硬错误：服务重启后将无法按该端口监听，保存前必须拦下
   if (port && (port < 1 || port > 65535)) {
-    warnings.push("端口范围必须在 1-65535 之间");
+    errors.push("端口范围必须在 1-65535 之间");
   }
-  return warnings;
+  return { errors, warnings };
 }
 
 const { toastOnly } = useToast();
@@ -151,11 +154,23 @@ async function saveConfig(force = false): Promise<void> {
     return;
   }
 
-  const warnings = validateConfig();
-  if (warnings.length > 0) frontendLogger.warn("config", warnings.join("；"));
-  if (!config.credentials.auth_url && !config.credentials.trigger_url) frontendLogger.warn("config", "认证地址与触发地址均为空，自动认证将无法工作");
+  const { errors, warnings } = validateConfig();
+  if (errors.length > 0) {
+    // 硬错误阻断保存：仅写日志用户不可见，非法端口会静默保存成功
+    frontendLogger.warn("config", errors.join("；"));
+    toastOnly(false, errors.join("；"));
+    return;
+  }
+  // 警示不阻断（格式存疑的 URL、空认证地址、未启用检测等由用户自行判断），
+  // 但必须 toast 出来——嵌入场景下用户不看日志面板
+  const hints = [...warnings];
+  if (!config.credentials.auth_url && !config.credentials.trigger_url) hints.push("认证地址与触发地址均为空，自动认证将无法工作");
   if (!config.monitor.enable_tcp_check && !config.monitor.enable_http_check && !(config.monitor.url_check_urls && config.monitor.url_check_urls.length)) {
-    frontendLogger.warn("config", "未启用任何网络检测方式，自动认证可能无法正常工作");
+    hints.push("未启用任何网络检测方式，自动认证可能无法正常工作");
+  }
+  if (hints.length > 0) {
+    frontendLogger.warn("config", hints.join("；"));
+    toastOnly(false, hints.join("；"));
   }
 
   saveSeq++;

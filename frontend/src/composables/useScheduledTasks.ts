@@ -24,18 +24,18 @@ interface ScheduledTaskForm {
   timeout: number;
 }
 
-/** 从 5 字段 cron 表达式解析 hour 和 minute */
-function parseCronToSchedule(cron: string): { hour: number; minute: number } {
+/** 从 5 字段 cron 表达式解析 hour 和 minute；分/时字段含非纯数字内容（步进、区间、列表等）时返回 valid:false */
+export function parseCronToSchedule(cron: string): { hour: number; minute: number; valid: boolean } {
   const parts = cron.trim().split(/\s+/);
   // 标准 5 字段: minute hour day month weekday
-  if (parts.length >= 2) {
-    const minute = parseInt(parts[0], 10);
-    const hour = parseInt(parts[1], 10);
-    if (!isNaN(minute) && !isNaN(hour)) {
-      return { hour, minute };
-    }
+  // 必须整字段纯数字：parseInt("8-18") 会宽松解析为 8，把区间表达式
+  // "半解析成功"，调度语义已经变了却检测不到
+  if (parts.length >= 2 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+    return { hour: parseInt(parts[1], 10), minute: parseInt(parts[0], 10), valid: true };
   }
-  return { hour: 8, minute: 0 };
+  // 非每日时间表达式：回退 08:00 仅作表单展示初值，调用方必须提示覆盖后果
+  //（保存固定生成每日表达式，此前无提示导致调度语义被静默改写）
+  return { hour: 8, minute: 0, valid: false };
 }
 
 /** 从 {hour, minute} 生成 5 字段 cron 表达式 */
@@ -60,6 +60,9 @@ const editingScheduledTask = ref<string | null>(null);
 const scheduledTaskFormLoading = ref(false);
 const scheduledTaskHistoryLoading = ref(false);
 const selectedScheduledTaskId = ref<string | null>(null);
+/** 编辑中的任务原始 cron 表达式（非每日格式时在弹窗内明示覆盖后果） */
+const originalCron = ref("");
+const originalCronInvalid = ref(false);
 
 // A11：手动运行 busy 守卫（响应式 Set），防止连点重复提交
 const runningIds = useBusyIds();
@@ -87,6 +90,8 @@ async function loadScheduledTasks(force = false): Promise<void> {
 
 function openCreateScheduledTask(): void {
   editingScheduledTask.value = null;
+  originalCron.value = "";
+  originalCronInvalid.value = false;
   Object.assign(scheduledTaskForm.value, {
     name: "",
     description: "",
@@ -101,11 +106,22 @@ function openCreateScheduledTask(): void {
 
 function openEditScheduledTask(task: ScheduledTask): void {
   editingScheduledTask.value = task.id;
-  const schedule = parseCronToSchedule(task.cron || "");
+  const cron = task.cron || "";
+  const schedule = parseCronToSchedule(cron);
+  originalCron.value = cron;
+  originalCronInvalid.value = !schedule.valid;
+  if (!schedule.valid) {
+    toastOnly(
+      false,
+      `该任务使用非每日时间表达式（${cron}），保存后将按表单时间改为每日执行`,
+    );
+  }
   Object.assign(scheduledTaskForm.value, {
     name: task.name || "",
     description: task.description || "",
-    task_type: task.task_type || "browser",
+    // 表单类型仅用于展示/切换目标下拉：shell 为历史数据的合法取值但无对应
+    // 选项，回落 browser 展示；保存不上传类型，后端始终从 target 推导
+    task_type: task.task_type === "script" ? "script" : "browser",
     target_id: task.target_id || "",
     enabled: task.enabled !== false,
     schedule,
@@ -117,6 +133,8 @@ function openEditScheduledTask(task: ScheduledTask): void {
 function closeScheduledTaskModal(): void {
   showScheduledTaskModal.value = false;
   editingScheduledTask.value = null;
+  originalCron.value = "";
+  originalCronInvalid.value = false;
 }
 
 async function saveScheduledTask(): Promise<void> {
@@ -256,6 +274,8 @@ export function useScheduledTasks() {
     scheduledTaskFormLoading,
     scheduledTaskHistoryLoading,
     selectedScheduledTaskId,
+    originalCron,
+    originalCronInvalid,
     runningIds,
     loadScheduledTasks,
     openCreateScheduledTask,

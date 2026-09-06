@@ -120,7 +120,11 @@ async function closeProfileEditor(): Promise<void> {
   editingProfileSnapshot = "";
 }
 
+/** 保存请求 in-flight 标记：防连点并发两次 PUT（新建方案第二次会撞"已存在"） */
+const profileSaving = ref(false);
+
 async function saveProfile(): Promise<boolean> {
+  if (profileSaving.value) return false;
   if (!editingProfile.value) return false;
   const profile = editingProfile.value;
   const profileId = profile.id.trim();
@@ -140,6 +144,7 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(false, "请填写自定义运营商关键字");
     return false;
   }
+  profileSaving.value = true;
   try {
     let data;
     if (_isNew) {
@@ -167,6 +172,8 @@ async function saveProfile(): Promise<boolean> {
     frontendLogger.error("profiles", "方案保存异常: " + msg, error);
     toastOnly(false, msg);
     return false;
+  } finally {
+    profileSaving.value = false;
   }
 }
 
@@ -291,6 +298,7 @@ export function useProfiles() {
     fetchProfiles,
     showProfileEditor,
     saveProfile,
+    profileSaving,
     deleteProfile,
     setActiveProfile,
     detectNetworkForEditor,

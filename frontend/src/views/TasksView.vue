@@ -141,7 +141,7 @@ function closeEditor() { void t.closeTaskEditor(); }
         </div>
         <div class="card-footer">
           <button class="btn btn-secondary" @click="closeEditor">取消</button>
-          <button class="btn btn-primary" @click="t.saveTask()" :disabled="!!t.jsonError.value">保存任务</button>
+          <button class="btn btn-primary" @click="t.saveTask()" :disabled="!!t.jsonError.value || t.taskSaving.value">保存任务</button>
         </div>
       </div>
 

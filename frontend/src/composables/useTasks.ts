@@ -157,7 +157,11 @@ function clearTaskDraft(): void {
   jsonError.value = "";
 }
 
+/** 保存请求 in-flight 标记：防连点并发两次 PUT（新建任务第二次会撞"已存在"） */
+const taskSaving = ref(false);
+
 async function saveTask(): Promise<void> {
+  if (taskSaving.value) return;
   if (!editingTask.value || !editingTask.value.id) {
     toastOnly(false, "请输入任务ID");
     return;
@@ -195,6 +199,7 @@ async function saveTask(): Promise<void> {
     if (!ok) return;
   }
 
+  taskSaving.value = true;
   try {
     const data = await tasksApi.save(editingTask.value.id, payload);
     frontendLogger.info("tasks", data?.message || "任务保存成功");
@@ -203,6 +208,8 @@ async function saveTask(): Promise<void> {
   } catch (error) {
     frontendLogger.error("tasks", "保存任务失败", error);
     toastOnly(false, extractApiError(error, "保存失败"));
+  } finally {
+    taskSaving.value = false;
   }
 }
 
@@ -422,6 +429,7 @@ export function useTasks() {
     setActiveTask,
     executeTask,
     saveTask,
+    taskSaving,
     deleteTask,
     showTaskEditor,
     closeTaskEditor,

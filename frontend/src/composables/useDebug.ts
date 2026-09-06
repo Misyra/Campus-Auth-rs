@@ -93,8 +93,13 @@ async function runAll(): Promise<void> {
   }
 }
 
+/** 停止请求 in-flight 标记：防连点并发两次 stop */
+const stopping = ref(false);
+
 /** 停止调试 */
 async function stopDebug(): Promise<void> {
+  if (stopping.value) return;
+  stopping.value = true;
   try {
     const data = await debugApi.stop();
     frontendLogger.info("debug", "调试已停止");
@@ -103,6 +108,7 @@ async function stopDebug(): Promise<void> {
     frontendLogger.error("debug", "停止调试失败", error);
     toastOnly(false, "停止调试失败");
   } finally {
+    stopping.value = false;
     // 无论 API 成功失败都重置本地状态；顺带取消未触发的详情补全定时器
     clearDetailRefill();
     syncSession(emptySession());
@@ -250,6 +256,7 @@ export function useDebug() {
     nextStep,
     runAll,
     stopDebug,
+    stopping,
     getStepResult,
     getStepStatus,
     handleScreenshot,

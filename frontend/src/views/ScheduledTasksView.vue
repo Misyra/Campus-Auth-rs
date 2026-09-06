@@ -15,10 +15,11 @@ const { tasks: browserTasks } = useTasks();
 
 onMounted(() => { void st.loadScheduledTasks(); });
 
+// 类型仅用于切换目标下拉：保存不上传 task_type，后端从 target 推导——
+// 不提供 shell 选项（选了也会按 target 被推导成 browser 任务，纯误导）
 const scheduledTaskTypeOptions: SelectOption[] = [
   { value: "browser", label: "浏览器任务" },
   { value: "script", label: "自定义脚本" },
-  { value: "shell", label: "Shell 命令" },
 ];
 
 const scriptTargetOptions = computed<SelectOption[]>(() =>
@@ -118,6 +119,9 @@ const browserTargetOptions = computed<SelectOption[]>(() =>
             <input id="scheduled-task-time" type="time"
               :value="st.formatScheduleTime(st.scheduledTaskForm.value.schedule)"
               @input="st.onTimeChange($event as InputEvent)" />
+            <span v-if="st.originalCronInvalid.value" class="hint text-danger">
+              原表达式「{{ st.originalCron.value }}」不是每日时间格式，保存后将按上方时间改为每日执行
+            </span>
           </div>
           <div class="form-group">
             <label for="scheduled-task-timeout">超时（秒）</label>
