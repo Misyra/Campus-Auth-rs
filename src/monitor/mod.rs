@@ -291,7 +291,8 @@ impl MonitorService {
         }
 
         // 步骤 2：物理网卡连接检查（由 local_check_enabled 控制）
-        // 逻辑：存在在线网卡表明链路已连接；网卡全失联时直接判 Offline，跳过后续探测。
+        // 逻辑：仅当明确检测到在线网卡时作为正向佐证；检测失败/超时/结果为空
+        // 一律跳过，交由后续三类探测决定状态（探测才是连通性的权威来源）
         if cfg.local_check_enabled {
             match tokio::time::timeout(
                 INTERFACE_CHECK_TIMEOUT,
@@ -302,26 +303,15 @@ impl MonitorService {
                 Ok(Ok(list)) => {
                     debug!("网卡检测通过：发现 {} 个网卡", list.len());
                     if list.is_empty() {
-                        return Ok(self.finalize_report(
-                            NetworkStatus::Offline,
-                            ProbeOutcome::Disabled,
-                            ProbeOutcome::Disabled,
-                            ProbeOutcome::Disabled,
-                            0,
-                            None,
-                        ));
+                        // 空结果 ≠ 网络断开：非中英文系统的 ipconfig 输出解析不出
+                        // 适配器块（H6），判 Offline 会在 auth_url 可达时升级为
+                        // CaptivePortal 触发登录循环。与超时分支同语义：跳过本步骤
+                        warn!("网卡检测返回空列表（疑似输出语言不匹配），本轮跳过网卡检查");
                     }
                 }
                 Ok(Err(e)) => {
-                    warn!("网卡检测失败: {e}");
-                    return Ok(self.finalize_report(
-                        NetworkStatus::Offline,
-                        ProbeOutcome::Disabled,
-                        ProbeOutcome::Disabled,
-                        ProbeOutcome::Disabled,
-                        0,
-                        None,
-                    ));
+                    // 检测手段故障 ≠ 网络断开：与超时分支同语义，跳过并交由后续探测
+                    warn!("网卡检测失败，本轮跳过网卡检查，继续网络探测: {e}");
                 }
                 Err(_) => {
                     // 检测手段超时 ≠ 网络断开：ipconfig 冷启动/AV 扫描拖慢会

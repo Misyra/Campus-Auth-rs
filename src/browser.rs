@@ -154,8 +154,10 @@ pub fn is_channel_available(channel: &str, custom_path: &str) -> bool {
         "firefox" => crate::environment::bootstrap::playwright_browser_installed("firefox"),
         "webkit" => crate::environment::bootstrap::playwright_browser_installed("webkit"),
         "custom" => {
+            // 必须是可执行文件而非仅存在的路径：指向目录会通过健康检查、
+            // 启动时才以晦涩的 Playwright 报错失败（H2）
             let p = custom_path.trim();
-            !p.is_empty() && Path::new(p).exists()
+            !p.is_empty() && Path::new(p).is_file()
         }
         _ => false,
     }

@@ -93,7 +93,7 @@ fn record_frontend_log(data: &serde_json::Value) {
 ///
 /// 截图仅用于本机调试面板；限制 8MiB 避免 full_page 极端页面把单条广播消息
 /// 膨胀到数十 MiB。超过上限时仍转发截图事件元数据，但不附带 `url`。
-const DEBUG_SCREENSHOT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const DEBUG_SCREENSHOT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 从 Worker 提供的本地路径中提取可安全回读的截图文件名。
 ///

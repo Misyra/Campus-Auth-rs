@@ -66,7 +66,9 @@ impl Metrics {
 
     /// 记录一次探测并更新平均耗时（毫秒）
     pub fn record_probe(&self, duration_ms: u64) {
-        // CAS 循环保证 total 与 avg 的读改写原子性，避免并发探测丢样本
+        // CAS 只保护 total 的计数原子性；avg 是 CAS 成功后的普通 store——并发下
+        // 两个样本可能以彼此看不见的顺序覆盖 avg，产生毫秒级统计偏差（可接受，
+        // 指标仅作趋势参考；如需严格原子需改为互斥或打包单字，不值当）
         loop {
             let total = self.probe_total.load(Ordering::Relaxed);
             let prev = self.probe_duration_ms_avg.load(Ordering::Relaxed);

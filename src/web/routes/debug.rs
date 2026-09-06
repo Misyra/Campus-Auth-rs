@@ -159,8 +159,22 @@ pub async fn debug_screenshot(
     if !path.exists() {
         return Err(ApiError::NotFound(format!("截图 {} 不存在", filename)));
     }
+    // 与 WS 内联（ws.rs prepare_bridge_event）同款安全口径（H4）：大小上限 +
+    // PNG/JPEG magic bytes 校验，只内联真实图片内容，杜绝 debug 目录被塞入
+    // 任意文件后借免鉴权 <img> 引用外发；顺带修正 JPEG 被硬编码为 image/png 的问题
+    let meta = tokio::fs::metadata(&path).await?;
+    if !meta.is_file() || meta.len() > crate::web::ws::DEBUG_SCREENSHOT_MAX_BYTES {
+        return Err(ApiError::BadRequest("截图文件超出大小限制或非法".into()));
+    }
     let bytes = tokio::fs::read(&path).await?;
-    Ok(([(header::CONTENT_TYPE, "image/png")], bytes))
+    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else {
+        return Err(ApiError::BadRequest("截图文件不是有效的 PNG/JPEG 图片".into()));
+    };
+    Ok(([(header::CONTENT_TYPE, mime)], bytes))
 }
 
 /// POST /api/debug/feedback-bundle — 导出问题报告（zip）
@@ -909,7 +923,8 @@ mod tests {
         // worker 工程目录：base_path 下 python_worker/（resolve 优先命中）
         let dbg = tmp.path().join("python_worker").join("debug");
         std::fs::create_dir_all(&dbg).unwrap();
-        std::fs::write(dbg.join("s1.png"), b"\x89PNG-hit").unwrap();
+        // H4 校验要求真实 PNG magic bytes：夹具用完整签名 + 标记尾巴
+        std::fs::write(dbg.join("s1.png"), b"\x89PNG\r\n\x1a\nhit").unwrap();
         let (app, _, cfg) = mock_app();
         cfg.lock().unwrap().base_path = tmp.path().to_path_buf();
         let uri = "/api/debug/screenshot/missing.png";
