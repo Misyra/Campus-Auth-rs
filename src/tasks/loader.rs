@@ -463,6 +463,18 @@ impl TaskManager {
 
         match kind {
             "browser" => {
+                // 浏览器任务 timeout 钳制：与脚本任务 clamp_timeout 口径对齐。
+                // 无校验时导入的第三方 JSON 可传 0（执行时 max(1) 变 1ms 永远
+                // 秒超时）或超大值（会话槽位被占一天，期间所有浏览器任务/登录被拒）
+                let timeout = config
+                    .get("timeout")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(crate::tasks::DEFAULT_TASK_TIMEOUT_MS);
+                if !(MIN_TASK_TIMEOUT_MS..=MAX_TASK_TIMEOUT_MS).contains(&timeout) {
+                    errors.push(format!(
+                        "timeout 需在 {MIN_TASK_TIMEOUT_MS}-{MAX_TASK_TIMEOUT_MS} 毫秒之间（当前 {timeout}）"
+                    ));
+                }
                 let steps = config.get("steps").and_then(|s| s.as_array());
                 match steps {
                     None => errors.push("steps 必须为数组".to_string()),
@@ -486,7 +498,7 @@ impl TaskManager {
                                 continue;
                             }
                             match stype {
-                                "input" | "click" | "select" | "click_select" | "wait" | "ocr" => {
+                                "input" | "click" | "click_select" | "ocr" => {
                                     if step
                                         .get("selector")
                                         .and_then(|v| v.as_str())
@@ -494,6 +506,45 @@ impl TaskManager {
                                         .is_empty()
                                     {
                                         errors.push(format!("步骤[{i}] 需要 selector"));
+                                    }
+                                }
+                                // select 的 value 是操作目标（option 的 value/文本），
+                                // 缺失时执行层会静默 no-op——所有步骤"成功"但运营商
+                                // 根本没选，必须在校验层显式拒绝
+                                "select" => {
+                                    if step
+                                        .get("selector")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .is_empty()
+                                    {
+                                        errors.push(format!("步骤[{i}] 需要 selector"));
+                                    }
+                                    if step
+                                        .get("value")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .trim()
+                                        .is_empty()
+                                    {
+                                        errors.push(format!("步骤[{i}] 需要 value"));
+                                    }
+                                }
+                                // wait 双语义（对齐 Python 执行器 handle_wait）：
+                                // 有 selector 等元素，否则按 duration(ms) 休眠。
+                                // 与 AI 提示词（prompt.rs）口径一致，此前强制
+                                // selector 会让 AI 生成的休眠步骤两轮自纠全败
+                                "wait" => {
+                                    let has_selector = !step
+                                        .get("selector")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .is_empty();
+                                    let has_duration =
+                                        step.get("duration").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            > 0;
+                                    if !has_selector && !has_duration {
+                                        errors.push(format!("步骤[{i}] 需要 selector 或 duration"));
                                     }
                                 }
                                 "wait_url" => {
@@ -506,7 +557,7 @@ impl TaskManager {
                                         errors.push(format!("步骤[{i}] 需要 pattern"));
                                     }
                                 }
-                                "eval" | "custom_js" => {
+                                "eval" | "custom_js" | "evaluate" | "custom" => {
                                     let has = step
                                         .get("script")
                                         .and_then(|v| v.as_str())
@@ -1098,6 +1149,119 @@ mod tests {
         });
         let errors = mgr.validate_task(&task).unwrap_err();
         assert!(errors.iter().any(|e| e.contains("需要非空 script 或 code")));
+    }
+
+    #[tokio::test]
+    async fn test_validate_wait_accepts_duration_only() {
+        // wait 双语义：无 selector 时按 duration 休眠（对齐 prompt.rs 与
+        // Python handle_wait）——此前强制 selector 会让 AI 生成的休眠步骤两轮自纠全败
+        let (_tmp, mgr) = make_task_manager().await;
+        let task = serde_json::json!({
+            "type": "browser",
+            "name": "等待任务",
+            "steps": [{
+                "id": "w",
+                "type": "wait",
+                "duration": 2000
+            }]
+        });
+        assert!(mgr.validate_task(&task).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_wait_requires_selector_or_duration() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let task = serde_json::json!({
+            "type": "browser",
+            "name": "等待任务",
+            "steps": [{
+                "id": "w",
+                "type": "wait"
+            }]
+        });
+        let errors = mgr.validate_task(&task).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("需要 selector 或 duration"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_select_requires_value() {
+        // select 空 value 在执行层是静默 no-op（所有步骤绿但运营商没选），
+        // 校验层必须显式拒绝
+        let (_tmp, mgr) = make_task_manager().await;
+        let invalid = serde_json::json!({
+            "type": "browser",
+            "name": "运营商任务",
+            "steps": [{
+                "id": "sel",
+                "type": "select",
+                "selector": "#isp"
+            }]
+        });
+        let errors = mgr.validate_task(&invalid).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("需要 value")));
+
+        let valid = serde_json::json!({
+            "type": "browser",
+            "name": "运营商任务",
+            "steps": [{
+                "id": "sel",
+                "type": "select",
+                "selector": "#isp",
+                "value": "电信"
+            }]
+        });
+        assert!(mgr.validate_task(&valid).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_browser_timeout_bounds() {
+        // timeout 钳制：0 → 执行时 1ms 永远秒超时；超大值占住全局互斥的会话槽位
+        let (_tmp, mgr) = make_task_manager().await;
+        let zero = serde_json::json!({
+            "type": "browser",
+            "name": "超时任务",
+            "timeout": 0,
+            "steps": [{"id": "w", "type": "wait", "duration": 100}]
+        });
+        let errors = mgr.validate_task(&zero).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("timeout 需在")));
+
+        let huge = serde_json::json!({
+            "type": "browser",
+            "name": "超时任务",
+            "timeout": 86400000,
+            "steps": [{"id": "w", "type": "wait", "duration": 100}]
+        });
+        let errors = mgr.validate_task(&huge).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("timeout 需在")));
+
+        let ok = serde_json::json!({
+            "type": "browser",
+            "name": "超时任务",
+            "timeout": 30000,
+            "steps": [{"id": "w", "type": "wait", "duration": 100}]
+        });
+        assert!(mgr.validate_task(&ok).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_accepts_evaluate_custom_alias() {
+        // Python 执行器注册的 evaluate/custom 别名必须在 Rust 校验侧放行，
+        // 否则录制/AI 产物保存时被误拒
+        let (_tmp, mgr) = make_task_manager().await;
+        let task = serde_json::json!({
+            "type": "browser",
+            "name": "别名任务",
+            "steps": [
+                {"id": "a", "type": "evaluate", "script": "return 1;"},
+                {"id": "b", "type": "custom", "code": "return 2;"}
+            ]
+        });
+        assert!(mgr.validate_task(&task).is_ok());
     }
 
     #[tokio::test]

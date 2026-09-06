@@ -148,20 +148,20 @@ const urlCheckText = computed({
                 <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.enable_http_check" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">HTTP 检测</span>
+                  <span class="toggle-label">204 检测</span>
                 </label>
-                <FieldHelp text="通过 HTTP 请求判断网络连通性，更接近真实上网行为。" />
+                <FieldHelp text="请求 generate_204 端点判断网络状态：204=在线，200/跳转=被门户劫持。主流厂商（小米/华为/vivo）均提供该端点，是误判率最低的检测方式。" />
               </div>
             </div>
             <div v-if="config.config.monitor.enable_http_check" class="form-group settings-toggle-compact">
               <div class="field-label-row">
-                <label for="settings-http-targets">HTTP 检测目标</label>
-                <FieldHelp text="建议使用返回 204 的轻量探针地址。" />
+                <label for="settings-http-targets">204 检测目标</label>
+                <FieldHelp text="必须填写返回 204 的轻量端点（generate_204 类）。填普通网页会导致恒判被劫持，反复触发登录。" />
               </div>
               <input id="settings-http-targets"
                 :value="config.config.monitor.test_urls.join(',')"
                 @input="config.config.monitor.test_urls = ($event.target as HTMLInputElement).value.split(',').map(s => s.trim()).filter(Boolean)"
-                type="text" placeholder="https://connect.rom.miui.com/generate_204" />
+                type="text" placeholder="http://connect.rom.miui.com/generate_204" />
             </div>
             <div class="toggle-group settings-toggle-spacer">
               <div class="toggle-with-help">

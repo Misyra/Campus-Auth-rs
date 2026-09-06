@@ -46,6 +46,10 @@ pub struct TaskCreateBody {
     pub url: Option<String>,
     pub script: Option<String>,
     pub command: Option<String>,
+    /// browser 任务的步骤列表：缺省为空（由 save_task 的校验显式报错，
+    /// 与 PUT /api/tasks 的口径一致），传入时反序列化为 StepConfig
+    #[serde(default)]
+    pub steps: Option<serde_json::Value>,
 }
 
 /// POST /api/tasks — 创建任务
@@ -63,9 +67,17 @@ pub async fn create_task(
         // 与 G6 同语义：缺失/空串/browser → 浏览器任务（向后兼容）；
         // 存在但未知 → 明确 400，不静默回退
         None | Some("") | Some("browser") => {
+            // steps 缺省为空 → save_task 校验显式报「steps 不能为空」；
+            // 传入时反序列化失败返回 400 而非 500（修复创建 browser 任务必然失败）
+            let steps = match body.steps {
+                Some(v) => serde_json::from_value(v)
+                    .map_err(|e| ApiError::BadRequest(format!("steps 格式错误: {e}")))?,
+                None => Vec::new(),
+            };
             crate::tasks::TaskKind::Browser(crate::tasks::TaskConfig {
                 common,
                 url: body.url.unwrap_or_default(),
+                steps,
                 ..Default::default()
             })
         }
@@ -294,7 +306,8 @@ pub async fn execute_task(
     let task = tasks
         .load_task(&id)
         .await
-        .map_err(|e| ApiError::NotFound(format!("任务不存在: {e}")))?;
+        // TaskError 按变体映射（NotFound/400/409/500），不再统一 404 丢失排查信息
+        .map_err(ApiError::from)?;
     let result = runner.execute(&task).await.map_err(ApiError::from)?;
     Ok(data(serde_json::to_value(&result)?))
 }

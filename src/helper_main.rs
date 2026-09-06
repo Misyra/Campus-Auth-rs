@@ -366,6 +366,32 @@ fn sync_distribution_files(extracted_dir: &Path, base_path: &Path) {
             eprintln!("[helper] 同步 {dir}/ 失败（继续）: {e}");
         }
     }
+    // Python 依赖清单内容实际变化时写重同步标记：主程序 ensure_venv 的
+    // 快速路径只验证解释器可启动，不感知依赖变化，不标记则新增依赖
+    // 在运行时 import 才暴露
+    let py_src = extracted_dir.join("python_worker").join("pyproject.toml");
+    let lock_src = extracted_dir.join("python_worker").join("uv.lock");
+    let py_dst = base_path.join("python_worker").join("pyproject.toml");
+    let lock_dst = base_path.join("python_worker").join("uv.lock");
+    let changed = (py_src.exists() && file_differs(&py_src, &py_dst))
+        || (lock_src.exists() && file_differs(&lock_src, &lock_dst));
+    if changed {
+        let marker = base_path
+            .join("python_worker")
+            .join(campus_auth::environment::RESYNC_MARKER);
+        match std::fs::write(&marker, Local::now().to_rfc3339()) {
+            Ok(()) => println!("[helper] Python 依赖清单变更，已写入重同步标记"),
+            Err(e) => eprintln!("[helper] 写重同步标记失败: {e}"),
+        }
+    }
+}
+
+/// 两个文件内容是否不同（任一侧读取失败/缺失视为不同）
+fn file_differs(a: &Path, b: &Path) -> bool {
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x != y,
+        _ => true,
+    }
 }
 
 /// 递归 overlay 复制目录：目标侧不存在的路径创建，已存在的文件覆盖

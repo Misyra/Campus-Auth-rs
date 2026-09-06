@@ -731,7 +731,33 @@ impl LoginOrchestrator {
             let state_arc = self.state.clone();
             let finished_notifier = finished.clone();
             tokio::spawn(async move {
-                session.run().await;
+                // 内层独立 spawn：JoinHandle 不会像 watch channel 一样被句柄持有者
+                // "保活"——run() panic 时内层返回 Err，外层可据此补写终态。
+                // 直接 await run() 的话 panic 会跳过 notify/清槽位，且 handle 持有
+                // watch sender 使 channel 永不关闭 → await_result 永挂、
+                // auto_login_in_flight 恒 true，自动登录静默失效直到重启。
+                let run = tokio::spawn(async move {
+                    session.run().await;
+                });
+                let panicked = run.await.is_err();
+                if panicked {
+                    // panic 路径：run() 未写终态。在清槽位前从活跃会话取回 handle
+                    // 补写失败结果，保证 await_result 必有返回
+                    let g = state_arc.lock().await;
+                    if matches!(&g.active_session, Some(a) if a.session_id == session_id) {
+                        if let Some(a) = &g.active_session {
+                            a.handle.inner.set_result(LoginResult {
+                                success: false,
+                                message: "登录会话内部异常，已中止".into(),
+                                source,
+                                duration: Duration::ZERO,
+                                attempts: 0,
+                            });
+                        }
+                        tracing::error!("登录会话 task panic，已补写失败终态");
+                    }
+                    drop(g);
+                }
                 // F6：run() 返回即全部收尾动作（含 emit 的 close_browser）完成，
                 // 触发通知供抢占方放行新会话；无等待者时存储许可，不丢失
                 finished_notifier.notify_one();

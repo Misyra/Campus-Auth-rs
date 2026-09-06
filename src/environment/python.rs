@@ -61,8 +61,17 @@ pub async fn ensure_venv(
         .worker_project_path()
         .join(crate::environment::PYTHON_EXE_RELATIVE);
 
+    // 更新 overlay 后的强制重同步：依赖清单变化时 helper 写入标记，
+    // 即使解释器完好也必须跑一次 uv sync，否则新增依赖要到 import 才暴露
+    let resync_marker = mgr
+        .worker_project_path()
+        .join(crate::environment::RESYNC_MARKER);
+    let resync_pending = resync_marker.is_file();
+
     // 文件存在不代表 uv 管理的基础解释器仍存在，必须实际启动一次。
-    if let Err(reason) = python_executable_status(&python_exe).await {
+    if resync_pending {
+        tracing::info!("检测到更新后依赖重同步标记，强制执行 uv sync");
+    } else if let Err(reason) = python_executable_status(&python_exe).await {
         // 补充探测失败的具体原因（缺失 / 启动失败 / 超时），便于定位 venv 损坏
         tracing::debug!(reason = %reason, "Python 解释器探测未通过，虚拟环境需要修复");
     } else {
@@ -76,6 +85,13 @@ pub async fn ensure_venv(
         tracing::info!("虚拟环境不存在，执行 uv sync 创建...");
     }
     crate::environment::uv::run_uv_sync(mgr, cancel).await?;
+
+    // 同步成功后清理标记：残留会导致下次启动多跑一次 uv sync（幂等无害）
+    if resync_pending {
+        if let Err(e) = std::fs::remove_file(&resync_marker) {
+            tracing::warn!("清理依赖重同步标记失败: {e}");
+        }
+    }
 
     // 验证创建成功
     if !python_executable_works(&python_exe).await {

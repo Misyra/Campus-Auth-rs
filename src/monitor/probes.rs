@@ -164,7 +164,10 @@ impl TcpProbe {
     }
 }
 
-/// HTTP 探测：状态码语义（204=Pass，200/3xx=Captive，其余状态码=Pass（连通成立），超时/连接失败=Fail）
+/// 204 检测（HTTP 探测）：请求 generate_204 类端点，按状态码判定
+/// （204=Pass，200/3xx=Captive 劫持证据，其余状态码=Pass（连通成立），超时/连接失败=Fail）。
+/// 目标必须是 generate_204 端点——204 端点返回 200 即门户劫持，这是 Android/captive
+/// 检测的事实标准；配置普通网页作目标会恒判 Captive 导致登录循环
 pub struct HttpProbe;
 
 impl HttpProbe {
@@ -199,11 +202,11 @@ async fn probe_http_one(
                 204 => ProbeOutcome::Pass,
                 200 => ProbeOutcome::Captive,
                 301..=308 => ProbeOutcome::Captive,
-                // 1xx/4xx/5xx：探测目标服务异常，但 TCP+TLS+HTTP 链路完整，
-                // 物理连通成立。判 Fail 会把"在线"误判为 Offline，
-                // 状态永不恢复且永不触发自动登录
+                // 1xx/4xx/5xx：204 端点返回非预期状态码（目标服务异常或配置了非 204 端点），
+                // 但 TCP+TLS+HTTP 链路完整，物理连通成立。判 Fail 会把"在线"误判为
+                // Offline，进而在 auth_url 可达时升级为 CaptivePortal 触发登录循环
                 other => {
-                    tracing::debug!(url = %url, status = other, "HTTP 探测返回非预期状态码，按连通处理");
+                    tracing::debug!(url = %url, status = other, "204 检测返回非预期状态码，按连通处理");
                     ProbeOutcome::Pass
                 }
             };

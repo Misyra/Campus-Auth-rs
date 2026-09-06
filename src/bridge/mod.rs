@@ -909,22 +909,18 @@ async fn execute_inner(
         }
 
         // 4.4 发送成功后再改动会话/取消状态（此后不再有可失败操作）。
-        // 先注册新 cancel token，再清理旧会话残留的 cancel_id（如 InLogin 时 debug_start
-        // 覆盖 current_session，旧 Login 的 cancel_id 不再被追踪）。仅当新旧不同才移除，
-        // 避免调用方复用同一 cancel_id 时误删刚注册的 token。
+        // cancel_registry 支持多活跃 token 共存：InLogin 时新命令 supersede 会话槽位
+        // （current_cancel_id 更新为新请求），但**不移除旧命令的 cancel_id**——
+        // 旧登录的取消传播按 cancel_id 查注册表（session.rs attempt_cancel_id），
+        // 提前移除会让用户对在途登录的取消静默失效。各命令自身的 cancel_id
+        // 由其 SessionGuard drop 时无条件移除（防泄漏）。
         inner
             .cancel_registry
             .register(cancel_id.clone(), token.clone());
         if is_ocr {
-            // OCR 轻量旁路：仅注册 cancel，不触碰会话槽位 / worker_state / 空闲计时器，
-            // 也不移除旧会话的 cancel_id（OCR 与任意会话并发，绝不清他人注册）。
+            // OCR 轻量旁路：仅注册 cancel，不触碰会话槽位 / worker_state / 空闲计时器。
             // pending 与 cancel 的清理交给 guard drop 的轻量回调（lightweight_cleanup）。
         } else {
-            if let Some(old_cancel_id) = inner.current_cancel_id.take() {
-                if old_cancel_id != cancel_id {
-                    inner.cancel_registry.remove(&old_cancel_id);
-                }
-            }
             inner.worker_state = if session == SessionType::Debug {
                 WorkerState::InDebug
             } else {
@@ -973,9 +969,18 @@ async fn execute_inner(
     } else {
         SessionGuard::new({
             let weak = this.self_weak.clone();
+            let cancel_id = cancel_id.clone();
             move || {
                 if let Some(sup) = weak.upgrade() {
                     reset_session(&sup, session, request_id);
+                    // 会话槽位可能已被后续命令 supersede（reset_session 匹配失败
+                    // 不做清理），本命令的 cancel_id 由守卫无条件移除防泄漏；
+                    // cancel_id 为每请求 UUID，不会误删他人注册
+                    sup.inner
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .cancel_registry
+                        .remove(&cancel_id);
                 }
             }
         })
@@ -1023,17 +1028,18 @@ fn debug_guard_cleanup(
     is_stop: bool,
 ) {
     let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-    // 双重匹配：仅当槽位仍为本 Debug 请求时才动状态（幂等防误清新会话）
+    // 槽位可能已被后续命令 supersede：无论匹配与否都先移除本命令注册的
+    // cancel_id（多 token 共存语义下，守卫负责自身清理，防泄漏）
     if inner.current_session != Some(SessionType::Debug)
         || inner.current_request_id != Some(request_id)
     {
+        inner.cancel_registry.remove(cancel_id);
         return;
     }
     inner.current_request_id = None;
-    if let Some(cid) = inner.current_cancel_id.take() {
-        inner.cancel_registry.remove(cancel_id);
-        let _ = cid;
-    }
+    // 双重匹配已确认槽位 cancel_id 即本请求
+    inner.current_cancel_id = None;
+    inner.cancel_registry.remove(cancel_id);
     if is_stop || !inner.debug_session_open {
         inner.debug_session_open = false;
         inner.last_screenshot_url = None;
@@ -1412,15 +1418,36 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
             "Worker 运行期间累计 {invalid_lines} 行非 JSON IPC 输出（stdout 疑似被第三方库污染），相关请求可能已超时"
         );
     }
-    // 正常退出（空闲回收 / 用户主动停止 / shutdown）：不记为崩溃，不计入指标，
-    // 不触发孤儿清理，也不置 Error。仅 drain pending 作为防御（正常退出时不应有在途请求）。
+    // 正常退出（空闲回收 / 用户主动停止 / shutdown / Worker 自行退出）：不记为崩溃，
+    // 不计入指标，不触发孤儿清理，也不置 Error。但必须完整清理进程与会话状态——
+    // Worker 可能非由 Rust 发起 shutdown 而自行退出（如 stdin EOF）：若只置 Idle
+    // 而保留 process/current_session，is_worker_ready 会持续误报 Ready，后续命令
+    // 写死管道且永不重 spawn，调试会话滞留还会让所有登录被 WorkerBusy 拒绝。
     if code == 0 {
         info!(target: "python_worker", "Worker 正常退出，exit_code=0");
+        // 正常退出时通常不应有在途请求；仍 drain 防御，调用方收到定性错误
         drain_pending_requests(this, "worker exited (code 0)");
-        {
+        let handles = {
             let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.cancel_registry.clear();
+            inner.current_session = None;
+            inner.current_cancel_id = None;
+            inner.current_request_id = None;
+            inner.debug_session_open = false;
+            // 进程对象必须 take：残留会让 is_worker_ready（Idle && process.is_some()）
+            // 对已死 Worker 返回 true，execute 走快速路径写已关闭的 stdin
+            let handles = inner.process.take().map(|p| p.handles);
             inner.worker_state = WorkerState::Idle;
+            // 能力缓存随进程失效（与崩溃分支同语义）
+            inner.worker_capabilities = None;
             merge_worker_status(&inner, &this.status);
+            handles
+        };
+        if let Some(h) = handles {
+            h.stdin_task.abort();
+            h.stdout_task.abort();
+            h.stderr_task.abort();
+            h.health_task.abort();
         }
         return;
     }

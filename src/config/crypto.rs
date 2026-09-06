@@ -52,6 +52,14 @@ pub struct PasswordCrypto {
     key: OnceLock<Zeroizing<[u8; KEY_LEN]>>,
     /// 密钥文件路径
     key_path: PathBuf,
+    /// 密钥初始化互斥锁（进程内串行化 ensure_key）
+    ///
+    /// 磁盘文件锁是 try_lock 失败降级（权限/残留场景不能阻断加密），
+    /// 降级后若同进程多线程/多实例并发生成，会出现磁盘密钥与内存密钥
+    /// 不一致（后写者覆盖磁盘、先 set 者留在 OnceLock），导致已加密密码
+    /// 无法解密。本锁保证进程内生成路径串行，跨进程双写由
+    /// `generate_and_write_key` 的写前读回兜底。
+    key_init: Mutex<()>,
     /// 解密失败的 Profile ID 集合（按 profile 记录，F10）
     ///
     /// 历史实现为全局单布尔：任一密文解密成功即清全局标志，A Profile 的损坏
@@ -67,6 +75,7 @@ impl PasswordCrypto {
         Self {
             key: OnceLock::new(),
             key_path,
+            key_init: Mutex::new(()),
             decryption_failed_profiles: Mutex::new(HashSet::new()),
         }
     }
@@ -224,6 +233,13 @@ impl PasswordCrypto {
         if self.key.get().is_some() {
             return Ok(());
         }
+        // 进程内串行化：磁盘文件锁是 try_lock 失败降级，降级后本锁是防止
+        // 同进程并发生成密钥（磁盘/内存密钥不一致）的唯一防线
+        let _guard = self.key_init.lock().unwrap_or_else(|e| e.into_inner());
+        // 双检：等锁期间其他线程可能已完成加载
+        if self.key.get().is_some() {
+            return Ok(());
+        }
         let key = Self::read_or_create_key(&self.key_path)?;
         // 若并发下其他线程已写入，忽略冲突（保留先写入的密钥）
         let _ = self.key.set(key);
@@ -365,6 +381,18 @@ impl PasswordCrypto {
 
     /// 生成新密钥并写入文件（Unix 下权限 0600）
     fn generate_and_write_key(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
+        // 跨进程双写防御：磁盘锁降级时另一进程可能刚生成完，写前读回，
+        // 避免后写者覆盖磁盘密钥而各进程内存密钥不一致（已加密密码将无法解密）
+        if key_path.exists() {
+            if let Ok(bytes) = std::fs::read(key_path) {
+                if bytes.len() == KEY_LEN {
+                    tracing::warn!("检测到加密密钥文件已被并发生成，读回复用（避免双写覆盖）");
+                    let mut arr = [0u8; KEY_LEN];
+                    arr.copy_from_slice(&bytes);
+                    return Ok(Zeroizing::new(arr));
+                }
+            }
+        }
         let mut arr = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut arr);
         let key = Zeroizing::new(arr);

@@ -3284,6 +3284,16 @@
 
   // ==================== 启动 ====================
 
+  // 多 frame 防护：无 @noframes 时 Tampermonkey 会向所有 iframe 注入本脚本，
+  // 而 GM_setValue/GM_getValue 存储按 frame 共享同一 key——iframe 实例的
+  // saveState 会整包覆盖主 frame 已录步骤，其 loadState 因 URL 不匹配还会
+  // 直接 clearSavedState() 清空主 frame 存储（跨 iframe 录制实际不可用）。
+  // 同源 frame 内的事件已由主实例 attachAllFrameListeners 感知，故 iframe
+  // 实例直接不激活：不读/写存储、不挂面板、不注册监听
+  if (window.self !== window.top) {
+    return;
+  }
+
   // 检查是否有保存的录制状态，自动恢复（activate 内部已注册 domGuard）
   const savedData = loadState();
   if (savedData) {

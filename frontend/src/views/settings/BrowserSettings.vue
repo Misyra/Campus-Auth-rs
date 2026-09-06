@@ -24,6 +24,8 @@ const currentNotInstalled = computed(() => {
   return found ? !found.installed : false;
 });
 const currentOfficialUrl = computed(() => OFFICIAL_URL[config.config.browser.browser_channel] ?? "");
+// Python 环境能力未就绪（环境状态已加载但 capability_ready 为 false）——修复未定义变量导致横幅永不渲染
+const pythonNotReady = computed(() => envStatus.value != null && !envStatus.value.capability_ready);
 
 onMounted(async () => {
   try {

@@ -187,9 +187,13 @@ impl From<crate::tasks::TaskError> for ApiError {
                     })
                     .collect(),
             ),
-            // Bridge 错误保留变体：WorkerBusy → 409，其余透传为内部错误
+            // Bridge 错误保留变体：WorkerBusy → 409，WorkerNotInstalled → 503，
+            // 其余透传为内部错误
             crate::tasks::TaskError::Bridge(crate::bridge::BridgeError::WorkerBusy) => {
                 ApiError::WorkerBusy("Worker 忙: 调试会话进行中".into())
+            }
+            crate::tasks::TaskError::Bridge(crate::bridge::BridgeError::WorkerNotInstalled) => {
+                ApiError::WorkerNotInstalled(e.to_string())
             }
             crate::tasks::TaskError::Bridge(inner) => ApiError::Internal(inner.to_string()),
             _ => ApiError::Internal(e.to_string()),
@@ -240,7 +244,12 @@ impl From<crate::engine::EngineError> for ApiError {
 
 impl From<crate::updater::UpdaterError> for ApiError {
     fn from(e: crate::updater::UpdaterError) -> Self {
-        ApiError::Internal(e.to_string())
+        match e {
+            // 并发更新/登录进行中是调用时序冲突，500 会误导前端走"服务端故障"分支
+            crate::updater::UpdaterError::UpdateInProgress
+            | crate::updater::UpdaterError::LoginInProgress => ApiError::Conflict(e.to_string()),
+            _ => ApiError::Internal(e.to_string()),
+        }
     }
 }
 

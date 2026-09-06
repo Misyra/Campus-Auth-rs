@@ -102,6 +102,12 @@ async function acceptRepoDisclaimer() {
       id = "task_" + id;
     }
     const tasks = useTasks();
+    // 编辑器草稿保护：与其他打开/替换草稿的路径一致，先经 dirty 确认，
+    // 否则仓库导入会静默覆盖未保存的修改
+    if (!(await tasks.confirmDiscardTaskIfDirty())) {
+      repoImport.value.disclaimer = task;
+      return;
+    }
     tasks.setTaskDraft({
       id,
       name: (data.name as string) || task.name || "",

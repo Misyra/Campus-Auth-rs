@@ -68,6 +68,13 @@ pub const PYTHON_VERSION_CONSTRAINT: &str = ">=3.12,<3.13";
 pub const UV_SYNC_TIMEOUT: Duration = Duration::from_secs(600);
 /// uv sync 重试次数
 pub const UV_SYNC_MAX_RETRIES: u32 = 1;
+/// 更新后 Python 依赖重同步标记文件名（python_worker/.venv-resync）
+///
+/// 应用内更新 overlay 覆盖 pyproject.toml / uv.lock 后，解释器完好时
+/// `ensure_venv` 快速路径会跳过 uv sync，新增依赖要到 import 失败才暴露。
+/// helper 在依赖清单内容实际变化时写入本标记；`ensure_venv` 检测到即
+/// 强制执行一次 uv sync 并删除标记。
+pub const RESYNC_MARKER: &str = ".venv-resync";
 /// playwright install 浏览器超时
 pub const PLAYWRIGHT_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// playwright install 重试次数

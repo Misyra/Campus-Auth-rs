@@ -15,6 +15,11 @@ use serde_json::Value;
 pub const TASK_ID_PATTERN: &str = r"^[a-zA-Z0-9_-]{1,64}$";
 /// 浏览器任务默认超时（毫秒）
 pub const DEFAULT_TASK_TIMEOUT_MS: u64 = 30000;
+/// 浏览器任务超时下限（毫秒）：低于此值任务必然秒超时，无意义
+pub const MIN_TASK_TIMEOUT_MS: u64 = 1000;
+/// 浏览器任务超时上限（毫秒）：浏览器会话槽位全局互斥，超长超时会
+/// 占住槽位导致期间所有浏览器任务/登录被拒
+pub const MAX_TASK_TIMEOUT_MS: u64 = 600_000;
 /// 步骤间延迟（秒）
 pub const DEFAULT_STEP_DELAY: f64 = 0.5;
 /// 页面加载后等待（秒）
@@ -44,6 +49,10 @@ pub const VALID_STEP_TYPES: &[&str] = &[
     "sleep",
     "ocr",
     "custom_js",
+    // Python Worker 侧的执行别名（step_handlers._STEP_HANDLERS 同名注册），
+    // 校验必须与执行器对齐，否则录制/AI 产物保存时被误拒
+    "evaluate",
+    "custom",
     "navigate",
     "goto",
     "assert_text",

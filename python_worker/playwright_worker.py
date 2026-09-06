@@ -871,6 +871,20 @@ class WorkerCore:
                 data["session_type"] = session_type
             self.emit(event_type, data)
 
+        def _on_page_lost() -> None:
+            """evaluate 超时/取消强制关闭页面后的自愈钩子。
+
+            close 是打断挂起 CDP await 的唯一手段，但页面销毁后残留的
+            ``self._page`` 死引用会让下一任务无法重建、后续步骤以
+            "Target page closed" 混乱失败。此处同步清引用；依赖该页的
+            调试会话无法自愈，直接结束并留痕。"""
+            if self._page is page:
+                self._page = None
+            for sid, session in list(self._debug_sessions.items()):
+                if session.page is page:
+                    self._debug_sessions.pop(sid, None)
+                    logger.warning("调试会话 %s 因页面被强制中断（JS 超时/取消）而结束", sid)
+
         return StepContext(
             page=page,
             variables=variables,
@@ -882,6 +896,7 @@ class WorkerCore:
             reveal_hidden=task_config.reveal_hidden,
             step_delay=task_config.step_delay,
             emit=_emit,
+            on_page_lost=_on_page_lost,
         )
 
     async def _navigate(self, page: Any, url: str, nav_timeout: int) -> None:
@@ -926,11 +941,38 @@ class WorkerCore:
 
         try:
             result = await run_steps(self._page, task_config.steps, context)
+            # success_condition 成功判定：声明变量名时，从 store_as 结果取变量真值判定，
+            # 覆盖默认的"步骤全部成功即成功"兜底（对齐原项目 v4.2.3 _check_success）。
+            # 必须先于 cookies 清理：真值判定未命中时最终 outcome 是失败，
+            # 判定前清理会让该场景带着可疑登录态进入下一次重试
+            var_name = (task_config.success_condition or "").strip()
+            if var_name and result.outcome == Outcome.SUCCESS.value:
+                if var_name not in context.results:
+                    result = _build_result(
+                        Outcome.UNKNOWN_ERROR,
+                        f"成功条件变量未设置: {var_name}（请检查 eval 步骤的 store_as）",
+                        context,
+                        start,
+                    )
+                else:
+                    value = context.results[var_name]
+                    if not _is_truthy(value):
+                        result = _build_result(
+                            Outcome.UNKNOWN_ERROR,
+                            f"成功条件未命中: {var_name}（真值判定不通过）",
+                            context,
+                            start,
+                        )
+                    else:
+                        # 变量值可能含凭据（如 eval 提取的 token），只记真值判定结果，不打印 value
+                        logger.info("[success_condition] 命中成功: 变量 %s 真值判定通过", var_name)
+                        result.message = f"成功条件命中: {var_name}（真值判定通过）"
             # B5 取舍：任务失败后在共享 context 上清除 cookies，避免上次任务的残留会话
             # （登录态等）污染下一个任务。不重建整个页面/浏览器——那会显著增加下一次
             # 任务的重启开销；在现有 context 复用结构下，清除 cookies 已覆盖绝大多数
             # 跨任务污染场景（登录态隔离）。重试同任务由 Rust 侧重新调用，页面按
             # "_run_task 顶部 reload 复用"逻辑刷新，不受此处影响。
+            # 按**最终** outcome 清理：success_condition 未命中也是失败，同样需要隔离
             if result.outcome not in (Outcome.SUCCESS.value, Outcome.CANCELLED.value):
                 if self._context is not None:
                     try:
@@ -938,28 +980,6 @@ class WorkerCore:
                         logger.info("[_run_task] 任务失败，已清除 context cookies")
                     except Exception as exc:  # noqa: BLE001
                         logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {exc}")
-            # success_condition 成功判定：声明变量名时，从 store_as 结果取变量真值判定，
-            # 覆盖默认的"步骤全部成功即成功"兜底（对齐原项目 v4.2.3 _check_success）。
-            var_name = (task_config.success_condition or "").strip()
-            if var_name and result.outcome == Outcome.SUCCESS.value:
-                if var_name not in context.results:
-                    return _build_result(
-                        Outcome.UNKNOWN_ERROR,
-                        f"成功条件变量未设置: {var_name}（请检查 eval 步骤的 store_as）",
-                        context,
-                        start,
-                    )
-                value = context.results[var_name]
-                if not _is_truthy(value):
-                    return _build_result(
-                        Outcome.UNKNOWN_ERROR,
-                        f"成功条件未命中: {var_name}（真值判定不通过）",
-                        context,
-                        start,
-                    )
-                # 变量值可能含凭据（如 eval 提取的 token），只记真值判定结果，不打印 value
-                logger.info("[success_condition] 命中成功: 变量 %s 真值判定通过", var_name)
-                result.message = f"成功条件命中: {var_name}（真值判定通过）"
             return result
         finally:
             # A7：登录/浏览器任务截图可能含表单明文凭据，任务结束（成功/失败/

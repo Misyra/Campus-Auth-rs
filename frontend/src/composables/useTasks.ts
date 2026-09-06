@@ -291,6 +291,8 @@ function syncJsonToMeta(): void {
 
 async function loadTemplate(templateId: string): Promise<void> {
   if (!editingTask.value) return;
+  // 模板会整体替换 json/name/description，与其他改写草稿的路径一致先经 dirty 确认
+  if (!(await confirmDiscardTaskIfDirty())) return;
   try {
     const data = await tasksApi.get(templateId);
     const summary = data.summary;
@@ -425,6 +427,7 @@ export function useTasks() {
     closeTaskEditor,
     setTaskDraft,
     isTaskDirty,
+    confirmDiscardTaskIfDirty,
     syncMetaToJson,
     syncJsonToMeta,
     loadTemplate,

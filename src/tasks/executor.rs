@@ -183,7 +183,13 @@ impl TaskExecutor {
                 .execute_with_timeout(
                     "execute_browser_task",
                     params,
-                    Duration::from_millis(cfg.timeout.max(1)),
+                    // 兜底钳制：校验层已拦截越界值，此处防御绕过校验的路径（如
+                    // 历史存量任务文件）——0 会变 1ms 秒超时，超大值占住全局互斥
+                    // 的浏览器会话槽位
+                    Duration::from_millis(cfg.timeout.clamp(
+                        crate::tasks::MIN_TASK_TIMEOUT_MS,
+                        crate::tasks::MAX_TASK_TIMEOUT_MS,
+                    )),
                 )
                 .await
                 .map_err(TaskError::Bridge)

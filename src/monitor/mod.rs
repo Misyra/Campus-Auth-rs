@@ -324,15 +324,11 @@ impl MonitorService {
                     ));
                 }
                 Err(_) => {
-                    warn!("网卡检测超时");
-                    return Ok(self.finalize_report(
-                        NetworkStatus::Offline,
-                        ProbeOutcome::Disabled,
-                        ProbeOutcome::Disabled,
-                        ProbeOutcome::Disabled,
-                        0,
-                        None,
-                    ));
+                    // 检测手段超时 ≠ 网络断开：ipconfig 冷启动/AV 扫描拖慢会
+                    // 超出外层预算，判 Offline 会在 auth_url 可达时升级为
+                    // CaptivePortal 触发一轮完全不必要的登录。跳过本步骤，
+                    // 交由后续三类探测决定状态
+                    warn!("网卡检测超时，本轮跳过网卡检查，继续网络探测");
                 }
             }
         }

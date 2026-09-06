@@ -91,6 +91,13 @@ class StepContext:
     screenshots: list[str] = field(default_factory=list)
     """本次动作产生的截图路径收集。"""
 
+    on_page_lost: Callable[[], None] = lambda: None
+    """页面被强制中断（evaluate 超时/取消时 close）后的回调。
+
+    Worker 构造 context 时注入：同步清空 ``self._page`` 死引用并结束依赖
+    该页的调试会话，避免后续步骤以 "Target page closed" 混乱失败、
+    下一任务也无法重建页面。"""
+
 
 def _check_cancel(context: StepContext) -> None:
     """在步骤边界检查取消事件，若已触发则抛出 StepCancelled。"""
@@ -535,7 +542,9 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
         raise WorkerError(Outcome.SELECTOR_FAILED, "select 步骤缺少 selector")
     value = (step.value or "").strip()
     if not value:
-        return
+        # 空 value 静默 no-op 会让任务"全绿"但运营商根本没选（校验层已拦截
+        # 新任务，此处对绕过校验的存量任务显式报错而非静默跳过）
+        raise WorkerError(Outcome.UNKNOWN_ERROR, "select 步骤缺少 value（必填）")
 
     timeout = step.timeout or context.default_timeout
     deadline = time.monotonic() + timeout / 1000
@@ -755,16 +764,17 @@ async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
             task.cancel()
             try:
                 await page.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("取消中断时关闭页面失败: %s", exc)
+            finally:
+                # close 是打断挂起 CDP await 的唯一手段；回调清死引用/结束调试会话
+                context.on_page_lost()
             raise StepCancelled("JS 执行已取消，页面已中断")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             task.cancel()
             try:
                 await page.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("超时中断时关闭页面失败: %s", exc)
+            finally:
+                context.on_page_lost()
             raise WorkerError(
                 Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已强制中断"
             )
