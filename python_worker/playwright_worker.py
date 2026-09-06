@@ -230,9 +230,17 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
 
 # ── 浏览器环境探测（原 playwright_bootstrap.py）──
 
+#: Playwright 托管渠道（playwright/firefox/webkit）的 executable_path 探测缓存。
+#: 路径只随 Playwright 版本变化，进程生命周期内缓存后仅需毫秒级的存在性复核，
+#: 避免 browser_health_check 每次冷启一个 sync_playwright driver 子进程
+#: （200-500ms）只为拿路径再判存在。只缓存成功结果；命中后复核失败即丢弃
+#: 缓存走完整探测（兼容卸载与升级换路径），失败探测不落缓存。无锁：GIL 下
+#: 单键读写原子，并发探测最坏重复一次属幂等。
+_MANAGED_BROWSER_PATH_CACHE: dict[str, str] = {}
+
 
 def _ensure_browser(channel: str = "playwright") -> bool:
-    """确保目标浏览器可用；Playwright 管理的引擎按实际 executable 检测。"""
+    """确保目标浏览器可用；Playwright 管理的引擎按实际 executable 检测（带缓存）。"""
     # 系统浏览器（Edge/Chrome/自定义路径）需真实探测可执行文件，而非恒 True。
     # 否则健康检查假成功，启动时才抛 obscure Playwright error。
     if channel == "custom":
@@ -279,6 +287,13 @@ def _ensure_browser(channel: str = "playwright") -> bool:
                 if home and Path(home, "Applications/Google Chrome.app").exists():
                     return True
         return False
+    # 托管渠道：缓存命中仅复核文件存在性（毫秒级）；复核失败说明路径消失
+    # （卸载或 Playwright 升级换路径），丢弃缓存走下方完整探测
+    cached = _MANAGED_BROWSER_PATH_CACHE.get(channel)
+    if cached is not None:
+        if Path(cached).exists():
+            return True
+        _MANAGED_BROWSER_PATH_CACHE.pop(channel, None)
     try:
         from playwright.sync_api import sync_playwright
 
@@ -290,7 +305,10 @@ def _ensure_browser(channel: str = "playwright") -> bool:
             else:
                 browser_type = p.chromium
             executable = browser_type.executable_path
-            return bool(executable and Path(executable).exists())
+            if executable and Path(executable).exists():
+                _MANAGED_BROWSER_PATH_CACHE[channel] = str(executable)
+                return True
+            return False
     except Exception as exc:  # noqa: BLE001
         logger.debug("浏览器探测失败（channel=%s）: %s", channel, exc)
         return False

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -804,6 +806,95 @@ def test_browser_idle_release_fires_and_cancels():
             pw._WORKER_KEEP_ALIVE = orig_env
 
     asyncio.run(_run())
+
+
+# ── 托管渠道浏览器探测缓存（_ensure_browser / _MANAGED_BROWSER_PATH_CACHE）──
+
+
+def _install_fake_sync_playwright(monkeypatch, handler):
+    """用假模块替换 playwright.sync_api：handler(sync_playwright 调用时) 决定行为。"""
+    import sys
+    import types
+
+    fake_api = types.ModuleType("playwright.sync_api")
+    fake_api.sync_playwright = handler
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
+
+
+def test_managed_probe_cache_hits_without_driver(monkeypatch):
+    """探测缓存命中：仅复核文件存在性，不再冷启 sync_playwright driver。"""
+    import playwright_worker as pw
+    from playwright_worker import _ensure_browser
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sentinel = Path(tmp) / "chrome.exe"
+        sentinel.write_bytes(b"")
+        monkeypatch.setattr(pw, "_MANAGED_BROWSER_PATH_CACHE", {"playwright": str(sentinel)})
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("缓存命中不应启动 sync_playwright driver")
+
+        _install_fake_sync_playwright(monkeypatch, _boom)
+        assert _ensure_browser("playwright") is True
+
+
+def test_managed_probe_cache_invalidated_on_missing_path(monkeypatch):
+    """缓存路径消失（卸载/升级换路径）：丢弃缓存重新探测并缓存新路径。"""
+    import playwright_worker as pw
+    from playwright_worker import _ensure_browser
+
+    with tempfile.TemporaryDirectory() as tmp:
+        real_exe = Path(tmp) / "chromium.exe"
+        real_exe.write_bytes(b"")
+        monkeypatch.setattr(
+            pw, "_MANAGED_BROWSER_PATH_CACHE", {"playwright": str(Path(tmp) / "gone.exe")}
+        )
+        calls = []
+
+        class FakeBrowserType:
+            executable_path = str(real_exe)
+
+        class FakeP:
+            chromium = FakeBrowserType()
+            firefox = FakeBrowserType()
+            webkit = FakeBrowserType()
+
+        class FakeCm:
+            def __enter__(self):
+                calls.append(True)
+                return FakeP()
+
+            def __exit__(self, *args):
+                return False
+
+        _install_fake_sync_playwright(monkeypatch, lambda: FakeCm())
+
+        assert _ensure_browser("playwright") is True
+        assert calls == [True], "缓存路径失效应重新完整探测"
+        assert pw._MANAGED_BROWSER_PATH_CACHE["playwright"] == str(real_exe)
+        # 新路径缓存生效：再次调用不再进 driver
+        assert _ensure_browser("playwright") is True
+        assert calls == [True]
+
+
+def test_managed_probe_failure_not_cached(monkeypatch):
+    """探测失败（未安装/driver 异常）不落缓存：每次完整探测，安装完成后自动恢复。"""
+    import playwright_worker as pw
+    from playwright_worker import _ensure_browser
+
+    monkeypatch.setattr(pw, "_MANAGED_BROWSER_PATH_CACHE", {})
+    calls = []
+
+    def fake_sync_playwright():
+        calls.append(True)
+        raise RuntimeError("driver 启动失败")
+
+    _install_fake_sync_playwright(monkeypatch, fake_sync_playwright)
+
+    assert _ensure_browser("playwright") is False
+    assert _ensure_browser("playwright") is False
+    assert calls == [True, True], "失败不应缓存，每次都完整探测"
+    assert pw._MANAGED_BROWSER_PATH_CACHE == {}
 
 
 # ── B3: 调试会话期间拒绝登录/浏览器任务（Python 半防御）──
