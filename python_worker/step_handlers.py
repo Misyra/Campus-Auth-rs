@@ -179,7 +179,12 @@ def _resolve(step: StepConfig, context: StepContext) -> StepConfig:
 
 
 # OCR 实例缓存/图片预处理已迁至 ocr_runtime.py，此处再导出兼容旧调用方
-from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image  # noqa: E402,F401
+from ocr_runtime import (
+    OCR_TIMEOUT_SECS,
+    _get_ocr,
+    _preprocess_ocr_image,
+    ocr_load_in_progress,
+)  # noqa: E402,F401
 
 
 # 连接级错误代码：含这些消息的异常归为 NETWORK_ERROR
@@ -863,6 +868,13 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
             timeout=OCR_TIMEOUT_SECS,
         )
     except asyncio.TimeoutError:
+        # 文案分流：模型首次加载中的超时（并发/重试等待或慢加载）不应误导用户重装依赖
+        if ocr_load_in_progress(step.old, step.char_range):
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR,
+                f"OCR 模型仍在首次加载（已超过 {OCR_TIMEOUT_SECS}s）。"
+                "加载完成会写入日志，稍后可直接重试，无需重装依赖",
+            ) from None
         raise WorkerError(
             Outcome.UNKNOWN_ERROR,
             f"OCR 模型加载超时（>{OCR_TIMEOUT_SECS}s）。模型为包内自带，仅本地加载，"

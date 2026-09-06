@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 # 避免上一次任务的 ``set_ranges`` 污染后续未限制字符集的识别。
 _ocr_cache: dict[tuple[bool, str | int | None], "_OcrSession"] = {}
 _ocr_lock = threading.Lock()
+#: 首次加载中的 key → 加载开始时刻（monotonic）。调用方超时不会终止已进入
+#: 第三方 native 代码的加载线程（孤儿线程），标记让后续超时报错能区分
+#: "模型正在首次加载"与"依赖不完整"，加载完成的日志也让恢复可见。
+_ocr_load_started: dict[tuple[bool, str | int | None], float] = {}
 
 # OCR 模型获取 + CPU 推理共享总预算（秒）。
 # step_handlers 仍负责 DOM 等待与步骤级 timeout；这里专门防止冷启动 90s 后
@@ -124,6 +128,9 @@ def _get_ocr(old: bool, char_range: str | int | None = None):
     key = (old, normalized_range)
     session = _ocr_cache.get(key)
     if session is None:
+        # 在锁外登记加载标记：等待锁的并发调用与超时文案分流都据此判断
+        # "正在首次加载"。锁保证构建本身仍只发生一次（B6 双检）。
+        _ocr_load_started.setdefault(key, time.monotonic())
         with _ocr_lock:
             session = _ocr_cache.get(key)
             if session is None:
@@ -139,10 +146,20 @@ def _get_ocr(old: bool, char_range: str | int | None = None):
                         )
                 session = _OcrSession(instance, key)
                 _ocr_cache[key] = session
+        # 加载完成（含调用方已超时的孤儿线程收尾）：写日志让恢复可见，清除标记
+        load_started = _ocr_load_started.pop(key, None)
+        if load_started is not None:
+            logger.info("[ocr] 模型加载完成（耗时 %.1fs）", time.monotonic() - load_started)
 
     elapsed = time.monotonic() - started
     session.add_budget(OCR_TIMEOUT_SECS - elapsed)
     return session
+
+
+def ocr_load_in_progress(old: bool, char_range: str | int | None = None) -> bool:
+    """指定 key 的模型是否正在首次加载中（供步骤超时文案分流）。"""
+    normalized_range = char_range if isinstance(char_range, (str, int)) else None
+    return (old, normalized_range) in _ocr_load_started
 
 
 def _preprocess_ocr_image(img_bytes: bytes) -> bytes:
