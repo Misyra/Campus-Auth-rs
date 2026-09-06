@@ -28,6 +28,9 @@ use crate::status::{EngineState, LoginSource, NetworkStatus, PartialSnapshot};
 const COOLING_DOWN_THRESHOLD: u32 = 3;
 /// 冷却期持续时间（秒）
 const COOLING_DOWN_DURATION_SECS: u64 = 300;
+/// 自适应探测的异常态周期（秒）：CaptivePortal/Offline 状态下的探测间隔。
+/// 断网感知延迟从最差一个 check_interval（默认 300s）降到此值
+const PROBE_ONLINE_BACKOFF_BASE_SECS: u64 = 30;
 
 /// 后台探测任务的回传消息
 ///
@@ -76,6 +79,11 @@ struct EngineInner {
     check_timer: Interval,
     /// 连续登录失败次数
     consecutive_failures: u32,
+    /// 连续 Online 探测次数（自适应间隔的退避进度）
+    ///
+    /// 非 Online 结果归零；Online 连续次数越多，下一次探测间隔按指数退避
+    /// 越接近配置的 check_interval（见 [`adaptive_check_interval_secs`]）。
+    online_streak: u32,
     /// 冷却期截止时刻（None 表示不在冷却中）
     cooling_down_until: Option<Instant>,
     /// 是否有 source=Auto 的登录会话在途
@@ -122,6 +130,7 @@ impl EngineInner {
                 t
             },
             consecutive_failures: 0,
+            online_streak: 0,
             cooling_down_until: None,
             auto_login_in_flight: false,
             probe_in_flight: false,
@@ -176,7 +185,7 @@ pub(crate) async fn run_loop(
             }
             Some(msg) = probe_result_rx.recv() => {
                 // 探测结果回传：更新网络状态并决策是否触发登录（F5）
-                handle_probe_message(msg, &mut inner, &deps);
+                handle_probe_message(msg, &mut inner, &deps).await;
             }
             Ok(()) = config_version_rx.changed() => {
                 // 配置版本变化：RuntimeConfig 已由 ConfigService 原子替换，
@@ -535,7 +544,7 @@ fn handle_network_check_with_priority(inner: &mut EngineInner, deps: &EngineDeps
 ///   结果中基于旧配置的判断（auth_url 可达性）不得触发自动登录。
 ///
 /// 状态合并不受前三者影响——迟到的网络事实仍值得呈现给前端。
-fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
+async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
     // 无论成败都先复位在途标记，否则后续检测被永久忽略
     inner.probe_in_flight = false;
     // 若在途期间有优先级检测排队，立即补发一次（仅一次，避免无限自激）
@@ -578,6 +587,25 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
         tracing::debug!("网络状态未变化: {:?}", report.status);
     }
     inner.last_network_status = report.status;
+    // 自适应探测间隔（C4）：异常态（CaptivePortal/Offline）短周期加密探测，
+    // 稳定在线按指数退避放大到配置的 check_interval。原地重建定时器并消费
+    // 首 tick——与 reset_check_timer 同语义：刚做完一轮探测，不消费会导致
+    // 立即重复探测形成风暴。探测 Failed 分支不重建（monitor 系统性故障时
+    // 维持原周期，不放大故障）；暂停期无结果回传，间隔自然保持
+    if report.status == NetworkStatus::Online {
+        inner.online_streak = inner.online_streak.saturating_add(1);
+    } else {
+        inner.online_streak = 0;
+    }
+    let next_secs = adaptive_check_interval_secs(
+        report.status,
+        inner.online_streak,
+        check_interval_duration(deps).as_secs(),
+    );
+    let mut t = tokio::time::interval(Duration::from_secs(next_secs));
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let _ = t.tick().await;
+    inner.check_timer = t;
     let paused = is_any_pause_active(inner, deps);
     // 冷却期内检查：若仍在冷却则跳过登录
     let cooling_down = inner.cooling_down_until.is_some();
@@ -807,6 +835,23 @@ fn check_interval_duration(deps: &EngineDeps) -> Duration {
     Duration::from_secs(secs.max(1))
 }
 
+/// 按探测结果计算下一次探测间隔（自适应，纯函数）
+///
+/// - 非 Online（CaptivePortal/Offline）：固定 [`PROBE_ONLINE_BACKOFF_BASE_SECS`]
+///   短周期探测，被踢下线后 30s 内即可感知并触发自动登录（原为最长一个
+///   check_interval）；
+/// - Online：按连续在线次数指数退避（30 → 60 → 120 → …），封顶配置的
+///   `base_secs`——稳态探测频率与固定间隔方案完全一致，只有异常态变密；
+/// - 冷却期由调用方的登录门控拦截，加速探测不会引发登录风暴。
+fn adaptive_check_interval_secs(status: NetworkStatus, online_streak: u32, base_secs: u64) -> u64 {
+    if status == NetworkStatus::Online {
+        let shift = online_streak.saturating_sub(1).min(16);
+        (PROBE_ONLINE_BACKOFF_BASE_SECS << shift).min(base_secs.max(1))
+    } else {
+        PROBE_ONLINE_BACKOFF_BASE_SECS
+    }
+}
+
 /// Profile 切换检测间隔（从 RuntimeConfig 读取，clamp 到合法范围）
 fn profile_check_interval_duration(deps: &EngineDeps) -> Duration {
     let secs = deps
@@ -835,6 +880,67 @@ mod tests {
     use crate::status::StatusManager;
     use crate::tasks::TaskManager;
     use crate::utils::metrics::Metrics;
+
+    #[test]
+    fn test_adaptive_interval_offline_uses_short_period() {
+        // 异常态：固定短周期探测，断网感知从最差 300s 降到 30s
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Offline, 0, 300),
+            PROBE_ONLINE_BACKOFF_BASE_SECS
+        );
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::CaptivePortal, 0, 300),
+            PROBE_ONLINE_BACKOFF_BASE_SECS
+        );
+    }
+
+    #[test]
+    fn test_adaptive_interval_online_exponential_backoff() {
+        // 连续在线：30 → 60 → 120 → 240 → 300（封顶 check_interval）
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, 1, 300),
+            30
+        );
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, 2, 300),
+            60
+        );
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, 3, 300),
+            120
+        );
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, 5, 300),
+            300
+        );
+        // streak 极大时不溢出、恒收敛到 base
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, u32::MAX, 300),
+            300
+        );
+    }
+
+    #[test]
+    fn test_adaptive_interval_caps_at_configured_base() {
+        // 用户配置了更短的 check_interval（如 60s）：Online 退避到 60 封顶，
+        // 异常态仍用固定短周期
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, 1, 60),
+            30
+        );
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, 2, 60),
+            60
+        );
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Online, 9, 60),
+            60
+        );
+        assert_eq!(
+            adaptive_check_interval_secs(NetworkStatus::Offline, 4, 60),
+            PROBE_ONLINE_BACKOFF_BASE_SECS
+        );
+    }
 
     /// 构造本地时区的固定时刻（年月日固定，避开 DST 边界）
     fn t(hour: u32, minute: u32) -> DateTime<Local> {
