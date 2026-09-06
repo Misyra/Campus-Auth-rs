@@ -50,6 +50,9 @@ use crate::utils::paths::worker_project_dir;
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 /// 发送 shutdown 命令后等待优雅退出的超时（秒）
 pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
+/// 孤儿调试会话 TTL（秒）：超过该时长无任何调试活动，视为调试面板被直接
+/// 关闭（未点"停止调试"）的遗弃会话，登录类命令到达时强制回收 Worker 放行
+const DEBUG_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// spawn 后等待 browser_health_check 通过的超时（秒）
 pub const DEFAULT_WORKER_STARTUP_TIMEOUT_SECS: u64 = 30;
 /// NDJSON 行分隔符
@@ -267,6 +270,10 @@ struct BridgeInner {
     /// 快速失败（此前仅命令在途窗口受保护，命令间隙自动登录可插入共用页面）；
     /// 空闲计时器不启动（调试静置不再被回收）。
     debug_session_open: bool,
+    /// 调试会话最近一次活动时刻（start/step/run_all 成功完成时刷新）。
+    /// G4：登录类命令遇活跃调试会话时，若超过 [`DEBUG_SESSION_TTL`] 无活动，
+    /// 判定为孤儿会话并强制回收 Worker 放行，而非无限拒绝。
+    debug_last_activity: Option<std::time::Instant>,
     /// 调试会话存续期最近一次截图的预览 URL（screenshot 事件转发时更新，
     /// debug_start 置会话时清空）。供 /api/debug/status 在前端刷新"失忆"后
     /// 恢复截图预览——WS 事件不会重放。
@@ -324,6 +331,7 @@ impl BridgeSupervisor {
             orphan_cleanup_done: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(BridgeInner {
                 debug_session_open: false,
+                debug_last_activity: None,
                 last_screenshot_url: None,
                 worker_state: WorkerState::NotInstalled,
                 process: None,
@@ -686,12 +694,14 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
                             DebugSettle::Open => {
                                 let mut inner = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
                                 inner.debug_session_open = true;
+                                inner.debug_last_activity = Some(Instant::now());
                                 // 注意：不在此清空 last_screenshot_url——初始截图事件先于
                                 // 本响应到达并已写入缓存，此处清空会抹掉它
                             }
                             DebugSettle::KeepOpen => {
                                 let mut inner = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
                                 inner.last_activity = Instant::now();
+                                inner.debug_last_activity = Some(Instant::now());
                             }
                             DebugSettle::Close => {}
                         }
@@ -842,6 +852,22 @@ async fn execute_inner(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .last_screenshot_url = None;
+    }
+
+    // G4：孤儿调试会话 TTL 预检（在原子临界区外执行 force_recycle，其内部同样
+    // 需要 inner 锁）。调试面板被直接关闭（未点"停止调试"）时调试会话永久占住
+    // 槽位、拒绝后续所有登录类命令；超过 30 分钟无调试活动判定为遗弃，强制
+    // 回收 Worker（调试状态随进程销毁）放行本次请求。
+    if matches!(method, "execute_login_attempt" | "execute_browser_task") {
+        let stale = {
+            let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.current_session == Some(SessionType::Debug)
+                && debug_session_stale(inner.debug_last_activity, Instant::now())
+        };
+        if stale {
+            tracing::warn!("调试会话超过 30 分钟无活动，判定为孤儿会话，强制回收 Worker 放行本次请求");
+            this.force_recycle().await;
+        }
     }
 
     // 1. 懒加载 Worker（环境就绪则 spawn）
@@ -1042,6 +1068,7 @@ fn debug_guard_cleanup(
     inner.cancel_registry.remove(cancel_id);
     if is_stop || !inner.debug_session_open {
         inner.debug_session_open = false;
+        inner.debug_last_activity = None;
         inner.last_screenshot_url = None;
         inner.current_session = None;
         inner.worker_state = WorkerState::Idle;
@@ -1324,6 +1351,7 @@ async fn kill_worker_now(this: &BridgeSupervisor) {
         inner.worker_capabilities = None;
         // 进程已亡，调试会话随之终结（B3）
         inner.debug_session_open = false;
+        inner.debug_last_activity = None;
         merge_worker_status(&inner, &this.status);
     }
 }
@@ -1356,6 +1384,7 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
         // 能力缓存随进程失效（任务 10）；调试会话随进程终结（B3）
         inner.worker_capabilities = None;
         inner.debug_session_open = false;
+        inner.debug_last_activity = None;
         merge_worker_status(&inner, &this.status);
     }
 }
@@ -1436,6 +1465,7 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
             inner.current_cancel_id = None;
             inner.current_request_id = None;
             inner.debug_session_open = false;
+        inner.debug_last_activity = None;
             // 进程对象必须 take：残留会让 is_worker_ready（Idle && process.is_some()）
             // 对已死 Worker 返回 true，execute 走快速路径写已关闭的 stdin
             let handles = inner.process.take().map(|p| p.handles);
@@ -1533,6 +1563,11 @@ fn merge_worker_status(inner: &BridgeInner, status: &StatusManager) {
     status.merge(PartialSnapshot::Worker { state });
 }
 
+/// G4：调试会话是否已超时成为孤儿（无活动记录视为遗弃，兼容旧数据升级场景）
+fn debug_session_stale(last_activity: Option<Instant>, now: Instant) -> bool {
+    last_activity.is_none_or(|at| now.duration_since(at) > DEBUG_SESSION_TTL)
+}
+
 /// 会话互斥矩阵：判断新请求 `method` 与当前活跃会话 `current` 是否兼容。
 ///
 /// 兼容（允许继续）：
@@ -1592,6 +1627,23 @@ mod tests {
             ),
             "{current:?} + {method} 应忙碌",
         );
+    }
+
+    #[test]
+    fn 孤儿调试会话判定() {
+        let now = Instant::now();
+        // 无活动记录：视为遗弃（兼容升级/异常路径）
+        assert!(debug_session_stale(None, now));
+        // 1 分钟前活动：未过期
+        assert!(!debug_session_stale(
+            Some(now - std::time::Duration::from_secs(60)),
+            now
+        ));
+        // 超过 30 分钟：过期
+        assert!(debug_session_stale(
+            Some(now - std::time::Duration::from_secs(30 * 60 + 1)),
+            now
+        ));
     }
 
     #[test]
