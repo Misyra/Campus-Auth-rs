@@ -589,7 +589,8 @@ impl LoginSession {
     /// 全部成功但页面实际未登录成功（如填入字面量 `{{USERNAME}}` 却没点登录按钮）。
     async fn verify_network_after_login(&self) -> bool {
         let monitor = &self.deps.monitor;
-        // 登录后等待 portal 生效的延迟（可配置，默认 5s，最大 60s）：
+        // 登录后等待 portal 生效的延迟（可配置，默认 5s）：钳制上限 60s 对齐
+        // 前端输入与本注释，防手改 settings.json 填大值导致登录后无限干等；
         // 期间监听 cancel_token / shutdown_token，取消立即以 false 返回，
         // 避免用户点"取消"后仍阻塞至多 60s+探测耗时才退出
         let delay = self
@@ -598,7 +599,8 @@ impl LoginSession {
             .runtime()
             .load()
             .monitor
-            .post_login_delay;
+            .post_login_delay
+            .min(60);
         let sleep_ok = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => false,

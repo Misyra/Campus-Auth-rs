@@ -575,6 +575,8 @@ const DDDDOCR_PACKAGE: &str = "ddddocr";
 ///
 /// 用户偏好已收敛进 `pyproject.toml` 主依赖（见 `install_ocr_dep` 的 `uv add`），
 /// 同步天然保留用户选择，无需 `--extra` 开关。
+/// 瞬态失败（网络抖动/锁占用）自动重试：与 uv 二进制下载共用重试常量，
+/// 交互路径（设置页安装/修复）无需用户手动再点。
 pub async fn run_uv_sync(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
@@ -596,35 +598,51 @@ pub async fn run_uv_sync(
         .map_err(EnvironmentError::UvExtractFailed)?;
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
-    let mut cmd = uv_command(&uv_exe);
-    cmd.arg("sync")
-        .arg("--project")
-        .arg(&*mgr.worker_project_path().to_string_lossy());
-    cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
-        .current_dir(mgr.base_path());
-
-    let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
-        Ok(output) => output,
-        Err(CommandOutputError::Cancelled) => return Err(EnvironmentError::Cancelled),
-        Err(CommandOutputError::Timeout) => {
-            return Err(EnvironmentError::UvSyncTimeout {
-                timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
-            });
+    let mut last_err: Option<EnvironmentError> = None;
+    for attempt in 1..=UV_DOWNLOAD_MAX_RETRIES {
+        if attempt > 1 {
+            tracing::warn!(
+                "uv sync 第 {}/{} 次尝试（{}s 后重试）",
+                attempt,
+                UV_DOWNLOAD_MAX_RETRIES,
+                UV_DOWNLOAD_RETRY_DELAY.as_secs()
+            );
+            tokio::time::sleep(UV_DOWNLOAD_RETRY_DELAY).await;
         }
-        Err(CommandOutputError::Io(error)) => {
-            return Err(EnvironmentError::UvExtractFailed(error));
+        if cancel.is_cancelled() {
+            return Err(EnvironmentError::Cancelled);
         }
-    };
+        let mut cmd = uv_command(&uv_exe);
+        cmd.arg("sync")
+            .arg("--project")
+            .arg(&*mgr.worker_project_path().to_string_lossy());
+        cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
+            .current_dir(mgr.base_path());
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        Err(EnvironmentError::UvSyncFailed {
+        let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
+            Ok(output) => output,
+            Err(CommandOutputError::Cancelled) => return Err(EnvironmentError::Cancelled),
+            Err(CommandOutputError::Timeout) => {
+                last_err = Some(EnvironmentError::UvSyncTimeout {
+                    timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
+                });
+                continue;
+            }
+            Err(CommandOutputError::Io(error)) => {
+                last_err = Some(EnvironmentError::UvExtractFailed(error));
+                continue;
+            }
+        };
+
+        if output.status.success() {
+            return Ok(());
+        }
+        last_err = Some(EnvironmentError::UvSyncFailed {
             exit_code: output.status.code(),
-            stderr,
-        })
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
     }
+    Err(last_err.expect("uv sync 重试循环结束后必有最后一次错误"))
 }
 
 /// 存量迁移：旧版 `environment/ocr.enabled` 标记 → `uv add` 认领为项目主依赖。

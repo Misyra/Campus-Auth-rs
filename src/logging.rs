@@ -312,7 +312,10 @@ impl<S: Subscriber> Layer<S> for BroadcastLayer {
         for (key, value) in &fields.extras {
             message.push_str(&format!(" {key}={value}"));
         }
-        let timestamp = chrono::Local::now().to_rfc3339();
+        // 与文件层（%Y-%m-%d %H:%M:%S）统一格式：RFC3339 会让 WS 实时日志与
+        // 历史日志/文件日志呈现两套时间样式；前端 formatTimestamp 对两种格式
+        // 截断结果一致，此变更对展示无回归风险
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let _ = self
             .tx
             .send(LogEntry::new(level, message, timestamp, source));

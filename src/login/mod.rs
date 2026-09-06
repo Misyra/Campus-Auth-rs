@@ -65,9 +65,12 @@ pub(crate) fn recover_lock<T>(m: &StdMutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// 在可用性快照上做浏览器自动选择决策（纯函数）
+/// 浏览器渠道可用性探测缓存 TTL：登录重试连打时避免逐轮扫盘
+const CHANNEL_PROBE_TTL: Duration = Duration::from_secs(60);
+
 ///
 /// - 配置渠道可用 → `None`（沿用，不动作）
-/// - 不可用但有兜底渠道 → `Some(兜底)`（调用方切换并落盘）
+/// - 不可用但有兜底渠道 → `Some(兜底)`（调用方本次登录临时切换，不落盘）
 /// - 全无可用 → `None`（调用方走环境引导兜底或报无浏览器可用；
 ///   与"沿用"同为 `None`，调用方以传入时的可用性区分，不在此处二义）
 fn decide_browser_override(
@@ -290,6 +293,11 @@ pub struct LoginOrchestrator {
     /// 见 [`PendingGuard`]：键为会话 ID，值为（来源, 取消令牌）。会话创建后
     /// 复用同一令牌，登记项随 submit 返回自动注销。
     pending_cancels: StdMutex<HashMap<u64, (LoginSource, CancellationToken)>>,
+    /// 浏览器渠道可用性探测缓存："channel|path" → (探测时刻, 可用)，60s TTL。
+    /// 登录重试连打时避免每轮预检都扫磁盘（which/固定路径/Playwright 目录探测）
+    channel_probe_cache: StdMutex<HashMap<String, (std::time::Instant, bool)>>,
+    /// 首个可用渠道探测缓存（first_available_channel 结果），60s TTL
+    first_available_cache: StdMutex<Option<(std::time::Instant, Option<&'static str>)>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
     /// 应用级 shutdown 信号（会话在 shutdown 时立即退出）
@@ -327,6 +335,8 @@ impl LoginOrchestrator {
             })),
             submit_gate: AsyncMutex::new(()),
             pending_cancels: StdMutex::new(HashMap::new()),
+            channel_probe_cache: StdMutex::new(HashMap::new()),
+            first_available_cache: StdMutex::new(None),
             metrics,
             shutdown_token,
         }
@@ -966,28 +976,65 @@ impl LoginOrchestrator {
         }
     }
 
+    /// 渠道可用性（60s TTL 缓存；键含自定义路径，路径变更自然失效）
+    fn channel_available_cached(&self, channel: &str, custom_path: &str) -> bool {
+        let key = format!("{channel}|{}", custom_path.trim());
+        {
+            let cache = self
+                .channel_probe_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((at, available)) = cache.get(&key) {
+                if at.elapsed() < CHANNEL_PROBE_TTL {
+                    return *available;
+                }
+            }
+        }
+        let available = browser::is_channel_available(channel, custom_path);
+        self.channel_probe_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, (std::time::Instant::now(), available));
+        available
+    }
+
+    /// 首个可用渠道（60s TTL 缓存）
+    fn first_available_channel_cached(&self) -> Option<&'static str> {
+        {
+            let guard = self
+                .first_available_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((at, cached)) = *guard {
+                if at.elapsed() < CHANNEL_PROBE_TTL {
+                    return cached;
+                }
+            }
+        }
+        let probed = browser::first_available_channel();
+        let mut guard = self
+            .first_available_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some((std::time::Instant::now(), probed));
+        probed
+    }
+
     /// 解析本次登录应使用的浏览器渠道
     ///
     /// 当前渠道可用返回 `None`（无动作）；不可用且存在其他可用浏览器时返回
-    /// 新渠道并落盘持久化（best-effort：落盘失败本次请求仍用新渠道继续）。
-    /// 全无可用返回 `None`，由调用方走环境引导兜底或报无浏览器可用。
+    /// 新渠道，**仅本次登录生效、不落盘**——用户手动设置始终权威，瞬时不可用
+    /// （如浏览器升级中）恢复后下次登录自动切回。探测结果带 60s TTL 缓存，
+    /// 避免登录重试连打时逐轮扫盘。全无可用返回 `None`，由调用方走环境引导
+    /// 兜底或报无浏览器可用。
     async fn resolve_browser_channel(&self, channel: &str, custom_path: &str) -> Option<String> {
-        let next = decide_browser_override(
-            browser::is_channel_available(channel, custom_path),
-            browser::first_available_channel(),
-        )?;
+        let available = self.channel_available_cached(channel, custom_path);
+        let next = decide_browser_override(available, self.first_available_channel_cached())?;
         tracing::warn!(
             old = %channel,
             new = next,
-            "配置的浏览器不可用，已自动切换到可用浏览器"
+            "配置的浏览器不可用，本次登录临时切换到可用浏览器（设置不改动）"
         );
-        if let Err(e) = self
-            .config
-            .modify_settings(|s| s.global.browser.browser_channel = next.to_string())
-            .await
-        {
-            tracing::warn!(error = %e, "自动切换浏览器落盘失败，本次登录仍使用可用渠道继续");
-        }
         Some(next.to_string())
     }
 

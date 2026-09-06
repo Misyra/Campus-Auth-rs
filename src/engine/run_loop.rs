@@ -573,6 +573,9 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
         ProbeMessage::Report(r, _) => r,
         ProbeMessage::Failed(e, _) => {
             tracing::warn!("网络探测执行失败: {}", e);
+            // 归还被消费的补发标记：探测执行失败不应吞掉排队中的"立即探测"请求，
+            // 否则优先级检测静默丢失，只能等下一个常规周期
+            inner.probe_pending |= pending;
             return;
         }
     };
@@ -781,18 +784,17 @@ fn merge_engine_state(inner: &EngineInner, deps: &EngineDeps, state: EngineState
         state,
         network: inner.last_network_status,
         last_check,
-        pause: inner.manual_paused,
+        // 暂停状态并入定时暂停窗口：窗口期内引擎实际不探测，快照需如实反映，
+        // 否则前端在定时暂停时段仍显示"运行中"
+        pause: inner.manual_paused || is_scheduled_pause_active(deps),
         cooling_down,
         cooling_down_remaining,
         consecutive_failures: inner.consecutive_failures,
     });
 }
 
-/// 判断是否存在任意暂停（手动或定时时段）
-fn is_any_pause_active(inner: &EngineInner, deps: &EngineDeps) -> bool {
-    if inner.manual_paused {
-        return true;
-    }
+/// 定时暂停窗口是否当前生效（不含手动暂停）
+fn is_scheduled_pause_active(deps: &EngineDeps) -> bool {
     let cfg = deps.config_service.runtime().load();
     if !cfg.pause.enabled {
         return false;
@@ -804,6 +806,14 @@ fn is_any_pause_active(inner: &EngineInner, deps: &EngineDeps) -> bool {
         cfg.pause.end_hour as u32,
         cfg.pause.end_minute as u32,
     )
+}
+
+/// 判断是否存在任意暂停（手动或定时时段）
+fn is_any_pause_active(inner: &EngineInner, deps: &EngineDeps) -> bool {
+    if inner.manual_paused {
+        return true;
+    }
+    is_scheduled_pause_active(deps)
 }
 
 /// 判断当前时间是否处于暂停时段（支持跨天）
@@ -1212,11 +1222,17 @@ mod tests {
         wait_for(|| snap().engine_state == EngineState::Running).await;
         assert_eq!(snap().probe_total, 0, "暂停窗口内 Start 不应触发探测");
 
-        // Pause → Resume：定时窗口仍生效，Resume 不得触发立即检测
+        // Pause → Resume：定时窗口仍生效，Resume 不得触发立即检测。
+        // F3 语义变更：窗口期内快照如实保持暂停态（原实现回显 false、
+        // 前端在定时暂停时段错误显示"运行中"），故此处不再等待 pause_active 翻回 false
         cmd_tx.send(EngineCommand::Pause).await.unwrap();
         wait_for(|| snap().pause_active).await;
         cmd_tx.send(EngineCommand::Resume).await.unwrap();
-        wait_for(|| !snap().pause_active).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            snap().pause_active,
+            "定时窗口期内 Resume 后快照仍应如实显示暂停"
+        );
         assert_eq!(snap().probe_total, 0, "定时暂停窗口内 Resume 不应触发探测");
 
         // 足量虚拟时间流逝后仍无任何探测执行（定时器分支同样被门控）

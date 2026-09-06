@@ -184,14 +184,19 @@ impl UpdaterService {
             loop {
                 // 每次迭代重新读取配置（支持运行时修改）
                 let settings = config.load_settings().global.updater;
-                // check_interval_hours 为 0 时禁用定时检查（仅保留启动时检查）
-                if settings.check_interval_hours == 0 {
-                    cancel.cancelled().await;
-                    break;
-                }
-                let interval_secs = (settings.check_interval_hours as u64).saturating_mul(3600);
-                let interval = std::time::Duration::from_secs(interval_secs.max(300)); // 最少 5 分钟
                 if !due_now {
+                    if settings.check_interval_hours == 0 {
+                        // 定时检查已禁用（启动检查已完成或未要求）：低频轮询配置，
+                        // 运行时改回非 0 无需重启。原实现在此永久阻塞 cancelled()，
+                        // 导致 0 → 非 0 的热改永远不生效（除非重启）。
+                        tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => continue,
+                        }
+                    }
+                    let interval_secs =
+                        (settings.check_interval_hours as u64).saturating_mul(3600);
+                    let interval = std::time::Duration::from_secs(interval_secs.max(300)); // 最少 5 分钟
                     tokio::select! {
                         _ = cancel.cancelled() => break,
                         _ = tokio::time::sleep(interval) => {},
@@ -264,12 +269,18 @@ impl UpdaterService {
             return Err(UpdaterError::LoginInProgress);
         }
 
-        let result = self.download_stage_and_pending(info).await;
-        // 无论成败均释放互斥，允许后续重试
-        self.update_in_progress.store(false, Ordering::SeqCst);
-        result?;
-
-        self.spawn_helper()
+        if let Err(e) = self.download_stage_and_pending(info).await {
+            // 失败释放互斥，允许后续重试
+            self.update_in_progress.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+        // 成功后保持互斥直到进程退出：助手替换窗口内不允许并发再发起一次更新
+        //（标记随进程消亡；spawn_helper 失败则释放，允许重新发起）
+        if let Err(e) = self.spawn_helper() {
+            self.update_in_progress.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// 下载 → 校验 → 解压 → 写 pending.json
