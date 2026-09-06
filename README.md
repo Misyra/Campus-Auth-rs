@@ -38,7 +38,7 @@ cd frontend && npm install && npm run build && cd ..
 cargo run
 ```
 
-> 要求：Rust 1.85+（Edition 2024）、Node.js（构建前端时）。
+> 要求：Rust 1.85+（Edition 2024，源码编译最低版本）、Node.js（构建前端时）。仓库通过 `rust-toolchain.toml` 固定 1.98 构建工具链，装有 rustup 时本地与 CI 自动采用该版本，自编译环境只需满足 1.85+ 即可。
 
 ### Docker 部署
 

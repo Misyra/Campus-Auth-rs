@@ -10,7 +10,7 @@ Campus-Auth 是一个校园网自动认证工具。Rust 重写版为单 binary c
 
 | 领域 | 选型 |
 |------|------|
-| 语言 / Edition | Rust 2024, MSRV 1.85 |
+| 语言 / Edition | Rust 2024, MSRV 1.85（构建工具链由 rust-toolchain.toml 固定 1.98） |
 | 异步运行时 | tokio（按需裁剪，原 full：rt-multi-thread / macros / net / fs / process / signal / sync / time / io-util，见 Cargo.toml） |
 | HTTP 框架 | axum 0.8 + tower-http |
 | HTTP 客户端 | reqwest (rustls-tls) |
