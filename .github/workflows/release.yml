@@ -6,6 +6,8 @@ name: Release
 #   campus-auth(-helper)(.exe)  # 主程序（前端已嵌入）+ 更新替换助手
 #   resources/                  # 托盘图标 / task-recorder 等静态资源
 #   python_worker/              # Python Worker 源码（运行时按需引导 uv 环境）
+#   Dockerfile / docker-compose.yml / .dockerignore / docker/  # Docker 部署（与 build.ps1 口径一致）
+#   README.md                     # 快速开始
 #
 # 矩阵：Windows x64 / Windows arm64（MSVC 目标由 windows runner 自带工具链交叉编译）/
 # macOS arm64 / macOS x64（Apple Silicon 主机交叉编译，规避 Intel 云主机退役风险）/
@@ -121,6 +123,16 @@ jobs:
           Get-ChildItem "python_worker" -Force | Where-Object { $_.Name -ne ".venv" } |
             ForEach-Object { Copy-Item $_.FullName (Join-Path "$out/python_worker" $_.Name) -Recurse -Force }
           Get-ChildItem "$out/python_worker" -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+          foreach ($d in @(".pytest_cache", ".tmp-uv-cache", ".mypy_cache", ".ruff_cache", "captures", "build", "dist", "node_modules")) {
+            Get-ChildItem "$out/python_worker" -Recurse -Directory -Filter $d -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path "$out/python_worker/$d") { Remove-Item "$out/python_worker/$d" -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          Get-ChildItem "$out/python_worker" -Recurse -File -Filter "*.pyc" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          Copy-Item "Dockerfile" "$out" -Force
+          Copy-Item "docker-compose.yml" "$out" -Force
+          Copy-Item ".dockerignore" "$out" -Force
+          Copy-Item "README.md" "$out/README.md" -Force
+          Copy-Item "docker" "$out/docker" -Recurse -Force
           Compress-Archive -Path "$out/*" -DestinationPath $env:ARCHIVE
 
       - name: 组装便携包（macOS / Linux）
@@ -131,7 +143,9 @@ jobs:
           cp "target/$RELEASE_TARGET/release/campus-auth-helper" pkg/
           cp -R resources pkg/resources
           mkdir -p pkg/docs/guides && cp docs/guides/*.md pkg/docs/guides/
-          tar -C python_worker --exclude=.venv --exclude=__pycache__ -cf - . | tar -C pkg/python_worker -xf -
+          tar -C python_worker --exclude=.venv --exclude=__pycache__ --exclude=.pytest_cache --exclude=.tmp-uv-cache --exclude=.mypy_cache --exclude=.ruff_cache --exclude=captures --exclude=build --exclude=dist --exclude=node_modules --exclude='*.pyc' -cf - . | tar -C pkg/python_worker -xf -
+          cp Dockerfile docker-compose.yml .dockerignore README.md pkg/ 2>/dev/null || true
+          cp -R docker pkg/docker 2>/dev/null || true
           tar -czf "$ARCHIVE" -C pkg .
 
       # 生成 SHA256 校验文件（更新器按 SHA 校验完整性的前置数据）；mac 无 sha256sum，回退 shasum

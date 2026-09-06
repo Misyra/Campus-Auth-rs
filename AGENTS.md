@@ -93,7 +93,9 @@ cd frontend && npm run build
 campus-auth/
 ├── Cargo.toml
 ├── openapi.json              # Web API 契约（手写 baseline，前端 typegen 数据源）
-├── build.ps1                 # 便携版打包脚本
+├── Dockerfile / docker-compose.yml / .dockerignore  # Docker 部署（与便携包同源）
+├── docker/                   # Docker 辅助（entrypoint.sh / README / override 示例）
+├── build.ps1                 # 便携版打包脚本（pwsh 7+，产物含 Docker 文件）
 ├── src/
 │   ├── lib.rs                # 库入口：聚合全部模块 + 统一 ServiceHandle
 │   ├── main.rs               # CLI 解析 → 启动分发
