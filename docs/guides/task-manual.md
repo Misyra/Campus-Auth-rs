@@ -1,14 +1,14 @@
 # 任务使用手册
 
-任务是 Campus-Auth 执行自动登录的实际载体：用 JSON 描述在认证页上的一系列浏览器操作，由 Playwright 按顺序执行。任务文件存放在运行目录的 `tasks/` 下。
+任务是 Campus-Auth 的执行单元：浏览器任务用 JSON 步骤序列经 Playwright 执行，脚本/ Shell 任务经本地进程执行。文件存放在运行目录的 `tasks/browser/`（浏览器）与 `tasks/scripts/`（脚本/ Shell）下（`src/tasks/loader.rs`，`type` 缺失时默认归为浏览器任务以兼容旧 JSON）。
 
 变量、步骤类型与字段语义见《任务编写指南》（`设置 · 任务` 页可导出），本文只讲日常使用。
 
 ## 1. 核心概念
 
-- **任务**：一份 JSON，描述一次完整的认证流程（打开登录页 → 填账号密码 → 处理验证码 → 点击登录 → 确认成功）。
-- **活跃任务**：实际被执行的任务，同时只能有一个。在`任务管理`页或`设置 · 任务`页查看当前活跃任务。
-- **定时任务**：与登录任务独立，按 Cron 表达式定时触发的任务，在`定时任务`页管理。
+- **任务**：一份 JSON，`type` 为 `browser`（浏览器自动化）/ `script`（文件脚本，`content` 或 `script_path` + `binary_path`/`args`/`work_dir`）/ `shell`（命令字符串 `command` + `shell_path`），见 `src/tasks/models.rs`。浏览器任务含 `url`/`steps`/`success_condition` 等；脚本/ Shell 任务由 `TaskExecutor` 直接起子进程执行。
+- **活跃任务**：实际被自动登录执行的任务，同时只能有一个。在`任务管理`页或`设置 · 任务`页查看当前活跃任务（`POST /api/tasks/active/{id}`）。
+- **定时任务**：与登录任务独立，按 Cron 表达式定时触发的任务，在`定时任务`页管理；底层仍为上述三类任务的调度视图。
 
 ## 2. 日常操作（Web 控制台）
 
@@ -59,6 +59,9 @@
 | `POST /api/tasks/order` | 排序 |
 | `POST /api/tasks/active/{task_id}` | 设为活跃任务 |
 | `POST /api/tasks/{id}/execute` | 执行指定任务 |
+| `GET /api/scripts` / `GET /api/shells` | 脚本 / Shell 任务过滤视图（同 `GET /api/tasks` 数据，`tasks/scripts/`） |
+| `POST /api/scripts/run` | 临时脚本直跑（不落盘，`ScriptTaskConfig` 即时执行） |
+| `GET /api/tasks`（脚本）| `GET /api/scripts/{id}` / `PUT /api/scripts/{id}`（脚本单体，`ps1` 被拒） |
 | `POST /api/login` | 触发登录（执行活跃任务） |
 | `POST /api/login/once` | 登录一次 |
 | `GET /api/login/status` | 登录状态 |
@@ -68,3 +71,4 @@
 - **任务执行失败**：查看日志定位到具体步骤；检查选择器是否随登录页改版失效；验证码步骤确认 OCR 已安装。
 - **任务中使用变量**：在任务 JSON 的 `variables` 字段中直接定义，步骤内以 `{{变量名}}` 引用；`{{USERNAME}}`、`{{PASSWORD}}`、`{{ISP}}`、`{{LOGIN_URL}}` 自动取当前方案配置。
 - **多网络环境**：不同校区 / 运营商使用`配置方案`页的多方案切换，而非为每个环境各写一套任务。
+- **脚本任务怎么写**：见 [自定义脚本指南](custom-script-guide.md)（`script`/`shell` 两类，`py`/`bat`/`sh`/`exe` 扩展名，`ps1` 不支持）；浏览器任务见 [任务编写指南](task-writing-guide.md)。

@@ -12,3 +12,4 @@
 - `changelog.md` 中 `v5.0.0` 之前的历史轮次后续按季度拆出至此（当前仍 inline，待下一版本执行瘦身）。
 - `plan-next.md` 为唯一活跃计划入口，不归档。
 - `test-coverage-*` 单日快照过期即归档，不删可追溯，CI 不依赖。
+> 审计复核报告 `docs/defect-recheck-2026-09-06.md`（76 条 v2）与 `docs/updater-audit-2026-09-05.md`（更新子系统 v2）为活跃复核材料，留置 `docs/` 根，下版本视是否兑现再归档；`docs/test-coverage-2026-08-30.md` 重定向下版本可删。

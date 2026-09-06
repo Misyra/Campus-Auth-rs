@@ -48,6 +48,8 @@ docker compose -f docker-compose.yml -f docker/docker-compose.override.example.y
 | `CAMPUS_AUTH_PORT` | `50721` | 监听端口 |
 | `CAMPUS_AUTH_BASE_PATH` | `/data` | 数据根目录（容器内） |
 | `RUST_LOG` | `info` | 日志级别 |
+
+> 更新通道（`stable`/`prerelease`/`all`）与检查开关在 `settings.json` 的 `updater` 节配置（前端设置页），非环境变量；镜像内 `update/last_check.json` 为上次检查落盘状态。
 | `CAMPUS_AUTH_WORKER_DIR` | `/app/python_worker` | Worker 源码路径覆盖 |
 
 CLI 参数优先级高于环境变量：`--host` / `--port` / `--base-path`。

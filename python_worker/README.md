@@ -3,7 +3,7 @@
 > Rust 侧对应模块 `src/bridge/`（`BridgeSupervisor` 通过 NDJSON IPC 驱动本 Worker），IPC 契约见本 README 与 `worker_main.py` docstring。
 
 校园网自动认证工具的浏览器自动化子进程。由 Rust 主进程（控制平面）通过
-> 版本：`v5.0.0-alpha.1`。本目录为 Rust 重写版的 Python Worker，已移除对旧
+> 版本：`v5.0.0-alpha.8`。本目录为 Rust 重写版的 Python Worker，已移除对旧
 > 项目 `app.*` 模块的全部依赖。
 
 ## 设计要点
@@ -67,7 +67,7 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 | `debug_start` | 启动调试会话，保持页面上下文 |
 | `debug_step` | 执行调试会话中的单步 |
 | `debug_stop` | 停止调试会话并释放页面 |
-| `page_capture` | 导航到目标页并落盘 MHTML 完整布局、HTML、CSS-JS 资源与全页截图到 `captures/latest/`（AI 任务生成） |
+| `page_capture` | 导航到目标页并落盘 MHTML 完整布局、HTML、CSS-JS 资源与全页截图到 `captures/latest/`（AI 任务生成，`POST /api/ai/capture` 触发） |
 | `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖） |
 | `shutdown` | 优雅关闭 Worker 进程 |
 

@@ -4,7 +4,7 @@
 
 Campus-Auth 是一个校园网自动认证工具。Rust 重写版为单 binary crate + Python 子进程（浏览器自动化），便携版解压即用。Rust 侧负责控制平面（网络监测、登录状态机、调度、配置、Web API、系统托盘），Python 侧作为按需执行插件负责浏览器自动化（Playwright）和 OCR（ddddocr）。
 
-当前版本：5.0.0-alpha.6
+当前版本：5.0.0-alpha.8（见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `python_worker/pyproject.toml` / `openapi.json` 四端同版）
 
 ## 技术栈
 
@@ -85,7 +85,7 @@ cd frontend && npm run build
 
 ### Lint
 
-启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test` / `frontend build + vitest` / `compileall` / `uv run pytest`）。
+启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（含 `rust-tests-unix` 真机）/ `frontend build + vitest` / `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路，见 `.github/workflows/ci.yml`）。
 
 ## 项目结构
 
@@ -100,20 +100,21 @@ campus-auth/
 │   ├── helper_main.rs        # 更新替换助手（独立 binary：campus-auth-helper）
 │   ├── app.rs                # Axum 服务器构建 + 托盘初始化
 │   ├── container.rs          # ServiceContainer: Arc 共享状态（13 服务 + Metrics/uptime 2 横切，共 15 字段）
-│   ├── launcher.rs           # 启动状态机 (full / lightweight / once)
+│   ├── launcher.rs           # 启动状态机 (full / lightweight / login-once)
 │   ├── logging.rs            # 日志子系统（初始化 / 动态级别 / WS 广播 Layer）
 │   ├── engine/               # 调度引擎（单 tokio task + select!，含 slot.rs 可替换句柄槽）
 │   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
 │   ├── login/                # 登录编排（状态机、去重、抢占、重试）
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）— 源码模块，对应运行时 /config（.gitignore / 锚定，勿混淆）
-│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分：config/profiles/login/monitor/scheduler/tasks/scripts/system/autostart/debug/history/repo/background/uninstall/ocr 等，细粒度 state 注入）
+│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分：config/profiles/login/monitor/scheduler/tasks/scripts/shells/system/autostart/debug/history/repo/background/uninstall/ocr/ai 等，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
 │   ├── tasks/                # 任务管理 — 源码模块，对应运行时 /tasks（.gitignore / 锚定）
 │   ├── network/              # 网络接口
 │   ├── bridge/               # Python Bridge（NDJSON IPC）— Rust 侧桥，对应 python_worker/ 执行侧
 │   ├── status/               # StatusManager: 状态快照 + watch 推送
 │   ├── environment/          # 环境管理器（uv/python 按需安装）— 源码模块，对应运行时 /environment（.gitignore / 锚定，空目录按需生成）
-│   ├── updater/              # 版本更新（检查 + 下载 + 应用）
+│   ├── ai/                   # AI 任务生成（LLM 配置 + 提示词 + 生成编排）
+│   ├── updater/              # 版本更新（检查 + 下载 + 应用，通道：Stable/Prerelease/All，状态落盘 update/last_check.json，见 GET /api/update-state）
 │   ├── tray/                 # 系统托盘（tray-icon）
 │   └── utils/                # 工具（PID 文件锁、平台特定代码）
 ├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略），与 resources/ 职责分离
@@ -121,7 +122,7 @@ campus-auth/
 ├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；mock_portal/ 已搬迁至 tests/mock-servers/full-portal/（根保留 README 重定向）
 ├── docs/                     # 文档（changelog / 已知问题清单 / 任务编写指南 / plan-next 活跃计划 / archive 归档，已兑现 docs/archive/）
 ├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入，区别于 frontend/public 与 frontend/dist）
-└── .github/workflows/        # CI（fmt + clippy + test + 前端构建 + vitest + pytest）
+└── .github/workflows/        # CI（fmt + clippy + test（含 e2e-login-chain + rust-tests-unix）+ 前端构建 + vitest + pytest）
 ```
 
 ## 架构要点
@@ -168,6 +169,13 @@ struct ServiceHandle {
 ### Python Bridge
 
 NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果。Bridge Supervisor 懒加载 Worker，空闲超时后关闭释放内存。Worker 崩溃不影响 Rust 控制平面。
+
+### Updater（更新器）
+
+- 通道：`UpdateChannel::{Stable,Prerelease,All}`（`src/config/schema.rs`），`All` 下正式/预发布一起按 semver 取最高；列表为空时回退单包口径
+- 状态落盘：`update/last_check.json`（UTC RFC3339，`GET /api/update-state` 回放，前端“上次检查”数据源）；每次检查无论成败均刷新
+- 开关：全局 `auto_check_enabled` 为总开关（关后仅手动检查）；`check_interval_hours==0` 仅启动检查；有周期检查时 `check_on_startup` 与首轮 due_now 语义等价
+- 代理收敛：`resolved_proxy_url()`（`proxy_url` 显式优先，回退旧 `proxy_port` 兼容）
 
 ### 前端嵌入
 
@@ -246,6 +254,13 @@ Conventional Commits，中文描述：
 
 ### 版本号
 
-版本号在 `Cargo.toml` 的 `version` 字段。升级时同步修改：
+版本号在 `Cargo.toml` 的 `version` 字段。升级时同步修改（四端同版，见文件头）：
 1. `Cargo.toml` — `version = "x.x.x"`
-2. `docs/changelog.md` — 新增版本条目
+2. `frontend/package.json` — `version`
+3. `python_worker/pyproject.toml` — `version`
+4. `openapi.json` — `info.version`
+5. `docs/changelog.md` — 新增版本条目
+
+### 更新通道
+
+`config.global.updater.channel`（`UpdateChannel::Stable/Prerelease/All`）。`Stable` 仅正式版（等价 releases/latest 单包），`Prerelease` 仅预发布，`All` 取最高；`All` 在枚举为空时回退单包，避免“切通道后无候选”回归。检查记录无论成败均落盘 `update/last_check.json`，前端经 `GET /api/update-state` 展示。

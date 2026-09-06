@@ -19,6 +19,7 @@ npm run preview   # 预览 dist/
 - `frontend/dist/` 必须在 `cargo build` 前存在，否则 `rust-embed` 编译失败；开发期可用 `cargo check --features no-embed` 跳过嵌入。
 - `frontend/src/api/types.ts` 为手写契约，`types.generated.ts` 为 `npm run typegen` 生成物（`.gitignore` 已忽略），以 `openapi.json` 为源。
 - `vite.config.ts: proxy` 仅开发期生效，生产由 Rust `Axum` 同源 `127.0.0.1:50721` 提供。
+- 更新状态：前端经 `GET /api/update-state` 回放 `update/last_check.json`（`src/api/types.ts: UpdateState`），与 `GET /api/check-update` 按 `UpdateChannel` 拉取的清单分离。
 
 ## 目录速览
 

@@ -63,4 +63,4 @@
 手动 E2E 环境变量：`CAMPUS_AUTH_BASE`（默认 `http://127.0.0.1:50721`）、
 `CAMPUS_AUTH_MOCK`（默认 `http://127.0.0.1:18765`）、`CAMPUS_AUTH_TOKEN`（优先于文件）、
 `CAMPUS_AUTH_BASE_PATH`（定位 `config/.auth_token`）。`_common.py` 自带回环 `no_proxy`。
-CI 接线见 `.github/workflows/ci.yml`（rust-clippy / rust-tests / rust-tests-unix / frontend-python / e2e-login-chain）。
+CI 接线见 `.github/workflows/ci.yml`（rust-clippy / rust-tests / rust-tests-unix / frontend-python / e2e-login-chain）；更新通道（`UpdateChannel`）与 `GET /api/update-state`（`update/last_check.json`）由 `src/updater/` 单元测试覆盖。

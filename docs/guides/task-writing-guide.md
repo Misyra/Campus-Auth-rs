@@ -41,7 +41,7 @@
 | `name` | `"未命名任务"` | 显示名称 |
 | `description` | `""` | 任务说明 |
 | `url` | `""` | 初始登录页；非空时执行器先自动导航 |
-| `timeout` | `30000` | 任务级总超时，毫秒；由 Rust 调用侧统一兜底 |
+| `timeout` | `30000` | 任务级总超时，毫秒；钳制到 `1000..600000`（`MIN/MAX_TASK_TIMEOUT_MS`），超出范围保存时被拒绝 |
 | `navigation_wait` | `1.0` | 初始导航完成后的额外等待，秒 |
 | `step_delay` | `0.5` | 相邻步骤之间的等待，秒 |
 | `reveal_hidden` | `false` | 是否在执行前揭示隐藏输入元素 |
@@ -79,7 +79,7 @@
 
 ## 4. 公开步骤类型
 
-Rust 保存层当前正式接受以下类型：
+Rust 保存层当前正式接受以下类型（`src/tasks/models.rs::VALID_STEP_TYPES`，与保存校验 `validate_task` 一致）：
 
 ```text
 input
@@ -93,6 +93,8 @@ screenshot
 sleep
 ocr
 custom_js
+evaluate
+custom
 navigate
 goto
 assert_text
@@ -100,7 +102,7 @@ upload_file
 wait_for_selector
 ```
 
-Python Worker 内部还保留 `evaluate`、`custom` 等历史兼容别名，但它们不是 Rust 保存 API 的公开类型。新任务请使用 `eval`；需要历史自定义脚本别名时使用 `custom_js`。
+`eval` / `custom_js` 为推荐写法，`evaluate` / `custom` 为历史兼容别名（与 Python Worker `step_handlers._STEP_HANDLERS` 对齐，否则录制/AI 产物保存时被误拒）；校验层已放行该别名，新任务优先用 `eval`，存量任务无需改写。
 
 ## 5. 变量系统
 

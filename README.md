@@ -14,6 +14,7 @@ Rust 重写版为便携式单二进制 + Python 子进程（浏览器自动化�
 - **定时任务**：cron 表达式调度，支持打卡签到等日常自动化
 - **Web 控制台**：内置 Web UI（Vue 3），支持状态查看、任务编辑、日志与实时 WebSocket
 - **系统托盘**：常驻托盘，一键启动/停止监测、打开控制台、退出
+- **AI 任务生成**：视觉模型按捕获页面自动生成浏览器任务（`POST /api/ai/capture` → `POST /api/ai/generate`，见设置页）
 - **自动更新**：版本检查与增量更新
 
 ## 快速开始
@@ -62,10 +63,11 @@ docker run -d --name campus-auth -p 50721:50721 -v campus-auth-data:/data campus
 
 ## 使用说明
 
-- **Web 控制台**：默认 `http://127.0.0.1:50721`（端口冲突自动 +1 重试）
-- **Profile**：每个 Profile 含认证页 URL、用户名、密码、网关/SSID 匹配规则与认证任务
-- **任务**：底层认证任务与定时任务分开管理，定时浏览器任务用于打卡/签到等日常自动化
-- **单次登录**：`campus-auth --mode once` 执行一次登录后退出；`--status` / `--stop` 管理后台实例
+- **Web 控制台**：默认 `http://127.0.0.1:50721`（端口冲突自动 +1 重试，`CAMPUS_AUTH_PORT` / `--port` 可覆盖）
+- **Profile**：每个 Profile 含认证页 URL（`auth_url`）与可选劫持触发地址（`trigger_url`，非空即重定向模式）、用户名/密码（AES-256-GCM 加密落盘）、网关/SSID 匹配与 `active_task`
+- **任务**：三类 `type`（`browser` 浏览器自动化 / `script` 自定义脚本 / `shell` Shell 命令），定时任务为浏览器任务的 cron 调度视图；API 统一为 `GET/POST /api/tasks`、`POST /api/scripts/run`、`GET /api/shells`
+- **单次登录**：`campus-auth --mode login-once` 执行一次活跃任务后退出；`--status` / `--stop` / `--autostart` 见 `campus-auth --help`（`--mode` 可选值：`full` / `lightweight` / `login-once`，见 `campus-auth --help`）
+- **更新通道**：设置页 `updater.channel`（`stable` 正式版 / `prerelease` 测试版 / `all` 全通道最新），`auto_check_enabled` 为总开关，`GET /api/update-state` 回放上次检查时间
 
 ## 项目结构
 
@@ -75,7 +77,7 @@ campus-auth/
 ├── frontend/            # Vue 3 + TypeScript + Vite Web 控制台
 ├── python_worker/       # Python Worker 子进程（Playwright + OCR）
 ├── tests/               # Rust 集成测试
-├── docs/                # 文档（changelog / 已知问题 / 任务编写指南 / plan-next 活跃计划 / archive 归档）
+├── docs/                # 文档（changelog / 已知问题 / 任务编写指南 / plan-next 活跃计划 / archive 归档，AI 见设置页与 src/ai）
 ├── resources/           # 静态资源（图标 / 脚本）
 └── openapi.json         # Web API 契约
 ```
@@ -86,7 +88,7 @@ campus-auth/
 
 - 提交规范：Conventional Commits，中文描述（详见 [AGENTS.md](AGENTS.md) 的 Git 规范）
 - 开发命令：`cargo build` / `cargo test` / `cargo clippy -- -D warnings` / `cargo fmt`
-- CI：`cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test` + 前端构建（`vue-tsc` + `vite build`）+ `vitest` + `compileall` + `uv run pytest`（见 `.github/workflows/ci.yml`）
+- CI：`cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test`（含 `rust-tests-unix` 与 `e2e-login-chain` mock→二进制→Worker 全链路）+ 前端构建（`vue-tsc` + `vite build`）+ `vitest` + `compileall` + `uv run pytest`（见 `.github/workflows/ci.yml`）
 - 变更记录见 [docs/changelog.md](docs/changelog.md)，已知问题见 [docs/known-issues.md](docs/known-issues.md)
 
 ## 许可证

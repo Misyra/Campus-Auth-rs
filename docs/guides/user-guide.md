@@ -1,291 +1,186 @@
 # 用户指南
 
-Campus-Auth 用户文档，帮助你快速上手并充分利用所有功能。
+> 适用于 Rust 重写版 `campus-auth`（`v5.0.0-alpha.8`，单 binary + Python Worker 子进程）。Python 版 `main.py` / `start.exe` / `update.exe` 已不在本仓库出现，本文已按当前实现重写。
 
-## 启动与配置
+## 1. 启动与命令行
 
-### 启动参数
-
-`main.py` 支持若干命令行参数，用于控制服务启动、状态查询和自启动管理。
+可执行文件：`campus-auth`（Windows 为 `campus-auth.exe`，另有 `campus-auth-helper` 辅助更新替换，无需手动调用）。
 
 ```bash
-# 基础启动
-python main.py
+# 完整模式（Web 控制台 + 托盘 + Engine，默认）
+campus-auth
 
-# 启动但不自动打开浏览器
-python main.py --no-browser
+# 轻量模式（仅 Engine + 托盘，Web 按需启动；macOS 自动降级为完整模式）
+campus-auth --mode lightweight
 
-# 不启动系统托盘
-python main.py --no-tray
+# 单次登录（执行活跃任务一次后退出）
+campus-auth --mode login-once
 
-# 指定运行模式
-python main.py --runtime-mode lightweight   # 轻量模式（无 Web UI，可通过托盘唤醒）
+# 查询 / 停止已运行实例
+campus-auth --status
+campus-auth --stop
 
-# 查看服务状态
-python main.py --status
+# 强制抢占（终止已运行实例后启动）
+campus-auth --force
 
-# 停止服务
-python main.py --stop
+# 开机自启
+campus-auth --autostart enable
+campus-auth --autostart disable
+campus-auth --autostart        # 查询当前状态
 
-# 强制启动（杀死已有实例）
-python main.py --force
+# 覆盖监听与目录
+campus-auth --port 50721 --host 127.0.0.1 --base-path D:\campus-auth-data
+# 等价环境变量：CAMPUS_AUTH_PORT / CAMPUS_AUTH_HOST / CAMPUS_AUTH_BASE_PATH
 
-# 自启动管理
-python main.py --autostart
-python main.py --autostart enable
-python main.py --autostart disable
+# 启动后不自动打开浏览器 / 不显示托盘
+campus-auth --no-browser
+campus-auth --no-tray
 
-# 指定启动动作
-python main.py --startup-action monitor    # 启动后自动开始监控
-python main.py --startup-action login_once  # 登录一次后退出
-
-# 指定运行模式
-python main.py --runtime-mode lightweight   # 轻量模式（无 Web UI）
+# 启动动作覆盖（覆盖 settings.json 的 app.startup_action）
+campus-auth --startup-action monitor      # 启动后进入监测
+campus-auth --startup-action login_once
+campus-auth --startup-action none
 ```
 
-### 配置说明
+完整参数见 `campus-auth --help`（定义于 `src/launcher.rs::CliArgs`，实现于 `src/main.rs`）。
 
-#### 配置来源
+Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，若已有实例在运行则直接在浏览器打开其 Web 控制台；从终端启动时会自动附着父控制台，`--status` / `--stop` 输出可见（`src/main.rs::attach_parent_console`）。
 
-项目配置存储在 `config/` 目录：
+### 运行时目录
 
-- `config/settings.json`：主配置文件，存储凭证、认证地址、监控设置等。
-- `config/profiles/`：配置方案目录，存储多网络配置方案数据。
+默认 `base_path` 为可执行文件所在目录；可用 `--base-path` / `CAMPUS_AUTH_BASE_PATH` 覆盖。目录结构：
 
-首次使用时系统会通过初始化向导引导你填写配置，所有配置统一存储在 `config/settings.json` 中。
-
-#### 高级配置
-
-项目的所有配置现已统一通过 Web 控制台管理。首次使用时，Web 控制台的初始化向导会引导你完成配置。如需高级配置（端口、代理等），可直接编辑 `config/settings.json` 或通过 Web 控制台"设置"页面操作。
-
-以下配置仅通过 Web 控制台或直接编辑 `config/settings.json` 设置，不支持环境变量：
-
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `startup_action` | `monitor` | 启动后执行的动作。`monitor`：自动监控；`login_once`：登录一次后退出。 |
-| `proxy` | 空 | 网络代理地址，用于远程任务仓库访问。留空不使用代理。 |
-| `browser_args` | 见默认值 | 自定义 Chromium 启动参数，每行一个，用于反检测或浏览器行为定制。 |
-| `pure_mode` | `true` | 纯净模式，使用 Chromium 原始设置，不注入自定义参数。 |
-| `block_proxy` | `true` | 阻止系统代理设置，使用直连网络。 |
-| `access_log` | `false` | 是否输出 Uvicorn HTTP 访问日志。 |
-| `log_retention_days` | `7` | 日志与截图保留天数（1-365），过期日期目录整体删除。 |
-
-## 功能说明
-
-### 任务系统
-
-任务系统使用 JSON 文件描述自动化认证流程，支持多种步骤类型、变量模板、网络检测兜底成功判断和帧上下文。任务文件存放在 `tasks/` 目录，通过 Web 控制台管理（新建、编辑、导入导出、复制、设置活动任务）。
-
-#### 任务类型
-
-1. **浏览器任务** (`tasks/browser/`)：使用 Playwright 执行浏览器自动化操作。
-2. **脚本任务** (`tasks/scripts/`)：执行 Python、PowerShell 或 cmd 脚本。
-3. **定时任务** (`tasks/scheduled/`)：在指定时间或间隔执行的任务。
-
-- [任务开发参考](../dev/architecture.md) — 架构、步骤类型、变量解析、API 接口
-- [任务编写指南](task-writing-guide.md) — 完整示例、最佳实践、常见问题
-
-### 多网络配置方案
-
-配置方案（Profiles）系统允许你为不同的网络环境（如宿舍 WiFi、教学楼 WiFi、有线网络）配置不同的认证参数，系统可以根据当前网络自动切换。
-
-#### 工作原理
-
-1. 每个方案可以设置匹配条件：网关 IP 或 WiFi SSID。
-2. 系统检测当前网络的网关 IP 和 WiFi SSID（支持 Windows、macOS、Linux）。
-3. 优先按网关 IP 匹配，其次按 SSID 匹配。
-4. 匹配成功后自动切换到对应方案的配置。
-
-#### 独立设置
-
-每个方案可以独立配置：
-
-- 凭证（用户名/密码，加密存储）
-- 认证地址、运营商
-- 检测间隔、暂停时段
-- 浏览器参数（无头模式、超时、User-Agent 等）
-
-也可以选择使用全局凭证或全局高级设置。
-
-#### Web 控制台操作
-
-在"配置方案"页面可以：
-
-- 查看所有方案列表及当前活动方案
-- 新建、编辑、删除方案（`default` 不可删除）
-- 检测当前网络环境（网关 IP、WiFi SSID、匹配的方案）
-- 开启/关闭自动切换
-
-#### 自动切换
-
-开启自动切换后，监控核心每 60 秒检测一次网络环境变化。当检测到当前网络匹配到不同的方案时，会自动切换配置并重新加载监控。
-
-### 系统托盘与自启动
-
-#### 系统托盘
-
-系统托盘功能允许程序在后台运行，提供以下操作：
-
-- 打开 Web 控制台
-- 查看运行状态
-- 退出程序
-
-轻量模式下支持按需唤醒 Web 控制台。
-
-#### 开机自启动
-
-支持在 Windows、macOS 和 Linux 上配置自启动：
-
-```bash
-# 启用自启动
-python main.py --autostart enable
-
-# 禁用自启动
-python main.py --autostart disable
-
-# 查看自启动状态
-python main.py --autostart
+```
+<base_path>/
+├── config/                  # settings.json + profiles/*.json + .auth_token（鉴权）
+├── tasks/
+│   ├── browser/             # 浏览器任务（*.json）
+│   ├── scripts/             # 自定义脚本任务（browser/script/shell 的脚本类落此处）
+│   └── scheduled/           # 定时任务调度历史等
+├── logs/                    # 按日归档（受 logging.retention_days 控制）
+├── environment/             # uv / .venv / Playwright 浏览器（按需生成）
+└── update/                  # last_check.json（上次检查状态）+ staging/（下载暂存）
 ```
 
-## 常见问题
+`settings.json` 为 v6 schema（`src/config/schema.rs`），`config_version` 字段驱动迁移；密码字段落盘为 `ENC:` 前缀密文（`aes-gcm` + `zeroize`）。
 
-### Playwright 或 Chromium 下载失败
+## 2. Web 控制台
 
-项目会自动尝试多个镜像源下载 Playwright 和 Chromium。如果下载仍然失败，可以手动设置环境变量指定下载源：
+地址：`http://127.0.0.1:50721`（`app.port`，端口占用自动 +1 重试；Docker 默认 `0.0.0.0:50721`）。首次启动走初始化向导，之后在「设置」页管理全部配置。
 
-```env
-PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
-```
+鉴权：启动时生成随机 token 持久化于 `config/.auth_token`（`0600`），前端经 `/api/auth/token` 懒取并在 `X-Auth-Token` / `Bearer` / `?token=` 中携带；`GET /api/health`、`GET /api/auth/token` 等少数端点豁免，其余 `/api/*` 与 `/ws/*` 强制校验（`src/web/auth.rs`）。
+
+## 3. 多网络配置方案（Profiles）
+
+入口：`GET /api/profiles` / `POST /api/profiles` / `GET /api/profiles/active`，前端为“配置方案”页。
+
+- 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则与 `active_task`。
+- 重定向模式：`trigger_url` 为明文 `http` 触发地址（如 `http://www.msftconnecttest.com/connecttest.txt`），Worker 首导航到该地址并跟随 302 到真门户，`{{LOGIN_URL}}` 同步为触发地址；监测跳过 `auth` TCP 探测、登录跳过预检，劫持判定优先于断网（`docs/guides/task-writing-guide.md` 重定向模式）。
+- 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高；`auto_switch` 开启时 Engine 每 60s 检测并自动切换，切换后重置登录失败去重状态。
+- `default` 为保底 Profile，不可删除。
+
+## 4. 任务系统
+
+### 三类任务
+
+- **浏览器任务**（`tasks/browser/*.json`，`type=browser`）：Playwright 步骤序列，见《任务编写指南》。
+- **脚本任务**（`tasks/scripts/*.json`，`type=script`）：`script_path` 或 `content` + `binary_path` + `args` + `work_dir` + `timeout`（`src/tasks/models.rs::ScriptTaskConfig`）。
+- **Shell 任务**（同目录，`type=shell`）：`command` + `shell_path` + `timeout`（`ShellTaskConfig`）。
+
+管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/active/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本/Shell 均走 `TaskExecutor::execute`）；`GET /api/scripts` / `/api/shells` 为同数据在脚本面板的视图过滤（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。
+
+### 日常操作
+
+- **任务管理 / 设置·任务**：新建、编辑、复制、删除、排序、导入/导出单个任务；将某个任务设为活跃任务（`POST /api/tasks/active/{id}`）。
+- **定时任务**：独立页，按 cron 调度浏览器任务（`src/scheduler`，状态在 `tasks/scheduled/`）。
+- **何时执行**：网络监测 Offline/Captive 时自动执行活跃任务；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
+
+### 录制器：不手写 JSON
+
+1. 安装 Tampermonkey；
+2. 在「设置·任务」页「安装录制器脚本」；
+3. 打开校园网登录页，点浮动按钮开始录制，按提示点选账号框、密码框、验证码、登录按钮等；
+4. 结束录制后保存为任务并设为活跃任务验证一次（`resources/tools/task-recorder.user.js`）。
+
+## 5. 浏览器自动化与调试
+
+- Playwright 渠道：`msedge`（默认）、`chromium`、`chrome`、`firefox`、`webkit`，支持自定义可执行文件路径与 `browser_args`（每行一个，`#` 注释，Worker 侧过滤敏感参数）。
+- 调试：`POST /api/debug/start`（前置环境就绪检查，缺失自动引导）、`POST /api/debug/step` / `stop` / `run_all`；前端调试面板单步执行并展示 `steps`，支持导出反馈包（含截图、MHTML、日志）。
+- 反馈包：`POST /api/debug/capture` 采集页面快照与日志，打包 `debug/` 归档。
+
+## 6. 验证码（OCR）
+
+- 仅 `ocr` 步骤需要；依赖 `ddddocr`（`python_worker/pyproject.toml` 的 `ocr` extra，约 120MB）。
+- 在「设置·任务」页安装，装好后可用“验证码识别”上传截图试识别；未安装时非 OCR 浏览器任务仍可运行（`src/environment` 按需引导，启动即后台探测环境状态）。
+
+## 7. 系统托盘与开机自启
+
+- 托盘常驻操作：打开控制台、查看状态、退出；轻量模式支持按需唤醒 Web 控制台（`src/tray`）。
+- macOS：托盘按用户决策禁用（`tray-icon` 要求主线程 NSApplication 事件循环，与 tokio 冲突），轻量模式自动降级为完整模式，Web 入口仍可用。
+- Linux：依赖 GTK3 / libayatana-appindicator（`TrayManager::spawn` 内 `gtk::init` + glib 主循环），无桌面环境时托盘不启动但 Web 仍可用。
+- 开机自启：`--autostart enable/disable`（`src/utils/platform` 三端实现；Windows 为计划任务/VBS，macOS 为 LaunchAgent，Linux 为 systemd/autostart）。
+
+## 8. AI 任务生成
+
+入口：设置页 AI 任务生成（`GET /api/ai/llm-config` 读配置、`PUT /api/ai/llm-config` 保存、`POST /api/ai/capture` 捕获页面、`POST /api/ai/generate` 生成）。
+
+- 配置文件：`<base>/config/llm.json`（`api_key_enc` 加密落盘，`base_url` / `model` 等，见 `src/ai/mod.rs`）；
+- 流程：`POST /api/ai/capture` 经 Bridge 触发 `page_capture` 落 `captures/latest/`（MHTML + HTML + 资源 + 截图），再由视觉模型按提示词生成浏览器任务 JSON，经 `validate_task` 强校验后回喂自纠（`src/ai/generate.rs`）；
+- 依赖：需先经 `page_capture` 捕获页面，生成失败可在前端预览/编辑后走 `POST /api/tasks/import` 入库。
+
+## 9. 自动更新与通道
+
+入口：关于页「检查更新」（`GET /api/check-update` 按通道拉清单，`GET /api/update-state` 回放上次检查时间）与「立即更新」（`POST /api/system/update`）。
+
+- 通道（`config.global.updater.channel`）：`stable` 仅正式版（`releases/latest` 单包语义）、`prerelease` 仅预发布、`all` 正式+预发布一起按 semver 取最高；`all` 在 releases 列表为空时回退单包口径（`src/updater/check.rs::fetch_manifest_for_channel`）。
+- 总开关：`auto_check_enabled` 关闭后后台循环与启动检查均静默，仅保留手动检查；`check_interval_hours==0` 仅做启动检查（`src/updater/mod.rs` 的 `due_now` 语义）。
+- 状态落盘：每次检查无论成败均刷新 `update/last_check.json`（UTC RFC3339，`last_check_at`/`has_update`/`latest_version`/`error`），前端据此展示“上次检查”。
+- 代理：显式 `proxy_url`（支持非本机）优先，回退旧 `proxy_port` 兼容（`resolved_proxy_url()`）；监测与更新代理解耦（`monitor.disable_proxy` 默认直连）。
+
+镜像目录：`~/.cache/campus-auth`（XDG）或项目内 `environment/`，更新 staging 为 `update/staging/`，helper 以 `campus-auth-helper` 完成自替换。
+
+## 10. 常见问题
+
+### Playwright / Chromium 下载失败
+
+项目经 `uv` 与多镜像（`npmmirror` / 清华 PyPI）尝试下载；失败时可在「系统设置」重试或检查 `environment/` 权限与代理设置。Docker 镜像构建时已预装 Chromium，宿主机部署按需等待首次下载完成。
 
 ### 服务提示已启动
 
-项目带有重复启动保护。如果你怀疑已经有实例在运行，可以先查看状态再决定是否停止：
-
 ```bash
-python main.py --status
-python main.py --stop
+campus-auth --status
+campus-auth --stop
+campus-auth --force   # 终止后抢占
 ```
 
 ### 认证不成功
 
-建议按这个顺序排查：
-
-1. 账号和密码是否正确。
-2. `LOGIN_URL` 是否能正常打开。
-3. `ISP` 是否和当前网络运营商匹配。
-4. 在 Web 控制台查看实时日志和失败截图。
-5. 暂时关闭无头模式，观察浏览器具体执行了什么操作。
+1. 账号/密码是否正确（`ENC:` 解密后注入 `{{USERNAME}}`/`{{PASSWORD}}`）；
+2. `auth_url` / `trigger_url` 是否可达（劫持型门户须用 `http` 触发地址）；
+3. `isp` 是否匹配；
+4. 在 Web 控制台看实时日志与失败截图；
+5. 临时关闭无头模式观察页面行为（`browser.headless`）。
 
 ### 日志不显示或有延迟
 
-- 确认后端服务本身在运行。
-- 检查浏览器开发者工具中的 WebSocket 连接状态。
-- 刷新页面后重新订阅日志流。
+确认后端在运行、浏览器 WebSocket 已连上（`/ws/logs`、`/ws/status`），刷新后重新订阅；开发期 `cargo run --features no-embed` 与 `frontend npm run dev` 需分别启动。
 
 ### 多个校园网怎么配置
 
-使用"配置方案"页面为每个网络创建独立的 Profile，设置匹配条件（网关 IP 或 WiFi SSID），并开启自动切换。系统会在检测到网络变化时自动切换到匹配的方案。
+在“配置方案”页为每个网络创建 Profile，填 `gateway_ip` / `wifi_ssid` 匹配条件并开启 `auto_switch`；为各 Profile 分别绑定 `active_task`，而非为每环境各写一套任务 JSON。
 
 ### 保存任务时弹出安全警告
 
-这是因为任务中包含 `eval` 步骤，该步骤可以执行任意 JavaScript 代码。系统会显示代码内容要求确认。确认代码安全后点击确认即可。
+`eval` / `custom_js` 步骤可执行任意 JS，系统会展示代码要求确认，确认安全后保存。
 
-### 自启动被杀毒软件拦截
+### 自启动被拦截
 
-Windows 自启动使用 VBS 脚本，部分杀毒软件可能会拦截。建议将程序目录添加到杀毒软件白名单，或暂时关闭杀毒软件后重试 `python main.py --autostart enable`。
+Windows 自启动为计划任务，部分杀毒软件可能拦截，建议将 `campus-auth.exe` 加入白名单后重试 `--autostart enable`。
 
-## 高级用法
+## 11. 相关文档
 
-### 辅助工具
-
-项目根目录提供两个 Go 编译的辅助工具，无需安装 Go 运行时即可使用：
-
-#### start.exe — 一键启动
-
-自动下载 uv、安装依赖并启动应用。适合首次部署或不想手动管理环境的用户。
-
-```bash
-# 启动应用（自动安装依赖）
-start.exe
-
-# 仅安装依赖，不启动应用
-start.exe --install-only
-
-# 透传参数给 main.py
-start.exe --no-browser --runtime-mode lightweight
-
-# 静默模式（CI 环境，不等待按键）
-start.exe --no-pause
-```
-
-工作流程：检测 PATH 中的 uv → 检查本地 `.uv/` 目录 → 从镜像源下载 uv → `uv sync` 安装依赖 → `uv run main.py` 启动应用。
-
-#### update.exe — 仓库克隆/更新
-
-自动检测/安装 Git，从镜像源克隆或更新仓库。适合需要快速获取最新代码或部署多台机器的场景。
-
-```bash
-# 在项目根目录运行（已克隆则更新，未克隆则初始化）
-update.exe
-```
-
-功能特性：
-- 自动检测 PATH 中的 Git，未找到时下载便携版（仅 Windows）
-- 支持 4 个镜像源自动轮询（GitClone、CNPMJS、GHProxy、GitHub 官方）
-- 已有仓库：fetch + reset --hard 到远程最新，支持切换分支
-- 新目录：git init + remote add + fetch + reset，交互式选择分支
-
-### 项目结构
-
-```text
-Campus-Auth/
-├── main.py                   # 统一启动入口（CLI + 启动编排）
-├── start.exe / git-puller.exe # Go 工具（编译产物，.gitignore）
-├── start.sh                  # macOS/Linux 启动脚本
-├── pyproject.toml            # 项目元数据与依赖
-├── config/                   # 运行时配置
-│   ├── settings.json         # 主配置文件
-│   └── profiles/             # 配置方案文件
-├── app/                      # Python 后端
-├── frontend/                 # 前端控制台（Vue 3 SPA，无构建步骤）
-├── tasks/                    # 任务定义
-├── tests/                    # pytest 测试
-├── docs/                     # 文档
-├── dev/                      # 开发笔记
-├── resources/                # 资源文件
-├── debug/                    # 日志与截图（按日期归档）
-└── release/                  # 发布产物
-```
-
-### 技术栈
-
-#### 后端
-
-- FastAPI：HTTP API 和 WebSocket。
-- Uvicorn：ASGI 服务运行器。
-- Pydantic：配置与请求数据校验。
-- Playwright：浏览器自动化执行。
-- socket + httpx：网络检测（TCP 探测 + HTTP 探测）。
-- psutil：网络检测（网关 IP 和 WiFi SSID 检测）。
-- cryptography：密码加密。
-- loguru：日志系统。
-- ddddocr：验证码 OCR 识别（任务步骤中使用）。
-
-#### 前端
-
-- Vue 3：控制台界面（单文件，无构建工具）。
-- Axios：后端 API 通信。
-- 原生 WebSocket：实时日志流。
-
-#### 工具与辅助
-
-- pystray / Pillow / cairosvg：系统托盘。
-- pytest：测试框架。
-
-## 相关文档
-
-- [任务编写指南](task-writing-guide.md) — 如何编写浏览器自动登录任务
-- [自定义脚本指南](custom-script-guide.md) — 使用 Python/PowerShell/cmd 脚本直接登录
-- [系统架构](../dev/architecture.md) — 内部架构概览
-- [API 接口参考](../dev/api-reference.md) — 全部 HTTP/WebSocket 端点文档
-- [更新日志](../changelog.md) — 版本变更记录
+- [任务编写指南](task-writing-guide.md) — 步骤类型、变量、frame、success_condition、选择器建议
+- [任务使用手册](task-manual.md) — 日常管理、录制器、调试
+- [自定义脚本指南](custom-script-guide.md) — `script` / `shell` 三类任务与 `POST /api/scripts/run`
+- [项目结构与架构](../../AGENTS.md) — ServiceContainer 15 字段、Updater 通道、Bridge 协议
+- [更新日志](../changelog.md) · [已知问题](../known-issues.md)
