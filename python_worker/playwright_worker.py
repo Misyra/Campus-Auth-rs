@@ -1246,7 +1246,16 @@ class WorkerCore:
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
         try:
             task = TaskConfig.from_dict(task_raw)
+
+            # G3：启动窗口（环境准备 + 首导航）同样响应取消——步骤层有取消检查，
+            # 但 start 阶段点"取消"此前被完全忽略，浏览器会照常拉起并导航
+            def _ensure_not_cancelled(stage: str) -> None:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise WorkerError(Outcome.UNKNOWN_ERROR, f"调试已取消（{stage}阶段）")
+
+            _ensure_not_cancelled("环境准备前")
             await self.ensure_browser({"browser_settings": bs})
+            _ensure_not_cancelled("会话准备前")
             # Debug session is also a top-level storage-isolation boundary.
             await self._prepare_session_page()
             variables = dict(task.variables or {})
@@ -1255,11 +1264,13 @@ class WorkerCore:
                 self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
             )
             if task.url:
+                _ensure_not_cancelled("导航前")
                 await self._navigate(
                     self._page, resolve(task.url, variables),
                     _to_ms(bs, "navigation_timeout", 15000),
                 )
                 await self._wait_after_navigation(task, context)
+                _ensure_not_cancelled("导航后")
             self._debug_sessions[session_id] = DebugSession(
                 session_id=session_id,
                 page=self._page,

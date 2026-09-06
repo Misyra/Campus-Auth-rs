@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Campus-Auth 任务录制器
 // @namespace    https://github.com/Misyra/Campus-Auth
-// @version      4.2.1
+// @version      5.0.0
 // @description  可视化选取校园网登录页面元素，自动生成任务 JSON 或结构化文档
 // @author       Misyra
 // @match        http://*/*
@@ -19,7 +19,7 @@
 
   // ==================== 配置 ====================
 
-  const VERSION = "4.2.1"; // 同步修改顶部 @version
+  const VERSION = "5.0.0"; // 同步修改顶部 @version
 
   const STEP_TYPES = {
     username: { category: "basic", label: "账号输入框", icon: "👤", color: "#4CAF50", primary: true, hint: "点击页面上真实的账号输入框（不是旁边的文字标签），支持自动检测隐藏输入框" },
@@ -665,8 +665,11 @@
       }
     } catch (_) {}
 
-    // 9. XPath
-    selectors.push({ type: "xpath", value: buildXPath(el), reliability: inShadowRoot ? 1 : 3 });
+    // 9. XPath（G1：残缺路径（超深未到根）返回空串时不产出，避免假选择器）
+    const xpath = buildXPath(el);
+    if (xpath) {
+      selectors.push({ type: "xpath", value: xpath, reliability: inShadowRoot ? 1 : 3 });
+    }
 
     // 按可靠性排序
     selectors.sort((a, b) => b.reliability - a.reliability);
@@ -723,10 +726,25 @@
     return parts.join(" > ");
   }
 
+  // G1：同级同名元素优先用可区分属性替代位置索引——页面增删元素会让索引漂移失效
+  function xpathDisambiguator(el) {
+    for (const attr of ["name", "placeholder", "type", "aria-label", "title", "alt"]) {
+      const v = el.getAttribute ? el.getAttribute(attr) : null;
+      if (v && !v.includes('"')) return `[@${attr}="${v}"]`;
+    }
+    return null;
+  }
+
   function buildXPath(el) {
     const parts = [];
     let current = el;
-    while (current && current !== document.body && parts.length < 6) {
+    let reached = null; // 命中的文档根（body / html），用于补全绝对路径前缀
+    while (
+      current &&
+      current !== document.body &&
+      current !== document.documentElement &&
+      parts.length < 8
+    ) {
       let part = current.tagName.toLowerCase();
       if (current.id) {
         parts.unshift(`//*[@id="${current.id}"]`);
@@ -736,14 +754,18 @@
       if (parent) {
         const siblings = Array.from(parent.children).filter(c => c.tagName === current.tagName);
         if (siblings.length > 1) {
-          const idx = siblings.indexOf(current) + 1;
-          part += `[${idx}]`;
+          part += xpathDisambiguator(current) || `[${siblings.indexOf(current) + 1}]`;
         }
       }
       parts.unshift(`/${part}`);
       current = parent;
     }
-    return parts.join("") || "/";
+    if (current === document.body) reached = "/html/body";
+    else if (current === document.documentElement) reached = "/html";
+    // 补全绝对路径前缀：缺 /html/body 的路径无法作为绝对 XPath 执行（G1）；
+    // 超过深度上限仍未到根的残缺路径不产出，避免生成假选择器
+    if (!reached) return "";
+    return reached + parts.join("");
   }
 
   // ==================== iframe 检测 ====================
