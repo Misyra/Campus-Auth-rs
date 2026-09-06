@@ -416,7 +416,7 @@ impl LoginSession {
                             duration_ms: structured.duration_ms,
                         };
                         if !self
-                            .try_retry(&retry_structured, &mut attempts_used, session_start)
+                            .try_retry(&retry_structured, &mut attempts_used, session_start, false)
                             .await
                         {
                             return;
@@ -447,7 +447,12 @@ impl LoginSession {
                 },
                 ResultAction::Retry => {
                     if !self
-                        .try_retry(&structured, &mut attempts_used, session_start)
+                        .try_retry(
+                            &structured,
+                            &mut attempts_used,
+                            session_start,
+                            should_force_recycle(structured.outcome),
+                        )
                         .await
                     {
                         return;
@@ -476,12 +481,19 @@ impl LoginSession {
 
     /// 尝试重试：更新状态、按需回收 Worker、等待重试间隔。
     ///
+    /// `force_recycle` 控制重试前是否强制回收 Worker：Worker 自身报错的路径
+    /// 按 `should_force_recycle(outcome)` 传入保持既有语义；「步骤成功但网络
+    /// 验证未过」路径传 `false`——步骤全绿证明 Worker/浏览器健康，验证失败
+    /// 多为探测瞬时误判，回收整棵进程树代价远超必要，还可能在门户留下
+    /// 重复登录痕迹。
+    ///
     /// 返回 `true` 表示继续下一轮循环，`false` 表示已 emit 终态结果（重试耗尽或被取消）。
     async fn try_retry(
         &self,
         structured: &StructuredResult,
         attempts_used: &mut u32,
         session_start: Instant,
+        force_recycle: bool,
     ) -> bool {
         if *attempts_used >= self.params.max_retries {
             self.finish_with_failure(
@@ -510,7 +522,7 @@ impl LoginSession {
             )),
             retry_count: *attempts_used,
         });
-        if should_force_recycle(structured.outcome) {
+        if force_recycle {
             // 强制回收 Worker：直接 kill 当前子进程并标记 Error，
             // 下一次 bridge.execute() 内部的 ensure_worker 会自动重新 spawn。
             // 同步 await（而非 spawn）确保 kill 在重试间隔之前完成，避免下一轮
