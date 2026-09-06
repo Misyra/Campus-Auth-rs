@@ -66,7 +66,7 @@ const urlCheckText = computed({
           <div class="form-group">
             <div class="field-label-row">
               <label for="settings-retry-interval">重试间隔（秒）</label>
-              <FieldHelp text="相邻两次重试之间的间隔。过短可能触发登录页限流。默认 5 秒。" />
+              <FieldHelp text="首次重试的等待间隔，之后每次重试翻倍（如 5 → 10 → 20 秒）。过短可能触发登录页限流。默认 5 秒。" />
             </div>
             <input id="settings-retry-interval" v-model.number="config.config.retry.retry_interval" type="number" min="1" max="300" />
           </div>

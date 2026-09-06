@@ -274,7 +274,7 @@ impl Default for LoggingSettings {
 pub struct RetrySettings {
     /// 最大重试次数
     pub max_retries: u32,
-    /// 重试间隔（秒）
+    /// 首次重试间隔（秒），逐次重试翻倍（指数退避，如 5 → 10 → 20）
     pub retry_interval: u32,
 }
 

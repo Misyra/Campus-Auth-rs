@@ -487,6 +487,14 @@ impl LoginSession {
     /// 多为探测瞬时误判，回收整棵进程树代价远超必要，还可能在门户留下
     /// 重复登录痕迹。
     ///
+    /// 第 `attempt` 次重试（从 1 计）的退避等待：基准间隔 × 2^(attempt-1)。
+    /// 默认 5s 配置下依次等待 5/10/20s。位移上限 8（×256）+ 饱和乘法，
+    /// 防御异常大的 max_retries/interval 组合导致溢出或过久阻塞。
+    fn retry_backoff_delay(base: Duration, attempt: u32) -> Duration {
+        let factor = 1u32 << attempt.saturating_sub(1).min(8);
+        base.max(Duration::from_secs(1)).saturating_mul(factor)
+    }
+
     /// 返回 `true` 表示继续下一轮循环，`false` 表示已 emit 终态结果（重试耗尽或被取消）。
     async fn try_retry(
         &self,
@@ -510,6 +518,9 @@ impl LoginSession {
             return false;
         }
         *attempts_used += 1;
+        // 指数退避：第 n 次重试等待基准间隔 × 2^(n-1)，给门户/网络恢复留递增窗口，
+        // 避免瞬时抖动下固定短间隔白耗重试预算
+        let backoff = Self::retry_backoff_delay(self.params.retry_interval, *attempts_used);
         *recover_lock(&self.state) = LoginState::Retrying {
             attempt: *attempts_used,
         };
@@ -517,8 +528,9 @@ impl LoginSession {
             status: LoginStatus::Running,
             source: Some(self.params.source),
             message: Some(format!(
-                "重试中 {attempts_used}/{}",
-                self.params.max_retries
+                "重试中 {attempts_used}/{}（{}s 后）",
+                self.params.max_retries,
+                backoff.as_secs()
             )),
             retry_count: *attempts_used,
         });
@@ -530,7 +542,6 @@ impl LoginSession {
             warn!("登录结果 {:?} 触发 Worker 强制回收", structured.outcome);
             self.deps.bridge.force_recycle().await;
         }
-        let retry_interval = self.params.retry_interval.max(Duration::from_secs(1));
         let ct = self.cancel_token.clone();
         tokio::select! {
             biased;
@@ -551,7 +562,7 @@ impl LoginSession {
                 .await;
                 false
             }
-            _ = sleep(retry_interval) => true,
+            _ = sleep(backoff) => true,
         }
     }
 
@@ -1045,6 +1056,33 @@ mod tests {
             history_service: Arc::new(LoginHistoryService::new(dir.path())),
             metrics: None,
         }
+    }
+
+    #[test]
+    fn test_retry_backoff_delay_doubles_per_attempt() {
+        let base = Duration::from_secs(5);
+        assert_eq!(
+            LoginSession::retry_backoff_delay(base, 1),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            LoginSession::retry_backoff_delay(base, 2),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            LoginSession::retry_backoff_delay(base, 3),
+            Duration::from_secs(20)
+        );
+        // 0 秒配置抬升到下限 1s
+        assert_eq!(
+            LoginSession::retry_backoff_delay(Duration::from_secs(0), 1),
+            Duration::from_secs(1)
+        );
+        // 位移上限 8（×256）+ 饱和乘法：异常大 attempt 不 panic、不超界
+        assert_eq!(
+            LoginSession::retry_backoff_delay(Duration::from_secs(300), 40),
+            Duration::from_secs(300 * 256)
+        );
     }
 
     fn make_params() -> SessionParams {
