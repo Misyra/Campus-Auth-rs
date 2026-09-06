@@ -70,6 +70,7 @@ import type {
   UninstallResponse,
   UpdateInfo,
   UpdatePin,
+  UpdateState,
 } from "./types";
 
 export { ApiError, extractApiError } from "./client";
@@ -107,6 +108,8 @@ export const systemApi = {
   health: () => http.get<HealthInfo>("/api/health"),
   initStatus: () => http.get<InitStatus>("/api/init-status"),
   checkUpdate: () => http.get<UpdateInfo>("/api/check-update"),
+  // 上次检查状态（设置页"上次检查时间"数据源，只读不触发网络检查）
+  updateState: () => http.get<UpdateState>("/api/update-state"),
   agree: () => http.post<MutationResult>("/api/agree"),
   shutdown: () => http.post<MutationResult>("/api/system/shutdown"),
   update: (pin?: UpdatePin) =>

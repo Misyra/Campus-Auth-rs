@@ -172,6 +172,8 @@ export const DEFAULT_CONFIG: Config = {
   },
   updater: {
     check_on_startup: true,
+    auto_check_enabled: true,
+    channel: "stable",
     release_source_url: "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest",
     check_interval_hours: 24,
     use_proxy: false,

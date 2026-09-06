@@ -4,7 +4,8 @@ import { computed, onMounted, ref, onActivated } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
 import { useEnvironment } from "@/composables/useEnvironment";
-import { autostartApi, configApi } from "@/api";
+import { autostartApi, configApi, systemApi } from "@/api";
+import type { UpdateState } from "@/api/types";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
@@ -62,7 +63,7 @@ const logLevelOptions: SelectOption[] = [
 ];
 
 // Python 环境卡片
-onMounted(() => { void refreshEnv(); });
+onMounted(() => { void refreshEnv(); void refreshUpdateState(); });
 onActivated(() => { void refreshEnv(); });
 
 const envReady = computed(() => Boolean(envStatus.value?.capability_ready));
@@ -77,6 +78,66 @@ const envStageLabel = computed(() => {
   };
   return map[s] ?? s;
 });
+
+// ---- 自动更新 ----
+// 检查频率与 check_interval_hours 双向映射：0=每次启动，24=每天，168=每周。
+// 存量非标准值（如 12/48）展示时向最近档位归一，改动保存后即规范化。
+const checkFrequencyOptions: SelectOption[] = [
+  { value: "0", label: "每次启动" },
+  { value: "24", label: "每天一次" },
+  { value: "168", label: "每周一次" },
+];
+const checkFrequency = computed<string>({
+  get: () => {
+    const h = config.config.updater.check_interval_hours ?? 24;
+    if (h <= 0) return "0";
+    return h < 168 ? "24" : "168";
+  },
+  set: (v) => { config.config.updater.check_interval_hours = Number(v); },
+});
+
+// 更新通道分段选项（value 与后端 UpdateChannel 的 serde 序列化一致）
+const channelOptions = [
+  { value: "stable", label: "正式版" },
+  { value: "prerelease", label: "测试版" },
+  { value: "all", label: "全通道最新版" },
+] as const;
+
+// 上次检查状态（GET /api/update-state，手动与自动检查共用一份记录，跨重启保留）
+const updateChecking = ref(false);
+const updateState = ref<UpdateState | null>(null);
+async function refreshUpdateState() {
+  try {
+    updateState.value = await systemApi.updateState();
+  } catch {
+    updateState.value = null;
+  }
+}
+const lastCheckLabel = computed(() => {
+  const s = updateState.value;
+  if (!s?.last_check_at) return "从未检查";
+  const d = new Date(s.last_check_at);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString();
+});
+const updateCheckHint = computed(() => {
+  const s = updateState.value;
+  if (!s) return "";
+  if (s.error) return `上次检查失败：${s.error}`;
+  if (s.has_update) return `发现新版本 v${s.latest_version}，请前往“关于”页更新`;
+  return s.latest_version ? `当前已是最新（远程 v${s.latest_version}）` : "";
+});
+// 手动立即检查：与“关于”页共用检查端点，完成后回读状态刷新时间与结果
+async function manualCheckUpdate() {
+  updateChecking.value = true;
+  try {
+    await systemApi.checkUpdate();
+  } catch {
+    // 检查失败时后端同样会记录错误态，由 updateState 回读展示
+  } finally {
+    updateChecking.value = false;
+    await refreshUpdateState();
+  }
+}
 
 // 配置热重载
 const reloading = ref(false);
@@ -214,6 +275,72 @@ async function reloadConfig() {
               <span v-if="autostart.method !== '-'" class="autostart-method-badge">{{ autostart.method }}</span>
             </label>
             <FieldHelp text="开机登录后自动启动本程序，注册方式显示于开关右侧。" />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 自动更新：内容较宽，独占整行拆两列（左列开关与频率 / 右列通道与检查状态） -->
+    <section class="card settings-panel settings-panel--wide">
+      <div class="settings-card-header">
+        <IconApp name="download" class="settings-card-icon" />
+        <h2>自动更新</h2>
+      </div>
+      <div class="card-body settings-grid-2col">
+        <div>
+          <div class="toggle-group">
+            <div class="toggle-with-help">
+              <label class="toggle toggle-help-inline">
+                <input type="checkbox" v-model="config.config.updater.auto_check_enabled" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">自动检查更新</span>
+              </label>
+              <FieldHelp text="关闭后不再自动检查更新，仅保留手动“立即检查”。保存后即时生效。" />
+            </div>
+          </div>
+          <div class="form-group">
+            <div class="field-label-row">
+              <label>检查频率</label>
+              <FieldHelp text="每次启动：仅启动时检查一次；每天/每周：启动时先检查一次，之后按周期自动检查。" />
+            </div>
+            <CustomSelect
+              v-model="checkFrequency"
+              :options="checkFrequencyOptions"
+              :disabled="!config.config.updater.auto_check_enabled"
+            />
+          </div>
+        </div>
+        <div>
+          <div class="form-group">
+            <div class="field-label-row">
+              <label>更新通道</label>
+              <FieldHelp text="正式版仅跟随稳定发布；测试版跟随预发布（alpha/beta）；全通道最新版取两者中更高者。" />
+            </div>
+            <div class="update-channel-segmented" role="group" aria-label="更新通道">
+              <button
+                v-for="opt in channelOptions"
+                :key="opt.value"
+                type="button"
+                :class="{ active: config.config.updater.channel === opt.value }"
+                @click="config.config.updater.channel = opt.value"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
+          <div class="form-group">
+            <div class="field-label-row">
+              <label>上次检查时间</label>
+              <FieldHelp text="记录最近一次手动或自动检查的结果，重启后保留。" />
+            </div>
+            <div class="update-check-row">
+              <button class="btn btn-secondary btn-sm" :disabled="updateChecking" @click="manualCheckUpdate">
+                <IconApp v-if="updateChecking" name="refresh" class="spin" />
+                {{ updateChecking ? "检查中..." : "立即检查" }}
+              </button>
+              <span v-if="lastCheckLabel" class="hint">{{ lastCheckLabel }}</span>
+            </div>
+            <span v-if="updateCheckHint" class="hint update-check-hint" :class="{ 'update-check-error': !!updateState?.error }">{{ updateCheckHint }}</span>
           </div>
         </div>
       </div>

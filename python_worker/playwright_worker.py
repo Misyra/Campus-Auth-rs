@@ -1040,8 +1040,16 @@ class WorkerCore:
         """执行单个浏览器任务：确保浏览器 → 导航 → 运行步骤。"""
         start = time.perf_counter()
         self._session_type = "login"
+        # 有码任务在拉起浏览器前同步预热一次：主线程加载 ddddocr/numpy C 扩展
+        # 入缓存，后续后台线程的分类识别只命中缓存，避免 Windows loader lock 卡 100s
+        if any(s.step_type in ("ocr", "ocr_recognize") for s in (task_config.steps or [])):
+            try:
+                from worker_main import _preload_ocr_deps  # noqa: WPS433
+
+                _preload_ocr_deps(force=True)
+            except Exception:  # noqa: BLE001 — 预热 best-effort，失败不影响任务
+                pass
         await self.ensure_browser({"browser_settings": bs})
-        # Top-level task boundary: keep context/cookies, replace the Page.
         await self._prepare_session_page()
 
         context = self._make_context(

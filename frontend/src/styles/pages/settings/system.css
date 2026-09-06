@@ -46,3 +46,43 @@
   color: var(--warning);
   border-color: rgba(var(--warning-rgb), 0.3);
 }
+/* 自动更新：通道分段控件（与 appearance-segmented 同构，settings 域内复用） */
+.update-channel-segmented {
+  display: inline-flex;
+  background: var(--bg-glass-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+.update-channel-segmented button {
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
+}
+.update-channel-segmented button:hover {
+  color: var(--text-primary);
+}
+.update-channel-segmented button.active {
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent);
+}
+/* 自动更新：上次检查行（按钮 + 时间戳 + 结果提示） */
+.update-check-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+.update-check-hint {
+  margin-top: var(--space-xs);
+}
+.update-check-error {
+  color: var(--error);
+}

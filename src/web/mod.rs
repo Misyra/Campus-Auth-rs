@@ -218,6 +218,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/check-update", || {
             get(routes::system::check_update)
         }),
+        ("GET", "/api/update-state", || {
+            get(routes::system::update_state)
+        }),
         ("GET", "/api/health", || get(routes::system::health_check)),
         ("GET", "/api/init-status", || {
             get(routes::system::init_status)

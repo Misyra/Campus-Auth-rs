@@ -29,7 +29,8 @@ pub use profiles::{ProfileApi, ProfileSummary};
 pub use runtime::{ConfigReloadSignal, ProfileSnapshot, RuntimeConfig, build_runtime_config};
 pub use schema::{
     AppSettings, BrowserSettings, GlobalConfig, LoggingSettings, MonitorSettings, PauseSettings,
-    ProfileData, RetrySettings, SettingsData, StartupAction, UpdaterSettings, WorkerSettings,
+    ProfileData, RetrySettings, SettingsData, StartupAction, UpdateChannel, UpdaterSettings,
+    WorkerSettings,
 };
 pub use service::ConfigError;
 pub use service::ConfigService;

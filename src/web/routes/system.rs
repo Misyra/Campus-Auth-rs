@@ -270,6 +270,17 @@ pub async fn check_update(
     }
 }
 
+/// GET /api/update-state — 上次更新检查状态（设置页"上次检查时间"数据源）
+///
+/// 只读回放 `update/last_check.json`：手动"立即检查"与后台自动检查成功/失败
+/// 都会刷新；文件缺失（从未检查过）返回空对象，由前端显示"从未检查"。
+pub async fn update_state(
+    State(updater): State<Arc<dyn UpdaterApi>>,
+) -> Result<Json<Value>, ApiError> {
+    let state = updater.last_check_state().unwrap_or_default();
+    Ok(data(serde_json::to_value(state)?))
+}
+
 /// 前端"检查更新"已确认的版本快照（请求体，可省略）
 ///
 /// 省略时服务端重新拉取清单（兼容旧调用方）；提供时必须三项齐备且通过
@@ -822,6 +833,10 @@ mod tests {
 
         async fn apply_update(&self, _info: &UpdateInfo) -> Result<(), UpdaterError> {
             Ok(())
+        }
+
+        fn last_check_state(&self) -> Option<crate::updater::LastCheckState> {
+            None
         }
     }
 

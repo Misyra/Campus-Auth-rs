@@ -351,15 +351,42 @@ impl Default for AppSettings {
     }
 }
 
+/// 更新通道
+///
+/// - `Stable` 正式版：仅跟随稳定发布（GitHub releases/latest 语义）
+/// - `Prerelease` 测试版：仅跟随预发布（alpha/beta 等 prerelease）
+/// - `All` 全通道最新版：正式版与预发布一起比较，哪个高跟哪个
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    /// 正式版（默认）
+    #[default]
+    Stable,
+    /// 测试版（预发布）
+    Prerelease,
+    /// 全通道最新版
+    All,
+}
+
 /// 自动更新配置
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct UpdaterSettings {
     /// 启动时是否检查更新
+    ///
+    /// 仅在 `check_interval_hours == 0`（不周期检查）时独立生效：有周期检查时
+    /// 首轮"立即补查"语义与启动检查等价（见 updater 后台循环的 due_now 逻辑）。
     pub check_on_startup: bool,
+    /// 是否启用自动检查更新（总开关）
+    ///
+    /// 关闭后后台循环与启动检查全部静默，仅保留手动"立即检查"；运行时改回
+    /// 无需重启（后台循环低频轮询该值）。
+    pub auto_check_enabled: bool,
+    /// 更新通道
+    pub channel: UpdateChannel,
     /// 发布源 URL
     pub release_source_url: String,
-    /// 检查间隔（小时）
+    /// 检查间隔（小时，0 = 仅启动检查不周期检查）
     pub check_interval_hours: u32,
     /// 是否使用显式代理下载更新（地址见 [`Self::resolved_proxy_url`])
     pub use_proxy: bool,
@@ -391,6 +418,8 @@ impl Default for UpdaterSettings {
     fn default() -> Self {
         Self {
             check_on_startup: true,
+            auto_check_enabled: true,
+            channel: UpdateChannel::default(),
             release_source_url:
                 "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest".to_string(),
             check_interval_hours: 24,

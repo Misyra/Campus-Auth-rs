@@ -1065,6 +1065,93 @@ mod tests {
         assert!(inner.lock().unwrap().settings.global.browser.pure_mode);
     }
 
+    // ============ updater 段：自动更新设置往返（channel/auto_check_enabled） ============
+
+    /// updater 部分 patch 深合并：只改 channel 不得清空其他 updater 字段；
+    /// 响应与 GET 同形回显新字段
+    #[tokio::test]
+    async fn test_patch_updater_merges_partially() {
+        let (app, inner) = mock_app();
+        // 预置非默认值：自定义代理与间隔
+        {
+            let mut g = inner.lock().unwrap();
+            g.settings.global.updater.proxy_url = "http://192.168.1.5:7890".into();
+            g.settings.global.updater.check_interval_hours = 168;
+            g.settings.global.updater.use_proxy = true;
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "updater": { "channel": "prerelease" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let u = &g.settings.global.updater;
+        // 仅 channel 变更，其余字段保持原值（深合并而非整体替换）
+        assert_eq!(u.channel, crate::config::UpdateChannel::Prerelease);
+        assert_eq!(u.proxy_url, "http://192.168.1.5:7890");
+        assert_eq!(u.check_interval_hours, 168);
+        assert!(u.use_proxy);
+        assert!(u.auto_check_enabled, "未指定的开关保持默认值");
+    }
+
+    /// 非法通道值在合并反序列化时被拒：返回 400 且不落盘
+    #[tokio::test]
+    async fn test_patch_updater_rejects_invalid_channel() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "updater": { "channel": "nightly" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let g = inner.lock().unwrap();
+        assert_eq!(g.save_calls, 0, "校验失败不得落盘");
+    }
+
+    /// auto_check_enabled 开关写入与回读
+    #[tokio::test]
+    async fn test_patch_updater_toggles_auto_check() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "updater": { "auto_check_enabled": false } })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let g = inner.lock().unwrap();
+        assert!(!g.settings.global.updater.auto_check_enabled);
+        // 响应回显（GET 同形）
+        assert_eq!(v["data"]["updater"]["auto_check_enabled"], false);
+        assert_eq!(v["data"]["updater"]["channel"], "stable");
+    }
+
     // ============ patch_settings / put_settings 共用映射（双 state 提取，M1） ============
 
     /// 凭证字段路由到 Profile、密码走 save_password 语义、全局字段落 settings

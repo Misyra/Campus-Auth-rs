@@ -1969,6 +1969,29 @@
     }
    }
   },
+  "/api/update-state": {
+   "get": {
+    "operationId": "get___api_update-state",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/check-update": {
    "get": {
     "operationId": "get___api_check-update",

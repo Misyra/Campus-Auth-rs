@@ -58,7 +58,7 @@ WORKER_VERSION = "5.0.0-alpha.8"
 OCR_CAPABILITIES: dict[str, bool] = {"ocr": False}
 
 
-def _preload_ocr_deps() -> None:
+def _preload_ocr_deps(*, force: bool = False) -> None:  # noqa: C901
     """预加载 OCR 依赖到主线程，规避后台线程加载 C 扩展卡死（根因修复）。
 
     背景：``ddddocr`` 链式加载 numpy C 扩展（``numpy._core._multiarray_umath``
@@ -70,14 +70,18 @@ def _preload_ocr_deps() -> None:
     后续后台线程 ``import`` 直接命中 ``sys.modules`` 缓存，不再重新加载 DLL，
     后续识别全程正常（~0.5s）。
 
-    本函数因此在 **主线程、事件循环启动前** 调用。best-effort：
-    - OCR 依赖未安装（numpy/ddddocr 缺失）时静默跳过，不影响 Worker 正常启动，
-      待安装完成后配合重启 Worker 使预加载生效；
-    - 加载失败不抛异常，避免预加载拖垮 Worker 启动。
+    按需触发：``force=False`` 时仅在当前任务含 ocr 步骤（见
+    ``playwright_worker._run_task`` 的按需预热）才实际加载；
+    无验证码任务不再在启动即预热，避免 ``No module named 'ddddocr'`` 的 WARN
+    刷屏。启动期保持能力探测不弹错。
 
     探测结果同步写入模块级 ``OCR_CAPABILITIES``（任务 10）：
-    完整加载 → ``{"ocr": True}``；numpy-only / 均不可用 → ``{"ocr": False}``。
+    完整加载 → ``{"ocr": True}``；未触发 / 均不可用 → ``{"ocr": False}``。
     """
+    # 非强制且尚未判定需要时，仅做轻量能力探测（不真正 import ddddocr）
+    if not force and OCR_CAPABILITIES.get("ocr") is False and not _ocr_needed_hint():
+        _probe_ocr_capability()
+        return
     # 探测前先复位（幂等）：仅完整加载成功才置 True
     OCR_CAPABILITIES["ocr"] = False
     # 主线程先完整加载 ddddocr（连带 numpy 等 C 扩展一并进入 sys.modules 缓存），
@@ -97,6 +101,28 @@ def _preload_ocr_deps() -> None:
         logger.info("OCR 依赖未完整安装，已预加载 numpy 核心")
     except Exception as exc:  # noqa: BLE001 — best-effort，不能拖垮非 OCR 登录
         logger.info(f"OCR 依赖不可用，跳过预加载: {exc}")
+
+
+def _probe_ocr_capability() -> None:
+    """仅探测 OCR 是否可用，不触发重型 import，避免无验证码任务的 WARN。"""
+    import importlib.util
+
+    if importlib.util.find_spec("ddddocr") is None:
+        OCR_CAPABILITIES["ocr"] = False
+        return
+    OCR_CAPABILITIES["ocr"] = False
+    try:
+        import ddddocr  # noqa: F401
+
+        OCR_CAPABILITIES["ocr"] = True
+    except Exception:  # noqa: BLE001 — 仅探测，不弹错
+        OCR_CAPABILITIES["ocr"] = False
+
+
+def _ocr_needed_hint() -> bool:
+    """当前进程内是否已出现过需要 OCR 的任务（按需预热的简易门控）。"""
+    # 由 playwright_worker._run_task 的按需预热置位；未置位时启动期不强行加载
+    return False
 
 
 def _force_utf8_stdio() -> None:
@@ -394,8 +420,10 @@ def main() -> None:
     _configure_logging()
     # A7：清理上次会话（进程被强杀）残留的截图文件（可能含明文凭据），best-effort
     _purge_stale_debug_screenshots()
-    # 主线程、事件循环启动前预加载 OCR 依赖，规避后台线程加载 numpy C 扩展卡死
-    _preload_ocr_deps()
+    # 启动期仅轻量探测 OCR 能力（不真正 import ddddocr/numpy），避免无验证码
+    # 任务的 Worker 进程产生 "No module named 'ddddocr'" 的 WARN。
+    # 有验证码任务在 _run_task 入口按需后台预热（见 playwright_worker）。
+    _probe_ocr_capability()
     try:
         asyncio.run(_serve())
     except KeyboardInterrupt:

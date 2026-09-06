@@ -302,7 +302,11 @@ async function init(): Promise<void> {
   });
   wsMgr.connectWebSocket();
   wsMgr.setupVisibilityChange();
-  void autoCheckUpdateOnStartup();
+  // 自动检查更新受设置门控（fetchConfig 已在上面 allSettled 中完成）：
+  // 关闭后启动不再检查，仅保留设置页/关于页的手动"立即检查"
+  if (config.config.updater.auto_check_enabled) {
+    void autoCheckUpdateOnStartup();
+  }
 
   // F9：保存轮询定时器 id，退出时 clearInterval，避免 quitApp 后页面仍持续轮询
   const statusPollTimer = setInterval(() => {

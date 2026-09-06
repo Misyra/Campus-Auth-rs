@@ -31,6 +31,49 @@ pub use error::UpdaterError;
 /// 后台检查任务启动前的延迟（等待核心启动完成）
 const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(5);
 
+/// 上次检查状态文件路径（相对 base_path，与 staging 同级不被清理波及）
+const LAST_CHECK_FILE_NAME: &str = "update/last_check.json";
+
+/// 上次更新检查结果（`update/last_check.json`，跨重启持久）
+///
+/// 手动"立即检查"与后台自动检查共用一份记录：成功时写 `latest_version` /
+/// `has_update`，失败时仅写 `error`（时间照常刷新）。
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct LastCheckState {
+    /// 上次检查时间（UTC RFC3339，前端转本地时区展示）
+    pub last_check_at: String,
+    /// 是否发现更新（检查失败时为 false）
+    pub has_update: bool,
+    /// 远程最新版本号（检查失败时为空）
+    #[serde(default)]
+    pub latest_version: String,
+    /// 上次检查失败原因（成功时为空）
+    #[serde(default)]
+    pub error: String,
+}
+
+/// 将检查结果写入状态文件（best-effort：失败仅 warn，不影响检查流程本身）
+fn record_last_check(base_path: &std::path::Path, state: &LastCheckState) {
+    let path = base_path.join(LAST_CHECK_FILE_NAME);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("创建更新状态目录失败: {e}");
+            return;
+        }
+    }
+    if let Err(e) = crate::utils::io::atomic_write_json(&path, state) {
+        tracing::warn!("写入上次检查状态失败: {e}");
+    }
+}
+
+/// 以当前时刻构造检查记录（RFC3339 UTC）
+fn last_check_now() -> LastCheckState {
+    LastCheckState {
+        last_check_at: chrono::Utc::now().to_rfc3339(),
+        ..Default::default()
+    }
+}
+
 /// 版本检查结果
 ///
 /// 既作为 API 响应（`GET /api/check-update`），也携带 `apply_update` 所需的下载信息
@@ -87,6 +130,8 @@ pub trait UpdaterApi: Send + Sync {
     async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError>;
     /// 执行更新（下载 zip 到 staging 并触发助手替换）。
     async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError>;
+    /// 读取上次检查状态（文件缺失或损坏返回 `None`）。
+    fn last_check_state(&self) -> Option<LastCheckState>;
 }
 
 #[async_trait::async_trait]
@@ -97,6 +142,10 @@ impl UpdaterApi for UpdaterService {
 
     async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
         UpdaterService::apply_update(self, info).await
+    }
+
+    fn last_check_state(&self) -> Option<LastCheckState> {
+        UpdaterService::last_check_state(self)
     }
 }
 
@@ -158,6 +207,9 @@ impl UpdaterService {
     /// 双查修复：循环改为"先等待再检查"。旧实现每轮"先查再睡"，与启动检查
     /// 相邻执行造成同一时刻 2×清单 + 2N×伴随 sha 拉取；关闭启动检查的用户
     /// 首轮 `due_now` 立即为真，首查时机（T+5s）保持不变。
+    ///
+    /// `auto_check_enabled` 为总开关（设置页"自动检查更新"）：关闭后启动检查与
+    /// 周期检查全部静默，仅保留手动"立即检查"；循环低频轮询该值，重新打开无需重启。
     pub fn start_background_check(&self, cancel: CancellationToken) {
         let config = self.config.clone();
         let status = self.status.clone();
@@ -165,17 +217,26 @@ impl UpdaterService {
         // 运行时修改 use_proxy / proxy_url 无需重启即生效
         let fallback_client = self.http_client.clone();
         let current_version = self.current_version.clone();
+        let base_path = self.base_path.clone();
 
         tokio::spawn(async move {
             tokio::time::sleep(STARTUP_CHECK_DELAY).await;
             // 启动即查：读一次决定，不随循环迭代变化
             let startup_settings = config.load_settings().global.updater;
-            if startup_settings.check_on_startup {
+            if startup_settings.auto_check_enabled && startup_settings.check_on_startup {
                 let client = effective_client_for(&startup_settings, fallback_client.clone());
                 if let Err(e) =
-                    perform_update_check(&config, &status, &client, &current_version).await
+                    perform_update_check(&config, &status, &client, &current_version, &base_path)
+                        .await
                 {
                     log_check_failure("启动时", &e);
+                    record_last_check(
+                        &base_path,
+                        &LastCheckState {
+                            error: e.to_string(),
+                            ..last_check_now()
+                        },
+                    );
                 }
             }
             // 启动检查已执行过则首轮先等待一个间隔；未执行（check_on_startup=false）
@@ -184,6 +245,13 @@ impl UpdaterService {
             loop {
                 // 每次迭代重新读取配置（支持运行时修改）
                 let settings = config.load_settings().global.updater;
+                // 总开关关闭：不自动检查，低频轮询配置等待重新打开
+                if !settings.auto_check_enabled {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => continue,
+                    }
+                }
                 if !due_now {
                     if settings.check_interval_hours == 0 {
                         // 定时检查已禁用（启动检查已完成或未要求）：低频轮询配置，
@@ -205,9 +273,17 @@ impl UpdaterService {
                 // 每周期等待结束后执行一次检查
                 let client = effective_client_for(&settings, fallback_client.clone());
                 if let Err(e) =
-                    perform_update_check(&config, &status, &client, &current_version).await
+                    perform_update_check(&config, &status, &client, &current_version, &base_path)
+                        .await
                 {
                     log_check_failure("定期", &e);
+                    record_last_check(
+                        &base_path,
+                        &LastCheckState {
+                            error: e.to_string(),
+                            ..last_check_now()
+                        },
+                    );
                 }
             }
         });
@@ -217,21 +293,56 @@ impl UpdaterService {
     ///
     /// 拉取清单 → 平台选择 → 版本比较；有新版本返回 `Some(UpdateInfo)`，否则 `None`。
     /// 网络路径同下载：显式代理（use_proxy）优先，未配置跟随系统代理。
+    /// 无论成败均刷新 `update/last_check.json`（设置页"上次检查时间"数据源）。
     pub async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
         let settings = self.config.load_settings().global.updater;
         let client = self.effective_client();
-        let manifest = check::fetch_manifest(&client, &settings.release_source_url).await?;
+        let manifest = match check::fetch_manifest_for_channel(
+            &client,
+            &settings.release_source_url,
+            settings.channel,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                record_last_check(
+                    &self.base_path,
+                    &LastCheckState {
+                        error: e.to_string(),
+                        ..last_check_now()
+                    },
+                );
+                return Err(e);
+            }
+        };
 
         let pkg = match check::select_platform(&manifest) {
             Some(p) => p,
             None => {
                 // 手动检查路径的预期情况（远程发布可能没有当前平台安装包），仅 debug
                 tracing::debug!("当前平台无可用更新包: {}", check::CURRENT_PLATFORM_KEY);
+                record_last_check(
+                    &self.base_path,
+                    &LastCheckState {
+                        latest_version: manifest.version.to_string(),
+                        ..last_check_now()
+                    },
+                );
                 return Ok(None);
             }
         };
 
-        if !check::compare_versions(&self.current_version, &manifest.version) {
+        let has_update = check::compare_versions(&self.current_version, &manifest.version);
+        record_last_check(
+            &self.base_path,
+            &LastCheckState {
+                has_update,
+                latest_version: manifest.version.to_string(),
+                ..last_check_now()
+            },
+        );
+        if !has_update {
             return Ok(None);
         }
 
@@ -245,6 +356,19 @@ impl UpdaterService {
             notes: manifest.changelog.clone(),
             release_date: manifest.release_date.clone(),
         }))
+    }
+
+    /// 读取上次检查状态（`update/last_check.json`；缺失/损坏返回 `None`）
+    pub fn last_check_state(&self) -> Option<LastCheckState> {
+        let path = self.base_path.join(LAST_CHECK_FILE_NAME);
+        let content = std::fs::read_to_string(path).ok()?;
+        match serde_json::from_str(&content) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                tracing::warn!("上次检查状态文件解析失败，忽略: {e}");
+                None
+            }
+        }
     }
 
     /// 暂存新二进制并触发助手进程
@@ -672,17 +796,33 @@ fn effective_client_for(
 }
 
 /// 拉取清单并判断是否存在对当前版本"感兴趣"的更新；有则推送状态快照
+///
+/// 成功时同步刷新 `update/last_check.json`（失败由调用方记录 error 态）。
 async fn perform_update_check(
     config: &ConfigService,
     status: &StatusManager,
     http_client: &reqwest::Client,
     current_version: &Version,
+    base_path: &std::path::Path,
 ) -> Result<(), UpdaterError> {
     let settings = config.load_settings().global.updater;
-    let manifest = check::fetch_manifest(http_client, &settings.release_source_url).await?;
-    if check::select_platform(&manifest).is_some()
-        && check::compare_versions(current_version, &manifest.version)
-    {
+    let manifest = check::fetch_manifest_for_channel(
+        http_client,
+        &settings.release_source_url,
+        settings.channel,
+    )
+    .await?;
+    let has_update = check::select_platform(&manifest).is_some()
+        && check::compare_versions(current_version, &manifest.version);
+    record_last_check(
+        base_path,
+        &LastCheckState {
+            has_update,
+            latest_version: manifest.version.to_string(),
+            ..last_check_now()
+        },
+    );
+    if has_update {
         status.merge(PartialSnapshot::Update { available: true });
         tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
     } else {
@@ -693,13 +833,16 @@ async fn perform_update_check(
     Ok(())
 }
 
-/// 更新检查失败的分级日志：远程发布没有当前平台的安装包属预期情况
-/// （如预发布版指向仅含旧命名资产的正式发布），记 info 即可；
-/// 其余（网络/解析/速率限制）才是真异常，记 warn。
+/// 更新检查失败的分级日志：远程发布没有当前平台的安装包或校验缺失
+/// 均为预期情况（未发布该平台包 / 未附校验文件），均按 info 汇报；其余
+/// （网络 / 解析 / 限流）才是真异常，记 warn。
 fn log_check_failure(stage: &str, e: &UpdaterError) {
     match e {
         UpdaterError::PlatformNotAvailable(_) => {
             tracing::info!("更新检查（{stage}）：远程发布无当前平台的安装包，跳过");
+        }
+        UpdaterError::ManifestFetchFailed(_) | UpdaterError::ManifestParseFailed(_) => {
+            tracing::info!("更新检查（{stage}）：清单不可用，跳过: {e}");
         }
         other => tracing::warn!("更新检查（{stage}）失败: {other}"),
     }

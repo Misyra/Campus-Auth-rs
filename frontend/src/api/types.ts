@@ -207,9 +207,16 @@ export interface AppSettings {
   auto_restart_hours: number;
 }
 
+/** 更新通道（正式版 / 测试版 / 全通道最新版） */
+export type UpdateChannel = "stable" | "prerelease" | "all";
+
 /** 更新器设置（GET/PATCH /api/config 的 updater 段） */
 export interface UpdaterConfig {
   check_on_startup: boolean;
+  /** 是否启用自动检查更新（总开关；关闭后仅手动"立即检查"） */
+  auto_check_enabled: boolean;
+  /** 更新通道 */
+  channel: UpdateChannel;
   release_source_url: string;
   check_interval_hours: number;
   /** 下载更新与仓库任务走显式代理（地址见 proxy_url） */
@@ -218,6 +225,16 @@ export interface UpdaterConfig {
   proxy_url: string;
   /** 旧版"本地代理端口"字段：仅兼容保留，后端在 proxy_url 为空时用它派生 */
   proxy_port: number;
+}
+
+/** 上次更新检查状态（GET /api/update-state） */
+export interface UpdateState {
+  /** 上次检查时间（UTC RFC3339；空表示从未检查） */
+  last_check_at: string;
+  has_update: boolean;
+  latest_version: string;
+  /** 上次检查失败原因（成功时为空） */
+  error: string;
 }
 
 /** 完整配置（前端内部表示，凭据嵌套） */
