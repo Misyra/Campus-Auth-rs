@@ -69,6 +69,14 @@ pub struct TaskManager {
     lock: Mutex<()>,
 }
 
+/// H5：单条步型字段约束 `(适用步型, required, any_of, any_of 全空时的报错文案)`
+type StepFieldRule = (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static str,
+);
+
 impl TaskManager {
     /// 构造管理器，确保子目录存在，并迁移旧版 `active.txt`、初始化 `.order.json`
     pub fn new(base_path: &Path, config: Arc<ConfigService>) -> Arc<Self> {
@@ -449,6 +457,49 @@ impl TaskManager {
     }
 
     /// 校验任务 JSON 格式（公开 API，符合规划 §3.7）
+    ///
+    /// 步型字段约束采用表驱动 [`Self::STEP_FIELD_RULES`]；wait 的"selector 或
+    /// duration>0"双语义无法用纯字段表表达，保留特判（口径对齐 Python 执行器）。
+    ///
+    /// H5：步型字段约束表（每行：`(适用步型, required, any_of, any_of 全空时报错)`）：
+    ///
+    /// - `required` 中每个字段都必须存在且非空白字符串，缺失时报 `需要 {字段名}`
+    /// - `any_of` 非空时要求至少一个字段非空白，全部为空时报 `any_msg`
+    /// - 统一 trim 语义：原实现部分字段放行纯空白值、执行层才失败，现在校验层提前拒绝
+    /// - select 的 value 是操作目标（option 的 value/文本），缺失时执行层会静默
+    ///   no-op——所有步骤"成功"但运营商根本没选，required 的显式拒绝是有意行为
+    const STEP_FIELD_RULES: &[StepFieldRule] = &[
+        (
+            &["input", "click", "click_select", "ocr", "wait_for_selector", "upload_file"],
+            &["selector"],
+            &[],
+            "",
+        ),
+        (&["select"], &["selector", "value"], &[], ""),
+        (&["assert_text"], &["value"], &[], ""),
+        (&["wait_url"], &["pattern"], &[], ""),
+        (
+            &["eval", "custom_js", "evaluate", "custom"],
+            &[],
+            &["script", "code"],
+            "需要非空 script 或 code",
+        ),
+        (
+            &["goto", "navigate"],
+            &[],
+            &["url", "value", "selector"],
+            "需要 url、value 或 selector",
+        ),
+        (&["upload_file"], &[], &["path", "value"], "需要 path 或 value"),
+    ];
+
+    /// 字段缺失或为纯空白视为空（H5：统一 trim 语义）
+    fn is_blank_field(step: &Value, key: &str) -> bool {
+        step.get(key)
+            .and_then(|v| v.as_str())
+            .is_none_or(|s| s.trim().is_empty())
+    }
+
     pub fn validate_task(&self, config: &Value) -> Result<(), Vec<String>> {
         let mut errors: Vec<String> = Vec::new();
         let kind = config
@@ -497,145 +548,37 @@ impl TaskManager {
                                 errors.push(format!("步骤[{i}] 未知类型: {stype}"));
                                 continue;
                             }
-                            match stype {
-                                "input" | "click" | "click_select" | "ocr" => {
-                                    if step
-                                        .get("selector")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .is_empty()
-                                    {
-                                        errors.push(format!("步骤[{i}] 需要 selector"));
+                            // H5：步型字段约束表驱动（STEP_FIELD_RULES）——替代
+                            // 逐臂手写校验；wait 的"selector 或 duration>0"双语义
+                            // 无法用纯字段表表达，保留特判（口径对齐 Python 执行器
+                            // handle_wait，与 AI 提示词 prompt.rs 一致）
+                            for (types, required, any_of, any_msg) in Self::STEP_FIELD_RULES {
+                                if !types.contains(&stype) {
+                                    continue;
+                                }
+                                for field in required.iter() {
+                                    if Self::is_blank_field(step, field) {
+                                        errors.push(format!("步骤[{i}] 需要 {field}"));
                                     }
                                 }
-                                // select 的 value 是操作目标（option 的 value/文本），
-                                // 缺失时执行层会静默 no-op——所有步骤"成功"但运营商
-                                // 根本没选，必须在校验层显式拒绝
-                                "select" => {
-                                    if step
-                                        .get("selector")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .is_empty()
-                                    {
-                                        errors.push(format!("步骤[{i}] 需要 selector"));
-                                    }
-                                    if step
-                                        .get("value")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .trim()
-                                        .is_empty()
-                                    {
-                                        errors.push(format!("步骤[{i}] 需要 value"));
-                                    }
-                                }
-                                // wait 双语义（对齐 Python 执行器 handle_wait）：
-                                // 有 selector 等元素，否则按 duration(ms) 休眠。
-                                // 与 AI 提示词（prompt.rs）口径一致，此前强制
-                                // selector 会让 AI 生成的休眠步骤两轮自纠全败
-                                "wait" => {
-                                    let has_selector = !step
-                                        .get("selector")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .is_empty();
-                                    let has_duration =
-                                        step.get("duration").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            > 0;
-                                    if !has_selector && !has_duration {
-                                        errors.push(format!("步骤[{i}] 需要 selector 或 duration"));
-                                    }
-                                }
-                                "wait_url" => {
-                                    if step
-                                        .get("pattern")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .is_empty()
-                                    {
-                                        errors.push(format!("步骤[{i}] 需要 pattern"));
-                                    }
-                                }
-                                "eval" | "custom_js" | "evaluate" | "custom" => {
-                                    let has = step
-                                        .get("script")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| !s.trim().is_empty())
-                                        .unwrap_or(false)
-                                        || step
-                                            .get("code")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| !s.trim().is_empty())
-                                            .unwrap_or(false);
-                                    if !has {
-                                        errors.push(format!("步骤[{i}] 需要非空 script 或 code"));
-                                    }
-                                }
-                                "goto" | "navigate" => {
-                                    let has_url = step
-                                        .get("url")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| !s.trim().is_empty())
-                                        .unwrap_or(false)
-                                        || step
-                                            .get("value")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| !s.trim().is_empty())
-                                            .unwrap_or(false)
-                                        || step
-                                            .get("selector")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| !s.trim().is_empty())
-                                            .unwrap_or(false);
-                                    if !has_url {
-                                        errors
-                                            .push(format!("步骤[{i}] 需要 url、value 或 selector"));
-                                    }
-                                }
-                                "assert_text" => {
-                                    if step
-                                        .get("value")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .is_empty()
-                                    {
-                                        errors.push(format!("步骤[{i}] 需要 value"));
-                                    }
-                                }
-                                "upload_file" => {
-                                    if step
-                                        .get("selector")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .is_empty()
-                                    {
-                                        errors.push(format!("步骤[{i}] 需要 selector"));
-                                    }
-                                    let has_path = step
-                                        .get("path")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| !s.trim().is_empty())
-                                        .unwrap_or(false)
-                                        || step
-                                            .get("value")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| !s.trim().is_empty())
-                                            .unwrap_or(false);
-                                    if !has_path {
-                                        errors.push(format!("步骤[{i}] 需要 path 或 value"));
-                                    }
-                                }
-                                "wait_for_selector"
-                                    if step
-                                        .get("selector")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .is_empty() =>
+                                if !any_of.is_empty()
+                                    && any_of.iter().all(|f| Self::is_blank_field(step, f))
                                 {
-                                    errors.push(format!("步骤[{i}] 需要 selector"));
+                                    errors.push(format!("步骤[{i}] {any_msg}"));
                                 }
-                                _ => {}
+                            }
+                            if stype == "wait" {
+                                let has_selector = !step
+                                    .get("selector")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .is_empty();
+                                let has_duration =
+                                    step.get("duration").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        > 0;
+                                if !has_selector && !has_duration {
+                                    errors.push(format!("步骤[{i}] 需要 selector 或 duration"));
+                                }
                             }
                         }
                     }
