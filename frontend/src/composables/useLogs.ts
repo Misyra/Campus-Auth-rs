@@ -11,6 +11,7 @@ import { systemApi } from "../api";
 import { LEVEL_VALUES, LIMITS } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { debounce } from "../utils/debounce";
+import { createFetchGuard } from "../utils/guards";
 
 const logs = reactive<LogEntry[]>([]);
 // 默认展示全部已接收日志；日志级别由用户筛选，避免历史接口与实时流出现“刷新后少日志”。
@@ -64,8 +65,13 @@ const filteredLogs = computed(() => {
   );
 });
 
-/** 从后端拉取历史日志（整体替换，并重建去重基准） */
-async function fetchLogs(limit = LIMITS.LOG_MAX_ENTRIES): Promise<void> {
+/** 从后端拉取历史日志（整体替换，并重建去重基准）。
+ *
+ *  F9：带 5s 守卫——init 与 Dashboard mount 双触发不再重复请求；
+ *  force: true 供手动刷新按钮 / 重连回调等显式刷新场景绕过守卫。 */
+const fetchGuard = createFetchGuard(5000);
+async function fetchLogs(force = false, limit = LIMITS.LOG_MAX_ENTRIES): Promise<void> {
+  if (!fetchGuard.shouldFetch(force)) return;
   // 记录请求开始时的序号；响应返回前产生的实时日志需要在历史替换后保留。
   const fetchStartedSeq = logs.reduce(
     (max, entry) => (typeof entry.seq === "number" ? Math.max(max, entry.seq) : max),
@@ -76,6 +82,8 @@ async function fetchLogs(limit = LIMITS.LOG_MAX_ENTRIES): Promise<void> {
     if (Array.isArray(entries)) {
       replaceLogs(entries, fetchStartedSeq);
     }
+    // 失败不 markSuccess，便于下次自动重试
+    fetchGuard.markSuccess();
   } catch (error) {
     frontendLogger.error("logs", "获取日志失败", error);
     // 历史文件暂时不可读时仍开启实时流，避免整个日志面板一直停在空白状态。

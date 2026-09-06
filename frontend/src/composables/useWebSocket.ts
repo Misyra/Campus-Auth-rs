@@ -112,7 +112,7 @@ async function connectWebSocket(): Promise<void> {
     frontendLogger.info("websocket", "已连接");
     if (wasConnected) {
       void status.fetchStatus();
-      void logs.fetchLogs();
+      void logs.fetchLogs(true);
       for (const cb of reconnectHandlers) {
         try {
           void cb();

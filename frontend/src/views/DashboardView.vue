@@ -221,7 +221,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
                 </div>
                 <div class="history-info">
                   <div class="history-row">
-                    <span class="history-time">{{ item.timestamp }}</span>
+                    <span class="history-time">{{ formatTimestamp(item.timestamp) }}</span>
                     <span class="history-duration">{{ item.duration_secs.toFixed(1) }}s</span>
                   </div>
                   <div class="history-row">

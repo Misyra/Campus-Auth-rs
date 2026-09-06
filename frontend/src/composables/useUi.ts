@@ -16,6 +16,7 @@ import { systemApi, browsersApi, monitorApi, actionsApi, historyApi } from "../a
 import { ApiError, extractApiError, isNoBrowserMessage } from "../api/client";
 import { TIMING } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
+import { createFetchGuard } from "../utils/guards";
 import { useConfig } from "./useConfig";
 import { useStatus } from "./useStatus";
 import { useLogs } from "./useLogs";
@@ -47,12 +48,16 @@ let initialized = false;
 const statusPollTimerIds: number[] = [];
 const autostartPollTimerIds: number[] = [];
 
-async function fetchLoginHistory(): Promise<void> {
+// F9：5s 守卫——init 与 Dashboard mount 双触发不再重复请求；force 供显式刷新绕过
+const historyFetchGuard = createFetchGuard(5000);
+async function fetchLoginHistory(force = false): Promise<void> {
+  if (!historyFetchGuard.shouldFetch(force)) return;
   try {
     const data = await historyApi.fetch(30);
     if (Array.isArray(data)) {
       loginHistory.splice(0, loginHistory.length, ...data);
     }
+    historyFetchGuard.markSuccess();
   } catch (error) {
     frontendLogger.error("history", "获取登录历史失败", error);
   }
@@ -149,11 +154,11 @@ async function manualLogin(): Promise<void> {
         cancelText: "稍后",
       });
       if (go) await router.push({ name: "settings-browser" });
-      await fetchLoginHistory();
+      await fetchLoginHistory(true);
       return;
     }
     notify(true, msg, "login");
-    await fetchLoginHistory();
+    await fetchLoginHistory(true);
   } catch (error) {
     const msg = extractApiError(error, "手动登录失败");
     frontendLogger.error("action", "手动登录失败", msg);
@@ -287,8 +292,8 @@ async function init(): Promise<void> {
       tasks.fetchActiveTask(),
       scheduled.loadScheduledTasks(true),
       // F8 顺带：补齐重连后遗漏的只读数据源
-      config.fetchPureMode(),
-      fetchLoginHistory(),
+      config.fetchPureMode(true),
+      fetchLoginHistory(true),
     ];
     if (!config.dirty.value) {
       pending.unshift(config.fetchConfig());

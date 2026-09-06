@@ -87,8 +87,13 @@ export interface RequestOptions {
  * - 错误响应统一为 `{ "error": { code, message, details } }`，抛出携带 code/message/details 的 ApiError；
  * - HTTP 非 2xx 一律按错误处理；无 success 字段判断。
  */
+/** 未显式传 timeout 的请求默认 30s 超时：后端卡死/连接假死时快速报错而非永久转圈。
+ *  长操作（登录/环境引导/OCR/AI）各自显式传入更大超时，不受影响。 */
+const DEFAULT_TIMEOUT_MS = 30000;
+
 async function request<T>(method: string, path: string, opts: RequestOptions = {}, retried = false): Promise<T> {
-  const controller = opts.timeout || opts.signal ? new AbortController() : null;
+  const controller = new AbortController();
+  const timeoutMs = opts.timeout ?? DEFAULT_TIMEOUT_MS;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   const abortFromCaller = () => controller?.abort(opts.signal?.reason);
@@ -96,14 +101,10 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
     if (opts.signal.aborted) abortFromCaller();
     else opts.signal.addEventListener("abort", abortFromCaller, { once: true });
   }
-  if (controller) {
-    if (opts.timeout) {
-      timeoutId = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, opts.timeout);
-    }
-  }
+  timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   const signal = controller?.signal;
   const token = await ensureAuthToken();
 

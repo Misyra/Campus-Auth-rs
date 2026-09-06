@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
-import { ref, computed, onMounted, onActivated } from "vue";
+import { ref, computed, onMounted, onActivated, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
 import { useRepoImport } from "@/composables/useRepoImport";
@@ -64,10 +64,17 @@ async function installOcr() {
   }
 }
 
+// F6：页面卸载即中止安装轮询——避免离页后仍每 1.5s 请求最长 5 分钟
+let ocrPollStopped = false;
+onUnmounted(() => {
+  ocrPollStopped = true;
+});
+
 /** 轮询 /api/ocr/status，直到 installed 为 true 或到达超时（最大 5 分钟）；返回最终是否已安装 */
 async function refreshOcrUntilInstalled(): Promise<boolean> {
   const deadline = Date.now() + 5 * 60 * 1000;
   while (Date.now() < deadline) {
+    if (ocrPollStopped) return ocrStatus.value.installed;
     try {
       const status = await ocrApi.fetchStatus();
       ocrStatus.value = status;

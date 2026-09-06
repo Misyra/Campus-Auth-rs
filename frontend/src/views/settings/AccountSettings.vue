@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { useProfiles } from "@/composables/useProfiles";
@@ -21,10 +21,11 @@ const { profiles, activeProfileId } = useProfiles();
 const router = useRouter();
 
 const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
-const currentProfileName = ref("");
-onMounted(() => {
-  currentProfileName.value = profiles.value[activeProfileId.value]?.name || activeProfileId.value || "默认方案";
-});
+// F7：computed 响应式跟随方案列表加载——直链进入时 profiles 尚未返回也能在
+// 加载完成后显示真实方案名（一次性快照会永久停留在"默认方案"）
+const currentProfileName = computed(
+  () => profiles.value[activeProfileId.value]?.name || activeProfileId.value || "默认方案",
+);
 
 // 自定义运营商：独立状态控制输入框显隐（修复 P1-17 敲第一个字符输入框即消失）。
 // 逻辑统一为：isp 非空且不在预设值列表 → 视为"自定义"（含"自定义"开关项与已加载的自定义关键字）。

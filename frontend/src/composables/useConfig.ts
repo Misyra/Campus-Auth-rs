@@ -10,6 +10,7 @@ import { configApi, autostartApi, pureModeApi } from "../api";
 import { ApiError, extractApiError } from "../api/client";
 import { DEFAULT_CONFIG } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
+import { createFetchGuard } from "../utils/guards";
 import { useStatus } from "./useStatus";
 import { useToast } from "./useToast";
 import { usePasswordField } from "./usePasswordField";
@@ -276,10 +277,14 @@ async function toggleAutostart(enable: boolean): Promise<void> {
   }
 }
 
-async function fetchPureMode(): Promise<void> {
+// F9：5s 守卫——init 与设置页 mount 双触发不再重复请求；force 供重连等显式刷新绕过
+const pureModeFetchGuard = createFetchGuard(5000);
+async function fetchPureMode(force = false): Promise<void> {
+  if (!pureModeFetchGuard.shouldFetch(force)) return;
   try {
     const data = await pureModeApi.fetch();
     pureMode.value = data.enabled;
+    pureModeFetchGuard.markSuccess();
   } catch (error) {
     frontendLogger.debug("config", "获取纯净模式失败，保持默认", error);
   }

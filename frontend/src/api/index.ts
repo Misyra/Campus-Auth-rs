@@ -9,6 +9,36 @@ import { ensureAuthToken, http } from "./client";
 
 /** 路径段编码：所有 id/filename 插值前必经此函数 */
 const pathSegment = (s: string) => encodeURIComponent(s);
+
+/** 带 60s 超时的 bundle 下载：导出走裸 fetch（返回 Blob，不经 http 封装），
+ *  后端打 zip 卡住时需超时兜底报错而非永久挂起（F8）。 */
+async function fetchBundleWithTimeout(url: string, init: RequestInit): Promise<Blob> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let msg = `导出失败 (${res.status})`;
+      try {
+        const j = JSON.parse(text) as { error?: { message?: string } };
+        if (j?.error?.message) msg = j.error.message;
+      } catch {
+        if (text) msg = text.slice(0, 200);
+      }
+      throw new Error(msg);
+    }
+    return await res.blob();
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error("导出超时（60s），请稍后重试");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 import type { RequestOptions } from "./client";
 import type {
   AiCaptureResult,
@@ -162,22 +192,10 @@ export const aiApi = {
   /** 保存页面文件：MHTML 完整布局 + HTML + CSS/JS 资源 + 截图（后端打 zip，返回 Blob） */
   async captureBundle(): Promise<Blob> {
     const token = await ensureAuthToken();
-    const res = await fetch("/api/ai/capture/bundle", {
+    return fetchBundleWithTimeout("/api/ai/capture/bundle", {
       method: "GET",
       headers: token ? { "X-Auth-Token": token } : undefined,
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      let msg = `导出失败 (${res.status})`;
-      try {
-        const j = JSON.parse(text) as { error?: { message?: string } };
-        if (j?.error?.message) msg = j.error.message;
-      } catch {
-        if (text) msg = text.slice(0, 200);
-      }
-      throw new Error(msg);
-    }
-    return await res.blob();
   },
   // 生成含 1~2 轮 LLM 调用（每轮最长 120s），放宽客户端超时
   generate: (payload: { extra_prompt?: string }) =>
@@ -219,22 +237,10 @@ export const debugApi = {
   /** 导出问题报告：日志+活动任务+页面 MHTML/截图（后端打 zip，返回 Blob） */
   async feedbackBundle(): Promise<Blob> {
     const token = await ensureAuthToken();
-    const res = await fetch("/api/debug/feedback-bundle", {
+    return fetchBundleWithTimeout("/api/debug/feedback-bundle", {
       method: "POST",
       headers: token ? { "X-Auth-Token": token } : undefined,
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      let msg = `导出失败 (${res.status})`;
-      try {
-        const j = JSON.parse(text) as { error?: { message?: string } };
-        if (j?.error?.message) msg = j.error.message;
-      } catch {
-        if (text) msg = text.slice(0, 200);
-      }
-      throw new Error(msg);
-    }
-    return res.blob();
   },
 };
 

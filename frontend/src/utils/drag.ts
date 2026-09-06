@@ -32,6 +32,8 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
   let dragState: DragState | null = null;
   let allowDrag = false;
   let swapCooldown = false;
+  // F10：拖拽期间发生过交换（onDragOver 即时生效），供 onDragEnd 补持久化
+  let orderDirty = false;
 
   function onHandleMouseDown(e: MouseEvent): void {
     allowDrag = true;
@@ -82,11 +84,13 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
     if (dragState.currentIndex < index) to++;
     list.value.splice(to, 0, item);
     dragState.currentIndex = to;
+    orderDirty = true;
   }
 
   function onDrop(e: DragEvent, _index: number): void {
     e.preventDefault();
     dragState = null;
+    orderDirty = false;
     void persistOrder();
   }
 
@@ -99,6 +103,12 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
     document
       .querySelectorAll(".drop-before, .drop-after")
       .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+    // F10：拖出列表松手不触发 drop——拖拽期间已生效的交换在此补持久化，
+    // 否则内存顺序与后端不一致，刷新后静默回退
+    if (orderDirty) {
+      orderDirty = false;
+      void persistOrder();
+    }
   }
 
   async function persistOrder(): Promise<void> {
