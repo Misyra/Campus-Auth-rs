@@ -194,8 +194,7 @@ impl UpdaterService {
                             _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => continue,
                         }
                     }
-                    let interval_secs =
-                        (settings.check_interval_hours as u64).saturating_mul(3600);
+                    let interval_secs = (settings.check_interval_hours as u64).saturating_mul(3600);
                     let interval = std::time::Duration::from_secs(interval_secs.max(300)); // 最少 5 分钟
                     tokio::select! {
                         _ = cancel.cancelled() => break,

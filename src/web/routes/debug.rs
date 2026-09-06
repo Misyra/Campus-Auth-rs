@@ -172,7 +172,9 @@ pub async fn debug_screenshot(
     } else if bytes.starts_with(b"\xff\xd8\xff") {
         "image/jpeg"
     } else {
-        return Err(ApiError::BadRequest("截图文件不是有效的 PNG/JPEG 图片".into()));
+        return Err(ApiError::BadRequest(
+            "截图文件不是有效的 PNG/JPEG 图片".into(),
+        ));
     };
     Ok(([(header::CONTENT_TYPE, mime)], bytes))
 }

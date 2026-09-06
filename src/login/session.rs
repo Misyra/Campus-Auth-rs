@@ -734,8 +734,8 @@ impl LoginSession {
             if b.has_live_worker() {
                 // preserve_state 仅在 keep_alive 且登录成功时为真，非成功终态
                 // 走会话级释放、默认配置走全量关闭，三档语义由 Worker 侧实现
-                let preserve = result.success
-                    && self.deps.config_service.runtime().load().worker.keep_alive;
+                let preserve =
+                    result.success && self.deps.config_service.runtime().load().worker.keep_alive;
                 // 超时须大于 Python 侧 close 内部超时（8s），避免竞速误报；
                 // 命令级超时兜底由 bridge.execute_with_timeout 负责，失败仅告警不阻塞收尾
                 if let Err(e) = b

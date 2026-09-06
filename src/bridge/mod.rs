@@ -865,7 +865,9 @@ async fn execute_inner(
                 && debug_session_stale(inner.debug_last_activity, Instant::now())
         };
         if stale {
-            tracing::warn!("调试会话超过 30 分钟无活动，判定为孤儿会话，强制回收 Worker 放行本次请求");
+            tracing::warn!(
+                "调试会话超过 30 分钟无活动，判定为孤儿会话，强制回收 Worker 放行本次请求"
+            );
             this.force_recycle().await;
         }
     }
@@ -1196,8 +1198,14 @@ async fn ensure_worker(
         .clone()
         .ok_or(BridgeError::WorkerStartupTimeout)?;
     let keep_alive = this.config.runtime().load().worker.keep_alive;
-    let process =
-        spawn_worker(&python_exe, &worker_main, &this.base_path, keep_alive, ipc_tx).await?;
+    let process = spawn_worker(
+        &python_exe,
+        &worker_main,
+        &this.base_path,
+        keep_alive,
+        ipc_tx,
+    )
+    .await?;
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Starting;
@@ -1465,7 +1473,7 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
             inner.current_cancel_id = None;
             inner.current_request_id = None;
             inner.debug_session_open = false;
-        inner.debug_last_activity = None;
+            inner.debug_last_activity = None;
             // 进程对象必须 take：残留会让 is_worker_ready（Idle && process.is_some()）
             // 对已死 Worker 返回 true，execute 走快速路径写已关闭的 stdin
             let handles = inner.process.take().map(|p| p.handles);

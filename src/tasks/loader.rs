@@ -470,7 +470,14 @@ impl TaskManager {
     ///   no-op——所有步骤"成功"但运营商根本没选，required 的显式拒绝是有意行为
     const STEP_FIELD_RULES: &[StepFieldRule] = &[
         (
-            &["input", "click", "click_select", "ocr", "wait_for_selector", "upload_file"],
+            &[
+                "input",
+                "click",
+                "click_select",
+                "ocr",
+                "wait_for_selector",
+                "upload_file",
+            ],
             &["selector"],
             &[],
             "",
@@ -490,7 +497,12 @@ impl TaskManager {
             &["url", "value", "selector"],
             "需要 url、value 或 selector",
         ),
-        (&["upload_file"], &[], &["path", "value"], "需要 path 或 value"),
+        (
+            &["upload_file"],
+            &[],
+            &["path", "value"],
+            "需要 path 或 value",
+        ),
     ];
 
     /// 字段缺失或为纯空白视为空（H5：统一 trim 语义）
@@ -574,8 +586,7 @@ impl TaskManager {
                                     .unwrap_or("")
                                     .is_empty();
                                 let has_duration =
-                                    step.get("duration").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        > 0;
+                                    step.get("duration").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
                                 if !has_selector && !has_duration {
                                     errors.push(format!("步骤[{i}] 需要 selector 或 duration"));
                                 }
