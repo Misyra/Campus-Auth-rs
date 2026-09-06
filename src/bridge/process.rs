@@ -111,10 +111,13 @@ pub struct ProcessHandles {
 /// `ipc_tx` 由 Supervisor 主循环持有其对应的 Receiver，用于回收响应/事件/退出通知。
 /// `base_path` 注入给 Worker，供其锚定浏览器持久化数据目录（`<base_path>/config/browser-data`），
 /// 避免依赖 Worker 脚本目录（便携包更新/重建时会被清空）。
+/// `keep_alive` 注入为环境变量，Worker 据此决定浏览器常驻策略（登录成功保留
+/// 页面与登录状态、非成功终态会话级释放、不装浏览器空闲回收计时器）。
 pub async fn spawn_worker(
     python_exe: &Path,
     worker_main: &Path,
     base_path: &Path,
+    keep_alive: bool,
     ipc_tx: mpsc::Sender<ParsedMessage>,
 ) -> Result<WorkerProcess, BridgeError> {
     let mut cmd = Command::new(python_exe);
@@ -129,6 +132,9 @@ pub async fn spawn_worker(
         .env("PYTHONUTF8", "1")
         // 注入应用数据目录，Worker 据此锚定浏览器持久化数据（browser-data）
         .env("CAMPUS_AUTH_BASE_PATH", base_path);
+    if keep_alive {
+        cmd.env("CAMPUS_AUTH_WORKER_KEEP_ALIVE", "1");
+    }
     // Windows：设置 CREATE_NO_WINDOW，避免 Worker 子进程弹出黑色控制台窗口
     // （与 orphan.rs 的进程枚举保持一致的处理，历史遗留 F4-Win）
     #[cfg(windows)]

@@ -711,17 +711,26 @@ impl LoginSession {
                 reason: result.message.clone(),
             },
         };
-        // 会话终态后关闭浏览器（对齐原版 BrowserContextManager 的会话级生命周期）：
-        // 会话内重试复用同一浏览器，终态即关闭；Worker 进程保留，下次登录由
-        // ensure_browser 重建。进程已被回收（force_recycle / 空闲超时）时跳过，
-        // 避免仅为关浏览器而重新 spawn 一个 Worker。
+        // 会话终态后回收浏览器资源（Worker 进程保留）。默认全量关闭浏览器
+        // （会话内重试复用同一浏览器，终态即关闭）；worker.keep_alive 启用时
+        // 改会话级释放，登录成功更是整页保留登录状态（门户页 JS 心跳不中断）。
+        // 进程已被回收（force_recycle / 空闲超时）时跳过，避免仅为关浏览器
+        // 而重新 spawn 一个 Worker。
         {
             let b = &self.deps.bridge;
             if b.has_live_worker() {
-                // 超时与 Python 侧 close_browser 内部超时（8s）对齐：
+                // preserve_state 仅在 keep_alive 且登录成功时为真，非成功终态
+                // 走会话级释放、默认配置走全量关闭，三档语义由 Worker 侧实现
+                let preserve = result.success
+                    && self.deps.config_service.runtime().load().worker.keep_alive;
+                // 超时须大于 Python 侧 close 内部超时（8s），避免竞速误报；
                 // 命令级超时兜底由 bridge.execute_with_timeout 负责，失败仅告警不阻塞收尾
                 if let Err(e) = b
-                    .execute_with_timeout("close_browser", json!({}), Duration::from_secs(8))
+                    .execute_with_timeout(
+                        "close_browser",
+                        json!({ "preserve_state": preserve }),
+                        Duration::from_secs(12),
+                    )
                     .await
                 {
                     warn!("登录终态关闭浏览器失败（忽略）: {e}");

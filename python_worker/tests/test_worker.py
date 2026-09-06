@@ -551,6 +551,261 @@ def test_handle_close_browser_closes_and_keeps_worker():
     asyncio.run(_run())
 
 
+def test_handle_close_browser_preserve_state_keeps_everything():
+    """preserve_state=true（keep_alive 且登录成功）：页面与登录状态原样保留。"""
+
+    async def _run():
+        import playwright_worker as pw
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        core._page = object()
+        core._context = object()
+        core._last_browser_settings = {"headless": True}
+
+        async def _fail_close(self):
+            raise AssertionError("preserve_state 时不应调用 close_browser")
+
+        async def _fail_session(self):
+            raise AssertionError("preserve_state 时不应调用 _close_session")
+
+        orig_close, orig_session = WorkerCore.close_browser, WorkerCore._close_session
+        WorkerCore.close_browser = _fail_close
+        WorkerCore._close_session = _fail_session
+        try:
+            result = await core.handle_close_browser({"preserve_state": True})
+        finally:
+            WorkerCore.close_browser = orig_close
+            WorkerCore._close_session = orig_session
+        assert result == {}
+        # 页面、context 与配置快照全部原样保留
+        assert core._page is not None and core._context is not None
+        assert core._last_browser_settings == {"headless": True}
+
+    asyncio.run(_run())
+
+
+def test_handle_close_browser_keep_alive_session_release():
+    """keep_alive 环境开启（非成功终态）：会话级释放，保留浏览器进程。"""
+
+    async def _run():
+        import playwright_worker as pw
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        released = []
+
+        async def fake_session(self):
+            released.append(True)
+
+        async def _fail_close(self):
+            raise AssertionError("keep_alive 会话级档不应全量 close_browser")
+
+        orig_env = pw._WORKER_KEEP_ALIVE
+        orig_session, orig_close = WorkerCore._close_session, WorkerCore.close_browser
+        pw._WORKER_KEEP_ALIVE = True
+        WorkerCore._close_session = fake_session
+        WorkerCore.close_browser = _fail_close
+        try:
+            result = await core.handle_close_browser({})
+        finally:
+            pw._WORKER_KEEP_ALIVE = orig_env
+            WorkerCore._close_session = orig_session
+            WorkerCore.close_browser = orig_close
+        assert result == {}
+        assert released == [True]
+
+    asyncio.run(_run())
+
+
+def test_close_session_keeps_browser_process():
+    """_close_session：只关页面与非持久化 context，保留浏览器进程与配置快照。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        closed = []
+
+        class FakeRes:
+            def __init__(self, name):
+                self.name = name
+
+            async def close(self):
+                closed.append(self.name)
+
+        browser = FakeRes("browser")
+        core._page = FakeRes("page")
+        core._context = FakeRes("context")
+        core._browser = browser
+        core._last_browser_settings = {"headless": True}
+        await core._close_session()
+        assert closed == ["page", "context"], "应只关闭页面与 context"
+        assert core._page is None and core._context is None
+        assert core._browser is browser, "浏览器进程应保留"
+        assert core._last_browser_settings == {"headless": True}, "配置快照应保留"
+
+    asyncio.run(_run())
+
+
+def test_close_session_persistent_keeps_context():
+    """persistent_context 模式（_browser 为 None）：context 即浏览器本体，不可关。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        closed = []
+
+        class FakeRes:
+            async def close(self):
+                closed.append(True)
+
+        ctx = FakeRes()
+        core._page = None
+        core._context = ctx
+        core._browser = None
+        await core._close_session()
+        assert closed == [], "persistent 模式不应关闭 context"
+        assert core._context is ctx, "persistent context 应保留"
+
+    asyncio.run(_run())
+
+
+def test_ensure_browser_hot_recovery_reuses_process():
+    """会话级释放后热恢复：进程存活且配置未变 → 只重建 context+page，不重启进程。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        class FakePage:
+            def __init__(self):
+                self.handlers = {}
+
+            def on(self, event, cb):
+                self.handlers[event] = cb
+
+        class FakeCtx:
+            async def new_page(self):
+                return FakePage()
+
+        class FakeBrowser:
+            def __init__(self):
+                self.context_calls = 0
+
+            def is_connected(self):
+                return True
+
+            async def new_context(self, **kwargs):
+                self.context_calls += 1
+                return FakeCtx()
+
+        core = WorkerCore()
+        browser = FakeBrowser()
+        core._browser = browser
+        core._context = None
+        core._last_browser_settings = {"pure_mode": True}
+        launched = []
+
+        async def fail_start(self, config):
+            launched.append(True)
+
+        orig_start = WorkerCore._start_browser
+        WorkerCore._start_browser = fail_start
+        try:
+            await core.ensure_browser({"browser_settings": {"pure_mode": True}})
+        finally:
+            WorkerCore._start_browser = orig_start
+        assert launched == [], "热恢复不应重启浏览器进程"
+        assert browser.context_calls == 1, "应只重建 context"
+        assert core._context is not None and core._page is not None
+
+    asyncio.run(_run())
+
+
+def test_ensure_browser_hot_recovery_falls_back_on_error():
+    """热恢复建 context 失败 → 回退完整重建（close_browser + _start_browser）。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        class FakeBrowser:
+            def is_connected(self):
+                return True
+
+            async def new_context(self, **kwargs):
+                raise RuntimeError("模拟建 context 失败")
+
+        core = WorkerCore()
+        core._browser = FakeBrowser()
+        core._context = None
+        core._last_browser_settings = {"pure_mode": True}
+        started = []
+
+        async def fake_start(self, config):
+            started.append(True)
+
+        async def fake_close(self):
+            pass
+
+        orig_start, orig_close = WorkerCore._start_browser, WorkerCore.close_browser
+        WorkerCore._start_browser = fake_start
+        WorkerCore.close_browser = fake_close
+        try:
+            await core.ensure_browser({"browser_settings": {"pure_mode": True}})
+        finally:
+            WorkerCore._start_browser = orig_start
+            WorkerCore.close_browser = orig_close
+        assert started == [True], "热恢复失败应回退完整重建"
+
+    asyncio.run(_run())
+
+
+def test_browser_idle_release_fires_and_cancels():
+    """浏览器空闲自动释放：到期触发全量关闭；取消后不再触发；keep_alive 时不武装。"""
+
+    async def _run():
+        import playwright_worker as pw
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        core._browser = object()
+        closed = []
+
+        async def fake_close(self):
+            closed.append(True)
+
+        orig_close = WorkerCore.close_browser
+        orig_secs = pw.BROWSER_IDLE_RELEASE_SECS
+        orig_env = pw._WORKER_KEEP_ALIVE
+        WorkerCore.close_browser = fake_close
+        pw.BROWSER_IDLE_RELEASE_SECS = 0.05
+        pw._WORKER_KEEP_ALIVE = False
+        try:
+            # 到期触发
+            core._arm_browser_idle_release()
+            assert core._browser_idle_task is not None
+            await asyncio.sleep(0.15)
+            assert closed == [True], "空闲到期应自动释放浏览器"
+            assert core._browser_idle_task is None
+            # 取消后不触发
+            core._browser = object()
+            core._arm_browser_idle_release()
+            core._cancel_browser_idle_release()
+            await asyncio.sleep(0.1)
+            assert closed == [True], "取消后不应触发"
+            # keep_alive 时武装为 no-op
+            pw._WORKER_KEEP_ALIVE = True
+            core._arm_browser_idle_release()
+            assert core._browser_idle_task is None, "keep_alive 时不装空闲回收"
+        finally:
+            WorkerCore.close_browser = orig_close
+            pw.BROWSER_IDLE_RELEASE_SECS = orig_secs
+            pw._WORKER_KEEP_ALIVE = orig_env
+
+    asyncio.run(_run())
+
+
 # ── B3: 调试会话期间拒绝登录/浏览器任务（Python 半防御）──
 
 

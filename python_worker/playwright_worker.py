@@ -462,6 +462,24 @@ class CancelRegistry:
 # ── Worker 核心 ──
 
 
+# ── 常驻与空闲回收策略 ──
+
+#: 浏览器空闲自动释放秒数：worker.keep_alive 未启用时，浏览器类命令完成后若
+#: 持续无新命令，超过该时长即全量关闭浏览器释放内存（Worker 进程本身仍由
+#: Rust 侧 worker.idle_timeout_seconds 管理）。连续任务不受影响：每次新命令
+#: 都会取消并重置计时。
+BROWSER_IDLE_RELEASE_SECS = 30
+
+#: Rust spawn 时按 cfg.worker.keep_alive 注入（改配置对下一个 Worker 生命周期
+#: 生效）。True 时浏览器跨会话常驻：登录成功整页保留登录状态（门户页 JS 心跳
+#: 不中断），非成功终态仅会话级释放，且不装浏览器空闲回收计时器。
+_WORKER_KEEP_ALIVE = os.environ.get("CAMPUS_AUTH_WORKER_KEEP_ALIVE", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
 class WorkerCore:
     """管理 Playwright 浏览器实例生命周期，并分发浏览器动作命令。"""
 
@@ -504,6 +522,8 @@ class WorkerCore:
         # 运行时能力（任务 10）：由 worker_main._serve 注入（OCR 预加载探测结果），
         # 随 worker_health_check 响应上报；未注入时为空 dict（Rust 侧回退文件探测）
         self.capabilities: dict[str, bool] = {}
+        # 浏览器空闲自动释放计时（keep_alive 关闭时武装，见 _arm_browser_idle_release）
+        self._browser_idle_task: asyncio.Task | None = None
 
     # ── 浏览器启动参数构建 ──
 
@@ -766,6 +786,28 @@ class WorkerCore:
     async def ensure_browser(self, config: dict) -> None:
         """确保浏览器就绪（复用已存在的实例，仅在未就绪或配置变更时重建）。"""
         bs = config.get("browser_settings", {})
+        # 任何浏览器命令开始都取消待触发的空闲自动释放
+        self._cancel_browser_idle_release()
+        # 会话级释放后的热恢复：浏览器进程存活且配置未变，仅重建轻量 context
+        # 与页面（全新 cookie 罐，会话隔离语义不变），省去 1-3s 冷启动
+        if (
+            self._browser is not None
+            and self._context is None
+            and self._last_browser_settings == bs
+            and self._browser.is_connected()
+        ):
+            try:
+                self._context = await self._browser.new_context(
+                    **self._build_context_options(bs)
+                )
+                if not bs.get("pure_mode", False):
+                    await self._apply_stealth_and_routes(bs)
+                self._page = await self._new_page()
+                logger.info("复用浏览器进程热恢复会话上下文")
+                return
+            except Exception:
+                logger.warning("浏览器进程热恢复失败，回退完整重建", exc_info=True)
+                await self.close_browser()
         has_browser = self._browser is not None or self._context is not None
         if has_browser and await self._health_check() and self._last_browser_settings == bs:
             return
@@ -827,6 +869,62 @@ class WorkerCore:
         self._debug_sessions.clear()
         self._last_browser_settings = None
         logger.info("浏览器及资源已关闭")
+
+    async def _close_session(self) -> None:
+        """会话级释放：关闭页面与非持久化 context，保留浏览器进程供热复用。
+
+        persistent_context 模式的 context 即浏览器本体（_browser 为 None），
+        关闭 context 等于终止进程，故仅清页面，context 由既有 ensure_browser
+        快速路径继续复用。_last_browser_settings 必须保留，热恢复分支依赖它
+        判定"配置未变"。
+        """
+        if self._page is not None:
+            await self._safe_close(self._page, "页面")
+            self._page = None
+        if self._context is not None and self._browser is not None:
+            await self._safe_close(self._context, "上下文")
+            self._context = None
+        # 与 close_browser 同款兜底：清理残留调试截图（可能含明文凭据）
+        for session in list(self._debug_sessions.values()):
+            self._cleanup_debug_screenshots(session)
+        self._debug_sessions.clear()
+        logger.info("会话级资源已释放（浏览器进程保留）")
+
+    def _cancel_browser_idle_release(self) -> None:
+        """取消待触发的浏览器空闲自动释放（任何新浏览器命令都会重置计时）。"""
+        if self._browser_idle_task is not None:
+            self._browser_idle_task.cancel()
+            self._browser_idle_task = None
+
+    def _arm_browser_idle_release(self) -> None:
+        """武装浏览器空闲自动释放计时（worker.keep_alive 启用时不回收）。"""
+        if _WORKER_KEEP_ALIVE:
+            return
+        self._cancel_browser_idle_release()
+        self._browser_idle_task = asyncio.create_task(self._browser_idle_release())
+
+    async def _browser_idle_release(self) -> None:
+        """空闲到期后全量关闭浏览器释放内存（Worker 进程仍由 Rust 空闲超时管理）。"""
+        try:
+            await asyncio.sleep(BROWSER_IDLE_RELEASE_SECS)
+        except asyncio.CancelledError:
+            return
+        self._browser_idle_task = None
+        # 调试会话兜底保护：活跃调试期间绝不回收
+        if self._debug_sessions:
+            return
+        if self._browser is None and self._context is None:
+            return
+        logger.info(
+            "浏览器空闲 %ds，自动释放（worker.keep_alive 未启用）",
+            BROWSER_IDLE_RELEASE_SECS,
+        )
+        try:
+            await asyncio.wait_for(self.close_browser(), timeout=8.0)
+        except asyncio.TimeoutError:
+            logger.warning("浏览器空闲自动释放超时（8s），跳过")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"浏览器空闲自动释放异常（忽略）: {exc}")
 
     async def force_interrupt_pending(self) -> None:
         """强制中断可能挂起的 Playwright 操作：关闭当前页面以打断 CDP await。
@@ -1080,15 +1178,19 @@ class WorkerCore:
             raise WorkerError(
                 Outcome.UNKNOWN_ERROR, "调试会话进行中，无法执行浏览器任务，请先停止调试"
             )
-        async with self._cancel_session(params) as (cancel_event, bs, task):
-            variables = dict(task.variables or {})
-            variables.update(self._system_variables(params))
-            self._task_dialogs = []
-            result = await self._run_task(
-                task, bs, variables, cancel_event, _debug_screenshot_dir()
-            )
-            result.data = {"dialogs": list(self._task_dialogs)}
-            return result.to_dict()
+        try:
+            async with self._cancel_session(params) as (cancel_event, bs, task):
+                variables = dict(task.variables or {})
+                variables.update(self._system_variables(params))
+                self._task_dialogs = []
+                result = await self._run_task(
+                    task, bs, variables, cancel_event, _debug_screenshot_dir()
+                )
+                result.data = {"dialogs": list(self._task_dialogs)}
+                return result.to_dict()
+        finally:
+            # 任务结束（含失败）即武装空闲回收：keep_alive 关闭时超时后全量释放浏览器
+            self._arm_browser_idle_release()
 
     @staticmethod
     def _system_variables(params: dict) -> dict:
@@ -1357,7 +1459,7 @@ class WorkerCore:
         return self._debug_response(session)
 
     async def handle_debug_stop(self, params: dict) -> dict:
-        """停止调试会话并关闭浏览器。"""
+        """停止调试会话并释放会话资源（keep_alive 时浏览器进程常驻热复用）。"""
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
         self._debug_sessions.pop(session.session_id, None)
@@ -1365,21 +1467,34 @@ class WorkerCore:
         self._cleanup_debug_screenshots(session)
         if session.cancel_id:
             cancel_registry.unregister(session.cancel_id)
-        await self.close_browser()
+        await self._close_session()
+        # 调试结束即武装空闲回收：keep_alive 关闭时浏览器进程超时后全量释放
+        self._arm_browser_idle_release()
         return {}
 
     async def handle_close_browser(self, params: dict) -> dict:
-        """关闭浏览器但保留 Worker 进程。
+        """登录会话终态后的浏览器资源回收（Worker 进程保留）。
 
-        登录会话到达终态（成功/失败/取消）后由 Rust 侧调用，对齐原版
-        BrowserContextManager 的会话级生命周期：会话内重试复用同一浏览器，
-        会话结束即关闭。Worker 进程保留，下次登录由 ensure_browser 重建浏览器。
+        三档行为，由 Rust 侧按配置与登录结果决定：
+        - ``preserve_state=true``（keep_alive 且登录成功）：页面与登录状态原样
+          保留——门户页 JS 心跳/在线状态不中断，不清 cookie、不导航、不关页；
+        - Worker 启动环境 ``CAMPUS_AUTH_WORKER_KEEP_ALIVE=1``（keep_alive 但非
+          成功终态）：会话级释放（关页面与非持久化 context），浏览器进程留给
+          下次登录热启动；
+        - 默认：全量关闭浏览器（历史行为）。
 
-        ``close_browser`` 内含 playwright.stop()，极端情况下可能挂起（如 driver
-        进程未及时退出），此处加内部超时兜底，避免一条挂起命令阻塞 Worker 命令队列。
+        极端情况下 close 可能挂起（如 driver 未及时退出），保留内部超时兜底，
+        避免一条挂起命令阻塞 Worker 命令队列。
         """
+        self._cancel_browser_idle_release()
+        if params.get("preserve_state"):
+            logger.info("keep_alive 常驻：登录成功，保留页面与登录状态")
+            return {}
         try:
-            await asyncio.wait_for(self.close_browser(), timeout=8.0)
+            if _WORKER_KEEP_ALIVE:
+                await asyncio.wait_for(self._close_session(), timeout=8.0)
+            else:
+                await asyncio.wait_for(self.close_browser(), timeout=8.0)
         except asyncio.TimeoutError:
             logger.warning("close_browser 超时（8s），跳过等待继续")
         return {}
@@ -1473,6 +1588,7 @@ class WorkerCore:
                 len(html),
                 len(resources),
             )
+            self._arm_browser_idle_release()
             return {
                 "final_url": meta["final_url"],
                 "title": title,
@@ -1482,6 +1598,7 @@ class WorkerCore:
                 "note": note,
             }
         except Exception:
+            self._arm_browser_idle_release()
             if cancel_id:
                 cancel_registry.unregister(cancel_id)
             raise

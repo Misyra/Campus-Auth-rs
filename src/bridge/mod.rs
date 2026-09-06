@@ -1168,7 +1168,9 @@ async fn ensure_worker(
         .ipc_tx
         .clone()
         .ok_or(BridgeError::WorkerStartupTimeout)?;
-    let process = spawn_worker(&python_exe, &worker_main, &this.base_path, ipc_tx).await?;
+    let keep_alive = this.config.runtime().load().worker.keep_alive;
+    let process =
+        spawn_worker(&python_exe, &worker_main, &this.base_path, keep_alive, ipc_tx).await?;
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Starting;
