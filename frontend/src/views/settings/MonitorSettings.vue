@@ -148,14 +148,14 @@ const urlCheckText = computed({
                 <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.enable_http_check" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">204 检测</span>
+                  <span class="toggle-label">204 门户检测</span>
                 </label>
-                <FieldHelp text="请求 generate_204 端点判断网络状态：204=在线，200/跳转=被门户劫持。主流厂商（小米/华为/vivo）均提供该端点，是误判率最低的检测方式。" />
+                <FieldHelp text="即 Captive Portal 检测：请求 generate_204 端点判断网络状态，204=在线，200/跳转=被门户劫持。主流厂商（小米/华为/vivo）均提供该端点，是误判率最低的检测方式。" />
               </div>
             </div>
             <div v-if="config.config.monitor.enable_http_check" class="form-group settings-toggle-compact">
               <div class="field-label-row">
-                <label for="settings-http-targets">204 检测目标</label>
+                <label for="settings-http-targets">204 门户检测目标</label>
                 <FieldHelp text="必须填写返回 204 的轻量端点（generate_204 类）。填普通网页会导致恒判被劫持，反复触发登录。" />
               </div>
               <input id="settings-http-targets"

@@ -199,7 +199,7 @@ impl Default for MonitorSettings {
                 "114.114.114.114:53".to_string(),
                 "www.baidu.com:443".to_string(),
             ],
-            // 204 检测目标：统一使用主流厂商的 generate_204 端点（Android/captive
+            // 204 门户检测目标：统一使用主流厂商的 generate_204 端点（Android/captive
             // 检测事实标准）。用明文 http——门户劫持下才能收到 200 响应（劫持证据），
             // https 在劫持下 TLS 握手直接失败，只能得到 Fail 而非 Captive
             http_targets: vec![
@@ -214,7 +214,7 @@ impl Default for MonitorSettings {
             ],
             url_expected_responses,
             tcp_enabled: false,
-            // 默认仅启用 204 检测：204 端点语义单一（204=在线/200=劫持），厂商覆盖广，
+            // 默认仅启用 204 门户检测：204 端点语义单一（204=在线/200=劫持），厂商覆盖广，
             // 是误判率最低的单探测方案；URL 内容探测与 TCP 探测默认关闭，按需启用
             http_enabled: true,
             url_enabled: false,
