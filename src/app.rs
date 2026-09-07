@@ -186,3 +186,34 @@ pub async fn stop_axum(mut handle: AxumServeHandle) {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 绑定地址解析：合法输入直通，非法/空回退回环（配置笔误不导致监听失败）
+    #[test]
+    fn test_parse_bind_addr_valid_and_fallback() {
+        assert_eq!(
+            parse_bind_addr("127.0.0.1"),
+            std::net::IpAddr::from(BIND_ADDR)
+        );
+        assert_eq!(
+            parse_bind_addr("0.0.0.0"),
+            std::net::IpAddr::from(DOCKER_BIND_ADDR)
+        );
+        assert!(parse_bind_addr("::").is_unspecified());
+        assert_eq!(
+            parse_bind_addr("not-an-ip"),
+            std::net::IpAddr::from(BIND_ADDR)
+        );
+        assert_eq!(parse_bind_addr(""), std::net::IpAddr::from(BIND_ADDR));
+    }
+
+    /// 服务常量保持在合理边界内（端口重试不至于长时间阻塞启动）
+    #[test]
+    fn test_service_constants_within_sane_bounds() {
+        assert_eq!(DEFAULT_PORT, 50721);
+        assert_eq!(WS_EVENT_CAPACITY, 1024);
+        assert!((1..=10).contains(&PORT_RETRY_MAX));
+    }
+}

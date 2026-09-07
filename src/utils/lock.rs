@@ -285,3 +285,43 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 端口记录→查询往返：当前进程存活，端口与运行时长可观测
+    #[test]
+    fn test_record_port_query_roundtrip() {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let lock = InstanceLock::try_acquire(dir.path()).expect("首次加锁");
+        lock.record_port(54321).expect("记录端口");
+        let info = query_instance(dir.path()).expect("应查到实例信息");
+        assert_eq!(info.port, 54321);
+        assert_eq!(info.pid, std::process::id());
+        assert!(info.running);
+        assert!(info.uptime.is_some());
+    }
+
+    /// 缺失/损坏的实例信息视为无实例（崩溃残留不误报）
+    #[test]
+    fn test_query_instance_missing_and_malformed_is_none() {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        assert!(query_instance(dir.path()).is_none());
+        let info_path = crate::utils::paths::instance_info_path(dir.path());
+        std::fs::create_dir_all(info_path.parent().expect("父目录")).expect("建目录");
+        std::fs::write(&info_path, "not-a-pid\nno-port\n").expect("写坏文件");
+        assert!(query_instance(dir.path()).is_none());
+    }
+
+    /// Drop 清理实例信息文件：锁释放后查询即无实例
+    #[test]
+    fn test_drop_cleans_instance_info() {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        {
+            let lock = InstanceLock::try_acquire(dir.path()).expect("加锁");
+            lock.record_port(54322).expect("记录端口");
+            assert!(query_instance(dir.path()).is_some());
+        }
+        assert!(query_instance(dir.path()).is_none());
+    }
+}

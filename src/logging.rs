@@ -403,3 +403,55 @@ pub fn init_logging(
 
     guard
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 来源归一化：前后端来源过滤与徽章展示依赖短名一致
+    #[test]
+    fn test_normalize_source_mapping() {
+        assert_eq!(
+            normalize_source("campus_auth::scheduler::cron_loop"),
+            "scheduler"
+        );
+        assert_eq!(normalize_source("campus_auth::launcher"), "launcher");
+        assert_eq!(normalize_source("campus_auth"), "app");
+        assert_eq!(normalize_source("hyper_util::client"), "hyper_util");
+        assert_eq!(normalize_source("campus_auth::Scheduler"), "scheduler");
+        assert_eq!(normalize_source(""), "");
+    }
+
+    /// 级别解析：大小写不敏感，无效回退 INFO（配置笔误不静默关闭日志）
+    #[test]
+    fn test_parse_level_branches() {
+        use tracing_subscriber::filter::LevelFilter;
+        assert_eq!(parse_level("TRACE"), LevelFilter::TRACE);
+        assert_eq!(parse_level("debug"), LevelFilter::DEBUG);
+        assert_eq!(parse_level("WARNING"), LevelFilter::WARN);
+        assert_eq!(parse_level("ERROR"), LevelFilter::ERROR);
+        assert_eq!(parse_level("INFO"), LevelFilter::INFO);
+        assert_eq!(parse_level("verbose"), LevelFilter::INFO);
+        assert_eq!(parse_level(""), LevelFilter::INFO);
+    }
+
+    /// 日志配置提取：缺失/非法回退 INFO + 7 天（启动期单次解析语义）
+    #[test]
+    fn test_logging_config_from_value_fallbacks() {
+        use serde_json::json;
+        use tracing_subscriber::filter::LevelFilter;
+        let (level, retention) = logging_config_from_value(&json!({}));
+        assert_eq!(level, LevelFilter::INFO);
+        assert_eq!(retention, 7);
+
+        let (level, retention) = logging_config_from_value(&json!({
+            "global": {"logging": {"level": "DEBUG", "retention_days": 30}}
+        }));
+        assert_eq!(level, LevelFilter::DEBUG);
+        assert_eq!(retention, 30);
+
+        let (level, _) = logging_config_from_value(&json!({
+            "global": {"logging": {"level": "nope"}}
+        }));
+        assert_eq!(level, LevelFilter::INFO);
+    }
+}
