@@ -8,7 +8,7 @@
 import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
-import { aiApi } from "@/api";
+import { aiApi, tasksApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import type { AiCaptureResult, AiGenerateResult } from "@/api/types";
 import { computed, onMounted, onUnmounted, ref } from "vue";
@@ -16,6 +16,7 @@ import { useRouter } from "vue-router";
 import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useToast } from "@/composables/useToast";
 import { downloadBlob } from "@/utils/file";
+import { fileStamp } from "@/utils/formatters";
 
 const router = useRouter();
 const { toastOnly } = useToast();
@@ -123,7 +124,7 @@ async function saveBundle(): Promise<void> {
   savingBundle.value = true;
   try {
     const blob = await aiApi.captureBundle();
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const stamp = fileStamp();
     downloadBlob(blob, `campus-auth-capture-${stamp}.zip`, "application/zip");
     toastOnly(true, "页面文件已保存");
   } catch (error) {
@@ -343,8 +344,8 @@ async function saveTask(): Promise<void> {
   }
 }
 
+// @/api 已在顶部静态导入（aiApi 等），此处动态导入无代码分割意义，改用静态成员
 async function tasksImport(task: Record<string, unknown>): Promise<{ failed?: unknown[] }> {
-  const { tasksApi } = await import("@/api");
   return (await tasksApi.import({ tasks: [task] })) as { failed?: unknown[] };
 }
 

@@ -16,6 +16,7 @@ import { downloadBlob, pickFile, getBinaryName } from "../utils/file";
 import { LOGIN_SCRIPT_TEMPLATE, NEW_SCRIPT_STUB } from "../utils/scriptTemplates";
 import { useBusyIds } from "../utils/guards";
 import { useTaskDirectory } from "./useTaskDirectory";
+import { useDirtySnapshot } from "./useDirtySnapshot";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 import { useTasks } from "./useTasks";
@@ -57,37 +58,13 @@ async function fetchAvailableBinaries(): Promise<void> {
   }
 }
 
-// ---- 编辑器 dirty 快照（对齐 useProfiles 的快照模式）----
-let editingScriptSnapshot = "";
-
-function snapshotOf(draft: ScriptDraft | null): string {
-  return draft ? JSON.stringify(draft) : "";
-}
-
-/** 统一的草稿写入入口：赋值并同步刷新 dirty 基准快照。 */
-function setScriptDraft(draft: ScriptDraft): void {
-  editingTask.value = draft;
-  editingScriptSnapshot = snapshotOf(draft);
-}
-
-/** 当前编辑器是否有未保存改动。 */
-function isScriptDirty(): boolean {
-  return editingTask.value !== null && snapshotOf(editingTask.value) !== editingScriptSnapshot;
-}
-
-/**
- * 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。
- * 返回 true 才允许继续（放弃修改）；false（用户取消）与 null（被新对话框抢占）
- * 一律不放行——保留现状、不丢弃数据（A10 语义：被抢占≠用户放弃）。
- */
-async function confirmDiscardScriptIfDirty(): Promise<boolean | null> {
-  if (!isScriptDirty()) return true;
-  return confirm({
-    title: "放弃未保存的修改",
-    message: "当前脚本有未保存的修改，确定放弃吗？",
-    danger: true,
-  });
-}
+// ---- 编辑器 dirty 快照：通用实现见 useDirtySnapshot（原为对齐 useProfiles 的逐字重复实现）----
+const {
+  setDraft: setScriptDraft,
+  isDirty: isScriptDirty,
+  confirmDiscardIfDirty: confirmDiscardScriptIfDirty,
+  resetSnapshot: resetScriptSnapshot,
+} = useDirtySnapshot(editingTask, { entityName: "脚本" });
 
 /** 关闭脚本编辑器（带 dirty 确认）。 */
 async function closeScriptEditor(): Promise<void> {
@@ -98,7 +75,7 @@ async function closeScriptEditor(): Promise<void> {
 /** 清空草稿（保存成功等无需确认的场景）。 */
 function clearScriptDraft(): void {
   editingTask.value = null;
-  editingScriptSnapshot = "";
+  resetScriptSnapshot();
 }
 
 async function showScriptEditor(taskId?: string): Promise<void> {

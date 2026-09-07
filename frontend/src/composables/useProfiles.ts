@@ -11,6 +11,7 @@ import { DEFAULT_PROFILE_SETTINGS } from "../utils/constants";
 import { createFetchGuard, createFirstFailNotifier } from "../utils/guards";
 import { frontendLogger } from "../utils/logger";
 import { useStatus } from "./useStatus";
+import { useDirtySnapshot } from "./useDirtySnapshot";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 import { useConfig } from "./useConfig";
@@ -21,8 +22,13 @@ const profiles = ref<Record<string, Profile>>({});
 const activeProfileId = ref("default");
 const autoSwitch = ref(true);
 const editingProfile = ref<EditingProfile | null>(null);
-// dirty 机制：记录打开编辑器时的原始快照，用于检测未保存改动（历史遗留 F4/F5）
-let editingProfileSnapshot = "";
+// dirty 机制：基准快照由 useDirtySnapshot 统一维护，用于检测未保存改动（历史遗留 F4/F5）
+const {
+  isDirty: isProfileDirty,
+  confirmDiscardIfDirty,
+  refreshSnapshot: refreshProfileSnapshot,
+  resetSnapshot: resetProfileSnapshot,
+} = useDirtySnapshot(editingProfile, { entityName: "配置方案" });
 const detectResult = ref<NetworkDetectResult | null>(null);
 const editorDetectResult = ref<NetworkDetectResult | null>(null);
 
@@ -82,42 +88,14 @@ async function showProfileEditor(profileId?: string): Promise<void> {
     } as EditingProfile;
   }
   // 记录初始快照作为 dirty 基准
-  editingProfileSnapshot = snapshotOf(editingProfile.value);
-}
-
-/** 计算当前编辑中的方案是否存在未保存改动。 */
-function snapshotOf(p: EditingProfile | null): string {
-  return p ? JSON.stringify(p) : "";
-}
-
-/** 当前编辑器是否有未保存改动。 */
-function isProfileDirty(): boolean {
-  return (
-    editingProfile.value !== null &&
-    snapshotOf(editingProfile.value) !== editingProfileSnapshot
-  );
-}
-
-/**
- * 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。
- *
- * 返回 true 才允许继续（放弃修改）；false（用户取消）与 null（被新对话框抢占）
- * 一律不放行——保留现状、不丢弃数据（A10 语义：被抢占≠用户放弃）。
- */
-async function confirmDiscardIfDirty(): Promise<boolean | null> {
-  if (!isProfileDirty()) return true;
-  return confirm({
-    title: "放弃未保存的修改",
-    message: "当前配置方案有未保存的修改，确定放弃吗？",
-    danger: true,
-  });
+  refreshProfileSnapshot();
 }
 
 /** 关闭编辑器（带 dirty 确认）。 */
 async function closeProfileEditor(): Promise<void> {
   if (!(await confirmDiscardIfDirty())) return;
   editingProfile.value = null;
-  editingProfileSnapshot = "";
+  resetProfileSnapshot();
 }
 
 /** 保存请求 in-flight 标记：防连点并发两次 PUT（新建方案第二次会撞"已存在"） */
@@ -168,7 +146,7 @@ async function saveProfile(): Promise<boolean> {
     frontendLogger.info("profiles", "方案保存成功: " + profileId);
     toastOnly(true, data?.message || "方案保存成功");
     editingProfile.value = null;
-    editingProfileSnapshot = "";
+    resetProfileSnapshot();
     await fetchProfiles(true);
     if (profileId === activeProfileId.value) {
       await refreshActiveProfileConfig();
@@ -197,7 +175,7 @@ async function deleteProfile(profileId: string): Promise<void> {
     toastOnly(true, "方案删除成功");
     if (editingProfile.value?.id === profileId) {
       editingProfile.value = null;
-      editingProfileSnapshot = "";
+      resetProfileSnapshot();
     }
     await fetchProfiles(true);
     if (!profiles.value[activeProfileId.value]) activeProfileId.value = "default";

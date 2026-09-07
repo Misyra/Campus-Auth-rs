@@ -30,7 +30,7 @@ async function refreshEnv(): Promise<void> {
   }
 }
 
-/** 触发后端环境初始化（同步等待完成）；结果经 toast 提示，toast 不可用时降级为 notify 通知 */
+/** 触发后端环境初始化（同步等待完成）；结果经 toast 提示 */
 async function bootstrapEnv(): Promise<boolean> {
   const { busy } = useStatus();
   if (busy.env) return false;
@@ -49,9 +49,8 @@ async function bootstrapEnv(): Promise<boolean> {
     envError.value = msg;
     // 失败后刷新一次以拿到后端 last_error
     try { await refreshEnv(); } catch { /* */ }
-    const { notify } = await import("./useNotifications").then(m => ({ notify: m.useNotifications().notify }));
-    // 优先 toast，降级 notify
-    try { useToast().toastOnly(false, msg); } catch { notify(false, msg, "environment"); }
+    // toastOnly 仅做状态赋值与日志记录，不会抛异常；原 notify 降级分支为不可达的死防御，已移除
+    useToast().toastOnly(false, msg);
     frontendLogger.error("environment", msg, e);
     return false;
   } finally {

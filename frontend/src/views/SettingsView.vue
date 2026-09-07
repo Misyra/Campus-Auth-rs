@@ -14,8 +14,6 @@ const config = useConfig();
 const { busy } = useStatus();
 const { toastOnly } = useToast();
 
-const TABS = SETTINGS_TABS;
-
 const activeTab = computed(() => {
   const name = route.name as string;
   return name.replace("settings-", "") || "account";
@@ -45,7 +43,7 @@ function handleSave() {
   <div class="page-content settings-page">
     <div class="settings-tabs card">
       <button
-        v-for="tab in TABS" :key="tab.id" type="button"
+        v-for="tab in SETTINGS_TABS" :key="tab.id" type="button"
         class="settings-tab"
         :class="{ active: activeTab === tab.id }"
         :title="tab.hint"

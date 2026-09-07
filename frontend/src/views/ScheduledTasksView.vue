@@ -9,6 +9,7 @@ import ToggleSwitch from "@/components/common/ToggleSwitch.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import Modal from "@/components/common/Modal.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
+import { formatTimestamp } from "@/utils/formatters";
 
 const st = useScheduledTasks();
 const { scripts } = useScripts();
@@ -173,7 +174,7 @@ function onSaveClick(): void {
             <span class="history-status" :class="record.success ? 'success' : 'failed'">
               {{ record.success ? '成功' : '失败' }}
             </span>
-            <span class="history-time">{{ record.run_at.replace('T', ' ').substring(0, 19) }}</span>
+            <span class="history-time">{{ formatTimestamp(record.run_at) }}</span>
             <span v-if="record.duration != null" class="history-duration">{{ record.duration }}s</span>
           </div>
           <div class="history-message">{{ record.message }}</div>

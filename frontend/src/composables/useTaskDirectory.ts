@@ -22,8 +22,9 @@ import { useToast } from "./useToast";
 /**
  * 归一化任务类型。
  * 列表项可能携带 task_type（后端列表序列化字段）或 type（配置内嵌字段），兼容判断只留这一份。
+ * 仅本模块内部使用，不再经 useTaskDirectory 返回对象对外暴露。
  */
-export function normalizeTaskType(item: TaskItem): string {
+function normalizeTaskType(item: TaskItem): string {
   return String(item.task_type || item.type || "");
 }
 
@@ -63,5 +64,5 @@ async function fetchDirectory(force = false): Promise<void> {
 }
 
 export function useTaskDirectory() {
-  return { browserTasks, scripts, fetchDirectory, normalizeTaskType };
+  return { browserTasks, scripts, fetchDirectory };
 }

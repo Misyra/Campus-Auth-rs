@@ -20,6 +20,12 @@ const browserInstallError = ref("");
 const stoppingBrowser = ref(false);
 const playwrightInstallable = new Set(["chromium", "firefox", "webkit"]);
 
+/** 各浏览器渠道的官方下载地址（Playwright 不可安装时的兜底指引） */
+const OFFICIAL_URL: Record<string, string> = {
+  msedge: "https://www.microsoft.com/edge/download",
+  chrome: "https://www.google.com/chrome/",
+};
+
 const firstErrorUrl = computed(() => {
   const text = browserInstallError.value;
   const idx = text.indexOf("https://");
@@ -48,11 +54,6 @@ onMounted(async () => {
   browserLoading.value = false;
   await config.fetchPureMode();
 });
-
-const OFFICIAL_URL: Record<string, string> = {
-  msedge: "https://www.microsoft.com/edge/download",
-  chrome: "https://www.google.com/chrome/",
-};
 
 /** 浏览器卡片点击分派：已安装→选为当前浏览器；未安装→Playwright 可装的走安装，否则提示去官网下载 */
 function handleBrowserClick(b: typeof browsers.value[0]) {

@@ -12,6 +12,7 @@ import { frontendLogger } from "../utils/logger";
 import { downloadBlob, pickFile } from "../utils/file";
 import { useBusyIds } from "../utils/guards";
 import { useTaskDirectory } from "./useTaskDirectory";
+import { useDirtySnapshot } from "./useDirtySnapshot";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 
@@ -109,52 +110,26 @@ function detectDangerousSteps(config: { steps?: Array<Record<string, unknown>> }
   return warnings;
 }
 
-// ---- 编辑器 dirty 快照（对齐 useProfiles 的快照模式）----
-// 记录打开编辑器时的原始快照，用于关闭/切换编辑目标时确认未保存改动
-let editingTaskSnapshot = "";
-
-/** 计算草稿的快照基准（JSON 全量序列化，草稿字段均为小体量标量） */
-function snapshotOf(draft: BrowserTaskDraft | null): string {
-  return draft ? JSON.stringify(draft) : "";
-}
-
-/** 统一的草稿写入入口：赋值并同步刷新 dirty 基准快照。 */
-function setTaskDraft(draft: BrowserTaskDraft): void {
-  editingTask.value = draft;
-  editingTaskSnapshot = snapshotOf(draft);
-}
-
-/** 当前编辑器是否有未保存改动。 */
-function isTaskDirty(): boolean {
-  return editingTask.value !== null && snapshotOf(editingTask.value) !== editingTaskSnapshot;
-}
-
-/**
- * 若存在未保存改动，弹窗确认是否放弃；无改动则直接放行。
- * 返回 true 才允许继续（放弃修改）；false（用户取消）与 null（被新对话框抢占）
- * 一律不放行——保留现状、不丢弃数据（A10 语义：被抢占≠用户放弃）。
- */
-async function confirmDiscardTaskIfDirty(): Promise<boolean | null> {
-  if (!isTaskDirty()) return true;
-  return confirm({
-    title: "放弃未保存的修改",
-    message: "当前任务有未保存的修改，确定放弃吗？",
-    danger: true,
-  });
-}
+// ---- 编辑器 dirty 快照：通用实现见 useDirtySnapshot（原为对齐 useProfiles 的逐字重复实现）----
+const {
+  setDraft: setTaskDraft,
+  isDirty: isTaskDirty,
+  confirmDiscardIfDirty: confirmDiscardTaskIfDirty,
+  resetSnapshot: resetTaskSnapshot,
+} = useDirtySnapshot(editingTask, { entityName: "任务" });
 
 /** 关闭任务编辑器（带 dirty 确认）。 */
 async function closeTaskEditor(): Promise<void> {
   if (!(await confirmDiscardTaskIfDirty())) return;
   editingTask.value = null;
-  editingTaskSnapshot = "";
+  resetTaskSnapshot();
   jsonError.value = "";
 }
 
 /** 清空草稿（保存成功等无需确认的场景）。 */
 function clearTaskDraft(): void {
   editingTask.value = null;
-  editingTaskSnapshot = "";
+  resetTaskSnapshot();
   jsonError.value = "";
 }
 

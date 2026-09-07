@@ -240,7 +240,8 @@ function extractMsg(data: unknown, fallback: string): string {
 }
 
 /** 剥离登录失败消息末尾附加的"截图: /logs/..."提示路径（对用户是噪音，日志面板里仍可看到）。
- *  正则与后端消息格式耦合：后端修改截图提示的括号样式或路径前缀时必须同步此处。 */
+ *  正则与后端消息格式耦合：后端修改截图提示的括号样式或路径前缀时必须同步此处。
+ *  注意：DashboardView.vue 另有针对"截图已保存：路径"格式的独立剥离实现——两套正则对应不同时代的后端文案，合并前先确认消息来源已统一。 */
 function stripScreenshotHint(message: string): string {
   const text = String(message || "");
   return text

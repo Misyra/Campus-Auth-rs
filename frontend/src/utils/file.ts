@@ -36,13 +36,6 @@ export function pickFile(accept = ""): Promise<File | null> {
     };
     window.addEventListener("focus", onFocus, { once: true });
     input.click();
-    // 兜底：若浏览器不支持 oncancel 且 focus 未触发（如非用户手势），超时后清理
-    setTimeout(() => {
-      if (!done && !input.files?.length && document.hasFocus()) {
-        // 已有焦点但无文件，说明对话框已关闭且未选择
-        // 由 focus 监听兜底，此处不再额外处理，避免重复 resolve
-      }
-    }, 2000);
   });
 }
 

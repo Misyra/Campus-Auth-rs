@@ -37,6 +37,11 @@ export function formatTimestamp(ts: string): string {
   return (ts || "").replace("T", " ").substring(0, 19);
 }
 
+/** 当前 UTC 时间 → 文件名安全时间戳 YYYYMMDDHHmmss（取 ISO 串前 19 位再去掉分隔符，供导出文件命名） */
+export function fileStamp(): string {
+  return new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+}
+
 /** ISO 时间戳 → "MM-DD HH:mm"（统计卡等紧凑场景，避免换行） */
 export function formatShortTime(ts: string): string {
   const full = formatTimestamp(ts);

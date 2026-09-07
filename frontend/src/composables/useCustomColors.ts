@@ -13,22 +13,10 @@ import {
   LIGHT_BG_COLORS,
 } from "../utils/constants";
 import type { Appearance, CustomColors } from "../utils/appearance-types";
-import { frontendLogger } from "../utils/logger";
+import { loadStored } from "../utils/storage";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 import { useAppearance } from "./useAppearance";
-
-function loadStored<T>(key: string, fallback: T): T {
-  const saved = localStorage.getItem(key);
-  if (!saved) return fallback;
-  try {
-    return { ...(fallback as object), ...JSON.parse(saved) } as T;
-  } catch (error) {
-    frontendLogger.debug("appearance", "本地外观配置损坏，已重置", error);
-    localStorage.removeItem(key);
-    return fallback;
-  }
-}
 
 const customColors = reactive<CustomColors>(
   loadStored<CustomColors>("appearance.custom_colors", {
@@ -42,6 +30,14 @@ const customColors = reactive<CustomColors>(
 function saveStoredColors(): void {
   localStorage.setItem("appearance.custom_colors", JSON.stringify(customColors));
 }
+
+/** 自定义颜色类型 → Appearance 上的当前色字段：removeCustomColor 回落默认值与 onCustomColorPicked 应用新色共用一份映射 */
+const COLOR_TYPE_TO_APPEARANCE_FIELD: Record<keyof CustomColors, keyof Appearance> = {
+  accent: "accent_color",
+  bg: "background_color",
+  sidebar: "sidebar_color",
+  sidebar_accent: "sidebar_accent",
+};
 
 watch(customColors, () => {
   saveStoredColors();
@@ -71,14 +67,7 @@ function removeCustomColor(type: keyof CustomColors, hex: string): void {
   customColors[type].splice(idx, 1);
   saveStoredColors();
   const { appearance } = useAppearance();
-  const defaultKey =
-    type === "accent"
-      ? "accent_color"
-      : type === "bg"
-        ? "background_color"
-        : type === "sidebar"
-          ? "sidebar_color"
-          : "sidebar_accent";
+  const defaultKey = COLOR_TYPE_TO_APPEARANCE_FIELD[type];
   if (String(appearance[defaultKey as keyof Appearance] || "").toLowerCase() === hex.toLowerCase()) {
     (appearance as Record<string, unknown>)[defaultKey] = DEFAULT_APPEARANCE[defaultKey as keyof Appearance];
   }
@@ -95,13 +84,7 @@ function onCustomColorPicked(type: keyof CustomColors, event: Event): void {
   const hex = (event.target as HTMLInputElement).value;
   addCustomColor(type, hex);
   const { appearance } = useAppearance();
-  const fieldMap: Record<string, keyof Appearance> = {
-    accent: "accent_color",
-    bg: "background_color",
-    sidebar: "sidebar_color",
-    sidebar_accent: "sidebar_accent",
-  };
-  (appearance as Record<string, unknown>)[fieldMap[type]] = hex;
+  (appearance as Record<string, unknown>)[COLOR_TYPE_TO_APPEARANCE_FIELD[type]] = hex;
   (event.target as HTMLInputElement).value = "#000000";
 }
 

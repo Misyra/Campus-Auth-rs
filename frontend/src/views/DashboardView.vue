@@ -104,7 +104,8 @@ const logSourceOptions = computed<SelectOption[]>(() => {
   return Array.from(options, ([value, label]) => ({ value, label }));
 });
 
-/** 剥离登录消息中的"截图已保存：..."提示（正文展示用），正则与后端消息文案耦合 */
+/** 剥离登录消息中的"截图已保存：..."提示（正文展示用），正则与后端消息文案耦合。
+ *  注意：useUi.ts 另有针对"截图: /logs/..."格式的独立剥离实现——两套正则对应不同时代的后端文案，合并前先确认消息来源已统一。 */
 function stripScreenshotHint(msg: string): string {
   return (msg || "").replace(/截图已保存[：:]\s*[^\s]*/g, "").trim();
 }

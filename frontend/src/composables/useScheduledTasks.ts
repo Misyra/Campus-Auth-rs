@@ -9,7 +9,7 @@ import { scheduledTasksApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { createFetchGuard, createFirstFailNotifier, useBusyIds } from "../utils/guards";
-import { formatScheduleTime, formatTimeValue } from "../utils/formatters";
+import { formatScheduleTime } from "../utils/formatters";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 
@@ -312,8 +312,8 @@ export function useScheduledTasks() {
     runScheduledTask,
     loadScheduledTaskHistory,
     closeScheduledTaskHistory,
+    // formatTimeValue 不再经此转发：无视图消费，测试直接引用 utils/formatters
     formatScheduleTime,
-    formatTimeValue,
     formatTaskType,
     onTimeChange,
   };
