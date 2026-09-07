@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 外观设置页：主题/卡片/侧栏样式、背景图与自定义颜色 */
 import IconApp from "@/components/common/IconApp.vue";
 import Modal from "@/components/common/Modal.vue";
 import { useAppearance } from "@/composables/useAppearance";

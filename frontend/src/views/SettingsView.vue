@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 设置页骨架：标签导航与保存栏等公共交互，具体表单由 settings-* 子页渲染 */
 import IconApp from "@/components/common/IconApp.vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";

@@ -93,6 +93,7 @@ async function executeTask(taskId: string): Promise<void> {
   }
 }
 
+/** 扫描任务步骤中的危险类型（执行 JS 类），产出保存前确认用的警告列表（代码截断防刷屏） */
 function detectDangerousSteps(config: { steps?: Array<Record<string, unknown>> }): DangerStep[] {
   const steps = config.steps || [];
   const warnings: DangerStep[] = [];
@@ -271,6 +272,10 @@ async function showTaskEditor(taskId?: string): Promise<void> {
   }
 }
 
+/**
+ * 元信息 → JSON 单向同步：把编辑器上方的 name/description 输入框写回 JSON 文本。
+ * 方向易混淆：本函数是"表单覆盖 JSON"，与 syncJsonToMeta 相反；JSON 无效时静默跳过。
+ */
 function syncMetaToJson(): void {
   if (!editingTask.value) return;
   try {
@@ -284,6 +289,10 @@ function syncMetaToJson(): void {
   }
 }
 
+/**
+ * JSON → 元信息单向同步：从 JSON 文本读出 name/description 回填上方输入框。
+ * 方向与 syncMetaToJson 相反（"JSON 覆盖表单"）；仅回填 JSON 中显式存在的键，JSON 无效时静默跳过。
+ */
 function syncJsonToMeta(): void {
   if (!editingTask.value) return;
   try {
@@ -316,6 +325,7 @@ async function loadTemplate(templateId: string): Promise<void> {
   }
 }
 
+/** 校验编辑器 JSON 文本语法，仅刷新 jsonError 提示，不改写内容 */
 function validateJson(): void {
   if (!editingTask.value || !editingTask.value.json.trim()) {
     jsonError.value = "";
@@ -329,6 +339,7 @@ function validateJson(): void {
   }
 }
 
+/** 格式化编辑器 JSON 文本（2 空格缩进）；语法错误时提示且不改写原文 */
 function formatJson(): void {
   if (!editingTask.value) return;
   try {

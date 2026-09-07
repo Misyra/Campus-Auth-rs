@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 设置 · 检测页：检测与重试、暂停时段及网络检测方式配置 */
 import IconApp from "@/components/common/IconApp.vue";
 import { computed } from "vue";
 import { useConfig } from "@/composables/useConfig";

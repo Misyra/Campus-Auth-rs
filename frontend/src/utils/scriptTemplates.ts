@@ -1,4 +1,4 @@
-/** Python script templates must only rely on the Python standard library. */
+/** Python 脚本模板只允许依赖 Python 标准库（用户环境未声明任何第三方包）。 */
 export const NEW_SCRIPT_STUB = `#!/usr/bin/env python3
 """自定义登录脚本"""
 

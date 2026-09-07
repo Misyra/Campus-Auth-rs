@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 设置 · 环境页：Python 环境初始化、OCR 依赖安装与验证码识别测试 */
 import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted, onActivated, onUnmounted } from "vue";
 import { useStatus } from "@/composables/useStatus";
@@ -67,6 +68,8 @@ onUnmounted(() => {
   if (ocrImagePreview.value) URL.revokeObjectURL(ocrImagePreview.value);
 });
 
+/** 安装后持续轮询 OCR 状态直到就绪：1.5s 间隔、5 分钟兜底截止（后端安装超时靠此收敛）；
+ *  页面卸载（ocrPollStopped）即停止轮询，单次失败不中断（网络抖动忽略继续下一轮）。 */
 async function refreshOcrUntilInstalled(): Promise<boolean> {
   const deadline = Date.now() + 5 * 60 * 1000;
   while (Date.now() < deadline) {

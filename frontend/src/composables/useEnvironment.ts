@@ -15,6 +15,7 @@ const envStatus = ref<EnvironmentStatus | null>(null);
 const envLoading = ref(false);
 const envError = ref<string | null>(null);
 
+/** 拉取环境安装状态（uv/venv/Playwright/OCR 能力就绪度），失败仅置错误标记不打断页面 */
 async function refreshEnv(): Promise<void> {
   envLoading.value = true;
   envError.value = null;
@@ -29,6 +30,7 @@ async function refreshEnv(): Promise<void> {
   }
 }
 
+/** 触发后端环境初始化（同步等待完成）；结果经 toast 提示，toast 不可用时降级为 notify 通知 */
 async function bootstrapEnv(): Promise<boolean> {
   const { busy } = useStatus();
   if (busy.env) return false;

@@ -17,6 +17,7 @@ const bgLightbox = reactive({ visible: false });
 
 const { toastOnly } = useToast();
 
+/** 本地选图并上传：超过上限直接拒绝（避免大图塞进用户数据目录），成功后立即应用 */
 async function selectBackgroundImage(): Promise<void> {
   const file = await pickFile("image/*");
   if (!file) return;
@@ -41,6 +42,7 @@ async function selectBackgroundImage(): Promise<void> {
   }
 }
 
+/** 打开随机壁纸弹窗，预填上次使用的壁纸 API 地址（首次回落默认源） */
 function openRandomWallpaperDialog(): void {
   const { appearance } = useAppearance();
   randomWallpaperDialog.url = appearance.wallpaper_api_url || "https://t.alcy.cc/pc";
@@ -48,10 +50,16 @@ function openRandomWallpaperDialog(): void {
   randomWallpaperDialog.visible = true;
 }
 
+/** 关闭随机壁纸弹窗（不清理 URL，保留用户输入便于重试） */
 function closeRandomWallpaperDialog(): void {
   randomWallpaperDialog.visible = false;
 }
 
+/**
+ * 确认下载随机壁纸并设为背景。
+ * 提交前先做 URL 构造校验：该地址会交给后端发起出网请求，格式非法的输入
+ * 在前端拦截可避免一次注定失败的后端往返，也能防止把任意乱串持久化进配置。
+ */
 async function confirmRandomWallpaper(): Promise<void> {
   const url = randomWallpaperDialog.url.trim();
   if (!url) {
@@ -86,6 +94,7 @@ async function confirmRandomWallpaper(): Promise<void> {
   }
 }
 
+/** 清除背景：先删除后端已落盘的文件（失败不阻断，仅记日志），再清空本地字段 */
 async function clearBackgroundImage(): Promise<void> {
   const { appearance, applyAppearance } = useAppearance();
   if (appearance.background_filename) {
@@ -101,9 +110,11 @@ async function clearBackgroundImage(): Promise<void> {
   applyAppearance();
 }
 
+/** 打开背景图放大预览 */
 function openBgLightbox(): void {
   bgLightbox.visible = true;
 }
+/** 关闭背景图放大预览 */
 function closeBgLightbox(): void {
   bgLightbox.visible = false;
 }

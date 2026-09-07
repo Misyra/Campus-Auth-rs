@@ -47,6 +47,7 @@ watch(customColors, () => {
   saveStoredColors();
 }, { deep: true });
 
+/** 新增自定义颜色：与系统色及已有自定义色去重（大小写不敏感），避免列表出现等值重复项 */
 function addCustomColor(type: keyof CustomColors, hex: string): void {
   if (!hex || !DEFAULT_CUSTOM_COLORS.hasOwnProperty(type)) return;
   const lower = hex.toLowerCase();
@@ -62,6 +63,7 @@ function addCustomColor(type: keyof CustomColors, hex: string): void {
   saveStoredColors();
 }
 
+/** 删除自定义颜色；若当前正在使用该色则一并回落到默认值，避免界面残留已删除的色值 */
 function removeCustomColor(type: keyof CustomColors, hex: string): void {
   if (!DEFAULT_CUSTOM_COLORS.hasOwnProperty(type)) return;
   const idx = customColors[type].findIndex((c) => c.toLowerCase() === hex.toLowerCase());
@@ -82,11 +84,13 @@ function removeCustomColor(type: keyof CustomColors, hex: string): void {
   }
 }
 
+/** 触发对应类型的隐藏取色器（原生 input[type=color]），保持模板零侵入 */
 function pickCustomColor(type: keyof CustomColors): void {
   const input = document.querySelector<HTMLInputElement>(`input[data-color-picker="${type}"]`);
   input?.click();
 }
 
+/** 取色器选中回调：入库自定义色并立即应用为当前色；随后清空 input 便于再次取同色也能触发 change */
 function onCustomColorPicked(type: keyof CustomColors, event: Event): void {
   const hex = (event.target as HTMLInputElement).value;
   addCustomColor(type, hex);
@@ -101,6 +105,7 @@ function onCustomColorPicked(type: keyof CustomColors, event: Event): void {
   (event.target as HTMLInputElement).value = "#000000";
 }
 
+/** 长按生效后的删除确认（移动端无右键/悬停，长按是唯一的删除入口） */
 function onColorLongPress(type: keyof CustomColors, hex: string): void {
   const { confirm } = useConfirm();
   void confirm({
@@ -111,6 +116,10 @@ function onColorLongPress(type: keyof CustomColors, hex: string): void {
   });
 }
 
+/**
+ * 触摸长按入口：按住 600ms 不松开（也不滑动）才视为长按，触发删除确认。
+ * 松开或滑动即取消计时器——600ms 阈值用于区分"点击选色"与"长按删除"两种手势。
+ */
 function startLongPress(type: keyof CustomColors, hex: string, event: TouchEvent): void {
   event.preventDefault();
   const target = event.target as EventTarget;
@@ -124,6 +133,7 @@ function startLongPress(type: keyof CustomColors, hex: string, event: TouchEvent
   target.addEventListener("touchmove", cancel);
 }
 
+/** 拼装选色列表：系统色在前、自定义色在后；背景色按当前有效主题取深/浅色板 */
 function getColorList(type: keyof CustomColors): { value: string; label: string; custom?: boolean }[] {
   let systemColors: { value: string; label: string }[] = [];
   if (type === "bg") {

@@ -104,13 +104,16 @@ const logSourceOptions = computed<SelectOption[]>(() => {
   return Array.from(options, ([value, label]) => ({ value, label }));
 });
 
+/** 剥离登录消息中的"截图已保存：..."提示（正文展示用），正则与后端消息文案耦合 */
 function stripScreenshotHint(msg: string): string {
   return (msg || "").replace(/截图已保存[：:]\s*[^\s]*/g, "").trim();
 }
+/** 从消息中提取截图路径（供"查看截图"入口用），与 stripScreenshotHint 同源文案 */
 function extractScreenshotUrl(msg: string): string | null {
   const m = (msg || "").match(/截图已保存[：:]\s*([^\s]+)/);
   return m ? m[1] : null;
 }
+/** 新标签页打开截图；noopener 防止新页面拿到本页引用 */
 function openFullscreen(url: string) { window.open(url, "_blank", "noopener,noreferrer"); }
 </script>
 

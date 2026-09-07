@@ -41,6 +41,7 @@ watch(appearance, () => {
   saveStoredAppearance();
 }, { deep: true });
 
+/** 解析有效主题：theme=auto 时按系统深浅色偏好实时判定，其余直接返回设定值 */
 function getEffectiveTheme(): "light" | "dark" {
   const themeMode = appearance.theme || "light";
   if (themeMode === "auto") {
@@ -170,6 +171,11 @@ function applyAppearance(): void {
   }
 }
 
+/**
+ * 将指定卡片的字段整体恢复为默认值（背景卡额外删除后端已上传的图片文件）。
+ * 字段归属表与 cardDirty 的判定表是同一份口径的两处拷贝：新增外观字段时两处必须同步，
+ * 否则会出现"重置漏字段"或"脏判定漏字段"的不一致。
+ */
 function resetCard(cardKey: "background" | "theme" | "card" | "sidebar"): void {
   const fields: Record<string, string[]> = {
     background: ["background_url", "background_filename", "wallpaper_api_url", "background_blur", "background_opacity", "backdrop_filter", "card_blur"],
@@ -188,6 +194,11 @@ function resetCard(cardKey: "background" | "theme" | "card" | "sidebar"): void {
   toastOnly(true, "已恢复默认");
 }
 
+/**
+ * 判断指定卡片是否偏离默认值（用于"恢复默认"按钮的可用态/高亮）。
+ * 判定表是 resetCard 字段表的子集（background_filename 等派生字段不参与脏判定）：
+ * 两表需交叉对照维护，新增外观字段时两处必须同步。
+ */
 function cardDirty(cardKey: "background" | "theme" | "card" | "sidebar"): boolean {
   const fields: Record<string, string[]> = {
     background: ["background_url", "background_blur", "background_opacity", "backdrop_filter", "card_blur"],
@@ -200,6 +211,7 @@ function cardDirty(cardKey: "background" | "theme" | "card" | "sidebar"): boolea
   );
 }
 
+/** 仅恢复默认背景色（不动背景图等其他字段），供主题卡内独立按钮使用 */
 function resetThemeBackground(): void {
   appearance.background_color = "";
   applyAppearance();

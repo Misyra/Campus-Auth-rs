@@ -14,6 +14,7 @@ const pythonStatus = ref("未知");
 const platform = ref("");
 const autostartEnabled = ref(false);
 
+/** 并行拉取版本/自启动/环境状态渲染"关于"页信息；任一失败仅降级为默认占位 */
 async function loadInfo() {
   try {
     const [health, auto, init] = await Promise.all([
@@ -42,6 +43,7 @@ const uninstallDone = ref(false);
 const uninstallResults = ref<UninstallStepResult[]>([]);
 const uninstallMessage = ref("");
 
+/** 打开卸载弹窗：detect→run 两段式的第一段——仅探测可清理项并重置上次结果，不执行任何删除 */
 async function openUninstall() {
   uninstallOpen.value = true;
   uninstallDetecting.value = true;
@@ -58,6 +60,8 @@ async function openUninstall() {
   }
 }
 
+/** 两段式第二段：detect→run。卸载不可恢复（删用户数据/自启动/浏览器缓存），
+ *  故执行前再经确认弹窗兜底；运行中弹窗不可关闭（closeUninstall 拦截）。 */
 async function runUninstall() {
   const ok = await confirm({
     title: "确认卸载清理",

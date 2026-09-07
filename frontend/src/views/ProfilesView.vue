@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 认证方案页：方案列表与编辑器、门户地址探测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useProfiles } from "@/composables/useProfiles";

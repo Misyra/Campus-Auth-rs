@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 设置 · 网络页：监听端口与代理、自动更新通道及数据维护操作 */
 import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";

@@ -34,6 +34,7 @@ const filteredRepoTasks = computed(() => {
 
 const { toastOnly } = useToast();
 
+/** 切换仓库源并回填对应预设索引地址（自定义源保留用户手输的 URL） */
 function selectRepoSource(source: "github" | "gitee" | "custom") {
   repoImport.value.source = source;
   if (source === "github") {
@@ -43,6 +44,7 @@ function selectRepoSource(source: "github" | "gitee" | "custom") {
   }
 }
 
+/** 打开导入弹窗并复位上次残留的搜索词/列表/错误，避免旧内容闪现 */
 function showRepoImport() {
   repoImport.value.visible = true;
   repoImport.value.error = "";
@@ -52,10 +54,12 @@ function showRepoImport() {
   repoImport.value.disclaimer = null;
 }
 
+/** 关闭导入弹窗（不清理状态，下次打开时由 showRepoImport 统一复位） */
 function closeRepoImport() {
   repoImport.value.visible = false;
 }
 
+/** 按当前输入的索引地址拉取远程任务列表；结果非数组或为空视为失败而非清空展示 */
 async function fetchRepoIndex() {
   const url = repoImport.value.url.trim();
   if (!url) {
@@ -82,14 +86,17 @@ async function fetchRepoIndex() {
   }
 }
 
+/** 确认导入某任务：仅记录待确认项并展示免责声明，实际导入由 acceptRepoDisclaimer 完成 */
 function confirmRepoImport(task: RepoTask) {
   repoImport.value.disclaimer = task;
 }
 
+/** 取消免责声明，回到任务列表继续浏览 */
 function cancelRepoDisclaimer() {
   repoImport.value.disclaimer = null;
 }
 
+/** 接受免责声明并执行导入：下载任务 JSON → dirty 确认 → 写入编辑器草稿（保存仍由用户手动触发） */
 async function acceptRepoDisclaimer() {
   const task = repoImport.value.disclaimer;
   repoImport.value.disclaimer = null;
@@ -105,6 +112,7 @@ async function acceptRepoDisclaimer() {
     // 编辑器草稿保护：与其他打开/替换草稿的路径一致，先经 dirty 确认，
     // 否则仓库导入会静默覆盖未保存的修改
     if (!(await tasks.confirmDiscardTaskIfDirty())) {
+      // 用户放弃丢弃草稿：恢复免责声明，让弹窗停留在确认页而非静默关闭
       repoImport.value.disclaimer = task;
       return;
     }

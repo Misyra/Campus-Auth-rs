@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 设置 · 浏览器页：浏览器选择与安装、会话保持及反检测等浏览器行为配置 */
 import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
@@ -52,6 +53,7 @@ const OFFICIAL_URL: Record<string, string> = {
   chrome: "https://www.google.com/chrome/",
 };
 
+/** 浏览器卡片点击分派：已安装→选为当前浏览器；未安装→Playwright 可装的走安装，否则提示去官网下载 */
 function handleBrowserClick(b: typeof browsers.value[0]) {
   if (!b.installed) {
     if (playwrightInstallable.has(b.channel)) {
@@ -72,6 +74,8 @@ function handleBrowserClick(b: typeof browsers.value[0]) {
   config.config.browser.browser_channel = b.channel;
 }
 
+/** 经 Playwright 安装指定 channel：装完重查列表；装完却未检测到（后端探测失败）与
+ *  安装请求失败分两路提示，前者建议查日志重试，后者直接展示后端错误消息 */
 async function installPlaywright(channel: string) {
   if (installingBrowser.value) return;
   installingBrowser.value = channel;
@@ -101,6 +105,7 @@ async function loadDefaultStealthScript() {
 
 const pureMode = config.pureMode;
 async function togglePureMode() { await config.togglePureMode(); }
+/** 手动停止 Python Worker 子进程（释放内存/解除浏览器占用）；失败仅记日志，不影响页面状态 */
 async function stopBrowser() {
   stoppingBrowser.value = true;
   try { await workerApi.stop(); } catch (e) { frontendLogger.warn("browser", "停止 Worker 失败", e as Error); }

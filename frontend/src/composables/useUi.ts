@@ -215,6 +215,7 @@ async function quitApp(): Promise<void> {
   }
 }
 
+/** 渲染"已安全退出"全屏遮罩：后端已关闭、WS 断开，前端不再有任何可用交互，只能关页 */
 function showExitOverlay(): void {
   const overlay = document.createElement("div");
   overlay.className = "exit-overlay";
@@ -238,6 +239,8 @@ function extractMsg(data: unknown, fallback: string): string {
   return fallback;
 }
 
+/** 剥离登录失败消息末尾附加的"截图: /logs/..."提示路径（对用户是噪音，日志面板里仍可看到）。
+ *  正则与后端消息格式耦合：后端修改截图提示的括号样式或路径前缀时必须同步此处。 */
 function stripScreenshotHint(message: string): string {
   const text = String(message || "");
   return text

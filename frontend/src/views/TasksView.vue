@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 任务页：浏览器任务的增删改查、立即执行、仓库导入与拖拽排序 */
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted } from "vue";
 import { useTasks } from "@/composables/useTasks";

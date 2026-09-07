@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 定时任务页：cron 调度计划的增删改查与启停 */
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted } from "vue";
 import { useScheduledTasks } from "@/composables/useScheduledTasks";

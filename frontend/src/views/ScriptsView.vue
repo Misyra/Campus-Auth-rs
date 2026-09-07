@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 自定义脚本页：脚本列表、编辑器、运行与导入导出 */
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted } from "vue";
 import { useScripts } from "@/composables/useScripts";
