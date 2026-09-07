@@ -9,6 +9,7 @@
 #   dist/
 #   ├── campus-auth(.exe)            # 主程序（前端已嵌入）
 #   ├── campus-auth-helper(.exe)     # 更新替换助手
+#   ├── LICENSE                     # AGPL-3.0-only 全文（二进制分发必备）
 #   ├── Dockerfile                   # Docker 构建文件
 #   ├── docker-compose.yml           # Docker 编排
 #   ├── .dockerignore                # Docker 上下文排除
@@ -99,7 +100,8 @@ foreach ($d in @(".pytest_cache", ".tmp-uv-cache", ".mypy_cache", ".ruff_cache",
 Get-ChildItem $workerDst -Recurse -File -Filter "*.pyc" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # Docker 部署文件（与 release.yml 口径一致）
-foreach ($f in @("Dockerfile", "docker-compose.yml", ".dockerignore", "README.md")) {
+# LICENSE 随包：AGPL §6 二进制分发需附带许可证文本
+foreach ($f in @("LICENSE", "Dockerfile", "docker-compose.yml", ".dockerignore", "README.md")) {
     $src = Join-Path $Root $f
     if (Test-Path $src) { Copy-Item $src $Out -Force }
 }

@@ -6,7 +6,7 @@ rust-version = "1.85"
 default-run = "campus-auth"
 description = "校园网自动认证工具 — Rust 重写版"
 authors = ["Misyra"]
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [[bin]]
 name = "campus-auth"

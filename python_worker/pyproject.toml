@@ -3,6 +3,7 @@ name = "campus-auth-worker"
 version = "5.0.0-alpha.8"
 description = "Campus-Auth 浏览器自动化 Python Worker（NDJSON IPC 子进程）"
 readme = "README.md"
+license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.12,<3.13"
 dependencies = [
     # 上界防未来大版本静默破坏（press_sequentially/CDP snapshot 等行为面），

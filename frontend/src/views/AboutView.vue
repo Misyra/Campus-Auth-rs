@@ -156,7 +156,7 @@ function closeUninstall() {
             GitHub
           </a>
         </div>
-        <p>License: MIT</p>
+        <p>License: AGPL-3.0-only (<a href="https://github.com/Misyra/Campus-Auth-rs/blob/master/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>)</p>
         <p class="qq-group">QQ交流群：<strong>1105307735</strong></p>
         <p class="muted">Made with ❤️ for campus network users</p>
       </div>

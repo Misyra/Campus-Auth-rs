@@ -1197,7 +1197,7 @@
           Misyra/Campus-Auth
         </a>
         <span class="ca-footer-sep">·</span>
-        <span>MIT License</span>
+        <span>AGPL-3.0-only</span>
       </div>
     `;
     document.body.appendChild(state.panel);
