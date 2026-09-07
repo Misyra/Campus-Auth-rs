@@ -47,7 +47,7 @@ export const LOG_SOURCE_LABELS: Record<string, string> = {
   container: "容器",
   engine: "引擎",
   login: "登录",
-  monitor: "监测",
+  monitor: "检测",
   bridge: "Bridge",
   scheduler: "调度",
   web: "Web",
@@ -184,13 +184,14 @@ export const DEFAULT_CONFIG: Config = {
   },
 };
 
-/** 设置页 Tab 清单（SettingsView 消费的单一来源；hint 作为 Tab 的悬停提示） */
+/** 设置页 Tab 清单（SettingsView 消费的单一来源；hint 作为 Tab 的悬停提示，6 Tab 均衡版） */
 export const SETTINGS_TABS = [
   { id: "account", label: "账号", hint: "账号、密码、认证地址与运营商" },
-  { id: "monitor", label: "监测", hint: "在线检测、登录重试与暂停时段" },
-  { id: "system", label: "系统", hint: "启动行为、日志、端口与代理" },
+  { id: "monitor", label: "检测", hint: "在线检测、登录重试与暂停时段" },
   { id: "browser", label: "浏览器", hint: "浏览器选择、超时与反检测参数" },
-  { id: "tasks", label: "任务", hint: "任务录制器、OCR 与任务入口" },
+  { id: "environment", label: "环境", hint: "Python 环境、OCR 与会话保持" },
+  { id: "system", label: "系统", hint: "启动行为、日志与界面" },
+  { id: "network", label: "网络与更新", hint: "端口、代理、自动更新与维护" },
 ] as const;
 
 export const DEFAULT_APPEARANCE: Appearance = {

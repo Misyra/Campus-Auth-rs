@@ -1,59 +1,38 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
-import { computed, onMounted, ref, onActivated } from "vue";
+import { computed } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
-import { useEnvironment } from "@/composables/useEnvironment";
-import { autostartApi, configApi, systemApi } from "@/api";
-import type { UpdateState } from "@/api/types";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const config = useConfig();
 const { busy, autostart } = useStatus();
-const { envStatus, envLoading, envError, refreshEnv, bootstrapEnv } = useEnvironment();
 
-// 启动后动作选项
 const loginActionOptions: SelectOption[] = [
-  { value: "monitor", label: "开始监测" },
+  { value: "monitor", label: "开始检测" },
   { value: "login_once", label: "登录一次后退出" },
   { value: "none", label: "无操作" },
 ];
 const startupActionHint = computed(() => {
   switch (config.config.app_settings.startup_action) {
-    case "monitor": return "启动后开始持续监测，断线自动重连";
+    case "monitor": return "启动后开始持续检测，断线自动重连";
     case "login_once": return "启动后执行一次登录，成功后自动退出程序";
     default: return "启动后不执行任何操作";
   }
 });
 
-// 定时自重启间隔（小时）：CustomSelect 值为字符串，经 computed 与 number 字段互转
-const autoRestartOptions: SelectOption[] = [
-  { value: "0", label: "不启用" },
-  { value: "6", label: "每 6 小时" },
-  { value: "12", label: "每 12 小时" },
-  { value: "24", label: "每 24 小时" },
-  { value: "48", label: "每 48 小时" },
-  { value: "168", label: "每 168 小时（每周）" },
-];
-const autoRestartHours = computed<string>({
-  get: () => String(config.config.app_settings.auto_restart_hours ?? 0),
-  set: (v) => { config.config.app_settings.auto_restart_hours = Number(v); },
-});
-
-// 运行模式
 const autostartModeOptions: SelectOption[] = [
   { value: "full", label: "完整模式" },
   { value: "lightweight", label: "轻量模式" },
 ];
 const runtimeModeHint = computed(() =>
   config.config.app_settings.runtime_mode === "lightweight"
-    ? "仅运行后台监测，不启动 Web 控制台"
+    ? "仅运行后台检测，不启动 Web 控制台"
     : "保留 Web 控制台，可查看状态与手动操作",
 );
 
-// 日志级别
 const logLevelOptions: SelectOption[] = [
   { value: "TRACE", label: "TRACE" },
   { value: "DEBUG", label: "DEBUG" },
@@ -61,188 +40,10 @@ const logLevelOptions: SelectOption[] = [
   { value: "WARN", label: "WARN" },
   { value: "ERROR", label: "ERROR" },
 ];
-
-// Python 环境卡片
-onMounted(() => { void refreshEnv(); void refreshUpdateState(); });
-onActivated(() => { void refreshEnv(); });
-
-const envReady = computed(() => Boolean(envStatus.value?.capability_ready));
-const envStageLabel = computed(() => {
-  const s = envStatus.value?.stage;
-  if (!s || s === "Done" || s === "Idle") return "";
-  const map: Record<string, string> = {
-    DownloadingUv: "下载 uv",
-    SyncingVenv: "同步虚拟环境",
-    InstallingPlaywright: "安装浏览器",
-    Error: "失败",
-  };
-  return map[s] ?? s;
-});
-
-// ---- 自动更新 ----
-// 检查频率与 check_interval_hours 双向映射：0=每次启动，24=每天，168=每周。
-// 存量非标准值（如 12/48）展示时向最近档位归一，改动保存后即规范化。
-const checkFrequencyOptions: SelectOption[] = [
-  { value: "0", label: "每次启动" },
-  { value: "24", label: "每天一次" },
-  { value: "168", label: "每周一次" },
-];
-const checkFrequency = computed<string>({
-  get: () => {
-    const h = config.config.updater.check_interval_hours ?? 24;
-    if (h <= 0) return "0";
-    return h < 168 ? "24" : "168";
-  },
-  set: (v) => { config.config.updater.check_interval_hours = Number(v); },
-});
-
-// 更新通道分段选项（value 与后端 UpdateChannel 的 serde 序列化一致）
-const channelOptions = [
-  { value: "stable", label: "正式版" },
-  { value: "prerelease", label: "测试版" },
-  { value: "all", label: "全通道最新版" },
-] as const;
-
-// 上次检查状态（GET /api/update-state，手动与自动检查共用一份记录，跨重启保留）
-const updateChecking = ref(false);
-const updateState = ref<UpdateState | null>(null);
-async function refreshUpdateState() {
-  try {
-    updateState.value = await systemApi.updateState();
-  } catch {
-    updateState.value = null;
-  }
-}
-const lastCheckLabel = computed(() => {
-  const s = updateState.value;
-  if (!s?.last_check_at) return "从未检查";
-  const d = new Date(s.last_check_at);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString();
-});
-const updateCheckHint = computed(() => {
-  const s = updateState.value;
-  if (!s) return "";
-  if (s.error) return `上次检查失败：${s.error}`;
-  if (s.has_update) return `发现新版本 v${s.latest_version}，请前往“关于”页更新`;
-  return s.latest_version ? `当前已是最新（远程 v${s.latest_version}）` : "";
-});
-// 手动立即检查：与“关于”页共用检查端点，完成后回读状态刷新时间与结果
-async function manualCheckUpdate() {
-  updateChecking.value = true;
-  try {
-    await systemApi.checkUpdate();
-  } catch {
-    // 检查失败时后端同样会记录错误态，由 updateState 回读展示
-  } finally {
-    updateChecking.value = false;
-    await refreshUpdateState();
-  }
-}
-
-// 配置热重载
-const reloading = ref(false);
-const reloadMsg = ref("");
-async function reloadConfig() {
-  reloading.value = true;
-  reloadMsg.value = "";
-  try {
-    await configApi.reload();
-    reloadMsg.value = "配置已重新加载";
-  } catch (e: unknown) {
-    reloadMsg.value = "重新加载失败：" + ((e as Error).message || "未知错误");
-  } finally {
-    reloading.value = false;
-  }
-}
 </script>
 
 <template>
   <div class="settings-panel-grid settings-panel-grid--cols2">
-    <!-- Python 环境（uv sync + Chromium）：状态行较宽，独占整行 -->
-    <section class="card settings-panel settings-panel--wide">
-      <div class="settings-card-header">
-        <IconApp name="terminal" class="settings-card-icon" />
-        <h2>Python 环境</h2>
-        <button
-          v-if="envReady"
-          class="btn btn-secondary btn-sm"
-          :disabled="busy.env"
-          @click="void bootstrapEnv()"
-          title="重新同步 Python 虚拟环境与浏览器"
-        >
-          <IconApp v-if="busy.env" name="refresh" class="spin" />
-          {{ busy.env ? "同步中..." : "重新同步" }}
-        </button>
-        <button
-          v-else
-          class="btn btn-primary btn-sm"
-          :disabled="busy.env"
-          @click="void bootstrapEnv()"
-          title="初始化 Python 虚拟环境（uv sync）"
-        >
-          <IconApp v-if="busy.env" name="refresh" class="spin" />
-          {{ busy.env ? "初始化中..." : "初始化 Python 环境" }}
-        </button>
-      </div>
-      <div class="card-body">
-        <p class="hint env-lead">
-          自动登录与 OCR 依赖该环境。首次使用需初始化一次（约 1–10 分钟），缺失时会自动补装。
-        </p>
-        <div class="env-status-row">
-          <span v-if="envLoading" class="hint">检测中…</span>
-          <template v-else-if="envError && !envStatus"> <span class="env-error">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
-          <template v-else>
-            <span v-if="envReady" class="env-pill env-pill--ok">已就绪</span>
-            <span v-else class="env-pill env-pill--warn">未就绪</span>
-            <span v-if="envStatus?.playwright_ready" class="env-pill">Chromium 已安装</span>
-            <span v-if="envStageLabel" class="env-pill">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
-          </template>
-        </div>
-        <p v-if="envStatus?.progress?.message" class="hint">{{ envStatus.progress.message }}</p>
-        <p v-if="envStatus?.last_error" class="hint env-error env-preline">{{ envStatus.last_error }}</p>
-        <p v-if="envError && envStatus" class="hint env-error">{{ envError }}</p>
-      </div>
-    </section>
-
-    <!-- 日志设置 -->
-    <section class="card settings-panel">
-      <div class="settings-card-header">
-        <IconApp name="file-text" class="settings-card-icon" />
-        <h2>日志设置</h2>
-      </div>
-      <div class="card-body settings-grid-2col">
-        <div>
-          <div class="form-row">
-            <div class="form-group">
-              <div class="field-label-row">
-                <label for="settings-log-retention">日志保留天数</label>
-                <FieldHelp text="日志和失败截图按天归档，超过设定天数自动清理。" />
-              </div>
-              <input id="settings-log-retention" v-model.number="config.config.logging.retention_days" type="number" min="1" max="365" />
-            </div>
-          </div>
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline">
-                <input type="checkbox" v-model="config.config.logging.file_enabled" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">启用文件日志</span>
-              </label>
-            </div>
-          </div>
-        </div>
-        <div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label>全局日志级别</label>
-              <FieldHelp text="低于该级别的日志将被过滤。选择后即时热更新。" />
-            </div>
-            <CustomSelect :model-value="config.config.logging.level" :options="logLevelOptions" @update:model-value="config.setLogLevel($event as string)" />
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- 启动与运行 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
@@ -251,18 +52,12 @@ async function reloadConfig() {
       </div>
       <div class="card-body">
         <div class="form-group">
-          <div class="field-label-row">
-            <label for="settings-startup-action">启动后执行</label>
-            <FieldHelp text="程序启动后自动执行的操作。" />
-          </div>
+          <div class="field-label-row"><label for="settings-startup-action">启动后执行</label><FieldHelp text="程序启动后自动执行的操作。" /></div>
           <CustomSelect v-model="config.config.app_settings.startup_action" :options="loginActionOptions" />
           <span class="hint">{{ startupActionHint }}</span>
         </div>
         <div class="form-group">
-          <div class="field-label-row">
-            <label>运行模式</label>
-            <FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台监测。切换后重启生效。" />
-          </div>
+          <div class="field-label-row"><label>运行模式</label><FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" /></div>
           <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
           <span class="hint">{{ runtimeModeHint }}</span>
         </div>
@@ -280,72 +75,36 @@ async function reloadConfig() {
       </div>
     </section>
 
-    <!-- 自动更新：内容较宽，独占整行拆两列（左列开关与频率 / 右列通道与检查状态） -->
-    <section class="card settings-panel settings-panel--wide">
+    <!-- 日志设置 -->
+    <section class="card settings-panel">
       <div class="settings-card-header">
-        <IconApp name="download" class="settings-card-icon" />
-        <h2>自动更新</h2>
+        <IconApp name="file-text" class="settings-card-icon" />
+        <h2>日志设置</h2>
       </div>
       <div class="card-body settings-grid-2col">
         <div>
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline">
-                <input type="checkbox" v-model="config.config.updater.auto_check_enabled" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">自动检查更新</span>
-              </label>
-              <FieldHelp text="关闭后不再自动检查更新，仅保留手动“立即检查”。保存后即时生效。" />
+          <div class="form-row">
+            <div class="form-group">
+              <div class="field-label-row"><label for="settings-log-retention">日志保留天数</label><FieldHelp text="日志和失败截图按天归档，超过设定天数自动清理。" /></div>
+              <input id="settings-log-retention" v-model.number="config.config.logging.retention_days" type="number" min="1" max="365" />
             </div>
           </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label>检查频率</label>
-              <FieldHelp text="每次启动：仅启动时检查一次；每天/每周：启动时先检查一次，之后按周期自动检查。" />
+          <div class="toggle-group">
+            <div class="toggle-with-help">
+              <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.logging.file_enabled" /><span class="toggle-slider"></span><span class="toggle-label">启用文件日志</span></label>
             </div>
-            <CustomSelect
-              v-model="checkFrequency"
-              :options="checkFrequencyOptions"
-              :disabled="!config.config.updater.auto_check_enabled"
-            />
           </div>
         </div>
         <div>
           <div class="form-group">
-            <div class="field-label-row">
-              <label>更新通道</label>
-              <FieldHelp text="正式版仅跟随稳定发布；测试版跟随预发布（alpha/beta）；全通道最新版取两者中更高者。" />
-            </div>
-            <div class="update-channel-segmented" role="group" aria-label="更新通道">
-              <button
-                v-for="opt in channelOptions"
-                :key="opt.value"
-                type="button"
-                :class="{ active: config.config.updater.channel === opt.value }"
-                @click="config.config.updater.channel = opt.value"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label>上次检查时间</label>
-              <FieldHelp text="记录最近一次手动或自动检查的结果，重启后保留。" />
-            </div>
-            <div class="update-check-row">
-              <button class="btn btn-secondary btn-sm" :disabled="updateChecking" @click="manualCheckUpdate">
-                <IconApp v-if="updateChecking" name="refresh" class="spin" />
-                {{ updateChecking ? "检查中..." : "立即检查" }}
-              </button>
-              <span v-if="lastCheckLabel" class="hint">{{ lastCheckLabel }}</span>
-            </div>
-            <span v-if="updateCheckHint" class="hint update-check-hint" :class="{ 'update-check-error': !!updateState?.error }">{{ updateCheckHint }}</span>
+            <div class="field-label-row"><label>全局日志级别</label><FieldHelp text="低于该级别的日志将被过滤。选择后即时热更新。" /></div>
+            <CustomSelect :model-value="config.config.logging.level" :options="logLevelOptions" @update:model-value="config.setLogLevel($event as string)" />
           </div>
         </div>
       </div>
     </section>
 
+    <!-- 占位均衡：日志设置较矮时由界面行为补齐，见 system.css -->
     <!-- 界面行为 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
@@ -355,101 +114,21 @@ async function reloadConfig() {
       <div class="card-body">
         <div class="toggle-group">
           <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline">
-              <input type="checkbox" v-model="config.config.app_settings.auto_start_browser" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">启动时打开控制台</span>
-            </label>
+            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.auto_start_browser" /><span class="toggle-slider"></span><span class="toggle-label">启动时打开控制台</span></label>
             <FieldHelp text="启用后，程序启动时自动打开 Web 控制台。" />
           </div>
         </div>
         <div class="toggle-group">
           <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline">
-              <input type="checkbox" v-model="config.config.app_settings.task_notification" />
-              <span class="toggle-label">任务通知</span>
-            </label>
+            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.task_notification" /><span class="toggle-label">任务通知</span></label>
             <FieldHelp text="关键事件完成时弹出系统通知。" />
           </div>
         </div>
         <div class="toggle-group">
           <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline">
-              <input type="checkbox" v-model="config.config.app_settings.show_tray" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">显示系统托盘图标</span>
-            </label>
+            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.show_tray" /><span class="toggle-slider"></span><span class="toggle-label">显示系统托盘图标</span></label>
             <FieldHelp text="关闭后无托盘图标，仅可通过 Web 控制台操作。修改后重启生效。" />
           </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 网络、端口与代理 -->
-    <section class="card settings-panel">
-      <div class="settings-card-header">
-        <IconApp name="globe" class="settings-card-icon" />
-        <h2>网络、端口与代理</h2>
-      </div>
-      <div class="card-body">
-        <div class="form-group">
-          <div class="field-label-row">
-            <label for="settings-app-port">控制台端口</label>
-            <FieldHelp text="Web 控制台的监听端口。修改后重启生效，默认 50721。" />
-          </div>
-          <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1024" max="65535" />
-          <span class="hint">本机访问地址一般为 http://127.0.0.1:端口</span>
-        </div>
-        <div class="toggle-group">
-          <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline">
-              <input type="checkbox" v-model="config.config.updater.use_proxy" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">使用代理下载更新</span>
-            </label>
-            <FieldHelp text="仅影响版本更新检查、下载与任务仓库。监测流量的代理设置见“监测”页。" />
-          </div>
-        </div>
-        <div class="form-group">
-          <div class="field-label-row">
-            <label for="settings-proxy-url">代理地址</label>
-            <FieldHelp text="完整的 HTTP 代理地址，如 http://127.0.0.1:7890。仅在启用后生效。" />
-          </div>
-          <input
-            id="settings-proxy-url"
-            v-model="config.config.updater.proxy_url"
-            type="text"
-            placeholder="http://127.0.0.1:7890"
-            spellcheck="false"
-            :disabled="!config.config.updater.use_proxy"
-          />
-        </div>
-      </div>
-    </section>
-
-    <!-- 维护操作：内容窄，独占整行避免右列空洞 -->
-    <section class="card settings-panel settings-panel--wide">
-      <div class="settings-card-header">
-        <IconApp name="sliders" class="settings-card-icon" />
-        <h2>维护操作</h2>
-      </div>
-      <div class="card-body">
-        <div class="form-group">
-          <div class="field-label-row">
-            <label for="settings-auto-restart">定时自重启</label>
-            <FieldHelp text="按运行时长周期性重启本程序，以回收内存。先启动新进程再退出旧进程，修改即时生效。" />
-          </div>
-          <CustomSelect v-model="autoRestartHours" :options="autoRestartOptions" />
-        </div>
-        <div class="form-group">
-          <div class="field-label-row">
-            <label>配置热重载</label>
-            <FieldHelp text="从磁盘重新读取配置文件并应用，无需重启。日常修改请使用下方的保存按钮。" />
-          </div>
-          <button class="btn btn-secondary btn-sm" @click="reloadConfig" :disabled="reloading">
-            {{ reloading ? "加载中..." : "重新加载配置" }}
-          </button>
-          <span v-if="reloadMsg" class="hint">{{ reloadMsg }}</span>
         </div>
       </div>
     </section>

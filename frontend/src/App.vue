@@ -41,7 +41,7 @@ onMounted(() => {
     <ToastNotification />
     <ConfirmDialog />
     <DebugPanel />
-    <!-- 仓库导入弹窗全局挂载：任意路由（/tasks 或 /settings/tasks）均可触发，避免局部挂载导致切页才弹的错位 -->
+    <!-- 仓库导入弹窗全局挂载：任意路由（/tasks 或 /settings/environment）均可触发，避免局部挂载导致切页才弹的错位 -->
     <RepoImportModals />
 
     <div v-if="state.isLoading" class="init-overlay">

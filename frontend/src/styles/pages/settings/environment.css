@@ -1,0 +1,36 @@
+/* environment.css — 环境页（Python + OCR + 验证码） */
+.environment-page .ocr-pick-row {
+  gap: 10px;
+}
+
+.environment-page .ocr-preview-wrap {
+  margin-top: 10px;
+}
+
+.environment-page .ocr-preview {
+  display: block;
+  max-width: 240px;
+  max-height: 140px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+  background: var(--bg-card);
+}
+
+.environment-page .ocr-recognize-btn {
+  margin-top: 10px;
+  width: 100%;
+  justify-content: center;
+}
+
+@media (min-width: 1080px) {
+  .environment-page.settings-panel-grid--cols2 > .settings-panel:not(.settings-panel--wide) {
+    display: flex;
+    flex-direction: column;
+  }
+  .environment-page.settings-panel-grid--cols2 > .settings-panel:not(.settings-panel--wide) .card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+}

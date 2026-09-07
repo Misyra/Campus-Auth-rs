@@ -214,7 +214,7 @@ onMounted(() => {
       <IconApp name="alert-triangle" class="icon-sm" />
       <span>
         当前功能仍在开发，可能不稳定。如果无法生成正确任务，请到
-        <router-link to="/settings/tasks">设置 → 任务</router-link>
+        <router-link to="/settings/environment">设置 → 环境</router-link>
         手动下载录制器，按照视频教程操作。
       </span>
     </div>

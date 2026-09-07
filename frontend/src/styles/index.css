@@ -33,6 +33,8 @@
 @import "./pages/settings/browser.css";
 @import "./pages/settings/system.css";
 @import "./pages/settings/tasks.css";
+@import "./pages/settings/environment.css";
+@import "./pages/settings/network.css";
 @import "./pages/profiles.css";
 @import "./pages/scheduled_tasks.css";
 @import "./pages/appearance.css";

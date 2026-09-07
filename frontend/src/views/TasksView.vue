@@ -157,6 +157,13 @@ function closeEditor() { void t.closeTaskEditor(); }
                 从仓库导入
               </button>
             </div>
+            <div class="help-tip">
+              <span>想自动生成步骤？可用 <b>任务录制器</b> 在登录页点选元素自动生成任务。</span>
+              <a href="/api/tools/task-recorder.user.js" class="btn btn-sm" title="下载录制器脚本">安装录制器</a>
+              <a href="/api/docs/task-writing-guide" target="_blank" class="btn btn-sm" title="查看编写指南">编写指南</a>
+              <router-link to="/ai-task" class="btn btn-sm" title="用 AI 描述生成任务">AI生成任务</router-link>
+            </div>
+            <p class="hint">OCR 相关设置已移至 <router-link to="/settings/environment">设置 · 环境</router-link>。</p>
             <h4>支持的步骤类型</h4>
             <ul>
               <li><code>input</code> - 输入文本</li>

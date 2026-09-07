@@ -2,7 +2,7 @@
 import IconApp from "@/components/common/IconApp.vue";
 import { ref } from "vue";
 import { systemApi, autostartApi, uninstallApi } from "@/api";
-import type { UninstallDetectItem, UninstallStepResult, UpdateInfo } from "@/api/types";
+import type { UninstallDetectItem, UninstallStepResult } from "@/api/types";
 import { useConfirm } from "@/composables/useConfirm";
 import { frontendLogger } from "@/utils/logger";
 
@@ -16,8 +16,6 @@ const autostartEnabled = ref(false);
 
 async function loadInfo() {
   try {
-    // /api/health 仅返回 status/version，不返回 python_version；
-    // Python 就绪状态改由 /api/init-status 的 environment.python_ready 推导
     const [health, auto, init] = await Promise.all([
       systemApi.health(),
       autostartApi.fetchStatus(),
@@ -33,58 +31,6 @@ async function loadInfo() {
   }
 }
 void loadInfo();
-
-// ---- 更新检查 ----
-const updateLoading = ref(false);
-const updating = ref(false);
-const updateInfo = ref<UpdateInfo | null>(null);
-
-async function checkUpdate() {
-  updateLoading.value = true;
-  updateInfo.value = null;
-  try {
-    updateInfo.value = await systemApi.checkUpdate();
-  } catch (e: unknown) {
-    updateInfo.value = { has_update: false, error: (e as Error).message || "检查失败" };
-  } finally {
-    updateLoading.value = false;
-  }
-}
-
-// 通过后台执行更新（下载并暂存，重启后生效）
-async function applyUpdate() {
-  updating.value = true;
-  try {
-    // 回传"检查更新"阶段已确认的版本，避免服务端重查导致下到与展示不一致的版本
-    const info = updateInfo.value;
-    const pin =
-      info?.latest && info.url && typeof info.sha256 === "string"
-        ? { version: info.latest, url: info.url, sha256: info.sha256 }
-        : undefined;
-    const data = await systemApi.update(pin);
-    updateInfo.value = {
-      has_update: false,
-      message: (data.message as string) || "更新已就绪，重启后生效",
-    };
-    // 更新已就绪，询问是否立即优雅关闭并重启（联动 Rust 侧优雅关闭接口）
-    const ok = await confirm({
-      title: "更新已就绪",
-      message: "更新已下载完成，是否立即重启应用以生效？",
-      confirmText: "立即重启",
-    });
-    if (ok) {
-      try {
-        await systemApi.shutdown();
-      } catch (e) {
-        updateInfo.value.message = "更新已就绪，但自动重启失败，请手动重启应用";
-      }
-    }
-  } catch (e: unknown) {
-    updateInfo.value = { has_update: false, error: (e as Error).message || "更新失败" };
-  } finally {
-    updating.value = false;
-  }
-}
 
 // ---- 卸载 ----
 const uninstallOpen = ref(false);
@@ -148,32 +94,6 @@ function closeUninstall() {
         <p class="about-subtitle">Campus Network Auth</p>
         <p class="version">Version {{ version }}</p>
         <p class="description">校园网自动认证工具</p>
-        <div class="update-section">
-          <button class="btn btn-secondary btn-sm" @click="checkUpdate" :disabled="updateLoading">
-            {{ updateLoading ? "检查中..." : "检查更新" }}
-          </button>
-          <div v-if="updateInfo && !updateInfo.error && !updateInfo.message" class="update-result">
-            <div v-if="updateInfo.has_update" class="update-available">
-              <IconApp name="upload" width="16" height="16" />
-              <span>发现新版本 <strong>v{{ updateInfo.latest }}</strong></span>
-              <button class="btn btn-primary btn-sm" @click="applyUpdate" :disabled="updating">
-                {{ updating ? "更新中..." : "立即更新" }}
-              </button>
-              <a :href="updateInfo.url" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm">前往下载</a>
-            </div>
-            <div v-else class="update-latest">
-              <IconApp name="check" width="16" height="16" />
-              <span>当前已是最新版本</span>
-            </div>
-          </div>
-          <div v-else-if="updateInfo && updateInfo.message" class="update-success">
-            <IconApp name="check" width="16" height="16" />
-            <span>{{ updateInfo.message }}，请重启程序生效</span>
-          </div>
-          <div v-else-if="updateInfo && updateInfo.error" class="update-error">
-            {{ updateInfo.error }}
-          </div>
-        </div>
       </div>
 
       <div class="about-grid">
@@ -199,7 +119,7 @@ function closeUninstall() {
             <ul class="feature-list">
               <li><IconApp name="check" />前后端分离架构</li>
               <li><IconApp name="check" />自动网络检测与登录</li>
-              <li><IconApp name="check" />实时日志与状态监控</li>
+              <li><IconApp name="check" />实时日志与状态检测</li>
               <li><IconApp name="check" />验证码 OCR 自动识别</li>
               <li><IconApp name="check" />开机自启动支持</li>
             </ul>
@@ -247,15 +167,12 @@ function closeUninstall() {
           <IconApp name="trash" width="20" height="20" />
           <div>
             <h3>卸载程序</h3>
-            <p class="uninstall-desc">
-              清理开机自启动、用户数据目录与 Playwright 浏览器缓存；完成后删除程序所在文件夹即可完成卸载。
-            </p>
+            <p class="uninstall-desc">清理开机自启动、用户数据目录与 Playwright 浏览器缓存；完成后删除程序所在文件夹即可完成卸载。</p>
           </div>
         </div>
         <button class="btn btn-danger-ghost btn-sm" @click="openUninstall">卸载</button>
       </div>
 
-      <!-- 卸载弹窗 -->
       <div v-if="uninstallOpen" class="uninstall-overlay" @click.self="closeUninstall">
         <div class="uninstall-modal">
           <div class="uninstall-modal-header">
@@ -280,18 +197,12 @@ function closeUninstall() {
                 </div>
                 <span class="uninstall-item-tag" :class="item.exists ? 'tag-exists' : 'tag-missing'">{{ item.exists ? "存在" : "无" }}</span>
               </div>
-              <div class="uninstall-hint-box">
-                将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。
-                清理完成后，手动删除程序所在文件夹即可完成卸载。
-              </div>
+              <div class="uninstall-hint-box">将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。清理完成后，手动删除程序所在文件夹即可完成卸载。</div>
             </template>
           </div>
 
           <div v-else class="uninstall-results">
-            <div class="uninstall-result-header">
-              <IconApp name="check" width="16" height="16" />
-              清理结果
-            </div>
+            <div class="uninstall-result-header"><IconApp name="check" width="16" height="16" />清理结果</div>
             <div v-for="r in uninstallResults" :key="r.key" class="uninstall-result-row">
               <span :class="r.success ? 'result-ok' : 'result-fail'">{{ r.success ? "✓" : "✗" }}</span>
               <span>{{ r.label }}</span>
@@ -303,13 +214,7 @@ function closeUninstall() {
           <div class="uninstall-modal-footer">
             <template v-if="!uninstallDone">
               <button class="btn btn-ghost btn-sm" @click="closeUninstall" :disabled="uninstallRunning">取消</button>
-              <button
-                class="btn btn-danger btn-sm"
-                @click="runUninstall"
-                :disabled="uninstallRunning || !!uninstallError"
-              >
-                {{ uninstallRunning ? "清理中..." : "开始清理" }}
-              </button>
+              <button class="btn btn-danger btn-sm" @click="runUninstall" :disabled="uninstallRunning || !!uninstallError">{{ uninstallRunning ? "清理中..." : "开始清理" }}</button>
             </template>
             <button v-else class="btn btn-primary btn-sm" @click="closeUninstall">关闭</button>
           </div>

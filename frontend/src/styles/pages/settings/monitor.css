@@ -28,3 +28,14 @@
 .info-box.compact {
   padding: 18px;
 }
+
+/* 暂停卡与检测卡等高对齐：压缩底部提示行高 */
+.pause-card .card-body {
+  display: flex;
+  flex-direction: column;
+}
+.pause-card .hint {
+  margin-top: auto;
+  padding-top: 8px;
+  font-size: var(--text-sm);
+}

@@ -1,0 +1,41 @@
+/* network.css — 网络与更新页（更新结果态 / 已最新 / 成功与错误） */
+.network-page .update-result {
+  margin-top: 10px;
+}
+
+.network-page .update-available,
+.network-page .update-latest,
+.network-page .update-success,
+.network-page .update-error {
+  margin-top: 10px;
+  font-size: var(--text-sm);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.network-page .update-available {
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.08);
+  border-radius: var(--radius-md);
+}
+
+.network-page .update-latest {
+  color: var(--success);
+}
+
+.network-page .update-success {
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--success-rgb), 0.24);
+  background: rgba(var(--success-rgb), 0.08);
+  border-radius: var(--radius-md);
+  color: var(--success);
+}
+
+.network-page .update-error {
+  color: var(--error);
+}
+
+/* about.css 的 update-available / update-latest 与本页共用一套；此处仅保留网络页的容器与成功态 */

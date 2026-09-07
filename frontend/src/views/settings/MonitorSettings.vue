@@ -83,7 +83,7 @@ const urlCheckText = computed({
       </div>
     </section>
     <!-- 暂停时段 -->
-    <section class="card settings-panel">
+    <section class="card settings-panel pause-card">
       <div class="settings-card-header">
         <IconApp name="clock" class="settings-card-icon" />
         <h2>暂停时段</h2>
