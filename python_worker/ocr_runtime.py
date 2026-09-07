@@ -131,21 +131,27 @@ def _get_ocr(old: bool, char_range: str | int | None = None):
         # 在锁外登记加载标记：等待锁的并发调用与超时文案分流都据此判断
         # "正在首次加载"。锁保证构建本身仍只发生一次（B6 双检）。
         _ocr_load_started.setdefault(key, time.monotonic())
-        with _ocr_lock:
-            session = _ocr_cache.get(key)
-            if session is None:
-                instance = ddddocr.DdddOcr(old=old, show_ad=False)
-                if normalized_range is not None:
-                    try:
-                        instance.set_ranges(normalized_range)
-                    except Exception as exc:  # noqa: BLE001 — 非法范围退回模型默认字符集
-                        logger.warning(
-                            "[ocr] set_ranges(%s) 失败，使用默认范围: %s",
-                            normalized_range,
-                            exc,
-                        )
-                session = _OcrSession(instance, key)
-                _ocr_cache[key] = session
+        try:
+            with _ocr_lock:
+                session = _ocr_cache.get(key)
+                if session is None:
+                    instance = ddddocr.DdddOcr(old=old, show_ad=False)
+                    if normalized_range is not None:
+                        try:
+                            instance.set_ranges(normalized_range)
+                        except Exception as exc:  # noqa: BLE001 — 非法范围退回模型默认字符集
+                            logger.warning(
+                                "[ocr] set_ranges(%s) 失败，使用默认范围: %s",
+                                normalized_range,
+                                exc,
+                            )
+                    session = _OcrSession(instance, key)
+                    _ocr_cache[key] = session
+        except BaseException:
+            # 构造失败/被取消也必须清标记：残留会让后续超时被误判为
+            # "模型仍在首次加载"而永不建议重装依赖
+            _ocr_load_started.pop(key, None)
+            raise
         # 加载完成（含调用方已超时的孤儿线程收尾）：写日志让恢复可见，清除标记
         load_started = _ocr_load_started.pop(key, None)
         if load_started is not None:

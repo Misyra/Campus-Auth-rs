@@ -2,6 +2,7 @@
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
+import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useStatus } from "@/composables/useStatus";
 import { CARRIER_OPTIONS, DEFAULT_TRIGGER_URL } from "@/utils/constants";
 import CustomSelect from "@/components/common/CustomSelect.vue";
@@ -9,6 +10,14 @@ import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const p = useProfiles();
 const { busy } = useStatus();
+const portalDetect = usePortalDetect();
+
+/** 方案编辑器内检测门户：抓到地址直接填入认证地址输入框 */
+async function detectPortalForEditor(): Promise<void> {
+  const url = await portalDetect.detectPortal();
+  const ep = p.editingProfile.value;
+  if (url && ep) ep.auth_url = url;
+}
 
 onMounted(() => { void p.fetchProfiles(); });
 
@@ -137,8 +146,9 @@ const redirectEnabled = computed({
                 </div>
                 <div class="form-group">
                   <label for="prof-password">独立密码</label>
+                  <!-- 后端对空串按"保留原密码"处理（GET 也不回传密码），占位按新建/编辑区分语义 -->
                   <input id="prof-password" v-model="p.editingProfile.value.password" type="password"
-                    :placeholder="p.editingProfile.value.password && p.editingProfile.value.password.startsWith('•') ? '已保存，清空可更新' : '留空使用全局'"
+                    :placeholder="p.editingProfile.value._isNew ? '留空使用全局' : '留空保留已保存密码，输入则更新'"
                     @focus="($event.target as HTMLInputElement).select()" />
                   <span class="hint">密码不会随配置切换导出，仅在本机生效</span>
                 </div>
@@ -161,7 +171,14 @@ const redirectEnabled = computed({
             <div class="editor-section-label">认证设置</div>
             <div class="form-group">
               <label for="prof-auth-url">认证地址</label>
-              <input id="prof-auth-url" v-model.trim="p.editingProfile.value.auth_url" type="text" placeholder="http://（重定向模式可留空）" />
+              <div class="input-with-action">
+                <input id="prof-auth-url" v-model.trim="p.editingProfile.value.auth_url" type="text" placeholder="http://（重定向模式可留空）" />
+                <button class="btn btn-secondary btn-sm" @click="detectPortalForEditor" :disabled="portalDetect.detecting.value" title="需先退出校园网登录：未认证时跟随跳转自动填入">
+                  <IconApp name="globe" class="icon-sm" />
+                  {{ portalDetect.detecting.value ? '检测中…' : '自动检测' }}
+                </button>
+              </div>
+              <span class="hint">需先退出校园网登录再检测（已在线时无跳转可抓）</span>
             </div>
             <div class="form-group">
               <label class="toggle toggle-help-inline">

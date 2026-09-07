@@ -129,7 +129,7 @@ const networkStatusText = computed(() => {
   // 后端 network_status 实际取值：online / captive_portal / offline / paused / unknown
   switch (status.network_state) {
     case "online":
-      return "在线监测中";
+      return "在线检测中";
     case "captive_portal":
       return "检测到门户劫持";
     case "offline":
@@ -137,7 +137,7 @@ const networkStatusText = computed(() => {
     case "paused":
       return "暂停时段";
     default:
-      return "正在启动监控";
+      return "正在启动检测";
   }
 });
 

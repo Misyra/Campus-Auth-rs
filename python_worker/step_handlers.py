@@ -654,7 +654,9 @@ async def handle_click_select(page, step: StepConfig, context: StepContext) -> N
         raise WorkerError(Outcome.SELECTOR_FAILED, "click_select 步骤缺少 selector")
     value = (step.value or "").strip()
     if not value:
-        return
+        # 与 select 分支同语义：静默 no-op 会让任务"全绿"但实际什么都没选
+        #（校验层已拦截新任务，此处对绕过校验的存量任务显式报错而非静默跳过）
+        raise WorkerError(Outcome.UNKNOWN_ERROR, "click_select 步骤缺少 value（必填）")
 
     timeout = step.timeout or context.default_timeout
     deadline = time.monotonic() + timeout / 1000
@@ -754,34 +756,77 @@ async def handle_screenshot(page, step: StepConfig, context: StepContext) -> Non
     context.emit("screenshot", {"path": local_path, "step_id": step.id})
 
 
+def _script_scope(context: StepContext):
+    """返回可执行 JS 的 Page / Frame 作用域（evaluate / assert_text 专用）。
+
+    这两类步骤直接执行脚本，无法走 ``frame_locator``（仅支持元素查询）：
+    frame 规格只能解析为 Frame（name / ``url=`` 片段）；CSS 选择器形式显式报错，
+    避免脚本静默在主 frame 执行（iframe 门户场景必然假失败）。
+    """
+    page = context.page
+    if page is None:
+        raise WorkerError(Outcome.SELECTOR_FAILED, "页面未初始化")
+    spec = (context.frame or "").strip()
+    if not spec:
+        return page
+
+    frames = getattr(page, "frames", None) or []
+    if spec.startswith("url="):
+        fragment = spec[4:]
+        matches = [frame for frame in frames if fragment and fragment in getattr(frame, "url", "")]
+        if len(matches) == 1:
+            return matches[0]
+        raise WorkerError(
+            Outcome.SELECTOR_FAILED, f"frame URL 匹配不唯一或未找到: {spec}"
+        )
+    name_matches = [frame for frame in frames if getattr(frame, "name", "") == spec]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    if len(name_matches) > 1:
+        raise WorkerError(Outcome.SELECTOR_FAILED, f"frame name 匹配不唯一: {spec}")
+    raise WorkerError(
+        Outcome.SELECTOR_FAILED,
+        f"evaluate/assert_text 的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
+    )
+
+
+async def _suppress_task(task: "asyncio.Future[Any]") -> None:
+    """等待被取消的任务真正退出（仅本地断开 await，不关共享页）。
+
+    任务的 CancelledError 不应外溢；evaluate 内部把取消包装成其他异常时同样忽略。
+    """
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 — 包装型异常一并吞掉，错误由调用方显式抛出
+        pass
+
+
 async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
-    """执行 JavaScript 并可选存储原生结果。"""
+    """执行 JavaScript 并可选存储原生结果（``context.frame`` 非空时在对应 Frame 内执行）。"""
     _check_cancel(context)
     script = step.effective_script
     if not script:
         raise WorkerError(Outcome.UNKNOWN_ERROR, "evaluate 步骤缺少 script/code")
     timeout_s = max(0.1, (step.timeout or context.default_timeout) / 1000)
 
-    task = asyncio.ensure_future(page.evaluate(script))
+    scope = _script_scope(context)
+    task = asyncio.ensure_future(scope.evaluate(script))
     deadline = time.monotonic() + timeout_s
     while not task.done():
         if context.cancel_event is not None and context.cancel_event.is_set():
             task.cancel()
-            try:
-                await page.close()
-            finally:
-                # close 是打断挂起 CDP await 的唯一手段；回调清死引用/结束调试会话
-                context.on_page_lost()
-            raise StepCancelled("JS 执行已取消，页面已中断")
+            # 只取消 JS 调用本身，不再 page.close()：run_steps 在任务开始时捕获
+            # 一次 page 引用，关页会让后续步骤（含失败截图）全部报废
+            await _suppress_task(task)
+            raise StepCancelled("JS 执行已取消")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             task.cancel()
-            try:
-                await page.close()
-            finally:
-                context.on_page_lost()
+            await _suppress_task(task)
             raise WorkerError(
-                Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已强制中断"
+                Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已中断 JS 调用"
             )
         await asyncio.wait({task}, timeout=min(0.1, remaining))
 
@@ -821,14 +866,15 @@ async def handle_navigate(page, step: StepConfig, context: StepContext) -> None:
 
 
 async def handle_assert_text(page, step: StepConfig, context: StepContext) -> None:
-    """断言页面出现指定文本。"""
+    """断言页面出现指定文本（``context.frame`` 非空时在对应 Frame 内执行）。"""
     _check_cancel(context)
     value = step.value
     if not value:
         raise WorkerError(Outcome.SELECTOR_FAILED, "assert_text 步骤需要 value")
     timeout = step.timeout or context.default_timeout
+    scope = _script_scope(context)
     try:
-        await page.wait_for_function(
+        await scope.wait_for_function(
             "arg => document.body.innerText.includes(arg)", arg=value, timeout=timeout
         )
     except PlaywrightTimeoutError as exc:

@@ -49,6 +49,18 @@ function getEffectiveTheme(): "light" | "dark" {
   return themeMode;
 }
 
+// theme=auto 时跟随系统深浅色切换：OS 切换不会触发 appearance watcher，
+// 必须显式监听 matchMedia change 并重应用（否则要等下一次外观改动才生效）
+try {
+  window
+    .matchMedia("(prefers-color-scheme: dark)")
+    .addEventListener("change", () => {
+      if ((appearance.theme || "light") === "auto") applyAppearance();
+    });
+} catch {
+  // 旧浏览器无 addEventListener（仅 addListener）：跟随系统失效可接受
+}
+
 /** 应用外观设置到页面 CSS 变量 */
 function applyAppearance(): void {
   const root = document.documentElement;

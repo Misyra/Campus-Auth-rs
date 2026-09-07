@@ -56,13 +56,17 @@ pub async fn get_history(
 
     // 分页（page + page_size 同时存在时启用）
     let use_pagination = params.page.is_some();
-    let page = params.page.unwrap_or(1);
-    let page_size = params.page_size.unwrap_or(50).max(1);
+    // 钳制分页参数：page 无上限时 page*page_size 会 usize 溢出（debug 构建 panic），
+    // page_size 无上限可被用来一次性拖出全量数据
+    let page = params.page.unwrap_or(1).max(1);
+    let page_size = params.page_size.unwrap_or(50).clamp(1, 200);
 
     if use_pagination {
-        // 从末尾往前分页（最新的是最后一条）
-        let start = history.len().saturating_sub(page * page_size);
-        let end = history.len().saturating_sub((page - 1) * page_size);
+        // 从末尾往前分页（最新的是最后一条）；saturating 乘法兜底防御
+        let start = history.len().saturating_sub(page.saturating_mul(page_size));
+        let end = history
+            .len()
+            .saturating_sub((page - 1).saturating_mul(page_size));
         if start < end {
             history.drain(..start);
             history.truncate(end - start);
@@ -225,6 +229,28 @@ mod tests {
         // 首页（最新页）应包含最后两条：Cancelled 与 Success
         assert_eq!(data["items"][0]["result"], "cancelled");
         assert_eq!(data["items"][1]["result"], "success");
+    }
+
+    /// 超大分页参数不再溢出：此前 `page * page_size` 裸乘法在 debug 构建下 panic，
+    /// release 回绕出错页；现钳制 page_size ≤ 200 且 saturating 乘法兜底
+    #[tokio::test]
+    async fn test_get_history_pagination_rejects_overflow_sized_params() {
+        let (app, _inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/history?page=99999999999999999&page_size=99999999999999999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let data = v.get("data").unwrap();
+        // page_size 被钳到 200；page 超界 → 空页但不 panic
+        assert_eq!(data["page_size"], 200);
+        assert_eq!(data["items"].as_array().unwrap().len(), 0);
     }
 
     /// 清除接口调用存储 clear 恰好一次

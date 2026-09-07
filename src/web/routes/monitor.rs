@@ -11,6 +11,7 @@ use axum::extract::State;
 use serde_json::Value;
 
 use crate::engine::{EngineApi, EngineCommand};
+use crate::monitor::{MonitorConfig, detect_portal};
 use crate::status::StatusManager;
 use crate::web::error::{ApiError, data};
 
@@ -48,8 +49,8 @@ pub async fn start_monitor(
     State(engine): State<Arc<dyn EngineApi>>,
 ) -> Result<Json<Value>, ApiError> {
     engine.try_dispatch(EngineCommand::Start)?;
-    tracing::info!("网络监测已启动");
-    Ok(data(Value::String("监测已启动".into())))
+    tracing::info!("网络检测已启动");
+    Ok(data(Value::String("检测已启动".into())))
 }
 
 /// POST /api/monitor/stop — 停止网络监测
@@ -57,8 +58,32 @@ pub async fn stop_monitor(
     State(engine): State<Arc<dyn EngineApi>>,
 ) -> Result<Json<Value>, ApiError> {
     engine.try_dispatch(EngineCommand::Stop)?;
-    tracing::info!("网络监测已停止");
-    Ok(data(Value::String("监测已停止".into())))
+    tracing::info!("网络检测已停止");
+    Ok(data(Value::String("检测已停止".into())))
+}
+
+/// POST /api/monitor/detect-portal — 检测认证门户地址并返回候选
+///
+/// 未认证时请求监测配置中的明文探测地址并跟随 302，找到真门户。检测目标固定
+/// 为服务端内置地址（`http_targets + url_targets`），不接受客户端传参，无 SSRF 面；
+/// 结果只读返回，前端填入表单后由用户确认保存，本接口不写配置。
+pub async fn detect_portal_handler(
+    State(config): State<Arc<dyn crate::config::ConfigApi>>,
+) -> Result<Json<Value>, ApiError> {
+    let rt = config.runtime_snapshot();
+    let m = &rt.monitor;
+    let cfg = MonitorConfig::from_runtime(&rt);
+    let result = detect_portal(
+        &m.http_targets,
+        cfg.http_timeout,
+        &m.url_targets,
+        &m.url_expected_responses,
+        cfg.url_timeout,
+        m.disable_proxy,
+    )
+    .await;
+    tracing::info!(status = ?result.status, portal_url = ?result.portal_url, "认证门户检测完成");
+    Ok(data(serde_json::to_value(&result)?))
 }
 
 #[cfg(test)]
@@ -170,10 +195,10 @@ mod tests {
             .with_state(api);
         let (status, v) = post_empty(app.clone(), "/api/monitor/start").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(v["data"], "监测已启动");
+        assert_eq!(v["data"], "检测已启动");
         let (status, v) = post_empty(app, "/api/monitor/stop").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(v["data"], "监测已停止");
+        assert_eq!(v["data"], "检测已停止");
         assert_eq!(*mock.commands.lock().unwrap(), vec!["Start", "Stop"]);
     }
 
@@ -215,5 +240,35 @@ mod tests {
                 .unwrap_or_default()
                 .contains("引擎已关闭")
         );
+    }
+
+    /// detect-portal：不可达探测目标 → offline 结论（200 正常返回，不写配置）
+    #[tokio::test]
+    async fn test_detect_portal_offline_when_unreachable() {
+        use crate::web::routes::test_support::{MockConfigApi, body_json};
+        let (config, inner) = MockConfigApi::mocked();
+        // 指向必然无监听的回环端口，判定收敛为 Offline
+        inner.lock().unwrap().runtime.monitor.http_targets =
+            vec!["http://127.0.0.1:9/generate_204".to_string()];
+        inner.lock().unwrap().runtime.monitor.url_targets = vec![];
+        let app = axum::Router::new()
+            .route("/api/monitor/detect-portal", post(detect_portal_handler))
+            .with_state(config);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/monitor/detect-portal")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["status"], "offline");
+        assert!(v["data"]["portal_url"].is_null());
+        assert!(!v["data"]["message"].as_str().unwrap_or_default().is_empty());
+        assert!(v.get("success").is_none(), "禁止 success 字段");
     }
 }

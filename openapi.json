@@ -159,6 +159,45 @@
     }
    }
   },
+  "/api/monitor/detect-portal": {
+   "post": {
+    "operationId": "post___api_monitor_detect-portal",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     }
+    }
+   }
+  },
   "/api/config": {
    "get": {
     "operationId": "get___api_config",
@@ -3539,6 +3578,30 @@
     }
    }
   },
+  "/api/ai/capture/status": {
+   "get": {
+    "operationId": "get___api_ai_capture_status",
+    "description": "查询最近一次捕获产物是否可用（页面刷新后恢复状态用）",
+    "responses": {
+     "200": {
+      "description": "捕获状态与 meta 回显字段",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "available": { "type": "boolean", "description": "meta.json 与 screenshot.png 是否齐备" },
+          "request_url": { "type": "string", "description": "捕获请求 URL（不可用时缺省）" },
+          "final_url": { "type": "string", "description": "捕获结束 URL（不可用时缺省）" },
+          "title": { "type": "string", "description": "页面标题（不可用时缺省）" }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/ai/capture/screenshot": {
    "get": {
     "operationId": "get___api_ai_capture_screenshot",
@@ -3610,6 +3673,29 @@
       }
      }
     }
+   }
+  },
+  "/api/ai/generate/stream": {
+   "post": {
+    "operationId": "post___api_ai_generate_stream",
+    "description": "流式生成（SSE text/event-stream）：增量推送 LLM 输出与校验状态，空闲超时 10 分钟。事件帧（data: <json>）type 枚举：started / attempt_start / delta / attempt_delta_done / validation_failed / retrying / validated / done / error；\": keepalive\" 注释帧仅证明连接存活不重置前端空闲计时。同一时刻至多一个生成任务（重复发起返回 409）；客户端断连将取消后端 LLM 调用",
+    "responses": {
+     "200": {
+      "description": "SSE stream（事件帧 schema 见 description；每帧 JSON 带 type 标签）",
+      "content": {
+       "text/event-stream": {
+        "schema": {
+         "type": "string",
+         "description": "SSE 帧序列：data: {type: started|attempt_start{attempt,max}|delta{attempt,text}|attempt_delta_done{attempt,text_len}|validation_failed{attempt,errors}|retrying{attempt,next}|validated{attempt}|done{attempts,warnings,task}|error{message}}"
+        }
+       }
+      }
+     },
+     "400": { "description": "Bad Request", "content": { "application/json": { "schema": {} } } },
+     "409": { "description": "已有生成任务进行中", "content": { "application/json": { "schema": {} } } },
+     "500": { "description": "Internal Error", "content": { "application/json": { "schema": {} } } }
+    },
+    "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "extra_prompt": { "type": "string" } } } } } }
    }
   },
   "/api/ai/capture/bundle": {

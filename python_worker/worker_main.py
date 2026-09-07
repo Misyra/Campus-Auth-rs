@@ -70,16 +70,16 @@ def _preload_ocr_deps(*, force: bool = False) -> None:  # noqa: C901
     后续后台线程 ``import`` 直接命中 ``sys.modules`` 缓存，不再重新加载 DLL，
     后续识别全程正常（~0.5s）。
 
-    按需触发：``force=False`` 时仅在当前任务含 ocr 步骤（见
-    ``playwright_worker._run_task`` 的按需预热）才实际加载；
-    无验证码任务不再在启动即预热，避免 ``No module named 'ddddocr'`` 的 WARN
-    刷屏。启动期保持能力探测不弹错。
+    调用时机：启动期 ``force=False``（能力探测，已安装即在主线程完整加载，
+    同时规避后台线程 DLL loader lock）；含 ocr 步骤的任务在
+    ``playwright_worker._run_task`` 入口 ``force=True`` 强制预热（覆盖探测
+    失败但依赖实际可用的边缘态）。
 
     探测结果同步写入模块级 ``OCR_CAPABILITIES``（任务 10）：
     完整加载 → ``{"ocr": True}``；未触发 / 均不可用 → ``{"ocr": False}``。
     """
-    # 非强制且尚未判定需要时，仅做轻量能力探测（不真正 import ddddocr）
-    if not force and OCR_CAPABILITIES.get("ocr") is False and not _ocr_needed_hint():
+    # 非强制且尚未判定可用时，仅做能力探测（已安装则主线程完整加载，见下）
+    if not force and OCR_CAPABILITIES.get("ocr") is False:
         _probe_ocr_capability()
         return
     # 探测前先复位（幂等）：仅完整加载成功才置 True
@@ -104,7 +104,13 @@ def _preload_ocr_deps(*, force: bool = False) -> None:  # noqa: C901
 
 
 def _probe_ocr_capability() -> None:
-    """仅探测 OCR 是否可用，不触发重型 import，避免无验证码任务的 WARN。"""
+    """探测 OCR 可用性并填充 ``OCR_CAPABILITIES``（随 health check 上报）。
+
+    已安装时会在 **主线程** 完整 ``import ddddocr``（连带 numpy C 扩展进入
+    sys.modules 缓存）——这既让能力上报准确，也天然规避后台线程加载 DLL 的
+    loader lock 卡死（见 ``_preload_ocr_deps`` 的根因说明）；未安装时只做
+    ``find_spec`` 轻量探测，不产生 import WARN。
+    """
     import importlib.util
 
     if importlib.util.find_spec("ddddocr") is None:
@@ -117,12 +123,6 @@ def _probe_ocr_capability() -> None:
         OCR_CAPABILITIES["ocr"] = True
     except Exception:  # noqa: BLE001 — 仅探测，不弹错
         OCR_CAPABILITIES["ocr"] = False
-
-
-def _ocr_needed_hint() -> bool:
-    """当前进程内是否已出现过需要 OCR 的任务（按需预热的简易门控）。"""
-    # 由 playwright_worker._run_task 的按需预热置位；未置位时启动期不强行加载
-    return False
 
 
 def _force_utf8_stdio() -> None:
@@ -420,9 +420,9 @@ def main() -> None:
     _configure_logging()
     # A7：清理上次会话（进程被强杀）残留的截图文件（可能含明文凭据），best-effort
     _purge_stale_debug_screenshots()
-    # 启动期仅轻量探测 OCR 能力（不真正 import ddddocr/numpy），避免无验证码
-    # 任务的 Worker 进程产生 "No module named 'ddddocr'" 的 WARN。
-    # 有验证码任务在 _run_task 入口按需后台预热（见 playwright_worker）。
+    # 启动期探测 OCR 能力：已安装时主线程完整加载（规避后台线程 DLL loader
+    # lock，且 health check 能如实上报）；未安装时 find_spec 轻量探测不弹 WARN。
+    # 有验证码任务的 _run_task 入口还会按需强制预热（见 playwright_worker）。
     _probe_ocr_capability()
     try:
         asyncio.run(_serve())

@@ -11,6 +11,7 @@ use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::ai::prompt::CaptureContext;
 use crate::ai::{self, LlmSettings};
@@ -22,6 +23,11 @@ use crate::web::error::{ApiError, data};
 
 /// capture 单次超时：导航 + networkidle 等待 + CDP 资源快照，宽于常规命令
 const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 在途流式生成的取消令牌（单用户本地应用，全局至多一个生成任务）。
+/// `Some` = 生成中：再次发起返回 409，客户端断连/超时经此令牌中止 LLM 调用，
+/// 避免 fetch abort 后后端照常烧完 token
+static GENERATE_INFLIGHT: std::sync::Mutex<Option<CancellationToken>> = std::sync::Mutex::new(None);
 
 /// 脱敏后的 LLM 配置视图（API key 永不出站，只回是否已设置）
 fn masked_view(settings: &LlmSettings) -> Value {
@@ -42,8 +48,9 @@ pub async fn get_llm_config(
 
 /// PUT /api/ai/llm-config — 保存 LLM 配置
 ///
-/// body: `{ base_url, model, api_key? }`。`api_key` 缺省表示保持不变，
-/// 空串表示清除，非空表示更新（AES-256-GCM 加密落盘）。
+/// body: `{ base_url, model, api_key?, max_tokens? }`。`api_key` 缺省表示保持不变，
+/// 空串表示清除，非空表示更新（AES-256-GCM 加密落盘）；`max_tokens` 为整数或
+/// `null`（不携带该字段，交由服务商默认），缺省表示保持不变。
 pub async fn put_llm_config(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<Value>,
@@ -77,6 +84,19 @@ pub async fn put_llm_config(
                 .map_err(|e| ApiError::Internal(format!("API Key 加密失败: {e}")))?;
         }
     }
+    if let Some(mt) = obj.get("max_tokens") {
+        settings.max_tokens = if mt.is_null() {
+            None
+        } else {
+            Some(
+                mt.as_u64()
+                    .filter(|v| (1..=200_000).contains(v))
+                    .ok_or_else(|| {
+                        ApiError::BadRequest("max_tokens 必须为 1..=200000 的整数或 null".into())
+                    })? as u32,
+            )
+        };
+    }
     ai::save_llm_settings(&base, &settings)
         .map_err(|e| ApiError::Internal(format!("LLM 配置写入失败: {e}")))?;
     tracing::info!("LLM 配置已更新: model={}", settings.model);
@@ -109,11 +129,12 @@ pub async fn capture(
         .map_err(|e| ApiError::ServiceUnavailable(format!("Python 环境未就绪: {e}")))?;
 
     let rt = config.runtime_snapshot();
+    // 每请求唯一 cancel_id：固定 id 会与 CancelRegistry 的 pending TTL 串扰
+    //（无在途请求时的迟到取消会命中 60s 内的下一次同 id 请求）
     let params = json!({
         "url": url,
         "browser_settings": serde_json::to_value(&rt.browser).unwrap_or(Value::Null),
-        // 固定 cancel_id：与 OCR 同模式，取消端点可命中本请求
-        "cancel_id": "ai-capture",
+        "cancel_id": format!("ai-capture-{}", uuid::Uuid::new_v4()),
     });
     let resp = bridge
         .execute_with_timeout("page_capture", params, CAPTURE_TIMEOUT)
@@ -144,6 +165,39 @@ pub async fn capture_screenshot(
     }
     let bytes = tokio::fs::read(&path).await?;
     Ok(([(header::CONTENT_TYPE, "image/png")], bytes))
+}
+
+/// GET /api/ai/capture/status — 查询最近一次捕获产物是否可用
+///
+/// 页面刷新后前端据此恢复捕获状态（避免强制重新捕获）；meta 损坏按不可用处理。
+pub async fn capture_status(
+    State(config): State<Arc<dyn ConfigApi>>,
+) -> Result<Json<Value>, ApiError> {
+    let dir = ai::capture_dir(&config.base_path());
+    let available = dir.join("meta.json").exists() && dir.join("screenshot.png").exists();
+    if !available {
+        return Ok(data(json!({ "available": false })));
+    }
+    let meta: Value = tokio::fs::read(dir.join("meta.json"))
+        .await
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    if meta.is_null() {
+        return Ok(data(json!({ "available": false })));
+    }
+    let field = |name: &str| {
+        meta.get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok(data(json!({
+        "available": true,
+        "request_url": field("request_url"),
+        "final_url": field("final_url"),
+        "title": field("title"),
+    })))
 }
 
 /// POST /api/ai/generate — 由捕获产物生成任务 JSON
@@ -209,6 +263,220 @@ pub async fn generate(
         "model": settings.model,
         "base_url": settings.base_url,
     })))
+}
+
+/// POST /api/ai/generate/stream — 流式生成（SSE）
+///
+/// 与 `generate` 语义一致，但以 `text/event-stream` 实时推送进度：
+/// 每个 LLM 增量、校验/重试状态均以 `data: <json>` 帧发出，前端据此在
+/// 最下方同步展示进度（流式文本预览 + 步骤状态）。超时语义为空闲超时：
+/// 只要仍在输出就不超时，仅当连续 10 分钟无内容才超时。
+pub async fn generate_stream(
+    State(config): State<Arc<dyn ConfigApi>>,
+    State(tasks): State<Arc<dyn TaskApi>>,
+    Json(body): Json<Value>,
+) -> Result<impl IntoResponse, ApiError> {
+    let extra_prompt = body
+        .get("extra_prompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let base = config.base_path();
+    let settings = ai::load_llm_settings(&base);
+    if !settings.is_configured() {
+        return Err(ApiError::BadRequest(
+            "请先配置 LLM 的 Base URL 与模型名".into(),
+        ));
+    }
+    let api_key = if settings.api_key_enc.is_empty() {
+        String::new()
+    } else {
+        ai::decrypt_api_key(&settings.api_key_enc)
+            .map_err(|_| {
+                ApiError::BadRequest(
+                    "API Key 解密失败（密钥文件可能已轮转），请在配置区重新保存 API Key".into(),
+                )
+            })?
+            .to_string()
+    };
+
+    let ctx = load_capture_context(&base).await?;
+    let capture_warnings = ctx.1;
+    let capture_ctx = ctx.0;
+    let model = settings.model.clone();
+    let base_url = settings.base_url.clone();
+
+    // 防重入：已有生成在途时拒绝（否则取消后立点会产生两条并发 LLM 流）
+    let cancel_token = {
+        let mut guard = GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_some() {
+            return Err(ApiError::Conflict(
+                "已有生成任务进行中，请等待其完成或刷新页面".into(),
+            ));
+        }
+        let token = CancellationToken::new();
+        *guard = Some(token.clone());
+        token
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<crate::ai::generate::StreamEvent>(1024);
+    let shared: std::sync::Arc<std::sync::Mutex<Vec<crate::ai::generate::StreamEvent>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let shared_for_gen = shared.clone();
+    let shared_for_forward = shared.clone();
+    let tx_for_forward = tx.clone();
+    let token_for_forward = cancel_token.clone();
+
+    // 转发器：每 40ms 把新事件刷到 SSE（MutexGuard 不跨 await）。
+    // 接收端消失（客户端断连/响应流结束）即取消生成令牌，停止无谓的 LLM 消耗
+    let forward_handle = tokio::spawn(async move {
+        let mut idx = 0usize;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let batch: Vec<crate::ai::generate::StreamEvent> = {
+                let guard = shared_for_forward.lock().unwrap();
+                if idx >= guard.len() {
+                    Vec::new()
+                } else {
+                    guard[idx..].to_vec()
+                }
+            };
+            if !batch.is_empty() {
+                idx += batch.len();
+                for ev in batch {
+                    let _ = tx_for_forward.send(ev).await;
+                }
+            }
+            if tx_for_forward.is_closed() {
+                token_for_forward.cancel();
+                break;
+            }
+            let should_exit = {
+                let guard = shared_for_forward.lock().unwrap();
+                guard.iter().any(|e| {
+                    matches!(
+                        e,
+                        crate::ai::generate::StreamEvent::Done { .. }
+                            | crate::ai::generate::StreamEvent::Error { .. }
+                    )
+                }) && idx >= guard.len()
+            };
+            if should_exit {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                break;
+            }
+        }
+    });
+
+    let extra_prompt_bg = extra_prompt.clone();
+    let tasks_bg = tasks.clone();
+    let token_for_gen = cancel_token.clone();
+    tokio::spawn(async move {
+        let validate = move |v: &Value| {
+            let task = v.clone();
+            let tasks = tasks_bg.clone();
+            async move { tasks.validate_task_json(&task).await }
+        };
+        let token = token_for_gen.clone();
+        let outcome = crate::ai::generate::generate_with_stream(
+            &capture_ctx,
+            extra_prompt_bg.as_deref(),
+            validate,
+            {
+                let settings = settings.clone();
+                let api_key = api_key.clone();
+                move |messages, on_delta| {
+                    let settings = settings.clone();
+                    let api_key = api_key.clone();
+                    let token = token.clone();
+                    async move {
+                        crate::ai::llm::chat_completion_with_stream(
+                            &settings,
+                            &api_key,
+                            messages,
+                            Some(on_delta),
+                            Some(&token),
+                        )
+                        .await
+                    }
+                }
+            },
+            shared_for_gen,
+        )
+        .await;
+        // 无论成败都释放在途标记；此后新请求才可再次发起
+        *GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        match outcome {
+            Ok(o) => {
+                let mut warnings = capture_warnings.clone();
+                warnings.extend(o.warnings.clone());
+                shared
+                    .lock()
+                    .unwrap()
+                    .push(crate::ai::generate::StreamEvent::Done {
+                        attempts: o.attempts,
+                        warnings,
+                        task: o.task,
+                    });
+                let _ = forward_handle.await;
+            }
+            Err(e) => {
+                shared
+                    .lock()
+                    .unwrap()
+                    .push(crate::ai::generate::StreamEvent::Error { message: e.clone() });
+                let _ = forward_handle.await;
+            }
+        }
+    });
+
+    let stream = async_stream::stream! {
+        let start = serde_json::json!({ "type": "started", "model": model, "base_url": base_url });
+        yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", start));
+        let mut rx = rx;
+        let mut idle_ticks: u32 = 0;
+        loop {
+            tokio::select! {
+                ev = rx.recv() => {
+                    match ev {
+                        Some(e) => {
+                            idle_ticks = 0;
+                            let line = serde_json::to_string(&e).unwrap_or_else(|_| "{}".into());
+                            yield Ok(format!("data: {}\n\n", line));
+                            if matches!(e, crate::ai::generate::StreamEvent::Done { .. } | crate::ai::generate::StreamEvent::Error { .. }) {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
+                    idle_ticks += 1;
+                    yield Ok(": keepalive\n\n".to_string());
+                    if idle_ticks >= 40 {
+                        let err = serde_json::json!({ "type": "error", "message": "流式空闲超时（10 分钟无输出）" });
+                        yield Ok(format!("data: {}\n\n", err));
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    let body = axum::body::Body::from_stream(stream);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/event-stream".to_string()),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (
+                header::HeaderName::from_static("x-accel-buffering"),
+                "no".to_string(),
+            ),
+        ],
+        body,
+    ))
 }
 
 /// 从落盘产物组装生成上下文；(上下文, 非致命提示)
@@ -741,7 +1009,13 @@ mod tests {
             let guard = inner.lock().unwrap();
             assert_eq!(guard.executed[0].0, "page_capture");
             assert_eq!(guard.executed[0].1["url"], "http://portal/");
-            assert_eq!(guard.executed[0].1["cancel_id"], "ai-capture");
+            assert!(
+                guard.executed[0].1["cancel_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("ai-capture-"),
+                "cancel_id 应为每请求唯一前缀"
+            );
             assert!(guard.executed[0].1.get("browser_settings").is_some());
         }
         let v = body_json(resp).await;
@@ -925,6 +1199,7 @@ mod tests {
             base_url: "https://a.com".into(),
             model: "m".into(),
             api_key_enc: String::new(),
+            max_tokens: None,
         };
         ai::save_llm_settings(dir.path(), &settings).unwrap();
         let resp = app

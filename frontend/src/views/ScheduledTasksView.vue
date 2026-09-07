@@ -29,6 +29,22 @@ const scriptTargetOptions = computed<SelectOption[]>(() =>
 const browserTargetOptions = computed<SelectOption[]>(() =>
   browserTasks.value.map((t) => ({ value: t.id, label: t.name })),
 );
+
+/** 切换任务类型时清空目标：旧类型的 target_id 残留会被保存成另一类型的目标（或死引用） */
+function onTaskTypeChange(value: string): void {
+  if (st.scheduledTaskForm.value.task_type === value) return;
+  st.scheduledTaskForm.value.task_type = value;
+  st.scheduledTaskForm.value.target_id = "";
+}
+
+/** 保存前把当前类型下合法的目标 id 集合交给 composable 做死引用校验 */
+function onSaveClick(): void {
+  const options =
+    st.scheduledTaskForm.value.task_type === "script"
+      ? scriptTargetOptions.value
+      : browserTargetOptions.value;
+  void st.saveScheduledTask(options.map((o) => o.value));
+}
 </script>
 
 <template>
@@ -73,6 +89,7 @@ const browserTargetOptions = computed<SelectOption[]>(() =>
             <div class="task-toggle">
               <ToggleSwitch
                 :model-value="task.enabled !== false"
+                :disabled="st.togglingIds.has(task.id)"
                 @update:model-value="st.toggleScheduledTask(task.id)"
               />
             </div>
@@ -101,7 +118,11 @@ const browserTargetOptions = computed<SelectOption[]>(() =>
         <div class="form-row">
           <div class="form-group" style="min-width:140px">
             <label for="scheduled-task-type">任务类型</label>
-            <CustomSelect v-model="st.scheduledTaskForm.value.task_type" :options="scheduledTaskTypeOptions" />
+            <CustomSelect
+              :model-value="st.scheduledTaskForm.value.task_type"
+              :options="scheduledTaskTypeOptions"
+              @update:model-value="onTaskTypeChange"
+            />
           </div>
           <div class="form-group flex-1">
             <label for="scheduled-task-target">{{ st.scheduledTaskForm.value.task_type === 'script' ? '选择脚本' : '选择浏览器任务' }}</label>
@@ -131,7 +152,7 @@ const browserTargetOptions = computed<SelectOption[]>(() =>
       </div>
       <template #footer>
         <button class="btn btn-secondary" @click="st.closeScheduledTaskModal()">取消</button>
-        <button class="btn btn-primary" @click="st.saveScheduledTask()" :disabled="st.scheduledTaskFormLoading.value">
+        <button class="btn btn-primary" @click="onSaveClick()" :disabled="st.scheduledTaskFormLoading.value">
           {{ st.scheduledTaskFormLoading.value ? '保存中...' : '保存' }}
         </button>
       </template>

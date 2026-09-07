@@ -5,7 +5,9 @@ description = "Campus-Auth 浏览器自动化 Python Worker（NDJSON IPC 子进�
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "playwright>=1.40",
+    # 上界防未来大版本静默破坏（press_sequentially/CDP snapshot 等行为面），
+    # 升级走 uv lock + 回归测试
+    "playwright>=1.40,<2",
 ]
 
 # OCR 为显式可选能力；锁文件保留该 extra，但默认同步不安装，应用按用户偏好启用。
@@ -35,6 +37,8 @@ include = [
     "step_handlers.py",
     "variable_resolver.py",
     "models.py",
+    "ocr_runtime.py",
+    "debug_session.py",
 ]
 
 # uv 镜像源配置：使用清华大学 PyPI 镜像加速依赖下载

@@ -652,8 +652,8 @@ async fn apply_startup_action(container: &Arc<ServiceContainer>) {
                 .dispatch(crate::engine::EngineCommand::Start)
                 .await
             {
-                Ok(()) => info!("按 startup_action=monitor 已启动监测"),
-                Err(e) => warn!("按 startup_action 启动监测失败: {e:?}"),
+                Ok(()) => info!("按 startup_action=monitor 已启动检测"),
+                Err(e) => warn!("按 startup_action 启动检测失败: {e:?}"),
             }
         }
         StartupAction::LoginOnce => {
@@ -832,8 +832,8 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
                     .dispatch(crate::engine::EngineCommand::Start)
                     .await
                 {
-                    Ok(()) => info!("Engine（重启 #{restart_count}）已按崩溃前状态恢复监测"),
-                    Err(e) => warn!("Engine（重启 #{restart_count}）恢复监测失败: {e:?}"),
+                    Ok(()) => info!("Engine（重启 #{restart_count}）已按崩溃前状态恢复检测"),
+                    Err(e) => warn!("Engine（重启 #{restart_count}）恢复检测失败: {e:?}"),
                 }
             }
 

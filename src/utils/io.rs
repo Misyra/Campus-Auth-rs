@@ -348,6 +348,8 @@ pub enum DownloadError {
     Io(std::io::Error),
     /// 响应体超过调用方给定上限。
     TooLarge { limit: u64 },
+    /// 下载停滞：超过阈值未收到任何数据
+    Stalled { idle_secs: u64, received_bytes: u64 },
 }
 
 impl std::fmt::Display for DownloadError {
@@ -356,6 +358,13 @@ impl std::fmt::Display for DownloadError {
             DownloadError::Http(e) => write!(f, "网络请求失败: {e}"),
             DownloadError::Io(e) => write!(f, "文件写入失败: {e}"),
             DownloadError::TooLarge { limit } => write!(f, "下载内容超过大小上限 {limit} 字节"),
+            DownloadError::Stalled {
+                idle_secs,
+                received_bytes,
+            } => write!(
+                f,
+                "下载停滞（{idle_secs}s 内无数据，已接收 {received_bytes} 字节）"
+            ),
         }
     }
 }
@@ -367,11 +376,25 @@ impl std::error::Error for DownloadError {}
 /// 统一 git.rs / uv.rs 两处流式下载模板（C2）：GET + error_for_status +
 /// 分块写入 + flush。调用方传入已配置的 `reqwest::Client` 并按各自错误类型映射
 /// （`DownloadError` 保留 Http / Io 之分，便于 uv 映射到不同 EnvironmentError 变体）。
+///
+/// 停滞检测：响应头等待与相邻 chunk 间均受 `stall_timeout` 保护（慢网只要持续
+/// 出数据就不判失败，仅彻底停滞才超时；调用方传 `None` 时不做停滞判定，仅做总超时由上层包裹）。
 pub async fn download_streaming(
     client: &reqwest::Client,
     url: &str,
     dest: &Path,
     max_bytes: u64,
+) -> Result<(), DownloadError> {
+    download_streaming_with_stall(client, url, dest, max_bytes, None).await
+}
+
+/// 同 [`download_streaming`]，但带停滞超时（相邻 chunk 间最大空闲时间）。
+pub async fn download_streaming_with_stall(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    max_bytes: u64,
+    stall_timeout: Option<std::time::Duration>,
 ) -> Result<(), DownloadError> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -394,7 +417,24 @@ pub async fn download_streaming(
 
     let mut stream = resp.bytes_stream();
     let mut downloaded = 0u64;
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk_opt = if let Some(timeout) = stall_timeout {
+            match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = tokio::fs::remove_file(dest).await;
+                    return Err(DownloadError::Stalled {
+                        idle_secs: timeout.as_secs(),
+                        received_bytes: downloaded,
+                    });
+                }
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(chunk) = chunk_opt else {
+            break;
+        };
         let chunk = chunk.map_err(DownloadError::Http)?;
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         if downloaded > max_bytes {

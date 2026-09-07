@@ -135,7 +135,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           <IconApp name="clock" />
         </div>
         <div class="stat-info">
-          <span class="stat-label">开始监控时长</span>
+          <span class="stat-label">开始检测时长</span>
           <span class="stat-value">{{ formatDuration(s.status.monitoring_seconds) }}</span>
         </div>
       </div>

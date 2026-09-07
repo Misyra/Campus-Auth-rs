@@ -208,9 +208,9 @@ const urlCheckText = computed({
                 <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.disable_proxy" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">监测不走代理</span>
+                  <span class="toggle-label">检测不走代理</span>
                 </label>
-                <FieldHelp text="启用后监测流量直连；关闭则跟随系统代理。修改后重启生效。" />
+                <FieldHelp text="启用后检测流量直连；关闭则跟随系统代理。修改后重启生效。" />
               </div>
             </div>
           </div>

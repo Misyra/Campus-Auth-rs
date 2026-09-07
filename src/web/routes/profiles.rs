@@ -23,6 +23,44 @@ pub struct ProfileCreateBody {
     pub name: String,
     pub username: String,
     pub password: Zeroizing<String>,
+    /// 编辑器同屏的可选匹配/认证设置：创建即完整落盘（此前仅收 4 字段，
+    /// 网关/SSID/认证地址等会被静默丢弃，须再编辑一次才能保存）
+    pub auth_url: Option<String>,
+    /// 重定向触发地址：非空即重定向模式（劫持型门户），为空保持直连
+    pub trigger_url: Option<String>,
+    pub isp: Option<String>,
+    pub gateway_ip: Option<String>,
+    pub wifi_ssid: Option<String>,
+    pub active_task: Option<String>,
+}
+
+/// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
+fn validate_http_url(label: &str, raw: &str) -> Result<String, ApiError> {
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(trimmed);
+    }
+    let parsed = trimmed
+        .parse::<url::Url>()
+        .map_err(|_| ApiError::BadRequest(format!("{label}格式非法: {trimmed}")))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(ApiError::BadRequest(format!(
+                "{label}仅支持 http/https，当前为: {}",
+                parsed.scheme()
+            )));
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ApiError::BadRequest(format!("{label}缺少主机名: {trimmed}")))?;
+    if host.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "{label}缺少主机名: {trimmed}"
+        )));
+    }
+    Ok(trimmed)
 }
 
 #[derive(Deserialize)]
@@ -82,6 +120,10 @@ pub async fn get_profile(
 }
 
 /// POST /api/profiles/{id} — 创建 Profile
+///
+/// body 必填 `name/username/password`（password 空串=不设独立密码）；
+/// 可选 `auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task` 与 PUT 同语义，
+/// 支持创建时一次带上编辑器内的全部字段。
 pub async fn create_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -119,6 +161,25 @@ pub async fn create_profile(
             .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?
     };
     profile.username = body.username;
+    // 可选设置字段与 PUT 语义一致（含 URL 校验），创建即完整落盘
+    if let Some(auth_url) = body.auth_url {
+        profile.auth_url = validate_http_url("认证地址", &auth_url)?;
+    }
+    if let Some(trigger_url) = body.trigger_url {
+        profile.trigger_url = validate_http_url("重定向触发地址", &trigger_url)?;
+    }
+    if let Some(isp) = body.isp {
+        profile.isp = isp;
+    }
+    if let Some(gateway_ip) = body.gateway_ip {
+        profile.gateway_ip = gateway_ip;
+    }
+    if let Some(wifi_ssid) = body.wifi_ssid {
+        profile.wifi_ssid = wifi_ssid;
+    }
+    if let Some(active_task) = body.active_task {
+        profile.active_task = active_task;
+    }
     profiles.create_profile(&target_id, profile).await?;
     tracing::info!(profile_id = %target_id, "创建 Profile");
     Ok(data(Value::String("ok".into())))
@@ -150,60 +211,10 @@ pub async fn update_profile(
         profile.username = username;
     }
     if let Some(auth_url) = body.auth_url {
-        let trimmed = auth_url.trim().to_string();
-        if !trimmed.is_empty() {
-            let parsed = trimmed.parse::<url::Url>().map_err(|_| {
-                crate::web::error::ApiError::BadRequest(format!("认证地址格式非法: {trimmed}"))
-            })?;
-            match parsed.scheme() {
-                "http" | "https" => {}
-                _ => {
-                    return Err(crate::web::error::ApiError::BadRequest(format!(
-                        "认证地址仅支持 http/https，当前为: {}",
-                        parsed.scheme()
-                    )));
-                }
-            }
-            let host = parsed.host_str().ok_or_else(|| {
-                crate::web::error::ApiError::BadRequest(format!("认证地址缺少主机名: {trimmed}"))
-            })?;
-            if host.is_empty() {
-                return Err(crate::web::error::ApiError::BadRequest(format!(
-                    "认证地址缺少主机名: {trimmed}"
-                )));
-            }
-        }
-        profile.auth_url = trimmed;
+        profile.auth_url = validate_http_url("认证地址", &auth_url)?;
     }
     if let Some(trigger_url) = body.trigger_url {
-        let trimmed = trigger_url.trim().to_string();
-        if !trimmed.is_empty() {
-            let parsed = trimmed.parse::<url::Url>().map_err(|_| {
-                crate::web::error::ApiError::BadRequest(format!(
-                    "重定向触发地址格式非法: {trimmed}"
-                ))
-            })?;
-            match parsed.scheme() {
-                "http" | "https" => {}
-                _ => {
-                    return Err(crate::web::error::ApiError::BadRequest(format!(
-                        "重定向触发地址仅支持 http/https，当前为: {}",
-                        parsed.scheme()
-                    )));
-                }
-            }
-            let host = parsed.host_str().ok_or_else(|| {
-                crate::web::error::ApiError::BadRequest(format!(
-                    "重定向触发地址缺少主机名: {trimmed}"
-                ))
-            })?;
-            if host.is_empty() {
-                return Err(crate::web::error::ApiError::BadRequest(format!(
-                    "重定向触发地址缺少主机名: {trimmed}"
-                )));
-            }
-        }
-        profile.trigger_url = trimmed;
+        profile.trigger_url = validate_http_url("重定向触发地址", &trigger_url)?;
     }
     if let Some(isp) = body.isp {
         profile.isp = isp;
@@ -746,6 +757,89 @@ mod tests {
             .find(|p| p.id == "new-profile")
             .unwrap();
         assert!(created.password.is_empty());
+    }
+
+    /// 创建时可选设置字段（网关/SSID/认证地址等）完整落盘，不再被静默丢弃
+    #[tokio::test]
+    async fn test_create_profile_persists_optional_settings() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/full-profile")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "full-profile",
+                            "name": "完整方案",
+                            "username": "student",
+                            "password": "secret",
+                            "auth_url": "http://10.1.1.55/",
+                            "trigger_url": "http://www.msftconnecttest.com/connecttest.txt",
+                            "isp": "电信",
+                            "gateway_ip": "192.168.1.1",
+                            "wifi_ssid": "Campus-Dorm-5G"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let guard = inner.lock().unwrap();
+        let created = guard
+            .profiles
+            .iter()
+            .find(|p| p.id == "full-profile")
+            .unwrap();
+        assert_eq!(created.auth_url, "http://10.1.1.55/");
+        assert_eq!(
+            created.trigger_url,
+            "http://www.msftconnecttest.com/connecttest.txt"
+        );
+        assert_eq!(created.isp, "电信");
+        assert_eq!(created.gateway_ip, "192.168.1.1");
+        assert_eq!(created.wifi_ssid, "Campus-Dorm-5G");
+    }
+
+    /// 创建时非法认证地址 → 400（与 PUT 同一校验助手）
+    #[tokio::test]
+    async fn test_create_profile_rejects_bad_auth_url() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/bad-url")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "bad-url",
+                            "name": "x",
+                            "username": "u",
+                            "password": "",
+                            "auth_url": "ftp://10.1.1.55/"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // 校验失败不得半落盘
+        assert!(
+            !inner
+                .lock()
+                .unwrap()
+                .profiles
+                .iter()
+                .any(|p| p.id == "bad-url"),
+            "校验失败不应创建 Profile"
+        );
     }
 
     /// 单个 Profile 读取不泄露密码

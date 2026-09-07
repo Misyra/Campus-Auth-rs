@@ -319,6 +319,17 @@ export interface NetworkDetectResult {
   matched_profile_name?: string | null;
 }
 
+/** 认证门户检测结论（POST /api/monitor/detect-portal） */
+export type PortalDetectStatus = "found" | "online" | "captive_no_redirect" | "offline";
+
+/** 认证门户检测结果 */
+export interface PortalDetectResult {
+  status: PortalDetectStatus;
+  portal_url: string | null;
+  message: string;
+  checked: string[];
+}
+
 /** 浏览器信息 */
 export interface BrowserInfo {
   channel: string;

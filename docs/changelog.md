@@ -2,6 +2,48 @@
 
 > 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.8”。
 
+## v5.0.0-alpha.8 后补丁轮（2026-09-07 全项目评审修复）
+
+> 2026-09-07 四路评审（AI 流式 / Rust 核心 / 前端 / Python Worker）新发现修复，另验证确认 76 条清单的 P0×9 与 P1×12 已随 fix/p0-p1-batch（09d7f66）全部落地。
+
+### 认证门户地址自动检测（新增）
+
+- 新增 `POST /api/monitor/detect-portal`：未认证时请求监测配置中的明文探测地址并手动跟随 302（最多 5 跳，相对 Location 按当前 URL 拼接），返回候选门户地址；已在线/门户直吐登录页/断网分别给出对应提示
+- 前端三处输入框旁加“自动检测”按钮：方案编辑器认证地址、账号设置认证地址、AI 任务捕获地址；共用 `usePortalDetect` composable，检测只读填入、保存仍由用户手动完成
+- 使用前提：需先退出校园网登录再检测（已在线时探测直通 204，无跳转可抓）；检测目标固定为服务端内置地址、不接受客户端传参，无 SSRF 面
+
+### AI 流式生成（未提交功能收尾）
+
+- 空闲超时真正生效：前端仅对真实数据帧重置空闲计时，后端 15s keepalive 注释帧不再续命（此前 2/5 分钟档永远打不到，只有写死的 10 分钟兜底生效）
+- 生成取消与防重入：`/api/ai/generate/stream` 加全局在途互斥（重复发起 409）+ CancellationToken；客户端断连/离开页面即中止后端 LLM 调用，不再照常烧 token；前端卸载时 abort
+- 流式重试不再拼接多轮输出：`attempt_start` 时清空预览文本；可重试判定由 `contains("5")` 字符串匹配改为类型化 `StreamError { retryable }`（截断/取消/预算耗尽不重试）
+- max_tokens 可配置：`llm.json` 新增 `max_tokens`（缺省 8192 兼容旧行为，`null` 表示不携带交由服务商默认），PUT `/api/ai/llm-config` 支持设置
+- 页面刷新后恢复捕获状态：新增 `GET /api/ai/capture/status`，产物仍在时无需强制重捕；底部进度条 done/error 后 6s 自动收起；SSE 事件枚举补进 openapi
+
+### 正确性修复
+
+- OCR/AI 捕获改每请求唯一 cancel_id：固定 id 会在 CancelRegistry 留下 60s pending 记录，误伤窗口期内下一次请求（卸载 OCR 后 60s 内的识别被静默取消）；`/api/ocr/uninstall` 经在途注册表精准取消真实在途请求
+- 修复“安装 Chromium”在引导因系统浏览器存在而跳过下载时静默 no-op 却报成功：判据由 `capability_ready` 改为引导前后 `playwright_ready` 对比
+- `/api/history` 分页参数钳制（page/page_size 上限 + saturating 乘法），debug 构建下超大参数不再溢出 panic
+- `next_fire_at` 展示改本地时区偏移（原 UTC `Z` 后缀与本地触发语义差一个时区）；清理死常量 `UV_SYNC_MAX_RETRIES`、死变体 `GitHubApiFallback`，移除零引用依赖 `tokio-stream`，`bootstrap.rs` 截断助手复用 `tail_chars`
+- Worker evaluate/assert_text 支持 `frame`（此前静默在主 frame 执行，iframe 门户必败）；JS 超时/取消只中断调用不再关共享页（此前后续步骤含失败截图全灭）；`click_select` 空 value 与 select 同语义显式报错
+- Worker 命令级超时的注销改 try/finally（CancelledError 绕过 except Exception 导致 cancel_registry 注册项泄漏）；`force_interrupt_pending` 补齐 on_page_lost 语义（僵尸调试会话不再占住单会话槽位）；OCR 模型构造失败清理加载标记（残留会让超时误判为“首次加载中”）
+- `ocr_recognize` 注册 cancel_id：卸载 OCR 可真实取消在途识别（Windows 上避免 onnxruntime DLL 占用导致 uv remove 失败）
+- wheel 打包白名单补齐 `ocr_runtime.py`/`debug_session.py`（此前非 editable 构建产物 import 即崩）；playwright 依赖加 `<2` 上界；debug/captures 目录锚定与 Rust 读盘侧一致的运行时工程目录
+
+### 前端修复
+
+- 创建配置方案不再丢字段：`POST /api/profiles/{id}` 扩展可选设置字段（网关/SSID/认证地址/触发地址/运营商/活动任务），创建即完整落盘；创建定时任务补发描述与超时（此前被静默丢弃）
+- 定时任务类型切换清空目标选择 + 保存前死引用校验；启停开关加 busy 守卫；加载失败首败提示（不再误显示“暂无定时任务”）
+- 方案编辑密码占位修正：后端对空串按“保留原密码”处理，占位由 `_isNew` 推导（原 `startsWith('•')` 永假）；脚本示例模板覆盖前经 dirty 确认；导入过滤器移除 .exe
+- ConfirmDialog 键盘可达（Esc=取消 / Enter=确认 / 焦点管理）；CustomSelect 下拉内按 Esc 不再连带关闭外层弹窗；`theme=auto` 监听系统深浅色切换
+- BrowserSettings 类型对齐后端字段；错误文案链接提取改为首个 URL 匹配；OCR 识别错误统一 `extractApiError`、预览 objectURL 卸载兜底 revoke；logo 渐变改用 accent token（跟随自定义强调色）
+- 修复本地调试脚本 `启动模拟测试.ps1` 路径中的字面换页符字节（mock 门户此前必然启动失败）
+
+### 文档
+
+- 任务编写指南同步：eval/assert_text 的 frame 规格限制、click_select value 必填语义、eval 超时不再关页
+
 ## v5.0.0-alpha.8（2026-09-05 AI 任务生成实测 + 执行结果修复）
 
 ### AI 任务生成

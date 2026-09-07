@@ -10,7 +10,7 @@ import { useToast } from "./useToast";
 
 const NOTIFY_CATEGORY_LABELS: Record<string, string> = {
   login: "登录",
-  monitor: "监控",
+  monitor: "检测",
   network: "网络",
   update: "更新",
   security: "安全",
@@ -50,7 +50,8 @@ function notify(
   }
   unreadNotifications.value++;
   const { toastOnly } = useToast();
-  toastOnly(success, message);
+  // 类别随 meta 传给 toast 镜像日志，方便在日志里区分通知来源
+  toastOnly(success, message, category ? { category } : undefined);
 }
 
 function toggleNotifications(): void {

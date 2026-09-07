@@ -53,6 +53,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/monitor/stop", || {
             post(routes::monitor::stop_monitor)
         }),
+        ("POST", "/api/monitor/detect-portal", || {
+            post(routes::monitor::detect_portal_handler)
+        }),
         // ---- 配置（config）----
         ("GET", "/api/config", || get(routes::config::get_settings)),
         ("PUT", "/api/config", || put(routes::config::put_settings)),
@@ -292,6 +295,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
             put(routes::ai::put_llm_config)
         }),
         ("POST", "/api/ai/capture", || post(routes::ai::capture)),
+        ("GET", "/api/ai/capture/status", || {
+            get(routes::ai::capture_status)
+        }),
         ("GET", "/api/ai/capture/screenshot", || {
             get(routes::ai::capture_screenshot)
         }),
@@ -299,6 +305,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
             get(routes::ai::capture_bundle)
         }),
         ("POST", "/api/ai/generate", || post(routes::ai::generate)),
+        ("POST", "/api/ai/generate/stream", || {
+            post(routes::ai::generate_stream)
+        }),
         // ---- OCR ----
         // recognize 单独放宽请求体限制（见 routes::ocr::RECOGNIZE_BODY_LIMIT），
         // 避免 >1.5MB 原图 base64 后触发 axum 默认 2MB 上限的 413

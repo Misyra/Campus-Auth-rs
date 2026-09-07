@@ -52,12 +52,20 @@ pub const UV_TARGET: &str = "aarch64-apple-darwin";
 pub const UV_EXE_NAME: &str = "uv.exe";
 #[cfg(not(target_os = "windows"))]
 pub const UV_EXE_NAME: &str = "uv";
-/// uv 下载超时
+/// uv 下载超时（单次镜像请求总超时，兜底）
 pub const UV_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// uv 镜像建连超时
+pub const UV_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// uv 下载停滞超时：相邻 chunk 间最大空闲时间（慢网只要持续出数据就不判失败，仅彻底停滞才超时）
+pub const UV_DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// uv 下载重试次数
 pub const UV_DOWNLOAD_MAX_RETRIES: u32 = 3;
-/// uv 下载重试间隔
+/// uv 下载重试基础间隔（指数退避：5s、10s、20s）
 pub const UV_DOWNLOAD_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// 镜像测速超时：并发 HEAD/Range 探测的可接受上限，超时镜像直接淘汰
+pub const UV_MIRROR_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// GitHub API 不可用时的 uv 版本兜底（避免国内网络下版本探测失败导致整个引导阻断）
+pub const UV_FALLBACK_VERSION: &str = "0.8.14";
 /// uv 最低版本要求
 pub const UV_MIN_VERSION: &str = "0.5.0";
 /// uv 锁定版本（None = latest）
@@ -66,8 +74,6 @@ pub const UV_PINNED_VERSION: Option<&str> = None;
 pub const PYTHON_VERSION_CONSTRAINT: &str = ">=3.12,<3.13";
 /// uv sync 超时
 pub const UV_SYNC_TIMEOUT: Duration = Duration::from_secs(600);
-/// uv sync 重试次数
-pub const UV_SYNC_MAX_RETRIES: u32 = 1;
 /// 更新后 Python 依赖重同步标记文件名（python_worker/.venv-resync）
 ///
 /// 应用内更新 overlay 覆盖 pyproject.toml / uv.lock 后，解释器完好时
@@ -110,6 +116,17 @@ pub const PYTHON_EXE_RELATIVE: &str = ".venv/bin/python";
 
 // `worker_project_dir` 已收敛至 `utils::paths`（消除 bridge/web/environment 三方分歧），
 // 历史名 `resolve_worker_project_path` 不再保留，调用方统一用 `crate::utils::paths::worker_project_dir`。
+/// 构建环境专用 HTTP 客户端：带建连超时与系统代理支持
+fn build_environment_http_client() -> Client {
+    Client::builder()
+        .connect_timeout(UV_DOWNLOAD_CONNECT_TIMEOUT)
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::warn!("环境 HTTP 客户端构建失败，回退无配置客户端: {e}");
+            Client::new()
+        })
+}
+
 /// 进度百分比区间
 pub const PROGRESS_UV_DOWNLOAD: (u8, u8) = (0, 20);
 /// 进度百分比区间
@@ -121,7 +138,7 @@ pub const PROGRESS_PLAYWRIGHT: (u8, u8) = (60, 85);
 #[derive(Debug, thiserror::Error)]
 pub enum EnvironmentError {
     /// environment 目录无写权限
-    #[error("environment 目录无写权限: {path}")]
+    #[error("environment 目录无写权限: {path}；可能原因：目录被设为只读、被安全软件占用或权限不足")]
     DirectoryNotWritable { path: PathBuf },
 
     /// 并发等待者复用前一轮引导的失败结果（F1）
@@ -143,41 +160,49 @@ pub enum EnvironmentError {
     UvDownloadIoFailed { retries: u32, message: String },
 
     /// uv 下载文件 SHA256 校验失败
-    #[error("uv 下载文件 SHA256 校验失败: expected={expected}, got={got}")]
+    #[error(
+        "uv 下载文件 SHA256 校验失败: expected={expected}, got={got}；可能原因：下载被网关劫持或镜像缓存异常，可稍后重试"
+    )]
     UvChecksumMismatch { expected: String, got: String },
 
     /// uv 解压失败
-    #[error("uv 解压失败: {0}")]
+    #[error("uv 解压失败: {0}；可能原因：磁盘空间不足、安全软件拦截写入或目录被占用")]
     UvExtractFailed(#[from] std::io::Error),
 
     /// GitHub API 请求失败
-    #[error("GitHub API 请求失败 (获取 uv 版本): {0}")]
+    #[error(
+        "GitHub API 请求失败 (获取 uv 版本): {0}；可能原因：网络未认证/受限或防火墙拦截 GitHub"
+    )]
     GitHubApiError(String),
 
-    /// uv sync 失败
-    #[error("uv sync 失败 (exit code={exit_code:?}): {stderr}")]
+    /// uv sync 失败（stderr 预截断为末尾 400 字符，保证提示不被 last_error 截断吃掉）
+    #[error(
+        "uv sync 失败 (exit code={exit_code:?}): {stderr}；可能原因：依赖源不可达/被限速或依赖冲突，详见 stderr 末尾"
+    )]
     UvSyncFailed {
         exit_code: Option<i32>,
         stderr: String,
     },
 
     /// uv sync 超时
-    #[error("uv sync 超时 (>{timeout_secs}s)")]
+    #[error("uv sync 超时 (>{timeout_secs}s)；可能原因：网络过慢或依赖源响应缓慢，可重试")]
     UvSyncTimeout { timeout_secs: u64 },
-    /// uv add/remove 失败（OCR 依赖增删）
-    #[error("uv {op} 失败 (exit code={exit_code:?}): {stderr}")]
+    /// uv add/remove 失败（OCR 依赖增删；stderr 预截断为末尾 400 字符）
+    #[error(
+        "uv {op} 失败 (exit code={exit_code:?}): {stderr}；可能原因：依赖源不可达/被限速或依赖冲突，详见 stderr 末尾"
+    )]
     UvPackageAlterFailed {
         op: &'static str,
         exit_code: Option<i32>,
         stderr: String,
     },
 
-    /// Playwright 安装失败
+    /// Playwright 安装失败（message 由 python.rs 归类生成，已含 原因/建议/详情）
     #[error("Playwright 安装失败 (重试 {retries} 次): {message}")]
     PlaywrightInstallFailed { retries: u32, message: String },
 
     /// Playwright 安装超时
-    #[error("Playwright 安装超时 (>{timeout_secs}s)")]
+    #[error("Playwright 安装超时 (>{timeout_secs}s)；可能原因：网络过慢或 CDN 响应缓慢，可重试")]
     PlaywrightInstallTimeout { timeout_secs: u64 },
 
     /// 请求安装了不受支持的 Playwright 浏览器
@@ -185,11 +210,11 @@ pub enum EnvironmentError {
     UnsupportedPlaywrightBrowser { browser: String },
 
     /// .venv 损坏，需要重建
-    #[error(".venv 损坏，需要重建")]
+    #[error(".venv 损坏，需要重建；可能原因：上次安装被中断或安全软件改动过环境，可重新初始化")]
     VenvCorrupted,
 
     /// python_worker/ 目录不存在
-    #[error("python_worker/ 目录不存在: {}", path.display())]
+    #[error("python_worker/ 目录不存在: {}；可能原因：安装包解压不完整或程序目录被移动", path.display())]
     WorkerProjectNotFound { path: PathBuf },
     /// 安装被取消
     #[error("安装被取消")]
@@ -434,7 +459,7 @@ impl EnvironmentManager {
                 last_error: None,
             })),
             status_manager,
-            http_client: Client::new(),
+            http_client: build_environment_http_client(),
             current_cancel_token: RwLock::new(CancellationToken::new()),
             on_bootstrap_done: Mutex::new(None),
             bootstrap_gate: BootstrapGate::new(),

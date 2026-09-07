@@ -390,7 +390,8 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "id": "job3", "target_id": "t1", "cron": "0 9 * * *", "name": "新任务"
+                            "id": "job3", "target_id": "t1", "cron": "0 9 * * *", "name": "新任务",
+                            "description": "每周例行的描述", "timeout": 300
                         })
                         .to_string(),
                     ))
@@ -402,6 +403,10 @@ mod tests {
         let inner = inner.lock().unwrap();
         assert_eq!(inner.tasks.len(), 3);
         assert_eq!(inner.notify_calls, 1);
+        // 描述与超时随创建落盘（此前创建分支静默丢弃这两个字段）
+        let job = inner.tasks.iter().find(|t| t.id == "job3").unwrap();
+        assert_eq!(job.description, "每周例行的描述");
+        assert_eq!(job.timeout, Some(300));
     }
 
     /// 更新不存在的任务返回 404

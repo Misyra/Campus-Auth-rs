@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::environment::python::tail_chars;
 use crate::environment::{
     BootstrapStage, EnvironmentError, EnvironmentManager, EnvironmentStatus, PROGRESS_PLAYWRIGHT,
     PROGRESS_UV_DOWNLOAD, PROGRESS_VENV_SYNC,
@@ -307,13 +308,15 @@ pub async fn retry_install(mgr: &EnvironmentManager) -> Result<(), EnvironmentEr
         .await
 }
 
-/// 标记安装失败状态
+/// 标记安装失败状态（message 会截断到 600 字符，避免超长 stderr 撑爆快照/日志）
 fn mark_error(mgr: &EnvironmentManager, message: &str) {
+    // 复用 python.rs 的 tail_chars（与 uv/playwright 输出截断同一实现，避免重复定义）
+    let truncated = tail_chars(message, 600);
     mgr.write_status(|s| {
         s.stage = BootstrapStage::Error;
-        s.last_error = Some(message.to_string());
+        s.last_error = Some(truncated.clone());
     });
-    mgr.report_progress("error", 0, message);
+    mgr.report_progress("error", 0, &truncated);
 }
 
 #[cfg(test)]

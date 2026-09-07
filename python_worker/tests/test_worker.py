@@ -7,6 +7,7 @@ IPC 响应/事件序列化，以及状态真值判定。
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import tempfile
 from pathlib import Path
@@ -187,6 +188,9 @@ def test_url_scheme_variants_order():
 def _patch_imports(monkeypatch, *, ddddocr_ok, numpy_ok):
     """按需拦截 ddddocr / numpy 顶层 import，返回调用记录。"""
     calls = {"ddddocr": 0, "numpy": 0}
+    # 补丁前先捕获真实 __import__：补丁期间任何其他 import（如 importlib.util）
+    # 经 builtins.__import__ 递归回 fake_import 会直接 RecursionError
+    real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
         if name == "ddddocr":
@@ -201,7 +205,7 @@ def _patch_imports(monkeypatch, *, ddddocr_ok, numpy_ok):
             mod = type("mod", (), {})()
         else:
             # 其余模块（含 sys/logger 依赖）照常走真实 import
-            return __import__(name, *args, **kwargs)
+            return real_import(name, *args, **kwargs)
         return mod
 
     monkeypatch.setattr("builtins.__import__", fake_import)
@@ -209,20 +213,24 @@ def _patch_imports(monkeypatch, *, ddddocr_ok, numpy_ok):
 
 
 def test_preload_ocr_deps_full_load_when_ddddocr_present(monkeypatch):
+    import builtins
+
     import worker_main
     calls = _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
-    worker_main._preload_ocr_deps()
+    # force=True 直达完整加载路径（force=False 启动期先走能力探测门控，见下方门控测试）
+    worker_main._preload_ocr_deps(force=True)
     # 完整加载路径：仅 import ddddocr 一次即返回，不再额外 import numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 0
     # 任务 10：完整加载 → 能力上报 ocr=True
     assert worker_main.OCR_CAPABILITIES == {"ocr": True}
+    assert builtins.__import__ is not None
 
 
 def test_preload_ocr_deps_falls_back_to_numpy(monkeypatch):
     import worker_main
     calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=True)
-    worker_main._preload_ocr_deps()
+    worker_main._preload_ocr_deps(force=True)
     # ddddocr 缺失（未安装/不完整）时退化为仅预加载 numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
@@ -234,23 +242,39 @@ def test_preload_ocr_deps_silent_when_missing(monkeypatch):
     import worker_main
     calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=False)
     # 两者都缺失时静默跳过，不抛异常（Worker 仍能正常启动）
-    worker_main._preload_ocr_deps()
+    worker_main._preload_ocr_deps(force=True)
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
     assert worker_main.OCR_CAPABILITIES == {"ocr": False}
 
 
-def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
+def test_preload_ocr_deps_gate_probes_only_without_force(monkeypatch):
+    import importlib.util
+
     import worker_main
+    calls = _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
+    # 模拟 ddddocr 未安装（与真实 venv 是否装有无关）：探测层 find_spec 短路，
+    # 不触发任何被拦截的 import，能力保持 False 且不产生 import WARN
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    worker_main._preload_ocr_deps()
+    assert calls == {"ddddocr": 0, "numpy": 0}
+    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
+
+
+def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
+    import builtins
+
+    import worker_main
+    real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
         if name in ("ddddocr", "numpy"):
             raise OSError(f"{name} DLL load failed")
-        return __import__(name, *args, **kwargs)
+        return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr("builtins.__import__", fake_import)
     # 损坏的 OCR DLL 不得阻止 Worker 启动，否则普通手动登录也会一起失效。
-    worker_main._preload_ocr_deps()
+    worker_main._preload_ocr_deps(force=True)
 
 
 # ── IPC 响应/事件序列化 ──

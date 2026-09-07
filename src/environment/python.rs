@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 /// 取字符串末尾至多 `max_chars` 个字符；超出时按字符边界截断并注明省略长度
 ///（Playwright 安装输出可达数 MB，全量进错误消息会撑爆日志与状态快照）
-fn tail_chars(s: &str, max_chars: usize) -> String {
+pub(crate) fn tail_chars(s: &str, max_chars: usize) -> String {
     let total = s.chars().count();
     if total <= max_chars {
         return s.to_string();

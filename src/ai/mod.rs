@@ -34,6 +34,18 @@ pub struct LlmSettings {
     /// API key 密文（`ENC:` 前缀）；空串表示未设置
     #[serde(default)]
     pub api_key_enc: String,
+    /// 单次生成的 max_tokens 上限；缺省 8192（兼容既有行为），`null` 表示不携带
+    /// 该字段（交由服务商默认，避免硬编码上限截断长任务 JSON 或超出模型限额）
+    #[serde(
+        default = "default_max_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_tokens: Option<u32>,
+}
+
+/// max_tokens 的历史缺省值：与既有硬编码行为保持一致
+fn default_max_tokens() -> Option<u32> {
+    Some(8192)
 }
 
 impl LlmSettings {
@@ -177,6 +189,7 @@ mod tests {
             base_url: "https://api.example.com/v1".into(),
             model: "glm-4v-flash".into(),
             api_key_enc: "ENC:abc".into(),
+            max_tokens: None,
         };
         save_llm_settings(base, &s).unwrap();
         let loaded = load_llm_settings(base);

@@ -109,6 +109,127 @@ where
     ))
 }
 
+/// 流式生成编排：与 `generate_with` 同步义，但 LLM 调用以流式增量回调推送
+///
+/// `on_progress` 在以下时机被调用（按序）：
+/// - LLM 每个增量文本片段到达时（`delta: <text>`）
+/// - 校验/自纠阶段的状态变更
+///
+/// 回调在生成任务内同步执行，不应阻塞。
+pub async fn generate_with_stream<V, Fut, C, CFut>(
+    ctx: &CaptureContext,
+    extra_prompt: Option<&str>,
+    validate: V,
+    chat_stream: C,
+    on_progress: std::sync::Arc<std::sync::Mutex<Vec<StreamEvent>>>,
+) -> Result<GenerateOutcome, String>
+where
+    V: Fn(&Value) -> Fut,
+    Fut: std::future::Future<Output = Result<(), Vec<String>>>,
+    C: Fn(Vec<Value>, Box<dyn FnMut(&str) + Send + 'static>) -> CFut,
+    CFut: std::future::Future<Output = Result<String, String>>,
+{
+    let mut messages = prompt::build_messages(ctx, extra_prompt);
+    let mut warnings = Vec::new();
+    let mut last_errors: Vec<String> = Vec::new();
+    let push = |ev: StreamEvent| on_progress.lock().unwrap().push(ev);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        push(StreamEvent::AttemptStart {
+            attempt,
+            max: MAX_ATTEMPTS,
+        });
+        let on_progress_clone = on_progress.clone();
+        let text = chat_stream(
+            messages.clone(),
+            Box::new(move |delta: &str| {
+                on_progress_clone.lock().unwrap().push(StreamEvent::Delta {
+                    attempt,
+                    text: delta.to_string(),
+                });
+            }),
+        )
+        .await
+        .map_err(|e| format!("第 {attempt} 轮生成失败: {e}"))?;
+        push(StreamEvent::AttemptDeltaDone {
+            attempt,
+            text_len: text.len(),
+        });
+        let task = extract_json(&text)?;
+        match validate(&task).await {
+            Ok(()) => {
+                push(StreamEvent::Validated { attempt });
+                return Ok(GenerateOutcome {
+                    task,
+                    attempts: attempt,
+                    warnings,
+                });
+            }
+            Err(errors) => {
+                last_errors = errors.clone();
+                push(StreamEvent::ValidationFailed {
+                    attempt,
+                    errors: errors.clone(),
+                });
+                if attempt < MAX_ATTEMPTS {
+                    warnings.push("首轮输出未通过校验，已自动回喂错误并重试".to_string());
+                    prompt::append_retry_messages(&mut messages, &text, &last_errors);
+                    push(StreamEvent::Retrying {
+                        attempt,
+                        next: attempt + 1,
+                    });
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "连续 {MAX_ATTEMPTS} 轮生成均未通过任务校验，最后错误：
+{}",
+        last_errors.join(
+            "
+"
+        )
+    ))
+}
+
+/// 流式进度事件（序列化为 SSE `data:` 帧）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamEvent {
+    AttemptStart {
+        attempt: u32,
+        max: u32,
+    },
+    Delta {
+        attempt: u32,
+        text: String,
+    },
+    AttemptDeltaDone {
+        attempt: u32,
+        text_len: usize,
+    },
+    Validated {
+        attempt: u32,
+    },
+    ValidationFailed {
+        attempt: u32,
+        errors: Vec<String>,
+    },
+    Retrying {
+        attempt: u32,
+        next: u32,
+    },
+    Done {
+        attempts: u32,
+        warnings: Vec<String>,
+        task: Value,
+    },
+    Error {
+        message: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

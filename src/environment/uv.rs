@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::environment::{
     EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
-    UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME, UV_MIN_VERSION, UV_RELEASES_BASE, UV_SYNC_TIMEOUT, UV_TARGET,
+    UV_DOWNLOAD_STALL_TIMEOUT, UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME, UV_FALLBACK_VERSION,
+    UV_MIN_VERSION, UV_MIRROR_PROBE_TIMEOUT, UV_RELEASES_BASE, UV_SYNC_TIMEOUT, UV_TARGET,
 };
 
 /// 等待环境子进程，同时响应用户取消与阶段超时。
@@ -276,9 +277,25 @@ pub async fn download_uv(
         let sha_urls = uv_sha_urls(&ver);
         let archive_urls = uv_archive_urls(&ver);
 
-        // 1. 下载 SHA256 校验文件（多镜像）
+        // 1. 下载 SHA256 校验文件（多镜像）；结果为空直接视为失败，避免后续校验永远不通过
         let expected_hash = match download_text_with_mirrors(mgr, &sha_urls).await {
-            Ok(text) => text.split_whitespace().next().unwrap_or("").to_string(),
+            Ok(text) => {
+                let hash = text.split_whitespace().next().unwrap_or("").to_string();
+                if hash.is_empty() {
+                    let msg = "SHA256 校验文件内容为空";
+                    tracing::warn!(
+                        "下载 uv SHA256 文件为空 (尝试 {}/{}): {}",
+                        attempt + 1,
+                        UV_DOWNLOAD_MAX_RETRIES,
+                        msg
+                    );
+                    last_err_msg = msg.to_string();
+                    let delay = UV_DOWNLOAD_RETRY_DELAY * (1u32 << attempt.min(3));
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                hash
+            }
             Err(e) => {
                 tracing::warn!(
                     "下载 uv SHA256 文件失败 (尝试 {}/{}): {}",
@@ -287,19 +304,24 @@ pub async fn download_uv(
                     e
                 );
                 last_err_msg = e.to_string();
-                tokio::time::sleep(UV_DOWNLOAD_RETRY_DELAY).await;
+                let delay = UV_DOWNLOAD_RETRY_DELAY * (1u32 << attempt.min(3));
+                tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
-        // 2. 流式下载压缩包到临时文件（多镜像 + 带超时）
+        // 2. 流式下载压缩包到临时文件（先并发测速选最快镜像，再按序尝试）
         let tmp_archive = env_path.join("uv-archive.tmp");
+        // 每轮下载前并发测速排序：最快的镜像优先，避免固定顺序下慢镜像拖满 300s 总超时
+        let archive_order = rank_mirror_urls(mgr, &archive_urls).await;
         let mut archive_downloaded = false;
-        for archive_url in &archive_urls {
+        for idx in archive_order {
+            let archive_url = &archive_urls[idx];
             if cancel.is_cancelled() {
                 return Err(EnvironmentError::Cancelled);
             }
             let _ = tokio::fs::remove_file(&tmp_archive).await;
+            // download_file_streaming 内部已带停滞检测，此处仅包一层总超时兜底
             let dl_result = tokio::time::timeout(
                 UV_DOWNLOAD_TIMEOUT,
                 download_file_streaming(mgr, archive_url, &tmp_archive),
@@ -315,9 +337,12 @@ pub async fn download_uv(
                     last_err_msg = e.to_string();
                 }
                 Err(_) => {
-                    tracing::debug!("压缩包下载超时: {}", archive_url);
+                    tracing::debug!("压缩包下载总超时: {}", archive_url);
                     last_err_msg = format!("下载超时 (超过 {}s)", UV_DOWNLOAD_TIMEOUT.as_secs());
                 }
+            }
+            if cancel.is_cancelled() {
+                return Err(EnvironmentError::Cancelled);
             }
         }
         if !archive_downloaded {
@@ -327,7 +352,8 @@ pub async fn download_uv(
                 UV_DOWNLOAD_MAX_RETRIES,
                 last_err_msg
             );
-            tokio::time::sleep(UV_DOWNLOAD_RETRY_DELAY).await;
+            let delay = UV_DOWNLOAD_RETRY_DELAY * (1u32 << attempt.min(3));
+            tokio::time::sleep(delay).await;
             continue;
         }
 
@@ -341,7 +367,8 @@ pub async fn download_uv(
             );
             let _ = tokio::fs::remove_file(&tmp_archive).await;
             last_err_msg = e.to_string();
-            tokio::time::sleep(UV_DOWNLOAD_RETRY_DELAY).await;
+            let delay = UV_DOWNLOAD_RETRY_DELAY * (1u32 << attempt.min(3));
+            tokio::time::sleep(delay).await;
             continue;
         }
 
@@ -387,19 +414,64 @@ pub async fn download_uv(
         return Ok(uv_dest);
     }
 
-    // 所有重试均失败
+    // 所有重试均失败：归类原因并给出可操作建议（与 Playwright 安装失败同风格），
+    // 重试次数由 UvDownloadIoFailed 的 Display 前缀（"重试 N 次"）携带，不再重复
+    let (cause, hint) = classify_uv_download_failure(&last_err_msg);
     Err(EnvironmentError::UvDownloadIoFailed {
         retries: UV_DOWNLOAD_MAX_RETRIES,
-        message: last_err_msg,
+        message: format!("原因：{cause}；建议：{hint}；详情：{last_err_msg}"),
     })
 }
 
-/// 通过 GitHub API 获取 uv 最新版本号（多镜像）
+/// uv 下载失败归类：从聚合错误文本识别超时/连接/HTTP 状态/磁盘等模式，
+/// 返回（原因，建议）随错误消息直接展示，帮助对照日志自查
+/// （与 `python::classify_playwright_failure` 同风格）。
+fn classify_uv_download_failure(detail: &str) -> (&'static str, &'static str) {
+    let lower = detail.to_ascii_lowercase();
+    if detail.contains("下载停滞") || detail.contains("下载超时") || lower.contains("timed out")
+    {
+        (
+            "下载超时或停滞",
+            "网络过慢或镜像限速；可稍后重试，或检查代理/防火墙设置",
+        )
+    } else if lower.contains("dns error")
+        || lower.contains("dns failure")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("connection aborted")
+        || lower.contains("unreachable")
+        || lower.contains("error trying to connect")
+        || lower.contains("certificate")
+        || lower.contains("tls")
+    {
+        (
+            "无法连接下载源",
+            "检查网络是否已通过校园网认证、代理是否可用、防火墙是否放行 GitHub 及镜像站",
+        )
+    } else if detail.contains("HTTP status") || detail.contains("HTTP ") {
+        // reqwest 状态错误形如 "HTTP status client error (404 ...)"，
+        // GitHub API 镜像路径形如 "HTTP 403"
+        (
+            "下载源返回错误",
+            "资源不存在或被限流（404/403/429/5xx）；可稍后重试",
+        )
+    } else if lower.contains("no space left") || lower.contains("enospc") {
+        ("磁盘空间不足", "清理磁盘空间后重试")
+    } else if detail.contains("大小上限") {
+        ("下载内容异常", "网络劫持或镜像返回了异常内容；可稍后重试")
+    } else {
+        ("下载失败", "检查网络与代理设置后重试“初始化 Python 环境”")
+    }
+}
+
+/// 通过 GitHub API 获取 uv 最新版本号（先并发测速选最快镜像，再按序尝试）
 async fn fetch_latest_uv_version(mgr: &EnvironmentManager) -> Result<String, EnvironmentError> {
     let urls = github_api_urls();
+    let order = rank_mirror_urls(mgr, &urls).await;
     let mut last_err = String::new();
 
-    for url in &urls {
+    for idx in order {
+        let url = &urls[idx];
         let resp = match tokio::time::timeout(
             UV_DOWNLOAD_TIMEOUT,
             mgr.http_client()
@@ -448,9 +520,8 @@ async fn fetch_latest_uv_version(mgr: &EnvironmentManager) -> Result<String, Env
         last_err = "tag_name 字段缺失".to_string();
     }
 
-    Err(EnvironmentError::GitHubApiError(format!(
-        "所有 GitHub API 镜像均失败: {last_err}"
-    )))
+    tracing::warn!("所有 GitHub API 镜像均失败({last_err})，回退到兜底版本 {UV_FALLBACK_VERSION}");
+    Ok(UV_FALLBACK_VERSION.to_string())
 }
 
 /// 下载文本内容（用于获取 SHA256 校验文件）
@@ -472,6 +543,14 @@ async fn download_text(mgr: &EnvironmentManager, url: &str) -> Result<String, En
         source: e,
     })?;
 
+    // 非 2xx（404/403/502 等）直接判失败，避免把错误页当作 sha 内容吃进校验
+    let resp = resp
+        .error_for_status()
+        .map_err(|e| EnvironmentError::UvDownloadFailed {
+            retries: 0,
+            source: e,
+        })?;
+
     resp.text()
         .await
         .map_err(|e| EnvironmentError::UvDownloadFailed {
@@ -480,27 +559,40 @@ async fn download_text(mgr: &EnvironmentManager, url: &str) -> Result<String, En
         })
 }
 
-/// 流式下载文件到指定路径（不含超时控制，由调用方包裹）
+/// 流式下载文件到指定路径（带停滞检测：慢网只要出数据就不判失败，仅彻底停滞才超时）
 async fn download_file_streaming(
     mgr: &EnvironmentManager,
     url: &str,
     dest: &Path,
 ) -> Result<(), EnvironmentError> {
-    crate::utils::io::download_streaming(mgr.http_client(), url, dest, 256 * 1024 * 1024)
-        .await
-        .map_err(|e| match e {
-            crate::utils::io::DownloadError::Http(e) => EnvironmentError::UvDownloadFailed {
+    crate::utils::io::download_streaming_with_stall(
+        mgr.http_client(),
+        url,
+        dest,
+        256 * 1024 * 1024,
+        Some(UV_DOWNLOAD_STALL_TIMEOUT),
+    )
+    .await
+    .map_err(|e| match e {
+        crate::utils::io::DownloadError::Http(e) => EnvironmentError::UvDownloadFailed {
+            retries: 0,
+            source: e,
+        },
+        crate::utils::io::DownloadError::Io(e) => EnvironmentError::UvExtractFailed(e),
+        crate::utils::io::DownloadError::Stalled {
+            idle_secs,
+            received_bytes,
+        } => EnvironmentError::UvDownloadIoFailed {
+            retries: 0,
+            message: format!("下载停滞（{idle_secs}s 内无数据，已接收 {received_bytes} 字节）"),
+        },
+        crate::utils::io::DownloadError::TooLarge { limit } => {
+            EnvironmentError::UvDownloadIoFailed {
                 retries: 0,
-                source: e,
-            },
-            crate::utils::io::DownloadError::Io(e) => EnvironmentError::UvExtractFailed(e),
-            crate::utils::io::DownloadError::TooLarge { limit } => {
-                EnvironmentError::UvDownloadIoFailed {
-                    retries: 0,
-                    message: format!("下载内容超过大小上限 {limit} 字节"),
-                }
+                message: format!("下载内容超过大小上限 {limit} 字节"),
             }
-        })
+        }
+    })
 }
 
 /// 校验文件 SHA256 与期望值一致
@@ -637,9 +729,16 @@ pub async fn run_uv_sync(
         if output.status.success() {
             return Ok(());
         }
+        // 全量 stderr 留给日志排查；进错误消息的 stderr 截尾到 400 字符，
+        // 保证末尾的"可能原因"提示不被 last_error 的 600 字符截断吃掉
+        let stderr_full = String::from_utf8_lossy(&output.stderr).into_owned();
+        tracing::warn!(
+            "uv sync 第 {attempt}/{UV_DOWNLOAD_MAX_RETRIES} 次失败，stderr: {}",
+            crate::environment::python::tail_chars(&stderr_full, 4000)
+        );
         last_err = Some(EnvironmentError::UvSyncFailed {
             exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr: crate::environment::python::tail_chars(&stderr_full, 400),
         });
     }
     Err(last_err.expect("uv sync 重试循环结束后必有最后一次错误"))
@@ -764,11 +863,17 @@ async fn run_uv_package_alter(
         Ok(())
     } else {
         backup.restore().await;
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        // 同 run_uv_sync：全量 stderr 留给日志，错误消息内截尾保证提示可见
+        let stderr_full = String::from_utf8_lossy(&output.stderr).into_owned();
+        tracing::warn!(
+            "uv {op} 失败 (exit code={:?})，stderr: {}",
+            output.status.code(),
+            crate::environment::python::tail_chars(&stderr_full, 4000)
+        );
         Err(EnvironmentError::UvPackageAlterFailed {
             op,
             exit_code: output.status.code(),
-            stderr,
+            stderr: crate::environment::python::tail_chars(&stderr_full, 400),
         })
     }
 }
@@ -868,18 +973,95 @@ fn github_api_urls() -> Vec<String> {
     urls
 }
 
-/// 尝试从多个镜像下载文本，第一个成功即返回
+/// 并发探测镜像可用性，按首字节到达延迟升序返回 URL 索引。
 ///
-/// 镜像逐个尝试属常规路径（部分镜像不可达是常态），逐镜像日志降为 debug，
-/// 仅最终成功（调用方 `uv 下载安装成功`）与整体失败保留可见级别。
+/// - 每个 URL 并发发起 `HEAD`（失败自动回退 `Range: bytes=0-0` 的 GET）；
+/// - 超时（`UV_MIRROR_PROBE_TIMEOUT`）或网络/非 2xx 的镜像直接淘汰；
+/// - 成功镜像按耗时升序排序，作为后续下载的尝试顺序——最快的优先。
+async fn rank_mirror_urls(mgr: &EnvironmentManager, urls: &[String]) -> Vec<usize> {
+    if urls.len() <= 1 {
+        return (0..urls.len()).collect();
+    }
+    let client = mgr.http_client().clone();
+    let mut handles = Vec::with_capacity(urls.len());
+    for (idx, url) in urls.iter().enumerate() {
+        let client = client.clone();
+        let url = url.clone();
+        handles.push(tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let outcome = tokio::time::timeout(UV_MIRROR_PROBE_TIMEOUT, async {
+                // 优先 HEAD：多数镜像与 GitHub Release 支持；不落地 body
+                let head_ok = client
+                    .head(&url)
+                    .header("User-Agent", "campus-auth")
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status().map(|_| ()))
+                    .is_ok();
+                if head_ok {
+                    return Ok(());
+                }
+                // HEAD 不被支持（如部分代理镜像）时回退到 1 字节 Range GET
+                client
+                    .get(&url)
+                    .header("User-Agent", "campus-auth")
+                    .header("Range", "bytes=0-0")
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status().map(|_| ()))
+                    .map(|_| ())
+            })
+            .await;
+            let elapsed = started.elapsed();
+            match outcome {
+                Ok(Ok(())) => Some((idx, elapsed)),
+                _ => None,
+            }
+        }));
+    }
+    let mut ranked: Vec<(usize, std::time::Duration)> = Vec::new();
+    let mut failed = 0usize;
+    for h in handles {
+        match h.await {
+            Ok(Some(pair)) => ranked.push(pair),
+            Ok(None) => failed += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    ranked.sort_by_key(|(_, d)| *d);
+    if ranked.is_empty() {
+        tracing::debug!("镜像测速：{} 个全部超时/失败，回退原序逐个尝试", urls.len());
+        return (0..urls.len()).collect();
+    }
+    if failed > 0 {
+        tracing::debug!(
+            "镜像测速：{} 个可用、{} 个超时/失败，按延迟排序",
+            ranked.len(),
+            failed
+        );
+    } else {
+        tracing::debug!(
+            "镜像测速：{} 个均可用，按延迟排序（最快优先）",
+            ranked.len()
+        );
+    }
+    ranked.into_iter().map(|(idx, _)| idx).collect()
+}
+
+/// 尝试从多个镜像下载文本，优先使用最快的镜像。
+///
+/// 先并发探测全部 URL 的首字节延迟并按延迟排序，再按测速结果依次尝试下载；
+/// 测速超时/失败的镜像不会被优先，但仍会在排序末尾保留作为兜底。
 async fn download_text_with_mirrors(
     mgr: &EnvironmentManager,
     urls: &[String],
 ) -> Result<String, EnvironmentError> {
+    let order = rank_mirror_urls(mgr, urls).await;
     let mut last_err = String::new();
-    tracing::debug!("尝试 {} 个镜像下载", urls.len());
-    for (i, url) in urls.iter().enumerate() {
-        tracing::debug!("镜像 {}/{}: {}", i + 1, urls.len(), url);
+    tracing::debug!("尝试 {} 个镜像下载（已按测速排序）", urls.len());
+    for (rank, idx) in order.iter().enumerate() {
+        let url = &urls[*idx];
+        tracing::debug!("镜像 {}/{}: {}", rank + 1, urls.len(), url);
         match download_text(mgr, url).await {
             Ok(text) => {
                 tracing::debug!("镜像 {} 下载成功", url);
@@ -1085,6 +1267,39 @@ mod tests {
         let shas = uv_sha_urls("0.5.0");
         assert_eq!(shas[0], uv_sha_url("0.5.0"));
         assert_eq!(shas.len(), archives.len());
+    }
+
+    /// 失败归类：超时/连接/HTTP/磁盘/兜底各走对应原因与建议。
+    #[test]
+    fn test_classify_uv_download_failure_branches() {
+        let (cause, hint) =
+            classify_uv_download_failure("下载停滞（60s 内无数据，已接收 1024 字节）");
+        assert_eq!(cause, "下载超时或停滞");
+        assert!(hint.contains("重试"));
+
+        let (cause, _) = classify_uv_download_failure("下载超时 (超过 300s)");
+        assert_eq!(cause, "下载超时或停滞");
+
+        let (cause, hint) = classify_uv_download_failure(
+            "uv 下载失败 (重试 0 次): error sending request for url (https://github.com): error trying to connect: dns error: failed to lookup",
+        );
+        assert_eq!(cause, "无法连接下载源");
+        assert!(hint.contains("防火墙"));
+
+        let (cause, _) = classify_uv_download_failure(
+            "HTTP status client error (404 Not Found) for url (https://example.com/x)",
+        );
+        assert_eq!(cause, "下载源返回错误");
+
+        let (cause, _) = classify_uv_download_failure("所有镜像均失败: HTTP 403");
+        assert_eq!(cause, "下载源返回错误");
+
+        let (cause, _) = classify_uv_download_failure("ENOSPC: no space left on device");
+        assert_eq!(cause, "磁盘空间不足");
+
+        let (cause, hint) = classify_uv_download_failure("boom");
+        assert_eq!(cause, "下载失败");
+        assert!(hint.contains("重试"));
     }
 
     /// SHA256 校验：正确值通过，错误值被拒

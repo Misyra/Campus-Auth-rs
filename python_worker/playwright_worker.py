@@ -87,14 +87,30 @@ def _browser_data_dir() -> Path:
     return root / "config" / "browser-data"
 
 
+def _runtime_worker_project_dir() -> Path:
+    """运行时 worker 工程目录：与 Rust 侧 ``worker_project_dir`` 首选候选对齐。
+
+    debug 截图与 AI 捕获产物均由 Rust 按 ``<base_path>/python_worker`` 读盘，
+    Python 写入侧必须锚定同一目录——resources 提取 / 只读安装布局下脚本目录
+    （``_WORKER_DIR``）与运行时工程目录可能不同。env 缺失或目录不存在时回退
+    脚本目录（dev 场景两者本就相同，Rust 的多级兜底也落在同一处）。
+    """
+    base = os.environ.get("CAMPUS_AUTH_BASE_PATH")
+    if base:
+        candidate = Path(base).resolve() / "python_worker"
+        if candidate.exists():
+            return candidate
+    return _WORKER_DIR
+
+
 def _debug_screenshot_dir() -> Path:
-    """调试截图目录（锚定到 worker 脚本目录，不依赖进程 CWD）。"""
-    return _WORKER_DIR / "debug"
+    """调试截图目录（锚定运行时 worker 工程目录，与 Rust 读盘侧一致）。"""
+    return _runtime_worker_project_dir() / "debug"
 
 
 def _capture_dir() -> Path:
-    """AI 任务生成的页面捕获目录（与 debug 截图同语义锚定，latest 每次覆盖）。"""
-    return _WORKER_DIR / "captures" / "latest"
+    """AI 任务生成的页面捕获目录（同上锚定，latest 每次覆盖）。"""
+    return _runtime_worker_project_dir() / "captures" / "latest"
 
 
 # 模块加载时刻：启动清理时用于判定“上次会话残留”（mtime 早于该时刻的文件）
@@ -952,8 +968,15 @@ class WorkerCore:
         浏览器资源。不关闭整个浏览器，避免影响后续轻量请求。
         """
         if self._page is not None:
-            await self._safe_close(self._page, "页面")
+            page = self._page
+            await self._safe_close(page, "页面")
             self._page = None
+            # 对齐步骤层 _on_page_lost 语义：依赖该页的调试会话一并结束，
+            # 否则僵尸会话持续占用"单会话"槽位，登录/任务被 B3 守卫持续拒绝
+            for sid, session in list(self._debug_sessions.items()):
+                if getattr(session, "page", None) is page:
+                    self._debug_sessions.pop(sid, None)
+                    logger.warning("调试会话 %s 因命令级超时强制中断页面而结束", sid)
 
     async def _handle_low_resource_request(self, route) -> None:
         """低资源模式请求处理：拦截图片/字体/媒体。"""
@@ -1252,6 +1275,7 @@ class WorkerCore:
         session_id = uuid.uuid4().hex
         self._session_type = "debug"
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+        session_established = False
         try:
             task = TaskConfig.from_dict(task_raw)
 
@@ -1289,6 +1313,7 @@ class WorkerCore:
                 task_id=task.task_id,
                 steps_info=_build_steps_info(task),
             )
+            session_established = True
             # 初始截图
             try:
                 stamp = str(int(time.time() * 1000))
@@ -1303,10 +1328,11 @@ class WorkerCore:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"调试会话初始截图失败: {exc}")
             return self._debug_response(self._debug_sessions[session_id])
-        except Exception:
-            if cancel_id:
+        finally:
+            # 会话建成 → 令牌交由 debug_stop/会话结束管理；其余任何退出路径
+            # （含命令级超时 task.cancel() 的 CancelledError）都注销，防泄漏
+            if cancel_id and not session_established:
                 cancel_registry.unregister(cancel_id)
-            raise
 
     def _debug_session_for(self, session_id: str) -> "DebugSession":
         """解析调试会话：显式 session_id 优先；为空时回退到唯一活跃会话。
@@ -1634,11 +1660,12 @@ class WorkerCore:
                 "resources_count": len(resources),
                 "note": note,
             }
-        except Exception:
+        finally:
+            # finally 而非 except Exception：命令级超时的 task.cancel() 产生
+            # CancelledError（BaseException），except Exception 拦不住会跳过注销
             self._arm_browser_idle_release()
             if cancel_id:
                 cancel_registry.unregister(cancel_id)
-            raise
 
     async def handle_feedback_capture(self, params: dict) -> dict:
         """捕获当前调试页面的完整 MHTML、截图与 CSS/JS 资源（供导出问题报告）。
@@ -1711,16 +1738,35 @@ class WorkerCore:
             raise WorkerError(Outcome.UNKNOWN_ERROR, f"落盘失败: {exc}") from exc
 
     async def handle_ocr_recognize(self, params: dict) -> dict:
-        """识别 base64 图片中的文本（ddddocr），模型加载与推理共享总超时预算。"""
+        """识别 base64 图片中的文本（ddddocr），模型加载与推理共享总超时预算。
+
+        注册 cancel_id：Rust 侧 /api/ocr/uninstall 据此取消在途识别（Windows 上
+        onnxruntime DLL 被占用会导致 uv remove 失败），模型加载与推理阶段均响应取消。
+        """
+        cancel_id = params.get("cancel_id", "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+        try:
+            return await self._ocr_recognize_impl(params, cancel_event)
+        finally:
+            # finally 而非 except Exception：命令级超时的 CancelledError 也要注销
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
+
+    async def _ocr_recognize_impl(self, params: dict, cancel_event: Any) -> dict:
         image_base64 = params.get("image_base64", "")
         if not image_base64:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "ocr_recognize 缺少 image_base64")
+
+        def _ensure_not_cancelled(stage: str) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise WorkerError(Outcome.UNKNOWN_ERROR, f"OCR 识别已取消（{stage}）")
 
         deadline = time.monotonic() + OCR_TIMEOUT_SECS
 
         def remaining_timeout() -> float:
             return max(0.0, deadline - time.monotonic())
 
+        _ensure_not_cancelled("模型加载前")
         try:
             # 模型构造（DdddOcr()）同步加载 onnx 模型，可能首次加载较慢。
             # 与后续 classification 共用 OCR_TIMEOUT_SECS 总预算，避免两阶段各吃满一次超时。
@@ -1737,11 +1783,14 @@ class WorkerCore:
                 f"OCR 处理超时（>{OCR_TIMEOUT_SECS}s，模型加载阶段）。"
                 "若持续超时请检查 OCR 依赖是否完整",
             ) from None
+        except WorkerError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise WorkerError(
                 Outcome.UNKNOWN_ERROR,
                 f"ddddocr 未安装或加载失败: {exc}。请在设置页安装 OCR 依赖后重试",
             ) from exc
+        _ensure_not_cancelled("推理前")
         try:
             img_bytes = base64.b64decode(image_base64)
         except Exception as exc:  # noqa: BLE001

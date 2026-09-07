@@ -93,6 +93,9 @@ export const monitorApi = {
   fetchStatus: () => http.get<import("./types").StatusSnapshot>("/api/monitor/status"),
   start: () => http.post<MutationResult>("/api/monitor/start"),
   stop: () => http.post<MutationResult>("/api/monitor/stop"),
+  /** 认证门户检测：未认证时跟随 302 返回候选门户地址，需先退出登录 */
+  detectPortal: () =>
+    http.post<import("./types").PortalDetectResult>("/api/monitor/detect-portal", null, { timeout: 60000 }),
 };
 
 /** 一次性操作 */
@@ -144,9 +147,23 @@ export const environmentApi = {
 export const profilesApi = {
   list: () => http.get<ProfileListResponse>("/api/profiles"),
   get: (id: string) => http.get<{ settings: Profile }>(`/api/profiles/${pathSegment(id)}`),
-  // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password（对齐后端 ProfileCreateBody 必填字段）
-  create: (id: string, payload: { id: string; name: string; username: string; password: string }) =>
-    http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
+  // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password；
+  // 可选设置字段（auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task）与 PUT 同语义
+  create: (
+    id: string,
+    payload: {
+      id: string;
+      name: string;
+      username: string;
+      password: string;
+      auth_url?: string;
+      trigger_url?: string;
+      isp?: string;
+      gateway_ip?: string;
+      wifi_ssid?: string;
+      active_task?: string;
+    },
+  ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   save: (id: string, payload: Profile) => http.put<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${pathSegment(id)}`),
   setActive: (id: string) => http.post<MutationResult>("/api/profiles/switch", { profile_id: id }),
@@ -192,6 +209,14 @@ export const aiApi = {
     http.post<AiCaptureResult>("/api/ai/capture", { url }, { timeout: 90000 }),
   // 截图经 <img> 直接引用（GET 免鉴权），不走 http 封装
   captureScreenshotUrl: () => `/api/ai/capture/screenshot?t=${Date.now()}`,
+  /** 查询最近一次捕获产物是否可用（页面刷新后恢复状态用） */
+  captureStatus: () =>
+    http.get<{
+      available: boolean;
+      request_url?: string;
+      final_url?: string;
+      title?: string;
+    }>("/api/ai/capture/status"),
   /** 保存页面文件：MHTML 完整布局 + HTML + CSS/JS 资源 + 截图（后端打 zip，返回 Blob） */
   async captureBundle(): Promise<Blob> {
     const token = await ensureAuthToken();
@@ -200,9 +225,98 @@ export const aiApi = {
       headers: token ? { "X-Auth-Token": token } : undefined,
     });
   },
-  // 生成含 1~2 轮 LLM 调用（每轮最长 120s），放宽客户端超时
+  // 生成含 1~2 轮 LLM 调用（每轮最长 120s），放宽客户端超时（保留非流式回退）
   generate: (payload: { extra_prompt?: string }) =>
     http.post<AiGenerateResult>("/api/ai/generate", payload, { timeout: 300000 }),
+  /** 流式生成（SSE）：增量推送，空闲超时语义（有输出自动续命，仅连续无内容达阈值才超时，最大 10 分钟） */
+  async generateStream(
+    payload: { extra_prompt?: string },
+    opts: {
+      onEvent: (ev: Record<string, unknown>) => void;
+      signal?: AbortSignal;
+      /** 空闲超时 ms，默认 600_000（10 分钟），有内容即重置，仅无内容连续达阈值才超时 */
+      idleTimeoutMs?: number;
+    },
+  ): Promise<void> {
+    const idleMs = opts.idleTimeoutMs ?? 600_000;
+    const token = await ensureAuthToken();
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort((opts.signal as unknown as { reason?: unknown })?.reason);
+    if (opts.signal) {
+      if (opts.signal.aborted) onCallerAbort();
+      else opts.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(new DOMException("空闲超时（连续无内容达阈值）", "AbortError")), idleMs);
+    };
+    const clearIdle = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = null; };
+    resetIdle();
+    try {
+      const res = await fetch("/api/ai/generate/stream", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "X-Auth-Token": token } : {}),
+        },
+        body: JSON.stringify(payload ?? {}),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        let msg = `生成失败 (${res.status})`;
+        try { const j = JSON.parse(text) as { error?: { message?: string } }; if (j?.error?.message) msg = j.error.message; } catch { if (text) msg = text.slice(0, 400); }
+        throw new Error(msg);
+      }
+      if (!res.body) throw new Error("浏览器不支持流式响应（ReadableStream 缺失）");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // 按 SSE 帧分割（\n\n）
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const lines = frame.split("\n");
+          for (const raw of lines) {
+            const line = raw.trim();
+            if (!line || line.startsWith(":")) continue;
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (!data) continue;
+            try {
+              const ev = JSON.parse(data) as Record<string, unknown>;
+              // 仅真实数据帧续命空闲计时：后端 ": keepalive" 注释帧只证明连接存活，
+              // 不代表有内容——否则任何 ≥ keepalive 间隔的空闲阈值都永远打不到
+              resetIdle();
+              opts.onEvent(ev);
+            } catch { /* ignore non-json keepalive */ }
+          }
+        }
+      }
+      // 处理尾部残留
+      const tail = buf.trim();
+      if (tail.startsWith("data:")) {
+        try { opts.onEvent(JSON.parse(tail.slice(5).trim()) as Record<string, unknown>); } catch {}
+      }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        const reason = (e as DOMException).message || "";
+        if (reason.includes("空闲超时")) throw new Error(`空闲超时（>${Math.round(idleMs/1000)}s 无输出），请检查网络或稍后重试`);
+        // 调用方主动取消：静默向上抛 AbortError 语义
+        throw e;
+      }
+      throw e;
+    } finally {
+      clearIdle();
+      opts.signal?.removeEventListener("abort", onCallerAbort);
+    }
+  },
 };
 
 /** 登录历史 */

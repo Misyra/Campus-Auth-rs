@@ -195,7 +195,7 @@ with urlopen(request, timeout=30) as response:
             <h4>注意事项</h4>
             <ul>
               <li>脚本超时默认 60 秒</li>
-              <li>脚本设为活动任务后，自动监控会使用脚本登录</li>
+              <li>脚本设为活动任务后，自动检测会使用脚本登录</li>
               <li>stderr 输出会记录到日志，不影响结果判断</li>
             </ul>
           </div>

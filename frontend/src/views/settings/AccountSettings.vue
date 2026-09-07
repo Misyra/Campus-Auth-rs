@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
+import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useProfiles } from "@/composables/useProfiles";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
@@ -49,6 +50,13 @@ const redirectEnabled = computed({
       : "";
   },
 });
+const portalDetect = usePortalDetect();
+
+/** 检测门户：抓到地址直接填入认证地址输入框 */
+async function detectPortalForSettings(): Promise<void> {
+  const url = await portalDetect.detectPortal();
+  if (url) config.config.credentials.auth_url = url;
+}
 </script>
 
 <template>
@@ -92,9 +100,16 @@ const redirectEnabled = computed({
         <div class="form-group">
           <div class="field-label-row">
             <label for="settings-auth-url">认证地址</label>
-<FieldHelp text="校园网认证页面的地址，以 http:// 或 https:// 开头。重定向模式下可留空，仅填触发地址。" />
+            <FieldHelp text="校园网认证页面的地址，以 http:// 或 https:// 开头。重定向模式下可留空，仅填触发地址。" />
           </div>
-          <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="https://auth.example.edu.cn" />
+          <div class="input-with-action">
+            <input id="settings-auth-url" v-model.trim="config.config.credentials.auth_url" type="text" placeholder="https://auth.example.edu.cn" />
+            <button class="btn btn-secondary btn-sm" @click="detectPortalForSettings" :disabled="portalDetect.detecting.value" title="需先退出校园网登录：未认证时跟随跳转自动填入">
+              <IconApp name="globe" class="icon-sm" />
+              {{ portalDetect.detecting.value ? '检测中…' : '自动检测' }}
+            </button>
+          </div>
+          <span class="hint">需先退出校园网登录再检测（已在线时无跳转可抓）</span>
         </div>
         <div class="form-group">
           <div class="toggle-with-help">

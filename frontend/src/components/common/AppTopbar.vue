@@ -96,11 +96,11 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
         class="btn btn-primary"
         @click="toggleMonitor"
         :disabled="busy.monitor"
-        :title="status.monitoring ? '停止网络监控和自动登录' : '开始监控网络，断网时自动登录'"
+        :title="status.monitoring ? '停止网络检测和自动登录' : '开始检测网络，断网时自动登录'"
       >
         <span v-if="busy.monitor" class="spinner" style="border-top-color: var(--on-accent)"></span>
         <IconApp v-else class="btn-icon" :name="status.monitoring ? 'pause' : 'play'" />
-        {{ busy.monitor ? "处理中..." : (status.monitoring ? "停止监控" : "启动监控") }}
+        {{ busy.monitor ? "处理中..." : (status.monitoring ? "停止检测" : "启动检测") }}
       </button>
     </div>
   </header>

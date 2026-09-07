@@ -221,7 +221,7 @@ wait_for_selector
 3. 在 `option_selector` 范围内按 `value` 文本寻找唯一选项；
 4. 点击匹配项。
 
-`option_selector` 只是搜索范围，不是最终要点击的值。触发器点击、展开等待和选项点击共用同一个步骤 timeout 预算。
+`option_selector` 只是搜索范围，不是最终要点击的值。触发器点击、展开等待和选项点击共用同一个步骤 timeout 预算。`value` 必填：缺失时校验层拒绝新任务，绕过校验的存量任务执行时也会显式报错（不会静默跳过）。
 
 ## 10. wait / sleep / wait_for_selector
 
@@ -283,7 +283,9 @@ wait_for_selector
 
 `custom_js` 是 Rust 保存层接受的历史兼容类型。`code` 仍可作为 `script` 的历史字段别名，并在加载时规范化为 `script`。
 
-`timeout` 会真正约束该步骤；若脚本长期不返回，Worker 会中断对应页面以避免悬挂。`store_as` 保留结果原生类型。
+`timeout` 会真正约束该步骤；超时/取消时 Worker 只中断 JS 调用本身、不关闭页面，后续步骤（含失败截图）不受影响。`store_as` 保留结果原生类型。
+
+`eval` 也支持 `frame`：脚本在对应 Frame 内执行。注意此时 `frame` 仅支持 name 与 `url=片段` 两种规格（JS 无法经 CSS 选择器的 `frame_locator` 执行），CSS 形式会显式报错而不是静默在主 frame 跑。
 
 ## 13. goto / navigate — 页面导航
 
@@ -418,6 +420,8 @@ iframe#login-frame          # iframe/frame CSS selector
 ```
 
 name 或 URL 匹配到多个 frame 时会失败，避免静默操作错误页面。
+
+注意：`eval` / `assert_text` 直接执行脚本，`frame` 仅支持 name 与 `url=` 两种可解析为 Frame 的规格；CSS 选择器形式仅适用于元素类步骤（input/click/select 等）。
 
 ## 19. success_condition
 

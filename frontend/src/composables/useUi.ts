@@ -81,12 +81,12 @@ async function checkInitStatus(): Promise<void> {
     const data: InitStatus = await systemApi.initStatus();
     state.showWizard = !data.agreed;
     if (data.password_decryption_failed) {
-      frontendLogger.error("init", "密码解密失败，请在设置页面重新输入密码");
+      frontendLogger.error("app", "密码解密失败，请在设置页面重新输入密码");
       notify(false, "密码解密失败，请在设置页面重新输入密码", "security");
     }
   } catch (error) {
     if (error instanceof ApiError && error.status) state.showWizard = false;
-    frontendLogger.warn("init", "检查初始化状态失败", error);
+    frontendLogger.warn("app", "检查初始化状态失败", error);
   }
 }
 
@@ -96,7 +96,7 @@ async function finishWizard(): Promise<void> {
     await systemApi.agree();
     state.showWizard = false;
     state.agreedToTerms = false;
-    frontendLogger.info("lifecycle", "已同意协议");
+    frontendLogger.info("app", "已同意协议");
   } catch (error) {
     toastOnly(false, extractApiError(error, "操作失败"));
   } finally {
@@ -128,7 +128,7 @@ async function toggleMonitor(): Promise<void> {
     await useStatus().fetchStatus();
   } catch (error) {
     const msg = extractApiError(error, "操作失败");
-    frontendLogger.error("monitor", "切换监控失败", msg);
+    frontendLogger.error("monitor", "切换检测失败", msg);
     notify(false, msg, "monitor");
   } finally {
     busy.monitor = false;
@@ -161,7 +161,7 @@ async function manualLogin(): Promise<void> {
     await fetchLoginHistory(true);
   } catch (error) {
     const msg = extractApiError(error, "手动登录失败");
-    frontendLogger.error("action", "手动登录失败", msg);
+    frontendLogger.error("login", "手动登录失败", msg);
     notify(false, stripScreenshotHint(msg), "login");
   } finally {
     busy.login = false;
@@ -311,7 +311,7 @@ async function init(): Promise<void> {
   // F9：保存轮询定时器 id，退出时 clearInterval，避免 quitApp 后页面仍持续轮询
   const statusPollTimer = setInterval(() => {
     const s = useStatus();
-    void s.fetchStatus().catch((err) => frontendLogger.warn("status_poll", err));
+    void s.fetchStatus().catch((err) => frontendLogger.warn("status", err));
   }, TIMING.STATUS_POLL_INTERVAL);
   const autostartPollTimer = setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
   statusPollTimerIds.push(statusPollTimer);

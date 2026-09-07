@@ -121,9 +121,10 @@
   height: 16px;
 }
 
-/* 浅色主题下 logo 文字改用主题色渐变 */
+/* 浅色主题下 logo 文字改用主题色渐变（同色系深浅：accent → accent-hover，
+   自定义强调色时跟随变化而非固定 indigo） */
 [data-theme="light"] .logo-text {
-  background: linear-gradient(135deg, var(--accent), #6366f1);
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   -webkit-background-clip: text;
   background-clip: text;
 }

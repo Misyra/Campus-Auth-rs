@@ -750,12 +750,25 @@ impl LoginSession {
                 }
             }
         }
-        info!(
-            source = ?result.source,
-            success = result.success,
-            "登录会话结束: {}",
-            result.message
-        );
+        // 失败升 warn 并附可能原因提示（成功/取消保持 info）：失败与成功同级别时
+        // 在日志里不显眼，排查困难；自动来源的失败另有 handle_login_result 的
+        // 结构化 warn（含连续失败计数），此处覆盖 Manual/Browser 全部来源
+        if history == HistoryResult::Failed {
+            warn!(
+                source = ?result.source,
+                attempts = result.attempts,
+                "登录失败: {}（{}）",
+                result.message,
+                login_failure_hint(&result.message)
+            );
+        } else {
+            info!(
+                source = ?result.source,
+                success = result.success,
+                "登录会话结束: {}",
+                result.message
+            );
+        }
     }
 
     /// 以「已取消」终态收尾：写入取消原因（`None` 保留既有原因）→ emit 取消结果 → 写历史。
@@ -826,6 +839,40 @@ impl LoginSession {
     }
 }
 
+/// 登录失败可能原因提示：按失败消息关键词轻量归类，随 warn 日志透出。
+///
+/// 失败消息来自任务步骤（导航/选择器/断言超时）、门户拒绝、环境未就绪等多源，
+/// 没有统一错误码，只能按关键词归类；命中不到就走通用兜底。
+/// 分支顺序即优先级：环境/Profile 属于本地配置问题，先于门户行为判定。
+fn login_failure_hint(message: &str) -> &'static str {
+    if message.contains("未就绪")
+        || message.contains("初始化")
+        || message.contains("Worker 未安装")
+        || message.contains("浏览器")
+    {
+        "可能原因：Python 环境/浏览器未就绪，可先在设置页初始化 Python 环境或检查浏览器配置"
+    } else if message.contains("Profile") || message.contains("加载失败") {
+        "可能原因：Profile 加载失败，请检查该 Profile 的账号密码与认证地址配置"
+    } else if message.contains("验证码") || message.contains("OCR") || message.contains("captcha")
+    {
+        "可能原因：门户出现验证码或 OCR 异常，自动登录受限，可改用手动登录"
+    } else if message.contains("密码")
+        || message.contains("账号")
+        || message.contains("用户名")
+        || message.contains("认证失败")
+    {
+        "可能原因：账号或密码有误、门户要求验证码，请核对 Profile 配置"
+    } else if message.contains("选择器") || message.contains("selector") || message.contains("元素")
+    {
+        "可能原因：认证页结构可能已变化导致步骤选择器失效，需更新登录任务步骤"
+    } else if message.contains("超时") || message.contains("timeout") || message.contains("Timeout")
+    {
+        "可能原因：门户响应超时，弱网或认证页加载异常，可重试"
+    } else {
+        "可能原因：门户状态异常或网络受限，可查看完整日志或手动打开认证页确认"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,6 +880,21 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     // ============ classify 纯函数测试 ============
+
+    /// 失败原因归类：环境/Profile/验证码/凭据/选择器/超时/兜底各走对应提示。
+    #[test]
+    fn test_login_failure_hint_branches() {
+        assert!(
+            login_failure_hint("浏览器能力未就绪，自动初始化失败").contains("初始化 Python 环境")
+        );
+        assert!(login_failure_hint("指定 Profile p1 加载失败，已拒绝登录").contains("Profile"));
+        assert!(login_failure_hint("OCR 识别超时（>60s）").contains("验证码"));
+        assert!(login_failure_hint("门户返回：用户名或密码错误").contains("账号或密码"));
+        assert!(login_failure_hint("操作超时: 30000ms").contains("门户响应超时"));
+        assert!(login_failure_hint("输入元素操作超时: #password").contains("选择器"));
+        let fallback = login_failure_hint("boom");
+        assert!(fallback.contains("门户状态异常"));
+    }
 
     #[test]
     fn test_classify_success_is_terminal_success() {

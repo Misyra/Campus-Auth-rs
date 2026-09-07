@@ -5,9 +5,11 @@
 //! 保证运行期修改即时生效。
 
 pub mod decision;
+pub mod portal;
 pub mod probes;
 
 pub use decision::evaluate;
+pub use portal::{PortalDetectResult, PortalDetectStatus, detect_portal};
 pub use probes::{PerProbeDetail, ProbeKind, ProbeOutcome, parse_url_host_port};
 
 use std::collections::HashMap;
@@ -211,9 +213,9 @@ impl MonitorService {
                     .store(disable_proxy, std::sync::atomic::Ordering::Relaxed);
                 self.last_ignore_certs
                     .store(ignore_certs, std::sync::atomic::Ordering::Relaxed);
-                tracing::info!("监测客户端已按新配置重建");
+                tracing::info!("检测客户端已按新配置重建");
             }
-            Err(e) => tracing::warn!("监测客户端重建失败，沿用旧客户端: {e}"),
+            Err(e) => tracing::warn!("检测客户端重建失败，沿用旧客户端: {e}"),
         }
     }
 

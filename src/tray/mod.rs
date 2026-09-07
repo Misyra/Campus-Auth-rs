@@ -602,7 +602,7 @@ fn update_tray(
 /// 监测切换项使用固定 id `monitor_toggle`，具体动作（启动/停止）由菜单事件 handler
 /// 根据当前引擎状态决定，从而实现「id 不变、文本随状态切换」。
 fn build_menu() -> MenuBuildResult {
-    let toggle_item = MenuItem::with_id(MenuId::new("monitor_toggle"), "启动监测", true, None);
+    let toggle_item = MenuItem::with_id(MenuId::new("monitor_toggle"), "启动检测", true, None);
     let update_item = MenuItem::with_id(MenuId::new("check_update"), "检查更新", true, None);
     let menu_items: Vec<Box<dyn IsMenuItem>> = vec![
         Box::new(toggle_item.clone()),

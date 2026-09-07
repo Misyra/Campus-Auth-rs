@@ -8,7 +8,7 @@ import type { ScheduledTask, ScheduledTaskHistoryItem } from "../api/types";
 import { scheduledTasksApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
-import { createFetchGuard, useBusyIds } from "../utils/guards";
+import { createFetchGuard, createFirstFailNotifier, useBusyIds } from "../utils/guards";
 import { formatScheduleTime, formatTimeValue } from "../utils/formatters";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
@@ -66,6 +66,8 @@ const originalCronInvalid = ref(false);
 
 // A11：手动运行 busy 守卫（响应式 Set），防止连点重复提交
 const runningIds = useBusyIds();
+// 启停开关 busy 守卫：toggle 无 in-flight 防护时快速双击会发出两次请求，终态取决于响应顺序
+const togglingIds = useBusyIds();
 
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
@@ -74,6 +76,8 @@ const { confirm } = useConfirm();
 // 不再重复请求）。失败不记录时间戳以便重试；force: true 供变更后刷新 /
 // 重连回调等显式刷新场景绕过守卫。
 const fetchGuard = createFetchGuard(5000);
+// 首败提示：加载失败时不再静默显示"暂无定时任务"空态误导用户
+const loadFail = createFirstFailNotifier();
 
 async function loadScheduledTasks(force = false): Promise<void> {
   if (!fetchGuard.shouldFetch(force)) return;
@@ -83,8 +87,12 @@ async function loadScheduledTasks(force = false): Promise<void> {
       scheduledTasks.value.splice(0, scheduledTasks.value.length, ...data);
     }
     fetchGuard.markSuccess();
+    loadFail.trackRecovery();
   } catch (e) {
-    frontendLogger.error("scheduled_tasks", "加载定时任务失败", e);
+    frontendLogger.error("scheduler", "加载定时任务失败", e);
+    if (loadFail.trackFailure()) {
+      toastOnly(false, extractApiError(e, "加载定时任务失败"));
+    }
   }
 }
 
@@ -137,7 +145,7 @@ function closeScheduledTaskModal(): void {
   originalCronInvalid.value = false;
 }
 
-async function saveScheduledTask(): Promise<void> {
+async function saveScheduledTask(validTargetIds?: string[]): Promise<void> {
   const form = scheduledTaskForm.value;
   if (!form.name.trim()) {
     toastOnly(false, "请输入任务名称");
@@ -147,8 +155,16 @@ async function saveScheduledTask(): Promise<void> {
     toastOnly(false, "请选择目标任务");
     return;
   }
+  // 死引用校验：目标任务被删除后下拉显示为空但 target_id 残留，
+  // 保存成功也要到运行期才报"加载目标任务失败"，这里前置拦截
+  if (validTargetIds && !validTargetIds.includes(form.target_id)) {
+    toastOnly(false, "目标任务不存在或已删除，请重新选择");
+    return;
+  }
   scheduledTaskFormLoading.value = true;
   const cron = scheduleToCron(form.schedule.hour, form.schedule.minute);
+  // 超时按输入框 min/max 钳制：NaN/越界值不发后端（后端缺省 60s）
+  const timeout = Math.min(Math.max(Number(form.timeout) || 60, 5), 3600);
   try {
     if (editingScheduledTask.value) {
       // PUT /api/scheduler/jobs/{id} — 发送完整表单数据（类型由后端从 target 推导，不再上传）
@@ -158,19 +174,22 @@ async function saveScheduledTask(): Promise<void> {
         target_id: form.target_id,
         cron,
         enabled: form.enabled,
-        timeout: form.timeout,
+        timeout,
       };
       const data = await scheduledTasksApi.update(editingScheduledTask.value, payload);
       toastOnly(true, data?.message || "保存成功");
     } else {
-      // POST /api/scheduler/jobs — 需要 id, name, target_id, cron, enabled
+      // POST /api/scheduler/jobs — 创建同样带上描述与超时
+      //（此前只发 5 字段，弹窗里的描述/超时被静默丢弃）
       const id = `sched_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const payload = {
         id,
         name: form.name,
+        description: form.description,
         target_id: form.target_id,
         cron,
         enabled: form.enabled,
+        timeout,
       };
       const data = await scheduledTasksApi.create(payload);
       toastOnly(true, data?.message || "保存成功");
@@ -197,12 +216,17 @@ async function deleteScheduledTask(taskId: string): Promise<void> {
 }
 
 async function toggleScheduledTask(taskId: string): Promise<void> {
+  // busy 守卫：开关连点只发一次请求，视觉状态等刷新后如实翻转
+  if (togglingIds.has(taskId)) return;
+  togglingIds.add(taskId);
   try {
     const data = await scheduledTasksApi.toggle(taskId);
     toastOnly(true, data?.message || "操作成功");
     await loadScheduledTasks(true);
   } catch (e) {
     toastOnly(false, extractApiError(e, "操作失败"));
+  } finally {
+    togglingIds.delete(taskId);
   }
 }
 
@@ -235,7 +259,7 @@ async function loadScheduledTaskHistory(taskId: string): Promise<void> {
     scheduledTaskHistory.value.splice(0, scheduledTaskHistory.value.length, ...runs);
   } catch (e) {
     if (selectedScheduledTaskId.value !== requestTaskId) return;
-    frontendLogger.error("scheduled_tasks", "加载执行历史失败", e);
+    frontendLogger.error("scheduler", "加载执行历史失败", e);
     scheduledTaskHistory.value.splice(0, scheduledTaskHistory.value.length);
   } finally {
     // 仅当仍是当前选中任务时才复位 loading（后发起的请求负责自己的状态）
@@ -277,6 +301,7 @@ export function useScheduledTasks() {
     originalCron,
     originalCronInvalid,
     runningIds,
+    togglingIds,
     loadScheduledTasks,
     openCreateScheduledTask,
     openEditScheduledTask,

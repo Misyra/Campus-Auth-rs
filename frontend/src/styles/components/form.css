@@ -72,6 +72,31 @@
   gap: var(--space-md);
 }
 
+/* 输入框 + 右侧操作按钮并排（认证地址自动检测等）：输入框弹性占满，
+ * 按钮不换行；窄屏自动换行避免挤压 */
+.input-with-action {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.input-with-action input,
+.input-with-action textarea {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-with-action .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .input-with-action {
+    flex-wrap: wrap;
+  }
+}
+
 .hint {
   display: block;
   font-size: var(--text-sm);

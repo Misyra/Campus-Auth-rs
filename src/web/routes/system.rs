@@ -424,17 +424,29 @@ fn normalize_playwright_browser(browser: Option<&str>) -> Result<String, ApiErro
     }
 }
 
-fn should_explicitly_install_after_ensure(browser: &str, core_was_ready: bool) -> bool {
-    browser != "chromium" || core_was_ready
+fn should_explicitly_install_after_ensure(
+    browser: &str,
+    playwright_ready_before: bool,
+    playwright_ready_after: bool,
+) -> bool {
+    // 引导刚装完 chromium（false→true）时跳过重复安装；引导因系统浏览器存在
+    // 而跳过下载时（after 仍为 false）必须显式安装——此前以 capability_ready
+    // 为判据，该场景下首次点击永远装不上却返回成功
+    !(browser == "chromium" && !playwright_ready_before && playwright_ready_after)
 }
 
 async fn perform_playwright_install(
     environment: &dyn crate::environment::EnvironmentApi,
     browser: &str,
-    core_was_ready: bool,
 ) -> Result<(), crate::environment::EnvironmentError> {
+    let playwright_ready_before = environment.status().playwright_ready;
     environment.ensure_capability().await?;
-    if should_explicitly_install_after_ensure(browser, core_was_ready) {
+    let playwright_ready_after = environment.status().playwright_ready;
+    if should_explicitly_install_after_ensure(
+        browser,
+        playwright_ready_before,
+        playwright_ready_after,
+    ) {
         environment.install_playwright_browser(browser).await?;
     }
     Ok(())
@@ -450,8 +462,7 @@ pub async fn install_playwright(
 ) -> Result<Json<Value>, ApiError> {
     let browser = normalize_playwright_browser(params.browser.as_deref())?;
     tracing::info!(browser = %browser, "开始安装 Playwright 浏览器");
-    let core_was_ready = environment.status().capability_ready;
-    perform_playwright_install(environment.as_ref(), &browser, core_was_ready)
+    perform_playwright_install(environment.as_ref(), &browser)
         .await
         .map_err(|e| {
             tracing::warn!(browser = %browser, "Playwright {browser} 安装失败: {e}");
@@ -678,15 +689,38 @@ mod tests {
 
     #[test]
     fn playwright_browser_install_decision_avoids_first_chromium_duplicate() {
-        assert!(!should_explicitly_install_after_ensure("chromium", false));
-        assert!(should_explicitly_install_after_ensure("chromium", true));
-        assert!(should_explicitly_install_after_ensure("firefox", false));
-        assert!(should_explicitly_install_after_ensure("webkit", false));
+        // 引导刚装完 chromium（false→true）：跳过重复安装
+        assert!(!should_explicitly_install_after_ensure(
+            "chromium", false, true
+        ));
+        // 引导因系统浏览器跳过下载（false→false）：必须显式安装（此前此场景谎报成功）
+        assert!(should_explicitly_install_after_ensure(
+            "chromium", false, false
+        ));
+        // 引导前 chromium 已就绪（true→true）：显式安装保持幂等
+        assert!(should_explicitly_install_after_ensure(
+            "chromium", true, true
+        ));
+        // 非 chromium 引擎始终显式安装
+        assert!(should_explicitly_install_after_ensure(
+            "firefox", false, false
+        ));
+        assert!(should_explicitly_install_after_ensure(
+            "firefox", false, true
+        ));
+        assert!(should_explicitly_install_after_ensure(
+            "webkit", false, false
+        ));
     }
 
     struct MockInstallEnvironment {
         ensure_fails: bool,
         install_fails: bool,
+        /// ensure 前的 playwright_ready（引导前状态）
+        playwright_ready_before: bool,
+        /// ensure 后的 playwright_ready（模拟引导是否真的装了 chromium）
+        playwright_ready_after: bool,
+        ensured: std::sync::atomic::AtomicBool,
         ensure_calls: std::sync::atomic::AtomicUsize,
         install_calls: std::sync::atomic::AtomicUsize,
     }
@@ -696,16 +730,38 @@ mod tests {
             Self {
                 ensure_fails,
                 install_fails,
+                playwright_ready_before: false,
+                playwright_ready_after: true,
+                ensured: std::sync::atomic::AtomicBool::new(false),
                 ensure_calls: std::sync::atomic::AtomicUsize::new(0),
                 install_calls: std::sync::atomic::AtomicUsize::new(0),
             }
+        }
+
+        fn with_playwright_ready(mut self, before: bool, after: bool) -> Self {
+            self.playwright_ready_before = before;
+            self.playwright_ready_after = after;
+            self
         }
     }
 
     #[async_trait::async_trait]
     impl crate::environment::EnvironmentApi for MockInstallEnvironment {
         fn status(&self) -> crate::environment::EnvironmentStatus {
-            panic!("status is not used by perform_playwright_install")
+            let ready = if self.ensured.load(Ordering::SeqCst) {
+                self.playwright_ready_after
+            } else {
+                self.playwright_ready_before
+            };
+            crate::environment::EnvironmentStatus {
+                uv_ready: ready,
+                python_ready: ready,
+                playwright_ready: ready,
+                capability_ready: ready,
+                stage: crate::environment::BootstrapStage::Idle,
+                progress: None,
+                last_error: None,
+            }
         }
 
         fn python_path(&self) -> std::path::PathBuf {
@@ -717,6 +773,7 @@ mod tests {
             if self.ensure_fails {
                 Err(crate::environment::EnvironmentError::Cancelled)
             } else {
+                self.ensured.store(true, Ordering::SeqCst);
                 Ok(())
             }
         }
@@ -753,7 +810,7 @@ mod tests {
     #[tokio::test]
     async fn playwright_install_propagates_core_failure_without_explicit_install() {
         let env = MockInstallEnvironment::new(true, false);
-        let result = perform_playwright_install(&env, "firefox", false).await;
+        let result = perform_playwright_install(&env, "firefox").await;
         assert!(matches!(
             result,
             Err(crate::environment::EnvironmentError::Cancelled)
@@ -765,13 +822,32 @@ mod tests {
     #[tokio::test]
     async fn playwright_install_waits_for_requested_browser_and_propagates_failure() {
         let env = MockInstallEnvironment::new(false, true);
-        let result = perform_playwright_install(&env, "firefox", false).await;
+        let result = perform_playwright_install(&env, "firefox").await;
         assert!(matches!(
             result,
             Err(crate::environment::EnvironmentError::Cancelled)
         ));
         assert_eq!(env.ensure_calls.load(Ordering::SeqCst), 1);
         assert_eq!(env.install_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 引导因系统浏览器存在而跳过 chromium 下载（false→false）时，
+    /// 显式安装必须执行：此前该场景静默 no-op 却返回安装成功
+    #[tokio::test]
+    async fn playwright_install_installs_chromium_when_bootstrap_skipped_download() {
+        let env = MockInstallEnvironment::new(false, false).with_playwright_ready(false, false);
+        let result = perform_playwright_install(&env, "chromium").await;
+        assert!(result.is_ok());
+        assert_eq!(env.install_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 引导刚装完 chromium（false→true）时跳过重复安装（防首次点击双下载）
+    #[tokio::test]
+    async fn playwright_install_skips_chromium_just_installed_by_bootstrap() {
+        let env = MockInstallEnvironment::new(false, false).with_playwright_ready(false, true);
+        let result = perform_playwright_install(&env, "chromium").await;
+        assert!(result.is_ok());
+        assert_eq!(env.install_calls.load(Ordering::SeqCst), 0);
     }
 
     // ============ tracing JSON 日志解析 ============

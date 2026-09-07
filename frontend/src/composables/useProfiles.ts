@@ -148,12 +148,19 @@ async function saveProfile(): Promise<boolean> {
   try {
     let data;
     if (_isNew) {
-      // 新建方案：走 POST /api/profiles/{id}，body 必须含 id/name/username/password（对齐后端 ProfileCreateBody 必填字段）
+      // 新建方案：必填 4 字段 + 编辑器同屏的可选设置一次带上
+      //（后端 ProfileCreateBody 已扩展，缺失会导致网关/SSID/认证地址等静默丢失）
       data = await profilesApi.create(profileId, {
         id: profileId,
         name: settings.name ?? "",
         username: settings.username ?? "",
         password: settings.password ?? "",
+        auth_url: settings.auth_url ?? "",
+        trigger_url: settings.trigger_url ?? "",
+        isp: settings.isp ?? "",
+        gateway_ip: settings.gateway_ip ?? "",
+        wifi_ssid: settings.wifi_ssid ?? "",
+        active_task: settings.active_task ?? "",
       });
     } else {
       data = await profilesApi.save(profileId, settings as Profile);

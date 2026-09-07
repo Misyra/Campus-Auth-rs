@@ -563,8 +563,30 @@ impl SchedulerApi for SchedulerService {
     }
 }
 
-/// `SystemTime` → ISO 8601 字符串（经 UTC 中转）。
+/// `SystemTime` → ISO 8601 字符串（带本地时区偏移）。
+///
+/// 定时任务按本地时间触发，此前输出 UTC `Z` 后缀让"下次触发"看起来差一个时区
+///（known-issues #3）；转 Local 后偏移显式可读，`new Date()` 解析兼容。
 fn systemtime_to_iso(t: std::time::SystemTime) -> String {
-    let utc: chrono::DateTime<chrono::Utc> = t.into();
-    utc.to_rfc3339()
+    let local: chrono::DateTime<chrono::Local> = t.into();
+    local.to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// next_fire_at 序列化带本地时区偏移（known-issues #3）：
+    /// 定时任务按本地时间触发，不得再输出 UTC `Z` 后缀造成时区误读
+    #[test]
+    fn test_systemtime_to_iso_uses_local_offset() {
+        let iso = systemtime_to_iso(std::time::SystemTime::now());
+        assert!(!iso.ends_with('Z'), "不应输出 UTC Z 后缀: {iso}");
+        // RFC3339 偏移形如 +08:00（UTC 时区的机器输出 +00:00 而非 Z）
+        let offset = &iso[iso.len() - 6..];
+        assert!(
+            offset.starts_with('+') || offset.starts_with('-'),
+            "缺少时区偏移: {iso}"
+        );
+    }
 }

@@ -99,6 +99,9 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     case "Escape":
       e.preventDefault();
+      // 只关下拉不关弹窗：keydown 会冒泡到 Modal overlay 的 onKeydown，
+      // 不阻断会让外层弹窗跟着一起关闭（表单内嵌下拉的场景）
+      e.stopPropagation();
       open.value = false;
       document.removeEventListener("mousedown", onDocClick);
       triggerRef.value?.focus();

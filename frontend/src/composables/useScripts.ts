@@ -246,7 +246,8 @@ async function exportScript(taskId: string): Promise<void> {
 }
 
 async function importScript(): Promise<void> {
-  const file = await pickFile(".py,.sh,.bat,.exe,.cmd,.txt");
+  // 不收 .exe：按文本读入只会得到乱码（exe 应直接填 binary_path，不走导入）
+  const file = await pickFile(".py,.sh,.bat,.cmd,.txt");
   if (!file) return;
   // 导入会整体替换当前草稿，先确认未保存改动
   if (!(await confirmDiscardScriptIfDirty())) return;
@@ -290,7 +291,20 @@ async function setActiveScript(taskId: string): Promise<void> {
 
 function loadScriptTemplate(): void {
   if (!editingTask.value) return;
-  editingTask.value.content = LOGIN_SCRIPT_TEMPLATE;
+  // 与 importScript/loadTemplate 同语义：覆盖已有内容前先经 dirty 确认
+  void (async () => {
+    const current = editingTask.value?.content ?? "";
+    if (current.trim() && current.trim() !== LOGIN_SCRIPT_TEMPLATE.trim()) {
+      const ok = await confirm({
+        title: "加载示例模板",
+        message: "当前脚本内容将被示例模板覆盖，未保存的修改会丢失。是否继续？",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    if (!editingTask.value) return;
+    editingTask.value.content = LOGIN_SCRIPT_TEMPLATE;
+  })();
 }
 
 function inferScriptExtension(binaryPath?: string, content?: string): string {

@@ -266,7 +266,7 @@ async fn handle_command(cmd: EngineCommand, inner: &mut EngineInner, deps: &Engi
 /// （暂停窗口结束后由定时器恢复正常检测），仅跳过立即检测本身。
 fn immediate_check_blocked_by_pause(inner: &EngineInner, deps: &EngineDeps) -> bool {
     if is_any_pause_active(inner, deps) {
-        tracing::info!("监测处于暂停时段，跳过手动操作触发的立即检测");
+        tracing::info!("检测处于暂停时段，跳过手动操作触发的立即检测");
         true
     } else {
         false
@@ -275,7 +275,7 @@ fn immediate_check_blocked_by_pause(inner: &EngineInner, deps: &EngineDeps) -> b
 
 async fn handle_start(inner: &mut EngineInner, deps: &EngineDeps) {
     if inner.monitoring {
-        tracing::debug!("监测已在运行中，忽略 Start 命令");
+        tracing::debug!("检测已在运行中，忽略 Start 命令");
         return;
     }
     inner.monitoring = true;
@@ -287,17 +287,17 @@ async fn handle_start(inner: &mut EngineInner, deps: &EngineDeps) {
     }
     // 用配置间隔重建定时器（内部会消费首个立即 tick，避免紧随本次手动检测再探测一轮）
     reset_check_timer(inner, deps).await;
-    tracing::info!("监测已启动");
+    tracing::info!("检测已启动");
 }
 
 async fn handle_stop(inner: &mut EngineInner, deps: &EngineDeps) {
     if !inner.monitoring {
-        tracing::debug!("监测已停止，忽略 Stop 命令");
+        tracing::debug!("检测已停止，忽略 Stop 命令");
         return;
     }
     inner.monitoring = false;
     merge_engine_state(inner, deps, EngineState::Stopped);
-    tracing::info!("监测已停止");
+    tracing::info!("检测已停止");
 }
 
 async fn handle_reload(inner: &mut EngineInner, deps: &EngineDeps) {
@@ -361,7 +361,7 @@ fn handle_test_network(
     tracing::info!("开始网络连通性测试");
     // Engine 统一负责暂停检查：暂停期内直接返回 Paused，不执行探测
     if is_any_pause_active(inner, deps) {
-        tracing::info!("网络测试跳过：监测已暂停");
+        tracing::info!("网络测试跳过：检测已暂停");
         let _ = reply.send(Ok(TestNetworkResult {
             status: NetworkStatus::Paused,
             details: ProbeDetails {
@@ -410,7 +410,7 @@ async fn handle_pause(inner: &mut EngineInner, deps: &EngineDeps) {
     inner.manual_paused = true;
     // 监测未启动时不得把状态合并成 Running
     merge_engine_state(inner, deps, engine_state_for(inner));
-    tracing::info!("监测已暂停");
+    tracing::info!("检测已暂停");
 }
 
 async fn handle_resume(inner: &mut EngineInner, deps: &EngineDeps) {
@@ -422,7 +422,7 @@ async fn handle_resume(inner: &mut EngineInner, deps: &EngineDeps) {
         handle_network_check_with_priority(inner, deps, true);
         reset_check_timer(inner, deps).await;
     }
-    tracing::info!("监测已恢复");
+    tracing::info!("检测已恢复");
 }
 
 async fn handle_shutdown(inner: &mut EngineInner, deps: &EngineDeps) {
@@ -582,10 +582,19 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
 
     let now = Local::now();
     inner.last_check_time = Some(now);
-    // 状态变化日志：仅在状态发生转换时记录 info，未变化保持静默（debug）
+    // 状态变化日志：仅在状态发生转换时记录 info，未变化保持静默（debug）。
+    // 附各通道探测结论作为判定依据——排查"为什么判为离线/劫持"不必再翻 debug 日志
     let old_status = inner.last_network_status;
     if report.status != old_status {
-        tracing::info!("网络状态变化: {:?} → {:?}", old_status, report.status);
+        tracing::info!(
+            "网络状态变化: {:?} → {:?}（判定依据: TCP={:?}, 204门户={:?}, URL标题={:?}, 耗时{}ms）",
+            old_status,
+            report.status,
+            report.tcp_outcome,
+            report.http_outcome,
+            report.url_outcome,
+            report.latency_ms
+        );
     } else {
         tracing::debug!("网络状态未变化: {:?}", report.status);
     }
@@ -650,12 +659,12 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
             // 监测已停止：探测发起后用户停止了监测，迟到结果不得触发登录。
             // （下方「补发排队的探测」同样受此门控）
             if !inner.monitoring {
-                tracing::debug!("监测已停止，跳过本轮自动登录（迟到探测结果）");
+                tracing::debug!("检测已停止，跳过本轮自动登录（迟到探测结果）");
                 return;
             }
             // 暂停生效中：暂停语义覆盖在途探测的迟到结果
             if paused {
-                tracing::debug!("监测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
+                tracing::debug!("检测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
                 return;
             }
             // 探测发起后配置已变更（如切换 Profile）：旧结果的门户判断不作数。
