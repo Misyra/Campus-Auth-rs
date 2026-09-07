@@ -152,9 +152,10 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
 #[cfg(unix)]
 fn parse_ppid_from_stat(stat: &str) -> Result<u32, String> {
     // 格式：pid (comm) state ppid ...
-    // comm 可能含空格/括号，故用首个 ')' 后定位
+    // comm 为任意字符串（含空格/括号），字段起点是最后一个 ')' 之后
+    //（首个 ')' 在 comm 含括号时会切进 comm 内部，见 proc(5)）
     let after_comm = stat
-        .split_once(')')
+        .rsplit_once(')')
         .map(|(_, rest)| rest)
         .ok_or("stat 格式异常")?;
     let ppid = after_comm
@@ -167,9 +168,15 @@ fn parse_ppid_from_stat(stat: &str) -> Result<u32, String> {
 
 /// 判断命令行是否匹配 chromium 特征（仅匹配 headless/debug Chrome，避免误杀普通浏览器）
 fn is_chromium(cmd: &str) -> bool {
-    cmd.contains("--headless")
-        || cmd.contains("--remote-debugging-port")
-        || cmd.contains("headless_shell")
+    // 先确认 Chrome 系二进制，再确认 headless/调试特征：
+    // 裸 `--headless` 会误伤 `firefox --headless` 等非 Chrome 进程，
+    // 而 kill 前仅有"父进程已死"一道闸，不足以兜底误杀。
+    // 漏判（少清一个残留）无害，误判（杀掉用户进程）不可接受，故偏向严格。
+    let lower = cmd.to_ascii_lowercase();
+    let chrome_binary = lower.contains("chrom") || lower.contains("headless_shell");
+    let headless_flag = cmd.contains("--headless") || cmd.contains("--remote-debugging-port");
+    // headless_shell 二进制名本身足够独特（Playwright headless 专用），单列即命中
+    (chrome_binary && headless_flag) || lower.contains("headless_shell")
 }
 
 /// 通过 taskkill 强杀（Windows）
@@ -195,4 +202,47 @@ fn kill_pid(pid: u32) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// chromium 判定：Chrome 系二进制 + headless/调试特征才命中，普通浏览器不误杀
+    #[test]
+    fn test_is_chromium_matrix() {
+        assert!(is_chromium("/opt/chromium --headless --disable-gpu"));
+        assert!(is_chromium("chrome --remote-debugging-port=9222"));
+        assert!(is_chromium("/tmp/headless_shell --foo"));
+        assert!(is_chromium(
+            "C:\\pw\\chromium-1228\\chrome-win\\chrome.exe --headless"
+        ));
+        // firefox --headless 曾被裸 `--headless` 子串误判命中
+        assert!(!is_chromium("/usr/bin/firefox --headless"));
+        assert!(!is_chromium(
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        ));
+        assert!(!is_chromium("/usr/bin/firefox"));
+        assert!(!is_chromium("node server.js"));
+        assert!(!is_chromium(""));
+    }
+
+    /// stat 解析：comm 含空格/括号时仍定位 ppid，格式异常返回错误
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_ppid_from_stat() {
+        assert_eq!(
+            parse_ppid_from_stat("123 (chromium) S 1 123 123 0 -1 4194304").expect("解析"),
+            1
+        );
+        assert_eq!(
+            parse_ppid_from_stat("9 (my app) S 7 9 9 0 -1 4194304").expect("含空格 comm"),
+            7
+        );
+        // comm 含括号时首个 ')' 会切进 comm 内部，必须用最后一个 ')' 定位
+        assert_eq!(
+            parse_ppid_from_stat("9 (my app (1)) S 7 9 9 0 -1 4194304").expect("含括号 comm"),
+            7
+        );
+        assert!(parse_ppid_from_stat("garbage").is_err());
+    }
 }
