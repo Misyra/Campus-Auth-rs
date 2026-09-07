@@ -39,6 +39,7 @@ from step_handlers import (
     WorkerError,
     _check_cancel,
     _classify_navigation_error,
+    _sleep_cancellable,
     run_step_async,
 )
 from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image
@@ -204,16 +205,25 @@ def _build_result(outcome: Outcome, message: str, context: StepContext, start: f
     )
 
 
-async def _sleep_cancellable(seconds: float, context: StepContext) -> None:
-    """分片 sleep，每片检查取消事件，避免长时间延迟期间无法响应取消。"""
-    slice_s = 0.2
-    deadline = time.monotonic() + max(0.0, seconds)
-    while True:
-        _check_cancel(context)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        await asyncio.sleep(min(slice_s, remaining))
+def _normalize_step_failure(
+    exc: Exception, cancelled_message: str = "步骤已取消"
+) -> tuple[Outcome, str]:
+    """把步骤失败异常归一为 (outcome, message)，三处执行路径共用。
+
+    归一规则（逐字段等价于原 run_steps / debug_step / debug_run_all 的内联
+    实现；StepCancelled 是 WorkerError 子类，必须先于 WorkerError 判断）：
+    - StepCancelled → (CANCELLED, cancelled_message)
+    - WorkerError → (Outcome(exc.outcome), exc.message)
+    - 其他未预期异常 → (UNKNOWN_ERROR, f"执行异常: {exc}")
+
+    堆栈日志仍由调用方按各自场景记录（日志触发条件：非 WorkerError 即
+    未预期异常），本函数不负责日志。
+    """
+    if isinstance(exc, StepCancelled):
+        return Outcome.CANCELLED, cancelled_message
+    if isinstance(exc, WorkerError):
+        return Outcome(exc.outcome), exc.message
+    return Outcome.UNKNOWN_ERROR, f"执行异常: {exc}"
 
 
 async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) -> StructuredResult:
@@ -245,13 +255,11 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
             logger.warning(summary)
             return _build_result(Outcome.SUCCESS, summary, context, start)
         return _build_result(Outcome.SUCCESS, "执行成功", context, start)
-    except StepCancelled:
-        return _build_result(Outcome.CANCELLED, "执行已取消", context, start)
-    except WorkerError as exc:
-        return _build_result(Outcome(exc.outcome), exc.message, context, start)
-    except Exception as exc:  # noqa: BLE001 — 最外层兜底：未预期异常统一转 UNKNOWN_ERROR，保住已累计截图返回 IPC
-        logger.exception("步骤执行未预期异常")
-        return _build_result(Outcome.UNKNOWN_ERROR, f"执行异常: {exc}", context, start)
+    except Exception as exc:  # noqa: BLE001 — 取消/分类失败/未预期异常统一归一，保住已累计截图返回 IPC
+        if not isinstance(exc, WorkerError):
+            logger.exception("步骤执行未预期异常")
+        outcome, message = _normalize_step_failure(exc, "执行已取消")
+        return _build_result(outcome, message, context, start)
 
 
 # ── 浏览器环境探测（原 playwright_bootstrap.py）──
@@ -296,19 +304,15 @@ def _ensure_browser(channel: str = "playwright") -> bool:
             if any(p.exists() for p in candidates):
                 return True
         else:
-            # macOS /Applications 与 ~/Applications
-            if channel == "msedge":
-                if Path("/Applications/Microsoft Edge.app").exists():
-                    return True
-                home = os.environ.get("HOME")
-                if home and Path(home, "Applications/Microsoft Edge.app").exists():
-                    return True
-            else:
-                if Path("/Applications/Google Chrome.app").exists():
-                    return True
-                home = os.environ.get("HOME")
-                if home and Path(home, "Applications/Google Chrome.app").exists():
-                    return True
+            # macOS /Applications 与 ~/Applications：按渠道对应 app 名依序探测，
+            # 候选顺序保持 /Applications 优先，HOME 未设置时跳过用户级目录
+            app_name = "Microsoft Edge.app" if channel == "msedge" else "Google Chrome.app"
+            home = os.environ.get("HOME")
+            candidates = [Path("/Applications") / app_name]
+            if home:
+                candidates.append(Path(home) / "Applications" / app_name)
+            if any(p.exists() for p in candidates):
+                return True
         return False
     # 托管渠道：缓存命中仅复核文件存在性（毫秒级）；复核失败说明路径消失
     # （卸载或 Playwright 升级换路径），丢弃缓存走下方完整探测
@@ -1216,33 +1220,33 @@ class WorkerCore:
             "capabilities": dict(self.capabilities),
         }
 
-    async def handle_execute_login_attempt(self, params: dict) -> dict:
-        """执行完整登录流程。"""
-        # B3 防御（Python 半）：调试会话持有 Worker 浏览器上下文期间拒绝登录
-        # 任务，避免登录重建浏览器把调试会话的 page/context 连根拔掉。
-        # Outcome 无 BUSY 变体（新增会破坏与 Rust 的 serde 契约），复用最贴近的
-        # UNKNOWN_ERROR（终态失败、不重试），消息中明确说明原因。
-        # 根治方案（Rust 侧会话槽位覆盖调试会话整个存活期，而非仅 debug_start
-        # 命令期间）另行立项，此处仅作纵深防御。
+    def _ensure_no_debug_session(self, action: str) -> None:
+        """B3 纵深防御（Python 半）：调试会话存续时拒绝新建浏览器类任务。
+
+        调试会话持有 Worker 浏览器上下文，登录/浏览器任务此时执行会重建浏览器，
+        把调试会话的 page/context 连根拔掉。Outcome 无 BUSY 变体（新增会破坏
+        与 Rust 的 serde 契约），复用最贴近的 UNKNOWN_ERROR（终态失败、不重试），
+        消息中明确说明原因。根治方案（Rust 侧会话槽位覆盖调试会话整个存活期，
+        而非仅 debug_start 命令期间）另行立项。
+        """
         if self._debug_sessions:
             raise WorkerError(
-                Outcome.UNKNOWN_ERROR, "调试会话进行中，无法执行登录任务，请先停止调试"
+                Outcome.UNKNOWN_ERROR, f"调试会话进行中，无法执行{action}，请先停止调试"
             )
+
+    async def handle_execute_login_attempt(self, params: dict) -> dict:
+        """执行完整登录流程。"""
+        self._ensure_no_debug_session("登录任务")
         async with self._cancel_session(params) as (cancel_event, bs, task):
             auth_url = params.get("auth_url", "") or ""
             trigger_url = params.get("trigger_url", "") or ""
             # 重定向模式：触发器非空即用它首导航，Playwright 自动跟随 302 到真门户；LOGIN_URL 同步为实际导航地址，存量任务零改动
             navigate_url = trigger_url.strip() or auth_url
             # 任务变量可自定义普通模板值，但系统保留变量必须始终反映当前 Profile。
+            # 统一经 _system_variables 注入：键缺失时跳过（避免空串覆盖任务自定义
+            # 变量）；{{LOGIN_URL}} 优先非空 trigger_url、回落 auth_url，与首导航一致。
             variables = dict(task.variables or {})
-            variables.update(
-                {
-                    "USERNAME": params.get("username", ""),
-                    "PASSWORD": params.get("password", ""),
-                    "ISP": params.get("isp", ""),
-                    "LOGIN_URL": navigate_url,
-                }
-            )
+            variables.update(self._system_variables(params))
             self._task_dialogs = []
             result = await self._run_task(
                 task, bs, variables, cancel_event, _debug_screenshot_dir(),
@@ -1255,10 +1259,7 @@ class WorkerCore:
         """执行浏览器任务（不含账号密码语义）。"""
         # B3 防御（Python 半）：同 handle_execute_login_attempt，调试会话存续期
         # 内拒绝浏览器任务，避免上下文互踩。
-        if self._debug_sessions:
-            raise WorkerError(
-                Outcome.UNKNOWN_ERROR, "调试会话进行中，无法执行浏览器任务，请先停止调试"
-            )
+        self._ensure_no_debug_session("浏览器任务")
         try:
             async with self._cancel_session(params) as (cancel_event, bs, task):
                 variables = dict(task.variables or {})
@@ -1454,13 +1455,11 @@ class WorkerCore:
         message = ""
         try:
             await run_step_async(session.page, step, session.context, step_index=idx, total_steps=len(steps))
-        except StepCancelled:
-            success, message = False, "步骤已取消"
-        except WorkerError as exc:
-            success, message = False, exc.message
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("调试步骤执行未预期异常")
-            success, message = False, f"执行异常: {exc}"
+        except Exception as exc:  # noqa: BLE001 — 取消/分类失败/未预期异常统一归一（前两者不记堆栈）
+            if not isinstance(exc, WorkerError):
+                logger.exception("调试步骤执行未预期异常")
+            _outcome, message = _normalize_step_failure(exc)
+            success = False
         if idx is not None:
             self._record_debug_result(session, idx, success, message)
         if auto_advance and idx is not None:
@@ -1497,14 +1496,17 @@ class WorkerCore:
                     step_index=idx,
                     total_steps=len(steps),
                 )
-            except StepCancelled:
-                success, message, fatal = False, "步骤已取消", True
-            except WorkerError as exc:
-                success, message = False, exc.message
-                fatal = step.required
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("调试批量执行未预期异常")
-                success, message, fatal = False, f"执行异常: {exc}", True
+            except Exception as exc:  # noqa: BLE001 — 取消/分类失败/未预期异常统一归一（前两者不记堆栈）
+                if not isinstance(exc, WorkerError):
+                    logger.exception("调试批量执行未预期异常")
+                _outcome, message = _normalize_step_failure(exc)
+                success = False
+                # 取消与未预期异常终止批量执行；分类失败按 required 决定是否继续
+                fatal = (
+                    step.required
+                    if isinstance(exc, WorkerError) and not isinstance(exc, StepCancelled)
+                    else True
+                )
             self._record_debug_result(session, idx, success, message)
             if fatal:
                 stop_idx = idx + 1
@@ -1594,6 +1596,79 @@ class WorkerCore:
             logger.warning("close_browser 超时（8s），跳过等待继续")
         return {}
 
+    async def _capture_navigate(self, url: str, bs: dict, cancel_event: Any) -> None:
+        """页面捕获前置：确保浏览器就绪、建隔离会话页并导航到目标 URL。
+
+        门户页常在加载后异步拉验证码/配置脚本，导航后等待一轮 networkidle 让
+        DOM 与已加载资源尽量齐全；长轮询页面等满超时即按当前状态继续（不致命）。
+        取消事件是裸 threading.Event（非 StepContext），导航边界处直接检查置位。
+        """
+        await self.ensure_browser({"browser_settings": bs})
+        await self._prepare_session_page()
+        await self._navigate(self._page, url, _nav_timeout(bs))
+        try:
+            await self._page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:  # noqa: BLE001
+            logger.debug("networkidle 等待超时，按当前页面状态继续捕获")
+        if cancel_event is not None and cancel_event.is_set():
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "页面捕获已取消")
+
+    @staticmethod
+    async def _capture_mhtml(page: Any, target: Path) -> bool:
+        """经 CDP 抓取完整布局 MHTML 快照并写入 target，成功返回 True。
+
+        MHTML 单文件自包含样式/图片，供"保存页面文件"离线还原；Chromium 按
+        设计不含 JS，脚本由 resources/ 补齐。任何失败（含快照为空、detach 异常）
+        均返回 False，不影响其余产物。
+        """
+        try:
+            cdp = await page.context.new_cdp_session(page)
+            mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
+            cdp_data = mhtml.get("data", "")
+            if cdp_data:
+                payload = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
+                target.write_bytes(payload)
+            await cdp.detach()
+            return bool(cdp_data)
+        except Exception as exc:  # noqa: BLE001 — MHTML 失败不影响其余产物
+            logger.debug("MHTML 快照失败（跳过）: %s", exc)
+            return False
+
+    @staticmethod
+    def _write_capture_meta(
+        cap_dir: Path,
+        url: str,
+        final_url: str,
+        title: str,
+        resources: dict[str, str],
+        *,
+        mhtml_ok: bool,
+        note: str | None,
+    ) -> dict[str, Any]:
+        """构建并落盘 captures/latest/meta.json，返回 meta 供响应组装。
+
+        资源目录仅在确有产物时写入路径；note 为空不写字段，保持 meta 结构
+        与消费方（Rust 读盘侧）的既有契约一致。
+        """
+        meta: dict[str, Any] = {
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "request_url": url,
+            "final_url": final_url,
+            "title": title,
+            "html_path": str(cap_dir / "page.html"),
+            "screenshot_path": str(cap_dir / "screenshot.png"),
+            "resources_dir": str(cap_dir / "resources") if resources else None,
+            "resources_count": len(resources),
+        }
+        if mhtml_ok:
+            meta["mhtml_path"] = str(cap_dir / "page.mhtml")
+        if note:
+            meta["note"] = note
+        (cap_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return meta
+
     async def handle_page_capture(self, params: dict) -> dict:
         """导航到目标页面并落盘 HTML / CSS-JS 资源 / 全页截图（供 AI 任务生成）。
 
@@ -1614,20 +1689,8 @@ class WorkerCore:
         cancel_id = params.get("cancel_id", "")
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
         try:
-            await self.ensure_browser({"browser_settings": bs})
-            await self._prepare_session_page()
-            nav_timeout = _nav_timeout(bs)
-            await self._navigate(self._page, url, nav_timeout)
-            # 门户页常在加载后异步拉验证码/配置脚本，等一轮 networkidle 让 DOM
-            # 与已加载资源尽量齐全；长轮询页面等满超时即按当前状态继续（不致命）
-            try:
-                await self._page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:  # noqa: BLE001
-                logger.debug("networkidle 等待超时，按当前页面状态继续捕获")
-            # 取消事件是裸 threading.Event（非 StepContext），直接检查置位
-            if cancel_event is not None and cancel_event.is_set():
-                raise WorkerError(Outcome.UNKNOWN_ERROR, "页面捕获已取消")
-            # 落盘目录与 _debug_screenshot_dir 同语义：锚定 Worker 脚本目录，
+            await self._capture_navigate(url, bs, cancel_event)
+            # 落盘目录与 _debug_screenshot_dir 同语义：锚定运行时 worker 工程目录，
             # 不依赖进程 CWD；固定 captures/latest 每次覆盖，避免产物无界堆积
             cap_dir = _capture_dir()
             shutil.rmtree(cap_dir, ignore_errors=True)
@@ -1636,20 +1699,7 @@ class WorkerCore:
             (cap_dir / "page.html").write_text(html, encoding="utf-8")
             png_bytes = await self._page.screenshot(full_page=True)
             (cap_dir / "screenshot.png").write_bytes(png_bytes)
-            # MHTML 完整布局快照（单文件自包含样式/图片，供"保存页面文件"离线还原；
-            # Chromium 按设计不含 JS，脚本由下方 resources/ 补齐）
-            mhtml_ok = False
-            try:
-                cdp = await self._page.context.new_cdp_session(self._page)
-                mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
-                cdp_data = mhtml.get("data", "")
-                if cdp_data:
-                    payload = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
-                    (cap_dir / "page.mhtml").write_bytes(payload)
-                    mhtml_ok = True
-                await cdp.detach()
-            except Exception as exc:  # noqa: BLE001 — MHTML 失败不影响其余产物
-                logger.debug("MHTML 快照失败（跳过）: %s", exc)
+            mhtml_ok = await self._capture_mhtml(self._page, cap_dir / "page.mhtml")
             resources: dict[str, str] = {}
             note: str | None = None
             try:
@@ -1660,22 +1710,14 @@ class WorkerCore:
                 title = await self._page.title()
             except Exception:  # noqa: BLE001 — 页面标题读取失败不致命
                 title = ""
-            meta: dict[str, Any] = {
-                "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "request_url": url,
-                "final_url": self._page.url,
-                "title": title,
-                "html_path": str(cap_dir / "page.html"),
-                "screenshot_path": str(cap_dir / "screenshot.png"),
-                "resources_dir": str(cap_dir / "resources") if resources else None,
-                "resources_count": len(resources),
-            }
-            if mhtml_ok:
-                meta["mhtml_path"] = str(cap_dir / "page.mhtml")
-            if note:
-                meta["note"] = note
-            (cap_dir / "meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            meta = self._write_capture_meta(
+                cap_dir,
+                url,
+                self._page.url,
+                title,
+                resources,
+                mhtml_ok=mhtml_ok,
+                note=note,
             )
             logger.info(
                 "[capture] 页面捕获完成: %s (html=%d chars, resources=%d)",
@@ -1683,7 +1725,6 @@ class WorkerCore:
                 len(html),
                 len(resources),
             )
-            self._arm_browser_idle_release()
             return {
                 "final_url": meta["final_url"],
                 "title": title,

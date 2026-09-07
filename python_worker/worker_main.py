@@ -165,20 +165,27 @@ def _configure_logging() -> None:
     root.setLevel(level)
 
 
-def emit_response(msg_id: int | None, result: dict) -> None:
-    """向 stdout 写入命令响应。"""
-    line = json.dumps({"id": msg_id, "result": result}, ensure_ascii=False)
+def _write_line(payload: dict) -> None:
+    """序列化单条 IPC 消息并加锁写入 stdout（响应与事件共用的唯一出口）。
+
+    stdout 是 IPC 通道：必须在 ``_stdout_lock`` 保护下整行写入并立即 flush，
+    避免响应与事件行互相穿插；``ensure_ascii=False`` 与 Rust 侧 UTF-8 解码
+    约定一致（``_force_utf8_stdio`` 已强制 stdout 编码）。
+    """
+    line = json.dumps(payload, ensure_ascii=False)
     with _stdout_lock:
         sys.stdout.write(line + "\n")
         sys.stdout.flush()
+
+
+def emit_response(msg_id: int | None, result: dict) -> None:
+    """向 stdout 写入命令响应。"""
+    _write_line({"id": msg_id, "result": result})
 
 
 def emit_event(event_type: str, data: dict) -> None:
     """向 stdout 推送事件（实际事件类型：step_progress / screenshot / dialog）。"""
-    line = json.dumps({"event": event_type, "data": data}, ensure_ascii=False)
-    with _stdout_lock:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+    _write_line({"event": event_type, "data": data})
 
 
 def _oversized_request_id(raw: str) -> int | None:

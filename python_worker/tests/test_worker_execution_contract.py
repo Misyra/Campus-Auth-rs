@@ -293,6 +293,50 @@ def test_system_variables_prefers_trigger():
     assert out2["LOGIN_URL"] == "http://10.0.0.1/login"
 
 
+def test_login_system_variables_skip_missing_keys(monkeypatch):
+    """登录命令未提供的 Profile 键不注入（避免空串覆盖任务自定义变量）。
+
+    handle_execute_login_attempt 统一复用 _system_variables 后的行为选择：
+    键缺失跳过，而非旧手写版的空串默认值；{{LOGIN_URL}} 仍回落 auth_url。
+    """
+    core = WorkerCore()
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        data = None
+
+        def to_dict(self):
+            return {"success": True, "data": self.data}
+
+    async def fake_run_task(
+        _task, _bs, variables, _cancel_event, _screenshot_dir, navigate_url=""
+    ):
+        captured.update(variables)
+        return FakeResult()
+
+    monkeypatch.setattr(core, "_run_task", fake_run_task)
+
+    # 仅传 username + auth_url：PASSWORD/ISP 缺失 → 不注入空串，任务自定义值保留
+    asyncio.run(
+        core.handle_execute_login_attempt(
+            {
+                "username": "profile-user",
+                "auth_url": "http://10.0.0.1/login",
+                "task_config": {
+                    "variables": {"PASSWORD": "custom-pass", "ISP": "custom-isp"}
+                },
+            }
+        )
+    )
+
+    assert captured == {
+        "USERNAME": "profile-user",
+        "PASSWORD": "custom-pass",
+        "ISP": "custom-isp",
+        "LOGIN_URL": "http://10.0.0.1/login",
+    }
+
+
 def test_debug_run_all_continues_after_optional_failure_and_applies_delay(monkeypatch):
     task = TaskConfig(
         task_id="debug-contract",

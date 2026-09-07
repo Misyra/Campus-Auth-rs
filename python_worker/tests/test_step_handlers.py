@@ -9,13 +9,13 @@ import threading
 
 import pytest
 
+import step_handlers
 from models import Outcome, StepConfig
 from step_handlers import (
     StepCancelled,
     StepContext,
     WorkerError,
     _check_cancel,
-    _get_handler,
     _resolve,
 )
 
@@ -55,12 +55,14 @@ def test_check_cancel_noop_without_event():
 # ── 处理器别名映射 ──
 
 def test_handler_alias_mapping():
-    assert _get_handler("input") is not None
-    assert _get_handler("sleep") is _get_handler("wait")
-    assert _get_handler("eval") is _get_handler("evaluate")
-    assert _get_handler("custom_js") is _get_handler("evaluate")
-    assert _get_handler("goto") is _get_handler("navigate")
-    assert _get_handler("unknown_type") is None
+    # _get_handler 已内联为 run_step_async 中的 _STEP_HANDLERS.get，别名映射直接查表验证
+    handlers = step_handlers._STEP_HANDLERS
+    assert handlers["input"] is not None
+    assert handlers["sleep"] is handlers["wait"]
+    assert handlers["eval"] is handlers["evaluate"]
+    assert handlers["custom_js"] is handlers["evaluate"]
+    assert handlers["goto"] is handlers["navigate"]
+    assert "unknown_type" not in handlers
 
 
 # ── 模板变量解析 ──

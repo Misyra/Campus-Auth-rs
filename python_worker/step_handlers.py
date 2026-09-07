@@ -317,39 +317,56 @@ def _looks_like_plain_text(selector: str) -> bool:
     return not any(ch in value for ch in "#.[>+~:=*|^$(),")
 
 
-def _frame_scope(context: StepContext) -> Any:
-    """返回当前步骤的 Page / Frame / FrameLocator 查询作用域。
+def _match_frame(page: Any, spec: str, *, allow_css_fallback: bool) -> Any:
+    """按 frame 规格解析 Page / Frame / FrameLocator 查询作用域（两类步骤共用）。
 
-    frame 字段支持三类既有契约：frame name、``url=片段``、iframe/frame CSS。
-    name/URL 能直接解析为 Frame 时优先使用；否则按 CSS 交给 ``frame_locator``。
+    匹配规则（与历史契约一致）：
+    - 空规格 → 返回 Page 本身（主 frame 执行）；
+    - ``url=片段`` → 在 ``page.frames`` 中按 URL 子串匹配，必须唯一命中；
+      空片段视为未找到（空子串会命中全部 frame）；
+    - 其他规格 → 按 frame name 精确匹配，必须唯一命中。
+
+    异常语义（均抛 ``SELECTOR_FAILED``）：
+    - URL 匹配多个或未找到：合并为同一文案（历史上两类步骤文案发散，现统一）；
+    - name 匹配多个：报"匹配不唯一"；
+    - name 未命中：``allow_css_fallback=True``（元素查询步骤）时降级为
+      ``page.frame_locator(spec)`` 按 CSS 定位 iframe/frame；``False``
+      （脚本执行步骤）时显式报错——脚本无法经 frame_locator 执行，
+      静默落到主 frame 会让 iframe 门户场景必然假失败。
     """
-    page = context.page
     if page is None:
         raise WorkerError(Outcome.SELECTOR_FAILED, "页面未初始化")
-    spec = (context.frame or "").strip()
     if not spec:
         return page
 
-    frames = getattr(page, "frames", None)
-    if frames is None:
-        frames = []
-
+    frames = getattr(page, "frames", None) or []
     if spec.startswith("url="):
         fragment = spec[4:]
         matches = [frame for frame in frames if fragment and fragment in getattr(frame, "url", "")]
         if len(matches) == 1:
             return matches[0]
-        if len(matches) > 1:
-            raise WorkerError(Outcome.SELECTOR_FAILED, f"frame URL 匹配不唯一: {spec}")
-        raise WorkerError(Outcome.SELECTOR_FAILED, f"未找到 frame URL: {spec}")
+        raise WorkerError(Outcome.SELECTOR_FAILED, f"frame URL 匹配不唯一或未找到: {spec}")
 
     name_matches = [frame for frame in frames if getattr(frame, "name", "") == spec]
     if len(name_matches) == 1:
         return name_matches[0]
     if len(name_matches) > 1:
         raise WorkerError(Outcome.SELECTOR_FAILED, f"frame name 匹配不唯一: {spec}")
+    if allow_css_fallback:
+        return page.frame_locator(spec)
+    raise WorkerError(
+        Outcome.SELECTOR_FAILED,
+        f"evaluate/assert_text 的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
+    )
 
-    return page.frame_locator(spec)
+
+def _frame_scope(context: StepContext) -> Any:
+    """返回当前步骤的 Page / Frame / FrameLocator 查询作用域。
+
+    frame 字段支持三类既有契约：frame name、``url=片段``、iframe/frame CSS。
+    name/URL 能直接解析为 Frame 时优先使用；否则按 CSS 交给 ``frame_locator``。
+    """
+    return _match_frame(context.page, (context.frame or "").strip(), allow_css_fallback=True)
 
 
 def _locator(context: StepContext, selector: str) -> Any:
@@ -388,16 +405,28 @@ async def _safe_op(coro: Any, outcome_on_timeout: Outcome) -> Any:
         raise WorkerError(Outcome.SELECTOR_FAILED, f"元素操作失败: {exc}") from exc
 
 
-async def _sleep_cancellable_ms(duration_ms: int, context: StepContext) -> None:
-    """分片休眠，保证长延时时能及时响应取消。"""
-    duration_ms = max(0, duration_ms)
-    deadline = time.monotonic() + duration_ms / 1000
+async def _sleep_cancellable(seconds: float, context: StepContext, *, slice_s: float = 0.2) -> None:
+    """分片可取消休眠（秒版）：每片结束前检查取消事件。
+
+    取消检查时机：进入循环先查一次（时长 ≤0 时也检查，保证已取消的调用
+    立即抛出），随后每片 sleep 结束回到循环顶部再查，长延时最多延迟一个
+    分片（默认 0.2s）响应取消。
+    """
+    deadline = time.monotonic() + max(0.0, seconds)
     while True:
         _check_cancel(context)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
-        await asyncio.sleep(min(0.1, remaining))
+        await asyncio.sleep(min(slice_s, remaining))
+
+
+async def _sleep_cancellable_ms(duration_ms: int, context: StepContext) -> None:
+    """分片休眠（毫秒版，分片粒度 0.1s），保证长延时时能及时响应取消。
+
+    与秒版共用同一实现，仅分片粒度不同（历史行为保持不变）。
+    """
+    await _sleep_cancellable(duration_ms / 1000, context, slice_s=0.1)
 
 
 async def _click_locator(locator, timeout_ms: int) -> bool:
@@ -565,11 +594,11 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
         await _skip_or_fail(step, f"读取下拉选项失败: {exc}")
         return
 
-    chosen_value: str | None = None
-    for item in items:
-        if str(item.get("value", "")) == value:
-            chosen_value = str(item.get("value", ""))
-            break
+    # 精确值匹配：取首个 option value 与目标值完全相等的项（未命中再走文本匹配兜底）
+    chosen_value = next(
+        (str(item.get("value", "")) for item in items if str(item.get("value", "")) == value),
+        None,
+    )
 
     if chosen_value is None:
         texts = [str(item.get("text", "")) for item in items]
@@ -759,31 +788,7 @@ def _script_scope(context: StepContext) -> Any:
     frame 规格只能解析为 Frame（name / ``url=`` 片段）；CSS 选择器形式显式报错，
     避免脚本静默在主 frame 执行（iframe 门户场景必然假失败）。
     """
-    page = context.page
-    if page is None:
-        raise WorkerError(Outcome.SELECTOR_FAILED, "页面未初始化")
-    spec = (context.frame or "").strip()
-    if not spec:
-        return page
-
-    frames = getattr(page, "frames", None) or []
-    if spec.startswith("url="):
-        fragment = spec[4:]
-        matches = [frame for frame in frames if fragment and fragment in getattr(frame, "url", "")]
-        if len(matches) == 1:
-            return matches[0]
-        raise WorkerError(
-            Outcome.SELECTOR_FAILED, f"frame URL 匹配不唯一或未找到: {spec}"
-        )
-    name_matches = [frame for frame in frames if getattr(frame, "name", "") == spec]
-    if len(name_matches) == 1:
-        return name_matches[0]
-    if len(name_matches) > 1:
-        raise WorkerError(Outcome.SELECTOR_FAILED, f"frame name 匹配不唯一: {spec}")
-    raise WorkerError(
-        Outcome.SELECTOR_FAILED,
-        f"evaluate/assert_text 的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
-    )
+    return _match_frame(context.page, (context.frame or "").strip(), allow_css_fallback=False)
 
 
 async def _suppress_task(task: "asyncio.Future[Any]") -> None:
@@ -977,11 +982,6 @@ _STEP_HANDLERS: dict[str, Callable] = {
 }
 
 
-def _get_handler(step_type: str) -> Callable | None:
-    """根据步骤类型返回处理器，兼容别名。"""
-    return _STEP_HANDLERS.get(step_type)
-
-
 async def run_step_async(
     page: Any,
     raw_step: StepConfig,
@@ -991,7 +991,7 @@ async def run_step_async(
 ) -> None:
     """异步执行单个步骤。"""
     step = _resolve(raw_step, context)
-    handler = _get_handler(step.step_type)
+    handler = _STEP_HANDLERS.get(step.step_type)
     if handler is None:
         raise WorkerError(Outcome.UNKNOWN_ERROR, f"未知步骤类型: {step.step_type}")
 
