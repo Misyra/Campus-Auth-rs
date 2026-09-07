@@ -332,37 +332,28 @@ pub async fn generate_stream(
     // 转发器：每 40ms 把新事件刷到 SSE（MutexGuard 不跨 await）。
     // 接收端消失（客户端断连/响应流结束）即取消生成令牌，停止无谓的 LLM 消耗
     let forward_handle = tokio::spawn(async move {
-        let mut idx = 0usize;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            // 一步取走全部未转发事件（drain 后 Vec 清空，免去手写游标 idx 的分页）；
+            // 终止事件随本批一起取出，作为本轮退出判据（终止事件由生成器最后恰好 push 一次）
             let batch: Vec<crate::ai::generate::StreamEvent> = {
-                let guard = shared_for_forward.lock().unwrap_or_else(|p| p.into_inner());
-                if idx >= guard.len() {
-                    Vec::new()
-                } else {
-                    guard[idx..].to_vec()
-                }
+                let mut guard = shared_for_forward.lock().unwrap_or_else(|p| p.into_inner());
+                guard.drain(..).collect()
             };
-            if !batch.is_empty() {
-                idx += batch.len();
-                for ev in batch {
-                    let _ = tx_for_forward.send(ev).await;
-                }
+            let should_exit = batch.iter().any(|e| {
+                matches!(
+                    e,
+                    crate::ai::generate::StreamEvent::Done { .. }
+                        | crate::ai::generate::StreamEvent::Error { .. }
+                )
+            });
+            for ev in batch {
+                let _ = tx_for_forward.send(ev).await;
             }
             if tx_for_forward.is_closed() {
                 token_for_forward.cancel();
                 break;
             }
-            let should_exit = {
-                let guard = shared_for_forward.lock().unwrap_or_else(|p| p.into_inner());
-                guard.iter().any(|e| {
-                    matches!(
-                        e,
-                        crate::ai::generate::StreamEvent::Done { .. }
-                            | crate::ai::generate::StreamEvent::Error { .. }
-                    )
-                }) && idx >= guard.len()
-            };
             if should_exit {
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                 break;
@@ -553,10 +544,8 @@ pub async fn capture_bundle(
                 continue;
             }
             let bytes = tokio::fs::read(&path).await?;
-            zw.start_file(name, opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(&bytes)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.start_file(name, opts).map_err(ApiError::internal)?;
+            zw.write_all(&bytes).map_err(ApiError::internal)?;
         }
         // resources/：捕获时经 CDP 抓取的 CSS/JS 快照
         let resources_dir = dir.join("resources");
@@ -566,13 +555,12 @@ pub async fn capture_bundle(
                 let Some(name) = name.to_str() else { continue };
                 if let Ok(bytes) = tokio::fs::read(entry.path()).await {
                     zw.start_file(format!("resources/{name}"), opts)
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                    zw.write_all(&bytes)
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                        .map_err(ApiError::internal)?;
+                    zw.write_all(&bytes).map_err(ApiError::internal)?;
                 }
             }
         }
-        zw.finish().map_err(|e| ApiError::Internal(e.to_string()))?;
+        zw.finish().map_err(ApiError::internal)?;
     }
     let bytes = buf.into_inner();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");

@@ -409,13 +409,9 @@ impl LoginOrchestrator {
         if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
             missing.push("认证地址与触发地址均为空，请至少填写一个");
         }
-        if !matches!(source, LoginSource::Browser)
-            && task_id.is_none()
-            && global_active_task.is_empty()
-        {
-            missing.push("当前无启用任务，请手动启用一个任务");
-        }
-        if source == LoginSource::Browser && task_id.is_none() && global_active_task.is_empty() {
+        // 浏览器/非浏览器来源在此项校验上文案一致（两分支条件互补并集为全部来源），
+        // 合并为单一条件：task_id 为空（手动/自动/CLI）且未启用全局活跃任务即缺失
+        if task_id.is_none() && global_active_task.is_empty() {
             missing.push("当前无启用任务，请手动启用一个任务");
         }
         if !missing.is_empty() {

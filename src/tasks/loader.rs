@@ -602,13 +602,11 @@ impl TaskManager {
                 let has_content = config
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
+                    .is_some_and(|s| !s.is_empty());
                 let has_path = config
                     .get("script_path")
                     .and_then(|v| v.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
+                    .is_some_and(|s| !s.is_empty());
                 if !has_content && !has_path {
                     errors.push("script 任务需提供 content 或 script_path".to_string());
                 }

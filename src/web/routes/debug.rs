@@ -110,7 +110,7 @@ pub async fn stop_debug(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json
 pub async fn debug_status(State(bridge): State<Arc<dyn BridgeApi>>) -> Json<Value> {
     let screenshot_url = bridge.last_screenshot_url();
     if !bridge.debug_session_active() {
-        return Json(json!({ "data": { "active": false, "screenshot_url": screenshot_url } }));
+        return data(json!({ "active": false, "screenshot_url": screenshot_url }));
     }
     // 会话活跃：向 Worker 查询完整会话详情（步骤列表/执行结果），无副作用；
     // 前端刷新后据此恢复面板，否则只剩"0/0 无步骤数据"骨架
@@ -124,12 +124,10 @@ pub async fn debug_status(State(bridge): State<Arc<dyn BridgeApi>>) -> Json<Valu
             Value::Null
         }
     };
-    Json(json!({
-        "data": {
-            "active": true,
-            "screenshot_url": screenshot_url,
-            "session": session,
-        }
+    data(json!({
+        "active": true,
+        "screenshot_url": screenshot_url,
+        "session": session,
     }))
 }
 
@@ -428,6 +426,13 @@ pub async fn feedback_bundle(
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o644);
 
+        // 局部闭包：统一「start_file + write_all」一组写入的错误映射
+        // （ZipError / io::Error → ApiError::Internal），消除逐组重复的 map_err 样板
+        let mut add = |name: &str, data: &[u8]| -> Result<(), ApiError> {
+            zw.start_file(name, opts).map_err(ApiError::internal)?;
+            zw.write_all(data).map_err(ApiError::internal)
+        };
+
         // logs
         if let Some(tail) = log_tail {
             let t = if tail.len() > 1024 * 1024 {
@@ -435,66 +440,39 @@ pub async fn feedback_bundle(
             } else {
                 tail
             };
-            zw.start_file("logs/app-tail.log", opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(t.as_bytes())
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add("logs/app-tail.log", t.as_bytes())?;
         } else {
-            zw.start_file("logs/app-tail.log", opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all("(无日志)".as_bytes())
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add("logs/app-tail.log", "(无日志)".as_bytes())?;
         }
 
         // task
         if let Some(s) = task_json {
-            zw.start_file(&task_filename, opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(s.as_bytes())
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add(&task_filename, s.as_bytes())?;
         }
 
         // meta
-        zw.start_file("meta.json", opts)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        zw.write_all(meta_str.as_bytes())
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        add("meta.json", meta_str.as_bytes())?;
 
         // page：MHTML（视觉离线还原，含样式与图片）；page.html（引用已改写为
         // resources/ 本地路径，与 CSS/JS 资源快照配合供源码级离线还原）
         if let Some(mhtml) = page_mhtml {
-            zw.start_file("debug/page.mhtml", opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(&mhtml)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add("debug/page.mhtml", &mhtml)?;
         }
         if let Some(html) = page_html {
-            zw.start_file("debug/page.html", opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(html.as_bytes())
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add("debug/page.html", html.as_bytes())?;
         }
         for (name, bytes) in &page_resources {
-            zw.start_file(format!("debug/resources/{name}"), opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(bytes)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add(&format!("debug/resources/{name}"), bytes)?;
         }
         if let Some(png) = page_png {
-            zw.start_file("debug/screenshot.png", opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(&png)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add("debug/screenshot.png", &png)?;
         }
         if let Some(note) = page_note {
             // 无会话或捕获失败时留说明，避免解压后疑惑缺文件
-            zw.start_file("debug/README.txt", opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            zw.write_all(note.as_bytes())
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            add("debug/README.txt", note.as_bytes())?;
         }
 
-        zw.finish().map_err(|e| ApiError::Internal(e.to_string()))?;
+        zw.finish().map_err(ApiError::internal)?;
     }
     let bytes = buf.into_inner();
     let filename = format!("campus-auth-feedback-{stamp}.zip");

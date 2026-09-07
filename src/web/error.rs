@@ -81,6 +81,12 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// 内部错误便捷构造：任意 `Display` 错误直接转为 `Internal` 变体，
+    /// 供 `.map_err(ApiError::internal)` 收敛 routes 层重复的样板映射
+    pub fn internal<E: std::fmt::Display>(e: E) -> Self {
+        ApiError::Internal(e.to_string())
+    }
+
     /// 错误码（稳定的机器可读字符串，参见 openapi.json / docs 错误码表）
     pub fn code(&self) -> &'static str {
         match self {

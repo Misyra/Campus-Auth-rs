@@ -498,6 +498,13 @@ impl NetworkDetect for MacosDetect {
     }
 }
 
+/// 解析 `inet ` 行提取出的 IP 段为非环回 IPv4：解析失败或为 127.0.0.1 时返回 None，
+/// 调用方据此保持 current_ipv4 不变（不覆盖同接口此前已解析出的有效地址）
+fn parse_inet_ipv4(ip_part: &str) -> Option<Ipv4Addr> {
+    let ip = ip_part.parse::<Ipv4Addr>().ok()?;
+    (ip != Ipv4Addr::LOCALHOST).then_some(ip)
+}
+
 /// 解析 `ip addr show` 输出（Linux），提取各网络接口信息
 fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
     let mut result = Vec::new();
@@ -549,15 +556,13 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
             continue;
         }
         // IPv4 行: "    inet 192.168.1.100/24 brd 192.168.1.255 scope global eth0"
+        // Linux `ip` 输出为 CIDR 记法，取 '/' 前段
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("inet ") {
-            if let Some(ip_part) = rest.split('/').next() {
-                if let Ok(ip) = ip_part.parse::<Ipv4Addr>() {
-                    if ip != Ipv4Addr::LOCALHOST {
-                        current_ipv4 = Some(ip);
-                    }
-                }
-            }
+        if let Some(rest) = trimmed.strip_prefix("inet ")
+            && let Some(ip_part) = rest.split('/').next()
+            && let Some(ip) = parse_inet_ipv4(ip_part)
+        {
+            current_ipv4 = Some(ip);
         }
     }
     // 最后一个接口
@@ -620,15 +625,13 @@ fn parse_ifconfig(text: &str) -> Vec<InterfaceInfo> {
             continue;
         }
         // IPv4 行: "	inet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255"
+        // macOS `ifconfig` 输出以空白分隔，取首个字段
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("inet ") {
-            if let Some(ip_part) = rest.split_whitespace().next() {
-                if let Ok(ip) = ip_part.parse::<Ipv4Addr>() {
-                    if ip != Ipv4Addr::LOCALHOST {
-                        current_ipv4 = Some(ip);
-                    }
-                }
-            }
+        if let Some(rest) = trimmed.strip_prefix("inet ")
+            && let Some(ip_part) = rest.split_whitespace().next()
+            && let Some(ip) = parse_inet_ipv4(ip_part)
+        {
+            current_ipv4 = Some(ip);
         }
     }
     // 最后一个接口
