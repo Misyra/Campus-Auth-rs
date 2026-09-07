@@ -2,6 +2,7 @@
 //!
 //! 提供跨切面关注点：实例互斥文件锁、原子指标计数器、平台特定代码（自启动、网络检测、Shell 检测）。
 
+pub mod archive_guard;
 pub mod io;
 pub mod lock;
 pub mod metrics;

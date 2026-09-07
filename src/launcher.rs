@@ -77,6 +77,10 @@ pub struct CliArgs {
     /// 启动动作（覆盖 settings.json 中的 startup_action）
     #[arg(long, value_enum)]
     pub startup_action: Option<StartupAction>,
+
+    /// 允许在系统临时目录中运行（临时目录拦截的排查放行，仅在确认已解压但仍被误判时使用）
+    #[arg(long, hide = true)]
+    pub allow_temp: bool,
 }
 
 /// 运行模式
@@ -139,8 +143,30 @@ pub(crate) struct LauncherState {
 // 入口
 // ============================================================
 
+/// 未解压运行的早期拦截（最优先）
+///
+/// 若检测到从压缩包虚拟路径 / 临时目录缺同级资源直接启动：桌面端弹窗 + stderr 同步输出并拒绝启动。
+/// - Docker / 显式 --base-path 覆盖 / 环境变量或 --allow-temp 已放行时降级放行，见 `utils::archive_guard::check_archive_block`
+/// - `--status` / `--stop` / `--autostart` 由 `main.rs` 在 `launcher::run` 之前已短路，无需额外短路
+fn guard_archive_run(cli: &CliArgs, base_path: &Path) -> Result<()> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("campus-auth"));
+    if let Some(msg) =
+        crate::utils::archive_guard::check_archive_block(&exe, base_path, cli.allow_temp)
+    {
+        // 同步通道（CLI 控制台可见）+ 异步通道（GUI 双击无控制台时弹窗可见）
+        eprintln!("\n{msg}\n");
+        #[cfg(windows)]
+        crate::utils::archive_guard::show_block_dialog(&msg);
+        anyhow::bail!("{msg}");
+    }
+    Ok(())
+}
+
 /// 启动编排主入口（由 `main.rs` 调用）
 pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
+    // 0. 未解压运行拦截（目录权限、实例锁、日志之前）
+    guard_archive_run(&cli, &base_path)?;
+
     // 1. 配置合并
     let app_config = load_and_merge_config(&cli, base_path)?;
 
