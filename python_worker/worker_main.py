@@ -31,6 +31,7 @@ from models import Outcome  # noqa: E402
 from playwright_worker import (  # noqa: E402
     COMMANDS,
     StepCancelled,
+    WORKER_VERSION,  # noqa: F401 — 单点定义在 playwright_worker，此处再导出保持可导入
     WorkerError,
     _purge_stale_debug_screenshots,
     _to_ms,
@@ -47,9 +48,6 @@ shutdown_event = threading.Event()
 # stdin 单行大小上限（字节）：超限视为异常/恶意载荷，直接丢弃该行，
 # 避免超大 JSON 解析耗尽内存（P9）
 _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
-
-# Worker 版本（与 pyproject.toml 的 project.version 保持同步，手动维护）
-WORKER_VERSION = "5.0.0-alpha.8"
 
 # OCR 运行时能力（任务 10）：由 _preload_ocr_deps 探测结果填充，
 # 随 worker_health_check 响应上报给 Rust 侧缓存（/api/ocr/status 消费）。
@@ -278,7 +276,7 @@ async def _dispatch(msg: dict) -> None:
         # 可分类失败：保留 outcome 供 Rust 侧决定重试/回收策略
         emit_response(msg_id, _structured_result(exc, success=False, start=start))
     except Exception as exc:  # noqa: BLE001
-        logger.exception(f"命令 {method} 执行异常")
+        logger.exception("命令 %s 执行异常", method)
         emit_response(msg_id, _error_result(str(exc)))
 
 

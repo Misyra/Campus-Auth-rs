@@ -66,7 +66,7 @@ class _OcrSession:
                 return self._budgets.popleft()
         return float(OCR_TIMEOUT_SECS)
 
-    def classification(self, img_bytes: bytes):
+    def classification(self, img_bytes: bytes) -> Any:
         """在本次剩余共享预算内执行识别。"""
         inference_timeout_secs = self._take_budget()
         if inference_timeout_secs <= 0:
@@ -113,7 +113,7 @@ def _evict_ocr_session(
             _ocr_cache.pop(key, None)
 
 
-def _get_ocr(old: bool, char_range: str | int | None = None):
+def _get_ocr(old: bool, char_range: str | int | None = None) -> _OcrSession:
     """获取缓存 OCR 会话，并登记本次模型获取后的推理剩余预算。
 
     模型不存在时抛出 ImportError，由调用方转换为 WorkerError。返回对象保持缓存身份

@@ -70,8 +70,12 @@ _TASK_STORAGE_ISOLATION_SCRIPT = r"""
 _WORKER_DIR = Path(__file__).resolve().parent
 
 # Worker 版本（任务 10）：与 pyproject.toml 的 project.version 保持同步（手动维护），
-# 随 worker_health_check 响应上报给 Rust 侧。
+# 随 worker_health_check 响应上报给 Rust 侧。单点定义：worker_main 从此处导入。
 WORKER_VERSION = "5.0.0-alpha.8"
+
+# 浏览器关闭/会话释放的兜底等待上限（秒）：close 可能挂起（driver 未及时退出等），
+# 统一超时跳过，避免单条挂起命令阻塞 Worker 命令队列
+_WAIT_TIMEOUT_SECS = 8.0
 
 
 def _browser_data_dir() -> Path:
@@ -140,7 +144,7 @@ def _purge_stale_debug_screenshots() -> None:
             if entry.stat().st_mtime >= _MODULE_LOAD_TIME:
                 continue
             entry.unlink(missing_ok=True)
-            logger.info(f"已清理上次会话残留截图: {entry.name}")
+            logger.info("已清理上次会话残留截图: %s", entry.name)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"清理残留截图失败 {entry}: {exc}")
 
@@ -159,6 +163,12 @@ def _to_ms(bs: dict, key: str, default_ms: int) -> int:
     except (TypeError, ValueError):
         return default_ms
     return ival * 1000
+
+
+def _nav_timeout(bs: dict) -> int:
+    """从 browser_settings 读取导航超时（毫秒），缺省 15000ms。"""
+    return _to_ms(bs, "navigation_timeout", 15000)
+
 
 # ── 步骤执行器（原 browser_runner.py）──
 
@@ -239,7 +249,7 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
         return _build_result(Outcome.CANCELLED, "执行已取消", context, start)
     except WorkerError as exc:
         return _build_result(Outcome(exc.outcome), exc.message, context, start)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — 最外层兜底：未预期异常统一转 UNKNOWN_ERROR，保住已累计截图返回 IPC
         logger.exception("步骤执行未预期异常")
         return _build_result(Outcome.UNKNOWN_ERROR, f"执行异常: {exc}", context, start)
 
@@ -265,9 +275,6 @@ def _ensure_browser(channel: str = "playwright") -> bool:
     if channel in ("msedge", "chrome"):
         # 复用 Rust 侧 is_edge/chrome_installed 的同口径判定（多路径 + which）
         # 此处为 Python 侧二次校验：优先 which，其次 Windows 固定路径
-        import shutil
-        import os
-
         if channel == "msedge":
             bins = ["msedge", "microsoft-edge", "microsoft-edge-stable"]
         else:
@@ -656,7 +663,7 @@ class WorkerCore:
             logger.warning(f"解析自定义请求头失败: {exc}")
         return {}
 
-    def _resolve_launcher(self, playwright, channel: str, custom_path: str):
+    def _resolve_launcher(self, playwright: Any, channel: str, custom_path: str) -> tuple[Any, str | None]:
         """根据 channel 解析对应的 launcher 对象。"""
         if channel == "custom" and custom_path:
             if not Path(custom_path).exists():
@@ -671,7 +678,14 @@ class WorkerCore:
         # playwright / chromium / msedge / chrome 走 Chromium launcher。
         return playwright.chromium, None
 
-    async def _launch_browser(self, playwright, channel, custom_path, headless, launch_args):
+    async def _launch_browser(
+        self,
+        playwright: Any,
+        channel: str,
+        custom_path: str,
+        headless: bool,
+        launch_args: list[str],
+    ) -> Any:
         """启动非持久化浏览器。"""
         launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path)
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
@@ -682,8 +696,15 @@ class WorkerCore:
         return await launcher.launch(**kwargs)
 
     async def _launch_persistent_context(
-        self, playwright, channel, custom_path, headless, launch_args, user_data_dir, ctx_opts
-    ):
+        self,
+        playwright: Any,
+        channel: str,
+        custom_path: str,
+        headless: bool,
+        launch_args: list[str],
+        user_data_dir: str,
+        ctx_opts: dict[str, Any],
+    ) -> Any:
         """启动持久化上下文浏览器（保留 cookies）。"""
         launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path)
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args, **ctx_opts}
@@ -757,7 +778,7 @@ class WorkerCore:
                 headless,
                 persistent,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 — 启动环节异常源众多（driver 崩溃/参数非法等），统一回滚后原样上抛
             logger.error("浏览器启动失败，回滚资源", exc_info=True)
             await self.close_browser()
             raise
@@ -806,7 +827,7 @@ class WorkerCore:
         page = await self._new_page()
         try:
             await page.add_init_script(_TASK_STORAGE_ISOLATION_SCRIPT)
-        except Exception:
+        except Exception:  # noqa: BLE001 — init 脚本注入失败时回收刚建的页面，异常原样上抛由上层归类
             await self._safe_close(page, "isolated page")
             raise
         self._page = page
@@ -850,7 +871,7 @@ class WorkerCore:
                 self._page = await self._new_page()
                 logger.info("复用浏览器进程热恢复会话上下文")
                 return
-            except Exception:
+            except Exception:  # noqa: BLE001 — 热恢复涉及建 context/装路由/建页多环节，任一失败统一回退完整重建
                 logger.warning("浏览器进程热恢复失败，回退完整重建", exc_info=True)
                 await self.close_browser()
         has_browser = self._browser is not None or self._context is not None
@@ -873,7 +894,7 @@ class WorkerCore:
             # 会走一次真实协议调用，可可靠暴露 "Target page/context closed"。
             await self._context.cookies()
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — 探活调用任何异常都代表 context 已不可用
             return False
 
     @staticmethod
@@ -965,7 +986,7 @@ class WorkerCore:
             BROWSER_IDLE_RELEASE_SECS,
         )
         try:
-            await asyncio.wait_for(self.close_browser(), timeout=8.0)
+            await asyncio.wait_for(self.close_browser(), timeout=_WAIT_TIMEOUT_SECS)
         except asyncio.TimeoutError:
             logger.warning("浏览器空闲自动释放超时（8s），跳过")
         except Exception as exc:  # noqa: BLE001
@@ -989,7 +1010,7 @@ class WorkerCore:
                     self._debug_sessions.pop(sid, None)
                     logger.warning("调试会话 %s 因命令级超时强制中断页面而结束", sid)
 
-    async def _handle_low_resource_request(self, route) -> None:
+    async def _handle_low_resource_request(self, route: Any) -> None:
         """低资源模式请求处理：拦截图片/字体/媒体。"""
         try:
             request = route.request
@@ -1042,7 +1063,7 @@ class WorkerCore:
             cancel_event=cancel_event,
             screenshot_dir=screenshot_dir,
             default_timeout=_to_ms(bs, "timeout", 10000),
-            navigation_timeout=_to_ms(bs, "navigation_timeout", 15000),
+            navigation_timeout=_nav_timeout(bs),
             reveal_hidden=task_config.reveal_hidden,
             step_delay=task_config.step_delay,
             emit=_emit,
@@ -1092,7 +1113,7 @@ class WorkerCore:
         target = navigate_url or task_config.url
         if target:
             target = resolve(target, variables)
-            nav_timeout = _to_ms(bs, "navigation_timeout", 15000)
+            nav_timeout = _nav_timeout(bs)
             # 全新 Page 让浏览器/上下文保持热态（免冷启动），同时强制存储隔离。
             await self._navigate(self._page, target, nav_timeout)
             await self._wait_after_navigation(task_config, context)
@@ -1177,7 +1198,7 @@ class WorkerCore:
             # "Sync API inside the asyncio loop" 被吞掉而误判 healthy=false（Worker 启动超时）。
             # 丢到线程池执行，与 OCR classification 的同步 CPU 推理处理一致。
             healthy = await asyncio.to_thread(_ensure_browser, channel)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — 健康检查失败本身即结果（healthy=False），不能向 IPC 抛异常
             logger.warning(f"健康检查异常: {exc}")
             healthy = False
         return {"healthy": healthy}
@@ -1310,7 +1331,7 @@ class WorkerCore:
                 _ensure_not_cancelled("导航前")
                 await self._navigate(
                     self._page, resolve(task.url, variables),
-                    _to_ms(bs, "navigation_timeout", 15000),
+                    _nav_timeout(bs),
                 )
                 await self._wait_after_navigation(task, context)
                 _ensure_not_cancelled("导航后")
@@ -1566,9 +1587,9 @@ class WorkerCore:
             return {}
         try:
             if _WORKER_KEEP_ALIVE:
-                await asyncio.wait_for(self._close_session(), timeout=8.0)
+                await asyncio.wait_for(self._close_session(), timeout=_WAIT_TIMEOUT_SECS)
             else:
-                await asyncio.wait_for(self.close_browser(), timeout=8.0)
+                await asyncio.wait_for(self.close_browser(), timeout=_WAIT_TIMEOUT_SECS)
         except asyncio.TimeoutError:
             logger.warning("close_browser 超时（8s），跳过等待继续")
         return {}
@@ -1595,7 +1616,7 @@ class WorkerCore:
         try:
             await self.ensure_browser({"browser_settings": bs})
             await self._prepare_session_page()
-            nav_timeout = _to_ms(bs, "navigation_timeout", 15000)
+            nav_timeout = _nav_timeout(bs)
             await self._navigate(self._page, url, nav_timeout)
             # 门户页常在加载后异步拉验证码/配置脚本，等一轮 networkidle 让 DOM
             # 与已加载资源尽量齐全；长轮询页面等满超时即按当前状态继续（不致命）

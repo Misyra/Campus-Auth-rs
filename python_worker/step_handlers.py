@@ -26,8 +26,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from models import Outcome, StepConfig
+# OCR 实例缓存/图片预处理已迁至 ocr_runtime.py；顶部导入同时兼作再导出，
+# 兼容旧调用方 `from step_handlers import _get_ocr` 等用法
+from ocr_runtime import (
+    OCR_TIMEOUT_SECS,
+    _get_ocr,
+    _preprocess_ocr_image,
+    ocr_load_in_progress,
+)
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from variable_resolver import resolve
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +134,6 @@ def _template_variables(context: StepContext) -> dict[str, str]:
 
 def _resolve_extra(value: Any, variables: dict[str, str]) -> Any:
     """递归解析 extras 中的字符串模板（例如 goto.url / wait_until）。"""
-    from variable_resolver import resolve
-
     if isinstance(value, str):
         return resolve(value, variables)
     if isinstance(value, list):
@@ -143,8 +150,6 @@ def _resolve(step: StepConfig, context: StepContext) -> StepConfig:
     后续步骤通过 ``{{变量}}`` 直接引用。返回副本而非原地改写，保证调试会话重跑
     同一步骤时不会发生二次解析。
     """
-    from variable_resolver import resolve
-
     variables = _template_variables(context)
     if not variables:
         return step
@@ -176,15 +181,6 @@ def _resolve(step: StepConfig, context: StepContext) -> StepConfig:
 
     resolved.extras = _resolve_extra(resolved.extras, variables)
     return resolved
-
-
-# OCR 实例缓存/图片预处理已迁至 ocr_runtime.py，此处再导出兼容旧调用方
-from ocr_runtime import (
-    OCR_TIMEOUT_SECS,
-    _get_ocr,
-    _preprocess_ocr_image,
-    ocr_load_in_progress,
-)  # noqa: E402,F401
 
 
 # 连接级错误代码：含这些消息的异常归为 NETWORK_ERROR
@@ -321,7 +317,7 @@ def _looks_like_plain_text(selector: str) -> bool:
     return not any(ch in value for ch in "#.[>+~:=*|^$(),")
 
 
-def _frame_scope(context: StepContext):
+def _frame_scope(context: StepContext) -> Any:
     """返回当前步骤的 Page / Frame / FrameLocator 查询作用域。
 
     frame 字段支持三类既有契约：frame name、``url=片段``、iframe/frame CSS。
@@ -356,7 +352,7 @@ def _frame_scope(context: StepContext):
     return page.frame_locator(spec)
 
 
-def _locator(context: StepContext, selector: str):
+def _locator(context: StepContext, selector: str) -> Any:
     """在当前 Page/Frame 作用域内创建 Locator。"""
     return _frame_scope(context).locator(_normalize_selector(selector))
 
@@ -382,7 +378,7 @@ def _primary_timeout_ms(total_ms: int) -> int:
     return max(1, total_ms - reserve)
 
 
-async def _safe_op(coro, outcome_on_timeout: Outcome):
+async def _safe_op(coro: Any, outcome_on_timeout: Outcome) -> Any:
     """执行 Playwright 操作并归一化超时/瞬时元素异常。"""
     try:
         return await coro
@@ -600,7 +596,7 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
 
 async def _find_click_select_option(
     context: StepContext, option_selector: str | None, value: str
-):
+) -> Any:
     """根据文本在 option_selector 范围内寻找唯一选项 Locator。"""
     scope = _frame_scope(context)
     if not option_selector:
@@ -756,7 +752,7 @@ async def handle_screenshot(page, step: StepConfig, context: StepContext) -> Non
     context.emit("screenshot", {"path": local_path, "step_id": step.id})
 
 
-def _script_scope(context: StepContext):
+def _script_scope(context: StepContext) -> Any:
     """返回可执行 JS 的 Page / Frame 作用域（evaluate / assert_text 专用）。
 
     这两类步骤直接执行脚本，无法走 ``frame_locator``（仅支持元素查询）：
@@ -981,13 +977,13 @@ _STEP_HANDLERS: dict[str, Callable] = {
 }
 
 
-def _get_handler(step_type: str):
+def _get_handler(step_type: str) -> Callable | None:
     """根据步骤类型返回处理器，兼容别名。"""
     return _STEP_HANDLERS.get(step_type)
 
 
 async def run_step_async(
-    page,
+    page: Any,
     raw_step: StepConfig,
     context: StepContext,
     step_index: int | None = None,
