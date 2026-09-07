@@ -1,3 +1,8 @@
+"""generate_204 captive + 验证码语义 mock（本地 e2e 用）。
+
+监听 127.0.0.1:8767：GET /generate_204 恒以 302 跳转登录页（未认证语义），
+登录页携带固定验证码（1234），POST /login 校验用户名与验证码并返回结果。
+"""
 import http.server, urllib.parse, json, random
 class H(http.server.BaseHTTPRequestHandler):
     CODE = "1234"

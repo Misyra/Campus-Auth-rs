@@ -1,3 +1,8 @@
+"""generate_204 captive 语义 mock（本地 e2e 用）。
+
+监听 127.0.0.1:8767：GET /generate_204 恒以 302 跳转登录页（未认证语义），
+其余路径回落 SimpleHTTPRequestHandler 静态文件服务（如 login.html）。
+"""
 import http.server, socketserver
 class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):

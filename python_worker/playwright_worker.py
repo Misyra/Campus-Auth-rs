@@ -48,9 +48,9 @@ from variable_resolver import resolve
 logger = logging.getLogger(__name__)
 
 
-# Isolate Web Storage per top-level task/debug session while keeping context cookies.
-# A new Page gives each session fresh sessionStorage. The marker makes the init script
-# clear local/session storage only on the first document for each origin in that Page.
+# 按"顶层任务/调试会话"隔离 Web Storage，同时保留 BrowserContext 级 Cookie。
+# 新建 Page 使每个会话获得全新的 sessionStorage；标记（marker）让 init 脚本
+# 仅在该 Page 内每个 origin 的首个文档上清空本地/会话存储，避免重复清理。
 _TASK_STORAGE_ISOLATION_SCRIPT = r"""
 (() => {
   const marker = "__campus_auth_storage_isolated_v1__";
@@ -777,12 +777,23 @@ class WorkerCore:
         return page
 
     async def _prepare_session_page(self) -> Any:
-        """Create an isolated top-level Page while retaining BrowserContext cookies."""
+        """创建会话隔离的顶层 Page，同时保留 BrowserContext 级 Cookie。
+
+        会话隔离的关键入口，任务/调试会话开始前必须先经此建页：
+        - 单活跃页语义：先关闭全部旧页/恢复页，阻断上一会话的
+          sessionStorage 与后台脚本渗入新会话；
+        - 向新 Page 注入 ``_TASK_STORAGE_ISOLATION_SCRIPT``（init script），
+          首个文档加载时清空本地/会话存储，保证存储从零开始；
+        - Cookie 挂在 BrowserContext 上，不受换页影响，登录态得以跨会话保留。
+
+        无参数；成功返回已就绪的新 Page 并将其设为当前 ``self._page``，
+        BrowserContext 未初始化时抛出 ``WorkerError``。
+        """
         if self._context is None:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "Browser context is not initialized")
 
-        # The worker has single-active-page semantics. Close all old/restored tabs so
-        # their sessionStorage/background scripts cannot bleed into the new session.
+        # Worker 采用单活跃页语义：关闭所有旧页/恢复页，
+        # 防止其 sessionStorage 与后台脚本渗入新会话。
         try:
             old_pages = list(self._context.pages)
         except Exception as exc:  # noqa: BLE001
@@ -1082,7 +1093,7 @@ class WorkerCore:
         if target:
             target = resolve(target, variables)
             nav_timeout = _to_ms(bs, "navigation_timeout", 15000)
-            # Fresh Page keeps the browser/context hot while enforcing storage isolation.
+            # 全新 Page 让浏览器/上下文保持热态（免冷启动），同时强制存储隔离。
             await self._navigate(self._page, target, nav_timeout)
             await self._wait_after_navigation(task_config, context)
 
@@ -1288,7 +1299,7 @@ class WorkerCore:
             _ensure_not_cancelled("环境准备前")
             await self.ensure_browser({"browser_settings": bs})
             _ensure_not_cancelled("会话准备前")
-            # Debug session is also a top-level storage-isolation boundary.
+            # 调试会话同样是顶层存储隔离边界。
             await self._prepare_session_page()
             variables = dict(task.variables or {})
             variables.update(self._system_variables(params))
