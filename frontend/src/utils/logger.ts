@@ -16,6 +16,27 @@ interface FrontendLogMessage {
   meta: unknown;
 }
 
+/**
+ * WS 上报前的 meta 序列化。
+ * Error（含 ApiError）的 message/stack 是不可枚举属性，直接 JSON.stringify
+ * 只得到 {"detail":{},"name":"ApiError"} 之类的空壳（线上曾因此出现 meta={}，
+ * 导致组件异常堆栈丢失无法定位）。此处转成普通对象，保留 name/message、
+ * 自身可枚举字段（如 status/code/detail/aborted）与 stack（放最后，
+ * 后端超长截断时优先保留 message）。控制台输出仍用原始对象
+ * （devtools 可展开堆栈），仅上报链路做转换。
+ */
+function serializeMeta(meta: unknown): unknown {
+  if (meta instanceof Error) {
+    const out: Record<string, unknown> = { name: meta.name, message: meta.message };
+    for (const key of Object.keys(meta)) {
+      out[key] = (meta as unknown as Record<string, unknown>)[key];
+    }
+    if (meta.stack) out.stack = meta.stack;
+    return out;
+  }
+  return meta;
+}
+
 class FrontendLogger {
   private currentLevel = "INFO";
   private ws: WebSocket | null = null;
@@ -50,7 +71,7 @@ class FrontendLogger {
       level,
       scope,
       message,
-      meta: meta === undefined || meta === "" ? null : meta,
+      meta: meta === undefined || meta === "" ? null : serializeMeta(meta),
     };
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
