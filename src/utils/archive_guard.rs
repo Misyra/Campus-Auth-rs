@@ -225,6 +225,8 @@ pub fn show_block_dialog(message: &str) {
 }
 
 #[cfg(not(windows))]
+/// 非 Windows 的 no-op 桩：与 Windows 版（MessageBoxW 弹窗）保持同签名，调用点
+/// （launcher 的未解压拦截）在类 Unix 平台仅依赖 stderr 输出，无需 GUI 弹窗
 pub fn show_block_dialog(_message: &str) {}
 
 #[cfg(test)]

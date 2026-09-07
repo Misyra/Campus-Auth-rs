@@ -16,6 +16,8 @@ use crate::environment::{
 ///
 /// `kill_on_drop(true)` 保证 select/timeout 放弃 `output()` future 时，已经 spawn 的
 /// 子进程不会脱离 Rust 任务继续占用 `.venv`、缓存目录或安装锁。
+/// 三态失败原因：`Cancelled` 为取消令牌先于超时触发（用户主动取消）；
+/// `Timeout` 为阶段超时（子进程未在时限内退出）；`Io` 为进程创建/等待本身的 IO 失败。
 #[derive(Debug)]
 pub(crate) enum CommandOutputError {
     Cancelled,
@@ -23,6 +25,10 @@ pub(crate) enum CommandOutputError {
     Io(std::io::Error),
 }
 
+/// spawn 环境子进程并等待其完整退出，收集 stdout/stderr 与退出码（`Output`）。
+///
+/// 取消令牌与超时先到者胜（`biased` 下取消优先判定），失败三态见
+/// [`CommandOutputError`]；select/timeout 放弃等待时由 `kill_on_drop` 终止子进程。
 pub(crate) async fn command_output_with_cancel(
     mut cmd: tokio::process::Command,
     timeout: Duration,

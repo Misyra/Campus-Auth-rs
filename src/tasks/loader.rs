@@ -512,6 +512,14 @@ impl TaskManager {
             .is_none_or(|s| s.trim().is_empty())
     }
 
+    /// 校验任务配置 JSON 的结构与字段约束（导入/保存前的统一闸口）
+    ///
+    /// - `config`：待校验的原始任务 JSON，`type` 缺省按 `browser` 处理；
+    /// - `Ok(())`：通过当前任务类型的全部校验（name 非空、timeout 区间钳制、
+    ///   steps 步型字段表 STEP_FIELD_RULES、script/shell 必填项、PowerShell 与
+    ///   路径穿越拦截等）；
+    /// - `Err(Vec<String>)`：校验不通过，携带**全部**（而非首个）人读错误文案，
+    ///   顺序即校验遍历顺序，供前端一次性整体展示。
     pub fn validate_task(&self, config: &Value) -> Result<(), Vec<String>> {
         let mut errors: Vec<String> = Vec::new();
         let kind = config

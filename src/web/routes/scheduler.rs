@@ -38,6 +38,7 @@ pub async fn list_jobs(
     Ok(data(result))
 }
 
+/// POST /api/scheduler/jobs 请求体：新建定时任务（cron 表达式 + 目标任务 target_id）
 #[derive(Deserialize)]
 pub struct JobCreateBody {
     pub id: String,
@@ -77,6 +78,7 @@ pub async fn create_job(
     Ok(data(Value::String("ok".into())))
 }
 
+/// PUT /api/scheduler/jobs/{id} 请求体：字段全可选，仅更新出现的字段
 #[derive(Deserialize)]
 pub struct JobUpdateBody {
     pub cron: Option<String>,

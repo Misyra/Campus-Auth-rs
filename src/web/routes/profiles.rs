@@ -16,6 +16,7 @@ use crate::config::{ConfigApi, ProfileApi};
 use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
 use crate::web::error::{ApiError, data};
 
+/// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
 #[derive(Deserialize)]
 pub struct ProfileCreateBody {
     /// 与路径参数冗余的历史字段：路径已携带 id，body 内可省略（路径优先）
@@ -63,6 +64,7 @@ fn validate_http_url(label: &str, raw: &str) -> Result<String, ApiError> {
     Ok(trimmed)
 }
 
+/// PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）
 #[derive(Deserialize)]
 pub struct ProfileUpdateBody {
     pub name: Option<String>,
@@ -77,11 +79,13 @@ pub struct ProfileUpdateBody {
     pub active_task: Option<String>,
 }
 
+/// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
 #[derive(Deserialize)]
 pub struct SwitchBody {
     pub profile_id: String,
 }
 
+/// POST /api/profiles/auto-switch 请求体：启用/禁用自动切换
 #[derive(Deserialize)]
 pub struct AutoSwitchBody {
     pub enabled: bool,

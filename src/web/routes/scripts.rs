@@ -49,6 +49,7 @@ pub async fn list_scripts(State(tasks): State<Arc<dyn TaskApi>>) -> Result<Json<
     Ok(data(tasks))
 }
 
+/// POST /api/scripts/run 请求体：按 task_id 运行已保存脚本，或直接运行 script 内容（二选一）
 #[derive(Deserialize)]
 pub struct RunScriptBody {
     /// 脚本任务 ID

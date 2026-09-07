@@ -125,6 +125,11 @@ fn is_windows_reserved_name(id: &str) -> bool {
     WINDOWS_RESERVED_NAMES.contains(&stem)
 }
 
+/// 校验 Profile ID 是否可安全用作 Profile 文件名（`profiles/<id>.json`）
+///
+/// 规则：非空且不超过 64 字节；仅接受 ASCII 字母/数字/下划线/连字符（天然排除
+/// 路径分隔符、点号等可能参与路径穿越的字符）；命中 Windows 保留设备名
+/// （见 [`is_windows_reserved_name`]）同样拒绝。
 pub(crate) fn is_valid_profile_id(id: &str) -> bool {
     if id.is_empty() || id.len() > 64 {
         return false;

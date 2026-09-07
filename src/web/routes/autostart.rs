@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
 
+/// POST /api/autostart/mode 请求体：更新自启动写入的运行模式（startup_action）
 #[derive(Deserialize)]
 pub struct AutostartModeBody {
     /// 自启动模式（如 "login_once" / "monitor" / "none"）

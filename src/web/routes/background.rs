@@ -22,6 +22,7 @@ pub(crate) const BACKGROUND_UPLOAD_BODY_LIMIT: usize = MAX_BACKGROUND_IMAGE_BYTE
 
 // ---- 背景图管理 ----
 
+/// POST /api/background/fetch-url 请求体：待拉取的远程图片地址（仅允许 HTTPS，走 SSRF 防护通道）
 #[derive(Deserialize)]
 pub struct BackgroundFetchBody {
     /// 图片 URL

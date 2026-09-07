@@ -170,8 +170,10 @@ pub async fn repo_fetch_task(
     Ok(data(task))
 }
 
+/// GET /api/repo/fetch 与 /api/repo/task 共用的查询参数
 #[derive(Deserialize)]
 pub struct RepoUrlQuery {
+    /// 远程仓库资源地址（GitHub blob 页面地址会被归一化为 raw 地址）
     pub url: String,
 }
 

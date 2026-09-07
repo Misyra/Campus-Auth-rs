@@ -204,14 +204,20 @@ async fn stream_chat_response(
     let deadline = tokio::time::Instant::now() + TOTAL_BUDGET;
     let mut idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
 
+    // 外层循环：单次连接的生命周期——逐块拉取 SSE 数据并驱动"空闲/总时长"双预算，
+    // 直到流自然结束、收到 [DONE]，或任一预算耗尽/取消触发返回
     loop {
+        // 总预算（10 分钟）硬上限：空闲预算会被数据不断刷新，此处兜底防"慢滴流"无限占用
         if tokio::time::Instant::now() >= deadline {
             return Err(StreamError::fatal("LLM 流式响应总时长超出 10 分钟上限"));
         }
         let remaining_idle = idle_deadline.saturating_duration_since(tokio::time::Instant::now());
         let remaining_total = deadline.saturating_duration_since(tokio::time::Instant::now());
         let wait = remaining_idle.min(remaining_total);
+        // 中层 select：取消赛道与数据赛道先到者胜；等待上限取空闲剩余与总预算剩余的
+        // 较小值，超时后再按命中哪条预算定性（空闲可重试、总预算致命）
         let chunk = tokio::select! {
+            // 取消赛道：无令牌时以 pending() 永久挂起，两分支统一为同型 future
             _ = async {
                 match cancel {
                     Some(t) => t.cancelled().await,
@@ -225,8 +231,10 @@ async fn stream_chat_response(
                 Ok(Some(Err(e))) => {
                     return Err(StreamError::retryable(format!("LLM 流式传输失败: {e}")));
                 }
+                // 流自然结束（服务端关闭连接）：跳出外层循环，进入收尾解析
                 Ok(None) => break,
                 Err(_) => {
+                    // 超时赛道：区分空闲超时（连接可能还活着，可重试）与总预算耗尽（致命）
                     if tokio::time::Instant::now() >= idle_deadline {
                         return Err(StreamError::retryable(format!(
                             "LLM 流式空闲超时（>{}s 无输出），请检查网络或稍后重试",
@@ -237,38 +245,51 @@ async fn stream_chat_response(
                 }
             },
         };
+        // 收到数据即刷新空闲预算：只有"持续无输出"才判定为空闲超时
         idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
         let text = String::from_utf8_lossy(&chunk);
         buf.push_str(&text);
+        // 内层 while：将累积缓冲按换行切段逐行解析——TCP chunk 不保证与 SSE 行
+        // 边界对齐，必须先入 buf 再按 '\n' 切分，残行留待下个 chunk 补齐
         while let Some(pos) = buf.find('\n') {
             let line = buf[..pos].trim().to_string();
             buf.drain(..=pos);
+            // 跳过空行与 `:` 开头的 SSE 注释行（服务端心跳/keep-alive 常借此保活）
             if line.is_empty() || line.starts_with(':') {
                 continue;
             }
+            // 仅 `data:` 行承载事件负载，其余字段（event:/id:/retry: 等）直接忽略
             let data = if let Some(d) = line.strip_prefix("data:") {
                 d.trim()
             } else {
                 continue;
             };
+            // OpenAI 兼容流约定的终止哨兵：置位后结束解析，外层循环随之收尾
             if data == "[DONE]" {
                 finished = true;
                 break;
             }
+            // data 载荷应为 JSON 事件对象；非 JSON 行（宽松网关的杂音）静默跳过，
+            // 不因单行解析失败丢弃整个流
             if let Ok(v) = serde_json::from_str::<Value>(data) {
                 if let Some(fr) = v
                     .pointer("/choices/0/finish_reason")
                     .and_then(Value::as_str)
                 {
+                    // finish_reason=length：输出被 max_tokens 截断，任务 JSON 必然残缺，
+                    // 与其让下游解析半截产物再报隐晦错误，不如立即致命失败并给出
+                    // 可操作提示（简化描述 / 调大 max_tokens）
                     if fr == "length" {
                         return Err(StreamError::fatal(
                             "LLM 输出被 max_tokens 截断（finish_reason=length），任务 JSON 不完整；请简化任务描述或调大 llm.json 的 max_tokens 后重试",
                         ));
                     }
+                    // 其余非空 finish_reason（如 stop）记录下来，收尾时统一复核
                     if !fr.is_empty() && fr != "null" {
                         last_finish_reason = Some(fr.to_string());
                     }
                 }
+                // 流式主通道：增量在 delta.content，逐段累积并回调前端实时预览
                 if let Some(delta) = v
                     .pointer("/choices/0/delta/content")
                     .and_then(Value::as_str)
@@ -281,6 +302,8 @@ async fn stream_chat_response(
                     }
                     continue;
                 }
+                // 非流式回退通道：部分兼容网关在 stream 模式仍整包返回 message.content
+                //（无 delta 字段），此处兜底提取，保证两条通道至少一条产出文本
                 if let Some(content) = v
                     .pointer("/choices/0/message/content")
                     .and_then(Value::as_str)
@@ -298,6 +321,8 @@ async fn stream_chat_response(
             break;
         }
     }
+    // 尾部兜底：流结束但缓冲仍有残留（无换行结尾的单行 JSON——部分网关不发
+    // [DONE] 也不带尾换行）时，按整包响应再解析一次，避免丢掉最后一段内容
     if full.is_empty() && !buf.trim().is_empty() {
         if let Ok(v) = serde_json::from_str::<Value>(buf.trim()) {
             if let Some(c) = v
@@ -311,11 +336,13 @@ async fn stream_chat_response(
             }
         }
     }
+    // 全程未产出任何文本：按可重试失败处理（让上层换连接重试），而非静默返回空串
     if full.is_empty() {
         return Err(StreamError::retryable(
             "LLM 流式响应为空（未收到任何增量内容）",
         ));
     }
+    // 收尾双保险：即使逐行路径因宽松解析漏过 length 事件，也不允许截断产物被当成功返回
     if last_finish_reason.as_deref() == Some("length") {
         return Err(StreamError::fatal(
             "LLM 输出被 max_tokens 截断（finish_reason=length），任务 JSON 不完整；请简化任务描述或调大 llm.json 的 max_tokens 后重试",

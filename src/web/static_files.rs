@@ -66,6 +66,7 @@ pub async fn openapi_handler() -> impl IntoResponse {
 }
 
 #[cfg(feature = "no-embed")]
+/// no-embed 构建变体：openapi.json 未编译进二进制，恒返回 404 与提示文案
 pub async fn openapi_handler() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -90,6 +91,9 @@ mod tests {
 }
 
 #[cfg(not(feature = "no-embed"))]
+/// 嵌入式静态资源 + SPA 回退入口：命中嵌入资源按扩展名 MIME 返回（带长缓存头），
+/// 未命中依次尝试 `path/index.html` 与根 `index.html`（覆盖前端路由刷新场景）；
+/// 未注册的 `/api/*` 返回 JSON 404，避免被 SPA 回退吞成 200 + index.html
 pub async fn handler(uri: Uri) -> impl IntoResponse {
     // 未注册的 /api/* 直接返回 404 JSON，避免被 SPA 回退吞成 200 + index.html
     if uri.path().starts_with("/api") {
@@ -134,6 +138,7 @@ fn asset_response(path: &str, asset: rust_embed::EmbeddedFile) -> Response {
 }
 
 #[cfg(feature = "no-embed")]
+/// no-embed 构建变体：无前端资源可服务，除 `/api/*` 404 JSON 外一律返回 404 文本
 pub async fn handler(uri: Uri) -> impl IntoResponse {
     // 未注册的 /api/* 返回 404 JSON（与嵌入版一致）
     if uri.path().starts_with("/api") {

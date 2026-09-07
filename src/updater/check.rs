@@ -32,6 +32,8 @@ pub(crate) fn is_allowed_update_url(url_str: &str) -> bool {
         _ => false,
     }
 }
+/// GitHub Release 的包清单（远程 `latest.json` 的反序列化目标）：版本、日期、
+/// 更新说明与各平台（`{os}-{arch}` → 下载包）映射
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReleaseManifest {
     /// 远程版本号（serde 直接反序列化为 `semver::Version`）

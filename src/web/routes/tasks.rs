@@ -224,6 +224,12 @@ fn normalize_import_item(item: &Value) -> (String, Value) {
     (String::new(), item.clone())
 }
 
+/// POST /api/tasks/import — 批量导入任务
+///
+/// 载荷形状契约：任务对象数组、单个任务对象，或 `{"tasks": [...]}` 包裹均可；条目
+/// ID 依次取顶层 `id`、导出详情的 `summary.id`、磁盘文件形态的 `task_id`；任务体
+/// 可为完整配置（含 `steps` 等 step 字段）或 `{"config": {...}}` 包裹的导出结果。
+/// 逐条导入互不中止，响应回传 `imported` 计数与 `failed` 失败明细。
 pub async fn import_tasks(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<Value>,

@@ -1,3 +1,6 @@
+//! 网络探测（detect.rs，即 super）的单元测试集：经 detect.rs 末尾的
+//! `#[path = "detect_tests.rs"]` 挂载为其 `mod tests`，经 `use super::*` 复用其内部符号。
+
 use super::*;
 use crate::network::interfaces::is_excluded;
 
