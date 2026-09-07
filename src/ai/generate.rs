@@ -132,7 +132,12 @@ where
     let mut messages = prompt::build_messages(ctx, extra_prompt);
     let mut warnings = Vec::new();
     let mut last_errors: Vec<String> = Vec::new();
-    let push = |ev: StreamEvent| on_progress.lock().unwrap().push(ev);
+    let push = |ev: StreamEvent| {
+        on_progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(ev)
+    };
 
     for attempt in 1..=MAX_ATTEMPTS {
         push(StreamEvent::AttemptStart {
@@ -143,10 +148,13 @@ where
         let text = chat_stream(
             messages.clone(),
             Box::new(move |delta: &str| {
-                on_progress_clone.lock().unwrap().push(StreamEvent::Delta {
-                    attempt,
-                    text: delta.to_string(),
-                });
+                on_progress_clone
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(StreamEvent::Delta {
+                        attempt,
+                        text: delta.to_string(),
+                    });
             }),
         )
         .await

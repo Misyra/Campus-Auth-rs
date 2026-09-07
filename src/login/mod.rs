@@ -1235,7 +1235,7 @@ mod tests {
             None,
         );
         let environment = EnvironmentManager::new(dir.path().to_path_buf(), status.clone());
-        let tasks = TaskManager::new(dir.path(), config.clone());
+        let tasks = TaskManager::new(dir.path());
         let history = LoginHistoryService::new(dir.path());
         let detector = create_detector();
         let monitor = Arc::new(

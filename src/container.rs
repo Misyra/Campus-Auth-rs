@@ -115,7 +115,7 @@ impl ServiceContainer {
         let status = Arc::new(StatusManager::new());
 
         // ---- Layer 3：持久化 & 状态 ----
-        let tasks = TaskManager::new(base_path, config.clone());
+        let tasks = TaskManager::new(base_path);
 
         // ---- Layer 4：桥接 & 环境（自返 Arc）----
         let bridge = BridgeSupervisor::new(
@@ -223,6 +223,7 @@ impl ServiceContainer {
         });
 
         Self::spawn_uptime_tracker(&container);
+        Self::spawn_log_cleanup_task(&container);
 
         // ---- 启动后台服务 ----
         let scheduler_handle = container.startup().await?;
@@ -288,6 +289,30 @@ impl ServiceContainer {
                         let secs = start_time.elapsed().as_secs();
                         metrics_for_uptime.set_uptime(secs);
                         status_for_uptime.merge(crate::status::PartialSnapshot::Uptime(secs));
+                    }
+                }
+            }
+        });
+    }
+
+    /// 每日兜底清理过期日志：启动时的 `cleanup_old_logs` 只执行一次，
+    /// 关闭"自动重启"的长驻进程会让轮转文件无限累积。保留天数每次从
+    /// 配置快照读取，跟随热更新。
+    fn spawn_log_cleanup_task(container: &Arc<Self>) {
+        let cancel_for_task = container.uptime_cancel.child_token();
+        let config_for_task = container.config.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86_400));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // 首个 tick 立即完成：启动时的清理已在 init_logging 做过，跳过
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_for_task.cancelled() => break,
+                    _ = interval.tick() => {
+                        let retention = config_for_task.runtime().load().logging.retention_days;
+                        crate::logging::cleanup_expired_logs(&config_for_task.base_path(), retention);
                     }
                 }
             }

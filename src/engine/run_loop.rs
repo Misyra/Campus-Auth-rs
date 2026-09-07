@@ -1139,7 +1139,7 @@ mod tests {
             Some(metrics.clone()),
         );
         let environment = EnvironmentManager::new(tmp.path().to_path_buf(), status.clone());
-        let tasks = TaskManager::new(tmp.path(), config.clone());
+        let tasks = TaskManager::new(tmp.path());
         let orchestrator = Arc::new(LoginOrchestrator::new(
             config.clone(),
             history,

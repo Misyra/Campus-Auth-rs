@@ -459,7 +459,7 @@ fn collect_current_platform_asset(
 /// - `.sha256` 伴随文件不是下载包本身，跳过；
 /// - 无法推断平台键的资产 warn 后跳过；
 /// - 返回 `(平台键, 下载 URL, 大小, 小写资产名)` 列表。
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn collect_package_assets(
     assets: &[serde_json::Value],
 ) -> Vec<(String, String, Option<u64>, String)> {

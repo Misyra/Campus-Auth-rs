@@ -336,7 +336,7 @@ pub async fn generate_stream(
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             let batch: Vec<crate::ai::generate::StreamEvent> = {
-                let guard = shared_for_forward.lock().unwrap();
+                let guard = shared_for_forward.lock().unwrap_or_else(|p| p.into_inner());
                 if idx >= guard.len() {
                     Vec::new()
                 } else {
@@ -354,7 +354,7 @@ pub async fn generate_stream(
                 break;
             }
             let should_exit = {
-                let guard = shared_for_forward.lock().unwrap();
+                let guard = shared_for_forward.lock().unwrap_or_else(|p| p.into_inner());
                 guard.iter().any(|e| {
                     matches!(
                         e,
@@ -412,20 +412,19 @@ pub async fn generate_stream(
             Ok(o) => {
                 let mut warnings = capture_warnings.clone();
                 warnings.extend(o.warnings.clone());
-                shared
-                    .lock()
-                    .unwrap()
-                    .push(crate::ai::generate::StreamEvent::Done {
+                shared.lock().unwrap_or_else(|p| p.into_inner()).push(
+                    crate::ai::generate::StreamEvent::Done {
                         attempts: o.attempts,
                         warnings,
                         task: o.task,
-                    });
+                    },
+                );
                 let _ = forward_handle.await;
             }
             Err(e) => {
                 shared
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|p| p.into_inner())
                     .push(crate::ai::generate::StreamEvent::Error { message: e.clone() });
                 let _ = forward_handle.await;
             }

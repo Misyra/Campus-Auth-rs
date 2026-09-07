@@ -315,7 +315,7 @@ impl BootstrapGate {
             if let Some(message) = self
                 .last_error
                 .lock()
-                .expect("BootstrapGate last_error 锁中毒")
+                .unwrap_or_else(|e| e.into_inner())
                 .clone()
             {
                 return Err(EnvironmentError::BootstrapFailedShared(message));
@@ -325,10 +325,7 @@ impl BootstrapGate {
         }
         let result = bootstrap().await;
         // 记录失败结果供后续等待者复用（成功时清除）；存 Display 字符串
-        *self
-            .last_error
-            .lock()
-            .expect("BootstrapGate last_error 锁中毒") =
+        *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
             result.as_ref().err().map(|e| e.to_string());
         self.generation.fetch_add(1, Ordering::Release);
         result
@@ -474,7 +471,7 @@ impl EnvironmentManager {
         *self
             .on_bootstrap_done
             .lock()
-            .expect("on_bootstrap_done 锁中毒") = Some(cb);
+            .unwrap_or_else(|e| e.into_inner()) = Some(cb);
     }
 
     /// 触发引导完成回调（内部，引导成功路径调用）
@@ -482,7 +479,7 @@ impl EnvironmentManager {
         let cb = self
             .on_bootstrap_done
             .lock()
-            .expect("on_bootstrap_done 锁中毒")
+            .unwrap_or_else(|e| e.into_inner())
             .clone();
         if let Some(cb) = cb {
             cb();
@@ -493,7 +490,7 @@ impl EnvironmentManager {
     pub fn is_ready(&self) -> bool {
         self.status
             .read()
-            .expect("EnvironmentStatus 读锁中毒")
+            .unwrap_or_else(|e| e.into_inner())
             .capability_ready
     }
 
@@ -501,7 +498,7 @@ impl EnvironmentManager {
     pub fn capability_ready(&self) -> bool {
         self.status
             .read()
-            .expect("EnvironmentStatus 读锁中毒")
+            .unwrap_or_else(|e| e.into_inner())
             .capability_ready
     }
 
@@ -509,7 +506,7 @@ impl EnvironmentManager {
     pub fn status(&self) -> EnvironmentStatus {
         self.status
             .read()
-            .expect("EnvironmentStatus 读锁中毒")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
@@ -522,7 +519,7 @@ impl EnvironmentManager {
     pub fn python_runtime_ready(&self) -> bool {
         self.status
             .read()
-            .expect("EnvironmentStatus 读锁中毒")
+            .unwrap_or_else(|e| e.into_inner())
             .python_ready
     }
 
@@ -582,18 +579,18 @@ impl EnvironmentManager {
     pub fn cancel(&self) {
         self.current_cancel_token
             .read()
-            .expect("Environment current_cancel_token 读锁中毒")
+            .unwrap_or_else(|e| e.into_inner())
             .cancel();
     }
 
     /// 读取环境状态（供 uv.rs/python.rs/git.rs 复用）
     pub(crate) fn read_status(&self) -> std::sync::RwLockReadGuard<'_, EnvironmentStatus> {
-        self.status.read().expect("EnvironmentStatus 读锁中毒")
+        self.status.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 更新环境状态（供 uv.rs/python.rs/git.rs 复用）
     pub(crate) fn write_status<F: FnOnce(&mut EnvironmentStatus)>(&self, f: F) {
-        let mut guard = self.status.write().expect("EnvironmentStatus 写锁中毒");
+        let mut guard = self.status.write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard);
     }
 
@@ -644,7 +641,7 @@ impl EnvironmentManager {
         *self
             .current_cancel_token
             .write()
-            .expect("Environment current_cancel_token 写锁中毒") = token.clone();
+            .unwrap_or_else(|e| e.into_inner()) = token.clone();
         token
     }
 

@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::config::ConfigService;
 use crate::tasks::TaskError;
 use crate::tasks::models::*;
 /// 任务排序与活跃任务记录（`.order.json`）
@@ -62,9 +61,6 @@ pub struct TaskManager {
     browser_dir: PathBuf,
     /// `tasks/scripts/` 目录
     scripts_dir: PathBuf,
-    /// 配置服务（用于读取运行时默认参数等）
-    #[allow(dead_code)]
-    config: Arc<ConfigService>,
     /// 文件写操作互斥锁
     lock: Mutex<()>,
 }
@@ -79,7 +75,7 @@ type StepFieldRule = (
 
 impl TaskManager {
     /// 构造管理器，确保子目录存在，并迁移旧版 `active.txt`、初始化 `.order.json`
-    pub fn new(base_path: &Path, config: Arc<ConfigService>) -> Arc<Self> {
+    pub fn new(base_path: &Path) -> Arc<Self> {
         // 路径经 `utils::paths` 统一；`ensure_runtime_dirs` 已在启动预建，
         // 此处保留幂等创建以兼容测试直构（防御性，不作为权威）。
         let tasks_dir = crate::utils::paths::tasks_dir(base_path);
@@ -105,7 +101,6 @@ impl TaskManager {
             tasks_dir,
             browser_dir,
             scripts_dir,
-            config,
             lock: Mutex::new(()),
         };
 
@@ -1046,11 +1041,7 @@ mod tests {
 
     async fn make_task_manager() -> (tempfile::TempDir, Arc<TaskManager>) {
         let tmp = tempfile::tempdir().unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let config = ConfigService::new(tmp.path().to_path_buf(), tx)
-            .await
-            .unwrap();
-        let mgr = TaskManager::new(tmp.path(), config);
+        let mgr = TaskManager::new(tmp.path());
         (tmp, mgr)
     }
 
@@ -1476,11 +1467,7 @@ mod tests {
             r#"{"type":"browser","name":"我的定制"}"#,
         )
         .unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let config = ConfigService::new(tmp.path().to_path_buf(), tx)
-            .await
-            .unwrap();
-        let mgr = TaskManager::new(tmp.path(), config);
+        let mgr = TaskManager::new(tmp.path());
         let kept = std::fs::read_to_string(browser.join("default.json")).unwrap();
         assert!(kept.contains("我的定制"), "已有默认任务不得被种子覆盖");
         assert_eq!(mgr.get_active_task().await, "default");
@@ -1500,10 +1487,6 @@ mod tests {
             command: "echo mine".to_string(),
             ..Default::default()
         });
-        let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let config = ConfigService::new(tmp.path().to_path_buf(), tx)
-            .await
-            .unwrap();
         // 先手写 mine 任务与指向它的 order，再构造管理器
         std::fs::write(
             browser.join("mine.json"),
@@ -1515,7 +1498,7 @@ mod tests {
             r#"{"order":["mine"],"active":"mine"}"#,
         )
         .unwrap();
-        let mgr = TaskManager::new(tmp.path(), config);
+        let mgr = TaskManager::new(tmp.path());
         assert_eq!(mgr.get_active_task().await, "mine");
         assert!(
             mgr.browser_dir.join("default.json").exists(),

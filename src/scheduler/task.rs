@@ -77,7 +77,7 @@ fn default_true() -> bool {
 
 impl ScheduledTask {
     /// 构造一个最小可用任务（含默认值）。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn new(id: String, cron: String, target_id: String) -> Self {
         Self {
             id,
