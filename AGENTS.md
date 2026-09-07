@@ -244,6 +244,12 @@ Conventional Commits，中文描述：
 - `rust-embed` 需要 `frontend/dist/` 存在才能编译。开发时用 `cargo check --features no-embed` 跳过
 - Python Worker 的 **stdout 是 IPC 通道**，不能用于日志输出（用 stderr）
 
+### Python Worker 依赖
+
+- 安装 `ddddocr` 等依赖**必须**使用 `uv add` 写入 `python_worker/pyproject.toml` + `uv.lock`，禁止 `uv pip install` / `pip install` 临时安装（会导致锁文件不同步、CI 复现失败）
+- 示例：`cd python_worker && uv add --optional ocr "ddddocr==1.6.1"`（OCR 为可选能力，见 `pyproject.toml:[project.optional-dependencies].ocr`）
+- 同步环境：`uv sync --extra ocr` / `uv sync --group dev --extra ocr`；E2E 预热另需 `uv run playwright install chromium` 与 `uv run python -c "from ocr_runtime import _get_ocr; _get_ocr(False, None)"`
+
 ### 配置系统
 
 - ConfigService 的 `ArcSwap<RuntimeConfig>` 是唯一的配置权威源，不要在其他服务缓存配置快照
