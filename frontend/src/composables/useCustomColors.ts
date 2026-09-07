@@ -49,7 +49,7 @@ watch(customColors, () => {
 
 /** 新增自定义颜色：与系统色及已有自定义色去重（大小写不敏感），避免列表出现等值重复项 */
 function addCustomColor(type: keyof CustomColors, hex: string): void {
-  if (!hex || !DEFAULT_CUSTOM_COLORS.hasOwnProperty(type)) return;
+  if (!hex || !Object.hasOwn(DEFAULT_CUSTOM_COLORS, type)) return;
   const lower = hex.toLowerCase();
   const systemColors =
     type === "accent"
@@ -65,7 +65,7 @@ function addCustomColor(type: keyof CustomColors, hex: string): void {
 
 /** 删除自定义颜色；若当前正在使用该色则一并回落到默认值，避免界面残留已删除的色值 */
 function removeCustomColor(type: keyof CustomColors, hex: string): void {
-  if (!DEFAULT_CUSTOM_COLORS.hasOwnProperty(type)) return;
+  if (!Object.hasOwn(DEFAULT_CUSTOM_COLORS, type)) return;
   const idx = customColors[type].findIndex((c) => c.toLowerCase() === hex.toLowerCase());
   if (idx === -1) return;
   customColors[type].splice(idx, 1);

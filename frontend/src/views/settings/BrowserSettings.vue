@@ -6,7 +6,8 @@ import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { useEnvironment } from "@/composables/useEnvironment";
 import FieldHelp from "@/components/common/FieldHelp.vue";
-import { browsersApi, configApi, workerApi, extractApiError } from "@/api";
+import { browsersApi, configApi, workerApi } from "@/api";
+import { extractApiError } from "@/api/client";
 import { frontendLogger } from "@/utils/logger";
 
 const config = useConfig();

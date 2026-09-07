@@ -312,6 +312,12 @@
   color: var(--accent);
 }
 
+/* 空态占位图标尺寸（原内联 style 迁移） */
+.appearance-bg-thumb-icon {
+  width: 24px;
+  height: 24px;
+}
+
 .appearance-bg-thumb-zoom {
   position: absolute;
   bottom: 4px;

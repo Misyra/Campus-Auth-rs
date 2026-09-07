@@ -7,14 +7,11 @@ import { useScripts } from "@/composables/useScripts";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
-import Modal from "@/components/common/Modal.vue";
-import { useRouter } from "vue-router";
 
 const t = useTasks();
 const s = useScripts();
 const repo = useRepoImport();
 const debug = useDebug();
-const router = useRouter();
 // B1：拖拽排序必须互传全量——后端 order 接口会整体替换任务与脚本两组顺序，
 // 漏传的一组会被清空，因此脚本列表也要一并传入用于持久化
 const drag = useDragSort(t.tasks, { tasks: t.tasks, scripts: s.scripts });
@@ -47,7 +44,7 @@ function closeEditor() { void t.closeTaskEditor(); }
               <IconApp name="share-2" class="icon-sm" />
               分享适配
             </a>
-            <button class="btn btn-sm btn-primary" @click="t.showTaskEditor(null)">
+            <button class="btn btn-sm btn-primary" @click="t.showTaskEditor()">
               <IconApp name="plus" class="icon-sm" />
               新建任务
             </button>

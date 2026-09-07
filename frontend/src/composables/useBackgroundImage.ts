@@ -7,7 +7,8 @@
 import { reactive } from "vue";
 import { LIMITS } from "../utils/constants";
 import { pickFile } from "../utils/file";
-import { backgroundApi, ApiError } from "../api";
+import { backgroundApi } from "../api";
+import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { useToast } from "./useToast";
 import { useAppearance } from "./useAppearance";
@@ -37,7 +38,7 @@ async function selectBackgroundImage(): Promise<void> {
       toastOnly(false, data?.message || "上传失败");
     }
   } catch (err) {
-    const msg = err instanceof ApiError ? err.message : (err as { message?: string }).message || "上传失败";
+    const msg = extractApiError(err, "上传失败");
     toastOnly(false, "上传失败: " + msg);
   }
 }
@@ -87,7 +88,7 @@ async function confirmRandomWallpaper(): Promise<void> {
       toastOnly(false, data?.message || "获取壁纸失败");
     }
   } catch (err) {
-    const msg = err instanceof ApiError ? err.message : "获取壁纸失败";
+    const msg = extractApiError(err, "获取壁纸失败");
     toastOnly(false, msg);
   } finally {
     randomWallpaperDialog.loading = false;

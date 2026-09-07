@@ -49,7 +49,7 @@ const {
               </button>
             </div>
             <div v-else class="appearance-bg-thumb empty" @click="selectBackgroundImage">
-              <IconApp name="image" :stroke-width="1.5" style="width:24px;height:24px" />
+              <IconApp name="image" :stroke-width="1.5" class="appearance-bg-thumb-icon" />
               <span>选择图片</span>
             </div>
             <div class="appearance-bg-thumb-actions">

@@ -58,7 +58,7 @@ async function manualCheckUpdate() {
   updateInfo.value = null;
   try {
     const info = await systemApi.checkUpdate();
-    updateInfo.value = info as unknown as UpdateInfo;
+    updateInfo.value = info;
   } catch (e: unknown) {
     updateInfo.value = { has_update: false, error: (e as Error).message || "检查失败" };
   } finally {
@@ -105,7 +105,7 @@ const autoRestartOptions = [
   { value: "24", label: "每 24 小时" },
   { value: "48", label: "每 48 小时" },
   { value: "168", label: "每 168 小时（每周）" },
-] as const;
+];
 const autoRestartHours = computed<string>({
   get: () => String(config.config.app_settings.auto_restart_hours ?? 0),
   set: (v) => { config.config.app_settings.auto_restart_hours = Number(v); },
@@ -233,7 +233,7 @@ onMounted(() => { void refreshUpdateState(); });
             </div>
             <span v-if="updateCheckHint && !updateInfo" class="hint update-check-hint" :class="{ 'update-check-error': !!updateState?.error }">{{ updateCheckHint }}</span>
             <!-- 检查结果：与关于页原逻辑一致，检查后原地展示更新/下载入口 -->
-            <div v-if="updateInfo && !updateInfo.error && !(updateInfo as unknown as { message?: string }).message" class="update-result">
+            <div v-if="updateInfo && !updateInfo.error && !updateInfo.message" class="update-result">
               <div v-if="updateInfo.has_update" class="update-available">
                 <IconApp name="upload" width="16" height="16" />
                 <span>发现新版本 <strong>v{{ updateInfo.latest }}</strong></span>
@@ -245,9 +245,9 @@ onMounted(() => { void refreshUpdateState(); });
                 <span>当前已是最新版本</span>
               </div>
             </div>
-            <div v-else-if="updateInfo && (updateInfo as unknown as { message?: string }).message" class="update-success">
+            <div v-else-if="updateInfo && updateInfo.message" class="update-success">
               <IconApp name="check" width="16" height="16" />
-              <span>{{ (updateInfo as unknown as { message: string }).message }}，请重启程序生效</span>
+              <span>{{ updateInfo.message }}，请重启程序生效</span>
             </div>
             <div v-else-if="updateInfo && updateInfo.error" class="update-error">{{ updateInfo.error }}</div>
           </div>

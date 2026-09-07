@@ -6,6 +6,42 @@
  */
 
 import { ensureAuthToken, http } from "./client";
+import type { RequestOptions } from "./client";
+import type {
+  AiCaptureResult,
+  AiGenerateResult,
+  AiLlmConfig,
+  AutostartStatus,
+  BackgroundUploadResult,
+  BinaryInfo,
+  BrowserListResponse,
+  ConfigResponse,
+  DebugSession,
+  EnvironmentStatus,
+  HealthInfo,
+  InitStatus,
+  LoginHistoryItem,
+  LogEntry,
+  MutationResult,
+  NetworkDetectResult,
+  OcrStatus,
+  PortalDetectResult,
+  Profile,
+  ProfileListResponse,
+  RepoTask,
+  SaveConfigPayload,
+  ScheduledTask,
+  ScheduledTaskHistoryItem,
+  Script,
+  StatusSnapshot,
+  TaskDetail,
+  TaskItem,
+  UninstallDetectItem,
+  UninstallResponse,
+  UpdateInfo,
+  UpdatePin,
+  UpdateState,
+} from "./types";
 
 /** 路径段编码：所有 id/filename 插值前必经此函数 */
 const pathSegment = (s: string) => encodeURIComponent(s);
@@ -39,40 +75,6 @@ async function fetchBundleWithTimeout(url: string, init: RequestInit): Promise<B
   }
 }
 
-import type { RequestOptions } from "./client";
-import type {
-  AiCaptureResult,
-  AiGenerateResult,
-  AiLlmConfig,
-  AutostartStatus,
-  BackgroundUploadResult,
-  BrowserListResponse,
-  ConfigResponse,
-  DebugSession,
-  EnvironmentStatus,
-  HealthInfo,
-  InitStatus,
-  LoginHistoryItem,
-  LogEntry,
-  MutationResult,
-  NetworkDetectResult,
-  OcrStatus,
-  Profile,
-  ProfileListResponse,
-  RepoTask,
-  SaveConfigPayload,
-  ScheduledTask,
-  ScheduledTaskHistoryItem,
-  Script,
-  TaskDetail,
-  TaskItem,
-  UninstallDetectItem,
-  UninstallResponse,
-  UpdateInfo,
-  UpdatePin,
-  UpdateState,
-} from "./types";
-
 export { ApiError, extractApiError } from "./client";
 
 /** 配置相关 */
@@ -90,12 +92,12 @@ export const configApi = {
 
 /** 监控与登录操作 */
 export const monitorApi = {
-  fetchStatus: () => http.get<import("./types").StatusSnapshot>("/api/monitor/status"),
+  fetchStatus: () => http.get<StatusSnapshot>("/api/monitor/status"),
   start: () => http.post<MutationResult>("/api/monitor/start"),
   stop: () => http.post<MutationResult>("/api/monitor/stop"),
   /** 认证门户检测：未认证时跟随 302 返回候选门户地址，需先退出登录 */
   detectPortal: () =>
-    http.post<import("./types").PortalDetectResult>("/api/monitor/detect-portal", null, { timeout: 60000 }),
+    http.post<PortalDetectResult>("/api/monitor/detect-portal", null, { timeout: 60000 }),
 };
 
 /** 一次性操作 */
@@ -389,7 +391,7 @@ export const backgroundApi = {
 export const scriptsApi = {
   list: () => http.get<Script[]>("/api/scripts"),
   get: (id: string) => http.get<Script>(`/api/scripts/${pathSegment(id)}`),
-  binaries: () => http.get<import("./types").BinaryInfo[]>("/api/scripts/binaries"),
+  binaries: () => http.get<BinaryInfo[]>("/api/scripts/binaries"),
   save: (id: string, payload: { name: string; description: string; content: string; binary_path: string }) =>
     http.put<MutationResult>(`/api/scripts/${pathSegment(id)}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/scripts/${pathSegment(id)}`),

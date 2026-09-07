@@ -287,6 +287,11 @@
   border-top-color: var(--warning);
 }
 
+/* 主按钮内的 spinner：顶色改用按钮文字色，保证在 accent 底色上可见（原内联 style 迁移） */
+.spinner-on-accent {
+  border-top-color: var(--on-accent);
+}
+
 /* ═══ 骨架屏加载 ═══ */
 .skeleton-shimmer {
   background: linear-gradient(

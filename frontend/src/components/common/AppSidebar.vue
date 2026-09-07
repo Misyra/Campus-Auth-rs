@@ -5,8 +5,8 @@ import IconApp from "@/components/common/IconApp.vue";
 
 import { ref, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { useStatus } from "../../composables/useStatus";
-import { useUi } from "../../composables/useUi";
+import { useStatus } from "@/composables/useStatus";
+import { useUi } from "@/composables/useUi";
 
 const route = useRoute();
 const router = useRouter();

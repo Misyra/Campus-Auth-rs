@@ -489,6 +489,8 @@ export interface UpdateInfo {
   latest?: string;
   current?: string;
   error?: string;
+  /** 检查/更新流程的结果文案（如“更新已就绪”提示） */
+  message?: string;
   /** 发布页/下载页链接（AboutView 展示“前往下载”按钮） */
   url?: string;
   /** 下载包预期 SHA256（点击“立即更新”时回传，固定本次确认的版本） */

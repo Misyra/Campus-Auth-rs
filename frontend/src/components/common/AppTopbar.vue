@@ -98,7 +98,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
         :disabled="busy.monitor"
         :title="status.monitoring ? '停止网络检测和自动登录' : '开始检测网络，断网时自动登录'"
       >
-        <span v-if="busy.monitor" class="spinner" style="border-top-color: var(--on-accent)"></span>
+        <span v-if="busy.monitor" class="spinner spinner-on-accent"></span>
         <IconApp v-else class="btn-icon" :name="status.monitoring ? 'pause' : 'play'" />
         {{ busy.monitor ? "处理中..." : (status.monitoring ? "停止检测" : "启动检测") }}
       </button>

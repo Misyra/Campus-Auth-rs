@@ -126,7 +126,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
     </div>
 
     <!-- 环境未就绪提示（非阻塞，仅链接到 系统 → Python 环境） -->
-    <div v-if="showEnvBanner" class="network-status-banner disconnected" style="cursor:pointer" @click="router.push({ name: 'settings-system' })">
+    <div v-if="showEnvBanner" class="network-status-banner disconnected env-banner" @click="router.push({ name: 'settings-system' })">
       <span class="status-dot"></span>
       <span>Python 环境未就绪，手动登录将自动初始化或可前往 设置 · 系统 手动修复</span>
     </div>

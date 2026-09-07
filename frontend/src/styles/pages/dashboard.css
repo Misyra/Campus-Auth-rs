@@ -398,6 +398,11 @@
   animation: pulse 2s ease-in-out infinite;
 }
 
+/* 环境未就绪提示横幅：整条可点击跳转设置页（仅此元素可点，不影响状态横幅） */
+.network-status-banner.env-banner {
+  cursor: pointer;
+}
+
 .network-status-banner.idle {
   background: rgba(var(--slate-rgb), 0.08);
   border-color: rgba(var(--slate-rgb), 0.15);
