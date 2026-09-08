@@ -37,7 +37,7 @@ use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 use crate::config::ConfigService;
@@ -787,8 +787,44 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
             // emit）转发到 WebSocket 日志流；其余事件仅 debug 记录。
             // 曾经白名单中的 `ocr_result` 为死臂：Python 侧从未 emit 该事件
             //（OCR 走 ocr_recognize 请求-响应，不走事件推送），已删除。
-            debug!(target: "python_worker", "event {}: {:?}", ev.event, ev.data);
+            // trace 级原始 dump：白名单事件已在下方以任务域 info 留痕，debug 级会与之双显
+            trace!(target: "python_worker", "event {}: {:?}", ev.event, ev.data);
             if matches!(ev.event.as_str(), "screenshot" | "step_progress" | "dialog") {
+                // 任务域留痕（target 归一为 source=task）：替代旧版前端合成条目，
+                // 使步骤/弹窗日志获得统一 seq/时间戳，并落盘、可导出
+                if ev.event == "step_progress" {
+                    // 与旧前端合成文案保持一致：步骤 N 或 步骤 N/M: 描述
+                    let idx = ev
+                        .data
+                        .get("step_index")
+                        .and_then(|v| v.as_u64())
+                        .map(|i| i + 1)
+                        .unwrap_or(1);
+                    let total = ev.data.get("total_steps").and_then(|v| v.as_u64());
+                    let desc = ev
+                        .data
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("执行步骤");
+                    match total {
+                        Some(total) => {
+                            info!(target: "campus_auth::tasks", "步骤 {idx}/{total}: {desc}")
+                        }
+                        None => info!(target: "campus_auth::tasks", "步骤 {idx}: {desc}"),
+                    }
+                } else if ev.event == "dialog" {
+                    if let Some(msg) = ev
+                        .data
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        info!(target: "campus_auth::tasks", "弹窗提示: {msg}");
+                    }
+                }
                 // screenshot 事件负载为本地落盘 path，浏览器不可达；换算成
                 // HTTP 预览 URL（GET /api/debug/screenshot/{filename}）供前端 <img> 使用
                 if ev.event == "screenshot" {

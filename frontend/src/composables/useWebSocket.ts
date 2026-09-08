@@ -9,7 +9,6 @@ import type { StatusSnapshot, LogEntry } from "../api/types";
 import { ensureAuthToken } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { TIMING } from "../utils/constants";
-import { localNowTimestamp } from "../utils/formatters";
 import { useStatus } from "./useStatus";
 import { useLogs } from "./useLogs";
 import { useDebug } from "./useDebug";
@@ -154,26 +153,12 @@ async function connectWebSocket(): Promise<void> {
         if (d.session_type === "debug") {
           useDebug().handleStepProgress(d);
         }
-        const desc = (typeof d.description === "string" && d.description.trim()) || "执行步骤";
-        const total = typeof d.total_steps === "number" ? d.total_steps : "";
-        const entry: LogEntry = {
-          timestamp: localNowTimestamp(),
-          level: "INFO",
-          source: "task",
-          message: `步骤 ${(d.step_index ?? 0) + 1}${total ? `/${total}` : ""}: ${desc}`,
-        };
-        logs.appendLogs([entry], logs.autoScroll.value);
+        // 步骤日志由后端以任务域 info 留痕（source=task，带 seq/统一时间戳），前端不再合成
       } else {
         frontendLogger.warn("websocket", "step_progress 消息数据无效");
       }
     } else if (parsed.type === "dialog") {
-      const d = parsed.data as { message?: string; action?: string } | null;
-      if (d && typeof d.message === "string" && d.message.trim()) {
-        logs.appendLogs(
-          [{ timestamp: localNowTimestamp(), level: "INFO", source: "task", message: `弹窗提示: ${d.message}` }],
-          logs.autoScroll.value,
-        );
-      }
+      /* 弹窗提示已由后端留痕为任务域日志（source=task），事件本身无其他前端消费 */
     } else if (parsed.type === "pong") {
       /* 心跳响应 */
     } else {
