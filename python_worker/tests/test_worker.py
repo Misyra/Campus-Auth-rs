@@ -67,6 +67,19 @@ def test_build_launch_args_firefox_skips_chromium_flags():
     assert "--disable-blink-features=AutomationControlled" not in args
 
 
+def test_is_chromium_channel_covers_custom_engine():
+    from playwright_worker import WorkerCore
+    assert WorkerCore._is_chromium_channel({}, "chromium") is True
+    assert WorkerCore._is_chromium_channel({}, "playwright") is True
+    assert WorkerCore._is_chromium_channel({}, "msedge") is True
+    assert WorkerCore._is_chromium_channel({}, "firefox") is False
+    assert WorkerCore._is_chromium_channel({}, "webkit") is False
+    # custom 路径按引擎细分：firefox/webkit 引擎不算 Chromium
+    assert WorkerCore._is_chromium_channel({}, "custom") is True
+    assert WorkerCore._is_chromium_channel({"custom_browser_engine": "firefox"}, "custom") is False
+    assert WorkerCore._is_chromium_channel({"custom_browser_engine": "webkit"}, "custom") is False
+
+
 def test_build_launch_args_filters_blocked_and_dedupes():
     from playwright_worker import WorkerCore
     core = WorkerCore()

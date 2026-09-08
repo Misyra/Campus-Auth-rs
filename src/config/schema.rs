@@ -72,7 +72,7 @@ pub struct BrowserSettings {
     pub persistent_context: bool,
     /// 纯净模式（禁用扩展，默认开启）
     pub pure_mode: bool,
-    /// 隐身模式
+    /// 反自动化检测（默认开启：注入 webdriver/plugins/languages 伪装脚本，无副作用，可手动关闭）
     pub stealth_mode: bool,
     /// 隐身模式自定义脚本
     pub stealth_custom_script: String,
@@ -115,7 +115,7 @@ impl Default for BrowserSettings {
             custom_browser_engine: "chromium".to_string(),
             persistent_context: false,
             pure_mode: true,
-            stealth_mode: false,
+            stealth_mode: true,
             stealth_custom_script: String::new(),
             low_resource_mode: false,
             disable_web_security: false,

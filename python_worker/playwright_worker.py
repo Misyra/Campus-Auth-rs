@@ -574,10 +574,7 @@ class WorkerCore:
 
     def _build_launch_args(self, bs: dict, channel: str = "playwright") -> list[str]:
         """构建浏览器启动参数；非 Chromium 引擎过滤 Chromium-only 参数。"""
-        custom_engine = (bs.get("custom_browser_engine") or "auto").strip().lower()
-        is_chromium = channel not in ("firefox", "webkit")
-        if channel == "custom":
-            is_chromium = custom_engine not in ("firefox", "webkit")
+        is_chromium = self._is_chromium_channel(bs, channel)
 
         args: list[str] = []
         if is_chromium:
@@ -684,6 +681,16 @@ class WorkerCore:
         # playwright / chromium / msedge / chrome 走 Chromium launcher。
         return playwright.chromium, None
 
+    @staticmethod
+    def _is_chromium_channel(bs: dict, channel: str) -> bool:
+        """是否为 Chromium 系（含 custom 路径配 Chromium 引擎；firefox/webkit 排除）。"""
+        if channel in ("firefox", "webkit"):
+            return False
+        if channel == "custom":
+            custom_engine = (bs.get("custom_browser_engine") or "auto").strip().lower()
+            return custom_engine not in ("firefox", "webkit")
+        return True
+
     async def _launch_browser(
         self,
         playwright: Any,
@@ -691,10 +698,15 @@ class WorkerCore:
         custom_path: str,
         headless: bool,
         launch_args: list[str],
+        bs: dict | None = None,
     ) -> Any:
         """启动非持久化浏览器。"""
         launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path)
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
+        # 去掉 Playwright 默认的 --enable-automation（消除 automation 痕迹；
+        # 用户侧仍被黑名单拦截，仅后端内置可配；仅 Chromium 支持该参数）
+        if self._is_chromium_channel(bs or {}, channel):
+            kwargs["ignore_default_args"] = ["--enable-automation"]
         if resolved_path:
             kwargs["executable_path"] = resolved_path
         elif channel in ("msedge", "chrome"):
@@ -710,10 +722,13 @@ class WorkerCore:
         launch_args: list[str],
         user_data_dir: str,
         ctx_opts: dict[str, Any],
+        bs: dict | None = None,
     ) -> Any:
         """启动持久化上下文浏览器（保留 cookies）。"""
         launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path)
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args, **ctx_opts}
+        if self._is_chromium_channel(bs or {}, channel):
+            kwargs["ignore_default_args"] = ["--enable-automation"]
         if resolved_path:
             kwargs["executable_path"] = resolved_path
         elif channel in ("msedge", "chrome"):
@@ -755,14 +770,14 @@ class WorkerCore:
                 ctx_opts = self._build_context_options(bs)
                 self._context = await self._launch_persistent_context(
                     self._playwright, channel, custom_path, headless,
-                    launch_args, str(user_data_dir), ctx_opts,
+                    launch_args, str(user_data_dir), ctx_opts, bs,
                 )
                 self._browser = None
                 if not pure_mode:
                     await self._apply_stealth_and_routes(bs)
             elif pure_mode:
                 self._browser = await self._launch_browser(
-                    self._playwright, channel, custom_path, headless, []
+                    self._playwright, channel, custom_path, headless, [], bs
                 )
                 # pure mode 只禁用额外启动参数、stealth 与资源路由；
                 # locale/timezone/UA/header/proxy 等 BrowserContext 契约仍应一致生效。
@@ -771,7 +786,7 @@ class WorkerCore:
             else:
                 launch_args = self._build_launch_args(bs, channel)
                 self._browser = await self._launch_browser(
-                    self._playwright, channel, custom_path, headless, launch_args
+                    self._playwright, channel, custom_path, headless, launch_args, bs
                 )
                 ctx_opts = self._build_context_options(bs)
                 self._context = await self._browser.new_context(**ctx_opts)
