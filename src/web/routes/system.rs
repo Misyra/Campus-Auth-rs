@@ -220,6 +220,7 @@ pub async fn fetch_logs(
 ///
 /// tracing json 格式：`{"timestamp":"...","level":"INFO","fields":{"message":"..."},"target":"..."}`
 /// 保留所有级别；是否展示由前端筛选器决定，保证刷新历史与实时日志一致。
+/// 结构化字段拼接到消息尾部（` key=value`），与 WS 实时条目（BroadcastLayer）信息量对齐。
 fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let level = v
@@ -232,12 +233,25 @@ fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    let message = v
-        .get("fields")
+    let fields = v.get("fields").and_then(|f| f.as_object());
+    let mut message = fields
         .and_then(|f| f.get("message"))
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_string();
+    if let Some(fields) = fields {
+        for (key, value) in fields {
+            if key == "message" {
+                continue;
+            }
+            // 字符串值不带引号（对齐 tracing Debug 渲染的可读性），其余用紧凑 JSON
+            let rendered = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            message.push_str(&format!(" {key}={rendered}"));
+        }
+    }
     let source =
         crate::web::state::normalize_source(v.get("target").and_then(|x| x.as_str()).unwrap_or(""));
     Some(crate::web::state::LogEntry::new(
@@ -854,12 +868,14 @@ mod tests {
 
     #[test]
     fn parse_tracing_json_log_extracts_fields() {
-        let line = r#"{"timestamp":"2026-08-14T01:02:03Z","level":"INFO","fields":{"message":"登录成功"},"target":"campus_auth::login"}"#;
+        let line = r#"{"timestamp":"2026-08-14T01:02:03Z","level":"INFO","fields":{"message":"登录成功","task_id":"t1","attempt":2},"target":"campus_auth::login"}"#;
         let entry = parse_tracing_json_log(line).expect("应解析成功");
         assert_eq!(entry.level, "INFO");
-        assert_eq!(entry.message, "登录成功");
-        // source 经 normalize_source 归一化（去掉 crate 前缀，取首段）
-        assert_eq!(entry.source, "login");
+        // 结构化字段拼接到消息尾部，与 WS 实时条目（BroadcastLayer）信息量对齐；
+        // 经 JSON 往返后字段按字母序排列（serde_json 默认 BTreeMap），顺序不保证与发射一致
+        assert_eq!(entry.message, "登录成功 attempt=2 task_id=t1");
+        // source 经 normalize_source 归一化为五大域（login → auth）
+        assert_eq!(entry.source, "auth");
         assert!(!entry.timestamp.is_empty());
     }
 

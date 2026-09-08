@@ -41,6 +41,11 @@ class FrontendLogger {
   private currentLevel = "INFO";
   private ws: WebSocket | null = null;
   private buffer: FrontendLogMessage[] = [];
+  /** 同 scope+message 的 WS 上行节流窗口（错误风暴等量回流会刷爆日志面板） */
+  private static readonly THROTTLE_WINDOW_MS = 5000;
+  /** 节流表上限：超过先清理过期键，仍超则整体清空（最坏代价是清空后一轮重复） */
+  private static readonly THROTTLE_MAP_MAX = 200;
+  private lastSentAt = new Map<string, number>();
 
   setWebSocket(ws: WebSocket | null): void {
     this.ws = ws;
@@ -65,7 +70,27 @@ class FrontendLogger {
     return [stamp, level, "FRONTEND", scope, message, meta ?? ""];
   }
 
+  /**
+   * WS 上行节流：5 秒窗口内相同 scope+message 只上行一次。
+   * 仅约束上报链路，console 输出不受限（保留完整开发信息）。
+   */
+  private isThrottled(scope: string, message: string): boolean {
+    const now = Date.now();
+    if (this.lastSentAt.size > FrontendLogger.THROTTLE_MAP_MAX) {
+      for (const [key, at] of this.lastSentAt) {
+        if (now - at >= FrontendLogger.THROTTLE_WINDOW_MS) this.lastSentAt.delete(key);
+      }
+      if (this.lastSentAt.size > FrontendLogger.THROTTLE_MAP_MAX) this.lastSentAt.clear();
+    }
+    const key = `${scope}\u0000${message}`;
+    const at = this.lastSentAt.get(key);
+    if (at !== undefined && now - at < FrontendLogger.THROTTLE_WINDOW_MS) return true;
+    this.lastSentAt.set(key, now);
+    return false;
+  }
+
   private send(level: string, scope: string, message: string, meta?: unknown): void {
+    if (this.isThrottled(scope, message)) return;
     // 无 meta 时发 null：后端按 null 省略 meta 字段，避免日志里出现 meta="" 噪音
     const payload: FrontendLogMessage = {
       level,
