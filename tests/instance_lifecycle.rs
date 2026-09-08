@@ -81,7 +81,7 @@ fn instance_lock_status_and_graceful_stop() {
         last,
         std::fs::read_to_string(&err_log).unwrap_or_default()
     );
-    wait_exit_or_kill(&mut first.0, "首个实例");
+    wait_exit_or_kill(&mut first.0, "首个实例", Some(&err_log));
 }
 
 /// `--stop` 对不存在的实例应快速失败并给出明确错误（而非空等超时）

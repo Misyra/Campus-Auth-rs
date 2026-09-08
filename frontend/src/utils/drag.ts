@@ -77,11 +77,19 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
     setTimeout(() => {
       swapCooldown = false;
     }, TIMING.DRAG_SWAP_COOLDOWN);
+    // splice 会原地修改 items（它与 list.value 是同一个数组），因此必须先保存
+    // 当前悬停项的 id；否则向下拖动时 index 已指向删除后的下一项，排序会越过一项。
+    const targetId = items[index].id;
     const from = list.value.findIndex((t) => t.id === dragState!.taskId);
     if (from === -1) return;
     const item = list.value.splice(from, 1)[0];
-    let to = list.value.findIndex((t) => t.id === items[index].id);
-    if (dragState.currentIndex < index) to++;
+    let to = list.value.findIndex((t) => t.id === targetId);
+    if (to === -1) {
+      // 防御性恢复：同步重渲染期间若目标被外部删除，不能连带丢失被拖拽项。
+      list.value.splice(from, 0, item);
+      return;
+    }
+    if (from < index) to++;
     list.value.splice(to, 0, item);
     dragState.currentIndex = to;
     orderDirty = true;

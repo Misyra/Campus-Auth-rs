@@ -42,25 +42,32 @@ const BASE = "";
  */
 let authToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
+const AUTH_TOKEN_TIMEOUT_MS = 10000;
 
 /** 获取（并缓存）鉴权 token；失败返回 null（后端将拒绝后续请求并返回 401） */
 export function ensureAuthToken(): Promise<string | null> {
   if (authToken) return Promise.resolve(authToken);
   if (!tokenPromise) {
     // 注意：此处必须用裸 fetch，经 request() 会因 ensureAuthToken 递归
-    tokenPromise = fetch(`${BASE}/api/auth/token`)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AUTH_TOKEN_TIMEOUT_MS);
+    const pending = fetch(`${BASE}/api/auth/token`, { signal: controller.signal })
       .then((res) => (res.ok ? res.json() : null))
       .then((json) => {
         const token = (json as { data?: { token?: string } } | null)?.data?.token;
         authToken = typeof token === "string" && token ? token : null;
-        tokenPromise = null;
         return authToken;
       })
       .catch((e) => {
         frontendLogger.debug("auth", "获取 token 失败，将以匿名请求继续", e);
-        tokenPromise = null;
         return null;
       });
+    tokenPromise = pending;
+    void pending.finally(() => {
+      clearTimeout(timeoutId);
+      // resetAuthToken 后可能已经开始新一轮取 token，旧请求不得清空新请求的共享状态。
+      if (tokenPromise === pending) tokenPromise = null;
+    });
   }
   return tokenPromise;
 }

@@ -277,6 +277,9 @@ impl SchedulerService {
             return Err(SchedulerError::InvalidTaskId(id.to_string()));
         }
         let path = self.scheduled_dir.join(format!("{}.json", id));
+        // 与 save_task/update_last_run 串行化，防止 last_run 的读-改-写在删除后
+        // 将同名任务文件重新写回磁盘。
+        let _file_guard = self.file_mutex.lock().await;
         let path_for_blocking = path.clone();
         let id_for_blocking = id.to_string();
         // 存在性检查与删除均在阻塞线程完成（历史遗留 #12）

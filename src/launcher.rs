@@ -582,7 +582,9 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
             {
                 anyhow::bail!("端口 {} 被占用: {e}", state.app_config.port);
             }
-            warn!("Axum 启动失败 ({e})，降级到轻量模式");
+            // 此时完整模式的依赖已按非轻量模式构建，继续运行会得到“看似完整、
+            // 实则没有 Web 控制台”的不一致状态；交由上层统一清理后明确退出。
+            anyhow::bail!("Web 控制台启动失败: {e}");
         }
     }
 

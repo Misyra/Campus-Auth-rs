@@ -87,6 +87,13 @@ fn main() -> anyhow::Result<()> {
         eprintln!("启动失败: {e:#}");
         std::process::exit(1);
     }
+    // 显式有界关闭，替代 Runtime 的隐式 drop：drop 会无限期等待在途
+    // spawn_blocking 任务完成——启动期后台任务（如环境检查的子进程探测）
+    // 若因外部原因挂起，进程会"已关闭但迟迟不退出"，只能等 30s 退出
+    // watchdog 强杀。优雅关闭已完成、日志已 flush（WorkerGuard 在
+    // graceful_shutdown 最后一步释放），此处仅需给在途阻塞任务一个有限
+    // 的收尾窗口（对齐全项目 stop_with_timeout 的有界关闭哲学）。
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
     Ok(())
 }
 

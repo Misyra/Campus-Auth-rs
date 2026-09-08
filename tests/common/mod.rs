@@ -78,7 +78,10 @@ pub fn wait_listening(port: u16) -> bool {
 }
 
 /// 在限期内等待子进程退出；超时则强杀并失败
-pub fn wait_exit_or_kill(child: &mut Child, label: &str) {
+///
+/// `stderr_log` 用于失败诊断：panic 信息附带实例 stderr 落盘内容，
+/// 否则 NamedTempFile 在守卫 Drop 时删除，超时场景的证据随之丢失。
+pub fn wait_exit_or_kill(child: &mut Child, label: &str, stderr_log: Option<&std::path::Path>) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         if matches!(child.try_wait(), Ok(Some(_))) {
@@ -87,7 +90,16 @@ pub fn wait_exit_or_kill(child: &mut Child, label: &str) {
         std::thread::sleep(Duration::from_millis(200));
     }
     let _ = child.kill();
-    panic!("{label} 未在期限内退出");
+    let stderr = stderr_log
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let stderr_tail: String = {
+        // 只保留尾部，避免超长日志淹没 panic 信息
+        let lines: Vec<&str> = stderr.lines().collect();
+        let start = lines.len().saturating_sub(20);
+        lines[start..].join("\n")
+    };
+    panic!("{label} 未在期限内退出；实例 stderr 尾部:\n{stderr_tail}");
 }
 
 /// 启动一个完整模式实例（托盘与浏览器均禁用），stderr 进临时文件便于失败排查
