@@ -18,8 +18,8 @@
 #   ├── resources/                   # 托盘图标 / task-recorder 等静态资源
 #   ├── python_worker/               # Python Worker 源码（运行时按需引导 uv 环境）
 #   └── docs/guides/                 # 离线指南（docs/guides/*.md）
-#
-# 打包完成后，额外将 campus-auth(.exe) 复制一份到项目根目录，方便直接运行测试。
+# 打包产物仅在 $Out（默认 dist/，见 .gitignore /dist/）；不再向项目根目录复制 exe，
+# 版本以 `target/release/campus-auth --version`（= Cargo.toml）为准，避免根残留误导。
 # 要求 pwsh 7+（UTF-8），Windows PowerShell 5.1 会按 ANSI 解析中文导致乱码。
 
 param(
@@ -116,11 +116,7 @@ $sizeMB = [math]::Round(
     1
 )
 
-# 复制主程序到项目根目录，方便直接运行测试
-$RootExe = Join-Path $Root "campus-auth$exeSuffix"
-Copy-Item (Join-Path $Out "campus-auth$exeSuffix") $RootExe -Force
-
 Write-Host "=== 4/4 完成 ==="
 Write-Host "便携版输出: $Out（约 ${sizeMB} MB，解压后直接运行 campus-auth$exeSuffix）"
-Write-Host "主程序已复制到项目根目录: $RootExe（直接运行即可测试）"
+Write-Host "本地冒烟: $Out\campus-auth$exeSuffix --status（勿用 target/debug 测 release 行为）"
 Write-Host "Docker 部署: 解压后 docker compose up -d --build（需 Dockerfile/docker-compose.yml/docker/）"

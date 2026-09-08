@@ -8,7 +8,8 @@ services:
     restart: unless-stopped
     ports:
       # Web 控制台
-      - "50721:50721"
+      # 本工具的 token 仅用于本地浏览器会话防护，不是远程访问凭证。
+      - "127.0.0.1:50721:50721"
     volumes:
       # 持久化数据：配置 / Profile / 任务 / 日志 / Python 环境
       - campus-auth-data:/data

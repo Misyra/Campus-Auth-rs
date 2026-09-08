@@ -5,7 +5,7 @@
 | 位置 | 文件 | 职责 |
 |---|---|---|
 | 根 | `Dockerfile` | 多阶段构建（Node 前端 → Rust → Python 3.12-slim 预装 `python_worker`+Chromium），`COPY python_worker` 与 `.dockerignore: python_worker/.venv` 联动，产物预装 `/app/python_worker` |
-| 根 | `docker-compose.yml` | 默认编排（`campus-auth:50721→50721`、`VOLUME /data`、`CAMPUS_AUTH_BASE_PATH=/data`、`HEALTHCHECK /api/health`），`docker compose up -d` 直接发现 |
+| 根 | `docker-compose.yml` | 默认编排（`127.0.0.1:50721→50721`、`VOLUME /data`、`CAMPUS_AUTH_BASE_PATH=/data`、`HEALTHCHECK /api/health`），`docker compose up -d` 直接发现 |
 | 根 | `.dockerignore` | 缩小上下文（`target/frontend/node_modules/python_worker/.venv/__pycache__/logs/config` 等），与 `.gitignore` 口径一致 |
 | `docker/` | `entrypoint.sh` | 容器入口（`mkdir -p $DATA_DIR/{config,tasks,logs,environment}` 后 `exec campus-auth`），仅被 `Dockerfile` 引用 |
 | `docker/` | `docker-compose.override.example.yml` | 宿主机目录挂载示例（`./data:/data`），需 `docker compose -f docker-compose.yml -f docker/docker-compose.override.example.yml up` 显式叠加 |
@@ -28,6 +28,8 @@ curl http://localhost:50721/api/health
 ```
 
 Web 控制台：`http://localhost:50721`
+
+> 安全提示：默认端口仅绑定宿主机回环地址。内置 token 用于防止本地网页跨站请求，**不是**远程访问认证；不要将容器端口直接暴露到局域网或公网。如确需远程访问，请在反向代理/VPN 层配置独立认证与 TLS。
 
 ## 持久化
 
@@ -74,7 +76,7 @@ docker build -t campus-auth .
 
 docker run -d \
   --name campus-auth \
-  -p 50721:50721 \
+  -p 127.0.0.1:50721:50721 \
   -v campus-auth-data:/data \
   -e CAMPUS_AUTH_HOST=0.0.0.0 \
   --restart unless-stopped \

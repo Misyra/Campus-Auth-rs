@@ -8,7 +8,7 @@ services:
       - ./data:/data
     # 自定义端口映射示例
     ports:
-      - "8080:50721"
+      - "127.0.0.1:8080:50721"
     environment:
       - CAMPUS_AUTH_PORT=50721
       - RUST_LOG=info
