@@ -29,13 +29,17 @@ function dialogButtons(): HTMLElement[] {
   );
 }
 
-// 打开时聚焦确认按钮（危险操作也聚焦确认，配合红色样式强化感知）
+// 打开时聚焦确认按钮（危险操作也聚焦确认，配合红色样式强化感知）+ 锁定背景滚动
 // 注意：confirmState 是 reactive 对象（非 ref），此处不能写 .value，
 // 否则 getter 求值抛 TypeError，上报为 watcher getter（生产构建 runtime-2）异常
 watch(
   () => confirmState.visible,
   async (val) => {
-    if (!val) return;
+    if (!val) {
+      document.body.style.overflow = "";
+      return;
+    }
+    document.body.style.overflow = "hidden";
     await nextTick();
     const buttons = dialogButtons();
     buttons[buttons.length - 1]?.focus();
@@ -46,10 +50,11 @@ watch(
 
 <template>
   <Teleport to="body">
-    <div
-      v-if="confirmState.visible"
-      class="modal-overlay confirm-overlay"
-      tabindex="-1"
+    <Transition name="modal-fade">
+      <div
+        v-if="confirmState.visible"
+        class="modal-overlay"
+        tabindex="-1"
       @click.self="resolveConfirm(false)"
       @keydown="onTrapKeydown"
       @keydown.esc.prevent="resolveConfirm(false)"
@@ -69,6 +74,7 @@ watch(
           </button>
         </div>
       </div>
-    </div>
+      </div>
+    </Transition>
   </Teleport>
 </template>

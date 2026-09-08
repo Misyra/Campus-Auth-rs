@@ -74,7 +74,7 @@ const redirectEnabled = computed({
   <div class="page-content">
     <!-- ===== 编辑器模式 ===== -->
     <template v-if="showEditor && p.editingProfile.value">
-      <div class="profile-editor-topbar">
+      <div class="profiles-topbar profile-editor-topbar">
         <button class="btn btn-sm" @click="closeEditor">
           <IconApp name="arrow-left" class="icon-sm" />
           返回方案列表
@@ -115,11 +115,11 @@ const redirectEnabled = computed({
               <span v-if="p.editorDetectResult.value" class="editor-detect-info">
                 <span v-if="p.editorDetectResult.value.gateway_ip" class="editor-detect-tag">
                   网关 <code>{{ p.editorDetectResult.value.gateway_ip }}</code>
-                  <button class="btn-link" @click="p.editingProfile.value.gateway_ip = p.editorDetectResult.value.gateway_ip">填入</button>
+                  <button class="btn btn-link" @click="p.editingProfile.value.gateway_ip = p.editorDetectResult.value.gateway_ip">填入</button>
                 </span>
                 <span v-if="p.editorDetectResult.value.ssid" class="editor-detect-tag">
                   SSID <code>{{ p.editorDetectResult.value.ssid }}</code>
-                  <button class="btn-link" @click="p.editingProfile.value.wifi_ssid = p.editorDetectResult.value.ssid">填入</button>
+                  <button class="btn btn-link" @click="p.editingProfile.value.wifi_ssid = p.editorDetectResult.value.ssid">填入</button>
                 </span>
                 <span v-if="!p.editorDetectResult.value.gateway_ip && !p.editorDetectResult.value.ssid" class="editor-detect-tag muted">未能获取网络信息</span>
               </span>
@@ -266,12 +266,12 @@ const redirectEnabled = computed({
         </div>
       </div>
 
-      <!-- 空状态 -->
+      <!-- 空状态：复用全局 .empty-state（misc.css），标题/描述走通用工具类 -->
       <div v-if="!Object.keys(p.profiles.value).length" class="card">
-        <div class="profiles-empty">
+        <div class="empty-state">
           <IconApp name="wifi" :stroke-width="1.5" />
-          <span class="profiles-empty-title">暂无配置方案</span>
-          <span class="profiles-empty-desc">为不同网络环境创建独立的认证配置</span>
+          <strong class="empty-title">暂无配置方案</strong>
+          <span class="empty-desc">为不同网络环境创建独立的认证配置</span>
           <button class="btn btn-sm btn-primary" @click="openEditor(null)">创建第一个方案</button>
         </div>
       </div>

@@ -50,9 +50,20 @@
 
   .logo-text,
   .nav-item span,
-  .nav-more-arrow,
-  .status-badge {
+  .nav-more-arrow {
     display: none;
+  }
+
+  /* 移动端状态徽标只藏文字留圆点，在线/离线状态不丢失 */
+  .status-badge {
+    font-size: 0;
+    gap: 0;
+    padding: 10px;
+    min-height: 0;
+  }
+
+  .status-badge .status-dot {
+    font-size: var(--text-md);
   }
 
   .nav-item {
@@ -88,6 +99,19 @@
     grid-template-columns: 1fr;
   }
 
+  /* 日志行四列在窄屏下折为两行：时间+徽章一行，消息独占一行，避免挤出视口 */
+  .log-entry {
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+      "time meta"
+      "msg msg";
+  }
+
+  .log-entry .log-time { grid-area: time; }
+  .log-entry .log-level-badge,
+  .log-entry .log-source-badge { grid-area: meta; }
+  .log-entry .log-content { grid-area: msg; }
+
   .debug-body {
     grid-template-columns: 1fr;
   }
@@ -97,14 +121,19 @@
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 768px) {
   .settings-tab {
     flex: 1 1 40%;
   }
 
   .task-mini-grid,
-  .form-row {
+  .form-row,
+  .form-row--wide {
     grid-template-columns: 1fr;
+  }
+
+  .form-row--flex {
+    flex-direction: column;
   }
 }
 
@@ -112,6 +141,42 @@
   .field-help::after {
     left: calc(100% + 8px);
     max-width: calc(100vw - 120px);
+  }
+
+  /* 通用弹窗窄屏：全幅贴边（复用向导的全幅模式），确认框同理 */
+  .modal-overlay {
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .modal-container,
+  .confirm-dialog {
+    width: 100%;
+    max-width: 100%;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    max-height: 92vh;
+    max-height: 92dvh;
+  }
+
+  /* 仓库导入双栏窄屏改为纵排，避免 360px 下挤窄 */
+  .repo-import-body {
+    flex-direction: column;
+  }
+
+  .repo-import-list,
+  .repo-import-detail {
+    max-height: none;
+  }
+
+  /* Toast 窄屏满宽贴边 */
+  .toast {
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+  }
+
+  .notification-dropdown {
+    width: calc(100vw - 32px);
   }
 
   .wizard-container {

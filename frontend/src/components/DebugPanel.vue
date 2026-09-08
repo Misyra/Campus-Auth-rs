@@ -101,7 +101,7 @@ async function handleFeedback(): Promise<void> {
         </span>
         <span v-else class="debug-task-id debug-task-unknown">调试会话</span>
         <div class="debug-info-right">
-          <span class="debug-status-pill" :class="isDone ? 'done' : 'active'">
+          <span class="badge debug-status-pill" :class="isDone ? 'badge--success' : 'badge--info'">
             <span class="debug-status-dot"></span>
             {{ isDone ? "已完成" : loading ? "执行中" : "进行中" }}
           </span>
@@ -138,7 +138,7 @@ async function handleFeedback(): Promise<void> {
             </div>
           </div>
 
-          <div v-if="!session.steps.length" class="debug-empty">
+          <div v-if="!session.steps.length" class="empty-state empty-state--dashed">
             <span class="debug-empty-icon">◻</span>
             <span>{{ loading ? "正在获取会话数据..." : session.running ? "会话详情恢复中，当前执行结束后自动补全" : "该任务没有可执行的步骤" }}</span>
           </div>

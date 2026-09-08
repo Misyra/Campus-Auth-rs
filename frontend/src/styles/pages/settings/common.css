@@ -22,10 +22,11 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  flex: 1 1 0;
   min-height: 46px;
-  min-width: 132px;
+  min-width: 0;
   gap: 1px;
-  padding: 6px 18px;
+  padding: 6px 10px;
   border: 1px solid transparent;
   border-radius: var(--radius-lg);
   background: transparent;
@@ -122,10 +123,16 @@
   flex: 1;
 }
 
-/* ---- 双列网格 ---- */
-.settings-grid-2col {
+/* ---- 双列网格（settings/appearance/tasks 三处 gap 差异收敛：默认 gap-md，宽松版用 --airy） ---- */
+.settings-grid-2col,
+.appearance-grid-2col {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+  align-items: start;
+}
+
+.settings-grid-2col--airy {
   gap: var(--space-lg);
 }
 
@@ -138,14 +145,16 @@
   margin-top: -4px;
 }
 
+/* 等宽多行输入复用全局 .textarea--mono（misc.css），旧 .settings-monospace-textarea 退役 */
 .settings-monospace-textarea {
-  font-family: monospace;
-  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
   resize: vertical;
 }
 
-@media (max-width: 720px) {
-  .settings-grid-2col {
+@media (max-width: 768px) {
+  .settings-grid-2col,
+  .appearance-grid-2col {
     grid-template-columns: 1fr;
   }
 }
@@ -214,7 +223,7 @@
   flex-shrink: 0;
 }
 
-/* ---- 保存按钮（右下角浮动） ---- */
+/* ---- 保存按钮（右下角浮动）：渐变主按钮语义同 .btn-primary，此处只留浮动条定位与尺寸差异 ---- */
 .save-bar {
   position: sticky;
   bottom: 20px;
@@ -228,12 +237,6 @@
   min-width: 130px;
   padding: 14px 28px;
   min-height: 48px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-  color: var(--on-accent);
-  border: none;
-  font-weight: 600;
-  box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.25);
-  transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
 }
 
 .save-btn svg {
@@ -313,24 +316,7 @@
   border-radius: var(--radius-sm);
 }
 
+/* settings 域按钮：次要/ghost 沿用 btn.css 基类，此处只留卡片底色差异（elevated 底修饰） */
 .settings-page .btn-secondary {
   background: var(--bg-card-elevated);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-}
-
-.settings-page .btn-secondary:hover {
-  background: var(--bg-hover);
-  border-color: var(--border-hover);
-}
-
-.settings-page .btn-ghost {
-  background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid transparent;
-}
-
-.settings-page .btn-ghost:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
 }

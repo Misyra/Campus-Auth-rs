@@ -207,7 +207,7 @@ onMounted(() => { void refreshUpdateState(); });
               <label>更新通道</label>
               <FieldHelp text="正式版仅跟随稳定发布；测试版跟随预发布（alpha/beta）；全通道最新版取两者中更高者。" />
             </div>
-            <div class="update-channel-segmented" role="group" aria-label="更新通道">
+            <div class="segmented" role="group" aria-label="更新通道">
               <button
                 v-for="opt in channelOptions"
                 :key="opt.value"

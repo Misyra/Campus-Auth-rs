@@ -196,7 +196,7 @@ body {
 
 ::selection {
   background: rgba(var(--accent-rgb), 0.25);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 /* 全局键盘焦点环：鼠标点击不触发（:focus-visible 只在键盘导航时出现） */

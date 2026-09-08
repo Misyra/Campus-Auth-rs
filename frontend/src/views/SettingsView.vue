@@ -63,7 +63,7 @@ function handleSave() {
 
     <div class="save-bar">
       <button
-        class="btn save-btn"
+        class="btn btn-primary save-btn"
         :class="{
           'save-btn-dirty': !busy.save && !saveFailed && config.dirty.value,
           'save-btn-saving': busy.save,

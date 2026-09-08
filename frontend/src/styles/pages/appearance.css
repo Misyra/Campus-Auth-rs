@@ -65,14 +65,7 @@
   padding: 20px;
 }
 
-/* 双栏 grid */
-.appearance-grid-2col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-md) 20px;
-  align-items: start;
-}
-
+/* 双栏 grid：结构复用通用 .appearance-grid-2col（settings/common.css，与 settings-grid-2col 同构），此处只留子项防溢出 */
 .appearance-grid-2col > .appearance-field,
 .appearance-grid-2col > .appearance-slider-item,
 .appearance-grid-2col > .appearance-bg-thumb-group,
@@ -93,36 +86,8 @@
   font-weight: 500;
 }
 
-/* segmented 主题切换 */
-.appearance-segmented {
-  display: inline-flex;
-  background: var(--bg-glass-light);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 2px;
-  gap: 2px;
-}
-
-.appearance-segmented button {
-  padding: 6px 14px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
-}
-
-.appearance-segmented button:hover {
-  color: var(--text-primary);
-}
-
-.appearance-segmented button.active {
-  background: rgba(var(--accent-rgb), 0.15);
-  color: var(--accent);
-}
+/* segmented 主题切换：结构复用通用 .segmented（components/segmented.css），此处旧类退役（模板已挂双类过渡） */
+.appearance-segmented {}
 
 /* 颜色控件 */
 .appearance-color-row {
@@ -221,7 +186,7 @@
   width: 100%;
   height: 4px;
   background: var(--border);
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   outline: none;
   cursor: pointer;
 }
@@ -390,53 +355,15 @@
   margin-bottom: 0;
 }
 
-/* 背景图 lightbox */
-.bg-lightbox-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-max);
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  animation: fadeIn var(--dur-base) var(--ease-out);
-  cursor: zoom-out;
-}
-
-.bg-lightbox-content {
-  position: relative;
-  max-width: 90vw;
-  max-height: 90vh;
-}
-
-.bg-lightbox-content img {
-  max-width: 90vw;
-  max-height: 90vh;
+/* 背景图预览：复用公共 Modal 容器，此处只留内容区图片样式 */
+.bg-preview-body img {
+  max-width: 100%;
+  max-height: 64vh;
+  width: 100%;
   object-fit: contain;
+  display: block;
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-xl);
-}
-
-.bg-lightbox-close {
-  position: absolute;
-  top: -12px;
-  right: -12px;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.7);
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  color: #fff;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
-}
-
-.bg-lightbox-close:hover {
-  background: var(--error);
-  transform: scale(1.1);
 }
 
 /* 自定义背景样式（应用到 body） */
@@ -452,16 +379,11 @@ body.has-custom-bg::before {
   z-index: -1;
 }
 
-/* 随机壁纸弹窗：遮罩/容器样式已随迁移公共 Modal 删除，仅保留内容元素样式 */
-.random-wallpaper-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-sm);
+/* 随机壁纸弹窗：容器/遮罩/头脚复用公共 Modal，此处只留内容区提示样式 */
+.random-wallpaper-hint {
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-md);
 }
 
-/* 响应式：窄屏降级为单列 */
-@media (max-width: 720px) {
-  .appearance-grid-2col {
-    grid-template-columns: 1fr;
-  }
-}
+/* 响应式：窄屏单列由通用规则兜底（settings/common.css 768px 断点），此处不再单列 */

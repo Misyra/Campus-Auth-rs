@@ -1,4 +1,6 @@
-/* toggle.css — 开关（label 型 toggle / ToggleSwitch 按钮型开关） */
+/* toggle.css — 开关（label 型 toggle 为标准 / ToggleSwitch 按钮型为兼容别名）
+ * 标准：关态底 --bg-secondary、钮 --text-on-accent（任意底色保持白色，见 base.css 双轨注释）；
+ * 开态统一 accent 渐变 + 滑移 20px。label 型历史关态底/钮色已对齐标准。 */
 .toggle-group {
   margin-bottom: var(--space-md);
   display: flex;
@@ -36,11 +38,15 @@
   width: 44px;
   height: 24px;
   flex-shrink: 0;
-  background: var(--bg-primary);
-  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-full);
   position: relative;
   transition: background var(--dur-base) var(--ease-out);
   border: 1px solid var(--border);
+}
+
+.toggle-slider:hover {
+  border-color: var(--accent);
 }
 
 .toggle-slider::after {
@@ -48,11 +54,12 @@
   position: absolute;
   width: 18px;
   height: 18px;
-  background: var(--text-secondary);
+  background: var(--text-on-accent);
   border-radius: 50%;
   top: 2px;
   left: 2px;
   transition: transform var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .toggle input:checked + .toggle-slider {
@@ -63,10 +70,9 @@
 
 .toggle input:checked + .toggle-slider::after {
   transform: translateX(20px);
-  background: var(--bg-primary);
 }
 
-/* ========== Toggle Switch (Button) ========== */
+/* ========== Toggle Switch (Button)：label 型的按钮兼容别名，色板与标准对齐 ========== */
 .toggle-row {
   display: flex;
   align-items: center;
@@ -105,7 +111,7 @@
   height: 24px;
   background-color: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-full);
   cursor: pointer;
   transition: background-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
   flex-shrink: 0;

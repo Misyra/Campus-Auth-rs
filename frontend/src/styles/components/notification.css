@@ -103,12 +103,7 @@
   font-weight: 600;
 }
 
-.notification-empty {
-  padding: var(--space-lg);
-  text-align: center;
-  color: var(--text-muted);
-  font-size: var(--text-md);
-}
+/* 空状态复用全局 .empty-state--sm（misc.css），旧 .notification-empty 已退役 */
 
 .notification-item {
   padding: 10px var(--space-md);

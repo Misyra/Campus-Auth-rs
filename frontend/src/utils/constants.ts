@@ -180,6 +180,7 @@ export const SETTINGS_TABS = [
   { id: "account", label: "账号", hint: "账号、密码、认证地址与运营商" },
   { id: "monitor", label: "检测", hint: "在线检测、登录重试与暂停时段" },
   { id: "browser", label: "浏览器", hint: "浏览器选择、超时与反检测参数" },
+  { id: "tasks", label: "任务", hint: "任务概览、录制器与编写指南" },
   { id: "environment", label: "环境", hint: "Python 环境、OCR 与会话保持" },
   { id: "system", label: "系统", hint: "启动行为、日志与界面" },
   { id: "network", label: "网络与更新", hint: "端口、代理、自动更新与维护" },

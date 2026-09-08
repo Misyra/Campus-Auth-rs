@@ -89,7 +89,7 @@ watch(
       <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'gitee' }" @click="repo.selectRepoSource('gitee')">Gitee</button>
       <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'custom' }" @click="repo.selectRepoSource('custom')">自定义</button>
       <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
-        <input v-model="repo.repoImport.value.url" type="text" class="input" placeholder="输入远程索引 URL" />
+        <div class="form-group form-group--flush"><input v-model="repo.repoImport.value.url" type="text" placeholder="输入远程索引 URL" /></div>
       </div>
     </div>
     <div class="repo-import-action">
@@ -99,7 +99,7 @@ watch(
     </div>
     <div v-if="repo.repoImport.value.error" class="repo-import-error">{{ repo.repoImport.value.error }}</div>
     <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-search">
-      <input v-model="repo.repoImport.value.searchQuery" type="text" class="input" placeholder="搜索任务..." />
+      <div class="form-group form-group--flush"><input v-model="repo.repoImport.value.searchQuery" type="text" placeholder="搜索任务..." /></div>
     </div>
     <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-body">
       <div class="repo-import-list">
@@ -117,7 +117,7 @@ watch(
           <div class="repo-item-text">
             <div class="repo-item-name">
               {{ task.name }}
-              <span v-if="isOfficialTask(task.author)" class="repo-item-official">官方任务</span>
+              <span v-if="isOfficialTask(task.author)" class="badge badge--sm badge--success repo-item-official">官方任务</span>
             </div>
             <div class="repo-item-desc">{{ task.description }}</div>
             <div class="repo-item-meta">
@@ -132,7 +132,7 @@ watch(
         <template v-if="repo.repoImport.value.selected">
           <h4 class="repo-detail-name">
             {{ repo.repoImport.value.selected.name }}
-            <span v-if="isOfficialTask(repo.repoImport.value.selected.author)" class="repo-item-official">官方任务</span>
+            <span v-if="isOfficialTask(repo.repoImport.value.selected.author)" class="badge badge--sm badge--success repo-item-official">官方任务</span>
           </h4>
           <p class="repo-detail-desc">{{ repo.repoImport.value.selected.description }}</p>
           <div v-if="selectedScreenshotUrl && !brokenImages.has(repo.repoImport.value.selected.id)" class="repo-detail-shot">
@@ -148,9 +148,6 @@ watch(
             <span class="repo-detail-zoom-hint">点击放大</span>
           </div>
           <div v-else class="repo-detail-empty">暂无截图</div>
-          <div class="repo-detail-actions">
-            <button class="btn btn-primary btn-sm" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">导入此任务</button>
-          </div>
         </template>
         <div v-else class="repo-detail-empty">点击左侧任务查看登录页截图</div>
       </div>
@@ -159,20 +156,24 @@ watch(
       <p>点击「加载索引」从远程仓库获取任务列表。</p>
       <p>你也可以 <a :href="repo.repoImport.value.url" target="_blank" rel="noopener">直接查看仓库</a>。</p>
     </div>
+    <template #footer>
+      <button v-if="repo.repoImport.value.selected" class="btn btn-primary btn-sm" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">导入此任务</button>
+      <span v-else class="repo-footer-hint">点击左侧任务查看详情后导入</span>
+    </template>
   </Modal>
 
-  <!-- 免责弹窗：必须显式确认/取消，禁用遮罩关闭 -->
-  <Modal :open="!!repo.repoImport.value.disclaimer" title="免责声明" :close-on-overlay="false" @close="repo.cancelRepoDisclaimer">
+  <!-- 免责弹窗：必须显式确认/取消，禁用遮罩与 ESC 关闭 -->
+  <Modal :open="!!repo.repoImport.value.disclaimer" title="免责声明" :close-on-overlay="false" :close-on-esc="false" @close="repo.cancelRepoDisclaimer">
     <p>从远程仓库导入的任务由社区成员提供，未经审核验证。</p>
     <p class="repo-disclaimer-warn"><strong>请仔细阅读并确认任务内容后再使用。</strong>任务中填入的账号密码将在执行时提交到第三方网站，请确认目标网站可靠。</p>
-    <div class="repo-disclaimer-actions">
+    <template #footer>
       <button class="btn btn-secondary" @click="repo.cancelRepoDisclaimer()">取消</button>
       <button class="btn btn-primary" @click="repo.acceptRepoDisclaimer()">确认导入</button>
-    </div>
+    </template>
   </Modal>
 
-  <!-- 截图放大预览：复用 Modal，大图可滚动查看原图 -->
-  <Modal :open="!!previewShot" :title="previewTitle" size="xl" @close="closeShotPreview">
+  <!-- 截图放大预览：复用 Modal，大图可滚动查看原图（沉浸预览加深遮罩） -->
+  <Modal :open="!!previewShot" :title="previewTitle" size="xl" preview @close="closeShotPreview">
     <div class="repo-shot-preview">
       <img :src="previewShot" :alt="previewTitle" />
     </div>
@@ -184,22 +185,22 @@ watch(
 .repo-source-label { font-size: var(--text-md); color: var(--text-secondary); }
 .repo-import-source .btn.active { background: var(--accent); color: var(--on-accent); }
 .repo-custom-url { width: 100%; margin-top: 8px; }
-.repo-custom-url .input { width: 100%; }
 .repo-import-action { margin-bottom: 12px; }
 .repo-import-error { color: var(--error); font-size: var(--text-md); margin-bottom: 8px; }
 .repo-import-search { margin-bottom: 12px; }
-.repo-import-search .input { width: 100%; }
 .repo-import-body { display: flex; gap: 12px; min-height: 0; }
 .repo-import-list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; }
 .repo-import-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: background var(--dur-fast) var(--ease-out); }
 .repo-import-item:hover { background: var(--bg-hover); }
-.repo-import-item.selected { border-color: var(--accent); }
+/* 选中态对齐 .task-item.active（淡底 + 边框），不用实底 accent */
+.repo-import-item.selected { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.06); }
 .repo-item-thumb { flex: none; width: 64px; height: 64px; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
 .repo-item-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .repo-item-thumb-empty { display: flex; align-items: center; justify-content: center; font-size: var(--text-xs); color: var(--text-tertiary); text-align: center; padding: 4px; }
 .repo-item-text { flex: 1; min-width: 0; }
 .repo-item-name { font-weight: 600; }
-.repo-item-official { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-xs); font-size: var(--text-xs); font-weight: 500; background: rgba(var(--success-rgb), 0.15); color: var(--success); vertical-align: middle; }
+/* 官方任务徽标：语义走通用 .badge--success，此处只留列表内的左侧间距 */
+.repo-item-official { margin-left: 6px; vertical-align: middle; }
 .repo-item-desc { font-size: var(--text-sm); color: var(--text-secondary); margin-top: 2px; }
 .repo-item-meta { display: flex; gap: 12px; margin-top: 6px; font-size: var(--text-xs); color: var(--text-tertiary); }
 .repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
@@ -212,10 +213,10 @@ watch(
 .repo-shot-preview { max-height: 70vh; overflow: auto; border-radius: var(--radius-sm); border: 1px solid var(--border); }
 .repo-shot-preview img { width: 100%; display: block; }
 .repo-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 120px; color: var(--text-tertiary); font-size: var(--text-sm); background: var(--bg-hover); border-radius: var(--radius-sm); }
-.repo-detail-actions { display: flex; justify-content: flex-end; }
+/* 列表弹窗 footer 为选中任务的操作区：有选中=导入按钮，无选中=引导文案 */
+.repo-footer-hint { color: var(--text-tertiary); font-size: var(--text-sm); }
 .repo-import-empty { text-align: center; color: var(--text-tertiary); padding: 24px; }
 .repo-import-hint { color: var(--text-secondary); font-size: var(--text-md); }
 .repo-import-hint a { color: var(--accent); }
 .repo-disclaimer-warn { color: var(--error); }
-.repo-disclaimer-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
 </style>

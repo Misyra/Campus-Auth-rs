@@ -177,7 +177,7 @@ function closeEditor() { void t.closeTaskEditor(); }
               <li><code>navigate</code> / <code>goto</code> - 跳转 URL</li>
               <li><code>assert_text</code> - 断言页面出现文本</li>
             </ul>
-            <p class="hint" style="margin-top: 0.5rem;">提示：<code>ocr</code> 步骤需安装 OCR 依赖（ddddocr），未安装时会返回明确错误。</p>
+            <p class="hint hint--mt">提示：<code>ocr</code> 步骤需安装 OCR 依赖（ddddocr），未安装时会返回明确错误。</p>
             <h4>可用变量</h4>
             <ul>
               <li><code v-pre>{{USERNAME}}</code> / <code v-pre>{{PASSWORD}}</code> / <code v-pre>{{ISP}}</code> / <code v-pre>{{LOGIN_URL}}</code></li>

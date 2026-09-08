@@ -16,6 +16,34 @@
   opacity: 0.5;
 }
 
+/* 空状态标题/描述工具类（Profiles 等页复用，不再各写一套） */
+.empty-title {
+  display: block;
+  font-size: var(--text-base);
+  color: var(--text-primary);
+}
+
+.empty-desc {
+  display: block;
+  font-size: var(--text-md);
+  color: var(--text-muted);
+}
+
+/* 虚线变体：调试面板等"可拖入/待填充"场景（保留边框与最小高度） */
+.empty-state--dashed {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  min-height: 160px;
+  padding: var(--space-lg);
+}
+
+/* 紧凑变体：通知下拉等小容器场景 */
+.empty-state--sm {
+  padding: var(--space-lg);
+  font-size: var(--text-md);
+  color: var(--text-muted);
+}
+
 .info-box {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -55,18 +83,8 @@
   background: rgba(var(--error-rgb), 0.1);
 }
 
-/* ========== Fullscreen Image Overlay ========== */
-.fullscreen-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-top);
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: zoom-out;
-  backdrop-filter: var(--blur-sm);
-}
+/* ========== Fullscreen Image Overlay ==========
+ * 已退役并删除：截图放大/背景预览统一走 Modal + preview 修饰（modal.css）。旧构建缓存抖动已过观察期，不再保留。 */
 
 .fullscreen-img {
   max-width: 95vw;
@@ -130,11 +148,14 @@
 /* 工具类: alignment */
 .ms-auto { margin-left: auto; }
 
-/* 等宽文本区域 */
+/* 等宽文本区域：脚本/参数/URL 检测等多行 mono 输入统一走本类（字族与字号对齐 form 基准） */
+.textarea--mono,
 .monospace-textarea {
     font-family: var(--font-mono);
     font-size: var(--text-base);
 }
+
+/* 旧 .monospace-textarea 为 .textarea--mono 别名，新代码请用 .textarea--mono */
 
 /* 旋转动画（@keyframes spin 统一定义在 base.css） */
 .spin {

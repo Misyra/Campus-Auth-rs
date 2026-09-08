@@ -104,7 +104,7 @@ function onSaveClick(): void {
     <Modal :open="st.showScheduledTaskModal.value" :title="st.editingScheduledTask.value ? '编辑定时任务' : '新建定时任务'" @close="st.closeScheduledTaskModal()">
       <div class="form-section">
         <div class="form-section-title">基本信息</div>
-        <div class="form-row">
+        <div class="form-row form-row--flex">
           <div class="form-group flex-1">
             <label for="scheduled-task-name">任务名称</label>
             <input id="scheduled-task-name" v-model="st.scheduledTaskForm.value.name" type="text" placeholder="输入任务名称" />
@@ -117,8 +117,8 @@ function onSaveClick(): void {
       </div>
       <div class="form-section">
         <div class="form-section-title">任务配置</div>
-        <div class="form-row">
-          <div class="form-group" style="min-width:140px">
+        <div class="form-row form-row--flex">
+          <div class="form-group form-group--min140">
             <label for="scheduled-task-type">任务类型</label>
             <CustomSelect
               :model-value="st.scheduledTaskForm.value.task_type"
@@ -136,7 +136,7 @@ function onSaveClick(): void {
       </div>
       <div class="form-section">
         <div class="form-section-title">执行设置</div>
-        <div class="form-row">
+        <div class="form-row form-row--flex">
           <div class="form-group">
             <label for="scheduled-task-time">执行时间</label>
             <input id="scheduled-task-time" type="time"

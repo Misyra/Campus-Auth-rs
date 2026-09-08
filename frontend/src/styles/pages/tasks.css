@@ -229,14 +229,10 @@
   flex-shrink: 0;
 }
 
+/* 调试状态徽标语义走通用 .badge（--info 进行中 / --success 已完成），此处只留胶囊圆角、圆点动画与旧类兼容 */
 .debug-status-pill {
-  display: inline-flex;
-  align-items: center;
+  border-radius: var(--radius-full);
   gap: 6px;
-  font-size: var(--text-xs);
-  padding: var(--space-xs) 10px;
-  border-radius: 999px;
-  border: 1px solid transparent;
 }
 
 .debug-status-pill.active {
@@ -258,6 +254,11 @@
   background: currentColor;
 }
 
+.debug-status-pill.badge--info .debug-status-dot {
+  animation: debug-step-pulse 1.2s ease-in-out infinite;
+}
+
+/* 旧类兼容：未迁移处仍可用 .active 触发圆点动画 */
 .debug-status-pill.active .debug-status-dot {
   animation: debug-step-pulse 1.2s ease-in-out infinite;
 }
@@ -418,20 +419,7 @@
 .msg-fail { color: var(--error); }
 .msg-running { color: var(--text-secondary); }
 
-.debug-empty {
-  flex: 1;
-  min-height: 160px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-sm);
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-md);
-}
-
+/* 调试面板空状态复用全局 .empty-state--dashed（misc.css），图标尺寸此处保留 */
 .debug-empty-icon {
   font-size: var(--text-xl);
   opacity: 0.6;

@@ -86,7 +86,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
             <span>通知历史</span>
             <button class="btn btn-text btn-xs" @click="notifications.splice(0, notifications.length)">清空</button>
           </div>
-          <div v-if="!notifications.length" class="notification-empty">暂无通知</div>
+          <div v-if="!notifications.length" class="empty-state empty-state--sm">暂无通知</div>
           <div
             v-for="n in notifications"
             :key="n.time + n.message"

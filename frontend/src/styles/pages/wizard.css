@@ -4,6 +4,7 @@
   left: 0;
   right: 0;
   bottom: 0;
+  /* 品牌渐变 + 高不透明底：浅色主题下底层仍深色，属全屏阻断例外（与普通 0.6 遮罩区分） */
   background:
     radial-gradient(ellipse 70% 50% at 30% 30%, rgba(var(--accent-rgb), 0.06) 0%, transparent 60%),
     radial-gradient(ellipse 50% 40% at 70% 70%, rgba(var(--purple-rgb), 0.05) 0%, transparent 60%),

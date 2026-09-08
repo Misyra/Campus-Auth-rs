@@ -394,7 +394,7 @@ async function restoreCapture(): Promise<void> {
       <IconApp name="alert-triangle" class="icon-sm" />
       <span>
         当前功能仍在开发，可能不稳定。如果无法生成正确任务，请到
-        <router-link to="/settings/environment">设置 → 环境</router-link>
+        <router-link to="/settings/tasks">设置 → 任务</router-link>
         手动下载录制器，按照视频教程操作。
       </span>
     </div>
@@ -429,7 +429,7 @@ async function restoreCapture(): Promise<void> {
       <div class="card" :class="{ 'ai-card-done': isConfigDone }">
         <div class="card-header">
           <h2><IconApp name="sparkles" class="icon-sm" /> 第 1 步 · 配置 LLM 服务</h2>
-          <span class="ai-card-badge" :class="isConfigDone ? 'badge-done' : 'badge-todo'">{{ isConfigDone ? "已配置" : "待配置" }}</span>
+          <span class="badge badge--sm" :class="isConfigDone ? 'badge--success' : 'badge--warn'">{{ isConfigDone ? "已配置" : "待配置" }}</span>
         </div>
         <div class="card-body">
           <button
@@ -446,7 +446,7 @@ async function restoreCapture(): Promise<void> {
             <div class="hint ai-privacy-hint">
               API Key 使用 AES-256-GCM 加密存储在本机（与校园网密码同一密钥体系），不会明文落盘。
             </div>
-            <div class="ai-config-row-wide">
+            <div class="form-row form-row--wide">
               <div class="form-group">
                 <label for="ai-preset">服务商预设</label>
                 <CustomSelect v-model="preset" :options="presetOptions" placeholder="选择服务商" @change="applyPreset" />
@@ -456,7 +456,7 @@ async function restoreCapture(): Promise<void> {
                 <input id="ai-base-url" v-model="baseUrl" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4" autocomplete="off" spellcheck="false" />
               </div>
             </div>
-            <div class="ai-config-row-eq">
+            <div class="form-row">
               <div class="form-group">
                 <label for="ai-model" class="required">模型名（需支持视觉输入）</label>
                 <input id="ai-model" v-model="model" type="text" placeholder="例如 glm-5.3-flash" autocomplete="off" spellcheck="false" />
@@ -479,7 +479,7 @@ async function restoreCapture(): Promise<void> {
       <div class="card" :class="{ 'ai-card-done': isCaptureDone }">
         <div class="card-header">
           <h2><IconApp name="image" class="icon-sm" /> 第 2 步 · 捕获登录页面</h2>
-          <span class="ai-card-badge" :class="isCaptureDone ? 'badge-done' : 'badge-todo'">{{ isCaptureDone ? "已捕获" : "待捕获" }}</span>
+          <span class="badge badge--sm" :class="isCaptureDone ? 'badge--success' : 'badge--warn'">{{ isCaptureDone ? "已捕获" : "待捕获" }}</span>
         </div>
         <div class="card-body">
           <div class="hint">
@@ -524,7 +524,7 @@ async function restoreCapture(): Promise<void> {
       <div class="card" :class="{ 'ai-card-done': isGenerateDone }">
         <div class="card-header">
           <h2><IconApp name="code" class="icon-sm" /> 第 3 步 · 生成并保存任务</h2>
-          <span class="ai-card-badge" :class="isGenerateDone ? 'badge-done' : generating ? 'badge-doing' : 'badge-todo'">{{ isGenerateDone ? "已生成" : generating ? "生成中" : "待生成" }}</span>
+          <span class="badge badge--sm" :class="isGenerateDone ? 'badge--success' : generating ? 'badge--primary' : 'badge--warn'">{{ isGenerateDone ? "已生成" : generating ? "生成中" : "待生成" }}</span>
         </div>
         <div class="card-body">
           <div class="form-group">
@@ -535,7 +535,7 @@ async function restoreCapture(): Promise<void> {
           <div class="ai-generate-bar">
             <div class="ai-idle-group">
               <label for="ai-idle" class="ai-idle-label">空闲超时</label>
-              <CustomSelect v-model="streamIdleValue" :options="streamIdleOptions" class="ai-idle-select" />
+              <CustomSelect v-model="streamIdleValue" :options="streamIdleOptions" class="ai-idle-select" compact />
             </div>
             <span class="hint ai-idle-hint">有输出自动续命，仅连续无内容达阈值才超时（最大 10 分钟）</span>
             <span class="ai-generate-hint hint" v-if="streamPhase && !generateResult">{{ streamPhase }}</span>

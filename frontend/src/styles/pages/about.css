@@ -328,41 +328,8 @@
   margin: 2px 0 0;
 }
 
-/* 卸载弹窗 */
-.uninstall-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: var(--z-modal);
-}
-
-.uninstall-modal {
-  background: var(--bg-modal);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  width: 540px;
-  max-width: 90vw;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: var(--shadow-xl);
-}
-
-.uninstall-modal-header {
-  display: flex;
-  gap: 12px;
-  padding: 20px 20px 0;
-  align-items: flex-start;
-}
-
-.uninstall-modal-header h3 {
-  margin: 0;
-  font-size: var(--text-lg);
-}
-
+/* 卸载弹窗：容器/头/脚复用公共 Modal（modal-header/body/footer），此处只留内容区行样式。
+ * 运行中经 Modal 的 close-on-overlay/close-on-esc=false 锁定关闭（含 X），closeUninstall 兜底拦截。 */
 .uninstall-subtitle {
   font-size: var(--text-md);
   color: var(--text-secondary);
@@ -381,20 +348,7 @@
 
 /* .spinner 和 @keyframes spin 已统一定义在 base.css 中 */
 
-.uninstall-modal-body {
-  padding: var(--space-md) 20px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.uninstall-empty {
-  text-align: center;
-  padding: var(--space-lg);
-  color: var(--text-secondary);
-  font-size: var(--text-base);
-}
+/* 错误空态复用全局 .empty-state--sm（misc.css），旧 .uninstall-empty 已退役 */
 
 .uninstall-item {
   display: flex;
@@ -479,14 +433,6 @@
   font-size: var(--text-md);
   color: var(--text-secondary);
   line-height: 1.5;
-}
-
-.uninstall-modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-sm);
-  padding: var(--space-md) 20px;
-  border-top: 1px solid var(--border);
 }
 
 /* 清理结果 */

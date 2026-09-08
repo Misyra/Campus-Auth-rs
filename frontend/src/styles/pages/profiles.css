@@ -383,36 +383,20 @@
   color: var(--text-primary);
 }
 
+/* 检测标签内的行内操作：复用 .btn-link 基类，此处只留字号/字重差异 */
 .editor-detect-tag .btn-link {
-  background: none;
-  border: none;
   padding: 0;
-  margin: 0;
   font-size: var(--text-xs);
-  color: var(--accent);
-  cursor: pointer;
-  text-decoration: none;
   font-weight: 600;
   line-height: 1;
 }
 
-.editor-detect-tag .btn-link:hover {
-  text-decoration: underline;
-}
-
 /* ==================== 编辑方案页面 ==================== */
 
+/* 编辑页顶栏复用 .profiles-topbar 卡片化工具栏（旧 .profile-editor-topbar 退役，padding 差 2px 已对齐）。
+ * 保留选择器仅为 h2 字号兜底，新代码请直接用 .profiles-topbar。 */
 .profile-editor-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-md);
-  gap: var(--space-md);
-  padding: 14px 20px;
-  background: var(--bg-card-elevated);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  backdrop-filter: var(--blur-md);
+  padding: var(--space-md) 20px;
 }
 
 .profile-editor-topbar h2 {
@@ -475,44 +459,15 @@
 
 /* .field-help 已统一定义在 components.css 中 */
 
-/* 空状态 — 使用更具体的选择器避免覆盖 components.css */
-.profiles-empty {
-  text-align: center;
-  padding: var(--space-xl) var(--space-lg);
-  color: var(--text-muted);
-}
-
-.profiles-empty svg {
-  width: 48px;
-  height: 48px;
-  opacity: 0.3;
-  margin-bottom: var(--space-md);
-}
-
-.profiles-empty-title {
-  display: block;
-  font-size: var(--text-base);
-  margin-bottom: var(--space-xs);
-}
-
-.profiles-empty-desc {
-  display: block;
-  font-size: var(--text-md);
-  color: var(--text-muted);
-  margin-bottom: var(--space-md);
-}
+/* 空状态复用全局 .empty-state（misc.css），此处不再自造（旧 .profiles-empty 已退役，模板已迁移） */
 
 /* 独立账号区域 */
 .profile-credentials-section {
   margin-top: var(--space-sm);
 }
 
-.profiles-empty p {
-  margin: 0 0 var(--space-md);
-}
-
-/* 响应式 */
-@media (max-width: 720px) {
+/* 响应式：折叠断点统一 768px（与全局 responsive.css 对齐） */
+@media (max-width: 768px) {
   .profiles-guide-steps {
     flex-direction: column;
     gap: 12px;

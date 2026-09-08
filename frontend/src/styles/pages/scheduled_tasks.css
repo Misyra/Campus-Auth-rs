@@ -44,14 +44,7 @@
   border-bottom: 1px solid var(--border);
 }
 
-.form-section .form-row {
-  display: flex;
-  gap: 12px;
-}
-
-.form-section .form-row .form-group {
-  margin-bottom: 0;
-}
+/* 弹窗内 form-row 统一走通用 .form-row--flex（form.css），此处旧覆盖退役 */
 
 .flex-1 {
   flex: 1;

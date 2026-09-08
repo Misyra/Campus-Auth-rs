@@ -93,7 +93,7 @@ const {
         <div class="appearance-card-body appearance-grid-2col">
           <div class="appearance-field">
             <div class="appearance-field-label">主题</div>
-            <div class="appearance-segmented">
+            <div class="segmented appearance-segmented">
               <button type="button" :class="{ active: appearance.theme === 'light' }" @click="appearance.theme = 'light'">浅色</button>
               <button type="button" :class="{ active: appearance.theme === 'dark' }" @click="appearance.theme = 'dark'">深色</button>
               <button type="button" :class="{ active: appearance.theme === 'auto' }" @click="appearance.theme = 'auto'">跟随系统</button>
@@ -235,15 +235,12 @@ const {
       </div>
     </div>
 
-    <!-- 背景图放大预览 -->
-    <div v-if="bgLightbox.visible" class="bg-lightbox-overlay" @click="closeBgLightbox">
-      <div class="bg-lightbox-content">
+    <!-- 背景图放大预览：复用公共 Modal（Teleport + modal-fade + ESC + Focus Trap，沉浸预览加深遮罩） -->
+    <Modal :open="bgLightbox.visible" title="背景预览" size="lg" preview @close="closeBgLightbox">
+      <div class="bg-preview-body">
         <img :src="appearance.background_url" alt="背景预览" />
-        <button type="button" class="bg-lightbox-close" @click.stop="closeBgLightbox" title="关闭">
-          <IconApp name="close" class="icon-lg" />
-        </button>
       </div>
-    </div>
+    </Modal>
 
     <!-- 从链接下载壁纸弹窗：复用公共 Modal（open prop 控制显隐，与 TasksView 用法一致） -->
     <Modal
@@ -252,15 +249,15 @@ const {
       @close="closeRandomWallpaperDialog"
     >
       <p class="random-wallpaper-hint">输入图片链接地址，将下载并设置为背景（如 https://picsum.photos/1920/1080）</p>
-      <input type="text" class="form-input" v-model="randomWallpaperDialog.url"
-        placeholder="https://t.alcy.cc/pc" @keyup.enter="confirmRandomWallpaper" />
-      <div class="random-wallpaper-footer">
+      <div class="form-group"><input type="text" v-model="randomWallpaperDialog.url"
+        placeholder="https://t.alcy.cc/pc" @keyup.enter="confirmRandomWallpaper" /></div>
+      <template #footer>
         <button class="btn btn-secondary btn-sm" @click="closeRandomWallpaperDialog" :disabled="randomWallpaperDialog.loading">取消</button>
         <button class="btn btn-primary btn-sm" @click="confirmRandomWallpaper" :disabled="randomWallpaperDialog.loading">
           <IconApp name="refresh" v-if="randomWallpaperDialog.loading" class="spin icon-sm" />
           {{ randomWallpaperDialog.loading ? '加载中...' : '确定' }}
         </button>
-      </div>
+      </template>
     </Modal>
   </div>
 </template>

@@ -1,4 +1,43 @@
-/* badge.css — 类型徽标（脚本/浏览器二选一的小胶囊，scripts 与 scheduled_tasks 共用结构） */
+/* badge.css — 类型徽标（脚本/浏览器二选一的小胶囊，scripts 与 scheduled_tasks 共用结构）
+ *
+ * 选用表：行内小胶囊统一走 .badge（尺寸 sm/md + 语义 success/warn/info/primary）；
+ * 脚本/浏览器二选一沿用 .badge-script/.badge-browser（语义别名，勿再新起名字）。 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.badge--sm {
+  font-size: var(--text-xs);
+  padding: 1px 6px;
+}
+
+.badge--primary {
+  background: rgba(var(--primary-rgb), 0.15);
+  color: var(--primary);
+}
+
+.badge--success {
+  background: rgba(var(--success-rgb), 0.15);
+  color: var(--success);
+}
+
+.badge--warn {
+  background: rgba(var(--warning-rgb), 0.12);
+  color: var(--warning);
+}
+
+.badge--info {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+}
+
 .binary-badge,
 .scheduled-task-type {
   font-size: var(--text-sm);

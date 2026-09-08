@@ -1,16 +1,28 @@
 <script setup lang="ts">
 // 首次使用协议向导（替代原 wizard.html）。
 // 展示使用协议与免责声明，勾选同意后调用 finishWizard 写入后端。
+// 全屏阻断例外：无 Teleport/关闭入口，打开期间锁定背景滚动。
 
+import { watch } from "vue";
 import { useStatus } from "../../composables/useStatus";
 import { useUi } from "../../composables/useUi";
 
 const { busy } = useStatus();
 const { state, finishWizard } = useUi();
+
+// 向导展示期间锁定背景滚动（全屏阻断，无其他关闭路径）
+watch(
+  () => state.showWizard,
+  (val) => {
+    document.body.style.overflow = val ? "hidden" : "";
+  },
+  { immediate: true },
+);
 </script>
 
+<!-- 首次使用协议向导：全屏阻断例外（无 Teleport/关闭入口），role 保证无障碍 -->
 <template>
-  <div v-if="state.showWizard" class="wizard-overlay">
+  <div v-if="state.showWizard" class="wizard-overlay" role="dialog" aria-modal="true" aria-label="使用协议与免责声明">
     <div class="wizard-container">
       <div class="wizard-header">
         <span class="wizard-logo logo-mark" role="img" aria-label="Campus-Auth 校园网认证助手"></span>

@@ -175,10 +175,10 @@ async function recognizeOcr() {
           <span v-if="envLoading" class="hint">检测中…</span>
           <template v-else-if="envError && !envStatus"> <span class="env-error">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
           <template v-else>
-            <span v-if="envReady" class="env-pill env-pill--ok">已就绪</span>
-            <span v-else class="env-pill env-pill--warn">未就绪</span>
-            <span v-if="envStatus?.playwright_ready" class="env-pill">Chromium 已安装</span>
-            <span v-if="envStageLabel" class="env-pill">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
+            <span v-if="envReady" class="badge badge--sm badge--success">已就绪</span>
+            <span v-else class="badge badge--sm badge--warn">未就绪</span>
+            <span v-if="envStatus?.playwright_ready" class="badge badge--sm">Chromium 已安装</span>
+            <span v-if="envStageLabel" class="badge badge--sm">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
           </template>
         </div>
         <p v-if="envStatus?.progress?.message" class="hint">{{ envStatus.progress.message }}</p>

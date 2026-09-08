@@ -39,7 +39,9 @@
   box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
 }
 
-/* ========== Custom Select Dropdown ========== */
+/* ========== Custom Select Dropdown ==========
+ * 原生 select 箭头：默认 slate 灰（两主题可读）；聚焦时跟随强调色（URL-encoded accent 静态值 + 浅色覆盖），
+ * 自定义强调色场景箭头不变色为已知取舍——需跟随请换 CustomSelect 组件。 */
 .form-group select {
   appearance: none;
   padding-right: 38px;
@@ -72,6 +74,21 @@
   gap: var(--space-md);
 }
 
+/* 双列变体：宽窄比（AI 配置页服务商预设 + Base URL 等场景） */
+.form-row--wide {
+  grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr);
+}
+
+/* flex 变体：定时任务弹窗基本信息/任务配置等弹性分栏（子 form-group 用 .flex-1 占满） */
+.form-row--flex {
+  display: flex;
+  gap: 12px;
+}
+
+.form-row--flex .form-group {
+  margin-bottom: 0;
+}
+
 /* 输入框 + 右侧操作按钮并排（认证地址自动检测等）：输入框弹性占满，
  * 按钮不换行；窄屏自动换行避免挤压 */
 .input-with-action {
@@ -102,6 +119,21 @@
   font-size: var(--text-sm);
   color: var(--text-muted);
   margin-top: 6px;
+}
+
+/* hint 上间距变体（替代散写 style="margin-top"） */
+.hint--mt {
+  margin-top: 0.5rem;
+}
+
+/* 短值输入限宽（替代散写 style="min-width"，定时任务类型选择等场景） */
+.form-group--min140 {
+  min-width: 140px;
+}
+
+/* 紧凑场景去下边距（替代散写 style="margin-bottom:0"，仓库导入搜索/自定义地址等场景） */
+.form-group--flush {
+  margin-bottom: 0;
 }
 
 .required {
@@ -260,3 +292,8 @@ textarea.json-valid {
 }
 
 /* ═══ 浅色主题 — field-help 气泡的底色由 --tooltip-* token 重映射，无需组件级覆盖 ═══ */
+
+/* 浅色主题：原生 select 聚焦箭头跟随加深后的强调色（默认深色值 #22d3ee 在浅底对比不足） */
+[data-theme="light"] .form-group select:focus-visible {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%230891b2' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3Epolyline points='6 9 12 15 18'%3E/svg%3E");
+}

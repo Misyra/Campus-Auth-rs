@@ -91,7 +91,7 @@ async function handleExportLogs(): Promise<void> {
               <input type="checkbox" :checked="autostart.enabled" @change="config.toggleAutostart(!autostart.enabled)" :disabled="busy.autostart" />
               <span class="toggle-slider"></span>
               <span class="toggle-label">开机自启动</span>
-              <span v-if="autostart.method !== '-'" class="autostart-method-badge">{{ autostart.method }}</span>
+              <span v-if="autostart.method !== '-'" class="badge badge--sm badge--mono">{{ autostart.method }}</span>
             </label>
             <FieldHelp text="开机登录后自动启动本程序，注册方式显示于开关右侧。" />
           </div>
@@ -156,7 +156,7 @@ async function handleExportLogs(): Promise<void> {
         </div>
         <div class="toggle-group">
           <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.task_notification" /><span class="toggle-label">任务通知</span></label>
+            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.task_notification" /><span class="toggle-slider"></span><span class="toggle-label">任务通知</span></label>
             <FieldHelp text="关键事件完成时弹出系统通知。" />
           </div>
         </div>

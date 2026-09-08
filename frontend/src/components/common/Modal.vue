@@ -14,12 +14,15 @@ const props = withDefaults(
     closeOnOverlay?: boolean;
     /** 是否允许 ESC 键关闭（默认 true；调试面板等误触代价高的场景设为 false） */
     closeOnEsc?: boolean;
+    /** 沉浸预览模式：加深遮罩（截图放大/背景预览等大图场景） */
+    preview?: boolean;
   }>(),
   {
     title: "",
     size: "default",
     closeOnOverlay: true,
     closeOnEsc: true,
+    preview: false,
   },
 );
 
@@ -67,25 +70,46 @@ function onTrapKeydown(e: KeyboardEvent): void {
   }
 }
 
+// 打开时聚焦第一个可聚焦元素 + 锁定背景滚动（多弹窗叠加时计数，全部关闭才还原）
+let modalOpenCount = 0;
+
+function lockBodyScroll(): void {
+  modalOpenCount += 1;
+  if (modalOpenCount === 1) document.body.style.overflow = "hidden";
+}
+
+function unlockBodyScroll(): void {
+  modalOpenCount = Math.max(0, modalOpenCount - 1);
+  if (modalOpenCount === 0) document.body.style.overflow = "";
+}
+
 // 打开时聚焦第一个可聚焦元素
 watch(
   () => props.open,
   async (val) => {
     if (val) {
+      lockBodyScroll();
       await nextTick();
       const firstFocusable = containerRef.value?.querySelector<HTMLElement>(
         'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
       );
       firstFocusable?.focus();
+    } else {
+      unlockBodyScroll();
     }
   },
+  { immediate: true },
 );
+
+onBeforeUnmount(() => {
+  if (props.open) unlockBodyScroll();
+});
 </script>
 
 <template>
   <Teleport to="body">
     <Transition name="modal-fade">
-      <div v-if="open" class="modal-overlay" @click.self="onOverlayClick" @keydown="onKeydown">
+      <div v-if="open" class="modal-overlay" :class="{ 'modal-overlay--preview': preview }" @click.self="onOverlayClick" @keydown="onKeydown">
         <div
           ref="containerRef"
           class="modal-container"

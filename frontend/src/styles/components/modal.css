@@ -1,4 +1,8 @@
-/* modal.css — 模态框（Modal.vue / ConfirmDialog / modal-fade 过渡） */
+/* modal.css — 模态框（Modal.vue / ConfirmDialog / modal-fade 过渡）
+ *
+ * 层级口径：普通弹窗统一 --z-top(400)；沉浸预览（截图放大/背景预览）同样经 Modal
+ * 走 --z-top，避免直写 --z-max 压住 Toast(z-toast=300) 之上的确认框等上层交互。
+ * 例外：向导（首次协议阻断）与退出/初始化全屏遮罩各走 --z-top/--z-max，见 wizard.css/misc.css。 */
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -8,6 +12,11 @@
   align-items: center;
   justify-content: center;
   backdrop-filter: var(--blur-sm);
+}
+
+/* 沉浸预览修饰：截图放大/背景预览等大图场景加深遮罩（与普通 0.6 区分） */
+.modal-overlay--preview {
+  background: rgba(0, 0, 0, 0.85);
 }
 
 .modal-container {
@@ -66,15 +75,16 @@
 
 /* ========== Confirm Dialog ========== */
 .confirm-dialog {
-  background: var(--bg-card);
+  background: var(--bg-modal);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   width: 90%;
   max-width: 440px;
   padding: var(--space-lg);
   box-shadow: var(--shadow-xl);
-  animation: modalFadeIn var(--dur-base) var(--ease-out);
 }
+
+/* 确认框随 modal-fade 过渡进出（旧 modalFadeIn keyframes 已退役，见文件尾过渡定义） */
 
 .confirm-dialog.danger {
   border-color: rgba(var(--error-rgb), 0.35);
@@ -116,23 +126,16 @@
 }
 
 .modal-fade-enter-active .modal-container,
-.modal-fade-leave-active .modal-container {
+.modal-fade-leave-active .modal-container,
+.modal-fade-enter-active .confirm-dialog,
+.modal-fade-leave-active .confirm-dialog {
   transition: transform var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out);
 }
 
 .modal-fade-enter-from .modal-container,
-.modal-fade-leave-to .modal-container {
+.modal-fade-leave-to .modal-container,
+.modal-fade-enter-from .confirm-dialog,
+.modal-fade-leave-to .confirm-dialog {
   transform: translateY(12px) scale(0.98);
   opacity: 0;
-}
-
-@keyframes modalFadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }

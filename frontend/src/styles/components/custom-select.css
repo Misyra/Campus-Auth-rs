@@ -115,7 +115,7 @@
   color: var(--accent);
 }
 
-/* 筛选场景的紧凑样式 */
+/* 筛选场景的紧凑样式（日志工具栏 / AI 空闲超时等行内过滤器）；表单场景用默认 42px 高 */
 .custom-select.compact .custom-select-trigger {
   padding: 5px 28px 5px var(--space-sm);
   font-size: var(--text-sm);

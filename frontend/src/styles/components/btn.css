@@ -1,4 +1,7 @@
-/* btn.css — 按钮（btn 及尺寸/语义变体） */
+/* btn.css — 按钮（btn 及尺寸/语义变体）
+ *
+ * 选用表：主要操作 btn-primary；次要 btn-secondary；最低强调 ghost（装饰入口）/ link（行内文字操作）/ text（顶栏清空等弱操作）；
+ * 行内删除用 btn-danger + btn-icon-only；整块危险区（卸载/停用）用 btn-danger-ghost。danger-ghost 与 danger 二选一，勿叠加。 */
 .btn {
   display: inline-flex;
   align-items: center;

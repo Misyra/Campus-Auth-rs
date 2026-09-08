@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
+import Modal from "@/components/common/Modal.vue";
 import { ref } from "vue";
 import { systemApi, autostartApi, uninstallApi } from "@/api";
 import type { UninstallDetectItem, UninstallStepResult } from "@/api/types";
@@ -177,53 +178,43 @@ function closeUninstall() {
         <button class="btn btn-danger-ghost btn-sm" @click="openUninstall">卸载</button>
       </div>
 
-      <div v-if="uninstallOpen" class="uninstall-overlay" @click.self="closeUninstall">
-        <div class="uninstall-modal">
-          <div class="uninstall-modal-header">
-            <IconApp name="trash" width="20" height="20" />
-            <div>
-              <h3>卸载程序</h3>
-              <p class="uninstall-subtitle">将清理以下系统残留项</p>
-            </div>
-          </div>
+      <Modal :open="uninstallOpen" title="卸载程序" :close-on-overlay="!uninstallRunning" :close-on-esc="!uninstallRunning" @close="closeUninstall">
+        <p class="uninstall-subtitle">将清理以下系统残留项</p>
 
-          <div v-if="uninstallDetecting" class="uninstall-modal-body">
-            <div class="uninstall-scanning"><span class="spinner"></span>正在检测...</div>
-          </div>
+        <div v-if="uninstallDetecting" class="uninstall-scanning"><span class="spinner"></span>正在检测...</div>
 
-          <div v-else-if="!uninstallDone" class="uninstall-modal-body">
-            <div v-if="uninstallError" class="uninstall-empty">{{ uninstallError }}</div>
-            <template v-else>
-              <div v-for="item in uninstallItems" :key="item.key" class="uninstall-item disabled">
-                <div class="uninstall-item-info">
-                  <span class="uninstall-item-label">{{ item.label }}</span>
-                  <span class="uninstall-item-path">{{ item.description }}</span>
-                </div>
-                <span class="uninstall-item-tag" :class="item.exists ? 'tag-exists' : 'tag-missing'">{{ item.exists ? "存在" : "无" }}</span>
+        <template v-else-if="!uninstallDone">
+          <div v-if="uninstallError" class="empty-state empty-state--sm">{{ uninstallError }}</div>
+          <template v-else>
+            <div v-for="item in uninstallItems" :key="item.key" class="uninstall-item disabled">
+              <div class="uninstall-item-info">
+                <span class="uninstall-item-label">{{ item.label }}</span>
+                <span class="uninstall-item-path">{{ item.description }}</span>
               </div>
-              <div class="uninstall-hint-box">将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。清理完成后，手动删除程序所在文件夹即可完成卸载。</div>
-            </template>
-          </div>
-
-          <div v-else class="uninstall-results">
-            <div class="uninstall-result-header"><IconApp name="check" width="16" height="16" />清理结果</div>
-            <div v-for="r in uninstallResults" :key="r.key" class="uninstall-result-row">
-              <span :class="r.success ? 'result-ok' : 'result-fail'">{{ r.success ? "✓" : "✗" }}</span>
-              <span>{{ r.label }}</span>
-              <span class="uninstall-item-path">{{ r.message }}</span>
+              <span class="uninstall-item-tag" :class="item.exists ? 'tag-exists' : 'tag-missing'">{{ item.exists ? "存在" : "无" }}</span>
             </div>
-            <div class="uninstall-final-hint">{{ uninstallMessage }}</div>
-          </div>
+            <div class="uninstall-hint-box">将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。清理完成后，手动删除程序所在文件夹即可完成卸载。</div>
+          </template>
+        </template>
 
-          <div class="uninstall-modal-footer">
-            <template v-if="!uninstallDone">
-              <button class="btn btn-ghost btn-sm" @click="closeUninstall" :disabled="uninstallRunning">取消</button>
-              <button class="btn btn-danger btn-sm" @click="runUninstall" :disabled="uninstallRunning || !!uninstallError">{{ uninstallRunning ? "清理中..." : "开始清理" }}</button>
-            </template>
-            <button v-else class="btn btn-primary btn-sm" @click="closeUninstall">关闭</button>
+        <div v-else class="uninstall-results">
+          <div class="uninstall-result-header"><IconApp name="check" width="16" height="16" />清理结果</div>
+          <div v-for="r in uninstallResults" :key="r.key" class="uninstall-result-row">
+            <span :class="r.success ? 'result-ok' : 'result-fail'">{{ r.success ? "✓" : "✗" }}</span>
+            <span>{{ r.label }}</span>
+            <span class="uninstall-item-path">{{ r.message }}</span>
           </div>
+          <div class="uninstall-final-hint">{{ uninstallMessage }}</div>
         </div>
-      </div>
+
+        <template #footer>
+          <template v-if="!uninstallDone">
+            <button class="btn btn-ghost btn-sm" @click="closeUninstall" :disabled="uninstallRunning">取消</button>
+            <button class="btn btn-danger btn-sm" @click="runUninstall" :disabled="uninstallRunning || !!uninstallError">{{ uninstallRunning ? "清理中..." : "开始清理" }}</button>
+          </template>
+          <button v-else class="btn btn-primary btn-sm" @click="closeUninstall">关闭</button>
+        </template>
+      </Modal>
     </div>
   </div>
 </template>
