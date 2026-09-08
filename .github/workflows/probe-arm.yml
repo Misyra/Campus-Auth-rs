@@ -1,0 +1,62 @@
+name: Probe ARM
+
+# Linux ARM64 可行性探针：手动触发，在原生 ubuntu-24.04-arm runner 上验证
+# 项目（含 tray-icon/GTK 链路）能否完整编译。只验证、不发布、不改 release 矩阵。
+#
+# 用法：gh workflow run probe-arm.yml（或 Actions 页面手动 Run workflow）
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: 原生 ARM64 编译探针
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 读取 Rust 工具链版本
+        id: rust-toolchain
+        shell: pwsh
+        run: |
+          $config = Get-Content rust-toolchain.toml -Raw
+          if ($config -notmatch 'channel\s*=\s*"([^"]+)"') {
+            throw "rust-toolchain.toml 缺少 toolchain.channel"
+          }
+          "channel=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      # 与 release.yml 同口径：tray-icon Linux 后端需要 GTK3 / appindicator / xdo 头文件
+      - name: 安装 Linux 托盘构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev pkg-config
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 构建前端资源
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      # 第一关：类型检查 + GTK 链接（含 build script）
+      - name: cargo check（ARM 原生）
+        run: cargo check --locked
+
+      # 第二关：完整 release 构建（含 LTO/strip，与 release 口径一致）
+      - name: cargo build --release（ARM 原生）
+        run: cargo build --release --locked
+
+      - name: 上报产物信息
+        run: |
+          ls -lh target/release/campus-auth target/release/campus-auth-helper
+          file target/release/campus-auth
