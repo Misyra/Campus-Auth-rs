@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+// 临时目录拦截仅 Windows 启用：以下 5 处在非 Windows 构建的生产路径中无引用
+// （仅被跨平台单测覆盖），用 cfg_attr 放行 dead_code；Windows 下仍保持告警。
+#[cfg_attr(not(windows), allow(dead_code))]
 /// 便携包必备同级目录（解压后应与 exe 同级）
 const REQUIRED_SIBLINGS: &[&str] = &["resources", "python_worker"];
 /// 环境变量：强制放行临时目录检查
@@ -13,6 +16,7 @@ enum BlockReason {
     /// 可执行文件路径含 `.zip` 片段（资源管理器压缩文件夹虚拟路径）
     ZipSegment,
     /// 位于系统临时目录且缺失便携包同级目录（典型：双击 zip 内 exe 后仅单文件释放入 Temp）
+    #[cfg_attr(not(windows), allow(dead_code))]
     TempMissingSiblings,
 }
 
@@ -95,6 +99,7 @@ fn contains_zip_segment(s: &str) -> bool {
 }
 
 /// 系统临时目录候选
+#[cfg_attr(not(windows), allow(dead_code))]
 fn temp_dir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     out.push(std::env::temp_dir());
@@ -114,6 +119,7 @@ fn temp_dir_candidates() -> Vec<PathBuf> {
 }
 
 /// 判断路径是否位于任一系统临时目录之下（Windows 大小写不敏感）
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_in_temp_dir(path: &Path) -> bool {
     let path_norm = normalize_for_cmp(path);
     for cand in temp_dir_candidates() {
@@ -131,6 +137,7 @@ fn is_in_temp_dir(path: &Path) -> bool {
 }
 
 /// 同级是否包含便携包必备目录（任一命中即视为已正确解压）
+#[cfg_attr(not(windows), allow(dead_code))]
 fn has_required_siblings(dir: &Path) -> bool {
     REQUIRED_SIBLINGS.iter().any(|name| dir.join(name).exists())
 }
