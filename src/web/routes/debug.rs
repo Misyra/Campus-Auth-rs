@@ -249,174 +249,7 @@ pub async fn feedback_bundle(
     let meta_str = serde_json::to_string_pretty(&meta).unwrap_or_default();
 
     // 4) 页面捕获（有调试会话时经 Worker 拿 MHTML/HTML + 截图 + CSS/JS 资源）
-    let mut page_html: Option<String> = None;
-    let mut page_mhtml: Option<Vec<u8>> = None;
-    let mut page_png: Option<Vec<u8>> = None;
-    // CSS/JS 资源快照（debug/resources/，Chromium MHTML 不含 JS 故由 Worker 补齐）
-    let mut page_resources: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut page_note: Option<String> = None;
-    // Worker 返回路径必须位于当前 debug 会话目录内（防 IPC 信任边界逃逸）
-    let allowed_debug_dir =
-        crate::utils::paths::worker_project_dir(&config.base_path()).join("debug");
-    let path_allowed = |p: &str| -> bool {
-        let path = std::path::Path::new(p);
-        let (Ok(canon), Ok(base)) = (path.canonicalize(), allowed_debug_dir.canonicalize()) else {
-            // 文件尚不存在时退化为词法前缀检查（父目录必须在 debug 内）
-            return path
-                .parent()
-                .map(|parent| parent.starts_with(&allowed_debug_dir))
-                .unwrap_or(false);
-        };
-        canon.starts_with(&base)
-    };
-    if bridge.debug_session_active() {
-        match bridge
-            .execute_with_timeout(
-                "feedback_capture",
-                serde_json::json!({}),
-                std::time::Duration::from_secs(15),
-            )
-            .await
-        {
-            Ok(resp) => {
-                let mhtml_path = resp.result.data.get("mhtml_path").and_then(|v| v.as_str());
-                let html_path = resp.result.data.get("html_path").and_then(|v| v.as_str());
-                let png_path = resp.result.data.get("png_path").and_then(|v| v.as_str());
-                let resources_dir = resp
-                    .result
-                    .data
-                    .get("resources_dir")
-                    .and_then(|v| v.as_str());
-                if let Some(path) = mhtml_path {
-                    if !path_allowed(path) {
-                        page_note = Some("拒绝读取 debug 目录外的 MHTML 路径".to_string());
-                    } else {
-                        match tokio::fs::read(path).await {
-                            Ok(b) => page_mhtml = Some(b),
-                            Err(e) => page_note = Some(format!("读取落盘 MHTML 失败 {path}: {e}")),
-                        }
-                    }
-                }
-                // 有资源快照时 HTML 与 MHTML 并存：MHTML 供视觉还原，page.html
-                // + resources/ 供源码级离线还原（JS 仅存在于后者）
-                if let Some(path) = html_path {
-                    if !path_allowed(path) {
-                        if page_note.is_none() {
-                            page_note = Some("拒绝读取 debug 目录外的 HTML 路径".to_string());
-                        }
-                    } else {
-                        match tokio::fs::read_to_string(path).await {
-                            Ok(s) => page_html = Some(s),
-                            Err(e) if page_note.is_none() => {
-                                page_note = Some(format!("读取落盘 HTML 失败 {path}: {e}"))
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                } else if page_mhtml.is_none() {
-                    if let Some(s) = resp.result.data.get("html_b64").and_then(|v| v.as_str()) {
-                        if let Ok(bytes) =
-                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
-                        {
-                            page_html = String::from_utf8(bytes).ok();
-                        }
-                    }
-                }
-                // 反馈资源总量上限 50MiB（防 200×5MiB≈1GiB 放大 + 内存 zip）
-                const MAX_FEEDBACK_RESOURCES_BYTES: usize = 50 * 1024 * 1024;
-                let mut resources_bytes: usize = 0;
-                if let Some(dir) = resources_dir {
-                    if !path_allowed(dir) {
-                        if page_note.is_none() {
-                            page_note = Some("拒绝读取 debug 目录外的资源目录".to_string());
-                        }
-                    } else {
-                        // 排序保证 zip 内容确定；单文件读取失败跳过不中断
-                        let mut entries: Vec<tokio::fs::DirEntry> = Vec::new();
-                        if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
-                            while let Ok(Some(e)) = rd.next_entry().await {
-                                entries.push(e);
-                            }
-                        }
-                        entries.sort_by_key(|e| e.file_name());
-                        for e in entries {
-                            let name = e.file_name();
-                            let Some(name) = name.to_str() else { continue };
-                            if let Ok(bytes) = tokio::fs::read(e.path()).await {
-                                resources_bytes += bytes.len();
-                                if resources_bytes > MAX_FEEDBACK_RESOURCES_BYTES {
-                                    page_note = Some("反馈资源超 50MiB 上限，已截断".to_string());
-                                    break;
-                                }
-                                page_resources.push((name.to_string(), bytes));
-                            }
-                        }
-                    }
-                }
-                if let Some(path) = png_path {
-                    if !path_allowed(path) {
-                        if page_note.is_none() {
-                            page_note = Some("拒绝读取 debug 目录外的截图路径".to_string());
-                        }
-                    } else {
-                        match tokio::fs::read(path).await {
-                            Ok(b) => page_png = Some(b),
-                            Err(e) if page_note.is_none() => {
-                                page_note = Some(format!("读取落盘截图失败 {path}: {e}"))
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                } else if let Some(s) = resp.result.data.get("png_b64").and_then(|v| v.as_str()) {
-                    if let Ok(bytes) =
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
-                    {
-                        page_png = Some(bytes);
-                    }
-                }
-                if let Some(note) = resp
-                    .result
-                    .data
-                    .get("resources_note")
-                    .and_then(|v| v.as_str())
-                {
-                    page_note = Some(match page_note {
-                        Some(p) => format!("{p}\n{note}"),
-                        None => note.to_string(),
-                    });
-                }
-                let cleanup_path = mhtml_path.or(html_path).or(png_path).or(resources_dir);
-                if let Some(p) = cleanup_path {
-                    // 仅 debug 目录内才清理，防任意目录删除
-                    if path_allowed(p) {
-                        if let Some(dir) = std::path::Path::new(p).parent() {
-                            // 二次确认父目录仍在允许区内
-                            if let (Ok(canon), Ok(base)) =
-                                (dir.canonicalize(), allowed_debug_dir.canonicalize())
-                            {
-                                if canon.starts_with(&base) {
-                                    let _ = tokio::fs::remove_dir_all(dir).await;
-                                }
-                            } else if dir.starts_with(&allowed_debug_dir) {
-                                let _ = tokio::fs::remove_dir_all(dir).await;
-                            }
-                        }
-                    }
-                }
-                if page_html.is_none()
-                    && page_png.is_none()
-                    && page_mhtml.is_none()
-                    && page_resources.is_empty()
-                    && page_note.is_none()
-                {
-                    page_note = Some(format!("feedback_capture 返回空: {}", resp.result.data));
-                }
-            }
-            Err(e) => page_note = Some(format!("feedback_capture 失败: {e}")),
-        }
-    } else {
-        page_note = Some("无活跃调试会话，页面捕获跳过（先启动调试再导出可含页面）".into());
-    }
+    let capture = collect_page_capture(&bridge, &config.base_path()).await;
 
     // 5) 打 zip（内存）
     let mut buf = Cursor::new(Vec::new());
@@ -455,19 +288,19 @@ pub async fn feedback_bundle(
 
         // page：MHTML（视觉离线还原，含样式与图片）；page.html（引用已改写为
         // resources/ 本地路径，与 CSS/JS 资源快照配合供源码级离线还原）
-        if let Some(mhtml) = page_mhtml {
+        if let Some(mhtml) = capture.mhtml {
             add("debug/page.mhtml", &mhtml)?;
         }
-        if let Some(html) = page_html {
+        if let Some(html) = capture.html {
             add("debug/page.html", html.as_bytes())?;
         }
-        for (name, bytes) in &page_resources {
+        for (name, bytes) in &capture.resources {
             add(&format!("debug/resources/{name}"), bytes)?;
         }
-        if let Some(png) = page_png {
+        if let Some(png) = capture.png {
             add("debug/screenshot.png", &png)?;
         }
-        if let Some(note) = page_note {
+        if let Some(note) = capture.note {
             // 无会话或捕获失败时留说明，避免解压后疑惑缺文件
             add("debug/README.txt", note.as_bytes())?;
         }
@@ -487,6 +320,223 @@ pub async fn feedback_bundle(
         ],
         bytes,
     ))
+}
+
+/// 调试目录守卫：Worker 返回的落盘路径必须位于当前 debug 会话目录内。
+///
+/// canonicalize 失败（文件尚不存在）时退化为词法前缀检查——父目录必须在
+/// debug 内。防 IPC 信任边界逃逸（任意目录读取/删除）。
+struct PathGuard {
+    /// `<worker工程>/debug` 目录（canonicalize 后的基准）
+    base: std::path::PathBuf,
+}
+
+impl PathGuard {
+    /// 构造守卫：`base_path` 为应用数据根，debug 目录固定拼接
+    fn new(base_path: &std::path::Path) -> Self {
+        Self {
+            base: crate::utils::paths::worker_project_dir(base_path).join("debug"),
+        }
+    }
+
+    /// 路径是否允许访问（读取或清理）
+    fn allows(&self, p: &str) -> bool {
+        let path = std::path::Path::new(p);
+        let (Ok(canon), Ok(base)) = (path.canonicalize(), self.base.canonicalize()) else {
+            // 文件尚不存在时退化为词法前缀检查（父目录必须在 debug 内）
+            return path
+                .parent()
+                .map(|parent| parent.starts_with(&self.base))
+                .unwrap_or(false);
+        };
+        canon.starts_with(&base)
+    }
+}
+
+/// 页面捕获产物（MHTML/HTML/截图/资源快照 + 失败说明）
+#[derive(Debug, Default)]
+struct PageCapture {
+    html: Option<String>,
+    mhtml: Option<Vec<u8>>,
+    png: Option<Vec<u8>>,
+    /// CSS/JS 资源快照（debug/resources/，Chromium MHTML 不含 JS 故由 Worker 补齐）
+    resources: Vec<(String, Vec<u8>)>,
+    note: Option<String>,
+}
+
+impl PageCapture {
+    /// 追加说明（多条说明换行拼接，首条直接写入）
+    fn push_note(&mut self, note: String) {
+        self.note = Some(match self.note.take() {
+            Some(p) => format!("{p}\n{note}"),
+            None => note,
+        });
+    }
+
+    /// 仅首条说明生效的追加（用于"拒绝读取"类互斥提示）
+    fn push_note_if_absent(&mut self, note: String) {
+        if self.note.is_none() {
+            self.note = Some(note);
+        }
+    }
+
+    /// 是否全空（无任何产物且无说明——调用方据此写"返回空"占位）
+    fn is_empty(&self) -> bool {
+        self.html.is_none()
+            && self.png.is_none()
+            && self.mhtml.is_none()
+            && self.resources.is_empty()
+            && self.note.is_none()
+    }
+}
+
+/// 页面捕获：有调试会话时经 Worker 取 MHTML/HTML + 截图 + CSS/JS 资源。
+///
+/// 无会话时返回仅带占位说明的空捕获。失败项一律记入 `note`，不抛错中断整包。
+async fn collect_page_capture(
+    bridge: &std::sync::Arc<dyn crate::bridge::BridgeApi>,
+    base_path: &std::path::Path,
+) -> PageCapture {
+    let mut capture = PageCapture::default();
+    // Worker 返回路径必须位于当前 debug 会话目录内（防 IPC 信任边界逃逸）
+    let guard = PathGuard::new(base_path);
+    if !bridge.debug_session_active() {
+        capture.note = Some("无活跃调试会话，页面捕获跳过（先启动调试再导出可含页面）".into());
+        return capture;
+    }
+    let resp = match bridge
+        .execute_with_timeout(
+            "feedback_capture",
+            serde_json::json!({}),
+            std::time::Duration::from_secs(15),
+        )
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            capture.note = Some(format!("feedback_capture 失败: {e}"));
+            return capture;
+        }
+    };
+    let data = &resp.result.data;
+    let mhtml_path = data.get("mhtml_path").and_then(|v| v.as_str());
+    let html_path = data.get("html_path").and_then(|v| v.as_str());
+    let png_path = data.get("png_path").and_then(|v| v.as_str());
+    let resources_dir = data.get("resources_dir").and_then(|v| v.as_str());
+
+    if let Some(path) = mhtml_path {
+        if !guard.allows(path) {
+            capture.note = Some("拒绝读取 debug 目录外的 MHTML 路径".to_string());
+        } else {
+            match tokio::fs::read(path).await {
+                Ok(b) => capture.mhtml = Some(b),
+                Err(e) => capture.note = Some(format!("读取落盘 MHTML 失败 {path}: {e}")),
+            }
+        }
+    }
+    // 有资源快照时 HTML 与 MHTML 并存：MHTML 供视觉还原，page.html
+    // + resources/ 供源码级离线还原（JS 仅存在于后者）
+    if let Some(path) = html_path {
+        if !guard.allows(path) {
+            capture.push_note_if_absent("拒绝读取 debug 目录外的 HTML 路径".to_string());
+        } else {
+            match tokio::fs::read_to_string(path).await {
+                Ok(s) => capture.html = Some(s),
+                Err(e) => {
+                    if capture.note.is_none() {
+                        capture.note = Some(format!("读取落盘 HTML 失败 {path}: {e}"));
+                    }
+                }
+            }
+        }
+    } else if capture.mhtml.is_none() {
+        if let Some(s) = data.get("html_b64").and_then(|v| v.as_str()) {
+            if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+            {
+                capture.html = String::from_utf8(bytes).ok();
+            }
+        }
+    }
+    collect_resource_files(resources_dir, &guard, &mut capture).await;
+    if let Some(path) = png_path {
+        if !guard.allows(path) {
+            capture.push_note_if_absent("拒绝读取 debug 目录外的截图路径".to_string());
+        } else {
+            match tokio::fs::read(path).await {
+                Ok(b) => capture.png = Some(b),
+                Err(e) => {
+                    if capture.note.is_none() {
+                        capture.note = Some(format!("读取落盘截图失败 {path}: {e}"));
+                    }
+                }
+            }
+        }
+    } else if let Some(s) = data.get("png_b64").and_then(|v| v.as_str()) {
+        if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s) {
+            capture.png = Some(bytes);
+        }
+    }
+    if let Some(note) = data.get("resources_note").and_then(|v| v.as_str()) {
+        capture.push_note(note.to_string());
+    }
+    let cleanup_path = mhtml_path.or(html_path).or(png_path).or(resources_dir);
+    if let Some(p) = cleanup_path {
+        // 仅 debug 目录内才清理，防任意目录删除
+        if guard.allows(p) {
+            if let Some(dir) = std::path::Path::new(p).parent() {
+                // 二次确认父目录仍在允许区内
+                if let (Ok(canon), Ok(base)) = (dir.canonicalize(), guard.base.canonicalize()) {
+                    if canon.starts_with(&base) {
+                        let _ = tokio::fs::remove_dir_all(dir).await;
+                    }
+                } else if dir.starts_with(&guard.base) {
+                    let _ = tokio::fs::remove_dir_all(dir).await;
+                }
+            }
+        }
+    }
+    if capture.is_empty() {
+        capture.note = Some(format!("feedback_capture 返回空: {}", resp.result.data));
+    }
+    capture
+}
+
+/// 收集 Worker 落盘的 CSS/JS 资源快照（排序保证 zip 内容确定；总量 50MiB 截断）。
+///
+/// 反馈资源总量上限 50MiB（防 200×5MiB≈1GiB 放大 + 内存 zip）。
+/// 单文件读取失败跳过不中断；目录越界（path_allowed 失败）记首条说明。
+async fn collect_resource_files(
+    resources_dir: Option<&str>,
+    guard: &PathGuard,
+    capture: &mut PageCapture,
+) {
+    const MAX_FEEDBACK_RESOURCES_BYTES: usize = 50 * 1024 * 1024;
+    let mut resources_bytes: usize = 0;
+    let Some(dir) = resources_dir else { return };
+    if !guard.allows(dir) {
+        capture.push_note_if_absent("拒绝读取 debug 目录外的资源目录".to_string());
+        return;
+    }
+    // 排序保证 zip 内容确定；单文件读取失败跳过不中断
+    let mut entries: Vec<tokio::fs::DirEntry> = Vec::new();
+    if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            entries.push(e);
+        }
+    }
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if let Ok(bytes) = tokio::fs::read(e.path()).await {
+            resources_bytes += bytes.len();
+            if resources_bytes > MAX_FEEDBACK_RESOURCES_BYTES {
+                capture.note = Some("反馈资源超 50MiB 上限，已截断".to_string());
+                break;
+            }
+            capture.resources.push((name.to_string(), bytes));
+        }
+    }
 }
 
 #[cfg(test)]
