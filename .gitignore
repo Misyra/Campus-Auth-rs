@@ -29,6 +29,8 @@ frontend/node_modules/
 frontend/dist/
 # openapi-typescript 生成物（npm run typegen 产物，手写 types.ts 才是权威来源）
 frontend/src/api/types.generated.ts
+# vue-tsc 落在源码旁的编译残留（frontend/src 下无手写 .js，见 2026-09-08 两次复发）
+frontend/src/**/*.js
 
 # Python Worker（__pycache__ 通配任意子目录，含 tests/）
 __pycache__/
