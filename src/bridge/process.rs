@@ -497,13 +497,16 @@ pub fn take_invalid_ipc_line_count() -> u64 {
 /// 解析 Python Worker（stdlib `logging`，格式 `时间 级别 [名称] 消息`）
 /// 日志行中的级别字段（如 `INFO` / `WARNING` / `ERROR`），按实际级别调用
 /// 对应的 tracing 宏，避免所有 stderr 输出都被误记为 WARN。
-/// 非日志行（无级别字段）回退为 WARN。
+/// 无级别前缀的续行（如 traceback 堆栈）继承前一行级别（仅在 ERROR/CRITICAL
+/// 之后继承），其余非日志行回退 WARN。
 ///
 /// 使用 `fill_buf`/`consume` 逐块读取并施加行长度限制（`IPC_MAX_LINE_LEN`），
 /// 超长行直接丢弃，与 stdout reader 一致，防止异常输出导致 OOM。
 async fn stderr_forwarder_task(stderr: ChildStderr) {
     let mut reader = BufReader::new(stderr);
     let mut line_buf = Vec::new();
+    // 上一有效行是否为 ERROR/CRITICAL：供无格式续行继承级别
+    let mut last_was_error = false;
     loop {
         line_buf.clear();
         let mut exceeded = false;
@@ -547,55 +550,86 @@ async fn stderr_forwarder_task(stderr: ChildStderr) {
             }
         }
         if !found_newline {
-            // EOF：处理缓冲区中剩余的最后一行后退出
+            // EOF：处理缓冲区中剩余的最后一行后退出（无需回传继承状态）
             if !exceeded && !line_buf.is_empty() {
-                log_stderr_line(&line_buf);
+                log_stderr_line(&line_buf, last_was_error);
             }
             return;
         }
         if !exceeded && !line_buf.is_empty() {
-            log_stderr_line(&line_buf);
+            last_was_error = log_stderr_line(&line_buf, last_was_error);
         }
     }
 }
 
 /// 解析 Python Worker 的 stdlib logging 行（`时间 级别 [名称] 消息`），
 /// 去掉已经由 Rust 日志层提供的时间和级别前缀。
-/// 返回 `(级别, 消息)`；格式异常时保留原文并让上层按 WARN 处理。
+/// 返回 `(级别, 消息)`；级别词必须命中已知档位才算解析成功，
+/// 否则整行视为无格式续行（如 traceback 堆栈行）原样返回，由上层继承前一行级别
+///（旧的宽松解析会把消息文本误当级别切掉，如 `  File "x.py" ...` 变成级别 FILE）。
 fn parse_worker_stderr_line(line: &str) -> (String, String) {
+    const KNOWN_LEVELS: [&str; 8] = [
+        "TRACE", "DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL", "FATAL",
+    ];
     let trimmed = line.trim_end();
     let mut fields = trimmed.splitn(4, ' ');
     let date = fields.next();
     let time = fields.next();
     let level = fields.next();
     let message = fields.next().map(str::trim).filter(|s| !s.is_empty());
-    if date.is_some() && time.is_some() && level.is_some() && message.is_some() {
-        return (
-            level.unwrap_or_default().to_ascii_uppercase(),
-            message.unwrap_or_default().to_string(),
-        );
+    if let (Some(_date), Some(_time), Some(level), Some(message)) = (date, time, level, message) {
+        let upper = level.to_ascii_uppercase();
+        if KNOWN_LEVELS.contains(&upper.as_str()) {
+            return (upper, message.to_string());
+        }
     }
     (String::new(), trimmed.to_string())
 }
 
 /// 按日志级别转发单行 stderr 到 tracing
-fn log_stderr_line(line: &[u8]) {
+///
+/// 返回本行是否为 ERROR/CRITICAL（供后续无格式续行继承级别）；
+/// `prev_was_error` 为继承输入，空行与 UTF-8 无效行不改变继承状态。
+fn log_stderr_line(line: &[u8], prev_was_error: bool) -> bool {
     let s = match std::str::from_utf8(line) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return prev_was_error,
     };
     let trimmed = s.trim_end();
     if trimmed.is_empty() {
-        return;
+        return prev_was_error;
     }
     let (level, message) = parse_worker_stderr_line(trimmed);
     match level.as_str() {
-        "TRACE" | "DEBUG" => tracing::debug!(target: "python_worker", "{message}"),
-        "INFO" => tracing::info!(target: "python_worker", "{message}"),
-        "WARNING" | "WARN" => tracing::warn!(target: "python_worker", "{message}"),
-        "ERROR" => tracing::error!(target: "python_worker", "{message}"),
-        "CRITICAL" | "FATAL" => tracing::error!(target: "python_worker", "{message}"),
-        _ => tracing::warn!(target: "python_worker", "{message}"),
+        "TRACE" | "DEBUG" => {
+            tracing::debug!(target: "python_worker", "{message}");
+            false
+        }
+        "INFO" => {
+            tracing::info!(target: "python_worker", "{message}");
+            false
+        }
+        "WARNING" | "WARN" => {
+            tracing::warn!(target: "python_worker", "{message}");
+            false
+        }
+        "ERROR" => {
+            tracing::error!(target: "python_worker", "{message}");
+            true
+        }
+        "CRITICAL" | "FATAL" => {
+            tracing::error!(target: "python_worker", "{message}");
+            true
+        }
+        // 无格式续行：仅 ERROR/CRITICAL 之后继承（traceback 堆栈不断尾），其余维持 WARN 兜底
+        "" if prev_was_error => {
+            tracing::error!(target: "python_worker", "{message}");
+            true
+        }
+        _ => {
+            tracing::warn!(target: "python_worker", "{message}");
+            false
+        }
     }
 }
 
@@ -639,6 +673,42 @@ mod tests {
         let (level, message) = parse_worker_stderr_line("worker crashed");
         assert!(level.is_empty());
         assert_eq!(message, "worker crashed");
+    }
+
+    #[test]
+    fn test_parse_worker_stderr_line_strict_level() {
+        // 级别词未命中已知档位时整行按无格式续行原样保留，
+        // 防止 traceback 行（`  File "x.py", line 10`）被误切出 bogus 级别
+        let line = "  File \"worker.py\", line 10, in run";
+        let (level, message) = parse_worker_stderr_line(line);
+        assert!(level.is_empty());
+        assert_eq!(message, line);
+
+        // 大小写不敏感命中
+        let (level, _) = parse_worker_stderr_line("2026-07-09 21:39:57,938 error [t] boom");
+        assert_eq!(level, "ERROR");
+    }
+
+    #[test]
+    fn test_log_stderr_line_error_continuation_inheritance() {
+        // ERROR 首行 → 续行继承 ERROR（traceback 堆栈不断尾）
+        assert!(log_stderr_line(
+            b"2026-09-08 10:00:00,000 ERROR [task] worker crashed",
+            false
+        ));
+        assert!(log_stderr_line(
+            b"  File \"worker.py\", line 10, in run",
+            true
+        ));
+        // 空行不改变继承状态（堆栈块中常见）
+        assert!(log_stderr_line(b"   ", true));
+        // 其他级别的格式行结束继承
+        assert!(!log_stderr_line(
+            b"2026-09-08 10:00:01,000 WARNING [task] recovered",
+            true
+        ));
+        // 非错误上下文的无前缀行维持 WARN 兜底语义
+        assert!(!log_stderr_line(b"random noise without prefix", false));
     }
 
     /// 解析一行并取回 channel 中的下一条消息
