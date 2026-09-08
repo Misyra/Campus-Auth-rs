@@ -587,6 +587,8 @@ class WorkerCore:
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--memory-pressure-off",
+                    # 默认反检测：去掉 Blink 的自动化标记（无副作用，其余推荐参数见前端按钮）
+                    "--disable-blink-features=AutomationControlled",
                 ]
             )
             if bs.get("disable_web_security", False):

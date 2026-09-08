@@ -54,6 +54,8 @@ def test_build_launch_args_base_chromium():
     args = core._build_launch_args({})
     assert "--no-sandbox" in args
     assert "--disable-gpu" in args
+    # 默认反检测（无副作用；其余推荐参数走前端按钮显式写入）
+    assert "--disable-blink-features=AutomationControlled" in args
 
 
 def test_build_launch_args_firefox_skips_chromium_flags():
@@ -62,6 +64,7 @@ def test_build_launch_args_firefox_skips_chromium_flags():
     args = core._build_launch_args({}, channel="firefox")
     assert "--no-sandbox" not in args
     assert "--disable-gpu" not in args
+    assert "--disable-blink-features=AutomationControlled" not in args
 
 
 def test_build_launch_args_filters_blocked_and_dedupes():

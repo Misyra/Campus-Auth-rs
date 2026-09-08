@@ -76,7 +76,8 @@ export const DEFAULT_CONFIG: Config = {
     low_resource_mode: false,
     disable_web_security: false,
     extra_headers_json: "",
-    // 后端默认为空（不追加额外参数）；BROWSER_ARGS_DEFAULT 为浏览器页"加载推荐参数"按钮的预设来源
+    // 后端默认仅追加 --disable-blink-features=AutomationControlled（无副作用反检测）；
+    // BROWSER_ARGS_DEFAULT 为浏览器页"加载推荐参数"按钮的预设来源
     browser_args: "",
     stealth_mode: false,
     stealth_custom_script: "",
