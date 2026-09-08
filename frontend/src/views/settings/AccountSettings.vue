@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 设置 · 账号页：校园网账号凭据（用户名/密码/运营商/认证与触发地址）表单 */
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
@@ -18,6 +19,7 @@ const editingPassword = config.editingPassword;
 const onPasswordFocus = config.onPasswordFocus;
 const onPasswordBlur = config.onPasswordBlur;
 const onPasswordInput = config.onPasswordInput;
+const clearPassword = config.clearPassword;
 const { profiles, activeProfileId } = useProfiles();
 const router = useRouter();
 
@@ -93,8 +95,11 @@ async function detectPortalForSettings(): Promise<void> {
             name="password" type="password"
             :placeholder="passwordSaved ? '已保存，输入新密码可更换' : '输入上网密码'"
             autocomplete="current-password" />
+          <button v-if="passwordSaved" type="button" class="btn btn-danger-ghost btn-sm" @click="clearPassword">
+            清除已保存密码
+          </button>
           <span class="hint" v-if="passwordSaved && !editingPassword">密码已加密保存于本地，点击输入框可更换</span>
-          <span class="hint" v-else-if="passwordSaved && editingPassword">为空则保留原密码，输入则替换为新密码</span>
+          <span class="hint" v-else-if="passwordSaved && editingPassword">留空不会修改；点击“清除已保存密码”后保存才会删除</span>
           <span class="hint" v-else>首次设置，保存后加密存放于本地</span>
         </div>
         <div class="form-group">

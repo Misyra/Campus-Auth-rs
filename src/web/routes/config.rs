@@ -189,8 +189,16 @@ async fn apply_flat_settings_patch(
             profile.active_task = active_task.to_string();
         }
         if let Some(password) = profile_patch.get("password") {
-            let pwd_str = password.as_str().unwrap_or("");
-            profile.password = profiles.save_password(Some(pwd_str), &profile.password);
+            // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
+            // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
+            match password {
+                Value::Null => {}
+                Value::String(pwd_str) if pwd_str.is_empty() => profile.password.clear(),
+                Value::String(pwd_str) => {
+                    profile.password = profiles.save_password(Some(pwd_str), &profile.password);
+                }
+                _ => return Err(ApiError::BadRequest("password 必须是字符串或 null".into())),
+            }
         }
         config.save_profile(&profile).await?;
     }
@@ -541,7 +549,7 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
     }
 
     serde_json::json!({
-        "check_interval": obj.get("check_interval_seconds").and_then(|v| v.as_u64()).unwrap_or(300),
+        "check_interval": obj.get("check_interval_seconds").and_then(|v| v.as_u64()).unwrap_or(120),
         "tcp_targets": obj.get("ping_targets").cloned().unwrap_or(serde_json::json!([])),
         "http_targets": obj.get("test_urls").cloned().unwrap_or(serde_json::json!([])),
         "url_targets": serde_json::json!(url_targets),
@@ -549,7 +557,7 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         "tcp_enabled": obj.get("enable_tcp_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "http_enabled": obj.get("enable_http_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "url_enabled": obj.get("url_check_urls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
-        "local_check_enabled": obj.get("enable_local_check").and_then(|v| v.as_bool()).unwrap_or(true),
+        "local_check_enabled": obj.get("enable_local_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "disable_proxy": obj.get("disable_proxy").and_then(|v| v.as_bool()).unwrap_or(true),
         "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
         "post_login_delay": obj.get("post_login_delay").and_then(|v| v.as_u64()).unwrap_or(5),
@@ -1061,8 +1069,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
-        assert_eq!(v["data"]["enabled"], true);
-        assert!(inner.lock().unwrap().settings.global.browser.pure_mode);
+        assert_eq!(v["data"]["enabled"], false);
+        assert!(!inner.lock().unwrap().settings.global.browser.pure_mode);
     }
 
     // ============ updater 段：自动更新设置往返（channel/auto_check_enabled） ============

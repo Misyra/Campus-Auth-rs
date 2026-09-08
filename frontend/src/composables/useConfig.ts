@@ -64,6 +64,7 @@ watch(password.value, () => {
 
 const { busy } = useStatus();
 
+/** 拉取后端配置并写入表单；加载期间抑制 dirty，成功后以加载结果为新快照 */
 async function fetchConfig(): Promise<void> {
   // G20：仅最新一次请求可写状态；迟到的旧响应直接丢弃
   const epoch = ++fetchConfigEpoch;
@@ -143,9 +144,16 @@ const { toastOnly } = useToast();
 
 /** 密码输入回调：同步明文值并标记 dirty */
 function onPasswordInput(e: Event): void {
-  password.value.value = (e.target as HTMLInputElement).value;
+  password.setValue((e.target as HTMLInputElement).value);
 }
 
+/** 明确请求清除已保存密码，并使仅此项改动也能提交。 */
+function clearPassword(): void {
+  password.clear();
+  dirty.value = true;
+}
+
+/** 保存配置：校验硬错误阻断、警示仅提示；成功后以表单当前值刷新 dirty 快照 */
 async function saveConfig(force = false): Promise<void> {
   if (!dirty.value && !force) return;
 
@@ -183,7 +191,6 @@ async function saveConfig(force = false): Promise<void> {
   busy.save = true;
   saveFailed.value = false;
   const pwdValue = password.submitValue();
-  const submittedPassword = !!pwdValue;
   const payload: SaveConfigPayload = {
     browser: config.browser,
     worker: config.worker,
@@ -203,7 +210,8 @@ async function saveConfig(force = false): Promise<void> {
 
   try {
     await configApi.patch(payload, { signal: controller.signal });
-    if (submittedPassword) password.markSaved(true);
+    // null 表示未编辑，空串表示明确清除，非空字符串表示更新。
+    if (pwdValue !== null) password.markSaved(pwdValue.length > 0);
     // 保存成功后以当前表单为新快照：用户把值改回原样时 dirty 自动消失
     savedSnapshot = JSON.stringify(config);
     dirty.value = false;
@@ -222,6 +230,7 @@ async function saveConfig(force = false): Promise<void> {
   }
 }
 
+/** 拉取服务端已保存的日志级别并回填表单（不算未保存变更） */
 async function fetchLogLevels(): Promise<void> {
   try {
     const data = await configApi.fetchLogLevels();
@@ -237,6 +246,7 @@ async function fetchLogLevels(): Promise<void> {
   }
 }
 
+/** 设置日志级别：走独立 API 即时保存，并同步前端日志输出级别 */
 async function setLogLevel(level: string): Promise<void> {
   try {
     const data = await configApi.setLogLevel(level);
@@ -257,6 +267,7 @@ async function setLogLevel(level: string): Promise<void> {
   }
 }
 
+/** 切换开机自启动；后端不支持（404）时给出升级提示而非笼统报错 */
 async function toggleAutostart(enable: boolean): Promise<void> {
   busy.autostart = true;
   try {
@@ -279,6 +290,7 @@ async function toggleAutostart(enable: boolean): Promise<void> {
 
 // F9：5s 守卫——init 与设置页 mount 双触发不再重复请求；force 供重连等显式刷新绕过
 const pureModeFetchGuard = createFetchGuard(5000);
+/** 拉取纯净模式开关状态（带 5s 守卫，init 与设置页 mount 双触发不重复请求） */
 async function fetchPureMode(force = false): Promise<void> {
   if (!pureModeFetchGuard.shouldFetch(force)) return;
   try {
@@ -290,6 +302,7 @@ async function fetchPureMode(force = false): Promise<void> {
   }
 }
 
+/** 切换纯净模式；失败时回滚本地开关，保证 UI 与后端状态一致 */
 async function togglePureMode(): Promise<void> {
   if (pureModeLoading.value) return;
   pureModeLoading.value = true;
@@ -325,6 +338,7 @@ export function useConfig() {
     onPasswordFocus: password.onFocus,
     onPasswordBlur: password.onBlur,
     onPasswordInput,
+    clearPassword,
     saveConfig,
     fetchLogLevels,
     setLogLevel,

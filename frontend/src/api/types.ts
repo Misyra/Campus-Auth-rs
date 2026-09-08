@@ -271,7 +271,10 @@ export interface ConfigResponse {
   password?: string;
 }
 
-/** PATCH /api/config 请求体（凭据平铺） */
+/**
+ * PATCH /api/config 请求体（凭据平铺）。
+ * password 使用三态：null 保留已保存密码、空串清除、非空字符串加密更新。
+ */
 export interface SaveConfigPayload {
   browser: BrowserConfig;
   worker: WorkerConfig;
@@ -347,7 +350,7 @@ export interface BrowserListResponse {
 /** OCR 状态 */
 export interface OcrStatus {
   installed: boolean;
-  /** 项目是否在 pyproject.toml 中声明了 ddddocr 依赖（即是否支持 OCR） */
+  /** Worker 工程是否存在（即是否支持按需安装 OCR），不等于已安装 */
   declared?: boolean;
   size_mb: number;
 }
