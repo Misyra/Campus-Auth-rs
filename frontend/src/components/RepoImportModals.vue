@@ -4,11 +4,52 @@
  * 状态存于 useRepoImport 单例。此前 Modal 仅挂在 TasksView，
  * 导致设置·任务页点「从仓库导入」无反应、切到任务列表页才弹出的错位 bug，
  * 故提取为共享组件，两处入口（TasksView / TasksSettings）各自挂载。
+ *
+ * 列表为左右分栏：左侧任务条目（含 64px 缩略图），点选后右侧展示
+ * 截图大图与完整信息；无 screenshot 定义的任务显示「暂无截图」占位。
+ * 缩略图/大图均经 /api/repo/image 同源代理（免鉴权 `<img>` 引用口径，
+ * 出站限死任务站 raw 域），加载失败回退占位而非破图。
  */
+import { computed, ref, watch } from "vue";
 import Modal from "./common/Modal.vue";
+import { repoApi } from "@/api";
 import { useRepoImport } from "@/composables/useRepoImport";
 
 const repo = useRepoImport();
+
+/** 图片加载失败的任务 id 集合：缩略图/大图统一回退占位 */
+const brokenImages = ref(new Set<string>());
+
+/** 当前点选任务的截图代理地址（无定义时为空，由模板渲染占位） */
+const selectedScreenshotUrl = computed(() => {
+  const shot = repo.repoImport.value.selected?.screenshot?.trim();
+  return shot ? repoApi.screenshotUrl(shot) : "";
+});
+
+/** 列表缩略图地址（无定义返回空字符串，模板渲染迷你占位） */
+function thumbUrl(taskId: string, screenshot?: string): string {
+  const shot = screenshot?.trim();
+  if (!shot || brokenImages.value.has(taskId)) return "";
+  return repoApi.screenshotUrl(shot);
+}
+
+/** 标记某任务截图加载失败，缩略图与大图同步回退占位 */
+function markImageBroken(taskId: string): void {
+  brokenImages.value = new Set(brokenImages.value).add(taskId);
+}
+
+// 切换索引/重新加载后旧失败标记失效，清空避免误占位
+watch(
+  () => repo.repoImport.value.tasks,
+  () => {
+    brokenImages.value = new Set<string>();
+    // 列表刷新后旧点选可能已不在结果中，清空详情避免展示过期任务
+    const selected = repo.repoImport.value.selected;
+    if (selected && !repo.repoImport.value.tasks.some((t) => t.id === selected.id)) {
+      repo.repoImport.value.selected = null;
+    }
+  },
+);
 </script>
 
 <template>
@@ -31,16 +72,49 @@ const repo = useRepoImport();
     <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-search">
       <input v-model="repo.repoImport.value.searchQuery" type="text" class="input" placeholder="搜索任务..." />
     </div>
-    <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-list">
-      <div v-for="task in repo.filteredRepoTasks.value" :key="task.name" class="repo-import-item" @click="repo.confirmRepoImport(task)">
-        <div class="repo-item-name">{{ task.name }}</div>
-        <div class="repo-item-desc">{{ task.description }}</div>
-        <div class="repo-item-meta">
-          <span v-if="task.author" class="repo-item-author">{{ task.author }}</span>
-          <span v-if="task.tags" class="repo-item-tags">{{ task.tags.join(', ') }}</span>
+    <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-body">
+      <div class="repo-import-list">
+        <div
+          v-for="task in repo.filteredRepoTasks.value"
+          :key="task.id || task.name"
+          class="repo-import-item"
+          :class="{ selected: repo.repoImport.value.selected?.id === task.id }"
+          @click="repo.selectRepoTask(task)"
+        >
+          <div v-if="thumbUrl(task.id, task.screenshot)" class="repo-item-thumb">
+            <img :src="thumbUrl(task.id, task.screenshot)" :alt="`${task.name} 登录页截图`" loading="lazy" @error="markImageBroken(task.id)" />
+          </div>
+          <div v-else class="repo-item-thumb repo-item-thumb-empty">暂无截图</div>
+          <div class="repo-item-text">
+            <div class="repo-item-name">{{ task.name }}</div>
+            <div class="repo-item-desc">{{ task.description }}</div>
+            <div class="repo-item-meta">
+              <span v-if="task.author" class="repo-item-author">{{ task.author }}</span>
+              <span v-if="task.tags" class="repo-item-tags">{{ task.tags.join(', ') }}</span>
+            </div>
+          </div>
         </div>
+        <div v-if="repo.filteredRepoTasks.value.length === 0" class="repo-import-empty">无匹配</div>
       </div>
-      <div v-if="repo.filteredRepoTasks.value.length === 0" class="repo-import-empty">无匹配</div>
+      <div class="repo-import-detail">
+        <template v-if="repo.repoImport.value.selected">
+          <h4 class="repo-detail-name">{{ repo.repoImport.value.selected.name }}</h4>
+          <p class="repo-detail-desc">{{ repo.repoImport.value.selected.description }}</p>
+          <div v-if="selectedScreenshotUrl && !brokenImages.has(repo.repoImport.value.selected.id)" class="repo-detail-shot">
+            <img
+              :src="selectedScreenshotUrl"
+              :alt="`${repo.repoImport.value.selected.name} 登录页截图`"
+              loading="lazy"
+              @error="markImageBroken(repo.repoImport.value.selected.id)"
+            />
+          </div>
+          <div v-else class="repo-detail-empty">暂无截图</div>
+          <div class="repo-detail-actions">
+            <button class="btn btn-primary btn-sm" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">导入此任务</button>
+          </div>
+        </template>
+        <div v-else class="repo-detail-empty">点击左侧任务查看登录页截图</div>
+      </div>
     </div>
     <div v-else-if="!repo.repoImport.value.loading" class="repo-import-hint">
       <p>点击「加载索引」从远程仓库获取任务列表。</p>
@@ -69,12 +143,25 @@ const repo = useRepoImport();
 .repo-import-error { color: var(--error); font-size: var(--text-md); margin-bottom: 8px; }
 .repo-import-search { margin-bottom: 12px; }
 .repo-import-search .input { width: 100%; }
-.repo-import-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-.repo-import-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: background var(--dur-fast) var(--ease-out); }
+.repo-import-body { display: flex; gap: 12px; min-height: 0; }
+.repo-import-list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; }
+.repo-import-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: background var(--dur-fast) var(--ease-out); }
 .repo-import-item:hover { background: var(--bg-hover); }
+.repo-import-item.selected { border-color: var(--accent); }
+.repo-item-thumb { flex: none; width: 64px; height: 64px; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-hover); }
+.repo-item-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.repo-item-thumb-empty { display: flex; align-items: center; justify-content: center; font-size: var(--text-xs); color: var(--text-tertiary); text-align: center; padding: 4px; }
+.repo-item-text { flex: 1; min-width: 0; }
 .repo-item-name { font-weight: 600; }
 .repo-item-desc { font-size: var(--text-sm); color: var(--text-secondary); margin-top: 2px; }
 .repo-item-meta { display: flex; gap: 12px; margin-top: 6px; font-size: var(--text-xs); color: var(--text-tertiary); }
+.repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; }
+.repo-detail-name { font-size: var(--text-md); font-weight: 600; }
+.repo-detail-desc { font-size: var(--text-sm); color: var(--text-secondary); }
+.repo-detail-shot { border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); }
+.repo-detail-shot img { width: 100%; display: block; }
+.repo-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 120px; color: var(--text-tertiary); font-size: var(--text-sm); background: var(--bg-hover); border-radius: var(--radius-sm); }
+.repo-detail-actions { display: flex; justify-content: flex-end; }
 .repo-import-empty { text-align: center; color: var(--text-tertiary); padding: 24px; }
 .repo-import-hint { color: var(--text-secondary); font-size: var(--text-md); }
 .repo-import-hint a { color: var(--accent); }

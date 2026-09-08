@@ -399,6 +399,8 @@ export interface RepoTask {
   tags?: string[];
   author?: string;
   version?: string;
+  /** 登录页截图（任务站 raw 地址；前端经 /api/repo/image 代理预览） */
+  screenshot?: string;
   url: string;
 }
 

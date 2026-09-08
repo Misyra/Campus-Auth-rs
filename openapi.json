@@ -2298,6 +2298,47 @@
     }
    }
   },
+  "/api/repo/image": {
+   "get": {
+    "operationId": "get___api_repo_image",
+    "description": "代理获取仓库任务截图（返回图片字节；出站仅限任务站 raw 域）",
+    "responses": {
+     "200": {
+      "description": "图片字节",
+      "content": {
+       "image/png": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       },
+       "image/jpeg": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/worker/stop": {
    "post": {
     "operationId": "post___api_worker_stop",

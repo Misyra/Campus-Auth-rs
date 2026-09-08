@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Query, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,8 +21,8 @@ use crate::web::ssrf::secure_get_proxied;
 
 /// 代理响应体大小上限（8 MiB）
 ///
-/// 仓库索引/任务配置是小型 JSON；恶意或误配置的远端可能返回超大响应，
-/// 无上限的 `resp.json()` 会将其整体读入内存。
+/// 仓库索引/任务配置是小型 JSON；截图是二进制图片。恶意或误配置的远端
+/// 可能返回超大响应，无上限读取会将其整体读入内存，故统一截断。
 const MAX_REPO_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// 将一个 chunk 追加到缓冲区，超过上限返回 None（不追加任何字节）
@@ -33,6 +35,40 @@ fn append_within_limit(buf: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Option<
     }
     buf.extend_from_slice(chunk);
     Some(())
+}
+
+/// 截图代理允许的目标 host（任务站 raw 域）
+///
+/// 仓库索引的 `screenshot` 字段指向 GitHub/Gitee raw 图片。截图经 `<img>`
+/// 直接引用，无法携带鉴权头，故中间件对本端点 GET 豁免；为避免豁免被滥用
+/// 为开放 SSRF 出口，出站目标仅放行任务站 raw 三 host，拒绝任意 URL。
+fn is_allowed_screenshot_host(host: &str) -> bool {
+    matches!(
+        host,
+        "raw.githubusercontent.com" | "raw.giteeusercontent.com" | "gitee.com"
+    )
+}
+
+/// 由 magic bytes 识别图片格式，返回待下发的 MIME
+///
+/// SVG 可内嵌脚本（`<img>` 上下文虽不执行，仍统一拒绝可执行格式），
+/// 文本/未知字节返回 None 由调用方拒绝。
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("image/bmp")
+    } else if bytes.starts_with(b"\x00\x00\x01\x00") {
+        Some("image/x-icon")
+    } else {
+        None
+    }
 }
 
 /// 归一化仓库 URL：将 GitHub/Gitee blob 页面链接转换为 raw 链接
@@ -170,7 +206,88 @@ pub async fn repo_fetch_task(
     Ok(data(task))
 }
 
-/// GET /api/repo/fetch 与 /api/repo/task 共用的查询参数
+/// GET /api/repo/image — 代理获取仓库任务截图（返回图片字节）
+///
+/// `<img>` 引用无法携带鉴权头（同背景图/调试截图 GET 豁免先例），且 raw 图片
+/// 直连国内常需代理（与仓库任务共用 updater 代理配置）。豁免 + 代理的组合若
+/// 对任意 URL 开放即成开放 SSRF 出口，故目标 host 限死任务站 raw 三 host；
+/// 响应再做大小上限 + magic bytes 格式校验，MIME 按真实签名下发（防类型混淆）。
+pub async fn repo_image(
+    State(config): State<Arc<dyn ConfigApi>>,
+    Query(params): Query<RepoUrlQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let url = normalize_repo_url(&params.url);
+    let parsed =
+        url::Url::parse(&url).map_err(|e| ApiError::BadRequest(format!("无效 URL: {e}")))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(ApiError::BadRequest(format!(
+            "不支持的 URL 协议: {scheme}，仅支持 http/https"
+        )));
+    }
+    let host = parsed.host_str().unwrap_or("").to_string();
+    if !is_allowed_screenshot_host(&host) {
+        return Err(ApiError::BadRequest(format!(
+            "截图仅允许任务站图片地址（raw.githubusercontent.com / raw.giteeusercontent.com / gitee.com）: {host}"
+        )));
+    }
+    let proxy = updater_proxy(&config).await;
+    let (resp, final_url) = secure_get_proxied(
+        &url,
+        Duration::from_secs(30),
+        "Campus-Auth",
+        proxy.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::debug!(host = %host, "仓库截图请求失败: {e}");
+        ApiError::BadRequest(e)
+    })?;
+    // 逐跳重定向已由 secure_get_proxied 做公网校验；此处再收敛终点 host，
+    // 防“白名单 URL 302 跳到任意公网地址”借豁免端点外发
+    let final_host = url::Url::parse(&final_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    if !is_allowed_screenshot_host(&final_host) {
+        tracing::debug!(host = %final_host, "仓库截图重定向终点不在白名单，已拒绝");
+        return Err(ApiError::BadRequest(format!(
+            "截图重定向目标不在任务站图片域内，已拒绝: {final_host}"
+        )));
+    }
+    let status = resp.status();
+    if !status.is_success() {
+        tracing::debug!(host = %host, status = %status, "仓库截图返回非成功状态");
+        return Err(ApiError::ServiceUnavailable(format!(
+            "远程返回 HTTP {status} ({url})"
+        )));
+    }
+    // 流式累积读取响应体，超过上限立即中止（与 JSON 代理同口径）
+    let mut body: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            tracing::debug!(host = %host, "仓库截图读取失败: {e}");
+            ApiError::Internal(format!("截图响应读取失败: {e}"))
+        })?;
+        append_within_limit(&mut body, &chunk, MAX_REPO_BODY_BYTES).ok_or_else(|| {
+            tracing::debug!(host = %host, "仓库截图超过大小上限，已中止下载");
+            ApiError::BadRequest(format!(
+                "截图响应体超过 {} MiB 上限，已中止下载",
+                MAX_REPO_BODY_BYTES / (1024 * 1024)
+            ))
+        })?;
+    }
+    let mime = detect_image_mime(&body).ok_or_else(|| {
+        tracing::debug!(host = %host, "仓库截图不是有效的位图");
+        ApiError::BadRequest("截图不是有效的 PNG/JPEG/GIF/WebP/BMP/ICO 图片".into())
+    })?;
+    // 只记 host，不记录完整 URL（query 可能携带敏感参数）
+    tracing::debug!(host = %host, size = body.len(), mime, "仓库截图代理成功");
+    Ok(([(header::CONTENT_TYPE, mime)], body))
+}
+
+/// GET /api/repo/fetch、/api/repo/task 与 /api/repo/image 共用的查询参数
 #[derive(Deserialize)]
 pub struct RepoUrlQuery {
     /// 远程仓库资源地址（GitHub blob 页面地址会被归一化为 raw 地址）
@@ -212,6 +329,50 @@ mod tests {
     #[test]
     fn test_repo_body_limit_constant() {
         assert_eq!(MAX_REPO_BODY_BYTES, 8 * 1024 * 1024);
+    }
+
+    // ============ 截图 host 白名单 ============
+
+    /// 任务站 raw 三 host 放行，其余一律拒绝（含大小写与子域伪装）
+    #[test]
+    fn test_screenshot_host_allowlist() {
+        assert!(is_allowed_screenshot_host("raw.githubusercontent.com"));
+        assert!(is_allowed_screenshot_host("raw.giteeusercontent.com"));
+        assert!(is_allowed_screenshot_host("gitee.com"));
+        assert!(!is_allowed_screenshot_host("github.com"));
+        assert!(!is_allowed_screenshot_host("example.com"));
+        assert!(!is_allowed_screenshot_host(
+            "evil-raw.githubusercontent.com"
+        ));
+        assert!(!is_allowed_screenshot_host("RAW.GITHUBUSERCONTENT.COM"));
+        assert!(!is_allowed_screenshot_host(""));
+    }
+
+    // ============ 截图 magic bytes 识别 ============
+
+    /// 常见位图按签名识别 MIME；文本/SVG/未知字节拒绝（SVG 可内嵌脚本）
+    #[test]
+    fn test_detect_image_mime_recognizes_bitmap_rejects_text() {
+        assert_eq!(
+            detect_image_mime(b"\x89PNG\r\n\x1a\nxxxx"),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_image_mime(b"\xFF\xD8\xFF\xE0xxxx"),
+            Some("image/jpeg")
+        );
+        assert_eq!(detect_image_mime(b"GIF89axxxx"), Some("image/gif"));
+        let mut webp = b"RIFF....WEBP".to_vec();
+        webp[4..8].copy_from_slice(b"1234");
+        assert_eq!(detect_image_mime(&webp), Some("image/webp"));
+        assert_eq!(detect_image_mime(b"BMxxxx"), Some("image/bmp"));
+        assert_eq!(
+            detect_image_mime(b"\x00\x00\x01\x00xxxx"),
+            Some("image/x-icon")
+        );
+        assert_eq!(detect_image_mime(b"hello"), None);
+        assert_eq!(detect_image_mime(b"<svg xmlns='x'></svg>"), None);
+        assert_eq!(detect_image_mime(b""), None);
     }
 
     // ============ URL 归一化 ============

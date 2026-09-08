@@ -21,6 +21,8 @@ const repoImport = ref({
   tasks: [] as RepoTask[],
   searchQuery: "",
   disclaimer: null as RepoTask | null,
+  /** 列表点选的任务（右侧详情预览用；导入仍经 disclaimer 二次确认） */
+  selected: null as RepoTask | null,
 });
 
 const filteredRepoTasks = computed(() => {
@@ -52,6 +54,7 @@ function showRepoImport() {
   repoImport.value.searchQuery = "";
   repoImport.value.loading = false;
   repoImport.value.disclaimer = null;
+  repoImport.value.selected = null;
 }
 
 /** 关闭导入弹窗（不清理状态，下次打开时由 showRepoImport 统一复位） */
@@ -70,6 +73,7 @@ async function fetchRepoIndex() {
   repoImport.value.error = "";
   repoImport.value.tasks = [];
   repoImport.value.searchQuery = "";
+  repoImport.value.selected = null;
   try {
     const data = await repoApi.fetchIndex(url);
     if (!Array.isArray(data) || data.length === 0) {
@@ -84,6 +88,11 @@ async function fetchRepoIndex() {
   } finally {
     repoImport.value.loading = false;
   }
+}
+
+/** 列表点选任务：右侧详情区展示截图大图与完整信息（不触发导入） */
+function selectRepoTask(task: RepoTask) {
+  repoImport.value.selected = task;
 }
 
 /** 确认导入某任务：仅记录待确认项并展示免责声明，实际导入由 acceptRepoDisclaimer 完成 */
@@ -143,6 +152,7 @@ export function useRepoImport() {
     showRepoImport,
     closeRepoImport,
     fetchRepoIndex,
+    selectRepoTask,
     confirmRepoImport,
     cancelRepoDisclaimer,
     acceptRepoDisclaimer,

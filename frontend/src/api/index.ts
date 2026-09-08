@@ -374,6 +374,9 @@ export const debugApi = {
 export const repoApi = {
   fetchIndex: (url: string) => http.get<RepoTask[]>(`/api/repo/fetch?url=${encodeURIComponent(url)}`),
   fetchTask: (url: string) => http.get<Record<string, unknown>>(`/api/repo/task?url=${encodeURIComponent(url)}`),
+  // 仓库任务截图经 <img> 直接引用（GET 免鉴权），不走 http 封装；
+  // 后端代理复用更新器代理配置并限死任务站 raw 域（防开放 SSRF 出口）
+  screenshotUrl: (rawUrl: string) => `/api/repo/image?url=${encodeURIComponent(rawUrl)}`,
 };
 
 /** 纯模式 */

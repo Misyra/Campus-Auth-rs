@@ -142,6 +142,7 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/repo/task", || {
             get(routes::repo::repo_fetch_task)
         }),
+        ("GET", "/api/repo/image", || get(routes::repo::repo_image)),
         // ---- 登录（login）----
         ("POST", "/api/login", || post(routes::login::trigger_login)),
         ("POST", "/api/login/cancel", || {

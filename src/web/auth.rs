@@ -166,6 +166,8 @@ fn token_from_query(query: Option<&str>) -> Option<&str> {
 ///   背景图为只读图片资源；写操作（upload/fetch-url/delete）仍需鉴权）
 /// - `GET /api/debug/screenshot/*`（同理：调试面板 `<img>` 预览截图，只读 PNG）
 /// - `GET /api/ai/capture/screenshot`（同理：AI 生成页 `<img>` 预览捕获截图，只读 PNG）
+/// - `GET /api/repo/image`（同理：仓库导入 `<img>` 预览任务站截图；
+///   出站目标限死任务站 raw 三 host，见 `routes::repo::repo_image`）
 ///
 /// token 来源：
 /// - HTTP：`X-Auth-Token` 头或 `Authorization: Bearer <token>`
@@ -189,6 +191,7 @@ pub async fn auth_middleware(
         && (path.starts_with("/api/background/")
             || path.starts_with("/api/debug/screenshot/")
             || path == "/api/ai/capture/screenshot"
+            || path == "/api/repo/image"
             || path == "/api/tools/task-recorder.user.js"
             || path == "/api/docs/task-writing-guide"
             || path == "/api/docs/task-manual"
@@ -477,6 +480,55 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/backgrounds")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// GET /api/repo/image 豁免：仓库导入 `<img>` 预览无法携带自定义头；
+    /// POST /api/repo/fetch 等 JSON 代理仍需鉴权（豁免仅图片一端）
+    #[tokio::test]
+    async fn auth_middleware_repo_image_get_exempt() {
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = test_router();
+
+        // GET 截图代理：无 token → 放行（路由层 405 只证明过了中间件）
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/repo/image?url=https%3A%2F%2Fexample.com%2Fa.png")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // JSON 代理仍需鉴权：无 token → 401
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/repo/fetch?url=https%3A%2F%2Fexample.com%2Findex.json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 豁免不扩大化：同前缀不同路径仍需鉴权
+        let app = test_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/repo/image")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
