@@ -30,7 +30,32 @@ fn ensure_no_proxy() {
 /// 64 位 hex 摘要（格式合法即可，检查路径不校验内容与实物一致性）
 const FAKE_SHA: &str = "a0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/// 测试侧的当前平台键，与生产侧 `check::CURRENT_PLATFORM_KEY` 的 cfg 矩阵一致
+fn current_platform_key() -> &'static str {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return "windows-x64";
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    return "windows-arm64";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return "linux-x64";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "linux-arm64";
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return "macos-arm64";
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return "macos-x64";
+    #[allow(unreachable_code)]
+    {
+        "unknown"
+    }
+}
+
 /// 为指定 tag 构造含当前平台安装包 + `.sha256` 伴随文件的 assets 数组
+///
+/// 各平台资产全部给出（windows-x64 / linux-x86_64 / macos-arm64 / linux-aarch64），
+/// 生产侧 `collect_current_platform_asset` 只取与编译期 `CURRENT_PLATFORM_KEY`
+/// 匹配的一项，多余条目在各平台均被跳过——此前仅给 win/linux 导致
+/// macOS 与 linux-arm64 CI 上 `PlatformNotAvailable`。
 fn assets_json(port: u16, tag: &str) -> serde_json::Value {
     let base = format!("http://127.0.0.1:{port}/assets/{tag}");
     serde_json::json!([
@@ -38,6 +63,12 @@ fn assets_json(port: u16, tag: &str) -> serde_json::Value {
         { "name": format!("app-{tag}-windows-x64.zip.sha256"), "browser_download_url": format!("{base}-win.zip.sha256") },
         { "name": format!("app-{tag}-linux-x86_64.zip"), "browser_download_url": format!("{base}-linux.zip"), "size": 16 },
         { "name": format!("app-{tag}-linux-x86_64.zip.sha256"), "browser_download_url": format!("{base}-linux.zip.sha256") },
+        { "name": format!("app-{tag}-linux-aarch64.zip"), "browser_download_url": format!("{base}-linux-arm.zip"), "size": 16 },
+        { "name": format!("app-{tag}-linux-aarch64.zip.sha256"), "browser_download_url": format!("{base}-linux-arm.zip.sha256") },
+        { "name": format!("app-{tag}-macos-arm64.zip"), "browser_download_url": format!("{base}-macos-arm.zip"), "size": 16 },
+        { "name": format!("app-{tag}-macos-arm64.zip.sha256"), "browser_download_url": format!("{base}-macos-arm.zip.sha256") },
+        { "name": format!("app-{tag}-macos-x64.zip"), "browser_download_url": format!("{base}-macos-x64.zip"), "size": 16 },
+        { "name": format!("app-{tag}-macos-x64.zip.sha256"), "browser_download_url": format!("{base}-macos-x64.zip.sha256") },
     ])
 }
 
@@ -127,7 +158,14 @@ fn spawn_github_mock() -> u16 {
                             serde_json::json!({
                                 "version": "9.9.9",
                                 "platforms": {
-                                    "windows-x64": {
+                                    // 自定清单按平台键精确查找：键必须与编译期
+                                    // CURRENT_PLATFORM_KEY 一致，否则 check_update
+                                    // 经 select_platform 查不到包而回 Ok(None)
+                                    // （此前写死 windows-x64，非 Windows 全挂）。
+                                    // 直接复用 GitHub 形态的平台键名：
+                                    // windows-x64 / linux-x64 / linux-arm64 /
+                                    // macos-arm64 / macos-x64。
+                                    current_platform_key(): {
                                         "url": format!("http://127.0.0.1:{port}/assets/win.zip"),
                                         "sha256": FAKE_SHA,
                                         "size": 16,
