@@ -74,11 +74,8 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 ## 依赖安装
 
 ```bash
-# 仅核心（Playwright）
+# 仅核心（Playwright；OCR 不预声明，用时经应用内设置页 add/remove）
 uv sync
-
-# 含 OCR 扩展
-uv sync --extra ocr
 ```
 
 > PyPI 镜像已配置为清华大学源以加速下载（见 `pyproject.toml` 的 `[tool.uv]`）。

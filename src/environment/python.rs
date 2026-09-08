@@ -132,57 +132,12 @@ pub(crate) fn ddddocr_installed(mgr: &EnvironmentManager) -> bool {
     false
 }
 
-/// OCR extra 是否在 `python_worker/pyproject.toml` 中声明 ddddocr。
+/// Worker 工程是否支持 OCR（按需 `uv add/remove ddddocr`，不再预声明）。
 ///
-/// `declared` 表示该构建支持 OCR 可选能力，并不等于用户已安装 OCR。
-/// 文件缺失或声明损坏时返回 false，避免前端误报能力。
+/// ddddocr 不预声明于 pyproject，避免裸 `uv sync` 解析/同步失败；
+/// 工程存在即具备随时安装的能力。`declared` 不等于已安装。
 pub(crate) fn ocr_declared(mgr: &EnvironmentManager) -> bool {
-    let pyproject = mgr.worker_project_path().join("pyproject.toml");
-    let content = match std::fs::read_to_string(&pyproject) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    ocr_declared_in_pyproject(&content)
-}
-
-fn ocr_declared_in_pyproject(content: &str) -> bool {
-    let mut in_optional_dependencies = false;
-    let mut in_ocr_extra = false;
-
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
-        if line.starts_with('[') {
-            in_optional_dependencies = line == "[project.optional-dependencies]";
-            in_ocr_extra = false;
-            continue;
-        }
-        if !in_optional_dependencies || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        if !in_ocr_extra {
-            let Some((name, value)) = line.split_once('=') else {
-                continue;
-            };
-            if name.trim() != "ocr" {
-                continue;
-            }
-            if value.contains("ddddocr") {
-                return true;
-            }
-            in_ocr_extra = !value.contains(']');
-            continue;
-        }
-
-        if line.contains("ddddocr") {
-            return true;
-        }
-        if line.contains(']') {
-            in_ocr_extra = false;
-        }
-    }
-
-    false
+    mgr.worker_project_path().join("pyproject.toml").is_file()
 }
 
 /// 安装核心 Playwright Chromium 浏览器。
@@ -478,33 +433,18 @@ mod tests {
     }
 
     #[test]
-    fn test_ocr_declared_requires_ocr_optional_extra() {
-        let optional = r#"
-[project]
-dependencies = ["playwright>=1.40"]
-
-[project.optional-dependencies]
-ocr = [
-    "ddddocr>=1.6.1",
-]
-"#;
-        assert!(ocr_declared_in_pyproject(optional));
-
-        let legacy_main_dependency = r#"
-[project]
-dependencies = [
-    "ddddocr>=1.6.1",
-    "playwright>=1.40",
-]
-"#;
-        assert!(!ocr_declared_in_pyproject(legacy_main_dependency));
-
-        let unrelated_extra = r#"
-[project.optional-dependencies]
-devtools = ["ddddocr>=1.6.1"]
-ocr = ["pillow"]
-"#;
-        assert!(!ocr_declared_in_pyproject(unrelated_extra));
+    fn test_ocr_declared_means_worker_project_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // 先建工程目录再构造 mgr：路径在 new() 内即时解析，事后建目录追不上
+        let proj = dir.path().join("python_worker");
+        std::fs::create_dir_all(&proj).unwrap();
+        let mgr = EnvironmentManager::new(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(crate::status::StatusManager::new()),
+        );
+        assert!(!ocr_declared(&mgr));
+        std::fs::write(proj.join("pyproject.toml"), "[project]\n").unwrap();
+        assert!(ocr_declared(&mgr));
     }
     /// 失败归类：超时/建连/镜像/磁盘/证书/兜底各走对应原因与建议。
     #[test]

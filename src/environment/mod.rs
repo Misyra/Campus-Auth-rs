@@ -383,7 +383,7 @@ pub trait EnvironmentApi: Send + Sync {
     async fn remove_ocr_dep(&self) -> Result<(), EnvironmentError>;
     /// OCR 依赖（ddddocr）是否已安装在 venv 内。
     fn ocr_ready(&self) -> bool;
-    /// 项目是否声明支持 `ocr` optional extra。
+    /// Worker 工程是否支持 OCR（按需安装，不预声明）。
     fn ocr_declared(&self) -> bool;
 }
 

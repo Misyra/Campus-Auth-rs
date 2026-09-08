@@ -110,7 +110,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 6. 验证码（OCR）
 
-- 仅 `ocr` 步骤需要；依赖 `ddddocr`（`python_worker/pyproject.toml` 的 `ocr` extra，约 120MB）。
+- 仅 `ocr` 步骤需要；依赖 `ddddocr`（约 120MB，不预声明，用时经应用内安装，用完可卸载）。
 - 在「设置·任务」页安装，装好后可用“验证码识别”上传截图试识别；未安装时非 OCR 浏览器任务仍可运行（`src/environment` 按需引导，启动即后台探测环境状态）。
 
 ## 7. 系统托盘与开机自启

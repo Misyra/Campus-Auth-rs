@@ -66,8 +66,7 @@ pub async fn ocr_recognize(
 /// 返回：
 /// - `installed`：OCR **依赖（ddddocr）** 是否已实际安装（仅需 Python venv 就绪 +
 ///   dddddcr 已装入 venv，不依赖 Playwright 浏览器是否就绪——OCR 识别只用 CPU 推理）。
-/// - `declared`：项目是否在 `python_worker/pyproject.toml` 的 `ocr` optional extra
-///   中声明 ddddocr，表示当前构建支持 OCR 可选能力。
+/// - `declared`：Worker 工程存在即支持 OCR（按需 add/remove，不预声明），不等于已安装。
 /// - `size_mb`：environment 目录估算体积。
 /// - `runtime_ocr`（任务 10，向后兼容新增）：Worker 存活时最近一次健康检查
 ///   上报的运行时 OCR 能力（`capabilities.ocr`）；Worker 未存活/未上报时为

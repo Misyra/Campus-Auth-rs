@@ -664,7 +664,7 @@ fn extract_uv_from_archive(archive_path: &Path, dest: &Path) -> std::io::Result<
     Ok(())
 }
 
-/// ddddocr 依赖声明（`uv add` 用，版本下限与旧 `ocr` extra 一致）
+/// ddddocr 按需安装版本下限（`uv add` 用，不预声明于 pyproject）
 const DDDDOCR_REQUIREMENT: &str = "ddddocr>=1.6.1";
 /// ddddocr 包名（`uv remove` 用）
 const DDDDOCR_PACKAGE: &str = "ddddocr";
@@ -786,7 +786,8 @@ pub async fn install_ocr_dep(
     Ok(())
 }
 
-/// 卸载 OCR 依赖：`uv remove ddddocr` 移出项目主依赖并自动重锁 + 同步。
+/// 卸载 OCR 依赖：`uv remove --optional ocr ddddocr` 摘除 ocr extra 声明并自动重锁 + 同步；
+/// 旧版裸 add 写入主依赖的残留回退裸 remove。
 ///
 /// 幂等：venv 内无 ddddocr 且无旧标记时直接成功；`uv remove` 因"未声明"报错
 /// 但环境已为空时同样按成功计（旧 extra 残留态）。
@@ -830,58 +831,68 @@ async fn run_uv_package_alter(
         .await
         .map_err(EnvironmentError::UvExtractFailed)?;
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
-    let backup = ProjectFilesBackup::take(mgr.worker_project_path())
-        .await
-        .map_err(EnvironmentError::UvExtractFailed)?;
-
-    let mut cmd = uv_command(&uv_exe);
-    cmd.arg(op);
-    if op == "add" {
-        cmd.arg(DDDDOCR_REQUIREMENT);
+    // remove 的参数组：新版 pyproject 无 extra 声明，裸 remove 即可；
+    // 存量副本仍带 ocr extra 声明时首选 `--optional ocr`，失败回退裸 remove
+    let arg_sets: Vec<Vec<&str>> = if op == "add" {
+        vec![vec![DDDDOCR_REQUIREMENT]]
     } else {
-        cmd.arg(DDDDOCR_PACKAGE);
-    }
-    cmd.arg("--project")
-        .arg(&*mgr.worker_project_path().to_string_lossy());
-    cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
-        .current_dir(mgr.base_path());
-
-    let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
-        Ok(output) => output,
-        Err(CommandOutputError::Cancelled) => {
-            backup.restore().await;
-            return Err(EnvironmentError::Cancelled);
-        }
-        Err(CommandOutputError::Timeout) => {
-            backup.restore().await;
-            return Err(EnvironmentError::UvSyncTimeout {
-                timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
-            });
-        }
-        Err(CommandOutputError::Io(error)) => {
-            backup.restore().await;
-            return Err(EnvironmentError::UvExtractFailed(error));
-        }
+        vec![
+            vec!["--optional", "ocr", DDDDOCR_PACKAGE],
+            vec![DDDDOCR_PACKAGE],
+        ]
     };
+    let mut last_err: Option<EnvironmentError> = None;
+    for (i, args) in arg_sets.iter().enumerate() {
+        let backup = ProjectFilesBackup::take(mgr.worker_project_path())
+            .await
+            .map_err(EnvironmentError::UvExtractFailed)?;
 
-    if output.status.success() {
-        backup.discard().await;
-        Ok(())
-    } else {
+        let mut cmd = uv_command(&uv_exe);
+        cmd.args(args);
+        cmd.arg("--project")
+            .arg(&*mgr.worker_project_path().to_string_lossy());
+        cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
+            .current_dir(mgr.base_path());
+
+        let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
+            Ok(output) => output,
+            Err(CommandOutputError::Cancelled) => {
+                backup.restore().await;
+                return Err(EnvironmentError::Cancelled);
+            }
+            Err(CommandOutputError::Timeout) => {
+                backup.restore().await;
+                return Err(EnvironmentError::UvSyncTimeout {
+                    timeout_secs: UV_SYNC_TIMEOUT.as_secs(),
+                });
+            }
+            Err(CommandOutputError::Io(error)) => {
+                backup.restore().await;
+                return Err(EnvironmentError::UvExtractFailed(error));
+            }
+        };
+
+        if output.status.success() {
+            backup.discard().await;
+            return Ok(());
+        }
         backup.restore().await;
         // 同 run_uv_sync：全量 stderr 留给日志，错误消息内截尾保证提示可见
         let stderr_full = String::from_utf8_lossy(&output.stderr).into_owned();
         tracing::warn!(
-            "uv {op} 失败 (exit code={:?})，stderr: {}",
+            "uv {op} 第 {}/{} 组参数失败 (exit code={:?})，stderr: {}",
+            i + 1,
+            arg_sets.len(),
             output.status.code(),
             crate::environment::python::tail_chars(&stderr_full, 4000)
         );
-        Err(EnvironmentError::UvPackageAlterFailed {
+        last_err = Some(EnvironmentError::UvPackageAlterFailed {
             op,
             exit_code: output.status.code(),
             stderr: crate::environment::python::tail_chars(&stderr_full, 400),
-        })
+        });
     }
+    Err(last_err.expect("参数组非空，循环结束后必有最后一次错误"))
 }
 
 /// `pyproject.toml` + `uv.lock` 快照：`uv add/remove` 改写前备份，失败/取消回滚。
