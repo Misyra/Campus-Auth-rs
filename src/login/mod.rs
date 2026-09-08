@@ -377,19 +377,9 @@ impl LoginOrchestrator {
 
         // 读取最新运行时配置（每次 submit 重新读取，不缓存）
         let rt = self.config.runtime().load_full();
-        // 解析凭据来源 Profile：profile_id 指定时加载该 Profile 快照，否则用全局活跃 Profile。
-        // 多 Profile 场景下的定时浏览器任务可借此使用各自独立的账号凭据。
-        // 指定 Profile 加载失败直接失败（不回退全局，避免账号 A/B 错配）。
-        let resolved_profile: ProfileSnapshot = match &profile_id {
-            Some(pid) if !pid.is_empty() => match self.config.runtime_config_for_profile(pid) {
-                Ok(rc) => rc.profile,
-                Err(e) => {
-                    let msg = format!("指定 Profile {pid} 加载失败，已拒绝登录: {e}");
-                    warn!("{msg}");
-                    return self.immediate_handle(source, false, msg, pid.clone()).await;
-                }
-            },
-            _ => rt.profile.clone(),
+        let resolved_profile = match self.resolve_profile(source, &rt, &profile_id).await {
+            Ok(p) => p,
+            Err(handle) => return handle,
         };
         let profile = &resolved_profile;
 
@@ -398,210 +388,28 @@ impl LoginOrchestrator {
         let global_active_task = self.tasks.get_active_task().await;
 
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
-        let mut missing = Vec::new();
-        if profile.username.is_empty() {
-            missing.push("账号为空，请在设置页填写账号");
-        }
-        if profile.password.as_str().is_empty() {
-            missing.push("密码为空，请在设置页填写密码");
-        }
-        // 重定向模式允许 auth_url 为空：首导航用 trigger_url 触发 302，固定门户地址未知或不可直连
-        if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
-            missing.push("认证地址与触发地址均为空，请至少填写一个");
-        }
-        // 浏览器/非浏览器来源在此项校验上文案一致（两分支条件互补并集为全部来源），
-        // 合并为单一条件：task_id 为空（手动/自动/CLI）且未启用全局活跃任务即缺失
-        if task_id.is_none() && global_active_task.is_empty() {
-            missing.push("当前无启用任务，请手动启用一个任务");
-        }
-        if !missing.is_empty() {
-            let msg = missing.join("；");
-            warn!(
-                "登录配置不完整: {msg}（source={source:?}，profile={}）",
-                profile.id
-            );
-            return self
-                .immediate_handle(
-                    source,
-                    false,
-                    format!("配置不完整: {msg}"),
-                    profile.id.clone(),
-                )
-                .await;
-        }
-
-        // 1b. 浏览器渠道预检：当前渠道不可用时自动切换到首个可用浏览器
-        // （落盘持久化，本次请求立即生效）；全无可用时不直接失败——环境引导
-        // 会尝试下载 Chromium 兜底，引导结束后再终验（见 1c）。
-        let mut browser_override = self
-            .resolve_browser_channel(&rt.browser.browser_channel, &rt.browser.browser_custom_path)
-            .await;
-
-        // 浏览器来源要求环境能力就绪：未就绪时自动触发 uv sync 初始化（经 BootstrapGate 幂等），
-        // 仍未就绪则以失败终态返回（携带 last_error 便于前端提示并引导至“初始化 Python 环境”按钮）。
-        // Manual 场景不走此分支——其 Worker 缺失会在会话内 Bridge 执行阶段以 WorkerNotInstalled 失败，
-        // 已在 session 层统一处理；此处仅守 Browser 定时任务路径。
-        // 环境初始化可达分钟级：与取消令牌竞速，准备阶段即可被取消中断。
-        if source == LoginSource::Browser && !self.environment.capability_ready() {
-            tracing::info!("浏览器能力未就绪，尝试自动初始化环境...");
-            let init_result = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return self.cancelled_handle(source, profile.id.clone()).await;
-                }
-                r = self.environment.ensure_capability() => r,
-            };
-            if let Err(e) = init_result {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| e.to_string());
-                warn!("浏览器任务环境自动初始化失败: {detail}");
-                return self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!("浏览器能力未就绪，自动初始化失败: {detail}"),
-                        profile.id.clone(),
-                    )
-                    .await;
-            }
-            if !self.environment.capability_ready() {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| "未知原因".to_string());
-                warn!("环境初始化完成但仍未就绪: {detail}");
-                return self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!("浏览器能力未就绪（初始化后仍未就绪）: {detail}"),
-                        profile.id.clone(),
-                    )
-                    .await;
-            }
-            tracing::info!("浏览器任务环境自动初始化成功，继续执行登录");
-        }
-
-        // 手动登录同样自动初始化：未安装时直接拒绝会让全新安装用户无从操作。
-        // 复用同一 BootstrapGate，显式按钮与登录并发时只跑一次 uv sync。
-        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
-            && !self.environment.capability_ready()
+        if let Some(handle) = self
+            .validate_profile(source, profile, &task_id, &global_active_task)
+            .await
         {
-            tracing::info!("手动登录触发环境自动初始化...");
-            self.status.merge(crate::status::PartialSnapshot::Login {
-                status: crate::status::LoginStatus::Running,
-                source: Some(source),
-                message: Some("正在初始化 Python 环境...".into()),
-                retry_count: 0,
-            });
-            let init_result = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return self.cancelled_handle(source, profile.id.clone()).await;
-                }
-                r = self.environment.ensure_capability() => r,
-            };
-            if let Err(e) = init_result {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| e.to_string());
-                warn!("手动登录环境自动初始化失败: {detail}");
-                return self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!(
-                            "环境未就绪，自动初始化失败: {detail}{}",
-                            Self::no_browser_hint()
-                        ),
-                        profile.id.clone(),
-                    )
-                    .await;
-            }
-            if !self.environment.capability_ready() {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| "未知原因".to_string());
-                // 与 Browser 分支的告警口径一致：环境初始化后仍未就绪直接失败，需留痕
-                warn!("环境初始化完成但仍未就绪: {detail}");
-                return self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!("环境初始化后仍未就绪: {detail}{}", Self::no_browser_hint()),
-                        profile.id.clone(),
-                    )
-                    .await;
-            }
-            tracing::info!("手动登录环境自动初始化成功，继续执行登录");
+            return handle;
         }
 
-        // 1c. 浏览器可用性终验（环境引导兜底之后）：引导中新装好的 Chromium
-        // 纳入复检，命中则自动切换后继续；仍全无可用则直接失败，前端据文案
-        // 弹窗引导下载 Chromium，不再把缺浏览器误报成登录失败深埋日志。
-        if !browser::is_channel_available(
-            browser_override
-                .as_deref()
-                .unwrap_or(&rt.browser.browser_channel),
-            &rt.browser.browser_custom_path,
-        ) {
-            browser_override = self
-                .resolve_browser_channel(
-                    browser_override
-                        .as_deref()
-                        .unwrap_or(&rt.browser.browser_channel),
-                    &rt.browser.browser_custom_path,
-                )
-                .await;
-            if browser_override.is_none() {
-                warn!("无可用浏览器且环境引导未能提供，已拒绝登录");
-                return self
-                    .immediate_handle(
-                        source,
-                        false,
-                        NO_BROWSER_MESSAGE.to_string(),
-                        profile.id.clone(),
-                    )
-                    .await;
-            }
-        }
-
-        // 2. auth_url TCP 预检（仅 manual / login_once；重定向模式跳过：触发器是公网 http，劫持下 TCP 必失败，交给 Worker 导航跟随 302）
-        // 地址解析统一走 MonitorService 的单点实现（parse_url_host_port，
-        // 支持 IPv6 方括号与裸地址），登录侧不再维护私有副本
-        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
-            && profile.trigger_url.is_empty()
+        // 1b. 浏览器渠道预检 + 1c. 可用性终验：返回本次生效的渠道覆盖
+        let browser_override = match self
+            .prepare_browser(source, profile, &rt, &cancel_token)
+            .await
         {
-            let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
-            let reachable = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return self.cancelled_handle(source, profile.id.clone()).await;
-                }
-                r = self.monitor.check_auth_url(&profile.auth_url, timeout) => r,
-            };
-            if !reachable {
-                warn!(
-                    "认证地址预检不可达: {}（请检查认证地址是否正确、是否已连校园网）",
-                    profile.auth_url
-                );
-                return self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!(
-                            "认证地址不可达: {}（请检查地址或校园网连接）",
-                            profile.auth_url
-                        ),
-                        profile.id.clone(),
-                    )
-                    .await;
-            }
+            Ok(ov) => ov,
+            Err(handle) => return handle,
+        };
+
+        // 2. auth_url TCP 预检（仅 manual / login_once；重定向模式跳过）
+        if let Some(handle) = self
+            .precheck_auth_url(source, profile, &rt, &cancel_token)
+            .await
+        {
+            return handle;
         }
 
         // 3. 从抢占决策开始串行化所有 submit，直到新会话真正占据 active_session。
@@ -727,53 +535,9 @@ impl LoginOrchestrator {
 
         // 6. 仅当成功占据活跃会话槽位时才计数并 spawn 状态机 task
         if became_active {
-            if let Some(m) = &self.metrics {
-                m.inc_login();
-                self.status.merge(PartialSnapshot::Totals {
-                    probe_total: m.probe_total.load(std::sync::atomic::Ordering::Relaxed),
-                    login_total: m.login_total.load(std::sync::atomic::Ordering::Relaxed),
-                });
-            }
-            let state_arc = self.state.clone();
-            let finished_notifier = finished.clone();
-            tokio::spawn(async move {
-                // 内层独立 spawn：JoinHandle 不会像 watch channel 一样被句柄持有者
-                // "保活"——run() panic 时内层返回 Err，外层可据此补写终态。
-                // 直接 await run() 的话 panic 会跳过 notify/清槽位，且 handle 持有
-                // watch sender 使 channel 永不关闭 → await_result 永挂、
-                // auto_login_in_flight 恒 true，自动登录静默失效直到重启。
-                let run = tokio::spawn(async move {
-                    session.run().await;
-                });
-                let panicked = run.await.is_err();
-                if panicked {
-                    // panic 路径：run() 未写终态。在清槽位前从活跃会话取回 handle
-                    // 补写失败结果，保证 await_result 必有返回
-                    let g = state_arc.lock().await;
-                    if matches!(&g.active_session, Some(a) if a.session_id == session_id) {
-                        if let Some(a) = &g.active_session {
-                            a.handle.inner.set_result(LoginResult {
-                                success: false,
-                                message: "登录会话内部异常，已中止".into(),
-                                source,
-                                duration: Duration::ZERO,
-                                attempts: 0,
-                            });
-                        }
-                        tracing::error!("登录会话 task panic，已补写失败终态");
-                    }
-                    drop(g);
-                }
-                // F6：run() 返回即全部收尾动作（含 emit 的 close_browser）完成，
-                // 触发通知供抢占方放行新会话；无等待者时存储许可，不丢失
-                finished_notifier.notify_one();
-                let mut g = state_arc.lock().await;
-                let should_clear =
-                    matches!(&g.active_session, Some(a) if a.session_id == session_id);
-                if should_clear {
-                    g.active_session = None;
-                }
-            });
+            // 句柄为 Arc 共享槽：槽位内已有一份 clone（见上），spawn 任务不再需要本体，
+            // 本体留给末尾 return（与原内联写法一致：panic 补偿取的是槽位内的 handle）
+            self.spawn_session_task(session_id, source, finished, session);
         } else {
             // 活跃槽位已被占用，立即写入终态（避免 await_result 永久挂起）
             // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
@@ -790,6 +554,336 @@ impl LoginOrchestrator {
         // 7. 返回句柄；_submit_guard 随函数返回释放，后续 submit 此时只能看到
         // 已安装的新 active_session，不再能看到抢占过程中的临时空槽。
         handle
+    }
+
+    /// 解析凭据来源 Profile：`profile_id` 指定时加载该快照，否则用全局活跃 Profile。
+    ///
+    /// 多 Profile 场景下的定时浏览器任务可借此使用各自独立的账号凭据。
+    /// `Err(handle)` = 指定 Profile 加载失败携带的立即终态句柄（不回退全局，
+    /// 避免账号 A/B 错配）。
+    async fn resolve_profile(
+        &self,
+        source: LoginSource,
+        rt: &RuntimeConfig,
+        profile_id: &Option<String>,
+    ) -> Result<ProfileSnapshot, LoginHandle> {
+        match profile_id {
+            Some(pid) if !pid.is_empty() => match self.config.runtime_config_for_profile(pid) {
+                Ok(rc) => Ok(rc.profile),
+                Err(e) => {
+                    let msg = format!("指定 Profile {pid} 加载失败，已拒绝登录: {e}");
+                    warn!("{msg}");
+                    Err(self.immediate_handle(source, false, msg, pid.clone()).await)
+                }
+            },
+            _ => Ok(rt.profile.clone()),
+        }
+    }
+
+    /// 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）。
+    ///
+    /// `Some(handle)` = 校验失败携带的立即终态句柄；`None` = 通过。
+    async fn validate_profile(
+        &self,
+        source: LoginSource,
+        profile: &ProfileSnapshot,
+        task_id: &Option<String>,
+        global_active_task: &str,
+    ) -> Option<LoginHandle> {
+        let mut missing = Vec::new();
+        if profile.username.is_empty() {
+            missing.push("账号为空，请在设置页填写账号");
+        }
+        if profile.password.as_str().is_empty() {
+            missing.push("密码为空，请在设置页填写密码");
+        }
+        // 重定向模式允许 auth_url 为空：首导航用 trigger_url 触发 302，固定门户地址未知或不可直连
+        if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
+            missing.push("认证地址与触发地址均为空，请至少填写一个");
+        }
+        // 浏览器/非浏览器来源在此项校验上文案一致（两分支条件互补并集为全部来源），
+        // 合并为单一条件：task_id 为空（手动/自动/CLI）且未启用全局活跃任务即缺失
+        if task_id.is_none() && global_active_task.is_empty() {
+            missing.push("当前无启用任务，请手动启用一个任务");
+        }
+        if missing.is_empty() {
+            return None;
+        }
+        let msg = missing.join("；");
+        warn!(
+            "登录配置不完整: {msg}（source={source:?}，profile={}）",
+            profile.id
+        );
+        Some(
+            self.immediate_handle(
+                source,
+                false,
+                format!("配置不完整: {msg}"),
+                profile.id.clone(),
+            )
+            .await,
+        )
+    }
+
+    /// 浏览器渠道预检（1b）+ 可用性终验（1c），返回本次登录生效的渠道覆盖。
+    ///
+    /// `Err(handle)` = 应直接返回的立即终态句柄。1b 的环境初始化只守
+    /// Browser/Manual 两条路径（其余来源的 Worker 缺失由会话内 Bridge
+    /// 执行阶段以 WorkerNotInstalled 失败，已在 session 层统一处理）。
+    async fn prepare_browser(
+        &self,
+        source: LoginSource,
+        profile: &ProfileSnapshot,
+        rt: &RuntimeConfig,
+        cancel_token: &CancellationToken,
+    ) -> Result<Option<String>, LoginHandle> {
+        // 1b. 浏览器渠道预检：当前渠道不可用时自动切换到首个可用浏览器
+        // （落盘持久化，本次请求立即生效）；全无可用时不直接失败——环境引导
+        // 会尝试下载 Chromium 兜底，引导结束后再终验（见 1c）。
+        let mut browser_override = self
+            .resolve_browser_channel(&rt.browser.browser_channel, &rt.browser.browser_custom_path)
+            .await;
+
+        // 浏览器来源要求环境能力就绪：未就绪时自动触发 uv sync 初始化（经 BootstrapGate 幂等），
+        // 仍未就绪则以失败终态返回（携带 last_error 便于前端提示并引导至“初始化 Python 环境”按钮）。
+        // Manual 场景不走此分支——其 Worker 缺失会在会话内 Bridge 执行阶段以 WorkerNotInstalled 失败，
+        // 已在 session 层统一处理；此处仅守 Browser 定时任务路径。
+        // 环境初始化可达分钟级：与取消令牌竞速，准备阶段即可被取消中断。
+        if source == LoginSource::Browser && !self.environment.capability_ready() {
+            tracing::info!("浏览器能力未就绪，尝试自动初始化环境...");
+            let init_result = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(self.cancelled_handle(source, profile.id.clone()).await);
+                }
+                r = self.environment.ensure_capability() => r,
+            };
+            if let Err(e) = init_result {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| e.to_string());
+                warn!("浏览器任务环境自动初始化失败: {detail}");
+                return Err(self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("浏览器能力未就绪，自动初始化失败: {detail}"),
+                        profile.id.clone(),
+                    )
+                    .await);
+            }
+            if !self.environment.capability_ready() {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| "未知原因".to_string());
+                warn!("环境初始化完成但仍未就绪: {detail}");
+                return Err(self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("浏览器能力未就绪（初始化后仍未就绪）: {detail}"),
+                        profile.id.clone(),
+                    )
+                    .await);
+            }
+            tracing::info!("浏览器任务环境自动初始化成功，继续执行登录");
+        }
+
+        // 手动登录同样自动初始化：未安装时直接拒绝会让全新安装用户无从操作。
+        // 复用同一 BootstrapGate，显式按钮与登录并发时只跑一次 uv sync。
+        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
+            && !self.environment.capability_ready()
+        {
+            tracing::info!("手动登录触发环境自动初始化...");
+            self.status.merge(crate::status::PartialSnapshot::Login {
+                status: crate::status::LoginStatus::Running,
+                source: Some(source),
+                message: Some("正在初始化 Python 环境...".into()),
+                retry_count: 0,
+            });
+            let init_result = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(self.cancelled_handle(source, profile.id.clone()).await);
+                }
+                r = self.environment.ensure_capability() => r,
+            };
+            if let Err(e) = init_result {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| e.to_string());
+                warn!("手动登录环境自动初始化失败: {detail}");
+                return Err(self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!(
+                            "环境未就绪，自动初始化失败: {detail}{}",
+                            Self::no_browser_hint()
+                        ),
+                        profile.id.clone(),
+                    )
+                    .await);
+            }
+            if !self.environment.capability_ready() {
+                let detail = self
+                    .environment
+                    .status()
+                    .last_error
+                    .unwrap_or_else(|| "未知原因".to_string());
+                // 与 Browser 分支的告警口径一致：环境初始化后仍未就绪直接失败，需留痕
+                warn!("环境初始化完成但仍未就绪: {detail}");
+                return Err(self
+                    .immediate_handle(
+                        source,
+                        false,
+                        format!("环境初始化后仍未就绪: {detail}{}", Self::no_browser_hint()),
+                        profile.id.clone(),
+                    )
+                    .await);
+            }
+            tracing::info!("手动登录环境自动初始化成功，继续执行登录");
+        }
+
+        // 1c. 浏览器可用性终验（环境引导兜底之后）：引导中新装好的 Chromium
+        // 纳入复检，命中则自动切换后继续；仍全无可用则直接失败，前端据文案
+        // 弹窗引导下载 Chromium，不再把缺浏览器误报成登录失败深埋日志。
+        if !browser::is_channel_available(
+            browser_override
+                .as_deref()
+                .unwrap_or(&rt.browser.browser_channel),
+            &rt.browser.browser_custom_path,
+        ) {
+            browser_override = self
+                .resolve_browser_channel(
+                    browser_override
+                        .as_deref()
+                        .unwrap_or(&rt.browser.browser_channel),
+                    &rt.browser.browser_custom_path,
+                )
+                .await;
+            if browser_override.is_none() {
+                warn!("无可用浏览器且环境引导未能提供，已拒绝登录");
+                return Err(self
+                    .immediate_handle(
+                        source,
+                        false,
+                        NO_BROWSER_MESSAGE.to_string(),
+                        profile.id.clone(),
+                    )
+                    .await);
+            }
+        }
+        Ok(browser_override)
+    }
+
+    /// auth_url TCP 预检（仅 manual / login_once；重定向模式跳过：触发器是
+    /// 公网 http，劫持下 TCP 必失败，交给 Worker 导航跟随 302）。
+    ///
+    /// 地址解析统一走 MonitorService 的单点实现（parse_url_host_port，
+    /// 支持 IPv6 方括号与裸地址），登录侧不再维护私有副本。
+    /// `Some(handle)` = 预检失败/取消携带的终态句柄；`None` = 通过或跳过。
+    async fn precheck_auth_url(
+        &self,
+        source: LoginSource,
+        profile: &ProfileSnapshot,
+        rt: &RuntimeConfig,
+        cancel_token: &CancellationToken,
+    ) -> Option<LoginHandle> {
+        if !(matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
+            && profile.trigger_url.is_empty())
+        {
+            return None;
+        }
+        let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
+        let reachable = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Some(self.cancelled_handle(source, profile.id.clone()).await);
+            }
+            r = self.monitor.check_auth_url(&profile.auth_url, timeout) => r,
+        };
+        if reachable {
+            return None;
+        }
+        warn!(
+            "认证地址预检不可达: {}（请检查认证地址是否正确、是否已连校园网）",
+            profile.auth_url
+        );
+        Some(
+            self.immediate_handle(
+                source,
+                false,
+                format!(
+                    "认证地址不可达: {}（请检查地址或校园网连接）",
+                    profile.auth_url
+                ),
+                profile.id.clone(),
+            )
+            .await,
+        )
+    }
+
+    /// 计数并 spawn 会话状态机 task（仅占据活跃槽位时调用）。
+    ///
+    /// 双层 spawn 保证 run() panic 时补写失败终态 + 清槽位 + 触发收尾通知，
+    /// 避免 await_result 永挂与自动登录静默失效（见内联注释）。
+    fn spawn_session_task(
+        &self,
+        session_id: u64,
+        source: LoginSource,
+        finished: Arc<tokio::sync::Notify>,
+        session: LoginSession,
+    ) {
+        if let Some(m) = &self.metrics {
+            m.inc_login();
+            self.status.merge(PartialSnapshot::Totals {
+                probe_total: m.probe_total.load(std::sync::atomic::Ordering::Relaxed),
+                login_total: m.login_total.load(std::sync::atomic::Ordering::Relaxed),
+            });
+        }
+        let state_arc = self.state.clone();
+        let finished_notifier = finished.clone();
+        tokio::spawn(async move {
+            // 内层独立 spawn：JoinHandle 不会像 watch channel 一样被句柄持有者
+            // "保活"——run() panic 时内层返回 Err，外层可据此补写终态。
+            // 直接 await run() 的话 panic 会跳过 notify/清槽位，且 handle 持有
+            // watch sender 使 channel 永不关闭 → await_result 永挂、
+            // auto_login_in_flight 恒 true，自动登录静默失效直到重启。
+            let run = tokio::spawn(async move {
+                session.run().await;
+            });
+            let panicked = run.await.is_err();
+            if panicked {
+                // panic 路径：run() 未写终态。在清槽位前从活跃会话取回 handle
+                // 补写失败结果，保证 await_result 必有返回
+                let g = state_arc.lock().await;
+                if matches!(&g.active_session, Some(a) if a.session_id == session_id) {
+                    if let Some(a) = &g.active_session {
+                        a.handle.inner.set_result(LoginResult {
+                            success: false,
+                            message: "登录会话内部异常，已中止".into(),
+                            source,
+                            duration: Duration::ZERO,
+                            attempts: 0,
+                        });
+                    }
+                    tracing::error!("登录会话 task panic，已补写失败终态");
+                }
+                drop(g);
+            }
+            // F6：run() 返回即全部收尾动作（含 emit 的 close_browser）完成，
+            // 触发通知供抢占方放行新会话；无等待者时存储许可，不丢失
+            finished_notifier.notify_one();
+            let mut g = state_arc.lock().await;
+            let should_clear = matches!(&g.active_session, Some(a) if a.session_id == session_id);
+            if should_clear {
+                g.active_session = None;
+            }
+        });
     }
 
     /// 等待被抢占的旧会话**完全收尾**（历史遗留 F6）
