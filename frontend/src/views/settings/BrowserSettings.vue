@@ -9,6 +9,7 @@ import FieldHelp from "@/components/common/FieldHelp.vue";
 import { browsersApi, configApi, workerApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import { frontendLogger } from "@/utils/logger";
+import { BROWSER_ARGS_DEFAULT } from "@/utils/constants";
 
 const config = useConfig();
 const router = useRouter();
@@ -103,6 +104,24 @@ async function loadDefaultStealthScript() {
     const data = await configApi.fetchStealthScript();
     config.config.browser.stealth_custom_script = data.script;
   } catch { /* */ }
+}
+
+/** 加载推荐启动参数：将 BROWSER_ARGS_DEFAULT 逐行并入现有输入（去重，
+ * 保留用户手写参数与注释行；后端默认为空不启用，点按钮才显式写入） */
+function loadRecommendedArgs() {
+  const current = config.config.browser.browser_args
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const seen = new Set(current);
+  for (const line of BROWSER_ARGS_DEFAULT.split("\n")) {
+    const flag = line.trim();
+    if (flag && !seen.has(flag)) {
+      seen.add(flag);
+      current.push(flag);
+    }
+  }
+  config.config.browser.browser_args = current.join("\n");
 }
 
 const pureMode = config.pureMode;
@@ -316,6 +335,7 @@ async function stopBrowser() {
           <div class="form-group">
             <div class="field-label-row"><label for="settings-browser-args">启动参数（Playwright args）</label><FieldHelp text="每行一个参数，附加到浏览器启动命令，# 开头为注释。--proxy-server、--load-extension、--remote-debugging-port 等安全敏感参数会被自动过滤；非 Chromium 引擎下 Chromium 专属参数不生效。" /></div>
             <textarea id="settings-browser-args" v-model="config.config.browser.browser_args" rows="4" class="settings-monospace-textarea" placeholder="每行一个，例如：--disable-notifications"></textarea>
+            <div class="form-row"><button type="button" class="btn btn-sm" title="将推荐反检测参数并入上方输入框（去重保留手写内容）" @click="loadRecommendedArgs">加载推荐参数</button></div>
           </div>
         </template>
       </div>
