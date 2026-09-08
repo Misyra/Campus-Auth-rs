@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::LlmSettings;
+use super::error::AiError;
 
 /// 空闲超时：连续无字节到达的判定阈值（10 分钟，只要还在输出就不超时）
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -31,37 +32,12 @@ const CHAT_MAX_RETRIES: u32 = 2;
 /// 流式回调：每收到一个增量 content 片段即调用
 pub type StreamCallback = Box<dyn FnMut(&str) + Send>;
 
-/// 流式消费错误：区分"换一次连接可能恢复"的传输层故障与重试无意义的内容层故障
-#[derive(Debug)]
-struct StreamError {
-    message: String,
-    /// true = 传输层抖动（空闲超时/连接中断/空响应），重试同请求通常可恢复；
-    /// false = 内容层故障（输出截断/用户取消/预算耗尽），重试只会重复同样结果
-    retryable: bool,
-}
-
-impl StreamError {
-    fn retryable(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retryable: true,
-        }
-    }
-
-    fn fatal(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retryable: false,
-        }
-    }
-}
-
 /// 执行一次 chat/completions，返回 assistant 文本（非流式，保留用于测试/回退）
 pub async fn chat_completion(
     settings: &LlmSettings,
     api_key: &str,
     messages: Vec<Value>,
-) -> Result<String, String> {
+) -> Result<String, AiError> {
     chat_completion_with_stream(settings, api_key, messages, None, None).await
 }
 
@@ -76,7 +52,7 @@ pub async fn chat_completion_with_stream(
     messages: Vec<Value>,
     mut on_delta: Option<StreamCallback>,
     cancel: Option<&CancellationToken>,
-) -> Result<String, String> {
+) -> Result<String, AiError> {
     let url = format!(
         "{}/chat/completions",
         settings.base_url.trim_end_matches('/')
@@ -105,14 +81,14 @@ pub async fn chat_completion_with_stream(
     let client = reqwest::Client::builder()
         .timeout(timeout_budget)
         .build()
-        .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
+        .map_err(|e| AiError::ClientBuild { source: e })?;
 
-    let mut last_err = String::new();
+    let mut last_err = AiError::Cancelled;
     for attempt in 0..=CHAT_MAX_RETRIES {
         if let Some(t) = cancel
             && t.is_cancelled()
         {
-            return Err("生成已取消".into());
+            return Err(AiError::Cancelled);
         }
         let mut req = client.post(&url).json(&payload);
         if !api_key.is_empty() {
@@ -127,7 +103,7 @@ pub async fn chat_completion_with_stream(
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                return Err("生成已取消".into());
+                return Err(AiError::Cancelled);
             }
             r = req.send() => r.map_err(|e| (e, cancel.is_some_and(|t| t.is_cancelled()))),
         };
@@ -137,17 +113,21 @@ pub async fn chat_completion_with_stream(
                 // 竞态：取消与 send 错误同到达时已响应取消兜底消息，
                 // 否则按原始错误类型可重试判定
                 if was_cancelled {
-                    return Err("生成已取消".into());
+                    return Err(AiError::Cancelled);
                 }
-                let retryable = e.is_timeout() || e.is_connect();
                 last_err = if e.is_timeout() {
-                    format!("LLM 请求超时（>{}s）", timeout_budget.as_secs())
+                    AiError::RequestTimeout {
+                        seconds: timeout_budget.as_secs(),
+                    }
                 } else if e.is_connect() {
-                    format!("无法连接 LLM 服务（{url}）: {e}")
+                    AiError::ConnectFailed {
+                        url: url.clone(),
+                        source: e,
+                    }
                 } else {
-                    format!("LLM 请求失败: {e}")
+                    AiError::RequestFailed { source: e }
                 };
-                if retryable && attempt < CHAT_MAX_RETRIES {
+                if last_err.is_retryable() && attempt < CHAT_MAX_RETRIES {
                     tracing::warn!(attempt = attempt + 1, "{last_err}，退避后重试");
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                     continue;
@@ -160,9 +140,8 @@ pub async fn chat_completion_with_stream(
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             let snippet: String = body.chars().take(500).collect();
-            last_err = format!("LLM 服务返回 {status}: {snippet}");
-            let retryable = status == 429 || status.is_server_error();
-            if retryable && attempt < CHAT_MAX_RETRIES {
+            last_err = AiError::LlmServiceError { status, snippet };
+            if last_err.is_retryable() && attempt < CHAT_MAX_RETRIES {
                 tracing::warn!(attempt = attempt + 1, "{last_err}，退避后重试");
                 tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                 continue;
@@ -173,13 +152,13 @@ pub async fn chat_completion_with_stream(
         if streaming {
             match stream_chat_response(resp, &mut on_delta, cancel).await {
                 Ok(text) => return Ok(text),
-                Err(e) if e.retryable && attempt < CHAT_MAX_RETRIES => {
-                    last_err = e.message;
-                    tracing::warn!(attempt = attempt + 1, "{last_err}，退避后重试");
+                Err(e) if e.is_retryable() && attempt < CHAT_MAX_RETRIES => {
+                    tracing::warn!(attempt = attempt + 1, "{e}，退避后重试");
+                    last_err = e;
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                     continue;
                 }
-                Err(e) => return Err(e.message),
+                Err(e) => return Err(e),
             }
         } else {
             let body = resp.text().await.unwrap_or_default();
@@ -194,7 +173,7 @@ async fn stream_chat_response(
     resp: reqwest::Response,
     on_delta: &mut Option<StreamCallback>,
     cancel: Option<&CancellationToken>,
-) -> Result<String, StreamError> {
+) -> Result<String, AiError> {
     let mut full = String::new();
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
@@ -209,7 +188,7 @@ async fn stream_chat_response(
     loop {
         // 总预算（10 分钟）硬上限：空闲预算会被数据不断刷新，此处兜底防"慢滴流"无限占用
         if tokio::time::Instant::now() >= deadline {
-            return Err(StreamError::fatal("LLM 流式响应总时长超出 10 分钟上限"));
+            return Err(AiError::TotalBudgetExceeded);
         }
         let remaining_idle = idle_deadline.saturating_duration_since(tokio::time::Instant::now());
         let remaining_total = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -224,24 +203,23 @@ async fn stream_chat_response(
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                return Err(StreamError::fatal("生成已取消"));
+                return Err(AiError::Cancelled);
             }
             waited = tokio::time::timeout(wait, stream.next()) => match waited {
                 Ok(Some(Ok(bytes))) => bytes,
                 Ok(Some(Err(e))) => {
-                    return Err(StreamError::retryable(format!("LLM 流式传输失败: {e}")));
+                    return Err(AiError::StreamInterrupted(e));
                 }
                 // 流自然结束（服务端关闭连接）：跳出外层循环，进入收尾解析
                 Ok(None) => break,
                 Err(_) => {
                     // 超时赛道：区分空闲超时（连接可能还活着，可重试）与总预算耗尽（致命）
                     if tokio::time::Instant::now() >= idle_deadline {
-                        return Err(StreamError::retryable(format!(
-                            "LLM 流式空闲超时（>{}s 无输出），请检查网络或稍后重试",
-                            IDLE_TIMEOUT.as_secs()
-                        )));
+                        return Err(AiError::IdleTimeout {
+                            seconds: IDLE_TIMEOUT.as_secs(),
+                        });
                     }
-                    return Err(StreamError::fatal("LLM 流式响应总时长超出 10 分钟上限"));
+                    return Err(AiError::TotalBudgetExceeded);
                 }
             },
         };
@@ -280,9 +258,7 @@ async fn stream_chat_response(
                     // 与其让下游解析半截产物再报隐晦错误，不如立即致命失败并给出
                     // 可操作提示（简化描述 / 调大 max_tokens）
                     if fr == "length" {
-                        return Err(StreamError::fatal(
-                            "LLM 输出被 max_tokens 截断（finish_reason=length），任务 JSON 不完整；请简化任务描述或调大 llm.json 的 max_tokens 后重试",
-                        ));
+                        return Err(AiError::Truncated);
                     }
                     // 其余非空 finish_reason（如 stop）记录下来，收尾时统一复核
                     if !fr.is_empty() && fr != "null" {
@@ -338,29 +314,23 @@ async fn stream_chat_response(
     }
     // 全程未产出任何文本：按可重试失败处理（让上层换连接重试），而非静默返回空串
     if full.is_empty() {
-        return Err(StreamError::retryable(
-            "LLM 流式响应为空（未收到任何增量内容）",
-        ));
+        return Err(AiError::EmptyStream);
     }
     // 收尾双保险：即使逐行路径因宽松解析漏过 length 事件，也不允许截断产物被当成功返回
     if last_finish_reason.as_deref() == Some("length") {
-        return Err(StreamError::fatal(
-            "LLM 输出被 max_tokens 截断（finish_reason=length），任务 JSON 不完整；请简化任务描述或调大 llm.json 的 max_tokens 后重试",
-        ));
+        return Err(AiError::Truncated);
     }
     Ok(full)
 }
 
 /// 解析 OpenAI 兼容响应体，提取 `choices[0].message.content`
-fn parse_chat_response(body: &str) -> Result<String, String> {
-    let v: Value = serde_json::from_str(body).map_err(|e| format!("LLM 响应不是合法 JSON: {e}"))?;
+fn parse_chat_response(body: &str) -> Result<String, AiError> {
+    let v: Value = serde_json::from_str(body)?;
     if v.pointer("/choices/0/finish_reason")
         .and_then(Value::as_str)
         == Some("length")
     {
-        return Err(
-            "LLM 输出被 max_tokens 截断（finish_reason=length），任务 JSON 不完整；请简化任务描述后重试".into(),
-        );
+        return Err(AiError::Truncated);
     }
     let content = v
         .pointer("/choices/0/message/content")
@@ -379,10 +349,9 @@ fn parse_chat_response(body: &str) -> Result<String, String> {
             })
             .unwrap_or_default();
         if joined.is_empty() {
-            return Err(format!(
-                "LLM 响应缺少 choices[0].message.content: {}",
-                body.chars().take(300).collect::<String>()
-            ));
+            return Err(AiError::MissingContent {
+                snippet: body.chars().take(300).collect(),
+            });
         }
         return Ok(joined);
     }
@@ -415,6 +384,6 @@ mod tests {
     fn test_parse_chat_response_truncated_reports_reason() {
         let body = r#"{"choices":[{"message":{"content":"{\"name\":"},"finish_reason":"length"}]}"#;
         let err = parse_chat_response(body).unwrap_err();
-        assert!(err.contains("截断"), "actual: {err}");
+        assert!(matches!(err, AiError::Truncated), "actual: {err}");
     }
 }

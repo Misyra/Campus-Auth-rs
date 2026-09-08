@@ -161,6 +161,37 @@ impl IntoResponse for ApiError {
 
 // ---- 各服务错误 → ApiError 自动转换 ----
 
+impl From<crate::ai::AiError> for ApiError {
+    fn from(e: crate::ai::AiError) -> Self {
+        use crate::ai::AiError as A;
+        match &e {
+            // 传输层/远端故障：上游不可用
+            A::RequestTimeout { .. }
+            | A::ConnectFailed { .. }
+            | A::IdleTimeout { .. }
+            | A::EmptyStream
+            | A::StreamInterrupted(_) => ApiError::ServiceUnavailable(e.to_string()),
+            A::LlmServiceError { status, .. } if status.is_server_error() => {
+                ApiError::ServiceUnavailable(e.to_string())
+            }
+            // 远端 4xx（含 429 限流）：透传原文，前端已可读
+            A::LlmServiceError { .. } => ApiError::BadRequest(e.to_string()),
+            // 自纠轮耗尽：任务校验语义，按 422 携带错误列表
+            A::ValidationExhausted { errors, .. } => ApiError::Validation(
+                errors
+                    .iter()
+                    .map(|m| FieldError {
+                        field: "task".into(),
+                        message: m.clone(),
+                    })
+                    .collect(),
+            ),
+            // 其余（取消/截断/解析/配置）沿用既有 400 语义，与收敛前一致
+            _ => ApiError::BadRequest(e.to_string()),
+        }
+    }
+}
+
 impl From<crate::config::ConfigError> for ApiError {
     fn from(e: crate::config::ConfigError) -> Self {
         match e {
@@ -372,6 +403,57 @@ mod tests {
         assert_eq!(body["error"]["code"], "BAD_REQUEST");
         assert_eq!(body["error"]["message"], "参数错误");
         assert!(body.get("success").is_none(), "禁止 success 字段");
+    }
+
+    /// 服务错误自动转换：AiError 状态码细分
+    ///
+    /// 传输层故障（超时/建连/空闲/中断/空流/远端 5xx）→ 503；
+    /// 自纠轮耗尽 → 422（携带错误列表为 details）；其余沿用既有 400。
+    #[test]
+    fn test_from_ai_error() {
+        use crate::ai::AiError;
+        use axum::http::StatusCode;
+
+        let e: ApiError = AiError::RequestTimeout { seconds: 120 }.into();
+        assert_eq!(e.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(e.message().contains("LLM 请求超时"));
+
+        let e: ApiError = AiError::LlmServiceError {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            snippet: String::new(),
+        }
+        .into();
+        assert_eq!(e.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let e: ApiError = AiError::LlmServiceError {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            snippet: String::new(),
+        }
+        .into();
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+
+        // ChatAttemptFailed 包裹层不透出内部类型：沿用既有 400 语义
+        let e: ApiError = AiError::ChatAttemptFailed {
+            attempt: 1,
+            source: Box::new(AiError::RequestTimeout { seconds: 120 }),
+        }
+        .into();
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+
+        let e: ApiError = AiError::ValidationExhausted {
+            max_attempts: 2,
+            errors: vec!["name 不能为空".into()],
+        }
+        .into();
+        assert_eq!(e.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            e.details().is_some(),
+            "耗尽错误应携带任务校验明细，实际 {e:?}"
+        );
+
+        let e: ApiError = AiError::Truncated.into();
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+        assert!(e.message().contains("截断"));
     }
 
     /// 服务错误自动转换：ConfigError 代表性分支

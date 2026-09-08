@@ -3,6 +3,7 @@
 //! 由登录页捕获产物（`captures/latest/`）+ 任务 schema 提示词驱动视觉模型
 //! 生成浏览器任务 JSON，经任务强校验回喂自纠后返回前端预览入库。
 
+pub mod error;
 pub mod generate;
 pub mod llm;
 pub mod prompt;
@@ -13,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::crypto::{PasswordCrypto, default_key_path};
 use crate::utils::io::atomic_write_json;
+
+pub use error::AiError;
 
 /// LLM 配置文件名（位于 `<base>/config/` 下，与 settings.json 同级）
 const LLM_CONFIG_FILE: &str = "llm.json";
@@ -97,20 +100,20 @@ pub fn decrypt_api_key(
 /// - 仅允许 `http` / `https`（http 放行任意 host：本地 Ollama / LM Studio 走回环/私网）
 /// - 拒绝带 userinfo 的 URL（`https://key@host` 形式会把凭据写进配置明文区）
 /// - host 非空
-pub fn validate_base_url(raw: &str) -> Result<String, String> {
+pub fn validate_base_url(raw: &str) -> Result<String, AiError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err("Base URL 不能为空".to_string());
+        return Err(AiError::BaseUrlEmpty);
     }
-    let url = url::Url::parse(trimmed).map_err(|e| format!("Base URL 格式无效: {e}"))?;
+    let url = url::Url::parse(trimmed)?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err("Base URL 仅支持 http/https".to_string());
+        return Err(AiError::BaseUrlUnsupportedScheme);
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("Base URL 不允许携带用户名/密码（请把 key 填在 API Key 输入框）".to_string());
+        return Err(AiError::BaseUrlUserInfoForbidden);
     }
     if url.host_str().map(str::is_empty).unwrap_or(true) {
-        return Err("Base URL 缺少主机名".to_string());
+        return Err(AiError::BaseUrlMissingHost);
     }
     let mut normalized = url.as_str().to_string();
     // Url::as_str 保留 path 与结尾斜杠语义；统一去掉结尾 "/"（拼接 /chat/completions 前再处理）

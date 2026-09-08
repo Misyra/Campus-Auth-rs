@@ -70,7 +70,7 @@ pub async fn put_llm_config(
     if model.is_empty() {
         return Err(ApiError::BadRequest("模型名不能为空".into()));
     }
-    let base_url = ai::validate_base_url(base_url_raw).map_err(ApiError::BadRequest)?;
+    let base_url = ai::validate_base_url(base_url_raw)?;
 
     let base = config.base_path();
     let mut settings = ai::load_llm_settings(&base);
@@ -246,8 +246,7 @@ pub async fn generate(
     let outcome = crate::ai::generate::generate_with(&ctx.0, extra_prompt, validate, |messages| {
         crate::ai::llm::chat_completion(&settings, &api_key, messages)
     })
-    .await
-    .map_err(ApiError::BadRequest)?;
+    .await?;
 
     let mut all_warnings = warnings;
     all_warnings.extend(outcome.warnings);
@@ -413,10 +412,11 @@ pub async fn generate_stream(
                 let _ = forward_handle.await;
             }
             Err(e) => {
-                shared
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(crate::ai::generate::StreamEvent::Error { message: e.clone() });
+                shared.lock().unwrap_or_else(|p| p.into_inner()).push(
+                    crate::ai::generate::StreamEvent::Error {
+                        message: e.to_string(),
+                    },
+                );
                 let _ = forward_handle.await;
             }
         }

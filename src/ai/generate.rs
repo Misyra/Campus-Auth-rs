@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 
+use super::error::AiError;
 use super::prompt::{self, CaptureContext};
 
 /// 校验失败时最多追加一轮自纠对话（共两次生成）
@@ -25,7 +26,7 @@ pub struct GenerateOutcome {
 ///
 /// 鲁棒性策略：优先剥 ```json 围栏；无围栏时取首个 `{` 到最后一个 `}` 的片段
 /// （容忍模型在 JSON 前后夹杂简短说明）。
-pub fn extract_json(text: &str) -> Result<Value, String> {
+pub fn extract_json(text: &str) -> Result<Value, AiError> {
     let candidate = extract_candidate(text);
     // 第一优先：整体/围栏片段直接解析
     if let Ok(v) = serde_json::from_str::<Value>(candidate) {
@@ -39,10 +40,9 @@ pub fn extract_json(text: &str) -> Result<Value, String> {
             }
         }
     }
-    Err(format!(
-        "无法从模型输出中提取 JSON（输出前 200 字符: {}）",
-        text.chars().take(200).collect::<String>()
-    ))
+    Err(AiError::ExtractJsonFailed {
+        snippet: text.chars().take(200).collect(),
+    })
 }
 
 /// 抽取候选串：剥 markdown 围栏后 trim
@@ -69,12 +69,12 @@ pub async fn generate_with<V, Fut, C, CFut>(
     extra_prompt: Option<&str>,
     validate: V,
     chat: C,
-) -> Result<GenerateOutcome, String>
+) -> Result<GenerateOutcome, AiError>
 where
     V: Fn(&Value) -> Fut,
     Fut: std::future::Future<Output = Result<(), Vec<String>>>,
     C: Fn(Vec<Value>) -> CFut,
-    CFut: std::future::Future<Output = Result<String, String>>,
+    CFut: std::future::Future<Output = Result<String, AiError>>,
 {
     let mut messages = prompt::build_messages(ctx, extra_prompt);
     let mut warnings = Vec::new();
@@ -83,7 +83,10 @@ where
     for attempt in 1..=MAX_ATTEMPTS {
         let text = chat(messages.clone())
             .await
-            .map_err(|e| format!("第 {attempt} 轮生成失败: {e}"))?;
+            .map_err(|e| AiError::ChatAttemptFailed {
+                attempt,
+                source: Box::new(e),
+            })?;
         let task = extract_json(&text)?;
         match validate(&task).await {
             Ok(()) => {
@@ -103,10 +106,10 @@ where
         }
     }
 
-    Err(format!(
-        "连续 {MAX_ATTEMPTS} 轮生成均未通过任务校验，最后错误：\n{}",
-        last_errors.join("\n")
-    ))
+    Err(AiError::ValidationExhausted {
+        max_attempts: MAX_ATTEMPTS,
+        errors: last_errors,
+    })
 }
 
 /// 流式生成编排：与 `generate_with` 同步义，但 LLM 调用以流式增量回调推送
@@ -122,12 +125,12 @@ pub async fn generate_with_stream<V, Fut, C, CFut>(
     validate: V,
     chat_stream: C,
     on_progress: std::sync::Arc<std::sync::Mutex<Vec<StreamEvent>>>,
-) -> Result<GenerateOutcome, String>
+) -> Result<GenerateOutcome, AiError>
 where
     V: Fn(&Value) -> Fut,
     Fut: std::future::Future<Output = Result<(), Vec<String>>>,
     C: Fn(Vec<Value>, Box<dyn FnMut(&str) + Send + 'static>) -> CFut,
-    CFut: std::future::Future<Output = Result<String, String>>,
+    CFut: std::future::Future<Output = Result<String, AiError>>,
 {
     let mut messages = prompt::build_messages(ctx, extra_prompt);
     let mut warnings = Vec::new();
@@ -158,7 +161,10 @@ where
             }),
         )
         .await
-        .map_err(|e| format!("第 {attempt} 轮生成失败: {e}"))?;
+        .map_err(|e| AiError::ChatAttemptFailed {
+            attempt,
+            source: Box::new(e),
+        })?;
         push(StreamEvent::AttemptDeltaDone {
             attempt,
             text_len: text.len(),
@@ -191,14 +197,10 @@ where
         }
     }
 
-    Err(format!(
-        "连续 {MAX_ATTEMPTS} 轮生成均未通过任务校验，最后错误：
-{}",
-        last_errors.join(
-            "
-"
-        )
-    ))
+    Err(AiError::ValidationExhausted {
+        max_attempts: MAX_ATTEMPTS,
+        errors: last_errors,
+    })
 }
 
 /// 流式进度事件（序列化为 SSE `data:` 帧）
@@ -310,7 +312,7 @@ mod tests {
             |_v| async { Ok(()) },
             move |_messages| {
                 let t = task.clone();
-                async move { Ok(t.to_string()) }
+                async move { Ok::<String, AiError>(t.to_string()) }
             },
         )
         .await
@@ -327,32 +329,35 @@ mod tests {
         let good = valid_task();
         let call = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let call2 = call.clone();
-        let outcome = generate_with(
-            &ctx(),
-            None,
-            |v: &Value| {
-                let empty_name = v
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::is_empty)
-                    .unwrap_or(true);
-                async move {
-                    if empty_name {
-                        Err(vec!["name 不能为空".to_string()])
-                    } else {
-                        Ok(())
+        let outcome =
+            generate_with(
+                &ctx(),
+                None,
+                |v: &Value| {
+                    let empty_name = v
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::is_empty)
+                        .unwrap_or(true);
+                    async move {
+                        if empty_name {
+                            Err(vec!["name 不能为空".to_string()])
+                        } else {
+                            Ok(())
+                        }
                     }
-                }
-            },
-            move |_messages| {
-                let n = call2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let b = bad.clone();
-                let g = good.clone();
-                async move { Ok(if n == 0 { b.to_string() } else { g.to_string() }) }
-            },
-        )
-        .await
-        .unwrap();
+                },
+                move |_messages| {
+                    let n = call2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let b = bad.clone();
+                    let g = good.clone();
+                    async move {
+                        Ok::<String, AiError>(if n == 0 { b.to_string() } else { g.to_string() })
+                    }
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(outcome.attempts, 2);
         assert!(!outcome.warnings.is_empty());
         assert_eq!(outcome.task["name"], "测试登录");
@@ -367,13 +372,22 @@ mod tests {
             |_v| async { Err(vec!["name 不能为空".to_string()]) },
             move |_messages| {
                 let b = bad.clone();
-                async move { Ok(b.to_string()) }
+                async move { Ok::<String, AiError>(b.to_string()) }
             },
         )
         .await;
         let err = result.unwrap_err();
-        assert!(err.contains("name 不能为空"), "{err}");
-        assert!(err.contains("连续 2 轮"), "{err}");
+        assert!(
+            matches!(
+                err,
+                AiError::ValidationExhausted {
+                    max_attempts: 2,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().contains("name 不能为空"), "{err}");
     }
 
     #[tokio::test]
@@ -382,10 +396,19 @@ mod tests {
             &ctx(),
             None,
             |_v| async { Ok(()) },
-            |_messages| async { Err("LLM 服务返回 401".to_string()) },
+            |_messages| async {
+                Err::<String, AiError>(AiError::LlmServiceError {
+                    status: reqwest::StatusCode::UNAUTHORIZED,
+                    snippet: "unauthorized".into(),
+                })
+            },
         )
         .await
         .unwrap_err();
-        assert!(result.contains("401"));
+        assert!(
+            matches!(result, AiError::ChatAttemptFailed { attempt: 1, .. }),
+            "应包装轮次上下文，实际 {result:?}"
+        );
+        assert!(result.to_string().contains("401"));
     }
 }

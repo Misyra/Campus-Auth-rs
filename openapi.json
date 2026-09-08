@@ -3641,7 +3641,15 @@
       }
      },
      "400": {
-      "description": "Bad Request（未配置/未捕获/校验失败）",
+      "description": "Bad Request（未配置/未捕获/解析或截断失败）",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "自纠轮耗尽仍未通过任务校验（错误列表见 VALIDATION_ERROR details）",
       "content": {
        "application/json": {
         "schema": {}
@@ -3650,6 +3658,14 @@
      },
      "500": {
       "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "503": {
+      "description": "LLM 上游不可用（超时/建连失败/空闲超时/远端 5xx）",
       "content": {
        "application/json": {
         "schema": {}
