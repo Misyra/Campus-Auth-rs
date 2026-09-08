@@ -7,6 +7,7 @@
  *
  * 列表为左右分栏：左侧任务条目（含 64px 缩略图），点选后右侧展示
  * 截图大图与完整信息；无 screenshot 定义的任务显示「暂无截图」占位。
+ * 详情区大图可点击放大（三层弹窗：导入列表 > 放大预览，免责声明互斥）。
  * 缩略图/大图均经 /api/repo/image 同源代理（免鉴权 `<img>` 引用口径，
  * 出站限死任务站 raw 域），加载失败回退占位而非破图。
  */
@@ -43,10 +44,33 @@ function markImageBroken(taskId: string): void {
   brokenImages.value = new Set(brokenImages.value).add(taskId);
 }
 
-// 切换索引/重新加载后旧失败标记失效，清空避免误占位
+/** 放大预览的截图地址（空即关闭）：详情区大图点选后全尺寸查看 */
+const previewShot = ref("");
+const previewTitle = ref("");
+
+/** 打开截图放大预览 */
+function openShotPreview(url: string, taskName: string): void {
+  previewShot.value = url;
+  previewTitle.value = `${taskName} · 登录页截图`;
+}
+
+/** 关闭截图放大预览 */
+function closeShotPreview(): void {
+  previewShot.value = "";
+  previewTitle.value = "";
+}
+
+// 主弹窗关闭时放大预览一起关，避免预览窗单独悬空
+watch(
+  () => repo.repoImport.value.visible,
+  (visible) => {
+    if (!visible) closeShotPreview();
+  },
+);
 watch(
   () => repo.repoImport.value.tasks,
   () => {
+    // 切换索引/重新加载后旧失败标记失效，清空避免误占位
     brokenImages.value = new Set<string>();
     // 列表刷新后旧点选可能已不在结果中，清空详情避免展示过期任务
     const selected = repo.repoImport.value.selected;
@@ -116,8 +140,12 @@ watch(
               :src="selectedScreenshotUrl"
               :alt="`${repo.repoImport.value.selected.name} 登录页截图`"
               loading="lazy"
+              class="repo-detail-shot-img"
+              title="点击放大查看"
+              @click="openShotPreview(selectedScreenshotUrl, repo.repoImport.value.selected.name)"
               @error="markImageBroken(repo.repoImport.value.selected.id)"
             />
+            <span class="repo-detail-zoom-hint">点击放大</span>
           </div>
           <div v-else class="repo-detail-empty">暂无截图</div>
           <div class="repo-detail-actions">
@@ -140,6 +168,13 @@ watch(
     <div class="repo-disclaimer-actions">
       <button class="btn btn-secondary" @click="repo.cancelRepoDisclaimer()">取消</button>
       <button class="btn btn-primary" @click="repo.acceptRepoDisclaimer()">确认导入</button>
+    </div>
+  </Modal>
+
+  <!-- 截图放大预览：复用 Modal，大图可滚动查看原图 -->
+  <Modal :open="!!previewShot" :title="previewTitle" size="xl" @close="closeShotPreview">
+    <div class="repo-shot-preview">
+      <img :src="previewShot" :alt="previewTitle" />
     </div>
   </Modal>
 </template>
@@ -170,8 +205,12 @@ watch(
 .repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
 .repo-detail-name { font-size: var(--text-md); font-weight: 600; }
 .repo-detail-desc { font-size: var(--text-sm); color: var(--text-secondary); }
-.repo-detail-shot { border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); }
+.repo-detail-shot { position: relative; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); }
 .repo-detail-shot img { width: 100%; display: block; }
+.repo-detail-shot-img { cursor: zoom-in; }
+.repo-detail-zoom-hint { position: absolute; right: 8px; bottom: 8px; padding: 2px 8px; border-radius: var(--radius-xs); font-size: var(--text-xs); color: var(--text-secondary); background: var(--bg-modal); border: 1px solid var(--border); pointer-events: none; }
+.repo-shot-preview { max-height: 70vh; overflow: auto; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.repo-shot-preview img { width: 100%; display: block; }
 .repo-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 120px; color: var(--text-tertiary); font-size: var(--text-sm); background: var(--bg-hover); border-radius: var(--radius-sm); }
 .repo-detail-actions { display: flex; justify-content: flex-end; }
 .repo-import-empty { text-align: center; color: var(--text-tertiary); padding: 24px; }
