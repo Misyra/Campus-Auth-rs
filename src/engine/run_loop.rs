@@ -29,7 +29,7 @@ const COOLING_DOWN_THRESHOLD: u32 = 3;
 /// 冷却期持续时间（秒）
 const COOLING_DOWN_DURATION_SECS: u64 = 300;
 /// 自适应探测的异常态周期（秒）：CaptivePortal/Offline 状态下的探测间隔。
-/// 断网感知延迟从最差一个 check_interval（默认 300s）降到此值
+/// 断网感知延迟从最差一个 check_interval（默认 120s）降到此值
 const PROBE_ONLINE_BACKOFF_BASE_SECS: u64 = 30;
 
 /// 后台探测任务的回传消息
@@ -573,9 +573,13 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
         ProbeMessage::Report(r, _) => r,
         ProbeMessage::Failed(e, _) => {
             tracing::warn!("网络探测执行失败: {}", e);
-            // 归还被消费的补发标记：探测执行失败不应吞掉排队中的"立即探测"请求，
-            // 否则优先级检测静默丢失，只能等下一个常规周期
-            inner.probe_pending |= pending;
+            // 失败也要消费并立即执行排队的优先级检测；仅归还标记会因本分支提前
+            // 返回而无人消费，最终仍要等下一个常规周期。不要重新置 pending，
+            // 否则下一轮结果会额外触发一次无意义探测。
+            if pending && inner.monitoring && !is_any_pause_active(inner, deps) {
+                tracing::debug!("补发排队的优先级探测");
+                handle_network_check(inner, deps);
+            }
             return;
         }
     };
@@ -848,10 +852,13 @@ fn is_in_pause_window(
     }
 }
 
-/// 网络检查间隔（从 RuntimeConfig 读取）
+/// 网络检查间隔（从 RuntimeConfig 读取，钳制到 20~1200s，见 [`crate::engine::CHECK_INTERVAL_MIN`]）
 fn check_interval_duration(deps: &EngineDeps) -> Duration {
     let secs = deps.config_service.runtime().load().monitor.check_interval as u64;
-    Duration::from_secs(secs.max(1))
+    Duration::from_secs(secs.clamp(
+        crate::engine::CHECK_INTERVAL_MIN,
+        crate::engine::CHECK_INTERVAL_MAX,
+    ))
 }
 
 /// 按探测结果计算下一次探测间隔（自适应，纯函数）

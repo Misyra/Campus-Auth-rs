@@ -44,9 +44,9 @@ const urlCheckText = computed({
           <div class="form-group">
             <div class="field-label-row">
               <label for="settings-interval">检测间隔（秒）</label>
-              <FieldHelp text="两次网络检测之间的间隔。过短增加资源消耗，过长延迟断线发现。建议 180~600 秒，默认 300 秒。" />
+              <FieldHelp text="两次网络检测之间的间隔。过短增加资源消耗，过长延迟断线发现。建议 60~300 秒，默认 120 秒（后端钳制 20~1200 秒）。" />
             </div>
-            <input id="settings-interval" v-model.number="config.config.monitor.check_interval_seconds" type="number" min="10" max="86400" />
+            <input id="settings-interval" v-model.number="config.config.monitor.check_interval_seconds" type="number" min="20" max="1200" />
           </div>
           <div class="form-group">
             <div class="field-label-row">

@@ -70,7 +70,7 @@ pub struct BrowserSettings {
     pub custom_browser_engine: String,
     /// 是否使用持久化上下文（保留登录态）
     pub persistent_context: bool,
-    /// 纯净模式（禁用扩展）
+    /// 纯净模式（禁用扩展，默认开启）
     pub pure_mode: bool,
     /// 隐身模式
     pub stealth_mode: bool,
@@ -114,7 +114,7 @@ impl Default for BrowserSettings {
             browser_custom_path: String::new(),
             custom_browser_engine: "chromium".to_string(),
             persistent_context: false,
-            pure_mode: false,
+            pure_mode: true,
             stealth_mode: false,
             stealth_custom_script: String::new(),
             low_resource_mode: false,
@@ -142,7 +142,7 @@ impl Default for BrowserSettings {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct MonitorSettings {
-    /// 探测间隔（秒）
+    /// 探测间隔（秒，默认 120；Engine 消费时钳制到 20~1200）
     pub check_interval: u32,
     /// TCP 探测目标列表（host:port）
     pub tcp_targets: Vec<String>,
@@ -193,7 +193,7 @@ impl Default for MonitorSettings {
             "Microsoft Connect Test".to_string(),
         );
         Self {
-            check_interval: 300,
+            check_interval: 120,
             tcp_targets: vec![
                 "8.8.8.8:53".to_string(),
                 "114.114.114.114:53".to_string(),
@@ -215,10 +215,10 @@ impl Default for MonitorSettings {
             url_expected_responses,
             tcp_enabled: false,
             // 默认仅启用 204 门户检测：204 端点语义单一（204=在线/200=劫持），厂商覆盖广，
-            // 是误判率最低的单探测方案；URL 内容探测与 TCP 探测默认关闭，按需启用
+            // 是误判率最低的单探测方案；URL 内容探测、TCP 探测与网卡检查默认关闭，按需启用
             http_enabled: true,
             url_enabled: false,
-            local_check_enabled: true,
+            local_check_enabled: false,
             disable_proxy: true,
             profile_check_interval: 180,
             tcp_timeout: 2,

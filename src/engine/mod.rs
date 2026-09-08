@@ -22,7 +22,7 @@ use crate::status::StatusManager;
 /// mpsc channel 容量
 pub const CMD_CHANNEL_CAPACITY: usize = 64;
 /// 网络检查默认间隔（秒）
-pub const DEFAULT_CHECK_INTERVAL_SECS: u64 = 300;
+pub const DEFAULT_CHECK_INTERVAL_SECS: u64 = 120;
 /// Profile 切换检测默认间隔（秒）
 pub const DEFAULT_PROFILE_CHECK_INTERVAL_SECS: u64 = 180;
 /// 无事件时最大休眠时间（秒）
@@ -35,6 +35,10 @@ pub const RESTART_DELAY_SECS: u64 = 5;
 pub const PROFILE_CHECK_INTERVAL_MIN: u64 = 60;
 /// profile_check_interval 配置上限（秒）
 pub const PROFILE_CHECK_INTERVAL_MAX: u64 = 600;
+/// check_interval 配置下限（秒）：稳态探测再密也越不过异常态的 30s 固定探测，下限防误配
+pub const CHECK_INTERVAL_MIN: u64 = 20;
+/// check_interval 配置上限（秒）：高于此值断线感知过慢
+pub const CHECK_INTERVAL_MAX: u64 = 1200;
 
 /// 引擎相关错误
 #[derive(Debug, thiserror::Error)]
