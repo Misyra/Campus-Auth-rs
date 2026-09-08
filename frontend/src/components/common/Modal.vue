@@ -9,7 +9,7 @@ const props = withDefaults(
   defineProps<{
     open: boolean;
     title?: string;
-    size?: "default" | "lg";
+    size?: "default" | "lg" | "xl";
     /** 是否允许点击遮罩关闭（默认 true；免责声明等需显式操作的场景设为 false） */
     closeOnOverlay?: boolean;
     /** 是否允许 ESC 键关闭（默认 true；调试面板等误触代价高的场景设为 false） */
@@ -89,7 +89,7 @@ watch(
         <div
           ref="containerRef"
           class="modal-container"
-          :class="{ 'modal-lg': size === 'lg' }"
+          :class="{ 'modal-lg': size === 'lg', 'modal-xl': size === 'xl' }"
           role="dialog"
           aria-modal="true"
           @keydown="onTrapKeydown"

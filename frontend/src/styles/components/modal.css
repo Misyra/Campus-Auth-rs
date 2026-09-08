@@ -30,6 +30,12 @@
   max-width: 720px;
 }
 
+/* 仓库导入等左右分栏弹窗：lg 下双栏被挤窄，xl 放宽到接近全宽 */
+.modal-container.modal-xl {
+  max-width: 1080px;
+  width: 94%;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;

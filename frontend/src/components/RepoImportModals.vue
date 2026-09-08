@@ -33,6 +33,11 @@ function thumbUrl(taskId: string, screenshot?: string): string {
   return repoApi.screenshotUrl(shot);
 }
 
+/** 是否官方任务：作者为项目维护者 Misyra（任务站默认索引的维护者署名） */
+function isOfficialTask(author?: string): boolean {
+  return author?.trim().toLowerCase() === "misyra";
+}
+
 /** 标记某任务截图加载失败，缩略图与大图同步回退占位 */
 function markImageBroken(taskId: string): void {
   brokenImages.value = new Set(brokenImages.value).add(taskId);
@@ -53,7 +58,7 @@ watch(
 </script>
 
 <template>
-  <Modal :open="repo.repoImport.value.visible" title="从云端仓库导入任务" size="lg" @close="repo.closeRepoImport">
+  <Modal :open="repo.repoImport.value.visible" title="从云端仓库导入任务" size="xl" @close="repo.closeRepoImport">
     <div class="repo-import-source">
       <span class="repo-source-label">源：</span>
       <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'github' }" @click="repo.selectRepoSource('github')">GitHub</button>
@@ -86,7 +91,10 @@ watch(
           </div>
           <div v-else class="repo-item-thumb repo-item-thumb-empty">暂无截图</div>
           <div class="repo-item-text">
-            <div class="repo-item-name">{{ task.name }}</div>
+            <div class="repo-item-name">
+              {{ task.name }}
+              <span v-if="isOfficialTask(task.author)" class="repo-item-official">官方任务</span>
+            </div>
             <div class="repo-item-desc">{{ task.description }}</div>
             <div class="repo-item-meta">
               <span v-if="task.author" class="repo-item-author">{{ task.author }}</span>
@@ -98,7 +106,10 @@ watch(
       </div>
       <div class="repo-import-detail">
         <template v-if="repo.repoImport.value.selected">
-          <h4 class="repo-detail-name">{{ repo.repoImport.value.selected.name }}</h4>
+          <h4 class="repo-detail-name">
+            {{ repo.repoImport.value.selected.name }}
+            <span v-if="isOfficialTask(repo.repoImport.value.selected.author)" class="repo-item-official">官方任务</span>
+          </h4>
           <p class="repo-detail-desc">{{ repo.repoImport.value.selected.description }}</p>
           <div v-if="selectedScreenshotUrl && !brokenImages.has(repo.repoImport.value.selected.id)" class="repo-detail-shot">
             <img
@@ -144,7 +155,7 @@ watch(
 .repo-import-search { margin-bottom: 12px; }
 .repo-import-search .input { width: 100%; }
 .repo-import-body { display: flex; gap: 12px; min-height: 0; }
-.repo-import-list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; }
+.repo-import-list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; }
 .repo-import-item { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: background var(--dur-fast) var(--ease-out); }
 .repo-import-item:hover { background: var(--bg-hover); }
 .repo-import-item.selected { border-color: var(--accent); }
@@ -153,9 +164,10 @@ watch(
 .repo-item-thumb-empty { display: flex; align-items: center; justify-content: center; font-size: var(--text-xs); color: var(--text-tertiary); text-align: center; padding: 4px; }
 .repo-item-text { flex: 1; min-width: 0; }
 .repo-item-name { font-weight: 600; }
+.repo-item-official { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-xs); font-size: var(--text-xs); font-weight: 500; background: rgba(var(--success-rgb), 0.15); color: var(--success); vertical-align: middle; }
 .repo-item-desc { font-size: var(--text-sm); color: var(--text-secondary); margin-top: 2px; }
 .repo-item-meta { display: flex; gap: 12px; margin-top: 6px; font-size: var(--text-xs); color: var(--text-tertiary); }
-.repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; }
+.repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
 .repo-detail-name { font-size: var(--text-md); font-weight: 600; }
 .repo-detail-desc { font-size: var(--text-sm); color: var(--text-secondary); }
 .repo-detail-shot { border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); }
