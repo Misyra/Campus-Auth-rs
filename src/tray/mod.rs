@@ -364,14 +364,15 @@ fn run_os_thread(
         }
     }));
 
-    // 阻塞等待泵任务 / Drop 发来的命令（退出或刷新托盘），保持线程存活
+    // 阻塞等待泵任务 / Drop 发来的命令（退出或刷新托盘），保持线程存活。
+    // 按值移交所有权（Linux timeout_add_local 闭包要求 'static，见 run_os_event_loop）。
     run_os_event_loop(
-        &tray,
-        &status,
-        &active_icon,
-        &inactive_icon,
-        &toggle_item,
-        &update_item,
+        tray,
+        status,
+        active_icon,
+        inactive_icon,
+        toggle_item,
+        update_item,
         os_cmd_rx,
     );
 
@@ -401,14 +402,18 @@ fn menu_action_for(id: &str, snap: &StatusSnapshot) -> Option<TrayAction> {
 }
 
 /// OS 线程事件循环（平台三分）：阻塞等待退出/刷新命令，保持线程存活。
+///
+/// 参数一律按值传递（`Rc`/`Arc`/`MenuItem` 均为廉价 clone）：Linux 的
+/// `timeout_add_local` 闭包要求 `'static`，传引用会导致 E0521（D 项重构曾
+/// 因此仅 Linux 编译失败，Windows 本地无法发现——跨平台改动必须过 unix job）。
 #[allow(clippy::too_many_arguments)]
 fn run_os_event_loop(
-    tray: &Rc<TrayIcon>,
-    status: &Arc<StatusManager>,
-    active_icon: &Option<Icon>,
-    inactive_icon: &Option<Icon>,
-    toggle_item: &MenuItem,
-    update_item: &MenuItem,
+    tray: Rc<TrayIcon>,
+    status: Arc<StatusManager>,
+    active_icon: Option<Icon>,
+    inactive_icon: Option<Icon>,
+    toggle_item: MenuItem,
+    update_item: MenuItem,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
     // Windows 平台必须 pump 消息循环：tray-icon 内部为托盘创建隐藏窗口，
@@ -417,12 +422,12 @@ fn run_os_event_loop(
     // 被处理，托盘左键点击与菜单事件都不会触发。
     #[cfg(windows)]
     run_windows_loop(
-        tray,
-        status,
-        active_icon,
-        inactive_icon,
-        toggle_item,
-        update_item,
+        &tray,
+        &status,
+        &active_icon,
+        &inactive_icon,
+        &toggle_item,
+        &update_item,
         os_cmd_rx,
     );
     // gtk 主循环驱动事件分发；以 50ms 轮询命令通道兼顾刷新与退出，
@@ -455,8 +460,8 @@ fn run_os_event_loop(
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 fn run_windows_loop(
-    tray: &Rc<TrayIcon>,
-    status: &Arc<StatusManager>,
+    tray: &TrayIcon,
+    status: &StatusManager,
     active_icon: &Option<Icon>,
     inactive_icon: &Option<Icon>,
     toggle_item: &MenuItem,
@@ -488,12 +493,12 @@ fn run_windows_loop(
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn run_linux_loop(
-    tray: &Rc<TrayIcon>,
-    status: &Arc<StatusManager>,
-    active_icon: &Option<Icon>,
-    inactive_icon: &Option<Icon>,
-    toggle_item: &MenuItem,
-    update_item: &MenuItem,
+    tray: Rc<TrayIcon>,
+    status: Arc<StatusManager>,
+    active_icon: Option<Icon>,
+    inactive_icon: Option<Icon>,
+    toggle_item: MenuItem,
+    update_item: MenuItem,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
@@ -504,12 +509,12 @@ fn run_linux_loop(
             }
             Ok(OsCommand::RefreshTray) => {
                 update_tray(
-                    tray,
+                    &tray,
                     &status.borrow(),
-                    active_icon,
-                    inactive_icon,
-                    toggle_item,
-                    update_item,
+                    &active_icon,
+                    &inactive_icon,
+                    &toggle_item,
+                    &update_item,
                 );
             }
             Err(std_mpsc::TryRecvError::Empty) => {}
@@ -528,12 +533,12 @@ fn run_linux_loop(
 #[cfg(all(not(windows), not(target_os = "linux")))]
 #[allow(clippy::too_many_arguments)]
 fn run_fallback_loop(
-    tray: &Rc<TrayIcon>,
-    status: &Arc<StatusManager>,
-    active_icon: &Option<Icon>,
-    inactive_icon: &Option<Icon>,
-    toggle_item: &MenuItem,
-    update_item: &MenuItem,
+    tray: Rc<TrayIcon>,
+    status: Arc<StatusManager>,
+    active_icon: Option<Icon>,
+    inactive_icon: Option<Icon>,
+    toggle_item: MenuItem,
+    update_item: MenuItem,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
     loop {
@@ -541,12 +546,12 @@ fn run_fallback_loop(
             Ok(OsCommand::Quit) => break,
             Ok(OsCommand::RefreshTray) => {
                 update_tray(
-                    tray,
+                    &tray,
                     &status.borrow(),
-                    active_icon,
-                    inactive_icon,
-                    toggle_item,
-                    update_item,
+                    &active_icon,
+                    &inactive_icon,
+                    &toggle_item,
+                    &update_item,
                 );
             }
             Err(_) => break, // 发送端已丢弃，结束线程
