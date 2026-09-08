@@ -123,6 +123,13 @@ export const systemApi = {
       pin ?? null,
     ),
   fetchLogs: (limit: number) => http.get<LogEntry[]>(`/api/logs?limit=${limit}`),
+  /** 导出日志压缩包：后端打 zip（运行日志 + 登录历史 + 脱敏 meta），返回 Blob */
+  async exportLogs(): Promise<Blob> {
+    const token = await ensureAuthToken();
+    return fetchBundleWithTimeout("/api/logs/export", {
+      headers: token ? { "X-Auth-Token": token } : undefined,
+    });
+  },
 };
 
 /** 环境初始化（uv sync + Chromium，POST /api/environment/bootstrap） */

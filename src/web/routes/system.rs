@@ -259,6 +259,183 @@ fn parse_tracing_json_log(line: &str) -> Option<crate::web::state::LogEntry> {
     ))
 }
 
+// ---- 日志导出 ----
+
+/// 日志导出包总量上限（50MiB，对齐 feedback-bundle 资源上限，防内存 zip 失控）
+const LOG_EXPORT_MAX_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+
+/// 导出包内的单个文件（包内相对路径 + 内容）
+type CollectedFile = (String, Vec<u8>);
+
+/// 列出目录下文件名满足谓词的普通文件（目录不存在返回空集）
+fn list_files_where(dir: &std::path::Path, pred: impl Fn(&str) -> bool) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_str()?;
+            (pred(name) && e.path().is_file()).then_some(e.path())
+        })
+        .collect()
+}
+
+/// 收集日志导出包的文件清单（纯同步，供 spawn_blocking 调用与单测直测）
+///
+/// 覆盖 `logs/app.log*`（tracing_appender 按日轮转，日期后缀越晚越新）与
+/// `logs/login_history/*.jsonl`。按文件名降序（新→旧）读取，总量超过
+/// `max_total_bytes` 时跳过并记录说明（先读 metadata 防止把超限大文件整块
+/// 读入内存），单文件读取失败也只记说明，绝不中断导出。
+fn collect_log_export_files(
+    base: &std::path::Path,
+    max_total_bytes: usize,
+) -> (Vec<CollectedFile>, Vec<String>) {
+    let mut files: Vec<CollectedFile> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut total = 0usize;
+
+    let mut log_files = list_files_where(&base.join("logs"), |n| n.starts_with("app.log"));
+    let mut history_files = list_files_where(&base.join("logs").join("login_history"), |n| {
+        n.ends_with(".jsonl")
+    });
+    // 文件名降序 = 新→旧：超限时优先保留较新文件
+    log_files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    history_files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+    for (path, rel_prefix) in log_files
+        .into_iter()
+        .map(|p| (p, "logs"))
+        .chain(history_files.into_iter().map(|p| (p, "login_history")))
+    {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let rel = format!("{rel_prefix}/{name}");
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        if total + size > max_total_bytes {
+            notes.push(format!("文件 {rel} 会使总量超出 50MiB 上限，已跳过"));
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                total += bytes.len();
+                files.push((rel, bytes));
+            }
+            Err(e) => notes.push(format!("读取 {rel} 失败: {e}")),
+        }
+    }
+    (files, notes)
+}
+
+/// GET /api/logs/export — 导出日志压缩包（zip，供随 bug 上传排查）
+///
+/// 包内内容：
+/// - `logs/`：全部 app.log* 轮转文件（当前 + 历史）
+/// - `login_history/`：登录历史 JSONL
+/// - `meta.json`：版本/平台/生成时间 + 脱敏配置摘要（仅布尔位 `has_password`，
+///   不含密码明文与加密配置原文）+ 环境就绪状态
+/// - `README.txt`：内容与隐私口径说明；截断/读取失败逐条记录，不以 500 打断导出
+pub async fn export_logs(
+    State(config): State<Arc<dyn crate::config::ConfigApi>>,
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+) -> Result<impl IntoResponse, ApiError> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    let base = config.base_path();
+    let rt = config.runtime_snapshot();
+    let settings = config.load_settings_async().await;
+    let env_status = environment.status();
+    let now = chrono::Local::now();
+    let stamp = now.format("%Y%m%d-%H%M%S").to_string();
+
+    // meta 脱敏口径与 feedback-bundle 一致：凭据只给 has_password 布尔位
+    let meta = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "generated_at": now.to_rfc3339(),
+        "log_level": settings.global.logging.level,
+        "log_file_enabled": settings.global.logging.file_enabled,
+        "log_retention_days": settings.global.logging.retention_days,
+        "browser_channel": rt.browser.browser_channel,
+        "active_profile": rt.profile.id,
+        "auth_url": rt.profile.auth_url,
+        "isp": rt.profile.isp,
+        "has_password": !rt.profile.password.as_str().is_empty(),
+        "environment": {
+            "uv_ready": env_status.uv_ready,
+            "python_ready": env_status.python_ready,
+            "playwright_ready": env_status.playwright_ready,
+        },
+    });
+
+    // 目录遍历 + 文件读取为阻塞 I/O，放入 spawn_blocking 避免阻塞 tokio worker
+    let collect_base = base.clone();
+    let (files, notes) = tokio::task::spawn_blocking(move || {
+        collect_log_export_files(&collect_base, LOG_EXPORT_MAX_TOTAL_BYTES)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("日志收集任务失败: {e}")))?;
+
+    let mut readme = String::new();
+    readme.push_str("Campus-Auth 日志导出包\n=======================\n\n");
+    readme.push_str(&format!(
+        "- 导出时间：{}\n",
+        now.format("%Y-%m-%d %H:%M:%S")
+    ));
+    readme.push_str(&format!("- 版本：{}\n", env!("CARGO_PKG_VERSION")));
+    readme.push_str("- logs/：运行日志（tracing JSON 格式，每行一个事件）\n");
+    readme.push_str("- login_history/：登录历史（JSONL）\n");
+    readme.push_str(
+        "- meta.json：环境与配置脱敏摘要（不含密码明文与加密配置原文）\n\n请连同 bug 描述一并上传。\n",
+    );
+    if !notes.is_empty() {
+        readme.push_str("\n注意：\n");
+        for note in &notes {
+            readme.push_str(&format!("- {note}\n"));
+        }
+    }
+
+    // 内存打 zip（与 feedback-bundle 同款：Deflated + 0o644）
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        let mut write_entry = |name: &str, bytes: &[u8]| -> Result<(), ApiError> {
+            zw.start_file(name, opts)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            zw.write_all(bytes)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            Ok(())
+        };
+        write_entry("README.txt", readme.as_bytes())?;
+        write_entry("meta.json", meta.to_string().as_bytes())?;
+        for (rel, bytes) in &files {
+            write_entry(rel, bytes)?;
+        }
+        zw.finish().map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    let bytes = buf.into_inner();
+    let filename = format!("campus-auth-logs-{stamp}.zip");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    ))
+}
+
 /// GET /api/check-update — 检查更新
 ///
 /// 返回字段对齐前端契约：`has_update`(bool) / `latest`(string) / `current`(string) /
@@ -994,5 +1171,141 @@ mod tests {
         let d = &v["data"];
         assert_eq!(d["has_update"], false);
         assert!(d["error"].as_str().unwrap().contains("网络超时"));
+    }
+
+    // ============ GET /api/logs/export 日志导出包 ============
+
+    use super::super::test_support::MockConfigApi;
+
+    /// 双域 state：ConfigApi + EnvironmentApi 各自经 FromRef 委派提取
+    #[derive(Clone)]
+    struct ExportTestState {
+        config: Arc<dyn crate::config::ConfigApi>,
+        environment: Arc<dyn crate::environment::EnvironmentApi>,
+    }
+
+    impl axum::extract::FromRef<ExportTestState> for Arc<dyn crate::config::ConfigApi> {
+        fn from_ref(state: &ExportTestState) -> Self {
+            state.config.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<ExportTestState> for Arc<dyn crate::environment::EnvironmentApi> {
+        fn from_ref(state: &ExportTestState) -> Self {
+            state.environment.clone()
+        }
+    }
+
+    fn export_app(base: std::path::PathBuf) -> axum::Router {
+        let (config, cfg) = MockConfigApi::mocked();
+        cfg.lock().unwrap().base_path = base;
+        let environment: Arc<dyn crate::environment::EnvironmentApi> =
+            Arc::new(MockInstallEnvironment::new(false, false));
+        axum::Router::new()
+            .route("/api/logs/export", route_get(export_logs))
+            .with_state(ExportTestState {
+                config,
+                environment,
+            })
+    }
+
+    async fn run_export(base: std::path::PathBuf) -> axum::http::Response<Body> {
+        export_app(base)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/logs/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn zip_names(bytes: &[u8]) -> Vec<String> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect()
+    }
+
+    /// 导出包含 README/meta/全部日志轮转文件与登录历史，无关文件不进包
+    #[tokio::test]
+    async fn logs_export_contains_logs_history_meta_and_readme() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = tmp.path().join("logs");
+        let hist = logs.join("login_history");
+        std::fs::create_dir_all(&hist).unwrap();
+        std::fs::write(logs.join("app.log.2026-09-05"), "{\"level\":\"INFO\"}\n").unwrap();
+        std::fs::write(logs.join("app.log.2026-09-06"), "{\"level\":\"WARN\"}\n").unwrap();
+        // 无关文件不应进包
+        std::fs::write(logs.join("not-a-log.txt"), "x").unwrap();
+        std::fs::write(hist.join("2026-09-06.jsonl"), "{\"result\":\"success\"}\n").unwrap();
+
+        let resp = run_export(tmp.path().to_path_buf()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "application/zip");
+        assert!(
+            resp.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment; filename=\"campus-auth-logs-")
+        );
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mut names = zip_names(&bytes);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "README.txt",
+                "login_history/2026-09-06.jsonl",
+                "logs/app.log.2026-09-05",
+                "logs/app.log.2026-09-06",
+                "meta.json",
+            ]
+        );
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut meta = String::new();
+        use std::io::Read;
+        zip.by_name("meta.json")
+            .unwrap()
+            .read_to_string(&mut meta)
+            .unwrap();
+        assert!(meta.contains("\"has_password\":false"), "{meta}");
+    }
+
+    /// logs 目录缺失：仍返回有效包（README + meta），不 500
+    #[tokio::test]
+    async fn logs_export_without_logs_dir_still_returns_zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resp = run_export(tmp.path().to_path_buf()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let names = zip_names(&bytes);
+        assert!(names.contains(&"README.txt".to_string()), "{names:?}");
+        assert!(names.contains(&"meta.json".to_string()), "{names:?}");
+        assert_eq!(names.len(), 2);
+    }
+
+    /// 总量超上限：旧文件被跳过且记录说明，新文件保留（降序 = 新→旧优先）
+    #[test]
+    fn collect_log_export_files_respects_total_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = tmp.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("app.log.2026-09-05"), "0123456789".repeat(10)).unwrap();
+        std::fs::write(logs.join("app.log.2026-09-06"), "new").unwrap();
+        let (files, notes) = collect_log_export_files(tmp.path(), 50);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["logs/app.log.2026-09-06"]);
+        assert!(
+            notes.iter().any(|n| n.contains("app.log.2026-09-05")),
+            "{notes:?}"
+        );
     }
 }

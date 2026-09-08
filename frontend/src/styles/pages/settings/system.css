@@ -86,3 +86,8 @@
 .update-check-error {
   color: var(--error);
 }
+/* 日志设置：导出说明与按钮同行，说明占满剩余宽度、按钮右对齐 */
+.log-export-footer .hint {
+  margin: 0 auto 0 0;
+  text-align: left;
+}

@@ -1,14 +1,20 @@
 <script setup lang="ts">
+/** 设置 · 系统页：启动与运行、日志设置及界面行为配置 */
 import IconApp from "@/components/common/IconApp.vue";
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
+import { useToast } from "@/composables/useToast";
+import { systemApi } from "@/api";
+import { extractApiError } from "@/api/client";
+import { downloadBlob } from "@/utils/file";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const config = useConfig();
 const { busy, autostart } = useStatus();
+const { toastOnly } = useToast();
 
 const loginActionOptions: SelectOption[] = [
   { value: "monitor", label: "开始检测" },
@@ -40,6 +46,24 @@ const logLevelOptions: SelectOption[] = [
   { value: "WARN", label: "WARN" },
   { value: "ERROR", label: "ERROR" },
 ];
+
+const exportingLogs = ref(false);
+
+/** 导出日志压缩包（运行日志 + 登录历史 + 脱敏环境摘要），供随 bug 反馈上传 */
+async function handleExportLogs(): Promise<void> {
+  if (exportingLogs.value) return;
+  exportingLogs.value = true;
+  try {
+    const blob = await systemApi.exportLogs();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    downloadBlob(blob, `campus-auth-logs-${stamp}.zip`, "application/zip");
+    toastOnly(true, "日志压缩包已导出");
+  } catch (e) {
+    toastOnly(false, extractApiError(e as Error, "导出日志压缩包失败"));
+  } finally {
+    exportingLogs.value = false;
+  }
+}
 </script>
 
 <template>
@@ -101,6 +125,18 @@ const logLevelOptions: SelectOption[] = [
             <CustomSelect :model-value="config.config.logging.level" :options="logLevelOptions" @update:model-value="config.setLogLevel($event as string)" />
           </div>
         </div>
+      </div>
+      <div class="card-footer log-export-footer">
+        <p class="hint">导出日志压缩包：打包运行日志、登录历史与脱敏环境摘要（不含密码），可随 bug 反馈一并上传。</p>
+        <button
+          class="btn btn-secondary btn-sm"
+          type="button"
+          :disabled="exportingLogs"
+          @click="handleExportLogs"
+          title="打包运行日志与登录历史，用于反馈问题"
+        >
+          {{ exportingLogs ? "导出中..." : "导出日志压缩包" }}
+        </button>
       </div>
     </section>
 

@@ -230,6 +230,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         }),
         ("POST", "/api/agree", || post(routes::system::agree_terms)),
         ("GET", "/api/logs", || get(routes::system::fetch_logs)),
+        ("GET", "/api/logs/export", || {
+            get(routes::system::export_logs)
+        }),
         // ---- 浏览器与安装（browsers / install / worker）----
         ("GET", "/api/browsers", || {
             get(routes::system::list_browsers)
