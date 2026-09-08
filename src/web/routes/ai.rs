@@ -264,6 +264,90 @@ pub async fn generate(
     })))
 }
 
+/// 获取在途生成令牌（防重入）：已有生成在途时返回 409。
+fn acquire_inflight_token() -> Result<CancellationToken, ApiError> {
+    let mut guard = GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+    if guard.is_some() {
+        return Err(ApiError::Conflict(
+            "已有生成任务进行中，请等待其完成或刷新页面".into(),
+        ));
+    }
+    let token = CancellationToken::new();
+    *guard = Some(token.clone());
+    Ok(token)
+}
+
+/// 事件转发器：每 40ms 把共享缓冲的新事件刷到 SSE 通道。
+///
+/// MutexGuard 不跨 await；终止事件（Done/Error）随本批一起取出作为退出判据
+/// （终止事件由生成器最后恰好 push 一次）。接收端消失即取消生成令牌。
+fn spawn_event_forwarder(
+    shared: std::sync::Arc<std::sync::Mutex<Vec<crate::ai::generate::StreamEvent>>>,
+    tx: tokio::sync::mpsc::Sender<crate::ai::generate::StreamEvent>,
+    cancel_token: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            // 一步取走全部未转发事件（drain 后 Vec 清空，免去手写游标 idx 的分页）；
+            // 终止事件随本批一起取出，作为本轮退出判据（终止事件由生成器最后恰好 push 一次）
+            let batch: Vec<crate::ai::generate::StreamEvent> = {
+                let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+                guard.drain(..).collect()
+            };
+            let should_exit = batch.iter().any(|e| {
+                matches!(
+                    e,
+                    crate::ai::generate::StreamEvent::Done { .. }
+                        | crate::ai::generate::StreamEvent::Error { .. }
+                )
+            });
+            for ev in batch {
+                let _ = tx.send(ev).await;
+            }
+            if tx.is_closed() {
+                cancel_token.cancel();
+                break;
+            }
+            if should_exit {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                break;
+            }
+        }
+    })
+}
+
+/// 生成收尾：把编排终态（Done/Error）推进共享缓冲，并等待转发器排空。
+async fn finalize_generation(
+    shared: &std::sync::Arc<std::sync::Mutex<Vec<crate::ai::generate::StreamEvent>>>,
+    forward_handle: tokio::task::JoinHandle<()>,
+    outcome: Result<crate::ai::generate::GenerateOutcome, crate::ai::AiError>,
+    base_warnings: &[String],
+) {
+    match outcome {
+        Ok(o) => {
+            let mut warnings = base_warnings.to_vec();
+            warnings.extend(o.warnings.clone());
+            shared.lock().unwrap_or_else(|p| p.into_inner()).push(
+                crate::ai::generate::StreamEvent::Done {
+                    attempts: o.attempts,
+                    warnings,
+                    task: o.task,
+                },
+            );
+            let _ = forward_handle.await;
+        }
+        Err(e) => {
+            shared.lock().unwrap_or_else(|p| p.into_inner()).push(
+                crate::ai::generate::StreamEvent::Error {
+                    message: e.to_string(),
+                },
+            );
+            let _ = forward_handle.await;
+        }
+    }
+}
+
 /// POST /api/ai/generate/stream — 流式生成（SSE）
 ///
 /// 与 `generate` 语义一致，但以 `text/event-stream` 实时推送进度：
@@ -308,17 +392,7 @@ pub async fn generate_stream(
     let base_url = settings.base_url.clone();
 
     // 防重入：已有生成在途时拒绝（否则取消后立点会产生两条并发 LLM 流）
-    let cancel_token = {
-        let mut guard = GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner());
-        if guard.is_some() {
-            return Err(ApiError::Conflict(
-                "已有生成任务进行中，请等待其完成或刷新页面".into(),
-            ));
-        }
-        let token = CancellationToken::new();
-        *guard = Some(token.clone());
-        token
-    };
+    let cancel_token = acquire_inflight_token()?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<crate::ai::generate::StreamEvent>(1024);
     let shared: std::sync::Arc<std::sync::Mutex<Vec<crate::ai::generate::StreamEvent>>> =
@@ -330,35 +404,8 @@ pub async fn generate_stream(
 
     // 转发器：每 40ms 把新事件刷到 SSE（MutexGuard 不跨 await）。
     // 接收端消失（客户端断连/响应流结束）即取消生成令牌，停止无谓的 LLM 消耗
-    let forward_handle = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            // 一步取走全部未转发事件（drain 后 Vec 清空，免去手写游标 idx 的分页）；
-            // 终止事件随本批一起取出，作为本轮退出判据（终止事件由生成器最后恰好 push 一次）
-            let batch: Vec<crate::ai::generate::StreamEvent> = {
-                let mut guard = shared_for_forward.lock().unwrap_or_else(|p| p.into_inner());
-                guard.drain(..).collect()
-            };
-            let should_exit = batch.iter().any(|e| {
-                matches!(
-                    e,
-                    crate::ai::generate::StreamEvent::Done { .. }
-                        | crate::ai::generate::StreamEvent::Error { .. }
-                )
-            });
-            for ev in batch {
-                let _ = tx_for_forward.send(ev).await;
-            }
-            if tx_for_forward.is_closed() {
-                token_for_forward.cancel();
-                break;
-            }
-            if should_exit {
-                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-                break;
-            }
-        }
-    });
+    let forward_handle =
+        spawn_event_forwarder(shared_for_forward, tx_for_forward, token_for_forward);
 
     let extra_prompt_bg = extra_prompt.clone();
     let tasks_bg = tasks.clone();
@@ -398,28 +445,7 @@ pub async fn generate_stream(
         .await;
         // 无论成败都释放在途标记；此后新请求才可再次发起
         *GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        match outcome {
-            Ok(o) => {
-                let mut warnings = capture_warnings.clone();
-                warnings.extend(o.warnings.clone());
-                shared.lock().unwrap_or_else(|p| p.into_inner()).push(
-                    crate::ai::generate::StreamEvent::Done {
-                        attempts: o.attempts,
-                        warnings,
-                        task: o.task,
-                    },
-                );
-                let _ = forward_handle.await;
-            }
-            Err(e) => {
-                shared.lock().unwrap_or_else(|p| p.into_inner()).push(
-                    crate::ai::generate::StreamEvent::Error {
-                        message: e.to_string(),
-                    },
-                );
-                let _ = forward_handle.await;
-            }
-        }
+        finalize_generation(&shared, forward_handle, outcome, &capture_warnings).await;
     });
 
     let stream = async_stream::stream! {
