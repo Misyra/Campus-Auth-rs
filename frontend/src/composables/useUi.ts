@@ -45,8 +45,8 @@ const { confirm } = useConfirm();
 // init 防重入守卫：避免重复调用叠加定时器与 WS 监听器（历史遗留 F7）
 let initialized = false;
 // F9：记录 init 启动的轮询定时器 id，quitApp 时统一清理
-const statusPollTimerIds: number[] = [];
-const autostartPollTimerIds: number[] = [];
+const statusPollTimerIds: Array<ReturnType<typeof setInterval>> = [];
+const autostartPollTimerIds: Array<ReturnType<typeof setInterval>> = [];
 
 // F9：5s 守卫——init 与 Dashboard mount 双触发不再重复请求；force 供显式刷新绕过
 const historyFetchGuard = createFetchGuard(5000);
@@ -313,12 +313,39 @@ async function init(): Promise<void> {
   }
 
   // F9：保存轮询定时器 id，退出时 clearInterval，避免 quitApp 后页面仍持续轮询
-  const statusPollTimer = setInterval(() => {
-    const s = useStatus();
-    void s.fetchStatus().catch((err) => frontendLogger.warn("status", err));
-  }, TIMING.STATUS_POLL_INTERVAL);
+  // 断连退避：后端失联时固定 30s 轮询会刷出大量失败日志；连续失败 3 次后
+  // 间隔拉到 5min（WS 重连成功/轮询成功即恢复 30s），quitApp 时同样清理。
+  let statusFailStreak = 0;
+  let statusPollTimer: ReturnType<typeof setInterval> | undefined;
+  const armStatusPoll = (intervalMs: number) => {
+    if (statusPollTimer) {
+      clearInterval(statusPollTimer);
+      // 旧计时器已清除，从退出清理名单中移除，避免数组攒过期 id
+      const i = statusPollTimerIds.indexOf(statusPollTimer);
+      if (i !== -1) statusPollTimerIds.splice(i, 1);
+    }
+    statusPollTimer = setInterval(() => {
+      const s = useStatus();
+      void s
+        .fetchStatus()
+        .then(() => {
+          if (statusFailStreak >= 3) {
+            statusFailStreak = 0;
+            armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
+          } else {
+            statusFailStreak = 0;
+          }
+        })
+        .catch((err) => {
+          frontendLogger.warn("status", err);
+          statusFailStreak += 1;
+          if (statusFailStreak === 3) armStatusPoll(TIMING.STATUS_POLL_SLOW_INTERVAL);
+        });
+    }, intervalMs);
+    statusPollTimerIds.push(statusPollTimer);
+  };
+  armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
   const autostartPollTimer = setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
-  statusPollTimerIds.push(statusPollTimer);
   autostartPollTimerIds.push(autostartPollTimer);
 
   // 应用外观

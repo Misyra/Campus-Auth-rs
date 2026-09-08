@@ -287,6 +287,14 @@
   border-top-color: var(--warning);
 }
 
+/* 重连条文本：长指引窄屏省略，完整文案见 title 悬停 */
+.ws-reconnect-text {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 主按钮内的 spinner：顶色改用按钮文字色，保证在 accent 底色上可见（原内联 style 迁移） */
 .spinner-on-accent {
   border-top-color: var(--on-accent);

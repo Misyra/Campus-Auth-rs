@@ -39,6 +39,9 @@ const BASE = "";
  *
  * 后端对所有 /api/* 与 /ws/* 请求校验 X-Auth-Token（防本地恶意网页 CSRF），
  * token 端点本身豁免鉴权，其响应受 CORS 读保护（仅 localhost Origin 可读）。
+ *
+ * 后端重启会换发 token：旧缓存在重启后即失效。HTTP 路径由 401 自动重置重试；
+ * WS 握手失败无状态码可读，需调用方在重连前显式 `refreshAuthToken()`。
  */
 let authToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
@@ -76,6 +79,16 @@ export function ensureAuthToken(): Promise<string | null> {
 function resetAuthToken(): void {
   authToken = null;
   tokenPromise = null;
+}
+
+/**
+ * 强制刷新 token 并返回新值：WS 重连前调用。
+ * 后端重启换发 token 后，缓存旧值建连必被拒；刷新失败返回 null，
+ * 调用方以匿名建连（后端 401 关掉后走正常退避，不比旧行为差）。
+ */
+export function refreshAuthToken(): Promise<string | null> {
+  resetAuthToken();
+  return ensureAuthToken();
 }
 
 export interface RequestOptions {

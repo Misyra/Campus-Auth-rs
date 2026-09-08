@@ -7,6 +7,8 @@ import type { Config, Appearance, Profile } from "./appearance-types";
 
 export const TIMING = {
   STATUS_POLL_INTERVAL: 30000,
+  /** 状态轮询断连退避间隔：连续失败 3 次后切换至此，成功即恢复常规间隔 */
+  STATUS_POLL_SLOW_INTERVAL: 300000,
   AUTOSTART_POLL_INTERVAL: 60000,
   TOAST_DURATION: 3000,
   TOAST_LEAVE_DELAY: 300,

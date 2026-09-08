@@ -2,11 +2,15 @@
  * WebSocket 连接管理（单例）。
  * 多标签页共存：所有页面同时订阅同一广播通道，互不顶替；多标签页可同时在线。
  * 自动重连（指数退避 1s→60s，仅网络断开时触发）、应用层 ping、状态/日志消息分发到对应 composable。
+ *
+ * 断连分两类展示（顶栏重连条消费）：
+ * - unreachable：后端进程没起/端口无监听，提示检查后端是否已启动；
+ * - unauthorized：疑似后端重启换发 token，建连前已强制刷新仍被拒，提示稍后自动重试。
  */
 
 import { ref } from "vue";
 import type { StatusSnapshot, LogEntry } from "../api/types";
-import { ensureAuthToken } from "../api/client";
+import { ensureAuthToken, refreshAuthToken } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { TIMING } from "../utils/constants";
 import { useStatus } from "./useStatus";
@@ -14,6 +18,11 @@ import { useLogs } from "./useLogs";
 import { useDebug } from "./useDebug";
 
 const WS_MAX_BACKOFF = 60_000;
+/** 连续 N 次建连失败后判定"后端可能没起"，顶栏提示检查后端而非无脑重连 */
+const WS_UNREACHABLE_THRESHOLD = 3;
+
+/** 断连原因：null=已连接/未开始重连，unreachable=后端无响应，unauthorized=疑似 token 失效 */
+export type WsDisconnectReason = "unreachable" | "unauthorized" | null;
 
 let ws: WebSocket | null = null;
 let destroyed = false;
@@ -27,6 +36,8 @@ let reconnectHandlers: Array<() => void | Promise<void>> = [];
 
 const wsReconnecting = ref(false);
 const wsRetryCount = ref(0);
+/** 当前断连原因（连接成功/首轮建连中为 null）；顶栏据此展示不同指引 */
+const wsDisconnectReason = ref<WsDisconnectReason>(null);
 
 const status = useStatus();
 const logs = useLogs();
@@ -57,6 +68,24 @@ function onWsReconnect(cb: () => void | Promise<void>): () => void {
   };
 }
 
+/** 安排下一次重连：指数退避 1s→60s；连续失败达阈值后标记 unreachable */
+function scheduleReconnect(reason: Exclude<WsDisconnectReason, null>): void {
+  if (destroyed) return;
+  connecting = false;
+  wsReconnecting.value = true;
+  wsRetryCount.value = retryCount;
+  // unauthorized（token 疑似失效）连续出现也指向"后端刚重启"同一结论，
+  // 与 unreachable 同阈值提示，避免用户对着 401 干等整轮退避。
+  wsDisconnectReason.value = retryCount + 1 >= WS_UNREACHABLE_THRESHOLD ? "unreachable" : reason;
+  const delay = Math.min(TIMING.WS_BACKOFF_BASE * Math.pow(2, retryCount), WS_MAX_BACKOFF);
+  retryCount++;
+  frontendLogger.warn("websocket", `连接已断开（${reason}），${delay / 1000}s 后重连…`);
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => {
+    if (!destroyed) connectWebSocket();
+  }, delay);
+}
+
 async function connectWebSocket(): Promise<void> {
   if (destroyed) return;
   if (connecting) return;
@@ -64,7 +93,10 @@ async function connectWebSocket(): Promise<void> {
     return;
   }
   connecting = true;
-  const token = await ensureAuthToken();
+  // 重连（非首次建连）先强制刷新 token：后端重启会换发 token，缓存旧值
+  // 建连必被 401 关掉；刷新失败（后端没起）返回 null，以匿名建连走正常退避。
+  // 首次建连走缓存路径：页面加载时 http 请求已并行取过 token，避免重复请求。
+  const token = wasConnected || retryCount > 0 ? await refreshAuthToken() : await ensureAuthToken();
   if (destroyed) {
     connecting = false;
     return;
@@ -88,16 +120,8 @@ async function connectWebSocket(): Promise<void> {
   try {
     ws = new WebSocket(wsUrl);
   } catch (e) {
-    connecting = false;
     frontendLogger.error("websocket", "创建 WebSocket 失败", e);
-    if (!destroyed) {
-      wsReconnecting.value = true;
-      const delay = Math.min(TIMING.WS_BACKOFF_BASE * Math.pow(2, retryCount), WS_MAX_BACKOFF);
-      retryCount++;
-      retryTimer = setTimeout(() => {
-        if (!destroyed) connectWebSocket();
-      }, delay);
-    }
+    scheduleReconnect(token !== null ? "unauthorized" : "unreachable");
     return;
   }
   frontendLogger.info("websocket", `正在连接日志通道 ${wsUrl.split("?")[0]}`);
@@ -107,6 +131,7 @@ async function connectWebSocket(): Promise<void> {
     retryCount = 0;
     wsRetryCount.value = 0;
     wsReconnecting.value = false;
+    wsDisconnectReason.value = null;
     if (ws) frontendLogger.setWebSocket(ws);
     frontendLogger.info("websocket", "已连接");
     if (wasConnected) {
@@ -167,21 +192,15 @@ async function connectWebSocket(): Promise<void> {
   };
 
   ws.onclose = () => {
-    connecting = false;
     frontendLogger.setWebSocket(null);
     if (pingTimer) {
       clearInterval(pingTimer);
       pingTimer = undefined;
     }
     if (destroyed) return;
-    wsReconnecting.value = true;
-    wsRetryCount.value = retryCount;
-    const delay = Math.min(TIMING.WS_BACKOFF_BASE * Math.pow(2, retryCount), WS_MAX_BACKOFF);
-    retryCount++;
-    frontendLogger.warn("websocket", `连接已断开，${delay / 1000}s 后重连…`);
-    retryTimer = setTimeout(() => {
-      if (!destroyed) connectWebSocket();
-    }, delay);
+    // 握手 401（token 失效）与后端没起在 onclose 侧无从区分：token 刚刷新过还被拒
+    // 归为 unauthorized（下一轮继续刷新），拿不到 token 的归为 unreachable。
+    scheduleReconnect(token !== null ? "unauthorized" : "unreachable");
   };
 
   ws.onerror = (e) => {
@@ -234,6 +253,19 @@ function destroy(): void {
   }
 }
 
+/**
+ * 立即重试一次连接（顶栏"立即重试"按钮用）。
+ * 清掉待触发的退避计时并归零计数，下一跳以 1s 间隔建连；
+ * connecting/OPEN/CONNECTING 由 connectWebSocket 内部防重入。
+ */
+function retryNow(): void {
+  if (destroyed) return;
+  if (retryTimer) clearTimeout(retryTimer);
+  retryCount = 0;
+  wsRetryCount.value = 0;
+  void connectWebSocket();
+}
+
 export function useWebSocket() {
-  return { connectWebSocket, setupVisibilityChange, destroy, onWsReconnect, wsReconnecting, wsRetryCount };
+  return { connectWebSocket, retryNow, setupVisibilityChange, destroy, onWsReconnect, wsReconnecting, wsRetryCount, wsDisconnectReason };
 }
