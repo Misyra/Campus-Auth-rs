@@ -177,189 +177,7 @@ impl TrayManager {
 
         // ---- OS 托盘线程：构建菜单与图标，独占持有 TrayIcon，等待命令 ----
         let os_handle = thread::spawn(move || {
-            // Linux：tray-icon 后端基于 gtk/libappindicator，构建图标前必须完成
-            // gtk::init，且 gtk 主循环要在同一线程持续运行（见下方 gtk::main）——
-            // 否则菜单/图标事件永远不会分发，托盘完全无响应
-            #[cfg(target_os = "linux")]
-            if let Err(e) = gtk::init() {
-                error!("gtk 初始化失败，托盘不可用: {e}");
-                return;
-            }
-
-            // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
-            // menu_items 绑定本身保持对象存活到线程结束；toggle_item / update_item 用于动态改文本
-            let (menu, menu_items, toggle_item, update_item) = build_menu();
-            let _ = &menu_items;
-            // 首次按当前状态设置文本
-            let first_snapshot = status.borrow();
-            toggle_item.set_text(monitor_toggle_label(first_snapshot.engine_state));
-            update_item.set_text(update_menu_label(first_snapshot.update_available));
-            drop(first_snapshot);
-
-            // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
-            // 停止态用同一 logo 的灰色版保持品牌识别（此前是纯红色块，无信息量）
-            let (rgba, w, h) = load_tray_rgba();
-            let active_icon = make_icon(rgba.clone(), w, h);
-            let mut inactive_rgba = rgba;
-            for px in inactive_rgba.chunks_mut(4) {
-                px[0] = 150;
-                px[1] = 150;
-                px[2] = 150;
-            }
-            let inactive_icon = make_icon(inactive_rgba, w, h);
-
-            let built = match active_icon.as_ref() {
-                Some(icon) => TrayIconBuilder::new()
-                    .with_icon(icon.clone())
-                    .with_menu(Box::new(menu))
-                    .with_tooltip("Campus-Auth")
-                    .build(),
-                None => {
-                    error!("无法加载或生成托盘图标");
-                    return;
-                }
-            };
-
-            let tray = match built {
-                Ok(t) => {
-                    info!("系统托盘已创建");
-                    Rc::new(t)
-                }
-                Err(e) => {
-                    error!("系统托盘创建失败: {e}");
-                    return;
-                }
-            };
-
-            // 注册全局菜单事件处理器：转发为 TrayAction（不阻塞 OS 线程）
-            let action_tx_tray = action_tx.clone();
-            let status_for_menu = Arc::clone(&status);
-            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                let id: String = event.id().0.clone();
-                // monitor_toggle 的具体动作（启动/停止）由当前引擎状态决定，
-                // 这样菜单项 id 固定，文本可随状态切换
-                let action = match id.as_str() {
-                    "monitor_toggle" => {
-                        if status_for_menu.borrow().engine_state == EngineState::Running {
-                            TrayAction::StopMonitor
-                        } else {
-                            TrayAction::StartMonitor
-                        }
-                    }
-                    "open_web" => TrayAction::OpenWeb,
-                    "check_update" => TrayAction::CheckUpdate,
-                    "quit" => TrayAction::Quit,
-                    _ => return,
-                };
-                // OS 线程用 try_send（非阻塞）转发；通道满/关闭时丢弃
-                if action_tx.try_send(action).is_err() {
-                    warn!("托盘泵任务已退出，丢弃菜单事件");
-                }
-            }));
-
-            // 注册全局托盘图标事件处理器：左键单击打开 Web 控制台
-            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-                if let TrayIconEvent::Click {
-                    button,
-                    button_state,
-                    ..
-                } = event
-                {
-                    if button == tray_icon::MouseButton::Left
-                        && button_state == tray_icon::MouseButtonState::Up
-                    {
-                        if let Err(e) = action_tx_tray.try_send(TrayAction::OpenWeb) {
-                            debug!("托盘点击事件转发失败（通道满或泵任务已退出）: {e}");
-                        }
-                    }
-                }
-            }));
-
-            // 阻塞等待泵任务 / Drop 发来的命令（退出或刷新托盘），保持线程存活。
-            //
-            // Windows 平台必须 pump 消息循环：tray-icon 内部为托盘创建隐藏窗口，
-            // 窗口过程处理 WM_USER_TRAYICON 后通过 TrayIconEvent::send 分发到全局
-            // handler。若没有 GetMessage/PeekMessage + DispatchMessage，窗口消息不
-            // 被处理，托盘左键点击与菜单事件都不会触发。
-            #[cfg(windows)]
-            {
-                use std::time::Duration;
-                loop {
-                    pump_windows_messages();
-                    match os_cmd_rx.recv_timeout(Duration::from_millis(50)) {
-                        Ok(OsCommand::Quit) => break,
-                        Ok(OsCommand::RefreshTray) => {
-                            update_tray(
-                                &tray,
-                                &status.borrow(),
-                                &active_icon,
-                                &inactive_icon,
-                                &toggle_item,
-                                &update_item,
-                            );
-                        }
-                        Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-            }
-            #[cfg(target_os = "linux")]
-            {
-                // gtk 主循环驱动事件分发；以 50ms 轮询命令通道兼顾刷新与退出，
-                // 避免引入跨线程唤醒 glib 主循环的复杂度
-                gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                    match os_cmd_rx.try_recv() {
-                        Ok(OsCommand::Quit) => {
-                            gtk::main_quit();
-                            return gtk::glib::ControlFlow::Break;
-                        }
-                        Ok(OsCommand::RefreshTray) => {
-                            update_tray(
-                                &tray,
-                                &status.borrow(),
-                                &active_icon,
-                                &inactive_icon,
-                                &toggle_item,
-                                &update_item,
-                            );
-                        }
-                        Err(std_mpsc::TryRecvError::Empty) => {}
-                        Err(std_mpsc::TryRecvError::Disconnected) => {
-                            // 发送端已丢弃，结束线程
-                            gtk::main_quit();
-                            return gtk::glib::ControlFlow::Break;
-                        }
-                    }
-                    gtk::glib::ControlFlow::Continue
-                });
-                gtk::main();
-            }
-            #[cfg(all(not(windows), not(target_os = "linux")))]
-            {
-                // 其余平台（macOS 等）：托盘暂不支持（tray-icon 要求主线程事件循环，
-                // 见 known-issues W6），仅保持线程等待退出命令
-                loop {
-                    match os_cmd_rx.recv() {
-                        Ok(OsCommand::Quit) => break,
-                        Ok(OsCommand::RefreshTray) => {
-                            update_tray(
-                                &tray,
-                                &status.borrow(),
-                                &active_icon,
-                                &inactive_icon,
-                                &toggle_item,
-                                &update_item,
-                            );
-                        }
-                        Err(_) => break, // 发送端已丢弃，结束线程
-                    }
-                }
-            }
-
-            // 清理：清除全局处理器（释放 action_tx 引用）
-            MenuEvent::set_event_handler::<fn(MenuEvent)>(None);
-            TrayIconEvent::set_event_handler::<fn(TrayIconEvent)>(None);
-            debug!("系统托盘线程退出");
+            run_os_thread(status, action_tx, os_cmd_rx);
         });
 
         // 记录 OS 线程句柄，供泵任务或 Drop 在结束时 join
@@ -446,6 +264,292 @@ impl Drop for TrayManager {
             .take()
         {
             let _ = h.join();
+        }
+    }
+}
+
+/// OS 托盘线程体：构建菜单与图标，独占持有 [`TrayIcon`]，等待命令。
+///
+/// 从 [`TrayManager::spawn`] 抽出——原 180 行闭包混杂资源构建、事件注册与
+/// 三个平台的消息循环。资源构建失败（gtk/图标）直接返回，调用方无需处理。
+fn run_os_thread(
+    status: Arc<StatusManager>,
+    action_tx: mpsc::Sender<TrayAction>,
+    os_cmd_rx: std_mpsc::Receiver<OsCommand>,
+) {
+    // Linux：tray-icon 后端基于 gtk/libappindicator，构建图标前必须完成
+    // gtk::init，且 gtk 主循环要在同一线程持续运行（见下方 gtk::main）——
+    // 否则菜单/图标事件永远不会分发，托盘完全无响应
+    #[cfg(target_os = "linux")]
+    if let Err(e) = gtk::init() {
+        error!("gtk 初始化失败，托盘不可用: {e}");
+        return;
+    }
+
+    // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
+    // menu_items 绑定本身保持对象存活到线程结束；toggle_item / update_item 用于动态改文本
+    let (menu, menu_items, toggle_item, update_item) = build_menu();
+    let _ = &menu_items;
+    // 首次按当前状态设置文本
+    let first_snapshot = status.borrow();
+    toggle_item.set_text(monitor_toggle_label(first_snapshot.engine_state));
+    update_item.set_text(update_menu_label(first_snapshot.update_available));
+    drop(first_snapshot);
+
+    // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
+    // 停止态用同一 logo 的灰色版保持品牌识别（此前是纯红色块，无信息量）
+    let (rgba, w, h) = load_tray_rgba();
+    let active_icon = make_icon(rgba.clone(), w, h);
+    let mut inactive_rgba = rgba;
+    for px in inactive_rgba.chunks_mut(4) {
+        px[0] = 150;
+        px[1] = 150;
+        px[2] = 150;
+    }
+    let inactive_icon = make_icon(inactive_rgba, w, h);
+
+    let built = match active_icon.as_ref() {
+        Some(icon) => TrayIconBuilder::new()
+            .with_icon(icon.clone())
+            .with_menu(Box::new(menu))
+            .with_tooltip("Campus-Auth")
+            .build(),
+        None => {
+            error!("无法加载或生成托盘图标");
+            return;
+        }
+    };
+
+    let tray = match built {
+        Ok(t) => {
+            info!("系统托盘已创建");
+            Rc::new(t)
+        }
+        Err(e) => {
+            error!("系统托盘创建失败: {e}");
+            return;
+        }
+    };
+
+    // 注册全局菜单事件处理器：转发为 TrayAction（不阻塞 OS 线程）
+    let action_tx_tray = action_tx.clone();
+    let status_for_menu = Arc::clone(&status);
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let id: String = event.id().0.clone();
+        // monitor_toggle 的具体动作（启动/停止）由当前引擎状态决定，
+        // 这样菜单项 id 固定，文本可随状态切换
+        if let Some(action) = menu_action_for(id.as_str(), &status_for_menu.borrow()) {
+            // OS 线程用 try_send（非阻塞）转发；通道满/关闭时丢弃
+            if action_tx.try_send(action).is_err() {
+                warn!("托盘泵任务已退出，丢弃菜单事件");
+            }
+        }
+    }));
+
+    // 注册全局托盘图标事件处理器：左键单击打开 Web 控制台
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        if let TrayIconEvent::Click {
+            button,
+            button_state,
+            ..
+        } = event
+        {
+            if button == tray_icon::MouseButton::Left
+                && button_state == tray_icon::MouseButtonState::Up
+            {
+                if let Err(e) = action_tx_tray.try_send(TrayAction::OpenWeb) {
+                    debug!("托盘点击事件转发失败（通道满或泵任务已退出）: {e}");
+                }
+            }
+        }
+    }));
+
+    // 阻塞等待泵任务 / Drop 发来的命令（退出或刷新托盘），保持线程存活
+    run_os_event_loop(
+        &tray,
+        &status,
+        &active_icon,
+        &inactive_icon,
+        &toggle_item,
+        &update_item,
+        os_cmd_rx,
+    );
+
+    // 清理：清除全局处理器（释放 action_tx 引用）
+    MenuEvent::set_event_handler::<fn(MenuEvent)>(None);
+    TrayIconEvent::set_event_handler::<fn(TrayIconEvent)>(None);
+    debug!("系统托盘线程退出");
+}
+
+/// 菜单 id → [`TrayAction`] 纯映射（monitor_toggle 依当前引擎状态二选一）。
+///
+/// 未知 id 返回 `None`（调用方静默丢弃）。
+fn menu_action_for(id: &str, snap: &StatusSnapshot) -> Option<TrayAction> {
+    match id {
+        "monitor_toggle" => {
+            if snap.engine_state == EngineState::Running {
+                Some(TrayAction::StopMonitor)
+            } else {
+                Some(TrayAction::StartMonitor)
+            }
+        }
+        "open_web" => Some(TrayAction::OpenWeb),
+        "check_update" => Some(TrayAction::CheckUpdate),
+        "quit" => Some(TrayAction::Quit),
+        _ => None,
+    }
+}
+
+/// OS 线程事件循环（平台三分）：阻塞等待退出/刷新命令，保持线程存活。
+#[allow(clippy::too_many_arguments)]
+fn run_os_event_loop(
+    tray: &Rc<TrayIcon>,
+    status: &Arc<StatusManager>,
+    active_icon: &Option<Icon>,
+    inactive_icon: &Option<Icon>,
+    toggle_item: &MenuItem,
+    update_item: &MenuItem,
+    os_cmd_rx: std_mpsc::Receiver<OsCommand>,
+) {
+    // Windows 平台必须 pump 消息循环：tray-icon 内部为托盘创建隐藏窗口，
+    // 窗口过程处理 WM_USER_TRAYICON 后通过 TrayIconEvent::send 分发到全局
+    // handler。若没有 GetMessage/PeekMessage + DispatchMessage，窗口消息不
+    // 被处理，托盘左键点击与菜单事件都不会触发。
+    #[cfg(windows)]
+    run_windows_loop(
+        tray,
+        status,
+        active_icon,
+        inactive_icon,
+        toggle_item,
+        update_item,
+        os_cmd_rx,
+    );
+    // gtk 主循环驱动事件分发；以 50ms 轮询命令通道兼顾刷新与退出，
+    // 避免引入跨线程唤醒 glib 主循环的复杂度
+    #[cfg(target_os = "linux")]
+    run_linux_loop(
+        tray,
+        status,
+        active_icon,
+        inactive_icon,
+        toggle_item,
+        update_item,
+        os_cmd_rx,
+    );
+    // 其余平台（macOS 等）：托盘暂不支持（tray-icon 要求主线程事件循环，
+    // 见 known-issues W6），仅保持线程等待退出命令
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    run_fallback_loop(
+        tray,
+        status,
+        active_icon,
+        inactive_icon,
+        toggle_item,
+        update_item,
+        os_cmd_rx,
+    );
+}
+
+/// Windows 事件循环：pump 消息 + 50ms 命令轮询
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn run_windows_loop(
+    tray: &Rc<TrayIcon>,
+    status: &Arc<StatusManager>,
+    active_icon: &Option<Icon>,
+    inactive_icon: &Option<Icon>,
+    toggle_item: &MenuItem,
+    update_item: &MenuItem,
+    os_cmd_rx: std_mpsc::Receiver<OsCommand>,
+) {
+    use std::time::Duration;
+    loop {
+        pump_windows_messages();
+        match os_cmd_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(OsCommand::Quit) => break,
+            Ok(OsCommand::RefreshTray) => {
+                update_tray(
+                    tray,
+                    &status.borrow(),
+                    active_icon,
+                    inactive_icon,
+                    toggle_item,
+                    update_item,
+                );
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+/// Linux 事件循环：gtk 主循环 + 50ms try_recv 轮询
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn run_linux_loop(
+    tray: &Rc<TrayIcon>,
+    status: &Arc<StatusManager>,
+    active_icon: &Option<Icon>,
+    inactive_icon: &Option<Icon>,
+    toggle_item: &MenuItem,
+    update_item: &MenuItem,
+    os_cmd_rx: std_mpsc::Receiver<OsCommand>,
+) {
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        match os_cmd_rx.try_recv() {
+            Ok(OsCommand::Quit) => {
+                gtk::main_quit();
+                return gtk::glib::ControlFlow::Break;
+            }
+            Ok(OsCommand::RefreshTray) => {
+                update_tray(
+                    tray,
+                    &status.borrow(),
+                    active_icon,
+                    inactive_icon,
+                    toggle_item,
+                    update_item,
+                );
+            }
+            Err(std_mpsc::TryRecvError::Empty) => {}
+            Err(std_mpsc::TryRecvError::Disconnected) => {
+                // 发送端已丢弃，结束线程
+                gtk::main_quit();
+                return gtk::glib::ControlFlow::Break;
+            }
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+    gtk::main();
+}
+
+/// 其余平台事件循环：阻塞等待退出/刷新命令
+#[cfg(all(not(windows), not(target_os = "linux")))]
+#[allow(clippy::too_many_arguments)]
+fn run_fallback_loop(
+    tray: &Rc<TrayIcon>,
+    status: &Arc<StatusManager>,
+    active_icon: &Option<Icon>,
+    inactive_icon: &Option<Icon>,
+    toggle_item: &MenuItem,
+    update_item: &MenuItem,
+    os_cmd_rx: std_mpsc::Receiver<OsCommand>,
+) {
+    loop {
+        match os_cmd_rx.recv() {
+            Ok(OsCommand::Quit) => break,
+            Ok(OsCommand::RefreshTray) => {
+                update_tray(
+                    tray,
+                    &status.borrow(),
+                    active_icon,
+                    inactive_icon,
+                    toggle_item,
+                    update_item,
+                );
+            }
+            Err(_) => break, // 发送端已丢弃，结束线程
         }
     }
 }
