@@ -2,6 +2,31 @@
 
 > 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.8”。
 
+## v5.0.0-alpha.8 后补丁轮（2026-09-08 日志系统整治）
+
+> 全面检查日志子系统后的来源精简与缺陷修复；含一处 P0（Worker INFO 日志三路丢失）。
+
+### 日志来源精简（19 → 5）
+
+- 后端 `normalize_source` 改为五大域映射：系统 `app`（app/launcher/container/tray/config/updater/web）、认证 `auth`（engine/login/monitor/network）、任务 `task`（scheduler/tasks/notification/ai）、执行器 `worker`（bridge/environment/python_worker）、界面 `frontend`；未识别 target（第三方库）保留首段回退
+- 文件日志 JSON 仍保留完整 target，信息无损；前端 `LOG_SOURCE_LABELS` 同步精简为 5 项，仪表盘来源筛选下拉与徽标随动
+
+### 缺陷修复
+
+- Worker 的 INFO 日志不再被静默丢弃：动态 filter 白名单补上 `python_worker` target（此前仅 `campus_auth`/`frontend` 生效，Worker INFO 及以下在控制台/文件/WS 三路同时丢失）；启动与热更新共用 `build_targets` 保证规则一致
+- 设置页"启用文件日志"开关真正生效：`file_enabled=false` 时 `init_logging` 跳过文件层（此前为死配置，关闭后仍照常写盘）
+- DEBUG 级别下任务步骤不再双显：Bridge 事件原始 dump 降为 `trace!`（白名单转发 + 前端合成条目已覆盖）
+- `/api/logs` 历史条目补齐结构化字段（` key=value` 拼接对齐 WS 实时条目，此前仅 message）
+- 接管 panic hook：崩溃信息进入日志流（subscriber 就绪前仅落 stderr，避免无声丢失）
+- 前端 logger WS 上行加同 `scope+message` 5 秒节流（错误风暴不再等量回流刷屏）；`logging.level` 注释移除实际不支持的 OFF 档；main.rs 过时注释修正
+
+### 日志系统二轮（同日追加）
+
+- 日志子系统初始化前移到实例锁之前：锁冲突、强杀残留等早期 warn 不再丢在 subscriber 就绪前；重复启动（转开已有实例控制台）路径真正落一条 info
+- 每日兜底清理过期日志：`cleanup_old_logs` 此前仅启动执行一次，关闭"自动重启"的长驻进程会无限累积轮转文件；保留天数每次从配置快照读取，跟随热更新
+- 任务步骤/弹窗日志改由后端任务域留痕（source=task，获得统一 seq/时间戳并落盘、可导出），前端删除本地合成条目
+- Worker stderr 的 traceback 续行继承前一行级别（此前一律降 WARN，按 ERROR 过滤时堆栈断尾）；stderr 级别解析改严格匹配，堆栈行不再被误切出伪级别
+
 ## v5.0.0-alpha.8 后补丁轮（2026-09-07 全项目评审修复）
 
 > 2026-09-07 四路评审（AI 流式 / Rust 核心 / 前端 / Python Worker）新发现修复，另验证确认 76 条清单的 P0×9 与 P1×12 已随 fix/p0-p1-batch（09d7f66）全部落地。
