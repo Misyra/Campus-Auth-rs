@@ -250,7 +250,7 @@ pub struct PauseSettings {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct LoggingSettings {
-    /// 日志级别（OFF/ERROR/WARN/INFO/DEBUG/TRACE）
+    /// 日志级别（ERROR/WARN/INFO/DEBUG/TRACE，大小写不敏感；无效值回退 INFO）
     pub level: String,
     /// 是否写入日志文件
     pub file_enabled: bool,

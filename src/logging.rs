@@ -54,14 +54,17 @@ impl LogEntry {
     }
 }
 
-/// 将 tracing target 归一化为短模块名，供前端来源过滤与展示
+/// 将 tracing target 归一化为面向用户的粗粒度来源，供前端来源过滤与展示
 ///
-/// - `campus_auth::scheduler::cron_loop` → `scheduler`
-/// - `campus_auth::launcher` → `launcher`
-/// - `campus_auth`（crate 根） → `app`
-/// - 外部 crate（如 `hyper_util::client`）→ 取首段 `hyper_util`
+/// 五大域映射（与前端 `LOG_SOURCE_LABELS` 一一对应，新增模块时两处同步维护）：
+/// - 系统 `app`：应用骨架（launcher/container/tray/config/updater/web 及 crate 根）
+/// - 认证 `auth`：网络与认证链路（engine/login/monitor/network）
+/// - 任务 `task`：定时任务与通知（scheduler/tasks/notification/ai）
+/// - 执行器 `worker`：Python 执行侧（bridge/environment/python_worker）
+/// - 界面 `frontend`：前端日志回流（target 即 `frontend`）
 ///
-/// 归一化后前后端来源过滤（精确匹配短名）与徽章展示才能一致工作。
+/// 未识别的首段（第三方 crate，如 `hyper_util::client`）保留原样展示。
+/// 文件日志 JSON 始终保留完整 target，本映射仅影响 WS 面板与历史接口的 source 字段。
 pub fn normalize_source(target: &str) -> String {
     let t = target.trim();
     if t.is_empty() {
@@ -69,12 +72,25 @@ pub fn normalize_source(target: &str) -> String {
     }
     // 去掉 crate 前缀 `campus_auth::`
     let rest = t.strip_prefix("campus_auth::").unwrap_or(t);
-    let first = rest.split("::").next().unwrap_or("").trim();
+    let first = rest
+        .split("::")
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     if first.is_empty() || first == "campus_auth" {
         // crate 根模块（target 恰好为 `campus_auth`）
         return "app".to_string();
     }
-    first.to_ascii_lowercase()
+    match first.as_str() {
+        "app" | "launcher" | "container" | "tray" | "config" | "updater" | "web" => "app",
+        "engine" | "login" | "monitor" | "network" => "auth",
+        "scheduler" | "tasks" | "notification" | "ai" => "task",
+        "bridge" | "environment" | "python_worker" => "worker",
+        "frontend" => "frontend",
+        _ => first.as_str(),
+    }
+    .to_string()
 }
 
 // ============================================================
@@ -103,15 +119,26 @@ static LOG_TARGETS: OnceLock<SharedTargets> = OnceLock::new();
 #[derive(Clone, Default)]
 struct SharedTargets(Arc<Mutex<tracing_subscriber::filter::Targets>>);
 
+/// 构建动态 filter 规则：第三方库保持 WARN，本项目 target 指定级别
+///
+/// `python_worker` 是 Worker stderr 转发使用的 target（bridge/process.rs），与
+/// `campus_auth`/`frontend` 同级对待——漏配会落到默认 WARN，Worker 的 INFO 及
+/// 以下日志在控制台/文件/WS 三路同时丢失。`build` 与 `reload_log_level` 共用
+/// 本函数，保证启动与热更新的规则永远一致。
+fn build_targets(
+    lf: tracing_subscriber::filter::LevelFilter,
+) -> tracing_subscriber::filter::Targets {
+    tracing_subscriber::filter::Targets::new()
+        .with_default(tracing_subscriber::filter::LevelFilter::WARN)
+        .with_target("campus_auth", lf)
+        .with_target("frontend", lf)
+        .with_target("python_worker", lf)
+}
+
 impl SharedTargets {
-    /// 构造默认规则：第三方库 WARN，本项目 target（campus_auth/frontend）指定级别
+    /// 构造默认规则（见 [`build_targets`]）
     fn build(lf: tracing_subscriber::filter::LevelFilter) -> Self {
-        Self::new(
-            tracing_subscriber::filter::Targets::new()
-                .with_default(tracing_subscriber::filter::LevelFilter::WARN)
-                .with_target("campus_auth", lf)
-                .with_target("frontend", lf),
-        )
+        Self::new(build_targets(lf))
     }
 
     fn new(targets: tracing_subscriber::filter::Targets) -> Self {
@@ -166,13 +193,13 @@ pub(crate) fn parse_level(level: &str) -> tracing_subscriber::filter::LevelFilte
     }
 }
 
-/// 从已解析的 settings.json `Value` 一次性提取日志配置（级别 + 保留天数）
+/// 从已解析的 settings.json `Value` 一次性提取日志配置（级别 + 保留天数 + 文件开关）
 ///
 /// 由 `launcher` 在单次文件读取后调用，避免启动期对同一文件三次读解析
-///（启动字段 / 日志级别 / 保留天数各读一次的历史包袱）。缺失/非法时回退 INFO / 7 天。
+///（启动字段 / 日志级别 / 保留天数各读一次的历史包袱）。缺失/非法时回退 INFO / 7 天 / 写文件。
 pub(crate) fn logging_config_from_value(
     value: &serde_json::Value,
-) -> (tracing_subscriber::filter::LevelFilter, u32) {
+) -> (tracing_subscriber::filter::LevelFilter, u32, bool) {
     let level = value
         .get("global")
         .and_then(|g| g.get("logging"))
@@ -187,30 +214,37 @@ pub(crate) fn logging_config_from_value(
         .and_then(|v| v.as_u64())
         .map(|d| d as u32)
         .unwrap_or(7);
-    (level, retention)
+    let file_enabled = value
+        .get("global")
+        .and_then(|g| g.get("logging"))
+        .and_then(|l| l.get("file_enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    (level, retention, file_enabled)
 }
 
 /// 热更新全局日志级别（由 `set_log_level` 调用）
 ///
-/// 第三方库保持 WARN，本项目 target（campus_auth/frontend）设为指定级别。无效级别回退 INFO。
+/// 项目 target 白名单与启动时保持一致（见 [`build_targets`]）。无效级别回退 INFO。
 pub fn reload_log_level(level: &str) {
     let lf = parse_level(level);
     let Some(shared) = LOG_TARGETS.get() else {
         tracing::warn!(level = %level, "日志 filter 未初始化，忽略级别切换");
         return;
     };
-    shared.replace(
-        tracing_subscriber::filter::Targets::new()
-            .with_default(tracing_subscriber::filter::LevelFilter::WARN)
-            .with_target("campus_auth", lf)
-            .with_target("frontend", lf),
-    );
+    shared.replace(build_targets(lf));
     tracing::info!(level = %lf, "日志级别已热更新");
 }
 
 // ============================================================
 // 文件保留清理
 // ============================================================
+
+/// 清理过期日志文件（每日兜底任务的入口；启动时的首次清理在 `init_logging` 内）
+pub fn cleanup_expired_logs(base_path: &Path, retention_days: u32) {
+    let logs_dir = crate::utils::paths::logs_dir(base_path);
+    cleanup_old_logs(&logs_dir, retention_days);
+}
 
 /// 删除 logs/ 目录下超过保留天数的旧日志文件
 ///
@@ -341,17 +375,26 @@ pub fn session_started_at() -> Option<&'static str> {
     SESSION_STARTED_AT.get().map(String::as_str)
 }
 
+/// 日志系统未初始化时返回 true 判定辅助（panic hook 据此选择输出通道：
+/// subscriber 就绪前 tracing 宏是 no-op，panic 不能无声丢失）
+pub fn logging_initialized() -> bool {
+    LOG_TARGETS.get().is_some()
+}
+
 /// 初始化日志系统：控制台层 + 文件层（按日期轮转）+ 广播层（WebSocket 推送）
 ///
 /// 全局 subscriber 只能 init 一次，所有层在此统一注册。
-/// 日志级别与保留天数由 `launcher` 单次解析 settings.json 后传入，
+/// 日志级别、保留天数与文件开关由 `launcher` 单次解析 settings.json 后传入，
 /// 本函数不再重复读文件（历史三读：启动字段 / 级别 / 保留天数各一次）。
+/// `file_enabled = false` 时跳过文件层，不创建 appender 也不落盘，
+/// 返回 `None`（历史接口 /api/logs 在无日志文件时返回空列表）。
 pub fn init_logging(
     base_path: &Path,
     log_tx: tokio::sync::broadcast::Sender<LogEntry>,
     log_level: tracing_subscriber::filter::LevelFilter,
     retention_days: u32,
-) -> WorkerGuard {
+    file_enabled: bool,
+) -> Option<WorkerGuard> {
     let logs_dir = crate::utils::paths::logs_dir(base_path);
     if let Err(e) = std::fs::create_dir_all(&logs_dir) {
         tracing::warn!("创建日志目录失败: {e}");
@@ -378,16 +421,19 @@ pub fn init_logging(
         .with_timer(local_timer.clone())
         .with_filter(shared.clone());
 
-    // 文件层：JSON 格式按日轮转
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "app.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .with_target(true)
-        .with_timer(local_timer)
-        .json()
-        .with_filter(shared.clone());
+    // 文件层：JSON 格式按日轮转；关闭时整体跳过（`registry().with(Option<Layer>)` 合法）
+    let file_appender = file_enabled
+        .then(|| tracing_appender::rolling::daily(&logs_dir, "app.log"))
+        .map(tracing_appender::non_blocking);
+    let file_layer = file_appender.as_ref().map(|(writer, _)| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .with_target(true)
+            .with_timer(local_timer)
+            .json()
+            .with_filter(shared.clone())
+    });
 
     // 广播层：真实 Layer，on_event 直接构造 LogEntry（无文本中转）
     let broadcast_layer = BroadcastLayer { tx: log_tx }.with_filter(shared);
@@ -401,24 +447,86 @@ pub fn init_logging(
         eprintln!("日志层注册失败（可能已初始化）: {e}");
     }
 
-    guard
+    file_appender.map(|(_, guard)| guard)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 来源归一化：前后端来源过滤与徽章展示依赖短名一致
+    /// 来源归一化：前后端来源过滤与徽章展示依赖五大域映射一致
     #[test]
     fn test_normalize_source_mapping() {
+        // 任务域
         assert_eq!(
             normalize_source("campus_auth::scheduler::cron_loop"),
-            "scheduler"
+            "task"
         );
-        assert_eq!(normalize_source("campus_auth::launcher"), "launcher");
+        assert_eq!(normalize_source("notification"), "task");
+        assert_eq!(normalize_source("campus_auth::tasks::loader"), "task");
+        assert_eq!(normalize_source("campus_auth::ai::llm"), "task");
+        // 系统域
         assert_eq!(normalize_source("campus_auth"), "app");
+        assert_eq!(normalize_source("campus_auth::launcher"), "app");
+        assert_eq!(normalize_source("campus_auth::web::routes::config"), "app");
+        assert_eq!(normalize_source("campus_auth::updater"), "app");
+        // 认证域
+        assert_eq!(normalize_source("campus_auth::login"), "auth");
+        assert_eq!(normalize_source("campus_auth::monitor::probe"), "auth");
+        // 执行器域
+        assert_eq!(normalize_source("python_worker"), "worker");
+        assert_eq!(normalize_source("campus_auth::bridge"), "worker");
+        assert_eq!(normalize_source("campus_auth::environment::uv"), "worker");
+        // 界面域
+        assert_eq!(normalize_source("frontend"), "frontend");
+        // 大小写归一后再映射
+        assert_eq!(normalize_source("campus_auth::Scheduler"), "task");
+        // 未识别首段（第三方 crate）保留原样
         assert_eq!(normalize_source("hyper_util::client"), "hyper_util");
-        assert_eq!(normalize_source("campus_auth::Scheduler"), "scheduler");
         assert_eq!(normalize_source(""), "");
+    }
+
+    /// 动态 filter 白名单：python_worker 必须与项目 target 同级，否则其 INFO
+    /// 及以下落到默认 WARN，三路（控制台/文件/WS）同时丢失。
+    /// 以真实事件发射验证 enabled 判定（Targets 无静态查询接口）。
+    #[test]
+    fn test_build_targets_whitelist() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::filter::LevelFilter;
+        use tracing_subscriber::layer::Layer as _;
+
+        // 记录穿透 filter 的事件 target:level
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        struct Collect(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Collect {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(format!(
+                    "{}:{}",
+                    event.metadata().target(),
+                    event.metadata().level()
+                ));
+            }
+        }
+
+        let layer = Collect(seen.clone()).with_filter(build_targets(LevelFilter::INFO));
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            tracing::info!(target: "campus_auth::engine", "a");
+            tracing::info!(target: "frontend", "b");
+            tracing::info!(target: "python_worker", "c");
+            // 第三方库默认 WARN：INFO 被丢弃，WARN 放行
+            tracing::info!(target: "hyper", "d");
+            tracing::warn!(target: "hyper", "e");
+        });
+
+        let seen = seen.lock().unwrap();
+        assert!(seen.contains(&"campus_auth::engine:INFO".to_string()));
+        assert!(seen.contains(&"frontend:INFO".to_string()));
+        assert!(seen.contains(&"python_worker:INFO".to_string()));
+        assert!(!seen.contains(&"hyper:INFO".to_string()));
+        assert!(seen.contains(&"hyper:WARN".to_string()));
     }
 
     /// 级别解析：大小写不敏感，无效回退 INFO（配置笔误不静默关闭日志）
@@ -434,22 +542,24 @@ mod tests {
         assert_eq!(parse_level(""), LevelFilter::INFO);
     }
 
-    /// 日志配置提取：缺失/非法回退 INFO + 7 天（启动期单次解析语义）
+    /// 日志配置提取：缺失/非法回退 INFO + 7 天 + 写文件（启动期单次解析语义）
     #[test]
     fn test_logging_config_from_value_fallbacks() {
         use serde_json::json;
         use tracing_subscriber::filter::LevelFilter;
-        let (level, retention) = logging_config_from_value(&json!({}));
+        let (level, retention, file_enabled) = logging_config_from_value(&json!({}));
         assert_eq!(level, LevelFilter::INFO);
         assert_eq!(retention, 7);
+        assert!(file_enabled);
 
-        let (level, retention) = logging_config_from_value(&json!({
-            "global": {"logging": {"level": "DEBUG", "retention_days": 30}}
+        let (level, retention, file_enabled) = logging_config_from_value(&json!({
+            "global": {"logging": {"level": "DEBUG", "retention_days": 30, "file_enabled": false}}
         }));
         assert_eq!(level, LevelFilter::DEBUG);
         assert_eq!(retention, 30);
+        assert!(!file_enabled);
 
-        let (level, _) = logging_config_from_value(&json!({
+        let (level, _, _) = logging_config_from_value(&json!({
             "global": {"logging": {"level": "nope"}}
         }));
         assert_eq!(level, LevelFilter::INFO);

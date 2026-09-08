@@ -33,10 +33,31 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
 
+    // 0.1 接管 panic hook（先于一切业务逻辑）：崩溃信息进入日志流（文件/WS 三路），
+    //     否则 panic 只走默认 stderr 处理器，app.log 与前端日志面板均不可见。
+    //     subscriber 就绪前 tracing 宏是 no-op，此时仅同步落 stderr，避免崩溃无声丢失。
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "非字符串 panic 载荷".to_string());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        if campus_auth::logging::logging_initialized() {
+            tracing::error!(target: "campus_auth", panic = %msg, location = %location, "程序异常崩溃");
+        } else {
+            eprintln!("程序异常崩溃: {msg} ({location})");
+        }
+    }));
+
     // 1. CLI 解析
     let cli = CliArgs::parse();
 
-    // 2. tracing subscriber 不在此处初始化，由 launcher::init_file_logging 统一注册
+    // 2. tracing subscriber 不在此处初始化，由 launcher::run 中的 init_logging 统一注册
     //    （全局 subscriber 只能 init 一次，提前 init 会导致文件日志层和广播层注册失败）
 
     let base_path = resolve_base_path(&cli);

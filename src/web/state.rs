@@ -209,17 +209,17 @@ impl axum::extract::FromRef<AppState> for Arc<StatusManager> {
 mod tests {
     use super::*;
 
-    /// normalize_source：模块路径归一化为短名
+    /// normalize_source：target 归一化为五大域来源（映射表见 logging.rs）
     #[test]
     fn test_normalize_source_various_targets() {
         assert_eq!(
             normalize_source("campus_auth::scheduler::cron_loop"),
-            "scheduler"
+            "task"
         );
-        assert_eq!(normalize_source("campus_auth::launcher"), "launcher");
+        assert_eq!(normalize_source("campus_auth::launcher"), "app");
         assert_eq!(normalize_source("campus_auth"), "app");
         assert_eq!(normalize_source("hyper_util::client::legacy"), "hyper_util");
-        assert_eq!(normalize_source("  campus_auth::bridge::mod  "), "bridge");
+        assert_eq!(normalize_source("  campus_auth::bridge::mod  "), "worker");
         assert_eq!(normalize_source(""), "");
         assert_eq!(normalize_source("   "), "");
     }

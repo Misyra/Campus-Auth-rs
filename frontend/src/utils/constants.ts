@@ -39,27 +39,15 @@ export const LEVEL_VALUES: Record<string, number> = {
 /**
  * 日志来源 → 中文标签的唯一映射。
  * Dashboard 的来源筛选下拉与日志条目来源徽标均由此派生；
- * 未登记的来源（后端新模块 / 前端新 scope）回退显示原始标识。
+ * 后端 normalize_source 将 target 归一为五大域，本表须与之同步维护；
+ * 未登记的来源（第三方 crate target）回退显示原始标识。
  */
 export const LOG_SOURCE_LABELS: Record<string, string> = {
-  app: "应用",
-  launcher: "启动器",
-  container: "容器",
-  engine: "引擎",
-  login: "登录",
-  monitor: "检测",
-  bridge: "Bridge",
-  scheduler: "调度",
-  web: "Web",
-  config: "配置",
-  tray: "托盘",
-  updater: "更新",
-  network: "网络",
-  tasks: "任务",
-  environment: "环境",
-  python_worker: "Python Worker",
+  app: "系统",
+  auth: "认证",
+  task: "任务",
+  worker: "执行器",
   frontend: "前端",
-  notification: "通知",
 };
 
 export const BROWSER_ARGS_DEFAULT = [
@@ -96,7 +84,7 @@ export const DEFAULT_CONFIG: Config = {
     timezone_id: "Asia/Shanghai",
     viewport_width: 1280,
     viewport_height: 720,
-    pure_mode: false,
+    pure_mode: true,
     browser_channel: "msedge",
     browser_custom_path: "",
     custom_browser_engine: "chromium",
@@ -109,7 +97,7 @@ export const DEFAULT_CONFIG: Config = {
     keep_alive: false,
   },
   monitor: {
-    check_interval_seconds: 300,
+    check_interval_seconds: 120,
     network_check_timeout: 2,
     ping_targets: ["8.8.8.8:53", "114.114.114.114:53", "www.baidu.com:443"],
     enable_tcp_check: false,
@@ -126,7 +114,7 @@ export const DEFAULT_CONFIG: Config = {
       "http://www.msftconnecttest.com/connecttest.txt|Microsoft Connect Test",
       "http://detectportal.firefox.com/success.txt|success",
     ],
-    enable_local_check: true,
+    enable_local_check: false,
     // 网络检测默认禁用代理（直连），避免代理故障误判离线；关闭后跟随系统代理（重启生效）
     disable_proxy: true,
     script_timeout: 60,

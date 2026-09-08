@@ -16,7 +16,7 @@ vi.mock("../api", () => ({
 
 const { useLogs } = await import("./useLogs");
 
-function entry(seq: number, message = `msg-${seq}`, level = "INFO", source = "backend"): LogEntry {
+function entry(seq: number, message = `msg-${seq}`, level = "INFO", source = "app"): LogEntry {
   return { seq, timestamp: `2026-08-26T00:00:${String(seq % 60).padStart(2, "0")}`, level, source, message };
 }
 
@@ -64,7 +64,7 @@ describe("实时追加与去重", () => {
 
   it("缺 seq 的条目按内容键去重", async () => {
     logs.clearLogs();
-    const noSeq = { timestamp: "2026-08-26T00:00:01", level: "INFO", source: "backend", message: "legacy" };
+    const noSeq = { timestamp: "2026-08-26T00:00:01", level: "INFO", source: "app", message: "legacy" };
     logs.appendLogs([noSeq as LogEntry, noSeq as LogEntry]);
     await flush();
     expect(logs.logs.length).toBe(1);

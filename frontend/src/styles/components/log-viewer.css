@@ -43,7 +43,7 @@
   text-align: center;
 }
 
-.log-source-badge.source-backend { color: var(--text-muted); }
+/* 来源徽标：五大域（app/auth/task/worker/frontend）走默认样式，仅前端来源高亮 */
 .log-source-badge.source-frontend { color: var(--primary); }
 
 [data-theme="light"] .log-entry:hover {

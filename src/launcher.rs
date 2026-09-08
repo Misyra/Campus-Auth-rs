@@ -121,6 +121,8 @@ struct AppConfig {
     log_level: tracing_subscriber::filter::LevelFilter,
     /// 日志保留天数（同上，避免日志模块重复读文件）
     log_retention_days: u32,
+    /// 是否写日志文件（false 时 `init_logging` 跳过文件层）
+    log_file_enabled: bool,
 }
 
 /// 启动过程中累积的中间状态
@@ -170,31 +172,45 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
     // 1. 配置合并
     let app_config = load_and_merge_config(&cli, base_path)?;
 
-    // 2. 目录权限检查
+    // 2. 日志子系统（级别/保留天数/文件开关由步骤 1 单次解析透传，不再重复读文件）。
+    //    必须先于目录检查/重启等待/实例锁初始化：锁冲突、强杀残留等早期 warn
+    //    才能进日志流，而不是丢在 subscriber 就绪之前
+    let log_tx = log_broadcast_tx();
+    let log_guard = init_logging(
+        &app_config.base_path,
+        log_tx.clone(),
+        app_config.log_level,
+        app_config.log_retention_days,
+        app_config.log_file_enabled,
+    );
+
+    // 3. 目录权限检查
     check_directory_permissions(&app_config.base_path)?;
 
-    // 3. 重启等待
+    // 4. 重启等待
     if cli.restarting {
         wait_for_lock_release(&app_config.base_path).await?;
     }
 
-    // 4. 实例锁
+    // 5. 实例锁
     let instance_lock = match acquire_lock(&app_config.base_path, cli.force) {
         Ok(lock) => lock,
         Err(e) => {
             // 已有实例运行时（典型的双击 exe 重复启动场景）不再直接报错退出，
-            // 而是打开运行中实例的 Web 控制台后正常退出——GUI 子系统下 stderr
-            // 不可见，静默失败会让用户以为双击无响应。轻量模式（端口 0）没有
+            // 而是打开运行中实例的 Web 控制台后正常退出——GUI 双击无控制台，
+            // 浏览器就是"已在运行"的用户可见信号。轻量模式（端口 0）没有
             // Web 入口，维持原报错。
             if !cli.force {
                 if let Some(info) = crate::utils::lock::query_instance(&app_config.base_path) {
                     if info.running && info.port > 0 && app_config.auto_open_browser {
                         let url = format!("http://127.0.0.1:{}", info.port);
                         if open::that(&url).is_ok() {
-                            // 此刻日志系统尚未初始化（tracing 无 subscriber），同步落 stderr
-                            eprintln!(
-                                "已有实例运行中（PID {}），已在浏览器打开 Web 控制台: {url}",
-                                info.pid
+                            // 控制台层写 stderr（终端启动可见）；本路径提前返回，
+                            // log_guard 就地 drop 以 flush 该条日志后退出
+                            info!(
+                                pid = info.pid,
+                                url = %url,
+                                "已有实例运行中，已在浏览器打开其 Web 控制台"
                             );
                             return Ok(());
                         }
@@ -205,16 +221,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         }
     };
 
-    // 5. 日志广播通道 + 文件日志层（级别/保留天数由步骤 1 单次解析透传，不再重复读文件）
-    let log_tx = log_broadcast_tx();
-    let log_guard = init_logging(
-        &app_config.base_path,
-        log_tx.clone(),
-        app_config.log_level,
-        app_config.log_retention_days,
-    );
-
-    // 启动信息留痕（日志系统刚就绪，此前的 tracing 日志无 subscriber）：版本 /
+    // 启动信息留痕：版本 /
     // 根目录 / 运行模式；非完整模式的实际端口按需分配（配置值无意义），省略该字段
     if matches!(app_config.runtime_mode, RuntimeMode::Full) {
         info!(
@@ -265,7 +272,7 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         tray_handle: None,
         shutdown_token,
         log_tx,
-        _log_guard: Some(log_guard),
+        _log_guard: log_guard,
     };
 
     // 8. 创建系统托盘
@@ -349,6 +356,7 @@ fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig>
         auto_open_browser,
         log_level: startup.log_level,
         log_retention_days: startup.log_retention_days,
+        log_file_enabled: startup.log_file_enabled,
     })
 }
 
@@ -364,6 +372,7 @@ struct StartupSettings {
     auto_open_browser: bool,
     log_level: tracing_subscriber::filter::LevelFilter,
     log_retention_days: u32,
+    log_file_enabled: bool,
 }
 
 /// 读取 settings.json 中的启动字段：端口、托盘显示、运行模式、自动打开浏览器 + 日志配置
@@ -380,6 +389,7 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         auto_open_browser: true,
         log_level: LevelFilter::INFO,
         log_retention_days: 7,
+        log_file_enabled: true,
     };
     let settings_path = crate::utils::paths::settings_path(base_path);
     let raw = match std::fs::read_to_string(&settings_path) {
@@ -428,7 +438,8 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         })
         .and_then(|t| t.as_bool())
         .unwrap_or(true);
-    let (log_level, log_retention_days) = crate::logging::logging_config_from_value(&value);
+    let (log_level, log_retention_days, log_file_enabled) =
+        crate::logging::logging_config_from_value(&value);
     StartupSettings {
         port,
         show_tray,
@@ -436,6 +447,7 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         auto_open_browser,
         log_level,
         log_retention_days,
+        log_file_enabled,
     }
 }
 
