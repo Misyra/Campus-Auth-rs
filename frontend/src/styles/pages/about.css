@@ -250,7 +250,8 @@
   margin-bottom: var(--space-md);
 }
 
-.github-link {
+.github-link,
+.docs-link {
   display: inline-flex;
   align-items: center;
   gap: var(--space-sm);
@@ -265,14 +266,16 @@
   min-height: 40px;
 }
 
-.github-link:hover {
+.github-link:hover,
+.docs-link:hover {
   background: var(--bg-hover);
   border-color: var(--border-hover);
   transform: translateY(-2px);
   box-shadow: var(--shadow-hover);
 }
 
-.github-link svg {
+.github-link svg,
+.docs-link svg {
   width: 20px;
   height: 20px;
 }
