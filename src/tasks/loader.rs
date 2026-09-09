@@ -40,7 +40,7 @@ pub struct TaskSummary {
     pub name: String,
     /// 任务描述
     pub description: String,
-    /// 任务类型：`browser` / `script` / `shell`
+    /// 任务类型：`browser` / `script`
     pub task_type: String,
 }
 
@@ -153,7 +153,7 @@ impl TaskManager {
                 }
             }
 
-            // 脚本/Shell 任务（scripts/*.json，排除 .meta.json）
+            // 脚本任务（scripts/*.json，排除 .meta.json）
             if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -295,7 +295,7 @@ impl TaskManager {
 
         let subdir = match task {
             TaskKind::Browser(_) => &self.browser_dir,
-            TaskKind::Script(_) | TaskKind::Shell(_) => &self.scripts_dir,
+            TaskKind::Script(_) => &self.scripts_dir,
         };
         let path = subdir.join(format!("{task_id}.json"));
         // 同 ID 切换类型时删除另一目录残留（防 browser 优先的影子文件）
@@ -511,7 +511,7 @@ impl TaskManager {
     ///
     /// - `config`：待校验的原始任务 JSON，`type` 缺省按 `browser` 处理；
     /// - `Ok(())`：通过当前任务类型的全部校验（name 非空、timeout 区间钳制、
-    ///   steps 步型字段表 STEP_FIELD_RULES、script/shell 必填项、PowerShell 与
+    ///   steps 步型字段表 STEP_FIELD_RULES、script 必填项、PowerShell 与
     ///   路径穿越拦截等）；
     /// - `Err(Vec<String>)`：校验不通过，携带**全部**（而非首个）人读错误文案，
     ///   顺序即校验遍历顺序，供前端一次性整体展示。
@@ -648,11 +648,9 @@ impl TaskManager {
                     }
                 }
             }
+            // Shell 任务已移除：历史存量 type=shell 明确拒绝，提示改用 script
             "shell" => {
-                let cmd = config.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                if cmd.trim().is_empty() {
-                    errors.push("shell 任务 command 不能为空".to_string());
-                }
+                errors.push("任务类型 shell 已移除，请改用 script 类型".to_string());
             }
             other => errors.push(format!("未知任务类型: {other}")),
         }
@@ -1005,13 +1003,6 @@ mod tests {
     }
 
     #[test]
-    fn test_common_mut_task_id_shell() {
-        let mut task = TaskKind::Shell(ShellTaskConfig::default());
-        task.common_mut().task_id = "shell_id".to_string();
-        assert_eq!(task.common().task_id, "shell_id");
-    }
-
-    #[test]
     fn test_task_name_extraction() {
         let mut cfg = TaskConfig::default();
         cfg.common.name = "测试任务".to_string();
@@ -1028,10 +1019,6 @@ mod tests {
         assert_eq!(
             TaskKind::Script(ScriptTaskConfig::default()).type_name(),
             "script"
-        );
-        assert_eq!(
-            TaskKind::Shell(ShellTaskConfig::default()).type_name(),
-            "shell"
         );
     }
 
@@ -1200,6 +1187,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_rejects_shell_type() {
+        // Shell 类型已移除：校验明确拒绝并提示改用 script
+        let (_tmp, mgr) = make_task_manager().await;
+        let task = serde_json::json!({
+            "type": "shell",
+            "name": "旧 Shell",
+            "command": "echo hi"
+        });
+        let errors = mgr.validate_task(&task).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("shell 已移除")));
+    }
+
+    #[tokio::test]
     async fn test_validate_accepts_evaluate_custom_alias() {
         // Python 执行器注册的 evaluate/custom 别名必须在 Rust 校验侧放行，
         // 否则录制/AI 产物保存时被误拒
@@ -1248,23 +1248,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_save_and_load_shell_task() {
-        // Shell 任务的保存与加载往返
+    async fn test_save_and_load_script_task() {
+        // 脚本任务的保存与加载往返
         let (_tmp, mgr) = make_task_manager().await;
-        let task = TaskKind::Shell(ShellTaskConfig {
+        let task = TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
-                name: "Shell 测试".to_string(),
+                name: "脚本测试".to_string(),
                 ..Default::default()
             },
-            command: "echo hello".to_string(),
+            content: Some("print('hello')".to_string()),
             ..Default::default()
         });
-        mgr.save_task("shell1", &task).await.unwrap();
-        let loaded = mgr.load_task("shell1").await.unwrap();
-        if let TaskKind::Shell(cfg) = loaded {
-            assert_eq!(cfg.command, "echo hello");
+        mgr.save_task("script1", &task).await.unwrap();
+        let loaded = mgr.load_task("script1").await.unwrap();
+        if let TaskKind::Script(cfg) = loaded {
+            assert_eq!(cfg.content, Some("print('hello')".to_string()));
         } else {
-            panic!("应为 Shell 类型");
+            panic!("应为 Script 类型");
         }
     }
 
@@ -1309,12 +1309,12 @@ mod tests {
     async fn test_delete_task_removes_file() {
         // 删除任务后文件应不存在
         let (_tmp, mgr) = make_task_manager().await;
-        let task = TaskKind::Shell(ShellTaskConfig {
+        let task = TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 name: "待删除".to_string(),
                 ..Default::default()
             },
-            command: "echo bye".to_string(),
+            content: Some("print('bye')".to_string()),
             ..Default::default()
         });
         mgr.save_task("to_delete", &task).await.unwrap();
@@ -1336,24 +1336,24 @@ mod tests {
     async fn test_list_tasks_sorted_by_order() {
         // 任务列表应按 .order.json 排序
         let (_tmp, mgr) = make_task_manager().await;
-        let shell1 = TaskKind::Shell(ShellTaskConfig {
+        let script1 = TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 name: "任务B".to_string(),
                 ..Default::default()
             },
-            command: "echo b".to_string(),
+            content: Some("print('b')".to_string()),
             ..Default::default()
         });
-        let shell2 = TaskKind::Shell(ShellTaskConfig {
+        let script2 = TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 name: "任务A".to_string(),
                 ..Default::default()
             },
-            command: "echo a".to_string(),
+            content: Some("print('a')".to_string()),
             ..Default::default()
         });
-        mgr.save_task("task_b", &shell1).await.unwrap();
-        mgr.save_task("task_a", &shell2).await.unwrap();
+        mgr.save_task("task_b", &script1).await.unwrap();
+        mgr.save_task("task_a", &script2).await.unwrap();
 
         let tasks = mgr.list_all_tasks().await;
         let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
@@ -1378,12 +1378,12 @@ mod tests {
     async fn test_set_active_task() {
         // 设置活跃任务后可正确查询
         let (_tmp, mgr) = make_task_manager().await;
-        let task = TaskKind::Shell(ShellTaskConfig {
+        let task = TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 name: "活跃任务".to_string(),
                 ..Default::default()
             },
-            command: "echo active".to_string(),
+            content: Some("print('active')".to_string()),
             ..Default::default()
         });
         mgr.save_task("my_active", &task).await.unwrap();
@@ -1399,12 +1399,12 @@ mod tests {
         let (_tmp, mgr) = make_task_manager().await;
         assert!(!mgr.has_task("no_such_task"));
 
-        let task = TaskKind::Shell(ShellTaskConfig {
+        let task = TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 name: "存在".to_string(),
                 ..Default::default()
             },
-            command: "echo exists".to_string(),
+            content: Some("print('exists')".to_string()),
             ..Default::default()
         });
         mgr.save_task("exists", &task).await.unwrap();
@@ -1477,12 +1477,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let browser = tmp.path().join("tasks").join("browser");
         std::fs::create_dir_all(&browser).unwrap();
-        let task = TaskKind::Shell(ShellTaskConfig {
+        let task = TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 name: "mine".to_string(),
                 ..Default::default()
             },
-            command: "echo mine".to_string(),
+            content: Some("print('mine')".to_string()),
             ..Default::default()
         });
         // 先手写 mine 任务与指向它的 order，再构造管理器

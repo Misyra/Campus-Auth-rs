@@ -47,6 +47,8 @@ export interface StatusSnapshot {
   engine_state?: string;
   /** 快照单调版本号（后端每次发布 +1；旧后端缺字段时为 0，回退 uptime 比较） */
   snapshot_version?: number;
+  /** 更新下载进度（下载期间有值，结束/失败后清空） */
+  update_progress?: { phase: string; percent: number; message: string } | null;
 }
 
 /** 开机自启动状态 */
@@ -235,6 +237,8 @@ export interface UpdateState {
   latest_version: string;
   /** 上次检查失败原因（成功时为空） */
   error: string;
+  /** 远程发布是否缺少当前平台的安装包（区分"已是最新"与"无本平台包"） */
+  platform_unavailable?: boolean;
 }
 
 /** 完整配置（前端内部表示，凭据嵌套） */
@@ -370,11 +374,11 @@ export interface TaskSummary {
   id: string;
   name: string;
   description: string;
-  /** 任务类型：browser / script / shell */
+  /** 任务类型：browser / script（shell 已移除） */
   task_type: string;
 }
 
-/** 任务完整配置（对应后端 TaskKind，按 type 区分 browser/script/shell） */
+/** 任务完整配置（对应后端 TaskKind，按 type 区分 browser/script） */
 export interface TaskConfig {
   type?: string;
   name?: string;
@@ -500,6 +504,14 @@ export interface UpdateInfo {
   url?: string;
   /** 下载包预期 SHA256（点击“立即更新”时回传，固定本次确认的版本） */
   sha256?: string;
+  /** 下载大小（字节） */
+  size?: number;
+  /** 更新说明（changelog） */
+  notes?: string;
+  /** 发布日期 */
+  release_date?: string;
+  /** 远程发布缺少当前平台安装包（此时 has_update=false） */
+  platform_unavailable?: boolean;
   [key: string]: unknown;
 }
 
@@ -548,7 +560,6 @@ export interface InitStatus {
 /** 健康检查 */
 export interface HealthInfo {
   version?: string;
-  python_version?: string;
 }
 
 /** 危险步骤（保存任务前确认） */

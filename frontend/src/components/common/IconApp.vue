@@ -10,7 +10,7 @@
  * 根元素透传 attrs（class / width / height 等由调用方按需附加，
  * 与原写法等价——原 svg 标签上的非图形属性会原样落到本组件根节点）。
  */
-import { computed, type ComponentObjectPropsOptions } from "vue";
+import { computed } from "vue";
 
 /** 图标注册表：name → svg 内部标记（stroke 继承根元素 currentColor） */
 const ICONS = {
@@ -112,9 +112,6 @@ const markup = computed(() => ICONS[props.name]);
 const stroke = computed(() => props.strokeWidth ?? 2);
 
 defineOptions({ inheritAttrs: true });
-// 供模板类型检查的占位（避免未使用告警）
-const _typed: ComponentObjectPropsOptions = {};
-void _typed;
 </script>
 
 <template>

@@ -198,18 +198,25 @@ pub(crate) async fn download_and_verify(
     Ok(archive_path)
 }
 
-/// 从下载 URL 提取资产文件名（截断 query / fragment）
+/// 从下载 URL 提取资产文件名（截断 query / fragment，防御性净化）
 ///
 /// 更新包落盘与解压分派都跟随官方资产名（Windows `.zip` / unix `.tar.gz`）；
-/// URL 无可解析段时回退固定名（zip 兜底）。
+/// URL 无可解析段、末段净化后为空（如 `..`）或超长时回退固定名（zip 兜底）。
+/// 资产名来自 GitHub 且 URL 未解码，正常路径不会命中净化分支——此处是
+/// 防御性约束，避免异常 URL 把路径片段变成落盘文件名。
 fn archive_name_from_url(url: &str) -> String {
     let path_only = url.split(['?', '#']).next().unwrap_or("");
-    path_only
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("campus-auth-update.zip")
-        .to_string()
+    let raw = path_only.rsplit('/').next().unwrap_or("");
+    let sanitized: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\') && !c.is_control())
+        .collect();
+    let trimmed = sanitized.trim().trim_matches('.');
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        "campus-auth-update.zip".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// 将压缩包解压到 `staging_dir/extracted/`，并校验解压出的 exe 存在
@@ -284,6 +291,7 @@ mod tests {
             size: None,
             notes: None,
             release_date: None,
+            platform_unavailable: false,
         }
     }
 
@@ -363,6 +371,32 @@ mod tests {
         );
         let mut rd = tokio::fs::read_dir(tmp.path()).await.unwrap();
         assert!(rd.next_entry().await.unwrap().is_none());
+    }
+
+    /// 文件名净化：正常资产名透传；`..` / 空段 / 超长 / 反斜杠回退或剥离
+    #[test]
+    fn test_archive_name_from_url_sanitized() {
+        assert_eq!(
+            archive_name_from_url("https://x.example/a/Campus-Auth-5.0.0-windows-x64.zip?sig=1"),
+            "Campus-Auth-5.0.0-windows-x64.zip"
+        );
+        // 纯点段 / 空段 → 回退固定名
+        assert_eq!(
+            archive_name_from_url("https://x.example/.."),
+            "campus-auth-update.zip"
+        );
+        assert_eq!(
+            archive_name_from_url("https://x.example/"),
+            "campus-auth-update.zip"
+        );
+        // 超长（>128 字符）→ 回退固定名
+        let long = format!("https://x.example/{}.zip", "a".repeat(130));
+        assert_eq!(archive_name_from_url(&long), "campus-auth-update.zip");
+        // 反斜杠剥离（路径分隔符不得进入文件名）
+        assert_eq!(
+            archive_name_from_url("https://x.example/a\\pkg.zip"),
+            "apkg.zip"
+        );
     }
 
     /// 非白名单 URL 不出网直接拒绝；缺 SHA 不出网直接拒绝

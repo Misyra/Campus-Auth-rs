@@ -6,11 +6,13 @@ import FieldHelp from "@/components/common/FieldHelp.vue";
 import { computed, onMounted, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useConfirm } from "@/composables/useConfirm";
+import { useStatus } from "@/composables/useStatus";
 import { systemApi, configApi } from "@/api";
 import type { UpdateState, UpdateInfo } from "@/api/types";
 
 const config = useConfig();
 const { confirm } = useConfirm();
+const { status } = useStatus();
 
 const checkFrequencyOptions = [
   { value: "0", label: "每次启动" },
@@ -34,6 +36,8 @@ const channelOptions = [
 
 const updateChecking = ref(false);
 const updating = ref(false);
+/** 下载进度（WS 状态快照的 update_progress，下载期间有值） */
+const updateProgress = computed(() => status.update_progress ?? null);
 const updateState = ref<UpdateState | null>(null);
 const updateInfo = ref<UpdateInfo | null>(null);
 
@@ -51,6 +55,7 @@ const updateCheckHint = computed(() => {
   if (!s) return "";
   if (s.error) return `上次检查失败：${s.error}`;
   if (s.has_update) return `发现新版本 v${s.latest_version}`;
+  if (s.platform_unavailable) return `远程发布暂无当前平台的安装包（远程 v${s.latest_version}）`;
   return s.latest_version ? `当前已是最新（远程 v${s.latest_version}）` : "";
 });
 async function manualCheckUpdate() {
@@ -236,14 +241,16 @@ onMounted(() => { void refreshUpdateState(); });
             <div v-if="updateInfo && !updateInfo.error && !updateInfo.message" class="update-result">
               <div v-if="updateInfo.has_update" class="update-available">
                 <IconApp name="upload" width="16" height="16" />
-                <span>发现新版本 <strong>v{{ updateInfo.latest }}</strong></span>
+                <span>发现新版本 <strong>v{{ updateInfo.latest }}</strong><template v-if="updateInfo.size">（约 {{ (updateInfo.size / 1048576).toFixed(1) }} MB）</template></span>
                 <button class="btn btn-primary btn-sm" :disabled="updating" @click="applyUpdate">{{ updating ? "更新中..." : "立即更新" }}</button>
                 <a v-if="updateInfo.url" :href="updateInfo.url" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm">前往下载</a>
               </div>
               <div v-else class="update-latest">
                 <IconApp name="check" width="16" height="16" />
-                <span>当前已是最新版本</span>
+                <span>{{ updateInfo.platform_unavailable ? "远程发布暂无当前平台的安装包" : "当前已是最新版本" }}</span>
               </div>
+              <div v-if="updating && updateProgress" class="hint update-progress">下载更新 {{ updateProgress.percent }}%</div>
+              <p v-if="updateInfo.has_update && updateInfo.notes" class="hint update-notes">{{ updateInfo.notes }}</p>
             </div>
             <div v-else-if="updateInfo && updateInfo.message" class="update-success">
               <IconApp name="check" width="16" height="16" />
@@ -283,3 +290,12 @@ onMounted(() => { void refreshUpdateState(); });
     </section>
   </div>
 </template>
+
+<style scoped>
+.update-notes {
+  white-space: pre-line;
+  margin: 6px 0 0;
+  max-height: 8em;
+  overflow-y: auto;
+}
+</style>

@@ -214,6 +214,5 @@ export function useAppearance() {
     getEffectiveTheme,
     resetThemeBackground,
     applyAppearance,
-    saveStoredAppearance,
   };
 }

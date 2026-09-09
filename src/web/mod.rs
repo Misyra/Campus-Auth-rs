@@ -58,15 +58,11 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         }),
         // ---- 配置（config）----
         ("GET", "/api/config", || get(routes::config::get_settings)),
-        ("PUT", "/api/config", || put(routes::config::put_settings)),
         ("PATCH", "/api/config", || {
             patch(routes::config::patch_settings)
         }),
         ("POST", "/api/config/reload", || {
             post(routes::config::reload_settings)
-        }),
-        ("GET", "/api/config/defaults", || {
-            get(routes::config::get_config_defaults)
         }),
         ("GET", "/api/config/log-levels", || {
             get(routes::config::get_log_levels)
@@ -183,9 +179,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/scheduler/jobs", || {
             post(routes::scheduler::create_job)
         }),
-        ("GET", "/api/scheduler/jobs/{id}", || {
-            get(routes::scheduler::get_job)
-        }),
         ("PUT", "/api/scheduler/jobs/{id}", || {
             put(routes::scheduler::update_job)
         }),
@@ -247,8 +240,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/environment/bootstrap", || {
             post(routes::system::bootstrap_environment)
         }),
-        // ---- 图标（icons）----
-        ("GET", "/api/icons", || get(routes::system::list_icons)),
         // ---- 卸载（uninstall）----
         ("GET", "/api/uninstall/detect", || {
             get(routes::uninstall::detect_uninstall)
@@ -288,9 +279,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/autostart/disable", || {
             post(routes::autostart::disable_autostart)
         }),
-        ("POST", "/api/autostart/mode", || {
-            post(routes::autostart::set_autostart_mode)
-        }),
         // ---- AI 任务生成（ai）----
         ("GET", "/api/ai/llm-config", || {
             get(routes::ai::get_llm_config)
@@ -308,7 +296,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/ai/capture/bundle", || {
             get(routes::ai::capture_bundle)
         }),
-        ("POST", "/api/ai/generate", || post(routes::ai::generate)),
         ("POST", "/api/ai/generate/stream", || {
             post(routes::ai::generate_stream)
         }),
@@ -327,7 +314,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
             post(routes::ocr::ocr_uninstall)
         }),
         // ---- 脚本（scripts）----
-        ("GET", "/api/scripts", || get(routes::scripts::list_scripts)),
         ("POST", "/api/scripts/run", || {
             post(routes::scripts::run_script)
         }),
@@ -343,11 +329,7 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("DELETE", "/api/scripts/{task_id}", || {
             delete(routes::scripts::delete_script)
         }),
-        ("GET", "/api/shells", || get(routes::scripts::list_shells)),
         // ---- 工具（tools）----
-        ("GET", "/api/tools/network-interfaces", || {
-            get(routes::monitor::list_network_interfaces)
-        }),
         ("GET", "/api/tools/task-recorder.user.js", || {
             get(routes::tools::task_recorder)
         }),

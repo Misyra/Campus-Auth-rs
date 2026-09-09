@@ -347,14 +347,6 @@
   border: 0;
 }
 
-/* form-hint */
-.form-hint {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  margin-top: var(--space-xs);
-  margin-bottom: 0;
-}
-
 /* 背景图预览：复用公共 Modal 容器，此处只留内容区图片样式 */
 .bg-preview-body img {
   max-width: 100%;

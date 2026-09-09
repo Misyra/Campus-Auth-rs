@@ -127,8 +127,7 @@ function openEditScheduledTask(task: ScheduledTask): void {
   Object.assign(scheduledTaskForm.value, {
     name: task.name || "",
     description: task.description || "",
-    // 表单类型仅用于展示/切换目标下拉：shell 为历史数据的合法取值但无对应
-    // 选项，回落 browser 展示；保存不上传类型，后端始终从 target 推导
+    // 表单类型仅用于展示/切换目标下拉；保存不上传类型，后端始终从 target 推导
     task_type: task.task_type === "script" ? "script" : "browser",
     target_id: task.target_id || "",
     enabled: task.enabled !== false,
@@ -275,7 +274,7 @@ function closeScheduledTaskHistory(): void {
 }
 
 function formatTaskType(type: string): string {
-  const types: Record<string, string> = { script: "自定义脚本", browser: "浏览器任务", shell: "Shell 命令" };
+  const types: Record<string, string> = { script: "自定义脚本", browser: "浏览器任务" };
   return types[type] || type;
 }
 

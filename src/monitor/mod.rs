@@ -38,30 +38,9 @@ const INTERFACE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// 监测相关错误
 #[derive(Debug, thiserror::Error)]
 pub enum MonitorError {
-    /// 配置读取失败
-    #[error("配置读取失败: {0}")]
-    ConfigLoad(String),
-
-    /// 网卡检测失败
-    #[error("网卡检测失败: {0}")]
-    InterfaceDetect(String),
-
     /// reqwest 客户端构建失败
     #[error("reqwest 客户端构建失败: {0}")]
     ClientBuild(String),
-
-    /// 探测超时
-    #[error("探测超时: {kind:?} ({timeout_ms}ms)")]
-    ProbeTimeout {
-        /// 超时的探测类别
-        kind: ProbeKind,
-        /// 超时毫秒数
-        timeout_ms: u64,
-    },
-
-    /// 所有探测类型均已禁用
-    #[error("所有探测类型均已禁用")]
-    AllProbesDisabled,
 }
 
 /// 从 RuntimeConfig 提取的监测配置子集

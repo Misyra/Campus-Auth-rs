@@ -7,7 +7,6 @@ run_all/stop 等 WorkerCore 方法）仍留在 WorkerCore——它们驱动真�
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,7 +23,6 @@ class DebugSession:
     task_config: TaskConfig
     context: StepContext
     cancel_id: str = ""
-    cancel_event: threading.Event | None = None
     # 自动步进游标：前端“下一步”无显式索引时，按顺序执行尚未运行的步骤
     current_step: int = 0
     # 面向前端的会话数据（对齐原版 debug_to_response）：

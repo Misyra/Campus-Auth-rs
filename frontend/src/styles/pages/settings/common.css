@@ -132,10 +132,6 @@
   align-items: start;
 }
 
-.settings-grid-2col--airy {
-  gap: var(--space-lg);
-}
-
 /* ---- 间距工具类 ---- */
 .settings-toggle-spacer {
   margin-top: 12px;
@@ -157,14 +153,6 @@
   .appearance-grid-2col {
     grid-template-columns: 1fr;
   }
-}
-
-.settings-panel .info-box ul {
-  margin-top: 10px;
-  padding-left: 18px;
-  color: var(--text-secondary);
-  display: grid;
-  gap: var(--space-sm);
 }
 
 .settings-page .btn-icon-only {

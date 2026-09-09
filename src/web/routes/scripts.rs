@@ -43,12 +43,6 @@ fn check_supported_binary(
     Ok(())
 }
 
-/// GET /api/scripts — 列出全部脚本（复用任务列表）
-pub async fn list_scripts(State(tasks): State<Arc<dyn TaskApi>>) -> Result<Json<Value>, ApiError> {
-    let tasks = tasks.list_all_tasks().await;
-    Ok(data(tasks))
-}
-
 /// POST /api/scripts/run 请求体：按 task_id 运行已保存脚本，或直接运行 script 内容（二选一）
 #[derive(Deserialize)]
 pub struct RunScriptBody {
@@ -195,35 +189,6 @@ pub async fn delete_script(
 ) -> Result<Json<Value>, ApiError> {
     tasks.delete_task(&task_id).await?;
     Ok(data(Value::String("ok".into())))
-}
-
-/// GET /api/shells — Shell 列表（Shell 任务专用，与 Script 任务正交）
-///
-/// 返回系统可用 Shell（用于 `TaskKind::Shell.shell_path`），支持
-/// `powershell/pwsh`；Script 任务（`TaskKind::Script`）的 `binary_path`
-/// 禁止 PowerShell（见 `check_supported_binary` 与 `is_supported_ext`），
-/// 二者域不同，不视为矛盾。
-pub async fn list_shells() -> Result<Json<Value>, ApiError> {
-    #[cfg(target_os = "windows")]
-    {
-        Ok(data(serde_json::json!({
-            "shells": [
-                { "name": "PowerShell", "path": "powershell.exe" },
-                { "name": "CMD", "path": "cmd.exe" }
-            ],
-            "default": "powershell.exe"
-        })))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(data(serde_json::json!({
-            "shells": [
-                { "name": "bash", "path": "/bin/bash" },
-                { "name": "sh", "path": "/bin/sh" }
-            ],
-            "default": "/bin/bash"
-        })))
-    }
 }
 
 #[cfg(test)]
@@ -447,33 +412,14 @@ mod tests {
             env: Arc::new(MockEnvironmentApi),
         };
         let app = axum::Router::new()
-            .route("/api/scripts", get(list_scripts))
             .route("/api/scripts/run", post(run_script))
             .route("/api/scripts/binaries", get(list_binaries))
             .route(
                 "/api/scripts/{task_id}",
                 get(get_script).put(update_script).delete(delete_script),
             )
-            .route("/api/shells", get(list_shells))
             .with_state(state);
         (app, inner)
-    }
-
-    /// 空列表形状：data 为 []
-    #[tokio::test]
-    async fn list_empty_returns_array() {
-        let (app, _) = mock_app(vec![]);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/scripts")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(body_json(resp).await["data"], serde_json::json!([]));
     }
 
     /// task_id 与 script 双缺 → 400（不触达执行器）
@@ -663,26 +609,5 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["data"][0]["name"], "python");
         assert_eq!(v["data"][0]["path"], "/mock/python");
-    }
-
-    /// shells 按编译目标返回（无状态依赖）
-    #[tokio::test]
-    async fn shells_match_platform() {
-        let (app, _) = mock_app(vec![]);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/shells")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let v = body_json(resp).await;
-        #[cfg(target_os = "windows")]
-        assert_eq!(v["data"]["default"], "powershell.exe");
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(v["data"]["default"], "/bin/bash");
     }
 }

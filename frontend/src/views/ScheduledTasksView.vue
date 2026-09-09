@@ -17,8 +17,7 @@ const { tasks: browserTasks } = useTasks();
 
 onMounted(() => { void st.loadScheduledTasks(); });
 
-// 类型仅用于切换目标下拉：保存不上传 task_type，后端从 target 推导——
-// 不提供 shell 选项（选了也会按 target 被推导成 browser 任务，纯误导）
+// 类型仅用于切换目标下拉：保存不上传 task_type，后端从 target 推导
 const scheduledTaskTypeOptions: SelectOption[] = [
   { value: "browser", label: "浏览器任务" },
   { value: "script", label: "自定义脚本" },

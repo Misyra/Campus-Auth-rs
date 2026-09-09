@@ -526,6 +526,7 @@ impl ApplyUpdateBody {
             size: None,
             notes: None,
             release_date: None,
+            platform_unavailable: false,
         })
     }
 }
@@ -553,7 +554,9 @@ pub async fn apply_update(
     tracing::info!(version = %info.latest_version, "开始下载并暂存更新");
     updater.apply_update(&info).await.map_err(|e| {
         tracing::warn!(version = %info.latest_version, "应用更新失败: {e}");
-        ApiError::Internal(format!("应用更新失败: {e}"))
+        // 走 From 映射：UpdateInProgress / LoginInProgress 等调用时序冲突回 409，
+        // 不再统一包成 500 误导前端走"服务端故障"分支
+        ApiError::from(e)
     })?;
     Ok(data(serde_json::json!({
         "message": "更新已暂存，重启后生效",
@@ -688,26 +691,6 @@ pub async fn bootstrap_environment(
         "progress": st.progress,
         "last_error": st.last_error,
     })))
-}
-
-/// GET /api/icons — 可用图标列表
-///
-/// 扫描资源图标目录返回可用图标。目录不存在时返回空列表。
-pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let icons_dir = state.config.base_path().join("resources").join("icons");
-    let mut icons = Vec::new();
-    // 目录扫描用 tokio::fs，避免同步 std::fs 阻塞 tokio worker 线程
-    if let Ok(mut rd) = tokio::fs::read_dir(&icons_dir).await {
-        while let Some(entry) = rd.next_entry().await.ok().flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".png") || name.ends_with(".ico") || name.ends_with(".svg") {
-                    let stem = name.split('.').next().unwrap_or(name).to_string();
-                    icons.push(serde_json::json!({ "name": stem, "file": name }));
-                }
-            }
-        }
-    }
-    Ok(data(icons))
 }
 
 // ---- 文档 ----
@@ -1119,6 +1102,7 @@ mod tests {
             size: Some(1024),
             notes: Some("修复若干问题".into()),
             release_date: None,
+            platform_unavailable: false,
         }
     }
 

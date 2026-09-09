@@ -84,9 +84,9 @@ pub struct SchedulerService {
     self_weak: std::sync::Weak<Self>,
     /// 配置服务（任务通知开关 app.task_notification 读取）
     config: Arc<ConfigService>,
-    /// 加载 browser/script/shell 任务配置。
+    /// 加载 browser/script 任务配置。
     task_manager: Arc<TaskManager>,
-    /// 脚本/Shell/浏览器任务执行。
+    /// 脚本/浏览器任务执行。
     executor: Arc<crate::tasks::TaskExecutor>,
     /// 状态广播。
     status_manager: Arc<StatusManager>,
@@ -212,7 +212,7 @@ impl SchedulerService {
             .clone()
     }
 
-    /// 返回目标任务的类型（`browser`/`script`/`shell`），供展示层补充类型标签。
+    /// 返回目标任务的类型（`browser`/`script`），供展示层补充类型标签。
     ///
     /// 类型权威来源为 [`crate::tasks::TaskKind`]（由 target_id 关联的任务推导），
     /// 定时任务存储模型本身不再冗余存类型。
@@ -504,7 +504,7 @@ pub trait SchedulerApi: Send + Sync {
     fn list_tasks(&self) -> Vec<ScheduledTask>;
     /// 查询单个任务。
     fn get_task(&self, id: &str) -> Option<ScheduledTask>;
-    /// 返回目标任务的类型（`browser`/`script`/`shell`）。
+    /// 返回目标任务的类型（`browser`/`script`）。
     async fn task_type_of(&self, target_id: &str) -> Option<&'static str>;
     /// 保存任务（创建或更新）。
     async fn save_task(&self, id: &str, task: &ScheduledTask) -> Result<(), SchedulerError>;

@@ -67,9 +67,6 @@ class StepContext:
     variables: dict[str, str] = field(default_factory=dict)
     """模板变量映射。"""
 
-    browser_settings: dict[str, Any] = field(default_factory=dict)
-    """浏览器设置。"""
-
     cancel_event: threading.Event | None = None
     """跨线程取消事件，处理器在边界处检查。"""
 
@@ -99,14 +96,6 @@ class StepContext:
 
     screenshots: list[str] = field(default_factory=list)
     """本次动作产生的截图路径收集。"""
-
-    on_page_lost: Callable[[], None] = lambda: None
-    """页面被强制中断（evaluate 超时/取消时 close）后的回调。
-
-    Worker 构造 context 时注入：同步清空 ``self._page`` 死引用并结束依赖
-    该页的调试会话，避免后续步骤以 "Target page closed" 混乱失败、
-    下一任务也无法重建页面。"""
-
 
 def _check_cancel(context: StepContext) -> None:
     """在步骤边界检查取消事件，若已触发则抛出 StepCancelled。"""

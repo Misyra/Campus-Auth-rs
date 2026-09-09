@@ -1,5 +1,5 @@
 {
-  "_comment": "跨语言任务配置契约样例（B5）：与 Rust src/tasks/models.rs 的浏览器 TaskConfig 序列化形状对齐（Rust 侧经 TaskManager::embed_task_config 以 serde_json::to_value(&TaskConfig) 嵌入 task_config 键下发 Worker），两端 CI 共同护航：Rust 侧以 serde 反序列化测试为准，Python 侧由 tests/test_task_contract.py 加载本文件走 TaskConfig.from_dict 断言全字段解析往返一致。注：script/shell 任务不经 IPC 下发 Python（embed 仅嵌入浏览器任务），故本契约只覆盖浏览器任务；步骤默认契约：required=true / clear=true / duration=1000。本 _comment 键为文档说明，Python 侧应落入 TaskConfig.extras。",
+  "_comment": "跨语言任务配置契约样例（B5）：与 Rust src/tasks/models.rs 的浏览器 TaskConfig 序列化形状对齐（Rust 侧经 TaskManager::embed_task_config 以 serde_json::to_value(&TaskConfig) 嵌入 task_config 键下发 Worker），两端 CI 共同护航：Rust 侧以 serde 反序列化测试为准，Python 侧由 tests/test_task_contract.py 加载本文件走 TaskConfig.from_dict 断言全字段解析往返一致。注：script 任务不经 IPC 下发 Python（embed 仅嵌入浏览器任务），故本契约只覆盖浏览器任务；步骤默认契约：required=true / clear=true / duration=1000。本 _comment 键为文档说明，Python 侧应落入 TaskConfig.extras。",
   "task_id": "contract_sample",
   "name": "契约样例任务",
   "description": "覆盖全字段与全步骤类型的浏览器任务样例",

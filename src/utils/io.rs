@@ -69,6 +69,25 @@ pub fn fsync_full(file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 计算文件 SHA256（hex 小写）
+///
+/// 更新器主进程与 helper 二进制共用（此前两处重复实现）。
+pub fn file_sha256(path: &Path) -> std::io::Result<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// rename 失败（跨卷等）时的回退安装：copy 到目标同目录临时名再原子 rename（A6/F11）
 ///
 /// 保证目标位置永远不出现半成品文件：
@@ -379,16 +398,7 @@ impl std::error::Error for DownloadError {}
 ///
 /// 停滞检测：响应头等待与相邻 chunk 间均受 `stall_timeout` 保护（慢网只要持续
 /// 出数据就不判失败，仅彻底停滞才超时；调用方传 `None` 时不做停滞判定，仅做总超时由上层包裹）。
-pub async fn download_streaming(
-    client: &reqwest::Client,
-    url: &str,
-    dest: &Path,
-    max_bytes: u64,
-) -> Result<(), DownloadError> {
-    download_streaming_with_stall(client, url, dest, max_bytes, None).await
-}
-
-/// 同 [`download_streaming`]，但带停滞超时（相邻 chunk 间最大空闲时间）。
+/// 带停滞超时（相邻 chunk 间最大空闲时间）的流式下载。
 pub async fn download_streaming_with_stall(
     client: &reqwest::Client,
     url: &str,

@@ -200,70 +200,6 @@ pub async fn capture_status(
     })))
 }
 
-/// POST /api/ai/generate — 由捕获产物生成任务 JSON
-///
-/// body: `{ extra_prompt? }`。流程：读 `captures/latest/` → 组装提示词
-/// （schema 浓缩指南 + 截图 + HTML/JS）→ LLM 生成 → 强校验 → 错误回喂自纠一轮。
-/// 返回的 JSON 未入库，前端预览/编辑后走 `/api/tasks/import` 保存。
-pub async fn generate(
-    State(config): State<Arc<dyn ConfigApi>>,
-    State(tasks): State<Arc<dyn TaskApi>>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    let extra_prompt = body
-        .get("extra_prompt")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let base = config.base_path();
-    let settings = ai::load_llm_settings(&base);
-    if !settings.is_configured() {
-        return Err(ApiError::BadRequest(
-            "请先配置 LLM 的 Base URL 与模型名".into(),
-        ));
-    }
-    let api_key = if settings.api_key_enc.is_empty() {
-        String::new()
-    } else {
-        ai::decrypt_api_key(&settings.api_key_enc)
-            .map_err(|_| {
-                ApiError::BadRequest(
-                    "API Key 解密失败（密钥文件可能已轮转），请在配置区重新保存 API Key".into(),
-                )
-            })?
-            .to_string()
-    };
-
-    let ctx = load_capture_context(&base).await?;
-    let warnings = ctx.1;
-    // 注入强校验：Value 小，clone 进 future 规避 HRTB 生命周期问题
-    let validate = move |v: &Value| {
-        let task = v.clone();
-        let tasks = tasks.clone();
-        async move { tasks.validate_task_json(&task).await }
-    };
-    let outcome = crate::ai::generate::generate_with(&ctx.0, extra_prompt, validate, |messages| {
-        crate::ai::llm::chat_completion(&settings, &api_key, messages)
-    })
-    .await?;
-
-    let mut all_warnings = warnings;
-    all_warnings.extend(outcome.warnings);
-    tracing::info!(
-        attempts = outcome.attempts,
-        model = %settings.model,
-        "AI 任务生成完成"
-    );
-    Ok(data(json!({
-        "task": outcome.task,
-        "attempts": outcome.attempts,
-        "warnings": all_warnings,
-        "model": settings.model,
-        "base_url": settings.base_url,
-    })))
-}
-
 /// 获取在途生成令牌（防重入）：已有生成在途时返回 409。
 fn acquire_inflight_token() -> Result<CancellationToken, ApiError> {
     let mut guard = GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner());
@@ -844,7 +780,6 @@ mod tests {
                 get(capture_screenshot).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
             )
             .route("/api/ai/capture/bundle", get(capture_bundle))
-            .route("/api/ai/generate", post(generate))
             .with_state(state);
         (app, inner, cfg_inner, dir)
     }
@@ -1185,49 +1120,5 @@ mod tests {
                 "missing {expect}: {names:?}"
             );
         }
-    }
-
-    /// generate：未配置 LLM → 400；未捕获 → 400
-    #[tokio::test]
-    async fn test_generate_requires_config_and_capture() {
-        let (app, _, _, _) = mock_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/ai/generate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(json!({}).to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let v = body_json(resp).await;
-        assert!(v["error"]["message"].as_str().unwrap().contains("请先配置"));
-
-        // 配置后但未捕获
-        let (app, _, _, dir) = mock_app();
-        let settings = LlmSettings {
-            base_url: "https://a.com".into(),
-            model: "m".into(),
-            api_key_enc: String::new(),
-            max_tokens: None,
-        };
-        ai::save_llm_settings(dir.path(), &settings).unwrap();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/ai/generate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(json!({}).to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let v = body_json(resp).await;
-        assert!(v["error"]["message"].as_str().unwrap().contains("捕获"));
     }
 }

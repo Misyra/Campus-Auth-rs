@@ -372,10 +372,10 @@ pub enum UpdateChannel {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct UpdaterSettings {
-    /// 启动时是否检查更新
+    /// 启动时是否检查更新（`auto_check_enabled` 开启时生效）
     ///
-    /// 仅在 `check_interval_hours == 0`（不周期检查）时独立生效：有周期检查时
-    /// 首轮"立即补查"语义与启动检查等价（见 updater 后台循环的 due_now 逻辑）。
+    /// 关闭后启动阶段不检查，首轮检查按 `check_interval_hours` 周期等待；
+    /// 总开关运行期由关到开时会立即补查一次（见 updater 后台循环）。
     pub check_on_startup: bool,
     /// 是否启用自动检查更新（总开关）
     ///

@@ -42,22 +42,6 @@ pub async fn get_settings(
     )))
 }
 
-/// PUT /api/config — 保存设置（按扁平 payload 合并更新）
-///
-/// 前端对 /api/config 的唯一实际用法是发送与 GET 响应同形的扁平 payload。
-/// 旧实现把 body 按嵌套 `SettingsData` 反序列化，serde default 全兜底导致
-/// 扁平 payload 中未指定的字段被整体清成默认值（一次误调用即清空整份配置）。
-/// 现复用 PATCH 的扁平字段映射：PUT 语义从「全量替换」收敛为「合并更新」，
-/// 未指定字段保持原值，凭证照常写入活跃 Profile，响应与 GET/PATCH 一致。
-pub async fn put_settings(
-    State(config): State<Arc<dyn ConfigApi>>,
-    State(profiles): State<Arc<dyn ProfileApi>>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    apply_flat_settings_patch(&config, &profiles, &body).await?;
-    reload_and_flat_response(&config).await
-}
-
 /// PATCH /api/config — 局部更新全局设置（合并后保存）
 ///
 /// 前端发送扁平结构 { browser, monitor, pause, logging, retry, app_settings, ... }
@@ -73,7 +57,7 @@ pub async fn patch_settings(
     reload_and_flat_response(&config).await
 }
 
-/// 将前端扁平 patch 应用并保存（PUT / PATCH /api/config 共用）
+/// 将前端扁平 patch 应用并保存（PATCH /api/config）
 ///
 /// 凭证字段（username/password/auth_url/isp/active_task）直接写入活跃 Profile；
 /// 全局设置经 [`ConfigApi::modify_settings_tx`] 的提交事务落盘——「读取→合并→
@@ -263,7 +247,7 @@ async fn reload_and_flat_response(config: &Arc<dyn ConfigApi>) -> Result<Json<Va
     )))
 }
 
-/// 构造设置扁平响应（GET / PUT / PATCH /api/config 与 GET /api/config/defaults 共用）
+/// 构造设置扁平响应（GET / PATCH /api/config 共用）
 ///
 /// 字段顺序与历史响应完全一致；monitor 字段做后端→前端字段名映射
 fn settings_flat_response(
@@ -308,17 +292,6 @@ pub async fn reload_settings(
 ) -> Result<Json<Value>, ApiError> {
     config.reload().await?;
     Ok(data(Value::String("ok".into())))
-}
-
-/// GET /api/config/defaults — 返回配置默认值（扁平结构，与 GET /api/config 格式对齐）
-pub async fn get_config_defaults() -> Result<Json<Value>, ApiError> {
-    let defaults = crate::config::SettingsData::default();
-    // 默认 Profile 无凭证：username/auth_url/isp/active_task 均为空、has_password 恒 false
-    Ok(data(settings_flat_response(
-        &defaults,
-        &crate::config::ProfileData::default(),
-        false,
-    )))
 }
 
 /// GET /api/config/log-levels — 返回当前日志级别
@@ -909,7 +882,7 @@ mod tests {
 
     /// 双域 state：ConfigApi + ProfileApi 各自经 FromRef 委派提取
     ///
-    /// put_settings / patch_settings 均声明双 State 依赖（凭证写入活跃 Profile）
+    /// patch_settings 声明双 State 依赖（凭证写入活跃 Profile）
     #[derive(Clone)]
     struct PatchTestState {
         config: Arc<dyn ConfigApi>,
@@ -941,10 +914,7 @@ mod tests {
             profiles: Arc::new(MockProfileApi),
         };
         let app = axum::Router::new()
-            .route(
-                "/api/config",
-                get(get_settings).put(put_settings).patch(patch_settings),
-            )
+            .route("/api/config", get(get_settings).patch(patch_settings))
             .route("/api/config/log-levels", get(get_log_levels))
             .route("/api/config/log-level", axum::routing::put(set_log_level))
             .route("/api/pure-mode", get(get_pure_mode).post(set_pure_mode))
@@ -993,29 +963,6 @@ mod tests {
         ] {
             assert!(d.get(key).is_some(), "缺少字段 {key}");
         }
-    }
-
-    /// PUT 全量保存后触发 reload 并回读
-    #[tokio::test]
-    async fn test_put_settings_saves_and_reloads() {
-        let (app, inner) = mock_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/config")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"active_profile_id": "default"}).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let g = inner.lock().unwrap();
-        assert_eq!(g.save_calls, 1);
-        assert_eq!(g.reload_calls, 1);
     }
 
     /// 日志级别读写往返
@@ -1160,7 +1107,7 @@ mod tests {
         assert_eq!(v["data"]["updater"]["channel"], "stable");
     }
 
-    // ============ patch_settings / put_settings 共用映射（双 state 提取，M1） ============
+    // ============ patch_settings 扁平映射（双 state 提取，M1） ============
 
     /// 凭证字段路由到 Profile、密码走 save_password 语义、全局字段落 settings
     #[tokio::test]
@@ -1208,11 +1155,11 @@ mod tests {
         assert_eq!(d["has_password"], true);
     }
 
-    // ============ B4：PUT 扁平 payload 不得清空未指定字段 ============
+    // ============ B4：PATCH 扁平 payload 不得清空未指定字段 ============
 
-    /// PUT 扁平 payload：未指定字段保持原值（不清空），响应为扁平结构
+    /// PATCH 扁平 payload：未指定字段保持原值（不清空），响应为扁平结构
     #[tokio::test]
-    async fn test_put_settings_flat_payload_keeps_unspecified_fields() {
+    async fn test_patch_settings_flat_payload_keeps_unspecified_fields() {
         let (app, inner) = mock_app();
         // 预置非默认值：pause.enabled=true、monitor.check_interval=120、username=orig
         {
@@ -1224,7 +1171,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .method("PUT")
+                    .method("PATCH")
                     .uri("/api/config")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -1262,22 +1209,22 @@ mod tests {
             "worker",
             "updater",
         ] {
-            assert!(d.get(key).is_some(), "PUT 响应缺少扁平字段 {key}");
+            assert!(d.get(key).is_some(), "PATCH 响应缺少扁平字段 {key}");
         }
         assert!(
             d.get("global").is_none(),
-            "PUT 响应不应再返回嵌套 SettingsData 结构"
+            "PATCH 响应不应再返回嵌套 SettingsData 结构"
         );
     }
 
-    /// PUT 不合法字段值返回 400（类型不匹配在合并反序列化时暴露）
+    /// PATCH 不合法字段值返回 400（类型不匹配在合并反序列化时暴露）
     #[tokio::test]
-    async fn test_put_settings_rejects_invalid_field_value() {
+    async fn test_patch_settings_rejects_invalid_field_value() {
         let (app, inner) = mock_app();
         let resp = app
             .oneshot(
                 Request::builder()
-                    .method("PUT")
+                    .method("PATCH")
                     .uri("/api/config")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -1336,30 +1283,5 @@ mod tests {
         assert_eq!(g.profile.password, "");
         assert!(!g.settings.global.pause.enabled);
         assert_eq!(g.save_calls, 0);
-    }
-
-    /// PUT 同样走凭证路径：Profile 加载失败返回 400（与 PATCH 行为一致）
-    #[tokio::test]
-    async fn test_put_settings_reports_profile_load_failure() {
-        let (app, inner) = mock_app();
-        {
-            let mut g = inner.lock().unwrap();
-            g.profile_load_fails = true;
-        }
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/config")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "username": "alice" }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(inner.lock().unwrap().save_calls, 0);
     }
 }

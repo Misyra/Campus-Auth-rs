@@ -1616,12 +1616,12 @@ fn debug_session_stale(last_activity: Option<Instant>, now: Instant) -> bool {
 ///
 /// 兼容（允许继续）：
 /// - 无活跃会话：任意方法
-/// - InLogin + (execute_login/browser_task/debug_start)：FIFO 排队
+/// - InLogin + (execute_login_attempt/execute_browser_task/debug_start)：FIFO 排队
 /// - InDebug + (debug_step/debug_stop/debug_run_all)：FIFO 排队
 ///
 /// 不兼容（快速失败 [`BridgeError::WorkerBusy`]）：
 /// - InLogin + (debug_step/debug_stop)
-/// - InDebug + (execute_login/browser_task)：登录请求快速失败
+/// - InDebug + (execute_login_attempt/execute_browser_task)：登录请求快速失败
 /// - InDebug + debug_start：已有调试会话
 ///
 /// `ocr_recognize` 轻量且单线程串行，允许与任意会话并发。
@@ -1693,8 +1693,8 @@ mod tests {
     #[test]
     fn 无会话_任意方法均兼容() {
         for m in [
-            "execute_login",
-            "browser_task",
+            "execute_login_attempt",
+            "execute_browser_task",
             "debug_start",
             "debug_step",
             "debug_stop",
@@ -1706,8 +1706,8 @@ mod tests {
 
     #[test]
     fn 登录会话_允许登录与浏览器任务() {
-        assert_ok(Some(SessionType::Login), "execute_login");
-        assert_ok(Some(SessionType::Login), "browser_task");
+        assert_ok(Some(SessionType::Login), "execute_login_attempt");
+        assert_ok(Some(SessionType::Login), "execute_browser_task");
     }
 
     #[test]
@@ -1736,8 +1736,8 @@ mod tests {
 
     #[test]
     fn 调试会话_登录与浏览器任务应忙碌() {
-        assert_busy(Some(SessionType::Debug), "execute_login");
-        assert_busy(Some(SessionType::Debug), "browser_task");
+        assert_busy(Some(SessionType::Debug), "execute_login_attempt");
+        assert_busy(Some(SessionType::Debug), "execute_browser_task");
     }
 
     #[test]
@@ -2082,7 +2082,7 @@ mod tests {
         // 这里直接验证 compat + 开合组合语义的等价判定路径：
         let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
         assert_busy(Some(SessionType::Debug), "execute_login_attempt");
-        assert_busy(Some(SessionType::Debug), "browser_task");
+        assert_busy(Some(SessionType::Debug), "execute_browser_task");
         assert!(
             matches!(
                 check_session_compat(inner.current_session, "debug_start"),

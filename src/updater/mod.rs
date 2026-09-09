@@ -50,6 +50,9 @@ pub struct LastCheckState {
     /// 上次检查失败原因（成功时为空）
     #[serde(default)]
     pub error: String,
+    /// 远程发布是否缺少当前平台的安装包（区分"已是最新"与"无本平台包"）
+    #[serde(default)]
+    pub platform_unavailable: bool,
 }
 
 /// 将检查结果写入状态文件（best-effort：失败仅 warn，不影响检查流程本身）
@@ -101,6 +104,8 @@ pub struct UpdateInfo {
     pub notes: Option<String>,
     /// 发布日期
     pub release_date: Option<String>,
+    /// 远程发布缺少当前平台安装包（此时 has_update=false 且无下载信息）
+    pub platform_unavailable: bool,
 }
 
 /// 更新器服务：封装版本检查、下载、暂存与助手替换
@@ -203,13 +208,15 @@ impl UpdaterService {
     ///
     /// 语义（U6 修复）：`check_on_startup` 只决定"启动是否立即检查一次"（循环外读一次），
     /// 循环内的周期检查不受其影响——否则关闭该开关会连定时检查一并消失。
+    /// 关闭该开关后循环内不再补"启动首查"（旧实现的 `due_now = !check_on_startup`
+    /// 会让开关形同虚设），首轮检查按 `check_interval_hours` 周期等待。
     ///
     /// 双查修复：循环改为"先等待再检查"。旧实现每轮"先查再睡"，与启动检查
-    /// 相邻执行造成同一时刻 2×清单 + 2N×伴随 sha 拉取；关闭启动检查的用户
-    /// 首轮 `due_now` 立即为真，首查时机（T+5s）保持不变。
+    /// 相邻执行造成同一时刻 2×清单 + 2N×伴随 sha 拉取。
     ///
     /// `auto_check_enabled` 为总开关（设置页"自动检查更新"）：关闭后启动检查与
-    /// 周期检查全部静默，仅保留手动"立即检查"；循环低频轮询该值，重新打开无需重启。
+    /// 周期检查全部静默，仅保留手动"立即检查"；循环低频轮询该值，重新打开无需重启，
+    /// 且由关到开的跃迁会立即补查一次（不等完整周期）。
     pub fn start_background_check(&self, cancel: CancellationToken) {
         let config = self.config.clone();
         let status = self.status.clone();
@@ -239,19 +246,26 @@ impl UpdaterService {
                     );
                 }
             }
-            // 启动检查已执行过则首轮先等待一个间隔；未执行（check_on_startup=false）
-            // 则首轮立即查一次，补上"启动时首查"的时机
-            let mut due_now = !startup_settings.check_on_startup;
+            // 启动是否检查完全由 check_on_startup 决定（上方循环外分支）；
+            // 循环内 due_now 仅用于"总开关由关到开"的立即补查
+            let mut due_now = false;
+            let mut prev_auto_enabled = startup_settings.auto_check_enabled;
             loop {
                 // 每次迭代重新读取配置（支持运行时修改）
                 let settings = config.load_settings().global.updater;
                 // 总开关关闭：不自动检查，低频轮询配置等待重新打开
                 if !settings.auto_check_enabled {
+                    prev_auto_enabled = false;
                     tokio::select! {
                         _ = cancel.cancelled() => break,
                         _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => continue,
                     }
                 }
+                // 总开关由关到开：立即补查一次，无需等待完整周期
+                if !prev_auto_enabled {
+                    due_now = true;
+                }
+                prev_auto_enabled = true;
                 if !due_now {
                     if settings.check_interval_hours == 0 {
                         // 定时检查已禁用（启动检查已完成或未要求）：低频轮询配置，
@@ -326,10 +340,28 @@ impl UpdaterService {
                     &self.base_path,
                     &LastCheckState {
                         latest_version: manifest.version.to_string(),
+                        platform_unavailable: true,
                         ..last_check_now()
                     },
                 );
-                return Ok(None);
+                // 与后台检查同样 merge 快照：托盘"发现新版本"文案保持一致
+                self.status.merge(PartialSnapshot::Update {
+                    available: false,
+                    progress: None,
+                });
+                // 返回带标记的结果（而非 Ok(None)）：让前端区分
+                // "当前已是最新"与"远程无当前平台的安装包"
+                return Ok(Some(UpdateInfo {
+                    current_version: self.current_version.to_string(),
+                    latest_version: manifest.version.to_string(),
+                    update_available: false,
+                    url: String::new(),
+                    sha256: String::new(),
+                    size: None,
+                    notes: manifest.changelog.clone(),
+                    release_date: manifest.release_date.clone(),
+                    platform_unavailable: true,
+                }));
             }
         };
 
@@ -342,6 +374,11 @@ impl UpdaterService {
                 ..last_check_now()
             },
         );
+        // 与后台检查同样 merge 快照：手动发现新版本后托盘菜单文本即时更新
+        self.status.merge(PartialSnapshot::Update {
+            available: has_update,
+            progress: None,
+        });
         if !has_update {
             return Ok(None);
         }
@@ -355,6 +392,7 @@ impl UpdaterService {
             size: pkg.size,
             notes: manifest.changelog.clone(),
             release_date: manifest.release_date.clone(),
+            platform_unavailable: false,
         }))
     }
 
@@ -373,10 +411,23 @@ impl UpdaterService {
 
     /// 暂存新二进制并触发助手进程
     ///
-    /// 流程：并发互斥 → 拒绝登录中 → 下载校验 → 解压 → 写 `pending.json`
-    /// → spawn 助手进程（助手等待本进程退出后完成替换与重启）。
+    /// 流程：已有 pending 则幂等返回 → 并发互斥 → 拒绝登录中 → 下载校验 →
+    /// 解压 → 写 `pending.json` → spawn 助手进程（助手等待本进程退出后完成替换与重启）。
     /// 调用方在收到 `Ok` 后应执行优雅关闭并使主进程退出，以放行助手替换。
     pub async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
+        // 已有待应用更新（本进程此前发起或上次会话遗留）：不重复下载，
+        // 补唤醒 helper（上次 spawn 的 helper 等待本进程退出超时 60s 后可能已退出）
+        // 并按成功返回——前端继续展示"更新已就绪，重启后生效"。
+        // 互斥语义由 pending 文件承载：存在即"已暂存待重启"，进程内
+        // AtomicBool 只防真正的并发下载窗口。
+        if apply::has_pending_update(&self.base_path) {
+            if let Err(e) = self.spawn_helper() {
+                // 补唤醒失败不报错：关机时 ensure_helper_for_shutdown 会再次尝试
+                tracing::warn!("待应用更新已存在，按需补唤醒 helper 失败（关机时会重试）: {e}");
+            }
+            return Ok(());
+        }
+
         if self
             .update_in_progress
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -395,15 +446,29 @@ impl UpdaterService {
         if let Err(e) = self.download_stage_and_pending(info).await {
             // 失败释放互斥，允许后续重试
             self.update_in_progress.store(false, Ordering::SeqCst);
+            self.clear_update_progress();
             return Err(e);
         }
-        // 成功后保持互斥直到进程退出：助手替换窗口内不允许并发再发起一次更新
-        //（标记随进程消亡；spawn_helper 失败则释放，允许重新发起）
+        // 下载暂存完成即"更新已就绪"：释放进程内互斥（后续重复请求由
+        // pending 存在性幂等接管），spawn 失败同样释放——关机时
+        // ensure_helper_for_shutdown 会按需补唤醒，允许重新发起。
         if let Err(e) = self.spawn_helper() {
             self.update_in_progress.store(false, Ordering::SeqCst);
+            self.clear_update_progress();
             return Err(e);
         }
+        self.update_in_progress.store(false, Ordering::SeqCst);
+        self.clear_update_progress();
         Ok(())
+    }
+
+    /// 清空更新下载进度（下载结束/失败后调用，避免残留在状态快照中）
+    fn clear_update_progress(&self) {
+        let available = self.status.borrow().update_available;
+        self.status.merge(PartialSnapshot::Update {
+            available,
+            progress: None,
+        });
     }
 
     /// 下载 → 校验 → 解压 → 写 pending.json
@@ -419,7 +484,10 @@ impl UpdaterService {
             info,
             &staging_dir,
             Some(&|percent| {
-                self.status.merge(PartialSnapshot::Environment {
+                // 进度走 Update 自有通道（此前蹭 Environment 通道，与环境安装
+                // 进度互相覆盖且无消费方）；available 置 true：正在应用的更新必然可用
+                self.status.merge(PartialSnapshot::Update {
+                    available: true,
                     progress: Some(InstallProgress {
                         phase: "downloading_update".into(),
                         percent,
@@ -448,21 +516,7 @@ impl UpdaterService {
         // 现在下载阶段已校验 zip 完整性，此处额外计算 exe sha 存入 pending 供 helper 二次复核。
         let exe_sha256 = tokio::task::spawn_blocking({
             let exe_path = staged.extracted_exe.clone();
-            move || -> Result<String, std::io::Error> {
-                use sha2::Digest;
-                use std::io::Read;
-                let mut f = std::fs::File::open(&exe_path)?;
-                let mut h = sha2::Sha256::new();
-                let mut buf = [0u8; 65536];
-                loop {
-                    let n = f.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    h.update(&buf[..n]);
-                }
-                Ok(hex::encode(h.finalize()))
-            }
+            move || crate::utils::io::file_sha256(&exe_path)
         })
         .await
         .map_err(|e| UpdaterError::ExtractFailed(format!("计算 exe SHA 失败: {e}")))?
@@ -529,8 +583,8 @@ impl UpdaterService {
     /// 但 `pending.json` 已落盘，主进程随后收到 `shutdown` 退出后无人替换，下次启动
     /// 只能走 `self_replace` 兜底产生 `.__relocated__.exe`。此处在优雅关闭入口再次
     /// 尝试 `spawn_helper`，确保至少有一个 helper 在等待本 PID 退出。
-    /// 重复 spawn 双 helper 竞争时由实例锁互斥，新 exe 第二次 spawn 会抢锁失败即退，
-    /// 无害且 `cleanup` 幂等。
+    /// 重复 spawn 的双 helper 由 `<base>/update/helper.lock` 文件锁互斥（helper
+    /// 启动即抢锁，后到者安静退出），且 helper 侧有"目标已是新版内容"的幂等跳过。
     pub(crate) fn ensure_helper_for_shutdown(&self) {
         if !apply::has_pending_update(&self.base_path) {
             return;
@@ -568,6 +622,9 @@ impl UpdaterService {
     /// pending.json 留待下次启动处理，不再依赖 sleep 错峰。
     pub async fn apply_pending_on_startup(&self) -> Result<bool, UpdaterError> {
         if !apply::has_pending_update(&self.base_path) {
+            // 无 pending 时顺带清理长期残留的 staging（用户点了"立即更新"却
+            // 长期不重启时，旧版本压缩包会一直堆积在 update/staging/）
+            self.cleanup_stale_staging().await;
             return Ok(false);
         }
         // F9：抢不到标记 = 手动更新正在进行 → 跳过（不清理、不替换）
@@ -583,6 +640,32 @@ impl UpdaterService {
         // 无论成败均释放互斥（后台应用为一次性启动动作，手动路径可继续）
         self.update_in_progress.store(false, Ordering::SeqCst);
         result
+    }
+
+    /// 清理超过 [`STALE_STAGING_AGE`] 未变动的 staging 残留（best-effort）
+    ///
+    /// staging 只在与 pending.json 配对时才有意义；目录最后修改时间久远
+    /// 说明是历史更新遗留（近期产物可能属于进行中的下载，保守保留）。
+    async fn cleanup_stale_staging(&self) {
+        const STALE_STAGING_AGE: Duration = Duration::from_secs(3 * 24 * 3600);
+        let staging = self.base_path.join(apply::STAGING_DIR_NAME);
+        let Ok(meta) = tokio::fs::metadata(&staging).await else {
+            return;
+        };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age >= STALE_STAGING_AGE);
+        if !stale {
+            return;
+        }
+        tracing::info!("清理超过 3 天未变动的 staging 残留: {}", staging.display());
+        if let Err(e) = tokio::fs::remove_dir_all(&staging).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("清理 staging 残留失败: {e}");
+            }
+        }
     }
 
     /// apply_pending_on_startup 的实际执行体（调用方已持有互斥标记）
@@ -630,7 +713,7 @@ impl UpdaterService {
             return Ok(false);
         }
         // 复核 staging exe 摘要（与 helper 同逻辑）
-        match file_sha256(&extracted_exe) {
+        match crate::utils::io::file_sha256(&extracted_exe) {
             Ok(actual) if actual.eq_ignore_ascii_case(&pending.sha256) => {}
             Ok(actual) => {
                 tracing::error!(
@@ -648,16 +731,26 @@ impl UpdaterService {
         }
 
         // U3 二次校验：pending 版本不高于当前版本则跳过并清理（下载与启动之间的时间窗内
-        // staging 产物或版本可能已过期/被替换）
-        if let Ok(pending_ver) = Version::parse(&pending.version) {
-            if pending_ver <= self.current_version {
+        // staging 产物或版本可能已过期/被替换）；版本号无法解析同样拒绝——
+        // 故障模式须 fail-closed，不给被篡改的 pending 留静默放行通道
+        let pending_ver = match Version::parse(&pending.version) {
+            Ok(v) => v,
+            Err(e) => {
                 tracing::warn!(
-                    "pending 版本 {pending_ver} 不高于当前 {}，跳过应用并清理",
-                    self.current_version
+                    "pending 版本号无法解析（{}）：{e}，拒绝应用并清理",
+                    pending.version
                 );
                 apply::cleanup_after_apply(&self.base_path).await;
                 return Ok(false);
             }
+        };
+        if pending_ver <= self.current_version {
+            tracing::warn!(
+                "pending 版本 {pending_ver} 不高于当前 {}，跳过应用并清理",
+                self.current_version
+            );
+            apply::cleanup_after_apply(&self.base_path).await;
+            return Ok(false);
         }
         let backup_path = self.base_path.join(".backup_exe");
         if let Err(e) = std::fs::copy(&current_exe, &backup_path) {
@@ -720,23 +813,6 @@ fn is_within_base(path: &std::path::Path, base_path: &std::path::Path) -> bool {
         return false;
     };
     canonical.starts_with(&base_canonical)
-}
-
-/// 计算文件 SHA256（hex 小写，与 helper 同逻辑）
-fn file_sha256(path: &std::path::Path) -> std::io::Result<String> {
-    use sha2::Digest;
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = sha2::Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 /// 代理地址脱敏：仅保留 scheme + host——代理 URL 可能内嵌 `user:pass` 凭据，
@@ -812,23 +888,31 @@ async fn perform_update_check(
         settings.channel,
     )
     .await?;
-    let has_update = check::select_platform(&manifest).is_some()
-        && check::compare_versions(current_version, &manifest.version);
+    let platform_available = check::select_platform(&manifest).is_some();
+    let has_update =
+        platform_available && check::compare_versions(current_version, &manifest.version);
     record_last_check(
         base_path,
         &LastCheckState {
             has_update,
             latest_version: manifest.version.to_string(),
+            platform_unavailable: !platform_available,
             ..last_check_now()
         },
     );
     if has_update {
-        status.merge(PartialSnapshot::Update { available: true });
+        status.merge(PartialSnapshot::Update {
+            available: true,
+            progress: None,
+        });
         tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
     } else {
         // 无更新时显式清 false：同进程内一次置 true 后若不清除，
         // 快照会跨"无更新"检查残留（重启归零，但长跑进程会一直误报）
-        status.merge(PartialSnapshot::Update { available: false });
+        status.merge(PartialSnapshot::Update {
+            available: false,
+            progress: None,
+        });
     }
     Ok(())
 }
@@ -840,6 +924,9 @@ fn log_check_failure(stage: &str, e: &UpdaterError) {
     match e {
         UpdaterError::PlatformNotAvailable(_) => {
             tracing::info!("更新检查（{stage}）：远程发布无当前平台的安装包，跳过");
+        }
+        UpdaterError::NoMatchingRelease => {
+            tracing::info!("更新检查（{stage}）：远程无符合通道的发布，跳过");
         }
         UpdaterError::ManifestFetchFailed(_) | UpdaterError::ManifestParseFailed(_) => {
             tracing::info!("更新检查（{stage}）：清单不可用，跳过: {e}");
@@ -930,11 +1017,59 @@ mod tests {
             size: None,
             notes: None,
             release_date: None,
+            platform_unavailable: false,
         };
         assert!(matches!(
             svc.apply_update(&info).await,
             Err(UpdaterError::UpdateInProgress)
         ));
+    }
+
+    /// #2：pending 已存在时 apply_update 幂等返回成功（不占互斥、不重复下载）
+    #[tokio::test]
+    async fn test_apply_update_idempotent_when_pending_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+
+        // 伪造待应用更新（helper 不存在，spawn 会失败但幂等路径只 warn 不报错）
+        let staging = dir.path().join("update/staging/extracted");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join(apply::EXE_NAME), b"fake-exe").unwrap();
+        let pending = PendingUpdate {
+            version: "999.0.0".into(),
+            staging_dir: dir
+                .path()
+                .join("update/staging")
+                .to_string_lossy()
+                .into_owned(),
+            target_exe: dir
+                .path()
+                .join("campus-auth.exe")
+                .to_string_lossy()
+                .into_owned(),
+            original_args: vec![],
+            sha256: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        apply::write_pending(&pending, dir.path()).unwrap();
+
+        let info = UpdateInfo {
+            current_version: "5.0.0".into(),
+            latest_version: "5.0.1".into(),
+            update_available: true,
+            url: "https://example.com/x.zip".into(),
+            sha256: String::new(),
+            size: None,
+            notes: None,
+            release_date: None,
+            platform_unavailable: false,
+        };
+        assert!(matches!(svc.apply_update(&info).await, Ok(())));
+        assert!(
+            !svc.update_in_progress.load(Ordering::SeqCst),
+            "幂等路径不得遗留互斥标记"
+        );
+        assert!(apply::has_pending_update(dir.path()), "pending 不被破坏");
     }
 
     /// G13 基线：staging 在 base 内 + target 为当前进程 → 放行；任一不满足 → 拒绝

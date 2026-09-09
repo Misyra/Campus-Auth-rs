@@ -5,7 +5,6 @@
 //! 只能排队。探测统一移入独立 tokio 任务，结果经 mpsc channel 回传主循环
 //! 处理（模式与登录结果 `LoginResult` channel 一致），命令保持即时响应。
 
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -71,10 +70,6 @@ struct EngineInner {
     manual_paused: bool,
     /// 上次 Profile 切换检测时间
     last_profile_check: Instant,
-    /// 上次检测到的网关 IP
-    last_gateway: Option<Ipv4Addr>,
-    /// 上次检测到的 WiFi SSID
-    last_ssid: Option<String>,
     /// 网络检查定时器（常驻，由 monitoring + 暂停状态门控）
     check_timer: Interval,
     /// 连续登录失败次数
@@ -120,8 +115,6 @@ impl EngineInner {
             last_check_time: None,
             manual_paused: false,
             last_profile_check: Instant::now(),
-            last_gateway: None,
-            last_ssid: None,
             check_timer: {
                 let mut t = tokio::time::interval(Duration::from_secs(
                     crate::engine::DEFAULT_CHECK_INTERVAL_SECS,
@@ -735,9 +728,6 @@ async fn check_profile_switch(inner: &mut EngineInner, deps: &EngineDeps) {
             return;
         }
     };
-    inner.last_gateway = gateways.first().copied();
-    inner.last_ssid = ssid.clone();
-
     let gateway_str = gateways.first().map(|g| g.to_string()).unwrap_or_default();
     let ssid_str = ssid.as_deref().unwrap_or("");
     if let Some(matched_id) = deps

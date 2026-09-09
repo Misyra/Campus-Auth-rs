@@ -22,6 +22,7 @@ const status = reactive<StatusSnapshot>({
   runtime_seconds: 0,
   network_connected: false,
   network_state: "unknown",
+  update_progress: null,
 });
 
 const autostart = reactive<AutostartStatus>({
@@ -78,6 +79,7 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   out.last_check_time = (raw.last_check_time as string | null) ?? status.last_check_time;
   out.login_status = raw.login_status as string | undefined;
   out.snapshot_version = Number(raw.snapshot_version ?? 0);
+  out.update_progress = (raw.update_progress as StatusSnapshot["update_progress"]) ?? null;
   return out;
 }
 

@@ -77,7 +77,7 @@ async function setActiveTask(taskId: string): Promise<boolean> {
   }
 }
 
-/** 立即执行任务（通用语义：浏览器打卡/脚本/Shell，不注入账号密码） */
+/** 立即执行任务（通用语义：浏览器打卡/脚本，不注入账号密码） */
 async function executeTask(taskId: string): Promise<void> {
   // A11：busy 守卫，执行中连点直接忽略，避免重复提交
   if (executingIds.has(taskId)) return;
@@ -222,7 +222,7 @@ async function showTaskEditor(taskId?: string): Promise<void> {
       const taskConfig: TaskConfig = data.config ?? {};
       const taskType = summary?.task_type || taskConfig.type;
 
-      if (taskType === "script" || taskType === "shell") {
+      if (taskType === "script") {
         // 脚本类型由「自定义脚本」页面的编辑器负责；此处不跨模块转交（避免 useTasks→useScripts 循环依赖），
         // 任务列表本身已过滤为浏览器任务，正常流程不会走到该分支
         toastOnly(false, "该任务为脚本类型，请在「自定义脚本」页面编辑");
@@ -411,7 +411,6 @@ export function useTasks() {
     exportingIds,
     fetchTasks,
     fetchActiveTask,
-    syncActiveTaskLocal,
     setActiveTask,
     executeTask,
     saveTask,
