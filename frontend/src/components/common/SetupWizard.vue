@@ -54,6 +54,14 @@ watch(
             </ul>
           </div>
 
+          <!-- 在线文档入口：新窗口打开，不打断向导流程 -->
+          <div class="docs-hint">
+            使用遇到问题？请查阅在线文档：
+            <a href="https://campus-auth.misyra.com/docs/faq/login" target="_blank" rel="noopener noreferrer">无法自动登录排查（常见问题）</a>
+            ·
+            <a href="https://campus-auth.misyra.com/docs/getting-started/start" target="_blank" rel="noopener noreferrer">快速开始（新手上路）</a>
+          </div>
+
           <div class="terms-checkbox">
             <label class="toggle">
               <input type="checkbox" v-model="state.agreedToTerms" />

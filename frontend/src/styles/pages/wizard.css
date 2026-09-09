@@ -113,6 +113,25 @@
   margin-bottom: 6px;
 }
 
+/* 在线文档入口（FAQ 排查 + 快速开始），位于协议卡片与勾选区之间 */
+.docs-hint {
+  margin-bottom: var(--space-md);
+  font-size: var(--text-md);
+  line-height: 1.6;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.docs-hint a {
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.docs-hint a:hover {
+  text-decoration: underline;
+}
+
 .terms-checkbox {
   padding: var(--space-md);
   background: var(--bg-primary);
