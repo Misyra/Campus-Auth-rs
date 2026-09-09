@@ -526,6 +526,7 @@ impl ApplyUpdateBody {
             size: None,
             notes: None,
             release_date: None,
+            platform_unavailable: false,
         })
     }
 }
@@ -553,7 +554,9 @@ pub async fn apply_update(
     tracing::info!(version = %info.latest_version, "开始下载并暂存更新");
     updater.apply_update(&info).await.map_err(|e| {
         tracing::warn!(version = %info.latest_version, "应用更新失败: {e}");
-        ApiError::Internal(format!("应用更新失败: {e}"))
+        // 走 From 映射：UpdateInProgress / LoginInProgress 等调用时序冲突回 409，
+        // 不再统一包成 500 误导前端走"服务端故障"分支
+        ApiError::from(e)
     })?;
     Ok(data(serde_json::json!({
         "message": "更新已暂存，重启后生效",
@@ -1119,6 +1122,7 @@ mod tests {
             size: Some(1024),
             notes: Some("修复若干问题".into()),
             release_date: None,
+            platform_unavailable: false,
         }
     }
 

@@ -20,6 +20,17 @@ pub enum UpdaterError {
     #[error("当前平台无可用更新包: {0}")]
     PlatformNotAvailable(String),
 
+    /// 发布含当前平台包但缺失 `.sha256` 伴随文件（无法构造可信更新）
+    ///
+    /// 与 [`UpdaterError::PlatformNotAvailable`] 区分：前者是"没有包"，
+    /// 本变体是"有包但发布流程漏带校验文件"，诊断方向不同。
+    #[error("发布中当前平台包缺失 SHA256 校验文件，已拒绝更新")]
+    ChecksumUnavailable,
+
+    /// Releases 列表中没有符合更新通道的发布（列表为空 / 全为草稿 / tag 无法解析）
+    #[error("Releases 列表中未找到符合更新通道的发布")]
+    NoMatchingRelease,
+
     /// 远程版本号解析失败
     #[error("版本号解析失败: {0}")]
     VersionParseFailed(#[source] semver::Error),
@@ -63,7 +74,7 @@ pub enum UpdaterError {
     #[error("启动更新助手失败: {0}")]
     HelperSpawnFailed(#[source] std::io::Error),
 
-    /// 已有更新正在进行（AtomicBool 互斥）
+    /// 已有更新正在下载（进程内并发互斥窗口）
     #[error("更新正在进行中，请稍后再试")]
     UpdateInProgress,
 

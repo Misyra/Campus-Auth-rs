@@ -10,10 +10,16 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
+use campus_auth::utils::io::file_sha256;
 use campus_auth::utils::lock::is_process_alive;
 use campus_auth::utils::paths::same_existing_path;
 use chrono::Local;
 use clap::Parser;
+
+// MSRV 1.85 兼容：fs4::FileExt 为低版本 Rust 提供 try_lock（与 utils::lock 同模式）；
+// Rust 1.96+ 内置方法优先级更高，不会冲突。
+#[allow(unused_imports)]
+use fs4::FileExt;
 
 /// campus-auth 更新助手进程
 #[derive(Parser)]
@@ -49,7 +55,7 @@ struct PendingInfo {
     /// 暂存包预期 SHA256（G13：替换前复核；空 = 发布源未提供，降级跳过）
     #[serde(default)]
     sha256: String,
-    #[allow(dead_code)]
+    /// 待应用版本号（见下方 2.5 版本闸门）
     version: String,
 }
 
@@ -123,6 +129,12 @@ fn main() {
     });
     let mut log = HelperLog::open(&base_path);
 
+    // 0.6 helper 互斥：apply_update 的 spawn 与关机时 ensure_helper_for_shutdown
+    // 的补唤醒可能同时存在两个 helper，并发执行备份/替换/回滚会产生竞态（最坏：
+    // 后到者复制失败进入回滚，把先行者刚替换的新 exe 用旧备份覆盖回去）。
+    // 对 <base>/update/helper.lock 取排他文件锁，抢不到说明同伴在执行，安静退出。
+    let _helper_lock = acquire_helper_lock(&base_path.join("update").join("helper.lock"), &mut log);
+
     // 1. 等待主进程退出
     log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
     if !wait_for_process_exit(cli.pid) {
@@ -186,6 +198,21 @@ fn main() {
         }
     };
 
+    // 2.5 版本闸门（纵深防御）：pending 版本须严格高于本 helper 版本（helper 与
+    // 被替换主程序同版本发布）。不高于或无法解析均拒绝替换并保留现场——
+    // 主进程侧（pin 路径 / apply_pending_on_startup）已有闸门，此处补齐
+    // helper 执行端的最后一环，堵住"篡改 pending 降级替换"的通道。
+    if let Some(p) = pending.as_ref() {
+        if !pending_version_allowed(&p.version, env!("CARGO_PKG_VERSION")) {
+            log.error(&format!(
+                "待应用版本 {} 不高于当前 {} 或无法解析，拒绝替换",
+                p.version,
+                env!("CARGO_PKG_VERSION")
+            ));
+            std::process::exit(1);
+        }
+    }
+
     // G13：staging 是 remove_dir_all 的目标，取值可能来自 pending.json——
     // 被篡改时会把任意系统目录变成清理对象，必须锁在 base_path 之内。
     if !is_within_base(&staging_dir, &base_path) {
@@ -217,13 +244,21 @@ fn main() {
         std::process::exit(1);
     }
 
+    // 3.6 幂等跳过：目标 exe 已与 staging 内容一致，说明此前有 helper 完成
+    // 复制后未及启动/清理即死亡（锁随进程释放）。跳过备份/替换/回滚，直接
+    // 进入分发同步与启动——从根上消除"回滚分支把新 exe 覆盖回旧版"的风险。
+    let already_replaced = files_identical(&extracted_exe, &target_exe);
+    if already_replaced {
+        log.info("目标 exe 已是新版内容（此前 helper 已完成替换），跳过复制步骤");
+    }
+
     // 4. 备份旧 exe（统一 "<原名>.bak"：unix 上 with_extension("exe.bak") 会产出
     // campus-auth.exe.bak 的怪名——无扩展名文件被凭空拼出 .exe）
     let backup_path = target_exe
         .file_name()
         .map(|n| target_exe.with_file_name(format!("{}.bak", n.to_string_lossy())))
         .unwrap_or_else(|| target_exe.with_extension("exe.bak"));
-    if target_exe.exists() {
+    if !already_replaced && target_exe.exists() {
         log.info(&format!("备份旧版本 -> {}", backup_path.display()));
         if let Err(e) = std::fs::copy(&target_exe, &backup_path) {
             log.error(&format!(
@@ -234,25 +269,27 @@ fn main() {
     }
 
     // 5. 替换 exe（helper 复制新文件覆盖旧 exe，而非替换自身）
-    log.info(&format!(
-        "替换 {} -> {}",
-        extracted_exe.display(),
-        target_exe.display()
-    ));
-    if let Err(e) = std::fs::copy(&extracted_exe, &target_exe) {
-        log.error(&format!("替换失败: {e}"));
-        // 尝试回退：从备份恢复
-        if backup_path.exists() {
-            match std::fs::copy(&backup_path, &target_exe) {
-                Ok(_) => log.error("已回退到备份版本"),
-                Err(e) => log.error(&format!(
-                    "回退失败（{e}），exe 处于未知状态，请手动用备份 {} 恢复",
-                    backup_path.display()
-                )),
+    if !already_replaced {
+        log.info(&format!(
+            "替换 {} -> {}",
+            extracted_exe.display(),
+            target_exe.display()
+        ));
+        if let Err(e) = std::fs::copy(&extracted_exe, &target_exe) {
+            log.error(&format!("替换失败: {e}"));
+            // 尝试回退：从备份恢复
+            if backup_path.exists() {
+                match std::fs::copy(&backup_path, &target_exe) {
+                    Ok(_) => log.error("已回退到备份版本"),
+                    Err(e) => log.error(&format!(
+                        "回退失败（{e}），exe 处于未知状态，请手动用备份 {} 恢复",
+                        backup_path.display()
+                    )),
+                }
             }
+            cleanup(&base_path, &staging_dir, &mut log);
+            std::process::exit(1);
         }
-        cleanup(&base_path, &staging_dir, &mut log);
-        std::process::exit(1);
     }
     // unix：fs::copy 只复制源文件权限，为防解压链路丢 +x，替换后显式确保
     // 新二进制可执行——否则重启必然 Exec format/permission 失败
@@ -329,6 +366,57 @@ fn main() {
     cleanup(&base_path, &staging_dir, &mut log);
 
     log.info("更新完成");
+}
+
+/// 对 helper 锁文件取排他锁（双 helper 互斥）
+///
+/// 锁文件打开失败按 fail-closed 处理（exit 1，更新留给下次尝试）；
+/// 锁被同伴持有则安静退出（exit 0，先行者负责完成替换与清理）。
+/// 返回的 `File` 须保持存活至进程退出（进程退出即释放）。
+fn acquire_helper_lock(lock_path: &Path, log: &mut HelperLog) -> std::fs::File {
+    if let Some(parent) = lock_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log.error(&format!("创建 update 目录失败: {e}"));
+            std::process::exit(1);
+        }
+    }
+    let file = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            log.error(&format!("打开 helper 锁文件失败: {e}"));
+            std::process::exit(1);
+        }
+    };
+    #[allow(clippy::incompatible_msrv)]
+    let locked = file.try_lock();
+    if let Err(e) = locked {
+        log.info(&format!("另一 helper 持有互斥锁（{e}），本实例安静退出"));
+        std::process::exit(0);
+    }
+    file
+}
+
+/// pending 版本是否允许应用：须严格高于 `current`，解析失败按拒绝处理（fail-closed）
+fn pending_version_allowed(pending_version: &str, current: &str) -> bool {
+    let Ok(pending) = semver::Version::parse(pending_version) else {
+        return false;
+    };
+    let current = semver::Version::parse(current).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+    pending > current
+}
+
+/// 两文件内容是否一致（任一读取/缺失视为不同）
+fn files_identical(a: &Path, b: &Path) -> bool {
+    match (file_sha256(a), file_sha256(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// 轮询等待指定 PID 的进程退出（最多等待 60 秒）
@@ -543,23 +631,6 @@ fn is_within_base(path: &Path, base_path: &Path) -> bool {
     canonical.starts_with(&base_canonical)
 }
 
-/// 计算文件 SHA256（hex 小写）
-fn file_sha256(path: &Path) -> std::io::Result<String> {
-    use sha2::Digest;
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = sha2::Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
 /// G13：替换前复核 staging exe 的 SHA256
 ///
 /// `expected` 为空直接拒绝（不再降级信任 HTTPS）；非空但与实际不符时返回
@@ -757,6 +828,32 @@ mod tests {
         );
         // 目标独有内容不删除
         assert!(dst.join("user-config-only.txt").exists());
+    }
+
+    /// 版本闸门：高于当前放行；等于/低于/无法解析拒绝；当前版本无法解析回退 0.0.0
+    #[test]
+    fn test_pending_version_allowed() {
+        assert!(pending_version_allowed("5.0.1", "5.0.0"));
+        assert!(pending_version_allowed("6.0.0-alpha.1", "5.0.0"));
+        assert!(!pending_version_allowed("5.0.0", "5.0.0"));
+        assert!(!pending_version_allowed("4.9.9", "5.0.0"));
+        assert!(!pending_version_allowed("not-a-version", "5.0.0"));
+        // 当前版本无法解析时回退 0.0.0（与主进程 UpdaterService 同语义）
+        assert!(pending_version_allowed("0.0.1", "bad"));
+    }
+
+    /// 幂等跳过判定：内容一致 / 不一致 / 缺失
+    #[test]
+    fn test_files_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.exe");
+        let b = dir.path().join("b.exe");
+        std::fs::write(&a, b"same").unwrap();
+        std::fs::write(&b, b"same").unwrap();
+        assert!(files_identical(&a, &b));
+        std::fs::write(&b, b"different").unwrap();
+        assert!(!files_identical(&a, &b));
+        assert!(!files_identical(&a, &dir.path().join("missing.exe")));
     }
 
     /// file_sha256 与已知摘要一致

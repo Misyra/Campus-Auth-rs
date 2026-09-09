@@ -620,25 +620,26 @@ async fn handle_action(
             false
         }
         TrayAction::CheckUpdate => {
-            // 托盘用户的更新入口：检查后有更新直接打开控制台关于页
-            // （关于页展示版本/changelog，并可一键应用）；无更新/失败仅记日志
+            // 托盘用户的更新入口：检查后有更新直接打开设置页"网络与更新"区块
+            // （更新按钮/下载进度均在此处，关于页无更新 UI）；无更新/失败仅记日志
             let updater = deps.updater.clone();
             let base = deps.config.base_path();
             let default_port = deps.port;
             tokio::spawn(async move {
                 match updater.check_update().await {
-                    Ok(Some(info)) => {
+                    Ok(Some(info)) if info.update_available => {
                         info!(
                             version = %info.latest_version,
-                            "发现新版本，打开控制台关于页"
+                            "发现新版本，打开控制台设置页（网络与更新）"
                         );
                         let port =
                             crate::utils::paths::read_runtime_port(&base).unwrap_or(default_port);
-                        let url = format!("http://127.0.0.1:{port}/about");
+                        let url = format!("http://127.0.0.1:{port}/settings/network");
                         if let Err(e) = open::that(&url) {
                             warn!("打开浏览器失败 ({url}): {e}");
                         }
                     }
+                    Ok(Some(_)) => info!("托盘检查更新：远程无当前平台的安装包"),
                     Ok(None) => info!("托盘检查更新：已是最新版本"),
                     Err(e) => warn!("托盘检查更新失败: {e}"),
                 }

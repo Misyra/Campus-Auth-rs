@@ -69,6 +69,25 @@ pub fn fsync_full(file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 计算文件 SHA256（hex 小写）
+///
+/// 更新器主进程与 helper 二进制共用（此前两处重复实现）。
+pub fn file_sha256(path: &Path) -> std::io::Result<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// rename 失败（跨卷等）时的回退安装：copy 到目标同目录临时名再原子 rename（A6/F11）
 ///
 /// 保证目标位置永远不出现半成品文件：

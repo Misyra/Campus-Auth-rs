@@ -205,10 +205,15 @@ async fn manifest_from_github_release(
     let mut platforms: HashMap<String, PlatformPackage> = HashMap::new();
     // 仅拉取当前平台的校验信息：检查失败一条日志足够，且避免多平台全拉的刷屏与
     // 额外 sha256 伴随文件请求（旧逻辑遍历全部平台，每平台还重试一次）。
-    if let Some((_, dl_url, size, name)) = collect_current_platform_asset(&assets) {
-        let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
-        let sha256 = fetch_sha256_assoc(client, &asset_refs, &name).await;
-        if !sha256.is_empty() {
+    match collect_current_platform_asset(&assets) {
+        Some((_, dl_url, size, name)) => {
+            let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
+            let sha256 = fetch_sha256_assoc(client, &asset_refs, &name).await;
+            if sha256.is_empty() {
+                // 有当前平台包但发布未附 .sha256 伴随文件：与"无平台包"区分开，
+                // 便于诊断（发布流程异常 / 手工上传漏带校验文件）
+                return Err(UpdaterError::ChecksumUnavailable);
+            }
             platforms.insert(
                 CURRENT_PLATFORM_KEY.to_string(),
                 PlatformPackage {
@@ -218,11 +223,11 @@ async fn manifest_from_github_release(
                 },
             );
         }
-    }
-    if platforms.is_empty() {
-        return Err(UpdaterError::PlatformNotAvailable(
-            "发布中未找到平台下载包".into(),
-        ));
+        None => {
+            return Err(UpdaterError::PlatformNotAvailable(
+                "发布中未找到平台下载包".into(),
+            ));
+        }
     }
     Ok(ReleaseManifest {
         version,
@@ -322,9 +327,7 @@ pub(crate) async fn fetch_manifest_for_channel(
             tracing::info!("测试版通道下远程无预发布，回退正式版清单");
             return fetch_manifest(client, source_url).await;
         }
-        return Err(UpdaterError::PlatformNotAvailable(
-            "Releases 列表为空".into(),
-        ));
+        return Err(UpdaterError::NoMatchingRelease);
     };
     manifest_from_github_release(client, best).await
 }

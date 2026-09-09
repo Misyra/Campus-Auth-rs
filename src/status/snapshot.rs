@@ -128,6 +128,8 @@ pub struct StatusSnapshot {
     pub pause_active: bool,
     /// 是否有新版本
     pub update_available: bool,
+    /// 更新下载进度（下载期间有值，结束/失败后清空）
+    pub update_progress: Option<InstallProgress>,
     /// Python Worker 外部状态
     pub worker_state: WorkerStatus,
     /// 环境安装进度
@@ -171,6 +173,7 @@ impl Default for StatusSnapshot {
             monitor_enabled: true,
             pause_active: false,
             update_available: false,
+            update_progress: None,
             worker_state: WorkerStatus::NotInstalled,
             environment_progress: None,
             uptime_seconds: 0,
@@ -226,10 +229,12 @@ pub enum PartialSnapshot {
         /// 安装进度（None 表示清空）
         progress: Option<InstallProgress>,
     },
-    /// 发现新版本
+    /// 发现新版本 / 更新下载进度
     Update {
         /// 是否有更新
         available: bool,
+        /// 下载进度（None 表示清空）
+        progress: Option<InstallProgress>,
     },
     /// Profile 切换
     ActiveProfile {
@@ -310,8 +315,12 @@ pub fn apply_partial(snapshot: &mut StatusSnapshot, partial: &PartialSnapshot) {
         PartialSnapshot::Environment { progress } => {
             snapshot.environment_progress = progress.clone();
         }
-        PartialSnapshot::Update { available } => {
+        PartialSnapshot::Update {
+            available,
+            progress,
+        } => {
             snapshot.update_available = *available;
+            snapshot.update_progress = progress.clone();
         }
         PartialSnapshot::ActiveProfile { id } => {
             snapshot.active_profile = id.clone();
@@ -428,8 +437,29 @@ mod tests {
         apply_partial(&mut s, &PartialSnapshot::Environment { progress: None });
         assert!(s.environment_progress.is_none(), "None 应清空安装进度");
 
-        apply_partial(&mut s, &PartialSnapshot::Update { available: true });
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Update {
+                available: true,
+                progress: Some(InstallProgress {
+                    phase: "downloading_update".into(),
+                    percent: 40,
+                    message: "下载更新 40%".into(),
+                }),
+            },
+        );
         assert!(s.update_available);
+        assert_eq!(s.update_progress.as_ref().map(|p| p.percent), Some(40));
+
+        apply_partial(
+            &mut s,
+            &PartialSnapshot::Update {
+                available: false,
+                progress: None,
+            },
+        );
+        assert!(!s.update_available);
+        assert!(s.update_progress.is_none(), "None 应清空更新下载进度");
     }
 
     /// ActiveProfile / MonitorEnabled / Uptime / Scheduler 变体
