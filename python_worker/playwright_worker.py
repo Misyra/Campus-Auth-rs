@@ -72,7 +72,7 @@ _WORKER_DIR = Path(__file__).resolve().parent
 
 # Worker 版本（任务 10）：与 pyproject.toml 的 project.version 保持同步（手动维护），
 # 随 worker_health_check 响应上报给 Rust 侧。单点定义：worker_main 从此处导入。
-WORKER_VERSION = "5.0.0-alpha.8"
+WORKER_VERSION = "5.0.0-alpha.9"
 
 # 浏览器关闭/会话释放的兜底等待上限（秒）：close 可能挂起（driver 未及时退出等），
 # 统一超时跳过，避免单条挂起命令阻塞 Worker 命令队列
