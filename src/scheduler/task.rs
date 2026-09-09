@@ -16,7 +16,7 @@ pub(crate) use crate::utils::paths::HISTORY_DIR_NAME;
 pub(crate) const MAX_HISTORY_RECORDS: usize = 50;
 /// 任务变更 mpsc channel 容量。
 pub(crate) const CHANGE_CHANNEL_CAPACITY: usize = 16;
-/// 定时任务默认超时秒数（浏览器/脚本/Shell 任务）。
+/// 定时任务默认超时秒数（浏览器/脚本任务）。
 pub(crate) const DEFAULT_SCHEDULED_TIMEOUT: u64 = 300;
 /// 到期定时任务的最大并发执行数。
 ///
@@ -32,7 +32,7 @@ pub(crate) const CRON_PARSE_SUFFIX: &str = " *";
 ///
 /// `id` 由文件名推导，不参与 JSON 序列化。
 ///
-/// 任务类型（浏览器/脚本/Shell）**不在此冗余存储**：由 `target_id` 关联的目标任务
+/// 任务类型（浏览器/脚本）**不在此冗余存储**：由 `target_id` 关联的目标任务
 /// 通过 [`crate::tasks::TaskKind`] 权威推导，避免与任务定义出现双份类型枚举。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledTask {
@@ -47,7 +47,7 @@ pub struct ScheduledTask {
     pub description: String,
     /// cron 表达式（用户侧 5 字段，存储亦是 5 字段）。
     pub cron: String,
-    /// 关联目标任务 ID（浏览器/脚本/Shell 任务）。
+    /// 关联目标任务 ID（浏览器/脚本任务）。
     pub target_id: String,
     /// 预留字段：未来如需「定时登录」可指定凭据 Profile。
     /// 当前定时任务统一走通用执行（打卡），不注入账号密码，故此字段暂不生效。

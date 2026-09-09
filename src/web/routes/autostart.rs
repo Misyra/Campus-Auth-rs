@@ -1,4 +1,4 @@
-//! 自启动路由：自启动状态、启用/禁用、模式
+//! 自启动路由：自启动状态、启用/禁用
 //!
 //! M1 细粒度 state（config 域）：handler 声明 `State<Arc<dyn ConfigApi>>` 依赖，
 //! 不再触达 `state.container`。
@@ -7,18 +7,10 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
-
-/// POST /api/autostart/mode 请求体：更新自启动写入的运行模式（startup_action）
-#[derive(Deserialize)]
-pub struct AutostartModeBody {
-    /// 自启动模式（如 "login_once" / "monitor" / "none"）
-    pub runtime_mode: String,
-}
 
 /// GET /api/autostart/status — 获取自启动状态
 pub async fn get_autostart(
@@ -109,35 +101,12 @@ async fn register_self_start(enabled: bool) -> Result<(), ApiError> {
     }
 }
 
-/// POST /api/autostart/mode — 设置自启动模式（startup_action）
-pub async fn set_autostart_mode(
-    State(config): State<Arc<dyn ConfigApi>>,
-    Json(body): Json<AutostartModeBody>,
-) -> Result<Json<Value>, ApiError> {
-    let action = match body.runtime_mode.as_str() {
-        "login_once" => crate::config::StartupAction::LoginOnce,
-        "monitor" => crate::config::StartupAction::Monitor,
-        "none" => crate::config::StartupAction::None,
-        other => return Err(ApiError::BadRequest(format!("未知的自启动模式: {other}"))),
-    };
-    let res = config
-        .modify_settings_tx(Box::new(move |mut s| {
-            s.global.app.startup_action = action;
-            Ok(s)
-        }))
-        .await?;
-    if let Err(msg) = res {
-        return Err(ApiError::BadRequest(msg));
-    }
-    Ok(data(serde_json::json!({ "message": "自启动模式已更新" })))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::{get, post};
+    use axum::routing::get;
     use tower::ServiceExt; // oneshot
 
     use super::super::test_support::{MockConfigApi, body_json};
@@ -149,7 +118,6 @@ mod tests {
         let (config, inner) = MockConfigApi::mocked();
         let app = axum::Router::new()
             .route("/api/autostart/status", get(get_autostart))
-            .route("/api/autostart/mode", post(set_autostart_mode))
             .with_state(config);
         (app, inner)
     }
@@ -192,70 +160,5 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["data"]["enabled"], true);
         assert_ne!(v["data"]["method"], "-");
-    }
-
-    /// mode 落盘：monitor 写入 settings 并返回确认
-    #[tokio::test]
-    async fn set_mode_persists_startup_action() {
-        let (app, inner) = mock_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/autostart/mode")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"runtime_mode":"login_once"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let action = &inner.lock().unwrap().settings.global.app.startup_action;
-        assert_eq!(
-            serde_json::to_value(action).unwrap(),
-            serde_json::json!("login_once")
-        );
-    }
-
-    /// 未知模式直接 400，不触达系统注册
-    #[tokio::test]
-    async fn set_mode_rejects_unknown() {
-        let (app, inner) = mock_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/autostart/mode")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"runtime_mode":"bogus"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(inner.lock().unwrap().save_calls, 0);
-    }
-
-    /// 落盘失败路径：modify 失败转 400（enable/disable 的系统注册分支
-    /// 会动真实注册表/schtasks，不在单测覆盖，见手动 E2E T14）
-    #[tokio::test]
-    async fn set_mode_maps_modify_failure_to_bad_request() {
-        let (config, inner) = MockConfigApi::mocked();
-        inner.lock().unwrap().modify_fails = true;
-        let app = axum::Router::new()
-            .route("/api/autostart/mode", post(set_autostart_mode))
-            .with_state(config);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/autostart/mode")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"runtime_mode":"monitor"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

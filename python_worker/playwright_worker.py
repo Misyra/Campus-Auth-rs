@@ -1359,7 +1359,6 @@ class WorkerCore:
                 task_config=task,
                 context=context,
                 cancel_id=cancel_id,
-                cancel_event=cancel_event,
                 task_id=task.task_id,
                 steps_info=_build_steps_info(task),
             )

@@ -59,7 +59,7 @@ pub struct ServiceContainer {
     pub environment: Arc<EnvironmentManager>,
 
     // ---- Layer 6：执行器 ----
-    /// 任务执行器（脚本/Shell 沙箱执行）
+    /// 任务执行器（脚本沙箱执行）
     pub executor: Arc<TaskExecutor>,
 
     // ---- Layer 7：登录编排 ----

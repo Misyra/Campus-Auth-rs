@@ -716,7 +716,7 @@ struct Cached<V> {
 /// 带 30s TTL 的网络检测器包装（7.3）
 ///
 /// `list_interfaces` / `default_gateways` / `current_ssid` 各自缓存，TTL 内直接返回缓存，
-/// 避免 monitor 每探测周期 + 每个 Web 请求（list_network_interfaces / detect）都重新 spawn
+/// 避免 monitor 每探测周期 + 每个探测请求都重新 spawn
 /// ipconfig、netsh、route 子进程（各 10s 超时，开销大）。
 pub(crate) struct CachingDetector {
     inner: std::sync::Arc<dyn NetworkDetect>,

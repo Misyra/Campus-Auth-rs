@@ -228,43 +228,6 @@
      }
     }
    },
-   "put": {
-    "operationId": "put___api_config",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   },
    "patch": {
     "operationId": "patch___api_config",
     "responses": {
@@ -337,37 +300,6 @@
      "content": {
       "application/json": {
        "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/config/defaults": {
-   "get": {
-    "operationId": "get___api_config_defaults",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
       }
      }
     }
@@ -1582,35 +1514,6 @@
    }
   },
   "/api/scheduler/jobs/{id}": {
-   "get": {
-    "operationId": "get___api_scheduler_jobs_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
    "put": {
     "operationId": "put___api_scheduler_jobs_id",
     "responses": {
@@ -2440,37 +2343,6 @@
     }
    }
   },
-  "/api/icons": {
-   "get": {
-    "operationId": "get___api_icons",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
   "/api/uninstall/detect": {
    "get": {
     "operationId": "get___api_uninstall_detect",
@@ -2854,45 +2726,6 @@
     }
    }
   },
-  "/api/autostart/mode": {
-   "post": {
-    "operationId": "post___api_autostart_mode",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
   "/api/ocr/recognize": {
    "post": {
     "operationId": "post___api_ocr_recognize",
@@ -3041,37 +2874,6 @@
     }
    }
   },
-  "/api/scripts": {
-   "get": {
-    "operationId": "get___api_scripts",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
   "/api/scripts/run": {
    "post": {
     "operationId": "post___api_scripts_run",
@@ -3211,68 +3013,6 @@
    },
    "delete": {
     "operationId": "delete___api_scripts_task_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/shells": {
-   "get": {
-    "operationId": "get___api_shells",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/tools/network-interfaces": {
-   "get": {
-    "operationId": "get___api_tools_network-interfaces",
     "responses": {
      "200": {
       "description": "OK",
@@ -3689,69 +3429,6 @@
       "content": {
        "application/json": {
         "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/ai/generate": {
-   "post": {
-    "operationId": "post___api_ai_generate",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request（未配置/未捕获/解析或截断失败）",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "422": {
-      "description": "自纠轮耗尽仍未通过任务校验（错误列表见 VALIDATION_ERROR details）",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "503": {
-      "description": "LLM 上游不可用（超时/建连失败/空闲超时/远端 5xx）",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {
-        "type": "object",
-        "properties": {
-         "extra_prompt": {
-          "type": "string",
-          "description": "用户补充说明（可选）"
-         }
-        }
        }
       }
      }

@@ -21,18 +21,6 @@ pub async fn get_status(State(status): State<Arc<StatusManager>>) -> Result<Json
     Ok(data(serde_json::to_value(&snapshot)?))
 }
 
-/// GET /api/tools/network-interfaces — 列出真实网络接口
-///
-/// 调用平台对应的 NetworkDetect 实现返回有效网卡列表。
-pub async fn list_network_interfaces() -> Result<Json<Value>, ApiError> {
-    let detector = crate::network::detect::create_detector();
-    let interfaces = detector
-        .list_interfaces()
-        .await
-        .map_err(|e| ApiError::Internal(format!("网络接口检测失败: {e}")))?;
-    Ok(data(interfaces))
-}
-
 /// POST /api/monitor/test — 网络连通性测试
 ///
 /// 经 EngineApi 派发到「当前活跃」Engine（崩溃重启后自动指向新实例），

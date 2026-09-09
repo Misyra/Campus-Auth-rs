@@ -693,26 +693,6 @@ pub async fn bootstrap_environment(
     })))
 }
 
-/// GET /api/icons — 可用图标列表
-///
-/// 扫描资源图标目录返回可用图标。目录不存在时返回空列表。
-pub async fn list_icons(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let icons_dir = state.config.base_path().join("resources").join("icons");
-    let mut icons = Vec::new();
-    // 目录扫描用 tokio::fs，避免同步 std::fs 阻塞 tokio worker 线程
-    if let Ok(mut rd) = tokio::fs::read_dir(&icons_dir).await {
-        while let Some(entry) = rd.next_entry().await.ok().flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".png") || name.ends_with(".ico") || name.ends_with(".svg") {
-                    let stem = name.split('.').next().unwrap_or(name).to_string();
-                    icons.push(serde_json::json!({ "name": stem, "file": name }));
-                }
-            }
-        }
-    }
-    Ok(data(icons))
-}
-
 // ---- 文档 ----
 
 /// 便携包/开发期均可用：优先读磁盘 `docs/guides/task-writing-guide.md`（便于热更），

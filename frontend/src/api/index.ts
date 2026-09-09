@@ -9,7 +9,6 @@ import { ensureAuthToken, http } from "./client";
 import type { RequestOptions } from "./client";
 import type {
   AiCaptureResult,
-  AiGenerateResult,
   AiLlmConfig,
   AutostartStatus,
   BackgroundUploadResult,

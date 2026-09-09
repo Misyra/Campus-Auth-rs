@@ -359,7 +359,7 @@ impl Drop for RunningGuard {
     }
 }
 
-/// 组装定时任务执行结果消息：脚本/Shell 任务附带退出码，浏览器任务仅有输出文本
+/// 组装定时任务执行结果消息：脚本任务附带退出码，浏览器任务仅有输出文本
 fn scheduled_result_message(task: &crate::tasks::TaskKind, r: &crate::tasks::TaskResult) -> String {
     match task {
         crate::tasks::TaskKind::Browser(_) => r.output.clone(),
@@ -385,7 +385,7 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
             // 定时浏览器任务统一走通用语义（打卡/签到等日常自动化），不注入账号密码。
             // 登录认证由断网自动触发（LoginSource::Auto）或手动登录按钮负责，二者正交。
             //
-            // 超时覆写（默认值 + 浏览器毫秒 / 脚本与 Shell 秒的单位差异 + 钳制）
+            // 超时覆写（默认值 + 浏览器毫秒 / 脚本秒的单位差异 + 钳制）
             // 由 executor 的统一入口内部集中处理，此处只传秒数。
             // 注意绑定名用 kind：外层 `task: ScheduledTask` 持有 timeout 定义
             let timeout = task.timeout.unwrap_or(DEFAULT_SCHEDULED_TIMEOUT);

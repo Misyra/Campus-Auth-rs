@@ -43,12 +43,6 @@ fn check_supported_binary(
     Ok(())
 }
 
-/// GET /api/scripts — 列出全部脚本（复用任务列表）
-pub async fn list_scripts(State(tasks): State<Arc<dyn TaskApi>>) -> Result<Json<Value>, ApiError> {
-    let tasks = tasks.list_all_tasks().await;
-    Ok(data(tasks))
-}
-
 /// POST /api/scripts/run 请求体：按 task_id 运行已保存脚本，或直接运行 script 内容（二选一）
 #[derive(Deserialize)]
 pub struct RunScriptBody {
@@ -447,7 +441,6 @@ mod tests {
             env: Arc::new(MockEnvironmentApi),
         };
         let app = axum::Router::new()
-            .route("/api/scripts", get(list_scripts))
             .route("/api/scripts/run", post(run_script))
             .route("/api/scripts/binaries", get(list_binaries))
             .route(
@@ -457,23 +450,6 @@ mod tests {
             .route("/api/shells", get(list_shells))
             .with_state(state);
         (app, inner)
-    }
-
-    /// 空列表形状：data 为 []
-    #[tokio::test]
-    async fn list_empty_returns_array() {
-        let (app, _) = mock_app(vec![]);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/scripts")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(body_json(resp).await["data"], serde_json::json!([]));
     }
 
     /// task_id 与 script 双缺 → 400（不触达执行器）

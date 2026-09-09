@@ -125,24 +125,6 @@ pub async fn update_job(
     Ok(data(Value::String("ok".into())))
 }
 
-/// GET /api/scheduler/jobs/{id} — 查询单个定时任务
-pub async fn get_job(
-    State(scheduler): State<Arc<dyn SchedulerApi>>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let job = scheduler
-        .get_task(&id)
-        .ok_or_else(|| ApiError::NotFound(format!("定时任务 {} 不存在", id)))?;
-    let mut v = serde_json::to_value(&job)?;
-    // 同 list_jobs：id 被 serde(skip)，显式回填保证单个响应也带 id
-    v["id"] = serde_json::json!(job.id);
-    // 补充 task_type 展示字段（由 target 关联任务类型推导）
-    if let Some(tt) = scheduler.task_type_of(&job.target_id).await {
-        v["task_type"] = serde_json::json!(tt);
-    }
-    Ok(data(v))
-}
-
 /// DELETE /api/scheduler/jobs/{id} — 删除定时任务
 pub async fn delete_job(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
@@ -203,7 +185,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::{get, post};
+    use axum::routing::{get, post, put};
     use tower::ServiceExt; // oneshot
 
     use crate::scheduler::task::ScheduledTask;
@@ -317,7 +299,7 @@ mod tests {
             .route("/api/scheduler/jobs", get(list_jobs).post(create_job))
             .route(
                 "/api/scheduler/jobs/{id}",
-                get(get_job).put(update_job).delete(delete_job),
+                put(update_job).delete(delete_job),
             )
             .route("/api/scheduler/jobs/{id}/toggle", post(toggle_job))
             .route("/api/scheduler/jobs/{id}/run", post(run_job))
