@@ -329,7 +329,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("DELETE", "/api/scripts/{task_id}", || {
             delete(routes::scripts::delete_script)
         }),
-        ("GET", "/api/shells", || get(routes::scripts::list_shells)),
         // ---- 工具（tools）----
         ("GET", "/api/tools/task-recorder.user.js", || {
             get(routes::tools::task_recorder)

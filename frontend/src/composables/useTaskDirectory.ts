@@ -47,7 +47,8 @@ async function fetchDirectory(force = false): Promise<void> {
       });
       const script = data.filter((t) => {
         const tt = normalizeTaskType(t);
-        return tt === "script" || tt === "shell";
+        // Shell 类型已移除：历史 shell 数据由后端拒绝加载，不会到达此处
+        return tt === "script";
       });
       browserTasks.value.splice(0, browserTasks.value.length, ...browser);
       scripts.value.splice(0, scripts.value.length, ...script);

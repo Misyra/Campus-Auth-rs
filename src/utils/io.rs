@@ -398,16 +398,7 @@ impl std::error::Error for DownloadError {}
 ///
 /// 停滞检测：响应头等待与相邻 chunk 间均受 `stall_timeout` 保护（慢网只要持续
 /// 出数据就不判失败，仅彻底停滞才超时；调用方传 `None` 时不做停滞判定，仅做总超时由上层包裹）。
-pub async fn download_streaming(
-    client: &reqwest::Client,
-    url: &str,
-    dest: &Path,
-    max_bytes: u64,
-) -> Result<(), DownloadError> {
-    download_streaming_with_stall(client, url, dest, max_bytes, None).await
-}
-
-/// 同 [`download_streaming`]，但带停滞超时（相邻 chunk 间最大空闲时间）。
+/// 带停滞超时（相邻 chunk 间最大空闲时间）的流式下载。
 pub async fn download_streaming_with_stall(
     client: &reqwest::Client,
     url: &str,

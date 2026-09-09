@@ -1,6 +1,6 @@
 //! 任务管理：TaskManager + TaskExecutor
 //!
-//! 本模块提供任务的文件 CRUD 管理（[`TaskManager`]）与脚本/Shell/浏览器任务的异步执行
+//! 本模块提供任务的文件 CRUD 管理（[`TaskManager`]）与脚本/浏览器任务的异步执行
 //! （[`TaskExecutor`]）。任务数据模型见 [`models`]；任务执行统一结果见 [`TaskResult`]；
 //! 统一错误类型见 [`TaskError`]。
 
@@ -149,9 +149,6 @@ pub enum TaskError {
     /// 扩展名不在白名单
     #[error("不支持的脚本扩展名: {0}")]
     UnsupportedExtension(String),
-    /// Shell 任务 command 为空
-    #[error("命令为空")]
-    CommandEmpty,
     /// 执行超时
     #[error("执行超时: {0}s")]
     ExecutionTimeout(u64),

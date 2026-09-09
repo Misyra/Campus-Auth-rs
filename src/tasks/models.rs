@@ -1,6 +1,6 @@
 //! 任务数据模型：TaskKind / TaskConfig / StepConfig 等
 //!
-//! 定义浏览器/脚本/Shell 三类任务的 serde 数据模型。`TaskKind` 为内部标记枚举，
+//! 定义浏览器/脚本两类任务的 serde 数据模型。`TaskKind` 为内部标记枚举，
 //! `type` 字段缺失或为空时默认归为浏览器任务（旧版 JSON 兼容），存在但未知时
 //! 反序列化报错（与保存路径的校验一致）。步骤配置做 `code`→`script` 与 `frame`
 //! 类型规范化。
@@ -26,7 +26,7 @@ pub const DEFAULT_STEP_DELAY: f64 = 0.5;
 pub const DEFAULT_NAVIGATION_WAIT: f64 = 1.0;
 /// 步骤默认超时（毫秒）
 pub const DEFAULT_STEP_TIMEOUT_MS: u64 = 10000;
-/// 脚本/Shell 默认超时（秒）
+/// 脚本默认超时（秒）
 pub const DEFAULT_SCRIPT_TIMEOUT: u64 = 60;
 /// 脚本超时下限（秒）
 pub const MIN_SCRIPT_TIMEOUT: u64 = 1;
@@ -187,37 +187,11 @@ impl Default for ScriptTaskConfig {
     }
 }
 
-/// Shell 任务配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ShellTaskConfig {
-    /// 共享字段（扁平嵌入）
-    #[serde(flatten)]
-    pub common: CommonFields,
-    /// Shell 命令字符串（必填）
-    pub command: String,
-    /// 超时秒数，钳制到 [1, 3600]
-    #[serde(default = "default_script_timeout")]
-    pub timeout: u64,
-    /// 指定 shell 路径，为空时用全局配置或系统默认
-    pub shell_path: Option<String>,
-}
-
-impl Default for ShellTaskConfig {
-    fn default() -> Self {
-        Self {
-            common: CommonFields::default(),
-            command: String::new(),
-            timeout: DEFAULT_SCRIPT_TIMEOUT,
-            shell_path: None,
-        }
-    }
-}
-
 /// 统一任务类型（内部标记枚举）
 ///
-/// `type` 字段缺失、为空或 = "browser" 时归为浏览器任务；"script"/"shell" 分别归为
-/// 对应类型；其余未知值在反序列化时报错（与保存路径 `validate_task` 拒绝未知类型
+/// `type` 字段缺失、为空或 = "browser" 时归为浏览器任务；"script" 归为脚本任务；
+/// 历史 `type=shell` 已移除，遇到时明确报错并提示改用脚本任务；
+/// 其余未知值在反序列化时报错（与保存路径 `validate_task` 拒绝未知类型
 /// 的行为一致，避免拼错类型名时被静默当作浏览器任务执行）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -226,17 +200,14 @@ pub enum TaskKind {
     Browser(TaskConfig),
     /// 脚本任务
     Script(ScriptTaskConfig),
-    /// Shell 任务
-    Shell(ShellTaskConfig),
 }
 
 impl TaskKind {
-    /// 借用三类任务共享的 [`CommonFields`]（收敛三臂 match 样板）
+    /// 借用两类任务共享的 [`CommonFields`]（收敛两臂 match 样板）
     pub fn common(&self) -> &CommonFields {
         match self {
             TaskKind::Browser(c) => &c.common,
             TaskKind::Script(c) => &c.common,
-            TaskKind::Shell(c) => &c.common,
         }
     }
 
@@ -245,16 +216,14 @@ impl TaskKind {
         match self {
             TaskKind::Browser(c) => &mut c.common,
             TaskKind::Script(c) => &mut c.common,
-            TaskKind::Shell(c) => &mut c.common,
         }
     }
 
-    /// 任务类型名（`"browser"` / `"script"` / `"shell"`，与 serde tag 取值一致）
+    /// 任务类型名（`"browser"` / `"script"`，与 serde tag 取值一致）
     pub fn type_name(&self) -> &'static str {
         match self {
             TaskKind::Browser(_) => "browser",
             TaskKind::Script(_) => "script",
-            TaskKind::Shell(_) => "shell",
         }
     }
 }
@@ -287,11 +256,12 @@ impl<'de> Deserialize<'de> for TaskKind {
             "script" => Ok(TaskKind::Script(
                 parse::<ScriptTaskConfig>(value).map_err(serde::de::Error::custom)?,
             )),
-            "shell" => Ok(TaskKind::Shell(
-                parse::<ShellTaskConfig>(value).map_err(serde::de::Error::custom)?,
+            // Shell 任务已移除：历史存量 type=shell 明确报错，提示改用脚本任务
+            "shell" => Err(serde::de::Error::custom(
+                "任务类型 shell 已移除，请改用 script 类型（.sh/.bat/.py/.exe）",
             )),
             other => Err(serde::de::Error::custom(format!(
-                "未知任务类型: {other}（有效值: browser / script / shell）"
+                "未知任务类型: {other}（有效值: browser / script）"
             ))),
         }
     }
@@ -486,18 +456,16 @@ mod tests {
     }
 
     #[test]
-    fn test_task_kind_deserialize_shell() {
-        // type=shell 应反序列化为 TaskKind::Shell
+    fn test_task_kind_deserialize_shell_rejected() {
+        // type=shell 已移除：明确报错并提示改用 script
         let json = r#"{
             "type": "shell",
             "name": "Shell 任务",
             "command": "echo hello"
         }"#;
-        let task: TaskKind = serde_json::from_str(json).unwrap();
-        assert!(matches!(task, TaskKind::Shell(_)));
-        if let TaskKind::Shell(cfg) = task {
-            assert_eq!(cfg.command, "echo hello");
-        }
+        let result: Result<TaskKind, _> = serde_json::from_str(json);
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("shell 已移除"));
     }
 
     #[test]
@@ -554,20 +522,18 @@ mod tests {
 
     #[test]
     fn test_task_kind_accessors() {
-        // common()/common_mut()/type_name() 访问器覆盖三个变体
+        // common()/common_mut()/type_name() 访问器覆盖两个变体
         let mut browser = TaskKind::Browser(TaskConfig::default());
         assert_eq!(browser.type_name(), "browser");
         assert_eq!(browser.common().name, "未命名任务");
         browser.common_mut().task_id = "b1".to_string();
         assert_eq!(browser.common().task_id, "b1");
 
-        let script = TaskKind::Script(ScriptTaskConfig::default());
+        let mut script = TaskKind::Script(ScriptTaskConfig::default());
         assert_eq!(script.type_name(), "script");
         assert_eq!(script.common().description, "");
-
-        let shell = TaskKind::Shell(ShellTaskConfig::default());
-        assert_eq!(shell.type_name(), "shell");
-        assert_eq!(shell.common().task_id, "");
+        script.common_mut().task_id = "s1".to_string();
+        assert_eq!(script.common().task_id, "s1");
     }
 
     // ============ StepConfig 反序列化 ============
@@ -679,12 +645,19 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_task_config_default_values() {
-        // 测试 ShellTaskConfig 默认值
-        let cfg = ShellTaskConfig::default();
-        assert_eq!(cfg.timeout, DEFAULT_SCRIPT_TIMEOUT);
-        assert!(cfg.command.is_empty());
-        assert!(cfg.shell_path.is_none());
+    fn test_task_kind_serde_roundtrip_script() {
+        // 脚本任务序列化-反序列化往返
+        let original = TaskKind::Script(ScriptTaskConfig {
+            content: Some("print('test')".to_string()),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        let back: TaskKind = serde_json::from_str(&json).unwrap();
+        if let TaskKind::Script(cfg) = back {
+            assert_eq!(cfg.content, Some("print('test')".to_string()));
+        } else {
+            panic!("应为 Script 类型");
+        }
     }
 
     #[test]
@@ -736,22 +709,6 @@ mod tests {
             assert_eq!(cfg.url, "http://example.com");
         } else {
             panic!("应为 Browser 类型");
-        }
-    }
-
-    #[test]
-    fn test_task_kind_serde_roundtrip_shell() {
-        // Shell 任务序列化-反序列化往返
-        let original = TaskKind::Shell(ShellTaskConfig {
-            command: "echo test".to_string(),
-            ..Default::default()
-        });
-        let json = serde_json::to_string(&original).unwrap();
-        let back: TaskKind = serde_json::from_str(&json).unwrap();
-        if let TaskKind::Shell(cfg) = back {
-            assert_eq!(cfg.command, "echo test");
-        } else {
-            panic!("应为 Shell 类型");
         }
     }
 }

@@ -25,10 +25,6 @@
   gap: 6px;
 }
 
-.info-box.compact {
-  padding: 18px;
-}
-
 /* 暂停卡与检测卡等高对齐：压缩底部提示行高 */
 .pause-card .card-body {
   display: flex;

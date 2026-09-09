@@ -130,9 +130,6 @@ function getColorList(type: keyof CustomColors): { value: string; label: string;
 
 export function useCustomColors() {
   return {
-    customColors: customColors as CustomColors,
-    addCustomColor,
-    removeCustomColor,
     pickCustomColor,
     onCustomColorPicked,
     onColorLongPress,

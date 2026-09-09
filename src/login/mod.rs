@@ -49,11 +49,6 @@ impl LoginHandleInner {
     pub(crate) fn set_result(&self, r: LoginResult) {
         self.result_tx.send_modify(|val| *val = Some(r));
     }
-
-    /// 非阻塞读取当前结果（None 表示尚未完成）
-    pub(crate) fn peek(&self) -> Option<LoginResult> {
-        self.result_tx.borrow().clone()
-    }
 }
 
 /// 中毒锁恢复：锁被 Poison 时取回内部数据而非 panic
@@ -98,11 +93,6 @@ impl LoginHandle {
     /// 触发取消（会话状态机退出后，`await_result` 收到取消终态）
     pub fn cancel(&self) {
         self.cancel_token.cancel();
-    }
-
-    /// 结果是否已就绪（非阻塞）
-    pub fn done(&self) -> bool {
-        self.inner.peek().is_some()
     }
 
     /// 异步等待终态结果
@@ -971,11 +961,6 @@ impl LoginOrchestrator {
         }
     }
 
-    /// 查询当前登录状态
-    pub fn status(&self) -> LoginStatus {
-        self.status.borrow().login_status
-    }
-
     /// 构造「已取消」的立即终态句柄（准备阶段被取消时使用）
     ///
     /// 与会话内取消的终态语义一致：登录状态广播 Cancelled（而非 Failed），
@@ -1183,7 +1168,7 @@ pub use crate::bridge::{Outcome as LoginOutcome, StructuredResult};
 pub use crate::status::LoginSource;
 pub use history::{HistoryResult, HistoryStore, LoginHistoryEntry, LoginHistoryService};
 pub use preemption::{PreemptionDecision, decide};
-pub use session::{LoginResult, LoginSession, LoginState, ResultAction, TerminalKind};
+pub use session::{LoginResult, LoginSession, ResultAction, TerminalKind};
 
 #[cfg(test)]
 mod tests {

@@ -20,32 +20,6 @@ use crate::login::{LoginHandleInner, recover_lock};
 use crate::status::{LoginSource, LoginStatus, PartialSnapshot, StatusManager};
 use crate::utils::metrics::Metrics;
 
-/// 会话内部状态机枚举（用于内部观测，前端可见状态经 `StatusManager` 广播）
-#[derive(Debug, Clone)]
-pub enum LoginState {
-    /// 初始状态，尚未开始执行
-    Idle,
-    /// 正在执行 `bridge.execute()`
-    Running,
-    /// 重试间隔 `sleep` 中
-    Retrying {
-        /// 当前重试次数（从 1 计）
-        attempt: u32,
-    },
-    /// 终态：成功
-    Success,
-    /// 终态：失败
-    Failed {
-        /// 失败原因
-        reason: String,
-    },
-    /// 终态：取消
-    Cancelled {
-        /// 取消原因
-        reason: String,
-    },
-}
-
 /// 终态种类（成功 / 取消 / 失败）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalKind {
@@ -197,8 +171,6 @@ pub struct LoginSession {
     cancel_reason: Arc<StdMutex<Option<String>>>,
     /// 服务依赖集
     deps: SessionDeps,
-    /// 内部状态机当前状态
-    state: StdMutex<LoginState>,
 }
 
 impl LoginSession {
@@ -220,19 +192,12 @@ impl LoginSession {
             shutdown_token,
             cancel_reason,
             deps,
-            state: StdMutex::new(LoginState::Idle),
         }
-    }
-
-    /// 返回当前内部状态机状态
-    pub fn current_state(&self) -> LoginState {
-        recover_lock(&self.state).clone()
     }
 
     /// 会话主循环：执行 → 分类 → 重试/终态
     pub async fn run(self) {
         let session_start = Instant::now();
-        *recover_lock(&self.state) = LoginState::Running;
         self.deps.status_manager.merge(PartialSnapshot::Login {
             status: LoginStatus::Running,
             source: Some(self.params.source),
@@ -521,9 +486,6 @@ impl LoginSession {
         // 指数退避：第 n 次重试等待基准间隔 × 2^(n-1)，给门户/网络恢复留递增窗口，
         // 避免瞬时抖动下固定短间隔白耗重试预算
         let backoff = Self::retry_backoff_delay(self.params.retry_interval, *attempts_used);
-        *recover_lock(&self.state) = LoginState::Retrying {
-            attempt: *attempts_used,
-        };
         self.deps.status_manager.merge(PartialSnapshot::Login {
             status: LoginStatus::Running,
             source: Some(self.params.source),
@@ -715,15 +677,6 @@ impl LoginSession {
             warn!("登录历史写入失败: {e}");
         }
 
-        *recover_lock(&self.state) = match history {
-            HistoryResult::Success => LoginState::Success,
-            HistoryResult::Cancelled => LoginState::Cancelled {
-                reason: result.message.clone(),
-            },
-            HistoryResult::Failed => LoginState::Failed {
-                reason: result.message.clone(),
-            },
-        };
         // 会话终态后回收浏览器资源（Worker 进程保留）。默认全量关闭浏览器
         // （会话内重试复用同一浏览器，终态即关闭）；worker.keep_alive 启用时
         // 改会话级释放，登录成功更是整页保留登录状态（门户页 JS 心跳不中断）。

@@ -45,7 +45,6 @@ pub struct TaskCreateBody {
     pub kind: Option<String>,
     pub url: Option<String>,
     pub script: Option<String>,
-    pub command: Option<String>,
     /// browser 任务的步骤列表：缺省为空（由 save_task 的校验显式报错，
     /// 与 PUT /api/tasks 的口径一致），传入时反序列化为 StepConfig
     #[serde(default)]
@@ -81,12 +80,12 @@ pub async fn create_task(
                 ..Default::default()
             })
         }
-        Some("shell") => crate::tasks::TaskKind::Shell(crate::tasks::ShellTaskConfig {
-            common: common.clone(),
-            command: body.command.unwrap_or_default(),
-            timeout: 300,
-            shell_path: None,
-        }),
+        // Shell 任务已移除：历史 kind=shell 明确拒绝，提示改用 script
+        Some("shell") => {
+            return Err(ApiError::BadRequest(
+                "任务类型 shell 已移除，请改用 script 类型".into(),
+            ));
+        }
         Some("script") => crate::tasks::TaskKind::Script(crate::tasks::ScriptTaskConfig {
             common: common.clone(),
             content: body.script,
@@ -94,7 +93,7 @@ pub async fn create_task(
         }),
         Some(other) => {
             return Err(ApiError::BadRequest(format!(
-                "未知任务类型 kind: {other}（支持 browser / script / shell）"
+                "未知任务类型 kind: {other}（支持 browser / script）"
             )));
         }
     };
@@ -300,7 +299,7 @@ pub async fn export_task(
     Ok(data(serde_json::to_value(detail)?))
 }
 
-/// POST /api/tasks/{id}/execute — 手动执行任务（通用语义：浏览器/脚本/Shell）
+/// POST /api/tasks/{id}/execute — 手动执行任务（通用语义：浏览器/脚本）
 ///
 /// 浏览器任务走通用执行（不注入账号密码，用于打卡/签到等日常自动化）；
 /// 带凭据的登录语义请走 `POST /api/login`。

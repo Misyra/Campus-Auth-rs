@@ -504,7 +504,7 @@ pub trait SchedulerApi: Send + Sync {
     fn list_tasks(&self) -> Vec<ScheduledTask>;
     /// 查询单个任务。
     fn get_task(&self, id: &str) -> Option<ScheduledTask>;
-    /// 返回目标任务的类型（`browser`/`script`/`shell`）。
+    /// 返回目标任务的类型（`browser`/`script`）。
     async fn task_type_of(&self, target_id: &str) -> Option<&'static str>;
     /// 保存任务（创建或更新）。
     async fn save_task(&self, id: &str, task: &ScheduledTask) -> Result<(), SchedulerError>;

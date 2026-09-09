@@ -191,35 +191,6 @@ pub async fn delete_script(
     Ok(data(Value::String("ok".into())))
 }
 
-/// GET /api/shells — Shell 列表（Shell 任务专用，与 Script 任务正交）
-///
-/// 返回系统可用 Shell（用于 `TaskKind::Shell.shell_path`），支持
-/// `powershell/pwsh`；Script 任务（`TaskKind::Script`）的 `binary_path`
-/// 禁止 PowerShell（见 `check_supported_binary` 与 `is_supported_ext`），
-/// 二者域不同，不视为矛盾。
-pub async fn list_shells() -> Result<Json<Value>, ApiError> {
-    #[cfg(target_os = "windows")]
-    {
-        Ok(data(serde_json::json!({
-            "shells": [
-                { "name": "PowerShell", "path": "powershell.exe" },
-                { "name": "CMD", "path": "cmd.exe" }
-            ],
-            "default": "powershell.exe"
-        })))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(data(serde_json::json!({
-            "shells": [
-                { "name": "bash", "path": "/bin/bash" },
-                { "name": "sh", "path": "/bin/sh" }
-            ],
-            "default": "/bin/bash"
-        })))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,7 +418,6 @@ mod tests {
                 "/api/scripts/{task_id}",
                 get(get_script).put(update_script).delete(delete_script),
             )
-            .route("/api/shells", get(list_shells))
             .with_state(state);
         (app, inner)
     }
@@ -639,26 +609,5 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["data"][0]["name"], "python");
         assert_eq!(v["data"][0]["path"], "/mock/python");
-    }
-
-    /// shells 按编译目标返回（无状态依赖）
-    #[tokio::test]
-    async fn shells_match_platform() {
-        let (app, _) = mock_app(vec![]);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/shells")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let v = body_json(resp).await;
-        #[cfg(target_os = "windows")]
-        assert_eq!(v["data"]["default"], "powershell.exe");
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(v["data"]["default"], "/bin/bash");
     }
 }

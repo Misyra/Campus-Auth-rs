@@ -1063,24 +1063,9 @@ class WorkerCore:
                 data["session_type"] = session_type
             self.emit(event_type, data)
 
-        def _on_page_lost() -> None:
-            """evaluate 超时/取消强制关闭页面后的自愈钩子。
-
-            close 是打断挂起 CDP await 的唯一手段，但页面销毁后残留的
-            ``self._page`` 死引用会让下一任务无法重建、后续步骤以
-            "Target page closed" 混乱失败。此处同步清引用；依赖该页的
-            调试会话无法自愈，直接结束并留痕。"""
-            if self._page is page:
-                self._page = None
-            for sid, session in list(self._debug_sessions.items()):
-                if session.page is page:
-                    self._debug_sessions.pop(sid, None)
-                    logger.warning("调试会话 %s 因页面被强制中断（JS 超时/取消）而结束", sid)
-
         return StepContext(
             page=page,
             variables=variables,
-            browser_settings=bs,
             cancel_event=cancel_event,
             screenshot_dir=screenshot_dir,
             default_timeout=_to_ms(bs, "timeout", 10000),
@@ -1088,7 +1073,6 @@ class WorkerCore:
             reveal_hidden=task_config.reveal_hidden,
             step_delay=task_config.step_delay,
             emit=_emit,
-            on_page_lost=_on_page_lost,
         )
 
     async def _navigate(self, page: Any, url: str, nav_timeout: int) -> None:
@@ -1118,7 +1102,7 @@ class WorkerCore:
         self._session_type = "login"
         # 有码任务在拉起浏览器前同步预热一次：主线程加载 ddddocr/numpy C 扩展
         # 入缓存，后续后台线程的分类识别只命中缓存，避免 Windows loader lock 卡 100s
-        if any(s.step_type in ("ocr", "ocr_recognize") for s in (task_config.steps or [])):
+        if any(s.step_type == "ocr" for s in (task_config.steps or [])):
             try:
                 from worker_main import _preload_ocr_deps  # noqa: WPS433
 

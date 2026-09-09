@@ -374,11 +374,11 @@ export interface TaskSummary {
   id: string;
   name: string;
   description: string;
-  /** 任务类型：browser / script / shell */
+  /** 任务类型：browser / script（shell 已移除） */
   task_type: string;
 }
 
-/** 任务完整配置（对应后端 TaskKind，按 type 区分 browser/script/shell） */
+/** 任务完整配置（对应后端 TaskKind，按 type 区分 browser/script） */
 export interface TaskConfig {
   type?: string;
   name?: string;
@@ -560,7 +560,6 @@ export interface InitStatus {
 /** 健康检查 */
 export interface HealthInfo {
   version?: string;
-  python_version?: string;
 }
 
 /** 危险步骤（保存任务前确认） */

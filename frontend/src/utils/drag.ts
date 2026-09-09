@@ -131,13 +131,11 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
   }
 
   return {
-    dragging,
     onHandleMouseDown,
     onHandleMouseUp,
     handleDragStart,
     onDragOver,
     onDrop,
     onDragEnd,
-    persistOrder,
   };
 }

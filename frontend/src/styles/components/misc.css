@@ -44,55 +44,7 @@
   color: var(--text-muted);
 }
 
-.info-box {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-md);
-  margin-top: 20px;
-  backdrop-filter: var(--blur-sm);
-}
-
-.info-box h4 {
-  font-size: var(--text-base);
-  margin-bottom: 12px;
-}
-
-.info-box ul {
-  list-style: none;
-  font-size: var(--text-md);
-  color: var(--text-secondary);
-}
-
-.info-box li {
-  padding: var(--space-xs) 0;
-}
-
-.info-box.success {
-  border-color: rgba(var(--success-rgb), 0.3);
-  background: rgba(var(--success-rgb), 0.1);
-}
-
-.info-box.warning {
-  border-color: rgba(var(--warning-rgb), 0.3);
-  background: rgba(var(--warning-rgb), 0.1);
-}
-
-.info-box.error {
-  border-color: rgba(var(--error-rgb), 0.3);
-  background: rgba(var(--error-rgb), 0.1);
-}
-
-/* ========== Fullscreen Image Overlay ==========
- * 已退役并删除：截图放大/背景预览统一走 Modal + preview 修饰（modal.css）。旧构建缓存抖动已过观察期，不再保留。 */
-
-.fullscreen-img {
-  max-width: 95vw;
-  max-height: 95vh;
-  object-fit: contain;
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-xl);
-}
+/* Fullscreen Image Overlay 已退役：统一走 Modal + preview 修饰 */
 
 /* ========== Loading State ========== */
 .loading-state {
@@ -105,7 +57,6 @@
 }
 
 /* 大号 spinner：统一在此处定义尺寸，各使用处不再重复 */
-.spinner-lg,
 .loading-state .spinner,
 .init-overlay .spinner {
   width: 40px;
@@ -134,19 +85,10 @@
 /* 工具类: SVG sizing */
 .icon-xs { width: 11px; height: 11px; }
 .icon-sm { width: 14px; height: 14px; }
-.icon-md { width: 16px; height: 16px; }
-.icon-lg { width: 20px; height: 20px; }
-.icon-xl { width: 24px; height: 24px; }
 
 /* 工具类: flex/gap（数值对齐 --space-* 档位） */
 .flex-row { display: flex; align-items: center; }
-.gap-xs { gap: var(--space-xs); }
 .gap-sm { gap: var(--space-sm); }
-.gap-md { gap: var(--space-md); }
-.gap-lg { gap: var(--space-lg); }
-
-/* 工具类: alignment */
-.ms-auto { margin-left: auto; }
 
 /* 等宽文本区域：脚本/参数/URL 检测等多行 mono 输入统一走本类（字族与字号对齐 form 基准） */
 .textarea--mono,
@@ -194,39 +136,6 @@
 .exit-overlay .btn {
   margin-top: 12px;
   min-width: 140px;
-}
-
-/* ── 提示条 ── */
-
-.alert-hint {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  margin-bottom: 12px;
-  border-radius: var(--radius-md);
-  background: rgba(var(--accent-rgb), 0.06);
-  border: 1px solid rgba(var(--accent-rgb), 0.15);
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-
-.alert-hint code {
-  font-size: var(--text-xs);
-  padding: 1px var(--space-xs);
-  background: rgba(var(--accent-rgb), 0.1);
-  border-radius: var(--radius-xs);
-  color: var(--accent);
-}
-
-.alert-hint a {
-  color: var(--accent);
-  text-decoration: none;
-  margin-left: 2px;
-}
-
-.alert-hint a:hover {
-  text-decoration: underline;
 }
 
 /* ========== Init Loading Overlay ========== */
@@ -319,55 +228,6 @@
 /* 主按钮内的 spinner：顶色改用按钮文字色，保证在 accent 底色上可见（原内联 style 迁移） */
 .spinner-on-accent {
   border-top-color: var(--on-accent);
-}
-
-/* ═══ 骨架屏加载 ═══ */
-.skeleton-shimmer {
-  background: linear-gradient(
-    90deg,
-    var(--bg-card) 25%,
-    var(--bg-hover) 37%,
-    var(--bg-card) 63%
-  );
-  background-size: 400% 100%;
-  animation: shimmer 1.4s ease infinite;
-  border-radius: var(--radius-xl);
-}
-
-@keyframes shimmer {
-  0% { background-position: 100% 50%; }
-  100% { background-position: 0 50%; }
-}
-
-.skeleton-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-md);
-  margin-bottom: var(--space-md);
-}
-
-.skeleton-card {
-  height: 80px;
-  border: 1px solid var(--border);
-}
-
-.skeleton-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-md);
-}
-
-@media (max-width: 1024px) {
-  .skeleton-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (max-width: 768px) {
-  .skeleton-grid,
-  .skeleton-row {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* ═══ 品牌 Logo：CSS mask 渲染，颜色跟随 --text-primary 自动适配深浅主题 ═══ */

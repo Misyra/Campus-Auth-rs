@@ -31,7 +31,6 @@ from models import Outcome  # noqa: E402
 from playwright_worker import (  # noqa: E402
     COMMANDS,
     StepCancelled,
-    WORKER_VERSION,  # noqa: F401 — 单点定义在 playwright_worker，此处再导出保持可导入
     WorkerError,
     _purge_stale_debug_screenshots,
     _to_ms,

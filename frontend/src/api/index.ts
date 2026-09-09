@@ -82,7 +82,6 @@ export const configApi = {
   // B4：原 PUT /api/config 全量保存方法已删除（全库零调用，且扁平整体替换
   // 的载荷形状容易在后端演变为清空配置的地雷）；保存统一走 patch 增量语义
   patch: (payload: SaveConfigPayload, opts?: RequestOptions) => http.patch<MutationResult>("/api/config", payload, opts),
-  fetchDefaults: () => http.get<ConfigResponse>("/api/config/defaults"),
   fetchLogLevels: () => http.get<{ level: string }>("/api/config/log-levels"),
   setLogLevel: (level: string) => http.put<MutationResult>("/api/config/log-level", { level }),
   fetchStealthScript: () => http.get<{ script: string }>("/api/config/default-stealth-script"),
@@ -233,9 +232,6 @@ export const aiApi = {
       headers: token ? { "X-Auth-Token": token } : undefined,
     });
   },
-  // 生成含 1~2 轮 LLM 调用（每轮最长 120s），放宽客户端超时（保留非流式回退）
-  generate: (payload: { extra_prompt?: string }) =>
-    http.post<AiGenerateResult>("/api/ai/generate", payload, { timeout: 300000 }),
   /** 流式生成（SSE）：增量推送，空闲超时语义（有输出自动续命，仅连续无内容达阈值才超时，最大 10 分钟） */
   async generateStream(
     payload: { extra_prompt?: string },
@@ -398,7 +394,6 @@ export const backgroundApi = {
 
 /** 脚本 */
 export const scriptsApi = {
-  list: () => http.get<Script[]>("/api/scripts"),
   get: (id: string) => http.get<Script>(`/api/scripts/${pathSegment(id)}`),
   binaries: () => http.get<BinaryInfo[]>("/api/scripts/binaries"),
   save: (id: string, payload: { name: string; description: string; content: string; binary_path: string }) =>
@@ -424,7 +419,6 @@ export const tasksApi = {
 /** 定时任务 */
 export const scheduledTasksApi = {
   list: () => http.get<ScheduledTask[]>("/api/scheduler/jobs"),
-  get: (id: string) => http.get<ScheduledTask>(`/api/scheduler/jobs/${id}`),
   create: (payload: ScheduledTask) => http.post<MutationResult>("/api/scheduler/jobs", payload),
   update: (id: string, payload: ScheduledTask) => http.put<MutationResult>(`/api/scheduler/jobs/${id}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/scheduler/jobs/${id}`),

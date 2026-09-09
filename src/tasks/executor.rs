@@ -3,11 +3,11 @@
 //! 统一入口 [`TaskExecutor::execute`] 按 [`TaskKind`] 分派：
 //! - `Browser` → 经 [`BridgeSupervisor`] 执行浏览器任务，执行前后向 [`StatusManager`] 上报
 //!   Worker 忙/空闲状态，并确保 Python 环境能力就绪（[`EnvironmentManager`]）；
-//! - `Script` / `Shell` → 用 `tokio::process::Command` 执行，超时/取消通过 `tokio::time::timeout`
+//! - `Script` → 用 `tokio::process::Command` 执行，超时/取消通过 `tokio::time::timeout`
 //!   与 `kill_on_drop`/Windows Job Object 实现，标准输出/错误持续排空并截断到
 //!   `OUTPUT_TRUNCATE_LEN`，避免管道阻塞和内存无界增长。
 //!
-//! 脚本/Shell 执行按任务 ID 经各自的 `tokio::sync::Mutex` 串行化：
+//! 脚本执行按任务 ID 经各自的 `tokio::sync::Mutex` 串行化：
 //! 同一任务串行执行，不同任务互不阻塞（避免一个长脚本阻塞所有脚本任务）。
 
 use std::collections::HashMap;
@@ -42,10 +42,8 @@ pub struct TaskResult {
     pub error: Option<String>,
 }
 
-/// 脚本/Shell 任务异步执行器
+/// 脚本任务异步执行器
 pub struct TaskExecutor {
-    /// 脚本/Shell 文件根目录（= `<base_path>/scripts` 的父级 `tasks/`）
-    tasks_dir: PathBuf,
     /// `tasks/scripts/` 目录（解析相对 script_path 用）
     scripts_dir: PathBuf,
     /// 状态管理器（上报 Worker 忙碌状态）
@@ -56,7 +54,7 @@ pub struct TaskExecutor {
     env: Arc<EnvironmentManager>,
     /// 配置服务（读取浏览器启动设置，随浏览器任务一并下发 Worker）
     config: Arc<ConfigService>,
-    /// 脚本/Shell 执行的按任务 ID 锁注册表：同任务串行、不同任务并行
+    /// 脚本执行的按任务 ID 锁注册表：同任务串行、不同任务并行
     ///
     /// registry 条目不清理：任务数量有限（数十量级），每个条目仅一个空 Mutex，
     /// 常驻内存开销可忽略，换取实现简单与并发安全。
@@ -77,10 +75,8 @@ impl TaskExecutor {
         env: Arc<EnvironmentManager>,
         config: Arc<ConfigService>,
     ) -> Arc<Self> {
-        let tasks_dir = crate::utils::paths::tasks_dir(base_path);
         let scripts_dir = crate::utils::paths::scripts_dir(base_path);
         Arc::new(Self {
-            tasks_dir,
             scripts_dir,
             status,
             bridge,
@@ -95,7 +91,6 @@ impl TaskExecutor {
         match task {
             TaskKind::Browser(cfg) => self.execute_browser(cfg).await,
             TaskKind::Script(cfg) => self.execute_script(cfg).await,
-            TaskKind::Shell(cfg) => self.execute_shell(cfg).await,
         }
     }
 
@@ -103,7 +98,7 @@ impl TaskExecutor {
     /// 中的超时字段（供调度器等需要按定时任务定义统一覆盖超时的调用方使用）。
     ///
     /// 超时单位差异在此集中消化：浏览器任务的 `TaskConfig::timeout` 单位是**毫秒**，
-    /// 脚本/Shell 任务的单位是**秒**（且执行时钳制到 `[1, 3600]`）。调用方统一传秒，
+    /// 脚本任务的单位是**秒**（且执行时钳制到 `[1, 3600]`）。调用方统一传秒，
     /// 由本方法按类型换算，避免各调用点自行重复处理单位与钳制。
     pub async fn execute_with_timeout_override(
         &self,
@@ -122,11 +117,6 @@ impl TaskExecutor {
                 let mut cfg = cfg.clone();
                 cfg.timeout = timeout_secs;
                 self.execute_script(&cfg).await
-            }
-            TaskKind::Shell(cfg) => {
-                let mut cfg = cfg.clone();
-                cfg.timeout = timeout_secs;
-                self.execute_shell(&cfg).await
             }
         }
     }
@@ -286,24 +276,6 @@ impl TaskExecutor {
             return Err(TaskError::UnsupportedExtension(ext));
         }
         let work_dir = resolve_work_dir(cfg, &script_file, &self.scripts_dir);
-        let envs = build_minimal_env();
-
-        self.run_command(program, args, &work_dir, envs, clamp_timeout(cfg.timeout))
-            .await
-    }
-
-    /// 执行 Shell 任务
-    pub async fn execute_shell(&self, cfg: &ShellTaskConfig) -> Result<TaskResult, TaskError> {
-        if cfg.command.trim().is_empty() {
-            return Err(TaskError::CommandEmpty);
-        }
-        // 同任务串行、不同任务并行：按任务 ID 取各自的执行锁
-        let lock = self.task_exec_lock(&cfg.common.task_id);
-        let _guard = lock.lock().await;
-
-        let (program, flag) = resolve_shell(cfg);
-        let args = vec![flag.to_string(), cfg.command.clone()];
-        let work_dir = self.tasks_dir.clone();
         let envs = build_minimal_env();
 
         self.run_command(program, args, &work_dir, envs, clamp_timeout(cfg.timeout))
@@ -601,24 +573,7 @@ fn resolve_work_dir(cfg: &ScriptTaskConfig, script_file: &Path, scripts_dir: &Pa
         .unwrap_or_else(|| scripts_dir.to_path_buf())
 }
 
-/// 解析 Shell 路径与参数标志（A7：自由函数便于单测）
-fn resolve_shell(cfg: &ShellTaskConfig) -> (String, &'static str) {
-    let shell = if let Some(s) = &cfg.shell_path {
-        s.clone()
-    } else {
-        default_shell()
-    };
-    let lower = shell.to_lowercase();
-    if lower.contains("powershell") || lower.contains("pwsh") {
-        (shell, "-Command")
-    } else if lower.contains("cmd") && cfg!(windows) {
-        (shell, "/c")
-    } else {
-        (shell, "-c")
-    }
-}
-
-/// 同时等待子进程退出并持续排空 stdout/stderr，只保留有限前缀防止内存无界增长。
+/// 钳制脚本超时到 `[MIN_SCRIPT_TIMEOUT, MAX_SCRIPT_TIMEOUT]`
 async fn wait_with_bounded_output(
     child: &mut tokio::process::Child,
     stdout: tokio::process::ChildStdout,
@@ -679,32 +634,6 @@ fn binary_to_ext(binary: &str) -> &'static str {
     } else {
         "py"
     }
-}
-
-/// 检测默认 Shell
-fn default_shell() -> String {
-    if cfg!(windows) {
-        for s in ["pwsh.exe", "powershell.exe", "cmd.exe"] {
-            if find_in_path(s) {
-                return s.to_string();
-            }
-        }
-        "cmd.exe".to_string()
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
-    }
-}
-
-/// 在 PATH 中查找可执行文件
-fn find_in_path(name: &str) -> bool {
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            if dir.join(name).exists() {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// 钳制脚本超时到 `[MIN_SCRIPT_TIMEOUT, MAX_SCRIPT_TIMEOUT]`
@@ -904,54 +833,6 @@ mod tests {
             Path::new("/tasks/scripts"),
         );
         assert_eq!(wd, PathBuf::from("/tasks/scripts/deep"));
-    }
-
-    // ============ resolve_shell ============
-
-    #[test]
-    fn test_resolve_shell_powershell_flag() {
-        let cfg = ShellTaskConfig {
-            shell_path: Some(
-                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe".into(),
-            ),
-            ..Default::default()
-        };
-        let (shell, flag) = resolve_shell(&cfg);
-        assert!(shell.contains("powershell"));
-        assert_eq!(flag, "-Command");
-    }
-
-    #[test]
-    fn test_resolve_shell_pwsh_flag() {
-        let cfg = ShellTaskConfig {
-            shell_path: Some("pwsh.exe".into()),
-            ..Default::default()
-        };
-        let (_, flag) = resolve_shell(&cfg);
-        assert_eq!(flag, "-Command");
-    }
-
-    #[test]
-    fn test_resolve_shell_cmd_flag_platform_dependent() {
-        // cmd.exe 的参数标志平台相关：Windows 用 /c，其余平台按通用 -c 处理
-        let cfg = ShellTaskConfig {
-            shell_path: Some("cmd.exe".into()),
-            ..Default::default()
-        };
-        let (_, flag) = resolve_shell(&cfg);
-        assert_eq!(flag, if cfg!(windows) { "/c" } else { "-c" });
-    }
-
-    #[test]
-    fn test_resolve_shell_custom_path_generic_flag() {
-        // 自定义 shell（如 bash）用通用 -c
-        let cfg = ShellTaskConfig {
-            shell_path: Some("/bin/bash".into()),
-            ..Default::default()
-        };
-        let (shell, flag) = resolve_shell(&cfg);
-        assert_eq!(shell, "/bin/bash");
-        assert_eq!(flag, "-c");
     }
 
     // ============ clamp_timeout 边界 ============
