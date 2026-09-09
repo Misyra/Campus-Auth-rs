@@ -111,8 +111,8 @@ async function autoCheckUpdateOnStartup(): Promise<void> {
     const latest = data.latest ? `v${data.latest}` : "新版本";
     const current = data.current ? `（当前 v${data.current}）` : "";
     const message = `发现新版本 ${latest}${current}`;
-    notify(true, message, "update", { label: "前往下载", page: "about" });
-    frontendLogger.warn("update", `${message}，请前往“关于”页面下载`);
+    notify(true, message, "update", { label: "前往更新", page: "settings-network" });
+    frontendLogger.warn("update", `${message}，请前往“设置 · 网络与更新”页面更新`);
   } catch (error) {
     frontendLogger.debug("update", "启动自动检查更新失败", error);
   }
