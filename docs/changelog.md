@@ -2,6 +2,10 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-11 发布流水线后续修复）
+
+- Release 创建时根据 tag 是否包含预发布后缀自动传入 `--prerelease`，避免后续 alpha/beta/rc 版本被 GitHub 错标为正式版；已发布的 `v5.0.0-alpha.10` 同步修正为预发布
+
 ## v5.0.0-alpha.10（2026-09-11 发布与运行环境修复）
 
 ### Python Worker 与 OCR

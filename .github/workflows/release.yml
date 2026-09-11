@@ -215,7 +215,11 @@ jobs:
               '- 各平台 .sha256 为对应压缩包的 SHA256 校验文件'
           } > /tmp/release-notes.md
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md || \
+            release_flags=()
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              release_flags+=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md "${release_flags[@]}" || \
               gh release view "$GITHUB_REF_NAME" >/dev/null
           fi
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
