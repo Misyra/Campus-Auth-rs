@@ -8,6 +8,7 @@ pub mod generate;
 pub mod llm;
 pub mod prompt;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -25,19 +26,25 @@ const LLM_CONFIG_FILE: &str = "llm.json";
 /// 独立文件而非并入 settings.json：低频工具配置，避免牵动 RuntimeConfig
 /// 快照语义与 schema 迁移；API key 以 AES-256-GCM 密文（`ENC:` 前缀）存储，
 /// 密钥与校园网密码共用（`~/.campus_network_auth/.enc_key.rs`）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmSettings {
+    /// 当前服务商标识；API key 按服务商隔离，切换时不会把旧服务商凭据发给新地址
+    #[serde(default)]
+    pub provider: String,
     /// OpenAI 兼容 API 根地址（如 `https://open.bigmodel.cn/api/paas/v4`），
-    /// 实际请求拼接 `/chat/completions`；允许 http 回环/私网（本地模型场景）
+    /// 实际请求拼接 `/chat/completions`；允许 http 回环/私网（自定义兼容服务场景）
     #[serde(default)]
     pub base_url: String,
     /// 视觉模型名（如 `glm-4v-flash`）
     #[serde(default)]
     pub model: String,
-    /// API key 密文（`ENC:` 前缀）；空串表示未设置
-    #[serde(default)]
+    /// 旧版单 key 字段，仅用于读取迁移；新写入统一进入 `api_keys_enc`
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key_enc: String,
-    /// 单次生成的 max_tokens 上限；缺省 8192（兼容既有行为），`null` 表示不携带
+    /// 按服务商隔离的 API key 密文（`ENC:` 前缀）
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub api_keys_enc: BTreeMap<String, String>,
+    /// 单次生成的 max_tokens 上限；缺省 16384，`null` 表示不携带
     /// 该字段（交由服务商默认，避免硬编码上限截断长任务 JSON 或超出模型限额）
     #[serde(
         default = "default_max_tokens",
@@ -46,15 +53,138 @@ pub struct LlmSettings {
     pub max_tokens: Option<u32>,
 }
 
-/// max_tokens 的历史缺省值：与既有硬编码行为保持一致
+/// max_tokens 缺省值：为较长的任务 JSON 预留空间
 fn default_max_tokens() -> Option<u32> {
-    Some(8192)
+    Some(16_384)
+}
+
+fn default_provider() -> String {
+    "custom".to_string()
+}
+
+impl Default for LlmSettings {
+    fn default() -> Self {
+        Self {
+            provider: default_provider(),
+            base_url: String::new(),
+            model: String::new(),
+            api_key_enc: String::new(),
+            api_keys_enc: BTreeMap::new(),
+            max_tokens: default_max_tokens(),
+        }
+    }
 }
 
 impl LlmSettings {
     /// 是否已完成基础配置（base_url + model，key 可为空——部分本地网关免鉴权）
     pub fn is_configured(&self) -> bool {
         !self.base_url.is_empty() && !self.model.is_empty()
+    }
+
+    /// 当前服务商对应的加密 API key；自定义服务按 origin 隔离
+    pub fn active_api_key_enc(&self) -> &str {
+        self.api_keys_enc
+            .get(&self.key_slot())
+            .map(String::as_str)
+            .or({
+                if self.api_key_enc.is_empty() {
+                    None
+                } else {
+                    Some(self.api_key_enc.as_str())
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    /// 当前服务商是否已经保存 API key
+    pub fn has_active_api_key(&self) -> bool {
+        !self.active_api_key_enc().is_empty()
+    }
+
+    /// 设置或清除当前服务商的 API key 密文
+    pub fn set_active_api_key_enc(&mut self, value: String) {
+        let slot = self.key_slot();
+        if value.is_empty() {
+            self.api_keys_enc.remove(&slot);
+        } else {
+            self.api_keys_enc.insert(slot, value);
+        }
+        self.api_key_enc.clear();
+    }
+
+    /// 已保存 key 的内置服务商列表（仅返回标识，不暴露密文）
+    pub fn configured_providers(&self) -> Vec<String> {
+        ["opencode", "glm", "deepseek"]
+            .into_iter()
+            .filter(|provider| self.api_keys_enc.contains_key(*provider))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn key_slot(&self) -> String {
+        if self.provider != "custom" {
+            return self.provider.clone();
+        }
+        url::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| {
+                let host = url.host_str()?;
+                let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+                Some(format!("custom:{}://{host}{port}", url.scheme()))
+            })
+            .unwrap_or_else(|| "custom".to_string())
+    }
+
+    fn normalize_after_load(&mut self) {
+        if self.provider.trim().is_empty() {
+            self.provider = infer_provider(&self.base_url).to_string();
+        }
+        if !self.api_key_enc.is_empty() {
+            let slot = self.key_slot();
+            self.api_keys_enc
+                .entry(slot)
+                .or_insert_with(|| self.api_key_enc.clone());
+            self.api_key_enc.clear();
+        }
+    }
+}
+
+/// 根据预设域名识别服务商；未知地址归为自定义服务
+pub fn infer_provider(base_url: &str) -> &'static str {
+    let host = url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    if host == "api.deepseek.com" {
+        "deepseek"
+    } else if host == "open.bigmodel.cn" {
+        "glm"
+    } else if host == "opencode.ai" {
+        "opencode"
+    } else {
+        "custom"
+    }
+}
+
+/// 校验前端传入的服务商标识，避免任意字符串膨胀 key 映射
+pub fn validate_provider(raw: &str) -> Result<String, AiError> {
+    let provider = raw.trim().to_ascii_lowercase();
+    if matches!(
+        provider.as_str(),
+        "opencode" | "glm" | "deepseek" | "custom"
+    ) {
+        Ok(provider)
+    } else {
+        Err(AiError::ProviderInvalid)
+    }
+}
+
+/// 校验内置服务商与域名匹配，避免通过篡改请求把其 Key 发送到其他主机。
+pub fn validate_provider_base_url(provider: &str, base_url: &str) -> Result<(), AiError> {
+    if provider == "custom" || infer_provider(base_url) == provider {
+        Ok(())
+    } else {
+        Err(AiError::ProviderBaseUrlMismatch)
     }
 }
 
@@ -67,10 +197,15 @@ pub fn llm_config_path(base: &Path) -> PathBuf {
 pub fn load_llm_settings(base: &Path) -> LlmSettings {
     let path = llm_config_path(base);
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            tracing::warn!("LLM 配置解析失败（{}），按未配置处理: {e}", path.display());
-            LlmSettings::default()
-        }),
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(|mut settings: LlmSettings| {
+                settings.normalize_after_load();
+                settings
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!("LLM 配置解析失败（{}），按未配置处理: {e}", path.display());
+                LlmSettings::default()
+            }),
         Err(_) => LlmSettings::default(),
     }
 }
@@ -78,7 +213,9 @@ pub fn load_llm_settings(base: &Path) -> LlmSettings {
 /// 原子写入 LLM 配置（调用方负责先校验 base_url、加密 api_key）
 pub fn save_llm_settings(base: &Path, settings: &LlmSettings) -> std::io::Result<()> {
     std::fs::create_dir_all(crate::utils::paths::config_dir(base))?;
-    atomic_write_json(&llm_config_path(base), settings)
+    let mut normalized = settings.clone();
+    normalized.normalize_after_load();
+    atomic_write_json(&llm_config_path(base), &normalized)
 }
 
 /// 加密 API key 明文（与校园网密码共用同一密钥文件）
@@ -114,6 +251,9 @@ pub fn validate_base_url(raw: &str) -> Result<String, AiError> {
     }
     if url.host_str().map(str::is_empty).unwrap_or(true) {
         return Err(AiError::BaseUrlMissingHost);
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(AiError::BaseUrlQueryOrFragmentForbidden);
     }
     let mut normalized = url.as_str().to_string();
     // Url::as_str 保留 path 与结尾斜杠语义；统一去掉结尾 "/"（拼接 /chat/completions 前再处理）
@@ -189,9 +329,11 @@ mod tests {
 
         // 写入后往返一致
         let s = LlmSettings {
+            provider: "glm".into(),
             base_url: "https://api.example.com/v1".into(),
             model: "glm-4v-flash".into(),
             api_key_enc: "ENC:abc".into(),
+            api_keys_enc: BTreeMap::new(),
             max_tokens: None,
         };
         save_llm_settings(base, &s).unwrap();
@@ -199,7 +341,7 @@ mod tests {
         assert!(loaded.is_configured());
         assert_eq!(loaded.base_url, s.base_url);
         assert_eq!(loaded.model, s.model);
-        assert_eq!(loaded.api_key_enc, s.api_key_enc);
+        assert_eq!(loaded.active_api_key_enc(), s.api_key_enc);
 
         // 损坏内容：按未配置处理不 panic
         std::fs::write(llm_config_path(base), b"{broken").unwrap();
@@ -218,5 +360,62 @@ mod tests {
     fn test_api_key_decrypt_plaintext_passthrough() {
         // 明文向后兼容直通（手工编辑 llm.json 的兜底）
         assert_eq!(&*decrypt_api_key("raw-key").unwrap(), "raw-key");
+    }
+
+    #[test]
+    fn test_provider_keys_are_isolated_and_legacy_key_is_migrated() {
+        let mut settings = LlmSettings {
+            provider: "deepseek".into(),
+            base_url: "https://api.deepseek.com".into(),
+            api_key_enc: "ENC:legacy".into(),
+            ..Default::default()
+        };
+        settings.normalize_after_load();
+        assert_eq!(settings.active_api_key_enc(), "ENC:legacy");
+
+        settings.provider = "glm".into();
+        settings.base_url = "https://open.bigmodel.cn/api/paas/v4".into();
+        assert!(!settings.has_active_api_key());
+        settings.set_active_api_key_enc("ENC:glm".into());
+
+        settings.provider = "deepseek".into();
+        settings.base_url = "https://api.deepseek.com".into();
+        assert_eq!(settings.active_api_key_enc(), "ENC:legacy");
+    }
+
+    #[test]
+    fn test_explicit_custom_provider_is_not_reclassified() {
+        let mut settings = LlmSettings {
+            provider: "custom".into(),
+            base_url: "https://api.deepseek.com/proxy".into(),
+            ..Default::default()
+        };
+        settings.set_active_api_key_enc("ENC:custom".into());
+        settings.normalize_after_load();
+        assert_eq!(settings.provider, "custom");
+        assert_eq!(settings.active_api_key_enc(), "ENC:custom");
+
+        let mut legacy: LlmSettings = serde_json::from_value(serde_json::json!({
+            "base_url": "https://api.deepseek.com",
+            "model": "m",
+            "api_key_enc": "ENC:legacy"
+        }))
+        .unwrap();
+        legacy.normalize_after_load();
+        assert_eq!(legacy.provider, "deepseek");
+        assert_eq!(legacy.active_api_key_enc(), "ENC:legacy");
+    }
+
+    #[test]
+    fn test_validate_base_url_rejects_query_and_fragment() {
+        assert!(validate_base_url("https://api.example.com/v1?key=x").is_err());
+        assert!(validate_base_url("https://api.example.com/v1#chat").is_err());
+    }
+
+    #[test]
+    fn test_builtin_provider_must_match_base_url() {
+        assert!(validate_provider_base_url("glm", "https://open.bigmodel.cn/api/paas/v4").is_ok());
+        assert!(validate_provider_base_url("glm", "https://api.deepseek.com").is_err());
+        assert!(validate_provider_base_url("custom", "https://example.com/v1").is_ok());
     }
 }

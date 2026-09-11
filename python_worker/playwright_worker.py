@@ -366,6 +366,113 @@ _RESOURCE_EXT_BY_MIME = {
 _RESOURCE_MAX_FILES = 200
 _RESOURCE_MAX_BYTES = 5 * 1024 * 1024
 _RESOURCE_MAX_TOTAL_BYTES = 50 * 1024 * 1024
+_STRUCTURE_MAX_CONTROLS = 300
+_STRUCTURE_MAX_LOCAL_HTML = 40_000
+_CAPTURE_MAX_SCREENSHOT_BYTES = 12 * 1024 * 1024
+
+
+async def _capture_page_structure(page: Any) -> dict[str, Any]:
+    """提取适合模型消费的页面结构，并保留脱敏局部 HTML。
+
+    原始 input value、textarea 内容和 token 类隐藏字段不会进入摘要；局部 HTML
+    仍保留标签层级与属性，作为稳定 selector 判断的必要材料。
+    """
+    script = r"""
+    (limits) => {
+      const visible = (el) => {
+        const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+        return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) !== 0 && r.width > 0 && r.height > 0;
+      };
+      const escAttr = (v) => String(v || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const roots = [document];
+      for (let i = 0; i < roots.length; i++) {
+        for (const el of roots[i].querySelectorAll('*')) if (el.shadowRoot) roots.push(el.shadowRoot);
+      }
+      const all = (selector) => roots.flatMap((root) => Array.from(root.querySelectorAll(selector)));
+      const unique = (selector) => { try { return all(selector).length === 1; } catch (_) { return false; } };
+      const selectorCandidates = (el) => {
+        const out = [];
+        if (el.id) { const s = '#' + CSS.escape(el.id); if (unique(s)) out.push(s); }
+        for (const a of ['data-testid', 'data-test', 'name', 'autocomplete', 'placeholder']) {
+          const v = el.getAttribute(a); if (!v) continue;
+          const s = `${el.localName}[${a}="${escAttr(v)}"]`; if (unique(s)) out.push(s);
+        }
+        const type = el.getAttribute('type');
+        if (type) { const s = `${el.localName}[type="${escAttr(type)}"]`; if (unique(s)) out.push(s); }
+        if (!out.length) {
+          const parts = []; let node = el;
+          while (node && node.nodeType === 1 && parts.length < 5) {
+            let part = node.localName;
+            if (node.id) { part += '#' + CSS.escape(node.id); parts.unshift(part); break; }
+            const siblings = node.parentElement ? Array.from(node.parentElement.children).filter(x => x.localName === node.localName) : [];
+            if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+            parts.unshift(part); node = node.parentElement;
+          }
+          if (parts.length) out.push(parts.join(' > '));
+        }
+        return out.slice(0, 4);
+      };
+      const labelFor = (el) => {
+        const aria = el.getAttribute('aria-label'); if (aria) return aria.trim();
+        if (el.labels?.length) return Array.from(el.labels).map(x => x.innerText || x.textContent || '').join(' ').trim();
+        const labelled = el.getAttribute('aria-labelledby');
+        if (labelled) return labelled.split(/\s+/).map(id => document.getElementById(id)?.textContent || '').join(' ').trim();
+        return (el.closest('label')?.innerText || '').trim();
+      };
+      const controls = all('input,button,select,textarea').slice(0, limits.controls).map((el, index) => ({
+        index, tag: el.localName, type: el.getAttribute('type') || '', id: el.id || '', name: el.getAttribute('name') || '',
+        label: labelFor(el).slice(0, 200), placeholder: (el.getAttribute('placeholder') || '').slice(0, 200),
+        text: (el.innerText || el.textContent || '').trim().slice(0, 200),
+        autocomplete: el.getAttribute('autocomplete') || '', required: !!el.required, disabled: !!el.disabled,
+        visible: visible(el), selectors: selectorCandidates(el),
+        options: el.localName === 'select' ? Array.from(el.options).slice(0, 50).map(o => ({value: o.value, text: (o.textContent || '').trim().slice(0, 200)})) : undefined
+      }));
+      const forms = all('form').slice(0, 50).map((form, index) => ({
+        index, id: form.id || '', name: form.getAttribute('name') || '', method: (form.method || 'get').toLowerCase(),
+        action: form.action || '', visible: visible(form), selectors: selectorCandidates(form)
+      }));
+      const captcha = all('img,input,canvas').filter((el) => {
+        const hay = [el.id, el.className, el.getAttribute('name'), el.getAttribute('alt'), el.getAttribute('placeholder'), el.getAttribute('src')].join(' ').toLowerCase();
+        return /captcha|verify|valid|checkcode|验证码|校验码/.test(hay);
+      }).slice(0, 30).map(el => ({tag: el.localName, id: el.id || '', name: el.getAttribute('name') || '', selectors: selectorCandidates(el)}));
+      const sources = forms.length ? all('form') : (() => {
+        const pwd = all('input[type="password"]')[0]; return pwd ? [pwd.closest('section,main,div') || pwd.parentElement || pwd] : [];
+      })();
+      const localHtml = sources.slice(0, 20).map((source) => {
+        const clone = source.cloneNode(true);
+        for (const el of clone.querySelectorAll('input')) {
+          el.removeAttribute('value');
+          if (/token|secret|password|pwd/i.test((el.getAttribute('name') || '') + ' ' + (el.id || ''))) el.setAttribute('value', '[REDACTED]');
+        }
+        for (const el of clone.querySelectorAll('textarea')) el.textContent = '';
+        for (const el of clone.querySelectorAll('script,style,noscript')) el.remove();
+        return clone.outerHTML;
+      }).join('\n').slice(0, limits.localHtml);
+      return { forms, controls, captcha_candidates: captcha, has_shadow_dom: roots.length > 1, local_html: localHtml };
+    }
+    """
+    frames: list[dict[str, Any]] = []
+    for index, frame in enumerate(page.frames):
+        frame_ref = "main" if frame == page.main_frame else (frame.name or f"frame-{index}")
+        parent = frame.parent_frame
+        parent_ref = None
+        if parent is not None:
+            parent_index = page.frames.index(parent)
+            parent_ref = "main" if parent == page.main_frame else (parent.name or f"frame-{parent_index}")
+        try:
+            detail = await frame.evaluate(
+                script,
+                {"controls": _STRUCTURE_MAX_CONTROLS, "localHtml": _STRUCTURE_MAX_LOCAL_HTML},
+            )
+        except Exception as exc:  # noqa: BLE001 — 跨域/销毁中的 frame 可单独跳过
+            detail = {"forms": [], "controls": [], "captcha_candidates": [], "local_html": "", "error": str(exc)[:300]}
+        frames.append({"ref": frame_ref, "parent": parent_ref, "name": frame.name, "url": frame.url, **detail})
+    remaining_html = _STRUCTURE_MAX_LOCAL_HTML
+    for frame in frames:
+        local_html = str(frame.get("local_html") or "")[:remaining_html]
+        frame["local_html"] = local_html
+        remaining_html = max(0, remaining_html - len(local_html))
+    return {"version": 1, "frames": frames}
 
 
 def _resource_ext(mime: str) -> str:
@@ -1647,6 +1754,9 @@ class WorkerCore:
         取消事件是裸 threading.Event（非 StepContext），导航边界处直接检查置位。
         """
         await self.ensure_browser({"browser_settings": bs})
+        # 捕获用于分析“未登录门户”，不得复用常驻登录会话的 Cookie。
+        if self._context is not None:
+            await self._context.clear_cookies()
         await self._prepare_session_page()
         await self._navigate(self._page, url, _nav_timeout(bs))
         try:
@@ -1684,6 +1794,7 @@ class WorkerCore:
         final_url: str,
         title: str,
         resources: dict[str, str],
+        structure_summary: dict[str, int],
         *,
         mhtml_ok: bool,
         note: str | None,
@@ -1702,6 +1813,8 @@ class WorkerCore:
             "screenshot_path": str(cap_dir / "screenshot.png"),
             "resources_dir": str(cap_dir / "resources") if resources else None,
             "resources_count": len(resources),
+            "structure_path": str(cap_dir / "page_structure.json"),
+            "structure_summary": structure_summary,
         }
         if mhtml_ok:
             meta["mhtml_path"] = str(cap_dir / "page.mhtml")
@@ -1741,7 +1854,27 @@ class WorkerCore:
             html = await self._page.content()
             (cap_dir / "page.html").write_text(html, encoding="utf-8")
             png_bytes = await self._page.screenshot(full_page=True)
+            screenshot_note: str | None = None
+            if len(png_bytes) > _CAPTURE_MAX_SCREENSHOT_BYTES:
+                png_bytes = await self._page.screenshot(full_page=False)
+                screenshot_note = "全页截图过大，已改为当前视口截图"
             (cap_dir / "screenshot.png").write_bytes(png_bytes)
+            try:
+                structure = await _capture_page_structure(self._page)
+            except Exception as exc:  # noqa: BLE001 — 原始 HTML 仍可作为生成兜底
+                structure = {"version": 1, "frames": [], "error": str(exc)[:300]}
+            (cap_dir / "page_structure.json").write_text(
+                json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            frame_items = structure.get("frames", [])
+            structure_summary = {
+                "frames": len(frame_items),
+                "forms": sum(len(item.get("forms", [])) for item in frame_items),
+                "controls": sum(len(item.get("controls", [])) for item in frame_items),
+                "captcha_candidates": sum(
+                    len(item.get("captcha_candidates", [])) for item in frame_items
+                ),
+            }
             mhtml_ok = await self._capture_mhtml(self._page, cap_dir / "page.mhtml")
             resources: dict[str, str] = {}
             note: str | None = None
@@ -1749,6 +1882,8 @@ class WorkerCore:
                 resources, note = await _capture_page_resources(self._page, cap_dir / "resources")
             except Exception as exc:  # noqa: BLE001 — 资源快照失败不阻断 HTML/截图
                 note = f"资源快照失败: {exc}"
+            if screenshot_note:
+                note = f"{note}；{screenshot_note}" if note else screenshot_note
             try:
                 title = await self._page.title()
             except Exception:  # noqa: BLE001 — 页面标题读取失败不致命
@@ -1759,6 +1894,7 @@ class WorkerCore:
                 self._page.url,
                 title,
                 resources,
+                structure_summary,
                 mhtml_ok=mhtml_ok,
                 note=note,
             )
@@ -1774,6 +1910,7 @@ class WorkerCore:
                 "html_chars": len(html),
                 "png_bytes": len(png_bytes),
                 "resources_count": len(resources),
+                "structure_summary": structure_summary,
                 "note": note,
             }
         finally:

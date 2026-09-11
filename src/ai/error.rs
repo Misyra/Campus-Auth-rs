@@ -97,6 +97,21 @@ pub enum AiError {
     /// Base URL 缺 host
     #[error("Base URL 缺少主机名")]
     BaseUrlMissingHost,
+    /// Base URL 带 query/fragment，字符串拼接会形成错误接口且可能泄露凭据
+    #[error("Base URL 不允许携带查询参数或片段")]
+    BaseUrlQueryOrFragmentForbidden,
+    /// 服务商标识不在受支持集合内
+    #[error("服务商标识无效")]
+    ProviderInvalid,
+    /// 内置服务商与预设域名不一致，拒绝把该槽位凭据发送到其他主机
+    #[error("服务商与 Base URL 不匹配，请重新选择服务商")]
+    ProviderBaseUrlMismatch,
+    /// LLM 流式输出超过内存与前端可审阅上限
+    #[error("LLM 输出超过大小上限，请缩短任务说明后重试")]
+    ResponseTooLarge,
+    /// LLM 流包含非法 UTF-8
+    #[error("LLM 流式响应包含无效 UTF-8 数据")]
+    InvalidStreamUtf8,
 }
 
 impl AiError {

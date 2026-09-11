@@ -45,6 +45,39 @@ pub fn extract_json(text: &str) -> Result<Value, AiError> {
     })
 }
 
+/// AI 生成专用安全校验：限制为新建浏览器任务，阻止覆盖已有任务或读取本机文件。
+pub fn validate_generated_task(task: &Value) -> Result<(), Vec<String>> {
+    let Some(obj) = task.as_object() else {
+        return Err(vec!["顶层必须为 JSON 对象".to_string()]);
+    };
+    let mut errors = Vec::new();
+    if obj.contains_key("task_id") || obj.contains_key("id") {
+        errors.push("不得包含 task_id 或顶层 id；保存时会自动创建新任务 ID".to_string());
+    }
+    if obj
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value != "browser")
+    {
+        errors.push("AI 只能生成 browser 类型任务".to_string());
+    }
+    if obj.get("url").and_then(Value::as_str) != Some("{{LOGIN_URL}}") {
+        errors.push("顶层 url 必须固定为 {{LOGIN_URL}}".to_string());
+    }
+    if let Some(steps) = obj.get("steps").and_then(Value::as_array) {
+        for (index, step) in steps.iter().enumerate() {
+            if step.get("type").and_then(Value::as_str) == Some("upload_file") {
+                errors.push(format!("步骤 {} 不允许使用 upload_file", index + 1));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 /// 抽取候选串：剥 markdown 围栏后 trim
 fn extract_candidate(text: &str) -> &str {
     let trimmed = text.trim();
@@ -87,8 +120,16 @@ where
                 attempt,
                 source: Box::new(e),
             })?;
-        let task = extract_json(&text)?;
-        match validate(&task).await {
+        let parsed = extract_json(&text);
+        let validation = match parsed.as_ref() {
+            Ok(task) => match validate_generated_task(task) {
+                Ok(()) => validate(task).await,
+                Err(errors) => Err(errors),
+            },
+            Err(error) => Err(vec![error.to_string()]),
+        };
+        let task = parsed.unwrap_or(Value::Null);
+        match validation {
             Ok(()) => {
                 return Ok(GenerateOutcome {
                     task,
@@ -169,8 +210,16 @@ where
             attempt,
             text_len: text.len(),
         });
-        let task = extract_json(&text)?;
-        match validate(&task).await {
+        let parsed = extract_json(&text);
+        let validation = match parsed.as_ref() {
+            Ok(task) => match validate_generated_task(task) {
+                Ok(()) => validate(task).await,
+                Err(errors) => Err(errors),
+            },
+            Err(error) => Err(vec![error.to_string()]),
+        };
+        let task = parsed.unwrap_or(Value::Null);
+        match validation {
             Ok(()) => {
                 push(StreamEvent::Validated { attempt });
                 return Ok(GenerateOutcome {
@@ -298,6 +347,7 @@ mod tests {
             final_url: "http://p/login".into(),
             title: "t".into(),
             html: "<html></html>".into(),
+            structure: None,
             screenshot_png: vec![0],
             note: None,
         }
@@ -325,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_retry_after_validation_failure() {
         // 第一轮输出缺 name（校验失败），第二轮输出合法任务
-        let bad = json!({ "steps": [] });
+        let bad = json!({ "url": "{{LOGIN_URL}}", "steps": [] });
         let good = valid_task();
         let call = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let call2 = call.clone();
@@ -365,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_generate_exhausts_attempts_with_error_list() {
-        let bad = json!({ "steps": [] });
+        let bad = json!({ "url": "{{LOGIN_URL}}", "steps": [] });
         let result = generate_with(
             &ctx(),
             None,
@@ -410,5 +460,20 @@ mod tests {
             "应包装轮次上下文，实际 {result:?}"
         );
         assert!(result.to_string().contains("401"));
+    }
+
+    #[test]
+    fn test_generated_task_rejects_identity_script_kind_and_file_upload() {
+        let errors = validate_generated_task(&json!({
+            "task_id": "default",
+            "type": "script",
+            "url": "https://example.com",
+            "steps": [{"type": "upload_file"}]
+        }))
+        .unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("task_id")));
+        assert!(errors.iter().any(|error| error.contains("browser")));
+        assert!(errors.iter().any(|error| error.contains("LOGIN_URL")));
+        assert!(errors.iter().any(|error| error.contains("upload_file")));
     }
 }

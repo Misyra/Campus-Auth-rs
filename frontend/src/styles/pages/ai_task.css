@@ -4,16 +4,20 @@
  */
 
 /* ---- 顶部步进器 ---- */
-.ai-task-page { padding-bottom: 10px; }
+.ai-task-page {
+  padding-bottom: 24px;
+  --ai-rail: rgba(var(--primary-rgb), 0.16);
+}
 .ai-stepper {
   display: flex;
   align-items: center;
   gap: 0;
   margin-bottom: 14px;
-  padding: 10px 14px;
+  padding: 14px 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--bg-card);
+  background: rgba(var(--primary-rgb), 0.035);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 .ai-step {
   display: flex;
@@ -55,8 +59,22 @@
   gap: 18px;
   align-items: start;
 }
-.ai-task-grid .card { transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out); }
+.ai-task-grid .card {
+  position: relative;
+  overflow: hidden;
+  border-left-width: 3px;
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+}
+.ai-task-grid .card::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--ai-rail);
+  pointer-events: none;
+}
 .ai-card-done { border-color: rgba(var(--success-rgb), 0.28); box-shadow: var(--shadow-hover); }
+.ai-card-done::after { background: var(--success); }
 /* 本页卡头在全局 .card-header 上追加 gap；步骤徽标统一走通用 .badge（模板已迁移，旧 .ai-card-badge/.badge-todo/doing/done 退役） */
 
 .ai-actions {
@@ -74,6 +92,59 @@
   background: rgba(var(--slate-rgb), 0.08);
 }
 
+/* 服务商像“信号站”一样一眼可扫：选中态、Key 状态与说明在同一张卡内。 */
+.ai-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 2px 0 16px;
+}
+.ai-provider-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 9px;
+  min-height: 82px;
+  padding: 12px;
+  color: inherit;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  cursor: pointer;
+}
+.ai-provider-card:hover { border-color: rgba(var(--primary-rgb), 0.48); }
+.ai-provider-card:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.ai-provider-card.selected {
+  border-color: var(--primary);
+  background: rgba(var(--primary-rgb), 0.07);
+  box-shadow: inset 0 0 0 1px rgba(var(--primary-rgb), 0.15);
+}
+.ai-provider-signal {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-card);
+}
+.ai-provider-card.selected .ai-provider-signal {
+  border-color: var(--primary);
+  background: var(--primary);
+  box-shadow: 0 0 0 4px rgba(var(--primary-rgb), 0.13);
+}
+.ai-provider-copy { display: flex; flex-direction: column; min-width: 0; }
+.ai-provider-copy small { margin-top: 3px; color: var(--text-secondary); line-height: 1.35; }
+.ai-key-state {
+  grid-column: 2;
+  width: fit-content;
+  padding: 1px 7px;
+  color: var(--success);
+  font-size: var(--text-xs);
+  border: 1px solid rgba(var(--success-rgb), 0.25);
+  border-radius: var(--radius-full);
+  background: rgba(var(--success-rgb), 0.08);
+}
+
 .ai-capture-meta {
   display: flex;
   flex-direction: column;
@@ -88,6 +159,25 @@
   border-radius: var(--radius-xs);
   background: rgba(var(--slate-rgb), 0.12);
 }
+.ai-structure-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+  padding: 11px 12px;
+  border: 1px solid rgba(var(--primary-rgb), 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--primary-rgb), 0.055);
+}
+.ai-structure-summary span {
+  padding: 4px 9px;
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  font-size: var(--text-sm);
+}
+.ai-structure-summary b { color: var(--primary); }
+.ai-structure-summary small { flex: 1 1 100%; color: var(--text-secondary); }
 
 .ai-screenshot {
   display: block;
@@ -285,4 +375,15 @@
 @media (max-width: 640px) {
   .ai-step-label { font-size: var(--text-sm); }
   .ai-step-sep { margin: 0 6px; }
+}
+@media (max-width: 960px) {
+  .ai-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+  .ai-provider-grid { grid-template-columns: 1fr; }
+  .ai-stepper { padding-inline: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-bottom-dot.active,
+  .ai-bottom-bar-fill.running { animation: none; }
 }

@@ -27,6 +27,10 @@ const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 /// 瞬时故障（超时/连接失败/429/5xx）的额外重试次数（指数退避）。
 /// 校验失败的自纠轮由 generate.rs 负责，此处只补传输层抖动
 const CHAT_MAX_RETRIES: u32 = 2;
+/// 模型文本上限：足够容纳复杂任务，同时阻止异常服务无界占用内存
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// 尚未出现换行的单个 SSE 帧上限
+const MAX_SSE_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// 流式回调：每收到一个增量 content 片段即调用
 pub type StreamCallback = Box<dyn FnMut(&str) + Send>;
@@ -151,13 +155,14 @@ pub async fn chat_completion_with_stream(
         if streaming {
             match stream_chat_response(resp, &mut on_delta, cancel).await {
                 Ok(text) => return Ok(text),
-                Err(e) if e.is_retryable() && attempt < CHAT_MAX_RETRIES => {
+                Err((e, false)) if e.is_retryable() && attempt < CHAT_MAX_RETRIES => {
                     tracing::warn!(attempt = attempt + 1, "{e}，退避后重试");
                     last_err = e;
                     tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
                     continue;
                 }
-                Err(e) => return Err(e),
+                // 已向前端推送过部分文本时不透明重试，避免两次响应拼接成无效 JSON。
+                Err((e, _)) => return Err(e),
             }
         } else {
             let body = resp.text().await.unwrap_or_default();
@@ -172,12 +177,13 @@ async fn stream_chat_response(
     resp: reqwest::Response,
     on_delta: &mut Option<StreamCallback>,
     cancel: Option<&CancellationToken>,
-) -> Result<String, AiError> {
+) -> Result<String, (AiError, bool)> {
     let mut full = String::new();
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     let mut finished = false;
     let mut last_finish_reason: Option<String> = None;
+    let mut emitted = false;
 
     let deadline = tokio::time::Instant::now() + TOTAL_BUDGET;
     let mut idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
@@ -187,7 +193,7 @@ async fn stream_chat_response(
     loop {
         // 总预算（10 分钟）硬上限：空闲预算会被数据不断刷新，此处兜底防"慢滴流"无限占用
         if tokio::time::Instant::now() >= deadline {
-            return Err(AiError::TotalBudgetExceeded);
+            return Err((AiError::TotalBudgetExceeded, emitted));
         }
         let remaining_idle = idle_deadline.saturating_duration_since(tokio::time::Instant::now());
         let remaining_total = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -202,94 +208,53 @@ async fn stream_chat_response(
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                return Err(AiError::Cancelled);
+                return Err((AiError::Cancelled, emitted));
             }
             waited = tokio::time::timeout(wait, stream.next()) => match waited {
                 Ok(Some(Ok(bytes))) => bytes,
                 Ok(Some(Err(e))) => {
-                    return Err(AiError::StreamInterrupted(e));
+                    return Err((AiError::StreamInterrupted(e), emitted));
                 }
                 // 流自然结束（服务端关闭连接）：跳出外层循环，进入收尾解析
                 Ok(None) => break,
                 Err(_) => {
                     // 超时赛道：区分空闲超时（连接可能还活着，可重试）与总预算耗尽（致命）
                     if tokio::time::Instant::now() >= idle_deadline {
-                        return Err(AiError::IdleTimeout {
+                        return Err((AiError::IdleTimeout {
                             seconds: IDLE_TIMEOUT.as_secs(),
-                        });
+                        }, emitted));
                     }
-                    return Err(AiError::TotalBudgetExceeded);
+                    return Err((AiError::TotalBudgetExceeded, emitted));
                 }
             },
         };
         // 收到数据即刷新空闲预算：只有"持续无输出"才判定为空闲超时
         idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
-        let text = String::from_utf8_lossy(&chunk);
-        buf.push_str(&text);
+        buf.extend_from_slice(&chunk);
+        if buf.len() > MAX_SSE_BUFFER_BYTES {
+            return Err((AiError::ResponseTooLarge, emitted));
+        }
         // 内层 while：将累积缓冲按换行切段逐行解析——TCP chunk 不保证与 SSE 行
         // 边界对齐，必须先入 buf 再按 '\n' 切分，残行留待下个 chunk 补齐
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].trim().to_string();
-            buf.drain(..=pos);
-            // 跳过空行与 `:` 开头的 SSE 注释行（服务端心跳/keep-alive 常借此保活）
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-            // 仅 `data:` 行承载事件负载，其余字段（event:/id:/retry: 等）直接忽略
-            let data = if let Some(d) = line.strip_prefix("data:") {
-                d.trim()
-            } else {
-                continue;
-            };
-            // OpenAI 兼容流约定的终止哨兵：置位后结束解析，外层循环随之收尾
-            if data == "[DONE]" {
-                finished = true;
-                break;
-            }
-            // data 载荷应为 JSON 事件对象；非 JSON 行（宽松网关的杂音）静默跳过，
-            // 不因单行解析失败丢弃整个流
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
-                if let Some(fr) = v
-                    .pointer("/choices/0/finish_reason")
-                    .and_then(Value::as_str)
-                {
-                    // finish_reason=length：输出被 max_tokens 截断，任务 JSON 必然残缺，
-                    // 与其让下游解析半截产物再报隐晦错误，不如立即致命失败并给出
-                    // 可操作提示（简化描述 / 调大 max_tokens）
-                    if fr == "length" {
-                        return Err(AiError::Truncated);
+        while let Some(pos) = buf.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            match consume_sse_line(
+                &line[..line.len().saturating_sub(1)],
+                &mut full,
+                on_delta,
+                &mut last_finish_reason,
+            ) {
+                Ok(done) => {
+                    emitted = !full.is_empty();
+                    if full.len() > MAX_RESPONSE_BYTES {
+                        return Err((AiError::ResponseTooLarge, emitted));
                     }
-                    // 其余非空 finish_reason（如 stop）记录下来，收尾时统一复核
-                    if !fr.is_empty() && fr != "null" {
-                        last_finish_reason = Some(fr.to_string());
+                    if done {
+                        finished = true;
+                        break;
                     }
                 }
-                // 流式主通道：增量在 delta.content，逐段累积并回调前端实时预览
-                if let Some(delta) = v
-                    .pointer("/choices/0/delta/content")
-                    .and_then(Value::as_str)
-                {
-                    if !delta.is_empty() {
-                        full.push_str(delta);
-                        if let Some(cb) = on_delta.as_mut() {
-                            cb(delta);
-                        }
-                    }
-                    continue;
-                }
-                // 非流式回退通道：部分兼容网关在 stream 模式仍整包返回 message.content
-                //（无 delta 字段），此处兜底提取，保证两条通道至少一条产出文本
-                if let Some(content) = v
-                    .pointer("/choices/0/message/content")
-                    .and_then(Value::as_str)
-                {
-                    if !content.is_empty() {
-                        full.push_str(content);
-                        if let Some(cb) = on_delta.as_mut() {
-                            cb(content);
-                        }
-                    }
-                }
+                Err(error) => return Err((error, emitted)),
             }
         }
         if finished {
@@ -298,28 +263,68 @@ async fn stream_chat_response(
     }
     // 尾部兜底：流结束但缓冲仍有残留（无换行结尾的单行 JSON——部分网关不发
     // [DONE] 也不带尾换行）时，按整包响应再解析一次，避免丢掉最后一段内容
-    if full.is_empty() && !buf.trim().is_empty() {
-        if let Ok(v) = serde_json::from_str::<Value>(buf.trim()) {
-            if let Some(c) = v
-                .pointer("/choices/0/message/content")
-                .and_then(Value::as_str)
-            {
-                full.push_str(c);
-                if let Some(cb) = on_delta.as_mut() {
-                    cb(c);
-                }
-            }
+    if !buf.iter().all(u8::is_ascii_whitespace) {
+        match consume_sse_line(&buf, &mut full, on_delta, &mut last_finish_reason) {
+            Ok(_) => emitted = !full.is_empty(),
+            Err(error) => return Err((error, emitted)),
         }
     }
     // 全程未产出任何文本：按可重试失败处理（让上层换连接重试），而非静默返回空串
     if full.is_empty() {
-        return Err(AiError::EmptyStream);
+        return Err((AiError::EmptyStream, emitted));
     }
     // 收尾双保险：即使逐行路径因宽松解析漏过 length 事件，也不允许截断产物被当成功返回
     if last_finish_reason.as_deref() == Some("length") {
-        return Err(AiError::Truncated);
+        return Err((AiError::Truncated, emitted));
     }
     Ok(full)
+}
+
+/// 解析一行 OpenAI 兼容 SSE；返回是否收到 `[DONE]`。
+fn consume_sse_line(
+    bytes: &[u8],
+    full: &mut String,
+    on_delta: &mut Option<StreamCallback>,
+    last_finish_reason: &mut Option<String>,
+) -> Result<bool, AiError> {
+    let line = std::str::from_utf8(bytes)
+        .map_err(|_| AiError::InvalidStreamUtf8)?
+        .trim();
+    if line.is_empty() || line.starts_with(':') {
+        return Ok(false);
+    }
+    let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+        return Ok(false);
+    };
+    if data == "[DONE]" {
+        return Ok(true);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return Ok(false);
+    };
+    if let Some(reason) = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+    {
+        if reason == "length" {
+            return Err(AiError::Truncated);
+        }
+        if !reason.is_empty() && reason != "null" {
+            *last_finish_reason = Some(reason.to_string());
+        }
+    }
+    let content = value
+        .pointer("/choices/0/delta/content")
+        .or_else(|| value.pointer("/choices/0/message/content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !content.is_empty() {
+        full.push_str(content);
+        if let Some(callback) = on_delta.as_mut() {
+            callback(content);
+        }
+    }
+    Ok(false)
 }
 
 /// 解析 OpenAI 兼容响应体，提取 `choices[0].message.content`
@@ -384,5 +389,26 @@ mod tests {
         let body = r#"{"choices":[{"message":{"content":"{\"name\":"},"finish_reason":"length"}]}"#;
         let err = parse_chat_response(body).unwrap_err();
         assert!(matches!(err, AiError::Truncated), "actual: {err}");
+    }
+
+    #[test]
+    fn test_consume_sse_line_preserves_multibyte_and_tail_event() {
+        let mut full = String::new();
+        let mut callback = None;
+        let mut reason = None;
+        let line = r#"data: {"choices":[{"delta":{"content":"校园网"},"finish_reason":"stop"}]}"#;
+        assert!(!consume_sse_line(line.as_bytes(), &mut full, &mut callback, &mut reason).unwrap());
+        assert_eq!(full, "校园网");
+        assert_eq!(reason.as_deref(), Some("stop"));
+        assert!(consume_sse_line(b"data: [DONE]", &mut full, &mut callback, &mut reason).unwrap());
+    }
+
+    #[test]
+    fn test_consume_sse_line_rejects_invalid_utf8() {
+        let mut full = String::new();
+        let mut callback = None;
+        let mut reason = None;
+        let err = consume_sse_line(&[0xff], &mut full, &mut callback, &mut reason).unwrap_err();
+        assert!(matches!(err, AiError::InvalidStreamUtf8));
     }
 }

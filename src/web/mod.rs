@@ -287,6 +287,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("PUT", "/api/ai/llm-config", || {
             put(routes::ai::put_llm_config)
         }),
+        ("POST", "/api/ai/llm-config/test", || {
+            post(routes::ai::test_llm_connection)
+        }),
         ("POST", "/api/ai/capture", || post(routes::ai::capture)),
         ("GET", "/api/ai/capture/status", || {
             get(routes::ai::capture_status)

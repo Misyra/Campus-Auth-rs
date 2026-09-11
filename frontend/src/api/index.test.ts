@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./client", () => ({
   http: {
@@ -10,9 +10,10 @@ vi.mock("./client", () => ({
   },
   ApiError: class ApiError extends Error {},
   extractApiError: vi.fn(),
+  ensureAuthToken: vi.fn().mockResolvedValue(""),
 }));
 
-const { browsersApi, systemApi } = await import("./index");
+const { aiApi, browsersApi, systemApi } = await import("./index");
 const { http } = await import("./client");
 
 const post = vi.mocked(http.post);
@@ -43,9 +44,40 @@ describe("browsersApi.installPlaywright", () => {
   });
 });
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe("systemApi.restart", () => {
   it("调用专用重启端点而不是 shutdown", async () => {
     await systemApi.restart();
     expect(post).toHaveBeenCalledWith("/api/system/restart");
+  });
+});
+
+function sseResponse(frames: string): Response {
+  const bytes = new TextEncoder().encode(frames);
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+describe("aiApi.generateStream", () => {
+  it("收到 done 终态后正常完成并转发事件", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse(
+      'data: {"type":"started"}\n\ndata: {"type":"done","task":{}}\n\n',
+    )));
+    const events: Array<Record<string, unknown>> = [];
+    await aiApi.generateStream({}, { onEvent: (event) => events.push(event), idleTimeoutMs: 1000 });
+    expect(events.map((event) => event.type)).toEqual(["started", "done"]);
+  });
+
+  it("连接结束但没有 done/error 时明确报错", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(sseResponse(
+      'data: {"type":"started"}\n\n',
+    )));
+    await expect(aiApi.generateStream({}, { onEvent: () => undefined, idleTimeoutMs: 1000 }))
+      .rejects.toThrow("未收到完成状态");
   });
 });

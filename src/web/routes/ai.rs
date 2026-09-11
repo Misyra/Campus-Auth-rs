@@ -28,9 +28,12 @@ const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// 脱敏后的 LLM 配置视图（API key 永不出站，只回是否已设置）
 fn masked_view(settings: &LlmSettings) -> Value {
     json!({
+        "provider": settings.provider,
         "base_url": settings.base_url,
         "model": settings.model,
-        "has_api_key": !settings.api_key_enc.is_empty(),
+        "has_api_key": settings.has_active_api_key(),
+        "configured_providers": settings.configured_providers(),
+        "max_tokens": settings.max_tokens,
     })
 }
 
@@ -44,7 +47,7 @@ pub async fn get_llm_config(
 
 /// PUT /api/ai/llm-config — 保存 LLM 配置
 ///
-/// body: `{ base_url, model, api_key?, max_tokens? }`。`api_key` 缺省表示保持不变，
+/// body: `{ provider?, base_url, model, api_key?, max_tokens? }`。`api_key` 缺省表示保持不变，
 /// 空串表示清除，非空表示更新（AES-256-GCM 加密落盘）；`max_tokens` 为整数或
 /// `null`（不携带该字段，交由服务商默认），缺省表示保持不变。
 pub async fn put_llm_config(
@@ -67,17 +70,24 @@ pub async fn put_llm_config(
         return Err(ApiError::BadRequest("模型名不能为空".into()));
     }
     let base_url = ai::validate_base_url(base_url_raw)?;
+    let provider = match obj.get("provider").and_then(Value::as_str) {
+        Some(raw) => ai::validate_provider(raw)?,
+        None => ai::infer_provider(&base_url).to_string(),
+    };
+    ai::validate_provider_base_url(&provider, &base_url)?;
 
     let base = config.base_path();
     let mut settings = ai::load_llm_settings(&base);
+    settings.provider = provider;
     settings.base_url = base_url;
     settings.model = model.to_string();
     match obj.get("api_key").and_then(Value::as_str) {
         None => {}
-        Some("") => settings.api_key_enc = String::new(),
+        Some(raw) if raw.trim().is_empty() => settings.set_active_api_key_enc(String::new()),
         Some(raw) => {
-            settings.api_key_enc = ai::encrypt_api_key(raw)
+            let encrypted = ai::encrypt_api_key(raw.trim())
                 .map_err(|e| ApiError::Internal(format!("API Key 加密失败: {e}")))?;
+            settings.set_active_api_key_enc(encrypted);
         }
     }
     if let Some(mt) = obj.get("max_tokens") {
@@ -95,8 +105,43 @@ pub async fn put_llm_config(
     }
     ai::save_llm_settings(&base, &settings)
         .map_err(|e| ApiError::Internal(format!("LLM 配置写入失败: {e}")))?;
-    tracing::info!("LLM 配置已更新: model={}", settings.model);
+    tracing::info!(provider = %settings.provider, model = %settings.model, "LLM 配置已更新");
     Ok(data(masked_view(&settings)))
+}
+
+/// POST /api/ai/llm-config/test — 用已保存配置发送极小请求，验证接口与凭据。
+pub async fn test_llm_connection(
+    State(config): State<Arc<dyn ConfigApi>>,
+) -> Result<Json<Value>, ApiError> {
+    let mut settings = ai::load_llm_settings(&config.base_path());
+    if !settings.is_configured() {
+        return Err(ApiError::BadRequest("请先保存 LLM 配置".into()));
+    }
+    settings.max_tokens = Some(8);
+    let api_key = if settings.active_api_key_enc().is_empty() {
+        zeroize::Zeroizing::new(String::new())
+    } else {
+        ai::decrypt_api_key(settings.active_api_key_enc()).map_err(|_| {
+            ApiError::BadRequest("API Key 解密失败，请重新保存当前服务商的 Key".into())
+        })?
+    };
+    let started = std::time::Instant::now();
+    let messages = vec![
+        json!({"role": "system", "content": "只回复 OK"}),
+        json!({"role": "user", "content": "连接测试"}),
+    ];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        crate::ai::llm::chat_completion(&settings, api_key.as_str(), messages),
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("连接测试超时（30 秒）".into()))?
+    .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+    Ok(data(json!({
+        "connected": true,
+        "latency_ms": started.elapsed().as_millis(),
+        "request_url": format!("{}/chat/completions", settings.base_url.trim_end_matches('/')),
+    })))
 }
 
 /// POST /api/ai/capture — 捕获登录页面（导航 + 截图 + HTML/JS 落盘）
@@ -178,7 +223,9 @@ pub async fn capture_status(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let dir = ai::capture_dir(&config.base_path());
-    let available = dir.join("meta.json").exists() && dir.join("screenshot.png").exists();
+    let available = dir.join("meta.json").exists()
+        && dir.join("page.html").exists()
+        && dir.join("screenshot.png").exists();
     if !available {
         return Ok(data(json!({ "available": false })));
     }
@@ -201,6 +248,7 @@ pub async fn capture_status(
         "request_url": field("request_url"),
         "final_url": field("final_url"),
         "title": field("title"),
+        "structure_summary": meta.get("structure_summary").cloned().unwrap_or(Value::Null),
     })))
 }
 
@@ -303,7 +351,7 @@ pub async fn generate_stream(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+        .map(|s| s.chars().take(4_000).collect::<String>());
 
     let base = config.base_path();
     let settings = ai::load_llm_settings(&base);
@@ -312,17 +360,16 @@ pub async fn generate_stream(
             "请先配置 LLM 的 Base URL 与模型名".into(),
         ));
     }
-    let api_key = if settings.api_key_enc.is_empty() {
-        String::new()
+    let api_key = if settings.active_api_key_enc().is_empty() {
+        zeroize::Zeroizing::new(String::new())
     } else {
-        ai::decrypt_api_key(&settings.api_key_enc)
-            .map_err(|_| {
-                ApiError::BadRequest(
-                    "API Key 解密失败（密钥文件可能已轮转），请在配置区重新保存 API Key".into(),
-                )
-            })?
-            .to_string()
+        ai::decrypt_api_key(settings.active_api_key_enc()).map_err(|_| {
+            ApiError::BadRequest(
+                "API Key 解密失败（密钥文件可能已轮转），请在配置区重新保存 API Key".into(),
+            )
+        })?
     };
+    let api_key = Arc::new(api_key);
 
     // 必须先登记再读取 captures/latest，确保 capture 不会在多文件读取期间覆盖目录。
     let generation = acquire_generation(&operations)?;
@@ -371,7 +418,7 @@ pub async fn generate_stream(
                     async move {
                         crate::ai::llm::chat_completion_with_stream(
                             &settings,
-                            &api_key,
+                            api_key.as_str(),
                             messages,
                             Some(on_delta),
                             Some(&token),
@@ -381,8 +428,11 @@ pub async fn generate_stream(
                 }
             },
             shared_for_gen,
-        )
-        .await;
+        );
+        let outcome = match tokio::time::timeout(crate::ai::llm::TOTAL_BUDGET, outcome).await {
+            Ok(result) => result,
+            Err(_) => Err(crate::ai::AiError::TotalBudgetExceeded),
+        };
         finalize_generation(&shared, forward_handle, outcome, &capture_warnings).await;
         // 显式放在终态事件排空之后；若中途 panic/abort，RAII Drop 仍会释放并取消。
         drop(generation);
@@ -467,6 +517,20 @@ async fn load_capture_context(
         .map_err(|_| ApiError::BadRequest("捕获截图缺失，请重新执行页面捕获".into()))?;
 
     let mut warnings: Vec<String> = Vec::new();
+    let structure = match tokio::fs::read(dir.join("page_structure.json")).await {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warnings.push(format!("结构化页面材料损坏，已回退原始 HTML: {error}"));
+                None
+            }
+        },
+        Err(_) => {
+            warnings.push("未找到结构化页面材料，已回退原始 HTML".to_string());
+            None
+        }
+    };
+
     if let Some(note) = meta.get("note").and_then(Value::as_str) {
         warnings.push(note.to_string());
     }
@@ -476,6 +540,7 @@ async fn load_capture_context(
         final_url: field("final_url"),
         title: field("title"),
         html,
+        structure,
         screenshot_png,
         note: None,
     };
@@ -484,8 +549,8 @@ async fn load_capture_context(
 
 /// GET /api/ai/capture/bundle — 下载最近一次捕获的完整页面文件（zip）
 ///
-/// 内容：MHTML 完整布局（自包含样式/图片）+ page.html + CSS/JS 资源快照 +
-/// 截图 + meta.json。供离线分析或分享适配；需鉴权（不同于只读截图豁免）。
+/// 内容：MHTML 完整布局（自包含样式/图片）+ page.html + page_structure.json +
+/// CSS/JS 资源快照 + 截图 + meta.json。供离线分析或分享适配；需鉴权。
 pub async fn capture_bundle(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -504,7 +569,13 @@ pub async fn capture_bundle(
             .unix_permissions(0o644);
 
         // meta / HTML / MHTML / 截图：顶层固定名
-        for name in ["meta.json", "page.html", "page.mhtml", "screenshot.png"] {
+        for name in [
+            "meta.json",
+            "page.html",
+            "page_structure.json",
+            "page.mhtml",
+            "screenshot.png",
+        ] {
             let path = dir.join(name);
             if !path.exists() {
                 continue;
@@ -790,6 +861,7 @@ mod tests {
         let app = axum::Router::new()
             .route("/api/ai/llm-config", get(get_llm_config))
             .route("/api/ai/llm-config", put(put_llm_config))
+            .route("/api/ai/llm-config/test", post(test_llm_connection))
             .route("/api/ai/capture", post(capture))
             .route(
                 "/api/ai/capture/screenshot",
@@ -828,6 +900,22 @@ mod tests {
         assert_eq!(v["data"]["has_api_key"], false);
     }
 
+    #[tokio::test]
+    async fn test_llm_connection_requires_saved_config() {
+        let (app, _, _, _) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/ai/llm-config/test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     /// PUT 配置：URL 规范化 + key 加密落盘 + 响应不含明文 key
     #[tokio::test]
     async fn test_put_llm_config_encrypts_and_normalizes() {
@@ -857,7 +945,7 @@ mod tests {
         assert!(raw.contains("ENC:"));
         let settings = ai::load_llm_settings(dir.path());
         assert_eq!(
-            &*ai::decrypt_api_key(&settings.api_key_enc).unwrap(),
+            &*ai::decrypt_api_key(settings.active_api_key_enc()).unwrap(),
             "sk-abc"
         );
     }
@@ -902,7 +990,7 @@ mod tests {
                     .uri("/api/ai/llm-config")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"base_url": "https://a.com", "model": "m", "api_key": "sk-1"})
+                        json!({"provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "m", "api_key": "sk-1"})
                             .to_string(),
                     ))
                     .unwrap(),
@@ -920,7 +1008,7 @@ mod tests {
                     .uri("/api/ai/llm-config")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"base_url": "https://b.com", "model": "m2"}).to_string(),
+                        json!({"provider": "deepseek", "base_url": "https://api.deepseek.com/v1", "model": "m2"}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -928,7 +1016,7 @@ mod tests {
             .unwrap();
         let settings = ai::load_llm_settings(dir.path());
         assert_eq!(
-            &*ai::decrypt_api_key(&settings.api_key_enc).unwrap(),
+            &*ai::decrypt_api_key(settings.active_api_key_enc()).unwrap(),
             "sk-1"
         );
         assert_eq!(settings.model, "m2");
@@ -941,7 +1029,7 @@ mod tests {
                     .uri("/api/ai/llm-config")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"base_url": "https://b.com", "model": "m2", "api_key": ""})
+                        json!({"provider": "deepseek", "base_url": "https://api.deepseek.com/v1", "model": "m2", "api_key": ""})
                             .to_string(),
                     ))
                     .unwrap(),
@@ -949,7 +1037,7 @@ mod tests {
             .await
             .unwrap();
         let settings = ai::load_llm_settings(dir.path());
-        assert!(settings.api_key_enc.is_empty());
+        assert!(!settings.has_active_api_key());
     }
 
     /// capture：注入 browser_settings 与 cancel_id，派发 page_capture，响应补截图 URL

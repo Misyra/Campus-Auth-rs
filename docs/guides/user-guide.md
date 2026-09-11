@@ -124,10 +124,11 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 8. AI 任务生成
 
-入口：设置页 AI 任务生成（`GET /api/ai/llm-config` 读配置、`PUT /api/ai/llm-config` 保存、`POST /api/ai/capture` 捕获页面、`POST /api/ai/generate` 生成）。
+入口：设置页 AI 任务生成（`GET /api/ai/llm-config` 读配置、`PUT /api/ai/llm-config` 保存、`POST /api/ai/capture` 捕获页面、`POST /api/ai/generate/stream` 流式生成）。
 
-- 配置文件：`<base>/config/llm.json`（`api_key_enc` 加密落盘，`base_url` / `model` 等，见 `src/ai/mod.rs`）；
-- 流程：`POST /api/ai/capture` 经 Bridge 触发 `page_capture` 落 `captures/latest/`（MHTML + HTML + 资源 + 截图），再由视觉模型按提示词生成浏览器任务 JSON，经 `validate_task` 强校验后回喂自纠（`src/ai/generate.rs`）；
+- 配置文件：`<base>/config/llm.json`（`api_keys_enc` 按服务商加密落盘，另含 `provider` / `base_url` / `model` / `max_tokens`，见 `src/ai/mod.rs`）；
+- 配置：先选择服务商再填写模型与 Key；不同服务商的 Key 各自加密保存，切换服务商会自动使用对应 Key。最长输出默认 16K，复杂页面可选 32K；
+- 流程：`POST /api/ai/capture` 经 Bridge 触发 `page_capture` 落 `captures/latest/`（MHTML + 原始 HTML + 结构化控件摘要 + 脱敏局部 HTML + 资源 + 截图），视觉模型优先读取结构摘要和局部 HTML，再生成浏览器任务 JSON，经 AI 安全规则与 `validate_task` 双重校验后回喂自纠（`src/ai/generate.rs`）；
 - 依赖：需先经 `page_capture` 捕获页面，生成失败可在前端预览/编辑后走 `POST /api/tasks/import` 入库。
 
 ## 9. 自动更新与通道

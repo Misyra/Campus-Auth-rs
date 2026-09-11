@@ -3296,9 +3296,14 @@
        "schema": {
         "type": "object",
         "properties": {
+         "provider": {
+          "type": "string",
+          "enum": ["opencode", "glm", "deepseek", "custom"],
+          "description": "服务商标识；API Key 按服务商独立保存"
+         },
          "base_url": {
           "type": "string",
-          "description": "OpenAI 兼容 API 根地址（允许 http 回环/私网供本地模型）"
+          "description": "OpenAI 兼容 API 根地址；不允许 query、fragment 或 userinfo"
          },
          "model": {
           "type": "string",
@@ -3307,6 +3312,13 @@
          "api_key": {
           "type": "string",
           "description": "缺省=保持不变；空串=清除；非空=更新（AES-GCM 加密落盘，响应永不回显）"
+         },
+         "max_tokens": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 1,
+          "maximum": 200000,
+          "description": "最长输出 token；默认 16384，null 表示交由服务商决定"
          }
         },
         "required": [
@@ -3316,6 +3328,17 @@
        }
       }
      }
+    }
+   }
+  },
+  "/api/ai/llm-config/test": {
+   "post": {
+    "operationId": "post___api_ai_llm_config_test",
+    "description": "使用已保存配置向实际 chat/completions 地址发送最小请求；30 秒超时",
+    "responses": {
+     "200": { "description": "连接成功，返回实际请求地址与耗时", "content": { "application/json": { "schema": {} } } },
+     "400": { "description": "配置缺失或 Key 无法解密", "content": { "application/json": { "schema": {} } } },
+     "503": { "description": "连接、鉴权或模型请求失败", "content": { "application/json": { "schema": {} } } }
     }
    }
   },
@@ -3397,10 +3420,11 @@
         "schema": {
          "type": "object",
          "properties": {
-          "available": { "type": "boolean", "description": "meta.json 与 screenshot.png 是否齐备" },
+          "available": { "type": "boolean", "description": "meta.json、page.html 与 screenshot.png 是否齐备" },
           "request_url": { "type": "string", "description": "捕获请求 URL（不可用时缺省）" },
           "final_url": { "type": "string", "description": "捕获结束 URL（不可用时缺省）" },
-          "title": { "type": "string", "description": "页面标题（不可用时缺省）" }
+          "title": { "type": "string", "description": "页面标题（不可用时缺省）" },
+          "structure_summary": { "type": "object", "description": "frame、表单、控件和验证码候选数量" }
          }
         }
        }
@@ -3438,7 +3462,7 @@
   "/api/ai/generate/stream": {
    "post": {
     "operationId": "post___api_ai_generate_stream",
-    "description": "流式生成（SSE text/event-stream）：增量推送 LLM 输出与校验状态，空闲超时 10 分钟。事件帧（data: <json>）type 枚举：started / attempt_start / delta / attempt_delta_done / validation_failed / retrying / validated / done / error；\": keepalive\" 注释帧仅证明连接存活不重置前端空闲计时。同一时刻至多一个生成任务（重复发起返回 409）；客户端断连将取消后端 LLM 调用",
+    "description": "流式生成（SSE text/event-stream）：增量推送 LLM 输出与校验状态，含传输重试和自纠轮在内的全流程总预算为 10 分钟。事件帧（data: <json>）type 枚举：started / attempt_start / delta / attempt_delta_done / validation_failed / retrying / validated / done / error；\": keepalive\" 注释帧仅证明连接存活不重置前端空闲计时。同一时刻至多一个生成任务（重复发起返回 409）；客户端断连将取消后端 LLM 调用",
     "responses": {
      "200": {
       "description": "SSE stream（事件帧 schema 见 description；每帧 JSON 带 type 标签）",
@@ -3455,7 +3479,7 @@
      "409": { "description": "已有生成任务进行中", "content": { "application/json": { "schema": {} } } },
      "500": { "description": "Internal Error", "content": { "application/json": { "schema": {} } } }
     },
-    "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "extra_prompt": { "type": "string" } } } } } }
+    "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "extra_prompt": { "type": "string", "maxLength": 4000 } } } } } }
    }
   },
   "/api/ai/capture/bundle": {
@@ -3463,7 +3487,7 @@
     "operationId": "get___api_ai_capture_bundle",
     "responses": {
      "200": {
-      "description": "zip（MHTML + HTML + resources + 截图 + meta）",
+      "description": "zip（MHTML + 原始 HTML + 结构化页面摘要 + resources + 截图 + meta）",
       "content": {
        "application/zip": {
         "schema": {

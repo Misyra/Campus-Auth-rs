@@ -2,6 +2,15 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-12 AI 任务生成增强）
+
+- 页面捕获新增结构化上下文：按主页面/iframe 提取表单、控件、label、placeholder、name/id/autocomplete、下拉选项、可见性、提交地址、验证码候选、Shadow DOM 信号及稳定 selector 候选；同时保留脱敏局部 HTML，原始 HTML 仅作兜底
+- LLM 配置改为面向新手的服务商卡片向导，新增“测试连接”并显示实际请求地址与耗时；DeepSeek、GLM、OpenCode 与自定义服务使用独立加密 Key 槽位，切换服务商同步切换 Key，不再跨服务误用；开放 16K/32K/服务商默认三档输出长度，默认提高至 16384
+- AI 页重做三段状态与结构扫描摘要，补充响应式布局、键盘焦点和减少动画适配；未保存的模型配置不再允许直接生成，SSE 未收到终态即明确失败
+- 收紧 AI 生成安全边界：仅允许新建 browser 任务，强制 `{{LOGIN_URL}}`，拒绝模型指定任务 ID、脚本任务及 `upload_file`；保存前重新生成唯一 ID，执行 JavaScript 步骤必须二次确认
+- 修复流式 UTF-8 跨 chunk 损坏、无尾换行事件丢失、部分输出后传输重试串文、全流程超时可叠加至多轮 10 分钟和输出缓冲无上限；无效 JSON 也会进入一次自动纠错
+- Base URL 拒绝 query/fragment，补充提示词注入隔离、补充说明长度限制、超大截图降级及结构化材料/任务安全校验回归覆盖
+
 ## 开发中（2026-09-12 文档清理与过程报告忽略）
 
 - 删除已归档的 `docs/test-coverage-2026-08-30.md` 重定向桩（内容已在 `docs/archive/test-coverage-2026-08-30.md`）

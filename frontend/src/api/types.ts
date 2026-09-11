@@ -653,9 +653,19 @@ export interface DangerStep {
 
 /** LLM 服务配置（AI 任务生成，脱敏视图：key 只回是否已设置） */
 export interface AiLlmConfig {
+  provider: "opencode" | "glm" | "deepseek" | "custom";
   base_url: string;
   model: string;
   has_api_key: boolean;
+  configured_providers: string[];
+  max_tokens: number | null;
+}
+
+export interface AiStructureSummary {
+  frames: number;
+  forms: number;
+  controls: number;
+  captcha_candidates: number;
 }
 
 /** 登录页捕获结果（产物落盘服务端，响应只带元数据） */
@@ -665,6 +675,7 @@ export interface AiCaptureResult {
   html_chars?: number;
   png_bytes?: number;
   resources_count?: number;
+  structure_summary?: AiStructureSummary;
   note?: string | null;
   /** 捕获截图预览地址（GET 免鉴权，加时间戳防缓存） */
   screenshot_url?: string;

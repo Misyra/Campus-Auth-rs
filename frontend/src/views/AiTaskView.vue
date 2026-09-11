@@ -15,11 +15,13 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useToast } from "@/composables/useToast";
+import { useConfirm } from "@/composables/useConfirm";
 import { downloadBlob } from "@/utils/file";
 import { fileStamp } from "@/utils/formatters";
 
 const router = useRouter();
 const { toastOnly } = useToast();
+const { confirm } = useConfirm();
 const portalDetect = usePortalDetect();
 
 /** 捕获地址自动检测：抓到门户地址直接填入捕获输入框 */
@@ -30,43 +32,70 @@ async function detectPortalForCapture(): Promise<void> {
 
 // ---- LLM 配置 ----
 const PRESETS = [
-  { label: "OpenCode Zen（免费）", base: "https://opencode.ai/zen/v1", model: "mimo-v2.5-free", defaultKey: "public" },
-  { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.3-flash", defaultKey: "" },
-  { label: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-v4-flash-vision-exp", defaultKey: "" },
-  { label: "自定义 / 本地模型（OpenAI 兼容）", base: "", model: "", defaultKey: "" },
-];
+  { id: "opencode", label: "OpenCode Zen", hint: "内置快速体验", base: "https://opencode.ai/zen/v1", model: "mimo-v2.5-free", defaultKey: "public" },
+  { id: "glm", label: "智谱 GLM", hint: "推荐使用视觉模型", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.3-flash", defaultKey: "" },
+  { id: "deepseek", label: "DeepSeek", hint: "请填写支持图片的模型", base: "https://api.deepseek.com", model: "", defaultKey: "" },
+  { id: "custom", label: "其他兼容服务", hint: "需要知道接口地址", base: "", model: "", defaultKey: "" },
+] as const;
 
-const preset = ref("0");
-const presetOptions = computed<SelectOption[]>(() =>
-  PRESETS.map((p, i) => ({ value: String(i), label: p.label })),
-);
+const provider = ref<string>("opencode");
+const configuredProviders = ref<string[]>([]);
 const baseUrl = ref("");
 const model = ref("");
 const apiKey = ref("");
 const hasApiKey = ref(false);
+const maxTokens = ref("16384");
+const maxTokenOptions: SelectOption[] = [
+  { label: "16K（推荐）", value: "16384" },
+  { label: "32K（复杂页面）", value: "32768" },
+  { label: "由服务商决定", value: "auto" },
+];
+const savedSignature = ref("");
 const configExpanded = ref(true);
 const configSummary = computed(() => {
   if (!baseUrl.value && !model.value) return "未配置";
   return model.value || baseUrl.value;
 });
+const actualRequestUrl = computed(() => baseUrl.value.trim()
+  ? `${baseUrl.value.trim().replace(/\/+$/, "")}/chat/completions`
+  : "尚未填写");
 const savingConfig = ref(false);
-const isConfigDone = computed(() => !!baseUrl.value && !!model.value);
+const testingConfig = ref(false);
+const configSignature = computed(() => JSON.stringify({
+  provider: provider.value,
+  base_url: baseUrl.value.trim(),
+  model: model.value.trim(),
+  max_tokens: maxTokens.value,
+}));
+const isConfigDone = computed(() => !!baseUrl.value.trim() && !!model.value.trim() && savedSignature.value === configSignature.value);
 
-function applyPreset(): void {
-  const p = PRESETS[Number(preset.value)];
-  if (p.base) {
+function selectProvider(id: string): void {
+  provider.value = id;
+  const p = PRESETS.find((item) => item.id === id);
+  if (p) {
     baseUrl.value = p.base;
     model.value = p.model;
   }
-  if (p.defaultKey) apiKey.value = p.defaultKey;
+  apiKey.value = p?.defaultKey || "";
+  hasApiKey.value = configuredProviders.value.includes(id) || !!p?.defaultKey;
+  configExpanded.value = true;
 }
 
 async function loadConfig(): Promise<void> {
   try {
     const cfg = await aiApi.fetchLlmConfig();
+    if (!cfg.base_url && !cfg.model) {
+      configuredProviders.value = cfg.configured_providers || [];
+      selectProvider("opencode");
+      return;
+    }
     baseUrl.value = cfg.base_url || "";
     model.value = cfg.model || "";
+    provider.value = cfg.provider || "custom";
+    configuredProviders.value = cfg.configured_providers || [];
     hasApiKey.value = cfg.has_api_key;
+    maxTokens.value = cfg.max_tokens == null ? "auto" : String(cfg.max_tokens);
+    savedSignature.value = configSignature.value;
     if (cfg.base_url && cfg.model) configExpanded.value = false;
   } catch (error) {
     toastOnly(false, extractApiError(error, "读取 LLM 配置失败"));
@@ -76,13 +105,17 @@ async function loadConfig(): Promise<void> {
 async function saveConfig(): Promise<void> {
   savingConfig.value = true;
   try {
-    const payload: { base_url: string; model: string; api_key?: string } = {
+    const payload: { provider: string; base_url: string; model: string; api_key?: string; max_tokens: number | null } = {
+      provider: provider.value,
       base_url: baseUrl.value,
       model: model.value,
+      max_tokens: maxTokens.value === "auto" ? null : Number(maxTokens.value),
     };
     if (apiKey.value.trim()) payload.api_key = apiKey.value.trim();
     const saved = await aiApi.saveLlmConfig(payload);
     hasApiKey.value = saved.has_api_key;
+    configuredProviders.value = saved.configured_providers || [];
+    savedSignature.value = configSignature.value;
     apiKey.value = "";
     configExpanded.value = false;
     toastOnly(true, "LLM 配置已保存");
@@ -90,6 +123,44 @@ async function saveConfig(): Promise<void> {
     toastOnly(false, extractApiError(error, "保存 LLM 配置失败"));
   } finally {
     savingConfig.value = false;
+  }
+}
+
+async function clearApiKey(): Promise<void> {
+  apiKey.value = "";
+  savingConfig.value = true;
+  try {
+    const saved = await aiApi.saveLlmConfig({
+      provider: provider.value,
+      base_url: baseUrl.value,
+      model: model.value,
+      api_key: "",
+      max_tokens: maxTokens.value === "auto" ? null : Number(maxTokens.value),
+    });
+    hasApiKey.value = saved.has_api_key;
+    configuredProviders.value = saved.configured_providers || [];
+    savedSignature.value = configSignature.value;
+    toastOnly(true, "当前服务商的 API Key 已清除");
+  } catch (error) {
+    toastOnly(false, extractApiError(error, "清除 API Key 失败"));
+  } finally {
+    savingConfig.value = false;
+  }
+}
+
+async function testConnection(): Promise<void> {
+  if (!isConfigDone.value) {
+    toastOnly(false, "请先保存当前配置再测试连接");
+    return;
+  }
+  testingConfig.value = true;
+  try {
+    const result = await aiApi.testLlmConfig();
+    toastOnly(true, `连接成功，耗时 ${result.latency_ms} ms`);
+  } catch (error) {
+    toastOnly(false, extractApiError(error, "连接测试失败"));
+  } finally {
+    testingConfig.value = false;
   }
 }
 
@@ -199,8 +270,8 @@ async function generate(): Promise<void> {
     toastOnly(false, "请先在第 2 步完成页面捕获");
     return;
   }
-  if (!hasApiKey.value && !apiKey.value.trim() && !isConfigDone.value) {
-    toastOnly(false, "请先在第 1 步完成模型配置并保存");
+  if (!isConfigDone.value) {
+    toastOnly(false, "模型配置有改动，请先保存第 1 步");
     return;
   }
   generating.value = true;
@@ -215,6 +286,8 @@ async function generate(): Promise<void> {
   try {
     let pendingDone: { attempts?: number; warnings?: string[]; task?: Record<string, unknown> } | null = null;
     let lastError: string | null = null;
+    let startedModel = model.value;
+    let startedBaseUrl = baseUrl.value;
     await aiApi.generateStream(
       { extra_prompt: extraPrompt.value || undefined },
       {
@@ -222,6 +295,10 @@ async function generate(): Promise<void> {
         idleTimeoutMs: streamIdleMs.value,
         onEvent: (ev) => {
           const typ = String((ev as Record<string, unknown>).type ?? "");
+          if (typ === "started") {
+            startedModel = String(ev.model ?? startedModel);
+            startedBaseUrl = String(ev.base_url ?? startedBaseUrl);
+          }
           if (typ === "delta") {
             const delta = String((ev as Record<string, unknown>).text ?? "");
             streamText.value += delta;
@@ -237,8 +314,8 @@ async function generate(): Promise<void> {
               task: (ev.task as Record<string, unknown>) ?? {},
               attempts: (ev.attempts as number) ?? 1,
               warnings: (ev.warnings as string[]) ?? [],
-              model: model.value,
-              base_url: baseUrl.value,
+              model: startedModel,
+              base_url: startedBaseUrl,
             } as AiGenerateResult;
             taskJson.value = JSON.stringify(generateResult.value.task, null, 2);
             pushStreamEvent(ev as Record<string, unknown>);
@@ -323,8 +400,27 @@ async function saveTask(): Promise<void> {
   if (!taskJson.value.trim()) return;
   try {
     const task = JSON.parse(taskJson.value) as Record<string, unknown>;
-    if (!task.task_id) task.task_id = `ai-${Date.now()}`;
-    if (!task.type) task.type = "browser";
+    const steps = Array.isArray(task.steps) ? task.steps as Array<Record<string, unknown>> : [];
+    if (steps.some((step) => step.type === "upload_file")) {
+      toastOnly(false, "AI 任务不允许包含上传本机文件步骤");
+      return;
+    }
+    const dangerous = steps.filter((step) => ["eval", "custom_js", "evaluate"].includes(String(step.type)));
+    if (dangerous.length > 0) {
+      const ok = await confirm({
+        title: "检测到执行脚本步骤",
+        message: `任务包含 ${dangerous.length} 个会在登录页执行 JavaScript 的步骤。请确认页面来源可信后再保存。`,
+        confirmText: "仍然保存",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    delete task.id;
+    delete task.source;
+    delete task.version;
+    task.task_id = `ai-${crypto.randomUUID()}`;
+    task.type = "browser";
+    task.url = "{{LOGIN_URL}}";
     savingTask.value = true;
     const r = await tasksImport(task);
     if (r.failed && (r.failed as unknown[]).length > 0) {
@@ -379,6 +475,7 @@ async function restoreCapture(): Promise<void> {
       captureResult.value = {
         final_url: st.final_url || "",
         title: st.title,
+        structure_summary: st.structure_summary,
       } as AiCaptureResult;
       screenshotUrl.value = aiApi.captureScreenshotUrl();
     }
@@ -419,8 +516,8 @@ async function restoreCapture(): Promise<void> {
     <div class="hint ai-steps-hint">
       <b>使用步骤</b>
       <ol>
-        <li>退出校园网登录后，输入认证页地址完成捕获。</li>
-        <li>连回校园网/热点，配置大模型后流式生成（空闲超时内有输出自动续命，最长 10 分钟）。</li>
+        <li>先选择模型服务商并保存配置；每个服务商的 API Key 独立保存。</li>
+        <li>退出校园网登录后捕获认证页，再连回网络生成任务（总时长最长 10 分钟）。</li>
         <li>在下方预览 JSON，确认后保存为任务。</li>
       </ol>
     </div>
@@ -444,16 +541,29 @@ async function restoreCapture(): Promise<void> {
           </button>
           <div v-show="configExpanded" class="ai-config-body">
             <div class="hint ai-privacy-hint">
-              API Key 使用 AES-256-GCM 加密存储在本机（与校园网密码同一密钥体系），不会明文落盘。
+              API Key 按服务商分别加密保存在本机。切换服务商时会自动切换到对应 Key，不会把 DeepSeek Key 发给 GLM。
+            </div>
+            <div class="ai-provider-grid" role="radiogroup" aria-label="模型服务商">
+              <button
+                v-for="item in PRESETS"
+                :key="item.id"
+                type="button"
+                class="ai-provider-card"
+                :class="{ selected: provider === item.id }"
+                role="radio"
+                :aria-checked="provider === item.id"
+                @click="selectProvider(item.id)"
+              >
+                <span class="ai-provider-signal"></span>
+                <span class="ai-provider-copy"><b>{{ item.label }}</b><small>{{ item.hint }}</small></span>
+                <span v-if="configuredProviders.includes(item.id) || item.defaultKey" class="ai-key-state">Key 已就绪</span>
+              </button>
             </div>
             <div class="form-row form-row--wide">
               <div class="form-group">
-                <label for="ai-preset">服务商预设</label>
-                <CustomSelect v-model="preset" :options="presetOptions" placeholder="选择服务商" @change="applyPreset" />
-              </div>
-              <div class="form-group">
                 <label for="ai-base-url" class="required">Base URL</label>
                 <input id="ai-base-url" v-model="baseUrl" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4" autocomplete="off" spellcheck="false" />
+                <span class="hint">实际请求：<code>{{ actualRequestUrl }}</code></span>
               </div>
             </div>
             <div class="form-row">
@@ -464,6 +574,11 @@ async function restoreCapture(): Promise<void> {
               <div class="form-group">
                 <label for="ai-api-key">API Key</label>
                 <input id="ai-api-key" v-model="apiKey" type="password" :placeholder="hasApiKey ? '已保存（留空保持不变）' : 'sk-...'" autocomplete="new-password" />
+                <span class="hint">{{ hasApiKey ? `已使用 ${PRESETS.find(p => p.id === provider)?.label || "当前服务"} 的独立 Key` : "当前服务商尚未保存 Key" }}</span>
+              </div>
+              <div class="form-group">
+                <label for="ai-max-tokens">最长输出</label>
+                <CustomSelect id="ai-max-tokens" v-model="maxTokens" :options="maxTokenOptions" />
               </div>
             </div>
             <div class="ai-actions">
@@ -471,6 +586,13 @@ async function restoreCapture(): Promise<void> {
                 <IconApp name="save" class="icon-sm" />
                 {{ savingConfig ? "保存中…" : "保存配置" }}
               </button>
+              <button v-if="hasApiKey && !PRESETS.find(p => p.id === provider)?.defaultKey" class="btn btn-secondary" :disabled="savingConfig" @click="clearApiKey">
+                清除当前 Key
+              </button>
+              <button class="btn btn-secondary" :disabled="testingConfig || !isConfigDone" @click="testConnection">
+                {{ testingConfig ? "测试中…" : "测试连接" }}
+              </button>
+              <span v-if="!isConfigDone && savedSignature" class="hint">配置有改动，保存后才能生成</span>
             </div>
           </div>
         </div>
@@ -509,6 +631,13 @@ async function restoreCapture(): Promise<void> {
               <div>落地地址：<code>{{ captureResult.final_url }}</code></div>
               <div v-if="captureResult.title">页面标题：{{ captureResult.title }}</div>
               <div>资源快照：{{ captureResult.resources_count ?? 0 }} 个文件<span v-if="captureResult.note">（{{ captureResult.note }}）</span></div>
+            </div>
+            <div v-if="captureResult.structure_summary" class="ai-structure-summary" aria-label="结构化页面扫描结果">
+              <span><b>{{ captureResult.structure_summary.frames }}</b> 个页面层级</span>
+              <span><b>{{ captureResult.structure_summary.forms }}</b> 个表单</span>
+              <span><b>{{ captureResult.structure_summary.controls }}</b> 个控件</span>
+              <span><b>{{ captureResult.structure_summary.captcha_candidates }}</b> 个验证码候选</span>
+              <small>生成时优先读取结构信息，并始终附带脱敏局部 HTML。</small>
             </div>
             <div class="ai-actions">
               <button class="btn btn-secondary btn-sm" :disabled="savingBundle" @click="saveBundle" title="下载 MHTML 完整布局 + HTML + CSS/JS 资源 + 截图">

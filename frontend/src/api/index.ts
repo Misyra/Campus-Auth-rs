@@ -217,8 +217,16 @@ export const ocrApi = {
 export const aiApi = {
   fetchLlmConfig: () => http.get<AiLlmConfig>("/api/ai/llm-config"),
   // api_key 缺省=保持不变；空串=清除；非空=更新
-  saveLlmConfig: (payload: { base_url: string; model: string; api_key?: string }) =>
+  saveLlmConfig: (payload: {
+    provider: string;
+    base_url: string;
+    model: string;
+    api_key?: string;
+    max_tokens?: number | null;
+  }) =>
     http.put<AiLlmConfig>("/api/ai/llm-config", payload),
+  testLlmConfig: () =>
+    http.post<{ connected: boolean; latency_ms: number; request_url: string }>("/api/ai/llm-config/test"),
   // 捕获含导航 + networkidle 等待 + CDP 资源快照，放宽客户端超时
   capture: (url: string) =>
     http.post<AiCaptureResult>("/api/ai/capture", { url }, { timeout: 90000 }),
@@ -231,6 +239,7 @@ export const aiApi = {
       request_url?: string;
       final_url?: string;
       title?: string;
+      structure_summary?: import("./types").AiStructureSummary;
     }>("/api/ai/capture/status"),
   /** 保存页面文件：MHTML 完整布局 + HTML + CSS/JS 资源 + 截图（后端打 zip，返回 Blob） */
   async captureBundle(): Promise<Blob> {
@@ -285,6 +294,12 @@ export const aiApi = {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+      let terminalReceived = false;
+      const deliver = (ev: Record<string, unknown>) => {
+        const type = String(ev.type ?? "");
+        if (type === "done" || type === "error") terminalReceived = true;
+        opts.onEvent(ev);
+      };
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -306,7 +321,7 @@ export const aiApi = {
               // 仅真实数据帧续命空闲计时：后端 ": keepalive" 注释帧只证明连接存活，
               // 不代表有内容——否则任何 ≥ keepalive 间隔的空闲阈值都永远打不到
               resetIdle();
-              opts.onEvent(ev);
+              deliver(ev);
             } catch { /* ignore non-json keepalive */ }
           }
         }
@@ -314,8 +329,9 @@ export const aiApi = {
       // 处理尾部残留
       const tail = buf.trim();
       if (tail.startsWith("data:")) {
-        try { opts.onEvent(JSON.parse(tail.slice(5).trim()) as Record<string, unknown>); } catch {}
+        try { deliver(JSON.parse(tail.slice(5).trim()) as Record<string, unknown>); } catch {}
       }
+      if (!terminalReceived) throw new Error("生成连接意外结束，未收到完成状态，请重试");
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") {
         const reason = (e as DOMException).message || "";
