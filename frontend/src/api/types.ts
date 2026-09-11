@@ -42,13 +42,81 @@ export interface StatusSnapshot {
   monitoring_seconds: number;
   runtime_seconds: number;
   network_connected: boolean;
-  network_state: string;
+  network_state: NetworkState;
+  /** Engine 的暂停状态独立于网络事实；暂停时保留最后一次网络结论 */
+  pause_active: boolean;
+  /** 是否因连续登录失败处于冷却期 */
+  cooling_down: boolean;
+  /** 冷却剩余秒数 */
+  cooling_down_remaining: number | null;
+  /** 最近一次连通性解释 */
+  connectivity: ConnectivityAssessment;
+  /** 最近一次原始探测证据 */
+  last_probe_evidence: ProbeEvidence | null;
   login_status?: string;
   engine_state?: string;
   /** 快照单调版本号（后端每次发布 +1；旧后端缺字段时为 0，回退 uptime 比较） */
   snapshot_version?: number;
   /** 更新下载进度（下载期间有值，结束/失败后清空） */
   update_progress?: { phase: string; percent: number; message: string } | null;
+}
+
+export type NetworkState = "online" | "captive_portal" | "offline" | "unknown";
+export type AssessmentConfidence = "high" | "medium" | "low";
+export type AssessmentReason =
+  | "not_checked"
+  | "internet_verified"
+  | "captive_detected"
+  | "external_failed_auth_reachable"
+  | "all_probes_failed"
+  | "weak_evidence_only"
+  | "conflicting_evidence"
+  | "no_probes_enabled";
+export type AuthEndpointState =
+  | "not_checked"
+  | "reachable"
+  | "unreachable"
+  | "invalid"
+  | "missing"
+  | "skipped_redirect_mode";
+export type RecoveryAdvice =
+  | "no_action"
+  | "attempt_login"
+  | "attempt_login_once"
+  | "wait_for_network"
+  | "wait_for_more_evidence"
+  | "fix_configuration"
+  | "no_probe_evidence"
+  | "not_evaluated";
+export type ProbeOutcome = "pass" | "captive" | "fail" | "disabled";
+export type LocalLinkState = "not_checked" | "available" | "unavailable" | "probe_failed";
+
+/** 后端对一轮网络证据的统一解释 */
+export interface ConnectivityAssessment {
+  status: NetworkState;
+  confidence: AssessmentConfidence;
+  reason: AssessmentReason;
+  auth_endpoint: AuthEndpointState;
+  recovery_advice: RecoveryAdvice;
+}
+
+/** 最近一次探测的原始证据 */
+export interface ProbeEvidence {
+  tcp: ProbeOutcome;
+  http: ProbeOutcome;
+  url: ProbeOutcome;
+  local_link: LocalLinkState;
+}
+
+/** POST /api/monitor/test 返回的手动诊断报告 */
+export interface NetworkTestResult {
+  status: NetworkState;
+  confidence: AssessmentConfidence;
+  reason: AssessmentReason;
+  local_link: LocalLinkState;
+  auth_endpoint: AuthEndpointState;
+  details: { tcp: string[]; http: string[]; url: string[] };
+  duration_ms: number;
 }
 
 /** 开机自启动状态 */
@@ -153,11 +221,12 @@ export interface MonitorConfig {
   enable_tcp_check: boolean;
   enable_http_check: boolean;
   test_urls: string[];
+  enable_url_check: boolean;
   check_auth_url: boolean;
   auth_url_targets: string[];
   url_check_urls: string[];
   enable_local_check: boolean;
-  /** 网络检测禁用代理（默认 true 直连；关闭后 HTTP/URL 探测跟随系统代理，重启生效） */
+  /** 网络检测禁用代理（默认 true 直连；关闭后 HTTP/URL 探测跟随系统代理，下一轮生效） */
   disable_proxy: boolean;
   script_timeout: number;
   post_login_delay: number;
@@ -538,7 +607,12 @@ export interface InstallProgress {
 export interface EnvironmentStatus {
   uv_ready: boolean;
   python_ready: boolean;
+  worker_ready: boolean;
+  manifest_current: boolean;
   playwright_ready: boolean;
+  system_browser_ready: boolean;
+  ocr_enabled: boolean;
+  ocr_ready: boolean;
   capability_ready: boolean;
   stage: string;
   progress: InstallProgress | null;

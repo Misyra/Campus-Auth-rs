@@ -801,7 +801,9 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
                 container.engine.clear();
                 status.merge(crate::status::PartialSnapshot::Engine {
                     state: crate::status::EngineState::Dead,
-                    network: crate::status::NetworkStatus::Offline,
+                    network: crate::status::NetworkStatus::Unknown,
+                    assessment: crate::monitor::ConnectivityAssessment::default(),
+                    evidence: None,
                     last_check: chrono::Local::now(),
                     pause: false,
                     cooling_down: false,

@@ -1,98 +1,236 @@
-//! 探测结果 → Online/CaptivePortal/Offline 判定
-//!
-//! 本文件提供纯函数 `evaluate`（多类探测结果汇总），无 IO，便于单元测试。
-//!
-//! 暂停时段检测由 Engine 在循环入口统一负责，Monitor 不再自行判断。
+//! 探测证据到网络状态与自动恢复建议的纯函数判定
 
 use crate::status::NetworkStatus;
 
-use super::{ProbeKind, ProbeOutcome};
+use super::ProbeOutcome;
+use super::model::{
+    AssessmentConfidence, AssessmentReason, AuthEndpointState, ConnectivityAssessment,
+    ProbeEvidence, RecoveryAdvice,
+};
 
-/// 综合判定：将多类探测结果汇总为最终网络状态。
+/// 综合公网探测证据。
 ///
-/// 规则（任一类别禁用则忽略）：
-/// - 列表为空（全部禁用）→ `Offline`（保守处理）
-/// - 任一 `Captive` → `CaptivePortal`（劫持证据优先：https 探测在劫持下必超时 Fail，真断网时则无 Captive，仍归 Offline）
-/// - 任一 `Fail` → `Offline`
-/// - 全部 `Pass` → `Online`
-///
-/// 注意：`Offline` 仅为第一阶段结论，上游 `check_once` 会在 Offline 时追加
-/// `auth_url` 直连探测，可达则二次纠正为 `CaptivePortal`（真断网保持 Offline）。
-pub fn evaluate(results: &[(ProbeKind, ProbeOutcome)]) -> NetworkStatus {
-    let active: Vec<&ProbeOutcome> = results
-        .iter()
-        .map(|(_, o)| o)
-        .filter(|o| !matches!(o, ProbeOutcome::Disabled))
+/// HTTP 204 与 URL 内容探测属于强公网证据；TCP 仅证明某个端口可连接，
+/// 因此只能作为补充。门户证据优先于公网成功，避免选择性劫持被漏判；
+/// 单个失败不能覆盖另一类已经给出的强成功证据。
+pub fn assess_connectivity(evidence: &ProbeEvidence) -> ConnectivityAssessment {
+    let outcomes = [evidence.tcp, evidence.http, evidence.url];
+    let active: Vec<ProbeOutcome> = outcomes
+        .into_iter()
+        .filter(|outcome| *outcome != ProbeOutcome::Disabled)
         .collect();
 
     if active.is_empty() {
-        return NetworkStatus::Offline;
+        return assessment(
+            NetworkStatus::Unknown,
+            AssessmentConfidence::Low,
+            AssessmentReason::NoProbesEnabled,
+            RecoveryAdvice::NoProbeEvidence,
+        );
     }
-    if active.iter().any(|o| matches!(o, ProbeOutcome::Captive)) {
-        return NetworkStatus::CaptivePortal;
+
+    let strong_captive = matches!(evidence.http, ProbeOutcome::Captive)
+        || matches!(evidence.url, ProbeOutcome::Captive);
+    if strong_captive {
+        return assessment(
+            NetworkStatus::CaptivePortal,
+            AssessmentConfidence::High,
+            AssessmentReason::CaptiveDetected,
+            RecoveryAdvice::AttemptLogin,
+        );
     }
-    if active.iter().any(|o| matches!(o, ProbeOutcome::Fail)) {
-        return NetworkStatus::Offline;
+
+    let strong_online =
+        matches!(evidence.http, ProbeOutcome::Pass) || matches!(evidence.url, ProbeOutcome::Pass);
+    if strong_online {
+        return assessment(
+            NetworkStatus::Online,
+            AssessmentConfidence::High,
+            AssessmentReason::InternetVerified,
+            RecoveryAdvice::NoAction,
+        );
     }
-    NetworkStatus::Online
+
+    if active.iter().all(|outcome| *outcome == ProbeOutcome::Fail) {
+        return assessment(
+            NetworkStatus::Offline,
+            AssessmentConfidence::Medium,
+            AssessmentReason::AllProbesFailed,
+            RecoveryAdvice::WaitForNetwork,
+        );
+    }
+
+    let reason = if evidence.tcp == ProbeOutcome::Pass {
+        AssessmentReason::WeakEvidenceOnly
+    } else {
+        AssessmentReason::ConflictingEvidence
+    };
+    assessment(
+        NetworkStatus::Unknown,
+        AssessmentConfidence::Low,
+        reason,
+        RecoveryAdvice::WaitForMoreEvidence,
+    )
+}
+
+/// 把认证入口补充证据应用到基础连通性判断。
+///
+/// 明确门户证据不会因一次 TCP 预检失败而被抹掉；此时给出“谨慎尝试一次”建议。
+/// 基础状态为 Offline/Unknown 时，只有认证入口可达才能升级为门户并建议登录。
+pub fn apply_auth_endpoint(
+    mut current: ConnectivityAssessment,
+    auth_endpoint: AuthEndpointState,
+) -> ConnectivityAssessment {
+    current.auth_endpoint = auth_endpoint;
+    match current.status {
+        NetworkStatus::Online => {
+            current.recovery_advice = RecoveryAdvice::NoAction;
+        }
+        NetworkStatus::CaptivePortal => {
+            current.recovery_advice = match auth_endpoint {
+                AuthEndpointState::Invalid | AuthEndpointState::Missing => {
+                    RecoveryAdvice::FixConfiguration
+                }
+                AuthEndpointState::Unreachable => RecoveryAdvice::AttemptLoginOnce,
+                AuthEndpointState::Reachable
+                | AuthEndpointState::SkippedRedirectMode
+                | AuthEndpointState::NotChecked => RecoveryAdvice::AttemptLogin,
+            };
+        }
+        NetworkStatus::Offline | NetworkStatus::Unknown => match auth_endpoint {
+            AuthEndpointState::Reachable => {
+                current.status = NetworkStatus::CaptivePortal;
+                current.confidence = AssessmentConfidence::Medium;
+                current.reason = AssessmentReason::ExternalFailedAuthReachable;
+                current.recovery_advice = RecoveryAdvice::AttemptLogin;
+            }
+            AuthEndpointState::Invalid | AuthEndpointState::Missing => {
+                current.recovery_advice = RecoveryAdvice::FixConfiguration;
+            }
+            AuthEndpointState::Unreachable => {
+                current.recovery_advice = if current.status == NetworkStatus::Offline {
+                    RecoveryAdvice::WaitForNetwork
+                } else {
+                    RecoveryAdvice::WaitForMoreEvidence
+                };
+            }
+            AuthEndpointState::SkippedRedirectMode | AuthEndpointState::NotChecked => {}
+        },
+    }
+    current
+}
+
+fn assessment(
+    status: NetworkStatus,
+    confidence: AssessmentConfidence,
+    reason: AssessmentReason,
+    recovery_advice: RecoveryAdvice,
+) -> ConnectivityAssessment {
+    ConnectivityAssessment {
+        status,
+        confidence,
+        reason,
+        auth_endpoint: AuthEndpointState::NotChecked,
+        recovery_advice,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn pair(kind: ProbeKind, outcome: ProbeOutcome) -> (ProbeKind, ProbeOutcome) {
-        (kind, outcome)
+    fn evidence(tcp: ProbeOutcome, http: ProbeOutcome, url: ProbeOutcome) -> ProbeEvidence {
+        ProbeEvidence::new(tcp, http, url)
     }
 
     #[test]
-    fn evaluate_all_pass() {
-        let r = [
-            pair(ProbeKind::Tcp, ProbeOutcome::Pass),
-            pair(ProbeKind::Http, ProbeOutcome::Pass),
-        ];
-        assert_eq!(evaluate(&r), NetworkStatus::Online);
+    fn http_pass_beats_supplementary_tcp_failure() {
+        let result = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Pass,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(result.status, NetworkStatus::Online);
+        assert_eq!(result.reason, AssessmentReason::InternetVerified);
     }
 
     #[test]
-    fn evaluate_any_fail_offline() {
-        let r = [
-            pair(ProbeKind::Tcp, ProbeOutcome::Pass),
-            pair(ProbeKind::Http, ProbeOutcome::Fail),
-        ];
-        assert_eq!(evaluate(&r), NetworkStatus::Offline);
+    fn captive_evidence_beats_other_results() {
+        let result = assess_connectivity(&evidence(
+            ProbeOutcome::Pass,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Captive,
+        ));
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
     }
 
     #[test]
-    fn evaluate_captive() {
-        let r = [
-            pair(ProbeKind::Tcp, ProbeOutcome::Pass),
-            pair(ProbeKind::Http, ProbeOutcome::Captive),
-        ];
-        assert_eq!(evaluate(&r), NetworkStatus::CaptivePortal);
-    }
-    #[test]
-    fn evaluate_captive_beats_fail_hijack() {
-        // 劫持型门户：https 探测超时 Fail，但 http 明文探测被劫持 Captive → 必须判门户，否则重定向模式永不触发登录
-        let r = [
-            pair(ProbeKind::Http, ProbeOutcome::Fail),
-            pair(ProbeKind::Url, ProbeOutcome::Captive),
-        ];
-        assert_eq!(evaluate(&r), NetworkStatus::CaptivePortal);
+    fn all_fail_is_offline_candidate() {
+        let result = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+        ));
+        assert_eq!(result.status, NetworkStatus::Offline);
+        assert_eq!(result.reason, AssessmentReason::AllProbesFailed);
     }
 
     #[test]
-    fn evaluate_disabled_ignored() {
-        let r = [
-            pair(ProbeKind::Tcp, ProbeOutcome::Disabled),
-            pair(ProbeKind::Http, ProbeOutcome::Pass),
-        ];
-        assert_eq!(evaluate(&r), NetworkStatus::Online);
+    fn tcp_pass_without_strong_evidence_is_unknown() {
+        let result = assess_connectivity(&evidence(
+            ProbeOutcome::Pass,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(result.status, NetworkStatus::Unknown);
+        assert_eq!(result.reason, AssessmentReason::WeakEvidenceOnly);
     }
 
     #[test]
-    fn evaluate_all_disabled_offline() {
-        let r = [pair(ProbeKind::Tcp, ProbeOutcome::Disabled)];
-        assert_eq!(evaluate(&r), NetworkStatus::Offline);
+    fn all_disabled_is_unknown_without_login_evidence() {
+        let result = assess_connectivity(&evidence(
+            ProbeOutcome::Disabled,
+            ProbeOutcome::Disabled,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(result.status, NetworkStatus::Unknown);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::NoProbeEvidence);
+    }
+
+    #[test]
+    fn auth_reachable_upgrades_offline_to_captive() {
+        let base = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+        ));
+        let result = apply_auth_endpoint(base, AuthEndpointState::Reachable);
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+        assert_eq!(result.reason, AssessmentReason::ExternalFailedAuthReachable);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
+    }
+
+    #[test]
+    fn explicit_captive_with_unreachable_auth_attempts_once() {
+        let base = assess_connectivity(&evidence(
+            ProbeOutcome::Disabled,
+            ProbeOutcome::Captive,
+            ProbeOutcome::Fail,
+        ));
+        let result = apply_auth_endpoint(base, AuthEndpointState::Unreachable);
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLoginOnce);
+    }
+
+    #[test]
+    fn invalid_auth_requires_configuration_fix() {
+        let base = assess_connectivity(&evidence(
+            ProbeOutcome::Disabled,
+            ProbeOutcome::Captive,
+            ProbeOutcome::Disabled,
+        ));
+        let result = apply_auth_endpoint(base, AuthEndpointState::Invalid);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::FixConfiguration);
     }
 }

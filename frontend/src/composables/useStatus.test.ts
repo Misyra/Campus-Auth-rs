@@ -58,7 +58,7 @@ describe("fetchStatus 映射", () => {
     expect(status.login_attempt_count).toBe(3);
     expect(status.runtime_seconds).toBe(100);
     expect(networkStatus.value).toBe("connected");
-    expect(networkStatusText.value).toBe("在线检测中");
+    expect(networkStatusText.value).toBe("公网连接正常");
   });
 
   it("旧版本轮询响应被丢弃，不回退状态", async () => {
@@ -89,7 +89,7 @@ describe("fetchStatus 映射", () => {
     await fetchStatus();
     expect(status.network_state).toBe("offline");
     expect(status.network_check_count).toBe(8);
-    expect(networkStatusText.value).toBe("网络断开");
+    expect(networkStatusText.value).toBe("网络暂不可达");
   });
 });
 
@@ -100,7 +100,20 @@ describe("updateStatus 权威推送", () => {
     );
     expect(status.network_state).toBe("captive_portal");
     expect(status.network_check_count).toBe(9);
-    expect(networkStatusText.value).toBe("检测到门户劫持");
+    expect(networkStatusText.value).toBe("需要校园网认证");
+  });
+
+  it("暂停仅改变引擎行为，不覆盖最近一次网络事实", () => {
+    updateStatus(
+      backendRaw({
+        snapshot_version: 2,
+        network_status: "online",
+        pause_active: true,
+      }) as unknown as Partial<StatusSnapshot>,
+    );
+    expect(status.network_state).toBe("online");
+    expect(networkStatus.value).toBe("checking");
+    expect(networkStatusText.value).toBe("自动监测已暂停");
   });
 });
 
@@ -116,7 +129,7 @@ describe("fetchAutostart 与失败通知", () => {
     fetchStatusMock.mockRejectedValueOnce(new Error("down"));
     await fetchStatus();
     expect(notifications.length).toBe(before + 1);
-    expect(status.network_state).toBe("captive_portal");
+    expect(status.network_state).toBe("online");
 
     fetchStatusMock.mockRejectedValueOnce(new Error("down"));
     await fetchStatus();

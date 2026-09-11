@@ -1,6 +1,7 @@
 //! 环境管理器：uv/Python/浏览器引导
 
 pub mod bootstrap;
+pub mod health;
 pub mod python;
 pub mod uv;
 
@@ -213,9 +214,30 @@ pub enum EnvironmentError {
     #[error(".venv 损坏，需要重建；可能原因：上次安装被中断或安全软件改动过环境，可重新初始化")]
     VenvCorrupted,
 
+    /// 损坏 venv 隔离或回滚失败
+    #[error("无法安全重建虚拟环境 {}: {source}", path.display())]
+    VenvRebuildFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// python_worker/ 目录不存在
     #[error("python_worker/ 目录不存在: {}；可能原因：安装包解压不完整或程序目录被移动", path.display())]
     WorkerProjectNotFound { path: PathBuf },
+    /// Worker 核心包导入或协议版本验证失败
+    #[error("Python Worker 运行时不可用: {reason}")]
+    WorkerRuntimeInvalid { reason: String },
+    /// 环境状态文件读写失败
+    #[error("环境状态文件读写失败 {}: {source}", path.display())]
+    StateIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// 环境状态文件内容损坏
+    #[error("环境状态文件无效 {}: {reason}", path.display())]
+    StateDataInvalid { path: PathBuf, reason: String },
     /// 安装被取消
     #[error("安装被取消")]
     Cancelled,
@@ -226,10 +248,16 @@ pub enum EnvironmentError {
 pub enum BootstrapStage {
     /// 未开始 / 空闲
     Idle,
+    /// 正在检查解释器、依赖清单与 Worker import
+    Checking,
     /// 正在下载 uv
     DownloadingUv,
     /// 正在创建虚拟环境 + 安装依赖
     SyncingVenv,
+    /// 正在验证 Worker 核心模块与协议版本
+    VerifyingWorker,
+    /// 正在对齐 OCR 可选依赖与用户偏好
+    ApplyingOcr,
     /// 正在安装 Playwright 浏览器
     InstallingPlaywright,
     /// 全部完成
@@ -245,8 +273,18 @@ pub struct EnvironmentStatus {
     pub uv_ready: bool,
     /// Python 虚拟环境是否就绪
     pub python_ready: bool,
+    /// Playwright Python 包与 Worker 模块是否可导入且版本匹配
+    pub worker_ready: bool,
+    /// 当前依赖清单是否已有成功验证过的同指纹状态
+    pub manifest_current: bool,
     /// Playwright 浏览器是否已安装
     pub playwright_ready: bool,
+    /// 系统 Edge/Chrome 是否可作为无需下载的浏览器后端
+    pub system_browser_ready: bool,
+    /// 用户是否希望启用 OCR 可选能力
+    pub ocr_enabled: bool,
+    /// ddddocr 是否已存在于当前 venv
+    pub ocr_ready: bool,
     /// 浏览器自动化能力是否完全就绪
     pub capability_ready: bool,
     /// 当前安装阶段
@@ -375,6 +413,15 @@ pub trait EnvironmentApi: Send + Sync {
     fn python_path(&self) -> PathBuf;
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导。
     async fn ensure_capability(&self) -> Result<(), EnvironmentError>;
+    /// 确保 Worker 核心可启动，不要求浏览器二进制。
+    async fn ensure_worker_ready(&self) -> Result<(), EnvironmentError> {
+        self.ensure_capability().await
+    }
+    /// 强制重新同步并验证 Worker 依赖，再补齐浏览器能力。
+    async fn retry_install(&self) -> Result<(), EnvironmentError> {
+        // 测试替身与第三方实现可沿用旧 ensure 语义；真实管理器会覆盖为强制同步。
+        self.ensure_capability().await
+    }
     /// 显式安装指定 Playwright 管理浏览器（chromium/firefox/webkit）。
     async fn install_playwright_browser(&self, browser: &str) -> Result<(), EnvironmentError>;
     /// 安装 OCR optional extra，并持久记录用户启用偏好。
@@ -399,6 +446,14 @@ impl EnvironmentApi for EnvironmentManager {
 
     async fn ensure_capability(&self) -> Result<(), EnvironmentError> {
         EnvironmentManager::ensure_capability(self).await
+    }
+
+    async fn ensure_worker_ready(&self) -> Result<(), EnvironmentError> {
+        EnvironmentManager::ensure_worker_ready(self).await
+    }
+
+    async fn retry_install(&self) -> Result<(), EnvironmentError> {
+        EnvironmentManager::retry_install(self).await
     }
 
     async fn install_playwright_browser(&self, browser: &str) -> Result<(), EnvironmentError> {
@@ -449,7 +504,12 @@ impl EnvironmentManager {
             status: Arc::new(RwLock::new(EnvironmentStatus {
                 uv_ready: false,
                 python_ready: false,
+                worker_ready: false,
+                manifest_current: false,
                 playwright_ready: false,
+                system_browser_ready: false,
+                ocr_enabled: false,
+                ocr_ready: false,
                 capability_ready: false,
                 stage: BootstrapStage::Idle,
                 progress: None,
@@ -523,6 +583,12 @@ impl EnvironmentManager {
             .python_ready
     }
 
+    /// Worker 核心依赖是否已验证，供 Bridge 启动门禁使用。
+    pub fn worker_runtime_ready(&self) -> bool {
+        let status = self.status.read().unwrap_or_else(|e| e.into_inner());
+        status.python_ready && status.worker_ready && status.manifest_current
+    }
+
     /// 确保项目内 Python 运行时就绪，只准备 uv + venv，不安装 Playwright 浏览器。
     ///
     /// 与完整浏览器引导共用 BootstrapGate：若两类首次使用并发发生，只允许一轮
@@ -542,10 +608,39 @@ impl EnvironmentManager {
             .await
     }
 
+    /// 确保 Worker 核心可启动，但不要求或安装浏览器二进制。
+    ///
+    /// OCR 与其他纯 Worker IPC 请求走本入口；普通 Python 脚本仍只使用
+    /// [`Self::ensure_python_runtime`]，不会被 Playwright 依赖绑死。
+    pub async fn ensure_worker_ready(&self) -> Result<(), EnvironmentError> {
+        self.bootstrap_gate
+            .ensure(
+                || self.worker_runtime_ready(),
+                || async {
+                    let cancel = self.begin_install_generation();
+                    bootstrap::bootstrap_worker_runtime(self, &cancel, false).await
+                },
+            )
+            .await
+    }
+
+    /// Worker 健康检查失败后的强制修复入口。
+    ///
+    /// 与所有环境写操作共用 BootstrapGate；强制 uv sync 后重新执行 import、
+    /// 版本与清单指纹验证，成功才解除 Bridge 熔断。
+    pub async fn repair_worker_runtime(&self) -> Result<(), EnvironmentError> {
+        self.bootstrap_gate
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                bootstrap::bootstrap_worker_runtime(self, &cancel, true).await
+            })
+            .await
+    }
+
     /// 确保浏览器自动化能力就绪；若未就绪则触发引导
     ///
-    /// OCR 依赖由前端显式安装/卸载（`uv add/remove ddddocr` 写入项目主依赖）；
-    /// 后续环境修复的裸 `uv sync` 按声明对齐，天然保留用户选择。
+    /// OCR 偏好独立持久化，依赖由 `uv add/remove ddddocr` 写入部署副本；
+    /// OCR 对齐失败不会把核心浏览器能力误标为不可用。
     ///
     /// F1：经 BootstrapGate 串行化——并发调用者等待锁后二次检查就绪状态，
     /// 只有一个调用者真正执行引导，其余复用其结果，避免并发 bootstrap
@@ -647,8 +742,8 @@ impl EnvironmentManager {
 
     /// 旧版 OCR 启用标记路径（`environment/ocr.enabled`，仅存量迁移消费）。
     ///
-    /// 新版偏好载体为 `pyproject.toml` 主依赖；`run_uv_sync` 入口检测到该文件即跑
-    /// 一次 `uv add` 认领后删除，见 `uv::migrate_legacy_ocr_marker`。
+    /// 新版偏好独立存于 `environment/python-preferences.json`；部署副本的
+    /// pyproject/uv.lock 只是 uv add/remove 产生的当前实现状态，不再兼任偏好源。
     pub(crate) fn ocr_marker_path(&self) -> PathBuf {
         self.env_path.join(OCR_ENABLED_MARKER)
     }

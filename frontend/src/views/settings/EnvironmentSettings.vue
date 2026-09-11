@@ -21,8 +21,11 @@ const envStageLabel = computed(() => {
   const s = envStatus.value?.stage;
   if (!s || s === "Done" || s === "Idle") return "";
   const map: Record<string, string> = {
+    Checking: "检查运行环境",
     DownloadingUv: "下载 uv",
     SyncingVenv: "同步虚拟环境",
+    VerifyingWorker: "验证 Worker",
+    ApplyingOcr: "对齐 OCR 偏好",
     InstallingPlaywright: "安装浏览器",
     Error: "失败",
   };
@@ -170,14 +173,17 @@ async function recognizeOcr() {
         </button>
       </div>
       <div class="card-body">
-        <p class="hint env-lead">自动登录与 OCR 依赖该环境。首次使用需初始化一次（约 1–10 分钟），缺失时会自动补装。</p>
+        <p class="hint env-lead">自动登录依赖 Python、Worker 核心和可用浏览器三层能力。每次启动 Worker 前都会真实验证，缺包会先自动修复再继续；OCR 始终是可选补充。</p>
         <div class="env-status-row">
           <span v-if="envLoading" class="hint">检测中…</span>
           <template v-else-if="envError && !envStatus"> <span class="env-error">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
           <template v-else>
             <span v-if="envReady" class="badge badge--sm badge--success">已就绪</span>
             <span v-else class="badge badge--sm badge--warn">未就绪</span>
+            <span v-if="envStatus?.python_ready" class="badge badge--sm">Python 可运行</span>
+            <span v-if="envStatus?.worker_ready && envStatus?.manifest_current" class="badge badge--sm">Worker 已验证</span>
             <span v-if="envStatus?.playwright_ready" class="badge badge--sm">Chromium 已安装</span>
+            <span v-else-if="envStatus?.system_browser_ready" class="badge badge--sm">使用系统浏览器</span>
             <span v-if="envStageLabel" class="badge badge--sm">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
           </template>
         </div>

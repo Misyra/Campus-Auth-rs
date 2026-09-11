@@ -23,6 +23,7 @@ import type {
   LogEntry,
   MutationResult,
   NetworkDetectResult,
+  NetworkTestResult,
   OcrStatus,
   PortalDetectResult,
   Profile,
@@ -103,7 +104,7 @@ export const actionsApi = {
   login: (timeoutMs: number) =>
     http.post<MutationResult>("/api/login", null, { timeout: timeoutMs }),
   cancelLogin: () => http.post<MutationResult>("/api/login/cancel"),
-  testNetwork: () => http.post<MutationResult>("/api/monitor/test", null, { timeout: 5000 }),
+  testNetwork: () => http.post<NetworkTestResult>("/api/monitor/test", null, { timeout: 30000 }),
 };
 
 /** 系统 */
@@ -138,7 +139,12 @@ export const environmentApi = {
         capability_ready: boolean;
         uv_ready: boolean;
         python_ready: boolean;
+        worker_ready: boolean;
+        manifest_current: boolean;
         playwright_ready: boolean;
+        system_browser_ready: boolean;
+        ocr_enabled: boolean;
+        ocr_ready: boolean;
         stage: string;
         progress: { phase: string; percent: number; message: string } | null;
         last_error: string | null;

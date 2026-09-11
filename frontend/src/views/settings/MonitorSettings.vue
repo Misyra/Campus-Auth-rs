@@ -8,14 +8,13 @@ import FieldHelp from "@/components/common/FieldHelp.vue";
 const config = useConfig();
 
 const urlCheckEnabled = computed({
-  get: () => config.config.monitor.url_check_urls.length > 0,
+  get: () => config.config.monitor.enable_url_check,
   set: (v: boolean) => {
-    if (v) {
-      // 开启时设置默认检测目标
+    if (v && config.config.monitor.url_check_urls.length === 0) {
+      // 首次开启时填入推荐目标；关闭只停用探测，不清空用户配置。
       config.config.monitor.url_check_urls = [...config.defaultUrlCheckUrls];
-    } else {
-      config.config.monitor.url_check_urls = [];
     }
+    config.config.monitor.enable_url_check = v;
   },
 });
 
@@ -127,11 +126,31 @@ const urlCheckText = computed({
             <div class="toggle-group">
               <div class="toggle-with-help">
                 <label class="toggle toggle-help-inline">
+                  <input type="checkbox" v-model="config.config.monitor.enable_http_check" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">204 门户检测（主要）</span>
+                </label>
+                <FieldHelp text="默认且推荐开启。请求 generate_204 端点：204 表示公网在线，200 或跳转表示被认证门户劫持。这是自动恢复的主要证据。" />
+              </div>
+            </div>
+            <div v-if="config.config.monitor.enable_http_check" class="form-group settings-toggle-compact">
+              <div class="field-label-row">
+                <label for="settings-http-targets">204 门户检测目标</label>
+                <FieldHelp text="必须填写返回 204 的轻量端点。普通网页返回 200，会被正确视为门户劫持证据，因此不能填在这里。" />
+              </div>
+              <input id="settings-http-targets"
+                :value="config.config.monitor.test_urls.join(',')"
+                @input="config.config.monitor.test_urls = ($event.target as HTMLInputElement).value.split(',').map(s => s.trim()).filter(Boolean)"
+                type="text" placeholder="http://connect.rom.miui.com/generate_204" />
+            </div>
+            <div class="toggle-group settings-toggle-spacer">
+              <div class="toggle-with-help">
+                <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.enable_tcp_check" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">TCP 检测</span>
+                  <span class="toggle-label">TCP 检测（补充）</span>
                 </label>
-                <FieldHelp text="通过 TCP 连接判断网络连通性，开销最小。" />
+                <FieldHelp text="仅补充传输层证据。TCP 成功不代表网页可访问，因此它单独成功时不会判定公网在线，也不会直接触发登录。" />
               </div>
             </div>
             <div v-if="config.config.monitor.enable_tcp_check" class="form-group settings-toggle-compact">
@@ -147,31 +166,11 @@ const urlCheckText = computed({
             <div class="toggle-group settings-toggle-spacer">
               <div class="toggle-with-help">
                 <label class="toggle toggle-help-inline">
-                  <input type="checkbox" v-model="config.config.monitor.enable_http_check" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">204 门户检测</span>
-                </label>
-                <FieldHelp text="即 Captive Portal 检测：请求 generate_204 端点判断网络状态，204=在线，200/跳转=被门户劫持。主流厂商（小米/华为/vivo）均提供该端点，是误判率最低的检测方式。" />
-              </div>
-            </div>
-            <div v-if="config.config.monitor.enable_http_check" class="form-group settings-toggle-compact">
-              <div class="field-label-row">
-                <label for="settings-http-targets">204 门户检测目标</label>
-                <FieldHelp text="必须填写返回 204 的轻量端点（generate_204 类）。填普通网页会导致恒判被劫持，反复触发登录。" />
-              </div>
-              <input id="settings-http-targets"
-                :value="config.config.monitor.test_urls.join(',')"
-                @input="config.config.monitor.test_urls = ($event.target as HTMLInputElement).value.split(',').map(s => s.trim()).filter(Boolean)"
-                type="text" placeholder="http://connect.rom.miui.com/generate_204" />
-            </div>
-            <div class="toggle-group settings-toggle-spacer">
-              <div class="toggle-with-help">
-                <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="urlCheckEnabled" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">URL 标题检测</span>
+                  <span class="toggle-label">URL 内容检测（补充）</span>
                 </label>
-                <FieldHelp text="请求页面并核对关键字，判断是否被劫持至登录页。每行一条：地址|关键字。" />
+                <FieldHelp text="用页面关键字补充确认公网或门户劫持。适合 204 端点在本网络不稳定时启用；每行一条：地址|关键字。" />
               </div>
             </div>
             <div v-if="urlCheckEnabled" class="form-group settings-toggle-compact">
@@ -183,15 +182,15 @@ const urlCheckText = computed({
             </div>
           </div>
           <div class="settings-detect-col">
-            <h4 class="settings-detect-heading">登录前检测</h4>
+            <h4 class="settings-detect-heading">诊断与恢复辅助</h4>
             <div class="toggle-group">
               <div class="toggle-with-help">
                 <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.enable_local_check" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">网卡连接检查</span>
+                  <span class="toggle-label">手动测试时检查网卡</span>
                 </label>
-                <FieldHelp text="物理网络全部断开时直接判定离线，跳过外网探测与登录。" />
+                <FieldHelp text="只用于“网络测试”的诊断说明，并与公网探测并行执行；不会挡住自动监测，也不会单独触发或阻止登录。" />
               </div>
             </div>
             <div class="toggle-group settings-toggle-spacer">
@@ -199,9 +198,9 @@ const urlCheckText = computed({
                 <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.check_auth_url" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">认证地址可达检查</span>
+                  <span class="toggle-label">手动登录前检查认证地址</span>
                 </label>
-                <FieldHelp text="登录前确认认证地址可达；不可达则跳过本次登录。" />
+                <FieldHelp text="手动登录前先直连确认认证地址可达，不可达则直接失败、不启动浏览器。默认关闭：部分校园网限制直连，开启可能误拦本可成功的登录。" />
               </div>
             </div>
             <div class="toggle-group settings-toggle-spacer">
@@ -211,7 +210,7 @@ const urlCheckText = computed({
                   <span class="toggle-slider"></span>
                   <span class="toggle-label">检测不走代理</span>
                 </label>
-                <FieldHelp text="启用后检测流量直连；关闭则跟随系统代理。修改后重启生效。" />
+                <FieldHelp text="启用后公网检测流量直连，避免系统代理故障造成误判；关闭则跟随系统代理。保存后下一轮检测生效。" />
               </div>
             </div>
           </div>

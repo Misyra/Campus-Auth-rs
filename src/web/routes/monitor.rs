@@ -83,6 +83,9 @@ mod tests {
     use tower::ServiceExt; // oneshot
 
     use crate::engine::{EngineError, ProbeDetails, TestNetworkResult};
+    use crate::monitor::{
+        AssessmentConfidence, AssessmentReason, AuthEndpointState, LocalLinkState,
+    };
     use crate::status::NetworkStatus;
 
     /// 内存 EngineApi：记录命令名，test_network 返回可配置结果
@@ -136,6 +139,10 @@ mod tests {
     fn sample_result() -> TestNetworkResult {
         TestNetworkResult {
             status: NetworkStatus::Online,
+            confidence: AssessmentConfidence::High,
+            reason: AssessmentReason::InternetVerified,
+            local_link: LocalLinkState::Available,
+            auth_endpoint: AuthEndpointState::NotChecked,
             details: ProbeDetails {
                 tcp: vec!["Pass".into()],
                 http: vec![],

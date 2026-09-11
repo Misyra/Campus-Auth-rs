@@ -151,6 +151,9 @@ mod tests {
     #[tokio::test]
     async fn test_test_network_receives_reply_from_engine() {
         use crate::engine::ProbeDetails;
+        use crate::monitor::{
+            AssessmentConfidence, AssessmentReason, AuthEndpointState, LocalLinkState,
+        };
         use crate::status::NetworkStatus;
 
         let (handle, mut rx) = bare_handle();
@@ -160,6 +163,10 @@ mod tests {
             if let Some(EngineCommand::TestNetwork { reply }) = rx.recv().await {
                 let _ = reply.send(Ok(TestNetworkResult {
                     status: NetworkStatus::Online,
+                    confidence: AssessmentConfidence::High,
+                    reason: AssessmentReason::InternetVerified,
+                    local_link: LocalLinkState::Available,
+                    auth_endpoint: AuthEndpointState::NotChecked,
                     details: ProbeDetails {
                         tcp: vec!["Pass".into()],
                         http: vec![],

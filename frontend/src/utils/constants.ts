@@ -107,9 +107,11 @@ export const DEFAULT_CONFIG: Config = {
     // 默认启用 HTTP 检测（generate_204 门户探测），比 TCP 更贴近真实网络连通性
     enable_http_check: true,
     test_urls: [
-      "https://connect.rom.miui.com/generate_204",
-      "https://connectivitycheck.platform.hicloud.com/generate_204",
+      "http://connect.rom.miui.com/generate_204",
+      "http://connectivitycheck.platform.hicloud.com/generate_204",
+      "http://wifi.vivo.com.cn/generate_204",
     ],
+    enable_url_check: false,
     check_auth_url: false,
     auth_url_targets: [],
     url_check_urls: [
@@ -118,7 +120,7 @@ export const DEFAULT_CONFIG: Config = {
       "http://detectportal.firefox.com/success.txt|success",
     ],
     enable_local_check: false,
-    // 网络检测默认禁用代理（直连），避免代理故障误判离线；关闭后跟随系统代理（重启生效）
+    // 网络检测默认禁用代理（直连），避免代理故障误判离线；关闭后跟随系统代理（下一轮生效）
     disable_proxy: true,
     script_timeout: 60,
     post_login_delay: 5,

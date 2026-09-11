@@ -186,7 +186,29 @@ async function testNetwork(): Promise<void> {
   busy.action = true;
   try {
     const data = await actionsApi.testNetwork();
-    toastOnly(true, extractMsg(data, "测试完成"));
+    const summary = {
+      online: "公网连接正常",
+      captive_portal: "检测到校园网认证门户",
+      offline: "网络暂不可达",
+      unknown: "证据不足，暂不能判断",
+    }[data.status];
+    const reason = {
+      not_checked: "尚未执行有效探测",
+      internet_verified: "HTTP 204 或 URL 内容探测已确认公网可用",
+      captive_detected: "探测请求被门户劫持",
+      external_failed_auth_reachable: "公网失败，但认证入口可达",
+      all_probes_failed: "所有已启用的公网探测均失败",
+      weak_evidence_only: "只有 TCP 弱证据，不能确认公网可用",
+      conflicting_evidence: "不同探测结果相互冲突",
+      no_probes_enabled: "没有启用有效公网探测",
+    }[data.reason];
+    const local = {
+      available: "本地链路正常",
+      unavailable: "未发现有效本地网络接口",
+      probe_failed: "本地链路检查失败",
+      not_checked: "本地链路未检查",
+    }[data.local_link];
+    toastOnly(data.status === "online", `${summary}；${reason}；${local}（${data.duration_ms}ms）`);
   } catch (error) {
     toastOnly(false, extractApiError(error, "网络测试失败"));
   } finally {

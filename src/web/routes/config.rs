@@ -414,7 +414,7 @@ pub async fn set_pure_mode(
 /// 后端 MonitorSettings → 前端 MonitorConfig 字段映射
 ///
 /// 后端字段：tcp_enabled/tcp_targets/http_enabled/http_targets/url_enabled/url_targets/url_expected_responses/...
-/// 前端字段：enable_tcp_check/ping_targets/enable_http_check/test_urls/url_check_urls/...
+/// 前端字段：enable_tcp_check/ping_targets/enable_http_check/test_urls/enable_url_check/url_check_urls/...
 /// url_check_urls 格式："url|expected_response"（合并 url_targets + url_expected_responses）
 fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
     // 合并 url_targets + url_expected_responses → url_check_urls ("url|expected" 格式)
@@ -434,7 +434,8 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "enable_tcp_check": m.tcp_enabled,
         "enable_http_check": m.http_enabled,
         "test_urls": m.http_targets,
-        "check_auth_url": false,
+        "enable_url_check": m.url_enabled,
+        "check_auth_url": m.check_auth_url,
         "auth_url_targets": [],
         "url_check_urls": url_check_urls,
         "enable_local_check": m.local_check_enabled,
@@ -455,13 +456,15 @@ const MONITOR_PATCH_ALLOWED_KEYS: &[&str] = &[
     "url_check_urls",
     "enable_tcp_check",
     "enable_http_check",
+    "enable_url_check",
     "enable_local_check",
     "disable_proxy",
     "network_check_timeout",
     "post_login_delay",
-    // 以下三个为 GET 响应的往返保真字段：前端保存时原样回传，映射函数有意忽略
-    // （不覆盖后端对应存储），见前端 constants.ts 的配置往返保真注释
+    // 登录前 auth_url 可达性预检开关（默认 false，见 MonitorSettings::check_auth_url）
     "check_auth_url",
+    // 以下两个为 GET 响应的往返保真字段：前端保存时原样回传，映射函数有意忽略
+    // （不覆盖后端对应存储），见前端 constants.ts 的配置往返保真注释
     "auth_url_targets",
     "script_timeout",
 ];
@@ -529,11 +532,18 @@ fn monitor_frontend_to_backend(v: &Value) -> Value {
         "url_expected_responses": Value::Object(url_expected_responses),
         "tcp_enabled": obj.get("enable_tcp_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "http_enabled": obj.get("enable_http_check").and_then(|v| v.as_bool()).unwrap_or(false),
-        "url_enabled": obj.get("url_check_urls").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+        // 新前端显式传 enable_url_check；旧客户端没有该字段时保留历史的
+        // “目标列表非空即启用”兼容语义，避免一次保存意外关闭原有 URL 探测。
+        "url_enabled": obj.get("enable_url_check").and_then(|v| v.as_bool()).unwrap_or_else(|| {
+            obj.get("url_check_urls")
+                .and_then(|v| v.as_array())
+                .is_some_and(|items| !items.is_empty())
+        }),
         "local_check_enabled": obj.get("enable_local_check").and_then(|v| v.as_bool()).unwrap_or(false),
         "disable_proxy": obj.get("disable_proxy").and_then(|v| v.as_bool()).unwrap_or(true),
         "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
         "post_login_delay": obj.get("post_login_delay").and_then(|v| v.as_u64()).unwrap_or(5),
+        "check_auth_url": obj.get("check_auth_url").and_then(|v| v.as_bool()).unwrap_or(false),
         // 注意：profile_check_interval / http_timeout / url_timeout / auth_url_timeout / socks5_port
         // 前端 MonitorConfig 不包含这些字段，故此处**不输出**。上层用 json_merge 合并，
         // 省略即可保留 settings.json 中已存储的值，避免每次保存把它们覆盖成硬编码默认值。
@@ -613,6 +623,7 @@ mod tests {
             http_timeout: 5,
             url_timeout: 5,
             auth_url_timeout: 5,
+            check_auth_url: false,
             post_login_delay: 5,
         }
     }
@@ -628,6 +639,7 @@ mod tests {
         assert_eq!(front["check_interval_seconds"], 120);
         assert_eq!(front["ping_targets"], serde_json::json!(["8.8.8.8:53"]));
         assert_eq!(front["enable_tcp_check"], serde_json::json!(true));
+        assert_eq!(front["enable_url_check"], serde_json::json!(true));
     }
 
     #[test]
@@ -648,6 +660,7 @@ mod tests {
             "check_interval_seconds": 60,
             "ping_targets": ["1.1.1.1:53"],
             "test_urls": ["http://c.com"],
+            "enable_url_check": true,
             "url_check_urls": [" http://a.com | OK ", "http://d.com"],
             "network_check_timeout": 8,
             "post_login_delay": 3,
@@ -663,7 +676,37 @@ mod tests {
         );
         assert!(back["url_expected_responses"].get("http://d.com").is_none());
         assert_eq!(back["tcp_enabled"], serde_json::json!(true));
+        assert_eq!(back["url_enabled"], serde_json::json!(true));
         assert_eq!(back["check_interval"], serde_json::json!(60));
+    }
+
+    #[test]
+    fn monitor_url_targets_do_not_implicitly_enable_probe() {
+        let front = serde_json::json!({
+            "enable_url_check": false,
+            "url_check_urls": ["http://a.com|OK"]
+        });
+        let back = monitor_frontend_to_backend(&front);
+        assert_eq!(back["url_enabled"], serde_json::json!(false));
+        assert_eq!(back["url_targets"], serde_json::json!(["http://a.com"]));
+    }
+
+    #[test]
+    fn monitor_roundtrip_preserves_check_auth_url() {
+        // 开关须真实往返：GET 给出后端值，PATCH 能写回（不再是被忽略的保真字段）
+        let mut original = sample_monitor();
+        assert!(!original.check_auth_url, "默认应关闭");
+        assert_eq!(
+            monitor_backend_to_frontend(&original)["check_auth_url"],
+            serde_json::json!(false)
+        );
+        original.check_auth_url = true;
+        let front = monitor_backend_to_frontend(&original);
+        assert_eq!(front["check_auth_url"], serde_json::json!(true));
+        assert_eq!(
+            monitor_frontend_to_backend(&front)["check_auth_url"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

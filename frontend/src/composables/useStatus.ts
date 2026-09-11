@@ -4,7 +4,13 @@
  */
 
 import { reactive, computed } from "vue";
-import type { StatusSnapshot, AutostartStatus } from "../api/types";
+import type {
+  AutostartStatus,
+  ConnectivityAssessment,
+  ProbeEvidence,
+  NetworkState,
+  StatusSnapshot,
+} from "../api/types";
 import { monitorApi, autostartApi } from "../api";
 import { ApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
@@ -22,6 +28,17 @@ const status = reactive<StatusSnapshot>({
   runtime_seconds: 0,
   network_connected: false,
   network_state: "unknown",
+  pause_active: false,
+  cooling_down: false,
+  cooling_down_remaining: null,
+  connectivity: {
+    status: "unknown",
+    confidence: "low",
+    reason: "not_checked",
+    auth_endpoint: "not_checked",
+    recovery_advice: "not_evaluated",
+  },
+  last_probe_evidence: null,
   update_progress: null,
 });
 
@@ -52,6 +69,19 @@ const busy = reactive({
 
 const fetchStatusFail = createFirstFailNotifier();
 
+/** WebSocket 与轮询都可能接入旧后端，未知状态统一收敛为 unknown。 */
+function normalizeNetworkState(value: unknown): NetworkState {
+  switch (value) {
+    case "online":
+    case "captive_portal":
+    case "offline":
+    case "unknown":
+      return value;
+    default:
+      return "unknown";
+  }
+}
+
 /**
  * 后端 StatusSnapshot 字段 → 前端字段映射。
  * 后端：monitor_enabled/network_status/consecutive_failures/retry_count/uptime_seconds/probe_total/login_total
@@ -65,8 +95,16 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   const engineState = String(raw.engine_state ?? "");
   out.monitoring = engineState === "running";
   out.engine_state = engineState || undefined;
-  out.network_state = String(raw.network_status ?? status.network_state ?? "unknown");
-  out.network_connected = raw.network_status === "online";
+  out.network_state = normalizeNetworkState(raw.network_status ?? status.network_state);
+  out.network_connected = out.network_state === "online";
+  out.pause_active = Boolean(raw.pause_active ?? status.pause_active);
+  out.cooling_down = Boolean(raw.cooling_down ?? status.cooling_down);
+  out.cooling_down_remaining = raw.cooling_down_remaining == null
+    ? null
+    : Number(raw.cooling_down_remaining);
+  out.connectivity = (raw.connectivity as ConnectivityAssessment | undefined) ?? status.connectivity;
+  out.last_probe_evidence = (raw.last_probe_evidence as ProbeEvidence | null | undefined)
+    ?? status.last_probe_evidence;
   // G23：检测/登录次数改用后端新增的累计字段 probe_total / login_total
   //（consecutive_failures / retry_count 是瞬时重试计数，此前被误当作次数展示）。
   // 后端字段缺失时沿用当前值兜底（旧版本后端不至于把计数清零）
@@ -121,6 +159,7 @@ function statusEpochAtRequest(): number {
 
 const networkStatus = computed(() => {
   if (!status.monitoring) return "idle";
+  if (status.pause_active) return "checking";
   if (status.network_state === "unknown") return "checking";
   if (status.network_connected === false) return "disconnected";
   return "connected";
@@ -128,18 +167,48 @@ const networkStatus = computed(() => {
 
 const networkStatusText = computed(() => {
   if (!status.monitoring) return "已停止";
-  // 后端 network_status 实际取值：online / captive_portal / offline / paused / unknown
+  if (status.pause_active) return "自动监测已暂停";
+  // 网络事实与引擎运行态分离；暂停不会覆盖最近一次网络结论。
   switch (status.network_state) {
     case "online":
-      return "在线检测中";
+      return "公网连接正常";
     case "captive_portal":
-      return "检测到门户劫持";
+      return status.cooling_down ? "需要认证 · 恢复冷却中" : "需要校园网认证";
     case "offline":
-      return "网络断开";
-    case "paused":
-      return "暂停时段";
+      return "网络暂不可达";
     default:
-      return "正在启动检测";
+      return "等待有效检测结果";
+  }
+});
+
+const networkStatusDetail = computed(() => {
+  if (!status.monitoring) return "自动监测停止后，手动网络测试仍可使用";
+  if (status.pause_active) return "暂停期间不会自动检测或登录；上次网络结论已保留";
+  if (status.cooling_down) {
+    const seconds = status.cooling_down_remaining;
+    return seconds == null ? "连续登录失败，稍后自动重试" : `连续登录失败，约 ${seconds} 秒后重试`;
+  }
+  switch (status.connectivity.reason) {
+    case "not_checked":
+      return "尚未完成第一轮检测";
+    case "internet_verified":
+      return "HTTP 204 或 URL 内容探测已确认可访问公网";
+    case "captive_detected":
+      return status.connectivity.recovery_advice === "attempt_login_once"
+        ? "发现门户劫持；认证入口预检失败，本次门户事件仅谨慎尝试一次"
+        : "发现门户劫持，自动登录会在运行态门控通过后启动";
+    case "external_failed_auth_reachable":
+      return "公网探测失败但校园网认证入口可达，按需要认证处理";
+    case "all_probes_failed":
+      return "所有已启用的公网探测均失败，等待链路恢复";
+    case "weak_evidence_only":
+      return "仅有 TCP 弱证据，暂不据此认定公网可用";
+    case "conflicting_evidence":
+      return "探测证据相互冲突，将在下一轮重新确认";
+    case "no_probes_enabled":
+      return "没有启用有效公网探测，自动恢复不会启动";
+    default:
+      return "检测状态待确认";
   }
 });
 
@@ -204,6 +273,7 @@ export function useStatus() {
     busy,
     networkStatus,
     networkStatusText,
+    networkStatusDetail,
     updateStatus,
     fetchStatus,
     fetchAutostart,

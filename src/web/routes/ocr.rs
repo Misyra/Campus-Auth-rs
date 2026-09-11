@@ -165,7 +165,7 @@ pub async fn ocr_uninstall(
 
 /// POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖
 ///
-/// 后台执行环境能力安装（uv/Python/Playwright）并 `uv add` ddddocr，
+/// 后台只准备 Python/Worker 核心（不要求浏览器二进制）并 `uv add` ddddocr，
 /// 进度通过 StatusManager 推送。
 pub async fn ocr_install(
     State(bridge): State<Arc<dyn BridgeApi>>,
@@ -173,9 +173,9 @@ pub async fn ocr_install(
 ) -> Result<Json<Value>, ApiError> {
     let env = environment.clone();
     tokio::spawn(async move {
-        // 先确保核心能力就绪，再同步 OCR optional extra
+        // OCR 是补充能力，只需要 Worker IPC，不应触发 Chromium 下载。
         // 后台安装失败可通过再次点击重试恢复（非进程级故障），降为 warn 避免误告警
-        if let Err(e) = env.ensure_capability().await {
+        if let Err(e) = env.ensure_worker_ready().await {
             tracing::warn!("OCR 环境引导失败: {e}");
             return;
         }
@@ -293,7 +293,12 @@ mod tests {
             EnvironmentStatus {
                 uv_ready: false,
                 python_ready: false,
+                worker_ready: false,
+                manifest_current: false,
                 playwright_ready: false,
+                system_browser_ready: false,
+                ocr_enabled: false,
+                ocr_ready: false,
                 capability_ready: false,
                 stage: BootstrapStage::Idle,
                 progress: None,

@@ -4,6 +4,7 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 
 use crate::engine::EngineError;
+use crate::monitor::{AssessmentConfidence, AssessmentReason, AuthEndpointState, LocalLinkState};
 use crate::status::NetworkStatus;
 
 /// 调度引擎接收的全部命令
@@ -56,6 +57,14 @@ pub enum ProfileSwitchSource {
 pub struct TestNetworkResult {
     /// 探测结论
     pub status: NetworkStatus,
+    /// 判断置信度
+    pub confidence: AssessmentConfidence,
+    /// 判断主原因
+    pub reason: AssessmentReason,
+    /// 本地链路诊断结果
+    pub local_link: LocalLinkState,
+    /// 认证入口状态（手动诊断默认不检查）
+    pub auth_endpoint: AuthEndpointState,
     /// 各探测方法的详细结果
     pub details: ProbeDetails,
     /// 探测耗时（毫秒）
@@ -81,15 +90,19 @@ mod tests {
 
     #[test]
     fn test_test_network_result_serialize_snake_case() {
-        // NetworkStatus 应序列化为 snake_case（online / captive_portal / offline / paused）
+        // NetworkStatus 应序列化为 snake_case（online / captive_portal / offline / unknown）
         for (status, expect) in [
             (NetworkStatus::Online, "online"),
             (NetworkStatus::CaptivePortal, "captive_portal"),
             (NetworkStatus::Offline, "offline"),
-            (NetworkStatus::Paused, "paused"),
+            (NetworkStatus::Unknown, "unknown"),
         ] {
             let r = TestNetworkResult {
                 status,
+                confidence: AssessmentConfidence::Low,
+                reason: AssessmentReason::WeakEvidenceOnly,
+                local_link: LocalLinkState::NotChecked,
+                auth_endpoint: AuthEndpointState::NotChecked,
                 details: ProbeDetails {
                     tcp: vec![],
                     http: vec![],
@@ -110,6 +123,10 @@ mod tests {
         // 验证 details 子字段与 duration_ms 完整序列化
         let r = TestNetworkResult {
             status: NetworkStatus::Online,
+            confidence: AssessmentConfidence::High,
+            reason: AssessmentReason::InternetVerified,
+            local_link: LocalLinkState::Available,
+            auth_endpoint: AuthEndpointState::NotChecked,
             details: ProbeDetails {
                 tcp: vec!["Pass".into()],
                 http: vec!["Pass".into()],
@@ -134,6 +151,10 @@ mod tests {
         // 模拟处理方发送探测结果
         let sent = Ok(TestNetworkResult {
             status: NetworkStatus::CaptivePortal,
+            confidence: AssessmentConfidence::High,
+            reason: AssessmentReason::CaptiveDetected,
+            local_link: LocalLinkState::Available,
+            auth_endpoint: AuthEndpointState::NotChecked,
             details: ProbeDetails {
                 tcp: vec!["Timeout".into()],
                 http: vec!["Pass".into()],

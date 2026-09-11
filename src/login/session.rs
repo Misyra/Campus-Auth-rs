@@ -545,7 +545,7 @@ impl LoginSession {
     /// 登录后真实网络验证：等待 post_login_delay 让认证生效，再调用 MonitorService 做一次完整探测。
     ///
     /// 仅当探测结果为 [`NetworkStatus::Online`] 时返回 true，其余（CaptivePortal /
-    /// Offline / Paused / 探测异常 / Monitor 未注入）均返回 false。
+    /// Offline / Unknown / 探测异常 / Monitor 未注入）均返回 false。
     ///
     /// 与老实现 `BrowserTaskRunner._network_detection_check` 等价：防止 Worker 步骤
     /// 全部成功但页面实际未登录成功（如填入字面量 `{{USERNAME}}` 却没点登录按钮）。
@@ -583,20 +583,21 @@ impl LoginSession {
                 info!("登录后网络验证已取消（应用关闭）");
                 return false;
             }
-            r = monitor.check_once() => r,
+            r = monitor.verify_internet() => r,
         };
         match report {
             Ok(report) => {
                 use crate::status::NetworkStatus;
-                let ok = matches!(report.status, NetworkStatus::Online);
+                let ok = matches!(report.assessment.status, NetworkStatus::Online);
                 if ok {
                     info!("登录后网络验证通过：Online");
                 } else {
                     warn!(
-                        status = ?report.status,
-                        tcp = ?report.tcp_outcome,
-                        http = ?report.http_outcome,
-                        url = ?report.url_outcome,
+                        status = ?report.assessment.status,
+                        reason = ?report.assessment.reason,
+                        tcp = ?report.evidence.tcp,
+                        http = ?report.evidence.http,
+                        url = ?report.evidence.url,
                         "登录后网络验证未通过"
                     );
                 }

@@ -236,6 +236,7 @@ impl ServiceContainer {
         bridge: &Arc<BridgeSupervisor>,
         environment: &Arc<EnvironmentManager>,
     ) {
+        bridge.set_environment(environment);
         let bridge_for_cb = bridge.clone();
         environment.set_on_bootstrap_done(Arc::new(move || bridge_for_cb.reset_spawn_failures()));
     }

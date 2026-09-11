@@ -841,7 +841,7 @@ fn network_status_str(s: NetworkStatus) -> &'static str {
         NetworkStatus::Online => "在线",
         NetworkStatus::CaptivePortal => "需认证",
         NetworkStatus::Offline => "离线",
-        NetworkStatus::Paused => "已暂停",
+        NetworkStatus::Unknown => "等待检测",
     }
 }
 
@@ -902,7 +902,7 @@ mod tests {
         assert_eq!(network_status_str(NetworkStatus::Online), "在线");
         assert_eq!(network_status_str(NetworkStatus::CaptivePortal), "需认证");
         assert_eq!(network_status_str(NetworkStatus::Offline), "离线");
-        assert_eq!(network_status_str(NetworkStatus::Paused), "已暂停");
+        assert_eq!(network_status_str(NetworkStatus::Unknown), "等待检测");
     }
 
     /// login_status_str：五个登录状态均有中文文案

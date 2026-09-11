@@ -28,6 +28,7 @@ use crate::config::ConfigService;
 use crate::config::runtime::ProfileSnapshot;
 use crate::config::runtime::RuntimeConfig;
 use crate::environment::EnvironmentManager;
+use crate::monitor::AuthEndpointState;
 use crate::status::{LoginStatus, PartialSnapshot, StatusManager};
 use crate::tasks::TaskManager;
 use crate::utils::metrics::Metrics;
@@ -789,31 +790,41 @@ impl LoginOrchestrator {
         {
             return None;
         }
+        // 默认关闭：裸 TCP 直连在部分校园网会被限制，误判不可达会拦掉本可成功的登录。
+        // 注意本开关**只**管登录前预检；监测侧「外网失败 + 认证地址可达 → 判为门户劫持」
+        // 的二次纠正（check_once 步骤 5）不受影响，否则会退化成 Offline 而永不触发自动登录。
+        if !rt.monitor.check_auth_url {
+            return None;
+        }
         let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
-        let reachable = tokio::select! {
+        let endpoint_state = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Some(self.cancelled_handle(source, profile.id.clone()).await);
             }
-            r = self.monitor.check_auth_url(&profile.auth_url, timeout) => r,
+            r = self.monitor.inspect_auth_endpoint(&profile.auth_url, timeout) => r,
         };
-        if reachable {
+        if endpoint_state == AuthEndpointState::Reachable {
             return None;
         }
-        warn!(
-            "认证地址预检不可达: {}（请检查认证地址是否正确、是否已连校园网）",
-            profile.auth_url
-        );
-        Some(
-            self.immediate_handle(
-                source,
-                false,
+        let message = match endpoint_state {
+            AuthEndpointState::Invalid => {
                 format!(
-                    "认证地址不可达: {}（请检查地址或校园网连接）",
+                    "认证地址格式无效: {}（请检查 Profile 配置）",
                     profile.auth_url
-                ),
-                profile.id.clone(),
-            )
-            .await,
+                )
+            }
+            AuthEndpointState::Unreachable => format!(
+                "认证地址不可达: {}（请检查地址或校园网连接）",
+                profile.auth_url
+            ),
+            AuthEndpointState::Missing => "未配置认证地址（请检查 Profile 配置）".to_string(),
+            AuthEndpointState::NotChecked | AuthEndpointState::SkippedRedirectMode => return None,
+            AuthEndpointState::Reachable => return None,
+        };
+        warn!(state = ?endpoint_state, "认证地址预检未通过: {message}");
+        Some(
+            self.immediate_handle(source, false, message, profile.id.clone())
+                .await,
         )
     }
 

@@ -50,8 +50,9 @@ async fn python_executable_status(python_exe: &Path) -> Result<(), String> {
 
 /// 确保 Python 虚拟环境就绪
 ///
-/// 检查解释器是否真实可启动，不可用则执行 `uv sync` 创建/修复。OCR 依赖
-/// （ddddocr）经 `uv add` 进入项目主依赖，同步天然保留，无需额外开关。
+/// 检查解释器是否真实可启动，不可用则执行 `uv sync` 创建/修复。
+/// 本函数只回答“Python 能否运行”；Worker import、协议版本与依赖清单指纹由
+/// `environment::health` 独立验证，避免普通 Python 脚本被浏览器能力绑死。
 /// 返回 Python 解释器路径。
 pub async fn ensure_venv(
     mgr: &EnvironmentManager,
@@ -61,44 +62,93 @@ pub async fn ensure_venv(
         .worker_project_path()
         .join(crate::environment::PYTHON_EXE_RELATIVE);
 
-    // 更新 overlay 后的强制重同步：依赖清单变化时 helper 写入标记，
-    // 即使解释器完好也必须跑一次 uv sync，否则新增依赖要到 import 才暴露
-    let resync_marker = mgr
-        .worker_project_path()
-        .join(crate::environment::RESYNC_MARKER);
-    let resync_pending = resync_marker.is_file();
-
     // 文件存在不代表 uv 管理的基础解释器仍存在，必须实际启动一次。
-    if resync_pending {
-        tracing::info!("检测到更新后依赖重同步标记，强制执行 uv sync");
-    } else if let Err(reason) = python_executable_status(&python_exe).await {
+    let failure_reason = if let Err(reason) = python_executable_status(&python_exe).await {
         // 补充探测失败的具体原因（缺失 / 启动失败 / 超时），便于定位 venv 损坏
         tracing::debug!(reason = %reason, "Python 解释器探测未通过，虚拟环境需要修复");
+        reason
     } else {
         return Ok(python_exe);
-    }
+    };
 
-    if python_exe.exists() {
-        tracing::warn!("虚拟环境不可用（缺失或损坏），执行 uv sync 修复");
+    let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
+    let backup = if venv_path.exists() {
+        // uv sync 会信任现有 pyvenv.cfg；若其 home 指向已删除的 uv 托管 Python，
+        // sync 只改包目录却不会重建解释器。先原地隔离，才能让 uv 创建新 venv。
+        tracing::warn!(reason = %failure_reason, "虚拟环境损坏，隔离旧目录后重建");
+        Some(quarantine_broken_venv(&venv_path).await?)
     } else {
-        // 不存在则执行 uv sync 创建虚拟环境并安装依赖
         tracing::info!("虚拟环境不存在，执行 uv sync 创建...");
-    }
-    crate::environment::uv::run_uv_sync(mgr, cancel).await?;
+        None
+    };
 
-    // 同步成功后清理标记：残留会导致下次启动多跑一次 uv sync（幂等无害）
-    if resync_pending {
-        if let Err(e) = std::fs::remove_file(&resync_marker) {
-            tracing::warn!("清理依赖重同步标记失败: {e}");
-        }
+    if let Err(error) = crate::environment::uv::run_uv_sync(mgr, cancel).await {
+        restore_quarantined_venv(&venv_path, backup.as_deref()).await;
+        return Err(error);
     }
 
     // 验证创建成功
     if !python_executable_works(&python_exe).await {
+        restore_quarantined_venv(&venv_path, backup.as_deref()).await;
         return Err(EnvironmentError::VenvCorrupted);
     }
 
+    if let Some(backup) = backup
+        && let Err(error) = tokio::fs::remove_dir_all(&backup).await
+    {
+        tracing::warn!(path = %backup.display(), "新虚拟环境已验证，但旧环境备份清理失败: {error}");
+    }
+
     Ok(python_exe)
+}
+
+/// 将损坏 venv 原地改名，保证重建失败时仍可回滚，且 rename 不跨文件系统。
+async fn quarantine_broken_venv(venv_path: &Path) -> Result<std::path::PathBuf, EnvironmentError> {
+    let parent = venv_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut suffix = 0u16;
+    let backup = loop {
+        let candidate = parent.join(format!(".venv-rebuild-{}-{suffix}", std::process::id()));
+        if !candidate.exists() {
+            break candidate;
+        }
+        suffix = suffix.saturating_add(1);
+        if suffix == u16::MAX {
+            return Err(EnvironmentError::VenvRebuildFailed {
+                path: venv_path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "无法分配 venv 隔离目录",
+                ),
+            });
+        }
+    };
+    tokio::fs::rename(venv_path, &backup)
+        .await
+        .map_err(|source| EnvironmentError::VenvRebuildFailed {
+            path: venv_path.to_path_buf(),
+            source,
+        })?;
+    Ok(backup)
+}
+
+/// 重建失败时恢复旧目录；回滚失败只记错误，保留隔离目录供人工恢复。
+async fn restore_quarantined_venv(venv_path: &Path, backup: Option<&Path>) {
+    let Some(backup) = backup else {
+        return;
+    };
+    if venv_path.exists()
+        && let Err(error) = tokio::fs::remove_dir_all(venv_path).await
+    {
+        tracing::error!(path = %venv_path.display(), "清理失败的新虚拟环境时出错: {error}");
+        return;
+    }
+    if let Err(error) = tokio::fs::rename(backup, venv_path).await {
+        tracing::error!(
+            backup = %backup.display(),
+            target = %venv_path.display(),
+            "虚拟环境回滚失败，隔离备份仍保留: {error}"
+        );
+    }
 }
 
 /// 检查 venv 内 ddddocr（OCR 依赖）是否已安装
@@ -401,6 +451,25 @@ mod tests {
     async fn test_python_executable_works_rejects_missing_file() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(!python_executable_works(&dir.path().join("missing-python.exe")).await);
+    }
+
+    #[tokio::test]
+    async fn broken_venv_quarantine_and_restore_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join(".venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "home = missing").unwrap();
+
+        let backup = quarantine_broken_venv(&venv).await.unwrap();
+        assert!(!venv.exists());
+        assert!(backup.join("pyvenv.cfg").is_file());
+
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("partial"), b"new but broken").unwrap();
+        restore_quarantined_venv(&venv, Some(&backup)).await;
+        assert!(venv.join("pyvenv.cfg").is_file());
+        assert!(!venv.join("partial").exists());
+        assert!(!backup.exists());
     }
 
     #[tokio::test]

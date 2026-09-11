@@ -29,7 +29,7 @@ pub use worker::{WorkerState, worker_state_to_status};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -41,7 +41,7 @@ use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 use crate::config::ConfigService;
-use crate::environment::PYTHON_EXE_RELATIVE;
+use crate::environment::{EnvironmentManager, PYTHON_EXE_RELATIVE};
 use crate::status::{PartialSnapshot, StatusManager, WorkerStatus};
 use crate::utils::metrics::Metrics;
 use crate::utils::paths::worker_project_dir;
@@ -229,6 +229,10 @@ pub enum BridgeError {
     /// Worker 连续启动失败熔断（B3）
     #[error("Worker 环境异常，请重新引导")]
     WorkerSpawnBlocked,
+
+    /// Worker 启动前环境验证或自愈失败
+    #[error("Worker 环境验证失败: {0}")]
+    WorkerEnvironmentInvalid(String),
 }
 
 /// Supervisor 后台 task 处理的命令
@@ -310,6 +314,8 @@ pub struct BridgeSupervisor {
     /// 启动串行锁：保证最多一个协程执行 Worker spawn + 健康检查，避免重复 spawn
     /// 独立持有（tokio Mutex），不置于 std Mutex 保护的 BridgeInner 内，避免跨 await 持锁
     startup_lock: AsyncMutex<()>,
+    /// 环境管理器弱引用：Worker spawn 前做真实门禁，失败时在同一请求内自愈。
+    environment: RwLock<Option<Weak<EnvironmentManager>>>,
     /// 孤儿清理已执行标记（A-4 降频）：PowerShell/CIM 进程枚举冷启动可达秒级，
     /// 仅在 Supervisor 生命周期首次 spawn 前执行一次；崩溃路径不受此门控
     orphan_cleanup_done: std::sync::atomic::AtomicBool,
@@ -358,7 +364,16 @@ impl BridgeSupervisor {
             metrics,
             event_tx: Mutex::new(None),
             startup_lock: tokio::sync::Mutex::new(()),
+            environment: RwLock::new(None),
         })
+    }
+
+    /// 接入环境管理器；使用弱引用避免 ServiceContainer 形成强引用环。
+    pub fn set_environment(&self, environment: &Arc<EnvironmentManager>) {
+        *self
+            .environment
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::downgrade(environment));
     }
 
     /// 统一执行入口，含懒加载、会话互斥检查、cancel_id 注册
@@ -1186,17 +1201,6 @@ async fn ensure_worker(
     if is_worker_ready(this) {
         return Ok(());
     }
-    // 熔断检查：连续 spawn 失败 ≥3 次，快速失败（B3）
-    {
-        let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.consecutive_spawn_failures >= SPAWN_FAILURE_THRESHOLD {
-            tracing::warn!(target: "python_worker",
-                "Worker 连续 {} 次启动失败，触发熔断",
-                inner.consecutive_spawn_failures
-            );
-            return Err(BridgeError::WorkerSpawnBlocked);
-        }
-    }
     // 串行化启动：持有 startup_lock 期间其他调用方阻塞，解锁后重新检查快速路径
     let _startup_guard = this.startup_lock.lock().await;
     // 双重检查（获取锁后可能已被其他协程启动完成）
@@ -1208,6 +1212,38 @@ async fn ensure_worker(
         let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.process.is_some() {
             return Ok(());
+        }
+    }
+
+    // 每次新 spawn 前重新执行真实 import 探针，避免进程运行期间依赖被删改后
+    // 仍信任旧快照。失败由 EnvironmentManager 在同一门内执行 uv sync 自愈。
+    let environment = this
+        .environment
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .and_then(Weak::upgrade);
+    if let Some(environment) = &environment {
+        crate::environment::check_environment(environment)
+            .await
+            .map_err(|error| BridgeError::WorkerEnvironmentInvalid(error.to_string()))?;
+        let result = if worker_only_health_check {
+            environment.ensure_worker_ready().await
+        } else {
+            environment.ensure_capability().await
+        };
+        result.map_err(|error| BridgeError::WorkerEnvironmentInvalid(error.to_string()))?;
+    }
+
+    // 环境修复会复位旧熔断，因此熔断检查必须放在门禁之后。
+    {
+        let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.consecutive_spawn_failures >= SPAWN_FAILURE_THRESHOLD {
+            tracing::warn!(target: "python_worker",
+                "Worker 连续 {} 次启动失败，触发熔断",
+                inner.consecutive_spawn_failures
+            );
+            return Err(BridgeError::WorkerSpawnBlocked);
         }
     }
     // 校验 Python 解释器是否存在（路径解析与 EnvironmentManager 一致，含 dev 回退）
@@ -1225,7 +1261,7 @@ async fn ensure_worker(
     {
         run_orphan_cleanup_with_timeout().await;
     }
-    // spawn 子进程 + 四个后台 task
+    // spawn 子进程 + 四个后台 task；首次失败会强制同步核心依赖并原地重试一次。
     let ipc_tx = this
         .inner
         .lock()
@@ -1234,47 +1270,79 @@ async fn ensure_worker(
         .clone()
         .ok_or(BridgeError::WorkerStartupTimeout)?;
     let keep_alive = this.config.runtime().load().worker.keep_alive;
-    let process = spawn_worker(
-        &python_exe,
-        &worker_main,
-        &this.base_path,
-        keep_alive,
-        ipc_tx,
-    )
-    .await?;
-    {
-        let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.worker_state = WorkerState::Starting;
-        inner.process = Some(process);
-        merge_worker_status(&inner, &this.status);
-    }
-    // Worker spawn 成功，递增指标
-    if let Some(m) = &this.metrics {
-        m.inc_worker_spawn();
-    }
-    // 纯 OCR 只验证 Worker IPC；浏览器任务继续验证 Playwright/Chromium。
-    match send_health_check(this, worker_only_health_check).await {
-        Ok(true) => {
+    for attempt in 0..2 {
+        let process = match spawn_worker(
+            &python_exe,
+            &worker_main,
+            &this.base_path,
+            keep_alive,
+            ipc_tx.clone(),
+        )
+        .await
+        {
+            Ok(process) => process,
+            Err(error) if attempt == 0 && environment.is_some() => {
+                warn!(target: "python_worker", "Worker 进程首次启动失败，尝试修复运行时: {error}");
+                if let Some(environment) = &environment {
+                    if let Err(repair_error) = environment.repair_worker_runtime().await {
+                        return Err(BridgeError::WorkerEnvironmentInvalid(
+                            repair_error.to_string(),
+                        ));
+                    }
+                }
+                continue;
+            }
+            Err(error) => {
+                record_spawn_failure(this);
+                return Err(error);
+            }
+        };
+        {
+            let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Starting;
+            inner.process = Some(process);
+            merge_worker_status(&inner, &this.status);
+        }
+        if let Some(metrics) = &this.metrics {
+            metrics.inc_worker_spawn();
+        }
+
+        // 纯 OCR 只验证 Worker IPC；浏览器任务继续验证 Playwright/Chromium。
+        if matches!(
+            send_health_check(this, worker_only_health_check).await,
+            Ok(true)
+        ) {
             let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.worker_state = WorkerState::Idle;
-            // 成功启动后复位连续失败计数（B3）
             inner.consecutive_spawn_failures = 0;
             merge_worker_status(&inner, &this.status);
             info!(target: "python_worker", "Worker 健康检查通过，已就绪");
-            Ok(())
+            return Ok(());
         }
-        _ => {
-            warn!(target: "python_worker", "Worker 健康检查失败或超时");
-            kill_worker_now(this).await;
-            // 递增连续失败计数（B3）
-            {
-                let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
-                inner.consecutive_spawn_failures += 1;
-                merge_worker_status(&inner, &this.status);
-            }
-            Err(BridgeError::WorkerStartupTimeout)
+
+        warn!(target: "python_worker", attempt = attempt + 1, "Worker 健康检查失败或超时");
+        kill_worker_now(this).await;
+        if attempt == 0
+            && let Some(environment) = &environment
+        {
+            tracing::info!(target: "python_worker", "强制同步 Worker 依赖后重试当前请求");
+            environment
+                .repair_worker_runtime()
+                .await
+                .map_err(|error| BridgeError::WorkerEnvironmentInvalid(error.to_string()))?;
+            continue;
         }
+        record_spawn_failure(this);
+        return Err(BridgeError::WorkerStartupTimeout);
     }
+    Err(BridgeError::WorkerStartupTimeout)
+}
+
+/// 仅在一次“预检 + 自愈重试”整体失败后计数，避免可修复故障快速打满熔断。
+fn record_spawn_failure(this: &BridgeSupervisor) {
+    let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+    inner.consecutive_spawn_failures += 1;
+    merge_worker_status(&inner, &this.status);
 }
 
 /// 判断 Worker 是否就绪（Idle 且子进程存活）

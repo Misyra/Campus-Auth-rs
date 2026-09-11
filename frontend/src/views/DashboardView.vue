@@ -123,7 +123,8 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
     <!-- 网络状态横幅 -->
     <div v-if="s.status.monitoring" class="network-status-banner" :class="s.networkStatus.value">
       <span class="status-dot"></span>
-      <span>{{ s.networkStatusText.value }}</span>
+      <span class="status-text">{{ s.networkStatusText.value }}</span>
+      <span class="status-detail">{{ s.networkStatusDetail.value }}</span>
     </div>
 
     <!-- 环境未就绪提示（非阻塞，仅链接到 环境 → Python 环境） -->

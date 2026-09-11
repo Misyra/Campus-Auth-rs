@@ -5,10 +5,15 @@
 //! 保证运行期修改即时生效。
 
 pub mod decision;
+pub mod model;
 pub mod portal;
 pub mod probes;
 
-pub use decision::evaluate;
+pub use decision::{apply_auth_endpoint, assess_connectivity};
+pub use model::{
+    AssessmentConfidence, AssessmentReason, AuthEndpointState, ConnectivityAssessment,
+    LocalLinkState, ProbeEvidence, ProbeReport, RecoveryAdvice,
+};
 pub use portal::{PortalDetectResult, PortalDetectStatus, detect_portal};
 pub use probes::{PerProbeDetail, ProbeKind, ProbeOutcome, parse_url_host_port};
 
@@ -45,7 +50,7 @@ pub enum MonitorError {
 
 /// 从 RuntimeConfig 提取的监测配置子集
 ///
-/// 每次 `check_once()` 开头重新构建，保证配置热更新生效。
+/// 每种检测入口执行前都会重新构建，保证配置热更新生效。
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
     /// 监测间隔（秒）
@@ -98,23 +103,15 @@ impl MonitorConfig {
     }
 }
 
-/// 一次完整探测周期的返回结果
-#[derive(Debug, Clone)]
-pub struct ProbeReport {
-    /// 最终网络状态结论
-    pub status: NetworkStatus,
-    /// auth_url 是否可达（CaptivePortal 或经 auth 二次判定的 Offline 时有值，其余为 None）
-    pub auth_url_reachable: Option<bool>,
-    /// TCP 探测结果
-    pub tcp_outcome: ProbeOutcome,
-    /// HTTP 探测结果
-    pub http_outcome: ProbeOutcome,
-    /// URL 探测结果
-    pub url_outcome: ProbeOutcome,
-    /// 整体探测耗时（毫秒）
-    pub latency_ms: u64,
-    /// 累计检测次数
-    pub check_number: u64,
+/// 一次检测的用途
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckPurpose {
+    /// 周期监测：补充认证入口证据并生成自动恢复建议
+    AutoMonitor,
+    /// 用户主动诊断：可采集本地链路，但绝不生成自动恢复动作
+    ManualDiagnostic,
+    /// 登录后验证：只确认公网是否恢复
+    PostLoginVerification,
 }
 
 /// 网络监测服务
@@ -228,8 +225,24 @@ impl MonitorService {
     /// 执行一次完整探测周期，返回 [`ProbeReport`]。
     ///
     /// 暂停时段由 Engine 在调用前检查，本方法不重复判断。
+    /// 执行自动监测：公网探测后按需补充认证入口证据与恢复建议。
+    pub async fn check_auto_monitor(&self) -> Result<ProbeReport, MonitorError> {
+        self.check_once(CheckPurpose::AutoMonitor).await
+    }
+
+    /// 执行用户主动诊断：允许采集本地链路，不触发任何自动恢复动作。
+    pub async fn diagnose_once(&self) -> Result<ProbeReport, MonitorError> {
+        self.check_once(CheckPurpose::ManualDiagnostic).await
+    }
+
+    /// 执行登录后公网验证：不采集本地链路，也不额外探测认证入口。
+    pub async fn verify_internet(&self) -> Result<ProbeReport, MonitorError> {
+        self.check_once(CheckPurpose::PostLoginVerification).await
+    }
+
+    /// 按用途执行一次检测；暂停属于 Engine 调度策略。
     #[instrument(skip_all)]
-    pub async fn check_once(&self) -> Result<ProbeReport, MonitorError> {
+    async fn check_once(&self, purpose: CheckPurpose) -> Result<ProbeReport, MonitorError> {
         self.ensure_client();
         let rt = self.config_service.runtime().load();
         let cfg = MonitorConfig::from_runtime(&rt);
@@ -254,57 +267,19 @@ impl MonitorService {
             cfg.check_interval
         );
 
-        // 步骤 1：全部禁用检查（首次告警，后续降级为 DEBUG）
+        // 全部禁用时仍走统一判定，最终返回 Unknown + NoProbeEvidence；
+        // 没有测量不能伪装成确认离线。
         if !cfg.tcp_enabled && !cfg.http_enabled && !cfg.url_enabled {
             if self.all_disabled_warned.swap(true, Ordering::Relaxed) {
-                debug!("所有探测类型均已禁用，本轮返回 Offline");
+                debug!("所有探测类型均已禁用，本轮返回 Unknown");
             } else {
-                warn!("所有探测类型均已禁用，本轮返回 Offline（后续同类告警降级为 DEBUG）");
+                warn!("所有探测类型均已禁用，本轮返回 Unknown 且禁止自动恢复");
             }
-            return Ok(self.finalize_report(
-                NetworkStatus::Offline,
-                ProbeOutcome::Disabled,
-                ProbeOutcome::Disabled,
-                ProbeOutcome::Disabled,
-                0,
-                None,
-            ));
+        } else {
+            self.all_disabled_warned.store(false, Ordering::Relaxed);
         }
 
-        // 步骤 2：物理网卡连接检查（由 local_check_enabled 控制）
-        // 逻辑：仅当明确检测到在线网卡时作为正向佐证；检测失败/超时/结果为空
-        // 一律跳过，交由后续三类探测决定状态（探测才是连通性的权威来源）
-        if cfg.local_check_enabled {
-            match tokio::time::timeout(
-                INTERFACE_CHECK_TIMEOUT,
-                self.network_detect.list_interfaces(),
-            )
-            .await
-            {
-                Ok(Ok(list)) => {
-                    debug!("网卡检测通过：发现 {} 个网卡", list.len());
-                    if list.is_empty() {
-                        // 空结果 ≠ 网络断开：非中英文系统的 ipconfig 输出解析不出
-                        // 适配器块（H6），判 Offline 会在 auth_url 可达时升级为
-                        // CaptivePortal 触发登录循环。与超时分支同语义：跳过本步骤
-                        warn!("网卡检测返回空列表（疑似输出语言不匹配），本轮跳过网卡检查");
-                    }
-                }
-                Ok(Err(e)) => {
-                    // 检测手段故障 ≠ 网络断开：与超时分支同语义，跳过并交由后续探测
-                    warn!("网卡检测失败，本轮跳过网卡检查，继续网络探测: {e}");
-                }
-                Err(_) => {
-                    // 检测手段超时 ≠ 网络断开：ipconfig 冷启动/AV 扫描拖慢会
-                    // 超出外层预算，判 Offline 会在 auth_url 可达时升级为
-                    // CaptivePortal 触发一轮完全不必要的登录。跳过本步骤，
-                    // 交由后续三类探测决定状态
-                    warn!("网卡检测超时，本轮跳过网卡检查，继续网络探测");
-                }
-            }
-        }
-
-        // 步骤 3：并发执行已启用的三类探测（不绑定出口网卡，走系统默认路由）
+        // 并发执行已启用的三类公网探测（不绑定出口网卡，走系统默认路由）
         // 客户端已按当前配置热重建（ensure_client）
         let client = self.http_client.load();
         let start = Instant::now();
@@ -351,21 +326,46 @@ impl MonitorService {
             }));
         }
 
-        let completed = join_all(tasks).await;
-        let latency = start.elapsed().as_millis() as u64;
+        let local_probe = async {
+            if purpose != CheckPurpose::ManualDiagnostic || !cfg.local_check_enabled {
+                return LocalLinkState::NotChecked;
+            }
+            match tokio::time::timeout(
+                INTERFACE_CHECK_TIMEOUT,
+                self.network_detect.list_interfaces(),
+            )
+            .await
+            {
+                Ok(Ok(list)) if list.is_empty() => {
+                    warn!("网卡诊断未发现有效物理接口；该结果不参与公网状态判定");
+                    LocalLinkState::Unavailable
+                }
+                Ok(Ok(list)) => {
+                    debug!("网卡诊断通过：发现 {} 个有效物理接口", list.len());
+                    LocalLinkState::Available
+                }
+                Ok(Err(error)) => {
+                    warn!("网卡诊断失败，不影响公网状态判定: {error}");
+                    LocalLinkState::ProbeFailed
+                }
+                Err(_) => {
+                    warn!("网卡诊断超时，不影响公网状态判定");
+                    LocalLinkState::ProbeFailed
+                }
+            }
+        };
+        let (completed, local_link) = tokio::join!(join_all(tasks), local_probe);
 
         // 收集各类结果（逐目标明细日志）
         let mut tcp_outcome = ProbeOutcome::Disabled;
         let mut http_outcome = ProbeOutcome::Disabled;
         let mut url_outcome = ProbeOutcome::Disabled;
-        let mut results: Vec<(ProbeKind, ProbeOutcome)> = Vec::new();
         for (kind, outcome, details) in completed {
             match kind {
                 ProbeKind::Tcp => tcp_outcome = outcome,
                 ProbeKind::Http => http_outcome = outcome,
                 ProbeKind::Url => url_outcome = outcome,
             }
-            results.push((kind, outcome));
             // 逐目标输出探测明细：成功仅 DEBUG（避免刷屏），失败降为 DEBUG（单目标失败是正常竞态行为）
             for d in &details {
                 if d.success {
@@ -387,91 +387,82 @@ impl MonitorService {
             }
         }
 
-        // 步骤 4：综合判定
-        let mut status = evaluate(&results);
+        let mut evidence = ProbeEvidence::new(tcp_outcome, http_outcome, url_outcome);
+        evidence.local_link = local_link;
+        let mut assessment = assess_connectivity(&evidence);
 
-        // 步骤 5：检查 auth_url 可达性。
-        //
-        // 前提是状态为 CaptivePortal 或 Offline：此时外网可能已被门户阻断，
-        // 需要确认校内认证服务器是否仍可达，据此区分「真断网」与「认证门户劫持」。
-        // 前者（auth 不可达）维持 Offline 不触发登录；后者（auth 可达）重分类为
-        // CaptivePortal，让 Engine 的自动登录分支得以触发——否则外网被阻断、
-        // 校内认证服务器可达的典型 captive portal 会被误判成 Offline，自动登录永不发生。
-        // Online 时无需检查（无意义）。
-        // 重定向模式（trigger_url 非空）跳过本步：首导航靠触发器跟随 302，auth 可能是公网触发器或为空，
-        // TCP 预检必失败会导致 Engine 因 Some(false) 跳过登录；劫持判定已由 evaluate 的 Captive 优先覆盖。
-        let mut auth_url_reachable = None;
-        if (status == NetworkStatus::CaptivePortal || status == NetworkStatus::Offline)
-            && rt.profile.trigger_url.is_empty()
-            && !rt.profile.auth_url.is_empty()
+        if purpose == CheckPurpose::AutoMonitor
+            && assessment.recovery_advice != RecoveryAdvice::NoProbeEvidence
+            && assessment.status != NetworkStatus::Online
         {
-            let reachable = self
-                .check_auth_url(&rt.profile.auth_url, cfg.auth_url_timeout)
-                .await;
-            let (derived, reach) = derive_captive_status(status, reachable);
-            if derived == NetworkStatus::CaptivePortal && status == NetworkStatus::Offline {
-                tracing::debug!(
-                    "外网探测失败但认证地址可达 ({}), 判为认证门户劫持",
-                    parse_url_host_port(&rt.profile.auth_url)
-                        .map(|(h, p)| format!("{h}:{p}"))
-                        .unwrap_or_else(|| rt.profile.auth_url.clone())
-                );
-            }
-            status = derived;
-            auth_url_reachable = reach;
+            let auth_endpoint = if !rt.profile.trigger_url.is_empty() {
+                AuthEndpointState::SkippedRedirectMode
+            } else if rt.profile.auth_url.trim().is_empty() {
+                AuthEndpointState::Missing
+            } else {
+                self.inspect_auth_endpoint(&rt.profile.auth_url, cfg.auth_url_timeout)
+                    .await
+            };
+            assessment = apply_auth_endpoint(assessment, auth_endpoint);
+        } else if purpose != CheckPurpose::AutoMonitor {
+            assessment.auth_endpoint = AuthEndpointState::NotChecked;
+            assessment.recovery_advice = RecoveryAdvice::NotEvaluated;
         }
 
-        let report = self.finalize_report(
-            status,
-            tcp_outcome,
-            http_outcome,
-            url_outcome,
-            latency,
-            auth_url_reachable,
-        );
-        // 完成日志（debug）：结构化字段承载结论与耗时；启用的探测类型已在
-        // 开始日志中列出，此处不再重复
+        let latency = start.elapsed().as_millis() as u64;
+        let report = self.finalize_report(evidence, assessment, latency);
         debug!(
-            status = ?report.status,
+            status = ?report.assessment.status,
+            confidence = ?report.assessment.confidence,
+            reason = ?report.assessment.reason,
+            recovery = ?report.assessment.recovery_advice,
+            auth_endpoint = ?report.assessment.auth_endpoint,
             latency_ms = report.latency_ms,
-            tcp = ?report.tcp_outcome,
-            http = ?report.http_outcome,
-            url = ?report.url_outcome,
-            auth_url = ?report.auth_url_reachable,
+            tcp = ?report.evidence.tcp,
+            http = ?report.evidence.http,
+            url = ?report.evidence.url,
+            local_link = ?report.evidence.local_link,
             "探测完成 #{}",
             report.check_number
         );
         Ok(report)
     }
 
-    /// 检查 auth_url 的 TCP 可达性（在 CaptivePortal 或 Offline 时调用）
+    /// 检查认证入口的 TCP 可达性，并区分配置错误与网络不可达。
     ///
     /// 必须直连（`TcpStream::connect`），禁止走系统代理/`http_client`：
     /// `auth_url` 指向校园内网认证服务器（常见 `10.x`/`172.16.x` 或校内域名的私网 IP），
     /// Captive 态下尚未获得公网访问能力，公网代理此时不可达且不会回源内网；若走代理
-    /// 则 `auth_url_reachable` 将恒为 `false` 导致 Engine 永不触发登录。外网三类探测
-    /// 已由 `build_client(disable_proxy=true → no_proxy)` 屏蔽代理，本方法将该原则
-    /// 贯彻到内网：内网更不应经过代理。
+    /// 会把认证入口误判为不可达，干扰监测层的恢复建议。外网三类探测已由
+    /// `build_client(disable_proxy=true → no_proxy)` 屏蔽代理，本方法将该原则贯彻到
+    /// 内网：内网更不应经过代理。
     ///
     /// 地址解析统一走 [`probes::parse_url_host_port`] 单点实现（G2）：
     /// 支持 IPv6 方括号与裸地址形式，返回的 host 已剥除方括号。
     #[instrument(skip(self))]
-    pub async fn check_auth_url(&self, auth_url: &str, timeout: Duration) -> bool {
+    pub async fn inspect_auth_endpoint(
+        &self,
+        auth_url: &str,
+        timeout: Duration,
+    ) -> AuthEndpointState {
         let (host, port) = match parse_url_host_port(auth_url) {
             Some(hp) => hp,
             None => {
-                // 解析失败会被上游误报为"认证地址不可达"，属配置异常，升为 warn
                 warn!("auth_url 解析失败: {auth_url}");
-                return false;
+                return AuthEndpointState::Invalid;
             }
         };
-        let result =
+        let reachable =
             match tokio::time::timeout(timeout, TcpStream::connect((host.as_str(), port))).await {
                 Ok(Ok(_)) => true,
                 Ok(Err(_)) | Err(_) => false,
             };
-        debug!("auth_url 可达性: {host}:{port} -> {result}");
-        result
+        debug!("auth_url 可达性: {host}:{port} -> {reachable}");
+        if reachable {
+            AuthEndpointState::Reachable
+        } else {
+            AuthEndpointState::Unreachable
+        }
     }
 
     /// 读取累计指标快照（G23）
@@ -495,12 +486,9 @@ impl MonitorService {
     /// 启动/恢复触发的立即检测与手动 TestNetwork 全部计入探测总数。
     fn finalize_report(
         &self,
-        status: NetworkStatus,
-        tcp_outcome: ProbeOutcome,
-        http_outcome: ProbeOutcome,
-        url_outcome: ProbeOutcome,
+        evidence: ProbeEvidence,
+        assessment: ConnectivityAssessment,
         latency_ms: u64,
-        auth_url_reachable: Option<bool>,
     ) -> ProbeReport {
         let n = self.check_count.fetch_add(1, Ordering::Relaxed) + 1;
         // 记录探测次数与平均耗时（通过 Metrics 方法而非直接操作原子字段）
@@ -508,72 +496,10 @@ impl MonitorService {
             m.record_probe(latency_ms);
         }
         ProbeReport {
-            status,
-            auth_url_reachable,
-            tcp_outcome,
-            http_outcome,
-            url_outcome,
+            evidence,
+            assessment,
             latency_ms,
             check_number: n,
         }
-    }
-}
-
-/// 派生认证门户判定：仅在可能是门户的状态（CaptivePortal / Offline）下，
-/// 依据 `auth_url` 可达性得出最终状态与可达性标记。
-///
-/// 调用方已保证 `auth_url` 非空（见 `check_once` 步骤 5 的守卫），因此本函数
-/// 不再处理空地址分支。
-///
-/// 根因修复：外网探测失败（Offline）但 `auth_url` 可达 → 实为认证门户劫持
-/// （外网被阻断、校内认证服务器仍可达），重分类为 `CaptivePortal`，否则
-/// Engine 因 Offline 永不触发自动登录。状态为 Online（或其他）时不改判、
-/// 可达性保持 `None`。
-fn derive_captive_status(
-    status: NetworkStatus,
-    auth_reachable: bool,
-) -> (NetworkStatus, Option<bool>) {
-    match status {
-        NetworkStatus::CaptivePortal => (NetworkStatus::CaptivePortal, Some(auth_reachable)),
-        NetworkStatus::Offline if auth_reachable => (NetworkStatus::CaptivePortal, Some(true)),
-        NetworkStatus::Offline => (NetworkStatus::Offline, Some(false)),
-        _ => (status, None),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn offline_but_auth_reachable_derives_captive() {
-        // 根因场景：外网探测 Fail → Offline，但校内认证地址可达 → 判为门户劫持
-        let (status, reach) = derive_captive_status(NetworkStatus::Offline, true);
-        assert_eq!(status, NetworkStatus::CaptivePortal);
-        assert_eq!(reach, Some(true));
-    }
-
-    #[test]
-    fn offline_and_auth_unreachable_stays_offline() {
-        // 真断网：auth 不可达 → 维持 Offline，且可达性标记为 false（Engine 据此不登录）
-        let (status, reach) = derive_captive_status(NetworkStatus::Offline, false);
-        assert_eq!(status, NetworkStatus::Offline);
-        assert_eq!(reach, Some(false));
-    }
-
-    #[test]
-    fn online_untouched() {
-        // Online 不检查 auth
-        let (status, reach) = derive_captive_status(NetworkStatus::Online, true);
-        assert_eq!(status, NetworkStatus::Online);
-        assert_eq!(reach, None);
-    }
-
-    #[test]
-    fn captive_keeps_status_and_marks_reachability() {
-        // CaptivePortal 维持不变，仅记录可达性
-        let (status, reach) = derive_captive_status(NetworkStatus::CaptivePortal, false);
-        assert_eq!(status, NetworkStatus::CaptivePortal);
-        assert_eq!(reach, Some(false));
     }
 }

@@ -620,7 +620,12 @@ mod tests {
             EnvironmentStatus {
                 uv_ready: false,
                 python_ready: false,
+                worker_ready: false,
+                manifest_current: false,
                 playwright_ready: false,
+                system_browser_ready: false,
+                ocr_enabled: false,
+                ocr_ready: false,
                 capability_ready: false,
                 stage: BootstrapStage::Idle,
                 progress: None,

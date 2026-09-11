@@ -671,16 +671,14 @@ const DDDDOCR_PACKAGE: &str = "ddddocr";
 
 /// 执行 `uv sync` 安装 Python 虚拟环境。
 ///
-/// 用户偏好已收敛进 `pyproject.toml` 主依赖（见 `install_ocr_dep` 的 `uv add`），
-/// 同步天然保留用户选择，无需 `--extra` 开关。
+/// 本函数只按当前 pyproject/uv.lock 对齐 venv；OCR 用户偏好由独立状态文件
+/// 保存，并在 Worker 核心同步后由 [`reconcile_ocr_preference`] 通过 add/remove 对齐。
 /// 瞬态失败（网络抖动/锁占用）自动重试：与 uv 二进制下载共用重试常量，
 /// 交互路径（设置页安装/修复）无需用户手动再点。
 pub async fn run_uv_sync(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    // 存量迁移：旧版 `ocr.enabled` 标记 → 主依赖认领（一次性，失败保留标记下次重试）
-    migrate_legacy_ocr_marker(mgr, cancel).await?;
     if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
     }
@@ -750,21 +748,37 @@ pub async fn run_uv_sync(
     Err(last_err.expect("uv sync 重试循环结束后必有最后一次错误"))
 }
 
-/// 存量迁移：旧版 `environment/ocr.enabled` 标记 → `uv add` 认领为项目主依赖。
+/// 将部署副本中的 ddddocr 声明/安装状态对齐到独立用户偏好。
 ///
-/// 旧版经 `uv sync --extra ocr` 安装 ddddocr；新版裸 `sync` 会按声明对齐环境而卸载它。
-/// 标记存在时跑一次 `uv add`（已安装即增量认领），成功后删除标记。
-async fn migrate_legacy_ocr_marker(
+/// 偏好为真时使用 `uv add`，为假时使用 `uv remove`；旧 `ocr.enabled`
+/// 只在首次读取时迁移，成功后清理。OCR 失败由上层按补充能力处理，不改变
+/// Worker 核心就绪结论。
+pub async fn reconcile_ocr_preference(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    if !mgr.ocr_marker_path().is_file() {
-        return Ok(());
+    let had_legacy_marker = mgr.ocr_marker_path().is_file();
+    let enabled = crate::environment::health::ocr_enabled(mgr)?;
+    if had_legacy_marker {
+        crate::environment::health::set_ocr_enabled(mgr, enabled).await?;
     }
-    tracing::info!("检测到旧版 OCR 启用标记，迁移为项目主依赖...");
-    run_uv_package_alter(mgr, "add", cancel).await?;
-    if let Err(e) = tokio::fs::remove_file(mgr.ocr_marker_path()).await {
-        tracing::warn!("旧版 OCR 标记清理失败（下次同步会再次认领）: {e}");
+
+    let declared = crate::environment::health::ddddocr_declared(mgr);
+    let installed = crate::environment::python::ddddocr_installed(mgr);
+    match (enabled, declared, installed) {
+        (true, false, _) => run_uv_package_alter(mgr, "add", cancel).await?,
+        (true, true, false) | (false, false, true) => run_uv_sync(mgr, cancel).await?,
+        (false, true, _) => run_uv_package_alter(mgr, "remove", cancel).await?,
+        _ => {}
+    }
+
+    verify_and_record_after_alter(mgr).await?;
+    mgr.write_status(|status| {
+        status.ocr_enabled = enabled;
+        status.ocr_ready = crate::environment::python::ddddocr_installed(mgr);
+    });
+    if had_legacy_marker {
+        crate::environment::health::clear_legacy_ocr_marker(mgr).await;
     }
     Ok(())
 }
@@ -774,6 +788,9 @@ pub async fn install_ocr_dep(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
+    // 偏好先落盘：网络失败时仍能在下次环境修复中继续完成用户意图。
+    crate::environment::health::set_ocr_enabled(mgr, true).await?;
+    mgr.write_status(|status| status.ocr_enabled = true);
     run_uv_package_alter(mgr, "add", cancel).await?;
     if !crate::environment::python::ddddocr_installed(mgr) {
         return Err(EnvironmentError::UvPackageAlterFailed {
@@ -782,12 +799,15 @@ pub async fn install_ocr_dep(
             stderr: "uv add 成功但 venv 内未探测到 ddddocr".to_string(),
         });
     }
+    verify_and_record_after_alter(mgr).await?;
+    mgr.write_status(|status| status.ocr_ready = true);
+    crate::environment::health::clear_legacy_ocr_marker(mgr).await;
     tracing::info!("OCR 可选依赖安装完成");
     Ok(())
 }
 
-/// 卸载 OCR 依赖：`uv remove --optional ocr ddddocr` 摘除 ocr extra 声明并自动重锁 + 同步；
-/// 旧版裸 add 写入主依赖的残留回退裸 remove。
+/// 卸载 OCR 依赖：`uv remove ddddocr` 摘除按需写入的主依赖并自动重锁 + 同步；
+/// 存量副本仍保留 `--optional ocr` 兼容回退。
 ///
 /// 幂等：venv 内无 ddddocr 且无旧标记时直接成功；`uv remove` 因"未声明"报错
 /// 但环境已为空时同样按成功计（旧 extra 残留态）。
@@ -795,18 +815,42 @@ pub async fn remove_ocr_dep(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
-    if !crate::environment::python::ddddocr_installed(mgr) && !mgr.ocr_marker_path().is_file() {
+    // 与安装同理先保存期望状态；若卸载受阻，下次修复会继续收敛到未启用。
+    crate::environment::health::set_ocr_enabled(mgr, false).await?;
+    mgr.write_status(|status| status.ocr_enabled = false);
+    let declared = crate::environment::health::ddddocr_declared(mgr);
+    if !crate::environment::python::ddddocr_installed(mgr) && !declared {
+        crate::environment::health::clear_legacy_ocr_marker(mgr).await;
         return Ok(());
     }
-    match run_uv_package_alter(mgr, "remove", cancel).await {
+    let result = if declared {
+        run_uv_package_alter(mgr, "remove", cancel).await
+    } else {
+        run_uv_sync(mgr, cancel).await
+    };
+    match result {
         Ok(()) => {}
         Err(e) if !crate::environment::python::ddddocr_installed(mgr) => {
             tracing::debug!("uv remove 未改变已为空的环境: {e}");
         }
         Err(e) => return Err(e),
     }
-    let _ = tokio::fs::remove_file(mgr.ocr_marker_path()).await;
+    verify_and_record_after_alter(mgr).await?;
+    mgr.write_status(|status| status.ocr_ready = false);
+    crate::environment::health::clear_legacy_ocr_marker(mgr).await;
     Ok(())
+}
+
+async fn verify_and_record_after_alter(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+    let probe = crate::environment::health::probe_worker_runtime(mgr).await;
+    if !probe.ready {
+        return Err(EnvironmentError::WorkerRuntimeInvalid {
+            reason: probe
+                .error
+                .unwrap_or_else(|| "OCR 依赖变更后 Worker import 验证失败".to_string()),
+        });
+    }
+    crate::environment::health::record_verified_runtime(mgr).await
 }
 
 /// 执行 `uv add/remove`（自动重锁 + 同步）：改写前备份 `pyproject.toml`/`uv.lock`，
@@ -831,14 +875,14 @@ async fn run_uv_package_alter(
         .await
         .map_err(EnvironmentError::UvExtractFailed)?;
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
-    // remove 的参数组：新版 pyproject 无 extra 声明，裸 remove 即可；
-    // 存量副本仍带 ocr extra 声明时首选 `--optional ocr`，失败回退裸 remove
+    // remove 的参数组：新版 pyproject 无 extra 声明，优先裸 remove；
+    // 存量副本仍带 ocr extra 声明时再回退 `--optional ocr`。
     let arg_sets: Vec<Vec<&str>> = if op == "add" {
         vec![vec![DDDDOCR_REQUIREMENT]]
     } else {
         vec![
-            vec!["--optional", "ocr", DDDDOCR_PACKAGE],
             vec![DDDDOCR_PACKAGE],
+            vec!["--optional", "ocr", DDDDOCR_PACKAGE],
         ]
     };
     let mut last_err: Option<EnvironmentError> = None;
@@ -847,12 +891,14 @@ async fn run_uv_package_alter(
             .await
             .map_err(EnvironmentError::UvExtractFailed)?;
 
-        let mut cmd = uv_command(&uv_exe);
-        cmd.args(args);
-        cmd.arg("--project")
-            .arg(&*mgr.worker_project_path().to_string_lossy());
-        cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
-            .current_dir(mgr.base_path());
+        let cmd = uv_package_alter_command(
+            &uv_exe,
+            op,
+            args,
+            mgr.worker_project_path(),
+            &venv_path,
+            mgr.base_path(),
+        );
 
         let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
             Ok(output) => output,
@@ -893,6 +939,25 @@ async fn run_uv_package_alter(
         });
     }
     Err(last_err.expect("参数组非空，循环结束后必有最后一次错误"))
+}
+
+/// 构造 `uv add/remove` 命令；子命令必须位于依赖参数之前。
+fn uv_package_alter_command(
+    uv_exe: &Path,
+    op: &'static str,
+    args: &[&str],
+    worker_project_path: &Path,
+    venv_path: &Path,
+    base_path: &Path,
+) -> tokio::process::Command {
+    let mut cmd = uv_command(uv_exe);
+    cmd.arg(op)
+        .args(args)
+        .arg("--project")
+        .arg(&*worker_project_path.to_string_lossy());
+    cmd.env("UV_PROJECT_ENVIRONMENT", venv_path)
+        .current_dir(base_path);
+    cmd
 }
 
 /// `pyproject.toml` + `uv.lock` 快照：`uv add/remove` 改写前备份，失败/取消回滚。
@@ -1430,6 +1495,48 @@ mod tests {
             std::fs::read(&pyproject).unwrap(),
             b"[project]\nname = \"x\"\n"
         );
+    }
+
+    /// OCR 依赖变更命令必须显式带 add/remove，防止把包名误当 uv 子命令。
+    #[test]
+    fn test_uv_package_alter_command_includes_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("python_worker");
+        let venv = project.join(crate::environment::VENV_DIR);
+
+        let add = uv_package_alter_command(
+            Path::new("uv"),
+            "add",
+            &[DDDDOCR_REQUIREMENT],
+            &project,
+            &venv,
+            dir.path(),
+        );
+        let add_args: Vec<_> = add
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(add_args[0], "add");
+        assert_eq!(add_args[1], DDDDOCR_REQUIREMENT);
+        assert_eq!(add_args[2], "--project");
+
+        let remove = uv_package_alter_command(
+            Path::new("uv"),
+            "remove",
+            &[DDDDOCR_PACKAGE],
+            &project,
+            &venv,
+            dir.path(),
+        );
+        let remove_args: Vec<_> = remove
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(remove_args[0], "remove");
+        assert_eq!(remove_args[1], DDDDOCR_PACKAGE);
+        assert_eq!(remove_args[2], "--project");
     }
 
     /// 5.4：uv --version 输出解析（含 Windows 可能的括号后缀）

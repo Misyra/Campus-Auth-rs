@@ -173,6 +173,12 @@ pub struct MonitorSettings {
     pub url_timeout: u32,
     /// 认证页探测超时（秒）
     pub auth_url_timeout: u32,
+    /// 登录前是否先用 TCP 直连确认认证地址可达（不可达则直接判失败，不启动浏览器）
+    ///
+    /// 仅作用于**手动登录 / 单次登录**：自动登录由监测侧的 Captive 判定驱动，不走此预检。
+    /// 默认关闭——部分校园网对裸 TCP 直连有限制，开启后一旦误判不可达会拦掉本可成功的
+    /// 登录；且手动登录失败与否浏览器都会给出明确错误，预检的止损价值有限。
+    pub check_auth_url: bool,
     /// 登录后等待 portal 生效的延迟（秒，0-60）
     pub post_login_delay: u32,
 }
@@ -225,6 +231,7 @@ impl Default for MonitorSettings {
             http_timeout: 10,
             url_timeout: 10,
             auth_url_timeout: 5,
+            check_auth_url: false,
             post_login_delay: 5,
         }
     }
@@ -493,6 +500,16 @@ pub enum StartupAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_defaults_to_http_204_only() {
+        let monitor = MonitorSettings::default();
+        assert!(!monitor.tcp_enabled, "TCP 仅作为可选补充证据");
+        assert!(monitor.http_enabled, "HTTP 204 是默认主探测");
+        assert!(!monitor.url_enabled, "URL 内容探测默认关闭");
+        assert!(!monitor.local_check_enabled, "本地链路诊断默认关闭");
+        assert!(!monitor.check_auth_url, "手动登录前认证入口预检默认关闭");
+    }
 
     #[test]
     fn test_resolved_proxy_url() {

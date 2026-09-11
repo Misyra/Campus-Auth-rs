@@ -1,6 +1,6 @@
 //! Engine 主循环：select! + 定时器驱动
 //!
-//! 网络探测不在主循环内联 await（F5）：`MonitorService::check_once` 可能耗时
+//! 网络探测不在主循环内联 await（F5）：`MonitorService::check_auto_monitor` 可能耗时
 //! 数秒到数十秒（多目标超时叠加），内联执行期间命令通道（Shutdown/Stop 等）
 //! 只能排队。探测统一移入独立 tokio 任务，结果经 mpsc channel 回传主循环
 //! 处理（模式与登录结果 `LoginResult` channel 一致），命令保持即时响应。
@@ -19,7 +19,7 @@ use crate::engine::{
     TestNetworkResult,
 };
 use crate::login::LoginResult;
-use crate::monitor::ProbeReport;
+use crate::monitor::{ConnectivityAssessment, ProbeEvidence, ProbeReport, RecoveryAdvice};
 use crate::status::Notifier;
 use crate::status::{EngineState, LoginSource, NetworkStatus, PartialSnapshot};
 
@@ -37,7 +37,7 @@ const PROBE_ONLINE_BACKOFF_BASE_SECS: u64 = 30;
 /// 只回传成功会导致标记永不复位、自动监测永久停摆。
 ///
 /// 携带探测发起时的配置版本：结果回传时版本失配说明期间发生过配置变更
-///（如切换 Profile），该结果的 `auth_url_reachable` 等派生判断基于旧配置，
+///（如切换 Profile），该结果的认证入口补充证据与恢复建议基于旧配置，
 /// 不得用于自动登录决策。
 enum ProbeMessage {
     /// 探测成功完成，携带报告与发起时的配置版本
@@ -59,8 +59,16 @@ impl ProbeMessage {
 struct EngineInner {
     /// 监测循环是否启用
     monitoring: bool,
-    /// 上次网络状态
-    last_network_status: NetworkStatus,
+    /// 最近一次连通性解释
+    last_assessment: ConnectivityAssessment,
+    /// 最近一次原始探测证据
+    last_evidence: Option<ProbeEvidence>,
+    /// 当前门户事件与配置版本是否已经执行过一次谨慎登录
+    ///
+    /// 明确门户证据存在、但认证入口 TCP 预检失败时，监测层会给出
+    /// `AttemptLoginOnce`。同一轮持续门户状态、同一配置版本仅放行一次，防止错误
+    /// 地址导致每轮探测都拉起浏览器；网络重新确认非门户或配置变化后恢复预算。
+    cautious_attempted_config_version: Option<u64>,
     /// 上次网络检测时间
     ///
     /// 仅在真实探测结果回传时更新（G3）：登录结果等非检测路径合并引擎状态时
@@ -111,7 +119,9 @@ impl EngineInner {
     ) -> Self {
         Self {
             monitoring: false,
-            last_network_status: NetworkStatus::Offline,
+            last_assessment: ConnectivityAssessment::default(),
+            last_evidence: None,
+            cautious_attempted_config_version: None,
             last_check_time: None,
             manual_paused: false,
             last_profile_check: Instant::now(),
@@ -233,7 +243,7 @@ async fn handle_command(cmd: EngineCommand, inner: &mut EngineInner, deps: &Engi
             false
         }
         EngineCommand::TestNetwork { reply } => {
-            handle_test_network(inner, deps, reply);
+            handle_test_network(deps, reply);
             false
         }
         EngineCommand::Pause => {
@@ -347,44 +357,33 @@ async fn handle_apply_profile(
 /// 手动诊断探测不参与 `probe_in_flight` 在途合并（与周期检测语义独立，
 /// 并发执行无害），也不修改引擎状态——结果仅供命令发起方消费。
 fn handle_test_network(
-    inner: &EngineInner,
     deps: &EngineDeps,
     reply: oneshot::Sender<Result<TestNetworkResult, EngineError>>,
 ) {
     tracing::info!("开始网络连通性测试");
-    // Engine 统一负责暂停检查：暂停期内直接返回 Paused，不执行探测
-    if is_any_pause_active(inner, deps) {
-        tracing::info!("网络测试跳过：检测已暂停");
-        let _ = reply.send(Ok(TestNetworkResult {
-            status: NetworkStatus::Paused,
-            details: ProbeDetails {
-                tcp: vec!["Disabled".to_string()],
-                http: vec!["Disabled".to_string()],
-                url: vec!["Disabled".to_string()],
-            },
-            duration_ms: 0,
-        }));
-        return;
-    }
     // 探测移入后台任务：check_once 可能耗时数十秒，内联 await 会阻塞
     // 命令通道（Shutdown/Stop 排队，F5）
     let monitor = deps.monitor_service.clone();
     tokio::spawn(async move {
         let start = Instant::now();
-        let result = match monitor.check_once().await {
+        let result = match monitor.diagnose_once().await {
             Ok(report) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 tracing::info!(
                     "网络测试完成: status={:?}, duration={}ms",
-                    report.status,
+                    report.assessment.status,
                     duration_ms
                 );
                 Ok(TestNetworkResult {
-                    status: report.status,
+                    status: report.assessment.status,
+                    confidence: report.assessment.confidence,
+                    reason: report.assessment.reason,
+                    local_link: report.evidence.local_link,
+                    auth_endpoint: report.assessment.auth_endpoint,
                     details: ProbeDetails {
-                        tcp: vec![format!("{:?}", report.tcp_outcome)],
-                        http: vec![format!("{:?}", report.http_outcome)],
-                        url: vec![format!("{:?}", report.url_outcome)],
+                        tcp: vec![format!("{:?}", report.evidence.tcp)],
+                        http: vec![format!("{:?}", report.evidence.http)],
+                        url: vec![format!("{:?}", report.evidence.url)],
                     },
                     duration_ms,
                 })
@@ -516,7 +515,7 @@ fn handle_network_check_with_priority(inner: &mut EngineInner, deps: &EngineDeps
     // 探测发起时的配置版本：结果回传后与当前版本比对，失配即拒绝用于登录决策
     let config_version = deps.config_service.config_version();
     tokio::spawn(async move {
-        let msg = match monitor.check_once().await {
+        let msg = match monitor.check_auto_monitor().await {
             Ok(report) => ProbeMessage::Report(report, config_version),
             Err(e) => ProbeMessage::Failed(e.to_string(), config_version),
         };
@@ -581,36 +580,53 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
     inner.last_check_time = Some(now);
     // 状态变化日志：仅在状态发生转换时记录 info，未变化保持静默（debug）。
     // 附各通道探测结论作为判定依据——排查"为什么判为离线/劫持"不必再翻 debug 日志
-    let old_status = inner.last_network_status;
-    if report.status != old_status {
+    let old_status = inner.last_assessment.status;
+    let old_advice = inner.last_assessment.recovery_advice;
+    let status = report.assessment.status;
+    if status != NetworkStatus::CaptivePortal {
+        // 离开门户态即结束本次认证事件；以后再次进入门户态可重新谨慎尝试一次。
+        inner.cautious_attempted_config_version = None;
+    }
+    if status != old_status {
         tracing::info!(
-            "网络状态变化: {:?} → {:?}（判定依据: TCP={:?}, 204门户={:?}, URL标题={:?}, 耗时{}ms）",
+            "网络状态变化: {:?} → {:?}（原因={:?}, 置信度={:?}, TCP={:?}, 204门户={:?}, URL标题={:?}, 耗时{}ms）",
             old_status,
-            report.status,
-            report.tcp_outcome,
-            report.http_outcome,
-            report.url_outcome,
+            status,
+            report.assessment.reason,
+            report.assessment.confidence,
+            report.evidence.tcp,
+            report.evidence.http,
+            report.evidence.url,
             report.latency_ms
         );
     } else {
-        tracing::debug!("网络状态未变化: {:?}", report.status);
+        tracing::debug!(
+            status = ?status,
+            reason = ?report.assessment.reason,
+            recovery = ?report.assessment.recovery_advice,
+            "网络状态未变化"
+        );
     }
-    inner.last_network_status = report.status;
+    inner.last_assessment = report.assessment.clone();
+    inner.last_evidence = Some(report.evidence.clone());
     // 自适应探测间隔（C4）：异常态（CaptivePortal/Offline）短周期加密探测，
     // 稳定在线按指数退避放大到配置的 check_interval。原地重建定时器并消费
     // 首 tick——与 reset_check_timer 同语义：刚做完一轮探测，不消费会导致
     // 立即重复探测形成风暴。探测 Failed 分支不重建（monitor 系统性故障时
     // 维持原周期，不放大故障）；暂停期无结果回传，间隔自然保持
-    if report.status == NetworkStatus::Online {
+    if status == NetworkStatus::Online {
         inner.online_streak = inner.online_streak.saturating_add(1);
     } else {
         inner.online_streak = 0;
     }
-    let next_secs = adaptive_check_interval_secs(
-        report.status,
-        inner.online_streak,
-        check_interval_duration(deps).as_secs(),
-    );
+    let configured_interval = check_interval_duration(deps).as_secs();
+    let next_secs = if report.assessment.recovery_advice == RecoveryAdvice::NoProbeEvidence {
+        // 没有任何有效探测时没有需要快速追踪的异常；沿用用户配置周期，
+        // 避免空配置退化成每 30 秒一次的无意义循环。
+        configured_interval
+    } else {
+        adaptive_check_interval_secs(status, inner.online_streak, configured_interval)
+    };
     let mut t = tokio::time::interval(Duration::from_secs(next_secs));
     t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let _ = t.tick().await;
@@ -634,7 +650,9 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
     };
     deps.status_manager.merge(PartialSnapshot::Engine {
         state,
-        network: report.status,
+        network: status,
+        assessment: report.assessment.clone(),
+        evidence: Some(report.evidence.clone()),
         last_check: now,
         pause: paused,
         cooling_down,
@@ -650,56 +668,71 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
         });
     }
 
-    // 按网络结论决策
-    match report.status {
-        NetworkStatus::CaptivePortal => {
-            // 监测已停止：探测发起后用户停止了监测，迟到结果不得触发登录。
-            // （下方「补发排队的探测」同样受此门控）
-            if !inner.monitoring {
-                tracing::debug!("检测已停止，跳过本轮自动登录（迟到探测结果）");
-                return;
-            }
-            // 暂停生效中：暂停语义覆盖在途探测的迟到结果
-            if paused {
-                tracing::debug!("检测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
-                return;
-            }
-            // 探测发起后配置已变更（如切换 Profile）：旧结果的门户判断不作数。
-            // 不 return——排队的优先级探测（切 Profile 触发的新鲜探测）仍需补发
-            if config_stale {
-                tracing::info!("探测结果基于过期配置，跳过本轮自动登录");
-            }
-            // 冷却期内跳过登录
-            else if cooling_down {
-                tracing::debug!(
-                    consecutive_failures = inner.consecutive_failures,
-                    "冷却期中，跳过本轮登录"
-                );
-                return;
-            }
-            // 上一轮 Auto 会话仍在途：跳过本轮触发。即使再提交也会被
-            // Orchestrator 去重复用同一会话，只会造成结果重复计数
-            else if inner.auto_login_in_flight {
-                tracing::debug!("自动登录会话仍在途，跳过本轮触发");
-                return;
-            }
-            // 仅在确认认证地址不可达时跳过（未知/可达都触发，避免无效等待）
-            else if report.auth_url_reachable != Some(false) {
-                tracing::info!("检测到门户劫持，触发自动登录");
-                inner.auto_login_in_flight = true;
-                let orchestrator = deps.orchestrator.clone();
-                let tx = inner.login_result_tx.clone();
-                tokio::spawn(async move {
-                    let handle = orchestrator.submit(LoginSource::Auto, None, None).await;
-                    let result = handle.await_result().await;
-                    let _ = tx.send(result).await;
-                });
+    // 监测层只给出恢复建议；是否执行由 Engine 的运行态门控统一决定。
+    let advice = report.assessment.recovery_advice;
+    if matches!(
+        advice,
+        RecoveryAdvice::AttemptLogin | RecoveryAdvice::AttemptLoginOnce
+    ) {
+        let cautious_already_attempted = advice == RecoveryAdvice::AttemptLoginOnce
+            && inner.cautious_attempted_config_version == Some(probe_config_version);
+
+        if !inner.monitoring {
+            tracing::debug!("检测已停止，跳过本轮自动登录（迟到探测结果）");
+        } else if paused {
+            tracing::debug!("检测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
+        } else if config_stale {
+            tracing::info!("探测结果基于过期配置，跳过本轮自动登录");
+        } else if cooling_down {
+            tracing::debug!(
+                consecutive_failures = inner.consecutive_failures,
+                "冷却期中，跳过本轮登录"
+            );
+        } else if inner.auto_login_in_flight {
+            tracing::debug!("自动登录会话仍在途，跳过本轮触发");
+        } else if cautious_already_attempted {
+            tracing::debug!(
+                config_version = probe_config_version,
+                "本次门户事件已执行过谨慎登录，等待网络状态或配置变化"
+            );
+        } else {
+            if advice == RecoveryAdvice::AttemptLoginOnce {
+                inner.cautious_attempted_config_version = Some(probe_config_version);
+                tracing::info!("检测到门户劫持但认证入口预检失败，谨慎尝试一次自动登录");
             } else {
-                tracing::debug!("认证地址不可达，跳过本轮自动登录（请检查认证地址或校园网连接）");
+                tracing::info!("检测结论建议恢复认证，触发自动登录");
             }
+            inner.auto_login_in_flight = true;
+            let orchestrator = deps.orchestrator.clone();
+            let tx = inner.login_result_tx.clone();
+            tokio::spawn(async move {
+                let handle = orchestrator.submit(LoginSource::Auto, None, None).await;
+                let result = handle.await_result().await;
+                let _ = tx.send(result).await;
+            });
         }
-        NetworkStatus::Online | NetworkStatus::Offline | NetworkStatus::Paused => {
-            // 无需操作
+    } else {
+        match advice {
+            RecoveryAdvice::FixConfiguration => {
+                if old_advice != RecoveryAdvice::FixConfiguration {
+                    tracing::warn!("认证配置无效，自动恢复暂停，等待用户修正 Profile");
+                } else {
+                    tracing::debug!("认证配置仍无效，继续等待用户修正 Profile");
+                }
+            }
+            RecoveryAdvice::WaitForNetwork => {
+                tracing::debug!("更像物理断网，等待网络恢复");
+            }
+            RecoveryAdvice::WaitForMoreEvidence => {
+                tracing::debug!("当前证据不足或冲突，等待下一轮探测");
+            }
+            RecoveryAdvice::NoProbeEvidence => {
+                tracing::debug!("没有启用有效公网探测，不执行自动恢复");
+            }
+            RecoveryAdvice::NoAction
+            | RecoveryAdvice::NotEvaluated
+            | RecoveryAdvice::AttemptLogin
+            | RecoveryAdvice::AttemptLoginOnce => {}
         }
     }
 
@@ -785,7 +818,9 @@ fn merge_engine_state(inner: &EngineInner, deps: &EngineDeps, state: EngineState
     };
     deps.status_manager.merge(PartialSnapshot::Engine {
         state,
-        network: inner.last_network_status,
+        network: inner.last_assessment.status,
+        assessment: inner.last_assessment.clone(),
+        evidence: inner.last_evidence.clone(),
         last_check,
         // 暂停状态并入定时暂停窗口：窗口期内引擎实际不探测，快照需如实反映，
         // 否则前端在定时暂停时段仍显示"运行中"
@@ -1077,10 +1112,9 @@ mod tests {
 
     /// 构造完整 EngineDeps 并启动 run_loop（真实服务 + 挂起检测器）
     ///
-    /// 监测配置：仅启用 TCP 探测但目标为空（通过「全部禁用」检查、不产生
-    /// 真实网络请求），物理网卡检查开启 → `check_once` 挂在
-    /// `list_interfaces` 上直至 3s 超时返回 Offline。`pause_all_day` 为 true
-    /// 时配置全天定时暂停窗口（start == end）。
+    /// 监测配置：HTTP 目标指向只接受连接但不响应的本地服务，使自动探测挂在
+    /// HTTP 超时；物理网卡检查同时开启，使手动诊断也会执行本地链路诊断。
+    /// `pause_all_day` 为 true 时配置全天定时暂停窗口（start == end）。
     #[allow(clippy::type_complexity)]
     async fn make_engine_with_hanging_probe(
         pause_all_day: bool,
@@ -1095,10 +1129,22 @@ mod tests {
         let config = ConfigService::new(tmp.path().to_path_buf(), reload_tx)
             .await
             .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stall_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _stream = stream;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
         let mut settings = config.load_settings();
-        settings.global.monitor.tcp_enabled = true;
+        settings.global.monitor.tcp_enabled = false;
         settings.global.monitor.tcp_targets = vec![];
-        settings.global.monitor.http_enabled = false;
+        settings.global.monitor.http_enabled = true;
+        settings.global.monitor.http_targets = vec![format!("http://{stall_addr}/generate_204")];
+        settings.global.monitor.http_timeout = 3;
         settings.global.monitor.url_enabled = false;
         settings.global.monitor.local_check_enabled = true;
         // 周期定时器调大：测试期间不产生周期 tick 干扰断言
@@ -1202,12 +1248,12 @@ mod tests {
         // 以当前时刻兜底填充，见 merge_engine_state 的 G3 注释）
         assert_eq!(snap().probe_total, 0, "探测在途时不应推送任何探测结果指标");
 
-        // 推进虚拟时钟越过网卡检查超时（3s），探测完成并回传主循环
+        // 推进虚拟时钟越过 HTTP 超时（3s），探测完成并回传主循环
         tokio::time::advance(Duration::from_secs(4)).await;
         wait_for(|| snap().probe_total == 1).await;
 
         let s = snap();
-        // 网卡检查超时 → Offline 报告，且产生了真实 last_check
+        // HTTP 超时 → Offline 报告，且产生了真实 last_check
         assert_eq!(s.network_status, NetworkStatus::Offline);
         assert!(s.last_check_time.is_some());
         // Stop 之后完成的探测不得把引擎状态拉回 Running
@@ -1252,20 +1298,22 @@ mod tests {
         );
     }
 
-    /// TestNetwork：暂停期直接返回 Paused；正常期探测后台执行、
-    /// 回复不阻塞命令通道
+    /// TestNetwork：暂停期仍可独立执行手动诊断；正常期探测后台执行，
+    /// 回复不阻塞命令通道。
     #[tokio::test(start_paused = true)]
     async fn test_test_network_reply_from_background() {
-        // 暂停场景：直接返回 Paused，不执行探测
+        // 暂停场景：手动诊断不受自动监测暂停影响，仍在后台执行
         let (_tmp, cmd_tx, _status, metrics) = make_engine_with_hanging_probe(true).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
             .send(EngineCommand::TestNetwork { reply: reply_tx })
             .await
             .unwrap();
-        let result = reply_rx.await.unwrap().unwrap();
-        assert_eq!(result.status, NetworkStatus::Paused);
         assert_eq!(metrics.probe_total.load(Ordering::Relaxed), 0);
+        tokio::time::advance(Duration::from_secs(4)).await;
+        let result = reply_rx.await.unwrap().unwrap();
+        assert_eq!(result.status, NetworkStatus::Offline);
+        assert_eq!(metrics.probe_total.load(Ordering::Relaxed), 1);
 
         // 正常场景：先 Start（探测 1 在途），再下发 TestNetwork（探测 2 独立执行），
         // 紧接着 Stop——Stop 在两个探测完成前即被处理（命令不被探测阻塞）

@@ -6,6 +6,8 @@
 use chrono::{DateTime, Local};
 use serde::Serialize;
 
+use crate::monitor::{ConnectivityAssessment, ProbeEvidence};
+
 /// 引擎运行状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,8 +30,8 @@ pub enum NetworkStatus {
     CaptivePortal,
     /// 物理断网或所有探测失败
     Offline,
-    /// 处于暂停时段，本轮跳过探测
-    Paused,
+    /// 未启用有效探测或当前证据不足
+    Unknown,
 }
 
 /// 登录状态
@@ -110,6 +112,10 @@ pub struct StatusSnapshot {
     pub consecutive_failures: u32,
     /// 当前网络状态
     pub network_status: NetworkStatus,
+    /// 最近一次连通性解释（置信度、原因、认证入口状态与恢复建议）
+    pub connectivity: ConnectivityAssessment,
+    /// 最近一次原始探测证据；尚未执行探测时为空
+    pub last_probe_evidence: Option<ProbeEvidence>,
     /// 上次网络检测时间
     pub last_check_time: Option<DateTime<Local>>,
     /// 当前登录状态
@@ -163,7 +169,9 @@ impl Default for StatusSnapshot {
             cooling_down: false,
             cooling_down_remaining: None,
             consecutive_failures: 0,
-            network_status: NetworkStatus::Offline,
+            network_status: NetworkStatus::Unknown,
+            connectivity: ConnectivityAssessment::default(),
+            last_probe_evidence: None,
             last_check_time: None,
             login_status: LoginStatus::Idle,
             login_source: None,
@@ -188,7 +196,7 @@ impl Default for StatusSnapshot {
     }
 }
 
-/// 部分状态更新枚举（8 变体）
+/// 部分状态更新枚举
 #[derive(Debug, Clone)]
 pub enum PartialSnapshot {
     /// 监测循环后的整体更新
@@ -197,6 +205,10 @@ pub enum PartialSnapshot {
         state: EngineState,
         /// 网络状态
         network: NetworkStatus,
+        /// 最近一次连通性解释
+        assessment: ConnectivityAssessment,
+        /// 最近一次原始探测证据
+        evidence: Option<ProbeEvidence>,
         /// 上次检测时间
         last_check: DateTime<Local>,
         /// 是否处于暂停时段
@@ -275,6 +287,8 @@ pub fn apply_partial(snapshot: &mut StatusSnapshot, partial: &PartialSnapshot) {
         PartialSnapshot::Engine {
             state,
             network,
+            assessment,
+            evidence,
             last_check,
             pause,
             cooling_down,
@@ -292,6 +306,8 @@ pub fn apply_partial(snapshot: &mut StatusSnapshot, partial: &PartialSnapshot) {
             }
             snapshot.engine_state = *state;
             snapshot.network_status = *network;
+            snapshot.connectivity = assessment.clone();
+            snapshot.last_probe_evidence = evidence.clone();
             snapshot.last_check_time = Some(*last_check);
             snapshot.pause_active = *pause;
             snapshot.cooling_down = *cooling_down;
@@ -368,6 +384,11 @@ mod tests {
             &PartialSnapshot::Engine {
                 state: EngineState::Running,
                 network: NetworkStatus::Online,
+                assessment: ConnectivityAssessment {
+                    status: NetworkStatus::Online,
+                    ..ConnectivityAssessment::default()
+                },
+                evidence: Some(ProbeEvidence::default()),
                 last_check: Local::now(),
                 pause: true,
                 cooling_down: true,
@@ -377,6 +398,8 @@ mod tests {
         );
         assert_eq!(s.engine_state, EngineState::Running);
         assert_eq!(s.network_status, NetworkStatus::Online);
+        assert_eq!(s.connectivity.status, NetworkStatus::Online);
+        assert!(s.last_probe_evidence.is_some());
         assert!(s.pause_active);
         assert!(s.cooling_down);
         assert_eq!(s.cooling_down_remaining, Some(120));
@@ -544,6 +567,12 @@ mod tests {
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["probe_total"], serde_json::json!(0));
         assert_eq!(json["login_total"], serde_json::json!(0));
+        assert_eq!(json["network_status"], serde_json::json!("unknown"));
+        assert_eq!(
+            json["connectivity"]["reason"],
+            serde_json::json!("not_checked")
+        );
+        assert!(json["last_probe_evidence"].is_null());
 
         let s = StatusSnapshot {
             probe_total: 123,

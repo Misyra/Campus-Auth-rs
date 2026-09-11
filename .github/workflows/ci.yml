@@ -237,7 +237,7 @@ jobs:
         working-directory: python_worker
         run: |
           uv sync --dev --frozen
-          uv pip install "ddddocr==1.6.1"
+          uv add "ddddocr==1.6.1"
           uv run playwright install chromium
           uv run python -c "from ocr_runtime import _get_ocr; _get_ocr(False, None)"
 

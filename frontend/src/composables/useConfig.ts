@@ -174,7 +174,7 @@ async function saveConfig(force = false): Promise<void> {
   // 但必须 toast 出来——嵌入场景下用户不看日志面板
   const hints = [...warnings];
   if (!config.credentials.auth_url && !config.credentials.trigger_url) hints.push("认证地址与触发地址均为空，自动认证将无法工作");
-  if (!config.monitor.enable_tcp_check && !config.monitor.enable_http_check && !(config.monitor.url_check_urls && config.monitor.url_check_urls.length)) {
+  if (!config.monitor.enable_tcp_check && !config.monitor.enable_http_check && !config.monitor.enable_url_check) {
     hints.push("未启用任何网络检测方式，自动认证可能无法正常工作");
   }
   if (hints.length > 0) {

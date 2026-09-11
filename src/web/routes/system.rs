@@ -113,7 +113,12 @@ pub async fn init_status(State(state): State<AppState>) -> Result<Json<Value>, A
         "environment": {
             "uv_ready": env_status.uv_ready,
             "python_ready": env_status.python_ready,
+            "worker_ready": env_status.worker_ready,
+            "manifest_current": env_status.manifest_current,
             "playwright_ready": env_status.playwright_ready,
+            "system_browser_ready": env_status.system_browser_ready,
+            "ocr_enabled": env_status.ocr_enabled,
+            "ocr_ready": env_status.ocr_ready,
             "capability_ready": env_status.capability_ready,
             "stage": format!("{:?}", env_status.stage),
             "progress": env_status.progress,
@@ -370,7 +375,12 @@ pub async fn export_logs(
         "environment": {
             "uv_ready": env_status.uv_ready,
             "python_ready": env_status.python_ready,
+            "worker_ready": env_status.worker_ready,
+            "manifest_current": env_status.manifest_current,
             "playwright_ready": env_status.playwright_ready,
+            "system_browser_ready": env_status.system_browser_ready,
+            "ocr_enabled": env_status.ocr_enabled,
+            "ocr_ready": env_status.ocr_ready,
         },
     });
 
@@ -671,14 +681,14 @@ pub async fn install_playwright(
 
 /// POST /api/environment/bootstrap — 初始化 Python 环境（uv sync + Chromium）
 ///
-/// 复用 `EnvironmentApi::ensure_capability`，经 `BootstrapGate` 保证并发幂等：
-/// 并发点击只跑一次下载/同步，其余等待者复用首个结果。同步等待完成直接返回
-/// 结果供按钮展示成功/失败，避免前端额外轮询竞态（对齐 `install_playwright` 的同步模型）。
+/// 显式按钮语义为完整重同步：即使当前状态显示就绪，也强制 uv sync 并重新
+/// 验证 Worker import、版本、依赖指纹与浏览器能力。与自动 ensure 共用门，
+/// 不会和后台首次使用并发改写同一个 venv。
 pub async fn bootstrap_environment(
     State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
 ) -> Result<Json<Value>, ApiError> {
     environment
-        .ensure_capability()
+        .retry_install()
         .await
         .map_err(|e| ApiError::Internal(format!("环境初始化失败: {e}")))?;
     let st = environment.status();
@@ -686,7 +696,12 @@ pub async fn bootstrap_environment(
         "capability_ready": st.capability_ready,
         "uv_ready": st.uv_ready,
         "python_ready": st.python_ready,
+        "worker_ready": st.worker_ready,
+        "manifest_current": st.manifest_current,
         "playwright_ready": st.playwright_ready,
+        "system_browser_ready": st.system_browser_ready,
+        "ocr_enabled": st.ocr_enabled,
+        "ocr_ready": st.ocr_ready,
         "stage": format!("{:?}", st.stage),
         "progress": st.progress,
         "last_error": st.last_error,
@@ -930,7 +945,12 @@ mod tests {
             crate::environment::EnvironmentStatus {
                 uv_ready: ready,
                 python_ready: ready,
+                worker_ready: ready,
+                manifest_current: ready,
                 playwright_ready: ready,
+                system_browser_ready: false,
+                ocr_enabled: false,
+                ocr_ready: false,
                 capability_ready: ready,
                 stage: crate::environment::BootstrapStage::Idle,
                 progress: None,

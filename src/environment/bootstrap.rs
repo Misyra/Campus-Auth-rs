@@ -83,8 +83,16 @@ pub async fn bootstrap_capability(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<(), EnvironmentError> {
+    bootstrap_capability_inner(mgr, cancel, false).await
+}
+
+async fn bootstrap_capability_inner(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+    force_worker_sync: bool,
+) -> Result<(), EnvironmentError> {
     tracing::info!("开始引导浏览器自动化能力...");
-    bootstrap_python_runtime(mgr, cancel).await?;
+    bootstrap_worker_runtime(mgr, cancel, force_worker_sync).await?;
 
     // ── 阶段 3: 安装 Playwright Chromium 浏览器 ──
     // 核心自动化能力只要求 Chromium；Firefox/WebKit 为可选浏览器，
@@ -123,13 +131,68 @@ pub async fn bootstrap_capability(
         return Err(EnvironmentError::Cancelled);
     }
 
-    mgr.write_status(|s| {
-        s.stage = BootstrapStage::Done;
-        s.capability_ready = true;
-    });
+    check_environment(mgr).await?;
+    if !mgr.read_status().capability_ready {
+        let reason = mgr
+            .read_status()
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "浏览器自动化能力最终验证未通过".to_string());
+        mark_error(mgr, &reason);
+        return Err(EnvironmentError::WorkerRuntimeInvalid { reason });
+    }
+    mgr.write_status(|s| s.stage = BootstrapStage::Done);
     mgr.report_progress("done", 100, "环境就绪");
-    mgr.fire_bootstrap_done();
     tracing::info!("浏览器自动化能力引导完成");
+    Ok(())
+}
+
+/// 引导并验证 Worker 核心运行时，不要求浏览器二进制。
+pub async fn bootstrap_worker_runtime(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+    force_sync: bool,
+) -> Result<(), EnvironmentError> {
+    bootstrap_python_runtime(mgr, cancel).await?;
+    mgr.write_status(|s| s.stage = BootstrapStage::VerifyingWorker);
+    mgr.report_progress(
+        "verifying_worker",
+        PROGRESS_VENV_SYNC.1,
+        "正在验证 Worker 核心依赖与版本...",
+    );
+    if let Err(error) =
+        crate::environment::health::ensure_worker_runtime(mgr, cancel, force_sync).await
+    {
+        let message = format!("Worker 环境修复失败: {error}");
+        mark_error(mgr, &message);
+        return Err(error);
+    }
+
+    mgr.write_status(|s| s.stage = BootstrapStage::ApplyingOcr);
+    mgr.report_progress("applying_ocr", 58, "正在对齐 OCR 可选依赖...");
+    if let Err(error) = crate::environment::uv::reconcile_ocr_preference(mgr, cancel).await {
+        // OCR 是补充能力，修复失败不应拖垮不依赖 OCR 的登录；保留偏好供下次重试。
+        tracing::warn!("OCR 可选依赖对齐失败，核心 Worker 继续可用: {error}");
+    }
+
+    check_environment(mgr).await?;
+    let status = mgr.read_status();
+    if !status.worker_ready || !status.manifest_current {
+        let reason = status
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "Worker 核心最终验证未通过".to_string());
+        drop(status);
+        mark_error(mgr, &reason);
+        return Err(EnvironmentError::WorkerRuntimeInvalid { reason });
+    }
+    drop(status);
+    mgr.report_progress(
+        "worker_ready",
+        PROGRESS_VENV_SYNC.1,
+        "Worker 核心环境已验证",
+    );
+    mgr.fire_bootstrap_done();
     Ok(())
 }
 
@@ -139,6 +202,7 @@ pub async fn bootstrap_capability(
 /// 通过 [`playwright_browser_installed`] 单独按实际缓存探测。`capability_ready`
 /// 另计系统浏览器：有 Edge/Chrome 即视为具备自动化能力，不强制下载 Chromium。
 pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), EnvironmentError> {
+    mgr.write_status(|s| s.stage = BootstrapStage::Checking);
     let env_path = mgr.env_path();
 
     let uv_exe = env_path.join(crate::environment::UV_EXE_NAME);
@@ -169,23 +233,79 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
         );
     }
 
+    let worker_probe = if python_ready {
+        crate::environment::health::probe_worker_runtime(mgr).await
+    } else {
+        crate::environment::health::WorkerRuntimeProbe {
+            ready: false,
+            version: None,
+            error: None,
+        }
+    };
+    let manifest_state = if python_ready {
+        match crate::environment::health::runtime_manifest_state(mgr) {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::debug!("依赖指纹探测失败，视为未就绪: {error}");
+                crate::environment::health::ManifestState::Stale
+            }
+        }
+    } else {
+        crate::environment::health::ManifestState::Missing
+    };
+    let manifest_current = manifest_state == crate::environment::health::ManifestState::Current;
     let playwright_ready = python_ready && playwright_browser_installed("chromium");
     let system_browser_ready = crate::browser::system_browser_available();
+    let ocr_enabled = crate::environment::health::ocr_enabled(mgr).unwrap_or_else(|error| {
+        tracing::warn!("OCR 偏好读取失败，安全回退为未启用: {error}");
+        false
+    });
+    let ocr_ready = crate::environment::python::ddddocr_installed(mgr);
 
-    let capability_ready = uv_ready && python_ready && (playwright_ready || system_browser_ready);
+    let capability_ready = derive_capability_ready(
+        uv_ready,
+        python_ready,
+        worker_probe.ready,
+        manifest_current,
+        playwright_ready,
+        system_browser_ready,
+    );
+    let diagnostic = if python_ready && !worker_probe.ready {
+        worker_probe.error.clone()
+    } else if python_ready && !manifest_current {
+        Some("Python 依赖清单尚未通过当前版本验证，将在首次使用时自动同步".to_string())
+    } else if worker_probe.ready && !(playwright_ready || system_browser_ready) {
+        Some("未检测到可用浏览器，首次使用时将自动安装 Chromium".to_string())
+    } else {
+        None
+    };
 
     mgr.write_status(|s: &mut EnvironmentStatus| {
         s.uv_ready = uv_ready;
         s.python_ready = python_ready;
+        s.worker_ready = worker_probe.ready;
+        s.manifest_current = manifest_current;
         s.playwright_ready = playwright_ready;
+        s.system_browser_ready = system_browser_ready;
+        s.ocr_enabled = ocr_enabled;
+        s.ocr_ready = ocr_ready;
         s.capability_ready = capability_ready;
+        s.last_error = diagnostic;
+        if s.stage == BootstrapStage::Checking {
+            s.stage = if capability_ready {
+                BootstrapStage::Done
+            } else {
+                BootstrapStage::Idle
+            };
+        }
     });
 
     // 首轮探测（容器启动路径）升 info，供用户从日志确认环境真实状态；
     // 后续（引导流程内的复用探测）保持 debug，避免刷屏。进程级静态标记是
     // 不改函数签名的最小区分方式——容器启动即 spawn 本函数，几乎必然是首调用方。
     let summary = format!(
-        "uv={uv_ready}, python={python_ready}, playwright={playwright_ready}, system_browser={system_browser_ready}, capability={capability_ready}"
+        "uv={uv_ready}, python={python_ready}, worker={}, manifest={manifest_current}, playwright={playwright_ready}, system_browser={system_browser_ready}, ocr={ocr_ready}/{ocr_enabled}, capability={capability_ready}",
+        worker_probe.ready
     );
     if !FIRST_CHECK_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
         tracing::info!("环境检查: {summary}");
@@ -194,6 +314,22 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
     }
 
     Ok(())
+}
+
+/// 汇总完整浏览器能力；系统浏览器只能替代浏览器下载，不能替代 Python 包。
+fn derive_capability_ready(
+    uv_ready: bool,
+    python_ready: bool,
+    worker_ready: bool,
+    manifest_current: bool,
+    managed_browser_ready: bool,
+    system_browser_ready: bool,
+) -> bool {
+    uv_ready
+        && python_ready
+        && worker_ready
+        && manifest_current
+        && (managed_browser_ready || system_browser_ready)
 }
 
 /// 是否已完成过首轮环境探测（首个调用方视为容器启动路径，探测摘要升 info）
@@ -303,7 +439,7 @@ pub async fn retry_install(mgr: &EnvironmentManager) -> Result<(), EnvironmentEr
                 s.progress = None;
                 s.last_error = None;
             });
-            bootstrap_capability(mgr, &cancel).await
+            bootstrap_capability_inner(mgr, &cancel, true).await
         })
         .await
 }
@@ -322,6 +458,17 @@ fn mark_error(mgr: &EnvironmentManager, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_browser_cannot_mask_missing_worker_package() {
+        assert!(!derive_capability_ready(
+            true, true, false, true, false, true
+        ));
+        assert!(!derive_capability_ready(
+            true, true, true, false, false, true
+        ));
+        assert!(derive_capability_ready(true, true, true, true, false, true));
+    }
 
     #[test]
     fn playwright_cache_detection_distinguishes_engines() {

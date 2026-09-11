@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::{join_all, select_ok};
 use reqwest::Client;
+use serde::Serialize;
 use tokio::net::TcpStream;
 use tracing::instrument;
 
@@ -354,7 +355,8 @@ pub enum ProbeKind {
 }
 
 /// 单类探测结果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProbeOutcome {
     /// 连通 / 204 / 内容匹配 / 收到非预期状态码（链路完整）
     Pass,
