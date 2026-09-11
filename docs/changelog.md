@@ -2,6 +2,15 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-12 文档清理与过程报告忽略）
+
+- 删除已归档的 `docs/test-coverage-2026-08-30.md` 重定向桩（内容已在 `docs/archive/test-coverage-2026-08-30.md`）
+- 删除过时过程报告：`docs/defect-recheck-2026-09-06.md`、`docs/updater-audit-2026-09-05.md`、`docs/updater-review-2026-09-09.md`、`docs/code-audit-2026-09-09.md`、`docs/monitor-flow-unify-2026-09-10.md` 及对应 proposal HTML；有效结论此前已收敛进 `docs/known-issues.md` 与 `docs/plan-next.md`
+- 完成 `docs/archive/step_screenshot_after_*.png` 的删除（此前仅工作区移除，索引仍跟踪）
+- `.gitignore` 补强过程报告规则：新增 `/docs/compose/`、`*bug-report*`、`*-bug-scan-*`、`*-coverage-*`
+- 同步更新 `docs/plan-next.md`、`docs/known-issues.md`、`docs/archive/README.md`：去掉对已删报告路径的依赖，摘要保留为权威口径
+- `AGENTS.md` 补充文档分工表与过程报告 ignore 策略（含 `git rm --cached` 处置步骤）
+
 ## 开发中（2026-09-12 账号页交互修复）
 
 - 修复账号设置与方案编辑器的自定义运营商状态：下拉选择和关键字输入改为稳定的双向映射，删除全部自定义文字后仍保持“自定义”选项与输入框，不再意外回落到“不选择”；补充组合式状态回归测试

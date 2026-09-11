@@ -84,9 +84,14 @@ frontend-legacy/
 
 # 问题报告
 issues-report.md
+/bug-report*.md
+/*bug-report*
+**/bug-report-*.md
 
 # BugReporter / 审计工具的过程报告（本地保留，不进入版本库）
+# 新报告写入 /docs/reports/；历史报告已删除，有效结论只在 known-issues / plan-next
 /docs/reports/
+/docs/compose/
 /docs/bugreporter/
 /docs/bugreporter-*
 /docs/*-audit-*.md
@@ -95,6 +100,8 @@ issues-report.md
 /docs/*-report-*.md
 /docs/*-proposal*.md
 /docs/*-proposal*.html
+/docs/*-bug-scan-*.md
+/docs/*-coverage-*.md
 /docs/monitor-flow-unify-*.md
 /docs/**/*-audit-*.md
 /docs/**/*-review-*.md
@@ -102,6 +109,8 @@ issues-report.md
 /docs/**/*-report-*.md
 /docs/**/*-proposal*.md
 /docs/**/*-proposal*.html
+/docs/**/*-bug-scan-*.md
+/docs/**/*-coverage-*.md
 
 # Mimosa 扫描产物（本地审计缓存，不提交）
 .mimosa/

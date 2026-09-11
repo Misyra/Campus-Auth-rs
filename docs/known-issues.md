@@ -3,7 +3,7 @@
 > 本文档沉淀**仍然有效**的未修复项（已逐项对照当前代码核实，2026-09-06）。
 > 原审查报告（`docs/*review-*.md`、`doc/*.md`）已删除，有效结论迁移至此；历史详见 `docs/archive/`。
 > 条目的修复记录归档于 `docs/changelog.md`（按版本归档，不在本文档保留已修复节）。
-> 另有两份审计复核报告独立留存：`docs/defect-recheck-2026-09-06.md`（76 条清单 v2 对质版）与 `docs/updater-audit-2026-09-05.md`（更新子系统 v2），判定口径与本文档互补。
+> 原 defect-recheck（76 条 v2）与 updater-audit（更新子系统 v2）过程报告已于 2026-09-12 删除；P0/P1 与更新子系统待办摘要见 `docs/plan-next.md`，与本文档互补。
 
 ---
 
@@ -18,7 +18,7 @@
 | 15 | 🟢 低 | Profile 匹配无用户可配置 `priority` 字段（已按约束数降序确定性排序，抖动已修） | `src/config/profiles.rs:138-157` |
 | 19 | 🟡 低中 | `repo.rs` IP 字面量校验**不完整**（IPv6 链路本地已修，见已修复记录；建议复核是否需补 `is_documentation` 等保留段） | `src/web/routes/repo.rs:108-125` |
 
-> 76 条清单的 P0/P1 已由 `docs/defect-recheck-2026-09-06.md` v2 对质收敛（9 条 P0/P1 全部属实，待排期），本文档不再重复展开；更新子系统 10 项见 `docs/updater-audit-2026-09-05.md` v2（含 `Stable/Prerelease/All` 通道与 `update/last_check.json` 相关项）。
+> 76 条清单的 P0/P1 已对质收敛（9 条 P0/P1 全部属实，待排期；摘要见 `docs/plan-next.md`），本文档不再重复展开；更新子系统 10 项摘要同见 `docs/plan-next.md`（含 `Stable/Prerelease/All` 通道与 `update/last_check.json` 相关项）。
 
 ---
 
@@ -34,7 +34,6 @@
 
 - 前端构建警告：`useTasks` ↔ `useScripts` 循环动态导入，无法拆 chunk
 - 本地遗留目录可清理：`python_worker/.venv`（Worker 本地虚拟环境，约 100MB+，运行时按需重建）
-- 文档：`docs/test-coverage-2026-08-30.md` 为历史重定向（已搬迁至 `docs/archive/test-coverage-2026-08-30.md`），下版本可删
 
 ---
 
@@ -56,6 +55,6 @@
 
 - 通道枚举：`src/config/schema.rs::UpdateChannel::{Stable,Prerelease,All}`；`Stable` 单包（`releases/latest`）、`Prerelease` 仅预发布、`All` 取最高，`All` 枚举为空时回退单包口径（有意降级，避免“切通道后无候选”回归）。
 - 状态落盘：`update/last_check.json`（UTC、best-effort），`GET /api/update-state` 回放，前端“上次检查”数据源；`auto_check_enabled==false` 时仅手动检查可刷新。
-- 审计项见 `docs/updater-audit-2026-09-05.md`（含下载代理收敛 `resolved_proxy_url`、单包 `.sha256` 伴随文件依赖等），此处不重复展开。
+- 审计项摘要见 `docs/plan-next.md` 更新子系统分批建议（含下载代理收敛 `resolved_proxy_url`、单包 `.sha256` 伴随文件依赖等），此处不重复展开。
 
 > 历史已修复条目已归档至 `docs/changelog.md`（2026-08 全量，含第十一~十六轮）；过时规划见 `docs/archive/` 与 `docs/plan-next.md`。

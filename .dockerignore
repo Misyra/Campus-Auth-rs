@@ -17,8 +17,15 @@ __pycache__
 .idea
 *.log
 docs/reports
+docs/compose
 docs/**/*bugreport*
 docs/**/*BugReporter*
+docs/**/*bug-scan*
+docs/**/*bug-report*
+docs/**/*-audit-*.md
+docs/**/*-review-*.md
+docs/**/*-recheck-*.md
+docs/**/*-proposal*
 logs
 config
 tasks/active.txt

@@ -122,7 +122,7 @@ campus-auth/
 ├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略），与 resources/ 职责分离
 ├── python_worker/            # Python Worker 子进程（Playwright + OCR）— 执行侧，对应 Rust 侧 src/bridge/，IPC 契约见 python_worker/README.md
 ├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；mock_portal/ 已搬迁至 tests/mock-servers/full-portal/（根保留 README 重定向）
-├── docs/                     # 文档（updatelog 用户更新 / changelog 逐项更改 / 已知问题 / plan-next / archive）
+├── docs/                     # 文档：updatelog（用户）/ changelog（开发）/ known-issues / plan-next / guides / archive；reports/ 与 compose/ 为过程产物（.gitignore 忽略）
 ├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入，区别于 frontend/public 与 frontend/dist）
 └── .github/workflows/        # CI（fmt + clippy + test（含 e2e-login-chain + rust-tests-unix）+ 前端构建 + vitest + pytest）
 ```
@@ -209,7 +209,24 @@ cargo test -- --nocapture
 
 - 每次代码、配置、接口或文档更改都必须在 `docs/changelog.md` 记录；该文件是面向开发和追溯的“更改日志”
 - `docs/updatelog.md` 是面向用户的“更新日志”，只在形成可发布版本时从 changelog 汇总用户可感知的变化，不堆叠开发过程细节
-- BugReporter、代码审计、缺陷复核和方案预览等过程报告仅在本地使用，不得提交；新报告优先放在已忽略的 `docs/reports/` 中
+- BugReporter、代码审计、缺陷复核、方案预览、Bug 扫描等过程报告仅在本地使用，不得提交
+- 新报告优先写入已忽略的 `docs/reports/`；compose-next 会话产物写 `docs/compose/`（同样已忽略）
+- `.gitignore` 已覆盖 `/docs/reports/`、`/docs/compose/`、`*-audit-*` / `*-review-*` / `*-recheck-*` / `*-report-*` / `*-bug-scan-*` / `*-coverage-*` / `*-proposal*` 等模式
+- 历史过程报告（defect-recheck / updater-audit / updater-review / code-audit / monitor-flow-unify 等）已于 2026-09-12 删除；有效结论只保留在 `docs/known-issues.md` 与 `docs/plan-next.md`
+- 若发现某报告仍被 `git ls-files` 命中：`git rm --cached <path>`，并确认对应 ignore 规则存在
+
+### 文档分工
+
+| 文档 | 职责 | 是否提交 |
+|------|------|----------|
+| `docs/changelog.md` | 开发/追溯用逐项更改日志 | 是 |
+| `docs/updatelog.md` | 面向用户的版本摘要（发布时从 changelog 汇总） | 是 |
+| `docs/known-issues.md` | 仍有效的未修复项 | 是 |
+| `docs/plan-next.md` | 唯一活跃计划入口 | 是 |
+| `docs/guides/` | 用户操作指南 | 是 |
+| `docs/archive/` | 不再活跃但需追溯的材料 | 是（仅确需追溯的） |
+| `docs/reports/` | Bug 扫描 / 审计等过程报告 | 否（ignore） |
+| `docs/compose/` | compose-next 会话规格与交付记录 | 否（ignore） |
 
 ### 分支策略
 
