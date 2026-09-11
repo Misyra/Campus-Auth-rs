@@ -32,10 +32,40 @@ pub struct WorkerRuntimeProbe {
 pub enum ManifestState {
     /// 上次成功验证的依赖指纹与当前一致。
     Current,
-    /// 尚无验证记录，可在 import 探针通过后直接认领。
+    /// 尚无验证记录；仅当本轮已经按当前清单完成 sync 时才可直接认领。
     Missing,
     /// 清单已变化或状态文件损坏，必须重新同步并验证。
     Stale,
+}
+
+/// Worker 运行时收敛计划。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerRuntimePlan {
+    /// 清单可信，先探针；失败时允许执行一次 sync 自愈。
+    VerifyThenRepair,
+    /// 已有“本轮刚同步”的证据，只需探针并记录指纹。
+    VerifyFreshSync,
+    /// 清单变化、标记存在、状态缺失或显式修复，先同步再探针。
+    SyncThenVerify,
+}
+
+/// 仅根据持久状态与本轮动作证据制定计划，避免先启动昂贵 import 探针再发现必需 sync。
+fn plan_worker_runtime(
+    force_sync: bool,
+    resync_pending: bool,
+    manifest_state: ManifestState,
+    venv_synchronized: bool,
+) -> WorkerRuntimePlan {
+    if force_sync || resync_pending || manifest_state == ManifestState::Stale {
+        WorkerRuntimePlan::SyncThenVerify
+    } else {
+        match manifest_state {
+            ManifestState::Current => WorkerRuntimePlan::VerifyThenRepair,
+            ManifestState::Missing if venv_synchronized => WorkerRuntimePlan::VerifyFreshSync,
+            ManifestState::Missing => WorkerRuntimePlan::SyncThenVerify,
+            ManifestState::Stale => unreachable!("Stale 已在前置分支处理"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -182,6 +212,7 @@ pub async fn ensure_worker_runtime(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
     force_sync: bool,
+    venv_synchronized: bool,
 ) -> Result<(), EnvironmentError> {
     if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
@@ -192,29 +223,36 @@ pub async fn ensure_worker_runtime(
         tracing::info!("依赖指纹暂不可计算，将通过 uv sync 重建: {error}");
         ManifestState::Stale
     });
-    let initial_probe = probe_worker_runtime(mgr).await;
-
-    let can_adopt = !force_sync
-        && !resync_pending
-        && initial_probe.ready
-        && manifest_state != ManifestState::Stale;
-    if can_adopt {
-        if manifest_state == ManifestState::Missing {
-            record_verified_runtime(mgr).await?;
+    let plan = plan_worker_runtime(
+        force_sync,
+        resync_pending,
+        manifest_state,
+        venv_synchronized,
+    );
+    let synchronized_before_probe = match plan {
+        WorkerRuntimePlan::SyncThenVerify => {
+            if force_sync {
+                tracing::info!("按用户请求强制重新同步 Python Worker 依赖");
+            } else if resync_pending || manifest_state == ManifestState::Stale {
+                tracing::info!("Python Worker 依赖清单已变化，执行 uv sync 对齐");
+            } else {
+                tracing::info!("既有虚拟环境缺少验证状态，执行 uv sync 后再认领");
+            }
+            crate::environment::uv::run_uv_sync(mgr, cancel).await?;
+            true
         }
-        return Ok(());
-    }
+        WorkerRuntimePlan::VerifyThenRepair | WorkerRuntimePlan::VerifyFreshSync => false,
+    };
 
-    if force_sync {
-        tracing::info!("按用户请求强制重新同步 Python Worker 依赖");
-    } else if resync_pending || manifest_state == ManifestState::Stale {
-        tracing::info!("Python Worker 依赖清单已变化，执行 uv sync 对齐");
-    } else if let Some(reason) = &initial_probe.error {
-        tracing::warn!(reason = %reason, "Python 解释器可用，但 Worker 依赖不完整，执行 uv sync 自愈");
+    let mut verified = probe_worker_runtime(mgr).await;
+    if !verified.ready && !synchronized_before_probe && plan == WorkerRuntimePlan::VerifyThenRepair
+    {
+        if let Some(reason) = &verified.error {
+            tracing::warn!(reason = %reason, "已验证清单的 Worker 探针失败，执行一次 uv sync 自愈");
+        }
+        crate::environment::uv::run_uv_sync(mgr, cancel).await?;
+        verified = probe_worker_runtime(mgr).await;
     }
-
-    crate::environment::uv::run_uv_sync(mgr, cancel).await?;
-    let verified = probe_worker_runtime(mgr).await;
     if !verified.ready {
         return Err(EnvironmentError::WorkerRuntimeInvalid {
             reason: verified
@@ -338,6 +376,42 @@ mod tests {
         std::fs::write(project.join("uv.lock"), "version = 1\n").unwrap();
         let mgr = EnvironmentManager::new(dir.path().to_path_buf(), Arc::new(StatusManager::new()));
         (dir, mgr)
+    }
+
+    #[test]
+    fn worker_runtime_plan_requires_sync_for_untracked_existing_venv() {
+        assert_eq!(
+            plan_worker_runtime(false, false, ManifestState::Missing, false),
+            WorkerRuntimePlan::SyncThenVerify
+        );
+        assert_eq!(
+            plan_worker_runtime(false, false, ManifestState::Missing, true),
+            WorkerRuntimePlan::VerifyFreshSync
+        );
+    }
+
+    #[test]
+    fn worker_runtime_plan_honours_force_marker_and_stale_state() {
+        assert_eq!(
+            plan_worker_runtime(true, false, ManifestState::Current, false),
+            WorkerRuntimePlan::SyncThenVerify
+        );
+        assert_eq!(
+            plan_worker_runtime(false, true, ManifestState::Current, false),
+            WorkerRuntimePlan::SyncThenVerify
+        );
+        assert_eq!(
+            plan_worker_runtime(false, false, ManifestState::Stale, false),
+            WorkerRuntimePlan::SyncThenVerify
+        );
+    }
+
+    #[test]
+    fn worker_runtime_plan_current_manifest_verifies_before_repair() {
+        assert_eq!(
+            plan_worker_runtime(false, false, ManifestState::Current, false),
+            WorkerRuntimePlan::VerifyThenRepair
+        );
     }
 
     #[tokio::test]

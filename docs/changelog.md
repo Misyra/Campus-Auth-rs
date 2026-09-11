@@ -5,6 +5,15 @@
 ## 开发中（2026-09-11 发布流水线后续修复）
 
 - Release 创建时根据 tag 是否包含预发布后缀自动传入 `--prerelease`，避免后续 alpha/beta/rc 版本被 GitHub 错标为正式版；已发布的 `v5.0.0-alpha.10` 同步修正为预发布
+- 修复 Windows WinNAT / Hyper-V 保留端口导致 Web 控制台以 10013 启动失败：本地回环首选端口真实绑定失败且属于占用/保留时，不再扫描相邻端口，而由内核原子分配可用端口；Docker/LAN 非回环监听保持固定端口失败语义；完整模式提前持有监听器再初始化后台服务，实际端口继续同步到 `.runtime_port`、`.instance` 与浏览器地址；启动失败日志改在文件日志 guard 释放前写入并 flush
+- 修复调试页导出问题报告遗失 HTML、MHTML、截图与 CSS/JS 资源：Worker 落盘目录从与 Rust 安全守卫不一致的 `<base>/logs/feedback-*` 统一到 `<base>/python_worker/debug/feedback-*`，并新增路径契约回归测试
+- 重构登录终态语义：`LoginResult` 以 `LoginTerminal::{Success,Failed,Cancelled}` 作为唯一权威，状态、历史、指标与浏览器保活均由终态派生；登录后网络验证改为 Online/可重试失败/取消三态，用户取消、抢占与应用关闭不再被误报为“重试耗尽”，Engine 也只将 Auto 的真实失败计入连续失败冷却
+- 重构 Python 环境就绪管道：虚拟环境层显式返回“本轮已完成 uv sync”证据，Worker 层按 Current/Missing/Stale、重同步标记与 force 生成动作计划；状态缺失的既有 venv 强制同步，刚同步的新 venv 可安全认领，已知需同步时跳过无效的前置 import 探针，OCR 无变更与引导完成路径不再重复加载 Worker
+- 修复更新 helper 在 overlay 后比较依赖清单导致重同步标记正常路径永不写入：改为覆盖前比较并预写 `.venv-resync`，仅在主程序完成 sync、Worker 探针与指纹记录后清除，覆盖 helper 中途退出恢复场景；补齐登录取消、冷却预算、环境动作矩阵和 helper 标记顺序回归测试
+- 收敛 Web 长操作生命周期：AI 生成与 OCR 识别改用 RAII 操作登记器，任务正常结束、取消、panic 或 abort 都会释放占用并传播取消；OCR 支持追踪并取消全部并发请求，卸载依赖期间暂停新请求、回收 Worker，并为单次识别增加 120 秒总超时
+- 统一 Python Worker 调试会话清理：停止、关闭浏览器、会话退出和强制中断共用幂等 teardown，完整注销取消 ID、关闭页面并删除截图；启动清理同时覆盖 `.png`、`.jpg`、`.jpeg` 过期截图
+- 修复前端更新应用成功后错误调用关机接口：改为请求重启；仪表盘登录结果图标改为互斥渲染，避免失败时成功与失败图标同时出现，并补齐重启 API 单测
+- 将 monitor 配置 PATCH 改为 `Option<T>` 类型化局部 DTO：仅映射显式提交字段，未知字段与类型错误返回 400，省略字段不再被旧硬编码默认值覆盖；补齐转换与 handler 回归测试
 
 ## v5.0.0-alpha.10（2026-09-11 发布与运行环境修复）
 

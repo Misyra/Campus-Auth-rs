@@ -600,7 +600,7 @@ async fn handle_action(
                 {
                     Ok(h) => {
                         // 同步实际端口到 `.instance`（PID + PORT），使 --status / --stop
-                        // 读到真实端口：初始 record_port 只记录配置端口，+1 重试后会失配（历史遗留 M5）
+                        // 读到真实端口：初始 record_port 只记录配置端口，自动回退后会失配（历史遗留 M5）
                         write_instance_port(&deps.config.base_path(), h.port);
                         let mut g = axum_handle.lock().unwrap_or_else(|e| e.into_inner());
                         if g.is_none() {

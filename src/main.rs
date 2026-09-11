@@ -79,19 +79,16 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     if let Err(e) = runtime.block_on(campus_auth::launcher::run(cli, base_path)) {
-        // 双写系有意：subscriber 初始化失败（或尚未注册）时 error! 无处输出，
-        // eprintln 是此时唯一可见通道
-        tracing::error!("启动失败: {e}");
-        // 实例锁等早期错误发生在日志系统初始化之前（tracing 无 subscriber，
-        // error! 会丢失），必须同步落 stderr 才能让用户看见失败原因
+        // launcher 在日志 guard 存活期间已记录并 flush 最终错误；此处只保留
+        // 同步 stderr 兜底，覆盖日志系统尚未初始化或注册失败的极早期错误。
         eprintln!("启动失败: {e:#}");
         std::process::exit(1);
     }
     // 显式有界关闭，替代 Runtime 的隐式 drop：drop 会无限期等待在途
     // spawn_blocking 任务完成——启动期后台任务（如环境检查的子进程探测）
     // 若因外部原因挂起，进程会"已关闭但迟迟不退出"，只能等 30s 退出
-    // watchdog 强杀。优雅关闭已完成、日志已 flush（WorkerGuard 在
-    // graceful_shutdown 最后一步释放），此处仅需给在途阻塞任务一个有限
+    // watchdog 强杀。优雅关闭已完成、日志已 flush（WorkerGuard 由 launcher::run
+    // 在最终成功/失败日志之后释放），此处仅需给在途阻塞任务一个有限
     // 的收尾窗口（对齐全项目 stop_with_timeout 的有界关闭哲学）。
     runtime.shutdown_timeout(std::time::Duration::from_secs(5));
     Ok(())

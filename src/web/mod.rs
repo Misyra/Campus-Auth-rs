@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod error;
+mod operations;
 mod routes;
 mod ssrf;
 pub mod state;

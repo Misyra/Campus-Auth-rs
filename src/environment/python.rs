@@ -10,6 +10,15 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
+/// 虚拟环境确保结果，供上层区分“复用既有环境”与“本轮已按当前清单同步”。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VenvEnsureResult {
+    /// Python 解释器路径。
+    pub python_exe: std::path::PathBuf,
+    /// 本轮是否成功执行过 `uv sync`。
+    pub synchronized: bool,
+}
+
 /// 取字符串末尾至多 `max_chars` 个字符；超出时按字符边界截断并注明省略长度
 ///（Playwright 安装输出可达数 MB，全量进错误消息会撑爆日志与状态快照）
 pub(crate) fn tail_chars(s: &str, max_chars: usize) -> String {
@@ -58,6 +67,17 @@ pub async fn ensure_venv(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<std::path::PathBuf, EnvironmentError> {
+    Ok(ensure_venv_with_state(mgr, cancel).await?.python_exe)
+}
+
+/// 确保 Python 虚拟环境就绪，并返回本轮是否已按当前清单同步。
+///
+/// `ManifestState::Missing` 是否可以安全认领依赖指纹，取决于这个同步证据；
+/// 因此该信息必须由真正执行 `uv sync` 的层向上返回，不能用文件时间猜测。
+pub(crate) async fn ensure_venv_with_state(
+    mgr: &EnvironmentManager,
+    cancel: &CancellationToken,
+) -> Result<VenvEnsureResult, EnvironmentError> {
     let python_exe = mgr
         .worker_project_path()
         .join(crate::environment::PYTHON_EXE_RELATIVE);
@@ -68,7 +88,10 @@ pub async fn ensure_venv(
         tracing::debug!(reason = %reason, "Python 解释器探测未通过，虚拟环境需要修复");
         reason
     } else {
-        return Ok(python_exe);
+        return Ok(VenvEnsureResult {
+            python_exe,
+            synchronized: false,
+        });
     };
 
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
@@ -99,7 +122,10 @@ pub async fn ensure_venv(
         tracing::warn!(path = %backup.display(), "新虚拟环境已验证，但旧环境备份清理失败: {error}");
     }
 
-    Ok(python_exe)
+    Ok(VenvEnsureResult {
+        python_exe,
+        synchronized: true,
+    })
 }
 
 /// 将损坏 venv 原地改名，保证重建失败时仍可回滚，且 rename 不跨文件系统。

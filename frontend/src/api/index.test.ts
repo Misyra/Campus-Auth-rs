@@ -12,7 +12,7 @@ vi.mock("./client", () => ({
   extractApiError: vi.fn(),
 }));
 
-const { browsersApi } = await import("./index");
+const { browsersApi, systemApi } = await import("./index");
 const { http } = await import("./client");
 
 const post = vi.mocked(http.post);
@@ -40,5 +40,12 @@ describe("browsersApi.installPlaywright", () => {
       null,
       opts,
     );
+  });
+});
+
+describe("systemApi.restart", () => {
+  it("调用专用重启端点而不是 shutdown", async () => {
+    await systemApi.restart();
+    expect(post).toHaveBeenCalledWith("/api/system/restart");
   });
 });

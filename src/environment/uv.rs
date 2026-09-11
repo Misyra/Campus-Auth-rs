@@ -765,14 +765,27 @@ pub async fn reconcile_ocr_preference(
 
     let declared = crate::environment::health::ddddocr_declared(mgr);
     let installed = crate::environment::python::ddddocr_installed(mgr);
-    match (enabled, declared, installed) {
-        (true, false, _) => run_uv_package_alter(mgr, "add", cancel).await?,
-        (true, true, false) | (false, false, true) => run_uv_sync(mgr, cancel).await?,
-        (false, true, _) => run_uv_package_alter(mgr, "remove", cancel).await?,
-        _ => {}
-    }
+    let changed = match (enabled, declared, installed) {
+        (true, false, _) => {
+            run_uv_package_alter(mgr, "add", cancel).await?;
+            true
+        }
+        (true, true, false) | (false, false, true) => {
+            run_uv_sync(mgr, cancel).await?;
+            true
+        }
+        (false, true, _) => {
+            run_uv_package_alter(mgr, "remove", cancel).await?;
+            true
+        }
+        _ => false,
+    };
 
-    verify_and_record_after_alter(mgr).await?;
+    // 无动作时沿用 ensure_worker_runtime 刚完成的验证结论，避免冷启动重复
+    // import 整个 Worker；发生依赖变更时才重新探针并记录新指纹。
+    if changed {
+        verify_and_record_after_alter(mgr).await?;
+    }
     mgr.write_status(|status| {
         status.ocr_enabled = enabled;
         status.ocr_ready = crate::environment::python::ddddocr_installed(mgr);

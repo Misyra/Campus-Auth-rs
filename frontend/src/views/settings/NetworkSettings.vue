@@ -91,7 +91,7 @@ async function applyUpdate() {
     });
     if (ok) {
       try {
-        await systemApi.shutdown();
+        await systemApi.restart();
       } catch {
         if (updateInfo.value) updateInfo.value.message = "更新已就绪，但自动重启失败，请手动重启应用";
       }

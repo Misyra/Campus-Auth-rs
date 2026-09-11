@@ -77,10 +77,9 @@ pub const PYTHON_VERSION_CONSTRAINT: &str = ">=3.12,<3.13";
 pub const UV_SYNC_TIMEOUT: Duration = Duration::from_secs(600);
 /// 更新后 Python 依赖重同步标记文件名（python_worker/.venv-resync）
 ///
-/// 应用内更新 overlay 覆盖 pyproject.toml / uv.lock 后，解释器完好时
-/// `ensure_venv` 快速路径会跳过 uv sync，新增依赖要到 import 失败才暴露。
-/// helper 在依赖清单内容实际变化时写入本标记；`ensure_venv` 检测到即
-/// 强制执行一次 uv sync 并删除标记。
+/// helper 在 overlay 前发现 pyproject.toml / uv.lock 变化时预写本标记；
+/// Worker 运行时规划器检测到后强制执行一次 uv sync，并仅在 import 探针与
+/// 依赖指纹记录均成功后删除，覆盖更新中途异常退出的恢复场景。
 pub const RESYNC_MARKER: &str = ".venv-resync";
 /// playwright install 浏览器超时
 pub const PLAYWRIGHT_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);

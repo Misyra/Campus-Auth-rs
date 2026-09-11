@@ -1012,4 +1012,31 @@ mod tests {
         assert!(meta.contains("\"has_password\":true") || meta.contains("\"has_password\": true"));
         assert!(!meta.contains("s3cr3t-pw"), "密码明文不得进包: {meta}");
     }
+
+    /// 问题报告落盘路径与 Worker 统一在 `<base>/python_worker/debug`。
+    #[test]
+    fn feedback_path_guard_matches_worker_debug_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let debug_dir = tmp.path().join("python_worker").join("debug");
+        let feedback_dir = debug_dir.join("feedback-123");
+        std::fs::create_dir_all(feedback_dir.join("resources")).unwrap();
+        std::fs::write(feedback_dir.join("page.html"), "<html></html>").unwrap();
+
+        let guard = super::PathGuard::new(tmp.path());
+        assert!(
+            guard.allows(feedback_dir.join("page.html").to_str().unwrap()),
+            "Worker 的页面快照应位于 Rust 允许的调试目录内"
+        );
+        assert!(
+            guard.allows(feedback_dir.join("resources").to_str().unwrap()),
+            "Worker 的资源目录应位于 Rust 允许的调试目录内"
+        );
+
+        let old_dir = tmp.path().join("logs").join("feedback-123");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        assert!(
+            !guard.allows(old_dir.to_str().unwrap()),
+            "旧 logs 目录不应绕过调试目录安全边界"
+        );
+    }
 }

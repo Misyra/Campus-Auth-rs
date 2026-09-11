@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::logging::{LogEntry, WorkerGuard, init_logging, log_broadcast_tx};
+use crate::logging::{LogEntry, init_logging, log_broadcast_tx};
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::task::JoinHandle;
@@ -131,14 +131,14 @@ pub(crate) struct LauncherState {
     instance_lock: Option<InstanceLock>,
     container: Option<Arc<ServiceContainer>>,
     startup_handles: Option<StartupHandles>,
+    /// 完整模式在服务初始化前预绑定的监听器；启动 Axum 时消费。
+    prepared_axum: Option<app::PreparedAxumListener>,
     axum_handle: Option<AxumServeHandle>,
     tray_manager: Option<Arc<TrayManager>>,
     /// 托盘泵任务句柄（spawn 后填充，优雅关闭时 stop）
     tray_handle: Option<crate::tray::ServiceHandle>,
     shutdown_token: CancellationToken,
     log_tx: tokio::sync::broadcast::Sender<LogEntry>,
-    /// 日志文件非阻塞写入的 WorkerGuard，优雅关闭时 drop 以 flush 剩余日志
-    _log_guard: Option<WorkerGuard>,
 }
 
 // ============================================================
@@ -184,6 +184,26 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         app_config.log_file_enabled,
     );
 
+    // WorkerGuard 由最外层持有到启动流程（含失败日志）结束。此前它被放进
+    // LauncherState，graceful_shutdown 会先释放 guard，main 随后打印的最终
+    // “启动失败”只能出现在控制台，文件日志可能缺失最关键的一行。
+    let result = run_after_logging(cli, app_config, log_tx).await;
+    if let Err(error) = &result {
+        error!(error = %format!("{error:#}"), "启动失败");
+    }
+    drop(log_guard);
+    result
+}
+
+/// 日志初始化后的启动主流程
+///
+/// 由 [`run`] 在日志 guard 存活期间调用，任何早期错误返回后都会先记录、flush，
+/// 再交由 `main` 向 stderr 展示。
+async fn run_after_logging(
+    cli: CliArgs,
+    app_config: AppConfig,
+    log_tx: tokio::sync::broadcast::Sender<LogEntry>,
+) -> Result<()> {
     // 3. 目录权限检查
     check_directory_permissions(&app_config.base_path)?;
 
@@ -205,8 +225,8 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
                     if info.running && info.port > 0 && app_config.auto_open_browser {
                         let url = format!("http://127.0.0.1:{}", info.port);
                         if open::that(&url).is_ok() {
-                            // 控制台层写 stderr（终端启动可见）；本路径提前返回，
-                            // log_guard 就地 drop 以 flush 该条日志后退出
+                            // 控制台层写 stderr（终端启动可见）；本路径提前返回后，
+                            // run 外层统一 drop log_guard 并 flush 该条日志
                             info!(
                                 pid = info.pid,
                                 url = %url,
@@ -240,6 +260,19 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         );
     }
 
+    // 完整模式先真实占住监听端口，再初始化服务容器。这样端口权限等不可恢复
+    // 错误不会启动 Engine / Scheduler / Bridge 后立刻整套关闭；可恢复的占用或
+    // Windows 10013 已在 prepare_axum_listener 内切换到内核分配端口。
+    let prepared_axum = if matches!(app_config.runtime_mode, RuntimeMode::Full) {
+        Some(
+            app::prepare_axum_listener(app_config.port, app_config.host.as_deref())
+                .await
+                .context("Web 控制台端口准备失败")?,
+        )
+    } else {
+        None
+    };
+
     // 6. 引导服务容器
     // 应用级关闭令牌在此创建：传入容器派生 uptime/登录 shutdown 的 child，
     // 并作为 LauncherState 的 shutdown_token 统一驱动关闭（A3）。
@@ -267,12 +300,12 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         instance_lock: Some(instance_lock),
         container: Some(container.clone()),
         startup_handles: Some(handles),
+        prepared_axum,
         axum_handle: None,
         tray_manager: None,
         tray_handle: None,
         shutdown_token,
         log_tx,
-        _log_guard: log_guard,
     };
 
     // 8. 创建系统托盘
@@ -543,49 +576,33 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("服务容器尚未初始化"))?
         .clone();
 
-    // 启动 Axum
-    match app::start_axum(
-        container.clone(),
-        state.log_tx.clone(),
-        state.app_config.port,
-        state.app_config.host.as_deref(),
-    )
-    .await
-    {
-        Ok(handle) => {
-            let port = handle.port;
-            if let Some(lock) = &state.instance_lock {
-                if let Err(e) = lock.record_port(port) {
-                    warn!(port = port, error = %e, "记录运行端口到实例锁失败");
-                }
-            }
-            state.axum_handle = Some(handle);
-            let bind_host = state.app_config.host.as_deref().unwrap_or("127.0.0.1");
-            // Docker 环境绑定 0.0.0.0 时，提示地址仍显示为可访问的 host:port
-            let display_host = if bind_host == "0.0.0.0" {
-                "0.0.0.0"
-            } else {
-                "127.0.0.1"
-            };
-            info!("Web 控制台已启动: http://{display_host}:{port}");
+    // 端口已在服务容器初始化前绑定，此处只组装 Router 并启动 serve task。
+    let prepared = state
+        .prepared_axum
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("完整模式缺少预绑定的 Axum 监听器"))?;
+    let handle = app::start_axum_with_listener(container, state.log_tx.clone(), prepared)
+        .context("Web 控制台启动失败")?;
+    let port = handle.port;
+    if let Some(lock) = &state.instance_lock {
+        if let Err(e) = lock.record_port(port) {
+            warn!(port = port, error = %e, "记录运行端口到实例锁失败");
+        }
+    }
+    state.axum_handle = Some(handle);
+    let bind_host = state.app_config.host.as_deref().unwrap_or("127.0.0.1");
+    // Docker 环境绑定 0.0.0.0 时，提示地址仍显示为可访问的 host:port
+    let display_host = if bind_host == "0.0.0.0" {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    };
+    info!("Web 控制台已启动: http://{display_host}:{port}");
 
-            // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
-            // 此前配置项是死开关，UI「静默启动」切换无任何效果
-            if state.app_config.auto_open_browser {
-                open_browser(port);
-            }
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            // 中英双语端口占用检测
-            if msg.contains("被占用") || msg.contains("address in use") || msg.contains("AddrInUse")
-            {
-                anyhow::bail!("端口 {} 被占用: {e}", state.app_config.port);
-            }
-            // 此时完整模式的依赖已按非轻量模式构建，继续运行会得到“看似完整、
-            // 实则没有 Web 控制台”的不一致状态；交由上层统一清理后明确退出。
-            anyhow::bail!("Web 控制台启动失败: {e}");
-        }
+    // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
+    // 此前配置项是死开关，UI「静默启动」切换无任何效果
+    if state.app_config.auto_open_browser {
+        open_browser(port);
     }
 
     // Engine 崩溃恢复
@@ -678,7 +695,7 @@ async fn apply_startup_action(container: &Arc<ServiceContainer>) {
                     .submit(crate::status::LoginSource::LoginOnce, None, None)
                     .await;
                 let result = handle.await_result().await;
-                if result.success {
+                if result.is_success() {
                     info!(message = %result.message, "启动单次登录成功");
                 } else {
                     warn!(message = %result.message, "启动单次登录失败");
@@ -707,13 +724,13 @@ async fn launch_login_once(state: &mut LauncherState) -> Result<()> {
     let result = handle.await_result().await;
 
     info!(
-        success = result.success,
+        success = result.is_success(),
         message = %result.message,
         duration = ?result.duration,
         "单次登录完成"
     );
 
-    if !result.success {
+    if !result.is_success() {
         anyhow::bail!("登录失败: {}", result.message);
     }
     Ok(())
@@ -957,9 +974,6 @@ async fn graceful_shutdown(state: &mut LauncherState) {
     state.instance_lock = None;
 
     info!("已关闭");
-
-    // 9. 释放日志 guard（flush 剩余日志后关闭文件句柄，必须在最后一条日志之后）
-    state._log_guard = None;
 }
 
 // ============================================================

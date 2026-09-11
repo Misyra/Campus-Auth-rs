@@ -66,7 +66,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 2. Web 控制台
 
-地址：`http://127.0.0.1:50721`（`app.port`，端口占用自动 +1 重试；Docker 默认 `0.0.0.0:50721`）。首次启动走初始化向导，之后在「设置」页管理全部配置。
+地址：`http://127.0.0.1:50721`（`app.port`；本地端口被占用或被 Windows 保留时由系统自动分配可用端口，实际地址见启动日志；Docker 默认固定监听 `0.0.0.0:50721`）。首次启动走初始化向导，之后在「设置」页管理全部配置。
 
 鉴权：启动时生成随机 token 持久化于 `config/.auth_token`（`0600`），前端经 `/api/auth/token` 懒取并在 `X-Auth-Token` / `Bearer` / `?token=` 中携带；`GET /api/health`、`GET /api/auth/token` 等少数端点豁免，其余 `/api/*` 与 `/ws/*` 强制校验（`src/web/auth.rs`）。
 

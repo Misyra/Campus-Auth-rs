@@ -20,9 +20,9 @@ use crate::login::{LoginHandleInner, recover_lock};
 use crate::status::{LoginSource, LoginStatus, PartialSnapshot, StatusManager};
 use crate::utils::metrics::Metrics;
 
-/// 终态种类（成功 / 取消 / 失败）
+/// 登录终态（成功 / 取消 / 失败）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalKind {
+pub enum LoginTerminal {
     /// 登录成功
     Success,
     /// 登录被取消
@@ -35,7 +35,7 @@ pub enum TerminalKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultAction {
     /// 终态（成功 / 取消 / 凭证无效 / 验证码 / 未知错误）
-    Terminal(TerminalKind),
+    Terminal(LoginTerminal),
     /// 可重试（导航超时 / 选择器失败 / 网络错误）
     Retry,
     /// 重试预算耗尽
@@ -45,8 +45,8 @@ pub enum ResultAction {
 /// 登录终态结果（句柄 `await_result` 返回、历史与调度器读取）
 #[derive(Debug, Clone)]
 pub struct LoginResult {
-    /// 是否成功
-    pub success: bool,
+    /// 唯一终态语义；调用方不得再用布尔值猜测取消与失败。
+    pub terminal: LoginTerminal,
     /// 结果消息（成功提示 / 失败原因 / 取消原因）
     pub message: String,
     /// 登录来源
@@ -55,6 +55,29 @@ pub struct LoginResult {
     pub duration: Duration,
     /// 尝试次数（含首次）
     pub attempts: u32,
+}
+
+impl LoginResult {
+    /// 是否为成功终态。
+    pub fn is_success(&self) -> bool {
+        self.terminal == LoginTerminal::Success
+    }
+
+    /// 是否为取消终态。
+    pub fn is_cancelled(&self) -> bool {
+        self.terminal == LoginTerminal::Cancelled
+    }
+}
+
+/// 登录后网络验证结果；取消不能与可重试的网络失败共用布尔值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkVerification {
+    /// 已确认公网在线。
+    Online,
+    /// 未确认在线，可按登录重试策略处理。
+    RetryableFailure,
+    /// 用户取消、抢占或应用关闭。
+    Cancelled,
 }
 
 /// 单次尝试结果分类（纯函数）
@@ -72,10 +95,10 @@ pub struct LoginResult {
 #[allow(unreachable_patterns)]
 pub fn classify(outcome: Outcome) -> ResultAction {
     match outcome {
-        Outcome::Success => ResultAction::Terminal(TerminalKind::Success),
-        Outcome::Cancelled => ResultAction::Terminal(TerminalKind::Cancelled),
-        Outcome::InvalidCredential => ResultAction::Terminal(TerminalKind::Failed),
-        Outcome::UnknownError => ResultAction::Terminal(TerminalKind::Failed),
+        Outcome::Success => ResultAction::Terminal(LoginTerminal::Success),
+        Outcome::Cancelled => ResultAction::Terminal(LoginTerminal::Cancelled),
+        Outcome::InvalidCredential => ResultAction::Terminal(LoginTerminal::Failed),
+        Outcome::UnknownError => ResultAction::Terminal(LoginTerminal::Failed),
         Outcome::CaptchaFailed => ResultAction::Retry,
         Outcome::NavigationTimeout => ResultAction::Retry,
         Outcome::SelectorFailed => ResultAction::Retry,
@@ -83,7 +106,7 @@ pub fn classify(outcome: Outcome) -> ResultAction {
         Outcome::AssertionFailed => ResultAction::Retry,
         Outcome::NetworkError => ResultAction::Retry,
         // 前向兼容：未知 outcome 兜底为终态（失败），避免无限重试
-        _ => ResultAction::Terminal(TerminalKind::Failed),
+        _ => ResultAction::Terminal(LoginTerminal::Failed),
     }
 }
 
@@ -329,7 +352,7 @@ impl LoginSession {
                 };
             match action {
                 ResultAction::Terminal(kind) => match kind {
-                    TerminalKind::Success => {
+                    LoginTerminal::Success => {
                         // 汇总成功消息：Worker message（如「成功条件命中」「N 个非必须
                         // 步骤失败」）与页面弹窗文案（如「登录成功！」）一并进入日志
                         let note = dialog_note(&structured.data);
@@ -346,24 +369,35 @@ impl LoginSession {
                         // （对齐原项目 v4.2.3 login_attempt 的 has_explicit_condition 分支）
                         if self.has_explicit_success_condition() {
                             debug!("任务声明 success_condition，跳过登录后网络检测");
-                            self.emit(
-                                self.make_result(true, msg, session_start, attempts_used),
-                                HistoryResult::Success,
-                            )
+                            self.emit(self.make_result(
+                                LoginTerminal::Success,
+                                msg,
+                                session_start,
+                                attempts_used,
+                            ))
                             .await;
                             return;
                         }
                         // 步骤全部成功后做真实网络验证：避免 Worker 假成功（步骤未抛异常
                         // 但页面实际未登录成功）被误报。参考老实现 _check_success：
                         // 等待 post_login_delay 让认证生效 → check_once → 仅 Online 才算真成功。
-                        let net_ok = self.verify_network_after_login().await;
-                        if net_ok {
-                            self.emit(
-                                self.make_result(true, msg, session_start, attempts_used),
-                                HistoryResult::Success,
-                            )
-                            .await;
-                            return;
+                        match self.verify_network_after_login().await {
+                            NetworkVerification::Online => {
+                                self.emit(self.make_result(
+                                    LoginTerminal::Success,
+                                    msg,
+                                    session_start,
+                                    attempts_used,
+                                ))
+                                .await;
+                                return;
+                            }
+                            NetworkVerification::Cancelled => {
+                                self.finish_with_cancelled(session_start, attempts_used, None)
+                                    .await;
+                                return;
+                            }
+                            NetworkVerification::RetryableFailure => {}
                         }
                         // 网络验证未通过：不直接判终态失败，而是走可重试路径。
                         // 理由：网络探测可能因瞬时波动误判，重试一次登录比直接判死更稳妥。
@@ -387,20 +421,17 @@ impl LoginSession {
                             return;
                         }
                     }
-                    TerminalKind::Cancelled => {
-                        self.emit(
-                            self.make_result(
-                                false,
-                                "登录已取消".into(),
-                                session_start,
-                                attempts_used,
-                            ),
-                            HistoryResult::Cancelled,
-                        )
+                    LoginTerminal::Cancelled => {
+                        self.emit(self.make_result(
+                            LoginTerminal::Cancelled,
+                            "登录已取消".into(),
+                            session_start,
+                            attempts_used,
+                        ))
                         .await;
                         return;
                     }
-                    TerminalKind::Failed => {
+                    LoginTerminal::Failed => {
                         self.finish_with_failure(
                             session_start,
                             attempts_used,
@@ -508,20 +539,14 @@ impl LoginSession {
         tokio::select! {
             biased;
             _ = ct.cancelled() => {
-                self.emit(
-                    self.make_cancelled_result(session_start, *attempts_used),
-                    HistoryResult::Cancelled,
-                )
-                .await;
+                self.emit(self.make_cancelled_result(session_start, *attempts_used))
+                    .await;
                 false
             }
             _ = self.shutdown_token.cancelled() => {
                 *recover_lock(self.cancel_reason.as_ref()) = Some("应用关闭".to_string());
-                self.emit(
-                    self.make_cancelled_result(session_start, *attempts_used),
-                    HistoryResult::Cancelled,
-                )
-                .await;
+                self.emit(self.make_cancelled_result(session_start, *attempts_used))
+                    .await;
                 false
             }
             _ = sleep(backoff) => true,
@@ -544,16 +569,16 @@ impl LoginSession {
 
     /// 登录后真实网络验证：等待 post_login_delay 让认证生效，再调用 MonitorService 做一次完整探测。
     ///
-    /// 仅当探测结果为 [`NetworkStatus::Online`] 时返回 true，其余（CaptivePortal /
-    /// Offline / Unknown / 探测异常 / Monitor 未注入）均返回 false。
+    /// 仅当探测结果为 [`NetworkStatus::Online`] 时返回 [`NetworkVerification::Online`]；
+    /// 取消独立返回 `Cancelled`，其余结果返回 `RetryableFailure`。
     ///
     /// 与老实现 `BrowserTaskRunner._network_detection_check` 等价：防止 Worker 步骤
     /// 全部成功但页面实际未登录成功（如填入字面量 `{{USERNAME}}` 却没点登录按钮）。
-    async fn verify_network_after_login(&self) -> bool {
+    async fn verify_network_after_login(&self) -> NetworkVerification {
         let monitor = &self.deps.monitor;
         // 登录后等待 portal 生效的延迟（可配置，默认 5s）：钳制上限 60s 对齐
         // 前端输入与本注释，防手改 settings.json 填大值导致登录后无限干等；
-        // 期间监听 cancel_token / shutdown_token，取消立即以 false 返回，
+        // 期间监听 cancel_token / shutdown_token，取消立即返回独立终态，
         // 避免用户点"取消"后仍阻塞至多 60s+探测耗时才退出
         let delay = self
             .deps
@@ -565,23 +590,27 @@ impl LoginSession {
             .min(60);
         let sleep_ok = tokio::select! {
             biased;
-            _ = self.cancel_token.cancelled() => false,
-            _ = self.shutdown_token.cancelled() => false,
-            _ = tokio::time::sleep(Duration::from_secs(delay as u64)) => true,
+            _ = self.cancel_token.cancelled() => NetworkVerification::Cancelled,
+            _ = self.shutdown_token.cancelled() => {
+                *recover_lock(self.cancel_reason.as_ref()) = Some("应用关闭".to_string());
+                NetworkVerification::Cancelled
+            },
+            _ = tokio::time::sleep(Duration::from_secs(delay as u64)) => NetworkVerification::Online,
         };
-        if !sleep_ok {
+        if sleep_ok == NetworkVerification::Cancelled {
             info!("登录后网络验证已取消（等待 portal 延迟期间）");
-            return false;
+            return NetworkVerification::Cancelled;
         }
         let report = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
                 info!("登录后网络验证已取消（探测期间）");
-                return false;
+                return NetworkVerification::Cancelled;
             }
             _ = self.shutdown_token.cancelled() => {
+                *recover_lock(self.cancel_reason.as_ref()) = Some("应用关闭".to_string());
                 info!("登录后网络验证已取消（应用关闭）");
-                return false;
+                return NetworkVerification::Cancelled;
             }
             r = monitor.verify_internet() => r,
         };
@@ -601,11 +630,15 @@ impl LoginSession {
                         "登录后网络验证未通过"
                     );
                 }
-                ok
+                if ok {
+                    NetworkVerification::Online
+                } else {
+                    NetworkVerification::RetryableFailure
+                }
             }
             Err(e) => {
                 warn!("登录后网络验证异常: {e}");
-                false
+                NetworkVerification::RetryableFailure
             }
         }
     }
@@ -613,13 +646,13 @@ impl LoginSession {
     /// 构建终态结果（携带耗时与尝试次数）
     fn make_result(
         &self,
-        success: bool,
+        terminal: LoginTerminal,
         message: String,
         start: Instant,
         attempts_used: u32,
     ) -> LoginResult {
         LoginResult {
-            success,
+            terminal,
             message,
             source: self.params.source,
             duration: start.elapsed(),
@@ -633,7 +666,7 @@ impl LoginSession {
             .clone()
             .unwrap_or_else(|| "已取消".to_string());
         LoginResult {
-            success: false,
+            terminal: LoginTerminal::Cancelled,
             message: reason,
             source: self.params.source,
             duration: start.elapsed(),
@@ -642,8 +675,14 @@ impl LoginSession {
     }
 
     /// 终态收尾：写入共享结果槽 → 广播状态 → 记录历史 → 更新内部状态
-    async fn emit(&self, result: LoginResult, history: HistoryResult) {
+    async fn emit(&self, result: LoginResult) {
         self.result_slot.set_result(result.clone());
+
+        let history = match result.terminal {
+            LoginTerminal::Success => HistoryResult::Success,
+            LoginTerminal::Failed => HistoryResult::Failed,
+            LoginTerminal::Cancelled => HistoryResult::Cancelled,
+        };
 
         // 统计登录终态指标
         if let Some(m) = &self.deps.metrics {
@@ -688,8 +727,8 @@ impl LoginSession {
             if b.has_live_worker() {
                 // preserve_state 仅在 keep_alive 且登录成功时为真，非成功终态
                 // 走会话级释放、默认配置走全量关闭，三档语义由 Worker 侧实现
-                let preserve =
-                    result.success && self.deps.config_service.runtime().load().worker.keep_alive;
+                let preserve = result.is_success()
+                    && self.deps.config_service.runtime().load().worker.keep_alive;
                 // 超时须大于 Python 侧 close 内部超时（8s），避免竞速误报；
                 // 命令级超时兜底由 bridge.execute_with_timeout 负责，失败仅告警不阻塞收尾
                 if let Err(e) = b
@@ -718,7 +757,7 @@ impl LoginSession {
         } else {
             info!(
                 source = ?result.source,
-                success = result.success,
+                success = result.is_success(),
                 "登录会话结束: {}",
                 result.message
             );
@@ -738,11 +777,8 @@ impl LoginSession {
         if let Some(reason) = reason {
             *recover_lock(self.cancel_reason.as_ref()) = Some(reason);
         }
-        self.emit(
-            self.make_cancelled_result(session_start, attempts_used),
-            HistoryResult::Cancelled,
-        )
-        .await;
+        self.emit(self.make_cancelled_result(session_start, attempts_used))
+            .await;
     }
 
     /// 以「失败」终态收尾：emit 失败结果 → 写历史（收敛 `run`/`try_retry` 内样板，C4）。
@@ -752,11 +788,8 @@ impl LoginSession {
         attempts_used: u32,
         message: String,
     ) {
-        self.emit(
-            self.make_result(false, message, session_start, attempts_used),
-            HistoryResult::Failed,
-        )
-        .await;
+        self.emit(self.make_result(LoginTerminal::Failed, message, session_start, attempts_used))
+            .await;
     }
 
     /// 将 `IpcResponse` 解析为 [`StructuredResult`]
@@ -854,7 +887,7 @@ mod tests {
     fn test_classify_success_is_terminal_success() {
         assert_eq!(
             classify(Outcome::Success),
-            ResultAction::Terminal(TerminalKind::Success)
+            ResultAction::Terminal(LoginTerminal::Success)
         );
     }
 
@@ -862,7 +895,7 @@ mod tests {
     fn test_classify_cancelled_is_terminal_cancelled() {
         assert_eq!(
             classify(Outcome::Cancelled),
-            ResultAction::Terminal(TerminalKind::Cancelled)
+            ResultAction::Terminal(LoginTerminal::Cancelled)
         );
     }
 
@@ -871,7 +904,7 @@ mod tests {
         // 凭证无效属于终态失败，重试无意义
         assert_eq!(
             classify(Outcome::InvalidCredential),
-            ResultAction::Terminal(TerminalKind::Failed)
+            ResultAction::Terminal(LoginTerminal::Failed)
         );
     }
 
@@ -885,7 +918,7 @@ mod tests {
     fn test_classify_unknown_error_is_terminal_failed() {
         assert_eq!(
             classify(Outcome::UnknownError),
-            ResultAction::Terminal(TerminalKind::Failed)
+            ResultAction::Terminal(LoginTerminal::Failed)
         );
     }
 
@@ -1155,7 +1188,7 @@ mod tests {
             "SelectorFailed 不应触发 Worker 回收"
         );
         let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
-        assert!(!result.success, "预算耗尽应为失败终态");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
         assert_eq!(result.attempts, 3);
         assert!(result.message.contains("重试耗尽"));
     }
@@ -1192,6 +1225,45 @@ mod tests {
         );
         assert_eq!(bridge.recycled.load(Ordering::SeqCst), 0);
         let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
-        assert!(!result.success);
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+    }
+
+    /// P1-3：Worker 成功后的延迟验证若被取消，即使没有剩余重试预算，也必须
+    /// 直接返回 Cancelled，不能降格为“网络验证失败 → 重试耗尽”。
+    #[tokio::test(start_paused = true)]
+    async fn test_post_login_verification_cancel_is_terminal_cancelled() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![(true, "success", "步骤执行成功")])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let cancel = CancellationToken::new();
+        let mut params = make_params();
+        params.max_retries = 0;
+        let session = LoginSession::new(
+            params,
+            cancel.clone(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+
+        let task = tokio::spawn(session.run());
+        while bridge.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        task.await.unwrap();
+
+        let result = result_rx.borrow_and_update().clone().expect("应有取消终态");
+        assert_eq!(result.terminal, LoginTerminal::Cancelled);
+        assert!(!result.message.contains("重试耗尽"));
+        assert_eq!(result.attempts, 1);
     }
 }

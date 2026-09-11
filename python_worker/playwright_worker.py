@@ -113,6 +113,11 @@ def _debug_screenshot_dir() -> Path:
     return _runtime_worker_project_dir() / "debug"
 
 
+def _feedback_capture_dir(stamp: str) -> Path:
+    """问题报告页面快照目录（位于 Rust 允许读取的调试目录内）。"""
+    return _debug_screenshot_dir() / f"feedback-{stamp}"
+
+
 def _capture_dir() -> Path:
     """AI 任务生成的页面捕获目录（同上锚定，latest 每次覆盖）。"""
     return _runtime_worker_project_dir() / "captures" / "latest"
@@ -127,7 +132,7 @@ def _purge_stale_debug_screenshots() -> None:
 
     Worker 进程被强杀时，任务级（_run_task）与调试级（_cleanup_debug_screenshots）
     清理均不会执行，debug/ 目录会残留可能含明文凭据的截图。启动时
-    best-effort 删除修改时间早于本进程启动（模块加载时刻）的 ``*.png``；
+    best-effort 删除修改时间早于本进程启动（模块加载时刻）的 PNG/JPEG；
     多 Worker 并发启动时，正被其他进程写入的新文件（mtime 较新）不受影响。
     """
     directory = _debug_screenshot_dir()
@@ -140,7 +145,7 @@ def _purge_stale_debug_screenshots() -> None:
         return
     for entry in entries:
         try:
-            if entry.suffix.lower() != ".png" or not entry.is_file():
+            if entry.suffix.lower() not in {".png", ".jpg", ".jpeg"} or not entry.is_file():
                 continue
             if entry.stat().st_mtime >= _MODULE_LOAD_TIME:
                 continue
@@ -949,11 +954,9 @@ class WorkerCore:
             except Exception:  # noqa: BLE001
                 logger.debug("停止 Playwright 时连接已断开（正常）")
             self._playwright = None
-        # 关闭浏览器时顺带清理全部调试会话截图（可能含明文凭据），
-        # 覆盖 debug_stop 未被正确调用（EOF / shutdown 路径）的泄漏场景
-        for session in list(self._debug_sessions.values()):
-            self._cleanup_debug_screenshots(session)
-        self._debug_sessions.clear()
+        # 覆盖 debug_stop 未被正确调用（EOF / shutdown 路径）的泄漏场景；
+        # 截图与 cancel 注册统一走幂等 teardown，不能只清 map。
+        self._teardown_all_debug_sessions()
         self._last_browser_settings = None
         logger.info("浏览器及资源已关闭")
 
@@ -971,10 +974,8 @@ class WorkerCore:
         if self._context is not None and self._browser is not None:
             await self._safe_close(self._context, "上下文")
             self._context = None
-        # 与 close_browser 同款兜底：清理残留调试截图（可能含明文凭据）
-        for session in list(self._debug_sessions.values()):
-            self._cleanup_debug_screenshots(session)
-        self._debug_sessions.clear()
+        # 与 close_browser 同款兜底：截图与 cancel 注册统一释放。
+        self._teardown_all_debug_sessions()
         logger.info("会话级资源已释放（浏览器进程保留）")
 
     def _cancel_browser_idle_release(self) -> None:
@@ -1029,6 +1030,7 @@ class WorkerCore:
             for sid, session in list(self._debug_sessions.items()):
                 if getattr(session, "page", None) is page:
                     self._debug_sessions.pop(sid, None)
+                    self._teardown_debug_session(session)
                     logger.warning("调试会话 %s 因命令级超时强制中断页面而结束", sid)
 
     async def _handle_low_resource_request(self, route: Any) -> None:
@@ -1548,6 +1550,22 @@ class WorkerCore:
         # screenshots 是 StepContext 的 list[str] 字段，list.clear() 不会抛出
         session.context.screenshots.clear()
 
+    def _teardown_debug_session(self, session: "DebugSession") -> None:
+        """幂等释放单个调试会话的磁盘截图与取消注册。"""
+        self._cleanup_debug_screenshots(session)
+        cancel_id = getattr(session, "cancel_id", "")
+        if cancel_id:
+            cancel_registry.unregister(cancel_id)
+            # 同一 session 被异常路径重复收尾时不重复触碰注册表。
+            session.cancel_id = ""
+
+    def _teardown_all_debug_sessions(self) -> None:
+        """从槽位移除并释放全部调试会话。"""
+        sessions = list(self._debug_sessions.values())
+        self._debug_sessions.clear()
+        for session in sessions:
+            self._teardown_debug_session(session)
+
     async def handle_debug_status(self, params: dict) -> dict:
         """查询当前调试会话详情（无副作用）。供前端刷新后恢复步骤数据。"""
         if not self._debug_sessions:
@@ -1560,10 +1578,7 @@ class WorkerCore:
         session_id = params.get("session_id", "")
         session = self._debug_session_for(session_id)
         self._debug_sessions.pop(session.session_id, None)
-        # 先清理本会话的截图（可能含明文凭据），再注销取消项
-        self._cleanup_debug_screenshots(session)
-        if session.cancel_id:
-            cancel_registry.unregister(session.cancel_id)
+        self._teardown_debug_session(session)
         await self._close_session()
         # 调试结束即武装空闲回收：keep_alive 关闭时浏览器进程超时后全量释放
         self._arm_browser_idle_release()
@@ -1753,8 +1768,7 @@ class WorkerCore:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "无活跃页面，无法捕获")
         # 落盘根目录先定（资源快照需要直接写入子目录），避免 IPC 1MiB 超限
         stamp = str(int(time.time() * 1000))
-        base = Path(os.environ.get("CAMPUS_AUTH_BASE_PATH", str(_WORKER_DIR))).resolve()
-        fb_dir = base / "logs" / f"feedback-{stamp}"
+        fb_dir = _feedback_capture_dir(stamp)
         # 尝试 MHTML（完整离线快照，含样式与图片），失败回退 HTML
         mhtml_bytes: bytes | None = None
         try:

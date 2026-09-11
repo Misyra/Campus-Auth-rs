@@ -121,10 +121,9 @@ async fn apply_flat_settings_patch(
         if profile_keys.contains(&k.as_str()) {
             profile_patch.insert(k.clone(), v.clone());
         } else if k == "monitor" {
-            // monitor 字段需要前端→后端字段名映射；先校验字段名白名单，
-            // 非法字段（如误传后端字段名 http_targets）直接报错而非静默清空配置
-            validate_monitor_patch(v)?;
-            let backend_monitor = monitor_frontend_to_backend(v);
+            // monitor 字段通过 Option<T> DTO 区分“缺省”和显式值；未知字段、
+            // 类型错误在进入合并前拒绝，避免缺字段被硬编码默认值覆盖。
+            let backend_monitor = monitor_frontend_to_backend(v)?;
             global_patch.insert("monitor".to_string(), backend_monitor);
         } else if global_keys.contains(&k.as_str()) {
             // 映射前端字段名到后端字段名
@@ -445,109 +444,98 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
     })
 }
 
-/// 前端 MonitorConfig → 后端 MonitorSettings 字段映射
+/// 前端 MonitorConfig 的类型化局部更新 DTO
 ///
-/// 拆分 url_check_urls ("url|expected" 格式) → url_targets + url_expected_responses
-/// monitor patch 允许的前端字段名（与 `monitor_frontend_to_backend` 的取值键一一对应）
-const MONITOR_PATCH_ALLOWED_KEYS: &[&str] = &[
-    "check_interval_seconds",
-    "ping_targets",
-    "test_urls",
-    "url_check_urls",
-    "enable_tcp_check",
-    "enable_http_check",
-    "enable_url_check",
-    "enable_local_check",
-    "disable_proxy",
-    "network_check_timeout",
-    "post_login_delay",
-    // 登录前 auth_url 可达性预检开关（默认 false，见 MonitorSettings::check_auth_url）
-    "check_auth_url",
-    // 以下两个为 GET 响应的往返保真字段：前端保存时原样回传，映射函数有意忽略
-    // （不覆盖后端对应存储），见前端 constants.ts 的配置往返保真注释
-    "auth_url_targets",
-    "script_timeout",
-];
-
-/// 校验 monitor patch 的字段名，白名单外（如误传后端字段名 `http_targets`）直接报错，
-/// 避免映射函数取不到值后把探测配置静默覆盖成默认值。
-fn validate_monitor_patch(v: &Value) -> Result<(), ApiError> {
-    let Some(obj) = v.as_object() else {
-        return Ok(()); // 非对象交给 serde 校验类型错误
-    };
-    let unknown: Vec<&String> = obj
-        .keys()
-        .filter(|k| !MONITOR_PATCH_ALLOWED_KEYS.contains(&k.as_str()))
-        .collect();
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    Err(ApiError::BadRequest(format!(
-        "monitor 配置包含未知字段: {}（合法字段: {}）",
-        unknown
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        MONITOR_PATCH_ALLOWED_KEYS.join(", ")
-    )))
+/// 所有字段均为 `Option<T>`：缺省/null 表示不修改，`false`/`0`/空数组仍是显式值。
+/// `deny_unknown_fields` 阻止误传后端字段名后被静默忽略。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MonitorPatch {
+    check_interval_seconds: Option<u64>,
+    ping_targets: Option<Vec<String>>,
+    test_urls: Option<Vec<String>>,
+    url_check_urls: Option<Vec<String>>,
+    enable_tcp_check: Option<bool>,
+    enable_http_check: Option<bool>,
+    enable_url_check: Option<bool>,
+    enable_local_check: Option<bool>,
+    disable_proxy: Option<bool>,
+    network_check_timeout: Option<u64>,
+    post_login_delay: Option<u64>,
+    check_auth_url: Option<bool>,
+    // GET 响应的往返保真字段：前端会原样回传，后端有意不存储。
+    auth_url_targets: Option<Vec<String>>,
+    script_timeout: Option<u64>,
 }
 
-fn monitor_frontend_to_backend(v: &Value) -> Value {
-    let obj = match v.as_object() {
-        Some(o) => o,
-        None => return v.clone(),
-    };
-
-    // 注意：调用方（apply_flat_settings_patch）须先经 validate_monitor_patch 校验字段名，
-    // 本函数不做校验（返回 Value 无法传播错误），非法字段名会被静默忽略。
-
-    // 拆分 url_check_urls → url_targets + url_expected_responses
-    let mut url_targets: Vec<String> = Vec::new();
-    let mut url_expected_responses: serde_json::Map<String, Value> = serde_json::Map::new();
-    if let Some(urls) = obj.get("url_check_urls").and_then(|x| x.as_array()) {
-        for entry in urls {
-            if let Some(s) = entry.as_str() {
-                if let Some((url, expected)) = s.split_once('|') {
-                    url_targets.push(url.trim().to_string());
-                    url_expected_responses.insert(
-                        url.trim().to_string(),
-                        Value::String(expected.trim().to_string()),
-                    );
-                } else {
-                    url_targets.push(s.trim().to_string());
-                }
-            } else {
-                // 非法条目（非字符串）此前静默跳过，debug 留痕便于发现前端脏数据
-                tracing::debug!("monitor 配置 url_check_urls 含非字符串条目，已跳过");
-            }
+impl MonitorPatch {
+    /// 转换为后端 MonitorSettings 的局部 JSON patch，仅输出实际提供的字段
+    fn into_backend_patch(self) -> Value {
+        let mut backend = serde_json::Map::new();
+        if let Some(value) = self.check_interval_seconds {
+            backend.insert("check_interval".into(), Value::from(value));
         }
-    }
+        if let Some(value) = self.ping_targets {
+            backend.insert("tcp_targets".into(), serde_json::json!(value));
+        }
+        if let Some(value) = self.test_urls {
+            backend.insert("http_targets".into(), serde_json::json!(value));
+        }
 
-    serde_json::json!({
-        "check_interval": obj.get("check_interval_seconds").and_then(|v| v.as_u64()).unwrap_or(120),
-        "tcp_targets": obj.get("ping_targets").cloned().unwrap_or(serde_json::json!([])),
-        "http_targets": obj.get("test_urls").cloned().unwrap_or(serde_json::json!([])),
-        "url_targets": serde_json::json!(url_targets),
-        "url_expected_responses": Value::Object(url_expected_responses),
-        "tcp_enabled": obj.get("enable_tcp_check").and_then(|v| v.as_bool()).unwrap_or(false),
-        "http_enabled": obj.get("enable_http_check").and_then(|v| v.as_bool()).unwrap_or(false),
-        // 新前端显式传 enable_url_check；旧客户端没有该字段时保留历史的
-        // “目标列表非空即启用”兼容语义，避免一次保存意外关闭原有 URL 探测。
-        "url_enabled": obj.get("enable_url_check").and_then(|v| v.as_bool()).unwrap_or_else(|| {
-            obj.get("url_check_urls")
-                .and_then(|v| v.as_array())
-                .is_some_and(|items| !items.is_empty())
-        }),
-        "local_check_enabled": obj.get("enable_local_check").and_then(|v| v.as_bool()).unwrap_or(false),
-        "disable_proxy": obj.get("disable_proxy").and_then(|v| v.as_bool()).unwrap_or(true),
-        "tcp_timeout": obj.get("network_check_timeout").and_then(|v| v.as_u64()).unwrap_or(5),
-        "post_login_delay": obj.get("post_login_delay").and_then(|v| v.as_u64()).unwrap_or(5),
-        "check_auth_url": obj.get("check_auth_url").and_then(|v| v.as_bool()).unwrap_or(false),
-        // 注意：profile_check_interval / http_timeout / url_timeout / auth_url_timeout / socks5_port
-        // 前端 MonitorConfig 不包含这些字段，故此处**不输出**。上层用 json_merge 合并，
-        // 省略即可保留 settings.json 中已存储的值，避免每次保存把它们覆盖成硬编码默认值。
-    })
+        // 拆分 url_check_urls → url_targets + url_expected_responses。旧客户端省略
+        // enable_url_check 时，仅在实际携带列表的情况下沿用“非空即启用”兼容语义。
+        let derived_url_enabled = self.url_check_urls.as_ref().map(|items| !items.is_empty());
+        if let Some(urls) = self.url_check_urls {
+            let mut targets = Vec::with_capacity(urls.len());
+            let mut expected = serde_json::Map::new();
+            for raw in urls {
+                if let Some((url, response)) = raw.split_once('|') {
+                    let url = url.trim().to_string();
+                    targets.push(url.clone());
+                    expected.insert(url, Value::String(response.trim().to_string()));
+                } else {
+                    targets.push(raw.trim().to_string());
+                }
+            }
+            backend.insert("url_targets".into(), serde_json::json!(targets));
+            backend.insert("url_expected_responses".into(), Value::Object(expected));
+        }
+        if let Some(value) = self.enable_url_check.or(derived_url_enabled) {
+            backend.insert("url_enabled".into(), Value::from(value));
+        }
+        if let Some(value) = self.enable_tcp_check {
+            backend.insert("tcp_enabled".into(), Value::from(value));
+        }
+        if let Some(value) = self.enable_http_check {
+            backend.insert("http_enabled".into(), Value::from(value));
+        }
+        if let Some(value) = self.enable_local_check {
+            backend.insert("local_check_enabled".into(), Value::from(value));
+        }
+        if let Some(value) = self.disable_proxy {
+            backend.insert("disable_proxy".into(), Value::from(value));
+        }
+        if let Some(value) = self.network_check_timeout {
+            backend.insert("tcp_timeout".into(), Value::from(value));
+        }
+        if let Some(value) = self.post_login_delay {
+            backend.insert("post_login_delay".into(), Value::from(value));
+        }
+        if let Some(value) = self.check_auth_url {
+            backend.insert("check_auth_url".into(), Value::from(value));
+        }
+
+        // 显式消费保真字段，表明它们经过类型校验但不进入后端配置。
+        let _ = (self.auth_url_targets, self.script_timeout);
+        Value::Object(backend)
+    }
+}
+
+/// 前端 MonitorConfig → 后端 MonitorSettings 局部 patch
+fn monitor_frontend_to_backend(value: &Value) -> Result<Value, ApiError> {
+    let patch: MonitorPatch = serde_json::from_value(value.clone())
+        .map_err(|error| ApiError::BadRequest(format!("monitor 配置无效: {error}")))?;
+    Ok(patch.into_backend_patch())
 }
 
 /// 校验认证地址：仅 http/https，已通过 DNS 钉扎防护的内网/保留地址需前置拒收
@@ -665,7 +653,7 @@ mod tests {
             "network_check_timeout": 8,
             "post_login_delay": 3,
         });
-        let back = monitor_frontend_to_backend(&front);
+        let back = monitor_frontend_to_backend(&front).unwrap();
         assert_eq!(
             back["url_targets"],
             serde_json::json!(["http://a.com", "http://d.com"])
@@ -686,7 +674,7 @@ mod tests {
             "enable_url_check": false,
             "url_check_urls": ["http://a.com|OK"]
         });
-        let back = monitor_frontend_to_backend(&front);
+        let back = monitor_frontend_to_backend(&front).unwrap();
         assert_eq!(back["url_enabled"], serde_json::json!(false));
         assert_eq!(back["url_targets"], serde_json::json!(["http://a.com"]));
     }
@@ -703,18 +691,23 @@ mod tests {
         original.check_auth_url = true;
         let front = monitor_backend_to_frontend(&original);
         assert_eq!(front["check_auth_url"], serde_json::json!(true));
-        assert_eq!(
-            monitor_frontend_to_backend(&front)["check_auth_url"],
-            serde_json::json!(true)
-        );
+        let back = monitor_frontend_to_backend(&front).unwrap();
+        assert_eq!(back["check_auth_url"], serde_json::json!(true));
     }
 
     #[test]
-    fn monitor_frontend_to_backend_ignores_non_object() {
-        assert_eq!(
-            monitor_frontend_to_backend(&serde_json::json!(42)),
-            serde_json::json!(42)
-        );
+    fn monitor_frontend_to_backend_rejects_invalid_shape_and_unknown_fields() {
+        assert!(monitor_frontend_to_backend(&serde_json::json!(42)).is_err());
+        assert!(monitor_frontend_to_backend(&serde_json::json!({ "http_targets": [] })).is_err());
+    }
+
+    #[test]
+    fn monitor_partial_patch_only_emits_supplied_fields() {
+        let back = monitor_frontend_to_backend(&serde_json::json!({
+            "enable_tcp_check": true
+        }))
+        .unwrap();
+        assert_eq!(back, serde_json::json!({ "tcp_enabled": true }));
     }
 
     #[test]
@@ -722,7 +715,7 @@ mod tests {
         // backend → frontend → backend 应保持 url_targets 与期望响应
         let original = sample_monitor();
         let front = monitor_backend_to_frontend(&original);
-        let back = monitor_frontend_to_backend(&front);
+        let back = monitor_frontend_to_backend(&front).unwrap();
         assert_eq!(back["url_targets"], serde_json::json!(["http://a.com"]));
         assert_eq!(
             back["url_expected_responses"]["http://a.com"],
@@ -1258,6 +1251,43 @@ mod tests {
             d.get("global").is_none(),
             "PATCH 响应不应再返回嵌套 SettingsData 结构"
         );
+    }
+
+    /// monitor 局部 PATCH 只改显式字段，不用历史默认值覆盖同域其他配置。
+    #[tokio::test]
+    async fn test_patch_monitor_keeps_unspecified_fields() {
+        let (app, inner) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            g.settings.global.monitor.disable_proxy = false;
+            g.settings.global.monitor.check_interval = 77;
+            g.settings.global.monitor.http_enabled = true;
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "monitor": { "enable_tcp_check": true }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let monitor = &g.settings.global.monitor;
+        assert!(monitor.tcp_enabled);
+        assert!(monitor.http_enabled, "未指定的 HTTP 探针开关应保留");
+        assert!(!monitor.disable_proxy, "未指定的代理设置应保留");
+        assert_eq!(monitor.check_interval, 77, "未指定的检查间隔应保留");
     }
 
     /// PATCH 不合法字段值返回 400（类型不匹配在合并反序列化时暴露）

@@ -16,6 +16,7 @@ use crate::status::StatusManager;
 use crate::tasks::{TaskApi, TaskRunApi};
 use crate::updater::UpdaterApi;
 use crate::utils::metrics::Metrics;
+use crate::web::operations::WebOperations;
 
 // WebSocket 日志条目与来源归一化已迁至 src/logging.rs（A-1）；
 // 此处再导出保持既有 `state::LogEntry` 路径的消费方兼容。
@@ -64,6 +65,8 @@ pub struct AppState {
     pub shutdown_tx: watch::Sender<()>,
     /// 本地 API 鉴权 token（见 `web::auth` 模块说明）
     pub auth_token: Arc<str>,
+    /// Web 长操作生命周期登记（AI 单飞、OCR 并发取消与卸载排空）
+    pub(crate) operations: Arc<WebOperations>,
 }
 
 impl AppState {
@@ -108,6 +111,7 @@ impl AppState {
             ws_tx,
             shutdown_tx,
             auth_token,
+            operations: Arc::new(WebOperations::new()),
         }
     }
 }
@@ -202,6 +206,13 @@ impl axum::extract::FromRef<AppState> for Arc<Metrics> {
 impl axum::extract::FromRef<AppState> for Arc<StatusManager> {
     fn from_ref(state: &AppState) -> Self {
         state.status.clone()
+    }
+}
+
+/// 委派提取：AI/OCR handler 的 Web 长操作生命周期登记
+impl axum::extract::FromRef<AppState> for Arc<WebOperations> {
+    fn from_ref(state: &AppState) -> Self {
+        state.operations.clone()
     }
 }
 

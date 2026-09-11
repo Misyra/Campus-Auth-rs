@@ -20,14 +20,10 @@ use crate::config::ConfigApi;
 use crate::environment::EnvironmentApi;
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+use crate::web::operations::{OperationRegistration, WebOperations};
 
 /// capture 单次超时：导航 + networkidle 等待 + CDP 资源快照，宽于常规命令
 const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// 在途流式生成的取消令牌（单用户本地应用，全局至多一个生成任务）。
-/// `Some` = 生成中：再次发起返回 409，客户端断连/超时经此令牌中止 LLM 调用，
-/// 避免 fetch abort 后后端照常烧完 token
-static GENERATE_INFLIGHT: std::sync::Mutex<Option<CancellationToken>> = std::sync::Mutex::new(None);
 
 /// 脱敏后的 LLM 配置视图（API key 永不出站，只回是否已设置）
 fn masked_view(settings: &LlmSettings) -> Value {
@@ -200,17 +196,12 @@ pub async fn capture_status(
     })))
 }
 
-/// 获取在途生成令牌（防重入）：已有生成在途时返回 409。
-fn acquire_inflight_token() -> Result<CancellationToken, ApiError> {
-    let mut guard = GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner());
-    if guard.is_some() {
-        return Err(ApiError::Conflict(
-            "已有生成任务进行中，请等待其完成或刷新页面".into(),
-        ));
-    }
-    let token = CancellationToken::new();
-    *guard = Some(token.clone());
-    Ok(token)
+/// 获取在途生成登记（防重入）：已有生成在途时返回 409。
+fn acquire_generation(operations: &WebOperations) -> Result<OperationRegistration, ApiError> {
+    operations
+        .ai_generation()
+        .register(format!("ai-generate-{}", uuid::Uuid::new_v4()))
+        .map_err(|_| ApiError::Conflict("已有生成任务进行中，请等待其完成或刷新页面".into()))
 }
 
 /// 事件转发器：每 40ms 把共享缓冲的新事件刷到 SSE 通道。
@@ -224,7 +215,10 @@ fn spawn_event_forwarder(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
+            }
             // 一步取走全部未转发事件（drain 后 Vec 清空，免去手写游标 idx 的分页）；
             // 终止事件随本批一起取出，作为本轮退出判据（终止事件由生成器最后恰好 push 一次）
             let batch: Vec<crate::ai::generate::StreamEvent> = {
@@ -293,6 +287,7 @@ async fn finalize_generation(
 pub async fn generate_stream(
     State(config): State<Arc<dyn ConfigApi>>,
     State(tasks): State<Arc<dyn TaskApi>>,
+    State(operations): State<Arc<WebOperations>>,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let extra_prompt = body
@@ -328,7 +323,8 @@ pub async fn generate_stream(
     let base_url = settings.base_url.clone();
 
     // 防重入：已有生成在途时拒绝（否则取消后立点会产生两条并发 LLM 流）
-    let cancel_token = acquire_inflight_token()?;
+    let generation = acquire_generation(&operations)?;
+    let cancel_token = generation.cancellation_token();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<crate::ai::generate::StreamEvent>(1024);
     let shared: std::sync::Arc<std::sync::Mutex<Vec<crate::ai::generate::StreamEvent>>> =
@@ -379,9 +375,9 @@ pub async fn generate_stream(
             shared_for_gen,
         )
         .await;
-        // 无论成败都释放在途标记；此后新请求才可再次发起
-        *GENERATE_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner()) = None;
         finalize_generation(&shared, forward_handle, outcome, &capture_warnings).await;
+        // 显式放在终态事件排空之后；若中途 panic/abort，RAII Drop 仍会释放并取消。
+        drop(generation);
     });
 
     let stream = async_stream::stream! {

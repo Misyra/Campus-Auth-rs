@@ -37,7 +37,7 @@ pub async fn trigger_login(
     // 登录失败（配置缺失、auth_url 不可达、凭证无效等）是预期业务结果而非服务端错误，
     // 统一以 200 + {success, message, duration} 返回，避免前端把环境性失败当作 500 异常。
     Ok(data(serde_json::json!({
-        "success": result.success,
+        "success": result.is_success(),
         "message": result.message,
         "duration": result.duration.as_secs_f64(),
     })))
@@ -81,7 +81,7 @@ pub async fn login_once(
     let result = handle.await_result().await;
     Ok(data(serde_json::json!({
         "once": true,
-        "success": result.success,
+        "success": result.is_success(),
         "message": result.message,
     })))
 }
@@ -95,7 +95,7 @@ mod tests {
     use axum::routing::{get, post};
     use tower::ServiceExt;
 
-    use crate::login::{LoginHandle, LoginResult};
+    use crate::login::{LoginHandle, LoginResult, LoginTerminal};
     use std::time::Duration;
 
     /// mock 记录的提交参数
@@ -140,7 +140,11 @@ mod tests {
 
     fn result(success: bool) -> LoginResult {
         LoginResult {
-            success,
+            terminal: if success {
+                LoginTerminal::Success
+            } else {
+                LoginTerminal::Failed
+            },
             message: if success {
                 "登录成功"
             } else {

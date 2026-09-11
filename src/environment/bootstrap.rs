@@ -10,20 +10,31 @@ use crate::environment::{
     PROGRESS_UV_DOWNLOAD, PROGRESS_VENV_SYNC,
 };
 
+/// 轻量 Python 引导结果，向 Worker 规划层传递本轮真实同步证据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PythonBootstrapOutcome {
+    /// 本轮是否执行并成功完成了 `uv sync`。
+    pub venv_synchronized: bool,
+}
+
 /// 引导轻量 Python 运行时（uv -> Python venv）。
 ///
 /// 供默认项目 Python 脚本首次执行使用；不会安装 Playwright 浏览器。
 pub async fn bootstrap_python_runtime(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
-) -> Result<(), EnvironmentError> {
+) -> Result<PythonBootstrapOutcome, EnvironmentError> {
     tracing::info!("开始引导 Python 运行时...");
 
-    // 先做一次快速检查，跳过已就绪的阶段
-    check_environment(mgr).await?;
-
     // ── 阶段 1: 确保 uv 就绪 ──
-    if !mgr.read_status().uv_ready {
+    let uv_exe = mgr.env_path().join(crate::environment::UV_EXE_NAME);
+    let uv_ready = if uv_exe.exists() {
+        crate::environment::uv::uv_executable_works(&uv_exe).await
+    } else {
+        crate::environment::uv::check_uv_on_path().await
+    };
+    mgr.write_status(|s| s.uv_ready = uv_ready);
+    if !uv_ready {
         mgr.write_status(|s| s.stage = BootstrapStage::DownloadingUv);
         mgr.report_progress("downloading_uv", PROGRESS_UV_DOWNLOAD.0, "正在下载 uv...");
 
@@ -46,34 +57,33 @@ pub async fn bootstrap_python_runtime(
     }
 
     // ── 阶段 2: 确保 Python 虚拟环境就绪 ──
-    // OCR 是否随 venv 同步由用户持久启用标记决定；未启用时仅安装基础依赖。
-    if !mgr.read_status().python_ready {
-        mgr.write_status(|s| s.stage = BootstrapStage::SyncingVenv);
-        mgr.report_progress(
-            "syncing_venv",
-            PROGRESS_VENV_SYNC.0,
-            "正在安装 Python 环境和依赖...",
-        );
-
-        match crate::environment::python::ensure_venv(mgr, cancel).await {
-            Ok(_) => {
-                mgr.write_status(|s| s.python_ready = true);
-                mgr.report_progress("syncing_venv", PROGRESS_VENV_SYNC.1, "Python 环境安装完成");
-            }
-            Err(e) => {
-                let msg = format!("Python 环境安装失败: {}", e);
-                tracing::error!("{}", msg);
-                mark_error(mgr, &msg);
-                return Err(e);
-            }
+    // 不依赖可能滞后的内存 status，始终实际探测解释器；返回值记录本轮是否 sync，
+    // 供 Missing 指纹状态区分“刚创建的新环境”与“状态文件丢失的旧环境”。
+    mgr.write_status(|s| s.stage = BootstrapStage::SyncingVenv);
+    mgr.report_progress(
+        "syncing_venv",
+        PROGRESS_VENV_SYNC.0,
+        "正在检查 Python 环境和依赖...",
+    );
+    let venv = match crate::environment::python::ensure_venv_with_state(mgr, cancel).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let msg = format!("Python 环境安装失败: {}", e);
+            tracing::error!("{}", msg);
+            mark_error(mgr, &msg);
+            return Err(e);
         }
-    }
+    };
+    mgr.write_status(|s| s.python_ready = true);
+    mgr.report_progress("syncing_venv", PROGRESS_VENV_SYNC.1, "Python 环境已就绪");
 
     if cancel.is_cancelled() {
         return Err(EnvironmentError::Cancelled);
     }
 
-    Ok(())
+    Ok(PythonBootstrapOutcome {
+        venv_synchronized: venv.synchronized,
+    })
 }
 
 /// 引导安装完整浏览器自动化能力（uv -> Python venv -> Playwright）。
@@ -131,7 +141,7 @@ async fn bootstrap_capability_inner(
         return Err(EnvironmentError::Cancelled);
     }
 
-    check_environment(mgr).await?;
+    refresh_browser_and_capability_status(mgr);
     if !mgr.read_status().capability_ready {
         let reason = mgr
             .read_status()
@@ -153,15 +163,20 @@ pub async fn bootstrap_worker_runtime(
     cancel: &CancellationToken,
     force_sync: bool,
 ) -> Result<(), EnvironmentError> {
-    bootstrap_python_runtime(mgr, cancel).await?;
+    let python = bootstrap_python_runtime(mgr, cancel).await?;
     mgr.write_status(|s| s.stage = BootstrapStage::VerifyingWorker);
     mgr.report_progress(
         "verifying_worker",
         PROGRESS_VENV_SYNC.1,
         "正在验证 Worker 核心依赖与版本...",
     );
-    if let Err(error) =
-        crate::environment::health::ensure_worker_runtime(mgr, cancel, force_sync).await
+    if let Err(error) = crate::environment::health::ensure_worker_runtime(
+        mgr,
+        cancel,
+        force_sync,
+        python.venv_synchronized,
+    )
+    .await
     {
         let message = format!("Worker 环境修复失败: {error}");
         mark_error(mgr, &message);
@@ -171,22 +186,27 @@ pub async fn bootstrap_worker_runtime(
     mgr.write_status(|s| s.stage = BootstrapStage::ApplyingOcr);
     mgr.report_progress("applying_ocr", 58, "正在对齐 OCR 可选依赖...");
     if let Err(error) = crate::environment::uv::reconcile_ocr_preference(mgr, cancel).await {
-        // OCR 是补充能力，修复失败不应拖垮不依赖 OCR 的登录；保留偏好供下次重试。
-        tracing::warn!("OCR 可选依赖对齐失败，核心 Worker 继续可用: {error}");
+        // OCR 是补充能力：操作失败且清单已回滚时允许核心 Worker 继续；若 uv 已改写
+        // 清单但后续验证失败，则下方指纹完整性检查会拒绝把环境误标为就绪。
+        tracing::warn!("OCR 可选依赖对齐失败，将按清单完整性决定核心 Worker 状态: {error}");
     }
 
-    check_environment(mgr).await?;
-    let status = mgr.read_status();
-    if !status.worker_ready || !status.manifest_current {
-        let reason = status
-            .last_error
-            .clone()
-            .unwrap_or_else(|| "Worker 核心最终验证未通过".to_string());
-        drop(status);
+    let manifest_current = matches!(
+        crate::environment::health::runtime_manifest_state(mgr),
+        Ok(crate::environment::health::ManifestState::Current)
+    );
+    if !manifest_current {
+        let reason = "OCR 对齐后 Python 依赖清单未通过完整性验证".to_string();
         mark_error(mgr, &reason);
         return Err(EnvironmentError::WorkerRuntimeInvalid { reason });
     }
-    drop(status);
+    mgr.write_status(|s| {
+        s.python_ready = true;
+        s.worker_ready = true;
+        s.manifest_current = manifest_current;
+        s.last_error = None;
+    });
+    refresh_browser_and_capability_status(mgr);
     mgr.report_progress(
         "worker_ready",
         PROGRESS_VENV_SYNC.1,
@@ -194,6 +214,24 @@ pub async fn bootstrap_worker_runtime(
     );
     mgr.fire_bootstrap_done();
     Ok(())
+}
+
+/// 只做浏览器文件系统探测并重算派生能力，不重复启动 Python/Worker import 探针。
+fn refresh_browser_and_capability_status(mgr: &EnvironmentManager) {
+    let managed_browser_ready = playwright_browser_installed("chromium");
+    let system_browser_ready = crate::browser::system_browser_available();
+    mgr.write_status(|s| {
+        s.playwright_ready = managed_browser_ready;
+        s.system_browser_ready = system_browser_ready;
+        s.capability_ready = derive_capability_ready(
+            s.uv_ready,
+            s.python_ready,
+            s.worker_ready,
+            s.manifest_current,
+            managed_browser_ready,
+            system_browser_ready,
+        );
+    });
 }
 
 /// 快速路径：检测各组件是否已就绪，更新 EnvironmentStatus。
@@ -233,15 +271,6 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
         );
     }
 
-    let worker_probe = if python_ready {
-        crate::environment::health::probe_worker_runtime(mgr).await
-    } else {
-        crate::environment::health::WorkerRuntimeProbe {
-            ready: false,
-            version: None,
-            error: None,
-        }
-    };
     let manifest_state = if python_ready {
         match crate::environment::health::runtime_manifest_state(mgr) {
             Ok(state) => state,
@@ -254,6 +283,17 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
         crate::environment::health::ManifestState::Missing
     };
     let manifest_current = manifest_state == crate::environment::health::ManifestState::Current;
+    // 清单不可信时最终必需 sync，先 import Worker 没有决策价值，还会把冷启动
+    // 重模块加载成本白付一次；仅 Current 状态执行运行时探针。
+    let worker_probe = if python_ready && manifest_current {
+        crate::environment::health::probe_worker_runtime(mgr).await
+    } else {
+        crate::environment::health::WorkerRuntimeProbe {
+            ready: false,
+            version: None,
+            error: None,
+        }
+    };
     let playwright_ready = python_ready && playwright_browser_installed("chromium");
     let system_browser_ready = crate::browser::system_browser_available();
     let ocr_enabled = crate::environment::health::ocr_enabled(mgr).unwrap_or_else(|error| {
@@ -270,10 +310,10 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
         playwright_ready,
         system_browser_ready,
     );
-    let diagnostic = if python_ready && !worker_probe.ready {
-        worker_probe.error.clone()
-    } else if python_ready && !manifest_current {
+    let diagnostic = if python_ready && !manifest_current {
         Some("Python 依赖清单尚未通过当前版本验证，将在首次使用时自动同步".to_string())
+    } else if python_ready && !worker_probe.ready {
+        worker_probe.error.clone()
     } else if worker_probe.ready && !(playwright_ready || system_browser_ready) {
         Some("未检测到可用浏览器，首次使用时将自动安装 Chromium".to_string())
     } else {

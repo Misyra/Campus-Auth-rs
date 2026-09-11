@@ -116,6 +116,7 @@ export const systemApi = {
   updateState: () => http.get<UpdateState>("/api/update-state"),
   agree: () => http.post<MutationResult>("/api/agree"),
   shutdown: () => http.post<MutationResult>("/api/system/shutdown"),
+  restart: () => http.post<MutationResult>("/api/system/restart"),
   update: (pin?: UpdatePin) =>
     http.post<MutationResult & { message?: string; version?: string }>(
       "/api/system/update",

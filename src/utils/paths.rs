@@ -84,7 +84,7 @@ pub fn runtime_port_path(base: &Path) -> PathBuf {
 
 /// 读取运行时实际监听端口（`config/.runtime_port`，Axum 绑定成功后写入）
 ///
-/// `--port` CLI 覆盖与端口冲突 +1 重试都只体现在该文件；配置快照的
+/// `--port` CLI 覆盖与端口不可用后的系统分配回退都只体现在该文件；配置快照的
 /// `app.port` 仍是 settings.json 的值，不能代表实际监听端口。文件缺失 /
 /// 内容非法时返回 `None`，调用方回退到配置值。
 pub fn read_runtime_port(base_path: &Path) -> Option<u16> {

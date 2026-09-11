@@ -222,7 +222,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
               <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">
                 <div class="history-status">
                   <IconApp name="check" v-if="item.result === 'success'" />
-                  <IconApp name="x-circle" />
+                  <IconApp name="x-circle" v-else />
                 </div>
                 <div class="history-info">
                   <div class="history-row">

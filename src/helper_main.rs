@@ -443,6 +443,21 @@ fn wait_for_process_exit(pid: u32) -> bool {
 /// 此处是防御性双保险：`.venv` 是用户引导出的运行态，`__pycache__` 运行时自动再生。
 /// best-effort：单文件失败仅告警继续，不回滚（exe 已替换，半新半旧由下次更新收敛）。
 fn sync_distribution_files(extracted_dir: &Path, base_path: &Path) {
+    // 必须在 overlay 前比较并写标记：成功覆盖后源/目标必然相同；先写标记还可
+    // 覆盖“清单已替换、helper 随后异常退出”的崩溃窗口。标记只会在主程序
+    // 完成 uv sync + Worker 探针 + 指纹记录后清除。
+    let manifests_changed = dependency_manifests_changed(extracted_dir, base_path);
+    if manifests_changed {
+        let worker_dir = base_path.join("python_worker");
+        let marker = worker_dir.join(campus_auth::environment::RESYNC_MARKER);
+        let marker_result = std::fs::create_dir_all(&worker_dir)
+            .and_then(|()| std::fs::write(&marker, Local::now().to_rfc3339()));
+        match marker_result {
+            Ok(()) => println!("[helper] Python 依赖清单变更，已预写重同步标记"),
+            Err(e) => eprintln!("[helper] 写重同步标记失败: {e}"),
+        }
+    }
+
     for dir in ["resources", "docs", "python_worker"] {
         let src = extracted_dir.join(dir);
         if !src.exists() {
@@ -454,24 +469,16 @@ fn sync_distribution_files(extracted_dir: &Path, base_path: &Path) {
             eprintln!("[helper] 同步 {dir}/ 失败（继续）: {e}");
         }
     }
-    // Python 依赖清单内容实际变化时写重同步标记：主程序 ensure_venv 的
-    // 快速路径只验证解释器可启动，不感知依赖变化，不标记则新增依赖
-    // 在运行时 import 才暴露
+}
+
+/// 在 overlay 前判断 Python 依赖清单是否变化。
+fn dependency_manifests_changed(extracted_dir: &Path, base_path: &Path) -> bool {
     let py_src = extracted_dir.join("python_worker").join("pyproject.toml");
     let lock_src = extracted_dir.join("python_worker").join("uv.lock");
     let py_dst = base_path.join("python_worker").join("pyproject.toml");
     let lock_dst = base_path.join("python_worker").join("uv.lock");
-    let changed = (py_src.exists() && file_differs(&py_src, &py_dst))
-        || (lock_src.exists() && file_differs(&lock_src, &lock_dst));
-    if changed {
-        let marker = base_path
-            .join("python_worker")
-            .join(campus_auth::environment::RESYNC_MARKER);
-        match std::fs::write(&marker, Local::now().to_rfc3339()) {
-            Ok(()) => println!("[helper] Python 依赖清单变更，已写入重同步标记"),
-            Err(e) => eprintln!("[helper] 写重同步标记失败: {e}"),
-        }
-    }
+    (py_src.exists() && file_differs(&py_src, &py_dst))
+        || (lock_src.exists() && file_differs(&lock_src, &lock_dst))
 }
 
 /// 两个文件内容是否不同（任一侧读取失败/缺失视为不同）
@@ -828,6 +835,55 @@ mod tests {
         );
         // 目标独有内容不删除
         assert!(dst.join("user-config-only.txt").exists());
+    }
+
+    #[test]
+    fn test_sync_distribution_marks_changed_python_manifests_before_overlay() {
+        let extracted = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let src_worker = extracted.path().join("python_worker");
+        let dst_worker = base.path().join("python_worker");
+        std::fs::create_dir_all(&src_worker).unwrap();
+        std::fs::create_dir_all(&dst_worker).unwrap();
+        std::fs::write(src_worker.join("pyproject.toml"), b"new-project").unwrap();
+        std::fs::write(src_worker.join("uv.lock"), b"new-lock").unwrap();
+        std::fs::write(dst_worker.join("pyproject.toml"), b"old-project").unwrap();
+        std::fs::write(dst_worker.join("uv.lock"), b"old-lock").unwrap();
+
+        sync_distribution_files(extracted.path(), base.path());
+
+        assert_eq!(
+            std::fs::read(dst_worker.join("pyproject.toml")).unwrap(),
+            b"new-project"
+        );
+        assert!(
+            dst_worker
+                .join(campus_auth::environment::RESYNC_MARKER)
+                .is_file(),
+            "成功 overlay 后仍应保留预写的重同步标记"
+        );
+    }
+
+    #[test]
+    fn test_sync_distribution_does_not_mark_identical_python_manifests() {
+        let extracted = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        for root in [extracted.path(), base.path()] {
+            let worker = root.join("python_worker");
+            std::fs::create_dir_all(&worker).unwrap();
+            std::fs::write(worker.join("pyproject.toml"), b"same-project").unwrap();
+            std::fs::write(worker.join("uv.lock"), b"same-lock").unwrap();
+        }
+
+        sync_distribution_files(extracted.path(), base.path());
+
+        assert!(
+            !base
+                .path()
+                .join("python_worker")
+                .join(campus_auth::environment::RESYNC_MARKER)
+                .exists()
+        );
     }
 
     /// 版本闸门：高于当前放行；等于/低于/无法解析拒绝；当前版本无法解析回退 0.0.0

@@ -18,7 +18,7 @@ use crate::engine::{
     PROFILE_CHECK_INTERVAL_MAX, PROFILE_CHECK_INTERVAL_MIN, ProbeDetails, ProfileSwitchSource,
     TestNetworkResult,
 };
-use crate::login::LoginResult;
+use crate::login::{LoginResult, LoginTerminal};
 use crate::monitor::{ConnectivityAssessment, ProbeEvidence, ProbeReport, RecoveryAdvice};
 use crate::status::Notifier;
 use crate::status::{EngineState, LoginSource, NetworkStatus, PartialSnapshot};
@@ -437,33 +437,43 @@ fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &Engi
     inner.auto_login_in_flight = false;
     // 当前活跃 Profile 作为通知去重的键
     let profile_id = deps.config_service.runtime().load().profile.id.clone();
-    if result.success {
-        inner.consecutive_failures = 0;
-        inner.cooling_down_until = None;
-        inner.notifier.on_login_success(&profile_id);
-        tracing::debug!(source = ?result.source, "登录成功，重置连续失败计数");
-    } else if result.source == LoginSource::Auto {
-        inner.consecutive_failures += 1;
-        // 登录失败日志合并为一条结构化 warn（target=notification 保持前端通知源）：
-        // 首败通知与否经 first_failure 字段表达（notifier 仍负责同 Profile 去重）
-        let first_failure = inner.notifier.should_notify_login_failure(&profile_id);
-        tracing::warn!(
-            target: "notification",
-            profile = %profile_id,
-            consecutive_failures = inner.consecutive_failures,
-            reason = %result.message,
-            first_failure,
-            "登录失败"
-        );
-        if inner.consecutive_failures >= COOLING_DOWN_THRESHOLD
-            && inner.cooling_down_until.is_none()
-        {
-            inner.cooling_down_until =
-                Some(Instant::now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS));
+    match login_failure_budget_action(result.terminal, result.source) {
+        LoginFailureBudgetAction::Reset => {
+            inner.consecutive_failures = 0;
+            inner.cooling_down_until = None;
+            inner.notifier.on_login_success(&profile_id);
+            tracing::debug!(source = ?result.source, "登录成功，重置连续失败计数");
+        }
+        LoginFailureBudgetAction::Increment => {
+            inner.consecutive_failures += 1;
+            // 登录失败日志合并为一条结构化 warn（target=notification 保持前端通知源）：
+            // 首败通知与否经 first_failure 字段表达（notifier 仍负责同 Profile 去重）
+            let first_failure = inner.notifier.should_notify_login_failure(&profile_id);
             tracing::warn!(
-                "连续失败达到 {} 次，进入冷却期（{}s）",
-                inner.consecutive_failures,
-                COOLING_DOWN_DURATION_SECS
+                target: "notification",
+                profile = %profile_id,
+                consecutive_failures = inner.consecutive_failures,
+                reason = %result.message,
+                first_failure,
+                "登录失败"
+            );
+            if inner.consecutive_failures >= COOLING_DOWN_THRESHOLD
+                && inner.cooling_down_until.is_none()
+            {
+                inner.cooling_down_until =
+                    Some(Instant::now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS));
+                tracing::warn!(
+                    "连续失败达到 {} 次，进入冷却期（{}s）",
+                    inner.consecutive_failures,
+                    COOLING_DOWN_DURATION_SECS
+                );
+            }
+        }
+        LoginFailureBudgetAction::Preserve => {
+            tracing::debug!(
+                source = ?result.source,
+                terminal = ?result.terminal,
+                "登录终态不影响自动登录失败预算"
             );
         }
     }
@@ -476,6 +486,28 @@ fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &Engi
         EngineState::Stopped
     };
     merge_engine_state(inner, deps, state);
+}
+
+/// 登录终态对自动登录失败预算的影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginFailureBudgetAction {
+    /// 登录成功，重置连续失败与冷却。
+    Reset,
+    /// Auto 的真实失败，累加预算。
+    Increment,
+    /// 取消或非 Auto 失败，不改变预算。
+    Preserve,
+}
+
+fn login_failure_budget_action(
+    terminal: LoginTerminal,
+    source: LoginSource,
+) -> LoginFailureBudgetAction {
+    match (terminal, source) {
+        (LoginTerminal::Success, _) => LoginFailureBudgetAction::Reset,
+        (LoginTerminal::Failed, LoginSource::Auto) => LoginFailureBudgetAction::Increment,
+        (LoginTerminal::Failed | LoginTerminal::Cancelled, _) => LoginFailureBudgetAction::Preserve,
+    }
 }
 
 /// 触发一次网络探测（后台任务执行，F5）
@@ -931,6 +963,48 @@ mod tests {
     use crate::status::StatusManager;
     use crate::tasks::TaskManager;
     use crate::utils::metrics::Metrics;
+
+    #[test]
+    fn test_login_failure_budget_only_counts_auto_failures() {
+        assert_eq!(
+            login_failure_budget_action(LoginTerminal::Failed, LoginSource::Auto),
+            LoginFailureBudgetAction::Increment
+        );
+        assert_eq!(
+            login_failure_budget_action(LoginTerminal::Failed, LoginSource::Manual),
+            LoginFailureBudgetAction::Preserve
+        );
+    }
+
+    #[test]
+    fn test_login_cancel_preserves_failure_budget() {
+        for source in [
+            LoginSource::Auto,
+            LoginSource::Manual,
+            LoginSource::Browser,
+            LoginSource::LoginOnce,
+        ] {
+            assert_eq!(
+                login_failure_budget_action(LoginTerminal::Cancelled, source),
+                LoginFailureBudgetAction::Preserve
+            );
+        }
+    }
+
+    #[test]
+    fn test_login_success_resets_failure_budget_for_every_source() {
+        for source in [
+            LoginSource::Auto,
+            LoginSource::Manual,
+            LoginSource::Browser,
+            LoginSource::LoginOnce,
+        ] {
+            assert_eq!(
+                login_failure_budget_action(LoginTerminal::Success, source),
+                LoginFailureBudgetAction::Reset
+            );
+        }
+    }
 
     #[test]
     fn test_adaptive_interval_offline_uses_short_period() {

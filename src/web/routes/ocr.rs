@@ -4,6 +4,7 @@
 //! `State<Arc<dyn EnvironmentApi>>` 提取，不再触达 `state.container`。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
@@ -13,15 +14,13 @@ use crate::bridge::BridgeApi;
 use crate::config::ConfigApi;
 use crate::environment::EnvironmentApi;
 use crate::web::error::{ApiError, data};
+use crate::web::operations::{OperationRegistry, RegisterError, WebOperations};
 
 /// recognize 请求体上限：Worker 的 NDJSON stdin 单行上限为 16 MiB，这里预留 1 MiB
 /// 给 IPC 外壳与 JSON 字段，保证 Web 已接受的请求一定能完整送达 Worker。
 pub(crate) const RECOGNIZE_BODY_LIMIT: usize = 15 * 1024 * 1024;
-
-/// 当前在途 OCR 识别的 cancel_id（recognize 登记、结束清除，uninstall 据此取消
-/// 真实在途请求）。不用固定 id："ocr" 在无在途请求时被 trigger 会在 CancelRegistry
-/// 留下 60s pending 记录，命中同 id 的下一次识别注册即被静默取消（评审 #9）
-static OCR_INFLIGHT_CANCEL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// OCR Web 请求总超时：覆盖 Worker 内部 90s 模型加载/推理预算与 IPC 收尾余量
+const OCR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// POST /api/ocr/recognize — 执行 OCR 识别
 ///
@@ -32,6 +31,7 @@ static OCR_INFLIGHT_CANCEL: std::sync::Mutex<Option<String>> = std::sync::Mutex:
 ///   响应体里，前端既不显示识别结果也不提示失败）。
 pub async fn ocr_recognize(
     State(bridge): State<Arc<dyn BridgeApi>>,
+    State(operations): State<Arc<WebOperations>>,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     // 注入每请求唯一 cancel_id，使 /api/ocr/uninstall 能精准取消本请求
@@ -40,14 +40,23 @@ pub async fn ocr_recognize(
     if let Some(obj) = body.as_object_mut() {
         obj.insert("cancel_id".into(), Value::String(cancel_id.clone()));
     }
-    *OCR_INFLIGHT_CANCEL
-        .lock()
-        .unwrap_or_else(|p| p.into_inner()) = Some(cancel_id);
-    let response = bridge.execute("ocr_recognize", body).await;
-    // 成功失败都清除在途标记：此后同 id 的迟到取消不再有意义
-    *OCR_INFLIGHT_CANCEL
-        .lock()
-        .unwrap_or_else(|p| p.into_inner()) = None;
+    let bridge_for_cancel = bridge.clone();
+    let registration = operations
+        .ocr()
+        .register(cancel_id)
+        .map_err(|error| match error {
+            RegisterError::Paused => ApiError::Conflict("OCR 正在卸载，请稍后重试".into()),
+            RegisterError::CapacityReached | RegisterError::DuplicateId => {
+                ApiError::Conflict("OCR 请求登记冲突，请重试".into())
+            }
+        })?
+        .with_cancel_action(move |id| bridge_for_cancel.cancel(id));
+    let response = bridge
+        .execute_with_timeout("ocr_recognize", body, OCR_REQUEST_TIMEOUT)
+        .await;
+    // Worker 已结算（含超时后的 Bridge 主动取消），正常释放时不再补发迟到 cancel；
+    // 若 Future 在 await 中被 abort 或 panic unwind，Drop 会把 cancel_id 发给 Worker。
+    registration.finish();
     let response = response?;
     if response.result.success {
         Ok(data(response.result.data))
@@ -142,25 +151,33 @@ fn dir_size_inner(path: &std::path::Path, depth: u8) -> u64 {
 
 /// POST /api/ocr/uninstall — 卸载 OCR（取消在途任务并移除依赖）
 ///
-/// 取消在途 OCR 识别任务（仅当确有在途请求，读 [`OCR_INFLIGHT_CANCEL`] 精准
-/// 命中），并 `uv remove` 项目主依赖中的 ddddocr（见 `environment.remove_ocr_dep`）。
+/// 取消全部在途 OCR 识别任务，并 `uv remove` 项目主依赖中的 ddddocr
+///（见 `environment.remove_ocr_dep`）。卸载完成前拒绝新的识别请求。
 pub async fn ocr_uninstall(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
+    State(operations): State<Arc<WebOperations>>,
 ) -> Result<Json<Value>, ApiError> {
-    // 无在途请求时什么都不留：过去的无条件固定 id cancel 会在 CancelRegistry
-    // 留下 pending 记录，误伤 60s 内的下一次识别
-    if let Some(id) = OCR_INFLIGHT_CANCEL
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take()
-    {
-        bridge.cancel(&id);
+    uninstall_ocr_with_registry(bridge, environment, operations.ocr()).await?;
+    Ok(data(Value::String("OCR 依赖已卸载".into())))
+}
+
+/// OCR 卸载核心流程（登记器可注入，便于并发取消语义单测）
+async fn uninstall_ocr_with_registry(
+    bridge: Arc<dyn BridgeApi>,
+    environment: Arc<dyn EnvironmentApi>,
+    operations: &OperationRegistry,
+) -> Result<(), ApiError> {
+    // pause guard 覆盖取消、回收与依赖移除全程，防止取消完旧请求后又插入新请求。
+    let paused = operations.pause_and_drain();
+    for id in paused.ids() {
+        bridge.cancel(id);
     }
     // Windows 不允许删除已加载的 onnxruntime DLL，因此卸载前先回收持有模型的 Worker。
     bridge.recycle_if_running().await;
     environment.remove_ocr_dep().await?;
-    Ok(data(Value::String("OCR 依赖已卸载".into())))
+    drop(paused);
+    Ok(())
 }
 
 /// POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖
@@ -335,6 +352,7 @@ mod tests {
     struct TestState {
         bridge: Arc<dyn BridgeApi>,
         env: Arc<dyn EnvironmentApi>,
+        operations: Arc<WebOperations>,
     }
 
     impl axum::extract::FromRef<TestState> for Arc<dyn BridgeApi> {
@@ -346,6 +364,12 @@ mod tests {
     impl axum::extract::FromRef<TestState> for Arc<dyn EnvironmentApi> {
         fn from_ref(state: &TestState) -> Self {
             state.env.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<WebOperations> {
+        fn from_ref(state: &TestState) -> Self {
+            state.operations.clone()
         }
     }
 
@@ -381,7 +405,11 @@ mod tests {
         let env: Arc<dyn EnvironmentApi> = Arc::new(MockEnvironmentApi {
             removed: inner.clone(),
         });
-        let state = TestState { bridge, env };
+        let state = TestState {
+            bridge,
+            env,
+            operations: Arc::new(WebOperations::new()),
+        };
         let app = axum::Router::new()
             // 与 route_table 中真实注册形态一致：携带放宽的请求体限制
             .route(
@@ -407,7 +435,11 @@ mod tests {
             .await
             .expect("ConfigService 构造失败");
         let state = StatusState {
-            base: TestState { bridge, env },
+            base: TestState {
+                bridge,
+                env,
+                operations: Arc::new(WebOperations::new()),
+            },
             config,
         };
         let app = axum::Router::new()
@@ -572,24 +604,21 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    /// uninstall：无在途请求时不再产生 cancel（避免 pending 串扰）；有在途请求时
-    /// 精准取消该请求，并移除依赖、回收已运行 Worker
+    /// uninstall：无在途请求时不产生 cancel；并发在途请求全部取消，依赖移除
+    /// 期间暂停新登记，完成后恢复接收。
     #[tokio::test]
     async fn test_ocr_uninstall_cancels_and_removes_dep() {
-        let (app, inner) = mock_app();
+        let (_app, inner) = mock_app();
+        let registry = OperationRegistry::concurrent();
+        let bridge: Arc<dyn BridgeApi> = Arc::new(MockBridgeApi(inner.clone()));
+        let env: Arc<dyn EnvironmentApi> = Arc::new(MockEnvironmentApi {
+            removed: inner.clone(),
+        });
+
         // 无在途：不 cancel
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/ocr/uninstall")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        uninstall_ocr_with_registry(bridge.clone(), env.clone(), &registry)
             .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+            .expect("无在途卸载成功");
         {
             let state = inner.lock().unwrap();
             assert!(state.cancelled.is_empty(), "无在途请求不应产生 cancel");
@@ -597,26 +626,25 @@ mod tests {
             assert_eq!(state.recycled, 1);
         }
 
-        // 有在途：精准取消该请求的 cancel_id
-        inner.lock().unwrap().removed = false;
-        *OCR_INFLIGHT_CANCEL
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some("ocr-inflight-test".into());
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/ocr/uninstall")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        // 两个并发在途：通过可注入登记器验证全部取消，而非只覆盖/取消最后一个。
+        {
+            let mut state = inner.lock().unwrap();
+            state.cancelled.clear();
+            state.removed = false;
+        }
+        let first = registry.register("ocr-first").expect("登记 first");
+        let second = registry.register("ocr-second").expect("登记 second");
+
+        uninstall_ocr_with_registry(bridge, env, &registry)
             .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let state = inner.lock().unwrap();
-        assert_eq!(state.cancelled, vec!["ocr-inflight-test"]);
-        assert!(state.removed);
+            .expect("卸载成功");
+
+        let mut cancelled = inner.lock().unwrap().cancelled.clone();
+        cancelled.sort();
+        assert_eq!(cancelled, ["ocr-first", "ocr-second"]);
+        assert!(inner.lock().unwrap().removed);
+        assert!(registry.register("ocr-after-uninstall").is_ok());
+        drop((first, second));
     }
 
     /// install 后台任务成功补装依赖后回收已运行 Worker，确保下次启动主线程预加载。

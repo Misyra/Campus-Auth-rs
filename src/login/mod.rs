@@ -111,7 +111,7 @@ impl LoginHandle {
             Err(_) => None,
         }
         .unwrap_or_else(|| LoginResult {
-            success: false,
+            terminal: LoginTerminal::Failed,
             message: "登录结果通道关闭".into(),
             source: self.source,
             duration: Duration::ZERO,
@@ -534,7 +534,7 @@ impl LoginOrchestrator {
             // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
             warn!("登录请求未能占据活跃会话槽位，写入终态「被更新的登录请求取代」");
             handle.inner.set_result(LoginResult {
-                success: false,
+                terminal: LoginTerminal::Cancelled,
                 message: "被更新的登录请求取代".into(),
                 source,
                 duration: Duration::ZERO,
@@ -865,7 +865,7 @@ impl LoginOrchestrator {
                 if matches!(&g.active_session, Some(a) if a.session_id == session_id) {
                     if let Some(a) = &g.active_session {
                         a.handle.inner.set_result(LoginResult {
-                            success: false,
+                            terminal: LoginTerminal::Failed,
                             message: "登录会话内部异常，已中止".into(),
                             source,
                             duration: Duration::ZERO,
@@ -996,7 +996,7 @@ impl LoginOrchestrator {
             warn!("登录历史写入失败: {e}");
         }
         LoginHandle::immediate(LoginResult {
-            success: false,
+            terminal: LoginTerminal::Cancelled,
             message: "登录已取消".into(),
             source,
             duration: Duration::ZERO,
@@ -1045,7 +1045,11 @@ impl LoginOrchestrator {
             warn!("登录历史写入失败: {e}");
         }
         LoginHandle::immediate(LoginResult {
-            success,
+            terminal: if success {
+                LoginTerminal::Success
+            } else {
+                LoginTerminal::Failed
+            },
             message,
             source,
             duration: Duration::ZERO,
@@ -1179,7 +1183,7 @@ pub use crate::bridge::{Outcome as LoginOutcome, StructuredResult};
 pub use crate::status::LoginSource;
 pub use history::{HistoryResult, HistoryStore, LoginHistoryEntry, LoginHistoryService};
 pub use preemption::{PreemptionDecision, decide};
-pub use session::{LoginResult, LoginSession, ResultAction, TerminalKind};
+pub use session::{LoginResult, LoginSession, LoginTerminal, ResultAction};
 
 #[cfg(test)]
 mod tests {
@@ -1490,7 +1494,7 @@ mod tests {
         let finished = old.finished.clone();
         // 模拟旧会话 emit：set_result 后仍需 150ms 才完成 close_browser
         old.handle.inner.set_result(LoginResult {
-            success: false,
+            terminal: LoginTerminal::Cancelled,
             message: "被抢占".into(),
             source: LoginSource::Manual,
             duration: Duration::ZERO,

@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import builtins
 import json
+import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -138,7 +140,73 @@ def test_cancel_registry_pending_cap():
     assert len(reg._pending) <= reg._MAX_PENDING
 
 
+def test_force_interrupt_tears_down_debug_session(tmp_path):
+    from playwright_worker import WorkerCore, cancel_registry
+
+    class FakePage:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    page = FakePage()
+    screenshot = tmp_path / "credential.jpg"
+    screenshot.write_bytes(b"sensitive")
+    cancel_id = "debug-force-interrupt-test"
+    cancel_registry.register(cancel_id)
+    session = SimpleNamespace(
+        session_id="session-1",
+        page=page,
+        context=SimpleNamespace(screenshots=[str(screenshot)]),
+        cancel_id=cancel_id,
+    )
+    core = WorkerCore()
+    core._page = page
+    core._debug_sessions[session.session_id] = session
+
+    asyncio.run(core.force_interrupt_pending())
+
+    assert page.closed is True
+    assert core._page is None
+    assert core._debug_sessions == {}
+    assert screenshot.exists() is False
+    assert session.context.screenshots == []
+    assert session.cancel_id == ""
+    assert cancel_id not in cancel_registry._events
+
+
+def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
+    import playwright_worker as worker
+
+    files = [tmp_path / "old.png", tmp_path / "old.jpg", tmp_path / "old.jpeg"]
+    keep = tmp_path / "note.txt"
+    for path in [*files, keep]:
+        path.write_bytes(b"x")
+        # 固定早于模块加载时刻，避免文件系统时间精度导致边界不稳定。
+        os.utime(path, (1, 1))
+    monkeypatch.setattr(worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker, "_MODULE_LOAD_TIME", 2)
+
+    worker._purge_stale_debug_screenshots()
+
+    assert all(not path.exists() for path in files)
+    assert keep.exists()
+
+
 # ── 反馈资源快照（feedback_capture 纯函数）──
+
+
+def test_feedback_capture_dir_matches_rust_path_guard(monkeypatch, tmp_path):
+    from playwright_worker import _feedback_capture_dir
+
+    # Rust PathGuard 只允许 <base>/python_worker/debug，Worker 必须落盘在同一边界内
+    (tmp_path / "python_worker").mkdir()
+    monkeypatch.setenv("CAMPUS_AUTH_BASE_PATH", str(tmp_path))
+
+    assert _feedback_capture_dir("123") == (
+        tmp_path / "python_worker" / "debug" / "feedback-123"
+    )
 
 
 def test_resource_ext_by_mime():

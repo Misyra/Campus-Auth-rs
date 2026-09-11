@@ -1,7 +1,8 @@
 //! Axum 服务器构建与按需启停
 //!
 //! - `build_router()`：组装 CORS / gzip / 路由 / WebSocket / 静态文件
-//! - `start_axum()`：绑定端口（冲突 +1 重试，最多 5 次）→ serve → 记录运行端口
+//! - `prepare_axum_listener()`：真实绑定首选端口，冲突或 Windows 保留端口时由系统分配回退端口
+//! - `start_axum()`：组装 Router → serve → 记录运行端口
 //! - `stop_axum()`：优雅关闭
 
 use std::net::SocketAddr;
@@ -20,8 +21,6 @@ pub const WS_EVENT_CAPACITY: usize = 1024;
 
 /// 默认监听端口
 pub const DEFAULT_PORT: u16 = 50721;
-/// 端口冲突重试上限
-pub const PORT_RETRY_MAX: u16 = 5;
 /// 默认绑定地址（本地回环，Docker 环境由 launcher 覆盖为 0.0.0.0）
 pub const BIND_ADDR: [u8; 4] = [127, 0, 0, 1];
 /// Docker 默认绑定地址
@@ -60,6 +59,16 @@ pub struct AxumServeHandle {
     pub port: u16,
 }
 
+/// 已成功绑定、等待装配 Router 的 Axum 监听器
+///
+/// 完整模式在初始化服务容器前先持有该监听器，避免端口不可用时启动整套后台服务；
+/// 轻量模式则在用户首次打开控制台时按需创建。
+pub struct PreparedAxumListener {
+    listener: TcpListener,
+    /// 实际监听端口
+    pub port: u16,
+}
+
 /// 构建完整 Router（含中间件、State 注入、路由挂载）
 pub fn build_router(
     container: Arc<ServiceContainer>,
@@ -80,16 +89,26 @@ pub fn build_router(
     Ok(crate::web::build_router(state))
 }
 
-/// 启动 Axum 服务器（端口冲突 +1 重试，最多 `PORT_RETRY_MAX` 次）
+/// 判断绑定错误是否可通过改用其他端口恢复
 ///
-/// 成功后将实际监听端口写入 `config/.runtime_port`。
-/// `host` 为绑定地址字符串（如 `127.0.0.1` / `0.0.0.0`），为空则根据环境自动选择。
-pub async fn start_axum(
-    container: Arc<ServiceContainer>,
-    log_tx: broadcast::Sender<LogEntry>,
+/// Windows 的 WinNAT / Hyper-V excluded port range 常返回 WSAEACCES(10013)，
+/// 此时端口可能没有进程监听，但仍不能绑定；与真正的 AddrInUse 一样应换端口。
+fn is_recoverable_port_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::AddrInUse
+        || (cfg!(windows) && error.raw_os_error() == Some(10013))
+}
+
+/// 绑定 Axum 监听器
+///
+/// 首次直接绑定用户配置的端口。回环地址的端口若被占用，或 Windows 将其划入
+/// WinNAT / Hyper-V 保留区（10013），则绑定端口 0，让内核原子选择可用端口；
+/// 不做“先探测再绑定”，避免探测与使用之间被其他进程抢占的 TOCTOU 竞态。
+/// 非回环地址（如 Docker/LAN 的 `0.0.0.0`）保持固定端口语义，失败时明确报错，
+/// 避免容器端口映射或外部客户端在不知情时失配。
+pub async fn prepare_axum_listener(
     port: u16,
     host: Option<&str>,
-) -> anyhow::Result<AxumServeHandle> {
+) -> anyhow::Result<PreparedAxumListener> {
     let bind_ip = match host {
         Some(h) if !h.is_empty() => parse_bind_addr(h),
         _ => {
@@ -100,75 +119,92 @@ pub async fn start_axum(
             }
         }
     };
-    info!(%bind_ip, port, "Axum 绑定地址");
-    let mut bind_port = port;
+    info!(%bind_ip, requested_port = port, "准备 Axum 监听端口");
 
-    for attempt in 0..=PORT_RETRY_MAX {
-        let addr = SocketAddr::new(bind_ip, bind_port);
-        match TcpListener::bind(addr).await {
-            Ok(listener) => {
-                let actual_port = listener.local_addr()?.port();
-                // launcher 已有"服务已启动"类 info，绑定成功降为 debug 防重复播报
-                debug!(port = actual_port, "Axum 服务绑定成功");
-                // 写入运行端口记录（路径经 `utils::paths` 统一）
-                let port_path =
-                    crate::utils::paths::runtime_port_path(&container.config.base_path());
-                if let Err(e) = std::fs::write(&port_path, actual_port.to_string()) {
-                    warn!("写入运行端口文件失败: {e}");
-                }
-
-                let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-                let router = build_router(container, log_tx, shutdown_tx)?;
-                let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(());
-
-                let handle = tokio::spawn(async move {
-                    let server = axum::serve(listener, router.into_make_service());
-                    let result = server
-                        .with_graceful_shutdown(async move {
-                            let _ = stop_rx.changed().await;
-                        })
-                        .await;
-                    if let Err(e) = result {
-                        error!("Axum 服务异常退出: {e}");
-                    }
-                });
-
-                return Ok(AxumServeHandle {
-                    handle,
-                    stop_tx,
-                    shutdown_rx,
-                    port: actual_port,
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                if attempt < PORT_RETRY_MAX {
-                    warn!(
-                        port = bind_port,
-                        "端口被占用，尝试 {} ({} / {})",
-                        bind_port + 1,
-                        attempt + 1,
-                        PORT_RETRY_MAX
-                    );
-                    if bind_port == u16::MAX {
-                        anyhow::bail!("端口已到上限 65535");
-                    }
-                    bind_port += 1;
-                } else {
-                    anyhow::bail!(
-                        "端口 {}~{} 均被占用（重试 {} 次后放弃）",
-                        port,
-                        bind_port,
-                        PORT_RETRY_MAX
-                    );
-                }
-            }
-            Err(e) => {
-                anyhow::bail!("Axum 绑定失败: {e}");
-            }
+    let requested_addr = SocketAddr::new(bind_ip, port);
+    let listener = match TcpListener::bind(requested_addr).await {
+        Ok(listener) => listener,
+        Err(primary_error)
+            if port != 0 && bind_ip.is_loopback() && is_recoverable_port_error(&primary_error) =>
+        {
+            let fallback_addr = SocketAddr::new(bind_ip, 0);
+            let listener = TcpListener::bind(fallback_addr).await.map_err(|fallback_error| {
+                anyhow::anyhow!(
+                    "Axum 请求端口 {requested_addr} 不可用（{primary_error}），系统自动分配端口也失败: {fallback_error}"
+                )
+            })?;
+            let fallback_port = listener.local_addr()?.port();
+            warn!(
+                requested_port = port,
+                actual_port = fallback_port,
+                error = %primary_error,
+                "当前端口不可用，已随机选择可用端口"
+            );
+            listener
         }
+        Err(error) => anyhow::bail!("Axum 绑定 {requested_addr} 失败: {error}"),
+    };
+    let actual_port = listener.local_addr()?.port();
+    debug!(%bind_ip, requested_port = port, actual_port, "Axum 监听器绑定成功");
+    Ok(PreparedAxumListener {
+        listener,
+        port: actual_port,
+    })
+}
+
+/// 使用已绑定监听器启动 Axum 服务器
+///
+/// 成功后将实际监听端口写入 `config/.runtime_port`。
+pub fn start_axum_with_listener(
+    container: Arc<ServiceContainer>,
+    log_tx: broadcast::Sender<LogEntry>,
+    prepared: PreparedAxumListener,
+) -> anyhow::Result<AxumServeHandle> {
+    let PreparedAxumListener { listener, port } = prepared;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let router = build_router(container.clone(), log_tx, shutdown_tx)?;
+
+    // Router 构建成功后才发布运行端口，避免 auth token 等初始化失败时留下
+    // “已有 Web 服务”的陈旧端口记录。
+    let port_path = crate::utils::paths::runtime_port_path(&container.config.base_path());
+    if let Err(e) = std::fs::write(&port_path, port.to_string()) {
+        warn!(path = %port_path.display(), error = %e, "写入运行端口文件失败");
     }
 
-    unreachable!("端口重试循环应已返回或 bail")
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(());
+    let handle = tokio::spawn(async move {
+        let server = axum::serve(listener, router.into_make_service());
+        let result = server
+            .with_graceful_shutdown(async move {
+                let _ = stop_rx.changed().await;
+            })
+            .await;
+        if let Err(e) = result {
+            error!("Axum 服务异常退出: {e}");
+        }
+    });
+
+    Ok(AxumServeHandle {
+        handle,
+        stop_tx,
+        shutdown_rx,
+        port,
+    })
+}
+
+/// 绑定并启动 Axum 服务器
+///
+/// `host` 为绑定地址字符串（如 `127.0.0.1` / `0.0.0.0`），为空则根据环境自动选择。
+/// 完整模式优先拆用 [`prepare_axum_listener`] / [`start_axum_with_listener`]，以便在
+/// 初始化后台服务前确定端口；轻量模式按需启动可直接调用本函数。
+pub async fn start_axum(
+    container: Arc<ServiceContainer>,
+    log_tx: broadcast::Sender<LogEntry>,
+    port: u16,
+    host: Option<&str>,
+) -> anyhow::Result<AxumServeHandle> {
+    let prepared = prepare_axum_listener(port, host).await?;
+    start_axum_with_listener(container, log_tx, prepared)
 }
 
 /// 优雅关闭 Axum 服务器
@@ -209,11 +245,36 @@ mod tests {
         assert_eq!(parse_bind_addr(""), std::net::IpAddr::from(BIND_ADDR));
     }
 
-    /// 服务常量保持在合理边界内（端口重试不至于长时间阻塞启动）
+    /// 端口占用时不扫描相邻端口，直接由内核原子选择可用端口
+    #[tokio::test]
+    async fn test_prepare_listener_falls_back_from_occupied_port() {
+        let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::from(BIND_ADDR), 0))
+            .expect("占用测试端口");
+        let requested = occupied.local_addr().expect("读取测试端口").port();
+
+        let prepared = prepare_axum_listener(requested, Some("127.0.0.1"))
+            .await
+            .expect("应回退到系统分配端口");
+
+        assert_ne!(prepared.port, requested);
+        assert!(prepared.port > 0);
+    }
+
+    /// Windows WinNAT / Hyper-V 保留端口错误属于可恢复绑定错误
     #[test]
-    fn test_service_constants_within_sane_bounds() {
+    fn test_recoverable_port_error_classification() {
+        let occupied = std::io::Error::new(std::io::ErrorKind::AddrInUse, "occupied");
+        assert!(is_recoverable_port_error(&occupied));
+
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert!(!is_recoverable_port_error(&denied));
+
+        #[cfg(windows)]
+        assert!(is_recoverable_port_error(
+            &std::io::Error::from_raw_os_error(10013)
+        ));
+
         assert_eq!(DEFAULT_PORT, 50721);
         assert_eq!(WS_EVENT_CAPACITY, 1024);
-        assert!((1..=10).contains(&PORT_RETRY_MAX));
     }
 }
