@@ -1,6 +1,61 @@
-# 更新日志
+# 更改日志
 
-> 归档说明：历史轮次 inline 归档于本文件；过时规划见 `docs/archive/`；活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.8”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
+
+## v5.0.0-alpha.10（2026-09-11 发布与运行环境修复）
+
+### Python Worker 与 OCR
+
+- Python Worker 版本从主程序发布版本解耦，`pyproject.toml` / `uv.lock` / 健康回包 / Worker README 统一固定为 `1.0.0`
+- 修复 OCR 安装和卸载命令漏传 `add/remove` 子命令：实际执行现为 `uv add ddddocr>=1.6.1` / `uv remove ddddocr`，并新增参数顺序回归测试
+- `ddddocr` 继续作为按需能力，源码 `python_worker/pyproject.toml` 不默认声明；CI 全链路也改用 `uv add` 安装，不再绕过锁文件使用 `uv pip install`
+- Python 环境初始化拆为“解释器可运行 / Worker 核心可导入 / 依赖指纹已验证 / 浏览器可用”四层状态：`python --version` 不再被当作 Worker 就绪，系统 Edge/Chrome 也只能替代 Chromium 下载，不能掩盖 Playwright Python 包缺失
+- 新增真实 Worker import + `1.0.0` 版本探针以及 `python-runtime-state.json` 清单指纹；pyproject/uv.lock 或版本变化、`.venv-resync` 标记、import 失败任一命中即自动 `uv sync`，同步后必须复验成功才放行
+- 修复 uv 托管 Python 被清理后 `uv sync` 仍复用损坏 pyvenv.cfg 的深层故障：解释器实启失败时先将旧 `.venv` 原地隔离，重建并验证成功后清理备份；同步或验证失败则恢复旧目录，避免留下更差的半成品
+- Bridge 每次新建 Worker 前重新探测环境；首次 spawn/健康检查失败会在当前请求内强制同步并重试一次，仍失败才累计熔断，环境修复成功自动解除旧熔断
+- OCR 用户偏好迁移到独立的 `environment/python-preferences.json`：启用/禁用先持久化意图，再经 `uv add/remove` 对齐部署副本；失败保留偏好供后续重试，且 OCR 修复失败不阻断非 OCR 登录
+- OCR 初始化改走 Worker-only 门禁，不再为了验证码识别下载 Chromium；设置页新增 Python、Worker、托管 Chromium/系统浏览器的分层状态展示，“重新同步”按钮现在会真正强制同步而非就绪时空操作
+- 新增依赖指纹变化、OCR 偏好迁移、声明识别和“系统浏览器不得遮蔽 Worker 缺包”回归测试；`GET /api/init-status` 与日志导出环境摘要补齐 Worker、指纹、系统浏览器和 OCR 状态
+- 验证：Rust Clippy `-D warnings` 通过；库测试 694 项通过（3 个本机 Windows 进程探测挂起用例排除后），Bridge/单实例/登录链/更新通道集成测试单独通过；前端 73 项 Vitest 与生产构建通过；重建后的真实 venv 完成 Worker import + `1.0.0` 探针，Python pytest 150 项通过
+
+### Docker 部署
+
+- Rust 构建镜像对齐 `rust-toolchain.toml` 的 1.98，Cargo 拉取与 release 构建均强制 `--locked`，不再吞掉依赖拉取失败
+- Rust 构建阶段补入 `docs/guides/`，修复 `rust-embed` 在 Docker 构建上下文内找不到指南目录的硬失败；运行镜像显式补齐 Rust 二进制动态链接所需的 GTK / AppIndicator / librsvg / libxdo 库
+- uv 镜像从漂移的 `latest` 固定为 `0.12.6`；Rust 二进制实启、Worker 同步、Chromium 安装和 Python 导入校验任一失败即终止构建，不再降级为系统 pip 或吞错生成半成品镜像
+- 修正 Docker 文档代码块、环境变量表格和持久化说明，`.dockerignore` 补充 Python 与过程报告缓存排除
+- `docker-compose.yml` 默认拉取 `ghcr.io/misyra/campus-auth-rs:prerelease`，普通部署不再执行本地源码编译；新增 `docker-compose.build.yml` 保留显式自构建路径
+- Release 工作流使用 GitHub 原生 x64/ARM64 runner 并行构建架构镜像，在 GHCR 合并为版本 tag；预发布同步更新 `prerelease`，正式版同步更新 `latest`
+
+### 发布与仓库维护
+
+- GitHub Release 说明改为按 tag 自动读取 `docs/updatelog.md` 对应章节；缺失版本章节时直接阻止发布，避免静默发出空更新说明
+- 本地与 CI 便携包补入 `updatelog.md` / `changelog.md` / `known-issues.md` 和 LICENSE，保证包内 README 链接与许可证完整；同时携带 `src/` / `frontend/` / Cargo 清单 / `openapi.json` 最小构建上下文，修复便携包内 Dockerfile 无源码可构建的问题
+- 发布并发创建仅容忍“已存在”竞态，其他 GitHub Release 创建失败不再被 `|| true` 吞掉
+- 删除已跟踪的 `docs/archive/feedback-bilibili-final.zip`；BugReporter、审计与方案报告继续只保留在本地忽略目录，递归规则同时覆盖 `docs/` 下的嵌套报告目录
+- 发布版本提升至 `v5.0.0-alpha.10`，同步 `Cargo.toml`、`Cargo.lock`、前端包清单、OpenAPI 契约与项目说明；用户更新日志由“开发中”冻结为 2026-09-11 测试版
+
+## v5.0.0-alpha.10（2026-09-10 网络监测完整重构）
+
+### 检测与判定
+
+- 网络探测改为“原始证据 → 连通性解释 → 恢复建议”三层模型：HTTP 204 与 URL 内容属于强公网证据，TCP 只作补充；明确门户证据优先，单个补充探测失败不再覆盖已经确认的公网成功
+- 默认仅开启 HTTP 204 门户检测；TCP、URL 内容与本地链路诊断默认关闭，按需作为补充
+- 新增 `Unknown` 网络状态；所有探测关闭、只有 TCP 弱证据或证据冲突时不再伪装成 `Offline`。暂停改为独立的 Engine 行为状态，保留最后一次真实网络结论
+- 自动监测、手动网络测试、登录后验证拆成独立入口：只有自动监测会补充认证入口证据并给出恢复建议；手动测试在停止或暂停期间仍可运行，且不会触发登录；登录后验证只确认公网是否恢复
+- 本地网卡检查改为手动诊断的并行证据，不再位于自动监测关键路径，也不会单独触发或阻止登录
+
+### 自动恢复与可观测性
+
+- Engine 只消费类型化恢复建议，并统一执行停止、暂停、过期配置、冷却期及登录在途门控；明确门户但认证入口 TCP 预检失败时，同一配置版本最多谨慎尝试一次，避免永久假阴性与反复拉起浏览器
+- 状态快照新增连通性置信度、判定原因、认证入口状态、恢复建议与最近一次原始探测证据；仪表盘直接说明“为什么这样判断、接下来会做什么”
+- 手动网络测试返回结构化诊断摘要与本地链路结果，前端请求超时由 5 秒调整为 30 秒，避免后端仍在检测时客户端提前报错
+- 设置页将 HTTP 204 标为主要探测，TCP 与 URL 标为补充；登录前认证地址预检保持默认关闭并明确只影响手动/单次登录
+
+### 文档与仓库维护
+
+- 将 `docs/changelog.md` 明确为逐项记录开发变动的“更改日志”，历史内容原样保留；新增 `docs/updatelog.md`，只在形成可发布版本时汇总用户可感知的更新
+- BugReporter、审计、复核与方案预览等过程报告统一视为本地产物，通过 `.gitignore` 阻止新报告进入提交；此前已经跟踪的历史报告保持不变
 
 ## v5.0.0-alpha.8 后补丁轮（2026-09-08 日志系统整治）
 

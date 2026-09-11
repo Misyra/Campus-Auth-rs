@@ -4,7 +4,7 @@
 
 Campus-Auth 是一个校园网自动认证工具。Rust 重写版为单 binary crate + Python 子进程（浏览器自动化），便携版解压即用。Rust 侧负责控制平面（网络监测、登录状态机、调度、配置、Web API、系统托盘），Python 侧作为按需执行插件负责浏览器自动化（Playwright）和 OCR（ddddocr）。
 
-当前版本：5.0.0-alpha.9（见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `python_worker/pyproject.toml` / `openapi.json` 四端同版）
+当前主程序版本：5.0.0-alpha.10（用户可见更新见 `docs/updatelog.md`，逐项更改见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `openapi.json` 三端同版）。Python Worker 版本独立固定为 1.0.0。
 
 ## 技术栈
 
@@ -93,7 +93,7 @@ cd frontend && npm run build
 campus-auth/
 ├── Cargo.toml
 ├── openapi.json              # Web API 契约（手写 baseline，前端 typegen 数据源）
-├── Dockerfile / docker-compose.yml / .dockerignore  # Docker 部署（与便携包同源）
+├── Dockerfile / docker-compose.yml / docker-compose.build.yml / .dockerignore  # GHCR 部署 + 本地源码构建
 ├── docker/                   # Docker 辅助（entrypoint.sh / README / override 示例）
 ├── build.ps1                 # 便携版打包脚本（pwsh 7+，产物含 Docker 文件）
 ├── src/
@@ -122,7 +122,7 @@ campus-auth/
 ├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略），与 resources/ 职责分离
 ├── python_worker/            # Python Worker 子进程（Playwright + OCR）— 执行侧，对应 Rust 侧 src/bridge/，IPC 契约见 python_worker/README.md
 ├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；mock_portal/ 已搬迁至 tests/mock-servers/full-portal/（根保留 README 重定向）
-├── docs/                     # 文档（changelog / 已知问题清单 / 任务编写指南 / plan-next 活跃计划 / archive 归档，已兑现 docs/archive/）
+├── docs/                     # 文档（updatelog 用户更新 / changelog 逐项更改 / 已知问题 / plan-next / archive）
 ├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入，区别于 frontend/public 与 frontend/dist）
 └── .github/workflows/        # CI（fmt + clippy + test（含 e2e-login-chain + rust-tests-unix）+ 前端构建 + vitest + pytest）
 ```
@@ -203,6 +203,12 @@ cargo test -- --nocapture
 
 ## Git 规范
 
+### 日志与报告
+
+- 每次代码、配置、接口或文档更改都必须在 `docs/changelog.md` 记录；该文件是面向开发和追溯的“更改日志”
+- `docs/updatelog.md` 是面向用户的“更新日志”，只在形成可发布版本时从 changelog 汇总用户可感知的变化，不堆叠开发过程细节
+- BugReporter、代码审计、缺陷复核和方案预览等过程报告仅在本地使用，不得提交；新报告优先放在已忽略的 `docs/reports/` 中
+
 ### 分支策略
 
 | 分支 | 用途 |
@@ -246,9 +252,9 @@ Conventional Commits，中文描述：
 
 ### Python Worker 依赖
 
-- 安装 `ddddocr` 等依赖**必须**使用 `uv add` 写入 `python_worker/pyproject.toml` + `uv.lock`，禁止 `uv pip install` / `pip install` 临时安装（会导致锁文件不同步、CI 复现失败）
-- 示例：`cd python_worker && uv add --optional ocr "ddddocr==1.6.1"`（OCR 为可选能力，见 `pyproject.toml:[project.optional-dependencies].ocr`）
-- 同步环境：`uv sync --extra ocr` / `uv sync --group dev --extra ocr`；E2E 预热另需 `uv run playwright install chromium` 与 `uv run python -c "from ocr_runtime import _get_ocr; _get_ocr(False, None)"`
+- `ddddocr` 是按需能力，源码 `python_worker/pyproject.toml` 不得默认声明；用户安装/卸载时必须分别通过 `uv add "ddddocr>=1.6.1"` / `uv remove ddddocr` 改写部署副本的 `pyproject.toml` + `uv.lock`
+- 禁止用 `uv pip install` / `pip install` 绕过项目声明与锁文件；基础环境用 `uv sync`，开发环境用 `uv sync --group dev`
+- E2E 准备为 `uv sync --dev --frozen`、`uv add "ddddocr==1.6.1"`、`uv run playwright install chromium`，再预热 OCR 模型
 
 ### 配置系统
 
@@ -262,12 +268,14 @@ Conventional Commits，中文描述：
 
 ### 版本号
 
-版本号在 `Cargo.toml` 的 `version` 字段。升级时同步修改（四端同版，见文件头）：
+主程序版本号在 `Cargo.toml` 的 `version` 字段。升级时同步修改（三端同版，见文件头）：
 1. `Cargo.toml` — `version = "x.x.x"`
 2. `frontend/package.json` — `version`
-3. `python_worker/pyproject.toml` — `version`
-4. `openapi.json` — `info.version`
-5. `docs/changelog.md` — 新增版本条目
+3. `openapi.json` — `info.version`
+4. `docs/updatelog.md` — 新增或完成面向用户的版本条目
+5. `docs/changelog.md` — 记录本次版本与文件同步变更
+
+`python_worker/pyproject.toml` 与 Worker 健康回包的版本固定为 `1.0.0`，不跟随主程序版本变更。
 
 ### 更新通道
 

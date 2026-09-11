@@ -1,0 +1,7 @@
+services:
+  campus-auth:
+    # 本文件仅供源码开发和自定义构建；生产部署默认直接拉取 GHCR 镜像。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: campus-auth:local

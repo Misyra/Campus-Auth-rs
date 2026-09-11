@@ -9,7 +9,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ── Rust 构建 ──
-FROM rust:1.85-bookworm AS rust-builder
+FROM rust:1.98-bookworm AS rust-builder
 # 编译依赖：tray-icon 的 gtk 在 Docker 运行时不使用，但编译期仍需头文件
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
@@ -21,58 +21,50 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY openapi.json ./
 # 创建空入口骗过 cargo fetch 的路径检查
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > src/helper_main.rs
-RUN cargo fetch || true
+RUN cargo fetch --locked
 # 拷贝真实源码与前端产物
 COPY src ./src
 COPY resources ./resources
 COPY python_worker ./python_worker
+COPY docs/guides ./docs/guides
 COPY --from=frontend-builder /build/frontend/dist ./frontend/dist
 # 复写 dummy 入口后再正式编译
 RUN touch src/main.rs src/helper_main.rs
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # ── 运行时 ──
 FROM python:3.12-slim-bookworm
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# 基础系统依赖
+# 基础系统依赖；Rust 二进制虽以 --no-tray 运行，动态链接器仍需能解析编译时的 GTK/托盘库。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
+    libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 libxdo3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # 安装 uv（Python 包管理器，Worker 依赖安装用）
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.6 /uv /uvx /bin/
 
 # 拷贝 Rust 二进制
 COPY --from=rust-builder /build/target/release/campus-auth /usr/local/bin/campus-auth
 COPY --from=rust-builder /build/target/release/campus-auth-helper /usr/local/bin/campus-auth-helper
+RUN campus-auth --version
 
 # 拷贝 Python Worker 源码
 COPY python_worker ./python_worker
 
-# 预装 Python 依赖与 Playwright 浏览器（加速首次启动，无网络时可离线运行）
-# 优先用 uv 创建 venv 并安装，再装 Chromium 及其 OS 依赖；失败则降级到 pip
+# 预装 Python 依赖与 Playwright 浏览器（加速首次启动，无网络时可离线运行）。
+# 任一环节失败都终止构建，禁止产出“镜像成功、Worker 不可用”的半成品。
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --project python_worker --frozen --no-dev 2>&1 | tail -n 20; \
-    if [ -f python_worker/.venv/bin/python ]; then \
-        echo "[docker] venv 已创建，安装 Chromium..."; \
-        python_worker/.venv/bin/pip install --no-cache-dir "playwright>=1.40" 2>&1 | tail -n 5; \
-        python_worker/.venv/bin/playwright install --with-deps chromium 2>&1 | tail -n 20 || \
-        echo "[warn] venv 内 Chromium 安装失败，启动时重试"; \
-    else \
-        echo "[docker] venv 创建失败，尝试系统级安装..."; \
-        pip install --no-cache-dir "playwright>=1.40" 2>&1 | tail -n 5; \
-        playwright install --with-deps chromium 2>&1 | tail -n 20 || \
-        pip install --no-cache-dir playwright && playwright install chromium 2>&1 | tail -n 20 || \
-        echo "[warn] Playwright 预装失败，容器启动时将按需安装"; \
-    fi; \
-    # 同时预装系统级 playwright 供健康检查 fallback
-    pip install --no-cache-dir "playwright>=1.40" 2>&1 | tail -n 5 || true
+    uv sync --project python_worker --frozen --no-dev && \
+    uv run --project python_worker --frozen playwright install --with-deps chromium && \
+    uv run --project python_worker --frozen python -c "import playwright; import worker_main"
 
 # 暴露端口
 EXPOSE 50721

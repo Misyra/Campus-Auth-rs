@@ -11,13 +11,15 @@
 #   ├── campus-auth-helper(.exe)     # 更新替换助手
 #   ├── LICENSE                     # AGPL-3.0-only 全文（二进制分发必备）
 #   ├── Dockerfile                   # Docker 构建文件
-#   ├── docker-compose.yml           # Docker 编排
+#   ├── docker-compose.yml           # 默认 GHCR 镜像编排
+#   ├── docker-compose.build.yml     # 本地源码构建覆盖
 #   ├── .dockerignore                # Docker 上下文排除
 #   ├── docker/                      # Docker 辅助文件（entrypoint.sh 等）
 #   ├── README.md                    # 快速开始
 #   ├── resources/                   # 托盘图标 / task-recorder 等静态资源
+#   ├── src/ + frontend/             # Docker 镜像所需的最小源码构建上下文
 #   ├── python_worker/               # Python Worker 源码（运行时按需引导 uv 环境）
-#   └── docs/guides/                 # 离线指南（docs/guides/*.md）
+#   └── docs/                        # 更新/更改/已知问题 + 离线指南
 # 打包产物仅在 $Out（默认 dist/，见 .gitignore /dist/）；不再向项目根目录复制 exe，
 # 版本以 `target/release/campus-auth --version`（= Cargo.toml）为准，避免根残留误导。
 # 要求 pwsh 7+（UTF-8），Windows PowerShell 5.1 会按 ANSI 解析中文导致乱码。
@@ -51,7 +53,7 @@ if (-not $SkipFrontend) {
 Write-Host "=== 2/4 Rust release 构建 ==="
 Push-Location $Root
 try {
-    cargo build --release
+    cargo build --release --locked
 } finally {
     Pop-Location
 }
@@ -78,10 +80,24 @@ Copy-Item $helperExe $Out
 
 Copy-Item (Join-Path $Root "resources") (Join-Path $Out "resources") -Recurse
 
-# 指南随包：全部 docs/guides/*.md 供离线查阅（含 user-guide/task-writing-guide 等）
+# Dockerfile 是源码构建镜像；便携包需同时带最小构建上下文，不能只放一个无法执行的入口文件。
+Copy-Item (Join-Path $Root "src") (Join-Path $Out "src") -Recurse
+$frontendDst = Join-Path $Out "frontend"
+New-Item -ItemType Directory -Path $frontendDst | Out-Null
+Get-ChildItem (Join-Path $Root "frontend") -Force |
+    Where-Object { $_.Name -notin @("node_modules", "dist", ".vite", "coverage") } |
+    ForEach-Object { Copy-Item $_.FullName (Join-Path $frontendDst $_.Name) -Recurse -Force }
+foreach ($f in @("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "openapi.json")) {
+    Copy-Item (Join-Path $Root $f) (Join-Path $Out $f) -Force
+}
+
+# 日志与指南随包：README 中的文档链接在便携包内仍可用。
 $docsDst = Join-Path $Out "docs/guides"
 New-Item -ItemType Directory -Path $docsDst -Force | Out-Null
 Copy-Item (Join-Path $Root "docs/guides/*.md") $docsDst -Force
+foreach ($doc in @("updatelog.md", "changelog.md", "known-issues.md")) {
+    Copy-Item (Join-Path $Root "docs/$doc") (Join-Path $Out "docs/$doc") -Force
+}
 
 # 复制 python_worker 时排除本地虚拟环境（运行时按需重建），避免先全量复制再删除的双重 IO；
 # __pycache__ 与 release.yml 口径对齐一并排除（运行时自动再生）
@@ -101,7 +117,7 @@ Get-ChildItem $workerDst -Recurse -File -Filter "*.pyc" -ErrorAction SilentlyCon
 
 # Docker 部署文件（与 release.yml 口径一致）
 # LICENSE 随包：AGPL §6 二进制分发需附带许可证文本
-foreach ($f in @("LICENSE", "Dockerfile", "docker-compose.yml", ".dockerignore", "README.md")) {
+foreach ($f in @("LICENSE", "Dockerfile", "docker-compose.yml", "docker-compose.build.yml", ".dockerignore", "README.md")) {
     $src = Join-Path $Root $f
     if (Test-Path $src) { Copy-Item $src $Out -Force }
 }
@@ -119,4 +135,4 @@ $sizeMB = [math]::Round(
 Write-Host "=== 4/4 完成 ==="
 Write-Host "便携版输出: $Out（约 ${sizeMB} MB，解压后直接运行 campus-auth$exeSuffix）"
 Write-Host "本地冒烟: $Out\campus-auth$exeSuffix --status（勿用 target/debug 测 release 行为）"
-Write-Host "Docker 部署: 解压后 docker compose up -d --build（需 Dockerfile/docker-compose.yml/docker/）"
+Write-Host "Docker 部署: 解压后 docker compose pull && docker compose up -d（默认 GHCR 预构建镜像）"

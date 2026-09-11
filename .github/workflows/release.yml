@@ -5,8 +5,9 @@ name: Release
 # 产物与 build.ps1 口径一致（解压即用）：
 #   campus-auth(-helper)(.exe)  # 主程序（前端已嵌入）+ 更新替换助手
 #   resources/                  # 托盘图标 / task-recorder 等静态资源
+#   src/ + frontend/ + Cargo 清单 # Dockerfile 的最小源码构建上下文
 #   python_worker/              # Python Worker 源码（运行时按需引导 uv 环境）
-#   Dockerfile / docker-compose.yml / .dockerignore / docker/  # Docker 部署（与 build.ps1 口径一致）
+#   Dockerfile / docker-compose*.yml / .dockerignore / docker/  # Docker 部署与源码构建覆盖
 #   README.md                     # 快速开始
 #
 # 矩阵：Windows x64 / Windows arm64（MSVC 目标由 windows runner 自带工具链交叉编译）/
@@ -22,6 +23,7 @@ on:
 # gh release create/upload 需要写权限
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -121,7 +123,18 @@ jobs:
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth.exe" $out
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth-helper.exe" $out
           Copy-Item "resources" "$out/resources" -Recurse
+          Copy-Item "src" "$out/src" -Recurse
+          New-Item -ItemType Directory -Path "$out/frontend" | Out-Null
+          Get-ChildItem "frontend" -Force |
+            Where-Object { $_.Name -notin @("node_modules", "dist", ".vite", "coverage") } |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path "$out/frontend" $_.Name) -Recurse -Force }
+          foreach ($file in @("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "openapi.json")) {
+            Copy-Item $file "$out/$file" -Force
+          }
           New-Item -ItemType Directory -Path "$out/docs/guides" -Force | Out-Null
+          foreach ($doc in @("updatelog.md", "changelog.md", "known-issues.md")) {
+            Copy-Item "docs/$doc" "$out/docs/$doc" -Force
+          }
           Copy-Item "docs/guides/*.md" "$out/docs/guides" -Force
           Get-ChildItem "python_worker" -Force | Where-Object { $_.Name -ne ".venv" } |
             ForEach-Object { Copy-Item $_.FullName (Join-Path "$out/python_worker" $_.Name) -Recurse -Force }
@@ -133,8 +146,10 @@ jobs:
           Get-ChildItem "$out/python_worker" -Recurse -File -Filter "*.pyc" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
           Copy-Item "Dockerfile" "$out" -Force
           Copy-Item "docker-compose.yml" "$out" -Force
+          Copy-Item "docker-compose.build.yml" "$out" -Force
           Copy-Item ".dockerignore" "$out" -Force
           Copy-Item "README.md" "$out/README.md" -Force
+          Copy-Item "LICENSE" "$out/LICENSE" -Force
           Copy-Item "docker" "$out/docker" -Recurse -Force
           Compress-Archive -Path "$out/*" -DestinationPath $env:ARCHIVE
 
@@ -145,10 +160,16 @@ jobs:
           cp "target/$RELEASE_TARGET/release/campus-auth" pkg/
           cp "target/$RELEASE_TARGET/release/campus-auth-helper" pkg/
           cp -R resources pkg/resources
-          mkdir -p pkg/docs/guides && cp docs/guides/*.md pkg/docs/guides/
+          cp -R src pkg/src
+          mkdir -p pkg/frontend
+          tar -C frontend --exclude=node_modules --exclude=dist --exclude=.vite --exclude=coverage -cf - . | tar -C pkg/frontend -xf -
+          cp Cargo.toml Cargo.lock rust-toolchain.toml openapi.json pkg/
+          mkdir -p pkg/docs/guides
+          cp docs/updatelog.md docs/changelog.md docs/known-issues.md pkg/docs/
+          cp docs/guides/*.md pkg/docs/guides/
           tar -C python_worker --exclude=.venv --exclude=__pycache__ --exclude=.pytest_cache --exclude=.tmp-uv-cache --exclude=.mypy_cache --exclude=.ruff_cache --exclude=captures --exclude=build --exclude=dist --exclude=node_modules --exclude='*.pyc' -cf - . | tar -C pkg/python_worker -xf -
-          cp Dockerfile docker-compose.yml .dockerignore README.md pkg/ 2>/dev/null || true
-          cp -R docker pkg/docker 2>/dev/null || true
+          cp Dockerfile docker-compose.yml docker-compose.build.yml .dockerignore README.md LICENSE pkg/
+          cp -R docker pkg/docker
           tar -czf "$ARCHIVE" -C pkg .
 
       # 生成 SHA256 校验文件（更新器按 SHA 校验完整性的前置数据）；mac 无 sha256sum，回退 shasum
@@ -165,19 +186,23 @@ jobs:
           [System.IO.File]::WriteAllText("$env:ARCHIVE.sha256", "$hash  $env:ARCHIVE")
 
       # Release 创建存在并发竞态（六个 job 同时打首个包）：
-      # create 失败仅可能是"已存在"，容忍后由 upload 继续幂等上传（--clobber 可重跑覆盖）
-      # 发布说明 = 本版更新日志（docs/changelog.md 对应章节）+ 三端运行前提；
+      # 只在已存在时容忍 create 竞态，其他失败不得被吞掉
+      # 发布说明 = 本版更新日志（docs/updatelog.md 对应章节）+ 三端运行前提；
       # 六个 job 算出同一份内容，首个 create 生效（macOS quarantine 指引 W9、Linux GTK 依赖 W8）
       - name: 上传到 GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          section="$(awk -v tag="$GITHUB_REF_NAME" '/^## /{t=substr($0,4); n=substr(t,length(tag)+1,1); on=(substr(t,1,length(tag))==tag&&(t==tag||(n!=""&&n!="."&&n!="-"&&!(n>="0"&&n<="9")&&index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",n)==0))); if(on){sub(/\r$/,"");print;next}} on{sub(/\r$/,"");print}' docs/changelog.md)"
+          section="$(awk -v tag="$GITHUB_REF_NAME" '/^## /{t=substr($0,4); n=substr(t,length(tag)+1,1); on=(substr(t,1,length(tag))==tag&&(t==tag||(n!=""&&n!="."&&n!="-"&&!(n>="0"&&n<="9")&&index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",n)==0))); if(on){sub(/\r$/,"");print;next}} on{sub(/\r$/,"");print}' docs/updatelog.md)"
+          if [ -z "$section" ]; then
+            echo "docs/updatelog.md 中未找到标签 $GITHUB_REF_NAME 对应的版本章节" >&2
+            exit 1
+          fi
           {
             echo "## 更新日志"
             echo
-            if [ -n "$section" ]; then printf '%s\n' "$section"; else echo "见仓库 docs/changelog.md"; fi
+            printf '%s\n' "$section"
             echo
             printf '%s\n' \
               '## 平台运行说明' \
@@ -186,8 +211,84 @@ jobs:
               '- **macOS**：浏览器下载的二进制带 quarantine 属性，Gatekeeper 会拦截，首次运行前先执行 `xattr -cr campus-auth`（或对解压后的整个目录 `xattr -cr .`）；解压用 `tar -xzf`' \
               '- **Linux**：二进制动态链接 GTK3 / libayatana-appindicator / librsvg（托盘），最小系统需先安装运行时库，Debian/Ubuntu：`sudo apt install libgtk-3-0 libayatana-appindicator3-1 librsvg2-2`；解压用 `tar -xzf`，执行 `./campus-auth`' \
               '- **Linux ARM64**：同上依赖；构建于 ubuntu-24.04（glibc 较新），老发行版（Debian 11/Ubuntu 20.04 及更早）可能因 glibc 过旧无法运行，建议 Debian 12+/Ubuntu 22.04+；树莓派 OS（64 位）可直接运行' \
+              "- **Docker**：预构建多架构镜像为 \`ghcr.io/misyra/campus-auth-rs:$GITHUB_REF_NAME\`，\`prerelease\` 指向最新测试版，正式版更新 \`latest\`" \
               '- 各平台 .sha256 为对应压缩包的 SHA256 校验文件'
           } > /tmp/release-notes.md
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md || true
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md || \
+              gh release view "$GITHUB_REF_NAME" >/dev/null
+          fi
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+
+  docker:
+    name: 构建 Docker ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux/amd64
+            suffix: amd64
+          - os: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    env:
+      IMAGE_NAME: ghcr.io/misyra/campus-auth-rs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 登录 GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: 构建并推送架构镜像
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ matrix.suffix }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha,scope=docker-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.suffix }}
+
+  docker-manifest:
+    name: 发布 Docker 多架构清单
+    needs: [build, docker]
+    runs-on: ubuntu-22.04
+    env:
+      IMAGE_NAME: ghcr.io/misyra/campus-auth-rs
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: 合并并校验多架构镜像
+        shell: bash
+        run: |
+          mutable_tag="latest"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            mutable_tag="prerelease"
+          fi
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:$GITHUB_REF_NAME" \
+            --tag "$IMAGE_NAME:$mutable_tag" \
+            "$IMAGE_NAME:$GITHUB_REF_NAME-amd64" \
+            "$IMAGE_NAME:$GITHUB_REF_NAME-arm64"
+          docker buildx imagetools inspect "$IMAGE_NAME:$GITHUB_REF_NAME"

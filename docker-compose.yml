@@ -1,9 +1,7 @@
 services:
   campus-auth:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: campus-auth:latest
+    # 默认拉取预构建多架构测试镜像；可通过 CAMPUS_AUTH_IMAGE 固定到具体版本。
+    image: ${CAMPUS_AUTH_IMAGE:-ghcr.io/misyra/campus-auth-rs:prerelease}
     container_name: campus-auth
     restart: unless-stopped
     ports:
@@ -11,7 +9,7 @@ services:
       # 本工具的 token 仅用于本地浏览器会话防护，不是远程访问凭证。
       - "127.0.0.1:50721:50721"
     volumes:
-      # 持久化数据：配置 / Profile / 任务 / 日志 / Python 环境
+      # 持久化数据：配置 / Profile / 任务 / 日志 / 环境引导状态
       - campus-auth-data:/data
       # 可选：如需持久化浏览器数据（登录态），已包含在 /data/config/browser-data
     environment:

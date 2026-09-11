@@ -5,6 +5,8 @@ python_worker/.venv
 python_worker/__pycache__
 python_worker/.pytest_cache
 python_worker/.tmp-uv-cache
+python_worker/.tmp-uv-audit-cache
+.pytest_cache
 __pycache__
 *.pyc
 .git
@@ -14,6 +16,9 @@ __pycache__
 .vscode
 .idea
 *.log
+docs/reports
+docs/**/*bugreport*
+docs/**/*BugReporter*
 logs
 config
 tasks/active.txt

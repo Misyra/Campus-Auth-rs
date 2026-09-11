@@ -1,6 +1,6 @@
 # 指南索引
 
-> 本目录为面向用户的操作指南（与 `docs/changelog.md` / `docs/known-issues.md` / `docs/plan-next.md` 的面向开发者文档区分）。
+> 本目录为面向用户的操作指南（与 `docs/changelog.md` / `docs/known-issues.md` / `docs/plan-next.md` 的面向开发者文档区分）。版本更新摘要单独维护在 `docs/updatelog.md`。
 
 ## 入门
 
@@ -15,7 +15,8 @@
 
 ## 相关链接
 
-- [更新日志](../changelog.md) — 版本变更记录
+- [更新日志](../updatelog.md) — 面向用户的版本更新摘要
+- [更改日志](../changelog.md) — 每项开发变动与问题修复记录
 - [已知问题](../known-issues.md) — 仍有效的未修复项
 - [后续计划](../plan-next.md) — 活跃计划入口
 - [架构与开发规范](../../AGENTS.md) — ServiceContainer、Bridge、Updater 通道等

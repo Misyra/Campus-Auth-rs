@@ -24,7 +24,7 @@ Rust 重写版为便携式单二进制 + Python 子进程（浏览器自动化�
 1. 从 Release 下载便携包并解压
 2. 双击 `campus-auth.exe` 启动（或命令行运行）
 3. 首次启动在系统托盘或 Web 控制台 `http://127.0.0.1:50721` 配置学校认证信息
-4. Python Worker（Playwright / OCR）按需自动安装，无需手动配置
+4. Python Worker（Playwright）首次需要时自动修复；验证码任务再到「设置·环境」按需启用 OCR
 
 ### 从源码构建
 
@@ -44,8 +44,9 @@ cargo run
 ### Docker 部署
 
 ```bash
-# 一键启动（后台，自动构建镜像 + 持久化数据卷）
-docker compose up -d --build
+# 拉取预构建镜像并启动（后台）
+docker compose pull
+docker compose up -d
 
 # 日志与健康检查
 docker compose logs -f
@@ -53,6 +54,13 @@ curl http://localhost:50721/api/health
 ```
 
 Web 控制台 `http://localhost:50721`，数据持久化于命名卷 `campus-auth-data`（`config/` / `tasks/` / `logs/`）。
+
+默认拉取 `ghcr.io/misyra/campus-auth-rs:prerelease` 多架构镜像。需要固定版本时设置
+`CAMPUS_AUTH_IMAGE=ghcr.io/misyra/campus-auth-rs:v5.0.0-alpha.10`；需要从当前源码构建时使用：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
 宿主机目录挂载、host 网络等进阶用法见 [docker/README.md](docker/README.md)。
 
 ```bash
@@ -89,7 +97,7 @@ campus-auth/
 - 提交规范：Conventional Commits，中文描述（详见 [AGENTS.md](AGENTS.md) 的 Git 规范）
 - 开发命令：`cargo build` / `cargo test` / `cargo clippy -- -D warnings` / `cargo fmt`
 - CI：`cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test`（含 `rust-tests-unix` 与 `e2e-login-chain` mock→二进制→Worker 全链路）+ 前端构建（`vue-tsc` + `vite build`）+ `vitest` + `compileall` + `uv run pytest`（见 `.github/workflows/ci.yml`）
-- 变更记录见 [docs/changelog.md](docs/changelog.md)，已知问题见 [docs/known-issues.md](docs/known-issues.md)
+- 面向用户的版本更新见 [docs/updatelog.md](docs/updatelog.md)，逐项开发更改见 [docs/changelog.md](docs/changelog.md)，已知问题见 [docs/known-issues.md](docs/known-issues.md)
 
 ## 许可证
 

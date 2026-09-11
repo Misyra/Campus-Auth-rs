@@ -104,6 +104,8 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 5. 浏览器自动化与调试
 
+- 环境就绪分四层判断：Python 解释器能启动、Worker/Playwright 包能真实导入、当前 pyproject/uv.lock 指纹已验证、存在 Playwright Chromium 或可用的系统 Edge/Chrome。已有系统浏览器只会免去 Chromium 下载，不会跳过 Python 包检查。
+- 每次真正拉起 Worker 前都会重新探测；若依赖缺失或清单变化，会先执行 `uv sync` 并复验。首次启动/健康检查仍失败时，当前请求会强制修复并重试一次，连续失败才进入熔断。
 - Playwright 渠道：`msedge`（默认）、`chromium`、`chrome`、`firefox`、`webkit`，支持自定义可执行文件路径与 `browser_args`（每行一个，`#` 注释，Worker 侧过滤敏感参数）。
 - 调试：`POST /api/debug/start`（前置环境就绪检查，缺失自动引导）、`POST /api/debug/step` / `stop` / `run_all`；前端调试面板单步执行并展示 `steps`，支持导出反馈包（含截图、MHTML、日志）。
 - 反馈包：`POST /api/debug/capture` 采集页面快照与日志，打包 `debug/` 归档。
@@ -111,7 +113,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 ## 6. 验证码（OCR）
 
 - 仅 `ocr` 步骤需要；依赖 `ddddocr`（约 120MB，不预声明，用时经应用内安装，用完可卸载）。
-- 在「设置·任务」页安装，装好后可用“验证码识别”上传截图试识别；未安装时非 OCR 浏览器任务仍可运行（`src/environment` 按需引导，启动即后台探测环境状态）。
+- 在「设置·环境」页安装，装好后可用“验证码识别”上传截图试识别；OCR 偏好独立保存并通过 `uv add/remove` 对齐，安装失败不会阻断非 OCR 浏览器任务，也不会为了 OCR 单独下载 Chromium。
 
 ## 7. 系统托盘与开机自启
 
@@ -143,7 +145,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ### Playwright / Chromium 下载失败
 
-项目经 `uv` 与多镜像（`npmmirror` / 清华 PyPI）尝试下载；失败时可在「系统设置」重试或检查 `environment/` 权限与代理设置。Docker 镜像构建时已预装 Chromium，宿主机部署按需等待首次下载完成。
+项目经 `uv` 与多镜像（`npmmirror` / 清华 PyPI）尝试下载；失败时可在「设置·环境」查看分层状态并执行“重新同步”，或检查 `environment/` 权限与代理设置。Docker 镜像构建时已预装 Chromium，宿主机部署按需等待首次下载完成。
 
 ### 服务提示已启动
 
@@ -183,4 +185,4 @@ Windows 自启动为计划任务，部分杀毒软件可能拦截，建议将 `c
 - [任务使用手册](task-manual.md) — 日常管理、录制器、调试
 - [自定义脚本指南](custom-script-guide.md) — `script` / `shell` 三类任务与 `POST /api/scripts/run`
 - [项目结构与架构](../../AGENTS.md) — ServiceContainer 15 字段、Updater 通道、Bridge 协议
-- [更新日志](../changelog.md) · [已知问题](../known-issues.md)
+- [更新日志](../updatelog.md) · [更改日志](../changelog.md) · [已知问题](../known-issues.md)
