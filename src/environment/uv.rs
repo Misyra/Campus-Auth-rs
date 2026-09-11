@@ -170,7 +170,20 @@ pub(crate) async fn command_output_streaming(
         }
     }
 
-    let status = child.wait().await.map_err(CommandOutputError::Io)?;
+    // 子进程可以主动关闭 stdout/stderr 后继续存活；管道 EOF 不代表进程已经退出。
+    // `wait` 必须继续受同一个总 deadline 与取消令牌约束，否则会绕过上面的保护永久挂起。
+    let status = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            kill_process_tree(&mut child);
+            return Err(CommandOutputError::Cancelled);
+        }
+        _ = &mut deadline => {
+            kill_process_tree(&mut child);
+            return Err(CommandOutputError::Timeout);
+        }
+        result = child.wait() => result.map_err(CommandOutputError::Io)?,
+    };
     Ok(std::process::Output {
         status,
         stdout: out_buf,
@@ -975,15 +988,16 @@ fn uv_package_alter_command(
 
 /// `pyproject.toml` + `uv.lock` 快照：`uv add/remove` 改写前备份，失败/取消回滚。
 struct ProjectFilesBackup {
-    pairs: Vec<(PathBuf, PathBuf)>,
+    entries: Vec<(PathBuf, Option<PathBuf>)>,
 }
 
 impl ProjectFilesBackup {
     async fn take(project_dir: &Path) -> std::io::Result<Self> {
-        let mut pairs = Vec::with_capacity(2);
+        let mut entries = Vec::with_capacity(2);
         for name in ["pyproject.toml", "uv.lock"] {
             let orig = project_dir.join(name);
             if !orig.is_file() {
+                entries.push((orig, None));
                 continue;
             }
             let bak = {
@@ -992,26 +1006,34 @@ impl ProjectFilesBackup {
                 PathBuf::from(name)
             };
             tokio::fs::copy(&orig, &bak).await?;
-            pairs.push((orig, bak));
+            entries.push((orig, Some(bak)));
         }
-        Ok(Self { pairs })
+        Ok(Self { entries })
     }
 
     /// 失败回滚：备份覆盖回原位（best-effort，逐个告警）。
     async fn restore(self) {
-        for (orig, bak) in &self.pairs {
-            if let Err(e) = tokio::fs::copy(bak, orig).await {
-                tracing::warn!("回滚 {} 失败: {e}", orig.display());
-                continue;
+        for (orig, backup) in &self.entries {
+            if let Some(bak) = backup {
+                if let Err(e) = tokio::fs::copy(bak, orig).await {
+                    tracing::warn!("回滚 {} 失败: {e}", orig.display());
+                    continue;
+                }
+                let _ = tokio::fs::remove_file(bak).await;
+            } else if let Err(e) = tokio::fs::remove_file(orig).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("回滚新建文件 {} 失败: {e}", orig.display());
+                }
             }
-            let _ = tokio::fs::remove_file(bak).await;
         }
     }
 
     /// 成功提交：删除备份。
     async fn discard(self) {
-        for (_, bak) in &self.pairs {
-            let _ = tokio::fs::remove_file(bak).await;
+        for (_, backup) in &self.entries {
+            if let Some(bak) = backup {
+                let _ = tokio::fs::remove_file(bak).await;
+            }
         }
     }
 }
@@ -1339,6 +1361,37 @@ mod tests {
         );
     }
 
+    /// 即使子进程提前关闭两个输出管道，后续 `wait` 仍受总超时约束。
+    #[tokio::test]
+    async fn test_command_output_streaming_timeout_after_both_pipes_close() {
+        #[cfg(windows)]
+        let cmd = {
+            let mut cmd = uv_command(std::path::Path::new("powershell.exe"));
+            cmd.args([
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.Close(); [Console]::Error.Close(); Start-Sleep -Seconds 30",
+            ]);
+            cmd
+        };
+        #[cfg(not(windows))]
+        let cmd = {
+            let mut cmd = uv_command(std::path::Path::new("sh"));
+            cmd.args(["-c", "exec 1>&-; exec 2>&-; sleep 30"]);
+            cmd
+        };
+
+        let cancel = CancellationToken::new();
+        let started = std::time::Instant::now();
+        let result =
+            command_output_streaming(cmd, std::time::Duration::from_secs(1), &cancel, |_| {}).await;
+        assert!(matches!(result, Err(CommandOutputError::Timeout)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "管道 EOF 后的进程等待必须受总超时约束"
+        );
+    }
+
     /// URL 构造：压缩包与 sha256 均指向主站对应文件（资产扩展名按平台：
     /// Windows zip / unix tar.gz）
     #[test]
@@ -1504,6 +1557,25 @@ mod tests {
         let backup = ProjectFilesBackup::take(dir.path()).await.unwrap();
         backup.discard().await;
         assert!(!dir.path().join("pyproject.toml.bak").exists());
+        assert_eq!(
+            std::fs::read(&pyproject).unwrap(),
+            b"[project]\nname = \"x\"\n"
+        );
+    }
+
+    /// 原先不存在的锁文件若被失败命令新建，restore 必须把它删除。
+    #[tokio::test]
+    async fn test_project_files_backup_removes_new_file_on_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        let lock = dir.path().join("uv.lock");
+        std::fs::write(&pyproject, b"[project]\nname = \"x\"\n").unwrap();
+
+        let backup = ProjectFilesBackup::take(dir.path()).await.unwrap();
+        std::fs::write(&lock, b"new lock").unwrap();
+        backup.restore().await;
+
+        assert!(!lock.exists());
         assert_eq!(
             std::fs::read(&pyproject).unwrap(),
             b"[project]\nname = \"x\"\n"

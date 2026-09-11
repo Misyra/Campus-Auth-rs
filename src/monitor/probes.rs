@@ -43,6 +43,16 @@ fn parse_host_port(target: &str) -> Option<(String, u16)> {
 /// 避免 `::1` 被误拆成空 host + 端口 `1`）。返回值可直接用于
 /// `TcpStream::connect((host.as_str(), port))`。
 pub fn parse_url_host_port(input: &str) -> Option<(String, u16)> {
+    if input.contains("://") {
+        let parsed = reqwest::Url::parse(input).ok()?;
+        let host = parsed
+            .host_str()?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let port = parsed.port_or_known_default()?;
+        return Some((host, port));
+    }
     let (scheme, rest) = match input.split_once("://") {
         Some((s, r)) => (s, r),
         None => ("http", input),
@@ -289,7 +299,16 @@ async fn probe_url_one(
                         Err(e) => {
                             // 读 body 中断属瞬态网络问题，仅 debug 避免断网期间刷屏
                             tracing::debug!(url = %url, "读取 URL 探测响应体失败: {e}");
-                            break;
+                            return (
+                                ProbeOutcome::Fail,
+                                PerProbeDetail::new(
+                                    url.to_string(),
+                                    false,
+                                    start,
+                                    Some(status),
+                                    Some(format!("读取响应体失败: {e}")),
+                                ),
+                            );
                         }
                     }
                 }
@@ -405,6 +424,8 @@ impl PerProbeDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
 
     // ============ parse_url_host_port：auth_url 地址解析单点（G2） ============
 
@@ -456,6 +477,10 @@ mod tests {
             parse_url_host_port("https://[2001:db8::1]/"),
             Some(("2001:db8::1".to_string(), 443))
         );
+        assert_eq!(
+            parse_url_host_port("https://user:pass@portal.example.edu:8443/login"),
+            Some(("portal.example.edu".to_string(), 8443))
+        );
     }
 
     #[test]
@@ -467,6 +492,40 @@ mod tests {
         assert_eq!(parse_url_host_port("host:99999"), None);
         // 方括号不闭合
         assert_eq!(parse_url_host_port("[::1:8080"), None);
+    }
+
+    /// 响应体在预期内容之后中断时也必须判定为探测失败，不能用已收到的
+    /// 部分内容误报 Pass。
+    #[tokio::test]
+    async fn test_url_probe_rejects_truncated_body_after_expected_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\nexpected",
+                )
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let url = format!("http://{address}/probe");
+        let expected = HashMap::from([(url.clone(), "expected".to_string())]);
+        let (outcome, details) = UrlProbe::run(
+            &Client::new(),
+            std::slice::from_ref(&url),
+            &expected,
+            Duration::from_secs(2),
+        )
+        .await;
+        server.await.unwrap();
+
+        assert_eq!(outcome, ProbeOutcome::Fail);
+        assert_eq!(details.len(), 1);
+        assert!(!details[0].success);
+        assert!(details[0].error.is_some(), "中断原因必须写入探测明细");
     }
 
     // ============ parse_host_port：TCP 目标严格 host:port ============

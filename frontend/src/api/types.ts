@@ -16,6 +16,13 @@ export interface MutationResult {
   [key: string]: unknown;
 }
 
+/** 手动登录业务结果；登录失败仍以 HTTP 200 返回，由 success 表达终态。 */
+export interface LoginResultResponse {
+  success: boolean;
+  message: string;
+  duration: number;
+}
+
 /** 背景图上传/拉取返回的业务负载 */
 export interface BackgroundUploadResult {
   filename?: string;

@@ -157,7 +157,7 @@ async function manualLogin(): Promise<void> {
       await fetchLoginHistory(true);
       return;
     }
-    notify(true, msg, "login");
+    notify(data.success, msg, "login");
     await fetchLoginHistory(true);
   } catch (error) {
     const msg = extractApiError(error, "手动登录失败");

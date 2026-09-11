@@ -191,7 +191,11 @@ fn parse_adapter_block(block: &str) -> Option<InterfaceInfo> {
         }
         // 默认网关（中英文标签兼容）
         if trimmed.contains("默认网关") || trimmed.contains("Default Gateway") {
-            gateway = extract_ipv4(trimmed);
+            // ipconfig 常把 IPv6 网关与 IPv4 网关分成两行；后续 IPv6/空行
+            // 不能清掉已经解析到的 IPv4 网关。
+            if let Some(parsed) = extract_ipv4(trimmed) {
+                gateway = Some(parsed);
+            }
         }
         // 已断开的适配器（"媒体状态: 已断开" / "Media State: Media disconnected"）
         if (trimmed.contains("媒体状态") || trimmed.to_ascii_lowercase().contains("media state"))
@@ -549,7 +553,11 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
             }
             current_name = name.to_string();
             current_ipv4 = None;
-            current_is_up = line.contains("UP");
+            current_is_up = line
+                .split_once('<')
+                .and_then(|(_, tail)| tail.split_once('>'))
+                .map(|(flags, _)| flags.split(',').any(|flag| flag.trim() == "UP"))
+                .unwrap_or(false);
             in_block = true;
         }
         if !in_block {

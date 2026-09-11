@@ -115,6 +115,40 @@ describe("updateStatus 权威推送", () => {
     expect(networkStatus.value).toBe("checking");
     expect(networkStatusText.value).toBe("自动监测已暂停");
   });
+
+  it("冷却剩余时间会本地递减，重复快照不重置倒计时", () => {
+    vi.useFakeTimers();
+    updateStatus(
+      backendRaw({
+        snapshot_version: 3,
+        network_status: "captive_portal",
+        cooling_down: true,
+        cooling_down_remaining: 5,
+      }) as unknown as Partial<StatusSnapshot>,
+    );
+    vi.advanceTimersByTime(2100);
+    expect(status.cooling_down_remaining).toBe(3);
+
+    updateStatus(
+      backendRaw({
+        snapshot_version: 4,
+        network_status: "captive_portal",
+        cooling_down: true,
+        cooling_down_remaining: 5,
+      }) as unknown as Partial<StatusSnapshot>,
+    );
+    vi.advanceTimersByTime(1000);
+    expect(status.cooling_down_remaining).toBe(2);
+
+    updateStatus(
+      backendRaw({
+        snapshot_version: 5,
+        cooling_down: false,
+        cooling_down_remaining: null,
+      }) as unknown as Partial<StatusSnapshot>,
+    );
+    vi.useRealTimers();
+  });
 });
 
 describe("fetchAutostart 与失败通知", () => {

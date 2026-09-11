@@ -504,8 +504,8 @@ impl LoginSession {
                 session_start,
                 *attempts_used,
                 format!(
-                    "重试耗尽（共 {} 次）: {}{}",
-                    self.params.max_retries,
+                    "重试耗尽（共 {} 次尝试）: {}{}",
+                    self.params.max_retries.saturating_add(1),
                     structured.message,
                     dialog_note(&structured.data)
                 ),

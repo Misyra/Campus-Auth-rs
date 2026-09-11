@@ -392,7 +392,8 @@ async def _serve() -> None:
     # worker_health_check 响应上报给 Rust 侧缓存）
     worker_core.emit = emit_event
     worker_core.shutdown_event = shutdown_event
-    worker_core.capabilities = dict(OCR_CAPABILITIES)
+    # 共享同一字典，使按需预热后的能力变化可立即反映到健康检查。
+    worker_core.capabilities = OCR_CAPABILITIES
 
     logger.info("Worker 已启动，等待 Rust 侧命令")
     try:

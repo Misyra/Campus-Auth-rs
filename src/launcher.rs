@@ -207,37 +207,36 @@ async fn run_after_logging(
     // 3. 目录权限检查
     check_directory_permissions(&app_config.base_path)?;
 
-    // 4. 重启等待
-    if cli.restarting {
-        wait_for_lock_release(&app_config.base_path).await?;
-    }
-
-    // 5. 实例锁
-    let instance_lock = match acquire_lock(&app_config.base_path, cli.force) {
-        Ok(lock) => lock,
-        Err(e) => {
-            // 已有实例运行时（典型的双击 exe 重复启动场景）不再直接报错退出，
-            // 而是打开运行中实例的 Web 控制台后正常退出——GUI 双击无控制台，
-            // 浏览器就是"已在运行"的用户可见信号。轻量模式（端口 0）没有
-            // Web 入口，维持原报错。
-            if !cli.force {
-                if let Some(info) = crate::utils::lock::query_instance(&app_config.base_path) {
-                    if info.running && info.port > 0 && app_config.auto_open_browser {
-                        let url = format!("http://127.0.0.1:{}", info.port);
-                        if open::that(&url).is_ok() {
-                            // 控制台层写 stderr（终端启动可见）；本路径提前返回后，
-                            // run 外层统一 drop log_guard 并 flush 该条日志
-                            info!(
-                                pid = info.pid,
-                                url = %url,
-                                "已有实例运行中，已在浏览器打开其 Web 控制台"
-                            );
-                            return Ok(());
+    // 4-5. 重启场景在等待到锁后直接持有，避免“探测成功后 drop 再获取”的竞态窗口。
+    let instance_lock = if cli.restarting {
+        wait_for_lock_release(&app_config.base_path).await?
+    } else {
+        match acquire_lock(&app_config.base_path, cli.force) {
+            Ok(lock) => lock,
+            Err(e) => {
+                // 已有实例运行时（典型的双击 exe 重复启动场景）不再直接报错退出，
+                // 而是打开运行中实例的 Web 控制台后正常退出——GUI 双击无控制台，
+                // 浏览器就是"已在运行"的用户可见信号。轻量模式（端口 0）没有
+                // Web 入口，维持原报错。
+                if !cli.force {
+                    if let Some(info) = crate::utils::lock::query_instance(&app_config.base_path) {
+                        if info.running && info.port > 0 && app_config.auto_open_browser {
+                            let url = format!("http://127.0.0.1:{}", info.port);
+                            if open::that(&url).is_ok() {
+                                // 控制台层写 stderr（终端启动可见）；本路径提前返回后，
+                                // run 外层统一 drop log_guard 并 flush 该条日志
+                                info!(
+                                    pid = info.pid,
+                                    url = %url,
+                                    "已有实例运行中，已在浏览器打开其 Web 控制台"
+                                );
+                                return Ok(());
+                            }
                         }
                     }
                 }
+                return Err(e);
             }
-            return Err(e);
         }
     };
 
@@ -540,7 +539,7 @@ fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
 }
 
 /// 重启场景：等待旧进程释放锁
-async fn wait_for_lock_release(base_path: &Path) -> Result<()> {
+async fn wait_for_lock_release(base_path: &Path) -> Result<InstanceLock> {
     let timeout = std::time::Duration::from_secs(30);
     let interval = std::time::Duration::from_millis(200);
     let start = std::time::Instant::now();
@@ -549,8 +548,7 @@ async fn wait_for_lock_release(base_path: &Path) -> Result<()> {
     loop {
         match InstanceLock::try_acquire(base_path) {
             Ok(lock) => {
-                drop(lock);
-                return Ok(());
+                return Ok(lock);
             }
             Err(_) if start.elapsed() < timeout => {
                 tokio::time::sleep(interval).await;

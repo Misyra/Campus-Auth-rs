@@ -345,7 +345,7 @@ def _match_frame(page: Any, spec: str, *, allow_css_fallback: bool) -> Any:
         return page.frame_locator(spec)
     raise WorkerError(
         Outcome.SELECTOR_FAILED,
-        f"evaluate/assert_text 的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
+        f"脚本/URL 操作的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
     )
 
 
@@ -728,7 +728,7 @@ async def handle_wait_for_selector(page, step: StepConfig, context: StepContext)
 
 
 async def handle_wait_url(page, step: StepConfig, context: StepContext) -> None:
-    """等待当前 URL 匹配指定正则。"""
+    """等待当前页面或目标 Frame 的 URL 匹配指定正则。"""
     _check_cancel(context)
     if not step.pattern:
         raise WorkerError(Outcome.NAVIGATION_TIMEOUT, "wait_url 步骤缺少 pattern")
@@ -739,10 +739,11 @@ async def handle_wait_url(page, step: StepConfig, context: StepContext) -> None:
 
     timeout = step.timeout or context.navigation_timeout
     deadline = time.monotonic() + timeout / 1000
+    scope = _script_scope(context)
     while time.monotonic() < deadline:
         _check_cancel(context)
         try:
-            current = context.page.url
+            current = scope.url
         except Exception as exc:  # noqa: BLE001
             raise WorkerError(
                 Outcome.NAVIGATION_TIMEOUT, f"读取页面 URL 失败: {exc}"
@@ -771,9 +772,9 @@ async def handle_screenshot(page, step: StepConfig, context: StepContext) -> Non
 
 
 def _script_scope(context: StepContext) -> Any:
-    """返回可执行 JS 的 Page / Frame 作用域（evaluate / assert_text 专用）。
+    """返回可执行 JS 或读取 URL 的 Page / Frame 作用域。
 
-    这两类步骤直接执行脚本，无法走 ``frame_locator``（仅支持元素查询）：
+    这类操作无法走 ``frame_locator``（仅支持元素查询）：
     frame 规格只能解析为 Frame（name / ``url=`` 片段）；CSS 选择器形式显式报错，
     避免脚本静默在主 frame 执行（iframe 门户场景必然假失败）。
     """
@@ -856,16 +857,17 @@ async def handle_navigate(page, step: StepConfig, context: StepContext) -> None:
 
 
 async def handle_assert_text(page, step: StepConfig, context: StepContext) -> None:
-    """断言页面出现指定文本（``context.frame`` 非空时在对应 Frame 内执行）。"""
+    """断言指定元素中出现文本。"""
     _check_cancel(context)
+    if not step.selector:
+        raise WorkerError(Outcome.SELECTOR_FAILED, "assert_text 步骤缺少 selector")
     value = step.value
     if not value:
         raise WorkerError(Outcome.SELECTOR_FAILED, "assert_text 步骤需要 value")
     timeout = step.timeout or context.default_timeout
-    scope = _script_scope(context)
     try:
-        await scope.wait_for_function(
-            "arg => document.body.innerText.includes(arg)", arg=value, timeout=timeout
+        await _locator(context, step.selector).filter(has_text=value).first.wait_for(
+            state="visible", timeout=timeout
         )
     except PlaywrightTimeoutError as exc:
         raise WorkerError(

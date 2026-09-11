@@ -107,6 +107,7 @@ pub async fn capture(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
+    State(operations): State<Arc<WebOperations>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let url = body
@@ -118,6 +119,12 @@ pub async fn capture(
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(ApiError::BadRequest("仅支持 http/https 页面捕获".into()));
     }
+    // capture 与 generate 共用单飞登记器，固定 captures/latest 在任一时刻只允许
+    // 一个读者或写者，避免生成读取到捕获覆盖一半的文件集合。
+    let capture_operation = operations
+        .ai_generation()
+        .register(format!("ai-capture-{}", uuid::Uuid::new_v4()))
+        .map_err(|_| ApiError::Conflict("页面捕获或任务生成正在进行，请稍后重试".into()))?;
     // 环境门槛与调试/登录对齐：未就绪时先引导，失败以 503 明确回报
     environment
         .ensure_capability()
@@ -145,6 +152,7 @@ pub async fn capture(
         obj.insert("screenshot_url".into(), json!("/api/ai/capture/screenshot"));
     }
     tracing::info!(url, "登录页捕获完成");
+    capture_operation.finish();
     Ok(data(payload))
 }
 
@@ -196,12 +204,12 @@ pub async fn capture_status(
     })))
 }
 
-/// 获取在途生成登记（防重入）：已有生成在途时返回 409。
+/// 获取在途 AI 捕获/生成登记（防重入）：已有同域操作在途时返回 409。
 fn acquire_generation(operations: &WebOperations) -> Result<OperationRegistration, ApiError> {
     operations
         .ai_generation()
         .register(format!("ai-generate-{}", uuid::Uuid::new_v4()))
-        .map_err(|_| ApiError::Conflict("已有生成任务进行中，请等待其完成或刷新页面".into()))
+        .map_err(|_| ApiError::Conflict("页面捕获或任务生成正在进行，请稍后重试".into()))
 }
 
 /// 事件转发器：每 40ms 把共享缓冲的新事件刷到 SSE 通道。
@@ -282,8 +290,8 @@ async fn finalize_generation(
 ///
 /// 与 `generate` 语义一致，但以 `text/event-stream` 实时推送进度：
 /// 每个 LLM 增量、校验/重试状态均以 `data: <json>` 帧发出，前端据此在
-/// 最下方同步展示进度（流式文本预览 + 步骤状态）。超时语义为空闲超时：
-/// 只要仍在输出就不超时，仅当连续 10 分钟无内容才超时。
+/// 最下方同步展示进度（流式文本预览 + 步骤状态）。请求同时受分块空闲超时与
+/// 10 分钟总预算约束，持续输出也不会超过总预算。
 pub async fn generate_stream(
     State(config): State<Arc<dyn ConfigApi>>,
     State(tasks): State<Arc<dyn TaskApi>>,
@@ -316,14 +324,14 @@ pub async fn generate_stream(
             .to_string()
     };
 
+    // 必须先登记再读取 captures/latest，确保 capture 不会在多文件读取期间覆盖目录。
+    let generation = acquire_generation(&operations)?;
     let ctx = load_capture_context(&base).await?;
     let capture_warnings = ctx.1;
     let capture_ctx = ctx.0;
     let model = settings.model.clone();
     let base_url = settings.base_url.clone();
 
-    // 防重入：已有生成在途时拒绝（否则取消后立点会产生两条并发 LLM 流）
-    let generation = acquire_generation(&operations)?;
     let cancel_token = generation.cancellation_token();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<crate::ai::generate::StreamEvent>(1024);
@@ -730,6 +738,7 @@ mod tests {
         bridge: Arc<dyn BridgeApi>,
         env: Arc<dyn EnvironmentApi>,
         tasks: Arc<dyn TaskApi>,
+        operations: Arc<WebOperations>,
     }
 
     impl axum::extract::FromRef<TestState> for Arc<dyn ConfigApi> {
@@ -752,6 +761,11 @@ mod tests {
             state.tasks.clone()
         }
     }
+    impl axum::extract::FromRef<TestState> for Arc<WebOperations> {
+        fn from_ref(state: &TestState) -> Self {
+            state.operations.clone()
+        }
+    }
 
     fn mock_app() -> (
         axum::Router,
@@ -771,6 +785,7 @@ mod tests {
             bridge: Arc::new(MockBridgeApi(inner.clone())),
             env: Arc::new(MockEnvironmentApi(inner.clone())),
             tasks: Arc::new(MockTaskApi),
+            operations: Arc::new(WebOperations::new()),
         };
         let app = axum::Router::new()
             .route("/api/ai/llm-config", get(get_llm_config))

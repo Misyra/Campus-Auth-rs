@@ -243,6 +243,19 @@ fn test_parse_ipconfig_english_labels() {
 }
 
 #[test]
+fn test_parse_ipconfig_ipv6_gateway_does_not_clear_ipv4_gateway() {
+    let input = r#"Ethernet adapter Ethernet:
+
+   IPv4 Address. . . . . . . . . . . : 10.10.10.5
+   Default Gateway . . . . . . . . . : 10.10.10.1
+   Default Gateway . . . . . . . . . : fe80::1%12
+"#;
+    let interfaces = parse_ipconfig(input);
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].gateway, Some(Ipv4Addr::new(10, 10, 10, 1)));
+}
+
+#[test]
 fn test_parse_ipconfig_empty() {
     // 空输入应返回空列表
     let interfaces = parse_ipconfig("");

@@ -19,6 +19,7 @@ import type {
   EnvironmentStatus,
   HealthInfo,
   InitStatus,
+  LoginResultResponse,
   LoginHistoryItem,
   LogEntry,
   MutationResult,
@@ -102,7 +103,7 @@ export const monitorApi = {
 /** 一次性操作 */
 export const actionsApi = {
   login: (timeoutMs: number) =>
-    http.post<MutationResult>("/api/login", null, { timeout: timeoutMs }),
+    http.post<LoginResultResponse>("/api/login", null, { timeout: timeoutMs }),
   cancelLogin: () => http.post<MutationResult>("/api/login/cancel"),
   testNetwork: () => http.post<NetworkTestResult>("/api/monitor/test", null, { timeout: 30000 }),
 };
@@ -239,7 +240,7 @@ export const aiApi = {
       headers: token ? { "X-Auth-Token": token } : undefined,
     });
   },
-  /** 流式生成（SSE）：增量推送，空闲超时语义（有输出自动续命，仅连续无内容达阈值才超时，最大 10 分钟） */
+  /** 流式生成（SSE）：增量推送；前端空闲计时收到内容会重置，后端总时长硬上限 10 分钟。 */
   async generateStream(
     payload: { extra_prompt?: string },
     opts: {

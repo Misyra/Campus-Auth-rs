@@ -139,7 +139,33 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             rename_field(monitor, "enable_local_check", "url_enabled");
             rename_field(monitor, "ping_targets", "tcp_targets");
             rename_field(monitor, "test_urls", "http_targets");
-            rename_field(monitor, "url_check_urls", "url_targets");
+            // v5 把 URL 与期望正文编码成 `url|expected`；v6 拆成目标数组与映射。
+            // 不能只重命名，否则带 `|` 的整串会被当成非法 URL。
+            if let Some(m) = monitor.as_object_mut() {
+                if let Some(Value::Array(items)) = m.remove("url_check_urls") {
+                    let mut targets = Vec::with_capacity(items.len());
+                    let mut expected = serde_json::Map::new();
+                    for item in items {
+                        let Some(raw) = item.as_str() else {
+                            continue;
+                        };
+                        if let Some((url, response)) = raw.split_once('|') {
+                            let url = url.trim().to_string();
+                            if !url.is_empty() {
+                                targets.push(Value::String(url.clone()));
+                                expected.insert(url, Value::String(response.trim().to_string()));
+                            }
+                        } else {
+                            let url = raw.trim();
+                            if !url.is_empty() {
+                                targets.push(Value::String(url.to_string()));
+                            }
+                        }
+                    }
+                    m.insert("url_targets".into(), Value::Array(targets));
+                    m.insert("url_expected_responses".into(), Value::Object(expected));
+                }
+            }
             // 废弃字段清理
             if let Some(m) = monitor.as_object_mut() {
                 for f in [
@@ -394,7 +420,8 @@ mod tests {
         assert_eq!(monitor["url_enabled"], true);
         assert_eq!(monitor["tcp_targets"][0], "1.1.1.1");
         assert_eq!(monitor["http_targets"][0], "http://test");
-        assert_eq!(monitor["url_targets"][0], "http://apple|Success");
+        assert_eq!(monitor["url_targets"][0], "http://apple");
+        assert_eq!(monitor["url_expected_responses"]["http://apple"], "Success");
         // 废弃字段已删除
         for f in [
             "check_interval_seconds",

@@ -51,6 +51,9 @@ struct HelperCli {
 struct PendingInfo {
     staging_dir: String,
     target_exe: String,
+    /// 主程序已解析并固定的 Worker 更新目标；旧 pending 回退 base/python_worker
+    #[serde(default)]
+    worker_target_dir: String,
     original_args: Vec<String>,
     /// 暂存包预期 SHA256（G13：替换前复核；空 = 发布源未提供，降级跳过）
     #[serde(default)]
@@ -198,6 +201,27 @@ fn main() {
         }
     };
 
+    // Worker 目标必须由主程序显式传递，并且仍等同于内置目录。外置 Worker、
+    // Docker bind mount 等布局由部署系统负责更新，helper 不猜测也不跨目录覆盖。
+    let bundled_worker_dir = base_path.join("python_worker");
+    let worker_target_dir = pending
+        .as_ref()
+        .map(|p| p.worker_target_dir.trim())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| bundled_worker_dir.clone());
+    if !worker_target_dir.is_dir()
+        || !bundled_worker_dir.is_dir()
+        || !same_existing_path(&worker_target_dir, &bundled_worker_dir)
+    {
+        log.error(&format!(
+            "拒绝执行：Worker 更新目标不是内置目录（目标 {}，要求 {}）",
+            worker_target_dir.display(),
+            bundled_worker_dir.display()
+        ));
+        std::process::exit(1);
+    }
+
     // 2.5 版本闸门（纵深防御）：pending 版本须严格高于本 helper 版本（helper 与
     // 被替换主程序同版本发布）。不高于或无法解析均拒绝替换并保留现场——
     // 主进程侧（pin 路径 / apply_pending_on_startup）已有闸门，此处补齐
@@ -308,9 +332,9 @@ fn main() {
     // （如反馈资源快照）永远到不了走应用内更新的用户。overlay 语义：覆盖同名
     // 文件、新增缺失文件、绝不删除目标侧多余内容（python_worker/.venv 是
     // 用户运行态，config/tasks/logs 等用户数据不在 staging 内天然不受影响）。
-    // 数据目录（python_worker/ resources/ docs/）均由 base_path 解析，overlay 到 base_path
+    // resources/docs 跟随 base_path；Worker 使用 pending 中已经校验的明确目标。
     let extracted_dir = staging_dir.join("extracted");
-    sync_distribution_files(&extracted_dir, &base_path);
+    sync_distribution_files(&extracted_dir, &base_path, &worker_target_dir);
     // helper 自更新落点必须是 exe 所在目录，而非 base_path：spawn_helper 从主程序
     // 同级目录查找 helper，--base-path 与 exe 目录分离时，写进 base_path 的 helper
     // 永远不会被调用（同时在数据目录留下一份无用副本）。
@@ -393,11 +417,17 @@ fn acquire_helper_lock(lock_path: &Path, log: &mut HelperLog) -> std::fs::File {
             std::process::exit(1);
         }
     };
-    #[allow(clippy::incompatible_msrv)]
-    let locked = file.try_lock();
-    if let Err(e) = locked {
-        log.info(&format!("另一 helper 持有互斥锁（{e}），本实例安静退出"));
-        std::process::exit(0);
+    match <std::fs::File as fs4::FileExt>::try_lock(&file) {
+        Ok(()) => {}
+        Err(fs4::TryLockError::WouldBlock) => {
+            let e = "锁已被占用";
+            log.info(&format!("另一 helper 持有互斥锁（{e}），本实例安静退出"));
+            std::process::exit(0);
+        }
+        Err(fs4::TryLockError::Error(e)) => {
+            log.error(&format!("获取 helper 互斥锁失败: {e}"));
+            std::process::exit(1);
+        }
     }
     file
 }
@@ -442,15 +472,14 @@ fn wait_for_process_exit(pid: u32) -> bool {
 /// `skip_names` 命中的目录名整棵子树跳过——发布包本就不含这些（release.yml 已排除），
 /// 此处是防御性双保险：`.venv` 是用户引导出的运行态，`__pycache__` 运行时自动再生。
 /// best-effort：单文件失败仅告警继续，不回滚（exe 已替换，半新半旧由下次更新收敛）。
-fn sync_distribution_files(extracted_dir: &Path, base_path: &Path) {
+fn sync_distribution_files(extracted_dir: &Path, base_path: &Path, worker_target_dir: &Path) {
     // 必须在 overlay 前比较并写标记：成功覆盖后源/目标必然相同；先写标记还可
     // 覆盖“清单已替换、helper 随后异常退出”的崩溃窗口。标记只会在主程序
     // 完成 uv sync + Worker 探针 + 指纹记录后清除。
-    let manifests_changed = dependency_manifests_changed(extracted_dir, base_path);
+    let manifests_changed = dependency_manifests_changed(extracted_dir, worker_target_dir);
     if manifests_changed {
-        let worker_dir = base_path.join("python_worker");
-        let marker = worker_dir.join(campus_auth::environment::RESYNC_MARKER);
-        let marker_result = std::fs::create_dir_all(&worker_dir)
+        let marker = worker_target_dir.join(campus_auth::environment::RESYNC_MARKER);
+        let marker_result = std::fs::create_dir_all(worker_target_dir)
             .and_then(|()| std::fs::write(&marker, Local::now().to_rfc3339()));
         match marker_result {
             Ok(()) => println!("[helper] Python 依赖清单变更，已预写重同步标记"),
@@ -463,7 +492,11 @@ fn sync_distribution_files(extracted_dir: &Path, base_path: &Path) {
         if !src.exists() {
             continue;
         }
-        let dst = base_path.join(dir);
+        let dst = if dir == "python_worker" {
+            worker_target_dir.to_path_buf()
+        } else {
+            base_path.join(dir)
+        };
         println!("[helper] 同步 {dir}/ -> {}", dst.display());
         if let Err(e) = copy_dir_overlay(&src, &dst, &[".venv", "__pycache__"]) {
             eprintln!("[helper] 同步 {dir}/ 失败（继续）: {e}");
@@ -472,11 +505,11 @@ fn sync_distribution_files(extracted_dir: &Path, base_path: &Path) {
 }
 
 /// 在 overlay 前判断 Python 依赖清单是否变化。
-fn dependency_manifests_changed(extracted_dir: &Path, base_path: &Path) -> bool {
+fn dependency_manifests_changed(extracted_dir: &Path, worker_target_dir: &Path) -> bool {
     let py_src = extracted_dir.join("python_worker").join("pyproject.toml");
     let lock_src = extracted_dir.join("python_worker").join("uv.lock");
-    let py_dst = base_path.join("python_worker").join("pyproject.toml");
-    let lock_dst = base_path.join("python_worker").join("uv.lock");
+    let py_dst = worker_target_dir.join("pyproject.toml");
+    let lock_dst = worker_target_dir.join("uv.lock");
     (py_src.exists() && file_differs(&py_src, &py_dst))
         || (lock_src.exists() && file_differs(&lock_src, &lock_dst))
 }
@@ -492,8 +525,15 @@ fn file_differs(a: &Path, b: &Path) -> bool {
 /// 递归 overlay 复制目录：目标侧不存在的路径创建，已存在的文件覆盖
 fn copy_dir_overlay(src: &Path, dst: &Path, skip_names: &[&str]) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
+    let mut first_error = None;
     for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                first_error.get_or_insert(e);
+                continue;
+            }
+        };
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
             continue;
@@ -503,13 +543,19 @@ fn copy_dir_overlay(src: &Path, dst: &Path, skip_names: &[&str]) -> std::io::Res
         }
         let src_path = entry.path();
         let dst_path = dst.join(&name);
-        if src_path.is_dir() {
-            copy_dir_overlay(&src_path, &dst_path, skip_names)?;
+        let result = if src_path.is_dir() {
+            copy_dir_overlay(&src_path, &dst_path, skip_names)
         } else {
-            std::fs::copy(&src_path, &dst_path)?;
+            std::fs::copy(&src_path, &dst_path).map(|_| ())
+        };
+        if let Err(e) = result {
+            first_error.get_or_insert(e);
         }
     }
-    Ok(())
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// 替换 helper 自身（步骤 5.5，best-effort）
@@ -850,7 +896,7 @@ mod tests {
         std::fs::write(dst_worker.join("pyproject.toml"), b"old-project").unwrap();
         std::fs::write(dst_worker.join("uv.lock"), b"old-lock").unwrap();
 
-        sync_distribution_files(extracted.path(), base.path());
+        sync_distribution_files(extracted.path(), base.path(), &dst_worker);
 
         assert_eq!(
             std::fs::read(dst_worker.join("pyproject.toml")).unwrap(),
@@ -868,6 +914,7 @@ mod tests {
     fn test_sync_distribution_does_not_mark_identical_python_manifests() {
         let extracted = tempfile::tempdir().unwrap();
         let base = tempfile::tempdir().unwrap();
+        let dst_worker = base.path().join("python_worker");
         for root in [extracted.path(), base.path()] {
             let worker = root.join("python_worker");
             std::fs::create_dir_all(&worker).unwrap();
@@ -875,7 +922,7 @@ mod tests {
             std::fs::write(worker.join("uv.lock"), b"same-lock").unwrap();
         }
 
-        sync_distribution_files(extracted.path(), base.path());
+        sync_distribution_files(extracted.path(), base.path(), &dst_worker);
 
         assert!(
             !base

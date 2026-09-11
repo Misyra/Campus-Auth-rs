@@ -895,6 +895,9 @@ async fn execute_inner(
 > {
     // OCR 只需要 Python Worker 与 ddddocr，不应被 Chromium 可执行文件状态阻断。
     let is_ocr = method == "ocr_recognize";
+    // OCR 与问题报告捕获都是附着于现有 Worker 的轻量请求：允许并发，但绝不能
+    // 抢占或复位登录/调试会话槽。feedback_capture 仍需浏览器环境，故不复用 is_ocr。
+    let is_lightweight = is_lightweight_method(method);
 
     // debug_start 发起时清空上一会话的截图缓存：新会话的初始截图事件先于响应
     // 到达（Worker 先 emit 再返回），清空若放在响应结算处会把新缓存抹掉
@@ -996,8 +999,8 @@ async fn execute_inner(
         inner
             .cancel_registry
             .register(cancel_id.clone(), token.clone());
-        if is_ocr {
-            // OCR 轻量旁路：仅注册 cancel，不触碰会话槽位 / worker_state / 空闲计时器。
+        if is_lightweight {
+            // 轻量旁路：仅注册 cancel，不触碰会话槽位 / worker_state / 空闲计时器。
             // pending 与 cancel 的清理交给 guard drop 的轻量回调（lightweight_cleanup）。
         } else {
             inner.worker_state = if session == SessionType::Debug {
@@ -1020,9 +1023,9 @@ async fn execute_inner(
     // RAII 守卫：drop 时复位会话状态并启动空闲计时器。drop 会再次加锁，故在临界区外创建。
     // 携带 request_id：reset_session 仅在当前会话仍为本请求时才复位，避免已结束会话的
     // 延迟 drop 误清刚启动的同类型新会话的 pending/cancel。
-    // OCR 请求使用轻量守卫：drop 只清自身 pending 与 cancel 注册，绝不 reset_session
+    // 轻量请求使用轻量守卫：drop 只清自身 pending 与 cancel 注册，绝不 reset_session
     // （否则会把并发登录会话的槽位复位为 Idle 并提前启动空闲计时器，见 5.1）。
-    let guard = if is_ocr {
+    let guard = if is_lightweight {
         SessionGuard::new({
             let weak = this.self_weak.clone();
             let cancel_id = cancel_id.clone();
@@ -1140,6 +1143,11 @@ fn lightweight_cleanup(this: &BridgeSupervisor, request_id: u64, cancel_id: &str
     inner.cancel_registry.remove(cancel_id);
 }
 
+/// 不占用登录/调试单会话槽的轻量命令。
+fn is_lightweight_method(method: &str) -> bool {
+    matches!(method, "ocr_recognize" | "feedback_capture")
+}
+
 /// 启动空闲计时器：超时后发送 IdleTimeout
 ///
 /// `keep_alive=true` 时跳过计时器（Worker 常驻）；否则使用配置 `worker.idle_timeout_seconds`。
@@ -1224,7 +1232,8 @@ async fn ensure_worker(
         .as_ref()
         .and_then(Weak::upgrade);
     if let Some(environment) = &environment {
-        crate::environment::check_environment(environment)
+        environment
+            .refresh_status()
             .await
             .map_err(|error| BridgeError::WorkerEnvironmentInvalid(error.to_string()))?;
         let result = if worker_only_health_check {
@@ -1464,6 +1473,7 @@ async fn kill_worker_now(this: &BridgeSupervisor) {
         // 进程已亡，调试会话随之终结（B3）
         inner.debug_session_open = false;
         inner.debug_last_activity = None;
+        inner.last_screenshot_url = None;
         merge_worker_status(&inner, &this.status);
     }
 }
@@ -1497,6 +1507,7 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
         inner.worker_capabilities = None;
         inner.debug_session_open = false;
         inner.debug_last_activity = None;
+        inner.last_screenshot_url = None;
         merge_worker_status(&inner, &this.status);
     }
 }
@@ -1692,7 +1703,7 @@ fn debug_session_stale(last_activity: Option<Instant>, now: Instant) -> bool {
 /// - InDebug + (execute_login_attempt/execute_browser_task)：登录请求快速失败
 /// - InDebug + debug_start：已有调试会话
 ///
-/// `ocr_recognize` 轻量且单线程串行，允许与任意会话并发。
+/// `ocr_recognize` / `feedback_capture` 为轻量命令，允许与任意会话并发。
 fn check_session_compat(current: Option<SessionType>, method: &str) -> Result<(), BridgeError> {
     if method == "ocr_recognize" || method == "feedback_capture" {
         return Ok(());
@@ -1767,6 +1778,7 @@ mod tests {
             "debug_step",
             "debug_stop",
             "ocr_recognize",
+            "feedback_capture",
         ] {
             assert_ok(None, m);
         }
@@ -1813,6 +1825,14 @@ mod tests {
         assert_ok(None, "ocr_recognize");
         assert_ok(Some(SessionType::Login), "ocr_recognize");
         assert_ok(Some(SessionType::Debug), "ocr_recognize");
+    }
+
+    #[test]
+    fn 反馈捕获_走轻量路径且与任意会话兼容() {
+        assert!(is_lightweight_method("feedback_capture"));
+        assert_ok(None, "feedback_capture");
+        assert_ok(Some(SessionType::Login), "feedback_capture");
+        assert_ok(Some(SessionType::Debug), "feedback_capture");
     }
 
     /// 5.1：OCR 轻量守卫 drop 只清理自身，保留并发登录会话槽位。

@@ -194,6 +194,21 @@ def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
     assert keep.exists()
 
 
+def test_purge_stale_debug_screenshots_removes_feedback_directory(monkeypatch, tmp_path):
+    import playwright_worker as worker
+
+    stale = tmp_path / "feedback-old"
+    stale.mkdir()
+    (stale / "page.html").write_text("secret", encoding="utf-8")
+    os.utime(stale, (1, 1))
+    monkeypatch.setattr(worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker, "_MODULE_LOAD_TIME", 2)
+
+    worker._purge_stale_debug_screenshots()
+
+    assert not stale.exists()
+
+
 # ── 反馈资源快照（feedback_capture 纯函数）──
 
 

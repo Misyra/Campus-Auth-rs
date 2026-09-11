@@ -140,12 +140,35 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
 
     let mut killed = 0;
     for (pid, ppid) in candidates {
-        // 父进程不存在（含被 init 收养 ppid==1 的情况）即视为孤儿
-        if (ppid == 1 || !pid_to_ppid.contains(&ppid)) && kill_pid(pid) {
+        // 枚举与 kill 之间进程可能退出、PID 复用或父进程刚出现；破坏性操作前
+        // 重新读取候选 cmdline/ppid，并以实时 /proc 父目录存在性复核。
+        if (ppid == 1 || !pid_to_ppid.contains(&ppid))
+            && still_orphan_chromium(pid, ppid)
+            && kill_pid(pid)
+        {
             killed += 1;
         }
     }
     Ok(killed)
+}
+
+/// kill 前复核候选仍是同一 Chromium 进程，且其父进程实时不存在或已被 init 收养。
+#[cfg(unix)]
+fn still_orphan_chromium(pid: u32, observed_ppid: u32) -> bool {
+    let process_dir = std::path::PathBuf::from(format!("/proc/{pid}"));
+    let Ok(stat) = std::fs::read_to_string(process_dir.join("stat")) else {
+        return false;
+    };
+    let Ok(current_ppid) = parse_ppid_from_stat(&stat) else {
+        return false;
+    };
+    if current_ppid != observed_ppid {
+        return false;
+    }
+    let cmdline = std::fs::read(process_dir.join("cmdline")).unwrap_or_default();
+    let command = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+    is_chromium(&command)
+        && (current_ppid == 1 || !std::path::Path::new(&format!("/proc/{current_ppid}")).exists())
 }
 
 /// 从 /proc/<pid>/stat 解析 ppid（第三个字段）

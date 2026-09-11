@@ -135,8 +135,9 @@ async fn apply_flat_settings_patch(
         }
     }
 
-    // 保存凭证到活跃 Profile（active_id 优先取 patch 显式指定值，其次当前设置）
-    if !profile_patch.is_empty() {
+    // 先在内存中构造待提交 Profile；若同一请求还包含全局字段，必须等全局合并校验
+    // 成功后由 ConfigService 双域事务一起落盘，禁止先写凭证形成半提交。
+    let profile_to_save = if !profile_patch.is_empty() {
         let active_id = match obj.get("active_profile_id").and_then(|v| v.as_str()) {
             Some(id) if !id.is_empty() => id.to_string(),
             _ => config.load_settings_async().await.active_profile_id,
@@ -183,8 +184,10 @@ async fn apply_flat_settings_patch(
                 _ => return Err(ApiError::BadRequest("password 必须是字符串或 null".into())),
             }
         }
-        config.save_profile(&profile).await?;
-    }
+        Some(profile)
+    } else {
+        None
+    };
 
     // 全局设置合并：提交事务（持锁读-改-写，闭包失败不落盘）
     if !global_patch.is_empty() || !other_patch.is_empty() {
@@ -194,29 +197,32 @@ async fn apply_flat_settings_patch(
         let other_empty = other_patch.is_empty();
         let global_patch = Value::Object(global_patch);
         let other_patch = Value::Object(other_patch);
-        match config
-            .modify_settings_tx(Box::new(move |settings| {
-                let mut current_value =
-                    serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
-                // 合并 global 字段
-                if !global_empty {
-                    if let Some(global) = current_value.get_mut("global") {
-                        json_merge(global, &global_patch);
-                    }
+        let merge = Box::new(move |settings| {
+            let mut current_value =
+                serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
+            // 合并 global 字段
+            if !global_empty {
+                if let Some(global) = current_value.get_mut("global") {
+                    json_merge(global, &global_patch);
                 }
-                // 合并其他字段（如 active_profile_id 等）
-                if !other_empty {
-                    json_merge(&mut current_value, &other_patch);
-                }
-                serde_json::from_value(current_value)
-                    .map_err(|e| format!("设置合并后校验失败: {e}"))
-            }))
-            .await
-        {
+            }
+            // 合并其他字段（如 active_profile_id 等）
+            if !other_empty {
+                json_merge(&mut current_value, &other_patch);
+            }
+            serde_json::from_value(current_value).map_err(|e| format!("设置合并后校验失败: {e}"))
+        });
+        let result = match profile_to_save {
+            Some(profile) => config.modify_settings_and_profile_tx(profile, merge).await,
+            None => config.modify_settings_tx(merge).await,
+        };
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
             Err(e) => return Err(e.into()),
         }
+    } else if let Some(profile) = profile_to_save {
+        config.save_profile(&profile).await?;
     }
 
     // 保存成功后统一记录变更字段名列表（严禁记录字段值，尤其密码/密钥）
@@ -313,11 +319,24 @@ pub async fn set_log_level(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<SetLogLevelBody>,
 ) -> Result<Json<Value>, ApiError> {
+    let level = match body.level.trim().to_ascii_uppercase().as_str() {
+        "TRACE" => "TRACE",
+        "DEBUG" => "DEBUG",
+        "INFO" => "INFO",
+        "WARN" | "WARNING" => "WARN",
+        "ERROR" => "ERROR",
+        _ => {
+            return Err(ApiError::BadRequest(
+                "日志级别仅支持 TRACE、DEBUG、INFO、WARN、ERROR".into(),
+            ));
+        }
+    }
+    .to_string();
     // 持锁读-改-写：锁外的 load→改→save 会丢并发的其他字段更新
-    let level = body.level.clone();
+    let persisted_level = level.clone();
     match config
         .modify_settings_tx(Box::new(move |mut s| {
-            s.global.logging.level = level;
+            s.global.logging.level = persisted_level;
             Ok(s)
         }))
         .await
@@ -327,9 +346,9 @@ pub async fn set_log_level(
         Err(e) => return Err(e.into()),
     }
     // 热更新运行时日志级别（tracing filter），而非仅落盘下次启动生效
-    crate::logging::reload_log_level(&body.level);
-    tracing::info!(level = %body.level, "日志级别已更新");
-    Ok(data(body.level))
+    crate::logging::reload_log_level(&level);
+    tracing::info!(level = %level, "日志级别已更新");
+    Ok(data(level))
 }
 
 /// GET /api/config/default-stealth-script — 默认反检测脚本
@@ -1021,7 +1040,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(inner.lock().unwrap().settings.global.logging.level, "debug");
+        assert_eq!(inner.lock().unwrap().settings.global.logging.level, "DEBUG");
         // 读取
         let resp = app
             .oneshot(
@@ -1033,7 +1052,7 @@ mod tests {
             .await
             .unwrap();
         let v = body_json(resp).await;
-        assert_eq!(v["data"]["level"], "debug");
+        assert_eq!(v["data"]["level"], "DEBUG");
     }
 
     /// 纯净模式 toggle 翻转
@@ -1310,6 +1329,34 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         // 校验失败时不应落盘
         assert_eq!(inner.lock().unwrap().save_calls, 0);
+    }
+
+    /// 同一请求含凭证与非法全局字段时，两域均不得落盘。
+    #[tokio::test]
+    async fn test_patch_settings_invalid_global_does_not_partially_save_profile() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "username": "should-not-persist",
+                            "pause": { "enabled": "not-a-bool" },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let state = inner.lock().unwrap();
+        assert_eq!(state.profile.username, "");
+        assert_eq!(state.save_calls, 0);
     }
 
     // ============ G16：profile 加载失败不得静默丢弃凭证修改 ============

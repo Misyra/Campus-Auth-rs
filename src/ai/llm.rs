@@ -4,9 +4,8 @@
 //! 协议；视觉输入统一走 `image_url`（data URL）消息部件。调用为低频一次性
 //! 请求，client 按次构建（超时预算独立于其他出站模块）。
 //!
-//! 流式模式（`stream: true`）用于前端实时进度展示；超时语义为"空闲超时"
-//! （idle timeout）：只要仍有 chunk 到达就续命，仅当连续 IDLE_TIMEOUT 内
-//! 无任何字节时才判定超时，上限 TOTAL_BUDGET（10 分钟）。
+//! 流式模式（`stream: true`）用于前端实时进度展示；同时受空闲超时与总预算约束：
+//! 收到 chunk 会刷新空闲计时，但单次请求无论是否持续输出都不超过 10 分钟。
 
 use std::time::Duration;
 
@@ -17,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use super::LlmSettings;
 use super::error::AiError;
 
-/// 空闲超时：连续无字节到达的判定阈值（10 分钟，只要还在输出就不超时）
+/// 空闲超时：连续无字节到达的判定阈值（同时受 10 分钟总预算限制）
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// 总预算上限：单次流式会话的最长墙钟时间（与空闲超时同值，兜底）
 pub const TOTAL_BUDGET: Duration = Duration::from_secs(600);
@@ -42,7 +41,7 @@ pub async fn chat_completion(
 }
 
 /// 流式 chat/completions：`on_delta` 非空时以 `stream: true` 请求，并在解析
-/// 到每个增量 `delta.content` 时回调；空闲超时语义：只要有字节到达就重置计时。
+/// 到每个增量 `delta.content` 时回调；收到字节会重置空闲计时，总预算不会重置。
 ///
 /// `cancel` 非空时响应取消令牌：流消费过程中令牌触发即中止（用于客户端断连/
 /// 用户取消时停止无谓的 token 消耗）。

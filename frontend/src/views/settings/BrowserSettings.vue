@@ -13,7 +13,7 @@ import { BROWSER_ARGS_DEFAULT } from "@/utils/constants";
 
 const config = useConfig();
 const router = useRouter();
-const { envStatus } = useEnvironment();
+const { envStatus, refreshEnv } = useEnvironment();
 const browsers = ref<{ name: string; channel: string; engine: string; installed: boolean; path?: string; custom?: boolean }[]>([]);
 const browserLoading = ref(true);
 const installingBrowser = ref<string | null>(null);
@@ -46,14 +46,13 @@ const currentOfficialUrl = computed(() => OFFICIAL_URL[config.config.browser.bro
 const pythonNotReady = computed(() => envStatus.value != null && !envStatus.value.capability_ready);
 
 onMounted(async () => {
-  try {
-    const data = await browsersApi.fetch();
-    browsers.value = data.browsers;
-  } catch (error) {
-    frontendLogger.error("browser", "获取浏览器列表失败", error);
-  }
-  browserLoading.value = false;
-  await config.fetchPureMode();
+  const browserRequest = browsersApi.fetch()
+    .then((data) => { browsers.value = data.browsers; })
+    .catch((error: unknown) => {
+      frontendLogger.error("browser", "获取浏览器列表失败", error);
+    })
+    .finally(() => { browserLoading.value = false; });
+  await Promise.allSettled([browserRequest, refreshEnv(), config.fetchPureMode()]);
 });
 
 /** 浏览器卡片点击分派：已安装→选为当前浏览器；未安装→Playwright 可装的走安装，否则提示去官网下载 */

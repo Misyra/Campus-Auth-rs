@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /** 设置 · 账号页：校园网账号凭据（用户名/密码/运营商/认证与触发地址）表单 */
-import { computed, ref, watch } from "vue";
+import { computed } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useProfiles } from "@/composables/useProfiles";
+import { useCarrierField } from "@/composables/useCarrierField";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import IconApp from "@/components/common/IconApp.vue";
@@ -30,19 +31,13 @@ const currentProfileName = computed(
   () => profiles.value[activeProfileId.value]?.name || activeProfileId.value || "默认方案",
 );
 
-// 自定义运营商：独立状态控制输入框显隐（修复 P1-17 敲第一个字符输入框即消失）。
-// 逻辑统一为：isp 非空且不在预设值列表 → 视为"自定义"（含"自定义"开关项与已加载的自定义关键字）。
-const showCustomCarrier = ref(false);
-// 运营商预设值（不含空与"自定义"开关项）
-const carrierPresetValues = CARRIER_OPTIONS.map((o) => o.value).filter((v) => v !== "" && v !== "自定义");
-watch(
-  () => config.config.credentials.isp,
-  (val) => {
-    const isp = val || "";
-    showCustomCarrier.value = isp !== "" && !carrierPresetValues.includes(isp);
+const accountCarrier = computed<string>({
+  get: () => config.config.credentials.isp,
+  set: (value) => {
+    config.config.credentials.isp = value;
   },
-  { immediate: true },
-);
+});
+const { showCustomCarrier, carrierSelection, customCarrierValue } = useCarrierField(accountCarrier);
 // 重定向模式开关：以 trigger_url 非空为唯一状态源；打开且为空时填默认触发地址，关闭则清空（=直连）
 const redirectEnabled = computed({
   get: () => !!config.config.credentials.trigger_url,
@@ -138,11 +133,11 @@ async function detectPortalForSettings(): Promise<void> {
             <label for="settings-carrier">运营商</label>
             <FieldHelp text="仅当登录页包含运营商选项时需要选择。选“不选择”跳过该步骤；选“自定义”按关键字匹配。" />
           </div>
-          <CustomSelect v-model="config.config.credentials.isp" :options="carrierOptions" />
+          <CustomSelect v-model="carrierSelection" :options="carrierOptions" />
         </div>
         <div v-if="showCustomCarrier" class="form-group">
           <label for="settings-carrier-custom">自定义运营商关键字</label>
-          <input id="settings-carrier-custom" v-model.trim="config.config.credentials.isp" type="text" placeholder="例如：宿舍宽带" />
+          <input id="settings-carrier-custom" v-model.trim="customCarrierValue" type="text" placeholder="例如：宿舍宽带" />
         </div>
       </div>
     </section>

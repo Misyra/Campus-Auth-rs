@@ -148,6 +148,10 @@ pub enum EnvironmentError {
     #[error("环境引导失败（复用并发前一轮结果）: {0}")]
     BootstrapFailedShared(String),
 
+    /// 引导代数已前进但状态仍未就绪，且没有可复用失败原因。
+    #[error("环境引导状态不一致: {0}")]
+    BootstrapInvariant(String),
+
     /// uv 下载失败（HTTP 层错误）
     #[error("uv 下载失败 (重试 {retries} 次): {source}")]
     UvDownloadFailed {
@@ -357,8 +361,10 @@ impl BootstrapGate {
             {
                 return Err(EnvironmentError::BootstrapFailedShared(message));
             }
-            // 防御性兜底：成功引导必然置 ready，理论上不可达
-            return Ok(());
+            // 成功引导必然置 ready；若状态被异常覆盖或内部遗漏，绝不能假成功。
+            return Err(EnvironmentError::BootstrapInvariant(
+                "上一轮引导已结束但能力仍未就绪，且没有失败记录".into(),
+            ));
         }
         let result = bootstrap().await;
         // 记录失败结果供后续等待者复用（成功时清除）；存 Display 字符串
@@ -567,6 +573,13 @@ impl EnvironmentManager {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// 串行刷新环境状态，避免只读探测与引导流程并发覆盖阶段和就绪字段。
+    pub async fn refresh_status(&self) -> Result<(), EnvironmentError> {
+        self.bootstrap_gate
+            .run_exclusive(crate::environment::check_environment(self))
+            .await
     }
 
     /// Python 解释器绝对路径

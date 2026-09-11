@@ -3,7 +3,7 @@
  * AI 生成任务页：捕获登录页面（截图 + HTML/JS）→ 交由用户配置的视觉 LLM
  * 生成任务 JSON → 校验回显 → 预览编辑后保存为任务。
  * 三段向导按序依赖：保存配置 → 捕获 → 生成 → 保存任务。
- * 流式模式：SSE 增量回显 + 底部同步进度条 + 空闲超时（有输出即续命，最大 10 分钟）。
+ * 流式模式：SSE 增量回显 + 底部同步进度条 + 可刷新空闲超时；后端总时长上限 10 分钟。
  */
 import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
@@ -134,7 +134,7 @@ async function saveBundle(): Promise<void> {
   }
 }
 
-// ---- 生成（流式，空闲超时：有输出即重置，仅无内容才超时，最大 10 分钟） ----
+// ---- 生成（流式：有输出会重置前端空闲计时；后端总时长上限 10 分钟） ----
 const extraPrompt = ref("");
 const generating = ref(false);
 const generateResult = ref<AiGenerateResult | null>(null);
@@ -534,10 +534,10 @@ async function restoreCapture(): Promise<void> {
 
           <div class="ai-generate-bar">
             <div class="ai-idle-group">
-              <label for="ai-idle" class="ai-idle-label">空闲超时</label>
+              <label for="ai-idle" class="ai-idle-label">前端空闲超时</label>
               <CustomSelect v-model="streamIdleValue" :options="streamIdleOptions" class="ai-idle-select" compact />
             </div>
-            <span class="hint ai-idle-hint">有输出自动续命，仅连续无内容达阈值才超时（最大 10 分钟）</span>
+            <span class="hint ai-idle-hint">有输出会刷新空闲计时；服务端单次生成总时长仍不超过 10 分钟</span>
             <span class="ai-generate-hint hint" v-if="streamPhase && !generateResult">{{ streamPhase }}</span>
             <span class="ai-generate-hint hint" v-else-if="generateResult">第 {{ generateResult.attempts }} 轮通过校验 · {{ generateResult.model }}</span>
           </div>

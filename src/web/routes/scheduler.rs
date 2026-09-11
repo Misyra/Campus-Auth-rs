@@ -158,7 +158,9 @@ pub async fn run_job(
         .get_task(&id)
         .ok_or_else(|| SchedulerError::TaskNotFound(id.clone()))?;
     // 手动触发与 cron 触发共用同一并发信号量闸（原 run_id 为死数据，不再生成/返回）
-    scheduler.spawn_manual_run(task);
+    if !scheduler.spawn_manual_run(task) {
+        return Err(ApiError::Conflict("任务正在执行或调度器正在关闭".into()));
+    }
     Ok(data(Value::String("ok".into())))
 }
 
@@ -195,6 +197,7 @@ mod tests {
         tasks: Vec<ScheduledTask>,
         notify_calls: usize,
         manual_run_ids: Vec<String>,
+        manual_run_accepted: bool,
     }
 
     /// 内存 SchedulerApi：无需磁盘与完整 ServiceContainer
@@ -260,8 +263,14 @@ mod tests {
             false
         }
 
-        fn spawn_manual_run(&self, task: ScheduledTask) {
-            self.0.lock().unwrap().manual_run_ids.push(task.id);
+        fn spawn_manual_run(&self, task: ScheduledTask) -> bool {
+            let mut inner = self.0.lock().unwrap();
+            if inner.manual_run_accepted {
+                inner.manual_run_ids.push(task.id);
+                true
+            } else {
+                false
+            }
         }
 
         async fn read_history(&self, id: &str) -> Result<Vec<Value>, ApiError> {
@@ -293,6 +302,7 @@ mod tests {
             tasks: vec![sample_task("job1", true), sample_task("job2", false)],
             notify_calls: 0,
             manual_run_ids: Vec::new(),
+            manual_run_accepted: true,
         }));
         let api: Arc<dyn SchedulerApi> = Arc::new(MockScheduler(inner.clone()));
         let app = axum::Router::new()
@@ -513,6 +523,25 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(inner.lock().unwrap().manual_run_ids, vec!["job1"]);
+    }
+
+    /// 调度器拒绝执行时 API 必须返回冲突，不能谎报已接受。
+    #[tokio::test]
+    async fn test_run_job_reports_rejection() {
+        let (app, inner) = mock_app();
+        inner.lock().unwrap().manual_run_accepted = false;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scheduler/jobs/job1/run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(inner.lock().unwrap().manual_run_ids.is_empty());
     }
 
     /// 非法任务 ID（路径穿越）返回 400

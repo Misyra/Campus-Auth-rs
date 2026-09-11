@@ -56,6 +56,21 @@ pub trait ConfigApi: Send + Sync {
         &self,
         f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
     ) -> Result<Result<(), String>, ConfigError>;
+    /// 同一请求同时修改 settings 与 Profile：先完成 settings 合并校验，再提交两域。
+    ///
+    /// 默认实现供测试替身使用；生产实现会同时持有两域写锁，并在 settings 写入失败时
+    /// 回滚 Profile，避免凭证先落盘而全局校验失败造成半提交。
+    async fn modify_settings_and_profile_tx(
+        &self,
+        profile: ProfileData,
+        f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        let result = self.modify_settings_tx(f).await?;
+        if result.is_ok() {
+            self.save_profile(&profile).await?;
+        }
+        Ok(result)
+    }
     /// 加载单个 Profile。
     fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError>;
     /// 保存 Profile。
@@ -89,6 +104,14 @@ impl ConfigApi for ConfigService {
         f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
     ) -> Result<Result<(), String>, ConfigError> {
         ConfigService::modify_settings_tx(self, f).await
+    }
+
+    async fn modify_settings_and_profile_tx(
+        &self,
+        profile: ProfileData,
+        f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        ConfigService::modify_settings_and_profile_tx(self, profile, f).await
     }
 
     fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {

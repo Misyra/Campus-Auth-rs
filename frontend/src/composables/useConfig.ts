@@ -59,7 +59,7 @@ watch(
 // 直接写成 `() => password.value` 不会对该 ref 的 .value 建立响应式依赖，导致永不触发。
 // 这里直接以 ref 作为 watch 源（等价于监听 password.value.value）才正确。
 watch(password.value, () => {
-  if (!loadingConfig) dirty.value = true;
+  if (!loadingConfig && !suppressDirty) dirty.value = true;
 });
 
 const { busy } = useStatus();
@@ -210,11 +210,19 @@ async function saveConfig(force = false): Promise<void> {
 
   try {
     await configApi.patch(payload, { signal: controller.signal });
-    // null 表示未编辑，空串表示明确清除，非空字符串表示更新。
-    if (pwdValue !== null) password.markSaved(pwdValue.length > 0);
-    // 保存成功后以当前表单为新快照：用户把值改回原样时 dirty 自动消失
-    savedSnapshot = JSON.stringify(config);
-    dirty.value = false;
+    // markSaved 会清空明文并异步触发 password watcher；在同一抑制窗口内等待
+    // watcher 结算后再复位 dirty，避免保存成功后下一微任务又变回“未保存”。
+    suppressDirty = true;
+    try {
+      // null 表示未编辑，空串表示明确清除，非空字符串表示更新。
+      if (pwdValue !== null) password.markSaved(pwdValue.length > 0);
+      await nextTick();
+      // 保存成功后以当前表单为新快照：用户把值改回原样时 dirty 自动消失
+      savedSnapshot = JSON.stringify(config);
+      dirty.value = false;
+    } finally {
+      suppressDirty = false;
+    }
     frontendLogger.info("config", "配置保存成功");
   } catch (error) {
     // G19：被 saveAbort.abort() 顶替的旧保存请求属预期取消（client.ts 已把

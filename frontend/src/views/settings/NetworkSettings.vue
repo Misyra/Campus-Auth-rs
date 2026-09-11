@@ -119,10 +119,24 @@ const autoRestartHours = computed<string>({
 const reloading = ref(false);
 const reloadMsg = ref("");
 async function reloadConfig() {
+  if (config.dirty.value) {
+    const ok = await confirm({
+      title: "放弃未保存修改",
+      message: "重新加载会用磁盘配置覆盖当前未保存的设置，是否继续？",
+      confirmText: "放弃并重新加载",
+      danger: true,
+    });
+    if (!ok) return;
+  }
   reloading.value = true;
   reloadMsg.value = "";
   try {
     await configApi.reload();
+    await config.fetchConfig();
+    if (config.configLoadFailed.value) {
+      reloadMsg.value = "后端已重新加载，但表单刷新失败，请重试";
+      return;
+    }
     reloadMsg.value = "配置已重新加载";
   } catch (e: unknown) {
     reloadMsg.value = "重新加载失败：" + ((e as Error).message || "未知错误");

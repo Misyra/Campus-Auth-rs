@@ -98,6 +98,10 @@ pub enum UpdaterError {
     #[error("无法确定当前可执行文件路径: {0}")]
     CurrentExeResolveFailed(#[source] std::io::Error),
 
+    /// 当前 Worker 来自外部或只读布局，不能由便携版更新器安全覆盖
+    #[error("当前 Python Worker 不在程序数据目录内，无法使用应用内自更新: {0}")]
+    UnsupportedSelfUpdateLayout(String),
+
     /// GitHub API 速率限制（429），需等待后重试
     #[error("请求过于频繁，请在 {retry_after} 秒后重试")]
     RateLimited { retry_after: u64 },

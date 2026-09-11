@@ -248,7 +248,7 @@ impl ServiceContainer {
     fn spawn_environment_probe(environment: &Arc<EnvironmentManager>) {
         let env_bg = environment.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::environment::check_environment(&env_bg).await {
+            if let Err(e) = env_bg.refresh_status().await {
                 tracing::warn!("启动环境探测失败: {e}");
             }
         });

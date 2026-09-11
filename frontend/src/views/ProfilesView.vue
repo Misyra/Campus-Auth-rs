@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /** 认证方案页：方案列表与编辑器、门户地址探测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
 import { usePortalDetect } from "@/composables/usePortalDetect";
+import { useCarrierField } from "@/composables/useCarrierField";
 import { useStatus } from "@/composables/useStatus";
 import { CARRIER_OPTIONS, DEFAULT_TRIGGER_URL } from "@/utils/constants";
 import CustomSelect from "@/components/common/CustomSelect.vue";
@@ -25,19 +26,14 @@ onMounted(() => { void p.fetchProfiles(); });
 // 编辑模式：true = 显示编辑器，false = 显示列表
 const showEditor = ref(false);
 
-// 自定义运营商：独立状态控制输入框显隐（修复 P1-17 敲第一个字符输入框即消失）。
-// 逻辑统一为：isp 非空且不在预设值列表 → 视为"自定义"（含"自定义"开关项与已加载的自定义关键字）。
-const showCustomCarrier = ref(false);
-// 运营商预设值（不含空与"自定义"开关项）
-const carrierPresetValues = CARRIER_OPTIONS.map((o) => o.value).filter((v) => v !== "" && v !== "自定义");
-watch(
-  () => p.editingProfile.value?.isp,
-  (val) => {
-    const isp = val || "";
-    showCustomCarrier.value = isp !== "" && !carrierPresetValues.includes(isp);
+const profileCarrier = computed<string>({
+  get: () => p.editingProfile.value?.isp ?? "",
+  set: (value) => {
+    const profile = p.editingProfile.value;
+    if (profile) profile.isp = value;
   },
-  { immediate: true },
-);
+});
+const { showCustomCarrier, carrierSelection, customCarrierValue } = useCarrierField(profileCarrier);
 
 async function openEditor(profileId: string | null) {
   await p.showProfileEditor(profileId ?? undefined);
@@ -157,11 +153,11 @@ const redirectEnabled = computed({
               <div class="form-row">
                 <div class="form-group">
                   <label for="prof-carrier">运营商</label>
-                  <CustomSelect v-model="p.editingProfile.value.isp" :options="carrierOptions" />
+                  <CustomSelect v-model="carrierSelection" :options="carrierOptions" />
                 </div>
                 <div v-if="showCustomCarrier" class="form-group">
                   <label for="prof-carrier-custom">自定义运营商</label>
-                  <input id="prof-carrier-custom" v-model.trim="p.editingProfile.value.isp" type="text" placeholder="校园专网" />
+                  <input id="prof-carrier-custom" v-model.trim="customCarrierValue" type="text" placeholder="校园专网" />
                 </div>
               </div>
             </div>

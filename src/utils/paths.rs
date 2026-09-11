@@ -154,22 +154,22 @@ pub fn pending_path(base: &Path) -> PathBuf {
 /// `bridge` / `web` / `environment` 三方各自解析的分歧。
 pub fn worker_project_dir(base_path: &Path) -> PathBuf {
     let candidate = base_path.join(WORKER_PROJECT_DIR);
-    if candidate.exists() {
+    if candidate.is_dir() {
         return candidate;
     }
     // Docker 镜像将 python_worker 置于 /app/python_worker（见 Dockerfile）
     let docker_path = Path::new("/app").join(WORKER_PROJECT_DIR);
-    if docker_path.exists() {
+    if docker_path.is_dir() {
         return docker_path;
     }
     // 环境变量覆盖（便于自定义挂载路径）
     if let Ok(env_path) = std::env::var("CAMPUS_AUTH_WORKER_DIR") {
         let pp = PathBuf::from(&env_path);
-        if pp.exists() {
+        if pp.is_dir() {
             return pp;
         }
         let p = pp.join(WORKER_PROJECT_DIR);
-        if p.exists() {
+        if p.is_dir() {
             return p;
         }
     }
@@ -178,12 +178,12 @@ pub fn worker_project_dir(base_path: &Path) -> PathBuf {
         .and_then(|p| p.parent())
         .map(|p| p.join(WORKER_PROJECT_DIR))
     {
-        if repo.exists() {
+        if repo.is_dir() {
             return repo;
         }
     }
     let mf = Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
-    if mf.exists() { mf } else { candidate }
+    if mf.is_dir() { mf } else { candidate }
 }
 
 /// 判定两条路径指向同一已存在的文件（canonicalize 后逐分量比较）

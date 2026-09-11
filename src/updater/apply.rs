@@ -37,6 +37,12 @@ pub struct PendingUpdate {
     pub staging_dir: String,
     /// 目标 exe 绝对路径（将被替换的当前 exe）
     pub target_exe: String,
+    /// Python Worker 的明确更新目标目录
+    ///
+    /// 新版只允许程序数据目录内置的 `<base_path>/python_worker`；字段落盘后
+    /// helper 不再自行猜测运行时 Worker 位于何处。旧 pending 缺字段时回退该目录。
+    #[serde(default)]
+    pub worker_target_dir: String,
     /// 主进程原始启动参数（助手用于重启时恢复）
     pub original_args: Vec<String>,
     /// 暂存包预期 SHA256（hex，空表示未取得校验值）
@@ -127,6 +133,11 @@ mod tests {
                 .join("campus-auth.exe")
                 .to_string_lossy()
                 .into_owned(),
+            worker_target_dir: dir
+                .path()
+                .join("python_worker")
+                .to_string_lossy()
+                .into_owned(),
             original_args: vec!["--port".into(), "8800".into()],
             sha256: "abc123".into(),
             created_at: "2026-08-24T00:00:00Z".into(),
@@ -136,6 +147,7 @@ mod tests {
         assert_eq!(loaded.version, "5.0.1");
         assert_eq!(loaded.sha256, "abc123");
         assert_eq!(loaded.original_args, vec!["--port", "8800"]);
+        assert!(loaded.worker_target_dir.ends_with("python_worker"));
         assert!(has_pending_update(dir.path()));
 
         // 旧格式（无 sha256 字段）兼容
@@ -149,6 +161,7 @@ mod tests {
         std::fs::write(pending_path(dir.path()), legacy).unwrap();
         let old = read_pending(dir.path()).unwrap();
         assert_eq!(old.sha256, "", "旧格式 sha256 应默认为空");
+        assert_eq!(old.worker_target_dir, "", "旧格式 Worker 目标应默认为空");
     }
 
     /// A6：写入后 update/ 目录内无 .tmp 残留（原子写不留半成品）
@@ -159,6 +172,7 @@ mod tests {
             version: "5.0.1".into(),
             staging_dir: "s".into(),
             target_exe: "t".into(),
+            worker_target_dir: "python_worker".into(),
             original_args: vec![],
             sha256: String::new(),
             created_at: "2026-08-24T00:00:00Z".into(),

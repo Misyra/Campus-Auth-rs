@@ -73,6 +73,18 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(false);
   });
 
+  it("保存新密码后不会被密码 watcher 重新标记为未保存", async () => {
+    await config.fetchConfig();
+    config.password.setValue("new-secret");
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+
+    await config.saveConfig();
+    await flushWatch();
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    expect(config.dirty.value).toBe(false);
+  });
+
   it("日志级别走独立即时保存 API，不把表单误标为已变更", async () => {
     await config.fetchConfig();
     await config.setLogLevel("DEBUG");

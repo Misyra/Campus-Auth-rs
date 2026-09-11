@@ -527,6 +527,49 @@ impl ConfigService {
         Ok(Ok(()))
     }
 
+    /// 同一请求原子化提交 settings 与 Profile（跨文件补偿事务）
+    ///
+    /// 锁序固定为 `profiles_lock -> settings_lock`，与 Profile 删除路径一致。先在无落盘
+    /// 状态下完成 settings 合并校验，再写 Profile、最后写 settings；若第二次写入失败，
+    /// 立即把 Profile 恢复为旧值。单文件写入仍由原子替换保证不撕裂。
+    pub async fn modify_settings_and_profile_tx(
+        &self,
+        profile: ProfileData,
+        f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        if self.settings_poisoned() {
+            return Err(ConfigError::ConfigWriteError {
+                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
+            });
+        }
+        if !is_valid_profile_id(&profile.id) {
+            return Err(ConfigError::InvalidProfileId {
+                id: profile.id.clone(),
+            });
+        }
+
+        let _profiles_guard = self.profiles_lock.lock().await;
+        let _settings_guard = self.settings_lock.lock().await;
+        let old_profile = self.load_profile(&profile.id)?;
+        let new_settings = match f(self.load_settings()) {
+            Ok(settings) => settings,
+            Err(msg) => return Ok(Err(msg)),
+        };
+
+        self.save_profile_locked(&profile).await?;
+        if let Err(settings_error) = self.write_settings_locked(&new_settings).await {
+            if let Err(rollback_error) = self.save_profile_locked(&old_profile).await {
+                return Err(ConfigError::ConfigWriteError {
+                    reason: format!(
+                        "settings 写入失败（{settings_error}），且 Profile 回滚失败（{rollback_error}）"
+                    ),
+                });
+            }
+            return Err(settings_error);
+        }
+        Ok(Ok(()))
+    }
+
     /// 是否处于 settings 隔离态（损坏且无缓存可用）
     fn settings_poisoned(&self) -> bool {
         self.settings_cache

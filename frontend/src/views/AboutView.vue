@@ -15,21 +15,29 @@ const pythonStatus = ref("未知");
 const platform = ref("");
 const autostartEnabled = ref(false);
 
-/** 并行拉取版本/自启动/环境状态渲染"关于"页信息；任一失败仅降级为默认占位 */
+/** 并行拉取版本/自启动/环境状态；各请求独立降级，避免单点失败遮掉其它信息 */
 async function loadInfo() {
-  try {
-    const [health, auto, init] = await Promise.all([
-      systemApi.health(),
-      autostartApi.fetchStatus(),
-      systemApi.initStatus(),
-    ]);
-    version.value = health.version || "unknown";
-    const env = (init as { environment?: { python_ready?: boolean } }).environment;
+  const [healthResult, autoResult, initResult] = await Promise.allSettled([
+    systemApi.health(),
+    autostartApi.fetchStatus(),
+    systemApi.initStatus(),
+  ]);
+  if (healthResult.status === "fulfilled") {
+    version.value = healthResult.value.version || "unknown";
+  } else {
+    frontendLogger.warn("about", "版本信息加载失败", healthResult.reason);
+  }
+  if (autoResult.status === "fulfilled") {
+    platform.value = autoResult.value.platform;
+    autostartEnabled.value = autoResult.value.enabled;
+  } else {
+    frontendLogger.warn("about", "自启动信息加载失败", autoResult.reason);
+  }
+  if (initResult.status === "fulfilled") {
+    const env = (initResult.value as { environment?: { python_ready?: boolean } }).environment;
     pythonStatus.value = env?.python_ready ? "已就绪" : "未就绪";
-    platform.value = auto.platform;
-    autostartEnabled.value = auto.enabled;
-  } catch (error) {
-    frontendLogger.warn("about", "系统信息加载失败", error);
+  } else {
+    frontendLogger.warn("about", "Python 环境信息加载失败", initResult.reason);
   }
 }
 void loadInfo();

@@ -7,7 +7,7 @@
 //! `--pid` 传入）退出后，将 `staging_dir/extracted/<EXE_NAME>` 复制到 `target_exe`
 //! 并以其 `original_args` 重启，最后清理 staging 与 pending 标记。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -33,6 +33,23 @@ const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(5);
 
 /// 上次检查状态文件路径（相对 base_path，与 staging 同级不被清理波及）
 const LAST_CHECK_FILE_NAME: &str = "update/last_check.json";
+
+/// 确认应用内更新可以安全覆盖当前 Worker，并返回明确目标目录。
+///
+/// Docker、系统包或显式外置 Worker 应由各自部署系统更新；若仍把发布包
+/// overlay 到 `<base_path>/python_worker`，会造成主程序与实际执行 Worker 版本分裂。
+fn self_update_worker_dir(base_path: &Path) -> Result<PathBuf, UpdaterError> {
+    let bundled = base_path.join("python_worker");
+    let resolved = crate::utils::paths::worker_project_dir(base_path);
+    if bundled.is_dir() && crate::utils::paths::same_existing_path(&bundled, &resolved) {
+        return Ok(bundled);
+    }
+    Err(UpdaterError::UnsupportedSelfUpdateLayout(format!(
+        "运行时解析到 {}；应用内更新仅支持 {}",
+        resolved.display(),
+        bundled.display()
+    )))
+}
 
 /// 上次更新检查结果（`update/last_check.json`，跨重启持久）
 ///
@@ -473,6 +490,7 @@ impl UpdaterService {
 
     /// 下载 → 校验 → 解压 → 写 pending.json
     async fn download_stage_and_pending(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
+        let worker_target_dir = self_update_worker_dir(&self.base_path)?;
         let staging_dir = self.base_path.join(apply::STAGING_DIR_NAME);
         tokio::fs::create_dir_all(&staging_dir)
             .await
@@ -525,6 +543,7 @@ impl UpdaterService {
             version: info.latest_version.clone(),
             staging_dir: staging_dir.to_string_lossy().into_owned(),
             target_exe: target_exe.to_string_lossy().into_owned(),
+            worker_target_dir: worker_target_dir.to_string_lossy().into_owned(),
             original_args: std::env::args().skip(1).collect(),
             sha256: exe_sha256,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -939,6 +958,24 @@ fn log_check_failure(stage: &str, e: &UpdaterError) {
 mod tests {
     use super::*;
 
+    /// 应用内更新只允许覆盖 base_path 自带的 Worker，防止外置部署版本分裂。
+    #[test]
+    fn test_self_update_worker_dir_requires_bundled_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            self_update_worker_dir(dir.path()),
+            Err(UpdaterError::UnsupportedSelfUpdateLayout(_))
+        ));
+
+        let bundled = dir.path().join("python_worker");
+        std::fs::create_dir_all(&bundled).unwrap();
+        assert_eq!(
+            self_update_worker_dir(dir.path()).unwrap(),
+            bundled,
+            "存在随程序分发的 Worker 时应明确返回该目录"
+        );
+    }
+
     /// 构造测试用 UpdaterService（base_path = tempdir）
     async fn make_service(base_path: &std::path::Path) -> Arc<UpdaterService> {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -983,6 +1020,11 @@ mod tests {
             target_exe: dir
                 .path()
                 .join("campus-auth.exe")
+                .to_string_lossy()
+                .into_owned(),
+            worker_target_dir: dir
+                .path()
+                .join("python_worker")
                 .to_string_lossy()
                 .into_owned(),
             original_args: vec![],
@@ -1045,6 +1087,11 @@ mod tests {
             target_exe: dir
                 .path()
                 .join("campus-auth.exe")
+                .to_string_lossy()
+                .into_owned(),
+            worker_target_dir: dir
+                .path()
+                .join("python_worker")
                 .to_string_lossy()
                 .into_owned(),
             original_args: vec![],

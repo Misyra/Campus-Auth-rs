@@ -82,7 +82,9 @@ impl WorkerProcess {
                     .await
                     .is_err()
                 {
-                    tracing::warn!("kill 后等待 Worker 退出超时（2s），放弃等待");
+                    tracing::warn!("kill 后等待 Worker 退出超时（2s），中止健康监控任务");
+                    self.handles.health_task.abort();
+                    let _ = self.handles.health_task.await;
                 }
             }
         }
@@ -656,7 +658,12 @@ async fn health_monitor_task(
             -1
         }
     };
-    let _ = ipc_tx.send(ParsedMessage::WorkerExited(code)).await;
+    // Supervisor 可能正在同一任务内等待 `shutdown()`；若 bounded IPC channel 已满，
+    // 直接 await send 会让 shutdown 与 health task 互相等待。通知交给独立短任务，
+    // health task 先结束；receiver 关闭时发送任务会自然收敛。
+    tokio::spawn(async move {
+        let _ = ipc_tx.send(ParsedMessage::WorkerExited(code)).await;
+    });
 }
 
 #[cfg(test)]

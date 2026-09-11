@@ -133,9 +133,43 @@ let statusEpoch = 0;
 // 当前已应用状态的新鲜度（后端 snapshot_version / uptime_seconds，单调递增；0 表示尚未应用过）
 let appliedVersion = 0;
 let appliedUptime = 0;
+let cooldownDeadline = 0;
+let lastServerCooldownRemaining: number | null = null;
+let cooldownTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 按后端给出的冷却基线在本地逐秒递减；重复快照不会把截止时间向后推。 */
+function syncCooldownClock(mapped: Partial<StatusSnapshot>): void {
+  if (!mapped.cooling_down) {
+    cooldownDeadline = 0;
+    lastServerCooldownRemaining = null;
+    if (cooldownTimer !== null) {
+      clearInterval(cooldownTimer);
+      cooldownTimer = null;
+    }
+    return;
+  }
+  const incoming = mapped.cooling_down_remaining;
+  if (incoming != null && Number.isFinite(incoming) && incoming !== lastServerCooldownRemaining) {
+    lastServerCooldownRemaining = incoming;
+    cooldownDeadline = Date.now() + Math.max(0, incoming) * 1000;
+  }
+  if (cooldownDeadline > 0) {
+    mapped.cooling_down_remaining = Math.max(0, Math.ceil((cooldownDeadline - Date.now()) / 1000));
+  }
+  if (cooldownTimer === null) {
+    cooldownTimer = setInterval(() => {
+      if (!status.cooling_down || cooldownDeadline <= 0) return;
+      status.cooling_down_remaining = Math.max(
+        0,
+        Math.ceil((cooldownDeadline - Date.now()) / 1000),
+      );
+    }, 1000);
+  }
+}
 
 /** 应用映射后的状态并同步已应用新鲜度（raw 为后端原始快照，可能缺新鲜度字段） */
 function applyStatus(mapped: Partial<StatusSnapshot>, raw: Record<string, unknown>): void {
+  syncCooldownClock(mapped);
   Object.assign(status, mapped);
   const version = Number(raw.snapshot_version);
   if (Number.isFinite(version) && version > 0) appliedVersion = version;

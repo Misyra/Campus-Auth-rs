@@ -132,7 +132,8 @@ def _purge_stale_debug_screenshots() -> None:
 
     Worker 进程被强杀时，任务级（_run_task）与调试级（_cleanup_debug_screenshots）
     清理均不会执行，debug/ 目录会残留可能含明文凭据的截图。启动时
-    best-effort 删除修改时间早于本进程启动（模块加载时刻）的 PNG/JPEG；
+    best-effort 删除修改时间早于本进程启动（模块加载时刻）的 PNG/JPEG，
+    以及完整的 ``feedback-*`` 快照目录；
     多 Worker 并发启动时，正被其他进程写入的新文件（mtime 较新）不受影响。
     """
     directory = _debug_screenshot_dir()
@@ -145,6 +146,11 @@ def _purge_stale_debug_screenshots() -> None:
         return
     for entry in entries:
         try:
+            if entry.is_dir() and entry.name.startswith("feedback-"):
+                if entry.stat().st_mtime < _MODULE_LOAD_TIME:
+                    shutil.rmtree(entry)
+                    logger.info("已清理上次会话残留反馈快照: %s", entry.name)
+                continue
             if entry.suffix.lower() not in {".png", ".jpg", ".jpeg"} or not entry.is_file():
                 continue
             if entry.stat().st_mtime >= _MODULE_LOAD_TIME:
@@ -1102,30 +1108,31 @@ class WorkerCore:
         """执行单个浏览器任务：确保浏览器 → 导航 → 运行步骤。"""
         start = time.perf_counter()
         self._session_type = "login"
-        # 有码任务在拉起浏览器前同步预热一次：主线程加载 ddddocr/numpy C 扩展
-        # 入缓存，后续后台线程的分类识别只命中缓存，避免 Windows loader lock 卡 100s
-        if any(s.step_type == "ocr" for s in (task_config.steps or [])):
-            try:
-                from worker_main import _preload_ocr_deps  # noqa: WPS433
-
-                _preload_ocr_deps(force=True)
-            except Exception:  # noqa: BLE001 — 预热 best-effort，失败不影响任务
-                pass
-        await self.ensure_browser({"browser_settings": bs})
-        await self._prepare_session_page()
-
-        context = self._make_context(
-            self._page, variables, bs, cancel_event, screenshot_dir, task_config
-        )
-        target = navigate_url or task_config.url
-        if target:
-            target = resolve(target, variables)
-            nav_timeout = _nav_timeout(bs)
-            # 全新 Page 让浏览器/上下文保持热态（免冷启动），同时强制存储隔离。
-            await self._navigate(self._page, target, nav_timeout)
-            await self._wait_after_navigation(task_config, context)
-
+        context: StepContext | None = None
         try:
+            # 有码任务在拉起浏览器前同步预热一次：主线程加载 ddddocr/numpy C 扩展
+            # 入缓存，后续后台线程的分类识别只命中缓存，避免 Windows loader lock 卡 100s
+            if any(s.step_type == "ocr" for s in (task_config.steps or [])):
+                try:
+                    from worker_main import _preload_ocr_deps  # noqa: WPS433
+
+                    _preload_ocr_deps(force=True)
+                except Exception:  # noqa: BLE001 — 预热 best-effort，失败不影响任务
+                    pass
+            await self.ensure_browser({"browser_settings": bs})
+            await self._prepare_session_page()
+
+            context = self._make_context(
+                self._page, variables, bs, cancel_event, screenshot_dir, task_config
+            )
+            target = navigate_url or task_config.url
+            if target:
+                target = resolve(target, variables)
+                nav_timeout = _nav_timeout(bs)
+                # 全新 Page 让浏览器/上下文保持热态（免冷启动），同时强制存储隔离。
+                await self._navigate(self._page, target, nav_timeout)
+                await self._wait_after_navigation(task_config, context)
+
             result = await run_steps(self._page, task_config.steps, context)
             # success_condition 成功判定：声明变量名时，从 store_as 结果取变量真值判定，
             # 覆盖默认的"步骤全部成功即成功"兜底（对齐原项目 v4.2.3 _check_success）。
@@ -1167,13 +1174,30 @@ class WorkerCore:
                     except Exception as exc:  # noqa: BLE001
                         logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {exc}")
             return result
+        except WorkerError as exc:
+            if exc.outcome != Outcome.CANCELLED and self._context is not None:
+                try:
+                    await self._context.clear_cookies()
+                    logger.info("[_run_task] 任务异常，已清除 context cookies")
+                except Exception as clear_exc:  # noqa: BLE001
+                    logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {clear_exc}")
+            raise
+        except Exception:
+            if self._context is not None:
+                try:
+                    await self._context.clear_cookies()
+                    logger.info("[_run_task] 任务异常，已清除 context cookies")
+                except Exception as clear_exc:  # noqa: BLE001
+                    logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {clear_exc}")
+            raise
         finally:
             # A7：登录/浏览器任务截图可能含表单明文凭据，任务结束（成功/失败/
             # 取消/异常等所有退出路径）后 best-effort 删除磁盘文件。截图事件
             # 已在 handle_screenshot 中即时推送（仅携带路径字符串，前端不回读
             # 文件），删除不影响展示链路；debug 会话不走 _run_task，其截图由
             # _cleanup_debug_screenshots（debug_stop / close_browser）清理。
-            self._cleanup_task_screenshots(context)
+            if context is not None:
+                self._cleanup_task_screenshots(context)
 
     # ── 命令处理器 ──
 
@@ -1240,23 +1264,27 @@ class WorkerCore:
     async def handle_execute_login_attempt(self, params: dict) -> dict:
         """执行完整登录流程。"""
         self._ensure_no_debug_session("登录任务")
-        async with self._cancel_session(params) as (cancel_event, bs, task):
-            auth_url = params.get("auth_url", "") or ""
-            trigger_url = params.get("trigger_url", "") or ""
-            # 重定向模式：触发器非空即用它首导航，Playwright 自动跟随 302 到真门户；LOGIN_URL 同步为实际导航地址，存量任务零改动
-            navigate_url = trigger_url.strip() or auth_url
-            # 任务变量可自定义普通模板值，但系统保留变量必须始终反映当前 Profile。
-            # 统一经 _system_variables 注入：键缺失时跳过（避免空串覆盖任务自定义
-            # 变量）；{{LOGIN_URL}} 优先非空 trigger_url、回落 auth_url，与首导航一致。
-            variables = dict(task.variables or {})
-            variables.update(self._system_variables(params))
-            self._task_dialogs = []
-            result = await self._run_task(
-                task, bs, variables, cancel_event, _debug_screenshot_dir(),
-                navigate_url=navigate_url,
-            )
-            result.data = {"dialogs": list(self._task_dialogs)}
-            return result.to_dict()
+        try:
+            async with self._cancel_session(params) as (cancel_event, bs, task):
+                auth_url = params.get("auth_url", "") or ""
+                trigger_url = params.get("trigger_url", "") or ""
+                # 重定向模式：触发器非空即用它首导航，Playwright 自动跟随 302 到真门户；LOGIN_URL 同步为实际导航地址，存量任务零改动
+                navigate_url = trigger_url.strip() or auth_url
+                # 任务变量可自定义普通模板值，但系统保留变量必须始终反映当前 Profile。
+                # 统一经 _system_variables 注入：键缺失时跳过（避免空串覆盖任务自定义
+                # 变量）；{{LOGIN_URL}} 优先非空 trigger_url、回落 auth_url，与首导航一致。
+                variables = dict(task.variables or {})
+                variables.update(self._system_variables(params))
+                self._task_dialogs = []
+                result = await self._run_task(
+                    task, bs, variables, cancel_event, _debug_screenshot_dir(),
+                    navigate_url=navigate_url,
+                )
+                result.data = {"dialogs": list(self._task_dialogs)}
+                return result.to_dict()
+        finally:
+            # 登录任务与普通浏览器任务保持一致，结束后都武装空闲回收。
+            self._arm_browser_idle_release()
 
     async def handle_execute_browser_task(self, params: dict) -> dict:
         """执行浏览器任务（不含账号密码语义）。"""
@@ -1319,7 +1347,7 @@ class WorkerCore:
             # 但 start 阶段点"取消"此前被完全忽略，浏览器会照常拉起并导航
             def _ensure_not_cancelled(stage: str) -> None:
                 if cancel_event is not None and cancel_event.is_set():
-                    raise WorkerError(Outcome.UNKNOWN_ERROR, f"调试已取消（{stage}阶段）")
+                    raise StepCancelled(f"调试已取消（{stage}阶段）")
 
             _ensure_not_cancelled("环境准备前")
             await self.ensure_browser({"browser_settings": bs})
@@ -1626,7 +1654,7 @@ class WorkerCore:
         except Exception:  # noqa: BLE001
             logger.debug("networkidle 等待超时，按当前页面状态继续捕获")
         if cancel_event is not None and cancel_event.is_set():
-            raise WorkerError(Outcome.UNKNOWN_ERROR, "页面捕获已取消")
+            raise StepCancelled("页面捕获已取消")
 
     @staticmethod
     async def _capture_mhtml(page: Any, target: Path) -> bool:
@@ -1846,7 +1874,7 @@ class WorkerCore:
 
         def _ensure_not_cancelled(stage: str) -> None:
             if cancel_event is not None and cancel_event.is_set():
-                raise WorkerError(Outcome.UNKNOWN_ERROR, f"OCR 识别已取消（{stage}）")
+                raise StepCancelled(f"OCR 识别已取消（{stage}）")
 
         deadline = time.monotonic() + OCR_TIMEOUT_SECS
 

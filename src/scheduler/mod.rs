@@ -384,16 +384,17 @@ impl SchedulerService {
     /// 同一任务已在执行时拒绝再次触发（与 cron 防重叠规则一致）。
     ///
     /// 自身 Arc 经 `self_weak` 升级获取（服务由容器持有强引用，运行期必然可达）。
-    pub fn spawn_manual_run(&self, task: crate::scheduler::task::ScheduledTask) {
+    pub fn spawn_manual_run(&self, task: crate::scheduler::task::ScheduledTask) -> bool {
         let Some(svc) = self.self_weak.upgrade() else {
             tracing::warn!(task_id = %task.id, "调度器已释放，忽略手动触发");
-            return;
+            return false;
         };
         if !svc.try_mark_running(&task.id) {
             tracing::warn!(task_id = %task.id, "任务正在执行中，拒绝手动重复触发");
-            return;
+            return false;
         }
         svc.spawn_tracked_run(task);
+        true
     }
 
     /// 将一次任务执行纳入服务生命周期，关闭时统一取消并等待清理完成。
@@ -517,7 +518,7 @@ pub trait SchedulerApi: Send + Sync {
     /// 查询指定任务的 cron 表达式是否解析失败。
     fn is_cron_invalid(&self, id: &str) -> bool;
     /// 手动触发执行定时任务。
-    fn spawn_manual_run(&self, task: ScheduledTask);
+    fn spawn_manual_run(&self, task: ScheduledTask) -> bool;
     /// 读取任务执行历史（内聚 id 校验 + 读盘 + 前端字段映射），
     /// 返回扁平数组 `[{ run_at, success, message }]`。
     async fn read_history(&self, id: &str) -> Result<Vec<serde_json::Value>, ApiError>;
@@ -557,8 +558,8 @@ impl SchedulerApi for SchedulerService {
         SchedulerService::is_cron_invalid(self, id)
     }
 
-    fn spawn_manual_run(&self, task: ScheduledTask) {
-        SchedulerService::spawn_manual_run(self, task);
+    fn spawn_manual_run(&self, task: ScheduledTask) -> bool {
+        SchedulerService::spawn_manual_run(self, task)
     }
 
     async fn read_history(&self, id: &str) -> Result<Vec<serde_json::Value>, ApiError> {
