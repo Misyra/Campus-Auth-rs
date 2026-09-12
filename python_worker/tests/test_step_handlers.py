@@ -273,7 +273,7 @@ def test_ocr_locator_screenshot_maps_to_selector_failed(monkeypatch):
         async def wait_for(self, state=None, timeout=None):
             return None
 
-        async def screenshot(self):
+        async def screenshot(self, timeout=None):
             raise PlaywrightError("element was detached")
 
     class FakePage:
@@ -452,8 +452,8 @@ def test_frame_scoped_locators_use_frame_locator():
         )
         ctx = StepContext(page=page2, reveal_hidden=True)
         await run_step_async(page2, input_step, ctx)
-        # handle_input 顶部预定位 + _force_input 注入各走一次 frame_locator
-        assert page2.frame_calls == ["iframe[name=x]", "iframe[name=x]"]
+        # 步骤入口只解析一次 frame，处理器内全部定位复用同一 scope。
+        assert page2.frame_calls == ["iframe[name=x]"]
         assert page2.evaluates, "_force_input 注入应经 frame_locator 定位后在框架内执行"
 
     asyncio.run(run())

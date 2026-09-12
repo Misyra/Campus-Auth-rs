@@ -465,19 +465,12 @@ impl TaskManager {
     ///   no-op——所有步骤"成功"但运营商根本没选，required 的显式拒绝是有意行为
     const STEP_FIELD_RULES: &[StepFieldRule] = &[
         (
-            &[
-                "input",
-                "click",
-                "click_select",
-                "ocr",
-                "wait_for_selector",
-                "upload_file",
-            ],
+            &["input", "click", "ocr", "wait_for_selector", "upload_file"],
             &["selector"],
             &[],
             "",
         ),
-        (&["select"], &["selector", "value"], &[], ""),
+        (&["select", "click_select"], &["selector", "value"], &[], ""),
         (&["assert_text"], &["value"], &[], ""),
         (&["wait_url"], &["pattern"], &[], ""),
         (
@@ -1148,6 +1141,34 @@ mod tests {
             "steps": [{
                 "id": "sel",
                 "type": "select",
+                "selector": "#isp",
+                "value": "电信"
+            }]
+        });
+        assert!(mgr.validate_task(&valid).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_click_select_requires_value() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let invalid = serde_json::json!({
+            "type": "browser",
+            "name": "自定义运营商任务",
+            "steps": [{
+                "id": "sel",
+                "type": "click_select",
+                "selector": "#isp"
+            }]
+        });
+        let errors = mgr.validate_task(&invalid).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("需要 value")));
+
+        let valid = serde_json::json!({
+            "type": "browser",
+            "name": "自定义运营商任务",
+            "steps": [{
+                "id": "sel",
+                "type": "click_select",
                 "selector": "#isp",
                 "value": "电信"
             }]

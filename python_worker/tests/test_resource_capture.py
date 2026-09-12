@@ -14,6 +14,7 @@ from pathlib import Path
 from playwright_worker import (
     _RESOURCE_MAX_BYTES,
     _capture_page_resources,
+    WorkerCore,
 )
 
 
@@ -52,6 +53,27 @@ class _FakePage:
 
     async def new_cdp_session(self, _page):
         return self._cdp
+
+
+class _FakeMhtmlCdp:
+    """MHTML 捕获 stub，可独立模拟抓取或释放失败。"""
+
+    def __init__(self, *, send_error=False, detach_error=False):
+        self.send_error = send_error
+        self.detach_error = detach_error
+        self.detached = False
+
+    async def send(self, method, params=None):
+        assert method == "Page.captureSnapshot"
+        assert params == {"format": "mhtml"}
+        if self.send_error:
+            raise RuntimeError("capture failed")
+        return {"data": "MIME-Version: 1.0\r\n"}
+
+    async def detach(self):
+        self.detached = True
+        if self.detach_error:
+            raise RuntimeError("detach failed")
 
 
 def _tree(resources):
@@ -128,3 +150,29 @@ def test_oversized_content_skipped():
 
         saved, _ = _run(_run_capture())
         assert set(saved) == {small_url}
+
+
+def test_mhtml_capture_detaches_and_keeps_success_when_detach_fails():
+    """已成功写盘后，即使 CDP detach 失败也不能把捕获结果改成失败。"""
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "page.mhtml"
+        cdp = _FakeMhtmlCdp(detach_error=True)
+
+        captured = _run(WorkerCore._capture_mhtml(_FakePage(cdp), target))
+
+        assert captured is True
+        assert cdp.detached is True
+        assert target.read_text(encoding="utf-8") == "MIME-Version: 1.0\n"
+
+
+def test_mhtml_capture_failure_still_detaches():
+    """抓取失败也必须释放已创建的 CDP 会话。"""
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "page.mhtml"
+        cdp = _FakeMhtmlCdp(send_error=True)
+
+        captured = _run(WorkerCore._capture_mhtml(_FakePage(cdp), target))
+
+        assert captured is False
+        assert cdp.detached is True
+        assert not target.exists()

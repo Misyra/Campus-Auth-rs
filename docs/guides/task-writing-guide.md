@@ -198,7 +198,7 @@ wait_for_selector
 2. option 显示文本精确匹配；
 3. 显示文本唯一子串匹配。
 
-`value` 为空时直接跳过。没有唯一匹配时，`required=true` 失败，`required=false` 跳过。`required` 的默认值是 `true`。
+`value` 必填。没有唯一匹配时步骤会报告失败：`required=true` 终止任务，`required=false` 由任务编排继续后续步骤，并在最终结果中列出失败步骤。`required` 的默认值是 `true`。
 
 ## 9. click_select — 自定义下拉框 / 按钮组
 
@@ -218,10 +218,10 @@ wait_for_selector
 
 1. 点击 `selector` 展开选项；
 2. 可选等待 `select_delay` 毫秒，默认 500；
-3. 在 `option_selector` 范围内按 `value` 文本寻找唯一选项；
+3. 提供 `option_selector` 时在该范围内按 `value` 文本寻找唯一选项；省略时在当前页面或 frame 中寻找；
 4. 点击匹配项。
 
-`option_selector` 只是搜索范围，不是最终要点击的值。触发器点击、展开等待和选项点击共用同一个步骤 timeout 预算。`value` 必填：缺失时校验层拒绝新任务，绕过校验的存量任务执行时也会显式报错（不会静默跳过）。
+`option_selector` 可选且只是搜索范围，不是最终要点击的值。触发器点击、展开等待和选项点击共用同一个步骤 timeout 预算。`value` 必填：缺失时校验层拒绝新任务，绕过校验的存量任务执行时也会显式报错（不会静默跳过）。
 
 ## 10. wait / sleep / wait_for_selector
 
@@ -395,7 +395,7 @@ OCR 模型冷启动与 CPU 推理共享 OCR 总预算，避免模型加载和识
 }
 ```
 
-等待页面正文包含指定文本；超时归类为断言失败。
+`value` 必填；`selector` 可选，省略时等待页面正文包含指定文本。超时归类为断言失败。
 
 ## 18. Frame / iframe
 
@@ -419,9 +419,9 @@ url=/portal/login           # URL 包含指定片段
 iframe#login-frame          # iframe/frame CSS selector
 ```
 
-name 或 URL 匹配到多个 frame 时会失败，避免静默操作错误页面。
+name 或 URL 会在当前步骤的 timeout 预算内等待动态 iframe 出现；匹配到多个 frame 时失败，避免静默操作错误页面。
 
-注意：`eval` / `assert_text` 直接执行脚本，`frame` 仅支持 name 与 `url=` 两种可解析为 Frame 的规格；CSS 选择器形式仅适用于元素类步骤（input/click/select 等）。
+注意：`eval` / `custom_js` 与 `wait_url` 直接使用 Frame 对象，`frame` 仅支持 name 与 `url=` 两种可解析规格；CSS 选择器形式适用于元素类步骤（input/click/select/assert_text 等）。
 
 ## 19. success_condition
 

@@ -36,7 +36,7 @@ from ocr_runtime import (
 )
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from variable_resolver import resolve
+from variable_resolver import resolve, resolve_javascript
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +91,18 @@ class StepContext:
     frame: str | None = None
     """frame name、``url=`` URL 片段或 iframe/frame CSS 选择器。"""
 
+    frame_scope: Any = None
+    """当前步骤已解析的 Frame / FrameLocator；仅在步骤执行期间有效。"""
+
+    on_page: Callable[[Any], None] | None = None
+    """发现弹窗或新标签页时通知 Worker 更新活动 Page。"""
+
     results: dict[str, Any] = field(default_factory=dict)
     """store_as 运行时结果。运行时结果在模板解析中优先于静态变量。"""
 
     screenshots: list[str] = field(default_factory=list)
     """本次动作产生的截图路径收集。"""
+
 
 def _check_cancel(context: StepContext) -> None:
     """在步骤边界检查取消事件，若已触发则抛出 StepCancelled。"""
@@ -164,7 +171,7 @@ def _resolve(step: StepConfig, context: StepContext) -> StepConfig:
 
     script = resolved.effective_script
     if script:
-        code = resolve(script, variables)
+        code = resolve_javascript(script, variables)
         resolved.code = code
         resolved.script = code
 
@@ -249,6 +256,12 @@ def _split_selector_candidates(selector: str) -> list[str]:
 
     ``:is(.a,.b)``、``[data-x='a,b']`` 等合法 CSS 中的逗号不能被当成候选分隔符。
     """
+    value = selector.strip()
+    # 显式 Playwright selector engine 的逗号属于该引擎语法或文本内容，
+    # 不能按 CSS 候选列表拆分；裸 XPath 同理。
+    if value.startswith("/") or re.match(r"^[A-Za-z_][A-Za-z0-9_-]*=", value):
+        return [value]
+
     result: list[str] = []
     buf: list[str] = []
     quote: str | None = None
@@ -355,7 +368,85 @@ def _frame_scope(context: StepContext) -> Any:
     frame 字段支持三类既有契约：frame name、``url=片段``、iframe/frame CSS。
     name/URL 能直接解析为 Frame 时优先使用；否则按 CSS 交给 ``frame_locator``。
     """
+    if context.frame_scope is not None:
+        return context.frame_scope
     return _match_frame(context.page, (context.frame or "").strip(), allow_css_fallback=True)
+
+
+def _looks_like_frame_css(spec: str) -> bool:
+    """保守识别 iframe/frame CSS，避免把普通 frame name 误作 CSS。"""
+    value = spec.strip().lower()
+    if value.startswith(("#", ".", "[", "//", "css=", "xpath=")):
+        return True
+    return bool(re.match(r"^(?:iframe|frame)(?:[.#\[:>+~\s]|$)", value))
+
+
+async def _resolve_frame_scope(
+    context: StepContext,
+    spec: str,
+    *,
+    allow_css_fallback: bool,
+) -> Any:
+    """在步骤预算内等待按 name/URL 动态出现的 Frame。"""
+    if not spec:
+        return context.page
+    if context.page is None:
+        return None
+    if _looks_like_frame_css(spec):
+        if allow_css_fallback:
+            return context.page.frame_locator(_normalize_selector(spec))
+        raise WorkerError(
+            Outcome.SELECTOR_FAILED,
+            f"脚本/URL 操作的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
+        )
+
+    while True:
+        _check_cancel(context)
+        frames = getattr(context.page, "frames", None) or []
+        if spec.startswith("url="):
+            fragment = spec[4:]
+            matches = [
+                frame for frame in frames
+                if fragment and fragment in getattr(frame, "url", "")
+            ]
+            label = "URL"
+        else:
+            matches = [frame for frame in frames if getattr(frame, "name", "") == spec]
+            label = "name"
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise WorkerError(Outcome.SELECTOR_FAILED, f"frame {label} 匹配不唯一: {spec}")
+        await asyncio.sleep(0.05)
+
+
+def _page_is_open(page: Any) -> bool:
+    """兼容真实 Playwright Page 与测试替身地判断页面是否仍可用。"""
+    try:
+        checker = getattr(page, "is_closed", None)
+        return not bool(checker()) if callable(checker) else True
+    except Exception:  # noqa: BLE001 — 页面切换本身是 best-effort
+        return False
+
+
+def _adopt_latest_page(context: StepContext) -> None:
+    """将浏览器上下文中新出现的最后一个活动页面接管为后续步骤目标。"""
+    current = context.page
+    browser_context = getattr(current, "context", None)
+    try:
+        pages = list(browser_context.pages) if browser_context is not None else []
+    except Exception:  # noqa: BLE001 — 页面枚举失败时继续使用当前页
+        return
+    live_pages = [page for page in pages if _page_is_open(page)]
+    if not live_pages:
+        return
+    latest = live_pages[-1]
+    if latest is current:
+        return
+    context.page = latest
+    if context.on_page is not None:
+        context.on_page(latest)
+    logger.info("检测到新标签页/弹窗，后续步骤已切换到新页面")
 
 
 def _locator(context: StepContext, selector: str) -> Any:
@@ -458,11 +549,9 @@ def _choose_text_index(texts: list[str], value: str) -> int | None:
     return None
 
 
-async def _skip_or_fail(step: StepConfig, message: str) -> None:
-    """按 required 语义决定容错跳过还是失败。"""
-    if step.required:
-        raise WorkerError(Outcome.SELECTOR_FAILED, message)
-    logger.warning("[step:%s] 可选步骤执行失败，已跳过: %s", step.id or step.step_type, message)
+def _raise_step_failure(message: str) -> None:
+    """将处理器失败统一上抛，由任务编排层决定必需/可选语义。"""
+    raise WorkerError(Outcome.SELECTOR_FAILED, message)
 
 
 # ── 各类型处理器 ──
@@ -552,9 +641,9 @@ async def handle_click(page, step: StepConfig, context: StepContext) -> None:
 async def handle_select(page, step: StepConfig, context: StepContext) -> None:
     """原生 select 选择。
 
-    先按 option value / 精确文本匹配，再按唯一子串文本匹配。空 value 自动跳过；
-    元素或选项找不到时由 ``required`` 决定失败还是跳过。元素等待与最终选择
-    共用同一个步骤 timeout 截止时间。
+    先按 option value / 精确文本匹配，再按唯一子串文本匹配。空 value 显式失败；
+    元素或选项找不到时统一上抛，由任务编排层处理 ``required`` 语义。元素等待
+    与最终选择共用同一个步骤 timeout 截止时间。
     """
     _check_cancel(context)
     if not step.selector:
@@ -577,10 +666,10 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
             "els => els.map(el => ({value: String(el.value ?? ''), text: String(el.textContent ?? '')}))"
         )
     except WorkerError as exc:
-        await _skip_or_fail(step, f"找不到下拉框: {step.selector}: {exc.message}")
+        _raise_step_failure(f"找不到下拉框: {step.selector}: {exc.message}")
         return
     except Exception as exc:  # noqa: BLE001
-        await _skip_or_fail(step, f"读取下拉选项失败: {exc}")
+        _raise_step_failure(f"读取下拉选项失败: {exc}")
         return
 
     # 精确值匹配：取首个 option value 与目标值完全相等的项（未命中再走文本匹配兜底）
@@ -596,12 +685,12 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
             chosen_value = str(items[idx].get("value", ""))
 
     if chosen_value is None:
-        await _skip_or_fail(step, f"下拉框未找到唯一匹配选项: {value}")
+        _raise_step_failure(f"下拉框未找到唯一匹配选项: {value}")
         return
 
     remaining = _remaining_ms(deadline)
     if remaining <= 0:
-        await _skip_or_fail(step, f"选择下拉项超时: {value}")
+        _raise_step_failure(f"选择下拉项超时: {value}")
         return
     try:
         await _safe_op(
@@ -609,7 +698,7 @@ async def handle_select(page, step: StepConfig, context: StepContext) -> None:
             Outcome.SELECTOR_FAILED,
         )
     except WorkerError as exc:
-        await _skip_or_fail(step, f"选择下拉项失败: {value}: {exc.message}")
+        _raise_step_failure(f"选择下拉项失败: {value}: {exc.message}")
 
 
 async def _find_click_select_option(
@@ -675,7 +764,7 @@ async def handle_click_select(page, step: StepConfig, context: StepContext) -> N
     timeout = step.timeout or context.default_timeout
     deadline = time.monotonic() + timeout / 1000
     if not await _click_locator(_locator(context, step.selector), _remaining_ms(deadline)):
-        await _skip_or_fail(step, f"找不到下拉触发器: {step.selector}")
+        _raise_step_failure(f"找不到下拉触发器: {step.selector}")
         return
 
     raw_delay = step.extra_fields.get("select_delay", _DEFAULT_SELECT_DELAY_MS)
@@ -687,20 +776,20 @@ async def handle_click_select(page, step: StepConfig, context: StepContext) -> N
         await _sleep_cancellable_ms(min(delay_ms, _remaining_ms(deadline)), context)
 
     if _remaining_ms(deadline) <= 0:
-        await _skip_or_fail(step, f"展开下拉框后已超时: {value}")
+        _raise_step_failure(f"展开下拉框后已超时: {value}")
         return
 
     try:
         option = await _find_click_select_option(context, step.option_selector, value)
     except (PlaywrightError, WorkerError) as exc:
-        await _skip_or_fail(step, f"查找下拉选项失败: {value}: {exc}")
+        _raise_step_failure(f"查找下拉选项失败: {value}: {exc}")
         return
 
     if option is None:
-        await _skip_or_fail(step, f"未找到唯一匹配的下拉选项: {value}")
+        _raise_step_failure(f"未找到唯一匹配的下拉选项: {value}")
         return
     if not await _click_locator(option, _remaining_ms(deadline)):
-        await _skip_or_fail(step, f"点击下拉选项失败: {value}")
+        _raise_step_failure(f"点击下拉选项失败: {value}")
 
 
 async def handle_wait(page, step: StepConfig, context: StepContext) -> None:
@@ -764,8 +853,10 @@ async def handle_screenshot(page, step: StepConfig, context: StepContext) -> Non
         filename = f"{filename}.png"
     local_path = str(directory / Path(filename).name)
     full_page = bool(step.extra_fields.get("full_page", True))
+    timeout = step.timeout or context.default_timeout
     await _safe_op(
-        page.screenshot(path=local_path, full_page=full_page), Outcome.SELECTOR_FAILED
+        page.screenshot(path=local_path, full_page=full_page, timeout=timeout),
+        Outcome.SELECTOR_FAILED,
     )
     context.screenshots.append(local_path)
     context.emit("screenshot", {"path": local_path, "step_id": step.id})
@@ -778,16 +869,32 @@ def _script_scope(context: StepContext) -> Any:
     frame 规格只能解析为 Frame（name / ``url=`` 片段）；CSS 选择器形式显式报错，
     避免脚本静默在主 frame 执行（iframe 门户场景必然假失败）。
     """
+    if context.frame_scope is not None:
+        return context.frame_scope
     return _match_frame(context.page, (context.frame or "").strip(), allow_css_fallback=False)
 
 
 async def _suppress_task(task: "asyncio.Future[Any]") -> None:
-    """等待被取消的任务真正退出（仅本地断开 await，不关共享页）。
+    """有限等待被取消的任务退出（仅本地断开 await，不关共享页）。
 
     任务的 CancelledError 不应外溢；evaluate 内部把取消包装成其他异常时同样忽略。
+    Playwright 驱动异常时取消也可能迟迟不返回，因此最多等待一秒，避免步骤超时
+    处理自身再次无限挂起。
     """
     try:
-        await task
+        done, _ = await asyncio.wait({task}, timeout=1.0)
+        if done:
+            task.result()
+        else:
+            # 任务稍后才结算时也要取走异常，避免事件循环输出
+            # "Task exception was never retrieved" 干扰 Worker stderr。
+            def _consume_result(future: "asyncio.Future[Any]") -> None:
+                try:
+                    future.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            task.add_done_callback(_consume_result)
     except asyncio.CancelledError:
         pass
     except Exception:  # noqa: BLE001 — 包装型异常一并吞掉，错误由调用方显式抛出
@@ -805,26 +912,28 @@ async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
     scope = _script_scope(context)
     task = asyncio.ensure_future(scope.evaluate(script))
     deadline = time.monotonic() + timeout_s
-    while not task.done():
-        if context.cancel_event is not None and context.cancel_event.is_set():
-            task.cancel()
-            # 只取消 JS 调用本身，不再 page.close()：run_steps 在任务开始时捕获
-            # 一次 page 引用，关页会让后续步骤（含失败截图）全部报废
-            await _suppress_task(task)
-            raise StepCancelled("JS 执行已取消")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            task.cancel()
-            await _suppress_task(task)
-            raise WorkerError(
-                Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已中断 JS 调用"
-            )
-        await asyncio.wait({task}, timeout=min(0.1, remaining))
-
     try:
+        while not task.done():
+            if context.cancel_event is not None and context.cancel_event.is_set():
+                raise StepCancelled("JS 执行已取消")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WorkerError(
+                    Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已中断 JS 调用"
+                )
+            await asyncio.wait({task}, timeout=min(0.1, remaining))
+
         result = task.result()
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, WorkerError):
+            raise
         raise WorkerError(Outcome.UNKNOWN_ERROR, f"JS 执行失败: {exc}") from exc
+    finally:
+        if not task.done():
+            # 只取消 JS 调用本身，不再 page.close()：关页会让后续步骤
+            # （含失败截图）全部报废。外层步骤 deadline 取消处理器时也走此收尾。
+            task.cancel()
+            await _suppress_task(task)
 
     if step.store_as:
         # 保留原生类型，success_condition 不会把 JS null 错判为字符串 "None" 的真值；
@@ -841,10 +950,10 @@ async def handle_navigate(page, step: StepConfig, context: StepContext) -> None:
 
     valid_wait_until = ("load", "domcontentloaded", "networkidle", "commit")
     raw = step.extra_fields.get("wait_until", "domcontentloaded")
-    wait_until = raw if isinstance(raw, str) and raw in valid_wait_until else "load"
+    wait_until = raw if isinstance(raw, str) and raw in valid_wait_until else "domcontentloaded"
     if wait_until != raw:
         logger.warning(
-            "[navigate] wait_until 值 '%s' 无效，可选: %s，使用默认 'load'",
+            "[navigate] wait_until 值 '%s' 无效，可选: %s，使用默认 'domcontentloaded'",
             raw,
             ", ".join(valid_wait_until),
         )
@@ -857,16 +966,15 @@ async def handle_navigate(page, step: StepConfig, context: StepContext) -> None:
 
 
 async def handle_assert_text(page, step: StepConfig, context: StepContext) -> None:
-    """断言指定元素中出现文本。"""
+    """断言指定元素或页面正文中出现文本。"""
     _check_cancel(context)
-    if not step.selector:
-        raise WorkerError(Outcome.SELECTOR_FAILED, "assert_text 步骤缺少 selector")
     value = step.value
     if not value:
         raise WorkerError(Outcome.SELECTOR_FAILED, "assert_text 步骤需要 value")
     timeout = step.timeout or context.default_timeout
+    selector = step.selector or "body"
     try:
-        await _locator(context, step.selector).filter(has_text=value).first.wait_for(
+        await _locator(context, selector).filter(has_text=value).first.wait_for(
             state="visible", timeout=timeout
         )
     except PlaywrightTimeoutError as exc:
@@ -900,22 +1008,25 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     _check_cancel(context)
     if not step.selector:
         raise WorkerError(Outcome.SELECTOR_FAILED, "ocr 步骤缺少 selector")
+    deadline = time.monotonic() + (step.timeout or context.default_timeout) / 1000
     try:
+        remaining = max(0.001, min(OCR_TIMEOUT_SECS, deadline - time.monotonic()))
+        load_budget = remaining
         ocr = await asyncio.wait_for(
             asyncio.to_thread(_get_ocr, step.old, step.char_range),
-            timeout=OCR_TIMEOUT_SECS,
+            timeout=remaining,
         )
     except asyncio.TimeoutError:
         # 文案分流：模型首次加载中的超时（并发/重试等待或慢加载）不应误导用户重装依赖
         if ocr_load_in_progress(step.old, step.char_range):
             raise WorkerError(
                 Outcome.UNKNOWN_ERROR,
-                f"OCR 模型仍在首次加载（已超过 {OCR_TIMEOUT_SECS}s）。"
+                f"OCR 模型仍在首次加载（已超过 {load_budget:g}s）。"
                 "加载完成会写入日志，稍后可直接重试，无需重装依赖",
             ) from None
         raise WorkerError(
             Outcome.UNKNOWN_ERROR,
-            f"OCR 模型加载超时（>{OCR_TIMEOUT_SECS}s）。模型为包内自带，仅本地加载，"
+            f"OCR 模型加载超时（>{load_budget:g}s）。模型为包内自带，仅本地加载，"
             "若持续超时请检查 OCR 依赖是否完整（uv add ddddocr）",
         ) from None
     except Exception as exc:  # noqa: BLE001
@@ -925,17 +1036,29 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
         ) from exc
 
     locator = _locator(context, step.selector)
-    timeout = step.timeout or context.default_timeout
-    await _safe_op(locator.wait_for(state="visible", timeout=timeout), Outcome.SELECTOR_FAILED)
-    img_bytes = await _safe_op(locator.screenshot(), Outcome.SELECTOR_FAILED)
+    remaining_ms = _remaining_ms(deadline)
+    if remaining_ms <= 0:
+        raise WorkerError(Outcome.SELECTOR_FAILED, "OCR 步骤在等待验证码前已超时")
+    await _safe_op(
+        locator.wait_for(state="visible", timeout=remaining_ms), Outcome.SELECTOR_FAILED
+    )
+    remaining_ms = _remaining_ms(deadline)
+    if remaining_ms <= 0:
+        raise WorkerError(Outcome.SELECTOR_FAILED, "OCR 步骤在截取验证码前已超时")
+    img_bytes = await _safe_op(
+        locator.screenshot(timeout=remaining_ms), Outcome.SELECTOR_FAILED
+    )
     img_bytes = _preprocess_ocr_image(img_bytes)
     try:
+        remaining = max(0.001, min(OCR_TIMEOUT_SECS, deadline - time.monotonic()))
+        inference_budget = remaining
         text = await asyncio.wait_for(
-            asyncio.to_thread(ocr.classification, img_bytes), timeout=OCR_TIMEOUT_SECS
+            asyncio.to_thread(ocr.classification_with_timeout, img_bytes, remaining),
+            timeout=remaining,
         )
     except asyncio.TimeoutError:
         raise WorkerError(
-            Outcome.UNKNOWN_ERROR, f"OCR 识别超时（>{OCR_TIMEOUT_SECS}s）"
+            Outcome.UNKNOWN_ERROR, f"OCR 识别超时（>{inference_budget:g}s）"
         ) from None
 
     # 与 ocr_recognize 命令口径一致：验证码文本可能被用户视为敏感内容，只记长度
@@ -944,8 +1067,11 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     if step.store_as:
         context.results[step.store_as] = text
     if step.target_selector:
+        remaining_ms = _remaining_ms(deadline)
+        if remaining_ms <= 0:
+            raise WorkerError(Outcome.SELECTOR_FAILED, "OCR 步骤在回填识别结果前已超时")
         await _safe_op(
-            _locator(context, step.target_selector).fill(text, timeout=timeout),
+            _locator(context, step.target_selector).fill(text, timeout=remaining_ms),
             Outcome.SELECTOR_FAILED,
         )
 
@@ -980,7 +1106,7 @@ async def run_step_async(
     step_index: int | None = None,
     total_steps: int | None = None,
 ) -> None:
-    """异步执行单个步骤。"""
+    """在统一截止时间内执行单个步骤，并在步骤边界接管新页面。"""
     step = _resolve(raw_step, context)
     handler = _STEP_HANDLERS.get(step.step_type)
     if handler is None:
@@ -998,8 +1124,65 @@ async def run_step_async(
     )
 
     prev_frame = context.frame
+    prev_frame_scope = context.frame_scope
     context.frame = step.frame or None
+    context.frame_scope = None
+    if step.timeout:
+        timeout_ms = int(step.timeout)
+    elif step.step_type in {"navigate", "goto", "wait_url"}:
+        timeout_ms = int(context.navigation_timeout)
+    elif step.step_type in {"wait", "sleep"} and not step.selector:
+        # 固定休眠的 duration 本身就是业务语义，默认步骤超时不能把合法长等待截短；
+        # 用户显式配置 timeout 时仍以显式值为准。
+        timeout_ms = max(int(context.default_timeout), int(step.duration) + 1000)
+    else:
+        timeout_ms = int(context.default_timeout)
+    timeout_ms = max(1, timeout_ms)
+    timeout_outcome = {
+        "navigate": Outcome.NAVIGATION_TIMEOUT,
+        "goto": Outcome.NAVIGATION_TIMEOUT,
+        "wait_url": Outcome.NAVIGATION_TIMEOUT,
+        "assert_text": Outcome.ASSERTION_FAILED,
+        "evaluate": Outcome.UNKNOWN_ERROR,
+        "eval": Outcome.UNKNOWN_ERROR,
+        "custom_js": Outcome.UNKNOWN_ERROR,
+        "custom": Outcome.UNKNOWN_ERROR,
+        "ocr": Outcome.UNKNOWN_ERROR,
+    }.get(step.step_type, Outcome.SELECTOR_FAILED)
+
+    async def _execute() -> None:
+        _check_cancel(context)
+        _adopt_latest_page(context)
+        if context.frame:
+            allow_css = step.step_type not in {
+                "eval", "custom_js", "evaluate", "custom", "wait_url"
+            }
+            context.frame_scope = await _resolve_frame_scope(
+                context,
+                context.frame.strip(),
+                allow_css_fallback=allow_css,
+            )
+        await handler(context.page, step, context)
+        _adopt_latest_page(context)
+
+    task = asyncio.create_task(_execute())
+    deadline = time.monotonic() + timeout_ms / 1000
     try:
-        await handler(page, step, context)
+        while not task.done():
+            if context.cancel_event is not None and context.cancel_event.is_set():
+                task.cancel()
+                await _suppress_task(task)
+                raise StepCancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                task.cancel()
+                await _suppress_task(task)
+                raise WorkerError(
+                    timeout_outcome,
+                    f"步骤 {step.id or step.step_type} 执行超时（{timeout_ms}ms）",
+                )
+            await asyncio.wait({task}, timeout=min(0.1, remaining))
+        await task
     finally:
         context.frame = prev_frame
+        context.frame_scope = prev_frame_scope

@@ -21,7 +21,6 @@ def test_ocr_session_returns_classification_result() -> None:
     from ocr_runtime import _OcrSession
 
     session = _OcrSession(_FakeOcr("5678"), (False, None))
-    session.add_budget(0.5)
     assert session.classification(b"image") == "5678"
 
 
@@ -37,13 +36,12 @@ def test_ocr_session_timeout_evicts_stuck_instance() -> None:
 
     key = (False, None)
     session = ocr_runtime._OcrSession(SlowOcr(), key)
-    session.add_budget(0.01)
     ocr_runtime._ocr_cache.clear()
     ocr_runtime._ocr_cache[key] = session
 
     try:
-        with pytest.raises(TimeoutError, match="共享预算"):
-            session.classification(b"image")
+        with pytest.raises(TimeoutError, match="单次预算"):
+            session.classification_with_timeout(b"image", 0.01)
         assert key not in ocr_runtime._ocr_cache
     finally:
         # 释放 daemon 识别线程，避免测试进程中残留无意义工作。
@@ -51,26 +49,13 @@ def test_ocr_session_timeout_evicts_stuck_instance() -> None:
         ocr_runtime._ocr_cache.clear()
 
 
-def test_get_ocr_subtracts_model_acquire_time(monkeypatch) -> None:
+def test_ocr_session_explicit_budget_does_not_leak_to_next_call(monkeypatch) -> None:
     import ocr_runtime
 
-    fake = _FakeOcr()
-    fake_module = SimpleNamespace(DdddOcr=lambda **_kwargs: fake)
-    monkeypatch.setitem(sys.modules, "ddddocr", fake_module)
-    monkeypatch.setattr(ocr_runtime, "OCR_TIMEOUT_SECS", 1.0)
-
-    # monotonic 消费点：started → 加载标记 → 完成日志 → elapsed（F5 加载标记新增两处）
-    ticks = iter((10.0, 10.0, 10.4, 10.4))
-    monkeypatch.setattr(ocr_runtime.time, "monotonic", lambda: next(ticks))
-    ocr_runtime._ocr_cache.clear()
-    ocr_runtime._ocr_load_started.clear()
-    try:
-        session = ocr_runtime._get_ocr(False)
-        assert session._instance is fake
-        assert list(session._budgets) == pytest.approx([0.6])
-    finally:
-        ocr_runtime._ocr_cache.clear()
-        ocr_runtime._ocr_load_started.clear()
+    session = ocr_runtime._OcrSession(_FakeOcr("ok"), (False, None))
+    with pytest.raises(TimeoutError):
+        session.classification_with_timeout(b"image", 0)
+    assert session.classification_with_timeout(b"image", 0.5) == "ok"
 
 
 def test_get_ocr_keeps_cached_session_identity(monkeypatch) -> None:
@@ -85,7 +70,6 @@ def test_get_ocr_keeps_cached_session_identity(monkeypatch) -> None:
         second = ocr_runtime._get_ocr(False)
         assert first is second
         assert first._instance is fake
-        assert len(first._budgets) == 2
     finally:
         ocr_runtime._ocr_cache.clear()
 

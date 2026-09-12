@@ -55,6 +55,8 @@ pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 const DEBUG_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// spawn 后等待 browser_health_check 通过的超时（秒）
 pub const DEFAULT_WORKER_STARTUP_TIMEOUT_SECS: u64 = 30;
+/// 取消通知发出后等待 Worker 确认收敛的最长时间；超时则回收进程。
+const CANCEL_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// NDJSON 行分隔符
 pub const IPC_DELIMITER: u8 = b'\n';
 /// 单行最大长度（1MB）
@@ -392,8 +394,8 @@ impl BridgeSupervisor {
         timeout: std::time::Duration,
     ) -> Result<IpcResponse, BridgeError> {
         // 自生成 cancel_id 并注入 params（调用方未提供时），使超时后能通过 Cancel 命令
-        // 命中本地已注册的 CancellationToken（见下），立即唤醒转发 task 的 select 分支
-        // → guard drop → 释放会话槽位与 pending（P1-7：超时不清理会导致槽位永久滞留）。
+        // 命中本地已注册的 CancellationToken（见下），唤醒转发 task 并等待 Worker
+        // 确认停止；无确认则强制回收，之后才 drop guard 释放槽位与 pending。
         let cancel_id = params
             .get("cancel_id")
             .and_then(Value::as_str)
@@ -420,8 +422,8 @@ impl BridgeSupervisor {
             .await
             .map_err(|_| BridgeError::SupervisorNotRunning)?;
         match tokio::time::timeout(timeout, rx.recv()).await {
-            // 超时返回前发送 Cancel：cancel_registry.trigger 立即唤醒本地 token →
-            // 转发 task 提前返回并 drop guard → 会话槽位与 pending 被释放。
+            // 超时返回前发送 Cancel：cancel_registry.trigger 立即唤醒本地 token，
+            // 转发 task 等 Worker 确认停止或强制回收后再 drop guard，释放槽位与 pending。
             // 幂等：若请求恰在超时瞬间已响应/已取消，trigger 与 stdin 发送均为 no-op。
             Err(_elapsed) => {
                 self.cmd_tx
@@ -695,13 +697,23 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
             let sup = Arc::clone(this);
             tokio::spawn(async move {
                 match execute_inner(&sup, &method, params).await {
-                    Ok((rx, _guard, token)) => {
-                        // 等待响应期间监听取消令牌：CancelRegistry.trigger 触发
-                        // token.cancel() 时立即返回 Cancelled，无需等待 Worker 自行退出；
-                        // Cancel 命令分支仍会向 Worker 发送 IPC Cancel 消息协同取消。
+                    Ok((mut rx, _guard, token)) => {
+                        // 取消后保持 guard/会话槽位，直到 Worker 回包确认已经停止；
+                        // 若 Worker 未响应则强制回收。不能仅因本地 token 触发就释放
+                        // 槽位，否则新命令会进入仍被旧命令占用的串行 Worker。
                         let result = tokio::select! {
-                            r = rx => r.unwrap_or(Err(BridgeError::SupervisorNotRunning)),
-                            _ = token.cancelled() => Err(BridgeError::Cancelled),
+                            biased;
+                            _ = token.cancelled() => {
+                                match tokio::time::timeout(CANCEL_ACK_TIMEOUT, &mut rx).await {
+                                    Ok(_) => Err(BridgeError::Cancelled),
+                                    Err(_) => {
+                                        warn!(target: "python_worker", "取消后 Worker 未在宽限期内停止，强制回收");
+                                        kill_worker_now(&sup).await;
+                                        Err(BridgeError::Cancelled)
+                                    }
+                                }
+                            },
+                            r = &mut rx => r.unwrap_or(Err(BridgeError::SupervisorNotRunning)),
                         };
                         // B3：guard drop 前结算调试会话开合（settle 需在守卫复位
                         // 判定前写入 debug_session_open）

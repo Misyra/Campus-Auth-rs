@@ -66,6 +66,14 @@ _TASK_STORAGE_ISOLATION_SCRIPT = r"""
 })();
 """
 
+# 持久化上下文应保留 localStorage 登录态；新建 Page 已天然隔离 sessionStorage，
+# 这里只显式清理会话级存储，避免门户把 token 放在 localStorage 时失去持久化意义。
+_PERSISTENT_SESSION_STORAGE_ISOLATION_SCRIPT = r"""
+(() => {
+  try { sessionStorage.clear(); } catch (_) {}
+})();
+"""
+
 # Worker 脚本所在目录：debug 截图等相对目录一律锚定到此，
 # 避免依赖 Rust spawn 继承的 CWD（未设 current_dir，可能是任意目录）
 _WORKER_DIR = Path(__file__).resolve().parent
@@ -256,6 +264,8 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
             try:
                 await run_step_async(page, step, context, step_index=idx, total_steps=total)
             except WorkerError as exc:
+                if isinstance(exc, StepCancelled):
+                    raise
                 if step.required:
                     raise
                 failed_ids.append(step.id or f"#{idx}")
@@ -284,13 +294,14 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
 _MANAGED_BROWSER_PATH_CACHE: dict[str, str] = {}
 
 
-def _ensure_browser(channel: str = "playwright") -> bool:
+def _ensure_browser(channel: str = "playwright", custom_path: str = "") -> bool:
     """确保目标浏览器可用；Playwright 管理的引擎按实际 executable 检测（带缓存）。"""
+    channel = str(channel or "playwright").strip().lower()
+    custom_path = str(custom_path or "").strip()
     # 系统浏览器（Edge/Chrome/自定义路径）需真实探测可执行文件，而非恒 True。
     # 否则健康检查假成功，启动时才抛 obscure Playwright error。
     if channel == "custom":
-        # 自定义路径在 _resolve_launcher 中校验存在性，此处仅作轻量判断
-        return True
+        return bool(custom_path and Path(custom_path).is_file())
     if channel in ("msedge", "chrome"):
         # 复用 Rust 侧 is_edge/chrome_installed 的同口径判定（多路径 + which）
         # 此处为 Python 侧二次校验：优先 which，其次 Windows 固定路径
@@ -452,13 +463,21 @@ async def _capture_page_structure(page: Any) -> dict[str, Any]:
     }
     """
     frames: list[dict[str, Any]] = []
-    for index, frame in enumerate(page.frames):
+    page_frames = list(page.frames)
+    for index, frame in enumerate(page_frames):
         frame_ref = "main" if frame == page.main_frame else (frame.name or f"frame-{index}")
         parent = frame.parent_frame
         parent_ref = None
         if parent is not None:
-            parent_index = page.frames.index(parent)
-            parent_ref = "main" if parent == page.main_frame else (parent.name or f"frame-{parent_index}")
+            try:
+                parent_index = page_frames.index(parent)
+            except ValueError:
+                parent_index = -1
+            parent_ref = (
+                "main"
+                if parent == page.main_frame
+                else (parent.name or (f"frame-{parent_index}" if parent_index >= 0 else "detached"))
+            )
         try:
             detail = await frame.evaluate(
                 script,
@@ -633,6 +652,9 @@ class CancelRegistry:
 #: 都会取消并重置计时。
 BROWSER_IDLE_RELEASE_SECS = 30
 
+# 普通任务截图为 WebSocket 异步回读预留时间；启动时仍会清理异常退出残留。
+TASK_SCREENSHOT_RETENTION_SECS = 30
+
 #: Rust spawn 时按 cfg.worker.keep_alive 注入（改配置对下一个 Worker 生命周期
 #: 生效）。True 时浏览器跨会话常驻：登录成功整页保留登录状态（门户页 JS 心跳
 #: 不中断），非成功终态仅会话级释放，且不装浏览器空闲回收计时器。
@@ -687,6 +709,10 @@ class WorkerCore:
         self.capabilities: dict[str, bool] = {}
         # 浏览器空闲自动释放计时（keep_alive 关闭时武装，见 _arm_browser_idle_release）
         self._browser_idle_task: asyncio.Task | None = None
+        # 延迟删除普通任务截图，确保 Rust WebSocket 有时间完成异步回读。
+        self._screenshot_cleanup_tasks: set[asyncio.Task] = set()
+        # 防止同一个 Page 重复绑定 dialog 处理器。
+        self._wired_page_ids: set[int] = set()
 
     # ── 浏览器启动参数构建 ──
 
@@ -786,9 +812,9 @@ class WorkerCore:
 
     def _resolve_launcher(self, playwright: Any, channel: str, custom_path: str) -> tuple[Any, str | None]:
         """根据 channel 解析对应的 launcher 对象。"""
-        if channel == "custom" and custom_path:
-            if not Path(custom_path).exists():
-                raise FileNotFoundError(f"自定义浏览器路径不存在: {custom_path}")
+        if channel == "custom":
+            if not custom_path or not Path(custom_path).is_file():
+                raise FileNotFoundError(f"自定义浏览器可执行文件不存在: {custom_path}")
             engine = (self._last_browser_settings or {}).get("custom_browser_engine", "auto")
             engine = engine if engine in ("firefox", "webkit") else "chromium"
             return getattr(playwright, engine), custom_path
@@ -873,8 +899,8 @@ class WorkerCore:
         self._last_browser_settings = bs
         headless = bs.get("headless", True)
         pure_mode = bs.get("pure_mode", False)
-        channel = bs.get("browser_channel", "playwright")
-        custom_path = bs.get("browser_custom_path", "")
+        channel = str(bs.get("browser_channel") or "playwright").strip().lower()
+        custom_path = str(bs.get("browser_custom_path") or "").strip()
 
         if self._playwright is None:
             self._playwright = await async_playwright().start()
@@ -882,7 +908,16 @@ class WorkerCore:
         persistent = bs.get("persistent_context", False)
         try:
             if persistent:
-                user_data_dir = _browser_data_dir() / channel
+                if channel == "custom":
+                    raw_engine = (bs.get("custom_browser_engine") or "auto").strip().lower()
+                    engine = raw_engine if raw_engine in ("firefox", "webkit") else "chromium"
+                    path_key = hashlib.sha256(
+                        str(Path(custom_path).resolve()).encode("utf-8")
+                    ).hexdigest()[:12]
+                    data_key = f"custom-{engine}-{path_key}"
+                else:
+                    data_key = channel
+                user_data_dir = _browser_data_dir() / data_key
                 user_data_dir.mkdir(parents=True, exist_ok=True)
                 launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
                 ctx_opts = self._build_context_options(bs)
@@ -890,6 +925,7 @@ class WorkerCore:
                     self._playwright, channel, custom_path, headless,
                     launch_args, str(user_data_dir), ctx_opts, bs,
                 )
+                self._wire_context()
                 self._browser = None
                 if not pure_mode:
                     await self._apply_stealth_and_routes(bs)
@@ -901,6 +937,7 @@ class WorkerCore:
                 # locale/timezone/UA/header/proxy 等 BrowserContext 契约仍应一致生效。
                 ctx_opts = self._build_context_options(bs)
                 self._context = await self._browser.new_context(**ctx_opts)
+                self._wire_context()
             else:
                 launch_args = self._build_launch_args(bs, channel)
                 self._browser = await self._launch_browser(
@@ -908,6 +945,7 @@ class WorkerCore:
                 )
                 ctx_opts = self._build_context_options(bs)
                 self._context = await self._browser.new_context(**ctx_opts)
+                self._wire_context()
                 await self._apply_stealth_and_routes(bs)
 
             self._page = await self._new_page()
@@ -922,6 +960,28 @@ class WorkerCore:
             await self.close_browser()
             raise
 
+    def _wire_page(self, page: Any) -> None:
+        """为上下文创建的每个页面注册统一弹窗处理器。"""
+        page_id = id(page)
+        if page_id in self._wired_page_ids:
+            return
+        on = getattr(page, "on", None)
+        if callable(on):
+            on("dialog", lambda d: asyncio.ensure_future(self._handle_page_dialog(d)))
+        self._wired_page_ids.add(page_id)
+
+    def _on_context_page(self, page: Any) -> None:
+        """接管门户打开的新标签页/弹窗，供后续步骤继续执行。"""
+        self._wire_page(page)
+        self._page = page
+
+    def _wire_context(self) -> None:
+        """监听 BrowserContext 的新增页面事件。"""
+        if self._context is not None:
+            on = getattr(self._context, "on", None)
+            if callable(on):
+                on("page", self._on_context_page)
+
     async def _new_page(self) -> Any:
         """创建新页面并注册防残留 dialog 处理器（B5 修正）。
 
@@ -933,7 +993,7 @@ class WorkerCore:
         等提示能在前端日志/通知中显示出来。
         """
         page = await self._context.new_page()
-        page.on("dialog", lambda d: asyncio.ensure_future(self._handle_page_dialog(d)))
+        self._wire_page(page)
         return page
 
     async def _prepare_session_page(self) -> Any:
@@ -942,8 +1002,8 @@ class WorkerCore:
         会话隔离的关键入口，任务/调试会话开始前必须先经此建页：
         - 单活跃页语义：先关闭全部旧页/恢复页，阻断上一会话的
           sessionStorage 与后台脚本渗入新会话；
-        - 向新 Page 注入 ``_TASK_STORAGE_ISOLATION_SCRIPT``（init script），
-          首个文档加载时清空本地/会话存储，保证存储从零开始；
+        - 非持久化上下文在首个文档加载时清空本地/会话存储；持久化上下文只清
+          sessionStorage，保留 localStorage 登录态；
         - Cookie 挂在 BrowserContext 上，不受换页影响，登录态得以跨会话保留。
 
         无参数；成功返回已就绪的新 Page 并将其设为当前 ``self._page``，
@@ -961,11 +1021,19 @@ class WorkerCore:
             old_pages = [self._page] if self._page is not None else []
         for old_page in old_pages:
             await self._safe_close(old_page, "old session page")
+        # 旧 Page 全部关闭后再清空身份集合，避免 Python 复用对象 id 时漏绑新页事件。
+        self._wired_page_ids.clear()
         self._page = None
 
         page = await self._new_page()
         try:
-            await page.add_init_script(_TASK_STORAGE_ISOLATION_SCRIPT)
+            persistent = bool((self._last_browser_settings or {}).get("persistent_context", False))
+            isolation_script = (
+                _PERSISTENT_SESSION_STORAGE_ISOLATION_SCRIPT
+                if persistent
+                else _TASK_STORAGE_ISOLATION_SCRIPT
+            )
+            await page.add_init_script(isolation_script)
         except Exception:  # noqa: BLE001 — init 脚本注入失败时回收刚建的页面，异常原样上抛由上层归类
             await self._safe_close(page, "isolated page")
             raise
@@ -1005,6 +1073,7 @@ class WorkerCore:
                 self._context = await self._browser.new_context(
                     **self._build_context_options(bs)
                 )
+                self._wire_context()
                 if not bs.get("pure_mode", False):
                     await self._apply_stealth_and_routes(bs)
                 self._page = await self._new_page()
@@ -1058,6 +1127,7 @@ class WorkerCore:
         if self._context is not None:
             await self._safe_close(self._context, "上下文")
             self._context = None
+            self._wired_page_ids.clear()
         if self._browser is not None:
             await self._safe_close(self._browser, "浏览器")
             self._browser = None
@@ -1172,11 +1242,15 @@ class WorkerCore:
         session_type = self._session_type
 
         def _emit(event_type: str, data: dict) -> None:
-            """给 step_progress 事件注入 session_type，供前端区分登录/调试会话。"""
-            if event_type == "step_progress" and isinstance(data, dict):
+            """给浏览器事件注入 session_type，供前端区分登录/调试会话。"""
+            if event_type in {"step_progress", "screenshot", "dialog"} and isinstance(data, dict):
                 data = dict(data)
                 data["session_type"] = session_type
             self.emit(event_type, data)
+
+        def _adopt_page(new_page: Any) -> None:
+            self._wire_page(new_page)
+            self._page = new_page
 
         return StepContext(
             page=page,
@@ -1188,6 +1262,7 @@ class WorkerCore:
             reveal_hidden=task_config.reveal_hidden,
             step_delay=task_config.step_delay,
             emit=_emit,
+            on_page=_adopt_page,
         )
 
     async def _navigate(self, page: Any, url: str, nav_timeout: int) -> None:
@@ -1298,13 +1373,10 @@ class WorkerCore:
                     logger.debug(f"[_run_task] 清除 cookies 失败（忽略）: {clear_exc}")
             raise
         finally:
-            # A7：登录/浏览器任务截图可能含表单明文凭据，任务结束（成功/失败/
-            # 取消/异常等所有退出路径）后 best-effort 删除磁盘文件。截图事件
-            # 已在 handle_screenshot 中即时推送（仅携带路径字符串，前端不回读
-            # 文件），删除不影响展示链路；debug 会话不走 _run_task，其截图由
-            # _cleanup_debug_screenshots（debug_stop / close_browser）清理。
+            # WebSocket 会在收到事件后异步回读文件并内联图片；延迟清理避免事件
+            # 已广播但 Rust 尚未读盘时文件先被删除。异常退出残留由启动清理兜底。
             if context is not None:
-                self._cleanup_task_screenshots(context)
+                self._defer_task_screenshot_cleanup(context)
 
     # ── 命令处理器 ──
 
@@ -1330,12 +1402,14 @@ class WorkerCore:
 
     async def handle_browser_health_check(self, params: dict) -> dict:
         """健康检查：确认 Playwright 与浏览器可用。"""
-        channel = (params.get("browser_settings") or {}).get("browser_channel", "playwright")
+        bs = params.get("browser_settings") or {}
+        channel = str(bs.get("browser_channel") or "playwright").strip().lower()
+        custom_path = str(bs.get("browser_custom_path") or "").strip()
         try:
             # _ensure_browser 内部用 sync_playwright，在 asyncio 事件循环内直接调用会抛
             # "Sync API inside the asyncio loop" 被吞掉而误判 healthy=false（Worker 启动超时）。
             # 丢到线程池执行，与 OCR classification 的同步 CPU 推理处理一致。
-            healthy = await asyncio.to_thread(_ensure_browser, channel)
+            healthy = await asyncio.to_thread(_ensure_browser, channel, custom_path)
         except Exception as exc:  # noqa: BLE001 — 健康检查失败本身即结果（healthy=False），不能向 IPC 抛异常
             logger.warning(f"健康检查异常: {exc}")
             healthy = False
@@ -1499,10 +1573,28 @@ class WorkerCore:
                 logger.warning(f"调试会话初始截图失败: {exc}")
             return self._debug_response(self._debug_sessions[session_id])
         finally:
-            # 会话建成 → 令牌交由 debug_stop/会话结束管理；其余任何退出路径
-            # （含命令级超时 task.cancel() 的 CancelledError）都注销，防泄漏
-            if cancel_id and not session_established:
+            # debug_start 的 cancel_id 只覆盖启动命令；会话建成后的每个 step/run_all
+            # 都注册自己的请求 cancel_id，避免 Rust 取消新命令却命中旧令牌。
+            cancelled_after_establish = bool(
+                session_established
+                and cancel_event is not None
+                and cancel_event.is_set()
+            )
+            if cancelled_after_establish:
+                # 取消可能恰好发生在会话写入字典与响应返回之间；此时不能留下一个
+                # Rust 已判定取消、Worker 却仍视为活跃的幽灵调试会话。
+                session = self._debug_sessions.pop(session_id, None)
+                if session is not None:
+                    self._teardown_debug_session(session)
+                session_established = False
+                await self._close_session()
+            if cancel_id:
                 cancel_registry.unregister(cancel_id)
+            if session_established:
+                self._debug_sessions[session_id].context.cancel_event = None
+                self._debug_sessions[session_id].cancel_id = ""
+            if cancelled_after_establish:
+                raise StepCancelled("调试已取消（启动完成阶段）")
 
     def _debug_session_for(self, session_id: str) -> "DebugSession":
         """解析调试会话：显式 session_id 优先；为空时回退到唯一活跃会话。
@@ -1553,6 +1645,22 @@ class WorkerCore:
             }
         )
 
+    @asynccontextmanager
+    async def _debug_command_cancel(
+        self, params: dict, session: "DebugSession"
+    ) -> AsyncIterator[None]:
+        """将当前调试命令的 cancel_id 临时绑定到复用的会话上下文。"""
+        cancel_id = params.get("cancel_id", "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+        previous = session.context.cancel_event
+        session.context.cancel_event = cancel_event
+        try:
+            yield
+        finally:
+            session.context.cancel_event = previous
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
+
     async def handle_debug_step(self, params: dict) -> dict:
         """执行调试会话中的单个步骤。
 
@@ -1590,13 +1698,17 @@ class WorkerCore:
 
         success = True
         message = ""
-        try:
-            await run_step_async(session.page, step, session.context, step_index=idx, total_steps=len(steps))
-        except Exception as exc:  # noqa: BLE001 — 取消/分类失败/未预期异常统一归一（前两者不记堆栈）
-            if not isinstance(exc, WorkerError):
-                logger.exception("调试步骤执行未预期异常")
-            _outcome, message = _normalize_step_failure(exc)
-            success = False
+        async with self._debug_command_cancel(params, session):
+            try:
+                await run_step_async(
+                    session.page, step, session.context,
+                    step_index=idx, total_steps=len(steps),
+                )
+            except Exception as exc:  # noqa: BLE001 — 取消/分类失败/未预期异常统一归一（前两者不记堆栈）
+                if not isinstance(exc, WorkerError):
+                    logger.exception("调试步骤执行未预期异常")
+                _outcome, message = _normalize_step_failure(exc)
+                success = False
         if idx is not None:
             self._record_debug_result(session, idx, success, message)
         if auto_advance and idx is not None:
@@ -1617,57 +1729,59 @@ class WorkerCore:
         stop_idx = len(steps)
         if start >= len(steps):
             return self._debug_response(session)
-        for idx in range(start, len(steps)):
-            step = steps[idx]
-            session.current_step = idx
-            success = True
-            message = ""
-            fatal = False
-            try:
-                if idx > start and session.context.step_delay > 0:
-                    await _sleep_cancellable(session.context.step_delay, session.context)
-                await run_step_async(
-                    session.page,
-                    step,
-                    session.context,
-                    step_index=idx,
-                    total_steps=len(steps),
-                )
-            except Exception as exc:  # noqa: BLE001 — 取消/分类失败/未预期异常统一归一（前两者不记堆栈）
-                if not isinstance(exc, WorkerError):
-                    logger.exception("调试批量执行未预期异常")
-                _outcome, message = _normalize_step_failure(exc)
-                success = False
-                # 取消与未预期异常终止批量执行；分类失败按 required 决定是否继续
-                fatal = (
-                    step.required
-                    if isinstance(exc, WorkerError) and not isinstance(exc, StepCancelled)
-                    else True
-                )
-            self._record_debug_result(session, idx, success, message)
-            if fatal:
-                stop_idx = idx + 1
-                break
+        async with self._debug_command_cancel(params, session):
+            for idx in range(start, len(steps)):
+                step = steps[idx]
+                session.current_step = idx
+                success = True
+                message = ""
+                fatal = False
+                try:
+                    if idx > start and session.context.step_delay > 0:
+                        await _sleep_cancellable(session.context.step_delay, session.context)
+                    await run_step_async(
+                        session.page,
+                        step,
+                        session.context,
+                        step_index=idx,
+                        total_steps=len(steps),
+                    )
+                except Exception as exc:  # noqa: BLE001 — 取消/分类失败/未预期异常统一归一（前两者不记堆栈）
+                    if not isinstance(exc, WorkerError):
+                        logger.exception("调试批量执行未预期异常")
+                    _outcome, message = _normalize_step_failure(exc)
+                    success = False
+                    # 取消与未预期异常终止批量执行；分类失败按 required 决定是否继续
+                    fatal = (
+                        step.required
+                        if isinstance(exc, WorkerError) and not isinstance(exc, StepCancelled)
+                        else True
+                    )
+                self._record_debug_result(session, idx, success, message)
+                if fatal:
+                    stop_idx = idx + 1
+                    break
         session.current_step = stop_idx
         return self._debug_response(session)
 
-    @staticmethod
-    def _cleanup_task_screenshots(context: StepContext) -> None:
-        """删除登录/浏览器任务期间产生的截图文件（A7）。
-
-        任务截图可能包含表单中的明文凭据，任务结束后及时清除，避免长期
-        驻留磁盘。仅删除 ``context.screenshots`` 中记录的文件（每个文件
-        best-effort，失败仅记日志不抛出），不递归清理整个 debug/ 目录，
-        避免误删其他并发会话的文件。StructuredResult 中的 screenshots
-        路径列表在 _build_result 时已快照，清理不影响 IPC 响应内容。
-        """
-        for p in list(context.screenshots):
-            try:
-                Path(p).unlink(missing_ok=True)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"清理任务截图失败 {p}: {exc}")
-        # screenshots 是 StepContext 的 list[str] 字段，list.clear() 不会抛出
+    def _defer_task_screenshot_cleanup(self, context: StepContext) -> None:
+        """延迟清理普通任务截图，为 WebSocket 读盘与编码预留窗口。"""
+        paths = list(context.screenshots)
         context.screenshots.clear()
+        if not paths:
+            return
+
+        async def _cleanup_later() -> None:
+            await asyncio.sleep(TASK_SCREENSHOT_RETENTION_SECS)
+            for path in paths:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("延迟清理任务截图失败 %s: %s", path, exc)
+
+        task = asyncio.create_task(_cleanup_later())
+        self._screenshot_cleanup_tasks.add(task)
+        task.add_done_callback(self._screenshot_cleanup_tasks.discard)
 
     @staticmethod
     def _cleanup_debug_screenshots(session: "DebugSession") -> None:
@@ -1771,9 +1885,11 @@ class WorkerCore:
         """经 CDP 抓取完整布局 MHTML 快照并写入 target，成功返回 True。
 
         MHTML 单文件自包含样式/图片，供"保存页面文件"离线还原；Chromium 按
-        设计不含 JS，脚本由 resources/ 补齐。任何失败（含快照为空、detach 异常）
-        均返回 False，不影响其余产物。
+        设计不含 JS，脚本由 resources/ 补齐。捕获失败或快照为空时返回 False，
+        不影响其余产物；detach 失败只记录日志，不能覆盖已经成功写盘的快照。
         """
+        cdp = None
+        captured = False
         try:
             cdp = await page.context.new_cdp_session(page)
             mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
@@ -1781,11 +1897,16 @@ class WorkerCore:
             if cdp_data:
                 payload = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
                 target.write_bytes(payload)
-            await cdp.detach()
-            return bool(cdp_data)
+                captured = True
         except Exception as exc:  # noqa: BLE001 — MHTML 失败不影响其余产物
             logger.debug("MHTML 快照失败（跳过）: %s", exc)
-            return False
+        finally:
+            if cdp is not None:
+                try:
+                    await cdp.detach()
+                except Exception as exc:  # noqa: BLE001 — detach 失败不能覆盖已成功的快照
+                    logger.debug("MHTML CDP 会话释放失败（忽略）: %s", exc)
+        return captured
 
     @staticmethod
     def _write_capture_meta(
@@ -2056,7 +2177,7 @@ class WorkerCore:
             if remaining <= 0:
                 raise asyncio.TimeoutError
             text = await asyncio.wait_for(
-                asyncio.to_thread(ocr.classification, img_bytes),
+                asyncio.to_thread(ocr.classification_with_timeout, img_bytes, remaining),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:

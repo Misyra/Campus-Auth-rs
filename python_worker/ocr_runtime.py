@@ -1,4 +1,4 @@
-"""OCR 运行时：ddddocr 实例缓存、图片预处理与共享超时预算。
+"""OCR 运行时：ddddocr 实例缓存、图片预处理与单次推理超时。
 
 自 step_handlers.py 迁出（A 组重构）：OCR 逻辑原先横跨 step_handlers 与
 playwright_worker 两个文件，归拢到单点便于测试与复用。本模块不依赖 Playwright。
@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import deque
 from io import BytesIO
 from typing import Any
 
@@ -24,55 +23,41 @@ _ocr_lock = threading.Lock()
 #: "模型正在首次加载"与"依赖不完整"，加载完成的日志也让恢复可见。
 _ocr_load_started: dict[tuple[bool, str | int | None], float] = {}
 
-# OCR 模型获取 + CPU 推理共享总预算（秒）。
-# step_handlers 仍负责 DOM 等待与步骤级 timeout；这里专门防止冷启动 90s 后
-# 推理阶段再额外获得完整 90s，导致单次 OCR 的 CPU 阶段上限翻倍。
+# 独立 OCR API 未提供更短截止时间时使用的默认 CPU 推理上限（秒）。浏览器步骤
+# 由 step_handlers 传入步骤剩余预算，模型获取、DOM 与推理不会各拿一份完整预算。
 OCR_TIMEOUT_SECS = 90
 
 
 class _OcrSession:
-    """可缓存的 OCR 会话，为每次获取登记独立的推理剩余预算。
-
-    返回对象本身保持缓存身份稳定，兼容既有 ``_get_ocr`` 契约；每次调用
-    ``_get_ocr`` 都会把本次模型获取后的剩余预算加入队列，后续一次
-    ``classification`` 消费一个预算。这样底层模型和 wrapper 都可复用，又不会让
-    冷启动和推理各自获得完整 90 秒。
+    """可缓存的 OCR 会话，单次识别显式接收自己的超时预算。
 
     ``step_handlers`` 会把 ``classification`` 放入 ``asyncio.to_thread``。Python
     无法安全终止已经进入第三方 native/CPU 代码的线程，因此这里再用 daemon 线程
-    包一层；共享预算耗尽时立即返回并淘汰该缓存会话，后续任务不会复用可能仍在
+    包一层；单次预算耗尽时立即返回并淘汰该缓存会话，后续任务不会复用可能仍在
     工作的底层实例。
     """
 
     def __init__(self, instance: Any, key: tuple[bool, str | int | None]) -> None:
         self._instance = instance
         self._key = key
-        self._budgets: deque[float] = deque()
-        self._budget_lock = threading.Lock()
 
     def __getattr__(self, name: str) -> Any:
         """除受控 classification 外，其余属性透明委托给底层 ddddocr 实例。"""
         return getattr(self._instance, name)
 
-    def add_budget(self, inference_timeout_secs: float) -> None:
-        """登记下一次识别可使用的剩余共享预算。"""
-        with self._budget_lock:
-            self._budgets.append(max(0.0, inference_timeout_secs))
-
-    def _take_budget(self) -> float:
-        """消费一次预算；异常直接调用时回退到完整 OCR 预算。"""
-        with self._budget_lock:
-            if self._budgets:
-                return self._budgets.popleft()
-        return float(OCR_TIMEOUT_SECS)
-
     def classification(self, img_bytes: bytes) -> Any:
-        """在本次剩余共享预算内执行识别。"""
-        inference_timeout_secs = self._take_budget()
+        """使用完整默认预算执行识别，兼容 ddddocr 的既有调用形式。"""
+        return self.classification_with_timeout(img_bytes, float(OCR_TIMEOUT_SECS))
+
+    def classification_with_timeout(
+        self, img_bytes: bytes, inference_timeout_secs: float
+    ) -> Any:
+        """使用调用方本次显式提供的独立预算执行识别。"""
+        inference_timeout_secs = max(0.0, float(inference_timeout_secs))
         if inference_timeout_secs <= 0:
-            logger.warning("[ocr] 会话预算已耗尽，淘汰缓存会话: key=%s", self._key)
+            logger.warning("[ocr] 单次识别预算已耗尽，淘汰缓存会话: key=%s", self._key)
             _evict_ocr_session(self._key, self)
-            raise TimeoutError("OCR 模型获取已耗尽共享预算")
+            raise TimeoutError("OCR 识别预算已耗尽")
 
         done = threading.Event()
         result: dict[str, Any] = {}
@@ -89,14 +74,12 @@ class _OcrSession:
         worker.start()
         if not done.wait(inference_timeout_secs):
             logger.warning(
-                "[ocr] 推理超过共享预算 %ss，淘汰缓存会话: key=%s",
+                "[ocr] 推理超过单次预算 %ss，淘汰缓存会话: key=%s",
                 inference_timeout_secs,
                 self._key,
             )
             _evict_ocr_session(self._key, self)
-            raise TimeoutError(
-                f"OCR 模型获取与推理超过共享预算 {OCR_TIMEOUT_SECS}s"
-            )
+            raise TimeoutError(f"OCR 推理超过单次预算 {inference_timeout_secs:g}s")
 
         error = result.get("error")
         if error is not None:
@@ -114,12 +97,11 @@ def _evict_ocr_session(
 
 
 def _get_ocr(old: bool, char_range: str | int | None = None) -> _OcrSession:
-    """获取缓存 OCR 会话，并登记本次模型获取后的推理剩余预算。
+    """获取缓存 OCR 会话。
 
     模型不存在时抛出 ImportError，由调用方转换为 WorkerError。返回对象保持缓存身份
     稳定；实际 ddddocr 实例只在对应 ``old + char_range`` key 首次使用时创建。
     """
-    started = time.monotonic()
     import ddddocr  # type: ignore
 
     # Rust 侧历史配置用 JSON Value 承载；若脏数据传入数组/对象，退回默认范围，
@@ -157,8 +139,6 @@ def _get_ocr(old: bool, char_range: str | int | None = None) -> _OcrSession:
         if load_started is not None:
             logger.info("[ocr] 模型加载完成（耗时 %.1fs）", time.monotonic() - load_started)
 
-    elapsed = time.monotonic() - started
-    session.add_budget(OCR_TIMEOUT_SECS - elapsed)
     return session
 
 

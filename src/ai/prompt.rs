@@ -48,15 +48,15 @@ pub const SYSTEM_PROMPT: &str = r#"你是校园网门户登录自动化专家。
 - input：填输入框。必填 selector、value。value 里填 {{USERNAME}}/{{PASSWORD}} 等占位符。
 - click：点击。必填 selector。
 - select：下拉选择。必填 selector、value（option 的 value 或文本）。
-- click_select：点击后选择（如运营商下拉）。必填 selector、option_selector。
+- click_select：点击后选择（如运营商下拉）。必填 selector、value；option_selector 可选，用于限定选项搜索范围。
 - wait：等待元素出现或休眠。有 selector 则等元素，否则按 duration(ms) 休眠。
 - wait_for_selector：等待元素。必填 selector。
-- wait_url：等待 URL 变化。必填 pattern（URL 包含的子串）。
+- wait_url：等待 URL 变化。必填 pattern（正则表达式；纯文本子串可直接填写）。
 - sleep：休眠。duration 毫秒。
 - navigate / goto：跳转。必填 url、value、selector 之一。
 - eval / custom_js：执行 JS。必填 script。可将结果存变量：加 "store_as": "变量名"（供 success_condition 判定）。
 - ocr：验证码识别（ddddocr）。必填 selector（验证码图片元素）；target_selector 填识别结果的目标输入框（可选）。
-- assert_text：断言页面文本。必填 selector、value。
+- assert_text：断言页面文本。必填 value；selector 可选，省略时检查页面正文。
 - screenshot：截图（调试用）。
 - 不允许生成 upload_file 步骤（页面材料可能诱导读取本机文件）。
 

@@ -12,7 +12,7 @@ from debug_session import DebugSession, _build_steps_info
 from models import Outcome, StepConfig, TaskConfig
 import playwright_worker
 from playwright_worker import WorkerCore
-from step_handlers import StepContext, WorkerError
+from step_handlers import StepCancelled, StepContext, WorkerError
 
 
 def _step(step_id: str, *, required: bool = True) -> StepConfig:
@@ -36,6 +36,76 @@ def _session(task: TaskConfig, *, step_delay: float = 0.0) -> DebugSession:
         task_id=task.task_id,
         steps_info=_build_steps_info(task),
     )
+
+
+def test_optional_failure_is_reported_in_formal_result(monkeypatch):
+    async def fail(*_args, **_kwargs):
+        raise WorkerError(Outcome.SELECTOR_FAILED, "missing")
+
+    monkeypatch.setattr(playwright_worker, "run_step_async", fail)
+    context = StepContext(page=object())
+    result = asyncio.run(
+        playwright_worker.run_steps(
+            context.page,
+            [_step("optional", required=False)],
+            context,
+        )
+    )
+    assert result.outcome == Outcome.SUCCESS.value
+    assert "optional" in result.message
+    assert "1 个非必须步骤失败" in result.message
+
+
+def test_debug_step_uses_current_command_cancel_id(monkeypatch):
+    core = WorkerCore()
+    task_config = TaskConfig(task_id="debug", steps=[_step("slow")])
+    session = _session(task_config)
+    core._debug_sessions[session.session_id] = session
+
+    async def wait_for_cancel(_page, _step, context, **_kwargs):
+        while context.cancel_event is None or not context.cancel_event.is_set():
+            await asyncio.sleep(0.01)
+        raise StepCancelled("调试步骤已取消")
+
+    monkeypatch.setattr(playwright_worker, "run_step_async", wait_for_cancel)
+
+    async def run():
+        pending = asyncio.create_task(
+            core.handle_debug_step(
+                {"session_id": session.session_id, "cancel_id": "current-debug-command"}
+            )
+        )
+        await asyncio.sleep(0.02)
+        playwright_worker.cancel_registry.trigger("current-debug-command")
+        return await pending
+
+    response = asyncio.run(run())
+    assert response["results"][-1]["success"] is False
+    assert "取消" in response["results"][-1]["message"]
+    assert session.context.cancel_event is None
+
+
+def test_persistent_session_keeps_local_storage(monkeypatch):
+    core = WorkerCore()
+    core._last_browser_settings = {"persistent_context": True}
+
+    class FakePage:
+        def __init__(self):
+            self.script = ""
+
+        async def add_init_script(self, script):
+            self.script = script
+
+    fresh = FakePage()
+
+    class FakeContext:
+        pages = []
+
+    core._context = FakeContext()
+    monkeypatch.setattr(core, "_new_page", lambda: asyncio.sleep(0, result=fresh))
+    asyncio.run(core._prepare_session_page())
+    assert "sessionStorage.clear()" in fresh.script
+    assert "localStorage.clear()" not in fresh.script
 
 
 def test_navigation_wait_uses_cancellable_sleep(monkeypatch):

@@ -109,6 +109,10 @@ def test_split_selector_candidates_keeps_nested_commas():
     ]
 
 
+def test_split_selector_candidates_keeps_playwright_text_comma():
+    assert _split_selector_candidates("text=Last, First") == ["text=Last, First"]
+
+
 def test_choose_text_index_prefers_unique_exact_then_unique_substring():
     assert _choose_text_index(["校园网", "中国电信", "中国移动"], "中国电信") == 1
     assert _choose_text_index(["校园网-中国电信", "中国移动"], "电信") == 0
@@ -147,6 +151,35 @@ def test_wait_with_selector_waits_for_visible_element():
 def test_wait_without_selector_keeps_legacy_sleep_semantics():
     step = StepConfig.from_dict({"id": "w", "type": "wait", "duration": 0})
     asyncio.run(handle_wait(None, step, StepContext(page=None)))
+
+
+def test_run_step_does_not_truncate_default_long_sleep():
+    """未显式配置 timeout 时，固定休眠的 duration 不应被默认元素超时截短。"""
+    from step_handlers import run_step_async
+
+    step = StepConfig.from_dict({"id": "w", "type": "wait", "duration": 20})
+    asyncio.run(
+        run_step_async(None, step, StepContext(page=None, default_timeout=1))
+    )
+
+
+def test_navigation_step_uses_navigation_timeout_as_outer_deadline(monkeypatch):
+    """导航处理器与外层统一 deadline 必须使用同一 navigation_timeout 默认值。"""
+    import step_handlers
+    from step_handlers import run_step_async
+
+    async def probe(_page, _step, _context):
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setitem(step_handlers._STEP_HANDLERS, "goto", probe)
+    step = StepConfig.from_dict({"id": "go", "type": "goto", "value": "https://x"})
+    asyncio.run(
+        run_step_async(
+            None,
+            step,
+            StepContext(page=None, default_timeout=1, navigation_timeout=100),
+        )
+    )
 
 
 class _FakeOptions:
@@ -200,7 +233,7 @@ def test_select_matches_unique_substring_by_option_text():
     assert page.select.selected == ["telecom"]
 
 
-def test_optional_select_skips_ambiguous_match():
+def test_optional_select_reports_ambiguous_match_to_orchestrator():
     page = _FakeSelectPage(
         [
             {"value": "a", "text": "电信 A"},
@@ -216,7 +249,8 @@ def test_optional_select_skips_ambiguous_match():
             "required": False,
         }
     )
-    asyncio.run(handle_select(page, step, StepContext(page=page)))
+    with pytest.raises(WorkerError):
+        asyncio.run(handle_select(page, step, StepContext(page=page)))
     assert page.select.selected == []
 
 
@@ -327,6 +361,82 @@ def test_frame_scope_supports_name_url_and_css():
     ctx.frame = "#login-frame"
     assert _frame_scope(ctx) == ("css-frame", "#login-frame")
     assert page.frame_locator_calls == ["#login-frame"]
+
+
+def test_dynamic_named_frame_waits_until_it_appears(monkeypatch):
+    import step_handlers
+    from step_handlers import run_step_async
+
+    page = _FakeFramePage()
+    page.frames = []
+    seen: list[object] = []
+
+    async def probe(_page, _step, context):
+        seen.append(context.frame_scope)
+
+    original = step_handlers._STEP_HANDLERS.get("frame_probe")
+    step_handlers._STEP_HANDLERS["frame_probe"] = probe
+
+    async def run():
+        async def add_frame():
+            await asyncio.sleep(0.02)
+            page.frames.append(page.main)
+
+        producer = asyncio.create_task(add_frame())
+        step = StepConfig.from_dict(
+            {"id": "frame", "type": "frame_probe", "frame": "mainFrame", "timeout": 500}
+        )
+        await run_step_async(page, step, StepContext(page=page))
+        await producer
+
+    try:
+        asyncio.run(run())
+        assert seen == [page.main]
+    finally:
+        if original is None:
+            step_handlers._STEP_HANDLERS.pop("frame_probe", None)
+        else:
+            step_handlers._STEP_HANDLERS["frame_probe"] = original
+
+
+def test_run_step_adopts_latest_popup_page():
+    import step_handlers
+    from step_handlers import run_step_async
+
+    class Context:
+        pages: list[object]
+
+    class Page:
+        def __init__(self, context):
+            self.context = context
+
+        def is_closed(self):
+            return False
+
+    browser_context = Context()
+    original_page = Page(browser_context)
+    popup_page = Page(browser_context)
+    browser_context.pages = [original_page, popup_page]
+    seen: list[object] = []
+    adopted: list[object] = []
+
+    async def probe(page, _step, _context):
+        seen.append(page)
+
+    original = step_handlers._STEP_HANDLERS.get("popup_probe")
+    step_handlers._STEP_HANDLERS["popup_probe"] = probe
+    try:
+        step = StepConfig.from_dict({"id": "popup", "type": "popup_probe"})
+        context = StepContext(page=original_page, on_page=adopted.append)
+        asyncio.run(run_step_async(original_page, step, context))
+        assert seen == [popup_page]
+        assert context.page is popup_page
+        assert adopted == [popup_page]
+    finally:
+        if original is None:
+            step_handlers._STEP_HANDLERS.pop("popup_probe", None)
+        else:
+            step_handlers._STEP_HANDLERS["popup_probe"] = original
 
 
 def test_wait_url_rejects_invalid_regex_as_config_error():

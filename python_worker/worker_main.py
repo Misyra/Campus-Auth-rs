@@ -200,8 +200,9 @@ def _oversized_request_id(raw: str) -> int | None:
 def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
     """守护线程：阻塞读取 stdin NDJSON，分发到队列或取消注册表。
 
-    不使用 ``select``：直接 ``for line in sys.stdin`` 阻塞读取，
-    Windows 上同样可靠。EOF 时设置 ``shutdown_event`` 并放入哨兵唤醒主循环。
+    不使用 ``select``：用带长度上限的 ``readline`` 阻塞读取，Windows 上同样可靠；
+    超长行分块丢弃，避免先把任意大小的整行分配进内存。EOF 时设置
+    ``shutdown_event`` 并放入哨兵唤醒主循环。
 
     跨线程写入 asyncio.Queue 必须通过 ``loop.call_soon_threadsafe``，
     否则事件循环可能无法被唤醒（直接 ``put_nowait`` 不保证线程安全）。
@@ -210,7 +211,23 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
     try:
-        for raw in sys.stdin:
+        while True:
+            raw = sys.stdin.readline(_MAX_STDIN_LINE_BYTES + 1)
+            if raw == "":
+                break
+            oversized_chars = len(raw) > _MAX_STDIN_LINE_BYTES and not raw.endswith("\n")
+            if oversized_chars:
+                prefix = raw[:512]
+                while raw and not raw.endswith("\n"):
+                    raw = sys.stdin.readline(_MAX_STDIN_LINE_BYTES + 1)
+                message = (
+                    f"IPC 请求超过 {_MAX_STDIN_LINE_BYTES // (1024 * 1024)}MiB 上限"
+                )
+                logger.warning(f"{message}，拒绝解析")
+                msg_id = _oversized_request_id(prefix)
+                if msg_id is not None:
+                    emit_response(msg_id, _error_result(message))
+                continue
             # 单行大小上限（P9）：按字节数校验，超限直接丢弃，不尝试 JSON 解析
             if len(raw.encode("utf-8", errors="replace")) > _MAX_STDIN_LINE_BYTES:
                 message = (

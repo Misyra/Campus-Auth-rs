@@ -29,6 +29,38 @@ def test_to_ms_seconds_vs_millis():
     assert _to_ms({"timeout": "abc"}, "timeout", 10000) == 10000
 
 
+def test_custom_browser_health_requires_existing_file():
+    from playwright_worker import _ensure_browser
+
+    with tempfile.TemporaryDirectory() as td:
+        executable = Path(td) / "browser.exe"
+        assert _ensure_browser("custom", str(executable)) is False
+        executable.write_bytes(b"fake")
+        assert _ensure_browser("custom", str(executable)) is True
+        assert _ensure_browser(" CUSTOM ", f"  {executable}  ") is True
+
+
+def test_task_screenshot_cleanup_is_deferred(monkeypatch):
+    import playwright_worker
+    from playwright_worker import WorkerCore
+    from step_handlers import StepContext
+
+    monkeypatch.setattr(playwright_worker, "TASK_SCREENSHOT_RETENTION_SECS", 0)
+
+    async def run(path: Path):
+        core = WorkerCore()
+        path.write_bytes(b"png")
+        context = StepContext(page=None, screenshots=[str(path)])
+        core._defer_task_screenshot_cleanup(context)
+        assert path.exists()
+        assert context.screenshots == []
+        await asyncio.gather(*list(core._screenshot_cleanup_tasks))
+        assert not path.exists()
+
+    with tempfile.TemporaryDirectory() as td:
+        asyncio.run(run(Path(td) / "shot.png"))
+
+
 # ── 状态真值判定 ──
 
 def test_is_truthy():

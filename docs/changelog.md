@@ -2,6 +2,18 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-12 Python Worker 功能审计修复）
+
+- 统一 Rust 任务校验、AI 生成提示、任务指南与 Python Worker 的步骤契约：`click_select` 明确必填 `selector + value`，`option_selector` 仅作可选搜索范围；`assert_text` 允许省略 selector 并默认检查页面正文
+- 修复 `select/click_select` 的可选步骤失败被处理器吞掉、正式结果不列失败且调试面板误显示成功的问题；取消不再被可选步骤降级为成功，失败摘要与调试结果恢复真实语义
+- 单步执行新增统一 deadline 与取消轮询，覆盖截图、OCR 模型获取、元素等待、识别和回填；按 name/URL 的动态 iframe 在同一预算内等待，显式 Playwright selector（如 `text=Last, First`）不再被逗号错误拆分
+- 调试 `debug_step/debug_run_all` 改为逐命令绑定 Rust 注入的 `cancel_id`；Rust Bridge 取消后保留会话槽位等待 Worker 回包确认，超时强制回收，避免旧命令仍运行时新任务误入串行 Worker
+- OCR 缓存移除跨请求 FIFO 预算，改为每次识别显式传递独立剩余预算，避免元素失败、取消或冷加载超时留下旧预算污染下次识别
+- 普通任务截图改为延迟清理，为 Rust WebSocket 异步读盘内联留出窗口；截图/弹窗事件补齐 `session_type`，避免登录事件污染调试面板
+- BrowserContext 统一监听新页面并接管 popup/新标签页，所有页面绑定 dialog 自动处理；持久化上下文保留 localStorage 登录态，仅隔离 sessionStorage，自定义浏览器数据目录按引擎与路径隔离
+- 自定义浏览器健康检查开始验证实际可执行文件；stdin 使用有界 `readline` 分块丢弃超长 NDJSON；MHTML 捕获保证释放 CDP 会话，frame 树变化不再使页面结构捕获崩溃，无效 `wait_until` 回退口径统一为 `domcontentloaded`
+- JavaScript 步骤模板变量按所处字符串字面量转义，阻断引号、反斜杠、换行和模板插值破坏脚本；内置默认任务不再裁剪账号密码首尾字符
+
 ## 开发中（2026-09-12 定时任务启动触发）
 
 - 定时任务新增「启动后执行」触发方式（与原「定时执行」并列二选一）：软件每次启动后延迟执行目标任务，解决 cron 定时触发在未开机时段漏跑的问题；典型场景如网站签到，配合开机自启实现"每天开机后自动签到一次"
