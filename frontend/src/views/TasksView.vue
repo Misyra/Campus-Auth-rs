@@ -27,7 +27,7 @@ function closeEditor() { void t.closeTaskEditor(); }
 
 <template>
   <div class="page-content">
-    <div class="tasks-grid">
+    <div class="tasks-grid" :class="{ 'tasks-grid--empty': !browserTasks.length }">
       <div class="card">
         <div class="card-header">
           <h2>任务列表</h2>

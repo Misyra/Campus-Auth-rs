@@ -44,6 +44,7 @@ const currentNotInstalled = computed(() => {
 });
 const currentOfficialUrl = computed(() => OFFICIAL_URL[config.config.browser.browser_channel] ?? "");
 const pythonNotReady = computed(() => envStatus.value != null && !envStatus.value.capability_ready);
+const installedChromium = computed(() => browsers.value.find((b) => b.channel === "chromium" && b.installed));
 
 onMounted(async () => {
   const browserRequest = browsersApi.fetch()
@@ -59,6 +60,7 @@ onMounted(async () => {
 function handleBrowserClick(b: typeof browsers.value[0]) {
   if (!b.installed) {
     if (playwrightInstallable.has(b.channel)) {
+      if (pythonNotReady.value) return;
       void installPlaywright(b.channel);
       return;
     }
@@ -74,6 +76,13 @@ function handleBrowserClick(b: typeof browsers.value[0]) {
     return;
   }
   config.config.browser.browser_channel = b.channel;
+}
+
+/** 用户主动确认后切换到已安装的 Chromium；只修改待保存配置，不静默落盘。 */
+function switchToInstalledChromium(): void {
+  if (!installedChromium.value) return;
+  config.config.browser.browser_channel = installedChromium.value.channel;
+  browserInstallError.value = "";
 }
 
 /** 经 Playwright 安装指定 channel：装完重查列表；装完却未检测到（后端探测失败）与
@@ -142,14 +151,19 @@ async function stopBrowser() {
       </div>
       <div class="card-body">
         <div v-if="pythonNotReady" class="browser-safe-info browser-safe-info--warning browser-notice--top">
-          <p>Python 环境未就绪，浏览器功能不可用。请先前往 <a class="inline-link" @click.prevent="router.push({ name: 'settings-environment' })">设置 · 环境 → Python 环境</a> 初始化。</p>
+          <p>Python 环境未就绪，浏览器功能不可用。请先前往 <a class="inline-link" @click.prevent="router.push({ name: 'settings-tasks' })">设置 · 任务与环境 → Python 环境</a> 初始化。</p>
         </div>
         <p class="form-help-text">选择用于自动登录的浏览器，推荐 Chromium / Edge / Chrome。</p>
         <div class="browser-selection">
           <div v-if="browserLoading" class="loading">正在检测浏览器...</div>
           <div v-else class="browser-cards">
             <div v-for="b in browsers" :key="b.channel" class="browser-card"
-              :class="{ active: config.config.browser.browser_channel === b.channel, disabled: !b.installed && !playwrightInstallable.has(b.channel) }"
+              :class="{
+                active: config.config.browser.browser_channel === b.channel,
+                uninstalled: !b.installed,
+                blocked: pythonNotReady && !b.installed && playwrightInstallable.has(b.channel),
+              }"
+              :aria-disabled="pythonNotReady && !b.installed && playwrightInstallable.has(b.channel)"
               @click="handleBrowserClick(b)">
               <div class="browser-icon">
                 <img v-if="b.channel === 'chromium'" src="/icons/chromium.svg" width="32" height="32" alt="chromium" />
@@ -166,6 +180,7 @@ async function stopBrowser() {
                 <div class="browser-status">
                   <span v-if="b.installed" class="status-installed"><IconApp name="check" width="14" height="14" /> 已安装</span>
                   <span v-else-if="installingBrowser === b.channel" class="status-downloading"><IconApp name="refresh" width="14" height="14" class="spin" /> 下载中...</span>
+                  <span v-else-if="playwrightInstallable.has(b.channel) && pythonNotReady" class="status-not-installed"><IconApp name="alert-triangle" width="14" height="14" /> 环境未就绪</span>
                   <span v-else-if="playwrightInstallable.has(b.channel)" class="status-not-installed"><IconApp name="upload" width="14" height="14" /> 点击安装</span>
                   <span v-else class="status-not-installed"><IconApp name="upload" width="14" height="14" /> 未安装</span>
                 </div>
@@ -181,7 +196,12 @@ async function stopBrowser() {
           <template v-else>{{ browserInstallError }}</template>
         </p>
         <div v-if="currentNotInstalled" class="browser-safe-info browser-safe-info--warning">
-          <p>当前选择的浏览器未安装，启动将失败。请先安装 <strong>{{ config.config.browser.browser_channel }}</strong><template v-if="currentOfficialUrl">，或前往 <a :href="currentOfficialUrl" target="_blank" rel="noopener noreferrer" class="inline-link">官网下载</a></template>，或切换到已安装的浏览器后保存。</p>
+          <div class="browser-warning-copy">
+            <p>当前选择的浏览器未安装，启动将失败。请先安装 <strong>{{ config.config.browser.browser_channel }}</strong><template v-if="currentOfficialUrl">，或前往 <a :href="currentOfficialUrl" target="_blank" rel="noopener noreferrer" class="inline-link">官网下载</a></template>，或切换到已安装的浏览器后保存。</p>
+            <button v-if="installedChromium" type="button" class="btn btn-sm btn-secondary" @click="switchToInstalledChromium">
+              切换到 Chromium
+            </button>
+          </div>
         </div>
       </div>
     </section>

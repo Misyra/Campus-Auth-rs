@@ -2,16 +2,19 @@
 import IconApp from "@/components/common/IconApp.vue";
 import Modal from "@/components/common/Modal.vue";
 import { ref } from "vue";
+import { useRouter } from "vue-router";
 import { systemApi, autostartApi, uninstallApi } from "@/api";
 import type { UninstallDetectItem, UninstallStepResult } from "@/api/types";
 import { useConfirm } from "@/composables/useConfirm";
 import { frontendLogger } from "@/utils/logger";
 
 const { confirm } = useConfirm();
+const router = useRouter();
 
 // ---- 版本信息 ----
 const version = ref("unknown");
 const pythonStatus = ref("未知");
+const pythonReady = ref<boolean | null>(null);
 const platform = ref("");
 const autostartEnabled = ref(false);
 
@@ -35,7 +38,8 @@ async function loadInfo() {
   }
   if (initResult.status === "fulfilled") {
     const env = (initResult.value as { environment?: { python_ready?: boolean } }).environment;
-    pythonStatus.value = env?.python_ready ? "已就绪" : "未就绪";
+    pythonReady.value = env?.python_ready ?? false;
+    pythonStatus.value = pythonReady.value ? "已就绪" : "未就绪";
   } else {
     frontendLogger.warn("about", "Python 环境信息加载失败", initResult.reason);
   }
@@ -145,7 +149,10 @@ function closeUninstall() {
             <div class="info-list">
               <div class="info-item">
                 <span class="info-label">Python</span>
-                <span class="info-value">{{ pythonStatus }}</span>
+                <span class="info-value" :class="{ 'info-value--success': pythonReady === true, 'info-value--warning': pythonReady === false }">
+                  {{ pythonStatus }}
+                  <button v-if="pythonReady === false" type="button" class="btn btn-link info-fix-link" @click="router.push({ name: 'settings-tasks' })">前往设置 · 任务与环境</button>
+                </span>
               </div>
               <div class="info-item">
                 <span class="info-label">平台</span>

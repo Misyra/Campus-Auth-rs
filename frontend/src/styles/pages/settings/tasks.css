@@ -193,6 +193,10 @@
 
 /* ---- OCR 依赖管理 ---- */
 .ocr-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
   margin: var(--space-sm) 0 var(--space-xs);
 }
 

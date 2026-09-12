@@ -215,6 +215,11 @@ const networkStatusText = computed(() => {
   }
 });
 
+/** 横幅是否处于"一切正常"态：正常态说明依据收纳进悬浮提示，异常态（暂停/冷却/门户/离线）才直显 */
+const networkAllGood = computed(
+  () => status.network_state === "online" && !status.pause_active && !status.cooling_down,
+);
+
 const networkStatusDetail = computed(() => {
   if (!status.monitoring) return "自动监测停止后，手动网络测试仍可使用";
   if (status.pause_active) return "暂停期间不会自动检测或登录；上次网络结论已保留";
@@ -308,6 +313,7 @@ export function useStatus() {
     networkStatus,
     networkStatusText,
     networkStatusDetail,
+    networkAllGood,
     updateStatus,
     fetchStatus,
     fetchAutostart,

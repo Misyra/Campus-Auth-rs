@@ -162,7 +162,8 @@
 /* 滑块控件 */
 .appearance-slider-item {
   display: grid;
-  grid-template-columns: 56px 1fr 48px;
+  /* 72px：容纳最长的五字标签（背景可见度），56px 会折行 */
+  grid-template-columns: 72px 1fr 48px;
   align-items: center;
   gap: 12px;
 }
@@ -171,6 +172,7 @@
   font-size: var(--text-sm);
   color: var(--text-muted);
   margin: 0;
+  white-space: nowrap;
 }
 
 .appearance-slider-item span {
@@ -232,6 +234,11 @@
 
 .appearance-toggle-row {
   margin-top: var(--space-xs);
+}
+
+.appearance-dependency-hint {
+  margin-top: -8px;
+  padding-left: 2px;
 }
 
 /* 背景图缩略图 */

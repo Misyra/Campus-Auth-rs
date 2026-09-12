@@ -105,12 +105,13 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
         </div>
       </div>
       <button
-        class="btn btn-primary"
+        class="btn"
+        :class="status.monitoring ? 'btn-secondary' : 'btn-primary'"
         @click="toggleMonitor"
         :disabled="busy.monitor"
         :title="status.monitoring ? '停止网络检测和自动登录' : '开始检测网络，断网时自动登录'"
       >
-        <span v-if="busy.monitor" class="spinner spinner-on-accent"></span>
+        <span v-if="busy.monitor" class="spinner" :class="{ 'spinner-on-accent': !status.monitoring }"></span>
         <IconApp v-else class="btn-icon" :name="status.monitoring ? 'pause' : 'play'" />
         {{ busy.monitor ? "处理中..." : (status.monitoring ? "停止检测" : "启动检测") }}
       </button>

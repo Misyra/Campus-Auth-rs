@@ -7,6 +7,17 @@ import FieldHelp from "@/components/common/FieldHelp.vue";
 
 const config = useConfig();
 
+// 204 检测目标文本：展示时一行一个，输入时兼容历史的英文逗号分隔。
+const httpCheckText = computed({
+  get: () => config.config.monitor.test_urls.join("\n"),
+  set: (value: string) => {
+    config.config.monitor.test_urls = value
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  },
+});
+
 const urlCheckEnabled = computed({
   get: () => config.config.monitor.enable_url_check,
   set: (v: boolean) => {
@@ -128,20 +139,18 @@ const urlCheckText = computed({
                 <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.enable_http_check" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">204 门户检测（主要）</span>
+                  <span class="toggle-label">204 门户检测 <span class="badge badge--sm badge--info">推荐开启</span></span>
                 </label>
-                <FieldHelp text="默认且推荐开启。请求 generate_204 端点：204 表示公网在线，200 或跳转表示被认证门户劫持。这是自动恢复的主要证据。" />
+                <FieldHelp text="默认开启。请求 generate_204 端点：204 表示公网在线，200 或跳转表示被认证门户劫持。这是自动恢复的主要证据。" />
               </div>
             </div>
             <div v-if="config.config.monitor.enable_http_check" class="form-group settings-toggle-compact">
               <div class="field-label-row">
                 <label for="settings-http-targets">204 门户检测目标</label>
-                <FieldHelp text="必须填写返回 204 的轻量端点。普通网页返回 200，会被正确视为门户劫持证据，因此不能填在这里。" />
+                <FieldHelp text="必须填写返回 204 的轻量端点，普通网页返回 200 会被视为门户劫持证据、不能填在这里。每行一个地址，也兼容英文逗号分隔。" />
               </div>
-              <input id="settings-http-targets"
-                :value="config.config.monitor.test_urls.join(',')"
-                @input="config.config.monitor.test_urls = ($event.target as HTMLInputElement).value.split(',').map(s => s.trim()).filter(Boolean)"
-                type="text" placeholder="http://connect.rom.miui.com/generate_204" />
+              <textarea id="settings-http-targets" v-model="httpCheckText" rows="3" class="settings-monospace-textarea"
+                placeholder="http://connect.rom.miui.com/generate_204&#10;http://www.gstatic.com/generate_204"></textarea>
             </div>
             <div class="toggle-group settings-toggle-spacer">
               <div class="toggle-with-help">
@@ -190,7 +199,7 @@ const urlCheckText = computed({
                   <span class="toggle-slider"></span>
                   <span class="toggle-label">手动测试时检查网卡</span>
                 </label>
-                <FieldHelp text="只用于“网络测试”的诊断说明，并与公网探测并行执行；不会挡住自动监测，也不会单独触发或阻止登录。" />
+                <FieldHelp text="仅手动「网络测试」时运行的诊断说明，与公网探测并行执行；自动监测与自动登录均不做网卡检查，开启与否也不影响登录能否进行。" />
               </div>
             </div>
             <div class="toggle-group settings-toggle-spacer">
@@ -200,7 +209,7 @@ const urlCheckText = computed({
                   <span class="toggle-slider"></span>
                   <span class="toggle-label">手动登录前检查认证地址</span>
                 </label>
-                <FieldHelp text="手动登录前先直连确认认证地址可达，不可达则直接失败、不启动浏览器。默认关闭：部分校园网限制直连，开启可能误拦本可成功的登录。" />
+                <FieldHelp text="手动登录前先直连确认认证地址可达，不可达则直接失败、不启动浏览器。自动登录不做此项：触发前已有门户劫持的强证据。默认关闭：部分校园网限制直连，开启可能误拦本可成功的登录。" />
               </div>
             </div>
             <div class="toggle-group settings-toggle-spacer">

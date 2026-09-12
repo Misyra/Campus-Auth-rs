@@ -39,6 +39,12 @@ const drag = useDragSort(scripts, { tasks: browserTasks, scripts });
 // 关闭编辑器走 composable 的 dirty 确认路径（对齐 ProfilesView 行为）
 function closeEditor() { void closeScriptEditor(); }
 
+/** 从空态直接创建带示例内容的脚本，先等待编辑器草稿初始化完成。 */
+async function createExampleScript(): Promise<void> {
+  await showScriptEditor();
+  if (editingTask.value) loadScriptTemplate();
+}
+
 // ---- 二进制选项 ----
 const binaryOptions = computed<SelectOption[]>(() => {
   const opts: SelectOption[] = [{ value: "", label: "Python (项目内解释器)" }];
@@ -72,6 +78,12 @@ const binaryOptions = computed<SelectOption[]>(() => {
             <IconApp name="code" :stroke-width="1.5" />
             <span>暂无自定义脚本</span>
             <span class="hint">支持 Python、Shell 或任意可执行程序，无需浏览器，资源占用更低</span>
+            <div class="empty-actions">
+              <button class="btn btn-sm btn-primary" type="button" @click="showScriptEditor()">
+                <IconApp name="plus" />新建脚本
+              </button>
+              <button class="btn btn-sm btn-secondary" type="button" @click="void createExampleScript()">加载示例模板</button>
+            </div>
           </div>
           <div v-else class="task-list">
             <div

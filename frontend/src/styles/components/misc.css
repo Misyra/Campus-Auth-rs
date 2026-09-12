@@ -16,6 +16,20 @@
   opacity: 0.5;
 }
 
+.empty-state .empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin-top: var(--space-xs);
+}
+
+.empty-state .empty-actions svg {
+  width: 14px;
+  height: 14px;
+  opacity: 1;
+}
+
 /* 空状态标题/描述工具类（Profiles 等页复用，不再各写一套） */
 .empty-title {
   display: block;

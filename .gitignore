@@ -6,6 +6,7 @@
 
 # 工具产物
 .reasonix/
+.playwright-cli/
 # Rust
 /target/
 **/*.rs.bk

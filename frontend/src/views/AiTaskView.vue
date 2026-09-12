@@ -68,6 +68,11 @@ const configSignature = computed(() => JSON.stringify({
   max_tokens: maxTokens.value,
 }));
 const isConfigDone = computed(() => !!baseUrl.value.trim() && !!model.value.trim() && savedSignature.value === configSignature.value);
+const configTestHint = computed(() => {
+  if (!baseUrl.value.trim() || !model.value.trim()) return "请先填写接口地址和模型名称并保存";
+  if (!savedSignature.value) return "请先保存模型配置，再测试连接";
+  return "配置有改动，请重新保存后再测试连接";
+});
 
 function selectProvider(id: string): void {
   provider.value = id;
@@ -589,10 +594,10 @@ async function restoreCapture(): Promise<void> {
               <button v-if="hasApiKey && !PRESETS.find(p => p.id === provider)?.defaultKey" class="btn btn-secondary" :disabled="savingConfig" @click="clearApiKey">
                 清除当前 Key
               </button>
-              <button class="btn btn-secondary" :disabled="testingConfig || !isConfigDone" @click="testConnection">
+              <button class="btn btn-secondary" :disabled="testingConfig || !isConfigDone" :title="!isConfigDone ? configTestHint : '测试当前已保存的模型配置'" @click="testConnection">
                 {{ testingConfig ? "测试中…" : "测试连接" }}
               </button>
-              <span v-if="!isConfigDone && savedSignature" class="hint">配置有改动，保存后才能生成</span>
+              <span v-if="!isConfigDone" class="hint">{{ configTestHint }}</span>
             </div>
           </div>
         </div>

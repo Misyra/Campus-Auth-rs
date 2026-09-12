@@ -372,6 +372,11 @@
   flex-shrink: 0;
 }
 
+/* 正常态说明收纳进 ? 悬浮气泡（复用 FieldHelp），紧随标题、防挤压 */
+.network-status-banner .field-help {
+  flex-shrink: 0;
+}
+
 .network-status-banner.connected {
   background: rgba(var(--success-rgb), 0.08);
   border-color: rgba(var(--success-rgb), 0.2);

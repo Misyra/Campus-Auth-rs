@@ -26,7 +26,7 @@ vi.mock("../api", () => ({
 const { useStatus } = await import("./useStatus");
 const { useNotifications } = await import("./useNotifications");
 
-const { status, autostart, networkStatus, networkStatusText, updateStatus, fetchStatus, fetchAutostart } =
+const { status, autostart, networkStatus, networkStatusText, networkAllGood, updateStatus, fetchStatus, fetchAutostart } =
   useStatus();
 const { notifications } = useNotifications();
 
@@ -59,6 +59,22 @@ describe("fetchStatus 映射", () => {
     expect(status.runtime_seconds).toBe(100);
     expect(networkStatus.value).toBe("connected");
     expect(networkStatusText.value).toBe("公网连接正常");
+    expect(networkAllGood.value).toBe(true);
+  });
+
+  it("门户劫持/离线/暂停时非全好态，说明行应直显", async () => {
+    fetchStatusMock.mockResolvedValue(backendRaw({ network_status: "captive_portal" }));
+    await fetchStatus();
+    expect(networkStatusText.value).toBe("需要校园网认证");
+    expect(networkAllGood.value).toBe(false);
+
+    fetchStatusMock.mockResolvedValue(backendRaw({ network_status: "offline" }));
+    await fetchStatus();
+    expect(networkAllGood.value).toBe(false);
+
+    // 恢复 online 基线：后续“旧响应被丢弃”用例依赖前面用例留下的 online 状态
+    fetchStatusMock.mockResolvedValue(backendRaw());
+    await fetchStatus();
   });
 
   it("旧版本轮询响应被丢弃，不回退状态", async () => {

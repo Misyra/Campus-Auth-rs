@@ -236,6 +236,19 @@
   font-size: var(--text-base);
 }
 
+.info-value--success {
+  color: var(--success);
+}
+
+.info-value--warning {
+  color: var(--warning);
+}
+
+.info-fix-link {
+  margin-left: 4px;
+  vertical-align: baseline;
+}
+
 .about-footer {
   text-align: center;
   padding: var(--space-lg);

@@ -10,6 +10,7 @@ import { throttleRaf } from "@/utils/debounce";
 import { LOG_SOURCE_LABELS } from "@/utils/constants";
 import { formatDuration, formatTimestamp, formatShortTime } from "@/utils/formatters";
 import CustomSelect from "@/components/common/CustomSelect.vue";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const s = useStatus();
@@ -124,13 +125,15 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
     <div v-if="s.status.monitoring" class="network-status-banner" :class="s.networkStatus.value">
       <span class="status-dot"></span>
       <span class="status-text">{{ s.networkStatusText.value }}</span>
-      <span class="status-detail">{{ s.networkStatusDetail.value }}</span>
+      <!-- 一切正常时说明依据是噪音：收纳进 ? 悬浮气泡；异常态（门户/离线/冷却/暂停）指引需被看见，保持直显 -->
+      <FieldHelp v-if="s.networkAllGood.value" :text="s.networkStatusDetail.value" />
+      <span v-else class="status-detail">{{ s.networkStatusDetail.value }}</span>
     </div>
 
     <!-- 环境未就绪提示（非阻塞，仅链接到 环境 → Python 环境） -->
-    <div v-if="showEnvBanner" class="network-status-banner disconnected env-banner" @click="router.push({ name: 'settings-environment' })">
+    <div v-if="showEnvBanner" class="network-status-banner disconnected env-banner" @click="router.push({ name: 'settings-tasks' })">
       <span class="status-dot"></span>
-      <span>Python 环境未就绪，手动登录将自动初始化或可前往 设置 · 环境 手动修复</span>
+      <span>Python 环境未就绪，手动登录将自动初始化或可前往 设置 · 任务与环境 手动修复</span>
     </div>
 
     <!-- 统计卡片 -->
@@ -217,6 +220,14 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
             <div v-if="!loginHistory.length" class="empty-state">
               <IconApp name="clock" />
               <span>暂无登录记录</span>
+              <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
+              <div class="empty-actions">
+                <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'settings-account' })">去配置账号</button>
+                <button class="btn btn-sm btn-primary" type="button" :disabled="s.busy.login || s.busy.loginCooldown" @click="void ui.manualLogin()">
+                  <IconApp name="log-in" />
+                  {{ s.busy.login ? '登录中...' : '手动登录' }}
+                </button>
+              </div>
             </div>
             <div v-else class="history-list">
               <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">

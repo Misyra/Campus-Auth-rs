@@ -27,8 +27,9 @@ const routes = [
       { path: "account", name: "settings-account", meta: { title: "设置 · 账号" }, component: () => import("@/views/settings/AccountSettings.vue") },
       { path: "monitor", name: "settings-monitor", meta: { title: "设置 · 网络检测" }, component: () => import("@/views/settings/MonitorSettings.vue") },
       { path: "browser", name: "settings-browser", meta: { title: "设置 · 浏览器" }, component: () => import("@/views/settings/BrowserSettings.vue") },
-      { path: "tasks", name: "settings-tasks", meta: { title: "设置 · 任务" }, component: () => import("@/views/settings/TasksSettings.vue") },
-      { path: "environment", name: "settings-environment", meta: { title: "设置 · 环境" }, component: () => import("@/views/settings/EnvironmentSettings.vue") },
+      { path: "tasks", name: "settings-tasks", meta: { title: "设置 · 任务与环境" }, component: () => import("@/views/settings/TaskEnvironmentSettings.vue") },
+      // 旧「环境」Tab 深链与书签重定向到合并后的 Tab
+      { path: "environment", redirect: { name: "settings-tasks" } },
       { path: "system", name: "settings-system", meta: { title: "设置 · 系统" }, component: () => import("@/views/settings/SystemSettings.vue") },
       { path: "network", name: "settings-network", meta: { title: "设置 · 网络与更新" }, component: () => import("@/views/settings/NetworkSettings.vue") },
     ],

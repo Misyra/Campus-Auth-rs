@@ -10,6 +10,11 @@
   min-width: 0;
 }
 
+/* 空列表时帮助内容顺排到下方，避免左右两栏形成一侧空、一侧过长。 */
+.tasks-grid.tasks-grid--empty {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .task-list {
   display: flex;
   flex-direction: column;
@@ -129,6 +134,8 @@
 /* 仓库导入引导条：帮助栏首屏提示（不想手写 JSON 的用户直达入口） */
 .help-tip {
   display: flex;
+  /* 低分辨率窄栏放不下"文字+多按钮"时整体换行，防止按钮把文字挤成一字一行 */
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
@@ -140,7 +147,8 @@
 }
 
 .help-tip span {
-  flex: 1;
+  /* basis 保底触发换行：窄栏时文字独占一行、按钮组排其后 */
+  flex: 1 1 160px;
   min-width: 0;
 }
 

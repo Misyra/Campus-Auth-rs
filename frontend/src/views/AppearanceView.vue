@@ -79,6 +79,7 @@ const {
               <span class="toggle-slider"></span>
               <span class="toggle-label">毛玻璃效果</span>
             </label>
+            <span v-if="!appearance.backdrop_filter" class="hint appearance-dependency-hint">开启毛玻璃效果后，才能调节上方的玻璃模糊度</span>
           </div>
         </div>
       </div>

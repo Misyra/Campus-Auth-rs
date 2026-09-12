@@ -61,8 +61,14 @@ function onSaveClick(): void {
       </div>
       <div class="card-body">
         <div v-if="!st.scheduledTasks.value.length" class="empty-state">
-          <p>暂无定时任务</p>
-          <p class="hint">定时任务会在指定时间自动执行脚本或浏览器任务</p>
+          <IconApp name="calendar" :stroke-width="1.5" />
+          <span class="empty-title">暂无定时任务</span>
+          <span class="empty-desc">在指定时间自动执行脚本或浏览器任务</span>
+          <div class="empty-actions">
+            <button class="btn btn-sm btn-primary" type="button" @click="st.openCreateScheduledTask()">
+              <IconApp name="plus" />新建定时任务
+            </button>
+          </div>
         </div>
         <div v-else class="task-list">
           <div v-for="task in st.scheduledTasks.value" :key="task.id" class="task-item hover-lift scheduled-task-item" :class="{ disabled: !task.enabled }">
