@@ -33,6 +33,13 @@ pub async fn list_jobs(
             v["task_type"] = serde_json::json!(tt);
         }
         v["schedule_invalid"] = serde_json::json!(scheduler.is_cron_invalid(&job.id));
+        // 启动触发任务补充当日成功次数（前端展示"今日 x/N 次"；窗口键由
+        // 后端按本地日期计算，前端不必复算时区口径）
+        if job.trigger == crate::scheduler::task::TaskTrigger::Startup {
+            v["startup_runs_today"] = serde_json::json!(
+                job.startup_success_today(&crate::scheduler::task::ScheduledTask::local_today())
+            );
+        }
         result.push(v);
     }
     Ok(data(result))
@@ -44,10 +51,28 @@ pub struct JobCreateBody {
     pub id: String,
     pub name: Option<String>,
     pub target_id: String,
-    pub cron: String,
+    /// cron 表达式（触发方式为 startup 时可缺省，落盘为空串）
+    pub cron: Option<String>,
     pub enabled: Option<bool>,
     pub description: Option<String>,
     pub timeout: Option<u64>,
+    /// 触发方式（"cron"/"startup"，缺省 cron）
+    pub trigger: Option<String>,
+    /// 启动触发：每日成功次数上限
+    pub max_runs_per_day: Option<u32>,
+    /// 启动触发：失败重试次数
+    pub max_retries: Option<u32>,
+    /// 启动触发：延迟执行秒数
+    pub startup_delay_secs: Option<u64>,
+}
+
+/// 解析触发方式字符串（"cron"/"startup"，缺省按 cron）；非法值报 400。
+fn parse_trigger(raw: Option<&str>) -> Result<crate::scheduler::task::TaskTrigger, ApiError> {
+    match raw {
+        None | Some("") | Some("cron") => Ok(crate::scheduler::task::TaskTrigger::Cron),
+        Some("startup") => Ok(crate::scheduler::task::TaskTrigger::Startup),
+        Some(other) => Err(ApiError::BadRequest(format!("无效的触发方式: {other}"))),
+    }
 }
 
 /// POST /api/scheduler/jobs — 创建定时任务
@@ -61,17 +86,23 @@ pub async fn create_job(
     if scheduler.get_task(&body.id).is_some() {
         return Err(ApiError::Conflict(format!("定时任务 {} 已存在", body.id)));
     }
+    let trigger = parse_trigger(body.trigger.as_deref())?;
     let job = crate::scheduler::task::ScheduledTask {
         id: body.id.clone(),
         name: body.name.unwrap_or_default(),
         description: body.description.unwrap_or_default(),
-        cron: body.cron,
+        cron: body.cron.unwrap_or_default(),
         target_id: body.target_id,
         profile_id: None,
         timeout: body.timeout,
         enabled: body.enabled.unwrap_or(true),
         last_run: None,
         last_result: None,
+        trigger,
+        max_runs_per_day: body.max_runs_per_day,
+        max_retries: body.max_retries,
+        startup_delay_secs: body.startup_delay_secs,
+        startup_success: None,
     };
     scheduler.save_task(&body.id, &job).await?;
     scheduler.notify_change();
@@ -88,6 +119,11 @@ pub struct JobUpdateBody {
     pub profile_id: Option<String>,
     pub description: Option<String>,
     pub timeout: Option<u64>,
+    /// 触发方式（"cron"/"startup"）
+    pub trigger: Option<String>,
+    pub max_runs_per_day: Option<u32>,
+    pub max_retries: Option<u32>,
+    pub startup_delay_secs: Option<u64>,
 }
 
 /// PUT /api/scheduler/jobs/{id} — 更新定时任务
@@ -99,6 +135,9 @@ pub async fn update_job(
     let mut job = scheduler
         .get_task(&id)
         .ok_or_else(|| ApiError::NotFound(format!("定时任务 {} 不存在", id)))?;
+    if let Some(t) = body.trigger.as_deref() {
+        job.trigger = parse_trigger(Some(t))?;
+    }
     if let Some(c) = body.cron {
         job.cron = c;
     }
@@ -119,6 +158,15 @@ pub async fn update_job(
     }
     if let Some(t) = body.timeout {
         job.timeout = Some(t);
+    }
+    if let Some(v) = body.max_runs_per_day {
+        job.max_runs_per_day = Some(v);
+    }
+    if let Some(v) = body.max_retries {
+        job.max_retries = Some(v);
+    }
+    if let Some(v) = body.startup_delay_secs {
+        job.startup_delay_secs = Some(v);
     }
     scheduler.save_task(&id, &job).await?;
     scheduler.notify_change();
@@ -294,6 +342,11 @@ mod tests {
             enabled,
             last_run: None,
             last_result: None,
+            trigger: crate::scheduler::task::TaskTrigger::Cron,
+            max_runs_per_day: None,
+            max_retries: None,
+            startup_delay_secs: None,
+            startup_success: None,
         }
     }
 
@@ -401,6 +454,99 @@ mod tests {
         let job = inner.tasks.iter().find(|t| t.id == "job3").unwrap();
         assert_eq!(job.description, "每周例行的描述");
         assert_eq!(job.timeout, Some(300));
+        // 未指定触发方式时按 cron 处理（兼容旧客户端）
+        assert_eq!(job.trigger, crate::scheduler::task::TaskTrigger::Cron);
+    }
+
+    /// 创建启动触发任务：cron 可缺省，启动参数随创建落盘
+    #[tokio::test]
+    async fn test_create_job_startup_trigger_without_cron() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scheduler/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "job_startup", "target_id": "t1", "name": "启动签到",
+                            "trigger": "startup", "max_runs_per_day": 2,
+                            "max_retries": 3, "startup_delay_secs": 15
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let inner = inner.lock().unwrap();
+        let job = inner
+            .tasks
+            .iter()
+            .find(|t| t.id == "job_startup")
+            .expect("启动触发任务应已创建");
+        assert_eq!(job.trigger, crate::scheduler::task::TaskTrigger::Startup);
+        assert_eq!(job.cron, "");
+        assert_eq!(job.max_runs_per_day, Some(2));
+        assert_eq!(job.max_retries, Some(3));
+        assert_eq!(job.startup_delay_secs, Some(15));
+        assert_eq!(job.startup_success, None);
+    }
+
+    /// 非法触发方式字符串返回 400
+    #[tokio::test]
+    async fn test_create_job_rejects_invalid_trigger() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scheduler/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "job_x", "target_id": "t1", "trigger": "hourly"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(inner.lock().unwrap().tasks.len(), 2);
+    }
+
+    /// 更新任务可切换触发方式并携带启动参数
+    #[tokio::test]
+    async fn test_update_job_switches_trigger() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/scheduler/jobs/job1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "trigger": "startup", "max_runs_per_day": 3, "startup_delay_secs": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let inner = inner.lock().unwrap();
+        let job = inner.tasks.iter().find(|t| t.id == "job1").unwrap();
+        assert_eq!(job.trigger, crate::scheduler::task::TaskTrigger::Startup);
+        assert_eq!(job.max_runs_per_day, Some(3));
+        assert_eq!(job.startup_delay_secs, Some(0));
+        // 未指定的字段保留原值
+        assert_eq!(job.cron, "0 8 * * *");
     }
 
     /// 更新不存在的任务返回 404

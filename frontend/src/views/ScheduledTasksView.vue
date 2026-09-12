@@ -23,6 +23,12 @@ const scheduledTaskTypeOptions: SelectOption[] = [
   { value: "script", label: "自定义脚本" },
 ];
 
+// 触发方式：定时执行（每日 HH:MM）/ 启动后执行（软件每次启动后自动执行）
+const scheduledTaskTriggerOptions: SelectOption[] = [
+  { value: "cron", label: "定时执行" },
+  { value: "startup", label: "启动后执行" },
+];
+
 const scriptTargetOptions = computed<SelectOption[]>(() =>
   scripts.value.map((s) => ({ value: s.id, label: s.name })),
 );
@@ -36,6 +42,11 @@ function onTaskTypeChange(value: string): void {
   if (st.scheduledTaskForm.value.task_type === value) return;
   st.scheduledTaskForm.value.task_type = value;
   st.scheduledTaskForm.value.target_id = "";
+}
+
+/** 触发方式收窄为合法枚举值（CustomSelect 发的是 string） */
+function onTriggerChange(value: string): void {
+  st.scheduledTaskForm.value.trigger = value === "startup" ? "startup" : "cron";
 }
 
 /** 保存前把当前类型下合法的目标 id 集合交给 composable 做死引用校验 */
@@ -63,7 +74,7 @@ function onSaveClick(): void {
         <div v-if="!st.scheduledTasks.value.length" class="empty-state">
           <IconApp name="calendar" :stroke-width="1.5" />
           <span class="empty-title">暂无定时任务</span>
-          <span class="empty-desc">在指定时间自动执行脚本或浏览器任务</span>
+          <span class="empty-desc">定时或启动后自动执行脚本与浏览器任务</span>
           <div class="empty-actions">
             <button class="btn btn-sm btn-primary" type="button" @click="st.openCreateScheduledTask()">
               <IconApp name="plus" />新建定时任务
@@ -77,8 +88,13 @@ function onSaveClick(): void {
               <p class="task-desc">
                 <span class="scheduled-task-type" :class="'badge-' + task.task_type">{{ st.formatTaskType(task.task_type) }}</span>
                 <span v-if="task.target_id"> · {{ task.target_id }}</span>
-                · 每天 {{ task.cron }}
-                <span v-if="task.schedule_invalid" class="text-danger" title="cron 表达式解析失败，该任务已启用但永远不会触发，请编辑修正"> · 表达式无效</span>
+                <template v-if="task.trigger === 'startup'">
+                  · 启动后执行<span v-if="typeof task.startup_runs_today === 'number'"> · 今日成功 {{ task.startup_runs_today }}/{{ task.max_runs_per_day || 1 }}</span>
+                </template>
+                <template v-else>
+                  · 每天 {{ task.cron }}
+                  <span v-if="task.schedule_invalid" class="text-danger" title="cron 表达式解析失败，该任务已启用但永远不会触发，请编辑修正"> · 表达式无效</span>
+                </template>
                 <span v-if="task.timeout"> · 超时 {{ task.timeout }}s</span>
                 <span v-if="task.last_run">
                   · 上次: <span :class="task.last_result?.startsWith('[success]') ? 'text-success' : 'text-danger'">{{ task.last_result?.startsWith('[success]') ? '成功' : '失败' }}</span>
@@ -143,6 +159,21 @@ function onSaveClick(): void {
         <div class="form-section-title">执行设置</div>
         <div class="form-row form-row--flex">
           <div class="form-group">
+            <label>触发方式</label>
+            <CustomSelect
+              :model-value="st.scheduledTaskForm.value.trigger"
+              :options="scheduledTaskTriggerOptions"
+              @update:model-value="onTriggerChange"
+            />
+          </div>
+          <div class="form-group">
+            <label for="scheduled-task-timeout">超时（秒）</label>
+            <input id="scheduled-task-timeout" v-model.number="st.scheduledTaskForm.value.timeout" type="number" min="5" max="3600" />
+          </div>
+        </div>
+        <!-- 定时执行：每日固定时间触发 -->
+        <div v-if="st.scheduledTaskForm.value.trigger === 'cron'" class="form-row form-row--flex">
+          <div class="form-group">
             <label for="scheduled-task-time">执行时间</label>
             <input id="scheduled-task-time" type="time"
               :value="st.formatScheduleTime(st.scheduledTaskForm.value.schedule)"
@@ -151,9 +182,23 @@ function onSaveClick(): void {
               原表达式「{{ st.originalCron.value }}」不是每日时间格式，保存后将按上方时间改为每日执行
             </span>
           </div>
+        </div>
+        <!-- 启动后执行：软件每次启动后自动执行，仅成功计入每日次数 -->
+        <div v-else class="form-row form-row--flex">
           <div class="form-group">
-            <label for="scheduled-task-timeout">超时（秒）</label>
-            <input id="scheduled-task-timeout" v-model.number="st.scheduledTaskForm.value.timeout" type="number" min="5" max="3600" />
+            <label for="scheduled-task-max-runs">每天最多成功</label>
+            <input id="scheduled-task-max-runs" v-model.number="st.scheduledTaskForm.value.max_runs_per_day" type="number" min="1" max="99" />
+            <span class="hint">次 · 执行成功才计入，当日达到上限后自动跳过</span>
+          </div>
+          <div class="form-group">
+            <label for="scheduled-task-retries">失败重试</label>
+            <input id="scheduled-task-retries" v-model.number="st.scheduledTaskForm.value.max_retries" type="number" min="0" max="10" />
+            <span class="hint">次 · 每次间隔 1 分钟</span>
+          </div>
+          <div class="form-group">
+            <label for="scheduled-task-delay">延迟执行（秒）</label>
+            <input id="scheduled-task-delay" v-model.number="st.scheduledTaskForm.value.startup_delay_secs" type="number" min="0" max="86400" />
+            <span class="hint">启动后先等待，便于网络就绪</span>
           </div>
         </div>
       </div>

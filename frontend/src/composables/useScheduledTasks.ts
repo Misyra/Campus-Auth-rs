@@ -4,7 +4,7 @@
  */
 
 import { ref } from "vue";
-import type { ScheduledTask, ScheduledTaskHistoryItem } from "../api/types";
+import type { ScheduledTask, ScheduledTaskHistoryItem, ScheduledTaskTrigger } from "../api/types";
 import { scheduledTasksApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
@@ -20,8 +20,46 @@ interface ScheduledTaskForm {
   task_type: string;
   target_id: string;
   enabled: boolean;
+  trigger: ScheduledTaskTrigger;
   schedule: { hour: number; minute: number };
   timeout: number;
+  /** 启动触发：每日成功次数上限 */
+  max_runs_per_day: number;
+  /** 启动触发：失败重试次数 */
+  max_retries: number;
+  /** 启动触发：延迟执行秒数 */
+  startup_delay_secs: number;
+}
+
+/** 启动触发字段的合法区间（与后端钳制口径一致） */
+export const STARTUP_FORM_LIMITS = {
+  maxRunsPerDay: { min: 1, max: 99, fallback: 1 },
+  maxRetries: { min: 0, max: 10, fallback: 2 },
+  startupDelaySecs: { min: 0, max: 86400, fallback: 30 },
+} as const;
+
+/** 钳制启动触发表单值：NaN/越界回退缺省或区间边界（纯函数，供测试） */
+export function clampStartupForm(input: {
+  max_runs_per_day: number;
+  max_retries: number;
+  startup_delay_secs: number;
+}): { max_runs_per_day: number; max_retries: number; startup_delay_secs: number } {
+  const { maxRunsPerDay, maxRetries, startupDelaySecs } = STARTUP_FORM_LIMITS;
+  const clamp = (raw: number, min: number, max: number, fallback: number): number => {
+    const n = Math.round(Number(raw));
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(Math.max(n, min), max);
+  };
+  return {
+    max_runs_per_day: clamp(input.max_runs_per_day, maxRunsPerDay.min, maxRunsPerDay.max, maxRunsPerDay.fallback),
+    max_retries: clamp(input.max_retries, maxRetries.min, maxRetries.max, maxRetries.fallback),
+    startup_delay_secs: clamp(
+      input.startup_delay_secs,
+      startupDelaySecs.min,
+      startupDelaySecs.max,
+      startupDelaySecs.fallback,
+    ),
+  };
 }
 
 /** 从 5 字段 cron 表达式解析 hour 和 minute；分/时字段含非纯数字内容（步进、区间、列表等）时返回 valid:false */
@@ -51,8 +89,12 @@ const scheduledTaskForm = ref<ScheduledTaskForm>({
   task_type: "browser",
   target_id: "",
   enabled: true,
+  trigger: "cron",
   schedule: { hour: 8, minute: 0 },
   timeout: 60,
+  max_runs_per_day: 1,
+  max_retries: 2,
+  startup_delay_secs: 30,
 });
 const scheduledTaskHistory = ref<ScheduledTaskHistoryItem[]>([]);
 const showScheduledTaskModal = ref(false);
@@ -106,19 +148,24 @@ function openCreateScheduledTask(): void {
     task_type: "browser",
     target_id: "",
     enabled: true,
+    trigger: "cron",
     schedule: { hour: 8, minute: 0 },
     timeout: 60,
+    max_runs_per_day: 1,
+    max_retries: 2,
+    startup_delay_secs: 30,
   });
   showScheduledTaskModal.value = true;
 }
 
 function openEditScheduledTask(task: ScheduledTask): void {
   editingScheduledTask.value = task.id;
-  const cron = task.cron || "";
+  const isStartup = task.trigger === "startup";
+  const cron = isStartup ? "" : task.cron || "";
   const schedule = parseCronToSchedule(cron);
   originalCron.value = cron;
-  originalCronInvalid.value = !schedule.valid;
-  if (!schedule.valid) {
+  originalCronInvalid.value = !isStartup && !schedule.valid;
+  if (!schedule.valid && !isStartup) {
     toastOnly(
       false,
       `该任务使用非每日时间表达式（${cron}），保存后将按表单时间改为每日执行`,
@@ -131,8 +178,12 @@ function openEditScheduledTask(task: ScheduledTask): void {
     task_type: task.task_type === "script" ? "script" : "browser",
     target_id: task.target_id || "",
     enabled: task.enabled !== false,
+    trigger: isStartup ? "startup" : "cron",
     schedule,
     timeout: task.timeout || 60,
+    max_runs_per_day: task.max_runs_per_day || 1,
+    max_retries: task.max_retries ?? 2,
+    startup_delay_secs: task.startup_delay_secs ?? 30,
   });
   showScheduledTaskModal.value = true;
 }
@@ -161,9 +212,16 @@ async function saveScheduledTask(validTargetIds?: string[]): Promise<void> {
     return;
   }
   scheduledTaskFormLoading.value = true;
-  const cron = scheduleToCron(form.schedule.hour, form.schedule.minute);
+  const isStartup = form.trigger === "startup";
+  // 启动触发不依赖 cron（后端落盘空串）；定时触发按表单时间生成每日表达式
+  const cron = isStartup ? "" : scheduleToCron(form.schedule.hour, form.schedule.minute);
   // 超时按输入框 min/max 钳制：NaN/越界值不发后端（后端缺省 60s）
   const timeout = Math.min(Math.max(Number(form.timeout) || 60, 5), 3600);
+  const startupFields = clampStartupForm({
+    max_runs_per_day: form.max_runs_per_day,
+    max_retries: form.max_retries,
+    startup_delay_secs: form.startup_delay_secs,
+  });
   try {
     if (editingScheduledTask.value) {
       // PUT /api/scheduler/jobs/{id} — 发送完整表单数据（类型由后端从 target 推导，不再上传）
@@ -174,6 +232,8 @@ async function saveScheduledTask(validTargetIds?: string[]): Promise<void> {
         cron,
         enabled: form.enabled,
         timeout,
+        trigger: form.trigger,
+        ...(isStartup ? startupFields : {}),
       };
       const data = await scheduledTasksApi.update(editingScheduledTask.value, payload);
       toastOnly(true, data?.message || "保存成功");
@@ -189,6 +249,8 @@ async function saveScheduledTask(validTargetIds?: string[]): Promise<void> {
         cron,
         enabled: form.enabled,
         timeout,
+        trigger: form.trigger,
+        ...(isStartup ? startupFields : {}),
       };
       const data = await scheduledTasksApi.create(payload);
       toastOnly(true, data?.message || "保存成功");

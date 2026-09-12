@@ -23,10 +23,10 @@ use crate::status::StatusManager;
 use crate::tasks::TaskManager;
 use crate::web::error::ApiError;
 
-pub use self::cron_loop::execute_scheduled_task;
+use self::cron_loop::RunSource;
 use self::task::{
     CHANGE_CHANNEL_CAPACITY, MAX_CONCURRENT_SCHEDULED_TASKS, ScheduledTask, append_history,
-    history_dir_of, map_history_records,
+    history_dir_of, map_history_records, next_success_count,
 };
 
 /// 调度器错误类型。
@@ -108,6 +108,10 @@ pub struct SchedulerService {
     /// 定时任务文件写入串行锁：`save_task` 与 `update_last_run` 均为读-改-写，
     /// 无锁并发会导致 cron/last_run 互相覆盖
     file_mutex: tokio::sync::Mutex<()>,
+    /// login_once 模式标记：单次登录模式登录即退，启动触发的执行轮在延迟到期后
+    /// 检查此标记并放弃执行（否则任务会被关闭取消半途而废）。由 Launcher 在
+    /// 模式分发前设置；调度器自身无法从配置可靠区分 CLI 注入的 login_once。
+    login_once: std::sync::atomic::AtomicBool,
     /// 内部状态。
     state: std::sync::Mutex<SchedulerState>,
 }
@@ -152,6 +156,7 @@ impl SchedulerService {
             task_tracker: TaskTracker::new(),
             task_cancel: CancellationToken::new(),
             file_mutex: tokio::sync::Mutex::new(()),
+            login_once: std::sync::atomic::AtomicBool::new(false),
             state: std::sync::Mutex::new(SchedulerState {
                 tasks: Vec::new(),
                 running: true,
@@ -175,6 +180,17 @@ impl SchedulerService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(task_id);
+    }
+
+    /// 标记当前运行模式为 login_once（由 Launcher 在模式分发前调用）。
+    pub fn set_login_once_mode(&self, login_once: bool) {
+        self.login_once
+            .store(login_once, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 当前是否处于 login_once 模式（启动触发执行轮据此放弃执行）。
+    pub(crate) fn is_login_once_mode(&self) -> bool {
+        self.login_once.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 启动调度循环，返回可停止的服务句柄。
@@ -237,17 +253,21 @@ impl SchedulerService {
         if !ScheduledTask::is_valid_id(id) {
             return Err(SchedulerError::InvalidTaskId(id.to_string()));
         }
-        // 校验 cron 表达式：此前仅在加载时解析，非法表达式静默落盘、
-        // 任务永不触发且 API 层返回 ok，用户无从得知
-        crate::scheduler::cron_loop::parse_cron_expr(&task.cron)?;
+        let mut to_save = task.clone();
+        to_save.id = id.to_string();
+        // 触发方式归一化先行（钳制/清理字段），再按触发方式校验：
+        // 仅 cron 触发需要 cron 表达式合法——此前非法表达式静默落盘、任务
+        // 永不触发且 API 层返回 ok；启动触发不依赖 cron，跳过校验
+        to_save.normalize_for_save();
+        if to_save.trigger == crate::scheduler::task::TaskTrigger::Cron {
+            crate::scheduler::cron_loop::parse_cron_expr(&to_save.cron)?;
+        }
         // 校验关联目标任务存在
-        if !self.task_manager.has_task(&task.target_id) {
-            return Err(SchedulerError::TargetNotFound(task.target_id.clone()));
+        if !self.task_manager.has_task(&to_save.target_id) {
+            return Err(SchedulerError::TargetNotFound(to_save.target_id.clone()));
         }
 
         let path = self.scheduled_dir.join(format!("{}.json", id));
-        let mut to_save = task.clone();
-        to_save.id = id.to_string();
         // 文件写入串行化：与 update_last_run 同锁，防读-改-写互相覆盖
         let _file_guard = self.file_mutex.lock().await;
         // 同步 fs 写入放入 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
@@ -378,6 +398,38 @@ impl SchedulerService {
         });
     }
 
+    /// 启动触发任务成功执行后递增当日成功计数（内存 + 磁盘）。
+    ///
+    /// 仅成功计入（用户口径：失败不算执行次数）；读-改-写与 save_task /
+    /// update_last_run 同锁串行化。磁盘与内存各按当前值独立推算下一笔
+    /// （纯函数 [`next_success_count`]，跨天窗口键不匹配时重置为 1）。
+    pub(crate) async fn record_startup_success(&self, task_id: &str) {
+        let today = ScheduledTask::local_today();
+        let path = self.scheduled_dir.join(format!("{}.json", task_id));
+        // 与 save_task/update_last_run 同锁串行化，防读-改-写互相覆盖
+        let _file_guard = self.file_mutex.lock().await;
+        let path_for_blocking = path.clone();
+        let today_for_blocking = today.clone();
+        let task_id_for_blocking = task_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(mut task) = ScheduledTask::load_from(&path_for_blocking) {
+                task.startup_success = Some(next_success_count(
+                    task.startup_success.as_ref(),
+                    &today_for_blocking,
+                ));
+                if let Err(e) = ScheduledTask::save_to(&path_for_blocking, &task) {
+                    tracing::warn!(task_id = %task_id_for_blocking, "启动成功计数持久化失败: {e}");
+                }
+            }
+        })
+        .await;
+        self.update_state(|s| {
+            if let Some(t) = s.tasks.iter_mut().find(|t| t.id == task_id) {
+                t.startup_success = Some(next_success_count(t.startup_success.as_ref(), &today));
+            }
+        });
+    }
+
     /// 手动触发执行定时任务：与 cron 触发共用同一并发信号量闸。
     /// 手动触发与定时触发走同一执行路径（`execute_scheduled_task`），
     /// 保证 run_id 不被死数据浪费、手动与 cron 触发共享 concurrency 限制。
@@ -393,12 +445,15 @@ impl SchedulerService {
             tracing::warn!(task_id = %task.id, "任务正在执行中，拒绝手动重复触发");
             return false;
         }
-        svc.spawn_tracked_run(task);
+        svc.spawn_tracked_run(task, RunSource::Manual);
         true
     }
 
     /// 将一次任务执行纳入服务生命周期，关闭时统一取消并等待清理完成。
-    pub(crate) fn spawn_tracked_run(self: Arc<Self>, task: ScheduledTask) {
+    ///
+    /// `source` 决定执行体与历史来源标注：Cron/Manual 为单次尝试，
+    /// Startup 走启动执行轮（延迟 + 失败重试 + 成功计数）。
+    pub(crate) fn spawn_tracked_run(self: Arc<Self>, task: ScheduledTask, source: RunSource) {
         let marked_id = task.id.clone();
         if self.task_cancel.is_cancelled() {
             self.clear_running(&marked_id);
@@ -423,11 +478,28 @@ impl SchedulerService {
 
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    // 若执行 future 已启动，析构链会触发 RunningGuard 与子进程 Job
-                    // Object 守卫，分别清除运行标记与回收整棵进程树。
+                    // 若执行 future 已启动，析构链会触发 RunningGuard 与子进程
+                    // Job Object 守卫，分别清除运行标记与回收整棵进程树。
                     svc.clear_running(&marked_id);
                 }
-                _ = crate::scheduler::cron_loop::execute_scheduled_task(task, svc.clone()) => {}
+                _ = {
+                    // 克隆后的 svc 移入 async block：第一个 select 分支仍需使用原值
+                    let svc = svc.clone();
+                    async move {
+                        match source {
+                            RunSource::Startup => {
+                                crate::scheduler::cron_loop::execute_startup_round(task, svc)
+                                    .await;
+                            }
+                            _ => {
+                                crate::scheduler::cron_loop::execute_scheduled_task(
+                                    task, svc, source,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                } => {}
             }
         });
     }
@@ -459,13 +531,14 @@ impl SchedulerService {
         Ok(map_history_records(&raw))
     }
 
-    /// 追加一条执行历史记录。
+    /// 追加一条执行历史记录（`trigger` 为触发来源标识 cron/startup/manual）。
     pub(crate) async fn add_history_record(
         &self,
         task_id: &str,
         status: &str,
         message: &str,
         duration: std::time::Duration,
+        trigger: &str,
     ) {
         let dir = history_dir_of(&self.scheduled_dir);
         // 历史追加移至 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
@@ -474,6 +547,7 @@ impl SchedulerService {
         let task_id_for_log = task_id_owned.clone();
         let status_owned = status.to_string();
         let message_owned = message.to_string();
+        let trigger_owned = trigger.to_string();
         tokio::task::spawn_blocking(move || {
             append_history(
                 &dir_for_blocking,
@@ -481,6 +555,7 @@ impl SchedulerService {
                 &status_owned,
                 &message_owned,
                 duration,
+                &trigger_owned,
             )
         })
         .await

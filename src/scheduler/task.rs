@@ -27,6 +27,20 @@ pub(crate) const MAX_CONCURRENT_SCHEDULED_TASKS: usize = 4;
 pub(crate) const CRON_PARSE_PREFIX: &str = "0 ";
 /// 5→7 字段转换：后缀年字段。
 pub(crate) const CRON_PARSE_SUFFIX: &str = " *";
+/// 启动触发默认延迟秒数（等网络/校园网登录稳定后再执行）。
+pub(crate) const DEFAULT_STARTUP_DELAY_SECS: u64 = 30;
+/// 启动触发延迟秒数上限。
+pub(crate) const MAX_STARTUP_DELAY_SECS: u64 = 86_400;
+/// 启动触发失败重试默认次数。
+pub(crate) const DEFAULT_STARTUP_MAX_RETRIES: u32 = 2;
+/// 启动触发失败重试次数上限。
+pub(crate) const MAX_STARTUP_RETRIES: u32 = 10;
+/// 启动触发重试间隔秒数（固定值，不作为配置暴露）。
+pub(crate) const STARTUP_RETRY_INTERVAL_SECS: u64 = 60;
+/// 启动触发每日成功次数缺省上限。
+pub(crate) const DEFAULT_STARTUP_MAX_RUNS_PER_DAY: u32 = 1;
+/// 启动触发每日成功次数上限的钳制上限。
+pub(crate) const MAX_STARTUP_RUNS_PER_DAY: u32 = 99;
 
 /// 定时任务数据模型（对应 `tasks/scheduled/{id}.json`）。
 ///
@@ -65,6 +79,21 @@ pub struct ScheduledTask {
     /// 上次执行结果（持久化恢复）。
     #[serde(default)]
     pub last_result: Option<String>,
+    /// 触发方式（缺省 cron，兼容存量任务文件）。
+    #[serde(default)]
+    pub trigger: TaskTrigger,
+    /// 启动触发：每日成功执行次数上限（None = [`DEFAULT_STARTUP_MAX_RUNS_PER_DAY`]）。
+    #[serde(default)]
+    pub max_runs_per_day: Option<u32>,
+    /// 启动触发：单轮失败后最大重试次数（None = [`DEFAULT_STARTUP_MAX_RETRIES`]）。
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    /// 启动触发：延迟执行秒数（None = [`DEFAULT_STARTUP_DELAY_SECS`]）。
+    #[serde(default)]
+    pub startup_delay_secs: Option<u64>,
+    /// 启动触发：当日成功次数簿记（跨重启判断"今天是否已成功过"）。
+    #[serde(default)]
+    pub startup_success: Option<DailySuccessCount>,
 }
 
 fn default_name() -> String {
@@ -73,6 +102,44 @@ fn default_name() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// 定时任务触发方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskTrigger {
+    /// cron 定时触发（默认，兼容存量任务文件）。
+    #[default]
+    Cron,
+    /// 应用启动后触发（受每日成功次数上限约束，支持失败重试）。
+    Startup,
+}
+
+/// 启动触发的当日成功计数簿记（随任务文件持久化，跨重启去重）。
+///
+/// 仅成功执行计入（用户口径：失败不算执行次数）；窗口键为本地日期，
+/// 日期不匹配即视为 0，跨天自动归零。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DailySuccessCount {
+    /// 本地日期（ISO 格式 YYYY-MM-DD）。
+    pub date: String,
+    /// 当日成功执行次数。
+    pub count: u32,
+}
+
+/// 成功执行后的下一笔当日计数（窗口键不匹配时重置为 1）。
+pub(crate) fn next_success_count(
+    existing: Option<&DailySuccessCount>,
+    today: &str,
+) -> DailySuccessCount {
+    let count = match existing {
+        Some(c) if c.date == today => c.count + 1,
+        _ => 1,
+    };
+    DailySuccessCount {
+        date: today.to_string(),
+        count,
+    }
 }
 
 impl ScheduledTask {
@@ -90,7 +157,71 @@ impl ScheduledTask {
             enabled: true,
             last_run: None,
             last_result: None,
+            trigger: TaskTrigger::Cron,
+            max_runs_per_day: None,
+            max_retries: None,
+            startup_delay_secs: None,
+            startup_success: None,
         }
+    }
+
+    /// 本地今日日期（ISO YYYY-MM-DD），作为启动成功计数的窗口键。
+    pub(crate) fn local_today() -> String {
+        chrono::Local::now().date_naive().to_string()
+    }
+
+    /// 启动触发的当日成功次数（簿记日期与 `today` 不匹配视为 0）。
+    pub(crate) fn startup_success_today(&self, today: &str) -> u32 {
+        match &self.startup_success {
+            Some(c) if c.date == today => c.count,
+            _ => 0,
+        }
+    }
+
+    /// 启动触发的有效每日成功次数上限。
+    pub(crate) fn effective_max_runs_per_day(&self) -> u32 {
+        self.max_runs_per_day
+            .unwrap_or(DEFAULT_STARTUP_MAX_RUNS_PER_DAY)
+    }
+
+    /// 启动触发的有效失败重试次数（单轮总尝试 = 重试次数 + 1）。
+    pub(crate) fn effective_max_retries(&self) -> u32 {
+        self.max_retries.unwrap_or(DEFAULT_STARTUP_MAX_RETRIES)
+    }
+
+    /// 启动触发的有效延迟执行秒数。
+    pub(crate) fn effective_startup_delay_secs(&self) -> u64 {
+        self.startup_delay_secs
+            .unwrap_or(DEFAULT_STARTUP_DELAY_SECS)
+    }
+
+    /// 启动触发当日成功额度是否已用尽。
+    pub(crate) fn startup_cap_reached(&self, today: &str) -> bool {
+        self.startup_success_today(today) >= self.effective_max_runs_per_day()
+    }
+
+    /// 保存前归一化：按触发方式清理/钳制字段。
+    ///
+    /// - Cron：清空启动触发专属字段（切回定时执行不残留启动配置与计数）；
+    /// - Startup：将上限/重试/延迟钳制到合法区间（缺省值显式落盘）；
+    ///   `startup_success` 保留（窗口键跨天自动归零，无需清理）。
+    pub(crate) fn normalize_for_save(&mut self) {
+        if self.trigger == TaskTrigger::Cron {
+            self.max_runs_per_day = None;
+            self.max_retries = None;
+            self.startup_delay_secs = None;
+            self.startup_success = None;
+            return;
+        }
+        self.max_runs_per_day = Some(
+            self.effective_max_runs_per_day()
+                .clamp(1, MAX_STARTUP_RUNS_PER_DAY),
+        );
+        self.max_retries = Some(self.effective_max_retries().min(MAX_STARTUP_RETRIES));
+        self.startup_delay_secs = Some(
+            self.effective_startup_delay_secs()
+                .min(MAX_STARTUP_DELAY_SECS),
+        );
     }
 
     /// 从磁盘文件加载任务，并以文件名 stem 作为 `id`。
@@ -129,6 +260,9 @@ struct HistoryRecord {
     status: String,
     message: String,
     duration: f64,
+    /// 触发来源（cron/startup/manual；存量记录缺省为空串）。
+    #[serde(default)]
+    trigger: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -144,6 +278,7 @@ pub(crate) fn append_history(
     status: &str,
     message: &str,
     duration: std::time::Duration,
+    trigger: &str,
 ) -> Result<(), SchedulerError> {
     let path = history_dir.join(format!("{}.json", task_id));
     let mut file: HistoryFile = if path.exists() {
@@ -159,6 +294,7 @@ pub(crate) fn append_history(
         status: status.to_string(),
         message: message.to_string(),
         duration: duration.as_secs_f64(),
+        trigger: trigger.to_string(),
     });
     if file.runs.len() > MAX_HISTORY_RECORDS {
         let excess = file.runs.len() - MAX_HISTORY_RECORDS;
@@ -193,10 +329,12 @@ pub(crate) fn map_history_records(raw: &serde_json::Value) -> Vec<serde_json::Va
                 .map(|s| s == "success")
                 .unwrap_or(false);
             let message = record.get("message").cloned().unwrap_or(Value::Null);
+            let trigger = record.get("trigger").cloned().unwrap_or(Value::Null);
             serde_json::json!({
                 "run_at": run_at,
                 "success": success,
-                "message": message
+                "message": message,
+                "trigger": trigger
             })
         })
         .collect()
@@ -360,6 +498,7 @@ mod tests {
             "success",
             "执行成功",
             std::time::Duration::from_secs(5),
+            "cron",
         )
         .unwrap();
 
@@ -387,6 +526,7 @@ mod tests {
                 "success",
                 &format!("run {i}"),
                 std::time::Duration::from_secs(1),
+                "cron",
             )
             .unwrap();
         }
@@ -416,6 +556,7 @@ mod tests {
                 if i % 2 == 0 { "success" } else { "failure" },
                 "msg",
                 std::time::Duration::from_secs(i as u64),
+                "manual",
             )
             .unwrap();
         }
@@ -486,5 +627,163 @@ mod tests {
         assert_eq!(CRON_PARSE_PREFIX, "0 ");
         assert_eq!(CRON_PARSE_SUFFIX, " *");
         assert_eq!(DEFAULT_SCHEDULED_TIMEOUT, 300);
+    }
+
+    // ============ 启动触发：模型序列化与缺省兼容 ============
+
+    #[test]
+    fn test_startup_fields_serde_roundtrip() {
+        let mut t = ScheduledTask::new("t1".to_string(), String::new(), "x".to_string());
+        t.trigger = TaskTrigger::Startup;
+        t.max_runs_per_day = Some(3);
+        t.max_retries = Some(1);
+        t.startup_delay_secs = Some(45);
+        t.startup_success = Some(DailySuccessCount {
+            date: "2026-09-12".to_string(),
+            count: 2,
+        });
+        let json = serde_json::to_string(&t).unwrap();
+        let back: ScheduledTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.trigger, TaskTrigger::Startup);
+        assert_eq!(back.max_runs_per_day, Some(3));
+        assert_eq!(back.max_retries, Some(1));
+        assert_eq!(back.startup_delay_secs, Some(45));
+        assert_eq!(
+            back.startup_success,
+            Some(DailySuccessCount {
+                date: "2026-09-12".to_string(),
+                count: 2
+            })
+        );
+    }
+
+    #[test]
+    fn test_old_task_file_without_trigger_loads_as_cron() {
+        // 存量任务文件没有 trigger 字段：反序列化为 Cron，启动字段为 None
+        let task: ScheduledTask =
+            serde_json::from_str(r#"{"cron": "0 8 * * *", "target_id": "t1"}"#).unwrap();
+        assert_eq!(task.trigger, TaskTrigger::Cron);
+        assert_eq!(task.max_runs_per_day, None);
+        assert_eq!(task.max_retries, None);
+        assert_eq!(task.startup_delay_secs, None);
+        assert_eq!(task.startup_success, None);
+        assert!(!task.startup_cap_reached("2026-09-12"));
+    }
+
+    // ============ 启动触发：成功计数窗口 ============
+
+    #[test]
+    fn test_next_success_count_same_date_increments() {
+        let existing = DailySuccessCount {
+            date: "2026-09-12".to_string(),
+            count: 2,
+        };
+        let next = next_success_count(Some(&existing), "2026-09-12");
+        assert_eq!(next.count, 3);
+        assert_eq!(next.date, "2026-09-12");
+    }
+
+    #[test]
+    fn test_next_success_count_date_mismatch_resets() {
+        // 跨天：旧簿记日期与今日不一致时重置为 1
+        let existing = DailySuccessCount {
+            date: "2026-09-11".to_string(),
+            count: 5,
+        };
+        let next = next_success_count(Some(&existing), "2026-09-12");
+        assert_eq!(next.count, 1);
+        // 无簿记同样从 1 起算
+        let first = next_success_count(None, "2026-09-12");
+        assert_eq!(first.count, 1);
+    }
+
+    #[test]
+    fn test_startup_cap_reached() {
+        let mut t = ScheduledTask::new("t1".to_string(), String::new(), "x".to_string());
+        t.trigger = TaskTrigger::Startup;
+        t.startup_success = Some(DailySuccessCount {
+            date: "2026-09-12".to_string(),
+            count: 1,
+        });
+        // 缺省上限 1：当日已成功 1 次 → 额度用尽
+        assert!(t.startup_cap_reached("2026-09-12"));
+        // 昨日的成功不占用今日额度
+        assert!(!t.startup_cap_reached("2026-09-13"));
+        // 上限提到 2 后未用尽
+        t.max_runs_per_day = Some(2);
+        assert!(!t.startup_cap_reached("2026-09-12"));
+    }
+
+    // ============ 启动触发：保存归一化 ============
+
+    #[test]
+    fn test_normalize_for_save_cron_clears_startup_fields() {
+        let mut t = ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string());
+        t.trigger = TaskTrigger::Cron;
+        t.max_runs_per_day = Some(5);
+        t.max_retries = Some(3);
+        t.startup_delay_secs = Some(60);
+        t.startup_success = Some(DailySuccessCount {
+            date: "2026-09-12".to_string(),
+            count: 1,
+        });
+        t.normalize_for_save();
+        assert_eq!(t.max_runs_per_day, None);
+        assert_eq!(t.max_retries, None);
+        assert_eq!(t.startup_delay_secs, None);
+        assert_eq!(t.startup_success, None);
+    }
+
+    #[test]
+    fn test_normalize_for_save_startup_clamps() {
+        let mut t = ScheduledTask::new("t1".to_string(), String::new(), "x".to_string());
+        t.trigger = TaskTrigger::Startup;
+        t.max_runs_per_day = Some(0);
+        t.max_retries = Some(999);
+        t.startup_delay_secs = Some(999_999);
+        t.normalize_for_save();
+        // 上下限钳制
+        assert_eq!(t.max_runs_per_day, Some(1));
+        assert_eq!(t.max_retries, Some(MAX_STARTUP_RETRIES));
+        assert_eq!(t.startup_delay_secs, Some(MAX_STARTUP_DELAY_SECS));
+
+        // None 补默认值
+        let mut t2 = ScheduledTask::new("t2".to_string(), String::new(), "x".to_string());
+        t2.trigger = TaskTrigger::Startup;
+        t2.normalize_for_save();
+        assert_eq!(t2.max_runs_per_day, Some(DEFAULT_STARTUP_MAX_RUNS_PER_DAY));
+        assert_eq!(t2.max_retries, Some(DEFAULT_STARTUP_MAX_RETRIES));
+        assert_eq!(t2.startup_delay_secs, Some(DEFAULT_STARTUP_DELAY_SECS));
+    }
+
+    // ============ 执行历史：触发来源字段 ============
+
+    #[test]
+    fn test_history_trigger_roundtrip_and_mapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let history_dir = tmp.path().join("history");
+        std::fs::create_dir_all(&history_dir).unwrap();
+        append_history(
+            &history_dir,
+            "task1",
+            "success",
+            "完成",
+            std::time::Duration::from_secs(1),
+            "startup",
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(history_dir.join("task1.json")).unwrap();
+        let file: HistoryFile = serde_json::from_str(&content).unwrap();
+        assert_eq!(file.runs[0].trigger, "startup");
+
+        let mapped = map_history_records(&serde_json::from_str(&content).unwrap());
+        assert_eq!(mapped[0]["trigger"], serde_json::json!("startup"));
+
+        // 存量记录无 trigger 字段 → 映射为 null（前端容错）
+        let legacy = serde_json::json!({
+            "runs": [{ "timestamp": "2026-08-14T01:00:00Z", "status": "success", "message": "旧", "duration": 1.0 }]
+        });
+        let mapped_legacy = map_history_records(&legacy);
+        assert_eq!(mapped_legacy[0]["trigger"], serde_json::Value::Null);
     }
 }

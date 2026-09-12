@@ -500,6 +500,15 @@ export interface BinaryInfo {
   name: string;
 }
 
+/** 定时任务触发方式：cron 定时执行 / startup 启动后执行 */
+export type ScheduledTaskTrigger = "cron" | "startup";
+
+/** 启动触发的当日成功计数簿记（后端按本地日期窗口持久化，跨天自动归零） */
+export interface ScheduledTaskDailySuccess {
+  date: string;
+  count: number;
+}
+
 /** 定时任务 */
 export interface ScheduledTask {
   id: string;
@@ -515,6 +524,18 @@ export interface ScheduledTask {
   last_result?: string | null;
   /** cron 表达式解析失败（enabled 却永不触发），需编辑修正 */
   schedule_invalid?: boolean;
+  /** 触发方式（缺省 cron，兼容存量任务） */
+  trigger?: ScheduledTaskTrigger;
+  /** 启动触发：每日成功次数上限（缺省 1） */
+  max_runs_per_day?: number | null;
+  /** 启动触发：失败重试次数（缺省 2） */
+  max_retries?: number | null;
+  /** 启动触发：延迟执行秒数（缺省 30） */
+  startup_delay_secs?: number | null;
+  /** 启动触发：当日成功计数簿记 */
+  startup_success?: ScheduledTaskDailySuccess | null;
+  /** 启动触发：当日成功次数（列表接口回填，后端按本地日期计算） */
+  startup_runs_today?: number;
   [key: string]: unknown;
 }
 
@@ -524,6 +545,8 @@ export interface ScheduledTaskHistoryItem {
   success: boolean;
   message: string;
   duration?: number;
+  /** 触发来源（cron/startup/manual；存量记录缺省为 null） */
+  trigger?: string | null;
   [key: string]: unknown;
 }
 

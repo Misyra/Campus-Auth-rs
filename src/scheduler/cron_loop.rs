@@ -16,9 +16,32 @@ use tokio::time::{Duration as TokioDuration, Instant as TokioInstant, sleep};
 
 use crate::config::runtime::ConfigReloadSignal;
 use crate::scheduler::task::{
-    CRON_PARSE_PREFIX, CRON_PARSE_SUFFIX, DEFAULT_SCHEDULED_TIMEOUT, ScheduledTask,
+    CRON_PARSE_PREFIX, CRON_PARSE_SUFFIX, DEFAULT_SCHEDULED_TIMEOUT, STARTUP_RETRY_INTERVAL_SECS,
+    ScheduledTask, TaskTrigger,
 };
 use crate::scheduler::{SchedulerError, SchedulerService, TaskChange};
+
+/// 一次执行链路的触发来源（写入执行历史供追溯）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunSource {
+    /// cron 到期触发。
+    Cron,
+    /// 用户手动触发（不消耗启动触发额度、不受额度限制）。
+    Manual,
+    /// 应用启动后触发（延迟执行 + 失败重试，成功计入每日额度）。
+    Startup,
+}
+
+impl RunSource {
+    /// 执行历史中的来源标识。
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cron => "cron",
+            Self::Manual => "manual",
+            Self::Startup => "startup",
+        }
+    }
+}
 
 /// 单片睡眠上限：长睡眠切成 ≤60s 的短片，每片醒来按墙钟重估剩余时长，
 /// 抵御 Linux 休眠唤醒（CLOCK_MONOTONIC 不计入挂起时间）与墙钟前跳导致的过睡
@@ -151,8 +174,10 @@ pub(crate) fn load_and_parse_all(service: &SchedulerService) -> Vec<TaskSchedule
                 }
             };
             // 所有任务（含禁用）都进缓存：get_task/toggle_task/update_task/run_task
-            // 均基于内存缓存，跳过禁用任务会让它们 404、永远无法被重新启用
-            if task.enabled {
+            // 均基于内存缓存，跳过禁用任务会让它们 404、永远无法被重新启用。
+            // 启动触发任务不依赖 cron：不进 cron 调度表（不解析、不参与
+            // invalid_cron_ids 标记），由 dispatch_startup_triggers 一次性派发。
+            if task.enabled && task.trigger != TaskTrigger::Startup {
                 let schedule = match parse_cron_expr(&task.cron) {
                     Ok(s) => Some(s),
                     Err(e) => {
@@ -331,7 +356,7 @@ pub(crate) fn fire_due_tasks(
                     .map(systemtime_from_local);
                 continue;
             }
-            service.clone().spawn_tracked_run(task);
+            service.clone().spawn_tracked_run(task, RunSource::Cron);
         } else {
             // 到期瞬间任务刚被删除（内存缓存已无）：仅 debug 留痕，下一轮调度表重载后消失
             tracing::debug!(task_id = %ts.task_id, "到期任务已不存在于内存缓存，跳过触发");
@@ -367,17 +392,20 @@ fn scheduled_result_message(task: &crate::tasks::TaskKind, r: &crate::tasks::Tas
     }
 }
 
-/// 在独立 tokio task 中执行到期任务（不阻塞主循环）。
-/// 此函数同时供定时触发与手动触发使用。
-pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerService>) {
+/// 单次尝试执行：加载目标任务 → 带超时执行 → 更新 `last_run` 与执行历史。
+///
+/// 启动触发任务成功时在此递增当日成功计数（仅成功计入、仅启动触发任务；
+/// 手动执行同样计数，使延迟窗口内/后的额度判定能感知手动签到结果）。
+/// 返回 `(是否成功, 结果消息, 耗时)`；重试尝试在消息尾部附加轮次标注。
+async fn execute_attempt(
+    task: &ScheduledTask,
+    service: &Arc<SchedulerService>,
+    source: RunSource,
+    attempt: Option<(u32, u32)>,
+) -> (bool, String, StdDuration) {
     let start = TokioInstant::now();
     let task_id = task.id.clone();
     let target_id = task.target_id.clone();
-    // 执行结束（含异常）时清除"执行中"标记，恢复该任务的下一轮触发资格
-    let _running_guard = RunningGuard {
-        service: service.clone(),
-        task_id: task_id.clone(),
-    };
 
     // 任务类型由 target_id 关联的目标任务权威推导（TaskKind），不再冗余存储 task_type。
     let (success, message) = match service.task_manager.load_task(&target_id).await {
@@ -409,12 +437,72 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
     let duration = start.elapsed();
     let status_str = if success { "success" } else { "failure" };
 
+    // 重试尝试在消息尾部标注轮次，便于在历史/last_result 中区分
+    let message = match attempt {
+        Some((n, total)) if n > 1 => format!("{}（第 {n}/{total} 次尝试）", message),
+        _ => message,
+    };
+
     service
         .update_last_run(&task_id, status_str, &message)
         .await;
     service
-        .add_history_record(&task_id, status_str, &message, duration)
+        .add_history_record(&task_id, status_str, &message, duration, source.as_str())
         .await;
+
+    if success && task.trigger == TaskTrigger::Startup {
+        service.record_startup_success(&task_id).await;
+    }
+
+    (success, message, duration)
+}
+
+/// 任务级结果通知（notification 日志源，受 app.task_notification 开关控制）。
+fn notify_task_result(
+    service: &Arc<SchedulerService>,
+    task: &ScheduledTask,
+    success: bool,
+    message: &str,
+    duration: StdDuration,
+) {
+    if !service.config.runtime().load().app.task_notification {
+        return;
+    }
+    // 安全截断：按 Unicode 字符边界截取，避免 UTF-8 字节索引 panic
+    let preview: String = message.chars().take(120).collect();
+    let notify = format!(
+        "定时任务「{}」{} ({:.1}s）：{}",
+        task.name,
+        if success {
+            "执行成功"
+        } else {
+            "执行失败"
+        },
+        duration.as_secs_f64(),
+        preview
+    );
+    if success {
+        tracing::info!(target: "notification", "{notify}");
+    } else {
+        tracing::warn!(target: "notification", "{notify}");
+    }
+}
+
+/// 在独立 tokio task 中执行到期任务（不阻塞主循环）。
+/// 此函数同时供 cron 触发与手动触发使用（单次尝试，不走重试轮）。
+pub(crate) async fn execute_scheduled_task(
+    task: ScheduledTask,
+    service: Arc<SchedulerService>,
+    source: RunSource,
+) {
+    let task_id = task.id.clone();
+    // 执行结束（含异常）时清除"执行中"标记，恢复该任务的下一轮触发资格
+    let _running_guard = RunningGuard {
+        service: service.clone(),
+        task_id: task_id.clone(),
+    };
+
+    let (success, message, duration) = execute_attempt(&task, &service, source, None).await;
 
     if success {
         tracing::info!(
@@ -432,28 +520,115 @@ pub async fn execute_scheduled_task(task: ScheduledTask, service: Arc<SchedulerS
             duration.as_secs_f64()
         );
     }
+    notify_task_result(&service, &task, success, &message, duration);
+}
 
-    // 任务通知（接线原死开关 app.task_notification）：与登录失败通知同机制，
-    // 经 notification 日志源推送到前端日志流，由用户在设置页开关
-    if service.config.runtime().load().app.task_notification {
-        // 安全截断：按 Unicode 字符边界截取，避免 UTF-8 字节索引 panic
-        let preview: String = message.chars().take(120).collect();
-        let notify = format!(
-            "定时任务「{}」{} ({:.1}s）：{}",
-            task.name,
-            if success {
-                "执行成功"
-            } else {
-                "执行失败"
-            },
-            duration.as_secs_f64(),
-            preview
-        );
-        if success {
-            tracing::info!(target: "notification", "{notify}");
-        } else {
-            tracing::warn!(target: "notification", "{notify}");
+/// 启动触发执行轮：延迟执行 → 失败按固定间隔重试（上限 `max_retries`）→ 成功即止。
+///
+/// 与 cron/手动路径的差异：
+/// - 延迟窗口内等待启动稳定（网络/校园网登录），期间响应停止信号；
+/// - 延迟结束后以内存缓存中的最新任务定义重验（删除/禁用/额度用尽即放弃），
+///   覆盖"延迟期间手动执行已成功"等竞态；
+/// - 成功计入每日额度（仅成功计入），一轮无论尝试多少次只通知一次最终结果。
+///
+/// 运行标记由派发方（[`dispatch_startup_triggers`]）预先持有，本函数全程
+/// 占用至轮结束（含延迟期），防止延迟窗口内其他触发同任务重叠。
+pub(crate) async fn execute_startup_round(task: ScheduledTask, service: Arc<SchedulerService>) {
+    let task_id = task.id.clone();
+    let _running_guard = RunningGuard {
+        service: service.clone(),
+        task_id: task_id.clone(),
+    };
+
+    // 延迟执行：等待启动稳定后再动浏览器/网络，期间响应停止信号
+    let delay_secs = task.effective_startup_delay_secs();
+    if delay_secs > 0 {
+        tokio::select! {
+            _ = service.task_cancel.cancelled() => return,
+            _ = sleep(TokioDuration::from_secs(delay_secs)) => {}
         }
+    }
+
+    // 延迟窗口内配置可能已变更：以内存缓存中的最新定义执行；
+    // 任务被删除/禁用/当日额度已被占用（如延迟期内手动执行成功）则放弃本轮
+    let Some(latest) = service.get_task(&task_id) else {
+        tracing::info!(task_id = %task_id, "启动触发任务在延迟期内被删除，放弃执行");
+        return;
+    };
+    if !latest.enabled {
+        tracing::info!(task_id = %task_id, "启动触发任务在延迟期内被禁用，放弃执行");
+        return;
+    }
+    if latest.startup_cap_reached(&ScheduledTask::local_today()) {
+        tracing::info!(
+            task_id = %task_id,
+            "启动触发任务今日成功次数已达上限，放弃执行"
+        );
+        return;
+    }
+    let task = latest;
+
+    let total = task.effective_max_retries() + 1;
+    let mut last_message = String::from("未执行");
+    let mut last_duration = StdDuration::ZERO;
+    for attempt in 1..=total {
+        if attempt > 1 {
+            // 轮内重试间隔（固定值），期间响应停止信号
+            tokio::select! {
+                _ = service.task_cancel.cancelled() => return,
+                _ = sleep(TokioDuration::from_secs(STARTUP_RETRY_INTERVAL_SECS)) => {}
+            }
+        }
+        let (success, message, duration) =
+            execute_attempt(&task, &service, RunSource::Startup, Some((attempt, total))).await;
+        last_message = message;
+        last_duration = duration;
+        if success {
+            tracing::info!(task_id = %task_id, attempt, total, "启动触发任务执行成功");
+            notify_task_result(&service, &task, true, &last_message, duration);
+            return;
+        }
+        tracing::warn!(
+            task_id = %task_id,
+            attempt,
+            total,
+            "启动触发任务执行失败"
+        );
+    }
+
+    // 全部尝试失败：一轮只通知一次最终结果（避免重试刷屏）
+    notify_task_result(&service, &task, false, &last_message, last_duration);
+}
+
+/// 启动触发一次性扫描：筛出启动触发的启用任务并派发执行轮。
+///
+/// 每进程一次（cron_loop 初始加载后调用，reload 不重跑，天然幂等）；
+/// login_once 模式登录即退，整体跳过（执行会被关闭取消半途而废）。
+/// 额度在此处与延迟到期的执行轮内双重判定（见 [`execute_startup_round`]）。
+pub(crate) async fn dispatch_startup_triggers(service: &Arc<SchedulerService>) {
+    if service.is_login_once_mode() {
+        tracing::debug!("login_once 模式，跳过启动触发任务派发");
+        return;
+    }
+    let today = ScheduledTask::local_today();
+    for task in service.list_tasks() {
+        if task.trigger != TaskTrigger::Startup || !task.enabled {
+            continue;
+        }
+        if task.startup_cap_reached(&today) {
+            tracing::info!(
+                task_id = %task.id,
+                success = task.startup_success_today(&today),
+                max = task.effective_max_runs_per_day(),
+                "启动触发任务今日成功次数已达上限，跳过"
+            );
+            continue;
+        }
+        if !service.try_mark_running(&task.id) {
+            tracing::warn!(task_id = %task.id, "启动触发任务上一轮仍在执行，跳过");
+            continue;
+        }
+        service.clone().spawn_tracked_run(task, RunSource::Startup);
     }
 }
 
@@ -469,6 +644,10 @@ pub(crate) async fn cron_loop(
     let mut reload_rx_opt = reload_rx;
 
     let mut task_schedules = load_and_parse_all_async(&service).await;
+
+    // 启动触发一次性派发：与 cron 调度独立，延迟/重试/额度在执行轮内处理。
+    // 每进程仅此一次，后续 reload 只重算 cron 调度表、不重跑启动触发
+    dispatch_startup_triggers(&service).await;
 
     // task_change channel 关闭后的降级轮询定时器（条件守护，channel 正常时不生效）。
     // 首个 tick 立即就绪，先消费掉避免进入降级模式时连发重载（MissedTick::Skip 兜底）

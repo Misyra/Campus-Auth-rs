@@ -281,6 +281,12 @@ async fn run_after_logging(
         ServiceContainer::new(&app_config.base_path, shutdown_token.clone()).await?;
     info!("服务容器初始化完成");
 
+    // login_once 模式登录即退，调度器的启动触发任务须放弃执行；
+    // 调度器无法从配置可靠区分 CLI 注入的 login_once，在模式分发前显式标记
+    container
+        .scheduler
+        .set_login_once_mode(matches!(app_config.runtime_mode, RuntimeMode::LoginOnce));
+
     // 7. CLI --startup-action 覆盖配置文件
     if let Some(action) = cli.startup_action {
         let mut settings = container.config.load_settings();
