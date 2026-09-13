@@ -366,6 +366,65 @@ async fn supervisor_超时宽限_不误杀接管槽位的新会话() {
     handle.stop().await;
 }
 
+/// TSK-2：调用方 future 被 abort（如任务被取消、调度器停止）后，取消语义必须
+/// 跨过调用方边界传播到 Worker。
+///
+/// 修复前转发 task 只监听取消 token 与 Worker 响应，调用方 drop 后无人发送
+/// Cancel，Worker 继续跑到自然结束（本测试中 sleep 12s）；修复后转发 task
+/// 监听 `response_tx.closed()`，进入与超时/显式取消相同的「Cancel → 等 ACK →
+/// 归属校验 → 强杀」链路。假 worker 的 sleep 不响应 cancel，因此走强杀路径：
+/// Worker 被回收、槽位经 guard drop 释放，后续请求应正常完成（会触发 Worker
+/// 重新 spawn）。
+#[tokio::test]
+async fn supervisor_调用方中止_取消传播到worker并释放槽位() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+    let Some(venv) = locate_venv() else {
+        eprintln!("跳过 bridge_supervisor TSK-2：未找到本地 Python venv");
+        return;
+    };
+    let Some(tree) = setup_worker_tree(&venv) else {
+        eprintln!("跳过 bridge_supervisor TSK-2：无法创建 .venv 目录链接");
+        return;
+    };
+
+    let (bridge, handle, _config) = make_supervisor(&tree.base).await;
+
+    // 预热：确保 Worker 已 spawn 并通过健康检查
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, Duration::from_secs(40))
+        .await;
+
+    // 在独立 task 中发起挂起请求（Worker sleep 12s），超时给足 40s：
+    // 路径只可能由调用方中止触发，而非请求超时
+    let bridge_callee = bridge.clone();
+    let callee = tokio::spawn(async move {
+        bridge_callee
+            .execute_with_timeout("sleep", json!({ "secs": 12 }), Duration::from_secs(40))
+            .await
+    });
+
+    // 等请求真正进入 Worker（预热后 token 注册与发送为毫秒级）
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    callee.abort();
+
+    // 取消传播窗口：closed() → Cancel → 等 ACK 2s → kill_worker_now 优雅关闭
+    // 等待（约 3s，假 worker sleep 期间不响应 shutdown）→ drain → guard drop
+    // 复位槽位，全程约 5s+；给足余量后验证槽位可用（修复前 Worker 要挂满 12s）
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let r = bridge
+        .execute_with_timeout("debug_step", Value::Null, Duration::from_secs(40))
+        .await;
+    assert!(
+        r.is_ok(),
+        "调用方中止后取消应传播并释放槽位，后续请求应成功，实际 {r:?}"
+    );
+
+    handle.stop().await;
+}
+
 /// 带超时地等待一个返回 (T, Duration) 的 JoinHandle（测试辅助）
 async fn join_with_timeout<T>(handle: tokio::task::JoinHandle<T>, secs: u64) -> T {
     tokio::time::timeout(Duration::from_secs(secs), handle)

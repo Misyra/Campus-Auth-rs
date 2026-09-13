@@ -4,6 +4,8 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- TSK-2 取消传播补全：Bridge 转发 task 新增监听 `response_tx.closed()`——调用方 future 被 abort/drop（任务取消、调度器停止等）时，此前无人发送 Cancel、Worker 会继续跑到自然结束或命令级超时；现在进入与超时/显式取消相同的「发 Cancel → 等 Worker ACK → 归属校验 → 必要时强杀」链路。原「取消后等待确认、超时强杀」收尾逻辑抽成 `wait_cancel_ack_or_kill` 共用 helper，三条取消路径（请求超时、显式 cancel、调用方中止）语义单一防漂移
+- 集成测试：`supervisor_调用方中止_取消传播到worker并释放槽位` 覆盖 abort 调用方 → Worker 收到取消 → 强杀回收 → 槽位释放 → 后续请求正常完成的完整链路
 - MON-2 探测语义修复：HTTP/URL 探测遇非预期状态码（1xx/4xx/5xx）从判 `Pass` 改判新增的 `ProbeOutcome::Inconclusive`（证据不足）——拦截型网关（未认证返回 403/404）不再被误判成 Online 且 Online 态强制 NoAction 截死补救路径，也不与全 Fail 混同落 Offline；多目标汇总优先级调整为 Captive > Pass > Inconclusive > Fail
 - decision 层配套分级：新增 `AssessmentReason::InconclusiveEvidence`，Inconclusive 证据 + auth_url 可达走 `RecoveryAdvice::AttemptLoginOnce`（Engine 按 `cautious_attempted_config_version` 谨慎单次去重），防止探测目标自身短暂 5xx 周期性误触发自动登录；明确 Offline（全 Fail）+ auth_url 可达仍保持原 `AttemptLogin` 升级路径
 - 前端同步：`ProbeOutcome`/`AssessmentReason` 类型新增 `inconclusive` / `inconclusive_evidence`，状态详情文案区分「谨慎尝试一次」与「等待下一轮确认」

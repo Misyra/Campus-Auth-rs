@@ -683,6 +683,41 @@ async fn grace_wait_slot_release(this: &BridgeSupervisor, stuck_request_id: u64,
 }
 
 /// 处理 supervisor 命令
+/// 等待 Worker 对取消的确认回包；宽限期内未确认且仍持有会话槽位则强杀。
+///
+/// 超时、显式取消与调用方中止（TSK-2）三条取消路径共用本收尾逻辑，
+/// 确保「等 ACK → 归属校验 → 强杀」语义单一，不再各自实现导致漂移。
+async fn wait_cancel_ack_or_kill(
+    sup: &Arc<BridgeSupervisor>,
+    rx: &mut oneshot::Receiver<Result<IpcResponse, BridgeError>>,
+    cancel_id: &str,
+) -> Result<IpcResponse, BridgeError> {
+    match tokio::time::timeout(CANCEL_ACK_TIMEOUT, rx).await {
+        Ok(_) => Err(BridgeError::Cancelled),
+        Err(_) => {
+            // 归属校验（与 grace_wait_slot_release 同一语义）：
+            // 仅当会话槽位仍被本请求占用（current_cancel_id 即本
+            // 请求 cancel_id）才强杀；槽位已被新请求接管或已空时，
+            // 本请求与 Worker 存活与否已无关联，静默放弃——否则
+            // 「不响应取消的挂起命令」的取消确认超时会误杀已接管
+            // 槽位的新请求（F2 复发路径，
+            // 见 tests/bridge_supervisor.rs 超时宽限用例）。
+            let owns_slot = {
+                let inner = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
+                inner.current_cancel_id.as_deref() == Some(cancel_id)
+            };
+            if owns_slot {
+                warn!(
+                    target: "python_worker",
+                    "取消后 Worker 未在宽限期内停止，强制回收"
+                );
+                kill_worker_now(sup).await;
+            }
+            Err(BridgeError::Cancelled)
+        }
+    }
+}
+
 async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: SupervisorCommand) {
     match cmd {
         SupervisorCommand::Execute {
@@ -704,32 +739,16 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
                         let result = tokio::select! {
                             biased;
                             _ = token.cancelled() => {
-                                match tokio::time::timeout(CANCEL_ACK_TIMEOUT, &mut rx).await {
-                                    Ok(_) => Err(BridgeError::Cancelled),
-                                    Err(_) => {
-                                        // 归属校验（与 grace_wait_slot_release 同一语义）：
-                                        // 仅当会话槽位仍被本请求占用（current_cancel_id 即本
-                                        // 请求 cancel_id）才强杀；槽位已被新请求接管或已空时，
-                                        // 本请求与 Worker 存活与否已无关联，静默放弃——否则
-                                        // 「不响应取消的挂起命令」的取消确认超时会误杀已接管
-                                        // 槽位的新请求（F2 复发路径，
-                                        // 见 tests/bridge_supervisor.rs 超时宽限用例）。
-                                        let owns_slot = {
-                                            let inner =
-                                                sup.inner.lock().unwrap_or_else(|e| e.into_inner());
-                                            inner.current_cancel_id.as_deref()
-                                                == Some(cancel_id.as_str())
-                                        };
-                                        if owns_slot {
-                                            warn!(
-                                                target: "python_worker",
-                                                "取消后 Worker 未在宽限期内停止，强制回收"
-                                            );
-                                            kill_worker_now(&sup).await;
-                                        }
-                                        Err(BridgeError::Cancelled)
-                                    }
-                                }
+                                wait_cancel_ack_or_kill(&sup, &mut rx, &cancel_id).await
+                            },
+                            // TSK-2：调用方 future 被 abort/drop 时响应通道断开。
+                            // 此前无人监听该事件，Worker 会继续跑到自然结束或命令级
+                            // 超时；现在进入与超时/显式取消相同的取消链路：发 Cancel
+                            // 命令唤醒本地 token 与 Worker → 等 ACK/强杀，槽位经
+                            // guard drop 释放。cancel_id 幂等：请求已结束时为 no-op。
+                            _ = response_tx.closed() => {
+                                sup.cancel(&cancel_id);
+                                wait_cancel_ack_or_kill(&sup, &mut rx, &cancel_id).await
                             },
                             r = &mut rx => r.unwrap_or(Err(BridgeError::SupervisorNotRunning)),
                         };
