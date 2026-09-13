@@ -8,7 +8,7 @@
 //!   （无跳转可取，只能提示用户手动复制地址栏）；
 //! - 检测目标固定为监测配置中的 `http_targets + url_targets`（内置 generate_204 类明文
 //!   地址），不接受客户端传参；重定向目标由网关下发，逐跳做最小目的地址校验
-//!   （仅拒环回/链路本地，内网门户放行，见 [`probe_target`]）；结果仅填入表单，
+//!   （仅拒环回/链路本地/通配地址，内网门户放行，见 [`probe_target`]）；结果仅填入表单，
 //!   由用户确认保存，不自动落盘。
 
 use std::collections::HashMap;
@@ -172,7 +172,7 @@ pub async fn detect_portal(
 /// （302 链后多为 200 登录页），后续请求失败也不丢弃已拿到的 Location。
 ///
 /// 跳转目标逐跳校验（MON-4）：首跳 URL 来自用户配置，属信任边界内不强校验；
-/// 跨主机跳转解析后仅拒绝环回/链路本地地址（不拦 RFC1918——校园门户普遍部署
+/// 跨主机跳转解析后仅拒绝环回/链路本地/通配地址（不拦 RFC1918——校园门户普遍部署
 /// 在内网段），域名钉扎到已校验 IP 防 reqwest 二次解析 TOCTOU；同主机跳转
 /// （门户自身相对路径跳转）不引入新目的地址，免校验。
 async fn probe_target(
@@ -279,7 +279,7 @@ async fn probe_target(
 
 /// 重定向跳转目标的最小目的地址校验（MON-4）
 ///
-/// 仅拒绝环回与链路本地地址——**不拦 RFC1918 私网**：校园门户普遍部署在
+/// 仅拒绝环回、链路本地与通配地址——**不拦 RFC1918 私网**：校园门户普遍部署在
 /// 内网段，全私网拦截会破坏核心场景（判定规则独立于 `web::ssrf` 的全私网
 /// 口径）。域名先经系统解析器展开、对全部候选地址判定（防「IP 字面量白名单」
 /// 被 DNS 解析绕过），并把域名钉扎到首个已校验地址（`ClientBuilder::resolve`，
@@ -292,7 +292,7 @@ async fn ensure_redirect_target(
     let host = url.host_str().ok_or(())?;
     let port = url.port_or_known_default().unwrap_or(80);
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return if is_loopback_or_link_local(&ip) {
+        return if is_blocked_redirect_ip(&ip) {
             Err(())
         } else {
             Ok(None)
@@ -302,29 +302,53 @@ async fn ensure_redirect_target(
         .await
         .map_err(|_| ())?
         .collect();
-    if addrs.is_empty() || addrs.iter().any(|a| is_loopback_or_link_local(&a.ip())) {
+    if !all_addrs_allowed(&addrs) {
         return Err(());
     }
+    build_pinned_client(host, addrs[0], disable_proxy).map(Some)
+}
+
+/// 按已校验地址构造钉扎客户端（域名 → 指定地址）
+///
+/// 与 `web::ssrf` 同手法：`ClientBuilder::resolve` 让 reqwest 不再自行解析域名，
+/// 杜绝「校验用 A 地址、连接用 B 地址」的 TOCTOU。独立成函数是为了能在无真实 DNS
+/// 的前提下锁定「解析通过后确实按该地址连接」这条放行分支（B5）。
+fn build_pinned_client(
+    host: &str,
+    addr: SocketAddr,
+    disable_proxy: bool,
+) -> Result<reqwest::Client, ()> {
     let mut builder = reqwest::Client::builder()
         .redirect(Policy::none())
-        .resolve(host, addrs[0]);
+        .resolve(host, addr);
     if disable_proxy {
         builder = builder.no_proxy();
     }
-    builder.build().map(Some).map_err(|_| ())
+    builder.build().map_err(|_| ())
 }
 
-/// 环回与链路本地判定（最小集合，口径见 [`ensure_redirect_target`]）：
-/// IPv4 127.0.0.0/8、169.254.0.0/16；IPv6 ::1、fe80::/10；
+/// 全部解析结果的放行判定：空结果（解析无输出）或任一地址被拒即不放行。
+///
+/// 独立成纯函数便于直接锁定“放行/拒绝”决策，无需依赖真实 DNS。
+fn all_addrs_allowed(addrs: &[SocketAddr]) -> bool {
+    !addrs.is_empty() && !addrs.iter().any(|a| is_blocked_redirect_ip(&a.ip()))
+}
+
+/// 环回、链路本地与通配地址判定（最小集合，口径见 [`ensure_redirect_target`]）：
+/// IPv4 127.0.0.0/8、169.254.0.0/16、0.0.0.0；IPv6 ::1、fe80::/10、::；
 /// IPv4-mapped IPv6（::ffff:a.b.c.d）解包后按 IPv4 规则判定。
-fn is_loopback_or_link_local(ip: &IpAddr) -> bool {
+///
+/// 0.0.0.0/:: 与 [`crate::web::ssrf::is_restricted_ip`] 同口径：二者在部分平台
+/// 会被内核解析为回环（Linux 上 connect 0.0.0.0 即访问本机），属同一类目的地址，
+/// 不能因“Windows 上不可用”而放行。
+fn is_blocked_redirect_ip(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_unspecified(),
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
-                return v4.is_loopback() || v4.is_link_local();
+                return v4.is_loopback() || v4.is_link_local() || v4.is_unspecified();
             }
-            v6.is_loopback() || v6.is_unicast_link_local()
+            v6.is_loopback() || v6.is_unicast_link_local() || v6.is_unspecified()
         }
     }
 }
@@ -481,26 +505,106 @@ mod tests {
         assert!(r.portal_url.is_none());
     }
 
-    /// MON-4 单元：环回/链路本地判定（IPv4/IPv6/IPv4-mapped；RFC1918 放行）
+    /// MON-4 单元：环回/链路本地/通配地址判定（IPv4/IPv6/IPv4-mapped；RFC1918 放行）
     #[test]
-    fn test_loopback_or_link_local_ip() {
-        assert!(is_loopback_or_link_local(&"127.0.0.1".parse().unwrap()));
-        assert!(is_loopback_or_link_local(
-            &"169.254.169.254".parse().unwrap()
-        ));
-        assert!(is_loopback_or_link_local(&"::1".parse().unwrap()));
-        assert!(is_loopback_or_link_local(&"fe80::1".parse().unwrap()));
-        assert!(is_loopback_or_link_local(
-            &"::ffff:127.0.0.1".parse().unwrap()
-        ));
-        assert!(is_loopback_or_link_local(
+    fn test_blocked_redirect_ip() {
+        assert!(is_blocked_redirect_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_blocked_redirect_ip(&"169.254.169.254".parse().unwrap()));
+        assert!(is_blocked_redirect_ip(&"::1".parse().unwrap()));
+        assert!(is_blocked_redirect_ip(&"fe80::1".parse().unwrap()));
+        assert!(is_blocked_redirect_ip(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_blocked_redirect_ip(
             &"::ffff:169.254.1.1".parse().unwrap()
         ));
+        // B2 补漏：通配地址与 web::ssrf 同口径拒绝——Linux 上 connect 0.0.0.0/:: 即
+        // 访问本机，等同环回，不能因 Windows 上 connect 会直接失败而放行
+        assert!(is_blocked_redirect_ip(&"0.0.0.0".parse().unwrap()));
+        assert!(is_blocked_redirect_ip(&"::".parse().unwrap()));
+        assert!(is_blocked_redirect_ip(&"::ffff:0.0.0.0".parse().unwrap()));
         // 内网门户与公网地址放行
-        assert!(!is_loopback_or_link_local(&"10.1.1.55".parse().unwrap()));
-        assert!(!is_loopback_or_link_local(&"192.168.1.1".parse().unwrap()));
-        assert!(!is_loopback_or_link_local(&"fc00::1".parse().unwrap()));
-        assert!(!is_loopback_or_link_local(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_blocked_redirect_ip(&"10.1.1.55".parse().unwrap()));
+        assert!(!is_blocked_redirect_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(!is_blocked_redirect_ip(&"fc00::1".parse().unwrap()));
+        assert!(!is_blocked_redirect_ip(&"8.8.8.8".parse().unwrap()));
+    }
+
+    /// MON-4 单元：解析结果放行判定（B5——此前只测拒绝，放行分支无锁定）
+    ///
+    /// 决策抽成纯函数后可直接锁定，不依赖真实 DNS。
+    #[test]
+    fn test_all_addrs_allowed() {
+        let public: SocketAddr = "8.8.8.8:80".parse().unwrap();
+        let internal: SocketAddr = "10.1.1.55:80".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let wildcard: SocketAddr = "0.0.0.0:80".parse().unwrap();
+        let v6_loopback: SocketAddr = "[::1]:80".parse().unwrap();
+        // 放行分支：内网门户与公网地址（含 ULA）均放行
+        assert!(all_addrs_allowed(&[public]));
+        assert!(all_addrs_allowed(&[internal, public]));
+        assert!(all_addrs_allowed(&["[fc00::1]:443".parse().unwrap()]));
+        // 拒绝分支：空结果（解析无输出）与「任一地址越界」——双栈混排时不得只判首个
+        assert!(!all_addrs_allowed(&[]));
+        assert!(!all_addrs_allowed(&[loopback]));
+        assert!(!all_addrs_allowed(&[wildcard]));
+        assert!(!all_addrs_allowed(&[internal, loopback]));
+        assert!(!all_addrs_allowed(&[public, v6_loopback]));
+    }
+
+    /// MON-4 单元：`ensure_redirect_target` 的 IP 字面量分支（无解析面，可离线锁定）
+    ///
+    /// IPv6 字面量在本函数中走 `lookup_host` 分支，其拒绝由
+    /// [`test_blocked_redirect_ip`] 与解析失败共同保证，不在此重复。
+    #[tokio::test]
+    async fn test_ensure_redirect_target_ip_literal() {
+        let parse = |s: &str| url::Url::parse(s).unwrap();
+        // 放行分支：内网门户 IP 字面量 → Ok(None)（沿用共享客户端，不钉扎）
+        assert!(matches!(
+            ensure_redirect_target(&parse("http://10.1.1.55/login"), true).await,
+            Ok(None)
+        ));
+        // 拒绝分支：环回 / 链路本地 / 通配一律 Err，不请求危险目标
+        for s in [
+            "http://127.0.0.1:8080/login",
+            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0/login",
+        ] {
+            assert!(
+                ensure_redirect_target(&parse(s), true).await.is_err(),
+                "{s} 应被拒绝跟随"
+            );
+        }
+    }
+
+    /// MON-4 单元：B5——放行分支的钉扎客户端确实按「已校验地址」连接
+    ///
+    /// 手工把 mock 服务的回环地址当作某域名的解析结果喂给钉扎构造器，绕开真实 DNS：
+    /// 这样「解析通过 → 钉扎 → 按该地址连接」整条链路可离线锁定，避免回归退化为
+    /// 静默拒绝跟随。地址放行判定由 [`test_all_addrs_allowed`] 单独锁定，此处不重复。
+    #[tokio::test]
+    async fn test_build_pinned_client_connects_to_resolved_addr() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ])
+        .await;
+        // serve_responses 返回 http://127.0.0.1:<port>/generate_204
+        let addr: SocketAddr = url
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let client = build_pinned_client("portal.example.com", addr, true)
+            .expect("已校验地址应能构造出钉扎客户端");
+        let resp = client
+            .get(format!(
+                "http://portal.example.com:{}/generate_204",
+                addr.port()
+            ))
+            .send()
+            .await
+            .expect("钉扎客户端应连到已校验地址而非重新解析域名");
+        assert_eq!(resp.status().as_u16(), 200);
     }
 
     /// 204 直通 → Online（提示先退出登录）

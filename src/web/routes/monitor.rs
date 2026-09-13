@@ -52,9 +52,11 @@ pub async fn stop_monitor(
 
 /// POST /api/monitor/detect-portal — 检测认证门户地址并返回候选
 ///
-/// 未认证时请求监测配置中的明文探测地址并跟随 302，找到真门户。检测目标固定
-/// 为服务端内置地址（`http_targets + url_targets`），不接受客户端传参，无 SSRF 面；
-/// 结果只读返回，前端填入表单后由用户确认保存，本接口不写配置。
+/// 未认证时请求监测配置中的明文探测地址并跟随 302，找到真门户。探测目标固定
+/// 为服务端内置地址（`http_targets + url_targets`），不接受客户端传参；但**跳转
+/// 目标由网关下发**，不属信任边界内，故 MON-4 起逐跳做最小目的地址校验
+/// （拒环回/链路本地/通配地址，放行内网门户，见 `monitor::portal`），不再按
+/// “无 SSRF 面”处理。结果只读返回，前端填入表单后由用户确认保存，本接口不写配置。
 pub async fn detect_portal_handler(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {

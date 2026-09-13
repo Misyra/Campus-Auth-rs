@@ -879,28 +879,28 @@ impl LoginOrchestrator {
                 // 只写结果槽，StatusManager 停留 Running 会误导引擎与前端
                 let failure = {
                     let g = state_arc.lock().await;
-                    if matches!(&g.active_session, Some(a) if a.session_id == session_id) {
-                        let a = g
-                            .active_session
-                            .as_ref()
-                            .expect("上方 matches 已确认活跃会话存在");
-                        a.handle.inner.set_result(LoginResult {
-                            terminal: LoginTerminal::Failed,
-                            message: "登录会话内部异常，已中止".into(),
-                            source,
-                            duration: Duration::ZERO,
-                            attempts: 0,
-                        });
-                        Some(LoginHistoryEntry {
-                            timestamp: chrono::Local::now(),
-                            source,
-                            profile_id,
-                            result: HistoryResult::Failed,
-                            message: "登录会话内部异常，已中止".to_string(),
-                            duration_secs: 0.0,
-                        })
-                    } else {
-                        None
+                    // 用 match 直接取引用而非 matches! + expect：本分支是 run() panic 的
+                    // 补偿路径，补偿逻辑自身一旦再 panic，下方的 notify_one 与清槽位
+                    // 都会被跳过（抢占方白等 13s 且槽位滞留），故不留 panic 点
+                    match &g.active_session {
+                        Some(a) if a.session_id == session_id => {
+                            a.handle.inner.set_result(LoginResult {
+                                terminal: LoginTerminal::Failed,
+                                message: "登录会话内部异常，已中止".into(),
+                                source,
+                                duration: Duration::ZERO,
+                                attempts: 0,
+                            });
+                            Some(LoginHistoryEntry {
+                                timestamp: chrono::Local::now(),
+                                source,
+                                profile_id,
+                                result: HistoryResult::Failed,
+                                message: "登录会话内部异常，已中止".to_string(),
+                                duration_secs: 0.0,
+                            })
+                        }
+                        _ => None,
                     }
                 };
                 if let Some(entry) = failure {

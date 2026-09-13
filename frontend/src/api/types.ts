@@ -542,8 +542,32 @@ export interface ScheduledTask {
   [key: string]: unknown;
 }
 
-/** 创建/更新定时任务的请求载荷：id 仅创建时由前端生成、task_type 由后端按 target 推导，二者均不要求完整 */
-export type ScheduledTaskPayload = Omit<ScheduledTask, "id" | "task_type"> & { id?: string };
+/**
+ * 创建/更新定时任务的请求载荷。
+ *
+ * id 仅创建时由前端生成（更新走路径参数，不带 id）、task_type 由后端按 target 推导，
+ * 二者都不出现在载荷中，故不在此声明（故不用 `Omit<ScheduledTask, ...>`——本类型家族
+ * 带 `[key: string]: unknown` 索引签名，`Omit`/`Pick` 会把字面量键并入索引签名而**不**
+ * 剔除任何键，必填字段随之退化成「空类型」，缺 name 的载荷也能过检查）。
+ */
+export interface ScheduledTaskPayload {
+  /** 仅创建时携带（前端生成 `sched_<ts>_<rand>`） */
+  id?: string;
+  name: string;
+  description?: string;
+  target_id: string;
+  /** cron 表达式；trigger=startup 时后端落盘空串 */
+  cron: string;
+  enabled: boolean;
+  timeout?: number | null;
+  /** 触发方式（缺省 cron，兼容存量任务） */
+  trigger?: ScheduledTaskTrigger;
+  /** 启动触发字段：仅 trigger=startup 时发送 */
+  max_runs_per_day?: number | null;
+  max_retries?: number | null;
+  startup_delay_secs?: number | null;
+  [key: string]: unknown;
+}
 
 /** 定时任务执行历史条目（后端 job_history 扁平数组：{ run_at, success, message, duration }） */
 export interface ScheduledTaskHistoryItem {

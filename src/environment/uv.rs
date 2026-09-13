@@ -225,7 +225,10 @@ pub async fn check_uv_on_path() -> bool {
     // 放弃后子进程被终止
     let out = match tokio::time::timeout(
         UV_ON_PATH_CHECK_TIMEOUT,
-        tokio::process::Command::new("uv").arg("--version").output(),
+        tokio::process::Command::new("uv")
+            .arg("--version")
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     {

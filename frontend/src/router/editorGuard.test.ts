@@ -82,6 +82,8 @@ describe("guardEditorLeave", () => {
     const result = await guardEditorLeave({ path: "/tasks" }, { path: "/scripts" });
     expect(result).toBe(true);
     expect(clearScriptDraft).toHaveBeenCalledTimes(1);
-    expect(clearTaskDraft).not.toHaveBeenCalledTimes(2);
+    // 隔离性：任务草稿清理必须一次都没被调用（not.toHaveBeenCalledTimes(2) 会放过
+    // “错误清空 1 次”这种漏检）
+    expect(clearTaskDraft).not.toHaveBeenCalled();
   });
 });

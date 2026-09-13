@@ -62,7 +62,8 @@ pub enum LoginSource {
     LoginOnce,
     /// 浏览器任务来源（NEW-1 口径修正：这是**活来源**而非历史遗留——
     /// `web/routes/login.rs` 仍从 API 入参构造、`session.rs` 保留
-    /// execute_browser_task 专属分支、`preemption.rs` 抢占优先级 3（最高）。
+    /// execute_browser_task 专属分支、`preemption.rs` 抢占优先级 3（次于
+    /// LoginOnce=4，二者均高于 Manual=2/Auto=1）。
     /// 前端当前不发送该来源，但 API 契约与历史记录反序列化均须保留）
     Browser,
 }

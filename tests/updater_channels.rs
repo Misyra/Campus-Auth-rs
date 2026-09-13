@@ -96,7 +96,7 @@ fn release_json(port: u16, tag: &str, prerelease: bool, draft: bool) -> serde_js
 /// - `GET *.sha256` → 64 位 hex 摘要文本
 ///
 /// 返回守卫（COR-7）：Drop 时置停止标志并回连唤醒阻塞的 accept，join 监听
-/// 线程退出——此前 8 个用例累计泄漏 8 个监听线程与端口。
+/// 线程退出——此前 6 个用例累计泄漏 6 个监听线程与端口。
 fn spawn_github_mock() -> GithubMockGuard {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定回环端口失败");
     let port = listener.local_addr().unwrap().port();
