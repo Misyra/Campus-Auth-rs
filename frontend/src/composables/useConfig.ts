@@ -112,6 +112,11 @@ async function fetchConfig(): Promise<void> {
     // F2：首次失败 toast 提示
     configLoadFailed.value = true;
     toastOnly(false, "加载配置失败");
+    // FE1-1：本请求已置位 loadingConfig（或赋值段抛错）时必须复位——
+    // 此前 catch 不复位，「并发取代后接管的新请求又失败」会让 loadingConfig
+    // 永久停留 true，dirty deep watch 被永久抑制，设置页保存按钮失效。
+    // :102 的早退分支不复位是有意设计（被取代的请求由接管者负责）
+    loadingConfig = false;
   }
 }
 

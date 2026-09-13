@@ -5,6 +5,7 @@ import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { useEnvironment } from "@/composables/useEnvironment";
+import { useToast } from "@/composables/useToast";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import { browsersApi, configApi, workerApi } from "@/api";
 import { extractApiError } from "@/api/client";
@@ -13,9 +14,12 @@ import { BROWSER_ARGS_DEFAULT } from "@/utils/constants";
 
 const config = useConfig();
 const router = useRouter();
+const { toastOnly } = useToast();
 const { envStatus, refreshEnv } = useEnvironment();
 const browsers = ref<{ name: string; channel: string; engine: string; installed: boolean; path?: string; custom?: boolean }[]>([]);
 const browserLoading = ref(true);
+/** 列表加载失败（FE2-5）：展示错误文案与重试入口，避免渲染空白网格无声失败 */
+const browserError = ref("");
 const installingBrowser = ref<string | null>(null);
 const browserInstallError = ref("");
 const stoppingBrowser = ref(false);
@@ -46,14 +50,23 @@ const currentOfficialUrl = computed(() => OFFICIAL_URL[config.config.browser.bro
 const pythonNotReady = computed(() => envStatus.value != null && !envStatus.value.capability_ready);
 const installedChromium = computed(() => browsers.value.find((b) => b.channel === "chromium" && b.installed));
 
+/** 拉取浏览器列表（FE2-5）：失败置 browserError 供模板展示并支持重试 */
+async function fetchBrowsers(): Promise<void> {
+  browserLoading.value = true;
+  browserError.value = "";
+  try {
+    const data = await browsersApi.fetch();
+    browsers.value = data.browsers;
+  } catch (error) {
+    frontendLogger.error("browser", "获取浏览器列表失败", error);
+    browserError.value = extractApiError(error, "浏览器列表检测失败");
+  } finally {
+    browserLoading.value = false;
+  }
+}
+
 onMounted(async () => {
-  const browserRequest = browsersApi.fetch()
-    .then((data) => { browsers.value = data.browsers; })
-    .catch((error: unknown) => {
-      frontendLogger.error("browser", "获取浏览器列表失败", error);
-    })
-    .finally(() => { browserLoading.value = false; });
-  await Promise.allSettled([browserRequest, refreshEnv(), config.fetchPureMode()]);
+  await Promise.allSettled([fetchBrowsers(), refreshEnv(), config.fetchPureMode()]);
 });
 
 /** 浏览器卡片点击分派：已安装→选为当前浏览器；未安装→Playwright 可装的走安装，否则提示去官网下载 */
@@ -111,7 +124,11 @@ async function loadDefaultStealthScript() {
   try {
     const data = await configApi.fetchStealthScript();
     config.config.browser.stealth_custom_script = data.script;
-  } catch { /* */ }
+  } catch (error) {
+    // FE2-6：失败给用户可见反馈，避免误以为脚本已填入
+    frontendLogger.error("browser", "获取内置脚本失败", error);
+    toastOnly(false, `获取内置脚本失败：${extractApiError(error, "未知错误")}`);
+  }
 }
 
 /** 加载推荐启动参数：将 BROWSER_ARGS_DEFAULT 逐行并入现有输入（去重，
@@ -156,6 +173,10 @@ async function stopBrowser() {
         <p class="form-help-text">选择用于自动登录的浏览器，推荐 Chromium / Edge / Chrome。</p>
         <div class="browser-selection">
           <div v-if="browserLoading" class="loading">正在检测浏览器...</div>
+          <div v-else-if="browserError" class="form-help-text browser-error-row">
+            {{ browserError }}
+            <button class="btn btn-sm btn-link" type="button" @click="fetchBrowsers()">重试</button>
+          </div>
           <div v-else class="browser-cards">
             <div v-for="b in browsers" :key="b.channel" class="browser-card"
               :class="{

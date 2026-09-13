@@ -4,6 +4,9 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- FE1-1 配置加载失败复位 loadingConfig：`fetchConfig` catch 分支补复位——「并发取代后接管的新请求又失败」会让 loadingConfig 永久停留 true，dirty deep watch 被永久抑制导致设置页保存按钮失效
+- FE2-2/3 弹窗滚动锁收口：新增 `useBodyScrollLock`（模块级计数），Modal / ConfirmDialog / SetupWizard 三处 5 个直接写 `body.overflow` 的位置全部收口——此前计数每实例独立 + ConfirmDialog 无条件清空，嵌套弹窗（AboutView 卸载、RepoImportModals 三层叠加）内层关闭会提前解锁外层
+- FE2-5/6 浏览器设置页错误态：浏览器列表加载失败新增错误文案与重试按钮（对齐同页环境卡/OCR 卡模式）；「填入内置脚本」空 catch 补失败 toast
 - WE2-1 `/ws/logs` 入站限制：升级前增加并发连接上限（16，满员 503 拒绝升级，RAII 计数守卫防泄漏）与单帧上限 64KiB（入站仅 ping 心跳与已截断的 frontend_log，对齐 axum 默认 64MiB 过宽的口子）
 - WE2-6 OCR 并发钳制：Web OCR 登记器从无上限（capacity=None）收敛为并发 1——每个 OCR 请求派生 Python/ddddocr 子进程，无限并发会耗尽本地资源；409 文案改「已有 OCR 请求进行中」，`concurrent()` 无调用方后移除
 - WEB-6 捕获包总量上限：`GET /api/ai/capture/bundle` 打 zip 前按 50MiB 累计预算预检（对齐 export_logs / feedback_bundle 口径），超限文件跳过并随 zip 附 `_skipped_by_quota.txt` 说明，消除异常产物全量读入内存撑爆内存的风险

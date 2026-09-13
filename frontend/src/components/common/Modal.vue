@@ -4,6 +4,7 @@
 
 import { ref, watch, onBeforeUnmount, nextTick } from "vue";
 import IconApp from "./IconApp.vue";
+import { lockBodyScroll, unlockBodyScroll } from "../../composables/useBodyScrollLock";
 
 const props = withDefaults(
   defineProps<{
@@ -70,18 +71,10 @@ function onTrapKeydown(e: KeyboardEvent): void {
   }
 }
 
-// 打开时聚焦第一个可聚焦元素 + 锁定背景滚动（多弹窗叠加时计数，全部关闭才还原）
-let modalOpenCount = 0;
-
-function lockBodyScroll(): void {
-  modalOpenCount += 1;
-  if (modalOpenCount === 1) document.body.style.overflow = "hidden";
-}
-
-function unlockBodyScroll(): void {
-  modalOpenCount = Math.max(0, modalOpenCount - 1);
-  if (modalOpenCount === 0) document.body.style.overflow = "";
-}
+// 打开时聚焦第一个可聚焦元素 + 锁定背景滚动
+// FE2-2：锁定计数收口到模块级 useBodyScrollLock——此前计数声明在
+// <script setup> 顶层即每实例各一份，嵌套/叠加弹窗内层关闭就把 body.overflow
+// 复位，外层弹窗背后页面恢复滚动
 
 // 打开时聚焦第一个可聚焦元素
 watch(

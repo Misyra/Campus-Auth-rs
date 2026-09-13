@@ -6,15 +6,19 @@
 import { watch } from "vue";
 import { useStatus } from "../../composables/useStatus";
 import { useUi } from "../../composables/useUi";
+import { lockBodyScroll, unlockBodyScroll } from "../../composables/useBodyScrollLock";
 
 const { busy } = useStatus();
 const { state, finishWizard } = useUi();
 
 // 向导展示期间锁定背景滚动（全屏阻断，无其他关闭路径）
+// FE2-3：滚动锁走全局计数，与 Modal/ConfirmDialog 协调（此前直接写 overflow，
+// 向导关闭会把叠加弹窗的锁定一并清掉）
 watch(
   () => state.showWizard,
   (val) => {
-    document.body.style.overflow = val ? "hidden" : "";
+    if (val) lockBodyScroll();
+    else unlockBodyScroll();
   },
   { immediate: true },
 );

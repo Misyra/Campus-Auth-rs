@@ -199,6 +199,7 @@ async function testNetwork(): Promise<void> {
       external_failed_auth_reachable: "公网失败，但认证入口可达",
       all_probes_failed: "所有已启用的公网探测均失败",
       weak_evidence_only: "只有 TCP 弱证据，不能确认公网可用",
+      inconclusive_evidence: "探测返回非预期结果，无法确认网络状态",
       conflicting_evidence: "不同探测结果相互冲突",
       no_probes_enabled: "没有启用有效公网探测",
     }[data.reason];
