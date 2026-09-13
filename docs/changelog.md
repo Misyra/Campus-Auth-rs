@@ -4,6 +4,9 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- WE2-1 `/ws/logs` 入站限制：升级前增加并发连接上限（16，满员 503 拒绝升级，RAII 计数守卫防泄漏）与单帧上限 64KiB（入站仅 ping 心跳与已截断的 frontend_log，对齐 axum 默认 64MiB 过宽的口子）
+- WE2-6 OCR 并发钳制：Web OCR 登记器从无上限（capacity=None）收敛为并发 1——每个 OCR 请求派生 Python/ddddocr 子进程，无限并发会耗尽本地资源；409 文案改「已有 OCR 请求进行中」，`concurrent()` 无调用方后移除
+- WEB-6 捕获包总量上限：`GET /api/ai/capture/bundle` 打 zip 前按 50MiB 累计预算预检（对齐 export_logs / feedback_bundle 口径），超限文件跳过并随 zip 附 `_skipped_by_quota.txt` 说明，消除异常产物全量读入内存撑爆内存的风险
 - ENV-2 uv 校验超时：`download_uv` 第 6 步 `uv --version` 从裸 `.output()` 改用现成 `command_output_with_cancel`（5s 超时 + 响应取消 + kill_on_drop）——该步骤全程持有 BootstrapGate，挂起会永久占住引导互斥门导致整个环境子系统假死
 - ENV-3 下载响应取消：`utils::io::download_streaming_with_stall` 新增可选取消令牌，chunk 循环以 `select!` 监听、命中即清理临时文件返回 `Cancelled`（uv 下载链透传既有 token）——此前取消仅在镜像尝试边界生效，传输中不响应，取消后最长仍占住引导门 300s
 - ENV-5 SHA256 文件下载上限：`download_text` 增加 1MiB 响应体上限（content_length 预判 + 分块累计），修复镜像/劫持响应无上限全量读入内存的风险

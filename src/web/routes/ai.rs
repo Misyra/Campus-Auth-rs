@@ -557,6 +557,12 @@ pub async fn capture_bundle(
     use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
 
+    // WEB-6：捕获文件全量读入内存打 zip，无上限时异常产物可撑爆内存——
+    // 对齐 export_logs / feedback_bundle 的 50MiB 累计口径，读前预检跳过
+    const MAX_CAPTURE_BYTES: u64 = 50 * 1024 * 1024;
+    let mut total: u64 = 0;
+    let mut skipped: Vec<String> = Vec::new();
+
     let dir = ai::capture_dir(&config.base_path());
     if !dir.join("meta.json").exists() {
         return Err(ApiError::NotFound("尚无捕获产物，请先执行页面捕获".into()));
@@ -567,6 +573,21 @@ pub async fn capture_bundle(
         let opts = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o644);
+
+        // 按预算判定可收入的文件：读前先查大小，超限跳过并记录说明
+        async fn read_within_budget(
+            path: &std::path::Path,
+            total: &mut u64,
+            max: u64,
+        ) -> Option<Vec<u8>> {
+            let size = tokio::fs::symlink_metadata(path).await.ok()?.len();
+            if *total + size > max {
+                return None;
+            }
+            let bytes = tokio::fs::read(path).await.ok()?;
+            *total += size;
+            Some(bytes)
+        }
 
         // meta / HTML / MHTML / 截图：顶层固定名
         for name in [
@@ -580,9 +601,13 @@ pub async fn capture_bundle(
             if !path.exists() {
                 continue;
             }
-            let bytes = tokio::fs::read(&path).await?;
-            zw.start_file(name, opts).map_err(ApiError::internal)?;
-            zw.write_all(&bytes).map_err(ApiError::internal)?;
+            match read_within_budget(&path, &mut total, MAX_CAPTURE_BYTES).await {
+                Some(bytes) => {
+                    zw.start_file(name, opts).map_err(ApiError::internal)?;
+                    zw.write_all(&bytes).map_err(ApiError::internal)?;
+                }
+                None => skipped.push(name.to_string()),
+            }
         }
         // resources/：捕获时经 CDP 抓取的 CSS/JS 快照
         let resources_dir = dir.join("resources");
@@ -590,12 +615,29 @@ pub async fn capture_bundle(
             while let Ok(Some(entry)) = rd.next_entry().await {
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else { continue };
-                if let Ok(bytes) = tokio::fs::read(entry.path()).await {
-                    zw.start_file(format!("resources/{name}"), opts)
-                        .map_err(ApiError::internal)?;
-                    zw.write_all(&bytes).map_err(ApiError::internal)?;
+                match read_within_budget(&entry.path(), &mut total, MAX_CAPTURE_BYTES).await {
+                    Some(bytes) => {
+                        zw.start_file(format!("resources/{name}"), opts)
+                            .map_err(ApiError::internal)?;
+                        zw.write_all(&bytes).map_err(ApiError::internal)?;
+                    }
+                    None => skipped.push(format!("resources/{name}")),
                 }
             }
+        }
+        // 跳过说明随 zip 附带，导出者能感知产物不完整而非默默缺失
+        if !skipped.is_empty() {
+            zw.start_file("_skipped_by_quota.txt", opts)
+                .map_err(ApiError::internal)?;
+            zw.write_all(
+                format!(
+                    "以下文件因捕获包总量超过 {} MiB 上限被跳过：\n{}",
+                    MAX_CAPTURE_BYTES / (1024 * 1024),
+                    skipped.join("\n")
+                )
+                .as_bytes(),
+            )
+            .map_err(ApiError::internal)?;
         }
         zw.finish().map_err(ApiError::internal)?;
     }

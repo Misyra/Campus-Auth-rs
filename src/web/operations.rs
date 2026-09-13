@@ -40,12 +40,9 @@ impl OperationRegistry {
         Self::with_capacity(Some(1))
     }
 
-    /// 创建允许多个在途操作的登记器
-    pub(crate) fn concurrent() -> Self {
-        Self::with_capacity(None)
-    }
-
-    fn with_capacity(capacity: Option<usize>) -> Self {
+    /// 创建指定并发上限的登记器（WE2-6：OCR 等每请求派生子进程的重资源
+    /// 操作必须限并发；`concurrent()` 保留给确需并发的轻量操作）
+    pub(crate) fn with_capacity(capacity: Option<usize>) -> Self {
         Self {
             capacity,
             state: Arc::new(Mutex::new(RegistryState::default())),
@@ -182,7 +179,9 @@ impl WebOperations {
     pub(crate) fn new() -> Self {
         Self {
             ai_generation: OperationRegistry::exclusive(),
-            ocr: OperationRegistry::concurrent(),
+            // WE2-6：OCR 每请求派生 Python/ddddocr 子进程，并发必须钳制为 1
+            //（内存敏感；此前 capacity=None 无限并发会耗尽本地资源）
+            ocr: OperationRegistry::exclusive(),
         }
     }
 
@@ -237,7 +236,7 @@ mod tests {
 
     #[test]
     fn cancel_action_only_runs_for_unfinished_registration() {
-        let registry = OperationRegistry::concurrent();
+        let registry = OperationRegistry::with_capacity(None);
         let cancelled = Arc::new(Mutex::new(Vec::new()));
 
         let cancelled_on_drop = cancelled.clone();
@@ -259,7 +258,7 @@ mod tests {
 
     #[test]
     fn concurrent_registry_tracks_distinct_ids() {
-        let registry = OperationRegistry::concurrent();
+        let registry = OperationRegistry::with_capacity(None);
         let first = registry.register("first").expect("登记 first");
         let second = registry.register("second").expect("登记 second");
         assert_eq!(
@@ -271,7 +270,7 @@ mod tests {
 
     #[test]
     fn pause_drains_cancels_and_reopens_on_drop() {
-        let registry = OperationRegistry::concurrent();
+        let registry = OperationRegistry::with_capacity(None);
         let first = registry.register("first").expect("登记 first");
         let second = registry.register("second").expect("登记 second");
         let first_token = first.cancellation_token();

@@ -186,13 +186,46 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(60);
 /// WebSocket 连接序号生成器（升级时分配，日志用于区分多标签页并发连接）
 static WS_CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// /ws/logs 并发连接上限（WE2-1）：本机控制台场景多标签页 + 调试面板并发
+/// 远低于该值；满员时拒绝升级，防止无上限连接堆积
+const WS_LOGS_MAX_CONNECTIONS: usize = 16;
+/// /ws/logs 并发连接计数（WE2-1）：与上限配合在升级前拒绝
+static WS_LOGS_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 入站单帧上限（WE2-1）：入站消息仅 ping 心跳与 frontend_log（后者已在
+/// record_frontend_log 截断至 KB 级），64KiB 绰绰有余；axum 默认 64MiB 远超需要
+const WS_LOGS_MAX_MESSAGE_SIZE: usize = 64 * 1024;
+
+/// /ws/logs 连接计数守卫：无论连接因何结束（panic/正常返回）都释放名额
+struct WsLogsConnGuard;
+
+impl Drop for WsLogsConnGuard {
+    fn drop(&mut self) {
+        WS_LOGS_ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// GET /ws/logs → 升级为 WebSocket，持续推送日志与状态
 pub async fn logs_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 并发上限检查：超限直接拒绝升级（HTTP 响应，前端 WS 连接失败走既有重连/降级路径）
+    if WS_LOGS_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) >= WS_LOGS_MAX_CONNECTIONS {
+        tracing::warn!("WebSocket 并发连接数达上限（{WS_LOGS_MAX_CONNECTIONS}），拒绝新连接");
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "并发连接数已达上限",
+        )
+            .into_response();
+    }
+    WS_LOGS_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let conn_id = WS_CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    ws.on_upgrade(move |socket| handle_logs(socket, state, conn_id))
+    ws.max_message_size(WS_LOGS_MAX_MESSAGE_SIZE)
+        .max_frame_size(WS_LOGS_MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| async move {
+            let _guard = WsLogsConnGuard;
+            handle_logs(socket, state, conn_id).await;
+        })
 }
 
 /// 发送超时（200ms），防止慢消费者阻塞事件循环

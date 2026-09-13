@@ -443,7 +443,7 @@ pub async fn download_streaming_with_stall(
     loop {
         let chunk_opt = if let Some(cancel) = cancel {
             // 取消与停滞检测同等待遇：循环内每个 await 点都可被打断
-            let next = if let Some(timeout) = stall_timeout {
+            if let Some(timeout) = stall_timeout {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
@@ -470,8 +470,7 @@ pub async fn download_streaming_with_stall(
                     }
                     v = stream.next() => v,
                 }
-            };
-            next
+            }
         } else if let Some(timeout) = stall_timeout {
             match tokio::time::timeout(timeout, stream.next()).await {
                 Ok(v) => v,

@@ -47,7 +47,7 @@ pub async fn ocr_recognize(
         .map_err(|error| match error {
             RegisterError::Paused => ApiError::Conflict("OCR 正在卸载，请稍后重试".into()),
             RegisterError::CapacityReached | RegisterError::DuplicateId => {
-                ApiError::Conflict("OCR 请求登记冲突，请重试".into())
+                ApiError::Conflict("已有 OCR 请求进行中，请稍候再试".into())
             }
         })?
         .with_cancel_action(move |id| bridge_for_cancel.cancel(id));
@@ -613,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn test_ocr_uninstall_cancels_and_removes_dep() {
         let (_app, inner) = mock_app();
-        let registry = OperationRegistry::concurrent();
+        let registry = OperationRegistry::with_capacity(None);
         let bridge: Arc<dyn BridgeApi> = Arc::new(MockBridgeApi(inner.clone()));
         let env: Arc<dyn EnvironmentApi> = Arc::new(MockEnvironmentApi {
             removed: inner.clone(),
