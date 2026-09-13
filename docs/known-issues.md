@@ -19,10 +19,13 @@
 | 19 | 🟡 低中 | `repo.rs` IP 字面量校验**不完整**（IPv6 链路本地已修，见已修复记录；建议复核是否需补 `is_documentation` 等保留段） | `src/web/routes/repo.rs:108-125` |
 | 20 | 🟢 低 | v5→v6 迁移把 `enable_local_check`（登录前物理网卡检查）误改名 `url_enabled`，存量迁移用户 `local_check_enabled` 永久缺省；forward 映射已修（2026-09-13），存量不回写（见注） | `src/config/migration.rs`（v5→v6） |
 | 21 | 🟢 极低 | `ServiceContainer` 无 `Drop`：`new()` 内已 spawn 引擎/uptime/日志清理等常驻任务，若构造中途失败这些任务不会被显式取消。实际危害有限——`startup()` 不可失败，真实失败点在 `new()` 内且随即 `exit(1)` 由 OS 收尸（窗口期空转而非永久泄漏）；仅当未来启动流程变为"部分失败但进程存活"时才值得引入 Drop/回滚编排 | `src/container.rs`（2026-09-13 复核口径） |
+| 22 | 🟢 极低 | 2026-09-13 P3 批量挂账（18 项，全部经复核确认为低危且有不修理由——已书面化的设计取舍、修复成本与收益不匹配、或依赖外部约定；逐项见下方 #22 注） | 见 #22 注 |
 
 > 76 条清单的 P0/P1 已对质收敛（9 条 P0/P1 全部属实，待排期；摘要见 `docs/plan-next.md`），本文档不再重复展开；更新子系统 10 项摘要同见 `docs/plan-next.md`（含 `Stable/Prerelease/All` 通道与 `update/last_check.json` 相关项）。
 >
 > #20 注：v5（Python 版）源码佐证 `enable_local_check` 仅门控登录前物理网卡连接检查，URL 内容检测在 v5 无独立开关（列表非空即生效）。对已迁移用户（config_version 6-8）的影响：① 手动网络测试不做网卡诊断，设置页"手动测试时检查网卡"一键可补开；② `url_enabled=true` 对默认配置用户≈v5 实际行为，v5 清空过 URL 列表的用户得到"开关开+空目标"，空目标探测实际 Disabled，无功能实害。存量不做 v9 回写：已迁移配置中 `url_enabled=true` 无法与用户主动开启区分，回写反而会覆盖用户选择。
+>
+> #22 注（P3 批量挂账，2026-09-13）：① **WEB-2** PATCH 的 other_patch 未知键可合并顶层 settings——收紧为白名单是行为变化，老客户端会开始报错；② **WEB-5** 反馈包/日志导出含原文（凭据若曾入日志随包泄露）——行级脱敏难穷举字段且易掩盖排障信息；③ **COR-4** BroadcastLayer 推 WS 无字段级脱敏——同 ② 取舍；④ **UPD-4/ENV-8** 更新链与 uv 下载无代码签名（TLS + 同源 SHA256）——签名体系需发布基础设施与密钥管理，代码注释已表明"不上签名但不降级"的有意选择，uv 官方亦无签名资产；⑤ **COR-3** 控制台层同步 stderr——改非阻塞引入丢日志窗口与退出 flush 时序问题，CLI 场景实时性更可预期；⑥ **BRG-3** IPC 行上限 Rust 1MiB / Python 16MiB 不一致——统一 16MiB 抬高行缓冲内存峰值，统一 1MiB 需大载荷分块协议；⑦ **BRG-5** bridge/mod.rs 约 2300 行职责过宽——拆分是结构性工程，超时常量收敛已随 UPD-6 覆盖；⑧ **ENV-9** uv.rs 约 1700 行上帝模块——同 ⑦；⑨ **WE2-7** run_script 直跑路径不复检 binary 黑名单——复检会拒绝历史已存任务，属行为变化；⑩ **TSK-4** 解压 dest 未 canonicalize——纵深防御缺口而非现行漏洞，Windows `\\?\` 前缀与 junction 语义坑多；⑪ **TSK-6** is_own_process 子串匹配 + 260 固定缓冲——精确基名比较需先约定各发行形态 exe 名单；⑫ **TSK-8** 解压到字面名 `campus-auth.zip` 目录被误拦——WinRAR"解压到 campus-auth.zip\"形态，有 `--allow-temp` 逃生通道；⑬ **FE1-5** 单例 composable 测试依赖用例声明顺序——依赖关系已有注释自认，隔离改造收益低；⑭ **ENG-4** test_network 诊断任务未绑取消令牌——任务受自身超时约束无共享状态副作用，属良性；⑮ **ENG-6** SchedulerService::start 二次调用 panic——全仓调用点唯一，`.take().expect` 作内部不变量金丝雀合理；⑯ **UPD-8** helper 以 PID 轮询等待主进程退出存在 PID 复用 TOCTOU——5.3 起超时已 fail-safe（报错退出保留 staging）；⑰ **ENV-6** site-packages 候选路径硬编码 `python3.12`——PYTHON_VERSION_CONSTRAINT 已锁 `>=3.12,<3.13`，约束放宽时才会失准。另：**NEW-1** LoginSource::Browser 文档与实现矛盾已随注释修正收口（不改 API 契约）。
 
 ---
 

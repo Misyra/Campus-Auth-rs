@@ -60,8 +60,10 @@ pub enum LoginSource {
     Manual,
     /// CLI 一次性登录
     LoginOnce,
-    /// 定时浏览器任务触发（历史遗留：现定时任务统一走通用执行，不再经登录编排器；
-    /// 保留以兼容历史记录中的 "browser" 来源反序列化）
+    /// 浏览器任务来源（NEW-1 口径修正：这是**活来源**而非历史遗留——
+    /// `web/routes/login.rs` 仍从 API 入参构造、`session.rs` 保留
+    /// execute_browser_task 专属分支、`preemption.rs` 抢占优先级 3（最高）。
+    /// 前端当前不发送该来源，但 API 契约与历史记录反序列化均须保留）
     Browser,
 }
 

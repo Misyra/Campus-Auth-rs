@@ -2,6 +2,36 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-13 P3 评审项批量修复）
+
+2026-09-12 评审报告 71 条 P3 + NEW-1：剔除 P2 批次已覆盖项后逐条复核（6 组并行子代理对照 HEAD 核实），4 条已修复/证伪（FE1-3 已修、FE1-4/TSK-5 证伪、FE2-7 清单过时）、43 个落地点按用户拍板分 5 批修复，18 项挂账 known-issues #22。拍板口径：MON-4 只拦环回+链路本地（解析后 IP 判定 + DNS 钉扎，不拦 RFC1918 内网门户）；FE2-9 全局路由守卫（定向判定 + 显式清草稿）；日志脱敏/签名体系/控制台非阻塞/PATCH 白名单收紧/IPC 行上限统一/run_script 复检/解压 canonicalize/TSK-6/8 判定强化均维持挂账。
+
+**批 1 配置/登录/监测（d2663df）**
+- CFG-4 删除 settings 隔离态死代码（poisoned 标志与 4 处拒存守卫不可达：new_sync 起缓存恒为 Some 无置空写点）；CFG-5 删 is_windows_reserved_name 的 split('.') 死逻辑；CFG-6 decrypt_core 返回 Zeroizing<String>（can_decrypt 校验即弃明文不再留未清零副本，UTF-8 失败路径字节同样清零）；CFG-7 抽 set_key_permissions 复用（Python 密钥继承路径补权限收紧）；CFG-8 DecryptFailed 透传 profile_id
+- LOG-3 重试耗尽文案统一总尝试次数；LOG-4 删死 match 臂；LOG-5 会话 panic 补齐 M4 终态协议（失败指标 + StatusManager 广播 + 历史记录，锁内取数不跨 await）；LOG-6 渠道自愈 warn 降 info
+- MON-3 route print 网关保序去重；MON-5 ipconfig 真机测试改 #[ignore]；MON-6 块首标题行由 parse_ipconfig 传入删除块内重检；MON-1 删 ConflictingEvidence 生产不可达分支（变体保留供序列化兼容，debug_assert 锁定 tcp==Pass 不变量）
+- MON-4 门户重定向跨主机跳转最小目的地址校验：解析后 IP 仅拒环回（127/8、::1、v4-mapped）与链路本地（169.254/16、fe80::/10），域名解析全部候选判定并钉扎首个已校验地址（ClientBuilder::resolve 防 reqwest 二次解析 TOCTOU）；同主机相对跳转免校验（mock 环境与真实场景均依赖）；不拦 RFC1918 内网门户；新增 4 测试
+
+**批 2 bridge/tasks（62aad3c）**
+- BRG-2 Rust 对 id=0 关闭哨兵回执特判降 debug（消除每次优雅退出的虚假"未知响应"告警）；BRG-4 _dispatch 响应写出收敛为可注入 emit + 单次回包守卫（handler 恰在超时瞬间完成的窄窗口不再同 id 双回包）；BRG-6 补 3 个容错测试（超长行后继续读、EOF 排空队列、超时竞态单回包）
+- TSK-3 extract_zip 符号链接条目返回 Err（对齐 tar 口径）；TSK-7 wait duration 改 as_f64（浮点 1.5s 不再误判未配置）
+
+**批 3 web（7141451）**
+- WEB-9 PATCH active_profile_id 合并前校验 Profile 存在（悬空 id 此前落盘后静默回退空凭据），拒绝/放行两测试；WEB-7 profile 字段类型错误显式 400（不再静默跳过）；WEB-4 debug_screenshot 改 symlink_metadata + is_symlink 拒绝（对齐 WS 口径）；WEB-8 ?browser= 空串回退 chromium；WEB-1 导出 toast 显式告知本机产物已清理；WE2-5 七处 body_json 收敛到共享 test_support + profiles 内联 Mock 的 unreachable!() 改回退默认（保留 load_profile 真实查找语义）
+
+**批 4 更新器/骨架/环境（69de14a）**
+- UPD-5 格式 1 清单校验 sha256 非空（空串改报 ChecksumUnavailable）+ 修过期注释；UPD-6 超时字面量提常量（updater 60s 轮询、launcher 锁等待 30s、helper 退出轮询与二次探活）；UPD-7 UpdateInfo.size 交叉核对（与 Content-Length 及实际字节不一致 warn，SHA256 仍是完整性权威）；UPD-9 LauncherState 登记 background_tasks 关闭统一 abort（watchdog 有意除外），start_background_check 改返回 JoinHandle
+- COR-2 删 setup_test_env 死代码；COR-5 --status 区分残留锁非零退出；COR-7 mock 服务器守卫托管（置停 + 回连唤醒 + join，不再泄漏监听线程）；COR-8 二次启动显式 --mode full；ENV-7 tag_name semver 白名单（非法跳过镜像）；ENV-10 check_uv_on_path 加 5s 超时 + kill_on_drop
+
+**批 5 前端 + NEW-1**
+- FE2-9 全局路由离开守卫（src/router/editorGuard.ts）：离开 /tasks、/scripts 且草稿脏时弹「放弃未保存的修改」二选一确认，按 from 路由定向判定，确认后显式 clearTaskDraft/clearScriptDraft（导出既有 clear 函数），取消/被抢占均阻断且保留现状；动态导入注册避免求值期循环依赖；6 个 vitest 用例
+- FE2-4 CustomSelect 改 useId()（实例 id 不再恒为 cs-1）；FE2-10 通知自增 id 替代 time+message key；FE2-8 Dashboard 5s 复查定时器卸载清理；FE1-2 saveScheduledTask 补入口 in-flight 守卫
+- NEW-1 LoginSource::Browser 注释口径修正（活来源而非历史遗留，API 契约与历史反序列化保留）
+
+**挂账与验证**
+- known-issues.md 新增 #22：18 项 P3 挂账逐项理由（WEB-2、WEB-5、COR-4、UPD-4/ENV-8、COR-3、BRG-3、BRG-5、ENV-9、WE2-7、TSK-4/6/8、FE1-5、ENG-4/6、UPD-8、ENV-6）
+- 验证：每批定向测试（config/login/monitor/engine/bridge/web routes/updater/environment + pytest 182 + vitest 91）+ fmt + clippy 全目标 -D warnings；收尾全量 cargo test / npm run build / vue-tsc 0 错
+
 ## 开发中（2026-09-13 前端类型检查清零）
 
 - `npx vue-tsc -p tsconfig.app.json --noEmit` 存量 28 错全部清零（`npm run build` 内置的裸 vue-tsc 不检查任何文件，该命令才是真口径）
