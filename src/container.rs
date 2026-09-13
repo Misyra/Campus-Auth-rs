@@ -302,6 +302,7 @@ impl ServiceContainer {
     fn spawn_log_cleanup_task(container: &Arc<Self>) {
         let cancel_for_task = container.uptime_cancel.child_token();
         let config_for_task = container.config.clone();
+        let history_for_task = container.history.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(86_400));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -314,6 +315,18 @@ impl ServiceContainer {
                     _ = interval.tick() => {
                         let retention = config_for_task.runtime().load().logging.retention_days;
                         crate::logging::cleanup_expired_logs(&config_for_task.base_path(), retention);
+                        // LOG-2：登录历史保留固定 30 天（与 Web 查询窗口对齐），
+                        // 更早的 JSONL 无消费路径，随每日 housekeeping 删除
+                        match history_for_task
+                            .clear_older_than(crate::login::HISTORY_RETENTION_DAYS)
+                            .await
+                        {
+                            Ok(n) if n > 0 => {
+                                tracing::info!("清理过期登录历史文件 {} 个", n);
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::debug!("清理登录历史失败: {e}"),
+                        }
                     }
                 }
             }

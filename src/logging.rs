@@ -243,47 +243,105 @@ pub fn reload_log_level(level: &str) {
 /// 清理过期日志文件（每日兜底任务的入口；启动时的首次清理在 `init_logging` 内）
 pub fn cleanup_expired_logs(base_path: &Path, retention_days: u32) {
     let logs_dir = crate::utils::paths::logs_dir(base_path);
-    cleanup_old_logs(&logs_dir, retention_days);
+    cleanup_old_logs(&logs_dir, retention_days, LOG_TOTAL_QUOTA_BYTES);
 }
 
-/// 删除 logs/ 目录下超过保留天数的旧日志文件
+/// 日志总配额兜底（COR-9，软上限）：`app.log*` 文件总字节数超过该值时
+/// 从最旧的轮转文件删起，尽量压回预算。
 ///
-/// 仅删除修改时间早于 cutoff 的 `.log` 文件，跳过当前正在写入的 `app.log`
-/// （`tracing_appender::rolling::daily` 生成 `app.log.YYYY-MM-DD` 轮转文件）。
-fn cleanup_old_logs(logs_dir: &Path, retention_days: u32) {
+/// 软配额而非硬上限：当日活跃 `app.log` 被 writer 持有，Windows 下无法
+/// 删除或截断，极端日志量单日仍可能突破预算；隔天轮转后由本配额回收。
+const LOG_TOTAL_QUOTA_BYTES: u64 = 200 * 1024 * 1024;
+
+/// 删除 logs/ 目录下超过保留天数或超出总配额的旧日志文件
+///
+/// 保留天数优先：仅删除修改时间早于 cutoff 的 `app.log*` 轮转文件，跳过当前
+/// 正在写入的 `app.log`（`tracing_appender::rolling::daily` 生成
+/// `app.log.YYYY-MM-DD`）；随后执行总配额兜底，从最旧文件删起，删除失败
+/// （Windows 句柄锁等）跳过继续。`quota_bytes` 参数化以便测试注入小配额。
+fn cleanup_old_logs(logs_dir: &Path, retention_days: u32, quota_bytes: u64) {
     let Ok(entries) = std::fs::read_dir(logs_dir) else {
         tracing::warn!("读取日志目录失败，跳过过期日志清理");
         return;
     };
     let cutoff = std::time::SystemTime::now()
         - std::time::Duration::from_secs(u64::from(retention_days) * 86_400);
-    let mut removed = 0usize;
+    // 一次目录扫描同时服务保留天数与总配额两条清理路径
+    let mut rotated: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut active_size = 0u64;
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        // 仅处理日志文件，跳过当前活跃文件
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == "app.log" || !name.starts_with("app.log") {
+        if !name.starts_with("app.log") {
             continue;
         }
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if modified < cutoff {
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => removed += 1,
-                        Err(e) => tracing::debug!("删除过期日志文件失败 {}: {e}", path.display()),
-                    }
-                }
-            }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if name == "app.log" {
+            // 当前活跃文件被 writer 持有，只参与配额计算，不参与删除
+            active_size = meta.len();
+        } else {
+            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            rotated.push((path, meta.len(), modified));
         }
     }
+
+    // 第一步：保留天数清理
+    let mut removed = 0usize;
+    rotated.retain(|(path, _, modified)| {
+        if *modified < cutoff {
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    removed += 1;
+                    false
+                }
+                Err(e) => {
+                    tracing::debug!("删除过期日志文件失败 {}: {e}", path.display());
+                    true
+                }
+            }
+        } else {
+            true
+        }
+    });
     if removed > 0 {
         tracing::info!(
             "清理过期日志文件 {} 个（保留 {} 天）",
             removed,
             retention_days
+        );
+    }
+
+    // 第二步：总配额兜底（COR-9）。从最旧（mtime 最小）的轮转文件删起，
+    // 单个删除失败跳过继续，尽力压回预算
+    let total: u64 = active_size + rotated.iter().map(|(_, size, _)| size).sum::<u64>();
+    if total <= quota_bytes {
+        return;
+    }
+    let mut total = total;
+    let mut quota_removed = 0usize;
+    rotated.sort_by_key(|(_, _, modified)| *modified);
+    for (path, size, _) in &rotated {
+        if total <= quota_bytes {
+            break;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                total = total.saturating_sub(*size);
+                quota_removed += 1;
+            }
+            Err(e) => tracing::debug!("配额清理删除日志文件失败 {}: {e}", path.display()),
+        }
+    }
+    if quota_removed > 0 {
+        tracing::info!(
+            "日志总配额超限，已清理最旧轮转文件 {} 个（软上限 {} MiB，当日活跃文件不受影响）",
+            quota_removed,
+            LOG_TOTAL_QUOTA_BYTES / (1024 * 1024)
         );
     }
 }
@@ -405,7 +463,7 @@ pub fn init_logging(
 
     // 启动时清理过期日志：按传入的 logging.retention_days 保留，
     // 删除超过保留天数的旧轮转文件，避免日志无限累积（对齐原项目 loguru retention）。
-    cleanup_old_logs(&logs_dir, retention_days);
+    cleanup_old_logs(&logs_dir, retention_days, LOG_TOTAL_QUOTA_BYTES);
 
     // 动态 filter：三个 layer 共享同一 SharedTargets（热更新入口见 reload_log_level）。
     let shared = SharedTargets::build(log_level);
@@ -563,5 +621,47 @@ mod tests {
             "global": {"logging": {"level": "nope"}}
         }));
         assert_eq!(level, LevelFilter::INFO);
+    }
+
+    /// COR-9：总配额兜底从最旧的轮转文件删起，活跃 app.log 不动
+    #[test]
+    fn test_log_quota_reclaims_oldest_rotated_files() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("app.log"), vec![b'x'; 100]).unwrap();
+        // 三个轮转文件，mtime 从旧到新
+        let rotated = [
+            ("app.log.2026-01-01", 30_000u64),
+            ("app.log.2026-01-02", 20_000),
+            ("app.log.2026-01-03", 10_000),
+        ];
+        for (name, age_secs) in rotated {
+            let p = dir.join(name);
+            std::fs::write(&p, vec![b'a'; 100]).unwrap();
+            // std File::set_modified 设置 mtime，供「最旧优先」排序判定
+            let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+            f.set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+                .unwrap();
+        }
+
+        // 配额 250B：总量 400B → 删最旧两个（200B）→ 剩 200B ≤ 250B 停止
+        cleanup_old_logs(dir, 365, 250);
+
+        assert!(!dir.join("app.log.2026-01-01").exists(), "最旧的应先删");
+        assert!(!dir.join("app.log.2026-01-02").exists(), "次旧的应删除");
+        assert!(dir.join("app.log.2026-01-03").exists(), "最新的应保留");
+        assert!(dir.join("app.log").exists(), "活跃文件不应被删除");
+
+        // 保留天数优先路径不受影响：retention=1 + 巨大配额 → 只按 mtime 删
+        let p = dir.join("app.log.2026-02-01");
+        std::fs::write(&p, b"y").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(2 * 86_400))
+            .unwrap();
+        cleanup_old_logs(dir, 1, u64::MAX);
+        assert!(!p.exists(), "超期文件按天数删除");
+        assert!(dir.join("app.log.2026-01-03").exists(), "未过期文件不动");
     }
 }

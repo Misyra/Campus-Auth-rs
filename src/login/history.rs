@@ -102,6 +102,10 @@ impl HistoryStore for LoginHistoryService {
     }
 }
 
+/// 登录历史保留天数（LOG-2）：与 Web 查询窗口（`/api/history` 固定最近 30 天）
+/// 对齐，更早的文件没有消费路径，由每日 housekeeping 删除以防无限累积。
+pub const HISTORY_RETENTION_DAYS: u32 = 30;
+
 impl LoginHistoryService {
     /// 构造历史服务（基准路径通常为 exe 所在目录）
     pub fn new(base_path: &Path) -> Self {
@@ -196,6 +200,44 @@ impl LoginHistoryService {
             }
         }
         Ok(())
+    }
+
+    /// 删除早于保留期的历史文件（LOG-2），返回删除数量
+    ///
+    /// Web 查询窗口固定为最近 30 天，更早的文件没有消费路径；按文件名日期
+    /// 判定（`%Y-%m-%d.jsonl`），文件名非日期格式（外部放置）的文件不清理。
+    pub async fn clear_older_than(&self, keep_days: u32) -> Result<usize, std::io::Error> {
+        let dir = self.history_dir();
+        if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
+            return Ok(0);
+        }
+        // 保留最近 keep_days 个自然日（含今天）：keep_days=30 → 删 d < 今天-29
+        let cutoff =
+            Local::now().date_naive() - chrono::Days::new(u64::from(keep_days).saturating_sub(1));
+        let mut removed = 0usize;
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let p = entry.path();
+            if !p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                continue;
+            }
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            match NaiveDate::parse_from_str(stem, "%Y-%m-%d") {
+                Ok(d) if d < cutoff => match tokio::fs::remove_file(&p).await {
+                    Ok(()) => removed += 1,
+                    Err(e) => {
+                        tracing::debug!("删除过期登录历史文件失败 {}: {e}", p.display())
+                    }
+                },
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::debug!(path = %p.display(), "登录历史文件名非日期格式，跳过清理")
+                }
+            }
+        }
+        Ok(removed)
     }
 }
 
@@ -421,5 +463,46 @@ mod tests {
         let rows = svc.query(from, to).await.unwrap();
         // 仅合法行被解析
         assert_eq!(rows.len(), 1);
+    }
+
+    /// LOG-2：clear_older_than 按文件名日期删除超期文件，保留期内与
+    /// 非日期文件名的文件一律不动
+    #[tokio::test]
+    async fn test_clear_older_than_by_filename_date() {
+        let tmp = TempDir::new().unwrap();
+        let svc = LoginHistoryService::new(tmp.path());
+        let dir = tmp.path().join("logs").join("login_history");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let today = Local::now().date_naive();
+        let fmt = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+        // 今天（保留）、29 天前（保留）、31 天前（删除）、非法名（不动）
+        for name in [
+            fmt(today),
+            fmt(today - chrono::Days::new(29)),
+            fmt(today - chrono::Days::new(31)),
+            "not-a-date".to_string(),
+        ] {
+            tokio::fs::write(
+                dir.join(format!("{name}.jsonl")),
+                b"{}
+",
+            )
+            .await
+            .unwrap();
+        }
+
+        let removed = svc.clear_older_than(HISTORY_RETENTION_DAYS).await.unwrap();
+        assert_eq!(removed, 1, "仅 31 天前的文件应被删除");
+        assert!(dir.join(format!("{}.jsonl", fmt(today))).exists());
+        assert!(
+            dir.join(format!("{}.jsonl", fmt(today - chrono::Days::new(29))))
+                .exists()
+        );
+        assert!(
+            !dir.join(format!("{}.jsonl", fmt(today - chrono::Days::new(31))))
+                .exists()
+        );
+        assert!(dir.join("not-a-date.jsonl").exists(), "非日期文件名不清理");
     }
 }

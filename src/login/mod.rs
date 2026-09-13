@@ -1207,7 +1207,9 @@ impl LoginOrchestrator {
 // 重新导出公共类型，供 `crate::login::*` 引用
 pub use crate::bridge::{Outcome as LoginOutcome, StructuredResult};
 pub use crate::status::LoginSource;
-pub use history::{HistoryResult, HistoryStore, LoginHistoryEntry, LoginHistoryService};
+pub use history::{
+    HISTORY_RETENTION_DAYS, HistoryResult, HistoryStore, LoginHistoryEntry, LoginHistoryService,
+};
 pub use preemption::{PreemptionDecision, decide};
 pub use session::{LoginResult, LoginSession, LoginTerminal, ResultAction};
 
