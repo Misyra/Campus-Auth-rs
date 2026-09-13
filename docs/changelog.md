@@ -4,6 +4,8 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- CFG-1 迁移结果写回：`run_migrations` 结束时把 `config_version` 写回 `CURRENT`——此前仅改返回值，落盘的 settings.json 永远停留在迁移前版本，每次启动重跑迁移链并原子重写盘（提交点契约失效）；v5→v6 内硬编码的中间 checkpoint（=6）保留供中途失败续跑定位。修正固化 version=6 的测试断言并新增写回回归用例
+- CFG-3 配置写盘后 reload：`update_profile` / `create_profile` / `modify_settings_and_profile_tx` 落盘成功后统一触发 `reload_with_signal`，消除 ArcSwap 快照滞后（运行中 Engine/Monitor 持旧凭据）；信号按语义区分——更新发 `ProfileSwitched{id}`（与 switch_profile 对齐，调度器增量处理不重载任务表）、新建与事务发 `GlobalChanged`；事务函数的 reload 置于 profiles/settings 两锁释放之后，避免与 `reload_lock` 形成新锁序；三处均 best-effort（失败仅告警，重试 reload 可恢复一致）
 - COR-1 挂账：`ServiceContainer` 无 `Drop`（启动半失败路径的常驻任务不会被显式取消）记入 `docs/known-issues.md` #21，记录复核口径——startup 实际不可失败、失败即 exit(1) 由 OS 收尸，仅当启动流程变为部分失败进程存活时才值得引入回滚编排
 - LOG-2 登录历史保留策略：`LoginHistoryService` 新增 `clear_older_than`（按文件名日期判定，非日期文件名不清理），挂入每日 housekeeping 任务，固定保留 30 天（与 `/api/history` 查询窗口对齐，更早文件无消费路径）；不与 `logging.retention_days` 共用避免语义混淆
 - COR-9 日志总配额兜底（软上限）：`cleanup_old_logs` 重构为一次目录扫描同时服务保留天数与配额两条路径，`app.log*` 总量超 200MiB 时从最旧轮转文件删起、删除失败跳过继续；当日活跃 `app.log` 因 Windows 句柄锁不参与删除（单日爆盘不在此兜底范围，隔天轮转后回收）

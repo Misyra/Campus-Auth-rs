@@ -50,6 +50,16 @@ pub fn run_migrations(config_dir: &Path, value: &mut Value) -> Result<u32, Confi
         }
     }
 
+    // 写回迁移后的版本号：仅改返回值会导致落盘的 settings.json 永远停在
+    // 迁移前版本，每次启动重跑迁移链并重写盘（CFG-1）；v5→v6 内硬编码的
+    // 中间 checkpoint（=6）保留，供迁移中途失败的下次续跑定位。
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "config_version".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(current)),
+        );
+    }
+
     // 迁移成功留痕：配置结构发生了不可逆的结构性变更，用户应能从日志确认
     tracing::info!(
         from = version,
@@ -504,9 +514,9 @@ mod tests {
     #[test]
     fn test_run_migrations_skips_when_version_current() {
         let tmp = tempfile::tempdir().unwrap();
-        // 已是 v6：不产生任何文件、不修改值
+        // 已是 CURRENT：跳过迁移链（版本前置检查），值原样保留
         let mut v = serde_json::json!({
-            "config_version": 6,
+            "config_version": crate::config::CURRENT_CONFIG_VERSION,
             "active_profile_id": "default",
         });
         let result = run_migrations(tmp.path(), &mut v).unwrap();
@@ -514,6 +524,24 @@ mod tests {
         assert_eq!(v["active_profile_id"], "default");
         // 未创建 profiles 目录（无迁移发生）
         assert!(!tmp.path().join("profiles").exists());
+    }
+
+    /// CFG-1 回归：迁移链跑完后 config_version 必须写回 CURRENT，
+    /// 落盘值不再停留于迁移前版本（否则每次启动重跑迁移）
+    #[test]
+    fn test_run_migrations_writes_back_config_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = serde_json::json!({
+            "config_version": 6,
+            "active_profile_id": "default",
+        });
+        let result = run_migrations(tmp.path(), &mut v).unwrap();
+        assert_eq!(result, crate::config::CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            v["config_version"].as_u64().unwrap(),
+            u64::from(crate::config::CURRENT_CONFIG_VERSION),
+            "迁移后 config_version 必须落回 value"
+        );
     }
 
     #[test]

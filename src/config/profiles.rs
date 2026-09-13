@@ -135,7 +135,14 @@ impl ProfileService {
         // 检查+写入同持 profiles_lock（原子创建，防并发同 id 覆盖）
         let mut profile = data;
         profile.id = slug;
-        self.config.create_profile_atomic(&profile).await
+        self.config.create_profile_atomic(&profile).await?;
+        // 写盘后同步 ArcSwap 快照（CFG-3）：新 Profile 进入自动匹配池，
+        // 否则运行中 Engine/Monitor 读到旧快照。与 delete_profile 同口径：
+        // 重载失败仅告警不回滚（文件已落盘，重试 reload 即可恢复一致）
+        if let Err(e) = self.config.reload().await {
+            tracing::warn!("创建 Profile 后配置重载失败（快照可能滞后）: {e}");
+        }
+        Ok(())
     }
 
     /// 更新 Profile（密码字段走 `save_password` 语义）
@@ -160,7 +167,18 @@ impl ProfileService {
             },
             &existing_pw,
         );
-        self.config.save_profile(&profile).await
+        self.config.save_profile(&profile).await?;
+        // 写盘后同步 ArcSwap 快照（CFG-3）：运行中 Engine/Monitor 可能正持有
+        // 旧凭据。发送 ProfileSwitched 与 switch_profile 对齐——调度器仅增量
+        // 处理该 Profile 变更，不触发任务表全量重载；重载失败仅告警不回滚
+        if let Err(e) = self
+            .config
+            .reload_with_signal(ConfigReloadSignal::ProfileSwitched { id: id.to_string() })
+            .await
+        {
+            tracing::warn!("更新 Profile 后配置重载失败（快照可能滞后）: {e}");
+        }
+        Ok(())
     }
 
     /// 删除 Profile（不允许删除 default）

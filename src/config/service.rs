@@ -548,24 +548,38 @@ impl ConfigService {
             });
         }
 
-        let _profiles_guard = self.profiles_lock.lock().await;
-        let _settings_guard = self.settings_lock.lock().await;
-        let old_profile = self.load_profile(&profile.id)?;
-        let new_settings = match f(self.load_settings()) {
-            Ok(settings) => settings,
-            Err(msg) => return Ok(Err(msg)),
+        // 事务临界区：reload 必须在 profiles/settings 两把锁释放之后执行
+        //（reload_inner 持 reload_lock，锁内调用会形成 profiles→settings→reload
+        // 新锁序，与「持 reload 后再取 settings」的路径存在死锁风险）
+        let tx_result = {
+            let _profiles_guard = self.profiles_lock.lock().await;
+            let _settings_guard = self.settings_lock.lock().await;
+            let old_profile = self.load_profile(&profile.id)?;
+            let new_settings = match f(self.load_settings()) {
+                Ok(settings) => settings,
+                Err(msg) => return Ok(Err(msg)),
+            };
+
+            self.save_profile_locked(&profile).await?;
+            if let Err(settings_error) = self.write_settings_locked(&new_settings).await {
+                if let Err(rollback_error) = self.save_profile_locked(&old_profile).await {
+                    return Err(ConfigError::ConfigWriteError {
+                        reason: format!(
+                            "settings 写入失败（{settings_error}），且 Profile 回滚失败（{rollback_error}）"
+                        ),
+                    });
+                }
+                return Err(settings_error);
+            }
+            Ok::<(), ConfigError>(())
         };
 
-        self.save_profile_locked(&profile).await?;
-        if let Err(settings_error) = self.write_settings_locked(&new_settings).await {
-            if let Err(rollback_error) = self.save_profile_locked(&old_profile).await {
-                return Err(ConfigError::ConfigWriteError {
-                    reason: format!(
-                        "settings 写入失败（{settings_error}），且 Profile 回滚失败（{rollback_error}）"
-                    ),
-                });
-            }
-            return Err(settings_error);
+        // 事务提交成功后同步 ArcSwap 快照（CFG-3）：settings 与 Profile 双双
+        // 变更，快照滞后会让运行中 Engine/Monitor 读到旧凭据。锁外 best-effort
+        // reload，失败仅告警（文件已落盘，重试 reload 即可恢复一致）
+        tx_result?;
+        if let Err(e) = self.reload().await {
+            tracing::warn!("settings+Profile 事务提交后配置重载失败（快照可能滞后）: {e}");
         }
         Ok(Ok(()))
     }
@@ -1214,8 +1228,13 @@ mod tests {
         assert!(profile.get("match_gateway_ip").is_none());
 
         // 验证 settings 中 profiles 已移除，版本已更新
+        // （CFG-1：run_migrations 结束时把 config_version 写回 CURRENT，
+        // 落盘值不再停留 在 v5→v6 的中间 checkpoint=6）
         assert!(value.get("profiles").is_none());
-        assert_eq!(value["config_version"].as_u64().unwrap(), 6);
+        assert_eq!(
+            value["config_version"].as_u64().unwrap(),
+            u64::from(crate::config::CURRENT_CONFIG_VERSION)
+        );
     }
 
     #[test]
