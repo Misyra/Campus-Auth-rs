@@ -412,6 +412,16 @@ impl BridgeSupervisor {
                 }
                 id
             });
+        // BRG-1：下传本次请求的超时预算（毫秒），Python 侧按 0.9 倍设置命令级
+        // 自愈超时，保证先于 Rust 超时触发（否则长任务被 Python 固定地板提前
+        // 中断，或预算平齐时走到 Rust 超时 → Cancel → 强杀的重路径）。旧 Worker
+        // 忽略该字段按原公式兜底，双向向后兼容。
+        if let Some(map) = params.as_object_mut() {
+            map.insert(
+                "rust_timeout_ms".to_string(),
+                Value::from(timeout.as_millis() as u64),
+            );
+        }
         let (tx, mut rx) = mpsc::channel(1);
         self.cmd_tx
             .send(SupervisorCommand::Execute {

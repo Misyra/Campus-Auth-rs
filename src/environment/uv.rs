@@ -343,7 +343,7 @@ pub async fn download_uv(
             // download_file_streaming 内部已带停滞检测，此处仅包一层总超时兜底
             let dl_result = tokio::time::timeout(
                 UV_DOWNLOAD_TIMEOUT,
-                download_file_streaming(mgr, archive_url, &tmp_archive),
+                download_file_streaming(mgr, archive_url, &tmp_archive, cancel),
             )
             .await;
             match dl_result {
@@ -416,12 +416,23 @@ pub async fn download_uv(
             return Err(EnvironmentError::UvExtractFailed(e));
         }
 
-        // 6. 验证可执行
-        let output = uv_command(&uv_dest)
-            .arg("--version")
-            .output()
+        // 6. 验证可执行（ENV-2：带超时 + 响应取消 + kill_on_drop）——该步骤
+        // 在持有 BootstrapGate 期间执行，裸 .output() 挂起会永久占住引导
+        // 互斥门，整个环境子系统假死；对齐 uv_executable_works 的 5s 口径
+        let cmd = {
+            let mut c = uv_command(&uv_dest);
+            c.arg("--version");
+            c
+        };
+        let output = command_output_with_cancel(cmd, Duration::from_secs(5), cancel)
             .await
-            .map_err(EnvironmentError::UvExtractFailed)?;
+            .map_err(|e| match e {
+                CommandOutputError::Cancelled => EnvironmentError::Cancelled,
+                CommandOutputError::Timeout => EnvironmentError::UvExtractFailed(
+                    std::io::Error::other("uv --version 校验超时（5s），疑似环境异常"),
+                ),
+                CommandOutputError::Io(e) => EnvironmentError::UvExtractFailed(e),
+            })?;
 
         if !output.status.success() {
             return Err(EnvironmentError::UvExtractFailed(std::io::Error::other(
@@ -563,26 +574,57 @@ async fn download_text(mgr: &EnvironmentManager, url: &str) -> Result<String, En
     })?;
 
     // 非 2xx（404/403/502 等）直接判失败，避免把错误页当作 sha 内容吃进校验
-    let resp = resp
+    let mut resp = resp
         .error_for_status()
         .map_err(|e| EnvironmentError::UvDownloadFailed {
             retries: 0,
             source: e,
         })?;
 
-    resp.text()
+    // ENV-5：SHA256 校验文件实际只有 64 hex + 换行，限制响应体大小防止
+    // 异常/被劫持镜像的超大 body 全量读入内存（二进制下载走 256MB 上限的
+    // 流式路径，文本此前无任何上限）
+    const SHA_TEXT_MAX_BYTES: usize = 1024 * 1024;
+    if let Some(len) = resp.content_length() {
+        if len as usize > SHA_TEXT_MAX_BYTES {
+            return Err(EnvironmentError::UvDownloadIoFailed {
+                retries: 0,
+                message: format!("SHA256 文件大小 {len} 字节超过上限 {SHA_TEXT_MAX_BYTES}"),
+            });
+        }
+    }
+    let mut body: Vec<u8> = Vec::with_capacity(256);
+    while let Some(chunk) = resp
+        .chunk()
         .await
         .map_err(|e| EnvironmentError::UvDownloadFailed {
             retries: 0,
             source: e,
-        })
+        })?
+    {
+        if body.len() + chunk.len() > SHA_TEXT_MAX_BYTES {
+            return Err(EnvironmentError::UvDownloadIoFailed {
+                retries: 0,
+                message: format!("SHA256 文件超过大小上限 {SHA_TEXT_MAX_BYTES} 字节"),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|_| EnvironmentError::UvDownloadIoFailed {
+        retries: 0,
+        message: "SHA256 校验文件不是有效的 UTF-8 文本".into(),
+    })
 }
 
 /// 流式下载文件到指定路径（带停滞检测：慢网只要出数据就不判失败，仅彻底停滞才超时）
+///
+/// `cancel`（ENV-3）透传至 chunk 循环：传输中触发即清理临时文件返回取消，
+/// 不再等 300s 总超时。
 async fn download_file_streaming(
     mgr: &EnvironmentManager,
     url: &str,
     dest: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(), EnvironmentError> {
     crate::utils::io::download_streaming_with_stall(
         mgr.http_client(),
@@ -590,9 +632,11 @@ async fn download_file_streaming(
         dest,
         256 * 1024 * 1024,
         Some(UV_DOWNLOAD_STALL_TIMEOUT),
+        Some(cancel),
     )
     .await
     .map_err(|e| match e {
+        crate::utils::io::DownloadError::Cancelled => EnvironmentError::Cancelled,
         crate::utils::io::DownloadError::Http(e) => EnvironmentError::UvDownloadFailed {
             retries: 0,
             source: e,

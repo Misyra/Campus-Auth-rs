@@ -332,12 +332,19 @@ def _command_timeout(params: dict) -> float:
     走 Cancel + 10s 宽限 + 可能的强杀回收，代价高得多。
     0.9 倍预留 30s（≥10s 宽限期的 3 倍）确保自愈完成并回包。
 
-    浏览器 settings 存在时以单步默认超时为基准放大（覆盖超大 step timeout
-    配置），但不低于固定兜底；不新增协议字段（复用 ``_to_ms`` 语义）。
+    BRG-1：Rust 侧下发 ``rust_timeout_ms``（本次请求的真实超时预算）时，取
+    ``min(单步放大基准, 0.9 × 预算)``——预算可达 600s（任务级钳制上限），
+    固定地板会让长任务被 Python 侧提前中断判失败而 Rust 仍在等待，与「Rust
+    超时才是权威」相悖；0.9x 保证 Python 自愈始终抢跑。字段缺省（旧 Rust
+    主程序）回退固定兜底公式；旧 Python 忽略该字段，双向向后兼容。
     """
     bs = params.get("browser_settings") or {}
     step_ms = _to_ms(bs, "timeout", 10000)
-    return max(270.0, step_ms / 1000 * 20)
+    base = max(270.0, step_ms / 1000 * 20)
+    rust_budget_ms = params.get("rust_timeout_ms")
+    if isinstance(rust_budget_ms, (int, float)) and rust_budget_ms > 0:
+        return min(base, float(rust_budget_ms) / 1000 * 0.9)
+    return base
 
 
 def _error_result(message: str) -> dict:

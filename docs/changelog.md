@@ -4,6 +4,10 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- ENV-2 uv 校验超时：`download_uv` 第 6 步 `uv --version` 从裸 `.output()` 改用现成 `command_output_with_cancel`（5s 超时 + 响应取消 + kill_on_drop）——该步骤全程持有 BootstrapGate，挂起会永久占住引导互斥门导致整个环境子系统假死
+- ENV-3 下载响应取消：`utils::io::download_streaming_with_stall` 新增可选取消令牌，chunk 循环以 `select!` 监听、命中即清理临时文件返回 `Cancelled`（uv 下载链透传既有 token）——此前取消仅在镜像尝试边界生效，传输中不响应，取消后最长仍占住引导门 300s
+- ENV-5 SHA256 文件下载上限：`download_text` 增加 1MiB 响应体上限（content_length 预判 + 分块累计），修复镜像/劫持响应无上限全量读入内存的风险
+- BRG-1 命令级超时预算下发：`execute_with_timeout` 向 params 注入 `rust_timeout_ms`，Python `_command_timeout` 改为 `min(0.9 × 预算, max(270s, 单步×20))`——此前 Python 固定地板与 Rust 600s 任务钳制不同源，长任务会被 Python 侧提前中断判失败；字段缺省回退原公式，双向向后兼容；IPC 契约文档同步
 - ENG-1 Engine 崩溃重启窗口消除：`watch_engine` 重启流程改为「先 spawn 新 Engine 并原子换入 slot、再做 5s 冷却等待」——原顺序在冷却窗口内 slot 持已死句柄，Web/托盘全部命令派发返回 ChannelClosed；新 Engine 处于 Stopped 态即可正常接单，冷却仅延后恢复监测时机，崩溃循环限速语义保留
 - ENG-2 探测失败刷新最近检测时间：`ProbeMessage::Failed` 分支在补发优先级检测后合并最小 Engine 快照（仅刷新 last_check，网络结论沿用上次、evidence 置 None），monitor 系统性故障期间前端「最近检测」不再冻结在最后一次成功值；探测定时器维持原周期不重建的有意设计不变
 - UPD-1 更新检查进度闸门：后台/手动/启动检查在 `update_in_progress`（下载/应用进行中）时跳过 `PartialSnapshot::Update` 合并——此前四处 merge 的 `progress: None` 会把下载任务每 500ms 推送的实时进度清零、`available: false` 会把"更新中"误报回退；`update_in_progress` 字段改 `Arc<AtomicBool>` 以便后台 task 跨 'static 读取；`record_last_check` 不受影响

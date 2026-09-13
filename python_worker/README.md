@@ -57,6 +57,15 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 {"event": "step_progress", "data": {"step_id": "s1", "status": "running"}}
 ```
 
+**命令级超时协商（BRG-1）**
+
+`execute_*` 类命令的 params 由 Rust 侧注入两个保留字段：
+
+- `cancel_id`：取消通知的匹配键（Worker 收到 `{"cancel": ...}` 时按它命中在途命令）；
+- `rust_timeout_ms`：Rust 侧本次请求的超时预算（毫秒）。Worker 按
+  `min(0.9 × 预算, max(270s, 单步超时 × 20))` 设置命令级自愈超时，保证
+  Python 自愈先于 Rust 超时触发。字段缺省时回退固定兜底公式（旧主程序兼容）。
+
 ## 支持的命令
 
 | 命令 | 说明 |

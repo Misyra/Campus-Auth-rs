@@ -369,6 +369,8 @@ pub enum DownloadError {
     TooLarge { limit: u64 },
     /// 下载停滞：超过阈值未收到任何数据
     Stalled { idle_secs: u64, received_bytes: u64 },
+    /// 协作式取消（ENV-3）：调用方取消令牌在传输中触发
+    Cancelled,
 }
 
 impl std::fmt::Display for DownloadError {
@@ -377,6 +379,7 @@ impl std::fmt::Display for DownloadError {
             DownloadError::Http(e) => write!(f, "网络请求失败: {e}"),
             DownloadError::Io(e) => write!(f, "文件写入失败: {e}"),
             DownloadError::TooLarge { limit } => write!(f, "下载内容超过大小上限 {limit} 字节"),
+            DownloadError::Cancelled => write!(f, "下载已取消"),
             DownloadError::Stalled {
                 idle_secs,
                 received_bytes,
@@ -398,23 +401,33 @@ impl std::error::Error for DownloadError {}
 ///
 /// 停滞检测：响应头等待与相邻 chunk 间均受 `stall_timeout` 保护（慢网只要持续
 /// 出数据就不判失败，仅彻底停滞才超时；调用方传 `None` 时不做停滞判定，仅做总超时由上层包裹）。
-/// 带停滞超时（相邻 chunk 间最大空闲时间）的流式下载。
+///
+/// `cancel`（ENV-3）：协作式取消令牌——chunk 循环内以 `select!` 监听，命中即
+/// 清理临时文件并返回 `Cancelled`。此前取消仅在镜像尝试边界生效，单镜像
+/// 下载进行中不响应（uv 总超时 300s，取消最长仍占住引导门 300s）。
 pub async fn download_streaming_with_stall(
     client: &reqwest::Client,
     url: &str,
     dest: &Path,
     max_bytes: u64,
     stall_timeout: Option<std::time::Duration>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<(), DownloadError> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
 
-    let resp = client
-        .get(url)
-        .header("User-Agent", "campus-auth")
-        .send()
-        .await
-        .map_err(DownloadError::Http)?;
+    // 响应头等待同样需要响应取消：把 send 包进 select（头等待通常远快于
+    // body 传输，但代理/劣网环境下也可能长时间挂起）
+    let send_fut = client.get(url).header("User-Agent", "campus-auth").send();
+    let resp = if let Some(cancel) = cancel {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+            r = send_fut => r.map_err(DownloadError::Http)?,
+        }
+    } else {
+        send_fut.await.map_err(DownloadError::Http)?
+    };
 
     let resp = resp.error_for_status().map_err(DownloadError::Http)?;
     if resp.content_length().is_some_and(|size| size > max_bytes) {
@@ -428,7 +441,38 @@ pub async fn download_streaming_with_stall(
     let mut stream = resp.bytes_stream();
     let mut downloaded = 0u64;
     loop {
-        let chunk_opt = if let Some(timeout) = stall_timeout {
+        let chunk_opt = if let Some(cancel) = cancel {
+            // 取消与停滞检测同等待遇：循环内每个 await 点都可被打断
+            let next = if let Some(timeout) = stall_timeout {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        let _ = tokio::fs::remove_file(dest).await;
+                        return Err(DownloadError::Cancelled);
+                    }
+                    v = tokio::time::timeout(timeout, stream.next()) => match v {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let _ = tokio::fs::remove_file(dest).await;
+                            return Err(DownloadError::Stalled {
+                                idle_secs: timeout.as_secs(),
+                                received_bytes: downloaded,
+                            });
+                        }
+                    },
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        let _ = tokio::fs::remove_file(dest).await;
+                        return Err(DownloadError::Cancelled);
+                    }
+                    v = stream.next() => v,
+                }
+            };
+            next
+        } else if let Some(timeout) = stall_timeout {
             match tokio::time::timeout(timeout, stream.next()).await {
                 Ok(v) => v,
                 Err(_) => {
