@@ -13,7 +13,7 @@
 //! - 找不到 Python/venv 时返回 `None`，调用方打印原因后直接 `return` 跳过。
 
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Stdio};
 use std::time::{Duration, Instant};
 
@@ -90,8 +90,83 @@ pub fn wait_exit_or_kill(child: &mut Child, label: &str, stderr_log: Option<&std
     panic!("{label} 未在期限内退出；实例 stderr 尾部:\n{stderr_tail}");
 }
 
+/// 预置测试实例的 OCR 用户偏好为启用。
+///
+/// 实例引导按偏好对齐 worker 项目的 ddddocr 声明（`reconcile_ocr_preference`）：
+/// 偏好缺失（新实例的默认态，即大部分不使用验证码识别用户的状态）等价于
+/// 「未启用」，引导对已声明 ddddocr 的项目执行 `uv remove`。登录链路用例依赖
+/// OCR，需在 `spawn_instance` 前调用本函数——实例引导会自动 `uv add` 到自己的
+/// worker 副本，等价于真实用户在设置页点「安装 OCR 依赖」的路径。
+pub fn preset_ocr_preference(base: &Path) {
+    let dir = base.join("environment");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let payload = serde_json::json!({ "schema_version": 1, "ocr_enabled": true });
+    let _ = std::fs::write(dir.join("python-preferences.json"), payload.to_string());
+}
+
+/// 复制仓库 `python_worker/` 源码到 `<base>/python_worker`，排除本地虚拟环境
+/// 与各类缓存（清单与 build.ps1 口径一致）。
+///
+/// 测试实例经 `worker_project_dir` 路径兜底会共用仓库 worker 项目：bootstrap 的
+/// `uv sync` 与 OCR 偏好对齐会改写它的 pyproject/uv.lock 与 .venv——测试间互拆
+/// 环境、还弄脏工作区。复制进 base 后 `worker_project_dir` 第一候选即命中副本，
+/// 实例的全部依赖操作隔离在 TempDir 内，仓库不再被触碰；复制的少量小文件
+/// （排除 .venv 后约几百 KB）相对实例启动成本可忽略。
+fn copy_worker_project(base: &str) {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python_worker");
+    let dst = Path::new(base).join("python_worker");
+    // 源不存在（异常环境）或副本已就位（幂等）时不动；复制尽力而为，
+    // 局部失败等价回退到旧行为（实例兜底共用仓库），不会更糟
+    if !src.is_dir() || dst.is_dir() {
+        return;
+    }
+    const EXCLUDED_DIRS: &[&str] = &[
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".tmp-uv-cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "captures",
+        "build",
+        "dist",
+        "node_modules",
+    ];
+    let mut stack = vec![(src, dst)];
+    while let Some((from, to)) = stack.pop() {
+        if std::fs::create_dir_all(&to).is_err() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&from) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            if EXCLUDED_DIRS.contains(&name.to_string_lossy().as_ref()) {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let target = to.join(&name);
+            if file_type.is_dir() {
+                stack.push((entry.path(), target));
+            } else if file_type.is_file() {
+                let _ = std::fs::copy(entry.path(), target);
+            }
+        }
+    }
+}
+
 /// 启动一个完整模式实例（托盘与浏览器均禁用），stderr 进临时文件便于失败排查
+///
+/// 实例的 worker 项目使用 base 内的源码副本（见 [`copy_worker_project`]），
+/// 不需要 OCR 的用例（默认态）不预置任何偏好，即覆盖大部分用户「未启用 OCR」
+/// 的真实引导路径。
 pub fn spawn_instance(base: &str, port: u16) -> InstanceGuard {
+    copy_worker_project(base);
     let log = tempfile::NamedTempFile::new().expect("创建 stderr 临时文件失败");
     let err_file = log.reopen().expect("复用 stderr 临时文件失败");
     let child = StdCommand::new(env!("CARGO_BIN_EXE_campus-auth"))

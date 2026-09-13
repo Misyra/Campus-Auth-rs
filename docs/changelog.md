@@ -9,6 +9,13 @@
 **构建脚本（2026-09-13 实测收尾）**
 - build.ps1 `-OutDir` 支持绝对路径（`IsPathRooted` 分支，此前 `Join-Path $Root $OutDir` 会把 `E:\Test\...` 拼成非法路径）；同日 E:\Test 便携版从 0 全功能实测（新 mock 门户 v2：302 跳转链/5 位验证码/环回跳转陷阱/失败注入），自动登录、failonce 重试、MON-4 三场景、FE2-9、C1 启动字段全过，发现 3 项低危 UI 问题（known-issues #23，测试资产固化见同批 E2E 固化提交）
 
+**E2E 固化（2026-09-13 实测过程入仓）**
+- 新增 `tests/mock-servers/portal-v2/`：实测用复杂 mock 门户进仓（form POST + 三级 302 跳转链、5 位数字验证码、sid 会话、failonce/failntimes/slowlogin/ban/kick 注入、MON-4 环回与通配跳转陷阱、/debug 面板），选择器与 full-portal 兼容
+- `tests/login_chain.rs` 扩展 4 用例（用例级 tokio 串行锁）：302 跳转链登录、slowlogin 慢响应、/ban 限时封禁后重试跨窗、kick 掉线 → 监测发现 captive → 引擎自动重登（实测「断线自动恢复」端到端闭环）；原有 failonce 用例保留
+- `tests/common/mod.rs` `spawn_instance` 将 worker 项目复制进 base（`copy_worker_project`，排除 .venv/缓存，清单同 build.ps1）：实例经 `worker_project_dir` 路径兜底曾共用仓库 `python_worker/`，bootstrap 的 `uv sync` 与 OCR 偏好对齐会改写其 pyproject/uv.lock 与 .venv——测试间互拆环境（preflight 假绿跳过）且弄脏工作区；副本化后实例依赖操作全部隔离在 TempDir，仓库不再被触碰。OCR 偏好按用例决定：`preset_ocr_preference` 仅供依赖 OCR 的用例在 spawn 前调用（当前仅 login_chain），其余用例保持偏好缺失的默认态——即覆盖大部分不使用验证码识别用户的真实引导路径（无 ddddocr、无额外下载）
+- 新增 `tests/scheduled_tasks.rs` 3 用例（无 Python 门槛，普通 test job 全平台跑）：cron/startup 创建全字段落盘、切回 cron 由 `normalize_for_save` 权威清空启动字段（服务端互斥口径）、list 的 id 回填/task_type/startup_runs_today、重复 id 409/非法 trigger 400/更新不存在 404/toggle 往返与删除
+- 验证：login_chain 5/5（真实执行 ~113-170s，两轮确认幂等）+ scheduled_tasks 3/3（0.7s，无 ddddocr 下载）；跑后 `python_worker/pyproject.toml`/`uv.lock` 无改动（ddddocr 由 CI e2e job 运行时 `uv add`，不入库）；实测发现 3 项 UI 问题挂账 known-issues #23
+
 **批 1 配置/登录/监测（d2663df）**
 - CFG-4 删除 settings 隔离态死代码（poisoned 标志与 4 处拒存守卫不可达：new_sync 起缓存恒为 Some 无置空写点）；CFG-5 删 is_windows_reserved_name 的 split('.') 死逻辑；CFG-6 decrypt_core 返回 Zeroizing<String>（can_decrypt 校验即弃明文不再留未清零副本，UTF-8 失败路径字节同样清零）；CFG-7 抽 set_key_permissions 复用（Python 密钥继承路径补权限收紧）；CFG-8 DecryptFailed 透传 profile_id
 - LOG-3 重试耗尽文案统一总尝试次数；LOG-4 删死 match 臂；LOG-5 会话 panic 补齐 M4 终态协议（失败指标 + StatusManager 广播 + 历史记录，锁内取数不跨 await）；LOG-6 渠道自愈 warn 降 info

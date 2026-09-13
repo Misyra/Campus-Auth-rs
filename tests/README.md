@@ -12,10 +12,13 @@
 │   ├── captcha-mock/           # 带验证码的 mock 登录页（原 target/captcha-mock）
 │   │   ├── game.html
 │   │   └── server.py
-│   └── full-portal/            # 完整 mock 认证门户（原 mock_portal/，含验证码/captive/多阶段回归）
-│       ├── server.py           # ThreadingHTTPServer 127.0.0.1:18765，生成 4 位数字验证码
-│       ├── poll_login.py       # 轮询 /api/login/status 直至结束
-│       └── test_phase_a1~a3.py # 分阶段回归（登录分支/探测/Profile/OCR/debug）
+│   ├── full-portal/            # 完整 mock 认证门户（原 mock_portal/，含验证码/captive/多阶段回归）
+│   │   ├── server.py           # ThreadingHTTPServer 127.0.0.1:18765，生成 4 位数字验证码
+│   │   ├── poll_login.py       # 轮询 /api/login/status 直至结束
+│   │   └── test_phase_a1~a3.py # 分阶段回归（登录分支/探测/Profile/OCR/debug）
+│   └── portal-v2/              # 复杂 mock 门户 v2（login_chain 扩展用例用；选择器与 full-portal 兼容）
+│       └── server.py           # form POST + 三级 302 跳转链、5 位验证码、sid 会话、
+│                               # failonce/failntimes/slowlogin/ban/kick 注入、环回与通配跳转陷阱、/debug
 ├── fixtures/
 │   ├── runtime-envs/           # 隔离基座（base_path）模板，原 target/* 下的 e2e-* / portal* / fresh-py / stop-test / su-*
 │   │   ├── e2e-real/           # 多 Profile + 定时任务 + 脚本（含 dorm/lib）
