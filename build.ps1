@@ -60,7 +60,8 @@ try {
 
 # ---- 3/4 组装便携目录 ----
 Write-Host "=== 3/4 组装便携目录 ==="
-$Out = Join-Path $Root $OutDir
+# OutDir 支持绝对路径（如 E:\Test\CampusAuth-Portable）；相对路径才相对仓库根拼接
+$Out = if ([System.IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $Root $OutDir }
 if (Test-Path $Out) {
     Remove-Item $Out -Recurse -Force
 }

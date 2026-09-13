@@ -6,6 +6,9 @@
 
 2026-09-12 评审报告 71 条 P3 + NEW-1：剔除 P2 批次已覆盖项后逐条复核（6 组并行子代理对照 HEAD 核实），4 条已修复/证伪（FE1-3 已修、FE1-4/TSK-5 证伪、FE2-7 清单过时）、43 个落地点按用户拍板分 5 批修复，18 项挂账 known-issues #22。拍板口径：MON-4 只拦环回+链路本地（解析后 IP 判定 + DNS 钉扎，不拦 RFC1918 内网门户）；FE2-9 全局路由守卫（定向判定 + 显式清草稿）；日志脱敏/签名体系/控制台非阻塞/PATCH 白名单收紧/IPC 行上限统一/run_script 复检/解压 canonicalize/TSK-6/8 判定强化均维持挂账。
 
+**构建脚本（2026-09-13 实测收尾）**
+- build.ps1 `-OutDir` 支持绝对路径（`IsPathRooted` 分支，此前 `Join-Path $Root $OutDir` 会把 `E:\Test\...` 拼成非法路径）；同日 E:\Test 便携版从 0 全功能实测（新 mock 门户 v2：302 跳转链/5 位验证码/环回跳转陷阱/失败注入），自动登录、failonce 重试、MON-4 三场景、FE2-9、C1 启动字段全过，发现 3 项低危 UI 问题（known-issues #23，测试资产固化见同批 E2E 固化提交）
+
 **批 1 配置/登录/监测（d2663df）**
 - CFG-4 删除 settings 隔离态死代码（poisoned 标志与 4 处拒存守卫不可达：new_sync 起缓存恒为 Some 无置空写点）；CFG-5 删 is_windows_reserved_name 的 split('.') 死逻辑；CFG-6 decrypt_core 返回 Zeroizing<String>（can_decrypt 校验即弃明文不再留未清零副本，UTF-8 失败路径字节同样清零）；CFG-7 抽 set_key_permissions 复用（Python 密钥继承路径补权限收紧）；CFG-8 DecryptFailed 透传 profile_id
 - LOG-3 重试耗尽文案统一总尝试次数；LOG-4 删死 match 臂；LOG-5 会话 panic 补齐 M4 终态协议（失败指标 + StatusManager 广播 + 历史记录，锁内取数不跨 await）；LOG-6 渠道自愈 warn 降 info
