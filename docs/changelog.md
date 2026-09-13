@@ -4,6 +4,7 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- COR-1 挂账：`ServiceContainer` 无 `Drop`（启动半失败路径的常驻任务不会被显式取消）记入 `docs/known-issues.md` #21，记录复核口径——startup 实际不可失败、失败即 exit(1) 由 OS 收尸，仅当启动流程变为部分失败进程存活时才值得引入回滚编排
 - LOG-2 登录历史保留策略：`LoginHistoryService` 新增 `clear_older_than`（按文件名日期判定，非日期文件名不清理），挂入每日 housekeeping 任务，固定保留 30 天（与 `/api/history` 查询窗口对齐，更早文件无消费路径）；不与 `logging.retention_days` 共用避免语义混淆
 - COR-9 日志总配额兜底（软上限）：`cleanup_old_logs` 重构为一次目录扫描同时服务保留天数与配额两条路径，`app.log*` 总量超 200MiB 时从最旧轮转文件删起、删除失败跳过继续；当日活跃 `app.log` 因 Windows 句柄锁不参与删除（单日爆盘不在此兜底范围，隔天轮转后回收）
 - WE2-4 收敛 Profile 创建语义：`POST /api/profiles/{id}` 删除「load_profile 既有档案后合并覆盖」的死代码（Service 层原子 create 的 ProfileIdConflict 检查使该分支永不落盘，实际请求以 409 拒绝），收敛为纯新建构造——消除未来放宽冲突检查时空密码分支静默清空既有加密密码的陷阱；不引入 Web 层 exists 预检，保持 Service 层原子 create 为唯一冲突裁判（防 TOCTOU）。新增回归测试：重复 POST 409 且原数据不变、新建空密码保持空串、PUT 空密码保留既有密码
