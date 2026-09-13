@@ -4,6 +4,8 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- ENG-1 Engine 崩溃重启窗口消除：`watch_engine` 重启流程改为「先 spawn 新 Engine 并原子换入 slot、再做 5s 冷却等待」——原顺序在冷却窗口内 slot 持已死句柄，Web/托盘全部命令派发返回 ChannelClosed；新 Engine 处于 Stopped 态即可正常接单，冷却仅延后恢复监测时机，崩溃循环限速语义保留
+- ENG-2 探测失败刷新最近检测时间：`ProbeMessage::Failed` 分支在补发优先级检测后合并最小 Engine 快照（仅刷新 last_check，网络结论沿用上次、evidence 置 None），monitor 系统性故障期间前端「最近检测」不再冻结在最后一次成功值；探测定时器维持原周期不重建的有意设计不变
 - UPD-1 更新检查进度闸门：后台/手动/启动检查在 `update_in_progress`（下载/应用进行中）时跳过 `PartialSnapshot::Update` 合并——此前四处 merge 的 `progress: None` 会把下载任务每 500ms 推送的实时进度清零、`available: false` 会把"更新中"误报回退；`update_in_progress` 字段改 `Arc<AtomicBool>` 以便后台 task 跨 'static 读取；`record_last_check` 不受影响
 - UPD-2 下载失败清理半写入 .tmp：停滞超时、chunk 读取失败、写盘失败、flush 失败四条错误路径统一经 `cleanup_tmp` 删除残留（对齐既有超限/校验失败分支），不再等到 3 天 stale 清理
 - UPD-3 `--restarting` 剥离口径统一：新增 `launcher::collect_args_without_restarting`（args_os 采集 + retain 剥离），更新 pending 的 `original_args` 与重启后继共用——此前更新捕获用 `env::args()` 原样含 `--restarting`，重启中进程执行更新会让更新后的新进程错误继承重启语义；顺带消除非 Unicode 参数 panic 隐患

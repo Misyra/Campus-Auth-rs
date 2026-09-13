@@ -837,16 +837,15 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
             info!(
                 attempt = restart_count,
                 max = MAX_RESTART_ATTEMPTS,
-                "Engine 重启中（{}s 后）...",
+                "Engine 重启中（立即换入新实例，{}s 冷却后恢复检测）...",
                 RESTART_DELAY_SECS
             );
-            // 等待重启延迟，期间若收到 shutdown 则提前退出
-            tokio::select! {
-                biased;
-                _ = shutdown_token.cancelled() => return,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)) => {}
-            }
 
+            // ENG-1：先 spawn 新 Engine 并原子换入 slot，再做冷却等待——
+            // 原顺序（先 sleep 后 spawn）会在 5s 窗口内让 slot 持已死句柄，
+            // Web/托盘所有命令派发得到 ChannelClosed。新 Engine 处于 Stopped
+            // 态即可正常接收命令；冷却 sleep 仅延后「恢复监测」时机，保留
+            // 崩溃循环限速语义（连续崩溃仍以 ≥5s 间隔消耗重启次数）。
             // 从 ConfigService 重新加载配置，内部状态重置为默认值
             let deps = EngineDeps {
                 config_service: config.clone(),
@@ -861,6 +860,13 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
 
             // 引用收口：新句柄原子换入 slot，Web/托盘/关闭流程即刻指向新 Engine
             container.engine.replace(new_handle);
+
+            // 等待重启冷却，期间若收到 shutdown 则提前退出
+            tokio::select! {
+                biased;
+                _ = shutdown_token.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(RESTART_DELAY_SECS)) => {}
+            }
 
             // 按崩溃前状态恢复监测（monitoring=false 空转会让用户以为还在监测）
             if was_monitoring {

@@ -604,6 +604,37 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
                 tracing::debug!("补发排队的优先级探测");
                 handle_network_check(inner, deps);
             }
+            // ENG-2：失败同样刷新「最近检测」——monitor 系统性故障期间前端
+            // 时间冻结在最后一次成功值，会让用户误判检测停摆。合并最小快照：
+            // 网络结论与证据沿用上次（失败不产生新证据，evidence 置 None），
+            // 仅刷新 last_check；探测定时器维持原周期不重建（有意设计，见下）
+            let now = Local::now();
+            inner.last_check_time = Some(now);
+            let paused = is_any_pause_active(inner, deps);
+            let cooling_down = inner.cooling_down_until.is_some();
+            let cooling_down_remaining = cooling_down.then(|| {
+                inner
+                    .cooling_down_until
+                    .unwrap()
+                    .saturating_duration_since(Instant::now())
+                    .as_secs() as u32
+            });
+            let state = if inner.monitoring {
+                EngineState::Running
+            } else {
+                EngineState::Stopped
+            };
+            deps.status_manager.merge(PartialSnapshot::Engine {
+                state,
+                network: inner.last_assessment.status,
+                assessment: inner.last_assessment.clone(),
+                evidence: None,
+                last_check: now,
+                pause: paused,
+                cooling_down,
+                cooling_down_remaining,
+                consecutive_failures: inner.consecutive_failures,
+            });
             return;
         }
     };
