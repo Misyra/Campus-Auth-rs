@@ -50,6 +50,13 @@ export const router = createRouter({
   routes,
 });
 
+// FE2-9：离开任务/脚本编辑页且存在未保存草稿时，确认是否放弃
+// （动态导入：editorGuard 依赖的 composable 链可能回指 router，避免求值期循环依赖）
+router.beforeEach(async (to, from) => {
+  const { guardEditorLeave } = await import("./editorGuard");
+  return guardEditorLeave(to, from);
+});
+
 // 离开设置页且存在未保存修改时，确认是否放弃
 router.beforeEach(async (to, from) => {
   const { dirty, fetchConfig, saveFailed } = useConfig();

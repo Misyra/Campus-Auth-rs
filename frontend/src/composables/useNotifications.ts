@@ -20,6 +20,9 @@ const NOTIFY_CATEGORY_LABELS: Record<string, string> = {
 const notifications = reactive<NotificationEntry[]>([]);
 const unreadNotifications = ref(0);
 const showNotifications = ref(false);
+// FE2-10：模块级自增 id——通知项曾以 time+message 作 :key，同秒同文案（批量
+// 通知）会撞 key 导致渲染错位
+let notifyIdCounter = 0;
 
 function formatNotifyTime(): string {
   const now = new Date();
@@ -36,6 +39,7 @@ function notify(
   action?: NotificationAction | null,
 ): void {
   const entry: NotificationEntry = {
+    id: ++notifyIdCounter,
     success,
     message,
     time: formatNotifyTime(),

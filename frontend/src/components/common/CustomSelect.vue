@@ -12,10 +12,11 @@ import IconApp from "@/components/common/IconApp.vue";
 // 自定义下拉选择组件（替代原 components.js 的 CustomSelect）。
 // 支持键盘导航（↑↓ Enter Esc 空格）、点击外部关闭、无障碍属性。
 
-import { ref, computed, nextTick, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, onBeforeUnmount, useId } from "vue";
 
-let selectIdCounter = 0;
-const selectUid = `cs-${++selectIdCounter}`;
+// FE2-4：script setup 顶层的计数器在每次实例化时重置，所有实例 id 恒为 cs-1，
+// 同页多实例 aria-activedescendant 不唯一；useId() 由框架保证全局唯一
+const selectUid = useId();
 
 const props = withDefaults(
   defineProps<{

@@ -89,7 +89,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
           <div v-if="!notifications.length" class="empty-state empty-state--sm">暂无通知</div>
           <div
             v-for="n in notifications"
-            :key="n.time + n.message"
+            :key="n.id"
             class="notification-item"
             :class="n.success ? 'notify-success' : 'notify-error'"
           >

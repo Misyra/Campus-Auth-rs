@@ -418,6 +418,7 @@ export function useTasks() {
     deleteTask,
     showTaskEditor,
     closeTaskEditor,
+    clearTaskDraft,
     setTaskDraft,
     isTaskDirty,
     confirmDiscardTaskIfDirty,

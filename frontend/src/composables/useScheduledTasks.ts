@@ -196,6 +196,9 @@ function closeScheduledTaskModal(): void {
 }
 
 async function saveScheduledTask(validTargetIds?: string[]): Promise<void> {
+  // FE1-2：composable 层入口守卫——按钮 :disabled 只覆盖模板路径，
+  // 任何绕过模板的调用点在此拦下（与 useTasks.saveTask 对齐）
+  if (scheduledTaskFormLoading.value) return;
   const form = scheduledTaskForm.value;
   if (!form.name.trim()) {
     toastOnly(false, "请输入任务名称");

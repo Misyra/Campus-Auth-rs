@@ -174,6 +174,8 @@ export interface LogEntry {
 
 /** 通知条目（前端内存态） */
 export interface NotificationEntry {
+  /** 自增唯一 id（渲染 :key 用；time+message 组合在同秒同文案时会冲突） */
+  id: number;
   success: boolean;
   message: string;
   time: string;

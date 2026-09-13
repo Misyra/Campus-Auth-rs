@@ -311,6 +311,7 @@ export function useScripts() {
     fetchAvailableBinaries,
     showScriptEditor,
     closeScriptEditor,
+    clearScriptDraft,
     isScriptDirty,
     onBinarySelectChange,
     saveScript,

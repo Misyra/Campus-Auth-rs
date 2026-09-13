@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
-import { ref, computed, onMounted, nextTick, watch } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
 import { useEnvironment } from "@/composables/useEnvironment";
@@ -20,6 +20,9 @@ const router = useRouter();
 const { envStatus, refreshEnv } = useEnvironment();
 const showEnvBanner = computed(() => envStatus.value != null && !envStatus.value.capability_ready);
 
+// FE2-8：延迟复查句柄须可清理——组件卸载后触发的 refreshEnv 虽是幂等 GET，
+// 但仍会更新已卸载页面关联的单例状态，提前离开时取消
+let envRetryTimer: ReturnType<typeof setTimeout> | null = null;
 onMounted(() => {
   void ui.fetchLoginHistory();
   void logs.fetchLogs();
@@ -27,11 +30,14 @@ onMounted(() => {
     // 后端启动时的环境探测是后台任务，可能晚于本次请求完成：首次取到
     // "未就绪"时延迟复查一次，避免磁盘环境完好却误挂未就绪横幅
     if (envStatus.value && !envStatus.value.capability_ready) {
-      setTimeout(() => {
+      envRetryTimer = setTimeout(() => {
         void refreshEnv();
       }, 5000);
     }
   });
+});
+onBeforeUnmount(() => {
+  if (envRetryTimer != null) clearTimeout(envRetryTimer);
 });
 
 // ---- 登录历史 — 复用 useUi 共享状态，避免手动登录后 Dashboard 不更新 ----
