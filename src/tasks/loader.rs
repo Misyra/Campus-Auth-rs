@@ -230,7 +230,8 @@ impl TaskManager {
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(TaskError::IoError)?;
-        let task: TaskKind = serde_json::from_str(&content).map_err(TaskError::JsonError)?;
+        let task: TaskKind =
+            serde_json::from_str(&strip_bom(content)).map_err(TaskError::JsonError)?;
         // 「保存强校验、加载宽校验 + 告警」（G8）：磁盘上被外部工具改坏的任务仍尽量
         // 加载（容错，不拒绝），但通过日志暴露校验失败，便于排查"看似正常却执行异常"
         if let Ok(value) = serde_json::to_value(&task) {
@@ -670,7 +671,7 @@ impl TaskManager {
     /// 按路径同步读取 `.order.json`（供 spawn_blocking 闭包内使用，无需 &self）
     fn read_order_at(path: &Path) -> OrderData {
         match std::fs::read_to_string(path) {
-            Ok(s) => match serde_json::from_str(&s) {
+            Ok(s) => match serde_json::from_str(&strip_bom(s)) {
                 Ok(o) => o,
                 Err(e) => {
                     // 损坏即静默重置会丢失用户自定义排序与活跃任务，必须留痕
@@ -793,7 +794,7 @@ impl TaskManager {
                 return None;
             }
         };
-        let v: Value = match serde_json::from_str(&content) {
+        let v: Value = match serde_json::from_str(&strip_bom(content)) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -829,7 +830,7 @@ impl TaskManager {
                 return None;
             }
         };
-        let v: Value = match serde_json::from_str(&content) {
+        let v: Value = match serde_json::from_str(&strip_bom(content)) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -874,6 +875,7 @@ impl TaskManager {
         let (name, description) = if meta_path.exists() {
             match std::fs::read_to_string(&meta_path)
                 .ok()
+                .map(strip_bom)
                 .and_then(|c| serde_json::from_str::<Value>(&c).ok())
             {
                 Some(v) => (
@@ -919,6 +921,18 @@ fn is_valid_task_id(id: &str) -> bool {
     }
     id.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// 剥离 UTF-8 BOM 前缀（TSK-1）
+///
+/// Windows 记事本默认以「带 BOM 的 UTF-8」保存，serde_json::from_str 遇前导
+/// U+FEFF 直接报错——load_task 报解析失败、列表摘要 warn 后静默跳过，用户会
+/// 误以为任务丢失。所有任务文件读取入口统一先经本函数。
+fn strip_bom(content: String) -> String {
+    match content.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => content,
+    }
 }
 
 /// 原子写入 JSON（委托给 utils::io::atomic_write_json）
@@ -1287,6 +1301,46 @@ mod tests {
         } else {
             panic!("应为 Script 类型");
         }
+    }
+
+    /// TSK-1：带 UTF-8 BOM 的任务文件（Windows 记事本默认保存格式）必须
+    /// 正常加载并出现在列表摘要，不得解析失败或被静默跳过
+    #[tokio::test]
+    async fn test_load_task_with_utf8_bom() {
+        let (tmp, mgr) = make_task_manager().await;
+        let task = TaskKind::Script(ScriptTaskConfig {
+            common: CommonFields {
+                name: "BOM 任务".to_string(),
+                ..Default::default()
+            },
+            content: Some("print('hi')".to_string()),
+            ..Default::default()
+        });
+        mgr.save_task("bom_task", &task).await.unwrap();
+
+        // 模拟记事本保存：重写为带 BOM 的 UTF-8
+        let path = tmp
+            .path()
+            .join("tasks")
+            .join("scripts")
+            .join("bom_task.json");
+        assert!(path.exists(), "脚本任务文件应存在");
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("\u{feff}{content}")).unwrap();
+
+        // 完整加载不受 BOM 影响
+        let loaded = mgr.load_task("bom_task").await.unwrap();
+        match loaded {
+            TaskKind::Script(cfg) => assert_eq!(cfg.common.name, "BOM 任务"),
+            other => panic!("应为 Script 类型，实际 {other:?}"),
+        }
+
+        // 列表摘要不被静默跳过
+        let summaries = mgr.list_all_tasks().await;
+        assert!(
+            summaries.iter().any(|s| s.id == "bom_task"),
+            "带 BOM 的任务必须出现在任务列表"
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,8 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- LOG-1 Auto 来源补环境自动初始化：引擎自动登录（`LoginSource::Auto`）此前被 `prepare_browser` 的自动初始化条件遗漏——`execute_login_attempt` 同样占用浏览器会话槽位，环境未就绪时占槽后立即失败并按重试策略反复空耗；现与 Manual/LoginOnce/Browser 一样触发 `ensure_capability`（与取消令牌竞速）
+- TSK-1 任务文件 BOM 兼容：新增 `strip_bom` 统一剥离 UTF-8 BOM 前缀，覆盖 load_task、列表摘要（read_summary/read_summary_typed）、`.order.json`、`.meta.json` 全部五个读取入口——Windows 记事本默认带 BOM 保存此前会导致 serde_json 解析失败，任务从列表静默消失；新增带 BOM 文件的加载与列表回归测试
 - CFG-1 迁移结果写回：`run_migrations` 结束时把 `config_version` 写回 `CURRENT`——此前仅改返回值，落盘的 settings.json 永远停留在迁移前版本，每次启动重跑迁移链并原子重写盘（提交点契约失效）；v5→v6 内硬编码的中间 checkpoint（=6）保留供中途失败续跑定位。修正固化 version=6 的测试断言并新增写回回归用例
 - CFG-3 配置写盘后 reload：`update_profile` / `create_profile` / `modify_settings_and_profile_tx` 落盘成功后统一触发 `reload_with_signal`，消除 ArcSwap 快照滞后（运行中 Engine/Monitor 持旧凭据）；信号按语义区分——更新发 `ProfileSwitched{id}`（与 switch_profile 对齐，调度器增量处理不重载任务表）、新建与事务发 `GlobalChanged`；事务函数的 reload 置于 profiles/settings 两锁释放之后，避免与 `reload_lock` 形成新锁序；三处均 best-effort（失败仅告警，重试 reload 可恢复一致）
 - COR-1 挂账：`ServiceContainer` 无 `Drop`（启动半失败路径的常驻任务不会被显式取消）记入 `docs/known-issues.md` #21，记录复核口径——startup 实际不可失败、失败即 exit(1) 由 OS 收尸，仅当启动流程变为部分失败进程存活时才值得引入回滚编排

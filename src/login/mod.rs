@@ -620,9 +620,11 @@ impl LoginOrchestrator {
 
     /// 浏览器渠道预检（1b）+ 可用性终验（1c），返回本次登录生效的渠道覆盖。
     ///
-    /// `Err(handle)` = 应直接返回的立即终态句柄。1b 的环境初始化只守
-    /// Browser/Manual 两条路径（其余来源的 Worker 缺失由会话内 Bridge
-    /// 执行阶段以 WorkerNotInstalled 失败，已在 session 层统一处理）。
+    /// `Err(handle)` = 应直接返回的立即终态句柄。1b 的环境初始化守
+    /// Browser/Manual/LoginOnce/Auto 四条路径（其余来源的 Worker 缺失由会话内
+    /// Bridge 执行阶段以 WorkerNotInstalled 失败，已在 session 层统一处理）。
+    /// Auto 不能遗漏（LOG-1）：引擎自动登录走 execute_login_attempt，同样占用
+    /// 浏览器会话槽位，环境未就绪时占槽后立即失败并触发重试，反复空耗槽位。
     async fn prepare_browser(
         &self,
         source: LoginSource,
@@ -685,12 +687,15 @@ impl LoginOrchestrator {
             tracing::info!("浏览器任务环境自动初始化成功，继续执行登录");
         }
 
-        // 手动登录同样自动初始化：未安装时直接拒绝会让全新安装用户无从操作。
+        // 手动/引擎自动登录同样自动初始化：未安装时直接拒绝会让全新安装用户
+        // 无从操作（Manual），Auto 则会占住会话槽位后失败并反复重试（LOG-1）。
         // 复用同一 BootstrapGate，显式按钮与登录并发时只跑一次 uv sync。
-        if matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
-            && !self.environment.capability_ready()
+        if matches!(
+            source,
+            LoginSource::Manual | LoginSource::LoginOnce | LoginSource::Auto
+        ) && !self.environment.capability_ready()
         {
-            tracing::info!("手动登录触发环境自动初始化...");
+            tracing::info!("登录触发环境自动初始化（来源: {source:?}）...");
             self.status.merge(crate::status::PartialSnapshot::Login {
                 status: crate::status::LoginStatus::Running,
                 source: Some(source),
@@ -709,7 +714,7 @@ impl LoginOrchestrator {
                     .status()
                     .last_error
                     .unwrap_or_else(|| e.to_string());
-                warn!("手动登录环境自动初始化失败: {detail}");
+                warn!("登录环境自动初始化失败: {detail}");
                 return Err(self
                     .immediate_handle(
                         source,
