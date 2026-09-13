@@ -28,6 +28,13 @@
 - FE2-4 CustomSelect 改 useId()（实例 id 不再恒为 cs-1）；FE2-10 通知自增 id 替代 time+message key；FE2-8 Dashboard 5s 复查定时器卸载清理；FE1-2 saveScheduledTask 补入口 in-flight 守卫
 - NEW-1 LoginSource::Browser 注释口径修正（活来源而非历史遗留，API 契约与历史反序列化保留）
 
+**复核收口（73e5c4d，A 组 7 条 + C1 + B2 + B5）**
+- MON-4 补漏通配地址：判定谓词改 `is_blocked_redirect_ip` 并拦 `0.0.0.0`/`::`（含 v4-mapped），与 `web/ssrf` 口径对齐；放行决策抽纯函数 `all_addrs_allowed`、地址构造抽 `build_pinned_client`，新增 3 个离线用例锁定放行分支（含「钉扎后确实按已校验地址连接」，手工喂解析结果绕开真实 DNS）；残余风险 B1/B3/B4 改挂 known-issues #22 ⑱⑲⑳（挂账由 18 项增至 21 项）
+- LOG-5 收口：panic 补偿路径去 `.expect`（改 `match &g.active_session` 直接取引用），补偿自身不再有 panic 点（原先若触发会跳过 notify_one 与清槽位）
+- ENV-10 收口：`check_uv_on_path` 补 `.kill_on_drop(true)`，兑现注释承诺并与 `uv_executable_works` 同口径
+- 注释/断言失实修正：Browser 抢占优先级 3 为次高（LoginOnce=4 最高）、detect-portal handler 去「无 SSRF 面」过时口径、mock 泄漏注释 8→6、editorGuard 补守卫覆盖范围（不含刷新/关窗）、隔离性断言改 `not.toHaveBeenCalled()`
+- 前端类型精度：`ScheduledTaskPayload` 由 `Omit` 改显式 interface（`ScheduledTask` 的索引签名使 `Omit` 不剔除任何键，必填字段全丢）
+
 **挂账与验证**
 - known-issues.md 新增 #22：18 项 P3 挂账逐项理由（WEB-2、WEB-5、COR-4、UPD-4/ENV-8、COR-3、BRG-3、BRG-5、ENV-9、WE2-7、TSK-4/6/8、FE1-5、ENG-4/6、UPD-8、ENV-6）
 - 验证：每批定向测试（config/login/monitor/engine/bridge/web routes/updater/environment + pytest 182 + vitest 91）+ fmt + clippy 全目标 -D warnings；收尾全量 cargo test / npm run build / vue-tsc 0 错
