@@ -135,6 +135,17 @@ async fn apply_flat_settings_patch(
         }
     }
 
+    // 端口范围硬校验（对齐 v5 Pydantic ge=1 le=65535 口径）：serde 的 u16 只保证
+    // 类型，port=0 落盘后重启将永远无法按配置端口监听（Linux 非 root/Docker 直接
+    // 绑定失败起不来），必须在保存前拦下；<1024 特权端口不强制拒绝（Windows 无
+    // 特权概念、Docker 可能绑 80）
+    if let Some(port) = global_patch.get("app").and_then(|app| app.get("port")) {
+        let valid = port.as_u64().is_some_and(|p| (1..=65535).contains(&p));
+        if !valid {
+            return Err(ApiError::BadRequest("端口范围必须在 1-65535 之间".into()));
+        }
+    }
+
     // 先在内存中构造待提交 Profile；若同一请求还包含全局字段，必须等全局合并校验
     // 成功后由 ConfigService 双域事务一起落盘，禁止先写凭证形成半提交。
     let profile_to_save = if !profile_patch.is_empty() {
@@ -1329,6 +1340,55 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         // 校验失败时不应落盘
         assert_eq!(inner.lock().unwrap().save_calls, 0);
+    }
+
+    /// 端口硬校验：port=0 / 越界值返回 400 且不落盘，合法值（含前端字段名
+    /// app_settings 映射到 app）正常保存
+    #[tokio::test]
+    async fn test_patch_settings_rejects_invalid_port() {
+        for invalid in [0, 65536, -1] {
+            let (app, inner) = mock_app();
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/config")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "app_settings": { "port": invalid } }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "port={invalid} 应被拒绝"
+            );
+            assert_eq!(
+                inner.lock().unwrap().save_calls,
+                0,
+                "port={invalid} 校验失败不应落盘"
+            );
+        }
+
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "app_settings": { "port": 8080 } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(inner.lock().unwrap().settings.global.app.port, 8080);
     }
 
     /// 同一请求含凭证与非法全局字段时，两域均不得落盘。

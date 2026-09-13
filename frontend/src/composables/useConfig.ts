@@ -133,8 +133,9 @@ function validateConfig(): { errors: string[]; warnings: string[] } {
     warnings.push("代理地址必须以 http:// 或 https:// 开头");
   }
   const port = config.app_settings.port;
-  // 端口非法是硬错误：服务重启后将无法按该端口监听，保存前必须拦下
-  if (port && (port < 1 || port > 65535)) {
+  // 端口非法是硬错误：服务重启后将无法按该端口监听，保存前必须拦下。
+  // 不能用真值判断——port=0 恰恰是需要拦截的值，v-model.number 的空串/NaN 也要拦
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
     errors.push("端口范围必须在 1-65535 之间");
   }
   return { errors, warnings };

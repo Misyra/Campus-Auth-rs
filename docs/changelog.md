@@ -2,6 +2,13 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-13 v5 迁移映射与端口校验修复）
+
+- 修正 v5→v6 配置迁移的 `enable_local_check` 误映射：经 v5（Python 版）源码核实，该字段是登录前物理网卡连接检查开关（`check_login_prerequisites`），现正确改名到 `local_check_enabled`；URL 内容检测在 v5 无独立开关（`url_check_urls` 列表非空即生效），`url_enabled` 改为按拆分后目标列表是否为空派生（与 Web 层旧客户端"非空即启用"派生口径一致），不再吞掉 v5 的本地检查开关值。存量迁移用户（config_version 6-8）不做 v9 回写（`url_enabled=true` 无法与用户主动开启区分），影响与补救口径记入 `docs/known-issues.md` #20
+- Web API 端口硬校验（对齐 v5 Pydantic `ge=1 le=65535` 口径）：`PATCH /api/config` 在合并前校验 `app.port ∈ 1..=65535`，0/负数/越界返回 400 且不落盘——此前 serde u16 仅保证类型，port=0 落盘后重启控制台将永远无法按配置端口监听（Linux 非 root/Docker 直接绑定失败起不来）；<1024 特权端口不强制拒绝（Windows 无特权概念、Docker 可能绑 80）
+- 前端端口校验修复 0/NaN 穿透：`validateConfig` 原真值判断 `if (port && ...)` 恰好放过需要拦截的 port=0，改为显式校验 `Number.isInteger` 与 1-65535 范围；启动链路 `launcher.rs` 的 `.max(1)` 保留作最后兜底
+- 测试：迁移测试断言新映射语义并新增派生独立性用例（关本地检查+非空列表→url_enabled 开、开本地检查+空列表→url_enabled 关）；路由层新增端口非法 400 不落盘与合法值保存用例
+
 ## 开发中（2026-09-12 Python Worker 功能审计修复）
 
 - 统一 Rust 任务校验、AI 生成提示、任务指南与 Python Worker 的步骤契约：`click_select` 明确必填 `selector + value`，`option_selector` 仅作可选搜索范围；`assert_text` 允许省略 selector 并默认检查页面正文

@@ -1,4 +1,4 @@
-//! 配置 schema 版本迁移 pipeline（v5 → v6 → v7）
+//! 配置 schema 版本迁移 pipeline（v5 → v6 → v7 → v8）
 //!
 //! 启动时若 `settings.json` 的 `config_version` 低于当前版本，按 `MIGRATIONS` 顺序
 //! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用覆盖写入，
@@ -136,7 +136,11 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             rename_field(monitor, "check_interval_seconds", "check_interval");
             rename_field(monitor, "enable_tcp_check", "tcp_enabled");
             rename_field(monitor, "enable_http_check", "http_enabled");
-            rename_field(monitor, "enable_local_check", "url_enabled");
+            // v5 的 `enable_local_check` 是登录前物理网卡连接检查开关（decision.py
+            // `check_login_prerequisites`），对应 `local_check_enabled`；URL 内容检测
+            // 在 v5 没有独立开关（`url_check_urls` 列表非空即生效），因此 `url_enabled`
+            // 在下方按拆分出的目标数派生，而非由该字段改名而来。
+            rename_field(monitor, "enable_local_check", "local_check_enabled");
             rename_field(monitor, "ping_targets", "tcp_targets");
             rename_field(monitor, "test_urls", "http_targets");
             // v5 把 URL 与期望正文编码成 `url|expected`；v6 拆成目标数组与映射。
@@ -162,8 +166,12 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
                             }
                         }
                     }
+                    // v5 语义：列表非空即启用 URL 内容检测，与 Web 层旧客户端的
+                    // “非空即启用”派生口径一致
+                    let url_enabled = !targets.is_empty();
                     m.insert("url_targets".into(), Value::Array(targets));
                     m.insert("url_expected_responses".into(), Value::Object(expected));
+                    m.insert("url_enabled".into(), Value::Bool(url_enabled));
                 }
             }
             // 废弃字段清理
@@ -417,6 +425,9 @@ mod tests {
         assert_eq!(monitor["check_interval"], 30);
         assert_eq!(monitor["tcp_enabled"], true);
         assert_eq!(monitor["http_enabled"], false);
+        // enable_local_check 是登录前物理网卡检查开关 → local_check_enabled
+        assert_eq!(monitor["local_check_enabled"], true);
+        // url_enabled 由非空 url_check_urls 派生（v5 无独立 URL 检测开关）
         assert_eq!(monitor["url_enabled"], true);
         assert_eq!(monitor["tcp_targets"][0], "1.1.1.1");
         assert_eq!(monitor["http_targets"][0], "http://test");
@@ -426,6 +437,7 @@ mod tests {
         for f in [
             "check_interval_seconds",
             "enable_tcp_check",
+            "enable_local_check",
             "ping_targets",
             "access_log",
             "block_proxy",
@@ -439,6 +451,29 @@ mod tests {
         assert_eq!(v["global"]["app"]["auto_start_browser"], true);
         assert!(v["global"]["app"].get("app_port").is_none());
         assert!(v["global"]["app"].get("shell_path").is_none());
+    }
+
+    /// v5 迁移中 url_enabled 派生与 local_check_enabled 映射相互独立：
+    /// 前者只看 url_check_urls 是否非空，后者只看 enable_local_check 原值
+    #[test]
+    fn test_migrate_v5_to_v6_url_enabled_derives_from_list_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 关闭本地检查但保留非空 URL 列表：url_enabled 仍应为 true
+        let mut v = v5_settings();
+        v["global"]["monitor"]["enable_local_check"] = serde_json::json!(false);
+        migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
+        let monitor = &v["global"]["monitor"];
+        assert_eq!(monitor["local_check_enabled"], false);
+        assert_eq!(monitor["url_enabled"], true);
+
+        // 开启本地检查但清空 URL 列表（v5 关闭 URL 检测的唯一方式）：url_enabled 应为 false
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = v5_settings();
+        v["global"]["monitor"]["url_check_urls"] = serde_json::json!([]);
+        migrate_v5_to_v6(tmp.path(), &mut v).unwrap();
+        let monitor = &v["global"]["monitor"];
+        assert_eq!(monitor["local_check_enabled"], true);
+        assert_eq!(monitor["url_enabled"], false);
     }
 
     #[test]
