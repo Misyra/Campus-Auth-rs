@@ -141,6 +141,8 @@ fn decode_console_output(bytes: &[u8]) -> String {
 fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
     let mut result = Vec::new();
     let mut current = String::new();
+    // 块首标题行（块内重检会在多语言/异常格式下错覆盖接口名，故只在此处记录）
+    let mut current_header = String::new();
     let mut in_block = false;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -150,11 +152,12 @@ fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
             && trimmed.ends_with(':');
         if is_header {
             if in_block && !current.is_empty() {
-                if let Some(info) = parse_adapter_block(&current) {
+                if let Some(info) = parse_adapter_block(&current_header, &current) {
                     result.push(info);
                 }
             }
             current.clear();
+            current_header = trimmed.to_string();
             in_block = true;
         }
         if in_block {
@@ -163,7 +166,7 @@ fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
         }
     }
     if in_block && !current.is_empty() {
-        if let Some(info) = parse_adapter_block(&current) {
+        if let Some(info) = parse_adapter_block(&current_header, &current) {
             result.push(info);
         }
     }
@@ -171,18 +174,15 @@ fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
 }
 
 /// 从单个适配器块解析出 InterfaceInfo（无有效 IPv4 时返回 None）
-fn parse_adapter_block(block: &str) -> Option<InterfaceInfo> {
-    let mut header: &str = "";
+///
+/// `header` 为块首标题行（由 [`parse_ipconfig`] 识别后传入），块内不再重检——
+/// 描述行等恰好以"adapter/适配器 …:"结尾的内容此前会错覆盖接口名。
+fn parse_adapter_block(header: &str, block: &str) -> Option<InterfaceInfo> {
     let mut ipv4: Option<Ipv4Addr> = None;
     let mut gateway: Option<Ipv4Addr> = None;
     let mut media_disconnected = false;
     for line in block.lines() {
         let trimmed = line.trim();
-        if (trimmed.contains("适配器") || trimmed.to_ascii_lowercase().contains("adapter"))
-            && trimmed.ends_with(':')
-        {
-            header = trimmed;
-        }
         // IPv4 地址（中英文标签兼容）
         if trimmed.contains("IPv4 地址") || trimmed.contains("IPv4 Address") {
             if let Some(ip) = extract_ipv4(trimmed) {
@@ -335,12 +335,17 @@ impl NetworkDetect for WindowsDetect {
     async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
         let out = run_command("route", &["print", "0.0.0.0"]).await?;
         let mut gateways = Vec::new();
+        // route print 会同时输出「活动路由」与「持久路由」两段，同一网关可能
+        // 重复出现；保序去重，避免消费方对列表语义产生歧义
+        let mut seen = std::collections::HashSet::new();
         for line in out.lines() {
             let cols: Vec<&str> = line.split_whitespace().collect();
             // 0.0.0.0 行：第一列是目标网络，第二列是网关
             if cols.len() >= 3 && cols[0] == "0.0.0.0" {
                 if let Ok(ip) = cols[2].parse::<Ipv4Addr>() {
-                    gateways.push(ip);
+                    if seen.insert(ip) {
+                        gateways.push(ip);
+                    }
                 }
             }
         }

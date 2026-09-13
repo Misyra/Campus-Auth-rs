@@ -119,10 +119,9 @@ const WINDOWS_RESERVED_NAMES: &[&str] = &[
 ];
 
 fn is_windows_reserved_name(id: &str) -> bool {
+    // 调用方 is_valid_profile_id 已拒绝含 '.' 的 id，无需再按 '.' 截 stem
     let upper = id.to_ascii_uppercase();
-    // 保留名本身或保留名 + "." 后缀（如 CON.json 的 stem）
-    let stem = upper.split('.').next().unwrap_or(&upper);
-    WINDOWS_RESERVED_NAMES.contains(&stem)
+    WINDOWS_RESERVED_NAMES.contains(&upper.as_str())
 }
 
 /// 校验 Profile ID 是否可安全用作 Profile 文件名（`profiles/<id>.json`）
@@ -153,8 +152,6 @@ struct SettingsCache {
     data: Option<SettingsData>,
     /// 上次读取时的文件修改时间
     mtime: Option<SystemTime>,
-    /// 磁盘文件损坏且无缓存可用（隔离态：拒绝保存，防止默认值覆盖用户配置）
-    poisoned: bool,
 }
 
 /// 单个 Profile 的内存缓存 + mtime
@@ -334,7 +331,6 @@ impl ConfigService {
             settings_cache: Mutex::new(SettingsCache {
                 data: Some(settings.clone()),
                 mtime: settings_mtime,
-                poisoned: false,
             }),
             profile_cache: Mutex::new(HashMap::new()),
             crypto,
@@ -407,23 +403,17 @@ impl ConfigService {
                 let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 c.data = Some(s.clone());
                 c.mtime = mtime;
-                // 文件恢复可解析（可能被外部修复），解除隔离
-                c.poisoned = false;
                 s
             }
             Err(e) => {
-                // 损坏时绝不静默返回默认值：调用方随后的"读→改→存"会用
-                // 默认值原子覆盖用户的原始配置，造成配置数据丢失。
-                // 有缓存则沿用旧快照；无缓存则进入隔离态并拒绝后续保存。
-                let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
+                // 损坏时绝不静默用默认值覆盖：有缓存则沿用旧快照（正常路径恒命中，
+                // new_sync 起缓存即为 Some 且无置空写点）；无缓存分支仅防御性保留。
+                let c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 if let Some(prev) = c.data.clone() {
                     tracing::warn!("settings.json 解析失败，沿用内存缓存: {e}");
                     return prev;
                 }
-                tracing::error!(
-                    "settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝）: {e}"
-                );
-                c.poisoned = true;
+                tracing::error!("settings.json 解析失败且无缓存可用，回退默认配置: {e}");
                 SettingsData::default()
             }
         }
@@ -437,15 +427,14 @@ impl ConfigService {
     /// 同步实现。内部 settings_cache 为 `std::sync::Mutex`，临界区极短（mtime
     /// 比对与缓存替换），在阻塞线程中短暂持锁是安全的。
     pub async fn load_settings_async(&self) -> SettingsData {
-        // 降级不回默认：优先沿用内存缓存并置隔离态，防默认值覆盖用户配置
+        // 降级不回默认：优先沿用内存缓存（缓存恒存在，无缓存分支仅防御性保留）
         let fallback_cached = || {
-            let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
+            let c = self.settings_cache.lock().unwrap_or_else(recover_lock);
             if let Some(prev) = c.data.clone() {
                 tracing::warn!("load_settings_async 异常，沿用内存缓存");
                 return prev;
             }
-            tracing::error!("load_settings_async 异常且无缓存可用，进入隔离态");
-            c.poisoned = true;
+            tracing::error!("load_settings_async 异常且无缓存可用，回退默认配置");
             SettingsData::default()
         };
         let Some(this) = self.self_weak.upgrade() else {
@@ -464,12 +453,6 @@ impl ConfigService {
 
     /// 原子写入 settings.json
     pub async fn save_settings(&self, data: &SettingsData) -> Result<(), ConfigError> {
-        // 隔离态拒绝保存：防止基于降级默认值的修改覆盖损坏前的用户配置
-        if self.settings_poisoned() {
-            return Err(ConfigError::ConfigWriteError {
-                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
-            });
-        }
         let _guard = self.settings_lock.lock().await;
         self.write_settings_locked(data).await
     }
@@ -486,12 +469,6 @@ impl ConfigService {
     where
         F: FnOnce(&mut SettingsData),
     {
-        // 隔离态拒绝保存（与 save_settings 同语义）
-        if self.settings_poisoned() {
-            return Err(ConfigError::ConfigWriteError {
-                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
-            });
-        }
         let _guard = self.settings_lock.lock().await;
         let mut settings = self.load_settings();
         f(&mut settings);
@@ -511,12 +488,6 @@ impl ConfigService {
         &self,
         f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
     ) -> Result<Result<(), String>, ConfigError> {
-        // 隔离态拒绝保存（与 save_settings 同语义）
-        if self.settings_poisoned() {
-            return Err(ConfigError::ConfigWriteError {
-                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
-            });
-        }
         let _guard = self.settings_lock.lock().await;
         let settings = self.load_settings();
         let new_settings = match f(settings) {
@@ -537,11 +508,6 @@ impl ConfigService {
         profile: ProfileData,
         f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
     ) -> Result<Result<(), String>, ConfigError> {
-        if self.settings_poisoned() {
-            return Err(ConfigError::ConfigWriteError {
-                reason: "settings.json 损坏（无可用缓存），已拒绝保存以保护原配置；请修复或恢复备份后重启".into(),
-            });
-        }
         if !is_valid_profile_id(&profile.id) {
             return Err(ConfigError::InvalidProfileId {
                 id: profile.id.clone(),
@@ -582,14 +548,6 @@ impl ConfigService {
             tracing::warn!("settings+Profile 事务提交后配置重载失败（快照可能滞后）: {e}");
         }
         Ok(Ok(()))
-    }
-
-    /// 是否处于 settings 隔离态（损坏且无缓存可用）
-    fn settings_poisoned(&self) -> bool {
-        self.settings_cache
-            .lock()
-            .unwrap_or_else(recover_lock)
-            .poisoned
     }
 
     /// 写入 settings.json 并同步内存缓存（调用方必须已持有 settings_lock）
@@ -809,27 +767,25 @@ impl ConfigService {
         .await
         .map_err(|e| ConfigError::Io(std::io::Error::other(format!("配置重读任务失败: {e}"))))?;
         let (settings_res, mtime) = disk;
-        // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照；
-        // 无缓存进入隔离态并中止 reload——绝不用默认值替换运行时，
-        // 否则端口 / active_profile 等关键字段全部回退默认，污染正在运行的服务
+        // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照；无缓存（防御性
+        // 保留的分支）中止 reload——绝不用默认值替换运行时，否则端口 /
+        // active_profile 等关键字段全部回退默认，污染正在运行的服务
         let settings = match settings_res {
             Ok(s) => {
                 let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 c.data = Some(s.clone());
                 c.mtime = mtime;
-                c.poisoned = false;
                 s
             }
             Err(e) => {
-                let mut c = self.settings_cache.lock().unwrap_or_else(recover_lock);
+                let c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 if let Some(prev) = c.data.clone() {
                     tracing::warn!("settings.json 解析失败，reload 沿用内存缓存: {e}");
                     prev
                 } else {
                     tracing::error!(
-                        "settings.json 解析失败且无缓存可用，进入隔离态（保存将被拒绝），reload 中止: {e}"
+                        "settings.json 解析失败且无缓存可用，reload 中止并拒绝保存: {e}"
                     );
-                    c.poisoned = true;
                     return Err(ConfigError::ConfigWriteError {
                         reason: format!(
                             "settings.json 解析失败，已保留当前运行时配置并拒绝保存: {e}"

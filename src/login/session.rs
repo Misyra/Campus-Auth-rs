@@ -461,9 +461,11 @@ impl LoginSession {
                     self.finish_with_failure(
                         session_start,
                         attempts_used,
+                        // 口径统一为总尝试次数（含首试），与 try_retry 耗尽分支
+                        // 及「尝试 N/M」进度文案一致（历史实现两处各说各话）
                         format!(
-                            "重试耗尽（共 {} 次）: {}{}",
-                            self.params.max_retries,
+                            "重试耗尽（共 {} 次尝试）: {}{}",
+                            total_attempts,
                             structured.message,
                             dialog_note(&structured.data)
                         ),

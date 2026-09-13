@@ -15,6 +15,9 @@ use arc_swap::ArcSwapOption;
 
 use crate::engine::{Engine, EngineCommand, EngineError, EngineHandle, TestNetworkResult};
 
+/// 网络测试等待 Engine 回复的超时秒数（Web /api/monitor/test 使用）
+const TEST_NETWORK_TIMEOUT_SECS: u64 = 30;
+
 /// 可替换的 Engine 句柄槽（Clone 共享同一底层存储）
 #[derive(Clone)]
 pub struct EngineSlot {
@@ -67,7 +70,7 @@ impl EngineSlot {
         }
     }
 
-    /// 执行一次网络探测并等待回复（30s 超时，Web /api/monitor/test 使用）
+    /// 执行一次网络探测并等待回复（超时 [`TEST_NETWORK_TIMEOUT_SECS`]，Web /api/monitor/test 使用）
     ///
     /// 派发 `EngineCommand::TestNetwork` 到当前活跃 Engine 并等待 oneshot 回复；
     /// reply 通道被对端丢弃（Engine 崩溃）映射为 [`EngineError::ChannelClosed`]，
@@ -75,7 +78,12 @@ impl EngineSlot {
     pub async fn test_network(&self) -> Result<TestNetworkResult, EngineError> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.try_dispatch(EngineCommand::TestNetwork { reply: reply_tx })?;
-        match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(TEST_NETWORK_TIMEOUT_SECS),
+            reply_rx,
+        )
+        .await
+        {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(EngineError::ChannelClosed),
             Err(_) => Err(EngineError::TestNetworkTimeout),

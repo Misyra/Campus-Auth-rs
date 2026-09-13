@@ -18,7 +18,7 @@ use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use rand::RngCore;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 // MSRV 1.85 兼容：fs4::FileExt 提供文件排他锁（Rust 1.96+ 内置方法优先级更高，不会冲突）
 #[allow(unused_imports)]
@@ -121,7 +121,9 @@ impl PasswordCrypto {
         if !ciphertext.starts_with(ENC_PREFIX) {
             return Ok(ciphertext.to_string());
         }
-        self.decrypt_core(ciphertext)
+        // 测试便利入口：拷贝副本不清零（生产一律走 decrypt_to_zeroizing）
+        self.decrypt_core("", ciphertext)
+            .map(|plain| plain.to_string())
     }
 
     /// 解密 `ENC:` 密文，返回 `Zeroizing<String>`（drop 时自动清零）
@@ -140,10 +142,10 @@ impl PasswordCrypto {
         if !ciphertext.starts_with(ENC_PREFIX) {
             return Ok(Zeroizing::new(ciphertext.to_string()));
         }
-        match self.decrypt_core(ciphertext) {
+        match self.decrypt_core(profile_id, ciphertext) {
             Ok(plain) => {
                 self.clear_decryption_failed(profile_id);
-                Ok(Zeroizing::new(plain))
+                Ok(plain)
             }
             Err(e) => {
                 self.mark_decryption_failed(profile_id);
@@ -161,7 +163,8 @@ impl PasswordCrypto {
         if ciphertext.is_empty() || !ciphertext.starts_with(ENC_PREFIX) {
             return true;
         }
-        self.decrypt_core(ciphertext).is_ok()
+        // 校验成功即弃明文：decrypt_core 返回 Zeroizing，drop 时清零不留副本
+        self.decrypt_core("", ciphertext).is_ok()
     }
 
     /// 是否存在任一 Profile 的解密失败记录（汇总语义：集合非空即 true）
@@ -190,7 +193,14 @@ impl PasswordCrypto {
     }
 
     /// 内部解密核心逻辑：纯计算，无失败标志副作用
-    fn decrypt_core(&self, ciphertext: &str) -> Result<String, ConfigError> {
+    ///
+    /// `profile_id` 透传进 [`ConfigError::DecryptFailed`] 供错误展示定位；
+    /// 明文以 `Zeroizing<String>` 返回，drop 时自动清零。
+    fn decrypt_core(
+        &self,
+        profile_id: &str,
+        ciphertext: &str,
+    ) -> Result<Zeroizing<String>, ConfigError> {
         self.ensure_key()?;
         let key = self.key.get().expect("密钥已确保加载");
 
@@ -199,14 +209,14 @@ impl PasswordCrypto {
             Ok(p) => p,
             Err(_) => {
                 return Err(ConfigError::DecryptFailed {
-                    profile_id: String::new(),
+                    profile_id: profile_id.to_string(),
                 });
             }
         };
 
         if payload.len() < NONCE_LEN {
             return Err(ConfigError::DecryptFailed {
-                profile_id: String::new(),
+                profile_id: profile_id.to_string(),
             });
         }
 
@@ -216,14 +226,21 @@ impl PasswordCrypto {
         let cipher = Aes256Gcm::new(key_arr);
 
         match cipher.decrypt(nonce, ct) {
-            Ok(plain) => String::from_utf8(plain).map_err(|e| {
-                ConfigError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("解密结果非 UTF-8: {e}"),
-                ))
-            }),
+            Ok(plain) => match String::from_utf8(plain) {
+                Ok(s) => Ok(Zeroizing::new(s)),
+                Err(e) => {
+                    // UTF-8 校验失败的字节同样源自密文明文，丢弃前清零
+                    let msg = format!("解密结果非 UTF-8: {}", e.utf8_error());
+                    let mut bytes = e.into_bytes();
+                    bytes.zeroize();
+                    Err(ConfigError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        msg,
+                    )))
+                }
+            },
             Err(_) => Err(ConfigError::DecryptFailed {
-                profile_id: String::new(),
+                profile_id: profile_id.to_string(),
             }),
         }
     }
@@ -373,7 +390,7 @@ impl PasswordCrypto {
             let _ = std::fs::create_dir_all(parent);
         }
         match std::fs::write(key_path, arr.as_ref()) {
-            Ok(()) => {}
+            Ok(()) => Self::set_key_permissions(key_path),
             Err(e) => tracing::warn!("写入继承密钥到 {} 失败: {e}", key_path.display()),
         }
         Some(Zeroizing::new(arr))
@@ -407,6 +424,17 @@ impl PasswordCrypto {
             "已生成新的加密密钥文件（此后使用旧密钥加密的密码将无法解密）"
         );
 
+        Self::set_key_permissions(key_path);
+
+        Ok(key)
+    }
+
+    /// 收紧密钥文件权限（尽力而为，失败静默：密钥已写入，仅权限未收紧）
+    ///
+    /// Unix 0600；Windows 借 icacls 移除继承权限并授予当前用户完全控制
+    /// （仅授 (R) 会导致后续轮转密钥时写入被拒，需授 (F)）。
+    /// 生成与 Python 继承两条写入路径共用，避免继承路径遗漏权限收紧。
+    fn set_key_permissions(key_path: &Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -415,8 +443,6 @@ impl PasswordCrypto {
         }
         #[cfg(windows)]
         {
-            // Windows 无 std 级 ACL API，借助系统 icacls 移除继承权限并授予当前用户完全控制：
-            // 仅授 (R) 会导致同用户后续轮转密钥时写入被拒（ACCESS_DENIED），需授 (F)
             let username = std::env::var("USERNAME").unwrap_or_default();
             let domain = std::env::var("USERDOMAIN").unwrap_or_default();
             if !username.is_empty() {
@@ -425,7 +451,6 @@ impl PasswordCrypto {
                 } else {
                     format!("{domain}\\{username}")
                 };
-                // 失败仅告警不阻断：密钥已写入，仅权限未收紧
                 // stderr 重定向到 null，避免环境无域账号解析时刷屏
                 let _ = std::process::Command::new("icacls")
                     .arg(key_path)
@@ -435,8 +460,10 @@ impl PasswordCrypto {
                     .status();
             }
         }
-
-        Ok(key)
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = key_path;
+        }
     }
 }
 

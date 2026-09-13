@@ -306,24 +306,21 @@ fn test_parse_ipconfig_gbk_chinese_labels() {
     assert_eq!(interfaces[0].ipv4, Ipv4Addr::new(192, 168, 31, 178));
 }
 
-// 实际调用 Windows 的 ipconfig，unix 上无此命令，仅 Windows 编译
+// 实际调用 Windows 的 ipconfig，unix 上无此命令，仅 Windows 编译。
+// 依赖真实子进程与宿主网络环境（断言弱、错误解析也能通过），默认 #[ignore]，
+// 需要真机冒烟时显式 `cargo test -- --ignored` 运行
 #[cfg(windows)]
 #[tokio::test]
+#[ignore = "依赖真实 ipconfig 子进程与宿主网络环境，仅手动冒烟"]
 async fn test_run_ipconfig_actual() {
     // 实际调用 ipconfig /all 验证 run_command 是否正常工作
     let result = run_command("ipconfig", &["/all"]).await;
     match result {
         Ok(out) => {
-            eprintln!("ipconfig output length: {}", out.len());
-            eprintln!(
-                "First 200 chars: {:?}",
-                out.chars().take(200).collect::<String>()
-            );
             assert!(!out.is_empty(), "ipconfig 输出不应为空");
             // 中英文 Windows 均包含冒号（用于键值分隔，如 "IPv4 地址 : x.x.x.x"）
             assert!(out.contains(':'), "输出应包含冒号（键值分隔符）");
             let interfaces = parse_ipconfig(&out);
-            eprintln!("Parsed {} interfaces", interfaces.len());
             assert!(
                 !interfaces.is_empty(),
                 "应至少解析出一个网络接口, 输出前500字符: {:?}",

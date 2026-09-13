@@ -7,9 +7,12 @@
 //! - 未认证时网关劫持探测请求：返回 3xx（`Location` 指向真门户）或直接 200 吐登录页
 //!   （无跳转可取，只能提示用户手动复制地址栏）；
 //! - 检测目标固定为监测配置中的 `http_targets + url_targets`（内置 generate_204 类明文
-//!   地址），不接受客户端传参，无 SSRF 面；结果仅填入表单，由用户确认保存，不自动落盘。
+//!   地址），不接受客户端传参；重定向目标由网关下发，逐跳做最小目的地址校验
+//!   （仅拒环回/链路本地，内网门户放行，见 [`probe_target`]）；结果仅填入表单，
+//!   由用户确认保存，不自动落盘。
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use futures::future::join_all;
@@ -97,7 +100,13 @@ pub async fn detect_portal(
     let url_timeout = url_timeout.min(Duration::from_secs(PER_TARGET_TIMEOUT_SECS));
     let mut futs = Vec::with_capacity(http_targets.len() + url_targets.len());
     for url in http_targets {
-        futs.push(probe_target(&client, url.clone(), None, http_timeout));
+        futs.push(probe_target(
+            &client,
+            url.clone(),
+            None,
+            http_timeout,
+            disable_proxy,
+        ));
     }
     for url in url_targets {
         futs.push(probe_target(
@@ -105,6 +114,7 @@ pub async fn detect_portal(
             url.clone(),
             url_expected.get(url),
             url_timeout,
+            disable_proxy,
         ));
     }
     let checked: Vec<String> = http_targets
@@ -160,16 +170,25 @@ pub async fn detect_portal(
 /// 首跳（未跟随跳转）的语义沿用 204/内容探测：204=在线，200=门户直吐登录页；
 /// 一旦跟随过至少一跳，最终 URL 即候选门户地址——落地页状态码不再重要
 /// （302 链后多为 200 登录页），后续请求失败也不丢弃已拿到的 Location。
+///
+/// 跳转目标逐跳校验（MON-4）：首跳 URL 来自用户配置，属信任边界内不强校验；
+/// 跨主机跳转解析后仅拒绝环回/链路本地地址（不拦 RFC1918——校园门户普遍部署
+/// 在内网段），域名钉扎到已校验 IP 防 reqwest 二次解析 TOCTOU；同主机跳转
+/// （门户自身相对路径跳转）不引入新目的地址，免校验。
 async fn probe_target(
     client: &reqwest::Client,
     url: String,
     expected: Option<&String>,
     timeout: Duration,
+    disable_proxy: bool,
 ) -> TargetOutcome {
     let mut current = url;
     let mut followed = false;
+    // 钉扎客户端：跨主机跳转目标为域名时，替换为解析校验后钉扎的 client
+    let mut pinned: Option<reqwest::Client> = None;
     for _ in 0..MAX_REDIRECT_HOPS {
-        let resp = match client.get(&current).timeout(timeout).send().await {
+        let hop_client = pinned.as_ref().unwrap_or(client);
+        let resp = match hop_client.get(&current).timeout(timeout).send().await {
             Ok(r) => r,
             Err(_) => {
                 // 已跟随过跳转：Location 本身就是候选门户地址，不因后续请求失败而丢弃
@@ -186,22 +205,16 @@ async fn probe_target(
                 .headers()
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok());
-            let next = loc.and_then(|loc| {
+            let next_url = loc.and_then(|loc| {
                 current.parse::<url::Url>().ok().and_then(|base| {
-                    base.join(loc).ok().and_then(|next| {
-                        let s = next.to_string();
-                        (matches!(next.scheme(), "http" | "https")
-                            && next.host_str().is_some_and(|h| !h.is_empty()))
-                        .then_some(s)
+                    base.join(loc).ok().filter(|next| {
+                        matches!(next.scheme(), "http" | "https")
+                            && next.host_str().is_some_and(|h| !h.is_empty())
                     })
                 })
             });
-            match next {
-                Some(next) => {
-                    current = next;
-                    followed = true;
-                    continue;
-                }
+            let next_url = match next_url {
+                Some(u) => u,
                 // Location 缺失/非法：首跳为劫持证据但无地址；链中则保留已拿到的地址
                 None => {
                     return if followed {
@@ -210,7 +223,32 @@ async fn probe_target(
                         TargetOutcome::DirectCaptive
                     };
                 }
+            };
+            // 跟随前校验目标地址。被拒时跳转本身已是劫持证据，按既有语义以
+            // 最后安全地址收尾，不请求危险目标
+            let same_host = current
+                .parse::<url::Url>()
+                .ok()
+                .and_then(|base| {
+                    base.host_str()
+                        .map(|h| h.eq_ignore_ascii_case(next_url.host_str().unwrap_or("")))
+                })
+                .unwrap_or(false);
+            if !same_host {
+                match ensure_redirect_target(&next_url, disable_proxy).await {
+                    Ok(pinned_client) => pinned = pinned_client,
+                    Err(()) => {
+                        return if followed {
+                            TargetOutcome::Redirect(current)
+                        } else {
+                            TargetOutcome::DirectCaptive
+                        };
+                    }
+                }
             }
+            current = next_url.to_string();
+            followed = true;
+            continue;
         }
         if followed {
             // 落地：最终 URL 即候选门户地址（302 链后的 204 极罕见，同样视为找到）
@@ -237,6 +275,58 @@ async fn probe_target(
     }
     // 跳数耗尽但一路有 Location：最后 URL 仍是候选
     TargetOutcome::Redirect(current)
+}
+
+/// 重定向跳转目标的最小目的地址校验（MON-4）
+///
+/// 仅拒绝环回与链路本地地址——**不拦 RFC1918 私网**：校园门户普遍部署在
+/// 内网段，全私网拦截会破坏核心场景（判定规则独立于 `web::ssrf` 的全私网
+/// 口径）。域名先经系统解析器展开、对全部候选地址判定（防「IP 字面量白名单」
+/// 被 DNS 解析绕过），并把域名钉扎到首个已校验地址（`ClientBuilder::resolve`，
+/// 与 `web::ssrf` 同手法），杜绝 reqwest 二次解析 TOCTOU。IP 字面量无解析面，
+/// 返回 `Ok(None)` 沿用共享客户端。解析失败或无结果一律拒绝跟随。
+async fn ensure_redirect_target(
+    url: &url::Url,
+    disable_proxy: bool,
+) -> Result<Option<reqwest::Client>, ()> {
+    let host = url.host_str().ok_or(())?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return if is_loopback_or_link_local(&ip) {
+            Err(())
+        } else {
+            Ok(None)
+        };
+    }
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| ())?
+        .collect();
+    if addrs.is_empty() || addrs.iter().any(|a| is_loopback_or_link_local(&a.ip())) {
+        return Err(());
+    }
+    let mut builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .resolve(host, addrs[0]);
+    if disable_proxy {
+        builder = builder.no_proxy();
+    }
+    builder.build().map(Some).map_err(|_| ())
+}
+
+/// 环回与链路本地判定（最小集合，口径见 [`ensure_redirect_target`]）：
+/// IPv4 127.0.0.0/8、169.254.0.0/16；IPv6 ::1、fe80::/10；
+/// IPv4-mapped IPv6（::ffff:a.b.c.d）解包后按 IPv4 规则判定。
+fn is_loopback_or_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback() || v4.is_link_local();
+            }
+            v6.is_loopback() || v6.is_unicast_link_local()
+        }
+    }
 }
 
 /// 限长读取响应体（URL 探测内容比对用，超长截断）
@@ -304,7 +394,7 @@ mod tests {
         assert_eq!(r.portal_url.as_deref(), Some("http://10.1.1.55/login"));
     }
 
-    /// 302 相对 Location → 按当前 URL join 后 Found
+    /// 302 相对 Location → 按当前 URL join 后 Found（同主机跳转免目的地址校验）
     #[tokio::test]
     async fn test_relative_redirect_joined() {
         let url = serve_responses(vec![
@@ -327,6 +417,90 @@ mod tests {
             portal.ends_with("/login.html"),
             "相对跳转应拼接主机: {portal}"
         );
+    }
+
+    /// MON-4：跨主机跳转指向环回 IP → 拒绝跟随，按直接劫持收尾。
+    /// 目标用 127.0.0.2（同属 127/8 环回段）而非 127.0.0.1——mock 服务器本身
+    /// 就在 127.0.0.1，同主机跳转按设计免校验
+    #[tokio::test]
+    async fn test_redirect_to_loopback_blocked() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.2:1/blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let r = detect_portal(
+            &http_targets_of(&url),
+            Duration::from_secs(5),
+            &[],
+            &HashMap::new(),
+            Duration::from_secs(5),
+            true,
+        )
+        .await;
+        assert_eq!(r.status, PortalDetectStatus::CaptiveNoRedirect);
+        assert!(r.portal_url.is_none());
+    }
+
+    /// MON-4：跨主机跳转指向链路本地地址（云元数据）→ 拒绝跟随
+    #[tokio::test]
+    async fn test_redirect_to_link_local_blocked() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let r = detect_portal(
+            &http_targets_of(&url),
+            Duration::from_secs(5),
+            &[],
+            &HashMap::new(),
+            Duration::from_secs(5),
+            true,
+        )
+        .await;
+        assert_eq!(r.status, PortalDetectStatus::CaptiveNoRedirect);
+        assert!(r.portal_url.is_none());
+    }
+
+    /// MON-4：跳转目标为解析到环回的域名（localhost）→ 解析后判定，拒绝跟随
+    #[tokio::test]
+    async fn test_redirect_to_loopback_hostname_blocked() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 302 Found\r\nLocation: http://localhost:1/blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let r = detect_portal(
+            &http_targets_of(&url),
+            Duration::from_secs(5),
+            &[],
+            &HashMap::new(),
+            Duration::from_secs(5),
+            true,
+        )
+        .await;
+        assert_eq!(r.status, PortalDetectStatus::CaptiveNoRedirect);
+        assert!(r.portal_url.is_none());
+    }
+
+    /// MON-4 单元：环回/链路本地判定（IPv4/IPv6/IPv4-mapped；RFC1918 放行）
+    #[test]
+    fn test_loopback_or_link_local_ip() {
+        assert!(is_loopback_or_link_local(&"127.0.0.1".parse().unwrap()));
+        assert!(is_loopback_or_link_local(
+            &"169.254.169.254".parse().unwrap()
+        ));
+        assert!(is_loopback_or_link_local(&"::1".parse().unwrap()));
+        assert!(is_loopback_or_link_local(&"fe80::1".parse().unwrap()));
+        assert!(is_loopback_or_link_local(
+            &"::ffff:127.0.0.1".parse().unwrap()
+        ));
+        assert!(is_loopback_or_link_local(
+            &"::ffff:169.254.1.1".parse().unwrap()
+        ));
+        // 内网门户与公网地址放行
+        assert!(!is_loopback_or_link_local(&"10.1.1.55".parse().unwrap()));
+        assert!(!is_loopback_or_link_local(&"192.168.1.1".parse().unwrap()));
+        assert!(!is_loopback_or_link_local(&"fc00::1".parse().unwrap()));
+        assert!(!is_loopback_or_link_local(&"8.8.8.8".parse().unwrap()));
     }
 
     /// 204 直通 → Online（提示先退出登录）

@@ -690,10 +690,7 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
     } else {
         adaptive_check_interval_secs(status, inner.online_streak, configured_interval)
     };
-    let mut t = tokio::time::interval(Duration::from_secs(next_secs));
-    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let _ = t.tick().await;
-    inner.check_timer = t;
+    inner.check_timer = new_check_timer(Duration::from_secs(next_secs)).await;
     let paused = is_any_pause_active(inner, deps);
     // 冷却期内检查：若仍在冷却则跳过登录
     let cooling_down = inner.cooling_down_until.is_some();
@@ -849,16 +846,23 @@ fn engine_state_for(inner: &EngineInner) -> EngineState {
     }
 }
 
-/// 重建网络检查定时器并消费首个立即 tick
+/// 新建网络检查定时器：`MissedTickBehavior::Skip` + 消费首个立即 tick
 ///
 /// `tokio::time::interval` 的第一次 `tick()` 立即完成；调用方通常刚做过一次
-/// 手动检测（Start/Resume/ApplyProfile），不消费首 tick 会导致紧接着重复探测
-/// 一轮；Reload 语义只改间隔，更不应意外触发即时探测。
-async fn reset_check_timer(inner: &mut EngineInner, deps: &EngineDeps) {
-    let mut t = tokio::time::interval(check_interval_duration(deps));
+/// 检测（探测处理/Start/Resume/ApplyProfile），不消费首 tick 会导致紧接着
+/// 重复探测一轮；Reload 语义只改间隔，更不应意外触发即时探测。
+/// （EngineInner::new 的初始定时器受 monitoring=false 门控、不消费首 tick，
+/// 语义不同，不在此复用。）
+async fn new_check_timer(period: Duration) -> tokio::time::Interval {
+    let mut t = tokio::time::interval(period);
     t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let _ = t.tick().await;
-    inner.check_timer = t;
+    t
+}
+
+/// 重建网络检查定时器（构造细节见 [`new_check_timer`]）
+async fn reset_check_timer(inner: &mut EngineInner, deps: &EngineDeps) {
+    inner.check_timer = new_check_timer(check_interval_duration(deps)).await;
 }
 
 /// 合并 Engine 状态到 StatusManager 快照

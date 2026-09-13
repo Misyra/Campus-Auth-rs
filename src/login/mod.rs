@@ -530,7 +530,7 @@ impl LoginOrchestrator {
         if became_active {
             // 句柄为 Arc 共享槽：槽位内已有一份 clone（见上），spawn 任务不再需要本体，
             // 本体留给末尾 return（与原内联写法一致：panic 补偿取的是槽位内的 handle）
-            self.spawn_session_task(session_id, source, finished, session);
+            self.spawn_session_task(session_id, source, profile.id.clone(), finished, session);
         } else {
             // 活跃槽位已被占用，立即写入终态（避免 await_result 永久挂起）
             // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
@@ -814,9 +814,6 @@ impl LoginOrchestrator {
             }
             r = self.monitor.inspect_auth_endpoint(&profile.auth_url, timeout) => r,
         };
-        if endpoint_state == AuthEndpointState::Reachable {
-            return None;
-        }
         let message = match endpoint_state {
             AuthEndpointState::Invalid => {
                 format!(
@@ -829,8 +826,11 @@ impl LoginOrchestrator {
                 profile.auth_url
             ),
             AuthEndpointState::Missing => "未配置认证地址（请检查 Profile 配置）".to_string(),
-            AuthEndpointState::NotChecked | AuthEndpointState::SkippedRedirectMode => return None,
-            AuthEndpointState::Reachable => return None,
+            // Reachable（预检通过放行登录）与 NotChecked/SkippedRedirectMode
+            // （预检不适用）同样直接放行，不产生预检失败提示
+            AuthEndpointState::Reachable
+            | AuthEndpointState::NotChecked
+            | AuthEndpointState::SkippedRedirectMode => return None,
         };
         warn!(state = ?endpoint_state, "认证地址预检未通过: {message}");
         Some(
@@ -847,6 +847,7 @@ impl LoginOrchestrator {
         &self,
         session_id: u64,
         source: LoginSource,
+        profile_id: String,
         finished: Arc<tokio::sync::Notify>,
         session: LoginSession,
     ) {
@@ -859,6 +860,9 @@ impl LoginOrchestrator {
         }
         let state_arc = self.state.clone();
         let finished_notifier = finished.clone();
+        let history = self.history.clone();
+        let status_manager = self.status.clone();
+        let metrics = self.metrics.clone();
         tokio::spawn(async move {
             // 内层独立 spawn：JoinHandle 不会像 watch channel 一样被句柄持有者
             // "保活"——run() panic 时内层返回 Err，外层可据此补写终态。
@@ -870,11 +874,16 @@ impl LoginOrchestrator {
             });
             let panicked = run.await.is_err();
             if panicked {
-                // panic 路径：run() 未写终态。在清槽位前从活跃会话取回 handle
-                // 补写失败结果，保证 await_result 必有返回
-                let g = state_arc.lock().await;
-                if matches!(&g.active_session, Some(a) if a.session_id == session_id) {
-                    if let Some(a) = &g.active_session {
+                // panic 路径：run() 未写终态。锁内补写结果槽并取出历史条目
+                // （锁不得跨 await），广播与历史在锁外按 M4 协议补齐——此前
+                // 只写结果槽，StatusManager 停留 Running 会误导引擎与前端
+                let failure = {
+                    let g = state_arc.lock().await;
+                    if matches!(&g.active_session, Some(a) if a.session_id == session_id) {
+                        let a = g
+                            .active_session
+                            .as_ref()
+                            .expect("上方 matches 已确认活跃会话存在");
                         a.handle.inner.set_result(LoginResult {
                             terminal: LoginTerminal::Failed,
                             message: "登录会话内部异常，已中止".into(),
@@ -882,10 +891,33 @@ impl LoginOrchestrator {
                             duration: Duration::ZERO,
                             attempts: 0,
                         });
+                        Some(LoginHistoryEntry {
+                            timestamp: chrono::Local::now(),
+                            source,
+                            profile_id,
+                            result: HistoryResult::Failed,
+                            message: "登录会话内部异常，已中止".to_string(),
+                            duration_secs: 0.0,
+                        })
+                    } else {
+                        None
                     }
-                    tracing::error!("登录会话 task panic，已补写失败终态");
+                };
+                if let Some(entry) = failure {
+                    tracing::error!("登录会话 task panic，已补写失败终态（含状态广播与历史记录）");
+                    if let Some(m) = &metrics {
+                        m.inc_login_failure();
+                    }
+                    status_manager.merge(PartialSnapshot::Login {
+                        status: LoginStatus::Failed,
+                        source: None,
+                        message: Some(entry.message.clone()),
+                        retry_count: 0,
+                    });
+                    if let Err(e) = history.record(&entry).await {
+                        warn!("登录历史写入失败: {e}");
+                    }
                 }
-                drop(g);
             }
             // F6：run() 返回即全部收尾动作（含 emit 的 close_browser）完成，
             // 触发通知供抢占方放行新会话；无等待者时存储许可，不丢失
@@ -1151,7 +1183,9 @@ impl LoginOrchestrator {
     async fn resolve_browser_channel(&self, channel: &str, custom_path: &str) -> Option<String> {
         let available = self.channel_available_cached(channel, custom_path);
         let next = decide_browser_override(available, self.first_available_channel_cached())?;
-        tracing::warn!(
+        // 预期内的正常自愈（不落盘、下次自动切回），降 info 控制告警噪声；
+        // 全无可用浏览器的最终失败仍由调用方以更高级别留痕
+        tracing::info!(
             old = %channel,
             new = next,
             "配置的浏览器不可用，本次登录临时切换到可用浏览器（设置不改动）"
