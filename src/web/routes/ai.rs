@@ -918,14 +918,8 @@ mod tests {
         (app, inner, cfg_inner, dir)
     }
 
-    async fn body_json(resp: axum::response::Response) -> Value {
-        serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 64 * 1024 * 1024)
-                .await
-                .unwrap(),
-        )
-        .unwrap()
-    }
+    // 测试脚手架统一走共享 test_support（WE2-5：原逐文件复制的 body_json 已收敛）
+    use crate::web::routes::test_support::body_json;
 
     /// GET 配置：未配置时返回空串 + has_api_key=false
     #[tokio::test]

@@ -506,7 +506,8 @@ mod tests {
         }
 
         fn runtime_snapshot(&self) -> std::sync::Arc<crate::config::RuntimeConfig> {
-            unreachable!("profiles handler 测试不触达 runtime_snapshot")
+            // profiles handler 测试不触达 runtime；误触时回退测试默认值而非 panic
+            std::sync::Arc::new(crate::web::routes::test_support::test_runtime_config())
         }
 
         fn encrypt_password(&self, raw: &str) -> Result<String, ConfigError> {
@@ -578,12 +579,8 @@ mod tests {
         (app, inner)
     }
 
-    async fn body_json(resp: axum::response::Response) -> Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
+    // 测试脚手架统一走共享 test_support（WE2-5：原逐文件复制的 body_json 已收敛）
+    use crate::web::routes::test_support::body_json;
 
     /// 列表返回 map + active/auto_switch 元数据
     #[tokio::test]

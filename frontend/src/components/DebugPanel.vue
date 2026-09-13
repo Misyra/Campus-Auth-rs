@@ -73,7 +73,8 @@ async function handleFeedback(): Promise<void> {
     const blob = await debugApi.feedbackBundle();
     const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
     downloadBlob(blob, `campus-auth-feedback-${stamp}.zip`, "application/zip");
-    toastOnly(true, "问题报告已导出");
+    // WEB-1：导出后本机调试产物（截图/页面快照）已被清理，显式告知避免误以为仍在
+    toastOnly(true, "问题报告已导出；本机调试产物已一并清理");
   } catch (e) {
     toastOnly(false, extractApiError(e as Error, "导出问题报告失败"));
   } finally {

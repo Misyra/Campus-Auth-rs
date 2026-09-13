@@ -193,12 +193,8 @@ mod tests {
         (app, inner, status)
     }
 
-    async fn body_json(resp: axum::response::Response) -> Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
+    // 测试脚手架统一走共享 test_support（WE2-5：原逐文件复制的 body_json 已收敛）
+    use crate::web::routes::test_support::body_json;
 
     /// body 缺省 source → Manual；登录失败以 200 + success:false 返回（业务结果非 500）
     #[tokio::test]

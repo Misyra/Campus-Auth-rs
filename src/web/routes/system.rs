@@ -619,7 +619,13 @@ pub struct InstallPlaywrightQuery {
 }
 
 fn normalize_playwright_browser(browser: Option<&str>) -> Result<String, ApiError> {
-    let browser = browser.unwrap_or("chromium").trim().to_ascii_lowercase();
+    // 空串与省略语义等价（WEB-8）：?browser=（空值）此前被 trim 后仍非空校验
+    // 拒绝 400，现统一回退 chromium
+    let browser = browser
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("chromium")
+        .to_ascii_lowercase();
     if matches!(browser.as_str(), "chromium" | "firefox" | "webkit") {
         Ok(browser)
     } else {
@@ -863,6 +869,12 @@ mod tests {
     #[test]
     fn normalize_playwright_browser_defaults_and_validates() {
         assert_eq!(normalize_playwright_browser(None).unwrap(), "chromium");
+        // WEB-8：空串与省略语义等价，回退 chromium（此前 ?browser= 直接 400）
+        assert_eq!(normalize_playwright_browser(Some("")).unwrap(), "chromium");
+        assert_eq!(
+            normalize_playwright_browser(Some("  ")).unwrap(),
+            "chromium"
+        );
         assert_eq!(
             normalize_playwright_browser(Some(" Firefox ")).unwrap(),
             "firefox"

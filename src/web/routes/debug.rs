@@ -159,9 +159,14 @@ pub async fn debug_screenshot(
     }
     // 与 WS 内联（ws.rs prepare_bridge_event）同款安全口径（H4）：大小上限 +
     // PNG/JPEG magic bytes 校验，只内联真实图片内容，杜绝 debug 目录被塞入
-    // 任意文件后借免鉴权 <img> 引用外发；顺带修正 JPEG 被硬编码为 image/png 的问题
-    let meta = tokio::fs::metadata(&path).await?;
-    if !meta.is_file() || meta.len() > crate::web::ws::DEBUG_SCREENSHOT_MAX_BYTES {
+    // 任意文件后借免鉴权 <img> 引用外发；顺带修正 JPEG 被硬编码为 image/png 的问题。
+    // symlink_metadata + is_symlink 拒绝符号链接，与 WS 内联（ws.rs）同一口径：
+    // debug 目录内的链接文件不得作为逃逸读取目录外内容的通道
+    let meta = tokio::fs::symlink_metadata(&path).await?;
+    if !meta.is_file()
+        || meta.file_type().is_symlink()
+        || meta.len() > crate::web::ws::DEBUG_SCREENSHOT_MAX_BYTES
+    {
         return Err(ApiError::BadRequest("截图文件超出大小限制或非法".into()));
     }
     let bytes = tokio::fs::read(&path).await?;

@@ -135,6 +135,20 @@ async fn apply_flat_settings_patch(
         }
     }
 
+    // WEB-9：active_profile_id 切换必须在合并前校验目标 Profile 存在——悬空 id
+    // 落盘后读取配置会加载失败并静默回退 ProfileData::default()（空凭据），
+    // 用户看到与设置不符且无错误提示
+    if let Some(id) = obj.get("active_profile_id").and_then(|v| v.as_str()) {
+        if id.is_empty() {
+            return Err(ApiError::BadRequest("active_profile_id 不能为空".into()));
+        }
+        config.load_profile(id).map_err(|e| {
+            ApiError::BadRequest(format!(
+                "active_profile_id 指向的 Profile 不存在: {id}（{e}）"
+            ))
+        })?;
+    }
+
     // 端口范围硬校验（对齐 v5 Pydantic ge=1 le=65535 口径）：serde 的 u16 只保证
     // 类型，port=0 落盘后重启将永远无法按配置端口监听（Linux 非 root/Docker 直接
     // 绑定失败起不来），必须在保存前拦下；<1024 特权端口不强制拒绝（Windows 无
@@ -148,6 +162,13 @@ async fn apply_flat_settings_patch(
 
     // 先在内存中构造待提交 Profile；若同一请求还包含全局字段，必须等全局合并校验
     // 成功后由 ConfigService 双域事务一起落盘，禁止先写凭证形成半提交。
+    // WEB-7：profile 字段类型错误显式 400（与 password 口径对齐），不再静默
+    // 跳过——静默丢字段会让用户误以为已保存
+    for key in ["username", "auth_url", "trigger_url", "isp", "active_task"] {
+        if profile_patch.get(key).is_some_and(|v| !v.is_string()) {
+            return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
+        }
+    }
     let profile_to_save = if !profile_patch.is_empty() {
         let active_id = match obj.get("active_profile_id").and_then(|v| v.as_str()) {
             Some(id) if !id.is_empty() => id.to_string(),
@@ -988,11 +1009,51 @@ mod tests {
         (app, inner)
     }
 
-    async fn body_json(resp: axum::response::Response) -> Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+    // 测试脚手架统一走共享 test_support（WE2-5：原逐文件复制的 body_json 已收敛）
+    use crate::web::routes::test_support::body_json;
+
+    /// WEB-9：PATCH 携带指向不存在 Profile 的 active_profile_id → 400 且不落盘
+    /// （悬空 id 落盘后读取配置会静默回退空凭据，必须在合并前拦下）
+    #[tokio::test]
+    async fn test_patch_dangling_active_profile_id_rejected() {
+        let (app, inner) = mock_app();
+        inner.lock().unwrap().profile_load_fails = true;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"active_profile_id": "ghost"}"#))
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let g = inner.lock().unwrap();
+        assert_eq!(g.save_calls, 0, "拒绝路径不得落盘");
+        assert_eq!(
+            g.settings.active_profile_id, "default",
+            "悬空 id 不得写入设置"
+        );
+    }
+
+    /// WEB-9 对照：active_profile_id 指向存在的 Profile → 正常合并落盘
+    #[tokio::test]
+    async fn test_patch_active_profile_id_existing_ok() {
+        let (app, _inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"active_profile_id": "default"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// GET 返回扁平结构与 has_password 计算字段（密码为空 → false）
