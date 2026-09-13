@@ -4,6 +4,7 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- WE2-4 收敛 Profile 创建语义：`POST /api/profiles/{id}` 删除「load_profile 既有档案后合并覆盖」的死代码（Service 层原子 create 的 ProfileIdConflict 检查使该分支永不落盘，实际请求以 409 拒绝），收敛为纯新建构造——消除未来放宽冲突检查时空密码分支静默清空既有加密密码的陷阱；不引入 Web 层 exists 预检，保持 Service 层原子 create 为唯一冲突裁判（防 TOCTOU）。新增回归测试：重复 POST 409 且原数据不变、新建空密码保持空串、PUT 空密码保留既有密码
 - TSK-2 取消传播补全：Bridge 转发 task 新增监听 `response_tx.closed()`——调用方 future 被 abort/drop（任务取消、调度器停止等）时，此前无人发送 Cancel、Worker 会继续跑到自然结束或命令级超时；现在进入与超时/显式取消相同的「发 Cancel → 等 Worker ACK → 归属校验 → 必要时强杀」链路。原「取消后等待确认、超时强杀」收尾逻辑抽成 `wait_cancel_ack_or_kill` 共用 helper，三条取消路径（请求超时、显式 cancel、调用方中止）语义单一防漂移
 - 集成测试：`supervisor_调用方中止_取消传播到worker并释放槽位` 覆盖 abort 调用方 → Worker 收到取消 → 强杀回收 → 槽位释放 → 后续请求正常完成的完整链路
 - MON-2 探测语义修复：HTTP/URL 探测遇非预期状态码（1xx/4xx/5xx）从判 `Pass` 改判新增的 `ProbeOutcome::Inconclusive`（证据不足）——拦截型网关（未认证返回 403/404）不再被误判成 Online 且 Online 态强制 NoAction 截死补救路径，也不与全 Fail 混同落 Offline；多目标汇总优先级调整为 Captive > Pass > Inconclusive > Fail

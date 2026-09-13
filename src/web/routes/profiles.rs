@@ -145,16 +145,16 @@ pub async fn create_profile(
             "缺少 profile id（路径或 body 至少提供一处）".into(),
         ));
     }
-    // 查找或构造 ProfileData：加载失败（不存在/损坏）按新建处理，debug 留痕区分
-    let mut profile = match config.load_profile(&target_id) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::debug!(profile_id = %target_id, "加载既有 Profile 失败，按新建处理: {e}");
-            crate::config::ProfileData::default()
-        }
+    // 纯新建语义：不从既有档案合并字段。命中既有 id 时由 Service 层的原子
+    // create（ProfileIdConflict）统一拒绝为 409——此前这里 load_profile 后
+    // 合并覆盖的 upsert 式写法是死代码，且其中的空密码分支一旦在放宽冲突
+    // 检查后生效，会把既有加密密码静默清空（WE2-4），直接删除该陷阱。
+    let mut profile = crate::config::ProfileData {
+        id: target_id.clone(),
+        name: body.name,
+        username: body.username,
+        ..Default::default()
     };
-    profile.id = target_id.clone();
-    profile.name = body.name;
     // 空密码表示“不设置独立密码”，必须保持为空；若把空串加密成 ENC:，
     // 后续 has_password 会误判为已有密码，而运行时解密后仍为空。
     profile.password = if body.password.is_empty() {
@@ -164,7 +164,6 @@ pub async fn create_profile(
             .encrypt_password(&body.password)
             .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?
     };
-    profile.username = body.username;
     // 可选设置字段与 PUT 语义一致（含 URL 校验），创建即完整落盘
     if let Some(auth_url) = body.auth_url {
         profile.auth_url = validate_http_url("认证地址", &auth_url)?;
@@ -862,5 +861,102 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["data"]["settings"]["password"], "");
+    }
+
+    // ============ WE2-4：POST 纯新建语义（既有 id 一律 409，不合并） ============
+
+    /// 重复 POST 同一 id 返回 409，且既有档案数据完全不变
+    #[tokio::test]
+    async fn test_post_existing_id_conflicts_and_keeps_data() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "改名尝试",
+                            "username": "入侵者",
+                            "password": "新密码"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // 既有档案不被触碰（不含 load_profile 合并路径的任何痕迹）
+        let g = inner.lock().unwrap();
+        let dorm = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.name, "档案 dorm");
+        assert_eq!(dorm.username, "");
+    }
+
+    /// POST 新档案空密码 = 不设独立密码（落盘为空串，不是 ENC: 伪密文）
+    #[tokio::test]
+    async fn test_post_new_profile_empty_password_stays_empty() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/fresh")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "新档案",
+                            "username": "u1",
+                            "password": ""
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let fresh = g.profiles.iter().find(|p| p.id == "fresh").unwrap();
+        assert_eq!(fresh.password, "", "空密码必须保持空串");
+    }
+
+    /// PUT 空密码保持既有密码不变（空串 = 未修改 的既有契约）
+    #[tokio::test]
+    async fn test_put_empty_password_keeps_existing() {
+        let (app, inner) = mock_app();
+        // 预置既有密码
+        {
+            let mut g = inner.lock().unwrap();
+            g.profiles
+                .iter_mut()
+                .find(|p| p.id == "dorm")
+                .unwrap()
+                .password = "ENC:old-secret".into();
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "只改名",
+                            "password": ""
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let dorm = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.password, "ENC:old-secret", "空密码不得清空既有密码");
+        assert_eq!(dorm.name, "只改名");
     }
 }
