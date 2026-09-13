@@ -1,3 +1,12 @@
+<script lang="ts">
+// 选项类型必须在普通 script 块导出（script setup 不支持 export 语句），
+// 供使用方 import type { SelectOption } 消费
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+</script>
+
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
 // 自定义下拉选择组件（替代原 components.js 的 CustomSelect）。
@@ -7,11 +16,6 @@ import { ref, computed, nextTick, onBeforeUnmount } from "vue";
 
 let selectIdCounter = 0;
 const selectUid = `cs-${++selectIdCounter}`;
-
-interface SelectOption {
-  value: string;
-  label: string;
-}
 
 const props = withDefaults(
   defineProps<{

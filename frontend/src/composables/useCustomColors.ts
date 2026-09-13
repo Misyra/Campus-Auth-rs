@@ -14,7 +14,6 @@ import {
 } from "../utils/constants";
 import type { Appearance, CustomColors } from "../utils/appearance-types";
 import { loadStored } from "../utils/storage";
-import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 import { useAppearance } from "./useAppearance";
 

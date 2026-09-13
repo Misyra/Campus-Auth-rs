@@ -9,16 +9,18 @@ import { useConfirm } from "@/composables/useConfirm";
 import { useStatus } from "@/composables/useStatus";
 import { systemApi, configApi } from "@/api";
 import type { UpdateState, UpdateInfo } from "@/api/types";
+import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const config = useConfig();
 const { confirm } = useConfirm();
 const { status } = useStatus();
 
-const checkFrequencyOptions = [
+// 显式标注 SelectOption[]：as const 的只读元组无法绑定 CustomSelect 的可变 options prop
+const checkFrequencyOptions: SelectOption[] = [
   { value: "0", label: "每次启动" },
   { value: "24", label: "每天一次" },
   { value: "168", label: "每周一次" },
-] as const;
+];
 const checkFrequency = computed<string>({
   get: () => {
     const h = config.config.updater.check_interval_hours ?? 24;

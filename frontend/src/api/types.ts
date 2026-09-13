@@ -540,6 +540,9 @@ export interface ScheduledTask {
   [key: string]: unknown;
 }
 
+/** 创建/更新定时任务的请求载荷：id 仅创建时由前端生成、task_type 由后端按 target 推导，二者均不要求完整 */
+export type ScheduledTaskPayload = Omit<ScheduledTask, "id" | "task_type"> & { id?: string };
+
 /** 定时任务执行历史条目（后端 job_history 扁平数组：{ run_at, success, message, duration }） */
 export interface ScheduledTaskHistoryItem {
   run_at: string;

@@ -11,7 +11,7 @@ import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import { aiApi, tasksApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import type { AiCaptureResult, AiGenerateResult } from "@/api/types";
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, unref } from "vue";
 import { useRouter } from "vue-router";
 import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useToast } from "@/composables/useToast";
@@ -289,7 +289,6 @@ async function generate(): Promise<void> {
   const abort = new AbortController();
   streamAbort = abort;
   try {
-    let pendingDone: { attempts?: number; warnings?: string[]; task?: Record<string, unknown> } | null = null;
     let lastError: string | null = null;
     let startedModel = model.value;
     let startedBaseUrl = baseUrl.value;
@@ -314,7 +313,6 @@ async function generate(): Promise<void> {
             return;
           }
           if (typ === "done") {
-            pendingDone = ev as unknown as typeof pendingDone;
             generateResult.value = {
               task: (ev.task as Record<string, unknown>) ?? {},
               attempts: (ev.attempts as number) ?? 1,
@@ -335,8 +333,11 @@ async function generate(): Promise<void> {
         },
       },
     );
-    if (pendingDone?.task && Object.keys(pendingDone.task).length) {
-      toastOnly(true, `任务生成成功（第 ${pendingDone.attempts ?? 1} 轮通过校验）`);
+    // 终判经 unref 读取：await 期间闭包对 generateResult 的写入不参与外层控制流
+    // 收窄，直接读 .value 会被此前置空动作钉死成 null（可选链非空分支随之成 never）
+    const done = unref(generateResult);
+    if (done?.task && Object.keys(done.task).length) {
+      toastOnly(true, `任务生成成功（第 ${done.attempts} 轮通过校验）`);
     } else if (lastError) {
       throw new Error(lastError);
     } else if (!taskJson.value && streamText.value.trim()) {

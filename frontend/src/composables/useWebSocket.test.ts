@@ -15,20 +15,21 @@ const fetchStatusMock = vi.fn(async () => {});
 const fetchLogsMock = vi.fn(async () => {});
 
 vi.mock("../api/client", () => ({
-  ensureAuthToken: (...a: unknown[]) => ensureMock(...a),
-  refreshAuthToken: (...a: unknown[]) => refreshMock(...a),
+  // 桩一律无参转发：被测代码不传参，且裸 vi.fn() 摊开 unknown[] 会触发 TS2556
+  ensureAuthToken: () => ensureMock(),
+  refreshAuthToken: () => refreshMock(),
 }));
 
 vi.mock("./useStatus", () => ({
   useStatus: () => ({
-    fetchStatus: (...a: unknown[]) => fetchStatusMock(...a),
+    fetchStatus: () => fetchStatusMock(),
     updateStatus: vi.fn(),
   }),
 }));
 
 vi.mock("./useLogs", () => ({
   useLogs: () => ({
-    fetchLogs: (...a: unknown[]) => fetchLogsMock(...a),
+    fetchLogs: () => fetchLogsMock(),
     appendLogs: vi.fn(),
     autoScroll: { value: true },
   }),

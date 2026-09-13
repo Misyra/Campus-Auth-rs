@@ -208,7 +208,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           <div class="card-header">
             <h2>登录历史</h2>
             <div class="flex-row gap-sm">
-              <button class="btn btn-icon-only" @click="fetchLoginHistory" title="刷新">
+              <button class="btn btn-icon-only" @click="fetchLoginHistory(true)" title="刷新">
                 <IconApp name="refresh" />
               </button>
               <button class="btn btn-icon-only" @click="clearLoginHistory" title="清空" :disabled="!loginHistory.length">

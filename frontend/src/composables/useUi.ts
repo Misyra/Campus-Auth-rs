@@ -6,13 +6,8 @@
 
 import { reactive } from "vue";
 import { router } from "../router";
-import type {
-  BrowserInfo,
-  UpdateInfo,
-  InitStatus,
-  LoginHistoryItem,
-} from "../api/types";
-import { systemApi, browsersApi, monitorApi, actionsApi, historyApi } from "../api";
+import type { InitStatus, LoginHistoryItem } from "../api/types";
+import { systemApi, monitorApi, actionsApi, historyApi } from "../api";
 import { ApiError, extractApiError, isNoBrowserMessage } from "../api/client";
 import { TIMING } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";

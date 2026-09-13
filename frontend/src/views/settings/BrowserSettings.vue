@@ -9,6 +9,7 @@ import { useToast } from "@/composables/useToast";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import { browsersApi, configApi, workerApi } from "@/api";
 import { extractApiError } from "@/api/client";
+import type { BrowserInfo } from "@/api/types";
 import { frontendLogger } from "@/utils/logger";
 import { BROWSER_ARGS_DEFAULT } from "@/utils/constants";
 
@@ -16,7 +17,7 @@ const config = useConfig();
 const router = useRouter();
 const { toastOnly } = useToast();
 const { envStatus, refreshEnv } = useEnvironment();
-const browsers = ref<{ name: string; channel: string; engine: string; installed: boolean; path?: string; custom?: boolean }[]>([]);
+const browsers = ref<BrowserInfo[]>([]);
 const browserLoading = ref(true);
 /** 列表加载失败（FE2-5）：展示错误文案与重试入口，避免渲染空白网格无声失败 */
 const browserError = ref("");

@@ -67,7 +67,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
               <IconApp name="upload" class="icon-sm" />
               导入
             </button>
-            <button class="btn btn-sm btn-primary" @click="showScriptEditor(null)">
+            <button class="btn btn-sm btn-primary" @click="showScriptEditor()">
               <IconApp name="plus" class="icon-sm" />
               新建脚本
             </button>

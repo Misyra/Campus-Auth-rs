@@ -2,6 +2,20 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-13 前端类型检查清零）
+
+- `npx vue-tsc -p tsconfig.app.json --noEmit` 存量 28 错全部清零（`npm run build` 内置的裸 vue-tsc 不检查任何文件，该命令才是真口径）
+- CustomSelect 真正导出 `SelectOption`：interface 原先声明在 `<script setup>` 内（setup 块不支持 export 语句），7 个视图的 `import type { SelectOption }` 全部解析失败（TS2614）；改经普通 `<script lang="ts">` 块 `export interface` 供给使用方
+- AiTaskView 生成终判重构：done 事件在 onEvent 闭包内写入的暂存变量 `pendingDone` 不参与外层函数的控制流收窄（外层视角被初始值钉死成 null，可选链非空分支随之成 never，TS2339×3）；改为 await 返回后经 `unref(generateResult)` 终判——直接读 `.value` 同样不行（此前置空动作的属性路径收窄会横跨 await 与闭包写入存活），unref 的返回类型来自签名、不带流收窄；`pendingDone` 本就是 `generateResult` 的重复暂存，一并删除
+- scheduledTasksApi `create`/`update` 参数从完整 `ScheduledTask` 收敛为新增的 `ScheduledTaskPayload`（`Omit<ScheduledTask, "id" | "task_type"> & { id?: string }`，对齐后端 JobCreateBody：id 创建时前端生成、task_type 由后端按 target 推导，此前 TS2345×2）
+- BrowserSettings 浏览器列表换用 `BrowserInfo`：本地手写类型多写了后端响应中不存在的 `engine` 必填字段（TS2322×2，模板实际未消费该字段）
+- DashboardView 刷新按钮 `@click="fetchLoginHistory"` 改显式 `fetchLoginHistory(true)`（此前 PointerEvent 充当 force 实参，行为等价保持：绕过 5s 历史去重守卫）
+- ScriptsView 新建脚本 `showScriptEditor(null)` 改 `showScriptEditor()`（签名 `taskId?: string`）
+- NetworkSettings `checkFrequencyOptions` 去 `as const` 显式标注 `SelectOption[]`（只读元组无法绑定 CustomSelect 可变 options prop，TS4104）
+- 清死导入/死变量（TS6133/6196×6）：useCustomColors 的 useToast、useProfiles 的 ProfileListResponse、useUi 的 BrowserInfo/UpdateInfo/browsersApi、drag.ts 从未读的 dragging ref（连带移除 ref 值导入）
+- 测试桩去 spread（TS2556×5）：useStatus.test / useWebSocket.test 的 mock 包装改无参转发——裸 `vi.fn()` 的重载签名无法摊开 `unknown[]`，且被测代码本就无参调用
+- 验证：vue-tsc 0 错、vitest 85 用例全绿（含改动过的两个测试文件）、`npm run build` 通过
+
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
 - FE1-1 配置加载失败复位 loadingConfig：`fetchConfig` catch 分支补复位——「并发取代后接管的新请求又失败」会让 loadingConfig 永久停留 true，dirty deep watch 被永久抑制导致设置页保存按钮失效

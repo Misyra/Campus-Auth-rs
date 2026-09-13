@@ -33,6 +33,7 @@ import type {
   SaveConfigPayload,
   ScheduledTask,
   ScheduledTaskHistoryItem,
+  ScheduledTaskPayload,
   Script,
   StatusSnapshot,
   TaskDetail,
@@ -443,8 +444,8 @@ export const tasksApi = {
 /** 定时任务 */
 export const scheduledTasksApi = {
   list: () => http.get<ScheduledTask[]>("/api/scheduler/jobs"),
-  create: (payload: ScheduledTask) => http.post<MutationResult>("/api/scheduler/jobs", payload),
-  update: (id: string, payload: ScheduledTask) => http.put<MutationResult>(`/api/scheduler/jobs/${id}`, payload),
+  create: (payload: ScheduledTaskPayload) => http.post<MutationResult>("/api/scheduler/jobs", payload),
+  update: (id: string, payload: ScheduledTaskPayload) => http.put<MutationResult>(`/api/scheduler/jobs/${id}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/scheduler/jobs/${id}`),
   toggle: (id: string) => http.post<MutationResult & { enabled: boolean }>(`/api/scheduler/jobs/${id}/toggle`),
   run: (id: string) => http.post<MutationResult & { run_id: string }>(`/api/scheduler/jobs/${id}/run`),

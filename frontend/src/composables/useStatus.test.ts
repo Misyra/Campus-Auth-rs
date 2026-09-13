@@ -19,8 +19,9 @@ const fetchAutostartMock = vi.fn(async () => ({
 }));
 
 vi.mock("../api", () => ({
-  monitorApi: { fetchStatus: (...a: unknown[]) => fetchStatusMock(...a) },
-  autostartApi: { fetchStatus: (...a: unknown[]) => fetchAutostartMock(...a) },
+  // 桩不转发实参：裸 vi.fn() 的重载签名无法摊开 unknown[]，而 fetchStatus 本就无参调用
+  monitorApi: { fetchStatus: () => fetchStatusMock() },
+  autostartApi: { fetchStatus: () => fetchAutostartMock() },
 }));
 
 const { useStatus } = await import("./useStatus");

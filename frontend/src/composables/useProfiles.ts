@@ -4,7 +4,7 @@
  */
 
 import { ref } from "vue";
-import type { Profile, ProfileListResponse, NetworkDetectResult } from "../api/types";
+import type { Profile, NetworkDetectResult } from "../api/types";
 import { profilesApi } from "../api";
 import { extractApiError } from "../api/client";
 import { DEFAULT_PROFILE_SETTINGS } from "../utils/constants";

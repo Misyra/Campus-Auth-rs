@@ -3,7 +3,6 @@
  * 从 legacy js/methods/drag.js 迁移：实时交换模式 + 防抖 + 顺序持久化。
  */
 
-import { ref } from "vue";
 import type { Ref } from "vue";
 import type { TaskItem } from "../api/types";
 import { tasksApi } from "../api";
@@ -28,7 +27,6 @@ interface DragSortOptions {
  *   漏传的一组会被清空，任务与脚本两个视图都必须互传全量。
  */
 export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
-  const dragging = ref(false);
   let dragState: DragState | null = null;
   let allowDrag = false;
   let swapCooldown = false;
