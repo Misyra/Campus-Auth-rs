@@ -1238,3 +1238,84 @@ def test_command_timeout_scales_with_step_timeout():
     assert worker_main._command_timeout(
         {"browser_settings": {"timeout": 20}}
     ) == 400.0
+
+
+# ── BRG-4: handler 恰在超时瞬间完成的双回包竞态 ──
+
+def test_dispatch_guarded_race_no_double_response(monkeypatch, capsys):
+    """handler 恰在超时判定返回后完成：单次守卫保证同 id 仅一个响应（BRG-4）。"""
+
+    async def _run():
+        import worker_main
+
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 60.0)
+
+        async def quick_handler(params):
+            return {"ok": True}
+
+        worker_main.COMMANDS["test_race"] = quick_handler
+
+        async def fake_wait(fs, timeout=None):
+            # 谎报「超时」（done 为空），但先让 handler 跑完——复现
+            # wait 返回后、cancel 前任务恰好完成的窄窗口
+            for f in list(fs):
+                await f
+            return set(), set(fs)
+
+        monkeypatch.setattr(worker_main.asyncio, "wait", fake_wait)
+
+        async def noop_interrupt():
+            return None
+
+        monkeypatch.setattr(
+            worker_main.worker_core, "force_interrupt_pending", noop_interrupt
+        )
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 701, "method": "test_race", "params": {}}
+            )
+        finally:
+            del worker_main.COMMANDS["test_race"]
+
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1, f"应恰好一次回包，实际 {len(lines)}: {lines}"
+        msg = json.loads(lines[0])
+        assert msg["id"] == 701
+        assert msg["result"]["success"] is True
+
+    asyncio.run(_run())
+
+
+# ── BRG-6: EOF 后主循环排空队列 ──
+
+def test_serve_drains_queue_after_eof(monkeypatch, capsys):
+    """stdin EOF 后主循环仍排空已到达的命令，不丢关闭前最后一批指令。"""
+
+    async def _run():
+        import io
+        import sys
+
+        import worker_main
+
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                '{"id": 1, "method": "worker_health_check"}\n'
+                '{"id": 2, "method": "worker_health_check"}\n'
+            ),
+        )
+
+        async def noop_close():
+            return None
+
+        monkeypatch.setattr(worker_main.worker_core, "close_browser", noop_close)
+        try:
+            await asyncio.wait_for(worker_main._serve(), timeout=10)
+        finally:
+            worker_main.shutdown_event.clear()
+
+    asyncio.run(_run())
+    lines = capsys.readouterr().out.strip().splitlines()
+    ids = [json.loads(line)["id"] for line in lines]
+    assert 1 in ids and 2 in ids, f"EOF 前的命令应全部执行: {ids}"

@@ -95,3 +95,22 @@ def test_oversized_line_without_id_is_silent(monkeypatch):
     items = _read_all(monkeypatch, padding + "\n")
     assert items == []
     assert calls == []
+
+
+def test_oversized_line_then_valid_command_processed(monkeypatch):
+    """超限行拒绝解析后继续读取，后续合法命令正常入队（分块丢弃不吞行）。"""
+    monkeypatch.setattr(worker_main, "emit_response", lambda i, r: None)
+    padding = "x" * (_MAX_STDIN_LINE_BYTES + 1024)
+    text = (
+        json.dumps({"id": 1, "method": "ping"})
+        + "\n"
+        + padding
+        + "\n"
+        + '{"id": 2, "method": "ping"}\n'
+    )
+    items = _read_all(monkeypatch, text)
+    # 超限行之前的合法命令同样入队；超限行被丢弃且不吞掉其后的合法命令
+    assert items == [
+        {"id": 1, "method": "ping"},
+        {"id": 2, "method": "ping"},
+    ]

@@ -186,6 +186,12 @@ pub fn extract_zip(
             continue;
         }
 
+        // 符号链接条目拒绝解压（与 extract_tar_gz 的特殊条目口径一致），
+        // 避免把链接目标路径当普通文件内容写出非预期产物
+        if entry.is_symlink() {
+            return Err(std::io::Error::other("压缩包含符号链接条目，已拒绝解压"));
+        }
+
         if entry.is_dir() {
             std::fs::create_dir_all(&outpath)?;
         } else {

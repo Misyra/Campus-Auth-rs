@@ -582,8 +582,11 @@ impl TaskManager {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .is_empty();
+                                // as_f64 兼容合法浮点（如 1.5s）：as_u64 对小数返回
+                                // None 会被误判为「未配置 duration」
                                 let has_duration =
-                                    step.get("duration").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
+                                    step.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0)
+                                        > 0.0;
                                 if !has_selector && !has_duration {
                                     errors.push(format!("步骤[{i}] 需要 selector 或 duration"));
                                 }

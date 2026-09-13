@@ -272,8 +272,14 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
             logger.debug("入队退出哨兵失败（事件循环可能已关闭）: %r", exc)
 
 
-async def _dispatch(msg: dict) -> None:
-    """分发单条命令并写回响应。"""
+async def _dispatch(msg: dict, emit=None) -> None:
+    """分发单条命令并写回响应。
+
+    ``emit`` 为响应写出函数，缺省全局 ``emit_response``；``_dispatch_guarded``
+    传入单次守卫包装——真实结果与超时错误竞争同一 id 时仅首个生效（BRG-4）。
+    """
+    if emit is None:
+        emit = emit_response
     msg_id = msg.get("id")
     method = msg.get("method")
     params = msg.get("params") or {}
@@ -282,7 +288,7 @@ async def _dispatch(msg: dict) -> None:
 
     try:
         if handler is None:
-            emit_response(msg_id, _error_result(f"未知命令: {method}"))
+            emit(msg_id, _error_result(f"未知命令: {method}"))
             return
         data = await handler(params)
         # 命令完成日志：debug 常规记录，超过 5s 的慢命令升为 info 便于观察
@@ -291,16 +297,16 @@ async def _dispatch(msg: dict) -> None:
             logger.info("命令 %s 完成，耗时 %dms", method, duration_ms)
         else:
             logger.debug("命令 %s 完成，耗时 %dms", method, duration_ms)
-        emit_response(msg_id, {"success": True, "data": data, "error": None})
+        emit(msg_id, {"success": True, "data": data, "error": None})
     except StepCancelled as exc:
         # 取消：视为成功终态（outcome=cancelled）
-        emit_response(msg_id, _structured_result(exc, success=True, start=start))
+        emit(msg_id, _structured_result(exc, success=True, start=start))
     except WorkerError as exc:
         # 可分类失败：保留 outcome 供 Rust 侧决定重试/回收策略
-        emit_response(msg_id, _structured_result(exc, success=False, start=start))
+        emit(msg_id, _structured_result(exc, success=False, start=start))
     except Exception as exc:  # noqa: BLE001
         logger.exception("命令 %s 执行异常", method)
-        emit_response(msg_id, _error_result(str(exc)))
+        emit(msg_id, _error_result(str(exc)))
 
 
 def _structured_result(exc: WorkerError, *, success: bool, start: float | None = None) -> dict:
@@ -373,12 +379,26 @@ async def _dispatch_guarded(msg: dict) -> None:
     以中断挂起的 Playwright await（``page.evaluate``/``goto`` 挂在无限循环时
     仅取消协程无法打断 CDP 调用），随后按 ``UNKNOWN_ERROR`` 回错误响应，
     避免一条挂起命令永久堵死后续所有命令（A1 自愈）。
+
+    单次回包守卫（BRG-4）：handler 恰在超时判定返回后、``cancel`` 生效前完成
+    的窄窗口内，真实结果与超时错误会竞争同一 id——经 ``emit_once`` 仅首个
+    回包生效，杜绝同 id 双响应（第二发会触发 Rust 侧"未知响应"告警）。
     """
     msg_id = msg.get("id")
     method = msg.get("method")
     params = msg.get("params") or {}
     timeout_s = _command_timeout(params)
-    task = asyncio.ensure_future(_dispatch(msg))
+    responded = False
+
+    def emit_once(mid, payload):
+        nonlocal responded
+        if responded:
+            logger.debug("命令 %s 已有响应在先，忽略重复回包", method)
+            return
+        responded = True
+        emit_response(mid, payload)
+
+    task = asyncio.ensure_future(_dispatch(msg, emit=emit_once))
     done, _pending = await asyncio.wait({task}, timeout=timeout_s)
     if task in done:
         exc = task.exception()
@@ -393,8 +413,9 @@ async def _dispatch_guarded(msg: dict) -> None:
         await worker_core.force_interrupt_pending()
     except Exception:  # noqa: BLE001
         logger.exception("强制中断挂起操作失败")
-    # 超时自愈错误响应（原 _timeout_result，与 _error_result 同构已合一）
-    emit_response(msg_id, _error_result(f"命令 {method} 执行超时（{timeout_s:.0f}s）"))
+    # 超时自愈错误响应（原 _timeout_result，与 _error_result 同构已合一；
+    # emit_once 保证 handler 恰在超时瞬间完成时不会双回包）
+    emit_once(msg_id, _error_result(f"命令 {method} 执行超时（{timeout_s:.0f}s）"))
     # 等待任务收敛：页面关闭后挂起的 Playwright await 应以“目标已关闭”异常结束
     try:
         await asyncio.wait_for(task, timeout=5.0)

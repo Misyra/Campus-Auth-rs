@@ -64,10 +64,13 @@ pub fn assess_connectivity(evidence: &ProbeEvidence) -> ConnectivityAssessment {
     // 升级路径应走「谨慎单次」而非与普通失败相同的无差别 AttemptLogin
     let reason = if active.contains(&ProbeOutcome::Inconclusive) {
         AssessmentReason::InconclusiveEvidence
-    } else if evidence.tcp == ProbeOutcome::Pass {
-        AssessmentReason::WeakEvidenceOnly
     } else {
-        AssessmentReason::ConflictingEvidence
+        // MON-1：到达此处必为 tcp==Pass——Captive/Pass(http/url) 已早退、
+        // 全 Fail 已早退，无 Inconclusive 时 active 的非 Fail 成员只能是 tcp
+        // 的 Pass。原 ConflictingEvidence 分支生产不可达已删，变体保留供
+        // 序列化兼容；debug_assert 锁定不变量，未来扩展 TCP 探测产出时先改这里
+        debug_assert_eq!(evidence.tcp, ProbeOutcome::Pass);
+        AssessmentReason::WeakEvidenceOnly
     };
     assessment(
         NetworkStatus::Unknown,

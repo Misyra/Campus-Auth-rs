@@ -832,6 +832,10 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
             if let Some(tx) = tx {
                 // oneshot::send 是同步操作，不会阻塞 supervisor 主循环
                 let _ = tx.send(Ok(resp));
+            } else if resp.id == SHUTDOWN_REQUEST_ID {
+                // 优雅关闭请求（id=0）的哨兵回执：Rust 侧发出后不入 pending_requests，
+                // Worker 按协议回包 → 到此即视为关闭 ACK，降 debug 不打虚假告警
+                tracing::debug!(target: "python_worker", "收到关闭哨兵响应（id=0）");
             } else {
                 tracing::warn!(target: "python_worker", "收到过期/未知响应 id={}", resp.id);
             }
