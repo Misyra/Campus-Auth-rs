@@ -242,6 +242,10 @@ const networkStatusDetail = computed(() => {
       return "所有已启用的公网探测均失败，等待链路恢复";
     case "weak_evidence_only":
       return "仅有 TCP 弱证据，暂不据此认定公网可用";
+    case "inconclusive_evidence":
+      return status.connectivity.recovery_advice === "attempt_login_once"
+        ? "探测结果异常但无法确认是否需要认证，将谨慎尝试一次登录"
+        : "探测结果异常且无法确认网络状态，将在下一轮重新确认";
     case "conflicting_evidence":
       return "探测证据相互冲突，将在下一轮重新确认";
     case "no_probes_enabled":

@@ -2,6 +2,13 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-13 P2 评审项批量修复）
+
+- MON-2 探测语义修复：HTTP/URL 探测遇非预期状态码（1xx/4xx/5xx）从判 `Pass` 改判新增的 `ProbeOutcome::Inconclusive`（证据不足）——拦截型网关（未认证返回 403/404）不再被误判成 Online 且 Online 态强制 NoAction 截死补救路径，也不与全 Fail 混同落 Offline；多目标汇总优先级调整为 Captive > Pass > Inconclusive > Fail
+- decision 层配套分级：新增 `AssessmentReason::InconclusiveEvidence`，Inconclusive 证据 + auth_url 可达走 `RecoveryAdvice::AttemptLoginOnce`（Engine 按 `cautious_attempted_config_version` 谨慎单次去重），防止探测目标自身短暂 5xx 周期性误触发自动登录；明确 Offline（全 Fail）+ auth_url 可达仍保持原 `AttemptLogin` 升级路径
+- 前端同步：`ProbeOutcome`/`AssessmentReason` 类型新增 `inconclusive` / `inconclusive_evidence`，状态详情文案区分「谨慎尝试一次」与「等待下一轮确认」
+- 测试：probes 新增 403/404 → Inconclusive 与 summarize 排位用例（mock server 需先读请求再回响应，避免 Windows 下 close 携带未读数据触发 RST 丢弃响应），decision 新增 Inconclusive 组合与 Offline 回归锚点用例
+
 ## 开发中（2026-09-13 v5 迁移映射与端口校验修复）
 
 - 修正 v5→v6 配置迁移的 `enable_local_check` 误映射：经 v5（Python 版）源码核实，该字段是登录前物理网卡连接检查开关（`check_login_prerequisites`），现正确改名到 `local_check_enabled`；URL 内容检测在 v5 无独立开关（`url_check_urls` 列表非空即生效），`url_enabled` 改为按拆分后目标列表是否为空派生（与 Web 层旧客户端"非空即启用"派生口径一致），不再吞掉 v5 的本地检查开关值。存量迁移用户（config_version 6-8）不做 v9 回写（`url_enabled=true` 无法与用户主动开启区分），影响与补救口径记入 `docs/known-issues.md` #20

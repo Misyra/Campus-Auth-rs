@@ -66,6 +66,9 @@ pub enum AssessmentReason {
     AllProbesFailed,
     /// 只有 TCP 等弱传输证据，不能确认公网状态
     WeakEvidenceOnly,
+    /// 探测收到非预期状态码（目标服务异常或拦截式网关）：链路完整但
+    /// 无法确认放行或劫持，证据不足
+    InconclusiveEvidence,
     /// 强证据之间出现冲突
     ConflictingEvidence,
     /// 没有启用任何有效公网探测

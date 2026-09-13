@@ -77,6 +77,7 @@ export type AssessmentReason =
   | "external_failed_auth_reachable"
   | "all_probes_failed"
   | "weak_evidence_only"
+  | "inconclusive_evidence"
   | "conflicting_evidence"
   | "no_probes_enabled";
 export type AuthEndpointState =
@@ -95,7 +96,7 @@ export type RecoveryAdvice =
   | "fix_configuration"
   | "no_probe_evidence"
   | "not_evaluated";
-export type ProbeOutcome = "pass" | "captive" | "fail" | "disabled";
+export type ProbeOutcome = "pass" | "captive" | "inconclusive" | "fail" | "disabled";
 export type LocalLinkState = "not_checked" | "available" | "unavailable" | "probe_failed";
 
 /** 后端对一轮网络证据的统一解释 */

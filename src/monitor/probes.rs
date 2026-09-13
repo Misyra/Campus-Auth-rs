@@ -213,12 +213,15 @@ async fn probe_http_one(
                 204 => ProbeOutcome::Pass,
                 200 => ProbeOutcome::Captive,
                 301..=308 => ProbeOutcome::Captive,
-                // 1xx/4xx/5xx：204 端点返回非预期状态码（目标服务异常或配置了非 204 端点），
-                // 但 TCP+TLS+HTTP 链路完整，物理连通成立。判 Fail 会把"在线"误判为
-                // Offline，进而在 auth_url 可达时升级为 CaptivePortal 触发登录循环
+                // 1xx/4xx/5xx：204 端点返回非预期状态码。TCP+TLS+HTTP 链路完整，
+                // 但无法区分「目标服务异常」与「门户拦截式响应」——判 Pass 会把
+                // 拦截型网关（403/404）误判成在线，且 Online 态强制 NoAction 截死
+                // 补救路径；判 Fail 会把在线误判成 Offline。落 Inconclusive 由
+                // decision 层给 Unknown/WaitForMoreEvidence，经 auth_url 可达性
+                // 谨慎升级登录
                 other => {
-                    tracing::debug!(url = %url, status = other, "204 门户检测返回非预期状态码，按连通处理");
-                    ProbeOutcome::Pass
+                    tracing::debug!(url = %url, status = other, "204 门户检测返回非预期状态码，证据不足");
+                    ProbeOutcome::Inconclusive
                 }
             };
             (
@@ -239,7 +242,7 @@ async fn probe_http_one(
     }
 }
 
-/// URL 标题探测：内容匹配语义（3xx=Captive，200 且内容匹配=Pass，200 不匹配=Captive，其余状态码=Pass（连通成立））
+/// URL 标题探测：内容匹配语义（3xx=Captive，200 且内容匹配=Pass，200 不匹配=Captive，其余状态码=Inconclusive（证据不足））
 pub struct UrlProbe;
 
 impl UrlProbe {
@@ -330,10 +333,10 @@ async fn probe_url_one(
                 );
             }
             (
-                // 1xx/4xx/5xx：能收到 HTTP 响应即物理连通成立（与 HTTP 探测同一原则），
-                // 判 Fail 会因目标服务异常把整体状态拖成 Offline
-                ProbeOutcome::Pass,
-                PerProbeDetail::new(url.to_string(), true, start, Some(status), None),
+                // 1xx/4xx/5xx：能收到 HTTP 响应即链路完整，但内容语义未知——
+                // 与 HTTP 探测同一原则落 Inconclusive（见 probe_http_one 注释）
+                ProbeOutcome::Inconclusive,
+                PerProbeDetail::new(url.to_string(), false, start, Some(status), None),
             )
         }
         Err(e) => (
@@ -343,18 +346,25 @@ async fn probe_url_one(
     }
 }
 
-/// 汇总多目标结果（劫持优先级：Captive > Pass > Fail）
+/// 汇总多目标结果（劫持优先级：Captive > Pass > Inconclusive > Fail）
 fn summarize(results: Vec<(ProbeOutcome, PerProbeDetail)>) -> (ProbeOutcome, Vec<PerProbeDetail>) {
     let pass = results.iter().any(|(o, _)| matches!(o, ProbeOutcome::Pass));
     let captive = results
         .iter()
         .any(|(o, _)| matches!(o, ProbeOutcome::Captive));
+    let inconclusive = results
+        .iter()
+        .any(|(o, _)| matches!(o, ProbeOutcome::Inconclusive));
     // 任一目标被门户劫持即整体 Captive：若 Pass 优先，混合目标场景
     // （一个直连可达 + 一个被劫持）会漏检 CaptivePortal，不触发自动登录
     let outcome = if captive {
         ProbeOutcome::Captive
     } else if pass {
         ProbeOutcome::Pass
+    } else if inconclusive {
+        // 无明确放行/劫持证据但存在非预期状态码：整体按证据不足处理，
+        // 而非与全 Fail 一样落 Offline
+        ProbeOutcome::Inconclusive
     } else {
         ProbeOutcome::Fail
     };
@@ -377,10 +387,13 @@ pub enum ProbeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeOutcome {
-    /// 连通 / 204 / 内容匹配 / 收到非预期状态码（链路完整）
+    /// 连通 / 204 / 内容匹配
     Pass,
     /// 200 / 3xx（门户劫持）
     Captive,
+    /// 1xx/4xx/5xx 等非预期状态码：TCP+TLS+HTTP 链路完整，但无法区分
+    /// 「目标服务异常」与「门户拦截式响应」，证据不足以判定放行或劫持
+    Inconclusive,
     /// 超时或连接失败（物理不通）
     Fail,
     /// 该类别未启用
@@ -424,7 +437,7 @@ impl PerProbeDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     // ============ parse_url_host_port：auth_url 地址解析单点（G2） ============
@@ -531,6 +544,94 @@ mod tests {
         assert_eq!(details.len(), 1);
         assert!(!details[0].success);
         assert!(details[0].error.is_some(), "中断原因必须写入探测明细");
+    }
+
+    /// 拦截型网关（未认证返回 403）必须判 Inconclusive 而非 Pass：
+    /// MON-2 回归锚点——Pass 会把认证墙误判成在线并截死补救路径
+    #[tokio::test]
+    async fn test_http_probe_nonexpected_status_is_inconclusive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // 先读掉请求：Windows 下 close 携带未读数据会发 RST，把 client
+            // 尚未读取的响应一并丢弃（10053 ConnectionAborted）
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let url = format!("http://{address}/generate_204");
+        let client = Client::builder().no_proxy().build().unwrap();
+        let (outcome, details) = probe_http_one(&client, &url, Duration::from_secs(2)).await;
+        server.await.unwrap();
+
+        assert_eq!(outcome, ProbeOutcome::Inconclusive);
+        assert!(!details.success);
+    }
+
+    /// URL 探测遇 404 同样落 Inconclusive（与 HTTP 探测同一原则）
+    #[tokio::test]
+    async fn test_url_probe_nonexpected_status_is_inconclusive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // 先读掉请求：同 test_http_probe_nonexpected_status_is_inconclusive
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let url = format!("http://{address}/hotspot-detect.html");
+        let client = Client::builder().no_proxy().build().unwrap();
+        let (outcome, details) =
+            probe_url_one(&client, &url, &HashMap::new(), Duration::from_secs(2)).await;
+        server.await.unwrap();
+
+        assert_eq!(outcome, ProbeOutcome::Inconclusive);
+        assert!(!details.success);
+    }
+
+    /// 汇总排位：Captive > Pass > Inconclusive > Fail
+    #[test]
+    fn test_summarize_priority_order() {
+        let detail = |o: ProbeOutcome| {
+            (
+                o,
+                PerProbeDetail::new("http://t".into(), false, Instant::now(), None, None),
+            )
+        };
+        // 劫持优先（不受 Pass/Inconclusive 干扰）
+        let (o, _) = summarize(vec![
+            detail(ProbeOutcome::Pass),
+            detail(ProbeOutcome::Captive),
+        ]);
+        assert_eq!(o, ProbeOutcome::Captive);
+        // 任一放行成功即 Pass
+        let (o, _) = summarize(vec![detail(ProbeOutcome::Fail), detail(ProbeOutcome::Pass)]);
+        assert_eq!(o, ProbeOutcome::Pass);
+        // 无明确结论但有非预期状态码：Inconclusive 而非 Fail
+        let (o, _) = summarize(vec![
+            detail(ProbeOutcome::Fail),
+            detail(ProbeOutcome::Inconclusive),
+        ]);
+        assert_eq!(o, ProbeOutcome::Inconclusive);
+        // 全 Fail 才 Fail
+        let (o, _) = summarize(vec![detail(ProbeOutcome::Fail), detail(ProbeOutcome::Fail)]);
+        assert_eq!(o, ProbeOutcome::Fail);
     }
 
     // ============ parse_host_port：TCP 目标严格 host:port ============

@@ -60,7 +60,11 @@ pub fn assess_connectivity(evidence: &ProbeEvidence) -> ConnectivityAssessment {
         );
     }
 
-    let reason = if evidence.tcp == ProbeOutcome::Pass {
+    // Inconclusive（非预期状态码）优先于 tcp==Pass 判定：链路通但证据不足时，
+    // 升级路径应走「谨慎单次」而非与普通失败相同的无差别 AttemptLogin
+    let reason = if active.contains(&ProbeOutcome::Inconclusive) {
+        AssessmentReason::InconclusiveEvidence
+    } else if evidence.tcp == ProbeOutcome::Pass {
         AssessmentReason::WeakEvidenceOnly
     } else {
         AssessmentReason::ConflictingEvidence
@@ -99,10 +103,20 @@ pub fn apply_auth_endpoint(
         }
         NetworkStatus::Offline | NetworkStatus::Unknown => match auth_endpoint {
             AuthEndpointState::Reachable => {
-                current.status = NetworkStatus::CaptivePortal;
-                current.confidence = AssessmentConfidence::Medium;
-                current.reason = AssessmentReason::ExternalFailedAuthReachable;
-                current.recovery_advice = RecoveryAdvice::AttemptLogin;
+                // 证据不足与明确失败分级：探测目标自身 5xx 等异常会让 Unknown
+                // 周期性出现，若与普通失败一样无差别 AttemptLogin，会在「探测
+                // 目标故障 + 认证服务器在线」时反复触发自动登录；谨慎单次由
+                // Engine 按配置版本去重（cautious_attempted_config_version）
+                if current.reason == AssessmentReason::InconclusiveEvidence
+                    && current.status == NetworkStatus::Unknown
+                {
+                    current.recovery_advice = RecoveryAdvice::AttemptLoginOnce;
+                } else {
+                    current.status = NetworkStatus::CaptivePortal;
+                    current.confidence = AssessmentConfidence::Medium;
+                    current.reason = AssessmentReason::ExternalFailedAuthReachable;
+                    current.recovery_advice = RecoveryAdvice::AttemptLogin;
+                }
             }
             AuthEndpointState::Invalid | AuthEndpointState::Missing => {
                 current.recovery_advice = RecoveryAdvice::FixConfiguration;
@@ -232,5 +246,63 @@ mod tests {
         ));
         let result = apply_auth_endpoint(base, AuthEndpointState::Invalid);
         assert_eq!(result.recovery_advice, RecoveryAdvice::FixConfiguration);
+    }
+
+    // ============ Inconclusive（MON-2）：非预期状态码 = 证据不足 ============
+
+    #[test]
+    fn inconclusive_without_strong_evidence_is_unknown() {
+        // 403/5xx 等非预期状态码不再判 Pass：不得落 Online，也不得与全 Fail
+        // 混同落 Offline，而是证据不足的 Unknown
+        let result = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Inconclusive,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(result.status, NetworkStatus::Unknown);
+        assert_eq!(result.reason, AssessmentReason::InconclusiveEvidence);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::WaitForMoreEvidence);
+    }
+
+    #[test]
+    fn inconclusive_with_tcp_pass_stays_inconclusive() {
+        // tcp==Pass + http==Inconclusive：链路通但放行证据不足，
+        // 谨慎语义优先于 WeakEvidenceOnly 的无限升级路径
+        let result = assess_connectivity(&evidence(
+            ProbeOutcome::Pass,
+            ProbeOutcome::Inconclusive,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(result.status, NetworkStatus::Unknown);
+        assert_eq!(result.reason, AssessmentReason::InconclusiveEvidence);
+    }
+
+    #[test]
+    fn inconclusive_with_auth_reachable_attempts_once() {
+        // 证据不足 + auth_url 可达：谨慎单次，不升级 CaptivePortal、
+        // 不给无差别 AttemptLogin（防探测目标短暂 5xx 周期性误触发登录）
+        let base = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Inconclusive,
+            ProbeOutcome::Disabled,
+        ));
+        let result = apply_auth_endpoint(base, AuthEndpointState::Reachable);
+        assert_eq!(result.status, NetworkStatus::Unknown);
+        assert_eq!(result.reason, AssessmentReason::InconclusiveEvidence);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLoginOnce);
+    }
+
+    #[test]
+    fn plain_offline_with_auth_reachable_keeps_full_attempt() {
+        // 回归锚点：明确 Offline（全 Fail）+ auth_url 可达仍走原升级路径，
+        // 不受 Inconclusive 分流影响
+        let base = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+        ));
+        let result = apply_auth_endpoint(base, AuthEndpointState::Reachable);
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
     }
 }
