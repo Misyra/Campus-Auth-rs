@@ -345,6 +345,10 @@ mod tests {
         fn ocr_declared(&self) -> bool {
             true
         }
+        fn browser_engine_ready(&self, _engine: &str) -> bool {
+            // 测试替身：不接管真实浏览器缓存探测
+            false
+        }
     }
 
     /// 双域 state：BridgeApi + EnvironmentApi 各自经 FromRef 委派提取

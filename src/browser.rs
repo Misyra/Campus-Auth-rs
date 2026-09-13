@@ -139,51 +139,87 @@ pub fn system_browser_available() -> bool {
 
 /// 指定浏览器渠道当前是否可用
 ///
-/// - `msedge` / `chrome`：系统安装探测
-/// - `chromium` / `playwright`（历史别名）：Playwright 缓存探测
+/// - `msedge` / `chrome`：系统安装探测（Windows 默认装 Edge，故默认渠道即走此路，
+///   不必下载 Chromium，节省磁盘）
+/// - `chromium` / `playwright`（历史别名）：Playwright 缓存探测（要求组件安装完整，
+///   见 [`crate::environment::browser_registry`]）
 /// - `firefox` / `webkit`：Playwright 缓存探测
 /// - `custom`：自定义路径非空且存在
 /// - 未知渠道：不可用
-pub fn is_channel_available(channel: &str, custom_path: &str) -> bool {
+pub fn is_channel_available(
+    env: &dyn crate::environment::EnvironmentApi,
+    channel: &str,
+    custom_path: &str,
+) -> bool {
+    is_channel_available_with(channel, custom_path, |engine| {
+        env.browser_engine_ready(engine)
+    })
+}
+
+/// 渠道可用性判定核心；`managed` 为托管引擎探测，注入以便单测脱离真实环境
+fn is_channel_available_with(
+    channel: &str,
+    custom_path: &str,
+    managed: impl Fn(&str) -> bool,
+) -> bool {
     match channel.trim().to_ascii_lowercase().as_str() {
         "msedge" => is_edge_installed(),
         "chrome" => is_chrome_installed(),
-        "chromium" | "playwright" => {
-            crate::environment::bootstrap::playwright_browser_installed("chromium")
-        }
-        "firefox" => crate::environment::bootstrap::playwright_browser_installed("firefox"),
-        "webkit" => crate::environment::bootstrap::playwright_browser_installed("webkit"),
         "custom" => {
             // 必须是可执行文件而非仅存在的路径：指向目录会通过健康检查、
             // 启动时才以晦涩的 Playwright 报错失败（H2）
             let p = custom_path.trim();
             !p.is_empty() && Path::new(p).is_file()
         }
-        _ => false,
+        // 托管渠道的映射与自愈路径共用同一实现（environment::browser_registry）
+        other => match crate::environment::browser_registry::managed_engine_of(other) {
+            Some(engine) => managed(engine),
+            None => false,
+        },
     }
 }
 
 /// 首个可用的浏览器渠道（优先级：Edge → Chrome → Chromium → Firefox → WebKit）
 ///
-/// 系统浏览器优先：免下载、启动快；均无时返回 `None`，调用方走 Chromium
-/// 下载兜底或直接报无浏览器可用。
-pub fn first_available_channel() -> Option<&'static str> {
+/// 系统浏览器优先：免下载、启动快（Windows 出厂即带 Edge，因此绝大多数用户
+/// 无需下载 Chromium）；均无时返回 `None`，调用方走 Chromium 下载兜底或直接报
+/// 无浏览器可用。
+pub fn first_available_channel(
+    env: &dyn crate::environment::EnvironmentApi,
+) -> Option<&'static str> {
+    first_available_channel_with(|engine| env.browser_engine_ready(engine))
+}
+
+/// 首个可用渠道的核心判定；`managed` 注入以便单测脱离真实环境
+fn first_available_channel_with(managed: impl Fn(&str) -> bool) -> Option<&'static str> {
+    first_available_from(system_browser_channel(), managed)
+}
+
+/// 当前系统浏览器渠道（Edge 优先，其次 Chrome；均无返回 `None`）
+fn system_browser_channel() -> Option<&'static str> {
     if is_edge_installed() {
-        return Some("msedge");
+        Some("msedge")
+    } else if is_chrome_installed() {
+        Some("chrome")
+    } else {
+        None
     }
-    if is_chrome_installed() {
-        return Some("chrome");
+}
+
+/// 渠道优先级的纯函数形式：系统浏览器优先，其次 Chromium → Firefox → WebKit
+///
+/// 区分出来是为了让优先级顺序可被确定性单测覆盖（系统浏览器是否存在依赖机器）。
+fn first_available_from(
+    system: Option<&'static str>,
+    managed: impl Fn(&str) -> bool,
+) -> Option<&'static str> {
+    if let Some(channel) = system {
+        return Some(channel);
     }
-    if crate::environment::bootstrap::playwright_browser_installed("chromium") {
-        return Some("chromium");
-    }
-    if crate::environment::bootstrap::playwright_browser_installed("firefox") {
-        return Some("firefox");
-    }
-    if crate::environment::bootstrap::playwright_browser_installed("webkit") {
-        return Some("webkit");
-    }
-    None
+    // 托管引擎回退顺序：Chromium → Firefox → WebKit
+    ["chromium", "firefox", "webkit"]
+        .into_iter()
+        .find(|engine| managed(engine))
 }
 
 #[cfg(test)]
@@ -192,31 +228,71 @@ mod tests {
 
     #[test]
     fn test_unknown_channel_is_unavailable() {
-        assert!(!is_channel_available("safari", ""));
-        assert!(!is_channel_available("", ""));
-        assert!(!is_channel_available("  ", ""));
+        // 托管引擎探测恒真也不该让未知渠道变可用
+        assert!(!is_channel_available_with("safari", "", |_| true));
+        assert!(!is_channel_available_with("", "", |_| true));
+        assert!(!is_channel_available_with("  ", "", |_| true));
     }
 
     #[test]
     fn test_custom_channel_requires_existing_path() {
-        assert!(!is_channel_available("custom", ""));
-        assert!(!is_channel_available("custom", "   "));
-        assert!(!is_channel_available(
+        assert!(!is_channel_available_with("custom", "", |_| false));
+        assert!(!is_channel_available_with("custom", "   ", |_| false));
+        assert!(!is_channel_available_with(
             "custom",
-            r"C:\definitely\not\here\browser.exe"
+            r"C:\definitely\not\here\browser.exe",
+            |_| false
         ));
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("browser.exe");
         std::fs::write(&exe, b"x").unwrap();
-        assert!(is_channel_available("custom", &exe.to_string_lossy()));
+        assert!(is_channel_available_with(
+            "custom",
+            &exe.to_string_lossy(),
+            |_| false
+        ));
     }
 
     #[test]
     fn test_channel_match_is_case_insensitive() {
         // 未知渠道大小写变化仍不可用（覆盖归一化分支）
-        assert!(!is_channel_available("SAFARI", ""));
+        assert!(!is_channel_available_with("SAFARI", "", |_| true));
         // custom 大小写归一后走同一分支：空路径仍不可用
-        assert!(!is_channel_available("Custom", ""));
+        assert!(!is_channel_available_with("Custom", "", |_| true));
+    }
+
+    /// 托管渠道的可用性由引擎判定驱动（ENV-1：不再由「目录非空」直接决定）
+    #[test]
+    fn managed_channel_follows_engine_availability() {
+        let only_chromium = |engine: &str| engine == "chromium";
+        assert!(is_channel_available_with("chromium", "", only_chromium));
+        // 历史别名 playwright 与 chromium 同渠道
+        assert!(is_channel_available_with("playwright", "", only_chromium));
+        assert!(is_channel_available_with("PLAYWRIGHT", "", only_chromium));
+        // 引擎不可用时对应渠道必须为假（旧实现的误报路径）
+        assert!(!is_channel_available_with("chromium", "", |_| false));
+        assert!(!is_channel_available_with("firefox", "", only_chromium));
+        assert!(!is_channel_available_with("webkit", "", only_chromium));
+    }
+
+    /// 渠道优先级：系统浏览器优先，其次 Chromium → Firefox → WebKit
+    #[test]
+    fn first_available_from_priority() {
+        let all = |_: &str| true;
+        // 有系统浏览器时永远优先系统浏览器（Windows 默认装 Edge）
+        assert_eq!(first_available_from(Some("msedge"), all), Some("msedge"));
+        assert_eq!(first_available_from(Some("chrome"), all), Some("chrome"));
+        // 无系统浏览器时按 managed 顺序回退
+        assert_eq!(first_available_from(None, all), Some("chromium"));
+        assert_eq!(
+            first_available_from(None, |engine| engine == "firefox"),
+            Some("firefox")
+        );
+        assert_eq!(
+            first_available_from(None, |engine| engine == "webkit"),
+            Some("webkit")
+        );
+        assert_eq!(first_available_from(None, |_| false), None);
     }
 
     #[test]

@@ -579,10 +579,11 @@ pub async fn apply_update(
 /// Playwright 管理的浏览器按实际缓存分别探测；核心引导默认只安装 Chromium。
 pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let settings = state.config.load_settings_async().await;
-    let chromium_installed =
-        crate::environment::bootstrap::playwright_browser_installed("chromium");
-    let firefox_installed = crate::environment::bootstrap::playwright_browser_installed("firefox");
-    let webkit_installed = crate::environment::bootstrap::playwright_browser_installed("webkit");
+    // 判定基于 Playwright registry 与安装完成标记（见 environment::browser_registry），
+    // 不再以「缓存目录非空」为准
+    let chromium_installed = state.environment.browser_engine_ready("chromium");
+    let firefox_installed = state.environment.browser_engine_ready("firefox");
+    let webkit_installed = state.environment.browser_engine_ready("webkit");
     let custom_path = &settings.global.browser.browser_custom_path;
     let edge_installed = is_edge_installed();
     let chrome_installed = is_chrome_installed();
@@ -997,6 +998,10 @@ mod tests {
         }
 
         fn ocr_declared(&self) -> bool {
+            false
+        }
+        fn browser_engine_ready(&self, _engine: &str) -> bool {
+            // 测试替身：不接管真实浏览器缓存探测
             false
         }
     }

@@ -182,14 +182,8 @@ async fn restore_quarantined_venv(venv_path: &Path, backup: Option<&Path>) {
 /// 通过 site-packages 下存在 `ddddocr` 包目录或 `ddddocr-*.dist-info` 判定，
 /// 兼容 Windows（Lib/site-packages）与 Unix（lib/python3.x/site-packages）布局。
 pub(crate) fn ddddocr_installed(mgr: &EnvironmentManager) -> bool {
-    let venv = mgr.worker_project_path().join(crate::environment::VENV_DIR);
-    let candidates = [
-        // Windows venv 布局
-        venv.join("Lib").join("site-packages"),
-        // Unix venv 布局（python3.12 固定小版本约束下取 3.12）
-        venv.join("lib").join("python3.12").join("site-packages"),
-    ];
-    for site in candidates {
+    // site-packages 布局解析与浏览器 registry 读取共用同一实现（单点维护）
+    for site in crate::environment::site_packages_candidates(mgr) {
         if !site.is_dir() {
             continue;
         }
@@ -334,6 +328,9 @@ pub async fn install_playwright_browser(
         match result {
             Ok(output) if output.status.success() => {
                 tracing::info!("Playwright {browser} 安装成功");
+                // 安装改变了 ms-playwright 内容：立刻重算浏览器/能力状态，
+                // 让界面与登录侧渠道判定立即看到新装的浏览器（ENV-1 自愈链路）
+                crate::environment::bootstrap::refresh_browser_and_capability_status(mgr);
                 return Ok(());
             }
             Ok(output) => {

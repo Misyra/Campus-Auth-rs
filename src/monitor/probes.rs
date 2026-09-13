@@ -513,8 +513,13 @@ mod tests {
 
         let url = format!("http://{address}/probe");
         let expected = HashMap::from([(url.clone(), "expected".to_string())]);
+        // 必须显式 no_proxy：reqwest 默认跟随系统代理，若环境设了 HTTP_PROXY
+        // （本机就是 127.0.0.1:4122）且无 NO_PROXY，请求会被发往代理而非本地
+        // listener，导致 accept() 永远等不到连接、测试挂死。
+        // 生产路径同理：monitor 的 build_client 默认也是 no_proxy（网络检测直连）。
+        let client = Client::builder().no_proxy().build().unwrap();
         let (outcome, details) = UrlProbe::run(
-            &Client::new(),
+            &client,
             std::slice::from_ref(&url),
             &expected,
             Duration::from_secs(2),

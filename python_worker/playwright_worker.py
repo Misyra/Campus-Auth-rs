@@ -15,10 +15,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import importlib.util
 import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -285,17 +287,158 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
 
 # ── 浏览器环境探测（原 playwright_bootstrap.py）──
 
-#: Playwright 托管渠道（playwright/firefox/webkit）的 executable_path 探测缓存。
-#: 路径只随 Playwright 版本变化，进程生命周期内缓存后仅需毫秒级的存在性复核，
-#: 避免 browser_health_check 每次冷启一个 sync_playwright driver 子进程
-#: （200-500ms）只为拿路径再判存在。只缓存成功结果；命中后复核失败即丢弃
-#: 缓存走完整探测（兼容卸载与升级换路径），失败探测不落缓存。无锁：GIL 下
-#: 单键读写原子，并发探测最坏重复一次属幂等。
-_MANAGED_BROWSER_PATH_CACHE: dict[str, str] = {}
+# 判定语义与 Rust 侧 `environment::browser_registry` **必须保持一致**（同一批用例在
+# 两端各有测试，见 tests/test_worker.py 的「浏览器探测」用例；任一侧漂移都会被测试抓到）：
+#   唯一事实源 = Playwright 包内 `driver/package/browsers.json`（精确 revision）
+#   完成判据   = 目录内含 `INSTALLATION_COMPLETE`（Playwright registry 的 isInstalled 判据）
+#   chromium   = 要求 `chromium-<rev>` 与 `chromium_headless_shell-<rev>` 两套都完整
+#
+# 为什么不再用 `browser_type.executable_path`：它返回的是 **headful** 路径
+# （`chromium-<rev>/chrome-win64/chrome.exe`），而后台运行默认 headless，实际使用的是
+# `chromium_headless_shell-<rev>`——旧实现据此判定会把「缺 headless shell」误判为可用。
+# 新判定只做文件系统检查，无需冷启 sync_playwright driver（省 200-500ms 冷启开销）。
+
+#: 安装完成标记（Playwright registry 的 isInstalled 判据）
+_INSTALLATION_COMPLETE = "INSTALLATION_COMPLETE"
+
+#: 引擎 → 需要的 registry 条目名（chromium 需 headful + headless shell 两套）
+_REQUIRED_REGISTRY_NAMES: dict[str, tuple[str, ...]] = {
+    "chromium": ("chromium", "chromium-headless-shell"),
+    "firefox": ("firefox",),
+    "webkit": ("webkit",),
+}
+
+#: 回退用的目录前缀（registry 不可读或带平台差异化修订时；headless shell 目录名是下划线）
+_FALLBACK_PREFIXES: dict[str, tuple[str, ...]] = {
+    "chromium": ("chromium-", "chromium_headless_shell-"),
+    "firefox": ("firefox-",),
+    "webkit": ("webkit-",),
+}
+
+#: registry 必需目录名缓存：engine -> (registry mtime, 目录名元组或 None)。
+#: registry 只随 Playwright 版本变化，按 mtime 失效即可。
+_REQUIRED_DIRS_CACHE: dict[str, tuple[float, tuple[str, ...] | None]] = {}
+
+
+def _browser_cache_dir() -> Path | None:
+    """Playwright 浏览器缓存根目录（PLAYWRIGHT_BROWSERS_PATH 优先，空 / "0" 走 OS 默认）"""
+    override = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if override and override != "0":
+        return Path(override)
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        return Path(base) / "ms-playwright" if base else None
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "ms-playwright"
+    return Path.home() / ".cache" / "ms-playwright"
+
+
+def _registry_path() -> Path | None:
+    """Playwright 包内 browsers.json 路径（按包定位，不猜 venv 目录布局）"""
+    try:
+        spec = importlib.util.find_spec("playwright")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    return Path(spec.origin).parent / "driver" / "package" / "browsers.json"
+
+
+def _required_dir_names(engine: str, registry: Path) -> tuple[str, ...] | None:
+    """从 registry 推导必需目录名；不可读 / 带平台差异化修订时返回 None（走回退）"""
+    wanted = _REQUIRED_REGISTRY_NAMES.get(engine)
+    if not wanted:
+        return None
+    try:
+        mtime = registry.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cached = _REQUIRED_DIRS_CACHE.get(engine)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    names: tuple[str, ...] | None = None
+    try:
+        raw = json.loads(registry.read_text(encoding="utf-8"))
+        by_name = {item["name"]: item for item in raw.get("browsers", [])}
+        if all(name in by_name for name in wanted) and not any(
+            "revisionOverrides" in by_name[name] for name in wanted
+        ):
+            # registry 名 → 目录名：`-` 换成 `_` 再拼 revision
+            # （registry 的 chromium-headless-shell 对应磁盘 chromium_headless_shell-1234）
+            names = tuple(
+                f"{name.replace('-', '_')}-{by_name[name]['revision']}" for name in wanted
+            )
+    except (OSError, ValueError, KeyError, TypeError) as exc:  # noqa: BLE001
+        logger.debug("读取 Playwright registry 失败，回退前缀判定: %s", exc)
+        names = None
+    _REQUIRED_DIRS_CACHE[engine] = (mtime, names)
+    return names
+
+
+def _fallback_available(cache_dir: Path, engine: str) -> bool:
+    """回退判定（registry 不可读）：任一匹配前缀的目录安装完成即可用"""
+    prefixes = _FALLBACK_PREFIXES.get(engine)
+    if not prefixes:
+        return False
+    try:
+        entries = list(cache_dir.iterdir())
+    except OSError:
+        return False
+    return any(
+        entry.is_dir()
+        and any(entry.name.startswith(prefix) for prefix in prefixes)
+        and (entry / _INSTALLATION_COMPLETE).is_file()
+        for entry in entries
+    )
+
+
+def _managed_engine(channel: str) -> str | None:
+    """托管渠道 → 引擎名；系统浏览器 / 自定义 / 未知渠道返回 None（与 Rust 侧一致）"""
+    if channel in ("chromium", "playwright"):
+        return "chromium"
+    if channel in ("firefox", "webkit"):
+        return channel
+    return None
+
+
+def _missing_components(engine: str) -> list[str]:
+    """缺失 / 未完成的组件目录名（供 Rust 侧给出可操作的错误信息）
+
+    registry 可读时给出精确目录名；不可读（含带平台差异化修订的引擎）时回退为
+    期望前缀 `xxx-*`，与 Rust 侧 `browser_registry::missing_components` 同口径——
+    保证「未就绪」时该字段不为空，诊断信息始终可操作。
+    """
+    cache_dir = _browser_cache_dir()
+    registry = _registry_path()
+    if cache_dir is not None and registry is not None:
+        names = _required_dir_names(engine, registry)
+        if names is not None:
+            return [
+                name
+                for name in names
+                if not (cache_dir / name / _INSTALLATION_COMPLETE).is_file()
+            ]
+    return [f"{prefix}*" for prefix in _FALLBACK_PREFIXES.get(engine, ())]
+
+
+def _engine_available(engine: str) -> bool:
+    """判定托管引擎（chromium/firefox/webkit）是否安装完整"""
+    cache_dir = _browser_cache_dir()
+    if cache_dir is None:
+        return False
+    registry = _registry_path()
+    if registry is not None:
+        names = _required_dir_names(engine, registry)
+        if names is not None:
+            return all(
+                (cache_dir / name / _INSTALLATION_COMPLETE).is_file() for name in names
+            )
+    return _fallback_available(cache_dir, engine)
 
 
 def _ensure_browser(channel: str = "playwright", custom_path: str = "") -> bool:
-    """确保目标浏览器可用；Playwright 管理的引擎按实际 executable 检测（带缓存）。"""
+    """确保目标浏览器可用；托管渠道按 registry + 安装完成标记判定（语义同 Rust 侧）。"""
     channel = str(channel or "playwright").strip().lower()
     custom_path = str(custom_path or "").strip()
     # 系统浏览器（Edge/Chrome/自定义路径）需真实探测可执行文件，而非恒 True。
@@ -320,9 +463,13 @@ def _ensure_browser(channel: str = "playwright", custom_path: str = "") -> bool:
                 if not base:
                     continue
                 if channel == "msedge":
-                    candidates.append(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe")
+                    candidates.append(
+                        Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+                    )
                 else:
-                    candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+                    candidates.append(
+                        Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"
+                    )
             if any(p.exists() for p in candidates):
                 return True
         else:
@@ -336,31 +483,17 @@ def _ensure_browser(channel: str = "playwright", custom_path: str = "") -> bool:
             if any(p.exists() for p in candidates):
                 return True
         return False
-    # 托管渠道：缓存命中仅复核文件存在性（毫秒级）；复核失败说明路径消失
-    # （卸载或 Playwright 升级换路径），丢弃缓存走下方完整探测
-    cached = _MANAGED_BROWSER_PATH_CACHE.get(channel)
-    if cached is not None:
-        if Path(cached).exists():
-            return True
-        _MANAGED_BROWSER_PATH_CACHE.pop(channel, None)
-    try:
-        from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as p:
-            if channel == "firefox":
-                browser_type = p.firefox
-            elif channel == "webkit":
-                browser_type = p.webkit
-            else:
-                browser_type = p.chromium
-            executable = browser_type.executable_path
-            if executable and Path(executable).exists():
-                _MANAGED_BROWSER_PATH_CACHE[channel] = str(executable)
-                return True
-            return False
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("浏览器探测失败（channel=%s）: %s", channel, exc)
+    # 托管渠道：显式枚举合法值（与 Rust is_channel_available 一致，未知渠道不可用）
+    engine = _managed_engine(channel)
+    if engine is None:
+        logger.debug("未知浏览器渠道，视为不可用: %s", channel)
         return False
+
+    available = _engine_available(engine)
+    if not available:
+        logger.debug("托管浏览器 %s 未安装完整（缓存目录 %s）", engine, _browser_cache_dir())
+    return available
 
 
 # ── 反馈资源快照（feedback_capture 的 CSS/JS 落盘辅助）──
@@ -1413,7 +1546,13 @@ class WorkerCore:
         except Exception as exc:  # noqa: BLE001 — 健康检查失败本身即结果（healthy=False），不能向 IPC 抛异常
             logger.warning(f"健康检查异常: {exc}")
             healthy = False
-        return {"healthy": healthy}
+        result: dict = {"healthy": healthy, "channel": channel}
+        if not healthy:
+            # 上报缺失组件：Rust 侧据此给出「缺哪个目录」的可操作错误，
+            # 而不是只剩通用「健康检查失败」（ENV-1 失败闭环）
+            engine = _managed_engine(channel)
+            result["missing"] = _missing_components(engine) if engine else []
+        return result
 
     async def handle_worker_health_check(self, params: dict) -> dict:
         """轻量健康检查：确认 Worker IPC/事件循环可用，不探测 Chromium。

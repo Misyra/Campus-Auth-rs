@@ -1,7 +1,5 @@
 //! 引导流程编排：核心 + 能力两阶段
 
-use std::path::PathBuf;
-
 use tokio_util::sync::CancellationToken;
 
 use crate::environment::python::tail_chars;
@@ -107,9 +105,21 @@ async fn bootstrap_capability_inner(
     // ── 阶段 3: 安装 Playwright Chromium 浏览器 ──
     // 核心自动化能力只要求 Chromium；Firefox/WebKit 为可选浏览器，
     // /api/browsers 会按实际缓存分别探测，不能把本标记等价为三种引擎均已安装。
-    // 系统已装 Edge/Chrome 时跳过下载：Playwright 经 channel 直连系统浏览器，
-    // 无需 Chromium 内核；全无可用浏览器时仍下载 Chromium 兜底自愈。
-    if !mgr.read_status().playwright_ready && !crate::browser::system_browser_available() {
+    //
+    // 策略（Windows 尤其重要）：**系统浏览器存在时不下载 Chromium**。
+    // Windows 出厂自带 Edge（默认渠道 msedge，见 `schema.rs` 的 BrowserSettings 默认值），
+    // Playwright 可经 channel 直连系统浏览器，无需 Chromium 内核——避免为绝大多数用户
+    // 白占约 150MB 磁盘。Chromium 只在两种情况下安装：
+    //   1) 全无系统浏览器时的兜底自愈（下面这个分支）；
+    //   2) 用户在设置页显式点击安装（`POST /api/install/playwright` →
+    //      `perform_playwright_install`，见 `web/routes/system.rs`）。
+    // 读取即释放：作用域内取快照，避免 RwLock 读守卫跨越后续 await 使 future 失去 Send
+    let need_managed_chromium = {
+        let status = mgr.read_status();
+        should_download_managed_chromium(status.playwright_ready, status.system_browser_ready)
+    };
+
+    if need_managed_chromium {
         mgr.write_status(|s| s.stage = BootstrapStage::InstallingPlaywright);
         mgr.report_progress(
             "installing_playwright",
@@ -119,7 +129,8 @@ async fn bootstrap_capability_inner(
 
         match crate::environment::python::install_playwright(mgr, cancel).await {
             Ok(_) => {
-                mgr.write_status(|s| s.playwright_ready = true);
+                // 不在此处置 playwright_ready：统一由下方的
+                // refresh_browser_and_capability_status 按同一口径重算，避免同一字段多套赋值
                 mgr.report_progress(
                     "installing_playwright",
                     PROGRESS_PLAYWRIGHT.1,
@@ -217,11 +228,17 @@ pub async fn bootstrap_worker_runtime(
 }
 
 /// 只做浏览器文件系统探测并重算派生能力，不重复启动 Python/Worker import 探针。
-fn refresh_browser_and_capability_status(mgr: &EnvironmentManager) {
-    let managed_browser_ready = playwright_browser_installed("chromium");
+///
+/// 供引导收尾与**显式安装浏览器成功后**复用：安装改变了 `ms-playwright` 内容，
+/// 必须立刻重算 `playwright_ready` / `capability_ready`，否则状态与界面会滞后，
+/// 登录侧的渠道探测缓存也不会失效（其缓存键含这两个标志）。
+pub(crate) fn refresh_browser_and_capability_status(mgr: &EnvironmentManager) {
+    let managed_browser_ready = playwright_browser_installed(mgr, "chromium");
     let system_browser_ready = crate::browser::system_browser_available();
     mgr.write_status(|s| {
-        s.playwright_ready = managed_browser_ready;
+        // 与 check_environment 同口径：表示「Python 运行时 + Chromium 二进制」均就绪。
+        // 少了 python_ready 会出现「界面显示浏览器已就绪、capability_ready 却为假」的自相矛盾。
+        s.playwright_ready = s.python_ready && managed_browser_ready;
         s.system_browser_ready = system_browser_ready;
         s.capability_ready = derive_capability_ready(
             s.uv_ready,
@@ -294,7 +311,7 @@ pub async fn check_environment(mgr: &EnvironmentManager) -> Result<(), Environme
             error: None,
         }
     };
-    let playwright_ready = python_ready && playwright_browser_installed("chromium");
+    let playwright_ready = python_ready && playwright_browser_installed(mgr, "chromium");
     let system_browser_ready = crate::browser::system_browser_available();
     let ocr_enabled = crate::environment::health::ocr_enabled(mgr).unwrap_or_else(|error| {
         tracing::warn!("OCR 偏好读取失败，安全回退为未启用: {error}");
@@ -372,96 +389,29 @@ fn derive_capability_ready(
         && (managed_browser_ready || system_browser_ready)
 }
 
+/// 是否需要下载 Playwright 托管的 Chromium
+///
+/// 仅当「Chromium 尚未安装」且「系统没有可用浏览器（Edge/Chrome）」时才自动下载；
+/// 有系统浏览器时由 Playwright 经 channel 直连，省下约 150MB 磁盘。
+/// 用户显式安装（`POST /api/install/playwright`）不走本判定，见调用方注释。
+fn should_download_managed_chromium(playwright_ready: bool, system_browser_ready: bool) -> bool {
+    !playwright_ready && !system_browser_ready
+}
+
 /// 是否已完成过首轮环境探测（首个调用方视为容器启动路径，探测摘要升 info）
 static FIRST_CHECK_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// 检查 Playwright 管理的指定浏览器是否实际安装。
+/// 检查 Playwright 管理的指定浏览器是否已安装完成
 ///
-/// 支持 `chromium` / `firefox` / `webkit`。判断依据是 Playwright 缓存目录中
-/// 对应 `<browser>-*` 子目录存在且非空；未知名称直接返回 false。
-/// 优先尊重 `PLAYWRIGHT_BROWSERS_PATH`，否则按操作系统检查 Playwright 默认缓存；
-/// 空值 / `"0"` 表示无独立缓存（与卸载侧 `playwright_cache_dir` 同口径），同样走默认缓存。
-pub fn playwright_browser_installed(browser: &str) -> bool {
-    let prefix = match browser {
-        "chromium" => "chromium-",
-        "firefox" => "firefox-",
-        "webkit" => "webkit-",
-        _ => return false,
-    };
-
-    if let Some(dir) =
-        resolve_custom_browsers_dir(std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").as_deref())
-    {
-        return playwright_dir_has_browser(dir, prefix);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            if playwright_dir_has_browser(
-                PathBuf::from(local_app_data).join("ms-playwright"),
-                prefix,
-            ) {
-                return true;
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            if playwright_dir_has_browser(
-                PathBuf::from(home)
-                    .join("Library")
-                    .join("Caches")
-                    .join("ms-playwright"),
-                prefix,
-            ) {
-                return true;
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            if playwright_dir_has_browser(
-                PathBuf::from(home).join(".cache").join("ms-playwright"),
-                prefix,
-            ) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-/// 解析自定义浏览器缓存目录：未设置 / 空 / `"0"` 返回 `None`（回退 OS 默认），纯函数便于单测。
-fn resolve_custom_browsers_dir(var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
-    let dir = var?;
-    if dir.is_empty() || dir == "0" {
-        return None;
-    }
-    Some(PathBuf::from(dir))
-}
-
-/// 检查 ms-playwright 目录下是否存在指定前缀且非空的浏览器子目录。
-fn playwright_dir_has_browser(dir: PathBuf, prefix: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with(prefix) {
-            if let Ok(mut sub) = std::fs::read_dir(entry.path()) {
-                if sub.next().is_some() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+/// 支持 `chromium` / `firefox` / `webkit`；未知名称返回 false。
+/// 判定基于 Playwright 自身的 registry（`browsers.json`）与 `INSTALLATION_COMPLETE`
+/// 完成标记，而非「缓存目录非空」——细节见 [`crate::environment::browser_registry`]。
+///
+/// chromium 要求 `chromium-<rev>` 与 `chromium_headless_shell-<rev>` **两套都完整**：
+/// 应用自身的 `playwright install chromium` 在 registry 中把两者都标为默认安装项，
+/// 因此这正是「安装完整」的语义，且使判定不依赖 `headless` 配置。
+pub fn playwright_browser_installed(mgr: &EnvironmentManager, engine: &str) -> bool {
+    crate::environment::missing_components(mgr, engine).is_empty()
 }
 
 /// 重试安装（POST /api/system/retry-install 触发）
@@ -510,44 +460,15 @@ mod tests {
         assert!(derive_capability_ready(true, true, true, true, false, true));
     }
 
+    /// Windows 默认装 Edge：系统浏览器存在时不得自动下载 Chromium（省磁盘）
     #[test]
-    fn playwright_cache_detection_distinguishes_engines() {
-        let dir = tempfile::tempdir().expect("创建临时目录");
-        std::fs::create_dir_all(dir.path().join("chromium-123").join("chrome"))
-            .expect("创建 chromium 缓存");
-        std::fs::write(
-            dir.path()
-                .join("chromium-123")
-                .join("chrome")
-                .join("marker"),
-            b"ok",
-        )
-        .expect("写入 marker");
-        std::fs::create_dir_all(dir.path().join("firefox-456")).expect("创建空 firefox 缓存");
-
-        assert!(playwright_dir_has_browser(
-            dir.path().to_path_buf(),
-            "chromium-"
-        ));
-        assert!(!playwright_dir_has_browser(
-            dir.path().to_path_buf(),
-            "firefox-"
-        ));
-        assert!(!playwright_dir_has_browser(
-            dir.path().to_path_buf(),
-            "webkit-"
-        ));
-    }
-    /// 自定义目录解析：未设置/空/"0" 回退默认（None），其余原样透出。
-    #[test]
-    fn custom_browsers_dir_exempts_empty_and_zero() {
-        use std::ffi::OsStr;
-        assert_eq!(resolve_custom_browsers_dir(None), None);
-        assert_eq!(resolve_custom_browsers_dir(Some(OsStr::new(""))), None);
-        assert_eq!(resolve_custom_browsers_dir(Some(OsStr::new("0"))), None);
-        assert_eq!(
-            resolve_custom_browsers_dir(Some(OsStr::new("/tmp/pw-browsers"))),
-            Some(PathBuf::from("/tmp/pw-browsers"))
-        );
+    fn managed_chromium_download_skipped_when_system_browser_exists() {
+        // 有 Edge/Chrome → 不下载
+        assert!(!should_download_managed_chromium(false, true));
+        // 已装 Chromium → 不重复下载
+        assert!(!should_download_managed_chromium(true, true));
+        assert!(!should_download_managed_chromium(true, false));
+        // 两者都没有 → 兜底下载，保证自愈
+        assert!(should_download_managed_chromium(false, false));
     }
 }

@@ -697,7 +697,7 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
             let sup = Arc::clone(this);
             tokio::spawn(async move {
                 match execute_inner(&sup, &method, params).await {
-                    Ok((mut rx, _guard, token)) => {
+                    Ok((mut rx, _guard, token, cancel_id)) => {
                         // 取消后保持 guard/会话槽位，直到 Worker 回包确认已经停止；
                         // 若 Worker 未响应则强制回收。不能仅因本地 token 触发就释放
                         // 槽位，否则新命令会进入仍被旧命令占用的串行 Worker。
@@ -707,8 +707,26 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
                                 match tokio::time::timeout(CANCEL_ACK_TIMEOUT, &mut rx).await {
                                     Ok(_) => Err(BridgeError::Cancelled),
                                     Err(_) => {
-                                        warn!(target: "python_worker", "取消后 Worker 未在宽限期内停止，强制回收");
-                                        kill_worker_now(&sup).await;
+                                        // 归属校验（与 grace_wait_slot_release 同一语义）：
+                                        // 仅当会话槽位仍被本请求占用（current_cancel_id 即本
+                                        // 请求 cancel_id）才强杀；槽位已被新请求接管或已空时，
+                                        // 本请求与 Worker 存活与否已无关联，静默放弃——否则
+                                        // 「不响应取消的挂起命令」的取消确认超时会误杀已接管
+                                        // 槽位的新请求（F2 复发路径，
+                                        // 见 tests/bridge_supervisor.rs 超时宽限用例）。
+                                        let owns_slot = {
+                                            let inner =
+                                                sup.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                            inner.current_cancel_id.as_deref()
+                                                == Some(cancel_id.as_str())
+                                        };
+                                        if owns_slot {
+                                            warn!(
+                                                target: "python_worker",
+                                                "取消后 Worker 未在宽限期内停止，强制回收"
+                                            );
+                                            kill_worker_now(&sup).await;
+                                        }
                                         Err(BridgeError::Cancelled)
                                     }
                                 }
@@ -902,6 +920,7 @@ async fn execute_inner(
         oneshot::Receiver<Result<IpcResponse, BridgeError>>,
         SessionGuard,
         CancellationToken,
+        String,
     ),
     BridgeError,
 > {
@@ -1080,8 +1099,9 @@ async fn execute_inner(
         })
     };
 
-    // 8. 返回 oneshot::Receiver、SessionGuard 与 CancellationToken，由调用方（转发 task）等待响应
-    Ok((resp_rx, guard, token))
+    // 8. 返回 oneshot::Receiver、SessionGuard、CancellationToken 与本请求 cancel_id，
+    //    由调用方（转发 task）等待响应；cancel_id 供「取消确认超时强杀」前做归属校验
+    Ok((resp_rx, guard, token, cancel_id))
 }
 
 /// 会话守卫 drop 时复位状态
@@ -1346,6 +1366,20 @@ async fn ensure_worker(
         if attempt == 0
             && let Some(environment) = &environment
         {
+            // 先区分故障面：健康检查失败多为浏览器二进制缺失/损坏（uv sync 对此无效），
+            // 只有浏览器本身完好时才退回强制同步 Worker 依赖。
+            let channel = {
+                let cfg = this.config.runtime().load();
+                cfg.browser.browser_channel.clone()
+            };
+            if environment
+                .repair_browser_channel(&channel)
+                .await
+                .map_err(|error| BridgeError::WorkerEnvironmentInvalid(error.to_string()))?
+            {
+                tracing::info!(target: "python_worker", "浏览器组件重装完成，重试当前请求");
+                continue;
+            }
             tracing::info!(target: "python_worker", "强制同步 Worker 依赖后重试当前请求");
             environment
                 .repair_worker_runtime()
@@ -1446,13 +1480,33 @@ async fn send_health_check(
             .worker_capabilities = caps;
     }
     // 健康检查成功且 Worker 报告浏览器可用
-    Ok(resp.result.success
+    let healthy = resp.result.success
         && resp
             .result
             .data
             .get("healthy")
             .and_then(Value::as_bool)
-            .unwrap_or(false))
+            .unwrap_or(false);
+    if !healthy && !worker_only {
+        // Worker 随响应上报缺失组件；转成可操作日志，否则用户只看到通用「健康检查失败」
+        let missing: Vec<&str> = resp
+            .result
+            .data
+            .get("missing")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if missing.is_empty() {
+            warn!(target: "python_worker", "浏览器健康检查未通过（未上报缺失组件明细）");
+        } else {
+            warn!(
+                target: "python_worker",
+                missing = %missing.join("、"),
+                "浏览器健康检查未通过：缺少浏览器组件，将尝试自动重装"
+            );
+        }
+    }
+    Ok(healthy)
 }
 
 /// 强杀当前 Worker 子进程并标记 Error（不清理 cancel 注册表/会话）

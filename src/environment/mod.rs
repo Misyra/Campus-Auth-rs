@@ -1,11 +1,13 @@
 //! 环境管理器：uv/Python/浏览器引导
 
 pub mod bootstrap;
+pub mod browser_registry;
 pub mod health;
 pub mod python;
 pub mod uv;
 
 pub use bootstrap::{bootstrap_capability, check_environment, retry_install};
+pub use browser_registry::{missing_components, site_packages_candidates};
 pub use python::{ensure_venv, install_playwright, install_playwright_browser};
 pub use uv::{check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256};
 
@@ -404,6 +406,11 @@ pub struct EnvironmentManager {
     on_bootstrap_done: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// 引导互斥门（F1）：串行化并发 ensure_capability / retry_install
     pub(crate) bootstrap_gate: BootstrapGate,
+    /// 浏览器自愈是否已尝试过（进程内单次保护）
+    ///
+    /// `browser_health_check` 失败后触发一次组件重装；置位后不再自动重试，
+    /// 避免网络不可用时反复下载数百 MB。用户手动安装/重装不受此限制。
+    browser_repair_attempted: std::sync::atomic::AtomicBool,
 }
 
 /// Web 层消费的环境能力抽象（M1 细粒度 state：environment 域）
@@ -437,6 +444,11 @@ pub trait EnvironmentApi: Send + Sync {
     fn ocr_ready(&self) -> bool;
     /// Worker 工程是否支持 OCR（按需安装，不预声明）。
     fn ocr_declared(&self) -> bool;
+    /// 判定指定托管引擎（chromium/firefox/webkit）是否已安装完整。
+    ///
+    /// 供浏览器列表 API 与登录渠道选择共用，判定细节见
+    /// [`browser_registry::missing_components`]（registry 精确 revision + 安装完成标记）。
+    fn browser_engine_ready(&self, engine: &str) -> bool;
 }
 
 #[async_trait::async_trait]
@@ -495,6 +507,10 @@ impl EnvironmentApi for EnvironmentManager {
     fn ocr_declared(&self) -> bool {
         crate::environment::python::ocr_declared(self)
     }
+
+    fn browser_engine_ready(&self, engine: &str) -> bool {
+        crate::environment::missing_components(self, engine).is_empty()
+    }
 }
 
 impl EnvironmentManager {
@@ -525,6 +541,7 @@ impl EnvironmentManager {
             current_cancel_token: RwLock::new(CancellationToken::new()),
             on_bootstrap_done: Mutex::new(None),
             bootstrap_gate: BootstrapGate::new(),
+            browser_repair_attempted: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -677,6 +694,57 @@ impl EnvironmentManager {
     /// 显式重装不允许与引导并发进行。
     pub async fn retry_install(&self) -> Result<(), EnvironmentError> {
         retry_install(self).await
+    }
+
+    /// 浏览器自愈：**失败后**自动补装 Playwright 浏览器
+    ///
+    /// 供 Bridge 在 `browser_health_check` 失败后调用，执行的是
+    /// `uv run --project <worker> playwright install <engine>`（见
+    /// [`crate::environment::python::install_playwright_browser`]）。
+    ///
+    /// 为什么需要独立入口：健康检查失败通常是**浏览器二进制缺失/损坏**（uv sync 对此无效），
+    /// 而系统浏览器存在时 `capability_ready` 仍为真、不会触发引导 —— 于是缺失的引擎永远修不上。
+    ///
+    /// 装哪个引擎：托管渠道补自身；系统浏览器/自定义路径兜底补 **Chromium**
+    /// （见 [`browser_registry::fallback_engine_for_channel`]）。正常运行时不会走到这里，
+    /// 引导仍是 Edge 优先、不下载（见 [`bootstrap`] 的 `should_download_managed_chromium`）。
+    ///
+    /// 返回 `Ok(true)` 表示执行了补装。进程内**只自动尝试一次**，避免网络不可用时
+    /// 反复下载数百 MB；用户手动安装（`POST /api/install/playwright`）不受此限制。
+    pub async fn repair_browser_channel(&self, channel: &str) -> Result<bool, EnvironmentError> {
+        let engine = crate::environment::browser_registry::fallback_engine_for_channel(channel);
+        let missing = crate::environment::missing_components(self, engine);
+        if missing.is_empty() {
+            // 引擎本身完整 → 失败原因在别处（系统依赖、被杀软拦截等），交由调用方走 uv sync
+            return Ok(false);
+        }
+        if self
+            .browser_repair_attempted
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            tracing::warn!(engine, "浏览器自愈本进程已尝试过，跳过重复下载");
+            return Ok(false);
+        }
+
+        let described = crate::environment::browser_registry::describe_missing(&missing);
+        tracing::warn!(
+            engine,
+            channel,
+            missing = %described,
+            "浏览器健康检查失败：自动执行 uv playwright install {engine}"
+        );
+        self.write_status(|s| {
+            s.last_error = Some(format!("{described}，正在自动重装（仅自动尝试一次）"));
+        });
+
+        // 安装成功时 `install_playwright_browser` 内部已重算状态（含 capability_ready）
+        self.bootstrap_gate
+            .run_exclusive(async {
+                let cancel = self.begin_install_generation();
+                crate::environment::python::install_playwright_browser(self, engine, &cancel).await
+            })
+            .await?;
+        Ok(true)
     }
 
     /// 取消当前在途安装 generation。

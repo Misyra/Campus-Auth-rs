@@ -284,11 +284,13 @@ pub struct LoginOrchestrator {
     /// 见 [`PendingGuard`]：键为会话 ID，值为（来源, 取消令牌）。会话创建后
     /// 复用同一令牌，登记项随 submit 返回自动注销。
     pending_cancels: StdMutex<HashMap<u64, (LoginSource, CancellationToken)>>,
-    /// 浏览器渠道可用性探测缓存："channel|path" → (探测时刻, 可用)，60s TTL。
-    /// 登录重试连打时避免每轮预检都扫磁盘（which/固定路径/Playwright 目录探测）
+    /// 浏览器渠道可用性探测缓存："channel|path|playwright_ready|system_browser_ready"
+    /// → (探测时刻, 可用)，60s TTL。键含环境就绪标志，浏览器安装/卸载后自动失效。
+    /// 登录重试连打时避免每轮预检都扫磁盘（which/固定路径/Playwright registry 探测）
     channel_probe_cache: StdMutex<HashMap<String, (std::time::Instant, bool)>>,
-    /// 首个可用渠道探测缓存（first_available_channel 结果），60s TTL
-    first_available_cache: StdMutex<Option<(std::time::Instant, Option<&'static str>)>>,
+    /// 首个可用渠道探测缓存（first_available_channel 结果），60s TTL；
+    /// 键为环境就绪标志，浏览器状态变化后自动失效
+    first_available_cache: StdMutex<Option<(String, std::time::Instant, Option<&'static str>)>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
     /// 应用级 shutdown 信号（会话在 shutdown 时立即退出）
@@ -714,7 +716,7 @@ impl LoginOrchestrator {
                         false,
                         format!(
                             "环境未就绪，自动初始化失败: {detail}{}",
-                            Self::no_browser_hint()
+                            Self::no_browser_hint(&*self.environment)
                         ),
                         profile.id.clone(),
                     )
@@ -732,7 +734,10 @@ impl LoginOrchestrator {
                     .immediate_handle(
                         source,
                         false,
-                        format!("环境初始化后仍未就绪: {detail}{}", Self::no_browser_hint()),
+                        format!(
+                            "环境初始化后仍未就绪: {detail}{}",
+                            Self::no_browser_hint(&*self.environment)
+                        ),
                         profile.id.clone(),
                     )
                     .await);
@@ -744,6 +749,7 @@ impl LoginOrchestrator {
         // 纳入复检，命中则自动切换后继续；仍全无可用则直接失败，前端据文案
         // 弹窗引导下载 Chromium，不再把缺浏览器误报成登录失败深埋日志。
         if !browser::is_channel_available(
+            &*self.environment,
             browser_override
                 .as_deref()
                 .unwrap_or(&rt.browser.browser_channel),
@@ -1058,17 +1064,21 @@ impl LoginOrchestrator {
     }
     /// 无浏览器兜底提示：环境引导失败时若当前无任何可用浏览器，把文案指向
     /// Chromium 安装（前端据"无可用浏览器"子串弹窗）；有可用浏览器时为空串。
-    fn no_browser_hint() -> &'static str {
-        if browser::first_available_channel().is_none() {
+    fn no_browser_hint(env: &dyn crate::environment::EnvironmentApi) -> &'static str {
+        if browser::first_available_channel(env).is_none() {
             "；当前无可用浏览器，请下载 Chromium（设置 · 浏览器页可一键安装）"
         } else {
             ""
         }
     }
 
-    /// 渠道可用性（60s TTL 缓存；键含自定义路径，路径变更自然失效）
+    /// 渠道可用性（60s TTL 缓存）
+    ///
+    /// 缓存键含自定义路径与**环境就绪标志**：路径变更、或浏览器被安装/卸载导致
+    /// `playwright_ready` / `system_browser_ready` 变化时键随之改变，旧结论自然失效，
+    /// 无需 environment 模块反向通知 login（避免模块间耦合）。
     fn channel_available_cached(&self, channel: &str, custom_path: &str) -> bool {
-        let key = format!("{channel}|{}", custom_path.trim());
+        let key = self.channel_probe_key(channel, custom_path);
         {
             let cache = self
                 .channel_probe_cache
@@ -1080,7 +1090,7 @@ impl LoginOrchestrator {
                 }
             }
         }
-        let available = browser::is_channel_available(channel, custom_path);
+        let available = browser::is_channel_available(&*self.environment, channel, custom_path);
         self.channel_probe_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1088,25 +1098,41 @@ impl LoginOrchestrator {
         available
     }
 
-    /// 首个可用渠道（60s TTL 缓存）
+    /// 渠道探测缓存键：渠道 + 自定义路径 + 环境浏览器就绪标志
+    fn channel_probe_key(&self, channel: &str, custom_path: &str) -> String {
+        let status = self.environment.status();
+        format!(
+            "{channel}|{}|{}|{}",
+            custom_path.trim(),
+            status.playwright_ready,
+            status.system_browser_ready
+        )
+    }
+
+    /// 首个可用渠道（60s TTL 缓存；键含环境就绪标志，安装后自动失效）
     fn first_available_channel_cached(&self) -> Option<&'static str> {
+        let status = self.environment.status();
+        let key = format!(
+            "{}|{}",
+            status.playwright_ready, status.system_browser_ready
+        );
         {
             let guard = self
                 .first_available_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some((at, cached)) = *guard {
-                if at.elapsed() < CHANNEL_PROBE_TTL {
-                    return cached;
+            if let Some((cached_key, at, cached)) = guard.as_ref() {
+                if *cached_key == key && at.elapsed() < CHANNEL_PROBE_TTL {
+                    return *cached;
                 }
             }
         }
-        let probed = browser::first_available_channel();
+        let probed = browser::first_available_channel(&*self.environment);
         let mut guard = self
             .first_available_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *guard = Some((std::time::Instant::now(), probed));
+        *guard = Some((key, std::time::Instant::now(), probed));
         probed
     }
 

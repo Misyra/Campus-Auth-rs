@@ -963,7 +963,10 @@ def test_browser_idle_release_fires_and_cancels():
     asyncio.run(_run())
 
 
-# ── 托管渠道浏览器探测缓存（_ensure_browser / _MANAGED_BROWSER_PATH_CACHE）──
+# ── 托管渠道浏览器探测（_ensure_browser / registry + 安装完成标记）──
+#
+# 判定语义与 Rust 侧 environment::browser_registry 一致：同一批用例两端各有测试，
+# 任一侧漂移（例如退回「目录非空」判据、或漏掉 headless shell）都会被这里抓到。
 
 
 def _install_fake_sync_playwright(monkeypatch, handler):
@@ -976,80 +979,201 @@ def _install_fake_sync_playwright(monkeypatch, handler):
     monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
 
 
-def test_managed_probe_cache_hits_without_driver(monkeypatch):
-    """探测缓存命中：仅复核文件存在性，不再冷启 sync_playwright driver。"""
+def _chromium_registry(tmp: Path, revision: str = "1234") -> Path:
+    """写一份最小 registry（含 chromium 与 headless shell 两条默认安装项）"""
+    registry = tmp / "browsers.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "browsers": [
+                    {"name": "chromium", "revision": revision, "installByDefault": True},
+                    {
+                        "name": "chromium-headless-shell",
+                        "revision": revision,
+                        "installByDefault": True,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return registry
+
+
+def _bind_probe_paths(monkeypatch, pw, cache_dir: Path, registry: Path | None) -> None:
+    """把缓存目录与 registry 指到临时位置，并清空必需目录名缓存"""
+    monkeypatch.setattr(pw, "_browser_cache_dir", lambda: cache_dir)
+    monkeypatch.setattr(pw, "_registry_path", lambda: registry)
+    monkeypatch.setattr(pw, "_REQUIRED_DIRS_CACHE", {})
+
+
+def _write_browser_dir(cache_dir: Path, name: str, *, complete: bool) -> None:
+    """写入浏览器目录；complete=True 时带 Playwright 的安装完成标记"""
+    from playwright_worker import _INSTALLATION_COMPLETE
+
+    target = cache_dir / name
+    (target / "payload").mkdir(parents=True, exist_ok=True)
+    if complete:
+        (target / _INSTALLATION_COMPLETE).write_bytes(b"")
+
+
+def test_managed_probe_requires_installation_marker(monkeypatch):
+    """核心回归：目录非空但缺完成标记 → 未安装（旧实现据此误报就绪）"""
     import playwright_worker as pw
-    from playwright_worker import _ensure_browser
 
     with tempfile.TemporaryDirectory() as tmp:
-        sentinel = Path(tmp) / "chrome.exe"
-        sentinel.write_bytes(b"")
-        monkeypatch.setattr(pw, "_MANAGED_BROWSER_PATH_CACHE", {"playwright": str(sentinel)})
+        tmp_path = Path(tmp)
+        cache = tmp_path / "cache"
+        _write_browser_dir(cache, "chromium-1234", complete=False)
+        _write_browser_dir(cache, "chromium_headless_shell-1234", complete=False)
+        _bind_probe_paths(monkeypatch, pw, cache, _chromium_registry(tmp_path))
+
+        assert pw._ensure_browser("playwright") is False
+        assert pw._ensure_browser("chromium") is False
+
+
+def test_managed_probe_requires_headless_shell(monkeypatch):
+    """只装 headful chromium、缺 headless shell → 未安装
+
+    默认后台运行走 headless，旧的 executable_path 判据只认 headful 路径，会漏判此情形。
+    """
+    import playwright_worker as pw
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cache = tmp_path / "cache"
+        _write_browser_dir(cache, "chromium-1234", complete=True)
+        _bind_probe_paths(monkeypatch, pw, cache, _chromium_registry(tmp_path))
+
+        assert pw._ensure_browser("chromium") is False
+
+
+def test_managed_probe_accepts_complete_components(monkeypatch):
+    """两套组件都有完成标记 → 可用（并验证历史别名 playwright 同渠道、大小写无关）"""
+    import playwright_worker as pw
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cache = tmp_path / "cache"
+        _write_browser_dir(cache, "chromium-1234", complete=True)
+        _write_browser_dir(cache, "chromium_headless_shell-1234", complete=True)
+        _bind_probe_paths(monkeypatch, pw, cache, _chromium_registry(tmp_path))
+
+        assert pw._ensure_browser("playwright") is True
+        assert pw._ensure_browser("chromium") is True
+        assert pw._ensure_browser("  PLAYWRIGHT  ") is True
+
+
+def test_managed_probe_unknown_channel_is_unavailable(monkeypatch):
+    """未知渠道不可用（与 Rust is_channel_available 一致，不再笼统当作 chromium）"""
+    import playwright_worker as pw
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "cache"
+        _bind_probe_paths(monkeypatch, pw, cache, None)
+        assert pw._ensure_browser("safari") is False
+        assert pw._ensure_browser("chrome-headless") is False
+
+
+def test_managed_probe_does_not_start_driver(monkeypatch):
+    """探测不再冷启 sync_playwright driver（旧实现为取 executable_path 需 200-500ms）"""
+    import playwright_worker as pw
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cache = tmp_path / "cache"
+        _write_browser_dir(cache, "chromium-1234", complete=True)
+        _write_browser_dir(cache, "chromium_headless_shell-1234", complete=True)
+        _bind_probe_paths(monkeypatch, pw, cache, _chromium_registry(tmp_path))
 
         def _boom(*args, **kwargs):
-            raise AssertionError("缓存命中不应启动 sync_playwright driver")
+            raise AssertionError("新判定不应启动 sync_playwright driver")
 
         _install_fake_sync_playwright(monkeypatch, _boom)
-        assert _ensure_browser("playwright") is True
+        assert pw._ensure_browser("playwright") is True
 
 
-def test_managed_probe_cache_invalidated_on_missing_path(monkeypatch):
-    """缓存路径消失（卸载/升级换路径）：丢弃缓存重新探测并缓存新路径。"""
+def test_managed_probe_honours_browsers_path_override(monkeypatch):
+    """PLAYWRIGHT_BROWSERS_PATH 生效（不替换 _browser_cache_dir，走真实解析）"""
     import playwright_worker as pw
-    from playwright_worker import _ensure_browser
 
     with tempfile.TemporaryDirectory() as tmp:
-        real_exe = Path(tmp) / "chromium.exe"
-        real_exe.write_bytes(b"")
-        monkeypatch.setattr(
-            pw, "_MANAGED_BROWSER_PATH_CACHE", {"playwright": str(Path(tmp) / "gone.exe")}
-        )
-        calls = []
+        tmp_path = Path(tmp)
+        cache = tmp_path / "cache"
+        _write_browser_dir(cache, "chromium-1234", complete=True)
+        _write_browser_dir(cache, "chromium_headless_shell-1234", complete=True)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
+        monkeypatch.setattr(pw, "_registry_path", lambda: _chromium_registry(tmp_path))
+        monkeypatch.setattr(pw, "_REQUIRED_DIRS_CACHE", {})
 
-        class FakeBrowserType:
-            executable_path = str(real_exe)
-
-        class FakeP:
-            chromium = FakeBrowserType()
-            firefox = FakeBrowserType()
-            webkit = FakeBrowserType()
-
-        class FakeCm:
-            def __enter__(self):
-                calls.append(True)
-                return FakeP()
-
-            def __exit__(self, *args):
-                return False
-
-        _install_fake_sync_playwright(monkeypatch, lambda: FakeCm())
-
-        assert _ensure_browser("playwright") is True
-        assert calls == [True], "缓存路径失效应重新完整探测"
-        assert pw._MANAGED_BROWSER_PATH_CACHE["playwright"] == str(real_exe)
-        # 新路径缓存生效：再次调用不再进 driver
-        assert _ensure_browser("playwright") is True
-        assert calls == [True]
+        assert pw._browser_cache_dir() == cache
+        assert pw._ensure_browser("chromium") is True
 
 
-def test_managed_probe_failure_not_cached(monkeypatch):
-    """探测失败（未安装/driver 异常）不落缓存：每次完整探测，安装完成后自动恢复。"""
+def test_managed_probe_fallback_without_registry(monkeypatch):
+    """registry 不可读 → 回退：任一匹配前缀目录安装完成即视为可用"""
     import playwright_worker as pw
-    from playwright_worker import _ensure_browser
 
-    monkeypatch.setattr(pw, "_MANAGED_BROWSER_PATH_CACHE", {})
-    calls = []
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "cache"
+        _bind_probe_paths(monkeypatch, pw, cache, None)
+        # 空目录 → 未安装
+        assert pw._ensure_browser("chromium") is False
+        # 非空但无完成标记 → 仍未安装（旧实现会误判）
+        _write_browser_dir(cache, "chromium-1234", complete=False)
+        assert pw._ensure_browser("chromium") is False
+        # 补完成标记 → 可用
+        _write_browser_dir(cache, "chromium-1234", complete=True)
+        assert pw._ensure_browser("chromium") is True
 
-    def fake_sync_playwright():
-        calls.append(True)
-        raise RuntimeError("driver 启动失败")
 
-    _install_fake_sync_playwright(monkeypatch, fake_sync_playwright)
+def test_managed_probe_platform_overrides_fall_back(monkeypatch):
+    """带 revisionOverrides 的引擎（webkit）走回退判定而非精确 revision"""
+    import playwright_worker as pw
 
-    assert _ensure_browser("playwright") is False
-    assert _ensure_browser("playwright") is False
-    assert calls == [True, True], "失败不应缓存，每次都完整探测"
-    assert pw._MANAGED_BROWSER_PATH_CACHE == {}
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cache = tmp_path / "cache"
+        registry = tmp_path / "browsers.json"
+        registry.write_text(
+            json.dumps(
+                {
+                    "browsers": [
+                        {
+                            "name": "webkit",
+                            "revision": "2336",
+                            "installByDefault": True,
+                            "revisionOverrides": {"mac14": "2251"},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        _bind_probe_paths(monkeypatch, pw, cache, registry)
+        _write_browser_dir(cache, "webkit-2251", complete=True)
+        assert pw._ensure_browser("webkit") is True
+        assert pw._ensure_browser("firefox") is False
+
+
+def test_missing_components_falls_back_to_prefixes(monkeypatch):
+    """未就绪时诊断信息不为空：不可精确推导（如 webkit 平台差异）时回退为期望前缀"""
+    import playwright_worker as pw
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cache = tmp_path / "cache"
+        _bind_probe_paths(monkeypatch, pw, cache, None)
+        assert pw._missing_components("webkit") == ["webkit-*"]
+        assert pw._missing_components("chromium") == [
+            "chromium-*",
+            "chromium_headless_shell-*",
+        ]
+
+        # registry 可读时给出精确目录名（只装了 headful → 报缺 headless shell）
+        _write_browser_dir(cache, "chromium-1234", complete=True)
+        _bind_probe_paths(monkeypatch, pw, cache, _chromium_registry(tmp_path))
+        assert pw._missing_components("chromium") == ["chromium_headless_shell-1234"]
 
 
 # ── B3: 调试会话期间拒绝登录/浏览器任务（Python 半防御）──

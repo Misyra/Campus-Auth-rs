@@ -733,6 +733,10 @@ mod tests {
         fn ocr_declared(&self) -> bool {
             true
         }
+        fn browser_engine_ready(&self, _engine: &str) -> bool {
+            // 测试替身：不接管真实浏览器缓存探测
+            false
+        }
     }
 
     /// 校验型 TaskApi：仅按 name 是否为空做判定（generate 链路只依赖校验行为）
