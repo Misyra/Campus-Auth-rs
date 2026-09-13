@@ -49,6 +49,9 @@ pub(crate) async fn command_output_with_cancel(
 /// 数 MB，全缓冲既"假死"又吃内存；超限后仍透出回调，仅截断最终 `Output`）。
 const STREAM_CAPTURE_CAP: usize = 256 * 1024;
 
+/// PATH 上 uv --version 探测的超时（ENV-10：与 uv_executable_works 的 5s 对齐）
+const UV_ON_PATH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 有上限累积输出：总量超 [`STREAM_CAPTURE_CAP`] 后丢弃新字节（回调不受影响）。
 fn push_capped(buf: &mut Vec<u8>, bytes: &[u8]) {
     let room = STREAM_CAPTURE_CAP.saturating_sub(buf.len());
@@ -217,13 +220,17 @@ fn parse_uv_version<N: AsRef<str>>(output: N) -> Option<semver::Version> {
 /// 供 `check_environment` 的 PATH 回退分支使用：PATH 上的 uv 过旧则视为未就绪，
 /// 触发引导下载最新版，避免旧版 uv 语法/行为不兼容导致 sync 失败。
 pub async fn check_uv_on_path() -> bool {
-    let out = match tokio::process::Command::new("uv")
-        .arg("--version")
-        .output()
-        .await
+    // ENV-10：与 uv_executable_works 同口径加超时兜底——PATH 上的 uv 若挂起
+    // （防病毒扫描/损坏的可执行文件）会卡死整个环境检查；kill_on_drop 确保超时
+    // 放弃后子进程被终止
+    let out = match tokio::time::timeout(
+        UV_ON_PATH_CHECK_TIMEOUT,
+        tokio::process::Command::new("uv").arg("--version").output(),
+    )
+    .await
     {
-        Ok(o) => o,
-        Err(_) => return false,
+        Ok(Ok(o)) => o,
+        Ok(Err(_)) | Err(_) => return false,
     };
     if !out.status.success() {
         return false;
@@ -545,6 +552,14 @@ async fn fetch_latest_uv_version(mgr: &EnvironmentManager) -> Result<String, Env
 
         if let Some(tag) = json["tag_name"].as_str() {
             let version = tag.strip_prefix('v').unwrap_or(tag);
+            // ENV-7：tag 未经清洗即拼进下载 URL（uv_archive_url 等 format!），
+            // url crate 会规范化 `..`，同 host 路径操纵面收敛于此——semver 白名单
+            // 校验失败视为镜像响应异常，继续尝试下一镜像
+            if semver::Version::parse(version).is_err() {
+                tracing::warn!("镜像返回非法版本号 {tag:?}，跳过该镜像");
+                last_err = format!("非法 tag_name: {tag}");
+                continue;
+            }
             return Ok(version.to_string());
         }
         last_err = "tag_name 字段缺失".to_string();

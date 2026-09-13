@@ -94,11 +94,19 @@ fn release_json(port: u16, tag: &str, prerelease: bool, draft: bool) -> serde_js
 ///   （测试版通道无预发布时的回退数据源）
 /// - `GET /mirror/latest.json` → 自定清单格式 v9.9.9（非 GitHub 来源回退数据源）
 /// - `GET *.sha256` → 64 位 hex 摘要文本
-fn spawn_github_mock() -> u16 {
+///
+/// 返回守卫（COR-7）：Drop 时置停止标志并回连唤醒阻塞的 accept，join 监听
+/// 线程退出——此前 8 个用例累计泄漏 8 个监听线程与端口。
+fn spawn_github_mock() -> GithubMockGuard {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定回环端口失败");
     let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_for_thread = stop.clone();
+    let join = std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            if stop_for_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             let mut stream = stream;
             // 逐请求处理（Connection: close，无需并发）
             std::thread::spawn(move || {
@@ -194,7 +202,30 @@ fn spawn_github_mock() -> u16 {
             });
         }
     });
-    port
+    GithubMockGuard {
+        port,
+        stop,
+        join: Some(join),
+    }
+}
+
+/// mock 服务器守卫：Drop 时置停止标志并回连唤醒阻塞的 accept，join 监听线程
+/// 退出（COR-7：此前监听线程与端口存活至测试进程结束，无法验证关闭）
+struct GithubMockGuard {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for GithubMockGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        // 回连一次唤醒阻塞在 accept() 的监听线程，使其看到停止标志后退出
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 /// 构造带指定更新源与通道的服务（settings.json 先落盘再由 ConfigService 加载）
@@ -223,7 +254,8 @@ fn read_last_check(base: &Path) -> serde_json::Value {
 #[tokio::test]
 async fn stable_channel_fetches_releases_latest() {
     ensure_no_proxy();
-    let port = spawn_github_mock();
+    let mock = spawn_github_mock();
+    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     let svc = service_with(
         dir.path(),
@@ -240,7 +272,8 @@ async fn stable_channel_fetches_releases_latest() {
 #[tokio::test]
 async fn prerelease_channel_picks_highest_semver() {
     ensure_no_proxy();
-    let port = spawn_github_mock();
+    let mock = spawn_github_mock();
+    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     let svc = service_with(
         dir.path(),
@@ -259,7 +292,8 @@ async fn prerelease_channel_picks_highest_semver() {
 #[tokio::test]
 async fn all_channel_picks_highest_overall() {
     ensure_no_proxy();
-    let port = spawn_github_mock();
+    let mock = spawn_github_mock();
+    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     let svc = service_with(
         dir.path(),
@@ -278,7 +312,8 @@ async fn all_channel_picks_highest_overall() {
 #[tokio::test]
 async fn prerelease_channel_falls_back_when_no_prerelease() {
     ensure_no_proxy();
-    let port = spawn_github_mock();
+    let mock = spawn_github_mock();
+    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     let svc = service_with(
         dir.path(),
@@ -298,7 +333,8 @@ async fn prerelease_channel_falls_back_when_no_prerelease() {
 #[tokio::test]
 async fn non_github_source_falls_back_to_single_manifest() {
     ensure_no_proxy();
-    let port = spawn_github_mock();
+    let mock = spawn_github_mock();
+    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     let svc = service_with(
         dir.path(),
@@ -317,7 +353,8 @@ async fn non_github_source_falls_back_to_single_manifest() {
 #[tokio::test]
 async fn check_records_last_check_state_on_success() {
     ensure_no_proxy();
-    let port = spawn_github_mock();
+    let mock = spawn_github_mock();
+    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     let svc = service_with(
         dir.path(),

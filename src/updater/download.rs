@@ -91,6 +91,17 @@ pub(crate) async fn download_and_verify(
             limit: MAX_UPDATE_ARCHIVE_BYTES,
         });
     }
+    // UPD-7：清单声明的预期大小参与交叉核对——与 Content-Length 不一致仅告警
+    // 不中断（最终完整性由 SHA256 把关），避免镜像误标长度导致正常更新失败
+    if let (Some(expected), Some(actual)) = (info.size, content_length) {
+        if expected != actual {
+            tracing::warn!(
+                expected,
+                actual,
+                "更新包 Content-Length 与清单声明大小不一致（以 SHA256 校验为准）"
+            );
+        }
+    }
     let download_start = std::time::Instant::now();
     tracing::info!(
         url = %info.url,
@@ -187,6 +198,16 @@ pub(crate) async fn download_and_verify(
         elapsed_ms = download_start.elapsed().as_millis() as u64,
         "更新包下载完成"
     );
+    // UPD-7：实际字节数与清单声明不一致仅告警（完整性以 SHA256 校验为准）
+    if let Some(expected) = info.size {
+        if downloaded != expected {
+            tracing::warn!(
+                expected,
+                actual = downloaded,
+                "更新包实际字节数与清单声明不一致（以 SHA256 校验为准）"
+            );
+        }
+    }
 
     let actual = hex::encode(hasher.finalize());
     // 完整性校验针对下载的 ZIP 本身；缺失已在入口拒绝，此处仅比对

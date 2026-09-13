@@ -26,10 +26,17 @@ fn instance_lock_status_and_graceful_stop() {
         std::fs::read_to_string(&err_log).unwrap_or_default()
     );
 
-    // 2. 二次启动被实例锁拒绝
+    // 2. 二次启动被实例锁拒绝（显式 --mode full：断言不隐式依赖默认模式）
     Command::cargo_bin("campus-auth")
         .unwrap()
-        .args(["--base-path", &base, "--no-tray", "--no-browser"])
+        .args([
+            "--base-path",
+            &base,
+            "--mode",
+            "full",
+            "--no-tray",
+            "--no-browser",
+        ])
         .timeout(Duration::from_secs(40))
         .assert()
         .failure()

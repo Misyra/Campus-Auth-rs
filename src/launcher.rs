@@ -139,6 +139,32 @@ pub(crate) struct LauncherState {
     tray_handle: Option<crate::tray::ServiceHandle>,
     shutdown_token: CancellationToken,
     log_tx: tokio::sync::broadcast::Sender<LogEntry>,
+    /// 辅助后台任务句柄（更新检查/自重启计时/启动动作派发；UPD-9：spawn 后
+    /// 丢弃句柄无法 join 验证，关闭时序无保证）。watchdog 不在此列——它是
+    /// 优雅关闭超时后的最后防线，必须活过关闭流程。
+    background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl LauncherState {
+    /// 登记后台任务句柄，供关闭流程统一 abort
+    fn track_background_task(&self, handle: tokio::task::JoinHandle<()>) {
+        self.background_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(handle);
+    }
+
+    /// 中止全部已登记后台任务（这些任务本身也监听 shutdown_token，abort 仅
+    /// 兜底保证关闭时序，不改变优雅退出语义）
+    fn abort_background_tasks(&self) {
+        let mut tasks = self
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for t in tasks.drain(..) {
+            t.abort();
+        }
+    }
 }
 
 // ============================================================
@@ -311,6 +337,7 @@ async fn run_after_logging(
         tray_handle: None,
         shutdown_token,
         log_tx,
+        background_tasks: std::sync::Mutex::new(Vec::new()),
     };
 
     // 8. 创建系统托盘
@@ -545,8 +572,11 @@ fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
 }
 
 /// 重启场景：等待旧进程释放锁
+///
+/// 超时上限与错误文案共用 [`LOCK_RELEASE_TIMEOUT_SECS`]（UPD-6 提常量）。
 async fn wait_for_lock_release(base_path: &Path) -> Result<InstanceLock> {
-    let timeout = std::time::Duration::from_secs(30);
+    const LOCK_RELEASE_TIMEOUT_SECS: u64 = 30;
+    let timeout = std::time::Duration::from_secs(LOCK_RELEASE_TIMEOUT_SECS);
     let interval = std::time::Duration::from_millis(200);
     let start = std::time::Instant::now();
 
@@ -560,8 +590,8 @@ async fn wait_for_lock_release(base_path: &Path) -> Result<InstanceLock> {
                 tokio::time::sleep(interval).await;
             }
             Err(_) => {
-                error!("等待旧进程释放锁超时（30 秒），本次启动中止");
-                anyhow::bail!("等待旧进程释放锁超时（30 秒）");
+                error!("等待旧进程释放锁超时（{LOCK_RELEASE_TIMEOUT_SECS} 秒），本次启动中止");
+                anyhow::bail!("等待旧进程释放锁超时（{LOCK_RELEASE_TIMEOUT_SECS} 秒）");
             }
         }
     }
@@ -620,7 +650,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
 
     // 按 startup_action 派发启动动作（Monitor / LoginOnce）
     if let Some(container) = state.container.as_ref() {
-        apply_startup_action(container).await;
+        apply_startup_action(state, container).await;
     }
 
     // 后台更新检查
@@ -635,6 +665,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
     // 事件循环
     wait_for_shutdown(state).await;
     watch_handle.abort();
+    state.abort_background_tasks();
 
     Ok(())
 }
@@ -649,7 +680,7 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     }
 
     if let Some(container) = state.container.as_ref() {
-        apply_startup_action(container).await;
+        apply_startup_action(state, container).await;
     }
 
     // G15：轻量模式下此刻 Axum 尚未监听（按需启动），记录哨兵端口 0——
@@ -669,6 +700,7 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     info!("轻量模式运行中（Axum 按需启动）");
     wait_for_shutdown(state).await;
     watch_handle.abort();
+    state.abort_background_tasks();
 
     Ok(())
 }
@@ -678,7 +710,7 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
 /// 该配置此前只有写入点（CLI --startup-action / autostart API），从未被启动
 /// 逻辑消费——默认值 Monitor 的语义"启动后进入监测"实际从未生效，
 /// Engine 一直以 monitoring=false 空转等待用户手动触发。
-async fn apply_startup_action(container: &Arc<ServiceContainer>) {
+async fn apply_startup_action(state: &LauncherState, container: &Arc<ServiceContainer>) {
     let settings = container.config.load_settings();
     match settings.global.app.startup_action {
         StartupAction::Monitor => {
@@ -694,7 +726,7 @@ async fn apply_startup_action(container: &Arc<ServiceContainer>) {
         StartupAction::LoginOnce => {
             info!("按 startup_action=login_once 触发单次登录");
             let orchestrator = container.login.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let handle = orchestrator
                     .submit(crate::status::LoginSource::LoginOnce, None, None)
                     .await;
@@ -705,6 +737,7 @@ async fn apply_startup_action(container: &Arc<ServiceContainer>) {
                     warn!(message = %result.message, "启动单次登录失败");
                 }
             });
+            state.track_background_task(handle);
         }
         StartupAction::None => {
             tracing::debug!("startup_action=None，不派发启动动作");
@@ -1003,9 +1036,10 @@ fn open_browser(port: u16) {
 /// 启动后台更新检查任务
 fn spawn_background_update_check(state: &LauncherState) {
     if let Some(container) = &state.container {
-        container
+        let handle = container
             .updater
             .start_background_check(state.shutdown_token.clone());
+        state.track_background_task(handle);
     }
 }
 
@@ -1024,7 +1058,7 @@ fn spawn_auto_restart_timer(state: &LauncherState) {
         return;
     };
     let token = state.shutdown_token.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
             tokio::select! {
                 biased;
@@ -1054,6 +1088,7 @@ fn spawn_auto_restart_timer(state: &LauncherState) {
             return;
         }
     });
+    state.track_background_task(handle);
 }
 
 /// 定时自重启触发判定（纯函数，便于单测）

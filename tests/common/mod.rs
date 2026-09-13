@@ -17,18 +17,6 @@ use std::path::PathBuf;
 use std::process::{Child, Command as StdCommand, Stdio};
 use std::time::{Duration, Instant};
 
-use tempfile::TempDir;
-
-/// 创建带基本配置的临时目录供测试使用
-pub fn setup_test_env() -> TempDir {
-    let dir = TempDir::new().unwrap();
-    let config_dir = dir.path().join("config").join("profiles");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    let tasks_dir = dir.path().join("tasks").join("browser");
-    std::fs::create_dir_all(&tasks_dir).unwrap();
-    dir
-}
-
 /// 子进程守卫：无论测试从哪条路径失败（panic/断言），Drop 都会强杀实例，
 /// 防止残留进程占住测试端口或锁文件。
 ///

@@ -95,9 +95,17 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// 查询运行实例状态
+///
+/// 锁文件存在但进程已死（残留锁，COR-5）时明确提示并以非零码退出——
+/// 此前照常打印「实例运行中」且退出码 0，脚本无法区分真存活与残留。
 fn handle_status(base_path: &Path) -> anyhow::Result<()> {
     match campus_auth::utils::lock::query_instance(base_path) {
         Some(info) => {
+            if !info.running {
+                println!("发现残留实例锁（进程已退出）：PID {}", info.pid);
+                println!("  可使用 --force 清理后重新启动");
+                std::process::exit(1);
+            }
             println!("实例运行中");
             println!("  PID:      {}", info.pid);
             if info.port == 0 {

@@ -21,6 +21,13 @@ use clap::Parser;
 #[allow(unused_imports)]
 use fs4::FileExt;
 
+/// 等待主进程退出的轮询间隔（毫秒）
+const PROCESS_EXIT_POLL_MS: u64 = 100;
+/// 等待主进程退出的总超时（秒），超时报错退出并保留 staging/pending
+const PROCESS_EXIT_TIMEOUT_SECS: u64 = 60;
+/// 新进程存活二次探活前的延迟（秒）：等待潜在秒退窗口过去
+const SECOND_ALIVE_PROBE_DELAY_SECS: u64 = 5;
+
 /// campus-auth 更新助手进程
 #[derive(Parser)]
 #[command(name = "campus-auth-helper", version, about = "Campus-Auth 更新助手")]
@@ -362,7 +369,7 @@ fn main() {
             // 删除 .bak；否则保留备份并输出回退提示。
             let first_probe = probe_alive(&mut child);
             let second_probe = if matches!(first_probe, Ok(None)) {
-                sleep(Duration::from_secs(5));
+                sleep(Duration::from_secs(SECOND_ALIVE_PROBE_DELAY_SECS));
                 probe_alive(&mut child)
             } else {
                 // 首查已退出/探测失败：无需二查
@@ -449,20 +456,23 @@ fn files_identical(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// 轮询等待指定 PID 的进程退出（最多等待 60 秒）
+/// 轮询等待指定 PID 的进程退出（最多等待 [`PROCESS_EXIT_TIMEOUT_SECS`] 秒）
 ///
 /// 返回 `true` 表示主进程已退出；超时返回 `false`。5.3：超时后**不再强制继续**——
 /// 主进程仍存活时覆盖运行中 exe 的替换必然失败，且强制继续会走 cleanup 摧毁 staging
 /// 与 pending.json，导致更新彻底丢失。改为报错退出并保留 staging/pending，把应用机会
 /// 留给主进程下次启动的 `apply_pending_on_startup`。
 fn wait_for_process_exit(pid: u32) -> bool {
-    for _ in 0..600 {
+    for _ in 0..(PROCESS_EXIT_TIMEOUT_SECS * 1000 / PROCESS_EXIT_POLL_MS) {
         if !is_process_alive(pid) {
             return true;
         }
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(PROCESS_EXIT_POLL_MS));
     }
-    eprintln!("[helper] 等待进程退出超时（60 秒），中止更新");
+    eprintln!(
+        "[helper] 等待进程退出超时（{} 秒），中止更新",
+        PROCESS_EXIT_TIMEOUT_SECS
+    );
     false
 }
 

@@ -31,6 +31,9 @@ pub use error::UpdaterError;
 /// 后台检查任务启动前的延迟（等待核心启动完成）
 const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(5);
 
+/// 设置轮询间隔（总开关关闭 / 定时检查禁用时的低频轮询，热改配置无需重启）
+const SETTINGS_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
 /// 上次检查状态文件路径（相对 base_path，与 staging 同级不被清理波及）
 const LAST_CHECK_FILE_NAME: &str = "update/last_check.json";
 
@@ -234,7 +237,8 @@ impl UpdaterService {
     /// `auto_check_enabled` 为总开关（设置页"自动检查更新"）：关闭后启动检查与
     /// 周期检查全部静默，仅保留手动"立即检查"；循环低频轮询该值，重新打开无需重启，
     /// 且由关到开的跃迁会立即补查一次（不等完整周期）。
-    pub fn start_background_check(&self, cancel: CancellationToken) {
+    /// 返回后台任务句柄（UPD-9：由 launcher 登记供关闭流程统一 abort）
+    pub fn start_background_check(&self, cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
         let config = self.config.clone();
         let status = self.status.clone();
         // 回退客户端（跟随系统代理）；每次检查按当前配置构建实际客户端，
@@ -283,7 +287,7 @@ impl UpdaterService {
                     prev_auto_enabled = false;
                     tokio::select! {
                         _ = cancel.cancelled() => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => continue,
+                        _ = tokio::time::sleep(SETTINGS_POLL_INTERVAL) => continue,
                     }
                 }
                 // 总开关由关到开：立即补查一次，无需等待完整周期
@@ -298,7 +302,7 @@ impl UpdaterService {
                         // 导致 0 → 非 0 的热改永远不生效（除非重启）。
                         tokio::select! {
                             _ = cancel.cancelled() => break,
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => continue,
+                            _ = tokio::time::sleep(SETTINGS_POLL_INTERVAL) => continue,
                         }
                     }
                     let interval_secs = (settings.check_interval_hours as u64).saturating_mul(3600);
@@ -331,7 +335,7 @@ impl UpdaterService {
                     );
                 }
             }
-        });
+        })
     }
 
     /// 手动触发版本检查（API 端点调用）

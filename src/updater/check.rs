@@ -53,9 +53,10 @@ pub struct ReleaseManifest {
 pub struct PlatformPackage {
     /// zip 下载 URL（必须 HTTPS）
     pub url: String,
-    /// 预期 SHA256 hex 摘要（64 字符小写）；为空时表示未取得校验值（降级信任 HTTPS）
+    /// 预期 SHA256 hex 摘要（64 字符小写）；检查阶段保证命中平台包非空，
+    /// 缺失即 ChecksumUnavailable（UPD-5），下载端 MissingChecksum 兜底拒绝
     pub sha256: String,
-    /// 预期文件大小（字节），用于进度计算
+    /// 预期文件大小（字节），与 Content-Length / 实际下载字节交叉核对（UPD-7）
     #[serde(default)]
     pub size: Option<u64>,
 }
@@ -157,6 +158,16 @@ pub(crate) async fn fetch_manifest(
     if body.get("version").is_some() {
         let manifest: ReleaseManifest =
             serde_json::from_value(body).map_err(UpdaterError::ManifestParseFailed)?;
+        // UPD-5：自定义清单与 GitHub 路径同口径——命中平台包必须携带非空
+        // sha256，空串透传会让前端提示有更新而下载端 MissingChecksum 拒绝，
+        // 检查阶段就应显式失败
+        if manifest
+            .platforms
+            .get(CURRENT_PLATFORM_KEY)
+            .is_some_and(|p| p.sha256.is_empty())
+        {
+            return Err(UpdaterError::ChecksumUnavailable);
+        }
         tracing::debug!(url = %url, version = %manifest.version, "已获取发布清单");
         return Ok(manifest);
     }
