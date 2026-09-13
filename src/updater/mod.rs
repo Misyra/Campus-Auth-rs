@@ -137,8 +137,8 @@ pub struct UpdaterService {
     base_path: PathBuf,
     /// 当前版本（`CARGO_PKG_VERSION` 解析）
     current_version: Version,
-    /// 防止并发触发下载
-    update_in_progress: AtomicBool,
+    /// 防止并发触发下载（Arc 包装：后台检查 task 需跨 'static 读取，UPD-1）
+    update_in_progress: Arc<AtomicBool>,
 }
 
 /// Web 层消费的更新器抽象（M1 细粒度 state：updater 域）
@@ -205,7 +205,7 @@ impl UpdaterService {
             http_client,
             base_path,
             current_version,
-            update_in_progress: AtomicBool::new(false),
+            update_in_progress: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -242,6 +242,8 @@ impl UpdaterService {
         let fallback_client = self.http_client.clone();
         let current_version = self.current_version.clone();
         let base_path = self.base_path.clone();
+        // UPD-1：下载/应用进行中时检查不得覆盖更新状态（进度清零/可用性回退）
+        let update_in_progress = Arc::clone(&self.update_in_progress);
 
         tokio::spawn(async move {
             tokio::time::sleep(STARTUP_CHECK_DELAY).await;
@@ -249,9 +251,15 @@ impl UpdaterService {
             let startup_settings = config.load_settings().global.updater;
             if startup_settings.auto_check_enabled && startup_settings.check_on_startup {
                 let client = effective_client_for(&startup_settings, fallback_client.clone());
-                if let Err(e) =
-                    perform_update_check(&config, &status, &client, &current_version, &base_path)
-                        .await
+                if let Err(e) = perform_update_check(
+                    &config,
+                    &status,
+                    &client,
+                    &current_version,
+                    &base_path,
+                    update_in_progress.load(Ordering::SeqCst),
+                )
+                .await
                 {
                     log_check_failure("启动时", &e);
                     record_last_check(
@@ -303,9 +311,15 @@ impl UpdaterService {
                 due_now = false;
                 // 每周期等待结束后执行一次检查
                 let client = effective_client_for(&settings, fallback_client.clone());
-                if let Err(e) =
-                    perform_update_check(&config, &status, &client, &current_version, &base_path)
-                        .await
+                if let Err(e) = perform_update_check(
+                    &config,
+                    &status,
+                    &client,
+                    &current_version,
+                    &base_path,
+                    update_in_progress.load(Ordering::SeqCst),
+                )
+                .await
                 {
                     log_check_failure("定期", &e);
                     record_last_check(
@@ -361,11 +375,14 @@ impl UpdaterService {
                         ..last_check_now()
                     },
                 );
-                // 与后台检查同样 merge 快照：托盘"发现新版本"文案保持一致
-                self.status.merge(PartialSnapshot::Update {
-                    available: false,
-                    progress: None,
-                });
+                // 与后台检查同样 merge 快照：托盘"发现新版本"文案保持一致；
+                // UPD-1：下载/应用进行中不得覆盖更新状态
+                if !self.update_in_progress.load(Ordering::SeqCst) {
+                    self.status.merge(PartialSnapshot::Update {
+                        available: false,
+                        progress: None,
+                    });
+                }
                 // 返回带标记的结果（而非 Ok(None)）：让前端区分
                 // "当前已是最新"与"远程无当前平台的安装包"
                 return Ok(Some(UpdateInfo {
@@ -391,11 +408,14 @@ impl UpdaterService {
                 ..last_check_now()
             },
         );
-        // 与后台检查同样 merge 快照：手动发现新版本后托盘菜单文本即时更新
-        self.status.merge(PartialSnapshot::Update {
-            available: has_update,
-            progress: None,
-        });
+        // 与后台检查同样 merge 快照：手动发现新版本后托盘菜单文本即时更新；
+        // UPD-1：下载/应用进行中不得覆盖更新状态（进度清零/可用性回退）
+        if !self.update_in_progress.load(Ordering::SeqCst) {
+            self.status.merge(PartialSnapshot::Update {
+                available: has_update,
+                progress: None,
+            });
+        }
         if !has_update {
             return Ok(None);
         }
@@ -544,7 +564,12 @@ impl UpdaterService {
             staging_dir: staging_dir.to_string_lossy().into_owned(),
             target_exe: target_exe.to_string_lossy().into_owned(),
             worker_target_dir: worker_target_dir.to_string_lossy().into_owned(),
-            original_args: std::env::args().skip(1).collect(),
+            // UPD-3：剥离 --restarting 并用 args_os 防 panic（与重启后继共用口径），
+            // 否则「重启中进程里执行更新」会让更新后的新进程错误继承重启语义
+            original_args: crate::launcher::collect_args_without_restarting()
+                .into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
             sha256: exe_sha256,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -893,12 +918,16 @@ fn effective_client_for(
 /// 拉取清单并判断是否存在对当前版本"感兴趣"的更新；有则推送状态快照
 ///
 /// 成功时同步刷新 `update/last_check.json`（失败由调用方记录 error 态）。
+/// `update_in_progress` 为 true（下载/应用进行中，UPD-1）时跳过状态 merge：
+/// merge 的 `progress: None` 会把下载任务的实时进度清零、`available: false`
+/// 会把"更新中"误报回退；last_check 记录不受影响。
 async fn perform_update_check(
     config: &ConfigService,
     status: &StatusManager,
     http_client: &reqwest::Client,
     current_version: &Version,
     base_path: &std::path::Path,
+    update_in_progress: bool,
 ) -> Result<(), UpdaterError> {
     let settings = config.load_settings().global.updater;
     let manifest = check::fetch_manifest_for_channel(
@@ -919,6 +948,10 @@ async fn perform_update_check(
             ..last_check_now()
         },
     );
+    if update_in_progress {
+        // 下载/应用进行中：available 恒为 true 且进度由下载回调维护，不动快照
+        return Ok(());
+    }
     if has_update {
         status.merge(PartialSnapshot::Update {
             available: true,

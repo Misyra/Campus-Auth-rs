@@ -128,9 +128,16 @@ pub(crate) async fn download_and_verify(
     loop {
         // chunk 间停滞判定：超时内未收到任何数据即判失败（正常 EOF 走 Ok(None)）
         let chunk = match tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, stream.next()).await {
-            Ok(Some(c)) => c.map_err(UpdaterError::DownloadFailed)?,
+            Ok(Some(c)) => c.map_err(|e| {
+                // UPD-2：失败路径统一清理半写入的 .tmp（对齐下方超限/校验分支）
+                cleanup_tmp(&tmp_path);
+                UpdaterError::DownloadFailed(e)
+            })?,
             Ok(None) => break,
             Err(_) => {
+                // UPD-2：停滞超时不得残留半写入的 .tmp（下次下载虽会重建，
+                // 但 3 天 stale 清理前一直占着 staging 空间）
+                cleanup_tmp(&tmp_path);
                 return Err(UpdaterError::DownloadStalled {
                     idle_secs: DOWNLOAD_STALL_TIMEOUT.as_secs(),
                     received_bytes: downloaded,
@@ -138,9 +145,10 @@ pub(crate) async fn download_and_verify(
             }
         };
         hasher.update(chunk.as_ref());
-        file.write_all(chunk.as_ref())
-            .await
-            .map_err(UpdaterError::PendingWriteFailed)?;
+        if let Err(e) = file.write_all(chunk.as_ref()).await {
+            cleanup_tmp(&tmp_path);
+            return Err(UpdaterError::PendingWriteFailed(e));
+        }
         downloaded += chunk.len() as u64;
         if downloaded > MAX_UPDATE_ARCHIVE_BYTES {
             if let Err(e) = tokio::fs::remove_file(&tmp_path).await {
@@ -168,9 +176,10 @@ pub(crate) async fn download_and_verify(
             }
         }
     }
-    file.flush()
-        .await
-        .map_err(UpdaterError::PendingWriteFailed)?;
+    file.flush().await.map_err(|e| {
+        cleanup_tmp(&tmp_path);
+        UpdaterError::PendingWriteFailed(e)
+    })?;
     drop(file);
 
     tracing::info!(
@@ -227,6 +236,15 @@ fn archive_name_from_url(url: &str) -> String {
 ///
 /// 解压为 CPU+I/O 密集操作，大更新包可能持续数秒~数十秒；通过
 /// `tokio::task::spawn_blocking` 在阻塞线程池执行，避免长时间占用 tokio worker 线程。
+/// 删除半写入/校验失败的 `.tmp` 下载残留（UPD-2）
+///
+/// 失败仅 debug 留痕（下次下载入口与 stale 清理仍会兜底），不掩盖原始错误。
+fn cleanup_tmp(tmp_path: &Path) {
+    if let Err(e) = std::fs::remove_file(tmp_path) {
+        tracing::debug!("清理临时下载文件失败 {}: {e}", tmp_path.display());
+    }
+}
+
 pub(crate) async fn extract_to_staging(
     archive_path: &Path,
     staging_dir: &Path,

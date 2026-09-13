@@ -1057,14 +1057,24 @@ fn should_auto_restart(hours: u32, uptime_secs: u64) -> bool {
     hours > 0 && uptime_secs >= u64::from(hours) * 3600
 }
 
+/// 采集当前进程启动参数并剥离 `--restarting`（UPD-3 共用口径）
+///
+/// args_os：参数含非法 Unicode 时 env::args() 会 panic，args_os 不会。
+/// 更新 pending 的 `original_args` 与重启后继共用本函数，避免两处口径漂移——
+/// 若更新后新进程继承 `--restarting`，会错误进入「等待前驱释放锁」的重启语义，
+/// 跳过重复启动检测等正常行为。
+pub(crate) fn collect_args_without_restarting() -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    args.retain(|a| a != "--restarting");
+    args
+}
+
 /// spawn 带 `--restarting` 标记的后继进程（定时自重启与 Web 重启接口共用）///
 /// 后继进程会先等待本进程释放实例锁再启动（见 [`wait_for_lock_release`]），
 /// 因此调用方必须**先 spawn 后继、再触发本进程优雅关闭**。
 pub(crate) fn spawn_restart_successor() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("获取可执行文件路径失败: {e}"))?;
-    // args_os：参数含非法 Unicode 时 env::args() 会 panic，args_os 不会
-    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    args.retain(|a| a != "--restarting");
+    let mut args = collect_args_without_restarting();
     args.push("--restarting".into());
     let mut cmd = std::process::Command::new(exe);
     cmd.args(&args);

@@ -4,6 +4,9 @@
 
 ## 开发中（2026-09-13 P2 评审项批量修复）
 
+- UPD-1 更新检查进度闸门：后台/手动/启动检查在 `update_in_progress`（下载/应用进行中）时跳过 `PartialSnapshot::Update` 合并——此前四处 merge 的 `progress: None` 会把下载任务每 500ms 推送的实时进度清零、`available: false` 会把"更新中"误报回退；`update_in_progress` 字段改 `Arc<AtomicBool>` 以便后台 task 跨 'static 读取；`record_last_check` 不受影响
+- UPD-2 下载失败清理半写入 .tmp：停滞超时、chunk 读取失败、写盘失败、flush 失败四条错误路径统一经 `cleanup_tmp` 删除残留（对齐既有超限/校验失败分支），不再等到 3 天 stale 清理
+- UPD-3 `--restarting` 剥离口径统一：新增 `launcher::collect_args_without_restarting`（args_os 采集 + retain 剥离），更新 pending 的 `original_args` 与重启后继共用——此前更新捕获用 `env::args()` 原样含 `--restarting`，重启中进程执行更新会让更新后的新进程错误继承重启语义；顺带消除非 Unicode 参数 panic 隐患
 - LOG-1 Auto 来源补环境自动初始化：引擎自动登录（`LoginSource::Auto`）此前被 `prepare_browser` 的自动初始化条件遗漏——`execute_login_attempt` 同样占用浏览器会话槽位，环境未就绪时占槽后立即失败并按重试策略反复空耗；现与 Manual/LoginOnce/Browser 一样触发 `ensure_capability`（与取消令牌竞速）
 - TSK-1 任务文件 BOM 兼容：新增 `strip_bom` 统一剥离 UTF-8 BOM 前缀，覆盖 load_task、列表摘要（read_summary/read_summary_typed）、`.order.json`、`.meta.json` 全部五个读取入口——Windows 记事本默认带 BOM 保存此前会导致 serde_json 解析失败，任务从列表静默消失；新增带 BOM 文件的加载与列表回归测试
 - CFG-1 迁移结果写回：`run_migrations` 结束时把 `config_version` 写回 `CURRENT`——此前仅改返回值，落盘的 settings.json 永远停留在迁移前版本，每次启动重跑迁移链并原子重写盘（提交点契约失效）；v5→v6 内硬编码的中间 checkpoint（=6）保留供中途失败续跑定位。修正固化 version=6 的测试断言并新增写回回归用例
