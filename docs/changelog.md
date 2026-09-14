@@ -2,6 +2,13 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-14 修复 E2E 全链路用例仍调用已删除的全局启用任务接口）
+
+- **缺陷**：`bfe7f52` 移除了 `GET/POST /api/tasks/active*` 两个路由（启用任务改为按方案绑定），但 `tests/login_chain.rs::setup_profile_and_task` 仍在 `POST /api/tasks/active/mock-login`——CI 的 `E2E Login Chain` job 因此 5 个用例全挂：`API POST /api/tasks/active/mock-login 返回 404 Not Found：{"error":{"code":"NOT_FOUND","message":"接口不存在"}}`。
+- **为何本地漏检**：`login_chain` 的 `preflight()` 在缺少 `PIL`/`ddddocr` 时**打印一行原因后 `return`（跳过而非失败）**，本机 venv 未装 OCR 依赖，故本地 `cargo test` 该用例恒为"通过"，路由删除没有任何提示。这类"环境缺失即静默跳过"是既有设计（缺环境不挂 CI），代价是**改动接口契约时它不会告警**——排查时需以「用例是否真的执行过」为准，不能只看 `test result: ok`。
+- 修复：改走方案级绑定——先把任务 `PUT /api/tasks/mock-login` 建好，再 `PUT /api/profiles/default` 带上 `active_task: "mock-login"`（`ProfileUpdateBody` 已支持该字段，与 `PUT` 同语义），与 `resolve_active_task` 的"方案绑定"解析路径一致，等价于真实用户在账号页为方案选择任务。
+- 验证：本机装齐 OCR 依赖后 `cargo test --test login_chain` **5 passed / 0 failed（127s 真实执行，非跳过）**；`cargo test --features no-embed` 全绿（797 lib + 各集成 crate）。验证完恢复 `python_worker/pyproject.toml` 与 `uv.lock`（用例会把 worker 项目复制进临时 base，仓库副本须保持干净）。
+
 ## 开发中（2026-09-14 修正前端类型检查从未生效）
 
 - **缺陷**：`frontend/tsconfig.json` 是 TypeScript「解决方案」文件（`"files": []` + `references`），而裸跑 `vue-tsc --noEmit` 不会遍历 `references`，因此**不检查任何文件、恒返回 0**。`npm run build` 里的类型检查步骤、以及 CI 依赖的 `npm run build` 长期是空检查：本轮一度出现「类型检查通过、但代码调用了已删除方法」（`TasksView` 调 `useTasks().setActiveTask`）才暴露。

@@ -216,21 +216,13 @@ async fn setup_env(python: &PathBuf, mock_script: &str) -> Option<TestEnv> {
     })
 }
 
-/// 配置凭证 + 登录任务 + 设为活跃 + 监测只看 mock（登录后网络验证以
+/// 配置凭证 + 登录任务 + 绑定任务到方案 + 监测只看 mock（登录后网络验证以
 /// test_urls 判定 Online，必须指向 mock 而非真实公网）
+///
+/// 任务启用态已改为按方案绑定（`profile.active_task`），全局
+/// `POST /api/tasks/active/{id}` 路由已移除。
 async fn setup_profile_and_task(env: &TestEnv, auth_url: &str) {
     let mock_base = env.mock.base();
-    env.api
-        .request(
-            "PUT",
-            "/api/profiles/default",
-            Some(json!({
-                "username": "testuser",
-                "password": "testpass",
-                "auth_url": auth_url,
-            })),
-        )
-        .await;
     env.api
         .request(
             "PUT",
@@ -239,7 +231,16 @@ async fn setup_profile_and_task(env: &TestEnv, auth_url: &str) {
         )
         .await;
     env.api
-        .request("POST", "/api/tasks/active/mock-login", None)
+        .request(
+            "PUT",
+            "/api/profiles/default",
+            Some(json!({
+                "username": "testuser",
+                "password": "testpass",
+                "auth_url": auth_url,
+                "active_task": "mock-login",
+            })),
+        )
         .await;
     env.api
         .request(
