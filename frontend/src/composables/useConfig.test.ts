@@ -103,25 +103,35 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(true);
   });
 
-  it("登录渠道作为只读派生值暴露，且不进入保存载荷", async () => {
-    // 后端未回传该字段时（老版本）回落默认 browser，不应出现 undefined
+  it("登录渠道与直连参数随设置读写往返（设置页与方案编辑器共用同一组件）", async () => {
+    // 后端未回传该字段时（老版本）回落默认值，不应出现 undefined
     await config.fetchConfig();
-    expect(config.activeLoginChannel.value).toBe("browser");
+    expect(config.config.credentials.login_channel).toBe("browser");
+    expect(config.config.credentials.http_method).toBe("GET");
 
-    // 后端回传 http 时如实反映，供按渠道抑制环境提示等判据使用
-    fetchMock.mockResolvedValue({ username: "user", login_channel: "http" });
+    // 后端回传直连配置时如实回填
+    fetchMock.mockResolvedValue({
+      username: "user",
+      login_channel: "http",
+      http_method: "POST",
+      http_url: "http://10.0.0.1/login",
+      http_body: "u={username}&p={password}",
+      http_success_pattern: "登录成功",
+    });
     await config.fetchConfig();
-    expect(config.activeLoginChannel.value).toBe("http");
+    expect(config.config.credentials.login_channel).toBe("http");
+    expect(config.config.credentials.http_method).toBe("POST");
+    expect(config.config.credentials.http_url).toBe("http://10.0.0.1/login");
 
-    // 无表单改动时不应有 dirty，也不能把该字段写进保存载荷。
-    // 注意 mock 未含 monitor，enable_tcp_check 回落默认 false，须置 true 才构成改动
-    await flushWatch();
-    expect(config.dirty.value).toBe(false);
-    config.config.monitor.enable_tcp_check = true;
+    // 改动渠道构成未保存变更，且随保存载荷提交（后端按扁平键写入活跃 Profile）
+    config.config.credentials.login_channel = "browser";
     await flushWatch();
     expect(config.dirty.value).toBe(true);
     await config.saveConfig();
     const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(payload).not.toHaveProperty("login_channel");
+    expect(payload.login_channel).toBe("browser");
+    expect(payload.http_url).toBe("http://10.0.0.1/login");
+    // 不得嵌进 credentials 子对象（后端按扁平结构读取）
+    expect(payload.credentials).toBeUndefined();
   });
 });

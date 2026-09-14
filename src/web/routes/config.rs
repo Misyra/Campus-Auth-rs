@@ -95,9 +95,16 @@ async fn apply_flat_settings_patch(
         "isp",
         "carrier_custom",
         "active_task",
-        // GET 扁平响应会回传该字段，客户端原样回传时必须落回 Profile；
-        // 否则落入 other_patch 被 json_merge 写到 settings.json 顶层成脏数据
+        // 登录渠道与直连参数：GET 扁平响应会回传，客户端原样回传时必须落回
+        // Profile；否则落入 other_patch 被 json_merge 写到 settings 顶层成脏数据
         "login_channel",
+        "http_method",
+        "http_url",
+        "http_headers",
+        "http_body",
+        "http_success_pattern",
+        "http_failure_pattern",
+        "http_crypto_script",
     ];
 
     // 全局设置字段
@@ -167,7 +174,19 @@ async fn apply_flat_settings_patch(
     // 成功后由 ConfigService 双域事务一起落盘，禁止先写凭证形成半提交。
     // WEB-7：profile 字段类型错误显式 400（与 password 口径对齐），不再静默
     // 跳过——静默丢字段会让用户误以为已保存
-    for key in ["username", "auth_url", "trigger_url", "isp", "active_task"] {
+    for key in [
+        "username",
+        "auth_url",
+        "trigger_url",
+        "isp",
+        "active_task",
+        "http_url",
+        "http_headers",
+        "http_body",
+        "http_success_pattern",
+        "http_failure_pattern",
+        "http_crypto_script",
+    ] {
         if profile_patch.get(key).is_some_and(|v| !v.is_string()) {
             return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
         }
@@ -214,6 +233,45 @@ async fn apply_flat_settings_patch(
                 channel.clone(),
             )
             .map_err(|_| ApiError::BadRequest("login_channel 仅支持 browser 或 http".into()))?;
+        }
+        // 请求方法同为枚举（"GET"/"POST"）
+        if let Some(method) = profile_patch.get("http_method") {
+            profile.http_method =
+                serde_json::from_value::<crate::config::HttpLoginMethod>(method.clone())
+                    .map_err(|_| ApiError::BadRequest("http_method 仅支持 GET 或 POST".into()))?;
+        }
+        // 请求地址与方案接口同口径（允许空串=尚未配置，非空须为合法 http/https）
+        if let Some(http_url) = profile_patch.get("http_url").and_then(|v| v.as_str()) {
+            let trimmed = http_url.trim();
+            if !trimmed.is_empty() {
+                crate::login::http_login::HttpLoginRequest::validate_url(trimmed)
+                    .map_err(ApiError::BadRequest)?;
+            }
+            profile.http_url = trimmed.to_string();
+        }
+        if let Some(v) = profile_patch.get("http_headers").and_then(|v| v.as_str()) {
+            profile.http_headers = v.to_string();
+        }
+        if let Some(v) = profile_patch.get("http_body").and_then(|v| v.as_str()) {
+            profile.http_body = v.to_string();
+        }
+        if let Some(v) = profile_patch
+            .get("http_success_pattern")
+            .and_then(|v| v.as_str())
+        {
+            profile.http_success_pattern = v.to_string();
+        }
+        if let Some(v) = profile_patch
+            .get("http_failure_pattern")
+            .and_then(|v| v.as_str())
+        {
+            profile.http_failure_pattern = v.to_string();
+        }
+        if let Some(v) = profile_patch
+            .get("http_crypto_script")
+            .and_then(|v| v.as_str())
+        {
+            profile.http_crypto_script = v.to_string();
         }
         if let Some(password) = profile_patch.get("password") {
             // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
@@ -320,10 +378,17 @@ fn settings_flat_response(
         "carrier_custom": "",
         "active_task": profile.active_task,
         "has_password": has_password,
-        // 活跃方案的登录执行渠道：前端据此判定登录方式（引导向导分流、
-        // 按渠道抑制「Python 环境未就绪」提示），无需再单独拉一次方案列表。
-        // 完整直连参数（http_url 等）不在扁平响应内，按需读 GET /api/profiles/{id}。
-        "login_channel": profile.login_channel
+        // 活跃方案的登录渠道与直连参数：设置页「账号」Tab 与引导向导据此编辑、
+        // 分流，无需为一次编辑再拉整个方案列表。这些字段属 Profile 域
+        // （后端写入活跃 Profile，不是全局 settings）。
+        "login_channel": profile.login_channel,
+        "http_method": profile.http_method,
+        "http_url": profile.http_url,
+        "http_headers": profile.http_headers,
+        "http_body": profile.http_body,
+        "http_success_pattern": profile.http_success_pattern,
+        "http_failure_pattern": profile.http_failure_pattern,
+        "http_crypto_script": profile.http_crypto_script
     })
 }
 

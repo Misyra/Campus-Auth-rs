@@ -151,6 +151,15 @@ export const DEFAULT_CONFIG: Config = {
     auth_url: "",
     trigger_url: "",
     isp: "",
+    // 与后端 ProfileData 默认值一致（加载失败兜底显示用，正常以服务端下发为准）
+    login_channel: "browser",
+    http_method: "GET",
+    http_url: "",
+    http_headers: "",
+    http_body: "",
+    http_success_pattern: "",
+    http_failure_pattern: "",
+    http_crypto_script: "",
   },
   active_task: "",
   app_settings: {

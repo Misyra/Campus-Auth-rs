@@ -273,6 +273,15 @@ export interface CredentialsConfig {
   auth_url: string;
   trigger_url: string;
   isp: string;
+  /** 登录执行渠道；同时可在「配置方案」编辑器与设置页「账号」修改 */
+  login_channel: LoginChannel;
+  http_method: HttpLoginMethod;
+  http_url: string;
+  http_headers: string;
+  http_body: string;
+  http_success_pattern: string;
+  http_failure_pattern: string;
+  http_crypto_script: string;
 }
 
 /** 应用设置 */
@@ -351,8 +360,15 @@ export interface ConfigResponse {
   trigger_url: string;
   isp: string;
   carrier_custom: string;
-  /** 活跃方案的登录执行渠道（引导分流与环境提示判据） */
+  /** 活跃方案的登录渠道与直连参数（属 Profile 域，非全局设置） */
   login_channel: LoginChannel;
+  http_method: HttpLoginMethod;
+  http_url: string;
+  http_headers: string;
+  http_body: string;
+  http_success_pattern: string;
+  http_failure_pattern: string;
+  http_crypto_script: string;
   password?: string;
 }
 
@@ -374,6 +390,15 @@ export interface SaveConfigPayload {
   auth_url: string;
   trigger_url: string;
   isp: string;
+  /** 登录渠道与直连参数：后端写入活跃 Profile，非全局设置 */
+  login_channel: LoginChannel;
+  http_method: HttpLoginMethod;
+  http_url: string;
+  http_headers: string;
+  http_body: string;
+  http_success_pattern: string;
+  http_failure_pattern: string;
+  http_crypto_script: string;
   password: string | null;
 }
 

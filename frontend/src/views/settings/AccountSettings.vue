@@ -10,6 +10,7 @@ import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
+import LoginChannelField from "@/components/common/LoginChannelField.vue";
 import { CARRIER_OPTIONS, DEFAULT_TRIGGER_URL } from "@/utils/constants";
 
 const config = useConfig();
@@ -139,6 +140,24 @@ async function detectPortalForSettings(): Promise<void> {
           <label for="settings-carrier-custom">自定义运营商关键字</label>
           <input id="settings-carrier-custom" v-model.trim="customCarrierValue" type="text" placeholder="例如：宿舍宽带" />
         </div>
+      </div>
+    </section>
+
+    <!-- 登录方式与直连参数：与「配置方案」编辑器共用同一组件，两处均可切换 -->
+    <section class="card settings-panel settings-panel--wide">
+      <div class="settings-card-header">
+        <IconApp name="globe" class="settings-card-icon" />
+        <h2>登录方式</h2>
+      </div>
+      <div class="card-body">
+        <LoginChannelField
+          :model-value="config.config.credentials"
+          :profile-id="activeProfileId || undefined"
+          :username="config.config.credentials.username"
+          :password="config.password.value"
+          :auth-url="config.config.credentials.auth_url"
+          :title="null"
+        />
       </div>
     </section>
 

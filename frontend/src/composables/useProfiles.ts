@@ -4,7 +4,13 @@
  */
 
 import { ref } from "vue";
-import type { HttpLoginTestResult, Profile, ProfileSummary, NetworkDetectResult } from "../api/types";
+import type {
+  HttpLoginMethod,
+  HttpLoginTestResult,
+  Profile,
+  ProfileSummary,
+  NetworkDetectResult,
+} from "../api/types";
 import { profilesApi } from "../api";
 import { extractApiError } from "../api/client";
 import { DEFAULT_PROFILE_SETTINGS } from "../utils/constants";
@@ -31,7 +37,8 @@ const {
 } = useDirtySnapshot(editingProfile, { entityName: "配置方案" });
 const detectResult = ref<NetworkDetectResult | null>(null);
 const editorDetectResult = ref<NetworkDetectResult | null>(null);
-const httpTestResult = ref<HttpLoginTestResult | null>(null);
+// 直连测试结果改由 LoginChannelField 自持局部 state（多实例互不覆盖），
+// 此处仅保留「是否有测试在途」这一全局门（后端为单飞，同刻只允许一个）
 const httpTestRunning = ref(false);
 
 const { busy } = useStatus();
@@ -69,7 +76,6 @@ async function showProfileEditor(profileId?: string): Promise<void> {
   // 打开新编辑器前先检查当前是否有未保存改动，避免静默丢弃（历史遗留 F5）
   if (!(await confirmDiscardIfDirty())) return;
   editorDetectResult.value = null;
-  httpTestResult.value = null;
   if (profileId && profiles.value[profileId]) {
     try {
       const data = await profilesApi.get(profileId);
@@ -177,42 +183,60 @@ async function saveProfile(): Promise<boolean> {
   }
 }
 
-/** 用编辑器当前值发送一次直连测试；不会保存方案，也不会触发登录状态机。 */
-async function testHttpLogin(): Promise<void> {
-  const profile = editingProfile.value;
-  if (!profile || httpTestRunning.value) return;
-  if (!profile.http_url.trim()) {
-    toastOnly(false, "请填写直连请求地址");
-    return;
-  }
-  if (!profile.username.trim()) {
-    toastOnly(false, "请填写独立账号后再测试");
-    return;
-  }
+/** 直连测试请求参数（由 LoginChannelField 从宿主草稿构造） */
+export interface HttpLoginTestParams {
+  /** 已保存方案 ID；无（新建/未保存）时不传，密码需手填 */
+  profileId?: string;
+  username: string;
+  password: string;
+  http_method: HttpLoginMethod;
+  http_url: string;
+  http_headers: string;
+  http_body: string;
+  http_success_pattern: string;
+  http_failure_pattern: string;
+  http_crypto_script: string;
+  auth_url: string;
+}
 
+/** 测试前置校验失败的就地提示（登录方式组件复用同一文案与 toast 口径） */
+function toastHttpTestPrecondition(message: string): void {
+  toastOnly(false, message);
+}
+
+/**
+ * 用给定参数发送一次直连测试；不会保存方案，也不会触发登录状态机。
+ *
+ * 无状态：结果由调用方持有（返回报告），使同一页面内多个登录方式实例
+ * 各自展示结果、互不覆盖（此前结果存在单例 ref 中，多实例会串）。
+ */
+async function testHttpLogin(
+  params: HttpLoginTestParams,
+): Promise<HttpLoginTestResult | null> {
+  if (httpTestRunning.value) return null;
   httpTestRunning.value = true;
-  httpTestResult.value = null;
   try {
     const result = await profilesApi.testHttpLogin({
-      profile_id: profile._isNew ? undefined : profile.id,
-      username: profile.username,
-      password: profile.password,
-      http_method: profile.http_method,
-      http_url: profile.http_url,
-      http_headers: profile.http_headers,
-      http_body: profile.http_body,
-      http_success_pattern: profile.http_success_pattern,
-      http_failure_pattern: profile.http_failure_pattern,
-      http_crypto_script: profile.http_crypto_script,
-      auth_url: profile.auth_url,
+      profile_id: params.profileId,
+      username: params.username,
+      password: params.password,
+      http_method: params.http_method,
+      http_url: params.http_url,
+      http_headers: params.http_headers,
+      http_body: params.http_body,
+      http_success_pattern: params.http_success_pattern,
+      http_failure_pattern: params.http_failure_pattern,
+      http_crypto_script: params.http_crypto_script,
+      auth_url: params.auth_url,
       fetch_page: true,
     });
-    httpTestResult.value = result;
     toastOnly(result.outcome === "success", result.message);
+    return result;
   } catch (error) {
     const message = extractApiError(error, "测试请求失败");
     frontendLogger.error("profiles", "直连登录测试异常: " + message, error);
     toastOnly(false, message);
+    return null;
   } finally {
     httpTestRunning.value = false;
   }
@@ -336,12 +360,12 @@ export function useProfiles() {
     editingProfile,
     detectResult,
     editorDetectResult,
-    httpTestResult,
     httpTestRunning,
     fetchProfiles,
     showProfileEditor,
     saveProfile,
     testHttpLogin,
+    toastHttpTestPrecondition,
     profileSaving,
     deleteProfile,
     setActiveProfile,
