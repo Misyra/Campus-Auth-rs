@@ -87,7 +87,10 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 - **脚本任务**（`tasks/scripts/*.json`，`type=script`）：`script_path` 或 `content` + `binary_path` + `args` + `work_dir` + `timeout`（`src/tasks/models.rs::ScriptTaskConfig`）。
 - **Shell 任务**（同目录，`type=shell`）：`command` + `shell_path` + `timeout`（`ShellTaskConfig`）。
 
-管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/active/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本/Shell 均走 `TaskExecutor::execute`）；`GET /api/scripts` / `/api/shells` 为同数据在脚本面板的视图过滤（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。
+> 历史 `type=shell` 已移除：遇到时反序列化明确报错并提示改用 `script`（`src/tasks/models.rs`）。同目录下曾有的 `shell` 任务需改写为 `.sh`/`.bat`/`.py` 脚本经 `binary_path` 执行。
+
+管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本均走 `TaskExecutor::execute`）；`GET /api/scripts` 为同数据在脚本面板的视图过滤（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。
+「用哪个浏览器任务」由各方案的 `active_task` 决定（在「设置·账号」或「配置方案」里选），没有全局端点。
 
 ### 日常操作
 
@@ -184,6 +187,6 @@ Windows 自启动为计划任务，部分杀毒软件可能拦截，建议将 `c
 
 - [任务编写指南](task-writing-guide.md) — 步骤类型、变量、frame、success_condition、选择器建议
 - [任务使用手册](task-manual.md) — 日常管理、录制器、调试
-- [自定义脚本指南](custom-script-guide.md) — `script` / `shell` 三类任务与 `POST /api/scripts/run`
+- [自定义脚本指南](custom-script-guide.md) — `script` 任务与 `POST /api/scripts/run`
 - [项目结构与架构](../../AGENTS.md) — ServiceContainer 15 字段、Updater 通道、Bridge 协议
 - [更新日志](../updatelog.md) · [更改日志](../changelog.md) · [已知问题](../known-issues.md)

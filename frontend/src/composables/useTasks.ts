@@ -223,9 +223,9 @@ async function showTaskEditor(taskId?: string): Promise<void> {
       const taskType = summary?.task_type || taskConfig.type;
 
       if (taskType === "script") {
-        // 脚本类型由「自定义脚本」页面的编辑器负责；此处不跨模块转交（避免 useTasks→useScripts 循环依赖），
+        // 脚本类型由「任务」页的脚本 Tab 编辑器负责；此处不跨模块转交（避免 useTasks→useScripts 循环依赖），
         // 任务列表本身已过滤为浏览器任务，正常流程不会走到该分支
-        toastOnly(false, "该任务为脚本类型，请在「自定义脚本」页面编辑");
+        toastOnly(false, "该任务为脚本类型，请切换到「脚本」标签页编辑");
         return;
       }
       setTaskDraft({

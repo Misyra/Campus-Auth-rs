@@ -3,8 +3,8 @@
  * 替代原 scriptData + scriptMethods。
  * 列表数据由 useTaskDirectory 单次拉取提供（任务/脚本共用一个混合列表源）。
  *
- * 依赖方向：useScripts → useTasks（单向）。useTasks 不再反向引用本模块，
- * 脚本列表与任务列表通过共享的任务目录（useTaskDirectory）取数，无循环依赖。
+ * 依赖方向：本模块与 useTasks 无依赖关系（列表经 useTaskDirectory 共享取数）；
+ * 脚本不参与登录认证，故不再有「设为活动任务」入口。
  */
 
 import { ref } from "vue";
@@ -19,7 +19,6 @@ import { useTaskDirectory } from "./useTaskDirectory";
 import { useDirtySnapshot } from "./useDirtySnapshot";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
-import { useTasks } from "./useTasks";
 
 export interface ScriptDraft {
   id: string;
@@ -258,14 +257,6 @@ function openImportedDraft(id: string, content: string): void {
   frontendLogger.info("scripts", "已导入脚本文件，请检查后保存");
 }
 
-async function setActiveScript(taskId: string): Promise<void> {
-  // 走 useTasks 的正规 setActiveTask（API + 本地同步），不再直捅 activeTaskId
-  const ok = await useTasks().setActiveTask(taskId);
-  if (ok) {
-    toastOnly(true, `已将「${taskId}」设为活动任务`);
-  }
-}
-
 function loadScriptTemplate(): void {
   if (!editingTask.value) return;
   // 与 importScript/loadTemplate 同语义：覆盖已有内容前先经 dirty 确认
@@ -320,7 +311,6 @@ export function useScripts() {
     runScript,
     exportScript,
     importScript,
-    setActiveScript,
     loadScriptTemplate,
   };
 }

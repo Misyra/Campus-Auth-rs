@@ -1,31 +1,23 @@
 /** Python 脚本模板只允许依赖 Python 标准库（用户环境未声明任何第三方包）。 */
 export const NEW_SCRIPT_STUB = `#!/usr/bin/env python3
-"""自定义登录脚本"""
+"""自定义脚本
 
-# 如需发送 HTTP 请求，可直接使用 Python 标准库 urllib.request。
+用于定时执行的辅助动作（打卡、签到等）。退出码 0 表示成功。
+如需发送 HTTP 请求，可直接使用 Python 标准库 urllib.request。
 `;
 
 export const LOGIN_SCRIPT_TEMPLATE = `#!/usr/bin/env python3
-"""自定义登录脚本示例
+"""自定义脚本示例
 
-脚本只需发送登录请求，登录是否成功由系统网络检测自动判断。
+脚本用于每日签到一类的辅助动作，退出码 0 表示成功（非 0 会记为失败）。
+如需登录校园网，请使用方案里的「直连请求」，无需编写脚本。
 模板只使用 Python 标准库，避免依赖应用运行环境未声明的第三方包。
 """
 
-LOGIN_URL = "http://10.0.0.1/login"
-USERNAME = "your_username"
-PASSWORD = "your_password"
-ISP = "cmcc"
+CHECKIN_URL = "http://10.0.0.1/checkin"
 
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
-payload = urlencode({
-    "username": USERNAME,
-    "password": PASSWORD,
-    "operator": ISP,
-}).encode("utf-8")
-request = Request(LOGIN_URL, data=payload, method="POST")
-with urlopen(request, timeout=30) as response:
+with urlopen(CHECKIN_URL, timeout=30) as response:
     print(f"HTTP {response.status}")
 `;

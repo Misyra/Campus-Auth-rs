@@ -151,7 +151,7 @@ function onSaveClick(): void {
             <label for="scheduled-task-target">{{ st.scheduledTaskForm.value.task_type === 'script' ? '选择脚本' : '选择浏览器任务' }}</label>
             <CustomSelect v-if="st.scheduledTaskForm.value.task_type === 'script'" v-model="st.scheduledTaskForm.value.target_id" :options="scriptTargetOptions" />
             <CustomSelect v-else v-model="st.scheduledTaskForm.value.target_id" :options="browserTargetOptions" />
-            <span class="hint">{{ st.scheduledTaskForm.value.task_type === 'script' ? '在「自定义脚本」页面创建和管理脚本' : '浏览器任务会自动打开网页并执行登录等自动化操作' }}</span>
+            <span class="hint">{{ st.scheduledTaskForm.value.task_type === 'script' ? '在「任务 → 脚本」页创建和管理脚本' : '浏览器任务会自动打开网页并执行登录等自动化操作' }}</span>
           </div>
         </div>
       </div>

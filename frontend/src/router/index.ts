@@ -35,10 +35,21 @@ const routes = [
     ],
   },
   { path: "/profiles", name: "profiles", meta: { title: "配置方案" }, component: () => import("@/views/ProfilesView.vue") },
-  { path: "/tasks", name: "tasks", meta: { title: "任务管理" }, component: () => import("@/views/TasksView.vue") },
+  {
+    path: "/tasks",
+    name: "tasks",
+    meta: { title: "任务" },
+    component: () => import("@/views/TasksView.vue"),
+    redirect: { name: "tasks-browser" },
+    children: [
+      { path: "", name: "tasks-browser", meta: { title: "任务 · 浏览器任务" }, component: () => import("@/views/tasks/BrowserTasksPanel.vue") },
+      { path: "scripts", name: "tasks-scripts", meta: { title: "任务 · 脚本" }, component: () => import("@/views/tasks/ScriptsPanel.vue") },
+    ],
+  },
   { path: "/ai-task", name: "ai-task", meta: { title: "AI 生成任务" }, component: () => import("@/views/AiTaskView.vue") },
   { path: "/scheduled", name: "scheduled", meta: { title: "定时任务" }, component: () => import("@/views/ScheduledTasksView.vue") },
-  { path: "/scripts", name: "scripts", meta: { title: "自定义脚本" }, component: () => import("@/views/ScriptsView.vue") },
+  // 旧「自定义脚本」页已并入「任务」页的脚本 Tab：保留深链与书签重定向
+  { path: "/scripts", redirect: { name: "tasks-scripts" } },
   { path: "/appearance", name: "appearance", meta: { title: "外观" }, component: () => import("@/views/AppearanceView.vue") },
   { path: "/about", name: "about", meta: { title: "关于" }, component: () => import("@/views/AboutView.vue") },
   // 兜底 404 路由：匹配所有未定义路径

@@ -126,6 +126,18 @@
     flex: 1 1 40%;
   }
 
+  /* 任务页 Tab 窄屏均分，AI 入口换行到次行（不再挤压页签） */
+  .tasks-tabs .settings-tab {
+    flex: 1 1 40%;
+    min-width: 0;
+  }
+
+  .tasks-ai-link {
+    margin-left: 0;
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
   .task-mini-grid,
   .form-row,
   .form-row--wide {

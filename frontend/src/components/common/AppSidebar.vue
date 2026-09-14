@@ -13,7 +13,7 @@ const router = useRouter();
 const { status, busy } = useStatus();
 const { quitApp } = useUi();
 
-const MORE_PAGES = ["profiles", "scripts", "scheduled", "appearance"];
+const MORE_PAGES = ["profiles", "scheduled", "appearance"];
 const moreActive = computed(() => MORE_PAGES.includes(String(route.name)));
 const showMoreNav = ref(false);
 const expanded = computed(() => showMoreNav.value || moreActive.value);
@@ -48,14 +48,9 @@ function navigate(name: string): void {
         <span>设置</span>
       </button>
 
-      <button class="nav-item" :class="{ active: route.name === 'tasks' }" @click="navigate('tasks')" title="任务管理">
+      <button class="nav-item" :class="{ active: String(route.name).startsWith('tasks') }" @click="navigate('tasks')" title="任务（浏览器任务 / 脚本）">
         <IconApp name="file-text" class="nav-icon" />
-        <span>任务管理</span>
-      </button>
-
-      <button class="nav-item" :class="{ active: route.name === 'ai-task' }" @click="navigate('ai-task')" title="AI 生成任务">
-        <IconApp name="sparkles" class="nav-icon" />
-        <span>AI 任务</span>
+        <span>任务</span>
       </button>
 
       <button class="nav-item" :class="{ active: route.name === 'about' }" @click="navigate('about')" title="关于">
@@ -80,11 +75,6 @@ function navigate(name: string): void {
             <button class="nav-item" :class="{ active: route.name === 'profiles' }" @click="navigate('profiles')" title="配置方案">
               <IconApp name="wifi" class="nav-icon" />
               <span>配置方案</span>
-            </button>
-
-            <button class="nav-item" :class="{ active: route.name === 'scripts' }" @click="navigate('scripts')" title="自定义脚本">
-              <IconApp name="code" class="nav-icon" />
-              <span>自定义脚本</span>
             </button>
 
             <button class="nav-item" :class="{ active: route.name === 'scheduled' }" @click="navigate('scheduled')" title="定时任务">

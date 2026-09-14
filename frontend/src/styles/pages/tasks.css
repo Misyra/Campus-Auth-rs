@@ -1,3 +1,20 @@
+/* 任务页 Tab 栏：复用设置页页签外观，右侧追加「AI 生成任务」入口 */
+.tasks-tabs {
+  margin-bottom: var(--space-md);
+}
+
+.tasks-tabs .settings-tab {
+  flex: 0 1 auto;
+  min-width: 120px;
+}
+
+.tasks-ai-link {
+  margin-left: auto;
+  align-self: center;
+  flex-shrink: 0;
+  text-decoration: none;
+}
+
 .tasks-grid {
   display: grid;
   /* 左（任务列表）宽右（编辑器/帮助）窄：列表行含名称+按钮组，是空间大头；

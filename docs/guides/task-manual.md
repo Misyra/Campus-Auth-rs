@@ -6,17 +6,18 @@
 
 ## 1. 核心概念
 
-- **任务**：一份 JSON，`type` 为 `browser`（浏览器自动化）/ `script`（文件脚本，`content` 或 `script_path` + `binary_path`/`args`/`work_dir`）/ `shell`（命令字符串 `command` + `shell_path`），见 `src/tasks/models.rs`。浏览器任务含 `url`/`steps`/`success_condition` 等；脚本/ Shell 任务由 `TaskExecutor` 直接起子进程执行。
-- **活跃任务**：实际被自动登录执行的任务，同时只能有一个。在`任务管理`页或`设置 · 任务`页查看当前活跃任务（`POST /api/tasks/active/{id}`）。
+- **任务**：一份 JSON，`type` 为 `browser`（浏览器自动化）或 `script`（脚本，`content` 或 `script_path` + `binary_path`/`args`/`work_dir`），见 `src/tasks/models.rs`。浏览器任务含 `url`/`steps`/`success_condition` 等；脚本任务由 `TaskExecutor` 直接起子进程执行。历史 `type=shell` 已移除，遇到时明确报错并提示改用 `script`。
+- **启用任务**：实际被自动登录执行的浏览器任务，**按方案绑定**——每个 Profile 各有一个（`ProfileData.active_task`），切方案即切任务；未绑定的方案回退内置默认任务 `default`。在`配置方案`编辑器或`设置 · 账号`的「登录方式」里选择。必须是浏览器任务（脚本不参与登录）。
 - **定时任务**：与登录任务独立，按 Cron 表达式定时触发的任务，在`定时任务`页管理；底层仍为上述三类任务的调度视图。
 
 ## 2. 日常操作（Web 控制台）
 
-### 任务管理页
+### 任务页
 
-- 新建、编辑、复制、删除任务；列表可排序。
+「任务」页含两个标签页：**浏览器任务**（自动化登录步骤序列）与**脚本**（定时执行的辅助动作）。
+
+- 新建、编辑、复制、删除任务；列表可排序。**本页只管编辑任务内容**；「用哪个任务登录」在各方案的「登录方式」里选择。
 - 从文件导入 / 导出单个任务（JSON 文件）。任务交换统一为导出结果格式（`{ summary, config }`，批量为其数组），导出文件可直接回导；导入另兼容顶层 `id` 的扁平对象与磁盘文件的 `task_id` 写法。
-- 将某个任务设为活跃任务。
 
 ### 设置 · 任务页
 
@@ -25,9 +26,9 @@
 
 ## 3. 任务何时执行
 
-- **自动执行**：网络监测发现离线时，自动执行活跃任务进行登录（`设置 · 监测` 配置检测策略与重试）。
-- **手动触发单次登录**：仪表盘的登录按钮（`POST /api/login`），执行活跃任务。
-- **执行指定任务**：`POST /api/tasks/{id}/execute`，不切换活跃任务，用于验证新任务。
+- **自动执行**：网络监测发现离线时，自动执行当前方案绑定的浏览器任务进行登录（`设置 · 监测` 配置检测策略与重试）。
+- **手动触发单次登录**：仪表盘的登录按钮（`POST /api/login`），执行当前方案绑定的任务。
+- **执行指定任务**：`POST /api/tasks/{id}/execute`，不改变方案绑定，用于验证新任务。
 
 ## 4. 录制器：不手写 JSON
 
@@ -35,7 +36,7 @@
 2. 在`设置 · 任务`页点击`安装录制器脚本`。
 3. 打开校园网登录页，点击页面上的浮动按钮开始录制。
 4. 依次点选账号框、密码框、验证码（如有）、登录按钮等元素。
-5. 结束录制后将生成的步骤保存为任务，并设为活跃任务验证一次。
+5. 结束录制后将生成的步骤保存为任务，再到「登录方式」里为当前方案选中它验证一次。
 
 ## 5. 验证码（OCR）
 
@@ -57,7 +58,7 @@
 | `GET /api/tasks/export/{id}` | 导出单个任务 |
 | `POST /api/tasks/import` | 导入任务 |
 | `POST /api/tasks/order` | 排序 |
-| `POST /api/tasks/active/{task_id}` | 设为活跃任务 |
+| `POST /api/login` | 触发登录（执行当前方案绑定的任务） |
 | `POST /api/tasks/{id}/execute` | 执行指定任务 |
 | `GET /api/scripts` / `GET /api/shells` | 脚本 / Shell 任务过滤视图（同 `GET /api/tasks` 数据，`tasks/scripts/`） |
 | `POST /api/scripts/run` | 临时脚本直跑（不落盘，`ScriptTaskConfig` 即时执行） |
