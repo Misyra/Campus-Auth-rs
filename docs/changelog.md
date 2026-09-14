@@ -2,6 +2,13 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-14 设置接口暴露登录渠道）
+
+- `GET /api/config` 扁平响应新增 `login_channel`（活跃方案的登录执行渠道）：前端判定登录方式与「按渠道抑制 Python 环境未就绪提示」的数据源，无需为一次判定再拉整个方案列表；完整直连参数（`http_url` 等）仍按需读 `GET /api/profiles/{id}`。
+- `PATCH /api/config` 将 `login_channel` 纳入 Profile 域白名单并做枚举校验（非法值显式 400，不静默保留旧渠道）。此前该键既不在 Profile 也不在全局白名单，客户端原样回传会落入 `other_patch` 经 `json_merge` 合并到 settings 顶层。
+- 前端 `ConfigResponse` 新增 `login_channel`；`useConfig` 以独立只读 ref `activeLoginChannel` 暴露，**有意不并入 `config` 表单状态**——该字段由「配置方案」编辑器按方案写入，若并入表单会进入 dirty 快照与保存载荷，用户在别处改完渠道后回到设置页点「立即保存」即把界面上不可见的旧值静默写回，翻转刚改的渠道。
+- 补齐测试：GET 回传 http 渠道、PATCH 落回 Profile 且不改动全局设置、非法值 400；前端新增「只读派生值暴露且不进入保存载荷」用例。三处均以变异验证断言有效（改坏实现即失败）。
+
 ## 开发中（2026-09-14 直连 HTTP 登录渠道）
 
 - Profile 新增浏览器/直连登录渠道及 GET/POST、URL、请求头、请求体、成功/失败关键字、凭据变换脚本配置；运行时快照完整携带，存量 Profile 通过 serde 默认值继续使用浏览器渠道，无需迁移。

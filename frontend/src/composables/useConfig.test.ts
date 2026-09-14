@@ -102,4 +102,26 @@ describe("dirty 快照比对", () => {
     await flushWatch();
     expect(config.dirty.value).toBe(true);
   });
+
+  it("登录渠道作为只读派生值暴露，且不进入保存载荷", async () => {
+    // 后端未回传该字段时（老版本）回落默认 browser，不应出现 undefined
+    await config.fetchConfig();
+    expect(config.activeLoginChannel.value).toBe("browser");
+
+    // 后端回传 http 时如实反映，供按渠道抑制环境提示等判据使用
+    fetchMock.mockResolvedValue({ username: "user", login_channel: "http" });
+    await config.fetchConfig();
+    expect(config.activeLoginChannel.value).toBe("http");
+
+    // 无表单改动时不应有 dirty，也不能把该字段写进保存载荷。
+    // 注意 mock 未含 monitor，enable_tcp_check 回落默认 false，须置 true 才构成改动
+    await flushWatch();
+    expect(config.dirty.value).toBe(false);
+    config.config.monitor.enable_tcp_check = true;
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+    await config.saveConfig();
+    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("login_channel");
+  });
 });

@@ -351,6 +351,8 @@ export interface ConfigResponse {
   trigger_url: string;
   isp: string;
   carrier_custom: string;
+  /** 活跃方案的登录执行渠道（引导分流与环境提示判据） */
+  login_channel: LoginChannel;
   password?: string;
 }
 

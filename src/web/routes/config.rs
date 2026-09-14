@@ -95,6 +95,9 @@ async fn apply_flat_settings_patch(
         "isp",
         "carrier_custom",
         "active_task",
+        // GET 扁平响应会回传该字段，客户端原样回传时必须落回 Profile；
+        // 否则落入 other_patch 被 json_merge 写到 settings.json 顶层成脏数据
+        "login_channel",
     ];
 
     // 全局设置字段
@@ -204,6 +207,14 @@ async fn apply_flat_settings_patch(
         if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str()) {
             profile.active_task = active_task.to_string();
         }
+        // 登录渠道是枚举（"browser"/"http"），不走字符串校验分支；
+        // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
+        if let Some(channel) = profile_patch.get("login_channel") {
+            profile.login_channel = serde_json::from_value::<crate::config::LoginChannel>(
+                channel.clone(),
+            )
+            .map_err(|_| ApiError::BadRequest("login_channel 仅支持 browser 或 http".into()))?;
+        }
         if let Some(password) = profile_patch.get("password") {
             // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
             // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
@@ -286,7 +297,8 @@ async fn reload_and_flat_response(config: &Arc<dyn ConfigApi>) -> Result<Json<Va
 
 /// 构造设置扁平响应（GET / PATCH /api/config 共用）
 ///
-/// 字段顺序与历史响应完全一致；monitor 字段做后端→前端字段名映射
+/// 字段顺序与历史响应完全一致（新增字段追加在末尾，避免打乱既有顺序）；
+/// monitor 字段做后端→前端字段名映射
 fn settings_flat_response(
     settings: &crate::config::SettingsData,
     profile: &crate::config::ProfileData,
@@ -307,7 +319,11 @@ fn settings_flat_response(
         "isp": profile.isp,
         "carrier_custom": "",
         "active_task": profile.active_task,
-        "has_password": has_password
+        "has_password": has_password,
+        // 活跃方案的登录执行渠道：前端据此判定登录方式（引导向导分流、
+        // 按渠道抑制「Python 环境未就绪」提示），无需再单独拉一次方案列表。
+        // 完整直连参数（http_url 等）不在扁平响应内，按需读 GET /api/profiles/{id}。
+        "login_channel": profile.login_channel
     })
 }
 
@@ -1087,6 +1103,8 @@ mod tests {
         let d = &v["data"];
         assert_eq!(d["username"], "user1");
         assert_eq!(d["has_password"], false);
+        // 活跃方案登录渠道：引导向导分流与「按渠道抑制环境提示」的数据源
+        assert_eq!(d["login_channel"], "browser");
         // 扁平结构包含各域
         for key in [
             "browser",
@@ -1098,6 +1116,82 @@ mod tests {
         ] {
             assert!(d.get(key).is_some(), "缺少字段 {key}");
         }
+    }
+
+    /// GET /api/config 回传活跃方案的直连渠道（避免前端为判定登录方式再拉一次方案列表）
+    #[tokio::test]
+    async fn test_get_settings_reports_http_login_channel() {
+        let (app, inner) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            g.profile.login_channel = crate::config::LoginChannel::Http;
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["login_channel"], "http");
+    }
+
+    /// PATCH 回传 login_channel 必须落回 Profile（不是全局设置）
+    #[tokio::test]
+    async fn test_patch_login_channel_updates_profile_not_global_settings() {
+        let (app, inner) = mock_app();
+        let settings_before = {
+            let g = inner.lock().unwrap();
+            serde_json::to_value(&g.settings).unwrap()
+        };
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "login_channel": "http" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["login_channel"], "http", "响应需回显新渠道");
+        let g = inner.lock().unwrap();
+        assert_eq!(g.profile.login_channel, crate::config::LoginChannel::Http);
+        // 渠道属 Profile 域：全局设置不得被改动（WEB-2 未知键落到 global/顶层的同源风险）
+        assert_eq!(
+            serde_json::to_value(&g.settings).unwrap(),
+            settings_before,
+            "全局设置不应被 login_channel 影响"
+        );
+    }
+
+    /// 非法 login_channel 显式 400，不静默保留旧渠道
+    #[tokio::test]
+    async fn test_patch_login_channel_rejects_invalid_value() {
+        let (app, _) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "login_channel": "carrier_pigeon" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// 日志级别读写往返

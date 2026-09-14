@@ -5,7 +5,7 @@
  */
 
 import { reactive, ref, watch, nextTick } from "vue";
-import type { Config, SaveConfigPayload } from "../api/types";
+import type { Config, LoginChannel, SaveConfigPayload } from "../api/types";
 import { configApi, autostartApi, pureModeApi } from "../api";
 import { ApiError, extractApiError } from "../api/client";
 import { DEFAULT_CONFIG } from "../utils/constants";
@@ -22,6 +22,16 @@ const dirty = ref(false);
 const saveFailed = ref(false);
 // F2：配置加载失败标记，为 true 时 SettingsView 保存按钮禁用并提示重试
 const configLoadFailed = ref(false);
+
+/**
+ * 活跃方案的登录执行渠道（只读派生值）。
+ *
+ * 与 `config` 表单状态分离：该字段由「配置方案」编辑器按方案写入，设置页
+ * 只做展示与判据（按渠道抑制「Python 环境未就绪」提示、引导分流）。若并入
+ * `config`，它会进入 dirty 快照与保存载荷——用户在别处改完渠道回到设置页
+ * 点「立即保存」时，会把界面上不可见的旧渠道静默写回。
+ */
+const activeLoginChannel = ref<LoginChannel>("browser");
 
 // 纯净模式（本质是 config.browser.pure_mode，API 为 /api/pure-mode，
 // 从 useTasks 迁入：独立于表单 dirty 流程的即时开关状态）
@@ -85,6 +95,10 @@ async function fetchConfig(): Promise<void> {
       trigger_url: data.trigger_url ?? "",
       isp: data.isp ?? "",
     };
+    // 活跃方案的登录渠道：只读派生信息（非表单状态），不进 savedSnapshot
+    // ——它由「配置方案」编辑器写入，若混入表单会在下一次「立即保存」时
+    // 把界面上不可见的旧值静默写回，翻转用户刚改的渠道
+    activeLoginChannel.value = data.login_channel ?? "browser";
     config.active_task = data.active_task ?? "";
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
@@ -346,6 +360,7 @@ export function useConfig() {
     dirty,
     saveFailed,
     configLoadFailed,
+    activeLoginChannel,
     pureMode,
     pureModeLoading,
     fetchConfig,
