@@ -31,7 +31,6 @@ const DANGEROUS_STEP_TYPES = new Set(["eval", "custom_js", "evaluate"]);
 
 // 列表来自任务目录（与脚本共用单次拉取，含 5 秒守卫与首败通知）
 const { browserTasks: tasks, fetchDirectory } = useTaskDirectory();
-const activeTaskId = ref("default");
 const editingTask = ref<BrowserTaskDraft | null>(null);
 const jsonError = ref("");
 
@@ -46,35 +45,6 @@ const { confirm } = useConfirm();
 // 拉取统一委托任务目录（force 语义与其他 fetch 一致）
 function fetchTasks(force = false): Promise<void> {
   return fetchDirectory(force);
-}
-
-async function fetchActiveTask(): Promise<void> {
-  try {
-    const data = await tasksApi.active();
-    activeTaskId.value = data.task_id;
-  } catch (error) {
-    frontendLogger.error("tasks", "获取活动任务失败", error);
-  }
-}
-
-/** 仅同步本地活动任务 id（不调 API），供已自行完成服务端切换的调用方复用。 */
-function syncActiveTaskLocal(taskId: string): void {
-  activeTaskId.value = taskId;
-}
-
-/** 设置活动任务（调 API + 本地同步）。返回是否成功。 */
-async function setActiveTask(taskId: string): Promise<boolean> {
-  try {
-    frontendLogger.info("tasks", `设置活动任务: ${taskId}`);
-    await tasksApi.setActive(taskId);
-    syncActiveTaskLocal(taskId);
-    frontendLogger.info("tasks", `活动任务已设置: ${taskId}`);
-    return true;
-  } catch (error) {
-    frontendLogger.error("tasks", "设置活动任务异常", error);
-    toastOnly(false, "设置活动任务失败");
-    return false;
-  }
 }
 
 /** 立即执行任务（通用语义：浏览器打卡/脚本，不注入账号密码） */
@@ -201,10 +171,6 @@ async function deleteTask(taskId: string): Promise<void> {
     frontendLogger.info("tasks", "任务删除成功: " + taskId);
     toastOnly(true, "任务已删除");
     await fetchTasks(true);
-    if (activeTaskId.value === taskId) {
-      activeTaskId.value = "default";
-      await setActiveTask("default");
-    }
   } catch (error) {
     frontendLogger.error("tasks", "删除任务异常", error);
     toastOnly(false, "删除任务失败");
@@ -403,15 +369,12 @@ async function importTask(): Promise<void> {
 export function useTasks() {
   return {
     tasks,
-    activeTaskId,
     editingTask,
     jsonError,
     executingIds,
     duplicatingIds,
     exportingIds,
     fetchTasks,
-    fetchActiveTask,
-    setActiveTask,
     executeTask,
     saveTask,
     taskSaving,

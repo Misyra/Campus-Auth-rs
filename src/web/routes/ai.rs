@@ -808,12 +808,6 @@ mod tests {
         async fn delete_task(&self, _task_id: &str) -> Result<(), crate::tasks::TaskError> {
             Ok(())
         }
-        async fn get_active_task(&self) -> String {
-            String::new()
-        }
-        async fn set_active_task(&self, _task_id: &str) -> Result<(), crate::tasks::TaskError> {
-            Ok(())
-        }
         async fn get_task_detail(
             &self,
             _task_id: &str,

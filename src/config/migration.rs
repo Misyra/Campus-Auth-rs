@@ -27,6 +27,7 @@ pub const MIGRATIONS: &[(u32, MigrationFn)] = &[
     (6, migrate_v5_to_v6),
     (7, migrate_v6_to_v7),
     (8, migrate_v7_to_v8),
+    (9, migrate_v8_to_v9),
 ];
 
 /// 执行所有需要的迁移
@@ -366,10 +367,85 @@ fn migrate_v7_to_v8(_config_dir: &Path, value: &mut Value) -> Result<(), ConfigE
     Ok(())
 }
 
+/// v8 → v9 迁移
+///
+/// 「启用哪个浏览器任务」从**全局唯一**改为**按方案绑定**：旧实现把选择存在
+/// `tasks/.order.json` 的 `active` 字段（全局一份），新实现存在各 Profile 的
+/// `active_task`（切方案即切任务）。本迁移把旧的全局选择搬给当前活跃方案，
+/// 避免升级后用户的既有选择被静默丢弃（随后回退到内置 default 任务——
+/// 表现为"升级后登录用了别的任务"）。
+///
+/// `.order.json` 的 `active` 字段此后不再读写（`OrderData` 已移除该字段），
+/// 残留值会被 serde 忽略，无需清理。
+fn migrate_v8_to_v9(config_dir: &Path, _value: &mut Value) -> Result<(), ConfigError> {
+    // `.order.json` 位于 `<base>/tasks/`，而 config_dir 为 `<base>/config/`
+    let order_path = config_dir
+        .parent()
+        .unwrap_or(config_dir)
+        .join("tasks")
+        .join(".order.json");
+
+    let legacy_active = std::fs::read_to_string(&order_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| {
+            v.get("active")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty());
+
+    let Some(task_id) = legacy_active else {
+        // 无旧选择（新装或本就未设置）：不动，由登录解析回退内置 default
+        return Ok(());
+    };
+
+    // 搬给当前活跃方案；后续未绑定方案的仍回退 default，行为不失真
+    let active_id = _value
+        .get("active_profile_id")
+        .and_then(Value::as_str)
+        .filter(|s| is_valid_profile_id(s))
+        .unwrap_or("default");
+
+    let profile_path = config_dir
+        .join("profiles")
+        .join(format!("{active_id}.json"));
+    let Some(mut profile) = std::fs::read_to_string(&profile_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    else {
+        tracing::warn!(
+            profile_id = %active_id,
+            path = %profile_path.display(),
+            "v9 迁移跳过：活跃方案文件不可读，任务绑定留空（将由登录兜底到 default）"
+        );
+        return Ok(());
+    };
+
+    // 已有显式绑定则不覆盖（幂等：重复迁移结果一致）
+    let already_bound = profile
+        .get("active_task")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    if !already_bound {
+        if let Some(obj) = profile.as_object_mut() {
+            obj.insert("active_task".to_string(), Value::String(task_id.clone()));
+        }
+        let json = serde_json::to_string_pretty(&profile)?;
+        std::fs::write(&profile_path, json)?;
+        tracing::info!(
+            profile_id = %active_id,
+            task_id = %task_id,
+            "v9 迁移：原全局启用任务已绑定到当前方案"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// 构造一个 v5 结构的 settings.json JSON 值（含旧字段名与废弃字段）
     fn v5_settings() -> Value {
         serde_json::json!({
@@ -735,5 +811,95 @@ mod tests {
             v["global"].get("updater").is_none(),
             "无 updater 不应凭空创建"
         );
+    }
+
+    // ============ v8 → v9：全局启用任务搬给当前方案 ============
+
+    /// 搭出 `<base>/config/settings.json` + `<base>/tasks/.order.json` + 方案文件的目录结构
+    fn v8_fixture(order_active: Option<&str>, profile_active: Option<&str>) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        std::fs::create_dir_all(base.join("config").join("profiles")).unwrap();
+        std::fs::create_dir_all(base.join("tasks")).unwrap();
+
+        if let Some(a) = order_active {
+            std::fs::write(
+                base.join("tasks").join(".order.json"),
+                format!(r#"{{"order":["t1"],"active":"{a}"}}"#),
+            )
+            .unwrap();
+        }
+        let mut profile = serde_json::json!({"id": "default", "name": "默认"});
+        if let Some(t) = profile_active {
+            profile["active_task"] = Value::String(t.to_string());
+        }
+        std::fs::write(
+            base.join("config").join("profiles").join("default.json"),
+            serde_json::to_string_pretty(&profile).unwrap(),
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_migrate_v8_to_v9_binds_global_task_to_active_profile() {
+        let tmp = v8_fixture(Some("mytask"), None);
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+
+        migrate_v8_to_v9(&config_dir, &mut v).unwrap();
+
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["active_task"], "mytask",
+            "原全局启用任务应绑定到当前方案，避免升级后选择被静默丢弃"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v8_to_v9_does_not_override_existing_binding() {
+        // 方案已有显式绑定：幂等，不覆盖（重复迁移结果一致）
+        let tmp = v8_fixture(Some("globaltask"), Some("boundtask"));
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+
+        migrate_v8_to_v9(&config_dir, &mut v).unwrap();
+
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["active_task"], "boundtask");
+    }
+
+    #[test]
+    fn test_migrate_v8_to_v9_without_legacy_active_is_noop() {
+        // 无旧全局选择（新装/未设置）：不动方案文件，由登录解析兜底 default
+        let tmp = v8_fixture(None, None);
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+
+        migrate_v8_to_v9(&config_dir, &mut v).unwrap();
+
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            saved.get("active_task").is_none(),
+            "无旧选择时不应凭空写入绑定"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v8_to_v9_missing_order_file_is_noop() {
+        // .order.json 不存在（如任务目录被清空）不应报错，迁移必须能继续
+        let tmp = v8_fixture(None, None);
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+        assert!(migrate_v8_to_v9(&config_dir, &mut v).is_ok());
     }
 }

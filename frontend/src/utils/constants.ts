@@ -152,6 +152,7 @@ export const DEFAULT_CONFIG: Config = {
     trigger_url: "",
     isp: "",
     // 与后端 ProfileData 默认值一致（加载失败兜底显示用，正常以服务端下发为准）
+    active_task: "",
     login_channel: "browser",
     http_method: "GET",
     http_url: "",
@@ -161,7 +162,6 @@ export const DEFAULT_CONFIG: Config = {
     http_failure_pattern: "",
     http_crypto_script: "",
   },
-  active_task: "",
   app_settings: {
     auto_start_browser: true,
     startup_action: "monitor",

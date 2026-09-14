@@ -1142,7 +1142,8 @@ mod tests {
 
         let mut value: Value = serde_json::from_str(v5_json).unwrap();
         let new_version = crate::config::migration::run_migrations(config_dir, &mut value).unwrap();
-        assert_eq!(new_version, 8);
+        // 断言"迁移链跑到了当前版本"，而非写死某个数字（否则每次升版都要改测试）
+        assert_eq!(new_version, crate::config::CURRENT_CONFIG_VERSION);
 
         // 验证全局字段重命名发生在正确的子段内，且旧字段名已移除
         let monitor = &value["global"]["monitor"];
@@ -1202,7 +1203,7 @@ mod tests {
         let v6_json = r#"{"config_version": 6, "active_profile_id": "default"}"#;
         let mut value: Value = serde_json::from_str(v6_json).unwrap();
         let new_version = crate::config::migration::run_migrations(config_dir, &mut value).unwrap();
-        assert_eq!(new_version, 8);
+        assert_eq!(new_version, crate::config::CURRENT_CONFIG_VERSION);
     }
 
     // ============ M2 双域锁并发写测试 ============

@@ -13,7 +13,7 @@ campus-auth
 # 轻量模式（仅 Engine + 托盘，Web 按需启动；macOS 自动降级为完整模式）
 campus-auth --mode lightweight
 
-# 单次登录（执行活跃任务一次后退出）
+# 单次登录（执行当前方案绑定的任务一次后退出）
 campus-auth --mode login-once
 
 # 查询 / 停止已运行实例
@@ -74,7 +74,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 入口：`GET /api/profiles` / `POST /api/profiles` / `GET /api/profiles/active`，前端为“配置方案”页。
 
-- 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则与 `active_task`。
+- 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求）。
 - 重定向模式：`trigger_url` 为明文 `http` 触发地址（如 `http://www.msftconnecttest.com/connecttest.txt`），Worker 首导航到该地址并跟随 302 到真门户，`{{LOGIN_URL}}` 同步为触发地址；监测跳过 `auth` TCP 探测、登录跳过预检，劫持判定优先于断网（`docs/guides/task-writing-guide.md` 重定向模式）。
 - 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高；`auto_switch` 开启时 Engine 每 60s 检测并自动切换，切换后重置登录失败去重状态。
 - `default` 为保底 Profile，不可删除。
@@ -93,7 +93,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ### 日常操作
 
-- **任务管理 / 设置·任务**：新建、编辑、复制、删除、排序、导入/导出单个任务；将某个任务设为活跃任务（`POST /api/tasks/active/{id}`）。
+- **任务 / 设置·任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。「任务」页分「浏览器任务」与「脚本」两个标签页，**只管编辑**；用哪个任务登录由方案决定（见下）。
 - **定时任务**：独立页，按 cron 调度浏览器任务（`src/scheduler`，状态在 `tasks/scheduled/`）。
 - **何时执行**：网络监测 Offline/Captive 时自动执行活跃任务；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
 
@@ -102,7 +102,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 1. 安装 Tampermonkey；
 2. 在「设置·任务」页「安装录制器脚本」；
 3. 打开校园网登录页，点浮动按钮开始录制，按提示点选账号框、密码框、验证码、登录按钮等；
-4. 结束录制后保存为任务并设为活跃任务验证一次（`resources/tools/task-recorder.user.js`）。
+4. 结束录制后保存为任务；再到「设置·账号」的「登录方式」里为当前方案选中它，验证一次（`resources/tools/task-recorder.user.js`）。
 
 ## 5. 浏览器自动化与调试
 
@@ -172,7 +172,7 @@ campus-auth --force   # 终止后抢占
 
 ### 多个校园网怎么配置
 
-在“配置方案”页为每个网络创建 Profile，填 `gateway_ip` / `wifi_ssid` 匹配条件并开启 `auto_switch`；为各 Profile 分别绑定 `active_task`，而非为每环境各写一套任务 JSON。
+在“配置方案”页为每个网络创建 Profile，填 `gateway_ip` / `wifi_ssid` 匹配条件并开启 `auto_switch`；再为各 Profile 分别选择**浏览器任务**（「配置方案」编辑器或「设置·账号」的「登录方式」里选），而非为每环境各写一套任务 JSON。切换方案会连同任务一起切换。
 
 ### 保存任务时弹出安全警告
 

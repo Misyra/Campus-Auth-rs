@@ -81,6 +81,53 @@ fn decide_browser_override(
     first_available.map(str::to_string)
 }
 
+/// 浏览器任务的取值决策结果
+struct TaskChoice {
+    /// 本次登录实际使用的任务 ID（None = 无任何可用任务）
+    task_id: Option<String>,
+    /// 是否发生了"方案绑定不可用 → 回落默认"的回退（调用方据此告警）
+    fell_back: bool,
+}
+
+/// 决定本次登录使用哪个浏览器任务（纯函数，可用性由调用方预先算好）。
+///
+/// 优先级：显式 `task_id` → 方案的 `active_task` → 内置默认任务 `default`。
+///
+/// 显式值不再校验可用性：它来自任务页/定时任务，指向不可用任务时由
+/// `embed_task_config` 在加载阶段告警，语义比静默换成别的任务更诚实。
+/// 方案绑定则要校验——这是用户长期挂着的配置，任务被删或改成脚本后必须
+/// 回落可用任务，否则表现为"浏览器打开却什么都没填"的假登录。
+fn resolve_task_choice(
+    explicit: &Option<String>,
+    profile_active_task: &str,
+    bound_usable: bool,
+    default_usable: bool,
+) -> TaskChoice {
+    let fallback_default = |fell_back: bool| TaskChoice {
+        task_id: default_usable.then(|| crate::tasks::DEFAULT_TASK_ID.to_string()),
+        fell_back,
+    };
+
+    if let Some(id) = explicit.as_ref().filter(|s| !s.is_empty()) {
+        return TaskChoice {
+            task_id: Some(id.clone()),
+            fell_back: false,
+        };
+    }
+    let bound = profile_active_task.trim();
+    // 未绑定是正常态（新装），走默认任务但不记为回退，不告警
+    if bound.is_empty() {
+        return fallback_default(false);
+    }
+    if bound_usable {
+        return TaskChoice {
+            task_id: Some(bound.to_string()),
+            fell_back: false,
+        };
+    }
+    fallback_default(true)
+}
+
 /// 登录提交后返回的控制句柄（可克隆，多次复用共享同一终态结果）
 #[derive(Clone, Debug)]
 pub struct LoginHandle {
@@ -378,9 +425,11 @@ impl LoginOrchestrator {
         };
         let profile = &resolved_profile;
 
-        // 全局唯一起活跃任务：任务页「使用」设置的 `.order.json.active`（TaskManager 层）。
-        // 手动/自动/CLI 登录（task_id 为空）统一走它；定时任务各自携带独立 task_id，不受影响。
-        let global_active_task = self.tasks.get_active_task().await;
+        // 本次生效的浏览器任务：显式 task_id（定时任务/任务页立即执行）优先，
+        // 其次取当前方案的 active_task（「账号 / 配置方案」页按方案绑定），
+        // 最后回退全局默认任务 default（未绑定方案的兜底，保证开箱可用）。
+        // 方案级绑定是「切方案即切任务」的唯一来源。
+        let effective_task_id = self.resolve_active_task(&task_id, profile).await;
 
         // 1a. 直连渠道判定：http 渠道在 Rust 进程内完成登录，浏览器任务来源
         // （显式 task 执行）不适用，仍按浏览器路径处理。直连时跳过 1b/1c 的
@@ -390,7 +439,7 @@ impl LoginOrchestrator {
 
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
         if let Some(handle) = self
-            .validate_profile(source, profile, &task_id, &global_active_task, use_http)
+            .validate_profile(source, profile, &effective_task_id, use_http)
             .await
         {
             return handle;
@@ -493,14 +542,6 @@ impl LoginOrchestrator {
             cancel_token: cancel_token.clone(),
             inner: result_slot.clone(),
         };
-
-        let effective_task_id = task_id.or_else(|| {
-            if global_active_task.is_empty() {
-                None
-            } else {
-                Some(global_active_task.clone())
-            }
-        });
 
         // 直连渠道不执行任务步骤：worker_config 置空占位，确保
         // has_explicit_success_condition 恒为 false，登录后网络验证兜底始终生效
@@ -609,6 +650,60 @@ impl LoginOrchestrator {
         }
     }
 
+    /// 该任务是否存在且为浏览器任务（登录只接受浏览器任务：脚本不执行步骤）。
+    ///
+    /// 仅查存在性不够——绑定的任务被改成脚本后仍会"存在"，但 Worker 拿到空
+    /// task_config 只会打开浏览器什么都不填（假登录），必须按类型拒绝。
+    async fn is_usable_browser_task(&self, id: &str) -> bool {
+        match self.tasks.load_task(id).await {
+            Ok(crate::tasks::TaskKind::Browser(_)) => true,
+            Ok(other) => {
+                tracing::warn!(
+                    task_id = id,
+                    task_type = other.type_name(),
+                    "绑定的任务不是浏览器任务，登录无法使用"
+                );
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// 解析本次登录实际使用的浏览器任务 ID。
+    ///
+    /// 优先级：显式 `task_id`（定时任务 / 任务页立即执行携带）→ 当前方案的
+    /// `active_task`（「账号」「配置方案」页按方案绑定，切方案即切任务）→
+    /// 内置默认任务 `default`（未绑定方案的兜底，保证新装开箱可用）。
+    ///
+    /// 判定规则见 [`resolve_task_choice`]（纯函数，便于单测）；此处只负责
+    /// 算出"该任务是否为可用的浏览器任务"——**必须同时校验类型**：绑定的
+    /// 任务若被改成脚本，仅查存在性会放行，Worker 拿到空 task_config 后
+    /// 表现为"浏览器打开却什么都没填"的假登录。
+    async fn resolve_active_task(
+        &self,
+        explicit: &Option<String>,
+        profile: &ProfileSnapshot,
+    ) -> Option<String> {
+        let bound_usable = match profile.active_task.trim() {
+            "" => false,
+            id => self.is_usable_browser_task(id).await,
+        };
+        let default_usable = self
+            .is_usable_browser_task(crate::tasks::DEFAULT_TASK_ID)
+            .await;
+
+        let choice =
+            resolve_task_choice(explicit, &profile.active_task, bound_usable, default_usable);
+        if choice.fell_back {
+            tracing::warn!(
+                profile = %profile.id,
+                task_id = %profile.active_task.trim(),
+                "方案绑定的浏览器任务不可用，回退到默认任务"
+            );
+        }
+        choice.task_id
+    }
+
     /// 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）。
     ///
     /// `Some(handle)` = 校验失败携带的立即终态句柄；`None` = 通过。
@@ -616,8 +711,7 @@ impl LoginOrchestrator {
         &self,
         source: LoginSource,
         profile: &ProfileSnapshot,
-        task_id: &Option<String>,
-        global_active_task: &str,
+        effective_task_id: &Option<String>,
         use_http: bool,
     ) -> Option<LoginHandle> {
         let mut missing = Vec::new();
@@ -636,10 +730,9 @@ impl LoginOrchestrator {
         } else if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
             missing.push("认证地址与触发地址均为空，请至少填写一个");
         }
-        // 启用任务是浏览器路径的前提（Worker 依据任务步骤执行）；直连渠道无
-        // Worker 参与，不要求
-        if !use_http && task_id.is_none() && global_active_task.is_empty() {
-            missing.push("当前无启用任务，请手动启用一个任务");
+        // 浏览器路径必须有可执行的浏览器任务；直连渠道无 Worker 参与，不要求
+        if !use_http && effective_task_id.is_none() {
+            missing.push("当前无可用浏览器任务，请在账号页为当前方案选择一个任务");
         }
         if missing.is_empty() {
             return None;
@@ -1310,6 +1403,63 @@ mod tests {
             cancel_token: CancellationToken::new(),
             inner: Arc::new(LoginHandleInner { result_tx }),
         }
+    }
+
+    // ============ 浏览器任务取值（方案级绑定优先） ============
+
+    #[test]
+    fn test_resolve_task_explicit_wins_over_profile_binding() {
+        // 显式 task_id（定时任务/任务页立即执行）优先级最高，压过方案绑定
+        let c = resolve_task_choice(&Some("explicit".to_string()), "bound", true, true);
+        assert_eq!(c.task_id.as_deref(), Some("explicit"));
+        assert!(!c.fell_back);
+    }
+
+    #[test]
+    fn test_resolve_task_uses_profile_binding_when_no_explicit() {
+        // 无显式值时取方案绑定——这是"切方案即切任务"的核心
+        let c = resolve_task_choice(&None, "bound", true, true);
+        assert_eq!(c.task_id.as_deref(), Some("bound"));
+        assert!(!c.fell_back);
+    }
+
+    #[test]
+    fn test_resolve_task_falls_back_when_binding_unusable() {
+        // 方案绑定的任务被删除、或已被改成脚本（两者都由 bound_usable=false 表达）：
+        // 回落内置 default 并标记回退（供上层告警）
+        let c = resolve_task_choice(&None, "bad_task", false, true);
+        assert_eq!(c.task_id.as_deref(), Some("default"));
+        assert!(c.fell_back, "绑定不可用必须标记回退");
+    }
+
+    #[test]
+    fn test_resolve_task_unbound_profile_uses_default_without_fallback_flag() {
+        // 未绑定方案是正常状态（新装），走 default 但不算"回退"，不应告警
+        let c = resolve_task_choice(&None, "", false, true);
+        assert_eq!(c.task_id.as_deref(), Some("default"));
+        assert!(!c.fell_back);
+    }
+
+    #[test]
+    fn test_resolve_task_blank_binding_treated_as_unbound() {
+        // 纯空白绑定等同未绑定（用户清空输入框后保存的场景）
+        let c = resolve_task_choice(&None, "   ", false, true);
+        assert_eq!(c.task_id.as_deref(), Some("default"));
+        assert!(!c.fell_back);
+    }
+
+    #[test]
+    fn test_resolve_task_none_when_default_unusable() {
+        // 连 default 都不可用（任务目录被清空/被改成脚本）：返回 None，由校验层报错拦截
+        let c = resolve_task_choice(&None, "", false, false);
+        assert!(c.task_id.is_none());
+        // 绑定不可用 + 默认也不可用：同样 None，但仍标记回退供告警
+        let c2 = resolve_task_choice(&None, "bad", false, false);
+        assert!(c2.task_id.is_none());
+        assert!(c2.fell_back);
+        // 显式值即使不可用也原样传递（由 embed 阶段告警，不静默换任务）
+        let c3 = resolve_task_choice(&Some("gone".to_string()), "", false, false);
+        assert_eq!(c3.task_id.as_deref(), Some("gone"));
     }
 
     #[test]

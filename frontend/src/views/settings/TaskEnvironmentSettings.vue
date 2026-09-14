@@ -5,6 +5,7 @@ import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, watch, onMounted, onActivated, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
+import { useConfig } from "@/composables/useConfig";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useStatus } from "@/composables/useStatus";
 import { useEnvironment } from "@/composables/useEnvironment";
@@ -17,6 +18,7 @@ const { busy } = useStatus();
 const { envStatus, envLoading, envError, refreshEnv, bootstrapEnv } = useEnvironment();
 const { toastOnly } = useToast();
 const t = useTasks();
+const config = useConfig();
 const repo = useRepoImport();
 const router = useRouter();
 
@@ -24,8 +26,11 @@ onMounted(() => { void t.fetchTasks(); });
 onMounted(() => { void refreshEnv(); });
 onActivated(() => { void refreshEnv(); });
 
+// 当前任务取「当前方案绑定的浏览器任务」——启用任务按方案绑定（切方案即切任务），
+// 未绑定时后端登录会回退内置默认任务
 const activeTaskName = computed(() => {
-  const id = t.activeTaskId.value;
+  const id = config.config.credentials.active_task;
+  if (!id) return "内置默认任务";
   const task = t.tasks.value.find((tk) => tk.id === id);
   return task?.name || id;
 });

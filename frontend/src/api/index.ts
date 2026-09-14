@@ -439,14 +439,12 @@ export const scriptsApi = {
   run: (id: string) => http.post<MutationResult>("/api/scripts/run", { task_id: id }),
 };
 
-/** 任务（浏览器任务） */
+/** 任务（浏览器任务 / 脚本） */
 export const tasksApi = {
   list: () => http.get<TaskItem[]>("/api/tasks"),
   get: (id: string) => http.get<TaskDetail>(`/api/tasks/${pathSegment(id)}`),
-  active: () => http.get<{ task_id: string }>("/api/tasks/active"),
   save: (id: string, payload: Record<string, unknown>) => http.put<MutationResult>(`/api/tasks/${pathSegment(id)}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${pathSegment(id)}`),
-  setActive: (id: string) => http.post<MutationResult>(`/api/tasks/active/${pathSegment(id)}`),
   execute: (id: string) => http.post<MutationResult>(`/api/tasks/${pathSegment(id)}/execute`),
   order: (order: { all: string[]; scripts: string[] }) => http.post<MutationResult>("/api/tasks/order", order),
   import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),

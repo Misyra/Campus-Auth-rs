@@ -273,6 +273,11 @@ export interface CredentialsConfig {
   auth_url: string;
   trigger_url: string;
   isp: string;
+  /**
+   * 本方案自动登录使用的浏览器任务 ID（空 = 未绑定，回退内置默认任务）。
+   * 按方案绑定：切方案即切任务，取代旧的全局启用任务。
+   */
+  active_task: string;
   /** 登录执行渠道；同时可在「配置方案」编辑器与设置页「账号」修改 */
   login_channel: LoginChannel;
   http_method: HttpLoginMethod;
@@ -338,7 +343,6 @@ export interface Config {
   logging: LoggingConfig;
   retry: RetryConfig;
   credentials: CredentialsConfig;
-  active_task: string;
   app_settings: AppSettings;
   updater: UpdaterConfig;
 }

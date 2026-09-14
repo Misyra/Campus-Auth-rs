@@ -8,6 +8,17 @@
 - 修复：`build` 脚本与新增的 `typecheck` 脚本改用 `vue-tsc --noEmit -p tsconfig.app.json`（`app` project 含 `src/**/*.vue`）。已验证该调用能捕获真实错误（注入未定义标识符即报 TS2304、退出码 2），裸跑则漏报。CI 无需另改——其前端步骤均走 `npm run build`。
 - 顺带修复该检查暴露的既有错误：`AccountSettings.vue` 把 `Ref<string>` 直接绑定给期望 `string` 的 `password` 属性（改为解构出 `value` 传入）；`useConfig.test.ts` 的 `patchMock` 声明为零参签名导致 `calls[0][0]` 越界，以及 `patch` 包装里 `as []` 断言抹掉实参。
 
+## 开发中（2026-09-14 启用任务改为按方案绑定）
+
+- **「用哪个浏览器任务登录」从全局唯一改为按方案绑定**：旧实现把选择存在 `tasks/.order.json` 的 `active` 字段（全局一份，任务页「使用」按钮写），而 `ProfileData.active_task` 虽存在却**全仓无读取方**——文档却教用户「为各 Profile 分别绑定 active_task」，照做无效（实测：方案级设为 9 步任务、全局为 4 步任务，登录执行的是全局那个）。现改为方案级优先：解析顺序 `显式 task_id → profile.active_task → 内置 default`（`src/login/mod.rs::resolve_active_task`），实现「切方案即切任务」。
+- 方案绑定会**同时校验任务类型**（`is_usable_browser_task`）：绑定的任务被删除或改成脚本时回落内置 default 并告警。仅查存在性不够——脚本"存在"但 Worker 只拿到空 `task_config`，表现为"浏览器打开却什么都没填"的假登录。
+- 移除全局启用任务：`OrderData` 去掉 `active` 字段（只保留排序）、`TaskManager::get/set/load_active_task` 与 `TaskApi` 对应方法删除、`GET/POST /api/tasks/active*` 两个路由及 openapi 条目移除；`TaskManager::ensure_default_task` 不再写 active，`load_task` 于 debug 反馈包的"活动任务"改取当前方案绑定。
+- 前端：「浏览器任务」选择内聚进 `LoginChannelField`（浏览器渠道下显示，直连渠道不显示），账号页与配置方案编辑器两处入口同时获得该能力；任务页移除每行「使用」按钮与行高亮（任务页只负责编辑）；`useTasks` 的 `activeTaskId`/`setActiveTask`/`fetchActiveTask` 与 `tasksApi.active/setActive` 一并删除；设置页「任务概览」的"当前任务"改显示当前方案绑定（未绑定显示"内置默认任务"）。
+- 前端表单状态收敛：`active_task` 由 `Config` 顶层的隐形往返字段（有读写、无 UI）移入 `credentials`，与 `login_channel` / 直连参数同域——设置页可编辑、随保存载荷提交（后端仍按扁平键写入活跃 Profile）。
+- **配置迁移 v8 → v9**（`migration::migrate_v8_to_v9`）：把旧全局 `active` 搬给当前活跃方案，避免升级后用户既有选择被静默丢弃（否则回退内置 default，表现为"升级后登录用了别的任务"）。方案已有显式绑定则不覆盖（幂等）；`.order.json` 的残留 `active` 由 serde 忽略（`OrderData` 已无该字段），并有单测锁定该兼容性。
+- 测试：新增 4 个迁移用例（搬迁/不覆盖/无旧值/缺文件）与 6 个取值决策用例（显式优先、方案绑定、绑定不可用回退、未绑定不告警、空白等同于未绑定、全不可用返回空）；两处硬编码 `config_version = 8` 的旧断言改为比对 `CURRENT_CONFIG_VERSION`（避免每次升版都要改测试）。关键断言均以变异验证（改坏实现即失败）。
+- 真机验证：v8 数据实跑迁移（`active=hust` → 活跃方案 `active_task=hust`）；同一实例下 `dorm`（绑 7 步 test2）登录日志为「步骤 1/7: 选择运营商（按钮组）」、切到 `lab`（绑 9 步 hust）后为「步骤 1/9: 输入账号」——**用 Worker 实际执行的步骤证明"切方案即切任务"**，而非只看接口回显。
+
 ## 开发中（2026-09-14 eportal XOR 门户直连复现验证）
 
 - 用真实门户脚本（用户提供的 `login.sh`，eportal / Dr.COM 加密登录）验证直连渠道的复现能力：新增 `tests/mock-servers/eportal-xor/`，严格复刻该门户的字段加密协议（密钥 = 来源 IP 各字符 ASCII 的 XOR 累积；每字段逐字符 `^key` 后 `%02x`；`GET /eportal/portal/login?...&encrypt=1&v=2576`；JSONP 回调 `dr1003`），mock 侧解密后再校验明文，可**直接证明**发出去的密文是否正确（而非只看 HTTP 200）。

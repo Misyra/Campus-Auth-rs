@@ -278,14 +278,6 @@ mod tests {
             }
         }
 
-        async fn get_active_task(&self) -> String {
-            String::new()
-        }
-
-        async fn set_active_task(&self, _task_id: &str) -> Result<(), TaskError> {
-            Ok(())
-        }
-
         async fn get_task_detail(&self, task_id: &str) -> Result<TaskDetail, TaskError> {
             let kind = self.load_task(task_id).await?;
             Ok(TaskDetail {

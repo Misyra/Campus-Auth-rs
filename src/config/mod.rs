@@ -11,7 +11,7 @@ pub mod schema;
 pub mod service;
 
 /// 当前代码支持的最高 schema 版本
-pub const CURRENT_CONFIG_VERSION: u32 = 8;
+pub const CURRENT_CONFIG_VERSION: u32 = 9;
 // 运行时目录布局单一事实源（见 `utils::paths`）：此处 re-export 保持调用路径稳定。
 pub use crate::utils::paths::{CONFIG_DIR, PROFILES_DIR, SETTINGS_FILE};
 /// 损坏文件备份前缀

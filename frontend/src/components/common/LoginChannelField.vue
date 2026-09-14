@@ -1,14 +1,18 @@
 <script setup lang="ts">
 /**
- * 登录方式选择器 + 直连请求参数面板（可复用）。
+ * 登录方式选择器（渠道 + 浏览器任务）+ 直连请求参数面板（可复用）。
  *
  * 从 ProfilesView 编辑器抽出：登录方式此前只在该编辑器内可选，其他入口
  * （设置页、引导向导）无法切换。以 `v-model` 绑定一个含登录渠道与直连字段的
  * 草稿对象，宿主只负责提供草稿与保存，本组件只管编辑与测试。
  *
- * 草稿对象契约（与后端 ProfileData 直连字段同名）：
- *   login_channel / http_method / http_url / http_headers / http_body /
- *   http_success_pattern / http_failure_pattern / http_crypto_script
+ * 草稿对象契约（与后端 ProfileData 同名字段）：
+ *   active_task / login_channel / http_method / http_url / http_headers /
+ *   http_body / http_success_pattern / http_failure_pattern / http_crypto_script
+ *
+ * 浏览器任务选择内聚在此处：它是「怎么登录」的一部分（浏览器渠道要指定用哪个
+ * 任务操作网页），且**按方案绑定**——切方案即切任务。任务管理页只负责编辑，
+ * 不再承担"启用哪个"的职责。
  *
  * `showTest` 供不落盘的场景使用；测试请求经 `useProfiles.testHttpLogin`
  * 发送，不会保存方案、也不会触发登录状态机。
@@ -21,11 +25,15 @@ import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import { computed, ref } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { HTTP_METHOD_OPTIONS, httpTestOutcomeLabel } from "@/utils/loginChannel";
 import type { HttpLoginTestResult } from "@/api/types";
+import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 /** 本组件读写的最小字段集（宿主草稿类型可含更多字段） */
 export interface LoginChannelDraft {
+  /** 浏览器渠道使用的任务 ID（空 = 未绑定，登录时回退内置默认任务） */
+  active_task: string;
   login_channel: "browser" | "http";
   http_method: "GET" | "POST";
   http_url: string;
@@ -64,6 +72,18 @@ const props = withDefaults(
 );
 
 const p = useProfiles();
+
+// 浏览器任务清单：与任务页同源（useTaskDirectory 单次拉取），此处只读展示
+const { browserTasks } = useTaskDirectory();
+
+/** 任务下拉选项：空值项显式表达"未绑定 → 登录时用内置默认任务" */
+const taskOptions = computed<SelectOption[]>(() => {
+  const opts: SelectOption[] = [{ value: "", label: "使用内置默认任务" }];
+  for (const t of browserTasks.value) {
+    opts.push({ value: t.id, label: t.name || t.id });
+  }
+  return opts;
+});
 
 // 测试结果自持：多实例（不同宿主/多方案）各自展示，互不覆盖
 const testResult = ref<HttpLoginTestResult | null>(null);
@@ -118,9 +138,19 @@ async function runTest(): Promise<void> {
       </button>
     </div>
 
-    <p v-if="!isHttp" class="channel-note">
-      按已启用的登录任务操作网页，适合验证码、动态表单和复杂交互。
-    </p>
+    <div v-if="!isHttp" class="browser-channel-panel">
+      <div class="form-group">
+        <div class="field-label-row">
+          <label for="login-active-task">浏览器任务</label>
+          <FieldHelp text="本方案自动登录时执行的任务。任务内容在「任务」页编辑；每个方案可各绑定一个，切换方案即切换任务；留空则使用内置默认任务。" />
+        </div>
+        <CustomSelect id="login-active-task" v-model="modelValue.active_task" :options="taskOptions" />
+        <span class="hint">按方案绑定：切换方案会同时切换任务</span>
+      </div>
+      <p class="channel-note">
+        按选定任务的步骤操作网页，适合验证码、动态表单和复杂交互。
+      </p>
+    </div>
 
     <div v-else class="http-channel-panel">
       <div class="http-channel-intro">
@@ -229,6 +259,19 @@ async function runTest(): Promise<void> {
   margin: 0;
   color: var(--text-muted);
   font-size: var(--text-sm);
+}
+
+/* 浏览器渠道：任务选择面板（与直连面板同构，保持两渠道视觉对等） */
+.browser-channel-panel {
+  margin-top: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-glass-light);
+}
+
+.browser-channel-panel .form-group {
+  margin-bottom: var(--space-sm);
 }
 
 .http-channel-panel {

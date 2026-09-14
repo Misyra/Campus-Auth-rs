@@ -136,4 +136,22 @@ describe("dirty 快照比对", () => {
     // 不得嵌进 credentials 子对象（后端按扁平结构读取）
     expect(payload.credentials).toBeUndefined();
   });
+
+  it("方案绑定的浏览器任务随设置读写往返（启用任务按方案绑定）", async () => {
+    // 未回传时回落空串（= 未绑定，登录时后端回退内置默认任务）
+    await config.fetchConfig();
+    expect(config.config.credentials.active_task).toBe("");
+
+    fetchMock.mockResolvedValue({ username: "user", active_task: "hust" });
+    await config.fetchConfig();
+    expect(config.config.credentials.active_task).toBe("hust");
+
+    // 在账号页改选任务后应进入未保存状态并随载荷提交
+    config.config.credentials.active_task = "sctu-eportal";
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+    await config.saveConfig();
+    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.active_task).toBe("sctu-eportal");
+  });
 });

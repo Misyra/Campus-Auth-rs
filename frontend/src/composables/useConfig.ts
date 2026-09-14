@@ -84,6 +84,9 @@ async function fetchConfig(): Promise<void> {
       auth_url: data.auth_url ?? "",
       trigger_url: data.trigger_url ?? "",
       isp: data.isp ?? "",
+      // 浏览器任务按方案绑定：与渠道/直连参数同属 Profile 域且同屏可编辑，
+      // 因此是表单状态（随保存载荷提交）
+      active_task: data.active_task ?? "",
       // 登录渠道与直连参数：设置页「账号」与「配置方案」编辑器均可编辑，
       // 因此是表单状态（随保存载荷提交），不再是只读派生信息
       login_channel: data.login_channel ?? DEFAULT_CONFIG.credentials.login_channel,
@@ -95,7 +98,6 @@ async function fetchConfig(): Promise<void> {
       http_failure_pattern: data.http_failure_pattern ?? "",
       http_crypto_script: data.http_crypto_script ?? "",
     };
-    config.active_task = data.active_task ?? "";
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
     // 旧配置只有 proxy_port（可能非默认值）：派生完整地址，
@@ -216,7 +218,7 @@ async function saveConfig(force = false): Promise<void> {
     retry: config.retry,
     app_settings: config.app_settings,
     updater: config.updater,
-    active_task: config.active_task || "",
+    active_task: config.credentials.active_task || "",
     username: config.credentials.username ?? "",
     auth_url: config.credentials.auth_url ?? "",
     trigger_url: config.credentials.trigger_url ?? "",

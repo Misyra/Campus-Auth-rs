@@ -293,7 +293,6 @@ async function init(): Promise<void> {
     status.fetchAutostart(),
     checkInitStatus(),
     tasks.fetchTasks(),
-    tasks.fetchActiveTask(),
     profiles.fetchProfiles(),
     config.fetchPureMode(),
     fetchLoginHistory(),
@@ -311,7 +310,6 @@ async function init(): Promise<void> {
       // 任务/脚本由任务目录单次拉取同时刷新，无需再调 fetchScripts
       profiles.fetchProfiles(true),
       tasks.fetchTasks(true),
-      tasks.fetchActiveTask(),
       scheduled.loadScheduledTasks(true),
       // F8 顺带：补齐重连后遗漏的只读数据源
       config.fetchPureMode(true),

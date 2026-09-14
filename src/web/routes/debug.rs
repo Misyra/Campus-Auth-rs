@@ -196,7 +196,8 @@ pub async fn feedback_bundle(
     use zip::write::SimpleFileOptions;
 
     let rt = config.runtime_snapshot();
-    let active_task_id = tasks.get_active_task().await;
+    // 反馈包里的"活动任务"取当前方案绑定的任务（方案级绑定，见 ProfileData::active_task）
+    let active_task_id = rt.profile.active_task.trim().to_string();
     let now = chrono::Local::now();
     let stamp = now.format("%Y%m%d-%H%M%S").to_string();
 
@@ -657,14 +658,6 @@ mod tests {
         }
 
         async fn delete_task(&self, _task_id: &str) -> Result<(), TaskError> {
-            Ok(())
-        }
-
-        async fn get_active_task(&self) -> String {
-            String::new()
-        }
-
-        async fn set_active_task(&self, _task_id: &str) -> Result<(), TaskError> {
             Ok(())
         }
 

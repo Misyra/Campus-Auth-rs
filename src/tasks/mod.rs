@@ -9,7 +9,7 @@ pub mod loader;
 pub mod models;
 
 pub use executor::{TaskExecutor, TaskResult};
-pub use loader::{OrderData, TaskDetail, TaskManager, TaskSummary};
+pub use loader::{DEFAULT_TASK_ID, OrderData, TaskDetail, TaskManager, TaskSummary};
 pub use models::*;
 
 use thiserror::Error;
@@ -30,10 +30,6 @@ pub trait TaskApi: Send + Sync {
     async fn save_task(&self, task_id: &str, task: &TaskKind) -> Result<(), TaskError>;
     /// 删除任务。
     async fn delete_task(&self, task_id: &str) -> Result<(), TaskError>;
-    /// 获取当前活跃任务 ID。
-    async fn get_active_task(&self) -> String;
-    /// 设置活跃任务。
-    async fn set_active_task(&self, task_id: &str) -> Result<(), TaskError>;
     /// 获取任务详情（摘要 + 完整配置）。
     async fn get_task_detail(&self, task_id: &str) -> Result<TaskDetail, TaskError>;
     /// 读取任务排序数据。
@@ -73,14 +69,6 @@ impl TaskApi for TaskManager {
 
     async fn delete_task(&self, task_id: &str) -> Result<(), TaskError> {
         TaskManager::delete_task(self, task_id).await
-    }
-
-    async fn get_active_task(&self) -> String {
-        TaskManager::get_active_task(self).await
-    }
-
-    async fn set_active_task(&self, task_id: &str) -> Result<(), TaskError> {
-        TaskManager::set_active_task(self, task_id).await
     }
 
     async fn get_task_detail(&self, task_id: &str) -> Result<TaskDetail, TaskError> {

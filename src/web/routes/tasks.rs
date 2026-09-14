@@ -21,23 +21,6 @@ pub async fn list_tasks(State(tasks): State<Arc<dyn TaskApi>>) -> Result<Json<Va
     Ok(data(tasks))
 }
 
-/// GET /api/tasks/active — 获取当前活跃任务
-pub async fn get_active_task(
-    State(tasks): State<Arc<dyn TaskApi>>,
-) -> Result<Json<Value>, ApiError> {
-    let active_id = tasks.get_active_task().await;
-    Ok(data(serde_json::json!({ "task_id": active_id })))
-}
-
-/// POST /api/tasks/active/{task_id} — 设置活跃任务
-pub async fn set_active_task(
-    State(tasks): State<Arc<dyn TaskApi>>,
-    Path(task_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    tasks.set_active_task(&task_id).await?;
-    Ok(data(Value::String("ok".into())))
-}
-
 #[derive(Deserialize)]
 pub struct TaskCreateBody {
     pub id: String,
@@ -145,8 +128,7 @@ pub struct OrderBody {
 
 /// POST /api/tasks/order — 保存任务排序
 ///
-/// 接受前端 `{ all, scripts }` 结构，合并写入内部 `OrderData.order`，
-/// 同时保留已持久化的 `active` 字段。
+/// 接受前端 `{ all, scripts }` 结构，合并写入内部 `OrderData.order`。
 pub async fn order_tasks(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<OrderBody>,
@@ -331,7 +313,6 @@ mod tests {
     #[derive(Default)]
     struct MockInner {
         tasks: Vec<(String, TaskKind)>,
-        active: String,
         order: OrderData,
         executed: Vec<String>,
     }
@@ -389,18 +370,6 @@ mod tests {
                 }
                 None => Err(TaskError::TaskNotFound(task_id.to_string())),
             }
-        }
-
-        async fn get_active_task(&self) -> String {
-            self.0.lock().unwrap().active.clone()
-        }
-
-        async fn set_active_task(&self, task_id: &str) -> Result<(), TaskError> {
-            if !self.has_task(task_id) {
-                return Err(TaskError::TaskNotFound(task_id.to_string()));
-            }
-            self.0.lock().unwrap().active = task_id.to_string();
-            Ok(())
         }
 
         async fn get_task_detail(&self, task_id: &str) -> Result<TaskDetail, TaskError> {
@@ -494,7 +463,6 @@ mod tests {
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner {
             tasks: vec![("t1".into(), browser_task("t1"))],
-            active: "t1".into(),
             order: OrderData::default(),
             executed: Vec::new(),
         }));
@@ -504,8 +472,6 @@ mod tests {
         };
         let app = axum::Router::new()
             .route("/api/tasks", get(list_tasks).post(create_task))
-            .route("/api/tasks/active", get(get_active_task))
-            .route("/api/tasks/active/{task_id}", post(set_active_task))
             .route(
                 "/api/tasks/{id}",
                 get(get_task).put(update_task).delete(delete_task),
@@ -542,37 +508,6 @@ mod tests {
     }
 
     /// 活跃任务读写
-    #[tokio::test]
-    async fn test_active_task_roundtrip() {
-        let (app, inner) = mock_app();
-        // 读取
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/tasks/active")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let v = body_json(resp).await;
-        assert_eq!(v["data"]["task_id"], "t1");
-        // 写入
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/tasks/active/t1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(inner.lock().unwrap().active, "t1");
-    }
-
     /// 创建任务（script 类型）
     #[tokio::test]
     async fn test_create_task_script_kind() {

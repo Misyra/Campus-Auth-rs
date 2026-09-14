@@ -112,12 +112,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         // ---- 任务（tasks）----
         ("GET", "/api/tasks", || get(routes::tasks::list_tasks)),
         ("POST", "/api/tasks", || post(routes::tasks::create_task)),
-        ("GET", "/api/tasks/active", || {
-            get(routes::tasks::get_active_task)
-        }),
-        ("POST", "/api/tasks/active/{task_id}", || {
-            post(routes::tasks::set_active_task)
-        }),
         ("POST", "/api/tasks/import", || {
             post(routes::tasks::import_tasks)
         }),
