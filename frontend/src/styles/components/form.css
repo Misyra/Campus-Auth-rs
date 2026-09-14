@@ -79,6 +79,12 @@
   grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr);
 }
 
+/* 只有 1 个子元素时让它跨满两列：否则它只落在第一列（窄列），右侧留出整块空白
+   （实测 AI 页 Base URL 输入框被压在 359px，而右侧 733px 空着）。 */
+.form-row--wide > :only-child {
+  grid-column: 1 / -1;
+}
+
 /* flex 变体：定时任务弹窗基本信息/任务配置等弹性分栏（子 form-group 用 .flex-1 占满） */
 .form-row--flex {
   display: flex;

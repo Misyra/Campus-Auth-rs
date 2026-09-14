@@ -2,6 +2,19 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-14 任务页三处视觉缺陷修复）
+
+用户反馈「UI 有点丑」。因为本轮起可以看图，先按 `getBoundingClientRect`/`getComputedStyle`/CDP `getPlatformFontsForNode` 采集度量定位**可判定**的问题（而非凭感觉重画），再逐张截图复核。以下 7 项均为实测缺陷，改完逐项复测数值。
+
+- **按钮与表单控件未继承应用字体栈（影响面最大）**：浏览器 UA 样式表给 `button/input/select/textarea` 预设 `font: 400 13.33px Arial`，而项目样式只覆盖字号、不覆盖字族。结果这些控件中的拉丁字符/数字走 Arial，与正文的 Segoe UI 不一致（中文两侧都回退到雅黑，故只在英文数字上显现，容易被忽略）。CDP 实测 Tab 标签的平台字体为 `Arial(3) + Microsoft YaHei(2)`，而卡片标题是纯 `Microsoft YaHei`。修法：在 `base.css` 为这四类元素声明 `font-family: inherit`，字号仍由各组件自行声明。
+- **列表行图标按钮的紧凑尺寸从未生效**：`tasks.css` 声明 `.btn-sm.btn-icon-only { width:28px; height:28px }`，但 `btn.css` 的 `.btn-icon-only` 与 `.btn-sm` 各自声明了 `min-width/min-height`（44px/36px），而 **min-\* 压过 width/height** —— 实测 5 个操作按钮全部渲染 44×44、按钮组占 244px 行宽。修法：该规则移入 `btn.css`（组合还被 ProfilesView 的检测结果面板使用，本属通用修饰），并补 `min-width/min-height: 28px`。复测按钮 28×28、按钮组 164px、行高 78→73。28px 仍高于 WCAG 2.5.8 的 24px 最小目标。
+- **卡头在窄屏把标题压成竖排且按钮组溢出**：`.card-header` 是 `nowrap` 的 space-between flex，右侧按钮组宽度固定，剩余空间不足时 flex 先把标题压扁——实测 460px 视口下标题宽只剩 16px、高 105px（中文逐字竖排），而按钮组仍溢出卡片 102px。修法：`.card-header` 加 `flex-wrap: wrap` + `row-gap`，标题 `min-width: fit-content`（声明最小需求宽度，参与收缩协商），新增 `.card-actions` 承载按钮组并允许自身换行；两个任务面板的 `flex-row gap-sm` 改用该类。复测 460/520/560px 及 320px 极窄下标题均单行、无溢出。
+- **列表描述行在窄屏溢出卡片且省略号失效**：≤980px 时 `.task-item` 改纵向排列 + `align-items: flex-start`，子项按 max-content 定宽，而 `.task-desc` 是 nowrap，于是 `.task-info` 撑到 412px、连带整行溢出卡片（520px 视口溢出 52px）；省略号只在容器宽度受限时才生效，故同时失效。修法：该断点下 `.task-info { align-self: stretch }`。
+- **AI 页 `.form-row--wide` 单子元素时右侧空 733px**：该变体是「窄列 + 宽列」两列模板，而 Base URL 那一行只有 1 个字段，被压在 359px、右侧 733px 空白。修法：`.form-row--wide > :only-child { grid-column: 1 / -1 }`。复测输入框 359→1092px（占满）。
+- **AI 页三个字段挤在两列网格里**：`.form-row` 只有两列，而「模型名 / API Key / 最长输出」三个字段同处一行，第三个被挤到次行首列、右侧空着且与 API Key 的说明文字错位。修法：拆成「模型名 + 最长输出」「API Key」两行。
+- **同行主/次按钮高度差 1px**：`.btn-primary` 是 `border: none`，`.btn-secondary` 有 1px 边框，同处一行的按钮组因此 40px vs 41px（实测 AI 页保存配置 40、测试连接 41）。修法：主按钮改 `border: 1px solid transparent`，与 `.btn` 保持同一盒模型。复测四个按钮均 41px。
+- 顺带清理：任务页 Tab 栏由「满宽卡片 + 内容宽页签」改为 `width: fit-content`（3 个页签原本只占 1136px 卡片的 32%，右侧空 753px——此前靠 `margin-left:auto` 把 AI 入口推到最右，入口移入页签后空白失去依托）；`tasks.css` 中重复的 `.icon-xs`（与 `misc.css` 同名不同值）补注释说明当前生效值，未合并。
+
 ## 开发中（2026-09-14 AI 生成并入「任务」页第三个 Tab）
 
 - AI 生成任务从独立导航项改为「任务」页第三个 Tab（`/tasks/ai`），与「浏览器任务」「脚本」并列。此前它在任务页是右上角一个按钮（`tasks-ai-link`），跳走后再保存又得自己找回任务列表；并入同一页后「生成 → 保存 → 看到成果」不再跨页，且 Tab 由子路由表达（刷新、深链直达，与另两个 Tab 同一套语义）。

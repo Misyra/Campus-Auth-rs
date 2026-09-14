@@ -21,11 +21,34 @@
   align-items: center;
   padding: var(--space-md) 20px;
   border-bottom: 1px solid var(--border);
+  /* 窄屏允许换行：卡头右侧常是「图标+文字」按钮组，不换行时 flex 会先把标题压扁
+     （实测 460px 视口下标题宽只剩 16px、高 105px，中文被逐字竖排），而按钮组仍溢出
+     卡片 100px+。换行后标题独占首行、按钮组落到次行。 */
+  flex-wrap: wrap;
+  row-gap: 10px;
+}
+
+/* 卡头右侧操作区：与标题同行时靠右，换行独占一行时仍靠右。
+   :not(:first-child) 排除「只有标题一个子元素」的卡头，避免把标题推到右边。 */
+.card-header > :last-child:not(:first-child) {
+  margin-left: auto;
 }
 
 .card-header h2 {
   font-size: var(--text-lg);
   font-weight: 600;
+  /* 标题优先保持整体可读：宁可让按钮组换行，也不把标题压成一列单字。
+     min-width:fit-content 让标题声明自己的最小需求宽度，参与 flex 收缩协商。 */
+  min-width: fit-content;
+}
+
+/* 卡头操作区（按钮组）：自身也允许换行，否则按钮组仍会宽过卡片 */
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-sm);
 }
 
 .card-body {

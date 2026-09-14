@@ -62,7 +62,7 @@ const binaryOptions = computed<SelectOption[]>(() => {
     <div class="card">
       <div class="card-header">
         <h2>自定义脚本</h2>
-        <div class="flex-row gap-sm">
+        <div class="card-actions">
           <button class="btn btn-sm" @click="importScript" title="从文件导入脚本">
             <IconApp name="upload" class="icon-sm" />
             导入

@@ -41,7 +41,9 @@
 .btn-primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   color: var(--on-accent);
-  border: none;
+  /* 透明边框而非 border:none：与 .btn 的 1px 边框保持同一盒模型，否则同一行里
+     主按钮（无边框）比次按钮（1px 边框）矮 1px，实测 40px vs 41px，肉眼可见错位。 */
+  border: 1px solid transparent;
   font-weight: 600;
   position: relative;
   overflow: hidden;
@@ -90,6 +92,24 @@
 .btn-icon-only svg {
   width: 18px;
   height: 18px;
+}
+
+/* 紧凑图标按钮（列表行内操作：编辑/调试/复制/导出/删除，以及面板关闭按钮）。
+   必须同时覆盖 min-width/min-height：`.btn-sm`（36px）与 `.btn-icon-only`（44px）
+   各自声明了 min-height，而 min-* 会压过 width/height，于是只写 width/height 的
+   紧凑尺寸从未生效——列表里 5 个操作按钮实际渲染 44×44、吃掉 244px 行宽。
+   紧凑尺寸定为 28px：仍高于 WCAG 2.5.8 的 24px 最小点击目标，且 16px 图标留白充足。 */
+.btn.btn-sm.btn-icon-only {
+  padding: var(--space-xs);
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+}
+
+.btn.btn-sm.btn-icon-only svg {
+  width: 16px;
+  height: 16px;
 }
 
 .btn.btn-active {

@@ -194,6 +194,17 @@ body {
   display: flex;
 }
 
+/* 表单控件与按钮默认不继承 body 字体：浏览器 UA 样式表给 button/input/select/textarea
+   预设了 `font: 400 13.33px Arial`，项目样式只覆盖字号而不覆盖字族，于是这些控件里的
+   拉丁字符落到 Arial、与正文的 Segoe UI 不一致（中文两侧都回退到雅黑，差异只在英文/
+   数字上显现，故易被忽略）。显式继承字族，字号仍由各组件自行声明。 */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
 ::selection {
   background: rgba(var(--accent-rgb), 0.25);
   color: var(--text-on-accent);

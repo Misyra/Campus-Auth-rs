@@ -32,6 +32,13 @@
     gap: 12px;
   }
 
+  /* 纵向排列 + align-items:flex-start 会让子项按 max-content 定宽，而描述行是
+     nowrap，于是 .task-info 撑到 412px 宽、连带整行溢出卡片（实测 520px 视口溢出
+     52px，且省略号失效——省略号只在容器宽度受限时才生效）。让信息块占满行宽。 */
+  .task-info {
+    align-self: stretch;
+  }
+
   .task-actions {
     width: 100%;
     justify-content: flex-end;

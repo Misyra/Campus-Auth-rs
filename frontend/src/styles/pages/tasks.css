@@ -1,6 +1,11 @@
-/* 任务页 Tab 栏：复用设置页页签外观，右侧追加「AI 生成任务」入口 */
+/* 任务页 Tab 栏：复用设置页页签外观。设置页有 6 个页签，均分整条卡片是合适的；
+   本页只有 3 个，均分会让每个页签宽到 590px+。而沿用「满宽卡片 + 内容宽页签」又会在
+   右侧空出 2/3 的卡片（此前靠 margin-left:auto 把 AI 入口推到最右，那个入口移入
+   页签后空白就失去了依托）。故让卡片收缩到内容宽，成为一条紧凑的分段控件。 */
 .tasks-tabs {
   margin-bottom: var(--space-md);
+  width: fit-content;
+  max-width: 100%;
 }
 
 .tasks-tabs .settings-tab {
@@ -510,12 +515,12 @@
   flex-shrink: 0;
 }
 
-.btn-sm.btn-icon-only {
-  padding: var(--space-xs);
-  width: 28px;
-  height: 28px;
-}
+/* 紧凑图标按钮尺寸已移入 components/btn.css（该组合还被 ProfilesView 的检测结果面板
+   使用，属通用按钮修饰而非任务页专属）。 */
 
+/* 注意：components/misc.css 也定义了 .icon-xs（11px）。本文件在 index.css 中
+   后于 misc.css 导入，故此处 14px 才是当前生效值（ProfilesView 的匹配信息行）。
+   两处同名不同值属历史遗留，收敛需先确认期望尺寸，暂不合并。 */
 .icon-xs {
   width: 14px;
   height: 14px;

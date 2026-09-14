@@ -574,19 +574,24 @@ async function restoreCapture(): Promise<void> {
                 <span class="hint">实际请求：<code>{{ actualRequestUrl }}</code></span>
               </div>
             </div>
+            <!-- 两行两列：地址与模型一行、凭据与输出上限一行。此前这一行放 3 个字段，
+                 而 .form-row 只有两列，「最长输出」被挤到第二行首列，右侧空着且与
+                 API Key 的说明文字错位。 -->
             <div class="form-row">
               <div class="form-group">
                 <label for="ai-model" class="required">模型名（需支持视觉输入）</label>
                 <input id="ai-model" v-model="model" type="text" placeholder="例如 glm-5.3-flash" autocomplete="off" spellcheck="false" />
               </div>
               <div class="form-group">
+                <label for="ai-max-tokens">最长输出</label>
+                <CustomSelect id="ai-max-tokens" v-model="maxTokens" :options="maxTokenOptions" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
                 <label for="ai-api-key">API Key</label>
                 <input id="ai-api-key" v-model="apiKey" type="password" :placeholder="hasApiKey ? '已保存（留空保持不变）' : 'sk-...'" autocomplete="new-password" />
                 <span class="hint">{{ hasApiKey ? `已使用 ${PRESETS.find(p => p.id === provider)?.label || "当前服务"} 的独立 Key` : "当前服务商尚未保存 Key" }}</span>
-              </div>
-              <div class="form-group">
-                <label for="ai-max-tokens">最长输出</label>
-                <CustomSelect id="ai-max-tokens" v-model="maxTokens" :options="maxTokenOptions" />
               </div>
             </div>
             <div class="ai-actions">

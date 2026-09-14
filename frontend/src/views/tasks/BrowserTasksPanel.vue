@@ -31,7 +31,7 @@ function closeEditor() { void t.closeTaskEditor(); }
     <div class="card">
       <div class="card-header">
         <h2>浏览器任务</h2>
-        <div class="flex-row gap-sm">
+        <div class="card-actions">
           <button class="btn btn-sm" @click="t.importTask()" title="从文件导入任务">
             <IconApp name="upload" class="icon-sm" />
             导入
