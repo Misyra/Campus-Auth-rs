@@ -12,6 +12,9 @@
 │   ├── captcha-mock/           # 带验证码的 mock 登录页（原 target/captcha-mock）
 │   │   ├── game.html
 │   │   └── server.py
+│   ├── eportal-xor/            # eportal（Dr.COM）XOR 加密直连门户，复刻 login.sh 的字段加密协议
+│   │   └── server.py           # 密钥=来源 IP 各字符 XOR；每字段逐字符 ^key 后 hex；
+│   │                           # GET /eportal/portal/login?encrypt=1，JSONP 回调 dr1003
 │   ├── full-portal/            # 完整 mock 认证门户（原 mock_portal/，含验证码/captive/多阶段回归）
 │   │   ├── server.py           # ThreadingHTTPServer 127.0.0.1:18765，生成 4 位数字验证码
 │   │   ├── poll_login.py       # 轮询 /api/login/status 直至结束
@@ -45,6 +48,7 @@
 ## 相关目录
 
 - `tests/mock-servers/full-portal/` — 完整 mock 门户（原 `mock_portal/` 已搬迁至此，根 `mock_portal/README.md` 为兼容重定向）
+- `tests/mock-servers/eportal-xor/` — eportal（Dr.COM）XOR 加密直连门户：密钥由**来源 IP** 推导，用于验证「直连请求渠道 + 凭据变换脚本」能否复现该类门户登录（`python server.py <port>`，手动起停，不参与 CI）
 - `python_worker/tests/` — Python Worker 单测
 - `mock_portal/` — 已搬迁，根保留 `README.md` 重定向（下版本可删）
 

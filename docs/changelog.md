@@ -8,6 +8,15 @@
 - 修复：`build` 脚本与新增的 `typecheck` 脚本改用 `vue-tsc --noEmit -p tsconfig.app.json`（`app` project 含 `src/**/*.vue`）。已验证该调用能捕获真实错误（注入未定义标识符即报 TS2304、退出码 2），裸跑则漏报。CI 无需另改——其前端步骤均走 `npm run build`。
 - 顺带修复该检查暴露的既有错误：`AccountSettings.vue` 把 `Ref<string>` 直接绑定给期望 `string` 的 `password` 属性（改为解构出 `value` 传入）；`useConfig.test.ts` 的 `patchMock` 声明为零参签名导致 `calls[0][0]` 越界，以及 `patch` 包装里 `as []` 断言抹掉实参。
 
+## 开发中（2026-09-14 eportal XOR 门户直连复现验证）
+
+- 用真实门户脚本（用户提供的 `login.sh`，eportal / Dr.COM 加密登录）验证直连渠道的复现能力：新增 `tests/mock-servers/eportal-xor/`，严格复刻该门户的字段加密协议（密钥 = 来源 IP 各字符 ASCII 的 XOR 累积；每字段逐字符 `^key` 后 `%02x`；`GET /eportal/portal/login?...&encrypt=1&v=2576`；JSONP 回调 `dr1003`），mock 侧解密后再校验明文，可**直接证明**发出去的密文是否正确（而非只看 HTTP 200）。
+- 算法保真已交叉验证：把 `login.sh` 的 `get_key`/`enc` 用 Python 复刻并与真实 `sh` 执行结果逐项比对（KEY/ACCOUNT/PWD/IP 四项全等），确保 mock 与结论不建立在误读之上。
+- **复现结论**：把 shell 算法逐句翻译为沙箱 `transform(ctx)` 后，经真实 `POST /api/profiles/http-login-test` 跑通——mock 解密出 `,0,{账号}@cmcc` 与正确密码并返回 `认证成功`；错误密码返回 `账号或密码错误`。即该类门户**可以**用直连渠道复现，无需 Python / 浏览器。
+- **发现两处待解决项（本次仅记录，未改实现）**：
+  1. 脚本 `ctx` 不含本机 IP（仅 `username`/`password`/`auth_url`/`page`）。本例的密钥必须由 IP 推导，只能绕道「门户首页把来源 IP 渲染进 HTML → 从 `ctx.page` 正则提取」；对不回显 IP 的门户将无法复现。需评估是否在 `ctx` 暴露本机 IP（如 `ctx.local_ip`）。
+  2. 判定口径：eportal 响应恒为 HTTP 200（JSONP），`success_pattern` 留空时的「2xx 即成功」口径会把**凭据错误也判为成功**；`login.sh` 自带的 `grep "success\|dr1003"` 同样恒真（`dr1003` 是回调名前缀）。正确写法是 `success_pattern='"result":1'` + `failure_pattern='"result":0'`（实测可准确区分成败）。前端直连面板与文档应提示这类「HTTP 恒 200」门户必须填成功/失败关键字。
+
 ## 开发中（2026-09-14 直连渠道抑制环境横幅与文档修正）
 
 - 仪表盘「Python 环境未就绪」横幅按登录渠道抑制：直连请求在 Rust 进程内完成登录，不拉起 Python Worker 与 Playwright，环境缺失对它无影响；此前横幅无条件显示，免 Python/浏览器的用户会被无意义提示长期打扰。判定收敛为 `utils/loginChannel.ts::channelNeedsRuntimeEnvironment`（未知/缺失值按"需要环境"处理，与默认渠道 browser 一致，宁多提示不静默漏提示），并在 `loginChannel.test.ts` 补 3 个用例（含变异验证：改坏判定即失败）。
