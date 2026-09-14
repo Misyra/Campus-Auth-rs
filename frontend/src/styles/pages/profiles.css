@@ -466,8 +466,159 @@
   margin-top: var(--space-sm);
 }
 
+/* 直连登录：保持方案编辑器的玻璃质感，用“请求报文”预览强化这是网络通道而非第二套任务编辑器。 */
+.profile-channel-switch {
+  margin-bottom: var(--space-sm);
+}
+
+.channel-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.http-channel-panel {
+  margin-top: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(135deg, rgba(var(--accent-rgb), 0.06), transparent 42%),
+    var(--bg-glass-light);
+}
+
+.http-channel-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: var(--space-md);
+}
+
+.http-channel-intro strong {
+  color: var(--text-primary);
+  font-size: var(--text-base);
+}
+
+.http-channel-intro span,
+.http-test-actions > span {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.http-url-row {
+  grid-template-columns: minmax(110px, 0.25fr) minmax(0, 1.75fr);
+}
+
+.http-method-field {
+  min-width: 0;
+}
+
+.http-risk-note,
+.http-template-help {
+  margin: calc(-1 * var(--space-sm)) 0 var(--space-md);
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.http-risk-note {
+  color: var(--warning-text);
+  border: 1px solid rgba(var(--warning-rgb), 0.25);
+  background: var(--warning-bg);
+}
+
+.http-template-help {
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-accent-strong);
+  background: rgba(var(--accent-rgb), 0.04);
+}
+
+.http-template-help code,
+.http-test-result code {
+  font-family: var(--font-mono);
+}
+
+.http-channel-panel .http-script-editor {
+  min-height: 170px;
+}
+
+.http-test-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.http-test-result {
+  margin-top: var(--space-md);
+  padding: var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.http-test-result.success {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+
+.http-test-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-md);
+  color: var(--text-primary);
+}
+
+.http-test-result-head span {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.http-test-result > p {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.http-test-result dl {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: var(--space-sm) 0 0;
+}
+
+.http-test-result dt {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.http-test-result dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.http-test-result dd code {
+  display: block;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+}
+
 /* 响应式：折叠断点统一 768px（与全局 responsive.css 对齐） */
 @media (max-width: 768px) {
+  .http-url-row {
+    grid-template-columns: 1fr;
+  }
+
+  .http-test-result dl {
+    grid-template-columns: 1fr;
+  }
+
   .profiles-guide-steps {
     flex-direction: column;
     gap: 12px;

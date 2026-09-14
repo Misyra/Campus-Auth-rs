@@ -12,9 +12,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::config::{ConfigApi, ProfileApi};
+use crate::config::{ConfigApi, HttpLoginMethod, LoginChannel, ProfileApi};
 use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
+use crate::login::http_login::{HttpLoginRequest, run_once as run_http_login_once};
 use crate::web::error::{ApiError, data};
+use crate::web::operations::{RegisterError, WebOperations};
 
 /// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
 #[derive(Deserialize)]
@@ -33,6 +35,14 @@ pub struct ProfileCreateBody {
     pub gateway_ip: Option<String>,
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
+    pub login_channel: Option<LoginChannel>,
+    pub http_method: Option<HttpLoginMethod>,
+    pub http_url: Option<String>,
+    pub http_headers: Option<String>,
+    pub http_body: Option<String>,
+    pub http_success_pattern: Option<String>,
+    pub http_failure_pattern: Option<String>,
+    pub http_crypto_script: Option<String>,
 }
 
 /// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
@@ -64,6 +74,16 @@ fn validate_http_url(label: &str, raw: &str) -> Result<String, ApiError> {
     Ok(trimmed)
 }
 
+/// 校验直连请求 URL；保存时允许空串，真正测试/登录时会明确拒绝。
+fn validate_http_login_url(raw: &str) -> Result<String, ApiError> {
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(trimmed);
+    }
+    HttpLoginRequest::validate_url(&trimmed).map_err(ApiError::BadRequest)?;
+    Ok(trimmed)
+}
+
 /// PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）
 #[derive(Deserialize)]
 pub struct ProfileUpdateBody {
@@ -77,6 +97,35 @@ pub struct ProfileUpdateBody {
     pub gateway_ip: Option<String>,
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
+    pub login_channel: Option<LoginChannel>,
+    pub http_method: Option<HttpLoginMethod>,
+    pub http_url: Option<String>,
+    pub http_headers: Option<String>,
+    pub http_body: Option<String>,
+    pub http_success_pattern: Option<String>,
+    pub http_failure_pattern: Option<String>,
+    pub http_crypto_script: Option<String>,
+}
+
+/// POST /api/profiles/http-login-test 请求体：用编辑器当前未保存值发送一次测试请求
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct HttpLoginTestBody {
+    /// 已保存方案 ID；密码留空时从该方案回退读取
+    pub profile_id: Option<String>,
+    pub username: String,
+    pub password: Zeroizing<String>,
+    pub http_method: HttpLoginMethod,
+    pub http_url: String,
+    pub http_headers: String,
+    pub http_body: String,
+    pub http_success_pattern: String,
+    pub http_failure_pattern: String,
+    pub http_crypto_script: String,
+    /// 认证页地址：传给脚本 ctx.auth_url，也可作为抓取页面原文的来源
+    pub auth_url: String,
+    /// 是否在运行脚本前抓取认证页原文
+    pub fetch_page: bool,
 }
 
 /// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
@@ -121,6 +170,77 @@ pub async fn get_profile(
     Ok(data(
         serde_json::json!({ "settings": serde_json::to_value(profile)? }),
     ))
+}
+
+/// POST /api/profiles/http-login-test — 发送一次无状态直连测试请求
+pub async fn test_http_login(
+    State(config): State<Arc<dyn ConfigApi>>,
+    State(operations): State<Arc<WebOperations>>,
+    Json(body): Json<HttpLoginTestBody>,
+) -> Result<Json<Value>, ApiError> {
+    let registration = operations
+        .http_login_test()
+        .register("http-login-test")
+        .map_err(|error| match error {
+            RegisterError::Paused => {
+                ApiError::ServiceUnavailable("服务正在停止，请稍后重试".into())
+            }
+            RegisterError::CapacityReached | RegisterError::DuplicateId => {
+                ApiError::Conflict("已有直连测试正在进行，请稍候再试".into())
+            }
+        })?;
+    let url = validate_http_login_url(&body.http_url)?;
+    if url.is_empty() {
+        return Err(ApiError::BadRequest("请填写直连请求地址".into()));
+    }
+    if body.username.trim().is_empty() {
+        return Err(ApiError::BadRequest("请填写账号".into()));
+    }
+
+    let mut password = body.password;
+    if password.is_empty() {
+        if let Some(profile_id) = body
+            .profile_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            let runtime = config.runtime_config_for_profile(profile_id.trim())?;
+            password = Zeroizing::new(runtime.profile.password.to_string());
+        }
+    }
+    if password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "请输入密码；编辑已有方案时也可留空以使用已保存密码".into(),
+        ));
+    }
+
+    let request = HttpLoginRequest {
+        method: body.http_method,
+        url,
+        headers: body.http_headers,
+        body: body.http_body,
+        success_pattern: body.http_success_pattern,
+        failure_pattern: body.http_failure_pattern,
+        crypto_script: body.http_crypto_script,
+        username: body.username.trim().to_string(),
+        password,
+        auth_url: body.auth_url.trim().to_string(),
+        fetch_page: body.fetch_page,
+    };
+    request.validate().map_err(ApiError::BadRequest)?;
+    let report = run_http_login_once(&request).await;
+    registration.finish();
+    Ok(data(serde_json::json!({
+        "rendered_url": report.rendered_url,
+        "rendered_headers": report.rendered_headers,
+        "rendered_body": report.rendered_body,
+        "status": report.status,
+        "response_snippet": report.response_snippet,
+        "outcome": report.outcome,
+        "message": report.message,
+        "script_error": report.script_error,
+        "duration_ms": report.duration_ms,
+    })))
 }
 
 /// POST /api/profiles/{id} — 创建 Profile
@@ -183,6 +303,30 @@ pub async fn create_profile(
     if let Some(active_task) = body.active_task {
         profile.active_task = active_task;
     }
+    if let Some(login_channel) = body.login_channel {
+        profile.login_channel = login_channel;
+    }
+    if let Some(http_method) = body.http_method {
+        profile.http_method = http_method;
+    }
+    if let Some(http_url) = body.http_url {
+        profile.http_url = validate_http_login_url(&http_url)?;
+    }
+    if let Some(http_headers) = body.http_headers {
+        profile.http_headers = http_headers;
+    }
+    if let Some(http_body) = body.http_body {
+        profile.http_body = http_body;
+    }
+    if let Some(http_success_pattern) = body.http_success_pattern {
+        profile.http_success_pattern = http_success_pattern;
+    }
+    if let Some(http_failure_pattern) = body.http_failure_pattern {
+        profile.http_failure_pattern = http_failure_pattern;
+    }
+    if let Some(http_crypto_script) = body.http_crypto_script {
+        profile.http_crypto_script = http_crypto_script;
+    }
     profiles.create_profile(&target_id, profile).await?;
     tracing::info!(profile_id = %target_id, "创建 Profile");
     Ok(data(Value::String("ok".into())))
@@ -230,6 +374,30 @@ pub async fn update_profile(
     }
     if let Some(active_task) = body.active_task {
         profile.active_task = active_task;
+    }
+    if let Some(login_channel) = body.login_channel {
+        profile.login_channel = login_channel;
+    }
+    if let Some(http_method) = body.http_method {
+        profile.http_method = http_method;
+    }
+    if let Some(http_url) = body.http_url {
+        profile.http_url = validate_http_login_url(&http_url)?;
+    }
+    if let Some(http_headers) = body.http_headers {
+        profile.http_headers = http_headers;
+    }
+    if let Some(http_body) = body.http_body {
+        profile.http_body = http_body;
+    }
+    if let Some(http_success_pattern) = body.http_success_pattern {
+        profile.http_success_pattern = http_success_pattern;
+    }
+    if let Some(http_failure_pattern) = body.http_failure_pattern {
+        profile.http_failure_pattern = http_failure_pattern;
+    }
+    if let Some(http_crypto_script) = body.http_crypto_script {
+        profile.http_crypto_script = http_crypto_script;
     }
     profiles.update_profile(&id, profile).await?;
     tracing::info!(profile_id = %id, "更新 Profile");
@@ -325,6 +493,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt; // oneshot
 
     use crate::config::{ConfigError, ProfileData, ProfileSummary, SettingsData};
@@ -377,6 +546,9 @@ mod tests {
                     username: p.username.clone(),
                     isp: p.isp.clone(),
                     active_task: p.active_task.clone(),
+                    login_channel: p.login_channel,
+                    gateway_ip: p.gateway_ip.clone(),
+                    wifi_ssid: p.wifi_ssid.clone(),
                 })
                 .collect()
         }
@@ -510,6 +682,18 @@ mod tests {
             std::sync::Arc::new(crate::web::routes::test_support::test_runtime_config())
         }
 
+        fn runtime_config_for_profile(
+            &self,
+            id: &str,
+        ) -> Result<crate::config::RuntimeConfig, ConfigError> {
+            let profile = self.load_profile(id)?;
+            let mut runtime = crate::web::routes::test_support::test_runtime_config();
+            runtime.profile.id = profile.id;
+            runtime.profile.username = profile.username;
+            runtime.profile.password = Zeroizing::new(profile.password);
+            Ok(runtime)
+        }
+
         fn encrypt_password(&self, raw: &str) -> Result<String, ConfigError> {
             Ok(format!("ENC:{raw}"))
         }
@@ -529,6 +713,7 @@ mod tests {
         profiles: Arc<dyn ProfileApi>,
         config: Arc<dyn ConfigApi>,
         engine: Arc<dyn EngineApi>,
+        operations: Arc<WebOperations>,
     }
 
     impl axum::extract::FromRef<TestState> for Arc<dyn ProfileApi> {
@@ -549,6 +734,12 @@ mod tests {
         }
     }
 
+    impl axum::extract::FromRef<TestState> for Arc<WebOperations> {
+        fn from_ref(state: &TestState) -> Self {
+            state.operations.clone()
+        }
+    }
+
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner {
             profiles: vec![profile_of("default"), profile_of("dorm")],
@@ -560,9 +751,14 @@ mod tests {
             profiles: Arc::new(MockProfileApi(inner.clone())),
             config: Arc::new(MockConfigApi(inner.clone())),
             engine: Arc::new(MockEngineApi(inner.clone())),
+            operations: Arc::new(WebOperations::new()),
         };
         let app = axum::Router::new()
             .route("/api/profiles", get(list_profiles))
+            .route(
+                "/api/profiles/http-login-test",
+                axum::routing::post(test_http_login),
+            )
             .route(
                 "/api/profiles/{id}",
                 get(get_profile)
@@ -585,7 +781,18 @@ mod tests {
     /// 列表返回 map + active/auto_switch 元数据
     #[tokio::test]
     async fn test_list_profiles_shape() {
-        let (app, _) = mock_app();
+        let (app, inner) = mock_app();
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == "dorm")
+                .expect("mock 含 dorm");
+            dorm.gateway_ip = "192.168.1.1".into();
+            dorm.wifi_ssid = "Campus-Dorm-5G".into();
+            dorm.password = "ENC:secret".into();
+        }
         let resp = app
             .oneshot(
                 Request::builder()
@@ -602,6 +809,13 @@ mod tests {
         assert_eq!(d["auto_switch"], false);
         assert_eq!(d["profiles"].as_object().unwrap().len(), 2);
         assert_eq!(d["profiles"]["dorm"]["name"], "档案 dorm");
+        // 列表卡渲染依赖的字段必须回传：否则匹配规则恒显「无匹配规则」、
+        // 登录方式无法展示（前端 ProfileSummary 契约，见 api/types.ts）
+        assert_eq!(d["profiles"]["dorm"]["login_channel"], "browser");
+        assert_eq!(d["profiles"]["dorm"]["gateway_ip"], "192.168.1.1");
+        assert_eq!(d["profiles"]["dorm"]["wifi_ssid"], "Campus-Dorm-5G");
+        // 密码等敏感字段不得出现在摘要中
+        assert!(d["profiles"]["dorm"].get("password").is_none());
     }
 
     /// 切换到存在的 Profile 成功且派发 Engine ApplyProfile；不存在的返回错误
@@ -779,7 +993,15 @@ mod tests {
                             "trigger_url": "http://www.msftconnecttest.com/connecttest.txt",
                             "isp": "电信",
                             "gateway_ip": "192.168.1.1",
-                            "wifi_ssid": "Campus-Dorm-5G"
+                            "wifi_ssid": "Campus-Dorm-5G",
+                            "login_channel": "http",
+                            "http_method": "POST",
+                            "http_url": "http://10.1.1.55/login",
+                            "http_headers": "X-Test: {username}",
+                            "http_body": "u={username}&p={password}",
+                            "http_success_pattern": "登录成功",
+                            "http_failure_pattern": "密码错误",
+                            "http_crypto_script": "function transform(ctx) { return {}; }"
                         })
                         .to_string(),
                     ))
@@ -803,6 +1025,14 @@ mod tests {
         assert_eq!(created.isp, "电信");
         assert_eq!(created.gateway_ip, "192.168.1.1");
         assert_eq!(created.wifi_ssid, "Campus-Dorm-5G");
+        assert_eq!(created.login_channel, LoginChannel::Http);
+        assert_eq!(created.http_method, HttpLoginMethod::Post);
+        assert_eq!(created.http_url, "http://10.1.1.55/login");
+        assert_eq!(created.http_headers, "X-Test: {username}");
+        assert_eq!(created.http_body, "u={username}&p={password}");
+        assert_eq!(created.http_success_pattern, "登录成功");
+        assert_eq!(created.http_failure_pattern, "密码错误");
+        assert!(!created.http_crypto_script.is_empty());
     }
 
     /// 创建时非法认证地址 → 400（与 PUT 同一校验助手）
@@ -955,5 +1185,61 @@ mod tests {
         let dorm = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
         assert_eq!(dorm.password, "ENC:old-secret", "空密码不得清空既有密码");
         assert_eq!(dorm.name, "只改名");
+    }
+
+    /// 测试端点可用已保存密码执行请求，且回显不泄露凭据。
+    #[tokio::test]
+    async fn test_http_login_test_uses_saved_password_and_redacts_report() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let body = "登录成功 saved-secret";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let (app, inner) = mock_app();
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.username = "student".into();
+            dorm.password = "saved-secret".into();
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/http-login-test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "profile_id": "dorm",
+                            "username": "student",
+                            "password": "",
+                            "http_method": "GET",
+                            "http_url": format!("http://{addr}/login?u={{username}}&p={{password}}"),
+                            "http_success_pattern": "登录成功"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["data"]["outcome"], "success");
+        let serialized = json.to_string();
+        assert!(!serialized.contains("saved-secret"));
+        assert!(!serialized.contains("student"));
     }
 }

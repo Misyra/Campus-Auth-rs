@@ -88,6 +88,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/profiles/{id}", || {
             get(routes::profiles::get_profile)
         }),
+        ("POST", "/api/profiles/http-login-test", || {
+            post(routes::profiles::test_http_login)
+        }),
         ("POST", "/api/profiles/{id}", || {
             post(routes::profiles::create_profile)
         }),

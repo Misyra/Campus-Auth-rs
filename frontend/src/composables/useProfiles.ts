@@ -4,7 +4,7 @@
  */
 
 import { ref } from "vue";
-import type { Profile, NetworkDetectResult } from "../api/types";
+import type { HttpLoginTestResult, Profile, ProfileSummary, NetworkDetectResult } from "../api/types";
 import { profilesApi } from "../api";
 import { extractApiError } from "../api/client";
 import { DEFAULT_PROFILE_SETTINGS } from "../utils/constants";
@@ -18,7 +18,7 @@ import { useConfig } from "./useConfig";
 
 export type EditingProfile = Profile & { id: string; _isNew: boolean };
 
-const profiles = ref<Record<string, Profile>>({});
+const profiles = ref<Record<string, ProfileSummary>>({});
 const activeProfileId = ref("default");
 const autoSwitch = ref(true);
 const editingProfile = ref<EditingProfile | null>(null);
@@ -31,6 +31,8 @@ const {
 } = useDirtySnapshot(editingProfile, { entityName: "配置方案" });
 const detectResult = ref<NetworkDetectResult | null>(null);
 const editorDetectResult = ref<NetworkDetectResult | null>(null);
+const httpTestResult = ref<HttpLoginTestResult | null>(null);
+const httpTestRunning = ref(false);
 
 const { busy } = useStatus();
 const { toastOnly } = useToast();
@@ -67,6 +69,7 @@ async function showProfileEditor(profileId?: string): Promise<void> {
   // 打开新编辑器前先检查当前是否有未保存改动，避免静默丢弃（历史遗留 F5）
   if (!(await confirmDiscardIfDirty())) return;
   editorDetectResult.value = null;
+  httpTestResult.value = null;
   if (profileId && profiles.value[profileId]) {
     try {
       const data = await profilesApi.get(profileId);
@@ -122,6 +125,10 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(false, "请填写自定义运营商关键字");
     return false;
   }
+  if (settings.login_channel === "http" && !String(settings.http_url ?? "").trim()) {
+    toastOnly(false, "请填写直连请求地址");
+    return false;
+  }
   profileSaving.value = true;
   try {
     let data;
@@ -139,6 +146,14 @@ async function saveProfile(): Promise<boolean> {
         gateway_ip: settings.gateway_ip ?? "",
         wifi_ssid: settings.wifi_ssid ?? "",
         active_task: settings.active_task ?? "",
+        login_channel: settings.login_channel ?? "browser",
+        http_method: settings.http_method ?? "GET",
+        http_url: settings.http_url ?? "",
+        http_headers: settings.http_headers ?? "",
+        http_body: settings.http_body ?? "",
+        http_success_pattern: settings.http_success_pattern ?? "",
+        http_failure_pattern: settings.http_failure_pattern ?? "",
+        http_crypto_script: settings.http_crypto_script ?? "",
       });
     } else {
       data = await profilesApi.save(profileId, settings as Profile);
@@ -159,6 +174,47 @@ async function saveProfile(): Promise<boolean> {
     return false;
   } finally {
     profileSaving.value = false;
+  }
+}
+
+/** 用编辑器当前值发送一次直连测试；不会保存方案，也不会触发登录状态机。 */
+async function testHttpLogin(): Promise<void> {
+  const profile = editingProfile.value;
+  if (!profile || httpTestRunning.value) return;
+  if (!profile.http_url.trim()) {
+    toastOnly(false, "请填写直连请求地址");
+    return;
+  }
+  if (!profile.username.trim()) {
+    toastOnly(false, "请填写独立账号后再测试");
+    return;
+  }
+
+  httpTestRunning.value = true;
+  httpTestResult.value = null;
+  try {
+    const result = await profilesApi.testHttpLogin({
+      profile_id: profile._isNew ? undefined : profile.id,
+      username: profile.username,
+      password: profile.password,
+      http_method: profile.http_method,
+      http_url: profile.http_url,
+      http_headers: profile.http_headers,
+      http_body: profile.http_body,
+      http_success_pattern: profile.http_success_pattern,
+      http_failure_pattern: profile.http_failure_pattern,
+      http_crypto_script: profile.http_crypto_script,
+      auth_url: profile.auth_url,
+      fetch_page: true,
+    });
+    httpTestResult.value = result;
+    toastOnly(result.outcome === "success", result.message);
+  } catch (error) {
+    const message = extractApiError(error, "测试请求失败");
+    frontendLogger.error("profiles", "直连登录测试异常: " + message, error);
+    toastOnly(false, message);
+  } finally {
+    httpTestRunning.value = false;
   }
 }
 
@@ -280,9 +336,12 @@ export function useProfiles() {
     editingProfile,
     detectResult,
     editorDetectResult,
+    httpTestResult,
+    httpTestRunning,
     fetchProfiles,
     showProfileEditor,
     saveProfile,
+    testHttpLogin,
     profileSaving,
     deleteProfile,
     setActiveProfile,

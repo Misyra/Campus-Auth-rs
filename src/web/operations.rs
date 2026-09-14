@@ -172,6 +172,7 @@ impl Drop for PausedOperations {
 pub(crate) struct WebOperations {
     ai_generation: OperationRegistry,
     ocr: OperationRegistry,
+    http_login_test: OperationRegistry,
 }
 
 impl WebOperations {
@@ -182,6 +183,9 @@ impl WebOperations {
             // WE2-6：OCR 每请求派生 Python/ddddocr 子进程，并发必须钳制为 1
             //（内存敏感；此前 capacity=None 无限并发会耗尽本地资源）
             ocr: OperationRegistry::exclusive(),
+            // 直连测试可能执行用户 JS 并发起网关请求，单飞可防止重复点击或 API
+            // 滥用并发堆积 boa 执行线程。
+            http_login_test: OperationRegistry::exclusive(),
         }
     }
 
@@ -193,6 +197,11 @@ impl WebOperations {
     /// OCR 识别登记器（允许并发，卸载时统一暂停与排空）
     pub(crate) fn ocr(&self) -> &OperationRegistry {
         &self.ocr
+    }
+
+    /// 直连登录测试登记器（单飞）
+    pub(crate) fn http_login_test(&self) -> &OperationRegistry {
+        &self.http_login_test
     }
 }
 

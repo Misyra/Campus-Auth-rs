@@ -8,7 +8,8 @@
 端点：
   GET  /                登录页（AJAX 提交，#result 显示结果）
   GET  /captcha         验证码 PNG（4 位数字，服务器记录当前文本）
-  POST /login           JSON {username,password,captcha}，校验并切换认证状态
+  GET  /login           查询串 username/password，供 Rust 直连登录测试
+  POST /login           JSON {username,password,captcha}（浏览器）或表单（直连）
   POST|GET /logout      模拟掉线/被踢
   GET  /status          JSON {authenticated, username, captcha_text(调试), log}
   GET  /portal          已登录状态页
@@ -23,6 +24,7 @@ import random
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -191,9 +193,16 @@ class Handler(BaseHTTPRequestHandler):
             state["log"] = state["log"][-50:]
 
     def do_GET(self):
-        path = self.path.split("?")[0]
+        parsed = urlsplit(self.path)
+        path = parsed.path
         if path in ("/", "/login.html"):
             self._send(200, PAGE, "text/html; charset=utf-8")
+        elif path == "/login":
+            fields = parse_qs(parsed.query, keep_blank_values=True)
+            self._do_direct_login(
+                (fields.get("username") or [""])[0],
+                (fields.get("password") or [""])[0],
+            )
         elif path == "/captcha":
             png, text = gen_captcha()
             with lock:
@@ -228,6 +237,22 @@ class Handler(BaseHTTPRequestHandler):
         self._log_line(f"logout: {who} 已掉线")
         self._json({"ok": True, "message": "已退出登录（模拟掉线）"})
 
+    def _do_direct_login(self, username, password):
+        """无需验证码的明文登录端点，专供 Rust HTTP 渠道端到端测试。"""
+        username = str(username or "")
+        password = str(password or "")
+        self._log_line(f"direct login attempt: user={username!r}")
+        if VALID_USERS.get(username) != password:
+            self._json({"ok": False, "message": "账号或密码错误"})
+            return
+        with lock:
+            state["authenticated"] = True
+            state["username"] = username
+            state["last_login_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            state["login_count"] += 1
+        self._log_line(f"direct login success: {username}")
+        self._json({"ok": True, "message": "登录成功"})
+
     def do_POST(self):
         path = self.path.split("?")[0]
         if path == "/logout":
@@ -242,8 +267,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length") or 0)
+        content_type = self.headers.get("Content-Type") or ""
+        raw_body = self.rfile.read(length)
+        if content_type.startswith("application/x-www-form-urlencoded"):
+            fields = parse_qs(raw_body.decode("utf-8", errors="replace"), keep_blank_values=True)
+            self._do_direct_login(
+                (fields.get("username") or [""])[0],
+                (fields.get("password") or [""])[0],
+            )
+            return
         try:
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = json.loads(raw_body or b"{}")
         except json.JSONDecodeError:
             self._json({"ok": False, "message": "请求格式错误"}, 400)
             return

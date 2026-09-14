@@ -18,6 +18,8 @@ import type {
   DebugSession,
   EnvironmentStatus,
   HealthInfo,
+  HttpLoginTestPayload,
+  HttpLoginTestResult,
   InitStatus,
   LoginResultResponse,
   LoginHistoryItem,
@@ -178,9 +180,19 @@ export const profilesApi = {
       gateway_ip?: string;
       wifi_ssid?: string;
       active_task?: string;
+      login_channel?: Profile["login_channel"];
+      http_method?: Profile["http_method"];
+      http_url?: string;
+      http_headers?: string;
+      http_body?: string;
+      http_success_pattern?: string;
+      http_failure_pattern?: string;
+      http_crypto_script?: string;
     },
   ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   save: (id: string, payload: Profile) => http.put<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
+  testHttpLogin: (payload: HttpLoginTestPayload) =>
+    http.post<HttpLoginTestResult>("/api/profiles/http-login-test", payload, { timeout: 30000 }),
   delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${pathSegment(id)}`),
   setActive: (id: string) => http.post<MutationResult>("/api/profiles/switch", { profile_id: id }),
   detect: () => http.post<NetworkDetectResult>("/api/profiles/detect"),

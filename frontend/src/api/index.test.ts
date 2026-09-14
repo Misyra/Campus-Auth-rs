@@ -13,7 +13,7 @@ vi.mock("./client", () => ({
   ensureAuthToken: vi.fn().mockResolvedValue(""),
 }));
 
-const { aiApi, browsersApi, systemApi } = await import("./index");
+const { aiApi, browsersApi, profilesApi, systemApi } = await import("./index");
 const { http } = await import("./client");
 
 const post = vi.mocked(http.post);
@@ -50,6 +50,31 @@ describe("systemApi.restart", () => {
   it("调用专用重启端点而不是 shutdown", async () => {
     await systemApi.restart();
     expect(post).toHaveBeenCalledWith("/api/system/restart");
+  });
+});
+
+describe("profilesApi.testHttpLogin", () => {
+  it("把编辑器值交给直连测试端点并使用独立超时", async () => {
+    const payload = {
+      profile_id: "dorm",
+      username: "student",
+      password: "",
+      http_method: "POST" as const,
+      http_url: "http://10.0.0.1/login",
+      http_headers: "",
+      http_body: "u={username}&p={password}",
+      http_success_pattern: "登录成功",
+      http_failure_pattern: "密码错误",
+      http_crypto_script: "",
+      auth_url: "http://10.0.0.1/",
+      fetch_page: true,
+    };
+    await profilesApi.testHttpLogin(payload);
+    expect(post).toHaveBeenCalledWith(
+      "/api/profiles/http-login-test",
+      payload,
+      { timeout: 30000 },
+    );
   });
 });
 

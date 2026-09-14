@@ -161,7 +161,7 @@ function closeEditor() { void t.closeTaskEditor(); }
               <a href="/api/docs/task-writing-guide" target="_blank" class="btn btn-sm" title="查看编写指南">编写指南</a>
               <router-link to="/ai-task" class="btn btn-sm" title="用 AI 描述生成任务">AI生成任务</router-link>
             </div>
-            <p class="hint">OCR 相关设置已移至 <router-link to="/settings/environment">设置 · 环境</router-link>。</p>
+            <p class="hint">OCR 相关设置已移至 <router-link :to="{ name: 'settings-tasks' }">设置 · 任务与环境</router-link>。</p>
             <h4>支持的步骤类型</h4>
             <ul>
               <li><code>input</code> - 输入文本</li>

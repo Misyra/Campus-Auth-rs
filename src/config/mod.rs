@@ -28,9 +28,9 @@ pub use profiles::ProfileService;
 pub use profiles::{ProfileApi, ProfileSummary};
 pub use runtime::{ConfigReloadSignal, ProfileSnapshot, RuntimeConfig, build_runtime_config};
 pub use schema::{
-    AppSettings, BrowserSettings, GlobalConfig, LoggingSettings, MonitorSettings, PauseSettings,
-    ProfileData, RetrySettings, SettingsData, StartupAction, UpdateChannel, UpdaterSettings,
-    WorkerSettings,
+    AppSettings, BrowserSettings, GlobalConfig, HttpLoginMethod, LoggingSettings, LoginChannel,
+    MonitorSettings, PauseSettings, ProfileData, RetrySettings, SettingsData, StartupAction,
+    UpdateChannel, UpdaterSettings, WorkerSettings,
 };
 pub use service::ConfigError;
 pub use service::ConfigService;
@@ -85,6 +85,18 @@ pub trait ConfigApi: Send + Sync {
     fn base_path(&self) -> std::path::PathBuf;
     /// 返回当前运行时配置快照（无锁读，Arc 共享免深拷贝）。
     fn runtime_snapshot(&self) -> std::sync::Arc<RuntimeConfig>;
+    /// 为指定 Profile 构建运行时配置（含解密后的密码）。
+    ///
+    /// 默认实现仅支持当前活跃 Profile，供轻量测试替身使用；生产实现会从磁盘
+    /// 加载任意指定 Profile 并用当前密钥解密凭据。
+    fn runtime_config_for_profile(&self, id: &str) -> Result<RuntimeConfig, ConfigError> {
+        let runtime = self.runtime_snapshot();
+        if runtime.profile.id == id {
+            Ok((*runtime).clone())
+        } else {
+            Err(ConfigError::ProfileNotFound { id: id.to_string() })
+        }
+    }
     /// 加密明文密码（Profile 凭据写入路径）。
     fn encrypt_password(&self, raw: &str) -> Result<String, ConfigError>;
 }
@@ -140,6 +152,10 @@ impl ConfigApi for ConfigService {
 
     fn runtime_snapshot(&self) -> std::sync::Arc<RuntimeConfig> {
         ConfigService::runtime_snapshot(self)
+    }
+
+    fn runtime_config_for_profile(&self, id: &str) -> Result<RuntimeConfig, ConfigError> {
+        ConfigService::runtime_config_for_profile(self, id)
     }
 
     fn encrypt_password(&self, raw: &str) -> Result<String, ConfigError> {

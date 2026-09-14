@@ -437,6 +437,31 @@ impl Default for UpdaterSettings {
     }
 }
 
+/// 登录执行渠道
+///
+/// `Browser` 走 Python Worker 浏览器自动化（默认，兼容存量）；`Http` 为 Rust
+/// 进程内直连请求，不启动 Worker/浏览器，也不要求 Python 环境就绪。
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginChannel {
+    /// 浏览器自动化（默认）
+    #[default]
+    Browser,
+    /// 直连 HTTP 请求
+    Http,
+}
+
+/// 直连请求方法
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpLoginMethod {
+    /// GET（凭证进入查询串，存在随 URL 落日志的风险，UI 需提示）
+    #[default]
+    Get,
+    /// POST
+    Post,
+}
+
 /// 单个 Profile 文件内容（`config/profiles/{id}.json`）
 ///
 /// 凭证类字段（如 [`ProfileData::password`]）在磁盘上以 `ENC:` 前缀的密文存储，
@@ -464,6 +489,24 @@ pub struct ProfileData {
     pub wifi_ssid: String,
     /// 活跃任务 ID
     pub active_task: String,
+    /// 登录执行渠道（browser=浏览器自动化默认；http=直连请求）
+    pub login_channel: LoginChannel,
+    /// 直连请求方法（仅 login_channel = http 时生效）
+    pub http_method: HttpLoginMethod,
+    /// 直连请求 URL 模板（完整地址，支持 {username} 等占位符）
+    pub http_url: String,
+    /// 直连请求头模板（每行 `Key: Value`，支持占位符）
+    pub http_headers: String,
+    /// 直连请求体模板（POST 时使用，支持占位符；值原样替换不转义）
+    pub http_body: String,
+    /// 成功判定关键字：响应体命中即登录成功；留空时 HTTP 2xx 视为成功
+    /// （并仍以登录后网络探测复核，见 LoginSession::verify_network_after_login）
+    pub http_success_pattern: String,
+    /// 失败判定关键字：响应体命中立即终态失败（不重试），如「密码错误」
+    pub http_failure_pattern: String,
+    /// 直连加密脚本（JS，定义 `transform(ctx)` 返回可被占位符引用的字段；
+    /// 由内置 boa 引擎在无网络/文件沙箱内执行；空 = 不做值变换）
+    pub http_crypto_script: String,
 }
 
 impl Default for ProfileData {
@@ -479,6 +522,14 @@ impl Default for ProfileData {
             gateway_ip: String::new(),
             wifi_ssid: String::new(),
             active_task: String::new(),
+            login_channel: LoginChannel::default(),
+            http_method: HttpLoginMethod::default(),
+            http_url: String::new(),
+            http_headers: String::new(),
+            http_body: String::new(),
+            http_success_pattern: String::new(),
+            http_failure_pattern: String::new(),
+            http_crypto_script: String::new(),
         }
     }
 }

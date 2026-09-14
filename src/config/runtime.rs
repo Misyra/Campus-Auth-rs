@@ -57,6 +57,22 @@ pub struct ProfileSnapshot {
     pub wifi_ssid: String,
     /// 活跃任务 ID
     pub active_task: String,
+    /// 登录执行渠道（browser=浏览器自动化默认；http=直连请求）
+    pub login_channel: crate::config::LoginChannel,
+    /// 直连请求方法
+    pub http_method: crate::config::HttpLoginMethod,
+    /// 直连请求 URL 模板
+    pub http_url: String,
+    /// 直连请求头模板（每行 `Key: Value`）
+    pub http_headers: String,
+    /// 直连请求体模板（POST 使用）
+    pub http_body: String,
+    /// 成功判定关键字（空 = HTTP 2xx 即成功，登录后网络探测复核）
+    pub http_success_pattern: String,
+    /// 失败判定关键字（命中即终态失败）
+    pub http_failure_pattern: String,
+    /// 直连加密脚本（JS transform(ctx)；空 = 不变换）
+    pub http_crypto_script: String,
 }
 
 impl std::fmt::Debug for ProfileSnapshot {
@@ -131,6 +147,14 @@ pub fn build_runtime_config(
         gateway_ip: profile.gateway_ip.clone(),
         wifi_ssid: profile.wifi_ssid.clone(),
         active_task: profile.active_task.clone(),
+        login_channel: profile.login_channel,
+        http_method: profile.http_method,
+        http_url: profile.http_url.clone(),
+        http_headers: profile.http_headers.clone(),
+        http_body: profile.http_body.clone(),
+        http_success_pattern: profile.http_success_pattern.clone(),
+        http_failure_pattern: profile.http_failure_pattern.clone(),
+        http_crypto_script: profile.http_crypto_script.clone(),
     };
 
     Ok(RuntimeConfig {
@@ -164,6 +188,14 @@ mod tests {
             gateway_ip: "10.0.0.1".to_string(),
             wifi_ssid: "Campus".to_string(),
             active_task: String::new(),
+            login_channel: crate::config::LoginChannel::default(),
+            http_method: crate::config::HttpLoginMethod::default(),
+            http_url: String::new(),
+            http_headers: String::new(),
+            http_body: String::new(),
+            http_success_pattern: String::new(),
+            http_failure_pattern: String::new(),
+            http_crypto_script: String::new(),
         }
     }
 

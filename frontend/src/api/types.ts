@@ -375,6 +375,10 @@ export interface SaveConfigPayload {
   password: string | null;
 }
 
+/** 登录渠道与直连请求方法 */
+export type LoginChannel = "browser" | "http";
+export type HttpLoginMethod = "GET" | "POST";
+
 /** 配置方案 */
 export interface Profile {
   id: string;
@@ -387,12 +391,73 @@ export interface Profile {
   gateway_ip: string;
   wifi_ssid: string;
   active_task: string;
+  login_channel: LoginChannel;
+  http_method: HttpLoginMethod;
+  http_url: string;
+  http_headers: string;
+  http_body: string;
+  http_success_pattern: string;
+  http_failure_pattern: string;
+  http_crypto_script: string;
   [key: string]: unknown;
+}
+
+/** 直连登录测试请求：使用编辑器内尚未保存的配置 */
+export interface HttpLoginTestPayload {
+  profile_id?: string;
+  username: string;
+  password: string;
+  http_method: HttpLoginMethod;
+  http_url: string;
+  http_headers: string;
+  http_body: string;
+  http_success_pattern: string;
+  http_failure_pattern: string;
+  http_crypto_script: string;
+  auth_url: string;
+  fetch_page: boolean;
+}
+
+/** 直连登录测试结果（请求内容与响应片段均已由后端脱敏） */
+export interface HttpLoginTestResult {
+  rendered_url: string;
+  rendered_headers: string;
+  rendered_body: string;
+  status: number | null;
+  response_snippet: string;
+  outcome:
+    | "success"
+    | "cancelled"
+    | "navigation_timeout"
+    | "selector_failed"
+    | "assertion_failed"
+    | "captcha_failed"
+    | "invalid_credential"
+    | "network_error"
+    | "unknown_error";
+  message: string;
+  script_error: string | null;
+  duration_ms: number;
+}
+
+/** 方案列表条目（后端 ProfileSummary：仅展示字段，不含密码与直连模板） */
+export interface ProfileSummary {
+  id: string;
+  name: string;
+  username: string;
+  isp: string;
+  active_task: string;
+  /** 登录执行渠道：列表卡据此区分登录方式 */
+  login_channel: LoginChannel;
+  /** 网关 IP 匹配规则（空 = 未配置） */
+  gateway_ip: string;
+  /** WiFi SSID 匹配规则（空 = 未配置） */
+  wifi_ssid: string;
 }
 
 /** 方案列表响应 */
 export interface ProfileListResponse {
-  profiles: Record<string, Profile>;
+  profiles: Record<string, ProfileSummary>;
   active_profile: string;
   auto_switch: boolean;
 }

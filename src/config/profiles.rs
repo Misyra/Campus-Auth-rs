@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::config::schema::ProfileData;
+use crate::config::schema::{LoginChannel, ProfileData};
 use crate::config::service::ConfigService;
 use crate::config::service::is_valid_profile_id;
 use crate::config::{ConfigError, ConfigReloadSignal};
@@ -23,6 +23,12 @@ pub struct ProfileSummary {
     pub isp: String,
     /// 活跃任务 ID
     pub active_task: String,
+    /// 登录执行渠道（列表卡按此区分「浏览器自动化 / 直连请求」）
+    pub login_channel: LoginChannel,
+    /// 网关 IP 匹配规则（列表卡展示"无匹配规则"判定依据）
+    pub gateway_ip: String,
+    /// WiFi SSID 匹配规则
+    pub wifi_ssid: String,
 }
 
 /// Profile 业务层：CRUD + 匹配 + 切换
@@ -113,6 +119,9 @@ impl ProfileService {
                 username: p.username,
                 isp: p.isp,
                 active_task: p.active_task,
+                login_channel: p.login_channel,
+                gateway_ip: p.gateway_ip,
+                wifi_ssid: p.wifi_ssid,
             })
             .collect()
     }

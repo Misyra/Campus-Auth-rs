@@ -251,6 +251,14 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
   trigger_url: "",
   active_task: "",
   isp: "",
+  login_channel: "browser",
+  http_method: "GET",
+  http_url: "",
+  http_headers: "",
+  http_body: "",
+  http_success_pattern: "",
+  http_failure_pattern: "",
+  http_crypto_script: "",
 };
 
 /** 派生选项（原 app-options.js data 中的静态选项） */

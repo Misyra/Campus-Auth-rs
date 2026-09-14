@@ -13,9 +13,13 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::bridge::{IpcResponse, Outcome, StructuredResult};
 use crate::config::ConfigService;
 use crate::login::history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
+use crate::login::http_login;
 use crate::login::{LoginHandleInner, recover_lock};
 use crate::status::{LoginSource, LoginStatus, PartialSnapshot, StatusManager};
 use crate::utils::metrics::Metrics;
@@ -176,6 +180,8 @@ pub(crate) struct SessionParams {
     pub profile_id: String,
     /// 发送给 Worker 的配置字典（凭证、auth_url、浏览器设置等）
     pub worker_config: Value,
+    /// 直连请求参数（Some = 直连渠道：尝试在 Rust 进程内执行，不经 Bridge/Worker）
+    pub http_plan: Option<crate::login::http_login::HttpLoginRequest>,
 }
 
 /// 登录会话：持有会话参数、取消原语与服务依赖，驱动单次登录状态机
@@ -238,6 +244,7 @@ impl LoginSession {
 
         let total_attempts = self.params.max_retries + 1;
         let mut attempts_used: u32 = 0;
+        let is_http = self.params.http_plan.is_some();
 
         loop {
             // 取消检查（状态机任意阶段）
@@ -249,8 +256,10 @@ impl LoginSession {
 
             // 会话总超时检查（login_timeout 至少 1s，见 SessionParams 构造 clamp）
             if session_start.elapsed() > self.params.login_timeout.max(Duration::from_secs(1)) {
-                if let Some(cid) = self.attempt_cancel_id.load_full() {
-                    bridge.cancel(cid.as_str());
+                if !is_http {
+                    if let Some(cid) = self.attempt_cancel_id.load_full() {
+                        bridge.cancel(cid.as_str());
+                    }
                 }
                 self.finish_with_failure(session_start, attempts_used, "登录超时".into())
                     .await;
@@ -259,8 +268,10 @@ impl LoginSession {
 
             // 生成本轮 attempt 的 cancel_id（UUID v4）
             let cancel_id = uuid::Uuid::new_v4().to_string();
-            self.attempt_cancel_id
-                .store(Some(Arc::new(cancel_id.clone())));
+            if !is_http {
+                self.attempt_cancel_id
+                    .store(Some(Arc::new(cancel_id.clone())));
+            }
 
             let attempt_no = attempts_used + 1;
             self.deps.status_manager.merge(PartialSnapshot::Login {
@@ -270,26 +281,44 @@ impl LoginSession {
                 retry_count: attempts_used,
             });
 
-            // 根据来源选择 Bridge 命令
-            let method = match self.params.source {
-                LoginSource::Browser => "execute_browser_task",
-                _ => "execute_login_attempt",
-            };
+            // 直连渠道：Rust 进程内构造/发送请求；浏览器渠道：Bridge 驱动 Worker。
+            // 两者统一为 Result<StructuredResult, String> 的可取消 future，
+            // 取消/shutdown/超时边界对两种渠道一致（直连路径无 Bridge 可取消）。
+            let mut work: Pin<Box<dyn Future<Output = Result<StructuredResult, String>> + Send>> =
+                if let Some(plan) = self.params.http_plan.clone() {
+                    Box::pin(async move { Ok(http_login::run_once(&plan).await.to_structured()) })
+                } else {
+                    // 根据来源选择 Bridge 命令
+                    let method = match self.params.source {
+                        LoginSource::Browser => "execute_browser_task",
+                        _ => "execute_login_attempt",
+                    };
 
-            let mut params = self.params.worker_config.clone();
-            params["cancel_id"] = json!(cancel_id.clone());
-            if let Some(tid) = &self.params.task_id {
-                params["task_id"] = json!(tid.clone());
-            }
+                    let mut params = self.params.worker_config.clone();
+                    params["cancel_id"] = json!(cancel_id.clone());
+                    if let Some(tid) = &self.params.task_id {
+                        params["task_id"] = json!(tid.clone());
+                    }
+                    let bridge = bridge.clone();
+                    Box::pin(async move {
+                        bridge
+                            .execute(method, params)
+                            .await
+                            .map_err(|e| format!("Bridge 执行失败: {e}"))
+                            .map(Self::parse_ipc_response)
+                    })
+                };
 
-            // 等待 Bridge 响应，期间监听会话级取消、应用 shutdown 与会话总超时
+            // 等待尝试完成，期间监听会话级取消、应用 shutdown 与会话总超时
             //
             // bridge.execute() 内部最长阻塞 300s。此处用 tokio::select! (biased) 同时监听：
             // - cancel_token 触发（用户/系统取消，最高优先级）
             // - shutdown_token 触发（应用关闭，立即以取消终态退出）
             // - 会话总超时到期（防止 Worker 卡死导致整会话永不退出）
-            // - execute 完成（正常路径）
-            // biased 保证取消类信号先于 execute/timeout 生效，避免取消被延迟。
+            // - 尝试完成（正常路径）
+            // biased 保证取消类信号先于执行/超时生效，避免取消被延迟。
+            // 取消通知仅对 Bridge 路径有意义（携带 cancel_id 停 Worker 任务），
+            // 直连路径的请求 future 随 select 撤销直接丢弃。
             let exec = {
                 let ct = self.cancel_token.clone();
                 let remaining = self
@@ -300,12 +329,16 @@ impl LoginSession {
                 tokio::select! {
                     biased;
                     _ = ct.cancelled() => {
-                        bridge.cancel(&cancel_id);
+                        if !is_http {
+                            bridge.cancel(&cancel_id);
+                        }
                         self.finish_with_cancelled(session_start, attempts_used, None).await;
                         return;
                     }
                     _ = self.shutdown_token.cancelled() => {
-                        bridge.cancel(&cancel_id);
+                        if !is_http {
+                            bridge.cancel(&cancel_id);
+                        }
                         self.finish_with_cancelled(
                             session_start,
                             attempts_used,
@@ -315,25 +348,23 @@ impl LoginSession {
                         return;
                     }
                     _ = sleep(remaining) => {
-                        bridge.cancel(&cancel_id);
+                        if !is_http {
+                            bridge.cancel(&cancel_id);
+                        }
                         self.finish_with_failure(session_start, attempts_used, "登录超时".into())
                             .await;
                         return;
                     }
-                    res = bridge.execute(method, params) => res,
+                    res = &mut work => res,
                 }
             };
 
             let structured = match exec {
-                Ok(resp) => self.parse_response(resp),
+                Ok(s) => s,
                 Err(e) => {
-                    error!(attempt = attempts_used + 1, "Bridge 执行失败: {e}");
-                    self.finish_with_failure(
-                        session_start,
-                        attempts_used,
-                        format!("Bridge 执行失败: {e}"),
-                    )
-                    .await;
+                    error!(attempt = attempts_used + 1, "登录执行失败: {e}");
+                    self.finish_with_failure(session_start, attempts_used, e)
+                        .await;
                     return;
                 }
             };
@@ -447,7 +478,8 @@ impl LoginSession {
                             &structured,
                             &mut attempts_used,
                             session_start,
-                            should_force_recycle(structured.outcome),
+                            // 直连路径无 Worker 参与，网络类失败不需要回收 Worker
+                            !is_http && should_force_recycle(structured.outcome),
                         )
                         .await
                     {
@@ -797,7 +829,7 @@ impl LoginSession {
     /// 将 `IpcResponse` 解析为 [`StructuredResult`]
     ///
     /// 成功时从 `result.data` 反序列化；失败时构造 `UnknownError` 兜底结果。
-    fn parse_response(&self, resp: IpcResponse) -> StructuredResult {
+    fn parse_ipc_response(resp: IpcResponse) -> StructuredResult {
         if resp.result.success {
             match serde_json::from_value::<StructuredResult>(resp.result.data.clone()) {
                 Ok(s) => s,
@@ -1147,6 +1179,7 @@ mod tests {
             login_timeout: Duration::from_secs(30),
             profile_id: "default".to_string(),
             worker_config: serde_json::json!({}),
+            http_plan: None,
         }
     }
 

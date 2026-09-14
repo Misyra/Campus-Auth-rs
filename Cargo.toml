@@ -92,6 +92,14 @@ sha2 = "0.10"
 which = "7"
 hex = "0.4"
 self-replace = "1"
+
+# 直连登录：散列/编码内置函数
+md-5 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+
+# 直连登录：用户加密脚本（内嵌 JS 引擎，纯 Rust 无 C 依赖）
+boa_engine = "0.22"
 tempfile = "3"
 url = "2"
 

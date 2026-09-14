@@ -64,6 +64,18 @@ const redirectEnabled = computed({
     ep.trigger_url = v ? ep.trigger_url || DEFAULT_TRIGGER_URL : "";
   },
 });
+
+/** 直连测试结果的人类可读状态。 */
+const httpTestOutcomeLabel = computed(() => {
+  switch (p.httpTestResult.value?.outcome) {
+    case "success": return "请求判定成功";
+    case "invalid_credential": return "门户拒绝凭据";
+    case "assertion_failed": return "未命中成功标识";
+    case "network_error": return "请求未送达";
+    case "unknown_error": return "配置或脚本错误";
+    default: return "测试未通过";
+  }
+});
 </script>
 
 <template>
@@ -190,6 +202,125 @@ const redirectEnabled = computed({
               <span class="hint">仅劫持型门户填写：明文 http 地址，Worker 跟随 302 到真门户</span>
             </div>
           </div>
+
+          <!-- 登录方式 -->
+          <div class="editor-section">
+            <div class="editor-section-label">
+              登录方式
+              <span class="field-help" tabindex="0" role="note" data-tip="浏览器自动化兼容复杂门户；直连请求无需 Python 和浏览器，适合可直接调用登录接口的门户。">?</span>
+            </div>
+            <div class="segmented profile-channel-switch" role="group" aria-label="登录方式">
+              <button type="button" :class="{ active: p.editingProfile.value.login_channel === 'browser' }"
+                @click="p.editingProfile.value.login_channel = 'browser'">
+                浏览器自动化
+              </button>
+              <button type="button" :class="{ active: p.editingProfile.value.login_channel === 'http' }"
+                @click="p.editingProfile.value.login_channel = 'http'">
+                直连请求
+              </button>
+            </div>
+            <p v-if="p.editingProfile.value.login_channel === 'browser'" class="channel-note">
+              按已启用的登录任务操作网页，适合验证码、动态表单和复杂交互。
+            </p>
+
+            <div v-else class="http-channel-panel">
+              <div class="http-channel-intro">
+                <strong>直接向校园网网关发送登录请求</strong>
+                <span>不启动浏览器；失败后按普通登录策略重试，不会自动切回浏览器。</span>
+              </div>
+
+              <div class="form-row http-url-row">
+                <div class="form-group http-method-field">
+                  <label for="prof-http-method">方法</label>
+                  <CustomSelect
+                    id="prof-http-method"
+                    v-model="p.editingProfile.value.http_method"
+                    :options="[{ value: 'GET', label: 'GET' }, { value: 'POST', label: 'POST' }]"
+                  />
+                </div>
+                <div class="form-group">
+                  <label for="prof-http-url">请求地址</label>
+                  <input id="prof-http-url" v-model.trim="p.editingProfile.value.http_url" type="text"
+                    placeholder="http://10.0.0.1/login?user={username}&pass={password}" />
+                </div>
+              </div>
+              <div v-if="p.editingProfile.value.http_method === 'GET'" class="http-risk-note">
+                GET 会把凭据放进地址栏。程序会脱敏自身日志，但网关、代理或系统网络日志仍可能记录完整地址；能用 POST 时优先用 POST。
+              </div>
+
+              <div class="form-group">
+                <label for="prof-http-headers">请求头</label>
+                <textarea id="prof-http-headers" v-model="p.editingProfile.value.http_headers" rows="3"
+                  placeholder="Content-Type: application/x-www-form-urlencoded&#10;Referer: {auth_url}"></textarea>
+                <span class="hint">每行一项，格式为“名称: 值”。</span>
+              </div>
+              <div v-if="p.editingProfile.value.http_method === 'POST'" class="form-group">
+                <label for="prof-http-body">请求内容</label>
+                <textarea id="prof-http-body" v-model="p.editingProfile.value.http_body" rows="4"
+                  placeholder="username={username}&password={password}"></textarea>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="prof-http-success">成功关键字</label>
+                  <input id="prof-http-success" v-model="p.editingProfile.value.http_success_pattern" type="text"
+                    placeholder="登录成功（留空则以 HTTP 2xx 判断）" />
+                </div>
+                <div class="form-group">
+                  <label for="prof-http-failure">失败关键字</label>
+                  <input id="prof-http-failure" v-model="p.editingProfile.value.http_failure_pattern" type="text"
+                    placeholder="账号或密码错误" />
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="prof-http-script">凭据变换脚本（可选）</label>
+                <textarea id="prof-http-script" v-model="p.editingProfile.value.http_crypto_script"
+                  class="http-script-editor" rows="8"
+                  placeholder="function transform(ctx) {&#10;  return { password: md5(ctx.password) };&#10;}"></textarea>
+                <span class="hint">
+                  定义 transform(ctx)，可读取 username、password、auth_url、page。可用 md5、sha1、sha256、hmac_sha256、base64_encode、base64_decode、hex_encode、url_encode、now_ms。
+                </span>
+              </div>
+
+              <div class="http-template-help">
+                地址、请求头和请求内容支持 <code>{username}</code>、<code>{password}</code>、<code>{auth_url}</code>
+                及脚本返回字段。值会原样替换，特殊字符请在脚本中使用 <code>url_encode()</code>。
+              </div>
+
+              <div class="http-test-actions">
+                <button type="button" class="btn btn-secondary" @click="p.testHttpLogin()"
+                  :disabled="p.httpTestRunning.value">
+                  <IconApp name="play" class="icon-sm" />
+                  {{ p.httpTestRunning.value ? '正在发送…' : '发送测试请求' }}
+                </button>
+                <span>测试不会保存方案，也不会改变自动登录状态。</span>
+              </div>
+
+              <div v-if="p.httpTestResult.value" class="http-test-result"
+                :class="p.httpTestResult.value.outcome === 'success' ? 'success' : 'failed'">
+                <div class="http-test-result-head">
+                  <strong>{{ httpTestOutcomeLabel }}</strong>
+                  <span>{{ p.httpTestResult.value.status ? 'HTTP ' + p.httpTestResult.value.status : '无响应' }} · {{ p.httpTestResult.value.duration_ms }} ms</span>
+                </div>
+                <p>{{ p.httpTestResult.value.message }}</p>
+                <dl>
+                  <template v-if="p.httpTestResult.value.rendered_url">
+                    <dt>请求地址</dt><dd><code>{{ p.httpTestResult.value.rendered_url }}</code></dd>
+                  </template>
+                  <template v-if="p.httpTestResult.value.rendered_headers">
+                    <dt>请求头</dt><dd><code>{{ p.httpTestResult.value.rendered_headers }}</code></dd>
+                  </template>
+                  <template v-if="p.httpTestResult.value.rendered_body">
+                    <dt>请求内容</dt><dd><code>{{ p.httpTestResult.value.rendered_body }}</code></dd>
+                  </template>
+                  <template v-if="p.httpTestResult.value.response_snippet">
+                    <dt>响应片段</dt><dd><code>{{ p.httpTestResult.value.response_snippet }}</code></dd>
+                  </template>
+                </dl>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="card-footer">
           <button class="btn btn-secondary" @click="closeEditor">取消</button>
@@ -295,6 +426,10 @@ const redirectEnabled = computed({
               <span v-if="!info.gateway_ip && !info.wifi_ssid" class="profile-tag">
                 <IconApp name="x-circle" class="icon-xs" />
                 无匹配规则
+              </span>
+              <span class="profile-tag" :title="info.login_channel === 'http' ? '直连请求：不启动浏览器' : '浏览器自动化：按任务操作网页'">
+                <IconApp :name="info.login_channel === 'http' ? 'globe' : 'chrome'" class="icon-xs" />
+                {{ info.login_channel === 'http' ? '直连请求' : '浏览器' }}
               </span>
             </div>
           </div>

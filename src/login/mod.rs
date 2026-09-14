@@ -8,6 +8,7 @@
 //! 全部依赖在 `new` 构造时注入（无 setter），依赖关系在组装期即确定。
 
 pub mod history;
+pub mod http_login;
 pub mod preemption;
 pub mod session;
 
@@ -25,6 +26,7 @@ use crate::bridge::BridgeSupervisor;
 use crate::browser::{self, NO_BROWSER_MESSAGE};
 
 use crate::config::ConfigService;
+use crate::config::LoginChannel;
 use crate::config::runtime::ProfileSnapshot;
 use crate::config::runtime::RuntimeConfig;
 use crate::environment::EnvironmentManager;
@@ -380,29 +382,57 @@ impl LoginOrchestrator {
         // 手动/自动/CLI 登录（task_id 为空）统一走它；定时任务各自携带独立 task_id，不受影响。
         let global_active_task = self.tasks.get_active_task().await;
 
+        // 1a. 直连渠道判定：http 渠道在 Rust 进程内完成登录，浏览器任务来源
+        // （显式 task 执行）不适用，仍按浏览器路径处理。直连时跳过 1b/1c 的
+        // 浏览器与环境准备，也不要求启用任务（无 Worker 参与）。
+        let use_http =
+            profile.login_channel == LoginChannel::Http && !matches!(source, LoginSource::Browser);
+
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
         if let Some(handle) = self
-            .validate_profile(source, profile, &task_id, &global_active_task)
+            .validate_profile(source, profile, &task_id, &global_active_task, use_http)
             .await
         {
             return handle;
         }
 
-        // 1b. 浏览器渠道预检 + 1c. 可用性终验：返回本次生效的渠道覆盖
-        let browser_override = match self
-            .prepare_browser(source, profile, &rt, &cancel_token)
-            .await
-        {
-            Ok(ov) => ov,
-            Err(handle) => return handle,
+        // 1a-2. 直连请求参数构造（URL 缺失/格式非法立即终态）
+        let http_plan = if use_http {
+            match crate::login::http_login::HttpLoginRequest::from_profile(profile) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    return self
+                        .immediate_handle(source, false, e, profile.id.clone())
+                        .await;
+                }
+            }
+        } else {
+            None
         };
 
-        // 2. auth_url TCP 预检（仅 manual / login_once；重定向模式跳过）
-        if let Some(handle) = self
-            .precheck_auth_url(source, profile, &rt, &cancel_token)
-            .await
-        {
-            return handle;
+        // 1b. 浏览器渠道预检 + 1c. 可用性终验：返回本次生效的渠道覆盖
+        // （直连渠道无浏览器/环境参与，整体跳过）
+        let browser_override = if use_http {
+            None
+        } else {
+            match self
+                .prepare_browser(source, profile, &rt, &cancel_token)
+                .await
+            {
+                Ok(ov) => ov,
+                Err(handle) => return handle,
+            }
+        };
+
+        // 2. auth_url TCP 预检（仅 manual / login_once；重定向模式跳过；
+        // 直连渠道可达性由请求自身的网络错误报告，且 auth_url 允许为空，跳过）
+        if !use_http {
+            if let Some(handle) = self
+                .precheck_auth_url(source, profile, &rt, &cancel_token)
+                .await
+            {
+                return handle;
+            }
         }
 
         // 3. 从抢占决策开始串行化所有 submit，直到新会话真正占据 active_session。
@@ -472,14 +502,19 @@ impl LoginOrchestrator {
             }
         });
 
-        let worker_config = self
-            .build_worker_config(
+        // 直连渠道不执行任务步骤：worker_config 置空占位，确保
+        // has_explicit_success_condition 恒为 false，登录后网络验证兜底始终生效
+        let worker_config = if use_http {
+            serde_json::json!({})
+        } else {
+            self.build_worker_config(
                 &rt,
                 &resolved_profile,
                 effective_task_id.as_deref().unwrap_or(""),
                 browser_override.as_deref(),
             )
-            .await;
+            .await
+        };
 
         let session = LoginSession::new(
             session::SessionParams {
@@ -490,6 +525,7 @@ impl LoginOrchestrator {
                 login_timeout: Duration::from_secs((rt.browser.login_timeout as u64).max(1)),
                 profile_id: profile.id.clone(),
                 worker_config,
+                http_plan,
             },
             cancel_token.clone(),
             result_slot,
@@ -582,6 +618,7 @@ impl LoginOrchestrator {
         profile: &ProfileSnapshot,
         task_id: &Option<String>,
         global_active_task: &str,
+        use_http: bool,
     ) -> Option<LoginHandle> {
         let mut missing = Vec::new();
         if profile.username.is_empty() {
@@ -590,13 +627,18 @@ impl LoginOrchestrator {
         if profile.password.as_str().is_empty() {
             missing.push("密码为空，请在设置页填写密码");
         }
-        // 重定向模式允许 auth_url 为空：首导航用 trigger_url 触发 302，固定门户地址未知或不可直连
-        if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
+        // 直连渠道要求登录请求 URL；浏览器渠道重定向模式允许 auth_url 为空
+        // （首导航用 trigger_url 触发 302，固定门户地址未知或不可直连）
+        if use_http {
+            if profile.http_url.trim().is_empty() {
+                missing.push("直连请求 URL 为空，请在方案的直连配置里填写登录地址");
+            }
+        } else if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
             missing.push("认证地址与触发地址均为空，请至少填写一个");
         }
-        // 浏览器/非浏览器来源在此项校验上文案一致（两分支条件互补并集为全部来源），
-        // 合并为单一条件：task_id 为空（手动/自动/CLI）且未启用全局活跃任务即缺失
-        if task_id.is_none() && global_active_task.is_empty() {
+        // 启用任务是浏览器路径的前提（Worker 依据任务步骤执行）；直连渠道无
+        // Worker 参与，不要求
+        if !use_http && task_id.is_none() && global_active_task.is_empty() {
             missing.push("当前无启用任务，请手动启用一个任务");
         }
         if missing.is_empty() {
