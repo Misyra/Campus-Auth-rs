@@ -44,9 +44,11 @@ const routes = [
     children: [
       { path: "", name: "tasks-browser", meta: { title: "任务 · 浏览器任务" }, component: () => import("@/views/tasks/BrowserTasksPanel.vue") },
       { path: "scripts", name: "tasks-scripts", meta: { title: "任务 · 脚本" }, component: () => import("@/views/tasks/ScriptsPanel.vue") },
+      { path: "ai", name: "tasks-ai", meta: { title: "任务 · AI 生成" }, component: () => import("@/views/AiTaskView.vue") },
     ],
   },
-  { path: "/ai-task", name: "ai-task", meta: { title: "AI 生成任务" }, component: () => import("@/views/AiTaskView.vue") },
+  // 旧「AI 生成任务」独立页已并入「任务」页第三个 Tab：保留深链与书签重定向
+  { path: "/ai-task", redirect: { name: "tasks-ai" } },
   { path: "/scheduled", name: "scheduled", meta: { title: "定时任务" }, component: () => import("@/views/ScheduledTasksView.vue") },
   // 旧「自定义脚本」页已并入「任务」页的脚本 Tab：保留深链与书签重定向
   { path: "/scripts", redirect: { name: "tasks-scripts" } },

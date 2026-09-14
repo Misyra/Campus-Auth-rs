@@ -433,8 +433,10 @@ async function saveTask(): Promise<void> {
       toastOnly(false, `任务校验未通过：${JSON.stringify(r.failed[0])}`);
       return;
     }
-    toastOnly(true, "任务已保存，可在任务管理中查看");
-    void router.push({ name: "tasks" });
+    toastOnly(true, "任务已保存，已在「浏览器任务」中显示");
+    // 生成完直接落到浏览器任务 Tab：AI 页与任务列表同属 /tasks 区域，
+    // 留在原处会让用户看不到刚保存的成果
+    void router.push({ name: "tasks-browser" });
   } catch (error) {
     if (error instanceof SyntaxError) {
       toastOnly(false, "任务 JSON 格式有误，请检查后重试");
@@ -492,7 +494,7 @@ async function restoreCapture(): Promise<void> {
 </script>
 
 <template>
-  <div class="page-content ai-task-page">
+  <div class="ai-task-page">
     <div class="ai-dev-notice">
       <IconApp name="alert-triangle" class="icon-sm" />
       <span>

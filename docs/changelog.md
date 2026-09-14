@@ -2,6 +2,14 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-14 AI 生成并入「任务」页第三个 Tab）
+
+- AI 生成任务从独立导航项改为「任务」页第三个 Tab（`/tasks/ai`），与「浏览器任务」「脚本」并列。此前它在任务页是右上角一个按钮（`tasks-ai-link`），跳走后再保存又得自己找回任务列表；并入同一页后「生成 → 保存 → 看到成果」不再跨页，且 Tab 由子路由表达（刷新、深链直达，与另两个 Tab 同一套语义）。
+- 路由：`/tasks` 子路由新增 `tasks-ai`；旧 `/ai-task` 改为 `redirect: { name: "tasks-ai" }`（与 `/scripts → tasks-scripts` 同口径），书签与旧深链不失效。`editorGuard` 的 `/tasks` 前缀判定无需改动即已覆盖新路径。
+- `TasksView`：Tab 判定改为按子路由**末段**匹配（`browser`/`scripts`/`ai`）——原先的 `startsWith("/tasks/scripts")` 写法在 `/tasks/ai` 上会误判为浏览器任务；Tab 栏补 `role="tablist"` / `role="tab"` / `aria-selected`，屏幕阅读器可识别选中态。
+- `AiTaskView`：外层去掉 `.page-content`（改由容器持有，避免同一页出现两个入场动画容器），保存成功后跳到「浏览器任务」Tab 并把提示改为「已在「浏览器任务」中显示」，不再停在原处让用户看不到刚保存的成果；`.ai-task-page` 自行补入场动画，切 Tab 时与另两个 Tab 观感一致。
+- 导航一致性：侧栏本就无「AI 任务」项（上一轮已移除），此处同步删掉 `TasksView` 里的 AI 按钮与 `.tasks-ai-link` 样式（含 `responsive.css` 窄屏规则）；`BrowserTasksPanel` 帮助栏的「用 AI 生成」链路由 `ai-task` 改指 `tasks-ai`，窄屏下三个 Tab `flex: 1 1 30%` 均分。
+
 ## 开发中（2026-09-14 直连脚本 ctx 暴露本机 IP 与 MAC）
 
 - **补齐上一轮记录的缺口**：eportal / Dr.COM 类门户的字段加密密钥由**来源 IP** 推导（密钥 = 来源 IP 各字符 ASCII 的 XOR 累积），而脚本 `ctx` 只有 `username`/`password`/`auth_url`/`page`，此前只能绕道「门户首页把来源 IP 渲染进 HTML → 从 `ctx.page` 正则提取」，对不回显 IP 的门户直接无法复现。现 `ctx` 新增 `local_ip`（本机主用接口 IPv4）与 `local_mac`（同接口 MAC），二者在 `POST /api/profiles/http-login-test`（发送测试请求）与正式自动登录**同源生效**。

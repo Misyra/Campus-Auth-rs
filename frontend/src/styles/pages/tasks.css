@@ -8,13 +8,6 @@
   min-width: 120px;
 }
 
-.tasks-ai-link {
-  margin-left: auto;
-  align-self: center;
-  flex-shrink: 0;
-  text-decoration: none;
-}
-
 .tasks-grid {
   display: grid;
   /* 左（任务列表）宽右（编辑器/帮助）窄：列表行含名称+按钮组，是空间大头；
