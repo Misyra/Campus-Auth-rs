@@ -5,7 +5,7 @@
 ## 开发中（2026-09-14 修正前端类型检查从未生效）
 
 - **缺陷**：`frontend/tsconfig.json` 是 TypeScript「解决方案」文件（`"files": []` + `references`），而裸跑 `vue-tsc --noEmit` 不会遍历 `references`，因此**不检查任何文件、恒返回 0**。`npm run build` 里的类型检查步骤、以及 CI 依赖的 `npm run build` 长期是空检查：本轮一度出现「类型检查通过、但代码调用了已删除方法」（`TasksView` 调 `useTasks().setActiveTask`）才暴露。
-- 修复：`build` 脚本与新增的 `typecheck` 脚本改用 `vue-tsc --noEmit -p tsconfig.app.json`（`app` project 含 `src/**/*.vue`）。已验证该调用能捕获真实错误（注入未定义标识符即报 TS2304、退出码 2），裸跑则漏报。CI 无需另改——其前端步骤均走 `npm run build`。
+- 修复：`build` 脚本与新增的 `typecheck` 脚本改用 `vue-tsc --noEmit -p tsconfig.app.json`（`app` project 含 `src/**/*.vue`）。已验证该调用能捕获真实错误（注入未定义标识符即报 TS2304、退出码 2），裸跑则漏报。CI 的 `frontend-python` job 增加独立的「前端类型检查（vue-tsc）」步骤（并把 `npm ci` 提为前置步骤，避免同 job 内重复安装）：此前检查只隐含在 `npm run build` 中，失败会混在构建日志里难以辨认——这正是它长期失效却无人察觉的原因之一。
 - 顺带修复该检查暴露的既有错误：`AccountSettings.vue` 把 `Ref<string>` 直接绑定给期望 `string` 的 `password` 属性（改为解构出 `value` 传入）；`useConfig.test.ts` 的 `patchMock` 声明为零参签名导致 `calls[0][0]` 越界，以及 `patch` 包装里 `as []` 断言抹掉实参。
 
 ## 开发中（2026-09-14 启用任务改为按方案绑定）

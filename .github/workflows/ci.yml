@@ -170,9 +170,19 @@ jobs:
           enable-cache: true
           cache-dependency-glob: python_worker/uv.lock
 
+      # 类型检查独立成步：此前它只隐含在 npm run build 里，
+      # 一旦失败会混在构建日志中难以辨认（曾因此长期未发现检查本身失效）。
+      - name: 安装前端依赖
+        working-directory: frontend
+        run: npm ci
+
+      - name: 前端类型检查（vue-tsc）
+        working-directory: frontend
+        run: npm run typecheck
+
       - name: 前端单元测试（vitest）
         working-directory: frontend
-        run: npm ci && npm test
+        run: npm test
 
       - name: Python Worker 语法检查
         run: python -m compileall python_worker
