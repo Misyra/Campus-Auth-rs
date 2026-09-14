@@ -19,6 +19,10 @@
      min-width:0 防 grid 子项被长代码行撑破视口（帮助栏溢出缺陷） */
   grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
   gap: var(--space-md);
+  /* 两列各按内容高度排布。stretch（默认）会把「任务列表」卡片拉到与右侧「JSON 配置
+     说明」等高：实测列表只有 1 行时左卡高 904px 而内容仅 283px，空出 621px 的带边框
+     空白框，视觉上像「列表坏了」。右列长是常态（帮助/编辑器），故让左列收到内容高。 */
+  align-items: start;
 }
 
 .tasks-grid > .card {

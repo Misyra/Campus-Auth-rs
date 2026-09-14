@@ -13,6 +13,7 @@
 - **AI 页 `.form-row--wide` 单子元素时右侧空 733px**：该变体是「窄列 + 宽列」两列模板，而 Base URL 那一行只有 1 个字段，被压在 359px、右侧 733px 空白。修法：`.form-row--wide > :only-child { grid-column: 1 / -1 }`。复测输入框 359→1092px（占满）。
 - **AI 页三个字段挤在两列网格里**：`.form-row` 只有两列，而「模型名 / API Key / 最长输出」三个字段同处一行，第三个被挤到次行首列、右侧空着且与 API Key 的说明文字错位。修法：拆成「模型名 + 最长输出」「API Key」两行。
 - **同行主/次按钮高度差 1px**：`.btn-primary` 是 `border: none`，`.btn-secondary` 有 1px 边框，同处一行的按钮组因此 40px vs 41px（实测 AI 页保存配置 40、测试连接 41）。修法：主按钮改 `border: 1px solid transparent`，与 `.btn` 保持同一盒模型。复测四个按钮均 41px。
+- **任务网格两列等高拉伸产生大片空框**：`.tasks-grid` 默认 `align-items: stretch`，会把「任务列表」卡片拉到与右列等高——实测列表只有 1 行时左卡高 904px 而内容仅 283px，空出 621px 的带边框空白框，视觉上像「列表坏了」。右列长是常态（帮助说明/编辑器都长），故改 `align-items: start` 让左卡收到内容高；复测帮助面板态左卡 354px（body 283px）、编辑器态 354px/989px，两列各自独立、空白回到页面背景。
 - 顺带清理：任务页 Tab 栏由「满宽卡片 + 内容宽页签」改为 `width: fit-content`（3 个页签原本只占 1136px 卡片的 32%，右侧空 753px——此前靠 `margin-left:auto` 把 AI 入口推到最右，入口移入页签后空白失去依托）；`tasks.css` 中重复的 `.icon-xs`（与 `misc.css` 同名不同值）补注释说明当前生效值，未合并。
 
 ## 开发中（2026-09-14 AI 生成并入「任务」页第三个 Tab）
