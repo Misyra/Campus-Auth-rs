@@ -18,6 +18,10 @@ const config = useConfig();
 const passwordDisplay = config.passwordDisplay;
 const passwordSaved = config.passwordSaved;
 const editingPassword = config.editingPassword;
+// 直连「发送测试请求」需要明文密码：仅在用户正在输入时才有值，未输入时传空串，
+// 由后端按 profile_id 回退该方案已保存的凭据（不能用 passwordDisplay——已保存且
+// 未编辑时它是掩码串，传给后端只会拿掩码去请求）
+const { value: typedPassword } = config.password;
 const onPasswordFocus = config.onPasswordFocus;
 const onPasswordBlur = config.onPasswordBlur;
 const onPasswordInput = config.onPasswordInput;
@@ -154,7 +158,7 @@ async function detectPortalForSettings(): Promise<void> {
           :model-value="config.config.credentials"
           :profile-id="activeProfileId || undefined"
           :username="config.config.credentials.username"
-          :password="config.password.value"
+          :password="typedPassword"
           :auth-url="config.config.credentials.auth_url"
           :title="null"
         />

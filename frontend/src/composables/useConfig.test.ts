@@ -8,14 +8,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { nextTick } from "vue";
 
 const fetchMock = vi.fn();
-const patchMock = vi.fn(async () => ({}));
+// 显式声明一个参数：否则 vi.fn(async () => ({})) 推断为零参签名，
+// 取 calls[0][0] 会触发 TS2493（类型检查此前因 tsconfig 是 solution 文件而未生效）
+const patchMock = vi.fn(async (_payload: Record<string, unknown>) => ({}));
 const setLogLevelMock = vi.fn(async () => ({ message: "ok" }));
 const fetchLogLevelsMock = vi.fn(async () => ({ level: "INFO" }));
 
 vi.mock("../api", () => ({
   configApi: {
     fetch: () => fetchMock(),
-    patch: (...a: unknown[]) => patchMock(...(a as [])),
+    patch: (...a: unknown[]) => patchMock(a[0] as Record<string, unknown>),
     setLogLevel: (...a: unknown[]) => setLogLevelMock(...(a as [])),
     fetchLogLevels: () => fetchLogLevelsMock(),
   },
