@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  channelNeedsRuntimeEnvironment,
   HTTP_METHOD_OPTIONS,
   httpTestOutcomeLabel,
   loginChannelLabel,
@@ -46,5 +47,23 @@ describe("httpTestOutcomeLabel", () => {
 describe("HTTP_METHOD_OPTIONS", () => {
   it("仅含 GET/POST 且值与后端枚举字面量一致", () => {
     expect(HTTP_METHOD_OPTIONS.map((o) => o.value)).toEqual(["GET", "POST"]);
+  });
+});
+
+describe("channelNeedsRuntimeEnvironment", () => {
+  // 仪表盘据此抑制「环境未就绪」横幅：直连请求不拉起 Python Worker
+  // 与浏览器，环境缺失对它无影响；浏览器自动化必须依赖该环境
+  it("直连请求不需要运行环境", () => {
+    expect(channelNeedsRuntimeEnvironment("http")).toBe(false);
+  });
+
+  it("浏览器自动化需要运行环境", () => {
+    expect(channelNeedsRuntimeEnvironment("browser")).toBe(true);
+  });
+
+  it("缺失/未知值按需要环境处理（与默认渠道 browser 一致，宁多提示不静默漏提示）", () => {
+    expect(channelNeedsRuntimeEnvironment(undefined)).toBe(true);
+    expect(channelNeedsRuntimeEnvironment("")).toBe(true);
+    expect(channelNeedsRuntimeEnvironment("something-else")).toBe(true);
   });
 });

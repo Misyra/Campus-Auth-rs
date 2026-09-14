@@ -48,3 +48,17 @@ export const HTTP_METHOD_OPTIONS: Array<{ value: HttpLoginMethod; label: string 
   { value: "GET", label: "GET" },
   { value: "POST", label: "POST" },
 ];
+
+/**
+ * 该登录渠道是否需要 Python / 浏览器运行环境。
+ *
+ * 直连请求在 Rust 进程内完成登录，不拉起 Python Worker 与 Playwright，
+ * 因此环境未就绪（python/worker/playwright 任一缺失）对它没有任何影响——
+ * 仪表盘据此抑制「环境未就绪」横幅，避免免 Python/浏览器的用户被无意义的
+ * 提示长期打扰。浏览器自动化需要该环境。
+ */
+export function channelNeedsRuntimeEnvironment(
+  channel: LoginChannel | string | undefined,
+): boolean {
+  return channel !== "http";
+}

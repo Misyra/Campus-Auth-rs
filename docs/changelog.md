@@ -8,6 +8,13 @@
 - 修复：`build` 脚本与新增的 `typecheck` 脚本改用 `vue-tsc --noEmit -p tsconfig.app.json`（`app` project 含 `src/**/*.vue`）。已验证该调用能捕获真实错误（注入未定义标识符即报 TS2304、退出码 2），裸跑则漏报。CI 无需另改——其前端步骤均走 `npm run build`。
 - 顺带修复该检查暴露的既有错误：`AccountSettings.vue` 把 `Ref<string>` 直接绑定给期望 `string` 的 `password` 属性（改为解构出 `value` 传入）；`useConfig.test.ts` 的 `patchMock` 声明为零参签名导致 `calls[0][0]` 越界，以及 `patch` 包装里 `as []` 断言抹掉实参。
 
+## 开发中（2026-09-14 直连渠道抑制环境横幅与文档修正）
+
+- 仪表盘「Python 环境未就绪」横幅按登录渠道抑制：直连请求在 Rust 进程内完成登录，不拉起 Python Worker 与 Playwright，环境缺失对它无影响；此前横幅无条件显示，免 Python/浏览器的用户会被无意义提示长期打扰。判定收敛为 `utils/loginChannel.ts::channelNeedsRuntimeEnvironment`（未知/缺失值按"需要环境"处理，与默认渠道 browser 一致，宁多提示不静默漏提示），并在 `loginChannel.test.ts` 补 3 个用例（含变异验证：改坏判定即失败）。
+- **文档修正（`type=shell` 已移除但多处文档仍按其存在描述）**：`custom-script-guide.md` 通篇重写——原文以「`script` / `shell` 两类任务」为骨架，含 `shell_path`、`type=shell` 示例与 `TaskKind::Script/Shell` 引用，而 `ShellTaskConfig` 在源码中已完全不存在；`user-guide.md` 的「三类任务」改为「两类」并删除 `/api/shells` 端点与 `ShellTaskConfig`（端点已不存在，openapi.json 亦无此路由）；`task-manual.md` 同步。均补注历史 `type=shell` 遇到时报错并提示改用 `script`（`src/tasks/models.rs`）。
+- 顺带修正同源错误：`user-guide.md` 称 `settings.json` 为 v6 schema，实际 `CURRENT_CONFIG_VERSION = 8`；`task-manual.md` 与 `custom-script-guide.md` 称脚本可用 `{{USERNAME}}` 等模板，实际脚本路径**不做模板替换**（`build_script_command` 只把 `content` 原样写入临时文件、`args` 原样传参，`variable_resolver.py` 仅服务浏览器任务步骤层）——已限定为浏览器任务特性，并说明子进程环境变量中的 `USERNAME` 是操作系统登录名而非方案账号。
+- `plan-next.md` 移除已解决的挂账项「`shell` 类型静默失效」。
+
 ## 开发中（2026-09-14 任务页合并与脚本定位修正）
 
 - 「任务管理」与「自定义脚本」两页合并为「任务」页双 Tab：`TasksView` 改为容器（子路由 + 页签），原内容拆为 `views/tasks/BrowserTasksPanel.vue` 与 `views/tasks/ScriptsPanel.vue`。两页本就同源（`GET /api/tasks` 与 `/api/scripts` 返回同一混合列表，前端按 `task_type` 拆分）并共享拖拽排序与活跃任务语义，拆成两个导航项是历史包袱。

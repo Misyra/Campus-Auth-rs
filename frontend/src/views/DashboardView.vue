@@ -4,10 +4,12 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue"
 import { useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
 import { useEnvironment } from "@/composables/useEnvironment";
+import { useConfig } from "@/composables/useConfig";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
 import { throttleRaf } from "@/utils/debounce";
 import { LOG_SOURCE_LABELS } from "@/utils/constants";
+import { channelNeedsRuntimeEnvironment } from "@/utils/loginChannel";
 import { formatDuration, formatTimestamp, formatShortTime } from "@/utils/formatters";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
@@ -18,7 +20,17 @@ const logs = useLogs();
 const ui = useUi();
 const router = useRouter();
 const { envStatus, refreshEnv } = useEnvironment();
-const showEnvBanner = computed(() => envStatus.value != null && !envStatus.value.capability_ready);
+const config = useConfig();
+
+// 直连请求渠道在 Rust 进程内完成登录，不拉起 Python Worker 与浏览器，
+// 故环境未就绪与之无关——否则免 Python/浏览器的用户会一直看到无意义的
+// "环境未就绪"横幅。渠道来源见 GET /api/config 的 login_channel（扁平响应）。
+const showEnvBanner = computed(
+  () =>
+    channelNeedsRuntimeEnvironment(config.config.credentials.login_channel) &&
+    envStatus.value != null &&
+    !envStatus.value.capability_ready,
+);
 
 // FE2-8：延迟复查句柄须可清理——组件卸载后触发的 refreshEnv 虽是幂等 GET，
 // 但仍会更新已卸载页面关联的单例状态，提前离开时取消

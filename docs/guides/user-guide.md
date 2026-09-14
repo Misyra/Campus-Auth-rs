@@ -55,14 +55,14 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 ├── config/                  # settings.json + profiles/*.json + .auth_token（鉴权）
 ├── tasks/
 │   ├── browser/             # 浏览器任务（*.json）
-│   ├── scripts/             # 自定义脚本任务（browser/script/shell 的脚本类落此处）
+│   ├── scripts/             # 脚本任务（type=script）
 │   └── scheduled/           # 定时任务调度历史等
 ├── logs/                    # 按日归档（受 logging.retention_days 控制）
 ├── environment/             # uv / .venv / Playwright 浏览器（按需生成）
 └── update/                  # last_check.json（上次检查状态）+ staging/（下载暂存）
 ```
 
-`settings.json` 为 v6 schema（`src/config/schema.rs`），`config_version` 字段驱动迁移；密码字段落盘为 `ENC:` 前缀密文（`aes-gcm` + `zeroize`）。
+`settings.json` 为 v8 schema（`src/config/schema.rs`，当前版本见 `CURRENT_CONFIG_VERSION`），`config_version` 字段驱动迁移；密码字段落盘为 `ENC:` 前缀密文（`aes-gcm` + `zeroize`）。
 
 ## 2. Web 控制台
 
@@ -81,11 +81,10 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 4. 任务系统
 
-### 三类任务
+### 两类任务
 
-- **浏览器任务**（`tasks/browser/*.json`，`type=browser`）：Playwright 步骤序列，见《任务编写指南》。
-- **脚本任务**（`tasks/scripts/*.json`，`type=script`）：`script_path` 或 `content` + `binary_path` + `args` + `work_dir` + `timeout`（`src/tasks/models.rs::ScriptTaskConfig`）。
-- **Shell 任务**（同目录，`type=shell`）：`command` + `shell_path` + `timeout`（`ShellTaskConfig`）。
+- **浏览器任务**（`tasks/browser/*.json`，`type=browser`）：Playwright 步骤序列，见《任务编写指南》。**校园网自动登录使用的就是这一类**。
+- **脚本任务**（`tasks/scripts/*.json`，`type=script`）：`script_path` 或 `content` + `binary_path` + `args` + `work_dir` + `timeout`（`src/tasks/models.rs::ScriptTaskConfig`）。用于定时执行的辅助动作（打卡、签到等），**不参与登录认证**。
 
 > 历史 `type=shell` 已移除：遇到时反序列化明确报错并提示改用 `script`（`src/tasks/models.rs`）。同目录下曾有的 `shell` 任务需改写为 `.sh`/`.bat`/`.py` 脚本经 `binary_path` 执行。
 
@@ -116,7 +115,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 ## 6. 验证码（OCR）
 
 - 仅 `ocr` 步骤需要；依赖 `ddddocr`（约 120MB，不预声明，用时经应用内安装，用完可卸载）。
-- 在「设置·环境」页安装，装好后可用“验证码识别”上传截图试识别；OCR 偏好独立保存并通过 `uv add/remove` 对齐，安装失败不会阻断非 OCR 浏览器任务，也不会为了 OCR 单独下载 Chromium。
+- 在「设置·任务」页安装，装好后可用“验证码识别”上传截图试识别；OCR 偏好独立保存并通过 `uv add/remove` 对齐，安装失败不会阻断非 OCR 浏览器任务，也不会为了 OCR 单独下载 Chromium。
 
 ## 7. 系统托盘与开机自启
 

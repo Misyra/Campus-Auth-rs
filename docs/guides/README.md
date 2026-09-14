@@ -11,7 +11,7 @@
 
 - [任务使用手册](task-manual.md) — 日常管理、录制器、调试、API 一览
 - [任务编写指南](task-writing-guide.md) — 浏览器任务 JSON 详解（步骤类型、变量、frame、success_condition、选择器）
-- [自定义脚本指南](custom-script-guide.md) — `script` / `shell` 任务（`tasks/scripts/`）与 `POST /api/scripts/run` 直跑
+- [自定义脚本指南](custom-script-guide.md) — `script` 任务（`tasks/scripts/`）与 `POST /api/scripts/run` 直跑
 
 ## 相关链接
 

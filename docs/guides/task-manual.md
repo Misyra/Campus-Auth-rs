@@ -1,6 +1,6 @@
 # 任务使用手册
 
-任务是 Campus-Auth 的执行单元：浏览器任务用 JSON 步骤序列经 Playwright 执行，脚本/ Shell 任务经本地进程执行。文件存放在运行目录的 `tasks/browser/`（浏览器）与 `tasks/scripts/`（脚本/ Shell）下（`src/tasks/loader.rs`，`type` 缺失时默认归为浏览器任务以兼容旧 JSON）。
+任务是 Campus-Auth 的执行单元：浏览器任务用 JSON 步骤序列经 Playwright 执行，脚本任务经本地进程执行。文件存放在运行目录的 `tasks/browser/`（浏览器）与 `tasks/scripts/`（脚本）下（`src/tasks/loader.rs`，`type` 缺失时默认归为浏览器任务以兼容旧 JSON）。
 
 变量、步骤类型与字段语义见《任务编写指南》（`设置 · 任务` 页可导出），本文只讲日常使用。
 
@@ -60,7 +60,7 @@
 | `POST /api/tasks/order` | 排序 |
 | `POST /api/login` | 触发登录（执行当前方案绑定的任务） |
 | `POST /api/tasks/{id}/execute` | 执行指定任务 |
-| `GET /api/scripts` / `GET /api/shells` | 脚本 / Shell 任务过滤视图（同 `GET /api/tasks` 数据，`tasks/scripts/`） |
+| `GET /api/scripts` | 脚本任务过滤视图（同 `GET /api/tasks` 数据，`tasks/scripts/`） |
 | `POST /api/scripts/run` | 临时脚本直跑（不落盘，`ScriptTaskConfig` 即时执行） |
 | `GET /api/tasks`（脚本）| `GET /api/scripts/{id}` / `PUT /api/scripts/{id}`（脚本单体，`ps1` 被拒） |
 | `POST /api/login` | 触发登录（执行活跃任务） |
@@ -70,6 +70,6 @@
 ## 8. 常见问题
 
 - **任务执行失败**：查看日志定位到具体步骤；检查选择器是否随登录页改版失效；验证码步骤确认 OCR 已安装。
-- **任务中使用变量**：在任务 JSON 的 `variables` 字段中直接定义，步骤内以 `{{变量名}}` 引用；`{{USERNAME}}`、`{{PASSWORD}}`、`{{ISP}}`、`{{LOGIN_URL}}` 自动取当前方案配置。
+- **任务中使用变量**（仅浏览器任务）：在任务 JSON 的 `variables` 字段中直接定义，步骤内以 `{{变量名}}` 引用；`{{USERNAME}}`、`{{PASSWORD}}`、`{{ISP}}`、`{{LOGIN_URL}}` 自动取当前方案配置。脚本任务的 `content` / `args` **不做模板替换**（原样写入文件并传参），账号密码需在脚本内自行读取或硬编码。
 - **多网络环境**：不同校区 / 运营商使用`配置方案`页的多方案切换，而非为每个环境各写一套任务。
-- **脚本任务怎么写**：见 [自定义脚本指南](custom-script-guide.md)（`script`/`shell` 两类，`py`/`bat`/`sh`/`exe` 扩展名，`ps1` 不支持）；浏览器任务见 [任务编写指南](task-writing-guide.md)。
+- **脚本任务怎么写**：见 [自定义脚本指南](custom-script-guide.md)（`py`/`bat`/`sh`/`exe` 扩展名，`ps1` 不支持）；浏览器任务见 [任务编写指南](task-writing-guide.md)。
