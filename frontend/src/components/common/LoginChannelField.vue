@@ -203,7 +203,7 @@ async function runTest(): Promise<void> {
         <textarea id="http-login-script" v-model="modelValue.http_crypto_script" class="http-script-editor" rows="8"
           placeholder="function transform(ctx) {&#10;  return { password: md5(ctx.password) };&#10;}"></textarea>
         <span class="hint">
-          定义 transform(ctx)，可读取 username、password、auth_url、page。可用 md5、sha1、sha256、hmac_sha256、base64_encode、base64_decode、hex_encode、url_encode、now_ms。
+          定义 transform(ctx)，可读取 username、password、auth_url、page、local_ip、local_mac（本机局域网 IPv4 与 MAC，取不到时为空串）。可用 md5、sha1、sha256、hmac_sha256、base64_encode、base64_decode、hex_encode、url_encode、now_ms。
         </span>
       </div>
 

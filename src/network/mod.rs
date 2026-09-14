@@ -11,6 +11,7 @@ pub use detect::{
     WindowsDetect, create_detector,
 };
 pub use interfaces::{
-    VIRTUAL_IF_PATTERNS_LINUX, VIRTUAL_IF_PATTERNS_MACOS, VIRTUAL_IF_PATTERNS_WINDOWS,
-    filter_interfaces, is_excluded, virtual_if_patterns,
+    LocalAddress, VIRTUAL_IF_PATTERNS_LINUX, VIRTUAL_IF_PATTERNS_MACOS,
+    VIRTUAL_IF_PATTERNS_WINDOWS, filter_interfaces, is_excluded, local_address_from,
+    select_primary_interface, virtual_if_patterns,
 };

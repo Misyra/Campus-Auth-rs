@@ -465,6 +465,33 @@ impl MonitorService {
         }
     }
 
+    /// 读取本机主用接口的地址（IPv4 + MAC），供直连脚本 `ctx.local_ip` /
+    /// `ctx.local_mac` 使用。
+    ///
+    /// 部分校园门户（如 eportal / Dr.COM）的字段加密密钥由**来源 IP** 推导，
+    /// 没有本机 IP 就无法在直连渠道复现。查询失败或平台不支持时返回空值而非
+    /// 报错：地址只是脚本入参的一部分，缺了它脚本自身可回退到从页面提取。
+    ///
+    /// 网卡为空时返回「无地址」而不是错误——脚本据此判断拿不到本机 IP。
+    pub async fn local_address(&self) -> crate::network::LocalAddress {
+        match tokio::time::timeout(
+            INTERFACE_CHECK_TIMEOUT,
+            self.network_detect.list_interfaces(),
+        )
+        .await
+        {
+            Ok(Ok(list)) => crate::network::local_address_from(&list),
+            Ok(Err(e)) => {
+                debug!("查询本机地址失败（脚本将收到空 local_ip）: {e}");
+                crate::network::LocalAddress::default()
+            }
+            Err(_) => {
+                debug!("查询本机地址超时（脚本将收到空 local_ip）");
+                crate::network::LocalAddress::default()
+            }
+        }
+    }
+
     /// 读取累计指标快照（G23）
     ///
     /// 返回 `(probe_total, login_total)` 的当前计数器值，供 Engine 在探测状态

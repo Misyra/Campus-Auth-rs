@@ -448,7 +448,17 @@ impl LoginOrchestrator {
         // 1a-2. 直连请求参数构造（URL 缺失/格式非法立即终态）
         let http_plan = if use_http {
             match crate::login::http_login::HttpLoginRequest::from_profile(profile) {
-                Ok(p) => Some(p),
+                Ok(p) => {
+                    // 本机地址（脚本 ctx.local_ip / ctx.local_mac）仅在配置了加密
+                    // 脚本时查询：网卡探测要 spawn 子进程，无脚本则无人读取这两字段。
+                    // 查询失败不阻断登录——脚本自身可回退到从页面提取。
+                    if p.uses_crypto_script() {
+                        let addr = self.monitor.local_address().await;
+                        Some(p.with_local_address(&addr))
+                    } else {
+                        Some(p)
+                    }
+                }
                 Err(e) => {
                     return self
                         .immediate_handle(source, false, e, profile.id.clone())

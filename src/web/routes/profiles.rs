@@ -225,9 +225,27 @@ pub async fn test_http_login(
         username: body.username.trim().to_string(),
         password,
         auth_url: body.auth_url.trim().to_string(),
+        local_ip: String::new(),
+        local_mac: String::new(),
         fetch_page: body.fetch_page,
     };
     request.validate().map_err(ApiError::BadRequest)?;
+    // 测试端点与正式登录同源：仅有加密脚本时才查本机地址（脚本可用 local_ip
+    // 推导密钥）；否则白跑一次网卡探测。测试端点无 MonitorService 注入，
+    // 每次自建检测器（与 detect_profile 同口径）。
+    let request = if request.uses_crypto_script() {
+        let detector = crate::network::detect::create_detector();
+        let addr = match detector.list_interfaces().await {
+            Ok(list) => crate::network::local_address_from(&list),
+            Err(e) => {
+                tracing::debug!("测试端点查询本机地址失败（脚本将收到空 local_ip）: {e}");
+                crate::network::LocalAddress::default()
+            }
+        };
+        request.with_local_address(&addr)
+    } else {
+        request
+    };
     let report = run_http_login_once(&request).await;
     registration.finish();
     Ok(data(serde_json::json!({

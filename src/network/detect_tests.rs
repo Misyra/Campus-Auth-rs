@@ -333,7 +333,115 @@ async fn test_run_ipconfig_actual() {
     }
 }
 
+// ============ normalize_mac 测试 ============
+
+#[test]
+fn test_normalize_mac_windows_dash_form() {
+    // Windows ipconfig 用连字符，统一规范化为冒号小写
+    assert_eq!(
+        normalize_mac("00-1A-2B-3C-4D-5E").as_deref(),
+        Some("00:1a:2b:3c:4d:5e")
+    );
+}
+
+#[test]
+fn test_normalize_mac_colon_form_passthrough() {
+    assert_eq!(
+        normalize_mac("00:1a:2b:3c:4d:5e").as_deref(),
+        Some("00:1a:2b:3c:4d:5e")
+    );
+}
+
+#[test]
+fn test_normalize_mac_uppercase_lowered() {
+    assert_eq!(
+        normalize_mac("AA:BB:CC:DD:EE:FF").as_deref(),
+        Some("aa:bb:cc:dd:ee:ff")
+    );
+}
+
+#[test]
+fn test_normalize_mac_rejects_wrong_length() {
+    // 太短 / 太长都不是 MAC，不得被截断或补齐
+    assert_eq!(normalize_mac("00:1a:2b"), None);
+    assert_eq!(normalize_mac("00:1a:2b:3c:4d:5e:6f"), None);
+    assert_eq!(normalize_mac(""), None);
+}
+
+#[test]
+fn test_normalize_mac_rejects_non_hex_text() {
+    // 关键字行里的文本片段（如 "link/ether" 若被误传）不得当成 MAC
+    assert_eq!(normalize_mac("link/ether"), None);
+    assert_eq!(normalize_mac("00-1A-2B-3C-4D-XY"), None);
+}
+
+#[test]
+fn test_extract_mac_after_keyword_linux_style() {
+    // Linux `ip addr`：关键字后是值，值本身含冒号——不能按「最后冒号」切
+    let line = "    link/ether 00:1a:2b:3c:4d:5e brd ff:ff:ff:ff:ff:ff";
+    assert_eq!(
+        extract_mac_after_keyword(line, "link/ether").as_deref(),
+        Some("00:1a:2b:3c:4d:5e")
+    );
+}
+
+#[test]
+fn test_extract_mac_after_keyword_macos_style() {
+    let line = "\tether 00:1a:2b:3c:4d:5e";
+    assert_eq!(
+        extract_mac_after_keyword(line, "ether").as_deref(),
+        Some("00:1a:2b:3c:4d:5e")
+    );
+}
+
+#[test]
+fn test_extract_mac_after_keyword_absent() {
+    // 关键字不存在时返回 None（不得把别的字段当 MAC）
+    assert_eq!(extract_mac_after_keyword("link/ether", "link/ether"), None);
+    assert_eq!(
+        extract_mac_after_keyword("some other line", "link/ether"),
+        None
+    );
+}
+
+#[test]
+fn test_extract_mac_after_colon_windows_label() {
+    // Windows 标签含冒号且值内无冒号（连字符分隔），按最后冒号切是正确的
+    let line = "   物理地址. . . . . . . . . . . . . : 00-1A-2B-3C-4D-5E";
+    assert_eq!(
+        extract_mac_after_colon(line).as_deref(),
+        Some("00:1a:2b:3c:4d:5e")
+    );
+}
+
+#[test]
+fn test_parse_ipconfig_extracts_mac() {
+    let input = "以太网适配器 以太网:\r\n\r\n   媒体状态  . . . . . . . . . . . . : 媒体已连接\r\n   物理地址. . . . . . . . . . . . . : 00-1A-2B-3C-4D-5E\r\n   IPv4 地址 . . . . . . . . . . . . : 192.168.1.100(首选)\r\n   默认网关. . . . . . . . . . . . . : 192.168.1.1\r\n";
+    let interfaces = parse_ipconfig(input);
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].mac.as_deref(), Some("00:1a:2b:3c:4d:5e"));
+}
+
 // ============ parse_ip_addr 测试（Linux 格式） ============
+
+#[test]
+fn test_parse_ip_addr_extracts_mac() {
+    let input = r#"1: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP
+    link/ether 00:1a:2b:3c:4d:5e brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.100/24 brd 192.168.1.255 scope global eth0
+"#;
+    let interfaces = parse_ip_addr(input);
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].mac.as_deref(), Some("00:1a:2b:3c:4d:5e"));
+}
+
+#[test]
+fn test_parse_ifconfig_extracts_mac() {
+    let input = "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\tether 00:1a:2b:3c:4d:5e\n\tinet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255\n";
+    let interfaces = parse_ifconfig(input);
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].mac.as_deref(), Some("00:1a:2b:3c:4d:5e"));
+}
 
 #[test]
 fn test_parse_ip_addr_basic() {

@@ -71,6 +71,10 @@ pub(crate) struct HttpLoginRequest {
     pub password: Zeroizing<String>,
     /// 认证地址（供脚本 ctx.auth_url 与登录页抓取）
     pub auth_url: String,
+    /// 本机主用接口 IPv4（供脚本 ctx.local_ip；取不到时为空串）
+    pub local_ip: String,
+    /// 本机主用接口 MAC（供脚本 ctx.local_mac；取不到时为空串）
+    pub local_mac: String,
     /// 执行脚本前是否抓取认证页原文（正式登录默认开启，测试端点可关闭）
     pub fetch_page: bool,
 }
@@ -93,6 +97,10 @@ impl HttpLoginRequest {
             username: profile.username.trim().to_string(),
             password: Zeroizing::new(profile.password.to_string()),
             auth_url: profile.auth_url.trim().to_string(),
+            // 本机地址需异步查询网卡，由调用方（持有 MonitorService）按需填充，
+            // 见 [`HttpLoginRequest::with_local_address`]
+            local_ip: String::new(),
+            local_mac: String::new(),
             fetch_page: true,
         };
         request.validate()?;
@@ -129,9 +137,22 @@ impl HttpLoginRequest {
         Ok(())
     }
 
-    /// 是否配置了加密脚本
-    fn has_script(&self) -> bool {
+    /// 是否存在用户加密脚本。
+    ///
+    /// 调用方据此决定是否值得查询本机地址（见 [`Self::with_local_address`]）：
+    /// 无脚本时脚本根本不会执行，`local_ip`/`local_mac` 也就无人读取。
+    pub fn uses_crypto_script(&self) -> bool {
         !self.crypto_script.trim().is_empty()
+    }
+
+    /// 填充本机地址（供脚本 `ctx.local_ip` / `ctx.local_mac`）。
+    ///
+    /// 仅在配置了加密脚本时才值得调用：网卡查询要 spawn `ipconfig`/`ip` 子进程
+    /// （带 30s 缓存），无脚本时登录流程根本不会读这两个字段，白跑一次探测。
+    pub fn with_local_address(mut self, addr: &crate::network::LocalAddress) -> Self {
+        self.local_ip = addr.ipv4.clone();
+        self.local_mac = addr.mac.clone();
+        self
     }
 }
 
@@ -183,9 +204,13 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     vars.insert("username".to_string(), req.username.clone());
     vars.insert("password".to_string(), req.password.to_string());
     vars.insert("auth_url".to_string(), req.auth_url.clone());
+    // 本机地址同样注册为占位符：脚本可以不用 ctx 而直接在 URL/body 里写
+    // {local_ip}，也能在 transform 中引用；取不到时为空串（脚本须容忍）
+    vars.insert("local_ip".to_string(), req.local_ip.clone());
+    vars.insert("local_mac".to_string(), req.local_mac.clone());
 
     let mut script_error = None;
-    if req.has_script() {
+    if req.uses_crypto_script() {
         // 登录页原文 best effort 抓取：失败置空串，脚本须容忍缺失
         let page = if req.fetch_page {
             fetch_login_page(&req.auth_url).await
@@ -197,6 +222,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             &req.username,
             &req.password,
             &req.auth_url,
+            (&req.local_ip, &req.local_mac),
             page,
         )
         .await
@@ -519,7 +545,9 @@ fn collect_secrets(vars: &BTreeMap<String, String>) -> Vec<String> {
     let mut secrets = Vec::new();
     for (key, v) in vars {
         // auth_url 是公开配置值，仅作为模板便利字段，不属于凭据或脚本产出。
-        if key == "auth_url" {
+        // local_ip / local_mac 同理：调用方自己的机器地址，非用户秘密；且它们
+        // 常出现在「IP 不匹配」这类门户诊断文案里，脱敏会把排查线索一并遮掉。
+        if matches!(key.as_str(), "auth_url" | "local_ip" | "local_mac") {
             continue;
         }
         if v.is_empty() {
@@ -554,22 +582,31 @@ fn redact_url(url: &str, secrets: &[String]) -> String {
 /// 在无 IO 沙箱内执行用户加密脚本（阻塞调用，内部走 spawn_blocking + 墙钟超时）
 ///
 /// 契约：脚本需定义 `function transform(ctx)`，返回对象；其字符串/数字/布尔
-/// 字段成为可被模板引用的占位符值。ctx 含 `username/password/auth_url/page`。
+/// 字段成为可被模板引用的占位符值。ctx 含
+/// `username/password/auth_url/page/local_ip/local_mac`。
+///
+/// `local` 为本机主用接口的 (IPv4, MAC)，取不到时均为空串——部分门户（eportal /
+/// Dr.COM）的字段密钥由来源 IP 推导，没有它就只能从页面里找补。
 async fn execute_crypto_script(
     script: &str,
     username: &str,
     password: &Zeroizing<String>,
     auth_url: &str,
+    local: (&str, &str),
     page: String,
 ) -> Result<BTreeMap<String, String>, String> {
     let script = script.to_string();
     let username = username.to_string();
     let password = Zeroizing::new(password.to_string());
     let auth_url = auth_url.to_string();
+    let local_ip = local.0.to_string();
+    let local_mac = local.1.to_string();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let result = run_script_in_sandbox(&script, &username, &password, &auth_url, page);
+        let result = run_script_in_sandbox(
+            &script, &username, &password, &auth_url, &local_ip, &local_mac, page,
+        );
         // 接收端已超时丢弃时发送失败，静默即可
         let _ = tx.send(result);
     });
@@ -585,11 +622,14 @@ async fn execute_crypto_script(
 }
 
 /// boa 沙箱执行：注册内置函数 → eval 脚本 → 调用 transform(ctx) → 序列化返回值
+#[allow(clippy::too_many_arguments)]
 fn run_script_in_sandbox(
     script: &str,
     username: &str,
     password: &Zeroizing<String>,
     auth_url: &str,
+    local_ip: &str,
+    local_mac: &str,
     page: String,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut context = Context::default();
@@ -611,6 +651,8 @@ fn run_script_in_sandbox(
             "password": password.as_str(),
             "auth_url": auth_url,
             "page": page,
+            "local_ip": local_ip,
+            "local_mac": local_mac,
         }),
         &mut context,
     )
@@ -785,6 +827,8 @@ mod tests {
             username: "abc".into(),
             password: Zeroizing::new("abcdef".into()),
             auth_url: "http://portal.example/login".into(),
+            local_ip: String::new(),
+            local_mac: String::new(),
             fetch_page: false,
         }
     }
@@ -837,6 +881,8 @@ mod tests {
             "user",
             &password,
             "http://portal.example/",
+            "",
+            "",
             String::new(),
         )
         .unwrap();
@@ -854,10 +900,50 @@ mod tests {
             "",
             &password,
             "",
+            "",
+            "",
             String::new(),
         )
         .unwrap_err();
         assert!(error.contains("Base64 解码失败"), "{error}");
+    }
+
+    /// ctx 暴露本机地址：eportal / Dr.COM 类门户的字段密钥由来源 IP 推导，
+    /// 没有 ctx.local_ip 就无法在直连渠道复现（见 changelog）。
+    #[test]
+    fn script_ctx_exposes_local_address() {
+        let password = Zeroizing::new("pw".to_string());
+        let values = run_script_in_sandbox(
+            "function transform(ctx) { return { ip: ctx.local_ip, mac: ctx.local_mac }; }",
+            "user",
+            &password,
+            "http://portal.example/",
+            "10.20.30.40",
+            "00:1a:2b:3c:4d:5e",
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(values["ip"], "10.20.30.40");
+        assert_eq!(values["mac"], "00:1a:2b:3c:4d:5e");
+    }
+
+    /// 取不到本机地址时 ctx 字段为空串（而非 undefined/报错），脚本据此可
+    /// 判断并回退到从页面提取——脚本不应因为拿不到 IP 就崩掉。
+    #[test]
+    fn script_ctx_local_address_empty_when_unknown() {
+        let password = Zeroizing::new("pw".to_string());
+        let values = run_script_in_sandbox(
+            "function transform(ctx) { return { ip: ctx.local_ip, hasIp: ctx.local_ip.length > 0 }; }",
+            "user",
+            &password,
+            "",
+            "",
+            "",
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(values["ip"], "");
+        assert_eq!(values["hasIp"], "false");
     }
 
     #[test]
@@ -865,6 +951,33 @@ mod tests {
         assert!(HttpLoginRequest::validate_url("https://portal.example/login").is_ok());
         assert!(HttpLoginRequest::validate_url("file:///tmp/login").is_err());
         assert!(HttpLoginRequest::validate_url("https://").is_err());
+    }
+
+    /// 本机地址不参与脱敏：它常出现在「IP 不匹配」这类门户诊断文案里，
+    /// 遮掉就等于把排查线索一并抹除（且它并非用户秘密）。
+    #[test]
+    fn collect_secrets_excludes_local_address_and_auth_url() {
+        let mut vars = BTreeMap::new();
+        vars.insert("username".to_string(), "alice".to_string());
+        vars.insert("password".to_string(), "s3cret".to_string());
+        vars.insert("auth_url".to_string(), "http://10.0.0.1/".to_string());
+        vars.insert("local_ip".to_string(), "192.168.123.210".to_string());
+        vars.insert("local_mac".to_string(), "00:1a:2b:3c:4d:5e".to_string());
+        let secrets = collect_secrets(&vars);
+        assert!(secrets.contains(&"alice".to_string()), "账号应脱敏");
+        assert!(secrets.contains(&"s3cret".to_string()), "密码应脱敏");
+        assert!(
+            !secrets.contains(&"192.168.123.210".to_string()),
+            "本机 IP 不应脱敏（否则 IP 不匹配类诊断无法排查）：{secrets:?}"
+        );
+        assert!(
+            !secrets.contains(&"00:1a:2b:3c:4d:5e".to_string()),
+            "本机 MAC 不应脱敏"
+        );
+        assert!(
+            !secrets.contains(&"http://10.0.0.1/".to_string()),
+            "auth_url 不应脱敏"
+        );
     }
 
     /// 以指定 charset 编码响应体返回（GBK 等非 UTF-8 门户场景）

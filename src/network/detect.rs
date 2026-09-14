@@ -61,6 +61,63 @@ pub struct InterfaceInfo {
     pub is_wifi: bool,
     /// WiFi SSID（仅 WiFi 接口）
     pub ssid: Option<String>,
+    /// MAC 地址（规范化为小写冒号分隔 `aa:bb:cc:dd:ee:ff`；解析不出时为 None）。
+    ///
+    /// 与 ipv4 不同，MAC 缺失不影响接口本身的可用性——部分虚拟/隧道适配器
+    /// 无物理地址，因此这里是 Option 而非让整个接口被过滤掉。
+    pub mac: Option<String>,
+}
+
+/// 把各平台输出的 MAC 原文规范化为小写冒号分隔形式。
+///
+/// 三平台格式各异（Windows `00-1A-2B-3C-4D-5E`、Linux/macOS `00:1a:2b:...`），
+/// 统一在此收口，消费方（直连脚本 `ctx.local_mac`）无需再分辨平台。
+/// 仅接受恰好 12 个十六进制字符（允许 `:`/`-`/`.`/空格分隔），其余一律拒绝——
+/// 宽松匹配会把 `link/ether` 这类文本片段误当 MAC。
+pub fn normalize_mac(raw: &str) -> Option<String> {
+    let hex: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    // 非分隔字符混入即拒绝，避免 "00-1A xyz" 之类被静默吞掉
+    let only_separators = raw
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '-' | '.' | ' ' | '\t'));
+    if hex.len() != 12 || !only_separators {
+        return None;
+    }
+    Some(
+        (0..6)
+            .map(|i| &hex[i * 2..i * 2 + 2])
+            .collect::<Vec<_>>()
+            .join(":"),
+    )
+}
+
+/// 从一行中提取「关键字后的首个字段」作为 MAC 候选。
+///
+/// Linux `ip addr`（`link/ether 00:1a:2b:3c:4d:5e brd ...`）与 macOS `ifconfig`
+/// （`ether 00:1a:2b:3c:4d:5e`）均为此形态。不能用「取最后一个冒号之后」的办法：
+/// 这两个值本身就含冒号，会切到 `ff` 这类尾段。
+fn extract_mac_after_keyword(line: &str, keyword: &str) -> Option<String> {
+    let mut tokens = line.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == keyword {
+            return tokens.next().and_then(normalize_mac);
+        }
+    }
+    None
+}
+
+/// 从一行「标签: 值」中提取 MAC（Windows `ipconfig` 的 `物理地址 . . . : 00-1A-...`）。
+///
+/// 取最后一个冒号之后：标签本身含冒号（中英文均如此），且 Windows 的 MAC 用
+/// 连字符分隔，值内无冒号，故最后一个冒号即标签与值的分界。
+fn extract_mac_after_colon(line: &str) -> Option<String> {
+    let idx = line.rfind(':')?;
+    let token = line[idx + 1..].split_whitespace().next()?;
+    normalize_mac(token)
 }
 
 /// 执行系统命令并返回 stdout，带超时
@@ -180,6 +237,7 @@ fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
 fn parse_adapter_block(header: &str, block: &str) -> Option<InterfaceInfo> {
     let mut ipv4: Option<Ipv4Addr> = None;
     let mut gateway: Option<Ipv4Addr> = None;
+    let mut mac: Option<String> = None;
     let mut media_disconnected = false;
     for line in block.lines() {
         let trimmed = line.trim();
@@ -187,6 +245,12 @@ fn parse_adapter_block(header: &str, block: &str) -> Option<InterfaceInfo> {
         if trimmed.contains("IPv4 地址") || trimmed.contains("IPv4 Address") {
             if let Some(ip) = extract_ipv4(trimmed) {
                 ipv4 = Some(ip);
+            }
+        }
+        // 物理地址（中英文标签兼容）
+        if trimmed.contains("物理地址") || trimmed.contains("Physical Address") {
+            if let Some(parsed) = extract_mac_after_colon(trimmed) {
+                mac = Some(parsed);
             }
         }
         // 默认网关（中英文标签兼容）
@@ -229,6 +293,7 @@ fn parse_adapter_block(header: &str, block: &str) -> Option<InterfaceInfo> {
         gateway,
         is_wifi,
         ssid: None,
+        mac,
     })
 }
 
@@ -519,6 +584,7 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
     let mut result = Vec::new();
     let mut current_name = String::new();
     let mut current_ipv4: Option<Ipv4Addr> = None;
+    let mut current_mac: Option<String> = None;
     let mut current_is_up = false;
     let mut in_block = false;
 
@@ -552,12 +618,14 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
                             gateway: None,
                             is_wifi,
                             ssid: None,
+                            mac: current_mac.clone(),
                         });
                     }
                 }
             }
             current_name = name.to_string();
             current_ipv4 = None;
+            current_mac = None;
             current_is_up = line
                 .split_once('<')
                 .and_then(|(_, tail)| tail.split_once('>'))
@@ -577,6 +645,12 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
         {
             current_ipv4 = Some(ip);
         }
+        // MAC 行: "    link/ether 00:1a:2b:3c:4d:5e brd ff:ff:ff:ff:ff:ff"
+        if trimmed.starts_with("link/ether")
+            && let Some(mac) = extract_mac_after_keyword(trimmed, "link/ether")
+        {
+            current_mac = Some(mac);
+        }
     }
     // 最后一个接口
     if in_block {
@@ -589,6 +663,7 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
                     gateway: None,
                     is_wifi,
                     ssid: None,
+                    mac: current_mac,
                 });
             }
         }
@@ -607,6 +682,7 @@ fn parse_ifconfig(text: &str) -> Vec<InterfaceInfo> {
     let mut result = Vec::new();
     let mut current_name = String::new();
     let mut current_ipv4: Option<Ipv4Addr> = None;
+    let mut current_mac: Option<String> = None;
     let mut current_is_up = false;
     let mut in_block = false;
 
@@ -624,12 +700,14 @@ fn parse_ifconfig(text: &str) -> Vec<InterfaceInfo> {
                             gateway: None,
                             is_wifi,
                             ssid: None,
+                            mac: current_mac.clone(),
                         });
                     }
                 }
             }
             current_name = line.split(':').next().unwrap_or("").trim().to_string();
             current_ipv4 = None;
+            current_mac = None;
             current_is_up = line.contains("UP");
             in_block = true;
             continue;
@@ -646,6 +724,12 @@ fn parse_ifconfig(text: &str) -> Vec<InterfaceInfo> {
         {
             current_ipv4 = Some(ip);
         }
+        // MAC 行: "	ether 00:1a:2b:3c:4d:5e"
+        if trimmed.starts_with("ether ")
+            && let Some(mac) = extract_mac_after_keyword(trimmed, "ether")
+        {
+            current_mac = Some(mac);
+        }
     }
     // 最后一个接口
     if in_block {
@@ -658,6 +742,7 @@ fn parse_ifconfig(text: &str) -> Vec<InterfaceInfo> {
                     gateway: None,
                     is_wifi,
                     ssid: None,
+                    mac: current_mac,
                 });
             }
         }

@@ -2,6 +2,18 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-14 直连脚本 ctx 暴露本机 IP 与 MAC）
+
+- **补齐上一轮记录的缺口**：eportal / Dr.COM 类门户的字段加密密钥由**来源 IP** 推导（密钥 = 来源 IP 各字符 ASCII 的 XOR 累积），而脚本 `ctx` 只有 `username`/`password`/`auth_url`/`page`，此前只能绕道「门户首页把来源 IP 渲染进 HTML → 从 `ctx.page` 正则提取」，对不回显 IP 的门户直接无法复现。现 `ctx` 新增 `local_ip`（本机主用接口 IPv4）与 `local_mac`（同接口 MAC），二者在 `POST /api/profiles/http-login-test`（发送测试请求）与正式自动登录**同源生效**。
+- 网卡地址采集：`network::InterfaceInfo` 新增 `mac: Option<String>`，三个平台解析器各自补齐 MAC 提取（Windows `ipconfig` 的「物理地址」/`Physical Address`、Linux `ip addr` 的 `link/ether`、macOS `ifconfig` 的 `ether`）。MAC 值本身含冒号，不能沿用取值到最后一个 `:` 的通用写法，故按关键字定位（`extract_mac_after_keyword`）或按标签定位（`extract_mac_after_colon`）；`normalize_mac()` 只接受 12 位十六进制（允许 `:`/`-`/`.`/空格分隔）并统一输出小写冒号形式，`link/ether` 这类非定长文本会被拒掉。
+- 主用接口选择：`network::select_primary_interface()` 按 `有网关 → 非 Wi-Fi → 列表首个` 排序，`local_address_from()` 据此产出 `LocalAddress { ipv4, mac }`（取不到均为空串）。**不是**简单取 `interfaces.first()`——多网卡机器（有线 + 无线 + 虚拟网卡）取首个常常命中虚拟网卡，得到的 IP 与 TCP 源地址不一致，脚本据此算出的密钥必然错误。
+- 查询时机：`LoginOrchestrator` 仅在 `HttpLoginRequest::uses_crypto_script()` 为真时才调 `MonitorService::local_address()`（`list_interfaces` 要 spawn `ipconfig`/`ip addr` 子进程，无脚本则无人读取这两字段）；测试端点无 `MonitorService` 注入，每次自建检测器（与 `detect_profile` 同口径）。查询失败/超时一律降级为 `LocalAddress::default()`（空串）而**不阻断登录**——地址只是脚本入参的一部分，脚本自身应容忍空值。
+- **写进日志脱敏白名单之外**：`local_ip`/`local_mac` 同时作为占位符注入 `vars`（`{local_ip}` 可用），若按默认规则视作秘密，日志会把本机 IP 打成 `***`，恰好抹掉排查「IP 不匹配」所需的唯一信息（实测：修复前显示 `IP 不匹配(...!=***)`）。故 `collect_secrets` 显式排除这两个键（与 `auth_url` 同理：调用方自己的机器地址，非用户秘密），并由用例 `collect_secrets_excludes_local_address_and_auth_url` 锁定。
+- 顺带说明**超出既定范围的一处**：本轮把 `local_ip`/`local_mac` 同时加进了模板变量表，故 `{local_ip}` 占位符在请求地址/请求头/请求体里也可用（原定范围只有脚本 `ctx`）。二者共用同一取值路径，去掉占位符侧不会更安全（值一样会进脚本），保留则少一条"为什么 ctx 有而占位符没有"的困惑；如需严格收敛回 `ctx`，删除 `run_once` 里的两行 `vars.insert` 即可。
+- 前端直连面板的脚本提示同步补上 `local_ip` / `local_mac`（并注明取不到时为空串、脚本须容忍），否则用户从界面上无从得知这两个字段存在。
+- 验证：**真机 + 真实 eportal mock**（mock 侧从 TCP 源 IP 推导密钥并解密校验明文，故成功了才证明发出的密文正确，而非只看 HTTP 200）。场景 A 用 `ctx.local_ip` 推导密钥 → `直连请求成功（HTTP 200 OK）` / `dr1003({"result":1,"msg":"认证成功"})`；场景 B 故意喂错值（用 `ctx.auth_url`）→ `invalid_credential` / `IP 不匹配(...!=192.168.123.210)`，**B 失败才使 A 的通过有意义**。目标取本机 LAN IP（非回环）以保证 TCP 源地址与 `ctx.local_ip` 一致。
+- 变异验证：去掉 MAC 长度校验 → 2 个用例失败；`select_primary_interface` 改回 `interfaces.first()` → 3 个失败；把 `local_ip`/`local_mac` 移出脱敏白名单排除项 → 1 个失败。均改回并逐字节确认复原。新增 21 个用例（MAC 归一化 5、关键字/标签提取 4、三平台解析各 1、主用接口选择 3、`local_address_from` 3、`ctx` 暴露与空值 2、脱敏排除 1）。
+
 ## 开发中（2026-09-14 修复 E2E 全链路用例仍调用已删除的全局启用任务接口）
 
 - **缺陷**：`bfe7f52` 移除了 `GET/POST /api/tasks/active*` 两个路由（启用任务改为按方案绑定），但 `tests/login_chain.rs::setup_profile_and_task` 仍在 `POST /api/tasks/active/mock-login`——CI 的 `E2E Login Chain` job 因此 5 个用例全挂：`API POST /api/tasks/active/mock-login 返回 404 Not Found：{"error":{"code":"NOT_FOUND","message":"接口不存在"}}`。
