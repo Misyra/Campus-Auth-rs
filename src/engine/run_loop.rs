@@ -6,12 +6,15 @@
 //! 处理（模式与登录结果 `LoginResult` channel 一致），命令保持即时响应。
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use chrono::{DateTime, Local, Timelike};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::{Duration, Interval};
+// 时间源统一用 tokio 时钟：冷却到期判定（cooling_down_until）与 check_timer /
+// 测试的 `tokio::time::advance` 同源。原先用 std::time::Instant 会与虚拟时钟
+// 完全解耦（advance(600s) 后 std 仅走 百微秒级），导致「冷却期满重置失败计数」
+// 这条恢复路径在任何测试中都走不到——回归保护形同虚设。
+use tokio::time::{Duration, Instant, Interval};
 
 use crate::engine::{
     Engine, EngineCommand, EngineDeps, EngineError, MAX_IDLE_SLEEP_SECS,
@@ -141,6 +144,25 @@ impl EngineInner {
             probe_result_tx,
             login_result_tx,
             notifier: Notifier::new(),
+        }
+    }
+
+    /// 冷却期满则清除冷却标记并重置失败计数。
+    ///
+    /// 恢复完整的「连续失败 N 次」预算；若只清冷却不重置计数，第二轮起会退化为
+    /// 「失败 1 次即再次冷却」。
+    ///
+    /// 单独成函数以便直接测试：该路径原先依赖 `std::time::Instant`，与测试所用
+    /// 的 tokio 虚拟时钟完全解耦，导致任何 `start_paused` 测试都走不到这里。
+    /// 现用 [`tokio::time::Instant`]（见文件头 import 注释），可被 `advance` 驱动。
+    fn clear_expired_cooling_down(&mut self) {
+        if self
+            .cooling_down_until
+            .map(|until| Instant::now() >= until)
+            .unwrap_or(false)
+        {
+            self.cooling_down_until = None;
+            self.consecutive_failures = 0;
         }
     }
 }
@@ -547,13 +569,79 @@ fn handle_network_check_with_priority(inner: &mut EngineInner, deps: &EngineDeps
     // 探测发起时的配置版本：结果回传后与当前版本比对，失配即拒绝用于登录决策
     let config_version = deps.config_service.config_version();
     tokio::spawn(async move {
+        // panic 兜底：`probe_in_flight` 的唯一复位点是结果回传（handle_probe_message），
+        // 任务若 panic，`tx` 随任务 drop、回传永不发生 → 此后每轮检测都被防重入吞掉，
+        // 自动监测静默停摆（症状是"卡死"而非崩溃，极难排障）。Drop 在 unwind 中
+        // 仍会执行，故由此守卫补发一条失败消息复位标记。
+        let mut guard = ProbeReturnGuard::new(tx.clone(), config_version);
         let msg = match monitor.check_auto_monitor().await {
             Ok(report) => ProbeMessage::Report(report, config_version),
             Err(e) => ProbeMessage::Failed(e.to_string(), config_version),
         };
         // 主循环退出后接收端已 drop：send 失败即丢弃（shutdown 弃在途探测）
-        let _ = tx.send(msg).await;
+        let _ = guard.tx.send(msg).await;
+        guard.sent = true;
     });
+}
+
+/// 探测任务的回传守卫：无论正常退出还是 panic 展开，都保证向主循环回传一条消息。
+///
+/// 主循环以「收到回传」作为 `probe_in_flight` 的复位条件，任何未回传的退出路径
+/// 都会让自动监测永久停摆。正常路径显式置 `sent = true`，守卫随即不再补发。
+struct ProbeReturnGuard {
+    tx: mpsc::Sender<ProbeMessage>,
+    config_version: u64,
+    /// 正常路径是否已自行回传（避免重复回传）
+    sent: bool,
+}
+
+impl ProbeReturnGuard {
+    fn new(tx: mpsc::Sender<ProbeMessage>, config_version: u64) -> Self {
+        Self {
+            tx,
+            config_version,
+            sent: false,
+        }
+    }
+}
+
+impl Drop for ProbeReturnGuard {
+    fn drop(&mut self) {
+        if self.sent {
+            return;
+        }
+        // Drop 不能 await：用 try_send。容量 8（见 probe_result_tx），而 probe_in_flight
+        // 保证同一时刻至多一个探测在途，即至多一条未消费消息，故不会因满载而丢。
+        // 若主循环已退出则发送失败，属预期（shutdown 弃在途探测）。
+        let _ = self.tx.try_send(ProbeMessage::Failed(
+            "探测任务异常退出（panic），已复位在途标记".to_string(),
+            self.config_version,
+        ));
+    }
+}
+
+/// 自动登录任务的回传守卫：panic 时补发失败结果，保证 `auto_login_in_flight` 复位。
+///
+/// 与 [`ProbeReturnGuard`] 同源动机：该标记的唯一复位点是 `handle_login_result`，
+/// 登录任务 panic 会让标记永不复位，自动登录从此永久失效。
+struct AutoLoginReturnGuard {
+    tx: mpsc::Sender<LoginResult>,
+    sent: bool,
+}
+
+impl Drop for AutoLoginReturnGuard {
+    fn drop(&mut self) {
+        if self.sent {
+            return;
+        }
+        let _ = self.tx.try_send(LoginResult {
+            terminal: LoginTerminal::Failed,
+            message: "自动登录任务异常退出（panic）".to_string(),
+            source: LoginSource::Auto,
+            duration: Duration::ZERO,
+            attempts: 0,
+        });
+    }
 }
 
 /// 处理探测结果回传：更新状态 → 决策登录（F5）
@@ -575,14 +663,7 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
     let pending = std::mem::replace(&mut inner.probe_pending, false);
     // 清除过期的冷却标记；冷却期满后重置失败计数，
     // 恢复完整的"连续失败 3 次"预算（否则第二轮起退化为失败 1 次即再冷却）
-    if inner
-        .cooling_down_until
-        .map(|until| Instant::now() >= until)
-        .unwrap_or(false)
-    {
-        inner.cooling_down_until = None;
-        inner.consecutive_failures = 0;
-    }
+    inner.clear_expired_cooling_down();
     let probe_config_version = msg.config_version();
     let current_config_version = deps.config_service.config_version();
     // 配置版本失配：期间发生过 reload（切换 Profile / 保存配置）。
@@ -766,9 +847,17 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
             let orchestrator = deps.orchestrator.clone();
             let tx = inner.login_result_tx.clone();
             tokio::spawn(async move {
+                // panic 兜底：`auto_login_in_flight` 的唯一复位点是结果回传
+                // （handle_login_result），任务 panic 会让标记永不复位、
+                // 自动登录永久失效。Drop 在 unwind 中仍执行，故由守卫补发。
+                let mut guard = AutoLoginReturnGuard {
+                    tx: tx.clone(),
+                    sent: false,
+                };
                 let handle = orchestrator.submit(LoginSource::Auto, None, None).await;
                 let result = handle.await_result().await;
-                let _ = tx.send(result).await;
+                let _ = guard.tx.send(result).await;
+                guard.sent = true;
             });
         }
     } else {
@@ -1009,6 +1098,104 @@ mod tests {
             login_failure_budget_action(LoginTerminal::Failed, LoginSource::Manual),
             LoginFailureBudgetAction::Preserve
         );
+    }
+
+    /// 冷却恢复路径：期满清冷却标记 + 失败计数归零（P2-13 的回归锚点）
+    ///
+    /// 该路径此前用 `std::time::Instant`，而测试用 tokio 虚拟时钟，二者完全解耦
+    /// ——`advance(300s)` 无法让 std 时钟走过冷却期，于是这条恢复逻辑**从未**被
+    /// 任何测试执行过。改用 tokio 时钟后可被 `advance` 真实驱动。
+    #[tokio::test(start_paused = true)]
+    async fn test_cooling_down_expiry_resets_failure_count() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (ltx, _lrx) = mpsc::channel(1);
+        let mut inner = EngineInner::new(tx, ltx);
+
+        // 进入冷却期：3 次失败后置位（模拟 handle_login_result 的冷却分支）
+        inner.consecutive_failures = COOLING_DOWN_THRESHOLD;
+        inner.cooling_down_until =
+            Some(Instant::now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS));
+
+        // 未到期：不得清除
+        inner.clear_expired_cooling_down();
+        assert!(inner.cooling_down_until.is_some(), "冷却未到期不应清除");
+        assert_eq!(
+            inner.consecutive_failures, COOLING_DOWN_THRESHOLD,
+            "冷却未到期不应重置失败计数"
+        );
+
+        // 推进虚拟时钟越过冷却期（此前 std 时钟不受 advance 影响，恒不到期）
+        tokio::time::advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1)).await;
+        inner.clear_expired_cooling_down();
+
+        assert!(
+            inner.cooling_down_until.is_none(),
+            "冷却期满应清除标记（若仍用 std 时钟，此处会失败）"
+        );
+        assert_eq!(
+            inner.consecutive_failures, 0,
+            "冷却期满应重置失败计数，恢复完整的连续失败预算"
+        );
+    }
+
+    /// P2-5：探测任务 panic 时守卫补发失败消息（否则 `probe_in_flight` 永久卡住）
+    ///
+    /// 主循环只在收到回传时复位 `probe_in_flight`；任务 panic 后 `tx` 随之 drop，
+    /// 回传永不发生 → 此后每轮检测被防重入吞掉，自动监测静默停摆。
+    #[tokio::test]
+    async fn test_probe_return_guard_sends_on_panic() {
+        let (tx, mut rx) = mpsc::channel::<ProbeMessage>(8);
+        // 模拟探测任务 panic：守卫在 unwind 中 drop
+        let task = tokio::spawn(async move {
+            let _guard = ProbeReturnGuard::new(tx, 42);
+            panic!("模拟探测任务 panic");
+        });
+        assert!(task.await.is_err(), "任务应 panic");
+
+        // 守卫补发的失败消息必须到达，且携带发起时的配置版本
+        let msg = rx.recv().await.expect("panic 后守卫应补发一条消息");
+        assert_eq!(msg.config_version(), 42);
+        assert!(matches!(msg, ProbeMessage::Failed(_, _)));
+    }
+
+    /// P2-5：正常路径只回传一次（守卫不得重复补发）
+    #[tokio::test]
+    async fn test_probe_return_guard_does_not_duplicate_on_success() {
+        let (tx, mut rx) = mpsc::channel::<ProbeMessage>(8);
+        {
+            let mut guard = ProbeReturnGuard::new(tx, 7);
+            guard
+                .tx
+                .send(ProbeMessage::Report(
+                    ProbeReport {
+                        evidence: ProbeEvidence::default(),
+                        assessment: ConnectivityAssessment::default(),
+                        latency_ms: 0,
+                        check_number: 1,
+                    },
+                    7,
+                ))
+                .await
+                .unwrap();
+            guard.sent = true;
+        } // 守卫在此 drop：不应再补发
+        assert!(matches!(rx.recv().await, Some(ProbeMessage::Report(_, 7))));
+        assert!(rx.try_recv().is_err(), "正常回传后守卫不得重复补发");
+    }
+
+    /// P2-5：自动登录任务 panic 时守卫补发失败结果（否则 `auto_login_in_flight` 永不复位）
+    #[tokio::test]
+    async fn test_auto_login_return_guard_sends_on_panic() {
+        let (tx, mut rx) = mpsc::channel::<LoginResult>(16);
+        let task = tokio::spawn(async move {
+            let _guard = AutoLoginReturnGuard { tx, sent: false };
+            panic!("模拟自动登录任务 panic");
+        });
+        assert!(task.await.is_err(), "任务应 panic");
+
+        let result = rx.recv().await.expect("panic 后守卫应补发登录结果");
+        assert_eq!(result.source, LoginSource::Auto);
+        assert_eq!(result.terminal, LoginTerminal::Failed);
     }
 
     #[test]
