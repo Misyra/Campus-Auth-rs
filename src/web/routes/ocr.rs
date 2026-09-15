@@ -149,15 +149,24 @@ fn dir_size_inner(path: &std::path::Path, depth: u8) -> u64 {
     total
 }
 
-/// POST /api/ocr/uninstall — 卸载 OCR（取消在途任务并移除依赖）
+/// POST /api/ocr/uninstall — 卸载 OCR（取消在途 OCR 识别任务并移除依赖）
 ///
 /// 取消全部在途 OCR 识别任务，并 `uv remove` 项目主依赖中的 ddddocr
 ///（见 `environment.remove_ocr_dep`）。卸载完成前拒绝新的识别请求。
+///
+/// 若有**其他**类型的会话在途（定时浏览器任务 / 登录 / 调试），直接拒绝而不是
+/// 照样回收：卸载必须在 Windows 上释放 onnxruntime DLL，`recycle_if_running`
+/// 是无条件强杀，会把对方的在途执行连带取消为 `Cancelled`（用户可见
+/// 「请求已取消」，看起来像自己取消的），根因却在 OCR 路径上。
 pub async fn ocr_uninstall(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
     State(operations): State<Arc<WebOperations>>,
 ) -> Result<Json<Value>, ApiError> {
+    // 前置检查：有其他会话在途时拒绝，避免回收摧毁对方在途执行
+    if bridge.session_busy() {
+        return Err(ApiError::Conflict("有任务正在执行，请稍后再试".to_string()));
+    }
     uninstall_ocr_with_registry(bridge, environment, operations.ocr()).await?;
     Ok(data(Value::String("OCR 依赖已卸载".into())))
 }
@@ -232,6 +241,8 @@ mod tests {
         respond: (bool, Value, Option<String>),
         /// runtime_ocr_capability 的预置返回值（任务 10）
         ocr_capability: Option<bool>,
+        /// session_busy 的预置返回值：模拟「定时浏览器任务/登录在途」
+        session_busy: bool,
     }
 
     impl Default for MockInner {
@@ -244,6 +255,7 @@ mod tests {
                 installed: false,
                 respond: (true, serde_json::json!({ "text": "abcd" }), None),
                 ocr_capability: None,
+                session_busy: false,
             }
         }
     }
@@ -288,6 +300,10 @@ mod tests {
 
         async fn recycle_if_running(&self) {
             self.0.lock().unwrap().recycled += 1;
+        }
+
+        fn session_busy(&self) -> bool {
+            self.0.lock().unwrap().session_busy
         }
 
         async fn shutdown(&self) {}
@@ -606,6 +622,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// uninstall：有**其他**会话在途（定时浏览器任务/登录/调试）时拒绝，
+    /// 而不是照样回收摧毁对方在途执行。
+    ///
+    /// 背景：`recycle_if_running` 是无条件强杀，卸载路径原样调用会把并发浏览器
+    /// 任务的在途请求连带取消为 `Cancelled`（用户可见「请求已取消」，根因在 OCR
+    /// 路径）。卸载必须在 Windows 上释放 onnxruntime DLL，不能简单跳过回收，
+    /// 故改为前置拒绝并给出可操作提示。
+    #[tokio::test]
+    async fn test_ocr_uninstall_rejects_when_session_busy() {
+        let (app, inner) = mock_app();
+        inner.lock().unwrap().session_busy = true;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/ocr/uninstall")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "有其他会话在途时应拒绝卸载"
+        );
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"]["code"], "CONFLICT");
+        assert_eq!(body["error"]["message"], "有任务正在执行，请稍后再试");
+
+        // 关键：拒绝时不得发生任何破坏性动作
+        let state = inner.lock().unwrap();
+        assert_eq!(state.recycled, 0, "拒绝时不得回收 Worker");
+        assert!(!state.removed, "拒绝时不得移除依赖");
+    }
+
+    /// uninstall：会话空闲时照常卸载（新检查不得误伤正常路径）
+    #[tokio::test]
+    async fn test_ocr_uninstall_proceeds_when_idle() {
+        let (app, inner) = mock_app();
+        assert!(!inner.lock().unwrap().session_busy);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/ocr/uninstall")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let state = inner.lock().unwrap();
+        assert_eq!(state.recycled, 1, "空闲时应照常回收");
+        assert!(state.removed, "空闲时应移除依赖");
     }
 
     /// uninstall：无在途请求时不产生 cancel；并发在途请求全部取消，依赖移除

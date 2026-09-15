@@ -521,6 +521,64 @@ async fn supervisor_归属回收_真实在途请求占槽时跳过() {
     handle.stop().await;
 }
 
+/// `session_busy` 必须在**真实在途请求**占槽时如实返回 true。
+///
+/// 该谓词是 OCR 卸载前置拒绝的依据（`ocr_uninstall`）：若它在真实槽位上失灵，
+/// 卸载会照常走到 `recycle_if_running` 并连带取消并发任务——即"拒绝"这道闸门
+/// 形同虚设。用真实 IPC 调用链固定，而非注入式 mock。
+#[tokio::test]
+async fn supervisor_session_busy_反映真实槽位占用() {
+    use campus_auth::bridge::BridgeApi;
+
+    let Some(venv) = locate_venv() else {
+        eprintln!("跳过 bridge_supervisor session_busy：未找到本地 Python venv");
+        return;
+    };
+    let Some(tree) = setup_worker_tree(&venv) else {
+        eprintln!("跳过 bridge_supervisor session_busy：无法创建 .venv 目录链接");
+        return;
+    };
+
+    let (bridge, handle, _config) = make_supervisor(&tree.base).await;
+    let long = Duration::from_secs(40);
+
+    // 未 spawn 任何请求前：无会话
+    assert!(!bridge.session_busy(), "无在途请求时不应报告忙");
+
+    // 预热完成后仍空闲
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, long)
+        .await;
+    assert!(!bridge.session_busy(), "预热结束（槽位已释放）后不应报告忙");
+
+    // 真实在途请求占槽 → 必须报告忙
+    let bridge_task = bridge.clone();
+    let inflight = tokio::spawn(async move {
+        bridge_task
+            .execute_with_timeout("sleep", json!({ "secs": 5, "cancel_id": "busy-1" }), long)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        bridge.session_busy(),
+        "真实在途请求占用槽位时必须报告忙（否则 OCR 卸载的前置拒绝形同虚设）"
+    );
+
+    // 请求结束、槽位释放 → 恢复空闲
+    let r = join_with_timeout(inflight, 30).await;
+    assert!(r.is_ok(), "在途请求应正常完成，实际 {r:?}");
+    // guard drop 与状态复位是异步的，给一个短窗口
+    for _ in 0..20 {
+        if !bridge.session_busy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!bridge.session_busy(), "请求结束后槽位应释放，不再报告忙");
+
+    handle.stop().await;
+}
+
 /// 带超时地等待一个返回 (T, Duration) 的 JoinHandle（测试辅助）
 async fn join_with_timeout<T>(handle: tokio::task::JoinHandle<T>, secs: u64) -> T {
     tokio::time::timeout(Duration::from_secs(secs), handle)

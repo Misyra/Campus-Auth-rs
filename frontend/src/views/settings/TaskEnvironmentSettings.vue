@@ -115,8 +115,9 @@ async function uninstallOcr() {
   try {
     await ocrApi.uninstall();
     await refreshOcrStatus();
-  } catch {
-    toastOnly(false, "OCR 依赖卸载失败，请查看后端日志后重试");
+  } catch (e) {
+    // 透出后端具体原因（如「有任务正在执行，请稍后再试」），而非笼统的失败提示
+    toastOnly(false, extractApiError(e, "OCR 依赖卸载失败，请查看后端日志后重试"));
   } finally {
     busy.ocr = false;
   }

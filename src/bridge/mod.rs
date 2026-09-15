@@ -128,6 +128,22 @@ pub trait BridgeApi: Send + Sync {
     fn debug_session_active(&self) -> bool {
         false
     }
+    /// 会话槽位是否被在途请求占用（登录 / 定时浏览器任务 / 调试会话）。
+    ///
+    /// 供 OCR **卸载**在回收 Worker 前做前置检查。卸载必须回收持有 onnxruntime
+    /// 的 Worker（Windows 不允许删除已加载的 DLL），但回收是破坏性的：若此时有
+    /// 浏览器任务在途，`force_recycle` 会连带取消它（用户可见「请求已取消」，
+    /// 根因却在 OCR 路径）。故调用方先经本方法判定，宁可拒绝本次操作也不要
+    /// 静默摧毁他人。
+    ///
+    /// 注意：OCR **安装**（后台任务）同样调用 `recycle_if_running` 且未加本检查
+    /// ——其触发概率低（一生一次的新用户配置期，通常无定时任务在跑），保持现状。
+    /// 若后续要收敛，同一谓词可直接复用。
+    ///
+    /// 默认实现返回 `false`，供内存 mock 等实现复用。
+    fn session_busy(&self) -> bool {
+        false
+    }
     /// 调试会话存续期最近一次截图的预览 URL（无会话或未截图时 `None`）。
     /// 默认实现返回 `None`，供内存 mock 等实现复用。
     fn last_screenshot_url(&self) -> Option<String> {
@@ -142,6 +158,13 @@ impl BridgeApi for BridgeSupervisor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .debug_session_open
+    }
+
+    fn session_busy(&self) -> bool {
+        // 槽位非空即视为有在途会话；debug_session_open 额外覆盖调试会话存续期
+        // （该期间槽位常驻 Some(Debug)，上面一条已能覆盖，此处仅作防御）
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.current_cancel_id.is_some() || inner.debug_session_open
     }
 
     fn last_screenshot_url(&self) -> Option<String> {

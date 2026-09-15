@@ -2,6 +2,48 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-15 修复 OCR 卸载摧毁并发浏览器任务）
+
+上一轮动态验证 P1-4 时顺带发现：`recycle_if_running`（`src/bridge/mod.rs`）是**无条件**回收，而 OCR 路由两处调用它。本次修掉其中的卸载路径。
+
+### 缺陷
+
+`POST /api/ocr/uninstall` 的流程是「暂停并取消在途 OCR 识别 → 回收 Worker → 移除依赖」。它确实有保护——`operations.pause_and_drain()`——但那个登记表**只装 OCR 识别请求**，定时浏览器任务 / 登录 / 调试都不在其中，所以拦不住。紧接着的 `bridge.recycle_if_running()` 是无条件强杀：
+
+```rust
+async fn recycle_if_running(&self) {
+    if self.has_live_worker() {
+        self.force_recycle().await;   // 谁在跑都杀
+    }
+}
+```
+
+于是「定时任务在途 + 用户点卸载 OCR」重叠时，任务的在途请求被 `trigger_all` 连带取消，**以 `Cancelled` 结束**（用户可见「执行错误: Bridge 错误: 请求已取消」——像被主动取消，实际与用户操作无关）。实测复现：并发任务在途时调 `recycle_if_running()` → 任务 `Err(Cancelled)`。
+
+触发概率低（要求两件事时间重叠），但卸载**不能**简单跳过回收——Windows 不允许删除已加载的 onnxruntime DLL，必须先把持有模型的 Worker 收掉。
+
+### 修法
+
+「先检查、有冲突就拒绝」，而不是照样回收：
+
+- `BridgeApi` 新增 `session_busy()`（`src/bridge/mod.rs`）：槽位非空 `current_cancel_id.is_some() || debug_session_open` 即视为有在途会话；默认实现返回 `false` 供内存 mock 复用。
+- `ocr_uninstall` 前置该检查，命中返回 `409 CONFLICT` +「有任务正在执行，请稍后再试」（`src/web/routes/ocr.rs`）。
+- 前端 `TaskEnvironmentSettings.vue` 的 `uninstallOcr` 改为 `extractApiError(e, 兜底文案)`，把后端具体原因透出（原为写死的「卸载失败，请查看后端日志后重试」，用户看不到真实原因）。
+- `openapi.json` 的 `/api/ocr/uninstall` 补 409 响应文档。
+
+### 未修（有意保留）
+
+**OCR 安装**路径（`ocr_install` 的后台任务）同样调用 `recycle_if_running()` 且**未加**本检查。判断为不修：安装实为一生一次（新用户初次配置期，通常还没有定时任务在跑），且它是 `tokio::spawn` 到后台的——真正回收发生在点击后几十秒，用户已离开页面，感知不到因果。若后续要收敛，同一 `session_busy` 谓词可直接复用；已在 `session_busy` 的文档注释里写明此边界，避免后人误以为安装也受保护。
+
+### 测试（均经证伪检验）
+
+- `test_ocr_uninstall_rejects_when_session_busy`：有会话在途 → 409、错误码/文案正确，且**断言 `recycled == 0`、`removed == false`**（拒绝时不得有任何破坏性动作）。
+- `test_ocr_uninstall_proceeds_when_idle`：空闲时照常卸载（新检查不得误伤正常路径）。
+- `supervisor_session_busy_反映真实槽位占用`（`tests/bridge_supervisor.rs`，集成）：用**真实在途请求**验证谓词——无请求 false → 预热后 false → 在途时 true → 结束后回到 false。理由同上一轮教训：`session_busy` 是拒绝闸门的唯一依据，若它只被 mock 覆盖，真实槽位上失灵不会被发现。
+- **变异验证**：把前置检查短路为 `if false && ...` → `test_ocr_uninstall_rejects_when_session_busy` 在状态码断言处失败（200 ≠ 409）；把 `session_busy` 改为恒 `false` → `supervisor_session_busy_反映真实槽位占用` 在 562 行失败。两者均已复原。
+
+`cargo test` **892 passed**（854 lib + 38 集成），fmt/clippy 零告警；前端 `vue-tsc` 零错误、vitest 118 passed。
+
 ## 开发中（2026-09-15 动态验证 P1-4：修正错误变体记录 `WorkerCrashed` → `Cancelled`）
 
 承接上条教训（测试数据须取自真实观测），对 **P1-4 做了同等级别的动态验证**——此前它只有单元测试（归属判定三情形，用 `register_test_cancel_id` 注入槽位）与代码链路推理，从未在真实 IPC 调用序列下跑过。

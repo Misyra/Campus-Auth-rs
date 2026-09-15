@@ -2814,6 +2814,14 @@
        }
       }
      },
+     "409": {
+      "description": "有任务正在执行，请稍后再试",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
      "500": {
       "description": "Internal Error",
       "content": {
