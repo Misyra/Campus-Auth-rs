@@ -425,6 +425,102 @@ async fn supervisor_调用方中止_取消传播到worker并释放槽位() {
     handle.stop().await;
 }
 
+/// P1-4：归属感知回收必须在**真实在途请求**占槽时跳过，且在持有时仍生效。
+///
+/// 与 `src/login/mod.rs` 的同名单测互补：该单测用 `register_test_cancel_id`
+/// **注入**槽位状态（实现者构造），只能证明谓词逻辑本身；本用例让槽位由真实
+/// `execute_with_timeout` 调用链（真实 IPC + 真实 Python 子进程）写入，再对
+/// 真实状态做判定——注入式用例恰好会绕过"真实调用链根本没把槽位设成预期值"
+/// 这类问题（孤儿清理漏判即栽在此处，见 `docs/changelog.md`）。
+///
+/// 三步覆盖：
+/// 1. 并发任务占槽 + 他人 id → 跳过，且在途任务**不受干扰**地正常完成；
+/// 2. 同一持有者自己调用 → 允许回收（证明未退化为"永不回收"）；
+/// 3. 槽位空闲 → 允许回收（退化为原语义）。
+#[tokio::test]
+async fn supervisor_归属回收_真实在途请求占槽时跳过() {
+    let Some(venv) = locate_venv() else {
+        eprintln!("跳过 bridge_supervisor P1-4：未找到本地 Python venv");
+        return;
+    };
+    let Some(tree) = setup_worker_tree(&venv) else {
+        eprintln!("跳过 bridge_supervisor P1-4：无法创建 .venv 目录链接");
+        return;
+    };
+
+    let (bridge, handle, _config) = make_supervisor(&tree.base).await;
+    let long = Duration::from_secs(40);
+
+    // 预热，避免首请求的 spawn/健康检查耗时与后续时序混淆
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, long)
+        .await;
+
+    // ── 1. 并发任务真实占槽（cancel_id = task-1），登录携他人 id 回收 → 跳过
+    let bridge_task = bridge.clone();
+    let inflight = tokio::spawn(async move {
+        bridge_task
+            .execute_with_timeout("sleep", json!({ "secs": 6, "cancel_id": "task-1" }), long)
+            .await
+    });
+    // 等请求真正进入 Worker 并完成槽位写入（预热后为毫秒级）
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // 登录会话上一轮 attempt 的 cancel_id：与该槽位持有者不同
+    let recycled = bridge
+        .force_recycle_if_unowned(Some("login-attempt-id"))
+        .await;
+    assert!(
+        !recycled,
+        "槽位被真实在途请求持有时不得回收（否则该任务会以 Cancelled 中途失败）"
+    );
+    assert!(
+        !matches!(
+            bridge.worker_status(),
+            campus_auth::status::WorkerStatus::Error
+        ),
+        "跳过回收后 Worker 不得被置为 Error"
+    );
+
+    // 关键：在途任务必须不受干扰地跑完，而不是被取消
+    let r = join_with_timeout(inflight, 30).await;
+    assert!(r.is_ok(), "在途定时任务不应被跳过式回收干扰，实际 {r:?}");
+
+    // ── 2. 持有者自己调用（新占槽的请求）→ 允许回收
+    let bridge_task = bridge.clone();
+    let inflight = tokio::spawn(async move {
+        bridge_task
+            .execute_with_timeout("sleep", json!({ "secs": 6, "cancel_id": "task-2" }), long)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        bridge.force_recycle_if_unowned(Some("task-2")).await,
+        "槽位持有者应可回收（否则修复退化为「永不回收」，NetworkError 重试失去上下文修复能力）"
+    );
+    // 回收后 worker_state = Error，且在途请求被结算（不会挂满超时）
+    assert!(
+        matches!(
+            bridge.worker_status(),
+            campus_auth::status::WorkerStatus::Error
+        ),
+        "持有者回收后 Worker 应为 Error"
+    );
+    let r = join_with_timeout(inflight, 30).await;
+    assert!(r.is_err(), "被回收时在途请求应被结算为错误，实际 {r:?}");
+
+    // ── 3. 槽位空闲 → 允许回收（谓词退化为原 force_recycle 语义）
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, long)
+        .await;
+    assert!(
+        bridge.force_recycle_if_unowned(None).await,
+        "槽位空闲时应回收，否则登录重试的上下文修复失效"
+    );
+
+    handle.stop().await;
+}
+
 /// 带超时地等待一个返回 (T, Duration) 的 JoinHandle（测试辅助）
 async fn join_with_timeout<T>(handle: tokio::task::JoinHandle<T>, secs: u64) -> T {
     tokio::time::timeout(Duration::from_secs(secs), handle)

@@ -98,8 +98,9 @@ pub trait BridgeApi: Send + Sync {
     ///
     /// 返回 `true` 表示已执行回收，`false` 表示因槽位被其他请求持有而跳过。
     /// 供登录会话在重试前回收「可能已损坏」的 Worker 使用——无条件回收会在
-    /// 「登录与定时浏览器任务时间重叠」时杀掉对方正在使用的 Worker：对方以
-    /// `WorkerCrashed` 中途失败，根因却在另一条路径上，极难排查。
+    /// 「登录与定时浏览器任务时间重叠」时杀掉对方正在使用的 Worker：对方在途请求
+    /// 被 `trigger_all` 取消，以 `Cancelled`（用户可见「请求已取消」）中途失败，
+    /// 根因却在另一条路径上，极难排查。
     ///
     /// `owner_cancel_id` 为调用方自己的 cancel_id；`None` 表示调用方无身份，
     /// 此时只要槽位被占用即视为「可能属于他人」而跳过。
@@ -541,7 +542,9 @@ impl BridgeSupervisor {
     /// 失败后的回收、以及抢占等待超时后的兜底都会调用它；而定时浏览器任务与
     /// 登录在 Bridge 层**共享同一个会话槽位**且互不排斥（`check_session_compat`
     /// 对 `Some(Login)` 放行 `execute_browser_task`，有测试固化）。两者时间重叠时
-    /// 无条件强杀会摧毁对方在途执行——对方以 `WorkerCrashed` 中途失败，症状是
+    /// 无条件强杀会摧毁对方在途执行——对方经 `trigger_all` 收到 `Cancelled`
+    /// （而非 `WorkerCrashed`：`force_recycle` 先取消会话区 token，在途请求的
+    /// `select!` 分支胜出，用户可见「请求已取消」），症状是
     /// "任务自己失败"，根因却在登录路径上。
     ///
     /// 判定口径与 [`grace_wait_slot_release`] / [`wait_cancel_ack_or_kill`] 一致：

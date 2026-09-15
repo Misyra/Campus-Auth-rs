@@ -2,6 +2,58 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-15 动态验证 P1-4：修正错误变体记录 `WorkerCrashed` → `Cancelled`）
+
+承接上条教训（测试数据须取自真实观测），对 **P1-4 做了同等级别的动态验证**——此前它只有单元测试（归属判定三情形，用 `register_test_cancel_id` 注入槽位）与代码链路推理，从未在真实 IPC 调用序列下跑过。
+
+### 验证方法
+
+新增临时集成探针（`tests/zz_p14_probe*.rs`，验证后删除），在真实 `BridgeSupervisor` + 真实 Python 子进程（假 Worker）上驱动真实在途请求，覆盖 9 个场景：
+
+| 探针 | 场景 | 结果 |
+|---|---|---|
+| probe1 | 真实在途请求占槽（`cancel_id=task-1`），携他人 id 回收 | 跳过 ✓，在途请求正常完成（未被干扰） |
+| probe2 | 携槽位持有者自己的 id 回收 | 执行回收 ✓ |
+| probe3 | `owner=None` + 槽位被旧会话自己的 `close_browser` 占用 | 跳过 ✓（符合设计：宁可少回收） |
+| probe4 | 槽位空闲 + `owner=None` | 回收 ✓（谓词退化为原语义） |
+| probe5 | 兜底跳过后新会话能否拿到可用 Worker | 能（93ms 内成功；Bridge 内部自愈在 ~15s 释放槽位，早于 18s 抢占预算，无竞态） |
+| probe6 | 对照组：无条件回收时新会话结果 | 亦成功（该时序下两者无差异——兜底跳过的价值在 probe7/8） |
+| probe7 | **无条件回收 + 并发定时任务** | 任务被摧毁 ✓（症状真实存在） |
+| probe7b | 上者重复 5 轮 | 变体**确定**（见下） |
+| probe8 | **归属感知回收 + 并发定时任务** | 任务存活并正常完成 ✓ |
+| probe9 | 登录仍是槽位持有者时回收 | 照常生效 ✓（证明修复未退化为"永不回收"） |
+
+### 修正：并发任务被摧毁时的错误变体不是 `WorkerCrashed`
+
+本次提交（`feeb6bd` 后的注释与 `docs/changelog.md`）把症状记为「对方以 `WorkerCrashed` 中途失败」。**probe7/probe7b 证伪**：实际恒为 `Cancelled`，5 轮重复观测无例外。
+
+机制：`force_recycle` 先 `cancel_registry.trigger_all()` 取消会话区 token，**再** `kill_worker_now` 的 `drain_pending_requests`。在途请求的转发 task 用 `biased` `select!` 且 token 分支在前，故 token 分支必胜出，请求以 `Cancelled` 结算；pending drain 只是无人接收的兜底。
+
+**用户可见差异（实测转换链，非推断）**：
+
+| 变体 | 调度器历史消息 | Web API |
+|---|---|---|
+| `Cancelled`（实际） | `执行错误: Bridge 错误: 请求已取消` | 500 `INTERNAL_ERROR` |
+| `WorkerCrashed`（原记录，错误） | `执行错误: Bridge 错误: Worker 进程崩溃: …` | 500 `INTERNAL_ERROR` |
+
+即"任务自己失败"的真实表现是**「请求已取消」**——比"崩溃"更易被误判为"用户自己取消的"或"系统在清理"，排查难度比原记录描述的更高（这一点反而强化了 P1-4 修复的必要性，但原记录的机制描述是错的）。
+
+已修正 4 处：`src/bridge/mod.rs`（trait 文档 + 实现文档）、`src/login/session.rs`（`try_retry` 注释）、`docs/changelog.md` 的 P1-4 条目。
+
+### 回归防护（补上缺失的验证强度）
+
+原 P1-4 只有单测，且其槽位是用 `register_test_cancel_id` **注入**的（实现者构造状态）——正是把孤儿清理漏判放进产物的那类盲区：注入式用例只能证明谓词逻辑对，无法发现"真实调用链根本没把槽位设成预期值"。
+
+故在 `tests/bridge_supervisor.rs` 新增永久集成用例 `supervisor_归属回收_真实在途请求占槽时跳过`：槽位由真实 `execute_with_timeout`（真实 IPC + 真实 Python 子进程）写入，覆盖三步——并发任务占槽时携他人 id 跳过且**在途任务不受干扰地跑完**、持有者自己调用时允许回收、槽位空闲时允许回收。
+
+**该用例经证伪检验**：临时把 `force_recycle_if_unowned` 的归属判定短路（`if false && !unowned`）后，用例在第 475 行断言处失败——证明它真的能拦住回归，而不是恒过的空壳。
+
+### 结论
+
+P1-4 的**修复本身正确且必要**（probe7 复现破坏、probe8 证明修复有效、probe9 证明未过度修复、probe1/4 证明谓词在真实槽位上按设计工作）；被修正的只是**破坏表现的记载**。`docs/updatelog.md` 的面向用户描述需同步（原文"以'任务自己失败'告终，且日志中看不出真实原因"未指名变体，但「请求已取消」比原文更误导，故改为如实说明）。
+
+`cargo test` **890 passed**（852 lib + 38 集成），fmt/clippy 零告警。
+
 ## 开发中（2026-09-15 修正孤儿清理漏判：CSV 未反转义 + 含空格路径）
 
 提交后做了一轮**动态验证**（此前只做了单元测试与计数核对），发现 P2-14 的基名匹配改动引入了真实回归：Windows 孤儿浏览器清理**一个都清不掉**。
@@ -77,7 +129,7 @@
 - **P1-1 宽松触发吞掉「谨慎单次」降级**（`src/monitor/decision.rs`）：`lenient_trigger_candidate` 原先只排除 `FixConfiguration` / `NoProbeEvidence`，未排除 `AttemptLogin` / `AttemptLoginOnce`。后果有二：① 真实捕获的门户劫持（`High` / `CaptiveDetected`）在关闭严格模式后被**无条件**改写成 `Low` / `LinkUpLoginAssumed`，排障时无法区分「确实检测到劫持」与「只是按链路猜」；② 有意的「同一配置版本仅尝试一次」节流被升级为无差别 `AttemptLogin`，绕过 Engine 的 `cautious_attempted_config_version` 去重（仍受 `auto_login_in_flight`、连续失败 3 次进 300s 冷却两道闸门约束，故为「300s 内最多 3 次」而非无限）。语义上宽松触发是**兜底**（严格口径什么都没给出时才升级），已有登录建议时它无任何可补充之处。原测试矩阵恰好绕过了唯一会出问题的组合（7 个纯函数用例只覆盖 `WaitForNetwork` / `WaitForMoreEvidence` / `NoAction` / `FixConfiguration` / `NoProbeEvidence`；5 个接线级用例全部构造为 `Offline`）。新增 3 个回归用例（`Captive`+`Reachable` 的 `High` 结论不变、`Captive`+`Unreachable` 的 `AttemptLoginOnce` 不变、`Inconclusive`+`Reachable` 的 `AttemptLoginOnce` 不变）。
 - **P1-2 纯净模式开关与配置双源，保存时静默回退**（`frontend/src/composables/useConfig.ts`）：`togglePureMode` 成功后只更新独立 ref `pureMode`，**从不回写** `config.browser.pure_mode`；而 `saveConfig` 的载荷携带整个 `config.browser`，后端 `browser` 属 `global_keys` 走 `json_merge` 递归覆盖。症状：用户关掉纯净模式后，在任意设置页点一次「立即保存」就会把它静默翻回开启，且 UI 开关仍显示"已关闭"（与落盘值分叉）、`dirty` 不置位、无任何提示。修法：切换成功与 `fetchPureMode` 拉取到权威值后都同步 `config.browser.pure_mode`，并沿用 `setLogLevel` 同款处理（`suppressDirty` 抑制 dirty 比对 + 仅在无未保存编辑时刷新 `savedSnapshot`，避免把其他未保存改动误判为已保存）。新增 2 个用例，其中一条直接断言 PATCH 载荷里 `browser.pure_mode` 等于开关当前值。
 - **P1-3 Engine 崩溃重启窗口内命令返回 HTTP 500**（`src/web/error.rs`）：`From<EngineError> for ApiError` 原先只把 `ChannelFull` 映射 503，`ChannelClosed` 落入 `_ => Internal`。Engine 崩溃后 `watch_engine` 在 `cancel_auto_pending().await` 与重建之间有一个窗口，期间 slot 仍持已死句柄，用户点「开始/停止监测」「测试网络」会看到 **500 服务故障**，语义误导（前端与用户会以为是服务端 bug）。修法：`ChannelClosed` 与 `ChannelFull` 一并映射 503——两者都是「引擎暂时不可用，稍后重试即可」。同步更新 `src/web/routes/monitor.rs` 那条断言 500 的既有用例，并在 `web/error.rs` 补 `EngineError` 全变体映射用例（原先该文件的状态码用例不含任何 `EngineError` 变体）。
-- **P1-4 `force_recycle` 无归属校验，会摧毁并发定时浏览器任务的 Worker**（`src/bridge/mod.rs`、`src/login/session.rs`、`src/login/mod.rs`）：定时浏览器任务与登录在 Bridge 层**共享同一个会话槽位且互不排斥**（`check_session_compat` 对 `Some(Login)` 放行 `execute_browser_task`，并有测试固化），而 `force_recycle` 是无条件强杀。登录可重试失败后的回收、抢占等待超时后的兜底都会调用它 → 时间重叠时定时任务被 `WorkerCrashed` 中途打断，症状是"任务自己失败"，根因却在另一条路径上。注意：审查报告原本归因于「登录收尾的 `close_browser` 关掉了任务浏览器」，经核对**不成立**——Python 侧 `_serve` 是严格串行的命令循环，`close_browser` 必须排队等待在途任务结束，真正的破坏点是 `force_recycle`。修法：新增归属感知的 `force_recycle_if_unowned(owner_cancel_id)`，判定口径与既有的 `grace_wait_slot_release` / `wait_cancel_ack_or_kill` 一致（仅当槽位空闲或属调用方时才放行）；`try_retry` 与 `wait_old_session_finished` 改走该入口。新增 1 个用例覆盖「槽位被他人占用时跳过」「冒名他人 id 被拒」「真正的持有者可回收」三种情形。
+- **P1-4 `force_recycle` 无归属校验，会摧毁并发定时浏览器任务的 Worker**（`src/bridge/mod.rs`、`src/login/session.rs`、`src/login/mod.rs`）：定时浏览器任务与登录在 Bridge 层**共享同一个会话槽位且互不排斥**（`check_session_compat` 对 `Some(Login)` 放行 `execute_browser_task`，并有测试固化），而 `force_recycle` 是无条件强杀。登录可重试失败后的回收、抢占等待超时后的兜底都会调用它 → 时间重叠时定时任务在途请求被 `trigger_all` 取消，以**「请求已取消」（`Cancelled`）**中断（**注**：此处原记为 `WorkerCrashed`，经 2026-09-15 动态验证证伪并修正，见本文件顶部条目），症状是"任务自己失败"，根因却在另一条路径上。注意：审查报告原本归因于「登录收尾的 `close_browser` 关掉了任务浏览器」，经核对**不成立**——Python 侧 `_serve` 是严格串行的命令循环，`close_browser` 必须排队等待在途任务结束，真正的破坏点是 `force_recycle`。修法：新增归属感知的 `force_recycle_if_unowned(owner_cancel_id)`，判定口径与既有的 `grace_wait_slot_release` / `wait_cancel_ack_or_kill` 一致（仅当槽位空闲或属调用方时才放行）；`try_retry` 与 `wait_old_session_finished` 改走该入口。新增 1 个用例覆盖「槽位被他人占用时跳过」「冒名他人 id 被拒」「真正的持有者可回收」三种情形。
 - 说明：`force_recycle` 是 `BridgeApi` trait 方法，`force_recycle_if_unowned` 以**默认实现**加入 trait（内存 mock 无需改动即视为无冲突），实际归属判定在 `BridgeSupervisor` 上实现。
 
 ### P2（健壮性缺口与验证能力缺口）
