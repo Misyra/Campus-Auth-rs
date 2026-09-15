@@ -36,6 +36,12 @@ const filteredRepoTasks = computed(() => {
 
 const { toastOnly } = useToast();
 
+// 索引拉取序号（epoch）守卫：只有最新一次请求可以写状态。
+// 交错场景——慢索引 A 在途 → 关弹窗重开（loading 被 showRepoImport 复位）→
+// 为 URL B 再点一次 → A 迟到覆盖 B 的列表并提前清 loading，用户会把 A 源的
+// 任务当 B 源导入。与 useConfig 的 saveSeq / fetchConfigEpoch 同口径。
+let fetchIndexSeq = 0;
+
 /** 切换仓库源并回填对应预设索引地址（自定义源保留用户手输的 URL） */
 function selectRepoSource(source: "github" | "gitee" | "custom") {
   repoImport.value.source = source;
@@ -69,6 +75,8 @@ async function fetchRepoIndex() {
     repoImport.value.error = "请输入索引地址";
     return;
   }
+  // 取号：迟到的旧响应据此丢弃（见 fetchIndexSeq 声明处注释）
+  const seq = ++fetchIndexSeq;
   repoImport.value.loading = true;
   repoImport.value.error = "";
   repoImport.value.tasks = [];
@@ -76,17 +84,21 @@ async function fetchRepoIndex() {
   repoImport.value.selected = null;
   try {
     const data = await repoApi.fetchIndex(url);
+    if (seq !== fetchIndexSeq) return;
     if (!Array.isArray(data) || data.length === 0) {
       repoImport.value.error = "索引为空或格式不正确";
       return;
     }
     repoImport.value.tasks = data;
   } catch (e) {
+    // 被取代的旧请求失败同样不写状态：否则会用一个已过期的错误覆盖新请求的结果
+    if (seq !== fetchIndexSeq) return;
     const msg = extractApiError(e, "加载失败，请检查地址是否正确");
     repoImport.value.error = msg;
     toastOnly(false, `获取远程索引失败: ${msg}`);
   } finally {
-    repoImport.value.loading = false;
+    // 仅最新请求负责复位 loading：旧请求提前清掉会让界面在 B 仍在途时误示"已完成"
+    if (seq === fetchIndexSeq) repoImport.value.loading = false;
   }
 }
 

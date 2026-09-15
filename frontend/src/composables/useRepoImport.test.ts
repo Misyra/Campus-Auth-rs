@@ -66,3 +66,77 @@ describe("仓库导入点选预览", () => {
     expect(repo.repoImport.value.tasks).toHaveLength(1);
   });
 });
+
+describe("索引拉取的 epoch 守卫", () => {
+  it("迟到的旧响应不得覆盖新请求的列表", async () => {
+    // A 慢、B 快：先发 A（挂起），再发 B（立即返回）
+    let resolveA: (v: RepoTask[]) => void = () => {};
+    const slowA = new Promise<RepoTask[]>((r) => {
+      resolveA = r;
+    });
+    vi.mocked(repoApi.fetchIndex)
+      .mockImplementationOnce(() => slowA)
+      .mockImplementationOnce(async () => [makeTask("B")]);
+
+    repo.repoImport.value.url = "https://example.com/a.json";
+    const pendingA = repo.fetchRepoIndex();
+    repo.repoImport.value.url = "https://example.com/b.json";
+    await repo.fetchRepoIndex();
+
+    expect(repo.repoImport.value.tasks.map((t) => t.id)).toEqual(["B"]);
+
+    // A 迟到：不得覆盖 B 的列表
+    resolveA([makeTask("A")]);
+    await pendingA;
+    expect(repo.repoImport.value.tasks.map((t) => t.id)).toEqual(["B"]);
+  });
+
+  it("旧请求完成时不得提前复位新请求的 loading", async () => {
+    let resolveA: (v: RepoTask[]) => void = () => {};
+    const slowA = new Promise<RepoTask[]>((r) => {
+      resolveA = r;
+    });
+    let resolveB: (v: RepoTask[]) => void = () => {};
+    const slowB = new Promise<RepoTask[]>((r) => {
+      resolveB = r;
+    });
+    vi.mocked(repoApi.fetchIndex)
+      .mockImplementationOnce(() => slowA)
+      .mockImplementationOnce(() => slowB);
+
+    const pendingA = repo.fetchRepoIndex();
+    const pendingB = repo.fetchRepoIndex();
+    expect(repo.repoImport.value.loading).toBe(true);
+
+    // A 先回来：B 仍在途，loading 必须保持 true
+    resolveA([makeTask("A")]);
+    await pendingA;
+    expect(repo.repoImport.value.loading).toBe(true);
+
+    // B 回来才复位
+    resolveB([makeTask("B")]);
+    await pendingB;
+    expect(repo.repoImport.value.loading).toBe(false);
+    expect(repo.repoImport.value.tasks.map((t) => t.id)).toEqual(["B"]);
+  });
+
+  it("被取代的旧请求失败不得覆盖新请求的错误状态", async () => {
+    let rejectA: (e: unknown) => void = () => {};
+    const failA = new Promise<RepoTask[]>((_r, rej) => {
+      rejectA = rej;
+    });
+    vi.mocked(repoApi.fetchIndex)
+      .mockImplementationOnce(() => failA)
+      .mockImplementationOnce(async () => [makeTask("B")]);
+
+    const pendingA = repo.fetchRepoIndex();
+    await repo.fetchRepoIndex();
+    expect(repo.repoImport.value.error).toBe("");
+
+    rejectA(new Error("A 超时"));
+    await pendingA;
+    // 新请求已成功，旧请求的失败不得写入 error
+    expect(repo.repoImport.value.error).toBe("");
+    expect(repo.repoImport.value.tasks.map((t) => t.id)).toEqual(["B"]);
+  });
+});
