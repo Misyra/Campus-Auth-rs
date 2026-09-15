@@ -129,7 +129,7 @@ impl ServiceContainer {
         Self::wire_environment_bridge(&bridge, &environment);
 
         // 启动即后台探测环境真实状态（只读，不触发下载，不阻断启动）。
-        Self::spawn_environment_probe(&environment);
+        Self::spawn_environment_probe(&environment, &shutdown_token);
 
         // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
         let executor = TaskExecutor::new(
@@ -245,10 +245,22 @@ impl ServiceContainer {
     ///
     /// `EnvironmentStatus` 初始全 false，磁盘完好时重启后需纠正 `/api/init-status`，
     /// 失败仅记日志，不阻断启动，不触发下载。
-    fn spawn_environment_probe(environment: &Arc<EnvironmentManager>) {
+    ///
+    /// 与 [`Self::spawn_pending_update_check`] 同构地接受关闭令牌（P2-7）：无令牌时
+    /// 停机后该任务仍持 `Arc<EnvironmentManager>` 继续写状态/日志、可能 spawn uv 子
+    /// 进程，与重启后的继任进程争缓存锁。
+    fn spawn_environment_probe(
+        environment: &Arc<EnvironmentManager>,
+        shutdown_token: &CancellationToken,
+    ) {
         let env_bg = environment.clone();
+        let shutdown_for_probe = shutdown_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = env_bg.refresh_status().await {
+            let result = tokio::select! {
+                _ = shutdown_for_probe.cancelled() => return,
+                r = env_bg.refresh_status() => r,
+            };
+            if let Err(e) = result {
                 tracing::warn!("启动环境探测失败: {e}");
             }
         });
