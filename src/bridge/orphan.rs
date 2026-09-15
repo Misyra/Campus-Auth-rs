@@ -95,11 +95,114 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
     let mut killed = 0;
     for (pid, ppid) in candidates {
         // 父进程不存在（孤儿）才强杀
-        if !alive_pids.contains(&ppid) && kill_pid(pid) {
+        if !alive_pids.contains(&ppid) && still_orphan_chromium(pid, ppid) && kill_pid(pid) {
             killed += 1;
         }
     }
     Ok(killed)
+}
+
+/// kill 前复核候选仍是同一 Chromium 进程，且其父进程**实时**已不存在（Windows）。
+///
+/// 与 unix 分支的 [`still_orphan_chromium`] 同源动机：`Get-CimInstance` 枚举在本机
+/// 460 进程规模下实测耗时 ~710ms，这段窗口内进程可能已退出、PID 被复用、或父进程
+/// 刚刚启动。不复核就直接 `taskkill /F /T` 会杀掉一个**与我方无关的新进程**。
+///
+/// 三道复核，任一不满足即放弃 kill（偏保守——漏清一个残留无害，误杀不可接受）：
+/// 1. 实时重读该 PID 的映像路径，确认仍是浏览器可执行文件（防 PID 复用）；
+/// 2. 实时重读其父 PID，确认与枚举时观察到的值一致（父进程未变）；
+/// 3. 确认该父 PID 实时已不存在（仍为孤儿）。
+#[cfg(windows)]
+fn still_orphan_chromium(pid: u32, observed_ppid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, MAX_PATH};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    unsafe {
+        // 复核 1：实时映像路径仍是浏览器（PID 未被复用的直接证据）
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // 进程已退出或无权限：无从确认身份，保守放弃
+            return false;
+        }
+        let mut len = MAX_PATH;
+        let mut buf = [0u16; 260];
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 {
+            return false;
+        }
+        let image_path = String::from_utf16_lossy(&buf[..len as usize]);
+        // 复用 is_chromium 的基名判定：只传映像路径（无参数），headless 特征无法
+        // 由此判定，故单独按基名判断是否为浏览器可执行文件
+        if !is_browser_executable(&image_path) {
+            return false;
+        }
+
+        // 复核 2 + 3：实时父 PID 未变，且该父进程已不存在
+        let Some(current_ppid) = parent_pid_of(pid) else {
+            return false;
+        };
+        current_ppid == observed_ppid && parent_pid_of(current_ppid).is_none()
+    }
+}
+
+/// 判断映像路径是否为浏览器可执行文件（基名匹配，与 [`is_chromium`] 同一白名单）
+#[cfg(windows)]
+fn is_browser_executable(image_path: &str) -> bool {
+    let lower = image_path.to_ascii_lowercase();
+    let basename = lower
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(lower.as_str())
+        .trim_matches('"');
+    const BROWSER_BASENAMES: [&str; 8] = [
+        "chrome.exe",
+        "chrome",
+        "chromium.exe",
+        "chromium",
+        "chrome-headless-shell.exe",
+        "chrome-headless-shell",
+        "headless_shell.exe",
+        "headless_shell",
+    ];
+    BROWSER_BASENAMES.contains(&basename) || basename.starts_with("msedge")
+}
+
+/// 读取指定 PID 的父 PID（Windows）。
+///
+/// 经 `CreateToolhelp32Snapshot` 遍历进程表获取——`Get-CimInstance` 太慢（~700ms），
+/// 而复核必须在 kill 前尽可能贴近内核状态。返回 `None` 表示进程不存在或无法读取
+/// （两者对复核而言等价：无法确认即放弃 kill）。
+#[cfg(windows)]
+fn parent_pid_of(pid: u32) -> Option<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = None;
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32ProcessID == pid {
+                    found = Some(entry.th32ParentProcessID);
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+        found
+    }
 }
 
 /// 跨平台清理实现（Unix：读取 /proc）
@@ -190,16 +293,53 @@ fn parse_ppid_from_stat(stat: &str) -> Result<u32, String> {
 }
 
 /// 判断命令行是否匹配 chromium 特征（仅匹配 headless/debug Chrome，避免误杀普通浏览器）
+///
+/// 判定分两步，**先看可执行文件基名**再看 headless/调试特征：
+/// - 基名白名单（`chrome.exe` / `chromium` / `headless_shell.exe` / `msedge.exe` 等）
+///   是 Playwright 实际会拉起的浏览器可执行文件，普通进程不会以其为程序名；
+/// - 再要求命令行含 `--headless` 或 `--remote-debugging-port`（或二进制本身即
+///   `headless_shell`，其用途唯一）。
+///
+/// 历史上这里只做全命令行子串匹配（`含 "chrom" 且含 "--headless"`），任何命令行
+/// **文本**同时出现这两类字样的进程都会被列为候选——实测 `cmd.exe /c echo chromium
+/// --headless` 即可命中，脚本参数、含 `chrom` 的路径、甚至审查这个模块的搜索命令
+/// 都会中招。kill 是破坏性操作，误判不可接受，故收紧为基名匹配。
+///
+/// 漏判（少清一个残留）无害：孤儿进程会在下次清理或进程退出时消失；误杀用户进程
+/// 不可接受，故整体偏向严格。
 fn is_chromium(cmd: &str) -> bool {
-    // 先确认 Chrome 系二进制，再确认 headless/调试特征：
-    // 裸 `--headless` 会误伤 `firefox --headless` 等非 Chrome 进程，
-    // 而 kill 前仅有"父进程已死"一道闸，不足以兜底误杀。
-    // 漏判（少清一个残留）无害，误判（杀掉用户进程）不可接受，故偏向严格。
     let lower = cmd.to_ascii_lowercase();
-    let chrome_binary = lower.contains("chrom") || lower.contains("headless_shell");
-    let headless_flag = cmd.contains("--headless") || cmd.contains("--remote-debugging-port");
-    // headless_shell 二进制名本身足够独特（Playwright headless 专用），单列即命中
-    (chrome_binary && headless_flag) || lower.contains("headless_shell")
+    // 取命令行首个非空 token 作为程序名（Playwright 直接以绝对路径拉起浏览器，
+    // 参数中不会出现裸的可执行文件名，故只认第一个 token）
+    let program = lower
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches('"');
+    // 程序名基名：剥离目录（Windows 反斜杠与 unix 斜杠都要处理）
+    let basename = program.rsplit(['/', '\\']).next().unwrap_or(program);
+
+    const BROWSER_BASENAMES: [&str; 8] = [
+        "chrome.exe",
+        "chrome",
+        "chromium.exe",
+        "chromium",
+        "chrome-headless-shell.exe",
+        "chrome-headless-shell",
+        "headless_shell.exe",
+        "headless_shell",
+    ];
+    if !BROWSER_BASENAMES.contains(&basename) {
+        // msedge / msedgewebview2 等 Edge 变体：基名以 msedge 开头
+        if !basename.starts_with("msedge") {
+            return false;
+        }
+    }
+    // headless_shell 用途唯一（Playwright headless 专用），单列即命中
+    if basename.contains("headless_shell") || basename.contains("headless-shell") {
+        return true;
+    }
+    lower.contains("--headless") || lower.contains("--remote-debugging-port")
 }
 
 /// 通过 taskkill 强杀（Windows）
@@ -249,6 +389,38 @@ mod tests {
         assert!(!is_chromium(""));
     }
 
+    /// 非浏览器进程的命令行**恰好含**关键词时不得命中（P2-14 的核心回归）
+    ///
+    /// 旧实现（全命令行子串匹配：含 "chrom" 且含 "--headless"）会把这些判为候选，
+    /// 而 Windows 分支当时无 kill 前复核 → 可能误杀用户进程。实测
+    /// `cmd.exe /c echo chromium --headless` 在旧实现下确实命中。
+    #[test]
+    fn test_is_chromium_rejects_keywords_in_arguments() {
+        // 程序名不是浏览器，仅参数/正文含关键词
+        assert!(!is_chromium("cmd.exe /c echo chromium --headless"));
+        assert!(!is_chromium(
+            "powershell -Command \"Get-Process chromium --headless\""
+        ));
+        assert!(!is_chromium("git log --grep=chromium --headless"));
+        assert!(!is_chromium(
+            "/bin/sh -c 'grep chrom --remote-debugging-port files'"
+        ));
+        // 路径含 chrom 但程序本身不是浏览器
+        assert!(!is_chromium(
+            "/home/u/chromium-notes/reader --headless --print"
+        ));
+        assert!(!is_chromium(
+            "C:\\tools\\chromedriver\\chromedriver.exe --headless"
+        ));
+        // 审查本模块的搜索命令（此前实测会把自己列为候选）
+        assert!(!is_chromium(
+            "rg is_chromium --headless_shell chromium src/bridge/orphan.rs"
+        ));
+        // 但真正的浏览器 + 特征仍必须命中
+        assert!(is_chromium("/opt/chromium-browser/chromium --headless"));
+        assert!(is_chromium("C:\\pw\\chrome.exe --headless --disable-gpu"));
+    }
+
     /// stat 解析：comm 含空格/括号时仍定位 ppid，格式异常返回错误
     #[cfg(unix)]
     #[test]
@@ -267,5 +439,64 @@ mod tests {
             7
         );
         assert!(parse_ppid_from_stat("garbage").is_err());
+    }
+
+    /// 映像路径基名判定：只有浏览器可执行文件才通过（kill 前复核的第一道）
+    #[cfg(windows)]
+    #[test]
+    fn test_is_browser_executable_matrix() {
+        assert!(is_browser_executable(
+            "C:\\pw\\chromium-1228\\chrome-win\\chrome.exe"
+        ));
+        assert!(is_browser_executable("C:\\pw\\headless_shell.exe"));
+        assert!(is_browser_executable("/opt/chromium"));
+        assert!(is_browser_executable(
+            "C:\\Program Files (x86)\\Microsoft\\Edge\\msedge.exe"
+        ));
+        // 非浏览器：即便名字里含 chrom
+        assert!(!is_browser_executable("C:\\tools\\chromedriver.exe"));
+        assert!(!is_browser_executable("C:\\Windows\\System32\\cmd.exe"));
+        assert!(!is_browser_executable("C:\\Users\\u\\notepad.exe"));
+    }
+
+    /// `parent_pid_of` 对真实进程读到的祖先后关系正确
+    ///
+    /// 该函数是 kill 前复核的第二/三道（父 PID 未变 + 父进程已不存在），
+    /// 必须在真实进程表上验证——静态推理无法确认 ToolHelp 快照的字段语义
+    /// （`th32ParentProcessID` 是否与 `Get-CimInstance` 的 `ParentProcessId` 一致）。
+    #[cfg(windows)]
+    #[test]
+    fn test_parent_pid_of_real_process() {
+        // 自身进程必有父进程
+        let me = std::process::id();
+        let ppid = parent_pid_of(me).expect("应能读到本进程的父 PID");
+        assert!(ppid > 0, "父 PID 应为有效值，实际 {ppid}");
+
+        // 不存在的 PID 返回 None（调用方据此保守放弃 kill）
+        // 取一个几乎不可能存在的 PID：0 是 System Idle，u32::MAX 必然无效
+        assert!(
+            parent_pid_of(u32::MAX).is_none(),
+            "不存在的 PID 应返回 None"
+        );
+
+        // 与 Get-CimInstance 的口径交叉核对：父进程确实存在且其 PID 等于读到的值
+        //（父进程可能在测试期间退出，故允许「父进程不存在」这一种失败）
+        if let Some(grandparent) = parent_pid_of(ppid) {
+            assert_ne!(grandparent, me, "不能把自己当成父进程");
+        }
+    }
+
+    /// `still_orphan_chromium` 对非浏览器 PID 必须拒绝（防 PID 复用误杀）
+    #[cfg(windows)]
+    #[test]
+    fn test_still_orphan_chromium_rejects_non_browser_pid() {
+        // 本测试进程显然不是浏览器可执行文件 → 复核应立即拒绝，
+        // 无论其父进程状态如何（这正是"PID 复用"防护的核心断言）
+        let me = std::process::id();
+        let ppid = parent_pid_of(me).unwrap_or(0);
+        assert!(
+            !still_orphan_chromium(me, ppid),
+            "非浏览器进程不得通过 kill 前复核"
+        );
     }
 }

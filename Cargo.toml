@@ -133,6 +133,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     # CONOUT$ 标准句柄重建（CreateFileW）
     "Win32_Storage_FileSystem",
+    # 孤儿浏览器清理的 kill 前复核：CreateToolhelp32Snapshot 读实时父 PID
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
