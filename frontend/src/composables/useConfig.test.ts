@@ -13,6 +13,8 @@ const fetchMock = vi.fn();
 const patchMock = vi.fn(async (_payload: Record<string, unknown>) => ({}));
 const setLogLevelMock = vi.fn(async () => ({ message: "ok" }));
 const fetchLogLevelsMock = vi.fn(async () => ({ level: "INFO" }));
+const pureModeFetchMock = vi.fn(async () => ({ enabled: true }));
+const pureModeToggleMock = vi.fn(async () => ({ enabled: false }));
 
 vi.mock("../api", () => ({
   configApi: {
@@ -22,7 +24,10 @@ vi.mock("../api", () => ({
     fetchLogLevels: () => fetchLogLevelsMock(),
   },
   autostartApi: { toggle: vi.fn() },
-  pureModeApi: { fetch: vi.fn(), toggle: vi.fn() },
+  pureModeApi: {
+    fetch: () => pureModeFetchMock(),
+    toggle: () => pureModeToggleMock(),
+  },
 }));
 
 const { useConfig } = await import("./useConfig");
@@ -45,6 +50,8 @@ beforeEach(() => {
   });
   patchMock.mockClear();
   setLogLevelMock.mockClear();
+  pureModeFetchMock.mockClear();
+  pureModeToggleMock.mockClear();
 });
 
 describe("dirty 快照比对", () => {
@@ -153,5 +160,50 @@ describe("dirty 快照比对", () => {
     await config.saveConfig();
     const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.active_task).toBe("sctu-eportal");
+  });
+
+  it("纯净模式开关回写表单模型，保存时不会被旧值覆盖", async () => {
+    // 后端初始为开启（fetchConfig 回传 browser.pure_mode=true）
+    fetchMock.mockResolvedValue({
+      username: "user",
+      browser: { pure_mode: true },
+    });
+    await config.fetchConfig();
+    expect(config.config.browser.pure_mode).toBe(true);
+
+    // 关闭：/api/pure-mode 返回 enabled=false
+    await config.togglePureMode();
+    expect(config.pureMode.value).toBe(false);
+    // 关键断言：开关必须回写 config.browser.pure_mode。否则 saveConfig 的载荷
+    // 携带整个 config.browser（旧值 true），后端 json_merge 递归覆盖会把刚关掉
+    // 的开关静默翻回开启
+    expect(config.config.browser.pure_mode).toBe(false);
+
+    // 开关本身不产生未保存变更（后端已即时落盘）
+    await flushWatch();
+    expect(config.dirty.value).toBe(false);
+
+    // 随后任意一次普通保存，载荷里的值必须是关闭态
+    // （默认 enable_tcp_check 为 false，这里改为 true 以制造真实的未保存变更）
+    config.config.monitor.enable_tcp_check = true;
+    await flushWatch();
+    await config.saveConfig();
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
+    expect((payload.browser as Record<string, unknown>).pure_mode).toBe(false);
+  });
+
+  it("fetchPureMode 拉取到的权威值同样回写表单模型", async () => {
+    fetchMock.mockResolvedValue({
+      username: "user",
+      browser: { pure_mode: true },
+    });
+    await config.fetchConfig();
+
+    // 后端已关（例如上一次会话关掉的），拉取后表单模型须跟随
+    pureModeFetchMock.mockResolvedValue({ enabled: false });
+    await config.fetchPureMode(true);
+    expect(config.pureMode.value).toBe(false);
+    expect(config.config.browser.pure_mode).toBe(false);
   });
 });

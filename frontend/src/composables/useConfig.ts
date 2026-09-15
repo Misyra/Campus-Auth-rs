@@ -24,7 +24,10 @@ const saveFailed = ref(false);
 const configLoadFailed = ref(false);
 
 // 纯净模式（本质是 config.browser.pure_mode，API 为 /api/pure-mode，
-// 从 useTasks 迁入：独立于表单 dirty 流程的即时开关状态）
+// 从 useTasks 迁入：独立于表单 dirty 流程的即时开关状态）。
+// 注意：开关与 config.browser.pure_mode 是同一后端字段的两个视图，
+// 切换成功必须回写 config.browser（见 togglePureMode），否则 saveConfig
+// 会用表单里的旧值把它覆盖回去。
 const pureMode = ref(true);
 const pureModeLoading = ref(false);
 
@@ -330,6 +333,14 @@ async function fetchPureMode(force = false): Promise<void> {
   try {
     const data = await pureModeApi.fetch();
     pureMode.value = data.enabled;
+    // 与 togglePureMode 同理：拉取到的后端权威值必须同步进表单模型，
+    // 否则表单里的旧值仍会在下次保存时把它覆盖回去
+    const wasDirty = dirty.value;
+    suppressDirty = true;
+    config.browser.pure_mode = data.enabled;
+    await nextTick();
+    if (!wasDirty) savedSnapshot = JSON.stringify(config);
+    suppressDirty = false;
     pureModeFetchGuard.markSuccess();
   } catch (error) {
     frontendLogger.debug("config", "获取纯净模式失败，保持默认", error);
@@ -344,6 +355,17 @@ async function togglePureMode(): Promise<void> {
     const data = await pureModeApi.toggle();
     const enabled = data?.enabled ?? false;
     pureMode.value = enabled;
+    // 该开关的后端权威源就是 config.browser.pure_mode（/api/pure-mode 直接改它），
+    // 因此必须同步表单模型：saveConfig 的载荷携带整个 config.browser，若不回写，
+    // 任何一次普通保存都会用旧值把刚关掉的开关静默翻回（服务端 json_merge 递归覆盖）。
+    // 与 setLogLevel 同款处理：抑制 dirty 比对，且仅在无未保存编辑时刷新快照，
+    // 避免把用户其他未保存改动误判为已保存。
+    const wasDirty = dirty.value;
+    suppressDirty = true;
+    config.browser.pure_mode = enabled;
+    await nextTick();
+    if (!wasDirty) savedSnapshot = JSON.stringify(config);
+    suppressDirty = false;
     frontendLogger.info("config", `纯净模式已${enabled ? "开启" : "关闭"}`);
     toastOnly(true, `纯净模式已${enabled ? "开启" : "关闭"}`);
   } catch (error) {
