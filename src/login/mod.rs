@@ -66,6 +66,17 @@ pub(crate) fn recover_lock<T>(m: &StdMutex<T>) -> MutexGuard<'_, T> {
 /// 浏览器渠道可用性探测缓存 TTL：登录重试连打时避免逐轮扫盘
 const CHANNEL_PROBE_TTL: Duration = Duration::from_secs(60);
 
+/// 抢占时等待旧会话**完全收尾**的预算。
+///
+/// 必须覆盖最坏路径的每一段：`close_browser` 命令级超时
+/// （[`session::CLOSE_BROWSER_TIMEOUT`]）加上 Bridge 在该超时后的自愈宽限
+/// （[`crate::bridge::GRACE_WAIT_DURATION`]）。早期版本的 13s 按「5s 等结果 +
+/// 8s 关闭」推导，漏算了宽限期，使超时兜底的强制回收可能在旧会话仍处宽限
+/// 期时触发。不变量由 `preempt_budget_covers_close_and_grace` 锁定。
+const PREEMPT_WAIT_BUDGET: Duration = Duration::from_secs(
+    session::CLOSE_BROWSER_TIMEOUT.as_secs() + crate::bridge::GRACE_WAIT_DURATION.as_secs(),
+);
+
 ///
 /// - 配置渠道可用 → `None`（沿用，不动作）
 /// - 不可用但有兜底渠道 → `Some(兜底)`（调用方本次登录临时切换，不落盘）
@@ -1093,19 +1104,42 @@ impl LoginOrchestrator {
     /// 防死锁：`Notify::notify_one` 无等待者时存储许可——旧会话先于本等待
     /// 完成时 `notified()` 立即返回，不挂起。
     async fn wait_old_session_finished(&self, old: ActiveSession) {
-        // F6 总预算：5s（旧版等结果预算）+ 8s（emit 内 close_browser 上限）
-        const PREEMPT_WAIT_BUDGET: Duration = Duration::from_secs(13);
+        // 收尾预算 = 各段超时之和，缺一即不覆盖最坏路径。不变量由
+        // `preempt_budget_covers_close_and_grace` 锁定：
+        // - close_browser 命令级超时（login::session::CLOSE_BROWSER_TIMEOUT，8s）；
+        // - Bridge 在该命令超时后给予的宽限等待
+        //   （bridge::GRACE_WAIT_DURATION，10s）。
+        // 早期版本的 13s（按「5s 等结果 + 8s 关闭」推导）漏算了宽限期，导致超时
+        // 兜底的 `force_recycle` 可能在旧会话收尾仍处宽限期时触发。
+        debug_assert!(
+            PREEMPT_WAIT_BUDGET
+                >= crate::login::session::CLOSE_BROWSER_TIMEOUT
+                    + crate::bridge::GRACE_WAIT_DURATION
+        );
+        // 旧会话在途 attempt 的 cancel_id：超时兜底强杀前用它证明槽位归属
+        // （见 force_recycle_if_unowned）。须在 await 前取出——等待期间会话可能
+        // 继续推进而改写该值。
+        let owner_cancel_id = old.attempt_cancel_id.load_full();
         match tokio_timeout(PREEMPT_WAIT_BUDGET, old.finished.notified()).await {
             Ok(()) => {
                 // 完全收尾：结果必然已写入（notify 在 run() 返回后触发），
                 // 无需再等 await_result
             }
             Err(_) => {
+                // 归属感知（P1-4）：槽位若已被**其他**请求占用（定时浏览器任务与
+                // 登录在 Bridge 层共享槽位且互不排斥），强杀会摧毁对方在途执行；
+                // 此时放弃回收，交由对方完成后再由空闲计时器回收。
                 warn!(
                     "等待旧会话完全收尾超时（{}s），强制回收 Worker 后放行新会话",
                     PREEMPT_WAIT_BUDGET.as_secs()
                 );
-                self.bridge.force_recycle().await;
+                if !self
+                    .bridge
+                    .force_recycle_if_unowned(owner_cancel_id.as_deref().map(String::as_str))
+                    .await
+                {
+                    warn!("Worker 会话槽位已被其他请求接管，跳过强制回收（避免摧毁在途任务）");
+                }
             }
         }
     }
@@ -1789,7 +1823,7 @@ mod tests {
     }
 
     /// F6：旧会话超预算未收尾 → force_recycle 兜底后放行
-    /// （start_paused 让 13s 预算瞬间耗尽；force_recycle 将 Worker 置 Error 可观测）
+    /// （start_paused 让预算瞬间耗尽；force_recycle 将 Worker 置 Error 可观测）
     #[tokio::test(start_paused = true)]
     async fn f6_旧会话超时未收尾_强制回收后放行() {
         let orch = make_orchestrator().await;
@@ -1801,6 +1835,63 @@ mod tests {
         assert!(
             matches!(ws, crate::status::WorkerStatus::Error),
             "超时兜底应强制回收 Worker，实际 {ws:?}"
+        );
+    }
+
+    /// F6：抢占收尾预算必须覆盖最坏路径的每一段
+    ///
+    /// 该不变量此前是隐式的（注释按「5s 等结果 + 8s 关闭」推导出 13s），漏算了
+    /// Bridge 在命令超时后的宽限期 → 超时兜底的强制回收可能在旧会话仍处宽限期
+    /// 时触发。改为由各段常量推导后，此处锁定推导关系。
+    #[test]
+    fn preempt_budget_covers_close_and_grace() {
+        let close = session::CLOSE_BROWSER_TIMEOUT;
+        let grace = crate::bridge::GRACE_WAIT_DURATION;
+        assert!(
+            PREEMPT_WAIT_BUDGET >= close + grace,
+            "抢占收尾预算 {PREEMPT_WAIT_BUDGET:?} 必须 ≥ close_browser 超时 {close:?} \
+             + Bridge 宽限 {grace:?}，否则超时兜底会在旧会话仍在收尾时强杀 Worker"
+        );
+    }
+
+    /// P1-4：槽位被其他请求占用时，归属感知回收必须跳过（不强杀在途任务）
+    #[tokio::test]
+    async fn force_recycle_if_unowned_skips_when_slot_held_by_other() {
+        let orch = make_orchestrator().await;
+        // 模拟「定时浏览器任务正占用会话槽位」：注册一个不属于本会话的 cancel_id
+        let holder = "other-session-cancel-id";
+        let token = tokio_util::sync::CancellationToken::new();
+        orch.bridge.register_test_cancel_id(holder, token);
+
+        // 调用方无身份（None）→ 槽位非空即视为他人占用 → 跳过
+        assert!(
+            !orch.bridge.force_recycle_if_unowned(None).await,
+            "槽位被他人占用时不得强杀 Worker"
+        );
+        let ws = orch.bridge.worker_status();
+        assert!(
+            !matches!(ws, crate::status::WorkerStatus::Error),
+            "跳过回收后 Worker 不应被置为 Error，实际 {ws:?}"
+        );
+
+        // 冒名他人 id 同样不得强杀（只有槽位真正的持有者才能回收）
+        assert!(
+            !orch
+                .bridge
+                .force_recycle_if_unowned(Some("not-the-holder"))
+                .await,
+            "非槽位持有者不得强杀 Worker"
+        );
+
+        // 槽位真正的持有者调用 → 允许回收
+        assert!(
+            orch.bridge.force_recycle_if_unowned(Some(holder)).await,
+            "槽位持有者应可强制回收"
+        );
+        let ws = orch.bridge.worker_status();
+        assert!(
+            matches!(ws, crate::status::WorkerStatus::Error),
+            "持有者回收后 Worker 应为 Error，实际 {ws:?}"
         );
     }
 }

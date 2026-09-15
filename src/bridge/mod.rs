@@ -57,6 +57,12 @@ const DEBUG_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30
 pub const DEFAULT_WORKER_STARTUP_TIMEOUT_SECS: u64 = 30;
 /// 取消通知发出后等待 Worker 确认收敛的最长时间；超时则回收进程。
 const CANCEL_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 命令级超时后，等待 Worker 自愈（取消任务 + 关页打断挂起的 CDP await）的宽限期。
+///
+/// 仍未释放会话槽位则判定卡死并强杀回收。该值与 `login::PREEMPT_WAIT_BUDGET`
+/// 的推导直接相关（后者须覆盖 close_browser 超时 + 本宽限期），改动时须同步。
+pub const GRACE_WAIT_DURATION: Duration = Duration::from_secs(10);
 /// NDJSON 行分隔符
 pub const IPC_DELIMITER: u8 = b'\n';
 /// 单行最大长度（1MB）
@@ -88,6 +94,21 @@ pub trait BridgeApi: Send + Sync {
     ) -> Result<IpcResponse, BridgeError>;
     /// 强制回收当前 Worker（kill 子进程并标记 Error，下次请求重新 spawn）。
     async fn force_recycle(&self);
+    /// 归属感知的强制回收：仅当会话槽位**未被其他请求占用**时才强杀 Worker。
+    ///
+    /// 返回 `true` 表示已执行回收，`false` 表示因槽位被其他请求持有而跳过。
+    /// 供登录会话在重试前回收「可能已损坏」的 Worker 使用——无条件回收会在
+    /// 「登录与定时浏览器任务时间重叠」时杀掉对方正在使用的 Worker：对方以
+    /// `WorkerCrashed` 中途失败，根因却在另一条路径上，极难排查。
+    ///
+    /// `owner_cancel_id` 为调用方自己的 cancel_id；`None` 表示调用方无身份，
+    /// 此时只要槽位被占用即视为「可能属于他人」而跳过。
+    async fn force_recycle_if_unowned(&self, owner_cancel_id: Option<&str>) -> bool {
+        // 内存 mock 无真实会话槽位，按「无冲突」处理
+        let _ = owner_cancel_id;
+        self.force_recycle().await;
+        true
+    }
     /// 是否存在存活 Worker 子进程。
     fn has_live_worker(&self) -> bool;
     /// 若 Worker 正在运行，则回收它以便下次请求按最新环境重新启动。
@@ -149,6 +170,10 @@ impl BridgeApi for BridgeSupervisor {
 
     async fn force_recycle(&self) {
         BridgeSupervisor::force_recycle(self).await
+    }
+
+    async fn force_recycle_if_unowned(&self, owner_cancel_id: Option<&str>) -> bool {
+        BridgeSupervisor::force_recycle_if_unowned(self, owner_cancel_id).await
     }
 
     fn has_live_worker(&self) -> bool {
@@ -457,7 +482,7 @@ impl BridgeSupervisor {
                         .flatten()
                 };
                 if let Some(request_id) = stuck_request_id {
-                    grace_wait_slot_release(self, request_id, Duration::from_secs(10)).await;
+                    grace_wait_slot_release(self, request_id, GRACE_WAIT_DURATION).await;
                 }
                 Err(BridgeError::Timeout)
             }
@@ -506,6 +531,39 @@ impl BridgeSupervisor {
         }
         // 强杀子进程并标记 Error
         kill_worker_now(self).await;
+    }
+
+    /// 归属感知的强制回收：仅当会话槽位空闲或属于调用方时才强杀 Worker。
+    ///
+    /// 返回 `true` 表示已执行回收，`false` 表示因槽位被**其他**请求持有而跳过。
+    ///
+    /// 动机：`force_recycle` 是破坏性操作（kill 整棵进程树）。登录会话在可重试
+    /// 失败后的回收、以及抢占等待超时后的兜底都会调用它；而定时浏览器任务与
+    /// 登录在 Bridge 层**共享同一个会话槽位**且互不排斥（`check_session_compat`
+    /// 对 `Some(Login)` 放行 `execute_browser_task`，有测试固化）。两者时间重叠时
+    /// 无条件强杀会摧毁对方在途执行——对方以 `WorkerCrashed` 中途失败，症状是
+    /// "任务自己失败"，根因却在登录路径上。
+    ///
+    /// 判定口径与 [`grace_wait_slot_release`] / [`wait_cancel_ack_or_kill`] 一致：
+    /// 仅当 `current_cancel_id` 为空（槽位空闲）或不等于他人 id 时放行。
+    /// `owner_cancel_id` 为 `None`（调用方无身份，如本轮 attempt 已结束）时，
+    /// 槽位非空即视为他人占用而跳过——宁可少回收一次（下次 `ensure_worker`
+    /// 会重新建立上下文），也不要误杀在途任务。
+    pub async fn force_recycle_if_unowned(&self, owner_cancel_id: Option<&str>) -> bool {
+        let unowned = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            match inner.current_cancel_id.as_deref() {
+                // 槽位空闲：无人依赖当前 Worker
+                None => true,
+                // 槽位由本请求持有：回收是预期行为
+                Some(current) => Some(current) == owner_cancel_id,
+            }
+        };
+        if !unowned {
+            return false;
+        }
+        self.force_recycle().await;
+        true
     }
 
     /// 启动 supervisor 后台 task（返回 ServiceHandle）
@@ -568,6 +626,20 @@ impl BridgeSupervisor {
             .unwrap_or_else(|e| e.into_inner())
             .process
             .is_some()
+    }
+
+    /// 测试辅助：模拟「某请求正占用会话槽位」
+    ///
+    /// 供 [`BridgeSupervisor::force_recycle_if_unowned`] 的归属判定用例使用——
+    /// 真实槽位只能由 `execute_inner` 的原子临界区写入，单测无从驱动完整 IPC。
+    #[cfg(test)]
+    pub(crate) fn register_test_cancel_id(&self, cancel_id: &str, token: CancellationToken) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.cancel_registry.register(cancel_id.to_string(), token);
+        inner.current_cancel_id = Some(cancel_id.to_string());
+        inner.current_session = Some(SessionType::Login);
+        inner.worker_state = WorkerState::InLogin;
+        inner.current_request_id = Some(inner.next_request_id);
     }
 
     /// 读取 Worker 运行时 OCR 能力（任务 10）
@@ -1060,9 +1132,18 @@ async fn execute_inner(
         // 旧登录的取消传播按 cancel_id 查注册表（session.rs attempt_cancel_id），
         // 提前移除会让用户对在途登录的取消静默失效。各命令自身的 cancel_id
         // 由其 SessionGuard drop 时无条件移除（防泄漏）。
-        inner
-            .cancel_registry
-            .register(cancel_id.clone(), token.clone());
+        //
+        // 轻量旁路注册到独立分区（P2-6）：`force_recycle` 的 `trigger_all`
+        // 只取消会话区，避免 Worker 回收时误伤并发的 OCR/反馈截图请求。
+        if is_lightweight {
+            inner
+                .cancel_registry
+                .register_lightweight(cancel_id.clone(), token.clone());
+        } else {
+            inner
+                .cancel_registry
+                .register(cancel_id.clone(), token.clone());
+        }
         if is_lightweight {
             // 轻量旁路：仅注册 cancel，不触碰会话槽位 / worker_state / 空闲计时器。
             // pending 与 cancel 的清理交给 guard drop 的轻量回调（lightweight_cleanup）。

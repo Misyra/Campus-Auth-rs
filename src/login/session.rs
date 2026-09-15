@@ -148,6 +148,14 @@ fn dialog_note(data: &Value) -> String {
     }
 }
 
+/// `close_browser` 的命令级超时。
+///
+/// 与 Python 侧 `handle_close_browser` 的内部超时一致
+/// （`playwright_worker.py` 的 `_WAIT_TIMEOUT_SECS = 8`）：两端同值时以 Python
+/// 自愈为主，Rust 侧不再多等 4s。该值是抢占收尾预算的组成部分——调大此处会
+/// 使 `login::PREEMPT_WAIT_BUDGET` 不再覆盖最坏路径（由不变量测试锁定）。
+pub(crate) const CLOSE_BROWSER_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// 会话跨实例共享的服务依赖集（由 LoginOrchestrator 构造一次并复用，A-2）
 pub(crate) struct SessionDeps {
     /// Bridge 句柄（trait 化：可注入 mock 做状态机单测）
@@ -369,7 +377,9 @@ impl LoginSession {
                 }
             };
 
-            // 本轮 attempt 结束，清除在途 cancel_id
+            // 本轮 attempt 结束，清除在途 cancel_id。清除前留一份：Bridge 强杀
+            // Worker 前要用它证明会话槽位属于本会话（见 try_retry 的归属感知回收）。
+            let finished_attempt_cancel_id = self.attempt_cancel_id.load_full();
             self.attempt_cancel_id.store(None);
 
             // 分类结果：可重试但重试预算已耗尽时归入 Exhausted（避免进入 try_retry）
@@ -446,7 +456,13 @@ impl LoginSession {
                             duration_ms: structured.duration_ms,
                         };
                         if !self
-                            .try_retry(&retry_structured, &mut attempts_used, session_start, false)
+                            .try_retry(
+                                &retry_structured,
+                                &mut attempts_used,
+                                session_start,
+                                false,
+                                finished_attempt_cancel_id.as_deref().map(String::as_str),
+                            )
                             .await
                         {
                             return;
@@ -480,6 +496,7 @@ impl LoginSession {
                             session_start,
                             // 直连路径无 Worker 参与，网络类失败不需要回收 Worker
                             !is_http && should_force_recycle(structured.outcome),
+                            finished_attempt_cancel_id.as_deref().map(String::as_str),
                         )
                         .await
                     {
@@ -526,12 +543,16 @@ impl LoginSession {
     }
 
     /// 返回 `true` 表示继续下一轮循环，`false` 表示已 emit 终态结果（重试耗尽或被取消）。
+    ///
+    /// `owner_cancel_id` 为本会话刚结束那轮 attempt 的 cancel_id，用于向 Bridge
+    /// 证明会话槽位归属（`None` 表示本会话未持有槽位/为直连渠道）。
     async fn try_retry(
         &self,
         structured: &StructuredResult,
         attempts_used: &mut u32,
         session_start: Instant,
         force_recycle: bool,
+        owner_cancel_id: Option<&str>,
     ) -> bool {
         if *attempts_used >= self.params.max_retries {
             self.finish_with_failure(
@@ -566,8 +587,24 @@ impl LoginSession {
             // 下一次 bridge.execute() 内部的 ensure_worker 会自动重新 spawn。
             // 同步 await（而非 spawn）确保 kill 在重试间隔之前完成，避免下一轮
             // ensure_worker 复用即将被 kill 的 Worker（force_recycle 与 retry 竞态）。
+            //
+            // 归属感知（P1-4）：本会话刚结束一轮 attempt（槽位若仍被占，占用者
+            // 只可能是**另一条路径**——如定时浏览器任务）。无条件强杀会以
+            // `WorkerCrashed` 摧毁对方在途执行，症状是"任务自己失败"，根因却在
+            // 登录重试上。故先校验槽位是否空闲或仍属本会话，否则跳过回收：
+            // 本轮登录已失败，不回收最多让下一轮重新 spawn 一次。
             warn!("登录结果 {:?} 触发 Worker 强制回收", structured.outcome);
-            self.deps.bridge.force_recycle().await;
+            let recycled = self
+                .deps
+                .bridge
+                .force_recycle_if_unowned(owner_cancel_id)
+                .await;
+            if !recycled {
+                warn!(
+                    "Worker 会话槽位被其他请求占用，跳过强制回收（避免摧毁在途任务）；\
+                     下一轮登录将由 ensure_worker 重新建立上下文"
+                );
+            }
         }
         let ct = self.cancel_token.clone();
         tokio::select! {
@@ -763,13 +800,11 @@ impl LoginSession {
                 // 走会话级释放、默认配置走全量关闭，三档语义由 Worker 侧实现
                 let preserve = result.is_success()
                     && self.deps.config_service.runtime().load().worker.keep_alive;
-                // 超时须大于 Python 侧 close 内部超时（8s），避免竞速误报；
-                // 命令级超时兜底由 bridge.execute_with_timeout 负责，失败仅告警不阻塞收尾
                 if let Err(e) = b
                     .execute_with_timeout(
                         "close_browser",
                         json!({ "preserve_state": preserve }),
-                        Duration::from_secs(12),
+                        CLOSE_BROWSER_TIMEOUT,
                     )
                     .await
                 {
