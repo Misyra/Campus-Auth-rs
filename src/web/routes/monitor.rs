@@ -225,12 +225,12 @@ mod tests {
         );
     }
 
-    /// test_network 引擎已关闭：ChannelClosed → 500
+    /// test_network 引擎已关闭：ChannelClosed → 503（「引擎暂不可用」，非服务端故障）
     #[tokio::test]
     async fn test_test_network_engine_closed() {
         let app = mock_app(MockEngineApi::new());
         let (status, v) = post_empty(app, "/api/monitor/test").await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             v["error"]["message"]
                 .as_str()

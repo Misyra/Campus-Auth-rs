@@ -273,7 +273,13 @@ impl From<crate::bridge::BridgeError> for ApiError {
 impl From<crate::engine::EngineError> for ApiError {
     fn from(e: crate::engine::EngineError) -> Self {
         match e {
-            crate::engine::EngineError::ChannelFull => ApiError::ServiceUnavailable(e.to_string()),
+            // 通道类错误都是「引擎暂时不可用」而非服务端故障：
+            // - ChannelFull：命令队列饱和，稍后重试即可；
+            // - ChannelClosed：Engine 已退出或正处在崩溃重启窗口，
+            //   稍后重试即可恢复。两者映射 500 会让前端/用户误以为服务端 bug
+            crate::engine::EngineError::ChannelFull | crate::engine::EngineError::ChannelClosed => {
+                ApiError::ServiceUnavailable(e.to_string())
+            }
             _ => ApiError::Internal(e.to_string()),
         }
     }
@@ -497,6 +503,29 @@ mod tests {
         assert!(matches!(e, ApiError::WorkerNotInstalled(_)));
         let e: ApiError = crate::bridge::BridgeError::WorkerBusy.into();
         assert!(matches!(e, ApiError::WorkerBusy(_)));
+    }
+
+    /// 服务错误自动转换：EngineError 通道类 → 503，其余 → 500
+    #[test]
+    fn test_from_engine_error() {
+        use crate::engine::EngineError;
+
+        // 通道类错误是「引擎暂时不可用」，不是服务端故障：
+        // Engine 崩溃重启窗口内用户点「开始监测」曾得到误导性的 500
+        for e in [EngineError::ChannelClosed, EngineError::ChannelFull] {
+            let api: ApiError = e.into();
+            assert_eq!(
+                api.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "通道类错误应映射 503"
+            );
+            assert!(matches!(api, ApiError::ServiceUnavailable(_)));
+        }
+        // 真正的内部故障仍为 500
+        let api: ApiError = EngineError::ProbeError("boom".into()).into();
+        assert_eq!(api.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let api: ApiError = EngineError::TestNetworkTimeout.into();
+        assert_eq!(api.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     /// 成功响应包装：{ "data": payload }
