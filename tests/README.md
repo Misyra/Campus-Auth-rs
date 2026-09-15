@@ -47,10 +47,9 @@
 
 ## 相关目录
 
-- `tests/mock-servers/full-portal/` — 完整 mock 门户（原 `mock_portal/` 已搬迁至此，根 `mock_portal/README.md` 为兼容重定向）
+- `tests/mock-servers/full-portal/` — 完整 mock 门户（原 `mock_portal/` 已搬迁至此）
 - `tests/mock-servers/eportal-xor/` — eportal（Dr.COM）XOR 加密直连门户：密钥由**来源 IP** 推导，用于验证「直连请求渠道 + 凭据变换脚本」能否复现该类门户登录（`python server.py <port>`，手动起停，不参与 CI）
 - `python_worker/tests/` — Python Worker 单测
-- `mock_portal/` — 已搬迁，根保留 `README.md` 重定向（下版本可删）
 
 ## 维护
 
@@ -59,12 +58,16 @@
 
 ## 测试矩阵（统一入口）
 
+> 不在此处维护用例/文件数量：这类绝对数字必然随开发腐化（历史上"73 处 / 5 crate /
+> 127 用例 / 49 用例"四项已全部过时）。需要当前规模时直接问测试工具本身——
+> `cargo test -- --list`、`uv run pytest --collect-only -q`、`npm test -- --reporter=json`。
+
 | 端 | 位置 | 命令 | 说明 |
 |---|---|---|---|
-| Rust 单元 | `src/**/mod tests`（73 处，就地） | `cargo test --lib` | 与源码同目录是 Rust 惯例，不搬迁 |
-| Rust 集成 | `tests/*.rs`（5 个 crate）+ `tests/common/` | `cargo test --test '*'` | 共享 helper 经 `mod common;` 接入；临时目录一律 `tempfile`，禁写 `target/` |
-| Python | `python_worker/tests/`（11 文件 / 127 用例） | `cd python_worker && uv run pytest` | 函数级懒导入保证无 Playwright 也可 collect |
-| 前端 | `frontend/src/**/*.test.ts`（7 文件 / 49 用例） | `cd frontend && npm test` | vitest node 环境 |
+| Rust 单元 | `src/**/` 内 `#[cfg(test)] mod tests`（就地） | `cargo test --lib` | 与源码同目录是 Rust 惯例，不搬迁 |
+| Rust 集成 | `tests/*.rs` + `tests/common/` | `cargo test --test '*'` | 共享 helper 经 `mod common;` 接入；临时目录一律 `tempfile`，禁写 `target/` |
+| Python | `python_worker/tests/` | `cd python_worker && uv run pytest` | 函数级懒导入保证无 Playwright 也可 collect |
+| 前端 | `frontend/src/**/*.test.ts` | `cd frontend && npm test` | vitest node 环境 |
 | 全链路 | `tests/login_chain.rs`（mock→二进制→Worker→success＋failonce 重试） | `cargo test --test login_chain` | 需 Python+Pillow+ddddocr+Playwright chromium，缺一 SKIP；CI `e2e-login-chain` 预装 |
 
 手动 E2E 环境变量：`CAMPUS_AUTH_BASE`（默认 `http://127.0.0.1:50721`）、

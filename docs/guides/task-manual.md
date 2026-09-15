@@ -8,13 +8,13 @@
 
 - **任务**：一份 JSON，`type` 为 `browser`（浏览器自动化）或 `script`（脚本，`content` 或 `script_path` + `binary_path`/`args`/`work_dir`），见 `src/tasks/models.rs`。浏览器任务含 `url`/`steps`/`success_condition` 等；脚本任务由 `TaskExecutor` 直接起子进程执行。历史 `type=shell` 已移除，遇到时明确报错并提示改用 `script`。
 - **启用任务**：实际被自动登录执行的浏览器任务，**按方案绑定**——每个 Profile 各有一个（`ProfileData.active_task`），切方案即切任务；未绑定的方案回退内置默认任务 `default`。在`配置方案`编辑器或`设置 · 账号`的「登录方式」里选择。必须是浏览器任务（脚本不参与登录）。
-- **定时任务**：与登录任务独立，按 Cron 表达式定时触发的任务，在`定时任务`页管理；底层仍为上述三类任务的调度视图。
+- **定时任务**：与登录任务独立，按 Cron 表达式定时触发的任务，在`定时任务`页管理；底层为上述**两类**任务（浏览器 / 脚本）的调度视图——创建时按 `target_id` 关联任务，任务类型由任务本体推导（`SchedulerService::task_type_of`），不在调度记录里冗余存储。
 
 ## 2. 日常操作（Web 控制台）
 
 ### 任务页
 
-「任务」页含两个标签页：**浏览器任务**（自动化登录步骤序列）与**脚本**（定时执行的辅助动作）。
+「任务」页含三个标签页：**浏览器任务**（自动化登录步骤序列）、**脚本**（定时执行的辅助动作）与 **AI 生成**（用自然语言描述生成浏览器任务）。
 
 - 新建、编辑、复制、删除任务；列表可排序。**本页只管编辑任务内容**；「用哪个任务登录」在各方案的「登录方式」里选择。
 - 从文件导入 / 导出单个任务（JSON 文件）。任务交换统一为导出结果格式（`{ summary, config }`，批量为其数组），导出文件可直接回导；导入另兼容顶层 `id` 的扁平对象与磁盘文件的 `task_id` 写法。
@@ -60,9 +60,10 @@
 | `POST /api/tasks/order` | 排序 |
 | `POST /api/login` | 触发登录（执行当前方案绑定的任务） |
 | `POST /api/tasks/{id}/execute` | 执行指定任务 |
-| `GET /api/scripts` | 脚本任务过滤视图（同 `GET /api/tasks` 数据，`tasks/scripts/`） |
-| `POST /api/scripts/run` | 临时脚本直跑（不落盘，`ScriptTaskConfig` 即时执行） |
-| `GET /api/tasks`（脚本）| `GET /api/scripts/{id}` / `PUT /api/scripts/{id}`（脚本单体，`ps1` 被拒） |
+| `GET /api/scripts/binaries` | 可选解释器/二进制清单（脚本编辑器的 `binary_path` 下拉） |
+| `POST /api/scripts/run` | 脚本直跑：body 传 `task_id`（执行已落盘任务）或 `script`（临时内容，不落盘，`task_id` 记为 `adhoc_script`）；二者均缺则 400 |
+| `GET /api/scripts/{id}` / `PUT /api/scripts/{id}` / `DELETE /api/scripts/{id}` | 脚本单体读写（`ps1` 被拒） |
+| `GET /api/tools/task-recorder.user.js` | 任务录制用户脚本（Tampermonkey） |
 | `POST /api/login` | 触发登录（执行活跃任务） |
 | `POST /api/login/once` | 登录一次 |
 | `GET /api/login/status` | 登录状态 |

@@ -1,10 +1,10 @@
 # Campus-Auth Python Worker
 
 > Rust 侧对应模块 `src/bridge/`（`BridgeSupervisor` 通过 NDJSON IPC 驱动本 Worker），IPC 契约见本 README 与 `worker_main.py` docstring。
+> Worker 协议版本：`v1.0.0`（与主程序发版版本独立）。本目录为 Rust 重写版的 Python Worker，已移除对旧项目 `app.*` 模块的全部依赖。
 
-校园网自动认证工具的浏览器自动化子进程。由 Rust 主进程（控制平面）通过
-> Worker 协议版本：`v1.0.0`（与主程序发版版本独立）。本目录为 Rust 重写版的 Python Worker，已移除对旧
-> 项目 `app.*` 模块的全部依赖。
+校园网自动认证工具的浏览器自动化子进程，由 Rust 主进程（控制平面）按需拉起、
+空闲超时后关闭。
 
 ## 设计要点
 
@@ -68,17 +68,30 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 
 ## 支持的命令
 
+与 `playwright_worker.py` 的 `COMMANDS` 注册表逐项对应（14 项）。
+
 | 命令 | 说明 |
 |------|------|
+| `worker_health_check` | Worker 进程级健康探测，上报运行时能力（`capabilities.ocr`，Rust 侧缓存并供 `/api/ocr/status` 消费） |
 | `browser_health_check` | 浏览器/Worker 健康探测，未安装 Playwright 时返回 `healthy: false` |
 | `execute_login_attempt` | 执行一次登录尝试（按 TaskConfig 的步骤序列） |
 | `execute_browser_task` | 执行通用浏览器任务（自定义步骤序列） |
+| `close_browser` | 登录会话终态后的浏览器资源回收（三种档位见 `preserve_state` / `CAMPUS_AUTH_WORKER_KEEP_ALIVE`） |
 | `debug_start` | 启动调试会话，保持页面上下文 |
 | `debug_step` | 执行调试会话中的单步 |
+| `debug_run_all` | 执行调试会话中从指定下标起的全部步骤 |
 | `debug_stop` | 停止调试会话并释放页面 |
+| `debug_status` | 查询调试会话详情（无副作用，供前端刷新后恢复步骤数据） |
+| `feedback_capture` | 捕获当前调试页的完整 MHTML、截图与 CSS/JS 资源（供导出离线问题报告） |
 | `page_capture` | 清理旧登录态后导航到目标页，落盘 MHTML、原始 HTML、结构化控件摘要与脱敏局部 HTML、CSS-JS 资源及截图到 `captures/latest/`（超大全页截图自动降为视口截图；由 `POST /api/ai/capture` 触发） |
-| `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖） |
+| `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖；与任意会话并发的轻量旁路，不占用单会话槽位） |
 | `shutdown` | 优雅关闭 Worker 进程 |
+
+> **会话互斥与轻量旁路**：`execute_login_attempt` / `execute_browser_task` 占用
+> Worker 的**单会话槽位**；`ocr_recognize` / `feedback_capture` 属轻量旁路，可与任意
+> 会话并发，且**不参与** Worker 回收时的全量取消（Rust 侧 `CancelRegistry` 为其
+> 单独分区）。Rust → Worker 的命令始终串行执行（`_serve` 主循环 `await` 至该条命令
+> 结束），故同一时刻只有一个命令真正操作浏览器。
 
 ## 依赖安装
 

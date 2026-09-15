@@ -2,6 +2,86 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-15 全面文档对质：修正 9 处与实现不符的陈述）
+
+对全部 19 个 tracked Markdown 与 `openapi.json` 做了一轮与代码的对质。**每条陈述都以源码/路由表/脚本实际内容为准核对**，不依赖文档间的交叉引用。修法遵循一条原则：**能用「查询命令」表达的规模数字就不再写死绝对值**（那类数字必然腐化），能用代码定位替代行号的就写符号名。
+
+### 接口与类型描述纠错（用户会照着做，影响最大）
+
+- **`GET /api/shells` 与 `type=shell` 根本不存在**（`README.md`）：原文称「三类 `type`（browser/script/shell）……API 统一为 `GET /api/shells`」。实际 `TaskKind` 只有 `Browser` / `Script` 两臂，`shell` 类型在反序列化处被**明确拒绝**并提示改用 `script`（`src/tasks/models.rs:259-262`，有用例锁定），`/api/shells` 无任何注册（`routes/` 下也没有 `shells.rs`）。改为两类，并换掉失效端点。
+- **定时任务不是「浏览器任务的 cron 调度视图」**（`README.md`、`user-guide.md`、`task-manual.md` 三处）：实际 `TaskExecutor::execute_with_timeout_override` 对 `Browser`/`Script` 两臂都有实现（`src/tasks/executor.rs:109-121`），`SchedulerService::task_type_of` 按 `target_id` 推导类型，前端定时任务页也提供「浏览器任务 / 自定义脚本」两个目标选项（`ScheduledTasksView.vue:22-23`）。三处均改为「两类（浏览器/脚本）」。
+- **`GET /api/scripts` 不存在**（`task-manual.md:63`、`user-guide.md:91`）：实际只有 `/api/scripts/run`、`/api/scripts/binaries`、`/api/scripts/{id}`（GET/PUT/DELETE）。脚本列表复用 `GET /api/tasks`。原文所谓「脚本任务过滤视图」在前端也是本地按类型过滤，并无该端点。
+- **`POST /api/ai/generate` 不存在**（`README.md:17`）：实际端点是 `POST /api/ai/generate/stream`（流式，`src/web/mod.rs:300`）。
+- **`POST /api/debug/capture` 不存在**（`user-guide.md:113`）：实际反馈包端点为 `POST /api/debug/feedback-bundle`（`src/web/mod.rs:167`）。
+- **`GET /api/profiles/active` 不存在**（`user-guide.md:75`）：活跃方案由 `GET /api/profiles` 响应的 `active_profile` 字段携带，切换走 `POST /api/profiles/switch`（前端 `profilesApi.setActive` 亦用后者）。
+- **`POST /api/scripts/run` 的语义写窄了**（`task-manual.md`）：它按 body 分派——传 `task_id` 执行已落盘任务，传 `script` 执行临时内容（`task_id` 记为 `adhoc_script`，不落盘），二者皆缺返回 400（`src/web/routes/scripts.rs:65-79`）。原文只写了 `task_id` 一种。
+- **前端 typegen 链路早已移除**（`frontend/README.md`、`openapi.json` 的 `description`）：原文称 `types.generated.ts` 是 `npm run typegen` 的产物、以 `openapi.json` 为源。实际 `typegen` 脚本与 `openapi-typescript` 依赖已在 `487e078`（C6）删除，`types.generated.ts` 也不存在。改为说明「手写 `types.ts` 是唯一权威，无生成链路」，并在 `openapi.json` 的 `description` 里如实交代其边界（只有 method+path，无 `components.schemas`，字段契约不在其中，漂移保护仅由 `openapi_json_matches_route_table` 覆盖路径集合）。
+
+### 结构与计数纠错
+
+- **任务页已是三个 Tab**（`user-guide.md`、`task-manual.md` 两处称「两个」）：`TasksView.vue:22-24` 与路由 `/tasks/{browser,scripts,ai}` 均为三项，「AI 生成」随 `5880401` 并入后文档未跟上。
+- **`web/routes/` 的域清单含不存在的 `shells`、漏了 `tools`**（`AGENTS.md:111`）：实际目录有 `tools.rs`（`/api/tools/task-recorder.user.js`）而无 `shells.rs`。
+- **`mock_portal/` 根目录重定向不存在**（`AGENTS.md`、`tests/README.md`）：该目录不存在、`git ls-files` 也无命中，原文「根保留 README 重定向」为凭空陈述。
+- **`docs/known-issues.md` 两处行号失效**（`:15`、`:16`）：`next_fire_at` 的实际序列化点在 `scheduler/mod.rs:658`（原写 `:326-328`，该处是 `save_task`）；Profile 切换的 pause 门控在 `run_loop.rs:234-241`（原写 `:127-130`，该处是 `EngineInner::new` 的字段初始化）。改为按符号定位，避免行号再次漂移。
+- **`docs/guides/user-guide.md` 版本号停在 `alpha.8`**：改为当前 `alpha.10`。
+
+### 仍有效但表述可改进
+
+- **`python_worker/README.md` 首段句子被打断**：原文「……由 Rust 主进程（控制平面）通过」后被 blockquote 截断，且第二条 blockquote 里嵌了「项目 `app.*` 模块……」的残句——系早前编辑事故。已重写该段。
+- **`python_worker/README.md` 的「支持的命令」表只列了 9 项**：实际 `COMMANDS` 注册 **14** 项。补上 `worker_health_check` / `close_browser` / `debug_run_all` / `debug_status` / `feedback_capture`，并补一节说明会话互斥与轻量旁路（`ocr_recognize` / `feedback_capture` 与任意会话并发且不参与 Worker 回收时的全量取消），与 Rust 侧 `CancelRegistry` 的双区语义对齐。
+
+### 未改动的部分（已核实准确）
+
+`docs/guides/README.md`、`docs/archive/README.md`、`docs/plans/`、`docker/README.md`、根 `README.md` 的 Docker/更新/贡献各节、`tests/README.md` 的目录树与 E2E 环境变量说明、`docs/guides/task-writing-guide.md` 的 18 项 `VALID_STEP_TYPES`（与 `src/tasks/models.rs:40-61` 逐项一致）、`docs/guides/custom-script-guide.md`（上一轮已按 `shell` 移除重写）。
+
+### 本轮验证
+
+- **端点对质**：从 `src/web/mod.rs` 的 `route_table` 提取全部 84 条 `(method, path)`，与各文档正文提及的 `/api/*` 逐一比对（路径参数归一化），确保无「文档提到但未注册」的端点。
+- **`updatelog.md` 章节提取回归**：`release.yml:197` 用 awk 按 `## <tag>` 前缀提取发布说明。本轮在该文件新增了 `## 尚未发布（开发中）` 小节，故按同一逻辑（PowerShell 复刻）验证：对 `tag=v5.0.0-alpha.10` 仅提取到 alpha.10 那一节（19 行），**未把新增小节并入**，前缀边界判定正确。
+- `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` 零告警；`cargo test` **887 passed**（含 `openapi_json_matches_route_table` 与 `test_openapi_asset_embedded`，两例在 `openapi.json` 的 `description` 改写后仍通过）。
+- `openapi.json` 改动后仍为合法 JSON（`info.version` = 5.0.0-alpha.10，85 个 paths）。
+
+## 开发中（2026-09-15 全面审查后的缺陷修复：4 项 P1 + 8 项 P2 + 3 项 P3）
+
+对全仓做了一轮审查与测试，逐项修复确认缺陷。所有结论均先经可执行实验或真实二进制验证，静态推理得出的判断一律以实验为准。
+
+### P1（用户可感知的正确性缺陷）
+
+- **P1-1 宽松触发吞掉「谨慎单次」降级**（`src/monitor/decision.rs`）：`lenient_trigger_candidate` 原先只排除 `FixConfiguration` / `NoProbeEvidence`，未排除 `AttemptLogin` / `AttemptLoginOnce`。后果有二：① 真实捕获的门户劫持（`High` / `CaptiveDetected`）在关闭严格模式后被**无条件**改写成 `Low` / `LinkUpLoginAssumed`，排障时无法区分「确实检测到劫持」与「只是按链路猜」；② 有意的「同一配置版本仅尝试一次」节流被升级为无差别 `AttemptLogin`，绕过 Engine 的 `cautious_attempted_config_version` 去重（仍受 `auto_login_in_flight`、连续失败 3 次进 300s 冷却两道闸门约束，故为「300s 内最多 3 次」而非无限）。语义上宽松触发是**兜底**（严格口径什么都没给出时才升级），已有登录建议时它无任何可补充之处。原测试矩阵恰好绕过了唯一会出问题的组合（7 个纯函数用例只覆盖 `WaitForNetwork` / `WaitForMoreEvidence` / `NoAction` / `FixConfiguration` / `NoProbeEvidence`；5 个接线级用例全部构造为 `Offline`）。新增 3 个回归用例（`Captive`+`Reachable` 的 `High` 结论不变、`Captive`+`Unreachable` 的 `AttemptLoginOnce` 不变、`Inconclusive`+`Reachable` 的 `AttemptLoginOnce` 不变）。
+- **P1-2 纯净模式开关与配置双源，保存时静默回退**（`frontend/src/composables/useConfig.ts`）：`togglePureMode` 成功后只更新独立 ref `pureMode`，**从不回写** `config.browser.pure_mode`；而 `saveConfig` 的载荷携带整个 `config.browser`，后端 `browser` 属 `global_keys` 走 `json_merge` 递归覆盖。症状：用户关掉纯净模式后，在任意设置页点一次「立即保存」就会把它静默翻回开启，且 UI 开关仍显示"已关闭"（与落盘值分叉）、`dirty` 不置位、无任何提示。修法：切换成功与 `fetchPureMode` 拉取到权威值后都同步 `config.browser.pure_mode`，并沿用 `setLogLevel` 同款处理（`suppressDirty` 抑制 dirty 比对 + 仅在无未保存编辑时刷新 `savedSnapshot`，避免把其他未保存改动误判为已保存）。新增 2 个用例，其中一条直接断言 PATCH 载荷里 `browser.pure_mode` 等于开关当前值。
+- **P1-3 Engine 崩溃重启窗口内命令返回 HTTP 500**（`src/web/error.rs`）：`From<EngineError> for ApiError` 原先只把 `ChannelFull` 映射 503，`ChannelClosed` 落入 `_ => Internal`。Engine 崩溃后 `watch_engine` 在 `cancel_auto_pending().await` 与重建之间有一个窗口，期间 slot 仍持已死句柄，用户点「开始/停止监测」「测试网络」会看到 **500 服务故障**，语义误导（前端与用户会以为是服务端 bug）。修法：`ChannelClosed` 与 `ChannelFull` 一并映射 503——两者都是「引擎暂时不可用，稍后重试即可」。同步更新 `src/web/routes/monitor.rs` 那条断言 500 的既有用例，并在 `web/error.rs` 补 `EngineError` 全变体映射用例（原先该文件的状态码用例不含任何 `EngineError` 变体）。
+- **P1-4 `force_recycle` 无归属校验，会摧毁并发定时浏览器任务的 Worker**（`src/bridge/mod.rs`、`src/login/session.rs`、`src/login/mod.rs`）：定时浏览器任务与登录在 Bridge 层**共享同一个会话槽位且互不排斥**（`check_session_compat` 对 `Some(Login)` 放行 `execute_browser_task`，并有测试固化），而 `force_recycle` 是无条件强杀。登录可重试失败后的回收、抢占等待超时后的兜底都会调用它 → 时间重叠时定时任务被 `WorkerCrashed` 中途打断，症状是"任务自己失败"，根因却在另一条路径上。注意：审查报告原本归因于「登录收尾的 `close_browser` 关掉了任务浏览器」，经核对**不成立**——Python 侧 `_serve` 是严格串行的命令循环，`close_browser` 必须排队等待在途任务结束，真正的破坏点是 `force_recycle`。修法：新增归属感知的 `force_recycle_if_unowned(owner_cancel_id)`，判定口径与既有的 `grace_wait_slot_release` / `wait_cancel_ack_or_kill` 一致（仅当槽位空闲或属调用方时才放行）；`try_retry` 与 `wait_old_session_finished` 改走该入口。新增 1 个用例覆盖「槽位被他人占用时跳过」「冒名他人 id 被拒」「真正的持有者可回收」三种情形。
+- 说明：`force_recycle` 是 `BridgeApi` trait 方法，`force_recycle_if_unowned` 以**默认实现**加入 trait（内存 mock 无需改动即视为无冲突），实际归属判定在 `BridgeSupervisor` 上实现。
+
+### P2（健壮性缺口与验证能力缺口）
+
+- **P2-5 探测/自动登录任务 panic 后在途标记永不复位**（`src/engine/run_loop.rs`）：`probe_in_flight` 与 `auto_login_in_flight` 的唯一复位点都是「结果回传」，任务若 panic 则 `tx` 随任务 drop、回传永不发生 → 此后每轮检测被防重入吞掉，**自动监测/自动登录静默停摆**（症状是"卡死"而非崩溃，极难排障）。修法：新增 `ProbeReturnGuard` / `AutoLoginReturnGuard` 两个 RAII 守卫，Drop（含 panic 展开）时经 `try_send` 补发一条失败消息复位标记；正常路径显式置 `sent = true` 避免重复回传。新增 3 个用例：panic 后守卫确实补发、正常路径不重复补发、自动登录守卫同样生效。
+- **P2-6 `force_recycle` 的 `trigger_all` 波及并发 OCR**（`src/bridge/session.rs`、`src/bridge/mod.rs`）：`CancelRegistry` 原为单区，轻量旁路（`ocr_recognize` / `feedback_capture`）与会话类命令注册在一起，`trigger_all`（Worker 回收时的兜底取消）会把与本次回收毫不相干的 OCR 请求判为 `Cancelled`。修法：注册表改为**双区**，`trigger_all` 只作用于会话区；`trigger` / `remove` / `clear` 仍覆盖两区（精确取消与防泄漏语义不变）。新增 3 个用例（`trigger_all` 不波及轻量 token、轻量仍可被精确取消、`clear` 清空两区）。
+- **P2-7 `spawn_environment_probe` 无取消令牌**（`src/container.rs`）：与同文件 `spawn_pending_update_check` 的不一致（后者有 `select! shutdown_token`）。无令牌时停机后该任务仍持 `Arc<EnvironmentManager>` 继续写状态/日志、可能 spawn uv 子进程，与重启后的继任进程争缓存锁。修法：改为与 `spawn_pending_update_check` 同构接受关闭令牌。
+- **P2-9 `client.ts` 的超时与取消不覆盖响应体解析**（`frontend/src/api/client.ts`）：`finally` 块在**收到响应头后**就 `clearTimeout` 并移除 abort 监听，而 `await res.json()` 在其后才执行 → 若响应头已回但 body 卡住/半途断流，`res.json()` 无超时、不可取消而**永久 pending**（永久转圈、无 toast、`busy.save` 永不复位），与该文件「后端卡死时快速报错而非永久转圈」的修复意图直接冲突。修法：把清理移入覆盖 body 消费的 `finally`，并把 body 阶段抛出的 `AbortError` 同样归一为「请求超时」/「请求已取消」。该文件原先只测 `isNoBrowserMessage`，对请求层零覆盖；新增 5 个用例（body 挂起时超时生效、body 阶段取消带 `aborted` 标记、`{data}` 信封解包、错误信封的 code/message、401 仅重试一次）。
+- **P2-10 `fetchRepoIndex` 无 epoch 守卫**（`frontend/src/composables/useRepoImport.ts`）：进入即 `loading=true`、`tasks=[]`，`await` 后**无条件**写状态。交错场景：慢索引 A 在途 → 关弹窗重开（`showRepoImport` 复位 loading）→ 为 URL B 再点 → A 迟到覆盖 B 的列表并提前清 loading，用户可能把 A 源任务当 B 源导入。修法：加 `fetchIndexSeq`，回包时 `if (seq !== fetchIndexSeq) return;`，且仅最新请求负责复位 `loading`（与 `useConfig` 的 `saveSeq` / `fetchConfigEpoch` 同口径）。新增 3 个用例。**变异验证**：去掉守卫后这 3 个用例全部失败，确认其鉴别力。
+- **P2-12 抢占等待预算小于最坏路径**（`src/login/mod.rs`、`src/login/session.rs`、`src/bridge/mod.rs`）：原 `PREEMPT_WAIT_BUDGET = 13s`，注释按「5s 等终态 + 8s close_browser」推导，但 `session.rs` 实际传 12s，且命令超时后 Bridge 还有 `grace_wait_slot_release` 的 10s 宽限 → 最坏 ≈18~22s > 13s，超时兜底的 `force_recycle` 可能在旧会话收尾仍处宽限期时触发，「run() 返回 = close_browser 完成」的等待语义不成立。修法：`close_browser` 超时降到 8s（与 Python 侧 `_WAIT_TIMEOUT_SECS = 8` 对齐，两端同值时以 Python 自愈为主），并让 `PREEMPT_WAIT_BUDGET` **由各段常量推导**（`CLOSE_BROWSER_TIMEOUT + GRACE_WAIT_DURATION` = 8+10 = 18s）。新增不变量用例 `preempt_budget_covers_close_and_grace` 锁定该推导关系（此前该不变量只存在于注释里，因此会漂移）。
+- **P2-13 `std::time::Instant` 使冷却恢复路径零覆盖**（`src/engine/run_loop.rs`）：冷却判定用 `std::time::Instant`，而测试统一用 tokio 虚拟时钟 + `advance`，两者**完全解耦**——`advance(600s)` 后 tokio 时钟走 600s 而 std 时钟仅走 108µs。因此「冷却期满重置 `consecutive_failures`」这条恢复路径**从未被任何测试执行过**，回归保护形同虚设。修法：改用 `tokio::time::Instant`（与 `check_timer` 同源），并把该逻辑提取为 `clear_expired_cooling_down()` 以便直接测试；新增 `test_cooling_down_expiry_resets_failure_count`（`start_paused` + `advance`）。**变异验证**：另跑一个临时测试确认 `tokio_expired=true std_expired=false`，即该用例确实能鉴别两种时钟。
+- **P2-14 Windows 孤儿清理缺少 kill 前复核 + `is_chromium` 子串过宽**（`src/bridge/orphan.rs`）：unix 分支有 `still_orphan_chromium` 三重复核，Windows 分支直接 `taskkill /F /T`；且 `is_chromium` 用全命令行子串匹配（`含 "chrom" 且含 "--headless"`），实测 `cmd.exe /c echo chromium --headless` 即命中，脚本参数、含 `chrom` 的路径、甚至审查该模块的搜索命令都会成为候选（Windows 上「父进程不存在」是常态：实测 430 进程中 11 个父进程已消失，而 `Get-CimInstance` 枚举 460 进程需 ~710ms，这段窗口内无任何复核）。修法（两项都做）：① `is_chromium` 改为**先匹配可执行文件基名白名单**（`chrome.exe` / `chromium` / `headless_shell.exe` / `msedge*` 等）再看 headless/调试特征；② Windows 分支新增 `still_orphan_chromium`，kill 前用 `OpenProcess` + `QueryFullProcessImageNameW` 重读映像路径确认仍是浏览器、用 `CreateToolhelp32Snapshot` 重读父 PID 确认未变且仍不存在。`Cargo.toml` 补 `Win32_System_Diagnostics_ToolHelp` feature。新增 4 个用例（关键词出现在参数中不得命中、映像基名矩阵、`parent_pid_of` 对真实进程的验证、非浏览器 PID 被复核拒绝）。
+- **P2-1 / P2-2 / P2-3 文档过时**：`tests/README.md` 的测试矩阵四项数字（73 处 / 5 crate / 127 用例 / 49 用例）全部过时，改为**不维护绝对数字**（附现取命令）——这类数字必然腐化；`docs/known-issues.md` 的 #2（`mapBackendStatus` 混入 `raw`，已由 P17 修为逐字段映射）、#7（`UV_SYNC_MAX_RETRIES` 未使用、`uv sync` 无重试，均已有 3 次重试）、W13（linux-arm64 无产物，已有 `ubuntu-24.04-arm` 原生构建）三条已修项标注为已修，并移除 `E3` 的过时数字；`tests/README.md` 与 `AGENTS.md` 中「根保留 `mock_portal/README.md` 重定向」的陈述与事实不符（该目录不存在），已删。
+
+### P3（清理项）
+
+- **任务执行失败弹绿色成功 toast**（`frontend/src/composables/useTasks.ts`）：任务失败同样以 HTTP 200 返回（`execute_task` 直接 `Ok`），成败由业务字段 `success` 表达；原实现硬编码 `toastOnly(true, ...)` 并让 `extractApiError` 对一个 object 取不到 `.message` 而固定回落"执行完成"。修法：按 `data.success` 分流，失败时以 `error` 为准并以 warn 级记日志。同时把 `tasksApi.execute` 的返回类型由 `MutationResult` 改为新增的 `TaskExecuteResult`（与后端 `TaskResult` 逐字段对应），使 `success` 在编译期可见。
+- **`armStatusPoll` 的退避是死代码**（`frontend/src/composables/useUi.ts`、`frontend/src/composables/useStatus.ts`）：退避挂在 `fetchStatus().catch()`，但 `fetchStatus` 内部 `try/catch` 全量吞异常、永远 resolve → `.catch` 不可达、`statusFailStreak` 恒 0、300s 慢间隔永不生效，而后端挂死时前端会每 30s 持续发注定失败的请求并刷日志。修法：`fetchStatus` 改为返回**本次请求是否成功**（区分「请求失败」与「响应因过期被丢弃」——后者服务端可达，返回 `true`），`useUi` 据此驱动退避与恢复。
+- **`replaceLogs` 在 `preserveAfterSeq=0` 时丢弃在途实时日志**（`frontend/src/composables/useLogs.ts`）：`realtimeDuringFetch` 仅在 `preserveAfterSeq > 0` 时非空，但 `pendingLogs` 被**无条件**清空；而 `fetchStartedSeq` 只从 `logs` 取最大 seq，用户点过「清空」后退化为 0 → 「清空后点刷新、期间到达的实时日志」被整批丢弃，`pendingNotAtBottom` 也被清零（"N 条新消息"不显示）。修法：`fetchStartedSeq` 纳入 `pendingLogs`（微任务缓冲里的日志同样属「请求发起后到达」）；seq 为 0 时改用「请求发起前已存在条目的内容键差集」判定；仅在无日志需保留时才清零新消息计数。新增 2 个用例。**变异验证**：还原守卫后这 2 个用例失败。
+- **`docs/changelog.md` 分项与总数矛盾**：同一行既称「新增 14 个用例」又称「纯函数 5 个 + 接线级 5 个 + Web 往返 2 个」（合计 12），且称纯函数覆盖「`FixConfiguration` 与 `NoProbeEvidence` 保护」为 1 个用例。实测为纯函数 **7** 个 + 接线级 5 个 + Web 往返 2 个 = 14，已改正分项与用例计数。
+
+### 本轮验证
+
+- `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` 零告警。
+- `cargo test`：**887 passed**（850 lib + 10 helper_main + 1 bridge_ipc + 5 bridge_supervisor + 1 http_login_chain + 4 instance_lifecycle + 5 login_chain + 3 scheduled_tasks + 1 smoke_test + 7 updater_channels），0 failed，1 ignored。
+- `uv run pytest`：**182 passed**。前端 `vitest`：**118 passed**（18 文件）；`vue-tsc --noEmit` 与 `npm run build` 通过。
+- 新增用例 **29** 个（本轮新增，不含工作树中既有的在研改动）。由基线差值核对：Rust lib 833 → 850 = +17，前端 106 → 118 = +12。分布——Rust：`monitor/decision.rs` +3（P1-1）、`bridge/session.rs` +3（P2-6）、`login/mod.rs` +2（P1-4 归属判定、P2-12 预算不变量）、`engine/run_loop.rs` +4（P2-13 冷却恢复、P2-5 两守卫与不重复回传）、`bridge/orphan.rs` +4（P2-14 关键词误判、映像基名、真实父 PID、非浏览器拒绝）、`web/error.rs` +1（P1-3 变体映射）；前端：`client.test.ts` +5（P2-9）、`useRepoImport.test.ts` +3（P2-10）、`useConfig.test.ts` +2（P1-2）、`useLogs.test.ts` +2（P3）。
+  > 注：`monitor/decision.rs` 现共 22 个用例（相对 HEAD 为 +10），其中 7 个属本工作树既有的「登录严格模式」在研改动，本轮只新增 3 个；上表按**本轮实际新增**口径统计。
+- **变异验证**（改回后确认用例失败、再复原）：P2-10 去掉 `seq` 守卫 → 3 个用例失败；P3 `replaceLogs` 还原旧判定 → 2 个用例失败；P2-13 另跑临时测试确认 `tokio_expired=true std_expired=false`（两种时钟确实解耦）。
+- 本轮未改 `config_version`、未改版本号、未改 IPC 契约与 `openapi.json`。
+
 ## 开发中（2026-09-15 新增「登录严格模式」开关，默认开启）
 
 用户实测：其校园网需**先登录学校门户、再进入校园网认证选择运营商**（学校门户决定账号）。该网络在严格口径下永不触发自动登录。实测日志（`debug/campus-auth-logs-20260914063057/logs/app.log.2026-09-14`）显示 13:39:38 起 `Online → Offline（原因=AllProbesFailed, 204门户=Fail）`，此后 13:39–13:45 反复手动测试均为 `Offline`，**全程无任何**「检测结论建议恢复认证，触发自动登录」或「谨慎尝试一次自动登录」记录，直到用户手动点登录才恢复。根因：`Offline` 在 `apply_auth_endpoint` 中仅当认证入口 TCP 可达（或非重定向模式）才升级为门户，否则落 `WaitForNetwork`；该网络的认证入口预检失败，故这条路径恒不触发。

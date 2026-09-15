@@ -11,10 +11,10 @@
 
 | # | 严重度 | 问题 | 位置 |
 |---|--------|------|------|
-| 2 | 🟢 低 | `mapBackendStatus` 用 `Object.assign(out, raw)` 混入非契约字段，后端新增同名字段会覆盖精心映射的值 | `frontend/src/composables/useStatus.ts:68` |
-| 3 | 🟢 低 | 定时任务 `next_fire_at` 以 UTC（RFC3339 `Z`）展示，与本地触发语义不一致，易误判 | `src/scheduler/mod.rs:326-328` |
-| 5 | 🟢 低 | Profile 切换检测仍被 `is_any_pause_active` 阻断（原审查判定为误阻断，属设计取舍，需确认） | `src/engine/run_loop.rs:127-130` |
-| 7 | 🟢 低 | `uv sync` 失败无删除重试；`UV_SYNC_MAX_RETRIES` 常量定义未使用；环境引导仅懒触发（任务执行 / OCR / 系统页），启动不自动引导 | `src/environment/uv.rs`、`src/environment/python.rs` |
+| 2 | ✅ 已修 | `mapBackendStatus` 用 `Object.assign(out, raw)` 混入非契约字段，后端新增同名字段会覆盖精心映射的值 | 已由 P17 改为逐字段显式映射（`frontend/src/composables/useStatus.ts:92-119`，其余 `Object.assign` 均不含 `raw`） |
+| 3 | 🟢 低 | 定时任务 `next_fire_at` 以 UTC（RFC3339 `Z`）展示，与本地触发语义不一致，易误判 | `src/scheduler/mod.rs:658`（序列化点；字段定义 `:71`、`systemtime_to_iso` `:360`） |
+| 5 | 🟢 低 | Profile 切换检测仍被 `is_any_pause_active` 阻断（原审查判定为误阻断，属设计取舍，需确认） | `src/engine/run_loop.rs:234-241`（门控）、`:1006`（`is_any_pause_active` 定义） |
+| 7 | ✅ 已修 | ~~`uv sync` 失败无删除重试；`UV_SYNC_MAX_RETRIES` 常量定义未使用~~（已修：常量已移除，`uv sync` 实为 3 次重试，见 `src/environment/uv.rs` 的 `UV_DOWNLOAD_MAX_RETRIES`）。仍存：环境引导仅懒触发（任务执行 / OCR / 系统页），启动不自动引导 | `src/environment/uv.rs`、`src/environment/python.rs` |
 | 15 | 🟢 低 | Profile 匹配无用户可配置 `priority` 字段（已按约束数降序确定性排序，抖动已修） | `src/config/profiles.rs:138-157` |
 | 19 | 🟡 低中 | `repo.rs` IP 字面量校验**不完整**（IPv6 链路本地已修，见已修复记录；建议复核是否需补 `is_documentation` 等保留段） | `src/web/routes/repo.rs:108-125` |
 | 20 | 🟢 低 | v5→v6 迁移把 `enable_local_check`（登录前物理网卡检查）误改名 `url_enabled`，存量迁移用户 `local_check_enabled` 永久缺省；forward 映射已修（2026-09-13），存量不回写（见注） | `src/config/migration.rs`（v5→v6） |
@@ -35,7 +35,7 @@
 
 | # | 问题 | 说明 |
 |---|------|------|
-| E3 | 测试短板 | 核心模块已补测试（`web/routes` handler 层、`environment/`、`scheduler`、tray 纯函数、`python_worker` 127 项 pytest、`engine::slot` 等）；`cargo test` 约 659 项、`vitest` 约 10 文件；全链路 `tests/login_chain.rs`（mock→二进制→Worker→success/failonce）已接入 `e2e-login-chain` CI，`rust-tests-unix` 双端齐跑；剩余偏少项见复核报告 |
+| E3 | 测试短板 | 核心模块已补测试（`web/routes` handler 层、`environment/`、`scheduler`、tray 纯函数、`python_worker` pytest、`engine::slot` 等）；全链路 `tests/login_chain.rs`（mock→二进制→Worker→success/failonce）已接入 `e2e-login-chain` CI，`rust-tests-unix` 双端齐跑；剩余偏少项见复核报告。**规模数字不再在此维护**（历史"127 项 / 约 659 项 / 约 10 文件"均已过时），需要时用 `cargo test -- --list`、`uv run pytest --collect-only -q`、`npm test -- --reporter=json` 现取 |
 
 ---
 
@@ -56,7 +56,7 @@
 |---|--------|------|------|
 | W8 | 🟢 低 | Linux 二进制动态链接 GTK3 / libayatana-appindicator / librsvg（托盘代价），无桌面发行版起不来；运行时依赖与安装命令已写入 Release 发布说明 | `.github/workflows/release.yml` |
 | W9 | 🟢 低 | macOS 未 codesign / 公证，浏览器下载后带 quarantine 被 Gatekeeper 拦截；`xattr -cr` 解除指引已写入 Release 发布说明，真签名需 Apple 开发者证书 | `.github/workflows/release.yml` |
-| W13 | 🟢 低 | linux-arm64 平台键存在但无产物（交叉链接缺 aarch64 GTK 库，暂不产包）；windows-arm64 已补 | `src/updater/check.rs` vs `release.yml` |
+| W13 | ✅ 已修 | ~~linux-arm64 平台键存在但无产物（交叉链接缺 aarch64 GTK 库，暂不产包）~~ 已补 `ubuntu-24.04-arm` 原生构建（`.github/workflows/release.yml:55-56`，`685ff8f` 2026-09-08）；`infer_platform_key` 可将 `aarch64-unknown-linux-gnu` 正确映射为 `linux-arm64`（`src/updater/check.rs:394-399`） | `.github/workflows/release.yml` |
 
 ---
 

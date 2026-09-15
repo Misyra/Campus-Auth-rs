@@ -1,6 +1,6 @@
 # 用户指南
 
-> 适用于 Rust 重写版 `campus-auth`（`v5.0.0-alpha.8`，单 binary + Python Worker 子进程）。Python 版 `main.py` / `start.exe` / `update.exe` 已不在本仓库出现，本文已按当前实现重写。
+> 适用于 Rust 重写版 `campus-auth`（`v5.0.0-alpha.10`，单 binary + Python Worker 子进程）。Python 版 `main.py` / `start.exe` / `update.exe` 已不在本仓库出现，本文已按当前实现重写。
 
 ## 1. 启动与命令行
 
@@ -72,7 +72,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 3. 多网络配置方案（Profiles）
 
-入口：`GET /api/profiles` / `POST /api/profiles` / `GET /api/profiles/active`，前端为“配置方案”页。
+入口：`GET /api/profiles`（列表，响应含 `active_profile` / `auto_switch`）/ `POST /api/profiles/{id}`（新建）/ `GET /api/profiles/{id}`，切换活跃方案用 `POST /api/profiles/switch`，前端为“配置方案”页。
 
 - 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求）。
 - 重定向模式：`trigger_url` 为明文 `http` 触发地址（如 `http://www.msftconnecttest.com/connecttest.txt`），Worker 首导航到该地址并跟随 302 到真门户，`{{LOGIN_URL}}` 同步为触发地址；监测跳过 `auth` TCP 探测、登录跳过预检，劫持判定优先于断网（`docs/guides/task-writing-guide.md` 重定向模式）。
@@ -88,13 +88,13 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 > 历史 `type=shell` 已移除：遇到时反序列化明确报错并提示改用 `script`（`src/tasks/models.rs`）。同目录下曾有的 `shell` 任务需改写为 `.sh`/`.bat`/`.py` 脚本经 `binary_path` 执行。
 
-管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本均走 `TaskExecutor::execute`）；`GET /api/scripts` 为同数据在脚本面板的视图过滤（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。
+管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本均走 `TaskExecutor::execute`）；脚本面板复用上述 `tasks` 端点并另接 `GET /api/scripts/binaries`、`GET/PUT/DELETE /api/scripts/{id}`、`POST /api/scripts/run`（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。
 「用哪个浏览器任务」由各方案的 `active_task` 决定（在「设置·账号」或「配置方案」里选），没有全局端点。
 
 ### 日常操作
 
-- **任务 / 设置·任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。「任务」页分「浏览器任务」与「脚本」两个标签页，**只管编辑**；用哪个任务登录由方案决定（见下）。
-- **定时任务**：独立页，按 cron 调度浏览器任务（`src/scheduler`，状态在 `tasks/scheduled/`）。
+- **任务 / 设置·任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。「任务」页分「浏览器任务」「脚本」「AI 生成」三个标签页（后者用自然语言描述生成浏览器任务），**只管编辑**；用哪个任务登录由方案决定（见下）。
+- **定时任务**：独立页，按 cron 调度**浏览器与脚本两类**任务（`src/scheduler`，状态在 `tasks/scheduled/`；创建时按 `target_id` 关联任务，类型由任务本体推导）。
 - **何时执行**：网络监测 Offline/Captive 时自动执行活跃任务；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
 
 ### 录制器：不手写 JSON
@@ -110,7 +110,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 - 每次真正拉起 Worker 前都会重新探测；若依赖缺失或清单变化，会先执行 `uv sync` 并复验。首次启动/健康检查仍失败时，当前请求会强制修复并重试一次，连续失败才进入熔断。
 - Playwright 渠道：`msedge`（默认）、`chromium`、`chrome`、`firefox`、`webkit`，支持自定义可执行文件路径与 `browser_args`（每行一个，`#` 注释，Worker 侧过滤敏感参数）。
 - 调试：`POST /api/debug/start`（前置环境就绪检查，缺失自动引导）、`POST /api/debug/step` / `stop` / `run_all`；前端调试面板单步执行并展示 `steps`，支持导出反馈包（含截图、MHTML、日志）。
-- 反馈包：`POST /api/debug/capture` 采集页面快照与日志，打包 `debug/` 归档。
+- 反馈包：`POST /api/debug/feedback-bundle` 采集页面快照与日志，打包 `debug/` 归档。
 
 ## 6. 验证码（OCR）
 

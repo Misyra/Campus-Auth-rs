@@ -14,7 +14,7 @@ Rust 重写版为便携式单二进制 + Python 子进程（浏览器自动化�
 - **定时任务**：cron 表达式调度，支持打卡签到等日常自动化
 - **Web 控制台**：内置 Web UI（Vue 3），支持状态查看、任务编辑、日志与实时 WebSocket
 - **系统托盘**：常驻托盘，一键启动/停止监测、打开控制台、退出
-- **AI 任务生成**：视觉模型按捕获页面自动生成浏览器任务（`POST /api/ai/capture` → `POST /api/ai/generate`，见设置页）
+- **AI 任务生成**：视觉模型按捕获页面自动生成浏览器任务（`POST /api/ai/capture` → `POST /api/ai/generate/stream` 流式生成，见设置页）
 - **自动更新**：版本检查与增量更新
 
 ## 快速开始
@@ -73,7 +73,7 @@ docker run -d --name campus-auth -p 50721:50721 -v campus-auth-data:/data campus
 
 - **Web 控制台**：默认 `http://127.0.0.1:50721`（端口冲突自动 +1 重试，`CAMPUS_AUTH_PORT` / `--port` 可覆盖）
 - **Profile**：每个 Profile 含认证页 URL（`auth_url`）与可选劫持触发地址（`trigger_url`，非空即重定向模式）、用户名/密码（AES-256-GCM 加密落盘）、网关/SSID 匹配与 `active_task`
-- **任务**：三类 `type`（`browser` 浏览器自动化 / `script` 自定义脚本 / `shell` Shell 命令），定时任务为浏览器任务的 cron 调度视图；API 统一为 `GET/POST /api/tasks`、`POST /api/scripts/run`、`GET /api/shells`
+- **任务**：两类 `type`（`browser` 浏览器自动化 / `script` 自定义脚本，由 `TaskKind` 表达）；定时任务可调度**两类**任务（`GET /api/scheduler/jobs`，创建时按 `target_id` 关联任务，类型由任务本体推导而非冗余存储）；API 统一为 `GET/POST /api/tasks`、`POST /api/scripts/run`、`GET /api/tools/task-recorder.user.js`（任务录制用户脚本）
 - **单次登录**：`campus-auth --mode login-once` 执行一次活跃任务后退出；`--status` / `--stop` / `--autostart` 见 `campus-auth --help`（`--mode` 可选值：`full` / `lightweight` / `login-once`，见 `campus-auth --help`）
 - **更新通道**：设置页 `updater.channel`（`stable` 正式版 / `prerelease` 测试版 / `all` 全通道最新），`auto_check_enabled` 为总开关，`GET /api/update-state` 回放上次检查时间
 
