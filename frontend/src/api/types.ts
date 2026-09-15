@@ -75,6 +75,7 @@ export type AssessmentReason =
   | "internet_verified"
   | "captive_detected"
   | "external_failed_auth_reachable"
+  | "link_up_login_assumed"
   | "all_probes_failed"
   | "weak_evidence_only"
   | "inconclusive_evidence"
@@ -236,6 +237,12 @@ export interface MonitorConfig {
   auth_url_targets: string[];
   url_check_urls: string[];
   enable_local_check: boolean;
+  /**
+   * 严格登录模式（默认开启）：仅在探测给出明确门户结论时才自动登录。
+   * 关闭后为宽松口径——网卡已连接且探测未确认在线即尝试登录，适用于
+   * 「学校门户 → 校园网认证」两级认证；代价是配置有误时会反复拉起浏览器。
+   */
+  strict_login_mode: boolean;
   /** 网络检测禁用代理（默认 true 直连；关闭后 HTTP/URL 探测跟随系统代理，下一轮生效） */
   disable_proxy: boolean;
   script_timeout: number;

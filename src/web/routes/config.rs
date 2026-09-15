@@ -570,6 +570,7 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "auth_url_targets": [],
         "url_check_urls": url_check_urls,
         "enable_local_check": m.local_check_enabled,
+        "strict_login_mode": m.strict_login_mode,
         "disable_proxy": m.disable_proxy,
         "script_timeout": 60,
         "post_login_delay": m.post_login_delay,
@@ -591,6 +592,7 @@ struct MonitorPatch {
     enable_http_check: Option<bool>,
     enable_url_check: Option<bool>,
     enable_local_check: Option<bool>,
+    strict_login_mode: Option<bool>,
     disable_proxy: Option<bool>,
     network_check_timeout: Option<u64>,
     post_login_delay: Option<u64>,
@@ -643,6 +645,9 @@ impl MonitorPatch {
         }
         if let Some(value) = self.enable_local_check {
             backend.insert("local_check_enabled".into(), Value::from(value));
+        }
+        if let Some(value) = self.strict_login_mode {
+            backend.insert("strict_login_mode".into(), Value::from(value));
         }
         if let Some(value) = self.disable_proxy {
             backend.insert("disable_proxy".into(), Value::from(value));
@@ -737,6 +742,7 @@ mod tests {
             http_enabled: false,
             url_enabled: true,
             local_check_enabled: false,
+            strict_login_mode: true,
             disable_proxy: true,
             profile_check_interval: 300,
             tcp_timeout: 5,
@@ -825,6 +831,38 @@ mod tests {
         assert_eq!(front["check_auth_url"], serde_json::json!(true));
         let back = monitor_frontend_to_backend(&front).unwrap();
         assert_eq!(back["check_auth_url"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn monitor_roundtrip_preserves_strict_login_mode() {
+        // 严格登录模式须真实往返：GET 给出后端值，PATCH 能写回
+        let mut original = sample_monitor();
+        assert!(original.strict_login_mode, "默认应开启（严格口径）");
+        assert_eq!(
+            monitor_backend_to_frontend(&original)["strict_login_mode"],
+            serde_json::json!(true)
+        );
+        // 关闭严格模式（= 启用宽松触发）后必须能被表达并写回
+        original.strict_login_mode = false;
+        let front = monitor_backend_to_frontend(&original);
+        assert_eq!(front["strict_login_mode"], serde_json::json!(false));
+        let back = monitor_frontend_to_backend(&front).unwrap();
+        assert_eq!(back["strict_login_mode"], serde_json::json!(false));
+    }
+
+    /// 关闭严格模式是显式值而非缺省：缺省（未提供）不得被当成 `false` 写回，
+    /// 否则前端任意一次局部保存都会把用户配置悄悄切成宽松口径
+    #[test]
+    fn monitor_patch_omitting_strict_mode_does_not_flip_it() {
+        let back = monitor_frontend_to_backend(&serde_json::json!({
+            "enable_tcp_check": true
+        }))
+        .unwrap();
+        assert_eq!(back, serde_json::json!({ "tcp_enabled": true }));
+        assert!(
+            back.get("strict_login_mode").is_none(),
+            "未提供该字段时不得出现在 patch 中"
+        );
     }
 
     #[test]

@@ -9,7 +9,9 @@ pub mod model;
 pub mod portal;
 pub mod probes;
 
-pub use decision::{apply_auth_endpoint, assess_connectivity};
+pub use decision::{
+    apply_auth_endpoint, apply_lenient_trigger, assess_connectivity, lenient_trigger_candidate,
+};
 pub use model::{
     AssessmentConfidence, AssessmentReason, AuthEndpointState, ConnectivityAssessment,
     LocalLinkState, ProbeEvidence, ProbeReport, RecoveryAdvice,
@@ -71,6 +73,12 @@ pub struct MonitorConfig {
     pub url_expected_responses: HashMap<String, String>,
     /// 是否启用物理网卡连接检查
     pub local_check_enabled: bool,
+    /// 严格登录模式：仅在拿到明确门户结论时才建议自动登录（默认开启）
+    ///
+    /// 关闭后退化为宽松触发：自动监测会额外采集本地链路证据（`list_interfaces`），
+    /// 并在严格判定未给出门户结论时升级为 `AttemptLogin`
+    /// （见 [`decision::apply_lenient_trigger`]）。
+    pub strict_login_mode: bool,
     /// TCP 连接超时
     pub tcp_timeout: Duration,
     /// HTTP 请求超时
@@ -95,6 +103,7 @@ impl MonitorConfig {
             url_targets: m.url_targets.clone(),
             url_expected_responses: m.url_expected_responses.clone(),
             local_check_enabled: m.local_check_enabled,
+            strict_login_mode: m.strict_login_mode,
             tcp_timeout: Duration::from_secs(m.tcp_timeout as u64),
             http_timeout: Duration::from_secs(m.http_timeout as u64),
             url_timeout: Duration::from_secs(m.url_timeout as u64),
@@ -326,35 +335,7 @@ impl MonitorService {
             }));
         }
 
-        let local_probe = async {
-            if purpose != CheckPurpose::ManualDiagnostic || !cfg.local_check_enabled {
-                return LocalLinkState::NotChecked;
-            }
-            match tokio::time::timeout(
-                INTERFACE_CHECK_TIMEOUT,
-                self.network_detect.list_interfaces(),
-            )
-            .await
-            {
-                Ok(Ok(list)) if list.is_empty() => {
-                    warn!("网卡诊断未发现有效物理接口；该结果不参与公网状态判定");
-                    LocalLinkState::Unavailable
-                }
-                Ok(Ok(list)) => {
-                    debug!("网卡诊断通过：发现 {} 个有效物理接口", list.len());
-                    LocalLinkState::Available
-                }
-                Ok(Err(error)) => {
-                    warn!("网卡诊断失败，不影响公网状态判定: {error}");
-                    LocalLinkState::ProbeFailed
-                }
-                Err(_) => {
-                    warn!("网卡诊断超时，不影响公网状态判定");
-                    LocalLinkState::ProbeFailed
-                }
-            }
-        };
-        let (completed, local_link) = tokio::join!(join_all(tasks), local_probe);
+        let completed = join_all(tasks).await;
 
         // 收集各类结果（逐目标明细日志）
         let mut tcp_outcome = ProbeOutcome::Disabled;
@@ -388,7 +369,6 @@ impl MonitorService {
         }
 
         let mut evidence = ProbeEvidence::new(tcp_outcome, http_outcome, url_outcome);
-        evidence.local_link = local_link;
         let mut assessment = assess_connectivity(&evidence);
 
         if purpose == CheckPurpose::AutoMonitor
@@ -407,6 +387,44 @@ impl MonitorService {
         } else if purpose != CheckPurpose::AutoMonitor {
             assessment.auth_endpoint = AuthEndpointState::NotChecked;
             assessment.recovery_advice = RecoveryAdvice::NotEvaluated;
+        }
+
+        // 本地链路证据按需采集（串行，在公网探测之后）：
+        // - 手动诊断：按用户开关采集，是诊断说明的一部分；
+        // - 自动监测：仅当严格模式**关闭**（宽松口径）且严格判定未确认在线时才采集
+        //   ——此时它是「升级还是等待」的唯一变量；已确认在线或已由严格判定接管
+        //   （配置错误/无有效探测）时采集毫无用处，而 `list_interfaces` 要 spawn
+        //   系统命令子进程，不该在在线稳态下每轮白跑；
+        // - 登录后验证：不采集。
+        // 串行而非并行：并行的代价是在线稳态下仍会白跑（结果被丢弃），收益只是
+        // 失败路径省去一次「枚举网卡」的耗时（≤3s），而失败路径紧接着要拉起
+        // 浏览器，这点延迟可忽略。
+        let want_local_link = match purpose {
+            CheckPurpose::ManualDiagnostic => cfg.local_check_enabled,
+            CheckPurpose::AutoMonitor => {
+                !cfg.strict_login_mode && lenient_trigger_candidate(&assessment)
+            }
+            CheckPurpose::PostLoginVerification => false,
+        };
+        if want_local_link {
+            evidence.local_link = self.probe_local_link().await;
+        }
+
+        // 宽松登录触发（严格模式关闭时）必须在严格判定（含认证入口补充）**之后**
+        // 应用：它是对「未确认在线」的兜底升级，而不是替换严格证据。顺序颠倒会让
+        // apply_auth_endpoint 的 FixConfiguration 被覆盖掉。
+        if purpose == CheckPurpose::AutoMonitor && !cfg.strict_login_mode {
+            let before = assessment.recovery_advice;
+            assessment = apply_lenient_trigger(assessment, evidence.local_link);
+            if assessment.recovery_advice == RecoveryAdvice::AttemptLogin
+                && before != RecoveryAdvice::AttemptLogin
+            {
+                debug!(
+                    local_link = ?evidence.local_link,
+                    previous_advice = ?before,
+                    "已关闭严格登录模式：本地链路可用且未确认在线，升级为建议登录"
+                );
+            }
         }
 
         let latency = start.elapsed().as_millis() as u64;
@@ -492,6 +510,40 @@ impl MonitorService {
         }
     }
 
+    /// 采集本地链路证据：至少一块非虚拟网卡持有非链路本地 IPv4 即判 `Available`。
+    ///
+    /// 注意语义边界：它只判**链路层是否连着**，不判「是否有网」——插着网线但对端
+    /// 未通、连着 WiFi 但网关不响应 DHCP，同样会得到 `Available`。真正判断「是否有
+    /// 网」的是公网探测（204/URL/TCP）；本方法只在宽松模式下作为**比「有网」更弱**
+    /// 的兜底信号使用（见 [`decision::apply_lenient_trigger`]），因此不得用于替代探测。
+    ///
+    /// 失败与超时均不影响公网状态判定：返回 `ProbeFailed`，宽松触发据此不升级。
+    async fn probe_local_link(&self) -> LocalLinkState {
+        match tokio::time::timeout(
+            INTERFACE_CHECK_TIMEOUT,
+            self.network_detect.list_interfaces(),
+        )
+        .await
+        {
+            Ok(Ok(list)) if list.is_empty() => {
+                debug!("网卡检查未发现有效物理接口");
+                LocalLinkState::Unavailable
+            }
+            Ok(Ok(list)) => {
+                debug!("网卡检查通过：发现 {} 个有效物理接口", list.len());
+                LocalLinkState::Available
+            }
+            Ok(Err(error)) => {
+                warn!("网卡检查失败，不影响公网状态判定: {error}");
+                LocalLinkState::ProbeFailed
+            }
+            Err(_) => {
+                warn!("网卡检查超时，不影响公网状态判定");
+                LocalLinkState::ProbeFailed
+            }
+        }
+    }
+
     /// 读取累计指标快照（G23）
     ///
     /// 返回 `(probe_total, login_total)` 的当前计数器值，供 Engine 在探测状态
@@ -528,5 +580,264 @@ impl MonitorService {
             latency_ms,
             check_number: n,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConfigService;
+    use crate::network::detect::{InterfaceInfo, NetworkError};
+    use async_trait::async_trait;
+    use std::net::Ipv4Addr;
+
+    /// 固定返回单块有线网卡的检测器（本地链路必判 Available），并记录调用次数
+    struct WiredDetect {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl WiredDetect {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl NetworkDetect for WiredDetect {
+        async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(vec![InterfaceInfo {
+                name: "以太网".into(),
+                ipv4: Ipv4Addr::new(192, 168, 1, 100),
+                gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                is_wifi: false,
+                ssid: None,
+                mac: Some("00:1a:2b:3c:4d:5e".into()),
+            }])
+        }
+        async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
+            Ok(vec![Ipv4Addr::new(192, 168, 1, 1)])
+        }
+        async fn current_ssid(&self) -> Result<Option<String>, NetworkError> {
+            Ok(None)
+        }
+    }
+
+    /// 204 恒直通（判 Online）的本地服务地址，用于验证「已在线时不采集网卡」
+    async fn spawn_always_204() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+        format!("http://{addr}/generate_204")
+    }
+
+    /// 无可用网卡的检测器（本地链路必判 Unavailable）
+    struct NoLinkDetect;
+
+    #[async_trait]
+    impl NetworkDetect for NoLinkDetect {
+        async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
+            Ok(vec![])
+        }
+        async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
+            Ok(vec![])
+        }
+        async fn current_ssid(&self) -> Result<Option<String>, NetworkError> {
+            Ok(None)
+        }
+    }
+
+    /// 构造监测服务；探测目标指向必然失败的地址（全 Fail → Offline）。
+    ///
+    /// `strict_mode=false` 即「关闭严格模式」＝启用宽松触发（被测行为）。
+    ///
+    /// `auth_url` 配成不可达地址（`127.0.0.1:9`，discard 端口通常无人监听）而非留空：
+    /// - 留空会走 `AuthEndpointState::Missing` → 严格判定给 `FixConfiguration`，
+    ///   而此时宽松触发按设计不覆盖（配置错误须用户先修正），测不出目标行为；
+    /// - 不可达才是用户真实场景（认证入口预检失败），严格判定给
+    ///   `WaitForNetwork`，正是宽松触发要接管的那条路径。
+    ///
+    /// `trigger_url` 留空以避免走 `SkippedRedirectMode`。
+    async fn monitor_with(
+        tmp: &tempfile::TempDir,
+        detect: Arc<dyn NetworkDetect>,
+        strict_mode: bool,
+    ) -> Arc<MonitorService> {
+        monitor_with_http_target(tmp, detect, strict_mode, "http://127.0.0.1:9/generate_204").await
+    }
+
+    /// 同 [`monitor_with`]，但可指定 204 探测目标（用于构造 Online 场景）
+    async fn monitor_with_http_target(
+        tmp: &tempfile::TempDir,
+        detect: Arc<dyn NetworkDetect>,
+        strict_mode: bool,
+        http_target: &str,
+    ) -> Arc<MonitorService> {
+        use tokio::sync::mpsc;
+        let (reload_tx, _reload_rx) = mpsc::channel(8);
+        let config = ConfigService::new(tmp.path().to_path_buf(), reload_tx)
+            .await
+            .unwrap();
+        let mut settings = config.load_settings();
+        settings.global.monitor.tcp_enabled = false;
+        settings.global.monitor.url_enabled = false;
+        settings.global.monitor.http_enabled = true;
+        settings.global.monitor.http_targets = vec![http_target.to_string()];
+        settings.global.monitor.http_timeout = 1;
+        settings.global.monitor.local_check_enabled = false;
+        settings.global.monitor.strict_login_mode = strict_mode;
+        settings.global.monitor.auth_url_timeout = 1;
+        config.save_settings(&settings).await.unwrap();
+        assert_eq!(
+            config.load_settings().global.monitor.strict_login_mode,
+            strict_mode,
+            "严格模式开关应先真实落盘"
+        );
+
+        let profiles = crate::config::ProfileService::new(config.clone());
+        let mut profile = profiles.get_profile("default").unwrap();
+        profile.auth_url = "http://127.0.0.1:9/login".into();
+        profile.trigger_url = String::new();
+        profiles.update_profile("default", profile).await.unwrap();
+        assert_eq!(
+            profiles.get_profile("default").unwrap().auth_url,
+            "http://127.0.0.1:9/login",
+            "认证地址需真实写入活跃方案，否则走的是 Missing 分支"
+        );
+        config.reload().await.unwrap();
+
+        Arc::new(MonitorService::new(config, detect, None, None).unwrap())
+    }
+
+    /// 严格模式关闭（宽松口径）+ 网卡可用：全 Fail 的 Offline 必须被升级为建议登录，
+    /// 且网卡证据确实被采集（自动监测路径在严格模式下恒为 NotChecked）。
+    #[tokio::test]
+    async fn test_lenient_trigger_upgrades_auto_monitor_when_link_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        let detect = Arc::new(WiredDetect::new());
+        let monitor = monitor_with(&tmp, detect.clone(), false).await;
+        let report = monitor.check_auto_monitor().await.unwrap();
+        assert_eq!(
+            report.evidence.local_link,
+            LocalLinkState::Available,
+            "宽松口径必须采集网卡证据，否则无法判定链路"
+        );
+        assert_eq!(
+            detect.calls(),
+            1,
+            "未确认在线时恰好采集一次网卡（串行路径的唯一一次调用）"
+        );
+        assert_eq!(report.assessment.status, NetworkStatus::CaptivePortal);
+        assert_eq!(
+            report.assessment.reason,
+            AssessmentReason::LinkUpLoginAssumed
+        );
+        assert_eq!(
+            report.assessment.recovery_advice,
+            RecoveryAdvice::AttemptLogin,
+            "Engine 只认 AttemptLogin，其余建议都不会触发自动登录"
+        );
+    }
+
+    /// 已确认在线时即便严格模式关闭也不采集网卡：在线稳态下每轮白跑
+    /// `list_interfaces`（spawn `ipconfig`/`ip addr`）没有意义。
+    #[tokio::test]
+    async fn test_online_skips_link_probe_even_when_strict_mode_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = spawn_always_204().await;
+        let detect = Arc::new(WiredDetect::new());
+        let monitor = monitor_with_http_target(&tmp, detect.clone(), false, &target).await;
+        let report = monitor.check_auto_monitor().await.unwrap();
+        assert_eq!(report.assessment.status, NetworkStatus::Online);
+        assert_eq!(report.assessment.recovery_advice, RecoveryAdvice::NoAction);
+        assert_eq!(
+            report.evidence.local_link,
+            LocalLinkState::NotChecked,
+            "已确认在线时不该采集网卡证据"
+        );
+        assert_eq!(detect.calls(), 0, "在线稳态下不得 spawn 网卡枚举子进程");
+    }
+
+    /// 默认（严格模式开启）：同一探测条件下保持原有等待语义，
+    /// 且不采集网卡证据（避免无谓 spawn 系统命令子进程）。
+    #[tokio::test]
+    async fn test_strict_mode_keeps_waiting_without_link_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let detect = Arc::new(WiredDetect::new());
+        let monitor = monitor_with(&tmp, detect.clone(), true).await;
+        let report = monitor.check_auto_monitor().await.unwrap();
+        assert_eq!(
+            report.evidence.local_link,
+            LocalLinkState::NotChecked,
+            "严格模式不应采集网卡证据"
+        );
+        assert_eq!(detect.calls(), 0);
+        assert_eq!(report.assessment.status, NetworkStatus::Offline);
+        assert_eq!(
+            report.assessment.recovery_advice,
+            RecoveryAdvice::WaitForNetwork,
+            "回归锚点：默认（严格）行为与改动前一致"
+        );
+    }
+
+    /// 认证地址缺失（Missing → FixConfiguration）时不采集网卡：
+    /// 宽松触发按设计不接管配置错误，采集结果也无人使用。
+    #[tokio::test]
+    async fn test_configuration_error_skips_link_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let detect = Arc::new(WiredDetect::new());
+        let monitor = monitor_with(&tmp, detect.clone(), false).await;
+        // 清空认证地址与触发地址 → 严格判定给 FixConfiguration
+        let config = monitor.config_service.clone();
+        let profiles = crate::config::ProfileService::new(config.clone());
+        let mut profile = profiles.get_profile("default").unwrap();
+        profile.auth_url = String::new();
+        profiles.update_profile("default", profile).await.unwrap();
+        config.reload().await.unwrap();
+
+        let report = monitor.check_auto_monitor().await.unwrap();
+        assert_eq!(
+            report.assessment.recovery_advice,
+            RecoveryAdvice::FixConfiguration
+        );
+        assert_eq!(
+            report.evidence.local_link,
+            LocalLinkState::NotChecked,
+            "配置错误时不该采集网卡证据"
+        );
+        assert_eq!(detect.calls(), 0);
+    }
+
+    /// 宽松口径但网卡不可用：不得升级——网卡没连上时登录没有意义。
+    #[tokio::test]
+    async fn test_lenient_trigger_skipped_when_link_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let monitor = monitor_with(&tmp, Arc::new(NoLinkDetect), false).await;
+        let report = monitor.check_auto_monitor().await.unwrap();
+        assert_eq!(report.evidence.local_link, LocalLinkState::Unavailable);
+        assert_eq!(report.assessment.status, NetworkStatus::Offline);
+        assert_eq!(
+            report.assessment.recovery_advice,
+            RecoveryAdvice::WaitForNetwork
+        );
     }
 }

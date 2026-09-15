@@ -5,7 +5,7 @@ use crate::status::NetworkStatus;
 use super::ProbeOutcome;
 use super::model::{
     AssessmentConfidence, AssessmentReason, AuthEndpointState, ConnectivityAssessment,
-    ProbeEvidence, RecoveryAdvice,
+    LocalLinkState, ProbeEvidence, RecoveryAdvice,
 };
 
 /// 综合公网探测证据。
@@ -134,6 +134,65 @@ pub fn apply_auth_endpoint(
             AuthEndpointState::SkippedRedirectMode | AuthEndpointState::NotChecked => {}
         },
     }
+    current
+}
+
+/// 宽松触发是否可能生效（即：采集本地链路证据是否值得）。
+///
+/// 由调用方在「严格登录模式已关闭」的前提下使用（见 `MonitorConfig::strict_login_mode`）：
+/// 本函数只判断判定本身是否还有升级空间，不含开关状态。
+///
+/// 与 [`apply_lenient_trigger`] 共用同一条件，避免「采集判据」与「升级判据」
+/// 两处漂移——若分开写，改一处忘另一处会导致白采集或证据缺失。
+///
+/// `true` = 当前判定尚未确认在线、且不属于宽松模式不该接管的两种终态
+/// （配置错误、无有效探测），此时本地链路证据是决定升级与否的唯一变量。
+pub fn lenient_trigger_candidate(current: &ConnectivityAssessment) -> bool {
+    current.status != NetworkStatus::Online
+        && !matches!(
+            current.recovery_advice,
+            RecoveryAdvice::FixConfiguration | RecoveryAdvice::NoProbeEvidence
+        )
+}
+
+/// 应用「宽松登录触发」：本地网卡已连接且未确认在线时也建议自动登录。
+///
+/// 仅在用户**关闭**「严格登录模式」（`monitor.strict_login_mode = false`）时由
+/// `MonitorService::check_once` 调用；默认（严格）模式下本函数不参与判定。
+///
+/// 面向「学校门户 → 校园网认证」两级认证场景：学校门户决定账号，进入校园网后
+/// 再选运营商。这类网络的网关可能直接放行 204 探测域名（判 `Online`）、或返回
+/// 探测目标自身的非预期状态码（判 `Unknown`），严格口径下都不会给出门户证据，
+/// 于是 `WaitForNetwork`/`NoAction` 让自动登录永不触发。
+///
+/// 判定只依赖「本地链路可用 + 未确认在线」两个条件（前置条件见
+/// [`lenient_trigger_candidate`]）：
+/// - `status == Online` 时一律不动——网关已放行探测，说明确实能上网，不该被
+///   宽松策略打扰（这也是本策略的唯一边界）；
+/// - `local_link != Available` 时不动——网卡没连上（无 IP/链路本地）时登录
+///   没有意义，等待链路本身就是正确动作；
+/// - `FixConfiguration` 保持不动——配置错误是用户须先解决的问题，拉浏览器
+///   只会产生误导性失败；
+/// - `NoProbeEvidence` 保持不动——一个探测都没启用属于测量缺失而非证据不足，
+///   此时升级会与「禁止自动恢复」的既定告警语义冲突，且每轮都会尝试登录；
+/// - 其余（Offline/Unknown/CaptivePortal）统一升级为 `CaptivePortal` +
+///   `AttemptLogin`，并标注置信度 `Low` 与原因
+///   [`AssessmentReason::LinkUpLoginAssumed`]，让用户在界面上能区分「明确检测到
+///   劫持」与「按链路连接推断需要登录」。
+///
+/// 认证地址 TCP 预检结果不参与判定：预检失败（网关对新连接限速/丢首包等）不构成
+/// 阻止尝试的理由，由用户显式选择承担该风险。
+pub fn apply_lenient_trigger(
+    mut current: ConnectivityAssessment,
+    local_link: LocalLinkState,
+) -> ConnectivityAssessment {
+    if !lenient_trigger_candidate(&current) || local_link != LocalLinkState::Available {
+        return current;
+    }
+    current.status = NetworkStatus::CaptivePortal;
+    current.confidence = AssessmentConfidence::Low;
+    current.reason = AssessmentReason::LinkUpLoginAssumed;
+    current.recovery_advice = RecoveryAdvice::AttemptLogin;
     current
 }
 
@@ -307,5 +366,126 @@ mod tests {
         let result = apply_auth_endpoint(base, AuthEndpointState::Reachable);
         assert_eq!(result.status, NetworkStatus::CaptivePortal);
         assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
+    }
+
+    // ============ 宽松登录触发（两级认证场景） ============
+
+    #[test]
+    fn lenient_upgrades_offline_when_link_available() {
+        let base = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+        ));
+        assert_eq!(base.recovery_advice, RecoveryAdvice::WaitForNetwork);
+        let result = apply_lenient_trigger(base, LocalLinkState::Available);
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+        assert_eq!(result.reason, AssessmentReason::LinkUpLoginAssumed);
+        assert_eq!(result.confidence, AssessmentConfidence::Low);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
+    }
+
+    #[test]
+    fn lenient_upgrades_unknown_and_inconclusive() {
+        // 未知证据（目标服务异常）与 Inconclusive 同样升级：
+        // 宽松模式下用户的意图是「只要网卡连着就试」，两种都不该漏
+        let unknown = assess_connectivity(&evidence(
+            ProbeOutcome::Pass,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(unknown.status, NetworkStatus::Unknown);
+        let result = apply_lenient_trigger(unknown, LocalLinkState::Available);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
+        assert_eq!(result.reason, AssessmentReason::LinkUpLoginAssumed);
+
+        let inconclusive = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Inconclusive,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(inconclusive.status, NetworkStatus::Unknown);
+        let result = apply_lenient_trigger(inconclusive, LocalLinkState::Available);
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
+        assert_eq!(result.reason, AssessmentReason::LinkUpLoginAssumed);
+    }
+
+    #[test]
+    fn lenient_preserves_no_probe_evidence() {
+        // 一个探测都没启用属「测量缺失」，保持「禁止自动恢复」的既定语义，
+        // 否则每轮都会拉起浏览器
+        let disabled = assess_connectivity(&ProbeEvidence::default());
+        assert_eq!(disabled.recovery_advice, RecoveryAdvice::NoProbeEvidence);
+        let result = apply_lenient_trigger(disabled, LocalLinkState::Available);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::NoProbeEvidence);
+        assert_eq!(result.status, NetworkStatus::Unknown);
+    }
+
+    #[test]
+    fn lenient_never_touches_confirmed_online() {
+        // 唯一边界：探测已确认在线时不打扰（网关放行 ≠ 需要登录）
+        let online = assess_connectivity(&evidence(
+            ProbeOutcome::Disabled,
+            ProbeOutcome::Pass,
+            ProbeOutcome::Disabled,
+        ));
+        assert_eq!(online.status, NetworkStatus::Online);
+        let result = apply_lenient_trigger(online, LocalLinkState::Available);
+        assert_eq!(result.status, NetworkStatus::Online);
+        assert_eq!(result.reason, AssessmentReason::InternetVerified);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::NoAction);
+    }
+
+    #[test]
+    fn lenient_requires_available_link() {
+        // 网卡未连上（未检查/无接口/检查失败）时等待链路才是正确动作
+        let offline = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+        ));
+        for state in [
+            LocalLinkState::NotChecked,
+            LocalLinkState::Unavailable,
+            LocalLinkState::ProbeFailed,
+        ] {
+            let result = apply_lenient_trigger(offline.clone(), state);
+            assert_eq!(
+                result.recovery_advice,
+                RecoveryAdvice::WaitForNetwork,
+                "{state:?} 不应触发宽松登录"
+            );
+            assert_eq!(result.status, NetworkStatus::Offline);
+        }
+    }
+
+    #[test]
+    fn lenient_preserves_configuration_error() {
+        // 配置错误须用户先修正：拉浏览器只会产生误导性失败
+        let base = apply_auth_endpoint(
+            assess_connectivity(&evidence(
+                ProbeOutcome::Disabled,
+                ProbeOutcome::Captive,
+                ProbeOutcome::Disabled,
+            )),
+            AuthEndpointState::Invalid,
+        );
+        assert_eq!(base.recovery_advice, RecoveryAdvice::FixConfiguration);
+        let result = apply_lenient_trigger(base, LocalLinkState::Available);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::FixConfiguration);
+    }
+
+    #[test]
+    fn lenient_without_trigger_keeps_strict_semantics() {
+        // 回归锚点：不调用 apply_lenient_trigger 时严格语义完全不变
+        let base = assess_connectivity(&evidence(
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+            ProbeOutcome::Fail,
+        ));
+        let result = apply_auth_endpoint(base, AuthEndpointState::SkippedRedirectMode);
+        assert_eq!(result.status, NetworkStatus::Offline);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::WaitForNetwork);
     }
 }

@@ -120,6 +120,10 @@ export const DEFAULT_CONFIG: Config = {
       "http://detectportal.firefox.com/success.txt|success",
     ],
     enable_local_check: false,
+    // 严格登录模式默认开启：仅探测给出明确门户结论才自动登录，与历史行为一致。
+    // 关闭后为宽松口径（网卡已连接且未确认在线即尝试），面向「学校门户 → 校园网认证」
+    // 两级认证；代价是配置有误时会反复拉起浏览器
+    strict_login_mode: true,
     // 网络检测默认禁用代理（直连），避免代理故障误判离线；关闭后跟随系统代理（下一轮生效）
     disable_proxy: true,
     script_timeout: 60,

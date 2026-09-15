@@ -62,6 +62,13 @@ pub enum AssessmentReason {
     CaptiveDetected,
     /// 公网探测全部失败，但校内认证入口可达
     ExternalFailedAuthReachable,
+    /// 宽松触发：本地网卡已连接，但探测未确认在线
+    ///
+    /// 仅在「严格登录模式」被关闭时产生（见
+    /// [`super::decision::apply_lenient_trigger`]）。用于「学校门户 + 校园网认证」
+    /// 两级认证等场景：网关可能放行探测域名（判 Online）或不给任何劫持证据，
+    /// 且不满足严格口径的门户证据组合。
+    LinkUpLoginAssumed,
     /// 所有已启用的公网探测均失败
     AllProbesFailed,
     /// 只有 TCP 等弱传输证据，不能确认公网状态

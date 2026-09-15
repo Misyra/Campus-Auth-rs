@@ -195,11 +195,21 @@ const urlCheckText = computed({
             <div class="toggle-group">
               <div class="toggle-with-help">
                 <label class="toggle toggle-help-inline">
+                  <input type="checkbox" v-model="config.config.monitor.strict_login_mode" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">登录严格模式 <span class="badge badge--sm badge--info">推荐开启</span></span>
+                </label>
+                <FieldHelp text="默认开启。只有探测到明确的门户劫持证据才自动登录，证据不足时保持观察、不打扰。若遇到断网后未自动登录，请关闭本开关：关闭后只要网卡已连接、探测未确认在线就尝试登录，适用于「先登录学校门户、再进校园网认证选运营商」两级认证的网络——这类网关可能直接放行探测请求，严格模式下会误判为已在线而永不尝试。注意：关闭后若认证地址填错或门户无需登录，也会真的拉起浏览器，请配合暂停时段使用。" />
+              </div>
+            </div>
+            <div class="toggle-group settings-toggle-spacer">
+              <div class="toggle-with-help">
+                <label class="toggle toggle-help-inline">
                   <input type="checkbox" v-model="config.config.monitor.enable_local_check" />
                   <span class="toggle-slider"></span>
                   <span class="toggle-label">手动测试时检查网卡</span>
                 </label>
-                <FieldHelp text="仅手动「网络测试」时运行的诊断说明，与公网探测并行执行；自动监测与自动登录均不做网卡检查，开启与否也不影响登录能否进行。" />
+                <FieldHelp text="仅手动「网络测试」时运行的诊断说明，与公网探测并行执行；自动监测不做网卡检查（例外：上方「登录严格模式」被关闭时会采集一次），开启与否也不影响登录能否进行。" />
               </div>
             </div>
             <div class="toggle-group settings-toggle-spacer">

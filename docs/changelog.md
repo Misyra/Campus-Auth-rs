@@ -2,6 +2,24 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-15 新增「登录严格模式」开关，默认开启）
+
+用户实测：其校园网需**先登录学校门户、再进入校园网认证选择运营商**（学校门户决定账号）。该网络在严格口径下永不触发自动登录。实测日志（`debug/campus-auth-logs-20260914063057/logs/app.log.2026-09-14`）显示 13:39:38 起 `Online → Offline（原因=AllProbesFailed, 204门户=Fail）`，此后 13:39–13:45 反复手动测试均为 `Offline`，**全程无任何**「检测结论建议恢复认证，触发自动登录」或「谨慎尝试一次自动登录」记录，直到用户手动点登录才恢复。根因：`Offline` 在 `apply_auth_endpoint` 中仅当认证入口 TCP 可达（或非重定向模式）才升级为门户，否则落 `WaitForNetwork`；该网络的认证入口预检失败，故这条路径恒不触发。
+
+- **配置新增 `monitor.strict_login_mode`（默认开启）**：开启＝严格口径，仅在探测给出明确门户结论（Captive 命中，或外网全失败且认证入口可达）时才自动登录；**关闭**后退化为宽松口径——只要**本地网卡已连接**且探测**未确认在线**即升级为门户并建议登录，不再要求先拿到门户劫持证据，面向「学校门户 + 校园网认证」两级认证等严格口径覆盖不到的组网方式。开关按正向语义命名（默认值即历史行为），用户勾选框默认选中，关闭才是行为变化。
+- **判定实现为独立纯函数** `monitor::decision::apply_lenient_trigger`（`src/monitor/decision.rs`），只依赖「本地链路可用 + 未确认在线」，由「严格模式关闭」触发。三条边界刻意保留，避免退化成无差别登录：① `Online` 一律不动——网关放行了探测就是真能上网，不该被打扰；② `FixConfiguration` 不动——配置错误须用户先修正，拉浏览器只会产生误导性失败；③ `NoProbeEvidence` 不动——一个探测都没启用属「测量缺失」，升级会与既有「禁止自动恢复」告警语义冲突且每轮都尝试登录。另有 `local_link != Available`（未检查/无接口/检查失败）不升级：网卡没连上时登录没有意义。
+- **「是否值得采集网卡」与「是否升级」共用同一谓词** `lenient_trigger_candidate`（同文件导出，只判断定是否还有升级空间、不含开关状态）：两处若各写一份条件，改一处忘另一处会导致白采集或证据缺失。`check_once` 的采集分支与 `apply_lenient_trigger` 的前置判断同源。
+- **新增判定原因 `AssessmentReason::LinkUpLoginAssumed`**（置信度 `Low`）：界面可区分「明确检测到劫持」与「按链路连接推断需要登录」，不把推断伪装成检测结论。前端 `useStatus.ts` / `useUi.ts` 补文案。
+- **网卡证据改为按需串行采集**（`MonitorService::check_once`）：原先仅手动诊断按 `local_check_enabled` 采集、自动监测恒为 `NotChecked`。现提取 `probe_local_link()`，仅在「手动诊断开关开启」或「严格模式关闭**且** `lenient_trigger_candidate` 成立」时调用。**由并行改为串行**（公网探测完成后再查）：并行虽能让判定少等一次网卡枚举，但代价是在线稳态下每轮**白跑**一次（结果随即被丢弃），收益只是失败路径省去 ≤3s 而失败路径紧接着就要拉起浏览器，延迟可忽略。已确认在线、配置错误、无有效探测三类情况一律不采集。
+- **语义边界写进代码注释**：`probe_local_link` 只判**链路层是否连着**（非虚拟网卡持有非链路本地 IPv4），**不判「是否有网」**——插着网线但对端未通、连着 WiFi 但网关不响应 DHCP，同样报 `Available`。判断「是否有网」的仍是公网探测；网卡证据只在宽松口径下作为**比「有网」更弱**的兜底信号，不得用于替代探测。
+- **应用顺序**：宽松判定在严格判定（含 `apply_auth_endpoint`）**之后**执行——它是对「未确认在线」的兜底升级而非替换严格证据，顺序颠倒会让 `FixConfiguration` 被覆盖。
+- **认证地址预检不参与判定**（用户明确选择）：预检失败不构成阻止尝试的理由，风险由用户显式选择承担。（预检失败的真实成因更可能是网关对新连接限速/丢首包，而非「https 握手被拦」——TCP 握手属 L4，与 https 无关；成因描述已在注释中订正。）
+- 前端：设置·检测页「诊断与恢复辅助」列新增**「登录严格模式」**开关（`badge--info`「推荐开启」），默认选中；**置于该列首位**（它决定「断网后会不会自动登录」这一最高频疑问，用户最需要先看到）；说明按「勾选＝严格 / 关闭＝宽松」两侧语义组织，并把**故障自诊指引写进文案**——「若遇到断网后未自动登录，请关闭本开关」。此指引方向经核对：该症状的成因正是严格口径把「网关放行探测判 Online」这类网络挡在门外，修复动作是**取消勾选**而非勾选。相邻的「手动测试时检查网卡」说明中的相对位置引用同步由「下方」改为「上方」；`frontend/src/api/types.ts`、`utils/constants.ts` 同步。
+- 涉及文件：`src/config/schema.rs`（字段 + 默认值 + 默认值断言）、`src/monitor/model.rs`（新增 reason）、`src/monitor/decision.rs`、`src/monitor/mod.rs`（`MonitorConfig` 透传 + `probe_local_link` + 串行采集 + 应用顺序）、`src/web/routes/config.rs`（前后端字段映射 + 往返用例）、`frontend/src/views/settings/MonitorSettings.vue`（开关 + 文案 + 次序）、前端 `types.ts` / `constants.ts` / `useStatus.ts` / `useUi.ts`。
+- 测试：新增 14 个用例。纯函数 7 个（Offline 升级 / Unknown+Inconclusive 升级 / Online 边界 / `FixConfiguration` 与 `NoProbeEvidence` 保护 / 链路不可用不升级 / 不调用即严格语义不变回归锚点）；`monitor::mod` 接线级 5 个（**严格模式关闭时确实采集网卡证据并升级为 `AttemptLogin`** 且恰好调用一次、**已在线时即便严格模式关闭也零次枚举网卡**、默认严格模式保持 `WaitForNetwork` 且零次、网卡不可用时不升级、配置错误时零次）；Web 往返 2 个（字段往返 + **PATCH 未提供该字段时不得把它写进 patch**，否则前端任意一次局部保存都会把用户配置悄悄切成宽松口径）；另 2 个既有默认值/映射断言扩展。`WiredDetect` 带调用计数以锁定「不白跑」。接线级用例首轮跑出真实交互：夹具 `auth_url` 为空会走 `Missing → FixConfiguration` 而使宽松判定不覆盖，改为配成不可达地址（与用户真实场景一致）后通过。**变异验证**（四处，均改回并确认复原）：① `apply_lenient_trigger` 短路为 no-op → 接线级用例失败；② `lenient_trigger_candidate` 改为恒真 → 「已在线不采集」「配置错误不采集」两用例失败；③ 采集分支 `!cfg.strict_login_mode` 翻转 → 3 个用例失败；④ 应用分支 `!cfg.strict_login_mode` 翻转 → 1 个用例失败（另一用例不失败，因严格模式下 `local_link` 恒为 `NotChecked`、`apply_lenient_trigger` 自身即 no-op——两道 guard 属纵深防御，各自独立生效）。
+- 端到端：构建产物 `MonitorSettings` chunk 断言含「登录严格模式」「请关闭本开关」，且不含旧的「下方」引用、含新的「上方」引用；真实二进制上验证全新配置默认 `strict_login_mode=true`、显式关闭后为 `false`、随后一次不含该字段的局部保存不会把它翻回 `true`。
+- 说明：本轮未改 `config_version`，字段为**本次尚未发布的新增项**（同一轮开发内即完成命名反转，从未随版本发布），故不涉及兼容负担。`strict_login_mode` 缺省由 `#[serde(default)]` 补齐为 `true`＝严格口径＝历史行为，存量配置行为不变，无须迁移。唯一的边界情况：若曾用本轮中间构建在配置里写过旧名 `lenient_login_trigger`，该键会被 serde 静默忽略（未知字段）、回到默认严格口径——因旧名从未发布，不视为兼容性问题。
+
 ## 开发中（2026-09-14 任务页三处视觉缺陷修复）
 
 用户反馈「UI 有点丑」。因为本轮起可以看图，先按 `getBoundingClientRect`/`getComputedStyle`/CDP `getPlatformFontsForNode` 采集度量定位**可判定**的问题（而非凭感觉重画），再逐张截图复核。以下 7 项均为实测缺陷，改完逐项复测数值。

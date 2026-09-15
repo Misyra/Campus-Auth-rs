@@ -179,6 +179,23 @@ pub struct MonitorSettings {
     /// 默认关闭——部分校园网对裸 TCP 直连有限制，开启后一旦误判不可达会拦掉本可成功的
     /// 登录；且手动登录失败与否浏览器都会给出明确错误，预检的止损价值有限。
     pub check_auth_url: bool,
+    /// 严格登录模式：仅在拿到明确门户结论时才尝试自动登录（默认开启）
+    ///
+    /// 开启（默认）＝严格口径：要求探测给出明确门户证据（Captive 命中，或外网全失败且
+    /// 认证入口可达），证据不足时不打扰用户，落 WaitForNetwork/NoAction。
+    ///
+    /// 关闭＝宽松口径：本地网卡已连接且探测未确认在线即尝试自动登录。应对
+    /// 「学校门户 → 校园网认证」两级认证：门户决定账号，校园网再选运营商。这类网络的
+    /// 网关常放行 204 探测域名（直通判 Online）或完全不返回劫持证据，且认证入口 TCP
+    /// 预检可能失败；严格口径下这些情况都落 WaitForNetwork，自动登录永不触发。
+    ///
+    /// 关闭严格模式后以「本地链路可用」为触发下限：多启用一次网卡枚举
+    /// （`list_interfaces`，与手动诊断同一路径），凡未确认在线即升级为门户并建议登录。
+    /// 认证地址 TCP 预检仍不参与（预检失败一律不构成拦截理由）。
+    ///
+    /// 代价：认证地址填错或门户确实无需登录时，会真去拉起浏览器，靠连续失败冷却
+    /// （3 次 → 300s）与暂停时段节流。
+    pub strict_login_mode: bool,
     /// 登录后等待 portal 生效的延迟（秒，0-60）
     pub post_login_delay: u32,
 }
@@ -232,6 +249,9 @@ impl Default for MonitorSettings {
             url_timeout: 10,
             auth_url_timeout: 5,
             check_auth_url: false,
+            // 默认开启严格模式：只有明确门户证据才自动登录，行为与历史版本一致；
+            // 关闭后退化为「网卡连着就试」，属行为变化，须用户显式选择
+            strict_login_mode: true,
             post_login_delay: 5,
         }
     }
@@ -560,6 +580,10 @@ mod tests {
         assert!(!monitor.url_enabled, "URL 内容探测默认关闭");
         assert!(!monitor.local_check_enabled, "本地链路诊断默认关闭");
         assert!(!monitor.check_auth_url, "手动登录前认证入口预检默认关闭");
+        assert!(
+            monitor.strict_login_mode,
+            "严格登录模式默认开启（关闭即退化为宽松触发，属行为变化）"
+        );
     }
 
     #[test]
