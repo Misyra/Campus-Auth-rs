@@ -331,7 +331,11 @@ async function init(): Promise<void> {
 
   // F9：保存轮询定时器 id，退出时 clearInterval，避免 quitApp 后页面仍持续轮询
   // 断连退避：后端失联时固定 30s 轮询会刷出大量失败日志；连续失败 3 次后
-  // 间隔拉到 5min（WS 重连成功/轮询成功即恢复 30s），quitApp 时同样清理。
+  // 间隔拉到 5min（轮询成功即恢复 30s），quitApp 时同样清理。
+  //
+  // `fetchStatus` 内部吞掉异常（只记日志 + 通知），不会 reject，故退避必须依据
+  // 其**返回值**（本次请求是否成功）——原实现挂在 `.catch` 上，该分支永不执行，
+  // 退避是死代码（连续失败 3 次拉长间隔从未生效）。
   let statusFailStreak = 0;
   let statusPollTimer: ReturnType<typeof setInterval> | undefined;
   const armStatusPoll = (intervalMs: number) => {
@@ -342,21 +346,20 @@ async function init(): Promise<void> {
       if (i !== -1) statusPollTimerIds.splice(i, 1);
     }
     statusPollTimer = setInterval(() => {
-      const s = useStatus();
-      void s
+      void useStatus()
         .fetchStatus()
-        .then(() => {
-          if (statusFailStreak >= 3) {
+        .then((ok) => {
+          if (ok) {
+            // 恢复：若此前已退避到慢间隔，切回常规间隔
+            if (statusFailStreak >= 3) armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
             statusFailStreak = 0;
-            armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
-          } else {
-            statusFailStreak = 0;
+            return;
           }
-        })
-        .catch((err) => {
-          frontendLogger.warn("status", err);
           statusFailStreak += 1;
-          if (statusFailStreak === 3) armStatusPoll(TIMING.STATUS_POLL_SLOW_INTERVAL);
+          if (statusFailStreak === 3) {
+            frontendLogger.warn("status", "连续 3 次获取状态失败，轮询间隔降为 5min");
+            armStatusPoll(TIMING.STATUS_POLL_SLOW_INTERVAL);
+          }
         });
     }, intervalMs);
     statusPollTimerIds.push(statusPollTimer);

@@ -257,34 +257,45 @@ const networkStatusDetail = computed(() => {
   }
 });
 
-async function fetchStatus(): Promise<void> {
+/// 拉取状态快照。
+///
+/// 返回**本次请求是否成功**（网络层），供调用方实现失败退避：本函数内部
+/// 吞掉异常（只记日志 + 通知），因此 `await` 它永远正常返回，调用方无法用
+/// `.catch` 感知失败——`useUi` 的断连退避此前正是挂在不存在的 reject 上，
+/// 成为死代码（连续失败 3 次拉到 5min 从未生效）。
+///
+/// 注意区分「请求失败」与「响应被丢弃」：因过期/陈旧而丢弃的响应仍属
+/// 成功（服务端可达），返回 `true`，否则会把正常的并发保护误判为断连。
+async function fetchStatus(): Promise<boolean> {
   const { notify } = useNotifications();
   const startEpoch = statusEpochAtRequest();
   try {
     const data = await monitorApi.fetchStatus();
     const raw = data as unknown as Record<string, unknown>;
     // B6/P14：in-flight 期间 WS 推送超过 1 次（差值 > 1）→ 请求明显过旧，直接丢弃
-    if (statusEpoch - startEpoch > 1) return;
+    if (statusEpoch - startEpoch > 1) return true;
     // 否则按单调新鲜度比较：仅当响应不早于当前已应用状态才应用，
     // 替换原"epoch 不等即丢"——相同数据的 WS 推送不再导致轮询响应被无谓丢弃。
     // 优先 snapshot_version（严格单调）；旧后端缺字段时回退 uptime_seconds 比较
     const freshVersion = Number(raw.snapshot_version ?? 0);
     const freshUptime = Number(raw.uptime_seconds ?? 0);
     if (freshVersion > 0) {
-      if (appliedVersion > 0 && freshVersion < appliedVersion) return;
+      if (appliedVersion > 0 && freshVersion < appliedVersion) return true;
     } else if (freshUptime > 0 && freshUptime < appliedUptime) {
-      return;
+      return true;
     }
     applyStatus(mapBackendStatus(raw), raw);
     // F3：从失败恢复时提示已重连（trackRecovery 仅在之前处于失败状态时返回 true）
     if (fetchStatusFail.trackRecovery()) {
       notify(true, "已重新连接到服务器", "network");
     }
+    return true;
   } catch (error) {
     frontendLogger.warn("status", "获取状态失败", error);
     if (fetchStatusFail.trackFailure()) {
       notify(false, "无法连接到服务器，请检查后端是否已关闭", "network");
     }
+    return false;
   }
 }
 
