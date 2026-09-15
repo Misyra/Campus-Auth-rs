@@ -82,12 +82,12 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
         }
         let pid = parts[idx_pid].trim().trim_matches('"').parse::<u32>().ok();
         let ppid = parts[idx_ppid].trim().trim_matches('"').parse::<u32>().ok();
-        let cmd = parts[idx_cmd];
+        let cmd = unescape_csv_field(parts[idx_cmd]);
         let (Some(pid), Some(ppid)) = (pid, ppid) else {
             continue;
         };
         alive_pids.insert(pid);
-        if is_chromium(cmd) {
+        if is_chromium(&cmd) {
             candidates.push((pid, ppid));
         }
     }
@@ -100,6 +100,25 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
         }
     }
     Ok(killed)
+}
+
+/// 反转义 `ConvertTo-Csv` 的字段：剥外层引号并把双写引号还原为单引号。
+///
+/// `ConvertTo-Csv` 按 RFC4180 把字段内的 `"` 转义为 `""`，且**总是**给字段加引号。
+/// 因此真实命令行
+/// `"C:\Program Files\Google\Chrome\Application\chrome.exe" --headless=new …`
+/// 在 CSV 里变成 `"""C:\Program Files\…\chrome.exe"" --headless=new …"`。
+///
+/// 这一步对命令行的**语义判定**是必需的：浏览器安装路径普遍含空格、且被引号包住，
+/// 不还原就会让按基名匹配的 [`is_chromium`] 全部落空（实测漏掉真实孤儿 chrome.exe）。
+/// 旧实现用全命令行子串匹配（`contains`）对此免疫，故该缺陷是在收紧为基名匹配后
+/// 才暴露的。
+fn unescape_csv_field(field: &str) -> String {
+    let inner = field
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(field);
+    inner.replace("\"\"", "\"")
 }
 
 /// kill 前复核候选仍是同一 Chromium 进程，且其父进程**实时**已不存在（Windows）。
@@ -309,15 +328,12 @@ fn parse_ppid_from_stat(stat: &str) -> Result<u32, String> {
 /// 不可接受，故整体偏向严格。
 fn is_chromium(cmd: &str) -> bool {
     let lower = cmd.to_ascii_lowercase();
-    // 取命令行首个非空 token 作为程序名（Playwright 直接以绝对路径拉起浏览器，
-    // 参数中不会出现裸的可执行文件名，故只认第一个 token）
-    let program = lower
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim_matches('"');
-    // 程序名基名：剥离目录（Windows 反斜杠与 unix 斜杠都要处理）
-    let basename = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    // 取可执行文件基名：Windows 安装路径含空格时命令行会写成
+    // `"C:\Program Files\…\chrome.exe" --headless`，按空白分割会把程序名截成
+    // `"c:\program`，故须先处理引号（见 program_basename）。
+    let Some(basename) = program_basename(&lower) else {
+        return false;
+    };
 
     const BROWSER_BASENAMES: [&str; 8] = [
         "chrome.exe",
@@ -340,6 +356,28 @@ fn is_chromium(cmd: &str) -> bool {
         return true;
     }
     lower.contains("--headless") || lower.contains("--remote-debugging-port")
+}
+
+/// 从（小写）命令行取可执行文件**基名**。
+///
+/// 两种写法都要处理：
+/// - 引号包裹（路径含空格时的常见形态）：取引号内内容；
+/// - 裸路径：取首个空白分隔 token。
+///
+/// 返回 `None` 表示无法解析出程序名（空串等），调用方按「非浏览器」处理——
+/// 偏保守：漏判只少清一个残留，误判会杀用户进程。
+fn program_basename(lower_cmd: &str) -> Option<&str> {
+    let cmd = lower_cmd.trim_start();
+    let program = match cmd.strip_prefix('"') {
+        // 引号包裹：到下一个引号为止（未闭合时退化为整串，交给基名匹配判定）
+        Some(rest) => rest.split('"').next().unwrap_or(rest),
+        None => cmd.split_whitespace().next().unwrap_or(""),
+    };
+    if program.is_empty() {
+        return None;
+    }
+    // 剥离目录（Windows 反斜杠与 unix 斜杠都要处理）
+    Some(program.rsplit(['/', '\\']).next().unwrap_or(program))
 }
 
 /// 通过 taskkill 强杀（Windows）
@@ -419,6 +457,56 @@ mod tests {
         // 但真正的浏览器 + 特征仍必须命中
         assert!(is_chromium("/opt/chromium-browser/chromium --headless"));
         assert!(is_chromium("C:\\pw\\chrome.exe --headless --disable-gpu"));
+    }
+
+    /// CSV 字段反转义：真实命令行带空格路径被双写引号包裹时必须还原
+    ///
+    /// `ConvertTo-Csv` 把字段内 `"` 转义为 `""` 并总是加外层引号，故
+    /// `"C:\Program Files\…\chrome.exe" --headless` 在 CSV 里是
+    /// `"""C:\Program Files\…\chrome.exe"" --headless"`。不还原会让按基名匹配的
+    /// is_chromium 全部落空（实测漏掉真实孤儿 chrome.exe）。
+    #[test]
+    fn test_unescape_csv_field() {
+        // PowerShell ConvertTo-Csv 对含引号路径的实际形态
+        assert_eq!(
+            unescape_csv_field(
+                "\"\"\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\"\" --headless=new\""
+            ),
+            "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --headless=new"
+        );
+        // 普通无引号字段
+        assert_eq!(unescape_csv_field("\"123\""), "123");
+        assert_eq!(unescape_csv_field("123"), "123");
+        assert_eq!(unescape_csv_field(""), "");
+    }
+
+    /// 含空格路径的浏览器（Windows 最常见形态）必须仍被判为候选
+    ///
+    /// 这是 P2-14 收紧基名匹配后新暴露的回归面：旧的全命令行子串匹配
+    /// （contains）对引号免疫，改为基名匹配后若不适配引号写法，安装在
+    /// `C:\Program Files\…` 下的浏览器会**全部漏判**，孤儿清理静默失效。
+    #[test]
+    fn test_is_chromium_handles_quoted_path_with_spaces() {
+        // 实测的真实命令行（带引号的含空格路径）
+        assert!(is_chromium(
+            "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --headless=new --disable-gpu"
+        ));
+        assert!(is_chromium(
+            "\"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe\" --remote-debugging-port=9222"
+        ));
+        // 反转义后的形态同样要命中
+        assert!(is_chromium(
+            "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --headless=new"
+        ));
+        // Playwright 的 headless_shell（通常无空格）
+        assert!(is_chromium(
+            "/root/.cache/ms-playwright/chromium_headless_shell-1200/chrome-linux/headless_shell --disable-gpu"
+        ));
+        // 非浏览器即便带引号含空格也不得命中
+        assert!(!is_chromium(
+            "\"C:\\Program Files\\NotABrowser\\reader.exe\" --headless"
+        ));
+        assert!(!is_chromium("\"C:\\tools\\chromedriver.exe\" --headless"));
     }
 
     /// stat 解析：comm 含空格/括号时仍定位 ppid，格式异常返回错误
