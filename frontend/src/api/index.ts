@@ -39,6 +39,7 @@ import type {
   Script,
   StatusSnapshot,
   TaskDetail,
+  TaskExecuteResult,
   TaskItem,
   UninstallDetectItem,
   UninstallResponse,
@@ -445,7 +446,8 @@ export const tasksApi = {
   get: (id: string) => http.get<TaskDetail>(`/api/tasks/${pathSegment(id)}`),
   save: (id: string, payload: Record<string, unknown>) => http.put<MutationResult>(`/api/tasks/${pathSegment(id)}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${pathSegment(id)}`),
-  execute: (id: string) => http.post<MutationResult>(`/api/tasks/${pathSegment(id)}/execute`),
+  // 执行结果以业务字段 success 表达（失败同样是 HTTP 200），故不能只按 HTTP 成败判断
+  execute: (id: string) => http.post<TaskExecuteResult>(`/api/tasks/${pathSegment(id)}/execute`),
   order: (order: { all: string[]; scripts: string[] }) => http.post<MutationResult>("/api/tasks/order", order),
   import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),
   export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${pathSegment(id)}`),

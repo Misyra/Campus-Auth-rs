@@ -55,7 +55,18 @@ async function executeTask(taskId: string): Promise<void> {
   try {
     frontendLogger.info("tasks", `执行任务: ${taskId}`);
     const data = await tasksApi.execute(taskId);
-    toastOnly(true, extractApiError(data, "执行完成"));
+    // 任务执行失败同样以 HTTP 200 返回（后端 execute_task 直接 Ok），成败由
+    // 业务字段 success 表达；此外信封 success 只表示"命令完成并回包"，步骤
+    // 失败（如 OCR 依赖缺失）也会返回 success=true 的信封。因此必须按
+    // data.success 分流，否则任务实际失败时弹的是绿色"执行完成"。
+    const ok = data?.success === true;
+    if (!ok) {
+      // 失败：优先展示后端错误消息（output 截断到 500 字符，不适合整段塞进 toast）
+      frontendLogger.warn("tasks", `执行失败: ${data?.error || data?.output || taskId}`);
+      toastOnly(false, data?.error || "执行失败");
+      return;
+    }
+    toastOnly(true, "执行完成");
   } catch (error) {
     frontendLogger.error("tasks", "执行任务异常", error);
     toastOnly(false, extractApiError(error, "执行失败"));

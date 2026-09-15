@@ -23,6 +23,20 @@ export interface LoginResultResponse {
   duration: number;
 }
 
+/**
+ * 手动执行任务的业务结果（后端 `tasks::executor::TaskResult`）。
+ *
+ * 任务**执行失败**同样以 HTTP 200 返回（`POST /api/tasks/{id}/execute` 直接
+ * `Ok(data(result))`），成败由 `success` 表达——调用方不得因 2xx 就当成功。
+ */
+export interface TaskExecuteResult {
+  success: boolean;
+  output: string;
+  exit_code: number;
+  duration_ms: number;
+  error: string | null;
+}
+
 /** 背景图上传/拉取返回的业务负载 */
 export interface BackgroundUploadResult {
   filename?: string;
