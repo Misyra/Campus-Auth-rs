@@ -145,13 +145,21 @@ pub fn apply_auth_endpoint(
 /// 与 [`apply_lenient_trigger`] 共用同一条件，避免「采集判据」与「升级判据」
 /// 两处漂移——若分开写，改一处忘另一处会导致白采集或证据缺失。
 ///
-/// `true` = 当前判定尚未确认在线、且不属于宽松模式不该接管的两种终态
-/// （配置错误、无有效探测），此时本地链路证据是决定升级与否的唯一变量。
+/// `true` = 当前判定尚未确认在线、且严格口径**尚未给出登录建议**、也不属于
+/// 宽松模式不该接管的两种终态（配置错误、无有效探测）。
 pub fn lenient_trigger_candidate(current: &ConnectivityAssessment) -> bool {
     current.status != NetworkStatus::Online
         && !matches!(
             current.recovery_advice,
-            RecoveryAdvice::FixConfiguration | RecoveryAdvice::NoProbeEvidence
+            RecoveryAdvice::FixConfiguration
+                | RecoveryAdvice::NoProbeEvidence
+                // 已是登录建议：宽松触发无事可做。若仍改写，会把严格口径更可信的
+                // `High`/`CaptiveDetected` 降级为 `Low`/`LinkUpLoginAssumed`，
+                // 抹掉「确实检测到劫持」与「仅按链路推断」的区别
+                | RecoveryAdvice::AttemptLogin
+                // 有意的「谨慎单次」节流（Engine 按配置版本去重）：升级为
+                // `AttemptLogin` 会绕过该去重，退化为按失败节奏反复尝试
+                | RecoveryAdvice::AttemptLoginOnce
         )
 }
 
@@ -175,6 +183,10 @@ pub fn lenient_trigger_candidate(current: &ConnectivityAssessment) -> bool {
 ///   只会产生误导性失败；
 /// - `NoProbeEvidence` 保持不动——一个探测都没启用属于测量缺失而非证据不足，
 ///   此时升级会与「禁止自动恢复」的既定告警语义冲突，且每轮都会尝试登录；
+/// - `AttemptLogin` / `AttemptLoginOnce` 保持不动——严格口径已经给出登录建议，
+///   本函数是**兜底**（严格口径什么都没给出时才升级），此时改写只会有损：
+///   前者会把 `High`/`CaptiveDetected` 降级为推断级 `Low`/`LinkUpLoginAssumed`，
+///   后者会绕过 Engine 的「同一配置版本仅尝试一次」去重；
 /// - 其余（Offline/Unknown/CaptivePortal）统一升级为 `CaptivePortal` +
 ///   `AttemptLogin`，并标注置信度 `Low` 与原因
 ///   [`AssessmentReason::LinkUpLoginAssumed`]，让用户在界面上能区分「明确检测到
@@ -474,6 +486,69 @@ mod tests {
         assert_eq!(base.recovery_advice, RecoveryAdvice::FixConfiguration);
         let result = apply_lenient_trigger(base, LocalLinkState::Available);
         assert_eq!(result.recovery_advice, RecoveryAdvice::FixConfiguration);
+    }
+
+    #[test]
+    fn lenient_preserves_confirmed_captive_with_reachable_auth() {
+        // 回归锚点：严格口径已给出明确门户证据 + 无差别登录建议时，宽松触发
+        // 不得把它改写成推断级——否则 High/CaptiveDetected（确实检测到劫持）
+        // 会被降级为 Low/LinkUpLoginAssumed（只是按链路猜），排障时无法区分
+        let base = apply_auth_endpoint(
+            assess_connectivity(&evidence(
+                ProbeOutcome::Disabled,
+                ProbeOutcome::Captive,
+                ProbeOutcome::Disabled,
+            )),
+            AuthEndpointState::Reachable,
+        );
+        assert_eq!(base.recovery_advice, RecoveryAdvice::AttemptLogin);
+        assert_eq!(base.confidence, AssessmentConfidence::High);
+        assert_eq!(base.reason, AssessmentReason::CaptiveDetected);
+        let result = apply_lenient_trigger(base, LocalLinkState::Available);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLogin);
+        assert_eq!(result.confidence, AssessmentConfidence::High);
+        assert_eq!(result.reason, AssessmentReason::CaptiveDetected);
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+    }
+
+    #[test]
+    fn lenient_preserves_attempt_login_once_on_unreachable_auth() {
+        // 明确门户证据但认证入口预检失败 → 「谨慎单次」（Engine 按配置版本去重，
+        // 同一版本仅放行一次）。宽松触发若升级为无差别 AttemptLogin，会绕过该
+        // 去重，退化为按失败节奏反复拉起浏览器
+        let base = apply_auth_endpoint(
+            assess_connectivity(&evidence(
+                ProbeOutcome::Disabled,
+                ProbeOutcome::Captive,
+                ProbeOutcome::Fail,
+            )),
+            AuthEndpointState::Unreachable,
+        );
+        assert_eq!(base.recovery_advice, RecoveryAdvice::AttemptLoginOnce);
+        let result = apply_lenient_trigger(base, LocalLinkState::Available);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLoginOnce);
+        assert_eq!(result.confidence, AssessmentConfidence::High);
+        assert_eq!(result.reason, AssessmentReason::CaptiveDetected);
+    }
+
+    #[test]
+    fn lenient_preserves_attempt_once_on_inconclusive_with_reachable_auth() {
+        // 证据不足（探测目标自身 5xx 等异常）+ 认证入口可达 → 谨慎单次。
+        // 该输入本就意味着「探测目标异常」，升级为门户会误导用户判断
+        let base = apply_auth_endpoint(
+            assess_connectivity(&evidence(
+                ProbeOutcome::Fail,
+                ProbeOutcome::Inconclusive,
+                ProbeOutcome::Disabled,
+            )),
+            AuthEndpointState::Reachable,
+        );
+        assert_eq!(base.status, NetworkStatus::Unknown);
+        assert_eq!(base.recovery_advice, RecoveryAdvice::AttemptLoginOnce);
+        let result = apply_lenient_trigger(base, LocalLinkState::Available);
+        assert_eq!(result.status, NetworkStatus::Unknown);
+        assert_eq!(result.reason, AssessmentReason::InconclusiveEvidence);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLoginOnce);
     }
 
     #[test]
