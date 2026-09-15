@@ -73,14 +73,18 @@ const fetchGuard = createFetchGuard(5000);
 async function fetchLogs(force = false, limit = LIMITS.LOG_MAX_ENTRIES): Promise<void> {
   if (!fetchGuard.shouldFetch(force)) return;
   // 记录请求开始时的序号；响应返回前产生的实时日志需要在历史替换后保留。
-  const fetchStartedSeq = logs.reduce(
+  // `pendingLogs`（微任务批量缓冲）也要纳入：那里的实时日志同样属于
+  // 「请求发起后到达」，漏算会让它们在替换时被当作请求前的历史而丢弃。
+  const fetchStartedSeq = [...logs, ...pendingLogs].reduce(
     (max, entry) => (typeof entry.seq === "number" ? Math.max(max, entry.seq) : max),
     0,
   );
+  // seq 退化为 0 时的兜底基准（见 replaceLogs 注释）：请求发起前已存在条目的内容键。
+  const preFetchKeys = new Set([...logs, ...pendingLogs].map(logKey));
   try {
     const entries = await systemApi.fetchLogs(limit);
     if (Array.isArray(entries)) {
-      replaceLogs(entries, fetchStartedSeq);
+      replaceLogs(entries, fetchStartedSeq, preFetchKeys);
     }
     // 失败不 markSuccess，便于下次自动重试
     fetchGuard.markSuccess();
@@ -102,17 +106,30 @@ function replayPendingBeforeInit(): void {
 }
 
 /** 用 HTTP 历史重建日志数组与去重键集合，并合并请求期间产生的实时日志。 */
-function replaceLogs(entries: LogEntry[], preserveAfterSeq = 0): void {
+function replaceLogs(
+  entries: LogEntry[],
+  preserveAfterSeq = 0,
+  preFetchKeys?: Set<string>,
+): void {
+  const current = [...logs, ...pendingLogs];
+  // 两种判定基准：
+  // - 有 seq 基准时按 seq 比较（WS 新日志 seq 全局单调递增，最可靠）；
+  // - seq 为 0 时（用户点过「清空」使 logs 为空、或旧后端条目无 seq）改用
+  //   「请求发起前已存在条目」的内容键差集。原实现此时直接取空数组，
+  //   而下方又无条件清空 pendingLogs——请求期间到达的实时日志被整批丢弃，
+  //   「N 条新消息」也一并清零。
   const realtimeDuringFetch =
     preserveAfterSeq > 0
-      ? [...logs, ...pendingLogs].filter(
-          (entry) => typeof entry.seq === "number" && entry.seq > preserveAfterSeq,
-        )
-      : [];
+      ? current.filter((entry) => typeof entry.seq === "number" && entry.seq > preserveAfterSeq)
+      : preFetchKeys
+        ? current.filter((entry) => !preFetchKeys.has(logKey(entry)))
+        : [];
   seenKeys.clear();
   seenSeqs.clear();
   pendingLogs.length = 0;
-  pendingNotAtBottom = 0;
+  // 仅当请求期间确实没有需要保留的实时日志时才清空「新消息」计数——
+  // 否则这些日志会被 appendLogs 回放，计数应如实保留。
+  if (realtimeDuringFetch.length === 0) pendingNotAtBottom = 0;
   // 历史条目 seq 每次请求重新分配（不跨请求稳定），基准只按内容键重建；
   // WS 新日志 seq 全局单调递增，不会与后续实时推送撞 seq
   for (const e of entries) seenKeys.add(logKey(e));

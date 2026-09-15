@@ -9,9 +9,12 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 import type { LogEntry } from "../api/types";
 
-// systemApi.fetchLogs 不发真实请求；返回空数组即完成"历史替换"初始化
+// systemApi.fetchLogs 不发真实请求；默认返回空数组即完成"历史替换"初始化。
+// 竞态用例用 mockImplementationOnce 换成挂起的 Promise。
+const fetchLogsMock = vi.fn(async () => [] as LogEntry[]);
+
 vi.mock("../api", () => ({
-  systemApi: { fetchLogs: vi.fn(async () => []) },
+  systemApi: { fetchLogs: (...a: unknown[]) => fetchLogsMock(...(a as [])) },
 }));
 
 const { useLogs } = await import("./useLogs");
@@ -137,5 +140,64 @@ describe("clearLogs", () => {
     logs.clearLogs();
     expect(logs.logs.length).toBe(0);
     expect(logs.newLogCount.value).toBe(0);
+  });
+});
+
+describe("历史替换期间的实时日志（P3 回归）", () => {
+  it("清空后刷新：请求在途时到达的实时日志不得被丢弃", async () => {
+    // 用户点过「清空」→ logs 为空 → seq 基准退化为 0（这是缺陷的触发前提）
+    logs.clearLogs();
+    logs.initialized.value = true;
+
+    // 让历史请求挂起，制造"fetch 在途"
+    let resolveFetch: (v: LogEntry[]) => void = () => {};
+    fetchLogsMock.mockImplementationOnce(
+      () =>
+        new Promise<LogEntry[]>((r) => {
+          resolveFetch = r;
+        }),
+    );
+
+    const pending = logs.fetchLogs(true);
+    // 请求在途期间实时日志到达（微任务 flush 后进 logs）
+    logs.appendLogs([entry(5001, "实时日志-在途")], false);
+    await flush();
+
+    // 历史响应回来：原实现此时 realtimeDuringFetch 为空且 pendingLogs 被清空，
+    // 这条实时日志会永久消失
+    resolveFetch([entry(1, "历史-1"), entry(2, "历史-2")]);
+    await pending;
+    await flush();
+
+    const messages = logs.logs.map((l) => l.message);
+    expect(messages).toContain("实时日志-在途");
+    expect(messages).toContain("历史-1");
+  });
+
+  it("保留实时日志时不清零「N 条新消息」计数", async () => {
+    logs.clearLogs();
+    logs.initialized.value = true;
+
+    let resolveFetch: (v: LogEntry[]) => void = () => {};
+    fetchLogsMock.mockImplementationOnce(
+      () =>
+        new Promise<LogEntry[]>((r) => {
+          resolveFetch = r;
+        }),
+    );
+
+    const pending = logs.fetchLogs(true);
+    // 不在底部：累计新消息计数
+    logs.appendLogs([entry(6001, "实时-不在底部")], false);
+    await flush();
+
+    resolveFetch([entry(1, "历史-1")]);
+    await pending;
+    await flush();
+
+    // 该条日志被保留，计数应如实非零（原实现无条件清零）
+    expect(logs.logs.map((l) => l.message)).toContain("实时-不在底部");
+    expect(logs.newLogCount.value).toBeGreaterThan(0);
+    logs.markAtBottom();
   });
 });
