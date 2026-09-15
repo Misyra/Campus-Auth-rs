@@ -151,56 +151,73 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
       throw new ApiError(timedOut ? "请求超时" : "请求已取消", undefined, e, undefined, !timedOut);
     }
     throw new ApiError("网络连接失败，请检查后端是否已启动", undefined, e);
+  }
+
+  // 注意：超时定时器与 abort 监听在**响应体消费完成后**才清理（见下层 finally），
+  // 不能只覆盖到「收到响应头」——若头已回但 body 卡住/半途断流，`res.json()`
+  // 将无超时、不可取消而永久 pending（表现为永久转圈、busy 标志永不复位）。
+
+  try {
+    // 401：token 可能因后端重启而轮换，重取一次后重试（仅一次，避免循环）
+    if (res.status === 401 && !retried) {
+      resetAuthToken();
+      return await request<T>(method, path, opts, true);
+    }
+
+    const contentType = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      let message = `请求失败 (${res.status})`;
+      let code: string | undefined;
+      let detail: unknown;
+      if (contentType.includes("application/json")) {
+        try {
+          const errJson = (await res.json()) as Record<string, unknown>;
+          // spec 错误信封：{ error: { code, message, details } }
+          const errObj = errJson.error as { code?: string; message?: string; details?: unknown } | undefined;
+          if (errObj && typeof errObj === "object") {
+            if (typeof errObj.message === "string") message = errObj.message;
+            if (typeof errObj.code === "string") code = errObj.code;
+            detail = errObj.details;
+          } else {
+            // 兼容旧 FastAPI detail 数组格式
+            detail = errJson.detail;
+            const detailMsg = extractDetailMessage(detail);
+            if (detailMsg) message = detailMsg;
+          }
+        } catch (e) {
+          // body 消费期间被超时/取消打断：如实报出，不可静默忽略
+          if ((e as Error).name === "AbortError") {
+            throw new ApiError(timedOut ? "请求超时" : "请求已取消", undefined, e, undefined, !timedOut);
+          }
+          /* 其余解析失败忽略：保留上面的通用消息 */
+        }
+      }
+      throw new ApiError(message, res.status, detail, code);
+    }
+
+    if (contentType.includes("application/json")) {
+      const json = (await res.json()) as Record<string, unknown>;
+      // spec 成功信封：{ data: <业务负载> }，解包返回 data 内容
+      if (json && typeof json === "object" && "data" in json) {
+        return json.data as T;
+      }
+      // 兜底：无信封时原样返回
+      return json as unknown as T;
+    }
+
+    // 非 JSON 成功响应（如文件流），原样返回文本
+    return (await res.text()) as unknown as T;
+  } catch (e) {
+    // 响应体读取超时/被取消：与 header 阶段同语义地归一为 ApiError
+    if ((e as Error).name === "AbortError") {
+      throw new ApiError(timedOut ? "请求超时" : "请求已取消", undefined, e, undefined, !timedOut);
+    }
+    throw e;
   } finally {
+    // 超时定时器与 abort 监听覆盖到响应体解析结束（上面两处 try 的所有出口）
     if (timeoutId) clearTimeout(timeoutId);
     opts.signal?.removeEventListener("abort", abortFromCaller);
   }
-
-  // 401：token 可能因后端重启而轮换，重取一次后重试（仅一次，避免循环）
-  if (res.status === 401 && !retried) {
-    resetAuthToken();
-    return request<T>(method, path, opts, true);
-  }
-
-  const contentType = res.headers.get("content-type") || "";
-  if (!res.ok) {
-    let message = `请求失败 (${res.status})`;
-    let code: string | undefined;
-    let detail: unknown;
-    if (contentType.includes("application/json")) {
-      try {
-        const errJson = (await res.json()) as Record<string, unknown>;
-        // spec 错误信封：{ error: { code, message, details } }
-        const errObj = errJson.error as { code?: string; message?: string; details?: unknown } | undefined;
-        if (errObj && typeof errObj === "object") {
-          if (typeof errObj.message === "string") message = errObj.message;
-          if (typeof errObj.code === "string") code = errObj.code;
-          detail = errObj.details;
-        } else {
-          // 兼容旧 FastAPI detail 数组格式
-          detail = errJson.detail;
-          const detailMsg = extractDetailMessage(detail);
-          if (detailMsg) message = detailMsg;
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-    throw new ApiError(message, res.status, detail, code);
-  }
-
-  if (contentType.includes("application/json")) {
-    const json = (await res.json()) as Record<string, unknown>;
-    // spec 成功信封：{ data: <业务负载> }，解包返回 data 内容
-    if (json && typeof json === "object" && "data" in json) {
-      return json.data as T;
-    }
-    // 兜底：无信封时原样返回
-    return json as unknown as T;
-  }
-
-  // 非 JSON 成功响应（如文件流），原样返回文本
-  return (await res.text()) as unknown as T;
 }
 
 /** 从 FastAPI 422 detail 数组提取可读消息 */
