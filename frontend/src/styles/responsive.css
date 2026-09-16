@@ -56,8 +56,7 @@
   }
 
   .logo-text,
-  .nav-item span,
-  .nav-more-arrow {
+  .nav-item span {
     display: none;
   }
 
@@ -76,12 +75,6 @@
   .nav-item {
     justify-content: center;
     padding: 12px;
-  }
-
-  .nav-more-menu {
-    margin: var(--space-xs) 0;
-    padding: var(--space-xs) 0;
-    border-left: none;
   }
 
   .main-content {
@@ -133,10 +126,14 @@
     flex: 1 1 40%;
   }
 
-  /* 任务页三 Tab 窄屏均分（不再有 AI 入口挤占页签） */
+  /* 任务页四 Tab 窄屏：保持内容宽并允许换行成多行（.settings-tabs 有 flex-wrap），
+     不用 flex 等分——9 字的「AI 生成浏览器任务」被压到 75px 会把文案断成
+     「AI 生成浏 / 览器任务」（实测）。此处只收紧内边距，宽度交给内容决定。 */
   .tasks-tabs .settings-tab {
-    flex: 1 1 30%;
+    flex: 0 1 auto;
     min-width: 0;
+    padding-left: 6px;
+    padding-right: 6px;
   }
 
   .task-mini-grid,

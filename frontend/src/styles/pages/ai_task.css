@@ -3,8 +3,8 @@
  * 顶部步进器 + 卡片完成态指示；流式输出与底部同步进度条为本次新增。
  */
 
-/* AI 生成页作为「任务」页的第三个 Tab 由容器渲染：外层 .page-content 由容器持有，
-   故入场动画在此补上（否则切到本 Tab 时无过渡，与其他两 Tab 观感不一致）。 */
+/* AI 生成页作为「任务」页的一个 Tab 由容器渲染：外层 .page-content 由容器持有，
+   故入场动画在此补上（否则切到本 Tab 时无过渡，与其他 Tab 观感不一致）。 */
 .ai-task-page {
   padding-bottom: 24px;
   --ai-rail: rgba(var(--primary-rgb), 0.16);

@@ -3,6 +3,9 @@
  * 覆盖：非编辑页导航直放、任务/脚本两个 Tab 间切换直放（草稿各自保留）、
  * 脏草稿确认抢占阻断且不清草稿、确认放行且显式清空、两块草稿同时脏时逐个判定。
  * useConfirm/useTasks/useScripts 全部打桩，不触真实单例。
+ *
+ * 直连登录 Tab 相关用例已随该 Tab 一并移除：直连参数归回「配置方案」页编辑，
+ * 其草稿由 useProfiles 的 dirty 快照与编辑器同生命周期负责，不再跨路由存活。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -110,5 +113,27 @@ describe("guardEditorLeave", () => {
     expect(confirmMock).toHaveBeenCalledTimes(1);
     expect(clearTaskDraft).not.toHaveBeenCalled();
     expect(clearScriptDraft).not.toHaveBeenCalled();
+  });
+
+  it("两块草稿同时脏且都确认：两块都清理后放行", async () => {
+    isTaskDirty.mockReturnValue(true);
+    isScriptDirty.mockReturnValue(true);
+    confirmMock.mockResolvedValueOnce(true);
+    confirmMock.mockResolvedValueOnce(true);
+    expect(await guardEditorLeave({ path: "/about" }, { path: "/tasks" })).toBe(true);
+    expect(clearTaskDraft).toHaveBeenCalledTimes(1);
+    expect(clearScriptDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("定时任务 Tab 同处 /tasks 区域：内部切换不拦截，离开才判定", async () => {
+    isTaskDirty.mockReturnValue(true);
+    // 直链进入定时任务 Tab（/tasks/scheduled）后切回浏览器任务 Tab
+    expect(await guardEditorLeave({ path: "/tasks" }, { path: "/tasks/scheduled" })).toBe(true);
+    expect(await guardEditorLeave({ path: "/tasks/scheduled" }, { path: "/tasks" })).toBe(true);
+    expect(confirmMock).not.toHaveBeenCalled();
+    // 离开整个 /tasks 区域才判定
+    confirmMock.mockResolvedValueOnce(true);
+    expect(await guardEditorLeave({ path: "/about" }, { path: "/tasks/scheduled" })).toBe(true);
+    expect(clearTaskDraft).toHaveBeenCalledTimes(1);
   });
 });

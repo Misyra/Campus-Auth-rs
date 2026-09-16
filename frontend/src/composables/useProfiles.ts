@@ -8,25 +8,42 @@ import type {
   HttpLoginMethod,
   HttpLoginTestResult,
   Profile,
+  ProfileSharePayload,
   ProfileSummary,
+  ProfileUpdatePayload,
   NetworkDetectResult,
 } from "../api/types";
 import { profilesApi } from "../api";
 import { extractApiError } from "../api/client";
 import { DEFAULT_PROFILE_SETTINGS } from "../utils/constants";
+import { pickFile } from "../utils/file";
 import { createFetchGuard, createFirstFailNotifier } from "../utils/guards";
 import { frontendLogger } from "../utils/logger";
 import { useStatus } from "./useStatus";
 import { useDirtySnapshot } from "./useDirtySnapshot";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
-import { useConfig } from "./useConfig";
 
-export type EditingProfile = Profile & { id: string; _isNew: boolean };
+/** 编辑中的方案草稿。`_` 前缀为编辑器专属字段，不参与 PUT 载荷。 */
+export type EditingProfile = Profile & {
+  id: string;
+  _isNew: boolean;
+  /**
+   * 显式清除已保存密码（请求态，保存后生效）。
+   *
+   * 必须放在草稿对象内而非独立 ref：dirty 判定是草稿的 JSON 全量比对
+   * （见 useDirtySnapshot），放在对象外则「只点了清除」不会产生未保存标记，
+   * 用户离开时静默丢失该意图。也**不能**用 `password = ""` 表达清除——PUT 的
+   * 空串契约是「保留原密码」，见 ProfileUpdatePayload.clear_password。
+   */
+  _clearPassword?: boolean;
+};
 
 const profiles = ref<Record<string, ProfileSummary>>({});
 const activeProfileId = ref("default");
-const autoSwitch = ref(true);
+// 与后端 SettingsData::default 一致（2026-09-16 起默认关闭自动切换）；
+// 加载后即以服务端下发为准，此处只是首帧占位
+const autoSwitch = ref(false);
 const editingProfile = ref<EditingProfile | null>(null);
 // dirty 机制：基准快照由 useDirtySnapshot 统一维护，用于检测未保存改动（历史遗留 F4/F5）
 const {
@@ -37,9 +54,19 @@ const {
 } = useDirtySnapshot(editingProfile, { entityName: "配置方案" });
 const detectResult = ref<NetworkDetectResult | null>(null);
 const editorDetectResult = ref<NetworkDetectResult | null>(null);
+/**
+ * 编辑中的方案是否已保存密码。
+ *
+ * 后端 GET 不回传密码（`settings.password` 恒为空串），故必须单独持有：
+ * 编辑器的占位文案与「清除已保存密码」按钮的显隐都据此判定。口径与后端
+ * 一致（反映「可解密」而非「非空」）。
+ */
+const editorHasPassword = ref(false);
 // 直连测试结果改由 LoginChannelField 自持局部 state（多实例互不覆盖），
 // 此处仅保留「是否有测试在途」这一全局门（后端为单飞，同刻只允许一个）
 const httpTestRunning = ref(false);
+/** 方案导入 in-flight：防连点导致重复导入同一条（后端会各分配一个 ID） */
+const profileImporting = ref(false);
 
 const { busy } = useStatus();
 const { toastOnly } = useToast();
@@ -83,7 +110,9 @@ async function showProfileEditor(profileId?: string): Promise<void> {
         ...data.settings,
         id: profileId,
         _isNew: false,
+        _clearPassword: false,
       } as EditingProfile;
+      editorHasPassword.value = data.has_password === true;
     } catch {
       frontendLogger.error("profiles", "加载方案失败: " + profileId);
       toastOnly(false, "加载方案失败");
@@ -94,7 +123,9 @@ async function showProfileEditor(profileId?: string): Promise<void> {
       ...DEFAULT_PROFILE_SETTINGS,
       id: "",
       _isNew: true,
+      _clearPassword: false,
     } as EditingProfile;
+    editorHasPassword.value = false;
   }
   // 记录初始快照作为 dirty 基准
   refreshProfileSnapshot();
@@ -104,7 +135,50 @@ async function showProfileEditor(profileId?: string): Promise<void> {
 async function closeProfileEditor(): Promise<void> {
   if (!(await confirmDiscardIfDirty())) return;
   editingProfile.value = null;
+  editorHasPassword.value = false;
   resetProfileSnapshot();
+}
+
+/**
+ * 打开**当前活跃方案**的编辑器；返回是否真的打开了。
+ *
+ * 供「方案」页进入时自动展示在用方案（改账号是这一页最高频的用途，
+ * 先看列表再找卡片点「编辑」平白多两步）。
+ *
+ * 与 `showProfileEditor(id)` 的关键区别：**活跃方案不在已加载列表里时返回 false，
+ * 绝不退化成新建草稿**。后者对缺失 id 的既有语义是「打开空白新建表单」
+ * （`showProfileEditor` 的 else 分支），用作自动打开时，一旦方案列表尚未拉取成功
+ * （`activeProfileId` 初始值恒为 `"default"` 而 `profiles` 为空），用户进入页面
+ * 会看到一个空白表单，误以为配置丢了——比留在列表页更糟。故此处显式前置校验。
+ */
+async function openActiveProfileForEdit(): Promise<boolean> {
+  // 已有草稿（上次离开本页时编辑器未关闭，或正在编辑另一个方案）→ 直接复用。
+  // 不能重载：重载会走 confirmDiscardIfDirty 弹「放弃未保存的修改」，
+  // 等于用户每次回到本页都被问一次是否丢弃。
+  if (editingProfile.value) return true;
+  const id = activeProfileId.value;
+  if (!id || !profiles.value[id]) return false;
+  await showProfileEditor(id);
+  return editingProfile.value !== null;
+}
+
+/**
+ * 标记「保存时清除已保存密码」。
+ *
+ * 只是请求态：写进草稿后由 dirty 快照照常标记未保存，点「保存方案」才落盘。
+ * 立即清空输入框（密码不回传，框里本就没有真实值），避免用户看到掩码误以为仍保留。
+ */
+function requestClearPassword(): void {
+  const profile = editingProfile.value;
+  if (!profile) return;
+  profile._clearPassword = true;
+  profile.password = "";
+}
+
+/** 撤销「清除密码」请求（误点后可退回） */
+function cancelClearPassword(): void {
+  const profile = editingProfile.value;
+  if (profile) profile._clearPassword = false;
 }
 
 /** 保存请求 in-flight 标记：防连点并发两次 PUT（新建方案第二次会撞"已存在"） */
@@ -120,12 +194,17 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(false, "请输入方案 ID");
     return false;
   }
-  if (!/^[a-zA-Z0-9_]+$/.test(profileId)) {
+  // 字符集必须与后端 `is_valid_profile_id` 一致（字母/数字/下划线/连字符）。
+  // 曾只允许下划线：而 `create_profile` 的 slugify 会把 `_` 归一为 `-`，于是新建
+  // `my_profile` 落盘成 `my-profile`，此后每次编辑保存都被这里拦下——方案一旦创建
+  // 就再也改不动（ID 输入框还是 disabled 的，用户连改名的入口都没有）。
+  // 引导导入的方案 id 同样来自该 slugify，故此处必须接受连字符。
+  if (!/^[a-zA-Z0-9_-]+$/.test(profileId)) {
     frontendLogger.warn("profiles", "保存方案被拒绝: ID 格式无效");
-    toastOnly(false, "方案 ID 只能包含字母、数字和下划线");
+    toastOnly(false, "方案 ID 只能包含字母、数字、下划线和连字符");
     return false;
   }
-  const { id, _isNew, ...settings } = profile;
+  const { id, _isNew, _clearPassword, ...settings } = profile;
   // 自定义运营商：选中"自定义"但未输入关键字时拒绝保存（修复 P1-17）
   if (settings.isp === "自定义") {
     toastOnly(false, "请填写自定义运营商关键字");
@@ -162,16 +241,18 @@ async function saveProfile(): Promise<boolean> {
         http_crypto_script: settings.http_crypto_script ?? "",
       });
     } else {
-      data = await profilesApi.save(profileId, settings as Profile);
+      data = await profilesApi.save(profileId, {
+        ...settings,
+        // 显式清除已保存密码：不能靠 password="" 表达（那是「保留原密码」）
+        clear_password: _clearPassword === true,
+      } as ProfileUpdatePayload);
     }
     frontendLogger.info("profiles", "方案保存成功: " + profileId);
     toastOnly(true, data?.message || "方案保存成功");
     editingProfile.value = null;
+    editorHasPassword.value = false;
     resetProfileSnapshot();
     await fetchProfiles(true);
-    if (profileId === activeProfileId.value) {
-      await refreshActiveProfileConfig();
-    }
     return true;
   } catch (error) {
     const msg = extractApiError(error, "保存失败");
@@ -272,30 +353,10 @@ async function setActiveProfile(profileId: string): Promise<void> {
     activeProfileId.value = profileId;
     frontendLogger.info("profiles", data?.message || `已切换到方案 ${profileId}`);
     toastOnly(true, data?.message || `已切换到方案 ${profileId}`);
-    await refreshActiveProfileConfig();
   } catch (error) {
     frontendLogger.error("profiles", "切换方案异常", error);
     toastOnly(false, "切换方案失败");
   }
-}
-
-/**
- * 刷新活跃方案的配置到设置页。
- *
- * 若设置页存在未保存修改（dirty），fetchConfig 的整体覆盖会静默丢弃它们（历史遗留 F5），
- * 因此先弹确认；用户取消则不刷新，保留当前编辑内容。
- */
-async function refreshActiveProfileConfig(): Promise<void> {
-  const { dirty, fetchConfig } = useConfig();
-  if (dirty.value) {
-    const ok = await confirm({
-      title: "未保存的修改",
-      message: "当前设置有未保存的修改，加载方案配置将覆盖它们。确定继续吗？",
-    });
-    // 仅 true 才继续覆盖；取消/被抢占（null）都不刷新，保留当前编辑内容
-    if (!ok) return;
-  }
-  await fetchConfig();
 }
 
 async function detectNetworkForEditor(): Promise<void> {
@@ -352,17 +413,68 @@ async function toggleAutoSwitch(): Promise<void> {
   }
 }
 
+/** 导出方案为分享文件：拉取载荷后交由调用方下载（本函数不触碰 DOM） */
+async function exportProfile(id: string): Promise<ProfileSharePayload | null> {
+  try {
+    const payload = await profilesApi.export(id);
+    frontendLogger.info("profiles", `方案已导出: ${id}`);
+    return payload;
+  } catch (error) {
+    const msg = extractApiError(error, "导出失败");
+    frontendLogger.error("profiles", `方案导出失败: ${id}`, error);
+    toastOnly(false, msg);
+    return null;
+  }
+}
+
+/** 导入分享的方案文件；成功返回后端分配的实际 ID（冲突时已自动改名） */
+async function importProfile(payload: unknown): Promise<string | null> {
+  if (profileImporting.value) return null;
+  profileImporting.value = true;
+  try {
+    const { id } = await profilesApi.import(payload as ProfileSharePayload);
+    frontendLogger.info("profiles", `方案已导入: ${id}`);
+    await fetchProfiles(true);
+    return id;
+  } catch (error) {
+    const msg = extractApiError(error, "导入失败");
+    frontendLogger.error("profiles", "方案导入失败", error);
+    toastOnly(false, msg);
+    return null;
+  } finally {
+    profileImporting.value = false;
+  }
+}
+
+/** 读取用户选择的 JSON 文件并解析（取消/非法 JSON 返回 null，由调用方决定提示） */
+async function readShareFile(): Promise<{ payload: unknown; fileName: string } | null> {
+  const file = await pickFile("application/json,.json");
+  if (!file) return null;
+  try {
+    const text = await file.text();
+    return { payload: JSON.parse(text) as unknown, fileName: file.name };
+  } catch (error) {
+    frontendLogger.error("profiles", "分享文件解析失败", error);
+    toastOnly(false, "无法解析该文件，请确认是本应用导出的方案文件");
+    return null;
+  }
+}
+
 export function useProfiles() {
   return {
     profiles,
     activeProfileId,
     autoSwitch,
     editingProfile,
+    editorHasPassword,
+    requestClearPassword,
+    cancelClearPassword,
     detectResult,
     editorDetectResult,
     httpTestRunning,
     fetchProfiles,
     showProfileEditor,
+    openActiveProfileForEdit,
     saveProfile,
     testHttpLogin,
     toastHttpTestPrecondition,
@@ -372,6 +484,10 @@ export function useProfiles() {
     detectNetworkForEditor,
     detectNetwork,
     toggleAutoSwitch,
+    exportProfile,
+    importProfile,
+    readShareFile,
+    profileImporting,
     isProfileDirty,
     closeProfileEditor,
   };

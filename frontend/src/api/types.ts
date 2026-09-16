@@ -287,7 +287,14 @@ export interface RetryConfig {
   retry_interval: number;
 }
 
-/** 凭据配置（前端内部嵌套结构） */
+/**
+ * 凭据字段集合（已不属于 `Config`）。
+ *
+ * 这些字段都是 `ProfileData` 的成员，仅在「配置方案」页编辑；此前 `Config` 里
+ * 有一份 `credentials` 投影（由 `GET /api/config` 的扁平响应填充），使同一份
+ * 数据有了两个可写入口。现保留本类型仅作为字段清单的单一说明来源，供需要整体
+ * 传递登录方式草稿的组件（`LoginChannelField` / `HttpLoginWizard`）引用。
+ */
 export interface CredentialsConfig {
   username: string;
   password: string;
@@ -296,10 +303,10 @@ export interface CredentialsConfig {
   isp: string;
   /**
    * 本方案自动登录使用的浏览器任务 ID（空 = 未绑定，回退内置默认任务）。
-   * 按方案绑定：切方案即切任务，取代旧的全局启用任务。
+   * 按方案绑定：切方案即切任务。
    */
   active_task: string;
-  /** 登录执行渠道；同时可在「配置方案」编辑器与设置页「账号」修改 */
+  /** 登录执行渠道 */
   login_channel: LoginChannel;
   http_method: HttpLoginMethod;
   http_url: string;
@@ -355,7 +362,12 @@ export interface UpdateState {
   platform_unavailable?: boolean;
 }
 
-/** 完整配置（前端内部表示，凭据嵌套） */
+/**
+ * 完整全局配置（前端内部表示）。
+ *
+ * 只含 `GlobalConfig` 域字段：账号与登录方式属于 Profile，由「配置方案」页
+ * 经 `/api/profiles/*` 读写，不在本结构内。
+ */
 export interface Config {
   browser: BrowserConfig;
   worker: WorkerConfig;
@@ -363,7 +375,6 @@ export interface Config {
   pause: PauseConfig;
   logging: LoggingConfig;
   retry: RetryConfig;
-  credentials: CredentialsConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
 }
@@ -398,8 +409,11 @@ export interface ConfigResponse {
 }
 
 /**
- * PATCH /api/config 请求体（凭据平铺）。
- * password 使用三态：null 保留已保存密码、空串清除、非空字符串加密更新。
+ * PATCH /api/config 请求体：只含全局设置。
+ *
+ * 后端仍接受扁平的凭据/直连键并把它们写回活跃方案（兼容既有客户端），但前端
+ * 不再提交这些字段——它们是方案数据，只能在「配置方案」页显式保存，否则任意
+ * 全局保存都会顺带改写活跃方案的凭据。
  */
 export interface SaveConfigPayload {
   browser: BrowserConfig;
@@ -410,21 +424,6 @@ export interface SaveConfigPayload {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
-  active_task: string;
-  username: string;
-  auth_url: string;
-  trigger_url: string;
-  isp: string;
-  /** 登录渠道与直连参数：后端写入活跃 Profile，非全局设置 */
-  login_channel: LoginChannel;
-  http_method: HttpLoginMethod;
-  http_url: string;
-  http_headers: string;
-  http_body: string;
-  http_success_pattern: string;
-  http_failure_pattern: string;
-  http_crypto_script: string;
-  password: string | null;
 }
 
 /** 登录渠道与直连请求方法 */
@@ -452,6 +451,49 @@ export interface Profile {
   http_failure_pattern: string;
   http_crypto_script: string;
   [key: string]: unknown;
+}
+
+/** 方案分享载荷（导出产物 / 导入输入）
+ *
+ * 后端导出时剔除 username 与 password（密码是跨机器不可解的 ENC: 密文，原样带出
+ * 会被接收方当明文再加密一次），并清空 active_task（接收方通常没有该任务）。
+ * 两个凭据字段仍保留在类型里：据其是否为空在前端提示"需自行填写"。
+ */
+export interface ProfileSharePayload {
+  campus_auth_profile: number;
+  exported_at?: string;
+  app_version?: string;
+  /** 导入时的命名建议（源方案 id，恒为 ASCII slug）；缺失时由后端按名称推导 */
+  suggested_id?: string;
+  profile: Omit<Profile, "id" | "active_task"> & { active_task?: string };
+}
+
+/** 方案导入结果：导入成功后的实际方案 ID（冲突时已自动改名） */
+export interface ProfileImportResult {
+  id: string;
+}
+
+/**
+ * GET /api/profiles/{id} 响应。
+ *
+ * `has_password` 是独立于 `settings` 的布尔：后端出于安全不回传密码（`settings.password`
+ * 恒为空串），仅凭它前端无法区分「没设密码」与「有密码但被抹掉」，占位文案只能猜。
+ * 口径与 `GET /api/config` 的 `has_password` 一致（反映「密码可解密」而非「字段非空」）。
+ */
+export interface ProfileDetailResponse {
+  settings: Profile;
+  has_password: boolean;
+}
+
+/** PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段 */
+export interface ProfileUpdatePayload extends Partial<Profile> {
+  /**
+   * 显式清除已保存密码。
+   *
+   * 不能用 `password: ""` 表达清除——该接口的空串契约是「未修改，保留原密码」，
+   * 两者等价。清除只能经本字段完成。
+   */
+  clear_password?: boolean;
 }
 
 /** 直连登录测试请求：使用编辑器内尚未保存的配置 */

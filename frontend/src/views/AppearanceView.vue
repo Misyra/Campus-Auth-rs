@@ -1,5 +1,9 @@
 <script setup lang="ts">
-/** 外观设置页：主题/卡片/侧栏样式、背景图与自定义颜色 */
+/** 外观设置页：主题/卡片/侧栏样式、背景图与自定义颜色。
+ * 原为侧栏独立页，现作为「设置」的一个 Tab 渲染（路由 /settings/appearance）：
+ * 它是纯本机显示偏好（localStorage），与其余设置同类，不再占用一级导航。
+ * 因此不再自带 .page-content 外壳——那层间距/入场动画由设置页框架统一提供，
+ * 嵌套会导致重复动画。改动即时生效，无保存栏（见 SettingsView 的 isAppearanceTab）。 */
 import IconApp from "@/components/common/IconApp.vue";
 import Modal from "@/components/common/Modal.vue";
 import { useAppearance } from "@/composables/useAppearance";
@@ -28,15 +32,14 @@ const {
 </script>
 
 <template>
-  <div class="page-content">
-    <div class="appearance-page">
-      <!-- 卡片 1：背景与氛围 -->
-      <div class="card appearance-card appearance-section-card">
-        <div class="appearance-card-header">
-          <IconApp name="image" class="appearance-card-icon" />
-          <h3>背景与氛围</h3>
-          <button v-if="cardDirty('background')" type="button" class="appearance-reset-btn" @click="resetCard('background')">恢复默认</button>
-        </div>
+  <div class="appearance-page">
+    <!-- 卡片 1：背景与氛围 -->
+    <div class="card appearance-card appearance-section-card">
+      <div class="appearance-card-header">
+        <IconApp name="image" class="appearance-card-icon" />
+        <h3>背景与氛围</h3>
+        <button v-if="cardDirty('background')" type="button" class="appearance-reset-btn" @click="resetCard('background')">恢复默认</button>
+      </div>
         <div class="appearance-card-body appearance-grid-2col">
           <div class="appearance-bg-thumb-group">
             <div v-if="appearance.background_url" class="appearance-bg-thumb" @click="openBgLightbox">
@@ -234,7 +237,6 @@ const {
           </div>
         </div>
       </div>
-    </div>
 
     <!-- 背景图放大预览：复用公共 Modal（Teleport + modal-fade + ESC + Focus Trap，沉浸预览加深遮罩） -->
     <Modal :open="bgLightbox.visible" title="背景预览" size="lg" preview @close="closeBgLightbox">

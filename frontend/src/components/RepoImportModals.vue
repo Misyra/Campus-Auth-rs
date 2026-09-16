@@ -10,13 +10,21 @@
  * 详情区大图可点击放大（三层弹窗：导入列表 > 放大预览，免责声明互斥）。
  * 缩略图/大图均经 /api/repo/image 同源代理（免鉴权 `<img>` 引用口径，
  * 出站限死任务站 raw 域），加载失败回退占位而非破图。
+ *
+ * 来源选择器与「加载索引」同处一行工具条：此前「加载索引」独占一行、
+ * 与它作用的来源选择器被隔开，看不出点它会用哪个源。
  */
 import { computed, ref, watch } from "vue";
 import Modal from "./common/Modal.vue";
+import IconApp from "./common/IconApp.vue";
 import { repoApi } from "@/api";
+import { TASK_REPO_SOURCES } from "@/utils/constants";
 import { useRepoImport } from "@/composables/useRepoImport";
 
 const repo = useRepoImport();
+
+/** 源选项（模板直接遍历，避免在模板里硬编码按钮——增删源只改 constants） */
+const sourceOptions = TASK_REPO_SOURCES;
 
 /** 图片加载失败的任务 id 集合：缩略图/大图统一回退占位 */
 const brokenImages = ref(new Set<string>());
@@ -83,20 +91,35 @@ watch(
 
 <template>
   <Modal :open="repo.repoImport.value.visible" title="从云端仓库导入任务" size="xl" @close="repo.closeRepoImport">
-    <div class="repo-import-source">
-      <span class="repo-source-label">源：</span>
-      <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'github' }" @click="repo.selectRepoSource('github')">GitHub</button>
-      <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'gitee' }" @click="repo.selectRepoSource('gitee')">Gitee</button>
-      <button class="btn btn-sm" :class="{ active: repo.repoImport.value.source === 'custom' }" @click="repo.selectRepoSource('custom')">自定义</button>
-      <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
-        <div class="form-group form-group--flush"><input v-model="repo.repoImport.value.url" type="text" placeholder="输入远程索引 URL" /></div>
+    <!-- 来源选择器与「加载索引」同行：点它会用哪个源，一看便知 -->
+    <div class="repo-import-toolbar">
+      <div class="repo-import-field">
+        <span class="repo-source-label">来源</span>
+        <div class="segmented" role="group" aria-label="任务来源">
+          <button
+            v-for="opt in sourceOptions"
+            :key="opt.id"
+            type="button"
+            :class="{ active: repo.repoImport.value.source === opt.id }"
+            @click="repo.selectRepoSource(opt.id)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
       </div>
-    </div>
-    <div class="repo-import-action">
       <button class="btn btn-primary btn-sm" @click="repo.fetchRepoIndex()" :disabled="repo.repoImport.value.loading">
+        <IconApp :name="repo.repoImport.value.loading ? 'refresh' : 'download'" class="icon-sm" :class="{ spin: repo.repoImport.value.loading }" />
         {{ repo.repoImport.value.loading ? '加载中...' : '加载索引' }}
       </button>
     </div>
+    <!-- 来源说明：「国内用户建议用 Gitee」的提示由 TASK_REPO_SOURCES 的 hint 承载，
+         自定义源无 hint 故整行不渲染 -->
+    <p v-if="repo.currentSource.value.hint" class="repo-source-hint">{{ repo.currentSource.value.hint }}</p>
+
+    <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
+      <div class="form-group form-group--flush"><input v-model="repo.repoImport.value.url" type="text" placeholder="输入远程索引 URL" /></div>
+    </div>
+
     <div v-if="repo.repoImport.value.error" class="repo-import-error">{{ repo.repoImport.value.error }}</div>
     <div v-if="repo.repoImport.value.tasks.length > 0" class="repo-import-search">
       <div class="form-group form-group--flush"><input v-model="repo.repoImport.value.searchQuery" type="text" placeholder="搜索任务..." /></div>
@@ -152,13 +175,24 @@ watch(
         <div v-else class="repo-detail-empty">点击左侧任务查看登录页截图</div>
       </div>
     </div>
-    <div v-else-if="!repo.repoImport.value.loading" class="repo-import-hint">
-      <p>点击「加载索引」从远程仓库获取任务列表。</p>
-      <p>你也可以 <a :href="repo.repoImport.value.url" target="_blank" rel="noopener">直接查看仓库</a>。</p>
+    <div v-else-if="!repo.repoImport.value.loading" class="empty-state empty-state--dashed repo-import-hint">
+      <IconApp name="globe-grid" :stroke-width="1.5" />
+      <strong class="empty-title">尚未加载任务列表</strong>
+      <span class="empty-desc">点击上方「加载索引」，从任务仓库获取可导入的任务。</span>
+      <!-- 指向仓库**主页**而非用户手填的索引地址：索引地址是给程序 GET 的 raw JSON，
+           此前把它当作可读页面链接，点开是一屏 JSON 而不是仓库首页 -->
+      <div class="empty-actions">
+        <a :href="repo.sourceHomeUrl.value" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">
+          <IconApp name="globe" class="icon-sm" />
+          直接查看仓库
+        </a>
+      </div>
     </div>
     <template #footer>
       <button v-if="repo.repoImport.value.selected" class="btn btn-primary btn-sm" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">导入此任务</button>
-      <span v-else class="repo-footer-hint">点击左侧任务查看详情后导入</span>
+      <!-- 列表为空时左侧根本没有可点的任务，这句引导会指向不存在的东西 -->
+      <span v-else-if="repo.repoImport.value.tasks.length" class="repo-footer-hint">点击左侧任务查看详情后导入</span>
+      <span v-else class="repo-footer-hint">本页任务来自社区仓库，导入前请核对内容</span>
     </template>
   </Modal>
 
@@ -181,11 +215,20 @@ watch(
 </template>
 
 <style scoped>
-.repo-import-source { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-.repo-source-label { font-size: var(--text-md); color: var(--text-secondary); }
-.repo-import-source .btn.active { background: var(--accent); color: var(--on-accent); }
-.repo-custom-url { width: 100%; margin-top: 8px; }
-.repo-import-action { margin-bottom: 12px; }
+/* 工具条：来源选择器与「加载索引」同行，前者左、后者右 */
+.repo-import-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.repo-import-field { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.repo-source-label { font-size: var(--text-md); color: var(--text-secondary); font-weight: 500; }
+/* 来源补充说明（Gitee 更快 / GitHub 可能慢）：与工具条同样式的次级文字，不抢视线 */
+.repo-source-hint { margin: 0 0 12px; font-size: var(--text-sm); color: var(--text-muted); line-height: 1.5; }
+.repo-custom-url { margin-bottom: 12px; }
 .repo-import-error { color: var(--error); font-size: var(--text-md); margin-bottom: 8px; }
 .repo-import-search { margin-bottom: 12px; }
 .repo-import-body { display: flex; gap: 12px; min-height: 0; }
@@ -216,7 +259,14 @@ watch(
 /* 列表弹窗 footer 为选中任务的操作区：有选中=导入按钮，无选中=引导文案 */
 .repo-footer-hint { color: var(--text-tertiary); font-size: var(--text-sm); }
 .repo-import-empty { text-align: center; color: var(--text-tertiary); padding: 24px; }
-.repo-import-hint { color: var(--text-secondary); font-size: var(--text-md); }
-.repo-import-hint a { color: var(--accent); }
+/* 空态复用全局 .empty-state--dashed（结构见 misc.css）：虚线框表达"待填充"，
+   并为「直接查看仓库」留出可点区域。此处只复位整体透明度与收敛文字宽度，
+   不改通用外观——.empty-state 默认 opacity:0.8 会把里面的按钮一起做旧，
+   而这里有真按钮，故复位为 1，改由 .empty-desc 的色值承担弱化。
+   （scoped 选择器编译后带 [data-v-*]，特异性高于全局单类，覆盖可靠且不受
+   样式表注入顺序影响。） */
+.repo-import-hint { text-align: center; opacity: 1; }
+.repo-import-hint .empty-desc { max-width: 34em; line-height: 1.6; }
+
 .repo-disclaimer-warn { color: var(--error); }
 </style>

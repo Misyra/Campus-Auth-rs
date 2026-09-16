@@ -6,8 +6,12 @@
 import { describe, expect, it } from "vitest";
 import {
   channelNeedsRuntimeEnvironment,
+  HTTP_CRYPTO_BUILTINS,
   HTTP_METHOD_OPTIONS,
+  httpConfigGaps,
+  httpTestOutcomeHint,
   httpTestOutcomeLabel,
+  isCredentialExposedViaGet,
   loginChannelLabel,
   loginChannelShortLabel,
 } from "./loginChannel";
@@ -65,5 +69,106 @@ describe("channelNeedsRuntimeEnvironment", () => {
     expect(channelNeedsRuntimeEnvironment(undefined)).toBe(true);
     expect(channelNeedsRuntimeEnvironment("")).toBe(true);
     expect(channelNeedsRuntimeEnvironment("something-else")).toBe(true);
+  });
+});
+
+describe("httpTestOutcomeHint", () => {
+  // 标签说明"发生了什么"，hint 说明"该改哪里"——后者是用户从失败走向成功的
+  // 唯一指引，缺了它用户只会反复重试同一个错配置
+  it("每个可映射 outcome 都给出针对性的下一步", () => {
+    const hinted = [
+      "success",
+      "invalid_credential",
+      "assertion_failed",
+      "network_error",
+      "unknown_error",
+      "cancelled",
+    ].map((o) => httpTestOutcomeHint(o));
+    for (const hint of hinted) {
+      expect(hint.length).toBeGreaterThan(10);
+    }
+    // 不同结论必须给出不同指引（复制粘贴导致文案串位是最容易犯的错）
+    expect(new Set(hinted).size).toBe(hinted.length);
+  });
+
+  it("「响应恒 200」门户的坑在未命中成功标识时被点名", () => {
+    expect(httpTestOutcomeHint("assertion_failed")).toContain("200");
+  });
+
+  it("未知/缺失 outcome 回落通用指引而非空白", () => {
+    expect(httpTestOutcomeHint(undefined)).toBeTruthy();
+    expect(httpTestOutcomeHint("navigation_timeout")).toBeTruthy();
+  });
+});
+
+describe("httpConfigGaps", () => {
+  it("三项齐备时无缺口", () => {
+    expect(
+      httpConfigGaps({ username: "20230001", password: "pw", http_url: "http://10.0.0.1/login" }),
+    ).toEqual([]);
+  });
+
+  it("按「账号 → 密码 → 请求地址」顺序列出缺口（与向导步骤顺序一致）", () => {
+    expect(httpConfigGaps({})).toEqual(["账号", "密码", "请求地址"]);
+    expect(httpConfigGaps({ username: "u" })).toEqual(["密码", "请求地址"]);
+    expect(httpConfigGaps({ username: "u", password: "p" })).toEqual(["请求地址"]);
+  });
+
+  it("已保存方案不把空密码算作缺口（后端按 profile_id 回退本机已保存凭据）", () => {
+    expect(
+      httpConfigGaps(
+        { username: "u", password: "", http_url: "http://10.0.0.1/login" },
+        { hasSavedProfile: true },
+      ),
+    ).toEqual([]);
+    // 同一输入在未保存方案下必须报缺密码——否则用户点测试只会拿到后端的 400
+    expect(
+      httpConfigGaps(
+        { username: "u", password: "", http_url: "http://10.0.0.1/login" },
+        { hasSavedProfile: false },
+      ),
+    ).toEqual(["密码"]);
+  });
+
+  it("纯空白按缺失处理", () => {
+    expect(httpConfigGaps({ username: "  ", password: "\t", http_url: " " })).toEqual([
+      "账号",
+      "密码",
+      "请求地址",
+    ]);
+  });
+});
+
+describe("isCredentialExposedViaGet", () => {
+  it("GET 且地址含 {password} 时判为暴露", () => {
+    expect(isCredentialExposedViaGet("GET", "http://10.0.0.1/login?p={password}")).toBe(true);
+  });
+
+  it("POST 不暴露（凭据在请求体里）", () => {
+    expect(isCredentialExposedViaGet("POST", "http://10.0.0.1/login?p={password}")).toBe(false);
+  });
+
+  it("GET 但地址不含密码时不误报", () => {
+    expect(isCredentialExposedViaGet("GET", "http://10.0.0.1/login?u={username}")).toBe(false);
+    expect(isCredentialExposedViaGet("GET", undefined)).toBe(false);
+    expect(isCredentialExposedViaGet(undefined, "http://10.0.0.1/?p={password}")).toBe(false);
+  });
+});
+
+describe("HTTP_CRYPTO_BUILTINS", () => {
+  // 前端向用户宣告的可用函数清单必须与执行器 register_builtins 一致；
+  // 少列会让用户以为函数不存在（改动脚本绕远路），多列会让脚本报错
+  it("与执行器注册的全局函数一一对应", () => {
+    expect([...HTTP_CRYPTO_BUILTINS]).toEqual([
+      "md5(text)",
+      "sha1(text)",
+      "sha256(text)",
+      "hmac_sha256(key, data)",
+      "base64_encode(text)",
+      "base64_decode(text)",
+      "hex_encode(text)",
+      "url_encode(text)",
+      "now_ms()",
+    ]);
   });
 });

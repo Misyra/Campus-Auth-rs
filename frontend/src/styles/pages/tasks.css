@@ -1,6 +1,6 @@
 /* 任务页 Tab 栏：复用设置页页签外观。设置页有 6 个页签，均分整条卡片是合适的；
-   本页只有 3 个，均分会让每个页签宽到 590px+。而沿用「满宽卡片 + 内容宽页签」又会在
-   右侧空出 2/3 的卡片（此前靠 margin-left:auto 把 AI 入口推到最右，那个入口移入
+   本页只有 4 个，均分会让每个页签宽到 440px+。而沿用「满宽卡片 + 内容宽页签」又会在
+   右侧空出大段卡片（此前靠 margin-left:auto 把 AI 入口推到最右，那个入口移入
    页签后空白就失去了依托）。故让卡片收缩到内容宽，成为一条紧凑的分段控件。 */
 .tasks-tabs {
   margin-bottom: var(--space-md);
@@ -8,9 +8,19 @@
   max-width: 100%;
 }
 
+/* min-width 保底 120px：文案较短的「脚本」不塌成小方块。页签宽度随文案自适应，
+   故「AI 生成浏览器任务」这类长标签不会挤压其它页签。 */
 .tasks-tabs .settings-tab {
   flex: 0 1 auto;
   min-width: 120px;
+}
+
+/* 文案不换行：本页出现 9 字的「AI 生成浏览器任务」后，等分/压缩宽度会把
+   「浏览器任务」折成「浏览器任 / 务」这类断词（实测 760px 下四栏全部折行）。
+   窄屏改为让容器换行成多行（.settings-tabs 已有 flex-wrap: wrap），
+   而不是把文案压断。 */
+.tasks-tabs .settings-tab span {
+  white-space: nowrap;
 }
 
 .tasks-grid {
@@ -511,13 +521,10 @@
   gap: var(--space-sm);
 }
 
-/* 仓库导入（源标签） */
-.repo-source-label {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  margin-right: 2px;
-  flex-shrink: 0;
-}
+/* 仓库导入的 .repo-source-label 已收回 RepoImportModals.vue 的 scoped 样式：
+   此前全局与组件各写一份且取值不同（--text-sm/--text-muted vs --text-md/--text-secondary），
+   实际以 scoped 为准，全局那条的 font-size/color 从未生效、只剩 margin-right 一半在起作用。
+   唯一消费点在该组件内，故删除以免继续漂移。 */
 
 /* 紧凑图标按钮尺寸已移入 components/btn.css（该组合还被 ProfilesView 的检测结果面板
    使用，属通用按钮修饰而非任务页专属）。 */

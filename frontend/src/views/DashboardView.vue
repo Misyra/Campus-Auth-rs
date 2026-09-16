@@ -4,7 +4,7 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue"
 import { useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
 import { useEnvironment } from "@/composables/useEnvironment";
-import { useConfig } from "@/composables/useConfig";
+import { useProfiles } from "@/composables/useProfiles";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
 import { throttleRaf } from "@/utils/debounce";
@@ -20,14 +20,19 @@ const logs = useLogs();
 const ui = useUi();
 const router = useRouter();
 const { envStatus, refreshEnv } = useEnvironment();
-const config = useConfig();
+const { profiles, activeProfileId } = useProfiles();
 
 // 直连请求渠道在 Rust 进程内完成登录，不拉起 Python Worker 与浏览器，
 // 故环境未就绪与之无关——否则免 Python/浏览器的用户会一直看到无意义的
-// "环境未就绪"横幅。渠道来源见 GET /api/config 的 login_channel（扁平响应）。
+// "环境未就绪"横幅。
+// 渠道取自活跃方案的摘要（ProfileSummary.login_channel）：它已是方案字段，
+// 不再随 GET /api/config 的凭据投影下发。
+const activeChannel = computed(
+  () => profiles.value[activeProfileId.value]?.login_channel ?? "browser",
+);
 const showEnvBanner = computed(
   () =>
-    channelNeedsRuntimeEnvironment(config.config.credentials.login_channel) &&
+    channelNeedsRuntimeEnvironment(activeChannel.value) &&
     envStatus.value != null &&
     !envStatus.value.capability_ready,
 );
@@ -240,7 +245,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
               <span>暂无登录记录</span>
               <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
               <div class="empty-actions">
-                <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'settings-account' })">去配置账号</button>
+                <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'profiles' })">去配置账号</button>
                 <button class="btn btn-sm btn-primary" type="button" :disabled="s.busy.login || s.busy.loginCooldown" @click="void ui.manualLogin()">
                   <IconApp name="log-in" />
                   {{ s.busy.login ? '登录中...' : '手动登录' }}

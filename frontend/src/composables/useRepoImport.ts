@@ -9,13 +9,16 @@ import type { RepoTask } from "../api/types";
 import { repoApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
+import { TASK_REPO_INDEX_URL, TASK_REPO_SOURCES, type TaskRepoSourceId } from "../utils/constants";
 import { useToast } from "./useToast";
 import { useTasks } from "./useTasks";
 
 const repoImport = ref({
   visible: false,
-  url: "https://raw.githubusercontent.com/Misyra/campus-auth-tasks/master/index.json",
-  source: "github" as "github" | "gitee" | "custom",
+  url: TASK_REPO_INDEX_URL,
+  source: "github" as TaskRepoSourceId,
+  /** 用户手输的自定义索引地址：切走再切回时恢复，避免误点一下就把已填内容冲掉 */
+  customUrl: "",
   loading: false,
   error: "",
   tasks: [] as RepoTask[],
@@ -34,6 +37,14 @@ const filteredRepoTasks = computed(() => {
   });
 });
 
+/** 当前源的选项（含说明文案）；未知源回退到自定义，避免取到 undefined */
+const currentSource = computed(
+  () => TASK_REPO_SOURCES.find((s) => s.id === repoImport.value.source) ?? TASK_REPO_SOURCES[TASK_REPO_SOURCES.length - 1],
+);
+
+/** 当前源的「直接查看仓库」地址：预设源用仓库主页，自定义源回退成用户自填的地址 */
+const sourceHomeUrl = computed(() => currentSource.value.homeUrl || repoImport.value.url.trim());
+
 const { toastOnly } = useToast();
 
 // 索引拉取序号（epoch）守卫：只有最新一次请求可以写状态。
@@ -42,13 +53,21 @@ const { toastOnly } = useToast();
 // 任务当 B 源导入。与 useConfig 的 saveSeq / fetchConfigEpoch 同口径。
 let fetchIndexSeq = 0;
 
-/** 切换仓库源并回填对应预设索引地址（自定义源保留用户手输的 URL） */
-function selectRepoSource(source: "github" | "gitee" | "custom") {
+/** 切换仓库源并回填对应预设索引地址（自定义源恢复上次手输的 URL） */
+function selectRepoSource(source: TaskRepoSourceId) {
+  // 离开自定义源前先记住手输内容：否则误点一下 GitHub 再点回来，已填的地址就没了
+  if (repoImport.value.source === "custom" && source !== "custom") {
+    repoImport.value.customUrl = repoImport.value.url;
+  }
   repoImport.value.source = source;
-  if (source === "github") {
-    repoImport.value.url = "https://raw.githubusercontent.com/Misyra/campus-auth-tasks/master/index.json";
-  } else if (source === "gitee") {
-    repoImport.value.url = "https://raw.giteeusercontent.com/Misyra/campus-auth-tasks/raw/master/index.gitee.json";
+  // 预设地址取自 TASK_REPO_SOURCES，不在此处各写一份：
+  // 同一 host 曾在多处硬编码，正是「分享适配」指向错仓库那类缺陷的成因
+  const preset = TASK_REPO_SOURCES.find((s) => s.id === source);
+  if (preset?.indexUrl) {
+    repoImport.value.url = preset.indexUrl;
+  } else if (repoImport.value.customUrl) {
+    // 仅在确实存过手输地址时回填：否则会把输入框清空，反而比保留上一个源的地址更差
+    repoImport.value.url = repoImport.value.customUrl;
   }
 }
 
@@ -160,6 +179,8 @@ export function useRepoImport() {
   return {
     repoImport,
     filteredRepoTasks,
+    currentSource,
+    sourceHomeUrl,
     selectRepoSource,
     showRepoImport,
     closeRepoImport,

@@ -17,24 +17,11 @@ declare module "vue-router" {
 const routes = [
   { path: "/", name: "dashboard", meta: { title: "仪表盘" }, component: () => import("@/views/DashboardView.vue") },
   {
-    path: "/settings",
-    name: "settings",
-    meta: { title: "设置" },
-    component: () => import("@/views/SettingsView.vue"),
-    redirect: { name: "settings-account" },
-    children: [
-      { path: "", redirect: { name: "settings-account" } },
-      { path: "account", name: "settings-account", meta: { title: "设置 · 账号" }, component: () => import("@/views/settings/AccountSettings.vue") },
-      { path: "monitor", name: "settings-monitor", meta: { title: "设置 · 网络检测" }, component: () => import("@/views/settings/MonitorSettings.vue") },
-      { path: "browser", name: "settings-browser", meta: { title: "设置 · 浏览器" }, component: () => import("@/views/settings/BrowserSettings.vue") },
-      { path: "tasks", name: "settings-tasks", meta: { title: "设置 · 任务与环境" }, component: () => import("@/views/settings/TaskEnvironmentSettings.vue") },
-      // 旧「环境」Tab 深链与书签重定向到合并后的 Tab
-      { path: "environment", redirect: { name: "settings-tasks" } },
-      { path: "system", name: "settings-system", meta: { title: "设置 · 系统" }, component: () => import("@/views/settings/SystemSettings.vue") },
-      { path: "network", name: "settings-network", meta: { title: "设置 · 网络与更新" }, component: () => import("@/views/settings/NetworkSettings.vue") },
-    ],
+    path: "/profiles",
+    name: "profiles",
+    meta: { title: "配置方案" },
+    component: () => import("@/views/ProfilesView.vue"),
   },
-  { path: "/profiles", name: "profiles", meta: { title: "配置方案" }, component: () => import("@/views/ProfilesView.vue") },
   {
     path: "/tasks",
     name: "tasks",
@@ -44,15 +31,40 @@ const routes = [
     children: [
       { path: "", name: "tasks-browser", meta: { title: "任务 · 浏览器任务" }, component: () => import("@/views/tasks/BrowserTasksPanel.vue") },
       { path: "scripts", name: "tasks-scripts", meta: { title: "任务 · 脚本" }, component: () => import("@/views/tasks/ScriptsPanel.vue") },
-      { path: "ai", name: "tasks-ai", meta: { title: "任务 · AI 生成" }, component: () => import("@/views/AiTaskView.vue") },
+      // 定时任务原为侧栏独立页，并入任务页：同属「可被触发执行的东西」，
+      // 放在一处免去「任务在哪、计划又在哪」的往返
+      { path: "scheduled", name: "tasks-scheduled", meta: { title: "任务 · 定时任务" }, component: () => import("@/views/ScheduledTasksView.vue") },
+      { path: "ai", name: "tasks-ai", meta: { title: "任务 · AI 生成浏览器任务" }, component: () => import("@/views/AiTaskView.vue") },
     ],
   },
-  // 旧「AI 生成任务」独立页已并入「任务」页第三个 Tab：保留深链与书签重定向
+  {
+    path: "/settings",
+    name: "settings",
+    meta: { title: "设置" },
+    component: () => import("@/views/SettingsView.vue"),
+    redirect: { name: "settings-monitor" },
+    children: [
+      { path: "", redirect: { name: "settings-monitor" } },
+      // 账号/认证地址/登录方式已全部移交「配置方案」页（单一入口）：保留
+      // 旧深链与书签的重定向，避免用户手上的 /settings/account 变成 404
+      { path: "account", redirect: { name: "profiles" } },
+      { path: "monitor", name: "settings-monitor", meta: { title: "设置 · 网络检测" }, component: () => import("@/views/settings/MonitorSettings.vue") },
+      { path: "browser", name: "settings-browser", meta: { title: "设置 · 浏览器" }, component: () => import("@/views/settings/BrowserSettings.vue") },
+      { path: "tasks", name: "settings-tasks", meta: { title: "设置 · 任务与环境" }, component: () => import("@/views/settings/TaskEnvironmentSettings.vue") },
+      // 旧「环境」Tab 深链与书签重定向到合并后的 Tab
+      { path: "environment", redirect: { name: "settings-tasks" } },
+      { path: "system", name: "settings-system", meta: { title: "设置 · 系统" }, component: () => import("@/views/settings/SystemSettings.vue") },
+      { path: "network", name: "settings-network", meta: { title: "设置 · 网络与更新" }, component: () => import("@/views/settings/NetworkSettings.vue") },
+      // 外观原为侧栏独立页，并入设置页：它是纯本机显示偏好，与其余设置同类
+      { path: "appearance", name: "settings-appearance", meta: { title: "设置 · 外观" }, component: () => import("@/views/AppearanceView.vue") },
+    ],
+  },
+  // 旧「AI 生成任务」独立页已并入「任务」页 Tab：保留深链与书签重定向
   { path: "/ai-task", redirect: { name: "tasks-ai" } },
-  { path: "/scheduled", name: "scheduled", meta: { title: "定时任务" }, component: () => import("@/views/ScheduledTasksView.vue") },
+  { path: "/scheduled", redirect: { name: "tasks-scheduled" } },
   // 旧「自定义脚本」页已并入「任务」页的脚本 Tab：保留深链与书签重定向
   { path: "/scripts", redirect: { name: "tasks-scripts" } },
-  { path: "/appearance", name: "appearance", meta: { title: "外观" }, component: () => import("@/views/AppearanceView.vue") },
+  { path: "/appearance", redirect: { name: "settings-appearance" } },
   { path: "/about", name: "about", meta: { title: "关于" }, component: () => import("@/views/AboutView.vue") },
   // 兜底 404 路由：匹配所有未定义路径
   { path: "/:pathMatch(.*)*", name: "not-found", meta: { title: "页面未找到" }, component: () => import("@/views/NotFoundView.vue") },

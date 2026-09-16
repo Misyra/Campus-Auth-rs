@@ -1,10 +1,16 @@
 /**
- * useRepoImport 点选与截图字段的单元测试。
+ * useRepoImport 点选、截图字段与来源切换的单元测试。
  * 覆盖：列表点选写入 selected（不触发导入）、打开/加载索引时复位 selected、
- * 任务刷新后点选失效自动清空。
+ * 任务刷新后点选失效自动清空、来源切换回填预设索引地址与仓库主页地址。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { RepoTask } from "../api/types";
+import {
+  TASK_REPO_INDEX_URL,
+  TASK_REPO_INDEX_URL_GITEE,
+  TASK_REPO_URL,
+  TASK_REPO_URL_GITEE,
+} from "../utils/constants";
 
 vi.mock("../api", () => ({
   repoApi: {
@@ -64,6 +70,59 @@ describe("仓库导入点选预览", () => {
     await repo.fetchRepoIndex();
     expect(repo.repoImport.value.selected).toBeNull();
     expect(repo.repoImport.value.tasks).toHaveLength(1);
+  });
+});
+
+describe("来源切换", () => {
+  it("切到 Gitee 回填镜像索引地址，切回 GitHub 回填原地址", () => {
+    repo.selectRepoSource("gitee");
+    expect(repo.repoImport.value.url).toBe(TASK_REPO_INDEX_URL_GITEE);
+    repo.selectRepoSource("github");
+    expect(repo.repoImport.value.url).toBe(TASK_REPO_INDEX_URL);
+  });
+
+  it("切到自定义保留已填的 URL，不被清空或覆盖", () => {
+    repo.repoImport.value.url = "https://example.com/my-index.json";
+    repo.selectRepoSource("custom");
+    expect(repo.repoImport.value.url).toBe("https://example.com/my-index.json");
+  });
+
+  it("自定义源切走再切回，手输地址仍保留（不因误点一下就丢）", () => {
+    repo.selectRepoSource("custom");
+    repo.repoImport.value.url = "https://example.com/mine.json";
+    repo.selectRepoSource("gitee");
+    expect(repo.repoImport.value.url).toBe(TASK_REPO_INDEX_URL_GITEE);
+    repo.selectRepoSource("custom");
+    expect(repo.repoImport.value.url).toBe("https://example.com/mine.json");
+  });
+
+  it("「直接查看仓库」在预设源下给仓库主页，而非 raw 索引地址", () => {
+    // 真实缺陷：此前直接用索引地址，点开是一屏 raw JSON 而不是仓库页面
+    repo.selectRepoSource("github");
+    expect(repo.sourceHomeUrl.value).toBe(TASK_REPO_URL);
+    repo.selectRepoSource("gitee");
+    expect(repo.sourceHomeUrl.value).toBe(TASK_REPO_URL_GITEE);
+    expect(repo.sourceHomeUrl.value).not.toContain("raw.");
+  });
+
+  it("自定义源下「直接查看仓库」回退为用户自填的地址", () => {
+    repo.selectRepoSource("custom");
+    repo.repoImport.value.url = "https://example.com/idx.json";
+    expect(repo.sourceHomeUrl.value).toBe("https://example.com/idx.json");
+  });
+
+  it("当前源的说明文案随来源变化，自定义源无说明", () => {
+    repo.selectRepoSource("gitee");
+    expect(repo.currentSource.value.hint).toContain("国内");
+    repo.selectRepoSource("custom");
+    expect(repo.currentSource.value.hint).toBe("");
+  });
+
+  it("未知源回退到自定义项，不产生 undefined", () => {
+    // 防御：类型收窄只在前端生效，localStorage 里的旧值等仍可能给出意外字符串
+    repo.repoImport.value.source = "svn" as never;
+    expect(repo.currentSource.value?.id).toBe("custom");
+    expect(repo.sourceHomeUrl.value).toBe(repo.repoImport.value.url);
   });
 });
 

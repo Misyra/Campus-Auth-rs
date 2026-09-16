@@ -21,6 +21,67 @@ export const TIMING = {
 /** 重定向模式默认触发地址：与 Windows NCSI 同源的明文探测页，劫持型校园网实测会被网关 302 */
 export const DEFAULT_TRIGGER_URL = "http://www.msftconnecttest.com/connecttest.txt";
 
+/**
+ * 任务仓库坐标（单一事实源）。
+ *
+ * 任务由**独立仓库**承载，与主程序仓库不是一个：「仓库导入」读它的 `index.json`、
+ * 录制器脚本引导用户把任务提交到它的 Issues、「分享适配」按钮也指向它。此前
+ * 「分享适配」误指主程序仓库（`Campus-Auth-rs`），点过去找不到任何可分享的任务。
+ * 集中在此以免三处各写一份 host/owner 而再次漂移。
+ */
+export const TASK_REPO_OWNER = "Misyra";
+export const TASK_REPO_NAME = "campus-auth-tasks";
+/** 仓库主页（「分享适配」「任务仓库 →」等人类可点击入口） */
+export const TASK_REPO_URL = `https://github.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}`;
+/** GitHub 源的索引地址（仓库导入预设源） */
+export const TASK_REPO_INDEX_URL = `https://raw.githubusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/master/index.json`;
+/** Gitee 镜像源的索引地址 */
+export const TASK_REPO_INDEX_URL_GITEE = `https://raw.giteeusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/raw/master/index.gitee.json`;
+/** Gitee 镜像的仓库主页（浏览用，非索引地址） */
+export const TASK_REPO_URL_GITEE = `https://gitee.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}`;
+
+/** 仓库导入的源类型：两个预设镜像 + 用户自填地址 */
+export type TaskRepoSourceId = "github" | "gitee" | "custom";
+
+/**
+ * 仓库导入的「源」选项表（单一事实源）。
+ *
+ * 三个字段各有用途，**不可合并**：`indexUrl` 是给程序 GET 的 raw JSON 地址，
+ * `homeUrl` 是给人点开浏览的仓库页面——真实缺陷：空态里「直接查看仓库」原先把
+ * `indexUrl` 当作可读页面链接，点开是一屏 raw JSON 而不是仓库首页。
+ * 预设源的 `homeUrl` 只在「自定义」时为空（用户自填的地址未必有对应主页）。
+ */
+export const TASK_REPO_SOURCES: readonly {
+  id: TaskRepoSourceId;
+  label: string;
+  /** 该源在「源」选择器旁的补充说明（空则不显示） */
+  hint: string;
+  indexUrl: string;
+  homeUrl: string;
+}[] = [
+  {
+    id: "github",
+    label: "GitHub",
+    hint: "国内访问可能较慢或加载失败，卡住时请改用 Gitee 镜像",
+    indexUrl: TASK_REPO_INDEX_URL,
+    homeUrl: TASK_REPO_URL,
+  },
+  {
+    id: "gitee",
+    label: "Gitee",
+    hint: "国内访问更快，推荐国内用户使用",
+    indexUrl: TASK_REPO_INDEX_URL_GITEE,
+    homeUrl: TASK_REPO_URL_GITEE,
+  },
+  {
+    id: "custom",
+    label: "自定义",
+    hint: "",
+    indexUrl: "",
+    homeUrl: "",
+  },
+];
+
 export const LIMITS = {
   LOG_MAX_ENTRIES: 100,
   FILE_UPLOAD_MAX: 5 * 1024 * 1024,
@@ -133,9 +194,10 @@ export const DEFAULT_CONFIG: Config = {
     // bind_interface_name: "",
   },
   pause: {
-    // 后端 PauseSettings 派生 Default：默认不启用（enabled=false），此处镜像后端
-    enabled: false,
-    start_hour: 0,
+    // 默认启用夜间暂停（23:00–06:00，跨天）：宿舍定时断网时段反复重连无意义，
+    // 与运行模式「默认模式」预设的取值一致（镜像后端 PauseSettings 的 Default）
+    enabled: true,
+    start_hour: 23,
     start_minute: 0,
     end_hour: 6,
     end_minute: 0,
@@ -149,26 +211,13 @@ export const DEFAULT_CONFIG: Config = {
     max_retries: 3,
     retry_interval: 5,
   },
-  credentials: {
-    username: "",
-    password: "",
-    auth_url: "",
-    trigger_url: "",
-    isp: "",
-    // 与后端 ProfileData 默认值一致（加载失败兜底显示用，正常以服务端下发为准）
-    active_task: "",
-    login_channel: "browser",
-    http_method: "GET",
-    http_url: "",
-    http_headers: "",
-    http_body: "",
-    http_success_pattern: "",
-    http_failure_pattern: "",
-    http_crypto_script: "",
-  },
+  // credentials 段已移除：账号/认证地址/登录方式属 Profile，统一在「配置方案」页
+  // 编辑（DEFAULT_PROFILE_SETTINGS 是其默认值来源）。此处保留全局设置默认值。
   app_settings: {
     auto_start_browser: true,
-    startup_action: "monitor",
+    // 与后端 AppSettings::default 一致（2026-09-16 起默认 none）：启动不自动开始监测。
+    // 这是加载失败时的兜底显示值，正常以服务端下发为准。
+    startup_action: "none",
     runtime_mode: "full",
     port: 50721,
     autostart_enabled: false,
@@ -190,14 +239,17 @@ export const DEFAULT_CONFIG: Config = {
   },
 };
 
-/** 设置页 Tab 清单（SettingsView 消费的单一来源；hint 作为 Tab 的悬停提示，6 Tab 均衡版） */
+/** 设置页 Tab 清单（SettingsView 消费的单一来源；hint 作为 Tab 的悬停提示）。
+ *
+ * **只列 `GlobalConfig` 域的设置**：账号/认证地址/登录方式/直连参数都是方案字段，
+ * 统一在「配置方案」页编辑（单一入口），此处不再有「账号」Tab。 */
 export const SETTINGS_TABS = [
-  { id: "account", label: "账号", hint: "账号、密码、认证地址与运营商" },
   { id: "monitor", label: "检测", hint: "在线检测、登录重试与暂停时段" },
   { id: "browser", label: "浏览器", hint: "浏览器选择、超时与反检测参数" },
-  { id: "tasks", label: "任务与环境", hint: "任务概览、录制器与 Python 环境、OCR" },
+  { id: "tasks", label: "任务与环境", hint: "Python 环境、录制器与 OCR" },
   { id: "system", label: "系统", hint: "启动行为、日志与界面" },
   { id: "network", label: "网络与更新", hint: "端口、代理、自动更新与维护" },
+  { id: "appearance", label: "外观", hint: "主题、背景与卡片样式" },
 ] as const;
 
 export const DEFAULT_APPEARANCE: Appearance = {
@@ -274,9 +326,17 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
   http_crypto_script: "",
 };
 
+/**
+ * 内置默认浏览器任务 ID。
+ *
+ * 与后端 `crate::tasks::DEFAULT_TASK_ID` 同值：该任务由程序播种（`tasks/browser/default.json`，
+ * 名称「通用登录」），不可删除（后端 `delete_task` 对它返回 `DeleteDefaultTask`）。
+ * 方案的 `active_task` 为空时登录即回退到它（`resolve_task_choice`），故两者等价。
+ */
+export const DEFAULT_TASK_ID = "default";
+
 /** 派生选项（原 app-options.js data 中的静态选项） */
-export const CARRIER_OPTIONS = [
-  { value: "", label: "不选择" },
+export const CARRIER_OPTIONS = [  { value: "", label: "不选择" },
   { value: "移动", label: "移动" },
   { value: "联通", label: "联通" },
   { value: "电信", label: "电信" },

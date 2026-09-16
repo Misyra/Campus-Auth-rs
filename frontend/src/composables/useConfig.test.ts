@@ -82,16 +82,12 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(false);
   });
 
-  it("保存新密码后不会被密码 watcher 重新标记为未保存", async () => {
+  it("密码不再属于全局设置：useConfig 不暴露 password 字段", async () => {
     await config.fetchConfig();
-    config.password.setValue("new-secret");
-    await flushWatch();
-    expect(config.dirty.value).toBe(true);
-
-    await config.saveConfig();
-    await flushWatch();
-    expect(patchMock).toHaveBeenCalledTimes(1);
-    expect(config.dirty.value).toBe(false);
+    // 账号字段已迁往方案页（useProfiles），此处暴露 password 意味着又出现了
+    // 第二份可写副本——正是「账号混在全局保存栏」导致顺带落盘的根源
+    expect("password" in config).toBe(false);
+    expect("clearPassword" in config).toBe(false);
   });
 
   it("日志级别走独立即时保存 API，不把表单误标为已变更", async () => {
@@ -112,54 +108,46 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(true);
   });
 
-  it("登录渠道与直连参数随设置读写往返（设置页与方案编辑器共用同一组件）", async () => {
-    // 后端未回传该字段时（老版本）回落默认值，不应出现 undefined
+  it("设置保存载荷只含全局设置，绝不携带方案凭据字段", async () => {
+    // 回归（known-issues #23 E1）：此前载荷带着 username/auth_url/login_channel 等
+    // 13 个方案字段，任意 Tab 的「立即保存」都会把活跃方案的凭据一并落盘——
+    // 账号页「自动检测」填入的未确认候选地址就是这样被静默持久化的。
     await config.fetchConfig();
-    expect(config.config.credentials.login_channel).toBe("browser");
-    expect(config.config.credentials.http_method).toBe("GET");
-
-    // 后端回传直连配置时如实回填
-    fetchMock.mockResolvedValue({
-      username: "user",
-      login_channel: "http",
-      http_method: "POST",
-      http_url: "http://10.0.0.1/login",
-      http_body: "u={username}&p={password}",
-      http_success_pattern: "登录成功",
-    });
-    await config.fetchConfig();
-    expect(config.config.credentials.login_channel).toBe("http");
-    expect(config.config.credentials.http_method).toBe("POST");
-    expect(config.config.credentials.http_url).toBe("http://10.0.0.1/login");
-
-    // 改动渠道构成未保存变更，且随保存载荷提交（后端按扁平键写入活跃 Profile）
-    config.config.credentials.login_channel = "browser";
+    config.config.monitor.enable_tcp_check = false;
     await flushWatch();
-    expect(config.dirty.value).toBe(true);
     await config.saveConfig();
+
     const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(payload.login_channel).toBe("browser");
-    expect(payload.http_url).toBe("http://10.0.0.1/login");
-    // 不得嵌进 credentials 子对象（后端按扁平结构读取）
-    expect(payload.credentials).toBeUndefined();
+    // 全局字段照常提交
+    expect(payload.monitor).toBeDefined();
+    expect(payload.browser).toBeDefined();
+    // 方案域字段一个都不能出现
+    const profileKeys = [
+      "username", "password", "auth_url", "trigger_url", "isp",
+      "active_task", "login_channel", "http_method", "http_url",
+      "http_headers", "http_body", "http_success_pattern",
+      "http_failure_pattern", "http_crypto_script", "clear_password",
+    ];
+    for (const key of profileKeys) {
+      expect(payload, `保存载荷不得包含方案字段 ${key}`).not.toHaveProperty(key);
+    }
   });
 
-  it("方案绑定的浏览器任务随设置读写往返（启用任务按方案绑定）", async () => {
-    // 未回传时回落空串（= 未绑定，登录时后端回退内置默认任务）
+  it("后端仍在扁平响应里回传方案凭据时，本 composable 不接收", async () => {
+    // 后端兼容既有客户端，GET 顶层依旧带 username/auth_url 等；
+    // 若这里接收了，方案数据就再次有了第二个可写入口。
+    fetchMock.mockResolvedValue({
+      username: "user",
+      auth_url: "http://portal.example",
+      login_channel: "http",
+      http_url: "http://10.0.0.1/login",
+      active_task: "hust",
+      monitor: { enable_tcp_check: true },
+    });
     await config.fetchConfig();
-    expect(config.config.credentials.active_task).toBe("");
-
-    fetchMock.mockResolvedValue({ username: "user", active_task: "hust" });
-    await config.fetchConfig();
-    expect(config.config.credentials.active_task).toBe("hust");
-
-    // 在账号页改选任务后应进入未保存状态并随载荷提交
-    config.config.credentials.active_task = "sctu-eportal";
-    await flushWatch();
-    expect(config.dirty.value).toBe(true);
-    await config.saveConfig();
-    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(payload.active_task).toBe("sctu-eportal");
+    expect("credentials" in config.config).toBe(false);
+    // 且不因这些字段的存在而误判为未保存
+    expect(config.dirty.value).toBe(false);
   });
 
   it("纯净模式开关回写表单模型，保存时不会被旧值覆盖", async () => {

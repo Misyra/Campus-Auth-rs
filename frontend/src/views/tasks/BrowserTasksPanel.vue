@@ -8,6 +8,7 @@ import { useScripts } from "@/composables/useScripts";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
+import { TASK_REPO_URL } from "@/utils/constants";
 
 const t = useTasks();
 const s = useScripts();
@@ -40,7 +41,10 @@ function closeEditor() { void t.closeTaskEditor(); }
             <IconApp name="globe-grid" class="icon-sm" />
             仓库导入
           </button>
-          <a href="https://github.com/Misyra/Campus-Auth-rs" target="_blank" rel="noopener" class="btn btn-sm" title="分享你的适配方案">
+          <!-- 指向**任务**仓库而非主程序仓库：这一入口的目的是贡献自己适配的登录任务，
+               而任务由独立仓库承载（见 TASK_REPO_URL 的说明）。此前误指主程序仓库，
+               点过去找不到任何可分享的任务。 -->
+          <a :href="TASK_REPO_URL" target="_blank" rel="noopener" class="btn btn-sm" title="把你的登录任务分享到任务仓库，供他人一键导入">
             <IconApp name="share-2" class="icon-sm" />
             分享适配
           </a>

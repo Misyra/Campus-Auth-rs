@@ -3,6 +3,7 @@
 // 键盘可达性对齐 Modal：Esc=取消、Enter=确认、打开时聚焦确认按钮、Tab 循环。
 
 import { nextTick, watch } from "vue";
+import IconApp from "@/components/common/IconApp.vue";
 import { useConfirm } from "../../composables/useConfirm";
 import { lockBodyScroll, unlockBodyScroll } from "../../composables/useBodyScrollLock";
 
@@ -55,7 +56,7 @@ watch(
     <Transition name="modal-fade">
       <div
         v-if="confirmState.visible"
-        class="modal-overlay"
+        class="modal-overlay modal-overlay--confirm"
         tabindex="-1"
       @click.self="resolveConfirm(false)"
       @keydown="onTrapKeydown"
@@ -64,7 +65,19 @@ watch(
     >
       <div class="confirm-dialog" :class="{ danger: confirmState.danger }" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
         <h3 id="confirm-dialog-title" class="confirm-title">{{ confirmState.title }}</h3>
-        <p class="confirm-message">{{ confirmState.message }}</p>
+        <p class="confirm-message" :class="{ 'confirm-message--tight': confirmState.changes.length }">{{ confirmState.message }}</p>
+        <!-- 结构化改动清单：字段名与旧/新值分列着色。旧值弱化、新值强调，
+             使"会变成什么"一眼可见（拼接成整段文本做不到这点） -->
+        <ul v-if="confirmState.changes.length" class="confirm-changes">
+          <li v-for="c in confirmState.changes" :key="c.label" class="confirm-change">
+            <span class="confirm-change-label">{{ c.label }}</span>
+            <span class="confirm-change-values">
+              <span class="confirm-change-from">{{ c.from }}</span>
+              <IconApp name="arrow-right" class="confirm-change-arrow" aria-hidden="true" />
+              <span class="confirm-change-to">{{ c.to }}</span>
+            </span>
+          </li>
+        </ul>
         <div class="confirm-actions">
           <button class="btn btn-secondary" @click="resolveConfirm(false)">{{ confirmState.cancelText }}</button>
           <button

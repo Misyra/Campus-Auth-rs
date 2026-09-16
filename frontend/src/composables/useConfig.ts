@@ -1,7 +1,15 @@
 /**
- * 配置状态与操作（单例）。
+ * 全局设置状态与操作（单例）。
  * 替代原 configData + configMethods + 部分 autostart/OCR/日志级别方法。
  * 修复 P1-12.8：用显式 dirty 标志替代每次 JSON.stringify 全量序列化。
+ *
+ * **边界：本 composable 只承载 `GlobalConfig`（浏览器/检测/重试/日志/应用/更新器）。
+ * 账号、认证地址、登录方式、直连参数都属于 Profile，一律在「配置方案」页编辑
+ * （`useProfiles`），不在此处保留副本。**此前这里有一份 `credentials` 投影 +
+ * 独立 `password` 实例，带来两个实缺陷：① `GET/PATCH /api/config` 把活跃方案的
+ * 凭据摊平在顶层，界面上看似「全局账号」而实际写的是活跃方案，「账号混在全局
+ * 保存栏」导致检测候选地址被任意 Tab 的保存顺带落盘（known-issues #23 E1）；
+ * ② 同一份数据有了设置页与方案页两个可写入口，「改哪边才生效」无从判断。
  */
 
 import { reactive, ref, watch, nextTick } from "vue";
@@ -13,10 +21,8 @@ import { frontendLogger } from "../utils/logger";
 import { createFetchGuard } from "../utils/guards";
 import { useStatus } from "./useStatus";
 import { useToast } from "./useToast";
-import { usePasswordField } from "./usePasswordField";
 
 const config = reactive<Config>(structuredClone(DEFAULT_CONFIG));
-const password = usePasswordField(false);
 const defaultUrlCheckUrls = [...DEFAULT_CONFIG.monitor.url_check_urls];
 const dirty = ref(false);
 const saveFailed = ref(false);
@@ -56,14 +62,8 @@ watch(
   { deep: true, flush: "post" },
 );
 
-// password 是独立的 usePasswordField 实例，不在 config 响应对象内，
-// 需单独监听其 value 变化以触发 dirty（否则仅改密码时 saveConfig 会因 !dirty 提前返回）。
-// 注意：password 是普通对象，password.value 取的是内部 ref 对象本身，
-// 直接写成 `() => password.value` 不会对该 ref 的 .value 建立响应式依赖，导致永不触发。
-// 这里直接以 ref 作为 watch 源（等价于监听 password.value.value）才正确。
-watch(password.value, () => {
-  if (!loadingConfig && !suppressDirty) dirty.value = true;
-});
+// password 曾在此单独监听以触发 dirty。账号字段迁往方案页后本 composable
+// 不再持有密码，无需该监听（方案侧的 dirty 由 useDirtySnapshot 全量快照负责）。
 
 const { busy } = useStatus();
 
@@ -81,26 +81,8 @@ async function fetchConfig(): Promise<void> {
     config.pause = { ...DEFAULT_CONFIG.pause, ...(data.pause || {}) };
     config.logging = { ...DEFAULT_CONFIG.logging, ...(data.logging || {}) };
     config.retry = { ...DEFAULT_CONFIG.retry, ...(data.retry || {}) };
-    config.credentials = {
-      username: data.username ?? "",
-      password: "",
-      auth_url: data.auth_url ?? "",
-      trigger_url: data.trigger_url ?? "",
-      isp: data.isp ?? "",
-      // 浏览器任务按方案绑定：与渠道/直连参数同属 Profile 域且同屏可编辑，
-      // 因此是表单状态（随保存载荷提交）
-      active_task: data.active_task ?? "",
-      // 登录渠道与直连参数：设置页「账号」与「配置方案」编辑器均可编辑，
-      // 因此是表单状态（随保存载荷提交），不再是只读派生信息
-      login_channel: data.login_channel ?? DEFAULT_CONFIG.credentials.login_channel,
-      http_method: data.http_method ?? DEFAULT_CONFIG.credentials.http_method,
-      http_url: data.http_url ?? "",
-      http_headers: data.http_headers ?? "",
-      http_body: data.http_body ?? "",
-      http_success_pattern: data.http_success_pattern ?? "",
-      http_failure_pattern: data.http_failure_pattern ?? "",
-      http_crypto_script: data.http_crypto_script ?? "",
-    };
+    // 顶层还带着活跃方案的凭据与直连参数（后端扁平响应，兼容既有客户端）：
+    // 本 composable 明确不接收——它们属于 Profile，归方案页编辑。
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
     // 旧配置只有 proxy_port（可能非默认值）：派生完整地址，
@@ -108,7 +90,6 @@ async function fetchConfig(): Promise<void> {
     if (!config.updater.proxy_url && config.updater.proxy_port > 0) {
       config.updater.proxy_url = `http://127.0.0.1:${config.updater.proxy_port}`;
     }
-    password.reset(!!data.has_password);
     // P12：watch 已是异步 flush，上面的加载赋值会在微任务中触发回调；
     // 先等待一轮刷新（回调在 loadingConfig=true 窗口内执行完、不计入 dirty），
     // 再以加载结果为新快照，保证加载不被误标为未保存修改
@@ -139,14 +120,6 @@ async function fetchConfig(): Promise<void> {
 function validateConfig(): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
-  const url = config.credentials.auth_url;
-  if (url && !/^https?:\/\//.test(url)) {
-    warnings.push("认证地址必须以 http:// 或 https:// 开头");
-  }
-  const trigger = config.credentials.trigger_url;
-  if (trigger && !/^https?:\/\//.test(trigger)) {
-    warnings.push("重定向触发地址必须以 http:// 或 https:// 开头");
-  }
   // 与后端 build_proxied_client 的校验口径一致
   const proxyUrl = config.updater.proxy_url;
   if (config.updater.use_proxy && proxyUrl && !/^https?:\/\//.test(proxyUrl)) {
@@ -163,26 +136,9 @@ function validateConfig(): { errors: string[]; warnings: string[] } {
 
 const { toastOnly } = useToast();
 
-/** 密码输入回调：同步明文值并标记 dirty */
-function onPasswordInput(e: Event): void {
-  password.setValue((e.target as HTMLInputElement).value);
-}
-
-/** 明确请求清除已保存密码，并使仅此项改动也能提交。 */
-function clearPassword(): void {
-  password.clear();
-  dirty.value = true;
-}
-
 /** 保存配置：校验硬错误阻断、警示仅提示；成功后以表单当前值刷新 dirty 快照 */
 async function saveConfig(force = false): Promise<void> {
   if (!dirty.value && !force) return;
-
-  // 自定义运营商：选中"自定义"但未输入关键字时拒绝保存（修复 P1-17）
-  if (config.credentials.isp === "自定义") {
-    toastOnly(false, "请填写自定义运营商关键字");
-    return;
-  }
 
   const { errors, warnings } = validateConfig();
   if (errors.length > 0) {
@@ -191,10 +147,9 @@ async function saveConfig(force = false): Promise<void> {
     toastOnly(false, errors.join("；"));
     return;
   }
-  // 警示不阻断（格式存疑的 URL、空认证地址、未启用检测等由用户自行判断），
+  // 警示不阻断（格式存疑的 URL、未启用检测等由用户自行判断），
   // 但必须 toast 出来——嵌入场景下用户不看日志面板
   const hints = [...warnings];
-  if (!config.credentials.auth_url && !config.credentials.trigger_url) hints.push("认证地址与触发地址均为空，自动认证将无法工作");
   if (!config.monitor.enable_tcp_check && !config.monitor.enable_http_check && !config.monitor.enable_url_check) {
     hints.push("未启用任何网络检测方式，自动认证可能无法正常工作");
   }
@@ -211,7 +166,9 @@ async function saveConfig(force = false): Promise<void> {
 
   busy.save = true;
   saveFailed.value = false;
-  const pwdValue = password.submitValue();
+  // 载荷只含全局设置：凭据/直连字段一律不提交（它们属 Profile，见文件头边界说明）。
+  // 此前这里带着 username/auth_url/login_channel 等 13 个方案字段，等于让任意
+  // 全局保存都能改写活跃方案的凭据——检测候选被静默落盘正是由此而来。
   const payload: SaveConfigPayload = {
     browser: config.browser,
     worker: config.worker,
@@ -221,30 +178,12 @@ async function saveConfig(force = false): Promise<void> {
     retry: config.retry,
     app_settings: config.app_settings,
     updater: config.updater,
-    active_task: config.credentials.active_task || "",
-    username: config.credentials.username ?? "",
-    auth_url: config.credentials.auth_url ?? "",
-    trigger_url: config.credentials.trigger_url ?? "",
-    isp: config.credentials.isp ?? "",
-    login_channel: config.credentials.login_channel,
-    http_method: config.credentials.http_method,
-    http_url: config.credentials.http_url ?? "",
-    http_headers: config.credentials.http_headers ?? "",
-    http_body: config.credentials.http_body ?? "",
-    http_success_pattern: config.credentials.http_success_pattern ?? "",
-    http_failure_pattern: config.credentials.http_failure_pattern ?? "",
-    http_crypto_script: config.credentials.http_crypto_script ?? "",
-    password: pwdValue as string | null,
   };
 
   try {
     await configApi.patch(payload, { signal: controller.signal });
-    // markSaved 会清空明文并异步触发 password watcher；在同一抑制窗口内等待
-    // watcher 结算后再复位 dirty，避免保存成功后下一微任务又变回“未保存”。
     suppressDirty = true;
     try {
-      // null 表示未编辑，空串表示明确清除，非空字符串表示更新。
-      if (pwdValue !== null) password.markSaved(pwdValue.length > 0);
       await nextTick();
       // 保存成功后以当前表单为新快照：用户把值改回原样时 dirty 自动消失
       savedSnapshot = JSON.stringify(config);
@@ -380,10 +319,6 @@ async function togglePureMode(): Promise<void> {
 export function useConfig() {
   return {
     config,
-    password,
-    passwordDisplay: password.display,
-    passwordSaved: password.saved,
-    editingPassword: password.editing,
     defaultUrlCheckUrls,
     dirty,
     saveFailed,
@@ -391,10 +326,6 @@ export function useConfig() {
     pureMode,
     pureModeLoading,
     fetchConfig,
-    onPasswordFocus: password.onFocus,
-    onPasswordBlur: password.onBlur,
-    onPasswordInput,
-    clearPassword,
     saveConfig,
     fetchLogLevels,
     setLogLevel,

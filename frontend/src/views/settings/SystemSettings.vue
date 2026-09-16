@@ -5,6 +5,10 @@ import { computed, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
 import { useToast } from "@/composables/useToast";
+import { useRunMode } from "@/composables/useRunMode";
+import { useConfirm } from "@/composables/useConfirm";
+import { RUN_MODE_PRESETS } from "@/utils/runMode";
+import type { RunModeId } from "@/utils/runMode";
 import { systemApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import { downloadBlob } from "@/utils/file";
@@ -15,6 +19,45 @@ import type { SelectOption } from "@/components/common/CustomSelect.vue";
 const config = useConfig();
 const { busy, autostart } = useStatus();
 const { toastOnly } = useToast();
+const { confirm } = useConfirm();
+const { currentMode, applying: modeApplying, applyRunMode, diffFor } = useRunMode();
+
+/** 「自定义」不是可点的选项，只作为当前态的展示——它由手动改过设置自然落入 */
+const modeOptions = computed(() =>
+  RUN_MODE_PRESETS.map((p) => ({ id: p.id, label: p.label, description: p.description })),
+);
+
+/** 当前模式的说明文案（含自定义） */
+const modeHint = computed(() => {
+  if (currentMode.value === "custom") {
+    return "检测到你手动调整过相关设置，已不在任何预设内。可点上方模式一键回到常规配置。";
+  }
+  return RUN_MODE_PRESETS.find((p) => p.id === currentMode.value)?.description ?? "";
+});
+
+/**
+ * 切换模式：先弹确认并列出**将要改动的项**。
+ *
+ * 不做"静默应用"：这个动作会写多处设置、还会真实注册/取消开机自启，用户有权在
+ * 动手前看到究竟改了什么。改动清单以结构化 `changes` 传入（而非拼成一段文本）——
+ * 确认框据此分列着色，多项时仍能逐行扫读。
+ */
+async function switchMode(id: Exclude<RunModeId, "custom">): Promise<void> {
+  if (id === currentMode.value) return;
+  const preset = RUN_MODE_PRESETS.find((p) => p.id === id);
+  if (!preset) return;
+  const changes = diffFor(id);
+  const ok = await confirm({
+    title: `切换到${preset.label}`,
+    message: changes.length
+      ? "将应用以下改动："
+      : `当前设置已与${preset.label}一致，无需改动。`,
+    changes: changes.map((c) => ({ label: c.label, from: c.from, to: c.to })),
+    confirmText: "应用",
+  });
+  if (ok !== true) return;
+  await applyRunMode(id);
+}
 
 const loginActionOptions: SelectOption[] = [
   { value: "monitor", label: "开始检测" },
@@ -68,6 +111,45 @@ async function handleExportLogs(): Promise<void> {
 
 <template>
   <div class="settings-panel-grid settings-panel-grid--cols2">
+    <!-- 运行模式：一组设置的命名组合，一键在「稳定跑」与「看得见、好排查」之间切换 -->
+    <section class="card settings-panel settings-panel--wide run-mode-card">
+      <div class="settings-card-header">
+        <IconApp name="sliders" class="settings-card-icon" />
+        <h2>运行模式</h2>
+        <span class="badge badge--sm" :class="currentMode === 'custom' ? 'badge--warn' : 'badge--success'">
+          当前：{{ currentMode === "custom" ? "自定义" : (RUN_MODE_PRESETS.find((p) => p.id === currentMode)?.label ?? "") }}
+        </span>
+      </div>
+      <div class="card-body">
+        <div class="run-mode-options">
+          <button
+            v-for="opt in modeOptions" :key="opt.id"
+            type="button"
+            class="run-mode-option"
+            :class="{ active: currentMode === opt.id }"
+            :disabled="modeApplying"
+            :aria-pressed="currentMode === opt.id"
+            @click="switchMode(opt.id)"
+          >
+            <span class="run-mode-option-head">
+              <span class="run-mode-option-label">{{ opt.label }}</span>
+              <IconApp v-if="currentMode === opt.id" name="check" class="icon-sm" />
+            </span>
+            <span class="run-mode-option-desc">{{ opt.description }}</span>
+          </button>
+          <!-- 自定义态：由手动改动自然落入，不可点选，只作说明 -->
+          <div class="run-mode-option run-mode-option--custom" :class="{ active: currentMode === 'custom' }">
+            <span class="run-mode-option-head">
+              <span class="run-mode-option-label">自定义</span>
+              <IconApp v-if="currentMode === 'custom'" name="check" class="icon-sm" />
+            </span>
+            <span class="run-mode-option-desc">手动调整过下方任一设置后自动进入此状态。</span>
+          </div>
+        </div>
+        <span class="hint run-mode-hint">{{ modeHint }}</span>
+      </div>
+    </section>
+
     <!-- 启动与运行 -->
     <section class="card settings-panel">
       <div class="settings-card-header">

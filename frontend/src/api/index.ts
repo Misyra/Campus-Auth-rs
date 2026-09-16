@@ -30,7 +30,11 @@ import type {
   OcrStatus,
   PortalDetectResult,
   Profile,
+  ProfileDetailResponse,
+  ProfileImportResult,
   ProfileListResponse,
+  ProfileSharePayload,
+  ProfileUpdatePayload,
   RepoTask,
   SaveConfigPayload,
   ScheduledTask,
@@ -165,7 +169,8 @@ export const environmentApi = {
 /** 配置方案 */
 export const profilesApi = {
   list: () => http.get<ProfileListResponse>("/api/profiles"),
-  get: (id: string) => http.get<{ settings: Profile }>(`/api/profiles/${pathSegment(id)}`),
+  get: (id: string) =>
+    http.get<ProfileDetailResponse>(`/api/profiles/${pathSegment(id)}`),
   // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password；
   // 可选设置字段（auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task）与 PUT 同语义
   create: (
@@ -191,7 +196,13 @@ export const profilesApi = {
       http_crypto_script?: string;
     },
   ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
-  save: (id: string, payload: Profile) => http.put<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
+  save: (id: string, payload: ProfileUpdatePayload) =>
+    http.put<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
+  /** 导出方案为可分享 JSON（后端已剔除账号与密码） */
+  export: (id: string) => http.get<ProfileSharePayload>(`/api/profiles/${pathSegment(id)}/export`),
+  /** 导入分享的方案；ID 冲突时后端自动改名，返回值给出实际 ID */
+  import: (payload: ProfileSharePayload) =>
+    http.post<ProfileImportResult>("/api/profiles/import", payload),
   testHttpLogin: (payload: HttpLoginTestPayload) =>
     http.post<HttpLoginTestResult>("/api/profiles/http-login-test", payload, { timeout: 30000 }),
   delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${pathSegment(id)}`),

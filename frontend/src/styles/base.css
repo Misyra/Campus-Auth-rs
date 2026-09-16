@@ -148,6 +148,11 @@
   --z-modal: 200;
   --z-toast: 300;
   --z-top: 400;
+  /* 确认框恒在普通弹窗之上：ConfirmDialog 是全局单例，用户常在弹窗内触发确认
+     （如「卸载」弹窗里点开始清理），若与触发它的弹窗同层级，则按 DOM 顺序决胜——
+     常驻先挂载的确认框必输给后挂载的弹窗，被压住且焦点仍在其按钮上（Enter 会
+     在不可见状态下执行危险操作）。单列一层，使「确认」严格大于任意弹窗 */
+  --z-confirm: 500;
   --z-max: 9999;
 }
 
@@ -313,10 +318,16 @@ textarea {
   --bg-modal: #e4e9f0;
   --border: rgba(100, 116, 139, 0.25);
   --border-hover: rgba(100, 116, 139, 0.3);
+  /* 默认主题（浅色）文字色：整体压到黑色系。
+     此前 secondary/muted 用的是中性灰（#4a4a4a/#666666），在浅色玻璃卡片的
+     半透明底上对比度虽达标但观感发灰，长段落（协议文本、帮助说明）尤其明显。
+     现按「正文纯黑 → 次级近黑 → 弱化深灰」四级递降保持层级可辨：
+     #000000 / #1a1a1a / #333333 / #4a4a4a，最浅档在 #eef2f7 底色上仍有
+     约 7.6:1 对比度（WCAG AA 正文要求 4.5:1）。 */
   --text-primary: #000000;
-  --text-secondary: #4a4a4a;
-  --text-muted: #666666;
-  --text-tertiary: #6b7280;
+  --text-secondary: #1a1a1a;
+  --text-muted: #333333;
+  --text-tertiary: #4a4a4a;
   --slate-rgb: 100, 116, 139;
   --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.06);

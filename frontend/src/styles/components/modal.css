@@ -2,6 +2,7 @@
  *
  * 层级口径：普通弹窗统一 --z-top(400)；沉浸预览（截图放大/背景预览）同样经 Modal
  * 走 --z-top，避免直写 --z-max 压住 Toast(z-toast=300) 之上的确认框等上层交互。
+ * 确认框遮罩走 --z-confirm(500)：它必须高于触发它的弹窗（见 base.css token 注释）。
  * 例外：向导（首次协议阻断）与退出/初始化全屏遮罩各走 --z-top/--z-max，见 wizard.css/misc.css。 */
 .modal-overlay {
   position: fixed;
@@ -12,6 +13,13 @@
   align-items: center;
   justify-content: center;
   backdrop-filter: var(--blur-sm);
+}
+
+/* 确认框遮罩：必须高于触发它的普通弹窗。不用 :has() 自动识别——本应用在用户默认
+   浏览器中打开，版本不可控，而确认框被压住时焦点仍落在其按钮上（Enter 会在不可见
+   状态下执行危险操作），属正确性问题，故用显式类名（与 --preview 修饰同一写法） */
+.modal-overlay--confirm {
+  z-index: var(--z-confirm);
 }
 
 /* 沉浸预览修饰：截图放大/背景预览等大图场景加深遮罩（与普通 0.6 区分） */
@@ -106,6 +114,74 @@
   color: var(--text-secondary);
   white-space: pre-line;
   margin: 0 0 var(--space-lg);
+}
+
+/* 改动清单：字段名在左、旧值→新值在右，两列对齐便于逐行扫读。
+   用列表而非把内容拼进 .confirm-message —— 拼接文本里字段名与取值同权重同颜色，
+   多项时退化成一团文字，看不出"哪一项变成什么"。
+   间距用显式类（--tight 修饰 message）而非 :has() 兄弟选择器：与本文件既有约定
+   一致（见 .modal-overlay--confirm 的说明），不依赖较新的选择器支持 */
+.confirm-message--tight {
+  margin-bottom: 10px;
+}
+
+.confirm-changes {
+  list-style: none;
+  margin: 0 0 var(--space-lg);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass-light);
+  overflow: hidden;
+}
+
+.confirm-change {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: 8px 12px;
+  font-size: var(--text-sm);
+}
+
+/* 行间分隔：最后一行不加，避免与容器下边框叠成双线 */
+.confirm-change + .confirm-change {
+  border-top: 1px solid var(--border);
+}
+
+.confirm-change-label {
+  color: var(--text-secondary);
+}
+
+.confirm-change-values {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* 旧值弱化、新值强调：一眼看出会变成什么。
+   **不用 line-through**：短字面（如 INFO/ON）被横线穿过主干后糊成一团，实测比不划
+   更难读；改以低对比度 + 稍小字号弱化，靠右侧的加粗新值形成对比。 */
+.confirm-change-from {
+  color: var(--text-muted);
+}
+
+.confirm-change-arrow {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.confirm-change-to {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.confirm-dialog.danger .confirm-change-to {
+  color: var(--error);
 }
 
 .confirm-actions {

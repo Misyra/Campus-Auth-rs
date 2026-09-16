@@ -1,5 +1,80 @@
 /* system.css — 系统设置子页（模板徽标已统一走通用 .badge，此处旧类退役保留注释防回潮）
  * .autostart-method-badge -> .badge.badge--sm.badge--mono；.env-pill -> .badge.badge--sm（成功/警告走 --success/--warn） */
+
+/* ==================== 运行模式（默认 / 调试 / 自定义） ==================== */
+
+/* 三栏并排：两个可点预设 + 一个只读的「自定义」态。窄屏由 .run-mode-options
+   的 flex-wrap 折行（min-width 保证折行后仍不至于挤成窄条）。 */
+.run-mode-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.run-mode-option {
+  flex: 1 1 200px;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass-light);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
+}
+
+.run-mode-option:hover:not(:disabled) {
+  border-color: rgba(var(--accent-rgb), 0.4);
+  background: var(--bg-hover);
+}
+
+.run-mode-option.active {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.1), rgba(var(--purple-rgb), 0.1));
+}
+
+/* 自定义态不可点：它是"手动改过"的自然结果，不是一个可选目标 */
+.run-mode-option--custom {
+  cursor: default;
+}
+
+.run-mode-option:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.run-mode-option-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+}
+
+.run-mode-option.active .run-mode-option-head {
+  color: var(--accent);
+}
+
+.run-mode-option-label {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.run-mode-option-desc {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.run-mode-hint {
+  display: block;
+  margin-top: var(--space-sm);
+}
+
 .badge--mono {
   font-family: var(--font-mono);
 }

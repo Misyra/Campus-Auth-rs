@@ -5,20 +5,21 @@ import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, watch, onMounted, onActivated, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
-import { useConfig } from "@/composables/useConfig";
+import { useProfiles } from "@/composables/useProfiles";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useStatus } from "@/composables/useStatus";
 import { useEnvironment } from "@/composables/useEnvironment";
 import { ocrApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import { pickFile } from "@/utils/file";
+import { TASK_REPO_URL } from "@/utils/constants";
 import { useToast } from "@/composables/useToast";
 
 const { busy } = useStatus();
 const { envStatus, envLoading, envError, refreshEnv, bootstrapEnv } = useEnvironment();
 const { toastOnly } = useToast();
 const t = useTasks();
-const config = useConfig();
+const { profiles, activeProfileId } = useProfiles();
 const repo = useRepoImport();
 const router = useRouter();
 
@@ -27,9 +28,11 @@ onMounted(() => { void refreshEnv(); });
 onActivated(() => { void refreshEnv(); });
 
 // 当前任务取「当前方案绑定的浏览器任务」——启用任务按方案绑定（切方案即切任务），
-// 未绑定时后端登录会回退内置默认任务
+// 未绑定时后端登录会回退内置默认任务。
+// 来源是方案摘要（ProfileSummary.active_task）而非设置表单：该字段属 Profile 域，
+// 不再随 GET /api/config 下发。
 const activeTaskName = computed(() => {
-  const id = config.config.credentials.active_task;
+  const id = profiles.value[activeProfileId.value]?.active_task;
   if (!id) return "内置默认任务";
   const task = t.tasks.value.find((tk) => tk.id === id);
   return task?.name || id;
@@ -262,7 +265,7 @@ async function recognizeOcr() {
           <button class="btn btn-secondary btn-sm" type="button" @click="t.importTask()">从文件导入</button>
           <button class="btn btn-secondary btn-sm" type="button" @click="repo.showRepoImport()">从仓库导入</button>
           <button class="btn btn-secondary btn-sm" type="button" @click="t.fetchTasks(true)">刷新列表</button>
-          <a href="https://github.com/Misyra/campus-auth-tasks" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">任务仓库 →</a>
+          <a :href="TASK_REPO_URL" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">任务仓库 →</a>
         </div>
       </div>
     </section>

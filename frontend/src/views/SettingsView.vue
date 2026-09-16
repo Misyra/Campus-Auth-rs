@@ -16,12 +16,21 @@ const { toastOnly } = useToast();
 
 const activeTab = computed(() => {
   const name = route.name as string;
-  return name.replace("settings-", "") || "account";
+  return name.replace("settings-", "") || "monitor";
 });
 
 function setTab(tabId: string) {
   router.push({ name: `settings-${tabId}` });
 }
+
+/**
+ * 外观页不走本页的保存栏。
+ *
+ * 外观是纯本机显示偏好，改动即时写入 localStorage 并立即生效（useAppearance 的
+ * watcher），没有服务端草稿。若照常显示「立即保存」，用户改完主题点它会得到
+ * 「配置没有变更，无需保存」，与眼前已生效的改动相矛盾。
+ */
+const isAppearanceTab = computed(() => activeTab.value === "appearance");
 
 const saveFailed = computed(() => config.saveFailed.value);
 const configLoadFailed = computed(() => config.configLoadFailed.value);
@@ -61,7 +70,8 @@ function handleSave() {
       <router-view />
     </form>
 
-    <div class="save-bar">
+    <!-- 外观页改的是本机显示偏好（即时生效、存 localStorage），无服务端草稿可提交 -->
+    <div v-if="!isAppearanceTab" class="save-bar">
       <button
         class="btn btn-primary save-btn"
         :class="{

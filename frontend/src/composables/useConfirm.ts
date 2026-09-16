@@ -5,9 +5,27 @@
 
 import { reactive } from "vue";
 
+/**
+ * 一处「旧值 → 新值」改动。
+ *
+ * 供确认框以结构化列表呈现（而非把整段内容拼成字符串塞进 message）：
+ * 拼接的文本无法给字段名与取值分别着色，也做不出对齐与视觉指向，
+ * 多项改动时会退化成一团难读的文字。
+ */
+export interface ConfirmChange {
+  /** 改动项的显示名（如「浏览器后台运行」） */
+  label: string;
+  /** 变更前的可读值 */
+  from: string;
+  /** 变更后的可读值 */
+  to: string;
+}
+
 export interface ConfirmOptions {
   title?: string;
   message: string;
+  /** 可选的结构化改动清单；有值时渲染为对齐列表，message 只作引导语 */
+  changes?: ConfirmChange[];
   confirmText?: string;
   cancelText?: string;
   danger?: boolean;
@@ -17,6 +35,7 @@ interface ConfirmState {
   visible: boolean;
   title: string;
   message: string;
+  changes: ConfirmChange[];
   confirmText: string;
   cancelText: string;
   danger: boolean;
@@ -26,6 +45,7 @@ const state = reactive<ConfirmState>({
   visible: false,
   title: "",
   message: "",
+  changes: [],
   confirmText: "确定",
   cancelText: "取消",
   danger: false,
@@ -46,6 +66,8 @@ let resolver: ((value: boolean | null) => void) | null = null;
 function confirm(options: ConfirmOptions): Promise<boolean | null> {
   state.title = options.title || "确认操作";
   state.message = options.message;
+  // 拷一份：调用方常在 computed/循环里构造数组，共享引用会被后续渲染改动
+  state.changes = options.changes ? options.changes.map((c) => ({ ...c })) : [];
   state.confirmText = options.confirmText || "确定";
   state.cancelText = options.cancelText || "取消";
   state.danger = options.danger || false;
