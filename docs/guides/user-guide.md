@@ -39,8 +39,10 @@ campus-auth --no-tray
 # 启动动作覆盖（覆盖 settings.json 的 app.startup_action）
 campus-auth --startup-action monitor      # 启动后进入监测
 campus-auth --startup-action login_once
-campus-auth --startup-action none
+campus-auth --startup-action none         # 默认：启动后待机，等控制台点「启动检测」
 ```
+
+> **`app.startup_action` 默认 `none`、`auto_switch` 默认 `false`**（2026-09-16 起）：新安装不自动开始检测，也不自动切换方案。两者都只影响**缺失该字段的新配置**——磁盘上已写的值优先，升级不会改动既有设置。需要「开机即自动重连」请在「设置 · 系统」把「启动后执行」改为「开始检测」；需要多网络自动切换在「方案」页开启。注意开机自启注册的命令行不带 `--startup-action`，故自启场景下启动动作完全取自该配置项。
 
 完整参数见 `campus-auth --help`（定义于 `src/launcher.rs::CliArgs`，实现于 `src/main.rs`）。
 
@@ -66,17 +68,49 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 2. Web 控制台
 
-地址：`http://127.0.0.1:50721`（`app.port`；本地端口被占用或被 Windows 保留时由系统自动分配可用端口，实际地址见启动日志；Docker 默认固定监听 `0.0.0.0:50721`）。首次启动走初始化向导，之后在「设置」页管理全部配置。
+地址：`http://127.0.0.1:50721`（`app.port`；本地端口被占用或被 Windows 保留时由系统自动分配可用端口，实际地址见启动日志；Docker 默认固定监听 `0.0.0.0:50721`）。首次启动走初始化向导。
+
+界面分五处，每处只编辑一类数据（避免同一份配置有多个可写入口）：
+
+| 导航 | 编辑对象 | 存储 / 接口 |
+|------|----------|-------------|
+| 仪表盘 | —（状态总览与手动操作） | — |
+| **方案** | 账号、密码、认证地址、匹配规则、登录方式、直连参数 | `config/profiles/*.json`，`/api/profiles/*` |
+| **任务** | 浏览器任务 / 脚本 / 定时任务 / AI 生成浏览器任务 | `tasks/`，`/api/tasks`、`/api/scripts`、`/api/scheduler/jobs` |
+| **设置** | 检测 / 浏览器 / 任务与环境 / 系统 / 网络与更新 / 外观 | `config/settings.json`，`/api/config` |
+| 关于 | —（版本、更新与卸载） | — |
+
+> 账号属于**方案**而非全局设置：登录时使用的是「活跃方案」的账号，切换方案即切换账号。因此填账号请到「方案」页。
+
+### 运行模式（设置 · 系统）
+
+把一组相关设置打包成两个预设，一键切换；手动改过其中任一设置后自动显示为「自定义」。
+
+| | 默认模式 | 调试模式 |
+|---|---|---|
+| 浏览器后台运行 | 开启 | 关闭（看得见浏览器窗口） |
+| 登录后保持浏览器进程 | 关闭 | 开启（便于反复查看现场） |
+| 启动后执行 | 开始检测 | 无操作（手动跑一次才看得见过程） |
+| 日志级别 | INFO | DEBUG |
+| 开机自启动 | 开启 | 关闭 |
+| 低资源模式 | 关闭 | 关闭 |
+
+切换前会列出**实际将要改动**的项（未变化的不列），确认后才执行。实现要点：多数项经 `PATCH /api/config` 一次提交；**日志级别必须走 `PUT /api/config/log-level`**（仅 PATCH 只落盘、不热更新 tracing filter，会出现"界面显示 DEBUG、实际按 INFO 过滤"的假象）；**开机自启走 `POST /api/autostart/*` 且会真实写系统注册表**。故三者非原子——任一步失败会提示"部分设置可能已生效，请检查后重试"。
+
+刻意**不含 `strict_login_mode`**：它决定"何时触发登录"，属功能行为而非可观测性；把它放进调试模式会在证据不足时也尝试登录，可能在没预期的时机拉起浏览器。
 
 鉴权：启动时生成随机 token 持久化于 `config/.auth_token`（`0600`），前端经 `/api/auth/token` 懒取并在 `X-Auth-Token` / `Bearer` / `?token=` 中携带；`GET /api/health`、`GET /api/auth/token` 等少数端点豁免，其余 `/api/*` 与 `/ws/*` 强制校验（`src/web/auth.rs`）。
 
 ## 3. 多网络配置方案（Profiles）
 
-入口：`GET /api/profiles`（列表，响应含 `active_profile` / `auto_switch`）/ `POST /api/profiles/{id}`（新建）/ `GET /api/profiles/{id}`，切换活跃方案用 `POST /api/profiles/switch`，前端为“配置方案”页。
+入口：`GET /api/profiles`（列表，响应含 `active_profile` / `auto_switch`）/ `POST /api/profiles/{id}`（新建）/ `GET /api/profiles/{id}`（响应含 `has_password`），切换活跃方案用 `POST /api/profiles/switch`，更新用 `PUT /api/profiles/{id}`（可用 `clear_password: true` 显式清除已保存密码），前端为「方案」页。
 
-- 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求）。
+「方案」页进入时**直接展示当前活跃方案**的编辑器（改账号是这一页最高频的用途）；顶栏下拉可切换方案，「当前使用」徽标标出自动登录实际使用的那个。点「返回方案列表」查看或新建其它方案。
+
+- 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求，后者见 `docs/guides/http-login-guide.md`）。
+- 这些字段**只在「方案」页编辑**；`GET /api/config` 顶层仍会扁平回传活跃方案的凭据（兼容既有客户端），但界面已不再从那里读写。
 - 重定向模式：`trigger_url` 为明文 `http` 触发地址（如 `http://www.msftconnecttest.com/connecttest.txt`），Worker 首导航到该地址并跟随 302 到真门户，`{{LOGIN_URL}}` 同步为触发地址；监测跳过 `auth` TCP 探测、登录跳过预检，劫持判定优先于断网（`docs/guides/task-writing-guide.md` 重定向模式）。
-- 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高；`auto_switch` 开启时 Engine 每 60s 检测并自动切换，切换后重置登录失败去重状态。
+- 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高；`auto_switch` 开启时 Engine 每 60s 检测并自动切换，切换后重置登录失败去重状态。**`auto_switch` 默认关闭**（2026-09-16 起，新配置生效）；关闭时方案页卡片可直接点击切换，开启时改由自动匹配决定（卡片不可手点）。
 - `default` 为保底 Profile，不可删除。
 
 ## 4. 任务系统
@@ -89,20 +123,20 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 > 历史 `type=shell` 已移除：遇到时反序列化明确报错并提示改用 `script`（`src/tasks/models.rs`）。同目录下曾有的 `shell` 任务需改写为 `.sh`/`.bat`/`.py` 脚本经 `binary_path` 执行。
 
 管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本均走 `TaskExecutor::execute`）；脚本面板复用上述 `tasks` 端点并另接 `GET /api/scripts/binaries`、`GET/PUT/DELETE /api/scripts/{id}`、`POST /api/scripts/run`（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。
-「用哪个浏览器任务」由各方案的 `active_task` 决定（在「设置·账号」或「配置方案」里选），没有全局端点。
+「用哪个浏览器任务」由各方案的 `active_task` 决定（在「方案」页的方案编辑器「登录方式」里选），没有全局端点。
 
 ### 日常操作
 
-- **任务 / 设置·任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。「任务」页分「浏览器任务」「脚本」「AI 生成」三个标签页（后者用自然语言描述生成浏览器任务），**只管编辑**；用哪个任务登录由方案决定（见下）。
-- **定时任务**：独立页，按 cron 调度**浏览器与脚本两类**任务（`src/scheduler`，状态在 `tasks/scheduled/`；创建时按 `target_id` 关联任务，类型由任务本体推导）。
+- **任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。「任务」页分「浏览器任务」「脚本」「定时任务」「AI 生成浏览器任务」四个标签页，**只管编辑**；用哪个任务登录由方案决定（见下）。
+- **定时任务**：「任务」页的「定时任务」标签页，按 cron 调度**浏览器与脚本两类**任务（`src/scheduler`，状态在 `tasks/scheduled/`；创建时按 `target_id` 关联任务，类型由任务本体推导）。
 - **何时执行**：网络监测 Offline/Captive 时自动执行活跃任务；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
 
 ### 录制器：不手写 JSON
 
 1. 安装 Tampermonkey；
-2. 在「设置·任务」页「安装录制器脚本」；
+2. 在「设置 · 任务与环境」页「安装录制器脚本」；
 3. 打开校园网登录页，点浮动按钮开始录制，按提示点选账号框、密码框、验证码、登录按钮等；
-4. 结束录制后保存为任务；再到「设置·账号」的「登录方式」里为当前方案选中它，验证一次（`resources/tools/task-recorder.user.js`）。
+4. 结束录制后保存为任务；再到「方案」页的方案编辑器「登录方式」里为当前方案选中它，验证一次（`resources/tools/task-recorder.user.js`）。
 
 ## 5. 浏览器自动化与调试
 
@@ -115,7 +149,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 ## 6. 验证码（OCR）
 
 - 仅 `ocr` 步骤需要；依赖 `ddddocr`（约 120MB，不预声明，用时经应用内安装，用完可卸载）。
-- 在「设置·任务」页安装，装好后可用“验证码识别”上传截图试识别；OCR 偏好独立保存并通过 `uv add/remove` 对齐，安装失败不会阻断非 OCR 浏览器任务，也不会为了 OCR 单独下载 Chromium。
+- 在「设置 · 任务与环境」页安装，装好后可用“验证码识别”上传截图试识别；OCR 偏好独立保存并通过 `uv add/remove` 对齐，安装失败不会阻断非 OCR 浏览器任务，也不会为了 OCR 单独下载 Chromium。
 
 ## 7. 系统托盘与开机自启
 
@@ -148,7 +182,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ### Playwright / Chromium 下载失败
 
-项目经 `uv` 与多镜像（`npmmirror` / 清华 PyPI）尝试下载；失败时可在「设置·环境」查看分层状态并执行“重新同步”，或检查 `environment/` 权限与代理设置。Docker 镜像构建时已预装 Chromium，宿主机部署按需等待首次下载完成。
+项目经 `uv` 与多镜像（`npmmirror` / 清华 PyPI）尝试下载；失败时可在「设置 · 任务与环境」查看分层状态并执行“重新同步”，或检查 `environment/` 权限与代理设置。Docker 镜像构建时已预装 Chromium，宿主机部署按需等待首次下载完成。
 
 ### 服务提示已启动
 
@@ -172,7 +206,7 @@ campus-auth --force   # 终止后抢占
 
 ### 多个校园网怎么配置
 
-在“配置方案”页为每个网络创建 Profile，填 `gateway_ip` / `wifi_ssid` 匹配条件并开启 `auto_switch`；再为各 Profile 分别选择**浏览器任务**（「配置方案」编辑器或「设置·账号」的「登录方式」里选），而非为每环境各写一套任务 JSON。切换方案会连同任务一起切换。
+在「方案」页为每个网络创建 Profile，填 `gateway_ip` / `wifi_ssid` 匹配条件并开启 `auto_switch`；再为各 Profile 分别选择**浏览器任务**（方案编辑器的「登录方式」里选），而非为每环境各写一套任务 JSON。切换方案会连同任务一起切换。
 
 ### 保存任务时弹出安全警告
 
@@ -184,6 +218,7 @@ Windows 自启动为计划任务，部分杀毒软件可能拦截，建议将 `c
 
 ## 11. 相关文档
 
+- [直连请求登录使用指南](http-login-guide.md) — 免 Python / 浏览器的 HTTP 直连登录（抓门户请求、占位符、成败判定、凭据变换脚本）
 - [任务编写指南](task-writing-guide.md) — 步骤类型、变量、frame、success_condition、选择器建议
 - [任务使用手册](task-manual.md) — 日常管理、录制器、调试
 - [自定义脚本指南](custom-script-guide.md) — `script` 任务与 `POST /api/scripts/run`

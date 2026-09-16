@@ -2,6 +2,573 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-16 修复 engine 测试隐式依赖墙钟时间）
+
+提交前全量验证时发现 `engine::run_loop` 两个测试在夜间时段失败：`make_engine_with_hanging_probe` 的非暂停分支隐式吃 `PauseSettings` 新默认值（enabled=true, 23:00–06:00），真实墙钟落入窗口时立即检测被 F4 门控拦下，`wait_for` 预算内 `probe_total` 永不满足而 panic。当日 19–21 点全量跑绿是因为恰在窗口外——隐式依赖默认值的测试正是这样漏网的。修复：非暂停分支显式 `pause.enabled = false`，并在两处注释写明「测试不得依赖墙钟时间」。全量 `cargo test --lib` **878 passed**。
+
+## 开发中（2026-09-16 直连配置补充 {local_mac} 格式说明，防 MAC 形态误判）
+
+### 背景
+
+用户询问 `{local_mac}` 的格式——程序内部统一为**小写冒号分隔**（`aa:bb:cc:dd:ee:ff`，`normalize_mac` 收口三平台差异），而大量门户（Dr.COM 系常见）要求 12 位裸十六进制（`aabbccddeeff`）或大写/连字符形态。用户按直觉直接引用占位符就会提交错误格式，且无任何报错，属于典型的「格式误判」。原 UI 与文档只写「同接口的 MAC」，没有交代格式与转换方式。
+
+### 改动
+
+- **单一事实源**：`loginChannel.ts` 新增 `HTTP_MAC_FORMAT_NOTE`（MAC 固定形态说明 + 三种常用转换写法 + eportal 靠来源 IP 防串号、MAC 提交空值即可的提示），`LoginChannelField.vue`（方案编辑器直连面板的占位符说明区）与 `HttpLoginWizard.vue`（向导「请求地址」占位符卡 + 「脚本契约」卡两处）注入同一常量，避免多处文案漂移。
+- **使用文档**（`http-login-guide.md` 第 4 节）：占位符表新增「替换后的值示例」列（每项给出真实形态示例），`{local_mac}` 行显式标注固定小写冒号分隔，并附转换代码块（`replace(/:/g,"")` / `toUpperCase()` / 连字符形态）与空值容忍提醒。
+
+### 验证
+
+- `vue-tsc` 零错误；`loginChannel.test.ts` 20 passed；`npm run build` 通过。
+- `cargo build` 后重启实例，`/api/docs/http-login-guide` 嵌入文档已含新示例（嵌入走 rust-embed，文档改动需重编译才在 `/api/docs/*` 生效）。
+
+## 开发中（2026-09-16 仓库整理：删除过时过程报告与本地缓存）
+
+按 AGENTS.md「过程报告仅在本地使用，有效结论只保留在 known-issues / plan-next」的约定做例行清理。全部删除对象均已被 gitignore（未入 git），不影响任何提交内容。
+
+### 已删除
+
+- **docs/reports 过时报告**：`code-review-2026-09-12/`（13 part + FIX-PLAN + VERIFY）、`audit-2026-09-15.md`（结论已全部修复并归档）、`async-concurrency-review.md`、`http-login-channel-plan-2026-09-14.md`（直连渠道已上线）、`frontend-ui-audit-2026-05-14.md`、`p3-recheck-2026-09-13/`（摘要已在 known-issues #22 注）、`ui-review-2026-09-12/`、`run-mode-ui-demo.html`（三方案对比 demo，UI 已定案）。
+- **docs/reports 过程截图**：根目录 14 张 PNG（直连渠道开发期的侦察/演示图，零引用）；`ia-verify/` 内 17 张验证截图与 5 个 `shot_*.py`、1 个 `inspect_*.py` 伴生脚本。
+- **docs/compose/**：compose-next 会话 spec（repo-audit / repo-bug-scan-2026-09-11）。
+- **本地缓存与临时**：`python_worker/.venv`（416 MB，known-issues 既有挂账项，运行时按需重建）、`.playwright-cli/`、根与各子目录的 `__pycache__` / `.pytest_cache` / `.ruff_cache`、`tests/mock-servers/*` 缓存、`config-backup-20260916-*/` × 2、`debug/`（日志导出产物）、`dist/`（便携包产物，`build.ps1` 可重建）、`.workbuddy/`、`.zcode/`、`.worktrees/`。
+- **`.campus_network_auth/`**（v3 Python 旧版加密密钥，用户确认 v3 不再用）。
+
+### 保留（盘点确认）
+
+- `docs/reports/ia-verify/` 的 **11 个 `verify_*.py` 探针**——changelog 引用其中 5 个作为验证方式记录，且可复现重跑（依赖 `target/debug/config/.auth_token`，该目录保留）。
+- 活跃文档（changelog / updatelog / known-issues / plan-next / guides 7 篇 / archive）、`resources/`、运行时目录（config / logs / tasks / environment / update）与 `target/`（未获明确指示，暂不动）。
+
+## 开发中（2026-09-16 修复 ipconfig 网关续行解析；新增 eportal 变体门户 mock 验证直连渠道）
+
+### 缺陷：双栈网关环境下 `ctx.local_ip` 密钥协商失效
+
+用「加密算法换新」的 eportal 变体门户（`tests/mock-servers/eportal-fnv1a-b64/`）端到端验证直连渠道时，恒定失败于 `IP 不匹配`——客户端加密用的 IP 与门户看到的来源 IP 不一致。
+
+**根因不在客户端选址逻辑，而在 `ipconfig /all` 的网关续行解析**：双栈（IPv6 + IPv4 默认网关并存）DHCP 环境下，ipconfig 把 IPv6 网关放在「默认网关」标签行、IPv4 网关放在**下一行续行**（无标签冒号，仅缩进+值）。`parse_adapter_block` 只解析标签行自身，续行上的 IPv4 网关被丢弃 → WLAN 接口 `gateway=None` → `select_primary_interface` 的「有网关优先」落空。本机同时存在 aTrust VPN 虚拟网卡等干扰，选址行为变得不可预期，脚本 `ctx.local_ip` 与 TCP 源地址不一致，密钥协商失败。症状是「认证失败」而非报错（与 `interfaces.rs:88-92` 注释预言的排障困境完全一致）。
+
+**修复**：`parse_adapter_block` 引入「网关续行窗口」——网关标签行开启窗口，紧随的无冒号 value-only 行若能解析出 IPv4 即为 IPv4 网关；窗口在任意其它带标签行处关闭。DNS 服务器有同款续行（`223.5.5.5` 独占一行），靠「仅网关标签行开启窗口 + 命中后立即关闭」双重约束排除。
+
+### 实现
+
+- `src/network/detect.rs`：`parse_adapter_block` 重构为 continue 三分支（IPv4 / 物理地址 / 网关标签 + 续行窗口），网关语义不变（标签行直接给出 IPv4 时立即采用且关闭窗口）。
+- `src/network/detect_tests.rs`：新增 2 例——`test_parse_ipconfig_ipv4_gateway_on_continuation_line`（真实双栈输出形态，含 DNS 续行干扰项）、`test_parse_ipconfig_gateway_continuation_closes_on_next_label`（无续行时不得误认）。
+- `tests/mock-servers/eportal-fnv1a-b64/`：新变体门户 mock（协议框架同 `eportal-xor`，加密算法换为 FNV-1a 密钥 + 逐字节 XOR + Base64）+ 同算法自测客户端。`--accept-ip` 参数对齐环回测试的密钥协商视角（真实校园网入站 IP 即客户端 WAN IP，无需此参数）。
+- `docs/guides/http-login-guide.md` 新增 6.2 节：Base64 加密结果进 GET 查询串必须 `url_encode()`（`+` 不编码会被服务端解析成空格）；32 位散列乘法必须用 `Math.imul` 而非 `*`（Number 精度在 2^53 处舍入，`>>>0` 救不回已丢失的低位——本次调试中两个连环踩坑的书面化）。
+
+### 端到端验证（真实主程序实例 + 变体门户）
+
+- 服务端 roundtrip：同算法客户端（等效 login.sh）→ `"result":1` 认证成功。
+- 主程序直连渠道（凭据变换脚本 + 占位符渲染）：**认证通过**（`"result":1`，服务端日志确认 `account=',0,20230001@cmcc' pwd='secret123' wip='192.168.123.210'` 全部正确解密）。
+- 负向用例：错误密码 → `invalid_credential`（失败关键字命中「账号或密码错误」），成功/失败关键字分流正确。
+- `cargo test --lib network::` **71 passed**（含 2 新例）；clippy 零警告、fmt 通过。
+- 调试过程自建 Rust 探针复现解析逻辑定位根因（临时目录，未入仓）；本地测试实例与 mock 已清理。
+
+## 开发中（2026-09-16 运行模式纳入暂停时段开关；初始默认启用 23:00–06:00 夜间暂停）
+
+### 需求
+
+用户要求：默认模式启用暂停时间段（23:00–06:00），调试模式不启用；初始配置也启用。
+
+### 实现
+
+- **预设新增 `pause_enabled` 字段**（`utils/runMode.ts`）：默认模式 `true`、调试模式 `false`。只预设**启用与否**，不预设起止——起止是用户可调的具体值，覆盖它们会抹掉用户自定义的时段（见 `useRunMode.ts` PATCH 载荷：`pause: { ...config.pause, enabled: preset.settings.pause_enabled }`）。调试关闭的理由：调试要随时手动复现，若落在暂停窗口里，登录会被引擎拦住、看似“没反应”。
+- **初始配置默认启用夜间暂停**：后端 `PauseSettings` 派生 Default 改为手写实现（`enabled=true, 23:00→06:00`），前端 `DEFAULT_CONFIG.pause` 同步镜像。`#[serde(default)]` 语义下**只影响全新安装与字段缺失回退，既有配置保留已落盘的值**——这与该文件既有的默认值调整口径一致（见下方“不影响既有配置”轮次）。
+- 预设差异标签表（`RUN_MODE_FIELD_LABELS`）补「启用暂停时段」，确认弹窗的改动清单随之如实多列一项。
+- UI 维持现状（仅「设置 · 系统」卡片）：此前一轮的三方案对比 demo（`docs/reports/run-mode-ui-demo.html`，过程产物不提交）结论为用户接受现有形态。
+
+### 验证
+
+- vitest **207 passed**（23 文件）：`runMode.test.ts` 新增/调整 4 例（预设字段集合锁定、默认/调试的 `pause_enabled` 取值、两组差异关键项断言纳入 `pause_enabled`、差异标签「启用暂停时段」）；`vue-tsc` 零错误、`npm run build` 通过。
+- Rust：`config::` 模块 **116 passed**（新增 `pause_defaults_to_night_window_enabled` 锁定新默认值）；`engine::run_loop` 26 passed；`cargo clippy --all-targets -- -D warnings` 零警告、`cargo fmt --check` 通过。
+- 既有测试适配 1 处：`test_patch_settings_reports_profile_load_failure` 原以 `pause.enabled=false` 为初始态反证落盘失败；默认值调整后 mock 初始态即为 `true`，断言改为盯 `save_calls=0`（真正承重的“不落盘”证据）。
+- **全量回归**：`cargo test --lib` **876 passed**（0 failed）；`login_chain` 集成 **5/5**（kick 自动重登 / failonce 重试 / ban 窗口 / 跳转链 / 慢门户）。
+- **连带影响排查（新默认值 `enabled=true` 的波及面）**：
+  - **e2e 集成不受影响**：`login_chain` 基座经 tempdir 全新引导，`setup_profile_and_task` 不写 pause 段（吃新默认值），但用例白天运行不在 23:00–06:00 窗口内；且 `immediate_check_blocked_by_pause` 仅在窗口内跳过立即检测、`monitoring` 照常置位，自动重登由定时器路径驱动。极端情况（恰在 23:00–06:00 跑 CI）本就是仓库既有基座模板显式 `"enabled": false` 所防的场景（见下）。
+  - **`tests/fixtures/runtime-envs/*` 四个隔离基座全部显式 `"enabled": false`**——字段已落盘则 `serde(default)` 不介入，新默认值不影响它们；这是防止测试落进暂停窗口的既有防线，确认保留不改。
+  - `verify_run_mode.py` 探针补 `pause_enabled` 断言（snapshot 纳入字段、调试/默认两向校验、恢复段含 pause），探针与预设字段重新对齐；`verify_new_defaults.py` 不校验 pause，无需扩展。
+- **updatelog 补记**（用户可感知变更）：「运行模式」条目补暂停时段行为（默认启用 / 调试关闭 / 时段起止不被预设覆盖）；「尚未发布 · 体验」新增「新安装默认启用夜间暂停时段（23:00–06:00）」，标注既有配置不受影响。
+
+## 开发中（2026-09-16 「从云端仓库导入任务」弹窗 UI 重构 + 国内网络提示）
+
+用户反馈该弹窗"有点丑"，并要求为国内用户补一条"访问慢请用 Gitee"的提示。重构中发现并修掉两个真实缺陷。
+
+### 界面重构
+
+原布局的问题不在于"配色不好看"，而是**信息关系没有表达出来**：
+
+- 「加载索引」原先是独占一行的次级按钮，而它**作用的对象是这个弹窗的索引地址**——按钮与它要拉取的源被隔开，看不出点它会用哪个源。
+- 索引地址只以输入框形式出现在「自定义」场景下，预设源不显示，用户无法确认"现在到底在从哪拉"。
+
+改动：
+
+- **工具条同行**（`.repo-import-toolbar`）：左侧「来源」标签 + `.segmented` 分段控件，右侧「加载索引」。复用全局 `.segmented`（与主题切换、更新通道同一控件），当前源高亮，一眼看出按钮会拉哪个源。
+- **逐源提示**（本轮新增的其实只有这一条说明文案，来源选择本身此前已有）：来源选择器下方一行次级说明文字，内容由源本身决定（GitHub：`国内访问可能较慢或加载失败，卡住时请改用 Gitee 镜像`；Gitee：`国内访问更快，推荐国内用户使用`；自定义：无，整行不渲染）。
+- **空态重做**：原先只有一行"暂无数据"式的文字，现在复用全局 `.empty-state--dashed`——虚线框表达"待填充"，配 `globe-grid` 图标、「尚未加载任务列表」标题、说明文案，以及一个「直接查看仓库」入口，让空窗期也有出路。
+- **footer 按状态三态化**：未选中且无列表 → 「本页任务来自社区仓库，导入前请核对内容」；有列表未选中 → 「点击左侧任务查看详情后导入」；已选中 → 「导入此任务」按钮。
+- 删掉 `styles/pages/tasks.css` 里的重复 `.repo-source-label` 规则（其 `font-size` / `color` 从未生效——scoped 规则编译后带 `[data-v-*]`，特异性更高；只有 `margin-right` 半生效）。现只保留组件内一份。
+
+### 顺带修掉的两个缺陷
+
+- **空态「直接查看仓库」原先指向 raw JSON 索引地址**：它绑的是 `repoImport.url`（给程序 GET 的 `index.json`），点开是一屏原始 JSON 而不是仓库页面。根因是**一个变量承担了两种语义**——"程序的抓取地址"与"人的浏览地址"本就不是一回事。现将源选项表显式拆成 `indexUrl` / `homeUrl` 两个字段，链接改指 `homeUrl`（自定义源回退为用户自填地址，因为手填的地址未必有对应主页）。
+- **列表为空时 footer 仍提示「点击左侧任务查看详情后导入」**：左侧根本没有可点的任务，这句引导指向不存在的东西。加 `tasks.length` 条件。
+
+### 实现要点
+
+- 源选项收敛为 `TASK_REPO_SOURCES` 单一事实源（`utils/constants.ts`），新增 `TASK_REPO_URL_GITEE` 与 `TaskRepoSourceId`。分段控件由 `v-for` 遍历生成，增删源只改常量表，不再出现"同一 host 在多处各写一份"——这正是上一轮「分享适配」指向错仓库的成因。
+- `selectRepoSource` 改为查表实现：不再硬编码任何 host。离开自定义源前先存 `customUrl`，切回时**仅在确实存过手输内容时**回填——否则会把输入框清空，比保留上一个源的地址更差。
+- 自定义源的索引输入框保持"按需显示"（预设源下不出现），但**从按钮行里挪到工具条下方独立一行**：原先它嵌在来源按钮中间，选中「自定义」时按钮会被撑开、那一行的对齐随之跳动。
+
+### 验证
+
+- **真实浏览器 21/21**（新增 `docs/reports/ia-verify/verify_repo_import_ui.py`，覆盖两主题两宽度）：选择器与「加载索引」**同行**（y 中心差 0.0px）；分段控件渲染 3 源且默认高亮 GitHub；切换后 hint 文案随之变化、高亮跟随；自定义源 hint 整行不渲染且出现手输框、切回预设源后收起；**Gitee 下「直接查看仓库」href 为 `https://gitee.com/Misyra/campus-auth-tasks` 且不含 `raw`/不以 `.json` 结尾**；空列表 footer 无「点击左侧任务…」而含核对提示，加载后出现该文案、选中后变「导入此任务」；**真实拉取 Gitee 索引拿到 9 个任务**（证明国内推荐路径端到端可用）；640px 下工具条无横向溢出（`scrollWidth - clientWidth == 0`）。
+- **单测 +14**：`useRepoImport.test.ts` 新增「来源切换」7 例（索引地址互换、自定义地址跨切换保留、`sourceHomeUrl` 断言、逐源 hint、未知源回退不产生 `undefined`），`taskRepo.test.ts` 新增「仓库来源选项表」7 例（id 顺序、预设 URL 与共享常量一致、自定义项两地址皆空、**hint 必须能把国内用户导向 Gitee 并说明原因**、`indexUrl !== homeUrl`、`homeUrl` 非 raw、Gitee 镜像同 owner/name）。
+- **变异验证 4/4 全部被捕获**：① `sourceHomeUrl` 退回读 `repoImport.url` → 「预设源给仓库主页」失败；② 去掉 `else if (customUrl)` 前置判断（无条件回填）→ 「切到自定义保留已填 URL」失败；③ 自定义源 hint 改为非空 → 「自定义源无说明」失败；④ Gitee hint 去掉国内表述 → 两个文件各 1 例失败。已全部复原（复原后 `npm run build` 产物 hash 与变异前一致，确认无残留）。
+- vitest **205 passed**（23 文件）、`vue-tsc` 零错误、`npm run build` 通过。
+
+## 开发中（2026-09-16 修复「分享适配」指向错误的仓库）
+
+### 缺陷
+
+任务页「浏览器任务」卡头的**「分享适配」按钮指向主程序仓库** `Misyra/Campus-Auth-rs`，而它的用途是"把你的登录任务分享给社区"——**任务由独立仓库 `Misyra/campus-auth-tasks` 承载**。点过去只会看到 Rust 源码，找不到任何可分享或可导入的任务，该入口完全无效。
+
+同一页的「仓库导入」读的正是 `campus-auth-tasks` 的 `index.json`（`useRepoImport.ts`），录制器脚本也引导用户把任务提交到该仓库的 Issues（`resources/tools/task-recorder.user.js:2573`）——即**同一个仓库，在同一屏里被写成了两个地址**。
+
+### 修复
+
+- 「分享适配」改指 `https://github.com/Misyra/campus-auth-tasks`，`title` 由「分享你的适配方案」改为「把你的登录任务分享到任务仓库，供他人一键导入」（说明点进去之后做什么）。
+- **顺带收敛重复定义**：任务仓库坐标原本散在三处（「分享适配」硬编码的 hub 地址、「任务仓库 →」的硬编码、`useRepoImport` 的两条索引地址），这正是上面出错的原因——两处各写一份必然漂移。现集中到 `utils/constants.ts` 的 `TASK_REPO_OWNER` / `TASK_REPO_NAME` / `TASK_REPO_URL` / `TASK_REPO_INDEX_URL` / `TASK_REPO_INDEX_URL_GITEE`，三个消费点全部改为引用。
+- 未改动 `AboutView` 的仓库主页与 LICENSE 链接：它们指向主程序仓库是**正确**的（那是关于本程序自身）。
+
+### 验证
+
+- **真实浏览器 4/4**（`docs/reports/ia-verify/verify_task_repo_links.py`）：「分享适配」href 为任务仓库；任务页**全量扫描 `a[href^='https://github.com']` 只有一条**且指向任务仓库（证明页面里不再有任何指向主程序仓库的外链）；「任务仓库 →」同为任务仓库。
+- **单测 7 例**（`utils/taskRepo.test.ts`）：锁定任务仓库坐标不与主程序仓库重合、两个索引源都含任务仓库路径且不含 `/Campus-Auth-rs/`、索引是可直接 GET 的 raw 地址；并以源码断言锁住三个消费点都改用共享常量、不得再出现硬编码的 hub 地址。
+- **变异验证**：把「分享适配」改回 `https://github.com/Misyra/Campus-Auth-rs` → 2 个用例失败（`expected ... to contain ':href="TASK_REPO_URL"'`、`expected ... not to contain 'https://github.com/Misyra/Campus-Auth-rs'`），确认护栏拦得住这次的原缺陷；已复原。
+- vitest **191 passed**（23 文件）、`vue-tsc` 零错误、`npm run build` 通过；其余浏览器套件全绿（`verify_ui` 25/25、`verify_autoopen` 21/21、`verify_network_match_collapse` 15/15、`verify_run_mode` 23/23、`verify_confirm_dialog_regression` 9/9、`verify_clear_password_ui` 9/9）。
+
+## 开发中（2026-09-16 确认框支持结构化改动清单）
+
+- 原实现把改动拼成字符串塞进 `message`，靠 `white-space: pre-line` 换行：字段名与取值**同权重同颜色**、无对齐、无视觉指向，四五项时就是一团文字（实测效果如"浏览器后台运行：开启 → 关闭"逐行堆叠）。
+- `useConfirm` 新增可选 `changes: ConfirmChange[]`（`{label, from, to}`）与 `confirm-message--tight` 间距修饰；`ConfirmDialog` 渲染为两列对齐列表：字段名在左，旧值浅灰、右侧箭头、**新值加粗**——一眼看出"哪一项会变成什么"。
+- 走**可选字段**而非改 `message` 语义：既有几十处调用（删除方案、清空历史、退出应用、放弃草稿等）完全不传 `changes`，渲染路径不变，无需逐个改动。
+- 新增 `arrow-right` 图标（`IconApp` 此前只有 `arrow-left`，补镜像版）。
+- **两处自身修正**：① 旧值起初用 `line-through` 划线，放大实测发现短字面（`INFO`）被横线穿过主干后**比不划更难读**，改为纯低对比度弱化；② 间距修饰原本想用 `:has(+ .confirm-changes)`，改为显式类——与本文件既有约定一致（见 `.modal-overlay--confirm` 的说明：不依赖较新选择器）。
+- **未引入 `--text-muted-rgb`**：核实该变量不存在（`--text-muted` 只有色值形式），避免了一个悄悄失效的样式声明。
+
+### 验证
+
+- **运行模式端到端 23/23**（探针同步适配：改动已从 `message` 文本移到结构化列表，改为读 `.confirm-change` 行并逐行打印）。
+- **确认框回归 9/9**（新增 `verify_confirm_dialog_regression.py`，专门为"改的是全局共享组件"而做）：无 `changes` 时**不渲染列表**（既有用法零影响）、`danger` 样式在、**`--z-confirm` 层级仍为 500**（Earlier 轮次修过的"确认框被弹窗压住"未复发）、Esc 可取消且不误退出、打开时焦点落在按钮、Tab 在框内循环。
+- 其余套件全绿：`verify_network_match_collapse` 15/15、`verify_autoopen` 21/21、`verify_ui` 25/25、`verify_clear_password_ui` 9/9。
+- `verify_new_defaults` 改为**前置校验后明确跳过**：它只适用于"删空 `config/` 后新建"的全新安装场景，而当前运行目录是既有配置（`startup_action=monitor`）——既有配置保留自己的值正是正确行为，此时它的断言本不成立。此前会报 3 条假失败，现改为打印跳过原因与复现步骤。
+- vitest **184 passed**、`vue-tsc` 零错误、`npm run build` 通过。
+
+## 开发中（2026-09-16 「设置 · 系统」新增「运行模式」预设：默认 / 调试 / 自定义）
+
+### 背景与调研结论
+
+需求是「加几个默认选项，一键改一组值」。调研后确认三件事，它们决定了实现形态：
+
+- **`developer_mode` 是死字段**：`src/config/schema.rs:356` 定义、默认 `false`，但后端无消费点、前端 `types.ts` 连类型都没有。故"调试模式"不能复用它，需另建概念。
+- **预设涉及的三类生效机制不同**：多数项可经 `PATCH /api/config` 一次提交；`logging.level` 必须走 `PUT /api/config/log-level`（仅 PATCH 只落盘**不热更新 tracing filter**，会出现"界面显示 DEBUG、实际仍按 INFO 过滤"的静默假象）；`autostart_enabled` 不在 PATCH 白名单，只能走 `POST /api/autostart/*` 且**会真实写系统注册表**。故"一键切换"必然跨 3 个 API、**非原子**——这一点在设计上被正面处理（见下），而非掩盖。
+- **跨 API 的中途失败会留下半套配置**：为此失败时明确提示"部分设置可能已生效，请检查后重试"，并尽力回读让界面反映真实状态，避免用户以为"什么都没变"而重复点击。
+
+### 实现
+
+- 新增 `utils/runMode.ts`（**纯函数**，可直测）：预设定义、模式判定 `detectRunMode`、差异计算 `diffRunMode`、值格式化。
+- 新增 `composables/useRunMode.ts`：读取当前值 → 判定模式 → 应用预设（与 API 打交道的部分）。
+- 「设置 · 系统」页顶部新增「运行模式」卡：两个可选预设 + 一个**只读**的「自定义」态，卡片头徽标实时显示当前模式。
+
+**预设内容**（`low_resource_mode` 两组都关：调试要看得见验证码图，默认模式也没理由为省资源而牺牲兼容性）：
+
+| | 默认模式 | 调试模式 |
+|---|---|---|
+| 浏览器后台运行 | 开启 | **关闭**（看得见浏览器） |
+| 登录后保持浏览器进程 | 关闭 | **开启**（反复查看现场） |
+| 启动后执行 | 开始检测 | **无操作**（手动跑一次才看得见过程） |
+| 日志级别 | INFO | **DEBUG** |
+| 开机自启动 | 开启 | **关闭** |
+| 低资源模式 | 关闭 | 关闭（两组相同） |
+
+**三个设计取舍（均有理由，非默认行为）**：
+
+1. **不含 `strict_login_mode`**：它决定"何时触发登录"，属功能行为而非可观测性；放进调试模式会让登录在证据不足时也尝试，可能在用户没预期的时机弹出浏览器。那是修 bug 的手段，不是"方便排查"的开关。
+2. **「自定义」不可点**：它是"手动改过设置"的自然回落，不是一个可选目标。任一字段与预设不符即判为自定义——不做"匹配度最高者胜"的模糊判定，那会让界面显示一个用户并没选过的模式名。
+3. **切换前弹确认并逐项列出改动**：由 `diffRunMode` 生成，**只列实际有变化的项**（实测确认框里不出现"低资源模式"，因两组取值相同）。这个动作会写多处设置、还会真实注册/取消开机自启，用户有权在动手前看到究竟改了什么。
+4. **未保存的修改先征得同意**：应用模式后必须回读才能让界面与磁盘一致，而回读会冲掉设置页草稿；故先确认，用户取消则整体放弃（不产生任何写入）。
+
+### 验证
+
+- **纯逻辑单测 26 例**（`utils/runMode.test.ts`）：模式判定（完全匹配 / 任一字段不符即自定义 / 两边各取一半）、大小写与 `WARNING`→`WARN` 归一化、差异计算只列变化项、值格式化（布尔转开启/关闭、未知枚举值原样返回不崩）、`custom` 不可作为目标。
+- **变异验证**：把 `matchesPreset` 的逐字段比对改成"只比第一个字段" → 3 个用例失败（`expected 'debug' to be 'custom'`），确认"任一字段不符即自定义"的判定真的承重；已复原。
+- **真实浏览器端到端 22/22**（`docs/reports/ia-verify/verify_run_mode.py`）：卡片与三个选项齐全、「自定义」非按钮不可点；切到调试模式后**服务端 5 项全部落实**（`headless=false`、`keep_alive=true`、`startup_action=none`、`log_level=DEBUG`、`autostart=false`）、徽标变「调试模式」；在「设置 · 浏览器」手动开一项并保存后**徽标自动回落「自定义」**；切回默认模式后 5 项回到默认值、徽标变「默认模式」；确认框只列实际会变的项；无 JS 错误；**测试后自动恢复到测试前状态**。
+- **系统注册表核对**：`autostart` 关闭时 `HKCU\...\Run` 下无 `Campus-Auth` 项，与 `settings.json` 的 `autostart_enabled` 一致——确认预设对自启动的改动是真的落到系统而非只改配置。
+- 我自己的探针修了两处**假设错误**（非产品缺陷）：① 硬断言"确认框必含开机自启动"，而该项当时已与目标一致、**正确地**未被列出——改为断言"只列实际会变的项"；② 「低资源模式」在「浏览器」Tab，探针却在「系统」Tab 找它。另把探针改成状态无关（重跑时若已是调试模式，点击会被正确忽略，不再误判为"确认框没弹出"）。
+- `vue-tsc` 零错误、vitest **184 passed**（22 文件）、`npm run build` 通过。
+
+## 开发中（2026-09-16 默认值调整：不自动监测、不自动切方案；方案编辑器「网络匹配」默认折叠）
+
+### 「网络匹配」区改为可折叠、默认收起
+
+- `ProfilesView` 的「网络匹配」（网关 IP / WiFi 名称 / 检测当前网络）由常驻展开改为可折叠区，头部即切换按钮（与「设置 · 任务与环境」的 Python 环境卡同一交互模式，含 `role="button"` / `tabindex` / `aria-expanded` / Enter / Space）。
+- **已配过匹配规则的方案默认展开**：`watch(editingProfile)` 在换草稿时按内容决定初值——收起会让人看不到自己设过的规则，以为丢了。同一份草稿内手动折叠后不再重算（否则改任意字段都会弹回展开，手动折叠形同虚设）。
+- 折叠态显示摘要（`网关 192.168.7.7 · SSID Dorm-9F`），避免"看不见就以为没配"。
+- 折叠状态是组件局部 `ref`，不持久化——它只是当次的查看偏好。
+
+### 默认值：启动不自动监测、不自动切换方案
+
+两处 `impl Default` 与枚举的 `#[default]` 同步改动：
+
+- `AppSettings::default().startup_action`：`Monitor` → **`None`**，并把 `StartupAction` 的 `#[default]` 从 `Monitor` 移到 `None`（两处必须同时改，否则 `AppSettings::default()` 与 `StartupAction::default()` 语义不一致）。效果：全新配置启动后引擎停在 `stopped`，需在控制台点「启动检测」。
+- `SettingsData::default().auto_switch`：`true` → **`false`**。效果：单网络环境用户不再每 60s 空转方案匹配；副作用是方案卡片变为可点击切换（`ProfilesView` 的 `!autoSwitch && setActiveProfile` 分支）。
+- 前端兜底同步：`DEFAULT_CONFIG.app_settings.startup_action` 改 `"none"`、`useProfiles` 的 `autoSwitch` 初值改 `false`（均为加载失败时的占位，正常以服务端下发为准）。
+- **不影响既有配置**：`#[serde(default)]` 只在字段缺失时生效，磁盘上已写的值优先。已实测（见验证）：放入 `auto_switch: true` + `startup_action: monitor` 的旧配置，新版本读取后仍为原值、磁盘未被回写、引擎照常自动启动。
+
+### 联动修复：受影响的两处测试
+
+- `config::service::tests` 的 `test_settings_data_default_values` / `test_settings_data_partial_json_fills_defaults` 原断言 `auto_switch == true`，改为断言新默认 `false`（后者显式覆盖"字段缺失回退默认"）。
+- `test_modify_settings_concurrent_switch_and_toggle_field_isolation` 的注释称"默认 auto_switch 恰为 true"，已改为说明"不依赖默认值"（该用例本就显式置起点，只是注释过期）。
+- **集成测试 `login_chain_auto_relogin_after_kick` 真的失败了**（首次运行 301s 超时）：它依赖"启动即自动监测"，自身从不调 `POST /api/monitor/start`，其旧文档注释也自认这一点（"实例启动即开始检测"）。这正是本次默认值变更的正确后果——已改为用例内**显式启动监测**并断言启动成功，让前提不再隐式依赖默认值。修复后 5 个用例全通过。
+
+### 验证
+
+- **全新配置端到端 12/12**（`docs/reports/ia-verify/verify_new_defaults.py`，删空 `config/` 后启动真实二进制）：`startup_action=none`、`auto_switch=false`；启动后 `engine_state=stopped`、`probe_total=0`、侧栏显示「已停止」；设置页启动动作显示「无操作」；方案页「自动切换」开关为关闭且文案为「自动切换已关闭」。
+- **反向验证（排除"引擎本来就起不来"的假通过）**：同一实例点「启动检测」后 `engine_state=running`、`probe_total=1`，再点「停止检测」回到 `stopped`。只断言"启动后是 stopped"会被"永远起不来"骗过，故两向都验。
+- **老配置不受影响（决定性检查）**：把含 `auto_switch: true` + `startup_action: monitor` 的旧配置放入运行目录后启动 → API 回读仍为 `True`/`monitor`、**磁盘未被回写**、`engine_state=running`（旧行为保留）。
+- 折叠区 15/15（`verify_network_match_collapse.py`）：无规则默认折叠且无摘要、有规则默认展开、点击/回车可切换、`aria-expanded` 正确、**改动其它字段不弹回展开**、折叠态摘要含网关与 SSID、测试方案已清理。
+- 日志佐证：当日 13:30 之前的每次启动均有 `按 startup_action=monitor 已启动检测`，13:30:41 的全新配置启动**无该行**——默认值变更确实生效。
+- `cargo fmt --check` / `cargo clippy --all-targets --features no-embed -- -D warnings` 零告警；`cargo test --features no-embed` **873 lib + 全集成 crate 通过**；`vue-tsc` 零错误、vitest 158 passed、`npm run build` 通过。
+
+### 待确认的联动（未改动，留给决策）
+
+「开机自启」注册的命令行**不带** `--startup-action`（`src/utils/platform.rs` 三平台均只注册 exe 路径），启动动作完全取自 `settings.json`。因此新默认下「开启开机自启 + 全新配置」= 开机后程序启动但**保持待机**，需手动点「启动检测」——这未必是自启用户想要的。若要贴合直觉，可让「启用自启」顺带把 `startup_action` 设为 `monitor`（或注册时带上 `--startup-action monitor`）；本次未动，因其属行为变更而非默认值调整。
+
+## 开发中（2026-09-16 任务页 Tab 文案：AI 生成 → AI 生成浏览器任务）
+
+- 任务页第四个 Tab 由「AI 生成」改为「**AI 生成浏览器任务**」，路由 meta 标题同步为「任务 · AI 生成浏览器任务」，侧栏「任务」的 `title` 悬停提示同步。
+- 改动理由：该 Tab 与左侧「浏览器任务」并列时，只写「AI 生成」看不出生成的是**什么**（脚本？定时任务？），用户得点进去才知道。补全宾语后一眼可知这一栏产出的是浏览器任务——它也正是登录实际执行的那一类，与「浏览器任务」的产物同类。
+- 布局：标签栏是 `width: fit-content` 自适应（`tasks.css:5-9`），桌面端 4 个页签总宽 527px、单行 60px 高，未折行，**主尺寸无需改 CSS**。
+- **过程中发现并修掉一处自身引入的缺陷（窄屏折行）**：`responsive.css` 原有 `.tasks-tabs .settings-tab { flex: 1 1 30% }`（三 Tab 时代为均分而设），改到 22% 后 760px 下每栏仅 75px，四个页签**全部被压成两行**（实测「浏览器任 / 务」「AI 生成浏 / 览器任务」）。已改为 `flex: 0 1 auto` + 只收紧内边距，并给 `.tasks-tabs .settings-tab span` 加 `white-space: nowrap`，让长标签靠容器换行（`.settings-tabs` 本就有 `flex-wrap: wrap`）而不是把文案压断。
+- 同类修正：`tasks.css` 头部注释写「本页只有 3 个 [页签]」、`responsive.css` 写「任务页三 Tab 窄屏均分」、`ai_task.css` 写「第三个 Tab / 其他两 Tab」——均为定时任务并入前的旧口径，已同步为四项。
+- 验证：浏览器断言 **8/8**——文案数组精确匹配、标签栏宽度（527px）与高度（60px）、AI Tab 可点开且内容渲染、窄屏零溢出、**窄屏四项文案均单行**（按计算行高判定 `lines≈1`，未截断）、无 JS 错误；`vue-tsc` 零错误、`npm run build` 通过、vitest 158 passed。
+- **探针自身的教训**：初版窄屏检查只比 `scrollWidth - clientWidth`，而**折行时两者相等**——该检查对折行是假通过，已改为按行高判定行数（`height / lineHeight`），才暴露出上面那处折行。
+- 同步：`task-manual.md:17`（Tab 清单）、`user-guide.md:77,111`（数据归属表与任务段）、changelog/updatelog 自身对 Tab 名的引用。
+
+## 开发中（2026-09-16 「方案」页进入即展示当前方案编辑器）
+
+### 问题：账号唯一入口却先落列表，高频操作多两步
+
+上一节把账号/认证/登录方式收敛到「方案」页后，进入该页最高频的用途变成**改当前方案的账号**，但页面默认展示列表，用户还得找到卡片再点「编辑」。方案数越多、卡片列表越长，这段路越没有意义。
+
+### 处置
+
+- 新增 `openActiveProfileForEdit()`（`useProfiles`），进入「方案」页时自动打开**活跃方案**的编辑器；`ProfilesView` 的 `onMounted` 改为 `await fetchProfiles()` 后再尝试打开。
+- **关键防御：列表未就绪时绝不打开。** `showProfileEditor(id)` 对"id 不在已加载列表里"的既有语义是**打开空白新建表单**（else 分支），而 `activeProfileId` 初始值恒为 `"default"`、`profiles` 在首个响应到达前为空——若直接调用，用户进入页面会看到一个空白表单并以为配置丢了，比留在列表页更糟。故 `openActiveProfileForEdit` 显式前置校验 `profiles[id]` 存在，否则返回 false 留在列表页。
+- **已有草稿直接复用，不重载**：用户上次在本页编到一半就切走（或点了侧栏再点回来），单例草稿仍在。若重载会走 `confirmDiscardIfDirty`，等于每次回页都被问「是否放弃未保存的修改」。
+- 自动打开**只在挂载时执行一次**：回列表后不会被立刻重新打开，用户「返回方案列表」的意图被尊重。
+- 编辑器顶栏改为「返回按钮 + 标题」在左、「方案切换器 + 当前使用徽标」在右：编辑中可直接换方案，不必退回列表再进来（此前顶栏第三个 div 只是占位）。切换复用 `openEditor` 既有路径，dirty 时先确认；用户取消则 `editingProfile` 保持原指向，下拉显示随之回退，不会出现「下拉已变、实际还在编旧方案」。
+- 新建草稿不显示切换器（无既有方案可切）。
+
+### 验证
+
+- vitest **158 passed**（21 文件；新增 `useProfiles.test.ts` 5 例）；`vue-tsc` 零错误；`npm run build` 通过。
+- **变异验证**：删掉 `openActiveProfileForEdit` 里的 `profiles[id]` 前置校验 → 「列表未加载时不打开」用例失败（`expected true to be false`），确认该防御真的承重而非冗余；已复原。
+- **真实浏览器 21 项断言全过**（`docs/reports/ia-verify/verify_autoopen.py`）：建 A/B 两方案并把 **B 设为活跃**后进入 `/profiles`，直接落在编辑器且账号为 `user-b`（**证明打开的是活跃方案而非列表首项**）；顶栏「当前使用」徽标与切换器存在；编辑器内切到 A 生效且徽标消失；侧栏离开再回来**不弹放弃确认**且改动 `draft-keep-me` 仍在（单例复用）；**整页 F5 后回落展示活跃方案**（单例随刷新清空）；「返回方案列表」后停在列表、不被自动重开、约 1s 后仍未被重开；「新建方案」仍可进入新建表单（ID 可编辑、无切换器）；无 JS 错误。测试方案已清理、活跃方案还原 `default`。
+
+## 开发中（2026-09-16 界面按「配置对象」重组：方案成为账号类的唯一入口）
+
+### 问题：同一份 `ProfileData` 有三个可写入口
+
+界面此前按"功能清单"分组，而数据模型是"方案中心"的，两者错位：
+
+- `GlobalConfig` 里**根本没有账号字段**（`src/config/schema.rs:38-56` 只有 browser/monitor/pause/logging/retry_settings/worker/app/updater）。
+- 「设置 · 账号」不是全局设置的一个切面，而是**活跃方案凭据的第二个视图**——`PATCH /api/config` 把 `username/password/auth_url/trigger_url/isp/active_task/login_channel/http_*` 共 13 个键映射回 Profile（`src/web/routes/config.rs:90-108`），`GET` 也只是把它们摊平到顶层。
+
+于是账号/认证/登录方式有了「设置 · 账号」「配置方案」编辑器两处等价入口（第三处「任务 · 直连登录」是上一轮新增），用户无从判断"改哪边才生效"。由此还带出两个实缺陷：
+
+- **`留空使用全局` 是假文案**：`resolve_profile`（`src/login/mod.rs:655-672`）只在方案之间回退，从不回退全局账号；留空即登录校验失败。更糟的是失败文案写「请在**设置页**填写账号」（`src/login/mod.rs:740`）——照它去设置页填，改的是活跃方案（可能是另一个方案）。
+- **known-issues #23 E1**：账号混在全局保存栏里，`useConfig` 的保存载荷带着 `auth_url`，于是「自动检测」填入的未确认候选地址会被任意 Tab 的「立即保存」静默落盘。
+
+### 处置：让 UI 追上数据归属，每类数据只有一个入口
+
+导航由「仪表盘/设置/任务/关于/更多(配置方案·定时任务·外观)」改为五项，按**配置对象**划分：
+
+| 导航 | 编辑对象 | 存储 / 接口 |
+|------|----------|-------------|
+| 仪表盘 | 状态总览与手动操作 | — |
+| **方案** | 账号、密码、认证地址、匹配规则、登录方式、直连参数 | `/api/profiles/*` |
+| **任务** | 浏览器任务 / 脚本 / 定时任务 / AI 生成浏览器任务 | `/api/tasks`、`/api/scripts`、`/api/scheduler/jobs` |
+| **设置** | 检测 / 浏览器 / 任务与环境 / 系统 / 网络与更新 / 外观 | `/api/config` |
+| 关于 | 版本、更新与卸载 | — |
+
+- 删除「设置 · 账号」Tab（`AccountSettings.vue` 删除），`SETTINGS_TABS` 去掉「账号」项、加入「外观」项（6 → 6，仍为 6 Tab）；`/settings/account` 保留为 **redirect → `/profiles`**，旧深链与书签不 404。
+- 删除上一轮新增的「任务 · 直连登录」Tab（`DirectLoginPanel.vue` + `useDirectLogin.ts` 删除，路由与 `editorGuard` 第三分支同步移除）：直连参数本就是方案字段，方案页是它的唯一入口，该 Tab 沦为冗余。
+- 「定时任务」由侧栏独立页并入任务页 Tab（`/tasks/scheduled`）；「外观」由侧栏独立页并入设置页 Tab（`/settings/appearance`）；两者旧路径保留 redirect。侧栏「更多」次级菜单随之删除（不再有需要折叠的项），`sidebar.css` / `responsive.css` 的 `.nav-more*` 规则同步清理。
+- **设置页保存栏不再触碰任何方案字段**：`useConfig` 删除 `credentials` 段、独立 `password` 实例、`validateConfig` 的 auth_url/trigger_url 检查，`SaveConfigPayload` 只余 8 个全局键。`refreshActiveProfileConfig()`（把活跃方案凭据同步进设置页副本）随之删除，`useProfiles` 不再 import `useConfig`——它存在的唯一理由就是维护那份副本。
+- `usePasswordField.ts` 删除：它的唯一用途是 `PATCH /api/config` 的三态密码契约，该契约已无调用方。
+- `CredentialsConfig` 类型保留为字段清单的单一说明来源（`LoginChannelField` / `HttpLoginWizard` 的草稿契约引用它），但不再挂在 `Config` 下。
+- `DashboardView` 的直连渠道判定与 `TaskEnvironmentSettings` 的"当前任务"改读方案摘要（`ProfileSummary.login_channel` / `active_task`），不再从 `GET /api/config` 的凭据投影取。
+- 外观 Tab 在设置页内**不显示保存栏**（`isAppearanceTab`）：它改动即时写 localStorage 并生效，显示「立即保存」会让用户点下去只得到「配置没有变更」。同时去掉 `AppearanceView` 自带的 `.page-content` 外壳，避免与设置页框架嵌套出重复入场动画。
+
+### 后端：补齐方案页取代账号页所必需的两个字段能力
+
+账号页原有的两个能力在方案页无对应实现，必须补上（否则是净能力回退）：
+
+- **`PUT /api/profiles/{id}` 新增 `clear_password`**（`ProfileUpdateBody`）。`password` 的空串语义是「未修改，保留原密码」，**无法**表达清除；清除此前只能经 `PATCH /api/config` 对活跃方案完成，那正是账号页的路径。
+- 同时把该意图穿透到服务层：`ProfileApi::update_profile` 增加 `clear_password: bool` 参数。不能只靠置空 `ProfileData::password`——`ProfileService::update_profile` 会把它再交给 `save_password`，而后者的空串契约正是「保留原密码」，清除会被静默撤销（`src/config/profiles.rs:171-178`）。
+- **`GET /api/profiles/{id}` 新增 `has_password`**（口径复用 `effective_has_password`，由私有改 `pub(crate)`）。此前该响应只把 `password` 置空后回 settings，前端无法区分「没设密码」与「有密码但被抹掉」，占位文案只能猜。
+- `openapi.json` **无需改动**：它没有字段级 schema（`/api/profiles/{id}` 条目内均为 `"schema": {}`，见 `openapi.json:617-654`），两个新字段不涉及路径增删。
+- 方案编辑器的密码区随之接入：已保存时显示「已保存，留空保留；输入新密码则更新」+「清除已保存密码」按钮，请求态 `_clearPassword` 放在**草稿对象内**（放对象外则「只点了清除」不产生未保存标记，离开时静默丢失），并提供「撤销清除」；账号占位由「留空使用全局」改为「学号 / 上网账号」+「留空无法自动认证」。
+
+### 验证
+
+- **前端**：`vue-tsc -p tsconfig.app.json` 零错误；`npm run build` 通过；vitest **153 passed**（20 文件）。
+- **回归护栏**（新增用例锁定新边界）：`useConfig.test.ts` 新增「保存载荷只含全局设置」——逐个断言 15 个方案域键（含 `clear_password`）不得出现在 `PATCH /api/config` 载荷里，并断言 `useConfig` 不再暴露 `password`/`clearPassword`、`config` 上无 `credentials`；「后端仍在扁平响应里回传凭据时本 composable 不接收」用例确认接收这些字段不会误标 dirty。`editorGuard.test.ts` 移除直连分支用例，改为覆盖定时任务 Tab 的内部切换与离开判定。
+- **Rust**：`cargo fmt --check` / `cargo clippy --all-targets --features no-embed -- -D warnings` 零告警；`cargo test --features no-embed` **873 lib + 全集成 crate 通过**。
+- **变异验证**（新增护栏必须能失败才算数，三处均已复原）：① 路由层 `update_profile` 的 `clear_password` 透传改为恒 `false` → `test_put_clear_password_empties_existing_password` 失败（`left: "ENC:old-secret"`）；② 服务层 `if clear_password` 改为 `&& false` → `test_update_profile_clear_password_empties_existing` 失败；③ 过程中发现**路由层 handler 内的 `profile.password.clear()` 是死代码**——删掉它测试仍全绿，因为真正的判定在服务层，故将其删除、只保留意图透传，测试随即能锁住透传（这正是变异验证的价值：避免留下"看起来在防护"的冗余分支）。
+
+### 文档
+
+- `user-guide.md`：第 2 节「Web 控制台」改为五处导航的数据归属表（并说明账号属方案、切方案即切账号）；第 3 节补 `has_password` / `clear_password`；第 4 节任务页四 Tab 重排、定时任务并入、录制器入口指向、「设置·环境」等旧称统一。
+- `task-manual.md`：任务页 Tab 清单与「直连登录」段改为"方案页是唯一入口"；启用任务的选择位置指向方案编辑器。
+- `http-login-guide.md`：第 1 节切换入口、第 7 节保存步骤、FAQ 向导入口三处去掉「设置 · 账号」。
+- `known-issues.md`：#23 E1 标记为 2026-09-16 已修复（架构性消除）并注明回归用例位置。
+
+## 开发中（2026-09-15 默认主题文字加深 + 直连登录 UI 重做、向导与使用文档）
+
+### 默认主题（浅色）文字色整体压到黑色系
+
+- `base.css` 的 `[data-theme="light"]` 四级文字 token 由 `#000000 / #4a4a4a / #666666 / #6b7280` 改为 `#000000 / #1a1a1a / #333333 / #4a4a4a`。原次级/弱化档是中性灰，在浅色玻璃卡片（`--bg-card: rgba(255,255,255,.45)`）上半透明合成后观感发灰，长段落（协议文本、字段说明）尤其明显；现按「正文纯黑 → 次级近黑 → 弱化深灰」递降，层级仍可辨。
+- **动态实测对比度**（Playwright + WCAG 相对亮度，分别对 body 底色与「卡片色合成 body 底色」两处取值，取最差）：`--text-primary` 18.68:1、`--text-secondary` 15.48:1、`--text-muted` 11.24:1、`--text-tertiary` 7.88:1，四档均远超 AA 正文 4.5:1。深色主题（`:root`）与 `--text-on-accent` / `--on-accent` 双轨未动，实测深色下仍为 `#ffffff / #b3b3b3 / #999999`。
+
+### 直连面板 UI 重做（`LoginChannelField.vue`）
+
+- **渠道选择由分段控件改为两张说明卡片**：各自给出「怎么工作」与成本标签（浏览器自动化=「需要 Python 与浏览器」/直连请求=「免 Python 与浏览器」）。原分段控件只有两个词，用户无法从界面判断两者代价差异，而这正是选渠道时唯一的决策依据。
+- **直连参数按因果顺序编号分组**（① 请求地址 → ② 请求头/请求内容 → ③ 成功/失败关键字 → ④ 凭据变换脚本 → ⑤ 测试），每组带一句「该做什么」。此前 7 个输入平铺成一片，用户常只填地址就点测试，拿到「未命中成功标识」后不知还差什么。
+- 新增「填入示例」按钮（地址/请求头/请求内容/脚本骨架），占位符与内置函数改为 chip 速查；判定顺序（先失败后成功）与「响应恒 200 门户必须填关键字」在 ③ 组内显式说明。
+- 凭据变换脚本默认收起（绝大多数门户不需要），已配置时自动展开并显示「已配置」徽标。
+- **测试结果面板补「下一步该怎么办」**：新增 `httpTestOutcomeHint()`，按 outcome 给出针对性指引（如 `assertion_failed` 明确指向「核对成功关键字；响应恒 200 时必须填」）。原面板只有结论标签，用户不知道改哪个字段，容易反复重试同一错配置。请求/响应报文收进 `<details>` 折叠、脚本错误单独高亮。
+- 向导入口挂在标题行右侧（胶囊按钮）；**该入口独立于标题渲染**——`AccountSettings` 传 `:title="null"`，若与标题同处一个 `v-if` 会导致设置页整块入口消失（本轮自查发现并修正，见验证）。
+
+### 新增直连登录分步向导（`HttpLoginWizard.vue`）
+
+- 四步：找到登录请求 → 填写请求 → 设定判定 → 发送测试。每步只暴露该步字段，步骤条可点回看（未到达步禁用）。
+- **与宿主共用同一草稿对象**（`v-model` 原地改）：向导内改动立即写回方案编辑器 / 设置页表单，关闭不丢，宿主原有 dirty 判定照常生效；向导自身不持有第二份状态、不负责保存。
+- **按步把关并在底部说明被拦原因**：第 1 步要求账号可用（该步本身就把账号行标红，仍放行会让人走到第 4 步才发现）、第 2/3 步要求请求地址、第 4 步要求无缺口。禁用按钮同时给出 `blockedReason` 文案——只禁用不说明等于把用户卡住。
+- 认证地址检测结果经 `portalDetected` 事件交回宿主写回（该字段不在组件读写的草稿契约内，且两个宿主落点不同）。
+- 向导内嵌 `ctx` / 内置函数清单与 eportal（按来源 IP 推导密钥）的完整示例脚本。
+
+### 新增使用文档与文档端点
+
+- `docs/guides/http-login-guide.md`：从「怎么判断门户适不适合直连」到抓包、占位符、成败判定、凭据变换脚本（含 eportal XOR 完整示例）、测试结果解读、边界与已知限制、FAQ。
+- 新增 `GET /api/docs/http-login-guide`（`src/web/routes/system.rs::http_login_guide`），前端面板与向导的「使用文档」入口指向它；`openapi.json` / `auth.rs` 免鉴权白名单 / `static_files::GuideAsset` 的 `#[include]` 同步。
+- **顺带收敛三份指南的样板代码**：`resolve_guide_path` / `embedded_guide` / `resolve_manual_path` / `embedded_manual` 四段逐字重复的实现合并为 `GuideFile` 描述表 + `serve_guide()`。原实现新增一份指南要再抄一遍「嵌入兜底 → 磁盘查找 → 读文件 → 组响应」，漏抄 `#[include]` 时开发机（磁盘有文件）一切正常、只有便携包在缺 `docs/` 的真实用户那里 404。
+
+### 验证
+
+- **前端**：`vue-tsc -p tsconfig.app.json` 零错误；`npm run build` 通过；vitest **129 passed**（`loginChannel.test.ts` 由 6 → 20 例，覆盖 `httpTestOutcomeHint` 六种结论互不相同且 `assertion_failed` 点名恒 200 陷阱、`httpConfigGaps` 的顺序与「已保存方案不算缺密码」、`isCredentialExposedViaGet` 三情形、内置函数清单锁定）。
+- **Rust**：`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` 零告警；`cargo test --features no-embed` **855 lib + 全集成 crate 通过**；默认特性下新增的 `every_guide_is_embedded` / `guide_path_falls_back_to_manifest_dir` / `all_guides_resolve_to_existing_files` 通过。
+- **变异验证**（新增护栏必须能失败才算数）：从 `GuideAsset` 删 `#[include = "http-login-guide.md"]` → `every_guide_is_embedded` 失败并报「http-login-guide.md 未嵌入」；把 `HTTP_LOGIN_GUIDE.rel_path` 改成不存在路径 → `all_guides_resolve_to_existing_files` 失败并打印该路径。两处均已复原。
+- **真实二进制 + Playwright 动态验证**：便携包语义（base 目录**不含** `docs/`）下 `GET /api/docs/http-login-guide` 返回 200 / `text/markdown` / `filename="http-login-guide.md"`，正文为 Markdown 原文 ← 证明嵌入兜底真的生效，而非只走开发机磁盘。
+- **端到端**：Playwright 驱动真实二进制 + `tests/mock-servers/full-portal` 门户，从 UI 填 POST 表单与成败关键字后点「发送测试请求」——正确凭据得「请求判定成功」，错误密码得「门户拒绝凭据」。**两个方向都验证**才排除「关键字恒匹配」的假通过（首次探针因 mock 路径解析失败报「请求未送达」，修正后重跑；该现象也反向确认了 network_error 分支的文案确实可读）。会话脚本错误数 0；700px 窄屏无横向溢出。
+- 过程中修正一处自身缺陷：向导入口原本与标题同处 `v-if="title !== null"`，而「设置 · 账号」传 `:title="null"`，入口在该页会整块消失——已拆出独立的标题行容器并用设置页回归探针锁定（入口可见、点击可开、浏览器渠道面板仍在）。
+
+## 开发中（2026-09-16 任务页新增「直连登录」Tab + 修正浏览器任务下拉）
+
+### 浏览器任务下拉：去掉与 `default` 重复的空值项
+
+下拉首项曾是空值「使用内置默认任务」，而它指向的就是任务列表里的 `default`
+（`DEFAULT_TASK_ID`，播种名「通用登录」）——**同一件事两个条目**，用户不知选哪个；
+且 `default` 那条不带任何说明，看不出它就是"内置默认"。
+
+- 选项改为只来自任务列表（`browserTaskOptions`），`default` 一条加「（内置默认）」后缀承袭原语义。
+- 显示走 `taskBindingDisplay` + computed 代理：未绑定（空 `active_task`）时显示为内置默认任务，
+  但**读取绝不写回草稿**——否则编辑器一打开就与服务端不一致，立刻显示「未保存」。
+  用户真正下拉选择时才写回，未触碰的方案保持原有空值。
+- 两者等价有据：后端 `resolve_task_choice`（`src/login/mod.rs:111`）在 `active_task` 为空与
+  为 `default` 时都回退同一个内置任务，故显示为 default 不改变行为。
+- 逻辑落在 `utils/loginChannel.ts` 并由单测直接覆盖（与组件共用同一实现，
+  避免测试自己抄一份逻辑的假覆盖）。
+
+### 任务页新增「直连登录」Tab
+
+直连参数（`http_*`）与登录渠道属于**方案**，此前只能在「配置方案」编辑器或
+「设置 · 账号」两处编辑；只配直连时得先打开整个方案编辑器。现单列一个 Tab
+（`/tasks/direct`），字段与保存语义与那两处**完全一致**（同一 `LoginChannelField`
+组件、同一 `PUT /api/profiles/{id}`），三处互不冲突。
+
+- **页内先选方案（默认当前活跃方案）**：直连参数是方案级配置，必须明确"正在改谁"，
+  否则会出现"改了没生效"——登录用的是活跃方案。非活跃方案额外提示需到「配置方案」页切换。
+- 草稿状态放在 `useDirectLogin` 单例而非组件内：任务页以子路由切 Tab，组件会卸载重建，
+  组件内 state 会在切走时丢失（与 `useTasks`/`useScripts` 同因）。
+- **不共用 `useConfig` 的草稿**：设置页也编辑同一批字段，共用会让两页的未保存状态互相串扰，
+  且从任务页保存会把无关的全局设置一并提交。本页走 `PUT /api/profiles/{id}`，只写方案。
+- `password` 提交空串：`update_profile` 的空密码分支是「保留原值」，故不会清掉已存密码
+  （已端到端验证：保存后密文逐字节未变）。
+- 离开守卫（`editorGuard`）补上直连草稿：该草稿是方案级快照，离开后不会自动恢复
+  （下次进入重新从服务端载入），脏时必须确认，否则改了一半的参数会被静默丢弃。
+  Tab 间切换不拦截（草稿在单例里，切回来仍在）。
+
+### 验证
+
+- **前端**：`vue-tsc` 零错误；vitest **155 passed**（148 + 7）；`npm run build` 通过。
+- **变异验证**（护栏必须能失败）：① 去掉下拉的「（内置默认）」标注 →
+  `browserTaskOptions` 两例失败；② 把 `taskBindingDisplay` 改成直接返回入参（未绑定不再显示默认任务）
+  → 两例失败；③ 在 `editorGuard` 里短路直连分支（`if (false && isDirectDirty())`）→
+  新增的 3 个直连用例失败。三处均已复原。
+- **端到端**（真实二进制 + 浏览器）：① 任务页出现 4 个 Tab，`/tasks/direct` 直连登录为激活态；
+  ② 任务下拉**只有一个条目**「通用登录（内置默认）」且已选中，重复项已消失；
+  ③ 打开即无「未保存」提示（代理读取不写回）；④ 切渠道后填写请求地址并保存 → toast
+  「直连登录配置已保存」，落盘 `login_channel=http` 且 `http_url`/成功关键字写入，
+  **原账号与 `ENC:` 密码逐字节未变**（关键：证明空密码语义没清凭据）；
+  ⑤ 方案下拉正确列出两个方案并标注「（当前使用）」，切换到另一方案后渠道与字段随之刷新；
+  ⑥ 脏草稿下切 Tab 放行且草稿保留，离开 `/tasks` 区域弹出「当前直连登录配置有未保存的修改，
+  确定放弃吗？」——取消则留在原页且草稿完好，确认才离开。
+- **顺带更正一条错误口径**（本轮复查发现）：我在前一轮的说明中称"改前端后需 `cargo build`
+  重新嵌入"，这是**错的**。实测（向 `frontend/dist` 注入标记后不重编译，运行中的 exe 立即下发
+  含标记的内容）证明 debug 构建是**运行时读磁盘**的 `frontend/dist`，改前端只需 `npm run build`，
+  无需重编 Rust、无需重启后端；编译期嵌入仅发生在 release。本仓库 `changelog.md:700` 早已记录
+  该结论（此前那次误判源于 curl 未加 `--noproxy` 被系统代理劫持），本轮重复了同一个错误。
+  **仍然成立的是**：同一 target 目录下 `--features no-embed` 与默认特性会互相覆盖同一个 exe
+  （实测 no-embed 构建后重启 → `GET /` 返回 404「前端未嵌入」），故跑过 `cargo test --features no-embed`
+  后仍需 `cargo build` 才能得到带界面的 exe。
+
+## 开发中（2026-09-16 新增配置方案导出/导入分享）
+
+### 需求
+
+「配置方案」页增加导出与导入，便于把配好的直连方案分享给同学（单方案，不做全量导出）。
+
+### 关键约束：密码密文跨机器不可用
+
+导出必须剔除 `username` 与 `password`。密码在磁盘上是 `ENC:` 密文，密钥存放于
+`~/.campus_network_auth/.enc_key.rs` 而**不在 config 目录内**，因此密文脱离原机即不可解。
+实测确认后果：把外部 `ENC:` 密文当密码提交，`ProfileApi::save_password`
+（`src/config/profiles.rs:275`）因 `can_decrypt_password` 为假而走「明文」分支**再加密一次**——
+落盘值由 `ENC:AAAA` 变为 `ENC:uJOHV1G1...`，即双重加密。导入方登录必然失败，且
+`/api/init-status` 的 `password_decryption_failed` 仍为 `false`（解密"成功"了，只是解出的不是密码），
+排障时毫无线索。故凭据一律留空由接收方自填。
+
+### 后端
+
+- 新增 `GET /api/profiles/{id}/export`（`export_profile`）与 `POST /api/profiles/import`（`import_profile`），
+  注册进 `web/mod.rs` route_table 与 `openapi.json`（87 → 88 paths：新端点 2 个 + 补回 1 个，见下"过程失误"）。
+  openapi 采用**纯文本插入**而非重写：该文件含手写紧凑数组，任何 `json.dumps` 往返都会重排 3000+ 行
+  （实测 `indent=1` + CRLF 的往返也在 `"enum": [...]` 处即分叉，故脚本先用基线断言守住再插入）。
+  端点默认受鉴权保护（`auth.rs` 默认拒绝，导出含方案元信息故不进白名单）。
+- **过程失误（已修复）**：为撤销一次 openapi 格式重排，我执行了 `git checkout -- openapi.json`，
+  把**上一轮尚未提交**的 `/api/docs/http-login-guide` 端点一并回退了（HEAD 里本就没有该端点，
+  checkout 等于丢弃工作区改动）。由既有护栏 `openapi_json_matches_route_table` 捕获
+  （报"路由表存在但 openapi.json 未声明: ["GET /api/docs/http-login-guide"]"），
+  已按同组 `task-manual` 的既有形状纯文本插回，并逐字段比对确认与兄弟端点完全一致。
+  **教训：对含未提交改动的文件不要用 `git checkout --` 回退**，应定向编辑。
+- **分享载荷带格式标记**：`{ campus_auth_profile: 1, suggested_id, exported_at, app_version, profile: {...} }`。
+  `parse_share_payload` 强制要求该标记存在，缺失即 400 而不做「猜字段」宽松解析——错误猜测会导入
+  一个看似成功却少了判定关键字的方案，用户要到下次登录失败才发现。更高版本号明确提示"请先升级"。
+- **`suggested_id` 解决中文名方案的 ID 退化**（端到端实测发现）：最初按方案名 slug 生成建议 ID，
+  而中文方案名（本应用主流用法，如「宿舍移动」）slug 后为空，一律退化成 `imported-profile`，
+  同名分享给多个同学还会各自变成 `-2`/`-3`，接收方看到一串无意义编号。改为导出时携带源方案 id
+  （恒为 ASCII slug，如 `dorm`），导入后即 `dorm` / `dorm-2`，可辨识。`suggested_id` 仍经
+  `slugify_id` 规范化，恶意值（`../../evil`）无法穿越——已加测试覆盖。
+- 导出同时清空 `active_task`：那是方案绑定的浏览器任务 ID，接收方通常没有同名任务，保留会被
+  `LoginInorchestrator::resolve_active_task`（`src/login/mod.rs:703`）静默回退到默认任务。
+- 枚举字段（`login_channel`/`http_method`）显式解析并报错，不静默退回默认（否则"导入成功但渠道被改"）。
+- 直连地址在导入时即校验（`HttpLoginRequest::validate_url`），不留到每次登录才失败。
+- **ID 冲突自动改名**（`name` → `name-2` → `name-3`），复用 `create_profile` 内部的
+  `slugify_id`（提升为 `pub(crate)`）而非另写一份规则：否则冲突探测算 `dorm_2`、实际落盘 `dorm-2`，
+  不一致会漏判冲突。绝不覆盖既有方案（覆盖会连带清掉对方凭据）。
+
+### 顺带修复：方案 ID 字符集前后端不一致（P1，既有缺陷）
+
+发现于导出 ID 设计阶段：后端 `create_profile` 的 `slugify_id` 把 `_` 归一为 `-`（落盘恒为连字符形态），
+而前端 `useProfiles.saveProfile` 的校验是 `^[a-zA-Z0-9_]+$`（**拒绝连字符**）。
+后果：任何含下划线/空格/中文名的新建方案都是「创建后再也改不动」——ID 输入框本身是 `disabled`，
+改个名字保存会被前端拦下。
+
+实测复现（真实二进制）：新建 `my_profile` → 落盘 `my-profile.json` → 编辑器内改名后点保存 →
+toast「方案 ID 只能包含字母、数字和下划线」，保存失败，编辑器保持打开，**该方案永久不可编辑**。
+
+修复：前端放宽为 `^[a-zA-Z0-9_-]+$`（与后端 `is_valid_profile_id` 一致），ID 输入框提示同步为
+「字母、数字、下划线、连字符」。`useTasks.ts:126` 本就是 `[a-zA-Z0-9_-]{1,64}`，此修复也消除了两处不一致。
+
+### 前端
+
+- `ProfilesView` 新增标题栏「导入方案」按钮与每张方案卡片的「导出」按钮；导入经
+  `Modal` 二次确认，展示文件名、方案名、渠道与匹配规则，并**脚本告警**：`http_crypto_script`
+  是会被执行的代码，导入他人方案等于执行他人 JS，故用警示色区块摊开脚本原文，说明沙箱边界
+  （无网络/无文件，仅纯计算，见 `run_script_in_sandbox`）后才允许确认。
+- `useProfiles` 新增 `exportProfile` / `importProfile` / `readShareFile`，含 `profileImporting`
+  单飞门（防连点重复导入同一文件）。
+- 文件名生成 `shareFileName`：方案名是自由文本（含中文/空格/路径分隔符），剔除 Windows 非法
+  字符、折叠空白、截断 60 字符，保留中文便于用户区分文件。
+- 形状判定与信封展开抽为 `isProfileSharePayload` / `unwrapSharePayload`（`utils/file.ts`），
+  与后端同口径，避免视图内联重复实现。
+
+### 验证
+
+- **Rust**：`web::routes::profiles` **27 例通过**（原 12 + 新增 15）。新增覆盖：导出剔除凭据与绑定、
+  导出不存在方案 404、导出→导入往返逐字保留直连参数、ID 冲突两次导入互不冲突且既有方案不被覆盖、
+  建议 ID 与 slugify 逐字一致（摘掉 `suggested_id` 以测"按名称推导"分支）、中文名方案沿用源 id、
+  `suggested_id` 路径穿越净化、前端字符集与 slugify 兼容、非本应用载荷三种形态拒绝、
+  未来格式版本提示升级、非法直连地址拒绝、非法枚举拒绝、无名称拒绝、`{data:...}` 信封兼容。
+- **变异验证**（护栏必须能失败）：① 导出时改回 `profile.username` / `profile.password` →
+  `test_export_strips_credentials_and_binding` 失败；② 把建议 ID 规则换成 `.replace([' ','-'], "_")`
+  → `test_import_suggested_id_matches_slugify` 失败并打印 `left: "my_dorm_net" / right: "my-dorm-net"`，
+  正是设计要防的偏差。两处均已复原。
+- **前端**：`vue-tsc` 零错误；vitest **144 passed**（133 + 11）：`file.test.ts` 3 → 14 例
+  （`shareFileName` 的中文保留/非法字符剔除/空白折叠/超长截断/控制字符，`isProfileSharePayload` 与
+  `unwrapSharePayload` 的顶层/envelope/缺标记/非对象/数组拒绝）。
+- **全量回归**：`cargo fmt --check` 零差异；`cargo clippy --all-targets -- -D warnings` 零告警；
+  `cargo test`（默认特性）**11 个测试二进制全绿**（lib 871 + helper 10 + 集成 22，零失败）；
+  `cargo test --features no-embed` lib 869 通过（差异为 3 个指南嵌入用例按特性条件编译）。
+  期间一次 `instance_lifecycle` 失败经查为上一轮 E2E 遗留的 Python mock 进程占用端口所致，
+  清理后全绿（非本次改动引入）。
+- **端到端**（真实二进制 + 浏览器，CDP 驱动，非仅接口调用）：
+  ① 建含脚本的直连方案 → 点卡片「导出」→ 捕获下载 Blob：文件名 `campus-auth-profile-宿舍移动.json`，
+    内容中 `username`/`password` 均为空串，`ENC:`/账号/明文密码**一处都不出现**，
+    直连 URL/请求体/成败关键字/脚本原文逐字保留；
+  ② 同一文件走「导入方案」→ 确认弹窗正确渲染文件名、方案名、「直连请求（免 Python 与浏览器）」+
+    WiFi/网关匹配规则，并**摊开脚本原文**警告；
+  ③ 确认导入 → toast「方案已导入：dorm-2（请补充账号与密码后再使用）」，列表出现新卡片；
+    磁盘 `dorm-2.json` 凭据为空、直连参数与脚本完整，**原 `dorm.json` 的账号与 `ENC:` 密码未被触碰**；
+  ④ 用导入的方案配置对 `tests/mock-servers/full-portal` 发真实请求做双向验证：
+     正确凭据 → `success`，错误密码 → `invalid_credential`（两向都验，排除"关键字恒匹配"的假通过）；
+  ⑤ 导入件在未填密码时点测试 → 后端明确报「请输入密码；编辑已有方案时也可留空以使用已保存密码」，
+     与 UI 提示一致。
+
+## 开发中（2026-09-16 修复弹窗内确认框被触发弹窗压住）
+
+### 缺陷
+
+「关于」页点「卸载」→ 弹窗内点「开始清理」→ 确认框出现在卸载弹窗**下面**，必须先叉掉卸载弹窗才能点到确认。用户报告的是交互受阻，实测还多一层：焦点已落在被遮挡的确认按钮上。
+
+`ConfirmDialog` 与所有 `Modal` 的遮罩层都取 `--z-top(400)`，**同层级按 DOM 顺序决胜**。而 `ConfirmDialog` 是 `App.vue` 里的常驻单例，其 Teleport 锚点在任何路由组件挂载前就已插入 `body`；页面内的 Modal 锚点是路由进入后才插入，于是 DOM 顺序恒为「确认框在前、触发它的弹窗在后」——只要在弹窗内发起 `confirm()`，确认框必被压住。
+
+动态实测（修复前，真实二进制 + CDP）：
+
+```
+overlay[0] z=400  .confirm-dialog   「确认卸载清理」
+overlay[1] z=400  .modal-container  「卸载程序」
+elementFromPoint(确认按钮中心) = .uninstall-item-path   ← 点击被下层弹窗吞掉
+document.activeElement = 「开始清理」(遮挡层之下的按钮)  ← Enter 可在不可见状态下执行
+```
+
+第二行是关键：这不只是「多点一次」的体验问题——确认按钮持有着焦点，此时按 Enter 会**在看不到弹窗的情况下**触发不可恢复的清理（关自启动、删用户数据、清浏览器缓存）。
+
+### 修复
+
+- `base.css` 新增 `--z-confirm: 500`，插在 `--z-top(400)` 与 `--z-max(9999)` 之间，使「确认」严格大于任意普通弹窗，不再靠 DOM 顺序决胜。
+- `modal.css` 新增 `.modal-overlay--confirm` 修饰类映射到该 token，`ConfirmDialog.vue` 挂上它。
+- **用显式类名而非 `.modal-overlay:has(.confirm-dialog)`**：本应用在用户默认浏览器中打开，版本不可控，而 `:has()` 失效的后果是危险操作按钮在不可见状态下可被点击，属正确性问题不应依赖选择器支持度；同类修饰已有 `.modal-overlay--preview` 先例（`custom-select.css` 里的 `:has()` 只管下拉层级润色，性质不同）。
+
+### 验证
+
+- **新增 `frontend/src/styles/zIndex.test.ts`**（4 例）：层级阶梯（base→dropdown→sticky→sidebar→overlay→modal→toast→top→confirm→max）严格递增、`confirm > top > toast`、`modal.css` 把修饰类映射到 `--z-confirm`、`ConfirmDialog.vue` 挂载该类。层级是纯声明式的，类型检查与构建都不会发现被压平，必须有护栏。
+- **变异验证**（护栏必须能失败）：把 `.modal-overlay--confirm` 的 `var(--z-confirm)` 改回 `var(--z-top)` → 对应用例失败；把 `ConfirmDialog.vue` 的类名去掉 → 对应用例失败。两处均已复原。
+- **真实二进制端到端**（`npm run build` + `cargo build` 重新嵌入前端后重启，CDP 驱动）：改为 `confirm z=500 / modal z=400`；确认框两个按钮 `elementFromPoint` 均命中自身（此前命中下层 `uninstall-item-path`）；点「取消」确认框消失且卸载弹窗保留（此前点不到）；按 ESC 只关确认框、卸载弹窗仍在且 `body.overflow=hidden`（滚动锁计数 2→1 正确）；再关卸载弹窗后 `body.overflow` 复位（无锁泄漏）。截图确认确认框浮在卸载弹窗之上、卸载弹窗内容在其后变暗。
+- 前端 `npm run build` 通过、vitest **133 passed**（129 + 新增 4）。
+
 ## 开发中（2026-09-15 修复 OCR 卸载摧毁并发浏览器任务）
 
 上一轮动态验证 P1-4 时顺带发现：`recycle_if_running`（`src/bridge/mod.rs`）是**无条件**回收，而 OCR 路由两处调用它。本次修掉其中的卸载路径。

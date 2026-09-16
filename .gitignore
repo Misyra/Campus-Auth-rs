@@ -133,3 +133,6 @@ tests/mock-servers/**/*.log
 
 # AI 任务生成的页面捕获产物（运行时生成）
 python_worker/captures/
+
+# 本地配置备份（删除运行目录 config 前的手工备份）
+/config-backup-*/
