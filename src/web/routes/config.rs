@@ -396,7 +396,14 @@ fn settings_flat_response(
 ///
 /// 否则密钥变更/格式不兼容时，前端误认为已保存 → 不重新输入 →
 /// 登录报缺少 password；刚保存显示成功、刷新又提示需重输，体验割裂。
-fn effective_has_password(config: &dyn ConfigApi, profile: &crate::config::ProfileData) -> bool {
+///
+/// `pub(crate)`：`GET /api/profiles/{id}` 需要同一口径的判定（方案页要显示
+/// 「密码已保存」并据此决定是否提供清除入口），两处必须同源，否则「账号页说
+/// 已保存、方案页说未设置」这类漂移会再次出现。
+pub(crate) fn effective_has_password(
+    config: &dyn ConfigApi,
+    profile: &crate::config::ProfileData,
+) -> bool {
     if profile.password.is_empty() {
         false
     } else {
@@ -1071,7 +1078,12 @@ mod tests {
         async fn create_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
             Ok(())
         }
-        async fn update_profile(&self, _id: &str, _data: ProfileData) -> Result<(), ConfigError> {
+        async fn update_profile(
+            &self,
+            _id: &str,
+            _data: ProfileData,
+            _clear_password: bool,
+        ) -> Result<(), ConfigError> {
             Ok(())
         }
         async fn delete_profile(&self, _id: &str) -> Result<(), ConfigError> {
@@ -1727,7 +1739,9 @@ mod tests {
         let g = inner.lock().unwrap();
         assert_eq!(g.profile.username, "");
         assert_eq!(g.profile.password, "");
-        assert!(!g.settings.global.pause.enabled);
+        // pause 默认启用，落盘失败也不应改变它（此前 payload 写 true 是为了反证；
+        // 默认值调整后 mock 的初始状态本身就是 true，断言改盯落盘计数即可）
+        assert!(g.settings.global.pause.enabled);
         assert_eq!(g.save_calls, 0);
     }
 }

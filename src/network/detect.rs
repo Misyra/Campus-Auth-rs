@@ -239,28 +239,13 @@ fn parse_adapter_block(header: &str, block: &str) -> Option<InterfaceInfo> {
     let mut gateway: Option<Ipv4Addr> = None;
     let mut mac: Option<String> = None;
     let mut media_disconnected = false;
+    // 「网关续行窗口」：IPv6 与 IPv4 网关各占一行时，ipconfig 把 IPv4 网关放在
+    // 标签行的**下一行续行**（行首无标签冒号，只有缩进 + 值）。DNS 服务器也有
+    // 同款续行（如 223.5.5.5 独占一行），因此续行只认「紧跟网关标签行、
+    // 无冒号、值恰好是 IPv4」的行——窗口在任意其它带标签的行处关闭。
+    let mut gateway_continuation = false;
     for line in block.lines() {
         let trimmed = line.trim();
-        // IPv4 地址（中英文标签兼容）
-        if trimmed.contains("IPv4 地址") || trimmed.contains("IPv4 Address") {
-            if let Some(ip) = extract_ipv4(trimmed) {
-                ipv4 = Some(ip);
-            }
-        }
-        // 物理地址（中英文标签兼容）
-        if trimmed.contains("物理地址") || trimmed.contains("Physical Address") {
-            if let Some(parsed) = extract_mac_after_colon(trimmed) {
-                mac = Some(parsed);
-            }
-        }
-        // 默认网关（中英文标签兼容）
-        if trimmed.contains("默认网关") || trimmed.contains("Default Gateway") {
-            // ipconfig 常把 IPv6 网关与 IPv4 网关分成两行；后续 IPv6/空行
-            // 不能清掉已经解析到的 IPv4 网关。
-            if let Some(parsed) = extract_ipv4(trimmed) {
-                gateway = Some(parsed);
-            }
-        }
         // 已断开的适配器（"媒体状态: 已断开" / "Media State: Media disconnected"）
         if (trimmed.contains("媒体状态") || trimmed.to_ascii_lowercase().contains("media state"))
             && (trimmed.contains("已断开")
@@ -268,6 +253,46 @@ fn parse_adapter_block(header: &str, block: &str) -> Option<InterfaceInfo> {
         {
             media_disconnected = true;
         }
+        // IPv4 地址（中英文标签兼容）
+        if trimmed.contains("IPv4 地址") || trimmed.contains("IPv4 Address") {
+            gateway_continuation = false;
+            if let Some(ip) = extract_ipv4(trimmed) {
+                ipv4 = Some(ip);
+            }
+            continue;
+        }
+        // 物理地址（中英文标签兼容）
+        if trimmed.contains("物理地址") || trimmed.contains("Physical Address") {
+            gateway_continuation = false;
+            if let Some(parsed) = extract_mac_after_colon(trimmed) {
+                mac = Some(parsed);
+            }
+            continue;
+        }
+        // 默认网关（中英文标签兼容）
+        if trimmed.contains("默认网关") || trimmed.contains("Default Gateway") {
+            gateway_continuation = true;
+            // 标签行自身的值若已是 IPv4（无 IPv6 网关共存时）直接采用；存在
+            // IPv6 网关时这里解析失败（值为 fe80::…%16），交给下面的续行
+            if let Some(parsed) = extract_ipv4(trimmed) {
+                gateway = Some(parsed);
+                gateway_continuation = false;
+            }
+            continue;
+        }
+        // 网关续行：仅当窗口开启、行内无冒号（无标签）、值恰为 IPv4 时命中。
+        // 已有 IPv4 网关（标签行直接给出）时不再覆盖。
+        if gateway_continuation && !trimmed.contains(':') && !trimmed.is_empty() {
+            if gateway.is_none() {
+                if let Ok(ip) = trimmed.parse::<Ipv4Addr>() {
+                    gateway = Some(ip);
+                }
+            }
+            gateway_continuation = false;
+            continue;
+        }
+        // 其它带标签/空行关闭续行窗口
+        gateway_continuation = false;
     }
     if media_disconnected {
         return None;

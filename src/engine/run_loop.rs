@@ -1453,6 +1453,11 @@ mod tests {
             settings.global.pause.start_minute = 0;
             settings.global.pause.end_hour = 0;
             settings.global.pause.end_minute = 0;
+        } else {
+            // 显式关闭：PauseSettings 默认自 2026-09-16 起为 enabled=true（23-6 点），
+            // 隐式吃默认值会让这些用例在真实夜间时段落入暂停窗口、立即检测被
+            // F4 门控拦下而超时——测试不得依赖墙钟时间
+            settings.global.pause.enabled = false;
         }
         config.save_settings(&settings).await.unwrap();
         config.reload().await.unwrap();

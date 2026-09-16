@@ -28,7 +28,10 @@ impl Default for SettingsData {
         Self {
             config_version: crate::config::CURRENT_CONFIG_VERSION,
             active_profile_id: "default".to_string(),
-            auto_switch: true,
+            // 默认关闭自动方案切换：多数用户只有一个网络环境，用不到按网关/SSID
+            // 自动选方案；开启后 Engine 每 60s 检测并切方案，对单方案用户是空转。
+            // 需要多网络自动切换的场景请在「方案」页显式开启。
+            auto_switch: false,
             global: GlobalConfig::default(),
         }
     }
@@ -258,10 +261,11 @@ impl Default for MonitorSettings {
 }
 
 /// 暂停时段配置
-#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct PauseSettings {
-    /// 是否启用暂停时段
+    /// 是否启用暂停时段（默认启用：23:00–06:00 夜间不自动登录，宿舍定时
+    /// 断网时段反复重连无意义；与运行模式「默认模式」预设的取值一致）
     pub enabled: bool,
     /// 暂停开始小时（0-23）
     pub start_hour: u8,
@@ -271,6 +275,18 @@ pub struct PauseSettings {
     pub end_hour: u8,
     /// 暂停结束分钟（0-59）
     pub end_minute: u8,
+}
+
+impl Default for PauseSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            start_hour: 23,
+            start_minute: 0,
+            end_hour: 6,
+            end_minute: 0,
+        }
+    }
 }
 
 /// 日志配置
@@ -365,7 +381,8 @@ impl Default for AppSettings {
         Self {
             auto_start_browser: true,
             runtime_mode: "full".to_string(),
-            startup_action: StartupAction::Monitor,
+            // 默认不自动开始监测：见 StartupAction::None 的说明
+            startup_action: StartupAction::None,
             port: 50721,
             autostart_enabled: false,
             task_notification: true,
@@ -560,9 +577,13 @@ impl Default for ProfileData {
 #[clap(rename_all = "snake_case")]
 pub enum StartupAction {
     /// 不自动执行任何动作
+    ///
+    /// 默认值：启动后不自动开始监测（用户可在控制台点「开始检测」）。
+    /// 此前默认 `Monitor`，但多数用户不希望在启动时就拉起检测；
+    /// 需要「开机即自动重连」的场景请在「设置 · 系统」显式选择「开始检测」。
+    #[default]
     None,
     /// 启动后进入网络监测
-    #[default]
     Monitor,
     /// 启动后执行一次登录
     LoginOnce,
@@ -583,6 +604,22 @@ mod tests {
         assert!(
             monitor.strict_login_mode,
             "严格登录模式默认开启（关闭即退化为宽松触发，属行为变化）"
+        );
+    }
+
+    #[test]
+    fn pause_defaults_to_night_window_enabled() {
+        let pause = PauseSettings::default();
+        assert!(pause.enabled, "暂停时段默认启用（夜间不自动登录）");
+        assert_eq!(
+            (pause.start_hour, pause.start_minute),
+            (23, 0),
+            "暂停开始默认 23:00"
+        );
+        assert_eq!(
+            (pause.end_hour, pause.end_minute),
+            (6, 0),
+            "暂停结束默认次日 6:00"
         );
     }
 

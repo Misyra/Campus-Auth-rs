@@ -256,6 +256,49 @@ fn test_parse_ipconfig_ipv6_gateway_does_not_clear_ipv4_gateway() {
 }
 
 #[test]
+fn test_parse_ipconfig_ipv4_gateway_on_continuation_line() {
+    // IPv6 网关在标签行、IPv4 网关在**下一行续行**（无标签冒号，只有缩进+值）
+    // ——双栈 DHCP 环境的真实 ipconfig /all 形态。此前续行不被识别，
+    // 该机器上 select_primary_interface 找不到带网关的接口，直连脚本
+    // ctx.local_ip 密钥协商失效（IP 不匹配）。
+    // DNS 服务器同款续行（223.5.5.5）不得被误认成网关。
+    let input = r#"Wireless LAN adapter WLAN 2:
+
+   IPv4 Address. . . . . . . . . . . : 192.168.123.210
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+   Default Gateway . . . . . . . . . : fe80::5e02:14ff:fec2:130f%16
+                                       192.168.123.1
+   DHCP Server . . . . . . . . . . . : 192.168.123.1
+   DNS Servers . . . . . . . . . . . : 2400:3200::1
+                                       223.5.5.5
+                                       223.6.6.6
+"#;
+    let interfaces = parse_ipconfig(input);
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].ipv4, Ipv4Addr::new(192, 168, 123, 210));
+    assert_eq!(
+        interfaces[0].gateway,
+        Some(Ipv4Addr::new(192, 168, 123, 1)),
+        "续行上的 IPv4 网关必须被识别"
+    );
+}
+
+#[test]
+fn test_parse_ipconfig_gateway_continuation_closes_on_next_label() {
+    // 网关标签行后紧跟其它标签行（无续行）→ 不得误认
+    let input = r#"Ethernet adapter Ethernet:
+
+   IPv4 Address. . . . . . . . . . . : 10.10.10.5
+   Default Gateway . . . . . . . . . : fe80::1%12
+   DHCP Server . . . . . . . . . . . : 10.10.10.1
+"#;
+    let interfaces = parse_ipconfig(input);
+    assert_eq!(interfaces.len(), 1);
+    // 只有 IPv6 网关 → gateway 仍为 None（IPv4 网关未知）
+    assert_eq!(interfaces[0].gateway, None);
+}
+
+#[test]
 fn test_parse_ipconfig_empty() {
     // 空输入应返回空列表
     let interfaces = parse_ipconfig("");

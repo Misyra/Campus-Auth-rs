@@ -91,6 +91,12 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/profiles/http-login-test", || {
             post(routes::profiles::test_http_login)
         }),
+        ("GET", "/api/profiles/{id}/export", || {
+            get(routes::profiles::export_profile)
+        }),
+        ("POST", "/api/profiles/import", || {
+            post(routes::profiles::import_profile)
+        }),
         ("POST", "/api/profiles/{id}", || {
             post(routes::profiles::create_profile)
         }),
@@ -266,6 +272,9 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         }),
         ("GET", "/api/docs/task-manual", || {
             get(routes::system::task_manual)
+        }),
+        ("GET", "/api/docs/http-login-guide", || {
+            get(routes::system::http_login_guide)
         }),
         // ---- 自启动（autostart）----
         ("GET", "/api/autostart/status", || {

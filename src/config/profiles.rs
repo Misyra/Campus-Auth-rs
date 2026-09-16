@@ -50,7 +50,17 @@ pub trait ProfileApi: Send + Sync {
     /// 创建 Profile（id 已存在则冲突）。
     async fn create_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError>;
     /// 更新 Profile（密码字段走 save_password 语义）。
-    async fn update_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError>;
+    ///
+    /// `clear_password` 为真时清除已保存密码，**优先于** `data.password`。
+    /// 必须单列此参数：`data.password` 的空串契约是「未修改，保留原密码」
+    /// （见 [`ProfileService::save_password`]），仅凭 `ProfileData` 无法表达
+    /// 「清空」——传空会被原样保留，清除被静默撤销。
+    async fn update_profile(
+        &self,
+        id: &str,
+        data: ProfileData,
+        clear_password: bool,
+    ) -> Result<(), ConfigError>;
     /// 删除 Profile（不允许删除 default）。
     async fn delete_profile(&self, id: &str) -> Result<(), ConfigError>;
     /// 切换活跃 Profile。
@@ -77,8 +87,13 @@ impl ProfileApi for ProfileService {
         ProfileService::create_profile(self, id, data).await
     }
 
-    async fn update_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError> {
-        ProfileService::update_profile(self, id, data).await
+    async fn update_profile(
+        &self,
+        id: &str,
+        data: ProfileData,
+        clear_password: bool,
+    ) -> Result<(), ConfigError> {
+        ProfileService::update_profile(self, id, data, clear_password).await
     }
 
     async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
@@ -155,7 +170,15 @@ impl ProfileService {
     }
 
     /// 更新 Profile（密码字段走 `save_password` 语义）
-    pub async fn update_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError> {
+    ///
+    /// `clear_password` 为真时先把密码置空并跳过 `save_password`——后者的空串契约
+    /// 是「保留原密码」，若把清空后的空串再交给它，清除会被静默撤销。
+    pub async fn update_profile(
+        &self,
+        id: &str,
+        data: ProfileData,
+        clear_password: bool,
+    ) -> Result<(), ConfigError> {
         if !is_valid_profile_id(id) {
             return Err(ConfigError::InvalidProfileId { id: id.to_string() });
         }
@@ -167,15 +190,19 @@ impl ProfileService {
             .unwrap_or_default();
         let mut profile = data;
         profile.id = id.to_string();
-        // 密码字段走 save_password 语义：空串保留原密码、ENC: 透传、明文加密
-        profile.password = self.save_password(
-            if profile.password.is_empty() {
-                None
-            } else {
-                Some(profile.password.as_str())
-            },
-            &existing_pw,
-        );
+        if clear_password {
+            profile.password = String::new();
+        } else {
+            // 密码字段走 save_password 语义：空串保留原密码、ENC: 透传、明文加密
+            profile.password = self.save_password(
+                if profile.password.is_empty() {
+                    None
+                } else {
+                    Some(profile.password.as_str())
+                },
+                &existing_pw,
+            );
+        }
         self.config.save_profile(&profile).await?;
         // 写盘后同步 ArcSwap 快照（CFG-3）：运行中 Engine/Monitor 可能正持有
         // 旧凭据。发送 ProfileSwitched 与 switch_profile 对齐——调度器仅增量
@@ -296,7 +323,12 @@ impl ProfileService {
 ///
 /// 规则：转小写；空白与下划线折叠为单个连字符；仅保留 ASCII 字母数字与连字符；
 /// 丢弃其余字符（含中文与标点）；首尾连字符去除。结果为空说明原始字符串无可保留字符。
-fn slugify_id(raw: &str) -> String {
+///
+/// 注意本函数会把 `_` 归一为 `-`，而 `is_valid_profile_id` 同时接受两者：落盘 id
+/// 恒为连字符形态。默认可见性为 `pub(crate)` 以便 Web 层方案导入复用同一规则
+/// （导入需在调用 `create_profile` **之前**预测最终 id，否则冲突探测算的是
+/// `dorm_2`、实际落盘 `dorm-2`，两者不一致会漏判冲突）。
+pub(crate) fn slugify_id(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut prev_dash = false;
     for ch in raw.trim().to_lowercase().chars() {
@@ -460,7 +492,7 @@ mod tests {
             Err(ConfigError::InvalidProfileId { .. })
         ));
         assert!(matches!(
-            svc.update_profile("../settings", ProfileData::default())
+            svc.update_profile("../settings", ProfileData::default(), false)
                 .await,
             Err(ConfigError::InvalidProfileId { .. })
         ));
@@ -517,6 +549,52 @@ mod tests {
         let ids: Vec<&str> = profiles.iter().map(|p| p.id.as_str()).collect();
         assert!(ids.contains(&"default"));
         assert!(ids.contains(&"custom"));
+    }
+
+    // ============ 密码清除（update_profile 的 clear_password） ============
+
+    /// clear_password 清空已保存密码；空串 password 仍保留原密码（两种意图不可混用）
+    #[tokio::test]
+    async fn test_update_profile_clear_password_empties_existing() {
+        let (_tmp, config) = make_config_service().await;
+        let svc = ProfileService::new(config.clone());
+
+        let mut data = ProfileData {
+            id: "dorm".to_string(),
+            name: "宿舍".to_string(),
+            username: "20230001".to_string(),
+            ..Default::default()
+        };
+        data.password = String::new();
+        svc.create_profile("dorm", data).await.unwrap();
+
+        // 走 update_profile 的明文加密路径写入密码（create 不做加密）
+        let mut with_pw = svc.get_profile("dorm").unwrap();
+        with_pw.password = "secret".to_string();
+        svc.update_profile("dorm", with_pw, false).await.unwrap();
+        let saved = svc.get_profile("dorm").unwrap().password;
+        assert!(saved.starts_with("ENC:"), "明文应已加密落盘，实际: {saved}");
+
+        // 只改名字、password 传空串 → 必须保留原密码（既有契约）
+        let mut rename = svc.get_profile("dorm").unwrap();
+        rename.password = String::new();
+        rename.name = "改名后".to_string();
+        svc.update_profile("dorm", rename, false).await.unwrap();
+        assert_eq!(
+            svc.get_profile("dorm").unwrap().password,
+            saved,
+            "空串密码不得清空既有密码"
+        );
+
+        // clear_password=true → 必须真的清空（本接口唯一能表达「清除」的路径）
+        let mut cleared = svc.get_profile("dorm").unwrap();
+        cleared.password = String::new();
+        svc.update_profile("dorm", cleared, true).await.unwrap();
+        assert_eq!(
+            svc.get_profile("dorm").unwrap().password,
+            "",
+            "clear_password 必须真的清空密码"
+        );
     }
 
     // ============ detect_matching_profile ============

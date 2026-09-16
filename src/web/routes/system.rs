@@ -716,40 +716,90 @@ pub async fn bootstrap_environment(
 }
 
 // ---- 文档 ----
+//
+// 三份指南曾各自抄一遍「嵌入兜底 → 磁盘查找 → 读文件 → 组响应」四段样板
+// （编写指南 / 任务手册 / 直连指南），新增一份就要再抄一遍。现收敛为
+// `GuideFile` 描述表驱动：新增指南只需在 `GUIDES` 加一行 + 在
+// `static_files::GuideAsset` 补一个 `#[include]` + 注册路由 + 补 openapi。
 
-/// 便携包/开发期均可用：优先读磁盘 `docs/guides/task-writing-guide.md`（便于热更），
-/// 缺失时回退到编译期嵌入的 `GuideAsset`（release 包不含 `docs/` 目录时不 404）。
+/// 一份可经 `/api/docs/*` 提供的指南文件
+struct GuideFile {
+    /// 磁盘相对路径（相对运行目录或仓库根），如 `docs/guides/task-writing-guide.md`
+    rel_path: &'static str,
+    /// 文件名，同时作为响应体 `Content-Disposition` 里的文件名
+    filename: &'static str,
+}
+
+/// 全部指南文件的描述表（路由处理函数按 `rel_path` 取用）
+const TASK_WRITING_GUIDE: GuideFile = GuideFile {
+    rel_path: "docs/guides/task-writing-guide.md",
+    filename: "task-writing-guide.md",
+};
+const TASK_MANUAL: GuideFile = GuideFile {
+    rel_path: "docs/guides/task-manual.md",
+    filename: "task-manual.md",
+};
+const HTTP_LOGIN_GUIDE: GuideFile = GuideFile {
+    rel_path: "docs/guides/http-login-guide.md",
+    filename: "http-login-guide.md",
+};
+
+/// 便携包/开发期均可用：优先读磁盘（便于热更），缺失时回退到编译期嵌入的
+/// `GuideAsset`（release 包不含 `docs/` 目录时不 404）。
 #[cfg(not(feature = "no-embed"))]
-fn embedded_guide() -> Option<String> {
-    crate::web::static_files::GuideAsset::get("task-writing-guide.md")
+fn embedded_guide(filename: &str) -> Option<String> {
+    crate::web::static_files::GuideAsset::get(filename)
         .and_then(|a| String::from_utf8(a.data.into_owned()).ok())
 }
 
 #[cfg(feature = "no-embed")]
-fn embedded_guide() -> Option<String> {
+fn embedded_guide(_filename: &str) -> Option<String> {
     None
 }
 
-/// 在候选目录中查找首个存在的任务编写指南
-fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
-    let rel = std::path::Path::new("docs")
-        .join("guides")
-        .join("task-writing-guide.md");
-    let primary = base_path.join(&rel);
+/// 在候选目录中查找首个存在的指南文件：运行目录 → 仓库根 → 编译期 manifest 目录。
+///
+/// 后两者覆盖开发期与便携包的目录深度差异（`base_path` 可能是仓库根、也可能是
+/// `target/debug` 之类的子目录），保证开发时改完文档刷新即可见。
+fn resolve_guide_path(base_path: &std::path::Path, rel_path: &str) -> std::path::PathBuf {
+    let rel = std::path::Path::new(rel_path);
+    let primary = base_path.join(rel);
     if primary.exists() {
         return primary;
     }
     if let Some(repo) = base_path.parent().and_then(|p| p.parent()) {
-        let fallback = repo.join(&rel);
+        let fallback = repo.join(rel);
         if fallback.exists() {
             return fallback;
         }
     }
-    let manifest_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&rel);
+    let manifest_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
     if manifest_fallback.exists() {
         return manifest_fallback;
     }
     primary
+}
+
+/// 读取一份指南并组响应（磁盘优先、嵌入兜底），失败时给出面向用户的 404 文案。
+async fn serve_guide(
+    config: &Arc<dyn crate::config::ConfigApi>,
+    guide: &GuideFile,
+) -> Result<Response, ApiError> {
+    let path = resolve_guide_path(&config.base_path(), guide.rel_path);
+    // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Ok(markdown_response(guide.filename, content)),
+        Err(e) => {
+            if let Some(content) = embedded_guide(guide.filename) {
+                tracing::debug!("指南 {} 回退到嵌入副本: {e}", guide.filename);
+                return Ok(markdown_response(guide.filename, content));
+            }
+            tracing::warn!("指南加载失败 ({path:?}): {e}");
+            Err(ApiError::NotFound(
+                "指南文件缺失，可能需要重新安装或更新软件".to_string(),
+            ))
+        }
+    }
 }
 
 /// GET /api/docs/task-writing-guide — 任务编写指南
@@ -760,21 +810,7 @@ fn resolve_guide_path(base_path: &std::path::Path) -> std::path::PathBuf {
 pub async fn task_writing_guide(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Response, ApiError> {
-    let path = resolve_guide_path(&config.base_path());
-    // tokio::fs 异步读取，避免同步 std::fs 阻塞 tokio worker 线程
-    match tokio::fs::read_to_string(&path).await {
-        Ok(content) => Ok(markdown_response("task-writing-guide.md", content)),
-        Err(e) => {
-            if let Some(content) = embedded_guide() {
-                tracing::debug!("任务编写指南回退到嵌入副本: {e}");
-                return Ok(markdown_response("task-writing-guide.md", content));
-            }
-            tracing::warn!("任务编写指南加载失败 ({path:?}): {e}");
-            Err(ApiError::NotFound(
-                "任务编写指南文件缺失，可能需要重新安装或更新软件".to_string(),
-            ))
-        }
-    }
+    serve_guide(&config, &TASK_WRITING_GUIDE).await
 }
 
 /// Markdown 文本以文件形式返回（与 tools.rs 的脚本直返保持一致）：
@@ -799,53 +835,17 @@ fn markdown_response(filename: &str, content: String) -> Response {
 pub async fn task_manual(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Response, ApiError> {
-    let path = resolve_manual_path(&config.base_path());
-    match tokio::fs::read_to_string(&path).await {
-        Ok(content) => Ok(markdown_response("task-manual.md", content)),
-        Err(e) => {
-            if let Some(content) = embedded_manual() {
-                tracing::debug!("任务使用手册回退到嵌入副本: {e}");
-                return Ok(markdown_response("task-manual.md", content));
-            }
-            tracing::warn!("任务使用手册加载失败 ({path:?}): {e}");
-            Err(ApiError::NotFound(
-                "任务使用手册文件缺失，可能需要重新安装或更新软件".to_string(),
-            ))
-        }
-    }
+    serve_guide(&config, &TASK_MANUAL).await
 }
 
-/// 在候选目录中查找首个存在的任务使用手册（与编写指南同目录）
-fn resolve_manual_path(base_path: &std::path::Path) -> std::path::PathBuf {
-    let rel = std::path::Path::new("docs")
-        .join("guides")
-        .join("task-manual.md");
-    let primary = base_path.join(&rel);
-    if primary.exists() {
-        return primary;
-    }
-    if let Some(repo) = base_path.parent().and_then(|p| p.parent()) {
-        let fallback = repo.join(&rel);
-        if fallback.exists() {
-            return fallback;
-        }
-    }
-    let manifest_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&rel);
-    if manifest_fallback.exists() {
-        return manifest_fallback;
-    }
-    primary
-}
-
-#[cfg(not(feature = "no-embed"))]
-fn embedded_manual() -> Option<String> {
-    crate::web::static_files::GuideAsset::get("task-manual.md")
-        .and_then(|a| String::from_utf8(a.data.into_owned()).ok())
-}
-
-#[cfg(feature = "no-embed")]
-fn embedded_manual() -> Option<String> {
-    None
+/// GET /api/docs/http-login-guide — 直连请求登录使用指南
+///
+/// 与其余指南同策略（磁盘优先、嵌入兜底）。前端直连面板与配置向导的
+/// 「打开完整使用文档」入口指向本端点。
+pub async fn http_login_guide(
+    State(config): State<Arc<dyn crate::config::ConfigApi>>,
+) -> Result<Response, ApiError> {
+    serve_guide(&config, &HTTP_LOGIN_GUIDE).await
 }
 
 // ---- 工具函数 ----
@@ -865,6 +865,57 @@ pub async fn stop_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 每份指南都必须同时存在于「磁盘查找表」与「rust-embed 嵌入清单」。
+    ///
+    /// 两处是同一份文件的两个引用点，新增指南时最容易只改一处：漏改 `#[include]`
+    /// 时开发机（磁盘有文件）一切正常，只有便携包在缺 `docs/` 目录的真实用户那里
+    /// 才会 404 —— 属于本地测不出来的漂移，故在此锁定。
+    #[cfg(not(feature = "no-embed"))]
+    #[test]
+    fn every_guide_is_embedded() {
+        for guide in [TASK_WRITING_GUIDE, TASK_MANUAL, HTTP_LOGIN_GUIDE] {
+            let content = embedded_guide(guide.filename).unwrap_or_else(|| {
+                panic!("{} 未嵌入（检查 GuideAsset 的 #[include]）", guide.filename)
+            });
+            assert!(
+                content.starts_with('#'),
+                "{} 的嵌入副本不是 Markdown 正文",
+                guide.filename
+            );
+        }
+    }
+
+    /// 磁盘查找必须能沿「运行目录 → 仓库根 → CARGO_MANIFEST_DIR」找到仓库内的指南。
+    ///
+    /// 测试进程的当前目录是 crate 根（`CARGO_MANIFEST_DIR`），前两个候选按构造都不
+    /// 命中，落到第三个，正好覆盖开发期这条最常走的路径。
+    #[test]
+    fn guide_path_falls_back_to_manifest_dir() {
+        let path = resolve_guide_path(
+            std::path::Path::new("target/debug"),
+            HTTP_LOGIN_GUIDE.rel_path,
+        );
+        assert!(
+            path.ends_with(
+                std::path::Path::new("docs")
+                    .join("guides")
+                    .join("http-login-guide.md")
+            ),
+            "解析出的路径不正确: {path:?}"
+        );
+        assert!(path.exists(), "仓库内应存在直连登录指南: {path:?}");
+    }
+
+    /// 路径解析与读取共用同一份描述表：`rel_path` 写错只会得到 404，
+    /// 故直接断言三份指南都能在仓库里定位到。
+    #[test]
+    fn all_guides_resolve_to_existing_files() {
+        for guide in [TASK_WRITING_GUIDE, TASK_MANUAL, HTTP_LOGIN_GUIDE] {
+            let path = resolve_guide_path(std::path::Path::new("."), guide.rel_path);
+            assert!(path.exists(), "{} 无法定位: {path:?}", guide.rel_path);
+        }
+    }
 
     #[test]
     fn normalize_playwright_browser_defaults_and_validates() {

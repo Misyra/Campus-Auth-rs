@@ -195,6 +195,7 @@ pub async fn auth_middleware(
             || path == "/api/tools/task-recorder.user.js"
             || path == "/api/docs/task-writing-guide"
             || path == "/api/docs/task-manual"
+            || path == "/api/docs/http-login-guide"
             || path == "/api/system/info"
             || path == "/api/monitor/status")
     {

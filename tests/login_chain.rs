@@ -485,9 +485,9 @@ async fn login_chain_retries_across_ban_window() {
 /// kick 掉线 → 监测发现 captive → 引擎自动重登：手动建立在线基线后全程
 /// 不再手动触发登录，验证"断线自动恢复"这一核心卖点的端到端闭环
 ///
-/// （不测"无凭证首轮自动登录"：实例启动即开始检测，凭证经 API 写入晚于
-/// 首轮检测，空配置登录失败进入编排器退避，监测翻转不再触发——这是用例
-/// 自造的启动竞态，真实用户开着监测时凭证早已配置）
+/// 显式 `POST /api/monitor/start` 起监测：`app.startup_action` 默认已于
+/// 2026-09-16 改为 `none`（启动不再自动监测），本用例依赖"监测在跑"这一前提，
+/// 必须自己建立，不能依赖默认值。
 #[tokio::test]
 async fn login_chain_auto_relogin_after_kick() {
     let _serial = SERIAL.lock().await;
@@ -507,6 +507,10 @@ async fn login_chain_auto_relogin_after_kick() {
         "基线登录应成功，message={}",
         r["message"]
     );
+
+    // 起监测：下面依赖「监测发现 captive 后自动重登」，不启动就永远不会发生
+    let started = env.api.request("POST", "/api/monitor/start", None).await;
+    assert!(started.get("error").is_none(), "启动监测失败: {started}");
 
     // 模拟被门户踢下线：204 → 200，监测应在下一轮发现 captive 并自动重登
     env.api

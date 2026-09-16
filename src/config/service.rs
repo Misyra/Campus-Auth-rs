@@ -1084,7 +1084,8 @@ mod tests {
             crate::config::CURRENT_CONFIG_VERSION
         );
         assert_eq!(settings.active_profile_id, "default");
-        assert!(settings.auto_switch);
+        // 默认关闭：多数用户只有一个网络环境，自动切换对他们是空转
+        assert!(!settings.auto_switch);
     }
 
     #[test]
@@ -1097,7 +1098,7 @@ mod tests {
             settings.config_version,
             crate::config::CURRENT_CONFIG_VERSION
         );
-        assert!(settings.auto_switch);
+        assert!(!settings.auto_switch, "缺失 auto_switch 应回退默认关闭");
     }
 
     // ============ 配置迁移 v5→v6 测试 ============
@@ -1296,8 +1297,8 @@ mod tests {
             .await
             .unwrap();
 
-        // 显式设定起点值（默认 auto_switch 恰为 true，与 8 次取反的偶数终值相同，
-        // 无法暴露回归——先把起点翻转为 false）
+        // 显式设定起点值：不依赖 auto_switch 的默认值，测试只针对并发语义。
+        // （默认值已于 2026-09-16 改为 false；无论默认如何，这里都从已知状态出发）
         svc.modify_settings(|s| s.auto_switch = false)
             .await
             .unwrap();

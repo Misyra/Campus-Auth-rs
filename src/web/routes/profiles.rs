@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::config::{ConfigApi, HttpLoginMethod, LoginChannel, ProfileApi};
+use crate::config::{ConfigApi, HttpLoginMethod, LoginChannel, ProfileApi, ProfileData};
 use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
 use crate::login::http_login::{HttpLoginRequest, run_once as run_http_login_once};
 use crate::web::error::{ApiError, data};
@@ -90,6 +90,15 @@ pub struct ProfileUpdateBody {
     pub name: Option<String>,
     pub username: Option<String>,
     pub password: Option<Zeroizing<String>>,
+    /// 显式清除已保存密码。
+    ///
+    /// `password` 的空串语义是「未修改，保留原密码」，因此**无法**用它表达清除
+    /// （`Some("")` 与 `None` 在此接口等价）。清除曾只能通过 `PATCH /api/config`
+    /// 对活跃方案完成——那是「设置 · 账号」页专用路径。账号页并入方案页后，
+    /// 该能力必须在本接口可用，否则「清除已保存密码」这个入口会整体消失。
+    /// 与 `password` 同现时以本字段为准（显式清除优先于「保留」）。
+    #[serde(default)]
+    pub clear_password: bool,
     pub auth_url: Option<String>,
     /// 重定向触发地址：非空即重定向模式（劫持型门户），为空保持直连
     pub trigger_url: Option<String>,
@@ -160,16 +169,218 @@ pub async fn list_profiles(
 }
 
 /// GET /api/profiles/{id} — 获取单个 Profile
+///
+/// 响应带 `has_password`（口径同 `GET /api/config`）：方案编辑器据此显示
+/// 「已保存 / 未设置」并决定是否提供「清除已保存密码」。只回 `settings` 一个
+/// 空串密码时，前端无法区分「没设密码」和「有密码但被抹掉了」——两者都会渲染成
+/// 空输入框，占位文案只能猜。
 pub async fn get_profile(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut profile = config.load_profile(&id)?;
+    let has_password =
+        crate::web::routes::config::effective_has_password(config.as_ref(), &profile);
     // 避免将密码（密文）泄露给前端
     profile.password = String::new();
-    Ok(data(
-        serde_json::json!({ "settings": serde_json::to_value(profile)? }),
-    ))
+    Ok(data(serde_json::json!({
+        "settings": serde_json::to_value(profile)?,
+        "has_password": has_password,
+    })))
+}
+
+/// 方案分享载荷的格式版本号
+///
+/// 导入时校验：缺失或非数字视为非本应用导出的文件（拒绝而非猜测），
+/// 高于当前值提示"由更新版本导出"。
+const PROFILE_SHARE_FORMAT: u32 = 1;
+
+/// 构造方案分享载荷
+///
+/// **剔除 `username` 与 `password`**：密码在磁盘上是 `ENC:` 密文，密钥存放于
+/// `~/.campus_network_auth/.enc_key.rs` 而非 config 目录，跨机器无法解密；若原样
+/// 带出，接收方的 `save_password` 会因 `can_decrypt_password` 为假而把它当**明文
+/// 再加密一次**（双重加密），导入后密码变成"那段密文本身"，登录必然失败且
+/// `password_decryption_failed` 仍为 false，排障时毫无线索。账号同样剔除——那是
+/// 接收方自己的学号，跟着走只会误导（也避免导出者无意识泄露）。
+///
+/// `active_task` 置空：任务属于方案绑定的浏览器任务 ID，接收方通常没有同名任务，
+/// 保留会静默回退到默认任务（`LoginInorchestrator::resolve_active_task`）。
+fn build_share_payload(profile: &ProfileData) -> Value {
+    serde_json::json!({
+        "campus_auth_profile": PROFILE_SHARE_FORMAT,
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        // 导入时的命名建议：取自源方案 id（恒为 ASCII slug），比拿方案名重算更可用。
+        // 方案名多为中文，slug 后为空会退化成 imported-profile/-2/-3，接收方看到一串
+        // 无意义 id；直接沿用源 id 则导入后就是 dorm / home 这类可辨识的名字。
+        // 仅作建议，导入方本就占用时仍会自动追加后缀。
+        "suggested_id": profile.id,
+        "profile": {
+            "name": profile.name,
+            // 明确空值而非缺字段：接收端 UI 据此提示"需自行填写账号密码"
+            "username": "",
+            "password": "",
+            "auth_url": profile.auth_url,
+            "trigger_url": profile.trigger_url,
+            "isp": profile.isp,
+            "gateway_ip": profile.gateway_ip,
+            "wifi_ssid": profile.wifi_ssid,
+            // 绑定任务不随方案迁移（接收方多半没有该任务）
+            "active_task": "",
+            "login_channel": profile.login_channel,
+            "http_method": profile.http_method,
+            "http_url": profile.http_url,
+            "http_headers": profile.http_headers,
+            "http_body": profile.http_body,
+            "http_success_pattern": profile.http_success_pattern,
+            "http_failure_pattern": profile.http_failure_pattern,
+            "http_crypto_script": profile.http_crypto_script,
+        }
+    })
+}
+
+/// 从分享载荷中提取待导入的 ProfileData 与建议 ID
+///
+/// 格式仅认「本应用导出的信封」：顶层数据字段为可选包装（兼容外壳/包裹写法），
+/// 但 `campus_auth_profile` 版本号必须存在——缺少即视为非本应用文件。宁可明确
+/// 报错，也不做"猜测字段"的宽松解析：错误猜测会导入一个看似成功却少了关键
+/// 判定关键字的方案，用户要到下次登录失败才发现。
+fn parse_share_payload(body: &Value) -> Result<(ProfileData, String), ApiError> {
+    // 兼容 API 信封 { data: {...} } 与 { profile: {...} } 包裹写法
+    let root = body.get("data").filter(|v| v.is_object()).unwrap_or(body);
+    let version = root
+        .get("campus_auth_profile")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            ApiError::BadRequest("不是有效的方案分享文件（缺少 campus_auth_profile 标记）".into())
+        })?;
+    if version > u64::from(PROFILE_SHARE_FORMAT) {
+        return Err(ApiError::BadRequest(format!(
+            "该方案由更新版本的应用导出（格式 {version}，当前支持 {PROFILE_SHARE_FORMAT}），请先升级"
+        )));
+    }
+    let obj = root
+        .get("profile")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| ApiError::BadRequest("分享文件缺少 profile 字段".into()))?;
+
+    // 逐字段按类型取值：类型不符直接忽略该字段（serde 的默认值兜底），
+    // 全量 as_str 转换失败会得到空串而非报错，符合"部分字段缺失仍可导入"的预期
+    let text = |key: &str| -> String {
+        obj.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut profile = ProfileData {
+        name: text("name"),
+        auth_url: text("auth_url"),
+        trigger_url: text("trigger_url"),
+        isp: text("isp"),
+        gateway_ip: text("gateway_ip"),
+        wifi_ssid: text("wifi_ssid"),
+        http_url: text("http_url"),
+        http_headers: text("http_headers"),
+        http_body: text("http_body"),
+        http_success_pattern: text("http_success_pattern"),
+        http_failure_pattern: text("http_failure_pattern"),
+        http_crypto_script: text("http_crypto_script"),
+        ..Default::default()
+    };
+    // 枚举字段显式解析：非法值报错而非静默退回默认，避免"导入成功但渠道变了"
+    if let Some(v) = obj.get("login_channel") {
+        profile.login_channel = serde_json::from_value(v.clone()).map_err(|_| {
+            ApiError::BadRequest("分享文件的 login_channel 非法（仅 browser/http）".into())
+        })?;
+    }
+    if let Some(v) = obj.get("http_method") {
+        profile.http_method = serde_json::from_value(v.clone()).map_err(|_| {
+            ApiError::BadRequest("分享文件的 http_method 非法（仅 GET/POST）".into())
+        })?;
+    }
+    if profile.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("分享文件缺少方案名称".into()));
+    }
+    // 直连方案的请求地址必须合法：校验前置到导入，避免落盘后每次登录才失败
+    if !profile.http_url.trim().is_empty() {
+        HttpLoginRequest::validate_url(&profile.http_url).map_err(ApiError::BadRequest)?;
+    }
+    if !profile.auth_url.trim().is_empty() {
+        validate_http_url("认证地址", &profile.auth_url)?;
+    }
+    if !profile.trigger_url.trim().is_empty() {
+        validate_http_url("重定向触发地址", &profile.trigger_url)?;
+    }
+
+    // 建议 ID：优先用导出方带的 `suggested_id`（源方案 id，恒为 ASCII slug），
+    // 缺失时才退回按名称推导。**必须与 `create_profile` 走同一 slug 规则**
+    // （`_` 归一为 `-`）——否则这里探测 `dorm_2` 是否占用、实际落盘却是 `dorm-2`，
+    // 冲突判定与被写入的 id 不一致，重名时会静默覆盖或报意外冲突。
+    let suggested = {
+        let from_payload = root
+            .get("suggested_id")
+            .and_then(Value::as_str)
+            .map(crate::config::profiles::slugify_id)
+            .filter(|s| !s.is_empty());
+        from_payload.unwrap_or_else(|| {
+            let by_name = crate::config::profiles::slugify_id(&profile.name);
+            if by_name.is_empty() {
+                "imported-profile".to_string()
+            } else {
+                by_name
+            }
+        })
+    };
+    Ok((profile, suggested))
+}
+
+/// GET /api/profiles/{id}/export — 导出方案为可分享的 JSON（剔除账号与密码）
+pub async fn export_profile(
+    State(config): State<Arc<dyn ConfigApi>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let profile = config.load_profile(&id)?;
+    tracing::info!(profile_id = %id, "导出方案");
+    Ok(data(build_share_payload(&profile)))
+}
+
+/// POST /api/profiles/import — 导入分享的方案 JSON
+///
+/// ID 冲突时自动追加 `-2`/`-3` 后缀而非报 409：导入的语义是"新增一份可用方案"，
+/// 让用户先解决命名冲突再重试属于把内部标识泄漏成用户负担；同时绝不覆盖既有
+/// 方案（覆盖会连带清掉对方的账号密码）。
+pub async fn import_profile(
+    State(profiles): State<Arc<dyn ProfileApi>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let (profile, suggested) = parse_share_payload(&body)?;
+
+    // 在既有方案中挑一个未占用的 ID
+    let existing: std::collections::HashSet<String> =
+        profiles.list_profiles().into_iter().map(|p| p.id).collect();
+    let mut target_id = suggested.clone();
+    if existing.contains(&target_id) {
+        // 上限兜底：极端情况下（10k 个同名）不无限循环
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{suggested}-{suffix}");
+            if !existing.contains(&candidate) {
+                target_id = candidate;
+                break;
+            }
+            suffix += 1;
+            if suffix > 10_000 {
+                return Err(ApiError::Conflict("同名方案过多，请先清理后再导入".into()));
+            }
+        }
+    }
+
+    let mut profile = profile;
+    profile.id = target_id.clone();
+    profiles.create_profile(&target_id, profile).await?;
+    tracing::info!(profile_id = %target_id, "导入方案");
+    Ok(data(serde_json::json!({ "id": target_id })))
 }
 
 /// POST /api/profiles/http-login-test — 发送一次无状态直连测试请求
@@ -417,7 +628,9 @@ pub async fn update_profile(
     if let Some(http_crypto_script) = body.http_crypto_script {
         profile.http_crypto_script = http_crypto_script;
     }
-    profiles.update_profile(&id, profile).await?;
+    profiles
+        .update_profile(&id, profile, body.clear_password)
+        .await?;
     tracing::info!(profile_id = %id, "更新 Profile");
     Ok(data(Value::String("ok".into())))
 }
@@ -591,13 +804,22 @@ mod tests {
             Ok(())
         }
 
-        async fn update_profile(&self, id: &str, data: ProfileData) -> Result<(), ConfigError> {
+        async fn update_profile(
+            &self,
+            id: &str,
+            data: ProfileData,
+            clear_password: bool,
+        ) -> Result<(), ConfigError> {
             let mut inner = self.0.lock().unwrap();
             let p = inner
                 .profiles
                 .iter_mut()
                 .find(|p| p.id == id)
                 .ok_or_else(|| ConfigError::ProfileNotFound { id: id.to_string() })?;
+            let mut data = data;
+            if clear_password {
+                data.password = String::new();
+            }
             *p = data;
             Ok(())
         }
@@ -777,6 +999,8 @@ mod tests {
                 "/api/profiles/http-login-test",
                 axum::routing::post(test_http_login),
             )
+            .route("/api/profiles/import", axum::routing::post(import_profile))
+            .route("/api/profiles/{id}/export", get(export_profile))
             .route(
                 "/api/profiles/{id}",
                 get(get_profile)
@@ -1205,6 +1429,96 @@ mod tests {
         assert_eq!(dorm.name, "只改名");
     }
 
+    /// GET 单个 Profile 回传 has_password，供方案页区分「已保存 / 未设置」
+    #[tokio::test]
+    async fn test_get_profile_reports_has_password() {
+        let (app, inner) = mock_app();
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            // 预置：dorm 有密码、default 无
+            dorm.password = "ENC:secret".into();
+        }
+
+        for (id, expected) in [("dorm", true), ("default", false)] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/profiles/{id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let v = body_json(resp).await;
+            assert_eq!(
+                v["data"]["has_password"], expected,
+                "{id} 的 has_password 判定错误"
+            );
+            // 密码本体仍不得出现在响应里（has_password 只是布尔）
+            assert_eq!(v["data"]["settings"]["password"], "");
+        }
+    }
+
+    /// clear_password 显式清除已保存密码（空串 password 无法表达该意图）
+    #[tokio::test]
+    async fn test_put_clear_password_empties_existing_password() {
+        let (app, inner) = mock_app();
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.password = "ENC:old-secret".into();
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "clear_password": true }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let dorm = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.password, "", "clear_password 必须真的清空密码");
+    }
+
+    /// clear_password 缺省（老客户端不传）时仍保留既有密码，语义不变
+    #[tokio::test]
+    async fn test_put_without_clear_password_keeps_existing() {
+        let (app, inner) = mock_app();
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.password = "ENC:old-secret".into();
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "name": "x" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let dorm = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(
+            dorm.password, "ENC:old-secret",
+            "未传 clear_password 不得清空"
+        );
+    }
+
     /// 测试端点可用已保存密码执行请求，且回显不泄露凭据。
     #[tokio::test]
     async fn test_http_login_test_uses_saved_password_and_redacts_report() {
@@ -1259,5 +1573,512 @@ mod tests {
         let serialized = json.to_string();
         assert!(!serialized.contains("saved-secret"));
         assert!(!serialized.contains("student"));
+    }
+
+    // ============ 方案分享（导出 / 导入） ============
+
+    /// 给名为 `id` 的方案填充可用于分享断言的全部字段
+    fn seed_shareable(inner: &Arc<std::sync::Mutex<MockInner>>, id: &str) {
+        let mut g = inner.lock().unwrap();
+        let p = g
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id)
+            .expect("方案存在");
+        p.name = "宿舍移动".into();
+        p.username = "20230001".into();
+        p.password = "ENC:Az3tbg8xvGEGbXsOZ".into();
+        p.auth_url = "http://10.1.1.55/".into();
+        p.isp = "移动".into();
+        p.gateway_ip = "10.1.1.1".into();
+        p.wifi_ssid = "Campus-Dorm".into();
+        p.active_task = "dorm-checkin".into();
+        p.login_channel = LoginChannel::Http;
+        p.http_method = HttpLoginMethod::Post;
+        p.http_url = "http://10.1.1.55/login?u={username}".into();
+        p.http_headers = "Content-Type: application/x-www-form-urlencoded".into();
+        p.http_body = "user={username}&pass={password}".into();
+        p.http_success_pattern = "登录成功".into();
+        p.http_failure_pattern = "密码错误".into();
+        p.http_crypto_script = "function transform(ctx){ return {}; }".into();
+    }
+
+    async fn export_of(app: &axum::Router, id: &str) -> Value {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/profiles/{id}/export"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    }
+
+    /// 导出必须剔除账号与密码：密码是跨机器不可解的 ENC: 密文，原样带出会被
+    /// 接收方当作明文**再加密一次**（双重加密），导入后登录必然失败且无任何提示
+    #[tokio::test]
+    async fn test_export_strips_credentials_and_binding() {
+        let (app, inner) = mock_app();
+        seed_shareable(&inner, "dorm");
+
+        let json = export_of(&app, "dorm").await;
+        let raw = json.to_string();
+        let profile = &json["data"]["profile"];
+
+        // 账号与密码双清（空串占位，便于前端提示"需自行填写"）
+        assert_eq!(profile["username"], "");
+        assert_eq!(profile["password"], "");
+        // 密文本身也不得出现在响应任何位置
+        assert!(!raw.contains("ENC:"), "导出体不得含密文: {raw}");
+        assert!(!raw.contains("20230001"), "导出体不得含账号: {raw}");
+        // 方案绑定的浏览器任务不随方案迁移
+        assert_eq!(profile["active_task"], "");
+
+        // 分享所需的直连参数必须完整保留
+        assert_eq!(profile["name"], "宿舍移动");
+        assert_eq!(profile["http_url"], "http://10.1.1.55/login?u={username}");
+        assert_eq!(profile["http_method"], "POST");
+        assert_eq!(profile["login_channel"], "http");
+        assert_eq!(profile["http_body"], "user={username}&pass={password}");
+        assert_eq!(profile["http_success_pattern"], "登录成功");
+        assert_eq!(profile["http_failure_pattern"], "密码错误");
+        assert_eq!(profile["wifi_ssid"], "Campus-Dorm");
+        assert!(!profile["http_crypto_script"].as_str().unwrap().is_empty());
+        // 格式标记与来源信息
+        assert_eq!(json["data"]["campus_auth_profile"], 1);
+        assert_eq!(json["data"]["app_version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// 导出不存在的方案 → 404
+    #[tokio::test]
+    async fn test_export_missing_profile_is_not_found() {
+        let (app, _inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/profiles/nope/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 导出→导入往返：直连参数须逐字保留，凭据须为空待填
+    #[tokio::test]
+    async fn test_export_import_roundtrip_preserves_http_config() {
+        let (app, inner) = mock_app();
+        seed_shareable(&inner, "dorm");
+        let exported = export_of(&app, "dorm").await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(exported["data"].to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let new_id = json["data"]["id"].as_str().unwrap().to_string();
+
+        let g = inner.lock().unwrap();
+        let imported = g
+            .profiles
+            .iter()
+            .find(|p| p.id == new_id)
+            .expect("导入的方案已落盘");
+        assert_eq!(imported.login_channel, LoginChannel::Http);
+        assert_eq!(imported.http_method, HttpLoginMethod::Post);
+        assert_eq!(imported.http_url, "http://10.1.1.55/login?u={username}");
+        assert_eq!(imported.http_body, "user={username}&pass={password}");
+        assert_eq!(imported.http_success_pattern, "登录成功");
+        assert_eq!(imported.http_failure_pattern, "密码错误");
+        assert_eq!(imported.gateway_ip, "10.1.1.1");
+        // 凭据留空，由接收方自填
+        assert_eq!(imported.username, "");
+        assert_eq!(imported.password, "");
+    }
+
+    /// 导入 ID 冲突时自动改名而非报 409，且**不得覆盖**既有方案
+    #[tokio::test]
+    async fn test_import_renames_on_id_conflict_without_overwriting() {
+        let (app, inner) = mock_app();
+        seed_shareable(&inner, "dorm");
+        let exported = export_of(&app, "dorm").await;
+        // 原始方案改名会丢信息：这里直接确认既有 dorm 的凭据不被导入动作清空
+        let before = {
+            let g = inner.lock().unwrap();
+            let p = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
+            (p.username.clone(), p.password.clone())
+        };
+
+        let mut imported_ids = Vec::new();
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/profiles/import")
+                        .header("content-type", "application/json")
+                        .body(Body::from(exported["data"].to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            imported_ids.push(
+                body_json(resp).await["data"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+
+        // 名称「宿舍移动」slug 后为连字符形态；两次导入互不冲突且都不等于 dorm
+        assert_ne!(imported_ids[0], imported_ids[1]);
+        let g = inner.lock().unwrap();
+        let after = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(
+            (after.username.clone(), after.password.clone()),
+            before,
+            "既有方案不得被导入覆盖"
+        );
+        assert_eq!(g.profiles.iter().filter(|p| p.id == "dorm").count(), 1);
+    }
+
+    /// 导入的建议 ID 必须与 `create_profile` 的 slugify 落盘 id 完全一致
+    ///
+    /// 回归：曾打算另写一份"下划线"规则，则冲突探测算的是 `dorm_2`、实际落盘
+    /// `dorm-2`，不一致会漏判冲突（静默覆盖或报意外 409）。用**含下划线与大写**
+    /// 的 ASCII 名称才能暴露该差异——中文名 slug 后为空，走回退分支，测不到规则本身。
+    #[tokio::test]
+    async fn test_import_suggested_id_matches_slugify() {
+        let (app, inner) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            g.profiles.iter_mut().find(|p| p.id == "dorm").unwrap().name = "My_Dorm Net".into();
+        }
+        let exported = export_of(&app, "dorm").await;
+        // 载荷不带 suggested_id 时才走"按名称推导"分支，这里先摘掉它以测该分支
+        let mut body = exported["data"].clone();
+        body.as_object_mut().unwrap().remove("suggested_id");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let assigned = body_json(resp).await["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 必须恰等于 create_profile 内部会写盘的那个 id（下划线归一为连字符）
+        assert_eq!(
+            assigned,
+            crate::config::profiles::slugify_id("My_Dorm Net"),
+            "导入 id 必须与 create_profile 的 slugify 结果逐字一致"
+        );
+        assert_eq!(assigned, "my-dorm-net");
+        let g = inner.lock().unwrap();
+        assert!(
+            g.profiles.iter().any(|p| p.id == assigned),
+            "响应的 id 必须是实际落盘的 id"
+        );
+    }
+
+    /// 中文方案名导入后应得到可辨识的 id（沿用导出方的源 id），而非 imported-profile
+    ///
+    /// 端到端实测发现：方案名多为中文，slug 后为空会退化成 `imported-profile`，
+    /// 同名分享给多个同学还会各自变成 `-2`/`-3`，接收方看到的是一串无意义编号。
+    #[tokio::test]
+    async fn test_import_prefers_source_id_for_chinese_names() {
+        let (app, inner) = mock_app();
+        seed_shareable(&inner, "dorm"); // name = "宿舍移动"（中文，slug 后为空）
+        let exported = export_of(&app, "dorm").await;
+        assert_eq!(exported["data"]["suggested_id"], "dorm");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(exported["data"].to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let assigned = body_json(resp).await["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // 源 id 已被占用（dorm 自身）→ 追加后缀，但仍是可辨识的 dorm-2 而非 imported-profile
+        assert_eq!(
+            assigned, "dorm-2",
+            "中文名方案应沿用源 id 而非退化为 imported-profile"
+        );
+    }
+
+    /// 恶意/异常 `suggested_id` 不得绕过 slug 与合法性校验（路径穿越等）
+    #[tokio::test]
+    async fn test_import_sanitizes_suggested_id() {
+        let (app, inner) = mock_app();
+        // 期望值：前两条路径穿越载荷都归一为 "evil"（第二条因重名追加后缀），
+        // 第三条按 slug 规则得 "my-dorm"，第四条空串退回 imported-profile
+        for (raw, expect) in [
+            ("../../evil", "evil"),
+            ("..\\..\\evil", "evil-2"),
+            ("My Dorm!", "my-dorm"),
+            ("", "imported-profile"),
+        ] {
+            let body = serde_json::json!({
+                "campus_auth_profile": 1,
+                "suggested_id": raw,
+                "profile": { "name": "中文名", "http_url": "http://10.1.1.1/login" }
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/profiles/import")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "suggested_id={raw:?}");
+            let assigned = body_json(resp).await["data"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                assigned, expect,
+                "suggested_id={raw:?} 应被规范化为 {expect}"
+            );
+            assert!(!assigned.contains('/') && !assigned.contains('\\') && !assigned.contains('.'));
+        }
+        // 所有落盘 id 均为合法 profile id（无路径分隔符 / 点号 / 保留名）
+        let g = inner.lock().unwrap();
+        let mut count = 0;
+        for p in &g.profiles {
+            assert!(
+                p.id.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "落盘 id 非法: {}",
+                p.id
+            );
+            count += 1;
+        }
+        assert_eq!(count, 2 + 4, "原有 2 个 + 4 次导入");
+    }
+
+    /// 连字符 id 必须能通过前端的保存校验字符集 `^[a-zA-Z0-9_-]+$`
+    ///
+    /// 回归：前端曾只允许 `_`，而落盘 id 恒为连字符形态（slugify 把 `_` 归一为 `-`），
+    /// 于是任何含下划线/空格/中文名的新建方案都是"创建后再也改不动"——编辑器里
+    /// ID 输入框 disabled，改名字保存会被前端拦下。导入的方案 id 同样来自该 slugify，
+    /// 故这里断言两者一致，防止任一侧单独放宽或收紧。
+    #[test]
+    fn test_slugified_ids_satisfy_frontend_id_charset() {
+        // 与 frontend/src/composables/useProfiles.ts 的 saveProfile 正则保持一致
+        let frontend_ok = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        };
+        for name in [
+            "My_Dorm Net",
+            "宿舍移动",
+            "dorm",
+            "DORM-2",
+            "a  b__c",
+            "profile!",
+        ] {
+            let slug = crate::config::profiles::slugify_id(name);
+            if slug.is_empty() {
+                // 空 slug 走 imported-profile 回退，不参与本断言
+                continue;
+            }
+            assert!(
+                frontend_ok(&slug),
+                "slugify({name:?}) = {slug:?} 会被前端 ID 校验拒绝"
+            );
+        }
+    }
+
+    /// 非本应用导出的 JSON 必须被拒绝，不做"猜字段"的宽松解析
+    #[tokio::test]
+    async fn test_import_rejects_foreign_payload() {
+        let (app, _inner) = mock_app();
+        for (label, body) in [
+            ("缺标记", serde_json::json!({ "profile": { "name": "x" } })),
+            ("空对象", serde_json::json!({})),
+            (
+                "裸 ProfileData",
+                serde_json::json!({ "name": "x", "http_url": "http://a.b/c" }),
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/profiles/import")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "应拒绝: {label}");
+        }
+    }
+
+    /// 更高格式版本须明确提示升级，而非按当前版本强行解析
+    #[tokio::test]
+    async fn test_import_rejects_future_format_version() {
+        let (app, _inner) = mock_app();
+        let body = serde_json::json!({
+            "campus_auth_profile": 99,
+            "profile": { "name": "未来方案" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        let msg = json["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("更新版本"), "应提示来源版本更新: {msg}");
+    }
+
+    /// 导入时校验直连地址：非法地址前置拒绝，不留到每次登录才失败
+    #[tokio::test]
+    async fn test_import_validates_http_url() {
+        let (app, _inner) = mock_app();
+        for bad in ["ftp://10.1.1.1/login", "10.1.1.1/login", "http://"] {
+            let body = serde_json::json!({
+                "campus_auth_profile": 1,
+                "profile": { "name": "坏地址方案", "http_url": bad }
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/profiles/import")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "应拒绝地址: {bad}");
+        }
+    }
+
+    /// 非法枚举值须报错，而非静默退回默认（否则"导入成功但渠道被改"）
+    #[tokio::test]
+    async fn test_import_rejects_invalid_enums() {
+        let (app, _inner) = mock_app();
+        for (field, value) in [("login_channel", "curl"), ("http_method", "PATCH")] {
+            let body = serde_json::json!({
+                "campus_auth_profile": 1,
+                "profile": { "name": "枚举方案", field: value }
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/profiles/import")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{field}={value} 应被拒"
+            );
+        }
+    }
+
+    /// 无名称的方案不可导入（无法命名也就无法提示用户）
+    #[tokio::test]
+    async fn test_import_requires_name() {
+        let (app, _inner) = mock_app();
+        let body = serde_json::json!({
+            "campus_auth_profile": 1,
+            "profile": { "name": "   ", "http_url": "http://10.1.1.1/login" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 带 `{ data: ... }` 外壳的载荷同样可导入（兼容 API 信封写法）
+    #[tokio::test]
+    async fn test_import_accepts_envelope_wrapping() {
+        let (app, _inner) = mock_app();
+        let body = serde_json::json!({
+            "data": {
+                "campus_auth_profile": 1,
+                "profile": { "name": "信封方案", "login_channel": "http", "http_url": "http://10.1.1.1/login" }
+            }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

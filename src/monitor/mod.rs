@@ -717,7 +717,10 @@ mod tests {
         let mut profile = profiles.get_profile("default").unwrap();
         profile.auth_url = "http://127.0.0.1:9/login".into();
         profile.trigger_url = String::new();
-        profiles.update_profile("default", profile).await.unwrap();
+        profiles
+            .update_profile("default", profile, false)
+            .await
+            .unwrap();
         assert_eq!(
             profiles.get_profile("default").unwrap().auth_url,
             "http://127.0.0.1:9/login",
@@ -811,7 +814,10 @@ mod tests {
         let profiles = crate::config::ProfileService::new(config.clone());
         let mut profile = profiles.get_profile("default").unwrap();
         profile.auth_url = String::new();
-        profiles.update_profile("default", profile).await.unwrap();
+        profiles
+            .update_profile("default", profile, false)
+            .await
+            .unwrap();
         config.reload().await.unwrap();
 
         let report = monitor.check_auto_monitor().await.unwrap();

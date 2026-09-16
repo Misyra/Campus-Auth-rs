@@ -54,6 +54,7 @@ struct OpenApiAsset;
 #[folder = "docs/guides/"]
 #[include = "task-writing-guide.md"]
 #[include = "task-manual.md"]
+#[include = "http-login-guide.md"]
 pub(crate) struct GuideAsset;
 
 #[cfg(not(feature = "no-embed"))]
