@@ -136,3 +136,6 @@ python_worker/captures/
 
 # 本地配置备份（删除运行目录 config 前的手工备份）
 /config-backup-*/
+
+# AI 工具会话记录（如 WorkBuddy/Codex），非项目代码，不入仓
+.workbuddy-ai/
