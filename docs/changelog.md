@@ -1,6 +1,57 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件，过时规划见 `docs/archive/`，活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
+
+## 开发中（2026-09-17 文档全量对质：修正 20 处与代码不符的陈述）
+
+以「文档声明 → 源码事实」逐条对质全部用户/开发文档（`README.md`、`AGENTS.md`、`docs/**`）与 `openapi.json`，发现并修正 20 处与当前实现不符的陈述；同时清理 `docs/archive/` 遗留引用并删除该已清空的目录。
+
+### 与实现相反（P0）
+
+- **`task-writing-guide.md` §10**：原称「`wait` 无 selector 保存新任务时被校验拒绝（`步骤[n] 需要 selector`）」——与代码相反。`src/tasks/loader.rs:548-561` 的实际规则是「`selector` 与 `duration` 不能同时为空」，只写 `duration` 的 `wait` **校验通过**（`test_validate_wait_accepts_duration_only` 已固化，有意设计以免 AI 生成的休眠步骤反复自纠失败）。改为如实描述校验口径与推荐写法。
+- **`user-guide.md` 运行模式表漏列 `pause_enabled`**：`frontend/src/utils/runMode.ts:38-58` 的 `RunModeSettings` 有 7 个字段，文档只列 6 项。补「启用暂停时段（默认模式开启 / 调试模式关闭）」，与 `docs/updatelog.md:11` 对齐。
+- **`task-manual.md` API 表重复 `POST /api/login` 两行**（`:62` / `:68`，一行还沿用旧术语「活跃任务」）、末行与 `## 8.` 标题间缺空行（表格会被标题截断）。重写该表：去重、补 `scheduler/jobs` 六个端点、路径参数按实现改 `{task_id}`、补空行。
+- **`user-guide.md` §3 切换检测周期错误**：原称「每 60s 检测」，实际默认 **180s**（`src/engine/mod.rs:27`、`src/config/schema.rs:249`），可配 60–600（`:35-37`）。
+
+### 事实性错误（P1）
+
+- **`README.md`「增量更新」→ 全量分发**：`src/updater/download.rs` 整体下载归档解压，无差分包逻辑；`docs/changelog.md:1338/1349` 自身口径即「更新全量分发」。
+- **`README.md`「优先级排序」→ 约束条件多者优先**：`src/config/` 无 `priority`/`order` 字段与端点，匹配顺序由 `profiles.rs:284/289` 的 `strength` 自动推导。
+- **`README.md`「端口冲突自动 +1」→ 改绑端口 0**：`src/app.rs:128-130` 仅在回环地址遇 `AddrInUse`/Windows 10013 时改由内核随机分配，非回环直接报错。
+- **`user-guide.md`「v8 schema」→ v9**：`src/config/mod.rs:14` 为 `CURRENT_CONFIG_VERSION = 9`。
+- **`user-guide.md` 运行时目录树**：`.venv`、`captures/`、`debug/` 实际都在 `python_worker/` 下（`environment::PYTHON_EXE_RELATIVE`、`src/ai/mod.rs:268`、`src/web/routes/debug.rs:152`），Playwright 浏览器在平台默认缓存（`environment/browser_registry.rs:73-86`）；补 `logs/login_history/` 与各项状态文件。
+- **`user-guide.md`「镜像目录 `~/.cache/campus-auth`」删除**：全仓无该路径任何写入点（`git grep` 仅命中该行文档本身）。
+- **`user-guide.md`「开机自启写系统注册表」限定 Windows**：macOS 写 LaunchAgent plist、Linux 写 XDG desktop（`src/utils/platform.rs:14-150`），与本文件 §7 三端描述一致。
+
+### 过时/失准（P2）
+
+- **`custom-script-guide.md`「stdout/stderr 经 tracing 与 WebSocket 推送」不成立**：`src/tasks/executor.rs:431-450` 只把输出放进 `TaskResult.output`（截断 500）随响应返回；9 处 `tracing::` 调用无一携带子进程输出，日志面板/`GET /api/logs` 看不到脚本输出。
+- **`custom-script-guide.md`「子进程带 `CREATE_NO_WINDOW`」不成立**：`executor.rs:381-393` 构造脚本子进程时未设 `creation_flags`（`:469-472` 那处只用于超时强杀的 `taskkill`）。改为中性描述并给出静默运行的规避方式。
+- **`custom-script-guide.md`「`script_path` 可为绝对路径」**：`executor.rs:340-357` 对绝对路径同样 canonicalize 并要求落在 `tasks/scripts/` 内，越界报「script_path 越界」。
+- **`http-login-guide.md`「体积超限在保存时被拒绝」**：`HttpLoginRequest::validate()` 仅在登录执行（`http_login.rs:106`）与测试端点（`profiles.rs:443`）调用，保存路径只校验 URL 合法性，超限配置可存盘。
+- **`plan-next.md`「85 个路径 / 响应 schema 全为 `{}`」**：实为 88 个路径（`/api/*` 87 + `/ws/logs`、operations 103），且 `/api/ai/capture/status` 带真实 schema（`openapi.json:3490-3499`）。
+- **`known-issues.md` 引用坐标修正**：#3 序列化点 `:360`（原 `:658` 是测试注释）、#15 排序示意移到 `:272-291`（原 `:138-157` 为摘要赋值与 slug 校验）、#19 校验位置改为 `src/web/ssrf.rs:26-69`（`repo.rs` 已无 IP 判定代码）。
+- **`known-issues.md` 两条失效条目**：「`useTasks` ↔ `useScripts` 循环动态导入」与「本地遗留 `python_worker/.venv` 待清理」均不再成立（前者两模块互不引用、均经 `useTaskDirectory`；后者目录已不存在），「三、低危清理项」据此清空。
+- **`known-issues.md` 核实口径**：删除「已逐项对照当前代码核实（2026-09-06）」这一与 `plan-next.md:42`（#22 注 21 项未复核）矛盾的表述，改为逐条注明核实时点。
+- **`docs/changelog.md` 头部**、`docs/known-issues.md` 头部：`docs/archive/` 死引用改为如实指向。
+- **删除 `docs/archive/`**：该目录自两轮清理后已成空壳（仅剩 README，无任何归档材料），且所有引用点均为「说明它已空」的元描述，无实际内容依赖。删目录同时收敛引用：`AGENTS.md` 文档分工表去掉该行、`docs/changelog.md` 头部与 `docs/known-issues.md` / `docs/plan-next.md` 改为「archive 已删除、历史归档材料不可追溯」。
+- **`docs/archive/README.md` 台账失真**：删除已不存在的 `test-coverage-2026-08-30.md` 行（该路径还被 `.gitignore` 的 `/docs/**/*-coverage-*.md` 命中，无法入库）。
+- **`src/ai/prompt.rs:3`**：自指行数改为「约 570 行」（实际 571）。
+
+### 顺带更正（本次对质新增发现）
+
+- `task-manual.md` 页面名 `设置 · 监测` → `设置 · 网络检测`、`设置 · 任务` → `设置 · 任务与环境`（以前端路由 `title` 为权威）。
+- `custom-script-guide.md` / `task-manual.md` / `user-guide.md` 标题旧叫法「配置方案」统一为「方案」。
+- `README.md` 单次登录改为「当前方案绑定的任务」、快速开始 OCR 入口改为「设置·任务与环境」、项目结构中 docs 清单补 `updatelog`/`guides`。
+
+### 验证
+
+- 文档内部相对链接全量扫描：**0 断链**；文档提及的 `/api/*` 路径与 `openapi.json` 逐一比对，除通配写法（`/api/autostart/*`、`/api/scripts`）与示例脚本 ID 外无悬空端点。
+- `cargo fmt --check` 通过；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo check --features no-embed` 通过。
+- `cargo test --lib` **878 passed / 0 failed**（含 `tasks::loader::tests::test_validate_wait_*` 实跑确认 wait 双语义、`scheduler::tests::test_systemtime_to_iso_uses_local_offset` 实跑确认 #3 已修）；`cargo test --test '*'` 全部通过（`instance_lifecycle` 首轮出现一次并行时序偶发失败，单独与重跑均通过）。
+- `web::tests::openapi_json_matches_route_table` 通过。
+- 未运行前端构建/vitest 与 pytest：本轮仅改文档与一处 Rust doc comment，未触及前端与 Worker 代码。
+
 
 ## 开发中（2026-09-16 修复 engine 测试隐式依赖墙钟时间）
 

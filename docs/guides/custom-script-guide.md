@@ -10,7 +10,7 @@
 - **更快** — 纯本地进程
 - **更灵活** — 任意解释器或可执行文件（经 `binary_path` 指定）
 
-**脚本不参与登录认证。** 校园网登录由「配置方案」里的**登录方式**负责：浏览器自动化（按任务步骤操作网页）或**直连请求**（在 Rust 进程内发 HTTP，无需写代码、无需 Python/浏览器）。脚本请用于定时执行的辅助动作。
+**脚本不参与登录认证。** 校园网登录由「方案」页里的**登录方式**负责：浏览器自动化（按任务步骤操作网页）或**直连请求**（在 Rust 进程内发 HTTP，无需写代码、无需 Python/浏览器）。脚本请用于定时执行的辅助动作。
 
 支持的文件脚本扩展名：`py` / `bat` / `cmd` / `sh` / `exe` / `com`（`src/tasks/executor.rs::is_supported_ext`）。`ps1` / `powershell` / `pwsh` 不在支持范围——经 `binary_path` 传入也会被映射为 `ps1` 后拒绝，请改用 `bat` 包装。
 
@@ -19,7 +19,7 @@
 | 字段 | 含义 |
 |------|------|
 | `content` | 内联脚本内容（写入临时文件执行，后缀按 `binary_path` 推断，上限 100 KB） |
-| `script_path` | 脚本路径（相对 `tasks/scripts/` 或绝对路径；相对路径经 canonicalize 校验仍在 `tasks/scripts/` 内，防 symlink 越界） |
+| `script_path` | 脚本路径。相对路径基于 `tasks/scripts/`；路径存在时经 canonicalize 校验必须仍位于 `tasks/scripts/` 内（防 symlink 越界），**绝对路径同样受此约束**，指向别处会报「script_path 越界」 |
 | `binary_path` | 解释器 / 启动器覆盖；为空时按下表回退 |
 | `args` | 命令行参数 |
 | `work_dir` | 工作目录，为空时用 `script_path` 所在目录（`content` 场景为临时目录） |
@@ -85,9 +85,9 @@ curl -X POST http://127.0.0.1:50721/api/scripts/run \
 
 - 统一执行：`POST /api/tasks/{id}/execute`（浏览器/脚本通用）；`POST /api/scripts/run`（脚本直跑，临时任务不落盘）。
 - 成败判定：按**子进程退出码**，`0` 视为成功（`src/tasks/executor.rs::run_command`）。
-- 日志：`stdout` 与 `stderr` 都经 `tracing` 与 WebSocket 推送，前端日志面板与 `GET /api/logs` 可查；超长输出按 `OUTPUT_TRUNCATE_LEN` 截断。
+- 输出去向：`stdout` / `stderr` 被合并进 `TaskResult.output`（各截断到 `OUTPUT_TRUNCATE_LEN` = 500 字符，超出为 `stdout\nstderr`）随**执行响应的 HTTP 响应体**返回，也是任务历史里显示的内容。**该输出不经 `tracing` 记录、不进 WebSocket 推送**，因此前端实时日志面板与 `GET /api/logs` 看不到脚本的 stdout/stderr——排障请看任务详情/执行结果，而非日志面板。
 - 环境隔离：子进程以最小环境变量启动（`env_clear` 后仅注入 `PATH`/`HOME`/`TEMP` 及 Windows 关键目录变量），不继承主进程的 token、代理密码等。
-- 超时：走 `tokio::process` 超时取消，Unix 上以独立进程组 `killpg` 回收整棵子树（对标 Windows Job Object + `taskkill /T`）。
+- 超时：走 `tokio::process` 超时取消，超时时 Windows 以 `taskkill /T`（带 `CREATE_NO_WINDOW`）递归杀进程树，Unix 上以独立进程组 `killpg` 回收整棵子树。
 
 ## 6. 常见问题
 
@@ -101,7 +101,7 @@ curl -X POST http://127.0.0.1:50721/api/scripts/run \
 
 **Q: 会弹窗口吗？**
 
-Windows 上子进程带 `CREATE_NO_WINDOW`，不弹控制台窗口。
+程序自身 release 版为 Windows GUI 子系统（`src/main.rs` 的 `windows_subsystem = "windows"`），双击主程序不弹控制台。但**脚本子进程本身没有显式设置 `CREATE_NO_WINDOW`**（`src/tasks/executor.rs` 仅在超时强杀的 `taskkill` 调用上设置该标记），因此它是否出现控制台窗口取决于脚本类型与宿主环境——例如启动 `cmd.exe` / 控制台版 `python.exe` 时可能短暂出现窗口。若你的脚本必须静默运行，请自行规避：用 `pythonw.exe`、`.vbs` 包装，或把控制台脚本改为不写终端的实现（脚本路径上不支持 `ps1`，见上文）。
 
 **Q: 如何注入账号密码？**
 

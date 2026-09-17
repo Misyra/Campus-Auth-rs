@@ -1,8 +1,8 @@
 # 已知问题清单
 
-> 本文档沉淀**仍然有效**的未修复项（已逐项对照当前代码核实，2026-09-06）。
-> 原审查报告（`docs/*review-*.md`、`doc/*.md`）已删除，有效结论迁移至此；历史详见 `docs/archive/`。
-> 条目的修复记录归档于 `docs/changelog.md`（按版本归档，不在本文档保留已修复节）。
+> 本文档沉淀**仍然有效**的未修复项。
+> **核实口径**：各条目在写入/修订时点对照当时代码核实，**并非全文档同一时间戳全量复核**——`docs/plan-next.md` 已明确记录 #22 注（21 项 P3 挂账）与 MON-4-R1/R2/R3 **尚未逐条复核**，引用前请自行对质当前代码。
+> 原审查报告（`docs/*review-*.md`）已删除，有效结论迁移至此；历史归档目录 `docs/archive/` 亦已于 2026-09-17 删除，其中材料不可追溯，已修复条目的记录见 `docs/changelog.md`（按版本归档，不在本文档保留已修复节）。
 > 原 defect-recheck（76 条 v2）与 updater-audit（更新子系统 v2）过程报告已于 2026-09-12 删除；P0/P1 与更新子系统待办摘要见 `docs/plan-next.md`，与本文档互补。
 
 ---
@@ -12,11 +12,11 @@
 | # | 严重度 | 问题 | 位置 |
 |---|--------|------|------|
 | 2 | ✅ 已修 | `mapBackendStatus` 用 `Object.assign(out, raw)` 混入非契约字段，后端新增同名字段会覆盖精心映射的值 | 已由 P17 改为逐字段显式映射（`frontend/src/composables/useStatus.ts:92-119`，其余 `Object.assign` 均不含 `raw`） |
-| 3 | 🟢 低 | 定时任务 `next_fire_at` 以 UTC（RFC3339 `Z`）展示，与本地触发语义不一致，易误判 | `src/scheduler/mod.rs:658`（序列化点；字段定义 `:71`、`systemtime_to_iso` `:360`） |
+| 3 | ✅ 已修 | ~~定时任务 `next_fire_at` 以 UTC（RFC3339 `Z`）展示，与本地触发语义不一致，易误判~~ 已改为转 `chrono::Local` 输出带偏移的 RFC3339（`systemtime_to_iso`，代码注释显式引用本条目），回归测试 `test_systemtime_to_iso_uses_local_offset` | `src/scheduler/mod.rs:645-652`（定义）、`:360`（调用点）、`:660`（测试） |
 | 5 | 🟢 低 | Profile 切换检测仍被 `is_any_pause_active` 阻断（原审查判定为误阻断，属设计取舍，需确认） | `src/engine/run_loop.rs:234-241`（门控）、`:1006`（`is_any_pause_active` 定义） |
-| 7 | ✅ 已修 | ~~`uv sync` 失败无删除重试；`UV_SYNC_MAX_RETRIES` 常量定义未使用~~（已修：常量已移除，`uv sync` 实为 3 次重试，见 `src/environment/uv.rs` 的 `UV_DOWNLOAD_MAX_RETRIES`）。仍存：环境引导仅懒触发（任务执行 / OCR / 系统页），启动不自动引导 | `src/environment/uv.rs`、`src/environment/python.rs` |
-| 15 | 🟢 低 | Profile 匹配无用户可配置 `priority` 字段（已按约束数降序确定性排序，抖动已修） | `src/config/profiles.rs:138-157` |
-| 19 | 🟡 低中 | `repo.rs` IP 字面量校验**不完整**（IPv6 链路本地已修，见已修复记录；建议复核是否需补 `is_documentation` 等保留段） | `src/web/routes/repo.rs:108-125` |
+| 7 | ✅ 已修 | ~~`uv sync` 失败无删除重试；`UV_SYNC_MAX_RETRIES` 常量定义未使用~~（已修：`UV_SYNC_MAX_RETRIES` 全仓无定义，`uv sync` 实为 3 次重试，常量定义于 `src/environment/mod.rs:65` 的 `UV_DOWNLOAD_MAX_RETRIES`，由 `uv.rs` 引入使用）。仍存：环境引导仅懒触发（任务执行 / OCR / 系统页），启动不自动引导 | `src/environment/uv.rs`、`src/environment/python.rs` |
+| 15 | 🟢 低 | Profile 匹配无用户可配置 `priority` 字段（已按约束数降序确定性排序，抖动已修） | `src/config/profiles.rs:272-291`（`detect_matching_profile`，`strength` 见 `:284`、排序见 `:289`） |
+| 19 | ✅ 已修 | ~~`repo.rs` IP 字面量校验**不完整**（IPv6 链路本地已修，建议复核是否需补 `is_documentation` 等保留段）~~ 校验已整体收敛至 `src/web/ssrf.rs::is_restricted_ip`：IPv4 文档示例段（`192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`）、CGNAT（`100.64.0.0/10`）、基准测试段（`198.18.0.0/15`）与 IPv6 `2001:db8::/32`、链路本地、v4-mapped 均已覆盖（`ssrf.rs:26-69`），`repo.rs` 自身不再含 IP 判定代码 | `src/web/ssrf.rs:26-69` |
 | 20 | 🟢 低 | v5→v6 迁移把 `enable_local_check`（登录前物理网卡检查）误改名 `url_enabled`，存量迁移用户 `local_check_enabled` 永久缺省；forward 映射已修（2026-09-13），存量不回写（见注） | `src/config/migration.rs`（v5→v6） |
 | 21 | 🟢 极低 | `ServiceContainer` 无 `Drop`：`new()` 内已 spawn 引擎/uptime/日志清理等常驻任务，若构造中途失败这些任务不会被显式取消。实际危害有限——`startup()` 不可失败，真实失败点在 `new()` 内且随即 `exit(1)` 由 OS 收尸（窗口期空转而非永久泄漏）；仅当未来启动流程变为"部分失败但进程存活"时才值得引入 Drop/回滚编排 | `src/container.rs`（2026-09-13 复核口径） |
 | 22 | 🟢 极低 | 2026-09-13 P3 批量挂账（21 项，全部经复核确认为低危且有不修理由——已书面化的设计取舍、修复成本与收益不匹配、或依赖外部约定；逐项见下方 #22 注） | 见 #22 注 |
@@ -41,8 +41,7 @@
 
 ## 三、低危清理项
 
-- 前端构建警告：`useTasks` ↔ `useScripts` 循环动态导入，无法拆 chunk
-- 本地遗留目录可清理：`python_worker/.venv`（Worker 本地虚拟环境，约 100MB+，运行时按需重建）
+> 2026-09-17 对质后已清空：原两条均已不成立。① 「`useTasks` ↔ `useScripts` 循环动态导入」——两模块现互不引用，均经 `useTaskDirectory` 共享取数（`useScripts.ts:6` 注释明示"与 useTasks 无依赖关系"），全仓动态 `import()` 仅存在于测试与 `router/index.ts` 的路由懒加载。② 「本地遗留目录 `python_worker/.venv` 可清理」——该目录已不存在（Worker 虚拟环境按需重建，位置为 `<base>/python_worker/.venv`，已被 `.gitignore` 忽略）。
 
 ---
 
@@ -66,4 +65,4 @@
 - 状态落盘：`update/last_check.json`（UTC、best-effort），`GET /api/update-state` 回放，前端“上次检查”数据源；`auto_check_enabled==false` 时仅手动检查可刷新。
 - 审计项摘要见 `docs/plan-next.md` 更新子系统分批建议（含下载代理收敛 `resolved_proxy_url`、单包 `.sha256` 伴随文件依赖等），此处不重复展开。
 
-> 历史已修复条目已归档至 `docs/changelog.md`（2026-08 全量，含第十一~十六轮）；过时规划见 `docs/archive/` 与 `docs/plan-next.md`。
+> 历史已修复条目已归档至 `docs/changelog.md`（2026-08 全量，含第十一~十六轮）；活跃计划见 `docs/plan-next.md`（历史归档目录 `docs/archive/` 已删除）。

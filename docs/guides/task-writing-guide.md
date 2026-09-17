@@ -250,7 +250,9 @@ wait_for_selector
 }
 ```
 
-为兼容历史任务，`wait` 没有 selector 时仍按 `duration` 做固定等待；新任务不要继续依赖这种双重语义。新任务固定等待必须用 `sleep`——`wait` 无 selector 仅为执行历史任务保留的兼容行为，保存新任务时会被校验拒绝（`步骤[n] 需要 selector`）。
+为兼容历史任务，`wait` 没有 selector 时仍按 `duration` 做固定等待；新任务固定等待请用 `sleep`，不要依赖这种双重语义。
+
+校验口径（`src/tasks/loader.rs::validate_task`）：`wait` 是表驱动步型字段约束的**特例**，规则为「`selector` 与 `duration` **不能同时为空**」——只写 `duration` 的 `wait` 会被**接受**，错误文案为 `步骤[n] 需要 selector 或 duration`。保留 `duration` 语义是有意设计（与 Python 侧 `handle_wait`、AI 提示词一致），否则 AI 生成的休眠步骤会在自纠轮次中反复失败。故两条约束并存：校验**允许** `wait` 只带 `duration`，约定**推荐**新任务用 `sleep`。
 
 `wait_for_selector` 是显式兼容类型，语义与带 selector 的 `wait` 一致。
 

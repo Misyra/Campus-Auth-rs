@@ -54,17 +54,21 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ```
 <base_path>/
-├── config/                  # settings.json + profiles/*.json + .auth_token（鉴权）
+├── config/                  # settings.json + profiles/*.json + .auth_token（鉴权）+ llm.json
 ├── tasks/
 │   ├── browser/             # 浏览器任务（*.json）
 │   ├── scripts/             # 脚本任务（type=script）
-│   └── scheduled/           # 定时任务调度历史等
-├── logs/                    # 按日归档（受 logging.retention_days 控制）
-├── environment/             # uv / .venv / Playwright 浏览器（按需生成）
+│   └── scheduled/           # 定时任务调度历史（history/）
+├── logs/                    # 按日归档（受 logging.retention_days 控制，默认 7 天）
+│   └── login_history/       # 登录历史
+├── environment/             # uv 可执行文件 + 状态文件（python-runtime-state.json / python-preferences.json / ocr.enabled）
+├── python_worker/           # Worker 工程目录：源码 + .venv（虚拟环境）+ captures/（AI 页面捕获）+ debug/（调试快照）
 └── update/                  # last_check.json（上次检查状态）+ staging/（下载暂存）
 ```
 
-`settings.json` 为 v8 schema（`src/config/schema.rs`，当前版本见 `CURRENT_CONFIG_VERSION`），`config_version` 字段驱动迁移；密码字段落盘为 `ENC:` 前缀密文（`aes-gcm` + `zeroize`）。
+> `.venv` 与 `captures/` / `debug/` 都在 `python_worker/` 下，**不在** `environment/`；`environment/` 只放 uv 与运行时状态。Playwright 浏览器放在各自平台的默认缓存（Windows `%LOCALAPPDATA%\ms-playwright`，macOS `~/Library/Caches/ms-playwright`，Linux `~/.cache/ms-playwright`），仅 Docker 通过 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` 改到镜像内。
+
+`settings.json` 为 v9 schema（`src/config/mod.rs::CURRENT_CONFIG_VERSION`，字段定义见 `src/config/schema.rs`），`config_version` 字段驱动迁移；密码字段落盘为 `ENC:` 前缀密文（`aes-gcm` + `zeroize`）。
 
 ## 2. Web 控制台
 
@@ -93,15 +97,18 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 | 启动后执行 | 开始检测 | 无操作（手动跑一次才看得见过程） |
 | 日志级别 | INFO | DEBUG |
 | 开机自启动 | 开启 | 关闭 |
-| 低资源模式 | 关闭 | 关闭 |
+| 低资源模式 | 关闭 | 关闭（两组取值相同，切换时不会列入改动清单） |
+| 启用暂停时段 | 开启 | 关闭（随时手动复现不被拦截） |
 
-切换前会列出**实际将要改动**的项（未变化的不列），确认后才执行。实现要点：多数项经 `PATCH /api/config` 一次提交；**日志级别必须走 `PUT /api/config/log-level`**（仅 PATCH 只落盘、不热更新 tracing filter，会出现"界面显示 DEBUG、实际按 INFO 过滤"的假象）；**开机自启走 `POST /api/autostart/*` 且会真实写系统注册表**。故三者非原子——任一步失败会提示"部分设置可能已生效，请检查后重试"。
+> 暂停时段只切换**启用开关**，不覆盖起止时间（默认 23:00–06:00，用户可自调）；上表与 `frontend/src/utils/runMode.ts` 的 `RunModeSettings` 一一对应。
+
+切换前会列出**实际将要改动**的项（未变化的不列），确认后才执行。实现要点：多数项（浏览器 / 保持进程 / 启动后执行 / 暂停开关）经 `PATCH /api/config` 一次提交；**日志级别必须走 `PUT /api/config/log-level`**（仅 PATCH 只落盘、不热更新 tracing filter，会出现"界面显示 DEBUG、实际按 INFO 过滤"的假象）；**开机自启走 `POST /api/autostart/*`，Windows 下会真实写注册表**（macOS 写 LaunchAgent plist、Linux 写 XDG desktop 文件）。故三者非原子——任一步失败会提示"部分设置可能已生效，请检查后重试"。
 
 刻意**不含 `strict_login_mode`**：它决定"何时触发登录"，属功能行为而非可观测性；把它放进调试模式会在证据不足时也尝试登录，可能在没预期的时机拉起浏览器。
 
 鉴权：启动时生成随机 token 持久化于 `config/.auth_token`（`0600`），前端经 `/api/auth/token` 懒取并在 `X-Auth-Token` / `Bearer` / `?token=` 中携带；`GET /api/health`、`GET /api/auth/token` 等少数端点豁免，其余 `/api/*` 与 `/ws/*` 强制校验（`src/web/auth.rs`）。
 
-## 3. 多网络配置方案（Profiles）
+## 3. 多网络方案（Profiles）
 
 入口：`GET /api/profiles`（列表，响应含 `active_profile` / `auto_switch`）/ `POST /api/profiles/{id}`（新建）/ `GET /api/profiles/{id}`（响应含 `has_password`），切换活跃方案用 `POST /api/profiles/switch`，更新用 `PUT /api/profiles/{id}`（可用 `clear_password: true` 显式清除已保存密码），前端为「方案」页。
 
@@ -110,7 +117,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 - 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求，后者见 `docs/guides/http-login-guide.md`）。
 - 这些字段**只在「方案」页编辑**；`GET /api/config` 顶层仍会扁平回传活跃方案的凭据（兼容既有客户端），但界面已不再从那里读写。
 - 重定向模式：`trigger_url` 为明文 `http` 触发地址（如 `http://www.msftconnecttest.com/connecttest.txt`），Worker 首导航到该地址并跟随 302 到真门户，`{{LOGIN_URL}}` 同步为触发地址；监测跳过 `auth` TCP 探测、登录跳过预检，劫持判定优先于断网（`docs/guides/task-writing-guide.md` 重定向模式）。
-- 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高；`auto_switch` 开启时 Engine 每 60s 检测并自动切换，切换后重置登录失败去重状态。**`auto_switch` 默认关闭**（2026-09-16 起，新配置生效）；关闭时方案页卡片可直接点击切换，开启时改由自动匹配决定（卡片不可手点）。
+- 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高（无用户可配的 `priority` 字段）；`auto_switch` 开启时 Engine 按 `monitor.profile_check_interval` 周期检测并自动切换（默认 **180 秒**，可配范围 60–600），切换后重置登录失败去重状态。**`auto_switch` 默认关闭**（2026-09-16 起，新配置生效）；关闭时方案页卡片可直接点击切换，开启时改由自动匹配决定（卡片不可手点）。
 - `default` 为保底 Profile，不可删除。
 
 ## 4. 任务系统
@@ -176,7 +183,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 - 状态落盘：每次检查无论成败均刷新 `update/last_check.json`（UTC RFC3339，`last_check_at`/`has_update`/`latest_version`/`error`），前端据此展示“上次检查”。
 - 代理：显式 `proxy_url`（支持非本机）优先，回退旧 `proxy_port` 兼容（`resolved_proxy_url()`）；监测与更新代理解耦（`monitor.disable_proxy` 默认直连）。
 
-镜像目录：`~/.cache/campus-auth`（XDG）或项目内 `environment/`，更新 staging 为 `update/staging/`，helper 以 `campus-auth-helper` 完成自替换。
+更新 staging 为 `update/staging/`（相对 `base_path`），helper 以 `campus-auth-helper` 完成自替换；uv 与 Python 运行时状态落在 `environment/`，Worker 虚拟环境在 `python_worker/.venv`。
 
 ## 10. 常见问题
 

@@ -1,6 +1,6 @@
 //! 提示词组装：系统提示词（任务 schema 浓缩指南）+ 用户消息（页面上下文 + 截图）
 //!
-//! 设计取舍：docs/guides/task-writing-guide.md 全文 565 行直接进 prompt 偏贵，
+//! 设计取舍：docs/guides/task-writing-guide.md 全文（约 570 行）直接进 prompt 偏贵，
 //! 此处固定一份浓缩版 schema 指南（覆盖步骤类型、必填字段、占位符与输出约束），
 //! 与强校验 `validate_task` 的硬性规则一一对应——提示词约束失守时仍有校验兜底。
 //! 优先使用 Worker 提取的结构化控件摘要与脱敏局部 HTML；原始 HTML 仅在结构化

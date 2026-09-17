@@ -224,7 +224,6 @@ cargo test -- --nocapture
 | `docs/known-issues.md` | 仍有效的未修复项 | 是 |
 | `docs/plan-next.md` | 唯一活跃计划入口 | 是 |
 | `docs/guides/` | 用户操作指南 | 是 |
-| `docs/archive/` | 不再活跃但需追溯的材料 | 是（仅确需追溯的） |
 | `docs/reports/` | Bug 扫描 / 审计等过程报告 | 否（ignore） |
 | `docs/compose/` | compose-next 会话规格与交付记录 | 否（ignore） |
 

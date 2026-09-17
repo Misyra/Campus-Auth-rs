@@ -2,7 +2,7 @@
 
 任务是 Campus-Auth 的执行单元：浏览器任务用 JSON 步骤序列经 Playwright 执行，脚本任务经本地进程执行。文件存放在运行目录的 `tasks/browser/`（浏览器）与 `tasks/scripts/`（脚本）下（`src/tasks/loader.rs`，`type` 缺失时默认归为浏览器任务以兼容旧 JSON）。
 
-变量、步骤类型与字段语义见《任务编写指南》（`设置 · 任务` 页可导出），本文只讲日常使用。
+变量、步骤类型与字段语义见《任务编写指南》（`设置 · 任务与环境` 页可导出），本文只讲日常使用。
 
 ## 1. 核心概念
 
@@ -20,21 +20,21 @@
 - 直连登录参数属于**方案**（不是任务），在「方案」页的方案编辑器里与账号、认证地址一并编辑——方案配置只有这一个入口。
 - 从文件导入 / 导出单个任务（JSON 文件）。任务交换统一为导出结果格式（`{ summary, config }`，批量为其数组），导出文件可直接回导；导入另兼容顶层 `id` 的扁平对象与磁盘文件的 `task_id` 写法。
 
-### 设置 · 任务页
+### 设置 · 任务与环境页
 
 - 从文件导入、从仓库导入、刷新列表、前往任务仓库。
 - 任务录制器与 OCR 依赖管理（见下）。
 
 ## 3. 任务何时执行
 
-- **自动执行**：网络监测发现离线时，自动执行当前方案绑定的浏览器任务进行登录（`设置 · 监测` 配置检测策略与重试）。
+- **自动执行**：网络监测发现离线时，自动执行当前方案绑定的浏览器任务进行登录（`设置 · 网络检测` 配置检测策略与重试）。
 - **手动触发单次登录**：仪表盘的登录按钮（`POST /api/login`），执行当前方案绑定的任务。
 - **执行指定任务**：`POST /api/tasks/{id}/execute`，不改变方案绑定，用于验证新任务。
 
 ## 4. 录制器：不手写 JSON
 
 1. 安装 Tampermonkey 浏览器扩展。
-2. 在`设置 · 任务`页点击`安装录制器脚本`。
+2. 在`设置 · 任务与环境`页点击`安装录制器脚本`。
 3. 打开校园网登录页，点击页面上的浮动按钮开始录制。
 4. 依次点选账号框、密码框、验证码（如有）、登录按钮等元素。
 5. 结束录制后将生成的步骤保存为任务，再到「登录方式」里为当前方案选中它验证一次。
@@ -42,7 +42,7 @@
 ## 5. 验证码（OCR）
 
 - 仅当任务中使用 `ocr` 步骤时才需要安装 OCR 依赖（约 120MB）。
-- 在`设置 · 任务`页安装，装好后可用`验证码识别`上传截图试识别，验证环境正常。
+- 在`设置 · 任务与环境`页安装，装好后可用`验证码识别`上传截图试识别，验证环境正常。
 
 ## 6. 调试
 
@@ -59,19 +59,25 @@
 | `GET /api/tasks/export/{id}` | 导出单个任务 |
 | `POST /api/tasks/import` | 导入任务 |
 | `POST /api/tasks/order` | 排序 |
-| `POST /api/login` | 触发登录（执行当前方案绑定的任务） |
-| `POST /api/tasks/{id}/execute` | 执行指定任务 |
+| `POST /api/tasks/{id}/execute` | 执行指定任务（浏览器 / 脚本通用） |
 | `GET /api/scripts/binaries` | 可选解释器/二进制清单（脚本编辑器的 `binary_path` 下拉） |
 | `POST /api/scripts/run` | 脚本直跑：body 传 `task_id`（执行已落盘任务）或 `script`（临时内容，不落盘，`task_id` 记为 `adhoc_script`）；二者均缺则 400 |
-| `GET /api/scripts/{id}` / `PUT /api/scripts/{id}` / `DELETE /api/scripts/{id}` | 脚本单体读写（`ps1` 被拒） |
-| `GET /api/tools/task-recorder.user.js` | 任务录制用户脚本（Tampermonkey） |
-| `POST /api/login` | 触发登录（执行活跃任务） |
+| `GET / PUT / DELETE /api/scripts/{task_id}` | 脚本单体读写（`ps1` 被拒） |
+| `GET /api/scheduler/jobs` | 定时任务列表 |
+| `POST /api/scheduler/jobs` | 新建定时任务（`cron` + 目标任务 `target_id`） |
+| `PUT / DELETE /api/scheduler/jobs/{id}` | 更新 / 删除定时任务 |
+| `POST /api/scheduler/jobs/{id}/toggle` | 切换启用 / 禁用 |
+| `POST /api/scheduler/jobs/{id}/run` | 手动触发定时任务 |
+| `GET /api/scheduler/jobs/{id}/history` | 定时任务执行历史 |
+| `POST /api/login` | 触发登录（执行当前方案绑定的任务） |
 | `POST /api/login/once` | 登录一次 |
 | `GET /api/login/status` | 登录状态 |
 | `POST /api/login/cancel` | 取消登录 |
+| `GET /api/tools/task-recorder.user.js` | 任务录制用户脚本（Tampermonkey） |
+
 ## 8. 常见问题
 
 - **任务执行失败**：查看日志定位到具体步骤；检查选择器是否随登录页改版失效；验证码步骤确认 OCR 已安装。
 - **任务中使用变量**（仅浏览器任务）：在任务 JSON 的 `variables` 字段中直接定义，步骤内以 `{{变量名}}` 引用；`{{USERNAME}}`、`{{PASSWORD}}`、`{{ISP}}`、`{{LOGIN_URL}}` 自动取当前方案配置。脚本任务的 `content` / `args` **不做模板替换**（原样写入文件并传参），账号密码需在脚本内自行读取或硬编码。
-- **多网络环境**：不同校区 / 运营商使用`配置方案`页的多方案切换，而非为每个环境各写一套任务。
+- **多网络环境**：不同校区 / 运营商使用`方案`页的多方案切换，而非为每个环境各写一套任务。
 - **脚本任务怎么写**：见 [自定义脚本指南](custom-script-guide.md)（`py`/`bat`/`sh`/`exe` 扩展名，`ps1` 不支持）；浏览器任务见 [任务编写指南](task-writing-guide.md)。
