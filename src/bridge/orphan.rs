@@ -113,6 +113,10 @@ fn cleanup_orphan_browsers_inner() -> Result<usize, String> {
 /// 不还原就会让按基名匹配的 [`is_chromium`] 全部落空（实测漏掉真实孤儿 chrome.exe）。
 /// 旧实现用全命令行子串匹配（`contains`）对此免疫，故该缺陷是在收紧为基名匹配后
 /// 才暴露的。
+/// 仅 Windows 的 `Get-CimInstance` + `ConvertTo-Csv` 路径需要，unix 分支读
+/// `/proc/<pid>/cmdline` 无 CSV 转义，不加上 `cfg(windows)` 会在 unix 下触发
+/// dead_code（CI 的 -D warnings 直接失败）
+#[cfg(windows)]
 fn unescape_csv_field(field: &str) -> String {
     let inner = field
         .strip_prefix('"')
@@ -465,6 +469,7 @@ mod tests {
     /// `"C:\Program Files\…\chrome.exe" --headless` 在 CSV 里是
     /// `"""C:\Program Files\…\chrome.exe"" --headless"`。不还原会让按基名匹配的
     /// is_chromium 全部落空（实测漏掉真实孤儿 chrome.exe）。
+    #[cfg(windows)]
     #[test]
     fn test_unescape_csv_field() {
         // PowerShell ConvertTo-Csv 对含引号路径的实际形态

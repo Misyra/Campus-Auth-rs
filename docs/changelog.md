@@ -2,6 +2,11 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-17 修复 unix CI 的 dead_code 编译失败）
+
+- **`unescape_csv_field` 加 `#[cfg(windows)]`**（`src/bridge/orphan.rs`，对应测试同步加 `#[cfg(windows)]`）：该函数只服务 Windows 分支的 `Get-CimInstance` + `ConvertTo-Csv` 路径（CSV 字段反转义），unix 分支读 `/proc/<pid>/cmdline` 无转义需要处理。缺 cfg 时 unix 下触发 `dead_code`，而 CI 的 `rust-tests-unix`（ubuntu-22.04 / macos-latest）以 `-D warnings` 运行 clippy，直接编译失败（exit 101）——最近两次 master CI 失败均源于此，Windows job 不受影响所以本地与 Windows CI 一直全绿。
+- 验证：Windows 本地 `cargo clippy --all-targets -- -D warnings` 零警告、`cargo fmt --check` 通过、`cargo test --tests` 全绿（lib 885 例 + 集成）。unix 侧改动仅为平台门控（不新增/不删代码路径），本地无 unix 交叉编译器（`ring`/`gtk-sys` 需要 `x86_64-linux-gnu-gcc` 与 pkg-config），以 CI 的 `rust-tests-unix` 复核为准。
+
 ## 开发中（2026-09-17 任务页补充「任务需在方案中启用」提示）
 
 - **任务页（浏览器任务 Tab）顶部新增归属提示条**（`frontend/src/views/tasks/BrowserTasksPanel.vue` + `styles/pages/tasks.css`）：文案「请前往侧边栏『方案』选择并启用任务，此处仅编辑调试」，其中「方案」为跳转 `/profiles` 的链接。此前本页只有编辑/调试/导入入口，不在本页也不在方案页的用户无从得知「在这里建的任务不会自动生效」——登录实际执行的是方案绑定的 `active_task`（未绑定时回退内置默认任务），该绑定关系只在方案页的「浏览器任务」选择器里可改。
