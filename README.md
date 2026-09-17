@@ -103,7 +103,7 @@ campus-auth/
 
 - **Noto Sans SC**（Web 控制台正文字体）：版权归 Google Inc.，以 [SIL Open Font License 1.1](https://scripts.sil.org/OFL) 授权。
   字体不随本仓库分发，也不内嵌进二进制——`frontend/index.html` 经 jsDelivr 引用 `@fontsource-variable/noto-sans-sc`，由浏览器按 `unicode-range` 分片按需加载；断网时回落系统字体栈。
-  该 CDN 域名已在 Web 控制台的 CSP `font-src` 中放行（`src/web/mod.rs`）。若需自托管或调整字重集，替换该 CDN 引用即可。
+  该 CDN 域名已在 Web 控制台的 CSP `style-src`（外部样式表本身）与 `font-src`（其内 `@font-face` 指向的字体文件）中放行（`src/web/mod.rs`）。若需自托管或调整字重集，替换该 CDN 引用即可。
 - **其他前端依赖**：见 [`frontend/package.json`](frontend/package.json)；Rust 依赖见 [`Cargo.toml`](Cargo.toml)。
 
 ## 许可证

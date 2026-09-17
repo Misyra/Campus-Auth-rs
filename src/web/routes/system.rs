@@ -574,6 +574,15 @@ pub async fn apply_update(
     })))
 }
 
+/// 自定义通道是否可用：必须是已存在的文件
+///
+/// 与 [`crate::browser::is_channel_available`] 的 custom 分支同口径（那也是
+/// `Path::is_file()`），确保 `/api/browsers` 的 `installed` 与真实可用性一致。
+/// 抽为独立函数以便单测覆盖，无需构造完整 `AppState`。
+fn custom_channel_installed(custom_path: &str) -> bool {
+    std::path::Path::new(custom_path.trim()).is_file()
+}
+
 /// GET /api/browsers — 可用浏览器列表
 ///
 /// Playwright 管理的浏览器按实际缓存分别探测；核心引导默认只安装 Chromium。
@@ -595,6 +604,8 @@ pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>,
         serde_json::json!({ "name": "WebKit", "channel": "webkit", "engine": "webkit", "installed": webkit_installed }),
     ];
     if !custom_path.is_empty() {
+        // 此前硬编码 installed=true，路径不存在时仍报已安装，与同响应中托管引擎的
+        // 真实探测结果自相矛盾（前端据此渲染会误导用户）
         browsers.insert(
             0,
             serde_json::json!({
@@ -602,7 +613,7 @@ pub async fn list_browsers(State(state): State<AppState>) -> Result<Json<Value>,
                 "channel": "custom",
                 "engine": settings.global.browser.custom_browser_engine,
                 "path": custom_path,
-                "installed": true,
+                "installed": custom_channel_installed(custom_path),
                 "custom": true,
             }),
         );
@@ -866,6 +877,42 @@ pub async fn stop_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/api/browsers` 的 custom 条目必须反映真实可用性
+    ///
+    /// 回归：此前硬编码 `installed: true`，`browser_custom_path` 指向不存在的文件时
+    /// 仍报「已安装」，与同响应中托管引擎的真实探测自相矛盾。
+    #[test]
+    fn custom_browser_installed_reflects_real_path() {
+        assert!(
+            !custom_channel_installed(""),
+            "空路径不得算已安装（该分支不会进入，但判定语义须自洽）"
+        );
+        assert!(!custom_channel_installed("   "), "纯空白等价于空");
+        assert!(
+            !custom_channel_installed(r"C:\definitely\not\here\browser.exe"),
+            "不存在的路径必须报未安装"
+        );
+
+        // 目录存在但指向目录（而非可执行文件）同样不算可用
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            !custom_channel_installed(&dir.path().to_string_lossy()),
+            "路径指向目录不算已安装"
+        );
+
+        let exe = dir.path().join("browser.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        assert!(
+            custom_channel_installed(&exe.to_string_lossy()),
+            "真实存在的文件应报已安装"
+        );
+        // 前后空白应被容忍（与 browser::is_channel_available 的 trim 一致）
+        assert!(custom_channel_installed(&format!(
+            "  {}  ",
+            exe.to_string_lossy()
+        )));
+    }
 
     /// 每份指南都必须同时存在于「磁盘查找表」与「rust-embed 嵌入清单」。
     ///

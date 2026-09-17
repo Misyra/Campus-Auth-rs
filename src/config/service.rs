@@ -876,7 +876,31 @@ impl ConfigService {
         config_dir: &Path,
     ) -> Result<SettingsData, ConfigError> {
         if !settings_path.exists() {
-            return Ok(SettingsData::default());
+            // 首次运行落盘一份默认配置：默认值此前仅存在于内存（首次配置变更才写文件），
+            // 用户无法查看/编辑初始配置，与「配置即文件」的直觉不符，排障时也无从核对
+            // 生效值。写入失败只降级为「沿用内存默认」，不阻断启动——配置可后续由任何
+            // 一次保存补齐，磁盘不可写（如只读介质）时不应让应用起不来。
+            let default = SettingsData::default();
+            match serde_json::to_string_pretty(&default) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(settings_path, json) {
+                        tracing::debug!(
+                            path = %settings_path.display(),
+                            error = %e,
+                            "首次运行写入默认 settings.json 失败，改用内存默认配置"
+                        );
+                    } else {
+                        tracing::info!(
+                            path = %settings_path.display(),
+                            "首次运行，已生成默认 settings.json"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "默认配置序列化失败，改用内存默认配置");
+                }
+            }
+            return Ok(default);
         }
         let raw = std::fs::read_to_string(settings_path)?;
         let mut value: Value = match serde_json::from_str(&raw) {
@@ -1614,5 +1638,60 @@ mod tests {
             5,
             "版本不得在解析失败时提交"
         );
+    }
+
+    /// 首次运行应把默认配置落盘，且内容可被再次加载回同等值
+    ///
+    /// 此前默认值仅存在于内存（首次配置变更才写文件），用户无法查看/编辑初始配置。
+    #[test]
+    fn test_first_run_writes_default_settings_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        assert!(!settings_path.exists(), "前置：文件尚不存在");
+
+        let loaded = ConfigService::load_or_init_settings(&settings_path, &config_dir).unwrap();
+
+        assert!(settings_path.exists(), "首次运行应生成 settings.json");
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        // SettingsData 未派生 PartialEq，用序列化值比较（字段集合与取值都要一致）
+        let on_disk: Value = serde_json::from_str(&raw).expect("落盘内容应可解析");
+        assert_eq!(
+            on_disk,
+            serde_json::to_value(&loaded).unwrap(),
+            "落盘内容应与本次加载使用的默认值一致"
+        );
+        // 版本号必须是当前版本，否则下次启动会被当作待迁移的旧配置
+        assert_eq!(
+            on_disk["config_version"].as_u64(),
+            Some(u64::from(crate::config::CURRENT_CONFIG_VERSION))
+        );
+
+        // 二次加载读文件，结果仍一致（不因落盘引入差异）
+        let again = ConfigService::load_or_init_settings(&settings_path, &config_dir).unwrap();
+        assert_eq!(
+            serde_json::to_value(&again).unwrap(),
+            serde_json::to_value(&loaded).unwrap()
+        );
+    }
+
+    /// 已存在的配置文件不得被首轮逻辑覆盖
+    #[test]
+    fn test_existing_settings_not_overwritten_on_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let custom = r#"{"config_version": 9, "active_profile_id": "default",
+            "auto_switch": true}"#;
+        std::fs::write(&settings_path, custom).unwrap();
+
+        let loaded = ConfigService::load_or_init_settings(&settings_path, &config_dir).unwrap();
+        assert!(loaded.auto_switch, "应读到文件中的 auto_switch");
+
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["auto_switch"], Value::Bool(true), "原文件不得被覆盖");
     }
 }

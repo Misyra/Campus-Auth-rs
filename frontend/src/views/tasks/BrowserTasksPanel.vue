@@ -29,6 +29,17 @@ function closeEditor() { void t.closeTaskEditor(); }
 
 <template>
   <div class="tasks-grid" :class="{ 'tasks-grid--empty': !browserTasks.length }">
+    <!-- 归属提示：本页只负责「编辑与调试」，真正生效的任务由方案绑定决定（切方案即切任务）。
+         放本 Tab 而非页面容器：脚本/定时任务 Tab 与方案无绑定关系，套用此文案会失真。 -->
+    <div class="tasks-notice">
+      <IconApp name="info" class="icon-sm" />
+      <span>
+        请前往侧边栏
+        <router-link :to="{ name: 'profiles' }">「方案」</router-link>
+        选择并启用任务，此处仅编辑调试。
+      </span>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <h2>浏览器任务</h2>
@@ -179,6 +190,27 @@ function closeEditor() { void t.closeTaskEditor(); }
             <li><code>assert_text</code> - 断言页面出现文本</li>
           </ul>
           <p class="hint hint--mt">提示：<code>ocr</code> 步骤需安装 OCR 依赖（ddddocr），未安装时会返回明确错误。</p>
+          <h4>如何判定任务真的成功</h4>
+          <p class="hint">
+            默认判定为「<b>步骤都执行完即成功</b>」，<b>不会校验登录是否被门户接受</b>——
+            验证码识别错误、账号密码错误等情况仍会显示「已执行完成（未校验结果）」。
+            需要「成功 = 确实登录成功」时，请用 <code>success_condition</code> 指定判定变量，
+            并用 <code>eval</code> 步骤把结果页的判据写入该变量：
+          </p>
+          <pre v-pre class="help-code">{
+  "success_condition": "portalOk",
+  "steps": [
+    { "type": "input", "selector": "#username", "value": "{{USERNAME}}" },
+    { "type": "input", "selector": "#password", "value": "{{PASSWORD}}" },
+    { "type": "click", "selector": "#login-btn" },
+    { "type": "eval", "store_as": "portalOk",
+      "script": "document.body.innerText.includes('认证成功')" }
+  ]
+}</pre>
+          <p class="hint">
+            变量真值为假时任务判为失败（提示「成功条件未命中」）。含 <code>ocr</code> +
+            <code>click</code> 的登录型任务建议都加上，否则界面显示成功但与实际是否上网无关。
+          </p>
           <h4>可用变量</h4>
           <ul>
             <li><code v-pre>{{USERNAME}}</code> / <code v-pre>{{PASSWORD}}</code> / <code v-pre>{{ISP}}</code> / <code v-pre>{{LOGIN_URL}}</code></li>

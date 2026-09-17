@@ -402,6 +402,27 @@ def _managed_engine(channel: str) -> str | None:
     return None
 
 
+#: 系统通道 → 面向用户的安装/切换建议（渠道名 → 展示名）
+_SYSTEM_CHANNEL_LABELS: dict[str, str] = {
+    "msedge": "Microsoft Edge",
+    "chrome": "Google Chrome",
+}
+
+
+def _unavailable_channel_hint(channel: str, custom_path: str = "") -> str:
+    """非托管通道不可用时的可操作提示（供 Rust 侧日志直接展示）
+
+    这些通道没有 Playwright 可下载的二进制，`_missing_components` 无从给出目录名，
+    故此处的文案直接指向「装浏览器」或「换通道」两条可执行路径。
+    """
+    if channel == "custom":
+        return f"自定义浏览器不可用（路径 {custom_path or '未填写'}），请检查路径或改用其他浏览器"
+    label = _SYSTEM_CHANNEL_LABELS.get(channel)
+    if label:
+        return f"未检测到 {label}，请安装 {label} 或改用 chromium（托管内核，可自动下载）"
+    return f"未知浏览器渠道 {channel!r}，请改用 msedge / chrome / chromium"
+
+
 def _missing_components(engine: str) -> list[str]:
     """缺失 / 未完成的组件目录名（供 Rust 侧给出可操作的错误信息）
 
@@ -1551,7 +1572,18 @@ class WorkerCore:
             # 上报缺失组件：Rust 侧据此给出「缺哪个目录」的可操作错误，
             # 而不是只剩通用「健康检查失败」（ENV-1 失败闭环）
             engine = _managed_engine(channel)
-            result["missing"] = _missing_components(engine) if engine else []
+            if engine:
+                result["missing"] = _missing_components(engine)
+                # 托管引擎可由 uv playwright install 自动补齐
+                result["reinstallable"] = True
+            else:
+                # 系统通道（msedge/chrome）与 custom 没有可补的 Playwright 二进制：
+                # engine 为 None 时若上报空数组，Rust 侧只剩「未上报缺失组件明细」
+                # 这一无指向性文案（启动超时/健康检查失败），排障方向完全偏离
+                # 真实原因「配置指定的浏览器未安装」。此处改为给出可操作指向。
+                result["missing"] = [_unavailable_channel_hint(channel, custom_path)]
+                # 无二进制可下，Rust 侧不应再宣称「将尝试自动重装」
+                result["reinstallable"] = False
         return result
 
     async def handle_worker_health_check(self, params: dict) -> dict:

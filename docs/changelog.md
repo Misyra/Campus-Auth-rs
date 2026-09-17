@@ -2,6 +2,47 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-17 任务页补充「任务需在方案中启用」提示）
+
+- **任务页（浏览器任务 Tab）顶部新增归属提示条**（`frontend/src/views/tasks/BrowserTasksPanel.vue` + `styles/pages/tasks.css`）：文案「请前往侧边栏『方案』选择并启用任务，此处仅编辑调试」，其中「方案」为跳转 `/profiles` 的链接。此前本页只有编辑/调试/导入入口，不在本页也不在方案页的用户无从得知「在这里建的任务不会自动生效」——登录实际执行的是方案绑定的 `active_task`（未绑定时回退内置默认任务），该绑定关系只在方案页的「浏览器任务」选择器里可改。
+- 归属选择：提示只放「浏览器任务」Tab，不放「任务」页容器。页内另有「脚本」「定时任务」「AI 生成浏览器任务」三个 Tab，均与方案绑定无关系（脚本/定时任务走独立调度，AI 生成只是任务的产出入口），套用同一文案会失真。
+- 样式：新增 `.tasks-notice`（`grid-column: 1 / -1` 横跨两列，避免落入左列把任务列表挤到右列；`.tasks-grid--empty` 的单列布局下同样成立），配色沿用 `--primary` 信息态（非 `.ai-dev-notice` 的警告态——这不是功能缺陷，是操作路径说明）。
+- 验证：前端 `vue-tsc` 零错误、`vitest` 207 例全绿、`vite build` 通过；另以 vite dev + 浏览器实测确认：`/tasks` 顶部渲染整条提示且横跨两列（`grid-column: 1 / -1` 生效，未挤占任务列表列），点「方案」跳转 `/profiles`，`/tasks/scripts`、`/tasks/scheduled`、`/tasks/ai` 三个 Tab 上均不渲染（`count = 0`），900px 宽视口下无横向溢出。
+
+## 开发中（2026-09-17 实测反馈整改：首轮落盘配置、任务成功语义与浏览器提示）
+
+依据全新安装实测与外部反馈复核结论（`docs/reports/fresh-install-acceptance.md` 第 7 节，不入仓）逐条整改。
+
+> 说明：本轮曾把 `StartupAction` 默认值由 `None` 改为 `Monitor`（启动即监测），经确认该默认值是产品方**有意设定**（多数用户不希望在启动时自动拉起检测），已完整回退——`src/config/schema.rs`、`frontend/src/utils/constants.ts`、`tests/login_chain.rs` 均恢复原状，本节不含该项。
+
+### 变更（行为）
+
+- **首次运行落盘默认 `settings.json`**（`src/config/service.rs::load_or_init_settings`）：此前默认值仅存在于内存（首次配置变更才写文件），用户无法查看/编辑初始配置，排障时也无从核对实际生效值。写入失败仅降级为「沿用内存默认」并记 debug 日志，不阻断启动（只读介质场景不应起不来）。
+- **`handle_ocr` 空识别结果改为失败**（`python_worker/step_handlers.py`）：识别器对空白/未渲染区域返回空串时，原先会 `fill('')` 清空输入框并继续提交，而 `run_steps` 只看步骤技术执行成功，最终任务报「执行成功」但门户实际拒绝登录。现显式抛 `UNKNOWN_ERROR`（文案「OCR 未识别出有效文本（验证码为空）」）且不发生回填。经真实空白图驱动验证：抛错、回填次数 0。（注：OCR 读到按钮文字等「非空乱码」不属本场景，是选择器配错，不在拦截范围内。）
+
+### 修复（提示与状态一致性）
+
+- **系统通道健康检查失败不再丢失可操作信息**（`python_worker/playwright_worker.py` + `src/bridge/mod.rs`）：`msedge`/`chrome`/`custom` 在 `_managed_engine` 上返回 `None`，原先上报空 `missing` 数组，Rust 侧只剩「未上报缺失组件明细」这一无指向性文案，排障方向从「配置的浏览器未安装」偏到「Worker 启动超时」。现系统通道给出可操作提示（如「未检测到 Microsoft Edge，请安装 Microsoft Edge 或改用 chromium」），并新增 `reinstallable` 标志：托管引擎（可由 `uv playwright install` 补齐）仍记「将尝试自动重装」，系统通道/custom 改记「配置的浏览器不可用且无法自动安装，请按提示处理后重试」——避免宣称一个不存在的自愈动作。
+- **`GET /api/browsers` 的 custom 条目按真实路径判定**（`src/web/routes/system.rs::custom_channel_installed`）：此前硬编码 `installed: true`，`browser_custom_path` 指向不存在文件时仍报「已安装」，与同响应中托管引擎的真实探测自相矛盾。现与 `browser::is_channel_available` 的 custom 分支同口径（`Path::is_file()`）。判定抽为独立函数以便单测。
+- **任务执行结果文案区分「已执行」与「认证成功」**（`frontend/src/composables/useTasks.ts`）：浏览器任务的成功语义是「步骤都执行完了」，后端明确不做登录后网络验证（`src/tasks/executor.rs`）。未声明 `success_condition` 的任务原先笼统提示「执行完成」，用户会把「脚本跑完」误读为「已认证上网」（实测验证码识别出错时任务报成功但门户实际拒绝登录）。现按是否声明成功条件分流：未声明提示「已执行完成（未校验结果）」，已声明提示「执行完成」。成功条件经 `tasksApi.get` 读取并按任务 id 缓存，读取失败保守按未声明处理。
+- **任务页补充 `success_condition` 用法说明**（`frontend/src/views/tasks/BrowserTasksPanel.vue`）：前端此前完全无该字段的说明入口，用户无从得知存在业务结果判定能力。新增「如何判定任务真的成功」小节（含 `eval` + `store_as` 可复制示例）。
+- **OCR 状态区分「依赖已装」与「运行时可用」**（`frontend/src/views/settings/TaskEnvironmentSettings.vue` + `api/types.ts`）：`/api/ocr/status` 的 `installed=true` 与 `runtime_ocr=null` 并存易被误读为「装了空壳」，而 `null` 只表示认证核心按需懒加载、当前未运行。现按三态给出说明（已加载 / 未加载需处理 / 首次使用时自动加载），并给 `OcrStatus` 契约类型补上 `runtime_ocr` 字段。
+
+### 验证
+
+- Rust：`cargo fmt --check` 通过、`clippy --all-targets -D warnings` 零警告、`cargo test --tests` 全绿（lib 885 例，含新增 `test_first_run_writes_default_settings_file` / `test_existing_settings_not_overwritten_on_load` / `custom_browser_installed_reflects_real_path`；集成 40 例）。首轮并行跑时 `instance_lifecycle` 曾因端口/锁竞争偶发失败，单独与复跑均通过，确认与本次改动无关。
+- Python：`uv run pytest` 186 例通过（原 182 + 新增 4：系统通道提示与 `reinstallable` 标志、空 OCR 结果抛错、纯空白结果等价处理）。
+- 前端：`vue-tsc` 零错误、`vitest` 207 例全绿、`vite build` 通过。
+- 端到端（`E:\Test\VerifyFixes` 全新目录 + 更新后的 Worker 源码）：首轮生成 `settings.json`（`config_version=9`）；custom 路径不存在报 `installed:false`、指向真实文件报 `true`；健康检查失败时系统通道给出可操作提示且 `reinstallable=false`、托管通道 `reinstallable=true`；空白验证码图使 `handle_ocr` 抛错且回填次数为 0。
+
+## 开发中（2026-09-17 全新安装实测修复：CLI 重定向输出丢失 + 远端字体被 CSP 拦截）
+
+从便携包 → 全新目录解压 → 真实浏览器端到端实测（验收报告本地 `docs/reports/fresh-install-acceptance.md`，不入仓）中发现并修复两个缺陷。
+
+- **修复 GUI 子系统 release 构建下 stdio 重定向/管道输出被静默丢弃**（`src/main.rs::attach_parent_console`）：实测 `campus-auth.exe --status > out.txt`、`--version > out.txt`、`cmd /c "… > f 2> e"`、`… | findstr .` 在真实控制台窗口中均得到 **0 字节输出且退出码为 0**（debug 控制台子系统构建全部正常）。根因是句柄操作顺序：**`AttachConsole(ATTACH_PARENT_PROCESS)` 自身就会重写本进程标准句柄表**，把调用方传入的重定向句柄替换为控制台句柄；而原实现先 `AttachConsole` 再判断"句柄是否缺失"，判定时看到的已是换上的控制台句柄，于是"齐全 → return"，重定向输出丢失——即原注释声称要避免的行为恰好发生（`Start-Process -RedirectStandardOutput` 能通过属 stderr 为 NULL 触发补写路径的偶然结果）。改为：附着**之前**用 `GetStdHandle` 记录原始 stdout/stderr，**两路均有效时完全不调用 `AttachConsole`**（不触碰句柄表）；确有一路缺失时才附着，随后逐路处理——原有效的重定向句柄还原、原缺失的补 `CONOUT$`。修复后实测：仅重定向 stdout、stdout+stderr 双重重定向、管道三种场景输出完整（27 字节版本号 / 25 字节状态文本），无重定向时终端可见性不变。
+- **修复 CSP `style-src` 未放行 jsDelivr 导致远端字体从未生效**（`src/web/mod.rs::security_headers`）：控制台每次加载均报 `Loading the stylesheet 'https://cdn.jsdelivr.net/npm/@fontsource-variable/noto-sans-sc@5.3.0/index.css' violates … "style-src 'self' 'unsafe-inline'"`。该字体是**以 `<link rel="stylesheet">` 外链**的，请求受 `style-src` 管辖（其内部 `@font-face` 指向的字体文件才走 `font-src`）；原实现只放行了 `font-src`，故此前"全站字体改为远端 Noto Sans SC"一轮（见下方同日条目）**实际从未生效**，界面始终回落系统字体栈。修法：`style-src` 补 `https://cdn.jsdelivr.net`（`font-src` 白名单保留），`script-src` 仍限 `'self'`。真实浏览器复验：CSP 报错由每载 1 条降为 **0 条**，`document.styleSheets` 已含该外链、`document.fonts.size = 101`（与 index.html 注释声明的 101 条 `@font-face` 一致），字体分片按 `unicode-range` 请求 200。
+- 验证：`cargo fmt --check` 通过、`clippy --all-targets -D warnings` 零警告、`cargo test --tests` 全绿（lib 881 例 + 集成 40 例，含 `login_chain` 5 例、`instance_lifecycle` 4 例、`smoke_test`），release 重建后 PE Subsystem 仍为 2（GUI）。CSP 策略串抽为 `CONTENT_SECURITY_POLICY` 常量并新增回归测试 `csp_allows_remote_font_stylesheet_and_files`（断言 `style-src`/`font-src` 均含 jsDelivr 且 `script-src` 仍只限 `'self'`），防止将来清理 CSP 时再次误删；lib 测试数 881 → 882 全绿。
+
 ## 开发中（2026-09-17 托盘菜单精简与状态行）
 
 - **托盘菜单移除「检查更新」项**（`src/tray/mod.rs` + `src/launcher.rs`）：更新入口统一收敛到关于页与设置 · 网络与更新，托盘不再重复提供。连带删除 `TrayAction::CheckUpdate` 分支、`update_menu_label`、`menu_action_for` 的 `check_update` 映射，以及仅为该功能存在的 `TrayDeps.updater` 字段与 `UpdaterService` 导入（该字段全仓仅此一处消费）。测试补断言 `menu_action_for("check_update")` 返回 `None`，防止入口复活。
@@ -18,7 +59,7 @@
 - **全站正文字体改走远端 Noto Sans SC 可变字重**（`frontend/index.html` + `styles/base.css` + `src/web/mod.rs`）：
   - 引入 `@fontsource-variable/noto-sans-sc@5.3.0/index.css`（jsDelivr，SIL OFL 1.1），CSS 内 101 条 `@font-face` 以 `unicode-range` 分片，浏览器只下载实际字形所在分片（实测界面 1343 个中文字命中 35 片 ≈ 1.6 MB）；`preconnect` 提前建连。
   - `--font-sans` 首选 `'Noto Sans SC Variable'`，逐级回落系统栈（PingFang SC / 微软雅黑 / Noto Sans SC / sans-serif）；断网时按 `font-display: swap` 用系统字体渲染，不阻塞首屏、不白屏。
-  - CSP 的 `font-src` 放行 `https://cdn.jsdelivr.net`（`src/web/mod.rs::security_headers`）——此前为 `'self' data:`，不改则远端字体被浏览器直接拦掉；`style-src`/`script-src` 仍限 `'self'`。
+  - CSP 的 `font-src` 放行 `https://cdn.jsdelivr.net`（`src/web/mod.rs::security_headers`）——此前为 `'self' data:`，不改则远端字体被浏览器直接拦掉；`style-src`/`script-src` 仍限 `'self'`。**[2026-09-17 更正]** 本条结论不完整：该 CSS 以外链样式表方式加载，受 `style-src` 管辖，仅放行 `font-src` 时字体**实际从未生效**；补 `style-src` 的修复见上方「全新安装实测修复」条目。
   - 选可变字重版而非静态多字重：静态 400 单字重 0.96 MB 但 500/600/700 需合成加粗（中文合成加粗发糊），静态 4 字重约 3.84 MB，可变版 1.63 MB 覆盖 100–900 全部真实字形。
 - **品牌字改为跟随全站字体**（`styles/layout.css` 的 `.logo-text`）：侧栏「认证喵」不再用霞鹜文楷，改用 `--font-sans`；字号提到 `--text-2xl`、字重与 `.page-title` 对齐为 600（此前 500 是霞鹜文楷时期为取真实 Medium 字形而定，与 600 的页标题并置明显偏轻）。删除 `frontend/public/fonts/` 下的霞鹜文楷子集与 OFL 副本、`base.css` 中两条 `@font-face`，仓库不再存放字体文件。变更缘由：鸿蒙字体（HarmonyOS Sans）虽免费但许可明确「不得修改」，子集化属违约，故未采用；霞鹜文楷子集方案被本次远端方案取代。
 - **README 新增「第三方资源」节**：声明 Noto Sans SC（Google Inc.，OFL-1.1）的授权与加载方式——字体不经仓库分发、不内嵌二进制，由 `frontend/index.html` 经 jsDelivr 按 `unicode-range` 分片加载，并说明该 CDN 已在 CSP `font-src` 放行。查证结论：OFL 1.1 的「再分发须附许可副本」义务因**未分发字体文件**而不触发，故无强制声明义务；本次声明属透明度考虑（浏览器会向 `cdn.jsdelivr.net` 发起请求），同时为将来可能改为自托管预留说明位置。

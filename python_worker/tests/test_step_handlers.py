@@ -294,6 +294,109 @@ def test_ocr_locator_screenshot_maps_to_selector_failed(monkeypatch):
     assert err.outcome == Outcome.SELECTOR_FAILED.value
 
 
+def test_ocr_empty_result_raises_instead_of_filling_blank(monkeypatch):
+    """OCR 识别出空串必须失败，不得静默回填空值
+
+    识别器对空白/无文字区域返回空串时，回填等价于清空输入框，提交后门户必然
+    拒绝；但 run_steps 只看步骤技术执行成功，会把任务判成「执行成功」——用户
+    看到成功却实际未登录。故空结果显式失败。
+    """
+    import asyncio
+    import tempfile
+    from pathlib import Path
+
+    import step_handlers
+    from step_handlers import Outcome, handle_ocr
+
+    filled: list[str] = []
+
+    class EmptyOcr:
+        def classification_with_timeout(self, _img, _timeout):
+            return ""  # 空白区域识别为空串
+
+    monkeypatch.setattr(
+        step_handlers, "_get_ocr", lambda old, char_range=None: EmptyOcr()
+    )
+
+    class Locator:
+        async def wait_for(self, state=None, timeout=None):
+            return None
+
+        async def screenshot(self, timeout=None):
+            return b"fake-png"
+
+        async def fill(self, value, timeout=None):
+            filled.append(value)
+
+    class FakePage:
+        def locator(self, selector):
+            return Locator()
+
+    async def run(tmp: Path):
+        step = StepConfig.from_dict(
+            {
+                "id": "s1",
+                "type": "ocr",
+                "selector": "#captcha-img",
+                "target_selector": "#captcha-input",
+            }
+        )
+        ctx = StepContext(page=FakePage(), screenshot_dir=tmp)
+        with pytest.raises(WorkerError) as ei:
+            await handle_ocr(FakePage(), step, ctx)
+        return ei.value
+
+    with tempfile.TemporaryDirectory() as td:
+        err = asyncio.run(run(Path(td)))
+    assert err.outcome == Outcome.UNKNOWN_ERROR.value
+    assert "验证码为空" in err.message
+    # 关键：不得发生回填
+    assert filled == []
+
+
+def test_ocr_whitespace_only_result_also_raises(monkeypatch):
+    """仅含空白的识别结果与空串同义（strip 后为空即失败）"""
+    import asyncio
+    import tempfile
+    from pathlib import Path
+
+    import step_handlers
+    from step_handlers import handle_ocr
+
+    class BlankOcr:
+        def classification_with_timeout(self, _img, _timeout):
+            return "   "
+
+    monkeypatch.setattr(
+        step_handlers, "_get_ocr", lambda old, char_range=None: BlankOcr()
+    )
+
+    class Locator:
+        async def wait_for(self, state=None, timeout=None):
+            return None
+
+        async def screenshot(self, timeout=None):
+            return b"fake-png"
+
+        async def fill(self, value, timeout=None):
+            raise AssertionError("空白结果不应回填")
+
+    class FakePage:
+        def locator(self, selector):
+            return Locator()
+
+    async def run(tmp: Path):
+        step = StepConfig.from_dict(
+            {"id": "s1", "type": "ocr", "selector": "#captcha-img"}
+        )
+        ctx = StepContext(page=FakePage(), screenshot_dir=tmp)
+        with pytest.raises(WorkerError):
+            await handle_ocr(FakePage(), step, ctx)
+
+    with tempfile.TemporaryDirectory() as td:
+        asyncio.run(run(Path(td)))
+
+
 def test_wait_url_page_closed_maps_to_navigation_timeout():
     """handle_wait_url 读取 page.url 抛 Target closed → NAVIGATION_TIMEOUT（可重试）。"""
     import asyncio

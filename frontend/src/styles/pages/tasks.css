@@ -39,6 +39,34 @@
   min-width: 0;
 }
 
+/* 归属提示条：本页只是编辑器，真正生效的任务由方案绑定决定。
+   grid-column: 1 / -1 让它在两列布局下横跨整行（否则会占据左列、把任务列表挤到右列）；
+   .tasks-grid--empty 时布局退化为单列，该值同样成立。 */
+.tasks-notice {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--primary-rgb), 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--primary-rgb), 0.07);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+
+.tasks-notice svg {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.tasks-notice a {
+  color: var(--primary);
+  font-weight: 600;
+  text-underline-offset: 2px;
+}
+
 /* 空列表时帮助内容顺排到下方，避免左右两栏形成一侧空、一侧过长。 */
 .tasks-grid.tasks-grid--empty {
   grid-template-columns: minmax(0, 1fr);

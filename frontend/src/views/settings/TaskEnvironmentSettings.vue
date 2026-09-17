@@ -58,9 +58,26 @@ const envStageLabel = computed(() => {
   return map[s] ?? s;
 });
 
-const ocrStatus = ref<{ installed: boolean; declared?: boolean; size_mb?: number }>({ installed: false });
+const ocrStatus = ref<{
+  installed: boolean;
+  declared?: boolean;
+  size_mb?: number;
+  runtime_ocr?: boolean | null;
+}>({ installed: false });
 const ocrStatusLoading = ref(false);
 const ocrStatusError = ref(false);
+
+/** 运行时能力说明：区分「依赖已装入环境」与「Worker 已加载」（O-3）
+ *
+ * `runtime_ocr` 为 null 是常态——Worker 按需懒加载，未运行时没有运行时数据；
+ * 只有明确为 false 才表示 Worker 已跑但 OCR 不可用（真正需要排查的情形）。
+ */
+const runtimeOcrLabel = computed(() => {
+  const runtime = ocrStatus.value.runtime_ocr;
+  if (runtime === true) return "识别核心已加载，可直接使用";
+  if (runtime === false) return "识别核心未加载：请点下方「安装 OCR 依赖」后重试";
+  return "识别核心将在首次使用时自动加载（认证核心当前未运行）";
+});
 
 async function refreshOcrStatus(): Promise<void> {
   ocrStatusLoading.value = true;
@@ -310,6 +327,12 @@ async function recognizeOcr() {
           <span v-else class="ocr-status none">未安装</span>
         </div>
         <div v-if="ocrStatus.installed && ocrStatus.size_mb && ocrStatus.size_mb > 0" class="ocr-size-hint">当前占用约 {{ ocrStatus.size_mb }} MB</div>
+        <!-- 区分「依赖已装入环境」与「Worker 正在跑且已加载」：runtime_ocr 为 null 时
+             只表示 Worker 当前未运行（按需拉起），不代表依赖有问题；不说明会被误读为
+             装了空壳。识别测试按钮始终可用，实际能力以识别结果为准。 -->
+        <div v-if="ocrStatus.installed" class="ocr-size-hint">
+          {{ runtimeOcrLabel }}
+        </div>
         <div class="env-card-actions">
           <button v-if="!ocrStatus.installed" class="btn btn-primary btn-sm" type="button" @click="installOcr" :disabled="busy.ocr">
             {{ busy.ocr ? '安装中...' : '安装 OCR 依赖' }}

@@ -1176,6 +1176,77 @@ def test_missing_components_falls_back_to_prefixes(monkeypatch):
         assert pw._missing_components("chromium") == ["chromium_headless_shell-1234"]
 
 
+def test_system_channel_failure_reports_actionable_hint():
+    """系统通道不可用时也必须给出可操作文案，而非空数组
+
+    msedge/chrome/custom 在 `_managed_engine` 上返回 None，没有 Playwright 目录名
+    可报；旧实现上报空数组，Rust 侧只剩「未上报缺失组件明细」，排障方向从
+    「配置的浏览器未安装」偏到「Worker 启动超时」。
+    """
+    import playwright_worker as pw
+
+    assert pw._managed_engine("msedge") is None
+    assert "Edge" in pw._unavailable_channel_hint("msedge")
+    assert "chromium" in pw._unavailable_channel_hint("msedge")
+    assert "Chrome" in pw._unavailable_channel_hint("chrome")
+    assert "路径" in pw._unavailable_channel_hint("custom", r"C:\no\such.exe")
+    # 未知渠道不抛异常，仍给出可操作指向
+    assert "未知浏览器渠道" in pw._unavailable_channel_hint("safari")
+
+
+def test_health_check_reports_hint_and_reinstallable_flag(monkeypatch):
+    """健康检查失败时：系统通道给提示且标记不可重装；托管通道仍报目录名并可重装"""
+    import asyncio
+
+    import playwright_worker as pw
+    from playwright_worker import worker_core
+
+    monkeypatch.setattr(pw, "_ensure_browser", lambda *a, **k: False)
+
+    # 系统通道（msedge）：提示非空 + reinstallable=False（无可下载二进制）
+    res = asyncio.run(
+        worker_core.handle_browser_health_check(
+            {"browser_settings": {"browser_channel": "msedge"}}
+        )
+    )
+    assert res["healthy"] is False
+    assert res["missing"] and "Edge" in res["missing"][0]
+    assert res["reinstallable"] is False
+
+    # 自定义通道：同样不可重装
+    res = asyncio.run(
+        worker_core.handle_browser_health_check(
+            {
+                "browser_settings": {
+                    "browser_channel": "custom",
+                    "browser_custom_path": r"C:\no\such.exe",
+                }
+            }
+        )
+    )
+    assert res["reinstallable"] is False
+    assert res["missing"]
+
+    # 托管通道（firefox）：标记可自动重装（missing 具体内容取决于本机装机情况）
+    res = asyncio.run(
+        worker_core.handle_browser_health_check(
+            {"browser_settings": {"browser_channel": "firefox"}}
+        )
+    )
+    assert res["reinstallable"] is True
+    assert isinstance(res["missing"], list)
+
+    # 健康时不上报 missing/reinstallable（保持响应精简与既有契约）
+    monkeypatch.setattr(pw, "_ensure_browser", lambda *a, **k: True)
+    res = asyncio.run(
+        worker_core.handle_browser_health_check(
+            {"browser_settings": {"browser_channel": "msedge"}}
+        )
+    )
+    assert res["healthy"] is True
+    assert "missing" not in res
+
+
 # ── B3: 调试会话期间拒绝登录/浏览器任务（Python 半防御）──
 
 

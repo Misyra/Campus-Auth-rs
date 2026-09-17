@@ -1064,6 +1064,17 @@ async def handle_ocr(page, step: StepConfig, context: StepContext) -> None:
     # 与 ocr_recognize 命令口径一致：验证码文本可能被用户视为敏感内容，只记长度
     logger.info("[step:%s] [ocr] 识别完成，结果长度=%d", step.id or "", len(text or ""))
 
+    # 空识别结果按失败处理：识别器对空白/无文字区域会返回空串，此时回填等于清空
+    # 输入框，提交后必然被门户拒绝，但 run_steps 只看步骤是否技术执行成功，会把
+    # 任务判成「执行成功」——用户看到成功却实际未登录。验证码非空是普遍契约，
+    # 故在此显式失败（`char_range` 等场景若确需空串，应改用 eval 步骤取值）。
+    if not (text or "").strip():
+        raise WorkerError(
+            Outcome.UNKNOWN_ERROR,
+            f"OCR 未识别出有效文本（验证码为空）: {step.selector}。"
+            "请确认选择器指向验证码图片，或稍后重试",
+        )
+
     if step.store_as:
         context.results[step.store_as] = text
     if step.target_selector:

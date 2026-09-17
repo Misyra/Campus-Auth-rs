@@ -595,6 +595,11 @@ export interface OcrStatus {
   /** Worker 工程是否存在（即是否支持按需安装 OCR），不等于已安装 */
   declared?: boolean;
   size_mb: number;
+  /**
+   * Worker 存活时上报的运行时 OCR 能力；`null` 表示认证核心当前未运行
+   * （按需懒加载），不代表依赖缺失。详见 `GET /api/ocr/status`。
+   */
+  runtime_ocr?: boolean | null;
 }
 
 /** 任务（浏览器任务 / 脚本的列表项） */

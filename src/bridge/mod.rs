@@ -1628,21 +1628,33 @@ async fn send_health_check(
             .and_then(Value::as_bool)
             .unwrap_or(false);
     if !healthy && !worker_only {
-        // Worker 随响应上报缺失组件；转成可操作日志，否则用户只看到通用「健康检查失败」
-        let missing: Vec<&str> = resp
-            .result
-            .data
+        // Worker 随响应上报缺失组件；转成可操作日志，否则用户只看到通用「健康检查失败」。
+        // `reinstallable` 由 Worker 给出：托管引擎（chromium/firefox/webkit）可由
+        // `uv playwright install` 自动补齐；系统通道（msedge/chrome）与 custom 没有
+        // 可下载的二进制，此时文案必须指向「装浏览器 / 换通道」而非「自动重装」。
+        let data = &resp.result.data;
+        let missing: Vec<&str> = data
             .get("missing")
             .and_then(Value::as_array)
             .map(|items| items.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
+        let reinstallable = data
+            .get("reinstallable")
+            .and_then(Value::as_bool)
+            .unwrap_or(!missing.is_empty());
         if missing.is_empty() {
             warn!(target: "python_worker", "浏览器健康检查未通过（未上报缺失组件明细）");
-        } else {
+        } else if reinstallable {
             warn!(
                 target: "python_worker",
                 missing = %missing.join("、"),
                 "浏览器健康检查未通过：缺少浏览器组件，将尝试自动重装"
+            );
+        } else {
+            warn!(
+                target: "python_worker",
+                missing = %missing.join("、"),
+                "浏览器健康检查未通过：配置的浏览器不可用且无法自动安装，请按提示处理后重试"
             );
         }
     }

@@ -350,17 +350,22 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
     ]
 }
 
+/// 本地管理界面的 CSP 策略串
+///
+/// 样式表与字体均放行 jsDelivr：正文字体 Noto Sans SC 以 `<link rel=stylesheet>`
+/// 外链 @fontsource 分片（见 frontend/index.html），该请求属 `style-src` 管辖，
+/// 其内部 `@font-face` 指向的字体文件才走 `font-src`——两处缺一都会失败
+/// （曾只放行 `font-src`，样式表被 `style-src` 拦掉，远端字体实际从未生效）。
+/// scripts 仍限 `'self'`。抽为常量以便回归测试锁定这两个来源。
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: blob:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
 /// 为本地管理界面统一附加浏览器安全响应头。
 async fn security_headers(req: Request<Body>, next: Next) -> Response {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            // font-src 放行 jsDelivr：正文字体 Noto Sans SC 走远端 @fontsource 分片
-            // （见 frontend/index.html）。仅白名单该 CDN 的字体，styles/scripts 仍限 'self'。
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-        ),
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -494,6 +499,36 @@ mod tests {
         assert!(
             table_only.is_empty(),
             "路由表存在但 openapi.json 未声明（需同步 openapi.json）: {table_only:?}"
+        );
+    }
+
+    /// CSP 必须同时放行远端字体所需的两个来源
+    ///
+    /// 远端 CSS 以外链样式表加载走 `style-src`，其内部 `@font-face` 的字体文件走
+    /// `font-src`；只放行其一都会让字体静默失效（浏览器仅报 CSP 违规、不报错中断），
+    /// 故用本测试锁定，避免将来清理 CSP 时误删。
+    #[test]
+    fn csp_allows_remote_font_stylesheet_and_files() {
+        for directive in ["style-src", "font-src"] {
+            let value = CONTENT_SECURITY_POLICY
+                .split(';')
+                .map(str::trim)
+                .find(|d| d.starts_with(directive))
+                .unwrap_or_else(|| panic!("CSP 缺少 {directive} 指令"));
+            assert!(
+                value.contains("https://cdn.jsdelivr.net"),
+                "{directive} 未放行 jsDelivr（{value}），远端字体将失效"
+            );
+        }
+        // script-src 不得因字体需求而放宽
+        let script = CONTENT_SECURITY_POLICY
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src"))
+            .expect("CSP 应含 script-src");
+        assert_eq!(
+            script, "script-src 'self'",
+            "script-src 只应限 'self'，不得引入外部脚本源"
         );
     }
 }

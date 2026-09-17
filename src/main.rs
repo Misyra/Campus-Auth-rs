@@ -164,9 +164,15 @@ fn handle_autostart(action: &AutostartAction) -> anyhow::Result<()> {
 ///
 /// 双击启动时父进程为 explorer（无控制台），附着失败直接返回；此后标准句柄
 /// 保持无效，Rust std 对无效标准句柄的写入按静默丢弃处理，不影响启动流程。
+///
+/// 句柄顺序是关键：`AttachConsole` 自身就会重写本进程的标准句柄表，把调用方
+/// 传入的重定向句柄（`> 文件` / 管道）替换成控制台句柄。因此必须在附着**之前**
+/// 记录原始句柄，两路均有效时直接返回、完全不调用 `AttachConsole`；否则附着后
+/// 再把被覆写的有效句柄还原回去。此前实现先附着再判断"是否缺失"，判定时看到的
+/// 已是 AttachConsole 换上的控制台句柄，重定向输出会被静默丢弃且退出码仍为 0。
 #[cfg(windows)]
 fn attach_parent_console() {
-    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
@@ -175,20 +181,29 @@ fn attach_parent_console() {
         SetStdHandle,
     };
 
+    /// 标准句柄是否有效（NULL 与 INVALID_HANDLE_VALUE 均视为无效）
+    fn is_valid(h: HANDLE) -> bool {
+        !h.is_null() && h != INVALID_HANDLE_VALUE
+    }
+
     // SAFETY：以下 Win32 调用仅影响当前进程的控制台关联与标准句柄表；
     // 任一步失败（无控制台 / 已附着 / CONOUT$ 打开失败）均无窗口等副作用，
     // 统一静默忽略，不阻断启动流程。
     unsafe {
-        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+        // 1. 先记录原始句柄：AttachConsole 会覆写句柄表，事后无法再取回
+        let orig_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        let orig_err = GetStdHandle(STD_ERROR_HANDLE);
+        let out_valid = is_valid(orig_out);
+        let err_valid = is_valid(orig_err);
+
+        // 2. 两路均已被重定向（文件/管道）时无需附着控制台：直接返回，
+        //    既不触碰句柄表也不打开 CONOUT$，重定向输出原样保留
+        if out_valid && err_valid {
             return;
         }
-        // 仅补齐缺失的标准句柄：已被重定向的有效句柄（文件/管道）必须原样保留，
-        // 否则 `--status > out.txt` 这类重定向会被覆写成控制台导致输出丢失
-        let missing = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].into_iter().any(|id| {
-            let cur = GetStdHandle(id);
-            cur.is_null() || cur == INVALID_HANDLE_VALUE
-        });
-        if !missing {
+
+        // 3. 确有一路缺失（双击启动、或仅重定向单路）时才附着父控制台
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
             return;
         }
         // "CONOUT$" 的 UTF-16 编码（含结尾 NUL）
@@ -205,8 +220,10 @@ fn attach_parent_console() {
         if handle == INVALID_HANDLE_VALUE {
             return;
         }
-        SetStdHandle(STD_OUTPUT_HANDLE, handle);
-        SetStdHandle(STD_ERROR_HANDLE, handle);
+        // 4. 逐路处理：原本有效的重定向句柄还原，原本缺失的补 CONOUT$。
+        //    只补/还原缺失的那一路，避免把有效的重定向覆写成控制台
+        SetStdHandle(STD_OUTPUT_HANDLE, if out_valid { orig_out } else { handle });
+        SetStdHandle(STD_ERROR_HANDLE, if err_valid { orig_err } else { handle });
         // 故意不 CloseHandle：标准句柄需在整个进程生命周期内保持有效
     }
 }

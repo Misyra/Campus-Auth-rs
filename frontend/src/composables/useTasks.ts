@@ -47,6 +47,30 @@ function fetchTasks(force = false): Promise<void> {
   return fetchDirectory(force);
 }
 
+/** 该任务是否声明了成功条件（决定"执行完成"提示的可信度）
+ *
+ * 目录列表只有摘要，需按需取详情；取不到时保守返回 false，避免给出过强承诺。
+ * 结果按任务 id 缓存，执行多次不重复请求。
+ */
+const successConditionCache = new Map<string, boolean>();
+
+async function hasSuccessCondition(taskId: string): Promise<boolean> {
+  const cached = successConditionCache.get(taskId);
+  if (cached !== undefined) return cached;
+  try {
+    const detail = await tasksApi.get(taskId);
+    const condition = String(
+      (detail?.config as { success_condition?: unknown } | undefined)?.success_condition ?? "",
+    ).trim();
+    const has = condition.length > 0;
+    successConditionCache.set(taskId, has);
+    return has;
+  } catch (error) {
+    frontendLogger.debug("tasks", "读取任务成功条件失败，按未声明处理", error);
+    return false;
+  }
+}
+
 /** 立即执行任务（通用语义：浏览器打卡/脚本，不注入账号密码） */
 async function executeTask(taskId: string): Promise<void> {
   // A11：busy 守卫，执行中连点直接忽略，避免重复提交
@@ -64,6 +88,14 @@ async function executeTask(taskId: string): Promise<void> {
       // 失败：优先展示后端错误消息（output 截断到 500 字符，不适合整段塞进 toast）
       frontendLogger.warn("tasks", `执行失败: ${data?.error || data?.output || taskId}`);
       toastOnly(false, data?.error || "执行失败");
+      return;
+    }
+    // 成功语义分流：浏览器任务的成功 = "步骤都执行完了"，**不校验业务结果**
+    // （后端 executor 明确不做登录后网络验证，见 src/tasks/executor.rs）。
+    // 未声明 success_condition 时若笼统提示"执行完成"，用户会把"脚本跑完"误读为
+    // "已认证上网"——实测验证码识别出错时任务仍报成功但门户实际拒绝登录。
+    if (!(await hasSuccessCondition(taskId))) {
+      toastOnly(true, "已执行完成（未校验结果）");
       return;
     }
     toastOnly(true, "执行完成");
