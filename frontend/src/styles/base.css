@@ -100,9 +100,10 @@
   --blur-lg: blur(12px);
   --blur-xl: blur(20px);
 
-  /* 字体：正文走系统中文字体栈（Inter 未随包分发，不再声明）；
+  /* 字体：正文走远端 Noto Sans SC（@fontsource-variable，index.html 引入），
+     按 unicode-range 分片按需加载；未命中分片或断网时逐级回落本地中文字体栈。
      中文显式声明避免 Windows/macOS 各自回退链接导致的渲染不一致 */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+  --font-sans: 'Noto Sans SC Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
 

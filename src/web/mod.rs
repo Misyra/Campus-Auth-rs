@@ -357,7 +357,9 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
     headers.insert(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            // font-src 放行 jsDelivr：正文字体 Noto Sans SC 走远端 @fontsource 分片
+            // （见 frontend/index.html）。仅白名单该 CDN 的字体，styles/scripts 仍限 'self'。
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
     headers.insert(

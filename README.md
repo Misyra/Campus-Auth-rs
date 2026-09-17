@@ -99,6 +99,13 @@ campus-auth/
 - CI：`cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test`（含 `rust-tests-unix` 与 `e2e-login-chain` mock→二进制→Worker 全链路）+ 前端构建（`vue-tsc` + `vite build`）+ `vitest` + `compileall` + `uv run pytest`（见 `.github/workflows/ci.yml`）
 - 面向用户的版本更新见 [docs/updatelog.md](docs/updatelog.md)，逐项开发更改见 [docs/changelog.md](docs/changelog.md)，已知问题见 [docs/known-issues.md](docs/known-issues.md)
 
+## 第三方资源
+
+- **Noto Sans SC**（Web 控制台正文字体）：版权归 Google Inc.，以 [SIL Open Font License 1.1](https://scripts.sil.org/OFL) 授权。
+  字体不随本仓库分发，也不内嵌进二进制——`frontend/index.html` 经 jsDelivr 引用 `@fontsource-variable/noto-sans-sc`，由浏览器按 `unicode-range` 分片按需加载；断网时回落系统字体栈。
+  该 CDN 域名已在 Web 控制台的 CSP `font-src` 中放行（`src/web/mod.rs`）。若需自托管或调整字重集，替换该 CDN 引用即可。
+- **其他前端依赖**：见 [`frontend/package.json`](frontend/package.json)；Rust 依赖见 [`Cargo.toml`](Cargo.toml)。
+
 ## 许可证
 
 本项目为个人开源工具，仅用于合法的校园网身份认证场景。请遵守校园网络使用规范。

@@ -35,9 +35,17 @@
 }
 
 .logo-text {
-  font-size: var(--text-lg);
-  font-weight: 700;
+  /* 品牌名跟随全站正文字体（--font-sans = 远端 Noto Sans SC 可变字重）。
+     字重与 .page-title 对齐（同为 --text-2xl / 600）：两者在视觉上同属「页面主标题」
+     层级，此前品牌字为 500（霞鹜文楷时期为取真实 Medium 字形而定），
+     与 600 的页标题并置时明显偏轻。可变字体 100–900 全覆盖，600 是真实字形 */
+  font-family: var(--font-sans);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
   color: var(--accent);
+  white-space: nowrap;
 }
 
 .nav-links {

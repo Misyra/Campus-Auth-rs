@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/logo.png" />
+    <!-- 正文字体 Noto Sans SC（SIL OFL 1.1，fontsource 打包，见 package.json 依赖注释）。
+         走 jsDelivr 远端：CSS 内 101 条 @font-face 以 unicode-range 分片，浏览器只下载
+         实际用到字形所在的分片（实测界面 1343 个中文字命中 35 片 ≈ 1.6 MB），
+         无需把 CJK 字体打进仓库/二进制。断网时按 font-display: swap 回落系统字体栈。
+         preconnect 提前建连，减少首屏字体等待。 -->
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@fontsource-variable/noto-sans-sc@5.3.0/index.css"
+    />
     <title>认证喵 - Campus-Auth</title>
     <script src="/theme-init.js"></script>
   </head>

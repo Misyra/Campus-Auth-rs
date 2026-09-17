@@ -2,6 +2,17 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-17 全站字体改为远端 Noto Sans SC）
+
+- **全站正文字体改走远端 Noto Sans SC 可变字重**（`frontend/index.html` + `styles/base.css` + `src/web/mod.rs`）：
+  - 引入 `@fontsource-variable/noto-sans-sc@5.3.0/index.css`（jsDelivr，SIL OFL 1.1），CSS 内 101 条 `@font-face` 以 `unicode-range` 分片，浏览器只下载实际字形所在分片（实测界面 1343 个中文字命中 35 片 ≈ 1.6 MB）；`preconnect` 提前建连。
+  - `--font-sans` 首选 `'Noto Sans SC Variable'`，逐级回落系统栈（PingFang SC / 微软雅黑 / Noto Sans SC / sans-serif）；断网时按 `font-display: swap` 用系统字体渲染，不阻塞首屏、不白屏。
+  - CSP 的 `font-src` 放行 `https://cdn.jsdelivr.net`（`src/web/mod.rs::security_headers`）——此前为 `'self' data:`，不改则远端字体被浏览器直接拦掉；`style-src`/`script-src` 仍限 `'self'`。
+  - 选可变字重版而非静态多字重：静态 400 单字重 0.96 MB 但 500/600/700 需合成加粗（中文合成加粗发糊），静态 4 字重约 3.84 MB，可变版 1.63 MB 覆盖 100–900 全部真实字形。
+- **品牌字改为跟随全站字体**（`styles/layout.css` 的 `.logo-text`）：侧栏「认证喵」不再用霞鹜文楷，改用 `--font-sans`；字号提到 `--text-2xl`、字重与 `.page-title` 对齐为 600（此前 500 是霞鹜文楷时期为取真实 Medium 字形而定，与 600 的页标题并置明显偏轻）。删除 `frontend/public/fonts/` 下的霞鹜文楷子集与 OFL 副本、`base.css` 中两条 `@font-face`，仓库不再存放字体文件。变更缘由：鸿蒙字体（HarmonyOS Sans）虽免费但许可明确「不得修改」，子集化属违约，故未采用；霞鹜文楷子集方案被本次远端方案取代。
+- **README 新增「第三方资源」节**：声明 Noto Sans SC（Google Inc.，OFL-1.1）的授权与加载方式——字体不经仓库分发、不内嵌二进制，由 `frontend/index.html` 经 jsDelivr 按 `unicode-range` 分片加载，并说明该 CDN 已在 CSP `font-src` 放行。查证结论：OFL 1.1 的「再分发须附许可副本」义务因**未分发字体文件**而不触发，故无强制声明义务；本次声明属透明度考虑（浏览器会向 `cdn.jsdelivr.net` 发起请求），同时为将来可能改为自托管预留说明位置。
+- 验证：`cargo build` 通过；实例重启后 `/api/health` 正常、CSP 响应头实测含 `font-src 'self' data: https://cdn.jsdelivr.net`、首页已嵌远端字体链接、`dist/fonts` 已消失；`vue-tsc` 零错误、vitest 207 例全绿。
+
 ## 开发中（2026-09-17 关于页新增赞助入口）
 
 - **关于页新增「赞助」链接**（`frontend/src/views/AboutView.vue` + `styles/pages/about.css` + `components/common/IconApp.vue`）：页脚 about-links 在「使用文档 / GitHub」后追加指向 `https://blog.misyra.com/sponsor/` 的赞助入口，外观与既有两链接同款（`.sponsor-link` 并入同一 hover/边框样式组），heart 图标以 `--accent` 品牌色区分；`IconApp` 图标注册表新增 `heart`（Feather heart path，单点维护避免内联 SVG 拷贝漂移）。验证：`vue-tsc` 零错误、vitest 207 例全绿。
