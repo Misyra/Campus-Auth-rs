@@ -312,7 +312,7 @@ fn run_os_thread(
         Some(icon) => TrayIconBuilder::new()
             .with_icon(icon.clone())
             .with_menu(Box::new(menu))
-            .with_tooltip("Campus-Auth")
+            .with_tooltip("认证喵 Campus-Auth")
             .build(),
         None => {
             error!("无法加载或生成托盘图标");
@@ -682,7 +682,7 @@ fn update_tray(
         _ => format!("登录: {}", login_status_str(snap.login_status)),
     };
     let tooltip = format!(
-        "Campus-Auth\n引擎: {}\n网络: {}\n{}",
+        "认证喵 Campus-Auth\n引擎: {}\n网络: {}\n{}",
         engine_state_str(snap.engine_state),
         network_status_str(snap.network_status),
         login_line,

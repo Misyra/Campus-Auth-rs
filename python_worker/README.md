@@ -3,7 +3,7 @@
 > Rust 侧对应模块 `src/bridge/`（`BridgeSupervisor` 通过 NDJSON IPC 驱动本 Worker），IPC 契约见本 README 与 `worker_main.py` docstring。
 > Worker 协议版本：`v1.0.0`（与主程序发版版本独立）。本目录为 Rust 重写版的 Python Worker，已移除对旧项目 `app.*` 模块的全部依赖。
 
-校园网自动认证工具的浏览器自动化子进程，由 Rust 主进程（控制平面）按需拉起、
+认证喵（Campus-Auth）的浏览器自动化子进程，由 Rust 主进程（控制平面）按需拉起、
 空闲超时后关闭。
 
 ## 设计要点

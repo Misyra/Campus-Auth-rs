@@ -33,8 +33,8 @@ function navigate(name: string): void {
   <nav class="sidebar">
     <div class="sidebar-header">
       <div class="logo">
-        <span class="logo-icon logo-mark" role="img" aria-label="Campus-Auth 校园网认证助手"></span>
-        <span class="logo-text">校园网认证</span>
+        <span class="logo-icon logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
+        <span class="logo-text">认证喵</span>
       </div>
     </div>
 

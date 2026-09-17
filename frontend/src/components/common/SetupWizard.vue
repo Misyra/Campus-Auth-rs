@@ -29,8 +29,8 @@ watch(
   <div v-if="state.showWizard" class="wizard-overlay" role="dialog" aria-modal="true" aria-label="使用协议与免责声明">
     <div class="wizard-container">
       <div class="wizard-header">
-        <span class="wizard-logo logo-mark" role="img" aria-label="Campus-Auth 校园网认证助手"></span>
-        <h1>欢迎使用 Campus-Auth 校园网自动认证</h1>
+        <span class="wizard-logo logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
+        <h1>欢迎使用认证喵（Campus-Auth 校园网自动认证）</h1>
         <p>请阅读以下协议内容，同意后方可使用本软件</p>
       </div>
 
@@ -40,7 +40,7 @@ watch(
 
           <div class="terms-content">
             <h4>使用协议</h4>
-            <p>本软件（Campus-Auth）是一款校园网自动认证工具，仅供学习和个人使用。使用本软件前，请您仔细阅读并理解以下条款：</p>
+            <p>本软件（认证喵 / Campus-Auth）是一款校园网自动认证工具，仅供学习和个人使用。使用本软件前，请您仔细阅读并理解以下条款：</p>
             <ul>
               <li>本软件按"现状"提供，不作任何明示或暗示的保证。</li>
               <li>用户应自行承担使用本软件的一切风险和后果。</li>

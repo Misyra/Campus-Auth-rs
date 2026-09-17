@@ -1,8 +1,8 @@
-# Campus-Auth 校园网自动认证工具（Rust 重写版）
+# Campus-Auth（认证喵）校园网自动认证工具（Rust 重写版）
 
 ## 项目概述
 
-Campus-Auth 是一个校园网自动认证工具。Rust 重写版为单 binary crate + Python 子进程（浏览器自动化），便携版解压即用。Rust 侧负责控制平面（网络监测、登录状态机、调度、配置、Web API、系统托盘），Python 侧作为按需执行插件负责浏览器自动化（Playwright）和 OCR（ddddocr）。
+Campus-Auth（中文名「认证喵」）是一个校园网自动认证工具。Rust 重写版为单 binary crate + Python 子进程（浏览器自动化），便携版解压即用。Rust 侧负责控制平面（网络监测、登录状态机、调度、配置、Web API、系统托盘），Python 侧作为按需执行插件负责浏览器自动化（Playwright）和 OCR（ddddocr）。
 
 当前主程序版本：5.0.0-alpha.10（用户可见更新见 `docs/updatelog.md`，逐项更改见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `openapi.json` 三端同版）。Python Worker 版本独立固定为 1.0.0。
 

@@ -31,7 +31,7 @@ const reconnectHint = computed(() => {
   return `重连中 (第 ${wsRetryCount.value + 1} 次)`;
 });
 
-const pageTitle = computed(() => (route.meta.title as string) || "校园网认证");
+const pageTitle = computed(() => (route.meta.title as string) || "认证喵");
 const showDirty = computed(() => dirty.value && String(route.name).startsWith("settings"));
 
 function onActionClick(action: NotificationAction | null): void {

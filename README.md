@@ -1,4 +1,4 @@
-# Campus-Auth 校园网自动认证工具
+# 认证喵（Campus-Auth）— 校园网自动认证工具
 
 校园网（captive portal）自动认证工具。检测到需要认证时自动打开认证页面并登录，
 支持多 Profile 自动匹配、定时任务、验证码 OCR、系统托盘与 Web 控制台。

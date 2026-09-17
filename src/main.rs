@@ -1,4 +1,4 @@
-//! Campus-Auth 校园网自动认证工具 — 应用入口
+//! 认证喵（Campus-Auth）校园网自动认证工具 — 应用入口
 //!
 //! CLI 参数解析 -> tracing 初始化 -> 特殊命令处理 -> 构建 tokio Runtime -> 启动 launcher。
 

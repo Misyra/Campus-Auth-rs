@@ -107,7 +107,7 @@ function closeUninstall() {
     <div class="about-container">
       <div class="about-hero card">
         <span class="about-logo logo-mark" role="img" aria-label="Logo"></span>
-        <h1>校园网自动认证</h1>
+        <h1>认证喵</h1>
         <p class="about-subtitle">Campus Network Auth</p>
         <p class="version">Version {{ version }}</p>
         <p class="description">校园网自动认证工具</p>

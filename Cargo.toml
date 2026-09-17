@@ -4,7 +4,7 @@ version = "5.0.0-alpha.10"
 edition = "2024"
 rust-version = "1.85"
 default-run = "campus-auth"
-description = "校园网自动认证工具 — Rust 重写版"
+description = "认证喵 — 校园网自动认证工具（Rust 重写版）"
 authors = ["Misyra"]
 license = "AGPL-3.0-only"
 
