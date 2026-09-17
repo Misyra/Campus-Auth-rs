@@ -264,7 +264,8 @@
 }
 
 .github-link,
-.docs-link {
+.docs-link,
+.sponsor-link {
   display: inline-flex;
   align-items: center;
   gap: var(--space-sm);
@@ -280,7 +281,8 @@
 }
 
 .github-link:hover,
-.docs-link:hover {
+.docs-link:hover,
+.sponsor-link:hover {
   background: var(--bg-hover);
   border-color: var(--border-hover);
   transform: translateY(-2px);
@@ -291,6 +293,13 @@
 .docs-link svg {
   width: 20px;
   height: 20px;
+}
+
+/* 赞助：heart 图标用品牌强调色，与 docs/github 的单色图标区分 */
+.sponsor-link svg {
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
 }
 
 .muted {

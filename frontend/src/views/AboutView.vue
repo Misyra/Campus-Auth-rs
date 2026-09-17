@@ -182,6 +182,10 @@ function closeUninstall() {
             </svg>
             GitHub
           </a>
+          <a href="https://blog.misyra.com/sponsor/" target="_blank" rel="noopener noreferrer" class="sponsor-link">
+            <IconApp name="heart" />
+            赞助
+          </a>
         </div>
         <p>License: AGPL-3.0-only (<a href="https://github.com/Misyra/Campus-Auth-rs/blob/master/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>)</p>
         <p class="qq-group">QQ交流群：<strong>1105307735</strong></p>

@@ -2,6 +2,10 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-17 关于页新增赞助入口）
+
+- **关于页新增「赞助」链接**（`frontend/src/views/AboutView.vue` + `styles/pages/about.css` + `components/common/IconApp.vue`）：页脚 about-links 在「使用文档 / GitHub」后追加指向 `https://blog.misyra.com/sponsor/` 的赞助入口，外观与既有两链接同款（`.sponsor-link` 并入同一 hover/边框样式组），heart 图标以 `--accent` 品牌色区分；`IconApp` 图标注册表新增 `heart`（Feather heart path，单点维护避免内联 SVG 拷贝漂移）。验证：`vue-tsc` 零错误、vitest 207 例全绿。
+
 ## 开发中（2026-09-17 软件中文名改为「认证喵」）
 
 - **软件中文显示名由「校园网自动认证」改为「认证喵」**，英文标识 `Campus-Auth` / `campus-auth` 与全部链接、仓库名、二进制名、注册表键、LaunchAgent label 等机器标识**一律不动**。改动点：关于页 `<h1>`（`AboutView.vue`）、侧栏 logo 文字与 aria-label（`AppSidebar.vue`）、顶栏默认标题（`AppTopbar.vue`）、设置向导欢迎语与协议文案（`SetupWizard.vue`）、托盘 tooltip 两处（`src/tray/mod.rs` 初始 + 动态刷新）、`index.html` `<title>`（定为「认证喵 - Campus-Auth」）、`Cargo.toml` description、`README.md` / `AGENTS.md` / `python_worker/README.md` 标题与首段。关于页副标题「Campus Network Auth」、版本行与说明行「校园网自动认证工具」按用户要求保留原样（名字与说明性文字区分）。验证：`cargo check` 通过、前端类型检查零错误。
