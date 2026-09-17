@@ -160,7 +160,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 7. 系统托盘与开机自启
 
-- 托盘常驻操作：打开控制台、查看状态、退出；轻量模式支持按需唤醒 Web 控制台（`src/tray`）。
+- 托盘菜单自上而下：**状态**（引擎 · 网络，登录进行中时追加登录态；只读信息行，引擎运行中为正常深色、未运行时灰化）、分隔线、**启动监测 / 停止监测**（随引擎状态切换文本）、**手动登录**（等同控制台「手动登录」按钮，来源标记为手动）、**打开控制台**、**退出**；轻量模式支持按需唤醒 Web 控制台。左键单击托盘图标直接打开控制台（`src/tray`）。托盘不再提供更新检查入口，更新走关于页或设置 · 网络与更新。
 - macOS：托盘按用户决策禁用（`tray-icon` 要求主线程 NSApplication 事件循环，与 tokio 冲突），轻量模式自动降级为完整模式，Web 入口仍可用。
 - Linux：依赖 GTK3 / libayatana-appindicator（`TrayManager::spawn` 内 `gtk::init` + glib 主循环），无桌面环境时托盘不启动但 Web 仍可用。
 - 开机自启：`--autostart enable/disable`（`src/utils/platform` 三端实现；Windows 为计划任务/VBS，macOS 为 LaunchAgent，Linux 为 systemd/autostart）。

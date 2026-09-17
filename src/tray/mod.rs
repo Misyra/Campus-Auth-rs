@@ -18,15 +18,16 @@ use tokio::sync::mpsc;
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem};
+use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::app::{self, AxumServeHandle};
 use crate::config::{ConfigService, ProfileService};
 use crate::container::ServiceContainer;
 use crate::engine::{EngineCommand, EngineSlot};
-use crate::status::{EngineState, LoginStatus, NetworkStatus, StatusManager, StatusSnapshot};
-use crate::updater::UpdaterService;
+use crate::status::{
+    EngineState, LoginSource, LoginStatus, NetworkStatus, StatusManager, StatusSnapshot,
+};
 use crate::web::state::LogEntry;
 
 /// 托盘图标默认尺寸（生成回退图标时使用）
@@ -36,10 +37,10 @@ const ACTIVE_COLOR: [u8; 3] = [80, 200, 120];
 /// 动作通道容量
 const ACTION_CHANNEL_CAPACITY: usize = 64;
 
-/// 菜单构建结果类型：`(Menu, 顶层菜单项容器, 监测切换 MenuItem)`
+/// 菜单构建结果类型：`(Menu, 顶层菜单项容器, 状态项, 监测切换项)`
 ///
-/// `toggle_item` 是 `menu_items[0]` 的克隆引用（MenuItem 内部为 Rc，clone 廉价），
-/// 单独返回以便状态变化时调用 `set_text` 动态切换「启动监测/停止监测」文本。
+/// 后两个 MenuItem 是 `menu_items` 内对应元素的克隆（MenuItem 内部为 Rc，clone 廉价），
+/// 单独返回以便状态变化时调用 `set_text` 动态改写文本。
 type MenuBuildResult = (Menu, Vec<Box<dyn IsMenuItem>>, MenuItem, MenuItem);
 
 /// OS 线程内部命令（泵任务 / Drop → OS 线程），单通道承载退出与托盘刷新。
@@ -62,8 +63,8 @@ pub enum TrayAction {
     StopMonitor,
     /// 打开 Web 控制台（open::that）
     OpenWeb,
-    /// 手动检查更新（调用 UpdaterService，有更新时打开关于页）
-    CheckUpdate,
+    /// 手动触发一次登录（等价于控制台「手动登录」按钮，来源标记 Manual）
+    ManualLogin,
     /// 退出（EngineCommand::Shutdown + 停止自身）
     Quit,
 }
@@ -79,10 +80,10 @@ pub struct TrayDeps {
     pub status: Arc<StatusManager>,
     /// 引擎句柄槽（派发命令到「当前活跃」Engine，崩溃重启后自动指向新实例）
     pub engine: EngineSlot,
+    /// 登录编排器（托盘「手动登录」入口复用与 Web API 相同的提交路径）
+    pub login: Arc<dyn crate::login::LoginApi>,
     /// Profile 服务（枚举 Profile 构建子菜单）
     pub profile_service: Arc<ProfileService>,
-    /// 更新服务（检查更新）
-    pub updater: Arc<UpdaterService>,
     /// 服务容器（轻量模式按需启动 Axum 时需要）
     pub container: Arc<ServiceContainer>,
     /// 日志广播通道（按需启动 Axum 时需要）
@@ -183,7 +184,7 @@ impl TrayManager {
         // 记录 OS 线程句柄，供泵任务或 Drop 在结束时 join
         *self.os_join.lock().unwrap_or_else(|e| e.into_inner()) = Some(os_handle);
 
-        // ---- tokio 泵任务：消费 TrayAction 并派发到 Engine/Updater ----
+        // ---- tokio 泵任务：消费 TrayAction 并派发到 Engine ----
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let pump = tokio::spawn(async move {
             let mut status_rx = status_for_pump.subscribe();
@@ -287,13 +288,16 @@ fn run_os_thread(
     }
 
     // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
-    // menu_items 绑定本身保持对象存活到线程结束；toggle_item / update_item 用于动态改文本
-    let (menu, menu_items, toggle_item, update_item) = build_menu();
+    // menu_items 绑定本身保持对象存活到线程结束；status_item / toggle_item 用于动态改文本
+    let (menu, menu_items, status_item, toggle_item) = build_menu();
     let _ = &menu_items;
-    // 首次按当前状态设置文本
+    // 首次按当前状态设置文本与状态行强调态
     let first_snapshot = status.borrow();
+    status_item.set_text(status_menu_label(&first_snapshot));
+    if status_item.is_enabled() != status_item_enabled(first_snapshot.engine_state) {
+        status_item.set_enabled(status_item_enabled(first_snapshot.engine_state));
+    }
     toggle_item.set_text(monitor_toggle_label(first_snapshot.engine_state));
-    update_item.set_text(update_menu_label(first_snapshot.update_available));
     drop(first_snapshot);
 
     // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
@@ -371,8 +375,8 @@ fn run_os_thread(
         status,
         active_icon,
         inactive_icon,
+        status_item,
         toggle_item,
-        update_item,
         os_cmd_rx,
     );
 
@@ -384,7 +388,8 @@ fn run_os_thread(
 
 /// 菜单 id → [`TrayAction`] 纯映射（monitor_toggle 依当前引擎状态二选一）。
 ///
-/// 未知 id 返回 `None`（调用方静默丢弃）。
+/// 未知 id 返回 `None`（调用方静默丢弃）；`status_display` 是禁用信息行，
+/// 正常不会产生事件，此处同样不映射。
 fn menu_action_for(id: &str, snap: &StatusSnapshot) -> Option<TrayAction> {
     match id {
         "monitor_toggle" => {
@@ -394,8 +399,8 @@ fn menu_action_for(id: &str, snap: &StatusSnapshot) -> Option<TrayAction> {
                 Some(TrayAction::StartMonitor)
             }
         }
+        "manual_login" => Some(TrayAction::ManualLogin),
         "open_web" => Some(TrayAction::OpenWeb),
-        "check_update" => Some(TrayAction::CheckUpdate),
         "quit" => Some(TrayAction::Quit),
         _ => None,
     }
@@ -412,8 +417,8 @@ fn run_os_event_loop(
     status: Arc<StatusManager>,
     active_icon: Option<Icon>,
     inactive_icon: Option<Icon>,
+    status_item: MenuItem,
     toggle_item: MenuItem,
-    update_item: MenuItem,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
     // Windows 平台必须 pump 消息循环：tray-icon 内部为托盘创建隐藏窗口，
@@ -426,8 +431,8 @@ fn run_os_event_loop(
         &status,
         &active_icon,
         &inactive_icon,
+        &status_item,
         &toggle_item,
-        &update_item,
         os_cmd_rx,
     );
     // gtk 主循环驱动事件分发；以 50ms 轮询命令通道兼顾刷新与退出，
@@ -438,8 +443,8 @@ fn run_os_event_loop(
         status,
         active_icon,
         inactive_icon,
+        status_item,
         toggle_item,
-        update_item,
         os_cmd_rx,
     );
     // 其余平台（macOS 等）：托盘暂不支持（tray-icon 要求主线程事件循环，
@@ -450,8 +455,8 @@ fn run_os_event_loop(
         status,
         active_icon,
         inactive_icon,
+        status_item,
         toggle_item,
-        update_item,
         os_cmd_rx,
     );
 }
@@ -464,8 +469,8 @@ fn run_windows_loop(
     status: &StatusManager,
     active_icon: &Option<Icon>,
     inactive_icon: &Option<Icon>,
+    status_item: &MenuItem,
     toggle_item: &MenuItem,
-    update_item: &MenuItem,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
     use std::time::Duration;
@@ -479,8 +484,8 @@ fn run_windows_loop(
                     &status.borrow(),
                     active_icon,
                     inactive_icon,
+                    status_item,
                     toggle_item,
-                    update_item,
                 );
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
@@ -497,8 +502,8 @@ fn run_linux_loop(
     status: Arc<StatusManager>,
     active_icon: Option<Icon>,
     inactive_icon: Option<Icon>,
+    status_item: MenuItem,
     toggle_item: MenuItem,
-    update_item: MenuItem,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
@@ -513,8 +518,8 @@ fn run_linux_loop(
                     &status.borrow(),
                     &active_icon,
                     &inactive_icon,
+                    &status_item,
                     &toggle_item,
-                    &update_item,
                 );
             }
             Err(std_mpsc::TryRecvError::Empty) => {}
@@ -537,8 +542,8 @@ fn run_fallback_loop(
     status: Arc<StatusManager>,
     active_icon: Option<Icon>,
     inactive_icon: Option<Icon>,
+    status_item: MenuItem,
     toggle_item: MenuItem,
-    update_item: MenuItem,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
     loop {
@@ -550,8 +555,8 @@ fn run_fallback_loop(
                     &status.borrow(),
                     &active_icon,
                     &inactive_icon,
+                    &status_item,
                     &toggle_item,
-                    &update_item,
                 );
             }
             Err(_) => break, // 发送端已丢弃，结束线程
@@ -619,29 +624,19 @@ async fn handle_action(
             }
             false
         }
-        TrayAction::CheckUpdate => {
-            // 托盘用户的更新入口：检查后有更新直接打开设置页"网络与更新"区块
-            // （更新按钮/下载进度均在此处，关于页无更新 UI）；无更新/失败仅记日志
-            let updater = deps.updater.clone();
-            let base = deps.config.base_path();
-            let default_port = deps.port;
+        TrayAction::ManualLogin => {
+            // 与控制台「手动登录」按钮走同一提交路径（LoginApi::submit + Manual 来源），
+            // 不另造入口——否则抢占优先级、去重、历史写入等语义会与 Web 侧分叉。
+            // 登录可能耗时数十秒（等浏览器/OCR），故 spawn 出去，不阻塞泵任务：
+            // 泵任务还负责其它托盘动作，阻塞会让菜单整体失去响应。
+            let login = deps.login.clone();
             tokio::spawn(async move {
-                match updater.check_update().await {
-                    Ok(Some(info)) if info.update_available => {
-                        info!(
-                            version = %info.latest_version,
-                            "发现新版本，打开控制台设置页（网络与更新）"
-                        );
-                        let port =
-                            crate::utils::paths::read_runtime_port(&base).unwrap_or(default_port);
-                        let url = format!("http://127.0.0.1:{port}/settings/network");
-                        if let Err(e) = open::that(&url) {
-                            warn!("打开浏览器失败 ({url}): {e}");
-                        }
-                    }
-                    Ok(Some(_)) => info!("托盘检查更新：远程无当前平台的安装包"),
-                    Ok(None) => info!("托盘检查更新：已是最新版本"),
-                    Err(e) => warn!("托盘检查更新失败: {e}"),
+                let handle = login.submit(LoginSource::Manual, None, None).await;
+                let result = handle.await_result().await;
+                if result.is_success() {
+                    info!("托盘手动登录成功: {}", result.message);
+                } else {
+                    warn!("托盘手动登录未成功: {}", result.message);
                 }
             });
             false
@@ -660,19 +655,26 @@ async fn handle_action(
     }
 }
 
-/// 根据状态更新托盘 tooltip、图标，以及监测切换菜单项文本
+/// 根据状态更新托盘 tooltip、图标，以及「状态」行文本与强调色（借启用态表达）
 fn update_tray(
     tray: &TrayIcon,
     snap: &StatusSnapshot,
     active: &Option<Icon>,
     inactive: &Option<Icon>,
+    status_item: &MenuItem,
     toggle_item: &MenuItem,
-    update_item: &MenuItem,
 ) {
-    // 动态切换「启动监测/停止监测」菜单项文本
+    // 「状态」信息行：引擎 · 网络（+ 登录态），随状态刷新。
+    // 引擎运行中 → 启用（系统默认深色文字，突出「正在工作」）；
+    // 未运行/崩溃 → 禁用（系统灰化，视觉上退到次要）。muda 无颜色 API，见
+    // status_item_enabled 的说明。
+    status_item.set_text(status_menu_label(snap));
+    let running = status_item_enabled(snap.engine_state);
+    if status_item.is_enabled() != running {
+        status_item.set_enabled(running);
+    }
+    // 动态切换「启动检测/停止检测」菜单项文本
     toggle_item.set_text(monitor_toggle_label(snap.engine_state));
-    // 动态切换「检查更新」菜单项文本（update_available 由后台检查 merge 维护）
-    update_item.set_text(update_menu_label(snap.update_available));
 
     // 登录行：成功/失败时附带上次登录结果信息
     let login_line = match (&snap.login_status, &snap.login_message) {
@@ -701,22 +703,47 @@ fn update_tray(
     }
 }
 
-/// 构建托盘右键菜单（四项：监测切换 / 检查更新 / 打开控制台 / 退出）。
+/// 构建托盘右键菜单。
 ///
-/// 返回 `(Menu, 顶层菜单项容器, 监测切换 MenuItem, 检查更新 MenuItem)`：
+/// 结构（自上而下）：
+/// ```text
+/// 状态：运行中 · 在线         ← 信息行，随状态刷新；运行中为正常色、未运行灰化
+/// ──────────────────────    ← 分隔线：把只读状态与可点操作用视觉分开
+/// 停止检测 / 启动检测        ← 随引擎状态切换文本
+/// 手动登录
+/// 打开控制台
+/// 退出
+/// ```
+///
+/// 返回 `(Menu, 顶层菜单项容器, 状态 MenuItem, 监测切换 MenuItem)`：
 /// muda 内部持有对菜单项对象的引用，因此 `menu_items` 必须比 [`Menu`]/[`TrayIcon`]
-/// 存活更久（由调用方持有）。`toggle_item` 是 `menu_items[0]` 的克隆（MenuItem
-/// 内部为 Rc，clone 廉价），供 [`update_tray`] 在状态变化时调用 `set_text` 动态切换文本；
-/// `update_item` 同理，文本随 `update_available` 切换。
+/// 存活更久（由调用方持有）。两个 MenuItem 是 `menu_items` 内的克隆（MenuItem 内部为
+/// Rc，clone 廉价），供 [`update_tray`] 在状态变化时 `set_text` 动态改文本。
 ///
 /// 监测切换项使用固定 id `monitor_toggle`，具体动作（启动/停止）由菜单事件 handler
 /// 根据当前引擎状态决定，从而实现「id 不变、文本随状态切换」。
+///
+/// 分隔线以 [`PredefinedMenuItem::separator`] 追加，不参与 id/文本动态更新。
 fn build_menu() -> MenuBuildResult {
+    let status_item = MenuItem::with_id(
+        MenuId::new("status_display"),
+        "状态：读取中…",
+        // 初始禁用（顶部为「未运行」灰化态），update_tray 会按实际引擎状态复位
+        false,
+        None,
+    );
     let toggle_item = MenuItem::with_id(MenuId::new("monitor_toggle"), "启动检测", true, None);
-    let update_item = MenuItem::with_id(MenuId::new("check_update"), "检查更新", true, None);
+    let sep = PredefinedMenuItem::separator();
     let menu_items: Vec<Box<dyn IsMenuItem>> = vec![
+        Box::new(status_item.clone()),
+        Box::new(sep),
         Box::new(toggle_item.clone()),
-        Box::new(update_item.clone()),
+        Box::new(MenuItem::with_id(
+            MenuId::new("manual_login"),
+            "手动登录",
+            true,
+            None,
+        )),
         Box::new(MenuItem::with_id(
             MenuId::new("open_web"),
             "打开控制台",
@@ -731,7 +758,38 @@ fn build_menu() -> MenuBuildResult {
     if let Err(e) = menu.append_items(&menu_refs) {
         error!("托盘菜单项追加失败，菜单可能不完整: {e}");
     }
-    (menu, menu_items, toggle_item, update_item)
+    (menu, menu_items, status_item, toggle_item)
+}
+
+/// 引擎状态 → 「状态」信息行的可点性（借 `set_enabled` 表达视觉强调）。
+///
+/// muda 的 `MenuItem` 没有颜色/字重 API（仅 `set_text`/`set_enabled`/`set_accelerator`），
+/// 故「运行中用深色、未运行用浅色」只能落到启用态：启用走系统默认深色文字，
+/// 禁用走系统灰化——这正是 Windows 原生菜单表达「强调 / 次要」的方式。
+/// 该行为纯信息行，`menu_action_for` 对 `status_display` 返回 `None`，
+/// 故即便处于启用态被点击也不会有任何动作。
+fn status_item_enabled(state: EngineState) -> bool {
+    state == EngineState::Running
+}
+
+/// 引擎/网络状态 → 「状态」行文本。
+///
+/// 引擎状态是用户最关心的「在不在工作」，网络状态说明「工作对象当前是什么情况」，
+/// 故合并为一行展示；登录进行中时追加登录态，避免用户误以为自动登录没反应。
+fn status_menu_label(snap: &StatusSnapshot) -> String {
+    let login = match snap.login_status {
+        LoginStatus::Running => " · 登录中",
+        LoginStatus::Success => " · 已登录",
+        LoginStatus::Failed => " · 上次失败",
+        LoginStatus::Cancelled => " · 已取消",
+        LoginStatus::Idle => "",
+    };
+    format!(
+        "状态：{} · {}{}",
+        engine_state_str(snap.engine_state),
+        network_status_str(snap.network_status),
+        login,
+    )
 }
 
 /// 引擎状态 → 监测切换菜单项文本
@@ -739,18 +797,6 @@ fn monitor_toggle_label(state: EngineState) -> &'static str {
     match state {
         EngineState::Running => "停止监测",
         EngineState::Stopped | EngineState::Dead => "启动监测",
-    }
-}
-
-/// 更新可用性 → 检查更新菜单项文本
-///
-/// 文本由 `snapshot.update_available` 驱动（含"无更新时清 false"的 else 分支），
-/// 这是该字段在托盘侧的消费点；后台检查的 merge 结果由此实时反映。
-fn update_menu_label(update_available: bool) -> &'static str {
-    if update_available {
-        "发现新版本，点击更新"
-    } else {
-        "检查更新"
     }
 }
 
@@ -913,6 +959,95 @@ mod tests {
         assert_eq!(login_status_str(LoginStatus::Success), "成功");
         assert_eq!(login_status_str(LoginStatus::Failed), "失败");
         assert_eq!(login_status_str(LoginStatus::Cancelled), "已取消");
+    }
+
+    /// menu_action_for：monitor_toggle 依引擎状态二选一；其余 id 固定映射；
+    /// status_display 是禁用信息行，不映射任何动作
+    #[test]
+    fn test_menu_action_for() {
+        let running = StatusSnapshot {
+            engine_state: EngineState::Running,
+            ..Default::default()
+        };
+        assert!(matches!(
+            menu_action_for("monitor_toggle", &running),
+            Some(TrayAction::StopMonitor)
+        ));
+        let stopped = StatusSnapshot {
+            engine_state: EngineState::Stopped,
+            ..Default::default()
+        };
+        assert!(matches!(
+            menu_action_for("monitor_toggle", &stopped),
+            Some(TrayAction::StartMonitor)
+        ));
+        let dead = StatusSnapshot {
+            engine_state: EngineState::Dead,
+            ..Default::default()
+        };
+        assert!(matches!(
+            menu_action_for("monitor_toggle", &dead),
+            Some(TrayAction::StartMonitor)
+        ));
+        assert!(matches!(
+            menu_action_for("manual_login", &stopped),
+            Some(TrayAction::ManualLogin)
+        ));
+        assert!(matches!(
+            menu_action_for("open_web", &stopped),
+            Some(TrayAction::OpenWeb)
+        ));
+        assert!(matches!(
+            menu_action_for("quit", &stopped),
+            Some(TrayAction::Quit)
+        ));
+        // 禁用信息行与未知 id 都不产生动作
+        assert!(menu_action_for("status_display", &stopped).is_none());
+        assert!(menu_action_for("nonexistent", &stopped).is_none());
+        // 已移除的更新入口不得复活
+        assert!(menu_action_for("check_update", &stopped).is_none());
+    }
+
+    /// status_item_enabled：仅引擎运行中为启用（借系统深色表达强调），
+    /// 停止/崩溃均灰化
+    #[test]
+    fn test_status_item_enabled() {
+        assert!(status_item_enabled(EngineState::Running));
+        assert!(!status_item_enabled(EngineState::Stopped));
+        assert!(!status_item_enabled(EngineState::Dead));
+    }
+
+    /// status_menu_label：始终含引擎与网络状态；登录态仅在非 Idle 时追加，
+    /// 避免空闲时显示「· 空闲」这种无信息量的尾巴
+    #[test]
+    fn test_status_menu_label() {
+        let online_idle = StatusSnapshot {
+            engine_state: EngineState::Running,
+            network_status: NetworkStatus::Online,
+            login_status: LoginStatus::Idle,
+            ..Default::default()
+        };
+        assert_eq!(status_menu_label(&online_idle), "状态：运行中 · 在线");
+
+        let logging_in = StatusSnapshot {
+            login_status: LoginStatus::Running,
+            ..online_idle.clone()
+        };
+        assert_eq!(
+            status_menu_label(&logging_in),
+            "状态：运行中 · 在线 · 登录中"
+        );
+
+        let failed = StatusSnapshot {
+            engine_state: EngineState::Stopped,
+            network_status: NetworkStatus::CaptivePortal,
+            login_status: LoginStatus::Failed,
+            ..Default::default()
+        };
+        assert_eq!(
+            status_menu_label(&failed),
+            "状态：已停止 · 需认证 · 上次失败"
+        );
     }
 
     /// solid_rgba：生成正确尺寸的纯色 RGBA 缓冲（alpha=255）

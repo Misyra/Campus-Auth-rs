@@ -2,6 +2,13 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-17 托盘菜单精简与状态行）
+
+- **托盘菜单移除「检查更新」项**（`src/tray/mod.rs` + `src/launcher.rs`）：更新入口统一收敛到关于页与设置 · 网络与更新，托盘不再重复提供。连带删除 `TrayAction::CheckUpdate` 分支、`update_menu_label`、`menu_action_for` 的 `check_update` 映射，以及仅为该功能存在的 `TrayDeps.updater` 字段与 `UpdaterService` 导入（该字段全仓仅此一处消费）。测试补断言 `menu_action_for("check_update")` 返回 `None`，防止入口复活。
+- **状态行改名并借启用态表达强调**：首行由「当前状态：运行中 · 在线」改为「**状态：运行中 · 在线**」。muda 的 `MenuItem` 无颜色/字重 API（仅 `set_text`/`set_enabled`/`set_accelerator`），故「运行中深色、未运行浅色」落到 `set_enabled`：引擎 `Running` → 启用（系统默认深色），`Stopped`/`Dead` → 禁用（系统灰化），即 Windows 原生菜单表达主次的方式。新增 `status_item_enabled()` 承载该映射并单测锁定；`update_tray` 与 `run_os_thread` 首帧均按状态复位启用态（仅在取值变化时调用 `set_enabled`，避免无谓重设）。
+- 现行菜单结构：状态行 → 分隔线 → 启动/停止监测（随状态切换）→ 手动登录 → 打开控制台 → 退出。README 与 `docs/guides/user-guide.md` 同步。
+- 验证：`cargo test --lib tray::` 8 例通过（新增 `test_status_item_enabled`）、`clippy --all-targets -D warnings` 零警告、`fmt --check` 通过；实例重启后日志确认「系统托盘已创建」且不再出现「托盘检查更新」条目。**菜单视觉呈现（分隔线、灰化）依赖 Windows 原生渲染，无法自动化断言，需人工目视确认。**
+
 ## 开发中（2026-09-17 指南文档端点统一为下载语义）
 
 - **`/api/docs/*` 三端点（编写指南 / 任务手册 / 直连登录指南）`Content-Disposition` 由 `inline` 改为 `attachment`**（`src/web/routes/system.rs::markdown_response`）：浏览器访问 URL 即弹出保存对话框，三个端点行为统一。同步移除前端「导出编写指南」链接上冗余的 `download` 属性（响应头已带 filename），`target="_blank"` 在线阅读入口（任务页编写指南、设置页指南链接、直连面板与向导的文档入口）随响应头语义自然变为下载，`title`/提示文案同步改为「下载」口径；`openapi.json` 三个端点 200 描述注明 attachment。验证：`cargo test --lib web::routes::system` 18 例通过、clippy 零警告、fmt 通过；前端 `vue-tsc` 零错误、vitest 207 例全绿。
