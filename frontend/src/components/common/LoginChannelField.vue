@@ -440,7 +440,7 @@ async function runTest(): Promise<void> {
                 class="icon-sm" :class="{ spin: p.httpTestRunning.value }" />
               {{ p.httpTestRunning.value ? '正在发送…' : '发送测试请求' }}
             </button>
-            <a class="btn btn-ghost" href="/api/docs/http-login-guide" target="_blank" rel="noopener">
+            <a class="btn btn-ghost" href="/api/docs/http-login-guide">
               <IconApp name="file-text" class="icon-sm" />
               使用文档
             </a>

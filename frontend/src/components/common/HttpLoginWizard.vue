@@ -270,7 +270,7 @@ function fillScriptSkeleton(): void {
         </div>
 
         <div class="wz-actions-inline">
-          <a class="btn btn-sm btn-ghost" href="/api/docs/http-login-guide" target="_blank" rel="noopener">
+          <a class="btn btn-sm btn-ghost" href="/api/docs/http-login-guide">
             <IconApp name="file-text" class="icon-sm" />
             打开完整使用文档
           </a>

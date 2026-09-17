@@ -2585,7 +2585,7 @@
     "operationId": "get___api_docs_task-writing-guide",
     "responses": {
      "200": {
-      "description": "Markdown 文件原文",
+      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）",
       "content": {
        "text/markdown": {
         "schema": {
@@ -2618,7 +2618,7 @@
     "operationId": "get___api_docs_http-login-guide",
     "responses": {
      "200": {
-      "description": "Markdown 文件原文",
+      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）",
       "content": {
        "text/markdown": {
         "schema": {
@@ -2651,7 +2651,7 @@
     "operationId": "get___api_docs_task-manual",
     "responses": {
      "200": {
-      "description": "Markdown 文件原文",
+      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）",
       "content": {
        "text/markdown": {
         "schema": {

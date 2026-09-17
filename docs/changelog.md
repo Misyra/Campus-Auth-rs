@@ -2,6 +2,10 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-17 指南文档端点统一为下载语义）
+
+- **`/api/docs/*` 三端点（编写指南 / 任务手册 / 直连登录指南）`Content-Disposition` 由 `inline` 改为 `attachment`**（`src/web/routes/system.rs::markdown_response`）：浏览器访问 URL 即弹出保存对话框，三个端点行为统一。同步移除前端「导出编写指南」链接上冗余的 `download` 属性（响应头已带 filename），`target="_blank"` 在线阅读入口（任务页编写指南、设置页指南链接、直连面板与向导的文档入口）随响应头语义自然变为下载，`title`/提示文案同步改为「下载」口径；`openapi.json` 三个端点 200 描述注明 attachment。验证：`cargo test --lib web::routes::system` 18 例通过、clippy 零警告、fmt 通过；前端 `vue-tsc` 零错误、vitest 207 例全绿。
+
 ## 开发中（2026-09-17 全站字体改为远端 Noto Sans SC）
 
 - **全站正文字体改走远端 Noto Sans SC 可变字重**（`frontend/index.html` + `styles/base.css` + `src/web/mod.rs`）：

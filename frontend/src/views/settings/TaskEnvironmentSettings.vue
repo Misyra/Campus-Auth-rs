@@ -284,13 +284,13 @@ async function recognizeOcr() {
               <IconApp name="upload" class="icon-sm" />
               安装录制器脚本
             </a>
-            <a href="/api/docs/task-writing-guide" download="task-writing-guide.md" class="btn btn-secondary">
+            <a href="/api/docs/task-writing-guide" class="btn btn-secondary">
               <IconApp name="file-text" class="icon-sm" />
               导出编写指南
             </a>
           </div>
           <div class="task-recorder-note">需先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 扩展，再安装录制器脚本；在登录页点击浮动按钮开始录制。</div>
-          <div class="task-recorder-note">编写规范见 <a href="/api/docs/task-writing-guide" target="_blank">任务编写指南</a> 与 <a href="/api/docs/task-manual" target="_blank">任务手册</a>。</div>
+          <div class="task-recorder-note">编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
         </div>
       </div>
     </section>

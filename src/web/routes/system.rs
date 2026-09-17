@@ -806,7 +806,7 @@ async fn serve_guide(
 ///
 /// 优先从 `docs/guides/task-writing-guide.md` 读取并以 Markdown 文件形式返回；
 /// 便携包缺 `docs/` 时回退到编译期嵌入的副本，避免 404。
-/// 注意与 `Json` 信封区分：浏览器直接打开显示文本，`download` 链接触发下载。
+/// `Content-Disposition: attachment` 使浏览器访问 URL 即弹出保存对话框。
 pub async fn task_writing_guide(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Response, ApiError> {
@@ -814,14 +814,15 @@ pub async fn task_writing_guide(
 }
 
 /// Markdown 文本以文件形式返回（与 tools.rs 的脚本直返保持一致）：
-/// `text/markdown` 让浏览器显示为文本，`download` 属性的链接触发下载。
+/// `attachment` 让浏览器访问 URL 即触发保存对话框；页面内「在线阅读」入口
+/// （`target="_blank"` 直开）与显式 `download` 属性的链接同样落到本响应。
 fn markdown_response(filename: &str, content: String) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("inline; filename=\"{filename}\""),
+            format!("attachment; filename=\"{filename}\""),
         )
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(content))
@@ -831,7 +832,7 @@ fn markdown_response(filename: &str, content: String) -> Response {
 /// GET /api/docs/task-manual — 任务使用手册
 ///
 /// 与编写指南同策略：优先读磁盘 `docs/guides/task-manual.md`（便于热更），
-/// 缺失时回退到编译期嵌入的副本，避免 404。
+/// 缺失时回退到编译期嵌入的副本，避免 404。`attachment` 触发保存对话框。
 pub async fn task_manual(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Response, ApiError> {
@@ -841,7 +842,7 @@ pub async fn task_manual(
 /// GET /api/docs/http-login-guide — 直连请求登录使用指南
 ///
 /// 与其余指南同策略（磁盘优先、嵌入兜底）。前端直连面板与配置向导的
-/// 「打开完整使用文档」入口指向本端点。
+/// 「打开完整使用文档」入口指向本端点，访问 URL 即弹出保存对话框。
 pub async fn http_login_guide(
     State(config): State<Arc<dyn crate::config::ConfigApi>>,
 ) -> Result<Response, ApiError> {

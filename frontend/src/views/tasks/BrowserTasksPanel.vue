@@ -159,7 +159,7 @@ function closeEditor() { void t.closeTaskEditor(); }
           <div class="help-tip">
             <span>想自动生成步骤？可用 <b>任务录制器</b> 在登录页点选元素自动生成任务。</span>
             <a href="/api/tools/task-recorder.user.js" class="btn btn-sm" title="下载录制器脚本">安装录制器</a>
-            <a href="/api/docs/task-writing-guide" target="_blank" class="btn btn-sm" title="查看编写指南">编写指南</a>
+            <a href="/api/docs/task-writing-guide" class="btn btn-sm" title="下载编写指南">编写指南</a>
             <router-link :to="{ name: 'tasks-ai' }" class="btn btn-sm" title="用 AI 描述生成任务">用 AI 生成</router-link>
           </div>
           <p class="hint">OCR 相关设置已移至 <router-link :to="{ name: 'settings-tasks' }">设置 · 任务与环境</router-link>。</p>
