@@ -1,6 +1,76 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0”。
+
+## v5.0.0（2026-09-18 正式版发布）
+
+自 `v5.0.0-alpha.10`（`fb5240b`）起共 85 个提交，逐项记录见下方各「开发中」条目（保留原文不改写，按日期倒序）。本次发版只做版本与文档同步，无功能代码改动。
+
+### 版本提升
+
+- 主程序版本由 `5.0.0-alpha.10` 提升为 `5.0.0`，同步 `Cargo.toml`、`Cargo.lock`、`frontend/package.json`、`frontend/package-lock.json`、`openapi.json`（`info.version`，路径表未变）。
+- 引用版本号的文档同步：`README.md`（Docker 固定版本示例 `ghcr.io/misyra/campus-auth-rs:v5.0.0`）、`docker/README.md`、`docs/guides/user-guide.md`、`AGENTS.md`、`docs/plan-next.md`（当前活跃改为 `v5.0.0`，章节标题「alpha.8 之后」改为「v5.0.0 之后」）、本文件头。
+- `docs/updatelog.md` 的「尚未发布（开发中）」段落冻结为 `## v5.0.0（2026-09-18）` 发布章节，按不兼容变更 / 新功能 / 体验 / 性能 / 修复 / Docker 部署分节。经 PowerShell 复刻 `release.yml:197` 的 awk 提取逻辑验证：`v5.0.0` 提取到该章节且不含相邻的 `v5.0.0-alpha.10` 正文，`v5.0.0-alpha.10` 仍提取 19 行不变（前缀边界判定正确）。
+- Python Worker 版本独立固定为 `1.0.0`，不随本次提升变动。
+
+### 文档修正
+
+- **`README.md` 使用说明的「重定向模式」表述与实现不符（事实性错误）**：原文称 `trigger_url`「非空即重定向模式」，漏掉「`auth_url` 与 `trigger_url` 均为空时按重定向登录」这条主路径（`5d6f962` 引入的默认行为），按字面理解会让新用户误以为留空不是重定向。改为按 `ProfileSnapshot::uses_redirect_login`（`src/config/runtime.rs:86-89`）的实际口径描述：填网址即直接使用、留空即跟随重定向，`trigger_url` 非空时兼容旧版显式重定向语义并以触发地址优先、须为明文 `http`。
+- **`README.md` 新增「登录方式」说明**：补上 `browser` / `http` 二选一与直连请求的指引；「特性」列表补入正式版主推能力——**直连请求登录**（免 Python / 免浏览器）、**方案导入导出**（凭据不随包导出）、**运行模式预设**，此前列表停留在 alpha.10 时期口径。
+- **`docs/updatelog.md` 顶部说明保留原样**：仍以「不迁移或改写此前的历史记录」为口径，发布章节与历史章节并排。
+
+### 文案修正（录制器与教程指引）
+
+- **「任务录制器」的描述高估了能力（5 处）**：录制器实际不产出任务，而是把点选的元素整理成一段 **AI 提示词**，须复制给大模型生成任务 JSON（`resources/tools/task-recorder.user.js:1365-1367` 与 `:2759` 自身即为此口径）。以下位置原称「自动生成任务」，会让用户以为点完即可得到任务：
+  - `frontend/src/views/tasks/BrowserTasksPanel.vue`：「想自动生成步骤？可用 任务录制器 在登录页点选元素自动生成任务」→ 补上「复制 AI 提示词发给大模型」这一步。
+  - `frontend/src/views/settings/TaskEnvironmentSettings.vue`（录制器卡片的产品说明）：原文「自动生成任务步骤」同上改正。
+  - `resources/tools/task-recorder.user.js` 的 `@description`（Tampermonkey 安装页可见）：原「自动生成任务 JSON 或结构化文档」，改为「整理成 AI 提示词，交给大模型生成任务 JSON」——且「结构化文档」这个出口并不存在。
+  - 同文件面板副标题「选取元素，生成任务配置」→「选取元素，生成 AI 提示词」。
+  - 同文件帮助说明的步骤类型表：三处「导出为 X」改为「整理为 X」（录制器不导出任务）；并补回运营商行丢失的 `📶` 图标（原文 `<td> 运营商</td>`）。
+- **`docs/guides/task-manual.md` 与 `docs/guides/user-guide.md` 的录制器流程漏了 AI 环节**：原第 5 步写「结束录制后将生成的步骤保存为任务」，直接跳过了「复制 AI 提示词 → 交给大模型 → 得到 JSON → 导入」这一必经链路。两处均补为完整步骤，并注明也可用内置的「AI 生成浏览器任务」页完成生成。
+- **`AiTaskView.vue` 的排障指引指向了不存在的内容（两处）**：① 原文说「按照**视频教程**操作」，但全仓没有任何视频地址（`git grep 视频教程` 零命中），用户照做必然找不到；② 链接写 `设置 → 任务`，与实际 Tab 名「任务与环境」不符。现改为指向真实的使用教程视频与正确页面。
+- **`frontend/src/views/settings/TaskEnvironmentSettings.vue` 按钮文案与同页说明自相矛盾**：按钮原写「导出编写指南」，而下方说明写「点击即下载」——`77269e6` 已把 `/api/docs/*` 三端点统一为 `attachment` 下载语义，按钮改为「下载编写指南」。
+- **`docs/guides/user-guide.md` 残留旧术语**：`:139` 的「自动执行活跃任务」改为「执行当前方案绑定的浏览器任务」（`bfe7f52` 起启用任务已按方案绑定，`active_task` 语义即当前方案绑定，任务页已无全局启用态）。
+
+### 新增（教程与作者入口）
+
+- **「关于」页新增 B 站主页入口**：`https://space.bilibili.com/5608024`，链接与使用教程视频集中在 `frontend/src/utils/constants.ts` 的 `BILIBILI_SPACE_URL` / `TUTORIAL_VIDEO_URL` 单一事实源，避免多处各写一份地址而漂移。
+- **使用教程视频入口放到任务页**：任务页「JSON 配置说明」的帮助条新增「使用教程」按钮（与「安装录制器」并列，`BrowserTasksPanel.vue`）——用户正是在这里装录制器、需要看怎么用。另在「设置 · 任务与环境」的录制器卡片、AI 生成页的排障提示各有一处入口。
+- **视频链接去掉了分享追踪参数**：原分享链接含 `share_source=copy_web&vd_source=…`，只保留 `t=209`（03:29 起播，即录制器演示片段）。
+- `IconApp` 注册表新增 `bilibili`（电视机身 + 天线 + 双眼，示意品牌轮廓，用于 B 站入口着色 `#fb7299`）与 `external-link`（通用外链图标，供后续入口复用）。
+- `frontend/src/styles/pages/about.css`：`.about-links` 补 `flex-wrap: wrap`（链接由 3 个增至 4 个，窄屏不换行会溢出），新增 `.bilibili-link` 的图标着色。
+
+### 主题色默认改为黑白单色
+
+**背景**：用户要求「主题与配色」的主题色改为「日间黑、夜间白」。原默认是青色（深色 `#22d3ee` / 浅色 `#0891b2`）。
+
+- **默认主题色改为单色哨兵 `MONO_ACCENT`（`"mono"`）**（`frontend/src/utils/constants.ts`）：主题色只存一个 hex，而 `theme` 可为 light/dark/auto，**纯 hex 无法同时表达「日间黑、夜间白」**（`auto` 下还要随系统实时切）。故新增哨兵值，由 `useAppearance::resolveAccentColor(isLight)` 在所有消费点解析为 `#000000` / `#ffffff`。哨兵不是合法 CSS 颜色，任何直接当色值用的位置都必须先解析。
+- **`applyAppearance` 收口解析**（`frontend/src/composables/useAppearance.ts`）：先解析哨兵再做全部派生；`--on-accent` 仍走既有的 `pickOnColor`，单色下自然得到「黑底白字 / 白底黑字」，无需特判。
+- **单色下悬停色单独取值**：`adjustColor` 会把通道钳制到 0..255，纯黑再 `-20` 仍是纯黑，主按钮悬停将失去颜色反馈；故单色按主题**反向**调亮度（浅色 `+31` → `#1f1f1f`、深色 `-25` → `#e6e6e6`），非单色维持原 `-20`。
+- **派生色跟随，但发光与描边中性化**（用户口径）：单色下 `--shadow-accent` 改中性（浅色 `rgba(0,0,0,.15)`、深色 `rgba(255,255,255,.12)`），`--border-accent` / `-hover` / `-strong` 同样按 `border_intensity` 取中性灰；**非单色必须显式 `removeProperty` 清除内联值**，否则内联样式（优先级高于样式表）会残留，用户切回彩色主题色时描边不恢复青蓝。
+- **`base.css` 的静态默认同步**：根（深色）与 `[data-theme="light"]` 两处的 `--accent` / `--accent-hover` / `--accent-rgb` / `--border-accent*` 全部改为黑白中性值。这些是**首屏兜底**（`theme-init.js` 只设 `data-theme`，其余交给本文件），不同步会导致首帧闪一下青色后被 JS 覆盖。
+- **色板新增「黑白（日间黑 / 夜间白）」项**（`ACCENT_COLORS` 首位）：色块背景经 `swatchBackground` 解析为当前主题下的实际色（浅色显示黑、深色显示白），即「选了它现在会得到什么」。未用「左黑右白对半块」：勾选图标必然落在同色那一半而看不清。
+- **修复色块勾选图标不可见（既有缺陷，4 个色块）**：勾选原继承文字色，深色主题下 `--text-primary` 是白色，叠在纯白色块（单色的夜间态、背景色的「纯白」`#f8fafc`）上完全看不见。现按色块实际底色经 `pickOnColor` 取对比色。
+- **修复开关开态旋钮可能隐形**：旋钮用「永远白色」的 `--text-on-accent`，叠在 accent 轨道上；单色深色下轨道是纯白 → 白钮白轨。新增 `--toggle-knob-active`（**仅单色时注入**，避免改变其余强调色观感），label 型与按钮型两处旋钮同步引用。
+- **修复原生 select 聚焦箭头残留青色**（`frontend/src/styles/components/form.css`）：两处内联 SVG 的 `stroke` 写死了旧强调色（深 `%2322d3ee` / 浅 `%230891b2`），改为白 / 黑。data URL 无法引用 CSS 变量，故用户改用彩色主题色时箭头仍是黑白（仅聚焦提示，可接受；已写入注释）。
+- **`resolvedAccent` 用 ref 暴露**：模板若直接调读 `matchMedia` 的 `getEffectiveTheme()` 只能拿到求值当时的快照，`theme=auto` 下系统切换深浅色不会触发重渲染，色块与色值文字会停在旧值。改由 `applyAppearance` 统一写入 ref（`useUi.ts:373` 初始化时即调用），模板读它自动订阅。
+- **`resetCard('theme')` 与 `cardDirty('theme')` 无需改动**：两者都按字段值与 `DEFAULT_APPEARANCE` 比较，`accent_color` 默认值换成哨兵后自动生效（选过彩色的用户点「恢复默认」会正确回到黑白）。
+- **既有用户不受影响**：`loadStored` 浅合并只在**键缺失**时用默认值，已存 `#22d3ee` 等值的用户保持其原选择；仅新装与「恢复默认」后为黑白。
+
+### 验证
+
+- `npm run typecheck`（`vue-tsc -p tsconfig.app.json --noEmit`）零错误；`npm test` **212 passed / 23 files** 全绿。
+- 主题色解析逻辑经 node 实跑核对（`vite-node` 临时脚本，跑完即删）：默认（mono）+ 浅色 → `accent=#000000 hover=#1f1f1f on-accent=#ffffff`；默认（mono）+ 深色 → `accent=#ffffff hover=#e6e6e6 on-accent=#0f172a`；青色（既有选择）→ `accent=#22d3ee`，派生不受影响。
+- **未做浏览器实测**：`agent-browser` 在本机起不来（多次 `open` 超时、无 chrome 进程），故主题色的实际渲染（色块、开关旋钮、描边/发光观感）**未经真实浏览器确认**，仅由上条逻辑核对与 `base.css` 静态值一致覆盖到「变量取值正确」。建议发版前人工目视过一遍浅色/深色两态的外观页。
+- `cargo build --release`（含前端嵌入）通过，产物内已含前端资源；`cargo fmt --check` 通过、`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告、`cargo test --features no-embed --lib` **908 passed / 0 failed / 1 ignored**。
+- 发布说明提取口径复验：PowerShell 复刻 `release.yml:197` 的 awk 逻辑，`v5.0.0` 提取 89 行且不含 `v5.0.0-alpha.10` 正文，`v5.0.0-alpha.10` 仍为 19 行。
+
+### 说明
+
+- 版本提升本身**未改动任何功能代码、IPC 契约、配置 schema 与 `openapi.json` 路径表**；其后的「文案修正」「新增（教程与作者入口）」「主题色默认改为黑白单色」三节含前端文案、样式、图标注册表与外观默认值的改动，均为用户可见变化，已同步写入 `docs/updatelog.md` 的 `v5.0.0` 章节。
+- 注意：主题色默认值改动使 `DEFAULT_APPEARANCE.accent_color` 由 `#22d3ee` 变为哨兵 `mono`，属**外观默认值变更**，但不影响已存 localStorage 的用户（浅合并且仅补缺失键）。
+- 已知问题（`docs/known-issues.md`，含 E2 定时任务手动运行的 toast 语义、E3 任务卡「上次」结果不即时刷新）**有意不写入发布说明**，仅在已知问题清单中保留。
+- 未在本轮处理（记此备查）：`docs/changelog.md` 中 80 余个历史条目标题仍带「开发中（日期 …）」前缀，属已合入条目，保留以维持按日期倒序的可追溯性，不做批量改写。
 
 ## 开发中（2026-09-18 登录网址单输入 + 重定向离线误判兜底）
 
