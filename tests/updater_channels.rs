@@ -30,6 +30,50 @@ fn ensure_no_proxy() {
 /// 64 位 hex 摘要（格式合法即可，检查路径不校验内容与实物一致性）
 const FAKE_SHA: &str = "a0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/// 当前 crate 版本的核心段（major/minor/patch），编译期常量。
+///
+/// mock 的远程版本一律据此派生而**不写死**：`check_update` 只在 `remote > current`
+/// 时返回 `Some`，写死的远程版本会在版本号提升到同一号时失效——v5.0.0 提升时即发生
+/// （mock 的远程正式版是 5.0.0、当前版本也是 5.0.0 → `remote > current` 为假 →
+/// 返回 `None` → 三平台稳定失败）。
+fn current_version_core() -> (u64, u64, u64) {
+    let full = env!("CARGO_PKG_VERSION");
+    let core = full.split('-').next().unwrap_or(full);
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+/// 远程正式版 tag：当前版本 patch +1，保证严格高于当前版本
+fn remote_stable_tag() -> String {
+    let (major, minor, patch) = current_version_core();
+    format!("{major}.{minor}.{}", patch + 1)
+}
+
+/// 远程预发布 tag：当前版本 minor +1 的 beta.1。
+/// minor 更大即保证高于 `remote_stable_tag()`（与 patch 无关），
+/// 故「全通道取最高」与「测试版取最高」都稳定选中它。
+fn remote_prerelease_tag() -> String {
+    let (major, minor, _) = current_version_core();
+    format!("{major}.{}.0-beta.1", minor + 1)
+}
+
+/// 旧的预发布 tag：当前版本的 alpha.7（低于当前版本）。
+/// 用于验证「列表首位不是 semver 最大」——它是列表第一个却是最低版本。
+fn remote_old_prerelease_tag() -> String {
+    let (major, minor, patch) = current_version_core();
+    format!("{major}.{minor}.{patch}-alpha.7")
+}
+
+/// 远高于当前版本的 tag（major +4）：草稿条目与镜像清单版本共用
+fn remote_far_tag() -> String {
+    let (major, _, _) = current_version_core();
+    format!("{}.0.0", major + 4)
+}
+
 /// 测试侧的当前平台键，与生产侧 `check::CURRENT_PLATFORM_KEY` 的 cfg 矩阵一致
 fn current_platform_key() -> &'static str {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -86,13 +130,16 @@ fn release_json(port: u16, tag: &str, prerelease: bool, draft: bool) -> serde_js
 
 /// 回环 mock：按路径返回 GitHub API 形态响应
 ///
-/// - `GET /repos/o/r/releases/latest` → 单发布 v5.0.0（正式）
-/// - `GET /repos/o/r/releases` → 列表：alpha.7（列表首位/最新创建）、5.0.0、
-///   5.1.0-beta.1、v9.0.0（draft，应被排除）——顺序有意与 semver 逆序，
+/// 各版本一律由当前 crate 版本派生（见上方 `remote_*_tag` 系列），不写死具体号——
+/// 「远程版本高于当前版本」是本文件的共同前提，写死会在版本号提升到同一号时集体失效。
+///
+/// - `GET /repos/o/r/releases/latest` → 单发布（正式，patch +1）
+/// - `GET /repos/o/r/releases` → 列表：旧 alpha（列表首位）、正式（patch +1）、
+///   beta（minor +1）、更高版本的 draft（应被排除）——顺序有意与 semver 逆序，
 ///   用于验证选取按 semver 最大而非列表首位
-/// - `GET /repos/empty/r/releases/latest` / `.../releases` → 仅正式版 v5.0.0
+/// - `GET /repos/empty/r/releases/latest` / `.../releases` → 仅正式版
 ///   （测试版通道无预发布时的回退数据源）
-/// - `GET /mirror/latest.json` → 自定清单格式 v9.9.9（非 GitHub 来源回退数据源）
+/// - `GET /mirror/latest.json` → 自定清单格式（major +4，非 GitHub 来源回退数据源）
 /// - `GET *.sha256` → 64 位 hex 摘要文本
 ///
 /// 返回守卫（COR-7）：Drop 时置停止标志并回连唤醒阻塞的 accept，join 监听
@@ -144,27 +191,27 @@ fn spawn_github_mock() -> GithubMockGuard {
                             Some(("fake-payload".into(), "application/zip"))
                         }
                         "/repos/o/r/releases/latest" | "/repos/empty/r/releases/latest" => Some((
-                            release_json(port, "5.0.0", false, false).to_string(),
+                            release_json(port, &remote_stable_tag(), false, false).to_string(),
                             "application/json",
                         )),
                         "/repos/o/r/releases" => Some((
                             serde_json::json!([
-                                release_json(port, "5.0.0-alpha.7", true, false),
-                                release_json(port, "5.0.0", false, false),
-                                release_json(port, "5.1.0-beta.1", true, false),
-                                release_json(port, "9.0.0", false, true),
+                                release_json(port, &remote_old_prerelease_tag(), true, false),
+                                release_json(port, &remote_stable_tag(), false, false),
+                                release_json(port, &remote_prerelease_tag(), true, false),
+                                release_json(port, &remote_far_tag(), false, true),
                             ])
                             .to_string(),
                             "application/json",
                         )),
                         "/repos/empty/r/releases" => Some((
-                            serde_json::json!([release_json(port, "5.0.0", false, false)])
+                            serde_json::json!([release_json(port, &remote_stable_tag(), false, false)])
                                 .to_string(),
                             "application/json",
                         )),
                         "/mirror/latest.json" => Some((
                             serde_json::json!({
-                                "version": "9.9.9",
+                                "version": remote_far_tag(),
                                 "platforms": {
                                     // 自定清单按平台键精确查找：键必须与编译期
                                     // CURRENT_PLATFORM_KEY 一致，否则 check_update
@@ -250,7 +297,7 @@ fn read_last_check(base: &Path) -> serde_json::Value {
     serde_json::from_str(&raw).expect("状态文件应为合法 JSON")
 }
 
-/// 正式版通道：直取 releases/latest 单发布 v5.0.0（高于当前 alpha 版）
+/// 正式版通道：直取 releases/latest 单发布（高于当前版本）
 #[tokio::test]
 async fn stable_channel_fetches_releases_latest() {
     ensure_no_proxy();
@@ -264,11 +311,14 @@ async fn stable_channel_fetches_releases_latest() {
     )
     .await;
     let info = svc.check_update().await.expect("检查不应失败");
-    assert_eq!(info.expect("5.0.0 高于当前 alpha").latest_version, "5.0.0");
+    assert_eq!(
+        info.expect("远程正式版应高于当前版本").latest_version,
+        remote_stable_tag()
+    );
 }
 
-/// 测试版通道：仅预发布中取 semver 最高（列表首位 alpha.7 是最新创建的，
-/// 但 5.1.0-beta.1 版本更高；draft 9.0.0 排除）
+/// 测试版通道：仅预发布中取 semver 最高（列表首位是最旧的 alpha，
+/// 但远程 beta 版本更高；draft 条目排除）
 #[tokio::test]
 async fn prerelease_channel_picks_highest_semver() {
     ensure_no_proxy();
@@ -283,8 +333,8 @@ async fn prerelease_channel_picks_highest_semver() {
     .await;
     let info = svc.check_update().await.expect("检查不应失败");
     assert_eq!(
-        info.expect("5.1.0-beta.1 高于当前 alpha").latest_version,
-        "5.1.0-beta.1"
+        info.expect("远程 beta 应高于当前版本").latest_version,
+        remote_prerelease_tag()
     );
 }
 
@@ -303,8 +353,8 @@ async fn all_channel_picks_highest_overall() {
     .await;
     let info = svc.check_update().await.expect("检查不应失败");
     assert_eq!(
-        info.expect("5.1.0-beta.1 高于当前 alpha").latest_version,
-        "5.1.0-beta.1"
+        info.expect("远程 beta 应高于当前版本").latest_version,
+        remote_prerelease_tag()
     );
 }
 
@@ -323,8 +373,8 @@ async fn prerelease_channel_falls_back_when_no_prerelease() {
     .await;
     let info = svc.check_update().await.expect("检查不应失败");
     assert_eq!(
-        info.expect("回退后 5.0.0 高于当前 alpha").latest_version,
-        "5.0.0"
+        info.expect("回退后的远程正式版应高于当前版本").latest_version,
+        remote_stable_tag()
     );
 }
 
@@ -344,8 +394,8 @@ async fn non_github_source_falls_back_to_single_manifest() {
     .await;
     let info = svc.check_update().await.expect("检查不应失败");
     assert_eq!(
-        info.expect("镜像清单 9.9.9 高于当前").latest_version,
-        "9.9.9"
+        info.expect("镜像清单版本应高于当前").latest_version,
+        remote_far_tag()
     );
 }
 
@@ -365,12 +415,12 @@ async fn check_records_last_check_state_on_success() {
     assert!(svc.check_update().await.expect("检查不应失败").is_some());
     let state = read_last_check(dir.path());
     assert!(!state["last_check_at"].as_str().unwrap().is_empty());
-    assert_eq!(state["latest_version"], "5.1.0-beta.1");
+    assert_eq!(state["latest_version"], remote_prerelease_tag());
     assert_eq!(state["has_update"], true);
     assert_eq!(state["error"], "");
     // last_check_state 读取器与文件内容一致
     let read_back = svc.last_check_state().expect("应能回读状态");
-    assert_eq!(read_back.latest_version, "5.1.0-beta.1");
+    assert_eq!(read_back.latest_version, remote_prerelease_tag());
 }
 
 /// 检查失败（源不可达）同样刷新状态文件并记录原因，时间照常更新
