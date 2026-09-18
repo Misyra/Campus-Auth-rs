@@ -40,7 +40,15 @@ pub async fn get_history(
 ) -> Result<Json<Value>, ApiError> {
     let to = Local::now();
     let from = to - Duration::days(30);
-    let mut history = history.query(from, to).await?;
+    // 只取最近 N 条的场景走 query_latest：实现方按天倒序（最新在前）逐天整读并排序，
+    // 累计条数达到 limit 即停止，不再触碰更早的日期文件，因此成本与 limit 相关而非与
+    // 30 天历史总量相关（此前全量读取后再截断，20k 条时单请求 CPU 达 10 ms、延迟
+    // 61 ms，见 docs/reports/perf-profile-2026-09-18.md）。
+    // 未传 limit 时仍需全量（保持既有契约），走 query。
+    let mut history = match params.limit {
+        Some(limit) => history.query_latest(from, to, limit).await?,
+        None => history.query(from, to).await?,
+    };
 
     // 按 limit 截断，保留最近的 N 条（列表已按时间升序排列）
     if let Some(limit) = params.limit {
@@ -139,6 +147,22 @@ mod tests {
             _to: chrono::DateTime<Local>,
         ) -> Result<Vec<LoginHistoryEntry>, std::io::Error> {
             Ok(self.0.lock().unwrap().entries.clone())
+        }
+
+        /// 与真实实现同语义：取末尾 limit 条（内存实现无需短路读取）
+        async fn query_latest(
+            &self,
+            _from: chrono::DateTime<Local>,
+            _to: chrono::DateTime<Local>,
+            limit: usize,
+        ) -> Result<Vec<LoginHistoryEntry>, std::io::Error> {
+            let entries = self.0.lock().unwrap().entries.clone();
+            let len = entries.len();
+            Ok(if len > limit {
+                entries.into_iter().skip(len - limit).collect()
+            } else {
+                entries
+            })
         }
 
         async fn clear(&self) -> Result<(), std::io::Error> {

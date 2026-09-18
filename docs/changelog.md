@@ -23,6 +23,49 @@
 - `cargo test --lib config::runtime::tests --features no-embed`：5 passed；`cargo test --lib monitor:: --features no-embed`：58 passed；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告。
 - `frontend npm run build` 通过，Vitest 23 files / 212 tests 全通过；真实 Rust 本地实例 + Playwright/Chromium 验证登录网址留空、填写、重新清空、自定义触发地址展开四条交互均通过，且无页面脚本错误。
 
+## 开发中（2026-09-18 性能：/api/history 改为按天倒序早停，消除随历史量线性增长的解析开销）
+
+性能分析（见 `docs/reports/perf-profile-2026-09-18.md`）实测发现：`GET /api/history` 先读 30 天**全量**记录，再按 `limit` 截断，导致 `limit` 对 I/O 与解析量**完全没有节流作用**——前端只需 30 条，服务端却解析全部历史。
+
+### 修复（性能缺陷）
+
+- **`HistoryStore` 新增 `query_latest(from, to, limit)`**（`src/login/history.rs`）：语义等价于 `query` 后取末尾 `limit` 条，但实现**按天倒序**（最新在前）逐天读取，累计条数达到 `limit` 即停止，不再触碰更早的日期文件。成本由「最新一天的文件规模」决定，而非与 30 天历史总量相关。
+  - **刻意不给默认实现**：该方法存在的唯一理由就是省掉全量读取，若提供「先全量再截断」的默认实现，实现方漏覆写即静默退化为原性能问题，故由编译器强制实现（仅 `LoginHistoryService` 与测试 `MockHistory` 两处实现）。
+  - **必须显式按时间排序，不得依赖物理文件顺序**：`query` 末尾本就有 `sort_by_key`，即代码库的既有口径。`record` 每条新开 tokio `File`，而 tokio `File` 内含写缓冲、drop 时仅**尽力**异步 flush，紧密连续写入时落盘先后可能不同于调用顺序。天与时间的对应是可靠的（`record` 以 `entry.timestamp.date_naive()` 选文件），但**同一文件内不可假设物理顺序等于时间顺序**。
+  - 空行与损坏行沿用 `query` 的静默跳过策略，且**不占用** `limit` 配额——否则损坏行会挤占返回条数，与「全量后截断」语义不一致。
+- **handler 按 `limit` 是否存在分派**（`src/web/routes/history.rs:48`）：传 `limit` 走 `query_latest`，不传仍需全量（保持既有契约）。分页路径与响应格式**未改动**，对外契约不变（`openapi.json` 路由表未变，`openapi_json_matches_route_table` 用例仍通过）。
+- **新增 9 个单元测试**覆盖：与「全量取尾」的等价性（核心不变式）、升序性、跨天取数、损坏行不吃配额、`limit=0`/超总量/空目录边界、单日大文件、**多天 × 多文件真实量级（30 天 × 167 条）**、**物理行序乱序**。
+
+### 过程记录：首版实现不可靠，已由测试捕获并改正
+
+首版实现为「从文件尾部按 64 KiB 分块倒读、凑够 `limit` 即停」，**该实现基于一个错误假设**：文件物理顺序等于时间顺序。
+
+- **症状**：新增的 3 个用例在**全量并行**测试下约 1/5 概率失败（`结果必须按时间升序`），单独运行该模块却始终通过。非确定性使问题极易被误判为「偶发」。
+- **根因**：`record` 每条记录新开一个 tokio `File` 写入后立即 drop，而 tokio `File`（`src/fs/file.rs`）内含 `max_buf_size` 写缓冲，drop 时是**尽力异步 flush**；紧密循环写入同一文件时，物理落盘顺序可能与调用顺序不同。倒读早停把「物理靠后」误当作「更新」，因而漏选或错选记录。
+- **修正**：改为按天倒序 + 单日文件**整读后排序**。天级早停仍然有效（最新一天读满 `limit` 即停），因此性能收益保留；同时新增 `test_query_latest_handles_physically_unsorted_file`，以**刻意乱序写入**把该假设钉死为可确定复现的失败条件，不再依赖并发碰运气。
+- **教训**：低概率非确定性失败必须查到根因，不能以「重跑通过」收尾——该问题只在并行全量下暴露，正是 CI 最易漏判的形态。
+
+### 实测效果（A/B 同一脚本、同一数据，每档 300 次请求累加以规避 15.6 ms 量化误差）
+
+| 累积历史条数 | 修复前 CPU | 修复后 CPU | 修复前延迟 | 修复后延迟 |
+|---|---|---|---|---|
+| 90 | 0.83 ms | 0.10 ms | 5.82 ms | 1.69 ms |
+| 990 | 0.94 ms | 0.00 ms | 7.91 ms | 0.49 ms |
+| 5 010 | 3.23 ms | 0.00 ms | 20.35 ms | 0.79 ms |
+| 20 010 | **10.16 ms** | **0.26 ms** | **61.27 ms** | **1.84 ms** |
+
+修复后 990 → 20 010 条之间 CPU 基本持平，**不再随历史总量增长**；20 010 条时延迟从 61 ms 降到 1.8 ms。正确性经逐条比对确认：20 010 条下全量返回与落盘一致、各 `limit` 均等于全量取尾且升序。
+
+### 验证
+
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets -- -D warnings` 零警告
+- `cargo test --lib`：**899 passed / 0 failed**（history 模块 23 例，含新增 9 例）；并**连续 12 次全量并行**运行确认非确定性已消除
+- `cargo test --test login_chain`（读 `/api/history` 的真实链路）：**5 passed / 0 failed**
+
+### 说明
+
+- 性能报告早期版本中该缺陷的数字（10.05 ms / 60.88 ms）来自**字段写错的合成数据**（用了 `duration_ms`，而 `LoginHistoryEntry` 要求 `duration_secs` 且无 `serde(default)`，导致每行反序列化失败、接口返回空数组）。已用与结构体严格对齐的数据重新测量并替换，趋势与结论方向不变。报告中同时标注了该修正原因。
+
 ## 开发中（2026-09-18 直连请求渠道缺口修复：HTTPS 证书可配、UA 兜底、响应头回显、保存校验体积）
 
 对直连请求渠道（`src/login/http_login.rs` + `ProfileData.http_*`）做缺口复核后修复四项；复核结论与剩余待办（Cookie/两步门户、判定只看响应体、方法仅 GET/POST 等）见 `docs/plan-next.md` 的「直连请求渠道待办」。

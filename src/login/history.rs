@@ -83,6 +83,21 @@ pub trait HistoryStore: Send + Sync {
         to: DateTime<Local>,
     ) -> Result<Vec<LoginHistoryEntry>, std::io::Error>;
 
+    /// 查询日期区间 `[from, to]` 内**最新的 `limit` 条**记录，按时间升序排列。
+    ///
+    /// 语义等价于 `query(from, to)` 后保留末尾 `limit` 条，但实现方**应**利用
+    /// 「只需最近 N 条」这一约束做短路读取，避免为取几条而解析整个区间的历史。
+    ///
+    /// 刻意不提供默认实现：该方法存在的唯一理由就是省掉全量读取，若给一个
+    /// 「先全量再截断」的默认实现，实现方漏覆写即静默退化为原始性能问题
+    /// （见 `docs/reports` 中 `/api/history` 全量读取的实测记录），故由编译器强制实现。
+    async fn query_latest(
+        &self,
+        from: DateTime<Local>,
+        to: DateTime<Local>,
+        limit: usize,
+    ) -> Result<Vec<LoginHistoryEntry>, std::io::Error>;
+
     /// 清空全部历史
     async fn clear(&self) -> Result<(), std::io::Error>;
 }
@@ -95,6 +110,15 @@ impl HistoryStore for LoginHistoryService {
         to: DateTime<Local>,
     ) -> Result<Vec<LoginHistoryEntry>, std::io::Error> {
         LoginHistoryService::query(self, from, to).await
+    }
+
+    async fn query_latest(
+        &self,
+        from: DateTime<Local>,
+        to: DateTime<Local>,
+        limit: usize,
+    ) -> Result<Vec<LoginHistoryEntry>, std::io::Error> {
+        LoginHistoryService::query_latest(self, from, to, limit).await
     }
 
     async fn clear(&self) -> Result<(), std::io::Error> {
@@ -186,6 +210,87 @@ impl LoginHistoryService {
         Ok(results)
     }
 
+    /// 查询日期区间 `[from, to]` 内最新的 `limit` 条记录（升序返回）
+    ///
+    /// 与 [`Self::query`] 的区别只在**枚举范围**：不读取整个区间的全部日期文件，
+    /// 而是**按天倒序**（最新在前）逐天读取与解析，累计条数达到 `limit` 即停止，
+    /// 因此不需触碰更早的日期文件。
+    ///
+    /// 与 `query(from, to)` 后取末尾 `limit` 条语义等价（`query` 按升序返回，
+    /// 末尾即最新），且与之同样**显式按时间排序**、不假设物理文件顺序。
+    ///
+    /// 为什么不能像「从文件尾部倒读」那样在文件内早停：追加写**不保证**物理顺序
+    /// 等于时间顺序——`record` 每条新开 tokio `File`，而 tokio `File` 内含写缓冲、
+    /// drop 时仅**尽力**异步 flush，紧密连续写入时落盘先后可能不同于调用顺序
+    /// （并行测试下已实际复现非确定性乱序）。`query` 正是因此显式排序而非
+    /// 依赖顺序（见其末尾 `sort_by_key`），本函数沿用同一口径。
+    /// 因此单日文件必须整读后排序，不可依赖「尾部即最新」。
+    ///
+    /// 天与时间的顺序是可靠的：`record` 以 `entry.timestamp.date_naive()` 选择
+    /// 文件，故某日文件内的记录时间戳必落于该日，跨天的先后关系与日期顺序一致。
+    ///
+    /// 空行与损坏行沿用 `query` 的静默跳过策略，**不占用** `limit` 配额——
+    /// 否则损坏行会挤占返回条数，与「全量后截断」的结果不一致。
+    ///
+    /// `limit == 0` 时不读任何文件，直接返回空。
+    pub async fn query_latest(
+        &self,
+        from: DateTime<Local>,
+        to: DateTime<Local>,
+        limit: usize,
+    ) -> Result<Vec<LoginHistoryEntry>, std::io::Error> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let dir = self.history_dir();
+        if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
+            return Ok(Vec::new());
+        }
+        // 按天倒序（最新在前）
+        let mut days = date_range(from.date_naive(), to.date_naive());
+        days.reverse();
+
+        // 逐天收集（新的日期在前），凑够 limit 即停
+        let mut groups: Vec<Vec<LoginHistoryEntry>> = Vec::new();
+        let mut total = 0usize;
+        for day in days {
+            let path = self.file_for(day);
+            let mut entries = match read_all_entries(&path).await {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "打开登录历史文件失败，跳过该日期"
+                    );
+                    continue;
+                }
+            };
+            if entries.is_empty() {
+                continue;
+            }
+            // 单日内部按时间升序：不假设物理追加顺序
+            entries.sort_by_key(|e| e.timestamp);
+            total += entries.len();
+            groups.push(entries);
+            if total >= limit {
+                break;
+            }
+        }
+
+        // groups 为「新日期在前」，逐组反序拼接得到全局升序
+        let mut result: Vec<LoginHistoryEntry> = Vec::with_capacity(limit.min(total.max(1)));
+        for group in groups.into_iter().rev() {
+            result.extend(group);
+        }
+        // 末尾即最新：超出 limit 的部分是最早的，从头丢弃
+        if result.len() > limit {
+            result.drain(..result.len() - limit);
+        }
+        Ok(result)
+    }
+
     /// 清空全部历史文件（删除目录下所有 `*.jsonl`）
     pub async fn clear(&self) -> Result<(), std::io::Error> {
         let dir = self.history_dir();
@@ -239,6 +344,35 @@ impl LoginHistoryService {
         }
         Ok(removed)
     }
+}
+
+/// 读取单个历史文件内的全部有效记录（顺序即物理顺序，调用方须自行排序）
+///
+/// 与 [`LoginHistoryService::query`] 相同的解析口径：空行跳过、损坏行静默丢弃
+/// 并留 `debug` 痕迹。文件不存在时返回 `NotFound` 错误，由调用方决定是否忽略。
+///
+/// 单文件是「一天」的粒度，规模有界（正常使用远小于日志文件），因此整读即可；
+/// **不可**改为从尾部倒读早停——追加写不保证物理顺序等于时间顺序
+/// （原因见 [`LoginHistoryService::query_latest`] 文档）。
+async fn read_all_entries(path: &Path) -> Result<Vec<LoginHistoryEntry>, std::io::Error> {
+    let file = tokio::fs::File::open(path).await?;
+    let reader = tokio::io::BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut entries = Vec::new();
+    while let Some(line) = lines.next_line().await? {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<LoginHistoryEntry>(line) {
+            Ok(entry) => entries.push(entry),
+            Err(_) => {
+                // 损坏行静默丢弃会让用户误以为记录丢失，留 debug 痕迹
+                tracing::debug!(path = %path.display(), "登录历史行解析失败，已跳过");
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// 枚举 `[start, end]` 闭区间内的每一天（NaiveDate）
@@ -504,5 +638,372 @@ mod tests {
                 .exists()
         );
         assert!(dir.join("not-a-date.jsonl").exists(), "非日期文件名不清理");
+    }
+
+    // ============ query_latest（按天倒序 + 单日整读排序，凑够即停） ============
+
+    /// 逐条写入 `count` 条记录（时间递增），返回服务
+    async fn seed(svc: &LoginHistoryService, day: NaiveDate, count: usize) {
+        for i in 0..count {
+            let mut e = sample_entry();
+            e.timestamp = chrono::Local
+                .from_local_datetime(
+                    &(day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::seconds(i as i64)),
+                )
+                .unwrap();
+            e.message = format!("m{i}");
+            svc.record(&e).await.unwrap();
+        }
+    }
+
+    /// query_latest 与「query 全量后取末尾 limit 条」语义等价（核心不变式）
+    #[tokio::test]
+    async fn test_query_latest_matches_full_query_tail() {
+        let (_dir, svc) = make_service();
+        let day = d(2025, 7, 9);
+        seed(&svc, day, 50).await;
+
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+
+        let full = svc.query(from, to).await.unwrap();
+        assert_eq!(full.len(), 50);
+        for limit in [1usize, 7, 50, 999] {
+            let latest = svc.query_latest(from, to, limit).await.unwrap();
+            let expect: Vec<_> = full
+                .iter()
+                .skip(full.len().saturating_sub(limit))
+                .map(|e| e.message.clone())
+                .collect();
+            let got: Vec<_> = latest.iter().map(|e| e.message.clone()).collect();
+            assert_eq!(got, expect, "limit={limit} 时应与全量取尾一致");
+        }
+    }
+
+    /// 返回结果必须按时间升序（与 query 契约一致）
+    #[tokio::test]
+    async fn test_query_latest_returns_ascending_order() {
+        let (_dir, svc) = make_service();
+        seed(&svc, d(2025, 7, 9), 20).await;
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+        let rows = svc.query_latest(from, to, 5).await.unwrap();
+        assert_eq!(rows.len(), 5);
+        assert!(
+            rows.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+            "应按时间升序"
+        );
+        // 最新一条应是 m19
+        assert_eq!(rows.last().unwrap().message, "m19");
+    }
+
+    /// 跨天取数：limit 跨越文件边界时，须按「天倒序」优先取更近的日期
+    #[tokio::test]
+    async fn test_query_latest_spans_days_newest_first() {
+        let (_dir, svc) = make_service();
+        seed(&svc, d(2025, 7, 8), 3).await; // 较早
+        seed(&svc, d(2025, 7, 9), 3).await; // 较晚
+
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 8, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+
+        // 取 4 条：应是 7-8 的最后 1 条 + 7-9 的 3 条
+        let rows = svc.query_latest(from, to, 4).await.unwrap();
+        assert_eq!(rows.len(), 4);
+        let days: Vec<_> = rows.iter().map(|e| e.timestamp.date_naive()).collect();
+        assert_eq!(
+            days,
+            vec![d(2025, 7, 8), d(2025, 7, 9), d(2025, 7, 9), d(2025, 7, 9)]
+        );
+        assert!(rows.windows(2).all(|w| w[0].timestamp <= w[1].timestamp));
+    }
+
+    /// 损坏行与空行不占用 limit 配额（否则会挤占返回条数）
+    #[tokio::test]
+    async fn test_query_latest_malformed_lines_do_not_consume_limit() {
+        let (_dir, svc) = make_service();
+        let day = d(2025, 7, 9);
+        seed(&svc, day, 5).await;
+        let path = svc
+            .history_dir()
+            .join(format!("{}.jsonl", day.format("%Y-%m-%d")));
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        f.write_all(b"not json\n\n").await.unwrap();
+        f.sync_all().await.unwrap();
+
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+        let rows = svc.query_latest(from, to, 5).await.unwrap();
+        assert_eq!(rows.len(), 5, "损坏行不得挤占 limit 配额");
+        assert_eq!(rows.last().unwrap().message, "m4");
+    }
+
+    /// limit=0 返回空；目录不存在返回空；limit 超过总量返回全部
+    #[tokio::test]
+    async fn test_query_latest_boundaries() {
+        let (_dir, svc) = make_service();
+        let day = d(2025, 7, 9);
+        seed(&svc, day, 3).await;
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+
+        assert!(svc.query_latest(from, to, 0).await.unwrap().is_empty());
+        assert_eq!(svc.query_latest(from, to, 99).await.unwrap().len(), 3);
+
+        // 空目录
+        let empty = TempDir::new().unwrap();
+        let svc2 = LoginHistoryService::new(empty.path());
+        assert!(svc2.query_latest(from, to, 10).await.unwrap().is_empty());
+    }
+
+    /// 单日大文件（远超读缓冲）下仍须正确取到最新记录
+    ///
+    /// 该用例是「单日文件规模较大」的回归锚点：早期实现曾从文件尾部倒读早停，
+    /// 而追加写不保证物理顺序等于时间顺序，会表现为非确定性乱序。
+    #[tokio::test]
+    async fn test_query_latest_large_single_day_file() {
+        let (_dir, svc) = make_service();
+        let day = d(2025, 7, 9);
+        // 每条 message 约 200B，1200 条约 240 KB，远超 BufReader 默认缓冲
+        for i in 0..1200 {
+            let mut e = sample_entry();
+            e.timestamp = chrono::Local
+                .from_local_datetime(
+                    &(day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::seconds(i as i64)),
+                )
+                .unwrap();
+            e.message = format!("{i:0>180}");
+            svc.record(&e).await.unwrap();
+        }
+        let file = svc
+            .history_dir()
+            .join(format!("{}.jsonl", day.format("%Y-%m-%d")));
+        let size = tokio::fs::metadata(&file).await.unwrap().len();
+        assert!(size > 64 * 1024, "用例前提：文件须超过 64 KiB，实际 {size}");
+
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+
+        let full = svc.query(from, to).await.unwrap();
+        assert_eq!(full.len(), 1200);
+
+        for limit in [1usize, 5, 100, 1199, 1200] {
+            let rows = svc.query_latest(from, to, limit).await.unwrap();
+            assert_eq!(rows.len(), limit.min(1200), "limit={limit}");
+            assert!(
+                rows.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+                "limit={limit} 必须升序"
+            );
+            let expect: Vec<_> = full
+                .iter()
+                .skip(1200 - limit.min(1200))
+                .map(|e| e.timestamp)
+                .collect();
+            let got: Vec<_> = rows.iter().map(|e| e.timestamp).collect();
+            assert_eq!(got, expect, "limit={limit} 结果应与全量取尾一致");
+        }
+    }
+
+    /// 多天 × 每天多条：limit 跨越多个日期文件边界的等价性与升序性
+    ///
+    /// 真实场景（30 天保留期、每天上百条）下 limit 通常跨多个文件，
+    /// 该用例是「天倒序 + 天内倒读」拼接顺序的回归锚点：跨文件累积顺序
+    /// 一旦写错，会表现为整体非升序、且与全量取尾不一致。
+    #[tokio::test]
+    async fn test_query_latest_multi_day_matches_tail_and_ascending() {
+        let (_dir, svc) = make_service();
+        let base_day = d(2025, 7, 1);
+        let days_n = 12usize;
+        let per_day = 40usize;
+        for offset in 0..days_n {
+            let day = base_day + chrono::Days::new(offset as u64);
+            for k in 0..per_day {
+                let mut e = sample_entry();
+                e.timestamp = chrono::Local
+                    .from_local_datetime(
+                        &(day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::seconds(k as i64)),
+                    )
+                    .unwrap();
+                e.message = format!("d{offset}-k{k}");
+                svc.record(&e).await.unwrap();
+            }
+        }
+
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 31, 23, 59, 59)
+            .unwrap();
+
+        let full = svc.query(from, to).await.unwrap();
+        let total = days_n * per_day;
+        assert_eq!(full.len(), total);
+
+        for limit in [1usize, 3, 39, 40, 41, 100, 250, 479, 480, 999] {
+            let rows = svc.query_latest(from, to, limit).await.unwrap();
+            let want = limit.min(total);
+            assert_eq!(rows.len(), want, "limit={limit} 条数不符");
+            assert!(
+                rows.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+                "limit={limit} 结果必须按时间升序"
+            );
+            let expect: Vec<_> = full
+                .iter()
+                .skip(total - want)
+                .map(|e| e.message.clone())
+                .collect();
+            let got: Vec<_> = rows.iter().map(|e| e.message.clone()).collect();
+            assert_eq!(got, expect, "limit={limit} 应等于全量取尾");
+        }
+    }
+
+    /// 复现线上量级：30 天 × 每天 167 条（≈单文件 18 KB，单块内）
+    ///
+    /// 与 HTTP 实测同构的场景，用于排查「多天 + 单文件内多次取数」下的
+    /// 顺序与等价性，覆盖 limit 落在当天文件内部、跨天、超总量三类边界。
+    #[tokio::test]
+    async fn test_query_latest_realistic_30days_167perday() {
+        let (_dir, svc) = make_service();
+        let today = Local::now().date_naive();
+        let days_n = 30usize;
+        let per_day = 167usize;
+        // 按时间升序写入（d=29 最早 → d=0 最新），与真实追加顺序一致
+        for offset in (0..days_n).rev() {
+            let day = today - chrono::Days::new(offset as u64);
+            for k in 0..per_day {
+                let mut e = sample_entry();
+                e.timestamp = chrono::Local
+                    .from_local_datetime(
+                        &(day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::seconds(k as i64)),
+                    )
+                    .unwrap();
+                e.message = format!("d{offset}-k{k}");
+                svc.record(&e).await.unwrap();
+            }
+        }
+
+        let to = Local::now();
+        let from = to - chrono::Duration::days(30);
+        let full = svc.query(from, to).await.unwrap();
+        let total = days_n * per_day;
+        assert_eq!(full.len(), total, "落盘总数应为 {total}");
+
+        for limit in [
+            1usize,
+            30,
+            100,
+            166,
+            167,
+            168,
+            250,
+            500,
+            2000,
+            total,
+            total + 100,
+        ] {
+            let rows = svc.query_latest(from, to, limit).await.unwrap();
+            let want = limit.min(total);
+            assert_eq!(rows.len(), want, "limit={limit} 条数不符");
+            assert!(
+                rows.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+                "limit={limit} 结果必须按时间升序"
+            );
+            let expect: Vec<_> = full
+                .iter()
+                .skip(total - want)
+                .map(|e| e.message.clone())
+                .collect();
+            let got: Vec<_> = rows.iter().map(|e| e.message.clone()).collect();
+            assert_eq!(got, expect, "limit={limit} 应等于全量取尾");
+        }
+    }
+
+    /// 物理行序与时间序不一致时，仍须返回正确的最新 N 条
+    ///
+    /// 这是**乱序追加**的确定性回归锚点（不依赖并发/时序碰运气）：
+    /// `record` 每条新开 tokio `File`，而 tokio `File` 含写缓冲、drop 时仅尽力
+    /// 异步 flush，因此真实运行中同一文件内的物理顺序并不保证与时间顺序一致。
+    /// 早期实现「从文件尾部倒读早停」正是建立在该错误假设上：它会把物理上
+    /// 靠后的行当作「更新」，从而漏掉或错选记录（并行测试下曾非确定性复现）。
+    ///
+    /// 本用例直接以乱序写入文件，把该假设钉死为可确定复现的失败条件。
+    #[tokio::test]
+    async fn test_query_latest_handles_physically_unsorted_file() {
+        let tmp = TempDir::new().unwrap();
+        let svc = LoginHistoryService::new(tmp.path());
+        let day = d(2025, 7, 9);
+        let dir = svc.history_dir();
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // 构造 20 条：时间戳 0..19，但物理写入顺序刻意打乱（逆序 + 交错）
+        let mut order: Vec<i64> = (0..20).collect();
+        order.reverse();
+        let mut jsonl = String::new();
+        for sec in &order {
+            let mut e = sample_entry();
+            e.timestamp = chrono::Local
+                .from_local_datetime(
+                    &(day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::seconds(*sec)),
+                )
+                .unwrap();
+            e.message = format!("s{sec:02}");
+            jsonl.push_str(&serde_json::to_string(&e).unwrap());
+            jsonl.push('\n');
+        }
+        tokio::fs::write(dir.join(format!("{}.jsonl", day.format("%Y-%m-%d"))), jsonl)
+            .await
+            .unwrap();
+
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+
+        // query 的既有口径：全量 + 排序
+        let full = svc.query(from, to).await.unwrap();
+        assert_eq!(full.len(), 20);
+        assert!(
+            full.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+            "query 应自行排序"
+        );
+
+        for limit in [1usize, 3, 10, 19, 20, 50] {
+            let rows = svc.query_latest(from, to, limit).await.unwrap();
+            let want = limit.min(20);
+            assert_eq!(rows.len(), want, "limit={limit} 条数不符");
+            assert!(
+                rows.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+                "limit={limit} 必须升序（不得依赖物理行序）"
+            );
+            // 应为时间上最新的 want 条，且 message 与时间戳对应
+            let expect: Vec<_> = full
+                .iter()
+                .skip(20 - want)
+                .map(|e| e.message.clone())
+                .collect();
+            let got: Vec<_> = rows.iter().map(|e| e.message.clone()).collect();
+            assert_eq!(got, expect, "limit={limit} 应等于按时间取尾");
+            // 交叉校验：message 编号与秒数一致
+            for r in &rows {
+                let sec = r.timestamp.format("%S").to_string().parse::<u32>().unwrap();
+                assert_eq!(r.message, format!("s{sec:02}"), "message 与时间戳须对应");
+            }
+        }
     }
 }
