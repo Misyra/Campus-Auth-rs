@@ -127,6 +127,7 @@ describe("dirty 快照比对", () => {
       "active_task", "login_channel", "http_method", "http_url",
       "http_headers", "http_body", "http_success_pattern",
       "http_failure_pattern", "http_crypto_script", "clear_password",
+      "http_ignore_https_errors",
     ];
     for (const key of profileKeys) {
       expect(payload, `保存载荷不得包含方案字段 ${key}`).not.toHaveProperty(key);

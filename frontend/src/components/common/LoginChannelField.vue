@@ -34,6 +34,7 @@ import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { DEFAULT_TASK_ID } from "@/utils/constants";
 import {
   HTTP_BODY_EXAMPLE,
+  HTTP_CERT_POLICY_OPTIONS,
   HTTP_CRYPTO_BUILTINS,
   HTTP_CRYPTO_CTX_FIELDS,
   HTTP_CRYPTO_SCRIPT_SKELETON,
@@ -42,6 +43,9 @@ import {
   HTTP_METHOD_OPTIONS,
   HTTP_TEMPLATE_PLACEHOLDERS,
   browserTaskOptions,
+  certPolicyFromValue,
+  certPolicyToValue,
+  certPolicyHint as certPolicyHintText,
   httpTestOutcomeHint,
   httpTestOutcomeLabel,
   isCredentialExposedViaGet,
@@ -49,6 +53,7 @@ import {
 } from "@/utils/loginChannel";
 import type { HttpLoginTestResult } from "@/api/types";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
+import type { HttpCertPolicy } from "@/utils/loginChannel";
 
 /** 本组件读写的最小字段集（宿主草稿类型可含更多字段） */
 export interface LoginChannelDraft {
@@ -62,6 +67,8 @@ export interface LoginChannelDraft {
   http_success_pattern: string;
   http_failure_pattern: string;
   http_crypto_script: string;
+  /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案显式覆盖 */
+  http_ignore_https_errors?: boolean | null;
 }
 
 const props = withDefaults(
@@ -133,6 +140,23 @@ function setChannel(channel: "browser" | "http"): void {
 
 const isHttp = computed(() => props.modelValue.login_channel === "http");
 
+/**
+ * 证书策略三态：取值与映射收敛在 `loginChannel.ts`（单一事实源），
+ * 组件只负责双向绑定与展示。
+ */
+const certPolicy = computed<string>(() =>
+  certPolicyFromValue(props.modelValue.http_ignore_https_errors),
+);
+
+function setCertPolicy(value: string): void {
+  props.modelValue.http_ignore_https_errors = certPolicyToValue(value as HttpCertPolicy);
+}
+
+/** 当前策略下的一句说明：讲清"实际会怎样"与"什么时候该改" */
+const certPolicyHint = computed(() =>
+  certPolicyHintText(certPolicyFromValue(props.modelValue.http_ignore_https_errors)),
+);
+
 /** GET + 地址含 {password}：凭据落在查询串里，需要专门提示 */
 const passwordInUrl = computed(() =>
   isCredentialExposedViaGet(props.modelValue.http_method, props.modelValue.http_url),
@@ -188,6 +212,7 @@ async function runTest(): Promise<void> {
     http_failure_pattern: draft.http_failure_pattern,
     http_crypto_script: draft.http_crypto_script,
     auth_url: props.authUrl ?? "",
+    httpIgnoreHttpsErrors: draft.http_ignore_https_errors ?? null,
   });
 }
 </script>
@@ -343,6 +368,22 @@ async function runTest(): Promise<void> {
             {{ HTTP_MAC_FORMAT_NOTE }}
           </div>
         </div>
+
+        <!-- 证书策略：https 门户自签证书时必需。默认跟随全局（与浏览器渠道同口径），
+             显式收紧会让自签门户直连失败，故把三态讲清楚而不是简单开关。 -->
+        <div class="form-group">
+          <div class="field-label-row">
+            <label :for="`${uid}-cert`">HTTPS 证书</label>
+            <FieldHelp text="校园网门户常用自签名证书。默认跟随「设置 · 浏览器」的「忽略 HTTPS 证书错误」（默认忽略），与浏览器自动化保持一致；门户证书正常时可改为「严格校验」以降低携带凭据的请求被中间人截获的风险。" />
+          </div>
+          <CustomSelect
+            :id="`${uid}-cert`"
+            :model-value="certPolicy"
+            :options="HTTP_CERT_POLICY_OPTIONS"
+            @update:model-value="setCertPolicy"
+          />
+          <span class="hint">{{ certPolicyHint }}</span>
+        </div>
       </section>
 
       <!-- ③ 成败判定 -->
@@ -440,7 +481,7 @@ async function runTest(): Promise<void> {
                 class="icon-sm" :class="{ spin: p.httpTestRunning.value }" />
               {{ p.httpTestRunning.value ? '正在发送…' : '发送测试请求' }}
             </button>
-            <a class="btn btn-ghost" href="/api/docs/http-login-guide">
+            <a class="btn btn-ghost" href="https://campus-auth.misyra.com/docs/profiles/http-login" target="_blank" rel="noopener noreferrer">
               <IconApp name="file-text" class="icon-sm" />
               使用文档
             </a>
@@ -483,6 +524,9 @@ async function runTest(): Promise<void> {
                 </template>
                 <template v-if="testResult.rendered_body">
                   <dt>请求内容</dt><dd><code>{{ testResult.rendered_body }}</code></dd>
+                </template>
+                <template v-if="testResult.response_headers">
+                  <dt>响应头</dt><dd><code>{{ testResult.response_headers }}</code></dd>
                 </template>
                 <template v-if="testResult.response_snippet">
                   <dt>响应片段</dt><dd><code>{{ testResult.response_snippet }}</code></dd>

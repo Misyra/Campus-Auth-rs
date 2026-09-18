@@ -105,6 +105,7 @@ async fn apply_flat_settings_patch(
         "http_success_pattern",
         "http_failure_pattern",
         "http_crypto_script",
+        "http_ignore_https_errors",
     ];
 
     // 全局设置字段
@@ -273,6 +274,18 @@ async fn apply_flat_settings_patch(
         {
             profile.http_crypto_script = v.to_string();
         }
+        // 三态：null 或缺席 = 跟随全局（None），布尔 = 显式覆盖本方案
+        if let Some(v) = profile_patch.get("http_ignore_https_errors") {
+            match v {
+                Value::Null => profile.http_ignore_https_errors = None,
+                Value::Bool(b) => profile.http_ignore_https_errors = Some(*b),
+                _ => {
+                    return Err(ApiError::BadRequest(
+                        "http_ignore_https_errors 必须是布尔值或 null".into(),
+                    ));
+                }
+            }
+        }
         if let Some(password) = profile_patch.get("password") {
             // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
             // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
@@ -388,7 +401,9 @@ fn settings_flat_response(
         "http_body": profile.http_body,
         "http_success_pattern": profile.http_success_pattern,
         "http_failure_pattern": profile.http_failure_pattern,
-        "http_crypto_script": profile.http_crypto_script
+        "http_crypto_script": profile.http_crypto_script,
+        // 三态：null 表示"跟随全局"，前端据此显示"默认（跟随全局）"
+        "http_ignore_https_errors": profile.http_ignore_https_errors
     })
 }
 
@@ -1059,6 +1074,7 @@ mod tests {
                 http_success_pattern: String::new(),
                 http_failure_pattern: String::new(),
                 http_crypto_script: String::new(),
+                http_ignore_https_errors: None,
             },
             auto_switch: false,
         }

@@ -47,6 +47,14 @@ const MAX_HEADERS_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024;
 const MAX_PATTERN_BYTES: usize = 8 * 1024;
 const MAX_SCRIPT_BYTES: usize = 128 * 1024;
+/// 响应头回显上限（字节）：门户响应头通常只有几百字节，超限截断防异常门户撑爆面板
+const MAX_RESPONSE_HEADERS_BYTES: usize = 8 * 1024;
+/// 未配置 User-Agent 时使用的兜底值。
+///
+/// reqwest 不设置该头便完全不发 `User-Agent`，部分门户/WAF 会因此返回 403
+/// 或另一套页面（而浏览器渠道总有 UA），表现为「抓包看不出问题、直连就是失败」。
+/// 用常见浏览器标识兜底，用户可在请求头里显式覆盖。
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// 一次直连登录尝试的完整请求参数（由 Profile 快照或测试端点构造）
 #[derive(Clone)]
@@ -77,11 +85,23 @@ pub(crate) struct HttpLoginRequest {
     pub local_mac: String,
     /// 执行脚本前是否抓取认证页原文（正式登录默认开启，测试端点可关闭）
     pub fetch_page: bool,
+    /// 是否忽略 HTTPS 证书错误（调用方已按「方案覆盖 ?? 全局 browser.ignore_https_errors」
+    /// 解析为确定值；测试端点同样传解析后的值）。
+    ///
+    /// 校园网门户大量使用自签名证书，浏览器渠道默认忽略证书错误即可登录；
+    /// 直连固定严格校验会造成「同一门户浏览器能登、直连必失败且报错晦涩」。
+    pub ignore_https_errors: bool,
 }
 
 impl HttpLoginRequest {
     /// 由 Profile 快照构造直连请求参数（仅 login_channel = http 时调用）
-    pub fn from_profile(profile: &ProfileSnapshot) -> Result<Self, String> {
+    ///
+    /// `global_ignore_https_errors` 为全局 `browser.ignore_https_errors`：
+    /// 方案未显式设置 `http_ignore_https_errors` 时沿用它，保证与浏览器渠道同口径。
+    pub fn from_profile(
+        profile: &ProfileSnapshot,
+        global_ignore_https_errors: bool,
+    ) -> Result<Self, String> {
         if profile.http_url.trim().is_empty() {
             return Err("直连请求 URL 为空，请在方案里填写".into());
         }
@@ -102,6 +122,9 @@ impl HttpLoginRequest {
             local_ip: String::new(),
             local_mac: String::new(),
             fetch_page: true,
+            ignore_https_errors: profile
+                .http_ignore_https_errors
+                .unwrap_or(global_ignore_https_errors),
         };
         request.validate()?;
         Ok(request)
@@ -121,13 +144,38 @@ impl HttpLoginRequest {
     /// 校验直连配置的协议与体积边界，避免异常配置造成过量内存/脚本开销。
     pub fn validate(&self) -> Result<(), String> {
         Self::validate_url(&self.url)?;
+        Self::validate_templates(
+            &self.url,
+            &self.headers,
+            &self.body,
+            &self.success_pattern,
+            &self.failure_pattern,
+            &self.crypto_script,
+        )
+    }
+
+    /// 纯模板体积校验（不含 URL 合法性）：保存路径使用。
+    ///
+    /// 保存与执行必须同一口径——此前只在执行/测试时校验体积，超限配置能静默
+    /// 落盘，用户要到真正登录失败才知道（且失败文案指向"过长"而非"保存被拒"，
+    /// 无从判断是保存没生效还是配置本来就不对）。
+    ///
+    /// `url` 单独校验合法性由调用方负责（保存路径允许空串=尚未配置）。
+    pub fn validate_templates(
+        url: &str,
+        headers: &str,
+        body: &str,
+        success_pattern: &str,
+        failure_pattern: &str,
+        crypto_script: &str,
+    ) -> Result<(), String> {
         let checks = [
-            ("直连请求 URL", self.url.len(), MAX_URL_BYTES),
-            ("直连请求头", self.headers.len(), MAX_HEADERS_BYTES),
-            ("直连请求体", self.body.len(), MAX_REQUEST_BODY_BYTES),
-            ("成功关键字", self.success_pattern.len(), MAX_PATTERN_BYTES),
-            ("失败关键字", self.failure_pattern.len(), MAX_PATTERN_BYTES),
-            ("加密脚本", self.crypto_script.len(), MAX_SCRIPT_BYTES),
+            ("直连请求 URL", url.len(), MAX_URL_BYTES),
+            ("直连请求头", headers.len(), MAX_HEADERS_BYTES),
+            ("直连请求体", body.len(), MAX_REQUEST_BODY_BYTES),
+            ("成功关键字", success_pattern.len(), MAX_PATTERN_BYTES),
+            ("失败关键字", failure_pattern.len(), MAX_PATTERN_BYTES),
+            ("加密脚本", crypto_script.len(), MAX_SCRIPT_BYTES),
         ];
         for (label, actual, limit) in checks {
             if actual > limit {
@@ -171,6 +219,8 @@ pub(crate) struct HttpAttemptReport {
     pub rendered_body: String,
     /// 响应状态码（请求失败时为 None）
     pub status: Option<u16>,
+    /// 响应头逐行文本（已脱敏；排查 Content-Type/charset/跳转类问题时必需）
+    pub response_headers: String,
     /// 响应体片段（已脱敏）
     pub response_snippet: String,
     /// 脚本执行错误（成功执行时为 None）
@@ -213,7 +263,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     if req.uses_crypto_script() {
         // 登录页原文 best effort 抓取：失败置空串，脚本须容忍缺失
         let page = if req.fetch_page {
-            fetch_login_page(&req.auth_url).await
+            fetch_login_page(&req.auth_url, req.ignore_https_errors).await
         } else {
             String::new()
         };
@@ -251,6 +301,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             rendered_headers: String::new(),
             rendered_body: String::new(),
             status: None,
+            response_headers: String::new(),
             response_snippet: String::new(),
             script_error: Some(e.clone()),
             duration_ms: start.elapsed().as_millis() as u64,
@@ -264,8 +315,8 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 
     // 3. 发送请求
     let send = send_request(req, &rendered_url, &rendered_headers, &rendered_body).await;
-    let (status, body) = match send {
-        Ok(pair) => pair,
+    let (status, body, response_headers) = match send {
+        Ok(triple) => triple,
         Err(e) => {
             let secrets = collect_secrets(&vars);
             // reqwest 的 Error::Display 会把完整 URL 拼进消息（"for url (...)"），
@@ -278,6 +329,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
                 rendered_headers: redact_text(&rendered_headers, &secrets),
                 rendered_body: redact_text(&rendered_body, &secrets),
                 status: None,
+                response_headers: String::new(),
                 response_snippet: String::new(),
                 script_error,
                 duration_ms: start.elapsed().as_millis() as u64,
@@ -327,23 +379,37 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         rendered_headers: redact_text(&rendered_headers, &secrets),
         rendered_body: redact_text(&rendered_body, &secrets),
         status: Some(status.as_u16()),
+        // 响应头同样按凭据字典脱敏：门户回显参数、回跳地址里可能带回提交过的凭据
+        response_headers: redact_text(&response_headers, &secrets),
         response_snippet: redact_text(&snippet, &secrets),
         script_error,
         duration_ms: start.elapsed().as_millis() as u64,
     }
 }
 
+/// 构建直连请求客户端（登录请求与登录页抓取共用同一策略）。
+///
+/// 统一收口三件事，避免两处各自构造时策略漂移：
+/// - 证书策略：按 `ignore_https_errors`（自签门户必需，与浏览器渠道同口径）
+/// - 代理：显式 `no_proxy`（校园网网关是本机直连可达的内网地址，走代理必失败）
+/// - User-Agent：未显式配置时补浏览器 UA（reqwest 默认完全不发该头）
+fn build_client(timeout: Duration, ignore_https_errors: bool) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(Policy::limited(MAX_REDIRECTS))
+        .no_proxy()
+        .danger_accept_invalid_certs(ignore_https_errors)
+        .user_agent(DEFAULT_USER_AGENT)
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("客户端构建失败: {e}"))
+}
+
 /// 抓取登录页原文（best effort）：脚本 ctx.page 数据源，失败返回空串
-async fn fetch_login_page(auth_url: &str) -> String {
+async fn fetch_login_page(auth_url: &str, ignore_https_errors: bool) -> String {
     if auth_url.is_empty() {
         return String::new();
     }
-    let client = match reqwest::Client::builder()
-        .redirect(Policy::limited(MAX_REDIRECTS))
-        .no_proxy()
-        .timeout(PAGE_FETCH_TIMEOUT)
-        .build()
-    {
+    let client = match build_client(PAGE_FETCH_TIMEOUT, ignore_https_errors) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("登录页抓取客户端构建失败: {e}");
@@ -352,7 +418,7 @@ async fn fetch_login_page(auth_url: &str) -> String {
     };
     match client.get(auth_url).send().await {
         Ok(resp) => match read_limited_body(resp).await {
-            Ok(body) => body,
+            Ok(body) => body.0,
             Err(e) => {
                 tracing::warn!("登录页读取失败: {e}");
                 String::new()
@@ -365,19 +431,14 @@ async fn fetch_login_page(auth_url: &str) -> String {
     }
 }
 
-/// 发送登录请求，返回 (状态码, 响应体原文)
+/// 发送登录请求，返回 (状态码, 响应体原文, 响应头逐行文本)
 async fn send_request(
     req: &HttpLoginRequest,
     url: &str,
     headers: &str,
     body: &str,
-) -> Result<(reqwest::StatusCode, String), String> {
-    let client = reqwest::Client::builder()
-        .redirect(Policy::limited(MAX_REDIRECTS))
-        .no_proxy()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| format!("客户端构建失败: {e}"))?;
+) -> Result<(reqwest::StatusCode, String, String), String> {
+    let client = build_client(REQUEST_TIMEOUT, req.ignore_https_errors)?;
 
     let mut request = match req.method {
         HttpLoginMethod::Get => client.get(url),
@@ -406,14 +467,35 @@ async fn send_request(
 
     let resp = request.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
-    let body = read_limited_body(resp).await?;
-    Ok((status, body))
+    // 响应头先快照再消费响应体（流式读取会拿走所有权）
+    let headers_text = format_response_headers(resp.headers());
+    let (body, _charset) = read_limited_body(resp).await?;
+    Ok((status, body, headers_text))
+}
+
+/// 响应头 → 逐行 `Key: Value` 文本（截断到上限），供测试结果面板排查排查
+fn format_response_headers(headers: &reqwest::header::HeaderMap) -> String {
+    let mut out = String::new();
+    for (name, value) in headers {
+        // 头值按可见字符展示；非 UTF-8（罕见）以 lossy 兜底，绝不因为一个头解析失败而丢整份回显
+        let value = String::from_utf8_lossy(value.as_bytes());
+        out.push_str(name.as_str());
+        out.push_str(": ");
+        out.push_str(value.trim());
+        out.push('\n');
+        if out.len() >= MAX_RESPONSE_HEADERS_BYTES {
+            out.push_str("…（已截断）");
+            break;
+        }
+    }
+    out
 }
 
 /// 流式读取响应体并在 64 KiB 处停止，避免异常门户以超大响应撑高进程内存。
 ///
-/// 解码先于流式读取取响应头 charset（消费 `resp` 后头字段不可再访问）。
-async fn read_limited_body(resp: reqwest::Response) -> Result<String, String> {
+/// 解码先于流式读取取响应头 charset（消费 `resp` 后头字段不可再访问），
+/// 一并返回实际使用的 charset 标签（未声明时为 None），供响应头回显核对编码。
+async fn read_limited_body(resp: reqwest::Response) -> Result<(String, Option<String>), String> {
     let charset = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -432,7 +514,7 @@ async fn read_limited_body(resp: reqwest::Response) -> Result<String, String> {
             break;
         }
     }
-    Ok(decode_body(&bytes, charset.as_deref()))
+    Ok((decode_body(&bytes, charset.as_deref()), charset))
 }
 
 /// 从 `Content-Type` 头解析 charset 参数（大小写不敏感；无该参数返回 None）
@@ -830,7 +912,155 @@ mod tests {
             local_ip: String::new(),
             local_mac: String::new(),
             fetch_page: false,
+            // 与浏览器渠道默认口径一致（校园网门户多为自签名证书）
+            ignore_https_errors: true,
         }
+    }
+
+    /// 起一个返回固定响应、并把收到的请求行/请求头回传给调用方的极简 HTTP 服务。
+    ///
+    /// 用于断言"实际发出的请求长什么样"（UA 兜底、自定义请求头覆盖等）——
+    /// 只看响应侧无法证明请求头是否正确。
+    async fn spawn_capturing_response(
+        status: u16,
+        body: &str,
+        extra_headers: &str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_string();
+        let extra_headers = extra_headers.to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let received = String::from_utf8_lossy(&buf[..n]).to_string();
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: text/plain; charset=utf-8\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            let _ = tx.send(received);
+        });
+        (format!("http://{addr}/login"), rx)
+    }
+
+    /// 未配置 User-Agent 时必须补浏览器 UA：reqwest 默认完全不发该头，
+    /// 部分门户/WAF 据此返回 403 或另一套页面，表现为"抓包看不出问题但直连失败"。
+    #[tokio::test]
+    async fn request_sends_default_user_agent_when_not_configured() {
+        let (url, received) = spawn_capturing_response(200, "登录成功", "").await;
+        let report = run_once(&request(url)).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        let raw = received.await.unwrap();
+        assert!(
+            raw.to_ascii_lowercase().contains("user-agent: mozilla"),
+            "未发出 User-Agent 兜底头:\n{raw}"
+        );
+    }
+
+    /// 用户显式配置 User-Agent 时不得被兜底值覆盖
+    #[tokio::test]
+    async fn explicit_user_agent_header_wins_over_default() {
+        let (url, received) = spawn_capturing_response(200, "登录成功", "").await;
+        let mut req = request(url);
+        req.headers = "User-Agent: CampusAuth-Test".into();
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        let raw = received.await.unwrap().to_ascii_lowercase();
+        assert!(raw.contains("user-agent: campusauth-test"), "{raw}");
+        assert!(
+            !raw.contains("mozilla/5.0"),
+            "兜底 UA 不应与显式配置同时发出:\n{raw}"
+        );
+    }
+
+    /// 响应头必须回显（排查 Content-Type/charset/跳转问题时唯一线索），且同样脱敏
+    #[tokio::test]
+    async fn report_includes_redacted_response_headers() {
+        let (url, _rx) = spawn_capturing_response(
+            200,
+            "登录成功 abcdef",
+            "X-Portal-Echo: abcdef\r\nSet-Cookie: sid=abcdef\r\n",
+        )
+        .await;
+        let report = run_once(&request(url)).await;
+        // http crate 把响应头名归一为小写，断言按小写比对
+        assert!(
+            report.response_headers.contains("set-cookie:"),
+            "响应头未回显: {:?}",
+            report.response_headers
+        );
+        assert!(
+            report.response_headers.contains("content-type:"),
+            "响应头未含 Content-Type: {:?}",
+            report.response_headers
+        );
+        assert!(
+            !report.response_headers.contains("abcdef"),
+            "响应头未脱敏，泄露凭据: {:?}",
+            report.response_headers
+        );
+    }
+
+    /// 保存路径的体积校验必须与执行路径同一口径（超限配置不得静默落盘）
+    #[test]
+    fn validate_templates_rejects_oversized_fields() {
+        let ok = HttpLoginRequest::validate_templates("http://p/login", "", "", "", "", "");
+        assert!(ok.is_ok());
+
+        let long_script = "a".repeat(MAX_SCRIPT_BYTES + 1);
+        let err = HttpLoginRequest::validate_templates("", "", "", "", "", &long_script)
+            .expect_err("超限脚本必须被拒");
+        assert!(err.contains("加密脚本过长"), "{err}");
+
+        let long_body = "b".repeat(MAX_REQUEST_BODY_BYTES + 1);
+        let err = HttpLoginRequest::validate_templates("", "", &long_body, "", "", "")
+            .expect_err("超限请求体必须被拒");
+        assert!(err.contains("直连请求体过长"), "{err}");
+    }
+
+    /// 证书策略缺省解析：方案未设置时跟随全局（与浏览器渠道同口径）
+    #[test]
+    fn from_profile_falls_back_to_global_cert_policy() {
+        let mut profile = crate::config::ProfileSnapshot {
+            id: "p".into(),
+            name: String::new(),
+            username: "u".into(),
+            password: Zeroizing::new("pw".into()),
+            auth_url: String::new(),
+            trigger_url: String::new(),
+            isp: String::new(),
+            gateway_ip: String::new(),
+            wifi_ssid: String::new(),
+            active_task: String::new(),
+            login_channel: crate::config::LoginChannel::Http,
+            http_method: HttpLoginMethod::Get,
+            http_url: "http://10.0.0.1/login".into(),
+            http_headers: String::new(),
+            http_body: String::new(),
+            http_success_pattern: String::new(),
+            http_failure_pattern: String::new(),
+            http_crypto_script: String::new(),
+            http_ignore_https_errors: None,
+        };
+
+        let followed = HttpLoginRequest::from_profile(&profile, true).unwrap();
+        assert!(followed.ignore_https_errors, "未设置时应跟随全局 true");
+
+        let followed_strict = HttpLoginRequest::from_profile(&profile, false).unwrap();
+        assert!(
+            !followed_strict.ignore_https_errors,
+            "未设置时应跟随全局 false"
+        );
+
+        // 显式覆盖优先于全局
+        profile.http_ignore_https_errors = Some(false);
+        let overridden = HttpLoginRequest::from_profile(&profile, true).unwrap();
+        assert!(!overridden.ignore_https_errors, "方案显式设置必须覆盖全局");
     }
 
     async fn spawn_response(status: u16, body: &str) -> String {

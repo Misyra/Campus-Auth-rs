@@ -194,6 +194,8 @@ export const profilesApi = {
       http_success_pattern?: string;
       http_failure_pattern?: string;
       http_crypto_script?: string;
+      /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案覆盖 */
+      http_ignore_https_errors?: Profile["http_ignore_https_errors"];
     },
   ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   save: (id: string, payload: ProfileUpdatePayload) =>

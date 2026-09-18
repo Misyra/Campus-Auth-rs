@@ -43,6 +43,8 @@ pub struct ProfileCreateBody {
     pub http_success_pattern: Option<String>,
     pub http_failure_pattern: Option<String>,
     pub http_crypto_script: Option<String>,
+    /// 是否忽略 HTTPS 证书错误（None = 未提交/跟随全局；Some = 显式覆盖）
+    pub http_ignore_https_errors: Option<bool>,
 }
 
 /// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
@@ -84,6 +86,22 @@ fn validate_http_login_url(raw: &str) -> Result<String, ApiError> {
     Ok(trimmed)
 }
 
+/// 保存前校验直连模板体积（与执行/测试同一口径）。
+///
+/// 保存路径此前只校验 URL 合法性，超限配置能落盘、直到登录执行才报「过长」；
+/// 用户在保存时得到的是"保存成功"，无从把失败归因到配置本身。
+fn validate_http_templates(profile: &ProfileData) -> Result<(), ApiError> {
+    HttpLoginRequest::validate_templates(
+        &profile.http_url,
+        &profile.http_headers,
+        &profile.http_body,
+        &profile.http_success_pattern,
+        &profile.http_failure_pattern,
+        &profile.http_crypto_script,
+    )
+    .map_err(ApiError::BadRequest)
+}
+
 /// PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）
 #[derive(Deserialize)]
 pub struct ProfileUpdateBody {
@@ -114,6 +132,8 @@ pub struct ProfileUpdateBody {
     pub http_success_pattern: Option<String>,
     pub http_failure_pattern: Option<String>,
     pub http_crypto_script: Option<String>,
+    /// 是否忽略 HTTPS 证书错误（None = 未提交/跟随全局；Some = 显式覆盖）
+    pub http_ignore_https_errors: Option<bool>,
 }
 
 /// POST /api/profiles/http-login-test 请求体：用编辑器当前未保存值发送一次测试请求
@@ -135,6 +155,9 @@ pub struct HttpLoginTestBody {
     pub auth_url: String,
     /// 是否在运行脚本前抓取认证页原文
     pub fetch_page: bool,
+    /// 是否忽略 HTTPS 证书错误；缺省（None）时跟随全局 `browser.ignore_https_errors`，
+    /// 与正式登录的解析口径一致（前端只传用户显式选择的值）
+    pub http_ignore_https_errors: Option<bool>,
 }
 
 /// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
@@ -236,6 +259,7 @@ fn build_share_payload(profile: &ProfileData) -> Value {
             "http_success_pattern": profile.http_success_pattern,
             "http_failure_pattern": profile.http_failure_pattern,
             "http_crypto_script": profile.http_crypto_script,
+            "http_ignore_https_errors": profile.http_ignore_https_errors,
         }
     })
 }
@@ -298,6 +322,11 @@ fn parse_share_payload(body: &Value) -> Result<(ProfileData, String), ApiError> 
         profile.http_method = serde_json::from_value(v.clone()).map_err(|_| {
             ApiError::BadRequest("分享文件的 http_method 非法（仅 GET/POST）".into())
         })?;
+    }
+    // 三态字段：缺失 = 跟随全局（None），显式布尔 = 覆盖；类型不符时忽略该字段
+    // （与其余文本字段"部分缺失仍可导入"的宽松口径一致）
+    if let Some(v) = obj.get("http_ignore_https_errors").and_then(Value::as_bool) {
+        profile.http_ignore_https_errors = Some(v);
     }
     if profile.name.trim().is_empty() {
         return Err(ApiError::BadRequest("分享文件缺少方案名称".into()));
@@ -425,6 +454,12 @@ pub async fn test_http_login(
         ));
     }
 
+    // 证书策略与正式登录同源：显式值优先，缺省跟随全局 browser.ignore_https_errors。
+    // 测试端点必须与正式路径同口径，否则会出现「测试报证书错误、实际登录成功」
+    // （或反之）这种无从判断该信哪边的组合。
+    let ignore_https_errors = body
+        .http_ignore_https_errors
+        .unwrap_or_else(|| config.runtime_snapshot().browser.ignore_https_errors);
     let request = HttpLoginRequest {
         method: body.http_method,
         url,
@@ -439,6 +474,7 @@ pub async fn test_http_login(
         local_ip: String::new(),
         local_mac: String::new(),
         fetch_page: body.fetch_page,
+        ignore_https_errors,
     };
     request.validate().map_err(ApiError::BadRequest)?;
     // 测试端点与正式登录同源：仅有加密脚本时才查本机地址（脚本可用 local_ip
@@ -464,6 +500,7 @@ pub async fn test_http_login(
         "rendered_headers": report.rendered_headers,
         "rendered_body": report.rendered_body,
         "status": report.status,
+        "response_headers": report.response_headers,
         "response_snippet": report.response_snippet,
         "outcome": report.outcome,
         "message": report.message,
@@ -556,6 +593,10 @@ pub async fn create_profile(
     if let Some(http_crypto_script) = body.http_crypto_script {
         profile.http_crypto_script = http_crypto_script;
     }
+    if let Some(v) = body.http_ignore_https_errors {
+        profile.http_ignore_https_errors = Some(v);
+    }
+    validate_http_templates(&profile)?;
     profiles.create_profile(&target_id, profile).await?;
     tracing::info!(profile_id = %target_id, "创建 Profile");
     Ok(data(Value::String("ok".into())))
@@ -628,6 +669,10 @@ pub async fn update_profile(
     if let Some(http_crypto_script) = body.http_crypto_script {
         profile.http_crypto_script = http_crypto_script;
     }
+    if let Some(v) = body.http_ignore_https_errors {
+        profile.http_ignore_https_errors = Some(v);
+    }
+    validate_http_templates(&profile)?;
     profiles
         .update_profile(&id, profile, body.clear_password)
         .await?;
@@ -1601,6 +1646,68 @@ mod tests {
         p.http_success_pattern = "登录成功".into();
         p.http_failure_pattern = "密码错误".into();
         p.http_crypto_script = "function transform(ctx){ return {}; }".into();
+        p.http_ignore_https_errors = Some(false);
+    }
+
+    /// 保存路径必须与执行路径同一体积口径：超限配置不得静默落盘
+    /// （此前保存只校验 URL，用户看到"保存成功"却在登录时才报"过长"）
+    #[tokio::test]
+    async fn test_update_rejects_oversized_http_templates() {
+        let (app, inner) = mock_app();
+        let oversized = "a".repeat(129 * 1024); // 超过脚本上限 128 KiB
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/default")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "http_crypto_script": oversized }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("过长"),
+            "错误文案应指出长度问题: {json}"
+        );
+        // 未落盘：方案里仍是空脚本
+        let g = inner.lock().unwrap();
+        let p = g.profiles.iter().find(|p| p.id == "default").unwrap();
+        assert!(p.http_crypto_script.is_empty(), "超限配置不得写入");
+    }
+
+    /// 证书策略为三态：显式 true/false 必须落盘，未提交时保持原值
+    #[tokio::test]
+    async fn test_update_persists_http_cert_policy() {
+        let (app, inner) = mock_app();
+        for value in [true, false] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/profiles/default")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "http_ignore_https_errors": value }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let g = inner.lock().unwrap();
+            let p = g.profiles.iter().find(|p| p.id == "default").unwrap();
+            assert_eq!(p.http_ignore_https_errors, Some(value));
+        }
     }
 
     async fn export_of(app: &axum::Router, id: &str) -> Value {

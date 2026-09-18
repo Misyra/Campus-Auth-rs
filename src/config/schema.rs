@@ -544,6 +544,15 @@ pub struct ProfileData {
     /// 直连加密脚本（JS，定义 `transform(ctx)` 返回可被占位符引用的字段；
     /// 由内置 boa 引擎在无网络/文件沙箱内执行；空 = 不做值变换）
     pub http_crypto_script: String,
+    /// 直连请求是否忽略 HTTPS 证书错误（三态）：
+    /// `None` = 跟随全局 `browser.ignore_https_errors`（默认 true，与浏览器渠道同口径）；
+    /// `Some(true/false)` = 本方案显式覆盖。
+    ///
+    /// 校园网门户大量使用自签名证书，浏览器渠道默认忽略证书错误即可登录，
+    /// 直连若固定严格校验则同一门户「浏览器能登、直连必失败」——故默认口径必须
+    /// 与浏览器渠道一致，同时保留显式收紧的入口（携带明文凭据的请求忽略证书
+    /// 校验风险更高，安全敏感用户可关掉）。
+    pub http_ignore_https_errors: Option<bool>,
 }
 
 impl Default for ProfileData {
@@ -567,6 +576,7 @@ impl Default for ProfileData {
             http_success_pattern: String::new(),
             http_failure_pattern: String::new(),
             http_crypto_script: String::new(),
+            http_ignore_https_errors: None,
         }
     }
 }

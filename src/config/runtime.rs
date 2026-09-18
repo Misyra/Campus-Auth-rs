@@ -73,6 +73,8 @@ pub struct ProfileSnapshot {
     pub http_failure_pattern: String,
     /// 直连加密脚本（JS transform(ctx)；空 = 不变换）
     pub http_crypto_script: String,
+    /// 直连请求是否忽略 HTTPS 证书错误（None = 跟随全局 browser.ignore_https_errors）
+    pub http_ignore_https_errors: Option<bool>,
 }
 
 impl std::fmt::Debug for ProfileSnapshot {
@@ -155,6 +157,7 @@ pub fn build_runtime_config(
         http_success_pattern: profile.http_success_pattern.clone(),
         http_failure_pattern: profile.http_failure_pattern.clone(),
         http_crypto_script: profile.http_crypto_script.clone(),
+        http_ignore_https_errors: profile.http_ignore_https_errors,
     };
 
     Ok(RuntimeConfig {
@@ -196,6 +199,7 @@ mod tests {
             http_success_pattern: String::new(),
             http_failure_pattern: String::new(),
             http_crypto_script: String::new(),
+            http_ignore_https_errors: None,
         }
     }
 

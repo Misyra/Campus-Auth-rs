@@ -50,6 +50,53 @@ export const HTTP_METHOD_OPTIONS: Array<{ value: HttpLoginMethod; label: string 
 ];
 
 /**
+ * 直连 HTTPS 证书策略的下拉取值。
+ *
+ * 用字符串而非裸布尔承载三态：`null`（未设置=跟随全局）与 `false`（显式严格校验）
+ * 语义完全不同，若把布尔直接塞进 `<option value>`，未设置会被渲染成字符串
+ * `"null"` 与"关闭"混淆。取名另加一层映射，新增策略时改动点集中在此。
+ */
+export type HttpCertPolicy = "follow" | "ignore" | "strict";
+
+/** 证书策略选项（CustomSelect 消费） */
+export const HTTP_CERT_POLICY_OPTIONS: Array<{ value: HttpCertPolicy; label: string }> = [
+  { value: "follow", label: "跟随全局设置（默认）" },
+  { value: "ignore", label: "忽略证书错误" },
+  { value: "strict", label: "严格校验证书" },
+];
+
+/**
+ * 方案的 `http_ignore_https_errors`（三态布尔）→ 下拉值。
+ *
+ * `null`/`undefined` 均为"未设置"，即跟随全局 `browser.ignore_https_errors`
+ * （默认 true）——与浏览器渠道同口径，自签证书门户才不会被直连渠道挡在门外。
+ */
+export function certPolicyFromValue(value: boolean | null | undefined): HttpCertPolicy {
+  if (value === true) return "ignore";
+  if (value === false) return "strict";
+  return "follow";
+}
+
+/** 下拉值 → 方案字段（`follow` 落回 `null`，保持"未设置"可跨版本跟随全局） */
+export function certPolicyToValue(policy: HttpCertPolicy): boolean | null {
+  if (policy === "ignore") return true;
+  if (policy === "strict") return false;
+  return null;
+}
+
+/** 证书策略说明：讲清"实际会怎样"与"什么时候该改"，避免用户盲目选严格后门户登不上 */
+export function certPolicyHint(policy: HttpCertPolicy): string {
+  switch (policy) {
+    case "ignore":
+      return "始终不校验证书：自签名门户可用，但请求携带的明文凭据可能被中间人截获。";
+    case "strict":
+      return "始终校验证书：安全性更高，但自签名 / 过期证书的门户会直接报证书错误。";
+    default:
+      return "跟随「设置 · 浏览器」的证书设置（默认忽略），与浏览器自动化的判定一致。";
+  }
+}
+
+/**
  * 测试结果的「下一步该怎么办」提示。
  *
  * 与 {@link httpTestOutcomeLabel} 配对：标签说明**发生了什么**，本函数说明

@@ -179,6 +179,7 @@ async function runTest(): Promise<void> {
     http_failure_pattern: props.draft.http_failure_pattern,
     http_crypto_script: props.draft.http_crypto_script,
     auth_url: props.authUrl ?? "",
+    httpIgnoreHttpsErrors: props.draft.http_ignore_https_errors ?? null,
   });
 }
 
@@ -270,7 +271,7 @@ function fillScriptSkeleton(): void {
         </div>
 
         <div class="wz-actions-inline">
-          <a class="btn btn-sm btn-ghost" href="/api/docs/http-login-guide">
+          <a class="btn btn-sm btn-ghost" href="https://campus-auth.misyra.com/docs/profiles/http-login" target="_blank" rel="noopener noreferrer">
             <IconApp name="file-text" class="icon-sm" />
             打开完整使用文档
           </a>

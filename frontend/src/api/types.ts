@@ -315,6 +315,8 @@ export interface CredentialsConfig {
   http_success_pattern: string;
   http_failure_pattern: string;
   http_crypto_script: string;
+  /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案显式覆盖 */
+  http_ignore_https_errors: HttpIgnoreHttpsErrors;
 }
 
 /** 应用设置 */
@@ -405,6 +407,8 @@ export interface ConfigResponse {
   http_success_pattern: string;
   http_failure_pattern: string;
   http_crypto_script: string;
+  /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案显式覆盖 */
+  http_ignore_https_errors: HttpIgnoreHttpsErrors;
   password?: string;
 }
 
@@ -430,6 +434,14 @@ export interface SaveConfigPayload {
 export type LoginChannel = "browser" | "http";
 export type HttpLoginMethod = "GET" | "POST";
 
+/**
+ * 直连 HTTPS 证书策略（三态）。
+ *
+ * `null` = 未设置，登录时跟随全局 `browser.ignore_https_errors`（默认 true，
+ * 与浏览器渠道同口径）；`true`/`false` = 本方案显式覆盖。
+ */
+export type HttpIgnoreHttpsErrors = boolean | null;
+
 /** 配置方案 */
 export interface Profile {
   id: string;
@@ -450,6 +462,8 @@ export interface Profile {
   http_success_pattern: string;
   http_failure_pattern: string;
   http_crypto_script: string;
+  /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案显式覆盖 */
+  http_ignore_https_errors: HttpIgnoreHttpsErrors;
   [key: string]: unknown;
 }
 
@@ -510,6 +524,8 @@ export interface HttpLoginTestPayload {
   http_crypto_script: string;
   auth_url: string;
   fetch_page: boolean;
+  /** 省略 = 跟随全局证书策略（后端按全局解析）；显式传值则覆盖 */
+  http_ignore_https_errors?: boolean;
 }
 
 /** 直连登录测试结果（请求内容与响应片段均已由后端脱敏） */
@@ -518,6 +534,8 @@ export interface HttpLoginTestResult {
   rendered_headers: string;
   rendered_body: string;
   status: number | null;
+  /** 响应头逐行文本（已脱敏；排查 Content-Type/charset/跳转问题） */
+  response_headers: string;
   response_snippet: string;
   outcome:
     | "success"

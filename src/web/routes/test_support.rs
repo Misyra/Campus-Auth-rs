@@ -43,6 +43,7 @@ pub fn test_runtime_config() -> RuntimeConfig {
             http_success_pattern: String::new(),
             http_failure_pattern: String::new(),
             http_crypto_script: String::new(),
+            http_ignore_https_errors: None,
         },
         auto_switch: false,
     }

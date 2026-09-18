@@ -128,6 +128,7 @@ describe("openActiveProfileForEdit", () => {
       http_success_pattern: "",
       http_failure_pattern: "",
       http_crypto_script: "",
+      http_ignore_https_errors: null,
       _isNew: false,
     };
 

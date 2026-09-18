@@ -239,6 +239,7 @@ async function saveProfile(): Promise<boolean> {
         http_success_pattern: settings.http_success_pattern ?? "",
         http_failure_pattern: settings.http_failure_pattern ?? "",
         http_crypto_script: settings.http_crypto_script ?? "",
+        http_ignore_https_errors: settings.http_ignore_https_errors ?? null,
       });
     } else {
       data = await profilesApi.save(profileId, {
@@ -278,6 +279,8 @@ export interface HttpLoginTestParams {
   http_failure_pattern: string;
   http_crypto_script: string;
   auth_url: string;
+  /** HTTPS 证书策略：null = 跟随全局（不提交该字段），bool = 显式覆盖 */
+  httpIgnoreHttpsErrors?: boolean | null;
 }
 
 /** 测试前置校验失败的就地提示（登录方式组件复用同一文案与 toast 口径） */
@@ -310,6 +313,11 @@ async function testHttpLogin(
       http_crypto_script: params.http_crypto_script,
       auth_url: params.auth_url,
       fetch_page: true,
+      // null/undefined（未显式设置）时不提交该键，由后端按全局策略解析
+      http_ignore_https_errors:
+        params.httpIgnoreHttpsErrors === null || params.httpIgnoreHttpsErrors === undefined
+          ? undefined
+          : params.httpIgnoreHttpsErrors,
     });
     toastOnly(result.outcome === "success", result.message);
     return result;

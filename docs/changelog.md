@@ -2,6 +2,44 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-18 直连请求渠道缺口修复：HTTPS 证书可配、UA 兜底、响应头回显、保存校验体积）
+
+对直连请求渠道（`src/login/http_login.rs` + `ProfileData.http_*`）做缺口复核后修复四项；复核结论与剩余待办（Cookie/两步门户、判定只看响应体、方法仅 GET/POST 等）见 `docs/plan-next.md` 的「直连请求渠道待办」。
+
+### 修复（可用性缺口）
+
+- **HTTPS 证书策略与浏览器渠道口径不一致（P1）**：直连客户端此前用 reqwest 默认 rustls 严格校验，而浏览器渠道与监测客户端都读 `browser.ignore_https_errors`（默认 **true**）。校园网门户大量使用自签名证书，后果是**同一门户浏览器能登、直连必然 `NetworkError` 且无从配置**。现新增方案级三态字段 `ProfileData.http_ignore_https_errors`（`Option<bool>`）：`None` = 跟随全局 `browser.ignore_https_errors`，`Some(bool)` = 本方案显式覆盖（可收紧为严格校验，代价是自签门户登不上，UI 已写明）。
+  - 解析点收口在 `HttpLoginRequest::from_profile(profile, global_ignore_https_errors)`；测试端点同源解析（未提交该键时读 `runtime_snapshot().browser.ignore_https_errors`），避免出现「测试报证书错误、正式登录成功」这类无从判断该信哪边的组合。
+- **未发送 User-Agent**：reqwest 在未显式设置时**完全不发** `User-Agent`（已对照 reqwest 0.12.28 源码确认），部分门户/WAF 据此返回 403 或另一套页面，表现为"抓包看不出问题、直连就是失败"。现 `build_client` 统一补浏览器 UA 兜底；用户显式写了 `User-Agent` 请求头则以其为准（用例锁定不被覆盖）。
+- **响应头不可见**：判定与排查此前只看响应体。`HttpAttemptReport` 新增 `response_headers`（逐行 `Key: Value`，上限 8 KiB），经既有凭据字典脱敏后进入测试结果面板与 IPC `data`——排查「中文乱码导致关键字命中不了」「302 跳转去向」这类问题的线索正是 `Content-Type`/`Location`。
+
+### 修复（一致性）
+
+- **保存路径不校验直连配置体积**：`HttpLoginRequest::validate()` 此前只在执行与测试端点调用，超限配置能静默落盘、直到登录执行才报「过长」，用户看到的是"保存成功"。现新增纯模板校验 `validate_templates`，由 `POST /api/profiles/{id}` 与 `PUT /api/profiles/{id}` 在落盘前调用（与执行路径同一口径：URL 8 KiB / 请求头 64 KiB / 请求体 256 KiB / 关键字各 8 KiB / 脚本 128 KiB）。指南 §8 相应从"保存不校验"改为"超限保存会被拒绝"。
+
+### 连通面
+
+- `ProfileData` / `ProfileSnapshot` / 创建与更新 DTO / `PATCH /api/config` 的 Profile 域白名单与扁平响应 / 方案导出导入（`Some(bool)` 显式解析，缺失即 `None`）/ 前端 `types.ts`（`Profile`、`CredentialsConfig`、测试请求与结果）/ `constants.ts` 默认值（`null`）/ `useProfiles`（创建载荷与测试参数：`null` 时不提交该键）/ `LoginChannelField.vue`（三态下拉 + 说明）/ `HttpLoginWizard.vue`（复用同一草稿传参）。
+- 证书三态映射收敛在 `frontend/src/utils/loginChannel.ts`（`certPolicyFromValue` / `certPolicyToValue` / `certPolicyHint` / `HTTP_CERT_POLICY_OPTIONS`），纯函数单一事实源——`follow` 必须落回 `null` 而非 `false`，否则「未设置」会变成「显式严格校验」，自签门户从此登不上（单测锁定该回归）。
+
+### 文档
+
+- `docs/guides/http-login-guide.md`：新增 §3.2.1 HTTPS 证书三选项说明；§5 结果面板补响应头线索与「证书校验失败」归因；§8 边界补「只发一次请求、不共享 Cookie」「不跟随系统代理」，并把体积上限那段从"保存不校验"改为"超限被拒"。
+- `docs/plan-next.md`：新增「直连请求渠道待办」节，记录 Cookie/两步门户的两条实现路径（先定方向再动手）、判定只看响应体、方法仅 GET/POST、测试端点与正式登录的 `local_ip` 来源不同、登录历史不记渠道。
+
+### 验证
+
+- Rust：`cargo check --features no-embed --all-targets` 通过（新字段全部构造点同步）；`cargo test --features no-embed --lib http_login` **20 例**通过（新增 5：默认 UA 兜底、显式 UA 覆盖兜底、响应头回显且脱敏、体积校验拒绝超限、证书策略三级回退）；`--lib web::routes` **191 例**通过（新增 2：保存超限 400 且不落盘、证书策略 true/false 往返落盘）。
+- 前端：`vue-tsc --noEmit` 零错误；`vitest` **212 例**全绿（新增 5 例锁定证书三态映射与往返语义）。
+- 未做实机门户验证：本轮无真实自签名 https 门户可测，证书策略由单测覆盖到"解析与传递"环节，**实际 TLS 握手是否放行未在真机确认**（`danger_accept_invalid_certs` 为 reqwest 既有能力，风险低）。
+
+## 开发中（2026-09-18 直连登录「使用文档」入口改指在线文档）
+
+- **两处入口由内置端点改为在线文档**（`frontend/src/components/common/LoginChannelField.vue`、`frontend/src/components/common/HttpLoginWizard.vue`）：`href` 从 `/api/docs/http-login-guide` 改为 `https://campus-auth.misyra.com/docs/profiles/http-login`，并补 `target="_blank" rel="noopener noreferrer"`（在应用内以新标签打开，不打断编辑草稿；与 `AboutView` / `SetupWizard` 既有外链口径一致）。
+- 动机：内置端点返回 Markdown 原文（浏览器直接展示纯文本，无排版、无目录、无站内跳转），在线文档是站点渲染后的版本且与最新功能同步。
+- **保留 `GET /api/docs/http-login-guide` 与 `docs/guides/http-login-guide.md`**：离线场景（便携版无网）仍可按地址访问，且该文档仍被 `docs/guides/README.md`、`docs/guides/user-guide.md` 引用；本轮只改前端入口，不动后端路由与 `openapi.json`。
+- 验证：`npm run typecheck` 零错误；vitest 全量 207 例通过（23 文件，无链接断言，改动为纯模板 href 替换）。
+
 ## 开发中（2026-09-18 修复 login_chain 自动重登用例依赖挂钟导致夜间 CI 必红）
 
 - **`setup_profile_and_task` 显式关闭定时暂停并断言落盘**（`tests/login_chain.rs`）：`PauseSettings` 默认 `enabled=true` 且窗口为 23:00–06:00（夜间不自动登录）。用例基座走 `tempdir` + 默认配置，不吃 `tests/fixtures` 里那些 `enabled:false` 的模板，而引擎定时器分支有 `is_any_pause_active` 门控（`src/engine/run_loop.rs:226`）——CI 在该窗口内运行时自动重登永远不触发，`login_chain_auto_relogin_after_kick` 必然在 150s 后超时失败。

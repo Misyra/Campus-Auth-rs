@@ -458,7 +458,13 @@ impl LoginOrchestrator {
 
         // 1a-2. 直连请求参数构造（URL 缺失/格式非法立即终态）
         let http_plan = if use_http {
-            match crate::login::http_login::HttpLoginRequest::from_profile(profile) {
+            // 证书策略：方案级 http_ignore_https_errors 优先，未设置时跟随全局
+            // browser.ignore_https_errors——后者默认 true，浏览器渠道即靠它登录
+            // 自签名证书门户；直连若固定严格校验会出现「浏览器能登、直连必失败」。
+            match crate::login::http_login::HttpLoginRequest::from_profile(
+                profile,
+                rt.browser.ignore_https_errors,
+            ) {
                 Ok(p) => {
                     // 本机地址（脚本 ctx.local_ip / ctx.local_mac）仅在配置了加密
                     // 脚本时查询：网卡探测要 spawn 子进程，无脚本则无人读取这两字段。

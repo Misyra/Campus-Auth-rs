@@ -5,7 +5,11 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  certPolicyFromValue,
+  certPolicyHint,
+  certPolicyToValue,
   channelNeedsRuntimeEnvironment,
+  HTTP_CERT_POLICY_OPTIONS,
   HTTP_CRYPTO_BUILTINS,
   HTTP_METHOD_OPTIONS,
   httpConfigGaps,
@@ -15,6 +19,46 @@ import {
   loginChannelLabel,
   loginChannelShortLabel,
 } from "./loginChannel";
+
+// ============ 直连 HTTPS 证书策略（三态） ============
+
+describe("certPolicy 三态映射", () => {
+  it("null/undefined 均为「跟随全局」，与浏览器渠道同口径", () => {
+    // 校园网门户多为自签名证书，全局默认忽略；未设置时必须落到该口径，
+    // 否则「浏览器能登、直连报证书错误」这个不一致会重新出现
+    expect(certPolicyFromValue(null)).toBe("follow");
+    expect(certPolicyFromValue(undefined)).toBe("follow");
+  });
+
+  it("显式布尔值映射到对应策略", () => {
+    expect(certPolicyFromValue(true)).toBe("ignore");
+    expect(certPolicyFromValue(false)).toBe("strict");
+  });
+
+  it("往返转换保持语义（follow 必须落回 null 而非 false）", () => {
+    // follow→false 会让「未设置」变成「显式严格校验」，自签门户从此登不上；
+    // 这条断言锁定的正是该回归
+    for (const value of [null, undefined, true, false] as const) {
+      expect(certPolicyToValue(certPolicyFromValue(value))).toBe(value ?? null);
+    }
+  });
+
+  it("三种策略各有选项与说明文案", () => {
+    for (const option of HTTP_CERT_POLICY_OPTIONS) {
+      expect(certPolicyHint(option.value).length).toBeGreaterThan(0);
+    }
+    expect(HTTP_CERT_POLICY_OPTIONS.map((o) => o.value)).toEqual([
+      "follow",
+      "ignore",
+      "strict",
+    ]);
+  });
+
+  it("严格策略的说明点明代价（自签门户会失败）", () => {
+    expect(certPolicyHint("strict")).toContain("证书错误");
+    expect(certPolicyHint("ignore")).toContain("截获");
+  });
+});
 
 describe("loginChannelLabel", () => {
   it("浏览器与直连各自有稳定中文标签", () => {

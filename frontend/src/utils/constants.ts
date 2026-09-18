@@ -324,6 +324,9 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
   http_success_pattern: "",
   http_failure_pattern: "",
   http_crypto_script: "",
+  // null = 跟随全局 browser.ignore_https_errors（校园网门户多为自签名证书，
+  // 全局默认为 true；显式 true/false 才覆盖本方案）
+  http_ignore_https_errors: null,
 };
 
 /**
