@@ -66,7 +66,17 @@ function handleSave() {
       <span>配置加载失败，当前显示的是默认值。为避免覆盖服务器配置，保存已禁用。</span>
       <button type="button" class="btn btn-sm" @click="handleRetryLoad">重试</button>
     </div>
-    <form autocomplete="on" class="settings-form">
+    <!--
+      `<form autocomplete="on">` 仅为拿到浏览器自动填充（账号/密码类字段），**没有**标签页
+      提交语义。必须拦掉 submit：该 form 内任何缺 `type="button"` 的 `<button>` 按 HTML
+      规范默认 `type="submit"`，点击即触发表单提交 → 导航到当前 URL → 整个 SPA 重载
+      （实测：token 查询串被 GET 表单覆盖掉，随即丢失鉴权上下文）。
+
+      子页按钮仍应显式写 `type="button"`（本文件守卫只是纵深防御）；本处拦截保证
+      即使漏写也只是不提交，而不会刷新页面。preventDefault 放在最前，避免任何
+      子页逻辑先跑再被导航打断。
+    -->
+    <form autocomplete="on" class="settings-form" @submit.prevent>
       <router-view />
     </form>
 

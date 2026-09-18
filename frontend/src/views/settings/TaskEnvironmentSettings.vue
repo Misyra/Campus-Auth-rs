@@ -240,6 +240,7 @@ async function recognizeOcr() {
         <div class="env-card-actions">
           <button
             v-if="envReady"
+            type="button"
             class="btn btn-secondary btn-sm"
             :disabled="busy.env"
             @click="void bootstrapEnv()"
@@ -250,6 +251,7 @@ async function recognizeOcr() {
           </button>
           <button
             v-else
+            type="button"
             class="btn btn-primary btn-sm"
             :disabled="busy.env"
             @click="void bootstrapEnv()"

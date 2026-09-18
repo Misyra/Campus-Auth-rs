@@ -288,8 +288,8 @@ function swatchCheckColor(value: string): string {
       <div class="form-group"><input type="text" v-model="randomWallpaperDialog.url"
         placeholder="https://t.alcy.cc/pc" @keyup.enter="confirmRandomWallpaper" /></div>
       <template #footer>
-        <button class="btn btn-secondary btn-sm" @click="closeRandomWallpaperDialog" :disabled="randomWallpaperDialog.loading">取消</button>
-        <button class="btn btn-primary btn-sm" @click="confirmRandomWallpaper" :disabled="randomWallpaperDialog.loading">
+        <button type="button" class="btn btn-secondary btn-sm" @click="closeRandomWallpaperDialog" :disabled="randomWallpaperDialog.loading">取消</button>
+        <button type="button" class="btn btn-primary btn-sm" @click="confirmRandomWallpaper" :disabled="randomWallpaperDialog.loading">
           <IconApp name="refresh" v-if="randomWallpaperDialog.loading" class="spin icon-sm" />
           {{ randomWallpaperDialog.loading ? '加载中...' : '确定' }}
         </button>
