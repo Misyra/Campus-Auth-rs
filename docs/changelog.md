@@ -23,6 +23,44 @@
 - `cargo test --lib config::runtime::tests --features no-embed`：5 passed；`cargo test --lib monitor:: --features no-embed`：58 passed；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告。
 - `frontend npm run build` 通过，Vitest 23 files / 212 tests 全通过；真实 Rust 本地实例 + Playwright/Chromium 验证登录网址留空、填写、重新清空、自定义触发地址展开四条交互均通过，且无页面脚本错误。
 
+## 开发中（2026-09-18 修复：engine 测试因新增重定向兜底分支而挂起）
+
+`5d6f962` 新增「重定向登录兜底」后，`engine::run_loop::tests::test_background_probe_keeps_commands_responsive_and_merges_reentry` 在 Windows / Linux / macOS 三平台**稳定失败**（CI run 35329391997 三平台失败点一致，均为 `run_loop.rs` 的 `等待条件超时（虚拟时钟 1.5s 内未满足）`）。
+
+### 根因
+
+测试 helper `make_engine_with_hanging_probe` 用默认 `ProfileData`（`auth_url` 与 `trigger_url` 均为空、渠道为 Browser），此时 `uses_redirect_login()` 返回 **true**。改动前 `want_local_link` 在严格模式下被 `!strict_login_mode` 短路为 false；改动后新增的 `redirect_fallback` 分支**不再被该短路覆盖**：
+
+```rust
+let redirect_fallback = purpose == CheckPurpose::AutoMonitor
+    && cfg.strict_login_mode                       // true
+    && rt.profile.uses_redirect_login()            // true（两地址皆空）
+    && redirect_fallback_candidate(&assessment);   // true
+// → want_local_link 变为 true，首次进入 probe_local_link()
+```
+
+而该 helper 注入的 `HangingDetect::list_interfaces()` 是永久 `pending()`，于是探测永不回传：实测推进 **40s 虚拟时钟仍失败**，证明并非超时预算不足。插桩确认卡点：`[C] want_local_link=true` → `[D] awaiting probe_local_link` → 永无 `[E]`。
+
+**仅 1 个用例受影响**：另两个共用该 helper 的用例分别因全天暂停门控、以及走 `ManualDiagnostic` 路径（不经过 `redirect_fallback` 判定）而未进入该分支。
+
+### 修复（仅改测试，不动生产逻辑）
+
+`make_engine_with_hanging_probe` 显式写入「非重定向」形态的 Profile：`auth_url = "http://127.0.0.1:9/login"`（非空使 `uses_redirect_login()` 为 false），并把 `auth_url_timeout` 从默认 5s 收紧到 1s（对齐 `monitor_with_http_target` 既有范式）。选 `127.0.0.1:9` 是因为该端口无监听、连接被**立即拒绝**，`inspect_auth_endpoint` 直接返回 `Unreachable` 而不消耗超时预算。
+
+- 新增**前提守卫**：在 helper 末尾断言 `!uses_redirect_login()`。若该前提再被配置默认值或判定逻辑变更打破，失败点会直接指向原因，而非只抛笼统的「等待条件超时」——本次排查耗费较多轮次正因缺少此断言。
+
+### 验证
+
+- 目标用例 + 另两个共用 helper 的用例：均通过
+- 插桩确认**测试未被架空**：探测真实执行（`n=1`）、`local_link=NotChecked`、`auth=Unreachable`
+- `cargo test --lib`：**908 passed / 0 failed / 1 ignored**（修复前 907 passed / 1 failed）
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets -- -D warnings` 零警告
+
+### 说明
+
+- 该失败**非本次性能改动引入**，而是 `5d6f962` 已存在于 master 的缺陷；推送时随 master 一并触发 CI。
+- 生产行为**无缺陷**：真实用户配置了登录网址时 `uses_redirect_login()` 返回 false，不入该分支。副作用仅是「未填登录网址的 Browser 方案」每轮失败探测会多一次网卡枚举（`5d6f962` 的有意设计），非本项修复范围。
+
 ## 开发中（2026-09-18 性能：/ws/logs 收窄单连接缓冲，16 连接常驻内存降低约 2 MB）
 
 内存专项分析（见 `docs/reports/perf-profile-2026-09-18.md` §7.1）实测每 WebSocket 连接私有内存 **0.154 MB**（16 连接合计 2.46 MB），是控制平面最大的可变内存项。

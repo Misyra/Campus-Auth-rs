@@ -1435,12 +1435,36 @@ mod tests {
                 });
             }
         });
+        // 活跃 Profile 显式写入「非重定向」形态的登录网址：`uses_redirect_login()`
+        // 在「Browser 渠道且 auth_url 为空」时返回 true，会额外触发
+        // `redirect_fallback` 分支（见 `monitor::check_once`）。本组用例的
+        // `HangingDetect::list_interfaces` 是永久 pending，一旦进入
+        // `probe_local_link()` 探测便永不回传 —— 实测推进 40s 虚拟时钟亦无法完成，
+        // 与用例本意（验证 F5 命令通道不被探测阻塞）无关，须从源头避开。
+        //
+        // 同时必须填**非空** auth_url：留空会走 `AuthEndpointState::Missing` 分支，
+        // 而填了可达地址会引入真实 TCP 等待。指向本机高位端口外的 9 号端口
+        // （无监听）使 `inspect_auth_endpoint` 立即得到「连接被拒」并返回
+        // `Unreachable`，不占用 `auth_url_timeout`。
+        let profiles_for_setup = ProfileService::new(config.clone());
+        let mut profile = profiles_for_setup.get_profile("default").unwrap();
+        profile.auth_url = "http://127.0.0.1:9/login".to_string();
+        profile.trigger_url = String::new();
+        profiles_for_setup
+            .update_profile("default", profile, false)
+            .await
+            .unwrap();
+
         let mut settings = config.load_settings();
         settings.global.monitor.tcp_enabled = false;
         settings.global.monitor.tcp_targets = vec![];
         settings.global.monitor.http_enabled = true;
         settings.global.monitor.http_targets = vec![format!("http://{stall_addr}/generate_204")];
         settings.global.monitor.http_timeout = 3;
+        // 认证入口探测超时显式收紧到 1s（默认 5s）：指向无监听的 127.0.0.1:9 时
+        // 连接被立即拒绝、通常不消耗该预算，但显式收紧可保证任何平台差异下
+        // 都不会越过本用例 4s 的虚拟时钟推进量（§monitor_with_http_target 同范式）
+        settings.global.monitor.auth_url_timeout = 1;
         settings.global.monitor.url_enabled = false;
         settings.global.monitor.local_check_enabled = true;
         // 周期定时器调大：测试期间不产生周期 tick 干扰断言
@@ -1461,6 +1485,15 @@ mod tests {
         }
         config.save_settings(&settings).await.unwrap();
         config.reload().await.unwrap();
+
+        // 前提守卫：后续断言依赖「自动监测不进入重定向兜底分支」。该前提一旦被
+        // 配置默认值或判定逻辑变更打破，探测会挂在 HangingDetect 上永不回传，
+        // 症状只是笼统的「等待条件超时」，故此处在源头直接断言，让失败原因自明。
+        assert!(
+            !config.runtime().load().profile.uses_redirect_login(),
+            "测试 Profile 不得落在重定向登录分支：否则 check_once 会调用 \
+             probe_local_link()，而 HangingDetect 永久 pending，探测永不回传"
+        );
 
         let status = Arc::new(StatusManager::new());
         let metrics = Metrics::new();
