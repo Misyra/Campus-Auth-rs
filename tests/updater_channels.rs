@@ -205,8 +205,13 @@ fn spawn_github_mock() -> GithubMockGuard {
                             "application/json",
                         )),
                         "/repos/empty/r/releases" => Some((
-                            serde_json::json!([release_json(port, &remote_stable_tag(), false, false)])
-                                .to_string(),
+                            serde_json::json!([release_json(
+                                port,
+                                &remote_stable_tag(),
+                                false,
+                                false
+                            )])
+                            .to_string(),
                             "application/json",
                         )),
                         "/mirror/latest.json" => Some((
@@ -373,7 +378,8 @@ async fn prerelease_channel_falls_back_when_no_prerelease() {
     .await;
     let info = svc.check_update().await.expect("检查不应失败");
     assert_eq!(
-        info.expect("回退后的远程正式版应高于当前版本").latest_version,
+        info.expect("回退后的远程正式版应高于当前版本")
+            .latest_version,
         remote_stable_tag()
     );
 }
