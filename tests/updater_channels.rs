@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use campus_auth::config::ConfigService;
 use campus_auth::status::StatusManager;
-use campus_auth::updater::UpdaterService;
+use campus_auth::updater::{UpdaterError, UpdaterService};
 
 /// 测试进程可能继承系统代理环境变量（reqwest 跟随系统代理），
 /// 回环 mock 流量必须直连，统一声明 NO_PROXY。
@@ -29,6 +29,12 @@ fn ensure_no_proxy() {
 
 /// 64 位 hex 摘要（格式合法即可，检查路径不校验内容与实物一致性）
 const FAKE_SHA: &str = "a0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// 本地安装包用例放置的文件内容
+///
+/// 检查阶段只比对摘要与大小（不解压），故内容只需**非空且大小确定**：真实 zip
+/// 结构会引入与"本地包命中"无关的解析面，且解压失败会掩盖本用例的断言目标。
+const LOCAL_PAYLOAD: &[u8] = b"fake-local-package-payload";
 
 /// 当前 crate 版本的核心段（major/minor/patch），编译期常量。
 ///
@@ -140,6 +146,8 @@ fn release_json(port: u16, tag: &str, prerelease: bool, draft: bool) -> serde_js
 /// - `GET /repos/empty/r/releases/latest` / `.../releases` → 仅正式版
 ///   （测试版通道无预发布时的回退数据源）
 /// - `GET /mirror/latest.json` → 自定清单格式（major +4，非 GitHub 来源回退数据源）
+/// - `GET /mirror/local.json` → 自定清单格式，其 `sha256` 取自 [`GithubMockGuard::local_sha`]
+///   （本地安装包用例：测试把该值设为放置文件的真实摘要）
 /// - `GET *.sha256` → 64 位 hex 摘要文本
 ///
 /// 返回守卫（COR-7）：Drop 时置停止标志并回连唤醒阻塞的 accept，join 监听
@@ -149,12 +157,20 @@ fn spawn_github_mock() -> GithubMockGuard {
     let port = listener.local_addr().unwrap().port();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_for_thread = stop.clone();
+    // 本地安装包用例的清单摘要（测试侧在发起请求前写入）
+    let local_sha = std::sync::Arc::new(std::sync::Mutex::new(FAKE_SHA.to_string()));
+    let local_sha_for_thread = local_sha.clone();
+    // 已请求路径记录：用于断言"本地包命中时未走网络下载"
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let requests_for_thread = requests.clone();
     let join = std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             if stop_for_thread.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
             let mut stream = stream;
+            let local_sha = local_sha_for_thread.clone();
+            let requests = requests_for_thread.clone();
             // 逐请求处理（Connection: close，无需并发）
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
@@ -181,6 +197,9 @@ fn spawn_github_mock() -> GithubMockGuard {
                     .to_string();
                 // 去掉 query（per_page=100 等）
                 let path = path.split('?').next().unwrap_or("").to_string();
+                if let Ok(mut log) = requests.lock() {
+                    log.push(path.clone());
+                }
 
                 let body: Option<(String, &'static str)> = if path.ends_with(".sha256") {
                     Some((format!("{FAKE_SHA}\n"), "text/plain"))
@@ -235,10 +254,46 @@ fn spawn_github_mock() -> GithubMockGuard {
                             .to_string(),
                             "application/json",
                         )),
+                        // 本地安装包用例的清单：摘要由测试预先写入（见 local_sha），
+                        // 大小与测试放置的文件严格一致（命中窗口同时锁定大小预筛分支）
+                        "/mirror/local.json" => {
+                            let sha = local_sha
+                                .lock()
+                                .map(|s| s.clone())
+                                .unwrap_or_else(|_| FAKE_SHA.to_string());
+                            Some((
+                                serde_json::json!({
+                                    "version": remote_far_tag(),
+                                    "platforms": {
+                                        current_platform_key(): {
+                                            "url": format!("http://127.0.0.1:{port}/assets/win.zip"),
+                                            "sha256": sha,
+                                            "size": LOCAL_PAYLOAD.len(),
+                                        },
+                                    },
+                                })
+                                .to_string(),
+                                "application/json",
+                            ))
+                        }
+                        // 上传包用例的"不高于当前版本"来源：清单版本 = 当前版本
+                        "/mirror/current.json" => Some((
+                            serde_json::json!({
+                                "version": env!("CARGO_PKG_VERSION"),
+                                "platforms": {
+                                    current_platform_key(): {
+                                        "url": format!("http://127.0.0.1:{port}/assets/win.zip"),
+                                        "sha256": FAKE_SHA,
+                                        "size": 16,
+                                    },
+                                },
+                            })
+                            .to_string(),
+                            "application/json",
+                        )),
                         _ => None,
                     }
                 };
-
                 let resp = match body {
                     Some((body, content_type)) => format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -258,6 +313,8 @@ fn spawn_github_mock() -> GithubMockGuard {
         port,
         stop,
         join: Some(join),
+        requests,
+        local_sha,
     }
 }
 
@@ -267,6 +324,27 @@ struct GithubMockGuard {
     port: u16,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
+    /// 已请求路径（去 query）：断言"本地包命中时未发起下载请求"
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// `/mirror/local.json` 返回的清单摘要（测试在发起请求前写入）
+    local_sha: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl GithubMockGuard {
+    /// 设置 `/mirror/local.json` 返回的清单摘要
+    fn set_local_sha(&self, sha: &str) {
+        if let Ok(mut slot) = self.local_sha.lock() {
+            *slot = sha.to_string();
+        }
+    }
+
+    /// 是否请求过指定路径
+    fn requested(&self, path: &str) -> bool {
+        self.requests
+            .lock()
+            .map(|log| log.iter().any(|p| p == path))
+            .unwrap_or(false)
+    }
 }
 
 impl Drop for GithubMockGuard {
@@ -453,4 +531,388 @@ async fn check_records_error_state_on_failure() {
     );
     assert!(!state["last_check_at"].as_str().unwrap().is_empty());
     assert_eq!(state["has_update"], false);
+}
+
+/// 计算 64 位 hex SHA256（本地包用例需要真实摘要才能命中）
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    hex_encode(&hasher.finalize())
+}
+
+/// 十六进制编码（避免引入 hex crate 依赖）
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 把安装包放进 `<base>/update/` 根目录（用户的手动更新路径）
+fn place_local_package(base: &Path, name: &str, payload: &[u8]) -> std::path::PathBuf {
+    let update = base.join("update");
+    std::fs::create_dir_all(&update).unwrap();
+    let path = update.join(name);
+    std::fs::write(&path, payload).unwrap();
+    path
+}
+
+/// 手动更新（命中）：`update/` 根目录下的包摘要与远程清单一致 →
+/// `UpdateInfo.local_package` 回报文件名与大小，供前端提示"将跳过下载"
+#[tokio::test]
+async fn check_update_reports_matching_local_package() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    let sha = sha256_hex(LOCAL_PAYLOAD);
+    mock.set_local_sha(&sha);
+    place_local_package(
+        dir.path(),
+        "Campus-Auth-local-windows-x64.zip",
+        LOCAL_PAYLOAD,
+    );
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/mirror/local.json"),
+        "all",
+    )
+    .await;
+
+    let info = svc
+        .check_update()
+        .await
+        .expect("检查不应失败")
+        .expect("远程版本更高，应返回新版本信息");
+    let local = info
+        .local_package
+        .expect("摘要一致的本地包应被回报（前端据此提示跳过下载）");
+    assert_eq!(local.file_name, "Campus-Auth-local-windows-x64.zip");
+    assert_eq!(local.size, LOCAL_PAYLOAD.len() as u64);
+    assert_eq!(local.sha256, sha);
+}
+
+/// 手动更新（未命中）：`update/` 根目录的包摘要与远程清单不符（用户放了旧版本）
+/// → 不回报本地包，走正常网络下载路径
+#[tokio::test]
+async fn check_update_ignores_stale_local_package() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    // 清单声明的摘要是 FAKE_SHA（默认值），放置的文件摘要与之不同
+    place_local_package(dir.path(), "Campus-Auth-old-windows-x64.zip", LOCAL_PAYLOAD);
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/mirror/local.json"),
+        "all",
+    )
+    .await;
+
+    let info = svc
+        .check_update()
+        .await
+        .expect("检查不应失败")
+        .expect("远程版本更高，应返回新版本信息");
+    assert!(
+        info.local_package.is_none(),
+        "摘要不符的本地文件不得被当作可用更新包"
+    );
+}
+
+/// 手动更新（防误认）：`update/` 根目录内的程序自身文件与半成品下载文件
+/// 内容即便与清单摘要一致，也不得被认作安装包
+#[tokio::test]
+async fn check_update_skips_non_package_files_in_update_dir() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    let sha = sha256_hex(LOCAL_PAYLOAD);
+    mock.set_local_sha(&sha);
+    // 三项内容都与清单摘要一致，但都不是安装包：程序自身文件、半成品、隐藏文件
+    place_local_package(dir.path(), "pending.json", LOCAL_PAYLOAD);
+    place_local_package(dir.path(), "last_check.json", LOCAL_PAYLOAD);
+    place_local_package(dir.path(), "helper.lock", LOCAL_PAYLOAD);
+    place_local_package(dir.path(), "pkg.zip.crdownload", LOCAL_PAYLOAD);
+    place_local_package(dir.path(), ".hidden.zip", LOCAL_PAYLOAD);
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/mirror/local.json"),
+        "all",
+    )
+    .await;
+
+    let info = svc
+        .check_update()
+        .await
+        .expect("检查不应失败")
+        .expect("远程版本更高，应返回新版本信息");
+    assert!(
+        info.local_package.is_none(),
+        "程序自身文件 / 半成品 / 隐藏文件均不得被认作本地安装包"
+    );
+    // 检查流程本身写入的 last_check.json 未损坏
+    assert_eq!(
+        read_last_check(dir.path())["latest_version"],
+        remote_far_tag()
+    );
+}
+
+/// 手动更新（不下载网络包）：命中本地包时应用更新只读本地文件——
+/// 断言 mock 从未收到 `/assets/` 下载请求，且远程清单仍被拉取（版本信息来自网络）
+///
+/// 必须先建出 `<base>/python_worker`：`download_stage_and_pending` 的第一道校验是
+/// `self_update_worker_dir`（拒绝 Docker / 外置 Worker 布局），缺该目录会在**触及
+/// 本地包分支之前**就返回 `UnsupportedSelfUpdateLayout`，用例会因为"提前失败"而
+/// 恒绿——那样它验证的就不是本地包行为，而是一条无关的前置拒绝。
+#[tokio::test]
+async fn apply_update_uses_local_package_without_download() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    // 布局前置：内置 Worker 目录存在（应用阶段的第一道校验才放行）
+    std::fs::create_dir_all(dir.path().join("python_worker")).unwrap();
+    let sha = sha256_hex(LOCAL_PAYLOAD);
+    mock.set_local_sha(&sha);
+    place_local_package(
+        dir.path(),
+        "Campus-Auth-local-windows-x64.zip",
+        LOCAL_PAYLOAD,
+    );
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/mirror/local.json"),
+        "all",
+    )
+    .await;
+
+    let info = svc
+        .check_update()
+        .await
+        .expect("检查不应失败")
+        .expect("远程版本更高");
+    assert!(info.local_package.is_some(), "前置：本次应命中本地包");
+
+    // LOCAL_PAYLOAD 不是合法 zip，故解压会失败——与本用例目标无关，
+    // 只断言"未发起下载请求"：本地包命中即走复制暂存，不触碰网络下载。
+    let err = svc
+        .apply_update(&info)
+        .await
+        .expect_err("非 zip 负载应解压失败");
+    assert!(
+        matches!(err, campus_auth::updater::UpdaterError::ExtractFailed(_)),
+        "应已越过本地暂存、在解压阶段失败（而非布局校验提前拒绝）：{err}"
+    );
+    assert!(
+        !mock.requested("/assets/win.zip"),
+        "命中本地包时不得发起安装包下载请求"
+    );
+}
+
+// ============ 手动「选择安装包」（apply_uploaded_package，真实实现） ============
+
+/// 构造一个含 `campus-auth` 可执行文件的真实 zip（与发布包结构的最低要求一致）
+///
+/// 上传路径会真的解压并校验 `extracted/<exe>` 存在，故不能用占位字节。
+fn real_update_zip() -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file(exe_name(), zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"#!/bin/sh\necho fake-new-binary\n").unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+/// 当前平台的可执行文件名（与生产侧 `updater::apply::EXE_NAME` 一致）
+fn exe_name() -> &'static str {
+    if cfg!(windows) {
+        "campus-auth.exe"
+    } else {
+        "campus-auth"
+    }
+}
+
+/// 写一个临时文件承载"上传"的包（真实路径是 Web 层的 multipart 临时文件）
+fn write_upload_temp(dir: &Path, bytes: &[u8]) -> std::path::PathBuf {
+    let path = dir.join("uploaded.tmp");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// 上传路径的收尾是 `spawn_helper`——测试环境（`target/debug/deps/`）下没有
+/// `campus-auth-helper`，故该步必然以 `HelperSpawnFailed` 失败。
+///
+/// 这不是被测行为的缺陷，而是环境缺件。用例据此把"走到哪一步"表达清楚：
+/// 允许 Ok 或 HelperSpawnFailed 两种结局，但**必须**已经写出 `pending.json`
+/// ——那才是 staging（复制→解压→校验→计算 exe 摘要）全部完成的证据。
+fn assert_reached_pending(result: Result<String, UpdaterError>, base: &Path) {
+    match &result {
+        Ok(_) => {}
+        Err(UpdaterError::HelperSpawnFailed(_)) => {}
+        Err(other) => panic!("应在 spawn helper 前完成暂存，实际失败于: {other}"),
+    }
+    assert!(
+        base.join("update").join("pending.json").exists(),
+        "staging 与 pending 应已完成（result={result:?}）"
+    );
+}
+
+/// 正常路径（真实实现）：远程版本更高 + 内置 Worker 布局 + 合法 zip →
+/// 解压、计算 exe 摘要并写出 `pending.json`
+#[tokio::test]
+async fn apply_uploaded_package_stages_and_writes_pending() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("python_worker")).unwrap();
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/repos/o/r/releases/latest"),
+        "stable",
+    )
+    .await;
+    let path = write_upload_temp(dir.path(), &real_update_zip());
+
+    let result = svc.apply_uploaded_package("pkg.zip", &path).await;
+    assert_reached_pending(result, dir.path());
+
+    // pending 的 sha256 必须是**解压出的 exe** 的摘要（而非压缩包摘要），
+    // 否则 helper 侧的复核恒失败
+    let pending: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("update/pending.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pending["version"], remote_stable_tag());
+    let extracted = dir.path().join("update/staging/extracted").join(exe_name());
+    assert!(extracted.exists(), "解压产物应存在于 staging");
+    assert_eq!(
+        pending["sha256"].as_str().unwrap(),
+        sha256_hex(&std::fs::read(&extracted).unwrap()),
+        "pending.sha256 应为解压后 exe 的摘要"
+    );
+}
+
+/// 版本闸门（真实实现）：远程最新版本不高于当前版本 → 拒绝，且不写 pending
+///
+/// 这条闸门与 helper 侧 `pending_version_allowed` 同口径——放行会写下一个 helper
+/// 必然拒绝的 pending，留下永远无法应用的待定更新（用户看到"已就绪"却永远更新不了）。
+#[tokio::test]
+async fn apply_uploaded_package_rejects_when_remote_not_newer() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("python_worker")).unwrap();
+    // `/mirror/current.json` 的清单版本等于当前版本 → compare_versions 为假
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/mirror/current.json"),
+        "all",
+    )
+    .await;
+    let path = write_upload_temp(dir.path(), &real_update_zip());
+
+    let err = svc
+        .apply_uploaded_package("pkg.zip", &path)
+        .await
+        .expect_err("远程版本不高于当前时应拒绝");
+    assert!(matches!(err, UpdaterError::PackageNotNewer { .. }), "{err}");
+    assert!(
+        !dir.path().join("update").join("pending.json").exists(),
+        "被拒绝时不得写入 pending"
+    );
+}
+
+/// 布局闸门（真实实现）：外置 Worker（无内置 `<base>/python_worker`）→ 拒绝
+///
+/// 与本地包复用、网络下载走同一道 `self_update_worker_dir`：Docker / 外置 Worker
+/// 由各自部署系统更新，应用内 overlay 会造成主程序与 Worker 版本分裂。
+#[tokio::test]
+async fn apply_uploaded_package_rejects_external_worker_layout() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    // 故意不建 python_worker（模拟外置布局）
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/repos/o/r/releases/latest"),
+        "stable",
+    )
+    .await;
+    let path = write_upload_temp(dir.path(), &real_update_zip());
+
+    let err = svc
+        .apply_uploaded_package("pkg.zip", &path)
+        .await
+        .expect_err("外置 Worker 布局应被拒绝");
+    assert!(
+        matches!(err, UpdaterError::UnsupportedSelfUpdateLayout(_)),
+        "{err}"
+    );
+    assert!(
+        !dir.path().join("update").join("pending.json").exists(),
+        "被拒绝时不得写入 pending"
+    );
+}
+
+/// 解压失败（不是压缩包）：报错且不写 pending
+///
+/// 上传路径不比对摘要（用户显式选定），因此"包无效"是这条路径最主要的失败模式，
+/// 必须确保它不会留下一个指向空 staging 的 pending。
+#[tokio::test]
+async fn apply_uploaded_package_rejects_invalid_archive() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("python_worker")).unwrap();
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/repos/o/r/releases/latest"),
+        "stable",
+    )
+    .await;
+    let path = write_upload_temp(dir.path(), b"definitely-not-a-zip");
+
+    let err = svc
+        .apply_uploaded_package("pkg.zip", &path)
+        .await
+        .expect_err("非压缩包应失败");
+    assert!(matches!(err, UpdaterError::ExtractFailed(_)), "{err}");
+    assert!(
+        !dir.path().join("update").join("pending.json").exists(),
+        "解压失败时不得写入 pending"
+    );
+}
+
+/// zip 里没有可执行文件：拒绝（防止把不含主程序的包写进 pending）
+#[tokio::test]
+async fn apply_uploaded_package_rejects_archive_without_exe() {
+    ensure_no_proxy();
+    let mock = spawn_github_mock();
+    let port = mock.port;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("python_worker")).unwrap();
+    let svc = service_with(
+        dir.path(),
+        &format!("http://127.0.0.1:{port}/repos/o/r/releases/latest"),
+        "stable",
+    )
+    .await;
+    // 合法 zip，但没有 campus-auth 可执行文件
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("README.md", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"no exe here").unwrap();
+    let path = write_upload_temp(dir.path(), &zip.finish().unwrap().into_inner());
+
+    let err = svc
+        .apply_uploaded_package("pkg.zip", &path)
+        .await
+        .expect_err("缺少可执行文件应失败");
+    assert!(matches!(err, UpdaterError::ExtractFailed(_)), "{err}");
+    assert!(!dir.path().join("update").join("pending.json").exists());
 }

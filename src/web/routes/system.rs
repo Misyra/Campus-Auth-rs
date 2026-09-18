@@ -537,6 +537,10 @@ impl ApplyUpdateBody {
             notes: None,
             release_date: None,
             platform_unavailable: false,
+            // pin 路径不收前端提供的本地包信息：条目由服务端在应用阶段自行扫描，
+            // 请求体里"用哪个本地文件"属可伪造输入，一律不采信（见
+            // UpdaterService::download_stage_and_pending 的本地优先分支）
+            local_package: None,
         })
     }
 }
@@ -572,6 +576,90 @@ pub async fn apply_update(
         "message": "更新已暂存，重启后生效",
         "version": info.latest_version,
     })))
+}
+
+/// 手动选择安装包的请求体上限：与下载路径同口径（`MAX_UPDATE_ARCHIVE_BYTES`）
+/// 再加 1 MiB 余量给 multipart 边界与字段头。
+pub(crate) const UPDATE_PACKAGE_BODY_LIMIT: usize =
+    crate::updater::download::MAX_UPDATE_ARCHIVE_BYTES as usize + 1024 * 1024;
+
+/// POST /api/system/update-package — 用手动选择的本地安装包执行更新
+///
+/// body 为 `multipart/form-data`，字段名 `file`（浏览器 `<input type="file">` 提交的
+/// 压缩包）。与本地包复用（扫描 `update/` 目录并比对远程清单摘要）不同，本端点接受
+/// **任何**能解出可执行文件的包：用户显式指定"就装这个包"，自编译包/镜像重打包的包
+/// 摘要必然不匹配远程清单，不能因此拒绝。信任级别的下降是用户显式选择的结果，
+/// 具体约束见 [`crate::updater::UpdaterService::apply_uploaded_package`]。
+///
+/// **不把整包读进内存**：压缩包可达数百 MB，`field.bytes()` 会同时持有 axum 缓冲与
+/// Vec 两份副本。改为把 multipart 分块流式写入系统临时文件，再把**路径**交给更新器
+/// （更新器以流式复制写入 staging，并在复制中按上限拒绝超限内容）。
+pub async fn apply_update_package(
+    State(updater): State<Arc<dyn UpdaterApi>>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<Value>, ApiError> {
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("multipart 解析失败: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let file_name = field.file_name().unwrap_or_default().to_string();
+        // 流式落临时文件：分块写盘，内存占用与包大小无关
+        let mut tmp = tempfile::Builder::new()
+            .prefix("campus-auth-upload-")
+            .tempfile()
+            .map_err(|e| ApiError::Internal(format!("创建临时文件失败: {e}")))?;
+        let mut written: u64 = 0;
+        loop {
+            let chunk = field
+                .chunk()
+                .await
+                .map_err(|e| ApiError::BadRequest(format!("读取上传数据失败: {e}")))?;
+            let Some(chunk) = chunk else { break };
+            written += chunk.len() as u64;
+            if written > crate::updater::download::MAX_UPDATE_ARCHIVE_BYTES {
+                return Err(ApiError::BadRequest(format!(
+                    "安装包超过大小上限（{} MB）",
+                    crate::updater::download::MAX_UPDATE_ARCHIVE_BYTES / 1024 / 1024
+                )));
+            }
+            std::io::Write::write_all(tmp.as_file_mut(), &chunk)
+                .map_err(|e| ApiError::Internal(format!("写入临时文件失败: {e}")))?;
+        }
+        if written == 0 {
+            return Err(ApiError::BadRequest("上传的安装包为空".into()));
+        }
+        tracing::info!(file = %file_name, size = written, "收到手动选择的安装包");
+        let version = updater
+            .apply_uploaded_package(&file_name, tmp.path())
+            .await
+            .map_err(|e| {
+                tracing::warn!(file = %file_name, "使用上传的安装包失败: {e}");
+                match e {
+                    // 登录进行中 / 已有待应用更新属调用时序冲突，500 会误导前端
+                    crate::updater::UpdaterError::UpdateInProgress
+                    | crate::updater::UpdaterError::LoginInProgress => {
+                        ApiError::Conflict(e.to_string())
+                    }
+                    // 包本身的问题（版本不够新 / 解压失败 / 超限）是用户可纠正的输入错误
+                    crate::updater::UpdaterError::PackageNotNewer { .. }
+                    | crate::updater::UpdaterError::ExtractFailed(_)
+                    | crate::updater::UpdaterError::DownloadTooLarge { .. }
+                    | crate::updater::UpdaterError::MissingChecksum => {
+                        ApiError::BadRequest(e.to_string())
+                    }
+                    other => ApiError::from(other),
+                }
+            })?;
+        return Ok(data(serde_json::json!({
+            "message": "更新已暂存，重启后生效",
+            "version": version,
+        })));
+    }
+    Err(ApiError::BadRequest("缺少 file 字段".into()))
 }
 
 /// 自定义通道是否可用：必须是已存在的文件
@@ -1223,6 +1311,20 @@ mod tests {
             Ok(())
         }
 
+        async fn apply_uploaded_package(
+            &self,
+            _archive_name: &str,
+            _archive_path: &std::path::Path,
+        ) -> Result<String, UpdaterError> {
+            match &self.0 {
+                MockOutcome::Info(i) => Ok(i.latest_version.clone()),
+                MockOutcome::None => Err(UpdaterError::PackageNotNewer {
+                    version: "1.0.0".into(),
+                }),
+                MockOutcome::Err(msg) => Err(UpdaterError::ExtractFailed(msg.clone())),
+            }
+        }
+
         fn last_check_state(&self) -> Option<crate::updater::LastCheckState> {
             None
         }
@@ -1239,6 +1341,7 @@ mod tests {
             notes: Some("修复若干问题".into()),
             release_date: None,
             platform_unavailable: false,
+            local_package: None,
         }
     }
 
@@ -1295,7 +1398,7 @@ mod tests {
 
     // ============ GET /api/logs/export 日志导出包 ============
 
-    use super::super::test_support::MockConfigApi;
+    use super::super::test_support::{MockConfigApi, body_json};
 
     /// 双域 state：ConfigApi + EnvironmentApi 各自经 FromRef 委派提取
     #[derive(Clone)]
@@ -1427,5 +1530,219 @@ mod tests {
             notes.iter().any(|n| n.contains("app.log.2026-09-05")),
             "{notes:?}"
         );
+    }
+
+    // ============ POST /api/system/update-package（手动选择安装包） ============
+
+    /// 上传端点专用 mock：记录收到的归档名与**文件实际内容**
+    ///
+    /// 记录内容而非路径：Web 层用临时文件承载上传，句柄随请求销毁，若只记路径则
+    /// 断言阶段文件已被删除。内容比对能同时锁定"字节确实完整传到更新器"。
+    ///
+    /// 注意：文件名净化在更新器内部（写入落盘名的位置）完成，本 mock 只做转发记录，
+    /// 故 `sanitize_upload_name` 的行为由 `updater::local` 的单测覆盖，不在此断言。
+    /// 更新器实际收到的（归档名, 文件内容）
+    type SeenUpload = Option<(String, Vec<u8>)>;
+
+    #[derive(Clone, Default)]
+    struct UploadRecorder {
+        seen: Arc<std::sync::Mutex<SeenUpload>>,
+    }
+
+    /// mock 的返回结果（只覆盖本层关心的错误映射分支）
+    #[derive(Clone)]
+    enum UploadOutcome {
+        Ok(String),
+        NotNewer,
+        ExtractFailed,
+        LoginInProgress,
+    }
+
+    struct UploadMockUpdaterApi {
+        recorder: UploadRecorder,
+        outcome: UploadOutcome,
+    }
+
+    #[async_trait::async_trait]
+    impl UpdaterApi for UploadMockUpdaterApi {
+        async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
+            Ok(None)
+        }
+
+        async fn apply_update(&self, _info: &UpdateInfo) -> Result<(), UpdaterError> {
+            Ok(())
+        }
+
+        async fn apply_uploaded_package(
+            &self,
+            archive_name: &str,
+            archive_path: &std::path::Path,
+        ) -> Result<String, UpdaterError> {
+            // 更新器签名收的是路径（大包不进内存），此处读回内容供断言
+            let bytes = std::fs::read(archive_path).unwrap_or_default();
+            if let Ok(mut slot) = self.recorder.seen.lock() {
+                *slot = Some((archive_name.to_string(), bytes));
+            }
+            match &self.outcome {
+                UploadOutcome::Ok(v) => Ok(v.clone()),
+                UploadOutcome::NotNewer => Err(UpdaterError::PackageNotNewer {
+                    version: "1.0.0".into(),
+                }),
+                UploadOutcome::ExtractFailed => {
+                    Err(UpdaterError::ExtractFailed("不是有效的压缩包".into()))
+                }
+                UploadOutcome::LoginInProgress => Err(UpdaterError::LoginInProgress),
+            }
+        }
+
+        fn last_check_state(&self) -> Option<crate::updater::LastCheckState> {
+            None
+        }
+    }
+
+    fn upload_app(recorder: UploadRecorder, outcome: UploadOutcome) -> axum::Router {
+        let api: Arc<dyn UpdaterApi> = Arc::new(UploadMockUpdaterApi { recorder, outcome });
+        axum::Router::new()
+            .route(
+                "/api/system/update-package",
+                axum::routing::post(apply_update_package).layer(
+                    axum::extract::DefaultBodyLimit::max(UPDATE_PACKAGE_BODY_LIMIT),
+                ),
+            )
+            .with_state(api)
+    }
+
+    /// 构造 multipart 请求体（单文件字段）
+    fn multipart_body(boundary: &str, filename: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+                 Content-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        body
+    }
+
+    async fn post_package(
+        app: axum::Router,
+        filename: &str,
+        bytes: &[u8],
+    ) -> axum::http::Response<Body> {
+        let boundary = "----campusAuthTestBoundary";
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/system/update-package")
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_body(boundary, filename, bytes)))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// 正常路径：上传字节完整送达更新器，响应回带版本号
+    #[tokio::test]
+    async fn update_package_forwards_file_to_updater() {
+        let recorder = UploadRecorder::default();
+        let payload = b"PK\x03\x04fake-archive-bytes";
+        let resp = post_package(
+            upload_app(recorder.clone(), UploadOutcome::Ok("9.9.9".into())),
+            "campus-auth-9.9.9-windows-x64.zip",
+            payload,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["version"], "9.9.9");
+
+        let (name, bytes) = recorder
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("更新器应收到上传的包");
+        assert_eq!(name, "campus-auth-9.9.9-windows-x64.zip");
+        assert_eq!(bytes, payload, "上传字节必须完整无损地送达");
+    }
+
+    /// 空文件：400（不把空包交给更新器）
+    #[tokio::test]
+    async fn update_package_rejects_empty_file() {
+        let recorder = UploadRecorder::default();
+        let resp = post_package(
+            upload_app(recorder.clone(), UploadOutcome::Ok("9.9.9".into())),
+            "p.zip",
+            b"",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            recorder.seen.lock().unwrap().is_none(),
+            "空包不应送达更新器"
+        );
+    }
+
+    /// 缺 file 字段：400
+    #[tokio::test]
+    async fn update_package_requires_file_field() {
+        let recorder = UploadRecorder::default();
+        let boundary = "----b";
+        let app = upload_app(recorder, UploadOutcome::Ok("9.9.9".into()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/system/update-package")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(format!(
+                        "--{boundary}\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nx\r\n--{boundary}--\r\n"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 错误映射：包本身的问题（版本不够新 / 解压失败）→ 400，而非 500
+    ///
+    /// 这两类是用户可纠正的输入错误，映射成 500 会让前端走"服务端故障"分支、
+    /// 用户看不到"这个包用不上"的原因。
+    #[tokio::test]
+    async fn update_package_maps_package_errors_to_400() {
+        for outcome in [UploadOutcome::NotNewer, UploadOutcome::ExtractFailed] {
+            let recorder = UploadRecorder::default();
+            let resp = post_package(upload_app(recorder, outcome), "p.zip", b"not-a-zip").await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "包本身的问题应回 400"
+            );
+        }
+    }
+
+    /// 时序冲突（登录中）→ 409，与「立即更新」路径同一口径
+    #[tokio::test]
+    async fn update_package_maps_login_in_progress_to_409() {
+        let recorder = UploadRecorder::default();
+        let resp = post_package(
+            upload_app(recorder, UploadOutcome::LoginInProgress),
+            "p.zip",
+            b"x",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }

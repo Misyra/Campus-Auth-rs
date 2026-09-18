@@ -234,7 +234,10 @@ pub(crate) async fn download_and_verify(
 /// URL 无可解析段、末段净化后为空（如 `..`）或超长时回退固定名（zip 兜底）。
 /// 资产名来自 GitHub 且 URL 未解码，正常路径不会命中净化分支——此处是
 /// 防御性约束，避免异常 URL 把路径片段变成落盘文件名。
-fn archive_name_from_url(url: &str) -> String {
+///
+/// 本地包暂存（`updater::local`）复用本函数：内容与远程资产一致时扩展名随之确定，
+/// 按远程名分派解压才不会因用户改过本地文件名而选错解压器。
+pub(crate) fn archive_name_from_url(url: &str) -> String {
     let path_only = url.split(['?', '#']).next().unwrap_or("");
     let raw = path_only.rsplit('/').next().unwrap_or("");
     let sanitized: String = raw
@@ -331,6 +334,7 @@ mod tests {
             notes: None,
             release_date: None,
             platform_unavailable: false,
+            local_package: None,
         }
     }
 

@@ -178,6 +178,11 @@ NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果
 - 状态落盘：`update/last_check.json`（UTC RFC3339，`GET /api/update-state` 回放，前端“上次检查”数据源）；每次检查无论成败均刷新
 - 开关：全局 `auto_check_enabled` 为总开关（关后仅手动检查）；`check_interval_hours==0` 仅启动检查；有周期检查时 `check_on_startup` 与首轮 due_now 语义等价
 - 代理收敛：`resolved_proxy_url()`（`proxy_url` 显式优先，回退旧 `proxy_port` 兼容）
+- 手动更新：两条入口，信任口径**不同**——
+  - **本地包复用**（`update/` 根目录扫描，`src/updater/local.rs`）：必须与远程清单声明的 SHA256 一致才复用；探测在 `check_update`（仅回报 `UpdateInfo.local_package` 供前端提示），暂存在 `download_stage_and_pending`（**重新扫描 + 边复制边哈希**，防 check→apply 之间文件被替换使信任锚断裂）；文件名取远程资产名而非本地名（决定解压分派）。不符即忽略并回退下载。
+  - **手动选择安装包**（`POST /api/system/update-package`，上传 multipart）：**不比对远程摘要**——自编译包/镜像重打包必不匹配，用户显式选定即采纳，只需能从包里解出可执行文件。硬约束：target 恒取 `current_exe()`、Worker 目录须为内置 `<base>/python_worker`、版本须严格高于当前（同 helper `pending_version_allowed`，否则留下永远无法应用的 pending）、exe 摘要由本进程实算写入 pending。Web 层把 multipart **流式落临时文件**、更新器收路径再复制（不整包进内存）。
+  - 共同点：落盘均走 `finalize_staged_package`（解压产物 → exe 摘要 → `pending.json`），无旁路；`UpdaterError::PackageNotNewer` / `ExtractFailed` 映射 400（用户可纠正），`LoginInProgress` / `UpdateInProgress` 映射 409。
+  - 清单声明的 `size` 为咨询性字段（同 UPD-7），不符仅告警、以摘要为准
 
 ### 前端嵌入
 

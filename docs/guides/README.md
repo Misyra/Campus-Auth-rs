@@ -5,7 +5,7 @@
 ## 入门
 
 - [README](../../README.md) — 项目概述、特性、快速开始（含 Docker）
-- [用户指南](user-guide.md) — 启动参数、运行时目录、Web 控制台、Profile、任务、录制器、OCR、托盘、更新通道、FAQ
+- [用户指南](user-guide.md) — 启动参数、运行时目录、Web 控制台、Profile、任务、录制器、OCR、托盘、更新通道与手动放置安装包、FAQ
 
 ## 功能指南
 

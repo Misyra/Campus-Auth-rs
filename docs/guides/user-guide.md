@@ -63,7 +63,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 │   └── login_history/       # 登录历史
 ├── environment/             # uv 可执行文件 + 状态文件（python-runtime-state.json / python-preferences.json / ocr.enabled）
 ├── python_worker/           # Worker 工程目录：源码 + .venv（虚拟环境）+ captures/（AI 页面捕获）+ debug/（调试快照）
-└── update/                  # last_check.json（上次检查状态）+ staging/（下载暂存）
+└── update/                  # last_check.json（上次检查状态）+ staging/（下载暂存）+ 手动放置的安装包
 ```
 
 > `.venv` 与 `captures/` / `debug/` 都在 `python_worker/` 下，**不在** `environment/`；`environment/` 只放 uv 与运行时状态。Playwright 浏览器放在各自平台的默认缓存（Windows `%LOCALAPPDATA%\ms-playwright`，macOS `~/Library/Caches/ms-playwright`，Linux `~/.cache/ms-playwright`），仅 Docker 通过 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` 改到镜像内。
@@ -179,7 +179,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 9. 自动更新与通道
 
-入口：关于页「检查更新」（`GET /api/check-update` 按通道拉清单，`GET /api/update-state` 回放上次检查时间）与「立即更新」（`POST /api/system/update`）。
+入口：关于页「检查更新」（`GET /api/check-update` 按通道拉清单，`GET /api/update-state` 回放上次检查时间）与「立即更新」（`POST /api/system/update`）。另有两条**手动更新**入口：「选择安装包」按钮（`POST /api/system/update-package`）与 `update/` 目录放置（见下）。
 
 - 通道（`config.global.updater.channel`）：`stable` 仅正式版（`releases/latest` 单包语义）、`prerelease` 仅预发布、`all` 正式+预发布一起按 semver 取最高；`all` 在 releases 列表为空时回退单包口径（`src/updater/check.rs::fetch_manifest_for_channel`）。
 - 总开关：`auto_check_enabled` 关闭后后台循环与启动检查均静默，仅保留手动检查；`check_interval_hours==0` 仅做启动检查（`src/updater/mod.rs` 的 `due_now` 语义）。
@@ -187,6 +187,27 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 - 代理：显式 `proxy_url`（支持非本机）优先，回退旧 `proxy_port` 兼容（`resolved_proxy_url()`）；监测与更新代理解耦（`monitor.disable_proxy` 默认直连）。
 
 更新 staging 为 `update/staging/`（相对 `base_path`），helper 以 `campus-auth-helper` 完成自替换；uv 与 Python 运行时状态落在 `environment/`，Worker 虚拟环境在 `python_worker/.venv`。
+
+### 手动更新（两条入口）
+
+下载慢、代理不稳，或手里已经有一个现成的包时，可以不走联网下载更新。**设置 · 网络与更新**页提供两种方式：
+
+**方式一：点「选择安装包」直接挑文件**
+
+在「手动选择安装包」处点按钮，从本机选一个已下载好的压缩包（`.zip` / `.tar.gz` / `.tgz`，上限 512 MB）即开始更新；暂存完成后同样询问是否立即重启。
+
+这种方式**不比对远程摘要**——你用自编译的包、别人重新打包的镜像包都能装。代价是这份包的可信度由你自己负责，因此请只选你信任来源的包。程序仍会做以下硬性检查，不通过就拒绝并给出原因：
+
+- 版本须**高于**当前版本（否则装了也不会生效，helper 会拒绝替换）；
+- 包内必须能解出主程序可执行文件，且 Worker 目录须是程序自带的 `python_worker`（Docker / 外置 Worker 部署请用各自方式更新）。
+
+**方式二：把包放进 `update/` 目录，让程序自己认**
+
+从发布页下载对应平台的压缩包（文件名含 `windows-x64` / `macos-arm64` 等平台标识），放进 `<base_path>/update/`（与 `last_check.json`、`staging/` 同级），再点「立即检查」——若包的内容与远程发布**完全一致**，会提示「已在 update/ 目录找到匹配的安装包 xxx，更新时将跳过下载」，按钮变为「使用本地包更新」。
+
+判定依据是 SHA256 **内容**，不按文件名：改过名的包照常可用，放着旧版本的包不会被误用（仍走正常下载），被改动过的包不会被采信。因为摘要来自远程发布清单，这种方式**需要能连上发布源**；完全离线时请用方式一，或按前面的整包覆盖流程手动更新。
+
+两种方式的共同点：暂存完成后都提示是否立即重启；重启由 `campus-auth-helper` 在旧进程退出后完成替换并自动拉起新版本。`update/` 目录下程序自身的文件（`pending.json`、`last_check.json`、`helper.lock`）、`staging/` 子目录、隐藏文件以及 `.tmp` / `.part` / `.crdownload` 半成品都不会被当作安装包，可安全地与包放在一起。
 
 ## 10. 常见问题
 

@@ -148,6 +148,8 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 tower = { version = "0.5", features = ["util"] }
+# 集成测试构造真实发布包结构（上传路径会真的解压并校验 extracted exe 存在）
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 strip = true

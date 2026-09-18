@@ -54,6 +54,13 @@ pub enum UpdaterError {
     #[error("更新包超过大小上限 {limit} 字节")]
     DownloadTooLarge { limit: u64 },
 
+    /// 手动选择的安装包对应的远程版本不高于当前版本
+    ///
+    /// 手动"选择安装包"路径专用：此时无更新可应用，远程清单也拿不到可比的摘要，
+    /// 故不能像本地包复用那样静默忽略，而要明确告知用户"这个包用不上"。
+    #[error("远程最新版本 {version} 不高于当前版本，无需安装本地包")]
+    PackageNotNewer { version: String },
+
     /// zip 解压失败（损坏/格式错误/路径穿越）
     #[error("解压失败: {0}")]
     ExtractFailed(String),

@@ -1940,6 +1940,65 @@
     }
    }
   },
+  "/api/system/update-package": {
+   "post": {
+    "operationId": "post___api_system_update-package",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "multipart/form-data": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "file": {
+          "type": "string",
+          "format": "binary",
+          "description": "手动选择的安装包（.zip / .tar.gz），上限 512 MB"
+         }
+        },
+        "required": [
+         "file"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/update-state": {
    "get": {
     "operationId": "get___api_update-state",

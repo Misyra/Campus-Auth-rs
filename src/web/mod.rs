@@ -216,6 +216,11 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/system/update", || {
             post(routes::system::apply_update)
         }),
+        ("POST", "/api/system/update-package", || {
+            post(routes::system::apply_update_package).layer(DefaultBodyLimit::max(
+                routes::system::UPDATE_PACKAGE_BODY_LIMIT,
+            ))
+        }),
         ("GET", "/api/check-update", || {
             get(routes::system::check_update)
         }),

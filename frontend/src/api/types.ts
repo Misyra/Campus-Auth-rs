@@ -822,7 +822,24 @@ export interface UpdateInfo {
   release_date?: string;
   /** 远程发布缺少当前平台安装包（此时 has_update=false） */
   platform_unavailable?: boolean;
+  /**
+   * 已命中 `update/` 目录下摘要与远程清单一致的安装包（后端
+   * `updater::LocalPackage`）：此时点击「立即更新」会跳过下载。
+   *
+   * 仅作展示用。应用阶段服务端会重新扫描并复制校验，请求体里不接受本地文件信息。
+   */
+  local_package?: LocalPackage | null;
   [key: string]: unknown;
+}
+
+/** 本地安装包（后端 updater::LocalPackage，来自 `<base_path>/update/` 目录） */
+export interface LocalPackage {
+  /** 文件名（不含目录） */
+  file_name: string;
+  /** 文件大小（字节） */
+  size: number;
+  /** 文件 SHA256（hex 小写，与远程清单声明值一致） */
+  sha256: string;
 }
 
 /**
@@ -875,6 +892,16 @@ export interface InitStatus {
 /** 健康检查 */
 export interface HealthInfo {
   version?: string;
+}
+
+/** 系统信息（GET /api/system/info） */
+export interface SystemInfo {
+  version: string;
+  /** 程序数据目录（运行时 base_path）；配置、任务、日志与 update/ 都相对它 */
+  base_path: string;
+  port: number;
+  active_profile_id: string;
+  platform: string;
 }
 
 /** 危险步骤（保存任务前确认） */

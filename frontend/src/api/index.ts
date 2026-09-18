@@ -42,6 +42,7 @@ import type {
   ScheduledTaskPayload,
   Script,
   StatusSnapshot,
+  SystemInfo,
   TaskDetail,
   TaskExecuteResult,
   TaskItem,
@@ -123,6 +124,8 @@ export const actionsApi = {
 /** 系统 */
 export const systemApi = {
   health: () => http.get<HealthInfo>("/api/health"),
+  /** 系统信息：版本、数据目录（base_path）、端口等 */
+  info: () => http.get<SystemInfo>("/api/system/info"),
   initStatus: () => http.get<InitStatus>("/api/init-status"),
   checkUpdate: () => http.get<UpdateInfo>("/api/check-update"),
   // 上次检查状态（设置页"上次检查时间"数据源，只读不触发网络检查）
@@ -135,6 +138,21 @@ export const systemApi = {
       "/api/system/update",
       pin ?? null,
     ),
+  /**
+   * 用手动选择的本地安装包更新（multipart 上传）。
+   *
+   * 上传几百 MB 的包可能远超默认 30s 超时，故放宽到 5 分钟（本地回环上传，
+   * 慢的是读盘与解压，不是网络）。
+   */
+  updateWithPackage: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return http.post<MutationResult & { message?: string; version?: string }>(
+      "/api/system/update-package",
+      form,
+      { timeout: 300000 },
+    );
+  },
   fetchLogs: (limit: number) => http.get<LogEntry[]>(`/api/logs?limit=${limit}`),
   /** 导出日志压缩包：后端打 zip（运行日志 + 登录历史 + 脱敏 meta），返回 Blob */
   async exportLogs(): Promise<Blob> {

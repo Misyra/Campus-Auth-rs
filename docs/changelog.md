@@ -73,6 +73,77 @@
 - 已知问题（`docs/known-issues.md`，含 E2 定时任务手动运行的 toast 语义、E3 任务卡「上次」结果不即时刷新）**有意不写入发布说明**，仅在已知问题清单中保留。
 - 未在本轮处理（记此备查）：`docs/changelog.md` 中 80 余个历史条目标题仍带「开发中（日期 …）」前缀，属已合入条目，保留以维持按日期倒序的可追溯性，不做批量改写。
 
+## 开发中（2026-09-18 手动更新：`update/` 目录放置安装包 + 更新页手动选择安装包）
+
+### 新功能
+
+- **本地包复用**（`src/updater/local.rs` 新增）：把发布包放进 `<base_path>/update/` 根目录后，应用内检查更新发现新版本时若本地文件摘要与远程清单声明值一致，即复用该文件暂存，跳过网络下载。检查阶段仅回报 `UpdateInfo.local_package`（文件名/大小/摘要）供前端提示「已在 update/ 目录找到匹配的安装包 xxx，更新时将跳过下载」，按钮文案相应变为「使用本地包更新」。
+- **手动选择安装包**（`POST /api/system/update-package` 新增 + 更新页「选择安装包」按钮）：浏览器选定本地压缩包上传，暂存后走与联网更新同样的替换流程。与本地包复用的**信任口径有意不同**：用户显式选定即采纳，**不比对远程摘要**——自编译包、他人重打包的镜像包摘要必然不匹配远程清单，按摘要拒绝会让该入口对最需要它的场景不可用。信任级别的下降是用户显式选择的结果，但硬约束保留：target 恒取 `current_exe()`（不接受上传方指定路径）、Worker 目录须为内置 `<base>/python_worker`（外置/Docker 布局拒绝）、版本须**严格高于**当前（同 helper `pending_version_allowed`，否则写下的 pending 会被 helper 拒绝、留下永远无法应用的待定更新）、每包 512 MB 上限、文件名净化（只取末段，防路径片段变成落盘名）。
+- **两条路径共用同一落盘序列**：抽出 `UpdaterService::finalize_staged_package`（解压产物 → 实算 exe 摘要 → 写 `pending.json`），本地包/上传包/网络下载三路都必须经过它，任何一路绕过都会形成"helper 认可的更新但校验不完整"的旁路。exe 摘要始终由本进程从解压产物实算，不接受外部声明值。
+- **上传不把整包读进内存**：压缩包可达数百 MB，`field.bytes()` 会同时持有 axum 缓冲与 Vec 两份副本。Web 层把 multipart **流式落到临时文件**（分块写盘 + 上限即拒），更新器收**路径**再流式复制到 staging，内存占用与包大小无关。
+- **错误映射分层**：`PackageNotNewer` / `ExtractFailed` / `DownloadTooLarge` → 400（用户可纠正的输入错误，如"包太旧""不是有效压缩包"）；`LoginInProgress` / `UpdateInProgress` → 409（调用时序冲突）；其余 → 500。
+- **更新页说明块**：自动更新卡片顶部新增默认折叠的说明条，讲清两条手动入口的区别，并显示实际 `update/` 目录绝对路径（取自 `GET /api/system/info` 的 `base_path`，新增 `systemApi.info` 绑定）与一键复制；取不到路径时降级为相对描述，不打断本页其他功能。
+- **本地包复用仍不支持完全离线**：摘要来自远程清单，取不到清单即无从校验（fail-closed，不做"信任本地文件"降级）——离线场景由新增的「选择安装包」入口覆盖。
+
+### 验证
+
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed` 全绿（lib **923 passed / 0 failed / 1 ignored**；`tests/updater_channels.rs` 由 7 → **16 例**）；前端 `vue-tsc` 零错误、`npm run build` 通过、vitest 全绿（本条落地时为 212 例；随后同日「设置页按钮缺 type」修复新增 2 例守卫，终值 **214 passed / 24 files**）。
+- **新增集成用例（真实实现，非 mock）** 5 例：正常路径 staging + `pending.json` 且 `pending.sha256` 等于解压后 exe 的实算摘要、版本不高于当前时拒绝（`PackageNotNewer`）、外置 Worker 布局拒绝（`UnsupportedSelfUpdateLayout`）、非压缩包拒绝、zip 内无可执行文件拒绝；后四例同时断言**不得写入 pending**。mock 回环新增 `/mirror/current.json`（清单版本 = 当前版本）作为"不高于当前"的受控来源。
+- **新增路由级用例** 5 例（`web::routes::system`）：字节完整送达更新器（比对内容而非路径——上传用临时文件承载，句柄随请求销毁）、空文件 400、缺 `file` 字段 400、包问题 → 400、登录中 → 409。
+- **新增 `updater::local` 用例** 4 例：文件名净化（末段/分隔符/前导点/超长回退）、上传包复制往返（跨多分块）、超限拒绝且清理半写入目标、大小声明不符仍按摘要命中。
+- **变异验证**（强制重编后确认，均改回并复原）：① 去掉上传路径的版本闸门 → 「不高于当前应拒绝」失败；② `pending.sha256` 改为固定值（模拟写成压缩包摘要）→ 「sha256 应为解压后 exe 的摘要」失败。
+- **两次"变异未生效"的排查教训**：用 `Copy-Item -Force` 还原被变异文件时其 mtime 被保留为旧值，cargo 判定产物新鲜而跳过重编，导致"变异后仍全绿"的假象。**结论：变异验证必须显式刷新被改文件的 mtime 再跑**，否则得到的是上一次的构建结果。
+- 未做实机验证：本机 `agent-browser` 起不来（既有记录，见 v5.0.0 条目）。**该限制已于同日被绕过**：改用 `python_worker/.venv` 内的 Playwright 直连 CDP，完成了真实浏览器的取证与回归（见同日「设置页按钮缺 type」条目），本条目的更新页说明块渲染已由该轮脚本覆盖。
+
+### 说明
+
+- 本轮新增 `openapi.json` 的 `/api/system/update-package` 路径（multipart 请求体、含 409 响应）；`openapi_json_matches_route_table` 漂移护栏在本轮**实际拦住了**漏加该路径（先失败后补全），验证了护栏有效性。
+- 用户可见操作步骤更新到 `docs/guides/user-guide.md` §9 的「手动更新（两条入口）」小节；`AGENTS.md` 的「Updater」要点补记两条入口的信任口径差异与共同落盘序列。
+
+## 开发中（2026-09-19 修复：设置页按钮缺 `type` 导致点击后整页刷新）
+
+### 缺陷修复
+
+- **用户报告**：「点击手动选择会刷新一下」。实测确认：点「选择安装包」会触发**原生表单提交**并整页重载，且提交时**token 查询串被覆盖掉**（`?token=...` → `?`），随之丢失鉴权上下文。
+
+### 根因（Playwright 取证，非推断）
+
+1. `SettingsView.vue` 用 `<form autocomplete="on">` 包裹 `<router-view />`（只为拿浏览器自动填充），且**没有** `@submit` 处理器；表单 `method=get`、`action` 为当前 URL。
+2. HTML 规范：`<button>` 缺 `type` 时其 IDL `type` 默认为 `"submit"`。新增的「选择安装包」按钮漏写 `type="button"`，于是点击即触发表单提交 → 导航到当前 URL → SPA 重载。
+3. **取证结论**（`docs/reports/verify-submit-bug.py`，用 `sessionStorage` 跨导航持久化记录——初版用 `window` 变量记录，整页重载后 init script 重置数组，等于把证据擦掉）：submit 事件确实触发、`event.submitter` 即该按钮、提交后 URL 变为 `?`。
+
+### 为何同类按钮当时未暴雷（关键，决定修法）
+
+审计发现表单内共有 **4 个** 按钮的 IDL `type` 为 `submit`（`选择安装包` / `立即检查` / `重新加载配置` / `初始化 Python 环境`），但**只有新增那个真的重载**。机制：浏览器在 click 派发完成后才执行默认动作，其间会检查 submitter 是否已 `disabled`。
+
+- 「立即检查」处理器**首行**同步置 `updateChecking=true` → Vue 微任务刷 DOM → 按钮 disabled → 默认动作被取消；
+- 「选择安装包」首行是 `await pickFile(...)`，置位发生在其后 → 默认动作窗口内仍启用 → 提交发生。
+
+**这是偶然保护**：只要置位挪到任一 `await` 之后就立即失效。故不能依赖「先置 busy」，采用三层守卫（缺一不可）：按钮显式 `type="button"` + 表单 `@submit.prevent` 兜底 + 静态守卫测试。
+
+### 修复
+
+- **根因层**（`SettingsView.vue`）：`<form class="settings-form" @submit.prevent>`。该表单只为自动填充而存在，**没有**标签页提交语义，拦截 submit 后即使将来再漏写 `type` 也只会"不提交"而不会刷新页面。
+- **直接原因层**：补齐 4 个按钮的 `type="button"`（`NetworkSettings.vue` 的 选择安装包/立即检查/立即更新/重新加载配置、`TaskEnvironmentSettings.vue` 的两个环境引导按钮）。
+- **顺带收敛**：`AppearanceView.vue` 随机壁纸弹窗的两个按钮（其在 `Teleport to="body"` 的模态框内，**不在**表单里、本无实害）也补上显式 `type`，使守卫规则可以定为"设置页内所有按钮都必须显式声明 `type`"，无需为 Teleport 例外开口子。
+- **新增静态守卫测试**（`frontend/src/views/settings/settingsForm.test.ts`）：断言 `form.settings-form` 含 `@submit.prevent`、且设置页各子组件所有 `<button>` 均显式声明 `type`。这类缺陷类型检查与构建都发现不了（属性可有可无、渲染正常），只能靠源码级断言拦住回归。
+
+### 验证
+
+- **真实浏览器取证 + 回归**（Playwright + 修复后二进制，`docs/reports/verify-fix.py`）：
+  - 三个按钮真实点击均无 submit 事件、URL 保留 token（修复前「选择安装包」有 submit 且 token 丢失）；
+  - **纵深防御实测**：向表单**注入**一个故意不写 `type` 的探针按钮（IDL `type='submit'`、`form.contains()` 为真），点击后**未发生整页重载**——证明漏写 `type` 时兜底生效；
+  - 功能未破坏：点「选择安装包」仍正常打开文件选择器（`filechooser` 事件触发）；
+  - 全 6 个设置 Tab 审计：表单内可由按钮触发的 submit **0 个**。
+- **守卫测试变异验证**（强制重编/重跑后确认，均已复原）：① 去掉 `@submit.prevent` → 第一个用例失败；② 给「选择安装包」去掉 `type="button"` → 第二个用例失败并点名该文件与标签。
+- 前端 `vue-tsc` 零错误、`npm run build` 通过、vitest **214 passed / 24 files**（新增 2 例）。
+- 后端本轮无改动，`cargo test` 未重跑（上一轮全绿结论不受影响）。
+
+### 说明
+
+- 过程报告与取证脚本留在本地忽略目录 `docs/reports/`（`verify-submit-bug.py` / `verify-fix.py` / `probe-*.py` / `audit-submit-buttons.py` / `diag-settings-page.py`），不入仓。
+- 遗留同类风险面（**未修，仅记录**）：`<form>` 之外若将来出现「包在 form 里的按钮」仍需靠守卫抓；守卫目前只覆盖 `views/settings/` 与其父 `SettingsView.vue`，其他页面若引入 `<form>` 需同步扩展守卫范围。
+
 ## 开发中（2026-09-18 登录网址单输入 + 重定向离线误判兜底）
 
 ### 交互简化

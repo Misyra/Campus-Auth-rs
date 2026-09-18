@@ -7,6 +7,8 @@ import { computed, onMounted, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { useConfirm } from "@/composables/useConfirm";
 import { useStatus } from "@/composables/useStatus";
+import { useToast } from "@/composables/useToast";
+import { pickFile } from "@/utils/file";
 import { systemApi, configApi } from "@/api";
 import type { UpdateState, UpdateInfo } from "@/api/types";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
@@ -14,6 +16,7 @@ import type { SelectOption } from "@/components/common/CustomSelect.vue";
 const config = useConfig();
 const { confirm } = useConfirm();
 const { status } = useStatus();
+const { toastOnly } = useToast();
 
 // 显式标注 SelectOption[]：as const 的只读元组无法绑定 CustomSelect 的可变 options prop
 const checkFrequencyOptions: SelectOption[] = [
@@ -42,6 +45,53 @@ const updating = ref(false);
 const updateProgress = computed(() => status.update_progress ?? null);
 const updateState = ref<UpdateState | null>(null);
 const updateInfo = ref<UpdateInfo | null>(null);
+
+/**
+ * 本地安装包命中提示。
+ *
+ * 后端在检查阶段比对 `update/` 目录下文件与远程清单声明的 SHA256，命中即回报；
+ * 内容不匹配（放的是旧版本）时不回报，此处自然为空。
+ */
+const localPackageHint = computed(() => {
+  const pkg = updateInfo.value?.local_package;
+  if (!pkg) return "";
+  return `已在 update/ 目录找到匹配的安装包 ${pkg.file_name}，更新时将跳过下载`;
+});
+
+/** 数据目录（后端 base_path）；未取到时不展示绝对路径，避免给出错误位置 */
+const basePath = ref("");
+const updateDirLabel = computed(() =>
+  basePath.value ? `${basePath.value}/update` : "程序数据目录下的 update/ 文件夹",
+);
+
+/** 复制数据目录路径：手输一长串路径容易错，给一键复制 */
+async function copyUpdateDir() {
+  if (!basePath.value) {
+    toastOnly(false, "尚未取到数据目录，请稍后重试");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(updateDirLabel.value);
+    toastOnly(true, "已复制 update/ 目录路径");
+  } catch {
+    toastOnly(false, "复制失败，请手动选择路径文本");
+  }
+}
+
+/**
+ * 拉取数据目录（`GET /api/system/info` 的 `base_path`）。
+ *
+ * 失败时静默降级为相对描述（`updateDirLabel` 的兜底文案）——该说明条只是辅助信息，
+ * 取不到绝对路径不应打断本页其他功能，故不弹报错提示。
+ */
+async function loadBasePath() {
+  try {
+    const info = await systemApi.info();
+    basePath.value = info.base_path ?? "";
+  } catch {
+    basePath.value = "";
+  }
+}
 
 async function refreshUpdateState() {
   try { updateState.value = await systemApi.updateState(); } catch { updateState.value = null; }
@@ -86,22 +136,52 @@ async function applyUpdate() {
       has_update: false,
       message: (data.message as string) || "更新已就绪，重启后生效",
     };
-    const ok = await confirm({
-      title: "更新已就绪",
-      message: "更新已下载完成，是否立即重启应用以生效？",
-      confirmText: "立即重启",
-    });
-    if (ok) {
-      try {
-        await systemApi.restart();
-      } catch {
-        if (updateInfo.value) updateInfo.value.message = "更新已就绪，但自动重启失败，请手动重启应用";
-      }
-    }
+    await offerRestart();
   } catch (e: unknown) {
     updateInfo.value = { has_update: false, error: (e as Error).message || "更新失败" };
   } finally {
     updating.value = false;
+  }
+}
+
+/**
+ * 手动选择安装包：挑本地压缩包上传并暂存，成功后同样询问是否立即重启。
+ *
+ * 与「立即更新」的区别只在包的来源——服务端仍会校验版本并走同一套
+ * staging → pending.json → helper 替换流程，故重启提示复用 offerRestart。
+ */
+async function selectUpdatePackage() {
+  const file = await pickFile(".zip,.tar.gz,.tgz");
+  if (!file) return;
+  updating.value = true;
+  updateInfo.value = null;
+  try {
+    const data = await systemApi.updateWithPackage(file);
+    updateInfo.value = {
+      has_update: false,
+      message: (data.message as string) || "更新已就绪，重启后生效",
+    };
+    await offerRestart();
+  } catch (e: unknown) {
+    updateInfo.value = { has_update: false, error: (e as Error).message || "安装包处理失败" };
+  } finally {
+    updating.value = false;
+  }
+}
+
+/** 更新暂存完成后的重启询问（两条更新路径共用） */
+async function offerRestart() {
+  const ok = await confirm({
+    title: "更新已就绪",
+    message: "更新已下载完成，是否立即重启应用以生效？",
+    confirmText: "立即重启",
+  });
+  if (ok) {
+    try {
+      await systemApi.restart();
+    } catch {
+      if (updateInfo.value) updateInfo.value.message = "更新已就绪，但自动重启失败，请手动重启应用";
+    }
   }
 }
 
@@ -145,7 +225,10 @@ async function reloadConfig() {
   } finally { reloading.value = false; }
 }
 
-onMounted(() => { void refreshUpdateState(); });
+onMounted(() => {
+  void refreshUpdateState();
+  void loadBasePath();
+});
 </script>
 
 <template>
@@ -198,6 +281,31 @@ onMounted(() => { void refreshUpdateState(); });
         <IconApp name="download" class="settings-card-icon" />
         <h2>自动更新</h2>
       </div>
+      <div class="card-body">
+        <!-- 手动放置安装包：跨两列的说明条（手动更新是低频操作，放折叠区避免占位） -->
+        <details class="manual-update-tip">
+          <summary>
+            <IconApp name="info" width="15" height="15" />
+            <span>下载慢？可把安装包放进 update/ 目录，更新时自动跳过下载</span>
+            <IconApp name="chevron-down" class="manual-update-chevron" />
+          </summary>
+          <div class="manual-update-body">
+            <p>
+              从发布页下载对应平台的压缩包，放进下面的目录，再点「立即检查」——
+              若包的内容与远程发布的一致，程序会复用它、不再联网下载。
+            </p>
+            <div class="manual-update-path">
+              <code>{{ updateDirLabel }}</code>
+              <button type="button" class="btn btn-ghost btn-sm" @click="copyUpdateDir">复制路径</button>
+            </div>
+            <ul class="manual-update-notes">
+              <li>按 <strong>内容</strong>（SHA256）判断，改过文件名也能用；放着旧版本的包不会被误用。</li>
+              <li>仍需能连上发布源：版本号与校验值来自远程，完全离线时请改用整包覆盖。</li>
+              <li>该目录下的 <code>pending.json</code>、<code>staging/</code> 等是程序自己的文件，可与之共存。</li>
+            </ul>
+          </div>
+        </details>
+      </div>
       <div class="card-body settings-grid-2col">
         <div>
           <div class="toggle-group">
@@ -242,11 +350,24 @@ onMounted(() => { void refreshUpdateState(); });
           </div>
           <div class="form-group">
             <div class="field-label-row">
+              <label>手动选择安装包</label>
+              <FieldHelp text="从本地挑一个已下载好的发布包直接安装，不联网下载。适用于下载慢、或用自编译/镜像包的情况；版本须高于当前版本。" />
+            </div>
+            <div class="update-check-row">
+              <button type="button" class="btn btn-secondary btn-sm" :disabled="updating" @click="selectUpdatePackage">
+                <IconApp v-if="updating" name="refresh" class="spin" />
+                {{ updating ? "处理中..." : "选择安装包" }}
+              </button>
+              <span class="hint">支持 .zip / .tar.gz / .tgz，上限 512 MB</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <div class="field-label-row">
               <label>上次检查时间</label>
               <FieldHelp text="记录最近一次手动或自动检查的结果，重启后保留。" />
             </div>
             <div class="update-check-row">
-              <button class="btn btn-secondary btn-sm" :disabled="updateChecking" @click="manualCheckUpdate">
+              <button type="button" class="btn btn-secondary btn-sm" :disabled="updateChecking" @click="manualCheckUpdate">
                 <IconApp v-if="updateChecking" name="refresh" class="spin" />
                 {{ updateChecking ? "检查中..." : "立即检查" }}
               </button>
@@ -258,13 +379,18 @@ onMounted(() => { void refreshUpdateState(); });
               <div v-if="updateInfo.has_update" class="update-available">
                 <IconApp name="upload" width="16" height="16" />
                 <span>发现新版本 <strong>v{{ updateInfo.latest }}</strong><template v-if="updateInfo.size">（约 {{ (updateInfo.size / 1048576).toFixed(1) }} MB）</template></span>
-                <button class="btn btn-primary btn-sm" :disabled="updating" @click="applyUpdate">{{ updating ? "更新中..." : "立即更新" }}</button>
+                <button type="button" class="btn btn-primary btn-sm" :disabled="updating" @click="applyUpdate">{{ updating ? "更新中..." : localPackageHint ? "使用本地包更新" : "立即更新" }}</button>
                 <a v-if="updateInfo.url" :href="updateInfo.url" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm">前往下载</a>
               </div>
               <div v-else class="update-latest">
                 <IconApp name="check" width="16" height="16" />
                 <span>{{ updateInfo.platform_unavailable ? "远程发布暂无当前平台的安装包" : "当前已是最新版本" }}</span>
               </div>
+              <!-- 本地安装包命中：说明将跳过下载（应用阶段服务端会重新扫描校验） -->
+              <p v-if="updateInfo.has_update && localPackageHint" class="hint update-local-package">
+                <IconApp name="check" width="14" height="14" />
+                {{ localPackageHint }}
+              </p>
               <div v-if="updating && updateProgress" class="hint update-progress">下载更新 {{ updateProgress.percent }}%</div>
               <p v-if="updateInfo.has_update && updateInfo.notes" class="hint update-notes">{{ updateInfo.notes }}</p>
             </div>
@@ -297,7 +423,7 @@ onMounted(() => { void refreshUpdateState(); });
             <label>配置热重载</label>
             <FieldHelp text="从磁盘重新读取配置文件并应用，无需重启。日常修改请使用下方的保存按钮。" />
           </div>
-          <button class="btn btn-secondary btn-sm" @click="reloadConfig" :disabled="reloading">
+          <button type="button" class="btn btn-secondary btn-sm" @click="reloadConfig" :disabled="reloading">
             {{ reloading ? "加载中..." : "重新加载配置" }}
           </button>
           <span v-if="reloadMsg" class="hint">{{ reloadMsg }}</span>

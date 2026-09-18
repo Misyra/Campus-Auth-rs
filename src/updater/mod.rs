@@ -6,6 +6,10 @@
 //! 助手进程契约：读取 `<base_path>/update/pending.json`，等待主进程（PID 由
 //! `--pid` 传入）退出后，将 `staging_dir/extracted/<EXE_NAME>` 复制到 `target_exe`
 //! 并以其 `original_args` 重启，最后清理 staging 与 pending 标记。
+//!
+//! 手动更新：用户把发布包放进 `<base_path>/update/` 时，检查阶段比对远程清单声明的
+//! SHA256，命中即复用该文件跳过下载（见 [`local`]）。本地包不是独立信任源，仍须
+//! 通过同一摘要校验，故不影响离线可用性与既有安全模型。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,13 +24,15 @@ use crate::status::{InstallProgress, LoginStatus, PartialSnapshot, StatusManager
 
 mod apply;
 pub(crate) mod check;
-mod download;
+pub(crate) mod download;
 pub mod error;
+pub(crate) mod local;
 
 pub use apply::PendingUpdate;
 pub use check::{PlatformPackage, ReleaseManifest};
 pub use download::StagedUpdate;
 pub use error::UpdaterError;
+pub use local::LocalPackage;
 
 /// 后台检查任务启动前的延迟（等待核心启动完成）
 const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(5);
@@ -126,6 +132,13 @@ pub struct UpdateInfo {
     pub release_date: Option<String>,
     /// 远程发布缺少当前平台安装包（此时 has_update=false 且无下载信息）
     pub platform_unavailable: bool,
+    /// 已命中 `<base_path>/update/` 下的本地安装包（摘要与远程清单一致），
+    /// 应用时可跳过下载；`None` 表示需走网络下载
+    ///
+    /// 仅用于展示与"是否需下载"的判断：应用阶段会**重新扫描并复制校验**，
+    /// 不信任此处携带的文件名（check 与 apply 之间文件可能被替换）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_package: Option<LocalPackage>,
 }
 
 /// 更新器服务：封装版本检查、下载、暂存与助手替换
@@ -155,6 +168,15 @@ pub trait UpdaterApi: Send + Sync {
     async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError>;
     /// 执行更新（下载 zip 到 staging 并触发助手替换）。
     async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError>;
+    /// 用手动选择的本地安装包执行更新（压缩包在磁盘上的路径）
+    ///
+    /// 取路径而非字节：上传包可达数百 MB，Web 层已把它流式落到临时文件，
+    /// 到这里再经流式复制写入 staging，全程不在内存里整包持有。
+    async fn apply_uploaded_package(
+        &self,
+        archive_name: &str,
+        archive_path: &Path,
+    ) -> Result<String, UpdaterError>;
     /// 读取上次检查状态（文件缺失或损坏返回 `None`）。
     fn last_check_state(&self) -> Option<LastCheckState>;
 }
@@ -167,6 +189,14 @@ impl UpdaterApi for UpdaterService {
 
     async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
         UpdaterService::apply_update(self, info).await
+    }
+
+    async fn apply_uploaded_package(
+        &self,
+        archive_name: &str,
+        archive_path: &Path,
+    ) -> Result<String, UpdaterError> {
+        UpdaterService::apply_uploaded_package(self, archive_name, archive_path).await
     }
 
     fn last_check_state(&self) -> Option<LastCheckState> {
@@ -399,6 +429,7 @@ impl UpdaterService {
                     notes: manifest.changelog.clone(),
                     release_date: manifest.release_date.clone(),
                     platform_unavailable: true,
+                    local_package: None,
                 }));
             }
         };
@@ -424,6 +455,17 @@ impl UpdaterService {
             return Ok(None);
         }
 
+        // 手动更新：探测 update/ 根目录下是否有摘要一致的本地安装包，命中即提示
+        // 前端"将跳过下载"。此处仅回报，不移动文件——应用阶段会重新扫描并按
+        // 副本重新校验（见 download_stage_and_pending 的本地优先分支）
+        let local_package = local::find_local_package(&self.base_path, &pkg.sha256, pkg.size).await;
+        if let Some(found) = local_package.as_ref() {
+            tracing::info!(
+                file = %found.file_name,
+                "命中本地安装包，将跳过下载"
+            );
+        }
+
         Ok(Some(UpdateInfo {
             current_version: self.current_version.to_string(),
             latest_version: manifest.version.to_string(),
@@ -434,6 +476,7 @@ impl UpdaterService {
             notes: manifest.changelog.clone(),
             release_date: manifest.release_date.clone(),
             platform_unavailable: false,
+            local_package,
         }))
     }
 
@@ -512,22 +555,126 @@ impl UpdaterService {
         });
     }
 
-    /// 下载 → 校验 → 解压 → 写 pending.json
-    async fn download_stage_and_pending(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
-        let worker_target_dir = self_update_worker_dir(&self.base_path)?;
-        let staging_dir = self.base_path.join(apply::STAGING_DIR_NAME);
-        tokio::fs::create_dir_all(&staging_dir)
-            .await
-            .map_err(UpdaterError::StagingDirCreateFailed)?;
+    /// 手动"选择安装包"：用用户提供的压缩包完成更新
+    ///
+    /// `archive_path` 为压缩包在磁盘上的位置（由 Web 层把 multipart 流式落到临时文件）。
+    /// 与本地包复用的**关键区别**：上传包的内容由用户提供，无法与某个远程资产名绑定，
+    /// 因此校验口径不同：
+    /// - 本地包复用：必须与远程清单声明的 SHA256 一致（否则忽略，退回下载）；
+    /// - 上传包：用户显式指定"就装这个包"，故不能因摘要不匹配而拒绝（自编译包、
+    ///   镜像重打包的包都会不匹配），改为**只要能从包里解出可执行文件就安装**。
+    ///
+    /// 由此带来的信任级别下降是**用户显式选择的结果**，但仍有硬约束兜住：
+    /// - 目标 exe 路径始终取 `current_exe()`（不接受上传方指定的路径）；
+    /// - Worker 目录仍须是内置 `<base>/python_worker`（外置/Docker 布局拒绝）；
+    /// - 版本仍须**严格高于**当前版本（与 helper 侧 `pending_version_allowed` 同口径），
+    ///   否则 helper 会在替换前拒绝，留下一个永远不会被应用的 pending；
+    /// - 落盘仍走 [`Self::finalize_staged_package`]，exe 摘要由本进程实际计算后写入
+    ///   `pending.json` 供 helper 复核（不是上传方声明的值）。
+    ///
+    /// 返回解出的版本号，供前端提示。
+    pub async fn apply_uploaded_package(
+        &self,
+        archive_name: &str,
+        archive_path: &Path,
+    ) -> Result<String, UpdaterError> {
+        // 已有待应用更新：不覆盖（与 apply_update 同语义，避免把已就绪的更新换掉）
+        if apply::has_pending_update(&self.base_path) {
+            return Err(UpdaterError::UpdateInProgress);
+        }
+        if self
+            .update_in_progress
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(UpdaterError::UpdateInProgress);
+        }
+        let result = self
+            .apply_uploaded_package_inner(archive_name, archive_path)
+            .await;
+        self.update_in_progress.store(false, Ordering::SeqCst);
+        if result.is_err() {
+            self.clear_update_progress();
+        }
+        result
+    }
 
-        let download_client = self.effective_client();
-        let zip_path = download::download_and_verify(
-            &download_client,
+    /// [`Self::apply_uploaded_package`] 的实际执行体（调用方已持有互斥标记）
+    async fn apply_uploaded_package_inner(
+        &self,
+        archive_name: &str,
+        archive_path: &Path,
+    ) -> Result<String, UpdaterError> {
+        // 前置检查：登录进行中拒绝（与下载路径一致：替换 exe 会打断登录）
+        if self.status.borrow().login_status == LoginStatus::Running {
+            return Err(UpdaterError::LoginInProgress);
+        }
+        // 布局校验：外置 Worker / Docker 拒绝（与本地包复用同一道闸门）
+        let worker_target_dir = self_update_worker_dir(&self.base_path)?;
+
+        // 版本闸门依赖远程清单：拿不到清单就没有可用的版本号，也就无法通过 helper
+        // 的版本校验。此处**不**降级放行——一个版本号未知的包写进 pending 只会被
+        // helper 拒绝，徒留一个永远无法应用的待定更新。
+        let settings = self.config.load_settings().global.updater;
+        let manifest = check::fetch_manifest_for_channel(
+            &self.effective_client(),
+            &settings.release_source_url,
+            settings.channel,
+        )
+        .await?;
+        if !check::compare_versions(&self.current_version, &manifest.version) {
+            return Err(UpdaterError::PackageNotNewer {
+                version: manifest.version.to_string(),
+            });
+        }
+
+        let staging_dir = self.base_path.join(apply::STAGING_DIR_NAME);
+        // 文件名净化：上传方提供的名字只取末段并剥离分隔符，避免路径片段变成落盘名；
+        // 扩展名决定解压分派（zip / tar.gz），故保留用户提供的扩展名
+        let safe_name = local::sanitize_upload_name(archive_name);
+        let written = local::copy_into_staging(archive_path, &staging_dir, &safe_name).await?;
+
+        let info = UpdateInfo {
+            current_version: self.current_version.to_string(),
+            latest_version: manifest.version.to_string(),
+            update_available: true,
+            url: String::new(),
+            sha256: String::new(),
+            size: None,
+            notes: manifest.changelog.clone(),
+            release_date: manifest.release_date.clone(),
+            platform_unavailable: false,
+            // 上传包不经本地包扫描：条目由用户在浏览器里选定，不存在"复用缓存"语义
+            local_package: None,
+        };
+        let staged = download::extract_to_staging(&written, &staging_dir, &info.latest_version)
+            .await
+            .inspect_err(|e| {
+                tracing::warn!(file = %safe_name, "选定的安装包解压失败: {e}");
+            })?;
+        self.finalize_staged_package(&staged, &info, &worker_target_dir, &staging_dir)
+            .await?;
+        self.spawn_helper()?;
+        self.clear_update_progress();
+        Ok(info.latest_version)
+    }
+
+    /// 网络下载 + 校验（本地包未命中/暂存失败时的路径）
+    ///
+    /// 与本地包暂存共用进度上报：下载期间经 Update 通道推送百分比（此前蹭
+    /// Environment 通道，与环境安装进度互相覆盖且无消费方）；`available` 置 true
+    /// ——正在应用的更新必然可用。
+    async fn download_archive(
+        &self,
+        info: &UpdateInfo,
+        staging_dir: &Path,
+    ) -> Result<PathBuf, UpdaterError> {
+        let client = self.effective_client();
+        download::download_and_verify(
+            &client,
             info,
-            &staging_dir,
+            staging_dir,
             Some(&|percent| {
-                // 进度走 Update 自有通道（此前蹭 Environment 通道，与环境安装
-                // 进度互相覆盖且无消费方）；available 置 true：正在应用的更新必然可用
                 self.status.merge(PartialSnapshot::Update {
                     available: true,
                     progress: Some(InstallProgress {
@@ -538,10 +685,71 @@ impl UpdaterService {
                 });
             }),
         )
-        .await?;
+        .await
+    }
+
+    /// 下载 → 校验 → 解压 → 写 pending.json
+    ///
+    /// 手动更新优先：`update/` 根目录下存在摘要与远程清单一致的安装包时，从该文件
+    /// 复制暂存（边复制边校验），跳过网络下载；未命中或校验失败时回退网络下载。
+    async fn download_stage_and_pending(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
+        let worker_target_dir = self_update_worker_dir(&self.base_path)?;
+        let staging_dir = self.base_path.join(apply::STAGING_DIR_NAME);
+        tokio::fs::create_dir_all(&staging_dir)
+            .await
+            .map_err(UpdaterError::StagingDirCreateFailed)?;
+
+        // 本地包优先：重新扫描（不信任 check 阶段回报的文件名与存在性——两个动作之间
+        // 文件可能已被删除/替换）。文件名仍取远程资产名，内容由复制时的增量哈希锁定。
+        // 未命中不是错误：用户没放包，或放的是别的版本。
+        let archive_name = download::archive_name_from_url(&info.url);
+        let local_hit = local::find_local_package(&self.base_path, &info.sha256, info.size).await;
+        let zip_path = match local_hit {
+            Some(found) => {
+                let src = self
+                    .base_path
+                    .join(crate::utils::paths::UPDATE_DIR)
+                    .join(&found.file_name);
+                tracing::info!(
+                    file = %found.file_name,
+                    "从本地安装包暂存更新（跳过下载）"
+                );
+                match local::stage_local_package(&src, &self.base_path, &archive_name, &info.sha256)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(e) => {
+                        // 本地包损坏/被替换：不阻断更新，退回网络下载（用户点"立即更新"
+                        // 的意图是完成更新，而非使用某个特定文件）
+                        tracing::warn!(
+                            file = %found.file_name,
+                            "本地安装包暂存失败（{e}），回退网络下载"
+                        );
+                        self.download_archive(info, &staging_dir).await?
+                    }
+                }
+            }
+            None => self.download_archive(info, &staging_dir).await?,
+        };
 
         let staged =
             download::extract_to_staging(&zip_path, &staging_dir, &info.latest_version).await?;
+        self.finalize_staged_package(&staged, info, &worker_target_dir, &staging_dir)
+            .await
+    }
+
+    /// 解压产物 → 计算 exe 摘要 → 写 `pending.json`（本地包/上传包/网络下载三路共用）
+    ///
+    /// 抽出本段的目的：手动"选择安装包"（上传）与本地包复用最终必须落在**同一个**
+    /// 落盘与校验序列上——任何一路绕过都会形成"helper 认可的更新但未经完整校验"的
+    /// 旁路。`staged` 已是解压产物（调用方负责先完成压缩包级校验）。
+    async fn finalize_staged_package(
+        &self,
+        staged: &StagedUpdate,
+        info: &UpdateInfo,
+        worker_target_dir: &Path,
+        staging_dir: &Path,
+    ) -> Result<(), UpdaterError> {
         // 校验解压产物确实存在后再写 pending，避免写入无效的待应用更新
         if !staged.extracted_exe.exists() {
             return Err(UpdaterError::ExtractFailed("解压产物缺失可执行文件".into()));
@@ -1097,6 +1305,7 @@ mod tests {
             notes: None,
             release_date: None,
             platform_unavailable: false,
+            local_package: None,
         };
         assert!(matches!(
             svc.apply_update(&info).await,
@@ -1147,6 +1356,7 @@ mod tests {
             notes: None,
             release_date: None,
             platform_unavailable: false,
+            local_package: None,
         };
         assert!(matches!(svc.apply_update(&info).await, Ok(())));
         assert!(
