@@ -23,6 +23,40 @@
 - `cargo test --lib config::runtime::tests --features no-embed`：5 passed；`cargo test --lib monitor:: --features no-embed`：58 passed；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告。
 - `frontend npm run build` 通过，Vitest 23 files / 212 tests 全通过；真实 Rust 本地实例 + Playwright/Chromium 验证登录网址留空、填写、重新清空、自定义触发地址展开四条交互均通过，且无页面脚本错误。
 
+## 开发中（2026-09-18 性能：/ws/logs 收窄单连接缓冲，16 连接常驻内存降低约 2 MB）
+
+内存专项分析（见 `docs/reports/perf-profile-2026-09-18.md` §7.1）实测每 WebSocket 连接私有内存 **0.154 MB**（16 连接合计 2.46 MB），是控制平面最大的可变内存项。
+
+### 修复（内存占用）
+
+- **收窄 `/ws/logs` 单连接读/写缓冲**（`src/web/ws.rs`）：tungstenite 默认读缓冲 **128 KiB**、写缓冲 128 KiB，且读缓冲是 **eager 分配**（见 `tungstenite/src/protocol/mod.rs` 的 `read_buffer_size` 文档：「This buffer is eagerly allocated」）。该默认值面向「高读负载」场景，而本端点入站仅有 ping 心跳与 `frontend_log`（后者已在 `record_frontend_log` 截断至 KB 级），128 KiB 明显过大。
+  - 新增 `WS_LOGS_READ_BUFFER_SIZE = 4 KiB`：入站无高负载需求，4 KiB 足够；
+  - 新增 `WS_LOGS_WRITE_BUFFER_SIZE = 16 KiB`：出站单帧最大为状态快照（~0.9 KB）与截断后的日志条目，16 KiB 可容纳单帧而非频繁扩容。
+  - 读缓冲调小**不影响大消息**：缓冲只是分块读取粒度，消息总长仍由既有 `max_message_size`/`max_frame_size`（64 KiB）约束 —— 已实测 64 KiB 级消息在 4 KiB 读缓冲下正确接收且连接存活。
+
+### 实测效果（同脚本 A/B，私有内存增量）
+
+| 并发连接 | 修复前每连接 | 修复后每连接 | 修复前总增量 | 修复后总增量 |
+|---|---|---|---|---|
+| 4 | 0.136 MB | 0.016 MB | 0.54 MB | 0.06 MB |
+| 8 | 0.144 MB | 0.017 MB | 1.15 MB | 0.13 MB |
+| 12 | 0.149 MB | 0.021 MB | 1.79 MB | 0.25 MB |
+| 16（上限） | 0.154 MB | **0.033 MB** | 2.46 MB | **0.53 MB** |
+
+- 每连接内存**降低约 79%**，16 连接（当前上限）总增量 **2.46 MB → 0.53 MB**。
+- 5 轮「16 连接建立→断开」循环峰值：**11.32 MB → 9.20 MB**，与节省量吻合；两版本均不累积（峰值逐轮稳定，属分配器保留空闲页而非泄漏）。
+
+### 验证
+
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets -- -D warnings` 零警告
+- `cargo test --lib`：**899 passed / 0 failed**（连续 3 次全量并行）；`cargo test --test login_chain`：5 passed
+- 端到端功能验证：WS 连接建立后每秒 1 帧状态快照正常；4 KB 前端日志正确回显；64 KiB 级入站消息正确接收、连接与进程均存活
+
+### 说明
+
+- 本项与同日的 `/api/history` 修复（见上一条）是同一轮内存/性能分析的两项产出：前者消除随历史量增长的 CPU/延迟，本项降低多连接常驻内存。
+- 内存分析的其余结论（Virtual Bytes 4.27 GB 为地址空间预留、无泄漏、7 MB 私有内存基线）见性能报告 §4 与 §7.1，均**无需改动**。
+
 ## 开发中（2026-09-18 性能：/api/history 改为按天倒序早停，消除随历史量线性增长的解析开销）
 
 性能分析（见 `docs/reports/perf-profile-2026-09-18.md`）实测发现：`GET /api/history` 先读 30 天**全量**记录，再按 `limit` 截断，导致 `limit` 对 I/O 与解析量**完全没有节流作用**——前端只需 30 条，服务端却解析全部历史。

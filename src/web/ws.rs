@@ -194,6 +194,12 @@ static WS_LOGS_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 /// 入站单帧上限（WE2-1）：入站消息仅 ping 心跳与 frontend_log（后者已在
 /// record_frontend_log 截断至 KB 级），64KiB 绰绰有余；axum 默认 64MiB 远超需要
 const WS_LOGS_MAX_MESSAGE_SIZE: usize = 64 * 1024;
+/// 单连接读缓冲（tungstenite 默认 128 KiB，**eager 分配**）：入站仅 ping 心跳
+/// 与 frontend_log，读侧无高负载需求，4 KiB 足够，可显著降低多连接常驻内存。
+const WS_LOGS_READ_BUFFER_SIZE: usize = 4 * 1024;
+/// 单连接写缓冲下限（tungstenite 默认 128 KiB）：出站单帧最大约 8 KiB 级
+/// （状态快照 ~0.9 KB、日志条目经前端截断），16 KiB 足够容纳单帧而非频繁扩容。
+const WS_LOGS_WRITE_BUFFER_SIZE: usize = 16 * 1024;
 
 /// /ws/logs 连接计数守卫：无论连接因何结束（panic/正常返回）都释放名额
 struct WsLogsConnGuard;
@@ -222,6 +228,8 @@ pub async fn logs_handler(
     let conn_id = WS_CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ws.max_message_size(WS_LOGS_MAX_MESSAGE_SIZE)
         .max_frame_size(WS_LOGS_MAX_MESSAGE_SIZE)
+        .read_buffer_size(WS_LOGS_READ_BUFFER_SIZE)
+        .write_buffer_size(WS_LOGS_WRITE_BUFFER_SIZE)
         .on_upgrade(move |socket| async move {
             let _guard = WsLogsConnGuard;
             handle_logs(socket, state, conn_id).await;
