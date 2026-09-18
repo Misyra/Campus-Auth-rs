@@ -40,6 +40,21 @@ export const TASK_REPO_INDEX_URL_GITEE = `https://raw.giteeusercontent.com/${TAS
 /** Gitee 镜像的仓库主页（浏览用，非索引地址） */
 export const TASK_REPO_URL_GITEE = `https://gitee.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}`;
 
+/**
+ * B 站 UP 主主页。
+ *
+ * 「关于」页的外部入口。
+ */
+export const BILIBILI_SPACE_URL = "https://space.bilibili.com/5608024";
+/**
+ * 使用教程视频，直达 03:29 的录制器演示片段。
+ *
+ * 任务页的「使用教程」入口、录制器卡片（`设置 · 任务与环境`）与 AI 页的排障提示共用。
+ * 此前 AI 页指引写「按照视频教程操作」，但全仓没有任何视频地址，用户照做找不到内容。
+ * 链接去掉了分享追踪参数（`share_source` / `vd_source`），只保留 `t=209` 的起播时间。
+ */
+export const TUTORIAL_VIDEO_URL = "https://www.bilibili.com/video/BV1EdNg6VEbp/?t=209";
+
 /** 仓库导入的源类型：两个预设镜像 + 用户自填地址 */
 export type TaskRepoSourceId = "github" | "gitee" | "custom";
 

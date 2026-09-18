@@ -8,7 +8,7 @@ import { useScripts } from "@/composables/useScripts";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
-import { TASK_REPO_URL } from "@/utils/constants";
+import { TASK_REPO_URL, TUTORIAL_VIDEO_URL } from "@/utils/constants";
 
 const t = useTasks();
 const s = useScripts();
@@ -168,8 +168,9 @@ function closeEditor() { void t.closeTaskEditor(); }
             </button>
           </div>
           <div class="help-tip">
-            <span>想自动生成步骤？可用 <b>任务录制器</b> 在登录页点选元素自动生成任务。</span>
+            <span>想自动生成步骤？先用 <b>任务录制器</b> 在登录页点选账号框、密码框、登录按钮等元素，再点面板上的「📋 复制 AI 提示词」发给大模型，即可得到任务 JSON。</span>
             <a href="/api/tools/task-recorder.user.js" class="btn btn-sm" title="下载录制器脚本">安装录制器</a>
+            <a :href="TUTORIAL_VIDEO_URL" target="_blank" rel="noopener noreferrer" class="btn btn-sm" title="任务录制器使用教程视频">使用教程</a>
             <a href="/api/docs/task-writing-guide" class="btn btn-sm" title="下载编写指南">编写指南</a>
             <router-link :to="{ name: 'tasks-ai' }" class="btn btn-sm" title="用 AI 描述生成任务">用 AI 生成</router-link>
           </div>

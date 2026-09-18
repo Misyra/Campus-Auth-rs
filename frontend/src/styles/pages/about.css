@@ -259,13 +259,16 @@
 .about-links {
   display: flex;
   justify-content: center;
+  /* 4 个链接（使用文档 / GitHub / 赞助 / B 站主页），窄屏换行避免溢出 */
+  flex-wrap: wrap;
   gap: var(--space-md);
   margin-bottom: var(--space-md);
 }
 
 .github-link,
 .docs-link,
-.sponsor-link {
+.sponsor-link,
+.bilibili-link {
   display: inline-flex;
   align-items: center;
   gap: var(--space-sm);
@@ -282,7 +285,8 @@
 
 .github-link:hover,
 .docs-link:hover,
-.sponsor-link:hover {
+.sponsor-link:hover,
+.bilibili-link:hover {
   background: var(--bg-hover);
   border-color: var(--border-hover);
   transform: translateY(-2px);
@@ -290,7 +294,8 @@
 }
 
 .github-link svg,
-.docs-link svg {
+.docs-link svg,
+.bilibili-link svg {
   width: 20px;
   height: 20px;
 }
@@ -300,6 +305,11 @@
   width: 20px;
   height: 20px;
   color: var(--accent);
+}
+
+/* B 站：官方粉，辨识来源 */
+.bilibili-link svg {
+  color: #fb7299;
 }
 
 .muted {

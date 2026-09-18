@@ -7,6 +7,7 @@ import { systemApi, autostartApi, uninstallApi } from "@/api";
 import type { UninstallDetectItem, UninstallStepResult } from "@/api/types";
 import { useConfirm } from "@/composables/useConfirm";
 import { frontendLogger } from "@/utils/logger";
+import { BILIBILI_SPACE_URL } from "@/utils/constants";
 
 const { confirm } = useConfirm();
 const router = useRouter();
@@ -185,6 +186,10 @@ function closeUninstall() {
           <a href="https://blog.misyra.com/sponsor/" target="_blank" rel="noopener noreferrer" class="sponsor-link">
             <IconApp name="heart" />
             赞助
+          </a>
+          <a :href="BILIBILI_SPACE_URL" target="_blank" rel="noopener noreferrer" class="bilibili-link">
+            <IconApp name="bilibili" />
+            B 站主页
           </a>
         </div>
         <p>License: AGPL-3.0-only (<a href="https://github.com/Misyra/Campus-Auth-rs/blob/master/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>)</p>

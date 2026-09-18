@@ -12,7 +12,7 @@ import { useEnvironment } from "@/composables/useEnvironment";
 import { ocrApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import { pickFile } from "@/utils/file";
-import { TASK_REPO_URL } from "@/utils/constants";
+import { TASK_REPO_URL, TUTORIAL_VIDEO_URL } from "@/utils/constants";
 import { useToast } from "@/composables/useToast";
 
 const { busy } = useStatus();
@@ -295,7 +295,7 @@ async function recognizeOcr() {
       </div>
       <div class="card-body">
         <div class="task-recorder-section">
-          <p class="task-recorder-desc">在登录页点选账号框、密码框、登录按钮等元素，自动生成任务步骤。</p>
+          <p class="task-recorder-desc">在登录页点选账号框、密码框、登录按钮等元素，录制器会把这些整理成一段 AI 提示词；点「📋 复制 AI 提示词」复制后发给大模型，即可生成任务步骤。</p>
           <div class="task-recorder-actions">
             <a href="/api/tools/task-recorder.user.js" class="btn btn-primary">
               <IconApp name="upload" class="icon-sm" />
@@ -303,11 +303,11 @@ async function recognizeOcr() {
             </a>
             <a href="/api/docs/task-writing-guide" class="btn btn-secondary">
               <IconApp name="file-text" class="icon-sm" />
-              导出编写指南
+              下载编写指南
             </a>
           </div>
           <div class="task-recorder-note">需先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 扩展，再安装录制器脚本；在登录页点击浮动按钮开始录制。</div>
-          <div class="task-recorder-note">编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
+          <div class="task-recorder-note">不会用？看 <a :href="TUTORIAL_VIDEO_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>（从 03:29 的录制演示开始）；编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
         </div>
       </div>
     </section>

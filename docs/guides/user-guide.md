@@ -1,6 +1,6 @@
 # 用户指南
 
-> 适用于 Rust 重写版 `campus-auth`（`v5.0.0-alpha.10`，单 binary + Python Worker 子进程）。Python 版 `main.py` / `start.exe` / `update.exe` 已不在本仓库出现，本文已按当前实现重写。
+> 适用于 Rust 重写版 `campus-auth`（`v5.0.0`，单 binary + Python Worker 子进程）。Python 版 `main.py` / `start.exe` / `update.exe` 已不在本仓库出现，本文已按当前实现重写。
 
 ## 1. 启动与命令行
 
@@ -136,14 +136,17 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 - **任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。「任务」页分「浏览器任务」「脚本」「定时任务」「AI 生成浏览器任务」四个标签页，**只管编辑**；用哪个任务登录由方案决定（见下）。
 - **定时任务**：「任务」页的「定时任务」标签页，按 cron 调度**浏览器与脚本两类**任务（`src/scheduler`，状态在 `tasks/scheduled/`；创建时按 `target_id` 关联任务，类型由任务本体推导）。
-- **何时执行**：网络监测 Offline/Captive 时自动执行活跃任务；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
+- **何时执行**：网络监测 Offline/Captive 时自动执行当前方案绑定的浏览器任务；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
 
 ### 录制器：不手写 JSON
+
+录制器只负责把你点选的元素整理成 **AI 提示词**，任务 JSON 由大模型生成后再导入。
 
 1. 安装 Tampermonkey；
 2. 在「设置 · 任务与环境」页「安装录制器脚本」；
 3. 打开校园网登录页，点浮动按钮开始录制，按提示点选账号框、密码框、验证码、登录按钮等；
-4. 结束录制后保存为任务；再到「方案」页的方案编辑器「登录方式」里为当前方案选中它，验证一次（`resources/tools/task-recorder.user.js`）。
+4. 点`📋 复制 AI 提示词`，粘贴给大模型生成任务 JSON（也可用「AI 生成浏览器任务」页完成）；
+5. 把任务导入「任务」页，再到「方案」页的方案编辑器「登录方式」里为当前方案选中它，验证一次（`resources/tools/task-recorder.user.js`）。
 
 ## 5. 浏览器自动化与调试
 

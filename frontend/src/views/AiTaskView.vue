@@ -17,6 +17,7 @@ import { useToast } from "@/composables/useToast";
 import { useConfirm } from "@/composables/useConfirm";
 import { downloadBlob } from "@/utils/file";
 import { fileStamp } from "@/utils/formatters";
+import { TUTORIAL_VIDEO_URL } from "@/utils/constants";
 
 const router = useRouter();
 const { toastOnly } = useToast();
@@ -491,8 +492,10 @@ async function restoreCapture(): Promise<void> {
       <IconApp name="alert-triangle" class="icon-sm" />
       <span>
         当前功能仍在开发，可能不稳定。如果无法生成正确任务，请到
-        <router-link to="/settings/tasks">设置 → 任务</router-link>
-        手动下载录制器，按照视频教程操作。
+        <router-link to="/settings/tasks">设置 · 任务与环境</router-link>
+        下载<router-link to="/settings/tasks">任务录制器</router-link>，点选元素后把提示词交给任意大模型生成；
+        也可参考
+        <a :href="TUTORIAL_VIDEO_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>。
       </span>
     </div>
 

@@ -10,6 +10,9 @@ Rust 重写版为便携式单二进制 + Python 子进程（浏览器自动化�
 - **自动认证**：断网/被劫持时自动触发登录，支持重试、冷却与失败去重提醒
 - **多 Profile**：按网关 IP / WiFi SSID 自动匹配（约束条件多者优先），支持手动切换
 - **浏览器自动化**：Playwright 驱动，支持完整的步骤序列（导航 / 填表 / 点击 / 验证码 / 断言）
+- **直连请求登录**：门户登录是普通 HTTP 请求时可免 Python、免浏览器直接完成认证（支持占位符与沙箱凭据变换脚本，见 [docs/guides/http-login-guide.md](docs/guides/http-login-guide.md)）
+- **方案导入导出**：方案（认证地址、直连参数、匹配规则等）可导出为 JSON 分享，导入前展示内容与脚本原文，凭据不随包导出
+- **运行模式预设**：「日常使用」与「排查问题」两套预设一键切换，确认前列出具体改动项
 - **验证码识别**：OCR 识别登录验证码，识别失败自动重试整个流程
 - **定时任务**：cron 表达式调度，支持打卡签到等日常自动化
 - **Web 控制台**：内置 Web UI（Vue 3），支持状态查看、任务编辑、日志与实时 WebSocket
@@ -56,7 +59,7 @@ curl http://localhost:50721/api/health
 Web 控制台 `http://localhost:50721`，数据持久化于命名卷 `campus-auth-data`（`config/` / `tasks/` / `logs/`）。
 
 默认拉取 `ghcr.io/misyra/campus-auth-rs:prerelease` 多架构镜像。需要固定版本时设置
-`CAMPUS_AUTH_IMAGE=ghcr.io/misyra/campus-auth-rs:v5.0.0-alpha.10`；需要从当前源码构建时使用：
+`CAMPUS_AUTH_IMAGE=ghcr.io/misyra/campus-auth-rs:v5.0.0`；需要从当前源码构建时使用：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
@@ -76,7 +79,8 @@ docker run -d --name campus-auth --restart unless-stopped --stop-timeout 40 \
 ## 使用说明
 
 - **Web 控制台**：默认 `http://127.0.0.1:50721`（回环地址端口被占用或被 Windows 保留时，改绑端口 0 由系统随机分配，实际端口见启动日志；`CAMPUS_AUTH_PORT` / `--port` 可覆盖）
-- **Profile**：每个 Profile 含认证页 URL（`auth_url`）与可选劫持触发地址（`trigger_url`，非空即重定向模式）、用户名/密码（AES-256-GCM 加密落盘）、网关/SSID 匹配与 `active_task`
+- **Profile**：每个 Profile 含可选固定登录网址（`auth_url`）、可选自定义重定向触发地址（`trigger_url`）、用户名/密码（AES-256-GCM 加密落盘）、网关/SSID 匹配与 `active_task`（本方案用哪个浏览器任务）。浏览器渠道下**填写网址即直接使用，留空即跟随重定向**（`auth_url` 与 `trigger_url` 均为空时按重定向登录，触发地址默认 `http://www.msftconnecttest.com/connecttest.txt`，仅特殊网络需要用 `trigger_url` 覆盖且必须为明文 `http`）；`trigger_url` 非空时兼容旧版显式重定向语义，以触发地址优先。判定见 `ProfileSnapshot::uses_redirect_login`（`src/config/runtime.rs`）
+- **登录方式**：每个 Profile 二选一——`browser` 浏览器自动化（Python Worker + Playwright）或 `http` 直连请求（Rust 内直接发 HTTP，免 Python 与浏览器，见 [docs/guides/http-login-guide.md](docs/guides/http-login-guide.md)）
 - **任务**：两类 `type`（`browser` 浏览器自动化 / `script` 自定义脚本，由 `TaskKind` 表达）；定时任务可调度**两类**任务（`GET /api/scheduler/jobs`，创建时按 `target_id` 关联任务，类型由任务本体推导而非冗余存储）；API 统一为 `GET/POST /api/tasks`、`POST /api/scripts/run`、`GET /api/tools/task-recorder.user.js`（任务录制用户脚本）
 - **单次登录**：`campus-auth --mode login-once` 执行一次当前方案绑定的任务后退出；`--status` / `--stop` / `--autostart` 见 `campus-auth --help`（`--mode` 可选值：`full` / `lightweight` / `login-once`）
 - **更新通道**：设置页 `updater.channel`（`stable` 正式版 / `prerelease` 测试版 / `all` 全通道最新），`auto_check_enabled` 为总开关，`GET /api/update-state` 回放上次检查时间
