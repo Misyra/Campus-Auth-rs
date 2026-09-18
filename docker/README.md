@@ -5,10 +5,10 @@
 | 位置 | 文件 | 职责 |
 |---|---|---|
 | 根 | `Dockerfile` | 多阶段构建（Node 前端 → Rust → Python 3.12-slim 预装 `python_worker`+Chromium），`COPY python_worker` 与 `.dockerignore: python_worker/.venv` 联动，产物预装 `/app/python_worker` |
-| 根 | `docker-compose.yml` | 默认拉取 GHCR 多架构测试镜像并编排（`127.0.0.1:50721→50721`、`VOLUME /data`、`HEALTHCHECK /api/health`） |
+| 根 | `docker-compose.yml` | 默认拉取 GHCR 多架构测试镜像并编排（`127.0.0.1:50721→50721`、`VOLUME /data`、`HEALTHCHECK /api/health`、`stop_grace_period: 40s` 容纳 26s 优雅关闭预算、`init: true` 回收浏览器子进程树） |
 | 根 | `docker-compose.build.yml` | 源码开发/自定义构建覆盖；叠加后才执行本地 `Dockerfile` 多阶段构建 |
 | 根 | `.dockerignore` | 缩小上下文（`target/frontend/node_modules/python_worker/.venv/__pycache__/logs/config` 等），与 `.gitignore` 口径一致 |
-| `docker/` | `entrypoint.sh` | 容器入口（`mkdir -p $DATA_DIR/{config,tasks,logs,environment}` 后 `exec campus-auth`），仅被 `Dockerfile` 引用 |
+| `docker/` | `entrypoint.sh` | 容器入口（`mkdir -p $DATA_DIR/{config,tasks,logs,environment}`、同步 `/opt/campus-auth/resources` 到数据目录后 `exec campus-auth`），仅被 `Dockerfile` 引用 |
 | `docker/` | `docker-compose.override.example.yml` | 宿主机目录挂载示例（`./data:/data`），需 `docker compose -f docker-compose.yml -f docker/docker-compose.override.example.yml up` 显式叠加 |
 
 发布流程会在原生 x64 与 ARM64 runner 分别构建镜像，再发布统一的多架构 tag。普通部署不再重复编译 Rust、前端和 Chromium；便携包仍携带源码构建上下文，离线或自定义场景可使用构建覆盖文件。
@@ -77,6 +77,10 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 > 更新通道（`stable`/`prerelease`/`all`）与检查开关在 `settings.json` 的 `updater` 节配置（前端设置页），非环境变量；镜像内 `update/last_check.json` 为上次检查落盘状态。
 
+> **容器内不支持应用内自更新**：镜像的 Python Worker 位于 `/app/python_worker`，不在数据目录 `/data` 内，应用内更新器会按「外置布局」拒绝覆盖（`UnsupportedSelfUpdateLayout`）。升级请走部署侧：`docker compose pull && docker compose up -d`。
+
+> **定时自重启与容器重启策略**：配置里的 `app.auto_restart_hours` 默认 24 小时，到期后主进程主动优雅退出。compose 已配 `restart: unless-stopped`，容器会自动拉起；手工 `docker run` 需自行加 `--restart unless-stopped`，否则容器会停在 exited。若不需要，可在设置页把该值改为 0。
+
 CLI 参数优先级高于环境变量：`--host` / `--port` / `--base-path`。
 
 ## 端口与网络
@@ -97,12 +101,15 @@ services:
 ```bash
 docker build -t campus-auth .
 
+# --stop-timeout 覆盖默认 10s，容纳 26s 的优雅关闭预算（否则 Bridge 等待 Worker
+# 退出时被 SIGKILL，残留孤儿浏览器进程）
 docker run -d \
   --name campus-auth \
+  --restart unless-stopped \
+  --stop-timeout 40 \
   -p 127.0.0.1:50721:50721 \
   -v campus-auth-data:/data \
   -e CAMPUS_AUTH_HOST=0.0.0.0 \
-  --restart unless-stopped \
   campus-auth
 ```
 

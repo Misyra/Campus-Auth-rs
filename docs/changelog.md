@@ -2,6 +2,27 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-17 Docker 部署核对整改：静态资源、关闭预算与运行口径）
+
+静态核对 Docker 部署（本机无 Docker 环境，未做实机构建；`uv` 相关结论由本机 uv 0.11.21 等价实验得出）发现并修复的问题。
+
+### 修复（Docker 运行时）
+
+- **`resources/` 随镜像分发并同步到数据卷**（`Dockerfile` + `docker/entrypoint.sh`）：`GET /api/tools/task-recorder.user.js` 从 `<base_path>/resources/tools/` 读取，且**没有** rust-embed 嵌入副本（对比 `docs/guides` 有 `GuideAsset` 兜底，是这条链上唯一断的）。此前 `resources` 只在 rust-builder 阶段 COPY（供 `include_bytes!("../../resources/icons/tray.png")`），运行时镜像不含该目录，`resolve_script_path`（`src/web/routes/tools.rs:15-37`）三级查找（base_path → 父级链 → 编译期 `CARGO_MANIFEST_DIR=/build`）全部落空 → 前端「安装录制器」按钮 **404**。修法：运行时 `COPY --from=rust-builder /build/resources /opt/campus-auth/resources`，entrypoint 每次启动 `cp -rf` 覆盖同步到 `${DATA_DIR}/resources`（与便携版 helper 的 overlay 口径一致：覆盖同名、新增缺失，保证升级镜像后不残留旧脚本；失败仅告警，不阻断启动）。
+- **`uv run` 两步补 `--no-dev`**（`Dockerfile`）：`uv sync` 带 `--no-dev`，但后续 `uv run` 不带 → uv 默认把 dev 组拉回 venv。本机实测（真实 `pyproject.toml` + `uv.lock`）：sync 后 5 个包，一次不带 `--no-dev` 的 `uv run` 就装回 `pytest/pluggy/iniconfig/packaging/pygments/colorama`。三步统一加 `--no-dev` 后实测 import 探针 `import playwright; import worker_main` 仍通过、site-packages 无 pytest。
+- **compose 补 `stop_grace_period: 40s` 与 `init: true`**（`docker-compose.yml`）：优雅关闭预算约 26s（托盘 3s + 调度 5s + 引擎 5s + Bridge 8s + Axum 5s，见 `src/launcher.rs:947-1005`），Docker 默认 10s 后 SIGKILL，会在 Bridge 等待 Worker 退出前强杀并留下孤儿 chromium。`init` 负责回收浏览器子进程树的僵尸进程。
+
+### 修复（文档口径）
+
+- **根 `README.md` 的 `docker run` 补 `--restart unless-stopped`、`--stop-timeout 40`、端口改绑回环**：原写法 `-p 50721:50721`（发布到所有网卡）与 `docker/README.md:39`「不要把容器端口直接暴露到局域网或公网」自相矛盾；缺 `--restart` 时，`app.auto_restart_hours` 默认 24h 到期后主进程主动退出，容器会停在 exited 不再回来（compose 有 `restart: unless-stopped` 故无此问题）。`docker/README.md` 的单独命令示例同步补 `--stop-timeout 40`。
+- **`docker/README.md` 明示「容器内不支持应用内自更新」**：镜像 Worker 位于 `/app/python_worker`、不在数据目录 `/data` 内，`self_update_worker_dir`（`src/updater/mod.rs:44-55`）按外置布局返回 `UnsupportedSelfUpdateLayout`，`POST /api/system/update` 必然失败——这是有意设计（由部署系统更新），但此前文档未写。同节补充定时自重启与容器重启策略的关系。
+- **新增 `.gitattributes` 固定 `docker/*.sh` / `Dockerfile` / `.dockerignore` / `docker-compose*.yml` 为 LF**：仓库 `core.autocrlf=true`，当前 entrypoint.sh 工作区与 git blob 均为 LF，但换机 checkout 被转成 CRLF 会让容器报 `exec: /entrypoint.sh: no such file or directory`（shebang 行带 `\r`）。
+
+### 其他
+
+- `.dockerignore` 补 `python_worker/tests`、`captures`、`debug`、`build`、`dist`、`.mypy_cache`、`.ruff_cache`（此前随 `COPY python_worker` 进镜像）。
+- 未改动项（已核对通过，记录备查）：`rust:1.98-bookworm` 与 `python:3.12-slim-bookworm` 均提供 amd64/arm64 且与 `rust-toolchain.toml`、`requires-python >=3.12,<3.13` 一致；运行时 GTK/ayatana/librsvg/libxdo 齐备；`worker_project_dir` 的 `/app/python_worker` 兜底命中镜像布局；`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` 构建与运行同源；`is_docker_env()` 经 `/.dockerenv` 生效（自动绑 `0.0.0.0` + 禁托盘）。
+
 ## 开发中（2026-09-17 修复 unix CI 的 dead_code 编译失败）
 
 - **`unescape_csv_field` 加 `#[cfg(windows)]`**（`src/bridge/orphan.rs`，对应测试同步加 `#[cfg(windows)]`）：该函数只服务 Windows 分支的 `Get-CimInstance` + `ConvertTo-Csv` 路径（CSV 字段反转义），unix 分支读 `/proc/<pid>/cmdline` 无转义需要处理。缺 cfg 时 unix 下触发 `dead_code`，而 CI 的 `rust-tests-unix`（ubuntu-22.04 / macos-latest）以 `-D warnings` 运行 clippy，直接编译失败（exit 101）——最近两次 master CI 失败均源于此，Windows job 不受影响所以本地与 Windows CI 一直全绿。

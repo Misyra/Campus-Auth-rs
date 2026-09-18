@@ -65,8 +65,12 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 ```bash
 # 仅用 Docker CLI（不使用 compose）
+# 端口同样只绑回环；--restart 必需：容器内定时自重启（默认 24h）会让主进程退出，
+# 无重启策略的容器将停在 exited 不再回来。--stop-timeout 覆盖默认 10s，
+# 给 26s 的优雅关闭预算留足时间（否则 Bridge 等待 Worker 时被 SIGKILL，残留孤儿浏览器）
 docker build -t campus-auth .
-docker run -d --name campus-auth -p 50721:50721 -v campus-auth-data:/data campus-auth
+docker run -d --name campus-auth --restart unless-stopped --stop-timeout 40 \
+  -p 127.0.0.1:50721:50721 -v campus-auth-data:/data campus-auth
 ```
 
 ## 使用说明

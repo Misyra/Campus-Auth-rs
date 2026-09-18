@@ -5,6 +5,13 @@ python_worker/.venv
 python_worker/__pycache__
 python_worker/.pytest_cache
 python_worker/.tmp-uv-cache
+python_worker/.mypy_cache
+python_worker/.ruff_cache
+python_worker/captures
+python_worker/debug
+python_worker/build
+python_worker/dist
+python_worker/tests
 python_worker/.tmp-uv-audit-cache
 .pytest_cache
 __pycache__

@@ -1,0 +1,8 @@
+# Docker 部署文件与 shell 脚本在各平台均须 LF：
+# 仓库 core.autocrlf=true 会把 CRLF 写回 Windows 工作区，
+# 导致容器里 `exec: /entrypoint.sh: no such file or directory`（shebang 行带 \r）。
+docker/*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+docker-compose*.yml text eol=lf
+docker/docker-compose*.yml text eol=lf

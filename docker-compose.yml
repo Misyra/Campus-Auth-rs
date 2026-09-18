@@ -4,6 +4,11 @@ services:
     image: ${CAMPUS_AUTH_IMAGE:-ghcr.io/misyra/campus-auth-rs:prerelease}
     container_name: campus-auth
     restart: unless-stopped
+    # 优雅关闭预算 ≈ 26s（托盘 3s + 调度 5s + 引擎 5s + Bridge 8s + Axum 5s），
+    # Docker 默认 10s 后即 SIGKILL，会在 Bridge 等待 Worker 退出前强杀，留下
+    # 孤儿 chromium；40s 留足余量。init 负责回收浏览器子进程树的僵尸进程。
+    stop_grace_period: 40s
+    init: true
     ports:
       # Web 控制台
       # 本工具的 token 仅用于本地浏览器会话防护，不是远程访问凭证。

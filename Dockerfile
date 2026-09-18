@@ -59,12 +59,21 @@ RUN campus-auth --version
 # 拷贝 Python Worker 源码
 COPY python_worker ./python_worker
 
+# 静态资源（托盘图标 / 任务录制器脚本）。图标已编译进二进制，此处供
+# `GET /api/tools/task-recorder.user.js` 读取——它由 base_path 下的
+# `resources/` 提供且无编译期嵌入副本（对比 docs/guides 有 GuideAsset 兜底），
+# 缺失会让前端「安装录制器」404。entrypoint.sh 每次启动覆盖同步到
+# ${CAMPUS_AUTH_BASE_PATH}/resources。
+COPY --from=rust-builder /build/resources /opt/campus-auth/resources
+
 # 预装 Python 依赖与 Playwright 浏览器（加速首次启动，无网络时可离线运行）。
 # 任一环节失败都终止构建，禁止产出“镜像成功、Worker 不可用”的半成品。
+# 三步均带 --no-dev：dev 组（pytest 等）是仓库测试依赖，运行时不需要；
+# 缺任一步 uv 都会按默认把 dev 组拉回 venv，白增一层与运行无关的包。
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --project python_worker --frozen --no-dev && \
-    uv run --project python_worker --frozen playwright install --with-deps chromium && \
-    uv run --project python_worker --frozen python -c "import playwright; import worker_main"
+    uv run --project python_worker --frozen --no-dev playwright install --with-deps chromium && \
+    uv run --project python_worker --frozen --no-dev python -c "import playwright; import worker_main"
 
 # 暴露端口
 EXPOSE 50721
