@@ -2,7 +2,7 @@
 // @name         Campus-Auth 任务录制器
 // @namespace    https://github.com/Misyra/Campus-Auth
 // @version      5.0.0
-// @description  可视化选取校园网登录页面元素，自动生成任务 JSON 或结构化文档
+// @description  可视化选取校园网登录页面元素，整理成 AI 提示词，交给大模型生成任务 JSON
 // @author       Misyra
 // @match        http://*/*
 // @match        https://*/*
@@ -1159,7 +1159,7 @@
         <div class="ca-header-bar">
           <div>
             <h3>🎬 Campus-Auth 任务录制器</h3>
-            <small>v${VERSION} — 选取元素，生成任务配置</small>
+            <small>v${VERSION} — 选取元素，生成 AI 提示词</small>
           </div>
           <button id="ca-btn-help" class="ca-help-btn" title="使用说明">?</button>
         </div>
@@ -2762,11 +2762,11 @@
           <h5 class="ca-help-h5">步骤类型</h5>
           <table class="ca-help-table">
             <tr class="ca-help-table-header"><th>类型</th><th>操作方式</th><th>说明</th></tr>
-            <tr><td>👤 账号</td><td>点击输入框</td><td>导出为 <code>input</code> + {{USERNAME}}</td></tr>
-            <tr><td>🔒 密码</td><td>点击输入框</td><td>导出为 <code>input</code> + {{PASSWORD}}</td></tr>
-            <tr><td> 运营商</td><td>点击下拉框/按钮</td><td>原生 select 一步完成；自定义下拉需再点选项；按钮组自动检测</td></tr>
+            <tr><td>👤 账号</td><td>点击输入框</td><td>整理为 <code>input</code> + {{USERNAME}}</td></tr>
+            <tr><td>🔒 密码</td><td>点击输入框</td><td>整理为 <code>input</code> + {{PASSWORD}}</td></tr>
+            <tr><td>📶 运营商</td><td>点击下拉框/按钮</td><td>原生 select 一步完成；自定义下拉需再点选项；按钮组自动检测</td></tr>
             <tr><td>🖼️ 验证码</td><td>先点图片再点输入框</td><td>合并为 <code>ocr</code> 步骤</td></tr>
-            <tr><td>🚀 提交</td><td>点击按钮</td><td>导出为 <code>click</code> 步骤</td></tr>
+            <tr><td>🚀 提交</td><td>点击按钮</td><td>整理为 <code>click</code> 步骤</td></tr>
             <tr><td>☑️ 勾选</td><td>点击复选框</td><td>录制勾选/取消操作</td></tr>
             <tr><td>🔍 智能检测</td><td>打字或点击</td><td>自动识别账号/密码/勾选/提交/下拉框，最省力</td></tr>
             <tr><td>👆 点击</td><td>点击任意元素</td><td>仅记录 click，不填值</td></tr>
