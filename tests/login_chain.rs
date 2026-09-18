@@ -221,6 +221,12 @@ async fn setup_env(python: &PathBuf, mock_script: &str) -> Option<TestEnv> {
 ///
 /// 任务启用态已改为按方案绑定（`profile.active_task`），全局
 /// `POST /api/tasks/active/{id}` 路由已移除。
+///
+/// 显式关闭定时暂停：`PauseSettings` 默认 `enabled=true` 且窗口为 23:00–06:00
+/// （夜间不自动登录，宿舍断网时段反复重连无意义）。基座走 tempdir + 默认配置，
+/// 不吃 `tests/fixtures` 里那些 `enabled:false` 的模板；CI 在该窗口内运行时，
+/// 引擎定时器分支被 `is_any_pause_active` 门控，自动重登永远不触发，
+/// `login_chain_auto_relogin_after_kick` 必然超时失败（依赖挂钟的偶发红）。
 async fn setup_profile_and_task(env: &TestEnv, auth_url: &str) {
     let mock_base = env.mock.base();
     env.api
@@ -254,10 +260,19 @@ async fn setup_profile_and_task(env: &TestEnv, auth_url: &str) {
                     "enable_tcp_check": false,
                     "enable_local_check": false,
                     "network_check_timeout": 5,
-                }
+                },
+                "pause": { "enabled": false },
             })),
         )
         .await;
+    // 落盘确认：上面只改内存快照不够——引擎经 ConfigService 读配置，
+    // 但显式断言能挡住"白名单拒收该键"这类静默失效（见 config.rs 的 global_keys）
+    let persisted = env.api.request("GET", "/api/config", None).await;
+    assert_eq!(
+        persisted["pause"]["enabled"], false,
+        "定时暂停仍为启用态，自动重登会被门控：{}",
+        persisted["pause"]
+    );
 }
 
 fn login_task_json(mock_base: &str) -> Value {

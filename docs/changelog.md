@@ -2,6 +2,14 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0-alpha.10”。
 
+## 开发中（2026-09-18 修复 login_chain 自动重登用例依赖挂钟导致夜间 CI 必红）
+
+- **`setup_profile_and_task` 显式关闭定时暂停并断言落盘**（`tests/login_chain.rs`）：`PauseSettings` 默认 `enabled=true` 且窗口为 23:00–06:00（夜间不自动登录）。用例基座走 `tempdir` + 默认配置，不吃 `tests/fixtures` 里那些 `enabled:false` 的模板，而引擎定时器分支有 `is_any_pause_active` 门控（`src/engine/run_loop.rs:226`）——CI 在该窗口内运行时自动重登永远不触发，`login_chain_auto_relogin_after_kick` 必然在 150s 后超时失败。
+- 根因定位依据：连续两次 CI（00:32Z / 01:04Z UTC）同用例失败、其余 4 例全绿，而 16:50Z 的 CI 全绿；单跑失败 job 复现一致，排除偶发。其余 4 例走手动 `POST /api/login`，不经引擎定时器，故不受影响。
+- 修复用 `PATCH /api/config` 的 `pause.enabled=false`（该键在 `global_keys` 白名单内，`src/web/routes/config.rs:111-122`）并在 `GET /api/config` 回读断言，挡住「白名单拒收该键导致静默失效」这类回归。
+- 与 2026-09-17 那轮「e2e 集成不受影响」的判断并不矛盾：当时是按**白天**运行 + `immediate_check_blocked_by_pause` 语义推得「自动重登由定时器路径驱动、不受影响」，本轮暴露的正是定时器路径自身在窗口内被门控（`docs/changelog.md` 该轮已把「恰在 23:00–06:00 跑 CI」列为极端情况，未处理，本轮补上）。
+- 验证：`cargo fmt --check` 通过、`cargo clippy --test login_chain` 无警告、`--list` 5 例齐备。**本机缺 ddddocr/PIL，`preflight()` 会打印原因后跳过（`cargo test --test login_chain` 0.33s 全绿即跳过态），实跑以 CI 的 `e2e-login-chain` 为准。**
+
 ## 开发中（2026-09-17 Docker 部署核对整改：静态资源、关闭预算与运行口径）
 
 静态核对 Docker 部署（本机无 Docker 环境，未做实机构建；`uv` 相关结论由本机 uv 0.11.21 等价实验得出）发现并修复的问题。
