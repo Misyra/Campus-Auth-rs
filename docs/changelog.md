@@ -63,7 +63,8 @@
 - 主题色解析逻辑经 node 实跑核对（`vite-node` 临时脚本，跑完即删）：默认（mono）+ 浅色 → `accent=#000000 hover=#1f1f1f on-accent=#ffffff`；默认（mono）+ 深色 → `accent=#ffffff hover=#e6e6e6 on-accent=#0f172a`；青色（既有选择）→ `accent=#22d3ee`，派生不受影响。
 - **未做浏览器实测**：`agent-browser` 在本机起不来（多次 `open` 超时、无 chrome 进程），故主题色的实际渲染（色块、开关旋钮、描边/发光观感）**未经真实浏览器确认**，仅由上条逻辑核对与 `base.css` 静态值一致覆盖到「变量取值正确」。建议发版前人工目视过一遍浅色/深色两态的外观页。
 - `cargo build --release`（含前端嵌入）通过，产物内已含前端资源；`cargo fmt --check` 通过、`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告、`cargo test --features no-embed --lib` **908 passed / 0 failed / 1 ignored**。
-- 发布说明提取口径复验：PowerShell 复刻 `release.yml:197` 的 awk 逻辑，`v5.0.0` 提取 89 行且不含 `v5.0.0-alpha.10` 正文，`v5.0.0-alpha.10` 仍为 19 行。
+- 发布说明提取口径复验：PowerShell 复刻 `release.yml:197` 的 awk 逻辑，`v5.0.0` 提取 94 行且不含 `v5.0.0-alpha.10` 正文，`v5.0.0-alpha.10` 仍为 19 行。
+- **版本提升暴露的测试耦合（已修）**：`tests/updater_channels.rs` 的 mock 远程版本写死 `5.0.0`，而 `check_update` 只在 `remote > current` 时返回 `Some`——当前版本提升到 `5.0.0` 后该比较恒为假，2 个用例在三平台稳定失败（CI run `35349374028`，本地同样复现）。改为由 `env!("CARGO_PKG_VERSION")` 派生各远程 tag（patch+1 / minor+1 的 beta / 更旧 alpha / major+4），断言与注释同步去具体号，避免下次提升再次失效。变异验证：去掉 `patch+1` → 正是这 2 例失败。`cargo test --tests --features no-embed` 全绿（908 lib + 各集成 crate）。
 
 ### 说明
 
