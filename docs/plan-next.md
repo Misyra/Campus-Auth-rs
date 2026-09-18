@@ -1,7 +1,7 @@
 # 后续计划（活跃入口）
 
 > R/F/G/A/B 组已在 `docs/changelog.md` 第十一~十六轮落地并归档；历史归档目录 `docs/archive/` 已于 2026-09-17 删除，其中材料不可追溯。
-> 当前活跃：`v5.0.0-alpha.10+`（`docs/changelog.md`）。P0/P1 与更新子系统待办的权威摘要以本文件与 `docs/known-issues.md` 为准（原 defect-recheck / updater-audit 过程报告已于 2026-09-12 删除）。
+> 当前活跃：`v5.0.0`（`docs/changelog.md`）。P0/P1 与更新子系统待办的权威摘要以本文件与 `docs/known-issues.md` 为准（原 defect-recheck / updater-audit 过程报告已于 2026-09-12 删除）。
 > 验证块：`cargo clippy --all-targets -- -D warnings` / `cargo test` 双 feature（含 `rust-tests-unix`）/ `cargo fmt --check` / `uv run pytest` / `npm run build` + `vitest` / `e2e-login-chain` 全链路。
 
 ## C 组收尾（已于 2026-08-26 落地，非活跃待办）
@@ -13,7 +13,7 @@
 - **批次七：A-5 system.rs 按域拆分** — `changelog.md:1541-1544`（`routes/background.rs` / `routes/uninstall.rs`，关闭 `state.container` 旁路；commit `207d9cd`）
 - **批次八：B3 根治（调试会话存活期纳入槽位）** — `changelog.md:1546-1550`（commit `5505faa`）
 
-## alpha.8 之后（待排期，按复核优先级）
+## v5.0.0 之后（待排期，按复核优先级）
 
 - **必修（P0，9 条）**：Bridge 槽位/取消注册表、录制器多 frame、任务创建 `..Default` 空 steps 等（原 76 条 v2 对质结论，报告已删）。
 - **强烈建议（P1，约 12 项）**：`wait` 三方矛盾、`timeout` 钳制、`evaluate` 关页、别名漂移、`select` 空值、LLM `finish_reason`/`max_tokens`/重试、更新后 `uv sync`、错误映射 500/404、Esc 脏状态、前端保存防连点与 `validateConfig`/`cron` 校验。（`shell` 类型静默失效已解决：`type=shell` 现于反序列化明确报错并提示改用 `script`，见 `src/tasks/models.rs`。）
