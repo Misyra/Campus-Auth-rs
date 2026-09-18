@@ -18,7 +18,7 @@ export const TIMING = {
   WS_BACKOFF_BASE: 1000,
   WS_PING_INTERVAL: 30000,
 } as const;
-/** 重定向模式默认触发地址：与 Windows NCSI 同源的明文探测页，劫持型校园网实测会被网关 302 */
+/** 登录网址留空时的默认触发地址：与 Windows NCSI 同源，明文请求可被校园网网关劫持 */
 export const DEFAULT_TRIGGER_URL = "http://www.msftconnecttest.com/connecttest.txt";
 
 /**

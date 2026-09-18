@@ -1,15 +1,14 @@
 //! 认证门户地址检测：未认证时请求明文探测地址并跟随 302 找到真门户
 //!
-//! 入口为 `POST /api/monitor/detect-portal`（见 [`crate::web::routes::monitor::detect_portal`]），
-//! 供认证地址输入框旁的“自动检测”按钮调用：
+//! 当前由 `POST /api/monitor/test-redirect` 在拉起可见浏览器前调用，用于快速识别
+//! “已经正常联网”的场景；不再把重定向候选地址返回前端或自动填入配置：
 //!
 //! - 已在线时探测直通 204，无劫持可抓——必须先退出校园网登录再检测；
 //! - 未认证时网关劫持探测请求：返回 3xx（`Location` 指向真门户）或直接 200 吐登录页
 //!   （无跳转可取，只能提示用户手动复制地址栏）；
 //! - 检测目标固定为监测配置中的 `http_targets + url_targets`（内置 generate_204 类明文
 //!   地址），不接受客户端传参；重定向目标由网关下发，逐跳做最小目的地址校验
-//!   （仅拒环回/链路本地/通配地址，内网门户放行，见 [`probe_target`]）；结果仅填入表单，
-//!   由用户确认保存，不自动落盘。
+//!   （仅拒环回/链路本地/通配地址，内网门户放行，见 [`probe_target`]）。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -40,7 +39,7 @@ pub enum PortalDetectStatus {
     Offline,
 }
 
-/// `POST /api/monitor/detect-portal` 的业务负载
+/// HTTP 门户预检的内部业务负载
 #[derive(Debug, Clone, Serialize)]
 pub struct PortalDetectResult {
     /// 结论

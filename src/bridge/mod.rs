@@ -1074,7 +1074,10 @@ async fn execute_inner(
     // 需要 inner 锁）。调试面板被直接关闭（未点"停止调试"）时调试会话永久占住
     // 槽位、拒绝后续所有登录类命令；超过 30 分钟无调试活动判定为遗弃，强制
     // 回收 Worker（调试状态随进程销毁）放行本次请求。
-    if matches!(method, "execute_login_attempt" | "execute_browser_task") {
+    if matches!(
+        method,
+        "execute_login_attempt" | "execute_browser_task" | "test_redirect"
+    ) {
         let stale = {
             let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.current_session == Some(SessionType::Debug)
@@ -1091,8 +1094,10 @@ async fn execute_inner(
     // 1. 懒加载 Worker（环境就绪则 spawn）
     ensure_worker(this, is_ocr).await?;
 
-    // 2. 会话类型（debug_* 为调试会话，其余为登录/浏览器任务）
-    let session = if method.starts_with("debug_") {
+    // 2. 会话类型（可见重定向检测独占窗口；debug_* 为调试会话；其余为登录任务）
+    let session = if method == "test_redirect" {
+        SessionType::RedirectTest
+    } else if method.starts_with("debug_") {
         SessionType::Debug
     } else {
         SessionType::Login
@@ -1915,11 +1920,13 @@ fn debug_session_stale(last_activity: Option<Instant>, now: Instant) -> bool {
 /// - 无活跃会话：任意方法
 /// - InLogin + (execute_login_attempt/execute_browser_task/debug_start)：FIFO 排队
 /// - InDebug + (debug_step/debug_stop/debug_run_all)：FIFO 排队
+/// - OCR / 反馈捕获等轻量命令可与任意会话并发
 ///
 /// 不兼容（快速失败 [`BridgeError::WorkerBusy`]）：
 /// - InLogin + (debug_step/debug_stop)
 /// - InDebug + (execute_login_attempt/execute_browser_task)：登录请求快速失败
 /// - InDebug + debug_start：已有调试会话
+/// - RedirectTest 与所有非轻量会话互斥：可见临时窗口不得被登录/调试关闭
 ///
 /// `ocr_recognize` / `feedback_capture` 为轻量命令，允许与任意会话并发。
 fn check_session_compat(current: Option<SessionType>, method: &str) -> Result<(), BridgeError> {
@@ -1929,9 +1936,10 @@ fn check_session_compat(current: Option<SessionType>, method: &str) -> Result<()
     match current {
         None => Ok(()),
         Some(SessionType::Login) => match method {
-            "debug_step" | "debug_stop" => Err(BridgeError::WorkerBusy),
+            "debug_step" | "debug_stop" | "test_redirect" => Err(BridgeError::WorkerBusy),
             _ => Ok(()),
         },
+        Some(SessionType::RedirectTest) => Err(BridgeError::WorkerBusy),
         Some(SessionType::Debug) => {
             if method.starts_with("debug_") {
                 match method {
@@ -1992,6 +2000,7 @@ mod tests {
         for m in [
             "execute_login_attempt",
             "execute_browser_task",
+            "test_redirect",
             "debug_start",
             "debug_step",
             "debug_stop",
@@ -2006,6 +2015,7 @@ mod tests {
     fn 登录会话_允许登录与浏览器任务() {
         assert_ok(Some(SessionType::Login), "execute_login_attempt");
         assert_ok(Some(SessionType::Login), "execute_browser_task");
+        assert_busy(Some(SessionType::Login), "test_redirect");
     }
 
     #[test]
@@ -2036,12 +2046,28 @@ mod tests {
     fn 调试会话_登录与浏览器任务应忙碌() {
         assert_busy(Some(SessionType::Debug), "execute_login_attempt");
         assert_busy(Some(SessionType::Debug), "execute_browser_task");
+        assert_busy(Some(SessionType::Debug), "test_redirect");
+    }
+
+    #[test]
+    fn 重定向检测_独占浏览器会话() {
+        for method in [
+            "execute_login_attempt",
+            "execute_browser_task",
+            "test_redirect",
+            "debug_start",
+            "debug_step",
+            "debug_stop",
+        ] {
+            assert_busy(Some(SessionType::RedirectTest), method);
+        }
     }
 
     #[test]
     fn ocr识别_与任意会话并发兼容() {
         assert_ok(None, "ocr_recognize");
         assert_ok(Some(SessionType::Login), "ocr_recognize");
+        assert_ok(Some(SessionType::RedirectTest), "ocr_recognize");
         assert_ok(Some(SessionType::Debug), "ocr_recognize");
     }
 
@@ -2050,6 +2076,7 @@ mod tests {
         assert!(is_lightweight_method("feedback_capture"));
         assert_ok(None, "feedback_capture");
         assert_ok(Some(SessionType::Login), "feedback_capture");
+        assert_ok(Some(SessionType::RedirectTest), "feedback_capture");
         assert_ok(Some(SessionType::Debug), "feedback_capture");
     }
 

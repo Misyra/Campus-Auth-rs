@@ -54,8 +54,8 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/monitor/stop", || {
             post(routes::monitor::stop_monitor)
         }),
-        ("POST", "/api/monitor/detect-portal", || {
-            post(routes::monitor::detect_portal_handler)
+        ("POST", "/api/monitor/test-redirect", || {
+            post(routes::monitor::test_redirect)
         }),
         // ---- 配置（config）----
         ("GET", "/api/config", || get(routes::config::get_settings)),

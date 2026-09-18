@@ -34,7 +34,7 @@ pub enum AuthEndpointState {
     Invalid,
     /// 直接认证模式下未配置认证入口
     Missing,
-    /// 重定向模式依赖 trigger_url，不执行直接认证入口预检
+    /// 重定向登录依赖 trigger_url，不执行固定认证入口预检
     SkippedRedirectMode,
 }
 
@@ -69,6 +69,11 @@ pub enum AssessmentReason {
     /// 两级认证等场景：网关可能放行探测域名（判 Online）或不给任何劫持证据，
     /// 且不满足严格口径的门户证据组合。
     LinkUpLoginAssumed,
+    /// 重定向登录兜底：本地网卡已连接，但公网探测无法拿到标准门户响应
+    ///
+    /// 此时只有让浏览器访问明文触发地址，才可能由网关完成跳转；为避免普通
+    /// 断网反复拉起浏览器，Engine 对该原因对应的建议只谨慎尝试一次。
+    RedirectLoginAssumed,
     /// 所有已启用的公网探测均失败
     AllProbesFailed,
     /// 只有 TCP 等弱传输证据，不能确认公网状态

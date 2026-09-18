@@ -117,9 +117,9 @@ wait_for_selector
 - `{{USERNAME}}`：当前 Profile 的账号
 - `{{PASSWORD}}`：当前 Profile 的密码
 - `{{ISP}}`：当前 Profile 的运营商
-- `{{LOGIN_URL}}`：当前认证地址（重定向模式下为触发地址，Worker 首导航跟随 302 到真门户，存量任务零改动）
+- `{{LOGIN_URL}}`：本次浏览器首导航地址；方案填写固定登录网址时为该网址，留空跟随重定向时为触发地址
 
-> 重定向模式（仅劫持型门户）：Profile 的 `trigger_url` 非空即启用，`auth_url` 可留空。触发地址须为明文 `http`（如 `http://captive.apple.com/hotspot-detect.html`，`https` 不可劫持）。监测跳过 `auth` TCP 探测、登录跳过预检，自动登录依赖 URL 探测的 `Captive` 判定。
+> 重定向登录（仅劫持型门户）：Profile 的固定登录网址 `auth_url` 留空即启用，触发地址默认 `http://www.msftconnecttest.com/connecttest.txt`，仅特殊网络需要用 `trigger_url` 自定义。触发地址须为明文 `http`（`https` 不可被未认证网关劫持）。监测跳过固定认证入口 TCP 预检；若公网探测未返回标准门户证据但本地链路可用，会谨慎启动一次浏览器触发跳转。
 
 变量优先级从低到高：
 

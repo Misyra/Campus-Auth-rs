@@ -28,7 +28,7 @@ import type {
   NetworkDetectResult,
   NetworkTestResult,
   OcrStatus,
-  PortalDetectResult,
+  RedirectTestResult,
   Profile,
   ProfileDetailResponse,
   ProfileImportResult,
@@ -103,9 +103,13 @@ export const monitorApi = {
   fetchStatus: () => http.get<StatusSnapshot>("/api/monitor/status"),
   start: () => http.post<MutationResult>("/api/monitor/start"),
   stop: () => http.post<MutationResult>("/api/monitor/stop"),
-  /** 认证门户检测：未认证时跟随 302 返回候选门户地址，需先退出登录 */
-  detectPortal: () =>
-    http.post<PortalDetectResult>("/api/monitor/detect-portal", null, { timeout: 60000 }),
+  /** 重定向检测：用可见浏览器验证能否进入校园网认证页，不回填最终地址。 */
+  testRedirect: (triggerUrl: string) =>
+    http.post<RedirectTestResult>(
+      "/api/monitor/test-redirect",
+      { trigger_url: triggerUrl },
+      { timeout: 60000 },
+    ),
 };
 
 /** 一次性操作 */

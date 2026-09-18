@@ -114,9 +114,9 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 「方案」页进入时**直接展示当前活跃方案**的编辑器（改账号是这一页最高频的用途）；顶栏下拉可切换方案，「当前使用」徽标标出自动登录实际使用的那个。点「返回方案列表」查看或新建其它方案。
 
-- 每个 Profile 含 `auth_url`（认证页）、可选 `trigger_url`（重定向型门户，非空即重定向模式）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求，后者见 `docs/guides/http-login-guide.md`）。
+- 每个 Profile 含可选 `auth_url`（固定登录网址）、可选 `trigger_url`（自定义重定向触发地址）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求，后者见 `docs/guides/http-login-guide.md`）。
 - 这些字段**只在「方案」页编辑**；`GET /api/config` 顶层仍会扁平回传活跃方案的凭据（兼容既有客户端），但界面已不再从那里读写。
-- 重定向模式：`trigger_url` 为明文 `http` 触发地址（如 `http://www.msftconnecttest.com/connecttest.txt`），Worker 首导航到该地址并跟随 302 到真门户，`{{LOGIN_URL}}` 同步为触发地址；监测跳过 `auth` TCP 探测、登录跳过预检，劫持判定优先于断网（`docs/guides/task-writing-guide.md` 重定向模式）。
+- 浏览器登录网址**填写即直接使用，留空即跟随重定向**。留空时默认访问 `http://www.msftconnecttest.com/connecttest.txt`，可在“重定向高级设置”用 `trigger_url` 覆盖；触发地址必须为明文 `http`。Worker 首导航到触发地址并跟随门户跳转，`{{LOGIN_URL}}` 同步为触发地址；若常规公网探测全失败但本地网卡已连接，会谨慎启动一次浏览器触发门户，而不是一直显示“没网”（`docs/guides/task-writing-guide.md` 重定向登录）。
 - 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高（无用户可配的 `priority` 字段）；`auto_switch` 开启时 Engine 按 `monitor.profile_check_interval` 周期检测并自动切换（默认 **180 秒**，可配范围 60–600），切换后重置登录失败去重状态。**`auto_switch` 默认关闭**（2026-09-16 起，新配置生效）；关闭时方案页卡片可直接点击切换，开启时改由自动匹配决定（卡片不可手点）。
 - `default` 为保底 Profile，不可删除。
 
@@ -202,7 +202,7 @@ campus-auth --force   # 终止后抢占
 ### 认证不成功
 
 1. 账号/密码是否正确（`ENC:` 解密后注入 `{{USERNAME}}`/`{{PASSWORD}}`）；
-2. `auth_url` / `trigger_url` 是否可达（劫持型门户须用 `http` 触发地址）；
+2. 若填写了固定登录网址，确认 `auth_url` 可达；若留空跟随重定向，确认自定义 `trigger_url`（如有）使用明文 `http`，也可直接恢复为空以使用默认触发地址；
 3. `isp` 是否匹配；
 4. 在 Web 控制台看实时日志与失败截图；
 5. 临时关闭无头模式观察页面行为（`browser.headless`）。

@@ -438,6 +438,80 @@
   margin-top: var(--space-xs);
 }
 
+/* 登录网址留空时才展示的低频高级项：默认只露出摘要，避免重新制造
+   “两个网址 + 一个模式开关”的认知负担。 */
+.redirect-advanced {
+  margin-top: calc(var(--space-sm) * -0.25);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(var(--slate-rgb), 0.04);
+}
+
+.redirect-advanced summary {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.redirect-advanced[open] summary {
+  margin-bottom: var(--space-md);
+}
+
+.redirect-advanced .form-group {
+  margin-bottom: 0;
+}
+
+/* 认证地址上方的手动验证入口：检测只给结论，不回填门户临时 URL。 */
+.redirect-test-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+  padding: 12px 14px;
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
+  border-radius: var(--radius-md);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.redirect-test-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.redirect-test-copy strong {
+  color: var(--text-primary);
+  font-size: var(--text-md);
+}
+
+.redirect-test-result.detected {
+  color: var(--success);
+}
+
+.redirect-test-result.online,
+.redirect-test-result.not_detected {
+  color: var(--warning);
+}
+
+.redirect-test-card .btn {
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .redirect-test-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 /* 区域标题：左侧 accent 竖线 + 加粗文字 */
 .editor-section-label {
   font-size: var(--text-md);

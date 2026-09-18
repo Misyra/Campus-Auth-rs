@@ -18,7 +18,6 @@ import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import Modal from "@/components/common/Modal.vue";
 import { computed, ref, watch } from "vue";
-import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useProfiles } from "@/composables/useProfiles";
 import {
   HTTP_BODY_EXAMPLE,
@@ -44,7 +43,7 @@ const props = defineProps<{
   username?: string;
   /** 草稿密码（留空且为已保存方案时，后端回退本机已保存凭据） */
   password?: string;
-  /** 草稿认证地址：门户检测结果与脚本 ctx.auth_url 的来源 */
+  /** 草稿认证地址：脚本 ctx.auth_url 的来源 */
   authUrl?: string;
   /** 已保存方案 ID；无则测试必须手填密码 */
   profileId?: string;
@@ -54,17 +53,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
-  /**
-   * 检测到的认证地址。
-   *
-   * 认证地址不在本组件读写的草稿字段集里（草稿契约只管登录方式与直连参数），
-   * 故由宿主自己写回，本组件只上报结果。
-   */
-  portalDetected: [url: string];
 }>();
 
 const p = useProfiles();
-const portalDetect = usePortalDetect();
 
 /** 步骤定义：标题 + 一句话说明，步骤条与正文标题共用 */
 const STEPS = [
@@ -155,15 +146,6 @@ const blockedReason = computed(() => {
 const passwordInUrl = computed(() =>
   isCredentialExposedViaGet(props.draft.http_method, props.draft.http_url),
 );
-
-async function detectPortal(): Promise<void> {
-  const url = await portalDetect.detectPortal();
-  if (url) {
-    // `authUrl` 是宿主的草稿字段而非本组件的 prop 副本，故由宿主传入的
-    // setter 语义在这里不成立——改用 emit 让宿主写回自己的草稿
-    emit("portalDetected", url);
-  }
-}
 
 async function runTest(): Promise<void> {
   testResult.value = null;
@@ -261,14 +243,6 @@ function fillScriptSkeleton(): void {
             </dd>
           </div>
         </dl>
-
-        <div class="wz-actions-inline">
-          <button type="button" class="btn btn-sm btn-secondary" :disabled="portalDetect.detecting.value" @click="detectPortal">
-            <IconApp name="globe" class="icon-sm" />
-            {{ portalDetect.detecting.value ? '检测中…' : '自动检测认证地址' }}
-          </button>
-          <span class="wz-hint">需先断开校园网登录再检测（已在线时没有跳转可抓）</span>
-        </div>
 
         <div class="wz-actions-inline">
           <a class="btn btn-sm btn-ghost" href="https://campus-auth.misyra.com/docs/profiles/http-login" target="_blank" rel="noopener noreferrer">

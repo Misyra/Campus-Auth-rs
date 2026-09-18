@@ -5,15 +5,88 @@
 //! 测试可注入内存实现（见模块测试）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::bridge::BridgeApi;
+use crate::config::{ConfigApi, DEFAULT_TRIGGER_URL};
 use crate::engine::{EngineApi, EngineCommand};
-use crate::monitor::{MonitorConfig, detect_portal};
+use crate::environment::EnvironmentApi;
+use crate::monitor::{MonitorConfig, PortalDetectStatus, detect_portal};
 use crate::status::StatusManager;
 use crate::web::error::{ApiError, data};
+
+/// 可见浏览器重定向检测的总超时（含 Worker 启动、浏览器冷启动与 5 秒页面观察）。
+const REDIRECT_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// `POST /api/monitor/test-redirect` 请求体。
+#[derive(Debug, Default, Deserialize)]
+pub struct RedirectTestRequest {
+    /// 用户尚未保存的自定义触发地址；空值使用内置默认地址。
+    #[serde(default)]
+    pub trigger_url: String,
+}
+
+/// 重定向检测结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedirectTestStatus {
+    /// 已识别到校园网认证页面。
+    Detected,
+    /// 公网探测已确认当前正常联网。
+    Online,
+    /// 浏览器未识别到认证页面或导航失败。
+    NotDetected,
+}
+
+/// 重定向检测响应；不包含最终 URL，避免门户临时 token 被前端或日志持久化。
+#[derive(Debug, Serialize)]
+pub struct RedirectTestResult {
+    /// 机器可读结论。
+    pub status: RedirectTestStatus,
+    /// 前端直接展示的用户提示。
+    pub message: &'static str,
+}
+
+fn redirect_test_result(status: RedirectTestStatus) -> RedirectTestResult {
+    let message = match status {
+        RedirectTestStatus::Detected => "已检测到校园网认证页面，认证地址无需填写",
+        RedirectTestStatus::Online => "当前已正常联网，请先退出校园网登录后再进行重定向检测",
+        RedirectTestStatus::NotDetected => {
+            "未检测到认证页面，无法跟随重定向，请重试或手动填入认证地址"
+        }
+    };
+    RedirectTestResult { status, message }
+}
+
+fn validate_redirect_test_url(raw: &str) -> Result<String, ApiError> {
+    let value = raw.trim();
+    let value = if value.is_empty() {
+        DEFAULT_TRIGGER_URL
+    } else {
+        value
+    };
+    if value.len() > 2048 {
+        return Err(ApiError::BadRequest("重定向触发地址过长".into()));
+    }
+    let parsed = url::Url::parse(value)
+        .map_err(|_| ApiError::BadRequest("重定向触发地址格式无效".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(ApiError::BadRequest(
+            "重定向触发地址必须是包含主机名的 http/https URL".into(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiError::BadRequest(
+            "重定向触发地址不能包含用户名或密码".into(),
+        ));
+    }
+    Ok(value.to_string())
+}
 
 /// GET /api/monitor/status — 获取当前系统状态快照
 pub async fn get_status(State(status): State<Arc<StatusManager>>) -> Result<Json<Value>, ApiError> {
@@ -50,20 +123,21 @@ pub async fn stop_monitor(
     Ok(data(Value::String("检测已停止".into())))
 }
 
-/// POST /api/monitor/detect-portal — 检测认证门户地址并返回候选
+/// POST /api/monitor/test-redirect — 用可见浏览器验证校园网重定向。
 ///
-/// 未认证时请求监测配置中的明文探测地址并跟随 302，找到真门户。探测目标固定
-/// 为服务端内置地址（`http_targets + url_targets`），不接受客户端传参；但**跳转
-/// 目标由网关下发**，不属信任边界内，故 MON-4 起逐跳做最小目的地址校验
-/// （拒环回/链路本地/通配地址，放行内网门户，见 `monitor::portal`），不再按
-/// “无 SSRF 面”处理。结果只读返回，前端填入表单后由用户确认保存，本接口不写配置。
-pub async fn detect_portal_handler(
-    State(config): State<Arc<dyn crate::config::ConfigApi>>,
+/// 先用既有 HTTP 探测确认“已正常联网”，命中时直接提示先退出登录；其余情况
+/// 强制 `headless=false` 启动独立临时浏览器。Worker 只返回页面分类，不返回或保存
+/// 最终 URL / 页面正文，避免门户一次性 token 进入配置、日志或前端状态。
+pub async fn test_redirect(
+    State(config): State<Arc<dyn ConfigApi>>,
+    State(bridge): State<Arc<dyn BridgeApi>>,
+    State(environment): State<Arc<dyn EnvironmentApi>>,
+    Json(body): Json<RedirectTestRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let rt = config.runtime_snapshot();
     let m = &rt.monitor;
     let cfg = MonitorConfig::from_runtime(&rt);
-    let result = detect_portal(
+    let preflight = detect_portal(
         &m.http_targets,
         cfg.http_timeout,
         &m.url_targets,
@@ -72,8 +146,53 @@ pub async fn detect_portal_handler(
         m.disable_proxy,
     )
     .await;
-    tracing::info!(status = ?result.status, portal_url = ?result.portal_url, "认证门户检测完成");
-    Ok(data(serde_json::to_value(&result)?))
+    if preflight.status == PortalDetectStatus::Online {
+        let result = redirect_test_result(RedirectTestStatus::Online);
+        tracing::info!(status = ?result.status, "重定向检测完成");
+        return Ok(data(serde_json::to_value(result)?));
+    }
+
+    let trigger_url = validate_redirect_test_url(&body.trigger_url)?;
+    environment
+        .ensure_capability()
+        .await
+        .map_err(|e| ApiError::ServiceUnavailable(format!("浏览器环境未就绪: {e}")))?;
+
+    let mut browser_settings = serde_json::to_value(&rt.browser)?;
+    let settings = browser_settings
+        .as_object_mut()
+        .ok_or_else(|| ApiError::Internal("浏览器设置序列化结果无效".into()))?;
+    // 本功能的目的就是让用户亲眼确认跳转，不能继承全局无头模式。
+    settings.insert("headless".into(), Value::Bool(false));
+    let response = bridge
+        .execute_with_timeout(
+            "test_redirect",
+            serde_json::json!({
+                "trigger_url": trigger_url,
+                "browser_settings": browser_settings,
+            }),
+            REDIRECT_TEST_TIMEOUT,
+        )
+        .await?;
+    if !response.result.success {
+        return Err(ApiError::ServiceUnavailable(
+            response
+                .result
+                .error
+                .unwrap_or_else(|| "浏览器重定向检测失败".into()),
+        ));
+    }
+    let status = match response.result.data.get("status").and_then(Value::as_str) {
+        Some("detected") => RedirectTestStatus::Detected,
+        Some("online") => RedirectTestStatus::Online,
+        Some("not_detected") => RedirectTestStatus::NotDetected,
+        _ => {
+            return Err(ApiError::Internal("浏览器重定向检测返回了未知结果".into()));
+        }
+    };
+    let result = redirect_test_result(status);
+    tracing::info!(status = ?result.status, "重定向检测完成");
+    Ok(data(serde_json::to_value(result)?))
 }
 
 #[cfg(test)]
@@ -239,33 +358,27 @@ mod tests {
         );
     }
 
-    /// detect-portal：不可达探测目标 → offline 结论（200 正常返回，不写配置）
-    #[tokio::test]
-    async fn test_detect_portal_offline_when_unreachable() {
-        use crate::web::routes::test_support::{MockConfigApi, body_json};
-        let (config, inner) = MockConfigApi::mocked();
-        // 指向必然无监听的回环端口，判定收敛为 Offline
-        inner.lock().unwrap().runtime.monitor.http_targets =
-            vec!["http://127.0.0.1:9/generate_204".to_string()];
-        inner.lock().unwrap().runtime.monitor.url_targets = vec![];
-        let app = axum::Router::new()
-            .route("/api/monitor/detect-portal", post(detect_portal_handler))
-            .with_state(config);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/monitor/detect-portal")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let v = body_json(resp).await;
-        assert_eq!(v["data"]["status"], "offline");
-        assert!(v["data"]["portal_url"].is_null());
-        assert!(!v["data"]["message"].as_str().unwrap_or_default().is_empty());
-        assert!(v.get("success").is_none(), "禁止 success 字段");
+    #[test]
+    fn 重定向检测空地址使用内置默认值() {
+        assert_eq!(
+            validate_redirect_test_url("  ").unwrap(),
+            DEFAULT_TRIGGER_URL
+        );
+    }
+
+    #[test]
+    fn 重定向检测拒绝非http与内嵌凭据() {
+        assert!(validate_redirect_test_url("file:///tmp/page.html").is_err());
+        assert!(validate_redirect_test_url("http://user:secret@example.com/").is_err());
+    }
+
+    #[test]
+    fn 重定向检测文案覆盖三种结论() {
+        let detected = redirect_test_result(RedirectTestStatus::Detected);
+        assert!(detected.message.contains("无需填写"));
+        let online = redirect_test_result(RedirectTestStatus::Online);
+        assert!(online.message.contains("退出校园网登录"));
+        let missing = redirect_test_result(RedirectTestStatus::NotDetected);
+        assert!(missing.message.contains("手动填入认证地址"));
     }
 }

@@ -193,6 +193,7 @@ async function testNetwork(): Promise<void> {
       captive_detected: "探测请求被门户劫持",
       external_failed_auth_reachable: "公网失败，但认证入口可达",
       link_up_login_assumed: "网卡已连接但未确认在线（宽松触发）",
+      redirect_login_assumed: "网卡已连接，尝试用浏览器触发门户重定向",
       all_probes_failed: "所有已启用的公网探测均失败",
       weak_evidence_only: "只有 TCP 弱证据，不能确认公网可用",
       inconclusive_evidence: "探测返回非预期结果，无法确认网络状态",

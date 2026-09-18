@@ -13,7 +13,6 @@ import { extractApiError } from "@/api/client";
 import type { AiCaptureResult, AiGenerateResult } from "@/api/types";
 import { computed, onMounted, onUnmounted, ref, unref } from "vue";
 import { useRouter } from "vue-router";
-import { usePortalDetect } from "@/composables/usePortalDetect";
 import { useToast } from "@/composables/useToast";
 import { useConfirm } from "@/composables/useConfirm";
 import { downloadBlob } from "@/utils/file";
@@ -22,13 +21,6 @@ import { fileStamp } from "@/utils/formatters";
 const router = useRouter();
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
-const portalDetect = usePortalDetect();
-
-/** 捕获地址自动检测：抓到门户地址直接填入捕获输入框 */
-async function detectPortalForCapture(): Promise<void> {
-  const url = await portalDetect.detectPortal();
-  if (url) captureUrl.value = url;
-}
 
 // ---- LLM 配置 ----
 const PRESETS = [
@@ -622,14 +614,8 @@ async function restoreCapture(): Promise<void> {
           </div>
           <div class="form-group">
             <label for="ai-capture-url" class="required">登录页地址</label>
-            <div class="input-with-action">
-              <input id="ai-capture-url" v-model="captureUrl" type="text" placeholder="例如 http://10.x.x.x 或任意网址（未登录时自动跳转到认证页）" autocomplete="off" spellcheck="false" @keyup.enter="capture" />
-              <button class="btn btn-secondary btn-sm" :disabled="portalDetect.detecting.value" @click="detectPortalForCapture" title="需先退出校园网登录：未认证时跟随跳转自动填入">
-                <IconApp name="globe" class="icon-sm" />
-                {{ portalDetect.detecting.value ? '检测中…' : '自动检测' }}
-              </button>
-            </div>
-            <span class="hint">需先退出校园网登录再检测（已在线时无跳转可抓）</span>
+            <input id="ai-capture-url" v-model="captureUrl" type="text" placeholder="例如 http://10.x.x.x 或任意网址（未登录时自动跳转到认证页）" autocomplete="off" spellcheck="false" @keyup.enter="capture" />
+            <span class="hint">请填写登录页或可触发校园网跳转的地址。</span>
           </div>
           <div class="ai-actions">
             <button class="btn btn-primary" :disabled="capturing" @click="capture">

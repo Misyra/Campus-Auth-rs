@@ -2,7 +2,7 @@
 
 本模块是 Python 侧浏览器自动化执行平面。Rust 主进程通过 NDJSON IPC
 调用此处注册的处理器（见 ``COMMANDS``），每个处理器对应一种命令：
-browser_health_check / execute_login_attempt / execute_browser_task /
+browser_health_check / test_redirect / execute_login_attempt / execute_browser_task /
 debug_start / debug_step / debug_stop / ocr_recognize / shutdown。
 
 Worker 仅作为"浏览器动作执行器"，单次动作返回 StructuredResult；
@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from html import escape as _html_escape
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
+from urllib.parse import urlsplit
 
 from models import (
     Outcome,
@@ -87,6 +88,90 @@ WORKER_VERSION = "1.0.0"
 # 浏览器关闭/会话释放的兜底等待上限（秒）：close 可能挂起（driver 未及时退出等），
 # 统一超时跳过，避免单条挂起命令阻塞 Worker 命令队列
 _WAIT_TIMEOUT_SECS = 8.0
+# 重定向检测首导航完成后继续观察 JS / Meta Refresh / 弹窗跳转的时长（秒）。
+_REDIRECT_TEST_SETTLE_SECS = 5.0
+# 重定向检测最多读取的可见文本，避免异常页面造成无界 IPC 前内存增长。
+_REDIRECT_TEST_TEXT_LIMIT = 64 * 1024
+
+
+def _classify_redirect_test(
+    *,
+    trigger_url: str,
+    final_url: str,
+    response_status: int | None,
+    visible_text: str,
+    password_inputs: int,
+    account_inputs: int,
+    forms: int,
+) -> dict[str, Any]:
+    """按地址变化、表单结构和页面语义综合判断重定向检测结果。
+
+    单独出现“登录”很常见，不能直接判为校园网认证页；只有强校园网语义，或
+    地址变化与登录结构/多项关键字相互印证时才返回 ``detected``。
+    返回值刻意不包含最终 URL 或页面正文，避免门户临时 token 与账号信息进入 IPC。
+    """
+    text = " ".join(visible_text.lower().split())
+    strong_keywords = (
+        "校园网",
+        "上网认证",
+        "网络认证",
+        "统一身份认证",
+        "captive portal",
+        "network authentication",
+    )
+    generic_keywords = (
+        "登录",
+        "认证",
+        "账号",
+        "用户名",
+        "密码",
+        "运营商",
+        "portal",
+        "sign in",
+        "log in",
+        "username",
+        "password",
+    )
+    strong_hits = sum(1 for keyword in strong_keywords if keyword in text)
+    generic_hits = sum(1 for keyword in generic_keywords if keyword in text)
+
+    try:
+        trigger = urlsplit(trigger_url)
+        final = urlsplit(final_url)
+        origin_changed = (
+            trigger.scheme.lower(),
+            (trigger.hostname or "").lower(),
+            trigger.port,
+        ) != (
+            final.scheme.lower(),
+            (final.hostname or "").lower(),
+            final.port,
+        )
+        url_changed = trigger_url.rstrip("/") != final_url.rstrip("/")
+    except ValueError:
+        origin_changed = False
+        url_changed = trigger_url != final_url
+
+    # Windows NCSI 默认触发页在线时返回这段固定文本；204 同样属于直通在线。
+    online_marker = "microsoft connect test" in text and len(text) < 512
+    structural_score = min(password_inputs, 1) * 3
+    structural_score += min(account_inputs, 1)
+    structural_score += 1 if forms and (password_inputs or account_inputs) else 0
+    redirect_score = 2 if origin_changed else (1 if url_changed else 0)
+    semantic_score = min(generic_hits, 3) + min(strong_hits, 1) * 2
+    score = structural_score + redirect_score + semantic_score
+
+    detected = (
+        score >= 5
+        or (strong_hits > 0 and generic_hits >= 2)
+        or (password_inputs > 0 and generic_hits > 0)
+        or (origin_changed and structural_score >= 2 and generic_hits > 0)
+    )
+    if detected:
+        return {"status": "detected"}
+    if response_status == 204 or online_marker:
+        return {"status": "online"}
+    return {"status": "not_detected"}
 
 
 def _browser_data_dir() -> Path:
@@ -964,12 +1049,19 @@ class WorkerCore:
             logger.warning(f"解析自定义请求头失败: {exc}")
         return {}
 
-    def _resolve_launcher(self, playwright: Any, channel: str, custom_path: str) -> tuple[Any, str | None]:
+    def _resolve_launcher(
+        self,
+        playwright: Any,
+        channel: str,
+        custom_path: str,
+        bs: dict | None = None,
+    ) -> tuple[Any, str | None]:
         """根据 channel 解析对应的 launcher 对象。"""
         if channel == "custom":
             if not custom_path or not Path(custom_path).is_file():
                 raise FileNotFoundError(f"自定义浏览器可执行文件不存在: {custom_path}")
-            engine = (self._last_browser_settings or {}).get("custom_browser_engine", "auto")
+            settings = bs if bs is not None else (self._last_browser_settings or {})
+            engine = settings.get("custom_browser_engine", "auto")
             engine = engine if engine in ("firefox", "webkit") else "chromium"
             return getattr(playwright, engine), custom_path
         if channel == "firefox":
@@ -999,7 +1091,7 @@ class WorkerCore:
         bs: dict | None = None,
     ) -> Any:
         """启动非持久化浏览器。"""
-        launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path)
+        launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path, bs)
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args}
         # 去掉 Playwright 默认的 --enable-automation（消除 automation 痕迹；
         # 用户侧仍被黑名单拦截，仅后端内置可配；仅 Chromium 支持该参数）
@@ -1023,7 +1115,7 @@ class WorkerCore:
         bs: dict | None = None,
     ) -> Any:
         """启动持久化上下文浏览器（保留 cookies）。"""
-        launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path)
+        launcher, resolved_path = self._resolve_launcher(playwright, channel, custom_path, bs)
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args, **ctx_opts}
         if self._is_chromium_channel(bs or {}, channel):
             kwargs["ignore_default_args"] = ["--enable-automation"]
@@ -1613,6 +1705,156 @@ class WorkerCore:
                 Outcome.UNKNOWN_ERROR, f"调试会话进行中，无法执行{action}，请先停止调试"
             )
 
+    @staticmethod
+    async def _inspect_redirect_test_page(
+        page: Any,
+        trigger_url: str,
+        response_status: int | None,
+    ) -> dict[str, Any]:
+        """读取主页面与 iframe 的有限可见信号，不回传原文或最终地址。"""
+        text_parts: list[str] = []
+        password_inputs = 0
+        account_inputs = 0
+        forms = 0
+        remaining = _REDIRECT_TEST_TEXT_LIMIT
+        for frame in list(page.frames):
+            if remaining <= 0:
+                break
+            try:
+                body_text = await frame.locator("body").inner_text(timeout=1500)
+                if body_text:
+                    clipped = body_text[:remaining]
+                    text_parts.append(clipped)
+                    remaining -= len(clipped)
+            except Exception:  # noqa: BLE001 — 跨域/销毁中的 frame 可能无法读取，其余 frame 仍可判断
+                pass
+            try:
+                password_inputs += await frame.locator("input[type='password']").count()
+                account_inputs += await frame.locator(
+                    "input[type='text'], input[type='email'], input[name*='user' i], "
+                    "input[name*='account' i], input[name*='phone' i]"
+                ).count()
+                forms += await frame.locator("form").count()
+            except Exception:  # noqa: BLE001 — 单个 frame 销毁不应让整次检测失败
+                pass
+        try:
+            title = await page.title()
+        except Exception:  # noqa: BLE001
+            title = ""
+        return _classify_redirect_test(
+            trigger_url=trigger_url,
+            final_url=str(getattr(page, "url", "") or ""),
+            response_status=response_status,
+            visible_text="\n".join([title, *text_parts]),
+            password_inputs=password_inputs,
+            account_inputs=account_inputs,
+            forms=forms,
+        )
+
+    async def handle_test_redirect(self, params: dict) -> dict:
+        """用独立、可见的临时浏览器验证触发地址能否到达校园网认证页。
+
+        检测不得复用 ``self._context``：正常登录可能正在保留 Cookie、localStorage
+        或门户心跳页面；复用会产生“已登录 Cookie 掩盖门户”的误判，也可能破坏
+        keep_alive 会话。这里始终另启非持久化浏览器，完成后只回收自己的资源。
+        """
+        self._ensure_no_debug_session("重定向检测")
+        trigger_url = str(params.get("trigger_url") or "").strip()
+        if not trigger_url.startswith(("http://", "https://")):
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "重定向检测仅支持 http/https 地址")
+
+        from playwright.async_api import async_playwright
+
+        bs = dict(params.get("browser_settings") or {})
+        channel = str(bs.get("browser_channel") or "playwright").strip().lower()
+        custom_path = str(bs.get("browser_custom_path") or "").strip()
+        pure_mode = bool(bs.get("pure_mode", False))
+        cancel_id = str(params.get("cancel_id") or "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+        created_playwright = False
+        browser: Any = None
+        context: Any = None
+        response_status: int | None = None
+        self._cancel_browser_idle_release()
+        try:
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+                created_playwright = True
+            launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
+            # 用户明确要求看到真实跳转过程：无论全局 headless 设置如何，检测恒为可见窗口。
+            browser = await self._launch_browser(
+                self._playwright,
+                channel,
+                custom_path,
+                False,
+                launch_args,
+                bs,
+            )
+            context = await browser.new_context(**self._build_context_options(bs))
+            if not pure_mode and bs.get("stealth_mode", False):
+                custom = str(bs.get("stealth_custom_script") or "").strip()
+                await context.add_init_script(custom or _STEALTH_INIT_SCRIPT)
+
+            pages: list[Any] = []
+            context.on("page", lambda new_page: pages.append(new_page))
+            page = await context.new_page()
+            if page not in pages:
+                pages.append(page)
+            if cancel_event is not None and cancel_event.is_set():
+                raise StepCancelled("重定向检测已取消")
+            try:
+                response = await page.goto(
+                    trigger_url,
+                    wait_until="domcontentloaded",
+                    timeout=min(_nav_timeout(bs), 15000),
+                )
+                if response is not None:
+                    response_status = response.status
+            except Exception as exc:  # noqa: BLE001 — 导航失败属于“无法跟随”，不是 Worker 故障
+                logger.info("重定向检测导航失败: %s", type(exc).__name__)
+                return {"status": "not_detected"}
+
+            deadline = time.monotonic() + _REDIRECT_TEST_SETTLE_SECS
+            while time.monotonic() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise StepCancelled("重定向检测已取消")
+                await asyncio.sleep(0.25)
+
+            active_page = page
+            for candidate in reversed(pages):
+                try:
+                    if not candidate.is_closed():
+                        active_page = candidate
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+            return await self._inspect_redirect_test_page(
+                active_page,
+                trigger_url,
+                response_status,
+            )
+        finally:
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
+            if context is not None:
+                try:
+                    await asyncio.wait_for(context.close(), timeout=_WAIT_TIMEOUT_SECS)
+                except Exception:  # noqa: BLE001 — 临时窗口关闭失败不覆盖检测结论
+                    logger.warning("关闭重定向检测上下文失败", exc_info=True)
+            if browser is not None:
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=_WAIT_TIMEOUT_SECS)
+                except Exception:  # noqa: BLE001
+                    logger.warning("关闭重定向检测浏览器失败", exc_info=True)
+            if created_playwright and self._browser is None and self._context is None:
+                try:
+                    await self._playwright.stop()
+                except Exception:  # noqa: BLE001
+                    logger.debug("停止临时 Playwright 连接失败", exc_info=True)
+                self._playwright = None
+            elif self._browser is not None or self._context is not None:
+                self._arm_browser_idle_release()
+
     async def handle_execute_login_attempt(self, params: dict) -> dict:
         """执行完整登录流程。"""
         self._ensure_no_debug_session("登录任务")
@@ -1620,11 +1862,12 @@ class WorkerCore:
             async with self._cancel_session(params) as (cancel_event, bs, task):
                 auth_url = params.get("auth_url", "") or ""
                 trigger_url = params.get("trigger_url", "") or ""
-                # 重定向模式：触发器非空即用它首导航，Playwright 自动跟随 302 到真门户；LOGIN_URL 同步为实际导航地址，存量任务零改动
+                # Rust 会把“登录网址留空”解析为有效触发地址；触发器非空时优先，
+                # 兼容旧版同时保存 auth_url + trigger_url 的显式重定向方案。
                 navigate_url = trigger_url.strip() or auth_url
                 # 任务变量可自定义普通模板值，但系统保留变量必须始终反映当前 Profile。
                 # 统一经 _system_variables 注入：键缺失时跳过（避免空串覆盖任务自定义
-                # 变量）；{{LOGIN_URL}} 优先非空 trigger_url、回落 auth_url，与首导航一致。
+                # 变量）；{{LOGIN_URL}} 优先有效 trigger_url、回落 auth_url，与首导航一致。
                 variables = dict(task.variables or {})
                 variables.update(self._system_variables(params))
                 self._task_dialogs = []
@@ -1663,7 +1906,7 @@ class WorkerCore:
 
         Rust 侧登录编排总是传全量四项；任务执行/调试路径经同一注入保证任务模板
         与文档契约一致。键缺失时不注入，避免空串覆盖任务自定义 variables。
-        重定向模式下 {{LOGIN_URL}} 优先取非空 trigger_url（回落 auth_url），与登录首导航一致。
+        重定向登录下 {{LOGIN_URL}} 优先取有效 trigger_url（回落 auth_url），与登录首导航一致。
         """
         mapping = {
             "USERNAME": "username",
@@ -2380,6 +2623,7 @@ worker_core = WorkerCore()
 COMMANDS: dict[str, Callable] = {
     "worker_health_check": worker_core.handle_worker_health_check,
     "browser_health_check": worker_core.handle_browser_health_check,
+    "test_redirect": worker_core.handle_test_redirect,
     "execute_login_attempt": worker_core.handle_execute_login_attempt,
     "execute_browser_task": worker_core.handle_execute_browser_task,
     "close_browser": worker_core.handle_close_browser,

@@ -21,6 +21,8 @@ const PENDING_TTL: Duration = Duration::from_secs(60);
 pub enum SessionType {
     /// execute_login_attempt / execute_browser_task
     Login,
+    /// 可见浏览器重定向检测（独占，避免与登录/调试互相关闭窗口）
+    RedirectTest,
     /// debug_start 保留的会话
     Debug,
 }

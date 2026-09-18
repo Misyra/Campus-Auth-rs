@@ -500,7 +500,7 @@ impl LoginOrchestrator {
             }
         };
 
-        // 2. auth_url TCP 预检（仅 manual / login_once；重定向模式跳过；
+        // 2. auth_url TCP 预检（仅 manual / login_once；重定向登录跳过；
         // 直连渠道可达性由请求自身的网络错误报告，且 auth_url 允许为空，跳过）
         if !use_http {
             if let Some(handle) = self
@@ -748,14 +748,10 @@ impl LoginOrchestrator {
         if profile.password.as_str().is_empty() {
             missing.push("密码为空，请在设置页填写密码");
         }
-        // 直连渠道要求登录请求 URL；浏览器渠道重定向模式允许 auth_url 为空
-        // （首导航用 trigger_url 触发 302，固定门户地址未知或不可直连）
-        if use_http {
-            if profile.http_url.trim().is_empty() {
-                missing.push("直连请求 URL 为空，请在方案的直连配置里填写登录地址");
-            }
-        } else if profile.auth_url.is_empty() && profile.trigger_url.is_empty() {
-            missing.push("认证地址与触发地址均为空，请至少填写一个");
+        // 直连渠道要求登录请求 URL；浏览器渠道不再要求认证地址：用户留空时
+        // RuntimeConfig 会补默认明文触发地址，由浏览器跟随网关重定向。
+        if use_http && profile.http_url.trim().is_empty() {
+            missing.push("直连请求 URL 为空，请在方案的直连配置里填写登录地址");
         }
         // 浏览器路径必须有可执行的浏览器任务；直连渠道无 Worker 参与，不要求
         if !use_http && effective_task_id.is_none() {
@@ -945,7 +941,7 @@ impl LoginOrchestrator {
         Ok(browser_override)
     }
 
-    /// auth_url TCP 预检（仅 manual / login_once；重定向模式跳过：触发器是
+    /// auth_url TCP 预检（仅 manual / login_once；重定向登录跳过：触发器是
     /// 公网 http，劫持下 TCP 必失败，交给 Worker 导航跟随 302）。
     ///
     /// 地址解析统一走 MonitorService 的单点实现（parse_url_host_port，
@@ -959,7 +955,7 @@ impl LoginOrchestrator {
         cancel_token: &CancellationToken,
     ) -> Option<LoginHandle> {
         if !(matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
-            && profile.trigger_url.is_empty())
+            && !profile.uses_redirect_login())
         {
             return None;
         }
@@ -1396,11 +1392,16 @@ impl LoginOrchestrator {
         task_id: &str,
         browser_channel_override: Option<&str>,
     ) -> serde_json::Value {
+        let trigger_url = if profile.uses_redirect_login() {
+            profile.effective_browser_login_url()
+        } else {
+            ""
+        };
         let mut cfg = serde_json::json!({
             "username": profile.username,
             "password": profile.password.as_str(),
             "auth_url": profile.auth_url,
-            "trigger_url": profile.trigger_url,
+            "trigger_url": trigger_url,
             "isp": profile.isp,
             "gateway_ip": profile.gateway_ip,
             "wifi_ssid": profile.wifi_ssid,

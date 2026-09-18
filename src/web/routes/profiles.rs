@@ -29,7 +29,7 @@ pub struct ProfileCreateBody {
     /// 编辑器同屏的可选匹配/认证设置：创建即完整落盘（此前仅收 4 字段，
     /// 网关/SSID/认证地址等会被静默丢弃，须再编辑一次才能保存）
     pub auth_url: Option<String>,
-    /// 重定向触发地址：非空即重定向模式（劫持型门户），为空保持直连
+    /// 自定义重定向触发地址；认证地址留空时生效，空值使用内置默认值
     pub trigger_url: Option<String>,
     pub isp: Option<String>,
     pub gateway_ip: Option<String>,
@@ -118,7 +118,7 @@ pub struct ProfileUpdateBody {
     #[serde(default)]
     pub clear_password: bool,
     pub auth_url: Option<String>,
-    /// 重定向触发地址：非空即重定向模式（劫持型门户），为空保持直连
+    /// 自定义重定向触发地址；认证地址留空时生效，空值使用内置默认值
     pub trigger_url: Option<String>,
     pub isp: Option<String>,
     pub gateway_ip: Option<String>,

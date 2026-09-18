@@ -160,6 +160,11 @@ impl TaskExecutor {
             // 注入活跃 Profile 的系统保留变量（{{USERNAME}}/{{PASSWORD}}/{{ISP}}/{{LOGIN_URL}}），
             // 与任务页文档契约一致；定时任务/任务卡执行/调试面板共用本路径。
             let profile = &rt.profile;
+            let trigger_url = if profile.uses_redirect_login() {
+                profile.effective_browser_login_url()
+            } else {
+                ""
+            };
             let params = serde_json::json!({
                 "task_config": task_val,
                 "browser_settings": browser_settings,
@@ -167,7 +172,7 @@ impl TaskExecutor {
                 "password": profile.password.to_string(),
                 "isp": profile.isp,
                 "auth_url": profile.auth_url,
-                "trigger_url": profile.trigger_url,
+                "trigger_url": trigger_url,
             });
             self.bridge
                 .execute_with_timeout(

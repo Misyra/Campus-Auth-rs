@@ -240,6 +240,8 @@ const networkStatusDetail = computed(() => {
       return "公网探测失败但校园网认证入口可达，按需要认证处理";
     case "link_up_login_assumed":
       return "已开启宽松触发：网卡已连接但未确认在线，将尝试登录";
+    case "redirect_login_assumed":
+      return "网卡已连接，但常规探测未收到门户响应；将谨慎启动一次浏览器触发重定向";
     case "all_probes_failed":
       return "所有已启用的公网探测均失败，等待链路恢复";
     case "weak_evidence_only":

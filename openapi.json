@@ -159,9 +159,9 @@
     }
    }
   },
-  "/api/monitor/detect-portal": {
+  "/api/monitor/test-redirect": {
    "post": {
-    "operationId": "post___api_monitor_detect-portal",
+    "operationId": "post___api_monitor_test-redirect",
     "responses": {
      "200": {
       "description": "OK",

@@ -157,6 +157,127 @@ def test_webkit_uses_webkit_launcher_and_no_chromium_flags():
     assert "--disable-gpu" not in core._build_launch_args({}, "webkit")
 
 
+def test_redirect_classifier_distinguishes_portal_online_and_generic_login():
+    portal = playwright_worker._classify_redirect_test(
+        trigger_url="http://www.msftconnecttest.com/connecttest.txt",
+        final_url="http://10.0.0.1/portal",
+        response_status=200,
+        visible_text="校园网 用户登录 统一认证",
+        password_inputs=1,
+        account_inputs=1,
+        forms=1,
+    )
+    assert portal["status"] == "detected"
+
+    online = playwright_worker._classify_redirect_test(
+        trigger_url="http://www.msftconnecttest.com/connecttest.txt",
+        final_url="http://www.msftconnecttest.com/connecttest.txt",
+        response_status=200,
+        visible_text="Microsoft Connect Test",
+        password_inputs=0,
+        account_inputs=0,
+        forms=0,
+    )
+    assert online["status"] == "online"
+
+    generic = playwright_worker._classify_redirect_test(
+        trigger_url="http://example.com/",
+        final_url="http://example.com/",
+        response_status=200,
+        visible_text="欢迎访问，登录后查看个人中心",
+        password_inputs=0,
+        account_inputs=0,
+        forms=0,
+    )
+    assert generic["status"] == "not_detected"
+
+
+def test_redirect_test_forces_visible_isolated_browser(monkeypatch):
+    core = WorkerCore()
+    core._playwright = object()
+    launched: dict = {}
+
+    class FakeLocator:
+        def __init__(self, selector: str):
+            self.selector = selector
+
+        async def inner_text(self, timeout):
+            assert timeout == 1500
+            return "校园网 登录 认证 账号 密码"
+
+        async def count(self):
+            if "password" in self.selector or "form" in self.selector:
+                return 1
+            return 0
+
+    class FakeFrame:
+        def locator(self, selector):
+            return FakeLocator(selector)
+
+    class FakeResponse:
+        status = 200
+
+    class FakePage:
+        url = "http://10.0.0.1/portal"
+        frames = [FakeFrame()]
+
+        async def goto(self, *_args, **_kwargs):
+            return FakeResponse()
+
+        async def title(self):
+            return "校园网认证"
+
+        def is_closed(self):
+            return False
+
+    class FakeContext:
+        def __init__(self):
+            self.on_page = None
+
+        def on(self, event, callback):
+            assert event == "page"
+            self.on_page = callback
+
+        async def new_page(self):
+            page = FakePage()
+            self.on_page(page)
+            return page
+
+        async def close(self):
+            launched["context_closed"] = True
+
+    class FakeBrowser:
+        async def new_context(self, **_kwargs):
+            return FakeContext()
+
+        async def close(self):
+            launched["browser_closed"] = True
+
+    async def fake_launch(*args, **_kwargs):
+        launched["headless"] = args[3]
+        return FakeBrowser()
+
+    monkeypatch.setattr(core, "_launch_browser", fake_launch)
+    monkeypatch.setattr(playwright_worker, "_REDIRECT_TEST_SETTLE_SECS", 0.0)
+    result = asyncio.run(
+        core.handle_test_redirect(
+            {
+                "trigger_url": "http://www.msftconnecttest.com/connecttest.txt",
+                "browser_settings": {},
+            }
+        )
+    )
+
+    assert result["status"] == "detected"
+    assert launched == {
+        "headless": False,
+        "context_closed": True,
+        "browser_closed": True,
+    }
+    assert core._context is None
+    assert core._page is None
+
+
 def test_custom_webkit_filters_chromium_only_flags():
     core = WorkerCore()
     args = core._build_launch_args(

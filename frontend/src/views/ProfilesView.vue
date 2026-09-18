@@ -1,11 +1,11 @@
 <script setup lang="ts">
-/** 认证方案页：方案列表与编辑器、门户地址探测及活动方案切换 */
+/** 认证方案页：方案列表与编辑器、重定向检测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
 import LoginChannelField from "@/components/common/LoginChannelField.vue";
 import HttpLoginWizard from "@/components/common/HttpLoginWizard.vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useProfiles } from "@/composables/useProfiles";
-import { usePortalDetect } from "@/composables/usePortalDetect";
+import { useRedirectTest } from "@/composables/useRedirectTest";
 import { useCarrierField } from "@/composables/useCarrierField";
 import { useStatus } from "@/composables/useStatus";
 import { CARRIER_OPTIONS, DEFAULT_TRIGGER_URL } from "@/utils/constants";
@@ -19,14 +19,12 @@ import { frontendLogger } from "@/utils/logger";
 
 const p = useProfiles();
 const { busy } = useStatus();
-const portalDetect = usePortalDetect();
+const redirectTest = useRedirectTest();
 const { toastOnly } = useToast();
 
-/** 方案编辑器内检测门户：抓到地址直接填入认证地址输入框 */
-async function detectPortalForEditor(): Promise<void> {
-  const url = await portalDetect.detectPortal();
-  const ep = p.editingProfile.value;
-  if (url && ep) ep.auth_url = url;
+/** 用草稿中的自定义触发地址（空值即内置默认）启动一次可见浏览器检测。 */
+async function testRedirectForEditor(): Promise<void> {
+  await redirectTest.testRedirect(p.editingProfile.value?.trigger_url ?? "");
 }
 
 /**
@@ -68,6 +66,7 @@ watch(
   () => p.editingProfile.value,
   (profile) => {
     if (!profile) return;
+    redirectTest.result.value = null;
     matchExpanded.value = Boolean(profile.gateway_ip?.trim() || profile.wifi_ssid?.trim());
   },
 );
@@ -134,15 +133,32 @@ async function switchEditingProfile(id: string): Promise<void> {
 
 // carrierOptions → SelectOption[]
 const carrierOptions: SelectOption[] = CARRIER_OPTIONS;
-// 重定向模式开关：以编辑中方案的 trigger_url 非空为唯一状态源
-const redirectEnabled = computed({
-  get: () => !!p.editingProfile.value?.trigger_url,
-  set: (v: boolean) => {
+/**
+ * 用户可见的唯一登录网址。
+ *
+ * 兼容旧配置：历史上 `trigger_url` 非空代表显式开启重定向，即使同时保存了
+ * `auth_url` 也不会使用后者，因此这里显示为空。用户一旦填写固定网址，就清掉
+ * 旧触发值，使“填写=直接使用、留空=浏览器跟随重定向”成为唯一可见规则。
+ */
+const loginUrl = computed<string>({
+  get: () => {
+    const ep = p.editingProfile.value;
+    if (!ep) return "";
+    if (ep.login_channel === "browser" && ep.trigger_url?.trim()) return "";
+    return ep.auth_url ?? "";
+  },
+  set: (value) => {
     const ep = p.editingProfile.value;
     if (!ep) return;
-    ep.trigger_url = v ? ep.trigger_url || DEFAULT_TRIGGER_URL : "";
+    ep.auth_url = value;
+    if (ep.login_channel === "browser" && value.trim()) ep.trigger_url = "";
   },
 });
+
+/** 浏览器渠道下登录网址留空即使用重定向，不再另设模式开关 */
+const followsRedirect = computed(
+  () => p.editingProfile.value?.login_channel === "browser" && !loginUrl.value.trim(),
+);
 
 // ---- 方案分享（导出 / 导入） ----
 
@@ -361,29 +377,41 @@ async function confirmImport(): Promise<void> {
           <!-- 认证设置 -->
           <div class="editor-section">
             <div class="editor-section-label">认证设置</div>
-            <div class="form-group">
-              <label for="prof-auth-url">认证地址</label>
-              <div class="input-with-action">
-                <input id="prof-auth-url" v-model.trim="p.editingProfile.value.auth_url" type="text" placeholder="http://（重定向模式可留空）" />
-                <button class="btn btn-secondary btn-sm" @click="detectPortalForEditor" :disabled="portalDetect.detecting.value" title="需先退出校园网登录：未认证时跟随跳转自动填入">
-                  <IconApp name="globe" class="icon-sm" />
-                  {{ portalDetect.detecting.value ? '检测中…' : '自动检测' }}
-                </button>
+            <div v-if="p.editingProfile.value.login_channel === 'browser'" class="redirect-test-card">
+              <div class="redirect-test-copy">
+                <strong>先测试是否需要认证地址</strong>
+                <span>请先退出校园网登录，再点击检测；检测时会打开一个浏览器窗口。</span>
+                <span
+                  v-if="redirectTest.result.value"
+                  class="redirect-test-result"
+                  :class="redirectTest.result.value.status"
+                >{{ redirectTest.result.value.message }}</span>
               </div>
-              <span class="hint">需先退出校园网登录再检测（已在线时无跳转可抓）</span>
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :disabled="redirectTest.testing.value"
+                @click="testRedirectForEditor"
+              >
+                <IconApp name="globe" class="icon-sm" />
+                {{ redirectTest.testing.value ? '检测中…' : '重定向检测' }}
+              </button>
             </div>
             <div class="form-group">
-              <label class="toggle toggle-help-inline">
-                <input type="checkbox" v-model="redirectEnabled" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">重定向模式（劫持型门户）</span>
-              </label>
+              <label for="prof-auth-url">认证地址（可选）</label>
+              <input id="prof-auth-url" v-model.trim="loginUrl" type="text" placeholder="重定向检测成功时无需填写；无法重定向时手动填写" />
+              <span class="hint" v-if="p.editingProfile.value.login_channel === 'http'">直连登录使用下方的直连请求地址；这里仅作为脚本抓取认证页的来源，通常可留空。</span>
+              <span class="hint" v-else-if="followsRedirect">当前将打开默认触发地址并由浏览器跟随门户跳转；多数校园网无需填写。</span>
+              <span class="hint" v-else>已填写时直接打开这个网址，不再经过重定向触发页。</span>
             </div>
-            <div v-if="redirectEnabled" class="form-group">
-              <label for="prof-trigger-url">重定向触发地址</label>
-              <input id="prof-trigger-url" v-model.trim="p.editingProfile.value.trigger_url" type="text" :placeholder="DEFAULT_TRIGGER_URL + '（直连留空）'" />
-              <span class="hint">仅劫持型门户填写：明文 http 地址，Worker 跟随 302 到真门户</span>
-            </div>
+            <details v-if="followsRedirect" class="redirect-advanced">
+              <summary>重定向高级设置</summary>
+              <div class="form-group">
+                <label for="prof-trigger-url">自定义触发地址（可选）</label>
+                <input id="prof-trigger-url" v-model.trim="p.editingProfile.value.trigger_url" type="text" :placeholder="DEFAULT_TRIGGER_URL" />
+                <span class="hint">留空默认使用 <code>{{ DEFAULT_TRIGGER_URL }}</code>。非特殊网络无需修改；必须使用明文 http 才能被未认证网关劫持。</span>
+              </div>
+            </details>
           </div>
 
           <!-- 登录方式：由 LoginChannelField 承载（与设置页、引导向导共用） -->
@@ -415,7 +443,6 @@ async function confirmImport(): Promise<void> {
         :username="p.editingProfile.value.username"
         :password="p.editingProfile.value.password"
         :auth-url="p.editingProfile.value.auth_url"
-        @portal-detected="p.editingProfile.value.auth_url = $event"
         @close="showHttpWizard = false"
       />
     </template>

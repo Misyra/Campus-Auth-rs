@@ -514,9 +514,9 @@ pub struct ProfileData {
     pub username: String,
     /// 登录密码（明文提交时由 ProfileService 加密为 `ENC:` 密文）
     pub password: String,
-    /// 认证页面 URL
+    /// 固定登录网址；浏览器渠道留空时自动使用重定向触发地址
     pub auth_url: String,
-    /// 重定向触发地址（仅劫持型门户）：非空即重定向模式，Worker 首导航到此 http 地址并跟随 302 到真门户；为空保持直连模式
+    /// 自定义重定向触发地址；固定登录网址留空且本字段也为空时使用内置默认值
     pub trigger_url: String,
     /// 运营商（已从 carrier 重命名）
     pub isp: String,

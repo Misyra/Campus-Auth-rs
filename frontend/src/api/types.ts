@@ -90,6 +90,7 @@ export type AssessmentReason =
   | "captive_detected"
   | "external_failed_auth_reachable"
   | "link_up_login_assumed"
+  | "redirect_login_assumed"
   | "all_probes_failed"
   | "weak_evidence_only"
   | "inconclusive_evidence"
@@ -582,15 +583,13 @@ export interface NetworkDetectResult {
   matched_profile_name?: string | null;
 }
 
-/** 认证门户检测结论（POST /api/monitor/detect-portal） */
-export type PortalDetectStatus = "found" | "online" | "captive_no_redirect" | "offline";
+/** 可见浏览器重定向检测结论（POST /api/monitor/test-redirect） */
+export type RedirectTestStatus = "detected" | "online" | "not_detected";
 
-/** 认证门户检测结果 */
-export interface PortalDetectResult {
-  status: PortalDetectStatus;
-  portal_url: string | null;
+/** 重定向检测结果；检测只判断能力，不返回或保存门户临时地址。 */
+export interface RedirectTestResult {
+  status: RedirectTestStatus;
   message: string;
-  checked: string[];
 }
 
 /** 浏览器信息 */

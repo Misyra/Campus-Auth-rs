@@ -208,6 +208,39 @@ pub fn apply_lenient_trigger(
     current
 }
 
+/// 重定向登录是否需要用浏览器补一次探测。
+///
+/// 仅处理已有有效公网探测、但结论为 Offline/Unknown 且严格判定没有给出登录
+/// 建议的情况。明确 Online、已发现门户、配置错误和全部探测禁用均不参与。
+pub fn redirect_fallback_candidate(current: &ConnectivityAssessment) -> bool {
+    matches!(
+        current.status,
+        NetworkStatus::Offline | NetworkStatus::Unknown
+    ) && matches!(
+        current.recovery_advice,
+        RecoveryAdvice::WaitForNetwork | RecoveryAdvice::WaitForMoreEvidence
+    )
+}
+
+/// 对重定向登录应用一次浏览器兜底。
+///
+/// 某些校园网在未认证时会直接丢弃常规探测请求，只有真实浏览器访问明文触发页
+/// 才返回门户跳转。确认本地链路可用后，把该状态提升为低置信度门户，并建议
+/// `AttemptLoginOnce`；链路不可用或诊断失败时保持原结论，避免“真没网”时拉浏览器。
+pub fn apply_redirect_fallback(
+    mut current: ConnectivityAssessment,
+    local_link: LocalLinkState,
+) -> ConnectivityAssessment {
+    if !redirect_fallback_candidate(&current) || local_link != LocalLinkState::Available {
+        return current;
+    }
+    current.status = NetworkStatus::CaptivePortal;
+    current.confidence = AssessmentConfidence::Low;
+    current.reason = AssessmentReason::RedirectLoginAssumed;
+    current.recovery_advice = RecoveryAdvice::AttemptLoginOnce;
+    current
+}
+
 fn assessment(
     status: NetworkStatus,
     confidence: AssessmentConfidence,
@@ -562,5 +595,50 @@ mod tests {
         let result = apply_auth_endpoint(base, AuthEndpointState::SkippedRedirectMode);
         assert_eq!(result.status, NetworkStatus::Offline);
         assert_eq!(result.recovery_advice, RecoveryAdvice::WaitForNetwork);
+    }
+
+    #[test]
+    fn redirect_fallback_attempts_once_when_link_is_available() {
+        let base = apply_auth_endpoint(
+            assess_connectivity(&evidence(
+                ProbeOutcome::Fail,
+                ProbeOutcome::Fail,
+                ProbeOutcome::Fail,
+            )),
+            AuthEndpointState::SkippedRedirectMode,
+        );
+        assert!(redirect_fallback_candidate(&base));
+
+        let result = apply_redirect_fallback(base, LocalLinkState::Available);
+        assert_eq!(result.status, NetworkStatus::CaptivePortal);
+        assert_eq!(result.confidence, AssessmentConfidence::Low);
+        assert_eq!(result.reason, AssessmentReason::RedirectLoginAssumed);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::AttemptLoginOnce);
+    }
+
+    #[test]
+    fn redirect_fallback_does_not_run_without_local_link_or_probe_evidence() {
+        let offline = apply_auth_endpoint(
+            assess_connectivity(&evidence(
+                ProbeOutcome::Fail,
+                ProbeOutcome::Fail,
+                ProbeOutcome::Fail,
+            )),
+            AuthEndpointState::SkippedRedirectMode,
+        );
+        for state in [
+            LocalLinkState::NotChecked,
+            LocalLinkState::Unavailable,
+            LocalLinkState::ProbeFailed,
+        ] {
+            let result = apply_redirect_fallback(offline.clone(), state);
+            assert_eq!(result.status, NetworkStatus::Offline);
+            assert_eq!(result.recovery_advice, RecoveryAdvice::WaitForNetwork);
+        }
+
+        let no_probes = assess_connectivity(&ProbeEvidence::default());
+        let result = apply_redirect_fallback(no_probes, LocalLinkState::Available);
+        assert_eq!(result.recovery_advice, RecoveryAdvice::NoProbeEvidence);
+        assert_eq!(result.status, NetworkStatus::Unknown);
     }
 }

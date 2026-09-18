@@ -12,6 +12,12 @@ pub mod service;
 
 /// 当前代码支持的最高 schema 版本
 pub const CURRENT_CONFIG_VERSION: u32 = 9;
+/// 浏览器登录未填写固定网址时使用的默认重定向触发地址。
+///
+/// 明文 HTTP 才能被未认证网关劫持；与 Windows NCSI 使用同一探测页，避免用户
+/// 必须先知道真实门户地址。前端仅把它作为默认提示，运行时在 Profile 两个地址
+/// 都为空时补入，不写回用户配置。
+pub const DEFAULT_TRIGGER_URL: &str = "http://www.msftconnecttest.com/connecttest.txt";
 // 运行时目录布局单一事实源（见 `utils::paths`）：此处 re-export 保持调用路径稳定。
 pub use crate::utils::paths::{CONFIG_DIR, PROFILES_DIR, SETTINGS_FILE};
 /// 损坏文件备份前缀

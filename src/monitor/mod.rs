@@ -10,7 +10,8 @@ pub mod portal;
 pub mod probes;
 
 pub use decision::{
-    apply_auth_endpoint, apply_lenient_trigger, assess_connectivity, lenient_trigger_candidate,
+    apply_auth_endpoint, apply_lenient_trigger, apply_redirect_fallback, assess_connectivity,
+    lenient_trigger_candidate, redirect_fallback_candidate,
 };
 pub use model::{
     AssessmentConfidence, AssessmentReason, AuthEndpointState, ConnectivityAssessment,
@@ -375,7 +376,11 @@ impl MonitorService {
             && assessment.recovery_advice != RecoveryAdvice::NoProbeEvidence
             && assessment.status != NetworkStatus::Online
         {
-            let auth_endpoint = if !rt.profile.trigger_url.is_empty() {
+            let auth_endpoint = if rt.profile.login_channel == crate::config::LoginChannel::Http {
+                // 直连渠道使用独立的 http_url，auth_url 只是可选的页面抓取来源，
+                // 不能因其留空把有效的直连方案误判为配置缺失。
+                AuthEndpointState::NotChecked
+            } else if rt.profile.uses_redirect_login() {
                 AuthEndpointState::SkippedRedirectMode
             } else if rt.profile.auth_url.trim().is_empty() {
                 AuthEndpointState::Missing
@@ -399,15 +404,36 @@ impl MonitorService {
         // 串行而非并行：并行的代价是在线稳态下仍会白跑（结果被丢弃），收益只是
         // 失败路径省去一次「枚举网卡」的耗时（≤3s），而失败路径紧接着要拉起
         // 浏览器，这点延迟可忽略。
+        let redirect_fallback = purpose == CheckPurpose::AutoMonitor
+            && cfg.strict_login_mode
+            && rt.profile.uses_redirect_login()
+            && redirect_fallback_candidate(&assessment);
         let want_local_link = match purpose {
             CheckPurpose::ManualDiagnostic => cfg.local_check_enabled,
             CheckPurpose::AutoMonitor => {
-                !cfg.strict_login_mode && lenient_trigger_candidate(&assessment)
+                redirect_fallback
+                    || (!cfg.strict_login_mode && lenient_trigger_candidate(&assessment))
             }
             CheckPurpose::PostLoginVerification => false,
         };
         if want_local_link {
             evidence.local_link = self.probe_local_link().await;
+        }
+
+        // 严格模式下的重定向兜底：部分网关不对探测请求返回标准 200/302，
+        // 会被基础判定视为 Offline。只有本地链路确实可用时才谨慎拉起一次浏览器，
+        // 让真实导航触发门户；物理断网保持 Offline，不产生浏览器噪声。
+        if redirect_fallback {
+            let before = assessment.recovery_advice;
+            assessment = apply_redirect_fallback(assessment, evidence.local_link);
+            if assessment.recovery_advice == RecoveryAdvice::AttemptLoginOnce
+                && before != RecoveryAdvice::AttemptLoginOnce
+            {
+                debug!(
+                    local_link = ?evidence.local_link,
+                    "重定向模式下公网探测无响应但本地链路可用，谨慎启动一次浏览器触发门户"
+                );
+            }
         }
 
         // 宽松登录触发（严格模式关闭时）必须在严格判定（含认证入口补充）**之后**
@@ -515,7 +541,8 @@ impl MonitorService {
     /// 注意语义边界：它只判**链路层是否连着**，不判「是否有网」——插着网线但对端
     /// 未通、连着 WiFi 但网关不响应 DHCP，同样会得到 `Available`。真正判断「是否有
     /// 网」的是公网探测（204/URL/TCP）；本方法只在宽松模式下作为**比「有网」更弱**
-    /// 的兜底信号使用（见 [`decision::apply_lenient_trigger`]），因此不得用于替代探测。
+    /// 的兜底信号使用（见 [`decision::apply_lenient_trigger`] 与
+    /// [`decision::apply_redirect_fallback`]），因此不得用于替代探测。
     ///
     /// 失败与超时均不影响公网状态判定：返回 `ProbeFailed`，宽松触发据此不升级。
     async fn probe_local_link(&self) -> LocalLinkState {
@@ -682,7 +709,14 @@ mod tests {
         detect: Arc<dyn NetworkDetect>,
         strict_mode: bool,
     ) -> Arc<MonitorService> {
-        monitor_with_http_target(tmp, detect, strict_mode, "http://127.0.0.1:9/generate_204").await
+        monitor_with_http_target(
+            tmp,
+            detect,
+            strict_mode,
+            "http://127.0.0.1:9/generate_204",
+            false,
+        )
+        .await
     }
 
     /// 同 [`monitor_with`]，但可指定 204 探测目标（用于构造 Online 场景）
@@ -691,6 +725,7 @@ mod tests {
         detect: Arc<dyn NetworkDetect>,
         strict_mode: bool,
         http_target: &str,
+        redirect_login: bool,
     ) -> Arc<MonitorService> {
         use tokio::sync::mpsc;
         let (reload_tx, _reload_rx) = mpsc::channel(8);
@@ -715,16 +750,20 @@ mod tests {
 
         let profiles = crate::config::ProfileService::new(config.clone());
         let mut profile = profiles.get_profile("default").unwrap();
-        profile.auth_url = "http://127.0.0.1:9/login".into();
+        profile.auth_url = if redirect_login {
+            String::new()
+        } else {
+            "http://127.0.0.1:9/login".into()
+        };
         profile.trigger_url = String::new();
         profiles
             .update_profile("default", profile, false)
             .await
             .unwrap();
         assert_eq!(
-            profiles.get_profile("default").unwrap().auth_url,
-            "http://127.0.0.1:9/login",
-            "认证地址需真实写入活跃方案，否则走的是 Missing 分支"
+            profiles.get_profile("default").unwrap().auth_url.is_empty(),
+            redirect_login,
+            "测试 Profile 的登录网址模式应真实写入磁盘"
         );
         config.reload().await.unwrap();
 
@@ -732,7 +771,7 @@ mod tests {
     }
 
     /// 严格模式关闭（宽松口径）+ 网卡可用：全 Fail 的 Offline 必须被升级为建议登录，
-    /// 且网卡证据确实被采集（自动监测路径在严格模式下恒为 NotChecked）。
+    /// 且网卡证据确实被采集（严格直连模式下仍为 NotChecked）。
     #[tokio::test]
     async fn test_lenient_trigger_upgrades_auto_monitor_when_link_available() {
         let tmp = tempfile::tempdir().unwrap();
@@ -768,7 +807,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let target = spawn_always_204().await;
         let detect = Arc::new(WiredDetect::new());
-        let monitor = monitor_with_http_target(&tmp, detect.clone(), false, &target).await;
+        let monitor = monitor_with_http_target(&tmp, detect.clone(), false, &target, false).await;
         let report = monitor.check_auto_monitor().await.unwrap();
         assert_eq!(report.assessment.status, NetworkStatus::Online);
         assert_eq!(report.assessment.recovery_advice, RecoveryAdvice::NoAction);
@@ -802,18 +841,69 @@ mod tests {
         );
     }
 
-    /// 认证地址缺失（Missing → FixConfiguration）时不采集网卡：
+    /// 严格模式 + 登录网址留空：公网探测全失败时不能直接卡死为“没网”。
+    /// 本地链路可用后应谨慎启动一次浏览器，让真实导航触发门户重定向。
+    #[tokio::test]
+    async fn test_strict_redirect_fallback_uses_browser_once_when_link_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        let detect = Arc::new(WiredDetect::new());
+        let monitor = monitor_with_http_target(
+            &tmp,
+            detect.clone(),
+            true,
+            "http://127.0.0.1:9/generate_204",
+            true,
+        )
+        .await;
+        let report = monitor.check_auto_monitor().await.unwrap();
+
+        assert_eq!(report.evidence.local_link, LocalLinkState::Available);
+        assert_eq!(detect.calls(), 1);
+        assert_eq!(report.assessment.status, NetworkStatus::CaptivePortal);
+        assert_eq!(
+            report.assessment.reason,
+            AssessmentReason::RedirectLoginAssumed
+        );
+        assert_eq!(
+            report.assessment.recovery_advice,
+            RecoveryAdvice::AttemptLoginOnce
+        );
+    }
+
+    /// 重定向兜底仍须尊重物理链路：没有可用网卡时保持 Offline，不启动浏览器。
+    #[tokio::test]
+    async fn test_strict_redirect_fallback_waits_when_link_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let monitor = monitor_with_http_target(
+            &tmp,
+            Arc::new(NoLinkDetect),
+            true,
+            "http://127.0.0.1:9/generate_204",
+            true,
+        )
+        .await;
+        let report = monitor.check_auto_monitor().await.unwrap();
+
+        assert_eq!(report.evidence.local_link, LocalLinkState::Unavailable);
+        assert_eq!(report.assessment.status, NetworkStatus::Offline);
+        assert_eq!(
+            report.assessment.recovery_advice,
+            RecoveryAdvice::WaitForNetwork
+        );
+    }
+
+    /// 固定登录网址格式错误（Invalid → FixConfiguration）时不采集网卡：
     /// 宽松触发按设计不接管配置错误，采集结果也无人使用。
     #[tokio::test]
     async fn test_configuration_error_skips_link_probe() {
         let tmp = tempfile::tempdir().unwrap();
         let detect = Arc::new(WiredDetect::new());
         let monitor = monitor_with(&tmp, detect.clone(), false).await;
-        // 清空认证地址与触发地址 → 严格判定给 FixConfiguration
+        // 两个地址留空已是合法的默认重定向；这里改用非空非法值构造配置错误。
         let config = monitor.config_service.clone();
         let profiles = crate::config::ProfileService::new(config.clone());
         let mut profile = profiles.get_profile("default").unwrap();
-        profile.auth_url = String::new();
+        profile.auth_url = "http://".into();
         profiles
             .update_profile("default", profile, false)
             .await

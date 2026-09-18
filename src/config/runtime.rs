@@ -45,9 +45,9 @@ pub struct ProfileSnapshot {
     pub username: String,
     /// 登录密码（明文，已解密并清零保护）
     pub password: Zeroizing<String>,
-    /// 认证页面 URL
+    /// 用户显式填写的登录网址；非空且 `trigger_url` 为空时直接使用
     pub auth_url: String,
-    /// 重定向触发地址：非空即重定向模式（直连预检/监测 auth 探测跳过，Worker 首导航用它）
+    /// 重定向触发地址：非空即重定向模式；登录网址留空时由运行时补入默认值
     pub trigger_url: String,
     /// 运营商
     pub isp: String,
@@ -75,6 +75,36 @@ pub struct ProfileSnapshot {
     pub http_crypto_script: String,
     /// 直连请求是否忽略 HTTPS 证书错误（None = 跟随全局 browser.ignore_https_errors）
     pub http_ignore_https_errors: Option<bool>,
+}
+
+impl ProfileSnapshot {
+    /// 是否使用浏览器重定向登录。
+    ///
+    /// `trigger_url` 非空兼容旧版显式“重定向模式”；两个地址都为空则是新版
+    /// “登录网址留空即自动跟随重定向”的默认行为。直连 HTTP 渠道不使用浏览器
+    /// 触发地址，因此始终返回 `false`。
+    pub fn uses_redirect_login(&self) -> bool {
+        self.login_channel == crate::config::LoginChannel::Browser
+            && (!self.trigger_url.trim().is_empty() || self.auth_url.trim().is_empty())
+    }
+
+    /// 浏览器首导航的有效地址。
+    ///
+    /// 旧版同时保存认证地址与触发地址时仍以触发地址为准，避免升级后改变既有
+    /// 方案行为；新版填写固定登录网址时，前端会清空 `trigger_url`。
+    pub fn effective_browser_login_url(&self) -> &str {
+        let trigger = self.trigger_url.trim();
+        if !trigger.is_empty() {
+            trigger
+        } else {
+            let auth = self.auth_url.trim();
+            if auth.is_empty() {
+                crate::config::DEFAULT_TRIGGER_URL
+            } else {
+                auth
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for ProfileSnapshot {
@@ -138,13 +168,24 @@ pub fn build_runtime_config(
         .decrypt_to_zeroizing(&profile.id, &profile.password)
         .unwrap_or_else(|_| Zeroizing::new(String::new()));
 
+    // 新交互不再要求用户先打开“重定向模式”：固定登录网址留空就是自动跟随
+    // 网关跳转。默认值仅进入运行时，持久化仍保留空串，方便 UI 明确展示“未填写”。
+    let trigger_url = if profile.login_channel == crate::config::LoginChannel::Browser
+        && profile.auth_url.trim().is_empty()
+        && profile.trigger_url.trim().is_empty()
+    {
+        crate::config::DEFAULT_TRIGGER_URL.to_string()
+    } else {
+        profile.trigger_url.clone()
+    };
+
     let profile_snapshot = ProfileSnapshot {
         id: profile.id.clone(),
         name: profile.name.clone(),
         username: profile.username.clone(),
         password,
         auth_url: profile.auth_url.clone(),
-        trigger_url: profile.trigger_url.clone(),
+        trigger_url,
         isp: profile.isp.clone(),
         gateway_ip: profile.gateway_ip.clone(),
         wifi_ssid: profile.wifi_ssid.clone(),
@@ -250,5 +291,47 @@ mod tests {
         let dbg = format!("{rc:?}");
         assert!(!dbg.contains("NESTED_SECRET"), "嵌套 Debug 泄密: {dbg}");
         assert!(dbg.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn blank_login_url_uses_default_redirect_trigger_at_runtime() {
+        let mut profile = ProfileData::default();
+        profile.auth_url.clear();
+        profile.trigger_url.clear();
+        let temp = tempfile::tempdir().unwrap();
+        let crypto = PasswordCrypto::new(temp.path().join("key"));
+        let runtime = build_runtime_config(&SettingsData::default(), &profile, &crypto).unwrap();
+
+        assert!(runtime.profile.uses_redirect_login());
+        assert_eq!(
+            runtime.profile.effective_browser_login_url(),
+            crate::config::DEFAULT_TRIGGER_URL
+        );
+    }
+
+    #[test]
+    fn explicit_login_url_stays_direct_and_legacy_trigger_keeps_precedence() {
+        let mut direct = snapshot_with_password("pw");
+        direct.auth_url = "https://portal.example/login".into();
+        direct.trigger_url.clear();
+        assert!(!direct.uses_redirect_login());
+        assert_eq!(
+            direct.effective_browser_login_url(),
+            "https://portal.example/login"
+        );
+
+        direct.trigger_url = "http://trigger.example/".into();
+        assert!(direct.uses_redirect_login());
+        assert_eq!(
+            direct.effective_browser_login_url(),
+            "http://trigger.example/"
+        );
+
+        direct.login_channel = crate::config::LoginChannel::Http;
+        direct.auth_url.clear();
+        assert!(
+            !direct.uses_redirect_login(),
+            "直连 HTTP 渠道不得被浏览器重定向设置接管"
+        );
     }
 }
