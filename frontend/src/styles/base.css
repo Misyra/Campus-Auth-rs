@@ -16,9 +16,11 @@
   /* 边框色 */
   --border: rgba(148, 163, 184, 0.15);
   --border-hover: rgba(148, 163, 184, 0.2);
-  --border-accent: rgba(56, 189, 248, 0.15);
-  --border-accent-hover: rgba(56, 189, 248, 0.25);
-  --border-accent-strong: rgba(56, 189, 248, 0.3);
+  /* 描边底色：默认单色主题色下取中性白（与 useAppearance 的单色分支一致），
+     非单色时由 useAppearance 注入青蓝 */
+  --border-accent: rgba(255, 255, 255, 0.15);
+  --border-accent-hover: rgba(255, 255, 255, 0.25);
+  --border-accent-strong: rgba(255, 255, 255, 0.3);
 
   /* 文字色（中性黑/白与中性灰，不掺蓝调） */
   --text-primary: #ffffff;
@@ -29,15 +31,17 @@
      需要在任意底色上保持白色的元素）；--on-accent 是强调色底上的对比度自适应文字 */
   --text-on-accent: #ffffff;
 
-  /* 主题色 */
-  --accent: #22d3ee;
-  --accent-hover: #06b6d4;
-  /* 强调色上的文字：默认深字配亮青底；自定义强调色时由 useAppearance 按亮度切换 */
+  /* 主题色：默认「黑白」单色（日间黑 / 夜间白），由 useAppearance 按有效主题注入实际值。
+     此处静态值仅为首屏兜底（theme-init.js 只设 data-theme，其余交给本文件），
+     故与 useAppearance 的解析结果保持一致——深色主题下为白。 */
+  --accent: #ffffff;
+  --accent-hover: #e6e6e6;
+  /* 强调色上的文字：白底配深字；自定义强调色时由 useAppearance 按亮度切换 */
   --on-accent: #0f172a;
 
   /* 主题/状态色的 RGB 三元组原语：所有半透明派生色统一走 rgba(var(--x-rgb), α)，
      保证自定义强调色时发光、边框、选中态同步跟随 */
-  --accent-rgb: 34, 211, 238;
+  --accent-rgb: 255, 255, 255;
   --primary-rgb: 59, 130, 246;
   --purple-rgb: 167, 139, 250;
   /* 中性灰蓝原语（slate）：滚动条/占位符/骨架等中性半透明色统一引用，浅色主题下整体加深 */
@@ -73,6 +77,8 @@
   --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
   --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.2);
   --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.4);
+  /* 强调色发光：跟随 --accent-rgb（非单色时即所选强调色；单色时该三元组是黑/白，
+     自然是中性发光） */
   --shadow-accent: 0 0 10px rgba(var(--accent-rgb), 0.2);
 
   /* 圆角 */
@@ -336,14 +342,16 @@ textarea {
   --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.1);
   --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.15);
   --shadow-accent: 0 0 10px rgba(var(--accent-rgb), 0.15);
-  --border-accent: rgba(56, 189, 248, 0.2);
-  --border-accent-hover: rgba(56, 189, 248, 0.3);
-  --border-accent-strong: rgba(56, 189, 248, 0.4);
-  --accent: #0891b2;
-  --accent-hover: #0e7490;
-  /* 浅色下强调色更深，配白字保证对比度 */
+  /* 描边底色：默认单色主题色下取中性黑（青蓝描边叠在黑白强调色上不协调，
+     与 useAppearance 的单色分支口径一致）；非单色时由 useAppearance 注入青蓝。 */
+  --border-accent: rgba(0, 0, 0, 0.2);
+  --border-accent-hover: rgba(0, 0, 0, 0.3);
+  --border-accent-strong: rgba(0, 0, 0, 0.4);
+  /* 浅色主题下的单色强调色：黑色（日间黑），白底上对比最强 */
+  --accent: #000000;
+  --accent-hover: #1f1f1f;
   --on-accent: #ffffff;
-  --accent-rgb: 8, 145, 178;
+  --accent-rgb: 0, 0, 0;
   --purple: #8b5cf6;
   --purple-rgb: 139, 92, 246;
   --primary: #2563eb;

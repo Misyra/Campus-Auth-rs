@@ -5,8 +5,8 @@
  * 自定义颜色见 useCustomColors，背景图/壁纸见 useBackgroundImage。
  */
 
-import { reactive, watch } from "vue";
-import { DEFAULT_APPEARANCE } from "../utils/constants";
+import { reactive, ref, watch } from "vue";
+import { DEFAULT_APPEARANCE, MONO_ACCENT, MONO_ACCENT_DARK, MONO_ACCENT_LIGHT } from "../utils/constants";
 import type { Appearance } from "../utils/appearance-types";
 import { hexToRgb, adjustColor, pickOnColor } from "../utils/formatters";
 import { loadStored } from "../utils/storage";
@@ -36,6 +36,33 @@ function getEffectiveTheme(): "light" | "dark" {
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
   return themeMode;
+}
+
+/**
+ * 把主题色解析为最终色值：`mono` 哨兵按**有效主题**取日间黑 / 夜间白，其余原样返回。
+ *
+ * 主题色只有一个字段，而 `theme` 可以是 light/dark/auto，纯 hex 无法同时表达
+ * 「日间黑、夜间白」；`auto` 下更要随系统实时切。故此函数是所有消费点的**唯一入口**
+ * ——CSS 变量注入、色板渲染、选中判定都必须先经过它，
+ * 否则会把哨兵 `mono` 当成颜色用（它不是合法 CSS 颜色）。`isLight` 由调用方传入，
+ * 避免内部重复探测系统偏好（同一帧内多次 matchMedia 结果一致但无谓）。
+ */
+function resolveAccentColor(isLight: boolean): string {
+  return appearance.accent_color === MONO_ACCENT ? (isLight ? MONO_ACCENT_LIGHT : MONO_ACCENT_DARK) : appearance.accent_color;
+}
+
+/**
+ * 主题色解析结果，**响应式**。
+ *
+ * 模板若直接调 `getEffectiveTheme()`（内部读 `matchMedia`）只能拿到求值当时的快照，
+ * `theme=auto` 下系统切换深浅色不会触发重渲染——色块与色值文字会停在旧值。
+ * 故由 `applyAppearance` 统一写入此 ref，模板读它即自动订阅。
+ */
+const resolvedAccent = ref(MONO_ACCENT_LIGHT);
+
+/** 主题色解析后的最终色值（按当前有效主题），供视图层显示与色板渲染 */
+function getResolvedAccent(): string {
+  return resolvedAccent.value;
 }
 
 // theme=auto 时跟随系统深浅色切换：OS 切换不会触发 appearance watcher，
@@ -73,23 +100,51 @@ function applyAppearance(): void {
     body.classList.add("no-backdrop-filter");
   }
 
-  if (appearance.accent_color) {
-    root.style.setProperty("--accent", appearance.accent_color);
-    root.style.setProperty("--accent-hover", adjustColor(appearance.accent_color, -20));
-    const accentRgb = hexToRgb(appearance.accent_color);
+  const isLight = getEffectiveTheme() === "light";
+  root.setAttribute("data-theme", isLight ? "light" : "dark");
+  const _p = (k: string, v: string) => root.style.setProperty(k, v);
+
+  // 主题色：先把 `mono` 哨兵按有效主题解析为日间黑 / 夜间白，再做后续一切派生
+  const isMono = appearance.accent_color === MONO_ACCENT;
+  const accent = resolveAccentColor(isLight);
+  resolvedAccent.value = accent;
+  if (accent) {
+    _p("--accent", accent);
+    // 单色的悬停色单独取值：adjustColor 会钳制到 0..255，纯黑再 -20 仍是纯黑，
+    // 主按钮悬停将失去颜色反馈（深色下纯白 -25 正常），故单色按主题反向调亮度。
+    _p("--accent-hover", isMono ? adjustColor(accent, isLight ? 31 : -25) : adjustColor(accent, -20));
+    const accentRgb = hexToRgb(accent);
     if (accentRgb) {
-      root.style.setProperty("--accent-rgb", `${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}`);
+      _p("--accent-rgb", `${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}`);
     }
-    // 自定义强调色深浅不可预设：按亮度切换其上的文字色，保证可读
-    root.style.setProperty("--on-accent", pickOnColor(appearance.accent_color));
+    // 自定义强调色深浅不可预设：按亮度切换其上的文字色，保证可读。
+    // 单色下同样走此逻辑，天然得到「黑底白字 / 白底黑字」。
+    _p("--on-accent", pickOnColor(accent));
   } else {
     // 清除自定义值，回落到 CSS 中按主题预置的默认组合
     root.style.removeProperty("--on-accent");
   }
 
-  const isLight = getEffectiveTheme() === "light";
-  root.setAttribute("data-theme", isLight ? "light" : "dark");
-  const _p = (k: string, v: string) => root.style.setProperty(k, v);
+  // 开关旋钮叠在 accent 轨道上：非单色沿用「永远白色」（既有观感），
+  // 单色深色下轨道是纯白，白钮会隐形，改取对比自适应的 --on-accent。
+  if (isMono) {
+    _p("--toggle-knob-active", "var(--on-accent)");
+  } else {
+    root.style.removeProperty("--toggle-knob-active");
+  }
+
+  // 单色主题色下，发光与描边不跟随强调色：强调色发光叠在黑白上不协调，且
+  // 半透明黑发光在浅色底上几乎不可见、半透明白发光在深色底上晕成一片。
+  // 故发光改中性灰（浅色下即柔和投影、深色下轻微提亮）；
+  // 描边同样中性化，但统一在下方 accentBorder 处按 border_intensity 写入
+  // （放这里会被那里覆盖——内联样式后写覆盖先写）。
+  // 非单色必须清除内联值，让 CSS 默认（跟随 --accent-rgb 的青蓝发光）重新生效。
+  if (isMono) {
+    const neutral = isLight ? "0, 0, 0" : "255, 255, 255";
+    _p("--shadow-accent", `0 0 10px rgba(${neutral}, ${isLight ? 0.15 : 0.12})`);
+  } else {
+    root.style.removeProperty("--shadow-accent");
+  }
 
   if (isLight) {
     if (appearance.background_color) {
@@ -126,15 +181,21 @@ function applyAppearance(): void {
   }
 
   const bi = appearance.border_intensity;
+  // 描边色：默认青蓝；单色主题色下改中性灰（见上方 isMono 分支的说明）。
+  // 统一在此处写一次，避免与上文的设置顺序耦合——内联样式后写覆盖先写。
+  const accentBorder = isMono
+    ? (alpha: number) => `rgba(${isLight ? "0, 0, 0" : "255, 255, 255"}, ${alpha * bi})`
+    : (alpha: number) => `rgba(56, 189, 248, ${alpha * bi})`;
   if (isLight) {
     _p("--border", `rgba(100, 116, 139, ${0.12 * bi})`);
     _p("--border-hover", `rgba(100, 116, 139, ${0.22 * bi})`);
-    _p("--border-accent", `rgba(56, 189, 248, ${0.15 * bi})`);
   } else {
     _p("--border", `rgba(148, 163, 184, ${0.1 * bi})`);
     _p("--border-hover", `rgba(148, 163, 184, ${0.2 * bi})`);
-    _p("--border-accent", `rgba(56, 189, 248, ${0.15 * bi})`);
   }
+  _p("--border-accent", accentBorder(0.15));
+  _p("--border-accent-hover", accentBorder(0.25));
+  _p("--border-accent-strong", accentBorder(0.3));
 
   _p("--sidebar-opacity", String(appearance.sidebar_opacity));
 
@@ -212,6 +273,8 @@ export function useAppearance() {
     resetCard,
     cardDirty,
     getEffectiveTheme,
+    /** 主题色解析后的实际色值（`mono` 按有效主题取黑白），视图层显示与选中判定用它 */
+    getResolvedAccent,
     resetThemeBackground,
     applyAppearance,
   };

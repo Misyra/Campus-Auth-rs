@@ -68,7 +68,11 @@
   box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.25);
 }
 
+/* 开态旋钮：默认沿用「永远白色」。单色主题色下 accent 可能是纯白（深色主题），
+   白钮叠白轨道会隐形，此时 useAppearance 注入 --toggle-knob-active 取对比色。
+   仅单色时注入，避免改变其余强调色的既有观感。 */
 .toggle input:checked + .toggle-slider::after {
+  background: var(--toggle-knob-active, var(--text-on-accent));
   transform: translateX(20px);
 }
 
@@ -138,6 +142,9 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
+/* 按钮型开关的开态旋钮：同 label 型，单色主题色下轨道可能是纯白。
+   与上方 label 型同因，仅单色时由 useAppearance 注入 --toggle-knob-active。 */
 .toggle-switch.active .toggle-knob {
+  background-color: var(--toggle-knob-active, var(--text-on-accent));
   transform: translateX(20px);
 }

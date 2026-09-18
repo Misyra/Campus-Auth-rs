@@ -267,6 +267,19 @@ export const SETTINGS_TABS = [
   { id: "appearance", label: "外观", hint: "主题、背景与卡片样式" },
 ] as const;
 
+/**
+ * 单色主题色的哨兵值：不落具体色值，应用时按**有效主题**解析为浅色黑 / 深色白。
+ *
+ * 主题色只存一个 hex，而 `theme` 可以是 light/dark/auto，纯 hex 无法同时表达
+ * 「日间黑、夜间白」；故默认值用该哨兵，由 `useAppearance::resolveAccentColor`
+ * 在应用与渲染时解析。它不是合法 CSS 颜色，任何直接当作色值使用的位置都必须先解析。
+ */
+export const MONO_ACCENT = "mono";
+/** 单色主题色在浅色主题下的取值（日间黑） */
+export const MONO_ACCENT_LIGHT = "#000000";
+/** 单色主题色在深色主题下的取值（夜间白） */
+export const MONO_ACCENT_DARK = "#ffffff";
+
 export const DEFAULT_APPEARANCE: Appearance = {
   background_url: "",
   background_filename: "",
@@ -281,7 +294,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
   sidebar_color: "",
   sidebar_accent: "",
   backdrop_filter: false,
-  accent_color: "#22d3ee",
+  accent_color: MONO_ACCENT,
   theme: "light",
 };
 
@@ -311,6 +324,7 @@ export const DEFAULT_CUSTOM_COLORS = {
 };
 
 export const ACCENT_COLORS = [
+  { value: MONO_ACCENT, label: "黑白（日间黑 / 夜间白）" },
   { value: "#22d3ee", label: "青色" },
   { value: "#3b82f6", label: "蓝色" },
   { value: "#8b5cf6", label: "紫色" },

@@ -9,8 +9,10 @@ import Modal from "@/components/common/Modal.vue";
 import { useAppearance } from "@/composables/useAppearance";
 import { useBackgroundImage } from "@/composables/useBackgroundImage";
 import { useCustomColors } from "@/composables/useCustomColors";
+import { MONO_ACCENT } from "@/utils/constants";
+import { pickOnColor } from "@/utils/formatters";
 
-const { appearance, cardDirty, resetCard, resetThemeBackground } = useAppearance();
+const { appearance, cardDirty, resetCard, resetThemeBackground, getResolvedAccent } = useAppearance();
 const {
   randomWallpaperDialog,
   bgLightbox,
@@ -29,6 +31,25 @@ const {
   onColorLongPress,
   startLongPress,
 } = useCustomColors();
+
+/**
+ * 色板色块的背景：`mono` 哨兵不是合法 CSS 颜色（直接当 background 会渲染成透明），
+ * 需解析为当前有效主题下的实际色——浅色主题显示黑、深色主题显示白，
+ * 即「选了它现在会得到什么」。对半色块（左黑右白）看似信息更全，
+ * 但勾选图标必然落在同色那一半而看不清，故不用。
+ */
+function swatchBackground(value: string): string {
+  return value === MONO_ACCENT ? getResolvedAccent() : value;
+}
+
+/**
+ * 色块内勾选图标的颜色：按该色块的实际底色取对比色。
+ * 此前勾选继承文字色，深色主题下 `--text-primary` 是白色，
+ * 叠在纯白色块（单色的夜间态）上会完全看不见。
+ */
+function swatchCheckColor(value: string): string {
+  return pickOnColor(swatchBackground(value));
+}
 </script>
 
 <template>
@@ -113,17 +134,20 @@ const {
                   v-for="color in getColorList('accent')" :key="color.value"
                   type="button" class="appearance-color-btn"
                   :class="{ active: appearance.accent_color === color.value, custom: color.custom }"
-                  :style="{ background: color.value }"
+                  :style="{ background: swatchBackground(color.value) }"
                   @click="appearance.accent_color = color.value"
                   @contextmenu.prevent="color.custom ? onColorLongPress('accent', color.value) : null"
                   @touchstart="color.custom ? startLongPress('accent', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <IconApp name="check" v-if="appearance.accent_color === color.value" class="icon-sm" />
+                  <IconApp
+                    name="check" v-if="appearance.accent_color === color.value"
+                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
+                  />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('accent')" title="自定义颜色">+</button>
               </div>
-              <span class="appearance-color-hex">{{ appearance.accent_color }}</span>
+              <span class="appearance-color-hex">{{ getResolvedAccent() }}</span>
             </div>
             <input type="color" data-color-picker="accent" class="sr-only" @change="onCustomColorPicked('accent', $event)" />
           </div>
@@ -145,7 +169,10 @@ const {
                   @touchstart="color.custom ? startLongPress('bg', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <IconApp name="check" v-if="appearance.background_color === color.value" class="icon-sm" />
+                  <IconApp
+                    name="check" v-if="appearance.background_color === color.value"
+                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
+                  />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('bg')" title="自定义颜色">+</button>
               </div>
@@ -205,7 +232,10 @@ const {
                   @touchstart="color.custom ? startLongPress('sidebar', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <IconApp name="check" v-if="appearance.sidebar_color === color.value" class="icon-sm" />
+                  <IconApp
+                    name="check" v-if="appearance.sidebar_color === color.value"
+                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
+                  />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('sidebar')" title="自定义颜色">+</button>
               </div>
@@ -227,7 +257,10 @@ const {
                   @touchstart="color.custom ? startLongPress('sidebar_accent', color.value, $event) : null"
                   :title="color.label"
                 >
-                  <IconApp name="check" v-if="appearance.sidebar_accent === color.value" class="icon-sm" />
+                  <IconApp
+                    name="check" v-if="appearance.sidebar_accent === color.value"
+                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
+                  />
                 </button>
                 <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('sidebar_accent')" title="自定义颜色">+</button>
               </div>
