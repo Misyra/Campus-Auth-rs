@@ -89,6 +89,19 @@
 - 已知问题（`docs/known-issues.md`，含 E2 定时任务手动运行的 toast 语义、E3 任务卡「上次」结果不即时刷新）**有意不写入发布说明**，仅在已知问题清单中保留。
 - 未在本轮处理（记此备查）：`docs/changelog.md` 中 80 余个历史条目标题仍带「开发中（日期 …）」前缀，属已合入条目，保留以维持按日期倒序的可追溯性，不做批量改写。
 
+## 开发中（2026-09-19 README 优化）
+
+### 文档
+
+- 重构根目录 `README.md`：新增 CI / Release / License 徽章；「功能特性」按认证核心 / 自动化 / 界面与体验 / 运维分组；「使用说明」收敛为用户视角要点（移除 `ProfileSnapshot::uses_redirect_login`、`TaskKind` 等代码级引用，字段语义下沉至 `docs/guides/`）；新增「命令行速查」表（对照 `--help` 实际输出核对）与指南文档索引表（对照 `docs/guides/` 实际文件）；Docker CLI-only 用法折叠收纳；许可证章节补全为 AGPL-3.0-only（对齐 `Cargo.toml` 与 `LICENSE`）并保留使用场景声明。
+- README 头部改为居中门面布局（标题 + 标语 + logo + 徽章）：新增 `docs/assets/logo.png`（由 `frontend/public/logo.png` 缩至 512×512）与 `docs/assets/logo-dark.png`（RGB 反相的白猫变体，GitHub 暗色主题下可见），经 `<picture>` + `prefers-color-scheme` 自动切换；原 logo 为纯黑剪影，暗色主题下不可见，故必须配暗色变体。
+- 徽章区扩为两行并逐一实测：第一行 CI / Stars / Forks / Downloads / Issues / Contributors / License（shields.io 动态端点，实时取 GitHub API 数据，实测当前值 stars 12 / forks 2 / downloads 6.5k / issues 0 / contributors 2 / AGPL-3.0）；第二行为技术栈静态徽章（Rust / Tokio / Python / Playwright / Vue 3 / TypeScript / Vite / Docker，`logo=` 参数取 simple-icons slug，逐一验证存在性：axum 无 slug 故不上徽章、playwright 已从 simple-icons 移除故用纯色无 logo 版）。
+- 新增「界面预览」区：本机隔离实例（`--base-path` 临时目录 + 独立端口，v5.0.1 debug 构建）实机截取三张 Web 控制台截图——仪表盘（初始化 Python 环境清除未就绪横幅、启动检测后截「公网连接正常 + 运行中」健康态）/ 方案编辑 / 任务管理；1280×800 圆角描边 + FASTOCTREE 256 色量化（59 / 31 / 50 KB），量化后目检无可见色带；`<div align="center">` + 86% 主图 + 49.5%×2 并排布局。
+- 新增「架构」区：mermaid flowchart（GitHub 原生渲染，无图片文件），表达使用入口 / Rust 控制平面（Axum、Engine、Scheduler、ConfigService、Updater、Bridge Supervisor）/ Python Worker（Playwright + ddddocr，按需拉起空闲回收）/ 认证门户的关系，与 AGENTS.md 架构口径一致。
+- 开发与贡献末尾新增折叠的 Star History 图表（api.star-history.com SVG 外链）。
+- 新增 `docs/assets/social-card.png`（1280×640，69 KB）：白猫 logo + 标题 + 标语 + 仓库地址的深色分享卡片；GitHub 社交预览图无上传 API，需仓库 Settings → General → Social preview 手动上传该文件。
+- 信息不丢失约束：README 精简掉的内容（重定向判定、API 路径、任务模型细节）均有既定去向（`AGENTS.md` / `docs/guides/` / `openapi.json`），未产生仅存于旧版 README 的信息。
+
 ## 开发中（2026-09-18 手动更新：`update/` 目录放置安装包 + 更新页手动选择安装包）
 
 ### 新功能
