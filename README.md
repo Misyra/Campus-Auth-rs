@@ -59,7 +59,7 @@ curl http://localhost:50721/api/health
 Web 控制台 `http://localhost:50721`，数据持久化于命名卷 `campus-auth-data`（`config/` / `tasks/` / `logs/`）。
 
 默认拉取 `ghcr.io/misyra/campus-auth-rs:prerelease` 多架构镜像。需要固定版本时设置
-`CAMPUS_AUTH_IMAGE=ghcr.io/misyra/campus-auth-rs:v5.0.0`；需要从当前源码构建时使用：
+`CAMPUS_AUTH_IMAGE=ghcr.io/misyra/campus-auth-rs:v5.0.1`；需要从当前源码构建时使用：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build

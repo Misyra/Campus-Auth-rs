@@ -1,6 +1,6 @@
 # 用户指南
 
-> 适用于 Rust 重写版 `campus-auth`（`v5.0.0`，单 binary + Python Worker 子进程）。Python 版 `main.py` / `start.exe` / `update.exe` 已不在本仓库出现，本文已按当前实现重写。
+> 适用于 Rust 重写版 `campus-auth`（`v5.0.1`，单 binary + Python Worker 子进程）。Python 版 `main.py` / `start.exe` / `update.exe` 已不在本仓库出现，本文已按当前实现重写。
 
 ## 1. 启动与命令行
 

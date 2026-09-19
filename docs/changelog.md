@@ -1,6 +1,22 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.0”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.1”。
+
+## v5.0.1（2026-09-19 正式版发布）
+
+自 `v5.0.0`（`81c330a`）起共 2 个提交，功能改动仅一项（启动动作 `login_once` 登录成功后退出程序），逐项记录见下方「开发中（2026-09-19 修复：设置页「登录一次后退出」登录成功后程序不退出）」条目，其余为版本与文档同步。
+
+### 版本提升
+
+- 主程序版本由 `5.0.0` 提升为 `5.0.1`，同步 `Cargo.toml`、`Cargo.lock`、`frontend/package.json`、`frontend/package-lock.json`、`openapi.json`（`info.version`，路径表未变）。
+- 引用版本号的文档同步：`README.md` 与 `docker/README.md`（Docker 固定版本示例 `ghcr.io/misyra/campus-auth-rs:v5.0.1`）、`docs/guides/user-guide.md`、`AGENTS.md`、`docs/plan-next.md`（当前活跃改为 `v5.0.1`）、本文件头。
+- `docs/updatelog.md` 的「尚未发布（开发中）」段落冻结为 `## v5.0.1（2026-09-19）` 发布章节，仅含 login_once 退出修复一条；经 `release.yml:197` 同款 awk 前缀边界提取验证：`v5.0.1` 精确命中该章节且不含相邻的 `v5.0.0` 正文。
+- 顺带修复 `tests/smoke_test.rs` 的 `--version` 断言：原写死 `5.0.0`，版本提升即失败；改为 `env!("CARGO_PKG_VERSION")` 派生（同 `updater_channels` 的 mock 版本口径），此后版本提升不再破该测试。
+- Python Worker 版本独立固定为 `1.0.0`，不随本次提升变动。
+
+### 验证
+
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed` 全绿（lib **923 passed / 0 failed / 1 ignored**；集成测试含 `updater_channels` 16 例全过）。
 
 ## v5.0.0（2026-09-18 正式版发布）
 
