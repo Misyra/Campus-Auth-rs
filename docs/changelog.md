@@ -100,6 +100,29 @@
 - 本轮新增 `openapi.json` 的 `/api/system/update-package` 路径（multipart 请求体、含 409 响应）；`openapi_json_matches_route_table` 漂移护栏在本轮**实际拦住了**漏加该路径（先失败后补全），验证了护栏有效性。
 - 用户可见操作步骤更新到 `docs/guides/user-guide.md` §9 的「手动更新（两条入口）」小节；`AGENTS.md` 的「Updater」要点补记两条入口的信任口径差异与共同落盘序列。
 
+## 开发中（2026-09-19 修复：设置页「登录一次后退出」登录成功后程序不退出）
+
+### 缺陷修复
+
+- **用户报告**：设置页「启动后执行」选「登录一次后退出」，登录成功后主程序并不退出。核实属实：前端文案承诺「启动后执行一次登录，成功后自动退出程序」（`SystemSettings.vue` 的选项 label 与提示、`runMode.ts` 的差异提示均同口径），但后端 `apply_startup_action` 的 `LoginOnce` 分支只 spawn 后台任务提交登录并打结果日志，**没有任何退出逻辑**，程序照常以完整/轻量模式驻留——UI 承诺与实现相反。全局检索 `LoginSource::LoginOnce` 消费点确认无其他退出路径。
+- 辨析：CLI `--mode login-once`（`launch_login_once`）的「登录一次后退出」实现正确（等终态 → `graceful_shutdown` → 进程退出，成功 exit 0 / 失败 exit 1），缺的只是 `startup_action=login_once` 这条入口。
+
+### 修复
+
+- `apply_startup_action` 的 `LoginOnce` 分支：登录**成功**后取消应用级关闭令牌（`state.shutdown_token.cancel()`），由既有的 `wait_for_shutdown` → `graceful_shutdown` 链路统一收尾退出（调度器 / Engine / Bridge / Axum 逆序有界关闭），与 CLI login-once 共用同一退出路径；成功日志补「按 startup_action 配置退出程序」，`apply_startup_action` 的 doc comment 补记该口径。
+- 失败 / 取消不退出，保持驻留：用户可打开 Web 控制台查看失败原因并重试，与文案「成功后自动退出」的字面口径一致。
+- 并发安全性复用既有机制，无新增原语：托盘 / Web 关闭若先于登录完成触发，登录后台任务被 `abort_background_tasks` 中止，在途会话经容器内 shutdown child token 以「应用关闭」取消终态收尾（A3 既有链路）；登录若先于启动编排后续步骤（更新检查 / 自重启计时 spawn、`wait_for_shutdown` 注册）完成，这些步骤创建后立即随令牌取消而退出，无竞态窗口。
+
+### 验证
+
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed --lib launcher` 通过。
+- 未跑真机 E2E：改动为单点行为（成功 → cancel token），退出链路整段复用 CLI login-once 已验证路径，无新增并发原语与数据面改动。
+
+### 说明
+
+- updatelog 新增「尚未发布（开发中）」段落补入用户可见条目，随 5.0.1 发版冻结为 `v5.0.1` 章节（v5.0.0 tag 不含本修复，不得落在 v5.0.0 小节）。
+- Docker 部署若配置 `startup_action=login_once`，登录成功即退出进程，容器按 restart 策略重启后再次登录——这是该选项语义的自然结果，与 CLI 模式一致。
+
 ## 开发中（2026-09-19 修复：设置页按钮缺 `type` 导致点击后整页刷新）
 
 ### 缺陷修复

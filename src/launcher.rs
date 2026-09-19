@@ -707,6 +707,9 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
 
 /// 按 settings.global.app.startup_action 派发启动动作
 ///
+/// `login_once` 的口径：登录**成功**后取消应用级关闭令牌退出程序（与设置页
+/// 文案「成功后自动退出程序」一致），失败/取消保持驻留供用户排查重试。
+///
 /// 该配置此前只有写入点（CLI --startup-action / autostart API），从未被启动
 /// 逻辑消费——默认值 Monitor 的语义"启动后进入监测"实际从未生效，
 /// Engine 一直以 monitoring=false 空转等待用户手动触发。
@@ -726,15 +729,23 @@ async fn apply_startup_action(state: &LauncherState, container: &Arc<ServiceCont
         StartupAction::LoginOnce => {
             info!("按 startup_action=login_once 触发单次登录");
             let orchestrator = container.login.clone();
+            // 设置页该选项承诺「成功后自动退出程序」：成功即取消应用级关闭令牌，
+            // wait_for_shutdown 唤醒后走统一优雅关闭，与 CLI --mode login-once
+            // 共用同一退出路径；失败/取消不退出，保持驻留便于 Web 控制台排查
+            let shutdown = state.shutdown_token.clone();
             let handle = tokio::spawn(async move {
                 let handle = orchestrator
                     .submit(crate::status::LoginSource::LoginOnce, None, None)
                     .await;
                 let result = handle.await_result().await;
                 if result.is_success() {
-                    info!(message = %result.message, "启动单次登录成功");
+                    info!(
+                        message = %result.message,
+                        "启动单次登录成功，按 startup_action 配置退出程序"
+                    );
+                    shutdown.cancel();
                 } else {
-                    warn!(message = %result.message, "启动单次登录失败");
+                    warn!(message = %result.message, "启动单次登录失败，程序保持运行");
                 }
             });
             state.track_background_task(handle);
