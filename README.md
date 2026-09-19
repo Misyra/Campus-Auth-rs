@@ -64,12 +64,12 @@ Rust 重写版为**便携式单二进制 + Python 子进程**：网络监测、�
 ## 界面预览
 
 <div align="center">
-<img src="docs/assets/preview-dashboard.png" alt="Web 控制台 · 仪表盘" width="86%" />
+<img src="docs/assets/preview-dashboard.webp" alt="Web 控制台 · 仪表盘" width="86%" />
 
 <br/>
 
-<img src="docs/assets/preview-profiles.png" alt="认证方案编辑" width="49.5%" />
-<img src="docs/assets/preview-tasks.png" alt="任务管理" width="49.5%" />
+<img src="docs/assets/preview-profiles.webp" alt="认证方案编辑" width="49.5%" />
+<img src="docs/assets/preview-tasks.webp" alt="任务管理" width="49.5%" />
 
 <p><sub>仪表盘（运行状态 · 快捷操作 · 实时日志） · 认证方案编辑 · 任务管理（浏览器任务 / 脚本 / 定时任务 / AI 生成）</sub></p>
 </div>
