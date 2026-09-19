@@ -45,7 +45,7 @@ Web 控制台：`http://localhost:50721`
 默认镜像为 `ghcr.io/misyra/campus-auth-rs:prerelease`。需要复现指定版本时可覆盖：
 
 ```bash
-CAMPUS_AUTH_IMAGE=ghcr.io/misyra/campus-auth-rs:v5.0.1 docker compose up -d
+CAMPUS_AUTH_IMAGE=ghcr.io/misyra/campus-auth-rs:v5.0.2 docker compose up -d
 ```
 
 宿主机目录挂载（便于备份）：

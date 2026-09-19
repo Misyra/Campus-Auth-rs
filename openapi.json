@@ -2,7 +2,7 @@
  "openapi": "3.0.3",
  "info": {
   "title": "Campus-Auth Web API",
-  "version": "5.0.1",
+  "version": "5.0.2",
   "description": "Baseline OpenAPI document for Campus-Auth. Scope: this file is a manual snapshot of the route table (method + path) only — `components.schemas` is intentionally absent and every `responses.*.content.application/json.schema` is `{}`. Field-level contracts are NOT described here; the hand-written `frontend/src/api/types.ts` is the source of truth for payload shapes. There is no codegen step: `npm run typegen` and its `openapi-typescript` dependency were removed (see docs/changelog.md, C6). Handlers are not yet annotated with `utoipa` derive macros; once that integration lands this file should be generated from `#[derive(utoipa::OpenApi)]` and then carry real schemas. Drift protection today is limited to the method+path set, asserted by `openapi_json_matches_route_table` (src/web/mod.rs)."
  },
  "servers": [
