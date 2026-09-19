@@ -165,6 +165,7 @@ docker run -d --name campus-auth --restart unless-stopped --stop-timeout 40 \
 
 | 文档 | 内容 |
 |------|------|
+| [官网 · 在线文档](https://campus-auth.misyra.com) | 下载入口、快速开始 / 任务 / FAQ 的在线版、更新日志 |
 | [用户指南](docs/guides/user-guide.md) | 启动参数、运行时目录、Web 控制台、Profile、托盘、OCR、更新与手动放置安装包、FAQ |
 | [任务使用手册](docs/guides/task-manual.md) | 任务的日常使用（存储位置、关联方案、调度） |
 | [浏览器任务编写指南](docs/guides/task-writing-guide.md) | 浏览器任务 JSON 的步骤类型与字段语义 |

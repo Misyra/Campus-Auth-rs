@@ -101,6 +101,7 @@
 - 新增「架构」区：mermaid flowchart（GitHub 原生渲染，无图片文件），表达使用入口 / Rust 控制平面（Axum、Engine、Scheduler、ConfigService、Updater、Bridge Supervisor）/ Python Worker（Playwright + ddddocr，按需拉起空闲回收）/ 认证门户的关系，与 AGENTS.md 架构口径一致。
 - 开发与贡献末尾新增折叠的 Star History 图表（api.star-history.com SVG 外链）。
 - 新增 `docs/assets/social-card.png`（1280×640，69 KB）：白猫 logo + 标题 + 标语 + 仓库地址的深色分享卡片；GitHub 社交预览图无上传 API，需仓库 Settings → General → Social preview 手动上传该文件。
+- 「文档」索引表首行新增官网链接 `https://campus-auth.misyra.com`（下载入口 / 在线文档 / 更新日志）。附带发现官网部署缺陷（在官网仓库侧，非本仓库）：部分 JS 资源被构建为 `http://127.0.0.1:4173/assets/...` 绝对地址（vite preview 本地端口），访客浏览器必然加载失败，静态预渲染的文档正文不受影响但 SPA 交互失效；待官网仓库修正构建 base 后重新部署。
 - 信息不丢失约束：README 精简掉的内容（重定向判定、API 路径、任务模型细节）均有既定去向（`AGENTS.md` / `docs/guides/` / `openapi.json`），未产生仅存于旧版 README 的信息。
 
 ## 开发中（2026-09-18 手动更新：`update/` 目录放置安装包 + 更新页手动选择安装包）
