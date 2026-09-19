@@ -57,10 +57,21 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
 /// `exit(0)` 硬退出，新进程抢锁失败即死，最终两个进程都消失）。
 /// 旧进程通过 shutdown_tx 走完整优雅关闭流程（而非 exit(0) 跳过清理）。
 /// 后继进程生成逻辑与定时自重启共用 [`crate::launcher::spawn_restart_successor`]。
+///
+/// 例外：存在待应用更新（`update/pending.json`）时**不得生成后继进程**——
+/// 后继进程运行的是旧 exe，会锁住目标文件，更新助手替换必然失败
+/// （os error 32，曾导致"下载完成却无法更新"）。此时走纯退出，由已等待的
+/// 更新助手完成替换并用新 exe 重启（关机路径 `ensure_helper_for_shutdown`
+/// 会兜底补唤醒助手）。
 pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    // 生命周期事件：重启是关键用户操作，info 留痕
-    tracing::info!("收到重启请求，生成后继进程并开始优雅关闭");
-    crate::launcher::spawn_restart_successor().map_err(ApiError::Internal)?;
+    if state.updater.has_pending_update() {
+        // 生命周期事件：重启是关键用户操作，info 留痕（分支措辞与实际行为一致，
+        // 便于从日志区分"生成后继"与"助手替换后重启"两种重启路径）
+        tracing::info!("收到重启请求：存在待应用更新，退出后由更新助手替换并重启新版本");
+    } else {
+        tracing::info!("收到重启请求，生成后继进程并开始优雅关闭");
+        crate::launcher::spawn_restart_successor().map_err(ApiError::Internal)?;
+    }
     // 通知 launcher 优雅关闭当前进程（新进程会等待实例锁释放）
     let _ = state.shutdown_tx.send(());
     // watchdog：优雅关闭挂死时强制退出，释放实例锁供新进程启动（A4 统一）
@@ -1328,6 +1339,10 @@ mod tests {
         fn last_check_state(&self) -> Option<crate::updater::LastCheckState> {
             None
         }
+
+        fn has_pending_update(&self) -> bool {
+            false
+        }
     }
 
     fn sample_info() -> UpdateInfo {
@@ -1597,6 +1612,10 @@ mod tests {
 
         fn last_check_state(&self) -> Option<crate::updater::LastCheckState> {
             None
+        }
+
+        fn has_pending_update(&self) -> bool {
+            false
         }
     }
 

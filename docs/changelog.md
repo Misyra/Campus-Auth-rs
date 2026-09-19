@@ -1,6 +1,22 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.1”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
+
+## v5.0.2（2026-09-20 正式版发布）
+
+自 `v5.0.1`（`55aedb0`）起共 1 个提交，功能改动仅一项（应用内更新「立即重启」后更新未生效修复），逐项记录见下方「开发中（2026-09-20 修复：应用内更新下载完成后重启仍为旧版本）」条目，其余为版本与文档同步。
+
+### 版本提升
+
+- 主程序版本由 `5.0.1` 提升为 `5.0.2`，同步 `Cargo.toml`、`Cargo.lock`、`frontend/package.json`、`openapi.json`（`info.version`，路径表未变）。
+- 引用版本号的文档同步：`AGENTS.md`、`docs/plan-next.md`、本文件头（`README.md` / `docker/README.md` / `docs/guides/` 未写死版本号，无需变更）。
+- `docs/updatelog.md` 新增 `## v5.0.2（2026-09-20）` 发布章节，从本文件「开发中」条目汇总用户可感知变化（仅更新修复一条）；经 `release.yml:197` 同款 awk 前缀边界提取验证：`v5.0.2` 精确命中该章节且不含相邻的 `v5.0.1` 正文。
+- Python Worker 版本独立固定为 `1.0.0`，不随本次提升变动。
+
+### 验证
+
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed` 全绿（lib **924 passed / 0 failed / 1 ignored**）。
+- 更新链路端到端实测（隔离实例，红 → 绿对照）：修复前旧 release 构建（v5.0.0）复现「立即重启 → 后继进程锁住 exe → 助手替换失败 os error 32 → 回退失败 → 更新作废且包被清理」；修复后同流程走通（助手备份 → 替换成功 → 启动新版本 → 探活清理备份 → 新进程存活且 exe 摘要与更新包一致，无后继进程日志）。过程与结论详见下方「开发中」条目。
 
 ## v5.0.1（2026-09-19 正式版发布）
 
@@ -88,6 +104,21 @@
 - 注意：主题色默认值改动使 `DEFAULT_APPEARANCE.accent_color` 由 `#22d3ee` 变为哨兵 `mono`，属**外观默认值变更**，但不影响已存 localStorage 的用户（浅合并且仅补缺失键）。
 - 已知问题（`docs/known-issues.md`，含 E2 定时任务手动运行的 toast 语义、E3 任务卡「上次」结果不即时刷新）**有意不写入发布说明**，仅在已知问题清单中保留。
 - 未在本轮处理（记此备查）：`docs/changelog.md` 中 80 余个历史条目标题仍带「开发中（日期 …）」前缀，属已合入条目，保留以维持按日期倒序的可追溯性，不做批量改写。
+
+## 开发中（2026-09-20 修复：应用内更新下载完成后重启仍为旧版本）
+
+### 修复
+
+- **应用内更新「立即重启」后更新未生效（v5.0.0 → v5.0.1 实机复现）**：更新下载、校验、暂存、写 `pending.json`、唤醒更新助手全部正常，但前端「立即重启」确认框走的是通用重启接口 `POST /api/system/restart`——该接口先 `spawn_restart_successor()` 用**旧 exe** 生成 `--restarting` 后继进程，再优雅关闭主进程。后继进程锁住 `campus-auth.exe`（Windows 运行中的 exe 不可覆盖），助手替换必然失败（os error 32），回退同样失败，最终跑的仍是旧版本；且旧失败路径会清理 pending + staging，新包一并被删、下次更新需重新下载。实机日志证据：`helper.log` 两轮「替换失败 / 回退失败 os error 32」与 `app.log`「收到重启请求，生成后继进程」在同秒内先后出现。
+- 修复口径：存在待应用更新（`update/pending.json`）时，重启入口**不生成后继进程**，走纯退出，由已等待的更新助手完成替换并用新 exe + `original_args` 重启（关机路径 `ensure_helper_for_shutdown` 会兜底补唤醒助手）。覆盖两个入口：
+  - `POST /api/system/restart`（`src/web/routes/system.rs`）：分支日志措辞与实际行为一致，便于从日志区分两种重启路径；前端两条更新路径（「立即更新」与「手动选择安装包」）共用此接口，均被覆盖。
+  - 定时自重启（`src/launcher.rs` `spawn_auto_restart_timer`）：覆盖「暂存后未立即重启、定时器到期自动重启」的同款场景。
+- 配套：`UpdaterApi` trait 新增 `has_pending_update()`（`UpdaterService` 实现，`src/web/routes/system.rs` 两处测试 mock 补 `false`）。
+- 纵深（助手失败保留现场）：助手替换失败时不再清理 `pending.json` 与 staging（`src/helper_main.rs`）。替换失败几乎必然是目标 exe 被占用（复制在打开目标阶段即失败，目标内容未被改动），保留现场供下次启动 `apply_pending_on_startup` → `self_replace` 重试（rename 语义不受目标占用影响）；包损坏场景到不了此路径（前序 SHA256 复核已拒绝并清理），`apply_pending_locked` 自身失败仍会清理，不会形成无限重试。
+
+### 验证
+
+- `cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed` 全绿：lib **924 passed / 0 failed / 1 ignored**（新增 `test_has_pending_update_reflects_pending_file`），集成测试各二进制全过（含 `updater_channels` 16 例）。
 
 ## 开发中（2026-09-19 README 优化）
 

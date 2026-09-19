@@ -1089,7 +1089,12 @@ fn spawn_auto_restart_timer(state: &LauncherState) {
                 continue;
             }
             info!("运行时长已达 {hours} 小时，执行定时自重启");
-            if let Err(e) = spawn_restart_successor() {
+            // 有待应用更新时不得生成后继进程：后继进程运行的是旧 exe，会锁住
+            // 目标文件导致更新助手替换必然失败（os error 32）。此时走纯退出，
+            // 由更新助手完成替换并用新版本重启（关机路径会兜底补唤醒助手）。
+            if container.updater.has_pending_update() {
+                info!("检测到待应用更新，跳过后继进程生成，退出后由更新助手替换并重启新版本");
+            } else if let Err(e) = spawn_restart_successor() {
                 // 后继进程启动失败时放弃本轮重启（保持当前进程运行），避免每分钟重试刷屏
                 error!("定时自重启：启动后继进程失败（{e}），本次已放弃，保持当前进程运行");
                 return;

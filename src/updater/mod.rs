@@ -179,6 +179,12 @@ pub trait UpdaterApi: Send + Sync {
     ) -> Result<String, UpdaterError>;
     /// 读取上次检查状态（文件缺失或损坏返回 `None`）。
     fn last_check_state(&self) -> Option<LastCheckState>;
+    /// 是否存在待应用更新标记（`update/pending.json`）
+    ///
+    /// 重启入口据此决策：有 pending 时必须走纯退出（由更新助手替换后重启），
+    /// 不得生成后继进程——后继进程运行的是旧 exe，会锁住目标文件导致
+    /// 助手替换必然失败（os error 32）。
+    fn has_pending_update(&self) -> bool;
 }
 
 #[async_trait::async_trait]
@@ -201,6 +207,10 @@ impl UpdaterApi for UpdaterService {
 
     fn last_check_state(&self) -> Option<LastCheckState> {
         UpdaterService::last_check_state(self)
+    }
+
+    fn has_pending_update(&self) -> bool {
+        UpdaterService::has_pending_update(self)
     }
 }
 
@@ -478,6 +488,15 @@ impl UpdaterService {
             platform_unavailable: false,
             local_package,
         }))
+    }
+
+    /// 是否存在待应用更新标记（`update/pending.json`）
+    ///
+    /// 重启入口（Web 重启接口 / 定时自重启）据此决策：有 pending 时必须走纯
+    /// 退出，由更新助手替换 exe 后用新版本重启；生成后继进程会锁住旧 exe
+    /// 导致助手替换必然失败（Windows 上运行中的 exe 文件不可覆盖）。
+    pub fn has_pending_update(&self) -> bool {
+        apply::has_pending_update(&self.base_path)
     }
 
     /// 读取上次检查状态（`update/last_check.json`；缺失/损坏返回 `None`）
@@ -1241,6 +1260,30 @@ mod tests {
             !svc.update_in_progress.load(Ordering::SeqCst),
             "跳过路径不得遗留占用标记"
         );
+    }
+
+    /// has_pending_update：pending.json 存在与否决定重启入口是否走
+    /// "纯退出 + 助手替换"路径（写/清都经 apply 模块的正规持久化函数）
+    #[tokio::test]
+    async fn test_has_pending_update_reflects_pending_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+        assert!(!svc.has_pending_update(), "无 pending.json 时应为 false");
+
+        let pending = apply::PendingUpdate {
+            version: "9.9.9".into(),
+            staging_dir: dir.path().join("update/staging").to_string_lossy().into(),
+            target_exe: dir.path().join("campus-auth.exe").to_string_lossy().into(),
+            worker_target_dir: dir.path().join("python_worker").to_string_lossy().into(),
+            original_args: vec![],
+            sha256: "0".repeat(64),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        apply::write_pending(&pending, dir.path()).expect("写入 pending 失败");
+        assert!(svc.has_pending_update(), "pending.json 存在时应为 true");
+
+        apply::cleanup_after_apply(dir.path()).await;
+        assert!(!svc.has_pending_update(), "清理后应为 false");
     }
 
     /// F9：手动更新进行中（标记被占）时后台路径跳过，

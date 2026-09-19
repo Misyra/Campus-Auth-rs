@@ -318,7 +318,12 @@ fn main() {
                     )),
                 }
             }
-            cleanup(&base_path, &staging_dir, &mut log);
+            // 替换失败几乎必然是目标 exe 被占用（如重启场景的后继进程、杀软
+            // 扫描），此时目标内容并未被修改（复制在打开目标阶段即失败），
+            // 保留 pending.json 与 staging 供下次启动走 apply_pending_on_startup
+            // → self_replace 重试（rename 语义不受目标占用影响）；仅当包本身
+            // 损坏时才会到不了这里（前序 SHA256 复核已拒绝并清理）。
+            log.info("已保留待应用更新记录，下次启动将自动重试应用更新");
             std::process::exit(1);
         }
     }
