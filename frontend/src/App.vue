@@ -10,16 +10,21 @@ import ConfirmDialog from "./components/common/ConfirmDialog.vue";
 import SetupWizard from "./components/common/SetupWizard.vue";
 import DebugPanel from "./components/DebugPanel.vue";
 import RepoImportModals from "./components/RepoImportModals.vue";
+import UpdateDialog from "./components/UpdateDialog.vue";
 import { onMounted } from "vue";
 import { useDebug } from "./composables/useDebug";
+import { useUpdateDialog } from "./composables/useUpdateDialog";
 
 const { state } = useUi();
 const debug = useDebug();
+const updateDialog = useUpdateDialog();
 
 // 启动时恢复服务端仍活跃的调试会话：否则页面刷新后界面"失忆"，
 // 用户既看不到会话在跑也没有停止入口，登录会一直撞"Worker 忙"错误
 onMounted(() => {
   void debug.restoreIfActive();
+  // 注册"后端周期检查命中"的自动弹窗（watch 需组件作用域，故在挂载时建立）
+  updateDialog.initAutoOpen();
 });
 </script>
 
@@ -43,6 +48,8 @@ onMounted(() => {
     <DebugPanel />
     <!-- 仓库导入弹窗全局挂载：任意路由（/tasks 或 /settings/environment）均可触发，避免局部挂载导致切页才弹的错位 -->
     <RepoImportModals />
+    <!-- 更新弹窗同样全局挂载：启动/周期检查命中时任意页面都能直接弹出 -->
+    <UpdateDialog />
 
     <div v-if="state.isLoading" class="init-overlay">
       <span class="spinner"></span>

@@ -80,6 +80,8 @@ export interface StatusSnapshot {
   snapshot_version?: number;
   /** 更新下载进度（下载期间有值，结束/失败后清空） */
   update_progress?: { phase: string; percent: number; message: string } | null;
+  /** 后端检查到可用更新（周期检查命中时置真；前端据此自动弹出更新弹窗） */
+  update_available?: boolean;
 }
 
 export type NetworkState = "online" | "captive_portal" | "offline" | "unknown";

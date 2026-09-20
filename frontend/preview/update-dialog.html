@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 更新弹窗样式预览页（仅本地开发用，不参与 `vite build`：构建入口只有 index.html）。
+         用法：`cd frontend && npm run dev`，然后打开 /preview/update-dialog.html?state=update
+         右上角浮动切换器可逐一切换各种状态，不需要后端在跑。 -->
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@fontsource-variable/noto-sans-sc@5.3.0/index.css"
+    />
+    <title>更新弹窗样式预览</title>
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="preview"></div>
+    <script type="module" src="./update-dialog.ts"></script>
+  </body>
+</html>

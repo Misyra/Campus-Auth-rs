@@ -41,6 +41,21 @@ export const TASK_REPO_INDEX_URL_GITEE = `https://raw.giteeusercontent.com/${TAS
 export const TASK_REPO_URL_GITEE = `https://gitee.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}`;
 
 /**
+ * 主程序仓库主页与发布页（单一事实源）。
+ *
+ * 更新弹窗的「在 GitHub 查看」用它拼具体 tag 的发布页；此前该地址只在
+ * `AboutView.vue` 的模板里硬编码过一次，弹窗再抄一份会两处漂移。
+ */
+export const APP_REPO_URL = "https://github.com/Misyra/Campus-Auth-rs";
+export const APP_RELEASES_URL = `${APP_REPO_URL}/releases`;
+
+/** 具体版本的发布页地址；版本号为空时退回发布列表页 */
+export function releaseTagUrl(version: string | undefined | null): string {
+  const v = (version ?? "").trim();
+  return v ? `${APP_RELEASES_URL}/tag/v${v.replace(/^v/, "")}` : APP_RELEASES_URL;
+}
+
+/**
  * B 站 UP 主主页。
  *
  * 「关于」页的外部入口。

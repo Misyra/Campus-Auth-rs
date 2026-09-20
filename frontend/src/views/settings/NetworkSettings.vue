@@ -8,6 +8,7 @@ import { useConfig } from "@/composables/useConfig";
 import { useConfirm } from "@/composables/useConfirm";
 import { useStatus } from "@/composables/useStatus";
 import { useToast } from "@/composables/useToast";
+import { useUpdateDialog } from "@/composables/useUpdateDialog";
 import { pickFile } from "@/utils/file";
 import { systemApi, configApi } from "@/api";
 import type { UpdateState, UpdateInfo } from "@/api/types";
@@ -17,6 +18,8 @@ const config = useConfig();
 const { confirm } = useConfirm();
 const { status } = useStatus();
 const { toastOnly } = useToast();
+/** 更新弹窗：本页的「立即检查」命中与「查看更新日志」入口都指向它 */
+const update = useUpdateDialog();
 
 // 显式标注 SelectOption[]：as const 的只读元组无法绑定 CustomSelect 的可变 options prop
 const checkFrequencyOptions: SelectOption[] = [
@@ -116,6 +119,9 @@ async function manualCheckUpdate() {
   try {
     const info = await systemApi.checkUpdate();
     updateInfo.value = info;
+    // 命中新版本直接弹更新弹窗（完整 GitHub 发布说明在此展示）；
+    //「已是最新 / 平台缺包」仍在本页就地提示，弹窗只用于真有更新可看可装时
+    if (info?.has_update) update.openWith(info);
   } catch (e: unknown) {
     updateInfo.value = { has_update: false, error: (e as Error).message || "检查失败" };
   } finally {
@@ -371,6 +377,10 @@ onMounted(() => {
                 <IconApp v-if="updateChecking" name="refresh" class="spin" />
                 {{ updateChecking ? "检查中..." : "立即检查" }}
               </button>
+              <!-- 更新日志统一在弹窗里看（大区域 + 可滚动），本页只留紧凑状态行 -->
+              <button type="button" class="btn btn-ghost btn-sm" @click="update.openDialog()">
+                查看更新日志
+              </button>
               <span v-if="lastCheckLabel" class="hint">{{ lastCheckLabel }}</span>
             </div>
             <span v-if="updateCheckHint && !updateInfo" class="hint update-check-hint" :class="{ 'update-check-error': !!updateState?.error }">{{ updateCheckHint }}</span>
@@ -392,7 +402,6 @@ onMounted(() => {
                 {{ localPackageHint }}
               </p>
               <div v-if="updating && updateProgress" class="hint update-progress">下载更新 {{ updateProgress.percent }}%</div>
-              <p v-if="updateInfo.has_update && updateInfo.notes" class="hint update-notes">{{ updateInfo.notes }}</p>
             </div>
             <div v-else-if="updateInfo && updateInfo.message" class="update-success">
               <IconApp name="check" width="16" height="16" />
@@ -432,12 +441,3 @@ onMounted(() => {
     </section>
   </div>
 </template>
-
-<style scoped>
-.update-notes {
-  white-space: pre-line;
-  margin: 6px 0 0;
-  max-height: 8em;
-  overflow-y: auto;
-}
-</style>

@@ -23,6 +23,7 @@ import { useWebSocket } from "./useWebSocket";
 import { useToast } from "./useToast";
 import { useNotifications } from "./useNotifications";
 import { useConfirm } from "./useConfirm";
+import { useUpdateDialog } from "./useUpdateDialog";
 
 const state = reactive({
   isLoading: true,
@@ -101,13 +102,9 @@ async function finishWizard(): Promise<void> {
 
 async function autoCheckUpdateOnStartup(): Promise<void> {
   try {
-    const data = await systemApi.checkUpdate();
-    if (!data?.has_update) return;
-    const latest = data.latest ? `v${data.latest}` : "新版本";
-    const current = data.current ? `（当前 v${data.current}）` : "";
-    const message = `发现新版本 ${latest}${current}`;
-    notify(true, message, "update", { label: "前往更新", page: "settings-network" });
-    frontendLogger.warn("update", `${message}，请前往“设置 · 网络与更新”页面更新`);
+    // 命中直接弹更新弹窗（含 GitHub 发布说明），与后端周期检查命中走同一路径；
+    // 此前只发一条 toast，用户还得自己找「设置 · 网络与更新」才能看到更新内容
+    await useUpdateDialog().checkAndMaybeOpen();
   } catch (error) {
     frontendLogger.debug("update", "启动自动检查更新失败", error);
   }

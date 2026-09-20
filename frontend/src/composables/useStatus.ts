@@ -40,6 +40,7 @@ const status = reactive<StatusSnapshot>({
   },
   last_probe_evidence: null,
   update_progress: null,
+  update_available: false,
 });
 
 const autostart = reactive<AutostartStatus>({
@@ -118,6 +119,8 @@ function mapBackendStatus(raw: Record<string, unknown>): Partial<StatusSnapshot>
   out.login_status = raw.login_status as string | undefined;
   out.snapshot_version = Number(raw.snapshot_version ?? 0);
   out.update_progress = (raw.update_progress as StatusSnapshot["update_progress"]) ?? null;
+  // 后端周期检查命中会置真；更新弹窗据此自动弹出（启动检查走 useUi 那条路径）
+  out.update_available = Boolean(raw.update_available ?? status.update_available);
   return out;
 }
 
