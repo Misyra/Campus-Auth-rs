@@ -4,6 +4,7 @@
 //! Bridge 命令派发经 `State<Arc<dyn BridgeApi>>` 提取，不再触达 `state.container`。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::Path;
@@ -13,9 +14,14 @@ use axum::response::IntoResponse;
 use serde_json::{Value, json};
 
 use crate::bridge::BridgeApi;
-use crate::config::ConfigApi;
+use crate::config::{ConfigApi, DEFAULT_TRIGGER_URL};
+use crate::monitor::{MonitorConfig, PortalDetectStatus, detect_portal};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+
+/// 调试启动"已联网"预检的超时上限：各探测目标并行，正常为百毫秒级的 204/内容探测，
+/// 收紧到 3s 是因为它只是一次咨询性判定，不该让点击"调试"明显卡顿。
+const DEBUG_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// POST /api/debug/start — 启动调试会话
 ///
@@ -23,6 +29,9 @@ use crate::web::error::{ApiError, data};
 /// 与 Python Worker 的 `debug_start` 契约一致（步骤载体为 `task_config`）。
 /// 同时注入活跃 Profile 的系统保留变量，使登录类任务的 {{USERNAME}}/{{LOGIN_URL}}
 /// 等模板在调试时的行为与真实执行一致（此前不注入会导航到 `{{LOGIN_URL}}` 字面量）。
+///
+/// 未配置登录网址（走内置默认触发地址）时先做一次"已联网"预检：命中直接 409，
+/// 避免已联网状态下白拉一次只会显示探测页面的浏览器。
 pub async fn start_debug(
     State(tasks): State<Arc<dyn TaskApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -75,6 +84,38 @@ pub async fn start_debug(
             "".into()
         }
     });
+    // 未配置登录网址（浏览器渠道 + 认证地址留空 + 触发地址为空或就是内置默认值）时，
+    // 已联网状态下访问触发地址不会跳转，调试只会打开一页探测返回值（没有登录表单），
+    // 白拉一次浏览器。这里复用「重定向检测」同一份门户预检（各目标并行）提前拦住，
+    // 前端把 409 的 message 直接当 toast 展示。
+    // 运行时快照会给"两个地址都空"的 Profile 补上默认触发地址
+    // （`build_runtime_config`），故"空"与"等于默认值"两种形态都要认。
+    // 只在用默认触发地址这一形态下探测：用户填了登录网址、或旧版方案自带触发地址时，
+    // 访问的是自己给的地址，联网时也可能真能打开门户，拦了就是误报。
+    let no_login_url_configured = profile.uses_redirect_login()
+        && profile.auth_url.trim().is_empty()
+        && (profile.trigger_url.trim().is_empty()
+            || profile.trigger_url.trim() == DEFAULT_TRIGGER_URL);
+    if no_login_url_configured {
+        let m = &rt.monitor;
+        let cfg = MonitorConfig::from_runtime(&rt);
+        let preflight = detect_portal(
+            &m.http_targets,
+            cfg.http_timeout.min(DEBUG_PREFLIGHT_TIMEOUT),
+            &m.url_targets,
+            &m.url_expected_responses,
+            cfg.url_timeout.min(DEBUG_PREFLIGHT_TIMEOUT),
+            m.disable_proxy,
+        )
+        .await;
+        if preflight.status == PortalDetectStatus::Online {
+            tracing::info!("未配置登录网址且当前已联网，已拦截调试启动");
+            return Err(ApiError::Conflict(
+                "当前已联网且未配置登录网址，可能无法打开门户页面；请先退出校园网登录，或在「方案」页填入登录网址后重试"
+                    .into(),
+            ));
+        }
+    }
     let resp = bridge.execute("debug_start", params).await?;
     tracing::info!("调试会话已启动");
     // 只取 IPC 载荷（result.data）：序列化整个 IpcResponse 会带上 id/result 包装，
@@ -852,6 +893,79 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(inner.lock().unwrap().executed.is_empty());
+    }
+
+    /// 本地 HTTP 服务对任意连接都回 204：门户 HTTP 探测按 204 判"已联网"（免外网依赖）
+    async fn serve_online_204() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+        format!("http://{addr}/generate_204")
+    }
+
+    /// 未配置登录网址 + 已联网 → 409，且不触达 Bridge（前端把 message 直接当 toast）
+    #[tokio::test]
+    async fn start_blocked_when_online_without_login_url() {
+        let (app, inner, cfg) = mock_app();
+        let online = serve_online_204().await;
+        {
+            let mut g = cfg.lock().unwrap();
+            g.runtime.monitor.http_targets = vec![online];
+            g.runtime.monitor.url_targets.clear();
+            g.runtime.monitor.url_expected_responses.clear();
+            g.runtime.monitor.disable_proxy = true;
+        }
+        let resp = app
+            .oneshot(post_json("/api/debug/start", r#"{"task_id":"t1"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("未配置登录网址"),
+            "{v}"
+        );
+        assert!(
+            inner.lock().unwrap().executed.is_empty(),
+            "预检拦截时不得触达 Bridge"
+        );
+    }
+
+    /// 未配置登录网址 → 注入内置默认触发地址；探测无可达目标（未联网）时不拦截
+    #[tokio::test]
+    async fn start_injects_default_trigger_when_login_url_not_configured() {
+        let (app, inner, cfg) = mock_app();
+        {
+            let mut g = cfg.lock().unwrap();
+            // 清空探测目标：detect_portal 无目标时汇总为 Offline，锁定"不误拦"这条腿
+            g.runtime.monitor.http_targets.clear();
+            g.runtime.monitor.url_targets.clear();
+        }
+        let resp = app
+            .oneshot(post_json("/api/debug/start", r#"{"task_id":"t1"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let guard = inner.lock().unwrap();
+        let (method, params) = &guard.executed[0];
+        assert_eq!(method, "debug_start");
+        // 认证地址留空 + 触发地址留空＝运行时补默认值，Worker 侧据此回落首导航
+        assert_eq!(params["auth_url"], "");
+        assert_eq!(params["trigger_url"], DEFAULT_TRIGGER_URL);
     }
 
     /// step 空体转 {} 并透传 debug_step

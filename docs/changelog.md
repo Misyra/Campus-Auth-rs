@@ -105,6 +105,31 @@
 - 已知问题（`docs/known-issues.md`，含 E2 定时任务手动运行的 toast 语义、E3 任务卡「上次」结果不即时刷新）**有意不写入发布说明**，仅在已知问题清单中保留。
 - 未在本轮处理（记此备查）：`docs/changelog.md` 中 80 余个历史条目标题仍带「开发中（日期 …）」前缀，属已合入条目，保留以维持按日期倒序的可追溯性，不做批量改写。
 
+## 开发中（2026-09-20 调试启动预检与首导航回落）
+
+### 新增
+
+- **调试启动新增"已联网且未配置登录网址"预检**（`src/web/routes/debug.rs`）：在浏览器渠道 + 认证地址留空 + 触发地址为空或等于内置默认值的形态下，先复用「重定向检测」同一份门户预检（`monitor::detect_portal`，各目标并行）判断当前是否已联网，命中直接返回 409 与提示「当前已联网且未配置登录网址，可能无法打开门户页面；请先退出校园网登录，或在「方案」页填入登录网址后重试」。
+  - 动机：已联网时访问触发地址不会跳转，调试只会打开一页探测返回值（无登录表单），白拉一次浏览器且用户看不出所以然。
+  - 前端**零改动**：`useDebug.startDebug` 已有 `extractApiError` → `toastOnly` 通道，409 的 `message` 直接成为 toast。
+  - 只在"用默认触发地址"这一形态下探测（填了登录网址、或旧版方案自带触发地址时访问的是用户自己给的地址，联网时也可能真能打开门户，拦了即误报）；预检超时收敛为 `cfg.http_timeout.min(3s)`（新增常量 `DEBUG_PREFLIGHT_TIMEOUT`），它只是咨询性判定，不该让点击"调试"明显卡顿。
+  - 放置位置在 JSON 对象校验与参数组装之后、Bridge 派发之前：非对象请求体（400）不触发任何网络探测。
+
+### 修复
+
+- **首导航取值收敛为三级**（`python_worker/playwright_worker.py` 新增 `_resolve_start_url` / `_profile_login_url`）：显式 `navigate_url`（登录强制去触发地址，逐字段等价于原实现）> 任务自身 `url` > Profile 有效登录地址（`trigger_url` 回落 `auth_url`，与登录同口径），三级皆空则跳过导航。
+- **修复调试任务无起始地址时的两类失败**：原 `handle_debug_start` 只判 `if task.url:`（判的是字面量 `{{LOGIN_URL}}`，恒真）就 `page.goto` 解析后的空串——认证地址留空时以无效 URL 中断启动、会话根本建不起来；任务 `url` 为空时则停在新开空白页且无任何提示（真实登录此时会去 Profile 有效登录地址，两个入口口径不一致）。现回落 Profile 有效登录地址；两者皆空时记 warning 跳过首导航，任务自带的 `goto` 步骤仍可手动单步执行。
+- **修复 `_run_task` 同形状缺陷**：原 `target = navigate_url or task_config.url` 的判空发生在 `resolve` 之前，`{{LOGIN_URL}}` 解析为空后仍会 `goto("")` 报无效 URL（直连渠道 + 认证地址留空 + 执行引用 `{{LOGIN_URL}}` 的任务即命中）。现判空在 `resolve` 之后；`handle_execute_browser_task` 传 `nav_fallback_url`，与调试共用同一规则。
+- **变量未命中不再当地址用**：`resolve` 变量未命中会保留 `{{...}}` 字面量，`_resolve_start_url` 按空处理并回落，替代此前"把字面量交给浏览器报无效 URL"。
+- 登录首导航计算收敛为 `_profile_login_url(params)`（原三行局部变量为重复实现，行为不变）。
+
+### 验证
+
+- `python_worker`：`uv run --frozen pytest -q` **191 passed**（新增 3 例：`test_start_url_prefers_task_then_falls_back_to_profile`、`test_debug_start_falls_back_to_profile_url_when_task_has_none`、`test_debug_start_skips_navigation_when_no_start_url`）。
+- `cargo test --features no-embed --lib web::routes::debug` **13 passed**（新增 2 例：`start_blocked_when_online_without_login_url` 用本地 204 服务锁定"已联网 → 409 且不触达 Bridge"；`start_injects_default_trigger_when_login_url_not_configured` 锁定"未联网不误拦 + 注入默认触发地址"，顺带补上此前零覆盖的 `trigger_url` 注入断言）。
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed --lib` 全绿：**926 passed / 0 failed / 1 ignored**。
+- 接口（`openapi.json` 路径表与响应契约）、前端、版本号均未变动，故无版本提升；后端错误码复用既有 `CONFLICT`。
+
 ## 开发中（2026-09-20 修复：应用内更新下载完成后重启仍为旧版本）
 
 ### 修复

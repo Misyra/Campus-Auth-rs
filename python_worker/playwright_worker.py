@@ -332,6 +332,32 @@ def _normalize_step_failure(
     return Outcome.UNKNOWN_ERROR, f"执行异常: {exc}"
 
 
+def _resolve_start_url(task_url: str, variables: dict, fallback_url: str = "") -> str:
+    """解析首导航地址：任务自身 url 优先，未配置时回落 Profile 有效登录地址。
+
+    任务 url 通常是 ``{{LOGIN_URL}}``（默认任务即如此，解析结果就是登录首导航地址），
+    用户在任务里硬编码地址时以其为准——调试与任务执行不比真实登录多绕一层。
+
+    ``resolve`` 在变量未命中时会保留 ``{{...}}`` 字面量，那不是一个可访问地址，按空
+    处理；两者皆空时返回空串，由调用方跳过导航而不是把空串交给 Playwright
+    （``page.goto("")`` 会以无效 URL 中断启动，会话根本建不起来）。
+    """
+    resolved = resolve(task_url or "", variables).strip()
+    if "{{" in resolved:
+        resolved = ""
+    return resolved or (fallback_url or "").strip()
+
+
+def _profile_login_url(params: dict) -> str:
+    """Profile 的有效浏览器首导航地址：``trigger_url`` 优先、回落 ``auth_url``。
+
+    与登录首导航口径一致：Rust 侧重定向登录（登录网址留空）会把有效触发地址下发到
+    ``trigger_url``，旧版同时保存两个地址时以触发地址为准。
+    """
+    trigger = str(params.get("trigger_url", "") or "").strip()
+    return trigger or str(params.get("auth_url", "") or "").strip()
+
+
 async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) -> StructuredResult:
     """按序执行步骤列表。
 
@@ -1532,8 +1558,14 @@ class WorkerCore:
         cancel_event: threading.Event | None,
         screenshot_dir: Path | None,
         navigate_url: str = "",
+        nav_fallback_url: str = "",
     ) -> StructuredResult:
-        """执行单个浏览器任务：确保浏览器 → 导航 → 运行步骤。"""
+        """执行单个浏览器任务：确保浏览器 → 导航 → 运行步骤。
+
+        ``navigate_url`` 为显式强制首导航（登录用它去触发地址，覆盖任务 url）；
+        ``nav_fallback_url`` 仅在任务自身 url 解析为空时生效（回落 Profile 有效登录
+        地址），用于避免任务没配起始地址时退化成空白页。
+        """
         start = time.perf_counter()
         self._session_type = "login"
         context: StepContext | None = None
@@ -1553,9 +1585,16 @@ class WorkerCore:
             context = self._make_context(
                 self._page, variables, bs, cancel_event, screenshot_dir, task_config
             )
-            target = navigate_url or task_config.url
+            # 首导航三级取值：显式 navigate_url（登录强制去触发地址，口径不变）>
+            # 任务自身 url > Profile 有效登录地址（回落）。判空必须在 resolve 之后：
+            # 原实现先判 target 再 resolve，`{{LOGIN_URL}}` 解析成空串后会直接
+            # page.goto("") 报无效 URL（直连渠道 + 认证地址留空即命中）。
+            preferred = (navigate_url or "").strip()
+            if preferred:
+                target = resolve(preferred, variables).strip()
+            else:
+                target = _resolve_start_url(task_config.url, variables, nav_fallback_url)
             if target:
-                target = resolve(target, variables)
                 nav_timeout = _nav_timeout(bs)
                 # 全新 Page 让浏览器/上下文保持热态（免冷启动），同时强制存储隔离。
                 await self._navigate(self._page, target, nav_timeout)
@@ -1860,11 +1899,9 @@ class WorkerCore:
         self._ensure_no_debug_session("登录任务")
         try:
             async with self._cancel_session(params) as (cancel_event, bs, task):
-                auth_url = params.get("auth_url", "") or ""
-                trigger_url = params.get("trigger_url", "") or ""
                 # Rust 会把“登录网址留空”解析为有效触发地址；触发器非空时优先，
                 # 兼容旧版同时保存 auth_url + trigger_url 的显式重定向方案。
-                navigate_url = trigger_url.strip() or auth_url
+                navigate_url = _profile_login_url(params)
                 # 任务变量可自定义普通模板值，但系统保留变量必须始终反映当前 Profile。
                 # 统一经 _system_variables 注入：键缺失时跳过（避免空串覆盖任务自定义
                 # 变量）；{{LOGIN_URL}} 优先有效 trigger_url、回落 auth_url，与首导航一致。
@@ -1892,7 +1929,8 @@ class WorkerCore:
                 variables.update(self._system_variables(params))
                 self._task_dialogs = []
                 result = await self._run_task(
-                    task, bs, variables, cancel_event, _debug_screenshot_dir()
+                    task, bs, variables, cancel_event, _debug_screenshot_dir(),
+                    nav_fallback_url=_profile_login_url(params),
                 )
                 result.data = {"dialogs": list(self._task_dialogs)}
                 return result.to_dict()
@@ -1954,14 +1992,20 @@ class WorkerCore:
             context = self._make_context(
                 self._page, variables, bs, cancel_event, _debug_screenshot_dir(), task
             )
-            if task.url:
+            # 首导航：任务自身 url 优先（调试以“这个任务”为准，不做强制覆盖），
+            # 未配置时回落 Profile 有效登录地址。原实现只判 `if task.url:`（判的是
+            # 字面量 `{{LOGIN_URL}}`）就去 goto 解析后的空串，认证地址留空时启动即失败。
+            target = _resolve_start_url(task.url, variables, _profile_login_url(params))
+            if target:
                 _ensure_not_cancelled("导航前")
-                await self._navigate(
-                    self._page, resolve(task.url, variables),
-                    _nav_timeout(bs),
-                )
+                await self._navigate(self._page, target, _nav_timeout(bs))
                 await self._wait_after_navigation(task, context)
                 _ensure_not_cancelled("导航后")
+            else:
+                # 任务 url 与 Profile 认证地址均为空（如直连渠道且认证地址留空）时
+                # 跳过首导航：goto("") 会以无效 URL 中断启动，会话根本建不起来；
+                # 任务自带的 goto 步骤仍可手动单步执行
+                logger.warning("调试任务无起始地址（任务 url 与 Profile 认证地址均为空），跳过首导航")
             self._debug_sessions[session_id] = DebugSession(
                 session_id=session_id,
                 page=self._page,

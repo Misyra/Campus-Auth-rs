@@ -484,6 +484,113 @@ def test_system_variables_prefers_trigger():
     assert out2["LOGIN_URL"] == "http://10.0.0.1/login"
 
 
+def test_start_url_prefers_task_then_falls_back_to_profile():
+    """首导航取值：任务自身 url 优先，未配置时回落 Profile 有效登录地址。"""
+    from playwright_worker import _profile_login_url, _resolve_start_url
+
+    fallback = "http://www.msftconnecttest.com/connecttest.txt"
+    # 认证地址留空 → Rust 补的默认触发地址就是有效首导航地址
+    assert _profile_login_url({"auth_url": "", "trigger_url": fallback}) == fallback
+    # 触发器非空优先于认证地址（旧版同时保存两个地址的方案）
+    assert (
+        _profile_login_url({"auth_url": "http://10.0.0.1/login", "trigger_url": "http://detect/"})
+        == "http://detect/"
+    )
+    assert _profile_login_url({"auth_url": "http://10.0.0.1/login", "trigger_url": ""}) == (
+        "http://10.0.0.1/login"
+    )
+    # 任务自身地址优先，不被 Profile 地址覆盖
+    assert _resolve_start_url("http://task.example/", {}, fallback) == "http://task.example/"
+    # 任务 url 是模板 → 由变量解析成触发/认证地址
+    assert (
+        _resolve_start_url("{{LOGIN_URL}}", {"LOGIN_URL": "http://trigger/"}, "") == "http://trigger/"
+    )
+    # 变量未命中时 resolve 保留字面量 → 按空处理并回落（不把 "{{...}}" 交给浏览器）
+    assert _resolve_start_url("{{MISSING}}", {}, fallback) == fallback
+    # 任务未配地址 → 回落
+    assert _resolve_start_url("", {}, fallback) == fallback
+    # 任务与 Profile 都拿不到地址 → 空串（调用方跳过导航，而不是 goto("")）
+    assert _resolve_start_url("", {}, "") == ""
+
+
+class _FakeDebugPage:
+    """只记录 goto 实参的调试页；screenshot 供初始截图空实现。"""
+
+    def __init__(self) -> None:
+        self.navigated: list[str] = []
+
+    async def goto(self, url, **_kwargs):
+        self.navigated.append(url)
+
+    async def screenshot(self, **_kwargs):
+        return b""
+
+
+def _debug_start_core(monkeypatch, tmp_path, page):
+    """装配 handle_debug_start 所需的浏览器替身（不启动真实浏览器）。"""
+    core = WorkerCore()
+    core._playwright = object()
+
+    async def fake_ensure_browser(*_args, **_kwargs):
+        return None
+
+    async def fake_prepare_session_page():
+        core._page = page
+
+    def fake_make_context(*_args, **_kwargs):
+        return StepContext(page=page)
+
+    monkeypatch.setattr(core, "ensure_browser", fake_ensure_browser)
+    monkeypatch.setattr(core, "_prepare_session_page", fake_prepare_session_page)
+    monkeypatch.setattr(core, "_make_context", fake_make_context)
+    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+    return core
+
+
+def test_debug_start_falls_back_to_profile_url_when_task_has_none(monkeypatch, tmp_path):
+    """任务未配起始地址 → 回落 Profile 有效登录地址（不再停在空白页）。"""
+    page = _FakeDebugPage()
+    core = _debug_start_core(monkeypatch, tmp_path, page)
+
+    response = asyncio.run(
+        core.handle_debug_start(
+            {
+                "task_config": {"task_id": "no-url", "url": "", "steps": [], "variables": {}},
+                "auth_url": "",
+                "trigger_url": "http://www.msftconnecttest.com/connecttest.txt",
+            }
+        )
+    )
+
+    assert page.navigated == ["http://www.msftconnecttest.com/connecttest.txt"]
+    assert response["total_steps"] == 0
+    assert core._debug_sessions, "会话应正常建成"
+
+
+def test_debug_start_skips_navigation_when_no_start_url(monkeypatch, tmp_path):
+    """任务 url 与 Profile 认证地址都为空（直连渠道）→ 跳过首导航，不 goto("")。"""
+    page = _FakeDebugPage()
+    core = _debug_start_core(monkeypatch, tmp_path, page)
+
+    asyncio.run(
+        core.handle_debug_start(
+            {
+                "task_config": {
+                    "task_id": "no-url",
+                    "url": "{{LOGIN_URL}}",
+                    "steps": [],
+                    "variables": {},
+                },
+                "auth_url": "",
+                "trigger_url": "",
+            }
+        )
+    )
+
+    assert page.navigated == []
+    assert core._debug_sessions, "会话应正常建成（不再因无效 URL 中断启动）"
+
+
 def test_login_system_variables_skip_missing_keys(monkeypatch):
     """登录命令未提供的 Profile 键不注入（避免空串覆盖任务自定义变量）。
 
