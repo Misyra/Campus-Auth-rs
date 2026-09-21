@@ -45,6 +45,14 @@
   }
 }
 
+/* 调试面板双栏（步骤 + 截图）：截图列最小 360px，窄弹窗下会把步骤列挤到
+   不可读。断点定在 900px——调试弹窗为 xxl（近全宽），768px 那个断点太晚 */
+@media (max-width: 900px) {
+  .debug-body {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 768px) {
   .sidebar {
     width: 64px;
@@ -111,10 +119,6 @@
   .log-entry .log-level-badge,
   .log-entry .log-source-badge { grid-area: meta; }
   .log-entry .log-content { grid-area: msg; }
-
-  .debug-body {
-    grid-template-columns: 1fr;
-  }
 
   .debug-screenshot-container {
     min-height: 200px;

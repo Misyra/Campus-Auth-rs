@@ -339,10 +339,13 @@
 
 .debug-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 14px;
+  /* 步骤列只需要容纳「序号 + 状态 + 类型徽标 + 一句描述」（最长描述约 150px），
+     给它 30% 已是宽裕；剩余宽度让给截图——截图才是调试时真正要看的东西。
+     窄屏由 responsive.css 折为纵排。 */
+  grid-template-columns: clamp(240px, 30%, 360px) minmax(0, 1fr);
+  gap: 16px;
   flex: 1;
-  min-height: 320px;
+  min-height: min(460px, 52vh);
 }
 
 .debug-steps {
@@ -350,7 +353,9 @@
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
-  max-height: 420px;
+  /* 与截图列共用同一份竖向预算（见 .debug-screenshot）：步骤再长也只在列表内滚动，
+     不会把整个面板顶出滚动条 */
+  max-height: calc(92vh - 295px);
   padding-right: 2px;
 }
 
@@ -517,7 +522,7 @@
 }
 
 .debug-screenshot-frame {
-  min-height: 280px;
+  min-height: min(320px, 36vh);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -525,12 +530,61 @@
   background: var(--bg-glass-heavy);
 }
 
-.debug-screenshot {
+/* 缩略图整块可点：按钮贴合图片本身（不是整块留白），"点击放大"提示贴图片右下角 */
+.debug-screenshot-btn {
+  position: relative;
+  display: flex;
   max-width: 100%;
-  max-height: 380px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+  border-radius: var(--radius-sm);
+}
+
+.debug-screenshot-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.debug-screenshot {
+  display: block;
+  max-width: 100%;
+  /* 高度够（窗口够高 / 列够窄）时按列宽铺满——16:9 的视口帧等比缩到列宽即可；
+     不够时按同一份预算压高度：92vh − 弹窗页头页脚与体留白（199px）− 面板信息条与
+     间距（36px）− 截图头（32px）− 余量。两条路都不会把面板顶出滚动条。
+     上下界：超宽屏最多 680px，极矮窗口至少 300px（此时面板体滚动）。 */
+  max-height: max(300px, min(680px, calc(92vh - 295px)));
   object-fit: contain;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-hover);
+}
+
+/* 常驻提示（与仓库导入大图同款角标）：不悬停也能看出这里能点开 */
+.debug-screenshot-zoom-hint {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-modal);
+  border: 1px solid var(--border);
+  pointer-events: none;
+}
+
+/* 放大预览：宽度铺满弹窗即接近原图分辨率，超出高度时滚动查看整页 */
+.debug-zoom-body {
+  max-height: 76vh;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.debug-zoom-body img {
+  display: block;
+  width: 100%;
 }
 
 .debug-screenshot-placeholder {

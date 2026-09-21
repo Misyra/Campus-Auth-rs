@@ -115,3 +115,27 @@ describe("刷新恢复与详情补全", () => {
     expect(debug.visible.value).toBe(true);
   });
 });
+
+describe("实时截图归属步骤", () => {
+  it("步骤级截图带 step_index，初始截图与裂图清空都不留归属", () => {
+    debug.handleScreenshot({ url: "data:image/png;base64,AAA", step_index: 3 });
+    expect(debug.session.screenshot_url).toBe("data:image/png;base64,AAA");
+    expect(debug.screenshotStep.value).toBe(3);
+
+    // 会话初始截图无 step_index → 归属清空，标题回落到"调试浏览器"
+    debug.handleScreenshot({ url: "data:image/png;base64,BBB" });
+    expect(debug.screenshotStep.value).toBe(null);
+
+    // 裂图清空：URL 与归属一并重置
+    debug.handleScreenshot({ url: "data:image/png;base64,CCC", step_index: 0 });
+    debug.clearScreenshot();
+    expect(debug.session.screenshot_url).toBe(null);
+    expect(debug.screenshotStep.value).toBe(null);
+  });
+
+  it("startDebug 重置上一场的截图归属", async () => {
+    debug.handleScreenshot({ url: "data:image/png;base64,DDD", step_index: 4 });
+    await debug.startDebug("t1");
+    expect(debug.screenshotStep.value).toBe(null);
+  });
+});

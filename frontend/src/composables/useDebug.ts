@@ -24,6 +24,8 @@ const emptySession = (): DebugSession => ({
 const session = reactive<DebugSession>(emptySession());
 const loading = ref(false);
 const visible = ref(false);
+/** 当前预览截图对应的步骤序号（0 基；会话初始截图为 null），用于标注"哪一步之后" */
+const screenshotStep = ref<number | null>(null);
 const _resultMap = ref<Map<number, DebugStepResult>>(new Map());
 
 const { toastOnly } = useToast();
@@ -50,6 +52,7 @@ async function startDebug(taskId: string): Promise<void> {
     // 新会话不带旧截图：screenshot_url 若保留上一场的残留 URL（文件已被
     // 停止流程清理），面板会显示裂图；置空等 WS 推送本场首张截图
     session.screenshot_url = null;
+    screenshotStep.value = null;
     const data = await debugApi.start(taskId);
     syncSession(data);
     visible.value = true;
@@ -112,6 +115,7 @@ async function stopDebug(): Promise<void> {
     // 无论 API 成功失败都重置本地状态；顺带取消未触发的详情补全定时器
     clearDetailRefill();
     syncSession(emptySession());
+    screenshotStep.value = null;
     visible.value = false;
   }
 }
@@ -204,6 +208,8 @@ function getStepStatus(index: number): "success" | "failed" | "running" | "curre
 function handleScreenshot(data: { url?: string; step_index?: number; description?: string }): void {
   if (data?.url) {
     session.screenshot_url = data.url;
+    // 步骤级补拍带 step_index（0 基），初始截图为空 → 预览标题据此标注归属步骤
+    screenshotStep.value = typeof data.step_index === "number" ? data.step_index : null;
     frontendLogger.info("debug", `收到调试截图: ${data.url}`);
   }
 }
@@ -211,6 +217,7 @@ function handleScreenshot(data: { url?: string; step_index?: number; description
 /** 截图加载失败（残留 URL 指向已清理文件等）时清空，回退占位文案 */
 function clearScreenshot(): void {
   session.screenshot_url = null;
+  screenshotStep.value = null;
 }
 
 /** 处理来自 WebSocket 的调试步骤进度事件 */
@@ -252,6 +259,7 @@ export function useDebug() {
     session,
     loading,
     visible,
+    screenshotStep,
     startDebug,
     nextStep,
     runAll,

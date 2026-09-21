@@ -53,6 +53,14 @@
   width: 94%;
 }
 
+/* 调试面板等"宽 + 高"都要的信息密集弹窗：xl 的 1080px 仍让步骤列与截图列
+   互挤、85vh 又压着步骤列表滚动，故 xxl 再放宽并允许更高 */
+.modal-container.modal-xxl {
+  max-width: 1200px;
+  width: 96%;
+  max-height: 92vh;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;

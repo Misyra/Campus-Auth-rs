@@ -6,7 +6,7 @@
  * 使用 useDebug composable 管理会话状态，通过 Modal 弹出。
  */
 
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useDebug } from "@/composables/useDebug";
 import { debugApi } from "@/api";
 import { downloadBlob } from "@/utils/file";
@@ -14,9 +14,40 @@ import { extractApiError } from "@/api/client";
 import { useToast } from "@/composables/useToast";
 import Modal from "./common/Modal.vue";
 
-const { session, loading, visible, nextStep, runAll, stopDebug, stopping, getStepStatus, getStepResult, clearScreenshot } =
+const { session, loading, visible, screenshotStep, nextStep, runAll, stopDebug, stopping, getStepStatus, getStepResult, clearScreenshot } =
   useDebug();
 const downloading = ref(false);
+
+/** 放大预览的截图地址与标题（空即关闭）。
+ *
+ * 开图时冻结 URL 与归属步骤：预览区只有 390~520px 宽，看验证码/表单细节必须放大，
+ * 而放大后再来新一帧会把画面换掉——冻住才能安心看这一帧。数据 URL 快照驻留内存，
+ * 无额外请求。 */
+const zoomUrl = ref("");
+const zoomStep = ref<number | null>(null);
+
+/** 放大预览标题：区分会话启动帧与某一步之后的画面 */
+const zoomTitle = computed(() =>
+  zoomStep.value === null ? "调试截图 · 会话启动" : `调试截图 · 步骤 ${zoomStep.value + 1} 执行后`,
+);
+
+/** 打开放大预览 */
+function openZoom(): void {
+  if (!session.screenshot_url) return;
+  zoomUrl.value = session.screenshot_url;
+  zoomStep.value = screenshotStep.value;
+}
+
+/** 关闭放大预览 */
+function closeZoom(): void {
+  zoomUrl.value = "";
+  zoomStep.value = null;
+}
+
+// 调试面板关闭（停止调试/会话结束）时放大预览一起关，避免预览窗单独悬空
+watch(visible, (open) => {
+  if (!open) closeZoom();
+});
 
 /** 当前步骤索引 */
 const currentStep = computed(() => session.current_step);
@@ -89,7 +120,7 @@ async function handleFeedback(): Promise<void> {
   <Modal
     :open="visible"
     title="任务调试"
-    size="lg"
+    size="xxl"
     :close-on-overlay="false"
     :close-on-esc="false"
     @close="handleClose"
@@ -126,7 +157,7 @@ async function handleFeedback(): Promise<void> {
             <div class="debug-step-info">
               <div class="debug-step-line">
                 <span class="debug-step-badge">{{ step.type || "?" }}</span>
-                <span class="debug-step-desc">{{ step.description || `步骤 ${i + 1}` }}</span>
+                <span class="debug-step-desc" :title="step.description">{{ step.description || `步骤 ${i + 1}` }}</span>
               </div>
               <span
                 v-if="getStepResult(i)?.message"
@@ -149,16 +180,29 @@ async function handleFeedback(): Promise<void> {
         <div class="debug-screenshot-container">
           <div class="debug-screenshot-head">
             <span>实时截图</span>
-            <span class="debug-screenshot-hint">调试浏览器</span>
+            <!-- 每步执行后补拍一帧，标注归属步骤可直观确认"预览确实前进了" -->
+            <span class="debug-screenshot-hint">
+              {{ screenshotStep === null ? "调试浏览器" : `步骤 ${screenshotStep + 1} 后` }}
+            </span>
           </div>
           <div class="debug-screenshot-frame">
-            <img
+            <!-- 缩略区只有几百像素宽，看不清验证码/表单细节：整图可点，弹大图 -->
+            <button
               v-if="session.screenshot_url"
-              :src="session.screenshot_url"
-              alt="截图预览"
-              class="debug-screenshot"
-              @error="clearScreenshot"
-            />
+              type="button"
+              class="debug-screenshot-btn"
+              title="点击放大查看"
+              aria-label="放大查看调试截图"
+              @click="openZoom"
+            >
+              <img
+                :src="session.screenshot_url"
+                alt="截图预览"
+                class="debug-screenshot"
+                @error="clearScreenshot"
+              />
+              <span class="debug-screenshot-zoom-hint">点击放大</span>
+            </button>
             <span v-else class="debug-screenshot-placeholder">
               {{ loading ? "执行中..." : "暂无截图" }}
             </span>
@@ -182,5 +226,12 @@ async function handleFeedback(): Promise<void> {
         <button class="btn btn-danger" @click="handleClose" :disabled="stopping">停止调试</button>
       </div>
     </template>
+  </Modal>
+
+  <!-- 截图放大预览：复用 Modal（沉浸遮罩），大图按原分辨率铺满并允许滚动查看 -->
+  <Modal :open="!!zoomUrl" :title="zoomTitle" size="xxl" preview @close="closeZoom">
+    <div class="debug-zoom-body">
+      <img v-if="zoomUrl" :src="zoomUrl" alt="调试截图大图" />
+    </div>
   </Modal>
 </template>
