@@ -105,6 +105,206 @@
 - 已知问题（`docs/known-issues.md`，含 E2 定时任务手动运行的 toast 语义、E3 任务卡「上次」结果不即时刷新）**有意不写入发布说明**，仅在已知问题清单中保留。
 - 未在本轮处理（记此备查）：`docs/changelog.md` 中 80 余个历史条目标题仍带「开发中（日期 …）」前缀，属已合入条目，保留以维持按日期倒序的可追溯性，不做批量改写。
 
+## 开发中（2026-09-21 AI 生成页：服务商卡片改名「自定义服务商」+ 切换服务商不再丢配置）
+
+### 背景
+
+- 卡片文案与实际含义对不上：`custom` 是"自己填地址的通用 OpenAI 兼容入口"（Ollama / LM Studio / 火山方舟这类都走它），却写着「其他兼容服务 / 需要知道接口地址」。改为标签「自定义服务商」，标识符 `custom` 与后端校验口径不动（自定义不校验域名，指向已下架渠道的老配置仍可保存）。
+- 缺陷：`selectProvider` 每次切换都用该服务商的预设默认值覆盖表单，而 `custom` 的预设默认值就是空串 —— 于是"自定义 → 预设 → 切回自定义"把手填的地址/模型/Key 全部清空，已保存的自定义配置同样拿不回来（`loadConfig` 只在挂载时跑一次，切换不重新读盘）。
+
+### 修复
+
+- **每服务商一份草稿**（`drafts: Map<provider, {baseUrl, model, apiKey, modelList, customModel}>`）：切换前 `stashDraft()` 存当前表单，切回时原样恢复（含已拉取的模型列表与"手动/下拉"模式）；`loadConfig` 把已保存配置种进草稿，所以切回拿到的是"上次保存 / 上次编辑"的值而不是预设空值。**空表单不入草稿**（读配置失败或用户压根没填过时，不能把"空"记成该服务商的状态，否则切回拿到空值而非预设默认值）。
+- **Key 状态按槽位判定**：新增 `savedKeySlot`（内置服务商＝标识本身；自定义＝`base_url` 的 origin，与后端 `LlmSettings::key_slot` 同一口径）与 `keySlotOf()`，`hasApiKey` 由可变标志改为 computed。原因是 `configured_providers` 只报内置服务商（自定义 Key 按 origin 隔离，没有单一槽位），切回自定义时前端无从判断 Key 是否还在，会把已保存的 Key 显示成"尚未保存"；现在只要地址没变就重新显示「已保存（留空保持不变）」，换成别的 origin 则不声称已保存。
+- 同步更新指向该标签的注释与类型说明（`src/ai/mod.rs`、`src/ai/llm.rs`、`frontend/src/api/types.ts`、`AiTaskView.vue`）。
+
+### 验证
+
+- **真机验证**（对运行中的实例 UI `http://127.0.0.1:50721/tasks/ai`，Playwright 驱动；只点服务商卡片与输入框打字，不点「保存配置」，不触碰实例里的真实配置）：15 项断言全过 —— 卡片已改名且旧名消失；挂载即载入已保存配置（`custom` + `https://ark.cn-beijing.volces.com/api/coding/v3` + `ark-code-latest`，`has_api_key=true`）；切换 GLM 用 GLM 预设，切回自定义恢复出已保存的地址/模型且占位回到「已保存（留空保持不变）」；手填三字段后与 GLM/DeepSeek 来回切换四轮，自定义值与 GLM 值各自完整保留、互不串值；把自定义地址改成另一个 origin 后不再声称「已保存」；控制台零报错。
+- 该轮验证同时暴露并修掉了草稿逻辑的一个边界：探测脚本曾在实例已退出（后端不可达）时运行，`loadConfig` 失败留下空表单，被 `stashDraft` 记成 GLM 的空草稿，导致之后切回 GLM 拿到空值 —— 即上面"空表单不入草稿"这条的由来。
+- `npm run typecheck` 零错误；`npx vitest run` **241 passed / 26 files**。
+
+## 开发中（2026-09-21 任务录制器：智能检测移到底部动作行 + 选中态强调色）
+
+### 背景
+
+- 「智能检测」是常用**模式**（打字/点击自动识别），却和一次性步骤类型挤在同一个网格里，位置随网格顺序漂；底部动作行只有右侧一个主按钮 + 关闭，左侧空着。
+- 上一轮把选中态做成了中性灰（`rgba(0,0,0,.22)` 描边 + 灰底），选中与未选中的差别太弱。
+
+### 修复
+
+- 步骤类型新增 `bottomRow` 标记，`smart_detect` 打上；网格按 `primary !== false && !cfg.bottomRow` 过滤，底部行按 `cfg.bottomRow` 过滤后用同一个 `createStepBtn` 生成并插到最前。**保留 `.ca-step-btn` 类**：`selectStepType` 是按 `dataset.type` 统一切换高亮的，所以选中态、与网格卡片的互斥行为都不用改。
+- 底部动作行改为 `.ca-bottom-row`（flex）：左侧常驻「🔍 智能检测」，`#ca-btn-copy-prompt` 用 `margin-left: auto` 推到右侧（原来在左），关闭按钮仍在最右；移除原先 `style="margin-left:auto"` 的内联样式。
+- 网格少一张卡后剩 6 张 + 「更多」，让 `.ca-more-btn` 跨整行（`grid-column: 1 / -1`），避免第 4 行只挂一张卡、左边空一格。
+- **选中态改用强调色**：新增令牌 `--ca-accent` / `--ca-accent-soft` / `--ca-accent-ink`（日间 `#5566e8` 靛蓝 —— 与徽标彩虹环的靛蓝端同一色系；夜间换 `#8b9cff` 的亮调），步骤卡与模式开关（多步录制 / 隐藏检测 / 显示隐藏）的选中态统一成「强调色描边 + 10% 淡底 + 强调色深调文字」，卡片 hover 描边与「更多」hover 也一并改用强调色。主按钮维持深底白字（单色主按钮 + 彩色选中态，避免整块面板被配色淹没）。
+
+### 验证
+
+- 真 Chromium：网格内 `smart_detect` 计数 0、底部行 1；点底部按钮 → 自身 active 且网格内 active 为 0（互斥保持）、状态条回执 `🔍` + hint；再点网格卡片 → 底部高亮自动取消。选中态计算样式为描边 `rgb(85,102,232)`、底 `rgba(85,102,232,0.1)`、文字 `rgb(63,79,208)`；模式开关选中态同色。样式/主题其余断言全过，控制台零报错。样张：`style-panel.png`、`style-bottom-row.png`、`probe-toggle.png`。
+
+## 开发中（2026-09-21 任务录制器：修回 @namespace 身份 + 重复安装自检）
+
+### 背景（实测定位）
+
+- 现场：面板做了日间/夜间两套令牌后，点切换按钮状态条回执「已切换到日间模式」，但面板配色纹丝不动。
+- 定位：截图里「复制 AI 提示词」是**靛紫 `#667eea`** —— 那是 **restyle 之前**的旧配色（日间应为近黑 `#16181d`、夜间近白 `#e9ebef`），说明**旧版样式表还在生效**。根因是当天早些时候"修仓库链接"那轮把 `@namespace` 从 `github.com/Misyra/Campus-Auth` 一并改成了 `.../Campus-Auth-rs`：**Tampermonkey 用「`@name` + `@namespace`」判定脚本身份**，改了 ns 等于换了个脚本，重新安装时 TM 会**另装一份**、旧那份不会被覆盖，两份同时在跑。旧样式表作用域是 `#ca-recorder-panel`（ID 选择器，`1,0,0`），而这次主题令牌放在了 `:root`（伪类，`0,1,0`）→ 旧令牌胜出，把配色压回旧版。
+  - 也解释了前一轮现象：改深色那版时令牌仍在 ID 作用域，同优先级下后注入的样式表赢，所以能看到改后的深色版；令牌一挪到 `:root`，旧表立刻重新压住。
+- 工装复现（真 Chromium）：只装新版 → 面板 `rgb(255,255,255)` / 主按钮 `rgb(22,24,29)`；**新版 + 旧样式表** → 面板 `rgb(26,26,46)`（旧 `#1a1a2e`）/ 主按钮 `rgb(102,126,234)`（旧 `#667eea`），与现场截图一致。
+
+### 修复
+
+- `@namespace` **改回历史值** `https://github.com/Misyra/Campus-Auth`：namespace 是机器标识（TM 拿它当脚本主键），不面向用户展示；**可见的仓库链接**（面板页脚、帮助页脚）保持指向 `Campus-Auth-rs`。同时在脚本里 `VERSION` 常量旁写明硬约束——不要再跟着仓库改这个字段，否则重装即分叉。
+- 新增**重复安装自检**：面板挂载后若发现页面上存在多个 `#ca-recorder-panel`，先把自己移到 `body` 末尾（叠在最上层，保证用户看到的是本份面板而不是被旧样式表压着的旧界面），再 `console.warn` + 状态条提示「请在 Tampermonkey 里删除旧的那份」。不自动处理（删脚本只能由用户做），但把这类静默故障变成可见提示。
+- 注意：`@namespace` 的两次翻转（先改成 `-rs`、又改回原值）各自造成一次 TM 分叉——每翻一次，重装就多出一份。现已冻结在原值，脚本里已写明硬约束。
+
+### 验证
+
+- `recorder_conflict_check.py` 三种场景：只装新版（配色正确）、新版 + 旧样式表（复现旧配色，判定"已复现"）、存在重复面板（自检提示触发，状态条命中"重复安装"）。
+- `node --check` 通过；日/夜主题的 14 项断言在"只装新版"下仍全过。
+
+## 开发中（2026-09-21 任务录制器：日间 / 夜间主题切换）
+
+### 背景
+
+- 面板改成白底后只剩一套配色：夜里或在暗色门户页上用它很刺眼，需要能切。
+
+### 修复
+
+- **令牌位置调整**：原来一组令牌挂在 `#ca-recorder-panel` 上，而 tooltip / 揭示面板 / 揭示弹窗都在面板作用域之外（挂在 `body` 上），拿不到主题；现在令牌提到 `:root`，主题类挂 `<html class="ca-dark">`，面板内外一起换。**样式规则一行未改** —— 夜间只是同一套令牌的另一组值。
+- **两套取值**：日间维持白底（`#ffffff` / 卡片 `#f4f5f7` / 主按钮深底白字）；夜间 `#17191e` / 卡片 `#1f232b` / 输入 `#14161b`，主按钮翻成亮底深字、成功/危险/警示三色换成暗底可读的亮色调；投影分两套（`--ca-shadow-panel` / `--ca-shadow-pop`）。
+- **切换入口**：头部右侧按钮组（与「?」并列）新增主题按钮，图标显示**目标**模式（日间显 🌙、夜间显 ☀️），点击即切换并在状态条回执。偏好走独立键 `ca_recorder_theme` + `GM_setValue` 持久化（与录制状态的 `ca_recorder_state` 互不影响），**默认日间**；`applyTheme()` 在样式注入前先跑一次，开面板之前 `<html>` 上已是正确主题，避免白闪。
+
+### 验证
+
+- 真 Chromium 14 项断言全过：默认日间（无 `ca-dark`、面板 `rgb(255,255,255)`、主按钮深底白字、图标 🌙）；点切换后 `html.ca-dark` 就位、面板 `rgb(23,25,30)`、卡片 `rgb(31,35,43)`、主按钮翻成亮底深字、图标 ☀️，且**面板之外的 tooltip / 揭示面板 / 揭示弹窗同步转深**（`rgb(29,32,39)`）；刷新后仍是夜间（偏好已存、且开面板前就已生效）；再点回日间；控制台零报错。
+- 样张：`docs/reports/debug-panel-harness/theme-light.png`、`theme-dark.png`。
+
+## 开发中（2026-09-21 任务录制器：面板改浅色现代简约 + 彩虹环律动）
+
+### 背景
+
+- 面板视觉停留在早期版本：紫色渐变头部 + 深蓝紫底 + 到处用饱和色（步骤卡 2px 透明边、开关紫色发光、状态条紫底），hover 还带 `translateY(-1px)` + `brightness(1.1)`；观感偏重、与主程序控制台的口径也不一致。第一版改成中性近黑，实测后按"要白的"改为 **白底浅色** —— 录制器是盖在门户页上的浮层，白色面板在绝大多数登录页上更轻、不压视线。
+
+### 修复
+
+- **只改 CSS 与令牌映射，DOM/JS 逻辑零改动**（替换逐条断言"恰命中一次"，未命中就不写回）：
+  - 浅色表面：`--ca-bg/--ca-surface/--ca-input #ffffff`、卡片 `#f4f5f7`、hover `#eceef1`、active `#e4e7eb`；文字 `#16181d / #4a5058 / #7a838f`；描边统一为 `rgba(0,0,0,0.10)` 的 hairline；面板 `border-radius: 14px` + 阴影改成浅色下更轻的两层 `0 20px 48px rgba(15,18,24,.16) + 0 2px 6px rgba(15,18,24,.05)`。
+  - **头部去紫渐变** → 白底 + 底部 1px 分隔线，标题 `15px/600`，副标题走 muted 色，"?" 帮助按钮改幽灵态（hover 才亮）。
+  - **按钮体系重排**：主按钮＝深底白字（`--ca-primary #16181d` + `--ca-primary-ink #ffffff`，hover 再压到纯黑），次要按钮＝透明 + 描边，危险按钮＝幽灵态（hover 才转红）；删掉位移 + 提亮的 hover。
+  - 其余同步收敛：小标题 `11px/600/0.08em`；开关改药丸形（active＝黑 6% 底）；状态条改虚线框（录制中＝红 8% 底 + 深红字）；步骤卡 1px hairline + 中性 hover/active（去掉紫色高亮）；已录制序号徽章改中性；输入框补 focus 描边；弹窗/遮罩改白底 + 轻遮罩 `rgba(15,18,24,.35)` + 轻微模糊。
+  - 页面上的 tooltip / 揭示面板 / 揭示弹窗一并改浅色（这些在面板作用域外，用字面量；揭示语义的绿色收敛为 `#12855a`）；顺手删掉已无人引用的 `--ca-step-*` 与 `--ca-primary-grad`。
+- **彩虹环律动**：彩虹层从元素自身背景挪到 `::after`（超采样圆盘 `inset: -30%`，靠按钮 `overflow: hidden` 裁成圆环带），`ca-rainbow-spin 6s linear infinite` 整体旋转；白底 `::before` 与 logo 是静态同级元素、**不跟着转**（否则 logo 会自转）。面板标题那枚徽标同样转、周期放到 9s 免得抢视线；`prefers-reduced-motion: reduce` 下停用动画。
+
+### 验证
+
+- 真 Chromium 实测：浮动按钮隔 1.2s 各拍一帧，PNG sha256 不同（确认在动而非静态渐变）；`::after` 计算样式为 `ca-rainbow-spin / 6s / infinite` + `conic-gradient(...)`、`::before` 为 `inset: 5px` 白底、logo 无滤镜；面板计算样式 `rgb(255,255,255)` / `14px` / `rgba(0,0,0,0.1)` 描边、头部 `background-image: none`；帮助弹窗白底 + 描边；控制台零报错；`node --check` 通过。实例接口复核：返回的脚本含 `--ca-bg: #ffffff` 与 `ca-rainbow-spin`、已无深色残留 `#17191e`。
+- 样式样张：`docs/reports/debug-panel-harness/style-panel.png`、`style-help.png`、`style-more.png`（"更多"展开态）、`btn-t0.png` / `btn-t1.png`（律动两帧）。
+
+## 开发中（2026-09-21 任务录制器：仓库链接改指 Rust 版 + 图标换成软件 logo、加彩虹环）
+
+### 背景
+
+- 录制器用户脚本（`resources/tools/task-recorder.user.js`）的仓库链接仍指向**已归档的 Python 版仓库** `Misyra/Campus-Auth`：`@namespace`、面板页脚 GitHub 链接（含显示文字）、帮助面板页脚链接共 3 处。主程序其余位置的仓库链接早在 `4ae78a7` 一代就统一为 `Misyra/Campus-Auth-rs`（`frontend/src/utils/constants.ts` 的 `APP_REPO_URL`、关于页、README、Docker 镜像名），只有录制器脚本漏改——它是从 `resources/` 原样分发、既不过前端构建也不受 CI 文案护栏覆盖的文件，所以一直没被发现。
+- 图标：浮动入口按钮与面板标题用 emoji（🎬），Tampermonkey 安装列表里也没有 `@icon`（显示默认图标），录制器没有软件自身的视觉标识。
+
+### 修复
+
+- **3 处链接统一为 `https://github.com/Misyra/Campus-Auth-rs`**（`@namespace` / 面板页脚 / 帮助页脚），页脚显示文字同步为 `Misyra/Campus-Auth-rs`。任务分享仓库 `Misyra/campus-auth-tasks` 是有意保留的另一仓库，不动。
+- **图标换成软件 logo（认证喵）+ 彩虹环**：
+  - 浮动入口按钮、面板标题里的 🎬 换成 logo `<img>`（纯黑标，取自 `resources/icons/tray.png`），压在白底内圈上，外圈用 CSS `conic-gradient` 画彩虹环；环宽由 `--ca-ring` 收口（按钮 5px／标题 3px），两处共用同一套规则。
+  - 彩虹环变量放在 `:root` 而不是面板变量块：浮动入口按钮挂在 `body` 上、不在 `#ca-recorder-panel` 作用域内，放面板里 `var(--ca-rainbow)` 取不到，环根本不会画出来（首版就栽在这，实测 `background-image: none`）。
+  - `@icon` 换成 **96×96 合成图**（彩虹环 + 白底 + 黑标，透明背景）：Tampermonkey 列表/标签页只有一张图、画不进 CSS，环必须烤进图里；仍用 **data URI 而非 `raw.githubusercontent.com` 链接**，取图标不依赖联网/GitHub 可达，国内网络与离线场景都能显示。
+  - 该文件没有构建步骤、`@icon` 只能是字面量，故 logo 分两处存在（`@icon` = 合成图，`LOGO_PNG` = 页面内两处用的纯黑标），注释里写明换图时三处（`tray.png` / `@icon` / `LOGO_PNG`）同步。
+
+### 验证
+
+- 真实 Chromium 实测（给 `GM_*` 打最小桩后加载用户脚本、点击浮动按钮展开面板）：浮动按钮 48×48、`background-image: conic-gradient(...)`、内圈 `inset: 5px` 白底、logo 26×26 无滤镜；面板标题徽标 26×26、内圈 3px、logo 15×15；面板页脚链接与文字均为 `Misyra/Campus-Auth-rs`；控制台零报错；`node --check` 语法通过。
+
+## 开发中（2026-09-21 调试面板：单步/批量执行后补拍截图 + 弹窗放大）
+
+### 背景（实测定位）
+
+- 现场：任务调试面板逐步执行 `input` / `select` / `ocr` / `click` / `sleep` / `eval` 这类常规步骤时，右侧「实时截图」始终停在会话启动那一刻的画面，点「单步执行」预览不刷新。
+- 根因：**整条调试链路里只有两处会推送 `screenshot` 事件**——`handle_debug_start` 的初始截图与显式 `screenshot` 步骤（`step_handlers.handle_screenshot`）。普通步骤的公共执行路径 `run_step_async` 只推 `step_progress`，一张图都不补，于是前端 `session.screenshot_url` 自始至终是初始帧。Rust 侧转发（`bridge/mod.rs` 事件白名单）、WebSocket 内联（`ws.rs::prepare_bridge_event`）与前端 `useWebSocket` → `handleScreenshot` 三段本身都是通的——缺的只是"源"。
+
+### 修复
+
+- **每步补拍一帧**（新增 `playwright_worker._capture_debug_frame`）：`handle_debug_step` 与 `handle_debug_run_all` 在记录步骤结果后调用，对当前活动页（`context.page`，弹窗/新标签页场景已是接管后的页）截图并 `emit("screenshot", {path, step_index})`。
+  - 步骤帧用**视口截图**（`full_page=False`）：1280x720 视口体积小、无需整页拼接，既不拖慢单步响应，也避开长页 full_page 超过 Rust 侧内联上限（`DEBUG_SCREENSHOT_MAX_BYTES` = 8MiB）被静默丢弃的坑；会话初始帧仍取整页，保留"一眼看清门户全貌"。
+  - 超时 `DEBUG_FRAME_TIMEOUT_MS = 5000`；失败（页面已关闭 / 超时 / 磁盘错误）只记 debug 日志并返回 False，**不影响步骤结果与命令响应**。文件名带步骤序号（`debug_{session}_{step}_{stamp}.png`），同一毫秒内重复截图不会互相覆盖；路径照旧登记进 `context.screenshots`，`debug_stop` 时统一清理。
+  - `handle_debug_start` 的初始截图改为走同一实现（`full_page=True`），删掉那份重复的手写落盘逻辑。
+- **预览标注归属步骤**：截图事件带 0 基 `step_index`（初始帧不带），前端 `useDebug` 新增 `screenshotStep`，面板标题右侧由固定「调试浏览器」改为「步骤 N 后」；`startDebug` / `stopDebug` / 裂图 `clearScreenshot` 时一并重置。
+- **弹窗放大**：`Modal` 新增 `size="xxl"`（`max-width: 1200px; width: 96%; max-height: 92vh`），调试面板由 `lg` 改用 `xxl`；面板内部同步放大——截图列 `clamp(360px, 34%, 520px)`、步骤列表 `max-height: min(600px, 58vh)`、截图预览 `max-height: min(600px, 58vh)`、正文 `min-height: min(460px, 52vh)`；双栏折叠断点由 768px 提前到 900px（弹窗近乎全宽后该断点太晚，截图列 360px 的最小宽度会把步骤列挤到不可读）。
+- **左右两栏重新分配宽度**：步骤列只需容纳「序号 + 状态 + 类型徽标 + 一句描述」（最长的一句约 150px，此前却占着约 900px），改为 `clamp(240px, 30%, 360px)`，剩余宽度全给截图。同时把两栏的高度都锁进同一份竖向预算（`calc(92vh - 295px)` = 92vh 减去弹窗页头页脚与体留白、面板信息条、截图头、余量），于是截图在够高时按列宽铺满、不够高时等比压高度，**两种情形都不会把面板顶出滚动条**（此前 1220x716 下溢出 58px）。步骤描述与结果文案补 `:title`，窄列下省略号截断仍可悬停看全。
+- **截图点击放大**：预览区宽 390~520px，验证码/表单细节看不清，故截图整块改为可点按钮（`cursor: zoom-in` + 常驻「点击放大」角标 + `focus-visible` 描边，键盘也能开），点击弹出 `Modal size="xxl" preview` 大图：宽度铺满弹窗（1280 视口帧即接近 1:1），超出高度时可滚动看完整页。
+  - 打开时**冻结** URL 与归属步骤：放大后再来新一帧会把画面换掉，冻住才能安心比对这一帧；标题显示「调试截图 · 会话启动」或「调试截图 · 步骤 N 执行后」。
+  - 调试面板关闭（停止调试 / 会话结束）时放大窗一并关闭，不留悬空预览。
+
+### 验证
+
+- 真机链路实测（临时工装驱动真实 Worker + headless Chromium，`file://` 本地页三步 input → click → eval）：`debug_start` 得初始帧（整页 9836B），两次 `debug_step` 各补一帧（9972B / 8642B，均 1280x720 视口），三帧字节两两不同；第 2 帧可见 `alice` 已填入，第 3 帧页面已按点击结果变色（背景由绿转深蓝、标题变「登录中…」）——**预览确实随单步推进**；`debug_stop` 后截图文件全部清理。
+- `python_worker/tests/test_worker_execution_contract.py` 新增 3 例（单步两帧且 `step_index` 递增、批量执行逐步补拍、补拍失败不影响步骤结果），`pytest` 全量 **200 passed**。
+- `npx vitest run` **241 passed / 26 files**（`useDebug.test.ts` 新增 2 例：截图归属步骤 + `startDebug` 重置归属）；`npm run typecheck` 零错误。
+- 弹窗尺寸工装实测（真实 CSS + Playwright 截图）：1512x950 视口下弹窗 **1200x705**（原 `lg` 上限 720px 宽）、960x760 下 922x640、860x820 下折为纵排且无横向溢出；放大窗按用户实际窗口尺寸（1220x716 CSS px）渲染为 1171x659、图片按原分辨率铺满。
+- 两栏宽度/高度工装实测（真实 CSS，逐档量 bbox）：1220x716 下步骤列 336px、截图列 767px、图片 647x364、面板体溢出 **0px**；1220x780 下图片吃满列宽 751x422、溢出 0px；1512x950 下步骤列 345px / 截图列 787px / 图片 771x434、溢出 0px；1100x650 下图片 303 高、溢出 0px；≤900px 折为纵排（此时面板体正常滚动）。
+
+## 开发中（2026-09-21 页面捕获：非 Chromium 渠道资源快照降级修复 + 离线还原副本）
+
+### 背景（实测定位）
+
+- 实测现场：浏览器渠道设为 `firefox`，对演示站（`http://127.0.0.1:8890/`）执行「捕获登录页面」并「保存页面文件」，zip 内只有 `meta.json` / `page.html` / `page_structure.json` / `screenshot.png`，无 `page.mhtml`、无 `resources/`；`page.html` 里的 `<link href="static/css/style.css">` 指向空气，离线打开无样式、无脚本。捕获结果 note 为 `资源快照失败: BrowserContext.new_cdp_session: CDP session is only available in Chromium`。
+- 根因：**MHTML 完整快照（`Page.captureSnapshot`）与 CSS/JS 资源快照（`Page.getResourceTree` / `getResourceContent`）都只走 CDP**，而 CDP 是 Chromium 独有。firefox / webkit（含 custom 渠道配这两个引擎）下 `context.new_cdp_session` 在协议层就不存在——不是"失败"，是根本没有。同一份代码、同一站点、只换 channel 复跑对照：chromium 得到 `page.mhtml` + 2 个资源文件、note 为空；firefox 得到上面那份残缺产物。**"报错"与"快照很垃圾"是同一个原因。**
+- 顺带暴露两个与渠道无关的缺陷：① `page_capture` 路径**从不改写** HTML 里的资源引用（只有 `feedback_capture` 改写），即 chromium 下 `resources/` 也只是躺在包里，仅因 MHTML 兜着才没暴露；② 资源只从 CDP 内存缓存取，已逐出或导航后才动态插入的取不到（逐项静默跳过）。
+
+### 修复
+
+- **引擎能力判定收口**（`_channel_supports_cdp`）：firefox / webkit（含 custom 配这两个引擎）判为不支持 CDP；`BrowserController._is_chromium_channel` 改为委托同一函数，避免启动参数过滤与捕获路径各写一份口径而漂移。
+- **非 Chromium 渠道跳过 CDP 并给出可操作说明**：不再尝试必然失败的 MHTML / CDP 调用，note 改为中文（带具体渠道名 + 引导切到 Chromium / Chrome / Edge 后重新捕获），不再把 Playwright 的英文异常原样抛给用户。
+- **引擎无关的资源兜底抓取**（`_http_resource_snapshot`）：页面内枚举已加载的 script / stylesheet（`script[src]`、`link[rel~=stylesheet]`、`link[rel=preload][as=style]`，加 `performance.getEntriesByType('resource')` 覆盖导航后动态插入与预加载的请求），再用 `context.request.get` 按 URL 回补正文（走浏览器网络栈，带 context 的 cookie / UA）。firefox 下这是唯一能拿到 CSS/JS 正文的路径；chromium 下作为补充，捞 CDP 内存缓存已逐出的资源。逐项容错，失败计数与首个原因随 note 上报（不再静默跳过）。
+- **离线还原副本 `page.offline.html`**：有资源时把 HTML 里的资源引用改写成 `resources/<hash>.<ext>`，zip 一并分发，解压后双击即可脱网还原（无 MHTML 的渠道下这是唯一可离线查看的形态）。`page.html` 保持原始不改写——它是 Rust 侧喂给 LLM 的材质，URL 语义不该被污染。
+  - **改写必须靠"原始书写形态"**：映射键是 CDP / 网络层的**绝对 URL**，而 HTML 文本里普遍是相对写法（`static/css/style.css`、`/css/a.css`），只按绝对 URL 做文本替换永远命中不了。初版 `page.offline.html` 与 `page.html` 字节完全相同（9463B）即栽在这里：资源确实落盘了，引用却一处没改。故枚举阶段额外采集属性的原始值作为别名（`_ResourceSink.alias`），且**无条件登记**——CDP 已拿到正文的资源不会再走回补，它的相对写法只能在枚举阶段补上（否则 chromium 下别名永远为空）。
+  - 上限（200 文件 / 单文件 5 MiB / 总量 50 MiB）在 `_ResourceSink` 内统一判定，两条抓取路径共用，不会绕过预算撑爆捕获包。
+- **`feedback_capture` 同步**（导出问题报告）：同样先判引擎再决定是否尝试 MHTML，page.html 的改写改用「绝对 URL + 原始形态」合并映射——它的相对 URL 改写此前同样命中不了。
+- **Rust 侧**：捕获包 zip 白名单加入 `page.offline.html`（`GET /api/ai/capture/bundle`），`capture_bundle` 用例同步断言该文件随包分发。
+- **文档**：`python_worker/README.md` 的 `page_capture` 命令行同步为产物的实际构成与渠道限制（MHTML 仅 Chromium、离线副本、非 Chromium 渠道的兜底抓取）。
+- **前端**：AI 生成页第 2 步在渠道落在非 Chromium 引擎（`firefox` / `webkit` / custom 配这两者）时给静态预警——说明 MHTML 完整快照会缺、CSS/JS 由联网回补抓取、去「浏览器设置」切换渠道可拿回完整快照，文案与后端 note 同口径；「保存页面文件」按钮 title 同步为产物的实际构成。
+
+### 验证
+
+- 渠道对照实测（同一份代码、同一站点，仅换 channel）：chromium → `page.mhtml`(19.4KB) + `resources/*.css` + `resources/*.js` + `page.offline.html`，note 为空；firefox → 资源补齐为同样的 2 个文件 + `page.offline.html`，无 MHTML（协议层不可得），note 为上述中文说明。
+- 离线副本 A/B 实测（abort 掉全部 http(s) 请求后以 `file://` 打开）：`page.offline.html` 样式生效（`.card-head` 底色 `rgb(43, 123, 211)`）、脚本执行成功（点击「忘记密码」弹出 `main.js` 绑定的 alert）、零网络请求被拦；同一目录的原始 `page.html` 两者皆无（底色透明、点击无反应）。文件名与引用路径与实际落盘的 `resources/af1562c10743.css` / `de91cec2f1eb.js` 一一对应。
+- `python_worker/tests/test_resource_capture.py` 由 4 例增至 10 例（`pytest` 全量 **196 passed**）：CDP 过滤/逐出容错、超限跳过、逐出资源经 HTTP 回补、CDP 已落盘资源仍登记相对别名、firefox 不触碰 CDP（fake 会在被调用时断言失败）且 note 可操作、回补失败计数与成功项并存、枚举失败不抛异常、`_channel_supports_cdp` 口径表、`_resource_ext` 按种类兜底。
+- `cargo test --lib` **939 passed / 0 failed / 1 ignored**；`cargo clippy --all-targets -- -D warnings` 零警告；`cargo fmt --check` 零差异；`npm run typecheck` 零错误；`npx vitest run` **239 passed / 26 files**。
+
+## 开发中（2026-09-21 AI 生成页：OpenCode 渠道下架 + 模型下拉框 + 本地网关直连）
+
+### 下架
+
+- **OpenCode Zen 渠道整体下架**：前端预设卡片、后端 `infer_provider`（`opencode.ai` 分支）/ `validate_provider` / `configured_providers` 白名单、`openapi.json` 的 provider enum 与前端 `AiLlmConfig` 类型同步移除。指向 `opencode.ai` 的老配置在界面上回落到「其他兼容服务」（自定义服务不校验域名），因此**已有配置仍可保存**、不会被服务商标识校验拦下。
+  - **实测依据（为何不是"修好"而是"删掉"）**：Zen 免费档的门控已从 `User-Agent` 收紧为「必须在 OpenCode 客户端内」。对同一模型发四组请求——不带原生头 / 带 `User-Agent: opencode/1.15.5` + `x-opencode-client: cli` + `x-opencode-session`（`ses_`）+ `x-opencode-request`（`msg_`）/ 各加与不加 HTTP 代理——**全部**返回 `403 {"type":"FreeTierError","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}`。逐模型探测结论一致：`mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`muse-spark-1.2-contributor-free`、`nemotron-3.5-lightning-free`、`big-pickle` 均为此 403；`deepseek-v4-flash-free` 是上游 `Model is unavailable`；付费模型（如 `glm-5.2`）无真实 Key 时 `401 Missing API key`。`/models` 本身**无门禁**（不带任何头也能列出 74 个模型，含 `*-free`），门禁只作用在推理请求上——所以"能列出、调不动"。
+  - 旁证：所参考的社区实现 `pgciq/pi-cn-free-model-providers` 也只保留「后台探测等官方放开」，其 README 明确声明当前没有已验证可供扩展匿名调用的免费模型。
+  - 此前实现过的「伪装官方客户端」原生请求头（含 `ses_`/`msg_` 标识生成）、匿名 `public` Key 占位、以及为 Zen 403 单独收敛的中文提示（`AiError::OpenCodeFreeTierBlocked`）随渠道一并删除——留着一条必然 403 的路径不如删掉。**官方若放开，恢复该渠道需同时恢复请求头、预设与 Key 占位，本条目即为此留档**（含完整实测方法与结论）。
+
+### 新增
+
+- **模型下拉框 +「获取模型列表」**：AI 生成页的模型名不再只能手填。新增 `POST /api/ai/models`（body `{provider, base_url, api_key?}`）拉取服务商 `GET {base_url}/models`，前端把结果渲染成下拉框（`CustomSelect`，可滚动，上限 500 条）。`api_key` 缺省或为空时后端回退到该服务商**已保存**的 Key，因此「选服务商 → 拉列表 → 选模型 → 保存」这条顺序可用，不必为了看列表先存一次配置（GLM / DeepSeek 的 `/models` 需要鉴权）。
+  - 不擅自改写当前模型：拉取结果命中列表才切到下拉模式，否则保持手动输入（私有模型、旧配置里的值都可能不在列表里）；下拉框恒带「自定义（手动输入）」项，拉取失败也能照旧手填。
+  - 解析兼容三种响应形态：`{data:[{id}]}`（OpenAI 标准）、`{models:[{id}]}`、裸数组（字符串或 `{id}`/`{name}` 对象）；去重、保持服务端顺序。
+  - 界面同时显示实际请求的 `/models` 地址（排障用）；`openapi.json` 同步补上该路径（路由表一致性用例 `openapi_json_matches_route_table` 强制）。
+
+### 修复
+
+- **「测试连接」不再把"回复被截断"当成连接失败**：该按钮原实现写死 `max_tokens = 8`，客户端拿到 `finish_reason=length` 后按 `AiError::Truncated` 判失败并回 503——对"先思考/话痨"型模型（GLM flash、各类推理模型、第三方聚合网关）必然误报，明明链路与凭据都正常。实测同一份保存配置（`cn:glm-5.3-flash`，第三方网关）：8 token 截断、64 token 仍截断、256 token 正常返回；即 8 这个预算是主要元凶。现在测试上限放宽到 256，并把「截断」与「HTTP 200 但无正文」按**连通**处理（响应附 `note: 模型回复被测试上限截断，连接与凭据正常`，前端 toast 一并显示），只有真正的传输/鉴权/协议错误才判失败。**生成路径的截断判定不变**（那里产物是 JSON，截断就是残缺）。
+- **本地/私网 LLM 网关不再走系统代理**：reqwest 默认采用系统代理，但**不**套用系统代理的绕过列表——实测宿主机开着 `127.0.0.1:7890` 代理时，对 `127.0.0.1` 的请求会被转发给代理并回 `502 Bad Gateway`，本页「其他兼容服务」接 Ollama / LM Studio 这类本机网关（`base_url` 允许 http 回环/私网）直接不可用。该缺陷先于本次改动存在，做模型列表时被实测暴露。现在回环/私网基址强制直连，公网基址仍走系统代理——需要代理才能出网的场景不受影响。
+
+### 验证
+
+- `cargo test --features no-embed --lib` **937 passed / 0 failed / 1 ignored**（原 926，净增 11 例）；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo fmt --check` 零差异；`npm run typecheck` 零错误；`npm run test` **239 passed / 26 files**；`npm run build` 通过。
+- 新增用例覆盖：`/models` 三种响应形态解析、空列表与非法 JSON 的错误、`api_key` 显式优先与已保存回退、不带伪客户端标识、回环/私网判定、非 2xx 原样透传、**测试连接对截断宽容而对 401 仍判失败**（均用本地 TCP 替身，不依赖外网）。
+- 实机联调（本地实例 + 第三方聚合网关）：模型下拉框从 `https://buddy.amiya.cc/v1` 取回 **65** 个模型；「测试连接」在一次真实误报（503 截断）上定位并复现了上述 max_tokens 问题。
+- 渠道移除后 `git grep opencode` 仅剩注释与"保证不再发该标识"的负向断言（`src/ai/llm.rs`、`src/ai/mod.rs`、`AiTaskView.vue`、`types.ts`）。
+- 前端本次仅类型检查 + 单测 + 构建，未做浏览器截图核对（页面需要后端在线）——留待实机查看。
+
 ## 开发中（2026-09-20 更新弹窗：检查到新版本直接弹出并展示 GitHub 发布说明）
 
 ### 新增
