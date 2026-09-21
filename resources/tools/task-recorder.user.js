@@ -4,6 +4,7 @@
 // @version      5.0.0
 // @description  可视化选取校园网登录页面元素，整理成 AI 提示词，交给大模型生成任务 JSON
 // @author       Misyra
+// @icon         data:image/png;base64,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
 // @match        http://*/*
 // @match        https://*/*
 // @grant        GM_setClipboard
@@ -19,7 +20,18 @@
 
   // ==================== 配置 ====================
 
+  // 注意：顶部 @namespace 必须保持历史值 https://github.com/Misyra/Campus-Auth（旧 Python
+  // 仓库地址），**不要**跟着仓库改写：Tampermonkey 用「@name + @namespace」判定脚本身份，
+  // 改了会被当成新脚本另装一份，旧那份的样式表（作用域是 #ca-recorder-panel 的 ID 选择器）
+  // 优先级高于新版的主题令牌，表现为"改了颜色/主题但界面没变"。可见的仓库链接（面板页脚、
+  // 帮助页脚）指向 Campus-Auth-rs 即可，namespace 属机器标识，不面向用户展示细节。
   const VERSION = "5.0.0"; // 同步修改顶部 @version
+
+  // 软件 logo：认证喵那枚 64×64 透明底黑标。页面内的两处徽标用它 + CSS 画的彩虹环
+  // （纯黑标才能在白底内圈上成立），顶部 @icon 则是"彩虹环 + 白底 + 黑标"的合成图
+  // （Tampermonkey 列表只有一张图可用，环画不进 CSS）。本文件没有构建步骤，合成图
+  // 只能是字面量；换 logo 时 resources/icons/tray.png、@icon、LOGO_PNG 三处同步。
+  const LOGO_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAcDSURBVHhe7Zt1qC5FGIevjR3YhYnd3Yhd2ImKKComivqHndiJIIJioaJiJyoKFtiKiomN3a2Yz6P3hTl7Zndnv/vde79z8AcP55zdmXfn3Zh55505YyayZoYlYCVYGmaDUa8Z4AB4GL6Av+DvsXwDz8LpsCyMOu0O70E43MSfcB0sBKNCF0M451NvI8p+DTvCiNU0cBt0cT4l6u0HI05zw5PQq/NB1N8URozsxN6GcXE8RTsfwvQw8NoY7NG7ON9W1vOyDQy09gJ78BLnw6kqubLiub1hYHU8tDkRWOZnuAi2gx3gUvgDcvXD7uIwcJoELoNoZLXxVSzzJiwPVa0Or0HYSvEGD5xmhPsgGplzOIgyRoFNYa/R4tnwBnwGT8OeMHBaAF6ANsclnL8CJocSTQbe4IHUquCw1MX5E2BUyKHoJyh1/ldwHtCrHPvnB2eOS8KCMNHejEMhnmjO4RTLfARrQRfNAbuBHesz8An8AmHzN7BveB78pLy5c8J41zlQ4nyUeQ7sJ0q1NlwLEUR1wTrXgJ9m3zUV3ABxsZzTQZS5FaaDEvlq3wJRt+0aOdK6V8N80BfNDo9BScOijG9KibyxR4IBUYn9EsKOyZZdYZw0L0RQkrtYSpTZH+o0NWwIp8L9EJOlEvtdCbteqyfNBK9ASeMs8yVsBDktCgY270I0LCVnsx+E/fOhs+6CtsbFBV6GXIw+C1wA6Sues1l6Lke1fJUo56dWLLMvbcbD8J2QG5O3gDT/l6tbim+O4faVcBU8ABGEBan9KlGmaITw1bcDaTIaBi+EnI6BKJOr53TZ8f0SOBi2hvVhA9gejgKHNPOIxhB2llVNC+Ydbofctap43rB9UmjUsdBkLC52COR0IkSZah2f2smwFPRT24KBUXrNHJ7fA2rlnY7Xts6AP31KOZkA/Q7S+v5uFOeNGZ/h6yLwDtS1XTz3Ijh9z8ohykJ1Rjx+CtRpCngVwoYYDS4HObkaZMjrW2fscAYcDpuBCdWuMqD6HpraLytDVudBU2XjesfyJq0Jr8OPYPTot5rKwOpoeAmiQTl+gLvB17uL7FOsn/NBPFc7K30E6ip73BtUoilhrv9+HSIb9zloK6i7VsqjsAqUyGu/D02274VhsmIEKrlKshX0It+aGyHs5GxXqZ7/HfaBEhl7pDZSPG50O6wfmBVchspVjEbUfjstOgnCRtWmOOya/jI09tNJz1XL29m1yaW0tG6Kxz+FYesLzqfrOpC4uAnLXhQzvUiXi8PWmWCf4TK547Od6DxgwuVmiLJpG0qCmXUgrVv1xQftAx+itgDI47tAL3J0CRtiRGfSo00GR+moYtDjTWqTc5Kok/PDN8DE6xD5BJpmfh43DO1Va4BD6E7//jVUC4O9fS5z5Ku6LzhctkZxY2WQ1uSHKfmsrXjt6ir6iZQ8uS46DswZal8egnHdKaKNJj+cS2RVMoZeD/2So4o245rxuw+iV9lHhK207YHHT4OszLyacKyrLJ7rNLVsUKTZtGsHGfadPhswdZXDbQRYaZsDj0tjZ34T1BmQMNI10+JyuXfeXj8UGyeq9h3zu+b0zD244tTWdm9QY19ifB6FqwYCz8kTsDk0GbSDOxfizXocQqbPwlZq+yko7fCUawUxWqTtrOL5oiW2s6DEWGDqzLm7kZpjuMlIOzdDzmo2yDE4ghCjzzsgPe8awIpQKidOdQFciufdgVZ0Yx1rY2tLzlhKNLyJavnDINXO4Fti39JlFngg5K5RxfN+VnWz0qyczDhethmvUtIYh9Pc0ngXmejUVsn1pKfVZTsiEwglF+qCtr4Cg5uuMmI1D1nSpijTlKpvlSFj6apQKWHLUaCLTHhEqr6tLZ43O7Ul9EUuQEbKqaQBVdJ6Pn0zP67/l2oTsF7JdS3j7HIZ6KvsvY8AMz6pQ6V8DC6QOOProoMgHKs6mxLXeRCGzfb6KUcJNy069Jlqjml0FYdAb5Yrvn7vvSRF3UQV9nJOB1HGjVZdYoi+yFyCW96dhrogYr7emNzQutfG2NndA12cdz1hVGgxcLmtzXGxjG+gW+1GhVwdaluZCizzFoxrTDFetAIY3Tm5MptckspyvK7bKJnieXHy08uscbzLEDXN/wVNGx0jkys5p4MoczmUbreboDJ/n3MkjjlBMvXl9hmH1fUgMjjVOlWijAsrAyufTJ0j4YC4ymRcEH/nyqdYxq15uZziQMkgpM2hcDrIlUmxjIu2patDE1Xxv0E5R7oSN8gkStfocaLJrTKR5c05VUo470YJEycjSi6ghAM559qIuiN6b7GbKL6FLjciytrZ9ZIrGDi5Pa6a8wtSh1McEkfdf42uCy6rfQA5pw19XUDtW/JiUOUeIuN2V4R8xZ3ArAauDv+v/zXBNWbMP5LBtbrBl5wLAAAAAElFTkSuQmCC";
 
   const STEP_TYPES = {
     username: { category: "basic", label: "账号输入框", icon: "👤", color: "#4CAF50", primary: true, hint: "点击页面上真实的账号输入框（不是旁边的文字标签），支持自动检测隐藏输入框" },
@@ -29,7 +41,7 @@
     captcha_input: { category: "basic", label: "验证码输入框", icon: "✏️", color: "#9C27B0", primary: false, hint: "点击验证码输入框，自动弹出验证码类型选择（数字/字母/运算等）" },
     submit: { category: "basic", label: "提交按钮", icon: "🚀", color: "#F44336", primary: true, hint: "点击登录/提交按钮，通常放在最后一步" },
     checkbox: { category: "basic", label: "勾选/协议", icon: "☑️", color: "#FF5722", primary: true, hint: "点击复选框、用户协议勾选框，自动录制勾选操作" },
-    smart_detect: { category: "basic", label: "智能检测", icon: "🔍", color: "#00BCD4", primary: true, hint: "打字自动识别账号/密码，点击自动识别勾选/提交/下拉框，按 Esc 停止" },
+    smart_detect: { category: "basic", label: "智能检测", icon: "🔍", color: "#00BCD4", primary: true, bottomRow: true, hint: "打字自动识别账号/密码，点击自动识别勾选/提交/下拉框，按 Esc 停止" },
     click: { category: "advanced", label: "点击元素", icon: "👆", color: "#607D8B", primary: false, hint: "点击任意页面元素，仅记录点击操作，不填空" },
     wait: { category: "advanced", label: "等待元素", icon: "⏳", color: "#795548", primary: false, hint: "鼠标悬停在要等待的元素上，然后按 Enter 键记录" },
     eval: { category: "advanced", label: "执行JS", icon: "⚙️", color: "#00BCD4", primary: false, hint: "输入一段要在页面中执行的 JavaScript 代码" },
@@ -66,6 +78,8 @@
   };
 
   const STORAGE_KEY = "ca_recorder_state";
+  /** 主题偏好：light / dark（独立键，与录制状态互不影响） */
+  const THEME_KEY = "ca_recorder_theme";
 
   // 截断长度 / 时间间隔等上限，避免魔法数字散落各处
   const LIMITS = {
@@ -175,6 +189,39 @@
     return isLikelyLoginForm(el);
   }
 
+  // ==================== 主题（日间 / 夜间） ====================
+
+  /** 读取主题偏好；读取异常/未设置时回落到日间（默认白底） */
+  function readTheme() {
+    try {
+      return GM_getValue(THEME_KEY, "light") === "dark" ? "dark" : "light";
+    } catch (e) {
+      return "light";
+    }
+  }
+
+  /** 应用主题：类挂在 <html> 上——面板之外的叠加层也要跟着换 */
+  function applyTheme(theme) {
+    document.documentElement.classList.toggle("ca-dark", theme === "dark");
+    const btn = document.getElementById("ca-btn-theme");
+    if (btn) {
+      btn.textContent = theme === "dark" ? "☀️" : "🌙";
+      btn.title = theme === "dark" ? "切换到日间模式" : "切换到夜间模式";
+    }
+  }
+
+  /** 切换并持久化主题 */
+  function toggleTheme() {
+    const next = readTheme() === "dark" ? "light" : "dark";
+    try {
+      GM_setValue(THEME_KEY, next);
+    } catch (e) {
+      console.warn("[CA Recorder] 保存主题偏好失败:", e);
+    }
+    applyTheme(next);
+    setStatus(next === "dark" ? "已切换到夜间模式" : "已切换到日间模式");
+  }
+
   function saveState() {
     try {
       // 移除大字段防止超出油猴存储限制（通常 5MB）
@@ -235,96 +282,189 @@
 
   // ==================== 样式注入 ====================
 
+  applyTheme(readTheme());
   GM_addStyle(`
     /* ====== CSS 变量 ====== */
-    #ca-recorder-panel {
-      --ca-bg: #1a1a2e;
-      --ca-card: #2a2a3e;
-      --ca-card-hover: #333;
-      --ca-card-active: #2a2a5e;
-      --ca-text: #e0e0e0;
-      --ca-text-dim: #aaa;
-      --ca-text-muted: #888;
-      --ca-border: #444;
-      --ca-divider: #333;
-      --ca-primary: #667eea;
-      --ca-primary-grad: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      --ca-success: #4CAF50;
-      --ca-danger: #e74c3c;
-      --ca-warning: #FF9800;
-      --ca-step-username: #4CAF50;
-      --ca-step-password: #2196F3;
-      --ca-step-carrier: #FF9800;
-      --ca-step-captcha: #9C27B0;
-      --ca-step-submit: #F44336;
-      --ca-step-checkbox: #FF5722;
-      --ca-step-detect: #00BCD4;
-      --ca-step-click: #607D8B;
-      --ca-step-wait: #795548;
+    /* 主题在样式注入前就应用一次（开面板前叠加层已是正确配色，避免白闪） */
+    /* 徽标彩虹环：conic 从红起绕一圈（首尾同色，接缝不可见）。定义在 :root ——
+       浮动入口按钮挂在 body 上、不在 #ca-recorder-panel 内，取不到面板作用域的变量 */
+    :root {
+      --ca-rainbow: conic-gradient(from 0deg, #ff4d4d, #ffa64d, #ffe14d, #4ade80, #4dd2ff, #7c7cff, #d24dff, #ff4d4d);
+    }
+    /* 主题令牌挂在 :root 上而不是面板上：面板之外的叠加层（tooltip / 揭示面板 /
+       揭示弹窗）也要跟着换主题，它们不在 #ca-recorder-panel 作用域内 */
+    :root {
+      /* 日间（默认）：白底 + 灰阶描边，主按钮＝深底白字；颜色只由 emoji 与彩虹环提供 */
+      --ca-bg: #ffffff;
+      --ca-surface: #ffffff;
+      --ca-card: #f4f5f7;
+      --ca-card-hover: #eceef1;
+      --ca-card-active: #e4e7eb;
+      --ca-input: #ffffff;
+      --ca-text: #16181d;
+      --ca-text-dim: #4a5058;
+      --ca-text-muted: #7a838f;
+      --ca-border: rgba(0, 0, 0, 0.1);
+      --ca-divider: rgba(0, 0, 0, 0.08);
+      --ca-primary: #16181d;
+      --ca-primary-ink: #ffffff;
+      --ca-primary-hover: #000000;
+      --ca-success: #12855a;
+      --ca-danger: #d92d20;
+      --ca-warning: #a9761a;
+      --ca-danger-soft: rgba(217, 45, 32, 0.08);
+      /* 选中态强调色：与徽标彩虹环的靛蓝端同一色系；-soft 铺底、-ink 写字（浅底上更实） */
+      --ca-accent: #5566e8;
+      --ca-accent-soft: rgba(85, 102, 232, 0.1);
+      --ca-accent-ink: #3f4fd0;
+      --ca-shadow-panel: 0 20px 48px rgba(15, 18, 24, 0.16), 0 2px 6px rgba(15, 18, 24, 0.05);
+      --ca-shadow-pop: 0 12px 32px rgba(15, 18, 24, 0.16);
+    }
+    /* 夜间：同一套令牌换值，规则一行不用改（<html class="ca-dark"> 由切换按钮控制） */
+    :root.ca-dark {
+      --ca-bg: #17191e;
+      --ca-surface: #1d2027;
+      --ca-card: #1f232b;
+      --ca-card-hover: #272c35;
+      --ca-card-active: #2d3340;
+      --ca-input: #14161b;
+      --ca-text: #e9ebef;
+      --ca-text-dim: #b0b6c0;
+      --ca-text-muted: #7f8794;
+      --ca-border: rgba(255, 255, 255, 0.09);
+      --ca-divider: rgba(255, 255, 255, 0.07);
+      --ca-primary: #e9ebef;
+      --ca-primary-ink: #17191e;
+      --ca-primary-hover: #ffffff;
+      --ca-success: #4ec08a;
+      --ca-danger: #e5484d;
+      --ca-warning: #d9a13b;
+      --ca-danger-soft: rgba(229, 72, 77, 0.1);
+      --ca-accent: #8b9cff;
+      --ca-accent-soft: rgba(139, 156, 255, 0.16);
+      --ca-accent-ink: #b9c4ff;
+      --ca-shadow-panel: 0 18px 50px rgba(0, 0, 0, 0.5);
+      --ca-shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.45);
     }
     /* ====== 面板主体 ====== */
     #ca-recorder-panel {
       position: fixed; top: 10px; right: 10px; z-index: 2147483647;
       width: 360px; max-height: 90vh; overflow-y: auto;
-      background: var(--ca-bg); color: var(--ca-text); border-radius: 12px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      background: var(--ca-bg); color: var(--ca-text);
+      border: 1px solid var(--ca-border); border-radius: 14px;
+      box-shadow: var(--ca-shadow-panel);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       font-size: 14px; line-height: 1.5;
     }
     #ca-recorder-panel * { box-sizing: border-box; }
     /* ====== 头部 ====== */
     #ca-recorder-panel .ca-header {
-      padding: 16px; background: var(--ca-primary-grad);
-      border-radius: 12px 12px 0 0; cursor: move; user-select: none;
+      padding: 14px 16px; background: transparent;
+      border-bottom: 1px solid var(--ca-divider);
+      border-radius: 14px 14px 0 0; cursor: move; user-select: none;
     }
-    #ca-recorder-panel .ca-header h3 { margin: 0; font-size: 16px; color: #fff; }
-    #ca-recorder-panel .ca-header small { color: rgba(255,255,255,0.7); }
+    #ca-recorder-panel .ca-header h3 {
+      display: flex; align-items: center; gap: 8px;
+      margin: 0; font-size: 15px; font-weight: 600; color: var(--ca-text);
+    }
+    /* 软件徽标：彩虹环 + 白底 + 黑标（与浮动入口按钮同一套观感）。
+       环宽用 --ca-ring 收口，::before 铺白底，img 相对定位压在白底之上。 */
+    #ca-recorder-panel .ca-brand-mark,
+    .ca-entry-btn {
+      position: relative; box-sizing: border-box; flex: none;
+      border-radius: 50%; background: var(--ca-card-active); overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+    }
+    /* 彩虹层：超采样圆盘（inset 负值）在按钮内被裁成圆环带，整体缓慢旋转即"律动"；
+       白底与 logo 是同级静态元素，不会跟着转 */
+    #ca-recorder-panel .ca-brand-mark::after,
+    .ca-entry-btn::after {
+      content: ""; position: absolute; inset: -30%; border-radius: 50%;
+      background: var(--ca-rainbow);
+    }
+    #ca-recorder-panel .ca-brand-mark::before,
+    .ca-entry-btn::before {
+      content: ""; position: absolute; inset: var(--ca-ring); z-index: 1;
+      border-radius: 50%; background: #fff;
+    }
+    #ca-recorder-panel .ca-brand-mark img,
+    .ca-entry-btn img { z-index: 2; }
+    .ca-entry-btn::after { animation: ca-rainbow-spin 6s linear infinite; }
+    #ca-recorder-panel .ca-brand-mark::after { animation: ca-rainbow-spin 9s linear infinite; }
+    @keyframes ca-rainbow-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .ca-entry-btn::after,
+      #ca-recorder-panel .ca-brand-mark::after { animation: none; }
+    }
+    #ca-recorder-panel .ca-brand-mark {
+      --ca-ring: 3px; width: 26px; height: 26px;
+    }
+    #ca-recorder-panel .ca-brand-logo {
+      position: relative; display: block; width: 15px; height: 15px;
+    }
+    #ca-recorder-panel .ca-header small { color: var(--ca-text-muted); font-weight: 400; }
     #ca-recorder-panel .ca-header-bar {
       display: flex; align-items: center; justify-content: space-between;
     }
-    #ca-recorder-panel .ca-help-btn {
+    #ca-recorder-panel .ca-header-actions { display: flex; align-items: center; gap: 6px; }
+    #ca-recorder-panel .ca-help-btn:hover,
+    #ca-recorder-panel .ca-theme-btn:hover { color: var(--ca-text); border-color: var(--ca-text-muted); }
+    #ca-recorder-panel .ca-step-btn:hover { border-color: var(--ca-accent); }
+    #ca-recorder-panel .ca-help-btn,
+    #ca-recorder-panel .ca-theme-btn {
       width: 26px; height: 26px; border-radius: 50%;
-      border: 1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1);
-      color: #fff; cursor: pointer; font-size: 14px; font-weight: bold; line-height: 1;
+      border: 1px solid var(--ca-border); background: transparent;
+      color: var(--ca-text-muted); cursor: pointer; font-size: 13px; font-weight: 600; line-height: 1;
+      transition: color 0.15s, border-color 0.15s;
     }
     /* ====== 内容区 ====== */
-    #ca-recorder-panel .ca-body { padding: 12px 16px; }
+    #ca-recorder-panel .ca-body { padding: 14px 16px 16px; }
     #ca-recorder-panel .ca-section { margin-bottom: 12px; }
     #ca-recorder-panel .ca-section-title {
-      font-size: 12px; text-transform: uppercase; color: var(--ca-text-muted);
-      letter-spacing: 1px; margin-bottom: 8px;
+      font-size: 11px; text-transform: uppercase; color: var(--ca-text-muted);
+      letter-spacing: 0.08em; font-weight: 600; margin-bottom: 8px;
     }
     /* ====== 按钮 ====== */
     #ca-recorder-panel .ca-btn {
       display: inline-flex; align-items: center; gap: 6px;
-      padding: 8px 14px; border: none; border-radius: 8px;
+      padding: 8px 14px; border: 1px solid transparent; border-radius: 9px;
       cursor: pointer; font-size: 13px; font-weight: 500;
-      transition: all 0.2s;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
     }
-    #ca-recorder-panel .ca-btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
-    #ca-recorder-panel .ca-btn-primary { background: var(--ca-primary); color: #fff; }
-    #ca-recorder-panel .ca-btn-success { background: var(--ca-success); color: #fff; }
-    #ca-recorder-panel .ca-btn-danger { background: var(--ca-danger); color: #fff; }
-    #ca-recorder-panel .ca-btn-secondary { background: var(--ca-card); color: #ccc; }
+    #ca-recorder-panel .ca-btn-primary { background: var(--ca-primary); color: var(--ca-primary-ink); font-weight: 600; }
+    #ca-recorder-panel .ca-btn-primary:hover { background: var(--ca-primary-hover); }
+    #ca-recorder-panel .ca-btn-success { background: var(--ca-success); color: var(--ca-primary-ink); }
+    #ca-recorder-panel .ca-btn-secondary {
+      background: transparent; color: var(--ca-text-dim); border-color: var(--ca-border);
+    }
+    #ca-recorder-panel .ca-btn-secondary:hover { background: var(--ca-card-hover); color: var(--ca-text); }
+    #ca-recorder-panel .ca-btn-danger {
+      background: transparent; color: var(--ca-text-muted); border-color: var(--ca-border);
+    }
+    #ca-recorder-panel .ca-btn-danger:hover {
+      background: var(--ca-danger-soft); color: #c81e12; border-color: rgba(217, 45, 32, 0.35);
+    }
     #ca-recorder-panel .ca-btn-sm { padding: 4px 10px; font-size: 12px; }
     #ca-recorder-panel .ca-btn-block { width: 100%; justify-content: center; }
-    #ca-recorder-panel .ca-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+    #ca-recorder-panel .ca-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     /* ====== 步骤网格 ====== */
     #ca-recorder-panel .ca-step-grid {
       display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px;
     }
     #ca-recorder-panel .ca-step-btn {
       display: flex; align-items: center; gap: 6px;
-      padding: 8px 10px; background: var(--ca-card); border: 2px solid transparent;
-      border-radius: 8px; cursor: pointer; color: #ddd; font-size: 13px;
-      transition: all 0.2s;
+      padding: 9px 11px; background: var(--ca-card); border: 1px solid var(--ca-border);
+      border-radius: 10px; cursor: pointer; color: var(--ca-text-dim); font-size: 13px;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
     }
-    #ca-recorder-panel .ca-step-btn:hover { background: #3a3a4e; }
-    #ca-recorder-panel .ca-step-btn.active { border-color: var(--ca-primary); background: var(--ca-card-active); }
-    #ca-recorder-panel .ca-more-btn { border-color: #555; }
-    #ca-recorder-panel .ca-more-btn:hover { border-color: var(--ca-primary); }
+    #ca-recorder-panel .ca-step-btn:hover { background: var(--ca-card-hover); color: var(--ca-text); }
+    #ca-recorder-panel .ca-step-btn.active {
+      border-color: var(--ca-accent); background: var(--ca-accent-soft); color: var(--ca-accent-ink);
+    }
+    #ca-recorder-panel .ca-more-btn { color: var(--ca-text-muted); grid-column: 1 / -1; }
+    #ca-recorder-panel .ca-more-btn:hover { border-color: var(--ca-accent); color: var(--ca-accent-ink); }
     #ca-recorder-panel .ca-more-container { grid-column: 1 / -1; margin-top: 2px; }
-    #ca-recorder-panel .ca-step-btn .ca-icon { font-size: 16px; }
+    #ca-recorder-panel .ca-step-btn .ca-icon { font-size: 15px; line-height: 1; }
     #ca-recorder-panel .ca-grid-sep {
       grid-column: 1 / -1; height: 1px; background: var(--ca-divider); margin: 2px 0;
     }
@@ -333,12 +473,14 @@
     #ca-recorder-panel .ca-recorded-item {
       display: flex; align-items: center; gap: 8px;
       padding: 8px 10px; margin-bottom: 4px;
-      background: var(--ca-card); border-radius: 8px; font-size: 12px;
+      background: var(--ca-card); border-radius: 10px; font-size: 12px;
+      border: 1px solid transparent;
       cursor: pointer;
     }
     #ca-recorder-panel .ca-recorded-item:hover { background: var(--ca-card-hover); }
     #ca-recorder-panel .ca-recorded-item .ca-idx {
-      background: var(--ca-primary); color: #fff; border-radius: 50%;
+      background: var(--ca-card-active); color: var(--ca-text-dim);
+      border: 1px solid var(--ca-border); border-radius: 50%;
       width: 20px; height: 20px; display: flex; align-items: center;
       justify-content: center; font-size: 11px; flex-shrink: 0;
     }
@@ -352,16 +494,18 @@
       overflow: hidden; text-overflow: ellipsis; max-width: 200px;
     }
     #ca-recorder-panel .ca-recorded-item .ca-del {
-      background: none; border: none; color: var(--ca-danger); cursor: pointer;
-      font-size: 16px; padding: 0 4px;
+      background: none; border: none; color: var(--ca-text-muted); cursor: pointer;
+      font-size: 15px; padding: 0 4px;
+    }
+    #ca-recorder-panel .ca-recorded-item .ca-del:hover { color: var(--ca-danger); }
     }
     /* ====== 底部 ====== */
     #ca-recorder-panel .ca-footer {
       padding: 12px 16px; border-top: 1px solid var(--ca-divider); text-align: center;
-      font-size: 12px; color: #666;
+      font-size: 12px; color: var(--ca-text-muted);
     }
     #ca-recorder-panel .ca-footer a {
-      color: var(--ca-primary); text-decoration: none; display: inline-flex;
+      color: var(--ca-text-dim); text-decoration: none; display: inline-flex;
       align-items: center; gap: 4px;
     }
     #ca-recorder-panel .ca-footer a:hover { text-decoration: underline; }
@@ -370,37 +514,48 @@
     /* ====== 操作栏 & 状态 ====== */
     #ca-recorder-panel .ca-actions { display: flex; gap: 6px; margin-top: 8px; }
     #ca-recorder-panel .ca-actions-end { justify-content: flex-end; }
+    /* 底部动作行：左侧常驻「智能检测」，主按钮 + 关闭推右 */
+    #ca-recorder-panel .ca-bottom-row {
+      display: flex; align-items: center; gap: 8px; margin-top: 12px;
+    }
+    #ca-recorder-panel .ca-bottom-row #ca-btn-copy-prompt { margin-left: auto; }
+    #ca-recorder-panel .ca-bottom-row .ca-detect-btn { flex: none; }
     #ca-recorder-panel .ca-status {
-      padding: 8px 12px; background: var(--ca-card); border-radius: 8px;
+      padding: 9px 12px; background: transparent; border: 1px dashed var(--ca-border);
+      border-radius: 10px; color: var(--ca-text-muted);
       font-size: 12px; text-align: center; margin-top: 8px;
     }
-    #ca-recorder-panel .ca-status.recording { background: #3a1a1a; color: #ff6b6b; animation: ca-pulse 1.5s infinite; }
+    #ca-recorder-panel .ca-status.recording {
+      background: var(--ca-danger-soft); border-style: solid; border-color: rgba(217, 45, 32, 0.3);
+      color: #c81e12; animation: ca-pulse 1.5s infinite;
+    }
     @keyframes ca-pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
     /* ====== 工具栏开关 ====== */
     #ca-recorder-panel .ca-toolbar { display: flex; gap: 4px; margin-bottom: 8px; }
     #ca-recorder-panel .ca-toggle {
       flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
-      padding: 6px 8px; background: var(--ca-card); border: 1px solid var(--ca-border);
-      border-radius: 8px; cursor: pointer; color: var(--ca-text-muted); font-size: 12px;
-      transition: all 0.2s; user-select: none;
+      padding: 6px 10px; background: transparent; border: 1px solid var(--ca-border);
+      border-radius: 999px; cursor: pointer; color: var(--ca-text-muted); font-size: 12px;
+      transition: background 0.15s, border-color 0.15s, color 0.15s; user-select: none;
     }
-    #ca-recorder-panel .ca-toggle:hover { background: var(--ca-card-hover); }
+    #ca-recorder-panel .ca-toggle:hover { color: var(--ca-text); border-color: rgba(255, 255, 255, 0.22); }
     #ca-recorder-panel .ca-toggle.active {
-      background: var(--ca-card-active); border-color: var(--ca-primary); color: #aab;
-      box-shadow: 0 0 6px rgba(102,126,234,0.25);
+      background: var(--ca-accent-soft); border-color: var(--ca-accent); color: var(--ca-accent-ink);
     }
     /* ====== 快捷键提示栏 ====== */
     #ca-recorder-panel .ca-shortcut-bar {
-      font-size: 11px; color: #666; margin-bottom: 4px;
+      font-size: 11px; color: var(--ca-text-muted); margin-bottom: 4px;
     }
     /* ====== 通用表单控件（模态框 & 编辑弹窗共用） ====== */
     #ca-recorder-panel .ca-modal-overlay {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      position: fixed; inset: 0; background: rgba(15, 18, 24, 0.35);
+      backdrop-filter: blur(2px);
       z-index: 2147483646; display: flex; align-items: center; justify-content: center;
     }
     #ca-recorder-panel .ca-modal {
-      background: var(--ca-bg); border-radius: 12px; padding: 20px;
-      width: 400px; max-width: 90vw; color: var(--ca-text);
+      background: var(--ca-surface); border: 1px solid var(--ca-border); border-radius: 14px;
+      padding: 20px; width: 400px; max-width: 90vw; color: var(--ca-text);
+      box-shadow: 0 20px 48px rgba(15, 18, 24, 0.18);
     }
     #ca-recorder-panel .ca-modal h4 { margin: 0 0 12px; }
     #ca-recorder-panel .ca-modal label,
@@ -409,38 +564,43 @@
     }
     #ca-recorder-panel .ca-step-edit-modal label { font-size: 12px; color: var(--ca-text-muted); }
     #ca-recorder-panel .ca-form-input {
-      width: 100%; padding: 8px 10px; background: var(--ca-card); border: 1px solid var(--ca-border);
-      border-radius: 6px; color: var(--ca-text); font-size: 13px; margin-bottom: 10px;
+      width: 100%; padding: 8px 10px; background: var(--ca-input); border: 1px solid var(--ca-border);
+      border-radius: 9px; color: var(--ca-text); font-size: 13px; margin-bottom: 10px;
+      transition: border-color 0.15s;
+    }
+    #ca-recorder-panel .ca-form-input:focus {
+      outline: none; border-color: rgba(0, 0, 0, 0.35);
     }
     #ca-recorder-panel textarea.ca-form-input { min-height: 60px; resize: vertical; }
     #ca-recorder-panel .ca-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
     #ca-recorder-panel .ca-step-edit-overlay {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      position: fixed; inset: 0; background: rgba(15, 18, 24, 0.35);
       z-index: 2147483646; display: flex; align-items: center; justify-content: center;
     }
     #ca-recorder-panel .ca-step-edit-modal {
-      background: var(--ca-bg); border-radius: 12px; padding: 20px;
-      width: 380px; max-width: 90vw; color: var(--ca-text);
+      background: var(--ca-surface); border: 1px solid var(--ca-border); border-radius: 14px;
+      padding: 20px; width: 380px; max-width: 90vw; color: var(--ca-text);
+      box-shadow: 0 20px 48px rgba(15, 18, 24, 0.18);
     }
     #ca-recorder-panel .ca-step-edit-modal h4 { margin: 0 0 14px; font-size: 15px; }
     /* ====== 选择器验证状态 ====== */
     #ca-recorder-panel .ca-selector-status { font-size: 11px; margin-bottom: 8px; min-height: 16px; }
     #ca-recorder-panel .ca-selector-ok { color: var(--ca-success); }
     #ca-recorder-panel .ca-selector-warn { color: var(--ca-danger); }
-    #ca-recorder-panel .ca-step-meta { font-size: 11px; color: #666; margin-bottom: 8px; }
+    #ca-recorder-panel .ca-step-meta { font-size: 11px; color: var(--ca-text-muted); margin-bottom: 8px; }
     /* ====== 提示框 ====== */
     #ca-tooltip {
       position: fixed; z-index: 2147483645; pointer-events: none;
-      background: rgba(26,26,46,0.95); color: #e0e0e0;
+      background: var(--ca-surface); color: var(--ca-text);
       padding: 8px 12px; border-radius: 8px; font-size: 12px;
       font-family: monospace; max-width: 400px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-      border-left: 3px solid #667eea;
+      box-shadow: var(--ca-shadow-pop);
+      border: 1px solid var(--ca-border); border-left: 3px solid var(--ca-border);
     }
-    #ca-tooltip .ca-tt-tag { color: #667eea; font-weight: bold; }
-    #ca-tooltip .ca-tt-id { color: #4CAF50; }
-    #ca-tooltip .ca-tt-class { color: #FF9800; }
-    #ca-tooltip .ca-tt-hint { color: #888; font-size: 11px; margin-top: 4px; }
+    #ca-tooltip .ca-tt-tag { color: var(--ca-text-muted); font-weight: bold; }
+    #ca-tooltip .ca-tt-id { color: var(--ca-success); }
+    #ca-tooltip .ca-tt-class { color: var(--ca-warning); }
+    #ca-tooltip .ca-tt-hint { color: var(--ca-text-muted); font-size: 11px; margin-top: 4px; }
     /* ====== 元素高亮 ====== */
     .ca-highlight { outline: 3px solid #667eea !important; outline-offset: 2px !important; background: rgba(102,126,234,0.1) !important; }
     .ca-highlight-selected { outline: 3px solid #4CAF50 !important; outline-offset: 2px !important; background: rgba(76,175,80,0.1) !important; }
@@ -463,58 +623,61 @@
     #ca-reveal-panel {
       position: fixed; left: 10px; top: 10px; z-index: 2147483646;
       width: 260px; max-height: 60vh; overflow-y: auto;
-      background: #1a1a2e; color: #e0e0e0; border-radius: 12px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      background: var(--ca-surface); border: 1px solid var(--ca-border);
+      color: var(--ca-text); border-radius: 12px;
+      box-shadow: var(--ca-shadow-pop);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       font-size: 12px;
     }
     #ca-reveal-panel .ca-rv-header {
-      padding: 10px 12px; background: #2e7d32; border-radius: 12px 12px 0 0;
+      padding: 10px 12px; background: var(--ca-card); color: var(--ca-success);
+      border-bottom: 1px solid var(--ca-divider); border-radius: 12px 12px 0 0;
       font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px;
     }
     #ca-reveal-panel .ca-rv-count {
-      background: #fff; color: #2e7d32; padding: 0 6px;
+      background: var(--ca-success); color: var(--ca-primary-ink); padding: 0 6px;
       border-radius: 10px; font-size: 11px;
     }
     #ca-reveal-panel .ca-rv-item {
       display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-      border-bottom: 1px solid #2a2a3e; cursor: pointer; transition: background 0.15s;
+      border-bottom: 1px solid var(--ca-divider); cursor: pointer; transition: background 0.15s;
     }
-    #ca-reveal-panel .ca-rv-item:hover { background: #2a2a4e; }
+    #ca-reveal-panel .ca-rv-item:hover { background: var(--ca-card-hover); }
     #ca-reveal-panel .ca-rv-icon { font-size: 14px; flex-shrink: 0; }
     #ca-reveal-panel .ca-rv-info { flex: 1; min-width: 0; }
     #ca-reveal-panel .ca-rv-sel {
-      font-family: monospace; font-size: 11px; color: #81C784; overflow: hidden;
+      font-family: monospace; font-size: 11px; color: var(--ca-success); overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap; max-width: 180px;
     }
-    #ca-reveal-panel .ca-rv-type { font-size: 10px; color: #888; }
+    #ca-reveal-panel .ca-rv-type { font-size: 10px; color: var(--ca-text-muted); }
     #ca-reveal-panel .ca-rv-btn {
-      flex-shrink: 0; padding: 2px 8px; border: 1px solid #4CAF50; border-radius: 4px;
-      background: transparent; color: #4CAF50; cursor: pointer; font-size: 11px;
+      flex-shrink: 0; padding: 2px 8px; border: 1px solid var(--ca-border); border-radius: 4px;
+      background: transparent; color: var(--ca-success); cursor: pointer; font-size: 11px;
       transition: all 0.15s;
     }
-    #ca-reveal-panel .ca-rv-btn:hover { background: #4CAF50; color: #fff; }
+    #ca-reveal-panel .ca-rv-btn:hover { background: var(--ca-success); color: var(--ca-primary-ink); }
     /* ====== 揭示弹窗 ====== */
     .ca-reveal-popup {
       position: fixed; z-index: 2147483647;
-      background: #1a1a2e; color: #e0e0e0; border-radius: 10px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.6); padding: 12px;
+      background: var(--ca-surface); border: 1px solid var(--ca-border);
+      color: var(--ca-text); border-radius: 10px;
+      box-shadow: var(--ca-shadow-pop); padding: 12px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       font-size: 13px; min-width: 200px;
     }
     .ca-reveal-popup .ca-rpop-header {
-      margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #333;
+      margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--ca-divider);
       font-size: 12px; word-break: break-all;
     }
     .ca-reveal-popup .ca-rpop-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .ca-reveal-popup .ca-rpop-actions button {
-      padding: 6px 12px; border: 1px solid #444; border-radius: 6px;
-      background: #2a2a3e; color: #ddd; cursor: pointer; font-size: 12px;
+      padding: 6px 12px; border: 1px solid var(--ca-border);
+      background: var(--ca-card); color: var(--ca-text-dim); cursor: pointer; font-size: 12px;
       transition: all 0.15s;
     }
-    .ca-reveal-popup .ca-rpop-actions button:hover { background: #3a3a5e; border-color: #667eea; }
-    .ca-reveal-popup .ca-rpop-actions button[data-rpop-type="dismiss"] { color: #888; border-color: transparent; }
-    .ca-reveal-popup .ca-rpop-actions button[data-rpop-type="dismiss"]:hover { color: #e74c3c; }
+    .ca-reveal-popup .ca-rpop-actions button:hover { background: var(--ca-card-hover); border-color: var(--ca-text-muted); }
+    .ca-reveal-popup .ca-rpop-actions button[data-rpop-type="dismiss"] { color: var(--ca-text-muted); border-color: transparent; }
+    .ca-reveal-popup .ca-rpop-actions button[data-rpop-type="dismiss"]:hover { color: var(--ca-danger); }
     /* ====== 帮助弹窗专用 ====== */
     #ca-recorder-panel .ca-help-modal { width: 600px; max-height: 82vh; overflow-y: auto; padding: 24px; }
     #ca-recorder-panel .ca-help-header {
@@ -524,12 +687,12 @@
     #ca-recorder-panel .ca-help-close {
       background: none; border: none; color: var(--ca-text-muted); cursor: pointer; font-size: 20px;
     }
-    #ca-recorder-panel .ca-help-body { line-height: 1.8; color: #ccc; }
+    #ca-recorder-panel .ca-help-body { line-height: 1.8; color: var(--ca-text-dim); }
     #ca-recorder-panel .ca-help-h5 { color: var(--ca-primary); margin: 14px 0 6px; }
     #ca-recorder-panel .ca-help-list { margin: 4px 0; padding-left: 18px; }
     #ca-recorder-panel .ca-help-list-sm { margin: 0 0 8px; padding-left: 18px; font-size: 12px; }
     #ca-recorder-panel .ca-help-tip {
-      background: rgba(102,126,234,0.08); border-left: 3px solid var(--ca-primary);
+      background: var(--ca-card); border-left: 3px solid var(--ca-text);
       padding: 8px 12px; margin: 8px 0; border-radius: 0 6px 6px 0;
       font-size: 12px; line-height: 1.6;
     }
@@ -537,20 +700,22 @@
     #ca-recorder-panel .ca-help-table th,
     #ca-recorder-panel .ca-help-table td { padding: 3px 6px; }
     #ca-recorder-panel .ca-help-table-header { color: var(--ca-text-dim); }
-    #ca-recorder-panel .ca-help-key { color: #fff; }
+    #ca-recorder-panel .ca-help-key { color: var(--ca-text); font-weight: 600; }
     #ca-recorder-panel .ca-help-footer {
       margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--ca-divider);
-      font-size: 11px; color: #666; text-align: center;
+      font-size: 11px; color: var(--ca-text-muted); text-align: center;
     }
     /* ====== 浮动入口按钮 ====== */
     .ca-entry-btn {
       position: fixed; bottom: 20px; right: 20px;
-      width: 48px; height: 48px; border-radius: 50%;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 24px; cursor: pointer; z-index: 2147483647;
-      box-shadow: 0 4px 16px rgba(102,126,234,0.4);
+      --ca-ring: 5px; width: 48px; height: 48px;
+      cursor: pointer; z-index: 2147483647;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
       transition: transform 0.2s; user-select: none;
+    }
+    .ca-entry-btn .ca-entry-logo {
+      position: relative; display: block; width: 26px; height: 26px;
+      pointer-events: none;
     }
   `);
 
@@ -1158,10 +1323,13 @@
       <div class="ca-header" id="ca-drag-handle">
         <div class="ca-header-bar">
           <div>
-            <h3>🎬 Campus-Auth 任务录制器</h3>
+            <h3><span class="ca-brand-mark"><img class="ca-brand-logo" src="${LOGO_PNG}" alt=""></span>Campus-Auth 任务录制器</h3>
             <small>v${VERSION} — 选取元素，生成 AI 提示词</small>
           </div>
-          <button id="ca-btn-help" class="ca-help-btn" title="使用说明">?</button>
+          <div class="ca-header-actions">
+            <button id="ca-btn-theme" class="ca-theme-btn" title="切换到夜间模式">🌙</button>
+            <button id="ca-btn-help" class="ca-help-btn" title="使用说明">?</button>
+          </div>
         </div>
       </div>
       <div class="ca-body">
@@ -1186,15 +1354,15 @@
           </div>
         </div>
         <div class="ca-status" id="ca-status">选择步骤类型后点击页面元素</div>
-        <div class="ca-actions ca-actions-end" style="margin-top:12px;">
+        <div class="ca-bottom-row" id="ca-bottom-row">
           <button class="ca-btn ca-btn-primary" id="ca-btn-copy-prompt">📋 复制 AI 提示词</button>
-          <button class="ca-btn ca-btn-danger ca-btn-sm" id="ca-btn-close" style="margin-left:auto;">✕</button>
+          <button class="ca-btn ca-btn-danger ca-btn-sm" id="ca-btn-close" title="关闭面板">✕</button>
         </div>
       </div>
       <div class="ca-footer">
-        <a href="https://github.com/Misyra/Campus-Auth" target="_blank">
+        <a href="https://github.com/Misyra/Campus-Auth-rs" target="_blank">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-          Misyra/Campus-Auth
+          Misyra/Campus-Auth-rs
         </a>
         <span class="ca-footer-sep">·</span>
         <span>AGPL-3.0-only</span>
@@ -1202,9 +1370,30 @@
     `;
     document.body.appendChild(state.panel);
 
+    // 重复安装自检：Tampermonkey 用「@name + @namespace」判定脚本身份，历史版本若有改动
+    // 会被当成新脚本另装一份（旧那份不会自动消失）。两份同时在跑时，旧那份的样式表会压住
+    // 当前主题（表现为"改了配色/主题但界面没变"），还会重复注册监听。
+    // 检测到重复时把自己移到 body 末尾 = 叠在最上面：保证用户看到的是本份面板 + 下面这条
+    // 提示，而不是又一个被旧样式表压着的旧界面。删脚本只能由用户在 Tampermonkey 里做。
+    if (document.querySelectorAll("#ca-recorder-panel").length > 1) {
+      document.body.appendChild(state.panel);
+      console.warn("[CA Recorder] 检测到重复安装的任务录制器，请在 Tampermonkey 里删除旧的那份");
+      setStatus("检测到重复安装的录制器：请在 Tampermonkey 里删除旧的那份");
+    }
+
     const grid = state.panel.querySelector("#ca-step-grid");
-    const primaryEntries = Object.entries(STEP_TYPES).filter(([, cfg]) => cfg.primary !== false);
+    // 底部动作行常驻的步骤类型：「智能检测」是模式而不是一次性步骤，放底部随手可点；
+    // 仍用 createStepBtn 生成（保留 .ca-step-btn 类），selectStepType 按 dataset.type
+    // 统一切换高亮，所以挪出网格不影响选中态。
+    const bottomEntries = Object.entries(STEP_TYPES).filter(([, cfg]) => cfg.bottomRow);
+    const primaryEntries = Object.entries(STEP_TYPES).filter(([, cfg]) => cfg.primary !== false && !cfg.bottomRow);
     const secondaryEntries = Object.entries(STEP_TYPES).filter(([, cfg]) => cfg.primary === false);
+    const bottomRow = state.panel.querySelector("#ca-bottom-row");
+    for (const [key, cfg] of bottomEntries) {
+      const btn = createStepBtn(key, cfg);
+      btn.classList.add("ca-detect-btn");
+      bottomRow.insertBefore(btn, bottomRow.firstChild);
+    }
 
     function createStepBtn(key, cfg) {
       const btn = document.createElement("div");
@@ -1235,6 +1424,10 @@
       const moreContainer = document.createElement("div");
       moreContainer.id = "ca-more-container";
       moreContainer.className = "ca-more-container";
+      const themeBtn = document.getElementById("ca-btn-theme");
+      if (themeBtn) themeBtn.addEventListener("click", toggleTheme);
+      applyTheme(readTheme());
+
       moreContainer.style.display = "none";
       const sep = document.createElement("div");
       sep.className = "ca-grid-sep";
@@ -2806,7 +2999,7 @@
           </ul>
 
           <p class="ca-help-footer">
-            Campus-Auth 任务录制器 v${VERSION} · <a href="https://github.com/Misyra/Campus-Auth" target="_blank" style="color:var(--ca-primary);">GitHub</a>
+            Campus-Auth 任务录制器 v${VERSION} · <a href="https://github.com/Misyra/Campus-Auth-rs" target="_blank" style="color:var(--ca-primary);">GitHub</a>
           </p>
         </div>
       </div>
@@ -3338,7 +3531,7 @@
 
   // 添加浮动入口按钮
   const entryBtn = document.createElement("div");
-  entryBtn.innerHTML = "🎬";
+  entryBtn.innerHTML = `<img class="ca-entry-logo" src="${LOGO_PNG}" alt="">`;
   entryBtn.title = "Campus-Auth 任务录制器 (Ctrl+Shift+E)";
   entryBtn.className = "ca-entry-btn";
   entryBtn.addEventListener("mouseenter", () => (entryBtn.style.transform = "scale(1.1)"));
