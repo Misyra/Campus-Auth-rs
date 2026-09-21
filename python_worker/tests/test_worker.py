@@ -267,6 +267,10 @@ def test_resource_ext_by_mime():
     assert _resource_ext("image/png") == "txt"
     assert _resource_ext("") == "txt"
     assert _resource_ext(None) == "txt"
+    # MIME 不可用时按枚举阶段已知的种类兜底（HTTP 回补常拿到通用二进制类型）
+    assert _resource_ext("application/octet-stream", "script") == "js"
+    assert _resource_ext("", "stylesheet") == "css"
+    assert _resource_ext("text/css", "script") == "css"
 
 
 def test_rewrite_resource_urls_raw_and_escaped():

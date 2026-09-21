@@ -27,7 +27,7 @@ import uuid
 from contextlib import asynccontextmanager
 from html import escape as _html_escape
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterable
 from urllib.parse import urlsplit
 
 from models import (
@@ -642,6 +642,28 @@ _RESOURCE_EXT_BY_MIME = {
 _RESOURCE_MAX_FILES = 200
 _RESOURCE_MAX_BYTES = 5 * 1024 * 1024
 _RESOURCE_MAX_TOTAL_BYTES = 50 * 1024 * 1024
+
+#: HTTP 回补单资源超时：资源通常与页面同源、缓存友好，给 10s 足够
+_RESOURCE_FETCH_TIMEOUT_MS = 10_000
+
+
+def _channel_supports_cdp(bs: dict | None) -> bool:
+    """当前浏览器渠道是否支持 CDP（仅 Chromium 系）。
+
+    MHTML 完整快照（``Page.captureSnapshot``）与 CDP 资源快照都只存在于
+    Chromium：firefox / webkit（含 custom 渠道配这两个引擎）调用
+    ``context.new_cdp_session`` 必然抛 "CDP session is only available in
+    Chromium"。此处作为唯一判定口径，供启动参数过滤与捕获路径共用，避免
+    两条路径各写一份口径漂移。
+    """
+    settings = bs or {}
+    channel = str(settings.get("browser_channel") or "playwright").strip().lower()
+    if channel in ("firefox", "webkit"):
+        return False
+    if channel == "custom":
+        engine = str(settings.get("custom_browser_engine") or "auto").strip().lower()
+        return engine not in ("firefox", "webkit")
+    return True
 _STRUCTURE_MAX_CONTROLS = 300
 _STRUCTURE_MAX_LOCAL_HTML = 40_000
 _CAPTURE_MAX_SCREENSHOT_BYTES = 12 * 1024 * 1024
@@ -759,10 +781,21 @@ async def _capture_page_structure(page: Any) -> dict[str, Any]:
     return {"version": 1, "frames": frames}
 
 
-def _resource_ext(mime: str) -> str:
-    """按 MIME 推导资源文件扩展名（未知类型统一 txt）。"""
+def _resource_ext(mime: str, kind: str = "") -> str:
+    """按 MIME 推导资源文件扩展名；MIME 缺失时按资源种类兜底，最后才落 txt。
+
+    回补路径拿到的 ``Content-Type`` 可能是通用的 ``application/octet-stream``，
+    此时用枚举阶段已知的 script/stylesheet 种类仍能给出可用的扩展名。
+    """
     key = (mime or "").split(";")[0].strip().lower()
-    return _RESOURCE_EXT_BY_MIME.get(key, "txt")
+    ext = _RESOURCE_EXT_BY_MIME.get(key)
+    if ext:
+        return ext
+    if kind == "script":
+        return "js"
+    if kind == "stylesheet":
+        return "css"
+    return "txt"
 
 
 def _url_scheme_variants(url: str) -> list[str]:
@@ -799,14 +832,81 @@ def _rewrite_resource_urls(html: str, mapping: dict[str, str]) -> str:
     return html
 
 
-async def _capture_page_resources(
-    page: Any, target_dir: Path
-) -> tuple[dict[str, str], str | None]:
-    """经 CDP 抓取主框架已加载的 Script/Stylesheet 资源并落盘到 target_dir。
+class _ResourceSink:
+    """资源落盘收集器：CDP 快照与 HTTP 回补共用同一套上限与命名规则。
 
-    返回 (url → resources/<name> 相对路径映射, 说明文本或 None)，
-    相对路径可直接替换 HTML 中的原始 URL。逐项容错：缓存已逐出/取回失败的
-    单个资源跳过，不中断整体快照。
+    文件名单调哈希命名（URL sha1 前 12 位 + 扩展名），两条路径写到同一目录也
+    不会互相覆盖；总量/文件数上限在收集器内统一判定，避免某条路径绕过预算
+    把捕获包撑爆。
+    """
+
+    def __init__(self, target_dir: Path) -> None:
+        self.target_dir = target_dir
+        self.saved: dict[str, str] = {}
+        #: 资源在 HTML 里的原始书写形态 → 本地路径（改写引用时按文本替换）
+        self.aliases: dict[str, str] = {}
+        self.total_bytes = 0
+        #: 触发上限时的说明；非 None 即表示后续资源不再收录
+        self.note: str | None = None
+
+    def admit(self) -> bool:
+        """是否还能继续收录；触顶后统一返回 False（说明只在首次触顶时写入）。"""
+        if self.note is not None:
+            return False
+        if len(self.saved) >= _RESOURCE_MAX_FILES:
+            self.note = f"资源数超过 {_RESOURCE_MAX_FILES}，其余跳过"
+            return False
+        return True
+
+    def alias(self, url: str, raw: str) -> None:
+        """登记资源在 HTML 里的原始书写形态（内容可能已由 CDP 路径落盘）。
+
+        枚举阶段必须无条件登记：CDP 已拿到正文的资源不会再走回补，其相对写法
+        只能在这里补上，否则离线副本改不动引用。
+        """
+        local = self.saved.get(url)
+        if local and raw and raw != url:
+            self.aliases.setdefault(raw, local)
+
+    def store(
+        self,
+        url: str,
+        data: bytes,
+        mime: str,
+        kind: str = "",
+        aliases: Iterable[str] = (),
+    ) -> bool:
+        """写入单个资源并建映射；空内容/超单文件/超总量返回 False。
+
+        ``aliases`` 是同一资源在 HTML 文本里的其它书写形态（相对路径、
+        协议相对等）。改写 HTML 时按文本替换，只有绝对 URL 是匹配不上的。
+        """
+        if not data or len(data) > _RESOURCE_MAX_BYTES:
+            return False
+        if self.total_bytes + len(data) > _RESOURCE_MAX_TOTAL_BYTES:
+            if self.note is None:
+                self.note = f"资源总量超 {_RESOURCE_MAX_TOTAL_BYTES // (1024 * 1024)}MiB，已截断"
+            return False
+        name = (
+            f"{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}"
+            f".{_resource_ext(mime, kind)}"
+        )
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        (self.target_dir / name).write_bytes(data)
+        local = f"resources/{name}"
+        self.saved[url] = local
+        for alias in aliases:
+            if alias and alias != url:
+                self.aliases.setdefault(alias, local)
+        self.total_bytes += len(data)
+        return True
+
+
+async def _cdp_resource_snapshot(page: Any, sink: _ResourceSink) -> None:
+    """经 CDP 抓取主框架已加载的 Script/Stylesheet 资源并写入 sink。
+
+    逐项容错：缓存已逐出/取回失败的单个资源跳过，不中断整体快照。CDP 内容与
+    页面实际执行的版本一致，优先级高于 HTTP 回补，故先跑这条路径。
     """
     cdp = await page.context.new_cdp_session(page)
     try:
@@ -817,18 +917,14 @@ async def _capture_page_resources(
         frame_tree = tree.get("frameTree", {})
         frame_id = frame_tree.get("frame", {}).get("id", "")
         entries = frame_tree.get("resources", []) or []
-        saved: dict[str, str] = {}
-        note: str | None = None
-        total_bytes = 0
         for res in entries:
-            if len(saved) >= _RESOURCE_MAX_FILES:
-                note = f"资源数超过 {_RESOURCE_MAX_FILES}，其余跳过"
+            if not sink.admit():
                 break
             rtype = (res.get("type") or "").lower()
             if rtype not in ("stylesheet", "script"):
                 continue
             url = res.get("url") or ""
-            if not url.startswith(("http://", "https://")) or url in saved:
+            if not url.startswith(("http://", "https://")) or url in sink.saved:
                 continue
             try:
                 got = await cdp.send(
@@ -840,22 +936,134 @@ async def _capture_page_resources(
                 data = base64.b64decode(got.get("content") or "")
             else:
                 data = (got.get("content") or "").encode("utf-8")
-            if not data or len(data) > _RESOURCE_MAX_BYTES:
-                continue
-            if total_bytes + len(data) > _RESOURCE_MAX_TOTAL_BYTES:
-                note = f"资源总量超 {_RESOURCE_MAX_TOTAL_BYTES // (1024*1024)}MiB，已截断"
-                break
-            total_bytes += len(data)
-            name = (
-                f"{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}"
-                f".{_resource_ext(res.get('mimeType') or '')}"
-            )
-            target_dir.mkdir(parents=True, exist_ok=True)
-            (target_dir / name).write_bytes(data)
-            saved[url] = f"resources/{name}"
-        return saved, note
+            sink.store(url, data, res.get("mimeType") or "", rtype)
     finally:
         await cdp.detach()
+
+
+#: 页面内枚举已加载的 script/stylesheet URL（引擎无关，不依赖 CDP）
+#:
+#: 两条来源互补：DOM 属性覆盖静态引用（含尚未进入缓存的），Performance 资源
+#: 条目覆盖导航后动态插入/预加载的请求。返回 [绝对URL, 属性的原始书写形态, 种类]
+#: 三元组：原始形态用于把 HTML 里的引用改成 resources/ 相对路径——HTML 文本里常见
+#: 相对写法（`static/css/style.css`、`/css/a.css`），只有绝对 URL 是替换不掉的。
+_PAGE_RESOURCE_PROBE_JS = r"""
+() => {
+  const out = [];
+  const seen = new Set();
+  const push = (url, raw, kind) => {
+    if (!url || url.startsWith('data:') || seen.has(url)) return;
+    seen.add(url);
+    out.push([url, raw || '', kind]);
+  };
+  for (const el of document.querySelectorAll('script[src]')) {
+    push(el.src, el.getAttribute('src'), 'script');
+  }
+  for (const el of document.querySelectorAll('link[href]')) {
+    const rel = (el.getAttribute('rel') || '').toLowerCase();
+    const as = (el.getAttribute('as') || '').toLowerCase();
+    if (rel.includes('stylesheet') || (rel.includes('preload') && as === 'style')) {
+      push(el.href, el.getAttribute('href'), 'stylesheet');
+    }
+  }
+  try {
+    for (const entry of performance.getEntriesByType('resource')) {
+      const type = (entry.initiatorType || '').toLowerCase();
+      if (type === 'script') push(entry.name, '', 'script');
+      else if (type === 'link' || type === 'css' || type === 'style') push(entry.name, '', 'stylesheet');
+    }
+  } catch (_) {}
+  return out;
+}
+"""
+
+
+async def _http_resource_snapshot(page: Any, sink: _ResourceSink) -> str | None:
+    """引擎无关兜底：枚举页面已加载的 script/stylesheet，按 URL 回补正文。
+
+    CDP 不可用（firefox / webkit）时这是唯一能拿到 CSS/JS 正文的路径；Chromium
+    下作为补充，捞 CDP 内存缓存已逐出或导航后才插入的资源。``context.request``
+    走浏览器网络栈（带 context 的 cookie / UA），逐项容错，返回说明文本或 None。
+    """
+    try:
+        entries = await page.evaluate(_PAGE_RESOURCE_PROBE_JS)
+    except Exception as exc:  # noqa: BLE001 — 枚举失败则本兜底整体不可用
+        return f"页面资源枚举失败: {exc}"
+    fetched = 0
+    failed = 0
+    first_error = ""
+    for entry in entries or []:
+        if not sink.admit():
+            break
+        if not isinstance(entry, (list, tuple)) or not entry:
+            continue
+        url = str(entry[0] or "")
+        raw = str(entry[1] or "") if len(entry) > 1 else ""
+        kind = str(entry[2] or "") if len(entry) > 2 else ""
+        if not url.startswith(("http://", "https://")):
+            continue
+        if url in sink.saved:
+            # 正文已有（CDP 路径或更早的条目）：只补登记 HTML 里的原始写法
+            sink.alias(url, raw)
+            continue
+        try:
+            resp = await page.context.request.get(url, timeout=_RESOURCE_FETCH_TIMEOUT_MS)
+            if not resp.ok:
+                failed += 1
+                if not first_error:
+                    first_error = f"HTTP {resp.status}"
+                continue
+            data = await resp.body()
+            mime = resp.headers.get("content-type", "")
+        except Exception as exc:  # noqa: BLE001 — 单个资源取回失败不中断整体
+            failed += 1
+            if not first_error:
+                first_error = str(exc)[:120]
+            continue
+        if sink.store(url, data, mime, kind, aliases=[raw]):
+            fetched += 1
+    if failed:
+        return f"{fetched} 个资源经 HTTP 回补成功，{failed} 个失败（首个原因: {first_error}）"
+    return None
+
+
+async def _capture_page_resources(
+    page: Any, target_dir: Path, *, bs: dict
+) -> tuple[dict[str, str], dict[str, str], str | None]:
+    """抓取页面 CSS/JS 资源并落盘到 target_dir。
+
+    返回 ``(saved, aliases, note)``：``saved`` 为 绝对URL → resources/<name>
+    映射，``aliases`` 为资源在 HTML 里的原始书写形态 → 同一路径，两者合并后交给
+    ``_rewrite_resource_urls`` 才能把 HTML 引用全部改到本地（相对路径写法只能靠
+    aliases 命中）。``note`` 为降级/截断说明或 None。
+
+    两条抓取路径：CDP（Chromium 系，内容与执行时一致）优先，页面枚举 + HTTP 回补
+    （引擎无关）兜底补缺。非 Chromium 渠道 CDP 在协议层就不存在，此处跳过并按渠道
+    给出可操作说明，而不是把 Playwright 的英文异常直接甩给用户。
+    """
+    sink = _ResourceSink(target_dir)
+    notes: list[str] = []
+    channel = str((bs or {}).get("browser_channel") or "playwright").strip().lower()
+    if _channel_supports_cdp(bs):
+        try:
+            await _cdp_resource_snapshot(page, sink)
+        except Exception as exc:  # noqa: BLE001 — 回退 HTTP 回补
+            notes.append(f"CDP 资源快照不可用: {exc}")
+    else:
+        notes.append(
+            f"当前浏览器渠道 {channel} 不支持 CDP：MHTML 完整布局快照不可用，"
+            "CSS/JS 已改用页面枚举 + HTTP 回补抓取；需要完整快照请把浏览器渠道"
+            "切换为 Chromium / Chrome / Edge 后重新捕获"
+        )
+    try:
+        fallback_note = await _http_resource_snapshot(page, sink)
+    except Exception as exc:  # noqa: BLE001 — 兜底整体失败不影响已落盘的 CDP 产物
+        fallback_note = f"资源回补失败: {exc}"
+    if fallback_note:
+        notes.append(fallback_note)
+    if sink.note:
+        notes.append(sink.note)
+    return sink.saved, sink.aliases, "；".join(notes) if notes else None
 
 
 # ── 取消注册表（跨线程安全）──
@@ -919,6 +1127,10 @@ BROWSER_IDLE_RELEASE_SECS = 30
 
 # 普通任务截图为 WebSocket 异步回读预留时间；启动时仍会清理异常退出残留。
 TASK_SCREENSHOT_RETENTION_SECS = 30
+
+# 调试步骤补拍截图的超时（毫秒）。截图只是给调试面板看的预览，超时即放弃：
+# 卡住的页面不得让 debug_step / debug_run_all 的命令响应无限期等待。
+DEBUG_FRAME_TIMEOUT_MS = 5000
 
 #: Rust spawn 时按 cfg.worker.keep_alive 注入（改配置对下一个 Worker 生命周期
 #: 生效）。True 时浏览器跨会话常驻：登录成功整页保留登录状态（门户页 JS 心跳
@@ -1099,13 +1311,12 @@ class WorkerCore:
 
     @staticmethod
     def _is_chromium_channel(bs: dict, channel: str) -> bool:
-        """是否为 Chromium 系（含 custom 路径配 Chromium 引擎；firefox/webkit 排除）。"""
-        if channel in ("firefox", "webkit"):
-            return False
-        if channel == "custom":
-            custom_engine = (bs.get("custom_browser_engine") or "auto").strip().lower()
-            return custom_engine not in ("firefox", "webkit")
-        return True
+        """是否为 Chromium 系（含 custom 路径配 Chromium 引擎；firefox/webkit 排除）。
+
+        与资源快照的 CDP 可用性判定同源（``_channel_supports_cdp``），避免启动
+        参数过滤与捕获路径出现两套口径。
+        """
+        return _channel_supports_cdp({**(bs or {}), "browser_channel": channel})
 
     async def _launch_browser(
         self,
@@ -2016,19 +2227,11 @@ class WorkerCore:
                 steps_info=_build_steps_info(task),
             )
             session_established = True
-            # 初始截图
-            try:
-                stamp = str(int(time.time() * 1000))
-                filename = f"debug_{session_id}_{stamp}.png"
-                shot_dir = _debug_screenshot_dir()
-                local_path = str(shot_dir / filename)
-                shot_dir.mkdir(parents=True, exist_ok=True)
-                await self._page.screenshot(path=local_path, full_page=True)
-                # 追踪初始截图路径，以便会话结束时统一清理（历史遗留 F5）
-                context.screenshots.append(local_path)
-                self.emit("screenshot", {"path": local_path})
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"调试会话初始截图失败: {exc}")
+            # 初始截图（整页）。失败不中断启动：首个步骤结束后还有步骤级补拍兜底
+            if not await self._capture_debug_frame(
+                self._debug_sessions[session_id], full_page=True
+            ):
+                logger.warning("调试会话初始截图失败，预览将等待首个步骤截图")
             return self._debug_response(self._debug_sessions[session_id])
         finally:
             # debug_start 的 cancel_id 只覆盖启动命令；会话建成后的每个 step/run_all
@@ -2088,6 +2291,54 @@ class WorkerCore:
             "results": list(session.results),
             "screenshot_url": None,
         }
+
+    async def _capture_debug_frame(
+        self,
+        session: "DebugSession",
+        *,
+        step_index: int | None = None,
+        full_page: bool = False,
+    ) -> bool:
+        """补拍一帧调试页面截图并推送事件（best-effort，返回是否成功）。
+
+        调试预览此前只有 `debug_start` 的初始截图与显式 `screenshot` 步骤会推送，
+        普通步骤（input / click / ocr / sleep …）执行完什么都不推，面板的"实时截图"
+        永远停在启动画面——表现为"点下一步浏览器不刷新"。每次步骤结束后补拍一帧，
+        预览才随单步前进。
+
+        `step_index` 为 0 基步骤序号（初始截图为 None），前端据此在预览标题上显示
+        这一帧是"哪一步之后"的画面。
+
+        步骤补拍默认取视口截图（`full_page=False`）：1280x720 视口体积小、无需整页
+        拼接，既不拖慢单步响应，也能避开长页 full_page 超过 Rust 侧 8MiB 内联上限
+        被静默丢弃的情况；会话初始截图仍用整页，便于一眼看清门户全貌。
+
+        截图失败（页面已关闭 / 超时 / 磁盘错误）只记日志并返回 False，绝不影响
+        步骤结果与命令响应。
+        """
+        page = getattr(session.context, "page", None)
+        if page is None:
+            page = session.page
+        try:
+            shot_dir = _debug_screenshot_dir()
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            stamp = str(int(time.time() * 1000))
+            # 文件名带步骤序号：同一毫秒内的两次截图不会互相覆盖，且能一眼看出归属
+            label = "init" if step_index is None else str(step_index)
+            local_path = str(shot_dir / f"debug_{session.session_id}_{label}_{stamp}.png")
+            await page.screenshot(
+                path=local_path, full_page=full_page, timeout=DEBUG_FRAME_TIMEOUT_MS
+            )
+            # 追踪路径以便会话结束时统一清理（截图可能含表单明文凭据）
+            session.context.screenshots.append(local_path)
+            payload: dict[str, Any] = {"path": local_path}
+            if step_index is not None:
+                payload["step_index"] = step_index
+            self.emit("screenshot", payload)
+            return True
+        except Exception as exc:  # noqa: BLE001 — 预览截图失败不影响步骤结果
+            logger.debug("调试截图失败（忽略）: %s", exc)
+            return False
 
     @staticmethod
     def _record_debug_result(
@@ -2171,6 +2422,11 @@ class WorkerCore:
             self._record_debug_result(session, idx, success, message)
         if auto_advance and idx is not None:
             session.current_step = idx + 1
+        # 步骤结束后补拍一帧：面板"实时截图"随单步前进（含显式 step 负载的场景，
+        # 该路径没有 idx，用会话游标作为归属序号）
+        await self._capture_debug_frame(
+            session, step_index=idx if idx is not None else session.current_step
+        )
         return self._debug_response(session)
 
     async def handle_debug_run_all(self, params: dict) -> dict:
@@ -2216,6 +2472,8 @@ class WorkerCore:
                         else True
                     )
                 self._record_debug_result(session, idx, success, message)
+                # 每步都补拍一帧：批量执行时前端预览同步推进到当前步骤画面
+                await self._capture_debug_frame(session, step_index=idx)
                 if fatal:
                     stop_idx = idx + 1
                     break
@@ -2376,12 +2634,14 @@ class WorkerCore:
         structure_summary: dict[str, int],
         *,
         mhtml_ok: bool,
+        offline_ok: bool,
         note: str | None,
     ) -> dict[str, Any]:
         """构建并落盘 captures/latest/meta.json，返回 meta 供响应组装。
 
         资源目录仅在确有产物时写入路径；note 为空不写字段，保持 meta 结构
-        与消费方（Rust 读盘侧）的既有契约一致。
+        与消费方（Rust 读盘侧）的既有契约一致。``mhtml_path`` / 离线副本路径
+        同为可选字段：非 Chromium 渠道没有 MHTML，无资源时也没有离线副本。
         """
         meta: dict[str, Any] = {
             "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -2397,6 +2657,8 @@ class WorkerCore:
         }
         if mhtml_ok:
             meta["mhtml_path"] = str(cap_dir / "page.mhtml")
+        if offline_ok:
+            meta["offline_html_path"] = str(cap_dir / "page.offline.html")
         if note:
             meta["note"] = note
         (cap_dir / "meta.json").write_text(
@@ -2454,13 +2716,32 @@ class WorkerCore:
                     len(item.get("captcha_candidates", [])) for item in frame_items
                 ),
             }
-            mhtml_ok = await self._capture_mhtml(self._page, cap_dir / "page.mhtml")
+            mhtml_ok = False
+            # MHTML 走 CDP，非 Chromium 渠道下调用必然失败：直接跳过，降级说明由
+            # 资源快照那条统一给出（避免日志里出现无意义的英文 CDP 异常）
+            if _channel_supports_cdp(bs):
+                mhtml_ok = await self._capture_mhtml(self._page, cap_dir / "page.mhtml")
             resources: dict[str, str] = {}
+            aliases: dict[str, str] = {}
             note: str | None = None
             try:
-                resources, note = await _capture_page_resources(self._page, cap_dir / "resources")
+                resources, aliases, note = await _capture_page_resources(
+                    self._page, cap_dir / "resources", bs=bs
+                )
             except Exception as exc:  # noqa: BLE001 — 资源快照失败不阻断 HTML/截图
                 note = f"资源快照失败: {exc}"
+            # 离线副本：把 HTML 中的资源引用改写成 resources/ 相对路径，解压后直接
+            # 双击即可还原（无 MHTML 的渠道下这是唯一可离线查看的形态）。原始
+            # page.html 保持不变——它是 Rust 侧喂给 LLM 的材质，URL 语义不该被污染。
+            offline_ok = False
+            if resources:
+                try:
+                    offline_html = _rewrite_resource_urls(html, {**resources, **aliases})
+                    (cap_dir / "page.offline.html").write_text(offline_html, encoding="utf-8")
+                    offline_ok = True
+                except Exception as exc:  # noqa: BLE001 — 离线副本失败不影响其余产物
+                    extra = f"离线副本生成失败: {exc}"
+                    note = f"{note}；{extra}" if note else extra
             if screenshot_note:
                 note = f"{note}；{screenshot_note}" if note else screenshot_note
             try:
@@ -2475,6 +2756,7 @@ class WorkerCore:
                 resources,
                 structure_summary,
                 mhtml_ok=mhtml_ok,
+                offline_ok=offline_ok,
                 note=note,
             )
             logger.info(
@@ -2507,30 +2789,37 @@ class WorkerCore:
         Chromium 的 MHTML 序列化按设计不保存 JS（CSS 也只嵌内存缓存命中的部分），
         故额外经 Page.getResourceTree/getResourceContent 把已加载的脚本与样式表
         落盘到 resources/，并生成引用改写后的 page.html 供源码级离线还原。
+        非 Chromium 渠道没有 CDP：MHTML 直接跳过，CSS/JS 由页面枚举 + HTTP 回补
+        抓取（见 ``_capture_page_resources``），产物同样可用于离线还原。
         """
         if self._page is None:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "无活跃页面，无法捕获")
         # 落盘根目录先定（资源快照需要直接写入子目录），避免 IPC 1MiB 超限
         stamp = str(int(time.time() * 1000))
         fb_dir = _feedback_capture_dir(stamp)
-        # 尝试 MHTML（完整离线快照，含样式与图片），失败回退 HTML
+        # 会话用的浏览器设置决定 CDP 是否可用（MHTML 与资源快照都只存在于 Chromium）
+        bs = self._last_browser_settings or {}
+        # 尝试 MHTML（完整离线快照，含样式与图片），失败回退 HTML；
+        # 非 Chromium 渠道不尝试：CDP 在协议层不存在，只会白记一条英文异常
         mhtml_bytes: bytes | None = None
-        try:
-            cdp = await self._page.context.new_cdp_session(self._page)
-            mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
-            cdp_data = mhtml.get("data", "")
-            if cdp_data:
-                mhtml_bytes = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
-            await cdp.detach()
-        except Exception as exc:  # noqa: BLE001 — CDP 不可用时回退 content()
-            logger.debug("CDP MHTML 快照失败，回退 HTML: %s", exc)
-            mhtml_bytes = None
+        if _channel_supports_cdp(bs):
+            try:
+                cdp = await self._page.context.new_cdp_session(self._page)
+                mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
+                cdp_data = mhtml.get("data", "")
+                if cdp_data:
+                    mhtml_bytes = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
+                await cdp.detach()
+            except Exception as exc:  # noqa: BLE001 — CDP 不可用时回退 content()
+                logger.debug("CDP MHTML 快照失败，回退 HTML: %s", exc)
+                mhtml_bytes = None
         # CSS/JS 资源快照：MHTML 不含 JS，这里补齐脚本与样式表（主框架资源）
         resources: dict[str, str] = {}  # url -> resources/<name>
+        aliases: dict[str, str] = {}  # HTML 里的原始书写形态 -> resources/<name>
         resource_note: str | None = None
         try:
-            resources, resource_note = await _capture_page_resources(
-                self._page, fb_dir / "resources"
+            resources, aliases, resource_note = await _capture_page_resources(
+                self._page, fb_dir / "resources", bs=bs
             )
         except Exception as exc:  # noqa: BLE001 — 资源快照失败不影响其余产物
             resource_note = f"资源快照失败: {exc}"
@@ -2539,7 +2828,9 @@ class WorkerCore:
         html: str | None = None
         if mhtml_bytes is None or resources:
             try:
-                html = _rewrite_resource_urls(await self._page.content(), resources)
+                html = _rewrite_resource_urls(
+                    await self._page.content(), {**resources, **aliases}
+                )
             except Exception as exc:  # noqa: BLE001
                 raise WorkerError(Outcome.UNKNOWN_ERROR, f"获取页面内容失败: {exc}") from exc
         try:

@@ -7,6 +7,7 @@ Debug Run All 相对正式 run_steps 的一致性，避免调试/生产路径契
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from debug_session import DebugSession, _build_steps_info
 from models import Outcome, StepConfig, TaskConfig
@@ -714,6 +715,89 @@ def test_debug_run_all_records_unexpected_exception_and_stops(monkeypatch):
     assert response["current_step"] == 1
     assert response["results"][0]["success"] is False
     assert "boom" in response["results"][0]["message"]
+
+
+class _FramingPage:
+    """记录截图调用并落盘占位 PNG 的调试页替身（供调试补拍断言）。"""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.shots: list[dict] = []
+        self.fail = fail
+
+    async def screenshot(self, **kwargs):
+        self.shots.append(kwargs)
+        if self.fail:
+            raise RuntimeError("截图失败")
+        Path(kwargs["path"]).write_bytes(b"\x89PNG\r\n\x1a\n")
+        return b""
+
+
+def _framing_core(monkeypatch, tmp_path, page, events):
+    """装配带截图能力的调试会话（不启动真实浏览器）。"""
+    core = WorkerCore()
+    core.emit = lambda event_type, data: events.append((event_type, data))
+    task = TaskConfig(task_id="debug-frame", steps=[_step("first"), _step("second")])
+    session = DebugSession(
+        session_id="frame-session",
+        page=page,
+        task_config=task,
+        context=StepContext(page=page, step_delay=0.0),
+        task_id=task.task_id,
+        steps_info=_build_steps_info(task),
+    )
+    core._debug_sessions[session.session_id] = session
+    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+
+    async def fake_run_step(_page, _step, _context, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
+    return core, session
+
+
+def test_debug_step_captures_frame_after_each_step(monkeypatch, tmp_path):
+    """单步结束后补拍一帧并推送带步骤序号的截图事件。
+
+    回归："实时截图"此前只有 debug_start 的初始帧，普通步骤（input/click/…）
+    执行后什么都不推，面板预览停在启动画面，表现为"点下一步浏览器不刷新"。
+    """
+    events: list[tuple[str, dict]] = []
+    page = _FramingPage()
+    core, session = _framing_core(monkeypatch, tmp_path, page, events)
+
+    asyncio.run(core.handle_debug_step({"session_id": session.session_id}))
+    asyncio.run(core.handle_debug_step({"session_id": session.session_id}))
+
+    shots = [data for ev, data in events if ev == "screenshot"]
+    assert [data["step_index"] for data in shots] == [0, 1]
+    # 步骤补拍取视口截图（整页留给会话初始帧），并有独立文件
+    assert all(shot["full_page"] is False for shot in page.shots)
+    assert len({shot["path"] for shot in shots}) == 2
+    assert all(shot["path"].endswith(".png") for shot in shots)
+    # 路径已登记，会话结束时统一清理
+    assert session.context.screenshots == [shot["path"] for shot in shots]
+
+
+def test_debug_run_all_captures_frame_per_step(monkeypatch, tmp_path):
+    """批量执行时每步各补拍一帧，预览随批量进度推进。"""
+    events: list[tuple[str, dict]] = []
+    core, session = _framing_core(monkeypatch, tmp_path, _FramingPage(), events)
+
+    asyncio.run(core.handle_debug_run_all({"session_id": session.session_id}))
+
+    assert [data["step_index"] for ev, data in events if ev == "screenshot"] == [0, 1]
+
+
+def test_debug_step_tolerates_screenshot_failure(monkeypatch, tmp_path):
+    """补拍失败（页面已关闭/超时）只记日志：步骤结果与响应不受影响。"""
+    events: list[tuple[str, dict]] = []
+    core, session = _framing_core(monkeypatch, tmp_path, _FramingPage(fail=True), events)
+
+    response = asyncio.run(core.handle_debug_step({"session_id": session.session_id}))
+
+    assert response["results"][0]["success"] is True
+    assert [ev for ev, _ in events if ev == "screenshot"] == []
+    assert session.context.screenshots == []
 
 
 def test_health_check_rejects_closed_context_even_if_browser_process_is_connected():

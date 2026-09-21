@@ -83,7 +83,7 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 | `debug_stop` | 停止调试会话并释放页面 |
 | `debug_status` | 查询调试会话详情（无副作用，供前端刷新后恢复步骤数据） |
 | `feedback_capture` | 捕获当前调试页的完整 MHTML、截图与 CSS/JS 资源（供导出离线问题报告） |
-| `page_capture` | 清理旧登录态后导航到目标页，落盘 MHTML、原始 HTML、结构化控件摘要与脱敏局部 HTML、CSS-JS 资源及截图到 `captures/latest/`（超大全页截图自动降为视口截图；由 `POST /api/ai/capture` 触发） |
+| `page_capture` | 清理旧登录态后导航到目标页，落盘 MHTML（仅 Chromium 渠道，走 CDP）、原始 HTML、离线副本 `page.offline.html`（资源引用改写为 `resources/`，解压即可脱网还原）、结构化控件摘要与脱敏局部 HTML、CSS-JS 资源及截图到 `captures/latest/`（**非 Chromium 渠道无 CDP**，CSS/JS 改由页面枚举 + HTTP 回补抓取；超大全页截图自动降为视口截图；由 `POST /api/ai/capture` 触发） |
 | `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖；与任意会话并发的轻量旁路，不占用单会话槽位） |
 | `shutdown` | 优雅关闭 Worker 进程 |
 
