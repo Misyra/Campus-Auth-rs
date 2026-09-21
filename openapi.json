@@ -3427,7 +3427,7 @@
         "properties": {
          "provider": {
           "type": "string",
-          "enum": ["opencode", "glm", "deepseek", "custom"],
+          "enum": ["glm", "deepseek", "custom"],
           "description": "服务商标识；API Key 按服务商独立保存"
          },
          "base_url": {
@@ -3468,6 +3468,17 @@
      "200": { "description": "连接成功，返回实际请求地址与耗时", "content": { "application/json": { "schema": {} } } },
      "400": { "description": "配置缺失或 Key 无法解密", "content": { "application/json": { "schema": {} } } },
      "503": { "description": "连接、鉴权或模型请求失败", "content": { "application/json": { "schema": {} } } }
+    }
+   }
+  },
+  "/api/ai/models": {
+   "post": {
+    "operationId": "post___api_ai_models",
+    "description": "拉取服务商 GET {base_url}/models 的模型列表（AI 页模型下拉框）；api_key 缺省或为空时回退到该服务商已保存的 Key",
+    "responses": {
+     "200": { "description": "返回 { count, models[] }，顺序与服务端一致", "content": { "application/json": { "schema": {} } } },
+     "400": { "description": "base_url 缺失或非法、服务商与地址不匹配、Key 无法解密、远端非 2xx 或响应中无模型 id", "content": { "application/json": { "schema": {} } } },
+     "503": { "description": "连接失败、超时或远端 5xx", "content": { "application/json": { "schema": {} } } }
     }
    }
   },

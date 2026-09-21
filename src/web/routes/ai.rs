@@ -25,6 +25,14 @@ use crate::web::operations::{OperationRegistration, WebOperations};
 /// capture 单次超时：导航 + networkidle 等待 + CDP 资源快照，宽于常规命令
 const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 「测试连接」的 max_tokens 上限。
+///
+/// 原实现写死 8：对"先思考/话痨"型模型（GLM flash、各类推理模型、第三方聚合网关）
+/// 8 个 token 连一句招呼都吐不完，客户端拿到 `finish_reason=length` 后按截断判失败，
+/// 明明链路与凭据都正常却报错。这里放宽到 256（成本仍可忽略），并把截断本身按
+/// "连通"处理（见 [`test_llm_connection`]）。
+const TEST_CONNECTION_MAX_TOKENS: u32 = 256;
+
 /// 脱敏后的 LLM 配置视图（API key 永不出站，只回是否已设置）
 fn masked_view(settings: &LlmSettings) -> Value {
     json!({
@@ -110,6 +118,10 @@ pub async fn put_llm_config(
 }
 
 /// POST /api/ai/llm-config/test — 用已保存配置发送极小请求，验证接口与凭据。
+///
+/// 判定口径是"能通"而非"输出完整"：模型回复被 max_tokens 截断（推理/话痨模型的
+/// 常见表现）、或 HTTP 200 却没吐正文，都说明链路与凭据正常，按连通返回并附 `note`
+/// 说明；只有真正的传输/鉴权/协议错误才判失败。
 pub async fn test_llm_connection(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -117,7 +129,7 @@ pub async fn test_llm_connection(
     if !settings.is_configured() {
         return Err(ApiError::BadRequest("请先保存 LLM 配置".into()));
     }
-    settings.max_tokens = Some(8);
+    settings.max_tokens = Some(TEST_CONNECTION_MAX_TOKENS);
     let api_key = if settings.active_api_key_enc().is_empty() {
         zeroize::Zeroizing::new(String::new())
     } else {
@@ -130,18 +142,89 @@ pub async fn test_llm_connection(
         json!({"role": "system", "content": "只回复 OK"}),
         json!({"role": "user", "content": "连接测试"}),
     ];
-    tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         crate::ai::llm::chat_completion(&settings, api_key.as_str(), messages),
     )
     .await
-    .map_err(|_| ApiError::ServiceUnavailable("连接测试超时（30 秒）".into()))?
-    .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
-    Ok(data(json!({
+    .map_err(|_| ApiError::ServiceUnavailable("连接测试超时（30 秒）".into()))?;
+
+    let truncated = matches!(
+        outcome,
+        Err(crate::ai::AiError::Truncated) | Err(crate::ai::AiError::MissingContent { .. })
+    );
+    if let Err(error) = &outcome
+        && !truncated
+    {
+        return Err(ApiError::ServiceUnavailable(error.to_string()));
+    }
+    let latency_ms = started.elapsed().as_millis();
+    tracing::info!(provider = %settings.provider, latency_ms, truncated, "连接测试通过");
+    let mut payload = json!({
         "connected": true,
-        "latency_ms": started.elapsed().as_millis(),
+        "latency_ms": latency_ms,
         "request_url": format!("{}/chat/completions", settings.base_url.trim_end_matches('/')),
-    })))
+    });
+    if truncated {
+        payload["note"] = json!("模型回复被测试上限截断，连接与凭据正常");
+    }
+    Ok(data(payload))
+}
+
+/// POST /api/ai/models — 拉取当前服务商的模型列表（供前端模型下拉框）
+///
+/// body: `{ provider, base_url, api_key? }`。`api_key` 缺省或为空时回退到该服务商
+/// **已保存** 的 Key，因此「选服务商 → 拉列表 → 选模型 → 保存」这条顺序可用，
+/// 不必为了看列表先存一次配置（GLM/DeepSeek 的 `/models` 需要鉴权）。
+pub async fn list_models(
+    State(config): State<Arc<dyn ConfigApi>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let obj = body
+        .as_object()
+        .ok_or_else(|| ApiError::BadRequest("请求体必须为 JSON 对象".into()))?;
+    let base_url_raw = obj
+        .get("base_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::BadRequest("缺少 base_url".into()))?;
+    let base_url = ai::validate_base_url(base_url_raw)?;
+    let provider = match obj.get("provider").and_then(Value::as_str) {
+        Some(raw) => ai::validate_provider(raw)?,
+        None => ai::infer_provider(&base_url).to_string(),
+    };
+    ai::validate_provider_base_url(&provider, &base_url)?;
+
+    let saved = ai::load_llm_settings(&config.base_path());
+    let api_key = match obj.get("api_key").and_then(Value::as_str) {
+        Some(raw) if !raw.trim().is_empty() => zeroize::Zeroizing::new(raw.trim().to_string()),
+        // key_slot 由 provider + base_url 决定，故先落到临时设置上再取槽位
+        _ => {
+            let mut probe = saved.clone();
+            probe.provider = provider.clone();
+            probe.base_url = base_url.clone();
+            let encrypted = probe.active_api_key_enc().to_string();
+            if encrypted.is_empty() {
+                zeroize::Zeroizing::new(String::new())
+            } else {
+                ai::decrypt_api_key(&encrypted).map_err(|_| {
+                    ApiError::BadRequest("API Key 解密失败，请重新保存当前服务商的 Key".into())
+                })?
+            }
+        }
+    };
+
+    let settings = LlmSettings {
+        provider,
+        base_url,
+        ..saved
+    };
+    let models = ai::llm::list_models(&settings, api_key.as_str()).await?;
+    tracing::info!(
+        provider = %settings.provider,
+        count = models.len(),
+        "已获取模型列表"
+    );
+    Ok(data(json!({ "count": models.len(), "models": models })))
 }
 
 /// POST /api/ai/capture — 捕获登录页面（导航 + 截图 + HTML/JS 落盘）
@@ -549,8 +632,10 @@ async fn load_capture_context(
 
 /// GET /api/ai/capture/bundle — 下载最近一次捕获的完整页面文件（zip）
 ///
-/// 内容：MHTML 完整布局（自包含样式/图片）+ page.html + page_structure.json +
-/// CSS/JS 资源快照 + 截图 + meta.json。供离线分析或分享适配；需鉴权。
+/// 内容：MHTML 完整布局（自包含样式/图片，仅 Chromium 渠道）+ page.html（原始
+/// 活 DOM，喂给 LLM 的材质）+ page.offline.html（资源引用改写到 resources/ 的
+/// 离线还原副本）+ page_structure.json + CSS/JS 资源快照 + 截图 + meta.json。
+/// 供离线分析或分享适配；需鉴权。
 pub async fn capture_bundle(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -589,10 +674,11 @@ pub async fn capture_bundle(
             Some(bytes)
         }
 
-        // meta / HTML / MHTML / 截图：顶层固定名
+        // meta / HTML / 离线副本 / MHTML / 截图：顶层固定名
         for name in [
             "meta.json",
             "page.html",
+            "page.offline.html",
             "page_structure.json",
             "page.mhtml",
             "screenshot.png",
@@ -902,6 +988,7 @@ mod tests {
             .route("/api/ai/llm-config", get(get_llm_config))
             .route("/api/ai/llm-config", put(put_llm_config))
             .route("/api/ai/llm-config/test", post(test_llm_connection))
+            .route("/api/ai/models", post(list_models))
             .route("/api/ai/capture", post(capture))
             .route(
                 "/api/ai/capture/screenshot",
@@ -914,6 +1001,46 @@ mod tests {
 
     // 测试脚手架统一走共享 test_support（WE2-5：原逐文件复制的 body_json 已收敛）
     use crate::web::routes::test_support::body_json;
+
+    /// JSON 请求体构造（AI 域测试只需 POST + content-type）
+    fn post_json(uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// 本地替身：记录收到的请求原文，按给定状态行 + 正文回一次响应
+    async fn serve_http(
+        status_line: &'static str,
+        payload: &'static str,
+    ) -> (String, Arc<std::sync::Mutex<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_in_task = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let read = sock.read(&mut buf).await.unwrap_or(0);
+                *seen_in_task.lock().unwrap() = String::from_utf8_lossy(&buf[..read]).to_string();
+                let response = format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+            }
+        });
+        (addr.to_string(), seen)
+    }
+
+    /// 本地替身：按给定 JSON 回 200
+    async fn serve_models(payload: &'static str) -> (String, Arc<std::sync::Mutex<String>>) {
+        serve_http("HTTP/1.1 200 OK", payload).await
+    }
 
     /// GET 配置：未配置时返回空串 + has_api_key=false
     #[tokio::test]
@@ -1074,6 +1201,146 @@ mod tests {
         assert!(!settings.has_active_api_key());
     }
 
+    /// 缺 base_url / 服务商与地址不匹配 → 400（不触达网络）
+    #[tokio::test]
+    async fn test_list_models_validates_input() {
+        let (app, _, _, _) = mock_app();
+        for body in [
+            json!({}),
+            json!({"base_url": "ftp://x"}),
+            // glm 服务商配了 deepseek 域名：拒绝把该槽位凭据发到别的主机
+            json!({"provider": "glm", "base_url": "https://api.deepseek.com"}),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(post_json("/api/ai/models", &body.to_string()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body={body}");
+        }
+    }
+
+    /// 显式传入 api_key → 用该 key 请求 `/models`，返回前端下拉框要的 id 列表
+    #[tokio::test]
+    async fn test_list_models_uses_explicit_key() {
+        let (app, _, _, _) = mock_app();
+        let (addr, seen) =
+            serve_models(r#"{"object":"list","data":[{"id":"glm-5.3-flash"},{"id":"glm-5.2"}]}"#)
+                .await;
+        let resp = app
+            .oneshot(post_json(
+                "/api/ai/models",
+                &json!({
+                    "provider": "custom",
+                    "base_url": format!("http://{addr}"),
+                    "api_key": "sk-live",
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["count"], 2);
+        assert_eq!(v["data"]["models"][0], "glm-5.3-flash");
+        let raw = seen.lock().unwrap().to_lowercase();
+        assert!(raw.starts_with("get /models "), "{raw}");
+        assert!(raw.contains("authorization: bearer sk-live"), "{raw}");
+    }
+
+    /// 未传 api_key → 回退到该服务商已保存的 Key（因此不必先保存一次配置）
+    #[tokio::test]
+    async fn test_list_models_falls_back_to_saved_key() {
+        let (app, _, _, dir) = mock_app();
+        let (addr, seen) = serve_models(r#"{"data":[{"id":"m"}]}"#).await;
+        let mut saved = LlmSettings {
+            provider: "custom".into(),
+            base_url: format!("http://{addr}"),
+            ..LlmSettings::default()
+        };
+        saved.set_active_api_key_enc(ai::encrypt_api_key("sk-saved").unwrap());
+        ai::save_llm_settings(dir.path(), &saved).unwrap();
+
+        let resp = app
+            .oneshot(post_json(
+                "/api/ai/models",
+                &json!({"provider": "custom", "base_url": format!("http://{addr}")}).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = seen.lock().unwrap().to_lowercase();
+        assert!(raw.contains("authorization: bearer sk-saved"), "{raw}");
+    }
+
+    /// 测试连接：回复被 max_tokens 截断仍算"连通"（附 note），不误报失败
+    ///
+    /// 回归背景：原实现写死 `max_tokens=8` 并把 `Truncated` 当失败，对"先思考/话痨"型
+    /// 模型（GLM flash、各类推理模型、第三方聚合网关）必然误报——实测同一配置
+    /// 8/64 token 都截断、256 token 正常返回。
+    #[tokio::test]
+    async fn test_connection_tolerates_truncated_reply() {
+        let (app, _, _, dir) = mock_app();
+        let (addr, _) = serve_models(
+            r#"{"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"length"}]}"#,
+        )
+        .await;
+        let saved = LlmSettings {
+            provider: "custom".into(),
+            base_url: format!("http://{addr}"),
+            model: "m".into(),
+            ..LlmSettings::default()
+        };
+        ai::save_llm_settings(dir.path(), &saved).unwrap();
+
+        let resp = app
+            .oneshot(post_json("/api/ai/llm-config/test", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["connected"], true);
+        assert!(
+            v["data"]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("截断"),
+            "{v}"
+        );
+    }
+
+    /// 测试连接：真正的失败（鉴权/传输）仍判失败
+    #[tokio::test]
+    async fn test_connection_reports_real_failures() {
+        let (app, _, _, dir) = mock_app();
+        let (addr, _) = serve_http(
+            "HTTP/1.1 401 Unauthorized",
+            r#"{"error":{"message":"Missing API key."}}"#,
+        )
+        .await;
+        let saved = LlmSettings {
+            provider: "custom".into(),
+            base_url: format!("http://{addr}"),
+            model: "m".into(),
+            ..LlmSettings::default()
+        };
+        ai::save_llm_settings(dir.path(), &saved).unwrap();
+
+        let resp = app
+            .oneshot(post_json("/api/ai/llm-config/test", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("401"),
+            "{v}"
+        );
+    }
+
     /// capture：注入 browser_settings 与 cancel_id，派发 page_capture，响应补截图 URL
     #[tokio::test]
     async fn test_capture_dispatches_with_settings() {
@@ -1218,6 +1485,9 @@ mod tests {
         std::fs::write(cap.join("meta.json"), b"{}").unwrap();
         std::fs::write(cap.join("page.html"), b"<html></html>").unwrap();
         std::fs::write(cap.join("page.mhtml"), b"MIME-Version: 1.0").unwrap();
+        // 离线副本（引用改写到 resources/ 的 HTML）：非 Chromium 渠道无 MHTML
+        // 时的替代还原形态，必须随包分发
+        std::fs::write(cap.join("page.offline.html"), b"<html></html>").unwrap();
         std::fs::write(cap.join("screenshot.png"), b"\x89PNG").unwrap();
         std::fs::write(res.join("main.js"), b"console.log(1)").unwrap();
         std::fs::write(res.join("style.css"), b"body{}").unwrap();
@@ -1248,6 +1518,7 @@ mod tests {
         for expect in [
             "meta.json",
             "page.html",
+            "page.offline.html",
             "page.mhtml",
             "screenshot.png",
             "resources/main.js",

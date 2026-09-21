@@ -275,7 +275,17 @@ export const aiApi = {
   }) =>
     http.put<AiLlmConfig>("/api/ai/llm-config", payload),
   testLlmConfig: () =>
-    http.post<{ connected: boolean; latency_ms: number; request_url: string }>("/api/ai/llm-config/test"),
+    http.post<{ connected: boolean; latency_ms: number; request_url: string; note?: string }>(
+      "/api/ai/llm-config/test",
+    ),
+  /**
+   * 拉取服务商 `/models` 列表（模型下拉框用）。
+   *
+   * `api_key` 缺省时后端回退到该服务商已保存的 Key，因此可以「选服务商 → 拉列表 →
+   * 选模型 → 保存」，不必先存一次配置。服务端 20s 超时，客户端放宽到 40s。
+   */
+  fetchModels: (payload: { provider: string; base_url: string; api_key?: string }) =>
+    http.post<{ count: number; models: string[] }>("/api/ai/models", payload, { timeout: 40000 }),
   // 捕获含导航 + networkidle 等待 + CDP 资源快照，放宽客户端超时
   capture: (url: string) =>
     http.post<AiCaptureResult>("/api/ai/capture", { url }, { timeout: 90000 }),
@@ -290,7 +300,11 @@ export const aiApi = {
       title?: string;
       structure_summary?: import("./types").AiStructureSummary;
     }>("/api/ai/capture/status"),
-  /** 保存页面文件：MHTML 完整布局 + HTML + CSS/JS 资源 + 截图（后端打 zip，返回 Blob） */
+  /**
+   * 保存页面文件（后端打 zip，返回 Blob）：MHTML 完整布局（仅 Chromium 渠道）+
+   * 原始 HTML + 离线副本 page.offline.html（资源引用已改到 resources/）+ CSS/JS
+   * 资源 + 截图 + meta.json
+   */
   async captureBundle(): Promise<Blob> {
     const token = await ensureAuthToken();
     return fetchBundleWithTimeout("/api/ai/capture/bundle", {

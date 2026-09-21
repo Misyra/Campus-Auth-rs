@@ -215,6 +215,23 @@
 
 /* 配置行统一走通用 .form-row / .form-row--wide（form.css，窄屏单列由 responsive.css 兜底），此处旧类退役（模板已迁移） */
 
+/* 模型名：下拉框（或手填输入）+「获取模型列表」按钮同一行。
+   输入框与下拉框都取 flex:1 撑满，按钮固定宽度不随文字换行 */
+.ai-model-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.ai-model-row > .custom-select,
+.ai-model-row > input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ai-model-row > .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .ai-dev-notice {
   display: flex;
   align-items: center;
@@ -228,6 +245,21 @@
   font-size: var(--text-md);
 }
 .ai-dev-notice a { color: var(--warning); font-weight: 600; text-underline-offset: 2px; }
+
+/* 捕获质量预警：当前浏览器渠道不支持 CDP（MHTML 完整快照缺失）时静态提示 */
+.ai-capture-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 var(--space-sm);
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--warning-rgb), 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--warning-rgb), 0.1);
+  color: var(--warning);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
 .ai-steps-hint {
   margin-bottom: 16px;
   padding: 10px 12px;

@@ -114,7 +114,7 @@ impl LlmSettings {
 
     /// 已保存 key 的内置服务商列表（仅返回标识，不暴露密文）
     pub fn configured_providers(&self) -> Vec<String> {
-        ["opencode", "glm", "deepseek"]
+        ["glm", "deepseek"]
             .into_iter()
             .filter(|provider| self.api_keys_enc.contains_key(*provider))
             .map(str::to_string)
@@ -150,6 +150,10 @@ impl LlmSettings {
 }
 
 /// 根据预设域名识别服务商；未知地址归为自定义服务
+///
+/// 原 `opencode.ai` 分支已移除：OpenCode Zen 免费档只对官方客户端开放（第三方客户端
+/// 一律 403 `FreeTierError`），该渠道对本程序无可用模型，故整体下架；指向该域名的
+/// 老配置在界面上回落为「自定义服务商」（自定义服务不校验域名）。
 pub fn infer_provider(base_url: &str) -> &'static str {
     let host = url::Url::parse(base_url)
         .ok()
@@ -159,8 +163,6 @@ pub fn infer_provider(base_url: &str) -> &'static str {
         "deepseek"
     } else if host == "open.bigmodel.cn" {
         "glm"
-    } else if host == "opencode.ai" {
-        "opencode"
     } else {
         "custom"
     }
@@ -169,10 +171,7 @@ pub fn infer_provider(base_url: &str) -> &'static str {
 /// 校验前端传入的服务商标识，避免任意字符串膨胀 key 映射
 pub fn validate_provider(raw: &str) -> Result<String, AiError> {
     let provider = raw.trim().to_ascii_lowercase();
-    if matches!(
-        provider.as_str(),
-        "opencode" | "glm" | "deepseek" | "custom"
-    ) {
+    if matches!(provider.as_str(), "glm" | "deepseek" | "custom") {
         Ok(provider)
     } else {
         Err(AiError::ProviderInvalid)

@@ -916,7 +916,8 @@ export interface DangerStep {
 
 /** LLM 服务配置（AI 任务生成，脱敏视图：key 只回是否已设置） */
 export interface AiLlmConfig {
-  provider: "opencode" | "glm" | "deepseek" | "custom";
+  /** 服务商标识：`custom` 覆盖「自定义服务商」（含指向 opencode.ai 的历史配置） */
+  provider: "glm" | "deepseek" | "custom";
   base_url: string;
   model: string;
   has_api_key: boolean;

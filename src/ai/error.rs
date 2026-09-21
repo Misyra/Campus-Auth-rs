@@ -112,6 +112,9 @@ pub enum AiError {
     /// LLM 流包含非法 UTF-8
     #[error("LLM 流式响应包含无效 UTF-8 数据")]
     InvalidStreamUtf8,
+    /// `GET /models` 响应里没有任何可识别的模型 id
+    #[error("未能从 /models 响应解析出模型列表（响应前 200 字符: {snippet}）")]
+    ModelListUnavailable { snippet: String },
 }
 
 impl AiError {
@@ -199,6 +202,22 @@ mod tests {
             AiError::ChatAttemptFailed {
                 attempt: 1,
                 source: Box::new(AiError::IdleTimeout { seconds: 1 }),
+            }
+            .is_retryable()
+        );
+    }
+
+    /// 新增变体文案必须自带可断言子串与可操作指引（前端直接展示该文本）
+    #[test]
+    fn test_new_variants_are_actionable() {
+        let unavailable = AiError::ModelListUnavailable {
+            snippet: "{}".into(),
+        }
+        .to_string();
+        assert!(unavailable.contains("/models"), "actual: {unavailable}");
+        assert!(
+            !AiError::ModelListUnavailable {
+                snippet: String::new()
             }
             .is_retryable()
         );

@@ -8,7 +8,7 @@
 import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
-import { aiApi, tasksApi } from "@/api";
+import { aiApi, configApi, tasksApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import type { AiCaptureResult, AiGenerateResult } from "@/api/types";
 import { computed, onMounted, onUnmounted, ref, unref } from "vue";
@@ -24,19 +24,58 @@ const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
 // ---- LLM 配置 ----
+// 服务商列表。OpenCode Zen 渠道已下架：其免费档只对 OpenCode 官方客户端开放，
+// 第三方客户端（含本程序）即使按官方形态发 `opencode/<version>` UA 与
+// `x-opencode-*` 原生头，实测仍一律 403 FreeTierError，等于没有可用模型；
+// 后端 `infer_provider` / `validate_provider` 已同步移除该标识，指向 opencode.ai 的
+// 老配置在界面上回落为「自定义服务商」（自定义服务不校验域名）。
 const PRESETS = [
-  { id: "opencode", label: "OpenCode Zen", hint: "内置快速体验", base: "https://opencode.ai/zen/v1", model: "mimo-v2.5-free", defaultKey: "public" },
   { id: "glm", label: "智谱 GLM", hint: "推荐使用视觉模型", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.3-flash", defaultKey: "" },
   { id: "deepseek", label: "DeepSeek", hint: "请填写支持图片的模型", base: "https://api.deepseek.com", model: "", defaultKey: "" },
-  { id: "custom", label: "其他兼容服务", hint: "需要知道接口地址", base: "", model: "", defaultKey: "" },
+  { id: "custom", label: "自定义服务商", hint: "需要知道接口地址", base: "", model: "", defaultKey: "" },
 ] as const;
 
-const provider = ref<string>("opencode");
+/** 模型下拉框里的「自定义」项：选中后展开手动输入 */
+const CUSTOM_MODEL = "__custom__";
+
+const provider = ref<string>("glm");
 const configuredProviders = ref<string[]>([]);
 const baseUrl = ref("");
 const model = ref("");
+/** 服务商 `/models` 返回的模型列表（空 = 未拉取，此时按手动输入处理） */
+const modelList = ref<string[]>([]);
+/** 是否用手动输入：列表里没有想要的模型时用（拉取失败、私有模型、旧配置里的值） */
+const customModel = ref(true);
+const loadingModels = ref(false);
 const apiKey = ref("");
-const hasApiKey = ref(false);
+/**
+ * 服务端确认「已保存 Key」的槽位：内置服务商＝标识本身，自定义服务＝base_url 的
+ * origin（后端 `LlmSettings::key_slot` 就是这么隔离自定义 Key 的）。
+ *
+ * 不用一个布尔量记"当前有没有 Key"：`configured_providers` 只报内置服务商，自定义
+ * 槽位随地址走，切走再切回时必须能按"当前地址"重新对上，才不至于把已保存的 Key
+ * 显示成"尚未保存"。
+ */
+const savedKeySlot = ref("");
+
+/** API Key 槽位：自定义服务按地址（origin）区分，其余按服务商标识 */
+function keySlotOf(id: string, url: string): string {
+  if (id !== "custom") return id;
+  try {
+    const parsed = new URL(url.trim());
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    // 地址还没填/填得不成形：槽位未知，按"没有已保存 Key"处理
+    return "";
+  }
+}
+
+/** 当前槽位是否已有服务端保存的 Key（决定输入框占位与「清除当前 Key」按钮） */
+const hasApiKey = computed(() => {
+  if (PRESETS.find((item) => item.id === provider.value)?.defaultKey) return true;
+  const slot = keySlotOf(provider.value, baseUrl.value);
+  return !!slot && slot === savedKeySlot.value;
+});
 const maxTokens = ref("16384");
 const maxTokenOptions: SelectOption[] = [
   { label: "16K（推荐）", value: "16384" },
@@ -52,6 +91,27 @@ const configSummary = computed(() => {
 const actualRequestUrl = computed(() => baseUrl.value.trim()
   ? `${baseUrl.value.trim().replace(/\/+$/, "")}/chat/completions`
   : "尚未填写");
+/** 模型列表端点（「获取模型列表」实际请求的地址，显示给用户以便排障） */
+const modelListUrl = computed(() => baseUrl.value.trim()
+  ? `${baseUrl.value.trim().replace(/\/+$/, "")}/models`
+  : "尚未填写");
+/** 模型下拉项：服务商返回的列表 + 自定义项 */
+const modelOptions = computed<SelectOption[]>(() => [
+  ...modelList.value.map((id) => ({ label: id, value: id })),
+  { label: "自定义（手动输入）", value: CUSTOM_MODEL },
+]);
+/** 下拉框选中值：当前模型不在列表里（或尚未拉取）时显示为「自定义」 */
+const modelChoice = computed<string>({
+  get: () => (!customModel.value && modelList.value.includes(model.value) ? model.value : CUSTOM_MODEL),
+  set: (value: string) => {
+    if (value === CUSTOM_MODEL) {
+      customModel.value = true;
+      return;
+    }
+    customModel.value = false;
+    model.value = value;
+  },
+});
 const savingConfig = ref(false);
 const testingConfig = ref(false);
 const configSignature = computed(() => JSON.stringify({
@@ -67,34 +127,127 @@ const configTestHint = computed(() => {
   return "配置有改动，请重新保存后再测试连接";
 });
 
-function selectProvider(id: string): void {
-  provider.value = id;
-  const p = PRESETS.find((item) => item.id === id);
-  if (p) {
-    baseUrl.value = p.base;
-    model.value = p.model;
+/**
+ * 各服务商上一次填写的草稿。
+ *
+ * 切换服务商只该切换"当前在编辑谁"，不该把已经填好的地址/模型/Key 丢掉：切换前先
+ * 把当前表单存进草稿槽，切回时原样恢复。服务器只回 `has_api_key` 与
+ * `configured_providers`（从不回 Key 明文），因此 Key 草稿仅活在本次会话内；地址与
+ * 模型在 `loadConfig` 时把已保存值种进草稿，所以切走再切回拿到的是"上次保存 / 上次
+ * 编辑"的状态，而不是预设的空值。
+ */
+interface ProviderDraft {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  modelList: string[];
+  customModel: boolean;
+}
+const drafts = new Map<string, ProviderDraft>();
+
+/** 把当前表单写进当前服务商的草稿槽（切换前与保存后调用） */
+function stashDraft(): void {
+  // 空表单不入草稿：把"什么都没填"记成该服务商的状态，会让之后切回来拿到空值而不是
+  // 预设默认值（配置读取失败、或用户压根没填过时就是这样）。清掉草稿即回落到预设。
+  const empty =
+    !baseUrl.value.trim() && !model.value.trim() && !apiKey.value.trim() && modelList.value.length === 0;
+  if (empty) {
+    drafts.delete(provider.value);
+    return;
   }
+  drafts.set(provider.value, {
+    baseUrl: baseUrl.value,
+    model: model.value,
+    apiKey: apiKey.value,
+    modelList: modelList.value,
+    customModel: customModel.value,
+  });
+}
+
+/** 套用预设默认值（该服务商还没有草稿时的回落） */
+function applyPreset(id: string): void {
+  const p = PRESETS.find((item) => item.id === id);
+  baseUrl.value = p?.base ?? "";
+  model.value = p?.model ?? "";
   apiKey.value = p?.defaultKey || "";
-  hasApiKey.value = configuredProviders.value.includes(id) || !!p?.defaultKey;
+  // 模型列表按服务商拉取，换服务商即作废；没有列表时退回手动填写
+  modelList.value = [];
+  customModel.value = true;
+}
+
+function selectProvider(id: string): void {
+  stashDraft();
+  provider.value = id;
+  const draft = drafts.get(id);
+  if (draft) {
+    baseUrl.value = draft.baseUrl;
+    model.value = draft.model;
+    apiKey.value = draft.apiKey;
+    modelList.value = draft.modelList;
+    customModel.value = draft.customModel;
+  } else {
+    applyPreset(id);
+  }
   configExpanded.value = true;
+}
+
+/**
+ * 拉取服务商 `/models` 列表填充下拉框。
+ *
+ * 未填 Key 时后端会回退到该服务商已保存的 Key，所以可以「选服务商 → 拉列表 →
+ * 选模型 → 保存」，不必先存一次配置。拉取结果不会擅自改写当前模型：命中列表才切到
+ * 下拉模式，否则保持手动输入（私有模型 / 旧配置里的值都可能不在列表里）。
+ */
+async function fetchModelList(): Promise<void> {
+  if (!baseUrl.value.trim()) {
+    toastOnly(false, "请先填写 Base URL");
+    return;
+  }
+  loadingModels.value = true;
+  try {
+    const data = await aiApi.fetchModels({
+      provider: provider.value,
+      base_url: baseUrl.value.trim(),
+      api_key: apiKey.value.trim() || undefined,
+    });
+    modelList.value = data.models || [];
+    const inList = modelList.value.includes(model.value);
+    customModel.value = !inList;
+    const tail = inList || !model.value.trim()
+      ? ""
+      : `；当前模型不在列表中，仍按手动填写处理`;
+    toastOnly(true, `已获取 ${modelList.value.length} 个模型${tail}`);
+  } catch (error) {
+    toastOnly(false, extractApiError(error, "获取模型列表失败"));
+  } finally {
+    loadingModels.value = false;
+  }
 }
 
 async function loadConfig(): Promise<void> {
   try {
     const cfg = await aiApi.fetchLlmConfig();
+    configuredProviders.value = cfg.configured_providers || [];
     if (!cfg.base_url && !cfg.model) {
-      configuredProviders.value = cfg.configured_providers || [];
-      selectProvider("opencode");
+      provider.value = "glm";
+      applyPreset("glm");
+      configExpanded.value = true;
       return;
     }
     baseUrl.value = cfg.base_url || "";
     model.value = cfg.model || "";
     provider.value = cfg.provider || "custom";
-    configuredProviders.value = cfg.configured_providers || [];
-    hasApiKey.value = cfg.has_api_key;
+    // 已下架的渠道（如 opencode）在预设里没有对应卡片：按「自定义服务商」对待，
+    // 否则界面上没有选中项、保存还会被后端的服务商标识校验拒绝
+    if (!PRESETS.some((item) => item.id === provider.value)) provider.value = "custom";
+    // Key 槽位按"界面认定的服务商 + 地址"记：自定义服务的 Key 存在 origin 槽里，
+    // 切回来只要地址还是那个地址，就该重新显示成"已保存"
+    savedKeySlot.value = cfg.has_api_key ? keySlotOf(provider.value, cfg.base_url || "") : "";
     maxTokens.value = cfg.max_tokens == null ? "auto" : String(cfg.max_tokens);
     savedSignature.value = configSignature.value;
     if (cfg.base_url && cfg.model) configExpanded.value = false;
+    // 已保存的配置种进草稿：切到别的服务商再切回来，恢复的是这份值而不是预设空值
+    stashDraft();
   } catch (error) {
     toastOnly(false, extractApiError(error, "读取 LLM 配置失败"));
   }
@@ -111,11 +264,13 @@ async function saveConfig(): Promise<void> {
     };
     if (apiKey.value.trim()) payload.api_key = apiKey.value.trim();
     const saved = await aiApi.saveLlmConfig(payload);
-    hasApiKey.value = saved.has_api_key;
+    savedKeySlot.value = saved.has_api_key ? keySlotOf(provider.value, baseUrl.value) : "";
     configuredProviders.value = saved.configured_providers || [];
     savedSignature.value = configSignature.value;
     apiKey.value = "";
     configExpanded.value = false;
+    // 保存后刷新草稿：Key 输入框已清空，草稿跟着记成"无待保存 Key"
+    stashDraft();
     toastOnly(true, "LLM 配置已保存");
   } catch (error) {
     toastOnly(false, extractApiError(error, "保存 LLM 配置失败"));
@@ -135,9 +290,10 @@ async function clearApiKey(): Promise<void> {
       api_key: "",
       max_tokens: maxTokens.value === "auto" ? null : Number(maxTokens.value),
     });
-    hasApiKey.value = saved.has_api_key;
+    savedKeySlot.value = saved.has_api_key ? keySlotOf(provider.value, baseUrl.value) : "";
     configuredProviders.value = saved.configured_providers || [];
     savedSignature.value = configSignature.value;
+    stashDraft();
     toastOnly(true, "当前服务商的 API Key 已清除");
   } catch (error) {
     toastOnly(false, extractApiError(error, "清除 API Key 失败"));
@@ -154,7 +310,8 @@ async function testConnection(): Promise<void> {
   testingConfig.value = true;
   try {
     const result = await aiApi.testLlmConfig();
-    toastOnly(true, `连接成功，耗时 ${result.latency_ms} ms`);
+    // note 存在表示"通了但回复被测试上限截断"（推理/话痨型模型的常见表现），一并显示
+    toastOnly(true, `连接成功，耗时 ${result.latency_ms} ms${result.note ? `；${result.note}` : ""}`);
   } catch (error) {
     toastOnly(false, extractApiError(error, "连接测试失败"));
   } finally {
@@ -169,6 +326,32 @@ const captureResult = ref<AiCaptureResult | null>(null);
 const screenshotUrl = ref("");
 const savingBundle = ref(false);
 const isCaptureDone = computed(() => !!captureResult.value);
+/** 当前浏览器渠道与自定义渠道的引擎（决定 CDP 是否可用，进而决定捕获质量） */
+const browserChannel = ref("");
+const customBrowserEngine = ref("");
+/**
+ * 渠道是否落在非 Chromium 引擎上。
+ *
+ * MHTML 完整快照与 CDP 资源快照都只存在于 Chromium：firefox / webkit（含
+ * custom 渠道配这两个引擎）下后端会跳过 MHTML，CSS/JS 改用页面枚举 + HTTP
+ * 回补抓取。捕获仍可用，所以这里是提示而非禁用；文案与后端 note 保持一致口径。
+ */
+const captureChannelDegraded = computed(() => {
+  const channel = browserChannel.value;
+  const engine = channel === "custom" ? customBrowserEngine.value : channel;
+  return engine === "firefox" || engine === "webkit";
+});
+
+/** 读取浏览器渠道：失败只少了这条提示，不影响捕获流程，静默忽略 */
+async function loadBrowserChannel(): Promise<void> {
+  try {
+    const cfg = await configApi.fetch();
+    browserChannel.value = cfg.browser?.browser_channel || "";
+    customBrowserEngine.value = cfg.browser?.custom_browser_engine || "";
+  } catch {
+    browserChannel.value = "";
+  }
+}
 
 async function capture(): Promise<void> {
   if (!captureUrl.value.trim()) {
@@ -459,6 +642,7 @@ function formatJson(): void {
 onMounted(() => {
   void loadConfig();
   void restoreCapture();
+  void loadBrowserChannel();
 });
 
 onUnmounted(() => {
@@ -519,7 +703,7 @@ async function restoreCapture(): Promise<void> {
     <div class="hint ai-steps-hint">
       <b>使用步骤</b>
       <ol>
-        <li>先选择模型服务商并保存配置；每个服务商的 API Key 独立保存。</li>
+        <li>先选择模型服务商并保存配置：需要该服务商的 API Key（各自独立加密保存），模型名可在保存前点「获取模型列表」从服务商拉取。</li>
         <li>退出校园网登录后捕获认证页，再连回网络生成任务（总时长最长 10 分钟）。</li>
         <li>在下方预览 JSON，确认后保存为任务。</li>
       </ol>
@@ -575,7 +759,41 @@ async function restoreCapture(): Promise<void> {
             <div class="form-row">
               <div class="form-group">
                 <label for="ai-model" class="required">模型名（需支持视觉输入）</label>
-                <input id="ai-model" v-model="model" type="text" placeholder="例如 glm-5.3-flash" autocomplete="off" spellcheck="false" />
+                <div class="ai-model-row">
+                  <CustomSelect
+                    v-if="modelList.length"
+                    id="ai-model-select"
+                    v-model="modelChoice"
+                    :options="modelOptions"
+                    :disabled="loadingModels"
+                    placeholder="请选择模型"
+                    aria-label="模型名"
+                  />
+                  <input
+                    v-if="!modelList.length || customModel"
+                    id="ai-model"
+                    v-model="model"
+                    type="text"
+                    placeholder="例如 glm-5.3-flash"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    :disabled="loadingModels || !baseUrl.trim()"
+                    :title="`从 ${modelListUrl} 拉取模型列表`"
+                    @click="fetchModelList"
+                  >
+                    <IconApp v-if="loadingModels" name="refresh" class="spin" />
+                    {{ loadingModels ? "获取中…" : "获取模型列表" }}
+                  </button>
+                </div>
+                <span v-if="!baseUrl.trim()" class="hint">请先填写 Base URL，再拉取模型列表</span>
+                <span v-else-if="!modelList.length" class="hint">
+                  可手填；点「获取模型列表」从 <code>{{ modelListUrl }}</code> 拉取后改为下拉选择
+                </span>
+                <span v-else-if="customModel" class="hint">当前为手动填写，也可从左侧列表中选择</span>
               </div>
               <div class="form-group">
                 <label for="ai-max-tokens">最长输出</label>
@@ -615,6 +833,12 @@ async function restoreCapture(): Promise<void> {
           <div class="hint">
             请在<b>未登录校园网</b>状态下捕获（已认证时不会跳转到登录页）。页面内容与截图将发送给你配置的 LLM 服务商。
           </div>
+          <div v-if="captureChannelDegraded" class="ai-capture-warn">
+            <span>
+              当前浏览器渠道 <b>{{ browserChannel }}</b> 不支持 CDP：捕获仍可进行，但 <b>MHTML 完整布局快照不可用</b>，CSS/JS 改为联网回补抓取。
+              需要完整快照请到「浏览器设置」把浏览器渠道切换为 Chromium / Chrome / Edge 后重新捕获。
+            </span>
+          </div>
           <div class="form-group">
             <label for="ai-capture-url" class="required">登录页地址</label>
             <input id="ai-capture-url" v-model="captureUrl" type="text" placeholder="例如 http://10.x.x.x 或任意网址（未登录时自动跳转到认证页）" autocomplete="off" spellcheck="false" @keyup.enter="capture" />
@@ -642,7 +866,7 @@ async function restoreCapture(): Promise<void> {
               <small>生成时优先读取结构信息，并始终附带脱敏局部 HTML。</small>
             </div>
             <div class="ai-actions">
-              <button class="btn btn-secondary btn-sm" :disabled="savingBundle" @click="saveBundle" title="下载 MHTML 完整布局 + HTML + CSS/JS 资源 + 截图">
+              <button class="btn btn-secondary btn-sm" :disabled="savingBundle" @click="saveBundle" title="下载离线页面文件：MHTML（Chromium 渠道）+ 原始 HTML + 离线副本 + CSS/JS 资源 + 截图">
                 <IconApp name="download" class="icon-sm" />
                 {{ savingBundle ? "打包中…" : "保存页面文件" }}
               </button>
