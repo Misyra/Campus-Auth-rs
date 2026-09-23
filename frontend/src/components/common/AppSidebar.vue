@@ -16,7 +16,7 @@ import IconApp from "@/components/common/IconApp.vue";
 // 「设置」的六个 Tab 仍留在设置页内的横向页签：它不产生"孤岛"，且窄屏下横排页签
 // 比侧栏展开更省纵向空间，故不做同款收编。
 
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
 import { useUi } from "@/composables/useUi";
@@ -34,16 +34,16 @@ const onSettings = computed(() => String(route.name).startsWith("settings"));
 /** 「任务」分组当前激活的子项 id（不在该分组时为 null） */
 const activeTaskChild = computed(() => activeChildId(TASK_NAV_CHILDREN, String(route.name)));
 
-/** 「任务」分组的展开态。刻意不落 localStorage：侧栏是本应用唯一通往这五个页面的
- *  入口，一次忘记的折叠若被持久化，下次冷启动整个任务区就被收进一个 caret 后面，
- *  属发现性陷阱。组件在 App 生命周期内常驻，故会话内记忆已足够。 */
-const tasksExpanded = ref(true);
-
-// 从别的页面点进任务区时自动展开：此时用户的意图就是"去任务页"，把子项一并亮出来；
-// 分组内部切换（/tasks/http → /tasks/scripts）不触发，手动的折叠态在组内保持
-watch(onTasks, (now, before) => {
-  if (now && !before) tasksExpanded.value = true;
-});
+/** 「任务」分组的展开态：**默认收起**，只在用户点「任务」这一行时展开。
+ *
+ *  默认收起是用户明确要求：侧栏默认保持精简，不要一进来就撑开五条子项。
+ *  因此也**不按路由自动展开**——从别的页面点进任务区同样保持收起，侧栏由用户自己
+ *  按需展开（展开态在会话内记忆，切页不会自己收回去）。
+ *
+ *  刻意不落 localStorage：侧栏是本应用唯一通往这五个页面的入口，一次忘记的折叠若被
+ *  持久化，下次冷启动整个任务区就被收进一个 caret 后面，属发现性陷阱。组件在 App
+ *  生命周期内常驻，故会话内记忆已足够。 */
+const tasksExpanded = ref(false);
 
 function toggleTasks(): void {
   tasksExpanded.value = !tasksExpanded.value;
