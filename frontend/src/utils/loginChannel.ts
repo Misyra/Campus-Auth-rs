@@ -106,15 +106,17 @@ export function certPolicyHint(policy: HttpCertPolicy): string {
 export function httpTestOutcomeHint(outcome: string | undefined): string {
   switch (outcome) {
     case "success":
-      return "请求已按预期判定成功。点「保存方案」后，自动登录就会走直连，无需 Python 与浏览器。";
+      // 文案保持"上下文中立"：测试入口有两个（直连任务编辑器 / 方案编辑器），
+      // 说「保存方案」会让任务页的用户去点一个不存在的按钮
+      return "请求已按预期判定成功。保存后，方案里选中这个直连任务即会走直连，无需 Python 与浏览器。";
     case "invalid_credential":
-      return "门户明确拒绝了这次请求：先确认账号密码正确；若门户要求密码加密或附加签名字段，请在下方「凭据变换脚本」里按门户逻辑生成。";
+      return "门户明确拒绝了这次请求：先确认账号密码正确；若门户要求密码加密或附加签名字段，请在直连任务的「凭据变换脚本」里按门户逻辑生成。";
     case "assertion_failed":
       return "请求送达了，但没在响应里找到成功标识。请核对「成功关键字」是否与门户真实响应一致；若该门户响应总是 HTTP 200，必须填写成功与失败关键字，否则错误凭据也会被当成成功。";
     case "network_error":
       return "请求没能送达门户。确认电脑已连上校园网、地址可被本机访问；校园网网关多为内网地址，需处于同一网络内。";
     case "unknown_error":
-      return "配置或脚本执行出错，请求没有发出。下方「脚本错误」给出具体原因，修正后重试。";
+      return "配置或脚本执行出错，请求没有发出。结果里的「脚本错误」给出具体原因，修正后重试。";
     case "cancelled":
       return "测试被取消，可重新发送。";
     default:
@@ -198,22 +200,22 @@ export const HTTP_MAC_FORMAT_NOTE = `{local_mac} 固定为小写冒号分隔（�
 /**
  * 直连配置的必填缺口清单（向导据此决定能否进入下一步 / 发送测试）。
  *
- * 与后端校验口径对齐，但**更早失败**：后端 `HttpLoginTestBody` 的校验在发请求前
+ * 与后端校验口径对齐，但**更早失败**：后端 `HttpTaskTestBody` 的校验在发请求前
  * 才返回 400，用户点一次「发送测试请求」才知道缺什么；向导逐步收敛到当前字段。
  *
  * 注意 `password` 只在「新建/未保存方案」时才算必填——已保存方案可留空由后端
- * 回退本机已保存凭据（见 `POST /api/profiles/http-login-test` 的 profile_id 回退），
+ * 回退本机已保存凭据（见 `POST /api/http-tasks/test` 的 profile_id 回退），
  * 此时提示用户手填密码是错的。
  */
 export function httpConfigGaps(draft: {
-  http_url?: string;
+  url?: string;
   username?: string;
   password?: string;
 }, options?: { hasSavedProfile?: boolean }): string[] {
   const gaps: string[] = [];
   if (!(draft.username ?? "").trim()) gaps.push("账号");
   if (!options?.hasSavedProfile && !(draft.password ?? "").trim()) gaps.push("密码");
-  if (!(draft.http_url ?? "").trim()) gaps.push("请求地址");
+  if (!(draft.url ?? "").trim()) gaps.push("请求地址");
   return gaps;
 }
 
@@ -266,6 +268,22 @@ export function browserTaskOptions(
     value: t.id,
     label: t.id === defaultTaskId ? `${t.name || t.id}（内置默认）` : t.name || t.id,
   }));
+}
+
+/**
+ * 直连任务下拉选项。
+ *
+ * 与浏览器任务不同，首项是显式的「未绑定」：直连没有可内置的兜底任务（门户地址
+ * 因人而异），空值必须能被表达出来，否则用户没法把一个方案从直连任务上摘下来。
+ * 未绑定的后果是直连登录直接失败，故文案讲清而不是留个空项。
+ */
+export function httpTaskOptions(
+  tasks: Array<{ id: string; name?: string }>,
+): Array<{ value: string; label: string }> {
+  return [
+    { value: "", label: "未绑定（直连登录不可用）" },
+    ...tasks.map((t) => ({ value: t.id, label: t.name || t.id })),
+  ];
 }
 
 /**

@@ -30,6 +30,9 @@ const routes = [
     redirect: { name: "tasks-browser" },
     children: [
       { path: "", name: "tasks-browser", meta: { title: "任务 · 浏览器任务" }, component: () => import("@/views/tasks/BrowserTasksPanel.vue") },
+      // 直连任务：字段编辑在任务页，方案只引用一个任务 id（active_http_task），
+      // 故与浏览器任务并列为一个 Tab；默认落地仍是 tasks-browser
+      { path: "http", name: "tasks-http", meta: { title: "任务 · 直连任务" }, component: () => import("../views/tasks/HttpTasksPanel.vue") },
       { path: "scripts", name: "tasks-scripts", meta: { title: "任务 · 脚本" }, component: () => import("@/views/tasks/ScriptsPanel.vue") },
       // 定时任务原为侧栏独立页，并入任务页：同属「可被触发执行的东西」，
       // 放在一处免去「任务在哪、计划又在哪」的往返

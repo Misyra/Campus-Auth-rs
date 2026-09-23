@@ -271,6 +271,8 @@ Conventional Commits，中文描述：
 ### 编译与嵌入
 
 - `rust-embed` 需要 `frontend/dist/` 存在才能编译。开发时用 `cargo check --features no-embed` 跳过
+- **`cargo test --features no-embed` 会把 `target/debug/campus-auth.exe` 覆盖成不内嵌前端的构建**（测试与开发二进制同一路径）。跑完测试再启动该路径，页面会变成「前端未嵌入」占位页——给用户看界面前先 `cargo build`（默认特性）重建
+- debug 构建（未开 `debug-embed`）下 rust-embed **运行时读盘**：改前端只需 `npm run build`，不必重编 Rust。但二进制本身若被 no-embed 构建替换过，仍须 `cargo build` 重建；且实例在跑时 exe 被锁，跑测试/构建前先停实例
 - Python Worker 的 **stdout 是 IPC 通道**，不能用于日志输出（用 stderr）
 
 ### Python Worker 依赖

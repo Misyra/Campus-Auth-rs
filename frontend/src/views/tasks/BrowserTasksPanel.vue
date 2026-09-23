@@ -2,6 +2,7 @@
 /** 浏览器任务面板：浏览器任务的增删改查、立即执行、仓库导入与拖拽排序。
  * 由「任务」页容器以子路由渲染；列表与脚本面板同源（useTaskDirectory 单次拉取）。 */
 import IconApp from "@/components/common/IconApp.vue";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import { computed, onMounted } from "vue";
 import { useTasks } from "@/composables/useTasks";
 import { useScripts } from "@/composables/useScripts";
@@ -29,26 +30,20 @@ function closeEditor() { void t.closeTaskEditor(); }
 
 <template>
   <div class="tasks-grid" :class="{ 'tasks-grid--empty': !browserTasks.length }">
-    <!-- 归属提示：本页只负责「编辑与调试」，真正生效的任务由方案绑定决定（切方案即切任务）。
-         放本 Tab 而非页面容器：脚本/定时任务 Tab 与方案无绑定关系，套用此文案会失真。 -->
-    <div class="tasks-notice">
-      <IconApp name="info" class="icon-sm" />
-      <span>
-        请前往侧边栏
-        <router-link :to="{ name: 'profiles' }">「方案」</router-link>
-        选择并启用任务，此处仅编辑调试。
-      </span>
-    </div>
-
     <div class="card">
       <div class="card-header">
         <h2>浏览器任务</h2>
+        <!-- 归属提示收进标题旁的 `?`（与「直连任务」Tab 同口径）：任务是"编辑对象"，
+             真正生效由方案绑定决定，这属于"第一次配置要读一次"的解释，不该常驻一整条横幅 -->
+        <FieldHelp
+          text="任务本身不会自动运行：要到「方案」页选中这个任务并保存，自动登录才会用它。此处仅编辑与调试。"
+        />
         <div class="card-actions">
           <button class="btn btn-sm" @click="t.importTask()" title="从文件导入任务">
             <IconApp name="upload" class="icon-sm" />
             导入
           </button>
-          <button class="btn btn-sm" @click="repo.showRepoImport()" title="从云端仓库导入">
+          <button class="btn btn-sm" @click="repo.showRepoImport('browser')" title="从云端仓库导入">
             <IconApp name="globe-grid" class="icon-sm" />
             仓库导入
           </button>
@@ -162,7 +157,7 @@ function closeEditor() { void t.closeTaskEditor(); }
         <div class="help-content">
           <div class="help-tip">
             <span>不想手写 JSON？<b>仓库导入</b>里有其他人适配好的校园网登录任务，一键即可获取。</span>
-            <button class="btn btn-sm" @click="repo.showRepoImport()" title="从云端仓库浏览并导入现成任务">
+            <button class="btn btn-sm" @click="repo.showRepoImport('browser')" title="从云端仓库浏览并导入现成任务">
               <IconApp name="globe-grid" class="icon-sm" />
               从仓库导入
             </button>

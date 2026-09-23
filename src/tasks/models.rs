@@ -1,9 +1,9 @@
-//! 任务数据模型：TaskKind / TaskConfig / StepConfig 等
+//! 任务数据模型：TaskKind / TaskConfig / HttpTaskConfig / StepConfig 等
 //!
-//! 定义浏览器/脚本两类任务的 serde 数据模型。`TaskKind` 为内部标记枚举，
-//! `type` 字段缺失或为空时默认归为浏览器任务（旧版 JSON 兼容），存在但未知时
-//! 反序列化报错（与保存路径的校验一致）。步骤配置做 `code`→`script` 与 `frame`
-//! 类型规范化。
+//! 定义浏览器/脚本/直连（http）三类任务的 serde 数据模型。`TaskKind` 为内部
+//! 标记枚举，`type` 字段缺失或为空时默认归为浏览器任务（旧版 JSON 兼容），
+//! 存在但未知时反序列化报错（与保存路径的校验一致）。步骤配置做
+//! `code`→`script` 与 `frame` 类型规范化。
 
 use std::collections::HashMap;
 
@@ -34,6 +34,27 @@ pub const MIN_SCRIPT_TIMEOUT: u64 = 1;
 pub const MAX_SCRIPT_TIMEOUT: u64 = 3600;
 /// 脚本内容大小上限（字节）
 pub const MAX_SCRIPT_CONTENT_SIZE: usize = 100 * 1024;
+/// http 直连任务凭据变换脚本大小上限（字节）
+///
+/// 与 `src/login/http_login.rs` 的 `MAX_SCRIPT_BYTES` 同口径：任务的
+/// `crypto_script` 与方案里的 `http_crypto_script` 最终由同一套脚本引擎执行，
+/// 任务侧若放行更大体积，会出现「任务保存成功、登录必然失败」的错位，故此处
+/// 用与登录侧完全相同的上限，让超限在保存时就被拒绝。
+pub const MAX_HTTP_SCRIPT_BYTES: usize = 128 * 1024;
+/// http 直连任务请求地址大小上限（字节，防呆）
+///
+/// 与 `src/login/http_login.rs` 的 `MAX_URL_BYTES` 同口径：超限的地址在登录侧会被
+/// 拒绝，保存侧若放行就又是"存得下、登不上"，故两处用同一个数。
+pub const MAX_HTTP_URL_BYTES: usize = 8 * 1024;
+/// http 直连任务请求头大小上限（字节，防呆）
+///
+/// 请求头为纯文本、每行一项，正常门户只有几百字节；上限只为拦住误粘贴的大段
+/// 内容（撑大任务文件、拖慢请求构造），不表达任何安全边界。
+pub const MAX_HTTP_HEADERS_BYTES: usize = 256 * 1024;
+/// http 直连任务请求体大小上限（字节，防呆）
+///
+/// 与请求头同理：POST 表单体通常几十字节，上限只拦误粘贴。
+pub const MAX_HTTP_BODY_BYTES: usize = 256 * 1024;
 /// stdout/stderr 截断长度
 pub const OUTPUT_TRUNCATE_LEN: usize = 500;
 /// 有效步骤类型集合
@@ -187,11 +208,205 @@ impl Default for ScriptTaskConfig {
     }
 }
 
+/// http 直连任务的请求方法
+///
+/// 序列化取大写形式（`"GET"` / `"POST"`），与 HTTP 报文里的方法名逐字一致，
+/// 避免任务 JSON 里出现 `"get"` 这类需要在每个消费方再规范化一次的写法。
+/// 默认 GET：直连门户最常见形态是带查询串的 GET，POST 需显式写 method。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpRequestMethod {
+    /// GET 请求
+    #[default]
+    Get,
+    /// POST 请求
+    Post,
+}
+
+impl HttpRequestMethod {
+    /// 方法名的线上表示（`"GET"` / `"POST"`）
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+}
+
+impl std::fmt::Display for HttpRequestMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 直连登录的前置请求（可选）：先发一次请求、取出一个值，再发登录请求。
+///
+/// 使用场景与连接复用口径见 [`HttpTaskConfig`] 的「前置请求」小节。典型配置
+/// （河南科技大学「大学掌」体系这类 CSRF 绑连接的门户）：
+///
+/// ```json
+/// "pre_request": {
+///   "method": "get",
+///   "url": "http://10.100.51.1/api/csrf-token",
+///   "extract": "json:csrf_token",
+///   "name": "csrf"
+/// }
+/// ```
+///
+/// 随后登录请求的请求头里写 `X-CSRF-Token: {csrf}` 即可。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct HttpPreRequest {
+    /// 请求方法
+    pub method: HttpRequestMethod,
+    /// 请求地址（支持与登录请求同一套占位符）
+    pub url: String,
+    /// 请求头，每行一项 `名称: 值`
+    pub headers: String,
+    /// 请求体（POST 使用）
+    pub body: String,
+    /// 取值方式：`json:<字段>[.<字段>...]`（按点号路径取 JSON 值，字符串取原值、
+    /// 其余类型取其 JSON 文本）。
+    ///
+    /// 只支持 JSON 路径而不支持正则：令牌在 HTML 里的门户用「登录页原文 + 凭据变换
+    /// 脚本」表达更合适（脚本的 `ctx.page` 就是登录页原文），不必再引入正则依赖。
+    pub extract: String,
+    /// 取到的值注册成哪个占位符（留空时取 `extract` 路径的最后一段）
+    pub name: String,
+}
+
+impl HttpPreRequest {
+    /// 取值方式的 JSON 点号路径（`json:data.csrf_token` → `data.csrf_token`）。
+    ///
+    /// 写在 tasks 层而不是执行层：保存路径（`TaskManager::validate_task`，只拿到
+    /// JSON 值）与执行路径（`login::http_login`）都要判同一件事——用户写错取值方式是
+    /// "保存通过、登录必然失败"的错位配置，两处口径必须同源，故解析放这里共用。
+    pub fn extract_path(&self) -> Result<&str, String> {
+        let trimmed = self.extract.trim();
+        if trimmed.is_empty() {
+            return Err("前置请求缺少取值方式（例如 `json:csrf_token`）".to_string());
+        }
+        match trimmed.strip_prefix("json:") {
+            Some(path) if !path.trim().is_empty() => Ok(path.trim()),
+            Some(_) => Err("前置请求的取值方式缺少字段名（例如 `json:csrf_token`）".to_string()),
+            None => Err(format!(
+                "前置请求的取值方式只支持 `json:字段路径`（当前为 `{trimmed}`）"
+            )),
+        }
+    }
+
+    /// 取到的值注册成哪个占位符：显式 `name` 优先，留空取路径最后一段
+    pub fn placeholder_name(&self) -> String {
+        let explicit = self.name.trim();
+        if !explicit.is_empty() {
+            return explicit.to_string();
+        }
+        self.extract_path()
+            .ok()
+            .and_then(|path| path.rsplit('.').next())
+            .unwrap_or("pre")
+            .to_string()
+    }
+
+    /// 结构校验：请求地址必填且为 http/https、取值方式可解析。
+    ///
+    /// 只管形状，不管体积（体积上限由保存路径与执行层各自的常量把关，与
+    /// `auth_url` 的分工一致）。空地址的前置请求等于"每次登录必然失败"的配置，
+    /// 必须在保存/测试闸口拦下，而不是等登录失败才暴露。
+    pub fn validate(&self) -> Result<(), String> {
+        let url = self.url.trim();
+        if url.is_empty() {
+            return Err("前置请求缺少请求地址（不需要前置请求就把整块留空）".to_string());
+        }
+        let (scheme, rest) = url.split_once("://").unwrap_or(("", ""));
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+            return Err("前置请求的地址仅支持 http/https".to_string());
+        }
+        if host.is_empty() {
+            return Err("前置请求的地址缺少主机名".to_string());
+        }
+        self.extract_path()?;
+        Ok(())
+    }
+}
+
+/// http 直连任务配置（把「直连请求」的登录参数固化为可复用的具名任务）
+///
+/// 只装请求本身（方法/地址/认证页/头/体/成败判定/凭据变换），**不装凭据**：账号
+/// 密码永远来自方案（`ProfileData`），任务只提供可被多个方案共享的请求模板，避免
+/// 凭据在任务文件里出现第二份副本、也避免改密码要逐个改任务。
+/// 认证页地址（[`Self::auth_url`]）是本层唯一的"共享式"字段：它本就两渠道共用，
+/// 任务填了只作回退链的优先项，方案里的同名字段本轮不动。
+///
+/// # 前置请求
+///
+/// 部分门户的登录需要一个先从**别的接口**取回的令牌（典型是 CSRF token），且该令牌
+/// **绑定 TCP 连接**——取 token 与发登录必须在同一条 keep-alive 连接上，换连接就报
+/// `CSRF token mismatch`。单请求模型表达不了这种门户，凭据变换脚本又跑在无网络沙箱里，
+/// 故在任务里加一层可选的前置请求（见 [`HttpPreRequest`]）：它先发一次请求、从响应里
+/// 取出一个值注册成占位符，再渲染并发出登录请求。两次请求由同一个 `reqwest::Client`
+/// 顺序发出，连接池按 `(scheme, host, port)` 复用，token 绑连接的门户因此才能成功。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpTaskConfig {
+    /// 共享字段（扁平嵌入）
+    #[serde(flatten)]
+    pub common: CommonFields,
+    /// 请求方法
+    pub method: HttpRequestMethod,
+    /// 直连请求地址（支持 `{username}` 等占位符替换）
+    pub url: String,
+    /// 认证页地址（门户登录页；直连请求里作为脚本 `ctx.auth_url` 与「抓取登录页原文」的来源）
+    ///
+    /// 注意它**不是**登录请求地址——登录请求地址是 [`Self::url`]。留空时运行时回退用
+    /// 方案的 `ProfileData::auth_url`（该字段浏览器/直连两个渠道共用，本轮不动），
+    /// 所以老配置不填也照旧工作；填了则本任务自带认证页地址。导入他人分享的任务时
+    /// 通常需要它，否则会在使用者的方案上取到与自己门户不匹配的地址。
+    pub auth_url: String,
+    /// 请求头，每行一项 `名称: 值`
+    pub headers: String,
+    /// 请求体（POST 使用，同样支持占位符）
+    pub body: String,
+    /// 成功判定模式（响应体匹配）
+    pub success_pattern: String,
+    /// 失败判定模式（响应体匹配）
+    pub failure_pattern: String,
+    /// 凭据变换脚本（生成加密后的表单字段等）
+    pub crypto_script: String,
+    /// 前置请求：登录前先取回一个值（如 CSRF token）供登录请求引用；`None` = 不需要
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_request: Option<HttpPreRequest>,
+    /// 是否忽略 HTTPS 证书错误；`None` = 跟随全局 `browser.ignore_https_errors`
+    pub ignore_https_errors: Option<bool>,
+    /// 用户自定义元数据（执行器不使用，供仓库来源等标注）
+    pub metadata: Value,
+}
+
+impl Default for HttpTaskConfig {
+    fn default() -> Self {
+        Self {
+            common: CommonFields::default(),
+            method: HttpRequestMethod::default(),
+            url: String::new(),
+            auth_url: String::new(),
+            headers: String::new(),
+            body: String::new(),
+            success_pattern: String::new(),
+            failure_pattern: String::new(),
+            crypto_script: String::new(),
+            pre_request: None,
+            ignore_https_errors: None,
+            metadata: default_value_obj(),
+        }
+    }
+}
+
 /// 统一任务类型（内部标记枚举）
 ///
 /// `type` 字段缺失、为空或 = "browser" 时归为浏览器任务；"script" 归为脚本任务；
-/// 历史 `type=shell` 已移除，遇到时明确报错并提示改用脚本任务；
-/// 其余未知值在反序列化时报错（与保存路径 `validate_task` 拒绝未知类型
+/// "http" 归为直连任务；历史 `type=shell` 已移除，遇到时明确报错并提示改用脚本
+/// 任务；其余未知值在反序列化时报错（与保存路径 `validate_task` 拒绝未知类型
 /// 的行为一致，避免拼错类型名时被静默当作浏览器任务执行）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -200,14 +415,17 @@ pub enum TaskKind {
     Browser(TaskConfig),
     /// 脚本任务
     Script(ScriptTaskConfig),
+    /// http 直连任务
+    Http(HttpTaskConfig),
 }
 
 impl TaskKind {
-    /// 借用两类任务共享的 [`CommonFields`]（收敛两臂 match 样板）
+    /// 借用三类任务共享的 [`CommonFields`]（收敛三臂 match 样板）
     pub fn common(&self) -> &CommonFields {
         match self {
             TaskKind::Browser(c) => &c.common,
             TaskKind::Script(c) => &c.common,
+            TaskKind::Http(c) => &c.common,
         }
     }
 
@@ -216,14 +434,36 @@ impl TaskKind {
         match self {
             TaskKind::Browser(c) => &mut c.common,
             TaskKind::Script(c) => &mut c.common,
+            TaskKind::Http(c) => &mut c.common,
         }
     }
 
-    /// 任务类型名（`"browser"` / `"script"`，与 serde tag 取值一致）
+    /// 任务类型名（`"browser"` / `"script"` / `"http"`，与 serde tag 取值一致）
     pub fn type_name(&self) -> &'static str {
         match self {
             TaskKind::Browser(_) => "browser",
             TaskKind::Script(_) => "script",
+            TaskKind::Http(_) => "http",
+        }
+    }
+
+    /// 列表摘要用的「任务地址」：浏览器任务=登录页地址，直连任务=请求地址，脚本任务=空。
+    ///
+    /// 收敛在这里而不是各调用点自己 match：任务列表的每一行都要显示它，摘要与详情
+    /// 两条构造路径（`summary_from_value` / `get_task_detail`）必须给出同一个答案。
+    pub fn summary_url(&self) -> &str {
+        match self {
+            TaskKind::Browser(c) => &c.url,
+            TaskKind::Script(_) => "",
+            TaskKind::Http(c) => &c.url,
+        }
+    }
+
+    /// 直连任务的请求方法；非直连任务为 `None`（前端据此决定要不要渲染方法标签）
+    pub fn http_request_method(&self) -> Option<HttpRequestMethod> {
+        match self {
+            TaskKind::Http(c) => Some(c.method),
+            _ => None,
         }
     }
 }
@@ -256,12 +496,15 @@ impl<'de> Deserialize<'de> for TaskKind {
             "script" => Ok(TaskKind::Script(
                 parse::<ScriptTaskConfig>(value).map_err(serde::de::Error::custom)?,
             )),
+            "http" => Ok(TaskKind::Http(
+                parse::<HttpTaskConfig>(value).map_err(serde::de::Error::custom)?,
+            )),
             // Shell 任务已移除：历史存量 type=shell 明确报错，提示改用脚本任务
             "shell" => Err(serde::de::Error::custom(
                 "任务类型 shell 已移除，请改用 script 类型（.sh/.bat/.py/.exe）",
             )),
             other => Err(serde::de::Error::custom(format!(
-                "未知任务类型: {other}（有效值: browser / script）"
+                "未知任务类型: {other}（有效值: browser / script / http）"
             ))),
         }
     }
@@ -710,5 +953,284 @@ mod tests {
         } else {
             panic!("应为 Browser 类型");
         }
+    }
+
+    // ============ http 直连任务 ============
+
+    #[test]
+    fn test_http_request_method_as_str_display_and_default() {
+        // 方法名取大写（与 HTTP 报文一致），默认 GET
+        assert_eq!(HttpRequestMethod::default(), HttpRequestMethod::Get);
+        assert_eq!(HttpRequestMethod::Get.as_str(), "GET");
+        assert_eq!(HttpRequestMethod::Post.as_str(), "POST");
+        assert_eq!(HttpRequestMethod::Get.to_string(), "GET");
+        assert_eq!(HttpRequestMethod::Post.to_string(), "POST");
+
+        // serde 往返同样是大写字面量
+        let json = serde_json::to_string(&HttpRequestMethod::Post).unwrap();
+        assert_eq!(json, r#""POST""#);
+        let back: HttpRequestMethod = serde_json::from_str(r#""GET""#).unwrap();
+        assert_eq!(back, HttpRequestMethod::Get);
+    }
+
+    #[test]
+    fn test_http_task_config_defaults() {
+        // 默认：GET、字段全空、证书策略为 None（跟随全局）、metadata 为空对象
+        let cfg = HttpTaskConfig::default();
+        assert_eq!(cfg.method, HttpRequestMethod::Get);
+        assert!(cfg.url.is_empty());
+        // 认证页地址默认为空 = 未填，运行时回退方案的 auth_url（老配置不填照旧可用）
+        assert!(cfg.auth_url.is_empty());
+        assert!(cfg.headers.is_empty());
+        assert!(cfg.body.is_empty());
+        assert!(cfg.success_pattern.is_empty());
+        assert!(cfg.failure_pattern.is_empty());
+        assert!(cfg.crypto_script.is_empty());
+        assert_eq!(cfg.ignore_https_errors, None);
+        assert!(cfg.metadata.is_object());
+    }
+
+    #[test]
+    fn test_task_kind_deserialize_http() {
+        // type=http 应反序列化为 TaskKind::Http；缺省字段走默认值
+        let json = r#"{
+            "type": "http",
+            "name": "直连登录",
+            "url": "http://portal.example.com/login?user={username}",
+            "method": "POST",
+            "headers": "Content-Type: application/x-www-form-urlencoded",
+            "body": "user={username}&pass={password}"
+        }"#;
+        let task: TaskKind = serde_json::from_str(json).unwrap();
+        assert!(matches!(task, TaskKind::Http(_)));
+        if let TaskKind::Http(cfg) = task {
+            assert_eq!(cfg.common.name, "直连登录");
+            assert_eq!(cfg.method, HttpRequestMethod::Post);
+            assert_eq!(cfg.url, "http://portal.example.com/login?user={username}");
+            assert!(cfg.body.contains("{password}"));
+            // 未写 ignore_https_errors → None（跟随全局），而非静默 false
+            assert_eq!(cfg.ignore_https_errors, None);
+            // 未写 auth_url → 空串（回退方案的认证地址），不是解析失败
+            assert!(cfg.auth_url.is_empty());
+        } else {
+            panic!("应为 Http 类型");
+        }
+    }
+
+    #[test]
+    fn test_http_task_config_serde_roundtrip() {
+        // 序列化带 "type":"http" → 反序列化字段一致（None 与 Some(false) 两态都覆盖）
+        let original = TaskKind::Http(HttpTaskConfig {
+            common: CommonFields {
+                task_id: "portal_http".to_string(),
+                name: "门户直连".to_string(),
+                description: "复用直连参数".to_string(),
+            },
+            method: HttpRequestMethod::Post,
+            url: "https://portal.example.com/auth".to_string(),
+            auth_url: "https://portal.example.com/login".to_string(),
+            headers: "Content-Type: application/x-www-form-urlencoded".to_string(),
+            body: "username={username}&password={password}".to_string(),
+            success_pattern: "登录成功".to_string(),
+            failure_pattern: "密码错误".to_string(),
+            crypto_script: "function transform(ctx) { return ctx; }".to_string(),
+            pre_request: Some(HttpPreRequest {
+                method: HttpRequestMethod::Get,
+                url: "https://portal.example.com/api/csrf-token".to_string(),
+                headers: "X-Requested-With: XMLHttpRequest".to_string(),
+                body: String::new(),
+                extract: "json:csrf_token".to_string(),
+                name: "csrf".to_string(),
+            }),
+            ignore_https_errors: None,
+            metadata: serde_json::json!({ "source": "repo" }),
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains(r#""type":"http""#),
+            "序列化必须带 http 标记: {json}"
+        );
+        let back: TaskKind = serde_json::from_str(&json).unwrap();
+        let TaskKind::Http(cfg) = back else {
+            panic!("应为 Http 类型");
+        };
+        assert_eq!(cfg.common.task_id, "portal_http");
+        assert_eq!(cfg.common.name, "门户直连");
+        assert_eq!(cfg.common.description, "复用直连参数");
+        assert_eq!(cfg.method, HttpRequestMethod::Post);
+        assert_eq!(cfg.url, "https://portal.example.com/auth");
+        assert_eq!(
+            cfg.auth_url, "https://portal.example.com/login",
+            "认证页地址必须原样往返（不是登录请求地址）"
+        );
+        assert_eq!(
+            cfg.headers,
+            "Content-Type: application/x-www-form-urlencoded"
+        );
+        assert_eq!(cfg.body, "username={username}&password={password}");
+        assert_eq!(cfg.success_pattern, "登录成功");
+        assert_eq!(cfg.failure_pattern, "密码错误");
+        assert_eq!(cfg.crypto_script, "function transform(ctx) { return ctx; }");
+        let pre = cfg.pre_request.expect("前置请求必须原样往返");
+        assert_eq!(pre.method, HttpRequestMethod::Get);
+        assert_eq!(pre.url, "https://portal.example.com/api/csrf-token");
+        assert_eq!(pre.headers, "X-Requested-With: XMLHttpRequest");
+        assert_eq!(pre.extract, "json:csrf_token");
+        assert_eq!(pre.name, "csrf");
+        assert_eq!(cfg.ignore_https_errors, None);
+        assert_eq!(cfg.metadata["source"], "repo");
+
+        // 显式 Some(false)：必须原样往返，不得被当作「未设置」而退回 None
+        let strict = TaskKind::Http(HttpTaskConfig {
+            ignore_https_errors: Some(false),
+            ..HttpTaskConfig::default()
+        });
+        let json = serde_json::to_string(&strict).unwrap();
+        let back: TaskKind = serde_json::from_str(&json).unwrap();
+        if let TaskKind::Http(cfg) = back {
+            assert_eq!(cfg.ignore_https_errors, Some(false));
+        } else {
+            panic!("应为 Http 类型");
+        }
+    }
+
+    #[test]
+    fn test_task_kind_type_name_three_kinds() {
+        // 三类任务的类型名与 serde tag 一致
+        assert_eq!(
+            TaskKind::Browser(TaskConfig::default()).type_name(),
+            "browser"
+        );
+        assert_eq!(
+            TaskKind::Script(ScriptTaskConfig::default()).type_name(),
+            "script"
+        );
+        assert_eq!(
+            TaskKind::Http(HttpTaskConfig::default()).type_name(),
+            "http"
+        );
+    }
+
+    #[test]
+    fn test_task_kind_http_common_accessors() {
+        // 新臂同样可经 common()/common_mut() 读写共享字段
+        let mut task = TaskKind::Http(HttpTaskConfig::default());
+        assert_eq!(task.common().name, "未命名任务");
+        task.common_mut().task_id = "h1".to_string();
+        assert_eq!(task.common().task_id, "h1");
+    }
+
+    #[test]
+    fn test_task_kind_unknown_type_error_lists_http() {
+        // 未知类型的有效值列表必须包含新增的 http，否则用户按报错改仍会被拒
+        let json = r#"{
+            "type": "httpp",
+            "name": "拼错类型",
+            "url": "http://example.com"
+        }"#;
+        let result: Result<TaskKind, _> = serde_json::from_str(json);
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("未知任务类型"));
+        assert!(err.to_string().contains("httpp"));
+        assert!(
+            err.to_string().contains("browser / script / http"),
+            "有效值列表应含 http: {err}"
+        );
+    }
+
+    /// 老任务文件（没有 `pre_request` 键）必须照旧解析为 `None`：仓库里已有的直连
+    /// 任务与用户磁盘上的历史文件都不能因为新增字段而失效
+    #[test]
+    fn legacy_http_task_without_pre_request_parses_as_none() {
+        let json = r#"{
+            "type": "http",
+            "task_id": "old_portal",
+            "name": "旧直连任务",
+            "method": "GET",
+            "url": "http://10.0.0.1/login?u={username}"
+        }"#;
+        let TaskKind::Http(cfg) = serde_json::from_str(json).unwrap() else {
+            panic!("应为 Http 类型");
+        };
+        assert!(cfg.pre_request.is_none());
+
+        // 未配置时不落盘该键（不往老文件里塞 `"pre_request": null` 噪音）
+        let roundtrip = serde_json::to_string(&TaskKind::Http(cfg)).unwrap();
+        assert!(
+            !roundtrip.contains("pre_request"),
+            "未配置前置请求时不应序列化该键: {roundtrip}"
+        );
+    }
+
+    /// 前置请求的取值方式与占位符名（形状判据在 tasks 层，保存与执行共用）
+    #[test]
+    fn pre_request_extract_path_and_placeholder_name() {
+        let pre = HttpPreRequest {
+            extract: "json:data.csrf_token".into(),
+            ..Default::default()
+        };
+        assert_eq!(pre.extract_path().unwrap(), "data.csrf_token");
+        assert_eq!(pre.placeholder_name(), "csrf_token");
+
+        // 显式 name 优先于路径末段
+        let named = HttpPreRequest {
+            name: "csrf".into(),
+            ..pre.clone()
+        };
+        assert_eq!(named.placeholder_name(), "csrf");
+
+        for (extract, expected) in [
+            ("", "缺少取值方式"),
+            ("json:", "缺少字段名"),
+            ("regex:(.*)", "只支持 `json:字段路径`"),
+        ] {
+            let bad = HttpPreRequest {
+                extract: extract.into(),
+                ..Default::default()
+            };
+            let err = bad.extract_path().unwrap_err();
+            assert!(
+                err.contains(expected),
+                "`{extract}` 的报错应含「{expected}」: {err}"
+            );
+        }
+    }
+
+    /// 前置请求的形状校验：地址必填、仅 http(s)、必须有主机名
+    #[test]
+    fn pre_request_validate_checks_url_shape() {
+        let base = HttpPreRequest {
+            extract: "json:csrf_token".into(),
+            ..Default::default()
+        };
+
+        let empty = HttpPreRequest {
+            url: "   ".into(),
+            ..base.clone()
+        };
+        assert!(empty.validate().unwrap_err().contains("缺少请求地址"));
+
+        let no_host = HttpPreRequest {
+            url: "http:///api/token".into(),
+            ..base.clone()
+        };
+        assert!(no_host.validate().unwrap_err().contains("缺少主机名"));
+
+        let wrong_scheme = HttpPreRequest {
+            url: "ftp://portal/token".into(),
+            ..base.clone()
+        };
+        assert!(
+            wrong_scheme
+                .validate()
+                .unwrap_err()
+                .contains("仅支持 http/https")
+        );
+
+        let ok = HttpPreRequest {
+            url: "http://10.100.51.1/api/csrf-token".into(),
+            ..base
+        };
+        assert!(ok.validate().is_ok());
     }
 }

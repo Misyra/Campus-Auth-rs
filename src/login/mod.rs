@@ -456,24 +456,47 @@ impl LoginOrchestrator {
             return handle;
         }
 
-        // 1a-2. 直连请求参数构造（URL 缺失/格式非法立即终态）
+        // 1a-2. 直连请求参数构造（任务缺失/类型不对/地址非法立即终态）
         let http_plan = if use_http {
-            // 证书策略：方案级 http_ignore_https_errors 优先，未设置时跟随全局
-            // browser.ignore_https_errors——后者默认 true，浏览器渠道即靠它登录
-            // 自签名证书门户；直连若固定严格校验会出现「浏览器能登、直连必失败」。
-            match crate::login::http_login::HttpLoginRequest::from_profile(
-                profile,
-                rt.browser.ignore_https_errors,
-            ) {
-                Ok(p) => {
-                    // 本机地址（脚本 ctx.local_ip / ctx.local_mac）仅在配置了加密
-                    // 脚本时查询：网卡探测要 spawn 子进程，无脚本则无人读取这两字段。
-                    // 查询失败不阻断登录——脚本自身可回退到从页面提取。
-                    if p.uses_crypto_script() {
-                        let addr = self.monitor.local_address().await;
-                        Some(p.with_local_address(&addr))
+            match self.resolve_http_task(profile).await {
+                Ok(task) => {
+                    // 认证地址回退链：任务的 auth_url 优先，留空才回退方案的 auth_url
+                    // （该字段浏览器/直连两渠道共用，老配置不填照旧可用）。**任务优先**
+                    // 是与前端方案编辑器一致的契约——两处口径若不同，会出现"编辑器里
+                    // 显示 A、实际请求用 B"这种无从排查的错位。
+                    let auth_url = if task.auth_url.trim().is_empty() {
+                        profile.auth_url.clone()
                     } else {
-                        Some(p)
+                        task.auth_url.clone()
+                    };
+                    // 证书策略：任务级 ignore_https_errors 优先，未设置时跟随全局
+                    // browser.ignore_https_errors——后者默认 true，浏览器渠道即靠它登录
+                    // 自签名证书门户；直连若固定严格校验会出现「浏览器能登、直连必失败」。
+                    match crate::login::http_login::HttpLoginRequest::from_task(
+                        &task,
+                        &profile.username,
+                        profile.password.as_str(),
+                        &auth_url,
+                        true,
+                        rt.browser.ignore_https_errors,
+                    ) {
+                        Ok(p) => {
+                            // 本机地址（脚本 ctx.local_ip / ctx.local_mac，或模板里的
+                            // {local_ip} 占位符）按需查询：网卡探测要 spawn 子进程，
+                            // 用不到就白跑一次。查询失败不阻断登录——脚本自身可回退到
+                            // 从页面提取。
+                            if p.needs_local_address() {
+                                let addr = self.monitor.local_address().await;
+                                Some(p.with_local_address(&addr))
+                            } else {
+                                Some(p)
+                            }
+                        }
+                        Err(e) => {
+                            return self
+                                .immediate_handle(source, false, e, profile.id.clone())
+                                .await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -731,6 +754,42 @@ impl LoginOrchestrator {
         choice.task_id
     }
 
+    /// 解析方案绑定的直连任务。
+    ///
+    /// 与浏览器任务的关键差别：直连**没有内置默认任务**——门户地址无法内置，
+    /// 凭空造一个 default 直连任务只会让用户看到一个自己没写过的请求被发出去。
+    /// 因此「未绑定 / 任务不存在 / 类型不对」都是明确的终态错误，不做任何回退，
+    /// 且文案直接指向「任务 · 直连任务」页（用户在那里能立刻改对）。
+    async fn resolve_http_task(
+        &self,
+        profile: &ProfileSnapshot,
+    ) -> Result<crate::tasks::HttpTaskConfig, String> {
+        let id = profile.active_http_task.trim();
+        // 空绑定不是"用默认"，而是"直连登录不可用"（见 ProfileSnapshot 字段说明）
+        if id.is_empty() {
+            return Err("方案未绑定直连任务，请在「任务 · 直连任务」里选择或新建一个".into());
+        }
+        match self.tasks.load_task(id).await {
+            Ok(crate::tasks::TaskKind::Http(cfg)) => Ok(cfg),
+            Ok(other) => {
+                // 与 is_usable_browser_task 同口径：任务被改成别类后仅查存在性会放行，
+                // 直连拿不到请求参数只能失败，必须在取值阶段就按类型拒绝并留痕
+                tracing::warn!(
+                    task_id = id,
+                    task_type = other.type_name(),
+                    "方案绑定的任务不是直连任务，直连登录无法使用"
+                );
+                Err(format!(
+                    "方案绑定的 {id} 不是直连任务（当前为 {} 类型），请在「任务 · 直连任务」里重新选择",
+                    other.type_name()
+                ))
+            }
+            Err(_) => Err(format!(
+                "方案绑定的直连任务 {id} 不存在，请在「任务 · 直连任务」里重新选择"
+            )),
+        }
+    }
+
     /// 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）。
     ///
     /// `Some(handle)` = 校验失败携带的立即终态句柄；`None` = 通过。
@@ -748,10 +807,12 @@ impl LoginOrchestrator {
         if profile.password.as_str().is_empty() {
             missing.push("密码为空，请在设置页填写密码");
         }
-        // 直连渠道要求登录请求 URL；浏览器渠道不再要求认证地址：用户留空时
-        // RuntimeConfig 会补默认明文触发地址，由浏览器跟随网关重定向。
-        if use_http && profile.http_url.trim().is_empty() {
-            missing.push("直连请求 URL 为空，请在方案的直连配置里填写登录地址");
+        // 直连渠道要求已绑定直连任务：请求参数（地址/方法/头/体/判定关键字）全在
+        // 任务里，未绑定必然失败；直连没有内置兜底任务，所以这里必须拦。浏览器渠道
+        // 不再要求认证地址：用户留空时 RuntimeConfig 会补默认明文触发地址，
+        // 由浏览器跟随网关重定向。
+        if use_http && profile.active_http_task.trim().is_empty() {
+            missing.push("未绑定直连任务，请在「任务 · 直连任务」里选择或新建一个");
         }
         // 浏览器路径必须有可执行的浏览器任务；直连渠道无 Worker 参与，不要求
         if !use_http && effective_task_id.is_none() {

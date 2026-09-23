@@ -239,6 +239,7 @@ mod tests {
                     name: kind.common().name.clone(),
                     description: kind.common().description.clone(),
                     task_type: kind.type_name().to_string(),
+                    ..TaskSummary::default()
                 })
                 .collect()
         }
@@ -286,6 +287,7 @@ mod tests {
                     name: kind.common().name.clone(),
                     description: String::new(),
                     task_type: kind.type_name().to_string(),
+                    ..TaskSummary::default()
                 },
                 config: kind,
             })

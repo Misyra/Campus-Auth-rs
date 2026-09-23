@@ -12,11 +12,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::config::{ConfigApi, HttpLoginMethod, LoginChannel, ProfileApi, ProfileData};
+use crate::config::{ConfigApi, LoginChannel, ProfileApi, ProfileData};
 use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
-use crate::login::http_login::{HttpLoginRequest, run_once as run_http_login_once};
+use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
-use crate::web::operations::{RegisterError, WebOperations};
 
 /// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
 #[derive(Deserialize)]
@@ -36,15 +35,8 @@ pub struct ProfileCreateBody {
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
     pub login_channel: Option<LoginChannel>,
-    pub http_method: Option<HttpLoginMethod>,
-    pub http_url: Option<String>,
-    pub http_headers: Option<String>,
-    pub http_body: Option<String>,
-    pub http_success_pattern: Option<String>,
-    pub http_failure_pattern: Option<String>,
-    pub http_crypto_script: Option<String>,
-    /// 是否忽略 HTTPS 证书错误（None = 未提交/跟随全局；Some = 显式覆盖）
-    pub http_ignore_https_errors: Option<bool>,
+    /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
+    pub active_http_task: Option<String>,
 }
 
 /// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
@@ -76,30 +68,48 @@ fn validate_http_url(label: &str, raw: &str) -> Result<String, ApiError> {
     Ok(trimmed)
 }
 
-/// 校验直连请求 URL；保存时允许空串，真正测试/登录时会明确拒绝。
-fn validate_http_login_url(raw: &str) -> Result<String, ApiError> {
-    let trimmed = raw.trim().to_string();
-    if trimmed.is_empty() {
-        return Ok(trimmed);
-    }
-    HttpLoginRequest::validate_url(&trimmed).map_err(ApiError::BadRequest)?;
-    Ok(trimmed)
-}
-
-/// 保存前校验直连模板体积（与执行/测试同一口径）。
+/// 校验方案的直连任务绑定（新建 / 更新 / `PATCH /api/config` 三条保存路径共用）。
 ///
-/// 保存路径此前只校验 URL 合法性，超限配置能落盘、直到登录执行才报「过长」；
-/// 用户在保存时得到的是"保存成功"，无从把失败归因到配置本身。
-fn validate_http_templates(profile: &ProfileData) -> Result<(), ApiError> {
-    HttpLoginRequest::validate_templates(
-        &profile.http_url,
-        &profile.http_headers,
-        &profile.http_body,
-        &profile.http_success_pattern,
-        &profile.http_failure_pattern,
-        &profile.http_crypto_script,
-    )
-    .map_err(ApiError::BadRequest)
+/// 为什么直连比浏览器渠道多出这一道：浏览器渠道有内置默认任务兜底，绑定为空或
+/// 失效时登录会回退到 `default`，最坏也只是"用了默认任务"；直连**没有**兜底
+/// （门户地址无法内置），绑定为空或指错任务时登录必然失败——而那一刻用户早已离开
+/// 保存页面，看到的是"登录失败"而非"配置没选对"。放过去等于把配置错误伪装成运行
+/// 错误，故必须在保存时就拦下。
+///
+/// 只读一次任务并同时判「存在」与「类型」：仅查存在性会放行被改成 browser/script
+/// 的同名任务，与 `LoginOrchestrator::resolve_http_task` 的判定口径保持一致。
+pub(crate) async fn validate_http_task_binding(
+    tasks: &Arc<dyn TaskApi>,
+    login_channel: LoginChannel,
+    active_http_task: &str,
+) -> Result<(), ApiError> {
+    if login_channel != LoginChannel::Http {
+        // 浏览器渠道不看这个字段：切回浏览器后残留的绑定无害，不强制用户清空
+        return Ok(());
+    }
+    let id = active_http_task.trim();
+    if id.is_empty() {
+        return Err(ApiError::BadRequest("请为直连渠道选择一个直连任务".into()));
+    }
+    match tasks.load_task(id).await {
+        Ok(crate::tasks::TaskKind::Http(_)) => Ok(()),
+        Ok(other) => {
+            tracing::warn!(
+                task_id = id,
+                task_type = other.type_name(),
+                "方案绑定的任务不是直连任务，保存被拒"
+            );
+            Err(ApiError::BadRequest(format!(
+                "直连任务 {id} 不存在或不是直连任务"
+            )))
+        }
+        Err(e) => {
+            tracing::warn!(task_id = id, error = %e, "方案绑定的直连任务加载失败，保存被拒");
+            Err(ApiError::BadRequest(format!(
+                "直连任务 {id} 不存在或不是直连任务"
+            )))
+        }
+    }
 }
 
 /// PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）
@@ -125,39 +135,8 @@ pub struct ProfileUpdateBody {
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
     pub login_channel: Option<LoginChannel>,
-    pub http_method: Option<HttpLoginMethod>,
-    pub http_url: Option<String>,
-    pub http_headers: Option<String>,
-    pub http_body: Option<String>,
-    pub http_success_pattern: Option<String>,
-    pub http_failure_pattern: Option<String>,
-    pub http_crypto_script: Option<String>,
-    /// 是否忽略 HTTPS 证书错误（None = 未提交/跟随全局；Some = 显式覆盖）
-    pub http_ignore_https_errors: Option<bool>,
-}
-
-/// POST /api/profiles/http-login-test 请求体：用编辑器当前未保存值发送一次测试请求
-#[derive(Deserialize, Default)]
-#[serde(default)]
-pub struct HttpLoginTestBody {
-    /// 已保存方案 ID；密码留空时从该方案回退读取
-    pub profile_id: Option<String>,
-    pub username: String,
-    pub password: Zeroizing<String>,
-    pub http_method: HttpLoginMethod,
-    pub http_url: String,
-    pub http_headers: String,
-    pub http_body: String,
-    pub http_success_pattern: String,
-    pub http_failure_pattern: String,
-    pub http_crypto_script: String,
-    /// 认证页地址：传给脚本 ctx.auth_url，也可作为抓取页面原文的来源
-    pub auth_url: String,
-    /// 是否在运行脚本前抓取认证页原文
-    pub fetch_page: bool,
-    /// 是否忽略 HTTPS 证书错误；缺省（None）时跟随全局 `browser.ignore_https_errors`，
-    /// 与正式登录的解析口径一致（前端只传用户显式选择的值）
-    pub http_ignore_https_errors: Option<bool>,
+    /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
+    pub active_http_task: Option<String>,
 }
 
 /// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
@@ -227,8 +206,10 @@ const PROFILE_SHARE_FORMAT: u32 = 1;
 /// `password_decryption_failed` 仍为 false，排障时毫无线索。账号同样剔除——那是
 /// 接收方自己的学号，跟着走只会误导（也避免导出者无意识泄露）。
 ///
-/// `active_task` 置空：任务属于方案绑定的浏览器任务 ID，接收方通常没有同名任务，
-/// 保留会静默回退到默认任务（`LoginInorchestrator::resolve_active_task`）。
+/// `active_task` / `active_http_task` 置空：两者都是"本机任务 ID"的绑定关系，接收方
+/// 通常没有同名任务。浏览器侧保留会静默回退到默认任务
+/// （`LoginOrchestrator::resolve_active_task`），直连侧保留则会直接指向一个不存在的
+/// 任务——两种结果都在对方的机器上表现为"配置看起来是好的但登录不对"。
 fn build_share_payload(profile: &ProfileData) -> Value {
     serde_json::json!({
         "campus_auth_profile": PROFILE_SHARE_FORMAT,
@@ -252,14 +233,9 @@ fn build_share_payload(profile: &ProfileData) -> Value {
             // 绑定任务不随方案迁移（接收方多半没有该任务）
             "active_task": "",
             "login_channel": profile.login_channel,
-            "http_method": profile.http_method,
-            "http_url": profile.http_url,
-            "http_headers": profile.http_headers,
-            "http_body": profile.http_body,
-            "http_success_pattern": profile.http_success_pattern,
-            "http_failure_pattern": profile.http_failure_pattern,
-            "http_crypto_script": profile.http_crypto_script,
-            "http_ignore_https_errors": profile.http_ignore_https_errors,
+            // 直连请求参数已整体搬进直连任务（`tasks/http/<id>.json`）：方案侧只剩这条
+            // 绑定关系，与 `active_task` 同口径清空。任务本身走任务页的导入导出通道。
+            "active_http_task": "",
         }
     })
 }
@@ -270,7 +246,12 @@ fn build_share_payload(profile: &ProfileData) -> Value {
 /// 但 `campus_auth_profile` 版本号必须存在——缺少即视为非本应用文件。宁可明确
 /// 报错，也不做"猜测字段"的宽松解析：错误猜测会导入一个看似成功却少了关键
 /// 判定关键字的方案，用户要到下次登录失败才发现。
-fn parse_share_payload(body: &Value) -> Result<(ProfileData, String), ApiError> {
+///
+/// 返回的第三个值 `legacy_http_config_dropped` 表示"这份文件里还带着 v9 的内联直连
+/// 配置（`http_url` 非空）"。新 `ProfileData` 没有这些字段，serde 会静默忽略——静默
+/// 正是问题：用户导入后会发现直连方案"没有请求地址了"却不知道为什么。故把事实回报给
+/// 前端，由它提示"请到任务页重新配置直连任务"。
+fn parse_share_payload(body: &Value) -> Result<(ProfileData, String, bool), ApiError> {
     // 兼容 API 信封 { data: {...} } 与 { profile: {...} } 包裹写法
     let root = body.get("data").filter(|v| v.is_object()).unwrap_or(body);
     let version = root
@@ -304,12 +285,6 @@ fn parse_share_payload(body: &Value) -> Result<(ProfileData, String), ApiError> 
         isp: text("isp"),
         gateway_ip: text("gateway_ip"),
         wifi_ssid: text("wifi_ssid"),
-        http_url: text("http_url"),
-        http_headers: text("http_headers"),
-        http_body: text("http_body"),
-        http_success_pattern: text("http_success_pattern"),
-        http_failure_pattern: text("http_failure_pattern"),
-        http_crypto_script: text("http_crypto_script"),
         ..Default::default()
     };
     // 枚举字段显式解析：非法值报错而非静默退回默认，避免"导入成功但渠道变了"
@@ -318,22 +293,16 @@ fn parse_share_payload(body: &Value) -> Result<(ProfileData, String), ApiError> 
             ApiError::BadRequest("分享文件的 login_channel 非法（仅 browser/http）".into())
         })?;
     }
-    if let Some(v) = obj.get("http_method") {
-        profile.http_method = serde_json::from_value(v.clone()).map_err(|_| {
-            ApiError::BadRequest("分享文件的 http_method 非法（仅 GET/POST）".into())
-        })?;
-    }
-    // 三态字段：缺失 = 跟随全局（None），显式布尔 = 覆盖；类型不符时忽略该字段
-    // （与其余文本字段"部分缺失仍可导入"的宽松口径一致）
-    if let Some(v) = obj.get("http_ignore_https_errors").and_then(Value::as_bool) {
-        profile.http_ignore_https_errors = Some(v);
+    // 老分享文件里的 `http_*` 键（含 `http_method` / `http_ignore_https_errors`）一律
+    // 忽略：这些字段在 v10 已不存在，serde 静默丢弃是正确行为，只在下面回报一个布尔
+    // 供前端提示，不做校验也不做迁移（迁移只对**本机**的 v9 磁盘配置负责，见
+    // `config::migration::migrate_v9_to_v10`；来自别人机器的地址搬过去也未必可用）。
+    let legacy_http_config_dropped = !text("http_url").trim().is_empty();
+    if legacy_http_config_dropped {
+        tracing::info!("分享文件包含 v9 内联直连配置，已忽略（直连配置现由任务承载）");
     }
     if profile.name.trim().is_empty() {
         return Err(ApiError::BadRequest("分享文件缺少方案名称".into()));
-    }
-    // 直连方案的请求地址必须合法：校验前置到导入，避免落盘后每次登录才失败
-    if !profile.http_url.trim().is_empty() {
-        HttpLoginRequest::validate_url(&profile.http_url).map_err(ApiError::BadRequest)?;
     }
     if !profile.auth_url.trim().is_empty() {
         validate_http_url("认证地址", &profile.auth_url)?;
@@ -361,7 +330,7 @@ fn parse_share_payload(body: &Value) -> Result<(ProfileData, String), ApiError> 
             }
         })
     };
-    Ok((profile, suggested))
+    Ok((profile, suggested, legacy_http_config_dropped))
 }
 
 /// GET /api/profiles/{id}/export — 导出方案为可分享的 JSON（剔除账号与密码）
@@ -383,7 +352,7 @@ pub async fn import_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let (profile, suggested) = parse_share_payload(&body)?;
+    let (profile, suggested, legacy_http_config_dropped) = parse_share_payload(&body)?;
 
     // 在既有方案中挑一个未占用的 ID
     let existing: std::collections::HashSet<String> =
@@ -409,114 +378,24 @@ pub async fn import_profile(
     profile.id = target_id.clone();
     profiles.create_profile(&target_id, profile).await?;
     tracing::info!(profile_id = %target_id, "导入方案");
-    Ok(data(serde_json::json!({ "id": target_id })))
-}
-
-/// POST /api/profiles/http-login-test — 发送一次无状态直连测试请求
-pub async fn test_http_login(
-    State(config): State<Arc<dyn ConfigApi>>,
-    State(operations): State<Arc<WebOperations>>,
-    Json(body): Json<HttpLoginTestBody>,
-) -> Result<Json<Value>, ApiError> {
-    let registration = operations
-        .http_login_test()
-        .register("http-login-test")
-        .map_err(|error| match error {
-            RegisterError::Paused => {
-                ApiError::ServiceUnavailable("服务正在停止，请稍后重试".into())
-            }
-            RegisterError::CapacityReached | RegisterError::DuplicateId => {
-                ApiError::Conflict("已有直连测试正在进行，请稍候再试".into())
-            }
-        })?;
-    let url = validate_http_login_url(&body.http_url)?;
-    if url.is_empty() {
-        return Err(ApiError::BadRequest("请填写直连请求地址".into()));
-    }
-    if body.username.trim().is_empty() {
-        return Err(ApiError::BadRequest("请填写账号".into()));
-    }
-
-    let mut password = body.password;
-    if password.is_empty() {
-        if let Some(profile_id) = body
-            .profile_id
-            .as_deref()
-            .filter(|id| !id.trim().is_empty())
-        {
-            let runtime = config.runtime_config_for_profile(profile_id.trim())?;
-            password = Zeroizing::new(runtime.profile.password.to_string());
-        }
-    }
-    if password.is_empty() {
-        return Err(ApiError::BadRequest(
-            "请输入密码；编辑已有方案时也可留空以使用已保存密码".into(),
-        ));
-    }
-
-    // 证书策略与正式登录同源：显式值优先，缺省跟随全局 browser.ignore_https_errors。
-    // 测试端点必须与正式路径同口径，否则会出现「测试报证书错误、实际登录成功」
-    // （或反之）这种无从判断该信哪边的组合。
-    let ignore_https_errors = body
-        .http_ignore_https_errors
-        .unwrap_or_else(|| config.runtime_snapshot().browser.ignore_https_errors);
-    let request = HttpLoginRequest {
-        method: body.http_method,
-        url,
-        headers: body.http_headers,
-        body: body.http_body,
-        success_pattern: body.http_success_pattern,
-        failure_pattern: body.http_failure_pattern,
-        crypto_script: body.http_crypto_script,
-        username: body.username.trim().to_string(),
-        password,
-        auth_url: body.auth_url.trim().to_string(),
-        local_ip: String::new(),
-        local_mac: String::new(),
-        fetch_page: body.fetch_page,
-        ignore_https_errors,
-    };
-    request.validate().map_err(ApiError::BadRequest)?;
-    // 测试端点与正式登录同源：仅有加密脚本时才查本机地址（脚本可用 local_ip
-    // 推导密钥）；否则白跑一次网卡探测。测试端点无 MonitorService 注入，
-    // 每次自建检测器（与 detect_profile 同口径）。
-    let request = if request.uses_crypto_script() {
-        let detector = crate::network::detect::create_detector();
-        let addr = match detector.list_interfaces().await {
-            Ok(list) => crate::network::local_address_from(&list),
-            Err(e) => {
-                tracing::debug!("测试端点查询本机地址失败（脚本将收到空 local_ip）: {e}");
-                crate::network::LocalAddress::default()
-            }
-        };
-        request.with_local_address(&addr)
-    } else {
-        request
-    };
-    let report = run_http_login_once(&request).await;
-    registration.finish();
+    // `legacy_http_config_dropped`：老分享文件带着 v9 内联直连配置时，前端据此提示
+    // 「已忽略旧版直连配置，请到任务页重新配置」。字段始终回传（false 也表示明确结论），
+    // 免得前端在"没这个键"和"键为 false"之间猜。
     Ok(data(serde_json::json!({
-        "rendered_url": report.rendered_url,
-        "rendered_headers": report.rendered_headers,
-        "rendered_body": report.rendered_body,
-        "status": report.status,
-        "response_headers": report.response_headers,
-        "response_snippet": report.response_snippet,
-        "outcome": report.outcome,
-        "message": report.message,
-        "script_error": report.script_error,
-        "duration_ms": report.duration_ms,
+        "id": target_id,
+        "legacy_http_config_dropped": legacy_http_config_dropped,
     })))
 }
 
 /// POST /api/profiles/{id} — 创建 Profile
 ///
 /// body 必填 `name/username/password`（password 空串=不设独立密码）；
-/// 可选 `auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task` 与 PUT 同语义，
-/// 支持创建时一次带上编辑器内的全部字段。
+/// 可选 `auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task/active_http_task`
+/// 与 PUT 同语义，支持创建时一次带上编辑器内的全部字段。
 pub async fn create_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
+    State(tasks): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
     Json(body): Json<ProfileCreateBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -572,31 +451,11 @@ pub async fn create_profile(
     if let Some(login_channel) = body.login_channel {
         profile.login_channel = login_channel;
     }
-    if let Some(http_method) = body.http_method {
-        profile.http_method = http_method;
+    if let Some(active_http_task) = body.active_http_task {
+        profile.active_http_task = active_http_task;
     }
-    if let Some(http_url) = body.http_url {
-        profile.http_url = validate_http_login_url(&http_url)?;
-    }
-    if let Some(http_headers) = body.http_headers {
-        profile.http_headers = http_headers;
-    }
-    if let Some(http_body) = body.http_body {
-        profile.http_body = http_body;
-    }
-    if let Some(http_success_pattern) = body.http_success_pattern {
-        profile.http_success_pattern = http_success_pattern;
-    }
-    if let Some(http_failure_pattern) = body.http_failure_pattern {
-        profile.http_failure_pattern = http_failure_pattern;
-    }
-    if let Some(http_crypto_script) = body.http_crypto_script {
-        profile.http_crypto_script = http_crypto_script;
-    }
-    if let Some(v) = body.http_ignore_https_errors {
-        profile.http_ignore_https_errors = Some(v);
-    }
-    validate_http_templates(&profile)?;
+    // 直连渠道必须有可用的直连任务绑定（见 validate_http_task_binding 的说明）
+    validate_http_task_binding(&tasks, profile.login_channel, &profile.active_http_task).await?;
     profiles.create_profile(&target_id, profile).await?;
     tracing::info!(profile_id = %target_id, "创建 Profile");
     Ok(data(Value::String("ok".into())))
@@ -606,6 +465,7 @@ pub async fn create_profile(
 pub async fn update_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
+    State(tasks): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
     Json(body): Json<ProfileUpdateBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -648,31 +508,13 @@ pub async fn update_profile(
     if let Some(login_channel) = body.login_channel {
         profile.login_channel = login_channel;
     }
-    if let Some(http_method) = body.http_method {
-        profile.http_method = http_method;
+    if let Some(active_http_task) = body.active_http_task {
+        profile.active_http_task = active_http_task;
     }
-    if let Some(http_url) = body.http_url {
-        profile.http_url = validate_http_login_url(&http_url)?;
-    }
-    if let Some(http_headers) = body.http_headers {
-        profile.http_headers = http_headers;
-    }
-    if let Some(http_body) = body.http_body {
-        profile.http_body = http_body;
-    }
-    if let Some(http_success_pattern) = body.http_success_pattern {
-        profile.http_success_pattern = http_success_pattern;
-    }
-    if let Some(http_failure_pattern) = body.http_failure_pattern {
-        profile.http_failure_pattern = http_failure_pattern;
-    }
-    if let Some(http_crypto_script) = body.http_crypto_script {
-        profile.http_crypto_script = http_crypto_script;
-    }
-    if let Some(v) = body.http_ignore_https_errors {
-        profile.http_ignore_https_errors = Some(v);
-    }
-    validate_http_templates(&profile)?;
+    // 直连渠道必须有可用的直连任务绑定（与 create 同一口径，见
+    // validate_http_task_binding）。注意这里判的是**合并后**的渠道与绑定：只改渠道
+    // 不改绑定（或反之）时也必须整体有效。
+    validate_http_task_binding(&tasks, profile.login_channel, &profile.active_http_task).await?;
     profiles
         .update_profile(&id, profile, body.clear_password)
         .await?;
@@ -769,11 +611,11 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt; // oneshot
 
     use crate::config::{ConfigError, ProfileData, ProfileSummary, SettingsData};
     use crate::engine::EngineError;
+    use crate::tasks::{TaskApi, TaskError, TaskKind};
 
     #[derive(Default)]
     struct MockInner {
@@ -782,6 +624,8 @@ mod tests {
         auto_switch: bool,
         /// switch_profile 派发的 ApplyProfile 目标 ID（验证 Engine 联动）
         dispatched_apply_profile: Vec<String>,
+        /// 内存任务表：只服务 `validate_http_task_binding` 的存在性 + 类型判定
+        tasks: Vec<(String, TaskKind)>,
     }
 
     /// 内存 EngineApi：仅记录 ApplyProfile 派发（switch 路由联动验证）
@@ -822,6 +666,7 @@ mod tests {
                     username: p.username.clone(),
                     isp: p.isp.clone(),
                     active_task: p.active_task.clone(),
+                    active_http_task: p.active_http_task.clone(),
                     login_channel: p.login_channel,
                     gateway_ip: p.gateway_ip.clone(),
                     wifi_ssid: p.wifi_ssid.clone(),
@@ -901,6 +746,79 @@ mod tests {
                 Some(r) if !r.is_empty() => format!("ENC:{r}"),
                 _ => existing.to_string(),
             }
+        }
+    }
+
+    /// 内存 TaskApi：只实现 `validate_http_task_binding` 用到的 `load_task`，
+    /// 其余方法按「本域测试不触达」返回中性值（不 panic 以免掩盖误用）
+    struct MockTaskApi(Arc<std::sync::Mutex<MockInner>>);
+
+    #[async_trait::async_trait]
+    impl TaskApi for MockTaskApi {
+        async fn list_all_tasks(&self) -> Vec<crate::tasks::TaskSummary> {
+            Vec::new()
+        }
+
+        async fn load_task(&self, task_id: &str) -> Result<TaskKind, TaskError> {
+            self.0
+                .lock()
+                .unwrap()
+                .tasks
+                .iter()
+                .find(|(id, _)| id == task_id)
+                .map(|(_, kind)| kind.clone())
+                .ok_or_else(|| TaskError::TaskNotFound(task_id.to_string()))
+        }
+
+        async fn embed_task_config(&self, _task_id: &str, _params: &mut Value) -> bool {
+            false
+        }
+
+        async fn save_task(&self, _task_id: &str, _task: &TaskKind) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn delete_task(&self, _task_id: &str) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn get_task_detail(
+            &self,
+            task_id: &str,
+        ) -> Result<crate::tasks::TaskDetail, TaskError> {
+            let config = self.load_task(task_id).await?;
+            Ok(crate::tasks::TaskDetail {
+                summary: crate::tasks::TaskSummary {
+                    id: task_id.to_string(),
+                    name: config.common().name.clone(),
+                    description: config.common().description.clone(),
+                    task_type: config.type_name().to_string(),
+                    url: config.summary_url().to_string(),
+                    http_method: config.http_request_method(),
+                },
+                config,
+            })
+        }
+
+        async fn load_order(&self) -> crate::tasks::OrderData {
+            crate::tasks::OrderData::default()
+        }
+
+        async fn save_order(&self, _order: &crate::tasks::OrderData) -> Result<(), TaskError> {
+            Ok(())
+        }
+
+        async fn get_script_path(&self, _task_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+
+        fn has_task(&self, task_id: &str) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|(id, _)| id == task_id)
         }
     }
 
@@ -992,13 +910,14 @@ mod tests {
         }
     }
 
-    /// 双 State 提取的测试 Router：ProfileApi + ConfigApi + EngineApi 组合为单一 state 类型
+    /// 多 State 提取的测试 Router：ProfileApi + ConfigApi + EngineApi + TaskApi
+    /// 组合为单一 state 类型
     #[derive(Clone)]
     struct TestState {
         profiles: Arc<dyn ProfileApi>,
         config: Arc<dyn ConfigApi>,
         engine: Arc<dyn EngineApi>,
-        operations: Arc<WebOperations>,
+        tasks: Arc<dyn TaskApi>,
     }
 
     impl axum::extract::FromRef<TestState> for Arc<dyn ProfileApi> {
@@ -1019,10 +938,42 @@ mod tests {
         }
     }
 
-    impl axum::extract::FromRef<TestState> for Arc<WebOperations> {
+    impl axum::extract::FromRef<TestState> for Arc<dyn TaskApi> {
         fn from_ref(state: &TestState) -> Self {
-            state.operations.clone()
+            state.tasks.clone()
         }
+    }
+
+    /// 测试用直连任务（`validate_http_task_binding` 只关心类型与 ID）
+    fn http_task(id: &str) -> (String, TaskKind) {
+        (
+            id.to_string(),
+            TaskKind::Http(crate::tasks::HttpTaskConfig {
+                common: crate::tasks::CommonFields {
+                    task_id: id.to_string(),
+                    name: format!("直连任务 {id}"),
+                    description: String::new(),
+                },
+                url: "http://10.1.1.55/login".into(),
+                ..Default::default()
+            }),
+        )
+    }
+
+    /// 测试用浏览器任务：用于验证「绑定指向非直连任务」被拒
+    fn browser_task(id: &str) -> (String, TaskKind) {
+        (
+            id.to_string(),
+            TaskKind::Browser(crate::tasks::TaskConfig {
+                common: crate::tasks::CommonFields {
+                    task_id: id.to_string(),
+                    name: format!("浏览器任务 {id}"),
+                    description: String::new(),
+                },
+                url: "https://example.com".into(),
+                ..Default::default()
+            }),
+        )
     }
 
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
@@ -1031,19 +982,16 @@ mod tests {
             active: "default".into(),
             auto_switch: false,
             dispatched_apply_profile: Vec::new(),
+            tasks: vec![http_task("portal-http"), browser_task("portal-browser")],
         }));
         let state = TestState {
             profiles: Arc::new(MockProfileApi(inner.clone())),
             config: Arc::new(MockConfigApi(inner.clone())),
             engine: Arc::new(MockEngineApi(inner.clone())),
-            operations: Arc::new(WebOperations::new()),
+            tasks: Arc::new(MockTaskApi(inner.clone())),
         };
         let app = axum::Router::new()
             .route("/api/profiles", get(list_profiles))
-            .route(
-                "/api/profiles/http-login-test",
-                axum::routing::post(test_http_login),
-            )
             .route("/api/profiles/import", axum::routing::post(import_profile))
             .route("/api/profiles/{id}/export", get(export_profile))
             .route(
@@ -1260,7 +1208,8 @@ mod tests {
         assert!(created.password.is_empty());
     }
 
-    /// 创建时可选设置字段（网关/SSID/认证地址等）完整落盘，不再被静默丢弃
+    /// 创建时可选设置字段（网关/SSID/认证地址等）完整落盘，不再被静默丢弃。
+    /// 直连渠道的请求参数已不在方案里，方案只落**任务绑定**这条关系。
     #[tokio::test]
     async fn test_create_profile_persists_optional_settings() {
         let (app, inner) = mock_app();
@@ -1282,13 +1231,7 @@ mod tests {
                             "gateway_ip": "192.168.1.1",
                             "wifi_ssid": "Campus-Dorm-5G",
                             "login_channel": "http",
-                            "http_method": "POST",
-                            "http_url": "http://10.1.1.55/login",
-                            "http_headers": "X-Test: {username}",
-                            "http_body": "u={username}&p={password}",
-                            "http_success_pattern": "登录成功",
-                            "http_failure_pattern": "密码错误",
-                            "http_crypto_script": "function transform(ctx) { return {}; }"
+                            "active_http_task": "portal-http"
                         })
                         .to_string(),
                     ))
@@ -1313,13 +1256,210 @@ mod tests {
         assert_eq!(created.gateway_ip, "192.168.1.1");
         assert_eq!(created.wifi_ssid, "Campus-Dorm-5G");
         assert_eq!(created.login_channel, LoginChannel::Http);
-        assert_eq!(created.http_method, HttpLoginMethod::Post);
-        assert_eq!(created.http_url, "http://10.1.1.55/login");
-        assert_eq!(created.http_headers, "X-Test: {username}");
-        assert_eq!(created.http_body, "u={username}&p={password}");
-        assert_eq!(created.http_success_pattern, "登录成功");
-        assert_eq!(created.http_failure_pattern, "密码错误");
-        assert!(!created.http_crypto_script.is_empty());
+        assert_eq!(created.active_http_task, "portal-http");
+    }
+
+    // ============ 直连任务绑定校验（直连没有兜底任务，错绑必须在保存时就拦） ============
+
+    /// 直连渠道未绑定任务 → 400：放过去只会在登录时才失败，那时用户已离开保存页
+    #[tokio::test]
+    async fn test_create_http_profile_without_binding_is_rejected() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/no-binding")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "直连未绑定",
+                            "username": "u",
+                            "password": "p",
+                            "login_channel": "http"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("请为直连渠道选择一个直连任务"),
+            "文案须指向「选任务」: {json}"
+        );
+        assert!(
+            !inner
+                .lock()
+                .unwrap()
+                .profiles
+                .iter()
+                .any(|p| p.id == "no-binding"),
+            "校验失败不得半落盘"
+        );
+    }
+
+    /// 绑定一个不存在的任务 → 400（用户看到的是"不存在或不是直连任务"）
+    #[tokio::test]
+    async fn test_create_http_profile_with_missing_task_is_rejected() {
+        let (app, _inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/ghost-binding")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "幽灵任务",
+                            "username": "u",
+                            "password": "p",
+                            "login_channel": "http",
+                            "active_http_task": "nope"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("直连任务 nope 不存在或不是直连任务"),
+            "{json}"
+        );
+    }
+
+    /// 绑定一个浏览器任务 → 400：仅查存在性会放行，直连拿不到请求参数只能失败
+    #[tokio::test]
+    async fn test_create_http_profile_with_wrong_task_type_is_rejected() {
+        let (app, _inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/wrong-type")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "绑错类型",
+                            "username": "u",
+                            "password": "p",
+                            "login_channel": "http",
+                            "active_http_task": "portal-browser"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("不存在或不是直连任务"),
+            "{json}"
+        );
+    }
+
+    /// 更新路径同一口径：把既有方案切成 http 却不带绑定时同样 400
+    #[tokio::test]
+    async fn test_update_switch_to_http_requires_binding() {
+        let (app, inner) = mock_app();
+        {
+            // 先把 dorm 造成一个已绑定的直连方案，再验证"只改渠道不改绑定"的合并语义
+            let mut g = inner.lock().unwrap();
+            let dorm = g.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.login_channel = LoginChannel::Http;
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "改名" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "已绑空绑定的 http 方案改名也必须被拦（合并后整体无效）"
+        );
+
+        // 带上有效绑定后放行
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "改名",
+                            "active_http_task": "portal-http"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let dorm = g.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.active_http_task, "portal-http");
+        assert_eq!(dorm.name, "改名");
+    }
+
+    /// 浏览器渠道不强制绑定：残留的绑定不构成错误（切回浏览器后旧绑定无害）
+    #[tokio::test]
+    async fn test_browser_channel_ignores_http_binding() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "login_channel": "browser",
+                            "active_http_task": "ghost"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        assert_eq!(
+            g.profiles
+                .iter()
+                .find(|p| p.id == "dorm")
+                .unwrap()
+                .active_http_task,
+            "ghost"
+        );
     }
 
     /// 创建时非法认证地址 → 400（与 PUT 同一校验助手）
@@ -1564,62 +1704,6 @@ mod tests {
         );
     }
 
-    /// 测试端点可用已保存密码执行请求，且回显不泄露凭据。
-    #[tokio::test]
-    async fn test_http_login_test_uses_saved_password_and_redacts_report() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request).await;
-            let body = "登录成功 saved-secret";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let (app, inner) = mock_app();
-        {
-            let mut guard = inner.lock().unwrap();
-            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
-            dorm.username = "student".into();
-            dorm.password = "saved-secret".into();
-        }
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/profiles/http-login-test")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "profile_id": "dorm",
-                            "username": "student",
-                            "password": "",
-                            "http_method": "GET",
-                            "http_url": format!("http://{addr}/login?u={{username}}&p={{password}}"),
-                            "http_success_pattern": "登录成功"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        assert_eq!(json["data"]["outcome"], "success");
-        let serialized = json.to_string();
-        assert!(!serialized.contains("saved-secret"));
-        assert!(!serialized.contains("student"));
-    }
-
     // ============ 方案分享（导出 / 导入） ============
 
     /// 给名为 `id` 的方案填充可用于分享断言的全部字段
@@ -1639,75 +1723,8 @@ mod tests {
         p.wifi_ssid = "Campus-Dorm".into();
         p.active_task = "dorm-checkin".into();
         p.login_channel = LoginChannel::Http;
-        p.http_method = HttpLoginMethod::Post;
-        p.http_url = "http://10.1.1.55/login?u={username}".into();
-        p.http_headers = "Content-Type: application/x-www-form-urlencoded".into();
-        p.http_body = "user={username}&pass={password}".into();
-        p.http_success_pattern = "登录成功".into();
-        p.http_failure_pattern = "密码错误".into();
-        p.http_crypto_script = "function transform(ctx){ return {}; }".into();
-        p.http_ignore_https_errors = Some(false);
-    }
-
-    /// 保存路径必须与执行路径同一体积口径：超限配置不得静默落盘
-    /// （此前保存只校验 URL，用户看到"保存成功"却在登录时才报"过长"）
-    #[tokio::test]
-    async fn test_update_rejects_oversized_http_templates() {
-        let (app, inner) = mock_app();
-        let oversized = "a".repeat(129 * 1024); // 超过脚本上限 128 KiB
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/profiles/default")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "http_crypto_script": oversized }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let json = body_json(resp).await;
-        assert!(
-            json["error"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("过长"),
-            "错误文案应指出长度问题: {json}"
-        );
-        // 未落盘：方案里仍是空脚本
-        let g = inner.lock().unwrap();
-        let p = g.profiles.iter().find(|p| p.id == "default").unwrap();
-        assert!(p.http_crypto_script.is_empty(), "超限配置不得写入");
-    }
-
-    /// 证书策略为三态：显式 true/false 必须落盘，未提交时保持原值
-    #[tokio::test]
-    async fn test_update_persists_http_cert_policy() {
-        let (app, inner) = mock_app();
-        for value in [true, false] {
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/api/profiles/default")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({ "http_ignore_https_errors": value }).to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let g = inner.lock().unwrap();
-            let p = g.profiles.iter().find(|p| p.id == "default").unwrap();
-            assert_eq!(p.http_ignore_https_errors, Some(value));
-        }
+        // 直连请求参数已在任务里，方案侧只剩这条绑定（导出时同样会被清空）
+        p.active_http_task = "portal-http".into();
     }
 
     async fn export_of(app: &axum::Router, id: &str) -> Value {
@@ -1726,7 +1743,8 @@ mod tests {
     }
 
     /// 导出必须剔除账号与密码：密码是跨机器不可解的 ENC: 密文，原样带出会被
-    /// 接收方当作明文**再加密一次**（双重加密），导入后登录必然失败且无任何提示
+    /// 接收方当作明文**再加密一次**（双重加密），导入后登录必然失败且无任何提示。
+    /// 两条任务绑定（浏览器 / 直连）同样清空：任务属于本机资源。
     #[tokio::test]
     async fn test_export_strips_credentials_and_binding() {
         let (app, inner) = mock_app();
@@ -1742,19 +1760,32 @@ mod tests {
         // 密文本身也不得出现在响应任何位置
         assert!(!raw.contains("ENC:"), "导出体不得含密文: {raw}");
         assert!(!raw.contains("20230001"), "导出体不得含账号: {raw}");
-        // 方案绑定的浏览器任务不随方案迁移
+        // 任务绑定不随方案迁移：接收方多半没有同名任务，保留会让"看起来配好了但登录不对"
         assert_eq!(profile["active_task"], "");
+        assert_eq!(profile["active_http_task"], "");
 
-        // 分享所需的直连参数必须完整保留
+        // 方案自身的可分享字段完整保留（直连请求参数已不在方案里，改由任务承载）
         assert_eq!(profile["name"], "宿舍移动");
-        assert_eq!(profile["http_url"], "http://10.1.1.55/login?u={username}");
-        assert_eq!(profile["http_method"], "POST");
         assert_eq!(profile["login_channel"], "http");
-        assert_eq!(profile["http_body"], "user={username}&pass={password}");
-        assert_eq!(profile["http_success_pattern"], "登录成功");
-        assert_eq!(profile["http_failure_pattern"], "密码错误");
+        assert_eq!(profile["auth_url"], "http://10.1.1.55/");
+        assert_eq!(profile["gateway_ip"], "10.1.1.1");
         assert_eq!(profile["wifi_ssid"], "Campus-Dorm");
-        assert!(!profile["http_crypto_script"].as_str().unwrap().is_empty());
+        // 旧内联直连键不得再出现在导出体里（v9 的字段已不存在）
+        for key in [
+            "http_method",
+            "http_url",
+            "http_headers",
+            "http_body",
+            "http_success_pattern",
+            "http_failure_pattern",
+            "http_crypto_script",
+            "http_ignore_https_errors",
+        ] {
+            assert!(
+                profile.get(key).is_none(),
+                "导出体不应再含旧内联直连字段 {key}: {raw}"
+            );
+        }
         // 格式标记与来源信息
         assert_eq!(json["data"]["campus_auth_profile"], 1);
         assert_eq!(json["data"]["app_version"], env!("CARGO_PKG_VERSION"));
@@ -1776,9 +1807,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    /// 导出→导入往返：直连参数须逐字保留，凭据须为空待填
+    /// 导出→导入往返：可分享字段逐字保留，凭据与任务绑定留空待接收方自填
     #[tokio::test]
-    async fn test_export_import_roundtrip_preserves_http_config() {
+    async fn test_export_import_roundtrip_preserves_shareable_fields() {
         let (app, inner) = mock_app();
         seed_shareable(&inner, "dorm");
         let exported = export_of(&app, "dorm").await;
@@ -1798,6 +1829,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let new_id = json["data"]["id"].as_str().unwrap().to_string();
+        assert_eq!(json["data"]["legacy_http_config_dropped"], false);
 
         let g = inner.lock().unwrap();
         let imported = g
@@ -1806,15 +1838,88 @@ mod tests {
             .find(|p| p.id == new_id)
             .expect("导入的方案已落盘");
         assert_eq!(imported.login_channel, LoginChannel::Http);
-        assert_eq!(imported.http_method, HttpLoginMethod::Post);
-        assert_eq!(imported.http_url, "http://10.1.1.55/login?u={username}");
-        assert_eq!(imported.http_body, "user={username}&pass={password}");
-        assert_eq!(imported.http_success_pattern, "登录成功");
-        assert_eq!(imported.http_failure_pattern, "密码错误");
+        assert_eq!(imported.auth_url, "http://10.1.1.55/");
         assert_eq!(imported.gateway_ip, "10.1.1.1");
+        assert_eq!(imported.wifi_ssid, "Campus-Dorm");
+        // 任务绑定必须为空：接收方要自己选一个直连任务（前端据此提示）
+        assert_eq!(imported.active_http_task, "");
+        assert_eq!(imported.active_task, "");
         // 凭据留空，由接收方自填
         assert_eq!(imported.username, "");
         assert_eq!(imported.password, "");
+    }
+
+    /// 导入老分享文件（v9 内联 `http_url` 非空）：字段被忽略，但必须**明确回报**
+    /// `legacy_http_config_dropped`，否则用户看到的是"直连方案的请求地址凭空消失"
+    #[tokio::test]
+    async fn test_import_reports_dropped_legacy_http_config() {
+        let (app, inner) = mock_app();
+        let body = serde_json::json!({
+            "campus_auth_profile": 1,
+            "suggested_id": "legacy-dorm",
+            "profile": {
+                "name": "老方案",
+                "login_channel": "http",
+                "auth_url": "http://10.1.1.55/",
+                "http_method": "POST",
+                "http_url": "http://10.1.1.55/login?u={username}",
+                "http_headers": "Content-Type: application/x-www-form-urlencoded",
+                "http_body": "user={username}&pass={password}",
+                "http_success_pattern": "登录成功",
+                "http_failure_pattern": "密码错误",
+                "http_crypto_script": "function transform(ctx){ return {}; }",
+                "http_ignore_https_errors": false
+            }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["data"]["legacy_http_config_dropped"], true,
+            "老 payload 带着非空 http_url，必须回报已忽略: {json}"
+        );
+        let id = json["data"]["id"].as_str().unwrap().to_string();
+        let g = inner.lock().unwrap();
+        let imported = g.profiles.iter().find(|p| p.id == id).expect("已落盘");
+        assert_eq!(
+            imported.active_http_task, "",
+            "导入不得凭空绑定直连任务（接收方没有该任务）"
+        );
+        assert_eq!(imported.auth_url, "http://10.1.1.55/");
+    }
+
+    /// 仅空 `http_url` 的老文件不算"含旧配置"：不误报提示
+    #[tokio::test]
+    async fn test_import_legacy_flag_false_when_http_url_empty() {
+        let (app, _inner) = mock_app();
+        let body = serde_json::json!({
+            "campus_auth_profile": 1,
+            "profile": { "name": "空直连键", "http_url": "   " }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["data"]["legacy_http_config_dropped"], false);
     }
 
     /// 导入 ID 冲突时自动改名而非报 409，且**不得覆盖**既有方案
@@ -2089,58 +2194,27 @@ mod tests {
         assert!(msg.contains("更新版本"), "应提示来源版本更新: {msg}");
     }
 
-    /// 导入时校验直连地址：非法地址前置拒绝，不留到每次登录才失败
+    /// 非法枚举值须报错，而非静默退回默认（否则"导入成功但渠道被改"）。
+    /// 直连请求参数整体搬进任务后，方案侧只剩 `login_channel` 一个枚举。
     #[tokio::test]
-    async fn test_import_validates_http_url() {
+    async fn test_import_rejects_invalid_login_channel() {
         let (app, _inner) = mock_app();
-        for bad in ["ftp://10.1.1.1/login", "10.1.1.1/login", "http://"] {
-            let body = serde_json::json!({
-                "campus_auth_profile": 1,
-                "profile": { "name": "坏地址方案", "http_url": bad }
-            });
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/profiles/import")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "应拒绝地址: {bad}");
-        }
-    }
-
-    /// 非法枚举值须报错，而非静默退回默认（否则"导入成功但渠道被改"）
-    #[tokio::test]
-    async fn test_import_rejects_invalid_enums() {
-        let (app, _inner) = mock_app();
-        for (field, value) in [("login_channel", "curl"), ("http_method", "PATCH")] {
-            let body = serde_json::json!({
-                "campus_auth_profile": 1,
-                "profile": { "name": "枚举方案", field: value }
-            });
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/profiles/import")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::BAD_REQUEST,
-                "{field}={value} 应被拒"
-            );
-        }
+        let body = serde_json::json!({
+            "campus_auth_profile": 1,
+            "profile": { "name": "枚举方案", "login_channel": "curl" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "非法渠道应被拒");
     }
 
     /// 无名称的方案不可导入（无法命名也就无法提示用户）
@@ -2149,7 +2223,7 @@ mod tests {
         let (app, _inner) = mock_app();
         let body = serde_json::json!({
             "campus_auth_profile": 1,
-            "profile": { "name": "   ", "http_url": "http://10.1.1.1/login" }
+            "profile": { "name": "   " }
         });
         let resp = app
             .oneshot(
@@ -2172,7 +2246,7 @@ mod tests {
         let body = serde_json::json!({
             "data": {
                 "campus_auth_profile": 1,
-                "profile": { "name": "信封方案", "login_channel": "http", "http_url": "http://10.1.1.1/login" }
+                "profile": { "name": "信封方案", "login_channel": "http" }
             }
         });
         let resp = app

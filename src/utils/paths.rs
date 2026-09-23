@@ -25,6 +25,8 @@ pub const TASKS_DIR: &str = "tasks";
 pub const BROWSER_TASKS_DIR: &str = "browser";
 /// 脚本任务子目录名（位于 tasks/ 下）
 pub const SCRIPTS_DIR: &str = "scripts";
+/// http 直连任务子目录名（位于 tasks/ 下）
+pub const HTTP_TASKS_DIR: &str = "http";
 /// 定时任务目录名（位于 tasks/ 下）
 pub const SCHEDULED_DIR_NAME: &str = "scheduled";
 /// 定时任务执行历史子目录名（位于 tasks/scheduled/ 下）
@@ -106,6 +108,14 @@ pub fn browser_tasks_dir(base: &Path) -> PathBuf {
 /// 脚本任务目录 `<base>/tasks/scripts`
 pub fn scripts_dir(base: &Path) -> PathBuf {
     tasks_dir(base).join(SCRIPTS_DIR)
+}
+
+/// http 直连任务目录 `<base>/tasks/http`
+///
+/// 与 `browser` / `scripts` 平级：任务类型决定存储桶，同名任务切换类型时由
+/// TaskManager 负责清掉其他桶的残留，避免同一 id 出现两份定义。
+pub fn http_tasks_dir(base: &Path) -> PathBuf {
+    tasks_dir(base).join(HTTP_TASKS_DIR)
 }
 
 /// 定时任务目录 `<base>/tasks/scheduled`
@@ -206,7 +216,7 @@ pub fn same_existing_path(a: &Path, b: &Path) -> bool {
 /// 启动时一次性预建全部运行时目录（幂等）
 ///
 /// 覆盖：`config/`、`config/profiles/`、`tasks/browser`、`tasks/scripts`、
-/// `tasks/scheduled/history`、`logs/login_history`、`environment/`。
+/// `tasks/http`、`tasks/scheduled/history`、`logs/login_history`、`environment/`。
 /// 各服务构造内的 `create_dir_all` 保留为防御性幂等调用（测试直构服务时仍可用），
 /// 但启动权威路径只此一处。
 pub fn ensure_runtime_dirs(base: &Path) -> std::io::Result<()> {
@@ -214,6 +224,7 @@ pub fn ensure_runtime_dirs(base: &Path) -> std::io::Result<()> {
         profiles_dir(base),
         browser_tasks_dir(base),
         scripts_dir(base),
+        http_tasks_dir(base),
         scheduled_history_dir(base),
         login_history_dir(base),
         env_dir(base),

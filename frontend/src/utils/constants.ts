@@ -361,16 +361,8 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
   active_task: "",
   isp: "",
   login_channel: "browser",
-  http_method: "GET",
-  http_url: "",
-  http_headers: "",
-  http_body: "",
-  http_success_pattern: "",
-  http_failure_pattern: "",
-  http_crypto_script: "",
-  // null = 跟随全局 browser.ignore_https_errors（校园网门户多为自签名证书，
-  // 全局默认为 true；显式 true/false 才覆盖本方案）
-  http_ignore_https_errors: null,
+  /** 直连渠道绑定的直连任务 ID（空 = 未绑定；直连没有内置兜底任务，故必须显式选） */
+  active_http_task: "",
 };
 
 /**

@@ -57,6 +57,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 ├── config/                  # settings.json + profiles/*.json + .auth_token（鉴权）+ llm.json
 ├── tasks/
 │   ├── browser/             # 浏览器任务（*.json）
+│   ├── http/                # 直连任务（type=http，直连登录的请求参数）
 │   ├── scripts/             # 脚本任务（type=script）
 │   └── scheduled/           # 定时任务调度历史（history/）
 ├── logs/                    # 按日归档（受 logging.retention_days 控制，默认 7 天）
@@ -68,7 +69,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 > `.venv` 与 `captures/` / `debug/` 都在 `python_worker/` 下，**不在** `environment/`；`environment/` 只放 uv 与运行时状态。Playwright 浏览器放在各自平台的默认缓存（Windows `%LOCALAPPDATA%\ms-playwright`，macOS `~/Library/Caches/ms-playwright`，Linux `~/.cache/ms-playwright`），仅 Docker 通过 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` 改到镜像内。
 
-`settings.json` 为 v9 schema（`src/config/mod.rs::CURRENT_CONFIG_VERSION`，字段定义见 `src/config/schema.rs`），`config_version` 字段驱动迁移；密码字段落盘为 `ENC:` 前缀密文（`aes-gcm` + `zeroize`）。
+`settings.json` 为 v10 schema（`src/config/mod.rs::CURRENT_CONFIG_VERSION`，字段定义见 `src/config/schema.rs`），`config_version` 字段驱动迁移（v9 → v10 会把方案里的直连参数搬成独立的直连任务）；密码字段落盘为 `ENC:` 前缀密文（`aes-gcm` + `zeroize`）。
 
 ## 2. Web 控制台
 
@@ -79,8 +80,8 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 | 导航 | 编辑对象 | 存储 / 接口 |
 |------|----------|-------------|
 | 仪表盘 | —（状态总览与手动操作） | — |
-| **方案** | 账号、密码、认证地址、匹配规则、登录方式、直连参数 | `config/profiles/*.json`，`/api/profiles/*` |
-| **任务** | 浏览器任务 / 脚本 / 定时任务 / AI 生成浏览器任务 | `tasks/`，`/api/tasks`、`/api/scripts`、`/api/scheduler/jobs` |
+| **方案** | 账号、密码、认证地址、匹配规则、登录方式（浏览器任务 / 直连任务） | `config/profiles/*.json`，`/api/profiles/*` |
+| **任务** | 浏览器任务 / 直连任务 / 脚本 / 定时任务 / AI 生成浏览器任务 | `tasks/`、`/api/tasks`、`/api/scripts`、`/api/scheduler/jobs` |
 | **设置** | 检测 / 浏览器 / 任务与环境 / 系统 / 网络与更新 / 外观 | `config/settings.json`，`/api/config` |
 | 关于 | —（版本、更新与卸载） | — |
 
@@ -114,7 +115,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 「方案」页进入时**直接展示当前活跃方案**的编辑器（改账号是这一页最高频的用途）；顶栏下拉可切换方案，「当前使用」徽标标出自动登录实际使用的那个。点「返回方案列表」查看或新建其它方案。
 
-- 每个 Profile 含可选 `auth_url`（固定登录网址）、可选 `trigger_url`（自定义重定向触发地址）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）与登录方式（浏览器自动化 / 直连请求，后者见 `docs/guides/http-login-guide.md`）。
+- 每个 Profile 含可选 `auth_url`（固定登录网址）、可选 `trigger_url`（自定义重定向触发地址）、`username`/`password`（加密存储）、`isp`、`gateway_ip`/`wifi_ssid` 匹配规则、`active_task`（本方案用哪个浏览器任务，留空回退内置 `default`）、登录方式（浏览器自动化 / 直连请求，后者见 `docs/guides/http-login-guide.md`）与 `active_http_task`（直连渠道用哪个直连任务，**空 = 未绑定，直连登录不可用**；直连没有内置兜底任务，门户地址因人而异无法内置，故未绑定时方案编辑器会当场提示、保存被拒绝）。直连的请求参数不在方案里，而在「任务」页的直连任务中（`tasks/http/*.json`），同一个任务可被多个方案复用。
 - 这些字段**只在「方案」页编辑**；`GET /api/config` 顶层仍会扁平回传活跃方案的凭据（兼容既有客户端），但界面已不再从那里读写。
 - 浏览器登录网址**填写即直接使用，留空即跟随重定向**。留空时默认访问 `http://www.msftconnecttest.com/connecttest.txt`，可在“重定向高级设置”用 `trigger_url` 覆盖；触发地址必须为明文 `http`。Worker 首导航到触发地址并跟随门户跳转，`{{LOGIN_URL}}` 同步为触发地址；若常规公网探测全失败但本地网卡已连接，会谨慎启动一次浏览器触发门户，而不是一直显示“没网”（`docs/guides/task-writing-guide.md` 重定向登录）。
 - 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高（无用户可配的 `priority` 字段）；`auto_switch` 开启时 Engine 按 `monitor.profile_check_interval` 周期检测并自动切换（默认 **180 秒**，可配范围 60–600），切换后重置登录失败去重状态。**`auto_switch` 默认关闭**（2026-09-16 起，新配置生效）；关闭时方案页卡片可直接点击切换，开启时改由自动匹配决定（卡片不可手点）。
@@ -122,21 +123,22 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 ## 4. 任务系统
 
-### 两类任务
+### 三类任务
 
 - **浏览器任务**（`tasks/browser/*.json`，`type=browser`）：Playwright 步骤序列，见《任务编写指南》。**校园网自动登录使用的就是这一类**。
+- **直连任务**（`tasks/http/*.json`，`type=http`）：直连登录的请求参数（方法 / 请求地址 / 认证地址 / 请求头 / 请求内容 / 成功与失败关键字 / 可选的凭据变换脚本 / 可选的前置请求），**不启动浏览器、不需要 Python**。任务不含凭据，账号密码仍属方案；同一个任务可被多个方案复用。「前置请求」用于「先取令牌（如 CSRF token）再登录」的门户：那次取令牌与登录请求由同一个连接池顺序发出，令牌绑定 TCP 连接的门户因此也能直连。在侧栏「任务 → 直连任务」里编辑，用编辑器内的「发送测试请求」验证（要手填一次测试账号/密码），详细说明见 `docs/guides/http-login-guide.md`。
 - **脚本任务**（`tasks/scripts/*.json`，`type=script`）：`script_path` 或 `content` + `binary_path` + `args` + `work_dir` + `timeout`（`src/tasks/models.rs::ScriptTaskConfig`）。用于定时执行的辅助动作（打卡、签到等），**不参与登录认证**。
 
 > 历史 `type=shell` 已移除：遇到时反序列化明确报错并提示改用 `script`（`src/tasks/models.rs`）。同目录下曾有的 `shell` 任务需改写为 `.sh`/`.bat`/`.py` 脚本经 `binary_path` 执行。
 
-管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本均走 `TaskExecutor::execute`）；脚本面板复用上述 `tasks` 端点并另接 `GET /api/scripts/binaries`、`GET/PUT/DELETE /api/scripts/{id}`、`POST /api/scripts/run`（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。
-「用哪个浏览器任务」由各方案的 `active_task` 决定（在「方案」页的方案编辑器「登录方式」里选），没有全局端点。
+管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本均走 `TaskExecutor::execute`）；脚本面板复用上述 `tasks` 端点并另接 `GET /api/scripts/binaries`、`GET/PUT/DELETE /api/scripts/{id}`、`POST /api/scripts/run`（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。直连任务复用同一套 `tasks` 增删改查（按 `type` 分流），测试走 `POST /api/http-tasks/test`。
+「用哪个浏览器任务 / 直连任务」由各方案的 `active_task` / `active_http_task` 决定（在「方案」页的方案编辑器「登录方式」里选），没有全局端点。
 
 ### 日常操作
 
-- **任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。「任务」页分「浏览器任务」「脚本」「定时任务」「AI 生成浏览器任务」四个标签页，**只管编辑**；用哪个任务登录由方案决定（见下）。
-- **定时任务**：「任务」页的「定时任务」标签页，按 cron 调度**浏览器与脚本两类**任务（`src/scheduler`，状态在 `tasks/scheduled/`；创建时按 `target_id` 关联任务，类型由任务本体推导）。
-- **何时执行**：网络监测 Offline/Captive 时自动执行当前方案绑定的浏览器任务；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
+- **任务**：新建、编辑、复制、删除、排序、导入/导出单个任务。侧栏「任务」项下展开「浏览器任务」「直连任务」「脚本」「定时任务」「AI 生成浏览器任务」五个子页，**只管编辑**；用哪个任务登录由方案决定（见下），各子页的导入 / 仓库导入只列出自己那一类任务。
+- **定时任务**：侧栏「任务 → 定时任务」，按 cron 调度**浏览器与脚本两类**任务（`src/scheduler`，状态在 `tasks/scheduled/`；创建时按 `target_id` 关联任务，类型由任务本体推导）。直连任务不经此执行，其验证入口是任务编辑器里的「发送测试请求」。
+- **何时执行**：网络监测 Offline/Captive 时自动执行当前方案绑定的任务（浏览器渠道＝浏览器任务，直连渠道＝直连任务）；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
 
 ### 录制器：不手写 JSON
 

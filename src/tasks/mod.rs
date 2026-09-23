@@ -1,8 +1,12 @@
 //! 任务管理：TaskManager + TaskExecutor
 //!
-//! 本模块提供任务的文件 CRUD 管理（[`TaskManager`]）与脚本/浏览器任务的异步执行
-//! （[`TaskExecutor`]）。任务数据模型见 [`models`]；任务执行统一结果见 [`TaskResult`]；
-//! 统一错误类型见 [`TaskError`]。
+//! 本模块提供三类任务（浏览器 / 脚本 / http 直连）的文件 CRUD 管理（[`TaskManager`]）
+//! 与异步执行（[`TaskExecutor`]）。任务数据模型见 [`models`]；任务执行统一结果见
+//! [`TaskResult`]；统一错误类型见 [`TaskError`]。
+//!
+//! 注意执行侧的覆盖面：http 直连任务的执行接入属后续阶段（直连本身不经过 Python
+//! Worker，而由 `login::http_login` 发一次性请求），当前 [`TaskRunApi::execute`]
+//! 对 http 类型是显式拒绝而非静默回退。
 
 pub mod executor;
 pub mod loader;
@@ -103,6 +107,9 @@ impl TaskApi for TaskManager {
 #[async_trait::async_trait]
 pub trait TaskRunApi: Send + Sync {
     /// 统一执行入口：按任务类型分派。
+    ///
+    /// 当前仅覆盖浏览器 / 脚本两类；http 直连任务的执行接入属后续阶段，
+    /// 传入该类型会显式报错（不静默成功）。
     async fn execute(&self, task: &TaskKind) -> Result<TaskResult, TaskError>;
 }
 

@@ -124,10 +124,7 @@ describe("dirty 快照比对", () => {
     // 方案域字段一个都不能出现
     const profileKeys = [
       "username", "password", "auth_url", "trigger_url", "isp",
-      "active_task", "login_channel", "http_method", "http_url",
-      "http_headers", "http_body", "http_success_pattern",
-      "http_failure_pattern", "http_crypto_script", "clear_password",
-      "http_ignore_https_errors",
+      "active_task", "login_channel", "active_http_task", "clear_password",
     ];
     for (const key of profileKeys) {
       expect(payload, `保存载荷不得包含方案字段 ${key}`).not.toHaveProperty(key);
@@ -141,7 +138,7 @@ describe("dirty 快照比对", () => {
       username: "user",
       auth_url: "http://portal.example",
       login_channel: "http",
-      http_url: "http://10.0.0.1/login",
+      active_http_task: "dorm-portal",
       active_task: "hust",
       monitor: { enable_tcp_check: true },
     });

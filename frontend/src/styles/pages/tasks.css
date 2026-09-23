@@ -1,26 +1,68 @@
-/* 任务页 Tab 栏：复用设置页页签外观。设置页有 6 个页签，均分整条卡片是合适的；
-   本页只有 4 个，均分会让每个页签宽到 440px+。而沿用「满宽卡片 + 内容宽页签」又会在
-   右侧空出大段卡片（此前靠 margin-left:auto 把 AI 入口推到最右，那个入口移入
-   页签后空白就失去了依托）。故让卡片收缩到内容宽，成为一条紧凑的分段控件。 */
-.tasks-tabs {
-  margin-bottom: var(--space-md);
-  width: fit-content;
-  max-width: 100%;
+/* 任务页外壳：导航不在页内了。
+   五个面板的切换收进左侧主侧栏的「任务」分组（见 components/sidebar.css 的
+   .nav-group/.nav-children），本文件只负责正文。
+   此前页内那张竖排二级导航卡在 2280px 视口下离左边缘 400px 有余、四周全是留白，
+   像一张被丢在页面中间的卡片；且它把正文推到中间，与顶栏页标题（贴左）不同列。 */
+
+/* 左对齐（不是居中）+ **填满可用宽度**：与顶栏页标题同一起始列。居中会让标题贴左、
+   正文居中，在宽屏上读成两列；限宽则把 2280px 视口右侧白扔 500px 以上（用户实测直接
+   问「为啥右边空一块」）。列表 / 帮助卡这类内容本来就该铺满，真正怕拉长的是表单里
+   的单行输入框，那一层由各面板在自己的列里限（见 HttpTaskFields / 面板的列定义）。 */
+.tasks-page {
+  max-width: none;
 }
 
-/* min-width 保底 120px：文案较短的「脚本」不塌成小方块。页签宽度随文案自适应，
-   故「AI 生成浏览器任务」这类长标签不会挤压其它页签。 */
-.tasks-tabs .settings-tab {
-  flex: 0 1 auto;
-  min-width: 120px;
+/* 窄屏兜底导航：≤768px 时侧栏只剩图标、子项文字放不下（responsive.css 里整块隐藏），
+   这里才出现。>768px 一律不渲染为可见元素，也就不占纵向空间。 */
+.tasks-narrow-nav {
+  display: none;
 }
 
-/* 文案不换行：本页出现 9 字的「AI 生成浏览器任务」后，等分/压缩宽度会把
-   「浏览器任务」折成「浏览器任 / 务」这类断词（实测 760px 下四栏全部折行）。
-   窄屏改为让容器换行成多行（.settings-tabs 已有 flex-wrap: wrap），
-   而不是把文案压断。 */
-.tasks-tabs .settings-tab span {
-  white-space: nowrap;
+@media (max-width: 768px) {
+  .tasks-narrow-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+    margin-bottom: var(--space-md);
+    padding: var(--space-xs);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg-glass);
+  }
+
+  .tasks-narrow-nav-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
+  }
+
+  .tasks-narrow-nav-item:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  /* pill 形态下"左侧竖条"失去依托（宽度随文案变），改用整圈描边表达激活 */
+  .tasks-narrow-nav-item.active {
+    border-color: rgba(var(--accent-rgb), 0.3);
+    background: rgba(var(--accent-rgb), 0.08);
+    color: var(--accent);
+  }
+
+  .tasks-narrow-nav-icon {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+  }
 }
 
 .tasks-grid {
@@ -39,33 +81,9 @@
   min-width: 0;
 }
 
-/* 归属提示条：本页只是编辑器，真正生效的任务由方案绑定决定。
-   grid-column: 1 / -1 让它在两列布局下横跨整行（否则会占据左列、把任务列表挤到右列）；
-   .tasks-grid--empty 时布局退化为单列，该值同样成立。 */
-.tasks-notice {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid rgba(var(--primary-rgb), 0.2);
-  border-radius: var(--radius-sm);
-  background: rgba(var(--primary-rgb), 0.07);
-  color: var(--text-secondary);
-  font-size: var(--text-md);
-  line-height: 1.5;
-}
-
-.tasks-notice svg {
-  color: var(--primary);
-  flex-shrink: 0;
-}
-
-.tasks-notice a {
-  color: var(--primary);
-  font-weight: 600;
-  text-underline-offset: 2px;
-}
+/* 归属提示条（`.tasks-notice`）已退役：浏览器任务的「需在方案里选中才生效」与直连任务
+   同口径收进标题旁的 `?` 气泡——那是"首次配置读一次"的解释，不该常驻一整条横幅把内容
+   往下压。相关规则一并删除，避免留下没人引用的死样式。 */
 
 /* 空列表时帮助内容顺排到下方，避免左右两栏形成一侧空、一侧过长。 */
 .tasks-grid.tasks-grid--empty {

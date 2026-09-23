@@ -87,10 +87,19 @@ impl TaskExecutor {
     }
 
     /// 统一执行入口：按任务类型分派
+    ///
+    /// http 直连任务是**占位拒绝**，不是遗漏：直连不走 Python Worker，而是由
+    /// `src/login/http_login.rs` 发一次性请求，本入口（`/api/tasks/{id}/execute`、
+    /// 定时任务的 `target_id`）目前只面向浏览器/脚本两类；直连任务的验证入口是
+    /// 「发送测试请求」。后续阶段把直连执行接入本方法后替换此臂，现阶段显式报错
+    /// 而非静默回退，避免"任务能存能列出、执行却没反应"表现为假成功。
     pub async fn execute(&self, task: &TaskKind) -> Result<TaskResult, TaskError> {
         match task {
             TaskKind::Browser(cfg) => self.execute_browser(cfg).await,
             TaskKind::Script(cfg) => self.execute_script(cfg).await,
+            TaskKind::Http(_) => Err(TaskError::ValidationFailed(vec![
+                "http 直连任务的执行接入属后续阶段，当前不可执行".to_string(),
+            ])),
         }
     }
 
@@ -118,6 +127,11 @@ impl TaskExecutor {
                 cfg.timeout = timeout_secs;
                 self.execute_script(&cfg).await
             }
+            // 同一 execute：http 直连任务的执行接入属后续阶段，「超时覆写」对其暂无
+            // 语义（直连请求超时由 http_login 侧固定），故同样占位拒绝
+            TaskKind::Http(_) => Err(TaskError::ValidationFailed(vec![
+                "http 直连任务的执行接入属后续阶段，当前不可执行".to_string(),
+            ])),
         }
     }
 

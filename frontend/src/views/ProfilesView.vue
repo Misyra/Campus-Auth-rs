@@ -2,8 +2,8 @@
 /** 认证方案页：方案列表与编辑器、重定向检测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
 import LoginChannelField from "@/components/common/LoginChannelField.vue";
-import HttpLoginWizard from "@/components/common/HttpLoginWizard.vue";
 import { computed, onMounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { useProfiles } from "@/composables/useProfiles";
 import { useRedirectTest } from "@/composables/useRedirectTest";
 import { useCarrierField } from "@/composables/useCarrierField";
@@ -47,8 +47,16 @@ onMounted(async () => {
 // 编辑模式：true = 显示编辑器，false = 显示列表
 const showEditor = ref(false);
 
-// 直连登录配置向导：与编辑器共用同一份草稿（p.editingProfile），故关闭向导不丢改动
-const showHttpWizard = ref(false);
+const router = useRouter();
+
+/**
+ * 「配置直连任务」入口：请求参数在任务页编辑（方案只引用一个任务 id），
+ * 故此处只负责跳过去并把当前绑定的任务带上——任务页有该任务就直接打开它。
+ */
+function openHttpTaskConfig(): void {
+  const taskId = p.editingProfile.value?.active_http_task?.trim();
+  router.push({ name: "tasks-http", query: taskId ? { task: taskId } : {} });
+}
 
 /**
  * 「网络匹配」区折叠态：默认收起。
@@ -101,8 +109,6 @@ async function closeEditor() {
   await p.closeProfileEditor();
   if (!p.editingProfile.value) {
     showEditor.value = false;
-    // 编辑器已关闭时向导失去草稿，必须一并关闭，否则留下悬浮在全屏遮罩上的空向导
-    showHttpWizard.value = false;
   }
 }
 
@@ -204,10 +210,24 @@ const importProfileBody = computed(() => {
   return (root?.profile ?? null) as Record<string, unknown> | null;
 });
 
-/** 预览里是否有会被执行的凭据变换脚本——导入他人方案等于执行他人 JS，必须显式提示 */
-const importHasScript = computed(() => {
-  const script = importProfileBody.value?.http_crypto_script;
-  return typeof script === "string" && script.trim().length > 0;
+/**
+ * 预览里是否带**旧版**（v9 及以前）内联直连配置。
+ *
+ * v10 起直连请求参数只存在于独立的直连任务里，方案分享不再携带它们；旧文件里
+ * 残留的这些字段会被后端忽略——包括会执行的凭据变换脚本，必须在预览里点名，
+ * 否则用户会以为导入后直连可用（脚本也被静默丢弃）。
+ */
+const importLegacyHttpConfig = computed(() => {
+  const body = importProfileBody.value;
+  if (!body) return false;
+  return [
+    "http_url",
+    "http_headers",
+    "http_body",
+    "http_success_pattern",
+    "http_failure_pattern",
+    "http_crypto_script",
+  ].some((key) => typeof body[key] === "string" && String(body[key]).trim().length > 0);
 });
 
 const importing = ref(false);
@@ -400,7 +420,7 @@ async function confirmImport(): Promise<void> {
             <div class="form-group">
               <label for="prof-auth-url">认证地址（可选）</label>
               <input id="prof-auth-url" v-model.trim="loginUrl" type="text" placeholder="重定向检测成功时无需填写；无法重定向时手动填写" />
-              <span class="hint" v-if="p.editingProfile.value.login_channel === 'http'">直连登录使用下方的直连请求地址；这里仅作为脚本抓取认证页的来源，通常可留空。</span>
+              <span class="hint" v-if="p.editingProfile.value.login_channel === 'http'">直连登录的请求地址在「直连任务」里；这里是它的兜底来源——任务里留空认证地址时用这个，也用作抓取登录页的地址。</span>
               <span class="hint" v-else-if="followsRedirect">当前将打开默认触发地址并由浏览器跟随门户跳转；多数校园网无需填写。</span>
               <span class="hint" v-else>已填写时直接打开这个网址，不再经过重定向触发页。</span>
             </div>
@@ -414,7 +434,8 @@ async function confirmImport(): Promise<void> {
             </details>
           </div>
 
-          <!-- 登录方式：由 LoginChannelField 承载（与设置页、引导向导共用） -->
+          <!-- 登录方式：由 LoginChannelField 承载（渠道 + 该渠道用哪个任务 + 直连测试）；
+               直连请求的字段在「任务 · 直连任务」里编辑，此处只选择与验证 -->
           <div class="editor-section">
             <LoginChannelField
               v-if="p.editingProfile.value"
@@ -424,7 +445,7 @@ async function confirmImport(): Promise<void> {
               :password="p.editingProfile.value.password"
               :auth-url="p.editingProfile.value.auth_url"
               show-guide
-              @open-guide="showHttpWizard = true"
+              @open-guide="openHttpTaskConfig"
             />
           </div>
         </div>
@@ -433,18 +454,6 @@ async function confirmImport(): Promise<void> {
           <button class="btn btn-primary" @click="saveAndClose" :disabled="p.profileSaving.value">保存方案</button>
         </div>
       </div>
-
-      <!-- 直连登录配置向导：与编辑器共用同一草稿对象，关闭不丢改动 -->
-      <HttpLoginWizard
-        v-if="p.editingProfile.value"
-        :open="showHttpWizard"
-        :draft="p.editingProfile.value"
-        :profile-id="p.editingProfile.value._isNew ? undefined : p.editingProfile.value.id"
-        :username="p.editingProfile.value.username"
-        :password="p.editingProfile.value.password"
-        :auth-url="p.editingProfile.value.auth_url"
-        @close="showHttpWizard = false"
-      />
     </template>
 
     <!-- ===== 列表模式 ===== -->
@@ -592,11 +601,12 @@ async function confirmImport(): Promise<void> {
           导入后账号与密码为空，需要你填写自己的。方案名重复时会自动改名，不会覆盖已有方案。
         </div>
 
-        <!-- 凭据变换脚本是会被执行的代码：导入他人方案前必须让用户看到原文 -->
-        <div v-if="importHasScript" class="import-script-warn">
-          <strong>此方案包含凭据变换脚本，导入后登录时会执行以下 JavaScript：</strong>
-          <pre class="import-script">{{ importProfileBody?.http_crypto_script }}</pre>
-          <span class="hint">脚本在无网络、无文件访问的沙箱中运行（仅可做计算），请确认来源可信。</span>
+        <!-- 旧版分享文件里的直连配置不会被导入（含会被执行的脚本），必须点名 -->
+        <div v-if="importLegacyHttpConfig" class="import-script-warn">
+          <strong>该分享文件来自旧版本，其中的直连请求配置不会被导入</strong>
+          <span class="hint">
+            直连参数（含凭据变换脚本）现在是独立的「直连任务」，不再随方案分享。导入后请到「任务 · 直连任务」新建或从任务仓库导入，再在方案里选中它。
+          </span>
         </div>
       </div>
 

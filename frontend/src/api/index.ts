@@ -18,8 +18,8 @@ import type {
   DebugSession,
   EnvironmentStatus,
   HealthInfo,
-  HttpLoginTestPayload,
   HttpLoginTestResult,
+  HttpTaskTestPayload,
   InitStatus,
   LoginResultResponse,
   LoginHistoryItem,
@@ -194,7 +194,8 @@ export const profilesApi = {
   get: (id: string) =>
     http.get<ProfileDetailResponse>(`/api/profiles/${pathSegment(id)}`),
   // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password；
-  // 可选设置字段（auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task）与 PUT 同语义
+  // 可选设置字段（auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task/
+  // active_http_task/login_channel）与 PUT 同语义
   create: (
     id: string,
     payload: {
@@ -209,15 +210,8 @@ export const profilesApi = {
       wifi_ssid?: string;
       active_task?: string;
       login_channel?: Profile["login_channel"];
-      http_method?: Profile["http_method"];
-      http_url?: string;
-      http_headers?: string;
-      http_body?: string;
-      http_success_pattern?: string;
-      http_failure_pattern?: string;
-      http_crypto_script?: string;
-      /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案覆盖 */
-      http_ignore_https_errors?: Profile["http_ignore_https_errors"];
+      /** 直连渠道绑定的直连任务 ID（空 = 未绑定；直连没有内置兜底任务） */
+      active_http_task?: string;
     },
   ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   save: (id: string, payload: ProfileUpdatePayload) =>
@@ -227,8 +221,6 @@ export const profilesApi = {
   /** 导入分享的方案；ID 冲突时后端自动改名，返回值给出实际 ID */
   import: (payload: ProfileSharePayload) =>
     http.post<ProfileImportResult>("/api/profiles/import", payload),
-  testHttpLogin: (payload: HttpLoginTestPayload) =>
-    http.post<HttpLoginTestResult>("/api/profiles/http-login-test", payload, { timeout: 30000 }),
   delete: (id: string) => http.delete<MutationResult>(`/api/profiles/${pathSegment(id)}`),
   setActive: (id: string) => http.post<MutationResult>("/api/profiles/switch", { profile_id: id }),
   detect: () => http.post<NetworkDetectResult>("/api/profiles/detect"),
@@ -500,6 +492,18 @@ export const tasksApi = {
   order: (order: { all: string[]; scripts: string[] }) => http.post<MutationResult>("/api/tasks/order", order),
   import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),
   export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${pathSegment(id)}`),
+};
+
+/**
+ * 直连任务（`type: "http"`）。
+ *
+ * 列表 / 详情 / 保存 / 删除 / 排序 / 导入导出都复用 `tasksApi`（后端一套 CRUD 认
+ * `type` 分派），只有测试请求走独立端点：它接受**未保存的草稿**或已保存任务 id，
+ * 与方案无关（方案编辑器另传 profile_id 取得凭据回退）。
+ */
+export const httpTasksApi = {
+  test: (payload: HttpTaskTestPayload) =>
+    http.post<HttpLoginTestResult>("/api/http-tasks/test", payload, { timeout: 30000 }),
 };
 
 /** 定时任务 */

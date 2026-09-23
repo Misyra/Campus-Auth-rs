@@ -211,6 +211,24 @@ async fn http_login_succeeds_without_python_or_worker_setup() {
         token: wait_token(dir.path()).await,
     };
     let portal_base = portal.base();
+    // 直连配置先落成一个直连任务（`tasks/http/<id>.json`）：v10 起方案里不再有
+    // 请求地址/方法/判定关键字等字段，方案只持有 `active_http_task` 这条绑定。
+    // 顺序不能反——保存方案时会校验绑定指向的任务存在且类型为 http。
+    api.request(
+        "PUT",
+        "/api/tasks/portal-http",
+        Some(json!({
+            "type": "http",
+            "task_id": "portal-http",
+            "name": "直连门户",
+            "method": "POST",
+            "url": format!("{portal_base}/login"),
+            "body": "username={username}&password={password}",
+            "success_pattern": "登录成功",
+            "failure_pattern": "账号或密码错误"
+        })),
+    )
+    .await;
     api.request(
         "PUT",
         "/api/profiles/default",
@@ -218,11 +236,7 @@ async fn http_login_succeeds_without_python_or_worker_setup() {
             "username": "testuser",
             "password": "testpass",
             "login_channel": "http",
-            "http_method": "POST",
-            "http_url": format!("{portal_base}/login"),
-            "http_body": "username={username}&password={password}",
-            "http_success_pattern": "登录成功",
-            "http_failure_pattern": "账号或密码错误"
+            "active_http_task": "portal-http"
         })),
     )
     .await;
@@ -241,6 +255,35 @@ async fn http_login_succeeds_without_python_or_worker_setup() {
         })),
     )
     .await;
+
+    // 任务测试端点（方案编辑器入口）：只给 task_id + profile_id，密码留空用方案已存密码。
+    // 这条同时验证「新端点 → 已保存任务 → 方案凭据」在真实二进制里真的连通，
+    // 而不只是 mock 单测通过。
+    let probe = api
+        .request(
+            "POST",
+            "/api/http-tasks/test",
+            Some(json!({
+                "task_id": "portal-http",
+                "profile_id": "default",
+                "username": "testuser",
+                "password": "",
+                "fetch_page": false
+            })),
+        )
+        .await;
+    assert_eq!(probe["outcome"], "success", "直连测试端点应成功: {probe}");
+    assert!(
+        probe["rendered_url"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/login"),
+        "测试端点渲染地址应来自直连任务的 url: {probe}"
+    );
+    assert!(
+        !probe.to_string().contains("testpass"),
+        "测试响应不得回显方案密码: {probe}"
+    );
 
     let result = api.request("POST", "/api/login", Some(json!({}))).await;
     assert_eq!(result["success"], true, "直连登录应成功: {result}");

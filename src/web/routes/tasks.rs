@@ -74,9 +74,17 @@ pub async fn create_task(
             content: body.script,
             ..Default::default()
         }),
+        // 直连任务：这里只建最小骨架（地址 + 名称），请求头/体/判定关键字/脚本等
+        // 由任务编辑器随后补齐。地址允许先留空——save_task 的校验只要求 http 任务
+        // 的地址在**非空时**必须合法，占位保存后再填也不报错。
+        Some("http") => crate::tasks::TaskKind::Http(crate::tasks::HttpTaskConfig {
+            common,
+            url: body.url.unwrap_or_default(),
+            ..Default::default()
+        }),
         Some(other) => {
             return Err(ApiError::BadRequest(format!(
-                "未知任务类型 kind: {other}（支持 browser / script）"
+                "未知任务类型 kind: {other}（支持 browser / script / http）"
             )));
         }
     };
@@ -333,6 +341,7 @@ mod tests {
                     name: kind.common().name.clone(),
                     description: kind.common().description.clone(),
                     task_type: kind.type_name().to_string(),
+                    ..TaskSummary::default()
                 })
                 .collect()
         }
@@ -380,6 +389,7 @@ mod tests {
                     name: kind.common().name.clone(),
                     description: kind.common().description.clone(),
                     task_type: kind.type_name().to_string(),
+                    ..TaskSummary::default()
                 },
                 config: kind,
             })
@@ -538,6 +548,75 @@ mod tests {
                 .map(|(_, k)| k),
             Some(TaskKind::Script(_))
         ));
+    }
+
+    /// 创建任务（http 直连类型）：最小骨架只需地址与名称，其余字段走默认值
+    #[tokio::test]
+    async fn test_create_task_http_kind() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "h1",
+                            "name": "直连",
+                            "kind": "http",
+                            "url": "http://10.1.1.55/login"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // 独立作用域持有 guard：断言完即释放，避免跨后续 await 持锁
+        {
+            let inner = inner.lock().unwrap();
+            let Some(TaskKind::Http(cfg)) = inner
+                .tasks
+                .iter()
+                .find(|(id, _)| id == "h1")
+                .map(|(_, k)| k)
+            else {
+                panic!("应为 http 任务");
+            };
+            assert_eq!(cfg.common.task_id, "h1");
+            assert_eq!(cfg.common.name, "直连");
+            assert_eq!(cfg.url, "http://10.1.1.55/login");
+            // 未提供的字段一律为默认（不是从别的类型残留过来的值）
+            assert_eq!(cfg.method, crate::tasks::HttpRequestMethod::Get);
+            assert!(cfg.headers.is_empty() && cfg.body.is_empty());
+            assert_eq!(cfg.ignore_https_errors, None);
+        }
+
+        // 未知类型错误文案必须列出 http，否则用户按报错改仍会被拒
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"id": "x1", "name": "拼错", "kind": "httpp"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        let msg = json["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("browser / script / http"),
+            "有效类型列表应含 http: {msg}"
+        );
     }
 
     /// 查询不存在任务返回 404

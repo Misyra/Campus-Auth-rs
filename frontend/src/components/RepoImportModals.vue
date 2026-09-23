@@ -5,6 +5,10 @@
  * 导致设置·任务页点「从仓库导入」无反应、切到任务列表页才弹出的错位 bug，
  * 故提取为共享组件，两处入口（TasksView / 任务与环境设置页）各自挂载。
  *
+ * 索引是混合的（同一个仓库同时承载浏览器任务与直连任务），弹窗只呈现
+ * `repoKind` 那一类：标题、过滤提示与导入去向都随它变化，避免"看着是浏览器任务、
+ * 导进去变成直连草稿"这种错位。
+ *
  * 列表为左右分栏：左侧任务条目（含 64px 缩略图），点选后右侧展示
  * 截图大图与完整信息；无 screenshot 定义的任务显示「暂无截图」占位。
  * 详情区大图可点击放大（三层弹窗：导入列表 > 放大预览，免责声明互斥）。
@@ -19,12 +23,26 @@ import Modal from "./common/Modal.vue";
 import IconApp from "./common/IconApp.vue";
 import { repoApi } from "@/api";
 import { TASK_REPO_SOURCES } from "@/utils/constants";
+import { repoSourceLabel, repoSourceUrl } from "@/utils/repoSource";
 import { useRepoImport } from "@/composables/useRepoImport";
 
 const repo = useRepoImport();
 
 /** 源选项（模板直接遍历，避免在模板里硬编码按钮——增删源只改 constants） */
 const sourceOptions = TASK_REPO_SOURCES;
+
+/** 当前浏览的条目类型（决定标题、过滤提示与导入去向） */
+const kind = computed(() => repo.repoImport.value.repoKind);
+
+/** 弹窗标题：直连与浏览器任务共用同一个索引，标题必须说清在看哪一类 */
+const modalTitle = computed(() => (kind.value === "http" ? "从云端仓库导入直连任务" : "从云端仓库导入浏览器任务"));
+
+/** 当前类型的条目在索引里的存在性提示：混合索引里"搜不到"常是切错了 Tab，而不是真的没有 */
+const kindEmptyHint = computed(() =>
+  kind.value === "http"
+    ? "当前只显示直连任务条目（浏览器任务请到「浏览器任务」Tab 导入）。"
+    : "当前只显示浏览器任务条目（直连任务请到「直连任务」Tab 导入）。",
+);
 
 /** 图片加载失败的任务 id 集合：缩略图/大图统一回退占位 */
 const brokenImages = ref(new Set<string>());
@@ -46,6 +64,11 @@ function thumbUrl(taskId: string, screenshot?: string): string {
 function isOfficialTask(author?: string): boolean {
   return author?.trim().toLowerCase() === "misyra";
 }
+
+/** 来源仓库链接（改编自他人脚本时在索引里标注；只放行 http(s)，见 repoSource.ts） */
+const sourceUrl = computed(() => repoSourceUrl(repo.repoImport.value.selected?.source));
+/** 来源链接文字（去掉协议与 www.，否则半行都是前缀） */
+const sourceLabel = computed(() => repoSourceLabel(sourceUrl.value));
 
 /** 标记某任务截图加载失败，缩略图与大图同步回退占位 */
 function markImageBroken(taskId: string): void {
@@ -90,7 +113,7 @@ watch(
 </script>
 
 <template>
-  <Modal :open="repo.repoImport.value.visible" title="从云端仓库导入任务" size="xl" @close="repo.closeRepoImport">
+  <Modal :open="repo.repoImport.value.visible" :title="modalTitle" size="xl" @close="repo.closeRepoImport">
     <!-- 来源选择器与「加载索引」同行：点它会用哪个源，一看便知 -->
     <div class="repo-import-toolbar">
       <div class="repo-import-field">
@@ -115,6 +138,8 @@ watch(
     <!-- 来源说明：「国内用户建议用 Gitee」的提示由 TASK_REPO_SOURCES 的 hint 承载，
          自定义源无 hint 故整行不渲染 -->
     <p v-if="repo.currentSource.value.hint" class="repo-source-hint">{{ repo.currentSource.value.hint }}</p>
+    <!-- 类型过滤提示：混合索引下"列表里没有想找的任务"多数是切错了 Tab，先说清在看哪一类 -->
+    <p class="repo-source-hint">{{ kindEmptyHint }}</p>
 
     <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
       <div class="form-group form-group--flush"><input v-model="repo.repoImport.value.url" type="text" placeholder="输入远程索引 URL" /></div>
@@ -158,6 +183,19 @@ watch(
             <span v-if="isOfficialTask(repo.repoImport.value.selected.author)" class="badge badge--sm badge--success repo-item-official">官方任务</span>
           </h4>
           <p class="repo-detail-desc">{{ repo.repoImport.value.selected.description }}</p>
+          <!-- 来源仓库：任务改编自他人脚本时标出处，可点开看原始实现。地址来自远端
+               索引，故经 repoSourceUrl 只放行 http(s)（见 utils/repoSource.ts） -->
+          <a
+            v-if="sourceUrl"
+            class="repo-detail-source"
+            :href="sourceUrl"
+            target="_blank"
+            rel="noopener"
+            title="本任务改编自该仓库，点开查看原始实现"
+          >
+            <IconApp name="external-link" class="icon-sm" />
+            <span>来源：{{ sourceLabel }}</span>
+          </a>
           <div v-if="selectedScreenshotUrl && !brokenImages.has(repo.repoImport.value.selected.id)" class="repo-detail-shot">
             <img
               :src="selectedScreenshotUrl"
@@ -198,8 +236,22 @@ watch(
 
   <!-- 免责弹窗：必须显式确认/取消，禁用遮罩与 ESC 关闭 -->
   <Modal :open="!!repo.repoImport.value.disclaimer" title="免责声明" :close-on-overlay="false" :close-on-esc="false" @close="repo.cancelRepoDisclaimer">
-    <p>从远程仓库导入的任务由社区成员提供，未经审核验证。</p>
-    <p class="repo-disclaimer-warn"><strong>请仔细阅读并确认任务内容后再使用。</strong>任务中填入的账号密码将在执行时提交到第三方网站，请确认目标网站可靠。</p>
+    <p>从远程仓库导入的{{ kind === 'http' ? '直连任务' : '任务' }}由社区成员提供，未经审核验证。</p>
+    <p class="repo-disclaimer-warn">
+      <strong>请仔细阅读并确认任务内容后再使用。</strong>
+      <template v-if="kind === 'http'">
+        直连任务会把方案里的账号密码提交到任务中写明的地址，请确认该地址是你的校园网网关，而不是被改过的第三者接口。
+      </template>
+      <template v-else>
+        任务中填入的账号密码将在执行时提交到第三方网站，请确认目标网站可靠。
+      </template>
+    </p>
+    <!-- 凭据变换脚本是要在登录时**执行**的 JavaScript：与浏览器任务的 eval/custom_js
+         同级的风险，必须在导入前就说清（保存时另有一次确认，此处不能只剩"未经审核"） -->
+    <p v-if="kind === 'http'" class="repo-disclaimer-warn">
+      <strong>直连任务可能包含凭据变换脚本。</strong>
+      导入后登录时会执行其中的 JavaScript（沙箱内运行、无网络与文件访问），请确认来源可信。
+    </p>
     <template #footer>
       <button class="btn btn-secondary" @click="repo.cancelRepoDisclaimer()">取消</button>
       <button class="btn btn-primary" @click="repo.acceptRepoDisclaimer()">确认导入</button>
@@ -249,6 +301,10 @@ watch(
 .repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
 .repo-detail-name { font-size: var(--text-md); font-weight: 600; }
 .repo-detail-desc { font-size: var(--text-sm); color: var(--text-secondary); }
+/* 来源仓库：与描述同层次的一行小链接，不抢主操作（导入按钮才是主操作） */
+.repo-detail-source { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; font-size: var(--text-xs); color: var(--text-muted); text-decoration: none; }
+.repo-detail-source span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo-detail-source:hover { color: var(--accent); text-decoration: underline; }
 .repo-detail-shot { position: relative; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--border); }
 .repo-detail-shot img { width: 100%; display: block; }
 .repo-detail-shot-img { cursor: zoom-in; }

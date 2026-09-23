@@ -377,7 +377,7 @@ impl MonitorService {
             && assessment.status != NetworkStatus::Online
         {
             let auth_endpoint = if rt.profile.login_channel == crate::config::LoginChannel::Http {
-                // 直连渠道使用独立的 http_url，auth_url 只是可选的页面抓取来源，
+                // 直连渠道使用独立的直连任务的 url，auth_url 只是可选的页面抓取来源，
                 // 不能因其留空把有效的直连方案误判为配置缺失。
                 AuthEndpointState::NotChecked
             } else if rt.profile.uses_redirect_login() {

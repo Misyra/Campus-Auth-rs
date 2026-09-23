@@ -9,7 +9,7 @@
 
 ## 功能指南
 
-- [直连请求登录使用指南](http-login-guide.md) — 免 Python / 浏览器的 HTTP 直连登录：怎么抓门户请求、占位符、成功/失败判定、凭据变换脚本、常见问题（软件内「直连配置向导」是本指南的分步版本）
+- [直连请求登录使用指南](http-login-guide.md) — 免 Python / 浏览器的 HTTP 直连登录：怎么抓门户请求、占位符、成功/失败判定、凭据变换脚本、常见问题（软件内「直连配置向导」位于「任务」页的直连任务编辑器里，是本指南的分步版本）
 - [任务使用手册](task-manual.md) — 日常管理、录制器、调试、API 一览
 - [任务编写指南](task-writing-guide.md) — 浏览器任务 JSON 详解（步骤类型、变量、frame、success_condition、选择器）
 - [自定义脚本指南](custom-script-guide.md) — `script` 任务（`tasks/scripts/`）与 `POST /api/scripts/run` 直跑

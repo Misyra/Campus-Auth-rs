@@ -148,7 +148,7 @@ describe("httpTestOutcomeHint", () => {
 describe("httpConfigGaps", () => {
   it("三项齐备时无缺口", () => {
     expect(
-      httpConfigGaps({ username: "20230001", password: "pw", http_url: "http://10.0.0.1/login" }),
+      httpConfigGaps({ username: "20230001", password: "pw", url: "http://10.0.0.1/login" }),
     ).toEqual([]);
   });
 
@@ -161,21 +161,21 @@ describe("httpConfigGaps", () => {
   it("已保存方案不把空密码算作缺口（后端按 profile_id 回退本机已保存凭据）", () => {
     expect(
       httpConfigGaps(
-        { username: "u", password: "", http_url: "http://10.0.0.1/login" },
+        { username: "u", password: "", url: "http://10.0.0.1/login" },
         { hasSavedProfile: true },
       ),
     ).toEqual([]);
     // 同一输入在未保存方案下必须报缺密码——否则用户点测试只会拿到后端的 400
     expect(
       httpConfigGaps(
-        { username: "u", password: "", http_url: "http://10.0.0.1/login" },
+        { username: "u", password: "", url: "http://10.0.0.1/login" },
         { hasSavedProfile: false },
       ),
     ).toEqual(["密码"]);
   });
 
   it("纯空白按缺失处理", () => {
-    expect(httpConfigGaps({ username: "  ", password: "\t", http_url: " " })).toEqual([
+    expect(httpConfigGaps({ username: "  ", password: "\t", url: " " })).toEqual([
       "账号",
       "密码",
       "请求地址",

@@ -649,7 +649,7 @@
   line-height: 1.6;
 }
 
-/* 脚本告警：导入他人方案 = 执行他人 JS，用警示色强提示而非普通说明色 */
+/* 旧版分享文件告警：直连配置不再随方案分享，用警示色点名而非普通说明色 */
 .import-script-warn {
   display: flex;
   flex-direction: column;
@@ -662,22 +662,6 @@
   color: var(--warning-text);
   font-size: var(--text-sm);
   line-height: 1.6;
-}
-
-/* 脚本原文：等宽 + 限高滚动，长脚本（eportal 示例）不撑破弹窗 */
-.import-script {
-  margin: 0;
-  padding: 10px;
-  max-height: 240px;
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: var(--bg-modal);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 /* 响应式：折叠断点统一 768px（与全局 responsive.css 对齐） */

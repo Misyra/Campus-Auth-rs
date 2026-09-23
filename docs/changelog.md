@@ -105,6 +105,268 @@
 - 已知问题（`docs/known-issues.md`，含 E2 定时任务手动运行的 toast 语义、E3 任务卡「上次」结果不即时刷新）**有意不写入发布说明**，仅在已知问题清单中保留。
 - 未在本轮处理（记此备查）：`docs/changelog.md` 中 80 余个历史条目标题仍带「开发中（日期 …）」前缀，属已合入条目，保留以维持按日期倒序的可追溯性，不做批量改写。
 
+## 开发中（2026-09-23 直连渠道新增「前置请求」：令牌绑连接的门户可直连 + 河南科技大学直连任务条目）
+
+### 背景
+
+- 用户给出一个实测有效的登录脚本（`heragehome/haust-auto-login`，河南科技大学裕达 / 大学掌体系，认证服务器 `10.100.51.1`）：先 `GET /api/csrf-token` 取令牌、再 `POST /api/account/login` 提交账号密码，并问能否收进默认任务仓库、在条目里标出原仓库地址。
+- 这套协议的硬约束写在原脚本头部：**CSRF 令牌绑定 TCP 连接**——「取 token 与登录必须走同一条 keep-alive 连接，否则服务器返回 HTTP 400 `{"error":"CSRF token mismatch"}`」。而直连管线当时有两个拦路点：一次登录**只发一个请求**，且**抓登录页与发登录各自 `build_client` 一个 `reqwest::Client`**（连接池挂在 Client 上、不共享）——所以是能力缺失，不是配置能绕过的。
+- 用户三选一确认路线：**改代码补「先取 token + 同一 client」能力**；提交方式：我开分支提 PR、他合并。
+- 顺带发现一个真缺陷：`{local_ip}` / `{local_mac}` 此前只在「配了加密脚本」时才查询网卡，于是「模板里写了 `{local_ip}` 但没配脚本」的任务会**静默发出空 IP**（把本机 IP 当必填参数的门户会请求照发、门户照拒，用户看不出是哪个环节空了）。
+- **过程中的一次越界与撤回（记此备查）**：用户提到"两个脚本"时只给了一个链接，我据此外推到另一个**私有**仓库里找第二套协议，并把由它反推出来的参数做成了仓库条目写进 PR。用户指出未经许可翻私有仓库后，该条目（连同索引条目与 README 行）已从分支与 PR 中撤下，分支 force-push、PR 说明改写，只保留来源可公开引用的这一条。教训：**用户没给的来源不要自己去找**，缺材料先问。
+
+### 实现
+
+- **数据结构（`src/tasks/models.rs`）**：新增 `HttpPreRequest`（`method` / `url` / `headers` / `body` / `extract` / `name`）与 `HttpTaskConfig.pre_request: Option<HttpPreRequest>`：`skip_serializing_if` 保证未配置时不往老任务文件里塞 `"pre_request": null`，老文件缺键解析为 `None`。形状判据（`validate` / `extract_path` / `placeholder_name`）放在 tasks 层：保存路径只拿到 JSON 值、执行路径在 login 层，两者必须同源（与 `auth_url` 的分工一致），否则会出现「存得下、登不上」的错位。
+- **执行管线（`src/login/http_login.rs`）**：`build_client` 去掉 `timeout` 参数，超时改由每个请求的 `RequestBuilder::timeout` 单独给（抓登录页 5s / 前置请求 10s / 登录 20s）——**整次尝试只建一个 Client**（登录页抓取、前置请求、登录请求三处共用），连接池因此会复用同一条 keep-alive 连接；`fetch_login_page` / `send_http` 改为收 `&Client`；`run_once` 新增第 1.5 步「前置请求」（渲染模板 → 发送 → 按 `json:点号路径` 取值 → 注册成占位符 → 再渲染登录请求）。失败即终态，且用新抽出的 `abort_report` 统一组装报告——报告里带的是**卡住那一步**的请求与响应（前置请求失败时展示前置请求的地址与响应，而不是一片空白）。取到的值插入 vars 后自动进脱敏字典（`collect_secrets` 覆盖非内置键），令牌在日志、历史与结果面板里都是 `***`。
+- **取值与校验**：取值只支持 `json:<字段>[.<字段>...]`，容忍 JSONP 包裹（`dr1003({...})`）与前后脏字符；新增 `validate_pre_request`（形状委托给 `HttpPreRequest::validate`，另加执行侧体积上限）与 `loader.rs::validate_task` 的 http 分支校验（保存/导入闸门）；新增 `MAX_HTTP_URL_BYTES` 并给主请求 URL 也补上体积上限（此前只有登录侧校验）。
+- **修掉 `{local_ip}` 静默发空值**：新增 `HttpLoginRequest::needs_local_address()`——脚本要读 `ctx.local_ip`/`ctx.local_mac`，**或** url/headers/body/前置请求里写了 `{local_ip}`/`{local_mac}` 都要查一次网卡；登录路径（`src/login/mod.rs`）与测试端点（`src/web/routes/http_tasks.rs`）都改用它。
+- **前端**：`api/types.ts` 新增 `HttpPreRequest` 与 `HttpTaskConfig.pre_request`；`utils/httpTask.ts` 草稿新增 6 个平铺字段，**地址留空即不需要前置请求**（不另设开关：开关与字段两份状态会各自漂移），载荷在地址为空时发 `null`，`httpTaskDraftGaps` 覆盖三种缺口（填了地址没填取值方式 / 取值方式前缀不是 `json:` / 只填了取值方式没填地址）；`HttpTaskFields.vue` 新增第 5 组「前置请求（可选）」（沿用第 4 组的高级折叠区样式，已配置则保持展开并显示「已配置」徽标，`?` 气泡讲清"令牌绑连接"与取值方式）。
+- **任务仓库条目（`Misyra/campus-auth-tasks`，PR 交付）**：新增 `tasks/haust.json`（`type: "http"`，CSRF POST + 前置请求；带一个做 URL 编码的小脚本，因为模板替换不转义、密码含 `&`/`=` 会截断表单）；两份索引补 `type: "http"`（缺了就不会出现在「直连任务」子页的导入列表里）与 `source`（原仓库地址）；README 增补该任务说明与 `type` / `source` 字段。
+- **前端「来源仓库」渲染**：`utils/repoSource.ts`（`repoSourceUrl` 只放行 http(s)、`repoSourceLabel` 去掉协议与 `www.`）+ `RepoTask.source` + `RepoImportModals.vue` 详情区渲染成 `rel="noopener"` 的外链。索引是远端数据，直接绑 `href` 等于让仓库维护者能往用户的点击路径上放 `javascript:`，故必须过白名单。
+
+### 验证
+
+- `cargo fmt` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed` 全绿（lib **987 passed / 0 failed / 1 ignored**，各集成测试套件全绿）。
+- 新增单测（`src/login/http_login.rs`）：`pre_request_shares_connection_with_login_request`——起一个「令牌按**来源端口**记账、换连接即回 400」的 mock 门户，断言两次请求的来源端口相同、且令牌在报告里是 `***`；`csrf_portal_rejects_login_without_token` 作对照组（不带前置请求必然被拒，证明上一条不是白过）；`pre_request_missing_field_is_terminal_and_reports_its_own_exchange`、`pre_request_validation_rejects_empty_url_and_unknown_extract_prefix`、`pre_request_extract_tolerates_jsonp_and_dirty_body`、`needs_local_address_covers_script_and_placeholders`。`src/tasks/models.rs`：`legacy_http_task_without_pre_request_parses_as_none`（老文件兼容 + 不落 null）、`pre_request_extract_path_and_placeholder_name`、`pre_request_validate_checks_url_shape`，并让 http 往返用例覆盖新字段。前端新增 `utils/repoSource.test.ts`（含"不把索引原串直接绑 href"的源码断言）与 `httpTask.test.ts` 的前置请求映射/缺口 8 例。
+- **端到端（真实二进制 + 真实前端 + 本地 mock；任务不落盘、不碰用户配置，走 `POST /api/http-tasks/test` 内联任务）**：
+  - haust 条目 → 自写的 CSRF mock（令牌按来源端口记账）：`outcome=success`；mock 日志 `GET /api/csrf-token conn=3817` 与 `POST /api/account/login conn=3817` **同一条连接**，表单里密码 `p@ss&word=1` 被编码为 `p%40ss%26word%3D1`，`userIpv4=192.168.123.210`、`userMac=bc:38:98:39:ce:34` 均已填入（同时验证了 `{local_ip}` 修复与 URL 编码脚本）。
+  - 该条目过了主程序的保存校验（`PUT /api/tasks/haust` 返回 200），验证后已从本地删除，未留残留。
+  - 前端 `npm run typecheck` 零错误、`npm test` **31 文件 / 308 例**全绿、`npm run build` 通过；Playwright 实机（1600px）：编辑器第 5 组字段齐、地址填好后出现「已配置」徽标、GET 时不渲染「请求内容」、零 `pageerror`；截图 `docs/reports/ui-check/106-pre-request.png`（本地，不提交）。
+- 文档：`docs/guides/http-login-guide.md` 新增 §3.5「前置请求」（机制、字段表、五条要点）、第 3 节改称五组、§9 边界条目改写（"两步式门户请用浏览器"→ 可用前置请求表达）、体积上限补前置请求；`task-manual.md` 与 `user-guide.md` 字段表同步；`docs/updatelog.md` 的「尚未发布」新增前置请求一条并改写原说明；`docs/plan-next.md` 同步模型字段、对外依赖与本轮遗留。
+- **观察（非本轮引入）**：脚本产出的**短值**也会进脱敏字典，两位十六进制这类产出会把响应里同名的子串一并替换（实测某个两位十六进制产出把响应里的 `"192.168.123.210"` 回显成 `***2.168.123.210`）。不影响判定与登录，只是回显可读性差一点；若要收紧可给脱敏字典加最短长度阈值，本轮未动以免改变既有脱敏口径。
+
+## 开发中（2026-09-23 直连任务页空态换脸：引导卡替掉「空列表列 + 散文说明卡」）
+
+### 背景
+
+- 用户实测截图（窗口约 1600px 宽）判「这一页有点丑」。实测诊断四件事：①左列列表卡 296px 的空态里塞着「共 0 个」+ 搜索框（没有可搜的东西）+ 两个按钮，而这两个按钮页头已有、右列说明卡里还有第三个「从仓库导入」——同一个动作全页出现三次；②右列说明卡 984px 且 `display: block` 单列：5 段正文各 942px、13px 灰字、无小标题与段间距，约 70 字/行，读成一坨；引导条内文字块 785px 后按钮被甩到 628px 外；③整页内容只有 498px 高，下方 600px 全空——真功能缩在 296px，一块「说明书」当了主角，主次颠倒；④**上一轮加的宽屏两列（`@container (min-width: 1000px)`）在这个窗口根本没触发**：卡片 984px、阈值 1000px，只差 16px，等于该优化对本人不可见。
+- 同轮把 14 个路由在 2280px 下全量量过一遍（每页正文宽、顶层区块右缘、文本行墨迹宽、控件宽度分布）：内容全部铺满（正文 1976px、右缘 2248）、零横向溢出，**右侧留白问题已不存在**；仍存的是密度与口径问题（设置页页签 6×320px、AI 步骤条连接线各 819px、同类单行控件宽度 240–1940px、关于页 960px 居中）。这些与「关于」页本轮按用户指示未动，仅改直连任务页。
+
+### 实现
+
+- **空态换脸（`views/tasks/HttpTasksPanel.vue`）**：一条任务都没有时不再摆两栏，整页一张居中引导卡 `.http-guide-card`（`width: 100%` + `max-width: 900px; margin: 0 auto`）：标题「还没有直连任务」+ 一句定位 + 三步（①先拿到一条任务 ②用配置向导填「请求的形状」③回「方案」绑定）+ 两个入口（新建 / 从仓库导入）+ 卡尾 `<details>`「字段与函数速查」（默认收起）。**居中不算「右边空一块」**：两侧对称，且页头操作行仍满宽；铺满 1976px 会把中文行拉到百余字。
+- **判据必须带 `!httpTaskDraft`**：只按条数判断时，点「新建直连任务」时还没有任何已保存任务，引导卡会把刚打开的编辑器顶掉（新建第一步就卡死）。同口径补齐左列：有草稿但 0 条已保存任务时不再渲染搜索框（`v-if="httpTasks.length"`）与「共 N 个」，改「暂无已保存任务」+「这条任务还没保存，保存后它会出现在这里」，避免读成「没有匹配「」的任务」。
+- **右列散文说明退场**：删除 `.http-help-card` 整块（含 `.http-help-prose` 5 段、`.http-help-glossary`、跨列 `help-tip`、容器查询块），改为「字段速查卡」`.http-ref-card`——一行指路（限宽 620px）+ 两组 chips。信息不丢：绑定关系与归属本就在页头 `?` 气泡（`NOTICE_HELP` 未改）、「怎么开始」在引导卡三步、「字段细节」在编辑器内各字段的 `?`、「分享适配」的仓库说明在页头链接的 `title` 里。
+- **CSS**：删除 `.http-list-empty*`、`.http-help-guide`、`.http-help-card`/`@container` 块、`.http-help-glossary h4:first-child`；新增 `.http-guide-*` 与 `.http-ref-lead`。`.http-chip*` 保留（编辑器与速查卡共用同一套词条样式）。
+
+### 验证
+
+- `npm run typecheck` 零错误；`npm test` **30 文件 / 295 例**全绿；`npm run build` 通过（仅前端，debug 二进制运行时读盘，无需重编 Rust）。
+- Playwright 实机（2280 / 1600 / 1200 三档，`ca-guide-check.py`）：引导卡 900×449 且**卡片中心 = 正文列中心**、三步齐、两个入口齐、`.http-tasks-split` 与搜索框均不渲染、无横向滚动、`pageerror` 零条。
+- 交互实测：展开折叠 900×623（**开合不再变宽**——`width: 100%` 修掉了 flex 列里 `margin: auto` 优先于 stretch、宽度被内容撑成 790→900 的跳动）；点「新建直连任务」→ 引导卡让位、编辑器出现、左列显示「暂无已保存任务」+ 保存提示；关闭编辑器回到引导卡。
+- 有任务态用 route mock（`GET /api/tasks` 注入两条 `type: http` 条目，`ca-ref-check.py`）验证：两栏恢复（列表 296px、搜索框在）、右列「字段速查」984×225 / 14 个 chip、无溢出、零 `pageerror`。
+- 截图 `docs/reports/ui-check/102-guide-empty.png`、`103-guide-fold-open.png`、`104-guide-after-new.png`、`105-ref-card.png`（本地，不提交）。
+
+## 开发中（2026-09-23 任务页二级导航收进左侧主侧栏：「任务」分组展开一层子项）
+
+### 背景
+
+- 上一条「任务页版式重做」把五个面板的切换做成页内竖排二级导航卡后，用户实测仍判「太丑」，并给出方向：**在左边导航栏里再加一级子导航栏**（附一张「父项 ▾ + 缩进子项」的侧栏树截图）。
+- 根因是那张卡本身：2280px 视口下它离左边缘 400px 有余、四周全是留白，像一张被丢在页面中间的卡片；页面整体（导航 + 正文）又被居中限宽，导致正文与顶栏页标题（贴左）不在同一列上，读成两列。卡片是被"搬到页面里"的导航，导航本该长在它归属的一级项旁边。
+
+### 实现
+
+- **侧栏二级导航（`components/common/AppSidebar.vue` + `styles/components/sidebar.css`）**：「任务」一级项现为一行 `nav-group`——**一级项 `button` 自身就是展开 / 收起开关**（整行可点，`aria-expanded` + `aria-controls` 挂在它上面），行尾 caret 是它的状态指示器（行内 `margin-left: auto` 的 `IconApp`，`flex-shrink: 0`，展开态旋转 -90°，不参与交互）。子项无图标、字号与内边距各降一档，左侧一根 1px 细轨表达层级；**展开且有子项激活时父行让出高亮**（`.nav-group--open .nav-item--group.active` 清掉渐变/描边/发光，只留文字提亮），否则"父行发光 + 子行浅底"两处同时高亮会看不出当前在哪一页。**展开态刻意不落 localStorage**：侧栏是本应用唯一通往这五个页面的入口，一次忘记的折叠若被持久化，冷启动后整个任务区会被收进一个 caret 后面（发现性陷阱）；组件随 App 常驻，会话内记忆已足够。从别的页面点进任务区自动展开，组内切换保持手动折叠态。
+  - **一轮返工（用户实测反馈「只能点箭头展开，点主体点不开」）**：初版是"点主体 = 跳 `/tasks`（浏览器任务）+ 展开、点 caret = 展开/收起"的复合设计，后果是"想展开子项却得瞄准那个小箭头，点了主体页面反而跳走"。改为 folder 语义（对齐用户给的侧栏树参考）：**整行只负责开合、不导航，页面切换只由子项承担**；代价是从别处进入任务区需两次点击（先展开、再点子项），换来的是"点哪儿都开"与零意外跳页。`/tasks` 的 redirect、深链、`startsWith("tasks")` 高亮均不受影响。
+- **导航数据单点（`utils/navTree.ts`，新增）**：`TASK_NAV_CHILDREN`（原 `TasksView.vue` 的 `TABS` 迁移至此）+ 纯函数 `activeChildId(children, routeName)`（按 `route.name` 精确匹配，返回 `null` 表示本组无激活项）+ `IconName` 类型来自 `IconApp`（图标改名时编译期即报错）。消费方两个：侧栏（宽屏展开渲染）与任务页（窄屏兜底），避免两处硬编码同一份路由表后各自漂移。**路由名/路径零改动**，深链、`editorGuard` 的 `/tasks` 前缀判定、侧栏 `startsWith("tasks")` 高亮均不受影响。
+- **任务页只剩正文（`views/TasksView.vue` + `styles/pages/tasks.css`）**：删除页内导航卡与 `.tasks-content` 包裹层；`.tasks-page` 由「flex + 1360px 居中」改为**左对齐 + 1440px 上限**（该上限已在下面「铺满宽度」一条中撤销）——左对齐是为了与顶栏页标题同一起始列（居中会让标题贴左、正文居中），1440px 是"再宽就把地址/请求体输入框拉成 1500px 以上长条"的取值（直连任务两栏是 `296px 列表 + 编辑器`）。`.tasks-subnav*` 全部规则与 900px 降级块删除。
+- **窄屏兜底（`TasksView.vue` + `styles/pages/tasks.css` + `styles/responsive.css`）**：≤768px 时主侧栏只剩 64px 图标、子项文字放不下，故侧栏的 `.nav-children` 与 `.nav-caret`（指示器没有指示对象了）整块隐藏，任务页内改由**同数据的横向 pill 行**（`.tasks-narrow-nav`，`display: none` → 768px 以下 `flex`）兜底，否则窄屏只能靠手输地址到达其余四个面板。
+- **铺满宽度（一轮返工：用户实测「为啥右边空一块」）**：上一版给 `.tasks-page` 设了 1440px 上限（理由：直连任务表单的输入框不该拉到 1600px），代价是 2280px 视口右侧白扔 500px 以上，与本站其余页面（都不限宽）也不一致。现改为 `max-width: none`，正文铺满 `.content-wrapper`（2280px 视口下 1976px，左右各 32px 内边距对称）。**表单里的单行输入框确实变宽了**（直连编辑器：请求地址 1393px、认证地址与请求头 1608px），但换来的是零空白；真要收窄只能给控件单独加 `max-width`，那会在卡片里留出新的空白带，反而更像"没铺满"。
+- **说明卡宽屏两列（`views/tasks/HttpTasksPanel.vue`）**：直连任务无草稿时，说明卡落在 `1fr` 整列上（列表列只有 296px），2280px 下宽 1622px——单列会让中文行宽拉到 1400px（一行百余字）、右半张卡全空。现按**卡片自身宽度**用容器查询（`.http-help-card { container-type: inline-size }` + `@container (min-width: 1000px)`）在 ≥1000px 时拆成「导语 1.35fr + 词表 1fr」两列，引导条横跨两列；窄屏仍竖排。**刻意不用视口断点**：卡片宽 = 视口 − 侧栏 240 − 页面内边距 64 − 列表列 296 − 卡片内边距 40，1440px 视口下只剩 782px（两列会把词表挤到 319px、chip 逐行成柱状），2280px 下才是 1622px，视口断点表达不了这层关系。`@container` 不被支持时整块规则被忽略，回落单列（渐进增强，与全站 `:has()` / `color-mix()` 同口径）。
+- **文档同步**：`docs/guides/` 四处（`task-manual.md` 的「五个标签页」与「各 Tab 的导入」、`user-guide.md` 的「直连任务 Tab」「五个标签页」「定时任务标签页」、`custom-script-guide.md` 的「脚本标签页」、`http-login-guide.md` 三处「Tab」）改为「侧栏「任务 → X」子页」；`docs/plan-next.md` 同口径一处。
+- **未同款收编**：「设置」的六个 Tab 仍留在设置页内的横向页签——它不产生"孤岛"，且窄屏下横排页签比侧栏展开更省纵向空间。
+
+### 验证
+
+- `npm run typecheck` 零错误；`npm test` **30 文件 / 295 例**全绿（新增 `utils/navTree.test.ts` 6 例：id/路由名唯一、`tasks-` 前缀、首项为 `tasks-browser`、`/tasks` 经 redirect 后命中浏览器任务、非本组返回 `null`）；`npm run build` 通过。
+- 实机（真实二进制 + 真实前端 + Playwright，2280 / 700 两档）：`/tasks`、`/tasks/http`、`/tasks/scheduled` 三路由子项齐五条、激活项正确；侧栏右缘 240、正文左边 272、**页标题左边同为 272**（同列）；有子项激活时父行背景透明、`box-shadow: none`；旧页内导航零残留；700px 下侧栏子项与 caret 隐藏、页内 pill 行 `display: flex` 且「脚本」点亮。截图 `docs/reports/ui-check/96-nav-*.png`（本地，不提交）。
+- 返工后按「整行开合」重新实测（`ca-group-click2.py`）：`/tasks/http` 内点标签 / 点行尾 caret 均只开合、**URL 不变**；`/profiles` 下点主体开合且仍停在 `/profiles`（不再被拽去浏览器任务）；点子项「定时任务」→ `/tasks/scheduled` 且激活项正确；焦点 + Enter 同样开合；`pageerror` 零条。
+- 铺满宽度后实测（`ca-fill-check.py` / `ca-http-help-check.py` / `ca-overflow-scan.py`）：五面板（`/tasks`、`/tasks/http`、`/tasks/scripts`、`/tasks/scheduled`、`/tasks/ai`）在 2280px 下正文均 1976px、右侧余量 32px（与左内边距对称）；**五面板 × 五档宽度（2280 / 1600 / 1200 / 900 / 700）横向溢出全为 0**；说明卡容器查询按预期分档——卡片 1622px 时 `display: grid`（列 913 / 677），卡片 782px 与 622px 时回落 `display: block`（单列），即视口 2280 走两列、1440 与 1280 走单列。
+- 验证脚本 `ca-nav-check.py` / `ca-group-click2.py` / `ca-fill-check.py` / `ca-http-help-check.py` / `ca-overflow-scan.py`（`%TEMP%`，本地）。控制台仅余既有的「字体加载失败 → 回退系统字体」（无网络环境下的预期回退，与本次改动无关）。
+
+## 开发中（2026-09-23 任务页版式重做：竖排二级导航 + 直连任务改「列表 + 编辑器」两栏）
+
+### 背景
+
+- 直连任务页上线后用户实测反馈「太丑」，并列出具体观感问题：2280px 视口下正文拉满、空态是一整块大白框、列表与编辑器上下叠成一条长页、右上四个按钮平级拥挤、顶部还压着一整条蓝底提示横幅。
+- 用户从三个候选版式（主从两栏 / 卡片网格 / 紧凑列表+抽屉）里选定 **A 主从两栏**，并同意叠加 **D 任务页改竖排二级导航**。设计稿留在 `docs/compose/http-task-ui-options.html`（本地，不提交）。
+
+### 实现
+
+- **任务页外壳（`views/TasksView.vue` + `styles/pages/tasks.css`）**：横向 `.tasks-tabs` 改为左侧竖排二级导航（190px，图标 + 短标签，AI 项用「AI 生成」、全称进 `title`）+ 右侧内容区；激活态是左竖条（`inset 2px 0 0 0 var(--accent)`）+ 8% 强调色浅底，刻意比主侧边栏轻，避免出现"两个一模一样的一级导航"。**路由名/路径零改动**（`tasks-browser` 仍是 `/tasks` 的空子路径），深链、`editorGuard` 的 `/tasks` 前缀判定、`AppSidebar` 高亮全不受影响。**正文限宽 1360px 居中**（导航与内容一起限宽，否则会出现"导航贴左、正文居中"的割裂）；≤900px 降级为横向可换行的 pill 行。`.tasks-notice` 三组规则随横幅退役一并删除，`responsive.css` 里针对 `.tasks-tabs` 的窄屏微调同样移除（附说明）。
+- **直连任务面板（`views/tasks/HttpTasksPanel.vue`）**：改为 `296px 列表 + 编辑器` 两栏（≤1100px 堆叠）。左列 = 数量 + 搜索（按名称 / 任务 ID / 请求地址前端过滤）+ 行（名称、方法 chip、等宽地址摘要、**被哪些方案绑定**的 pills）；行尾 `⋯` 菜单承载复制 / 导出 / 删除，导入 / 仓库导入 / 分享适配 / ＋新建在标题行。空态只占左列（一句说明 + 新建 / 从仓库导入），右列照旧是帮助卡；"搜索无匹配"与"一个都没有"用不同文案。编辑器卡头部 = 名称 + 新建/已保存徽标 + 配置向导 / 发送测试请求 / 保存 / ✕（原卡片 footer 的取消-保存行随之移除，保存进标题行、关闭由 ✕ 承担，dirty 确认不变）。点"当前已打开的那一行"直接 no-op——否则脏草稿时会弹「放弃未保存的修改」，等于诱导误删。
+- **列表行的信息面**：新增「被哪些方案绑定」（数据来自 `useProfiles().profiles`，`useUi.init` 已拉取，不新增请求）。方案列表尚未就绪时**整行不渲染绑定区**，而不是显示「未绑定」——空表与"没人用"是两回事，显示错了会让用户删掉正在被引用的任务。
+- **后端摘要补两个展示字段**：`TaskSummary` 增加 `url`（浏览器=登录页、直连=请求地址、脚本=空）与 `http_method`（仅直连，非法/缺失为 `None`），由 `TaskKind::summary_url()` / `http_request_method()` 统一派生（列表与详情两条构造路径必须给出同一个答案）。列表读取本来就把整个 JSON 解析出来了，顺手取字段是免费的——**因此删掉了初版那套「每条任务再补一次详情请求」的 N+1 缓存**（`useHttpTasks` 的 `httpTaskRowMeta` 与三个辅助函数、面板的三参数调用）。`ProfileSummary` 同步补 `active_http_task`（绑定 pills 的数据源）。
+- **浏览器任务 Tab 的归属提示**同样收进标题旁的 `?`（与直连 Tab 同口径：这是"首次配置读一次"的解释，不该常驻横幅把内容往下压）。
+- 新增 `utils/httpTaskList.ts`（绑定索引 / 行摘要 / 搜索过滤三段纯函数）+ `utils/httpTaskList.test.ts` 17 例：前端无组件测试环境，派生逻辑放纯函数里才能被 vitest 直接盯住——绑定未就绪与"未绑定"的区分、缺字段不编造 GET、搜索跨字段不误命中，这三类都是会让用户看错事实的地方。
+
+### 验证
+
+- 前端：`npm run typecheck` 零报错、`npm run test` **29 文件 289 例全过**、`npm run build` 通过。
+- Rust：`cargo fmt --all --check` 零差异、`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告、`cargo test --features no-embed` **1026 passed / 0 failed / 1 ignored**（lib 978 + 集成 48；新增 `test_list_summary_carries_url_and_http_method` 锁定"列表摘要自带方法与地址"这条契约，避免将来又把 N+1 补回来）。
+- 实机（真实二进制 + 真实前端 + 真实配置，2280 / 1440 / 900 三档宽度）：页宽上限生效（2280 视口下正文 1146）、二级导航 190px 且 ≤900px 变横向 pill 行、任务页五个路由（`/tasks`、`/tasks/http`、`/tasks/scripts`、`/tasks/scheduled`、`/tasks/ai`）全部可进、激活项正确、控制台零错误；直连任务页在无任务时左列是紧凑空态 + 右列帮助卡，浏览器任务页在同样外壳下 8 条真实任务正常渲染。截图见 `docs/reports/ui-check/9x-*.png`（本地，不提交）。
+- 过程中修掉的两处自身缺陷：旧版把「详情 N+1 补齐」当临时方案留着（后端摘要补齐字段后已删除）；`responsive.css` 与 `tasks.css` 里针对已退役横幅/Tab 的死规则。
+
+## 开发中（2026-09-22 直连请求重构为独立「直连任务」：三类任务模型 / 配置迁移 v10 / 登录链路 / Web API）
+
+### 背景
+
+- 用户诉求两项：①「直连请求」的参数编辑从方案编辑器里挪到任务页、成为独立对象；② 直连任务能进仓库分享（和浏览器任务一样）。
+- 此前直连参数是**方案的内联字段**（`ProfileData.http_*`），三个后果：同一门户的多个账号要各填一遍同一份请求配置；方案分享被迫连直连配置一起带（含会被执行的凭据变换脚本）；任务仓库只服务浏览器任务，直连配置无处可分享。
+- 已定方向（用户三选一确认）：**独立具名任务、方案里选一个**；仓库里**只分享直连任务**（不含账号密码，它们本就属方案）；**复用现有任务仓库**（同一索引、多一类条目，老条目 `type` 缺省视为 browser）。
+
+### 实现
+
+#### 一、存储层：任务体系新增第三类（`type: "http"`）
+
+- `src/tasks/models.rs`：新增 `HttpRequestMethod`（`GET`/`POST`，`UPPERCASE`）与 `HttpTaskConfig`（`common` 扁平嵌 `task_id`/`name`/`description` + `method`/`url`/`auth_url`/`headers`/`body`/`success_pattern`/`failure_pattern`/`crypto_script`/`ignore_https_errors`/`metadata`），`TaskKind::Http` 第三臂（`common()`/`common_mut()`/`type_name()` 与手写 `Deserialize` 同步，未知类型报错文案列出三类）。上限常量：`MAX_HTTP_SCRIPT_BYTES` 128 KiB（与 `login/http_login.rs` 的 `MAX_SCRIPT_BYTES` 同口径）、`MAX_HTTP_HEADERS_BYTES`/`MAX_HTTP_BODY_BYTES` 256 KiB。
+- `src/utils/paths.rs`：新增 `tasks/http/` 目录并纳入 `ensure_runtime_dirs` 预建清单（目录布局单一事实源）。
+- `src/tasks/loader.rs`：`TaskManager` 增 `http_dir`，把「按类型选桶 / 清其他桶残留 / 删 / 查 / 列表扫描」收敛成 `bucket_dir()`/`buckets()`/`other_bucket_paths()`/`scan_json_bucket()`（顺带删掉两段重复的目录遍历与私有 `read_summary()`）；`validate_task` 的 http 分支校验 `url` 非空、`auth_url`（可空，非空须 http/https 且带主机名）、脚本/请求头/请求体体积；`ensure_default_task` 仍只播浏览器默认任务。
+- **保留 ID 规则（新增）**：三类任务共用同一个 `task_id` 命名空间，而 `default` 是浏览器渠道未绑定方案时的兜底任务——非浏览器任务占用它会导致保存时的残留清理删掉种子文件（浏览器渠道随即「当前无可用浏览器任务」）或两份定义按桶优先级互相遮蔽。故 `validate_task`（JSON 口径）与 `save_task`（入参口径，`PUT /api/tasks/{id}` 的 body 未必带正确 `task_id`）都拒绝非浏览器类型使用 `default`，文案指向「请换一个 ID」。
+- `src/tasks/executor.rs`：两处穷尽匹配补占位臂——直连任务不经 Python Worker，`/api/tasks/{id}/execute` 与定时任务 task_id 对它是 `ValidationFailed`（400）；它的验证入口是「发送测试请求」。
+
+#### 二、配置：绑定字段 + 迁移 v9 → v10
+
+- `ProfileData` / `ProfileSnapshot`：删除全部 `http_*`，新增 `active_http_task: String`（空 = 未绑定）。`CURRENT_CONFIG_VERSION` 9 → 10；`crate::config::HttpLoginMethod` 删除（枚举唯一来源改为 `tasks::HttpRequestMethod`）。
+- `src/config/migration.rs::migrate_v9_to_v10`（跨文件迁移）：
+  - 判定「这份方案配过直连」按**取值而非键存在**——`ProfileData` 带 `#[serde(default)]`，任何方案文件都会写出全部 `http_*` 键（值是默认值）；口径是「任一项非空即算配过」，因为配到一半（先写好脚本、地址还没填）的方案若判为"没配过"，那些字段会被新结构忽略、下次保存时静默消失。
+  - 每个配过直连的方案生成 `tasks/http/<id>.json`（名称「<方案名> 直连」）+ 回填 `active_http_task` + 清空内联字段 + 并入 `.order.json`。
+  - ID 选取：优先方案 id；被**任一类型**的任务占用时换 `<id>-2`…`<id>-20`（`default` 撞名是最典型的真实场景：方案叫 default、内置浏览器任务也叫 default）；绝不覆盖用户文件。任务已存在且内容一致时直接复用（上次迁移写到一半退出的续跑不会重复建）。迁移产物刻意**不填** `auth_url`——方案的 `auth_url` 仍在原处，留空即回退用它，升级前后行为完全一致。
+- 方案分享：导出清空 `active_http_task`（与 `active_task` 同口径）、不再输出任何 `http_*`；导入忽略老文件里残留的 `http_*` 键并在响应里回报 `legacy_http_config_dropped`（老 payload 含非空 `http_url` 时为 true），前端据此提示「该分享文件包含旧版直连配置，已忽略」。
+
+#### 三、登录链路（`src/login/`）
+
+- `HttpLoginRequest::from_task(task, username, password, auth_url, fetch_page, global_ignore_https_errors)` 取代 `from_profile`。
+- 新增 `LoginOrchestrator::resolve_http_task`：**未绑定 / 任务不存在 / 类型不对都是明确的终态错误**、零回退（直连没有可内置的默认任务），文案直接指向「任务 · 直连任务」页；`validate_profile` 的直连分支相应从「url 为空」改为「未绑定直连任务」。
+- 认证地址回退链：**任务的 `auth_url` 优先，留空才回退方案的**（该字段浏览器/直连两渠道共用，老配置不填照旧可用）；证书策略：任务级 `ignore_https_errors` 优先、缺省跟随全局 `browser.ignore_https_errors`。
+
+#### 四、Web API
+
+- 新增 `POST /api/http-tasks/test`（新模块 `src/web/routes/http_tasks.rs`）：请求体 `{ task_id?, task?, profile_id?, username, password, fetch_page }`——`task`（任务编辑器里未保存的草稿）优先于 `task_id`（方案编辑器）；账号必填、密码留空时按 `profile_id` 回退方案已保存密码；认证地址与证书策略与正式登录同源；响应字段与旧端点逐字一致。错误码区分「两者都没给」（400）、「任务不存在」（404）、「任务类型不对」（400）。
+- 删除 `POST /api/profiles/http-login-test`（路由 + handler + `HttpLoginTestBody` 全删），`openapi.json` 同步（删旧路径、加新路径，`openapi_json_matches_route_table` 绿）。
+- 方案读写：`ProfileCreateBody`/`ProfileUpdateBody`/`PATCH /api/config` 的方案域白名单全删 `http_*`、加 `active_http_task`；三条保存路径共用 `validate_http_task_binding`——`login_channel == http` 时绑定不能为空、且必须是存在的 `http` 任务（直连没有兜底任务，绑错必然登录失败，放过去只会把配置错误伪装成运行错误）；`PATCH /api/config` 为此加了 `State<Arc<dyn TaskApi>>`（只在请求真的带了方案域字段时才校验，纯全局设置保存不受影响）。
+- `POST /api/tasks` 的 `kind` 分支支持 `"http"`（用于建最小骨架），未知类型文案改为 `支持 browser / script / http`。
+
+#### 五、前端
+
+见下方同日条目「任务页新增「直连任务」Tab，任务仓库按条目类型分流」；本条目侧的配套改动：`LoginChannelField.vue` 退化为「渠道卡 + 该渠道用哪个任务 + 直连测试」（未绑定/绑定任务已被删除时当场提示并给出口，保存时前端也拦「选了直连但没绑任务」）；抽出 `HttpTaskFields.vue`（四组字段 + `?` 说明，任务编辑器与向导共用）、`HttpTestResult.vue`（结果卡）、`useHttpTaskTest.ts`（发送 + 单飞 + toast 口径，两个宿主共用）；直连配置向导改为编辑直连任务草稿（入口在任务编辑器里）；方案页认证地址的一行 hint 改为讲清「任务优先、这里是回退来源」；方案导入预览改为点名「旧版分享文件里的直连配置（含脚本）不会被导入」；测试结果文案改成上下文中立（两个测试入口共用，不再说「点保存方案」）。
+
+### 验证
+
+- `cargo fmt --all --check` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed` **1025 passed / 0 failed / 1 ignored**（lib 977 + 集成 48；含真跑真通过的 `http_login_chain`——自带 `TcpListener` mock 门户 + 真实二进制 + `PATH=""`）。
+- 前端：`npm run typecheck` 零报错、`npm run test` **28 文件 274 例全过**、`npm run build` 通过。
+- **迁移实测（真实存量形态的隔离副本）**：拷贝真实 `settings.json` + 浏览器任务 + 一份 v9 形态方案（带全套 `http_*` 实际值），以新二进制启动 —— 产物 `tasks/http/default-2.json`（因方案 id 与内置浏览器任务 `default` 撞名而换后缀）、`tasks/browser/default.json` 原封不动、方案 `active_http_task = "default-2"` 且 `http_*` 全部清空、`config_version = 10`、`auth_url` 与密码密文未变。
+- **实机全链路（真实二进制 + 真实前端 + Playwright）**：任务页出现「直连任务」Tab 并列出迁移生成的「宿舍移动 直连」（带迁移说明）；打开编辑器字段逐项还原（地址/请求头/请求内容/成败关键字/脚本/证书=严格校验，认证地址为空即回退方案）；填测试账号密码后「发送测试请求」对本地 mock 门户返回 `请求判定成功 | HTTP 200`（走通「任务草稿内联 → 新端点 → 结果卡」全链）；编辑器内「配置向导」可打开；方案页「登录方式」显示绑定的「宿舍移动 直连」+ 发送测试 + 使用文档。
+- 过程中修掉的两处自身缺陷：迁移测试夹具把「没配过直连」写成了「只有地址为空」（与真实存量的全默认值形态不符，掩盖了判定口径），改为按 `http_url` 是否为空决定其余字段；撞名规则最初只看 `tasks/http/`，实测才发现会与内置浏览器任务抢 `default`。
+
+## 开发中（2026-09-22 任务页新增「直连任务」Tab，任务仓库按条目类型分流）
+
+### 背景
+
+- 直连请求的登录参数已从「方案内联字段」重构为独立任务对象（`type: "http"`，落 `<base>/tasks/http/<id>.json`，方案用 `active_http_task` 引用一个任务），后端列表接口顺带返回（`task_type: "http"`）。但前端此前**只有方案编辑器**能挑一个直连任务，「任务」页没有对应 Tab：创建/编辑任务本身只能手改 JSON 文件，方案编辑器「配置直连任务」跳的 `tasks-http` 也是一个尚不存在的路由名。
+- 同一个任务仓库（`Misyra/campus-auth-tasks`）同时承载浏览器任务与直连任务（索引条目 `RepoTask.type`，缺省视为 `browser`），而导入弹窗此前把索引**全量**列出、确认结果一律按浏览器任务落草稿——直连条目会被写进 JSON 编辑器，步骤为空、请求字段全丢。
+
+### 实现
+
+- **`frontend/src/composables/useHttpTasks.ts`（新增，单例）**：对齐 `useTasks` 的结构——单例草稿 `httpTaskDraft`（`HttpTaskDraft | null`）、`useDirtySnapshot` 的 dirty/丢弃确认三件套、`fetchHttpTasks`（委托 `useTaskDirectory` 的混合列表拉取，只取 `httpTasks` 视图）。新增 `showNewHttpTaskDraft` / `showHttpTaskEditor(id)` / `closeHttpTaskEditor` / `saveHttpTask` / `deleteHttpTask` / `duplicateHttpTask` / `exportHttpTask` / `importHttpTask`。与 `useTasks` 的差异（有意）：草稿是**强类型平铺字段**而非一段 JSON 文本（`HttpTaskFields` 原地修改），故没有 JSON 校验/格式化/模板加载/危险步骤检测；缺口校验走 `httpTaskDraftGaps`（ID 形态 + 请求地址）；没有「执行」入口（直连不经 Python Worker，验证路径是发一次测试请求）。`duplicateHttpTask` 的 `_copy`/`_copy_N` 去重与 `exportHttpTask` 的下载口径照抄 `useTasks`；`saveHttpTask` 后清草稿并 `fetchDirectory(true)`；保存前对**非空 `crypto_script`** 弹一次确认（文案讲清"沙箱内执行、无网络与文件访问"，与 `useTasks.saveTask` 对 `eval`/`custom_js` 危险步骤的确认同口径，用户拒绝即不保存）；删除正被编辑的任务时关掉编辑器（否则"删除"看起来没生效——再保存会以同一 ID 重建）。`importHttpTask` 先按条目 `type` 过滤（兼容磁盘文件顶层 `type`、导出详情 `config.type` 与 `data` 信封三种形态），非直连条目拒绝并提示，避免"提示导入成功却在列表里看不见"。
+- **`frontend/src/views/tasks/HttpTasksPanel.vue`（新增）**：以 `BrowserTasksPanel` 为模板（`tasks-grid` 两列 = 列表卡 + 编辑器/帮助卡）。列表卡头部：导入（文件）/ 仓库导入（`showRepoImport("http")`）/ 分享适配（`TASK_REPO_URL`）/ 新建直连任务；**不放「调试」按钮**（直连任务不经 Worker，验证入口是测试）。编辑器卡：ID（仅新建可改）/ 名称 / 描述 + `<HttpTaskFields :model="draft" />` + 测试区 + footer 保存/取消，并挂 `<HttpLoginWizard :draft :open :test-username :test-password>`（向导编辑同一份草稿，凭据与测试区共用同一对 ref）。**测试区**：本页没有方案上下文且任务不含凭据，故手填一次账号密码——两者是组件本地 ref，不进草稿（进草稿会被写进任务文件，还会让 dirty 永远为真），用 `FieldHelp` 说明其来源；发送走 `runHttpTaskTest({ task: httpTaskPayload(draft), username, password, fetch_page: true })`（内联未落盘草稿，不用已保存任务），前置校验缺账号/缺密码/缺请求地址各自给出提示；按钮态用共享的 `running`（禁用 + 「正在发送…」+ `spin`）；草稿任何变化（deep watch）或草稿被换掉/关掉时 `clearTestResult()` 并收起向导。帮助卡用 4 段导语（是什么 / 与 `active_http_task` 的关系 / 凭据留在方案 / 怎么分享导入）+ 占位符与脚本函数速查（沿用 `loginChannel` 的词表常量，不复制第二份说明）+ 一句「字段详情见编辑器内 `?`」。**支持 `?task=<id>`**：`onMounted` 内先拉目录、再判定该任务存在后 `showHttpTaskEditor(id)`，只跑一次，故参数不清理也不会反复覆盖用户当前编辑。
+- **路由与 Tab**：`frontend/src/router/index.ts` 在 `/tasks` 下新增子路由 `{ path: "http", name: "tasks-http", meta: { title: "任务 · 直连任务" } }`（默认落地仍是 `tasks-browser`，未动 `redirect`）；`frontend/src/views/TasksView.vue` 的 `TABS` 在「浏览器任务」之后插入 `http` 项，`activeTab` 同步按 `/tasks/http` 末段判定。
+- **`frontend/src/router/editorGuard.ts`**：该守卫按 `from.path.startsWith("/tasks")` 定向判定，直连任务草稿也是同一区域内的页内编辑器卡片，故第三个纳入 `useHttpTasks().isDraftDirty`——脏则二选一确认后 `clearHttpTaskDraft()`，与浏览器任务/脚本草稿同口径。
+- **仓库按类型分流**：`frontend/src/composables/useRepoImport.ts` 新增 `repoKind: "browser" | "http"`，`showRepoImport(kind)` 改为**必填参数**（给默认值会让"忘了传"变成静默导入错类型）；`filteredRepoTasks` 先按类型过滤再按关键词（`""`/缺失/`"browser"` → browser，`"http"` → http，其余如 `"script"` 两类都不进）；`acceptRepoDisclaimer` 按 `repoKind` 分派——browser 走既有 `setTaskDraft`，http 用 `httpTaskDraftFromConfig` 填进 `useHttpTasks` 的新建草稿（`_isNew = true`，名称优先取条目名，ID 归一化到 `[A-Za-z0-9_-]`），两侧均保留 dirty 确认与「请在右侧编辑器内确认后保存」提示；下载文件实际 `type` 与列表类型不一致时拒绝导入并提示。`frontend/src/components/RepoImportModals.vue` 按 `repoKind` 显示标题（「从云端仓库导入直连任务 / 浏览器任务」）、来源 hint 后补一句类型过滤提示（「当前只显示直连任务条目（浏览器任务请到「浏览器任务」Tab 导入）」），免责声明按类型措辞：直连任务里没有凭据（凭据属于方案）故改说"凭据提交到任务写明地址"，并补一段点明**条目可能带凭据变换脚本**（登录时会在沙箱内执行其中的 JavaScript、无网络与文件访问）。调用方 `BrowserTasksPanel.vue`、`views/settings/TaskEnvironmentSettings.vue` 改为 `showRepoImport("browser")`。
+- **测试**：新增 `frontend/src/utils/httpTask.test.ts`（14 例：`emptyHttpTaskDraft`；`httpTaskDraftFromConfig` 的证书三态（`null` 跟随全局 / `true` / `false` 不得塌成 `null`）与缺字段兜底；`httpTaskPayload` 的 `type:"http"`、trim、名称全空白兜底、请求头/请求内容不 trim；`httpTaskDraftGaps` 的「ID 形态只在 `_isNew` 时校验」、空 url 报缺、合法草稿无缺口、判定关键字不强制）；新增 `frontend/src/composables/useHttpTasks.test.ts`（10 例：保存前的 ID 形态/地址/名称三类缺口拦截、非空 `crypto_script` 的确认与拒绝后保留草稿、无脚本时不打扰、落盘载荷 `type:"http"` 与 trim 后的地址、保存失败保留草稿、删除正在编辑的任务时关掉编辑器、取消确认不删除、删除别的任务不动当前草稿；`api`/`useToast`/`useConfirm` 全部 mock，不碰真实 HTTP）；`frontend/src/utils/loginChannelTask.test.ts` 补 `httpTaskOptions` 5 例（首项空值「未绑定（直连登录不可用）」、任务顺序保持传入顺序、无 name 回落 id、空任务仍保留未绑定项）；`frontend/src/composables/useRepoImport.test.ts` 补条目按类型分流 4 例（只列当前类型 / 搜索不越过类型边界 / http 条目落直连草稿 / 文件类型与列表不符时拒绝），并把既有调用改为 `showRepoImport("browser")`。
+- 未改动（属其他改动面，签名已冻结）：`utils/httpTask.ts`、`components/common/HttpTaskFields.vue`、`HttpTestResult.vue`、`HttpLoginWizard.vue`、`composables/useHttpTaskTest.ts`、`api/types.ts`、`api/index.ts`、`components/common/LoginChannelField.vue`、`composables/useProfiles.ts`。
+
+### 验证
+
+- `npm run typecheck` 零报错；`npm run test` **28 文件 274 例全过**（本次新增 33 例）；`npm run build` 通过（`vue-tsc` + `vite build`，产物含 `HttpTasksPanel-*.js` 35.22 kB / gzip 12.07 kB）。
+
+## 开发中（2026-09-22 直连请求面板：说明文字收进 `?` 气泡，气泡支持点击钉住）
+
+### 背景
+
+- 用户反馈直连请求面板「元素过多、说明性文字太多」。实测该面板 1086px 宽下正文共 8 段说明 + 1 个占位符速查块：每个步骤标题各带一句 `<small>`（4 处）、请求内容的占位符速查（头句 + 规则 + MAC 形态说明）、判定顺序提示、证书策略的常驻 `hint`、测试区的「不会保存方案」——7 个输入控件被挤到首屏之外。这些文字都是「首次配置才需要读一次」的解释，常驻正文的代价是每次打开都要重读。
+- 信息不能删（占位符规则、判定顺序、脚本契约都是踩过坑才写下的），因此改为「字段留在界面上、解释收进 `?` 气泡」：标签、示例按钮、输入框 placeholder、真实风险提示全部保持可见，只有「为什么这么填」挪进气泡。
+
+### 实现
+
+- `frontend/src/components/common/FieldHelp.vue`（全站帮助气泡的唯一实现）：
+  - **点击钉住**：新增 `pinned` 态。此前只有 `:hover` / `:focus-visible` 显示（纯 CSS），鼠标一移向输入框气泡即消失，多段说明等于看不完。现在点击切换钉住，再点一次 / 点别处 / Esc 关闭；全局 `pointerdown`、`keydown` 监听只在钉住期间挂载（本组件实例以数十计，常驻监听白占开销），`onBeforeUnmount` 兜底摘除。键盘 `Enter` / `Space` 同样可切换。
+  - **自动翻转 + 宽度实测**：新增 `syncAutoFlip()`，在 `mouseenter` / `focus` / 点击时量触发点左右两侧实际剩余空间，右侧放不下就翻到左侧，两侧都放不下则把 `--tip-max` 压到较宽一侧的可用值（下限 200px）。此前 `.field-help--flip` 只能由作者静态指定，窄屏下靠右的 `?` 气泡会整块跑出视口——本面板把说明都挪进气泡后，这等于把文字弄丢，故必须实测。
+  - **`wide` 修饰**：宽气泡 460px（翻转时 420px），用于脚本契约、占位符规则这类长文案；默认 320px 会把它们拉成极长的竖条。
+- `frontend/src/styles/components/form.css`：气泡 `white-space` 由 `normal` 改为 `pre-line`（`data-tip` 里的 `\n` 按段落换行）、补 `overflow-wrap: break-word`（URL / 代码片段不撑破气泡）；新增 `.field-help--pinned`（展开态 + 限高 `min(60vh, 420px)` 可滚 + 放开指针事件，做到「边填边看」）与 `.field-help--wide`；四处 `max-width` 改为 `min(var(--tip-max, 默认值), calc(100vw - 80px))`，让组件实测值生效。
+- `frontend/src/styles/responsive.css`：≤640px 的 `.field-help::after` 覆盖规则原本写死 `max-width: calc(100vw - 120px)`，会盖掉组件写入的 `--tip-max`，改为 `min(var(--tip-max, 320px), calc(100vw - 64px))`。
+- `frontend/src/components/common/LoginChannelField.vue`：
+  - 面板文案集中到脚本内 `HELP` 常量表（`channel` / `url` / `request` / `headers` / `body` / `placeholders` / `cert` / `verdict` / `success` / `failure` / `scriptWhen` / `scriptContract` / `test`），以 `\n` 分段；`certHelp` 把证书口径与「当前选择实际含义」（原常驻 `hint`）合成为一条气泡。
+  - 删除：面板导语 `.http-channel-intro`（与渠道卡重复，「失败不切回浏览器」并入 `HELP.channel`）、4 处步骤 `<small>`、占位符速查的三段说明、`.http-judge-note`、证书常驻 `hint`、测试区说明句；浏览器渠道的 `.channel-note` 与重复的「按方案绑定」`hint` 一并去掉（该口径在任务 `?` 气泡里已有）。
+  - 保留可见：全部标签与示例按钮、输入框 placeholder、占位符词表（要照着抄）、`passwordInUrl` 风险提示（它拦的是用户看不见的后果，藏进气泡就失去拦截力）、测试前置提示「需先填好账号与密码」。
+  - 步骤 4 的折叠标题行改为 `.http-advanced-row`（标题按钮按内容收缩，气泡与「已配置」徽标同排）：气泡不能放进按钮内部，嵌套可聚焦元素会让点击语义打架。
+  - 关联 CSS 清理：删除 `.http-channel-intro*`、`.http-step-head small`、`.http-judge-note*`、`.http-template-help`、`.http-template-head`、`.http-template-note`、`.http-help-block .http-help-title`、`.http-advanced-copy small`、`.channel-note`；新增 `.http-step-title`、`.http-template-row` / `.http-template-label`、`.http-chip-row--inline`、`.http-advanced-row`。
+
+### 验证
+
+- `npm run typecheck` 零报错；`npm run test` 241 例全过（26 文件）；`npm run build` 通过。
+- 真机实拍（`--base-path` 隔离实例 + 重编译内嵌 dist，Playwright Chromium）：1440 / 1024 / 640 / 480 四档视口逐项悬停面板内全部 `?` 并截图，气泡与触发点均落在视口内、页面与面板横向溢出为 0、控制台无错误；钉住态实测「点击 + 鼠标移开仍展开（1）→ 点别处关闭（0）」；占位符规则这条 5 段长文案换行正常，`\n` 未被吞。
+- 窄屏回归：480px 下面板宽 334px，最长的占位符气泡按实测可用宽度 255px 渲染并完整落在视口内，占位符词表自动折行。
+
+## 开发中（2026-09-21 新增 `docs/promo/` 项目介绍演示页：纯 HTML/CSS/JS/SVG，15 页可放映）
+
+### 背景
+
+- README 里的三张静态截图不足以说明「控制平面 + Python 插件」这套架构与运行模式取舍，需要一个能直接双击打开、像 PPT 一样翻页/自动播放的介绍材料，且不引入构建步骤与第三方运行时。
+- 硬约束：只用 HTML / CSS / JS / SVG，`file://` 双击即用（不依赖本地服务器）；1920×1080 到 1366×768 之间任意窗口下版面构图一致。
+
+### 实现
+
+- **目录**：`docs/promo/index.html`（放映页）+ `script.html`（分镜与旁白讲稿）+ `README.md`（用法/设计说明）+ `css/{tokens,stage,backdrop,slides,motion}.css` + `js/{deck,backdrop,fx}.js`，共 11 个文件，无构建。复用 `docs/assets/` 已有的 `logo.png` / `logo-dark.png` 与三张 `preview-*.webp`，不新增二进制资源。
+- **不用 ES module**：全部走经典脚本（`IIFE` + `window.PROMO` 命名空间）挂载。原因是 `type="module"` 在 `file://` 下受 CORS 限制会被拦掉，双击打开即白屏。
+- **固定舞台缩放**：内容按 1600×900 设计，`#stage` 用 `translate(-50%,-50%) scale(min(vw/1600, vh/900))` 整体等比缩放，标题/正文/图形的位置关系在任意分辨率下完全一致，版式不随窗口漂移。
+- **背景非纯色**：7 层叠加（`#sheen` 斜向光晕 / `#bloom` 径向色斑 / `#grid` 线格 / `#arcs` 圆弧刻度 / `#mesh` canvas 网络点阵 / `#streams` 流线 / `#vignette` + `#grain` 噪点压边），逐页 `data-bg` 切换情绪（`hero` / `grid` / `blueprint` / `streams` / `bloom` / `glow` / `quiet`），0.9s 交叉淡入。`#mesh` 是 canvas 实时绘制：46 个漂移节点（每 11 个为枢纽）、252px 连线阈值、4 个游走数据包，密度函数随横坐标右重（`0.06 + 0.94 * pow(x/W,1.5)`）。
+- **昼夜两套主题靠两个变量**（`--fg` / `--bg`）切换，所有描边、面板、线格用 `color-mix(in srgb, currentColor N%, transparent)` 派生，因此换主题不需要改任何组件样式。强调色只有一支 `#12CFBB`，仅用于表达「已连通 / 正在播放」。
+- **动画原语**：`.wipe`（`clip-path` 遮罩打字式揭示，用于标题）/ `.rise`（面板上浮）/ `.pop`（标签弹出）/ `.draw`（`pathLength="1"` 描边生长，用于连线与图形）/ `.fade` / `.flow`（连接线上流动虚线）/ `.breath` / `.live` / `.caret`；单元素延迟用 `--d`，容器上 `data-stagger` 自动给子元素铺开延迟。`js/fx.js` 额外提供数字滚动（`[data-count]`）与密文打乱（`#cipher`）。
+- **放映引擎**（`js/deck.js`）：单个 `requestAnimationFrame` 循环同时驱动时间轴、进度轨与 canvas；每页 `data-dur` 独立时长（合计约 134s），`data-theme` 决定昼夜，`data-title` 作进度轨悬浮提示；`history.replaceState` 写 `#n` 支持深链。键盘 `←/→`、`PageUp/PageDown`、`Space`/`k`、`Home`/`End`、`f` 全屏，点击任意处前进，进度轨刻度可跳页；标签页失焦暂停；自动播放到末页停住，播放键变「重播」。`prefers-reduced-motion` 下走静态降级（`still` 标记）。
+- **内容口径**逐条对齐 `README.md` / `docs/updatelog.md` / `AGENTS.md`：v5.0.2、AES-256-GCM 加密配置、30 天登录历史、200 MiB 日志上限、实时日志缓冲约 79% 内存下降、12 类任务步骤、三条更新通道（stable/prerelease/all）、直连登录的能力边界（不绕过验证码与风控）、23:00–06:00 夜间暂停默认仅对新装生效。
+
+### 验证
+
+- **真机分页截图核对**（Playwright Chromium，`file://` 直开，1600×900）：15 页逐页截图 + `script.html`，每页等 4600ms 让入场动画走完后再取图；`getBoundingClientRect` 逐元素比对，15 页内容盒底部一律 754px（`#stage` 内容区下沿，末页 565px 为设计留白），横向溢出 0，无文本相互压盖；另按 `line/path` 采样 + canvas 实测字形墨迹盒核对 SVG 内文字与线是否相交、SVG 文字是否被自身 `viewBox` 裁掉，本机全为斜体矩形的倾斜检测亦为 0。
+- **交互自检**（Playwright 逐项断言，23 项全过、控制台无错误）：起始页与夜间主题、进度轨刻度数与计数文本、`→`/`←`/按钮前进后退、`End`/`Home` 首末页与夜间/情绪切换、`Space` 暂停、点击舞台前进、刻度跳页与 `#n` 深链、末页停住不循环并出现重播按钮、1600×900 / 1280×720 / 3840×2160 / 1100×900 四种窗口下舞台等比缩放。
+- **节拍实测**（`promo-perf.py` 读引擎时间轴）：01→02 发生在约 7.0s、02→03 约 14.6s，与 `data-dur` 一致，无丢帧导致的整体漂移；首屏首次内容绘制 1240ms，`load` 约 3.7s（两处 CDN 字体各约 950ms，无头软件渲染下约 34fps）。
+- 过程中修掉的实现缺陷：`#stage.is-night` 选择器不匹配（实际类名只有 `is-night`，改为 `#stage.is-night`）；CSS 拆分时 `.hero-art` 丢了 `position:absolute` 落到左上角；`#grain` 的 SVG 无宽高回退成默认 300×150 导致噪点不覆盖（补 `width/height:100%` 与 `viewBox`，顺带把首屏 raster 成本降约 16×，此前在无头环境下第一次绘制卡顿约 4s）；`#vignette` 被 `#backdrop .bd` 优先级压住恒为 `opacity:0`（改为 `#backdrop #vignette`）；`#arcs .dial` 旋转原点缺 `transform-box:view-box` 导致圆心漂移。
+- 未随本轮提交的备选（已记入 `docs/promo/README.md`）：导出 MP4 的两种做法（录屏自动播放，或 Playwright 按 `data-dur` 逐页截帧后交 ffmpeg 合成，裁掉底部 118px 即可隐藏进度轨与控制栏），以及把图片内联成 base64 使 `index.html` 单文件可移植。
+
+### 修订（同日：13 → 15 页，拆开两种登录方式并补轻量实测）
+
+- 用户反馈驱动的三处调整：①两种登录方式的优缺点要「全讲清楚」，一页带过不够；②要单独一页说内存占用，突出轻量；③对新手最关键的是「仓库里已经有内置任务，所以装完零配置」，这一点要重点写。
+- **拆页**：原「两种登录方式」拆成 05「浏览器自动化」与 06「直连请求」，两页共用 `.login-split` 结构 —— 左半各自呈现（05 是认证页线框 + 五枚步骤标签，06 是深色终端里一次真实 POST 与 200 响应 + 两节点小图「Rust 控制平面 → 校园网认证门户」），右半是优点四条 / 缺点三条的双栏清单，页脚各留一句「什么时候用它」「建议顺序」。优点记号用 ASCII `+`、缺点用 `-`（避开 U+2212 的字形风险），青色只落在优点侧。
+- **新增 07「轻量」**：24 小时时间轴上四根青色细柱 = 浏览器真正存在的那几秒（`viewBox="0 0 1200 262"`）；标题行右侧一张常态后台内存读数卡（`< 10 MB` + 任务管理器实测行 `campus-auth.exe / 5.8 MB 内存 / 0% CPU / 非常低 电源`）；页脚三段说明（常驻的只有控制平面 / 按需拉起、用完就还 / 日志不再堆在内存里）。读数取自 Windows 任务管理器实测，页面按上界口径写成 `< 10 MB`。卡片放在标题行右半（`.mem-top` 两列），竖向不额外占高。
+- **重写 14「上手」为零配置**：标题改为「装完就能跑，零配置」，新增 `.zero` 区块（`0` 份配置要写 + 内置任务说明）与四步清单，终端日志补 `内置任务「通用登录」已就绪`、`Engine 待机中 · 点「启动检测」开始`，页脚点明「零配置不等于只有一条路：默认任务删不掉，删掉别的任务会自动回退到它」。口径依据 `src/tasks/seed_default.json` 被 `src/tasks/loader.rs` 以 `include_str!` 内置为 `DEFAULT_TASK_SEED`、`DEFAULT_TASK_ID = "default"`（不可删除）。
+- **版面缺陷修正**（均来自用户截图）：①控制台页五枚数据片原先压住仪表盘截图，改为截图居中偏左（`width:900px`）、数据片整体移到右侧一列（`x=948 / 1216`），互不相交；②架构页的 S 形折线与竖向主轴交叠显乱，重写为单一正交折线（`http 直连登录 · 不经 Worker`），图例挪到右上；③截图不再加 `transform:rotate()`（用户明确要求「不要东倒西歪」）；④`.frame-shot` 改为 flex 列布局、`img` 用 `object-fit:cover`，修掉图片高度忽略窗口标题栏造成的越界假象；⑤问题页胶囊框与分隔线缩短，不再压到四段标签；⑥轻量页时间轴两端由 `x=30/1170` 改为 `x=0/1200`，与内容栏左右边界对齐。
+- **修掉一类此前没人注意的裁剪缺陷**：SVG 根元素默认 `overflow:hidden`，文字一旦越过自身 `viewBox` 就被削掉——问题页「明天再来一遍」上缘被削约 1px、安全页更新通道的 `prerelease` 标签右端超框约 26px。核对脚本因此补了一项「svg 文字被裁」（canvas 实测墨迹盒 vs svg 自身盒，全四边），修完后 15 页 0 命中。
+- `docs/promo/script.html`（分镜与旁白）与 `docs/promo/README.md`（用法 / 设计说明 / 录屏口径）同步更新到 15 页、约 2:14，并补记各项数据的出处（含内存读数实测来源）。
+
+### 修订（2026-09-22：统一暖白宣传风格，15 → 9 页）
+
+- 用户希望最终材料更像 1–3 分钟宣传片，而不是技术说明会：全片由 15 页 / 约 2:14 收束为 **9 页 / 62.4 秒**，叙事改为「问题与承诺 → 24 小时重连闭环 → 四个核心卖点 → 真实产品证据 → 开箱使用 → 收尾」。架构、运行模式、夜间暂停、安全与更新等说明性内容不再单独占页；两种登录方式合并为一页，只保留对观众有用的取舍。
+- **不再切换白底 / 黑底**：`tokens.css` 把日间与夜间令牌统一映射为暖白纸张 `#F4EFE6` + 深棕黑正文，琥珀黄 `#D79346` 承担品牌强调，低饱和绿色只表示在线/成功。9 个 `<section>` 保持同一套颜色令牌，页面仅通过 `data-bg` 改变光晕、同心弧与连接线密度，不改变曝光基线。
+- **开场回到真实产品**：采用「左侧品牌文案 + 右侧仪表盘实机截图」构图，与官网首屏一致；仪表盘 / 任务 / 方案三张真实截图统一装入有边界的浅色窗口。曾生成的夜间宿舍候选图因不符合用户指定的暖色调方向而弃用并从仓库移除。
+- **产品窗口强化**：四处真实界面截图统一换成 macOS 风格三色窗口按钮与居中地址栏；首屏产品窗口由 710×426 放大到 800×500，并增加「常驻内存 `< 10 MB`」与「网络连接正常」两张轻量状态浮层，让实机界面成为画面主焦点，同时把低占用、持续守护直接放进首屏。
+- **9 页全部改用对应实机页面**：启动隔离基准路径下的真实 `campus-auth.exe`，通过 Chromium 逐一访问 `/`、`/settings/monitor`、`/settings/system`、`/settings/network`、`/tasks`、`/profiles`、`/settings/browser`、`/settings/tasks` 与 `/about` 截图；另把方案页滚动到“认证设置”单独捕获“浏览器自动化 / 直连请求”选择区。02 用网络检测设置、03 用系统设置 + 网络与更新、05 用浏览器任务、06 用认证设置 + 浏览器设置、07 用任务与环境、08 用方案顶部、09 用关于 + 任务 + 方案矩阵，不再用同一张仪表盘图重复裁切。方案截图中的账号仅在截图 DOM 中替换为演示学号 `20260001`，不写回配置。
+- **双引擎卡片留白修正**：第 6 页左右两张卡片的 `HTTP 直连` / `浏览器自动化` 标题区下移 24px，与上方实际界面截图和悬浮图标拉开距离，避免信息挤在截图底边。
+- **仓库页采用用户指定截图**：第 5 页左侧产品窗口改用用户提供的“从云端仓库导入任务”实机截图，直接展示 GitHub / Gitee / 自定义来源、任务列表与预览区域；保留窗口化处理和“仓库导入”标注，不再使用普通浏览器任务列表截图代替仓库界面。
+- **直连页采用用户指定截图并重做双窗口构图**：第 6 页左侧改用用户提供的“直接向校园网网关发送登录请求”配置截图，完整露出请求地址、请求头与成功判断配置；左右实机画面统一改成带三色按钮的 Mac 风格窗口，截图高度扩展到 290px，并移除遮住画面的渐变、悬浮标签和圆形图标。`HTTP 直连` / `浏览器自动化` 标题与说明固定排在窗口下方，产品画面成为卡片主体。
+- **直连截图改用近景版本**：按用户最终指定图片覆盖第 6 页直连窗口素材，镜头集中展示 GET / POST 方法选择、登录请求地址和请求头输入区，避免此前全页截图中文字过小；超宽原图采用完整适配并关闭推近，不裁掉左右两侧内容。
+- **移除背景方格**：用户反馈格线观感杂乱，`campaign.css` 对 `#backdrop #grid` 直接 `display:none`，不保留弱化版本；背景只剩暖色渐变、柔和蓝灰/琥珀光晕、同心弧和极淡的网络连接线。
+- **卖点前置**：第 3 页直接落出「解压即用 / 共享任务仓库 / 24 小时自动重连 / 常态后台 `< 10 MB`」；第 5 页把任务仓库讲成「浏览 → 预览 → 导入」并明确 GitHub / Gitee 镜像与分享适配；第 7 页用 24 小时时间轴上的短柱说明浏览器 / OCR 只在真正登录的几秒出现；第 8 页把上手收为「解压 / 填一次账号 / 启动检测」三步。
+- **动画节制**：新增 `css/campaign.css` 承载 9 页构图；实机截图只做 2%–7% 的镜头推近，循环动效只保留重连脉冲、双引擎状态点与内存短柱。`prefers-reduced-motion` 下全部关闭；首屏与第二页截图在 `<head>` 预加载，减少自动播放切页时的图片闪入。
+- **背景气候修正**：`deck.js` 切页与首屏初始化时调用 `backdrop.setMood()`，此前只改了 `data-mood`，canvas 节点疏密的 `moodK` 实际没有同步。
+- `docs/promo/README.md` 与 `script.html` 同步重写为 9 页 / 62.4 秒口径；旁白按镜头逐页给出，收尾预留 2–3 秒静帧。
+
+### 验证（9 页宣传版）
+
+- Playwright Chromium 以 `file://` + 1600×900 逐页取图核对：9 页均保持同一暖白背景，无明暗切换与方格残留；每页至少一张对应实机截图且全部加载成功、比例正确；第 6 页标题由浏览器随机断词改为主动两行断句。
+- 自动检查覆盖 9 个进度刻度、`01 / 09` 计数、所有页 `data-theme=night`、图片 `naturalWidth`、可见文字舞台边界、控制台 / page error，以及 `Home` / `End` / `ArrowRight` 基础交互。
+
 ## 开发中（2026-09-21 AI 生成页：服务商卡片改名「自定义服务商」+ 切换服务商不再丢配置）
 
 ### 背景

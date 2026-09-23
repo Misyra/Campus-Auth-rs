@@ -59,22 +59,15 @@ pub struct ProfileSnapshot {
     pub active_task: String,
     /// 登录执行渠道（browser=浏览器自动化默认；http=直连请求）
     pub login_channel: crate::config::LoginChannel,
-    /// 直连请求方法
-    pub http_method: crate::config::HttpLoginMethod,
-    /// 直连请求 URL 模板
-    pub http_url: String,
-    /// 直连请求头模板（每行 `Key: Value`）
-    pub http_headers: String,
-    /// 直连请求体模板（POST 使用）
-    pub http_body: String,
-    /// 成功判定关键字（空 = HTTP 2xx 即成功，登录后网络探测复核）
-    pub http_success_pattern: String,
-    /// 失败判定关键字（命中即终态失败）
-    pub http_failure_pattern: String,
-    /// 直连加密脚本（JS transform(ctx)；空 = 不变换）
-    pub http_crypto_script: String,
-    /// 直连请求是否忽略 HTTPS 证书错误（None = 跟随全局 browser.ignore_https_errors）
-    pub http_ignore_https_errors: Option<bool>,
+    /// 直连渠道使用的直连任务 ID（空 = 未绑定）
+    ///
+    /// 直连请求的全部参数（方法 / 地址 / 认证地址 / 请求头 / 请求体 / 判定关键字 /
+    /// 凭据变换脚本 / 证书策略）都在该任务里（`tasks/http/<id>.json`），凭据仍取本
+    /// 快照的 `username` / `password`。
+    ///
+    /// 与 `active_task` 的差别：浏览器渠道有内置默认任务可回退，直连**没有**
+    /// （门户地址无法内置），故空值不是"用默认"，而是"直连登录不可用"。
+    pub active_http_task: String,
 }
 
 impl ProfileSnapshot {
@@ -191,14 +184,7 @@ pub fn build_runtime_config(
         wifi_ssid: profile.wifi_ssid.clone(),
         active_task: profile.active_task.clone(),
         login_channel: profile.login_channel,
-        http_method: profile.http_method,
-        http_url: profile.http_url.clone(),
-        http_headers: profile.http_headers.clone(),
-        http_body: profile.http_body.clone(),
-        http_success_pattern: profile.http_success_pattern.clone(),
-        http_failure_pattern: profile.http_failure_pattern.clone(),
-        http_crypto_script: profile.http_crypto_script.clone(),
-        http_ignore_https_errors: profile.http_ignore_https_errors,
+        active_http_task: profile.active_http_task.clone(),
     };
 
     Ok(RuntimeConfig {
@@ -233,14 +219,7 @@ mod tests {
             wifi_ssid: "Campus".to_string(),
             active_task: String::new(),
             login_channel: crate::config::LoginChannel::default(),
-            http_method: crate::config::HttpLoginMethod::default(),
-            http_url: String::new(),
-            http_headers: String::new(),
-            http_body: String::new(),
-            http_success_pattern: String::new(),
-            http_failure_pattern: String::new(),
-            http_crypto_script: String::new(),
-            http_ignore_https_errors: None,
+            active_http_task: String::new(),
         }
     }
 

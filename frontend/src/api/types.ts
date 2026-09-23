@@ -293,10 +293,9 @@ export interface RetryConfig {
 /**
  * 凭据字段集合（已不属于 `Config`）。
  *
- * 这些字段都是 `ProfileData` 的成员，仅在「配置方案」页编辑；此前 `Config` 里
- * 有一份 `credentials` 投影（由 `GET /api/config` 的扁平响应填充），使同一份
- * 数据有了两个可写入口。现保留本类型仅作为字段清单的单一说明来源，供需要整体
- * 传递登录方式草稿的组件（`LoginChannelField` / `HttpLoginWizard`）引用。
+ * 这些字段都是 `ProfileData` 的成员，仅在「配置方案」页编辑（直连任务的请求参数
+ * 已独立成 `HttpTaskConfig`，不在此列）。`Config` 里曾有一份 `credentials` 投影
+ * （由 `GET /api/config` 的扁平响应填充），使同一份数据有了两个可写入口，现已移除。
  */
 export interface CredentialsConfig {
   username: string;
@@ -311,15 +310,12 @@ export interface CredentialsConfig {
   active_task: string;
   /** 登录执行渠道 */
   login_channel: LoginChannel;
-  http_method: HttpLoginMethod;
-  http_url: string;
-  http_headers: string;
-  http_body: string;
-  http_success_pattern: string;
-  http_failure_pattern: string;
-  http_crypto_script: string;
-  /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案显式覆盖 */
-  http_ignore_https_errors: HttpIgnoreHttpsErrors;
+  /**
+   * 直连渠道绑定的直连任务 ID（空 = 未绑定）。
+   *
+   * 直连**没有内置兜底任务**（门户地址无法内置），故空值意味着直连登录会直接失败。
+   */
+  active_http_task: string;
 }
 
 /** 应用设置 */
@@ -401,17 +397,10 @@ export interface ConfigResponse {
   trigger_url: string;
   isp: string;
   carrier_custom: string;
-  /** 活跃方案的登录渠道与直连参数（属 Profile 域，非全局设置） */
+  /** 活跃方案的登录渠道与直连任务绑定（属 Profile 域，非全局设置） */
   login_channel: LoginChannel;
-  http_method: HttpLoginMethod;
-  http_url: string;
-  http_headers: string;
-  http_body: string;
-  http_success_pattern: string;
-  http_failure_pattern: string;
-  http_crypto_script: string;
-  /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案显式覆盖 */
-  http_ignore_https_errors: HttpIgnoreHttpsErrors;
+  /** 直连渠道绑定的直连任务 ID（空 = 未绑定；请求参数在任务里，不在本响应里） */
+  active_http_task: string;
   password?: string;
 }
 
@@ -441,7 +430,7 @@ export type HttpLoginMethod = "GET" | "POST";
  * 直连 HTTPS 证书策略（三态）。
  *
  * `null` = 未设置，登录时跟随全局 `browser.ignore_https_errors`（默认 true，
- * 与浏览器渠道同口径）；`true`/`false` = 本方案显式覆盖。
+ * 与浏览器渠道同口径）；`true`/`false` = 本直连任务显式覆盖。
  */
 export type HttpIgnoreHttpsErrors = boolean | null;
 
@@ -458,16 +447,79 @@ export interface Profile {
   wifi_ssid: string;
   active_task: string;
   login_channel: LoginChannel;
-  http_method: HttpLoginMethod;
-  http_url: string;
-  http_headers: string;
-  http_body: string;
-  http_success_pattern: string;
-  http_failure_pattern: string;
-  http_crypto_script: string;
-  /** HTTPS 证书策略：null = 跟随全局（默认），true/false = 本方案显式覆盖 */
-  http_ignore_https_errors: HttpIgnoreHttpsErrors;
+  /**
+   * 直连渠道绑定的直连任务 ID（空 = 未绑定）。
+   *
+   * 与 `active_task` 同语义，但**没有内置兜底任务**：门户地址无法内置，故未绑定时
+   * 直连登录直接以明确原因失败（浏览器渠道则会回退到内置默认任务）。
+   */
+  active_http_task: string;
   [key: string]: unknown;
+}
+
+/**
+ * 直连登录的前置请求（`HttpTaskConfig.pre_request`）。
+ *
+ * 先发一次请求、取出一个值（如 CSRF token），再发登录请求；登录请求的地址、请求头
+ * 与请求体里用 `{name}` 引用这个值。取值方式目前只支持 `json:字段路径`。
+ */
+export interface HttpPreRequest {
+  method: HttpLoginMethod;
+  /** 请求地址模板（与登录请求同一套占位符） */
+  url: string;
+  /** 请求头模板（每行 `名称: 值`） */
+  headers: string;
+  /** 请求体模板（POST 使用） */
+  body: string;
+  /** 取值方式：`json:<字段>[.<字段>...]`，如 `json:csrf_token`、`json:data.token` */
+  extract: string;
+  /** 把取到的值注册成哪个占位符（留空时取 `extract` 路径的最后一段） */
+  name: string;
+}
+
+/**
+ * 直连任务配置（`tasks/http/<id>.json`，`type: "http"`）。
+ *
+ * 只描述**请求形状**：账号、密码与认证地址仍属方案——同一门户的不同账号共用一份
+ * 直连任务，这正是把它从方案里独立出来的意义。仓库分享的也是这个对象。
+ */
+export interface HttpTaskConfig {
+  task_id: string;
+  name: string;
+  description: string;
+  method: HttpLoginMethod;
+  /** 请求地址模板（支持 {username} 等占位符） */
+  url: string;
+  /**
+   * 认证地址 = 门户登录页地址（脚本 `ctx.auth_url` 与「抓取登录页原文」的来源）。
+   *
+   * 不是登录请求地址（那是 `url`）。留空时回退用方案的 `auth_url`，因此老配置不填
+   * 也照旧工作；填了则本任务自带认证页地址——分享给别人的任务通常需要它，
+   * 否则对方还得自己摸出认证页地址。
+   */
+  auth_url: string;
+  /** 请求头模板（每行 `名称: 值`） */
+  headers: string;
+  /** 请求体模板（POST 使用） */
+  body: string;
+  success_pattern: string;
+  failure_pattern: string;
+  /** 凭据变换脚本（JS `transform(ctx)`；空 = 不变换） */
+  crypto_script: string;
+  /**
+   * 前置请求（可选）：登录前先发一次请求、从响应里取出一个值供登录请求引用。
+   *
+   * 面向「令牌绑连接」的门户：部分门户的 CSRF token 必须与登录请求走**同一条 TCP
+   * 连接**（换连接服务器回 `CSRF token mismatch`），且 token 只能从另一个接口取到。
+   * 两次请求由后端用同一个 HTTP 客户端顺序发出，连接因此被复用。
+   *
+   * `null` / 缺省 = 不需要前置请求。
+   */
+  pre_request?: HttpPreRequest | null;
+  /** null = 跟随全局证书策略（`browser.ignore_https_errors`） */
+  ignore_https_errors: HttpIgnoreHttpsErrors;
+  /** 任务元数据（执行器不用；仓库来源等标注可放这里） */
+  metadata?: Record<string, unknown>;
 }
 
 /** 方案分享载荷（导出产物 / 导入输入）
@@ -482,12 +534,22 @@ export interface ProfileSharePayload {
   app_version?: string;
   /** 导入时的命名建议（源方案 id，恒为 ASCII slug）；缺失时由后端按名称推导 */
   suggested_id?: string;
-  profile: Omit<Profile, "id" | "active_task"> & { active_task?: string };
+  profile: Omit<Profile, "id" | "active_task" | "active_http_task"> & {
+    active_task?: string;
+    active_http_task?: string;
+  };
 }
 
 /** 方案导入结果：导入成功后的实际方案 ID（冲突时已自动改名） */
 export interface ProfileImportResult {
   id: string;
+  /**
+   * 分享文件里带着旧版「方案内联直连配置」（v9 及以前的 `http_*` 字段）时为 true。
+   *
+   * v10 起直连参数只存在于直连任务里，后端会忽略这些残留字段——必须让用户知道，
+   * 否则会以为导入后直连开箱可用。
+   */
+  legacy_http_config_dropped?: boolean;
 }
 
 /**
@@ -513,22 +575,27 @@ export interface ProfileUpdatePayload extends Partial<Profile> {
   clear_password?: boolean;
 }
 
-/** 直连登录测试请求：使用编辑器内尚未保存的配置 */
-export interface HttpLoginTestPayload {
+/**
+ * 直连测试请求（`POST /api/http-tasks/test`）。
+ *
+ * 两种用法：任务编辑器里传未保存的 `task`（任务页没有方案上下文，账号密码要手填）；
+ * 方案编辑器里传已保存任务的 `task_id` + `profile_id`（凭据留空时由后端回退该方案
+ * 已保存的密码）。
+ *
+ * 认证地址的解析顺序：任务的 `auth_url` → 方案的 `auth_url`（给了 `profile_id` 时），
+ * 与正式登录同口径，避免「测试能过、自动登录用了另一个地址」的错位。
+ */
+export interface HttpTaskTestPayload {
+  /** 已保存的直连任务 ID；与 `task` 二选一，`task` 优先 */
+  task_id?: string;
+  /** 编辑器内尚未保存的直连任务草稿 */
+  task?: HttpTaskConfig;
+  /** 凭据（以及认证地址回退）的来源方案（可省） */
   profile_id?: string;
   username: string;
   password: string;
-  http_method: HttpLoginMethod;
-  http_url: string;
-  http_headers: string;
-  http_body: string;
-  http_success_pattern: string;
-  http_failure_pattern: string;
-  http_crypto_script: string;
-  auth_url: string;
+  /** 是否在运行脚本前抓取认证页原文 */
   fetch_page: boolean;
-  /** 省略 = 跟随全局证书策略（后端按全局解析）；显式传值则覆盖 */
-  http_ignore_https_errors?: boolean;
 }
 
 /** 直连登录测试结果（请求内容与响应片段均已由后端脱敏） */
@@ -562,6 +629,8 @@ export interface ProfileSummary {
   username: string;
   isp: string;
   active_task: string;
+  /** 直连渠道绑定的直连任务 ID（空 = 未绑定）；任务页据此标出"这条任务被谁在用" */
+  active_http_task: string;
   /** 登录执行渠道：列表卡据此区分登录方式 */
   login_channel: LoginChannel;
   /** 网关 IP 匹配规则（空 = 未配置） */
@@ -621,13 +690,17 @@ export interface OcrStatus {
   runtime_ocr?: boolean | null;
 }
 
-/** 任务（浏览器任务 / 脚本的列表项） */
+/** 任务（浏览器任务 / 脚本 / 直连任务的列表项） */
 export interface TaskItem {
   id: string;
   name: string;
   description?: string;
   type?: string;
+  task_type?: string;
+  /** 任务地址：浏览器=登录页，直连=请求地址；摘要自带，任务列表行直接显示 */
   url?: string;
+  /** 直连任务的请求方法（GET/POST）；非直连任务缺省 */
+  http_method?: string;
   [key: string]: unknown;
 }
 
@@ -636,11 +709,11 @@ export interface TaskSummary {
   id: string;
   name: string;
   description: string;
-  /** 任务类型：browser / script（shell 已移除） */
+  /** 任务类型：browser / script / http（http = 直连任务） */
   task_type: string;
 }
 
-/** 任务完整配置（对应后端 TaskKind，按 type 区分 browser/script） */
+/** 任务完整配置（对应后端 TaskKind，按 type 区分 browser/script/http） */
 export interface TaskConfig {
   type?: string;
   name?: string;
@@ -665,8 +738,21 @@ export interface RepoTask {
   tags?: string[];
   author?: string;
   version?: string;
+  /**
+   * 条目类型（`browser` / `script` / `http`）。
+   *
+   * 缺省视为 `browser`：直连任务加入索引之前发布的老条目没有这个字段，
+   * 把缺省当 browser 才能让同一个仓库同时承载两类条目而不破坏既有条目。
+   */
+  type?: string;
   /** 登录页截图（任务站 raw 地址；前端经 /api/repo/image 代理预览） */
   screenshot?: string;
+  /**
+   * 来源仓库地址（任务改编自他人脚本时标注出处）。
+   *
+   * 来自远端索引，渲染前须经 `repoSourceUrl` 只放行 http(s)。
+   */
+  source?: string;
   url: string;
 }
 

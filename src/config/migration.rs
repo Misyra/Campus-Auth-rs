@@ -1,8 +1,12 @@
-//! 配置 schema 版本迁移 pipeline（v5 → v6 → v7 → v8）
+//! 配置 schema 版本迁移 pipeline（v5 → v6 → v7 → v8 → v9 → v10）
 //!
 //! 启动时若 `settings.json` 的 `config_version` 低于当前版本，按 `MIGRATIONS` 顺序
 //! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用覆盖写入，
 //! `settings.json` 的 `config_version` 更新是 commit point。
+//!
+//! v10 起迁移可能**跨文件**（`migrate_v9_to_v10` 把方案里的直连字段搬成
+//! `<base>/tasks/http/<id>.json`），因此每个迁移函数都要能安全重跑：先判断
+//! 「是否已迁过」，再决定是否落盘。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -28,6 +32,7 @@ pub const MIGRATIONS: &[(u32, MigrationFn)] = &[
     (7, migrate_v6_to_v7),
     (8, migrate_v7_to_v8),
     (9, migrate_v8_to_v9),
+    (10, migrate_v9_to_v10),
 ];
 
 /// 执行所有需要的迁移
@@ -441,6 +446,323 @@ fn migrate_v8_to_v9(config_dir: &Path, _value: &mut Value) -> Result<(), ConfigE
     }
 
     Ok(())
+}
+
+/// v9 → v10 迁移：直连请求参数从方案内联字段搬成独立的「直连任务」
+///
+/// 背景：v10 起直连请求的全部参数都存在具名任务里（`<base>/tasks/http/<id>.json`，
+/// `type: "http"`），方案只保留绑定 `active_http_task`——同一门户的多个账号因此能
+/// 共用一份配置，仓库也能分享它。不搬的后果是升级后方案里的 `http_*` 被 serde
+/// 静默忽略，用户表现为"直连配置没了"，故必须无损搬过去。
+///
+/// 判定「这份方案配过直连」的口径：`ProfileData` 带 `#[serde(default)]`，任何方案
+/// 文件都会写出全部 `http_*` 键（值是默认值），因此不能按「键存在」判断，只能按
+/// **有意义的取值**判断（见 [`legacy_http_config_present`]）。
+///
+/// 迁移产物刻意**不填**任务的 `auth_url`：方案的 `auth_url` 仍保留在原处，
+/// 留空即回退用它，升级前后行为完全一致（用户改方案里的认证地址依然生效）。
+///
+/// 幂等：任务文件已存在且与方案里的值一致时直接复用（不重复建、不覆盖用户后来
+/// 的改动）；方案已有 `active_http_task` 时沿用不改写。
+fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), ConfigError> {
+    // 目录布局：`config_dir` 为 `<base>/config/`，任务在 `<base>/tasks/`
+    let tasks_dir = config_dir.parent().unwrap_or(config_dir).join("tasks");
+    let http_dir = tasks_dir.join("http");
+    let profiles_dir = config_dir.join(crate::config::PROFILES_DIR);
+
+    let entries = match std::fs::read_dir(&profiles_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            // 方案目录不可读：不动任何东西，留给下次启动重试（迁移版本号未提交）
+            tracing::warn!(
+                path = %profiles_dir.display(),
+                error = %e,
+                "v10 迁移跳过：方案目录不可读"
+            );
+            return Ok(());
+        }
+    };
+
+    let mut created: Vec<String> = Vec::new();
+    let mut profile_paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    // 目录遍历顺序不保证稳定；迁移结果的命名（`<id>` / `<id>-2`）与之相关，排序后再处理
+    profile_paths.sort();
+
+    for path in profile_paths {
+        let Some(profile_id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // 与配置系统其它入口同口径：非法 id 不是本程序写的文件，一律不碰
+        if !is_valid_profile_id(profile_id) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut profile) = serde_json::from_str::<Value>(&raw) else {
+            tracing::warn!(
+                profile_id = %profile_id,
+                "v10 迁移跳过：方案文件解析失败"
+            );
+            continue;
+        };
+        if !legacy_http_config_present(&profile) {
+            // 没配过直连（或已迁过）：方案里的空 `http_*` 键留着无害——v10 的
+            // ProfileData 不再有这些字段，反序列化时会忽略，保存时自然消失
+            continue;
+        }
+        let already_bound = profile
+            .get("active_http_task")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+
+        let task_id = match pick_http_task_id(&tasks_dir, &http_dir, profile_id, &profile) {
+            Ok(id) => id,
+            Err(reason) => {
+                tracing::error!(
+                    profile_id = %profile_id,
+                    reason = %reason,
+                    "v10 迁移跳过：无法为该方案分配直连任务 ID，方案里的直连配置保持原样（未删除）"
+                );
+                continue;
+            }
+        };
+
+        if !path_has_task(&http_dir, &task_id) {
+            let task = build_legacy_http_task(&task_id, &profile);
+            if let Err(e) = std::fs::create_dir_all(&http_dir) {
+                tracing::warn!(path = %http_dir.display(), error = %e, "v10 迁移：创建直连任务目录失败");
+                continue;
+            }
+            let task_path = http_dir.join(format!("{task_id}.json"));
+            match serde_json::to_string_pretty(&task) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&task_path, json) {
+                        tracing::warn!(
+                            path = %task_path.display(),
+                            error = %e,
+                            "v10 迁移：写入直连任务失败，保留方案里的原配置"
+                        );
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "v10 迁移：序列化直连任务失败");
+                    continue;
+                }
+            }
+            created.push(task_id.clone());
+            append_to_order(&tasks_dir, &task_id);
+        }
+
+        // 绑定 + 清掉内联字段：清干净才算迁移完成，否则下次启动会重复搬
+        if let Some(obj) = profile.as_object_mut() {
+            if !already_bound {
+                obj.insert(
+                    "active_http_task".to_string(),
+                    Value::String(task_id.clone()),
+                );
+            }
+            for key in LEGACY_HTTP_KEYS {
+                obj.remove(key);
+            }
+        }
+        match serde_json::to_string_pretty(&profile) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    tracing::warn!(
+                        profile_id = %profile_id,
+                        error = %e,
+                        "v10 迁移：写回方案失败（直连任务已就绪，下次启动会重试绑定）"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(profile_id = %profile_id, error = %e, "v10 迁移：序列化方案失败")
+            }
+        }
+    }
+
+    if !created.is_empty() {
+        tracing::info!(
+            count = created.len(),
+            tasks = ?created,
+            "v10 迁移：方案里的直连配置已搬为直连任务并完成绑定（任务页 · 直连任务）"
+        );
+    }
+    Ok(())
+}
+
+/// v9 及以前内联在方案里的直连字段（v10 起全部搬进直连任务）
+const LEGACY_HTTP_KEYS: [&str; 8] = [
+    "http_method",
+    "http_url",
+    "http_headers",
+    "http_body",
+    "http_success_pattern",
+    "http_failure_pattern",
+    "http_crypto_script",
+    "http_ignore_https_errors",
+];
+
+/// 这份方案是否真的配过直连（键必然存在，故只能按取值判断，见迁移函数说明）
+///
+/// 口径是「任何一项非空即算配过」而非只看 `http_url`：配到一半就升级的方案
+/// （例如先写好凭据变换脚本、地址还没填）如果判为"没配过"，那些字段会被 v10 的
+/// 结构直接忽略、在下一次保存时静默消失。宁可多搬出一个待补地址的任务——用户在
+/// 任务编辑器里补上地址即可，而静默丢脚本是无法挽回的（脚本是用户逆出来的算法）。
+fn legacy_http_config_present(profile: &Value) -> bool {
+    let text = |key: &str| {
+        profile
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    text("http_url")
+        || text("http_headers")
+        || text("http_body")
+        || text("http_success_pattern")
+        || text("http_failure_pattern")
+        || text("http_crypto_script")
+        // 非 null 的证书策略是显式选择（默认是 null = 跟随全局）
+        || profile
+            .get("http_ignore_https_errors")
+            .is_some_and(|v| v.is_boolean())
+}
+
+/// 目标任务文件是否已存在（`<http_dir>/<id>.json`）
+fn path_has_task(http_dir: &Path, task_id: &str) -> bool {
+    http_dir.join(format!("{task_id}.json")).exists()
+}
+
+/// 该任务 ID 是否已被**任一类型**的任务占用
+///
+/// 三类任务共用同一个 `task_id` 命名空间（`save_task` 保存同 ID 的另一类型时会清掉
+/// 原桶文件），迁移挑 ID 因此必须避开全部三个桶，而不是只看 `tasks/http/`：
+/// 方案 id 与浏览器任务 id 撞名（`default` 是最典型的一个——方案叫 default、内置
+/// 浏览器任务也叫 default）时，直连任务占了 `default` 会让用户一保存它就把浏览器
+/// 兜底任务清掉。撞名则换 `<id>-2` 后缀。
+fn task_id_taken(tasks_dir: &Path, task_id: &str) -> bool {
+    ["browser", "scripts", "http"].iter().any(|bucket| {
+        tasks_dir
+            .join(bucket)
+            .join(format!("{task_id}.json"))
+            .exists()
+    })
+}
+
+/// 为该方案挑一个可用的直连任务 ID
+///
+/// 首选方案 id（可读、与方案一一对应）；已被占用时依次尝试 `<id>-2`…`<id>-20`：
+/// 占位说明用户自己建过同名任务、别的类型占用了同名 id，或上一次迁移已写过，
+/// **绝不覆盖**用户的文件。
+fn pick_http_task_id(
+    tasks_dir: &Path,
+    http_dir: &Path,
+    profile_id: &str,
+    profile: &Value,
+) -> Result<String, String> {
+    if let Some(existing) = reusable_existing_task(http_dir, profile_id, profile) {
+        return Ok(existing);
+    }
+    if !task_id_taken(tasks_dir, profile_id) {
+        return Ok(profile_id.to_string());
+    }
+    for n in 2..=20 {
+        let candidate = format!("{profile_id}-{n}");
+        if !task_id_taken(tasks_dir, &candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("{profile_id} 及其 -2…-20 后缀的任务 ID 都已被占用"))
+}
+
+/// 已存在的同名任务是否**就是**这份方案的直连配置（上次迁移写到一半就退出时复用，
+/// 避免重复建出 `<id>-2`）；内容不一致（用户自建的同名任务）返回 `None`，由调用方换名。
+fn reusable_existing_task(http_dir: &Path, profile_id: &str, profile: &Value) -> Option<String> {
+    let path = http_dir.join(format!("{profile_id}.json"));
+    let existing: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let same = |task_key: &str, profile_key: &str| {
+        existing.get(task_key).and_then(Value::as_str).unwrap_or("")
+            == profile
+                .get(profile_key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+    };
+    let matches = same("url", "http_url")
+        && same("headers", "http_headers")
+        && same("body", "http_body")
+        && same("success_pattern", "http_success_pattern")
+        && same("failure_pattern", "http_failure_pattern")
+        && same("crypto_script", "http_crypto_script");
+    matches.then(|| profile_id.to_string())
+}
+
+/// 由方案里的 v9 内联字段构造直连任务 JSON（字段名与 `HttpTaskConfig` 对齐）
+fn build_legacy_http_task(task_id: &str, profile: &Value) -> Value {
+    let name = profile
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(task_id);
+    let method = profile
+        .get("http_method")
+        .and_then(Value::as_str)
+        .map(|s| s.to_ascii_uppercase())
+        .filter(|s| s == "POST")
+        .unwrap_or_else(|| "GET".to_string());
+    let ignore = profile
+        .get("http_ignore_https_errors")
+        .filter(|v| v.is_boolean())
+        .cloned()
+        .unwrap_or(Value::Null);
+    serde_json::json!({
+        "type": "http",
+        "task_id": task_id,
+        "name": format!("{name} 直连"),
+        "description": format!("v10 迁移：由方案「{name}」的直连配置生成"),
+        "method": method,
+        "url": profile.get("http_url").and_then(Value::as_str).unwrap_or(""),
+        // 刻意留空：方案的 auth_url 仍在原处，留空即回退用它，升级前后行为一致
+        "auth_url": "",
+        "headers": profile.get("http_headers").and_then(Value::as_str).unwrap_or(""),
+        "body": profile.get("http_body").and_then(Value::as_str).unwrap_or(""),
+        "success_pattern": profile.get("http_success_pattern").and_then(Value::as_str).unwrap_or(""),
+        "failure_pattern": profile.get("http_failure_pattern").and_then(Value::as_str).unwrap_or(""),
+        "crypto_script": profile.get("http_crypto_script").and_then(Value::as_str).unwrap_or(""),
+        "ignore_https_errors": ignore,
+    })
+}
+
+/// 把新任务 id 追加进 `<tasks>/.order.json` 的排序表（缺失/损坏时按空表处理）
+///
+/// 不追加也能用（列表按扫描顺序兜底），但顺序会随目录遍历漂移；迁移产生的任务
+/// 往往一次多个，落进排序表才能给出稳定顺序。
+fn append_to_order(tasks_dir: &Path, task_id: &str) {
+    let path = tasks_dir.join(".order.json");
+    let mut order = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("order").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    if order.iter().any(|v| v.as_str() == Some(task_id)) {
+        return;
+    }
+    order.push(Value::String(task_id.to_string()));
+    let json = serde_json::json!({ "order": order });
+    if let Ok(text) = serde_json::to_string_pretty(&json) {
+        if let Err(e) = std::fs::write(&path, text) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "v10 迁移：写入任务排序表失败（不影响任务可用，仅顺序不固定）"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -901,5 +1223,283 @@ mod tests {
         let config_dir = tmp.path().join("config");
         let mut v = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
         assert!(migrate_v8_to_v9(&config_dir, &mut v).is_ok());
+    }
+
+    // ============ v9 → v10：直连配置搬成直连任务 ============
+
+    /// v9 形态配置目录：一个方案（含全套内联 `http_*` 键，与 `#[serde(default)]`
+    /// 的落盘形态一致——即便没配直连也写着这些键）+ 空 `tasks/` 目录
+    ///
+    /// `http_url` 为空表示"这个方案没配过直连"：此时其余可选字段也必须留空，
+    /// 因为真实存量里没动过直连的方案，`http_*` 全是 serde 默认值（空串/null）。
+    /// 反之只要传了地址，就把整套字段填满——这两态正是迁移要区分的。
+    fn v9_fixture(profile_id: &str, http_url: &str, ignore_tls: Option<bool>) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let profiles_dir = tmp.path().join("config").join("profiles");
+        std::fs::create_dir_all(&profiles_dir).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+        let configured = !http_url.trim().is_empty();
+        let text = |value: &str| {
+            Value::String(if configured {
+                value.to_string()
+            } else {
+                String::new()
+            })
+        };
+        let profile = serde_json::json!({
+            "id": profile_id,
+            "name": "宿舍",
+            "username": "20230001",
+            "password": "ENC:xxx",
+            "auth_url": "http://10.0.0.1/",
+            "trigger_url": "",
+            "login_channel": "http",
+            "http_method": "POST",
+            "http_url": http_url,
+            "http_headers": text("Content-Type: application/x-www-form-urlencoded"),
+            "http_body": text("u={username}&p={password}"),
+            "http_success_pattern": text("登录成功"),
+            "http_failure_pattern": text("密码错误"),
+            "http_crypto_script": text("function transform(ctx) { return {}; }"),
+            "http_ignore_https_errors": ignore_tls,
+        });
+        std::fs::write(
+            profiles_dir.join(format!("{profile_id}.json")),
+            serde_json::to_string_pretty(&profile).unwrap(),
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_migrate_v9_to_v10_moves_inline_config_into_task() {
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", Some(false));
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        let task_path = tmp.path().join("tasks").join("http").join("default.json");
+        let task: Value =
+            serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap()).unwrap();
+        assert_eq!(task["type"], "http");
+        assert_eq!(task["task_id"], "default");
+        assert_eq!(task["name"], "宿舍 直连");
+        assert_eq!(task["method"], "POST");
+        assert_eq!(task["url"], "http://10.0.0.1/login");
+        assert_eq!(task["body"], "u={username}&p={password}");
+        assert_eq!(task["success_pattern"], "登录成功");
+        assert_eq!(task["failure_pattern"], "密码错误");
+        assert_eq!(task["ignore_https_errors"], false);
+        assert_eq!(
+            task["auth_url"], "",
+            "刻意留空：方案的认证地址仍在原处，留空即回退用它（升级前后行为一致）"
+        );
+
+        let profile = read_profile(&config_dir, "default");
+        assert_eq!(profile["active_http_task"], "default");
+        assert_eq!(profile["auth_url"], "http://10.0.0.1/", "认证地址仍属方案");
+        for key in LEGACY_HTTP_KEYS {
+            assert!(
+                profile.get(key).is_none(),
+                "{key} 必须搬走并清掉，否则下次启动会重复搬"
+            );
+        }
+
+        let order: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("tasks").join(".order.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            order["order"][0], "default",
+            "新任务要落进排序表，顺序才稳定"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v9_to_v10_skips_profile_without_http_config() {
+        // 「没配过直连」的判定必须按取值而非键存在：所有方案文件都有这些键
+        let tmp = v9_fixture("default", "", None);
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        assert!(
+            !tmp.path()
+                .join("tasks")
+                .join("http")
+                .join("default.json")
+                .exists(),
+            "没填过直连地址就不该凭空造任务"
+        );
+        let profile = read_profile(&config_dir, "default");
+        assert!(profile.get("active_http_task").is_none());
+        assert_eq!(
+            profile["http_url"], "",
+            "未迁移的方案保持原样（空键留着无害，保存时自然消失）"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v9_to_v10_keeps_partial_config_without_url() {
+        // 配到一半（有脚本没地址）也要搬：判为"没配过"会让脚本在下次保存时静默消失。
+        // 搬出来的任务地址为空，用户在任务编辑器里补上即可（比丢算法好得多）。
+        let tmp = v9_fixture("default", "", None);
+        let config_dir = tmp.path().join("config");
+        let mut partial = read_profile(&config_dir, "default");
+        partial["http_crypto_script"] =
+            Value::String("function transform(ctx) { return {}; }".into());
+        std::fs::write(
+            config_dir.join("profiles").join("default.json"),
+            serde_json::to_string_pretty(&partial).unwrap(),
+        )
+        .unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        let task: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("tasks").join("http").join("default.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            task["crypto_script"],
+            "function transform(ctx) { return {}; }"
+        );
+        assert_eq!(task["url"], "", "地址留空，等用户补");
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v9_to_v10_is_idempotent() {
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+        let first =
+            std::fs::read_to_string(tmp.path().join("tasks").join("http").join("default.json"))
+                .unwrap();
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        assert_eq!(
+            first,
+            std::fs::read_to_string(tmp.path().join("tasks").join("http").join("default.json"))
+                .unwrap(),
+            "重跑不得改写已生成的任务"
+        );
+        assert!(
+            !tmp.path()
+                .join("tasks")
+                .join("http")
+                .join("default-2.json")
+                .exists(),
+            "重跑不得重复建任务"
+        );
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v9_to_v10_does_not_clobber_user_task() {
+        // 用户自己建过同名直连任务：迁移让位（换 `<id>-2`），绝不覆盖用户文件
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let http_dir = tmp.path().join("tasks").join("http");
+        std::fs::create_dir_all(&http_dir).unwrap();
+        let mine = http_dir.join("default.json");
+        std::fs::write(
+            &mine,
+            r#"{"type":"http","task_id":"default","name":"我自己建的"}"#,
+        )
+        .unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&mine).unwrap(),
+            r#"{"type":"http","task_id":"default","name":"我自己建的"}"#,
+            "用户的同名任务必须原封不动"
+        );
+        assert!(
+            http_dir.join("default-2.json").exists(),
+            "迁移应换用 -2 后缀"
+        );
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default-2"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v9_to_v10_avoids_id_taken_by_other_kind() {
+        // 方案 id 与**别的类型**的任务撞名（真实场景：方案 default + 内置浏览器任务
+        // default）。直连任务若占了这个 id，用户一保存它就会把内置浏览器兜底任务
+        // 清掉，故迁移必须换后缀。
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let browser_dir = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser_dir).unwrap();
+        std::fs::write(
+            browser_dir.join("default.json"),
+            r#"{"type":"browser","task_id":"default","name":"通用登录","steps":[{"type":"click"}]}"#,
+        )
+        .unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        assert!(
+            browser_dir.join("default.json").exists(),
+            "内置浏览器任务不得被迁移动过"
+        );
+        assert!(
+            tmp.path()
+                .join("tasks")
+                .join("http")
+                .join("default-2.json")
+                .exists(),
+            "撞名时直连任务应换 -2 后缀"
+        );
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default-2"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v9_to_v10_reuses_task_from_interrupted_run() {
+        // 上次迁移写了任务但没能写回方案：重跑要复用它，而不是再建一个 default-2
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let http_dir = tmp.path().join("tasks").join("http");
+        std::fs::create_dir_all(&http_dir).unwrap();
+        let profile_before = read_profile(&config_dir, "default");
+        std::fs::write(
+            http_dir.join("default.json"),
+            serde_json::to_string_pretty(&build_legacy_http_task("default", &profile_before))
+                .unwrap(),
+        )
+        .unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        assert!(
+            !http_dir.join("default-2.json").exists(),
+            "内容一致的同名任务应复用，不重复建"
+        );
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default"
+        );
     }
 }

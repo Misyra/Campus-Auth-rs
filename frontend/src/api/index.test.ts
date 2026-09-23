@@ -13,7 +13,7 @@ vi.mock("./client", () => ({
   ensureAuthToken: vi.fn().mockResolvedValue(""),
 }));
 
-const { aiApi, browsersApi, profilesApi, systemApi } = await import("./index");
+const { aiApi, browsersApi, httpTasksApi, systemApi } = await import("./index");
 const { http } = await import("./client");
 
 const post = vi.mocked(http.post);
@@ -53,25 +53,30 @@ describe("systemApi.restart", () => {
   });
 });
 
-describe("profilesApi.testHttpLogin", () => {
-  it("把编辑器值交给直连测试端点并使用独立超时", async () => {
+describe("httpTasksApi.test", () => {
+  it("把直连任务草稿交给测试端点并使用独立超时", async () => {
     const payload = {
-      profile_id: "dorm",
+      task: {
+        task_id: "dorm",
+        name: "宿舍直连",
+        description: "",
+        method: "POST" as const,
+        url: "http://10.0.0.1/login",
+        auth_url: "http://10.0.0.1/",
+        headers: "",
+        body: "u={username}&p={password}",
+        success_pattern: "登录成功",
+        failure_pattern: "密码错误",
+        crypto_script: "",
+        ignore_https_errors: null,
+      },
       username: "student",
       password: "",
-      http_method: "POST" as const,
-      http_url: "http://10.0.0.1/login",
-      http_headers: "",
-      http_body: "u={username}&p={password}",
-      http_success_pattern: "登录成功",
-      http_failure_pattern: "密码错误",
-      http_crypto_script: "",
-      auth_url: "http://10.0.0.1/",
       fetch_page: true,
     };
-    await profilesApi.testHttpLogin(payload);
+    await httpTasksApi.test(payload);
     expect(post).toHaveBeenCalledWith(
-      "/api/profiles/http-login-test",
+      "/api/http-tasks/test",
       payload,
       { timeout: 30000 },
     );

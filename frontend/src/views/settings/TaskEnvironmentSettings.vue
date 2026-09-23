@@ -282,7 +282,7 @@ async function recognizeOcr() {
         </div>
         <div class="task-overview-actions">
           <button class="btn btn-secondary btn-sm" type="button" @click="t.importTask()">从文件导入</button>
-          <button class="btn btn-secondary btn-sm" type="button" @click="repo.showRepoImport()">从仓库导入</button>
+          <button class="btn btn-secondary btn-sm" type="button" @click="repo.showRepoImport('browser')">从仓库导入</button>
           <button class="btn btn-secondary btn-sm" type="button" @click="t.fetchTasks(true)">刷新列表</button>
           <a :href="TASK_REPO_URL" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">任务仓库 →</a>
         </div>

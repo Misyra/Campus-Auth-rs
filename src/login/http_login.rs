@@ -1,4 +1,4 @@
-//! 直连登录执行器：按 Profile 的直连配置构造并发送登录请求。
+//! 直连登录执行器：按方案的直连任务构造并发送登录请求。
 //!
 //! 与浏览器渠道（Python Worker + Playwright）完全独立：整个流程在 Rust 进程内
 //! 完成，不要求 Python 环境与浏览器就绪。流水线：
@@ -28,7 +28,7 @@ use sha2::Digest;
 use zeroize::Zeroizing;
 
 use crate::bridge::{Outcome, StructuredResult};
-use crate::config::{HttpLoginMethod, ProfileSnapshot};
+use crate::tasks::{HttpPreRequest, HttpRequestMethod, HttpTaskConfig};
 
 /// 响应体展示/判定的读取上限（字节）：门户响应通常极小，超限部分截断
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -36,6 +36,8 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_REDIRECTS: usize = 5;
 /// 登录页抓取超时（best effort，失败不影响主流程）
 const PAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// 前置请求（取 CSRF token 之类）超时
+const PRE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// 登录请求总超时
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// 用户脚本执行墙钟上限（防死循环拖死会话；引擎内另有指令数兜底）
@@ -56,11 +58,11 @@ const MAX_RESPONSE_HEADERS_BYTES: usize = 8 * 1024;
 /// 用常见浏览器标识兜底，用户可在请求头里显式覆盖。
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-/// 一次直连登录尝试的完整请求参数（由 Profile 快照或测试端点构造）
+/// 一次直连登录尝试的完整请求参数（由方案绑定的直连任务构造）
 #[derive(Clone)]
 pub(crate) struct HttpLoginRequest {
     /// 请求方法
-    pub method: HttpLoginMethod,
+    pub method: HttpRequestMethod,
     /// 请求 URL（完整地址）
     pub url: String,
     /// 请求头模板（每行 `Key: Value`）
@@ -73,6 +75,9 @@ pub(crate) struct HttpLoginRequest {
     pub failure_pattern: String,
     /// 加密脚本（空 = 不变换）
     pub crypto_script: String,
+    /// 前置请求（`None` = 不需要）：先取回一个值（如 CSRF token）再渲染登录请求。
+    /// 两次请求共用一个 `Client`，故 token 绑定 TCP 连接的门户也能成功。
+    pub pre_request: Option<HttpPreRequest>,
     /// 登录用户名
     pub username: String,
     /// 登录密码（Zeroizing 保护）
@@ -94,36 +99,50 @@ pub(crate) struct HttpLoginRequest {
 }
 
 impl HttpLoginRequest {
-    /// 由 Profile 快照构造直连请求参数（仅 login_channel = http 时调用）
+    /// 由直连任务构造请求参数（方案只提供凭据与回退认证地址）。
     ///
-    /// `global_ignore_https_errors` 为全局 `browser.ignore_https_errors`：
-    /// 方案未显式设置 `http_ignore_https_errors` 时沿用它，保证与浏览器渠道同口径。
-    pub fn from_profile(
-        profile: &ProfileSnapshot,
+    /// 请求本体（方法 / 地址 / 请求头 / 请求体 / 判定关键字 / 凭据变换脚本 / 证书策略）
+    /// 全部来自任务 `tasks/http/<id>.json`：同一门户的多个账号因此共用一份配置，
+    /// 改门户地址只需改任务，不必逐个方案改。
+    ///
+    /// `auth_url` 由调用方解析好传入——任务的认证地址非空时优先，留空才回退方案的
+    /// 同名字段（该字段两渠道共用，老配置不填也照旧可用），回退链在调用侧实现
+    /// （见 `LoginOrchestrator::resolve_http_task` 与 `/api/http-tasks/test`），
+    /// 以免这里再持有一份方案快照。
+    ///
+    /// `global_ignore_https_errors` 为全局 `browser.ignore_https_errors`：任务未显式
+    /// 设置 `ignore_https_errors` 时沿用它，保证与浏览器渠道同口径。
+    pub fn from_task(
+        task: &HttpTaskConfig,
+        username: &str,
+        password: &str,
+        auth_url: &str,
+        fetch_page: bool,
         global_ignore_https_errors: bool,
     ) -> Result<Self, String> {
-        if profile.http_url.trim().is_empty() {
-            return Err("直连请求 URL 为空，请在方案里填写".into());
+        if task.url.trim().is_empty() {
+            return Err("直连任务缺少请求地址，请在「任务 · 直连任务」里填写".into());
         }
-        Self::validate_url(&profile.http_url)?;
+        Self::validate_url(&task.url)?;
         let request = Self {
-            method: profile.http_method,
-            url: profile.http_url.trim().to_string(),
-            headers: profile.http_headers.clone(),
-            body: profile.http_body.clone(),
-            success_pattern: profile.http_success_pattern.clone(),
-            failure_pattern: profile.http_failure_pattern.clone(),
-            crypto_script: profile.http_crypto_script.clone(),
-            username: profile.username.trim().to_string(),
-            password: Zeroizing::new(profile.password.to_string()),
-            auth_url: profile.auth_url.trim().to_string(),
+            method: task.method,
+            url: task.url.trim().to_string(),
+            headers: task.headers.clone(),
+            body: task.body.clone(),
+            success_pattern: task.success_pattern.clone(),
+            failure_pattern: task.failure_pattern.clone(),
+            crypto_script: task.crypto_script.clone(),
+            pre_request: task.pre_request.clone(),
+            username: username.trim().to_string(),
+            password: Zeroizing::new(password.to_string()),
+            auth_url: auth_url.trim().to_string(),
             // 本机地址需异步查询网卡，由调用方（持有 MonitorService）按需填充，
             // 见 [`HttpLoginRequest::with_local_address`]
             local_ip: String::new(),
             local_mac: String::new(),
-            fetch_page: true,
-            ignore_https_errors: profile
-                .http_ignore_https_errors
+            fetch_page,
+            ignore_https_errors: task
+                .ignore_https_errors
                 .unwrap_or(global_ignore_https_errors),
         };
         request.validate()?;
@@ -151,7 +170,33 @@ impl HttpLoginRequest {
             &self.success_pattern,
             &self.failure_pattern,
             &self.crypto_script,
-        )
+        )?;
+        if let Some(pre) = &self.pre_request {
+            Self::validate_pre_request(pre)?;
+        }
+        Ok(())
+    }
+
+    /// 前置请求校验：结构形状与各模板体积上限。
+    ///
+    /// 形状（地址必填且 http(s)、取值方式可解析）委托给
+    /// [`HttpPreRequest::validate`]——保存路径（只拿到 JSON 值）与执行路径必须同源，
+    /// 此处只补执行侧才关心的体积边界。
+    pub fn validate_pre_request(pre: &HttpPreRequest) -> Result<(), String> {
+        pre.validate()?;
+        let checks = [
+            ("前置请求 URL", pre.url.len(), MAX_URL_BYTES),
+            ("前置请求头", pre.headers.len(), MAX_HEADERS_BYTES),
+            ("前置请求体", pre.body.len(), MAX_REQUEST_BODY_BYTES),
+            ("前置请求取值方式", pre.extract.len(), MAX_PATTERN_BYTES),
+            ("前置请求占位符名", pre.name.len(), MAX_PATTERN_BYTES),
+        ];
+        for (label, actual, limit) in checks {
+            if actual > limit {
+                return Err(format!("{label}过长（最多 {limit} 字节）"));
+            }
+        }
+        Ok(())
     }
 
     /// 纯模板体积校验（不含 URL 合法性）：保存路径使用。
@@ -191,6 +236,25 @@ impl HttpLoginRequest {
     /// 无脚本时脚本根本不会执行，`local_ip`/`local_mac` 也就无人读取。
     pub fn uses_crypto_script(&self) -> bool {
         !self.crypto_script.trim().is_empty()
+    }
+
+    /// 是否需要本机地址（决定是否值得做一次网卡探测）。
+    ///
+    /// 除了脚本要读 `ctx.local_ip` / `ctx.local_mac`，**模板里直接写 `{local_ip}` 也算**：
+    /// 锐捷 ePortal 这类门户把本机 IP 当必填参数提交，少查一次就是静默发出空 IP
+    /// （请求照发、门户照拒，用户看不出是哪个环节空了）。此前只看"有没有脚本"，
+    /// 于是"模板用了 {local_ip} 但没配脚本"的任务必然失败且无从判断。
+    pub fn needs_local_address(&self) -> bool {
+        fn mentions(text: &str) -> bool {
+            text.contains("{local_ip}") || text.contains("{local_mac}")
+        }
+        self.uses_crypto_script()
+            || mentions(&self.url)
+            || mentions(&self.headers)
+            || mentions(&self.body)
+            || self.pre_request.as_ref().is_some_and(|pre| {
+                mentions(&pre.url) || mentions(&pre.headers) || mentions(&pre.body)
+            })
     }
 
     /// 填充本机地址（供脚本 `ctx.local_ip` / `ctx.local_mac`）。
@@ -249,6 +313,23 @@ impl HttpAttemptReport {
 pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let start = Instant::now();
 
+    // 0. 本次尝试共用的 HTTP 客户端（登录页抓取 / 前置请求 / 登录请求三处都用它）：
+    //    连接池挂在 Client 上，CSRF 令牌绑定 TCP 连接的门户要求取 token 与发登录落在
+    //    同一条 keep-alive 连接，故整次尝试只能建一个。见 [`build_client`]。
+    let client = match build_client(req.ignore_https_errors) {
+        Ok(client) => client,
+        Err(e) => {
+            return abort_report(
+                Outcome::UnknownError,
+                format!("HTTP 客户端构建失败: {e}"),
+                None,
+                None,
+                None,
+                start.elapsed().as_millis() as u64,
+            );
+        }
+    };
+
     // 1. 用户脚本值变换：产出可被占位符引用的字段表
     let mut vars = BTreeMap::new();
     vars.insert("username".to_string(), req.username.clone());
@@ -263,7 +344,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     if req.uses_crypto_script() {
         // 登录页原文 best effort 抓取：失败置空串，脚本须容忍缺失
         let page = if req.fetch_page {
-            fetch_login_page(&req.auth_url, req.ignore_https_errors).await
+            fetch_login_page(&client, &req.auth_url).await
         } else {
             String::new()
         };
@@ -294,18 +375,86 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 
     // 脚本失败直接终态：凭证变换错误时发出去的请求必错，重试无意义
     if let Some(e) = &script_error {
-        return HttpAttemptReport {
-            outcome: Outcome::UnknownError,
-            message: format!("加密脚本执行失败: {e}"),
-            rendered_url: String::new(),
-            rendered_headers: String::new(),
-            rendered_body: String::new(),
-            status: None,
-            response_headers: String::new(),
-            response_snippet: String::new(),
-            script_error: Some(e.clone()),
-            duration_ms: start.elapsed().as_millis() as u64,
-        };
+        return abort_report(
+            Outcome::UnknownError,
+            format!("加密脚本执行失败: {e}"),
+            None,
+            None,
+            Some(e.clone()),
+            start.elapsed().as_millis() as u64,
+        );
+    }
+
+    // 1.5 前置请求（可选）：先取回一个值（如 CSRF token）注册成占位符，供登录请求的
+    //     URL / 请求头 / 请求体引用。与登录请求同一个 client，两条请求因此落在同一条
+    //     连接上；取不到值就没必要再发登录请求（必然被门户拒），直接终态并把这次
+    //     前置请求的请求与响应带进报告，便于在测试面板里看清是哪一步不对。
+    if let Some(pre) = &req.pre_request {
+        let pre_url = substitute(&pre.url, &vars);
+        let pre_headers = substitute(&pre.headers, &vars);
+        let pre_body = substitute(&pre.body, &vars);
+        let secrets = collect_secrets(&vars);
+        let rendered = (
+            redact_url(&pre_url, &secrets),
+            redact_text(&pre_headers, &secrets),
+            redact_text(&pre_body, &secrets),
+        );
+
+        match send_http(
+            &client,
+            pre.method,
+            &pre_url,
+            &pre_headers,
+            &pre_body,
+            PRE_REQUEST_TIMEOUT,
+        )
+        .await
+        {
+            Ok((status, body, response_headers)) => {
+                let body_snippet = truncate_snippet(&body);
+                let extracted = match pre.extract_path() {
+                    Ok(path) => extract_pre_value(path, &body),
+                    Err(e) => Err(e),
+                };
+                match extracted {
+                    Ok(value) => {
+                        let placeholder = pre.placeholder_name();
+                        tracing::debug!(
+                            "前置请求（HTTP {status}）取到占位符 `{placeholder}`（{} 字节）",
+                            value.len()
+                        );
+                        // 取到的值进 vars 后即属"秘密"：collect_secrets 会把非内置键
+                        // 全部纳入脱敏字典，后续日志/历史/前端回显都不会漏出令牌
+                        vars.insert(placeholder, value);
+                    }
+                    Err(e) => {
+                        return abort_report(
+                            Outcome::UnknownError,
+                            redact_text(&format!("前置请求未取到占位符: {e}"), &secrets),
+                            Some((&rendered.0, &rendered.1, &rendered.2)),
+                            Some((
+                                status.as_u16(),
+                                &redact_text(&response_headers, &secrets),
+                                &redact_text(&body_snippet, &secrets),
+                            )),
+                            None,
+                            start.elapsed().as_millis() as u64,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                // reqwest 的错误消息会拼上完整 URL，前置请求地址同样可能带凭据参数
+                return abort_report(
+                    Outcome::NetworkError,
+                    redact_text(&format!("前置请求失败: {e}"), &secrets),
+                    Some((&rendered.0, &rendered.1, &rendered.2)),
+                    None,
+                    None,
+                    start.elapsed().as_millis() as u64,
+                );
+            }
+        }
     }
 
     // 2. 模板渲染
@@ -314,7 +463,15 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let rendered_body = substitute(&req.body, &vars);
 
     // 3. 发送请求
-    let send = send_request(req, &rendered_url, &rendered_headers, &rendered_body).await;
+    let send = send_http(
+        &client,
+        req.method,
+        &rendered_url,
+        &rendered_headers,
+        &rendered_body,
+        REQUEST_TIMEOUT,
+    )
+    .await;
     let (status, body, response_headers) = match send {
         Ok(triple) => triple,
         Err(e) => {
@@ -322,18 +479,18 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             // reqwest 的 Error::Display 会把完整 URL 拼进消息（"for url (...)"），
             // GET 渠道下 URL 含明文凭据，必须先脱敏再进 message——它会流入日志、
             // 登录历史与前端；rendered_url 的自有脱敏无法覆盖这条错误路径。
-            return HttpAttemptReport {
-                outcome: Outcome::NetworkError,
-                message: redact_text(&format!("直连请求失败: {e}"), &secrets),
-                rendered_url: redact_url(&rendered_url, &secrets),
-                rendered_headers: redact_text(&rendered_headers, &secrets),
-                rendered_body: redact_text(&rendered_body, &secrets),
-                status: None,
-                response_headers: String::new(),
-                response_snippet: String::new(),
+            return abort_report(
+                Outcome::NetworkError,
+                redact_text(&format!("直连请求失败: {e}"), &secrets),
+                Some((
+                    &redact_url(&rendered_url, &secrets),
+                    &redact_text(&rendered_headers, &secrets),
+                    &redact_text(&rendered_body, &secrets),
+                )),
+                None,
                 script_error,
-                duration_ms: start.elapsed().as_millis() as u64,
-            };
+                start.elapsed().as_millis() as u64,
+            );
         }
     };
 
@@ -393,30 +550,35 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 /// - 证书策略：按 `ignore_https_errors`（自签门户必需，与浏览器渠道同口径）
 /// - 代理：显式 `no_proxy`（校园网网关是本机直连可达的内网地址，走代理必失败）
 /// - User-Agent：未显式配置时补浏览器 UA（reqwest 默认完全不发该头）
-fn build_client(timeout: Duration, ignore_https_errors: bool) -> Result<reqwest::Client, String> {
+///
+/// **整次直连尝试只建一个**，由调用方传给登录页抓取 / 前置请求 / 登录请求三处：
+/// reqwest 的连接池挂在 `Client` 上，而部分门户把 CSRF 令牌绑在 TCP 连接上（取 token
+/// 与发登录必须同一条 keep-alive 连接，换连接服务器回 `CSRF token mismatch`）。
+/// 此前每个请求各建一个 Client，等于每次登录都新开一条连接，这类门户必然失败。
+///
+/// 超时因此不设在 Client 上（一个 Client 只能有一个全局超时），改由每个请求的
+/// `RequestBuilder::timeout` 单独给：抓登录页 5s / 前置请求 10s / 登录 20s。
+fn build_client(ignore_https_errors: bool) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .redirect(Policy::limited(MAX_REDIRECTS))
         .no_proxy()
         .danger_accept_invalid_certs(ignore_https_errors)
         .user_agent(DEFAULT_USER_AGENT)
-        .timeout(timeout)
         .build()
         .map_err(|e| format!("客户端构建失败: {e}"))
 }
 
 /// 抓取登录页原文（best effort）：脚本 ctx.page 数据源，失败返回空串
-async fn fetch_login_page(auth_url: &str, ignore_https_errors: bool) -> String {
+async fn fetch_login_page(client: &reqwest::Client, auth_url: &str) -> String {
     if auth_url.is_empty() {
         return String::new();
     }
-    let client = match build_client(PAGE_FETCH_TIMEOUT, ignore_https_errors) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("登录页抓取客户端构建失败: {e}");
-            return String::new();
-        }
-    };
-    match client.get(auth_url).send().await {
+    match client
+        .get(auth_url)
+        .timeout(PAGE_FETCH_TIMEOUT)
+        .send()
+        .await
+    {
         Ok(resp) => match read_limited_body(resp).await {
             Ok(body) => body.0,
             Err(e) => {
@@ -431,18 +593,21 @@ async fn fetch_login_page(auth_url: &str, ignore_https_errors: bool) -> String {
     }
 }
 
-/// 发送登录请求，返回 (状态码, 响应体原文, 响应头逐行文本)
-async fn send_request(
-    req: &HttpLoginRequest,
+/// 发送一次请求，返回 (状态码, 响应体原文, 响应头逐行文本)。
+///
+/// 登录请求与前置请求共用（差别只有方法/地址/体积与超时），`client` 由调用方传入而
+/// 非在此新建——两次请求必须落在同一条连接上，见 [`build_client`]。
+async fn send_http(
+    client: &reqwest::Client,
+    method: HttpRequestMethod,
     url: &str,
     headers: &str,
     body: &str,
+    timeout: Duration,
 ) -> Result<(reqwest::StatusCode, String, String), String> {
-    let client = build_client(REQUEST_TIMEOUT, req.ignore_https_errors)?;
-
-    let mut request = match req.method {
-        HttpLoginMethod::Get => client.get(url),
-        HttpLoginMethod::Post => {
+    let mut request = match method {
+        HttpRequestMethod::Get => client.get(url),
+        HttpRequestMethod::Post => {
             let mut r = client.post(url);
             if !body.is_empty() {
                 r = r.body(body.to_string());
@@ -456,7 +621,7 @@ async fn send_request(
     for (k, v) in &parsed {
         request = request.header(k, v);
     }
-    if req.method == HttpLoginMethod::Post && !body.is_empty() {
+    if method == HttpRequestMethod::Post && !body.is_empty() {
         let has_content_type = parsed
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
@@ -465,12 +630,78 @@ async fn send_request(
         }
     }
 
-    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let resp = request
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let status = resp.status();
     // 响应头先快照再消费响应体（流式读取会拿走所有权）
     let headers_text = format_response_headers(resp.headers());
     let (body, _charset) = read_limited_body(resp).await?;
     Ok((status, body, headers_text))
+}
+
+/// 从前置请求的响应体里取出值（字符串取原值，其余类型取 JSON 文本）。
+///
+/// `path` 是已解析好的点号路径（见 [`HttpPreRequest::extract_path`]）。容忍 JSONP
+/// 包裹与前后脏字符：这类接口由门户前端 AJAX 调用，常见
+/// `dr1003({"csrf_token":"..."})` 或带 BOM/空行的返回。
+fn extract_pre_value(path: &str, body: &str) -> Result<String, String> {
+    let raw = body.trim();
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(first) => {
+            // JSONP 包裹（`dr1003({...})`）或前后脏字符：退一步取最外层花括号再试
+            let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}')) else {
+                return Err(format!("响应不是 JSON（取值 `json:{path}`）: {first}"));
+            };
+            if end <= start {
+                return Err(format!("响应不是 JSON（取值 `json:{path}`）: {first}"));
+            }
+            serde_json::from_str(&raw[start..=end])
+                .map_err(|e| format!("响应不是 JSON（取值 `json:{path}`）: {e}"))?
+        }
+    };
+
+    let mut current = &value;
+    for segment in path.split('.') {
+        current = current
+            .get(segment)
+            .ok_or_else(|| format!("响应里没有字段 `{path}`"))?;
+    }
+    Ok(match current {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    })
+}
+
+/// 组装"还没走到登录请求就终结"的报告（客户端构建失败 / 脚本失败 / 前置请求失败）。
+///
+/// `rendered` 传**实际卡住的那一步**的渲染结果（前置请求就传前置请求的），测试面板要
+/// 能看到失败那一步真实发出的东西，而不是一片空白。
+fn abort_report(
+    outcome: Outcome,
+    message: String,
+    rendered: Option<(&str, &str, &str)>,
+    response: Option<(u16, &str, &str)>,
+    script_error: Option<String>,
+    duration_ms: u64,
+) -> HttpAttemptReport {
+    let (url, headers, body) = rendered.unwrap_or(("", "", ""));
+    let (status, response_headers, response_snippet) = response.unwrap_or((0, "", ""));
+    HttpAttemptReport {
+        outcome,
+        message,
+        script_error,
+        duration_ms,
+        rendered_url: url.to_string(),
+        rendered_headers: headers.to_string(),
+        rendered_body: body.to_string(),
+        status: (status != 0).then_some(status),
+        response_headers: response_headers.to_string(),
+        response_snippet: response_snippet.to_string(),
+    }
 }
 
 /// 响应头 → 逐行 `Key: Value` 文本（截断到上限），供测试结果面板排查排查
@@ -899,13 +1130,14 @@ mod tests {
 
     fn request(url: String) -> HttpLoginRequest {
         HttpLoginRequest {
-            method: HttpLoginMethod::Get,
+            method: HttpRequestMethod::Get,
             url,
             headers: "X-User: {username}".into(),
             body: String::new(),
             success_pattern: "登录成功".into(),
             failure_pattern: "密码错误".into(),
             crypto_script: String::new(),
+            pre_request: None,
             username: "abc".into(),
             password: Zeroizing::new("abcdef".into()),
             auth_url: "http://portal.example/login".into(),
@@ -1023,44 +1255,89 @@ mod tests {
         assert!(err.contains("直连请求体过长"), "{err}");
     }
 
-    /// 证书策略缺省解析：方案未设置时跟随全局（与浏览器渠道同口径）
+    /// 空请求地址必须明确指向「任务 · 直连任务」而不是方案——直连配置已整体搬到
+    /// 任务里，报错文案若仍说"请在方案里填写"，用户会去错页面找不到该字段。
     #[test]
-    fn from_profile_falls_back_to_global_cert_policy() {
-        let mut profile = crate::config::ProfileSnapshot {
-            id: "p".into(),
-            name: String::new(),
-            username: "u".into(),
-            password: Zeroizing::new("pw".into()),
-            auth_url: String::new(),
-            trigger_url: String::new(),
-            isp: String::new(),
-            gateway_ip: String::new(),
-            wifi_ssid: String::new(),
-            active_task: String::new(),
-            login_channel: crate::config::LoginChannel::Http,
-            http_method: HttpLoginMethod::Get,
-            http_url: "http://10.0.0.1/login".into(),
-            http_headers: String::new(),
-            http_body: String::new(),
-            http_success_pattern: String::new(),
-            http_failure_pattern: String::new(),
-            http_crypto_script: String::new(),
-            http_ignore_https_errors: None,
+    fn from_task_rejects_empty_url() {
+        let task = HttpTaskConfig::default();
+        // HttpLoginRequest 未派生 Debug（内含 Zeroizing 凭据），故不能用 expect_err/unwrap_err
+        let err = match HttpLoginRequest::from_task(&task, "u", "p", "", false, true) {
+            Ok(_) => panic!("空地址必须被拒"),
+            Err(e) => e,
+        };
+        assert!(err.contains("直连任务缺少请求地址"), "{err}");
+        assert!(err.contains("任务 · 直连任务"), "文案须指向任务页: {err}");
+
+        // 仅空白同样视为空
+        let blank = HttpTaskConfig {
+            url: "   ".into(),
+            ..HttpTaskConfig::default()
+        };
+        assert!(HttpLoginRequest::from_task(&blank, "u", "p", "", false, true).is_err());
+    }
+
+    /// 证书策略缺省解析：任务未设置时跟随全局（与浏览器渠道同口径），
+    /// 显式值覆盖全局
+    #[test]
+    fn from_task_falls_back_to_global_cert_policy() {
+        let task = HttpTaskConfig {
+            url: "http://10.0.0.1/login".into(),
+            ..HttpTaskConfig::default()
         };
 
-        let followed = HttpLoginRequest::from_profile(&profile, true).unwrap();
+        let followed = HttpLoginRequest::from_task(&task, "u", "p", "", false, true).unwrap();
         assert!(followed.ignore_https_errors, "未设置时应跟随全局 true");
 
-        let followed_strict = HttpLoginRequest::from_profile(&profile, false).unwrap();
+        let followed_strict = HttpLoginRequest::from_task(&task, "u", "p", "", false, false)
+            .expect("全局 false 同样可构成合法请求");
         assert!(
             !followed_strict.ignore_https_errors,
             "未设置时应跟随全局 false"
         );
 
         // 显式覆盖优先于全局
-        profile.http_ignore_https_errors = Some(false);
-        let overridden = HttpLoginRequest::from_profile(&profile, true).unwrap();
-        assert!(!overridden.ignore_https_errors, "方案显式设置必须覆盖全局");
+        let strict = HttpTaskConfig {
+            ignore_https_errors: Some(false),
+            ..task.clone()
+        };
+        let overridden = HttpLoginRequest::from_task(&strict, "u", "p", "", false, true).unwrap();
+        assert!(!overridden.ignore_https_errors, "任务显式设置必须覆盖全局");
+    }
+
+    /// 任务字段逐项落到请求上（方法/头/体/判定关键字/脚本/认证地址/抓页开关），
+    /// 且账号 trim、密码进 Zeroizing —— 与旧的「方案快照构造」逐字段映射等价
+    #[test]
+    fn from_task_maps_all_fields_and_trims() {
+        let task = HttpTaskConfig {
+            method: HttpRequestMethod::Post,
+            url: "  http://10.0.0.1/login  ".into(),
+            headers: "X-User: {username}".into(),
+            body: "u={username}&p={password}".into(),
+            success_pattern: "登录成功".into(),
+            failure_pattern: "密码错误".into(),
+            crypto_script: "function transform(ctx) { return {}; }".into(),
+            ..HttpTaskConfig::default()
+        };
+        let req = HttpLoginRequest::from_task(
+            &task,
+            " 20230001 ",
+            "pw",
+            " http://10.0.0.1/ ",
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(req.method, HttpRequestMethod::Post);
+        assert_eq!(req.url, "http://10.0.0.1/login", "地址须 trim");
+        assert_eq!(req.headers, "X-User: {username}");
+        assert_eq!(req.body, "u={username}&p={password}");
+        assert_eq!(req.success_pattern, "登录成功");
+        assert_eq!(req.failure_pattern, "密码错误");
+        assert!(req.uses_crypto_script());
+        assert_eq!(req.username, "20230001", "账号须 trim");
+        assert_eq!(req.password.as_str(), "pw");
+        assert_eq!(req.auth_url, "http://10.0.0.1/", "认证地址须 trim");
+        assert!(req.fetch_page, "抓页开关由调用方决定（测试端点可关）");
     }
 
     async fn spawn_response(status: u16, body: &str) -> String {
@@ -1298,5 +1575,293 @@ mod tests {
         assert!(!report.response_snippet.contains("abc"));
         assert!(!report.response_snippet.contains("def"));
         assert!(report.rendered_url.contains("***"));
+    }
+
+    // ===== 前置请求（CSRF 令牌绑定 TCP 连接的门户） =====
+
+    /// 起一个"令牌绑连接"的极简门户，返回 `(base_url, 收到的 (来源端口, 路径) 流)`。
+    ///
+    /// 复现实测过的门户约束（河南科技大学「大学掌」体系那类）：`GET /api/csrf-token`
+    /// 发一个令牌，`POST /api/account/login` 必须带上**同一条连接**上取到的令牌，
+    /// 换连接即回 `400 {"error":"CSRF token mismatch"}`。响应刻意不写
+    /// `Connection: close`，连接因此可被客户端 keep-alive 复用——这正是被测代码要用的性质。
+    async fn spawn_csrf_portal() -> (String, tokio::sync::mpsc::Receiver<(u16, String)>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+
+        tokio::spawn(async move {
+            // 令牌按"来源端口"记账：换了连接就查不到自己的令牌
+            let tokens: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<u16, String>>> =
+                std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+            loop {
+                let Ok((stream, peer)) = listener.accept().await else {
+                    break;
+                };
+                let tokens = tokens.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let (mut reader, mut writer) = stream.into_split();
+                    let mut buf: Vec<u8> = Vec::new();
+                    loop {
+                        // 读到"请求头 + Content-Length 指定的体"齐全为止
+                        let (head_end, content_length) = loop {
+                            if let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                                let len = head
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (k, v) = line.split_once(':')?;
+                                        k.eq_ignore_ascii_case("content-length")
+                                            .then(|| v.trim().parse::<usize>().ok())?
+                                    })
+                                    .unwrap_or(0);
+                                if buf.len() >= head_end + 4 + len {
+                                    break (head_end, len);
+                                }
+                            }
+                            let mut chunk = [0_u8; 4096];
+                            match reader.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        };
+
+                        let request =
+                            String::from_utf8_lossy(&buf[..head_end + 4 + content_length])
+                                .to_string();
+                        buf.drain(..head_end + 4 + content_length);
+                        let path = request.split(' ').nth(1).unwrap_or("/").to_string();
+                        let _ = tx.send((peer.port(), path.clone())).await;
+
+                        let (status, reason, body) = if path.starts_with("/api/csrf-token") {
+                            let token = format!("tok-{}", peer.port());
+                            tokens.lock().await.insert(peer.port(), token.clone());
+                            (200, "OK", format!("{{\"csrf_token\":\"{token}\"}}"))
+                        } else if path.starts_with("/api/account/login") {
+                            let sent = request
+                                .lines()
+                                .find_map(|line| {
+                                    let (k, v) = line.split_once(':')?;
+                                    k.eq_ignore_ascii_case("x-csrf-token")
+                                        .then(|| v.trim().to_string())
+                                })
+                                .unwrap_or_default();
+                            let expected = tokens
+                                .lock()
+                                .await
+                                .get(&peer.port())
+                                .cloned()
+                                .unwrap_or_default();
+                            if !expected.is_empty() && sent == expected {
+                                (200, "OK", "{\"code\":0,\"msg\":\"ok\"}".to_string())
+                            } else {
+                                (
+                                    400,
+                                    "Bad Request",
+                                    "{\"error\":\"CSRF token mismatch\"}".to_string(),
+                                )
+                            }
+                        } else {
+                            (404, "Not Found", "{}".to_string())
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if writer.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        (format!("http://{addr}"), rx)
+    }
+
+    /// 前置请求与登录请求必须落在**同一条连接**上——这是令牌绑连接的门户能否登录的
+    /// 唯一判据，也是把 Client 提到整次尝试一处的原因。
+    #[tokio::test]
+    async fn pre_request_shares_connection_with_login_request() {
+        let (base, mut seen) = spawn_csrf_portal().await;
+        let mut req = request(format!("{base}/api/account/login"));
+        req.method = HttpRequestMethod::Post;
+        req.body = "username={username}&password={password}".into();
+        req.headers = "X-CSRF-Token: {csrf}".into();
+        req.success_pattern = "\"code\":0".into();
+        req.failure_pattern.clear();
+        req.pre_request = Some(HttpPreRequest {
+            method: HttpRequestMethod::Get,
+            url: format!("{base}/api/csrf-token"),
+            extract: "json:csrf_token".into(),
+            name: "csrf".into(),
+            ..Default::default()
+        });
+
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+
+        let token_call = seen.recv().await.unwrap();
+        let login_call = seen.recv().await.unwrap();
+        assert!(
+            token_call.1.starts_with("/api/csrf-token"),
+            "{token_call:?}"
+        );
+        assert!(
+            login_call.1.starts_with("/api/account/login"),
+            "{login_call:?}"
+        );
+        assert_eq!(
+            token_call.0, login_call.0,
+            "前置请求与登录请求落在了两条连接上（CSRF 绑连接的门户会拒登）"
+        );
+        // 取到的令牌属秘密：报告里不得出现明文
+        assert!(
+            !report.rendered_headers.contains("tok-"),
+            "报告泄露令牌: {}",
+            report.rendered_headers
+        );
+        assert!(report.rendered_headers.contains("***"));
+    }
+
+    /// 对照组：不带前置请求时同一门户直接拒登——证明上一条测试不是白过
+    #[tokio::test]
+    async fn csrf_portal_rejects_login_without_token() {
+        let (base, _seen) = spawn_csrf_portal().await;
+        let mut req = request(format!("{base}/api/account/login"));
+        req.method = HttpRequestMethod::Post;
+        req.body = "username={username}".into();
+        req.success_pattern = "\"code\":0".into();
+        req.failure_pattern.clear();
+
+        let report = run_once(&req).await;
+        assert_eq!(
+            report.outcome,
+            Outcome::AssertionFailed,
+            "{}",
+            report.message
+        );
+        assert!(
+            report.response_snippet.contains("CSRF token mismatch"),
+            "{}",
+            report.response_snippet
+        );
+    }
+
+    /// 前置请求取不到字段 → 终态失败，并把**前置请求**的请求与响应带进报告
+    /// （否则测试面板只会显示一片空白，用户无从判断是 token 接口还是登录接口不对）
+    #[tokio::test]
+    async fn pre_request_missing_field_is_terminal_and_reports_its_own_exchange() {
+        let (base, _seen) = spawn_csrf_portal().await;
+        let mut req = request(format!("{base}/api/account/login"));
+        req.pre_request = Some(HttpPreRequest {
+            url: format!("{base}/api/csrf-token"),
+            extract: "json:not_here".into(),
+            ..Default::default()
+        });
+
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::UnknownError);
+        assert!(
+            report.message.contains("前置请求未取到占位符"),
+            "{}",
+            report.message
+        );
+        assert!(report.message.contains("`not_here`"), "{}", report.message);
+        assert!(
+            report.rendered_url.ends_with("/api/csrf-token"),
+            "报告应展示前置请求的地址: {}",
+            report.rendered_url
+        );
+        assert!(
+            report.response_snippet.contains("csrf_token"),
+            "报告应带回前置请求的响应: {}",
+            report.response_snippet
+        );
+    }
+
+    /// 前置请求的地址/取值方式在保存（validate）阶段就要拦：空地址、非法取值前缀
+    #[test]
+    fn pre_request_validation_rejects_empty_url_and_unknown_extract_prefix() {
+        let mut req = request("http://portal.example/login".into());
+        req.pre_request = Some(HttpPreRequest {
+            url: String::new(),
+            extract: "json:csrf_token".into(),
+            ..Default::default()
+        });
+        assert!(
+            req.validate().unwrap_err().contains("前置请求缺少请求地址"),
+            "{:?}",
+            req.validate().unwrap_err()
+        );
+
+        req.pre_request = Some(HttpPreRequest {
+            url: "http://portal.example/token".into(),
+            extract: "regex:name=\"(.*?)\"".into(),
+            ..Default::default()
+        });
+        assert!(
+            req.validate()
+                .unwrap_err()
+                .contains("只支持 `json:字段路径`"),
+            "{:?}",
+            req.validate().unwrap_err()
+        );
+
+        req.pre_request = Some(HttpPreRequest {
+            url: "ftp://portal.example/token".into(),
+            extract: "json:csrf_token".into(),
+            ..Default::default()
+        });
+        assert!(req.validate().is_err());
+    }
+
+    /// 用得到本机 IP 就必须查一次：脚本要读 `ctx.local_ip`，或模板里直接写了 `{local_ip}`
+    /// （锐捷 ePortal 这类门户把本机 IP 当必填参数；少查一次 = 静默发出空 IP）
+    #[test]
+    fn needs_local_address_covers_script_and_placeholders() {
+        let mut req = request("http://portal.example/login".into());
+        assert!(
+            !req.needs_local_address(),
+            "既无脚本也无占位符时不该白跑一次网卡探测"
+        );
+
+        req.url = "http://portal.example/login?ip={local_ip}".into();
+        assert!(req.needs_local_address(), "地址里的占位符要算进去");
+
+        req.url = "http://portal.example/login".into();
+        req.body = "mac={local_mac}".into();
+        assert!(req.needs_local_address(), "请求体里的占位符要算进去");
+
+        req.body.clear();
+        req.crypto_script = "function transform(ctx) { return { ip: ctx.local_ip }; }".into();
+        assert!(req.needs_local_address(), "脚本要读 ctx.local_ip");
+
+        req.crypto_script.clear();
+        req.pre_request = Some(HttpPreRequest {
+            url: "http://portal.example/t?ip={local_ip}".into(),
+            extract: "json:token".into(),
+            ..Default::default()
+        });
+        assert!(req.needs_local_address(), "前置请求里的占位符要算进去");
+    }
+
+    /// 取值：容忍 JSONP 包裹与前后脏字符（这类接口由门户前端 AJAX 调用）
+    #[test]
+    fn pre_request_extract_tolerates_jsonp_and_dirty_body() {
+        assert_eq!(
+            extract_pre_value("csrf_token", "dr1003({\"csrf_token\":\"t1\"})").unwrap(),
+            "t1"
+        );
+        assert_eq!(
+            extract_pre_value("data.token", "\n {\"data\":{\"token\":\"t2\"}} \n").unwrap(),
+            "t2"
+        );
+        // 非字符串值取其 JSON 文本（数字令牌也照用）
+        assert_eq!(extract_pre_value("code", "{\"code\":0}").unwrap(), "0");
+        assert!(extract_pre_value("missing", "{\"code\":0}").is_err());
     }
 }

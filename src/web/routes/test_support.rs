@@ -36,14 +36,8 @@ pub fn test_runtime_config() -> RuntimeConfig {
             wifi_ssid: String::new(),
             active_task: String::new(),
             login_channel: crate::config::LoginChannel::default(),
-            http_method: crate::config::HttpLoginMethod::default(),
-            http_url: String::new(),
-            http_headers: String::new(),
-            http_body: String::new(),
-            http_success_pattern: String::new(),
-            http_failure_pattern: String::new(),
-            http_crypto_script: String::new(),
-            http_ignore_https_errors: None,
+            // 直连渠道的请求参数在直连任务里，快照侧只有这条绑定（空 = 未绑定）
+            active_http_task: String::new(),
         },
         auto_switch: false,
     }

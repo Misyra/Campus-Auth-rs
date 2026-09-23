@@ -85,6 +85,15 @@
     padding: 12px;
   }
 
+  /* 图标模式下侧栏只有 64px：二级子项的文字放不下，整块隐藏（caret 也随之隐藏——
+     它是一级项的展开指示器，藏了子项就没有指示的对象）。
+     代价是窄屏在侧栏里到达不了其余四个任务面板，故任务页内会亮出一条横向
+     pill 行兜底（`.tasks-narrow-nav`，见 styles/pages/tasks.css）。 */
+  .nav-children,
+  .nav-caret {
+    display: none;
+  }
+
   .main-content {
     margin-left: 64px;
   }
@@ -130,15 +139,10 @@
     flex: 1 1 40%;
   }
 
-  /* 任务页四 Tab 窄屏：保持内容宽并允许换行成多行（.settings-tabs 有 flex-wrap），
-     不用 flex 等分——9 字的「AI 生成浏览器任务」被压到 75px 会把文案断成
-     「AI 生成浏 / 览器任务」（实测）。此处只收紧内边距，宽度交给内容决定。 */
-  .tasks-tabs .settings-tab {
-    flex: 0 1 auto;
-    min-width: 0;
-    padding-left: 6px;
-    padding-right: 6px;
-  }
+  /* 任务页五个面板的切换已收进左侧主侧栏的「任务」分组（见 components/sidebar.css），
+     原先针对页内横向 Tab（`.tasks-tabs`）与页内竖排二级导航（`.tasks-subnav`）的窄屏
+     规则随之作废。侧栏本身在 ≤768px 只剩图标、子项文字放不下，故任务页内另有一条
+     横向 pill 行兜底（`.tasks-narrow-nav`，定义在 styles/pages/tasks.css）。 */
 
   .task-mini-grid,
   .form-row,
@@ -154,7 +158,9 @@
 @media (max-width: 640px) {
   .field-help::after {
     left: calc(100% + 8px);
-    max-width: calc(100vw - 120px);
+    /* 窄屏收紧宽度；--tip-max 是组件按触发点两侧实测剩余空间写入的上界
+       （见 FieldHelp.syncAutoFlip），必须一并尊重，否则本规则会把实测值覆盖掉 */
+    max-width: min(var(--tip-max, 320px), calc(100vw - 64px));
   }
 
   /* 通用弹窗窄屏：全幅贴边（复用向导的全幅模式），确认框同理 */

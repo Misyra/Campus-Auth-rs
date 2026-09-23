@@ -11,7 +11,10 @@ pub mod schema;
 pub mod service;
 
 /// 当前代码支持的最高 schema 版本
-pub const CURRENT_CONFIG_VERSION: u32 = 9;
+///
+/// v10：直连请求参数从方案内联字段迁出为独立的「直连任务」（`tasks/http/<id>.json`），
+/// 方案只保留绑定关系 `active_http_task`（跨文件迁移，见 `migration::migrate_v9_to_v10`）。
+pub const CURRENT_CONFIG_VERSION: u32 = 10;
 /// 浏览器登录未填写固定网址时使用的默认重定向触发地址。
 ///
 /// 明文 HTTP 才能被未认证网关劫持；与 Windows NCSI 使用同一探测页，避免用户
@@ -34,9 +37,9 @@ pub use profiles::ProfileService;
 pub use profiles::{ProfileApi, ProfileSummary};
 pub use runtime::{ConfigReloadSignal, ProfileSnapshot, RuntimeConfig, build_runtime_config};
 pub use schema::{
-    AppSettings, BrowserSettings, GlobalConfig, HttpLoginMethod, LoggingSettings, LoginChannel,
-    MonitorSettings, PauseSettings, ProfileData, RetrySettings, SettingsData, StartupAction,
-    UpdateChannel, UpdaterSettings, WorkerSettings,
+    AppSettings, BrowserSettings, GlobalConfig, LoggingSettings, LoginChannel, MonitorSettings,
+    PauseSettings, ProfileData, RetrySettings, SettingsData, StartupAction, UpdateChannel,
+    UpdaterSettings, WorkerSettings,
 };
 pub use service::ConfigError;
 pub use service::ConfigService;

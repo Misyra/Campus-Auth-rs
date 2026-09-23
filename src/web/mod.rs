@@ -88,9 +88,6 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("GET", "/api/profiles/{id}", || {
             get(routes::profiles::get_profile)
         }),
-        ("POST", "/api/profiles/http-login-test", || {
-            post(routes::profiles::test_http_login)
-        }),
         ("GET", "/api/profiles/{id}/export", || {
             get(routes::profiles::export_profile)
         }),
@@ -118,6 +115,11 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         // ---- 任务（tasks）----
         ("GET", "/api/tasks", || get(routes::tasks::list_tasks)),
         ("POST", "/api/tasks", || post(routes::tasks::create_task)),
+        // 直连测试：参数从任务取（草稿或已保存），凭据与认证地址可来自来源方案。
+        // 旧端点 POST /api/profiles/http-login-test 已删除——直连配置不再属于方案。
+        ("POST", "/api/http-tasks/test", || {
+            post(routes::http_tasks::test_http_task)
+        }),
         ("POST", "/api/tasks/import", || {
             post(routes::tasks::import_tasks)
         }),

@@ -5,8 +5,6 @@
 
 import { ref } from "vue";
 import type {
-  HttpLoginMethod,
-  HttpLoginTestResult,
   Profile,
   ProfileSharePayload,
   ProfileSummary,
@@ -62,9 +60,6 @@ const editorDetectResult = ref<NetworkDetectResult | null>(null);
  * 一致（反映「可解密」而非「非空」）。
  */
 const editorHasPassword = ref(false);
-// 直连测试结果改由 LoginChannelField 自持局部 state（多实例互不覆盖），
-// 此处仅保留「是否有测试在途」这一全局门（后端为单飞，同刻只允许一个）
-const httpTestRunning = ref(false);
 /** 方案导入 in-flight：防连点导致重复导入同一条（后端会各分配一个 ID） */
 const profileImporting = ref(false);
 
@@ -210,8 +205,10 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(false, "请填写自定义运营商关键字");
     return false;
   }
-  if (settings.login_channel === "http" && !String(settings.http_url ?? "").trim()) {
-    toastOnly(false, "请填写直连请求地址");
+  // 直连渠道没有可内置的兜底任务（门户地址因人而异，浏览器渠道才有内置 default），
+  // 故未绑定直连任务时直接拒绝保存：放过去只会在登录时才失败，且失败点在别处
+  if (settings.login_channel === "http" && !String(settings.active_http_task ?? "").trim()) {
+    toastOnly(false, "请为直连渠道选择一个直连任务（任务页 · 直连任务）");
     return false;
   }
   profileSaving.value = true;
@@ -232,14 +229,7 @@ async function saveProfile(): Promise<boolean> {
         wifi_ssid: settings.wifi_ssid ?? "",
         active_task: settings.active_task ?? "",
         login_channel: settings.login_channel ?? "browser",
-        http_method: settings.http_method ?? "GET",
-        http_url: settings.http_url ?? "",
-        http_headers: settings.http_headers ?? "",
-        http_body: settings.http_body ?? "",
-        http_success_pattern: settings.http_success_pattern ?? "",
-        http_failure_pattern: settings.http_failure_pattern ?? "",
-        http_crypto_script: settings.http_crypto_script ?? "",
-        http_ignore_https_errors: settings.http_ignore_https_errors ?? null,
+        active_http_task: settings.active_http_task ?? "",
       });
     } else {
       data = await profilesApi.save(profileId, {
@@ -262,72 +252,6 @@ async function saveProfile(): Promise<boolean> {
     return false;
   } finally {
     profileSaving.value = false;
-  }
-}
-
-/** 直连测试请求参数（由 LoginChannelField 从宿主草稿构造） */
-export interface HttpLoginTestParams {
-  /** 已保存方案 ID；无（新建/未保存）时不传，密码需手填 */
-  profileId?: string;
-  username: string;
-  password: string;
-  http_method: HttpLoginMethod;
-  http_url: string;
-  http_headers: string;
-  http_body: string;
-  http_success_pattern: string;
-  http_failure_pattern: string;
-  http_crypto_script: string;
-  auth_url: string;
-  /** HTTPS 证书策略：null = 跟随全局（不提交该字段），bool = 显式覆盖 */
-  httpIgnoreHttpsErrors?: boolean | null;
-}
-
-/** 测试前置校验失败的就地提示（登录方式组件复用同一文案与 toast 口径） */
-function toastHttpTestPrecondition(message: string): void {
-  toastOnly(false, message);
-}
-
-/**
- * 用给定参数发送一次直连测试；不会保存方案，也不会触发登录状态机。
- *
- * 无状态：结果由调用方持有（返回报告），使同一页面内多个登录方式实例
- * 各自展示结果、互不覆盖（此前结果存在单例 ref 中，多实例会串）。
- */
-async function testHttpLogin(
-  params: HttpLoginTestParams,
-): Promise<HttpLoginTestResult | null> {
-  if (httpTestRunning.value) return null;
-  httpTestRunning.value = true;
-  try {
-    const result = await profilesApi.testHttpLogin({
-      profile_id: params.profileId,
-      username: params.username,
-      password: params.password,
-      http_method: params.http_method,
-      http_url: params.http_url,
-      http_headers: params.http_headers,
-      http_body: params.http_body,
-      http_success_pattern: params.http_success_pattern,
-      http_failure_pattern: params.http_failure_pattern,
-      http_crypto_script: params.http_crypto_script,
-      auth_url: params.auth_url,
-      fetch_page: true,
-      // null/undefined（未显式设置）时不提交该键，由后端按全局策略解析
-      http_ignore_https_errors:
-        params.httpIgnoreHttpsErrors === null || params.httpIgnoreHttpsErrors === undefined
-          ? undefined
-          : params.httpIgnoreHttpsErrors,
-    });
-    toastOnly(result.outcome === "success", result.message);
-    return result;
-  } catch (error) {
-    const message = extractApiError(error, "测试请求失败");
-    frontendLogger.error("profiles", "直连登录测试异常: " + message, error);
-    toastOnly(false, message);
-    return null;
-  } finally {
-    httpTestRunning.value = false;
   }
 }
 
@@ -440,9 +364,16 @@ async function importProfile(payload: unknown): Promise<string | null> {
   if (profileImporting.value) return null;
   profileImporting.value = true;
   try {
-    const { id } = await profilesApi.import(payload as ProfileSharePayload);
+    const { id, legacy_http_config_dropped } = await profilesApi.import(
+      payload as ProfileSharePayload,
+    );
     frontendLogger.info("profiles", `方案已导入: ${id}`);
     await fetchProfiles(true);
+    // 旧版分享文件里的直连配置（方案内联 http_* 字段）在 v10 已无法承载：
+    // 后端忽略它们，这里必须说一声，否则用户以为导入后直连还能用
+    if (legacy_http_config_dropped) {
+      toastOnly(false, "该分享文件包含旧版直连配置，已忽略；请在「任务 · 直连任务」里重新配置");
+    }
     return id;
   } catch (error) {
     const msg = extractApiError(error, "导入失败");
@@ -479,13 +410,10 @@ export function useProfiles() {
     cancelClearPassword,
     detectResult,
     editorDetectResult,
-    httpTestRunning,
     fetchProfiles,
     showProfileEditor,
     openActiveProfileForEdit,
     saveProfile,
-    testHttpLogin,
-    toastHttpTestPrecondition,
     profileSaving,
     deleteProfile,
     setActiveProfile,

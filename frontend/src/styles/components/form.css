@@ -184,7 +184,8 @@
   top: 50%;
   transform: translateY(-50%) translateX(4px);
   width: max-content;
-  max-width: min(320px, calc(100vw - 80px));
+  /* --tip-max 由组件按触发点两侧实际剩余空间写入（窄屏防越界）；未写入时用默认宽度 */
+  max-width: min(var(--tip-max, 320px), calc(100vw - 80px));
   padding: 10px 14px;
   border-radius: var(--radius-md);
   border: 1px solid var(--tooltip-border);
@@ -197,7 +198,10 @@
   font-weight: 500;
   line-height: 1.65;
   letter-spacing: 0.01em;
-  white-space: normal;
+  /* pre-line：data-tip 里的 \n 按段落换行（说明文案都按段落书写），
+     同时保留普通文本的自动换行；break-word 防止 URL / 代码片段撑破气泡 */
+  white-space: pre-line;
+  overflow-wrap: break-word;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
@@ -215,13 +219,41 @@
 .field-help--flip::after {
   left: auto;
   right: calc(100% + 10px);
-  max-width: min(280px, calc(100vw - 80px));
+  max-width: min(var(--tip-max, 280px), calc(100vw - 80px));
   transform: translateY(-50%) translateX(-4px);
 }
 
 .field-help--flip:hover::after,
 .field-help--flip:focus-visible::after {
   transform: translateY(-50%) translateX(0);
+}
+
+/* 钉住态（点击展开）：与 :hover 并列作为显示条件。
+   多段说明单独靠悬停看不完——鼠标一移向输入框气泡就消失，故点击后放开指针事件
+   并限高可滚，做到「边填边看」。再点一次、点别处或 Esc 关闭。 */
+.field-help--pinned,
+.field-help--pinned:hover,
+.field-help--pinned:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+}
+
+.field-help--pinned::after {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+  pointer-events: auto;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+}
+
+/* 加宽修饰：脚本契约、占位符规则这类长文案在 320px 下会拉成极长的竖条 */
+.field-help--wide::after {
+  max-width: min(var(--tip-max, 460px), calc(100vw - 80px));
+}
+
+.field-help--flip.field-help--wide::after {
+  max-width: min(var(--tip-max, 420px), calc(100vw - 80px));
 }
 
 /* ========== Radio Group ========== */

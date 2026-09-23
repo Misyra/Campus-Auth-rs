@@ -55,7 +55,7 @@ Rust 重写版为**便携式单二进制 + Python 子进程**：网络监测、�
 - **Web 控制台**：内置 Vue 3 Web UI，状态查看、任务编辑、日志与实时 WebSocket 推送
 - **系统托盘**：常驻托盘；首行为状态行（引擎 · 网络 · 登录态，运行中高亮、未运行灰化），提供启动 / 停止监测、手动登录、打开控制台、退出
 - **运行模式预设**：「日常使用」与「排查问题」两套预设一键切换，确认前列出具体改动项
-- **方案导入导出**：认证方案（认证地址、直连参数、匹配规则等）导出 JSON 分享，导入前展示内容与脚本原文，凭据不随包导出
+- **方案导入导出**：认证方案（认证地址、匹配规则等）导出 JSON 分享，导入前展示内容与脚本原文，凭据不随包导出（直连请求参数在「任务」页的直连任务里，随任务导出 / 任务仓库分享）
 
 **运维**
 
@@ -157,8 +157,8 @@ docker run -d --name campus-auth --restart unless-stopped --stop-timeout 40 \
 - **Profile（认证方案）**：含认证地址、用户名 / 密码（AES-256-GCM 加密落盘）、网关 / SSID 匹配规则与关联任务，可在方案间手动切换
 - **登录方式**（每方案二选一）：
   - **浏览器渠道**：填写认证网址即直接使用，留空由浏览器跟随校园网重定向登录；支持「重定向检测」辅助判断是否需要填写
-  - **直连渠道**：Rust 内直接发 HTTP 请求完成认证，支持占位符与沙箱凭据变换脚本，见 [docs/guides/http-login-guide.md](docs/guides/http-login-guide.md)
-- **任务**：浏览器任务（JSON 步骤序列）与本地脚本任务两类，均可被定时调度；内置任务录制用户脚本，可在浏览器上录制操作生成任务
+  - **直连渠道**：Rust 内直接发 HTTP 请求完成认证，请求参数在「任务」页的**直连任务**里配置（可复用、可分享），支持占位符与沙箱凭据变换脚本，见 [docs/guides/http-login-guide.md](docs/guides/http-login-guide.md)
+- **任务**：浏览器任务（JSON 步骤序列）、直连任务（直连登录的请求参数）与本地脚本任务三类；浏览器与脚本任务可被定时调度，直连任务用「发送测试请求」验证；内置任务录制用户脚本，可在浏览器上录制操作生成任务
 - **更新**：设置页选择通道 `stable`（正式版）/ `prerelease`（测试版）/ `all`（全通道最新），`auto_check_enabled` 为总开关；也支持手动更新——将安装包放入 `update/` 目录，或在更新页直接选择安装包
 
 ## 文档
@@ -171,6 +171,7 @@ docker run -d --name campus-auth --restart unless-stopped --stop-timeout 40 \
 | [浏览器任务编写指南](docs/guides/task-writing-guide.md) | 浏览器任务 JSON 的步骤类型与字段语义 |
 | [自定义脚本指南](docs/guides/custom-script-guide.md) | 本地脚本任务的编写与执行 |
 | [直连登录指南](docs/guides/http-login-guide.md) | HTTP 直连登录的参数配置 |
+| [项目介绍演示](docs/promo/index.html) | 15 页可放映的图文介绍（点击翻页或自动播放，纯 HTML/CSS/JS/SVG 无构建）；分镜与旁白讲稿见 [script.html](docs/promo/script.html) |
 | [用户更新日志](docs/updatelog.md) / [开发更改日志](docs/changelog.md) / [已知问题](docs/known-issues.md) | 版本变化与遗留问题 |
 
 ## 架构
@@ -220,7 +221,7 @@ campus-auth/
 ├── frontend/            # Vue 3 + TypeScript + Vite Web 控制台
 ├── python_worker/       # Python Worker 子进程（Playwright + OCR）
 ├── tests/               # Rust 集成测试（含 mock 门户与 E2E 全链路）
-├── docs/                # 文档（updatelog / changelog / 已知问题 / plan-next 活跃计划 / guides 用户指南）
+├── docs/                # 文档（updatelog / changelog / 已知问题 / plan-next 活跃计划 / guides 用户指南 / promo 介绍演示）
 ├── resources/           # 静态资源（图标 / 脚本）
 ├── docker/              # Docker 辅助（entrypoint / 进阶用法说明）
 └── openapi.json         # Web API 路径清单

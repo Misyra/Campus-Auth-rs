@@ -3,7 +3,7 @@
  *
  * 任务/脚本编辑器是页面内嵌卡片而非遮罩弹层：侧边栏 SPA 导航此前会静默丢弃
  * 编辑中的内容（仅手动关闭按钮有 dirty 确认）。本守卫在路由离开 /tasks
- * 区域（含 /tasks、/tasks/scripts、/tasks/scheduled、/tasks/ai 各 Tab）时按 from
+ * 区域（含 /tasks、/tasks/http、/tasks/scripts、/tasks/scheduled、/tasks/ai 各 Tab）时按 from
  * 路由定向判定——不做"任一全局 dirty 即拦截"，避免单例残留状态干扰无关页面。
  *
  * 覆盖范围：仅 SPA 路由离开（侧边栏/链接跳转）。**不含**浏览器刷新、关闭标签页、
@@ -17,18 +17,19 @@
 import { useConfirm } from "../composables/useConfirm";
 import { useTasks } from "../composables/useTasks";
 import { useScripts } from "../composables/useScripts";
+import { useHttpTasks } from "../composables/useHttpTasks";
 
 export async function guardEditorLeave(
   to: { path: string },
   from: { path: string },
 ): Promise<boolean> {
-  // 任务与脚本两个 Tab 同处 /tasks 区域：仅离开该区域时判定。
-  // Tab 间切换不拦截——两个草稿分别持有在各自 composable 的单例里，
+  // 任务、脚本、直连任务三个 Tab 同处 /tasks 区域：仅离开该区域时判定。
+  // Tab 间切换不拦截——各草稿分别持有在各自 composable 的单例里，
   // 切回来编辑器仍在，不存在内容丢失。
   if (!from.path.startsWith("/tasks") || to.path.startsWith("/tasks")) return true;
 
   const { confirm } = useConfirm();
-  // 两块草稿可能同时存在（各自独立），逐个判定；任一被拒即阻断
+  // 三块草稿可能同时存在（各自独立），逐个判定；任一被拒即阻断
   const { isTaskDirty, clearTaskDraft } = useTasks();
   if (isTaskDirty()) {
     const discard = await discardConfirm(confirm, "任务");
@@ -40,6 +41,14 @@ export async function guardEditorLeave(
     const discard = await discardConfirm(confirm, "脚本");
     if (discard !== true) return false;
     clearScriptDraft();
+  }
+  // 直连任务草稿与浏览器任务草稿同口径：它也是 /tasks 区域的页内编辑器卡片，
+  // 离开区域同样会整块消失（这里按 from/路径前缀判定，故新增 Tab 必须显式纳入）
+  const { isDraftDirty, clearHttpTaskDraft } = useHttpTasks();
+  if (isDraftDirty()) {
+    const discard = await discardConfirm(confirm, "直连任务");
+    if (discard !== true) return false;
+    clearHttpTaskDraft();
   }
   return true;
 }

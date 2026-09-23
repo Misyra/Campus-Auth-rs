@@ -22,7 +22,6 @@ vi.mock("../api", () => ({
     toggleAutoSwitch: vi.fn(),
     export: vi.fn(),
     import: vi.fn(),
-    testHttpLogin: vi.fn(),
   },
 }));
 
@@ -49,6 +48,7 @@ function summary(id: string, name: string) {
     username: "",
     isp: "",
     active_task: "",
+    active_http_task: "",
     login_channel: "browser" as const,
     gateway_ip: "",
     wifi_ssid: "",
@@ -121,14 +121,8 @@ describe("openActiveProfileForEdit", () => {
       password: "",
       auth_url: "",
       trigger_url: "",
-      http_method: "GET" as const,
-      http_url: "",
-      http_headers: "",
-      http_body: "",
-      http_success_pattern: "",
-      http_failure_pattern: "",
-      http_crypto_script: "",
-      http_ignore_https_errors: null,
+      login_channel: "http" as const,
+      active_http_task: "dorm-portal",
       _isNew: false,
     };
 
