@@ -109,7 +109,8 @@ campus-auth/
 │   ├── logging.rs            # 日志子系统（初始化 / 动态级别 / WS 广播 Layer）
 │   ├── engine/               # 调度引擎（单 tokio task + select!，含 slot.rs 可替换句柄槽）
 │   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
-│   ├── login/                # 登录编排（状态机、去重、抢占、重试）
+│   ├── login/                # 登录编排（状态机、去重、抢占、重试；三种渠道：
+│   │                         #   浏览器=Worker / http=进程内发请求 / script=进程内起子进程）
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）— 源码模块，对应运行时 /config（.gitignore / 锚定，勿混淆）
 │   ├── uninstall/            # 卸载计划（删什么 / 拒什么 / 怎么删）——**单一事实源**：
 │   │                         #   界面据此列清单、campus-auth-helper --uninstall 据此执行
@@ -293,6 +294,16 @@ Conventional Commits，中文描述：
 - **不要在 `target/` 下试卸载**：守卫会拦"源码仓库"（`.git` / `Cargo.toml`）与"cargo 构建输出"（路径含 `target` 且祖先有 `Cargo.toml`），但发布包解压到别处才代表真实场景；本地演练要单独 `--target-dir` 编一份 exe（`docs/reports/uninstall-e2e/rehearse.ps1`）
 - `--uninstall` 是"等主进程退出后删安装目录"，Windows 上必须两段式（第一段把自己复制到 `%TEMP%` 再 spawn 第二段），且最后一份副本靠 `cmd` 兜底删除——那段引号规则不属于 `CommandLineToArgvW` 语义，改动它只能靠真起进程的测试（`test_spawn_delayed_delete_removes_file`）
 - **「保留配置与任务」必须同时保留加密密钥目录**（`~/.campus_network_auth`）：保留的 `config/` 里方案密码是 `ENC:` 密文，密钥一删这些密码就再也解不开——`POST /api/uninstall` 的 `keep_user_data` 与 `purge` 必须传同一个值
+
+### 登录渠道
+
+判定「要不要 Python 环境 / 要不要占浏览器会话槽位 / 能不能取消 Bridge 任务」一律走 `LoginChannel::is_in_process()`，不要在别处重写 `== Http || == Script`；`login::session` 里对应的开关是 `uses_bridge`（三者只有浏览器渠道为真）。
+
+- **脚本渠道复用 `TaskExecutor`，不要另写一套进程执行**：`login/script_login.rs` 经 `TaskExecutor::execute_script_with_env`（= 任务页「立即运行」那条路径 + 叠加 `CAMPUS_*` 环境变量）跑脚本。另起一套会让解释器回退、路径约束、按任务串行、超时与进程树回收在两处各自演化
+- 脚本渠道的凭据只经环境变量下发（`CAMPUS_USERNAME` / `CAMPUS_PASSWORD` / `CAMPUS_ISP` / `CAMPUS_AUTH_URL`，见 `script_login::login_env`）：脚本任务**不做** `{{USERNAME}}` 模板替换（那是浏览器任务在 Worker 侧的变量解析）。四个名字改动必须同步 `docs/guides/custom-script-guide.md` 与前端 `loginChannel.ts` 的 `SCRIPT_LOGIN_ENV_VARS`（有测试钉住）
+- **成败判定是退出码**：`0` 视为本次尝试成功，但 `worker_config` 必须是 `{}`——这样 `has_explicit_success_condition()` 恒为 false，登录后网络验证兜底才生效（"脚本说成功但没登上"不会被记成成功）。非 0 用 `Outcome::AssertionFailed`（可重试、**不**回收 Worker），与直连「未命中成功标识」同一口径
+- 脚本失败**不得**触发 Worker 回收：`should_force_recycle` 的判定点必须同时受 `uses_bridge` 保护，否则一次脚本失败会去杀另一条在跑的浏览器登录
+- 三条保存路径（`POST` / `PUT /api/profiles/{id}`、`PATCH /api/config`）共用 `validate_login_task_binding`：直连与脚本渠道都**没有内置兜底任务**，未绑定或绑错类型必须在保存时拦下（放过去等于把配置错误伪装成运行错误）
 
 ### 配置系统
 

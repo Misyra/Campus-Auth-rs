@@ -4,6 +4,20 @@
 > 当前活跃：`v5.0.2`（`docs/changelog.md`）。P0/P1 与更新子系统待办的权威摘要以本文件与 `docs/known-issues.md` 为准（原 defect-recheck / updater-audit 过程报告已于 2026-09-12 删除）。
 > 验证块：`cargo clippy --all-targets -- -D warnings` / `cargo test` 双 feature（含 `rust-tests-unix`）/ `cargo fmt --check` / `uv run pytest` / `npm run build` + `vitest` / `e2e-login-chain` 全链路。
 
+## 登录新增第三种渠道：自定义脚本（2026-09-24 **已落地**）
+
+> 用户诉求：「给登录任务增加一种渠道，就是自定义脚本，允许使用自定义脚本进行登录」。逐项实现与验证见 `docs/changelog.md` 同日条目，脚本契约见 `docs/guides/custom-script-guide.md` 第 2 节。
+
+**已落地**：`LoginChannel::Script`（`script`）+ 方案字段 `active_script_task`；`src/login/script_login.rs` 在 Rust 进程内起子进程跑方案绑定的**脚本任务**（与任务页「立即运行」同一条执行路径 `TaskExecutor::execute_script_with_env`，只是叠加 `CAMPUS_USERNAME` / `CAMPUS_PASSWORD` / `CAMPUS_ISP` / `CAMPUS_AUTH_URL` 四个环境变量）；退出码 `0` 视为本次成功、随后仍走登录后网络验证，非 0 走重试预算且**不**回收 Worker；三条保存路径共用 `validate_login_task_binding`（脚本与直连都没有内置兜底任务）；前端渠道卡第三张 + 「登录脚本」下拉 + 契约说明气泡。
+
+**为什么要这一渠道**（相对已有两条路的位置）：直连渠道的凭据变换脚本跑在无网络、无文件的 JS 沙箱里，**发不出第二个请求**——"先取令牌再登录""按门户逻辑加密密码""多步跳转取参"这类门户在直连里写不出来，只能退回浏览器。脚本渠道用自己的解释器与库，把这段空档补上，同时仍然不要求 Python Worker 与 Playwright。
+
+**本轮登记 / 遗留**：
+
+- **登录历史不记渠道字段**（既有项，本轮更明显）：三条渠道只能从消息文本辨认（「步骤 N/M」/「直连请求成功」/「登录脚本 X 退出码 N」）。若要按渠道统计/筛选需要给 `LoginHistoryEntry` 加字段并改历史页。
+- **脚本渠道没有"不重试"的表达**：退出码只有成功/失败两态，凭证无效也会按重试预算重发（与浏览器渠道的验证码失败同类）。加第三语义（如 `exit 2 = 凭证无效`）代价是用户更容易写错，当前用全局重试策略兜底。
+- **脚本子进程不保证静默**：与「立即运行」同一条路径，未设 `CREATE_NO_WINDOW`，控制台版解释器可能闪现窗口（既有行为）。
+
 ## 未提交更改的全面审查与修复（2026-09-24 **已落地**）
 
 > 用户诉求：「全面审查一下当前更改」→「你修复优化一下」。审查结论与证据在 `docs/reports/current-changes-review-2026-09-24.md`（本地不提交），逐项修复见 `docs/changelog.md` 同日条目「全面审查后的修复」。

@@ -2,6 +2,77 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-24 登录新增第三种渠道：自定义脚本）
+
+### 背景
+
+- 用户诉求：「给登录任务增加一种渠道，就是自定义脚本，允许使用自定义脚本进行登录」。
+- 此前登录只有两条路：浏览器自动化（按浏览器任务操作网页）与直连请求（程序内发一次 HTTP）。二者之间有个明显的空档——**请求形状本身能用直连表达、但构造请求要先按门户逻辑加密/签名/多步取参**的门户：直连的凭据变换脚本跑在无网络、无文件的 JS 沙箱里（不能发第二个请求、不能读文件、算力受限），写不出来的就只能退回浏览器。脚本渠道正是补这一段：把登录整个交给用户写的脚本，用自己的解释器、自己的库，程序只负责起进程、看退出码、再做一次登录后网络验证。
+- 落地方式沿用直连那一套骨架（**进程内完成、不经 Bridge/Worker、不要求 Python 环境与浏览器**），因此会话状态机、抢占、重试、取消、登录后网络验证这些既有机制一行没改就复用了。
+
+### 一、渠道枚举与方案字段
+
+- `LoginChannel` 增加 `Script`（serde 字面量 `script`，`src/config/schema.rs`），并补两个判定方法把散落的渠道判断收口：`is_in_process()`（免 Python/浏览器，等于 `Http | Script`）与 `binding_field()`（该渠道用哪个字段承载"登录怎么做"）。`LoginChannel` 的另外两处调用点一并改走它：`monitor` 的认证入口预检（`auth_url` 对脚本同样只是可选输入，不能因其留空把有效方案误判为配置缺失）与前端 `channelNeedsRuntimeEnvironment`。
+- `ProfileData` / `ProfileSnapshot` / `ProfileSummary` 增加 `active_script_task`（空 = 未绑定）。`ProfileData` 是 `#[serde(default)]`，**存量方案文件照旧解析**，无需迁移；新字段随下一次保存落盘（与 `active_http_task` 同款，未绑定时写空串而非省略）。
+- `ProfileSnapshot` 的 Debug 已脱敏构造不变（新字段不进 Debug 输出，它不是凭据）。
+
+### 二、脚本登录的执行（`src/login/script_login.rs`）
+
+- 新增 `ScriptLoginPlan { task: ScriptTaskConfig, extra_env }`：由登录编排器在准备阶段构造（`resolve_script_task` 取任务 + `login_env` 取凭据），随会话参数下发；`Debug` 手写（`extra_env` 里躺着明文密码，派生 Debug 会在任何一次 `plan:?` 日志里把它打出来，与 `ProfileSnapshot` 同款处理）。
+- **凭据经环境变量下发**：`CAMPUS_USERNAME` / `CAMPUS_PASSWORD` / `CAMPUS_ISP` / `CAMPUS_AUTH_URL`（四个名字由 `login_env` 显式列出，测试用 `LOGIN_ENV_KEYS` 对账）。脚本任务本身**不做** `{{USERNAME}}` 一类模板替换（那是浏览器任务在 Worker 侧的特性），故这是脚本唯一的凭据来源；四个变量改动必须同步指南与前端 `SCRIPT_LOGIN_ENV_VARS`。
+- **成败按退出码**：`0` → `Outcome::Success`，随后照旧走登录后网络验证（`worker_config` 由编排器置 `{}`，`has_explicit_success_condition()` 恒为 false）——脚本"自称成功"与"真的通了"由后者裁决，与浏览器渠道同口径；非 0 → `Outcome::AssertionFailed`（可重试、**不**回收 Worker），与直连「未命中成功标识」同一档，受方案重试预算约束。连进程都没起来（`ScriptNotFound` / `UnsupportedExtension` / IO）判终态失败——重试不会让缺失的脚本文件出现；`ExecutionTimeout` 判可重试（`NavigationTimeout`）。
+- **不新建第二套脚本执行实现**：`TaskExecutor` 增加 `execute_script_with_env(cfg, extra_env)`，把原来的 `execute_script` 收敛为"额外环境变量为空"的调用；额外变量叠在 `build_minimal_env`（已改名 `collect_minimal_env` + `build_minimal_env_with`）之上，`env_clear` 的隔离语义不变。登录脚本与任务页「立即运行」因此共用解释器回退、`tasks/scripts/` 路径约束、按任务串行的执行锁、超时与进程树回收、输出截断全套行为。
+- `ScriptRunnerApi` trait（`src/tasks/mod.rs`，紧邻 `TaskApi`）：会话的 `SessionDeps` 守着"依赖 trait 化且非 Option"的既有约定，而真装配一个 `TaskExecutor` 需要 `BridgeSupervisor` / `EnvironmentManager` 全套服务——trait 化后状态机单测可注入替身。实现只有 `TaskExecutor`（方法名刻意不同于固有方法，避免自递归）。
+- 登录历史消息里带脚本输出的**尾部 200 字符**，且**先抹掉本次注入的密码**（脚本打印含凭据的 URL 是常见写法，历史要落盘）：`redact_secret` + `tail_snippet`（压成单行、超长留尾）。
+
+### 三、会话状态机与编排器
+
+- `SessionParams` 增加 `script_plan`（与 `http_plan` 互斥）；`SessionDeps` 增加 `script_runner`；尝试循环的 `work` future 多一臂：脚本渠道 → `script_login::run_once`。
+- `is_http` → **`uses_bridge`**（`http_plan.is_none() && script_plan.is_none()`，只有浏览器渠道为真）：取消时"要不要 `bridge.cancel`"、失败时"要不要 `force_recycle`"两处闸门都改走它。**这是必须的**——脚本渠道的失败若被判成"网络错误强制回收"，会去杀另一条正在跑的浏览器登录的 Worker。
+- `LoginOrchestrator` 注入 `script_runner`（`container.rs` 传 `executor.clone()`，与调度器同一个实例，连"同任务串行"的执行锁都是同一把）；`submit` 里 `use_script` 与 `use_http` 并列，进程内渠道统一跳过浏览器预检、环境初始化与 auth_url 预检（`in_process` 一个变量表达）。
+- `validate_profile` 增加脚本分支：未绑定脚本任务即终态失败（**脚本渠道没有内置兜底脚本**，与直连同理）；账号密码对脚本渠道同样必需（它们是 `CAMPUS_*` 的唯一来源）。新增 `resolve_script_task`，与 `resolve_http_task` 完全同构（空绑定 / 任务不存在 / 类型不对都给面向用户的明确文案，不回退）。
+
+### 四、Web 层
+
+- `validate_http_task_binding` → **`validate_login_task_binding`**：接收渠道 + 两条绑定，按渠道取对应字段与期望类型（覆盖三条保存路径：`POST` / `PUT /api/profiles/{id}` / `PATCH /api/config`）。错误文案对直连保持逐字不变（`直连任务 X 不存在或不是直连任务`），脚本侧同构（`脚本任务 X 不存在或不是脚本任务`），空绑定提示 `请为脚本渠道选择一个脚本任务`。
+- `ProfileCreateBody` / `ProfileUpdateBody` / `PATCH /api/config` 白名单与类型校验、`GET /api/config` 扁平响应、`ProfileSummary` 一并带上 `active_script_task`；`login_channel` 的枚举错误文案改为「仅支持 browser、http 或 script」。
+- 方案分享载荷清空 `active_script_task`（与 `active_task` / `active_http_task` 同口径：那是本机任务 ID）；导入侧仍忽略该字段，`login_channel` 非法值的报错文案同步。
+
+### 五、前端
+
+- 方案编辑器「登录方式」由两张渠道卡变三张（渠道网格改 `repeat(auto-fit, minmax(200px, 1fr))`，窄屏自动折列，不必再加一档断点）；新增「登录脚本」下拉（首项「未绑定（脚本登录不可用）」）与未绑定/任务已删除的当场提示、脚本登录文档入口。渠道面板类名 `http-channel-panel` → `channel-panel`（直连与脚本共用同一套外观，不再多一份副本）。
+- `loginChannel.ts` 收敛渠道展示：`loginChannelLabel` / `ShortLabel`（新增「自定义脚本」/「脚本」）、新增 `loginChannelIcon`（收窄成 `"chrome" | "globe" | "code"` 字面量联合，否则宿主的 `IconApp` name 联合类型编译不过）与 `loginChannelHint`；方案列表卡的渠道徽标改由这三个函数渲染（原先内联三元写死了两个渠道）。`channelNeedsRuntimeEnvironment` 对 `script` 返回 false（仪表盘不再对脚本渠道提示"环境未就绪"）。
+- 新增 `scriptTaskOptions` 与 `SCRIPT_LOGIN_CONTRACT_NOTE`（环境变量、退出码、网络验证、日志脱敏四件事一次讲清，面板 `?` 气泡直接用）；`SCRIPT_LOGIN_ENV_VARS` 与后端四个名字对账（有测试）。
+- 保存闸口加脚本分支（未绑定即拒绝保存并 toast）；方案编辑器认证地址的说明对脚本渠道改说"它只作 `CAMPUS_AUTH_URL` 传给脚本"；导入预览改为按渠道渲染，并在直连/脚本方案后追加一段说明「绑定的任务不随方案分享，导入后请到对应任务页重选」——导出按契约清空了绑定，不点名的话用户导入完点登录只会看到一句"未绑定"。
+- **「设置 · 任务与环境」的「当前任务」改为按渠道取**（顺手修掉一个被第三个渠道暴露出来的既有失真）：它原先**恒取浏览器任务的 `active_task`**，于是直连渠道（本轮之前就如此）与脚本渠道下，卡片会显示一个登录时**根本不会执行**的任务名，用户据此排查会走错方向。现按 `login_channel` 分别取 `active_task` / `active_http_task` / `active_script_task`；直连与脚本侧直接显示任务 id（任务页列表里的标识），浏览器侧沿用友好名称；未绑定则显示「未绑定（直连登录不可用）」这类明确文案而非「内置默认任务」。渠道卡网格改 `auto-fit` 后 `audit.mjs` 复核 `ghosts=0 dead=36` 未变。
+
+### 六、测试
+
+- Rust（lib +14 例）：`script_login` 六例（环境变量契约与空值注入、退出码 → outcome、失败不回收 Worker、密码脱敏、消息只留尾部且单行、Debug 不泄密码）、`schema` 两例（枚举字面量与两个判定方法、存量方案缺字段仍可解析）、`profiles` 路由四例（未绑定/绑错类型/绑定正确落盘/分享载荷清空脚本绑定）、`config` 路由一例（`PATCH` 脚本渠道的绑定校验与"落 Profile 而非全局设置"）。
+- 前端（vitest +8 例）：标签/短标签/图标/悬停说明三渠道映射、环境判定、环境变量清单与契约文案、脚本任务下拉首项、`useProfiles` 的脚本保存闸口（未绑定拒绝且不发请求、绑定后带字段提交、直连既有闸口未放宽）。
+- 全量：`fmt --check` 通过、`clippy --all-targets --features no-embed -D warnings` 零告警、`cargo test --features no-embed` lib **1036** 例（上轮 1020）+ helper 12 例全绿、`vue-tsc` 零错误、`vitest` **449** 例、`vite build` 通过。
+
+### 七、真机验证（独立实例，不动用户正在跑的实例）
+
+- **做法**：`cargo build --target-dir target/verify` 单独编一份 exe（用户彼时正跑着 `target/debug/campus-auth.exe`，文件被锁，也**不该**去动他的数据目录），以 `--base-path target/verify-base --port 50751 --no-browser --no-tray` 起一个隔离实例，全部通过 API 建脚本任务与方案。这是本功能唯一"真的起过进程"的证据——脚本渠道的执行、环境变量注入、退出码判定、脱敏、重试预算，四件事都只有真机能串起来验。
+- **成功路径**：`login_channel=script` + 绑一个内联 `.bat`（`binary_path: cmd.exe`，`echo SCRIPT-LOGIN user=%CAMPUS_USERNAME% …` + `exit /b 0`）→ 5.2 秒返回
+  `登录成功（登录脚本 login-probe 退出码 0：SCRIPT-LOGIN user=20230001 isp= auth=）`。
+  **一句话里同时印证四件事**：脚本真跑了、`CAMPUS_USERNAME` 注入成功（`user=20230001`）、`CAMPUS_ISP`/`CAMPUS_AUTH_URL` 按契约注入空串（方案没填）、退出码 0 之后网络验证兜底确实执行并确认在线。
+- **失败路径**：`exit /b 3` → **4 次尝试 / 35.1 秒**（1 次 + 重试 3 次，间隔 5→10→20 秒，与「重试间隔逐次翻倍」的既有策略一致），终态
+  `重试耗尽（共 4 次尝试）: 登录脚本 login-fail 退出码 3：trying with PW=*** portal said no`；把 `retry.max_retries` 改为 1 后同一脚本变成「共 2 次尝试」——**重试预算确实由全局策略控制**，脚本渠道没有旁路。
+- **脱敏**：上面两条消息里的 `PW=***` 与登录历史里落盘的内容一致（`GET /api/history` 复核），密码没有以明文进历史。
+- **绑定闸口**：未绑定 / 绑到浏览器任务 / 绑到不存在的 id / `PATCH /api/config` 切脚本不给绑定，四条路径**全部 400**，文案分别是「请为脚本渠道选择一个脚本任务」「脚本任务 default 不存在或不是脚本任务」「脚本任务 nope 不存在或不是脚本任务」与同上第一条。
+- **运行期任务消失**：绑定后删掉那个脚本任务再登录 → 0.0 秒即以
+  `方案绑定的登录脚本 login-probe 不存在，请在「任务 · 脚本」里重新选择` 失败（终态、不重试），与 `resolve_script_task` 的实现一致。
+- **真机跑出来的一个真缺陷（已修）**：第一次用**一位密码**的方案做脱敏验证时，脚本打印的 `isp=` 被改成了 `is***=`——`redact_secret` 用的是 `String::replace`（纯子串替换），短密码的每个字符都会命中无关字段名，把消息改烂。单测当时用的是 `hunter2`，看不出来。改为**只在词边界上替换**（命中子串前后若仍是字母/数字/下划线则不替换：`PW=<密码>` 照样命中，`isp` 里的 `p` 不受影响），补 2 例回归测试（短密码不切碎字段名、延长标识符内的一段不算密码出现），并在真机上重跑同一场景确认 `PW=*** isp= auth=`。
+- 收尾：验证实例已停止、`target/verify-base` 已删除；构建目录 `target/verify` 留在盘上（`target/` 已 gitignore）。用户那个 19:33 起跑的实例全程未被触碰。
+
+### 有意不做 / 遗留
+
+- **登录历史不记渠道字段**：三条渠道现在只能从消息文本辨认（「步骤 N/M」/「直连请求成功」/「登录脚本 X 退出码 N」）。加字段要动历史 schema 与历史页，与本轮目标无关，仍留在 `plan-next.md`。
+- **脚本渠道不做"不重试"的表达**：退出码只有"成功/失败"两态，凭证无效也会按重试预算重发（与浏览器渠道的验证码失败同类）。真要做需要给退出码约定第三语义，而约定越细用户越容易写错；当前用全局重试策略兜底，并在指南里讲清。
+- **脚本子进程仍不保证静默**：与「立即运行」同一条路径，未设 `CREATE_NO_WINDOW`，控制台版解释器可能闪现窗口（既有行为，见 `custom-script-guide.md` 第 7 节）。
+
 ## 开发中（2026-09-24 未提交更改的全面审查与修复：六条 P1 + 一批 P2/P3）
 
 ### 背景

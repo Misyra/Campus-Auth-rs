@@ -80,7 +80,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 | 导航 | 编辑对象 | 存储 / 接口 |
 |------|----------|-------------|
 | 仪表盘 | —（状态总览与手动操作） | — |
-| **方案** | 账号、密码、认证地址、匹配规则、登录方式（浏览器任务 / 直连任务） | `config/profiles/*.json`，`/api/profiles/*` |
+| **方案** | 账号、密码、认证地址、匹配规则、登录方式（浏览器任务 / 直连任务 / 登录脚本） | `config/profiles/*.json`，`/api/profiles/*` |
 | **任务** | 浏览器任务 / 直连任务 / 脚本 / 定时任务 / AI 生成浏览器任务 | `tasks/`、`/api/tasks`、`/api/scripts`、`/api/scheduler/jobs` |
 | **设置** | 检测 / 浏览器 / 任务与环境 / 系统 / 网络与更新 / 外观 | `config/settings.json`，`/api/config` |
 | 关于 | —（版本、更新与卸载） | — |
@@ -127,18 +127,18 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 - **浏览器任务**（`tasks/browser/*.json`，`type=browser`）：Playwright 步骤序列，见《任务编写指南》。**校园网自动登录使用的就是这一类**。
 - **直连任务**（`tasks/http/*.json`，`type=http`）：直连登录的请求参数（方法 / 请求地址 / 认证地址 / 请求头 / 请求内容 / 成功与失败关键字 / 可选的凭据变换脚本 / 可选的前置请求 / 可选的退出登录请求），**不启动浏览器、不需要 Python**。任务不含凭据，账号密码仍属方案；同一个任务可被多个方案复用。「前置请求」用于「先取令牌（如 CSRF token）再登录」的门户：那次取令牌与登录请求由同一个连接池顺序发出，令牌绑定 TCP 连接的门户因此也能直连。「退出登录请求」用于「旧会话还在就拒绝再次登录」的门户：登录前先请求一次门户的下线接口把旧会话踢掉，它排在整个流程最前面（先于读取登录页与凭据脚本），成败不影响登录。在侧栏「任务 → 直连任务」里编辑，用编辑器内的「发送测试请求」验证（要手填一次测试账号/密码），详细说明见 `docs/guides/http-login-guide.md`。
-- **脚本任务**（`tasks/scripts/*.json`，`type=script`）：`script_path` 或 `content` + `binary_path` + `args` + `work_dir` + `timeout`（`src/tasks/models.rs::ScriptTaskConfig`）。用于定时执行的辅助动作（打卡、签到等），**不参与登录认证**。
+- **脚本任务**（`tasks/scripts/*.json`，`type=script`）：`script_path` 或 `content` + `binary_path` + `args` + `work_dir` + `timeout`（`src/tasks/models.rs::ScriptTaskConfig`）。两种用法：定时执行的辅助动作（打卡、签到等），或**直接作为登录渠道**（「自定义脚本」，把登录整个交给脚本，见 `docs/guides/custom-script-guide.md`）。
 
 > 历史 `type=shell` 已移除：遇到时反序列化明确报错并提示改用 `script`（`src/tasks/models.rs`）。同目录下曾有的 `shell` 任务需改写为 `.sh`/`.bat`/`.py` 脚本经 `binary_path` 执行。
 
 管理端点：`GET /api/tasks`、`POST /api/tasks`、`GET/PUT/DELETE /api/tasks/{id}`、`POST /api/tasks/order`、`POST /api/tasks/import`、`GET /api/tasks/export/{id}`、`POST /api/tasks/{id}/execute`（通用，浏览器/脚本均走 `TaskExecutor::execute`）；脚本面板复用上述 `tasks` 端点并另接 `GET /api/scripts/binaries`、`GET/PUT/DELETE /api/scripts/{id}`、`POST /api/scripts/run`（见 `docs/guides/task-manual.md`、`docs/guides/custom-script-guide.md`）。直连任务复用同一套 `tasks` 增删改查（按 `type` 分流），测试走 `POST /api/http-tasks/test`。
-「用哪个浏览器任务 / 直连任务」由各方案的 `active_task` / `active_http_task` 决定（在「方案」页的方案编辑器「登录方式」里选），没有全局端点。
+「用哪个浏览器任务 / 直连任务 / 登录脚本」由各方案的 `active_task` / `active_http_task` / `active_script_task` 决定（在「方案」页的方案编辑器「登录方式」里选），没有全局端点。
 
 ### 日常操作
 
 - **任务**：新建、编辑、删除、拖拽排序、导入/导出单个任务（浏览器任务与直连任务还支持「复制为新任务」）。侧栏「任务」项下（默认收起，点「任务」这一行展开）有「浏览器任务」「直连任务」「脚本」「定时任务」「AI 生成」五个子页，**只管编辑**；用哪个任务登录由方案决定（见下），各子页的导入 / 仓库导入只列出自己那一类任务（任务仓库里浏览器任务与直连任务各有一份索引文件，各子页读自己那一份）。
 - **定时任务**：侧栏「任务 → 定时任务」，按 cron 调度**浏览器与脚本两类**任务（`src/scheduler`，状态在 `tasks/scheduled/`；创建时按 `target_id` 关联任务，类型由任务本体推导）。与另外三个子页同一套交互：整页列表 + 点行进入的二级编辑页，字段改动自动保存（没有保存按钮），面包屑返回列表；列表里可直接「立即运行」、查看「执行历史」，开关控制是否按计划执行（立即运行不受开关影响）。直连任务不经此执行，其验证入口是任务编辑器里的「发送测试请求」。
-- **何时执行**：网络监测 Offline/Captive 时自动执行当前方案绑定的任务（浏览器渠道＝浏览器任务，直连渠道＝直连任务）；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
+- **何时执行**：网络监测 Offline/Captive 时自动执行当前方案绑定的任务（浏览器渠道＝浏览器任务，直连渠道＝直连任务，脚本渠道＝登录脚本；后两者都在程序进程内完成，不需要 Python 环境）；仪表盘“登录”按钮（`POST /api/login`）、“执行指定任务”（`POST /api/tasks/{id}/execute`）为手动触发。
 
 ### 录制器：不手写 JSON
 
