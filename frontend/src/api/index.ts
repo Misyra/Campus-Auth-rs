@@ -46,7 +46,8 @@ import type {
   TaskDetail,
   TaskExecuteResult,
   TaskItem,
-  UninstallDetectItem,
+  UninstallDetectResult,
+  UninstallPurgeResponse,
   UninstallResponse,
   UpdateInfo,
   UpdatePin,
@@ -236,10 +237,25 @@ export const autostartApi = {
 
 /** 卸载 */
 export const uninstallApi = {
-  detect: () => http.get<UninstallDetectItem[]>("/api/uninstall/detect"),
-  // 删除 ms-playwright 浏览器缓存可能耗时较长（数百 MB），放宽客户端超时
-  uninstall: () =>
-    http.post<UninstallResponse>("/api/uninstall", null, { timeout: 300000 }),
+  detect: () => http.get<UninstallDetectResult>("/api/uninstall/detect"),
+  // 第一步：清理 base_path 之外的系统残留（自启动 / 用户数据目录 / 浏览器缓存）。
+  // 删除 ms-playwright 浏览器缓存可能耗时较长（数百 MB），放宽客户端超时。
+  //
+  // `keepUserData` 必须与 `purge` 同值：勾了「保留配置与任务」时这一步要**保留加密密钥
+  // 目录**，否则被保留下来的 `config/` 里那些 `ENC:` 方案密码再也解不开（下次启动会用
+  // 新密钥去解旧密文）。两处传同一个变量，不要各写各的默认值。
+  uninstall: (keepUserData: boolean) =>
+    http.post<UninstallResponse>(
+      "/api/uninstall",
+      { keep_user_data: keepUserData },
+      { timeout: 300000 },
+    ),
+  // 第二步：删程序本身并退出——由更新助手在主进程退出后完成，故**不设长超时**：
+  // 请求本身只是"校验 + spawn 助手 + 发关闭信号"，秒级返回
+  purge: (keepUserData: boolean) =>
+    http.post<UninstallPurgeResponse>("/api/uninstall/purge", {
+      keep_user_data: keepUserData,
+    }),
 };
 
 /** OCR */
@@ -478,7 +494,8 @@ export const scriptsApi = {
   save: (id: string, payload: { name: string; description: string; content: string; binary_path: string }) =>
     http.put<MutationResult>(`/api/scripts/${pathSegment(id)}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/scripts/${pathSegment(id)}`),
-  run: (id: string) => http.post<MutationResult>("/api/scripts/run", { task_id: id }),
+  // 与浏览器任务同构：成败在业务字段里（HTTP 200 也可能是失败），故不能用 MutationResult
+  run: (id: string) => http.post<TaskExecuteResult>("/api/scripts/run", { task_id: id }),
 };
 
 /** 任务（浏览器任务 / 脚本） */
@@ -489,7 +506,10 @@ export const tasksApi = {
   delete: (id: string) => http.delete<MutationResult>(`/api/tasks/${pathSegment(id)}`),
   // 执行结果以业务字段 success 表达（失败同样是 HTTP 200），故不能只按 HTTP 成败判断
   execute: (id: string) => http.post<TaskExecuteResult>(`/api/tasks/${pathSegment(id)}/execute`),
-  order: (order: { all: string[]; scripts: string[] }) => http.post<MutationResult>("/api/tasks/order", order),
+  // 顺序载荷三组必须**全量**互传：后端整体替换 `.order.json`，漏传一组等于清空那组顺序
+  // （`all` 是浏览器任务的历史字段名，后端保留同名以免"旧后端 + 新前端"时缺字段 400）
+  order: (order: { all: string[]; scripts: string[]; http: string[] }) =>
+    http.post<MutationResult>("/api/tasks/order", order),
   import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),
   export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${pathSegment(id)}`),
 };
@@ -513,6 +533,8 @@ export const scheduledTasksApi = {
   update: (id: string, payload: ScheduledTaskPayload) => http.put<MutationResult>(`/api/scheduler/jobs/${id}`, payload),
   delete: (id: string) => http.delete<MutationResult>(`/api/scheduler/jobs/${id}`),
   toggle: (id: string) => http.post<MutationResult & { enabled: boolean }>(`/api/scheduler/jobs/${id}/toggle`),
-  run: (id: string) => http.post<MutationResult & { run_id: string }>(`/api/scheduler/jobs/${id}/run`),
+  // 手动触发只表示"已排入执行"：后端 spawn 后立刻回 200，成败要等执行历史，
+  // 故没有 message / run_id（run_id 曾是死数据，后端已不再返回）
+  run: (id: string) => http.post<MutationResult>(`/api/scheduler/jobs/${pathSegment(id)}/run`),
   history: (id: string) => http.get<{ runs: ScheduledTaskHistoryItem[] } | ScheduledTaskHistoryItem[]>(`/api/scheduler/jobs/${id}/history`),
 };

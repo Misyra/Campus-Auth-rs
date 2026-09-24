@@ -176,6 +176,62 @@ export interface UninstallResponse {
   message: string;
 }
 
+/**
+ * 卸载清单项：程序目录 / 用户数据目录。
+ *
+ * `exists` 参与渲染（不存在的目录不该被列成"将删除"），但**不参与是否删除的判定**
+ * ——判定在助手侧按目录名做（`crate::uninstall`），存在性只是给人看的。
+ */
+export interface UninstallTarget {
+  /** 数据目录名（`program` 项无此字段） */
+  key?: string;
+  label: string;
+  path: string;
+  exists: boolean;
+}
+
+/** 卸载检测响应（GET /api/uninstall/detect） */
+export interface UninstallDetectResult {
+  /** 程序目录与用户数据目录之外的系统残留（用户数据目录 / Playwright 缓存 / 自启动） */
+  items: UninstallDetectItem[];
+  /** 程序目录：卸载时整体删除（含 resources/ docs/ python_worker/ 与随包源码副本） */
+  program: UninstallTarget;
+  /**
+   * 卸载助手（`campus-auth-helper`）是否在位。
+   *
+   * 它不在位时 `purge` 一定失败（spawn 不出来），而那时"清理系统残留"可能已经跑过一遍
+   * ——界面据此先把按钮拦下，别让用户白删一轮。老后端不返回该字段，故可选。
+   */
+  helper?: UninstallTarget;
+  /** 用户数据目录：勾选「保留配置与任务」时整棵保留 */
+  data: UninstallTarget[];
+  /** 非 null = 拒绝卸载及原因（如该目录是源码仓库而非安装目录），界面据此禁用卸载 */
+  blocked: string | null;
+}
+
+/** 真卸载响应（POST /api/uninstall/purge） */
+export interface UninstallPurgeResponse {
+  message: string;
+  kept_user_data: boolean;
+  install_dir: string;
+  /**
+   * 本次实际删除的用户数据目录。
+   *
+   * 与 `UninstallTarget` 同形但**不含 `exists`**（后端返回 `{key,label,path}`）：这里是
+   * "已经确定要删的东西"，存在性由 `detect` 报过。故类型上放宽，免得 UI 误以为有该字段。
+   */
+  data_dirs: Array<Omit<UninstallTarget, "exists">>;
+  /** 是否顺带取消了待应用更新（不取消会在退出时被更新助手装回来） */
+  cancelled_pending_update: boolean;
+  /**
+   * 取消待应用更新**失败**，退出后仍可能被更新助手重新安装。
+   *
+   * 只在取消失败（`pending.json` / staging 被占用）时为真：这时必须出声，否则用户以为
+   * 卸载完成了、下次开机却看到程序还在。老后端不返回该字段，故可选。
+   */
+  pending_update_left?: boolean;
+}
+
 /** 日志条目 */
 export interface LogEntry {
   /**
@@ -478,6 +534,25 @@ export interface HttpPreRequest {
 }
 
 /**
+ * 直连任务的动作请求（`HttpTaskConfig.logout_request`）：发了不判成败的附加请求。
+ *
+ * 与 `HttpPreRequest` 的分工：前置请求**取值**（取不到即登录流程终态失败），
+ * 动作请求**触达**（门户收没收到都照常走主流程）。退出登录正是这一类——强制下线
+ * 通常只为把「IP 已在线，拒绝重复登录」的旧会话踢掉，下线请求失败不拦登录。
+ */
+export interface HttpActionRequest {
+  method: HttpLoginMethod;
+  /** 请求地址模板（与登录请求同一套占位符） */
+  url: string;
+  /** 请求头模板（每行 `名称: 值`） */
+  headers: string;
+  /** 请求体模板（POST 使用） */
+  body: string;
+  /** 请求发出后等待秒数（0 = 不等待；下线异步生效的门户等 1~3 秒再登录） */
+  wait_secs: number;
+}
+
+/**
  * 直连任务配置（`tasks/http/<id>.json`，`type: "http"`）。
  *
  * 只描述**请求形状**：账号、密码与认证地址仍属方案——同一门户的不同账号共用一份
@@ -516,6 +591,13 @@ export interface HttpTaskConfig {
    * `null` / 缺省 = 不需要前置请求。
    */
   pre_request?: HttpPreRequest | null;
+  /**
+   * 退出登录请求（可选）：登录前先发一次下线动作（踢掉「IP 已在线」的旧会话）。
+   *
+   * 排在整个流程**最前**（先于读取登录页与凭据变换脚本），与登录请求走同一条 keep-alive
+   * 连接；请求成败不判定——失败只记日志，登录照常进行。`null` / 缺省 = 不需要。
+   */
+  logout_request?: HttpActionRequest | null;
   /** null = 跟随全局证书策略（`browser.ignore_https_errors`） */
   ignore_https_errors: HttpIgnoreHttpsErrors;
   /** 任务元数据（执行器不用；仓库来源等标注可放这里） */
@@ -701,6 +783,8 @@ export interface TaskItem {
   url?: string;
   /** 直连任务的请求方法（GET/POST）；非直连任务缺省 */
   http_method?: string;
+  /** 任务文件最近修改时间（UTC RFC3339）；读不到时缺省——列表「最近修改」列数据源 */
+  modified_at?: string;
   [key: string]: unknown;
 }
 
@@ -763,6 +847,8 @@ export interface Script {
   description?: string;
   content?: string;
   binary_path?: string;
+  /** 脚本文件最近修改时间（UTC RFC3339）；读不到时缺省——列表「最近修改」列数据源 */
+  modified_at?: string;
   [key: string]: unknown;
 }
 

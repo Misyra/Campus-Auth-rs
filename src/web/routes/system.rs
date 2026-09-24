@@ -650,11 +650,11 @@ pub async fn apply_update_package(
             .map_err(|e| {
                 tracing::warn!(file = %file_name, "使用上传的安装包失败: {e}");
                 match e {
-                    // 登录进行中 / 已有待应用更新属调用时序冲突，500 会误导前端
+                    // 登录进行中 / 已有待应用更新 / 更新已被取消（程序正在卸载）属调用时序
+                    // 冲突，500 会误导前端
                     crate::updater::UpdaterError::UpdateInProgress
-                    | crate::updater::UpdaterError::LoginInProgress => {
-                        ApiError::Conflict(e.to_string())
-                    }
+                    | crate::updater::UpdaterError::LoginInProgress
+                    | crate::updater::UpdaterError::Cancelled => ApiError::Conflict(e.to_string()),
                     // 包本身的问题（版本不够新 / 解压失败 / 超限）是用户可纠正的输入错误
                     crate::updater::UpdaterError::PackageNotNewer { .. }
                     | crate::updater::UpdaterError::ExtractFailed(_)
@@ -1343,6 +1343,10 @@ mod tests {
         fn has_pending_update(&self) -> bool {
             false
         }
+
+        async fn cancel_pending_update(&self) -> bool {
+            false
+        }
     }
 
     fn sample_info() -> UpdateInfo {
@@ -1615,6 +1619,10 @@ mod tests {
         }
 
         fn has_pending_update(&self) -> bool {
+            false
+        }
+
+        async fn cancel_pending_update(&self) -> bool {
             false
         }
     }

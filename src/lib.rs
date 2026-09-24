@@ -23,6 +23,7 @@ pub mod scheduler;
 pub mod status;
 pub mod tasks;
 pub mod tray;
+pub mod uninstall;
 pub mod updater;
 pub mod utils;
 pub mod web;

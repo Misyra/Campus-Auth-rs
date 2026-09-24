@@ -89,6 +89,14 @@ pub enum UpdaterError {
     #[error("登录任务进行中，无法更新")]
     LoginInProgress,
 
+    /// 更新已被取消（程序正在卸载）
+    ///
+    /// `UpdaterService::cancel_pending_update` 落这个标记后：在途的下载即使跑完也不再写
+    /// `pending.json`（否则用户刚卸载的程序会被更新助手在退出时装回来），此后任何更新
+    /// 入口一律拒绝。属调用时序冲突，不是服务端故障。
+    #[error("更新已取消（程序正在卸载）")]
+    Cancelled,
+
     /// 替换可执行文件失败（self-replace 路径）
     #[error("替换可执行文件失败: {0}")]
     SelfReplaceFailed(String),

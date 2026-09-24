@@ -29,12 +29,23 @@ const PROCESS_EXIT_TIMEOUT_SECS: u64 = 60;
 const SECOND_ALIVE_PROBE_DELAY_SECS: u64 = 5;
 
 /// campus-auth 更新助手进程
+///
+/// 两种模式，互斥：
+/// - `--apply-update`：等待主进程退出 → 替换 exe → 重启新版本（见 `run_apply_update`）
+/// - `--uninstall`：等待主进程退出 → 删除安装目录（+ 可选保留用户数据）→ 系统提示框
+///
+/// 合并进同一个 binary 而不是再加一个可执行文件：两者共用"等 PID 退出""路径守卫"
+/// "best-effort 日志"三块逻辑，且发布包少一个文件就少一处需要同步的版本管理。
 #[derive(Parser)]
 #[command(name = "campus-auth-helper", version, about = "Campus-Auth 更新助手")]
 struct HelperCli {
     /// 应用待处理更新（从 pending.json 读取配置）
     #[arg(long)]
     apply_update: bool,
+
+    /// 卸载：等待主进程退出后删除安装目录（与 --apply-update 互斥）
+    #[arg(long, conflicts_with = "apply_update")]
+    uninstall: bool,
 
     /// 主进程 PID（等待其退出后执行替换）
     #[arg(long)]
@@ -51,6 +62,18 @@ struct HelperCli {
     /// 基础路径（可选，默认从 exe 所在目录推断）
     #[arg(long)]
     base_path: Option<PathBuf>,
+
+    /// 卸载时保留用户数据（config / tasks / logs / environment / update）
+    #[arg(long)]
+    keep_user_data: bool,
+
+    /// 卸载第二段（内部使用）：本实例已退到系统临时目录，等待第一段退出后执行删除
+    #[arg(long)]
+    uninstall_phase2: bool,
+
+    /// 卸载第二段（内部使用）：被卸载的程序目录；第一段显式传入
+    #[arg(long)]
+    install_dir: Option<PathBuf>,
 }
 
 /// pending.json 数据结构（与 UpdaterService 的 PendingUpdate 对应）
@@ -82,14 +105,18 @@ struct HelperLog {
 impl HelperLog {
     /// 打开日志文件（失败则退回仅 stderr 模式）
     fn open(base_path: &Path) -> Self {
-        let log_path = base_path.join("logs").join("helper.log");
+        Self::open_at(&base_path.join("logs").join("helper.log"))
+    }
+
+    /// 打开指定路径的日志文件（卸载模式用：日志不能留在即将被删除的目录里）
+    fn open_at(log_path: &Path) -> Self {
         let file = std::fs::create_dir_all(log_path.parent().unwrap_or_else(|| Path::new(".")))
             .ok()
             .and_then(|()| {
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&log_path)
+                    .open(log_path)
                     .ok()
             });
         Self { file }
@@ -124,14 +151,24 @@ impl HelperLog {
 fn main() {
     let cli = HelperCli::parse();
 
+    if cli.uninstall {
+        run_uninstall(&cli);
+        return;
+    }
+
     if !cli.apply_update {
         eprintln!("campus-auth-helper v{}", env!("CARGO_PKG_VERSION"));
         return;
     }
 
+    run_apply_update(&cli);
+}
+
+/// 更新模式主体：等待主进程退出 -> 替换 exe -> 启动新 exe -> 清理
+fn run_apply_update(cli: &HelperCli) {
     // 0. 计算基准路径并初始化 best-effort 落盘日志
     // （GUI 子系统下 stdout/stderr 不可见，更新失败必须可从 helper.log 诊断）
-    let base_path = cli.base_path.unwrap_or_else(|| {
+    let base_path = cli.base_path.clone().unwrap_or_else(|| {
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -181,6 +218,7 @@ fn main() {
 
     let staging_dir = match cli
         .staging
+        .clone()
         .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.staging_dir)))
     {
         Some(p) => p,
@@ -199,6 +237,7 @@ fn main() {
         .and_then(|p| p.parent().map(|d| d.join(exe_name())));
     let provided_target = cli
         .target
+        .clone()
         .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.target_exe)));
     let target_exe = match resolve_target_exe(derived_target, provided_target, &base_path) {
         Some(p) => p,
@@ -404,6 +443,384 @@ fn main() {
     log.info("更新完成");
 }
 
+// ═══ 卸载模式 ═══
+
+/// 卸载第二段所在的临时目录名前缀
+const UNINSTALL_TEMP_PREFIX: &str = "campus-auth-uninst-";
+
+/// 卸载模式：等待主进程退出后删除安装目录，并把结果写进系统提示框
+///
+/// ## 为什么分两段（仅 Windows）
+///
+/// 执行删除的进程不能住在被删的目录里：Windows 不允许删除运行中的 exe，而本进程默认
+/// 就跑在安装目录下，`remove_dir_all(install_dir)` 必然撞上自己。故第一段先把自己
+/// 复制到系统临时目录、spawn 第二段执行删除，第一段随即退出。unix 没有这个限制
+/// （运行中的可执行文件可以 unlink），单段直删。
+///
+/// ## 为什么不用 `helper.lock`
+///
+/// 更新模式的互斥锁落在 `<base>/update/helper.lock`——正是要被删掉的东西之一，
+/// 持锁删除锁文件在 Windows 上必然失败。且卸载期间主进程已退出、界面上不可能再发起
+/// 第二次卸载，互斥在此处没有对象。改为：Web 路由在 spawn 之前**取消待应用更新**
+/// （删 pending.json + staging），使新更新不会在卸载途中开始。
+///
+/// ## 删除清单/守卫
+///
+/// 一律来自 `campus_auth::uninstall`（**单一事实源**）：界面上列的清单与这里删的东西
+/// 必须逐字对应，两处各写一份必然漂移。
+fn run_uninstall(cli: &HelperCli) {
+    // 日志必须落在系统临时目录：安装目录（含 logs/）正在被删
+    let mut log = HelperLog::open_at(&std::env::temp_dir().join("campus-auth-uninstall.log"));
+
+    let install_dir = match uninstall_install_dir(cli) {
+        Ok(d) => d,
+        Err(e) => uninstall_abort(&mut log, "卸载失败", &e),
+    };
+    let base_path = cli.base_path.clone().unwrap_or_else(|| install_dir.clone());
+    log.info(&format!(
+        "卸载模式启动（第二段={}，安装目录 {}，基础路径 {}，保留用户数据={}）",
+        cli.uninstall_phase2,
+        install_dir.display(),
+        base_path.display(),
+        cli.keep_user_data
+    ));
+
+    // 守卫：纵深防御。Web 路由已校验过一次（用户能当场看到拒绝原因），
+    // 此处再校验一次，堵住"直接用 CLI 参数指定任意目录"的通道。
+    if let Err(e) = campus_auth::uninstall::validate_install_dir(&install_dir) {
+        uninstall_abort(&mut log, "卸载已中止", &e);
+    }
+    if let Err(e) = campus_auth::uninstall::validate_base_path(&base_path) {
+        uninstall_abort(&mut log, "卸载已中止", &e);
+    }
+
+    // 1. 等待主进程退出
+    log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
+    if !wait_for_process_exit(cli.pid) {
+        uninstall_abort(
+            &mut log,
+            "卸载已中止",
+            &format!(
+                "等待主进程退出超时（{} 秒）。\n\n请先退出「认证喵」再重新执行卸载。",
+                PROCESS_EXIT_TIMEOUT_SECS
+            ),
+        );
+    }
+    // 额外等待一小段时间，确保文件句柄完全释放（与更新流程同口径）
+    sleep(Duration::from_millis(500));
+
+    // 2. 仅 Windows：第一段退位，把删除交给临时目录里的第二段
+    #[cfg(windows)]
+    {
+        if !cli.uninstall_phase2 {
+            match spawn_uninstall_phase2(&install_dir, &base_path, cli.keep_user_data, &mut log) {
+                Ok(()) => {
+                    log.info("已交给临时目录中的第二段执行删除，本进程退出");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    // 不硬着头皮在原地删：删不掉自己所在的目录，只会留下半删的现场
+                    uninstall_abort(
+                        &mut log,
+                        "卸载失败",
+                        &format!("无法启动卸载第二段：{e}\n\n程序文件未被删除，可重试或手动删除。"),
+                    );
+                }
+            }
+        }
+    }
+
+    // 3. 执行删除
+    let plan =
+        match campus_auth::uninstall::build_plan(&install_dir, &base_path, cli.keep_user_data) {
+            Ok(p) => p,
+            Err(e) => uninstall_abort(&mut log, "卸载已中止", &e),
+        };
+    let report = campus_auth::uninstall::execute(&plan);
+    log.info(&format!(
+        "删除完成：成功 {} 项，失败 {} 项",
+        report.steps.iter().filter(|s| s.success).count(),
+        report.failures().count()
+    ));
+
+    // 4. 结果提示框：主进程已退出，这是唯一还能传达信息的出口
+    let ok = report.all_ok();
+    let text = campus_auth::uninstall::report_text(&report, &plan);
+    notify(
+        ok,
+        if ok {
+            "认证喵 · 卸载完成"
+        } else {
+            "认证喵 · 卸载未完全成功"
+        },
+        &text,
+    );
+
+    // 5. 最后处理自己（Windows：登记重启后删除；unix：已被一并删除，无需动作）
+    schedule_self_delete(&mut log);
+}
+
+/// 解析被卸载的程序目录
+///
+/// 第二段跑在系统临时目录里，无法从自身位置推导出安装目录，必须由第一段用
+/// `--install-dir` 显式传入——这也是"删除目标不接受外部任意路径"的一部分：
+/// 第一段的值来自它自己的 `current_exe()`，不是用户输入。
+fn uninstall_install_dir(cli: &HelperCli) -> Result<PathBuf, String> {
+    if cli.uninstall_phase2 {
+        return cli
+            .install_dir
+            .clone()
+            .ok_or_else(|| "内部错误：卸载第二段缺少 --install-dir".to_string());
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .ok_or_else(|| "无法确定程序所在目录".to_string())
+}
+
+/// 中止卸载：记日志 + 系统提示框 + 以失败码退出
+///
+/// 卸载失败必须**出声**——主进程已经退出，静默退出会让用户既没拿到结果、也不知道
+/// 现场还剩什么。
+fn uninstall_abort(log: &mut HelperLog, title: &str, message: &str) -> ! {
+    log.error(&format!("{title}：{message}"));
+    notify(false, &format!("认证喵 · {title}"), message);
+    std::process::exit(1);
+}
+
+/// （Windows）把自身复制到系统临时目录并以 `--uninstall-phase2` 重启，由它执行删除
+///
+/// 复制而非移动：移动（rename）跨卷会失败，而系统临时目录与安装目录不一定同卷。
+#[cfg(windows)]
+fn spawn_uninstall_phase2(
+    install_dir: &Path,
+    base_path: &Path,
+    keep_user_data: bool,
+    log: &mut HelperLog,
+) -> Result<(), String> {
+    let self_exe = std::env::current_exe().map_err(|e| format!("无法确定自身路径: {e}"))?;
+    let stage = std::env::temp_dir().join(format!("{UNINSTALL_TEMP_PREFIX}{}", std::process::id()));
+    std::fs::create_dir_all(&stage).map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let staged_exe = stage.join(campus_auth::uninstall::helper_exe_name());
+    std::fs::copy(&self_exe, &staged_exe).map_err(|e| format!("复制自身到临时目录失败: {e}"))?;
+
+    let mut cmd = std::process::Command::new(&staged_exe);
+    cmd.arg("--uninstall")
+        .arg("--uninstall-phase2")
+        .arg("--pid")
+        .arg(std::process::id().to_string())
+        .arg("--install-dir")
+        .arg(install_dir)
+        .arg("--base-path")
+        .arg(base_path);
+    if keep_user_data {
+        cmd.arg("--keep-user-data");
+    }
+    // helper 内有多行输出，Windows 上隐藏控制台窗口避免闪黑窗（与 spawn_helper 同口径）
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn().map_err(|e| format!("spawn 第二段失败: {e}"))?;
+    log.info(&format!("第二段已从 {} 启动", staged_exe.display()));
+    Ok(())
+}
+
+/// 系统提示框（Windows）/ stderr（其它平台）
+#[cfg(windows)]
+fn notify(success: bool, title: &str, text: &str) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MessageBoxW,
+    };
+
+    let wide = |s: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let text_w = wide(text);
+    let title_w = wide(title);
+    let icon = if success {
+        MB_ICONINFORMATION
+    } else {
+        MB_ICONWARNING
+    };
+    // SAFETY: 两个宽字符串缓冲在调用期间存活且以 NUL 结尾；hwnd 传 null 表示无属主窗口
+    // （无属主窗口仍会显示在任务栏并置前，符合"卸载完成"的提示需求）。
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text_w.as_ptr(),
+            title_w.as_ptr(),
+            MB_OK | icon,
+        );
+    }
+}
+
+/// 非 Windows 平台：主进程已退出，stderr 可能无人接收，但至少留下痕迹
+#[cfg(not(windows))]
+fn notify(_success: bool, title: &str, text: &str) {
+    eprintln!("[helper] {title}\n{text}");
+}
+
+/// （Windows）把自身与所在临时目录删掉
+///
+/// **主路径是 shell 兜底删除，不是 `MoveFileExW`**——真机演练实测：非管理员账户下
+/// `MOVEFILE_DELAY_UNTIL_REBOOT` 会以 `ERROR_ACCESS_DENIED` 失败（该标志要求调用者
+/// 属于 Administrators 组或 LocalSystem）。即"重启后删除"对普通用户**等于没做**，
+/// 每次卸载都会在 `%TEMP%` 留下一个几 MB 的副本。故先 spawn `cmd`（等本进程退出后
+/// 删除自身与已空的临时目录），只在派发失败时才退回 `MoveFileExW` 登记。
+///
+/// 两条路径的目标都先确认**确实位于系统临时目录内**：若有人直接在安装目录里以
+/// `--uninstall-phase2` 手工运行，绝不能把安装目录里的助手当成本次卸载的残留删掉。
+#[cfg(windows)]
+fn schedule_self_delete(log: &mut HelperLog) {
+    let Ok(self_exe) = std::env::current_exe() else {
+        return;
+    };
+    let (Ok(exe_canonical), Ok(temp_canonical)) =
+        (self_exe.canonicalize(), std::env::temp_dir().canonicalize())
+    else {
+        log.debug("跳过自身清理：路径无法规范化");
+        return;
+    };
+    if !exe_canonical.starts_with(&temp_canonical) {
+        log.debug(&format!(
+            "跳过自身清理：{} 不在系统临时目录内",
+            self_exe.display()
+        ));
+        return;
+    }
+
+    if spawn_delayed_delete(std::slice::from_ref(&self_exe), self_exe.parent(), log) {
+        return;
+    }
+    register_delete_on_reboot(&self_exe, log);
+}
+
+/// 派发"本进程退出后删除这些路径（含可选的空目录）"的系统命令；成功派发返回 `true`
+///
+/// 组合是 `ping -n 3 127.0.0.1 >nul`（约 2 秒延迟，够本进程退出并释放文件锁）加
+/// `del` / `rmdir`。用 `ping` 而非 `timeout`：后者在无控制台的进程里会因"输入重定向
+/// 不受支持"立刻返回，起不到等待作用。目标目录此刻应已只装着我们这份副本，
+/// `rmdir` 不带 `/s` 即可（非空时直接失败，比递归删除安全）。
+///
+/// **抽成独立函数是为了能被单测真的跑一次**：cmd 的引号规则与 `Command` 的默认转义
+/// 语义不同（后者是 `CommandLineToArgvW` 那一套），靠推理写不对——本函数第一版就是
+/// 这么写错的：命令派发成功、文件却还在。`test_spawn_delayed_delete_removes_file`
+/// 会真的起一次 cmd 并断言文件消失。
+///
+/// 路径含 cmd 会二次解析的字符时**放弃派发**（返回 `false`）：宁可留一个临时文件，
+/// 也不冒"命令被拆成两截、删到别的东西"的风险。
+#[cfg(windows)]
+fn spawn_delayed_delete(
+    targets: &[PathBuf],
+    dir_to_remove: Option<&Path>,
+    log: &mut HelperLog,
+) -> bool {
+    use std::os::windows::process::CommandExt;
+
+    let unsafe_path = targets.iter().any(|p| !cmd_safe_path(p))
+        || dir_to_remove.is_some_and(|d| !cmd_safe_path(d));
+    if unsafe_path {
+        log.debug("路径含 cmd 特殊字符，跳过 shell 兜底删除");
+        return false;
+    }
+    let quoted = |p: &Path| format!("\"{}\"", p.display());
+    let mut line = String::from("ping -n 3 127.0.0.1 >nul");
+    for t in targets {
+        line.push_str(&format!(" & del /f /q {}", quoted(t)));
+    }
+    if let Some(dir) = dir_to_remove {
+        line.push_str(&format!(" & rmdir /q {}", quoted(dir)));
+    }
+
+    let mut cmd = std::process::Command::new("cmd");
+    // 命令以 `ping` 开头（首字符不是引号），故**不加** `""…""` 外层包裹：
+    // cmd 的 `/c` 只在"首个字符是引号"时才做首尾引号剥离，而剥掉的恰好会是内层
+    // 路径的引号，把整行拆坏（第一版就是这么错的：派发成功、文件还在）。
+    // 现在的形态等价于在控制台里手敲这一整行。
+    cmd.raw_arg(format!("/c {line}"));
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    match cmd.spawn() {
+        Ok(child) => {
+            log.info(&format!(
+                "已派发系统命令（PID {}）在本进程退出后删除自身与临时目录",
+                child.id()
+            ));
+            true
+        }
+        Err(e) => {
+            log.debug(&format!("派发 shell 兜底删除失败: {e}"));
+            false
+        }
+    }
+}
+
+/// 路径是否可以安全地拼进 cmd 命令行（下列字符会被 cmd 二次解析）
+#[cfg(windows)]
+fn cmd_safe_path(p: &Path) -> bool {
+    const UNSAFE: [char; 8] = ['%', '&', '^', '|', '<', '>', '"', '!'];
+    let s = p.to_string_lossy();
+    !s.chars()
+        .any(|c| UNSAFE.contains(&c) || c == '\n' || c == '\r')
+}
+
+/// 备用：登记"下次重启时删除"（`MoveFileExW` + `MOVEFILE_DELAY_UNTIL_REBOOT`）
+///
+/// 仅在前一条路径派发失败时使用。**非管理员账户下这里通常也会失败**（真机演练实测），
+/// 故它只是最后一道兜底，不能当主路径。
+#[cfg(windows)]
+fn register_delete_on_reboot(self_exe: &Path, log: &mut HelperLog) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+
+    let wide = |p: &Path| -> Vec<u16> {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let stage_dir = self_exe.parent().map(Path::to_path_buf);
+    for (target, what) in [
+        (Some(self_exe.to_path_buf()), "自身可执行文件"),
+        (stage_dir, "临时目录"),
+    ] {
+        let Some(target) = target else { continue };
+        let target_w = wide(&target);
+        // SAFETY: 路径缓冲以 NUL 结尾且在调用期间存活；目标为 null 表示"只登记删除"。
+        // 两次调用按可执行文件、目录的顺序注册，系统的待重命名队列按序执行，
+        // 故目录必然在文件被删空之后才轮到自己。
+        let ok = unsafe {
+            MoveFileExW(
+                target_w.as_ptr(),
+                std::ptr::null(),
+                MOVEFILE_DELAY_UNTIL_REBOOT,
+            )
+        };
+        if ok == 0 {
+            log.debug(&format!(
+                "登记{what}重启后删除失败（非管理员账户下属预期）: {}",
+                target.display()
+            ));
+        } else {
+            log.info(&format!(
+                "已登记{what}在下次重启时删除: {}",
+                target.display()
+            ));
+        }
+    }
+}
+
+/// 非 Windows：运行中的可执行文件允许 unlink，安装目录整体删除时本进程文件已被一并
+/// 删除，无需任何后续动作。
+#[cfg(not(windows))]
+fn schedule_self_delete(_log: &mut HelperLog) {}
+
 /// 对 helper 锁文件取排他锁（双 helper 互斥）
 ///
 /// 锁文件打开失败按 fail-closed 处理（exit 1，更新留给下次尝试）；
@@ -580,11 +997,8 @@ fn copy_dir_overlay(src: &Path, dst: &Path, skip_names: &[&str]) -> std::io::Res
 /// 残留一个无害文件，下次更新覆盖重试）。任一步失败仅告警——旧 helper
 /// 依然能完成未来的 exe 替换（接口仅依赖 pending.json 文件，保持稳定）。
 fn replace_helper(extracted_dir: &Path, base_path: &Path, log: &mut HelperLog) {
-    let helper_name = if cfg!(target_os = "windows") {
-        "campus-auth-helper.exe"
-    } else {
-        "campus-auth-helper"
-    };
+    // 名字取自 `uninstall`（与卸载路径共用，避免两处各写一份平台分支）
+    let helper_name = campus_auth::uninstall::helper_exe_name();
     let new_helper = extracted_dir.join(helper_name);
     if !new_helper.exists() {
         return;
@@ -985,5 +1399,61 @@ mod tests {
             file_sha256(&f).unwrap(),
             hex::encode(Sha256::digest(b"hello campus-auth"))
         );
+    }
+
+    /// 真的起一次 cmd，验证"退出后删除"的命令行能被 cmd 正确解析并执行
+    ///
+    /// 为什么要用真进程测：cmd 的引号规则不是 `CommandLineToArgvW` 那一套，靠推理
+    /// 写不对——本函数第一版（`Command::arg` 直接拼、且外层引号对没配平）派发成功却
+    /// 什么都没删，单测与人工审阅都看不出问题，是端到端演练才暴露的。
+    ///
+    /// 路径刻意带空格：用户的 `%TEMP%`（`C:\Users\John Doe\…`）与中文用户名下的临时
+    /// 目录都带空格或非 ASCII，正是引号最容易出错的地方。
+    #[cfg(windows)]
+    #[test]
+    fn test_spawn_delayed_delete_removes_file() {
+        let base = tempfile::tempdir().unwrap();
+        let stage = base
+            .path()
+            .join("with space")
+            .join("campus-auth-uninst-1234");
+        std::fs::create_dir_all(&stage).unwrap();
+        let victim = stage.join("campus-auth-helper.exe");
+        std::fs::write(&victim, b"x").unwrap();
+
+        let mut log = HelperLog::open_at(&base.path().join("helper.log"));
+        assert!(
+            spawn_delayed_delete(std::slice::from_ref(&victim), Some(&stage), &mut log),
+            "命令应派发成功"
+        );
+
+        // `ping -n 3` 约 2 秒延迟：轮询等它动手
+        for _ in 0..60 {
+            if !victim.exists() && !stage.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(250));
+        }
+        assert!(!victim.exists(), "cmd 没有删掉目标文件（引号规则有误）");
+        assert!(!stage.exists(), "cmd 没有删掉空目录");
+    }
+
+    /// 含 cmd 特殊字符的路径直接放弃派发（宁可留临时文件，也不冒误删风险）
+    #[cfg(windows)]
+    #[test]
+    fn test_spawn_delayed_delete_skips_unsafe_path() {
+        let base = tempfile::tempdir().unwrap();
+        let mut log = HelperLog::open_at(&base.path().join("helper.log"));
+        // 只用 Windows 合法文件名字符中"对 cmd 有特殊含义"的那些
+        // （`|` `<` `>` `"` 本身就是非法文件名，造不出这种路径来测）
+        for name in ["a%b.exe", "a&b.exe", "a^b.exe", "a!b.exe"] {
+            let p = base.path().join(name);
+            std::fs::write(&p, b"x").unwrap();
+            assert!(
+                !spawn_delayed_delete(std::slice::from_ref(&p), None, &mut log),
+                "{name} 不该被拼进命令行"
+            );
+            assert!(p.exists(), "{name} 不该被删");
+        }
     }
 }

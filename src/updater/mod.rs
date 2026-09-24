@@ -155,6 +155,8 @@ pub struct UpdaterService {
     current_version: Version,
     /// 防止并发触发下载（Arc 包装：后台检查 task 需跨 'static 读取，UPD-1）
     update_in_progress: Arc<AtomicBool>,
+    /// 更新是否已被取消（卸载流程置位；置位后任何更新入口都拒绝，见 `Cancelled`）
+    update_cancelled: Arc<AtomicBool>,
 }
 
 /// Web 层消费的更新器抽象（M1 细粒度 state：updater 域）
@@ -185,6 +187,12 @@ pub trait UpdaterApi: Send + Sync {
     /// 不得生成后继进程——后继进程运行的是旧 exe，会锁住目标文件导致
     /// 助手替换必然失败（os error 32）。
     fn has_pending_update(&self) -> bool;
+    /// 取消待应用更新（删除 `pending.json` 与 staging）；返回此前是否确实有待应用更新
+    ///
+    /// 卸载流程必须在退出主进程**之前**调用，否则后果很具体：
+    /// `graceful_shutdown` 的 `ensure_helper_for_shutdown` 见到 pending 存在就会唤醒
+    /// **更新**助手，把用户刚卸载的程序又"更新"回来并重启。
+    async fn cancel_pending_update(&self) -> bool;
 }
 
 #[async_trait::async_trait]
@@ -211,6 +219,10 @@ impl UpdaterApi for UpdaterService {
 
     fn has_pending_update(&self) -> bool {
         UpdaterService::has_pending_update(self)
+    }
+
+    async fn cancel_pending_update(&self) -> bool {
+        UpdaterService::cancel_pending_update(self).await
     }
 }
 
@@ -249,6 +261,7 @@ impl UpdaterService {
             base_path,
             current_version,
             update_in_progress: Arc::new(AtomicBool::new(false)),
+            update_cancelled: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -499,6 +512,54 @@ impl UpdaterService {
         apply::has_pending_update(&self.base_path)
     }
 
+    /// 取消待应用更新（卸载前调用）
+    ///
+    /// 复用"替换成功后"的同一套清理（[`apply::cleanup_after_apply`]）：`pending.json`
+    /// 与 staging 是"待应用"的全部状态，两者都清掉后 [`Self::has_pending_update`] 即为
+    /// false，关机路径不会再唤醒更新助手。
+    ///
+    /// **返回值是"这次调用真的把更新取消掉了"**，而不是"此前有 pending"：
+    /// - 清理是 best-effort（warn-only），不复查就会把"没删掉"报成"已取消"，而卸载流程
+    ///   正是靠这个布尔值决定要不要提示用户；
+    /// - 先落 `update_cancelled` 标记并抢占下载互斥，堵住两条"取消之后更新还发生"的路径：
+    ///   ① 在途下载跑完后无条件写 `pending.json` 并 spawn 助手（用户刚卸载的程序被装回来）；
+    ///   ② cancel 之后又开一轮新的下载。两条都不是理论问题——①正是这个函数存在的理由。
+    pub async fn cancel_pending_update(&self) -> bool {
+        self.update_cancelled.store(true, Ordering::SeqCst);
+        let _ = self.update_in_progress.compare_exchange(
+            false,
+            true,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        if !apply::has_pending_update(&self.base_path) {
+            return false;
+        }
+        apply::cleanup_after_apply(&self.base_path).await;
+        // 复查：清理失败（文件被占用等）时不能对调用方谎称"已取消"
+        let pending_left = apply::has_pending_update(&self.base_path);
+        let staging_left = self.base_path.join(apply::STAGING_DIR_NAME).exists();
+        let cancelled = !pending_left && !staging_left;
+        if cancelled {
+            tracing::info!("已取消待应用更新（卸载前清理 pending.json 与 staging）");
+        } else {
+            tracing::warn!(
+                pending_left,
+                staging_left,
+                "取消待应用更新未完全成功（卸载后仍可能被更新助手装回来）"
+            );
+        }
+        cancelled
+    }
+
+    /// 更新是否已被取消（卸载流程置位）
+    ///
+    /// 置位后**所有**更新入口都要拒绝：取消那一刻可能正好有一次下载在跑，它结束时若无条件
+    /// 落盘，用户刚卸载的程序就会在退出后被更新助手装回来。
+    fn update_cancelled(&self) -> bool {
+        self.update_cancelled.load(Ordering::SeqCst)
+    }
+
     /// 读取上次检查状态（`update/last_check.json`；缺失/损坏返回 `None`）
     pub fn last_check_state(&self) -> Option<LastCheckState> {
         let path = self.base_path.join(LAST_CHECK_FILE_NAME);
@@ -518,6 +579,11 @@ impl UpdaterService {
     /// 解压 → 写 `pending.json` → spawn 助手进程（助手等待本进程退出后完成替换与重启）。
     /// 调用方在收到 `Ok` 后应执行优雅关闭并使主进程退出，以放行助手替换。
     pub async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
+        // 卸载已开始：一律拒绝（含"补唤醒助手"那条分支——取消之后唤醒助手正是要防的事）
+        if self.update_cancelled() {
+            tracing::warn!("更新已被取消（程序正在卸载），拒绝应用更新");
+            return Err(UpdaterError::Cancelled);
+        }
         // 已有待应用更新（本进程此前发起或上次会话遗留）：不重复下载，
         // 补唤醒 helper（上次 spawn 的 helper 等待本进程退出超时 60s 后可能已退出）
         // 并按成功返回——前端继续展示"更新已就绪，重启后生效"。
@@ -597,6 +663,10 @@ impl UpdaterService {
         archive_name: &str,
         archive_path: &Path,
     ) -> Result<String, UpdaterError> {
+        // 卸载已开始：不接收新包（与 apply_update 同一道闸）
+        if self.update_cancelled() {
+            return Err(UpdaterError::Cancelled);
+        }
         // 已有待应用更新：不覆盖（与 apply_update 同语义，避免把已就绪的更新换掉）
         if apply::has_pending_update(&self.base_path) {
             return Err(UpdaterError::UpdateInProgress);
@@ -769,6 +839,15 @@ impl UpdaterService {
         worker_target_dir: &Path,
         staging_dir: &Path,
     ) -> Result<(), UpdaterError> {
+        // 这里是"解压产物 → 写 pending.json"的唯一出口（网络下载 / 本地包复用 / 上传包
+        // 三路共用），因此也是"取消更新"唯一的拦截点：取消可能正好发生在下载途中，若此处
+        // 仍无条件落盘，用户刚卸载的程序会在退出后被更新助手装回来。拦下时顺带清掉解压
+        // 产物——留在盘上的话，下次启动的 `apply_pending_on_startup` 又会把它捡起来。
+        if self.update_cancelled() {
+            tracing::warn!("更新已被取消（程序正在卸载），丢弃已暂存的更新包");
+            apply::cleanup_after_apply(&self.base_path).await;
+            return Err(UpdaterError::Cancelled);
+        }
         // 校验解压产物确实存在后再写 pending，避免写入无效的待应用更新
         if !staged.extracted_exe.exists() {
             return Err(UpdaterError::ExtractFailed("解压产物缺失可执行文件".into()));
@@ -861,6 +940,11 @@ impl UpdaterService {
     /// 重复 spawn 的双 helper 由 `<base>/update/helper.lock` 文件锁互斥（helper
     /// 启动即抢锁，后到者安静退出），且 helper 侧有"目标已是新版内容"的幂等跳过。
     pub(crate) fn ensure_helper_for_shutdown(&self) {
+        // 卸载流程取消更新后**不能**再唤醒助手：那正是"卸载完又被装回来"的入口
+        if self.update_cancelled() {
+            tracing::warn!("更新已被取消（程序正在卸载），关机时不唤醒更新助手");
+            return;
+        }
         if !apply::has_pending_update(&self.base_path) {
             return;
         }
@@ -1248,6 +1332,87 @@ mod tests {
             .expect("构造 ConfigService 失败");
         let status = Arc::new(StatusManager::new());
         UpdaterService::new(config, status, base_path.to_path_buf())
+    }
+
+    /// 取消待应用更新：待应用状态（pending.json + staging）真的清掉才算成功
+    ///
+    /// 返回值是"确实取消掉了"而不是"此前有 pending"：卸载流程靠它决定要不要提示用户，
+    /// 而清理本身是 best-effort（文件被占用时会失败）。
+    #[tokio::test]
+    async fn test_cancel_pending_update_clears_state_and_reports_truthfully() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+
+        // 现场没有 pending：不撒谎说"取消了"
+        assert!(
+            !svc.cancel_pending_update().await,
+            "没有待应用更新时不该报成已取消"
+        );
+
+        // 造一份 pending + staging，再取消
+        let staging = dir.path().join(apply::STAGING_DIR_NAME);
+        std::fs::create_dir_all(staging.join("extracted")).unwrap();
+        apply::write_pending(
+            &apply::PendingUpdate {
+                version: "9.9.9".into(),
+                staging_dir: staging.to_string_lossy().into_owned(),
+                target_exe: dir
+                    .path()
+                    .join("campus-auth.exe")
+                    .to_string_lossy()
+                    .into_owned(),
+                worker_target_dir: String::new(),
+                original_args: Vec::new(),
+                sha256: String::new(),
+                created_at: "2026-09-24T00:00:00Z".into(),
+            },
+            dir.path(),
+        )
+        .unwrap();
+        assert!(apply::has_pending_update(dir.path()));
+
+        assert!(
+            svc.cancel_pending_update().await,
+            "清理成功时必须报 true（否则界面会白白警告）"
+        );
+        assert!(
+            !apply::has_pending_update(dir.path()),
+            "pending.json 应已删除"
+        );
+        assert!(!staging.exists(), "staging 应已删除");
+    }
+
+    /// 取消之后任何更新入口都拒绝：否则用户刚卸载的程序会被助手装回来
+    #[tokio::test]
+    async fn test_cancelled_update_refuses_all_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+        svc.cancel_pending_update().await;
+
+        let info = UpdateInfo {
+            current_version: "0.0.1".into(),
+            latest_version: "9.9.9".into(),
+            update_available: true,
+            url: "https://example.invalid/pkg.zip".into(),
+            sha256: String::new(),
+            size: None,
+            notes: None,
+            release_date: None,
+            platform_unavailable: false,
+            local_package: None,
+        };
+        assert!(
+            matches!(svc.apply_update(&info).await, Err(UpdaterError::Cancelled)),
+            "卸载中不得再应用更新"
+        );
+        assert!(
+            matches!(
+                svc.apply_uploaded_package("pkg.zip", &dir.path().join("pkg.zip"))
+                    .await,
+                Err(UpdaterError::Cancelled)
+            ),
+            "卸载中不得再接收上传包"
+        );
     }
 
     /// F9：无 pending.json 时直接跳过，且不遗留占用互斥标记

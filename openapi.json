@@ -2517,6 +2517,45 @@
     }
    }
   },
+  "/api/uninstall/purge": {
+   "post": {
+    "operationId": "post___api_uninstall_purge",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     }
+    }
+   }
+  },
   "/api/background/{filename}": {
    "get": {
     "operationId": "get___api_background_filename",

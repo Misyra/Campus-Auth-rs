@@ -3,13 +3,11 @@ import IconApp from "@/components/common/IconApp.vue";
 import Modal from "@/components/common/Modal.vue";
 import { ref } from "vue";
 import { useRouter } from "vue-router";
-import { systemApi, autostartApi, uninstallApi } from "@/api";
-import type { UninstallDetectItem, UninstallStepResult } from "@/api/types";
-import { useConfirm } from "@/composables/useConfirm";
+import { systemApi, autostartApi } from "@/api";
+import { useUninstall } from "@/composables/useUninstall";
 import { frontendLogger } from "@/utils/logger";
 import { BILIBILI_SPACE_URL } from "@/utils/constants";
 
-const { confirm } = useConfirm();
 const router = useRouter();
 
 // ---- 版本信息 ----
@@ -48,59 +46,30 @@ async function loadInfo() {
 void loadInfo();
 
 // ---- 卸载 ----
-const uninstallOpen = ref(false);
-const uninstallDetecting = ref(false);
-const uninstallItems = ref<UninstallDetectItem[]>([]);
-const uninstallError = ref("");
-const uninstallRunning = ref(false);
-const uninstallDone = ref(false);
-const uninstallResults = ref<UninstallStepResult[]>([]);
-const uninstallMessage = ref("");
-
-/** 打开卸载弹窗：detect→run 两段式的第一段——仅探测可清理项并重置上次结果，不执行任何删除 */
-async function openUninstall() {
-  uninstallOpen.value = true;
-  uninstallDetecting.value = true;
-  uninstallItems.value = [];
-  uninstallError.value = "";
-  uninstallDone.value = false;
-  uninstallResults.value = [];
-  try {
-    uninstallItems.value = await uninstallApi.detect();
-  } catch (e: unknown) {
-    uninstallError.value = (e as Error).message || "检测失败";
-  } finally {
-    uninstallDetecting.value = false;
-  }
-}
-
-/** 两段式第二段：detect→run。卸载不可恢复（删用户数据/自启动/浏览器缓存），
- *  故执行前再经确认弹窗兜底；运行中弹窗不可关闭（closeUninstall 拦截）。 */
-async function runUninstall() {
-  const ok = await confirm({
-    title: "确认卸载清理",
-    message: "将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。是否继续？",
-    confirmText: "开始清理",
-  });
-  if (!ok) return;
-  uninstallRunning.value = true;
-  uninstallError.value = "";
-  try {
-    const data = await uninstallApi.uninstall();
-    uninstallResults.value = data.results ?? [];
-    uninstallMessage.value = data.message ?? "";
-    uninstallDone.value = true;
-  } catch (e: unknown) {
-    uninstallError.value = (e as Error).message || "卸载清理失败";
-  } finally {
-    uninstallRunning.value = false;
-  }
-}
-
-function closeUninstall() {
-  if (uninstallRunning.value) return;
-  uninstallOpen.value = false;
-}
+// 流程（探测 → 确认 → 清系统残留 → 删程序并退出）在 composable 里，含各步的失败语义；
+// 模板只负责渲染清单与勾选。解构出的都是 ref，模板里自动解包。
+const {
+  open: uninstallOpen,
+  detecting: uninstallDetecting,
+  detectError: uninstallDetectError,
+  items: uninstallItems,
+  program: uninstallProgram,
+  data: uninstallData,
+  // 只用合成后的 blockReason（守卫拒绝 或 卸载助手缺失）：单看 blocked 会漏掉后者
+  blockReason: uninstallBlockReason,
+  keepUserData: uninstallKeepUserData,
+  phase: uninstallPhase,
+  running: uninstallRunning,
+  cleanupResults: uninstallCleanupResults,
+  cleanupMessage: uninstallCleanupMessage,
+  error: uninstallError,
+  pendingUpdateLeft: uninstallPendingUpdateLeft,
+  deletionLabels: uninstallDeletionLabels,
+  deleteCount: uninstallDeleteCount,
+  openDialog: openUninstall,
+  run: runUninstall,
+  closeDialog: closeUninstall,
+} = useUninstall();
 </script>
 
 <template>
@@ -118,15 +87,18 @@ function closeUninstall() {
         <div class="card">
           <div class="card-header"><h2>技术栈与工具链</h2></div>
           <div class="card-body">
+            <!-- 徽标直接作为 .tech-stack（flex + wrap + gap）的子项：
+                 此前每项还套了一层 `<div class="tech-item">`，而全仓没有任何
+                 `.tech-item` 规则——是一层不产生任何效果的空壳。 -->
             <div class="tech-stack">
-              <div class="tech-item"><span class="tech-badge rust">Rust 2024</span></div>
-              <div class="tech-item"><span class="tech-badge tokio">Tokio + Axum</span></div>
-              <div class="tech-item"><span class="tech-badge vue">Vue 3 + Vite</span></div>
-              <div class="tech-item"><span class="tech-badge playwright">Playwright</span></div>
-              <div class="tech-item"><span class="tech-badge websockets">WebSockets</span></div>
-              <div class="tech-item"><span class="tech-badge ddddocr">Ddddocr</span></div>
-              <div class="tech-item"><span class="tech-badge uv">uv</span></div>
-              <div class="tech-item"><span class="tech-badge python">Python 3.10+</span></div>
+              <span class="tech-badge rust">Rust 2024</span>
+              <span class="tech-badge tokio">Tokio + Axum</span>
+              <span class="tech-badge vue">Vue 3 + Vite</span>
+              <span class="tech-badge playwright">Playwright</span>
+              <span class="tech-badge websockets">WebSockets</span>
+              <span class="tech-badge ddddocr">Ddddocr</span>
+              <span class="tech-badge uv">uv</span>
+              <span class="tech-badge python">Python 3.10+</span>
             </div>
           </div>
         </div>
@@ -203,20 +175,84 @@ function closeUninstall() {
           <IconApp name="trash" width="20" height="20" />
           <div>
             <h3>卸载程序</h3>
-            <p class="uninstall-desc">清理开机自启动、用户数据目录与 Playwright 浏览器缓存；完成后删除程序所在文件夹即可完成卸载。</p>
+            <p class="uninstall-desc">删除程序文件（可勾选保留配置与任务），并关闭开机自启动、清理加密密钥目录与 Playwright 浏览器缓存。</p>
           </div>
         </div>
         <button class="btn btn-danger-ghost btn-sm" @click="openUninstall">卸载</button>
       </div>
 
       <Modal :open="uninstallOpen" title="卸载程序" :close-on-overlay="!uninstallRunning" :close-on-esc="!uninstallRunning" @close="closeUninstall">
-        <p class="uninstall-subtitle">将清理以下系统残留项</p>
-
         <div v-if="uninstallDetecting" class="uninstall-scanning"><span class="spinner"></span>正在检测...</div>
 
-        <template v-else-if="!uninstallDone">
-          <div v-if="uninstallError" class="empty-state empty-state--sm">{{ uninstallError }}</div>
+        <!-- 卸载已启动：后端随时消失，只回执不提供操作 -->
+        <div v-else-if="uninstallPhase === 'done'" class="uninstall-results">
+          <div class="uninstall-result-header"><IconApp name="check" width="16" height="16" />程序即将退出</div>
+          <p class="uninstall-subtitle">卸载助手将在退出后立即删除：</p>
+          <ul class="uninstall-plan-list">
+            <li v-for="label in uninstallDeletionLabels" :key="label">{{ label }}</li>
+          </ul>
+          <template v-if="uninstallCleanupResults.length">
+            <p class="uninstall-subtitle">系统残留清理结果</p>
+            <div v-for="r in uninstallCleanupResults" :key="r.key" class="uninstall-result-row">
+              <span :class="r.success ? 'result-ok' : 'result-fail'">{{ r.success ? "✓" : "✗" }}</span>
+              <span>{{ r.label }}</span>
+              <span class="uninstall-item-path">{{ r.message }}</span>
+            </div>
+          </template>
+          <div class="uninstall-hint-box">
+            完成删除后会弹出系统提示框，告诉你删了什么、以及有没有删不掉的项。
+          </div>
+          <p v-if="uninstallCleanupMessage" class="uninstall-note">{{ uninstallCleanupMessage }}</p>
+          <!-- 取消失败必须出声：否则用户以为卸干净了，下次开机程序还在 -->
+          <p v-if="uninstallPendingUpdateLeft" class="uninstall-blocked">
+            注意：待应用的更新未能取消，程序可能在退出后被更新助手重新安装。
+          </p>
+        </div>
+
+        <template v-else>
+          <div v-if="uninstallDetectError" class="empty-state empty-state--sm">{{ uninstallDetectError }}</div>
+          <!-- 拦下卸载的原因：守卫拒绝 或 卸载助手缺失（后者一定导致"清完残留却删不掉程序"） -->
+          <div v-else-if="uninstallBlockReason" class="uninstall-blocked">{{ uninstallBlockReason }}</div>
           <template v-else>
+            <p class="uninstall-subtitle">将删除以下内容（不可恢复）</p>
+
+            <div v-if="uninstallProgram" class="uninstall-item disabled">
+              <div class="uninstall-item-info">
+                <span class="uninstall-item-label">{{ uninstallProgram.label }}</span>
+                <span class="uninstall-item-path">{{ uninstallProgram.path }}</span>
+              </div>
+              <span class="uninstall-item-tag" :class="uninstallProgram.exists ? 'tag-exists' : 'tag-missing'">
+                {{ uninstallProgram.exists ? "将删除" : "无" }}
+              </span>
+            </div>
+
+            <!-- 保留勾选：默认不勾（默认真卸载）。放在数据目录上方，勾选后下方行的标签
+                 立刻从「将删除」变成「保留」，后果在按下按钮前就看得见 -->
+            <label class="toggle toggle-help-inline uninstall-keep">
+              <input type="checkbox" v-model="uninstallKeepUserData" :disabled="uninstallRunning" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">保留配置与任务</span>
+            </label>
+            <p class="uninstall-keep-hint">
+              勾选后下列用户数据整棵保留，重装到别处后仍可用；程序文件照常删除。
+            </p>
+
+            <div v-for="d in uninstallData" :key="d.key" class="uninstall-item" :class="{ disabled: !d.exists || uninstallKeepUserData }">
+              <div class="uninstall-item-info">
+                <span class="uninstall-item-label">{{ d.label }}</span>
+                <span class="uninstall-item-path">{{ d.path }}</span>
+              </div>
+              <!-- 类名字面量留在模板里（不藏进函数返回值）：死类审计按模板字面量判定，
+                   藏起来会让一个在用的类被报成死类 -->
+              <span
+                class="uninstall-item-tag"
+                :class="uninstallKeepUserData ? 'tag-kept' : d.exists ? 'tag-exists' : 'tag-missing'"
+              >
+                {{ uninstallKeepUserData ? "保留" : d.exists ? "将删除" : "无" }}
+              </span>
+            </div>
+
+            <p class="uninstall-subtitle">并清理以下系统残留</p>
             <div v-for="item in uninstallItems" :key="item.key" class="uninstall-item disabled">
               <div class="uninstall-item-info">
                 <span class="uninstall-item-label">{{ item.label }}</span>
@@ -224,26 +260,26 @@ function closeUninstall() {
               </div>
               <span class="uninstall-item-tag" :class="item.exists ? 'tag-exists' : 'tag-missing'">{{ item.exists ? "存在" : "无" }}</span>
             </div>
-            <div class="uninstall-hint-box">将关闭开机自启动、删除用户数据目录并清理 Playwright 浏览器缓存，此操作不可恢复。清理完成后，手动删除程序所在文件夹即可完成卸载。</div>
+
+            <div class="uninstall-hint-box">
+              程序会立即退出，删除由更新助手在退出后完成（运行中的程序文件无法自己删除），完成后会弹出系统提示框。
+            </div>
           </template>
+          <div v-if="uninstallError" class="uninstall-blocked">{{ uninstallError }}</div>
         </template>
 
-        <div v-else class="uninstall-results">
-          <div class="uninstall-result-header"><IconApp name="check" width="16" height="16" />清理结果</div>
-          <div v-for="r in uninstallResults" :key="r.key" class="uninstall-result-row">
-            <span :class="r.success ? 'result-ok' : 'result-fail'">{{ r.success ? "✓" : "✗" }}</span>
-            <span>{{ r.label }}</span>
-            <span class="uninstall-item-path">{{ r.message }}</span>
-          </div>
-          <div class="uninstall-final-hint">{{ uninstallMessage }}</div>
-        </div>
-
         <template #footer>
-          <template v-if="!uninstallDone">
+          <span v-if="uninstallPhase === 'done'" class="uninstall-footer-note">程序正在退出，请勿关闭窗口…</span>
+          <template v-else>
             <button class="btn btn-ghost btn-sm" @click="closeUninstall" :disabled="uninstallRunning">取消</button>
-            <button class="btn btn-danger btn-sm" @click="runUninstall" :disabled="uninstallRunning || !!uninstallError">{{ uninstallRunning ? "清理中..." : "开始清理" }}</button>
+            <button
+              class="btn btn-danger btn-sm"
+              @click="runUninstall"
+              :disabled="uninstallRunning || !!uninstallBlockReason || !!uninstallDetectError || uninstallDeleteCount === 0"
+            >
+              {{ uninstallRunning ? (uninstallPhase === "cleanup" ? "清理中..." : "正在启动卸载...") : "卸载并退出" }}
+            </button>
           </template>
-          <button v-else class="btn btn-primary btn-sm" @click="closeUninstall">关闭</button>
         </template>
       </Modal>
     </div>

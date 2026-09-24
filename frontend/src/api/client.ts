@@ -251,6 +251,18 @@ export function isNoBrowserMessage(message: unknown): boolean {
   return typeof message === "string" && message.includes("无可用浏览器");
 }
 
+/**
+ * 是否为"资源已存在"冲突（后端 `ApiError::Conflict` → HTTP 409 + code `CONFLICT`）。
+ *
+ * 存在的理由：定时任务的"新建"是 `POST /api/scheduler/jobs`，而该端点对已存在 id 明确
+ * 返回 409。自动保存场景下"两发重叠"是正常时序（首发与补发都以为自己是第一次），
+ * 这时 409 的真实含义是"另一发已经把它建好了"——调用方据此降级为 PUT 继续，
+ * 而不是弹一句"定时任务 X 已存在"的红字（任务其实建成功了）。
+ */
+export function isConflictError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 409 || error.code === "CONFLICT");
+}
+
 export const http = {
   get: <T>(path: string, opts?: RequestOptions) => request<T>("GET", path, opts),
   // 写方法对缺失 body 统一发送 "{}" 并携带 application/json：后端 Json 提取器
