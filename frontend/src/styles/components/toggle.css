@@ -41,7 +41,8 @@
   background: var(--bg-secondary);
   border-radius: var(--radius-full);
   position: relative;
-  transition: background var(--dur-base) var(--ease-out);
+  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
   border: 1px solid var(--border);
 }
 
@@ -117,7 +118,8 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
   cursor: pointer;
-  transition: background-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
   flex-shrink: 0;
   padding: 0;
 }
@@ -126,9 +128,15 @@
   border-color: var(--accent);
 }
 
+/* 开态与 label 型**逐字对齐**：此前这里是纯色 `background-color: var(--accent)`，
+   而 label 型（`.toggle input:checked + .toggle-slider`）是 accent→accent-hover 渐变
+   外加一圈 `0 0 12px` 发光——同一个"开关开"的语义两套外观，两种实现混用时肉眼可见。
+   两者现在共用同一组声明（渐变为不可动画属性，故两者的 switch 过渡同样只作用在
+   边框与阴影上，与各自 `transition` 声明保持一致）。 */
 .toggle-switch.active {
-  background-color: var(--accent);
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.25);
 }
 
 .toggle-knob {

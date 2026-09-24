@@ -171,7 +171,7 @@ async function runTest(): Promise<void> {
 </script>
 
 <template>
-  <div class="channel-section">
+  <div>
     <!-- 标题行：标题与入口同处一行。标题可为 null（宿主自渲染标题的紧凑场景），
          但入口必须独立于标题渲染——否则 :title="null" 的宿主会连入口一起消失。 -->
     <div v-if="title !== null || showGuide" class="channel-section-head">
@@ -251,11 +251,11 @@ async function runTest(): Promise<void> {
       </div>
 
       <!-- 未绑定 / 绑定的任务已被删除：两种都会让直连登录直接失败，故当场提示并给出出口 -->
-      <div v-if="boundHttpTaskMissing" class="http-task-alert">
+      <div v-if="boundHttpTaskMissing" class="note note--warn">
         <IconApp name="alert-triangle" class="icon-sm" />
         <span>绑定的直连任务已不存在，请重新选择；直连登录在选中任务前不可用。</span>
       </div>
-      <div v-else-if="!modelValue.active_http_task.trim()" class="http-task-alert http-task-alert--muted">
+      <div v-else-if="!modelValue.active_http_task.trim()" class="note">
         <IconApp name="info" class="icon-sm" />
         <span>尚未绑定直连任务，直连登录会直接失败。</span>
         <a href="#" class="http-task-link" @click.prevent="emit('openGuide')">去新建 →</a>
@@ -444,29 +444,9 @@ async function runTest(): Promise<void> {
   margin-bottom: var(--space-sm);
 }
 
-.http-task-alert {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(var(--warning-rgb), 0.25);
-  background: var(--warning-bg);
-  color: var(--warning-text);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-
-.http-task-alert--muted {
-  border-color: var(--border);
-  background: rgba(var(--slate-rgb), 0.06);
-  color: var(--text-secondary);
-}
-
-.http-task-alert svg {
-  flex-shrink: 0;
-}
+/* 绑定缺失提示改用全局 `.note` / `.note--warn`（components/misc.css）：
+   - 原 `--muted` 变体（border/中性底/次要色）与 `.note` 的默认态完全同值
+   - 原 `--warn` 变体是同族的第三份副本（只差 padding 8px 10px 与 align-items:center） */
 
 .http-task-link {
   color: var(--accent);

@@ -12,8 +12,9 @@
  * 组件只剩正文，且不再需要"导航 + 正文一起限宽居中"来避免割裂感。
  *
  * 路由名/路径一律不变（/tasks、/tasks/http、/tasks/scripts、/tasks/scheduled、
- * /tasks/ai）：深链、router/editorGuard.ts 的 `/tasks` 前缀判定、AppSidebar 的
- * `startsWith("tasks")` 高亮都依赖它们；当前面板仍由子路由表达，刷新与深链均可直达。 */
+ * /tasks/ai）：深链、AppSidebar 的 `startsWith("tasks")` 高亮都依赖它们；
+ * 当前面板仍由子路由表达，刷新与深链均可直达。（原 router/editorGuard.ts 的
+ * 离开确认守卫已随自动保存模式退役，编辑态判据改由各面板的"草稿非空"承担。） */
 import IconApp from "@/components/common/IconApp.vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";

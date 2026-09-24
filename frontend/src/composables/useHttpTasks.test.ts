@@ -1,16 +1,16 @@
 /**
- * useHttpTasks 的保存 / 删除 / 复制路径单元测试。
+ * useHttpTasks 自动保存路径的单元测试。
  *
- * 这几条是最容易悄悄坏掉的地方：
- * 1. 保存前拦缺口（ID 形态、请求地址、名称）——放过去就会在 `<base>/tasks/http/`
- *    写出一个 ID 非法或没有地址、登录必然失败的任务；
- * 2. 非空 `crypto_script` 必须弹一次确认（登录时要执行其中的 JS），拒绝即不保存；
- * 3. 删除正在编辑的任务必须关掉编辑器——否则"删除"看起来没生效（再点保存会以同一
- *    ID 新建回来）。
+ * 自动保存模式（方案 G）下最容易悄悄坏掉的地方：
+ * 1. 缺口校验（ID 形态、请求地址）——缺口未补齐时自动保存**静默跳过**（不发请求、
+ *    不打扰编辑），补齐后恢复落盘；
+ * 2. 落盘载荷正确（type=http、trim 后的地址与 id）；
+ * 3. 删除正在编辑的任务必须关掉编辑器——否则自动保存可能写回一个已删除的 id。
  *
  * 依赖全部 mock：本测试只关心状态机与请求参数，不碰真实 HTTP。
+ * debounce 用 vi.useFakeTimers 推进，避免等待真实 500ms。
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { emptyHttpTaskDraft } from "../utils/httpTask";
 
 const { confirmMock, toastOnlyMock, tasksApiMock } = vi.hoisted(() => ({
@@ -35,7 +35,6 @@ vi.mock("./useToast", () => ({ useToast: () => ({ toastOnly: toastOnlyMock }) })
 vi.mock("./useConfirm", () => ({ useConfirm: () => ({ confirm: confirmMock }) }));
 
 const { useHttpTasks } = await import("./useHttpTasks");
-const { setHttpTaskDraft, clearHttpTaskDraft, saveHttpTask, deleteHttpTask, isDraftDirty } = useHttpTasks();
 
 beforeEach(() => {
   confirmMock.mockReset();
@@ -44,114 +43,109 @@ beforeEach(() => {
   tasksApiMock.save.mockClear();
   tasksApiMock.delete.mockClear();
   tasksApiMock.list.mockClear();
-  clearHttpTaskDraft();
+  tasksApiMock.get.mockReset();
 });
 
-describe("saveHttpTask 的前置校验", () => {
-  it("ID 形态非法时不发请求", async () => {
-    setHttpTaskDraft({ ...emptyHttpTaskDraft(), id: "宿舍 直连", url: "http://10.0.0.1/login" });
-    await saveHttpTask();
-    expect(tasksApiMock.save).not.toHaveBeenCalled();
-    expect(toastOnlyMock).toHaveBeenCalledWith(false, expect.stringContaining("任务ID需为"));
-  });
+afterEach(() => {
+  useHttpTasks().clearHttpTaskDraft();
+});
 
-  it("请求地址为空时不发请求（缺了必然登不上）", async () => {
-    setHttpTaskDraft({ ...emptyHttpTaskDraft(), id: "dorm" });
-    await saveHttpTask();
-    expect(tasksApiMock.save).not.toHaveBeenCalled();
-    expect(toastOnlyMock).toHaveBeenCalledWith(false, expect.stringContaining("请求地址"));
-  });
+describe("自动保存的缺口校验（经 showHttpTaskEditor + debounce）", () => {
+  it("请求地址补齐前不发请求，补齐后恢复落盘", async () => {
+    vi.useFakeTimers();
+    try {
+      tasksApiMock.get.mockResolvedValue({
+        summary: { id: "dorm", name: "宿舍直连", task_type: "http" },
+        config: { type: "http", task_id: "dorm", name: "宿舍直连", url: "" },
+      });
+      const http = useHttpTasks();
+      await http.showHttpTaskEditor("dorm");
+      expect(http.httpTaskDraft.value?.id).toBe("dorm");
 
-  it("名称为空时不发请求（列表/下拉里不能出现无名条目）", async () => {
-    setHttpTaskDraft({ ...emptyHttpTaskDraft(), id: "dorm", name: "   ", url: "http://10.0.0.1/login" });
-    await saveHttpTask();
-    expect(tasksApiMock.save).not.toHaveBeenCalled();
-    expect(toastOnlyMock).toHaveBeenCalledWith(false, "请填写任务名称");
+      // 地址为空：debounce 到点也不发请求（缺口未补齐，发了必 400）
+      await vi.advanceTimersByTimeAsync(600);
+      expect(tasksApiMock.save).not.toHaveBeenCalled();
+
+      // 补上地址：debounce 到点后落盘
+      if (http.httpTaskDraft.value) http.httpTaskDraft.value.url = "http://10.0.0.1/login";
+      await vi.advanceTimersByTimeAsync(600);
+      expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
-describe("saveHttpTask 的凭据变换脚本确认", () => {
-  it("含脚本时先确认，拒绝则不保存且保留草稿", async () => {
-    confirmMock.mockResolvedValue(false);
-    setHttpTaskDraft({
-      ...emptyHttpTaskDraft(),
-      id: "dorm",
-      url: "http://10.0.0.1/login",
-      crypto_script: "function transform(ctx) { return ctx; }",
+describe("换编辑对象时补发在途改动", () => {
+  it("改动还在 debounce 窗口内就切走：仍然落盘，且不污染新草稿", async () => {
+    vi.useFakeTimers();
+    try {
+      tasksApiMock.get.mockImplementation(async (id: string) => ({
+        summary: { id, name: id, task_type: "http" },
+        config: { type: "http", task_id: id, name: id, url: "http://10.0.0.1/login" },
+      }));
+      const http = useHttpTasks();
+      await http.showHttpTaskEditor("dorm");
+      // 改一个字段后**不等** debounce 到点就切到另一条：原来 watcher 只会把定时器
+      // 清掉（换 id 直接 return），这半秒内的编辑既没落盘也没提示地消失
+      if (http.httpTaskDraft.value) http.httpTaskDraft.value.name = "宿舍直连改";
+      await http.showHttpTaskEditor("office");
+
+      const dormCall = tasksApiMock.save.mock.calls.find((c) => c[0] === "dorm");
+      expect(dormCall, "切走时应补发上一份草稿的改动").toBeTruthy();
+      expect((dormCall?.[1] as Record<string, unknown>).name).toBe("宿舍直连改");
+      expect(http.httpTaskDraft.value?.id).toBe("office");
+
+      // 新草稿刚载入、用户还没碰过它：不该凭空写一次
+      // （旧草稿那一发的响应若回头改写 lastSavedFingerprint 就会在这里露出来）
+      await vi.advanceTimersByTimeAsync(600);
+      expect(tasksApiMock.save.mock.calls.map((c) => c[0])).not.toContain("office");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("删除路径", () => {
+  it("删除的正是当前编辑对象时关掉编辑器（自动保存不再写回已删除的 id）", async () => {
+    tasksApiMock.get.mockResolvedValue({
+      summary: { id: "dorm", name: "宿舍直连", task_type: "http" },
+      config: { type: "http", task_id: "dorm", name: "宿舍直连", url: "http://10.0.0.1/login" },
     });
+    const http = useHttpTasks();
+    await http.showHttpTaskEditor("dorm");
+    expect(http.httpTaskDraft.value?.id).toBe("dorm");
 
-    await saveHttpTask();
-
-    expect(confirmMock).toHaveBeenCalledTimes(1);
-    expect(tasksApiMock.save).not.toHaveBeenCalled();
-    // 草稿保留：用户拒绝的是"保存"，不是"丢掉刚写的脚本"
-    expect(useHttpTasks().httpTaskDraft.value?.id).toBe("dorm");
-  });
-
-  it("无脚本时不打扰用户（大多数门户不需要脚本）", async () => {
-    setHttpTaskDraft({ ...emptyHttpTaskDraft(), id: "dorm", url: "http://10.0.0.1/login" });
-    await saveHttpTask();
-    expect(confirmMock).not.toHaveBeenCalled();
-    expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("saveHttpTask 的落盘载荷", () => {
-  it("带上 type=http、trim 后的地址，保存成功即清草稿并刷新列表", async () => {
-    setHttpTaskDraft({
-      ...emptyHttpTaskDraft(),
-      id: " dorm ",
-      name: "  宿舍直连  ",
-      url: "  http://10.0.0.1/login?username={username}  ",
-    });
-
-    await saveHttpTask();
-
-    expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
-    const [id, payload] = tasksApiMock.save.mock.calls[0] as [string, Record<string, unknown>];
-    expect(id).toBe("dorm");
-    expect(payload).toMatchObject({
-      type: "http",
-      task_id: "dorm",
-      name: "宿舍直连",
-      url: "http://10.0.0.1/login?username={username}",
-    });
-    expect(confirmMock).not.toHaveBeenCalled();
-    expect(tasksApiMock.list).toHaveBeenCalledTimes(1);
-    expect(toastOnlyMock).toHaveBeenCalledWith(true, "保存成功");
-  });
-
-  it("保存失败时保留草稿并提示（用户不必重填）", async () => {
-    tasksApiMock.save.mockRejectedValueOnce(new Error("磁盘错误"));
-    setHttpTaskDraft({ ...emptyHttpTaskDraft(), id: "dorm", url: "http://10.0.0.1/login" });
-
-    await saveHttpTask();
-
-    expect(toastOnlyMock).toHaveBeenCalledWith(false, expect.stringContaining("磁盘错误"));
-    expect(useHttpTasks().httpTaskDraft.value?.id).toBe("dorm");
-  });
-});
-
-describe("deleteHttpTask", () => {
-  it("删除的正是当前编辑对象时关掉编辑器", async () => {
-    setHttpTaskDraft({ ...emptyHttpTaskDraft(), id: "dorm", _isNew: false, url: "http://10.0.0.1/login" });
-    await deleteHttpTask("dorm");
+    await http.deleteHttpTask("dorm");
     expect(tasksApiMock.delete).toHaveBeenCalledWith("dorm");
-    // 草稿清空 = 编辑器关闭；留着会让人以为"还能保存"，保存其实会以同一 ID 新建回来
-    expect(isDraftDirty()).toBe(false);
+    expect(http.httpTaskDraft.value).toBeNull();
     expect(toastOnlyMock).toHaveBeenCalledWith(true, "直连任务已删除");
   });
 
   it("用户取消确认时不删除", async () => {
     confirmMock.mockResolvedValue(false);
-    await deleteHttpTask("dorm");
+    await useHttpTasks().deleteHttpTask("dorm");
     expect(tasksApiMock.delete).not.toHaveBeenCalled();
   });
 
   it("删除的是别的任务时不动当前草稿", async () => {
-    setHttpTaskDraft({ ...emptyHttpTaskDraft(), id: "dorm", _isNew: false, url: "http://10.0.0.1/login" });
-    await deleteHttpTask("other");
-    expect(isDraftDirty()).toBe(false);
-    expect(useHttpTasks().httpTaskDraft.value?.id).toBe("dorm");
+    tasksApiMock.get.mockResolvedValue({
+      summary: { id: "dorm", name: "宿舍直连", task_type: "http" },
+      config: { type: "http", task_id: "dorm", name: "宿舍直连", url: "http://10.0.0.1/login" },
+    });
+    const http = useHttpTasks();
+    await http.showHttpTaskEditor("dorm");
+
+    await http.deleteHttpTask("other");
+    expect(http.httpTaskDraft.value?.id).toBe("dorm");
+  });
+});
+
+describe("草稿 ⇄ 载荷互转（经 emptyHttpTaskDraft 基准）", () => {
+  it("空草稿的缺口是请求地址；_isNew 不再参与判定（新建先落盘）", () => {
+    const draft = emptyHttpTaskDraft();
+    expect(draft.url).toBe("");
+    // 自动保存模式下新建即落盘，_isNew 只是展示语义
+    expect(draft._isNew).toBe(true);
   });
 });

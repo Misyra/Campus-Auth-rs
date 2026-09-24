@@ -15,10 +15,20 @@ export interface HttpTaskRow {
   id: string;
   /** 人读名称；空串时由渲染方回退显示 id */
   name: string;
+  /** 描述：渲染成名称下方的副行（与浏览器任务 / 脚本列表同口径），空串则不渲染 */
+  description: string;
   /** 请求方法（`TaskSummary.http_method`）；非直连/解析失败时为空串——不编造 GET */
   method: string;
   /** 请求地址模板（同时是搜索的匹配字段之一） */
   url: string;
+  /**
+   * 任务文件最近修改时间（UTC RFC3339，`TaskSummary.modified_at`）；读不到时为空串。
+   *
+   * 由本函数带出而非渲染方按 id 反查：列表行同时要名称、方法、地址、绑定与时间，
+   * 分头取会让渲染层对每一行做一次 `find`（O(n²)），也把"行里有什么"这件事
+   * 拆到两处。
+   */
+  modifiedAt: string;
   /** 绑定该任务的方案名（空数组 = 没有任何方案引用它） */
   boundProfiles: string[];
 }
@@ -78,22 +88,29 @@ export function buildHttpTaskRows(
     return {
       id,
       name: pickString(task.name),
+      description: pickString(task.description),
       method: pickString(task.http_method),
       url: pickString(task.url),
+      modifiedAt: pickString(task.modified_at),
       boundProfiles: [...(binding.get(id) ?? [])],
     };
   });
 }
 
 /**
- * 按关键字过滤行：匹配名称 / 任务 ID / 请求地址，大小写不敏感。
+ * 按关键字过滤行：匹配名称 / 任务 ID / 描述 / 请求地址，大小写不敏感。
+ *
+ * 描述与地址都进匹配面，是因为它们**看得见**（描述是名称格下的副行、地址在「请求」列）：
+ * 界面上能读到的文字搜不到，用户会以为搜索坏了。
  *
  * 不匹配绑定方案名——这一列是「这条任务被谁在用」的答案，搜索的意图始终是
- * 「我要找那条任务」。三个字段用换行拼接避免跨字段误命中（"宿舍dorm" 不该因为
+ * 「我要找那条任务」。四个字段用换行拼接避免跨字段误命中（"宿舍dorm" 不该因为
  * 名称以「宿舍」结尾、id 以 dorm 开头就算匹配）。
  */
 export function filterHttpTaskRows(rows: HttpTaskRow[], query: string): HttpTaskRow[] {
   const keyword = query.trim().toLowerCase();
   if (!keyword) return rows;
-  return rows.filter((row) => `${row.name}\n${row.id}\n${row.url}`.toLowerCase().includes(keyword));
+  return rows.filter((row) =>
+    `${row.name}\n${row.id}\n${row.description}\n${row.url}`.toLowerCase().includes(keyword),
+  );
 }

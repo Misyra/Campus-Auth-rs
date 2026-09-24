@@ -44,6 +44,17 @@ export interface HttpTaskDraft {
   pre_request_extract: string;
   /** 注册成哪个占位符（留空 = 取 `extract` 路径最后一段） */
   pre_request_name: string;
+  /**
+   * 退出登录请求（可选）：**地址留空 = 不需要**，与前置请求同一套"无开关"口径。
+   *
+   * 登录前先发一次下线动作（踢掉「IP 已在线」的旧会话），请求成败不判定、
+   * 失败不拦登录。`wait_secs` 为下线后等待秒数（下线异步生效的门户用）。
+   */
+  logout_method: HttpLoginMethod;
+  logout_url: string;
+  logout_headers: string;
+  logout_body: string;
+  logout_wait_secs: number;
   ignore_https_errors: HttpIgnoreHttpsErrors;
   /** 新建（尚未落盘）：允许改 id，保存走新建语义 */
   _isNew?: boolean;
@@ -71,6 +82,11 @@ export function emptyHttpTaskDraft(): HttpTaskDraft {
     pre_request_body: "",
     pre_request_extract: "",
     pre_request_name: "",
+    logout_method: "GET",
+    logout_url: "",
+    logout_headers: "",
+    logout_body: "",
+    logout_wait_secs: 0,
     ignore_https_errors: null,
     _isNew: true,
   };
@@ -97,6 +113,15 @@ export function httpTaskDraftFromConfig(config: HttpTaskConfig): HttpTaskDraft {
     pre_request_body: config.pre_request?.body ?? "",
     pre_request_extract: config.pre_request?.extract ?? "",
     pre_request_name: config.pre_request?.name ?? "",
+    // 退出登录请求：老配置没有这个键（`undefined`）与显式 null 都按"不需要"处理；
+    // wait_secs 为 0/缺失时归 0（下线后不等待）
+    logout_method: config.logout_request?.method ?? "GET",
+    logout_url: config.logout_request?.url ?? "",
+    logout_headers: config.logout_request?.headers ?? "",
+    logout_body: config.logout_request?.body ?? "",
+    logout_wait_secs: typeof config.logout_request?.wait_secs === "number" && config.logout_request.wait_secs > 0
+      ? config.logout_request.wait_secs
+      : 0,
     ignore_https_errors: config.ignore_https_errors ?? null,
     _isNew: false,
   };
@@ -126,6 +151,19 @@ export function httpTaskPayload(draft: HttpTaskDraft): HttpTaskConfig & { type: 
           body: draft.pre_request_body,
           extract: draft.pre_request_extract.trim(),
           name: draft.pre_request_name.trim(),
+        }
+      : null,
+    // 地址留空 = 不需要退出登录（与前置请求同口径；后端 Option<HttpActionRequest> 收 null）
+    logout_request: draft.logout_url.trim()
+      ? {
+          method: draft.logout_method,
+          url: draft.logout_url.trim(),
+          headers: draft.logout_headers,
+          body: draft.logout_body,
+          // 执行侧钳制 [0, 30]，此处只把非法输入归 0（负数/NaN 不该落盘）
+          wait_secs: Number.isFinite(draft.logout_wait_secs) && draft.logout_wait_secs > 0
+            ? draft.logout_wait_secs
+            : 0,
         }
       : null,
     ignore_https_errors: draft.ignore_https_errors,
@@ -158,6 +196,12 @@ export function httpTaskDraftGaps(draft: HttpTaskDraft): string[] {
   } else if (draft.pre_request_extract.trim()) {
     // 只填了取值方式没填地址：不报就等着用户困惑"为什么没生效"
     gaps.push("前置请求的请求地址（填了取值方式就必须有地址）");
+  }
+  if (draft.logout_url.trim()) {
+    // 与后端 `HttpActionRequest::validate` 的等待钳制同口径（0~30 秒）
+    if (!(draft.logout_wait_secs >= 0) || draft.logout_wait_secs > 30) {
+      gaps.push("退出登录的等待秒数（0~30）");
+    }
   }
   return gaps;
 }

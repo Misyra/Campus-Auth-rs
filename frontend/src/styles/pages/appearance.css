@@ -21,7 +21,7 @@
 }
 
 .appearance-card-header h3 {
-  font-size: var(--text-base);
+  font-size: var(--text-lg);
   font-weight: 600;
   margin: 0;
   color: var(--text-primary);

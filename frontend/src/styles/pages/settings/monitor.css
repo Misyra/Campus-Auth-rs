@@ -1,10 +1,4 @@
 /* monitor.css — 监控检测设置子页（检测列布局 / 紧凑信息框） */
-.settings-detect-columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-xl);
-}
-
 .settings-detect-col {
   display: flex;
   flex-direction: column;

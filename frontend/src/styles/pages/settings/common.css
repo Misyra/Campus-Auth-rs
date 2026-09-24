@@ -76,13 +76,9 @@
   gap: var(--space-md);
 }
 
-/* 单列（任务页等卡片少或需纵览的场景） */
-.settings-panel-grid--task {
-  grid-template-columns: 1fr;
-}
-
-/* 双列（宽屏下减少纵向滚动；--wide 卡独占整行） */
-@media (min-width: 1080px) {
+/* 双列（宽屏下减少纵向滚动；--wide 卡独占整行）。断点与 `.environment-page` 的同款
+   规则对齐到 --bp-wide（1100），此前两处写作 1080，与全局断点尺不同源。 */
+@media (min-width: 1100px) {
   .settings-panel-grid--cols2 {
     grid-template-columns: 1fr 1fr;
     align-items: stretch;
@@ -115,8 +111,12 @@
   flex-shrink: 0;
 }
 
-.settings-card-header h2 {
-  font-size: var(--text-base);
+/* 卡头标题与 `.card-header h2/h3` 同一口径（16px / 600），不再单独压到 14px——
+   此前设置页 14px、任务页 16.38px（`<h3>` 落 UA 默认）、其余页 16px，
+   同一个视觉角色三种渲染，切页时肉眼可见地"标题忽大忽小"。 */
+.settings-card-header h2,
+.settings-card-header h3 {
+  font-size: var(--text-lg);
   font-weight: 600;
   margin: 0;
   color: var(--text-primary);
@@ -141,12 +141,9 @@
   margin-top: -4px;
 }
 
-/* 等宽多行输入复用全局 .textarea--mono（misc.css），旧 .settings-monospace-textarea 退役 */
-.settings-monospace-textarea {
-  font-family: var(--font-mono);
-  font-size: var(--text-base);
-  resize: vertical;
-}
+/* 等宽多行输入统一走全局 `.textarea--mono`（components/misc.css）。
+   旧的 `.settings-monospace-textarea` 已删除——此前本文件写着"退役"而模板仍在用它，
+   是本仓"注释先行、代码没跟"的一处实例（2026-09-24 静态审计发现并收口）。 */
 
 @media (max-width: 768px) {
   .settings-grid-2col,

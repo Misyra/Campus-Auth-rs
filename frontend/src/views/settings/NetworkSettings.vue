@@ -251,7 +251,7 @@ onMounted(() => {
             <label for="settings-app-port">控制台端口</label>
             <FieldHelp text="Web 控制台的监听端口。修改后重启生效，默认 50721。" />
           </div>
-          <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1024" max="65535" />
+          <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1" max="65535" />
           <span class="hint">本机访问地址一般为 http://127.0.0.1:端口</span>
         </div>
         <div class="toggle-group">
@@ -401,7 +401,7 @@ onMounted(() => {
                 <IconApp name="check" width="14" height="14" />
                 {{ localPackageHint }}
               </p>
-              <div v-if="updating && updateProgress" class="hint update-progress">下载更新 {{ updateProgress.percent }}%</div>
+              <div v-if="updating && updateProgress" class="hint">下载更新 {{ updateProgress.percent }}%</div>
             </div>
             <div v-else-if="updateInfo && updateInfo.message" class="update-success">
               <IconApp name="check" width="16" height="16" />

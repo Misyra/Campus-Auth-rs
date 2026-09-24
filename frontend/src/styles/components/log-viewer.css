@@ -13,18 +13,11 @@
   line-height: 1.4;
 }
 
-.log-name {
-  color: var(--text-muted);
-  flex-shrink: 0;
-  min-width: 160px;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-xs);
-  font-family: var(--font-mono);
-}
+/* .log-name 已删除（2026-09-24 静态审计：零引用）——
+   它对应的"日志来源名固定宽列"随日志行改为 grid 布局后不再存在；
+   实际渲染的来源走 .log-source-badge。 */
 
+/* 级别徽标固定宽度：等宽后各级别在行内纵向对齐 */
 .log-level-badge {
   min-width: 52px;
   justify-content: center;
@@ -84,29 +77,9 @@
 }
 
 
-.log-filter-chip {
-  padding: var(--space-xs) 10px;
-  border-radius: var(--radius-lg);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-
-.log-filter-chip:hover {
-  border-color: var(--border-hover);
-  color: var(--text-secondary);
-}
-
-.log-filter-chip.active {
-  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-  color: var(--on-accent);
-  border-color: var(--accent);
-  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.2);
-}
+/* .log-filter-chip 已删除（2026-09-24 静态审计：零引用）——
+   它对应的"日志级别快捷过滤行"已由 .log-toolbar 里的两个 compact CustomSelect
+   取代（见 .log-toolbar .custom-select），chip 行本身不复存在。 */
 
 /* 新消息提示按钮 */
 .new-logs-btn {

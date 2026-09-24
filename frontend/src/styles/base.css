@@ -253,9 +253,10 @@ textarea {
   min-height: 100dvh;
 }
 
-.page-content {
-  animation: pageEnter var(--dur-slow) var(--ease-out);
-}
+/* 页面/面板入场动画的**唯一出口**在 layout.css（覆盖顶层页面、设置页面板、任务页面板
+   三处 router-view 落点）。此处不再单独给 `.page-content` 挂动画：它只被其中一部分页面
+   使用，且 `AppearanceView` / `AiTaskView` 的根节点根本不带该类，于是需要用的人只能
+   手抄一份（`ai_task.css` 曾如此）——那正是转场忽有忽无的根因。 */
 
 @keyframes pageEnter {
   from {
@@ -322,7 +323,12 @@ textarea {
   --bg-glass-heavy: rgba(255, 255, 255, 0.85);
   --bg-card: rgba(255, 255, 255, 0.75);
   --bg-card-elevated: rgba(255, 255, 255, 0.55);
-  --bg-modal: #e4e9f0;
+  /* 弹窗面：**抬到卡片之上**，而不是与 `--bg-secondary` 同值。
+     同值时弹窗比页面卡片更暗（实测卡片 ≈246、弹窗 #e4e9f0 = 228），叠在 0.6 黑遮罩上
+     读成"一块灰板子上面摆着白输入框"——用户实机反馈"弹窗发灰"。深色主题本来就是
+     "弹窗比卡片更亮一档"（rgba(30,41,59,.97) vs rgba(15,23,42,.6)），浅色主题对齐同一口径。
+     弹窗内的输入框改用比弹窗略深一档的底（见 modal.css），否则两者只差几个色阶。 */
+  --bg-modal: #fbfcfe;
   --border: rgba(100, 116, 139, 0.25);
   --border-hover: rgba(100, 116, 139, 0.3);
   /* 默认主题（浅色）文字色：整体压到黑色系。

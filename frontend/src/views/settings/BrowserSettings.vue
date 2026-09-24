@@ -173,8 +173,8 @@ async function stopBrowser() {
         </div>
         <p class="form-help-text">选择用于自动登录的浏览器，推荐 Chromium / Edge / Chrome。</p>
         <div class="browser-selection">
-          <div v-if="browserLoading" class="loading">正在检测浏览器...</div>
-          <div v-else-if="browserError" class="form-help-text browser-error-row">
+          <div v-if="browserLoading" class="hint">正在检测浏览器...</div>
+          <div v-else-if="browserError" class="form-help-text">
             {{ browserError }}
             <button class="btn btn-sm btn-link" type="button" @click="fetchBrowsers()">重试</button>
           </div>
@@ -310,7 +310,7 @@ async function stopBrowser() {
             <FieldHelp text="将 Cookie 等浏览数据持久化到独立目录，重启后仍保持登录态。不同浏览器数据相互隔离，Firefox 不支持。" />
           </div>
         </div>
-        <div v-if="config.config.browser.persistent_context && config.config.browser.browser_channel !== 'firefox'" class="browser-info-tip">
+        <div v-if="config.config.browser.persistent_context && config.config.browser.browser_channel !== 'firefox'" class="note note--info">
           <IconApp name="info" width="16" height="16" />
           <div>数据目录: <code>config/browser-data/{{ config.config.browser.browser_channel }}/</code></div>
         </div>
@@ -343,7 +343,7 @@ async function stopBrowser() {
         </div>
         <div v-show="config.config.browser.stealth_mode" class="form-group">
           <div class="stealth-script-actions"><span class="hint">自定义脚本，留空使用内置脚本</span><button type="button" class="btn btn-sm btn-secondary" @click="loadDefaultStealthScript()">填入内置脚本</button></div>
-          <textarea v-model="config.config.browser.stealth_custom_script" rows="6" placeholder="留空使用内置默认脚本..." class="settings-monospace-textarea"></textarea>
+          <textarea v-model="config.config.browser.stealth_custom_script" rows="6" placeholder="留空使用内置默认脚本..." class="textarea--mono"></textarea>
         </div>
       </div>
     </section>
@@ -375,7 +375,7 @@ async function stopBrowser() {
           </div>
           <div class="form-group">
             <div class="field-label-row"><label for="settings-browser-args">启动参数（Playwright args）</label><FieldHelp text="每行一个参数，附加到浏览器启动命令，# 开头为注释。--proxy-server、--load-extension、--remote-debugging-port 等安全敏感参数会被自动过滤；非 Chromium 引擎下 Chromium 专属参数不生效。" /></div>
-            <textarea id="settings-browser-args" v-model="config.config.browser.browser_args" rows="4" class="settings-monospace-textarea" placeholder="每行一个，例如：--disable-notifications"></textarea>
+            <textarea id="settings-browser-args" v-model="config.config.browser.browser_args" rows="4" class="textarea--mono" placeholder="每行一个，例如：--disable-notifications"></textarea>
             <div class="form-row"><button type="button" class="btn btn-sm" title="将推荐反检测参数并入上方输入框（去重保留手写内容）" @click="loadRecommendedArgs">加载推荐参数</button></div>
           </div>
         </template>

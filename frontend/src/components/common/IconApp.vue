@@ -15,6 +15,7 @@ import { computed } from "vue";
 /** 图标注册表：name → svg 内部标记（stroke 继承根元素 currentColor） */
 const ICONS = {
   check: '<polyline points="20 6 9 17 4 12"/>',
+  search: '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
   close: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
   refresh:

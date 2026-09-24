@@ -30,11 +30,14 @@ onMounted(() => {
 
 <template>
   <div id="app-root">
+    <!-- 跳到主内容：键盘用户不必逐个 Tab 穿过整条侧栏（样式起见于 base.css 的 .skip-link，
+        此前那条规则一直是死代码——没有任何实例） -->
+    <a class="skip-link" href="#main">跳到主内容</a>
     <template v-if="!state.showWizard">
       <AppSidebar />
       <div class="main-content">
         <AppTopbar />
-        <main class="content-wrapper">
+        <main id="main" tabindex="-1" class="content-wrapper">
           <router-view v-slot="{ Component }">
             <component :is="Component" />
           </router-view>

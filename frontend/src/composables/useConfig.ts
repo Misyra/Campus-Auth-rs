@@ -20,6 +20,7 @@ import { DEFAULT_CONFIG } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { createFetchGuard } from "../utils/guards";
 import { useStatus } from "./useStatus";
+import { CONFIG_RANGES, validateRangeValues } from "../utils/configRanges";
 import { useToast } from "./useToast";
 
 const config = reactive<Config>(structuredClone(DEFAULT_CONFIG));
@@ -125,13 +126,31 @@ function validateConfig(): { errors: string[]; warnings: string[] } {
   if (config.updater.use_proxy && proxyUrl && !/^https?:\/\//.test(proxyUrl)) {
     warnings.push("代理地址必须以 http:// 或 https:// 开头");
   }
-  const port = config.app_settings.port;
-  // 端口非法是硬错误：服务重启后将无法按该端口监听，保存前必须拦下。
-  // 不能用真值判断——port=0 恰恰是需要拦截的值，v-model.number 的空串/NaN 也要拦
-  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
-    errors.push("端口范围必须在 1-65535 之间");
-  }
+  // 数值字段的区间校验统一走 utils/configRanges 的单一出处（含端口）。
+  // 界面上的 min/max 拦不住手工输入与程序化赋值，只有这里才是真正的闸门。
+  const rangeResult = validateRangeValues(rangeValuesFromConfig());
+  errors.push(...rangeResult.errors);
+  warnings.push(...rangeResult.warnings);
   return { errors, warnings };
+}
+
+/**
+ * 从表单模型取出 `CONFIG_RANGES` 覆盖到的数值字段。
+ *
+ * 按表里的键动态取值（而不是手写一份映射），这样往表里加一个字段不需要再改这里；
+ * 表单里不存在的键不会出现在结果里，`validateRangeValues` 会跳过。
+ */
+function rangeValuesFromConfig(): Record<string, unknown> {
+  const bag = config as unknown as Record<string, Record<string, unknown>>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(CONFIG_RANGES)) {
+    const dot = key.indexOf(".");
+    const group = key.slice(0, dot);
+    const field = key.slice(dot + 1);
+    const section = bag[group];
+    if (section && typeof section === "object" && field in section) out[key] = section[field];
+  }
+  return out;
 }
 
 const { toastOnly } = useToast();
@@ -180,14 +199,24 @@ async function saveConfig(force = false): Promise<void> {
     updater: config.updater,
   };
 
+  // ⚠ 快照必须在 `await` **之前**取。
+  // 这里等的是本次 PATCH 的载荷（payload 在上面已经构造好），所以"已提交的基准"
+  // 就是此刻的 config；PATCH 在途期间用户继续编辑产生的改动**不属于**这次提交。
+  // 原实现在 await 之后才用"当前 config"当快照，于是途中的编辑被当成已保存基准、
+  // dirty 被置 false —— 实际从未提交，属静默丢改动。
+  const submittedSnapshot = JSON.stringify(config);
+
   try {
     await configApi.patch(payload, { signal: controller.signal });
     suppressDirty = true;
     try {
       await nextTick();
-      // 保存成功后以当前表单为新快照：用户把值改回原样时 dirty 自动消失
-      savedSnapshot = JSON.stringify(config);
-      dirty.value = false;
+      // 以**已提交值**为新快照：用户把值改回原样时 dirty 自动消失
+      savedSnapshot = submittedSnapshot;
+      // 只有"当前值与已提交值一致"才清 dirty。在途编辑必须保留未保存标记，
+      // 否则用户看不到脏提示、也不会再点一次保存（suppressDirty 窗口内被抑制的
+      // watcher 不会补跑，故此处必须自己算一次）。
+      dirty.value = JSON.stringify(config) !== submittedSnapshot;
     } finally {
       suppressDirty = false;
     }

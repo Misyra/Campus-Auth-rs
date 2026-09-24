@@ -65,56 +65,575 @@
   }
 }
 
-.tasks-grid {
-  display: grid;
-  /* 左（任务列表）宽右（编辑器/帮助）窄：列表行含名称+按钮组，是空间大头；
-     min-width:0 防 grid 子项被长代码行撑破视口（帮助栏溢出缺陷） */
-  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
+/* ==================== 共享版式：列表页 + 二级编辑页（tsk-*） ====================
+   三个列表型面板（浏览器任务 / 直连任务 / 脚本）共用同一骨架：**列表态整页表格 +
+   编辑态独占全宽的二级页**（方案 G），两态由 `?task=<id>` 表达。
+   此前每个面板各自 scoped 复制一份（约 350 行 × 2 份，脚本面板又是第三套），
+   同一处版式要改三遍、漏一遍就漂移；收敛到本文件后只有一个出处。
+   类名统一 `tsk-` 前缀：本文件是全局样式，`list-title` / `editor-head` 这类裸类名
+   一旦与其它页面的同名规则相遇，就会由导入顺序决定谁生效（静默覆盖）。 */
+
+/* ---- 列表态 ---- */
+.tsk-list-page {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-md);
-  /* 两列各按内容高度排布。stretch（默认）会把「任务列表」卡片拉到与右侧「JSON 配置
-     说明」等高：实测列表只有 1 行时左卡高 904px 而内容仅 283px，空出 621px 的带边框
-     空白框，视觉上像「列表坏了」。右列长是常态（帮助/编辑器），故让左列收到内容高。 */
-  align-items: start;
 }
 
-.tasks-grid > .card {
+.tsk-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* 标题吃掉左侧余量把工具组推到右边；**不下边距**——它是 flex 行里的一项，
+   带 margin-bottom 会让标题相对同行按钮整体上移（原实现各面板都偏 8px）。 */
+.tsk-title {
+  margin: 0 auto 0 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 搜索框弹性：固定 240px 在窄窗口里会和后面的按钮组抢宽（换行后仍占满一行） */
+.tsk-search {
+  flex: 1 1 180px;
+  min-width: 140px;
+  max-width: 260px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass-light);
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  transition: border-color var(--dur-base) var(--ease-out);
+}
+
+.tsk-search:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12);
+}
+
+/* 表格卡**不裁切**：行尾 ⋯ 菜单是绝对定位元素，`overflow: hidden` 会把最后几行的
+   菜单切掉（越靠下切得越多，最末一行只能看到菜单顶边）。圆角改由表头 / 表尾单元格
+   自己承担（见下方 radius 规则），视觉结果与裁切一致而菜单不再被吃掉。 */
+.tsk-table-card {
+  overflow: visible;
+}
+
+.tsk-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-md);
+  /* fixed + colgroup：列宽只由 col 决定，数据 1 条还是 50 条都稳定
+     （auto 布局下名称列会被内容撑到六成行宽，表格随数据跳形） */
+  table-layout: fixed;
+}
+
+/* 列宽口径三面板统一：同一列在任何面板里都落在同一个 x 位置，切子页时表格不跳形。
+   比例列用百分比、固定列用 px；`tsk-col-flex` 是"吃剩余空间"的那一列（直连任务的
+   请求列）。浏览器任务与脚本列表已把描述并进名称格，由各自的 scoped 规则把
+   **名称列**改成 auto 来吃剩余宽度。 */
+.tsk-table col.tsk-col-drag { width: 44px; }
+.tsk-table col.tsk-col-name { width: 20%; }
+.tsk-table col.tsk-col-id { width: 14%; }
+.tsk-table col.tsk-col-flex { width: auto; }
+.tsk-table col.tsk-col-bind { width: 13%; }
+.tsk-table col.tsk-col-binary { width: 11%; }
+.tsk-table col.tsk-col-mtime { width: 10%; }
+.tsk-table col.tsk-col-actions { width: 132px; }
+
+/* 弹性列的单元格/表头标记（与 `.tsk-col-flex` 成对，命名随其余 `tsk-cell-*`）。
+   它此前是个**幽灵类**：模板里挂了两处（`<th>` 与 `<td>`），全仓却没有 `.tsk-cell-flex`
+   规则——于是"请求"这一格拿不到任何单元格级约束。auto 列在有长 URL 的内容下会被
+   自动最小尺寸顶开，故这里补上 min-width: 0（与 `.tsk-cell-ellipsis` 同源的守卫）。 */
+.tsk-table .tsk-cell-flex {
   min-width: 0;
 }
 
-/* 归属提示条（`.tasks-notice`）已退役：浏览器任务的「需在方案里选中才生效」与直连任务
-   同口径收进标题旁的 `?` 气泡——那是"首次配置读一次"的解释，不该常驻一整条横幅把内容
-   往下压。相关规则一并删除，避免留下没人引用的死样式。 */
-
-/* 空列表时帮助内容顺排到下方，避免左右两栏形成一侧空、一侧过长。 */
-.tasks-grid.tasks-grid--empty {
-  grid-template-columns: minmax(0, 1fr);
+/* 圆角补偿：卡片不再裁切，由首尾单元格把圆角带出来。
+   表头不再铺底色（见下），故只有"会被染色的那一行"需要圆角——即悬停时的最后一行；
+   有页脚时底角归页脚，最后一行不再承担。
+   半径取 `--radius-xl`，与卡片自身一致（差一档会在圆角处露出约 2px 方角）。 */
+.tsk-table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: var(--radius-xl);
 }
 
-.task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.tsk-table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: var(--radius-xl);
 }
 
-.task-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: var(--space-md);
-  background: var(--bg-glass);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  transition: border-color var(--dur-slow) var(--ease-out), background var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
+/* 有页脚时圆角归页脚，最后一行不再承担底角 */
+.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:first-child,
+.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:last-child {
+  border-radius: 0;
+}
+
+.tsk-table th {
+  text-align: left;
+  padding: 12px var(--space-md);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  /* 表头**不铺 `--bg-glass`**：卡片本身已是半透明玻璃面，再叠一层白就把
+     「表头 / 数据行 / 页脚」切成三种底色——用户实机看到的就是"这一行颜色不一样"
+     （同一张卡里三种灰，且只有一条任务时那行像被选中）。结构改由 12px 弱化字 +
+     底边框表达，整张表就是卡片自身的表面色。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tsk-table td {
+  /* 行高加大：列表是页面主体，行距太密显得单薄 */
+  padding: 18px var(--space-md);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  /* 悬停过渡跟随底色（底色画在单元格上，见下） */
+  transition: background var(--dur-base) var(--ease-out);
+}
+
+.tsk-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.tsk-table tbody tr {
+  cursor: pointer;
+}
+
+/* 悬停底色画在**单元格**上而不是行盒上：底角半径写在 td 上，只有单元格自己的背景
+   会被它裁圆——画在 tr 上时浏览器按整行矩形绘制，卡片底部两个圆角外会露出方角。 */
+.tsk-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+/* 空态那一行不是数据行（没有 @click），别给它手型光标与悬停变色：
+   整块 200px 高的区域变蓝又说"能点"，点下去毫无反应 */
+.tsk-table tbody tr:has(.empty-state) {
   cursor: default;
 }
 
-/* .task-item:hover 由 hover-lift 类处理 */
-
-.task-item.active {
-  border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.05);
+.tsk-table tbody tr:has(.empty-state):hover td {
+  background: transparent;
 }
+
+/* 单元格省略：fixed 布局下省略号需要单元格自己 min-width:0 */
+.tsk-cell-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 名称：本列表的主键，加粗 + 省略 */
+.tsk-name {
+  display: block;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 名称下的描述副行：描述并进名称格（而不是单占一列）之后，一行读作两行——
+   行高因此从"一块只有一行字的空框"变成有信息密度的两行，与设计稿一致。
+   刻意不复用 `.tsk-sub`：那个是独立单元格的正文色，这里是名称的附属小字。
+   `max-width` 是给超宽屏用的：名称列吃剩余宽度，2280px 下这一列可达 1400px，
+   不封顶的话中文描述会拉成一行百余字（同 `HttpTaskFields` 的 620px 口径）。 */
+.tsk-name-sub {
+  display: block;
+  min-width: 0;
+  max-width: 560px;
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 次要说明列（描述 / 请求地址） */
+.tsk-sub {
+  display: block;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ID 与地址用等宽体：两者都是要照着抄进配置的东西 */
+.tsk-mono {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-family: var(--font-mono);
+}
+
+/* 弱化文本（「—」/「未绑定」）。
+   刻意不叫 `.muted`：那个类名由 about.css 全局定义（还带一条 `margin-top`），
+   任务页借用它等于把"关于页的排版规则"焊进列表单元格——改 about.css 会波及这里。 */
+.tsk-muted {
+  color: var(--text-muted);
+}
+
+/* 行内小徽标（请求方法 / 解释器）：与绑定 pill 区分开，不用 tooltip 依赖。
+   视觉已收敛到全局 `.chip .chip--dense`（components/chip.css）——
+   表格单元格里用的正是它，此处不再保留第二份定义。 */
+.tsk-chip-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 最近修改：紧凑本地时间，弱化色，等宽数字防列内跳动 */
+.tsk-mtime {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 操作列：**居中**（表头与按钮同轴）。
+   原先靠右对齐，与本表首列的拖拽柄（居中）不成对——一侧贴边、一侧居中，
+   整张表的重心偏右；且操作列是固定 132px 的窄列，右对齐时按钮簇左侧空出一块、
+   看着像没对齐。四张列表（浏览器 / 直连 / 脚本 / 定时）共用本规则，切子页不跳形。 */
+.tsk-actions {
+  text-align: center;
+  white-space: nowrap;
+  position: relative;
+}
+
+/* 表头要单独一条：`.tsk-table th { text-align: left }`（0,1,1）压得住 `.tsk-actions`
+   （0,1,0），只写上一条时表头会留在左对齐、与下面的按钮簇错位
+   （与 `.sch-cell-enabled` 是同一个坑，见 scheduled_tasks.css）。 */
+.tsk-table th.tsk-actions {
+  text-align: center;
+}
+
+/* 拖拽柄列：居中且不触发「点行进编辑」 */
+.tsk-drag-cell {
+  text-align: center;
+}
+
+.tsk-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 9px var(--space-md);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  /* 与表头同口径：不铺底色，整张表保持卡片自身的表面色（只有一条任务时，
+     页脚与数据行同色才不像"某行被选中"）。分隔靠在上的那条边框。 */
+  border-bottom-left-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-lg);
+}
+
+.tsk-spacer {
+  flex: 1;
+}
+
+/* 行尾 ⋯ 菜单：绝对定位于操作列，同一时刻只开一个（面板持状态） */
+.tsk-menu {
+  position: absolute;
+  top: 100%;
+  right: 8px;
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  min-width: 132px;
+  padding: var(--space-xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-modal);
+  box-shadow: var(--shadow-float);
+}
+
+.tsk-menu button {
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-base) var(--ease-out);
+}
+
+.tsk-menu button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.tsk-menu button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.tsk-menu .tsk-menu-danger {
+  color: var(--error);
+}
+
+/* ---- 编辑态（二级页） ---- */
+.tsk-editor-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.tsk-crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  font-size: var(--text-md);
+  color: var(--text-muted);
+}
+
+.tsk-crumb-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  cursor: pointer;
+  transition: all var(--dur-base) var(--ease-out);
+}
+
+.tsk-crumb-back:hover {
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+  background: var(--bg-hover);
+}
+
+/* 返回箭头复用 chevron-down 图标（图标集无 chevron-left），旋转 90° 指向左 */
+.tsk-crumb-icon {
+  transform: rotate(90deg);
+}
+
+.tsk-crumb-sep {
+  color: var(--border-hover);
+}
+
+.tsk-crumb-here {
+  color: var(--text-primary);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tsk-editor-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+
+.tsk-editor-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 自动保存状态字：圆点 + 文案，四态共用一个类（saving / saved / error） */
+.tsk-autosave {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  transition: color var(--dur-base) var(--ease-out);
+}
+
+.tsk-autosave::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(var(--slate-rgb), 0.5);
+  transition: background var(--dur-base) var(--ease-out);
+}
+
+.tsk-autosave.saving {
+  color: var(--warning-text);
+}
+
+.tsk-autosave.saving::before {
+  background: var(--warning);
+  animation: tsk-autosave-pulse 1s ease-in-out infinite;
+}
+
+.tsk-autosave.saved {
+  color: var(--success);
+}
+
+.tsk-autosave.saved::before {
+  background: var(--success);
+}
+
+.tsk-autosave.error {
+  color: var(--error);
+}
+
+.tsk-autosave.error::before {
+  background: var(--error);
+}
+
+/* 缺口态：改动压根没发出去（见 utils/autosave 的 autosaveLabel），
+   用警示色而非静默的灰——它要让人停下来把缺口补上 */
+.tsk-autosave.blocked {
+  color: var(--warning-text);
+}
+
+.tsk-autosave.blocked::before {
+  background: var(--warning);
+}
+
+@keyframes tsk-autosave-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* 缺口提示条：自动保存被缺口拦住时必须说出来（否则状态字写着「改动自动保存」，
+   用户改了半天以为存了）。文案列出具体缺什么，与持久化闸口同源。 */
+.tsk-gaps {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: 10px 12px;
+  margin-bottom: var(--space-md);
+  border: 1px solid rgba(var(--warning-rgb), 0.25);
+  border-radius: var(--radius-md);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: var(--text-md);
+  line-height: 1.6;
+}
+
+.tsk-gaps svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.tsk-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--space-md);
+  align-items: start;
+}
+
+.tsk-main,
+.tsk-side {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.tsk-side-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.tsk-side-btn {
+  justify-content: center;
+}
+
+.tsk-side-hint {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.tsk-side-hint code {
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.tsk-side-hint a {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+/* 侧栏键值块（绑定方案 / 执行程序等） */
+.tsk-kv {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.tsk-kv dt {
+  color: var(--text-muted);
+}
+
+.tsk-kv dd {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+/* ---- 窄屏降级 ----
+   「最近修改」先让位（信息量最低、可从字段速查与文件系统另取）；≤768px 再让
+   绑定与 ID。弹性的描述 / 请求地址列始终保留——它才是辨识一行的那一列。
+   `col` 与对应单元格必须成对隐藏：fixed 布局下只藏单元格会留下一条空列。 */
+@media (max-width: 1100px) {
+  .tsk-table col.tsk-col-mtime,
+  .tsk-table .tsk-cell-mtime {
+    display: none;
+  }
+
+  .tsk-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .tsk-table col.tsk-col-bind,
+  .tsk-table .tsk-cell-bind,
+  .tsk-table col.tsk-col-binary,
+  .tsk-table .tsk-cell-binary,
+  .tsk-table col.tsk-col-id,
+  .tsk-table .tsk-cell-id {
+    display: none;
+  }
+}
+
+
+/* 旧主从两栏（`.tlist-*`，方案 A）随三面板迁移方案 G 一并退役；`.tasks-grid` /
+   `.help-tip` / `.help-content` / `.task-editor*` 已无引用后删除。
+   下方 `.task-list` / `.task-item` / `.task-info` / `.task-desc` / `.task-actions`
+   （原「定时任务」页的卡片列表）也已随该页改用本文件的 `tsk-*` 表格版式删除；
+   只留 `.task-drag-handle`——三面板的拖拽柄仍在用。 */
 
 /* 拖拽样式 */
 .task-drag-handle {
@@ -133,143 +652,14 @@
   background: var(--bg-hover);
 }
 
-.task-item.dragging {
-  opacity: 0.4;
-  transform: scale(0.98);
+/* 拖拽中的那一行：整行弱化，作为"正在被移动"的反馈
+   （原 `.task-item.dragging` 的等价物；列表从卡片改成表格后一度丢失了这个反馈）。
+   刻意不做"落点指示线"：本列表是**实时交换**模型（拖过中线即换位），行本身已经在动，
+   再画一条插入线反而与看到的位置打架。 */
+.tsk-table tbody tr.dragging {
+  opacity: 0.5;
 }
 
-
-.task-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.task-info h3 {
-  font-size: var(--text-base);
-  margin-bottom: var(--space-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-info p {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-}
-
-.task-desc {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  margin: var(--space-xs) 0 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-actions {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.task-editor textarea {
-  width: 100%;
-  min-height: var(--editor-min-height, 300px);
-  padding: 12px;
-  background: var(--bg-glass);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--text-md);
-  resize: vertical;
-  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
-}
-
-.task-editor textarea:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.task-editor-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  margin-top: var(--space-md);
-}
-
-.task-editor-actions .btn {
-  flex: 1;
-  min-width: 120px;
-}
-
-/* 仓库导入引导条：帮助栏首屏提示（不想手写 JSON 的用户直达入口） */
-.help-tip {
-  display: flex;
-  /* 低分辨率窄栏放不下"文字+多按钮"时整体换行，防止按钮把文字挤成一字一行 */
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  margin-bottom: var(--space-md);
-  border: 1px solid rgba(var(--accent-rgb), 0.25);
-  border-radius: var(--radius-sm);
-  background: rgba(var(--accent-rgb), 0.07);
-  font-size: 0.86rem;
-}
-
-.help-tip span {
-  /* basis 保底触发换行：窄栏时文字独占一行、按钮组排其后 */
-  flex: 1 1 160px;
-  min-width: 0;
-}
-
-.help-tip .btn {
-  flex-shrink: 0;
-}
-
-.help-content h4 {
-  font-size: var(--text-base);
-  margin: var(--space-md) 0 var(--space-sm);
-}
-
-.help-content h4:first-child {
-  margin-top: 0;
-}
-
-.help-content ul {
-  list-style: none;
-  font-size: var(--text-md);
-  color: var(--text-secondary);
-}
-
-.help-content li {
-  padding: var(--space-xs) 0;
-}
-
-.help-content code {
-  background: var(--bg-primary);
-  padding: 2px 6px;
-  border-radius: var(--radius-xs);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  /* 长变量名/路径在窄栏内换行而非撑破容器 */
-  word-break: break-all;
-}
-
-.help-content pre {
-  background: var(--bg-glass);
-  padding: 12px;
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  overflow-x: auto;
-  margin-top: var(--space-sm);
-  border: 1px solid var(--border);
-}
 
 /* ==================== 调试模式（面板 + 步骤 + 截图） ==================== */
 
@@ -628,12 +1018,4 @@
 
 /* 紧凑图标按钮尺寸已移入 components/btn.css（该组合还被 ProfilesView 的检测结果面板
    使用，属通用按钮修饰而非任务页专属）。 */
-
-/* 注意：components/misc.css 也定义了 .icon-xs（11px）。本文件在 index.css 中
-   后于 misc.css 导入，故此处 14px 才是当前生效值（ProfilesView 的匹配信息行）。
-   两处同名不同值属历史遗留，收敛需先确认期望尺寸，暂不合并。 */
-.icon-xs {
-  width: 14px;
-  height: 14px;
-}
 

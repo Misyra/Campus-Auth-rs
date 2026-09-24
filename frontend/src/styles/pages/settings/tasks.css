@@ -1,60 +1,19 @@
-/* tasks.css — 任务设置子页（任务概览 / 录制器 / OCR 依赖与识别） */
-.task-mini-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: var(--space-md);
-}
+/* tasks.css — 任务设置子页（任务概览 / 任务录制器 / OCR 依赖与识别）
+   2026-09-24 清理：零引用的一批已删除——`.task-mini-grid`、`.mini-stat*`、
+   `.task-panel-actions`、`.task-quick-actions`、`.task-overview-row`、
+   `.task-overview-info`、`.task-overview-desc`、
+   `.task-overview-left .task-overview-desc`、`.ocr-recognize`
+   （连同 `responsive.css` 里配套的 `.task-mini-grid` 窄屏规则）。
+   注意「任务概览」卡片**本身仍在用**（TaskEnvironmentSettings.vue 的
+   `section.card.settings-panel.task-overview-card` + `.task-overview-compact` /
+   `-left` / `-label` / `-name` / `-right` / `-actions`），故其规则保留在下方。 */
 
-.mini-stat {
-  padding: var(--space-md);
-  border-radius: var(--radius-xl);
-  border: 1px solid var(--border);
-  background: var(--bg-glass);
-  transition: border-color var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
-}
-
-.mini-stat:hover {
-  border-color: var(--border-hover);
-  transform: translateY(-1px);
-}
-
-.mini-stat-label {
-  display: block;
-  margin-bottom: var(--space-sm);
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-}
-
-.mini-stat-value {
-  display: block;
-  font-size: var(--text-base);
-  color: var(--text-primary);
-  font-weight: 600;
-  word-break: break-word;
-}
-
-.task-panel-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 18px;
-}
-
-.task-overview-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-md);
-  margin-bottom: var(--space-md);
-  padding-bottom: var(--space-md);
-  border-bottom: 1px solid var(--border);
-}
-
+/* 任务概览卡片：卡体比通用卡片收紧一档（内容是两行短信息，不是表单） */
 .task-overview-card .card-body {
   padding: 12px var(--space-md);
 }
 
+/* 当前任务行：左信息 + 右「管理任务」，下带分隔线 */
 .task-overview-compact {
   display: flex;
   align-items: center;
@@ -63,13 +22,6 @@
   margin-bottom: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
-}
-
-.task-overview-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  flex-wrap: wrap;
 }
 
 .task-overview-left {
@@ -86,7 +38,6 @@
   flex-shrink: 0;
 }
 
-/* 紧凑版：设置页面内的任务概览（字号更小） */
 .task-overview-left .task-overview-name {
   font-size: var(--text-base);
   font-weight: 600;
@@ -96,15 +47,6 @@
   white-space: nowrap;
 }
 
-.task-overview-left .task-overview-desc {
-  font-size: var(--text-sm);
-  color: var(--text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-top: 0;
-}
-
 .task-overview-right {
   display: flex;
   align-items: center;
@@ -112,25 +54,11 @@
   flex-shrink: 0;
 }
 
-.task-overview-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.task-overview-name {
-  font-size: var(--text-base);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.task-overview-desc {
-  display: block;
-  font-size: var(--text-md);
-  color: var(--text-secondary);
-  margin-top: var(--space-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.task-overview-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
 }
 
 /* 任务录制器卡片 */
@@ -179,18 +107,6 @@
 }
 
 /* 快捷操作 */
-.task-quick-actions {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.task-quick-actions .btn {
-  font-size: var(--text-md);
-  padding: 10px 14px;
-  justify-content: center;
-}
-
 /* ---- OCR 依赖管理 ---- */
 .ocr-status-row {
   display: flex;
@@ -255,13 +171,6 @@
 .ocr-hint {
   font-size: var(--text-md);
   color: var(--text-muted);
-}
-
-.ocr-recognize {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: var(--space-xs);
 }
 
 .ocr-pick-row {

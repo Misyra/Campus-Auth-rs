@@ -15,16 +15,38 @@ interface DragState {
 }
 
 interface DragSortOptions {
-  /** 浏览器任务 id 全量序列（持久化到 order.all） */
+  /** 浏览器任务 id 全量序列（持久化到 `order.all`） */
   tasks: Ref<{ id: string }[]>;
-  /** 脚本 id 全量序列（持久化到 order.scripts） */
+  /** 脚本 id 全量序列（持久化到 `order.scripts`） */
   scripts: Ref<{ id: string }[]>;
+  /** 直连任务 id 全量序列（持久化到 `order.http`） */
+  http: Ref<{ id: string }[]>;
+}
+
+/**
+ * 顺序持久化载荷：三组**全量**互传。
+ *
+ * 抽成纯函数是为了能被 vitest 直接盯住——后端 `order_tasks` 是整体替换
+ * `.order.json`（先 clear 再 extend），漏传一组等于把那一组的顺序清空，
+ * 而"漏传"的表现是**静默**的：排序看起来生效了，刷新另一类任务后才发现顺序乱了。
+ * 三个面板都必须传齐三组，故 `DragSortOptions` 的字段全为必填（不设默认值）。
+ */
+export function orderPayload(
+  tasks: readonly { id: string }[],
+  scripts: readonly { id: string }[],
+  http: readonly { id: string }[],
+): { all: string[]; scripts: string[]; http: string[] } {
+  return {
+    all: tasks.map((t) => t.id),
+    scripts: scripts.map((s) => s.id),
+    http: http.map((h) => h.id),
+  };
 }
 
 /**
  * @param list 拖拽重排的目标列表（本视图持有的列表）
- * @param order 顺序持久化用的全量清单。B1：后端 order 接口会整体替换两组顺序，
- *   漏传的一组会被清空，任务与脚本两个视图都必须互传全量。
+ * @param order 顺序持久化用的全量清单。B1：后端 order 接口会整体替换三组顺序，
+ *   漏传的一组会被清空，因此三个视图都必须互传全量。
  */
 export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
   let dragState: DragState | null = null;
@@ -106,9 +128,6 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
     dragState = null;
     allowDrag = false;
     swapCooldown = false;
-    document
-      .querySelectorAll(".drop-before, .drop-after")
-      .forEach((el) => el.classList.remove("drop-before", "drop-after"));
     // F10：拖出列表松手不触发 drop——拖拽期间已生效的交换在此补持久化，
     // 否则内存顺序与后端不一致，刷新后静默回退
     if (orderDirty) {
@@ -119,10 +138,9 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
 
   async function persistOrder(): Promise<void> {
     try {
-      await tasksApi.order({
-        all: order.tasks.value.map((t) => t.id),
-        scripts: order.scripts.value.map((s) => s.id),
-      });
+      await tasksApi.order(
+        orderPayload(order.tasks.value, order.scripts.value, order.http.value),
+      );
     } catch (error) {
       frontendLogger.warn("tasks", "保存任务排序失败", error);
     }

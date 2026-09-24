@@ -367,7 +367,7 @@ async function recognizeOcr() {
           <button class="btn btn-primary ocr-recognize-btn" type="button" :disabled="busy.ocrRec || !ocrImageFile" @click="recognizeOcr">
             {{ busy.ocrRec ? '识别中...' : '开始识别' }}
           </button>
-          <div v-if="ocrResult" class="ocr-result"><span class="ocr-result-label">识别结果：</span><code class="ocr-result-text">{{ ocrResult }}</code></div>
+          <div v-if="ocrResult" class="ocr-result"><span>识别结果：</span><code class="ocr-result-text">{{ ocrResult }}</code></div>
           <div v-if="ocrError" class="ocr-error">识别失败：{{ ocrError }}</div>
         </template>
       </div>

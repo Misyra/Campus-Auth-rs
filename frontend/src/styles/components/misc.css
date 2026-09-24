@@ -60,6 +60,59 @@
 
 /* Fullscreen Image Overlay 已退役：统一走 Modal + preview 修饰 */
 
+/* ═══ 提示条（note）═══
+ *
+ * 选用表：行内提示统一走 .note（--warn / --info / --danger 三态；默认中性 slate 底）。
+ * 需要图标时把 <IconApp class="icon-sm"> 放成首个子元素，`.note svg` 已处理对齐。
+ * 需要去掉下边距时加 --flush。
+ *
+ * 为什么不各写各的：`.wz-warn`（HttpLoginWizard）与 `.http-risk-note`（HttpTaskFields）
+ * 此前**规则体逐字相同**，`.http-task-alert`（LoginChannelField）是同族的第三份
+ * （只差 padding 8px 10px 与 align-items:center），`.browser-info-tip` 是同款的
+ * accent 色调变体（只差色调与字号）。四份平行实现意味着改一处观感、其余三处不动。
+ *
+ * 与"横幅"的分工：`.network-status-banner`（dashboard.css）与 `.detect-banner`
+ * （profiles.css）带毛玻璃、图标块与更大的圆角，属另一档（页面级状态横幅），
+ * 不要与本类混用；`settings/common.css` 的 `.settings-load-failed` 是配置加载失败
+ * 的专用阻断提示，同样保留独立形态。
+ */
+.note {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding: 10px 12px;
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(var(--slate-rgb), 0.06);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* 警示：密码出现在 URL、缺绑定等"能继续但会出问题"的提示 */
+.note--warn {
+  border-color: rgba(var(--warning-rgb), 0.25);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+/* 信息：跟随强调色的中性说明（原 .browser-info-tip） */
+.note--info {
+  border-color: rgba(var(--accent-rgb), 0.3);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent);
+}
+
+/* 变体按需增长：`--danger`（阻断）与 `--flush`（去下边距）当前没有使用者，
+   故不预先声明——本仓的教训正是"留着一堆没人用的平行样式"，等真有第二处需求再加。 */
+
 /* ========== Loading State ========== */
 .loading-state {
   display: flex;
@@ -84,34 +137,27 @@
 }
 
 /* ========== Text Utilities ========== */
-.text-secondary {
-  color: var(--text-secondary);
-}
-
-.text-success {
-  color: var(--success);
-}
-
+/* `.text-secondary` / `.text-success` 已删除（2026-09-24 静态审计：零引用）。
+   需要次要色请直接用 `color: var(--text-secondary)`；`.text-danger` 仍有实例，保留。 */
 .text-danger {
   color: var(--error);
 }
 
 /* 工具类: SVG sizing */
-.icon-xs { width: 11px; height: 11px; }
 .icon-sm { width: 14px; height: 14px; }
 
 /* 工具类: flex/gap（数值对齐 --space-* 档位） */
 .flex-row { display: flex; align-items: center; }
 .gap-sm { gap: var(--space-sm); }
 
-/* 等宽文本区域：脚本/参数/URL 检测等多行 mono 输入统一走本类（字族与字号对齐 form 基准） */
-.textarea--mono,
-.monospace-textarea {
-    font-family: var(--font-mono);
-    font-size: var(--text-base);
+/* 等宽文本区域：脚本/参数/URL 检测等多行 mono 输入统一走本类（字族与字号对齐 form 基准）。
+   旧别名 `.monospace-textarea` 与「退役但没退」的 `.settings-monospace-textarea`
+   已随 2026-09-24 静态审计一并清掉：前者零引用，后者被 BrowserSettings 的两个
+   textarea 实际使用着——本轮已把那两处改用本类，迁移到此真正完成。 */
+.textarea--mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
 }
-
-/* 旧 .monospace-textarea 为 .textarea--mono 别名，新代码请用 .textarea--mono */
 
 /* 旋转动画（@keyframes spin 统一定义在 base.css） */
 .spin {
@@ -166,23 +212,10 @@
   color: var(--text-secondary);
 }
 
-/* ========== WebSocket 被顶替提示横幅（多页面单连接限制） ========== */.ws-kicked-banner {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: var(--z-toast);
-  padding: 10px var(--space-md);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  font-size: var(--text-md);
-  background: var(--warning-bg);
-  color: var(--warning-text);
-  border-bottom: 1px solid var(--border);
-}
+/* `.ws-kicked-banner` 已删除（2026-09-24 静态审计：零引用）——
+   它服务的是"多标签页单连接、后开的把先进的顶掉"那套限制；该限制已取消
+   （见 useWebSocket.ts 文件头："所有页面同时订阅同一广播通道，互不顶替"），
+   横幅随之没有宿主。当前的重连提示走 .ws-reconnect-bar（下方）。 */
 
 /* ═══ 内联加载旋转 ═══ */
 .spinner {
@@ -193,17 +226,6 @@
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
-}
-
-/* ═══ 通用 hover 上浮效果 ═══ */
-.hover-lift {
-  transition: border-color var(--dur-slow) var(--ease-out), background var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
-}
-
-.hover-lift:hover {
-  border-color: var(--border-hover);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-hover);
 }
 
 /* ═══ WS 重连指示器 ═══ */

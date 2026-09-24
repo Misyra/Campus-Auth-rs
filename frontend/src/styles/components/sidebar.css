@@ -96,22 +96,22 @@
 .nav-children {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin: 2px 0 2px 21px;
-  padding-left: 8px;
+  gap: 4px;
+  margin: 4px 0 4px 20px;
+  padding-left: 10px;
   border-left: 1px solid var(--border);
 }
 
-/* 子项：无图标、更小字号与内边距——刻意比一级项轻一档，不复制第二份主侧栏 */
+/* 子项：与一级项**同级字号**（14px）。原先小一档的 13px 在侧栏里偏轻，用户实机反馈要"做大一点"——层级改由「无图标 + 左侧细轨 + 弱化色 + 同款圆角」表达，字号与行距不再降档。行高约 40px，与一级项（12px 16px 内边距 → 约 44px）差一档而不塌；矮视口由 `.nav` 的 overflow-y: auto 兜（见 layout.css）。 */
 .nav-child {
   display: block;
   width: 100%;
-  padding: 7px 10px;
+  padding: 10px 12px;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
-  font-size: var(--text-md);
+  font-size: var(--text-base);
   font-weight: 400;
   text-align: left;
   white-space: nowrap;
@@ -129,7 +129,7 @@
 .nav-child.active {
   background: rgba(var(--accent-rgb), 0.08);
   color: var(--accent);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .quit-btn {

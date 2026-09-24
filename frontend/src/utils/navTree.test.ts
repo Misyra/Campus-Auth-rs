@@ -3,7 +3,7 @@
  *
  * 这五个子项是「任务」分组在侧栏与窄屏 pill 行两处的唯一事实源，
  * 路由名写错或 id 重复会让某一项永远激活不了、或两项同时点亮；
- * 而路由名在 AppSidebar、TasksView、editorGuard 三处被引用，属高风险字段。
+ * 而路由名在 AppSidebar、TasksView、router/index.ts 三处被引用，属高风险字段。
  */
 import { describe, expect, it } from "vitest";
 import { activeChildId, TASK_NAV_CHILDREN } from "./navTree";
@@ -19,8 +19,8 @@ describe("TASK_NAV_CHILDREN 数据完整性", () => {
 
   it("路由名均为 tasks- 前缀且标签/说明非空", () => {
     for (const child of TASK_NAV_CHILDREN) {
-      // 前缀是 AppSidebar 的 `startsWith("tasks")` 高亮判定与 router 的
-      // editorGuard `/tasks` 区域判定的前提
+      // 前缀是 AppSidebar 的 `startsWith("tasks")` 高亮判定与 router/index.ts
+      // 的 `/tasks` 子路由前缀的前提
       expect(child.name.startsWith("tasks-")).toBe(true);
       expect(child.label.length).toBeGreaterThan(0);
       // 全称说明靠 title 承载（侧栏放不下全称），空 title 等于信息丢失

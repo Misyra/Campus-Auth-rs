@@ -36,7 +36,7 @@ const routes = [
       { path: "scripts", name: "tasks-scripts", meta: { title: "任务 · 脚本" }, component: () => import("@/views/tasks/ScriptsPanel.vue") },
       // 定时任务原为侧栏独立页，并入任务页：同属「可被触发执行的东西」，
       // 放在一处免去「任务在哪、计划又在哪」的往返
-      { path: "scheduled", name: "tasks-scheduled", meta: { title: "任务 · 定时任务" }, component: () => import("@/views/ScheduledTasksView.vue") },
+      { path: "scheduled", name: "tasks-scheduled", meta: { title: "任务 · 定时任务" }, component: () => import("@/views/tasks/ScheduledTasksPanel.vue") },
       { path: "ai", name: "tasks-ai", meta: { title: "任务 · AI 生成浏览器任务" }, component: () => import("@/views/AiTaskView.vue") },
     ],
   },
@@ -76,13 +76,6 @@ const routes = [
 export const router = createRouter({
   history: createWebHistory(),
   routes,
-});
-
-// FE2-9：离开任务/脚本编辑页且存在未保存草稿时，确认是否放弃
-// （动态导入：editorGuard 依赖的 composable 链可能回指 router，避免求值期循环依赖）
-router.beforeEach(async (to, from) => {
-  const { guardEditorLeave } = await import("./editorGuard");
-  return guardEditorLeave(to, from);
 });
 
 // 离开设置页且存在未保存修改时，确认是否放弃

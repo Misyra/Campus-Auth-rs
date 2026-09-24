@@ -93,9 +93,16 @@ describe("isBindingIndexReady", () => {
 });
 
 describe("buildHttpTaskRows", () => {
-  it("方法/地址取任务摘要自带字段，名称与绑定一并带出", () => {
+  it("方法/地址/描述取任务摘要自带字段，名称与绑定一并带出", () => {
     const rows = buildHttpTaskRows(
-      [makeTask({ url: " http://10.0.0.1/login ", http_method: "POST" })],
+      [
+        makeTask({
+          url: " http://10.0.0.1/login ",
+          http_method: "POST",
+          modified_at: "2026-09-23T02:10:00Z",
+          description: " 教学区电信门户 ",
+        }),
+      ],
       new Map([["dorm", ["宿舍移动"]]]),
     );
 
@@ -103,11 +110,21 @@ describe("buildHttpTaskRows", () => {
       {
         id: "dorm",
         name: "宿舍移动 直连",
+        // 描述渲染成名称格下的副行（与浏览器任务 / 脚本列表同口径）
+        description: "教学区电信门户",
         method: "POST",
         url: "http://10.0.0.1/login",
+        // 行同时带出 mtime：渲染层不再按 id 反查列表（O(n²)）
+        modifiedAt: "2026-09-23T02:10:00Z",
         boundProfiles: ["宿舍移动"],
       },
     ]);
+  });
+
+  it("摘要缺 mtime / 描述时为空串（渲染方按「—」或不渲染副行，不伪造内容）", () => {
+    const row = buildHttpTaskRows([makeTask()], new Map())[0];
+    expect(row.modifiedAt).toBe("");
+    expect(row.description).toBe("");
   });
 
   it("摘要缺方法/地址时为空串（不编造 GET，也不显示空地址）", () => {
@@ -150,6 +167,18 @@ describe("filterHttpTaskRows", () => {
 
   it("按请求地址匹配（改网关 IP 后按 IP 找任务）", () => {
     expect(filterHttpTaskRows(rows, "10.30.7.9").map((r) => r.id)).toEqual(["library"]);
+  });
+
+  it("按描述匹配（描述是名称格下看得见的副行，就得能搜到）", () => {
+    const withDesc = buildHttpTaskRows(
+      [
+        makeTask({ id: "a", name: "宿舍移动", description: "eportal 自签证书门户" }),
+        makeTask({ id: "b", name: "教学区", description: "Dr.COM 客户端协议" }),
+      ],
+      new Map(),
+    );
+    expect(filterHttpTaskRows(withDesc, "eportal").map((r) => r.id)).toEqual(["a"]);
+    expect(filterHttpTaskRows(withDesc, "dr.com").map((r) => r.id)).toEqual(["b"]);
   });
 
   it("不跨字段拼接误命中", () => {

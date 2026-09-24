@@ -70,11 +70,9 @@
   min-height: 26px;
 }
 
-.btn-lg {
-  padding: 12px var(--space-lg);
-  font-size: var(--text-base);
-  min-height: 44px;
-}
+/* `.btn-lg` 已删除（2026-09-24 静态审计：零引用）——
+   全站最高优先级的按钮是 `.save-btn`（保存栏，settings/common.css 里自行声明 48px），
+   不存在 44px 的"大按钮"档；需要时再按需新增，避免留一个没人用的档位。 */
 
 .btn-icon {
   width: 18px;

@@ -1,47 +1,32 @@
+/* responsive.css — 全站响应式断点层。
+ *
+ * ═══ 断点尺（全站只用这四个值，勿再新增中间值）═══
+ *   640  手机窄屏（单列、满宽按钮、贴边弹窗）
+ *   768  窄屏（侧栏收成 64px 图标条、内边距收一档、表单行变单列）
+ *   900  平板窄区（双列栅格降为单列、调试面板双栏改纵排、表格开始让列）
+ *   1100 平板宽区 / 小笔记本（设置页签与面板栅格降为单列、看板栅格降列）
+ * 反向（≥）只有 1100 一档，用于「够宽时才开双列」（settings/common.css、
+ * environment.css）。
+ *
+ * 2026-09-24 收敛前的散值是 520 / 640 / 720 / 768 / 860 / 900 / 960 / 980 /
+ * 1024 / 1100 / min-1080 —— 11 个取值、其中 5 个只出现在单个文件里，
+ * 结果同一类「窄屏降级」在不同页面于不同宽度触发。映射规则：就近落到上表某一档，
+ * 且**只允许让降级更早发生**（并集只多不少），避免把本已拥挤的区间放宽。
+ */
+
 @media (max-width: 1100px) {
   .settings-tabs,
-  .settings-panel-grid,
-  .settings-panel-grid--task {
+  .settings-panel-grid {
     grid-template-columns: 1fr;
   }
 
-  .settings-detect-columns {
-    grid-template-columns: 1fr;
-    gap: var(--space-lg);
-  }
-}
-
-@media (max-width: 1024px) {
+  /* 原 1024 档并入本档：看板栅格与设置页签同属「平板宽区装不下多列」 */
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 
   .dashboard-grid {
     grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 980px) {
-  .tasks-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .task-item {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  /* 纵向排列 + align-items:flex-start 会让子项按 max-content 定宽，而描述行是
-     nowrap，于是 .task-info 撑到 412px 宽、连带整行溢出卡片（实测 520px 视口溢出
-     52px，且省略号失效——省略号只在容器宽度受限时才生效）。让信息块占满行宽。 */
-  .task-info {
-    align-self: stretch;
-  }
-
-  .task-actions {
-    width: 100%;
-    justify-content: flex-end;
   }
 }
 
@@ -132,9 +117,8 @@
   .debug-screenshot-container {
     min-height: 200px;
   }
-}
 
-@media (max-width: 768px) {
+  /* 设置页签在窄屏改为每行 2 个（原为独立的一个 768 块，已并入本块） */
   .settings-tab {
     flex: 1 1 40%;
   }
@@ -144,7 +128,6 @@
      规则随之作废。侧栏本身在 ≤768px 只剩图标、子项文字放不下，故任务页内另有一条
      横向 pill 行兜底（`.tasks-narrow-nav`，定义在 styles/pages/tasks.css）。 */
 
-  .task-mini-grid,
   .form-row,
   .form-row--wide {
     grid-template-columns: 1fr;
@@ -158,9 +141,10 @@
 @media (max-width: 640px) {
   .field-help::after {
     left: calc(100% + 8px);
-    /* 窄屏收紧宽度；--tip-max 是组件按触发点两侧实测剩余空间写入的上界
-       （见 FieldHelp.syncAutoFlip），必须一并尊重，否则本规则会把实测值覆盖掉 */
-    max-width: min(var(--tip-max, 320px), calc(100vw - 64px));
+    /* 窄屏收一档但不低于 420px：本规则同时作用于 `--wide` 变体，写太小会把长说明
+       压成一条竖线；真正"放不下"的场景由组件按触发点两侧实测剩余空间写入的
+       `--tip-max` 收（见 FieldHelp.syncAutoFlip），必须一并尊重，否则本规则会把它覆盖掉 */
+    max-width: min(var(--tip-max, 420px), calc(100vw - 48px));
   }
 
   /* 通用弹窗窄屏：全幅贴边（复用向导的全幅模式），确认框同理 */
@@ -210,18 +194,5 @@
   .wizard-footer {
     padding-left: 20px;
     padding-right: 20px;
-  }
-
-  .wizard-steps {
-    padding: var(--space-md) 20px;
-    flex-wrap: wrap;
-  }
-
-  .step-label {
-    display: none;
-  }
-
-  .step-line {
-    width: 24px;
   }
 }

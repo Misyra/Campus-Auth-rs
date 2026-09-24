@@ -15,17 +15,23 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  TASK_REPO_INDEX_URL,
-  TASK_REPO_INDEX_URL_GITEE,
   TASK_REPO_NAME,
   TASK_REPO_OWNER,
   TASK_REPO_SOURCES,
   TASK_REPO_URL,
   TASK_REPO_URL_GITEE,
+  presetRepoIndexUrl,
 } from "./constants";
 
 /** 主程序仓库（**不应**被任务类入口引用） */
 const APP_REPO = "https://github.com/Misyra/Campus-Auth-rs";
+
+/** 选项表里全部预设索引地址（2 源 × 2 类 = 4 个） */
+function allPresetIndexUrls(): string[] {
+  return TASK_REPO_SOURCES.flatMap((s) =>
+    s.indexUrls ? [s.indexUrls.browser, s.indexUrls.http] : [],
+  );
+}
 
 describe("任务仓库坐标", () => {
   it("仓库主页指向任务仓库而非主程序仓库", () => {
@@ -34,18 +40,32 @@ describe("任务仓库坐标", () => {
     expect(TASK_REPO_NAME).not.toBe("Campus-Auth-rs");
   });
 
-  it("两个索引源都指向任务仓库（github 与 gitee 镜像同仓）", () => {
-    for (const url of [TASK_REPO_INDEX_URL, TASK_REPO_INDEX_URL_GITEE]) {
+  it("四个索引地址都指向任务仓库（github 与 gitee 镜像同仓）", () => {
+    // 索引按 (源, 类别) 两维给：两个源 × 两类任务
+    const urls = allPresetIndexUrls();
+    expect(urls).toHaveLength(4);
+    for (const url of urls) {
       expect(url).toContain(`/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/`);
       expect(url).not.toContain("/Campus-Auth-rs/");
     }
   });
 
-  it("索引地址是可直接 GET 的 raw 地址（非仓库页面）", () => {
-    expect(TASK_REPO_INDEX_URL).toMatch(/^https:\/\/raw\.githubusercontent\.com\//);
-    expect(TASK_REPO_INDEX_URL).toMatch(/index\.json$/);
-    expect(TASK_REPO_INDEX_URL_GITEE).toMatch(/^https:\/\/raw\.giteeusercontent\.com\//);
-    expect(TASK_REPO_INDEX_URL_GITEE).toMatch(/index\.gitee\.json$/);
+  it("索引地址是可直接 GET 的 raw 地址（非仓库页面），两类任务的文件不同名", () => {
+    expect(presetRepoIndexUrl("browser", "github")).toMatch(
+      /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.json$/,
+    );
+    expect(presetRepoIndexUrl("http", "github")).toMatch(
+      /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.http\.json$/,
+    );
+    expect(presetRepoIndexUrl("browser", "gitee")).toMatch(
+      /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.gitee\.json$/,
+    );
+    expect(presetRepoIndexUrl("http", "gitee")).toMatch(
+      /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.http\.gitee\.json$/,
+    );
+    // 两类任务不得共用同一个文件（那正是"混装"要根治的东西）
+    expect(presetRepoIndexUrl("browser", "github")).not.toBe(presetRepoIndexUrl("http", "github"));
+    expect(presetRepoIndexUrl("browser", "gitee")).not.toBe(presetRepoIndexUrl("http", "gitee"));
   });
 });
 
@@ -79,7 +99,7 @@ describe("视图中的任务类入口", () => {
       resolve(__dirname, "../composables/useRepoImport.ts"),
       "utf-8",
     );
-    expect(repoImport).toContain("TASK_REPO_INDEX_URL");
+    expect(repoImport).toContain("presetRepoIndexUrl");
     expect(repoImport).not.toMatch(/https:\/\/raw\.githubusercontent\.com\/Misyra\/campus-auth-tasks/);
   });
 });
@@ -89,15 +109,19 @@ describe("仓库来源选项表", () => {
     expect(TASK_REPO_SOURCES.map((s) => s.id)).toEqual(["github", "gitee", "custom"]);
     const github = TASK_REPO_SOURCES.find((s) => s.id === "github")!;
     const gitee = TASK_REPO_SOURCES.find((s) => s.id === "gitee")!;
-    // 表里另写一份字面量就会与常量漂移，故逐项对齐
-    expect(github.indexUrl).toBe(TASK_REPO_INDEX_URL);
-    expect(gitee.indexUrl).toBe(TASK_REPO_INDEX_URL_GITEE);
+    // 表里另写一份字面量就会与常量漂移，故逐项对齐（地址按 (类别, 源) 两维取）
+    expect(presetRepoIndexUrl("browser", "github")).toBe(github.indexUrls!.browser);
+    expect(presetRepoIndexUrl("http", "github")).toBe(github.indexUrls!.http);
+    expect(presetRepoIndexUrl("browser", "gitee")).toBe(gitee.indexUrls!.browser);
+    expect(presetRepoIndexUrl("http", "gitee")).toBe(gitee.indexUrls!.http);
     expect(github.homeUrl).toBe(TASK_REPO_URL);
     expect(gitee.homeUrl).toBe(TASK_REPO_URL_GITEE);
-    // 自定义源无预设地址（由用户手填）
+    // 自定义源无预设地址（由用户手填）：取地址一律回空串，不抛错
     const custom = TASK_REPO_SOURCES.find((s) => s.id === "custom")!;
-    expect(custom.indexUrl).toBe("");
+    expect(custom.indexUrls).toBeNull();
     expect(custom.homeUrl).toBe("");
+    expect(presetRepoIndexUrl("browser", "custom")).toBe("");
+    expect(presetRepoIndexUrl("http", "custom")).toBe("");
   });
 
   it("来源提示能把国内用户导向 Gitee，且 Gitee 侧说明了原因", () => {
@@ -111,10 +135,12 @@ describe("仓库来源选项表", () => {
   });
 
   it("索引地址（raw JSON）与仓库主页（人类浏览）是两个不同的地址", () => {
-    // 真实缺陷：把 indexUrl 当作可读页面链接，点开是一屏 raw JSON
+    // 真实缺陷：把索引地址当作可读页面链接，点开是一屏 raw JSON
     for (const s of TASK_REPO_SOURCES) {
-      if (!s.indexUrl) continue;
-      expect(s.indexUrl).not.toBe(s.homeUrl);
+      if (!s.indexUrls) continue;
+      for (const url of [s.indexUrls.browser, s.indexUrls.http]) {
+        expect(url).not.toBe(s.homeUrl);
+      }
       expect(s.homeUrl).toMatch(/^https:\/\/[^/]*gitee\.com\/|^https:\/\/github\.com\//);
       expect(s.homeUrl).not.toMatch(/raw\./);
     }
@@ -129,11 +155,19 @@ describe("仓库来源选项表", () => {
 describe("来源切换实现", () => {
   const repoImport = readFileSync(resolve(__dirname, "../composables/useRepoImport.ts"), "utf-8");
 
-  it("切换来源从选项表取地址，而非在函数里各写一份 raw 地址", () => {
-    // 分支硬编码正是漂移的成因：新增源时容易漏改一处
-    expect(repoImport).toContain("TASK_REPO_SOURCES.find");
+  it("索引地址经共享的 presetRepoIndexUrl 取，而非在函数里各写一份 raw 地址", () => {
+    // 分支硬编码正是漂移的成因：新增源或新增类别时都会漏改一处
+    expect(repoImport).toContain("presetRepoIndexUrl");
     expect(repoImport).not.toMatch(/raw\.githubusercontent\.com/);
     expect(repoImport).not.toMatch(/raw\.giteeusercontent\.com/);
+  });
+
+  it("切类别与切源都重取索引地址（否则会出现「在直连列表里拉浏览器索引」）", () => {
+    // 地址同时取决于类别与源，任一处不重取就是静默错配
+    expect(repoImport).toContain("applyPresetIndexUrl");
+    const modal = readFileSync(resolve(__dirname, "../components/RepoImportModals.vue"), "utf-8");
+    // 弹窗不再解释混合索引：拆分后文件即类别，那句提示成了噪音
+    expect(modal).not.toContain("当前只显示直连任务条目");
   });
 
   it("「直接查看仓库」用仓库主页，不用索引地址", () => {

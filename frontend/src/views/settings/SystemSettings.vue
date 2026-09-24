@@ -112,7 +112,7 @@ async function handleExportLogs(): Promise<void> {
 <template>
   <div class="settings-panel-grid settings-panel-grid--cols2">
     <!-- 运行模式：一组设置的命名组合，一键在「稳定跑」与「看得见、好排查」之间切换 -->
-    <section class="card settings-panel settings-panel--wide run-mode-card">
+    <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
         <IconApp name="sliders" class="settings-card-icon" />
         <h2>运行模式</h2>

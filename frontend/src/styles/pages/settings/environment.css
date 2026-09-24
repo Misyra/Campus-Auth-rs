@@ -10,10 +10,6 @@
   display: block;
 }
 
-.environment-page .env-status-summary {
-  margin-bottom: var(--space-sm);
-}
-
 .environment-page .env-checklist {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -66,7 +62,7 @@
   white-space: nowrap;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 768px) {
   .environment-page .env-checklist {
     grid-template-columns: 1fr;
   }
@@ -96,7 +92,7 @@
   justify-content: center;
 }
 
-@media (min-width: 1080px) {
+@media (min-width: 1100px) {
   .environment-page.settings-panel-grid--cols2 > .settings-panel:not(.settings-panel--wide) {
     display: flex;
     flex-direction: column;

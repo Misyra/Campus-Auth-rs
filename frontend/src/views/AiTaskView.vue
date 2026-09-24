@@ -726,7 +726,7 @@ async function restoreCapture(): Promise<void> {
             <span class="ai-config-summary">{{ configSummary }}</span>
             <IconApp name="chevron-down" class="icon-sm ai-config-chevron" :class="{ open: configExpanded }" />
           </button>
-          <div v-show="configExpanded" class="ai-config-body">
+          <div v-show="configExpanded">
             <div class="hint ai-privacy-hint">
               API Key 按服务商分别加密保存在本机。切换服务商时会自动切换到对应 Key，不会把 DeepSeek Key 发给 GLM。
             </div>

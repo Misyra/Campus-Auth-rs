@@ -127,11 +127,6 @@
   margin-bottom: var(--space-xs);
 }
 
-.notification-item-header .notify-icon {
-  display: flex;
-  align-items: center;
-}
-
 .notification-item-header .notify-label {
   font-size: var(--text-sm);
   font-weight: 500;
@@ -147,10 +142,6 @@
   color: var(--text-secondary);
 }
 
-.notification-item.notify-success .notify-icon,
-.notification-item.notify-success .notify-label { color: var(--success); }
-.notification-item.notify-error .notify-icon,
-.notification-item.notify-error .notify-label { color: var(--error); }
 .notification-item.notify-success .notification-item-body { color: var(--success); }
 .notification-item.notify-error .notification-item-body { color: var(--error); }
 

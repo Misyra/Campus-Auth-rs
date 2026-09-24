@@ -149,7 +149,7 @@ const urlCheckText = computed({
                 <label for="settings-http-targets">204 门户检测目标</label>
                 <FieldHelp text="必须填写返回 204 的轻量端点，普通网页返回 200 会被视为门户劫持证据、不能填在这里。每行一个地址，也兼容英文逗号分隔。" />
               </div>
-              <textarea id="settings-http-targets" v-model="httpCheckText" rows="3" class="settings-monospace-textarea"
+              <textarea id="settings-http-targets" v-model="httpCheckText" rows="3" class="textarea--mono"
                 placeholder="http://connect.rom.miui.com/generate_204&#10;http://www.gstatic.com/generate_204"></textarea>
             </div>
             <div class="toggle-group settings-toggle-spacer">
@@ -186,7 +186,7 @@ const urlCheckText = computed({
               <div class="field-label-row">
                 <label for="settings-url-check">URL 检测目标</label>
               </div>
-              <textarea id="settings-url-check" v-model="urlCheckText" rows="4" class="settings-monospace-textarea"
+              <textarea id="settings-url-check" v-model="urlCheckText" rows="4" class="textarea--mono"
                 placeholder="https://captive.apple.com|Success&#10;https://detectportal.firefox.com|success&#10;https://msftconnecttest.com|Microsoft Connect Test"></textarea>
             </div>
           </div>

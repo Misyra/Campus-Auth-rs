@@ -55,7 +55,7 @@ function swatchCheckColor(value: string): string {
 <template>
   <div class="appearance-page">
     <!-- 卡片 1：背景与氛围 -->
-    <div class="card appearance-card appearance-section-card">
+    <div class="card appearance-section-card">
       <div class="appearance-card-header">
         <IconApp name="image" class="appearance-card-icon" />
         <h3>背景与氛围</h3>
@@ -82,7 +82,7 @@ function swatchCheckColor(value: string): string {
             </div>
           </div>
 
-          <div class="appearance-sliders appearance-sliders-col">
+          <div class="appearance-sliders-col">
             <div class="appearance-slider-item">
               <label for="bg-blur">背景模糊</label>
               <input id="bg-blur" type="range" v-model.number="appearance.background_blur" min="0" max="30" step="1" />
@@ -109,7 +109,7 @@ function swatchCheckColor(value: string): string {
       </div>
 
       <!-- 卡片 2：主题与配色 -->
-      <div class="card appearance-card appearance-section-card">
+      <div class="card appearance-section-card">
         <div class="appearance-card-header">
           <IconApp name="contrast" class="appearance-card-icon" />
           <h3>主题与配色</h3>
@@ -184,7 +184,7 @@ function swatchCheckColor(value: string): string {
       </div>
 
       <!-- 卡片 3：卡片样式 -->
-      <div class="card appearance-card appearance-section-card">
+      <div class="card appearance-section-card">
         <div class="appearance-card-header">
           <IconApp name="grid" class="appearance-card-icon" />
           <h3>卡片样式</h3>
@@ -205,7 +205,7 @@ function swatchCheckColor(value: string): string {
       </div>
 
       <!-- 卡片 4：侧边栏 -->
-      <div class="card appearance-card appearance-section-card">
+      <div class="card appearance-section-card">
         <div class="appearance-card-header">
           <IconApp name="sidebar" class="appearance-card-icon" />
           <h3>侧边栏</h3>

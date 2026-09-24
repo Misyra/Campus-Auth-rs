@@ -15,6 +15,19 @@
   box-shadow: var(--shadow-lg);
 }
 
+/* 卡片内弹出的 `?` 气泡要能压住**同页后续卡片**。
+   卡片因 `backdrop-filter` 各自成为层叠上下文（毛玻璃的前提），气泡被限制在自己
+   卡片那一层里：DOM 靠后的卡片（如任务编辑器主列里的「测试区」）会盖住前一张卡片
+   中弹出的长说明的下半截——实测呈现为气泡底部一条横向亮度分界带。
+   悬停 / 钉住期间把所在卡片抬到本层更靠上的位置即可，不必把气泡 teleport 到 body。
+   `:has()` 不被支持时整条规则被忽略（回到旧行为），与全站 `:has()` 用法同口径。 */
+.card:has(.field-help:hover),
+.card:has(.field-help:focus-visible),
+.card:has(.field-help--pinned) {
+  position: relative;
+  z-index: var(--z-overlay);
+}
+
 .card-header {
   display: flex;
   justify-content: space-between;
@@ -34,7 +47,15 @@
   margin-left: auto;
 }
 
-.card-header h2 {
+/* 卡头标题：h2 / h3 必须同一口径。
+   四个任务面板的编辑页卡头用的是 `<h3>`，此前**没有任何规则命中 `.card-header h3`**，
+   于是落到浏览器 UA 默认（`1.17em` ≈ 16.38px / `font-weight: bold` 700），
+   而设置页的卡头是 14px/600、其余页面的 `.card-header h2` 是 16px/600 ——
+   同一个视觉角色三种渲染。此处把 h3 显式纳入，与 h2 完全对齐；
+   同时用 `margin: 0` 保证标题是块级时的行盒与 h2 一致（UA 的 h3 外边距已被 base.css 的
+   `*` 重置抹掉，但显式声明可防未来改动）。 */
+.card-header h2,
+.card-header h3 {
   font-size: var(--text-lg);
   font-weight: 600;
   /* 标题优先保持整体可读：宁可让按钮组换行，也不把标题压成一列单字。
@@ -64,13 +85,6 @@
   align-items: center;
 }
 
-/* 卡片副标题 */
-.card-header-sub {
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    margin-top: 2px;
-}
-
 /* ═══ 统一卡片头（settings / appearance 页的分节卡头，结构一致收敛于此） ═══ */
 .settings-card-header,
 .appearance-card-header {
@@ -83,24 +97,11 @@
   color: var(--text-secondary);
 }
 
-/* ═══ 通用毛玻璃卡片 ═══ */
-.glass-card {
-  background: var(--bg-glass);
-  border: 1px solid var(--border-accent);
-  border-radius: var(--radius-lg);
-  -webkit-backdrop-filter: var(--card-blur, none);
-  backdrop-filter: var(--card-blur, none);
-  box-shadow: var(--shadow);
-}
-
 /* 毛玻璃效果降级：低端设备或用户偏好 */
 @media (prefers-reduced-motion: reduce) {
   * {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
-  }
-  .glass-card {
-    background: var(--bg-secondary);
   }
 }
 

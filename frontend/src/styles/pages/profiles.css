@@ -529,12 +529,6 @@
   gap: 6px;
 }
 
-.editor-divider {
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--border), transparent);
-  margin: 20px 0;
-}
-
 /* 「网络匹配」可折叠区：头部即切换按钮（与设置页 Python 环境卡同一交互模式） */
 .editor-collapse-header {
   cursor: pointer;

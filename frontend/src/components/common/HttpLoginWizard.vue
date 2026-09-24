@@ -199,7 +199,7 @@ function fillScriptSkeleton(): void {
       </li>
     </ol>
 
-    <div class="wz-body">
+    <div>
       <!-- 步骤 1：任务是编辑对象，账号密码只在测试时用一次 -->
       <section v-if="STEPS[current].key === 'portal'" class="wz-page">
         <h4>确认这个直连任务与认证地址</h4>
@@ -293,7 +293,7 @@ function fillScriptSkeleton(): void {
           </div>
         </div>
 
-        <div v-if="passwordInUrl" class="wz-warn">
+        <div v-if="passwordInUrl" class="note note--warn">
           <IconApp name="alert-triangle" class="icon-sm" />
           <span>
             地址里带了密码，它会出现在网关、代理与系统网络日志中。程序只保证自身日志脱敏；
@@ -303,8 +303,8 @@ function fillScriptSkeleton(): void {
 
         <div class="wz-card">
           <strong>可用的占位符</strong>
-          <div class="wz-chips">
-            <code v-for="ph in HTTP_TEMPLATE_PLACEHOLDERS" :key="ph" class="wz-chip">{{ ph }}</code>
+          <div class="chip-row">
+            <code v-for="ph in HTTP_TEMPLATE_PLACEHOLDERS" :key="ph" class="chip">{{ ph }}</code>
           </div>
           <p class="wz-note">
             这些词在发送前会被替换成真实值。<strong>值原样替换、不做转义</strong>，
@@ -389,13 +389,13 @@ function fillScriptSkeleton(): void {
           </div>
           <div class="wz-card">
             <strong>脚本契约</strong>
-            <div class="wz-chips">
-              <span class="wz-chip-label">可读入参 ctx</span>
-              <code v-for="f in HTTP_CRYPTO_CTX_FIELDS" :key="f" class="wz-chip">{{ f }}</code>
+            <div class="chip-row">
+              <span class="chip-row-label">可读入参 ctx</span>
+              <code v-for="f in HTTP_CRYPTO_CTX_FIELDS" :key="f" class="chip">{{ f }}</code>
             </div>
-            <div class="wz-chips">
-              <span class="wz-chip-label">可用函数</span>
-              <code v-for="fn in HTTP_CRYPTO_BUILTINS" :key="fn" class="wz-chip wz-chip--fn">{{ fn }}</code>
+            <div class="chip-row">
+              <span class="chip-row-label">可用函数</span>
+              <code v-for="fn in HTTP_CRYPTO_BUILTINS" :key="fn" class="chip chip--fn">{{ fn }}</code>
             </div>
             <p class="wz-note">
               脚本需定义 <code>transform(ctx)</code>，返回对象的字段可直接用
@@ -645,24 +645,8 @@ function fillScriptSkeleton(): void {
   font-weight: 600;
 }
 
-.wz-warn {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  padding: 10px 12px;
-  margin-bottom: var(--space-md);
-  border: 1px solid rgba(var(--warning-rgb), 0.25);
-  border-radius: var(--radius-md);
-  background: var(--warning-bg);
-  color: var(--warning-text);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-
-.wz-warn svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
+/* 密码进 URL 的警示改用全局 `.note .note--warn`（components/misc.css）——
+   此处原是本文件私有的一份，与 HttpTaskFields 的 `.http-risk-note` 规则体逐字相同 */
 
 .wz-card {
   margin-top: var(--space-md);
@@ -691,32 +675,8 @@ function fillScriptSkeleton(): void {
   line-height: 1.7;
 }
 
-.wz-chips {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
-}
-
-.wz-chip-label {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-
-.wz-chip {
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-
-.wz-chip--fn {
-  color: var(--accent);
-}
+/* 词条视觉（.wz-chip 家族）已收敛到全局 components/chip.css。
+   此前这份与 HttpTaskFields 的 `.http-chip` 规则体只差容器类名，属第三份副本。 */
 
 .wz-advanced {
   margin-top: var(--space-md);

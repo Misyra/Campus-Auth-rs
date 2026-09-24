@@ -81,6 +81,18 @@
   flex: 1;
 }
 
+/* 弹窗内的"玻璃"改指比弹窗面**更深**一档（浅色主题限定）。
+   弹窗面已抬到近白（`--bg-modal: #fbfcfe`），控件若仍用 `--bg-glass`（70% 白）
+   与底色只差两个色阶，"这是个输入框"就只剩边框在传达；深色主题本来就是"字段比弹窗深"
+   （rgba(15,23,42,.5) vs rgba(30,41,59,.97)），浅色主题对齐同一口径。
+   改的是作用域内的令牌而不是逐个控件选择器：input / textarea / CustomSelect 触发器
+   都读这两个令牌，一处生效、后续新增控件自动跟随。 */
+[data-theme="light"] .modal-container,
+[data-theme="light"] .confirm-dialog {
+  --bg-glass: rgba(var(--slate-rgb), 0.1);
+  --bg-glass-heavy: rgba(var(--slate-rgb), 0.17);
+}
+
 .modal-footer {
   display: flex;
   justify-content: flex-end;

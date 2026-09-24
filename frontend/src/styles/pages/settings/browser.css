@@ -91,16 +91,6 @@
 }
 
 /* Shell 自定义路径输入 */
-.shell-custom-input {
-  display: flex;
-  gap: var(--space-sm);
-  margin-top: var(--space-sm);
-}
-
-.shell-custom-input input[type="text"] {
-  flex: 1;
-}
-
 /* 浏览器选择 */
 .browser-selection {
   margin-top: var(--space-sm);
@@ -204,16 +194,6 @@
   color: var(--accent);
 }
 
-.status-custom {
-  color: var(--accent);
-}
-
-.browser-desc {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  line-height: 1.4;
-}
-
 .browser-check {
   position: absolute;
   top: 12px;
@@ -221,24 +201,10 @@
   color: var(--accent);
 }
 
-.browser-info-tip {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  margin-top: 12px;
-  padding: 12px;
-  background: rgba(var(--accent-rgb), 0.1);
-  border: 1px solid rgba(var(--accent-rgb), 0.3);
-  border-radius: var(--radius-md);
-  color: var(--accent);
-  font-size: var(--text-md);
-  line-height: 1.5;
-}
-
-.browser-info-tip svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
+/* 数据目录提示改用全局 `.note .note--info`（components/misc.css）：
+   原 `.browser-info-tip` 是同款的 accent 色调变体，只差字号（13px vs 12px）与
+   margin-top（12px，上方 `.toggle-group` 已有 16px 下边距，本就重复）。
+   该提示的宿主见 BrowserSettings.vue 的 persistent_context 区块。 */
 
 @media (max-width: 640px) {
   .browser-warning-copy {

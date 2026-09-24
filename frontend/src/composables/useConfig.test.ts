@@ -82,6 +82,39 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(false);
   });
 
+  it("PATCH 在途期间的编辑不算已保存（回归：曾被静默置为干净）", async () => {
+    await config.fetchConfig();
+    config.config.monitor.enable_tcp_check = false;
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+
+    // 让 PATCH 挂起，制造"请求在途"窗口
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    patchMock.mockImplementationOnce(async () => {
+      await gate;
+      return {};
+    });
+
+    const saving = config.saveConfig();
+    // 在途期间用户继续编辑：这次改动不属于上面那个已经构造好的载荷
+    config.config.monitor.enable_tcp_check = true;
+    await flushWatch();
+
+    release();
+    await saving;
+
+    // 提交的是 false、途中改成 true 从未提交 → 必须仍显示"未保存"，
+    // 否则用户既看不到脏提示、也不会再点一次保存，改动就丢了
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    expect(config.dirty.value).toBe(true);
+
+    // 再保存一次应当真的把 true 提交上去
+    await config.saveConfig();
+    expect(patchMock).toHaveBeenCalledTimes(2);
+    expect(config.dirty.value).toBe(false);
+  });
+
   it("密码不再属于全局设置：useConfig 不暴露 password 字段", async () => {
     await config.fetchConfig();
     // 账号字段已迁往方案页（useProfiles），此处暴露 password 意味着又出现了

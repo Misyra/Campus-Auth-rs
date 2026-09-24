@@ -1,104 +1,155 @@
-/* .scheduled-task-type / .badge-script / .badge-browser 统一定义在 components/badge.css */
+/* 定时任务面板：版式骨架用 `styles/pages/tasks.css` 的 `tsk-*` 共享组（列表页整页表格 +
+   行尾 ⋯ 菜单 + 二级编辑页），本文件只放本页独有的列宽、单元格两行结构、等宽取值与
+   时间字段细节。类型徽标用通用的 `.badge badge--sm` + `.badge-{browser,script}`
+   （components/badge.css）。
 
-.task-item.disabled {
-  opacity: 0.6;
-}
+   列宽规则挂在 `.scheduled-tasks-page` 下（列表态的根类），编辑态是 `tsk-editor-page`、
+   不含该类，故这些列宽不会漏到编辑页。 */
 
-.scheduled-task-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-}
+/* ===== 列宽（本页 8 列：名称 / 类型 / 触发 / 目标 / 超时 / 最近结果 / 启用 / 操作） =====
+   共同版式里 `tsk-col-name` 等是"三面板列表"的口径，本页列语义不同，故另起一组，
+   只复用 `tsk-col-actions`（操作列 132px 与三面板一致）。
 
-.scheduled-task-item .task-info {
-  flex: 1;
+   文字列一律用百分比、只把"装不下就换行/省略号失效"的列钉成 px（类型徽标 92px、
+   启用开关 72px、操作 132px、拖拽柄 44px 走共享规则）。原因：全 px 时列宽之和
+   是常数，`table-layout: fixed` 下表格宽 = max(100%, Σ列宽)，实测 1100px 视口起
+   表格就比卡片宽（900px 视口下表格 742px 画在 596px 的卡片外，内容区出现横向滚动条），
+   而**名称列（auto）会被压到 0px**——1200px 视口下名称只剩 80px、1050px 下 2px，
+   最该看的列先消失。百分比让列跟着容器缩，px 列之和（340）永远小于容器，
+   于是名称列总能拿到剩余宽度（1440 下 239px、1100 下 130px）。
+   实测记录见各断点注释。 */
+.scheduled-tasks-page .tsk-table col.sch-col-name { width: auto; }
+.scheduled-tasks-page .tsk-table col.sch-col-type { width: 92px; }
+.scheduled-tasks-page .tsk-table col.sch-col-trigger { width: 12%; }
+.scheduled-tasks-page .tsk-table col.sch-col-target { width: 14%; }
+.scheduled-tasks-page .tsk-table col.sch-col-timeout { width: 8%; }
+/* 14% 是「最近结果」这个四字表头不折断的下限（4 字 × 12px + 单元格左右内边距 32px
+   ≈ 80px，900px 视口下 14% × 594 = 83px）；再小表头会变成「最近…」 */
+.scheduled-tasks-page .tsk-table col.sch-col-result { width: 14%; }
+.scheduled-tasks-page .tsk-table col.sch-col-enabled { width: 72px; }
+
+/* ===== 单元格：主行 + 副行（与任务列表的名称格同构） ===== */
+.sch-main {
+  display: block;
   min-width: 0;
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.scheduled-task-item .task-actions {
-  flex-shrink: 0;
-}
-
-.scheduled-task-item .task-toggle {
-  flex-shrink: 0;
-  padding-left: var(--space-md);
-  border-left: 1px solid var(--border);
-}
-
-.form-section {
-  margin-bottom: 20px;
-}
-
-.form-section:last-child {
-  margin-bottom: 0;
-}
-
-.form-section-title {
+.sch-sub {
+  display: block;
+  min-width: 0;
+  margin-top: 2px;
+  color: var(--text-muted);
   font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 12px;
-  padding-bottom: var(--space-sm);
-  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* 弹窗内 form-row 统一走通用 .form-row--flex（form.css），此处旧覆盖退役 */
+.sch-mono-muted {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
 
+/* 等宽取值（cron 表达式 / 任务 ID）：数字等宽才不会让「每天 8:05」与「每天 18:05」
+   在相邻行里错位。`mono` 这个名字此前被用在模板里却**没有任何规则**（全仓搜不到
+   `.mono {}`），等于没生效，故按本页前缀另立一个真实存在的类。 */
+.sch-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.sch-cell-type,
+.sch-cell-trigger,
+.sch-cell-target,
+.sch-cell-timeout {
+  overflow: hidden;
+}
+
+/* 启用列：开关与表头都居中（它是这一列唯一的内容，靠左会显得这一列是空的）。
+   选择器带上 `.tsk-table` 是为了压过 `.tsk-table th { text-align: left }`
+   ——只写 `.sch-cell-enabled` 时特异性更低，表头会保持左对齐、与下面的开关错位。 */
+.tsk-table .sch-cell-enabled {
+  text-align: center;
+}
+
+/* 停用的任务：文字整行弱化，但「启用」开关与操作列保持原样——
+   开关本身是恢复入口，跟着变淡会让人以为点不动。 */
+.scheduled-tasks-page .tsk-table tr.is-off td:not(.sch-cell-enabled):not(.tsk-actions) {
+  opacity: 0.55;
+}
+
+/* ===== 窄屏让位（共享版式只管三面板用到的列，本页的列要自己让） =====
+   `col` 与对应单元格必须成对隐藏：fixed 布局下只藏单元格会留下一条空列。
+   内容区宽 = 视口 − 侧栏(240) − 左右内边距(32×2)；768px 起侧栏收到 64px、
+   内边距 16px，故内容区反而回宽到 672。8 列在这个区间装不下，只能逐级让：
+
+   - ≤1100（内容 ~796）：藏「超时」
+   - ≤900（内容 ~596 起）：藏「类型 + 目标 + 最近结果」，并把「触发 / 最近结果」
+     钉回 px 下限——百分比在此宽度下会把「每天 08:00」压成「每天 …」
+     （12% × 594 = 71px，减内边距只剩 39px，放不下 5 字符的等宽时间）；
+     操作列也收到 96px（本页只有运行 + ⋯ 两个按钮，132px 是给三按钮的三面板留的）。
+     名称列因此保住 ~186–318px
+
+   2026-09-24 断点收敛：原为 1100 / 980 / 860 三档，其中 980 与 860 都是
+   「平板窄区」的同一个意图，且 860→768 的映射会让 768–900 这一段反而多留
+   「最近结果」（名称列掉到 90px）。现按全局断点尺（640 / 768 / 900 / 1100）
+   合并为 1100 / 900 两档：隐藏的列集在每一档都只多不少，名称列只会更宽。 */
+@media (max-width: 1100px) {
+  .scheduled-tasks-page .tsk-table col.sch-col-timeout,
+  .scheduled-tasks-page .tsk-table .sch-cell-timeout {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .scheduled-tasks-page .tsk-table col.sch-col-type,
+  .scheduled-tasks-page .tsk-table .sch-cell-type,
+  .scheduled-tasks-page .tsk-table col.sch-col-target,
+  .scheduled-tasks-page .tsk-table .sch-cell-target,
+  .scheduled-tasks-page .tsk-table col.sch-col-result,
+  .scheduled-tasks-page .tsk-table .sch-cell-result {
+    display: none;
+  }
+
+  .scheduled-tasks-page .tsk-table col.sch-col-trigger { width: 110px; }
+  .scheduled-tasks-page .tsk-table col.tsk-col-actions { width: 96px; }
+}
+
+/* ===== 编辑态（二级页）=====
+   编辑页的三个分区直接用全局 `.card` + `.card-header` + `.card-body`（与其余三个子页
+   同一套组件、同一个 16px 标题），本文件只负责其中的"并列短字段"与时间控件。
+   弹窗时代的 `.sch-form`（卡片摞叠）、`.sch-form .card-body > .form-row:last-child`
+   （弹窗高度收边）与 `.modal-container:has(.sch-form)`（92vh 放宽）已随弹窗一起删除：
+   页面上没有"内容比视口高就滚"的约束，那三条都是给弹窗高度打的补丁。 */
+
+/* 三个"并列短字段"（每天最多成功 / 失败重试 / 延迟执行）等分一行 */
 .flex-1 {
   flex: 1;
 }
 
-.scheduled-tasks-page .history-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-height: unset;
+/* 执行时间：原生时间控件只做"与全站输入框同款"的收边——
+   原生指示图标默认是浏览器灰，且与右侧内边距贴太紧。
+   宽度收窄：双列栅格会把它拉满整整半行（原为固定 140px，进栅格后按 100% 会
+   和"超时（秒）"同宽），按时间控件自身的量级给个上界即可。 */
+.sch-time-input {
+  width: 100%;
+  max-width: 220px;
+  font-variant-numeric: tabular-nums;
 }
 
-/* .history-item 基础样式来自 dashboard.css */
-/* 以下为定时任务历史的修饰符 */
-.scheduled-tasks-page .history-item.success {
-  border-left: 3px solid var(--success);
+.sch-time-input::-webkit-calendar-picker-indicator {
+  opacity: 0.55;
+  margin-left: 4px;
+  cursor: pointer;
 }
 
-.scheduled-tasks-page .history-item.failed {
-  border-left: 3px solid var(--error);
-}
-
-.scheduled-tasks-page .history-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: var(--space-sm);
-}
-
-.scheduled-tasks-page .history-status {
-  font-weight: 600;
-  font-size: var(--text-md);
-}
-
-.scheduled-tasks-page .history-status.success {
-  color: var(--success);
-}
-
-.scheduled-tasks-page .history-status.failure {
-  color: var(--error);
-}
-
-.scheduled-tasks-page .history-time {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-
-.scheduled-tasks-page .history-duration {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-
-.scheduled-tasks-page .history-message {
-  font-size: var(--text-md);
-  color: var(--text-secondary);
-  word-break: break-all;
+.sch-time-input::-webkit-calendar-picker-indicator:hover {
+  opacity: 0.9;
 }

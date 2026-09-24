@@ -469,7 +469,9 @@ async function confirmImport(): Promise<void> {
           </div>
         </div>
         <div class="profiles-topbar-actions">
-          <label class="toggle compact" title="开启后根据检测到的网关 IP 自动切换到匹配的方案">
+          <!-- 此处原写作 `toggle compact`：`.compact` 只在 custom-select.css 里定义，
+               对 .toggle 完全无效（是"幽灵修饰类"），故去掉，避免让人以为存在紧凑变体。 -->
+          <label class="toggle" title="开启后根据检测到的网关 IP 自动切换到匹配的方案">
             <input type="checkbox" :checked="p.autoSwitch.value" @change="p.toggleAutoSwitch()" />
             <span class="toggle-slider"></span>
             <span class="toggle-label">自动切换</span>
@@ -547,19 +549,19 @@ async function confirmImport(): Promise<void> {
             </div>
             <div class="profile-card-meta">
               <span v-if="info.gateway_ip" class="profile-tag">
-                <IconApp name="server" class="icon-xs" />
+                <IconApp name="server" class="icon-sm" />
                 {{ info.gateway_ip }}
               </span>
               <span v-if="info.wifi_ssid" class="profile-tag">
-                <IconApp name="wifi" class="icon-xs" />
+                <IconApp name="wifi" class="icon-sm" />
                 {{ info.wifi_ssid }}
               </span>
               <span v-if="!info.gateway_ip && !info.wifi_ssid" class="profile-tag">
-                <IconApp name="x-circle" class="icon-xs" />
+                <IconApp name="x-circle" class="icon-sm" />
                 无匹配规则
               </span>
               <span class="profile-tag" :title="info.login_channel === 'http' ? '直连请求：不启动浏览器' : '浏览器自动化：按任务操作网页'">
-                <IconApp :name="info.login_channel === 'http' ? 'globe' : 'chrome'" class="icon-xs" />
+                <IconApp :name="info.login_channel === 'http' ? 'globe' : 'chrome'" class="icon-sm" />
                 {{ info.login_channel === 'http' ? '直连请求' : '浏览器' }}
               </span>
             </div>

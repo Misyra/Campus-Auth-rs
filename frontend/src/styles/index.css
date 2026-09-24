@@ -13,6 +13,7 @@
 @import "./components/card.css";
 @import "./components/btn.css";
 @import "./components/badge.css";
+@import "./components/chip.css";
 @import "./components/segmented.css";
 @import "./components/sidebar.css";
 @import "./components/topbar.css";
@@ -29,7 +30,8 @@
 @import "./pages/tasks.css";
 @import "./pages/scripts.css";
 @import "./pages/settings/common.css";
-@import "./pages/settings/account.css";
+/* account.css 已删除：`/settings/account` 自「账号移交配置方案页」起只是重定向到
+   /profiles，该文件里的 `.current-profile-hint` / `.hint-link` 零引用（2026-09-24 静态审计） */
 @import "./pages/settings/monitor.css";
 @import "./pages/settings/browser.css";
 @import "./pages/settings/system.css";

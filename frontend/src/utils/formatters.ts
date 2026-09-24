@@ -48,6 +48,21 @@ export function formatShortTime(ts: string): string {
   return full.length >= 16 ? full.substring(5, 16) : full;
 }
 
+/**
+ * ISO 时间戳 → 本地时区 "MM-DD HH:mm"（任务列表「最近修改」列）。
+ *
+ * 与 {@link formatShortTime} 的差别在**时区**：任务文件的 mtime 由后端按 UTC 序列化，
+ * 直接截字符串会把 UTC 时间当本地时间展示（差 8 小时）。这里经 `Date` 解析后再按
+ * 本地时区格式化；解析失败或空串返回 "—"。
+ */
+export function formatMtime(ts: string | undefined): string {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 /** HEX → RGB */
 export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   let h = (hex || "").replace("#", "");

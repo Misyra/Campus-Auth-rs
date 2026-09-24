@@ -88,39 +88,22 @@
   grid-column: 1 / -1;
 }
 
-/* flex 变体：定时任务弹窗基本信息/任务配置等弹性分栏（子 form-group 用 .flex-1 占满） */
+/* flex 变体：一排并列的**短字段**等分一行（定时任务弹窗「启动后执行」的
+   每天最多成功 / 失败重试 / 延迟执行；子 form-group 用 .flex-1 占满）。
+   间距与 `.form-row` 的栅格 gap 同值，两种变体落在同一行时不出现两种列距。 */
 .form-row--flex {
   display: flex;
-  gap: 12px;
+  gap: var(--space-md);
 }
 
 .form-row--flex .form-group {
   margin-bottom: 0;
 }
 
-/* 输入框 + 右侧操作按钮并排（认证地址自动检测等）：输入框弹性占满，
- * 按钮不换行；窄屏自动换行避免挤压 */
-.input-with-action {
-  display: flex;
-  gap: var(--space-sm);
-  align-items: center;
-}
-
-.input-with-action input,
-.input-with-action textarea {
-  flex: 1;
-  min-width: 0;
-}
-
-.input-with-action .btn {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-@media (max-width: 480px) {
-  .input-with-action {
-    flex-wrap: wrap;
-  }
+/* 两行 flex 行叠放时要自己交出竖直间距：变体里子 form-group 的 margin-bottom 被清零，
+   紧挨着排会贴在一起（栅格 `.form-row` 靠子项的下边距，不适用这里） */
+.form-row--flex + .form-row--flex {
+  margin-top: var(--space-md);
 }
 
 .hint {
@@ -128,16 +111,6 @@
   font-size: var(--text-sm);
   color: var(--text-muted);
   margin-top: 6px;
-}
-
-/* hint 上间距变体（替代散写 style="margin-top"） */
-.hint--mt {
-  margin-top: 0.5rem;
-}
-
-/* 短值输入限宽（替代散写 style="min-width"，定时任务类型选择等场景） */
-.form-group--min140 {
-  min-width: 140px;
 }
 
 /* 紧凑场景去下边距（替代散写 style="margin-bottom:0"，仓库导入搜索/自定义地址等场景） */
@@ -155,13 +128,15 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   border-radius: var(--radius-full);
-  border: 1px solid rgba(var(--slate-rgb), 0.3);
-  background: rgba(var(--slate-rgb), 0.1);
+  /* 描边与底色比初版重一档：15px 里塞一个 10px 的问号太轻，读成装饰而不是"能点的东西"
+     （点击钉住气泡是它的隐藏能力，看不见就没意义） */
+  border: 1px solid rgba(var(--slate-rgb), 0.45);
+  background: rgba(var(--slate-rgb), 0.12);
   color: var(--text-secondary);
-  font-size: 8px;
+  font-size: var(--text-2xs);
   font-weight: 700;
   line-height: 1;
   cursor: help;
@@ -177,6 +152,17 @@
   color: var(--accent);
 }
 
+/*
+ * 气泡宽度策略：**内容需要多宽就多宽**，上界取三者最小值——
+ *   ① 变体默认上界（普通 420px / `--wide` 620px）
+ *   ② 组件按触发点两侧实测剩余空间写入的 `--tip-max`（窄屏防越界，见 FieldHelp.syncAutoFlip）
+ *   ③ 视口兜底 `calc(100vw - 64px)`
+ *
+ * 此前上界写死 320 / 460（翻转时还各再收紧 40px）：一句 38 字的中文说明在 460px 里
+ * 折成两行半、末尾两个字单独落到第三行（实测「…自动登录才会用到／它。」），而 2280px
+ * 的屏幕上右侧空着一千八百多像素——上界既不跟文案长度走，也不跟可用空间走。
+ * 翻转不再单独收紧：左右摆的是气泡位置，不是它需要的宽度（真要收由 ② 实测决定）。
+ */
 .field-help::after {
   content: attr(data-tip);
   position: absolute;
@@ -184,20 +170,18 @@
   top: 50%;
   transform: translateY(-50%) translateX(4px);
   width: max-content;
-  /* --tip-max 由组件按触发点两侧实际剩余空间写入（窄屏防越界）；未写入时用默认宽度 */
-  max-width: min(var(--tip-max, 320px), calc(100vw - 80px));
+  max-width: min(var(--tip-max, 420px), calc(100vw - 64px));
   padding: 10px 14px;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   border: 1px solid var(--tooltip-border);
   background: var(--tooltip-bg);
   color: var(--tooltip-text);
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.25),
-    0 0 0 1px rgba(var(--slate-rgb), 0.06);
+  /* 阴影走主题令牌（深色 0.2 / 浅色 0.1），不再写死一个在浅色主题下过重的黑 */
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-sans);
   font-size: var(--text-sm);
   font-weight: 500;
-  line-height: 1.65;
-  letter-spacing: 0.01em;
+  line-height: 1.7;
   /* pre-line：data-tip 里的 \n 按段落换行（说明文案都按段落书写），
      同时保留普通文本的自动换行；break-word 防止 URL / 代码片段撑破气泡 */
   white-space: pre-line;
@@ -209,23 +193,66 @@
   backdrop-filter: var(--blur-md);
 }
 
+/* 指向问号的小箭头：贴气泡靠触发点的那一侧，让"这段说明属于谁"一眼可见
+   （此前气泡是悬空的一块，凑近了才猜得出它对应哪个 `?`）。
+   用"旋转 45° 的小方块"而不是 border 三角：45° 方块在四个方向上都对称、
+   与圆角气泡接缝更服帖，也不必为翻转各写一份 border 配色——
+   挡在气泡后面的那半块由 `::after` 覆盖（后绘制的伪元素压住先绘制的）。
+   位置以气泡左缘为基准（`100% + 10px` 就是气泡起点），取半个方块宽度回退，
+   使方块中心正好落在接缝上。 */
+.field-help::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 10px - 4.5px);
+  width: 9px;
+  height: 9px;
+  background: var(--tooltip-bg);
+  border-left: 1px solid var(--tooltip-border);
+  border-bottom: 1px solid var(--tooltip-border);
+  border-radius: 2px;
+  transform: translateY(-50%) rotate(45deg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-out);
+  z-index: var(--z-modal);
+}
+
 .field-help:hover::after,
 .field-help:focus-visible::after {
   opacity: 1;
   transform: translateY(-50%) translateX(0);
 }
 
+.field-help:hover::before,
+.field-help:focus-visible::before {
+  opacity: 1;
+}
+
 /* 向左翻转提示框，用于右侧空间不足时 */
 .field-help--flip::after {
   left: auto;
   right: calc(100% + 10px);
-  max-width: min(var(--tip-max, 280px), calc(100vw - 80px));
   transform: translateY(-50%) translateX(-4px);
+}
+
+.field-help--flip::before {
+  left: auto;
+  right: calc(100% + 10px - 4.5px);
+  border-left: none;
+  border-bottom: none;
+  border-top: 1px solid var(--tooltip-border);
+  border-right: 1px solid var(--tooltip-border);
 }
 
 .field-help--flip:hover::after,
 .field-help--flip:focus-visible::after {
   transform: translateY(-50%) translateX(0);
+}
+
+/* 长文案放宽上界（普通说明仍按 420px 走：一两句话的气泡不该横穿整屏） */
+.field-help--wide::after {
+  max-width: min(var(--tip-max, 620px), calc(100vw - 64px));
 }
 
 /* 钉住态（点击展开）：与 :hover 并列作为显示条件。
@@ -247,68 +274,13 @@
   overflow-y: auto;
 }
 
-/* 加宽修饰：脚本契约、占位符规则这类长文案在 320px 下会拉成极长的竖条 */
-.field-help--wide::after {
-  max-width: min(var(--tip-max, 460px), calc(100vw - 80px));
+/* 钉住态也要有箭头：气泡还挂着，指向关系不能只在悬停那一瞬间成立 */
+.field-help--pinned::before {
+  opacity: 1;
 }
 
-.field-help--flip.field-help--wide::after {
-  max-width: min(var(--tip-max, 420px), calc(100vw - 80px));
-}
-
-/* ========== Radio Group ========== */
-.radio-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: var(--space-xs);
-}
-
-.radio-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  cursor: pointer;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
-}
-
-.radio-option:hover {
-  background: var(--bg-glass);
-  border-color: var(--border-hover);
-}
-
-.radio-option:has(input:checked) {
-  border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.06);
-}
-
-.radio-option input[type="radio"] {
-  margin: 3px 0 0;
-  flex-shrink: 0;
-  accent-color: var(--accent);
-}
-
-.radio-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.radio-label {
-  font-weight: 500;
-  font-size: var(--text-md);
-  color: var(--text-primary);
-}
-
-.radio-desc {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  line-height: 1.4;
-}
+/* 加宽修饰的定义在上面那组气泡规则里（`--wide` → 620px）；此处曾再写一份 460/420px 的
+   覆盖，两份规则叠在一起时后一份生效——改宽度时只看其中一处会得出"没生效"的错觉。 */
 
 /* ═══ JSON 校验反馈 ═══ */
 .json-error {

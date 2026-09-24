@@ -24,7 +24,7 @@ export const DEFAULT_TRIGGER_URL = "http://www.msftconnecttest.com/connecttest.t
 /**
  * 任务仓库坐标（单一事实源）。
  *
- * 任务由**独立仓库**承载，与主程序仓库不是一个：「仓库导入」读它的 `index.json`、
+ * 任务由**独立仓库**承载，与主程序仓库不是一个：「仓库导入」读它的索引文件、
  * 录制器脚本引导用户把任务提交到它的 Issues、「分享适配」按钮也指向它。此前
  * 「分享适配」误指主程序仓库（`Campus-Auth-rs`），点过去找不到任何可分享的任务。
  * 集中在此以免三处各写一份 host/owner 而再次漂移。
@@ -33,12 +33,28 @@ export const TASK_REPO_OWNER = "Misyra";
 export const TASK_REPO_NAME = "campus-auth-tasks";
 /** 仓库主页（「分享适配」「任务仓库 →」等人类可点击入口） */
 export const TASK_REPO_URL = `https://github.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}`;
-/** GitHub 源的索引地址（仓库导入预设源） */
-export const TASK_REPO_INDEX_URL = `https://raw.githubusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/master/index.json`;
-/** Gitee 镜像源的索引地址 */
-export const TASK_REPO_INDEX_URL_GITEE = `https://raw.giteeusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/raw/master/index.gitee.json`;
 /** Gitee 镜像的仓库主页（浏览用，非索引地址） */
 export const TASK_REPO_URL_GITEE = `https://gitee.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}`;
+
+/** GitHub raw 地址（`file` 为仓库根下的文件名） */
+const githubRaw = (file: string): string =>
+  `https://raw.githubusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/master/${file}`;
+/** Gitee 镜像 raw 地址（镜像与主仓库同分支，只有域名与路径段不同） */
+const giteeRaw = (file: string): string =>
+  `https://raw.giteeusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/raw/master/${file}`;
+
+/**
+ * 仓库条目的类别：**两类任务各有一份索引文件**，读哪一份由它决定。
+ *
+ * 浏览器任务（步骤式 JSON）与直连任务（HTTP 请求形状）曾共用一份混合索引，靠条目上
+ * 可选的 `type` 字段分类、缺省当 `browser`——贡献者忘写 `type` 就得到「列在列表里、
+ * 点导入又被文件类型校验拒掉」的死条目，用户也会在错的 Tab 里搜不到自己学校。
+ * 拆开后**文件即类别**：`index.json` 收浏览器任务，`index.http.json` 收直连任务。
+ */
+export type TaskRepoKind = "browser" | "http";
+
+/** 预设镜像源 id（自定义源没有预设索引地址，故不在内） */
+export type TaskRepoMirrorId = "github" | "gitee";
 
 /**
  * 主程序仓库主页与发布页（单一事实源）。
@@ -71,46 +87,57 @@ export const BILIBILI_SPACE_URL = "https://space.bilibili.com/5608024";
 export const TUTORIAL_VIDEO_URL = "https://www.bilibili.com/video/BV1EdNg6VEbp/?t=209";
 
 /** 仓库导入的源类型：两个预设镜像 + 用户自填地址 */
-export type TaskRepoSourceId = "github" | "gitee" | "custom";
+export type TaskRepoSourceId = TaskRepoMirrorId | "custom";
 
 /**
  * 仓库导入的「源」选项表（单一事实源）。
  *
- * 三个字段各有用途，**不可合并**：`indexUrl` 是给程序 GET 的 raw JSON 地址，
- * `homeUrl` 是给人点开浏览的仓库页面——真实缺陷：空态里「直接查看仓库」原先把
- * `indexUrl` 当作可读页面链接，点开是一屏 raw JSON 而不是仓库首页。
- * 预设源的 `homeUrl` 只在「自定义」时为空（用户自填的地址未必有对应主页）。
+ * 两个字段各有用途，**不可合并**：`indexUrls` 是给程序 GET 的 raw JSON 地址（每类任务
+ * 一份索引，故按类别分别给），`homeUrl` 是给人点开浏览的仓库页面——真实缺陷：空态里
+ * 「直接查看仓库」原先把索引地址当作可读页面链接，点开是一屏 raw JSON 而不是仓库首页。
+ * 自定义源两项皆空（用户自填的地址未必有对应主页，也可能只指向某一类索引）。
  */
 export const TASK_REPO_SOURCES: readonly {
   id: TaskRepoSourceId;
   label: string;
   /** 该源在「源」选择器旁的补充说明（空则不显示） */
   hint: string;
-  indexUrl: string;
+  /** 该源的索引地址（按条目类别；自定义源为 null，由用户手填） */
+  indexUrls: Record<TaskRepoKind, string> | null;
   homeUrl: string;
 }[] = [
   {
     id: "github",
     label: "GitHub",
     hint: "国内访问可能较慢或加载失败，卡住时请改用 Gitee 镜像",
-    indexUrl: TASK_REPO_INDEX_URL,
+    indexUrls: { browser: githubRaw("index.json"), http: githubRaw("index.http.json") },
     homeUrl: TASK_REPO_URL,
   },
   {
     id: "gitee",
     label: "Gitee",
     hint: "国内访问更快，推荐国内用户使用",
-    indexUrl: TASK_REPO_INDEX_URL_GITEE,
+    indexUrls: { browser: giteeRaw("index.gitee.json"), http: giteeRaw("index.http.gitee.json") },
     homeUrl: TASK_REPO_URL_GITEE,
   },
   {
     id: "custom",
     label: "自定义",
     hint: "",
-    indexUrl: "",
+    indexUrls: null,
     homeUrl: "",
   },
 ];
+
+/**
+ * 取某类别在某源下的预设索引地址；自定义源（或未知源）返回空串，表示"应由用户手填"。
+ *
+ * 切源与切类别都走这个函数：索引地址同时取决于**类别**与**源**，任一处各写一份就会出现
+ * 「在直连列表里拉了浏览器索引」这类静默错配。
+ */
+export function presetRepoIndexUrl(kind: TaskRepoKind, source: TaskRepoSourceId): string {
+  return TASK_REPO_SOURCES.find((s) => s.id === source)?.indexUrls?.[kind] ?? "";
+}
 
 export const LIMITS = {
   LOG_MAX_ENTRIES: 100,

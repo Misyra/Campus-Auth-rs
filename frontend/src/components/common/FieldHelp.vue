@@ -40,7 +40,10 @@ function syncAutoFlip(): void {
   const el = root.value;
   if (!el) return;
   const rect = el.getBoundingClientRect();
-  const wanted = props.wide ? 460 : 320;
+  // 期望宽度与 form.css 里 `.field-help::after` / `--wide` 的上界保持一致：
+  // 这里只负责"放不下时收紧并换边"，气泡能有多宽由 CSS 说（两处数值不一致会让
+  // 组件在明明放得下的时候就把气泡压窄）
+  const wanted = props.wide ? 620 : 420;
   const rightRoom = window.innerWidth - rect.right - 26;
   const leftRoom = rect.left - 26;
   const flipToLeft = rightRoom < wanted && leftRoom > rightRoom;
@@ -49,8 +52,8 @@ function syncAutoFlip(): void {
   if (room >= wanted) {
     el.style.removeProperty("--tip-max");
   } else {
-    // 200px 下限：别把气泡压成一条竖线（宁可纵向变长，仍在视口内）
-    el.style.setProperty("--tip-max", `${Math.max(200, room)}px`);
+    // 220px 下限：别把气泡压成一条竖线（宁可纵向变长，仍在视口内）
+    el.style.setProperty("--tip-max", `${Math.max(220, room)}px`);
   }
 }
 

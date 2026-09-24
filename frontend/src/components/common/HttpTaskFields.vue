@@ -93,6 +93,14 @@ const HELP = {
     "取到的值默认按字段名注册成占位符，登录请求的请求头与请求体里用 {csrf_token} 这样引用" +
     "（占位符名留空即取字段名，也可以自己改）。\n\n" +
     "用不到就留空，整块忽略。",
+  logoutWhen:
+    "反复登录时门户提示「IP 已在线」或「重复登录」的才需要：登录前先请求一次下线接口，" +
+    "把旧会话踢掉再登录。\n\n" +
+    "下线请求的成败不影响登录：接口地址不对、门户没开下线都只会记一条日志，登录照常进行。" +
+    "下线接口常为 /logout、/para?name=logout 这类地址，可在门户页面找「注销 / 下线」按钮照抄。",
+  logoutWait:
+    "部分门户的下线是异步生效的：立即重连仍会被刚踢掉的旧会话占住。等 1~3 秒再发登录请求" +
+    "能显著提高一次成功率；下线即时生效的门户保持 0 即可。",
 } as const;
 
 /** 表单控件 id 前缀：同页可能同时挂载多个实例（任务编辑器 + 向导） */
@@ -106,6 +114,12 @@ const preOpen = ref(false);
 
 /** 已配置前置请求（地址非空即启用）时保持展开，避免收起遮蔽既有配置 */
 const preHasContent = computed(() => props.model.pre_request_url.trim().length > 0);
+
+// 退出登录同为高级项（只有「IP 已在线」类门户需要），收起策略一致
+const logoutOpen = ref(false);
+
+/** 已配置退出登录（地址非空即启用）时保持展开 */
+const logoutHasContent = computed(() => props.model.logout_url.trim().length > 0);
 
 /** 已展开过脚本区（或草稿里本来就有脚本）时保持展开，避免收起遮蔽既有配置 */
 const scriptHasContent = computed(() => props.model.crypto_script.trim().length > 0);
@@ -144,7 +158,7 @@ function fillScriptSkeleton(): void {
 </script>
 
 <template>
-  <div class="http-fields">
+  <div>
     <!-- ① 请求地址 -->
     <section class="http-step">
       <div class="http-step-head">
@@ -182,7 +196,7 @@ function fillScriptSkeleton(): void {
       </div>
 
       <!-- 凭据进 URL 会落在网关/代理日志里：只在真的这么填了才提示，不折叠 -->
-      <div v-if="passwordInUrl" class="http-risk-note">
+      <div v-if="passwordInUrl" class="note note--warn">
         <IconApp name="alert-triangle" class="icon-sm" />
         <span>
           当前把密码放进了请求地址，网关、代理或系统网络日志仍可能记录完整地址。程序只保证自身日志脱敏；能用 POST 时优先用 POST。
@@ -224,8 +238,8 @@ function fillScriptSkeleton(): void {
       <div class="http-template-row">
         <span class="http-template-label">占位符</span>
         <FieldHelp :text="HELP.placeholders" wide />
-        <div class="http-chip-row http-chip-row--inline">
-          <code v-for="ph in HTTP_TEMPLATE_PLACEHOLDERS" :key="ph" class="http-chip">{{ ph }}</code>
+        <div class="chip-row chip-row--inline">
+          <code v-for="ph in HTTP_TEMPLATE_PLACEHOLDERS" :key="ph" class="chip">{{ ph }}</code>
         </div>
       </div>
 
@@ -307,14 +321,24 @@ function fillScriptSkeleton(): void {
 }"></textarea>
         </div>
 
+        <!-- 自动保存模式下没有"保存前确认"这个时机了（旧版在显式保存时弹一次），
+             故把提示落在**字段旁边**：填了就看得见，而不是等出问题再回头找 -->
+        <div v-if="model.crypto_script.trim()" class="note note--warn">
+          <IconApp name="alert-triangle" class="icon-sm" />
+          <span>
+            这段脚本会在每次登录时执行（沙箱内运行，无网络与文件访问，最长 500 毫秒）。
+            改一个字就会自动保存并立即生效——只在看得懂、或来源可信时才保留它。
+          </span>
+        </div>
+
         <div class="http-script-help">
-          <div class="http-chip-row http-chip-row--inline">
-            <span class="http-chip-label">可读入参 ctx</span>
-            <code v-for="f in HTTP_CRYPTO_CTX_FIELDS" :key="f" class="http-chip">{{ f }}</code>
+          <div class="chip-row chip-row--inline">
+            <span class="chip-row-label">可读入参 ctx</span>
+            <code v-for="f in HTTP_CRYPTO_CTX_FIELDS" :key="f" class="chip">{{ f }}</code>
           </div>
-          <div class="http-chip-row">
-            <span class="http-chip-label">可用函数</span>
-            <code v-for="fn in HTTP_CRYPTO_BUILTINS" :key="fn" class="http-chip http-chip--fn">{{ fn }}</code>
+          <div class="chip-row">
+            <span class="chip-row-label">可用函数</span>
+            <code v-for="fn in HTTP_CRYPTO_BUILTINS" :key="fn" class="chip chip--fn">{{ fn }}</code>
           </div>
         </div>
       </div>
@@ -388,6 +412,74 @@ function fillScriptSkeleton(): void {
         </p>
       </div>
     </section>
+
+    <!-- ⑥ 退出登录（可选，默认收起）：「IP 已在线」类门户要"先踢旧会话再登录"。
+         与前置请求同一套"地址留空即整块忽略"的口径，不另设开关。
+         动作语义与前置请求不同：成败不判定，失败不拦登录——文案里讲清这点 -->
+    <section class="http-step http-step--advanced">
+      <div class="http-advanced-row">
+        <button
+          type="button"
+          class="http-advanced-toggle"
+          :aria-expanded="logoutOpen || logoutHasContent"
+          @click="logoutOpen = !logoutOpen"
+        >
+          <IconApp name="chevron-down" class="icon-sm http-advanced-arrow" :class="{ expanded: logoutOpen || logoutHasContent }" />
+          <span class="http-step-num http-step-num--muted">6</span>
+          <span class="http-advanced-copy">
+            <strong>退出登录请求（可选）</strong>
+          </span>
+        </button>
+        <FieldHelp :text="HELP.logoutWhen" wide />
+        <span v-if="logoutHasContent" class="http-advanced-badge">已配置</span>
+      </div>
+
+      <div v-show="logoutOpen || logoutHasContent" class="http-advanced-body">
+        <div class="form-row http-url-row">
+          <div class="form-group http-method-field">
+            <label :for="`${uid}-logout-method`">方法</label>
+            <CustomSelect
+              :id="`${uid}-logout-method`"
+              v-model="model.logout_method"
+              :options="HTTP_METHOD_OPTIONS"
+            />
+          </div>
+          <div class="form-group">
+            <label :for="`${uid}-logout-url`">请求地址</label>
+            <input :id="`${uid}-logout-url`" v-model.trim="model.logout_url" type="text"
+              placeholder="http://10.0.0.1/logout（留空 = 不需要退出登录）" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label :for="`${uid}-logout-wait`">下线后等待</label>
+            <input :id="`${uid}-logout-wait`" v-model.number="model.logout_wait_secs" type="number"
+              min="0" max="30" step="0.5" />
+            <span class="hint">秒 · 下线异步生效的门户等 1~3 秒再登录</span>
+          </div>
+          <div class="form-group">
+            <div class="field-label-row">
+              <span class="http-logout-note">下线失败不影响登录</span>
+              <FieldHelp :text="HELP.logoutWait" />
+            </div>
+            <span class="hint">请求发出即继续；门户不回或报错都只记一条日志</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label :for="`${uid}-logout-headers`">请求头</label>
+          <textarea :id="`${uid}-logout-headers`" v-model="model.logout_headers" rows="2"
+            placeholder="每行一项，通常可留空"></textarea>
+        </div>
+
+        <div v-if="model.logout_method === 'POST'" class="form-group">
+          <label :for="`${uid}-logout-body`">请求内容</label>
+          <textarea :id="`${uid}-logout-body`" v-model="model.logout_body" rows="2"
+            placeholder="POST 时照抄下线表单内容，如 username={username}；GET 用不到"></textarea>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -459,26 +551,10 @@ function fillScriptSkeleton(): void {
   font-weight: 600;
 }
 
-/* 风险提示：只在真的把凭据写进地址时出现，故保留整段文字而不折叠——
-   它要拦的是用户看不到的后果（网关/代理日志留痕），藏进气泡就失去拦截力 */
-.http-risk-note {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-  margin: 0 0 var(--space-md);
-  color: var(--warning-text);
-  border: 1px solid rgba(var(--warning-rgb), 0.25);
-  background: var(--warning-bg);
-}
-
-.http-risk-note svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
+/* 风险提示改用全局 `.note .note--warn`（components/misc.css）——
+   此处原是本文件私有的一份，与 HttpLoginWizard 的 `.wz-warn` 规则体逐字相同；
+   只保留本文件特有的语境注释：它只在真的把凭据写进地址时出现，故保留整段文字
+   而不折叠——它要拦的是用户看不到的后果（网关/代理日志留痕），藏进气泡就失去拦截力 */
 
 /* 占位符速查：词表（要照着抄进输入框）留在界面上，规则收进 `?` 气泡 */
 .http-template-row {
@@ -497,38 +573,9 @@ function fillScriptSkeleton(): void {
   font-size: var(--text-xs);
 }
 
-.http-chip-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-/* 行内速查变体：用在标签 + 词条同排的场景（占位符行、脚本契约卡首行），
-   此时不需要默认的 8px 上间距 */
-.http-chip-row--inline {
-  margin-top: 0;
-}
-
-.http-chip-label {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-
-.http-chip {
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-
-.http-chip--fn {
-  color: var(--accent);
-}
+/* 词条视觉（.http-chip 家族）已收敛到全局 components/chip.css：
+   scoped 样式无法跨组件复用，正是此前三份副本逐字重复的原因。
+   现在模板直接引用 .chip / .chip--fn / .chip-row / .chip-row--inline / .chip-row-label。 */
 
 /* ===== 高级项（凭据变换脚本） ===== */
 .http-step--advanced {
@@ -592,6 +639,12 @@ function fillScriptSkeleton(): void {
 
 .http-advanced-body {
   margin-top: var(--space-sm);
+}
+
+/* 「下线失败不影响登录」说明行：与标签同排的弱化说明，不做成警示 */
+.http-logout-note {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }
 
 .http-script-editor {

@@ -5,9 +5,10 @@
  * 导致设置·任务页点「从仓库导入」无反应、切到任务列表页才弹出的错位 bug，
  * 故提取为共享组件，两处入口（TasksView / 任务与环境设置页）各自挂载。
  *
- * 索引是混合的（同一个仓库同时承载浏览器任务与直连任务），弹窗只呈现
- * `repoKind` 那一类：标题、过滤提示与导入去向都随它变化，避免"看着是浏览器任务、
- * 导进去变成直连草稿"这种错位。
+ * 两类任务各有一份索引（`index.json` 收浏览器任务、`index.http.json` 收直连任务），
+ * 弹窗只读 `repoKind` 那一份：标题、空态与导入去向都随它变化，避免"看着是浏览器任务、
+ * 导进去变成直连草稿"这种错位。索引文件里若出现另一类的条目，那是文件写错了，此时
+ * 显式提示条数而非静默过滤。
  *
  * 列表为左右分栏：左侧任务条目（含 64px 缩略图），点选后右侧展示
  * 截图大图与完整信息；无 screenshot 定义的任务显示「暂无截图」占位。
@@ -24,25 +25,21 @@ import IconApp from "./common/IconApp.vue";
 import { repoApi } from "@/api";
 import { TASK_REPO_SOURCES } from "@/utils/constants";
 import { repoSourceLabel, repoSourceUrl } from "@/utils/repoSource";
-import { useRepoImport } from "@/composables/useRepoImport";
+import { useRepoImport, repoKindLabel } from "@/composables/useRepoImport";
 
 const repo = useRepoImport();
 
 /** 源选项（模板直接遍历，避免在模板里硬编码按钮——增删源只改 constants） */
 const sourceOptions = TASK_REPO_SOURCES;
 
-/** 当前浏览的条目类型（决定标题、过滤提示与导入去向） */
+/** 当前浏览的条目类型（决定读哪份索引、标题与导入去向） */
 const kind = computed(() => repo.repoImport.value.repoKind);
 
-/** 弹窗标题：直连与浏览器任务共用同一个索引，标题必须说清在看哪一类 */
-const modalTitle = computed(() => (kind.value === "http" ? "从云端仓库导入直连任务" : "从云端仓库导入浏览器任务"));
+/** 当前类别的中文名（标题、空态与异类条目提示共用同一处措辞，见 useRepoImport） */
+const kindLabel = computed(() => repoKindLabel(kind.value));
 
-/** 当前类型的条目在索引里的存在性提示：混合索引里"搜不到"常是切错了 Tab，而不是真的没有 */
-const kindEmptyHint = computed(() =>
-  kind.value === "http"
-    ? "当前只显示直连任务条目（浏览器任务请到「浏览器任务」Tab 导入）。"
-    : "当前只显示浏览器任务条目（直连任务请到「直连任务」Tab 导入）。",
-);
+/** 弹窗标题：两类任务各有一份索引，标题必须说清在看哪一类 */
+const modalTitle = computed(() => `从云端仓库导入${kindLabel.value}`);
 
 /** 图片加载失败的任务 id 集合：缩略图/大图统一回退占位 */
 const brokenImages = ref(new Set<string>());
@@ -138,8 +135,11 @@ watch(
     <!-- 来源说明：「国内用户建议用 Gitee」的提示由 TASK_REPO_SOURCES 的 hint 承载，
          自定义源无 hint 故整行不渲染 -->
     <p v-if="repo.currentSource.value.hint" class="repo-source-hint">{{ repo.currentSource.value.hint }}</p>
-    <!-- 类型过滤提示：混合索引下"列表里没有想找的任务"多数是切错了 Tab，先说清在看哪一类 -->
-    <p class="repo-source-hint">{{ kindEmptyHint }}</p>
+    <!-- 异类条目提示：索引文件只承载一类条目，出现不符即该文件写错了（或自定义地址指到了
+         另一类的索引）。数量显式说出来，避免用户对着短列表猜"我的学校去哪了" -->
+    <p v-if="repo.foreignRepoTaskCount.value > 0" class="repo-source-hint repo-foreign-hint">
+      索引里有 {{ repo.foreignRepoTaskCount.value }} 个条目不属于{{ kindLabel }}（类型不符），已跳过。
+    </p>
 
     <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
       <div class="form-group form-group--flush"><input v-model="repo.repoImport.value.url" type="text" placeholder="输入远程索引 URL" /></div>
@@ -168,9 +168,12 @@ watch(
               <span v-if="isOfficialTask(task.author)" class="badge badge--sm badge--success repo-item-official">官方任务</span>
             </div>
             <div class="repo-item-desc">{{ task.description }}</div>
+            <!-- meta 行自带 flex + gap + 小字弱色（.repo-item-meta），
+                 子项无需任何额外规则——原先挂的 .repo-item-author / .repo-item-tags
+                 全仓没有对应规则，是空钩子，故去掉。 -->
             <div class="repo-item-meta">
-              <span v-if="task.author" class="repo-item-author">{{ task.author }}</span>
-              <span v-if="task.tags" class="repo-item-tags">{{ task.tags.join(', ') }}</span>
+              <span v-if="task.author">{{ task.author }}</span>
+              <span v-if="task.tags">{{ task.tags.join(', ') }}</span>
             </div>
           </div>
         </div>
@@ -215,8 +218,14 @@ watch(
     </div>
     <div v-else-if="!repo.repoImport.value.loading" class="empty-state empty-state--dashed repo-import-hint">
       <IconApp name="globe-grid" :stroke-width="1.5" />
-      <strong class="empty-title">尚未加载任务列表</strong>
-      <span class="empty-desc">点击上方「加载索引」，从任务仓库获取可导入的任务。</span>
+      <!-- 「还没点加载」与「加载成功但这一类没有条目」是两件事：另一类任务有各自的索引，
+           空列表在拆分后是合法状态，不能说成"尚未加载"或"格式不正确" -->
+      <strong class="empty-title">{{ repo.repoImport.value.loaded ? `该来源暂无${kindLabel}条目` : "尚未加载任务列表" }}</strong>
+      <span v-if="repo.repoImport.value.loaded" class="empty-desc">
+        索引已读取，但里面没有{{ kindLabel }}。{{ kindLabel === "浏览器任务" ? "直连任务" : "浏览器任务" }}有各自的索引，
+        可到对应子页的「仓库导入」查看；也可以换个来源再试。
+      </span>
+      <span v-else class="empty-desc">点击上方「加载索引」，从任务仓库获取可导入的任务。</span>
       <!-- 指向仓库**主页**而非用户手填的索引地址：索引地址是给程序 GET 的 raw JSON，
            此前把它当作可读页面链接，点开是一屏 JSON 而不是仓库首页 -->
       <div class="empty-actions">
@@ -280,6 +289,9 @@ watch(
 .repo-source-label { font-size: var(--text-md); color: var(--text-secondary); font-weight: 500; }
 /* 来源补充说明（Gitee 更快 / GitHub 可能慢）：与工具条同样式的次级文字，不抢视线 */
 .repo-source-hint { margin: 0 0 12px; font-size: var(--text-sm); color: var(--text-muted); line-height: 1.5; }
+/* 异类条目提示：诊断口径（索引文件被写混、或自定义地址指到了另一类的索引），
+   用警告色区别于上面的来源说明，但不像 .repo-import-error 那样当失败处理 */
+.repo-foreign-hint { color: var(--warning-text); }
 .repo-custom-url { margin-bottom: 12px; }
 .repo-import-error { color: var(--error); font-size: var(--text-md); margin-bottom: 8px; }
 .repo-import-search { margin-bottom: 12px; }

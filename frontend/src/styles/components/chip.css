@@ -1,0 +1,70 @@
+/* chip.css — 等宽词条（模板占位符 / 脚本入参 / 内置函数 / 表内取值）
+ *
+ * 选用表：
+ *   成行排列        .chip-row（--inline 去掉默认上间距），行首说明用 .chip-row-label
+ *   普通词条        .chip
+ *   可调用函数      .chip--fn（强调色）
+ *   表格行内密集    .chip--dense（更小一档，表格行高有限）
+ *   弱化            .chip--muted
+ *
+ * 为什么必须放在全局而非 scoped：这套视觉此前在三个文件里各写一份，其中
+ * `HttpTaskFields.vue` 的 `.http-chip` 与 `views/tasks/HttpTasksPanel.vue` 的 `.http-chip`
+ * **规则体逐字相同**、与 `HttpLoginWizard.vue` 的 `.wz-chip` 也只差容器类的名字。
+ * scoped 样式无法跨组件复用，于是每加一处新面板就得再抄一遍——收敛到这里后
+ * 任何面板直接引用即可，无需再起 `xx-chip` 这样的新前缀。
+ *
+ * 与 `.badge`（badge.css）的分工：`.badge` 是有语义色的小胶囊（成功/警告/类型），
+ * 用于状态与分类；`.chip` 是**等宽取值**（占位符名字、函数名、HTTP 方法），
+ * 不表达状态。二者不要互相替代。
+ */
+
+.chip-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* 行内速查变体：标签 + 词条同排（占位符行、脚本契约卡首行），不需要默认的上间距 */
+.chip-row--inline {
+  margin-top: 0;
+}
+
+.chip-row-label {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.chip {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.chip--fn {
+  color: var(--accent);
+}
+
+/* 表格行内密集变体：原 .tsk-chip（tasks.css）。表格行高有限，字号与内边距各收一档，
+   底色改用更透的 --bg-glass 以免在斑马/悬停行上形成色块。 */
+.chip--dense {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+}
+
+/* 弱化变体：原 .tsk-chip--muted（ScriptsPanel）。解释器徽标里 Python 是默认项、
+   不需要与"自定义程序"同等强调。 */
+.chip--muted {
+  color: var(--text-muted);
+  font-weight: 600;
+}

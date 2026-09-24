@@ -1,110 +1,56 @@
 /**
- * 定时任务状态与操作（单例）。
- * 替代原 scheduledTasksData + scheduledTasksMethods。
+ * 定时任务状态与操作（单例）——自动保存模式。
+ *
+ * 编辑模型与 `useScripts` / `useHttpTasks` 对齐：**没有弹窗、没有保存按钮**。字段变更
+ * debounce 静默落盘（首次 POST 建任务、之后 PUT），头部状态字 idle→saving→saved/error；
+ * 缺口（见 `utils/scheduledDraft`）会拦住落盘并把状态字改成「有 N 处待补全，改动暂未保存」。
+ *
+ * 此前是「表格 + 新建/编辑弹窗」：同一个任务页里，另外三个子页是"点行进二级页、
+ * 改动自动保存"，定时任务却是"弹窗 + 取消/保存"，交互与版式都不是一套东西。
+ *
+ * 两处与弹窗时代不同的口径（有意）：
+ * - **新建不再预落盘**：弹窗时代点「新建」只是打开表单（不落盘，这点本来就对），现在
+ *   同理——ID 由程序生成（`newScheduledTaskId`）但只有名称与目标都补齐后第一次自动保存
+ *   才创建文件，中途放弃不留垃圾任务。
+ * - **启停开关仍留在列表**（连点守卫不变），编辑页侧栏另有一个同样的开关，改的是同一份
+ *   草稿、走自动保存。
  */
 
-import { ref } from "vue";
-import type { ScheduledTask, ScheduledTaskHistoryItem, ScheduledTaskTrigger } from "../api/types";
+import { computed, ref, watch } from "vue";
+import type { ScheduledTask, ScheduledTaskHistoryItem } from "../api/types";
 import { scheduledTasksApi } from "../api";
-import { extractApiError } from "../api/client";
+import { extractApiError, isConflictError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { createFetchGuard, createFirstFailNotifier, useBusyIds } from "../utils/guards";
-import { formatScheduleTime } from "../utils/formatters";
+import { createAutosaveController, gapBlocker } from "../utils/autosave";
+import {
+  emptyScheduledDraft,
+  scheduledDraftFingerprint,
+  scheduledDraftFromServer,
+  scheduledDraftGaps,
+  scheduledDraftPayload,
+  type ScheduledGapContext,
+  type ScheduledTaskDraft,
+} from "../utils/scheduledDraft";
+import { useTaskDirectory } from "./useTaskDirectory";
+import { initialReconcileState, reconcileDraft } from "../utils/draftReconcile";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
 
-interface ScheduledTaskForm {
-  id: string;
-  name: string;
-  description: string;
-  task_type: string;
-  target_id: string;
-  enabled: boolean;
-  trigger: ScheduledTaskTrigger;
-  schedule: { hour: number; minute: number };
-  timeout: number;
-  /** 启动触发：每日成功次数上限 */
-  max_runs_per_day: number;
-  /** 启动触发：失败重试次数 */
-  max_retries: number;
-  /** 启动触发：延迟执行秒数 */
-  startup_delay_secs: number;
-}
+export type { ScheduledTaskDraft };
 
-/** 启动触发字段的合法区间（与后端钳制口径一致） */
-export const STARTUP_FORM_LIMITS = {
-  maxRunsPerDay: { min: 1, max: 99, fallback: 1 },
-  maxRetries: { min: 0, max: 10, fallback: 2 },
-  startupDelaySecs: { min: 0, max: 86400, fallback: 30 },
-} as const;
-
-/** 钳制启动触发表单值：NaN/越界回退缺省或区间边界（纯函数，供测试） */
-export function clampStartupForm(input: {
-  max_runs_per_day: number;
-  max_retries: number;
-  startup_delay_secs: number;
-}): { max_runs_per_day: number; max_retries: number; startup_delay_secs: number } {
-  const { maxRunsPerDay, maxRetries, startupDelaySecs } = STARTUP_FORM_LIMITS;
-  const clamp = (raw: number, min: number, max: number, fallback: number): number => {
-    const n = Math.round(Number(raw));
-    if (!Number.isFinite(n)) return fallback;
-    return Math.min(Math.max(n, min), max);
-  };
-  return {
-    max_runs_per_day: clamp(input.max_runs_per_day, maxRunsPerDay.min, maxRunsPerDay.max, maxRunsPerDay.fallback),
-    max_retries: clamp(input.max_retries, maxRetries.min, maxRetries.max, maxRetries.fallback),
-    startup_delay_secs: clamp(
-      input.startup_delay_secs,
-      startupDelaySecs.min,
-      startupDelaySecs.max,
-      startupDelaySecs.fallback,
-    ),
-  };
-}
-
-/** 从 5 字段 cron 表达式解析 hour 和 minute；分/时字段含非纯数字内容（步进、区间、列表等）时返回 valid:false */
-export function parseCronToSchedule(cron: string): { hour: number; minute: number; valid: boolean } {
-  const parts = cron.trim().split(/\s+/);
-  // 标准 5 字段: minute hour day month weekday
-  // 必须整字段纯数字：parseInt("8-18") 会宽松解析为 8，把区间表达式
-  // "半解析成功"，调度语义已经变了却检测不到
-  if (parts.length >= 2 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
-    return { hour: parseInt(parts[1], 10), minute: parseInt(parts[0], 10), valid: true };
-  }
-  // 非每日时间表达式：回退 08:00 仅作表单展示初值，调用方必须提示覆盖后果
-  //（保存固定生成每日表达式，此前无提示导致调度语义被静默改写）
-  return { hour: 8, minute: 0, valid: false };
-}
-
-/** 从 {hour, minute} 生成 5 字段 cron 表达式 */
-function scheduleToCron(hour: number, minute: number): string {
-  return `${minute} ${hour} * * *`;
-}
+// 目标下拉与缺口校验都要用任务目录（浏览器任务 / 脚本的混合列表，模块级单例）
+const { browserTasks, scripts: taskScripts, loaded: directoryLoaded } = useTaskDirectory();
 
 const scheduledTasks = ref<ScheduledTask[]>([]);
-const scheduledTaskForm = ref<ScheduledTaskForm>({
-  id: "",
-  name: "",
-  description: "",
-  task_type: "browser",
-  target_id: "",
-  enabled: true,
-  trigger: "cron",
-  schedule: { hour: 8, minute: 0 },
-  timeout: 60,
-  max_runs_per_day: 1,
-  max_retries: 2,
-  startup_delay_secs: 30,
-});
+/** 列表是否已成功拉取过一次：`?task=<id>` 未就绪时不判定"任务不存在"（见 useTaskEditorQuery 的 ready） */
+const scheduledLoaded = ref(false);
+/** 正在编辑的定时任务草稿（null = 列表态） */
+const scheduledTaskDraft = ref<ScheduledTaskDraft | null>(null);
+
 const scheduledTaskHistory = ref<ScheduledTaskHistoryItem[]>([]);
-const showScheduledTaskModal = ref(false);
-const editingScheduledTask = ref<string | null>(null);
-const scheduledTaskFormLoading = ref(false);
 const scheduledTaskHistoryLoading = ref(false);
 const selectedScheduledTaskId = ref<string | null>(null);
-/** 编辑中的任务原始 cron 表达式（非每日格式时在弹窗内明示覆盖后果） */
-const originalCron = ref("");
-const originalCronInvalid = ref(false);
 
 // A11：手动运行 busy 守卫（响应式 Set），防止连点重复提交
 const runningIds = useBusyIds();
@@ -121,16 +67,29 @@ const fetchGuard = createFetchGuard(5000);
 // 首败提示：加载失败时不再静默显示"暂无定时任务"空态误导用户
 const loadFail = createFirstFailNotifier();
 
+/**
+ * 拉取世代号：只有**最新**那一发允许写列表。
+ *
+ * 与 `useTaskDirectory.fetchDirectory` 同一口径（那里解释了为什么必要）：落盘后刷新与
+ * 守卫内的自然刷新可以重叠，较旧的快照后到会让"刚编辑的这个任务"从列表里消失，
+ * 对账逻辑据此判定它已被删除、关掉编辑器，未落盘的改动随之丢失。
+ */
+let loadEpoch = 0;
+
 async function loadScheduledTasks(force = false): Promise<void> {
   if (!fetchGuard.shouldFetch(force)) return;
+  const mine = ++loadEpoch;
   try {
     const data = await scheduledTasksApi.list();
+    if (mine !== loadEpoch) return; // 过期快照：丢弃
     if (Array.isArray(data)) {
       scheduledTasks.value.splice(0, scheduledTasks.value.length, ...data);
+      scheduledLoaded.value = true;
     }
     fetchGuard.markSuccess();
     loadFail.trackRecovery();
   } catch (e) {
+    if (mine !== loadEpoch) return;
     frontendLogger.error("scheduler", "加载定时任务失败", e);
     if (loadFail.trackFailure()) {
       toastOnly(false, extractApiError(e, "加载定时任务失败"));
@@ -138,139 +97,177 @@ async function loadScheduledTasks(force = false): Promise<void> {
   }
 }
 
-function openCreateScheduledTask(): void {
-  editingScheduledTask.value = null;
-  originalCron.value = "";
-  originalCronInvalid.value = false;
-  Object.assign(scheduledTaskForm.value, {
-    name: "",
-    description: "",
-    task_type: "browser",
-    target_id: "",
-    enabled: true,
-    trigger: "cron",
-    schedule: { hour: 8, minute: 0 },
-    timeout: 60,
-    max_runs_per_day: 1,
-    max_retries: 2,
-    startup_delay_secs: 30,
-  });
-  showScheduledTaskModal.value = true;
+/**
+ * 列表刷新后对账（四个任务面板同一口径，见 `utils/draftReconcile`）。
+ *
+ * 正在编辑的任务若在别处被删掉（手改磁盘 / 另一个实例 / 刷新后它已不在列表里），
+ * 编辑器必须自己退出：否则用户每改一处都会 PUT 一个不存在的 id、拿到 404 与失败
+ * 提示，草稿却留在页面上，看起来像"保存不了"。
+ *
+ * 这里用 `clearScheduledDraft` 而**不是** `closeScheduledTaskEditor`：后者的语义是
+ * "退出即落盘"（flush），对一个已被删除的任务再发一次 PUT 只会再吃一次 404；而且
+ * 那份草稿已经没有任何可以落盘的去处。
+ *
+ * 挂在模块作用域而**不是** `loadScheduledTasks` 里面：后者每成功拉取一次就跑一遍
+ * （自动保存落盘后也会拉），放在里面会让 watcher 与 `reconcileState` 按拉取次数累加，
+ * 同一份删除被反复判定。
+ */
+let reconcileState = initialReconcileState(scheduledTasks.value.map((t) => t.id));
+watch(
+  () => scheduledTasks.value.map((t) => t.id).join("\u0000"),
+  () => {
+    const listIds = scheduledTasks.value.map((t) => t.id);
+    const result = reconcileDraft({
+      state: reconcileState,
+      draftId: scheduledTaskDraft.value?.id,
+      listIds,
+    });
+    reconcileState = result.state;
+    if (!result.gone) return;
+    clearScheduledDraft();
+    toastOnly(false, "正在编辑的任务已不存在，已退出编辑");
+  },
+);
+
+// ---- 草稿 / 缺口 ----
+
+/** 缺口校验的上下文：当前草稿的目标类型决定候选池 */
+function gapContextFor(draft: ScheduledTaskDraft): ScheduledGapContext {
+  const pool = draft.task_type === "script" ? taskScripts.value : browserTasks.value;
+  return {
+    validTargetIds: pool.map((t) => t.id),
+    targetsLoaded: directoryLoaded.value,
+  };
 }
 
-function openEditScheduledTask(task: ScheduledTask): void {
-  editingScheduledTask.value = task.id;
-  const isStartup = task.trigger === "startup";
-  const cron = isStartup ? "" : task.cron || "";
-  const schedule = parseCronToSchedule(cron);
-  originalCron.value = cron;
-  originalCronInvalid.value = !isStartup && !schedule.valid;
-  if (!schedule.valid && !isStartup) {
+/** 当前草稿的缺口（渲染用）：自动保存被缺口拦住时状态字与缺口条据此改口 */
+const draftGapsNow = computed<string[]>(() =>
+  scheduledTaskDraft.value ? scheduledDraftGaps(scheduledTaskDraft.value, gapContextFor(scheduledTaskDraft.value)) : [],
+);
+
+/** 当前编辑的是"还没落盘的定时任务"（面板据此把「删除」改成「放弃」、落盘后补 `?task=`） */
+const isNewScheduledDraft = computed(() => scheduledTaskDraft.value?._isNew === true);
+
+// ---- 自动保存 ----
+
+/**
+ * 自动保存：状态机、在途请求序号与 debounce 都交给共享控制器（见 `utils/autosave`），
+ * 本面板只提供三件口径——**什么算有改动**（载荷指纹）、**什么算发不出去**（缺口）、
+ * **往哪儿落盘**。
+ *
+ * 落盘动作带着本面板唯一的特殊分支：**首次落盘走 POST 建任务，之后同一 id 走 PUT**。
+ */
+const autosave = createAutosaveController<ScheduledTaskDraft>({
+  draft: scheduledTaskDraft,
+  idOf: (draft) => draft.id,
+  fingerprintOf: scheduledDraftFingerprint,
+  blockReasonOf: gapBlocker((draft) => scheduledDraftGaps(draft, gapContextFor(draft))),
+  persist: async (draft) => {
+    const payload = scheduledDraftPayload(draft);
+    if (draft._isNew) {
+      try {
+        await scheduledTasksApi.create({ id: draft.id, ...payload });
+      } catch (e) {
+        // 首发与"换编辑对象 / 关闭编辑器时补发的那一发"重叠时，两边都以为自己是第一次；
+        // 而 `POST /api/scheduler/jobs` 对已存在的 id 明确返回 409（PUT 是幂等合并）。
+        // 此时 409 的真实含义是"另一发已经把它建好了"，降级成 PUT 继续即可——否则用户
+        // 看到一句"定时任务 X 已存在"的红字，而任务其实建成功了。
+        if (!isConflictError(e)) throw e;
+        await scheduledTasksApi.update(draft.id, payload);
+      }
+    } else {
+      await scheduledTasksApi.update(draft.id, payload);
+    }
+    // 列表里的调度摘要（下次执行时间 / 今日成功次数）由后端回填，落盘后刷新才准
+    await loadScheduledTasks(true);
+  },
+  onSaved: (draft) => {
+    draft._isNew = false;
+  },
+  toast: toastOnly,
+  logScope: "scheduler",
+  detachedSubject: "上一份定时任务",
+});
+
+/** 清空编辑器状态（删除 / 放弃新建等无需再保存的场景）；草稿由控制器一并关掉 */
+function clearScheduledDraft(): void {
+  autosave.clear();
+}
+
+/** 关闭编辑器：在途 debounce 立即落盘（「退出即生效」承诺） */
+async function closeScheduledTaskEditor(): Promise<void> {
+  await autosave.flush("close");
+  clearScheduledDraft();
+}
+
+/**
+ * 新建草稿（**不落盘**）。
+ *
+ * ID 虽然由程序生成，但只有名称与目标补齐后第一次自动保存才创建文件——否则"点开看一眼
+ * 又退出"会在磁盘上留一个没填过的任务。
+ */
+function createScheduledDraft(): void {
+  const draft = emptyScheduledDraft();
+  scheduledTaskDraft.value = draft;
+  // 名称与目标都空着，本来就是缺口（发不出去）：登记基线只是省掉一发注定被拦的定时器
+  autosave.markBaseline(draft);
+}
+
+/**
+ * 打开定时任务编辑器：无参 = 新建草稿，带参 = 由列表里的任务构造草稿。
+ *
+ * 任务字段**全部取自列表响应**（后端没有单任务 GET）：故深链要在列表就绪后再解析
+ * （见 useTaskEditorQuery 的 `ready`），此处找不到即视为"已不存在"。
+ */
+async function showScheduledTaskEditor(taskId?: string): Promise<void> {
+  // 换编辑对象：上一份草稿在途的改动先补发（不 await——打开必须立刻发生）
+  void autosave.flush("switch");
+  if (!taskId) {
+    createScheduledDraft();
+    return;
+  }
+  const task = scheduledTasks.value.find((t) => t.id === taskId);
+  if (!task) {
+    toastOnly(false, `找不到定时任务「${taskId}」，它可能已被删除`);
+    return;
+  }
+  const draft = scheduledDraftFromServer(task);
+  scheduledTaskDraft.value = draft;
+  // 刚载入的草稿就是磁盘现状：基线对上了，用户不动它就不会发请求
+  autosave.markBaseline(draft);
+  if (draft._originalCronInvalid) {
+    // 非每日表达式在表单里表达不了：不提示就等于静默改写调度语义。
+    // 措辞与面板里那条 hint 同口径——只改名称 / 目标不动调度，改「执行时间」才会改写。
     toastOnly(
       false,
-      `该任务使用非每日时间表达式（${cron}），保存后将按表单时间改为每日执行`,
+      `该任务使用非每日时间表达式（${draft._originalCron}）：不动「执行时间」就保持原样，改了才会按上方时间改为每日执行`,
     );
   }
-  Object.assign(scheduledTaskForm.value, {
-    name: task.name || "",
-    description: task.description || "",
-    // 表单类型仅用于展示/切换目标下拉；保存不上传类型，后端始终从 target 推导
-    task_type: task.task_type === "script" ? "script" : "browser",
-    target_id: task.target_id || "",
-    enabled: task.enabled !== false,
-    trigger: isStartup ? "startup" : "cron",
-    schedule,
-    timeout: task.timeout || 60,
-    max_runs_per_day: task.max_runs_per_day || 1,
-    max_retries: task.max_retries ?? 2,
-    startup_delay_secs: task.startup_delay_secs ?? 30,
-  });
-  showScheduledTaskModal.value = true;
 }
 
-function closeScheduledTaskModal(): void {
-  showScheduledTaskModal.value = false;
-  editingScheduledTask.value = null;
-  originalCron.value = "";
-  originalCronInvalid.value = false;
-}
-
-async function saveScheduledTask(validTargetIds?: string[]): Promise<void> {
-  // FE1-2：composable 层入口守卫——按钮 :disabled 只覆盖模板路径，
-  // 任何绕过模板的调用点在此拦下（与 useTasks.saveTask 对齐）
-  if (scheduledTaskFormLoading.value) return;
-  const form = scheduledTaskForm.value;
-  if (!form.name.trim()) {
-    toastOnly(false, "请输入任务名称");
-    return;
-  }
-  if (!form.target_id) {
-    toastOnly(false, "请选择目标任务");
-    return;
-  }
-  // 死引用校验：目标任务被删除后下拉显示为空但 target_id 残留，
-  // 保存成功也要到运行期才报"加载目标任务失败"，这里前置拦截
-  if (validTargetIds && !validTargetIds.includes(form.target_id)) {
-    toastOnly(false, "目标任务不存在或已删除，请重新选择");
-    return;
-  }
-  scheduledTaskFormLoading.value = true;
-  const isStartup = form.trigger === "startup";
-  // 启动触发不依赖 cron（后端落盘空串）；定时触发按表单时间生成每日表达式
-  const cron = isStartup ? "" : scheduleToCron(form.schedule.hour, form.schedule.minute);
-  // 超时按输入框 min/max 钳制：NaN/越界值不发后端（后端缺省 60s）
-  const timeout = Math.min(Math.max(Number(form.timeout) || 60, 5), 3600);
-  const startupFields = clampStartupForm({
-    max_runs_per_day: form.max_runs_per_day,
-    max_retries: form.max_retries,
-    startup_delay_secs: form.startup_delay_secs,
-  });
-  try {
-    if (editingScheduledTask.value) {
-      // PUT /api/scheduler/jobs/{id} — 发送完整表单数据（类型由后端从 target 推导，不再上传）
-      const payload = {
-        name: form.name,
-        description: form.description,
-        target_id: form.target_id,
-        cron,
-        enabled: form.enabled,
-        timeout,
-        trigger: form.trigger,
-        ...(isStartup ? startupFields : {}),
-      };
-      const data = await scheduledTasksApi.update(editingScheduledTask.value, payload);
-      toastOnly(true, data?.message || "保存成功");
-    } else {
-      // POST /api/scheduler/jobs — 创建同样带上描述与超时
-      //（此前只发 5 字段，弹窗里的描述/超时被静默丢弃）
-      const id = `sched_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-      const payload = {
-        id,
-        name: form.name,
-        description: form.description,
-        target_id: form.target_id,
-        cron,
-        enabled: form.enabled,
-        timeout,
-        trigger: form.trigger,
-        ...(isStartup ? startupFields : {}),
-      };
-      const data = await scheduledTasksApi.create(payload);
-      toastOnly(true, data?.message || "保存成功");
-    }
-    closeScheduledTaskModal();
-    await loadScheduledTasks(true);
-  } catch (e) {
-    toastOnly(false, extractApiError(e, "保存失败"));
-  } finally {
-    scheduledTaskFormLoading.value = false;
-  }
-}
+// ---- 列表行操作 ----
 
 async function deleteScheduledTask(taskId: string): Promise<void> {
-  const ok = await confirm({ title: "删除定时任务", message: "确定要删除这个定时任务吗？", danger: true });
+  // 新建草稿磁盘上还没有它：这个动作是"放弃"而不是"删除"，照旧走后端只会 404
+  const draft = scheduledTaskDraft.value;
+  const discard = !!draft && draft._isNew && draft.id === taskId;
+  const ok = await confirm({
+    title: discard ? "放弃新建定时任务" : "删除定时任务",
+    message: discard
+      ? "这个定时任务还没有保存过（名称与目标补齐后才会创建），放弃后当前内容会丢掉。"
+      : `确定要删除定时任务「${taskId}」吗？`,
+    danger: true,
+  });
   if (!ok) return;
+  if (discard) {
+    clearScheduledDraft();
+    return;
+  }
   try {
+    // 被删的是当前打开的那条时先关编辑器：自动保存可能正要写回一个已删除的 id
+    if (draft && !draft._isNew && draft.id === taskId) {
+      clearScheduledDraft();
+    }
     const data = await scheduledTasksApi.delete(taskId);
     toastOnly(true, data?.message || "删除成功");
     await loadScheduledTasks(true);
@@ -299,8 +296,10 @@ async function runScheduledTask(taskId: string): Promise<void> {
   if (runningIds.has(taskId)) return;
   runningIds.add(taskId);
   try {
-    const data = await scheduledTasksApi.run(taskId);
-    toastOnly(true, data?.message || "执行成功");
+    // 后端只表示"已排入执行"（spawn 手动运行后立刻回包），成败要等执行历史。
+    // 原来读 `data?.message` 恒为 undefined，于是无论任务成败都弹绿色的"执行成功"。
+    await scheduledTasksApi.run(taskId);
+    toastOnly(true, "已触发执行，结果见「执行历史」");
     await loadScheduledTasks(true);
   } catch (e) {
     toastOnly(false, extractApiError(e, "执行失败"));
@@ -343,42 +342,29 @@ function formatTaskType(type: string): string {
   return types[type] || type;
 }
 
-function onTimeChange(event: Event): void {
-  const value = (event.target as HTMLInputElement).value;
-  if (value) {
-    const [hour, minute] = value.split(":").map(Number);
-    scheduledTaskForm.value.schedule.hour = hour;
-    scheduledTaskForm.value.schedule.minute = minute;
-  }
-}
-
 export function useScheduledTasks() {
   return {
     scheduledTasks,
-    scheduledTaskForm,
+    scheduledLoaded,
+    scheduledTaskDraft,
+    isNewScheduledDraft,
+    autosaveState: autosave.autosaveState,
+    draftGapsNow,
     scheduledTaskHistory,
-    showScheduledTaskModal,
-    editingScheduledTask,
-    scheduledTaskFormLoading,
     scheduledTaskHistoryLoading,
     selectedScheduledTaskId,
-    originalCron,
-    originalCronInvalid,
     runningIds,
     togglingIds,
     loadScheduledTasks,
-    openCreateScheduledTask,
-    openEditScheduledTask,
-    closeScheduledTaskModal,
-    saveScheduledTask,
+    showScheduledTaskEditor,
+    createScheduledDraft,
+    closeScheduledTaskEditor,
+    clearScheduledDraft,
     deleteScheduledTask,
     toggleScheduledTask,
     runScheduledTask,
     loadScheduledTaskHistory,
     closeScheduledTaskHistory,
-    // formatTimeValue 不再经此转发：无视图消费，测试直接引用 utils/formatters
-    formatScheduleTime,
     formatTaskType,
-    onTimeChange,
   };
 }

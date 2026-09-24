@@ -3,12 +3,11 @@
  * 顶部步进器 + 卡片完成态指示；流式输出与底部同步进度条为本次新增。
  */
 
-/* AI 生成页作为「任务」页的一个 Tab 由容器渲染：外层 .page-content 由容器持有，
-   故入场动画在此补上（否则切到本 Tab 时无过渡，与其他 Tab 观感不一致）。 */
+/* AI 生成页作为「任务」页的一个 Tab 由容器渲染。入场动画不再在此手抄——
+   统一出口见 layout.css 的 `.content-wrapper > *`（页面级，每个页面都自动带上）。 */
 .ai-task-page {
   padding-bottom: 24px;
   --ai-rail: rgba(var(--primary-rgb), 0.16);
-  animation: pageEnter var(--dur-slow) var(--ease-out);
 }
 .ai-stepper {
   display: flex;
@@ -406,14 +405,12 @@
 @keyframes ai-pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(0.92); opacity: 0.85; } }
 @keyframes ai-indeterminate { 0% { transform: translateX(-45%); } 100% { transform: translateX(280%); } }
 
+@media (max-width: 900px) {
+  .ai-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 640px) {
   .ai-step-label { font-size: var(--text-sm); }
   .ai-step-sep { margin: 0 6px; }
-}
-@media (max-width: 960px) {
-  .ai-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 520px) {
   .ai-provider-grid { grid-template-columns: 1fr; }
   .ai-stepper { padding-inline: 10px; }
 }

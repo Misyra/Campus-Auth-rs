@@ -1,15 +1,17 @@
 .about-container {
   max-width: 960px;
   margin: 0 auto;
-  /* 技术徽章品牌色 */
-  --tech-python: #3776ab;
-  --tech-fastapi: #009688;
-  --tech-pyinstaller: #b0b0b0;
-  --tech-websockets: #6495ed;
-  --tech-pydantic: #e63e12;
+  /* 技术徽章品牌色。与 AboutView.vue 的 tech-stack 清单**一一对应**：
+     清单里出现的每个修饰类，这里必须有一条同名 token，否则徽标没有配色
+     （`.rust` / `.tokio` / `.vue` 曾因此长期无配色，见下方 .tech-badge 注释）。 */
+  --tech-rust: #f74c00;
+  --tech-tokio: #7b6bff;
+  --tech-vue: #42b883;
   --tech-playwright: #2eaa55;
-  --tech-uv: var(--accent);
+  --tech-websockets: #6495ed;
   --tech-ddddocr: #a855f7;
+  --tech-uv: var(--accent);
+  --tech-python: #3776ab;
 }
 
 .about-hero {
@@ -58,14 +60,6 @@
 
 .description {
   color: var(--text-secondary);
-}
-
-.update-section {
-  margin-top: var(--space-md);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
 }
 
 .update-result {
@@ -131,9 +125,11 @@
   align-items: center;
   min-height: 36px;
   transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
-  /* color-mix 回退：旧浏览器显示半透明灰 */
+  /* color-mix 不支持时的兜底（旧浏览器显示半透明灰）：
+     下方那条带 color-mix 的声明会整条失效，于是回落到这两行 */
   background: rgba(var(--slate-rgb), 0.12);
   border: 1px solid rgba(var(--slate-rgb), 0.2);
+  color: var(--text-primary);
 }
 
 .tech-badge:hover {
@@ -141,53 +137,31 @@
   box-shadow: var(--shadow-hover);
 }
 
+/* 配色派生：每个技术只声明一行品牌色（下面的 `--tech` 赋值），
+   底色 / 描边 / 文字三者统一由它派生——此前是 8 条×4 行的平行规则，
+   每加一个技术就要记得写三处属性（background / color / border），漏一处
+   就出现"只有底色没有文字色"这类半成品。 */
+.tech-badge.rust,
+.tech-badge.tokio,
+.tech-badge.vue,
+.tech-badge.playwright,
+.tech-badge.websockets,
+.tech-badge.ddddocr,
+.tech-badge.uv,
 .tech-badge.python {
-  background: color-mix(in srgb, var(--tech-python) 20%, transparent);
-  color: var(--tech-python);
-  border: 1px solid color-mix(in srgb, var(--tech-python) 30%, transparent);
+  background: color-mix(in srgb, var(--tech) 20%, transparent);
+  border-color: color-mix(in srgb, var(--tech) 30%, transparent);
+  color: var(--tech);
 }
 
-.tech-badge.fastapi {
-  background: color-mix(in srgb, var(--tech-fastapi) 20%, transparent);
-  color: var(--tech-fastapi);
-  border: 1px solid color-mix(in srgb, var(--tech-fastapi) 30%, transparent);
-}
-
-.tech-badge.pyinstaller {
-  background: color-mix(in srgb, var(--tech-pyinstaller) 20%, transparent);
-  color: var(--tech-pyinstaller);
-  border: 1px solid color-mix(in srgb, var(--tech-pyinstaller) 30%, transparent);
-}
-
-.tech-badge.websockets {
-  background: color-mix(in srgb, var(--tech-websockets) 20%, transparent);
-  color: var(--tech-websockets);
-  border: 1px solid color-mix(in srgb, var(--tech-websockets) 30%, transparent);
-}
-
-.tech-badge.pydantic {
-  background: color-mix(in srgb, var(--tech-pydantic) 20%, transparent);
-  color: var(--tech-pydantic);
-  border: 1px solid color-mix(in srgb, var(--tech-pydantic) 30%, transparent);
-}
-
-.tech-badge.playwright {
-  background: color-mix(in srgb, var(--tech-playwright) 20%, transparent);
-  color: var(--tech-playwright);
-  border: 1px solid color-mix(in srgb, var(--tech-playwright) 30%, transparent);
-}
-
-.tech-badge.uv {
-  background: color-mix(in srgb, var(--tech-uv) 20%, transparent);
-  color: var(--tech-uv);
-  border: 1px solid color-mix(in srgb, var(--tech-uv) 30%, transparent);
-}
-
-.tech-badge.ddddocr {
-  background: color-mix(in srgb, var(--tech-ddddocr) 20%, transparent);
-  color: var(--tech-ddddocr);
-  border: 1px solid color-mix(in srgb, var(--tech-ddddocr) 30%, transparent);
-}
+.tech-badge.rust { --tech: var(--tech-rust); }
+.tech-badge.tokio { --tech: var(--tech-tokio); }
+.tech-badge.vue { --tech: var(--tech-vue); }
+.tech-badge.playwright { --tech: var(--tech-playwright); }
+.tech-badge.websockets { --tech: var(--tech-websockets); }
+.tech-badge.ddddocr { --tech: var(--tech-ddddocr); }
+.tech-badge.uv { --tech: var(--tech-uv); }
+.tech-badge.python { --tech: var(--tech-python); }
 
 .feature-list {
   list-style: none;
@@ -434,11 +408,6 @@
   white-space: nowrap;
 }
 
-.uninstall-item-size {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-
 .uninstall-item-tag {
   font-size: var(--text-xs);
   color: var(--text-muted);
@@ -506,12 +475,56 @@
   min-width: 32px;
 }
 
-.uninstall-final-hint {
+/* ---- 真卸载（purge）新增的几块 ---- */
+
+/* 「保留配置与任务」勾选行：与数据目录列表贴在一起，勾选后下方行的标签立刻改口 */
+.uninstall-keep {
   margin-top: var(--space-md);
+}
+
+.uninstall-keep-hint {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* 勾选保留后的数据目录标签：与「将删除」「无」同为中性信息，不用成功色——
+   它不是"操作成功"，只是"这次不动它" */
+.uninstall-item-tag.tag-kept {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+/* 守卫拒绝（如该目录是源码仓库）/ 卸载失败：阻断性提示，不是普通空态 */
+.uninstall-blocked {
   padding: 10px 12px;
+  margin-bottom: var(--space-sm);
   background: rgba(var(--error-rgb), 0.08);
-  border: 1px solid rgba(var(--error-rgb), 0.2);
+  border: 1px solid rgba(var(--error-rgb), 0.25);
   border-radius: var(--radius-md);
   font-size: var(--text-md);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+/* 卸载已启动时的删除清单：这是用户看到的最后一份清单，要与实际执行的一致 */
+.uninstall-plan-list {
+  margin: 0 0 var(--space-sm);
+  padding-left: 20px;
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.uninstall-note {
+  margin: var(--space-sm) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.uninstall-footer-note {
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
