@@ -2,6 +2,43 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-24 全功能实测排查）
+
+### 背景
+
+- 用户诉求：「再全面细致排查一遍各项功能，你使用 agent-browser 实际启动试试，确保各个功能没有问题」。
+- 做法：`agent-browser`（CDP，无 Playwright 依赖）在真实实例上点完所有页面并复核落盘结果 + 91 条路由全量扫 + 集成测试真起二进制；完整清单、截图与证据在 `docs/reports/full-audit/README.md`（本地不提交）。
+- 结论：界面侧无崩溃 / 白屏 / 死链 / 未处理异常，91 条路由状态码全部符合预期；**但脚本渠道在默认配置下完全跑不起来**，本轮修掉。
+
+### 一、脚本任务默认解释器跑不起来（真缺陷）
+
+- **现象**：新建脚本任务（默认「执行程序 = Python (项目内解释器)」）→「立即运行」报 `IO 错误: program path has no file name`；方案绑定该任务并选「自定义脚本」渠道 → `POST /api/login` 0.2 秒即终态失败，消息 `登录脚本 audit-probe 无法执行: IO 错误: program path has no file name`。把解释器换成下拉里的具体 python 路径后，同一任务同一方案 5.4 秒登录成功（`退出码 0：… user=20230001 PW=*** isp= auth=`）。
+- **根因**：`ScriptsPanel.vue` 把「项目内解释器」这一项存成**空串**，而 `build_script_command` 的四个分支写的是 `cfg.binary_path.clone().unwrap_or_else(|| default)`——`unwrap_or_else` 只兜 `None`，`Some("")` 被当作真实路径交给 `Command::new("")`。同一字段在三处各有解释（`uses_project_python` 与 `binary_to_ext` 早就把空串当未指定），只有执行分支不是。
+- **为什么全绿却没拦住**：三份 e2e fixture 的脚本任务都是手写的 `"binary_path": null`（走 `None` 分支），且此前**没有任何测试真的跑过一次脚本任务**（`tests/*.rs` 没有 `POST /api/scripts/run` 用例）。直连渠道有 `http_login_chain`、浏览器渠道有 `login_chain`，脚本渠道只有单测。
+- **修复**（`src/tasks/executor.rs`）：新增 `explicit_binary()`，把 `binary_path` 的**空白串按未指定**处理（trim + 过滤空串），`py` / `bat` / `cmd` / `sh` 四个分支统一走它；`execute_script_with_env` 增加前置判定，解析出的程序名为空时返回
+  `环境能力错误: 未解析到可执行程序（脚本扩展名 .py）：项目内解释器不可用，且任务未指定「执行程序」`，不再把空路径交给 `spawn` 换一句英文平台错误。
+- **回归测试 3 例**：空白 `binary_path` 在 `py` / `bat` / `sh` 三处都回退默认（逐字断言 program 与 args）、`binary_to_ext` 对空白仍推断为 `py`。
+
+### 二、界面上与「脚本登录」自相矛盾的过时文案
+
+- `ScriptsPanel.vue` 空列表说明原为「…支持 Python、Shell 或任意可执行程序；**要登录校园网请改用「方案」里的登录方式，不必写代码**」，「快速上手」原为「脚本只做辅助动作（打卡、签到等），**不参与登录认证**。」——而方案编辑器「自定义脚本」渠道的未绑定提示恰恰引导用户到这一页（`去新建 →`）。改为：脚本既能做辅助动作、也能当登录脚本，并补上退出码判定与重试口径；`useScripts.ts` 里同源的过时注释一并更正。
+
+### 三、删除定时任务残留执行历史文件
+
+- 真机证据：`DELETE /api/scheduler/jobs/sched_mufj7xv2_s411` 后 `tasks/scheduled/history/sched_mufj7xv2_s411.json` 仍在盘上——界面已无入口查看它，文件却永久残留；id 一旦被复用（旧版本按序号命名）会把上一个任务的历史当成自己的。
+- `SchedulerService::delete_task` 现连同 `history/{id}.json` 一并清理（**尽力而为**：历史删除失败只告警，不影响任务删除结果）。`tests/scheduled_tasks.rs` 的生命周期用例补断言（删前手写历史文件，删后必须不存在）。
+
+### 四、验证
+
+- `cargo fmt --check` 干净；`cargo clippy --all-targets --features no-embed -- -D warnings` 零告警。
+- `cargo test --features no-embed`：lib **1039** 例（上轮 1036，+3 为本轮新增回归）+ helper 12 例全绿；`http_login_chain` / `instance_lifecycle` / `scheduled_tasks` / `bridge_supervisor` / `updater_channels` / `smoke_test` 全绿。
+- 前端：`vue-tsc` 零错误、`vitest` **449** 例、`vite build` 通过、`audit.mjs` 复核 `ghosts=0 dead=36` 未变。
+- 本轮未覆盖：`tests/login_chain`（浏览器渠道真机链路）在本机走 skip 分支——其 `preflight()` 要求 `locate_python()` 命中的解释器能 `import PIL, ddddocr`，而仓库 `python_worker/.venv` 只装了 playwright（PIL/ddddocr 是可选能力，按设计不默认声明），以 CI 的 `e2e-login-chain` 作业为浏览器渠道的覆盖依据；卸载全流程演练未复跑，只验了守卫拒绝路径。
+
+### 五、本轮登记的待办（详见 `docs/plan-next.md`）
+
+- 登录历史不记渠道字段（三渠道只能从消息文本辨认）；「立即运行」后「最近结果」不刷新（后端异步执行、前端立刻拉取）；「设置 · 任务与环境」的「当前任务」对直连/脚本渠道显示原始任务 ID（直连的是自动生成的 `untitled_N`）；系统设置页部分开关不在可访问性树里；`TaskError::IoError` 全量人话化。
+
 ## 开发中（2026-09-24 登录新增第三种渠道：自定义脚本）
 
 ### 背景
