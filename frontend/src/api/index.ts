@@ -213,6 +213,8 @@ export const profilesApi = {
       login_channel?: Profile["login_channel"];
       /** 直连渠道绑定的直连任务 ID（空 = 未绑定；直连没有内置兜底任务） */
       active_http_task?: string;
+      /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
+      active_script_task?: string;
     },
   ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   save: (id: string, payload: ProfileUpdatePayload) =>

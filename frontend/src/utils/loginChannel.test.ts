@@ -13,11 +13,17 @@ import {
   HTTP_CRYPTO_BUILTINS,
   HTTP_METHOD_OPTIONS,
   httpConfigGaps,
+  httpTaskOptions,
   httpTestOutcomeHint,
   httpTestOutcomeLabel,
   isCredentialExposedViaGet,
+  loginChannelHint,
+  loginChannelIcon,
   loginChannelLabel,
   loginChannelShortLabel,
+  SCRIPT_LOGIN_CONTRACT_NOTE,
+  SCRIPT_LOGIN_ENV_VARS,
+  scriptTaskOptions,
 } from "./loginChannel";
 
 // ============ 直连 HTTPS 证书策略（三态） ============
@@ -61,9 +67,10 @@ describe("certPolicy 三态映射", () => {
 });
 
 describe("loginChannelLabel", () => {
-  it("浏览器与直连各自有稳定中文标签", () => {
+  it("浏览器、直连与脚本各自有稳定中文标签", () => {
     expect(loginChannelLabel("browser")).toBe("浏览器自动化");
     expect(loginChannelLabel("http")).toBe("直连请求");
+    expect(loginChannelLabel("script")).toBe("自定义脚本");
   });
 
   it("未知/缺失值回落浏览器（存量方案未写该字段的场景）", () => {
@@ -74,6 +81,46 @@ describe("loginChannelLabel", () => {
   it("紧凑标签与完整标签对 http 一致、对 browser 更短", () => {
     expect(loginChannelShortLabel("http")).toBe("直连请求");
     expect(loginChannelShortLabel("browser")).toBe("浏览器");
+    expect(loginChannelShortLabel("script")).toBe("脚本");
+  });
+
+  it("每个渠道都有徽标图标与悬停说明", () => {
+    // 图标名必须落在 IconApp 注册表里（返回类型已收窄，这里是运行时兜底）
+    expect(loginChannelIcon("browser")).toBe("chrome");
+    expect(loginChannelIcon("http")).toBe("globe");
+    expect(loginChannelIcon("script")).toBe("code");
+    for (const channel of ["browser", "http", "script"] as const) {
+      expect(loginChannelHint(channel).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("脚本登录渠道的契约文案", () => {
+  it("环境变量清单与后端 login::script_login 一一对应", () => {
+    // 后端改名而这里没跟着改，用户会照界面写一个永远读到空值的脚本，且不报错
+    expect([...SCRIPT_LOGIN_ENV_VARS]).toEqual([
+      "CAMPUS_USERNAME",
+      "CAMPUS_PASSWORD",
+      "CAMPUS_ISP",
+      "CAMPUS_AUTH_URL",
+    ]);
+  });
+
+  it("契约说明讲清四件事：谁来跑、凭据从哪来、怎么算成功、输出去哪", () => {
+    for (const key of SCRIPT_LOGIN_ENV_VARS) {
+      expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain(key);
+    }
+    expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("退出码 0");
+    expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("网络验证");
+    expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("***");
+  });
+
+  it("脚本任务下拉首项是「未绑定」——脚本渠道没有兜底任务", () => {
+    const options = scriptTaskOptions([{ id: "checkin", name: "每日签到" }]);
+    expect(options[0]).toEqual({ value: "", label: "未绑定（脚本登录不可用）" });
+    expect(options[1]).toEqual({ value: "checkin", label: "每日签到" });
+    // 直连侧同一口径：两个进程内渠道在"未绑定即不可用"上没有分歧
+    expect(httpTaskOptions([])[0].value).toBe("");
   });
 });
 
@@ -99,10 +146,15 @@ describe("HTTP_METHOD_OPTIONS", () => {
 });
 
 describe("channelNeedsRuntimeEnvironment", () => {
-  // 仪表盘据此抑制「环境未就绪」横幅：直连请求不拉起 Python Worker
-  // 与浏览器，环境缺失对它无影响；浏览器自动化必须依赖该环境
+  // 仪表盘据此抑制「环境未就绪」横幅：直连请求与自定义脚本都在 Rust 进程内
+  // 完成登录（前者发 HTTP、后者起子进程），不拉起 Python Worker 与浏览器；
+  // 浏览器自动化必须依赖该环境
   it("直连请求不需要运行环境", () => {
     expect(channelNeedsRuntimeEnvironment("http")).toBe(false);
+  });
+
+  it("自定义脚本不需要运行环境（起的是本地子进程，不是 Worker）", () => {
+    expect(channelNeedsRuntimeEnvironment("script")).toBe(false);
   });
 
   it("浏览器自动化需要运行环境", () => {

@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::config::{ConfigApi, ProfileApi};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
-use crate::web::routes::profiles::validate_http_task_binding;
+use crate::web::routes::profiles::validate_login_task_binding;
 
 /// GET /api/config — 获取当前全局设置
 ///
@@ -68,7 +68,7 @@ pub async fn patch_settings(
 /// 合并整份设置再 `save_settings`（仅锁最终写入），两个并发修改不同字段的请求
 /// 会相互覆盖（丢更新）。
 ///
-/// `tasks` 仅用于校验直连任务绑定（见 [`validate_http_task_binding`]）——这里不复用
+/// `tasks` 仅用于校验直连任务绑定（见 [`validate_login_task_binding`]）——这里不复用
 /// `ProfileApi`，因为绑定校验是**任务域的事实**，与方案业务无关。
 async fn apply_flat_settings_patch(
     config: &Arc<dyn ConfigApi>,
@@ -102,12 +102,13 @@ async fn apply_flat_settings_patch(
         "isp",
         "carrier_custom",
         "active_task",
-        // 登录渠道与直连任务绑定：GET 扁平响应会回传，客户端原样回传时必须落回
+        // 登录渠道与「渠道 → 任务」绑定：GET 扁平响应会回传，客户端原样回传时必须落回
         // Profile；否则落入 other_patch 被 json_merge 写到 settings 顶层成脏数据。
         // 注意直连的**请求参数**已不在方案里（搬进 `tasks/http/<id>.json`），
-        // 这里只剩渠道与绑定这两项。
+        // 这里只剩渠道与两条绑定。
         "login_channel",
         "active_http_task",
+        "active_script_task",
     ];
 
     // 全局设置字段
@@ -184,6 +185,7 @@ async fn apply_flat_settings_patch(
         "isp",
         "active_task",
         "active_http_task",
+        "active_script_task",
     ] {
         if profile_patch.get(key).is_some_and(|v| !v.is_string()) {
             return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
@@ -224,26 +226,38 @@ async fn apply_flat_settings_patch(
         if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str()) {
             profile.active_task = active_task.to_string();
         }
-        // 登录渠道是枚举（"browser"/"http"），不走字符串校验分支；
+        // 登录渠道是枚举（"browser"/"http"/"script"），不走字符串校验分支；
         // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
         if let Some(channel) = profile_patch.get("login_channel") {
-            profile.login_channel = serde_json::from_value::<crate::config::LoginChannel>(
-                channel.clone(),
-            )
-            .map_err(|_| ApiError::BadRequest("login_channel 仅支持 browser 或 http".into()))?;
+            profile.login_channel =
+                serde_json::from_value::<crate::config::LoginChannel>(channel.clone()).map_err(
+                    |_| ApiError::BadRequest("login_channel 仅支持 browser、http 或 script".into()),
+                )?;
         }
-        // 直连任务绑定：字符串（空串 = 未绑定）
+        // 任务绑定：字符串（空串 = 未绑定）
         if let Some(v) = profile_patch
             .get("active_http_task")
             .and_then(|v| v.as_str())
         {
             profile.active_http_task = v.to_string();
         }
-        // 直连渠道必须有可用的直连任务绑定。**与 `POST/PUT /api/profiles/{id}` 完全
-        // 同一口径**（共用 `validate_http_task_binding`）：三条保存路径若只有一条
+        if let Some(v) = profile_patch
+            .get("active_script_task")
+            .and_then(|v| v.as_str())
+        {
+            profile.active_script_task = v.to_string();
+        }
+        // 直连 / 脚本渠道必须有可用的任务绑定。**与 `POST/PUT /api/profiles/{id}`
+        // 完全同一口径**（共用 `validate_login_task_binding`）：三条保存路径若只有一条
         // 放宽，用户从设置页存一次就能把方案改成登录时必失败的状态，且毫无提示。
         // 校验的是**合并后**的渠道与绑定，故只改渠道不改绑定（或反之）同样整体判定。
-        validate_http_task_binding(tasks, profile.login_channel, &profile.active_http_task).await?;
+        validate_login_task_binding(
+            tasks,
+            profile.login_channel,
+            &profile.active_http_task,
+            &profile.active_script_task,
+        )
+        .await?;
         if let Some(password) = profile_patch.get("password") {
             // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
             // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
@@ -349,12 +363,14 @@ fn settings_flat_response(
         "carrier_custom": "",
         "active_task": profile.active_task,
         "has_password": has_password,
-        // 活跃方案的登录渠道与直连任务绑定：设置页「账号」Tab 与引导向导据此编辑、
-        // 分流，无需为一次编辑再拉整个方案列表。这两个字段属 Profile 域
+        // 活跃方案的登录渠道与「渠道 → 任务」绑定：设置页「账号」Tab 与引导向导据此编辑、
+        // 分流，无需为一次编辑再拉整个方案列表。这几个字段属 Profile 域
         // （后端写入活跃 Profile，不是全局 settings）；直连的请求参数不在这里，
-        // 它们属于 `tasks/http/<id>.json`，前端按 `active_http_task` 去任务页取。
+        // 它们属于 `tasks/http/<id>.json`，前端按 `active_http_task` 去任务页取；
+        // 脚本任务的正文同理属于 `tasks/scripts/<id>.json`。
         "login_channel": profile.login_channel,
         "active_http_task": profile.active_http_task,
+        "active_script_task": profile.active_script_task,
     })
 }
 
@@ -914,8 +930,9 @@ mod tests {
         profile_load_fails: bool,
     }
 
-    /// 内存 TaskApi：只实现 `validate_http_task_binding` 用到的 `load_task`。
-    /// 固定放一个直连任务与一个浏览器任务，覆盖"存在且类型对 / 类型不对 / 不存在"三态。
+    /// 内存 TaskApi：只实现 `validate_login_task_binding` 用到的 `load_task`。
+    /// 固定放一个直连任务、一个浏览器任务与一个脚本任务，覆盖"存在且类型对 /
+    /// 类型不对 / 不存在"三态（两种进程内渠道各一条）。
     struct MockTaskApi;
 
     #[async_trait::async_trait]
@@ -931,6 +948,9 @@ mod tests {
                 )),
                 "portal-browser" => Ok(crate::tasks::TaskKind::Browser(
                     crate::tasks::TaskConfig::default(),
+                )),
+                "portal-login" => Ok(crate::tasks::TaskKind::Script(
+                    crate::tasks::ScriptTaskConfig::default(),
                 )),
                 other => Err(TaskError::TaskNotFound(other.to_string())),
             }
@@ -1082,6 +1102,7 @@ mod tests {
                 active_task: String::new(),
                 login_channel: crate::config::LoginChannel::default(),
                 active_http_task: String::new(),
+                active_script_task: String::new(),
             },
             auto_switch: false,
         }
@@ -1326,6 +1347,64 @@ mod tests {
             serde_json::to_value(&g.settings).unwrap(),
             settings_before,
             "全局设置不应被 login_channel 影响"
+        );
+    }
+
+    /// 脚本渠道在 PATCH 路径上与直连同一口径：绑定必须有效，且落回 Profile 而非全局设置
+    #[tokio::test]
+    async fn test_patch_script_channel_validates_binding_and_updates_profile() {
+        let (app, inner) = mock_app();
+        let settings_before = {
+            let g = inner.lock().unwrap();
+            serde_json::to_value(&g.settings).unwrap()
+        };
+
+        // 切到脚本渠道但不给绑定 → 400（合并后整体无效，与新建/更新路径同判据）
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "login_channel": "script" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 带上有效绑定 → 200 且落回 Profile
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "login_channel": "script",
+                            "active_script_task": "portal-login"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["login_channel"], "script", "响应需回显新渠道");
+        assert_eq!(v["data"]["active_script_task"], "portal-login");
+        let g = inner.lock().unwrap();
+        assert_eq!(g.profile.login_channel, crate::config::LoginChannel::Script);
+        assert_eq!(g.profile.active_script_task, "portal-login");
+        assert_eq!(
+            serde_json::to_value(&g.settings).unwrap(),
+            settings_before,
+            "全局设置不应被脚本渠道字段影响"
         );
     }
 

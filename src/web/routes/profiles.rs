@@ -37,6 +37,8 @@ pub struct ProfileCreateBody {
     pub login_channel: Option<LoginChannel>,
     /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
     pub active_http_task: Option<String>,
+    /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）
+    pub active_script_task: Option<String>,
 }
 
 /// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
@@ -68,45 +70,68 @@ fn validate_http_url(label: &str, raw: &str) -> Result<String, ApiError> {
     Ok(trimmed)
 }
 
-/// 校验方案的直连任务绑定（新建 / 更新 / `PATCH /api/config` 三条保存路径共用）。
+/// 校验方案的「渠道 → 任务」绑定（新建 / 更新 / `PATCH /api/config` 三条保存路径共用）。
 ///
-/// 为什么直连比浏览器渠道多出这一道：浏览器渠道有内置默认任务兜底，绑定为空或
-/// 失效时登录会回退到 `default`，最坏也只是"用了默认任务"；直连**没有**兜底
-/// （门户地址无法内置），绑定为空或指错任务时登录必然失败——而那一刻用户早已离开
-/// 保存页面，看到的是"登录失败"而非"配置没选对"。放过去等于把配置错误伪装成运行
-/// 错误，故必须在保存时就拦下。
+/// 为什么直连与脚本比浏览器渠道多出这一道：浏览器渠道有内置默认任务兜底，绑定为空或
+/// 失效时登录会回退到 `default`，最坏也只是"用了默认任务"；直连与脚本都**没有**兜底
+/// （门户地址无法内置，登录逻辑只能由用户自己写），绑定为空或指错任务时登录必然失败
+/// ——而那一刻用户早已离开保存页面，看到的是"登录失败"而非"配置没选对"。放过去等于把
+/// 配置错误伪装成运行错误，故必须在保存时就拦下。
 ///
-/// 只读一次任务并同时判「存在」与「类型」：仅查存在性会放行被改成 browser/script
-/// 的同名任务，与 `LoginOrchestrator::resolve_http_task` 的判定口径保持一致。
-pub(crate) async fn validate_http_task_binding(
+/// 只读一次任务并同时判「存在」与「类型」：仅查存在性会放行被改成别类的同名任务，
+/// 与 `LoginOrchestrator::resolve_http_task` / `resolve_script_task` 的判定口径保持一致。
+pub(crate) async fn validate_login_task_binding(
     tasks: &Arc<dyn TaskApi>,
     login_channel: LoginChannel,
     active_http_task: &str,
+    active_script_task: &str,
 ) -> Result<(), ApiError> {
-    if login_channel != LoginChannel::Http {
-        // 浏览器渠道不看这个字段：切回浏览器后残留的绑定无害，不强制用户清空
-        return Ok(());
-    }
-    let id = active_http_task.trim();
+    // 浏览器渠道不看这两个字段：切回浏览器后残留的绑定无害，不强制用户清空
+    let (id, field, kind, want_http) = match login_channel {
+        LoginChannel::Browser => return Ok(()),
+        LoginChannel::Http => (
+            active_http_task.trim(),
+            "active_http_task",
+            "直连任务",
+            true,
+        ),
+        LoginChannel::Script => (
+            active_script_task.trim(),
+            "active_script_task",
+            "脚本任务",
+            false,
+        ),
+    };
     if id.is_empty() {
-        return Err(ApiError::BadRequest("请为直连渠道选择一个直连任务".into()));
+        return Err(ApiError::BadRequest(format!(
+            "请为{}渠道选择一个{kind}",
+            if want_http { "直连" } else { "脚本" }
+        )));
     }
+    let type_matches = |task: &crate::tasks::TaskKind| {
+        if want_http {
+            matches!(task, crate::tasks::TaskKind::Http(_))
+        } else {
+            matches!(task, crate::tasks::TaskKind::Script(_))
+        }
+    };
     match tasks.load_task(id).await {
-        Ok(crate::tasks::TaskKind::Http(_)) => Ok(()),
+        Ok(task) if type_matches(&task) => Ok(()),
         Ok(other) => {
             tracing::warn!(
                 task_id = id,
                 task_type = other.type_name(),
-                "方案绑定的任务不是直连任务，保存被拒"
+                field,
+                "方案绑定的任务类型不符，保存被拒"
             );
             Err(ApiError::BadRequest(format!(
-                "直连任务 {id} 不存在或不是直连任务"
+                "{kind} {id} 不存在或不是{kind}"
             )))
         }
         Err(e) => {
-            tracing::warn!(task_id = id, error = %e, "方案绑定的直连任务加载失败，保存被拒");
+            tracing::warn!(task_id = id, field, error = %e, "方案绑定的任务加载失败，保存被拒");
             Err(ApiError::BadRequest(format!(
-                "直连任务 {id} 不存在或不是直连任务"
+                "{kind} {id} 不存在或不是{kind}"
             )))
         }
     }
@@ -137,6 +162,8 @@ pub struct ProfileUpdateBody {
     pub login_channel: Option<LoginChannel>,
     /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
     pub active_http_task: Option<String>,
+    /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）
+    pub active_script_task: Option<String>,
 }
 
 /// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
@@ -206,10 +233,10 @@ const PROFILE_SHARE_FORMAT: u32 = 1;
 /// `password_decryption_failed` 仍为 false，排障时毫无线索。账号同样剔除——那是
 /// 接收方自己的学号，跟着走只会误导（也避免导出者无意识泄露）。
 ///
-/// `active_task` / `active_http_task` 置空：两者都是"本机任务 ID"的绑定关系，接收方
-/// 通常没有同名任务。浏览器侧保留会静默回退到默认任务
-/// （`LoginOrchestrator::resolve_active_task`），直连侧保留则会直接指向一个不存在的
-/// 任务——两种结果都在对方的机器上表现为"配置看起来是好的但登录不对"。
+/// `active_task` / `active_http_task` / `active_script_task` 置空：三者都是"本机任务
+/// ID"的绑定关系，接收方通常没有同名任务。浏览器侧保留会静默回退到默认任务
+/// （`LoginOrchestrator::resolve_active_task`），直连与脚本侧保留则会直接指向一个不
+/// 存在的任务——两种结果都在对方的机器上表现为"配置看起来是好的但登录不对"。
 fn build_share_payload(profile: &ProfileData) -> Value {
     serde_json::json!({
         "campus_auth_profile": PROFILE_SHARE_FORMAT,
@@ -236,6 +263,8 @@ fn build_share_payload(profile: &ProfileData) -> Value {
             // 直连请求参数已整体搬进直连任务（`tasks/http/<id>.json`）：方案侧只剩这条
             // 绑定关系，与 `active_task` 同口径清空。任务本身走任务页的导入导出通道。
             "active_http_task": "",
+            // 脚本任务同理：登录脚本的正文在 `tasks/scripts/<id>.json`，不随方案走
+            "active_script_task": "",
         }
     })
 }
@@ -290,7 +319,7 @@ fn parse_share_payload(body: &Value) -> Result<(ProfileData, String, bool), ApiE
     // 枚举字段显式解析：非法值报错而非静默退回默认，避免"导入成功但渠道变了"
     if let Some(v) = obj.get("login_channel") {
         profile.login_channel = serde_json::from_value(v.clone()).map_err(|_| {
-            ApiError::BadRequest("分享文件的 login_channel 非法（仅 browser/http）".into())
+            ApiError::BadRequest("分享文件的 login_channel 非法（仅 browser/http/script）".into())
         })?;
     }
     // 老分享文件里的 `http_*` 键（含 `http_method` / `http_ignore_https_errors`）一律
@@ -454,8 +483,17 @@ pub async fn create_profile(
     if let Some(active_http_task) = body.active_http_task {
         profile.active_http_task = active_http_task;
     }
-    // 直连渠道必须有可用的直连任务绑定（见 validate_http_task_binding 的说明）
-    validate_http_task_binding(&tasks, profile.login_channel, &profile.active_http_task).await?;
+    if let Some(active_script_task) = body.active_script_task {
+        profile.active_script_task = active_script_task;
+    }
+    // 直连 / 脚本渠道必须有可用的任务绑定（见 validate_login_task_binding 的说明）
+    validate_login_task_binding(
+        &tasks,
+        profile.login_channel,
+        &profile.active_http_task,
+        &profile.active_script_task,
+    )
+    .await?;
     profiles.create_profile(&target_id, profile).await?;
     tracing::info!(profile_id = %target_id, "创建 Profile");
     Ok(data(Value::String("ok".into())))
@@ -511,10 +549,19 @@ pub async fn update_profile(
     if let Some(active_http_task) = body.active_http_task {
         profile.active_http_task = active_http_task;
     }
-    // 直连渠道必须有可用的直连任务绑定（与 create 同一口径，见
-    // validate_http_task_binding）。注意这里判的是**合并后**的渠道与绑定：只改渠道
+    if let Some(active_script_task) = body.active_script_task {
+        profile.active_script_task = active_script_task;
+    }
+    // 直连 / 脚本渠道必须有可用的任务绑定（与 create 同一口径，见
+    // validate_login_task_binding）。注意这里判的是**合并后**的渠道与绑定：只改渠道
     // 不改绑定（或反之）时也必须整体有效。
-    validate_http_task_binding(&tasks, profile.login_channel, &profile.active_http_task).await?;
+    validate_login_task_binding(
+        &tasks,
+        profile.login_channel,
+        &profile.active_http_task,
+        &profile.active_script_task,
+    )
+    .await?;
     profiles
         .update_profile(&id, profile, body.clear_password)
         .await?;
@@ -624,7 +671,7 @@ mod tests {
         auto_switch: bool,
         /// switch_profile 派发的 ApplyProfile 目标 ID（验证 Engine 联动）
         dispatched_apply_profile: Vec<String>,
-        /// 内存任务表：只服务 `validate_http_task_binding` 的存在性 + 类型判定
+        /// 内存任务表：只服务 `validate_login_task_binding` 的存在性 + 类型判定
         tasks: Vec<(String, TaskKind)>,
     }
 
@@ -667,6 +714,7 @@ mod tests {
                     isp: p.isp.clone(),
                     active_task: p.active_task.clone(),
                     active_http_task: p.active_http_task.clone(),
+                    active_script_task: p.active_script_task.clone(),
                     login_channel: p.login_channel,
                     gateway_ip: p.gateway_ip.clone(),
                     wifi_ssid: p.wifi_ssid.clone(),
@@ -749,7 +797,7 @@ mod tests {
         }
     }
 
-    /// 内存 TaskApi：只实现 `validate_http_task_binding` 用到的 `load_task`，
+    /// 内存 TaskApi：只实现 `validate_login_task_binding` 用到的 `load_task`，
     /// 其余方法按「本域测试不触达」返回中性值（不 panic 以免掩盖误用）
     struct MockTaskApi(Arc<std::sync::Mutex<MockInner>>);
 
@@ -945,7 +993,7 @@ mod tests {
         }
     }
 
-    /// 测试用直连任务（`validate_http_task_binding` 只关心类型与 ID）
+    /// 测试用直连任务（`validate_login_task_binding` 只关心类型与 ID）
     fn http_task(id: &str) -> (String, TaskKind) {
         (
             id.to_string(),
@@ -977,13 +1025,33 @@ mod tests {
         )
     }
 
+    /// 测试用脚本任务（脚本渠道的绑定校验与直连同构，只是类型判据不同）
+    fn script_task(id: &str) -> (String, TaskKind) {
+        (
+            id.to_string(),
+            TaskKind::Script(crate::tasks::ScriptTaskConfig {
+                common: crate::tasks::CommonFields {
+                    task_id: id.to_string(),
+                    name: format!("脚本任务 {id}"),
+                    description: String::new(),
+                },
+                content: Some("print(1)".into()),
+                ..Default::default()
+            }),
+        )
+    }
+
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner {
             profiles: vec![profile_of("default"), profile_of("dorm")],
             active: "default".into(),
             auto_switch: false,
             dispatched_apply_profile: Vec::new(),
-            tasks: vec![http_task("portal-http"), browser_task("portal-browser")],
+            tasks: vec![
+                http_task("portal-http"),
+                browser_task("portal-browser"),
+                script_task("portal-login"),
+            ],
         }));
         let state = TestState {
             profiles: Arc::new(MockProfileApi(inner.clone())),
@@ -1050,6 +1118,9 @@ mod tests {
         assert_eq!(d["profiles"]["dorm"]["login_channel"], "browser");
         assert_eq!(d["profiles"]["dorm"]["gateway_ip"], "192.168.1.1");
         assert_eq!(d["profiles"]["dorm"]["wifi_ssid"], "Campus-Dorm-5G");
+        // 两条「渠道 → 任务」绑定都要在摘要里（任务页据此标出任务被谁在用）
+        assert_eq!(d["profiles"]["dorm"]["active_http_task"], "");
+        assert_eq!(d["profiles"]["dorm"]["active_script_task"], "");
         // 密码等敏感字段不得出现在摘要中
         assert!(d["profiles"]["dorm"].get("password").is_none());
     }
@@ -1461,6 +1532,139 @@ mod tests {
                 .active_http_task,
             "ghost"
         );
+    }
+
+    /// 脚本渠道未绑定脚本任务 → 400（与直连同一口径：没有兜底任务，未绑定必然登不上）
+    #[tokio::test]
+    async fn test_create_script_profile_without_binding_is_rejected() {
+        let (app, _inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/script-unbound")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "脚本未绑定",
+                            "username": "u",
+                            "password": "p",
+                            "login_channel": "script"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("请为脚本渠道选择一个脚本任务"),
+            "{json}"
+        );
+    }
+
+    /// 脚本渠道绑定到非脚本任务（这里是直连任务）→ 400：仅查存在性会放行，
+    /// 登录时才发现拿到的是别类配置
+    #[tokio::test]
+    async fn test_create_script_profile_with_wrong_task_type_is_rejected() {
+        let (app, _inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/script-wrong-type")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "绑错类型",
+                            "username": "u",
+                            "password": "p",
+                            "login_channel": "script",
+                            "active_script_task": "portal-http"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("不存在或不是脚本任务"),
+            "{json}"
+        );
+    }
+
+    /// 脚本渠道绑定正确 → 落盘并可在详情里读回（新建路径）
+    #[tokio::test]
+    async fn test_create_script_profile_with_binding_persists() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/lab-script")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "实验室脚本",
+                            "username": "u",
+                            "password": "p",
+                            "login_channel": "script",
+                            "active_script_task": "portal-login"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let created = g
+            .profiles
+            .iter()
+            .find(|p| p.id == "lab-script")
+            .expect("已创建 lab-script");
+        assert_eq!(created.login_channel, LoginChannel::Script);
+        assert_eq!(created.active_script_task, "portal-login");
+    }
+
+    /// 分享载荷必须清空脚本绑定（接收方多半没有同名脚本任务）
+    #[tokio::test]
+    async fn test_export_clears_script_task_binding() {
+        let (app, inner) = mock_app();
+        {
+            let mut g = inner.lock().unwrap();
+            let dorm = g.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.login_channel = LoginChannel::Script;
+            dorm.active_script_task = "portal-login".into();
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/profiles/dorm/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let profile = &json["data"]["profile"];
+        // 渠道本身跟着走（那是方案属性），绑定清空（那是本机任务）
+        assert_eq!(profile["login_channel"], "script");
+        assert_eq!(profile["active_script_task"], "");
+        assert_eq!(profile["active_http_task"], "");
     }
 
     /// 创建时非法认证地址 → 400（与 PUT 同一校验助手）

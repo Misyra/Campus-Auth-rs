@@ -477,7 +477,10 @@ impl Default for UpdaterSettings {
 /// 登录执行渠道
 ///
 /// `Browser` 走 Python Worker 浏览器自动化（默认，兼容存量）；`Http` 为 Rust
-/// 进程内直连请求，不启动 Worker/浏览器，也不要求 Python 环境就绪。
+/// 进程内直连请求，不启动 Worker/浏览器，也不要求 Python 环境就绪；`Script` 为
+/// 自定义脚本——把登录动作整个交给用户写的脚本任务，由 Rust 起本地子进程执行，
+/// 同样不启动 Worker/浏览器（凭据经环境变量注入，契约见
+/// `docs/guides/custom-script-guide.md` 的「用脚本登录」一节）。
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginChannel {
@@ -486,6 +489,31 @@ pub enum LoginChannel {
     Browser,
     /// 直连 HTTP 请求
     Http,
+    /// 自定义脚本
+    Script,
+}
+
+impl LoginChannel {
+    /// 是否在 Rust 进程内完成登录（不需要 Python 环境、浏览器与 Worker）。
+    ///
+    /// 三种渠道里只有浏览器渠道要拉起 Worker：直连在进程内发 HTTP，脚本在进程内
+    /// 起子进程。凡"是否需要环境就绪 / 是否占用浏览器会话槽位 / 是否能取消 Bridge
+    /// 任务"这类判定都应走本方法，避免各处各写一遍 `== Http || == Script`。
+    pub fn is_in_process(self) -> bool {
+        matches!(self, LoginChannel::Http | LoginChannel::Script)
+    }
+
+    /// 该渠道是否用某个任务承载"登录怎么做"（直连用直连任务，脚本用脚本任务）。
+    ///
+    /// 浏览器渠道也有 `active_task`，但它的登录参数（账号/地址）在方案里，
+    /// 任务只是"操作步骤"——所以本方法只覆盖后两种渠道。
+    pub fn binding_field(self) -> Option<&'static str> {
+        match self {
+            LoginChannel::Browser => None,
+            LoginChannel::Http => Some("active_http_task"),
+            LoginChannel::Script => Some("active_script_task"),
+        }
+    }
 }
 
 /// 单个 Profile 文件内容（`config/profiles/{id}.json`）
@@ -515,10 +543,15 @@ pub struct ProfileData {
     pub wifi_ssid: String,
     /// 活跃任务 ID
     pub active_task: String,
-    /// 登录执行渠道（browser=浏览器自动化默认；http=直连请求）
+    /// 登录执行渠道（browser=浏览器自动化默认；http=直连请求；script=自定义脚本）
     pub login_channel: LoginChannel,
     /// 直连渠道使用的任务 ID
     pub active_http_task: String,
+    /// 脚本渠道使用的脚本任务 ID（空 = 未绑定，脚本登录不可用）
+    ///
+    /// 与 `active_http_task` 同一口径：脚本渠道**没有**内置兜底任务（登录逻辑只能
+    /// 由用户写），故空值不是"用默认"，而是"脚本登录不可用"，保存与登录两侧都会拦。
+    pub active_script_task: String,
 }
 
 impl Default for ProfileData {
@@ -536,6 +569,7 @@ impl Default for ProfileData {
             active_task: String::new(),
             login_channel: LoginChannel::default(),
             active_http_task: String::new(),
+            active_script_task: String::new(),
         }
     }
 }
@@ -574,6 +608,54 @@ mod tests {
             monitor.strict_login_mode,
             "严格登录模式默认开启（关闭即退化为宽松触发，属行为变化）"
         );
+    }
+
+    /// 登录渠道枚举的 serde 字面量与判定方法。
+    ///
+    /// 字面量是前后端契约（前端 `LoginChannel` 联合类型、方案分享文件的
+    /// `login_channel` 字段），改名即破坏存量配置与分享文件。
+    #[test]
+    fn login_channel_serde_and_helpers() {
+        for (channel, literal) in [
+            (LoginChannel::Browser, "browser"),
+            (LoginChannel::Http, "http"),
+            (LoginChannel::Script, "script"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(channel).unwrap(),
+                serde_json::json!(literal)
+            );
+            assert_eq!(
+                serde_json::from_value::<LoginChannel>(serde_json::json!(literal)).unwrap(),
+                channel
+            );
+        }
+        // 是否进程内完成登录：只有浏览器渠道要拉起 Worker 与 Playwright
+        assert!(!LoginChannel::Browser.is_in_process());
+        assert!(LoginChannel::Http.is_in_process());
+        assert!(LoginChannel::Script.is_in_process());
+        // 渠道 → 承载"登录怎么做"的绑定字段（浏览器渠道没有：它的登录参数在方案里）
+        assert_eq!(LoginChannel::Browser.binding_field(), None);
+        assert_eq!(LoginChannel::Http.binding_field(), Some("active_http_task"));
+        assert_eq!(
+            LoginChannel::Script.binding_field(),
+            Some("active_script_task")
+        );
+        assert_eq!(LoginChannel::default(), LoginChannel::Browser);
+    }
+
+    /// 存量方案文件没有 `active_script_task` 时必须照旧解析（缺省空串 = 未绑定）
+    #[test]
+    fn profile_data_tolerates_missing_script_binding() {
+        let legacy: ProfileData = serde_json::from_value(serde_json::json!({
+            "id": "dorm",
+            "name": "宿舍",
+            "username": "u",
+            "login_channel": "browser"
+        }))
+        .expect("老文件必须能解析（字段带 serde default）");
+        assert_eq!(legacy.active_script_task, "");
+        assert_eq!(legacy.login_channel, LoginChannel::Browser);
     }
 
     #[test]

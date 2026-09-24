@@ -10,6 +10,7 @@
 pub mod history;
 pub mod http_login;
 pub mod preemption;
+pub mod script_login;
 pub mod session;
 
 use std::collections::HashMap;
@@ -330,6 +331,8 @@ pub struct LoginOrchestrator {
     environment: Arc<EnvironmentManager>,
     /// 任务管理器（提供浏览器任务的步骤配置）
     tasks: Arc<TaskManager>,
+    /// 脚本执行能力（脚本登录渠道用；trait 化以便状态机单测注入替身）
+    script_runner: Arc<dyn crate::tasks::ScriptRunnerApi>,
     /// 网络监测服务（登录后网络验证用）
     monitor: Arc<crate::monitor::MonitorService>,
     /// 内部状态（活跃会话 + ID 计数器）
@@ -370,6 +373,7 @@ impl LoginOrchestrator {
         bridge: Arc<BridgeSupervisor>,
         environment: Arc<EnvironmentManager>,
         tasks: Arc<TaskManager>,
+        script_runner: Arc<dyn crate::tasks::ScriptRunnerApi>,
         monitor: Arc<crate::monitor::MonitorService>,
         shutdown_token: CancellationToken,
         metrics: Option<Arc<Metrics>>,
@@ -381,6 +385,7 @@ impl LoginOrchestrator {
             bridge,
             environment,
             tasks,
+            script_runner,
             monitor,
             state: Arc::new(AsyncMutex::new(OrchestratorState {
                 active_session: None,
@@ -442,15 +447,17 @@ impl LoginOrchestrator {
         // 方案级绑定是「切方案即切任务」的唯一来源。
         let effective_task_id = self.resolve_active_task(&task_id, profile).await;
 
-        // 1a. 直连渠道判定：http 渠道在 Rust 进程内完成登录，浏览器任务来源
-        // （显式 task 执行）不适用，仍按浏览器路径处理。直连时跳过 1b/1c 的
-        // 浏览器与环境准备，也不要求启用任务（无 Worker 参与）。
+        // 1a. 进程内渠道判定：直连与脚本都在 Rust 进程内完成登录（直连发 HTTP、脚本起
+        // 子进程），浏览器任务来源（显式 task 执行）不适用，仍按浏览器路径处理。两者都
+        // 跳过 1b/1c 的浏览器与环境准备，也不要求启用任务（无 Worker 参与）。
         let use_http =
             profile.login_channel == LoginChannel::Http && !matches!(source, LoginSource::Browser);
+        let use_script = profile.login_channel == LoginChannel::Script
+            && !matches!(source, LoginSource::Browser);
 
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
         if let Some(handle) = self
-            .validate_profile(source, profile, &effective_task_id, use_http)
+            .validate_profile(source, profile, &effective_task_id, use_http, use_script)
             .await
         {
             return handle;
@@ -509,9 +516,29 @@ impl LoginOrchestrator {
             None
         };
 
+        // 1a-3. 脚本登录计划（任务缺失 / 类型不对立即终态，与直连同一口径）
+        let script_plan = if use_script {
+            match self.resolve_script_task(profile).await {
+                Ok(task) => Some(script_login::ScriptLoginPlan {
+                    task,
+                    extra_env: script_login::login_env(profile),
+                }),
+                Err(e) => {
+                    return self
+                        .immediate_handle(source, false, e, profile.id.clone())
+                        .await;
+                }
+            }
+        } else {
+            None
+        };
+
+        // 进程内渠道（直连 / 脚本）：不涉及浏览器、Python 环境与 Worker
+        let in_process = use_http || use_script;
+
         // 1b. 浏览器渠道预检 + 1c. 可用性终验：返回本次生效的渠道覆盖
-        // （直连渠道无浏览器/环境参与，整体跳过）
-        let browser_override = if use_http {
+        // （进程内渠道无浏览器/环境参与，整体跳过）
+        let browser_override = if in_process {
             None
         } else {
             match self
@@ -524,8 +551,8 @@ impl LoginOrchestrator {
         };
 
         // 2. auth_url TCP 预检（仅 manual / login_once；重定向登录跳过；
-        // 直连渠道可达性由请求自身的网络错误报告，且 auth_url 允许为空，跳过）
-        if !use_http {
+        // 进程内渠道的可达性由各自的执行结果报告，且 auth_url 允许为空，跳过）
+        if !in_process {
             if let Some(handle) = self
                 .precheck_auth_url(source, profile, &rt, &cancel_token)
                 .await
@@ -593,9 +620,10 @@ impl LoginOrchestrator {
             inner: result_slot.clone(),
         };
 
-        // 直连渠道不执行任务步骤：worker_config 置空占位，确保
+        // 进程内渠道不执行任务步骤：worker_config 置空占位，确保
         // has_explicit_success_condition 恒为 false，登录后网络验证兜底始终生效
-        let worker_config = if use_http {
+        // （脚本渠道同理：脚本退出码 0 只代表"脚本自称成功"，真终态仍由网络验证确认）
+        let worker_config = if in_process {
             serde_json::json!({})
         } else {
             self.build_worker_config(
@@ -617,6 +645,7 @@ impl LoginOrchestrator {
                 profile_id: profile.id.clone(),
                 worker_config,
                 http_plan,
+                script_plan,
             },
             cancel_token.clone(),
             result_slot,
@@ -629,6 +658,7 @@ impl LoginOrchestrator {
                 config_service: self.config.clone(),
                 status_manager: self.status.clone(),
                 history_service: self.history.clone(),
+                script_runner: self.script_runner.clone(),
                 metrics: self.metrics.clone(),
             },
         );
@@ -790,6 +820,37 @@ impl LoginOrchestrator {
         }
     }
 
+    /// 解析方案绑定的登录脚本任务。
+    ///
+    /// 与 [`Self::resolve_http_task`] 完全同构（没有内置兜底任务，空绑定/不存在/类型
+    /// 不对都是明确的终态错误，不做任何回退），只是取值与类型判据换成脚本任务。
+    async fn resolve_script_task(
+        &self,
+        profile: &ProfileSnapshot,
+    ) -> Result<crate::tasks::ScriptTaskConfig, String> {
+        let id = profile.active_script_task.trim();
+        if id.is_empty() {
+            return Err("方案未绑定登录脚本，请在「任务 · 脚本」里选择或新建一个".into());
+        }
+        match self.tasks.load_task(id).await {
+            Ok(crate::tasks::TaskKind::Script(cfg)) => Ok(cfg),
+            Ok(other) => {
+                tracing::warn!(
+                    task_id = id,
+                    task_type = other.type_name(),
+                    "方案绑定的任务不是脚本任务，脚本登录无法使用"
+                );
+                Err(format!(
+                    "方案绑定的 {id} 不是脚本任务（当前为 {} 类型），请在「任务 · 脚本」里重新选择",
+                    other.type_name()
+                ))
+            }
+            Err(_) => Err(format!(
+                "方案绑定的登录脚本 {id} 不存在，请在「任务 · 脚本」里重新选择"
+            )),
+        }
+    }
+
     /// 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）。
     ///
     /// `Some(handle)` = 校验失败携带的立即终态句柄；`None` = 通过。
@@ -799,6 +860,7 @@ impl LoginOrchestrator {
         profile: &ProfileSnapshot,
         effective_task_id: &Option<String>,
         use_http: bool,
+        use_script: bool,
     ) -> Option<LoginHandle> {
         let mut missing = Vec::new();
         if profile.username.is_empty() {
@@ -807,15 +869,19 @@ impl LoginOrchestrator {
         if profile.password.as_str().is_empty() {
             missing.push("密码为空，请在设置页填写密码");
         }
-        // 直连渠道要求已绑定直连任务：请求参数（地址/方法/头/体/判定关键字）全在
-        // 任务里，未绑定必然失败；直连没有内置兜底任务，所以这里必须拦。浏览器渠道
-        // 不再要求认证地址：用户留空时 RuntimeConfig 会补默认明文触发地址，
-        // 由浏览器跟随网关重定向。
+        // 直连 / 脚本渠道都要求已绑定任务：登录参数（直连的请求形状、脚本的正文）
+        // 全在任务里，未绑定必然失败；两者都没有内置兜底任务，所以这里必须拦。浏览器
+        // 渠道不再要求认证地址：用户留空时 RuntimeConfig 会补默认明文触发地址，
+        // 由浏览器跟随网关重定向。（账号密码对脚本渠道同样必需：它们是脚本取凭据的
+        // 唯一来源——`CAMPUS_USERNAME` / `CAMPUS_PASSWORD`，见 script_login。）
         if use_http && profile.active_http_task.trim().is_empty() {
             missing.push("未绑定直连任务，请在「任务 · 直连任务」里选择或新建一个");
         }
-        // 浏览器路径必须有可执行的浏览器任务；直连渠道无 Worker 参与，不要求
-        if !use_http && effective_task_id.is_none() {
+        if use_script && profile.active_script_task.trim().is_empty() {
+            missing.push("未绑定登录脚本，请在「任务 · 脚本」里选择或新建一个");
+        }
+        // 浏览器路径必须有可执行的浏览器任务；进程内渠道无 Worker 参与，不要求
+        if !use_http && !use_script && effective_task_id.is_none() {
             missing.push("当前无可用浏览器任务，请在账号页为当前方案选择一个任务");
         }
         if missing.is_empty() {
@@ -1704,6 +1770,15 @@ mod tests {
                 .expect("MonitorService 构造失败"),
         );
         let _ = Arc::new(ProfileService::new(config.clone()));
+        // 脚本登录渠道的执行能力：与生产同一条路径（TaskExecutor 构造本身只是装配
+        // 几个 Arc，不需要真起进程）
+        let script_runner = crate::tasks::TaskExecutor::new(
+            dir.path(),
+            status.clone(),
+            bridge.clone(),
+            environment.clone(),
+            config.clone(),
+        );
 
         Arc::new(LoginOrchestrator::new(
             config,
@@ -1712,6 +1787,7 @@ mod tests {
             bridge,
             environment,
             tasks,
+            script_runner,
             monitor,
             CancellationToken::new(),
             Some(Metrics::new()),

@@ -57,7 +57,7 @@ pub struct ProfileSnapshot {
     pub wifi_ssid: String,
     /// 活跃任务 ID
     pub active_task: String,
-    /// 登录执行渠道（browser=浏览器自动化默认；http=直连请求）
+    /// 登录执行渠道（browser=浏览器自动化默认；http=直连请求；script=自定义脚本）
     pub login_channel: crate::config::LoginChannel,
     /// 直连渠道使用的直连任务 ID（空 = 未绑定）
     ///
@@ -68,6 +68,12 @@ pub struct ProfileSnapshot {
     /// 与 `active_task` 的差别：浏览器渠道有内置默认任务可回退，直连**没有**
     /// （门户地址无法内置），故空值不是"用默认"，而是"直连登录不可用"。
     pub active_http_task: String,
+    /// 脚本渠道使用的脚本任务 ID（空 = 未绑定）
+    ///
+    /// 与 `active_http_task` 同理：脚本渠道没有内置兜底任务，空值即"脚本登录不可用"。
+    /// 脚本本体（内容 / 解释器 / 参数 / 工作目录 / 超时）在 `tasks/scripts/<id>.json`，
+    /// 凭据经 `CAMPUS_*` 环境变量注入（见 `crate::login::script_login`）。
+    pub active_script_task: String,
 }
 
 impl ProfileSnapshot {
@@ -185,6 +191,7 @@ pub fn build_runtime_config(
         active_task: profile.active_task.clone(),
         login_channel: profile.login_channel,
         active_http_task: profile.active_http_task.clone(),
+        active_script_task: profile.active_script_task.clone(),
     };
 
     Ok(RuntimeConfig {
@@ -220,6 +227,7 @@ mod tests {
             active_task: String::new(),
             login_channel: crate::config::LoginChannel::default(),
             active_http_task: String::new(),
+            active_script_task: String::new(),
         }
     }
 

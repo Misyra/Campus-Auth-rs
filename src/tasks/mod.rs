@@ -18,6 +18,40 @@ pub use models::*;
 
 use thiserror::Error;
 
+/// 脚本执行能力抽象（登录脚本渠道注入用）
+///
+/// 单独成 trait 而非直接注入 `Arc<TaskExecutor>`：登录会话的 `SessionDeps` 守着
+/// "依赖 trait 化且非 Option" 的既有约定（见 `login::session` 的 A-2 说明），而真起一个
+/// `TaskExecutor` 需要 `BridgeSupervisor` / `EnvironmentManager` 整套服务——只为了跑
+/// 一次登录状态机单测而装配这些，等于让测试覆盖被基础设施拖着走。故会话侧只依赖
+/// "能执行脚本并拿到 [`TaskResult`]" 这一件事。
+///
+/// 实现只有 [`TaskExecutor`]（任务页「立即运行」与登录渠道共用同一条执行路径），
+/// 测试可注入返回固定结果的替身。
+#[async_trait::async_trait]
+pub trait ScriptRunnerApi: Send + Sync {
+    /// 执行脚本任务并叠加额外环境变量，返回执行结果（退出码 / 输出 / 耗时）。
+    async fn run_script_with_env(
+        &self,
+        cfg: &ScriptTaskConfig,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<TaskResult, TaskError>;
+}
+
+#[async_trait::async_trait]
+impl ScriptRunnerApi for TaskExecutor {
+    async fn run_script_with_env(
+        &self,
+        cfg: &ScriptTaskConfig,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<TaskResult, TaskError> {
+        // 方法名刻意与固有方法 `execute_script_with_env` **不同**：同名会让本实现里的
+        // `self.execute_script_with_env(...)` 解析回 trait 自身（无限递归）。转调固有
+        // 实现，保证"登录脚本"与"任务页立即运行"始终是同一条执行路径。
+        self.execute_script_with_env(cfg, extra_env).await
+    }
+}
+
 /// Web 层消费的任务管理抽象（M1 细粒度 state：tasks 域）
 ///
 /// handler 通过 `State<Arc<dyn TaskApi>>` 提取依赖，不再触达 `state.container`，

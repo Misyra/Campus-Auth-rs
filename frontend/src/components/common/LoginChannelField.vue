@@ -6,12 +6,15 @@
  * `<base>/tasks/http/<id>.json`），方案只引用一个任务 id（`active_http_task`）。
  * 于是同一门户的多个账号共用一份配置，字段编辑也只有一处入口——此前同一份
  * 直连配置既能在方案编辑器改、又能在别处改，排查时说不清哪个生效。
+ * 脚本渠道同理：登录脚本的正文属于「脚本任务」（`tasks/scripts/<id>.json`），方案
+ * 只引用 `active_script_task`。
  *
  * 草稿对象契约（与后端 ProfileData 同名字段）：
- *   active_task / login_channel / active_http_task
+ *   active_task / login_channel / active_http_task / active_script_task
  *
  * 账号、密码、认证地址仍属方案：直连测试用宿主草稿里的账号密码，密码留空且为
- * 已保存方案时由后端回退该方案的本机凭据（见 POST /api/http-tasks/test）。
+ * 已保存方案时由后端回退该方案的本机凭据（见 POST /api/http-tasks/test）；
+ * 脚本渠道的凭据由程序注入脚本的环境变量（见 `SCRIPT_LOGIN_CONTRACT_NOTE`）。
  *
  * 「去任务页配置」由宿主决定怎么走（emit `openGuide`），组件不直接导航——
  * 它同时被方案编辑器与向导宿主使用。
@@ -25,16 +28,24 @@ import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useHttpTaskTest } from "@/composables/useHttpTaskTest";
 import { useToast } from "@/composables/useToast";
 import { DEFAULT_TASK_ID } from "@/utils/constants";
-import { browserTaskOptions, httpTaskOptions, taskBindingDisplay } from "@/utils/loginChannel";
+import {
+  browserTaskOptions,
+  httpTaskOptions,
+  scriptTaskOptions,
+  SCRIPT_LOGIN_CONTRACT_NOTE,
+  taskBindingDisplay,
+} from "@/utils/loginChannel";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 /** 本组件读写的最小字段集（宿主草稿类型可含更多字段） */
 export interface LoginChannelDraft {
   /** 浏览器渠道使用的任务 ID（空 = 未绑定，登录时回退内置默认任务） */
   active_task: string;
-  login_channel: "browser" | "http";
+  login_channel: "browser" | "http" | "script";
   /** 直连渠道使用的直连任务 ID（空 = 未绑定；直连没有内置兜底任务） */
   active_http_task: string;
+  /** 脚本渠道使用的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
+  active_script_task: string;
 }
 
 const props = withDefaults(
@@ -69,7 +80,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ openGuide: [] }>();
 
-const { browserTasks, httpTasks } = useTaskDirectory();
+const { browserTasks, httpTasks, scripts } = useTaskDirectory();
 const { toastOnly } = useToast();
 const { running: httpTestRunning, result: testResult, runHttpTaskTest, clearTestResult } =
   useHttpTaskTest();
@@ -77,14 +88,17 @@ const { running: httpTestRunning, result: testResult, runHttpTaskTest, clearTest
 /**
  * 说明文案集中在此（`\n` 分段，气泡按 pre-line 渲染）。
  *
- * 直连的字段说明在任务页（`HttpTaskFields`）；这里只讲"渠道怎么选、任务是什么"，
+ * 直连的字段说明在任务页（`HttpTaskFields`）、脚本的契约说明由
+ * `SCRIPT_LOGIN_CONTRACT_NOTE` 提供；这里只讲"渠道怎么选、任务是什么"，
  * 两处不重复。
  */
 const HELP = {
   channel:
     "浏览器自动化兼容验证码、动态表单等复杂门户，但需要 Python 与浏览器。\n\n" +
     "直连请求在程序内直接向门户发登录请求，免 Python 与浏览器、更快；" +
-    "失败后仍按方案的重试策略重发，不会自动切回浏览器。",
+    "失败后仍按方案的重试策略重发，不会自动切回浏览器。\n\n" +
+    "自定义脚本把登录整个交给你自己写的脚本任务，同样免 Python 与浏览器，" +
+    "适合门户逻辑特殊、直连请求表达不出来的场景——代价是登录逻辑要自己维护。",
   browserTask:
     "本方案自动登录时执行的任务。任务内容在「任务 · 浏览器任务」里编辑；每个方案可各绑定一个，" +
     "切换方案即切换任务。选「通用登录（内置默认）」即使用程序自带的任务。",
@@ -92,10 +106,14 @@ const HELP = {
     "本方案直连登录时使用哪份直连任务（请求地址、请求头、判定关键字、凭据变换脚本都在任务里）。\n\n" +
     "同一门户的多个账号共用一份任务，字段在「任务 · 直连任务」里编辑。" +
     "直连没有内置兜底任务——门户地址没法内置，所以未绑定时直连登录会直接失败。",
+  scriptTask:
+    "本方案脚本登录时执行哪个脚本任务。脚本正文在「任务 · 脚本」里编辑，" +
+    "与列表里的「立即运行」是同一条执行路径。\n\n" + SCRIPT_LOGIN_CONTRACT_NOTE,
   test: "测试只发这一次请求，不会保存任何配置，也不会改变自动登录状态。",
 } as const;
 
 const isHttp = computed(() => props.modelValue.login_channel === "http");
+const isScript = computed(() => props.modelValue.login_channel === "script");
 
 /**
  * 浏览器任务绑定值的显示代理：未绑定（空 `active_task`）时显示为内置默认任务。
@@ -121,11 +139,23 @@ const httpTaskSelectOptions = computed<SelectOption[]>(() =>
   httpTaskOptions(httpTasks.value),
 );
 
-/** 已绑定任务是否存在于当前任务清单（被删掉的任务要当场看得见） */
+/** 脚本任务下拉选项：首项同为"未绑定"，脚本渠道也没有兜底任务可回退 */
+const scriptTaskSelectOptions = computed<SelectOption[]>(() =>
+  scriptTaskOptions(scripts.value),
+);
+
+/** 已绑定直连任务是否存在于当前任务清单（被删掉的任务要当场看得见） */
 const boundHttpTaskMissing = computed(
   () =>
     props.modelValue.active_http_task.trim() !== "" &&
     !httpTasks.value.some((t) => t.id === props.modelValue.active_http_task),
+);
+
+/** 已绑定脚本任务是否还在清单里（同上：删掉后必须当场提示，而不是等登录失败） */
+const boundScriptTaskMissing = computed(
+  () =>
+    props.modelValue.active_script_task.trim() !== "" &&
+    !scripts.value.some((s) => s.id === props.modelValue.active_script_task),
 );
 
 /** 已保存方案可留空密码由后端回退；新建/未保存时必须手填 */
@@ -135,7 +165,7 @@ const hasSavedProfile = computed(() => Boolean(props.profileId));
 const uid = `login-channel-${Math.random().toString(36).slice(2, 8)}`;
 
 /** 切换渠道：原地写回草稿（宿主序列化比对即可感知为未保存改动） */
-function setChannel(channel: "browser" | "http"): void {
+function setChannel(channel: "browser" | "http" | "script"): void {
   props.modelValue.login_channel = channel;
   clearTestResult();
 }
@@ -144,6 +174,11 @@ function setChannel(channel: "browser" | "http"): void {
 function onHttpTaskChange(value: string): void {
   props.modelValue.active_http_task = value;
   clearTestResult();
+}
+
+/** 换绑脚本任务：没有测试结论要清（脚本渠道的验证方式是「立即运行」） */
+function onScriptTaskChange(value: string): void {
+  props.modelValue.active_script_task = value;
 }
 
 async function runTest(): Promise<void> {
@@ -191,14 +226,14 @@ async function runTest(): Promise<void> {
       </a>
     </div>
 
-    <!-- 渠道卡片：两渠道各自说明「要不要环境、适合谁」，比纯文字分段控件更可判 -->
+    <!-- 渠道卡片：三个渠道各自说明「要不要环境、适合谁」，比纯文字分段控件更可判 -->
     <div class="channel-cards" role="radiogroup" aria-label="登录方式">
       <button
         type="button"
         class="channel-card"
         role="radio"
-        :aria-checked="!isHttp"
-        :class="{ active: !isHttp }"
+        :aria-checked="!isHttp && !isScript"
+        :class="{ active: !isHttp && !isScript }"
         @click="setChannel('browser')"
       >
         <span class="channel-card-icon"><IconApp name="chrome" /></span>
@@ -224,9 +259,25 @@ async function runTest(): Promise<void> {
         </span>
         <span class="channel-card-cost channel-card-cost--free">免 Python 与浏览器</span>
       </button>
+
+      <button
+        type="button"
+        class="channel-card"
+        role="radio"
+        :aria-checked="isScript"
+        :class="{ active: isScript }"
+        @click="setChannel('script')"
+      >
+        <span class="channel-card-icon"><IconApp name="code" /></span>
+        <span class="channel-card-copy">
+          <strong>自定义脚本</strong>
+          <small>由脚本任务里的脚本完成登录，逻辑完全自己写</small>
+        </span>
+        <span class="channel-card-cost channel-card-cost--free">免 Python 与浏览器</span>
+      </button>
     </div>
 
-    <div v-if="!isHttp" class="browser-channel-panel">
+    <div v-if="!isHttp && !isScript" class="browser-channel-panel">
       <div class="form-group">
         <div class="field-label-row">
           <label :for="`${uid}-task`">浏览器任务</label>
@@ -236,7 +287,41 @@ async function runTest(): Promise<void> {
       </div>
     </div>
 
-    <div v-else class="http-channel-panel">
+    <div v-else-if="isScript" class="channel-panel">
+      <div class="form-group">
+        <div class="field-label-row">
+          <label :for="`${uid}-script-task`">登录脚本</label>
+          <FieldHelp :text="HELP.scriptTask" wide />
+        </div>
+        <CustomSelect
+          :id="`${uid}-script-task`"
+          :model-value="modelValue.active_script_task"
+          :options="scriptTaskSelectOptions"
+          @update:model-value="onScriptTaskChange"
+        />
+      </div>
+
+      <!-- 未绑定 / 绑定的脚本已被删除：两种都会让脚本登录直接失败，故当场提示并给出出口 -->
+      <div v-if="boundScriptTaskMissing" class="note note--warn">
+        <IconApp name="alert-triangle" class="icon-sm" />
+        <span>绑定的脚本任务已不存在，请重新选择；脚本登录在选中任务前不可用。</span>
+      </div>
+      <div v-else-if="!modelValue.active_script_task.trim()" class="note">
+        <IconApp name="info" class="icon-sm" />
+        <span>尚未绑定登录脚本，脚本登录会直接失败。</span>
+        <a href="#" class="http-task-link" @click.prevent="emit('openGuide')">去新建 →</a>
+      </div>
+
+      <div class="http-test-actions">
+        <a class="btn btn-ghost" href="https://campus-auth.misyra.com/docs/guides/custom-script" target="_blank" rel="noopener noreferrer">
+          <IconApp name="file-text" class="icon-sm" />
+          脚本登录文档
+        </a>
+        <span class="http-test-hint">登录逻辑与账号一样由你自己维护，改脚本即改登录方式</span>
+      </div>
+    </div>
+
+    <div v-else class="channel-panel">
       <div class="form-group">
         <div class="field-label-row">
           <label :for="`${uid}-http-task`">直连任务</label>
@@ -324,10 +409,12 @@ async function runTest(): Promise<void> {
   background: rgba(var(--accent-rgb), 0.16);
 }
 
-/* ===== 渠道卡片 ===== */
+/* ===== 渠道卡片 =====
+   三张卡（浏览器 / 直连 / 脚本）用 auto-fit：够宽时并排三列，窗口变窄自动折成
+   两列再到单列，不必为多出来的渠道再手写一档断点。 */
 .channel-cards {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: var(--space-sm);
   margin-bottom: var(--space-sm);
 }
@@ -416,7 +503,7 @@ async function runTest(): Promise<void> {
   color: var(--success);
 }
 
-/* 浏览器渠道：任务选择面板（与直连面板同构，保持两渠道视觉对等） */
+/* 浏览器渠道：任务选择面板（中性底，与"进程内渠道"的 accent 面板形成对照） */
 .browser-channel-panel {
   margin-top: var(--space-sm);
   padding: var(--space-md);
@@ -429,8 +516,8 @@ async function runTest(): Promise<void> {
   margin-bottom: 0;
 }
 
-/* ===== 直连面板 ===== */
-.http-channel-panel {
+/* ===== 进程内渠道面板（直连 / 脚本共用同一套外观）===== */
+.channel-panel {
   margin-top: var(--space-sm);
   padding: var(--space-md);
   border: 1px solid var(--border-accent);
@@ -440,7 +527,7 @@ async function runTest(): Promise<void> {
     var(--bg-glass-light);
 }
 
-.http-channel-panel .form-group {
+.channel-panel .form-group {
   margin-bottom: var(--space-sm);
 }
 

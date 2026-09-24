@@ -376,9 +376,9 @@ impl MonitorService {
             && assessment.recovery_advice != RecoveryAdvice::NoProbeEvidence
             && assessment.status != NetworkStatus::Online
         {
-            let auth_endpoint = if rt.profile.login_channel == crate::config::LoginChannel::Http {
-                // 直连渠道使用独立的直连任务的 url，auth_url 只是可选的页面抓取来源，
-                // 不能因其留空把有效的直连方案误判为配置缺失。
+            let auth_endpoint = if rt.profile.login_channel.is_in_process() {
+                // 进程内渠道（直连用任务的 url、脚本经 CAMPUS_AUTH_URL 取用）里 auth_url
+                // 只是可选输入，不能因其留空把有效方案误判为配置缺失。
                 AuthEndpointState::NotChecked
             } else if rt.profile.uses_redirect_login() {
                 AuthEndpointState::SkippedRedirectMode

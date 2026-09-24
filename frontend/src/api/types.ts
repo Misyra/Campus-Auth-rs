@@ -372,6 +372,13 @@ export interface CredentialsConfig {
    * 直连**没有内置兜底任务**（门户地址无法内置），故空值意味着直连登录会直接失败。
    */
   active_http_task: string;
+  /**
+   * 脚本渠道绑定的脚本任务 ID（空 = 未绑定）。
+   *
+   * 与 `active_http_task` 同理：脚本渠道也没有内置兜底任务（登录逻辑只能自己写），
+   * 故空值意味着脚本登录会直接失败。
+   */
+  active_script_task: string;
 }
 
 /** 应用设置 */
@@ -457,6 +464,8 @@ export interface ConfigResponse {
   login_channel: LoginChannel;
   /** 直连渠道绑定的直连任务 ID（空 = 未绑定；请求参数在任务里，不在本响应里） */
   active_http_task: string;
+  /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本正文在任务里，不在本响应里） */
+  active_script_task: string;
   password?: string;
 }
 
@@ -479,7 +488,7 @@ export interface SaveConfigPayload {
 }
 
 /** 登录渠道与直连请求方法 */
-export type LoginChannel = "browser" | "http";
+export type LoginChannel = "browser" | "http" | "script";
 export type HttpLoginMethod = "GET" | "POST";
 
 /**
@@ -510,6 +519,14 @@ export interface Profile {
    * 直连登录直接以明确原因失败（浏览器渠道则会回退到内置默认任务）。
    */
   active_http_task: string;
+  /**
+   * 脚本渠道绑定的脚本任务 ID（空 = 未绑定）。
+   *
+   * 登录动作整个由这个脚本任务承担：程序起本地子进程跑它，凭据经环境变量注入
+   * （`CAMPUS_USERNAME` / `CAMPUS_PASSWORD` / `CAMPUS_ISP` / `CAMPUS_AUTH_URL`），
+   * 脚本退出码 0 视为本次尝试成功（真终态仍由登录后网络验证确认）。
+   */
+  active_script_task: string;
   [key: string]: unknown;
 }
 
@@ -713,6 +730,8 @@ export interface ProfileSummary {
   active_task: string;
   /** 直连渠道绑定的直连任务 ID（空 = 未绑定）；任务页据此标出"这条任务被谁在用" */
   active_http_task: string;
+  /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定）；用途同 `active_http_task` */
+  active_script_task: string;
   /** 登录执行渠道：列表卡据此区分登录方式 */
   login_channel: LoginChannel;
   /** 网关 IP 匹配规则（空 = 未配置） */

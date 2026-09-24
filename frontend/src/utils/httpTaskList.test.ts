@@ -26,6 +26,7 @@ function makeProfile(overrides: Partial<ProfileSummary> = {}): ProfileSummary {
     isp: "",
     active_task: "default",
     active_http_task: "",
+    active_script_task: "",
     login_channel: "http",
     gateway_ip: "",
     wifi_ssid: "",

@@ -205,10 +205,15 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(false, "请填写自定义运营商关键字");
     return false;
   }
-  // 直连渠道没有可内置的兜底任务（门户地址因人而异，浏览器渠道才有内置 default），
-  // 故未绑定直连任务时直接拒绝保存：放过去只会在登录时才失败，且失败点在别处
+  // 直连 / 脚本渠道都没有可内置的兜底任务（直连的门户地址因人而异、脚本的登录逻辑
+  // 只能自己写；浏览器渠道才有内置 default），故未绑定时直接拒绝保存：放过去只会
+  // 在登录时才失败，且失败点在别处
   if (settings.login_channel === "http" && !String(settings.active_http_task ?? "").trim()) {
     toastOnly(false, "请为直连渠道选择一个直连任务（任务页 · 直连任务）");
+    return false;
+  }
+  if (settings.login_channel === "script" && !String(settings.active_script_task ?? "").trim()) {
+    toastOnly(false, "请为自定义脚本渠道选择一个脚本任务（任务页 · 脚本）");
     return false;
   }
   profileSaving.value = true;
@@ -230,6 +235,7 @@ async function saveProfile(): Promise<boolean> {
         active_task: settings.active_task ?? "",
         login_channel: settings.login_channel ?? "browser",
         active_http_task: settings.active_http_task ?? "",
+        active_script_task: settings.active_script_task ?? "",
       });
     } else {
       data = await profilesApi.save(profileId, {

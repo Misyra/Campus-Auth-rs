@@ -38,6 +38,8 @@ pub fn test_runtime_config() -> RuntimeConfig {
             login_channel: crate::config::LoginChannel::default(),
             // 直连渠道的请求参数在直连任务里，快照侧只有这条绑定（空 = 未绑定）
             active_http_task: String::new(),
+            // 脚本渠道同理：登录脚本的正文在脚本任务里
+            active_script_task: String::new(),
         },
         auto_switch: false,
     }

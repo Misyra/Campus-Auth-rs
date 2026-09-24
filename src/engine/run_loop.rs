@@ -1517,6 +1517,15 @@ mod tests {
         );
         let environment = EnvironmentManager::new(tmp.path().to_path_buf(), status.clone());
         let tasks = TaskManager::new(tmp.path());
+        // 脚本登录渠道的执行能力：与生产同一条路径（TaskExecutor 构造本身只是装配
+        // 几个 Arc，不需要真起进程）
+        let script_runner = crate::tasks::TaskExecutor::new(
+            tmp.path(),
+            status.clone(),
+            bridge.clone(),
+            environment.clone(),
+            config.clone(),
+        );
         let orchestrator = Arc::new(LoginOrchestrator::new(
             config.clone(),
             history,
@@ -1524,6 +1533,7 @@ mod tests {
             bridge,
             environment,
             tasks,
+            script_runner,
             monitor.clone(),
             tokio_util::sync::CancellationToken::new(),
             Some(metrics.clone()),

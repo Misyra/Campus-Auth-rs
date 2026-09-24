@@ -27,12 +27,26 @@ onMounted(() => { void t.fetchTasks(); });
 onMounted(() => { void refreshEnv(); });
 onActivated(() => { void refreshEnv(); });
 
-// 当前任务取「当前方案绑定的浏览器任务」——启用任务按方案绑定（切方案即切任务），
-// 未绑定时后端登录会回退内置默认任务。
-// 来源是方案摘要（ProfileSummary.active_task）而非设置表单：该字段属 Profile 域，
-// 不再随 GET /api/config 下发。
+/**
+ * 「当前任务」= 当前方案的**当前渠道**实际会执行的那个任务。
+ *
+ * 启用任务按方案绑定（切方案即切任务），来源是方案摘要而非设置表单（这些字段属
+ * Profile 域，不再随 `GET /api/config` 下发）。
+ *
+ * 必须按渠道取：三条渠道各绑各的字段，拿浏览器任务的 `active_task` 去代表直连或
+ * 脚本渠道，会显示一个登录时**根本不会执行**的任务名——用户据此排查会走错方向。
+ * 直连/脚本侧直接显示任务 id（任务页列表里的标识），浏览器侧沿用友好名称。
+ */
 const activeTaskName = computed(() => {
-  const id = profiles.value[activeProfileId.value]?.active_task;
+  const profile = profiles.value[activeProfileId.value];
+  if (!profile) return "内置默认任务";
+  if (profile.login_channel === "http") {
+    return profile.active_http_task?.trim() || "未绑定（直连登录不可用）";
+  }
+  if (profile.login_channel === "script") {
+    return profile.active_script_task?.trim() || "未绑定（脚本登录不可用）";
+  }
+  const id = profile.active_task;
   if (!id) return "内置默认任务";
   const task = t.tasks.value.find((tk) => tk.id === id);
   return task?.name || id;

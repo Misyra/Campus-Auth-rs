@@ -1,5 +1,5 @@
 /**
- * 登录渠道（浏览器自动化 / 直连请求）展示映射。
+ * 登录渠道（浏览器自动化 / 直连请求 / 自定义脚本）展示映射。
  *
  * 单一事实源：方案列表卡徽标、直连面板标题、后续设置页与引导向导的分流文案
  * 均由此派生，避免同一枚举在多处各写一套中文标签而漂移。
@@ -9,12 +9,31 @@ import type { HttpLoginMethod, LoginChannel } from "../api/types";
 
 /** 登录渠道 → 用户可见标签 */
 export function loginChannelLabel(channel: LoginChannel | string | undefined): string {
-  return channel === "http" ? "直连请求" : "浏览器自动化";
+  if (channel === "http") return "直连请求";
+  if (channel === "script") return "自定义脚本";
+  return "浏览器自动化";
 }
 
 /** 登录渠道 → 列表卡等紧凑场景的短标签 */
 export function loginChannelShortLabel(channel: LoginChannel | string | undefined): string {
-  return channel === "http" ? "直连请求" : "浏览器";
+  if (channel === "http") return "直连请求";
+  if (channel === "script") return "脚本";
+  return "浏览器";
+}
+
+/**
+ * 登录渠道 → 徽标图标名（`IconApp` 的 name）。
+ *
+ * 与标签同处一地：换了图标名或加了渠道，列表卡与其它入口不必各自去猜。
+ * 返回类型收窄成字面量联合而非 `string`——`IconApp` 的 `name` 是注册表键的联合，
+ * 返回 `string` 会在每个宿主处编译不过。
+ */
+export function loginChannelIcon(
+  channel: LoginChannel | string | undefined,
+): "chrome" | "globe" | "code" {
+  if (channel === "http") return "globe";
+  if (channel === "script") return "code";
+  return "chrome";
 }
 
 /**
@@ -235,15 +254,17 @@ export function isCredentialExposedViaGet(
 /**
  * 该登录渠道是否需要 Python / 浏览器运行环境。
  *
- * 直连请求在 Rust 进程内完成登录，不拉起 Python Worker 与 Playwright，
- * 因此环境未就绪（python/worker/playwright 任一缺失）对它没有任何影响——
- * 仪表盘据此抑制「环境未就绪」横幅，避免免 Python/浏览器的用户被无意义的
- * 提示长期打扰。浏览器自动化需要该环境。
+ * 直连请求与自定义脚本都在 Rust 进程内完成登录（前者发 HTTP、后者起本地子进程），
+ * 不拉起 Python Worker 与 Playwright，因此环境未就绪（python/worker/playwright
+ * 任一缺失）对它们没有任何影响——仪表盘据此抑制「环境未就绪」横幅，避免免
+ * Python/浏览器的用户被无意义的提示长期打扰。浏览器自动化需要该环境。
+ *
+ * 未知取值一律按"需要"处理（保守侧）：漏报会让人以为环境无关而卡在假登录上。
  */
 export function channelNeedsRuntimeEnvironment(
   channel: LoginChannel | string | undefined,
 ): boolean {
-  return channel !== "http";
+  return channel !== "http" && channel !== "script";
 }
 
 /**
@@ -285,6 +306,53 @@ export function httpTaskOptions(
     ...tasks.map((t) => ({ value: t.id, label: t.name || t.id })),
   ];
 }
+
+/**
+ * 脚本任务下拉选项。
+ *
+ * 与直连同一口径：首项是显式的「未绑定」，因为脚本渠道也没有可内置的兜底任务——
+ * 登录逻辑只能由用户自己写。未绑定的后果是脚本登录直接失败，故文案讲清而不是留空项。
+ */
+export function scriptTaskOptions(
+  tasks: Array<{ id: string; name?: string }>,
+): Array<{ value: string; label: string }> {
+  return [
+    { value: "", label: "未绑定（脚本登录不可用）" },
+    ...tasks.map((t) => ({ value: t.id, label: t.name || t.id })),
+  ];
+}
+
+/** 渠道徽标的悬停说明（列在网络匹配标签旁，一句话讲清这个渠道怎么登） */
+export function loginChannelHint(channel: LoginChannel | string | undefined): string {
+  if (channel === "http") return "直连请求：在程序内发登录请求，不启动浏览器";
+  if (channel === "script") return "自定义脚本：由绑定的脚本任务完成登录，不启动浏览器";
+  return "浏览器自动化：按任务步骤操作登录页";
+}
+
+/**
+ * 脚本登录渠道注入的环境变量（与后端 `login::script_login` 的 `LOGIN_ENV_*` 同源）。
+ *
+ * `loginChannel.test.ts` 钉住这份清单：后端改名而前端没跟着改，用户会照着
+ * 界面上写好的变量名写出一个永远读到空值的脚本，且没有任何报错。
+ */
+export const SCRIPT_LOGIN_ENV_VARS = [
+  "CAMPUS_USERNAME",
+  "CAMPUS_PASSWORD",
+  "CAMPUS_ISP",
+  "CAMPUS_AUTH_URL",
+] as const;
+
+/**
+ * 脚本登录的契约说明（面板 `?` 气泡与任务页脚本指南共用，避免两处文案漂移）。
+ */
+export const SCRIPT_LOGIN_CONTRACT_NOTE =
+  `程序起本地子进程执行该脚本任务的脚本，把登录整个交给它，不启动浏览器与 Python Worker。\n\n` +
+  `脚本从环境变量取凭据：${SCRIPT_LOGIN_ENV_VARS.map((v) => v).join(" / ")}` +
+  `（脚本任务本身不做 {{USERNAME}} 这类模板替换）。\n\n` +
+  `退出码 0 = 本次尝试成功，程序随后仍会做一次登录后网络验证来确认真登上了；` +
+  `非 0 = 本次尝试失败，按方案的重试策略重发，重试预算耗尽才判失败。\n\n` +
+  `超时取脚本任务自己的「超时」设置；脚本的 stdout/stderr 末尾会写进登录历史，` +
+  `其中出现的密码会被抹成 ***。`;
 
 /**
  * 绑定值 → 下拉显示的 value。

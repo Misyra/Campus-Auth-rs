@@ -259,6 +259,23 @@ impl TaskExecutor {
 
     /// 执行脚本任务
     pub async fn execute_script(&self, cfg: &ScriptTaskConfig) -> Result<TaskResult, TaskError> {
+        self.execute_script_with_env(cfg, Vec::new()).await
+    }
+
+    /// 执行脚本任务并叠加额外环境变量（登录脚本渠道用：凭据经环境变量下发）。
+    ///
+    /// 额外变量叠在 [`build_minimal_env`] 的**最小环境之上**：`env_clear` 的隔离语义
+    /// 不变（主进程的 Web token、代理密码等仍不继承），只是同名键由后来者覆盖——
+    /// 于是登录脚本里的 `CAMPUS_*` 不会被主进程的同名变量抢走。
+    ///
+    /// 除环境变量外的一切（解释器回退、`tasks/scripts/` 路径约束、按任务串行、
+    /// 超时与进程树强杀、输出截断）与「立即运行」完全同一条路径——**不新增第二套
+    /// 脚本执行实现**，否则两条路径的行为迟早分叉。
+    pub async fn execute_script_with_env(
+        &self,
+        cfg: &ScriptTaskConfig,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<TaskResult, TaskError> {
         // 同任务串行、不同任务并行：按任务 ID 取各自的执行锁
         let lock = self.task_exec_lock(&cfg.common.task_id);
         let _guard = lock.lock().await;
@@ -295,7 +312,7 @@ impl TaskExecutor {
             return Err(TaskError::UnsupportedExtension(ext));
         }
         let work_dir = resolve_work_dir(cfg, &script_file, &self.scripts_dir);
-        let envs = build_minimal_env();
+        let envs = build_minimal_env_with(extra_env);
 
         self.run_command(program, args, &work_dir, envs, clamp_timeout(cfg.timeout))
             .await
@@ -673,8 +690,18 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{t}...(已截断)")
 }
 
-/// 构建最小环境变量（仅保留执行任务所需的 PATH/HOME/TEMP 等）
-fn build_minimal_env() -> Vec<(String, String)> {
+/// 构建最小环境变量（仅保留执行任务所需的 PATH/HOME/TEMP 等），并叠加 `extra`。
+///
+/// `extra` 追加在末尾：`Command::envs` 按顺序生效、同名后者胜出，故登录脚本渠道
+/// 注入的 `CAMPUS_*`（以及它可能想覆盖的 `USERNAME`）不会被上面的最小环境盖回去。
+fn build_minimal_env_with(extra: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut envs = collect_minimal_env();
+    envs.extend(extra);
+    envs
+}
+
+/// 最小环境变量的本体（不含调用方叠加项）
+fn collect_minimal_env() -> Vec<(String, String)> {
     let mut envs: Vec<(String, String)> = Vec::new();
     if let Ok(p) = std::env::var("PATH") {
         envs.push(("PATH".to_string(), p));

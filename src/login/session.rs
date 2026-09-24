@@ -20,6 +20,7 @@ use crate::bridge::{IpcResponse, Outcome, StructuredResult};
 use crate::config::ConfigService;
 use crate::login::history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
 use crate::login::http_login;
+use crate::login::script_login;
 use crate::login::{LoginHandleInner, recover_lock};
 use crate::status::{LoginSource, LoginStatus, PartialSnapshot, StatusManager};
 use crate::utils::metrics::Metrics;
@@ -168,6 +169,9 @@ pub(crate) struct SessionDeps {
     pub status_manager: std::sync::Arc<StatusManager>,
     /// 历史服务（终态写入）
     pub history_service: std::sync::Arc<LoginHistoryService>,
+    /// 脚本执行能力（脚本登录渠道用；trait 化以便状态机单测注入替身，见
+    /// [`crate::tasks::ScriptRunnerApi`]）
+    pub script_runner: std::sync::Arc<dyn crate::tasks::ScriptRunnerApi>,
     /// 运行指标（可选）
     pub metrics: Option<std::sync::Arc<Metrics>>,
 }
@@ -190,6 +194,9 @@ pub(crate) struct SessionParams {
     pub worker_config: Value,
     /// 直连请求参数（Some = 直连渠道：尝试在 Rust 进程内执行，不经 Bridge/Worker）
     pub http_plan: Option<crate::login::http_login::HttpLoginRequest>,
+    /// 脚本登录计划（Some = 脚本渠道：尝试在 Rust 进程内起子进程跑脚本任务，不经
+    /// Bridge/Worker）。与 `http_plan` 互斥——方案只有一个登录渠道，两者不会同时有值。
+    pub script_plan: Option<crate::login::script_login::ScriptLoginPlan>,
 }
 
 /// 登录会话：持有会话参数、取消原语与服务依赖，驱动单次登录状态机
@@ -253,6 +260,10 @@ impl LoginSession {
         let total_attempts = self.params.max_retries + 1;
         let mut attempts_used: u32 = 0;
         let is_http = self.params.http_plan.is_some();
+        // 只有浏览器渠道经 Bridge 驱动 Worker：直连在进程内发请求、脚本在进程内起
+        // 子进程，两者都没有可取消的 Bridge attempt，也不该去回收别人的 Worker 会话
+        // （脚本失败被误判成"网络错误强制回收"会直接打断另一条在跑的浏览器登录）。
+        let uses_bridge = !is_http && self.params.script_plan.is_none();
 
         loop {
             // 取消检查（状态机任意阶段）
@@ -264,7 +275,7 @@ impl LoginSession {
 
             // 会话总超时检查（login_timeout 至少 1s，见 SessionParams 构造 clamp）
             if session_start.elapsed() > self.params.login_timeout.max(Duration::from_secs(1)) {
-                if !is_http {
+                if uses_bridge {
                     if let Some(cid) = self.attempt_cancel_id.load_full() {
                         bridge.cancel(cid.as_str());
                     }
@@ -276,7 +287,7 @@ impl LoginSession {
 
             // 生成本轮 attempt 的 cancel_id（UUID v4）
             let cancel_id = uuid::Uuid::new_v4().to_string();
-            if !is_http {
+            if uses_bridge {
                 self.attempt_cancel_id
                     .store(Some(Arc::new(cancel_id.clone())));
             }
@@ -289,12 +300,19 @@ impl LoginSession {
                 retry_count: attempts_used,
             });
 
-            // 直连渠道：Rust 进程内构造/发送请求；浏览器渠道：Bridge 驱动 Worker。
-            // 两者统一为 Result<StructuredResult, String> 的可取消 future，
-            // 取消/shutdown/超时边界对两种渠道一致（直连路径无 Bridge 可取消）。
+            // 直连渠道：Rust 进程内构造/发送请求；脚本渠道：Rust 进程内起子进程跑脚本；
+            // 浏览器渠道：Bridge 驱动 Worker。三者统一为
+            // Result<StructuredResult, String> 的可取消 future，取消/shutdown/超时边界对
+            // 三种渠道一致（进程内路径无 Bridge 可取消，靠丢弃 future 回收子进程）。
             let mut work: Pin<Box<dyn Future<Output = Result<StructuredResult, String>> + Send>> =
                 if let Some(plan) = self.params.http_plan.clone() {
                     Box::pin(async move { Ok(http_login::run_once(&plan).await.to_structured()) })
+                } else if let Some(plan) = self.params.script_plan.clone() {
+                    // 取消时本 future 被 `select!` 直接丢弃，`run_command` 里带
+                    // `kill_on_drop` 的子进程随之回收（Windows 另有 Job Object 兜住
+                    // 整棵进程树），故脚本渠道不需要 Bridge 那种 cancel_id 收尾。
+                    let runner = self.deps.script_runner.clone();
+                    Box::pin(async move { Ok(script_login::run_once(&runner, &plan).await) })
                 } else {
                     // 根据来源选择 Bridge 命令
                     let method = match self.params.source {
@@ -337,14 +355,14 @@ impl LoginSession {
                 tokio::select! {
                     biased;
                     _ = ct.cancelled() => {
-                        if !is_http {
+                        if uses_bridge {
                             bridge.cancel(&cancel_id);
                         }
                         self.finish_with_cancelled(session_start, attempts_used, None).await;
                         return;
                     }
                     _ = self.shutdown_token.cancelled() => {
-                        if !is_http {
+                        if uses_bridge {
                             bridge.cancel(&cancel_id);
                         }
                         self.finish_with_cancelled(
@@ -356,7 +374,7 @@ impl LoginSession {
                         return;
                     }
                     _ = sleep(remaining) => {
-                        if !is_http {
+                        if uses_bridge {
                             bridge.cancel(&cancel_id);
                         }
                         self.finish_with_failure(session_start, attempts_used, "登录超时".into())
@@ -495,7 +513,7 @@ impl LoginSession {
                             &mut attempts_used,
                             session_start,
                             // 直连路径无 Worker 参与，网络类失败不需要回收 Worker
-                            !is_http && should_force_recycle(structured.outcome),
+                            uses_bridge && should_force_recycle(structured.outcome),
                             finished_attempt_cancel_id.as_deref().map(String::as_str),
                         )
                         .await
@@ -1175,7 +1193,25 @@ mod tests {
             config_service: config,
             status_manager: Arc::new(StatusManager::new()),
             history_service: Arc::new(LoginHistoryService::new(dir.path())),
+            script_runner: Arc::new(StubScriptRunner),
             metrics: None,
+        }
+    }
+
+    /// 脚本执行替身：会话状态机的单测不需要真起子进程（这条路径由
+    /// `script_login` 的单测与真机登录覆盖），只需"能拿到一个结果"。
+    struct StubScriptRunner;
+
+    #[async_trait::async_trait]
+    impl crate::tasks::ScriptRunnerApi for StubScriptRunner {
+        async fn run_script_with_env(
+            &self,
+            _cfg: &crate::tasks::ScriptTaskConfig,
+            _extra_env: Vec<(String, String)>,
+        ) -> Result<crate::tasks::TaskResult, crate::tasks::TaskError> {
+            Err(crate::tasks::TaskError::ScriptNotFound(
+                "单测替身不执行脚本".to_string(),
+            ))
         }
     }
 
@@ -1216,6 +1252,7 @@ mod tests {
             profile_id: "default".to_string(),
             worker_config: serde_json::json!({}),
             http_plan: None,
+            script_plan: None,
         }
     }
 

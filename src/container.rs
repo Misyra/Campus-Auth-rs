@@ -163,6 +163,9 @@ impl ServiceContainer {
             bridge.clone(),
             environment.clone(),
             tasks.clone(),
+            // 脚本登录渠道复用同一个执行器实例（与任务页「立即运行」同一条路径，
+            // 连"同任务串行"的执行锁都是同一把）
+            executor.clone(),
             monitor.clone(),
             login_shutdown_token,
             Some(metrics.clone()),

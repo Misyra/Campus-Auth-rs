@@ -9,6 +9,12 @@ import { useRedirectTest } from "@/composables/useRedirectTest";
 import { useCarrierField } from "@/composables/useCarrierField";
 import { useStatus } from "@/composables/useStatus";
 import { CARRIER_OPTIONS, DEFAULT_TRIGGER_URL } from "@/utils/constants";
+import {
+  loginChannelHint,
+  loginChannelIcon,
+  loginChannelLabel,
+  loginChannelShortLabel,
+} from "@/utils/loginChannel";
 import { downloadBlob, isProfileSharePayload, shareFileName, unwrapSharePayload } from "@/utils/file";
 import Modal from "@/components/common/Modal.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
@@ -230,6 +236,20 @@ const importLegacyHttpConfig = computed(() => {
   ].some((key) => typeof body[key] === "string" && String(body[key]).trim().length > 0);
 });
 
+/**
+ * 导入预览：直连 / 脚本渠道的方案绑定的是**本机任务**，导出时按契约清空
+ * （接收方多半没有同名任务），导入后必须自己去对应任务页重选一次。
+ *
+ * 不点名这一条，用户会导入完就直接点登录，拿到一句"未绑定…"的失败——而那次失败
+ * 与"文件有问题"长得一样。返回的是要去的任务页名称（浏览器渠道为空串）。
+ */
+const importChannelTaskPage = computed(() => {
+  const channel = String(importProfileBody.value?.login_channel ?? "");
+  if (channel === "http") return "「任务 · 直连任务」";
+  if (channel === "script") return "「任务 · 脚本」";
+  return "";
+});
+
 const importing = ref(false);
 
 /** 确认导入：交给后端分配 ID（冲突自动改名） */
@@ -421,6 +441,7 @@ async function confirmImport(): Promise<void> {
               <label for="prof-auth-url">认证地址（可选）</label>
               <input id="prof-auth-url" v-model.trim="loginUrl" type="text" placeholder="重定向检测成功时无需填写；无法重定向时手动填写" />
               <span class="hint" v-if="p.editingProfile.value.login_channel === 'http'">直连登录的请求地址在「直连任务」里；这里是它的兜底来源——任务里留空认证地址时用这个，也用作抓取登录页的地址。</span>
+              <span class="hint" v-else-if="p.editingProfile.value.login_channel === 'script'">脚本登录不看这个地址：它只作为环境变量 CAMPUS_AUTH_URL 传给登录脚本，脚本用不到就留空。</span>
               <span class="hint" v-else-if="followsRedirect">当前将打开默认触发地址并由浏览器跟随门户跳转；多数校园网无需填写。</span>
               <span class="hint" v-else>已填写时直接打开这个网址，不再经过重定向触发页。</span>
             </div>
@@ -560,9 +581,9 @@ async function confirmImport(): Promise<void> {
                 <IconApp name="x-circle" class="icon-sm" />
                 无匹配规则
               </span>
-              <span class="profile-tag" :title="info.login_channel === 'http' ? '直连请求：不启动浏览器' : '浏览器自动化：按任务操作网页'">
-                <IconApp :name="info.login_channel === 'http' ? 'globe' : 'chrome'" class="icon-sm" />
-                {{ info.login_channel === 'http' ? '直连请求' : '浏览器' }}
+              <span class="profile-tag" :title="loginChannelHint(info.login_channel)">
+                <IconApp :name="loginChannelIcon(info.login_channel)" class="icon-sm" />
+                {{ loginChannelShortLabel(info.login_channel) }}
               </span>
             </div>
           </div>
@@ -593,7 +614,8 @@ async function confirmImport(): Promise<void> {
         <div v-if="importProfileBody" class="import-summary">
           <span class="import-summary-name">{{ importProfileBody.name || '(未命名)' }}</span>
           <span class="import-summary-meta">
-            {{ importProfileBody.login_channel === 'http' ? '直连请求（免 Python 与浏览器）' : '浏览器自动化' }}
+            {{ loginChannelLabel(String(importProfileBody.login_channel ?? "")) }}
+            <template v-if="importProfileBody.login_channel !== 'browser'">（免 Python 与浏览器）</template>
             <template v-if="importProfileBody.wifi_ssid"> · WiFi {{ importProfileBody.wifi_ssid }}</template>
             <template v-if="importProfileBody.gateway_ip"> · 网关 {{ importProfileBody.gateway_ip }}</template>
           </span>
@@ -608,6 +630,15 @@ async function confirmImport(): Promise<void> {
           <strong>该分享文件来自旧版本，其中的直连请求配置不会被导入</strong>
           <span class="hint">
             直连参数（含凭据变换脚本）现在是独立的「直连任务」，不再随方案分享。导入后请到「任务 · 直连任务」新建或从任务仓库导入，再在方案里选中它。
+          </span>
+        </div>
+
+        <!-- 直连 / 脚本渠道绑定的任务不随方案分享，导入后得自己重选一次 -->
+        <div v-else-if="importChannelTaskPage" class="import-script-warn">
+          <strong>该方案用的是{{ loginChannelLabel(String(importProfileBody?.login_channel ?? "")) }}渠道，任务绑定不随方案分享</strong>
+          <span class="hint">
+            绑定的是本机任务（别人机器上多半没有同名任务），导出时已清空。导入后请到
+            {{ importChannelTaskPage }} 新建或从任务仓库导入对应的任务，再在方案里选中它——未选中前这个方案的登录会直接失败。
           </span>
         </div>
       </div>

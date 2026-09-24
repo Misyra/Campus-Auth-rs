@@ -390,6 +390,8 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
   login_channel: "browser",
   /** 直连渠道绑定的直连任务 ID（空 = 未绑定；直连没有内置兜底任务，故必须显式选） */
   active_http_task: "",
+  /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
+  active_script_task: "",
 };
 
 /**

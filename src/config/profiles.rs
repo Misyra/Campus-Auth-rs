@@ -28,7 +28,11 @@ pub struct ProfileSummary {
     /// 任务页据此在列表里标出「这条直连任务被哪些方案在用」——那是判断能否安全
     /// 删除它、以及确认改动会影响到谁的唯一依据，不必再切到方案页逐个核对。
     pub active_http_task: String,
-    /// 登录执行渠道（列表卡按此区分「浏览器自动化 / 直连请求」）
+    /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定）
+    ///
+    /// 与 `active_http_task` 同一用途：任务页据此标出「这条脚本任务被哪些方案在用」。
+    pub active_script_task: String,
+    /// 登录执行渠道（列表卡按此区分「浏览器自动化 / 直连请求 / 自定义脚本」）
     pub login_channel: LoginChannel,
     /// 网关 IP 匹配规则（列表卡展示"无匹配规则"判定依据）
     pub gateway_ip: String,
@@ -140,6 +144,7 @@ impl ProfileService {
                 isp: p.isp,
                 active_task: p.active_task,
                 active_http_task: p.active_http_task,
+                active_script_task: p.active_script_task,
                 login_channel: p.login_channel,
                 gateway_ip: p.gateway_ip,
                 wifi_ssid: p.wifi_ssid,
