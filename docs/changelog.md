@@ -2,6 +2,710 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-24 未提交更改的全面审查与修复：六条 P1 + 一批 P2/P3）
+
+### 背景
+
+- 用户诉求：「全面审查一下当前更改」→「你修复优化一下」。审查对象是当时工作区里那 95 个文件 / +6985 −3706 的全部未提交改动（卸载模式、任务页四面板、样式统一、文档三件套）。
+- 做法：**独立复跑**全部验证块 + **四路并行对抗性复核**（前端逻辑层 / 前端视图与样式 / Rust web·tasks·login·updater / 文档与代码一致性），每条结论都回到实现代码复核判据后才写进报告；报告在 `docs/reports/current-changes-review-2026-09-24.md`（本地不提交）。
+- 复跑结果：`fmt --check` 通过、`clippy --all-targets --features no-embed -D warnings` 零告警、`cargo test --features no-embed` lib **1014** + helper **12** 全绿、`vue-tsc` 零错误、`vitest` **424**、`vite build` 通过、`audit.mjs` **ghosts=0 dead=36**、任务仓库四个远端索引实测 **9 / 1 / 9 / 1**（Gitee 侧 `haust` 已可达）——**与 changelog 原先的声称全部一致**，故本轮不动那批数字。
+- 本轮修的是复核**新发现**的问题，其中六条属"会丢数据 / 不可逆 / 功能失效"级别。
+
+### 修复：P1（每条都配了回归测试）
+
+- **跨桶 `untitled_N` 撞 id 会静默删掉另一类任务的文件**（数据丢失，且几乎必然发生）：浏览器任务与直连任务各自只在**自己那一类**的列表里取号，都从 `untitled_1` 起算；而后端 `save_task` 写盘时会删掉**另外两个桶**里同 id 的文件（那条清理是给"用户主动改任务类型"用的，注释假设"同 id = 换类型"）。于是"两类各新建过第一个任务"之后，改一下直连任务的地址就会把 `tasks/browser/untitled_1.json` 删掉，界面上什么都不说。
+  - 前端取号改为对**三类 id 的并集**去重：`useTaskDirectory.allTaskIds()`，`createTask` / `duplicateTask`（浏览器）与 `createHttpTask` / `duplicateHttpTask`（直连）四处都换成它——`duplicateTask` 的 `_copy` 后缀走的是同一条路径，一并修掉。
+  - 后端删别桶残留时改走 `tracing::warn!`（原先 `let _ = remove_file(..)` 完全无声）：这条路径正常来自"改类型"，一旦来自撞车，日志就是唯一的追查线索。
+- **「保留配置与任务」保留的配置解不开密码**：第一步 `POST /api/uninstall` 原先**无条件**删除 `~/.campus_network_auth`（其中 `.enc_key.rs` 是方案密码 AES-256-GCM 的主密钥，路径与 `base_path` 无关）。勾选"保留"时 `config/` 留下来、密钥却被删掉，下次启动用新密钥解旧密文必然失败——用户得把所有方案密码重填一遍，而 updatelog 承诺的是"换目录重装后直接可用"。
+  - `POST /api/uninstall` 新增可选 body `{ keep_user_data }`（`CleanupRequest`，缺省 `false` = 原语义，老调用方不受影响）；勾选时跳过密钥目录并在步骤结果里明说"已保留（保留的配置需要它才能解密）"。
+  - 前端 `uninstallApi.uninstall(keepUserData)` 与 `purge` 传**同一个变量**（两处各写各的默认值正是这类 bug 的来源），`useUninstall` 的单测钉住"两步收到同一个值"。
+  - 顺带修文档：user-guide 原先写"只删程序文件"（实际是"除五个数据目录外的一切照删，含未知文件"），并把密钥目录的处置写准。
+- **不可逆步骤排在可能失败的步骤之前**：前端顺序是"先清系统残留（删密钥目录 / 自启动 / 浏览器缓存）→ 再 purge（spawn 助手）"，而 `spawn_helper` 在助手缺失时必然失败（有单测）——于是"凭据已删、程序还在"，白丢一轮且不可回滚。
+  - `purge_uninstall` 在守卫之后**先查卸载助手是否在位**，缺失即 400 + 可执行的文案（"请重新解压完整发布包后再卸载（程序文件未被删除）"），不再等到 spawn 那一步才报 500。
+  - `detect` 回报 `helper.{label,path,exists}`；前端把它合成 `blockReason`（与守卫拒绝同一个展示位），助手缺失时按钮直接禁用并说明原因——连确认框都不弹。
+- **`cancel_pending_update()` 挡不住"卸载后被更新回来"**：原实现只判"此前有没有 pending"就返回 `true`，而两条路径仍可让更新在卸载中发生：① 更新助手**已经 spawn**（`--apply-update --pid … --staging … --target …`，CLI 参数优先于 pending，助手最多等 60s），用户在这窗口里点卸载，助手醒来读不到 pending 但 CLI 的 staging/target 仍生效；② 取消之际有一次下载在途，它跑完后**无条件**写 `pending.json` 并 spawn 助手。这正是该函数存在的理由。
+  - 新增 `update_cancelled` 标记（`UpdaterService`）：`cancel_pending_update` 先落标记、再抢占下载互斥，然后才清理；`apply_update` / `apply_uploaded_package` / `finalize_staged_package`（三条落盘路径的唯一出口）/ `ensure_helper_for_shutdown` **四处复查**该标记，命中即 `UpdaterError::Cancelled`（409）并清掉解压产物。
+  - 返回值改为"**确实**取消掉了"：清理后复查 `has_pending_update()` 与 staging 是否真的消失（清理是 best-effort，不复查就会把"没删掉"报成"已取消"）。
+  - 取消失败时不再沉默：`purge` 响应新增 `pending_update_left`，前端回执里明说"程序可能在退出后被更新助手重新安装"——否则用户以为卸干净了、下次开机却看到程序还在。
+- **定时任务新建的 `_isNew` 会卡死**：`onSaved` 是 `_isNew` 唯一的翻转点，而 `run()` 在"被后一发顶掉"时先于它返回；于是首发 POST 的成功被丢弃后，之后**每次**自动保存都会 POST 一个已存在的 id → 409，面板"存不下去"直到重开编辑器（另三个面板用幂等 PUT，同一条竞态能自愈——这是四面板分化处）。
+  - `autosave.run`：落盘成功时 `onSaved` 的调用只保留"这份草稿仍在编辑器里"这一个条件（成功是关于草稿的**事实**，与"由哪一发接管界面态"无关），基线/状态字仍受序号判断保护。
+  - `useScheduledTasks.persist`：create 遇 409 降级为 PUT 继续（`isConflictError`，按 409 / `CONFLICT` 判），不再弹一句假的"已存在"；非冲突错误照旧报错、不偷偷降级。
+- **脚本面板：打字停顿会锁死 ID**（ID 落盘后不可改、输入框随即禁用）：闸口只看"当前值恰好合法"，而 `camp` 在打字途中就是合法 ID、stub 内容也非空——停手 500ms 即落盘，`campus` 再也打不完，只能删掉重来（还留一份 `camp.json`）。
+  - `scriptDraftGaps` 新增可选上下文 `{ idPending }`；`useScripts` 持有 `scriptIdPending`（新建态为真），面板在输入框**回车 / 失焦**时调 `commitScriptId()` 收口。
+  - `commitScriptId` 延后一拍（`nextTick`）执行：失焦与"点另一个按钮"在同一轮事件里，用户点的是「放弃」时草稿已被清空，这里就什么都不做——否则会先创建一份再把它删掉。
+  - 提示文案同时改准（原先写"字母开头、只能用下划线"，比后端 `is_valid_task_id` 严，正是 2026-09-23 修过的那类死角）。
+
+### 修复：P2 / P3
+
+- **保存闸比执行闸松：请求头 256 KiB vs 64 KiB**（存得下、必然登不上；指南写的又正是 64 KiB）：`tasks::MAX_HTTP_HEADERS_BYTES` 对齐到 64 KiB，并补 `login_and_task_size_limits_agree` 把"两处必须同值"钉住（URL / 请求头 / 请求体三档一起比）。
+- **在途载荷相同就不再发一遍**：debounce 到点会清掉 `pendingChanges`、基线要等响应才更新，于是"在途"这段窗口里 `flush`（换编辑对象 / 关闭编辑器）会重复发一次同样的请求——对三个 PUT 面板是白跑，对定时任务是第二次 POST 一个刚建出来的 id（409 假报错）。`autosave` 记 `inFlight{seq,mark}`，命中即不重发。
+- **`clear()` 使在途那一发作废**：`resetMachine` 顺带推进 `seq`，迟到响应不再把 `lastSavedFingerprint` 写成已丢弃草稿的指纹、也不再调 `onSaved`（注释同时写明：这**不能**撤回已发出的请求，"放弃新建"仍可能创建文件——接口的硬限制，故文案不承诺"什么都没写"）。
+- **detached 一发的失败不再被序号判断吞掉**：失败分支的 `seq` 检查只用来决定"要不要写状态字"，日志与"上一份的改动未保存"提示照发（原先 `mine !== seq` 直接 return，注释却写着"已切走也照样出声"）。
+- **`DATA_DIR_NAMES` 改由 `utils::paths` 常量拼出**并加 `test_data_dir_names_match_paths`：五个名字是"保留数据"与"删除其余一切"的分界线，两边各写一份时改一处漏一处，后果是用户勾了保留却丢那一项。
+- **守卫拒绝 cargo 构建输出**：`is_cargo_target_dir`（路径含 `target` 组件**且**祖先有 `Cargo.toml`——只按组件名判会误伤用户自建的 `D:\target\`）。开发实例住的 `target/debug/` 里既没有 `.git` 也没有 `Cargo.toml`，原先会放行并删掉整个构建产物目录（含那份实例的数据目录）。
+- **`InvalidTaskId` 的 400 补齐**：`GET /api/tasks/{id}` 与 `GET /api/tasks/export/{id}` 原先用 `has_task` 短路，畸形 id 报 404「任务不存在」，与 PUT/DELETE 的 400 矛盾；改为交给加载路径判（`InvalidTaskId → 400`、`TaskNotFound → 404`），`web/error.rs` 补一条映射断言（把映射改回去则测试失败）。
+- **危险步骤 / 凭据脚本的提示移到编辑器内**：HEAD 里浏览器任务保存前会弹「检测到危险步骤」、直连任务会弹「任务包含凭据变换脚本」，改成自动保存后那个时机**不存在**了（函数仍在、零引用），等于静默去掉了一道提示。改为常驻提示：浏览器任务在 JSON 卡下方列出"第 N 步 evaluate"（`useTasks.dangerousSteps`，纯解析、不碰 `jsonError`），直连任务在凭据脚本框下方说明执行环境与"改一个字就自动保存"。
+- **非每日 cron 不再被无关编辑静默改写成每日**：编辑页对"表单表达不了"的表达式有明示，但载荷**总是**带表单值、PUT 又是按字段合并——于是"打开只在周一跑的任务、只改个名字"就把调度改成天天 08:00。`scheduledDraftPayload` 改为：原表达式表达不了 **且** 时间控件未被触碰 → 原样带回原表达式（新增界面态 `_originalSchedule` 记录载入时时分），动过时间控件才按表单值改写。
+- **列表刷新加世代号**：`useTaskDirectory.fetchDirectory` 与 `loadScheduledTasks` 允许重叠（落盘后的 `force` 刷新 + 守卫内的自然刷新），两个响应到达顺序不保证——较旧的快照后到会让"刚编辑的任务"从列表消失，对账逻辑判定它已被删除 → 关掉编辑器、未落盘的改动随之丢失（`plan-next` 早先把这列为"存疑未验证"，本轮确认机制成立）。改为只有最新那一发的响应才允许写列表，过期快照（含其失败提示）直接丢弃。
+- **文档同步**：`AGENTS.md` 补 `uninstall/` 与 `browser.rs` 模块、routes 域列举补 `http_tasks`、`docs/` 描述去掉不存在的 `archive` 并补 `assets/` + `promo/`，新增「卸载与更新助手」陷阱节（清单单一事实源 / 别在 `target/` 下试卸载 / 两段式与 cmd 引号 / 保留数据必须保留密钥目录）、Updater 节补取消语义；`plan-next.md` 的 openapi 指标由过期的 88/103 更正为 91/106 并登记本轮；`task-manual.md` 的定时任务与脚本小节按实现改准（"按上方时间"、ID 需回车 / 失焦确认）；`frontend/src/api/types.ts` 的退出登录顺序注释（原写"在凭据变换脚本之后"，实际排**最前**）、`http_login.rs` 的步骤编号（`// 2.` 曾物理排在 `// 1.` 之前）与"三处都用它"（实为四处）一并修正；`ScriptsPanel` 的导入提示补 `.cmd`（`pickFile` 已接受它）。
+- **仓库卫生**：`.gitignore` 补 `*.bak`；仓库根的 `--full-page`（202 KB，实为 PNG）与 `campus-auth.exe.bak`（26.5 MB）移到已忽略的 `docs/reports/stray-from-root/`（不删，用户可自行处置）。
+
+### 验证
+
+- `cargo fmt --check` 通过；`cargo clippy --all-targets --features no-embed -- -D warnings` 零告警；`cargo test --features no-embed`：lib **1020 例**（上轮 1014，+6：`login_and_task_size_limits_agree` / `test_data_dir_names_match_paths` / `test_is_cargo_target_dir` / `test_validate_install_dir_rejects_cargo_target` / `test_cancel_pending_update_clears_state_and_reports_truthfully` / `test_cancelled_update_refuses_all_entry_points`）、helper bin **12 例**、各集成测试全绿。
+- 前端：`vue-tsc` 零错误、`vitest` **441 例**（上轮 424，+17）、`npm run build` 通过。
+- 复跑说明：Rust 测试仍在独立 `CARGO_TARGET_DIR=target/review` 下跑，用户正在使用的 `target/debug/campus-auth.exe` 全程未被覆盖（前后核对 mtime 未变）。
+
+### 有意不做 / 遗留
+
+- **「放弃新建」不撤回已发出的请求**：那一发已经在路上，脚本 / 任务文件仍会被创建（要真取消得给四个面板各配 `AbortController`）。本轮的改动是让 `clear()` 不再让迟到响应改写状态，文案也不承诺"什么都没写"。
+- **改任务类型（把 JSON 的 `type` 换成另一类）后本面板的编辑器仍会被对账逻辑关掉**：任务确实换了桶、本面板列表里不再有它——提示措辞"任务已不存在"不准，但行为比"每改一处都 PUT 一个不在本类型的 id"要好。已登记 `known-issues.md`。
+- **`python_worker/captures/`（AI 生成任务的页面捕获）随 `python_worker/` 一起被删**：勾选「保留配置与任务」不含它，已登记 `known-issues.md`。
+- **Docker 形态下的卸载未评估**：容器内 `install_dir` 指向 `/app`，守卫会放行（有 exe、无 `.git`），该形态是否符合预期未知。
+- **未重跑真机目检与卸载演练**：`docs/reports/ui-audit/visual-check.py`（12 路由）、`docs/reports/uninstall-e2e/rehearse.ps1`（34 项）都在盘上、时间戳为当日，未重跑（前者要起实例 + Playwright，后者会弹阻塞式系统提示框）——卸载链路的结论以"代码 + 脚本 + 单测"为准。
+
+## 开发中（2026-09-24 前端 UI 风格全面统一：组件契约层收敛 + 死代码清理 + 断点归尺）
+
+### 背景
+
+- 用户诉求：「准备全面统一前端界面 UI 风格，你先探索，拿到结论」——探索结论见 `docs/reports/ui-audit/conclusion.md`（本地不提交）。
+- 探索用的是规则级证据而非目检：`docs/reports/ui-audit/audit.mjs` 用 Vue 编译器 AST 取模板 class、再与样式表选择器集合对账，产出「幽灵类 / 死类 / token 逃逸 / 断点分布」四张表。
+- **总判断：token 层是健康的，问题在组件契约层**——同一个视觉角色有 2–15 套平行实现。`base.css` 之外的字面 hex 只有 11 处、字面 rgba 只有 9 处（多为不可 token 化的黑色遮罩），六组 token（颜色/圆角/间距/字号/动效/层级）覆盖完整。
+
+### 一、卡片头三套并存 → 一套
+
+- **`.card-header h3` 全仓没有任何规则**。`card.css` 只写了 `.card-header h2`，于是四个任务面板编辑页的 `<h3>` 落到浏览器 UA 默认（`1.17em` ≈ 16.38px / `font-weight: bold` 700），而设置页卡头是 14px/600、其余页面的 `<h2>` 是 16px/600——同一个视觉角色三种渲染，且任务面板那一种**从未被有意选择过**。
+  - 反讽之处：`scheduled_tasks.css` 的注释写着「与其余三个子页同一套组件、**同一个 16px 标题**」——作者以为在用 16px。
+  - 修法：`card.css` 把 `h3` 纳入 `.card-header h2, .card-header h3` 同一条规则；`settings-card-header` / `appearance-card-header` 的标题字号从 `--text-base` 提到 `--text-lg`。全站卡头标题统一 16px/600。
+
+### 二、页面外壳：入场动画从"各处手抄"改为结构选择器单一出口
+
+- `.page-content` 此前**只挂了一个入场动画、没有任何布局**，且只被七个页面里的五个使用（`AppearanceView` / `AiTaskView` 的根节点不带该类）。结果是 `ai_task.css` 手抄了一份 `animation: pageEnter`，而外观页干脆没有——同一个转场三种待遇：设置页切 Tab 无过渡、任务页四个 Tab 里唯独 AI Tab 有。
+- 改为三个 router-view 落点各一条结构选择器（`layout.css`）：`.content-wrapper > *`（顶层页面）、`.settings-form > *`（设置页 Tab）、`.tasks-page > :not(.tasks-narrow-nav)`（任务页面板）。删掉 `.page-content` 的动画声明与 `ai_task.css` 的手抄副本。
+- 收益：新增页面/面板自动获得一致转场，且设置页切 Tab 从此也有了过渡（此前完全没有）。
+
+### 三、小标签（chip）三份逐字重复 → 全局一套
+
+- `HttpTaskFields.vue` 的 `.http-chip`（scoped）与 `views/tasks/HttpTasksPanel.vue` 的 `.http-chip`（scoped）**规则体逐字相同**，`HttpLoginWizard.vue` 的 `.wz-chip` 只差容器类名——同一个"等宽词条"视觉三份平行实现。根因是 scoped 样式无法跨组件复用。
+- 新增 `frontend/src/styles/components/chip.css`（并进 `index.css` 的组件层）：`.chip` / `.chip--fn` / `.chip--dense`（表格行内密集档，原 `.tsk-chip`）/ `.chip--muted`（原 `.tsk-chip--muted`）/ `.chip-row` / `.chip-row--inline` / `.chip-row-label`。三个文件的 scoped 副本与 `tasks.css` 的 `.tsk-chip` 一并删除，模板改引用共享类。
+
+### 四、提示条（note）四份同族 → 全局一套
+
+- `.wz-warn`（HttpLoginWizard）与 `.http-risk-note`（HttpTaskFields）**规则体逐字相同**；`.http-task-alert`（LoginChannelField）是同族第三份（只差 padding 8px 10px 与 `align-items:center`）；`.browser-info-tip` 是同款的 accent 色调变体（只差字号与一个多余的 margin-top）。
+- `misc.css` 新增 `.note` / `.note--warn` / `.note--info`，四处改用共享类。**`--danger` 与 `--flush` 两个变体故意不预先声明**——当前没有使用者，本仓的教训正是"留着一堆没人用的平行样式"。`settings-load-failed` 按其"带操作按钮的阻断横幅"语义保留独立形态（文件内已注明分工）。
+
+### 五、布尔开关：**核查结论是"本来就统一"，问题在别处**
+
+- 探索阶段曾据 `<input type="checkbox">` 单行判断"MonitorSettings 8 个全是裸复选框"，**这是错的**：25 个 checkbox **全部**走 `<label class="toggle">` + `.toggle-slider` 标准开关（用 AST 取祖先 label 复核，`未走标准开关 = 0`）。已修正结论文档。
+- 真正的分歧在**两种实现的开态不一致**：`ToggleSwitch.vue`（按钮型）是纯色 `background-color: var(--accent)`，而 `.toggle`（label 型）是 `accent→accent-hover` 渐变 + `0 0 12px` 发光。现把按钮型对齐到 label 型（同一组声明），两者的 `transition` 也一并补上 `border-color`/`box-shadow`，开态不再"边框与发光瞬间跳变"。
+- 顺带清掉一个幽灵修饰类：`ProfilesView.vue` 的 `<label class="toggle compact">`——`.compact` 只在 `custom-select.css` 里定义，对 `.toggle` 完全无效。
+
+### 六、清理死 CSS（零引用，且已排除运行期拼接 / Transition / JS 施加）
+
+- **删除 `styles/pages/settings/account.css` 整个文件**（并从 `index.css` 摘掉 import）：`/settings/account` 自「账号移交配置方案页」起只是重定向到 `/profiles`，文件里 `current-profile-hint` / `hint-link` 零引用。
+- 删除 36 个零引用规则块（脚本 `prune.mjs` 按精确选择器删除，删后断言全样式表花括号配平）：`settings/tasks.css` 的 `.task-mini-grid` / `.mini-stat*` / `.task-panel-actions` / `.task-quick-actions` / `.task-overview-row|info|desc` / `.ocr-recognize`（共 2.8 KB）、`settings/common.css` 的 `.settings-panel-grid--task`、`settings/monitor.css` 的 `.settings-detect-columns`、`settings/environment.css` 的 `.env-status-summary`、`settings/browser.css` 的 `.shell-custom-input*` / `.status-custom` / `.browser-desc`、`about.css` 的 `.update-section` / `.uninstall-item-size`、`profiles.css` 的 `.editor-divider`、`notification.css` 的 `.notify-icon`（3 条）、`dashboard.css` 的 `.network-status-banner .status-icon`、`log-viewer.css` 的 `.log-name` / `.log-filter-chip`（3 条），以及 `misc.css` 的 `.ws-kicked-banner` / `.text-secondary` / `.text-success` / 旧别名 `.monospace-textarea`、`btn.css` 的 `.btn-lg`。合计约 4.2 KB 规则 + 整个文件。
+- **把"注释说退役、代码还在用"的一处真正收口**：`settings/common.css` 写着「旧 `.settings-monospace-textarea` 退役」，而 `BrowserSettings.vue`（2 处）与 `MonitorSettings.vue`（2 处）用的正是它、文档指定的新名字 `.textarea--mono` 反而零引用。现四处改用 `.textarea--mono`，旧类删除。
+- **不再保留动态 class 误报**：`badge-script/badge-browser`（`'badge-' + task_type`）、`chip-*`（`'chip-' + ev.type`）、`level-*`/`log-*`（`'log-' + level`）、`source-frontend`、`step-*`（DebugPanel 状态函数返回）、`checking/connected/idle`（后端状态串）、`detected/not_detected`（`useRedirectTest` 的 status）、`dragging`/`exit-overlay`/`has-custom-bg`/`no-backdrop-filter`（JS `classList`）、`modal-fade-*`（Vue `<Transition>`）、`saved`/`saving`/`tsk-autosave`（`autosave.ts` 状态字）——审计脚本改为逐条列出**来源**的 `RUNTIME_APPLIED` 表，而不是一个沉默白名单。
+
+### 七、幽灵类：18 个 → 0
+
+- **补样式**：
+  - `.rust` / `.tokio` / `.vue`（AboutView 技术栈徽标）：`about.css` 只给 `python / fastapi / pyinstaller / websockets / pydantic / playwright / uv / ddddocr` 配了色——Rust 重写后模板已换成 Rust 栈，配色没跟着换，三个徽标因此**没有颜色**。现把死掉的 python 时代配色（`fastapi` / `pyinstaller` / `pydantic`）换成 `rust` / `tokio` / `vue`，并把 8 条×4 行的平行规则收敛成"每条只声明一个 `--tech` 品牌色、底色/描边/文字统一由它 `color-mix` 派生"。
+  - `.tsk-cell-flex`（HttpTasksPanel 的 `<th>`/`<td>`）：与 `.tsk-col-flex` 成对，却全仓没有规则——"请求"这一格拿不到任何单元格级约束。现补 `min-width: 0`，并给该 `<td>` 补上同排邻居都有的 `.tsk-cell-ellipsis`。
+- **删空钩子**（引用了但全仓无规则、且父级已提供全部样式）：`.tech-item`（8 处空壳 div，`.tech-stack` 本身已是 flex）、`.appearance-card`（4 处，与 `appearance-section-card` 同挂）、`.appearance-sliders`、`.channel-section`、`.http-fields`、`.wz-body`、`.ai-config-body`、`.repo-item-author` / `.repo-item-tags`（`.repo-item-meta` 已提供 flex+gap+弱色）、`.update-progress`、`.run-mode-card`、`.browser-error-row`、`.ocr-result-label`；`.loading` 改用已有的 `.hint`（它本来就是一行状态文字，不是 `.loading-state` 那种居中大块）。
+
+### 八、断点归尺：11 个取值 → 4 个
+
+- 收敛前全仓出现 `520 / 640 / 720 / 768 / 860 / 900 / 960 / 980 / 1024 / 1100 / min-1080`，其中 5 个只出现在单个文件里，结果是同一类"窄屏降级"在不同页面于不同宽度触发。
+- 定为四档并写进 `responsive.css` 文件头：**640（手机窄屏）/ 768（窄屏，侧栏收成图标条）/ 900（平板窄区）/ 1100（平板宽区）**，反向只有 `min-1100` 一档（"够宽才开双列"）。
+- 映射规则：就近落到某一档，且**只允许让降级更早发生**（隐藏的元素集并集只多不少）。`scheduled_tasks.css` 原有 1100/980/860 三档，其中 980 与 860 都是"平板窄区"的同一意图，且 860→768 的映射会让 768–900 这一段反而多留「最近结果」（名称列掉到 90px）——故合并为 1100/900 两档，名称列在每一档都只更宽。`ai_task.css` 的 520→640、960→900；`environment.css` 的 720→768；`min-1080`→`min-1100`；`responsive.css` 的 1024 并入 1100 档，两个重复的 768 块合并为一块。
+
+### 九、顺带做掉 `docs/plan-next.md` 里的前端项
+
+- **`useConfig` 保存期间的在途编辑被静默丢弃**（原报告 P3，修法已明确但需同步调整快照用例）：`saveConfig` 在 `await patch` **之后**才用"当前 `config`"写 `savedSnapshot`，于是 PATCH 在途期间的编辑被当成"已保存基准"、`dirty` 被置 false——实际从未提交，用户看到"已保存"却什么也没存。现改为 `await` **之前**取 `submittedSnapshot`，且保存成功后 `dirty = 当前值 !== submittedSnapshot`（`suppressDirty` 窗口内被抑制的 watcher 不会补跑，故必须自己算一次）。新增回归用例，并**验证过它在旧实现下会失败**（临时改回旧行为跑一遍，确认该用例真的咬得住）。
+- **删除/失效任务的编辑器不自动关**（四个面板同一口径）：正在编辑的任务在别处被删掉（手改磁盘 / 另一实例 / 刷新后已不在列表里）时，编辑器仍开着，用户每改一处都 PUT 一个不存在的 id、吃 404 与失败提示，草稿却留在页面上。新增 `frontend/src/utils/draftReconcile.ts`（纯判定 + 7 例单测），四个面板各挂一个列表对账 watcher。
+  - **判据是「曾经在列表里、现在不在了」而不是「现在不在列表里」**：新建草稿在"首次落盘成功"与"下一次列表刷新"之间本来就不在列表里，用后者会把刚建好的任务立刻踢出编辑器。
+  - 走 `clearXDraft()` 而不是 `closeXEditor()`——后者的语义是"退出即落盘"，对一个已被删除的任务再发一次 PUT 只会再吃一次 404。
+- **`validateConfig` 覆盖到位**（原 P1 项的另一半）：此前只查端口范围与代理地址格式，而设置页各数字输入框声明的 `min`/`max` **拦不住手工输入与程序化赋值**（页面用 `<form @submit.prevent>`，没有表单提交校验这条路径）。新增 `frontend/src/utils/configRanges.ts` 作为区间**单一出处**，并把校验接入 `validateConfig`。
+  - **分级**：`errors` 只放定义上不可能正确的值（NaN / 非整数，以及端口越出 1–65535——超出必然起不来）；越出"界面建议区间"只降级为警告。依据是后端这些字段是**裸 u32 直收、不做任何钳制**（`src/config/schema.rs`），前端若把建议区间当硬闸门，就会出现"昨天还能保存的配置今天保存不了"——`retry.max_retries: 0`、`worker.idle_timeout_seconds: 0` 都合法且有人用。
+  - 端口那项**已经漂移过**：输入框写 `min="1024"`、校验放行 1–65535。现统一为 1–65535，低于 1024 给"需要管理员权限"的警告（而不是硬错误，否则会拦住既有配置）。
+  - 新增 `configRanges.test.ts`（10 例）：7 例是分级与边界行为，另有 3 例**读设置页模板反向对账**——「界面声明的区间 == 表里的区间」「表里每一项都有对应输入框（没有死校验）」，两侧任何一处改动导致不一致都会在 CI 失败。
+- **`parseCronToSchedule` 补时/分区间校验**：原判据只查"纯数字 + 每日 + 5 字段"，于是 `99 99 * * *` 被判为**有效**，编辑页显示 "99:99"、原样存成一条永远匹配不上的 cron，任务从此静默不执行。现补 `0-59` / `0-23` 区间（2 例回归测试）。
+- **补齐 `useTasks` / `useScripts` 的自动保存单测**（此前这两个面板**没有测试文件**，`useScheduledTasks` / `useHttpTasks` 已有）：`useScripts.test.ts`（6 例）覆盖缺口拦落盘、补齐后落盘一次、改回原样不发请求、落盘后状态字转 saved、删除当前编辑对象关编辑器、取消确认不删；`useTasks.test.ts`（5 例）覆盖 JSON 非法不落盘且标红、修正后恢复落盘、指纹判据、删除关编辑器、取消不删。
+- **核查后确认"保存防连点"已满足，未作无谓改动**：保存按钮 `:disabled="busy.save"` + `saveAbort`/`saveSeq` 的"后发接管"语义（比硬拒绝更正确——硬拒绝会把用户更新的一次编辑丢掉）；设置页各「重试」按钮在 `v-else-if` 分支里、与 loading 分支互斥，加载中根本不在 DOM 里；更新页的检查/更新/重载按钮均有 `:disabled`。逐条核实后只记录结论。
+
+### 有意不做 / 遗留
+
+- ~~**`autosave` 状态机仍未抽成共享控制器**（`plan-next.md` 登记项）~~：**2026-09-24 已落地**，见下方同名一节。上轮"先把 `useTasks` / `useScripts` 的单测补齐（抽取值最高的前置条件）"的判断成立——测试就位后替换确实是机械的：四个面板的自动保存测试文件一行未改即通过。
+- ~~未做真机目检~~：**2026-09-24 已补上**（Playwright 巡检 12 条路由），并因此发现一处规则级证据看不到的问题（任务页 / 设置页的入场动画内外两层同时播）。见下方同名一节。
+
+### 测试与验证
+
+- `npx vitest run`：**398 例全绿**（上轮 367，+31：`draftReconcile` 7、`configRanges` 10、`useScripts` 6、`useTasks` 5、`useConfig` +1、`scheduledDraft` +2）。
+- `npx vue-tsc --noEmit -p tsconfig.app.json` 零错误（新测试里踩到本仓已记录过的坑：`vi.fn(async () => ...)` 推断出零参签名，断言 `mock.calls[0][0]` 触发 TS2493——mock 的参数需显式声明）。
+- `npm run build` 通过；对构建产物 `dist/assets/index-*.css` 逐条断言：新增规则（`.card-header h2,h3`、`.chip`、`.chip--dense`、`.chip-row`、`.note`、`.note--warn`、`.note--info`、`--tech-rust`、`.content-wrapper>*`、断点 900/1100）全部存在；已删规则（`current-profile-hint`、`settings-monospace-textarea`、`.tsk-chip`、`browser-info-tip`、`http-chip`/`wz-chip`、`ws-kicked-banner`、`.btn-lg`、`log-filter-chip`、`task-mini-grid`、`.log-name`、散落断点 980/860/1024/520）全部消失。
+- 审计脚本自身的两处修正（记此备查）：① 初版把 `url("http://www.w3.org/2000/svg")` 里的 `.w3` / `.org`、`url("/logo.png")` 里的 `.png` 当成类选择器，产生 3 个假幽灵/假死类；已在抽取前剥掉 `url(...)` 与 `@import` 字符串。② 初版无法区分 `:class` 表达式里的**标识符**（三元条件、对象键）与真正的类名字面量，据此把 `isConfigDone` / `currentMode` 一类报为幽灵类——改为只有静态 `class="..."` 属性才参与幽灵类判定。
+- 本轮自身的一处过删（记此备查）：`prune.mjs` 按"选择器名零引用"判定，把 `.task-overview-*` 整簇删掉了，但模板里 `TaskEnvironmentSettings.vue` **仍在用**其中 7 个类（`.task-overview-card` / `-compact` / `-left` / `-label` / `-name` / `-right` / `-actions`）——重跑审计时 ghosts 从 0 反弹到 8 才发现。已从 `git diff` 取回原规则、只恢复模板真正使用的那部分（`.task-overview-row` / `-info` / `-desc` / `.task-overview-left .task-overview-desc` 确为零引用，保持删除）。教训：死代码清理必须在**改完之后重跑审计**，而不是删完就算。
+
+## 开发中（2026-09-24 更新助手增加卸载模式：「卸载」从此真的卸载）
+
+### 背景
+
+- 用户诉求：「能否优化一下更新助手，把卸载功能加进去」。
+- **原状**：`POST /api/uninstall` 只清理 `base_path` **之外**的系统残留（自启动 / `~/.campus_network_auth` / Playwright 浏览器缓存），然后提示「删除程序所在文件夹即可完成卸载」——程序目录本身交给用户手动删。做不了的原因很硬：**Windows 不允许删除运行中的 exe**，而程序文件与 `config/ tasks/ logs/ environment/` 同在一个目录里，必须先退出进程才能动。
+- 而"等主进程退出后操作文件"正是更新助手已有的能力（`--apply-update` 的整条骨架），故扩展成**两种模式互斥的同一个 binary**，而不是再加一个可执行文件——两者共用"等 PID 退出""路径守卫""best-effort 日志"三块逻辑，发布包少一个文件就少一处需要同步的版本管理。
+
+### 一、助手新增 `--uninstall` 模式
+
+- CLI：`--uninstall`（与 `--apply-update` 互斥）+ `--keep-user-data` + 两段式内部参数 `--uninstall-phase2` / `--install-dir`。`main` 拆成模式分发（`run_apply_update` / `run_uninstall`），原更新主体逻辑未改。
+- **两段式（仅 Windows）**：执行删除的进程不能住在被删的目录里。第一段（在安装目录内）等主进程退出后把自己**复制**到 `%TEMP%\campus-auth-uninst-<pid>\`，spawn 第二段即退出；第二段位于安装目录之外，因此可以删掉整个安装目录（含第一段那份文件）。复制而非移动：rename 跨卷会失败，而系统临时目录与安装目录不保证同卷。unix 没有这个限制（运行中的可执行文件可 unlink），单段直删。
+- **助手最后一份文件**的处理（真机演练改写过一次，见下）：运行中的 exe 无法自删，故派发 `cmd /c ping -n 3 … & del /f /q … & rmdir /q …`，等本进程退出后由系统命令删掉临时副本与它所在的目录；派发失败（或路径含 cmd 会二次解析的字符 `% & ^ | < > " !`）才退回 `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)` 登记。
+  - **`MoveFileExW` 不能当主路径**：真机演练实测，非管理员账户下它以 `ERROR_ACCESS_DENIED` 失败（该标志要求调用者属于 Administrators 组或 LocalSystem）。原先把它当主路径时，"重启后删除"对普通用户等于没做，每次卸载都会在 `%TEMP%` 留下一个几 MB 的副本——**这类问题只有真机跑得出来**，单测与静态审阅都看不见（派发"成功"、代码路径全走通）。
+  - **cmd 的引号规则也踩了一次**：第一版用 `raw_arg("/c \"\"{line}\"\"")`（外层加一对引号），结果命令派发成功却什么都没删。原因是 cmd 的 `/c` 只在"命令行首字符是引号"时才做首尾引号剥离，而剥掉的恰好是内层路径的引号，把整行拆坏。修正为不加外层包裹（首字符是 `ping`，cmd 原样执行，等价于在控制台手敲）。为把这条钉住，新增 `test_spawn_delayed_delete_removes_file`——**真的起一次 cmd**并断言文件与目录消失（路径刻意带空格，覆盖 `C:\Users\John Doe\…` 这类最常见形态），另有 `test_spawn_delayed_delete_skips_unsafe_path` 覆盖特殊字符路径的放弃分支。cmd 引号规则不属于 `CommandLineToArgvW` 语义，靠推理写不对，只能靠真进程测。
+  - 登记/派发前都先确认目标**确实位于系统临时目录内**，防止"有人在安装目录里手工跑 `--uninstall-phase2`"把正经安装位置当成残留删掉。
+- **结果提示框**：主进程已退出，这是唯一还能传达信息的出口，故成功与失败都弹（`MessageBoxW` 零新依赖——`windows-sys` 已启用 `WindowsAndMessaging` 与 `Storage_FileSystem` 两个 feature）。文案由 `uninstall::report_text` 生成（纯函数、可单测）：全删时列出程序目录与各数据目录；保留数据时**点名保留了哪几项**（否则"卸载完成"与"目录还在"自相矛盾）；失败项**逐条列出**（每一项都意味着现场还留着东西，并提示可手动删除）。
+- 卸载日志落 `%TEMP%\campus-auth-uninstall.log`：安装目录（含 `logs/`）正在被删，日志不能留在里面。`HelperLog` 因此拆出 `open_at(path)`。
+- **不用 `helper.lock`**（更新模式那把互斥锁）：它落在 `<base>/update/helper.lock`，正是要被删掉的东西之一——持锁删除锁文件在 Windows 上必然失败；且卸载期间主进程已退出，不可能再有第二次卸载。互斥改由"路由先取消待应用更新"承担。
+
+### 二、删除范围与守卫（`src/uninstall/`，**单一事实源**）
+
+- 为什么单独成模块：卸载弹窗要**明确列出**将删除的内容（用户拍板的口径），而真正执行删除的是另一个进程。两处各写一份清单必然漂移，故清单与守卫都在此，两个 binary 共用（界面据此渲染，助手据此执行）。
+- **整目录删，不枚举包内文件**：发布包除 exe 外还带 `resources/`、`docs/`、`python_worker/`，**以及 `src/` 与 `frontend/` 两份源码**。枚举清单只要漏一项，用户就会拿到"卸载完了但目录还在、里面躺着不认识的文件"，而漏项几乎必然（包结构一改就得同步改清单，没有任何机制强制）。故：全删 = `remove_dir_all(install_dir)`；保留数据 = 逐项删子项、只跳过数据目录名（未知文件照删，口径仍是"整个目录消失，只保数据"）；删空后目录若已空则一并删掉（用户选的是"保留数据"，不是"保留一个空文件夹"）。
+- **守卫**（误删比残留严重得多）：文件系统根目录、用户主目录、系统临时目录、**源码仓库**四类一律拒绝；并要求目录下确实有主程序或助手。最后一条是真实踩点：仓库根放着一个早期 `campus-auth.exe`，其 base_path 就是仓库根——天真实现会把 `E:\Campus-Auth-rs\src\` 与 `frontend\` 一起删掉。守卫在**两处**执行：Web 路由（用户还在界面上，能当场看到拒绝原因）与助手（纵深防御，防 CLI 参数被绕过）。
+- 删除带重试（5 次 × 400ms）：首次失败最常见的原因是"文件仍被占用"（并发唤醒的更新助手、杀软扫描）。
+
+### 三、路由与前端
+
+- 新增 `POST /api/uninstall/purge`（body `{ keep_user_data }`）。顺序刻意如此，每步都有具体理由：
+  1. **守卫先跑** → 拒绝原因在界面上就能看到；
+  2. **取消待应用更新**（新增 `UpdaterApi::cancel_pending_update`，复用 `apply::cleanup_after_apply`）——**不取消就会出真 bug**：退出时 `graceful_shutdown` 的 `ensure_helper_for_shutdown` 见到 `pending.json` 存在就会唤醒**更新**助手，把用户刚卸载的程序又"更新"回来并重启；
+  3. **spawn 卸载助手**（助手等本进程退出后才动手）；
+  4. **优雅关闭本进程** + 看门狗兜底（照 `restart_app` 的模式，响应在关闭信号发出前构造）。
+- `GET /api/uninstall/detect` 响应从数组改为对象：`{ items, program, data, blocked }`——多了程序目录与用户数据目录的逐项清单（含路径与存在性）与守卫拒绝原因。
+- 既有 `POST /api/uninstall`（清系统残留）**保留且语义不变**：它同时是"重置环境"的入口（清掉浏览器缓存与自启动后程序照常可用），前端流程把它当第一步自动接着调 `purge`。
+- 前端把整条流程抽成 `composables/useUninstall.ts`（+13 例单测）：留在 `AboutView` 里时那段逻辑有真实时序（确认 → 清理 → 卸程序 → 界面失去后端），且每步失败语义不同——**残留清理失败不阻断卸载**，卸程序失败必须说清"程序文件一个都没删"。卸载弹窗改为：逐项列出将删除的内容（程序目录 / 五个用户数据目录 / 系统残留）、**「保留配置与任务」勾选**（默认不勾 = 默认真卸载；勾选后对应行的标签立刻从「将删除」变成「保留」，后果在按下按钮前看得见）、确认框**逐项点名**删除内容、执行中不可关窗、启动后翻到"程序即将退出"回执（列出将要删除的清单）。
+- 一处测试逼出来的修正：`extractApiError(e, fallback)` 在异常**有 message 时原样返回 message**，fallback 只在无 message 时生效——"程序文件未被删除"放在 fallback 里等于没写，用户只会看到一句「助手缺失」而无从判断删没删。改为写进正文。
+- 一处审计逼出来的修正：数据目录行右侧标签原先把类名藏在辅助函数返回值里（`dataTag(d.exists).cls`），死类审计按模板字面量判定，于是 `.tag-kept` 被报成死类。类名字面量挪回模板（`tag-kept / tag-exists / tag-missing` 三元），audit 回到 `ghosts=0 dead=36`。
+
+### 测试与验证
+
+- `cargo test --lib --features no-embed`：**1014 例全绿**（本轮新增的 lib 用例为 `src/uninstall/mod.rs` 15 例 + `src/web/routes/uninstall.rs` 2 例；另 `campus-auth-helper` bin 新增 2 例。逐文件差值合计 +29，含既有权衡改动带来的少量用例调整）。
+  - 覆盖了真实误删风险：`.git`/`Cargo.toml` 存在即拒绝、根目录拒绝、非安装目录拒绝、保留数据时数据整棵留存而未知文件仍被删除、目录删空即删目录、数据与安装目录分离（`--base-path` 指到别处）时两边各自处理。
+- `cargo test --bin campus-auth-helper --features no-embed`：**12 例全绿**（新增 2 例真起 cmd 的删除用例；纯 `cargo test` 也会跑到它们，CI 的 windows 作业上生效）。
+- `cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo fmt --check` 通过。
+- openapi.json 已同步 `/api/uninstall/purge`——**是测试逼出来的**：`web::tests::openapi_json_matches_route_table` 在路由表与 openapi 不一致时直接失败（该测试此前就存在，这次正好发挥作用）。
+- 前端：`vue-tsc` 零错误；`vitest` **424 例全绿**（+13）；`npm run build` 通过；`docs/reports/ui-audit/audit.mjs` 复核 `ghosts=0 dead=36`（新增 6 个在用的类，删掉 1 个失效的 `.uninstall-final-hint`）。
+- **真机端到端卸载演练：34 项断言全过**（`docs/reports/uninstall-e2e/rehearse.ps1`，本地不提交）。为不碰用户正在运行的实例，用独立 `--target-dir target/e2e` 编了一份 exe + helper，在仓库外的临时"安装目录"上跑全链路：
+  - 三轮：全删 / 保留数据 / 守卫拒绝。逐项断言 **detect 清单形状**、**purge 后主进程退出**、**安装目录真的消失**、**保留数据时 `config/` 与 `tasks/` 整棵存活而程序文件（含一个"非程序文件"）被删**、**守卫在真机上以 HTTP 400 拒绝且一个文件都没删**、**助手卡在系统提示框上**、**关掉提示框后助手自行退出**、**`%TEMP%` 无残留**。
+  - 演练脚本自身也踩过两个坑（记此备查）：API 信封是 `{data: <载荷>}` 而载荷里也有 `data` 字段，少解一层；以及"临时副本是否被清掉"**不能查一次就下结论**——删除是异步的（cmd 要等本进程退出），必须轮询；收尾也**不能**替它擦掉残留，否则会把假阳性洗成通过。
+- **未跑 `cargo build` / 默认 feature 的 `cargo test` 到 `target/debug`**：那里的 `campus-auth.exe` 是用户的运行实例（那也正是本功能要解决的问题本身），全程只写 `target/e2e`；前后核对 `target/debug/campus-auth.exe` 时间戳未变（`2026/9/23 23:47:02`）。
+
+### 有意不做 / 遗留
+
+- **路径含 cmd 特殊字符时（`% & ^ | < > " !`）退回 `MoveFileExW`**：该路径在非管理员账户下会失败，于是那份临时副本会留在 `%TEMP%`（不可见，系统也会自行清理）。概率极低（要求用户名或路径里带这些字符），而"宁可留一个临时文件也不冒命令被拆坏的风险"是刻意的取舍——真要覆盖，得改用 `CreateProcessW` + 自建管道或写一个临时批处理，成本与风险都不成比例。
+- 「保留配置与任务」只作用于用户数据目录；Playwright 浏览器缓存（可达数百 MB）与加密密钥目录仍按原有语义清理（它们是系统残留而非用户配置）。想"换目录重装且不重下浏览器"目前需手动保留缓存。
+- 卸载**没有进度界面**：`purge` 返回后程序立即退出，删除由助手在后台完成，用户看到的最后画面是弹窗里的"程序即将退出"回执，之后是系统提示框。中间若某一步卡住（如杀软长时间扫描），用户只能等提示框——不做进度窗口是有意的：助手是无界面进程，加窗口等于引入一整套 GUI 生命周期。
+
+## 开发中（2026-09-24 自动保存状态机四份拷贝 → 共享控制器；首次真机目检）
+
+### 背景
+
+- 上一轮（同日「前端 UI 风格全面统一」）列了两项「有意不做 / 遗留」：`autosave` 状态机抽共享控制器、真机目检。本轮把两项都做掉，并把真机目检发现的问题一并修掉。
+
+### 一、`autosave` 状态机四份拷贝 → `createAutosaveController`
+
+- 四个面板各自的 `autosaveTimer + autosaveSeq + pendingChanges + lastSavedFingerprint + flushPendingAutosave`（连注释都是逐字重复）收敛到 `utils/autosave.ts` 的共享控制器，深度 watcher 也一并由控制器持有——面板只剩「注入口径」三件：
+
+  | 注入项 | 含义 | 各面板的差异 |
+  |---|---|---|
+  | `fingerprintOf` | 什么算**有改动**（载荷指纹，`null` = 构造不出载荷） | 浏览器任务可能返回 `null`（JSON 语法非法），其余三个恒为字符串 |
+  | `blockReasonOf` | 什么算**发不出去**（闸口） | 浏览器任务是 JSON 闸口（提示要带解析器原话）；其余三个共用 `gapBlocker(gapsOf)` |
+  | `persist` / `onSaved` | 往哪儿落盘 + 落盘后的界面态修正 | 定时任务多一个「首次 POST、之后 PUT」分支；`onSaved` 各自翻转 `_isNew`（浏览器任务还清 `jsonError`） |
+
+- **控制器不持有缺口清单**：各面板的 `draftGapsNow`（状态字与缺口条的数据源）照旧自己算，控制器只在需要时问一次「发不出去的话该说什么」。上轮把「注入面不一致」列为推迟理由，核实后确实不一致，但差异只落在上表三处，不需要控制器知道任何面板细节。
+- 各面板的 `autosaveState` 改由控制器提供；`useTasks` / `useHttpTasks` 各自声明的 `AutosaveState` 字面重复类型删掉，统一从 `utils/autosave` 取。
+- 面板侧的 API 收敛成四件：`markBaseline(draft)`（打开 / 新建后登记"当前内容 == 磁盘那份"）、`markUnsaved()`（导入覆盖等已知与磁盘不同步）、`saveNow(draft)`（模板替换这类程序化改动，不等 debounce）、`flush("switch" | "close")`、`clear()`。`saveNow` 顺带撤掉在途定时器——旧实现里"载入模板后 500ms 还会再补一发"那次重复请求随之消失。
+
+### 二、顺手修掉的两个真问题
+
+- **`useScheduledTasks` 的对账 watcher 挂在 `loadScheduledTasks` 里面**：该函数每成功拉取一次就跑一遍（自动保存每次落盘后也会拉），于是每拉一次 `watch` 一次、`reconcileState` 也重建一次——watcher 与基线状态随拉取次数线性累积，同一份"任务已被删除"被反复判定。现移到模块作用域，与另外三个面板同构。
+- **`clear()` 只复位状态机会漏掉一轮迟到的 watcher**（补控制器单测时暴露）：深度 watcher 是异步批处理的，`改字段 → 立刻 clear`（删除 / 放弃新建正是这条路径）时那一轮回调尚未执行；只复位状态机的话它会读到**残留的草稿**（基线已空 → 判定有改动）再排一次落盘，"删除后又被写回一次"。四个面板原来都靠"紧接着把 ref 置空"绕过，属于会踩空的隐式约定。现由控制器的 `clear()` 自己关掉草稿（watcher 回调读的是**运行当下**的 `draft.value`，置空即堵死那一轮），并把这条写进注释与回归用例。
+
+### 三、首次真机目检（含一处规则级证据看不到的问题）
+
+- 起用户正在用的 debug 实例（`target/debug/campus-auth.exe`，数据目录在 exe **旁边**即 `target/debug/config/`），用 Playwright（chromium 已在 `ms-playwright` 缓存中）**只读**巡检 12 条路由并逐项断言计算样式；脚本与产物在 `docs/reports/ui-audit/`（本地不提交）。
+- **查出的问题：任务页 / 设置页的入场动画内外两层同时播。** `.content-wrapper > *` 与 `.settings-form > *` / `.tasks-page > :not(.tasks-narrow-nav)` 在这两个页面进入时同时命中（外壳与内部面板一起挂载），嵌套的 `animation` 位移相加、透明度相乘——同一个转场在这两个页面明显更"重"，其余页面只播一次。
+  - 探针本身也踩了一次坑：查"哪些元素匹配某选择器"的写法会骗人（CSS 规则删掉后选择器照样命中 DOM），必须读**计算值**全量扫描才能看见真实附着情况。
+  - 修法：**只留 `.content-wrapper > *` 一条规则**。嵌套动画只能二选一，留外层（覆盖全部页面）；内层那份换来的只是"切 Tab 时淡入"——那是上一轮新增的便利、不是既有行为，而切 Tab 本来就是瞬时换内容。收完实测 8 条路由各恰好 1 个 `pageEnter` 元素。
+- 目检结果（全部通过）：12 条路由全部正常挂载（`h1` 与路由一致）；**135 条控制台消息中 0 error / 0 warning、0 个未捕获异常**；卡片标题实测 `16px/600`；关于页 8 枚技术徽标各得其色（`uv` 是刻意的中性灰——uv 本社品牌即为单色，`--tech-uv: var(--accent)`，核查后确认不是缺色缺陷）；1100 / 900 / 760 三个窄口无横向溢出。
+- **新建草稿路径的实机确认**（本轮改动的核心）：点「新建任务」后状态字为「尚未创建 · 改动后自动保存」（`autosaveLabel` 的 `isNew` 分支）、「调试运行」禁用、「删除」变「放弃」；**全程不动任何字段 → 数据目录里一个文件都没多**（`untitled_1.json` 不存在），即 `markBaseline` 对"新建后没改过"的抑制在真机上成立。巡检脚本只读，不写任何数据。
+
+### 测试与验证
+
+- `npx vitest run`：**411 例全绿**（上轮 398，+13：`utils/autosave` 的控制器用例——debounce / 指纹 / 闸口 / detached / 慢响应后到 / 失败提示 / `saveNow` / `markUnsaved` / `clear` / `gapBlocker`）。
+- **四个面板的自动保存测试文件一行未改即全部通过**（`useTasks` 5 / `useScripts` 6 / `useHttpTasks` 6 / `useScheduledTasks` 15，共 32 例）——这是「替换是机械的」这一说法唯一的证据形式。可复核：四个文件的 mtime 为 `useHttpTasks` 09-23 23:18、`useScheduledTasks` 09-24 00:42、`useTasks` 与 `useScripts` 均 09-24 01:29，**均早于本轮开工时间**（本轮净改动 8 个文件：四个 composable + `layout.css` + `ai_task.css` + `utils/autosave.ts` + `utils/autosave.test.ts`）。
+- `npx vue-tsc --noEmit -p tsconfig.app.json` 零错误；`npm run build` 通过。
+- Playwright 真机巡检：`docs/reports/ui-audit/visual-check.py` → `visual-check.json` + `shots/*.png`（12 路由截图、控制台计数、计算样式断言、转场单源计数）。
+- 未跑 `cargo test` / `cargo build`：本轮未动 Rust；且按 AGENTS.md，`target/debug/campus-auth.exe` 正被用户实例占用，`cargo test --features no-embed` 会把它覆盖成不内嵌前端的构建。改动仅前端，debug 构建运行期读盘 `frontend/dist`，`npm run build` 即生效、无需重编。
+
+## 开发中（2026-09-24 定时任务改为「列表页 + 二级编辑页」：四个子页终于是同一套交互）
+
+### 背景
+
+- 用户实机截图指出：「定时任务怎么还是弹窗，能不能和前面两个一样改成打开新页面，一级页面显示列表」。
+- 任务页四个子页里，浏览器任务 / 直连任务 / 脚本早已是「整页列表 + 点行进二级编辑页 + 改动自动保存」，只有定时任务还是「表格 + 新建/编辑弹窗 + 取消/保存」——同一个页面的四套交互，用户得记住自己现在在哪一套里。列表本身上一轮已换成 `tsk-*` 共享版式，留下的就是这个弹窗与它背后的"显式保存"编辑模型。
+
+### 实现
+
+- **新增 `frontend/src/utils/scheduledDraft.ts`**（纯函数，342 行）：编辑模型 `ScheduledTaskDraft`（含 `_isNew` / `_originalCron` / `_originalCronInvalid` 三个界面态）、`emptyScheduledDraft` / `scheduledDraftFromServer` / `switchDraftTargetKind` / `switchDraftTrigger`，以及**缺口判定**与**落盘载荷**——`parseCronToSchedule` / `clampStartupForm` / `STARTUP_FORM_LIMITS` 一并从 `useScheduledTasks` 搬来（`clampTimeout` 新增）。
+  - 校验从"保存按钮的三个 toast 分支"改成**发请求之前可判定的缺口**：debounce 到点才打一个注定 400 的请求，用户只会看到一句莫名的报错。
+  - 数字区间越界计入缺口而**不静默钳制**——静默钳制会在"界面显示 1、磁盘上是 5"之间留下一处说谎（状态字那条规矩要避免的正是它）。载荷里仍保留一次钳制作最后一道闸。
+- **`useScheduledTasks` 改为草稿 + 自动保存模型**（与 `useScripts` / `useHttpTasks` 同构）：`scheduledTaskDraft` / `autosaveState` / `draftGapsNow` / `isNewScheduledDraft` + `persistDraft(draft, { detached })` / `flushPendingAutosave(switch|close)` / `showScheduledTaskEditor` / `closeScheduledTaskEditor` / `clearScheduledDraft`。首次落盘 POST、之后同 id PUT；`scheduledLoaded` 记录列表是否已拉取过（供深链解析）。
+  - 删掉弹窗时代的 `showScheduledTaskModal` / `editingScheduledTask` / `scheduledTaskFormLoading` / `openCreateScheduledTask` / `openEditScheduledTask` / `closeScheduledTaskModal` / `saveScheduledTask` / `onTimeChange`（时间控件的 handler 归视图）。
+  - **编辑页的字段全部来自列表响应**：后端没有单任务 GET，故深链必须在列表就绪后再解析。
+- **`useTaskEditorQuery` 新增可选 `ready` 门**：默认取任务目录 `loaded`（三面板不变），定时任务注入自己的 `scheduledLoaded`——未就绪时不判定"任务不存在"，否则冷启动深链会被误报为"已被删除"并抹掉参数。
+- **新增 `frontend/src/views/tasks/ScheduledTasksPanel.vue`**（584 行），删除 `views/ScheduledTasksView.vue`（工作区删除，未入索引）；路由 `tasks-scheduled` 改指新面板。列表态保持上一轮的表格（名称 / 类型 / 触发 / 目标 / 超时 / 最近结果 / 启用 / 操作），点行与 ⋯ 里的「编辑」都改为进编辑页；编辑态 = 面包屑「返回定时任务」+ 页头（标题 / 状态字 / 运行 / 执行历史 / 删除或放弃）+ 缺口条 + `tsk-grid` 两列（主列三张卡：基本信息 / 任务配置 / 执行设置；侧栏：执行与状态 / 快速上手）。
+  - 侧栏给出**「下次执行」**（每日表达式本地按当前时刻推算今天还是明天）与**今日成功 x/N**（启动触发，取列表回填字段）；启停开关与列表那一列改的是同一个字段，走自动保存。
+- **删除弹窗专属样式**：`.sch-form`（卡片摞叠）、`.sch-form .card-body > .form-row:last-child`（弹窗高度收边）、`.modal-container:has(.sch-form)`（92vh 放宽）——三条都是给弹窗高度打的补丁，页面上没有这个约束。
+- 顺带：新面板不再自带 `.page-content`（它是四个子页里唯一一个嵌套了该类的，TasksView 已提供），并新增真实存在的 `.sch-mono`——模板里此前写的 `mono` 全仓**没有任何规则**（搜不到 `.mono {}`），cron 表达式其实一直没等宽。
+
+### 顺带修掉的真缺陷
+
+- **非每日 cron 表达式会被静默改成每日**：`parseCronToSchedule` 原先只检查"分/时字段是否纯数字"，于是 `0 8 * * MON`（只在周一跑）、`0 8 1 * *`（每月 1 号）、`0 0 8 * * *`（秒级 6 字段）都被判为"表单能表达"，编辑页不提示、一保存就把调度语义改成天天跑。现按三条判据收紧：分/时必须纯数字、**日期/月/星期三段必须是 `*`**、字段数必须是 5。这不只是文案问题——它决定"保存"到底是一次无损写回还是一次无声的调度改写。
+- **列表里的「目标已不存在」现在同时是保存闸口**：此前只有保存时后端会拦死引用（列表侧标红），前端仍会把死引用写回去一次再被拒。
+
+### 测试与验证
+
+- `frontend/src/utils/scheduledDraft.test.ts`（30 例）：解析三判据（步进 / 区间 / 列表 / 星期限制 / 月内某天 / 4 字段 / 6 字段 / 垃圾输入）、钳制、空草稿与列表构造（含非每日标记）、切换类型清空目标、列表「触发」列文案（每日表达式 → 每天 HH:MM，表达不了的原样显示）、缺口逐项（含"未就绪时不判定目标不存在"）、载荷（cron vs 启动、名称 trim、描述保留、越界钳制、不含界面态字段）。
+- `frontend/src/composables/useScheduledTasks.test.ts`（15 例，重写）：缺口拦落盘 → 补齐后 POST → 同 id 转 PUT；刚载入不动不发请求；改回原样不发请求；目标不存在按缺口拦下；换编辑对象补发在途改动且不污染新草稿；关编辑器补发（退出即生效）与缺口态下出声；打开不存在的任务给提示；删除当前编辑对象会关编辑器、新建草稿上的删除是「放弃」；取消确认不删；「已排入执行」的提示语义；运行连点只发一次；加载成功标记就绪 / 失败不标记并就绪提示一次（notifier 每轮只响一次，故 `beforeEach` 复位 `scheduledLoaded` 与会话态）。
+- 中途踩到的两个坑（记此备查）：`vi.fn(async () => [])` 的返回类型被推断为 `never[]`，`mockResolvedValue([task])` 因此报"不能赋给 never"——mock 的**参数与返回类型要显式写出来**；以及 JSDoc 注释里写了 `*/5 * * * *`，其中的 `*/` 提前关闭了块注释，报出来的却是几十条"无效字符"（真凶在 200 行之前）。
+- `npm run typecheck` 零错误、`npm run test` **367 例全绿**（上轮 329，+38）、`npm run build` 通过（产物 `ScheduledTasksPanel-*.js` 19.7 kB）。
+- 顺带把列表「触发」列从 `每天 ${task.cron}`（后端存 5 字段，铺出来是"每天 0 8 * * *"）改成 `scheduledTriggerLabel`：每日表达式渲染成「每天 08:00」，**表达不了的表达式原样显示**（那正是用户要去改它的理由）。
+- **真机目检 30/30 全过**（新增 `docs/reports/ui-check/ca-sched-panel-check.py`，本地不提交）：打到本机正在运行的 dev 实例上，`/api/scheduler/**` 与 `/api/tasks` 打桩、写请求被拦下并断言载荷（不碰用户真实定时任务）。覆盖：列表 3 行且**页面上不再有弹窗**（`.modal-overlay` 不可见、旧弹窗表单类 `.sch-form` 零命中）、触发列渲染成「每天 08:00 / 每天 22:30 / 启动后执行」、目标已不存在有副行、点「新建定时任务」进的是二级编辑页（面包屑「返回定时任务」、状态字按缺口改口、缺口条点名「任务名称、目标任务」）、补齐后落盘（POST 载荷含程序生成的 id 与非每日表达式原样不动的 `cron: "0 8 * * *"`）、落盘后地址栏带上 `?task=`、深链 `?task=s1` 直达且侧栏给出「触发 每天 08:00 / 下次执行 今天 08:00 / 任务 ID」、切触发方式落盘（PUT 载荷 `cron: ""` + 三个启动参数）与侧栏改口「今日成功 x/N」、面包屑返回后 `?task=` 清掉。截图四张（列表 / 新建草稿 / 已有任务 / 启动触发）逐张过目。
+
+### 有意不做 / 遗留
+
+- **执行历史仍是弹窗**：它是只读视图（不是编辑），入口在列表 ⋯ 与编辑页头部，两处都保留；改成第三层页面会让"返回"变成两级。
+- **自动保存状态机现在是第四份拷贝**（`useTasks` / `useHttpTasks` / `useScripts` / `useScheduledTasks`）：本轮按四个面板同构照搬了一份，抽成 `utils/autosave` 共享控制器的收益因此更大——已登记 `docs/plan-next.md`，建议下一轮单独做（它要动三个正在工作的面板，不宜与本轮混在一起）。
+- **列表不加搜索框**：定时任务通常个位数，搜索框在没有可搜之物时只是噪音。
+
+## 开发中（2026-09-24 任务仓库索引按类别拆分：浏览器任务与直连任务各一份）
+
+### 背景
+
+- 用户诉求：「任务仓库导入里两类方案共享一个 json，容易误解，能否使用两份 `index.json` 隔离」。
+- 混合索引的真实代价：条目靠**可选的** `type` 字段分类、缺省当 `browser`——贡献者忘写 `type` 就得到「列在浏览器列表里、点导入又被文件级类型校验拒掉」的死条目；用户也会在错的 Tab 里搜不到自己学校；UI 为此长期背一句解释性文案（「当前只显示直连任务条目（浏览器任务请到「浏览器任务」Tab 导入）」）。两类任务的**任务文件结构本就不同**（浏览器步骤 vs HTTP 请求形状），共用一个 catalog 只是历史原因。
+- 用户确认的取舍（二选一）：`index.json` 继续等于浏览器任务（老客户端只读它，行为不变），新增 `index.http.json`；Gitee 直连索引一并补齐。
+
+### 实现：任务仓库（`Misyra/campus-auth-tasks`，GitHub + Gitee 双端推送）
+
+- **索引按类别拆分**（`d3eca57`）：`index.json` / `index.gitee.json` 恢复为纯浏览器索引（9 条，老条目一条未改、不带 `type`）；新增 `index.http.json` / `index.http.gitee.json`（直连任务，条目保留 `type: "http"` 与 `source`）。对已发布的老客户端**行为不变**（它只读 `index.json`），且顺带修掉一个已发布的真实缺陷：v5.0.2 及更早的导入弹窗不按类型分流，`haust` 混在 `index.json` 里会被当成浏览器任务列出、导进去是一份步骤为空的空任务。
+- **顺带补上镜像落后**：`gitee/master` 此前停在 `8e9f9ae`（`44b04c1` 的 haust 提交没推过去），Gitee 上 `tasks/haust.json` 实为 404、`index.gitee.json` 里也没有该条目——国内镜像用户看不到这条直连任务。本次推送一并补齐。
+- **文档**：README 新增「索引文件」表（4 个地址）、任务列表按类别分两张、写明条目只能进对应索引、`screenshot` 只属浏览器条目；`submit-task.md` 的 Step 6 / 6a / 6b / 7 与验证清单改为按类别；`doc/task-writing-guide.md` 的截图一节标明只适用浏览器任务。
+- **修正两处死链**（`18d6ecf`）：README 的「任务录制器」与「任务编写指南」原指向旧 Python 仓库 `Misyra/Campus-Auth` 的 `tools/` 与 `doc/`，而该仓库这两个目录都不存在（GitHub contents API 实测 404）。录制器改指 `Campus-Auth-rs` 的 `resources/tools/task-recorder.user.js`，指南改指本仓库的 `doc/task-writing-guide.md`。
+
+### 实现：前端
+
+- **索引地址改为「类别 × 源」两维**（`utils/constants.ts`）：删掉 `TASK_REPO_INDEX_URL` / `TASK_REPO_INDEX_URL_GITEE` 两个扁平常量（其语义就是"唯一一份索引"，正是要根治的东西），源表每项改为 `indexUrls: Record<TaskRepoKind, string> | null`，新增 `presetRepoIndexUrl(kind, source)`（自定义源/未知源回空串）。四个地址经 `githubRaw()` / `giteeRaw()` 由 owner/name 拼出，不再各写一份字面量；`TaskRepoSourceId` 现由 `TaskRepoMirrorId` 派生，`TaskRepoKind` 上移到 constants 并由 `useRepoImport` 以 `RepoKind` 别名导出。
+- **切类别与切源都重取地址**（`useRepoImport.ts`）：`showRepoImport(kind)` 与 `selectRepoSource(source)` 统一走 `applyPresetIndexUrl()`。**这是本轮最容易出错的地方**——原实现里 `selectRepoSource` 无条件写 `preset.indexUrl`，不改的话在直连 Tab 上切一下来源，列表拉到的就是浏览器索引。
+- **索引状态不再三义**：新增 `loaded` 标记，区分「还没点加载」「加载成功但这一类暂无条目」「拉取失败 / 格式错」。空数组过去与"格式不正确"共用一句提示（`索引为空或格式不正确`），而拆分后"这一类暂时没有条目"是合法状态（新仓库、镜像源尚未收录）；失败提示带上类别名（「获取直连任务索引失败: …」），因为两类索引地址不同、说了类别才知道该看哪个来源。
+- **异类条目从静默过滤改为计数提示**：新增 `foreignRepoTaskCount` + 弹窗一行警告（`--warning-text`）。索引文件只承载一类条目，出现不符即文件写错了——静默吞掉会让用户对着短列表猜"我的学校去哪了"。
+- **删掉混合索引的解释性文案**：`kindEmptyHint`（「当前只显示直连任务条目…」）随拆分一起删除；弹窗标题、空态与警告文案统一由 `repoKindLabel(kind)` 派生，不再各写一份措辞。
+
+### 测试与验证
+
+- `npm run typecheck` 零错误。中途踩到一个类型收窄陷阱：`const DEFAULT_KIND: RepoKind = "browser"` 会让 ref 里该字段的类型窄成字面量 `"browser"`，于是多处 `kind === "http"` 被判为"无重叠比较"——改为在属性处 `as RepoKind` / `as TaskRepoSourceId` 收口（与原实现同口径）。
+- `npm run test` **329 例全绿**（上轮 320 例，+9）：`taskRepo.test.ts` 改为按 (类别, 源) 断言四个索引地址、两类文件不得同名、`presetRepoIndexUrl(…, "custom")` 回空串，并新增源码断言锁住弹窗不再出现"混合索引"文案；`useRepoImport.test.ts` 新增「索引地址：类别 × 源」describe（切类别换文件、类别内切源、自定义源跨类别保留）与「索引状态与异类条目」describe（空索引合法且不弹失败提示、非数组算格式错、失败提示带类别名、打开弹窗复位 `loaded`、异类计数），`toastOnly` 借 `vi.hoisted` 暴露以便断言消息内容；`beforeEach` 补 source / repoKind / url / loaded 复位（这些用例会改它们，不复位会互相串味）。
+- `npm run build` 通过。
+- **线上契约实测**：四个 raw 地址逐一 GET 校验——`index.json` 9 条、`index.gitee.json` 9 条、`index.http.json` 1 条、`index.http.gitee.json` 1 条，确认前端拼出的地址真能取到拆分后的文件（Gitee 侧同时验证了镜像已跟上）。
+- 未做真实浏览器点击验证：本次改动是地址派生与状态文案，既有浏览器级回归（`docs/reports/ia-verify/verify_repo_import_ui.py`）覆盖的是选择器 / 分段控件 / hint 渲染，本次未动其结构。
+
+## 开发中（2026-09-23 任务页深度复核：三面板一致性、一揽子真实缺陷与死代码）
+
+### 背景
+
+- 用户要求「还有没有什么需要优化的，你检查一下」。做法：对这一轮未提交的方案 G 改动做四路并行复核（三面板行为矩阵 / CSS 死代码与令牌 / Rust 后端未提交 diff / 文档与实现一致性），再把确认的问题逐条修掉。
+- 确认的**会丢数据、会报错**的问题集中在两类：换编辑对象时在途的自动保存被丢弃；前端校验规则比后端严，导致"后端收得下、前端存不上"。
+
+### 修复：前端真实缺陷
+
+- **换编辑对象时在途改动静默丢失**（三面板统一）：`useTasks` / `useHttpTasks` 的 watcher 在 `draft.id` 变化时只 `clearTimeout` 后 return，而「停手半秒落盘」的承诺在「换对象」这一瞬间必须显式兑现——在 A 任务里打字后 500ms 内点另一条（或走仓库导入 / 浏览器前进后退切 `?task=`），那半秒的编辑既没落盘也没提示地消失；`closeTaskEditor` 的冲刷条件还被嵌在 `if (autosaveTimer)` 里，而 timer 已被上一次切换清成 null。现按 `useScripts` 的口径给三者都加 `flushPendingAutosave(reason)`（`useScripts` 原来的 `flushPendingAutosave(notify)` 一并改成同一签名），并在 `showTaskEditor` / `createTask` / `showHttpTaskEditor` / `createHttpTask` / `showScriptEditor` / `importScript` 入口调用。
+  - **`switch` 与 `close` 语义分开**：关闭编辑器正常落盘、被拦时出声；换编辑对象走 **detached** 落盘——那一发的响应回来时新草稿已经在编辑中，共享状态（`lastSavedFingerprint` / `autosaveState` / `_isNew`）不该再被旧草稿改写（指纹被旧草稿覆盖会让刚新建、用户还没碰过的新草稿被误判成"有改动"，凭空写一次）。`persistDraft(draft, { detached })` 保留列表刷新与失败提示。
+  - 判据不再只看 `pendingChanges`：深度 watcher 是异步批处理的，"改字段"与"换对象"落在同一 tick 时它还来不及置位；改为 `!pendingChanges && fingerprint(draft) === lastSavedFingerprint` 才跳过——载荷指纹是**当下**的事实。
+- **仓库导入撞 id 用了未清洗的原始条目名**（`useRepoImport.ts`）：直连分支归一化后的 `id` 只含 `[A-Za-z0-9_-]`，撞车时却拼 `${rawId}_${n}`——条目名含中文（很常见）时第二次导入同一条目必然被后端 `is_valid_task_id` 拒掉，且报的是"任务不存在"。改为拼清洗后的 `id`（与浏览器分支同口径）。
+- **浏览器面板状态字在 JSON 为空 / 语法错误时说谎**：`autosaveLabel(..., [])` 恒传空缺口，而这两种情况 `persistDraft` 一个字节都不写，状态字却仍是「改动自动保存」。新增 `jsonGate` 计算（空 → 「JSON 配置」、语法错 → 「JSON 语法」）喂给状态字，与直连 / 脚本的缺口优先口径一致。
+- **脚本 ID 规则前后端不同口径**：`SCRIPT_ID_PATTERN` 要求"字母开头 + 不收连字符"，而后端 `is_valid_task_id` 是 `^[A-Za-z0-9_-]{1,64}$`。id 为 `my-script` / `2fa` 的脚本（`POST /api/tasks`、导入、或历史上手工放进 `tasks/scripts/`）打开后缺口恒非空 → 自动保存永远被跳过，而它点名的字段在面板上是**禁用**的（落盘后 ID 固定）→ 改不动也存不下，且没有任何报错。规则对齐后端；`scriptDraft.test.ts` 的用例改为钉住"数字开头 / 连字符必须放行"这条回归护栏；`scriptDraft.ts` 的模块注释顺带修正脚本落盘文件名（是 `<id>.json`，`<id>.<ext>` 只出现在导出文件名上）。
+- **脚本「立即运行」永远弹成功**：`scriptsApi.run` 被声明成 `MutationResult`，而 `runScript` 读 `data?.message`（后端返回的是 `TaskResult`，没有 message 字段）→ 无论脚本成败都弹绿色的"执行完成"。改为按 `TaskExecuteResult.success` 分流、失败带上退出码与输出末行；接口类型同步改成 `TaskExecuteResult`。
+- **脚本输出无处可看**（连带修）：脚本 stdout/stderr 只在这一次响应里（进程输出**不进日志页**），面板不留下来用户就没有任何地方能看到"脚本为什么失败"。侧栏「执行与调试」新增最近一次「立即运行」的结果块（复用 dashboard 的 `.history-item / .history-status / .history-info` 词汇，新增 `.history-output` 承载输出正文），并带 id 判断——换脚本后不把上一次的结果显示在新脚本名下。同时修正面板里两处"stdout 与 stderr 都进日志页"的错误文案。
+- **定时任务手动「运行」的 toast 语义**（known-issues E2）：后端 `spawn_manual_run` 后立刻回 `data("ok")`，前端读 `data?.message` 恒为 undefined → 永远弹"执行成功"。改为「已触发执行，结果见「执行历史」」；`scheduledTasksApi.run` 的类型去掉后端已不再返回的 `run_id`。
+- **浏览器面板四处「调试」入口没有 busy 守卫**：同一次会话连点两下会发两次 `debugApi.start`（`useDebug` 自己不做重入保护），而脚本 / 直连的运行类按钮都在途禁用。统一加 `:disabled="debug.loading.value"`（列表行图标 / 行尾菜单 / 编辑页 JSON 卡 / 侧栏）、图标在途切 `refresh` + `spin`。
+- **「加载默认模板」一键覆盖且立即写盘**（浏览器面板）：脚本面板同性质动作会弹一次红色确认，浏览器面板直接替换手写好的 JSON 并落盘、没有撤销。加同款确认（当前内容非空且与模板不同才弹）。
+- **文件导入的类型口径**：浏览器面板把整包丢给后端，混进来的直连 / 脚本条目会被后端照单收下并落到别的列表里，而本列表按 `task_type` 过滤 → 列表毫无变化、toast 却说"已导入 N 个任务"。改为与直连面板同构的 `isBrowserImportEntry` 过滤 + 「忽略 N 个非浏览器条目」（`type` 缺省视为浏览器任务，与导出端点 / 磁盘文件的历史形态一致）。
+- **脚本面板**：导入之后补 `?task=`（覆盖既有脚本时 `_isNew` 为 false，面板那个"落盘后补 query"的 watcher 不触发，改到一半刷新会掉回列表态）——`importScript` 现返回打开的 id；「导出」补 busy 守卫（连点会落两份同名文件）；行尾菜单文案改「导出脚本文件」；空态按钮「导入文件」→「导入」（与工具栏及其他面板一致）。
+- **菜单监听泄漏**：浏览器 / 脚本面板在菜单打开时切页会永久留下 `document` 的 `pointerdown` / `keydown`（Esc 会调到已卸载组件的作用域）。补 `onBeforeUnmount`（直连面板本来就有）。
+- **删除浏览器任务的确认文案**：浏览器任务被删后，绑它的方案会**静默**回退到内置 `default`（`src/login/mod.rs` 的 `resolve_active_task` 只记一条 warn），而直连任务的确认文案会警告"绑定它的方案将无法再用直连方式登录"。补一句"若有方案绑定它，那些方案会回退到内置的 default 任务"。
+- **工具栏里的「分享适配」不像按钮**（用户实机指出）：它是外链 `<a class="btn btn-sm btn-ghost">`，而 `btn-ghost` 同时抹掉底色**与**边框（`border: 1px solid transparent`）——实测盒模型与相邻的「导入 / 仓库导入」完全一致（同为 36px 高、同 padding、same top），但那个 108px 的盒子看不见，于是变成"夹在两个按钮中间的裸文字"，看着不像能点。两个面板（浏览器 / 直连）都改成普通次要按钮（`btn btn-sm`），去向仍由 `title` 说明。
+- **定时任务表格在窄视口下画到卡片外，且名称列被压成 0px**（本轮实测确认，比复核时估的更严重）：8 列全是 px 固定宽（和 742px），而 `table-layout: fixed` 下表格宽 = `max(100%, Σ列宽)`——1100px 视口起表格就比卡片宽，900px 下 742px 的表格画在 596px 的卡片外；**更要紧的是名称列（`auto`）被压到 0px**（1200px 下只剩 80px、1050px 下 2px），最该看的列先消失。改法（按实测定，见 `ca-sched-geo.py`）：文字列一律百分比、只把装不下就失去意义的列钉 px（类型 92 / 启用 72 / 操作 132），并逐级让列——≤1100 藏「超时」，≤980 藏「类型 + 目标」且「触发 / 最近结果」钉回下限（110 / 96px），≤860 藏「最近结果」（信息在行尾 ⋯ 的「查看历史」里），操作列在 ≤980 收到 96px（本页只有两个按钮）。实测各视口表格 ≤ 卡片、名称列 92→300px、页面级零横向滚动。
+
+### 修复：后端
+
+- **mtime → RFC3339 在超范围时间戳上 panic**（`tasks/loader.rs`）：`chrono` 的 `From<SystemTime>` 内部是 `timestamp_opt(..).unwrap()`，超出可表示范围（约 ±26 万年）直接 panic。mtime 是文件系统给的任意 i64（Linux / Docker 下 `touch -d @1e13`、tar 里解出的畸形 mtime 都能造出来），而列表扫描跑在 `spawn_blocking` 里 → panic 被 `JoinError` 吞成「任务目录扫描失败（返回空列表）」→ **三桶任务全部从列表消失**（文件还在），且只要那个文件在就永久复现。改用 `DateTime::from_timestamp`（越界返回 `None` → 留空 → 前端显示「—」，与"读不到 mtime"同路，纪元前的负值也照收），补单测钉住不 panic。
+- **`order_tasks` 跨两次加锁的读改写**：原实现 `load_order` → 清空 → 拼接 → `save_order`，而 `load_order` 根本不持锁。与自动保存的 `PUT /api/tasks/{id}`（`save_task` 会把新 id 追进排序表）并发时丢更新——用户看到「拖完排序，另一类任务顺序莫名回退」。载荷本来就是全量的（三组必须全传），改为直接用请求体构造 `OrderData` 整体替换。
+- **退出登录请求的执行顺序**（直连任务新功能）：原来排在凭据变换脚本**之后**——而脚本的输入之一正是"抓到的登录页原文"，旧会话仍在线时这类门户会把登录页重定向到「已在线」页，脚本据此产出的字段全是错的（本功能要治的正是这类门户）。移到整个流程最前（先于抓登录页与脚本），`models.rs` 与执行侧注释同步说明"因此下线请求只支持内置占位符"；补一条"下线必须排在登录页抓取之前"的测试，并把流程注释重新编号（1 下线 → 2 脚本 → 3 前置请求 → 4 模板渲染 → 5 发送 → 6 成败判定）。
+- **`InvalidTaskId` 映射 400**：它表示"id 形态不合法"（用户可改），与 `TaskNotFound`（资源不存在）挤在 404 里会把排查方向带偏（自动保存打来一个畸形 id 时尤其明显）。
+- **`logout_request` 保存闸口补测试**：前端每次保存都会带上这个字段（未配置时为 `null`），形状 + 体积双闸此前只有 validate / 执行层的测试，loader 层（字段名取错、体积常量串位、`null` 未放过）零覆盖。
+- `models.rs` 的 `pre_request` 文档示例 `"method": "get"` → `"GET"`（`HttpRequestMethod` 是 `rename_all = "UPPERCASE"`，照抄示例必然反序列化失败、任务在列表里静默消失）。
+
+### 清理：死代码与令牌
+
+- 删除本轮重写后确已无引用的规则（逐条以全仓 `*.vue` / `*.ts` 词边界匹配确认为零引用）：`responsive.css` 的 980px 块（`.tasks-grid` / `.task-item` / `.task-info` / `.task-actions`，旧卡片列表退役）、`.settings-panel-grid--task`、`.settings-detect-columns`、`.wizard-steps` / `.step-label` / `.step-line`；`form.css` 的 `.input-with-action`（含 480px 媒体块）、`.radio-group` / `.radio-option` / `.radio-text` / `.radio-label` / `.radio-desc`、`.hint--mt`、`.form-group--min140`；`badge.css` 的 `.scheduled-task-type` / `.binary-badge` / `.binary-default`；`misc.css` 的 `.hover-lift`；`card.css` 的 `.card-header-sub` / `.glass-card`（含降级分支）；`drag.ts` 的 `onDragEnd` 里对 `.drop-before / .drop-after` 的清理（那两条类已不存在，成了空操作）。
+- `.icon-xs` 双定义收敛：`misc.css`（11px）与 `tasks.css`（14px）同名不同值，按 `index.css` 导入顺序 14px 生效、11px 那份从未生效。删掉两份规则，唯一消费点（ProfilesView 匹配信息行的 4 个图标）改用已有的 `.icon-sm`（14px）——行为不变。
+- `modal.css` 浅色主题的 `--bg-glass` 覆盖改走 `rgba(var(--slate-rgb), α)`（原为裸三元组，数值正是浅色主题的 `--slate-rgb`）；`form.css` 的 field-help 问号字号 `9px` → `var(--text-2xs)`，并把过期的"14px 里塞 8px"注释改成现状。
+- `.skip-link` 此前是死代码（有样式、无实例）：在 `App.vue` 补上真实的跳到主内容链接（`<a class="skip-link" href="#main">`）并给 `<main>` 加 `id="main"` + `tabindex="-1"`，键盘用户不必逐个 Tab 穿过整条侧栏。
+- 表格版式两处：悬停底色从 `tr` 移到 `td`（底角半径写在 `td` 上，只有单元格自己的背景会被它裁圆——画在行盒上时卡片底部圆角外会露出方角），半径改用 `--radius-xl` 与卡片对齐；空态那一行不再有手型光标与悬停变色（它不是数据行、没有 `@click`，整块 200px 高区域"看起来能点"却毫无反应）。
+
+### 文档同步
+
+- 三份指南补「退出登录请求」这一组参数（此前整条新功能只存在于 changelog）：`http-login-guide.md` 的「五组」→「六组」+ 新增 3.6 节、`user-guide.md` 的字段清单、`updatelog.md` 新增用户可见条目；同时修正"一次登录只发一次请求"的边界承诺（现在最多三次：下线 → 前置 → 登录，同一连接池顺序发出）。
+- 修正三处与代码冲突的文档：脚本落盘名（`tasks/scripts/<id>.json`，正文在 `content` 字段里）、脚本 stdout/stderr **不进日志页**（`custom-script-guide.md` 同文自相矛盾，一处已按对的写法给出）、文件导入与仓库导入的区别（只有仓库导入会当场打开编辑页；三类的文件导入各按自己的类型/扩展名收，浏览器任务那条本轮补上了过滤）、侧栏子页名与标签一致（「AI 生成」而非全称）、任务页状态字补齐 6 种。
+- `plan-next.md` 删掉已完成却仍列在"有意不做"里的「直连任务参与拖拽排序」，并补上 `logout_request` 字段；`known-issues.md` 更新动态 `import()` 的唯一来源、E2 / E3 的措辞（页面已改表格）、登记"落盘后 ID 固定的历史裸 `.py` 脚本若 ID 含点号则无法保存"这一遗留死角。
+
+### 验证
+
+- `cargo fmt` + `cargo clippy --all-targets -- -D warnings` 零告警；`cargo test` 全绿（lib 999 例），新增 3 例：`test_secs_to_rfc3339_out_of_range_is_empty_and_does_not_panic`（判据放在纯函数上——Windows 的 `SystemTime` 上限本身就在 chrono 范围内，造不出越界值）、`test_validate_http_logout_request_gate`、`logout_request_precedes_login_page_fetch`。
+- `npm run typecheck` 零错误、`npm run test` **320 例**全绿（`useHttpTasks.test.ts` 新增 1 例：在途改动 + 立刻切对象仍落盘、且不污染新草稿指纹；`scriptDraft.test.ts` 的 ID 用例改为后端同口径）、`npm run build` 通过。
+- 实机回归 112 → **144 项断言全过**（`docs/reports/ui-check/ca-taskpage-check.py`，`/api/**` 全 mock、不碰用户任务文件）。本轮新增 32 项：换编辑对象时**把 500ms debounce 掐掉后**改动仍落盘（证明确实来自切换那一下的补发）、JSON 清空 / 语法错时状态字改口、调试启动中按钮置灰且图标转圈、加载默认模板先弹确认且取消后内容不变、脚本行尾菜单文案、运行失败如实提示 + 输出就地显示、空态行不显示手型光标且悬停不变色、悬停底色画在单元格上、跳到主内容链接是首个可聚焦元素且目标存在、导入只提交本类条目并报忽略条数、删除确认说明方案回退、定时任务表格在 8 个视口都不宽于卡片且名称列 ≥60px、两面板的「分享适配」与相邻按钮同底色同边框同高度。
+- 边角量测脚本 `ca-sched-geo.py` / `ca-wrap-scroll.py`（本地，不提交）把"表格 vs 卡片 vs 内容区"的宽度差与内容区横向滚动的真凶分开量测：前者是本次修的列宽问题，后者是**隐藏的说明气泡 `::after`** 参与可滚动溢出（与本次改动无关，且浏览器任务面板在 820px 下同样有），已登记 `known-issues.md`。
+
+## 开发中（2026-09-23 新建任务不再「点一下就落盘」：三面板统一为首次改动才创建）
+
+
+### 背景
+
+- 用户反馈「新建任务什么都没有改的话不自动保存」。实测确认了那条噪音路径：方案 G 下浏览器任务与直连任务的**新建**都是**立即落盘一份种子**（`tasksApi.save("untitled_N", seed)` → 再打开编辑器），于是"点开看一眼又退出"会在磁盘上留下一个没人改过的 `untitled_N.json`，列表里也多出一条「未命名任务」。
+- 脚本面板早就是"补上 ID 后第一次自动保存才创建文件"，只有这两条不同口径——同一个页面的三个子页，新建的副作用不一致。
+- 连带要一起处理的：种子不再落盘后，新建态的三个入口（删除 / 导出 / 调试运行）打过去都会因为"磁盘上没有这个 id"而 404。
+
+### 实现
+
+- **新建改成内存草稿（`useTasks` / `useHttpTasks`）**：`createTask` / `createHttpTask` 不再 PUT，只在内存里起一份草稿——id 仍是本地生成的 `untitled_N`（撞目录已有 id 递增）、`_isNew: true`，浏览器任务种子仍是"一步 `sleep` 占位 + `{{LOGIN_URL}}`"（后端 `validate_task` 拒绝空 steps / 空地址，种子必须能通过保存校验），直连种子仍带 `{gateway_host}` 占位地址。首次**真实改动**触发自动保存时才创建文件。
+- **自动保存加"载荷指纹"判据**（与 `useScripts` 同口径）：新增 `lastSavedFingerprint`（磁盘上那份的载荷 JSON 串），新建草稿把种子的指纹当作"磁盘现状"。改动与它一致就不发请求——于是**新建后没动过零请求**，顺带解决"内容改回原样还补发一次 PUT"。首次落盘成功后把 `_isNew` 置 false（草稿从此是"已存在"，删除恢复删除语义）。
+- **新建态的配套改道**：
+  - 「删除」→「**放弃**」：不请求后端，直接丢草稿（`deleteTask` / `deleteHttpTask` / `deleteScript` 各自判定 `_isNew`，确认文案也换成"还没保存过，放弃后内容会丢掉"）。
+  - 「导出」→ 走内存里的草稿（后端没有这个 id；浏览器任务在 JSON 语法错误时提示先修正）。
+  - 「调试运行 / 调试」→ 禁用，`title` 说明"新建任务还没有落盘，改动后才会创建它"。
+  - 状态字 → 「**尚未创建 · 改动后自动保存**」（`utils/autosave.autosaveLabel` 新增 `isNew` 参数，只在空闲态生效：保存中 / 已保存之后它已经存在了，不再提"尚未创建"；缺口优先于它，缺 ID 的新脚本仍先说要补什么）。
+- **地址栏**：新建态**不写** `?task=`（磁盘上没有这个任务，写进去刷新就是「找不到任务」，分享出去的链接也是死的）；首次落盘后由面板 watcher 补上 `?task=<id>`，与"点行进入"完全一致。三个面板都补了这一步（脚本面板此前也缺）。
+- **脚本面板补齐新建态的出口**：此前新建草稿的「运行 / 导出 / 删除」三个按钮都被 `canRun` 隐藏，只能靠返回——而返回会把合法内容真的存下来（"退出即生效"），想放弃却没有入口。现在新建态显示「导出（当前草稿）/ 放弃」。
+
+### 验证
+
+- `npm run typecheck` 零错误、`npm run test` **319 例**全绿（`autosave.test.ts` 新增 2 例：新建态改口、缺口优先于新建态）、`npm run build` 通过。
+- 实机回归 91 → **112 项断言全过**（`/api/**` 全 mock，不碰用户任务文件），新增 21 项盯住新建路径：浏览器任务新建后**零写请求**、地址栏不带 `?task=`、状态字「尚未创建」、调试运行禁用、按钮改口「放弃」；未改动直接返回仍是零请求且不留文件；改动名称后 PUT `/api/tasks/untitled_1` 且载荷带上改后的名称与 `task_id`；落盘后地址栏补上 `?task=untitled_1`、状态字变「已保存 · 刚刚」、调试运行恢复可用、按钮改回「删除」；点「放弃」不发 DELETE 且回到列表；直连任务同口径（含 `type: "http"` 载荷）。
+- 截图 `14-new-task-draft.png`（新建未落盘）/ `15-new-task-saved.png`（改动后落盘）（本地，不提交）。
+
+### 有意不做
+
+- **「复制为新任务」与「仓库导入」仍是立即落盘**：这两个动作的用户意图就是"得到一份有内容的任务"（副本拷贝自既有任务、导入来自仓库条目），不是"起个空壳再慢慢填"。真正的噪音只在"新建一个空种子"这条路径上。
+
+## 开发中（2026-09-23 文档事故与还原：changelog 头部被误截断）
+
+### 事故
+
+- 本轮记录 changelog 时用 PowerShell 拼接数组写回文件，写成 `@($lines[0..5], $entry, $lines[6..])` —— `@()` 里嵌了一个数组字面量，`-join` 对它调用 `ToString()` 得到 `System.Object[]`，**整个 docs/changelog.md 被覆盖成 3 行 51 字节**（原文件 3256 行 / 524 KB）。
+- 受损的是**工作区未提交**的部分：`docs/changelog.md` 最后一次提交是当天 15:38（`a7635d3`），头部在途条目（本日与 09-20 各轮，相对 HEAD 合计 23 个 `##` 章节）都不在 HEAD 里。`docs/updatelog.md`、`docs/plan-next.md`、代码与配置**均未受影响**。
+
+### 还原
+
+- 基线取 HEAD（`git cat-file blob`，475 KB / 2976 行）。
+- 在途条目从会话转录（`~/.dsh/sessions/--E-Campus-Auth-rs--/session.v4.jsonl.zstd`）里还原：每次对 changelog 的写操作都留在转录里，且**插入类写入的 `old_string` 就是插入点下方的锚点标题**。以「新条目标题 → 锚点标题」建链并向下走，直到锚点落在 HEAD 内容里为止，即可得到完整、有序的在途条目集合（14 条）与其原文。
+- 结果：`## 开发中（2026-09-23 …）` 到 `## v5.0.2` 之间的 14 条全部回填，`## v5.0.2` 及以下与 HEAD **逐行一致**（脚本比对通过）；其中「直连任务纳入拖拽排序」的 `### 生效条件` 段取的是后续修订版（「（已完成）」）。
+- 残留风险（已核对，影响可忽略）：条目**内部的**局部修订（非整条插入的 edit）若未在链上体现，可能仍是修订前的措辞；已按转录里最后一次出现的版本取自取，未逐条人工比对。
+
+### 教训
+
+- 写文件不要用「数组拼接 + join」这种把嵌套数组序列化的写法：**先 `[System.Collections.Generic.List[string]]` 或字符串拼接**，写完立刻 `Get-Content -TotalCount 6` + 行数回读自检（本次是回读时发现「lines now: 3」才暴露的）。
+- 未提交的文档同样需要基线：改长文件前先 `Copy-Item` 一份到 `%TEMP%`（此前几轮有做，这次没做）。
+
+## 开发中（2026-09-23 任务页风格统一：操作列居中 · 编辑弹窗卡片分区 · 执行历史同构）
+
+### 背景
+
+- 用户对着「浏览器任务」列表的操作列截图反馈「把当前页面风格统一一下……定时任务的（编辑页面），浏览器任务的操作让它居中，然后调试用之前 svg 的虫子图标」。逐条核对出四件事：
+  1. **操作列靠右对齐**：本表首列（拖拽柄）是居中的，操作列却贴右边缘，同一行两侧的重心不对；操作列又是固定 132px 的窄列，三个 28px 图标按钮右对齐时左半留着明显空白。
+  2. **同一个动作两种图标**：行内调试按钮用的是播放三角（`play`），而任务编辑页里做同一件事的「调试」按钮用的是虫子（`bug`）——三个调试入口（行尾 / JSON 卡片 / 侧栏）里两个用三角形。
+  3. **定时任务编辑弹窗是全站唯一一处 `.form-section-title`**（13px + 整条下划线）：而「任务」页编辑页的分区是 `.card` + `.card-header` + `<h3>`（实测 16.4px / 700）。同一件事两套词汇、两档字号，正是"弹窗和编辑页不像一套东西"的来源。
+  4. 顺带查出一个真 bug：**执行历史弹窗的条目样式一条都没生效**——`.history-header / .history-status(.success/.failed) / .history-time / .history-duration / .history-message / .history-list` 全挂在 `.scheduled-tasks-page` 选择器下，而弹窗经 `Teleport to body` 渲染，不在该容器内。于是「成功 / 失败」两个字被塞进 dashboard.css 的 20×20 图标槽、信息被挤成横排两列、`max-height: unset` 也没生效。
+
+### 实现
+
+- **操作列居中（`styles/pages/tasks.css`）**：`.tsk-actions` 由 `text-align: right` 改为 `center`；另补一条 `.tsk-table th.tsk-actions`——`.tsk-table th { text-align: left }`（0,1,1）压得住 `.tsk-actions`（0,1,0），只改前一条会留下一个左对齐的表头与按钮错位（与 `.sch-cell-enabled` 同一个坑）。四张列表（浏览器 / 直连 / 脚本 / 定时）共用该规则，切子页不跳形。
+- **调试图标归位（`views/tasks/BrowserTasksPanel.vue`）**：行内调试按钮与侧栏「调试运行」改用 `bug`，与 JSON 卡片上的「调试」一致；脚本 / 定时任务的「运行」保持播放图标（那是"运行一次"，不是调试）。
+- **定时任务编辑弹窗（`views/ScheduledTasksView.vue` + `styles/pages/scheduled_tasks.css`）**：三个分区改用 `.card` + `.card-header`（`<h3>`）+ `.card-body`，与任务编辑页同一套组件；弹窗宽度 default（560px）→ `lg`（720px）；字段行回到全局 `.form-row` 双列栅格（原来靠 `.form-row--flex` 按内容宽度左挤，「触发方式 / 超时」两个窄控件把整行右半留空）；「触发方式 · 执行时间 · 超时」并成一行——拆两行时弹窗内容比视口高，默认形态一进来就要滚动才能看到说明文字。
+- **`styles/components/form.css`**：`.form-row--flex` 的 gap 12px → `var(--space-md)`（与 `.form-row` 的栅格 gap 同值，两种变体落在同一行时不出现两种列距）；新增 `.form-row--flex + .form-row--flex { margin-top }`（变体里子 `form-group` 的下边距被清零，两行 flex 行叠放会贴在一起）。
+- **弹窗高度**：`.modal-container:has(.sch-form) { max-height: 92vh }`（与 `.modal-xxl` 同口径）。「启动后执行」形态比别的弹窗内容高，85vh 下实测量刚好差 60px；内容不满时高度仍由内容决定，该规则只在"差一点装不下"时生效。
+- **执行历史弹窗改用共享结构**：条目与仪表盘登录历史同构（`.history-status` 放 `check-circle / x-circle` 图标 + `.history-info` 信息列），消息行按成功 / 失败走 `.history-profile` / `.history-error`——不再为本页新增任何类名。
+- **删除死样式**：`scheduled_tasks.css` 里 47 行失效的 `.scheduled-tasks-page .history-*` 规则、`.form-section` / `.form-section-title` / `.sch-type-field`；`ScheduledTasksView.vue` 里对应的旧结构（`.history-header` / `.history-message`）一并移除。
+
+### 验证
+
+- `npm run typecheck` 零错误、`npm run test` 317 例全绿、`npm run build` 通过。
+- 实机回归（真实二进制 + 真实前端 + Playwright，`/api/**` 全 mock）由 74 项扩到 **91 项断言全过**，新增：操作列表头与按钮同轴居中、行尾按钮顺序（编辑 / 调试运行 / 更多操作）且调试为虫子图标、弹窗三张 `.card`、分区标题字号 ≥16px、卡片间距 16px、弹窗宽 720px、**默认形态弹窗内部零滚动**、**「启动后执行」形态同样零滚动**且三字段等分、执行历史六项（两条记录 / 图标槽 20×20 内是 svg / 信息列竖排 / 成功色条 `rgb(16,185,129)` / 失败错误色 `rgb(239,68,68)` / 旧类名已不存在）。
+- 目检截图（本地，不提交）：`sched-after-modal.png`（定时执行形态）、`sched-after-modal-startup.png`（启动后执行形态）、`sched-after-history.png`（执行历史）、`sched-after-modal-dark.png`（深色对照）。
+
+## 开发中（2026-09-23 定时任务页改版 + 弹窗底面抬升）
+
+### 背景
+
+- 用户对着「新建定时任务」弹窗截图反馈「定时任务的界面也优化一下」。实测与复核出四件事：
+  1. **弹窗比页面卡片更暗**：浅色主题 `--bg-modal: #e4e9f0`（与 `--bg-secondary` 同值）= 实测 228，而页面卡片 ≈246、页面底 238——叠在 `rgba(0,0,0,.6)` 遮罩上，弹窗读成"一块灰板子上面摆着白输入框"（用户截图里的"发灰"就是它）。深色主题反倒是"弹窗比卡片亮一档"，两边口径不一致。
+  2. **列表还是旧卡片版式**：`.task-item` + 四个文字按钮（运行 / 查看历史 / 编辑 / 删除）平铺在行尾、开关无表头，与「任务」页三个面板的表格语言对不上（该页是唯一还在用这套旧版的页面）。
+  3. **信息以一句话串起来**：`类型 · target_id · 每天 08:00 · 超时 60s · 上次: 成功`——目标只显示 id（要用户自己去别的页面对照名称），死引用（目标任务被删）没有任何提示，只能等触发时失败。
+  4. 原生 `<input type="time">` 的指示图标是浏览器默认灰、贴着右内边距；`.form-section-title` 上的 `text-transform: uppercase` 与 0.5px 字距对中文是空转。
+
+### 实现
+
+- **列表改版（`views/ScheduledTasksView.vue`）**：改用 `tsk-*` 共享版式——整页表格 8 列（名称+描述 / 类型 / 触发 / 目标 / 超时 / 最近结果 / 启用 / 操作）、行尾 ⋯ 菜单（立即运行 · 查看历史 · 编辑 · 删除）、点行进编辑弹窗、页脚说明；工具行与三个面板同构（标题 + `?` 气泡 + 新建）。
+- **信息变成列**：目标显示**任务名**（回退 id），目标任务已不存在时在副行标红「目标已不存在」——后端只在保存时拦死引用，列表里得自己认，否则这行看起来一切正常、直到触发才失败；触发列按 cron / 启动两种模式给主副行（每天 08:00 / 启动后执行 + 今日成功 x/y，或「表达式无效」）；最近结果给成功 / 失败 / 尚未执行三态徽标 + 时间；超时单独一列。
+- **启用开关进表格**：单独一列并带表头（此前是一个没有任何标注的开关，浮在行尾）；停用行整行文字弱化，但开关与操作列保持原样（开关是恢复入口，跟着变淡会让人以为点不动）。
+- **弹窗底面抬升（`styles/base.css`）**：浅色主题 `--bg-modal` 由 `#e4e9f0` 改为 `#fbfcfe`（等于卡片之上的一档，与深色主题口径对齐）。该 token 被弹窗、Toast、下拉菜单、向导共用，故浅色主题下这些"悬浮面"一起变亮。
+- **弹窗内控件底色（`styles/components/modal.css`）**：新增 `[data-theme="light"] .modal-container / .confirm-dialog` 作用域内的 `--bg-glass` / `--bg-glass-heavy` 覆盖（10% / 17% 的 slate 调）。底面变近白后，控件若仍用 70% 白就与底色只差两个色阶，"这是输入框"只剩边框在传达；改令牌而不是逐个控件选择器，input / textarea / CustomSelect 触发器一并跟随，后续新增控件自动继承。深色主题不受影响（实测仍 `rgba(30,41,59,.97)` + `rgba(15,23,42,.5)`）。
+- **表单细节**：分区标题去掉空转的 `uppercase` / 字距、字号提到 13px 并改用正文色；任务类型下拉不再与目标下拉平分宽度（180px）；执行时间字段收边（140px、等宽数字、原生指示图标降透明度并与右内边距留距）并补一句「每天到这个时间执行一次」；页面补 `?` 气泡（定时任务只调度浏览器任务与脚本，直连任务的验证入口在任务编辑器里）。
+- **清理**：`.task-item` / `.task-list` / `.task-info` / `.task-desc` / `.task-actions` / `.scheduled-task-item*` 全部成为死样式后删除（该页是最后一个使用方）；`.tsk-table tbody tr.dragging` 补回来——列表从卡片改成表格后，拖拽中的行一度没有任何视觉反馈。
+
+### 验证
+
+- `npm run typecheck` 零错误、`npm run test` 317 例全绿、`npm run build` 通过。
+- 实机（真实二进制 + 真实前端 + Playwright，`/api/scheduler/jobs` 与任务列表全 mock）：回归脚本从 58 项扩到 **74 项断言全过**，新增 16 项覆盖定时任务页——3 行渲染、8 列结构、目标解析为名称、死引用标红、停用行弱化、启用列居中、结果徽标三态、⋯ 菜单四项、弹窗三分区标题、执行时间字段存在、**弹窗底面取到近白**（`rgb(251,252,254)`，不再是与 `--bg-secondary` 同值的灰）、**弹窗内输入框与底面区分开**、窄屏四页零溢出。
+- 目检截图：`docs/reports/ui-check/sched-after-list.png`（列表）、`sched-after-modal.png`（浅色弹窗）、`sched-after-modal-dark.png`（深色弹窗，确认未受影响）（本地，不提交）。
+- 过程中修掉自己一处断言错（`.sch-cell-target` 同时命中了表头 `th`，而表头文字是「目标」）。
+
+## 开发中（2026-09-23 列表底色统一：不再有"这一行颜色不一样"）
+
+### 背景
+
+- 用户对着浏览器任务列表截图问「为什么任务项颜色不一样」——只有一条任务时，数据行明显比表头与页脚深一档，像"被选中/悬停"了。实测（Playwright 取计算样式 + 截图取样，鼠标移到角落排除 `:hover`）：同一张卡片里有**三层底色**叠加——
+
+  | 层 | 计算值 | 渲染（浅色主题实测） |
+  |---|---|---|
+  | 卡片玻璃面 | `rgba(255,255,255,.45)` | ≈ `RGB(246,248,251)` |
+  | 表头 / 页脚 | 再叠 `--bg-glass`（`.7` 白） | ≈ `RGB(252,253,254)` |
+  | 数据行 | 无自己的底色（透明） | 露出卡片本色 246 |
+
+  行本身写的是 `rgba(0,0,0,0)`，所以"那一行的颜色"其实是**卡片本色**，而上下两条是"卡片本色 + 一层白"。
+
+### 实现
+
+- `styles/pages/tasks.css`：表头 `th` 与 `.tsk-foot` 去掉 `background: var(--bg-glass)`，整张表统一为卡片自身的表面色；结构改由「12px 弱化字 + 底边框」（表头）与「上边框」（页脚）表达。三面板共用这套规则，一次改完。
+- 随之删掉表头两条圆角补偿规则（表头不再有底色，没有需要圆的东西）；数据行与页脚那两条**保留**——悬停时那一行会被染色，最后一行 / 页脚的圆角仍要有人承担。
+
+### 验证
+
+- 像素复测：卡片纵向扫描 y=175/200/230/260/300 全部 `RGB(246,248,251)`（改前为表头 252 / 行 246 / 页脚 252），卡片外仍是页面背景 238；计算样式里 `th` / `tr` / `td` / `.tsk-foot` 均为 `rgba(0,0,0,0)`。
+- `npm run typecheck` 零错误、`npm run test` 317 例全绿、实机浏览器检查 **58 项全过**；截图 `docs/reports/ui-check/row-color.png`（本地，不提交）。
+
+## 开发中（2026-09-23 侧栏二级导航子项放大）
+
+### 背景
+
+- 用户对着展开的「任务」分组截图（浏览器任务 / 直连任务 / 脚本 / 定时任务 / AI 生成）反馈「把下面的这些做大一点」。原值是刻意降档的：子项 13px / `padding: 7px 10px`（行高 33px），一级项 14px / `12px 16px`（行高 46px）——落差在实机里读成"字太小"，而不是"层级更低"。
+
+### 实现
+
+- `components/sidebar.css`：`.nav-child` 字号 `--text-md`(13px) → **`--text-base`(14px)**（与一级项同级）、内边距 `7px 10px` → **`10px 12px`**（行高 33 → **40px**）、圆角 `radius-sm`(6) → `radius-md`(8)（与一级项同款）、激活态字重 500 → 600；`.nav-children` 的 gap 2 → 4px、左内边距 `8px`→`10px`、外边距 `21px`→`20px`（文字仍略靠左于一级项标签，缩进关系不变）。
+- 层级不再靠**字号降档**表达，改由「无图标 + 左侧 1px 细轨 + 弱化色」承担——这两条在任何字号下都成立，而字号降档一旦被读成"字小"就同时损失了可读性与层级感。
+- 矮视口无需额外处理：`.nav` 本就是 `overflow-y: auto`（`layout.css`，上一轮为同样的问题加的）——子项变高后多占约 43px（5 项），必要时侧栏内滚动、不推走底部状态行。
+
+### 验证
+
+- 度量（Playwright，真实实例，只点「任务」行展开、不跳页）：子项行高 **33 → 40px**、字号 **13 → 14px**（一级项 46px / 14px），5 项共多占 43px；实测脚本见 `docs/reports/ui-check/ca-navchild-metrics.py`（本地，不提交）。
+- `npm run typecheck` 零错误、`npm run test` 317 例全绿、实机浏览器检查 **58 项全过**。截图 `docs/reports/ui-check/nav-child-before.png` / `nav-child-after.png`（本地，不提交）。
+
+## 开发中（2026-09-23 字段说明气泡（`?`）样式与层叠修复）
+
+### 背景
+
+- 用户对着浏览器任务列表标题旁的 `?` 气泡截图反馈「优化一下这个提示的样式」。实测（Playwright 量几何 + 像素扫描）：气泡宽 460px（`--wide`）、一句 38 字的中文说明折成两行半、末尾两个字单独落到第三行（「…自动登录才会用到／它。」），而 2280px 视口右侧空着一千八百多像素——上界既不跟文案长度走，也不跟可用空间走；气泡还是悬空一块，看不出它属于哪个 `?`。
+
+### 实现
+
+- **宽度策略（`components/form.css`）**：`width: max-content` + 上界取三者最小值——① 变体默认（普通 420px / `--wide` 620px）② 组件按触发点两侧实测剩余空间写入的 `--tip-max` ③ `calc(100vw - 64px)`。删掉"翻转时各再收紧 40px"的两条规则：左右摆的是气泡位置、不是它需要的宽度，真要收由 ② 的实测决定。`FieldHelp.vue` 的 `wanted` 同步改成 420/620（两处数值不一致会让组件在明明放得下时就把气泡压窄）。
+- **箭头**：新增 `.field-help::before`，用"旋转 45° 的小方块"指向触发点（挡在气泡后的半块由后绘制的 `::after` 覆盖）。先写的 border 三角版本**实测根本没上色**（像素扫描：圆形右缘到气泡左缘之间全是背景色，而计算值一切正常），换成旋转方块后正常——四方向对称、接缝更服帖，翻转也不必各写一份 border 配色。钉住态（`--pinned`）同样显示箭头。
+- **层叠修复**：卡片因 `backdrop-filter` 各自成为层叠上下文，气泡被限制在自己卡片那一层里——DOM 靠后的卡片（任务编辑器主列的「测试区」）会盖住前一张卡片中弹出的长说明的下半截，实测呈现为气泡底部一条横向亮度分界带（先怀疑 `backdrop-filter` 自身，注入 `backdrop-filter: none` 后band 依旧，才定位到层叠）。修法：`card.css` 里 `.card:has(.field-help:hover / :focus-visible / .field-help--pinned) { position: relative; z-index: var(--z-overlay) }`——悬停/钉住期间把所在卡片抬起来，不把气泡 teleport 到 body。
+- **其它细节**：触发标记 14px/8px 字 → **15px/9px**、描边与底色各重一档（原来读成装饰而不是"能点的东西"）；圆角 `radius-md`(8) → `radius-lg`(10)；阴影改用主题令牌 `--shadow-float`（原先写死的 `0 4px 16px rgba(0,0,0,.25)` 在浅色主题下过重）；删掉 `letter-spacing: 0.01em`；行高 1.65 → 1.7；显式声明 `font-family: var(--font-sans)`（气泡会出现在等宽上下文旁边，不该跟着继承）；`responsive.css` 的 ≤640px 上界 320px → 420px 且视口兜底从 `-64px` 改 `-48px`（手机上白白浪费两成屏宽）。
+
+### 验证
+
+- 度量（Playwright，真实实例，只悬停不改数据）：气泡由"460px 夹到 3 行"变为 **484px / 61px 高（每段各一行、无孤字）**；`--wide` 长文案按 620px 呈现（约 51 字/行）；深色主题下取到深色令牌 `rgba(15,23,42,.96)`。
+- 像素扫描确认箭头真的画出来了（`::before` 命中）与亮度带消失（气泡内部纵向取样从"上深下浅台阶"变为均匀 `RGB(39,49,67)`）。
+- 回归：`npm run typecheck` 零错误、`npm run test` 317 例全绿、实机浏览器检查 **58 项全过**。截图 `docs/reports/ui-check/tip-after.png`、`tip-after-pinned.png`、`tip-caret-zoom.png`、`tip-wide.png`、`tip-dark.png`（本地，不提交）。
+- 顺带修掉脚本自身的口径：`docs/reports/ui-check/ca-taskpage-check.py` 原来只从 `config/.runtime_port` 读端口，而**基座默认是 exe 目录**（`target/debug`），改为两处都看一眼（见同日「直连任务纳入拖拽排序」条目里那次踩坑）。
+
+## 开发中（2026-09-23 直连任务纳入拖拽排序）
+
+### 背景
+
+- 用户要求「允许直连任务拖拽排序」。这是「直连请求重构为独立直连任务」当初写进 `docs/plan-next.md` 的遗留小项：`.order.json` 本来是三类任务**共用**的一份扁平 id 表（`loader.rs` 的 `list_all_tasks` 按 id 排序，与类型无关），缺的只是接口与前端——`POST /api/tasks/order` 的载荷只有 `{all, scripts}`，而 `order_tasks` 是先 `clear()` 再 `extend()` 整表替换，于是直连任务的 id 被顺手清掉，列表顺序回落为目录扫描顺序。
+
+### 实现
+
+- **后端（`src/web/routes/tasks.rs`）**：`OrderBody` 新增 `http: Vec<String>`（`#[serde(default)]`），`order_tasks` 一并写入。刻意**不给 `all` 改名**（它是"浏览器任务"的历史字段名）：改名会让「旧后端 + 新前端」这种组合（调试构建运行时读盘、前端先于后端更新时真实存在）在拖拽排序时因缺字段 400，而加字段做不到这点——旧前端不发 `http` 只会让直连顺序回落（与改动前行为一致），旧后端收到多出来的 `http` 也会忽略。
+- **前端**：
+  - `utils/drag.ts` 的 `DragSortOptions` 补 `http`，并把载荷构造抽成纯函数 `orderPayload(tasks, scripts, http)`（`utils/drag.test.ts` 3 例）。三个字段**全为必填**：漏传一组不会报错，只会静默清空那组顺序（排序看起来生效、刷新另一类任务才发现乱了），必填让 TypeScript 在编译期拦住。
+  - `HttpTasksPanel` 新增拖拽列（`col.tsk-col-drag` + 行首柄），列表行接上 `useDragSort(httpTasks, { tasks: browserTasks, scripts, http: httpTasks })`；行下标按**全量下标**映射回 `httpTasks`（与另两个面板同口径，搜索过滤时不会挪错条目），页脚补「拖拽行首调整顺序」。
+  - `BrowserTasksPanel` / `ScriptsPanel` 同步补上第三个分组（不补就等于它们拖拽时清空直连顺序）。
+  - 直连列表的名称列宽 20% → 24%（scoped 覆盖）：它的名称格是两行（名称 + 描述副行），20% 会把描述挤成半句；剩余宽度仍由「请求」列（auto）吃。
+
+### 验证
+
+- `cargo fmt --all --check` 零差异、`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告、`cargo test --features no-embed --lib` **994 passed / 0 failed / 1 ignored**（新增 `test_order_tasks_without_http_group_is_accepted`，并把 `test_order_tasks_dedupes` 扩到三组交叉去重 → `["t1","t2","s1","h1"]`）。
+- 前端 `npm run typecheck` 零错误、`npm run test` **33 文件 / 317 例**全绿（新增 `utils/drag.test.ts`）、`npm run build` 通过。
+- 实机（真实二进制 + 真实前端 + Playwright，任务 API 全部 mock）：**58 项断言全过**，其中新增——直连列表按请求地址搜索后拖拽，POST 载荷 `http` 为 `["blank_http","lib_http","dorm_http"]`（中间那条未动、被拖条目落到末尾），且 `all` / `scripts` 两组同时带上（证明直连面板拖拽不会清空另两类顺序）；浏览器任务面板拖拽的载荷同样三组俱全。
+- **只跑了 lib 测试与 clippy（check-only）**，未跑 `cargo test`（全量）：按 `AGENTS.md` 的告警，它会把 `target/debug/campus-auth.exe` 覆盖成不嵌前端的构建，而用户实例正锁着该路径。本改动要生效需重建后端并重启实例（见下）。
+
+### 生效条件（已完成）
+
+后端改了，运行中的实例是旧二进制。已按用户确认执行：优雅退出（`POST /api/system/shutdown`；`--stop` 因 `.instance` 里是重启交接留下的死 PID 而未命中，改用实例自报的 token 调接口）→ `cargo build`（默认特性，内嵌新前端）→ 原样重启。
+
+**重启命令记录（踩过坑）**：基座默认是 **exe 所在目录**（`main.rs` 的 `resolve_base_path`：CLI 参数 > exe 目录 > 当前目录），开发形态下即 `target/debug`——**不能想当然按"仓库根"传 `--base-path`**。本轮第一次重启我误传了 `--base-path E:\Campus-Auth-rs`，实例随即指向了仓库根的那份测试基座（9 个浏览器任务 + 2 个脚本、无直连任务），与用户实际在用的 `target/debug` 基座（1 浏览器 + 1 直连）不是同一份数据。发现后立刻停掉并**不带参数**重启（`Start-Process target\debug\campus-auth.exe`，cwd 不影响结果），任务集与端口即回到原状，两个基座的任务文件与 `.order.json` 全程未被写入。
+
+## 开发中（2026-09-23 任务页三面板全面复核：共享版式 + 脚本面板迁移方案 G + 六处缺陷修复）
+
+### 背景
+
+- 用户在方案 G（列表页 + 二级编辑页 + 自动保存）落地后要求「全面细致优化当前页面的重写内容，修复各种问题」。对三个面板（浏览器任务 / 直连任务 / 脚本）、`useTasks` / `useHttpTasks` / `useScripts`、`utils/drag`、`styles/pages/tasks.css` 做了一轮逐行复核，实际问题分三类：
+  1. **状态判据错**：编辑态由 `?task=` 参数驱动（`isEditing = query 非空 || 草稿非空`），于是「返回列表」只清参数不清草稿 → 编辑页退不出去；而 `?task=` 指向已删除/错拼的 id 时「参数非空 + 草稿为空」→ 列表与编辑两个分支都不渲染，整页空白且无返回入口。
+  2. **两个交互数学错误**：搜索过滤后拖拽用「过滤后下标」改「完整列表」顺序（挪错条目并把错序持久化到后端）；表格卡 `overflow: hidden` 裁掉行尾 `⋯` 菜单（越靠下的行切得越多，最末一行只剩顶边）。
+  3. **三份实现各自漂移**：三个面板各持一份约 350 行 scoped 版式、一份自动保存状态字、一份缺口校验（`useHttpTasks.draftGaps` 与 `utils/httpTask.httpTaskDraftGaps` 双份），脚本面板整体仍停在旧的「主从两栏 + 显式保存 + 脏确认」模型。
+
+### 实现
+
+#### 一、共享版式（`styles/pages/tasks.css` 新增 `tsk-*` 组）
+
+- 列表页 / 表格 / 列宽 / 行尾菜单 / 二级编辑页 / 面包屑 / 状态字 / 缺口条 / 侧栏键值块收敛为一份，三个面板的 scoped 样式只剩各自独有的部分（JSON 编辑器、词条、向导胶囊）。类名统一 `tsk-` 前缀（本文件是全局样式，`list-title` / `editor-head` 这类裸类名与其它页面撞名时由导入顺序决定谁生效）。
+- 列宽口径三面板统一（拖拽 44px / 名称 20% / ID 14% / 弹性列 auto / 绑定 13% / 执行程序 11% / 最近修改 10% / 操作 132px），切子页时同一列落在同一 x 位置。窄屏降级改为按信息价值让位：≤1100px 先让「最近修改」（`col` 与单元格成对隐藏，否则 fixed 布局下会留一条空列），≤768px 再让绑定与 ID；弹性的描述列（浏览器/脚本）与请求列（直连）始终保留——它才是辨识一行的那一列（旧的 `≤1100px 隐藏请求列` 会让直连任务只剩「未命名直连任务」这种名字）。
+- 行尾菜单不再被裁切：`.tsk-table-card` 改 `overflow: visible`，卡片圆角由表头 / 表尾单元格与 `.tsk-foot` 自己承担（`:has(.tsk-foot)` 时归页脚）。实测最后一行菜单会溢出卡片底部约 97px，属预期。
+- 新增 `.tsk-muted`：此前面板借用 `about.css` 里全局定义的 `.muted`（那条规则还带 `margin-top`），等于把"关于页的排版规则"焊进列表单元格；改为任务页自有类名。
+- 删除随之失效的旧版式：`.tlist-*`（方案 A 主从两栏）、`.tasks-grid`、`.help-tip`、`.help-content*`、`.task-editor*`（共约 380 行）。`.task-list` / `.task-item` / `.task-info` / `.task-desc` / `.task-actions` **保留**——「定时任务」页仍在使用，已就地注明以免被当死样式清掉。
+
+#### 二、编辑态判据与 `?task=` 同步（新增 `composables/useTaskEditorQuery.ts`）
+
+- 判据收敛为一条：**编辑态 = 草稿非空**。`?task=<id>` 只是"意图"，由三面板共用的 `useTaskEditorQuery` 解析：目录就绪后 id 存在则打开、不存在则提示「找不到任务「xxx」，它可能已被删除」并撤下参数；草稿被清空（关闭 / 删除当前任务）时同步撤下参数。`useTaskDirectory` 新增 `loaded`（"已拉取过"而非"列表非空"）作为存在性判定的前提——冷启动深链时列表本来就是空的，把"还没拉完"当成"不存在"会给错提示还抹掉用户的深链。
+- 点行进入编辑时写 query 与发起打开是同一次动作，`openIfNeeded` 用 `opening` 标记去重（否则 query 变化的 watcher 会把同一次打开做两遍：两次详情请求、两次草稿赋值）。
+- 面板侧：`closeEditor()` 改为「撤 query + 关编辑器」，`createX()` 新建后撤掉旧 query 再进入新草稿。
+
+#### 三、脚本面板迁移方案 G
+
+- 新增 `utils/scriptDraft.ts`（草稿形态 / 载荷互转 / 缺口校验），`useScripts` 改为自动保存：debounce 500ms 静默 PUT、`autosaveState` 四态、退出前冲刷在途 debounce。**与另两个面板的差异只在新建**：脚本 ID 是文件名、也是「定时任务」的引用值，故新建先给一份空 ID 草稿（不落盘），ID 合法后第一次自动保存才创建文件，落盘后 ID 固定——直连任务的 ID 没有外部含义，随便取 `untitled_N` 就行，脚本不行。
+- 落盘判定改用**载荷指纹**（`scriptDraftPayload` 的 JSON 串）而非"比较草稿 id"：新建草稿的 ID 由用户输入，按 id 判"换了编辑对象"会把改名当切对象、首次落盘永远排不上期；指纹比较顺带免掉"内容改回原样也发一串 PUT"。
+- 切换编辑对象前补发在途 debounce（丢的是停手不足半秒的那笔改动）；缺口拦住落盘时，切对象静默、**关闭编辑器出声**（一句「改动未保存：还缺 …」）——「退出即生效」不能在缺口态下变成静默丢弃。
+- 缺口校验补齐三处此前不存在的判定：自定义执行程序路径为空（旧实现会静默存成 Python）、PowerShell / `.ps1`（前端拦过但没进过"保存闸口"）、内容按 UTF-8 字节数限 100 KB（后端按字节，中文不能按字符数蒙混）。
+- `ScriptsPanel.vue` 重写为列表页 + 二级编辑页：列（拖拽 / 名称 / 脚本 ID / 描述 / 执行程序 / 最近修改 / 操作）、行尾 ⋯（立即运行 / 导出 / 删除）、搜索、深链 `?task=<id>`、编辑器三卡（基本信息 / 脚本内容 / 侧栏执行与调试 + 快速上手）。
+- `router/editorGuard.ts` 空壳与 `useScripts` 的 dirty 快照三件套随之删除（两侧文件注释里「脚本面板迁移后一并删除」的条件已满足）。
+
+#### 四、自动保存闸口与状态字（新增 `utils/autosave.ts`）
+
+- 状态字三份 `switch` 收敛为 `autosaveLabel(state, gaps)`，**缺口优先**：有缺口时说的是「有 N 处待补全，改动暂未保存」而不是「改动自动保存」/「已保存 · 刚刚」。直连面板与脚本面板的编辑页顶部新增缺口条（列出缺什么），`useHttpTasks` 新增 `draftGapsNow`；状态字说谎比不显示状态字更坏——那是本轮修掉的静默丢改动的入口。
+- `useHttpTasks` 的本地 `draftGaps` 删除，改用 `utils/httpTask.httpTaskDraftGaps`（两份判定曾各自演进，属"面板说能存、后端说不能"的温床）。
+- `closeTaskEditor` / `closeHttpTaskEditor` 在缺口（或 JSON 语法错误）拦住落盘时补一次提示，不再静默丢弃。
+
+#### 五、其它修正
+
+- 拖拽排序把「模板行下标」映射回**全量下标**（浏览器任务与脚本两处）：`useDragSort` 按传入列表 id 做 splice 与持久化，过滤后的下标会挪错条目。实测（搜索态拖拽）POST 载荷 `all` 为 `["dorm_browser","lib_browser","default"]`——与被拖位置一致且未动被过滤掉的那条。
+- 列表行「最近修改」不再由渲染层按 id 反查列表（O(n²) + 两处取数），改由 `buildHttpTaskRows` 带出 `modifiedAt`；脚本列表的 `Script` 类型补 `modified_at`。
+- 浏览器任务列表的「点行进入编辑」此前只有名称格可点（页脚却写着"点行进入编辑"），且名称格用 `padding: 0 !important` + 专用按钮绕过行高——统一为整行可点、名称格回到普通单元格（行首拖拽柄与操作列 `@click.stop`），`?` 说明从自绘 span 换成 `FieldHelp`（可点击钉住）。
+- 工具栏标题的 `margin: 0 auto var(--space-sm) 0` 让标题在 flex 行里整体上移 8px，改为 `margin: 0 auto 0 0`；搜索框改弹性宽（`flex: 1 1 180px; max-width: 260px`），窄屏不再与按钮组抢宽；补全 `type="button"`（历史上有过"缺 type 导致点击整页刷新"）。
+- `IconApp` 新增 `search` 图标：三个面板的「搜索无匹配」空态此前没有可用的放大镜图标。
+- 文档同步：`http-login-guide.md` 六处「点保存任务 / 未保存的草稿也能测 / 导入后仍需点保存」改为自动保存口径；`task-manual.md` 的任务页小节补「编辑即自动保存」与脚本 ID 规则；`custom-script-guide.md` §3 重写为「新建 → 命名 ID → 自动保存 → 立即运行」；`updatelog.md` 的「尚未发布」新增任务页改版与五条修复。
+
+### 验证
+
+- 前端：`npm run typecheck` 零错误；`npm run test` **32 文件 / 313 例**全绿（新增 `utils/autosave.test.ts` 4 例、`utils/scriptDraft.test.ts` 15 例，`utils/httpTaskList.test.ts` 补 mtime 断言）；`npm run build` 通过。
+- **实机（真实二进制 + 真实前端 + Playwright，任务 API 全部 mock 以保护用户真实任务文件）**：50 项断言全过（脚本与截图在已忽略的 `docs/reports/ui-check/`，不提交）——覆盖 ①点行进入编辑 / ②返回回到列表且地址栏清参 / ③深链到不存在的任务不白屏且给出提示 / ④最后一行 ⋯ 菜单项可被命中（`elementFromPoint` 命中测试）且点击触发动作 / ⑤搜索态拖拽的顺序载荷正确且脚本组全量互传 / ⑥直连缺口态：缺口条 + 状态字改口 + 缺口未补不发请求 + 补齐后自动落盘且载荷 `type=http` / ⑦脚本新建立即编辑：空 ID 不落盘、命名后自动创建、落盘后 ID 禁用 / ⑧三面板在 900px 与 1600px 下零横向溢出、零 JS 报错。截图 `docs/reports/ui-check/01~08-*.png`（本地，不提交）。
+- Rust 侧本轮**未改动**、也**未跑** `cargo test --features no-embed`：按 `AGENTS.md` 的告警，该命令会把 `target/debug/campus-auth.exe` 覆盖成不嵌前端的构建，而用户实例正在运行该路径（调试构建运行时读盘，故本次前端改动无需重编 Rust 即可生效，实机验证也正是在运行中的实例上做的）。
+
+### 有意不做
+
+- **直连任务不参与拖拽排序**（既有取舍，未变）：`POST /api/tasks/order` 的载荷只含浏览器任务与脚本 id。
+- **脚本重命名**：ID 落盘后不可改，要换名需删除重建；做「改名 = 存新 id + 删旧 id」会引入一次会留下孤儿文件的失败窗口，不在本轮范围。
+- **缺口态在「切换编辑对象」时静默**：只在关闭编辑器时提示，避免用户点列表里另一条时被弹一句（改动确实丢了，但那是用户主动切换）。
+
+## 开发中（2026-09-20：修复新建浏览器任务被空 steps 校验拒绝）
+
+- 修复：与直连任务同类问题——新建浏览器任务的种子 `steps` 为空数组，被后端 `validate_task` 的「steps 不能为空」闸口 400 拒绝。种子改带一个无害的占位步骤（`sleep` 1000ms，描述注明"编辑 JSON 时替换"），通过校验且执行无副作用。
+- 验证：typecheck 零错误、vitest 293 全过、build 通过；重建二进制实测页面 200，新建流程落盘并跳入编辑页。
+
+## 开发中（2026-09-20：修复新建直连任务被空地址校验拒绝）
+
+- 修复：自动保存模式的新建直连任务种子 `url` 留空，被后端 `validate_task` 的「直连任务缺少请求地址」闸口 400 拒绝（"无法新建task"）。种子地址改为非空占位符 `{gateway_host}`（`NEW_TASK_PLACEHOLDER_URL`）：通过保存校验，又明确表达"待填"——执行时占位符无对应值原样保留，请求必然失败但不会误登录真实地址；编辑页测试按钮检测到占位符时提示先替换。
+- 验证：typecheck 零错误、vitest 293 全过、build 通过；重建二进制实测 `/tasks/http` 200，新建流程落盘 `untitled_1` 并跳入编辑页。
+
+## 开发中（2026-09-20：任务列表行高加大）
+
+- 任务列表行内边距 10px → 18px（垂直方向，行高约 52px → 68px），表头 10px → 12px；浏览器任务名称格的自绘按钮内边距同步对齐。两个列表（浏览器/直连）同口径。列表是页面主体，行距太密显得单薄（截图反馈：单条任务时表格尤其显小）。
+
+## 开发中（2026-09-20：任务列表操作列顺序对齐）
+
+- 浏览器任务列表操作列图标顺序改为「编辑（pencil）· 调试（play）· 更多」，与 demo 的 ✎ ▶ ⋮ 一致（此前调试位用的是 bug 图标且排在编辑前）；⋯ 菜单里补「调试」项，行内不再放的调试动作仍可达。
+
+## 开发中（2026-09-20：任务列表「最近修改」列）
+
+- 任务列表补齐 demo 中的「最近修改」列（此前落地时因 `TaskSummary` 无时间字段而省略，与 demo 不一致）：后端 `TaskSummary` 新增 `modified_at`（任务文件 mtime，UTC RFC3339 秒级；`summary_from_value` / 裸 `.py` 摘要路径顺手读，详情路径不填避免多余摸盘），前端 `formatMtime` 按本地时区格式化为 `MM-DD HH:mm`（经 `Date` 解析修正时区，直接截字符串会把 UTC 当本地差 8 小时）。浏览器任务与直连任务两个列表各加一列（colgroup 同步 7/6 列比例），mtime 读不到时显示「—」。
+- 验证：cargo lib 测试 993 全过（`get_task_detail` 等两处 mock 构造补齐新字段）、clippy -D warnings 零警告、fmt 零差异；前端 typecheck / vitest 293 / build 通过；重建二进制实测页面 200。
+
+## 开发中（2026-09-20：任务列表列宽修复）
+
+- 任务列表表格落地后与 demo 走样（真实单条数据下列宽失衡）：浏览器任务面板表头 6 列但行只渲染 5 个 td（描述列缺失、绑定 pill 误用描述列样式），且名称列无宽度约束被内容撑到 60%+ 行宽。两处列表（浏览器/直连）统一改 `table-layout: fixed` + `<colgroup>` 锁定列宽比例（浏览器：拖拽 44px / 名称 26% / ID 17% / 描述弹性 / 绑定 15% / 操作 132px；直连：名称 22% / ID 17% / 请求弹性 / 绑定 15% / 操作 104px），长名称/长地址按列省略；浏览器任务名称单元格去掉与描述列重复的内嵌描述行。
+- 验证：typecheck 零错误、vitest 293 全过、build 通过，重建二进制实测页面 200。
+
+## 开发中（2026-09-20：任务页方案 G——列表页 + 二级编辑页 + 自动保存）
+
+### 编辑模型重构：自动保存（浏览器任务 / 直连任务）
+
+- **编辑模型换轨**：浏览器任务与直连任务从「草稿 + 显式保存」改为**自动保存**——字段变更 debounce 500ms 静默 PUT，头部状态字 idle→saving→saved/error；「退出即生效」，没有保存按钮、没有「放弃未保存的修改？」确认。单用户本地工具无并发冲突，草稿/脏快照/确认弹窗整套仪式退役。
+  - `useTasks.ts` / `useHttpTasks.ts` 重写：`useDirtySnapshot` 接线删除，新增深度 watch + debounce 的 `persistDraft`（在途请求按序号作废，慢响应不覆盖新状态）；`closeTaskEditor` / `closeHttpTaskEditor` 在退出时冲刷在途 debounce，兑现「退出即生效」。
+  - 浏览器任务 JSON 文本框：语法合法才落盘，非法标红且提示「修正前不会保存」，修正后自动恢复落盘；直连任务缺口校验（请求地址等）未补齐时同样静默跳过（发了必 400）。
+  - **新建即落盘**：`createTask` / `createHttpTask` 立即以 `untitled_N`（撞名自动递增）写入种子任务并跳入其编辑页；任务 ID 相应改为**创建时生成、不可修改**（原来「新建时可填 id」的窗口消失，ID 形态校验只剩种子路径需要）。
+  - `editorGuard.ts`（FE2-9 离开确认守卫）退役：router.beforeEach 调用移除，`editorGuard.test.ts` 删除。守卫文件本身先是留了个注明迁移原因的空壳导出，后来在脚本面板迁移方案 G 时连同空壳一并删除（见上方「`router/editorGuard.ts` 空壳与 `useScripts` 的 dirty 快照三件套随之删除」那条）。脚本面板当时未迁移自动保存，暂不受影响。
+  - `useRepoImport` 仓库导入改为**直接落盘 + 跳编辑页**（无草稿可写）：撞已有 id 自动加 `_N` 后缀（导入不再是覆盖语义），成功后 `router.push` 到 `?task=<id>`；对应单测改写为新契约（save 载荷 + 编辑器跳转断言）。
+- **任务页结构（方案 G 终稿）**：浏览器任务与直连任务两个面板统一为「**全页列表 + 二级编辑页**」：
+  - 列表态：整页任务表格铺满内容区（无右列、无帮助卡），浏览器任务列为拖拽柄/名称+描述/ID/绑定方案/操作（调试·编辑·⋯菜单），直连任务列为名称/ID/方法+地址摘要/绑定方案/操作（编辑·⋯菜单）；工具行仅搜索 + 导入/仓库导入（/分享适配）+ 新建；页脚一行「拖拽排序 · 点行进入编辑 · 改动自动保存」。
+  - 编辑态：点行或新建进入，列表整页切走；面包屑「‹ 返回任务」返回；主列「基本信息卡 + JSON/请求配置卡」，右侧 320px 侧栏（调试运行/绑定方案/快速上手/字段速查）；直连任务保留配置向导入口与测试请求区。删除/导出收进编辑页头部右侧（低频操作弱化为 ghost）。
+  - 两态由 `?task=<id>` 查询参数表达：刷新与深链直达编辑态，方案页「配置直连任务」等外部入口带参跳入即落编辑器，返回即列表；路由名/路径未变（`/tasks/browser` 等），仅新增 query 语义。
+  - 浏览器任务列表的「绑定方案」列来自 `ProfileSummary.active_task` 反向聚合（直连任务沿用 `buildHttpTaskBindingIndex` 的 `active_http_task` 口径）；profiles 未就绪时显示「—」而非误导性的「未绑定」。
+- `docs/compose/tasks-page-structure-options-v3.html`（方案 G demo，含浅/深主题与背景图模拟）与 v1/v2 两轮 demo 留档于 ignored 的 compose 目录。
+
+### 验证
+
+- 前端 `npm run typecheck` 零错误；`npm run test`（vitest）全绿（**293 passed**，含改写后的 useHttpTasks/useRepoImport 用例）；`npm run build` 通过。
+- `cargo check --features no-embed` 零警告（本轮无 Rust 改动）；构建默认特性二进制并实测：`/tasks/browser` 返回 200，列表态/编辑态/自动保存状态字按方案 G 呈现。
+
+## 开发中（2026-09-20：任务页统一主从两栏 + 直连任务退出登录请求）
+
+### 任务页结构统一（方案 A：主从两栏）
+
+- 任务页三个列表型面板（浏览器任务 / 直连任务 / 脚本）统一为**主从两栏**骨架：左列固定 320px 列表卡（数量 + 搜索 + 行 + 行尾 ⋯ 菜单），右列编辑器卡 / 帮助卡；窄屏（≤1100px）堆叠单列。此前浏览器任务与脚本面板为上下堆叠的旧两栏网格（`tasks-grid`），与直连面板的主从版式同页混用，切 Tab 时重心跳动。
+- `styles/pages/tasks.css` 新增共享 `tlist-*` 样式组（`tlist-split` / `tlist-head` / `tlist-search` / `tlist-row` / `tlist-row-menu` 等），三个面板共用一份列表视觉；列宽从直连面板的 296px 收敛为 320px（三列不同宽会让切换 Tab 时列表内容跳位）。
+- `BrowserTasksPanel.vue` 重写为主从两栏：列表行收为「拖拽柄 + 名称 + ID + 描述 + ⋯ 菜单」，编辑 / 调试 / 复制 / 导出 / 删除五个行内图标按钮（实测占 244px 行宽）收进 ⋯ 菜单；新增纯前端搜索（名称 / ID / 描述）；点行打开编辑器，选中行高亮对齐直连面板口径。帮助卡挪到右列（编辑器打开时替换显示）。
+- `ScriptsPanel.vue` 同步重写为主从两栏：运行 / 导出 / 删除收进 ⋯ 菜单（立即运行为菜单首位），新增搜索与行选中态；编辑器与帮助卡的显隐关系与浏览器任务面板一致。
+- 两个面板的 ⋯ 菜单沿用直连面板的交互契约：`pointerdown.stop` 阻止全局点外关闭监听吃掉菜单点击、菜单打开期间才挂全局监听、Escape / 点外关闭。
+
+### 直连任务：退出登录请求（logout_request）
+
+- `src/tasks/models.rs` 新增 `HttpActionRequest` 动作请求模型（method / url / headers / body / wait_secs），`HttpTaskConfig` 增加可选 `logout_request` 字段（`skip_serializing_if` 未配置不落盘）。动作请求与前置请求（`HttpPreRequest`）的本质差异在结果语义：前置请求**取值**（取不到即终态失败），动作请求**触达**（成败不判定、失败不拦登录）——退出登录正是为踢掉「IP 已在线，拒绝重复登录」的旧会话，下线没生效时登录仍值得一试。
+- 执行顺序：凭据变换脚本 → **退出登录动作** → 前置请求 → 登录请求，全部落在同一条 keep-alive 连接（`build_client` 单 Client 口径不变）。下线放在前置请求**之前**：「IP 已在线」类门户连取令牌的接口都可能被旧会话挡住，先清场再取令牌才是正确因果链。
+- `wait_secs` 支持下线后等待（0~30 秒，执行侧 `LOGOUT_MAX_WAIT_SECS` 与模型层 `MAX_WAIT_SECS` 双侧钳制）：部分门户下线异步生效，立即重连仍被旧会话占住。
+- 下线请求与登录请求共用同一套占位符（`{username}` / `{password}` / 脚本产出字段 / `{local_ip}` 等），`needs_local_address` 把下线模板纳入网卡探测判定；日志经 `collect_secrets` / `redact_text` 脱敏（下线失败消息可能拼 URL）。
+- `HttpLoginRequest::validate_logout_request` 形状 + 体积校验；`loader.rs` 的 `validate_task` 在 http 分支对 `logout_request` 做同口径「形状 + 体积」双闸（`url` 8KB / `headers` 256KB / `body` 256KB 上限，与 `pre_request` 一致）。
+- 前端契约同步：`types.ts` 新增 `HttpActionRequest` 与 `HttpTaskConfig.logout_request`；`httpTask.ts` 草稿增加 `logout_method/url/headers/body/wait_secs` 平铺字段，`httpTaskPayload` 按地址留空 = null 互转（与前置请求同口径），`httpTaskDraftGaps` 校验等待秒数 0~30。
+- `HttpTaskFields.vue` 新增「退出登录请求（可选）」折叠区块（第 ⑥ 节，与凭据变换脚本 / 前置请求同款高级项交互：地址留空 = 整块忽略，已配置常驻展开），含方法 / 地址 / 等待秒数 / 请求头 / POST 请求体字段与「下线失败不影响登录」说明。
+
+### 验证
+
+- `cargo fmt` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed --lib` 全绿（**993 passed / 0 failed / 1 ignored**）。
+- 新增测试：`models.rs` 的 `logout_request_roundtrip_and_defaults`（serde 往返 + 缺省 + 未配置不落盘）、`logout_request_validate_checks_url_shape_and_wait`（地址 / 等待钳制）；`http_login.rs` 的 `logout_request_is_sent_before_login_request`（专用记录型 mock 门户断言下线先于登录、同连接、占位符渲染）、`logout_request_failure_does_not_block_login`（下线网络失败登录照常成功）、`from_task_carries_logout_request`（任务 → 执行参数映射）、`validate_logout_request_rejects_oversized_fields`（体积闸）。
+- 前端 `npm run typecheck` / `npm run build` 通过。
+
 ## v5.0.2（2026-09-20 正式版发布）
 
 自 `v5.0.1`（`55aedb0`）起共 1 个提交，功能改动仅一项（应用内更新「立即重启」后更新未生效修复），逐项记录见下方「开发中（2026-09-20 修复：应用内更新下载完成后重启仍为旧版本）」条目，其余为版本与文档同步。

@@ -1,0 +1,42 @@
+/* ============================================================
+   设计令牌
+   宣传片统一使用暖白纸张底色，避免录屏时在纯白与纯黑之间跳变。
+   琥珀黄承担品牌强调，绿色只表示「在线 / 成功」。
+   ============================================================ */
+
+:root{
+  /* 色板 */
+  --ink:#2F2A24;
+  --paper:#F4EFE6;
+  --night-ink:#2F2A24;
+  --night-paper:#F4EFE6;
+  --accent:#D79346;
+  --accent-blue:#4E75C8;
+  --success:#2FA77C;
+  --warning:#C76E43;
+  --term-bg:#2F2A24;
+  --term-fg:#FFF9EF;
+
+  /* 当前生效的一对（由 #stage.is-night 切换） */
+  --fg:var(--ink);
+  --bg:var(--paper);
+
+  /* 版心与节奏 */
+  --pad:112px;
+  --rail-y:806px;
+  --bar-y:846px;
+  --ease:cubic-bezier(.22,.61,.36,1);
+  --ease-wipe:cubic-bezier(.72,0,.22,1);
+
+  /* 由 currentColor 派生的层次 */
+  --hairline:color-mix(in srgb,currentColor 15%,transparent);
+  --hairline-2:color-mix(in srgb,currentColor 26%,transparent);
+  --tint:color-mix(in srgb,currentColor 5%,transparent);
+  --tint-2:color-mix(in srgb,currentColor 9%,transparent);
+  --shadow:0 36px 76px -34px rgba(75,55,35,.34),0 12px 28px -18px rgba(75,55,35,.22);
+
+  /* 字体：中文 Noto Sans SC，拉丁与数字 Archivo（口径同程序本体） */
+  --sans:"Noto Sans SC Variable","Noto Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --display:"Archivo Variable","Noto Sans SC Variable","Noto Sans SC",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:"Cascadia Mono","Cascadia Code",Consolas,"SF Mono",Menlo,ui-monospace,"Liberation Mono",monospace;
+}

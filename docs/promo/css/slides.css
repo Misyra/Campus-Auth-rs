@@ -1,0 +1,280 @@
+/* ============================================================
+   组件与分页构图
+   原则还是「不用卡片堆」：分栏靠线与文字，只有真实界面（截图 / 终端 /
+   托盘菜单）才给实体面板，这样层级一眼能看出来。
+   ============================================================ */
+
+/* ---------- 分栏 ---------- */
+
+.split{display:grid;grid-template-columns:1fr 1px 1fr;gap:52px;align-items:start}
+.split > .divider{width:1px;align-self:stretch;min-height:100%;background:var(--hairline)}
+
+.cols{display:grid}
+.cols-2{grid-template-columns:repeat(2,1fr);gap:46px 64px}
+.cols-3{grid-template-columns:repeat(3,1fr);gap:44px}
+.cols-4{grid-template-columns:repeat(4,1fr);gap:36px}
+.col-head{display:flex;align-items:baseline;gap:13px}
+.col-idx{font-family:var(--display);font-size:19px;font-weight:700;opacity:.38;flex:none}
+.col-body{font-size:18.5px;line-height:1.64;opacity:.62;margin:12px 0 0;text-wrap:pretty}
+
+/* ---------- 标记 ---------- */
+
+.badge{
+  display:inline-block;font-size:14.5px;font-weight:600;padding:5px 12px;border-radius:100px;
+  border:1px solid var(--hairline-2);opacity:.8;
+}
+.chip{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:15px;font-weight:600;padding:7px 14px;border-radius:100px;
+  border:1px solid var(--hairline-2);
+}
+.chip .dot{width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.4;flex:none}
+.chip.on{border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.chip.on .dot{background:var(--accent);opacity:1;box-shadow:0 0 10px color-mix(in srgb,var(--accent) 55%,transparent)}
+.chip-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+
+/* ---------- 面板 / 截图 / 终端 ---------- */
+
+.panel{background:var(--tint);border:1px solid var(--hairline);border-radius:12px;box-shadow:var(--shadow)}
+.panel-soft{background:var(--tint);border:1px solid var(--hairline);border-radius:12px}
+
+.frame-shot{
+  position:relative;display:flex;flex-direction:column;background:#fff;border-radius:11px;overflow:hidden;
+  border:1px solid var(--hairline-2);box-shadow:var(--shadow);
+}
+.frame-shot img{display:block;width:100%;flex:1 1 auto;min-height:0;object-fit:cover;object-position:top left}
+.frame-chrome{
+  display:flex;align-items:center;gap:11px;padding:11px 15px;
+  border-bottom:1px solid rgba(0,0,0,.1);background:#FBFBFB;color:#111;font-size:14px;
+}
+.chrome-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+.chrome-url{font-family:var(--mono);font-size:13.5px;background:#EFEFEC;border-radius:6px;padding:3px 10px;color:#3A3A38}
+.chrome-right{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;color:#2A2A28;opacity:.75}
+
+.term{
+  background:var(--term-bg);color:var(--term-fg);
+  border-radius:12px;padding:20px 22px;
+  font-family:var(--mono);font-size:15px;line-height:1.9;
+  border:1px solid rgba(255,255,255,.09);
+  box-shadow:var(--shadow);
+}
+.term .dim{opacity:.45}
+.term .acc{color:var(--accent)}
+.term .ok{color:#63D69A}
+.caret{
+  display:inline-block;width:8px;height:16px;background:var(--accent);
+  vertical-align:-3px;margin-left:2px;animation:live 1.05s steps(1) infinite;
+}
+
+.stat-chip{
+  position:absolute;display:flex;align-items:baseline;gap:10px;
+  padding:11px 16px;border-radius:11px;white-space:nowrap;
+  background:var(--bg);border:1px solid var(--hairline-2);
+  box-shadow:0 20px 40px -22px rgba(0,0,0,.55);
+  font-size:14.5px;
+}
+.stat-chip b{font-family:var(--display);font-size:19px;font-weight:800;letter-spacing:-.01em}
+
+/* ---------- 步骤行 / 步骤类型表 ---------- */
+
+.step{display:flex;gap:18px;align-items:baseline;padding:24px 0;border-top:1px solid var(--hairline)}
+.step:last-child{border-bottom:1px solid var(--hairline)}
+.step-text{font-size:20px}
+
+.mono-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 40px}
+.mono-row{
+  display:flex;align-items:baseline;gap:12px;
+  padding:10px 0;border-top:1px solid var(--hairline);
+  font-family:var(--mono);font-size:15.5px;
+}
+.mono-row i{font-family:var(--sans);font-style:normal;font-size:14.5px;opacity:.5}
+
+/* ---------- 托盘菜单示意 ---------- */
+
+.tray{width:296px;padding:7px 0;font-size:16px}
+.tray-status{display:flex;align-items:center;gap:10px;padding:10px 16px;font-weight:600;opacity:.85}
+.tray-item{padding:9px 16px;opacity:.75}
+.tray-sep{height:1px;background:var(--hairline);margin:6px 0}
+
+/* ---------- 运行模式对照 ---------- */
+
+.mode{border:1px solid var(--hairline);border-radius:12px;padding:20px 22px;background:var(--tint)}
+.mode h4{font-family:var(--display);font-size:23px;font-weight:700;margin:0;letter-spacing:-.01em}
+.mode p{font-size:16.5px;line-height:1.6;opacity:.6;margin:11px 0 0}
+.diff{font-family:var(--mono);font-size:14.5px;line-height:2;margin:0;opacity:.62}
+.diff s{text-decoration:none;opacity:.5}
+.diff em{font-style:normal;font-weight:700;opacity:1;color:var(--accent)}
+
+/* ---------- 品牌图形 ---------- */
+
+.logo-stack{position:relative;width:168px;height:168px;flex:none}
+.logo-stack img{
+  position:absolute;inset:0;width:100%;height:100%;transition:opacity .5s var(--ease);
+  -webkit-mask-image:linear-gradient(112deg,#000 0 34%,transparent 52%);
+  mask-image:linear-gradient(112deg,#000 0 34%,transparent 52%);
+  -webkit-mask-size:320% 320%;mask-size:320% 320%;
+  -webkit-mask-position:100% 100%;mask-position:100% 100%;
+  -webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+}
+.slide.is-active .logo-stack img{animation:sweepMask 1.2s var(--ease) both}
+@keyframes sweepMask{
+  from{-webkit-mask-position:100% 100%;mask-position:100% 100%}
+  to{-webkit-mask-position:0% 0%;mask-position:0% 0%}
+}
+.logo-stack .l-day,.logo-inline .l-day{opacity:1}
+.logo-stack .l-night,.logo-inline .l-night{opacity:0}
+#stage.is-night .logo-stack .l-day,#stage.is-night .logo-inline .l-day{opacity:0}
+#stage.is-night .logo-stack .l-night,#stage.is-night .logo-inline .l-night{opacity:1}
+
+.logo-inline{position:relative;width:76px;height:76px;flex:none}
+.logo-inline img{position:absolute;inset:0;width:100%;height:100%;transition:opacity .5s var(--ease)}
+
+/* 首尾两页的线稿：左端渐隐，避免线条凭空起头 */
+.hero-art{
+  position:absolute;pointer-events:none;
+  -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 22%);
+  mask-image:linear-gradient(90deg,transparent 0,#000 22%);
+}
+
+/* ============================================================
+   分页构图
+   ============================================================ */
+
+/* --- 01 开场：界面本身当主角，左侧留出文字栏，两者不重叠 --- */
+.hero-row{display:flex;align-items:center;gap:44px}
+.hero-rule{margin-top:54px;max-width:840px}
+.hero-claim{margin-top:52px;max-width:19em}
+.hero-shot{position:absolute;right:-170px;top:112px;width:760px}
+.hero-shot .frame-shot{height:446px}
+.hero-tray{position:absolute;right:650px;bottom:128px}
+.hero-chips{margin-top:auto}
+
+/* --- 02 问题：闭环 → 直线，整页靠一张 svg 说清 --- */
+.problem-art{margin-top:40px;width:100%}
+.problem-foot{display:flex;align-items:flex-end;justify-content:space-between;gap:70px}
+
+/* --- 03 架构 --- */
+.arch-sub{margin-top:16px}
+.arch-art{margin-top:16px;width:100%}
+
+/* --- 04 四阶段 --- */
+.stage-rail{margin-top:48px;width:100%;overflow:visible}
+.verdict-row{display:flex;align-items:center;gap:14px;margin-top:22px;flex-wrap:wrap}
+.verdict-row .t-note{margin-left:auto}
+
+/* --- 05 / 06 登录方式：左右各一页，左边摆证据，右边摆优缺点 --- */
+.login-art{margin-top:18px;padding:20px 22px;display:inline-block}
+.login-art svg{display:block;width:430px}
+.login-cap{margin-top:16px;max-width:34em}
+.login-chips{margin-top:16px}
+.direct-art{margin-top:26px;width:100%}
+.pc-stack{margin-top:4px}
+.pc-head{display:flex;align-items:center;gap:12px;padding-bottom:10px;border-bottom:1px solid var(--hairline-2)}
+.pc-head ~ .pc-head{margin-top:22px}
+.pc-sign{
+  width:27px;height:27px;flex:none;display:grid;place-items:center;border-radius:50%;
+  font-family:var(--display);font-size:17px;font-weight:800;line-height:1;
+  border:1px solid var(--hairline-2);
+}
+.pc-sign.up{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.pc-sign.down{opacity:.55}
+.pc-row{display:flex;align-items:baseline;gap:16px;padding:9px 0;border-bottom:1px solid var(--hairline)}
+.pc-k{flex:none;width:7.4em;font-family:var(--display);font-size:17.5px;font-weight:700;letter-spacing:-.01em}
+.pc-d{font-size:16.5px;line-height:1.45;opacity:.6;margin:0;text-wrap:pretty}
+.login-split{margin-top:30px}
+.wizard-line{margin-top:18px;display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
+.wizard-line .sep{opacity:.3}
+.wizard-line span{font-size:16px;opacity:.62}
+
+/* --- 07 轻量：一张 24 小时的时间轴 --- */
+.mem-art{margin-top:30px;width:100%}
+.mem-foot{margin-top:auto}
+/* 07 · 标题行的常态内存读数卡（标题行右半，不额外占竖向高度） */
+.mem-top{display:grid;grid-template-columns:minmax(0,1fr) 452px;gap:0 56px;align-items:start}
+.mem-card{
+  display:flex;flex-direction:column;padding:16px 22px;
+  border:1px solid var(--hairline-2);border-radius:14px;
+  background:color-mix(in srgb,currentColor 4%,transparent);
+}
+.mem-head{display:flex;align-items:baseline;gap:16px}
+.mem-num{font-family:var(--display);font-size:54px;font-weight:700;letter-spacing:-.02em;line-height:1;color:var(--accent)}
+.mem-num em{font-style:normal;font-size:26px;margin-right:5px;vertical-align:7px;opacity:.65}
+.mem-label{font-family:var(--display);font-size:18px;font-weight:700;letter-spacing:-.01em}
+.mem-sub{margin:9px 0 0;font-size:14.5px;line-height:1.45;opacity:.5}
+.mem-tm{
+  display:flex;justify-content:space-between;gap:14px;
+  margin-top:13px;padding-top:11px;border-top:1px solid var(--hairline);
+  font-family:var(--mono);font-size:13.5px;line-height:1.2;opacity:.6;
+}
+.mem-tm b{font-weight:600;opacity:1}
+
+/* --- 08 方案匹配 --- */
+.conv-art{width:100%}
+.shot-profiles{height:446px}
+.shot-caption{margin-top:15px}
+
+/* --- 09 任务 --- */
+.task-split{margin-top:36px;grid-template-columns:1.16fr 1px 1fr}
+.shot-tasks{height:368px}
+.task-fx{margin-top:18px}
+.big-num{font-size:50px;font-weight:800;letter-spacing:-.02em}
+.task-foot{margin-top:auto}
+
+/* --- 10 控制台：截图占左，数据片贴着右侧一列排开，谁也不压谁 --- */
+.console-stage{position:relative;margin-top:34px;height:420px}
+.shot-console{position:absolute;left:0;top:0;width:900px}
+.shot-console .frame-shot{height:420px}
+.chip-time{left:948px;top:22px}
+.chip-ok{left:1216px;top:84px}
+.chip-live{left:948px;top:150px}
+.chip-log{left:948px;top:272px}
+.chip-fail{left:1216px;top:334px}
+.console-foot{margin-top:auto}
+
+/* --- 11 运行模式 --- */
+.mode-split{margin-top:42px}
+.mode-stack{display:flex;flex-direction:column;gap:18px}
+.mode-hint{opacity:.55}
+.mode-term{margin-top:18px;font-size:14.5px}
+
+/* --- 12 夜间暂停 --- */
+.night-art{margin-top:12px;width:100%}
+.night-claim{margin-top:auto;max-width:21em}
+
+/* --- 13 安全与运维 --- */
+.sec-split{margin-top:38px}
+.cipher{margin:18px 0 0;font-size:13.5px;line-height:1.8}
+.chan-art{margin-top:16px;width:100%}
+
+/* --- 14 上手：先把「零配置」摆在最前面 --- */
+.start-split{margin-top:32px;grid-template-columns:1.06fr 1px .94fr}
+.zero{
+  display:flex;gap:24px;align-items:flex-start;
+  padding:20px 26px;border-radius:14px;
+  border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);
+  background:color-mix(in srgb,var(--accent) 6%,transparent);
+}
+.zero-num{
+  font-family:var(--display);font-size:78px;font-weight:800;line-height:.82;
+  letter-spacing:-.05em;color:var(--accent);flex:none;
+}
+.zero-t{font-family:var(--display);font-size:22px;font-weight:700;margin:0;letter-spacing:-.01em}
+.zero-d{font-size:16px;line-height:1.56;opacity:.66;margin:8px 0 0;text-wrap:pretty}
+.start-steps{margin-top:20px}
+.start-steps .step{padding:16px 0}
+.start-steps .step-text{font-size:19px}
+.url-row{display:flex;align-items:baseline;gap:14px;margin-top:22px}
+.url-big{font-size:33px;font-weight:800;letter-spacing:-.01em}
+.boot{margin:0;font-size:14.5px}
+
+/* --- 15 收尾 --- */
+.cta-wrap{justify-content:center;padding-bottom:164px}
+.cta-row{display:flex;align-items:center;gap:48px}
+.cta-rule{margin-top:50px;max-width:680px}
+.cta-links{margin-top:36px;display:flex;gap:52px;align-items:baseline;max-width:900px}
+.cta-links a{
+  color:inherit;text-decoration:none;font-size:25px;font-weight:700;letter-spacing:-.01em;
+  border-bottom:2px solid var(--hairline-2);padding-bottom:4px;
+}
+.cta-links a:hover{border-bottom-color:var(--accent)}
+.cta-chips{margin-top:32px}

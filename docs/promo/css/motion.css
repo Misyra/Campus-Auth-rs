@@ -1,0 +1,54 @@
+/* ============================================================
+   动效基元
+   每一页的元素用 class + --d（延迟）声明入场：不用统一的「淡入上移」，
+   而是按内容分派——文字用遮罩擦出，线稿用描边，界面用浮起。
+   ============================================================ */
+
+/* 块级元素：遮罩擦出（像剪辑里的划线揭示） */
+.wipe{clip-path:inset(0 100% 0 0)}
+.slide.is-active .wipe{animation:wipeIn .8s var(--ease-wipe) both;animation-delay:var(--d,140ms)}
+@keyframes wipeIn{to{clip-path:inset(0 0 0 0)}}
+
+/* 界面 / 面板：浮起并轻微缩放 */
+.rise{opacity:0}
+.slide.is-active .rise{animation:rise .72s var(--ease) both;animation-delay:var(--d,140ms)}
+@keyframes rise{from{opacity:0;transform:translateY(22px) scale(.985)}to{opacity:1;transform:none}}
+
+/* 数据片：弹出 */
+.pop{opacity:0}
+.slide.is-active .pop{animation:pop .6s var(--ease) both;animation-delay:var(--d,140ms)}
+@keyframes pop{from{opacity:0;transform:translateY(10px) scale(.94)}to{opacity:1;transform:none}}
+
+/* 线稿：描边生长（元素需带 pathLength="1"） */
+.draw{stroke-dasharray:1;stroke-dashoffset:1}
+.slide.is-active .draw{animation:draw var(--dd,1s) var(--ease) both;animation-delay:var(--d,140ms)}
+@keyframes draw{to{stroke-dashoffset:0}}
+
+/* 纯亮起 */
+.fade{opacity:0}
+.slide.is-active .fade{animation:fadeIn .6s linear both;animation-delay:var(--d,140ms)}
+@keyframes fadeIn{to{opacity:1}}
+
+/* 常驻微动 */
+.flow{stroke-dasharray:4 10;animation:flow 1.5s linear infinite}
+@keyframes flow{to{stroke-dashoffset:-14}}
+
+.breath{animation:breathe 4.6s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:.32}50%{opacity:1}}
+
+.live{animation:live 2.2s ease-in-out infinite}
+@keyframes live{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ---------- 降级：只留淡入，不做过场与位移 ---------- */
+@media (prefers-reduced-motion:reduce){
+  .slide,.slide.is-active{clip-path:none;transition:opacity .18s linear}
+  #sweep{display:none}
+  .slide.is-active .rise,
+  .slide.is-active .wipe,
+  .slide.is-active .pop,
+  .slide.is-active .fade{animation:fadeIn .3s linear both;animation-delay:0ms}
+  .slide.is-active .draw{animation:none;stroke-dashoffset:0}
+  .slide.is-active .logo-stack img{animation:none}
+  .logo-stack img{-webkit-mask-image:none;mask-image:none}
+  .flow,.breath,.live,.caret{animation:none}
+}

@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>认证喵 · Campus-Auth 宣传片</title>
+<meta name="description" content="认证喵（Campus-Auth）：开箱即用的校园网自动认证工具，支持任务仓库共享、24 小时断网自动重连与低内存常驻。">
+<meta name="theme-color" content="#F4EFE6">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preload" href="../assets/promo-dashboard-live.png" as="image" type="image/png">
+<link rel="preload" href="../assets/promo-monitor-settings.png" as="image" type="image/png">
+<link rel="preload" href="../assets/preview-dashboard.webp" as="image" type="image/webp">
+<link rel="preload" href="../assets/preview-tasks.webp" as="image" type="image/webp">
+<link rel="preload" href="../assets/preview-profiles.webp" as="image" type="image/webp">
+<!-- 字体口径与程序本体一致；断网时自动回落系统字体栈。 -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource-variable/archivo@5/index.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource-variable/noto-sans-sc@5/index.css">
+
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/stage.css">
+<link rel="stylesheet" href="css/backdrop.css">
+<link rel="stylesheet" href="css/slides.css">
+<link rel="stylesheet" href="css/motion.css">
+<link rel="stylesheet" href="css/campaign.css">
+</head>
+<body>
+
+<div id="stage" class="is-night">
+
+  <!-- 全片共用同一套暖米白背景，仅切换光晕与连线密度，不再明暗反转。 -->
+  <div id="backdrop" data-mood="hero">
+    <div class="bd" id="sheen"></div>
+    <div class="bd" id="bloom"><span></span><span></span><span></span></div>
+    <div class="bd" id="grid"></div>
+
+    <svg class="bd" id="arcs" viewBox="0 0 1600 900" aria-hidden="true">
+      <g class="arc-a" fill="none" stroke="currentColor">
+        <circle cx="1450" cy="120" r="300" stroke-width="1.2" opacity=".10"/>
+        <circle cx="1450" cy="120" r="460" stroke-width="1.2" opacity=".085"/>
+        <circle cx="1450" cy="120" r="660" stroke-width="1.2" opacity=".065"/>
+        <circle cx="1450" cy="120" r="880" stroke-width="1.2" opacity=".05"/>
+        <circle class="dial" cx="1450" cy="120" r="560" stroke-width="1.4" opacity=".14" stroke-dasharray="2 15"/>
+      </g>
+      <g class="arc-b" fill="none" stroke="currentColor">
+        <circle cx="120" cy="840" r="220" stroke-width="1.2" opacity=".075"/>
+        <circle cx="120" cy="840" r="380" stroke-width="1.2" opacity=".055"/>
+        <circle cx="120" cy="840" r="560" stroke-width="1.2" opacity=".04"/>
+      </g>
+    </svg>
+
+    <canvas class="bd" id="mesh" aria-hidden="true"></canvas>
+    <div class="bd" id="streams"><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="bd" id="vignette"></div>
+  </div>
+
+  <!-- ======================= 01 · 开场 ======================= -->
+  <section class="slide campaign-hero" data-theme="night" data-bg="hero" data-dur="6400" data-title="开场">
+    <div class="pad">
+      <div class="campaign-brand rise" style="--d:120ms">
+        <span class="logo-inline campaign-logo">
+          <img src="../assets/logo.png" alt="认证喵">
+        </span>
+        <span>认证喵 <small>Campus-Auth</small></span>
+      </div>
+
+      <div class="campaign-hero-copy">
+        <h1 class="campaign-display wipe" style="--d:260ms">校园网掉了，<br>它自己连回来。</h1>
+        <p class="campaign-lead wipe" style="--d:620ms">把每天重复的登录，交给一只安静守在后台的猫。</p>
+        <div class="chip-row campaign-hero-chips wipe" style="--d:920ms">
+          <span class="chip on"><span class="dot"></span>24 小时自动重连</span>
+          <span class="chip">解压即用</span>
+          <span class="chip">常态 &lt; 10 MB</span>
+        </div>
+      </div>
+
+      <div class="hero-product rise" style="--d:420ms">
+        <div class="campaign-shot campaign-shot-hero">
+          <div class="frame-chrome">
+            <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="chrome-url">127.0.0.1:50721</span>
+            <span class="chrome-right"><i class="chrome-live-dot"></i>运行中 · 在线</span>
+          </div>
+          <div class="shot-viewport">
+            <img src="../assets/promo-dashboard-live.png" alt="认证喵实际运行中的 Web 控制台仪表盘">
+          </div>
+        </div>
+        <div class="resource-float pop" style="--d:1080ms">
+          <span>常驻内存</span>
+          <strong>&lt; 10 MB</strong>
+          <small>浏览器按需唤醒</small>
+          <div class="resource-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        </div>
+        <div class="status-float pop" style="--d:1240ms">
+          <span class="signal-ring"><i></i></span>
+          <span><b>网络连接正常</b><small>监测持续运行中</small></span>
+        </div>
+      </div>
+
+      <p class="campaign-footnote wipe" style="--d:1180ms">Rust 控制平面 · Windows 便携版 · Docker 多架构 · AGPL-3.0 开源</p>
+    </div>
+  </section>
+
+  <!-- ======================= 02 · 全天守护 ======================= -->
+  <section class="slide" data-theme="night" data-bg="grid" data-dur="6500" data-title="全天守护">
+    <div class="pad">
+      <div class="section-heading">
+        <h2 class="t-h1 wipe" style="--d:120ms">你睡着的时候，连接也有人守着</h2>
+        <p class="campaign-kicker wipe" style="--d:300ms">无需守着认证页，也不用第二天才发现整晚离线。</p>
+      </div>
+
+      <div class="guard-layout">
+        <div class="guard-shot-wrap rise" style="--d:360ms">
+          <div class="campaign-shot guard-shot">
+            <div class="frame-chrome">
+              <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="chrome-url">127.0.0.1:50721/settings/monitor</span>
+              <span class="chrome-right">网络检测</span>
+            </div>
+            <div class="shot-viewport">
+              <img src="../assets/promo-monitor-settings.png" alt="认证喵实际网络检测设置页，包含检测间隔、重试与状态检测配置">
+            </div>
+          </div>
+          <div class="guard-hours-card pop" style="--d:980ms">
+            <span class="guard-number">24</span><span class="guard-unit">小时</span>
+            <small>持续探测网络状态</small>
+            <div class="guard-pulse"><i></i><i></i><i></i></div>
+          </div>
+        </div>
+
+        <div class="reconnect-sequence" data-stagger="170">
+          <div class="sequence-item fade">
+            <span class="sequence-time">01:47:02</span>
+            <span class="sequence-node is-warning"></span>
+            <span class="sequence-copy"><b>检测到断线</b><small>门户劫持 / 无法联网</small></span>
+          </div>
+          <div class="sequence-item fade">
+            <span class="sequence-time">01:47:03</span>
+            <span class="sequence-node"></span>
+            <span class="sequence-copy"><b>自动选择方案</b><small>按网关与 WiFi 匹配</small></span>
+          </div>
+          <div class="sequence-item fade">
+            <span class="sequence-time">01:47:05</span>
+            <span class="sequence-node"></span>
+            <span class="sequence-copy"><b>完成认证</b><small>直连或浏览器自动化</small></span>
+          </div>
+          <div class="sequence-item fade">
+            <span class="sequence-time">01:47:06</span>
+            <span class="sequence-node is-online"></span>
+            <span class="sequence-copy"><b>重新在线</b><small>复检成功，写入历史</small></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="guard-verdict rise" style="--d:1520ms">
+        <span class="guard-line"></span>
+        <span class="chip"><span class="warning-dot"></span>断线</span>
+        <span class="guard-arrow">检测 · 登录 · 复检</span>
+        <span class="chip on online-chip"><span class="dot"></span>在线</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 03 · 四个重点 ======================= -->
+  <section class="slide" data-theme="night" data-bg="blueprint" data-dur="6500" data-title="核心特点">
+    <div class="pad">
+      <div class="section-heading compact-heading">
+        <h2 class="t-h1 wipe" style="--d:120ms">把反复登录，变成一次配置</h2>
+        <p class="campaign-kicker wipe" style="--d:300ms">没有常驻大浏览器，没有必须手写的脚本，也没有复杂安装流程。</p>
+      </div>
+
+      <div class="feature-layout">
+        <div class="feature-proof rise" style="--d:360ms">
+          <div class="campaign-shot feature-shot-main">
+            <div class="frame-chrome">
+              <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="chrome-url">127.0.0.1:50721/settings/system</span>
+              <span class="chrome-right">系统设置</span>
+            </div>
+            <div class="shot-viewport"><img src="../assets/promo-system-settings.png" alt="认证喵实际系统设置页，包含运行模式、启动行为与日志配置"></div>
+          </div>
+          <div class="campaign-shot feature-shot-mini pop" style="--d:980ms">
+            <div class="shot-viewport"><img src="../assets/promo-network-settings.png" alt="认证喵实际网络与更新设置页，包含代理、更新通道与自动检查"></div>
+            <span>网络与更新</span>
+          </div>
+        </div>
+
+        <div class="feature-board" data-stagger="120">
+          <article class="feature-item rise">
+            <div class="feature-mark">
+              <svg viewBox="0 0 56 56" aria-hidden="true"><path d="M12 16h32v25H12zM20 10h16v6M20 46h16M28 24v10M23 29l5 5 5-5"/></svg>
+            </div>
+            <div><h3>解压即用</h3><p>双击主程序就能启动，本地控制台随程序一起分发。</p></div>
+            <span class="feature-meta">无需安装服务</span>
+          </article>
+
+          <article class="feature-item rise">
+            <div class="feature-mark">
+              <svg viewBox="0 0 56 56" aria-hidden="true"><path d="M12 18h32v26H12zM18 12h20v6M18 26h20M18 34h13M39 39l5 5 8-10"/></svg>
+            </div>
+            <div><h3>共享任务仓库</h3><p>从 GitHub / Gitee 下载现成适配，也能分享自己的任务。</p></div>
+            <span class="feature-meta">一键导入</span>
+          </article>
+
+          <article class="feature-item rise">
+            <div class="feature-mark feature-mark-online">
+              <svg viewBox="0 0 56 56" aria-hidden="true"><path d="M10 22a24 24 0 0 1 36 0M17 30a15 15 0 0 1 22 0M24 38a6 6 0 0 1 8 0"/><circle cx="28" cy="45" r="2.5"/></svg>
+            </div>
+            <div><h3>24 小时自动重连</h3><p>持续探测、断线登录、联网复检，失败自动重试。</p></div>
+            <span class="feature-meta feature-meta-online">全天候</span>
+          </article>
+
+          <article class="feature-item rise">
+            <div class="feature-mark"><span class="feature-number">&lt;10</span></div>
+            <div><h3>低内存常驻</h3><p>Rust 控制平面保持轻量，浏览器与 OCR 按需启动。</p></div>
+            <span class="feature-meta">MB 常态</span>
+          </article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 04 · 控制台 ======================= -->
+  <section class="slide" data-theme="night" data-bg="glow" data-dur="7000" data-title="控制台">
+    <div class="pad">
+      <div class="section-heading">
+        <h2 class="t-h1 wipe" style="--d:120ms">状态看得见，重连才放心</h2>
+        <p class="campaign-kicker wipe" style="--d:300ms">网络、日志、登录历史和运行状态，都在一个本地控制台里。</p>
+      </div>
+
+      <div class="dashboard-layout">
+        <div class="campaign-shot dashboard-shot rise" style="--d:380ms">
+          <div class="frame-chrome">
+            <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="chrome-url">127.0.0.1:50721</span>
+            <span class="chrome-right"><i class="chrome-live-dot"></i>仪表盘</span>
+          </div>
+          <div class="shot-viewport">
+            <img src="../assets/preview-dashboard.webp" alt="认证喵仪表盘，可查看网络状态、实时日志和登录历史">
+          </div>
+        </div>
+
+        <div class="dashboard-points" data-stagger="140">
+          <div class="dashboard-point rise">
+            <span class="point-index">01</span>
+            <div><b>联网状态</b><p>持续探测，结果不是猜出来的。</p></div>
+          </div>
+          <div class="dashboard-point rise">
+            <span class="point-index">02</span>
+            <div><b>实时日志</b><p>WebSocket 推送，过程一目了然。</p></div>
+          </div>
+          <div class="dashboard-point rise">
+            <span class="point-index">03</span>
+            <div><b>登录历史</b><p>每次成功与失败都有据可查。</p></div>
+          </div>
+          <div class="online-stamp pop"><span class="dot"></span>当前在线</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 05 · 共享任务 ======================= -->
+  <section class="slide" data-theme="night" data-bg="streams" data-dur="7000" data-title="共享任务">
+    <div class="pad">
+      <div class="section-heading">
+        <h2 class="t-h1 wipe" style="--d:120ms">不会写脚本，也能用别人适配好的任务</h2>
+        <p class="campaign-kicker wipe" style="--d:300ms">校园门户各不相同，适配不必从零开始。</p>
+      </div>
+
+      <div class="repo-layout">
+        <div class="campaign-shot repo-shot rise" style="--d:360ms">
+          <div class="frame-chrome">
+            <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="chrome-url">127.0.0.1:50721/tasks</span>
+            <span class="chrome-right">任务 · 浏览器任务</span>
+          </div>
+          <div class="shot-viewport">
+            <img src="../assets/promo-repo-browser.png" alt="认证喵云端任务仓库界面，可按 GitHub、Gitee 或自定义来源浏览和导入校园网任务">
+          </div>
+          <div class="repo-callout pop" style="--d:1240ms"><span></span>仓库导入</div>
+        </div>
+
+        <div class="repo-copy rise" style="--d:520ms">
+          <p class="repo-big">下载，使用，<br>再把适配分享出去。</p>
+          <div class="repo-flow" data-stagger="150">
+            <div class="fade"><span>01</span><b>浏览</b><small>GitHub / Gitee 镜像</small></div>
+            <div class="fade"><span>02</span><b>预览</b><small>先看说明与截图</small></div>
+            <div class="fade"><span>03</span><b>导入</b><small>确认内容后一键获取</small></div>
+          </div>
+          <p class="repo-note">内置“通用登录”覆盖常见门户；特殊校园网再从社区仓库补充。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 06 · 双引擎 ======================= -->
+  <section class="slide" data-theme="night" data-bg="blueprint" data-dur="6500" data-title="两种登录方式">
+    <div class="pad">
+      <div class="section-heading compact-heading">
+        <h2 class="t-h1 wipe" style="--d:120ms">简单门户走直连，<br>复杂门户交给浏览器</h2>
+        <p class="campaign-kicker wipe" style="--d:300ms">同一份方案里自由选择，速度与兼容性不必二选一。</p>
+      </div>
+
+      <div class="engine-layout">
+        <article class="engine-panel rise" style="--d:380ms">
+          <div class="engine-proof">
+            <div class="engine-windowbar" aria-hidden="true"><i></i><i></i><i></i><span>直连请求配置</span></div>
+            <div class="engine-shot"><img src="../assets/promo-direct-request.png" alt="认证喵实际直连请求配置页，可填写请求地址、请求头与登录成功判断条件"></div>
+          </div>
+          <div class="engine-copyline">
+            <h3>HTTP 直连</h3>
+            <span class="engine-speed">通常数百毫秒</span>
+          </div>
+          <p>一次请求完成认证，没有浏览器进程，适合接口稳定的门户。</p>
+          <div class="engine-tags"><span>最快</span><span>最轻</span><span>易分享</span></div>
+        </article>
+
+        <div class="engine-switch fade" style="--d:920ms">
+          <span></span><i></i><span></span>
+          <small>自动复检结果</small>
+        </div>
+
+        <article class="engine-panel rise" style="--d:500ms">
+          <div class="engine-proof engine-proof-browser">
+            <div class="engine-windowbar" aria-hidden="true"><i></i><i></i><i></i><span>浏览器设置</span></div>
+            <div class="engine-shot"><img src="../assets/promo-browser-settings.png" alt="认证喵实际浏览器设置页，可选择浏览器并配置会话保持与低资源模式"></div>
+          </div>
+          <div class="engine-copyline">
+            <h3>浏览器自动化</h3>
+            <span class="engine-speed">兼容复杂流程</span>
+          </div>
+          <p>真实打开页面、填表、选运营商、识别验证码并判断成功。</p>
+          <div class="engine-tags"><span>跳转</span><span>JS 加密</span><span>OCR</span></div>
+        </article>
+      </div>
+
+      <p class="engine-foot wipe" style="--d:1520ms">登录完成后再次探测网络——只有真正联网，才会亮起绿色状态。</p>
+    </div>
+  </section>
+
+  <!-- ======================= 07 · 轻量 ======================= -->
+  <section class="slide" data-theme="night" data-bg="quiet" data-dur="6500" data-title="低内存">
+    <div class="pad">
+      <div class="memory-layout">
+        <div class="memory-copy">
+          <h2 class="t-h1 wipe" style="--d:120ms">一直在线，<br>不等于一直占内存。</h2>
+          <p class="campaign-kicker wipe" style="--d:360ms">常驻的只有 Rust 控制平面；重活按需启动，用完自动回收。</p>
+          <div class="memory-stat rise" style="--d:620ms">
+            <span class="memory-less">&lt;</span><strong>10</strong><span class="memory-unit">MB<small>常态后台内存</small></span>
+          </div>
+        </div>
+
+        <div class="memory-visual rise" style="--d:440ms">
+          <div class="campaign-shot memory-shot">
+            <div class="frame-chrome">
+              <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="chrome-url">127.0.0.1:50721/settings/tasks</span>
+              <span class="chrome-right"><i class="chrome-live-dot"></i>环境就绪</span>
+            </div>
+            <div class="shot-viewport"><img src="../assets/promo-environment-settings.png" alt="认证喵实际任务与环境设置页，显示 Python、任务录制器与 OCR 依赖状态"></div>
+            <div class="memory-process">
+              <span>campus-auth.exe</span><b>5.8 MB</b><span>CPU 0%</span><span>电源：非常低</span>
+            </div>
+          </div>
+          <div class="memory-chart">
+            <div class="chart-line"></div>
+            <i style="--x:14%;--h:82px"></i>
+            <i style="--x:44%;--h:118px"></i>
+            <i style="--x:72%;--h:72px"></i>
+            <i style="--x:91%;--h:96px"></i>
+            <div class="chart-labels"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+            <p>琥珀色短柱 = 浏览器真正存在的几秒钟</p>
+          </div>
+          <div class="memory-tags">
+            <span>控制平面常驻</span>
+            <span>Worker 按需拉起</span>
+            <span>空闲自动关闭</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 08 · 开箱即用 ======================= -->
+  <section class="slide" data-theme="night" data-bg="glow" data-dur="7000" data-title="开箱即用">
+    <div class="pad">
+      <div class="section-heading">
+        <h2 class="t-h1 wipe" style="--d:120ms">下载、解压、填一次，就开始守护</h2>
+        <p class="campaign-kicker wipe" style="--d:300ms">内置通用登录任务，不要求先学 JSON、选择器或脚本。</p>
+      </div>
+
+      <div class="start-layout">
+        <div class="start-flow" data-stagger="160">
+          <div class="start-item rise">
+            <span>01</span><div><b>解压便携包</b><p>无需安装，双击 campus-auth.exe。</p></div>
+          </div>
+          <div class="start-item rise">
+            <span>02</span><div><b>填一次账号</b><p>方案、凭据与登录方式都在同一页。</p></div>
+          </div>
+          <div class="start-item rise">
+            <span>03</span><div><b>启动检测</b><p>之后的断线、登录与复检自动完成。</p></div>
+          </div>
+          <div class="start-ready fade"><span class="dot"></span>通用登录任务已就绪</div>
+        </div>
+
+        <div class="campaign-shot start-shot rise" style="--d:440ms">
+          <div class="frame-chrome">
+            <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="chrome-url">127.0.0.1:50721/profiles</span>
+            <span class="chrome-right">配置方案</span>
+          </div>
+          <div class="shot-viewport">
+            <img src="../assets/promo-profiles-live.png" alt="认证喵实际方案编辑页，账号、网络匹配与认证设置集中配置">
+          </div>
+          <div class="start-tip pop" style="--d:1360ms"><b>只需配置一次</b><span>密码加密保存在本机</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= 09 · 收尾 ======================= -->
+  <section class="slide campaign-end" data-theme="night" data-bg="hero" data-dur="9000" data-title="开始使用">
+    <svg class="hero-art end-art" viewBox="0 0 900 300" aria-hidden="true">
+      <line class="draw" pathLength="1" x1="0" y1="150" x2="900" y2="150" stroke="currentColor" stroke-width="2" style="--d:200ms;--dd:1.2s"/>
+      <g stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round">
+        <path class="draw" pathLength="1" style="--d:520ms;--dd:.5s" d="M469 108.9 A64 64 0 0 0 371 108.9"/>
+        <path class="draw" pathLength="1" style="--d:640ms;--dd:.5s" d="M501.2 81.9 A106 106 0 0 0 338.8 81.9"/>
+        <path class="draw" pathLength="1" style="--d:760ms;--dd:.5s" d="M533.4 54.8 A148 148 0 0 0 306.6 54.8"/>
+      </g>
+      <circle class="fade breath" style="--d:980ms" cx="420" cy="150" r="6" fill="#D79346"/>
+    </svg>
+
+    <div class="pad end-wrap">
+      <div class="end-copy">
+        <div class="end-brand rise" style="--d:120ms">
+          <span class="logo-inline end-logo"><img src="../assets/logo.png" alt=""></span>
+          <span>认证喵</span>
+        </div>
+        <h2 class="end-title wipe" style="--d:360ms">让校园网认证，<br>从此不再打断你。</h2>
+        <div class="end-links wipe" style="--d:760ms">
+          <a href="https://campus-auth.misyra.com" target="_blank" rel="noopener">campus-auth.misyra.com</a>
+          <a href="https://github.com/Misyra/Campus-Auth-rs" target="_blank" rel="noopener">GitHub · Misyra/Campus-Auth-rs</a>
+        </div>
+        <div class="chip-row end-chips wipe" style="--d:980ms">
+          <span class="chip on"><span class="dot"></span>v5.0.2</span>
+          <span class="chip">Windows 便携版</span>
+          <span class="chip">Docker 多架构</span>
+          <span class="chip">AGPL-3.0-only</span>
+        </div>
+      </div>
+
+      <div class="end-product-stack rise" style="--d:520ms">
+        <div class="campaign-shot end-shot end-shot-back end-shot-tasks">
+          <div class="shot-viewport"><img src="../assets/promo-tasks-browser.png" alt="认证喵实际任务页面"></div>
+        </div>
+        <div class="campaign-shot end-shot end-shot-back end-shot-profiles">
+          <div class="shot-viewport"><img src="../assets/promo-profiles-live.png" alt="认证喵实际方案页面"></div>
+        </div>
+        <div class="campaign-shot end-shot end-shot-front">
+          <div class="frame-chrome">
+            <span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="chrome-url">127.0.0.1:50721/about</span>
+            <span class="chrome-right">v5.0.2</span>
+          </div>
+          <div class="shot-viewport"><img src="../assets/promo-about.png" alt="认证喵实际关于页，展示版本、特性与系统信息"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="sweep" aria-hidden="true"></div>
+  <div id="hint">点击任意处前进 · ← → 翻页 · 空格播放 / 暂停</div>
+
+  <div class="rail" id="rail">
+    <div class="rail-base"></div>
+    <div class="rail-fill" id="railFill"></div>
+    <div class="rail-ticks" id="railTicks"></div>
+    <div class="rail-dot" id="railDot"></div>
+  </div>
+
+  <div class="hud-bar">
+    <div class="hud-title">认证喵 · Campus-Auth</div>
+    <div class="hud-controls">
+      <button class="ctl" id="btnPrev" type="button" aria-label="上一页">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5 L7 12 L14 19"/></svg>
+      </button>
+      <button class="ctl" id="btnPlay" type="button" aria-label="暂停自动播放"></button>
+      <button class="ctl" id="btnNext" type="button" aria-label="下一页">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5 L17 12 L10 19"/></svg>
+      </button>
+      <button class="ctl" id="btnFull" type="button" aria-label="全屏">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9 V4 h5 M20 15 v5 h-5 M15 4 h5 v5 M9 20 H4 v-5"/></svg>
+      </button>
+    </div>
+    <div class="hud-count" id="counter">01 / 09</div>
+  </div>
+
+  <svg id="grain" viewBox="0 0 400 225" preserveAspectRatio="none" aria-hidden="true">
+    <filter id="grainFilter">
+      <feTurbulence type="fractalNoise" baseFrequency="0.82" numOctaves="3" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+    </filter>
+    <rect width="400" height="225" filter="url(#grainFilter)"/>
+  </svg>
+</div>
+
+<div id="rotate">横屏观看效果更好</div>
+
+<script src="js/backdrop.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/deck.js"></script>
+</body>
+</html>

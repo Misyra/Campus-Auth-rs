@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>认证喵 · 宣传片分镜与旁白</title>
+<style>
+:root{color-scheme:light;--bg:#f4efe6;--panel:#fffaf1;--line:#d8ccba;--fg:#2f2a24;--muted:#7d746a;--accent:#d79346;--warn:#c76e43}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font-family:"Noto Sans SC","Microsoft YaHei",sans-serif;line-height:1.65}
+main{width:min(1080px,calc(100% - 40px));margin:auto;padding:64px 0 96px}header{margin-bottom:48px}h1{font-size:46px;line-height:1.2;margin:0 0 16px}header p{color:var(--muted);margin:0;max-width:55em}
+.summary{display:flex;gap:12px;flex-wrap:wrap;margin-top:24px}.summary span{padding:7px 12px;border:1px solid var(--line);border-radius:100px;color:var(--muted)}.summary b{color:var(--accent)}
+.scene{display:grid;grid-template-columns:150px 1fr;gap:34px;padding:36px 0;border-top:1px solid var(--line)}.scene:last-child{border-bottom:1px solid var(--line)}
+.meta{font-family:Consolas,monospace;color:var(--muted)}.meta strong{display:block;color:var(--accent);font-size:30px;line-height:1}.meta span{display:block;margin-top:12px;font-size:14px}
+h2{font-size:29px;margin:0 0 12px}.screen{color:var(--muted);margin:0 0 18px}.voice{font-size:19px;margin:0;padding:18px 20px;border-left:3px solid var(--accent);background:var(--panel);border-radius:0 10px 10px 0}.cue{margin:14px 0 0;color:var(--muted);font-size:14px}.cue b{color:var(--warn)}
+@media(max-width:700px){main{padding-top:36px}.scene{grid-template-columns:1fr;gap:18px}h1{font-size:36px}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>认证喵 · 宣传片分镜与旁白</h1>
+    <p>对应 <code>docs/promo/index.html</code> 的 9 个镜头。语速按每分钟约 210–230 字控制，旁白讲重点，不逐字复述画面。</p>
+    <div class="summary"><span><b>9</b> 个镜头</span><span><b>62.4 秒</b> 画面时长</span><span>统一暖白主题</span><span>适合 16:9 录屏</span></div>
+  </header>
+
+  <section class="scene">
+    <div class="meta"><strong>01</strong><span>00:00–00:06.4</span></div>
+    <div><h2>校园网掉了，它自己连回来</h2><p class="screen">暖白产品主视觉，左侧标题与核心标签依次出现；右侧放大的 macOS 风格窗口承载真实仪表盘并缓慢推近，底部依次浮出“常驻内存 &lt; 10 MB”和“网络连接正常”。</p><p class="voice">校园网又掉了？这一次，不用再打开认证页。认证喵会安静守在后台，断线后自动把连接找回来。</p><p class="cue"><b>节奏：</b>“它自己连回来”稍作重读，给品牌和真实界面留半秒呼吸。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>02</strong><span>00:06.4–00:12.9</span></div>
+    <div><h2>24 小时守护</h2><p class="screen">左侧展示真实“设置 · 网络检测”页面并叠加“24 小时”状态卡；右侧时间线依次亮起断线、方案匹配、认证、重新在线。</p><p class="voice">它持续探测网络。发现断线，自动匹配当前网络的方案，完成认证，再复检一次。只有真正联网，才算成功。</p><p class="cue"><b>节奏：</b>旁白按时间线四步推进，最后落在绿色“在线”。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>03</strong><span>00:12.9–00:19.4</span></div>
+    <div><h2>四个核心特点</h2><p class="screen">左侧真实“设置 · 系统”与“设置 · 网络与更新”页面叠层，右侧四象限依次出现：解压即用、共享任务仓库、24 小时自动重连、低内存常驻。</p><p class="voice">下载后解压即用；从共享仓库一键获取别人适配好的任务；全天候断线重连；常态后台占用不到十兆。</p><p class="cue"><b>节奏：</b>四个短句一一对应四个象限，不展开技术细节。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>04</strong><span>00:19.4–00:26.4</span></div>
+    <div><h2>运行状态看得见</h2><p class="screen">仪表盘真实截图缓慢推近，右侧列出联网状态、实时日志、登录历史。</p><p class="voice">运行状态不是黑盒。当前是否联网、正在做什么、最近哪次登录成功或失败，都能在本地控制台里直接看到。</p><p class="cue"><b>画面：</b>截图停留足够久，让观众看清“公网连接正常”和实时日志区域。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>05</strong><span>00:26.4–00:33.4</span></div>
+    <div><h2>共享任务仓库</h2><p class="screen">任务页截图，仓库导入入口被琥珀黄标签点亮；右侧出现浏览、预览、导入三步。</p><p class="voice">校园门户各不相同，但适配不必从零开始。你可以从 GitHub 或 Gitee 浏览现成任务，一键导入；也能把自己的适配分享给更多人。</p><p class="cue"><b>合规提示：</b>远程任务来自社区，正式讲解时可补充“导入前请核对内容”。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>06</strong><span>00:33.4–00:39.9</span></div>
+    <div><h2>两种登录方式</h2><p class="screen">左卡使用用户提供的“直连请求”实机配置页，展示请求地址、请求头与成功判断；右卡使用真实浏览器设置页，两套引擎由状态点连接。</p><p class="voice">简单门户，一次 HTTP 请求就能快速完成。遇到跳转、加密或验证码，再交给真实浏览器自动操作。两种方式，共用同一套方案。</p><p class="cue"><b>节奏：</b>先快后稳，突出“速度与兼容性都能要”。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>07</strong><span>00:39.9–00:46.4</span></div>
+    <div><h2>低内存常驻</h2><p class="screen">左侧显示 &lt;10 MB；右侧嵌入真实“设置 · 任务与环境”页面，下方 24 小时时间轴只有几根短促的琥珀色柱。</p><p class="voice">一直在线，不等于一直占内存。Rust 控制平面保持轻量；浏览器和识别组件只在登录时启动，用完就自动关闭。</p><p class="cue"><b>数据：</b>页面展示的 5.8 MB、CPU 0% 来自 Windows 任务管理器实测。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>08</strong><span>00:46.4–00:53.4</span></div>
+    <div><h2>开箱即用</h2><p class="screen">左侧三步流程，右侧方案页真实截图与“只需配置一次”提示。</p><p class="voice">上手只要三步：解压便携包，填一次账号，启动检测。内置通用登录任务，不会写 JSON 或脚本也能直接开始。</p><p class="cue"><b>画面：</b>“通用登录任务已就绪”在三步之后亮起。</p></div>
+  </section>
+
+  <section class="scene">
+    <div class="meta"><strong>09</strong><span>00:53.4–01:02.4</span></div>
+    <div><h2>让认证不再打断你</h2><p class="screen">左侧品牌、官网、GitHub 与发行形式依次出现；右侧仪表盘、任务与方案三张真实界面组成产品矩阵。</p><p class="voice">认证喵，开源、轻量、解压即用。让校园网认证，从此不再打断你。现在就从官网或 GitHub 开始使用。</p><p class="cue"><b>收尾：</b>念完后保留 2–3 秒静帧，方便观众记住地址、查看界面或后期加二维码。</p></div>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,153 @@
+/* ============================================================
+   背景系统
+   七层叠出来的底，全部用 currentColor 低透明度绘制，跟着主题一起反转。
+   每一页用 data-mood 声明要哪几层，切换时各层做 0.9s 交叉淡入，
+   所以翻页不只是换文字，整个空间的「气候」也在变。
+   ============================================================ */
+
+#backdrop{position:absolute;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+
+#backdrop .bd{
+  position:absolute;inset:0;
+  opacity:0;
+  transition:opacity .9s var(--ease);
+}
+
+/* ---------- 1. 掠光：每 26 秒扫过一次的高光带 ---------- */
+
+#sheen{
+  left:-34%;right:auto;width:34%;top:-30%;bottom:-30%;
+  background:linear-gradient(100deg,transparent 0,color-mix(in srgb,currentColor 8%,transparent) 50%,transparent 100%);
+  animation:sheenSweep 26s ease-in-out infinite;
+}
+@keyframes sheenSweep{
+  0%   {transform:translateX(0) rotate(7deg);opacity:0}
+  10%  {opacity:1}
+  72%  {opacity:1}
+  100% {transform:translateX(490%) rotate(7deg);opacity:0}
+}
+
+/* ---------- 2. 光晕：三团软光，给空间深度 ---------- */
+
+#bloom span{position:absolute;border-radius:50%}
+#bloom span:nth-child(1){
+  width:1000px;height:1000px;right:-300px;top:-360px;
+  background:radial-gradient(circle,color-mix(in srgb,var(--accent) 30%,transparent) 0,transparent 62%);
+  animation:bloomDrift1 44s ease-in-out infinite alternate;
+}
+#bloom span:nth-child(2){
+  width:1240px;height:1240px;left:-520px;bottom:-640px;
+  background:radial-gradient(circle,color-mix(in srgb,currentColor 15%,transparent) 0,transparent 60%);
+  animation:bloomDrift2 58s ease-in-out infinite alternate;
+}
+#bloom span:nth-child(3){
+  width:760px;height:760px;right:160px;bottom:-420px;
+  background:radial-gradient(circle,color-mix(in srgb,var(--accent) 17%,transparent) 0,transparent 58%);
+  animation:bloomDrift3 36s ease-in-out infinite alternate;
+}
+@keyframes bloomDrift1{from{transform:translate(0,0) scale(1)}to{transform:translate(-70px,60px) scale(1.12)}}
+@keyframes bloomDrift2{from{transform:translate(0,0) scale(1.06)}to{transform:translate(90px,-50px) scale(1)}}
+@keyframes bloomDrift3{from{transform:translate(0,0)}to{transform:translate(-120px,-70px) scale(1.15)}}
+
+/* ---------- 3. 蓝图格：细格 + 粗格，向右上角聚拢后淡出 ---------- */
+
+#grid{
+  background-image:
+    linear-gradient(to right,color-mix(in srgb,currentColor 9%,transparent) 0 1px,transparent 1px),
+    linear-gradient(to bottom,color-mix(in srgb,currentColor 9%,transparent) 0 1px,transparent 1px),
+    linear-gradient(to right,color-mix(in srgb,currentColor 16%,transparent) 0 1px,transparent 1px),
+    linear-gradient(to bottom,color-mix(in srgb,currentColor 16%,transparent) 0 1px,transparent 1px);
+  background-size:40px 40px,40px 40px,200px 200px,200px 200px;
+  -webkit-mask-image:radial-gradient(118% 104% at 76% 26%,#000 0,transparent 70%);
+  mask-image:radial-gradient(118% 104% at 76% 26%,#000 0,transparent 70%);
+}
+
+/* ---------- 4. 半环：直接借用 logo 的同心弧，两处，缓慢转动 ---------- */
+
+#arcs{overflow:visible;width:100%;height:100%}
+#arcs g,#arcs .dial{transform-box:view-box;transform-origin:center}
+#arcs .arc-a{transform-origin:1450px 120px;animation:arcDriftA 70s ease-in-out infinite alternate}
+#arcs .arc-a .dial{transform-origin:1450px 120px;animation:dialSpin 120s linear infinite}
+#arcs .arc-b{transform-origin:120px 840px;animation:arcDriftB 88s ease-in-out infinite alternate}
+@keyframes arcDriftA{from{transform:translate(0,0)}to{transform:translate(-46px,34px)}}
+@keyframes arcDriftB{from{transform:translate(0,0)}to{transform:translate(54px,-40px)}}
+@keyframes dialSpin{to{transform:rotate(360deg)}}
+
+/* ---------- 5. 信号网格：canvas，见 js/backdrop.js ---------- */
+
+/* canvas 由 #backdrop .bd 统一控制透明度（默认 0），mood 规则再打开 */
+
+/* ---------- 6. 数据流：上下页边滚动的虚线，像一直在跑流量 ---------- */
+
+#streams i{
+  position:absolute;left:0;right:0;height:1px;
+  background-image:linear-gradient(90deg,currentColor 0 12px,transparent 12px 100%);
+  background-size:34px 1px;background-repeat:repeat-x;
+  opacity:.18;
+  animation:streamX 3.4s linear infinite;
+}
+#streams i:nth-child(1){top:52px;--op:.1;animation-duration:3.4s}
+#streams i:nth-child(2){top:104px;opacity:.09;animation-duration:5.2s}
+#streams i:nth-child(3){top:868px;opacity:.09;animation-duration:4.4s}
+#streams i:nth-child(4){top:824px;opacity:.12;animation-duration:6.1s}
+#streams i:nth-child(5){top:452px;opacity:.07;animation-duration:7.3s}
+@keyframes streamX{from{background-position-x:0}to{background-position-x:-34px}}
+
+/* ---------- 7. 暗角 + 颗粒 ---------- */
+
+#backdrop #vignette{opacity:1;background:radial-gradient(122% 96% at 50% 44%,transparent 46%,rgba(0,0,0,.18) 100%)}
+#stage.is-night #backdrop #vignette{background:radial-gradient(122% 96% at 50% 44%,transparent 30%,rgba(0,0,0,.55) 100%)}
+
+/* 颗粒：SVG 不给宽高会退回 300×150 的默认尺寸，必须显式撑满 */
+#grain{width:100%;height:100%;position:absolute;inset:0;z-index:6;pointer-events:none;opacity:.05;mix-blend-mode:overlay}
+
+/* ============================================================
+   每一页的气候
+   ============================================================ */
+
+/* 开场与收尾：全开，最亮 */
+#backdrop[data-mood="hero"] #bloom,
+#backdrop[data-mood="hero"] #grid,
+#backdrop[data-mood="hero"] #arcs,
+#backdrop[data-mood="hero"] #streams,
+#backdrop[data-mood="hero"] #mesh{opacity:1}
+#backdrop[data-mood="hero"] #grid{opacity:.5}
+
+/* 标准内容页：格线主导 */
+#backdrop[data-mood="grid"] #grid,
+#backdrop[data-mood="grid"] #mesh,
+#backdrop[data-mood="grid"] #bloom{opacity:1}
+#backdrop[data-mood="grid"] #bloom{opacity:.4}
+
+/* 架构页：格线拉满，像图纸 */
+#backdrop[data-mood="blueprint"] #grid,
+#backdrop[data-mood="blueprint"] #arcs,
+#backdrop[data-mood="blueprint"] #mesh{opacity:1}
+#backdrop[data-mood="blueprint"] #grid{opacity:1}
+#backdrop[data-mood="blueprint"] #arcs{opacity:.55}
+
+/* 流程 / 任务页：数据流主导 */
+#backdrop[data-mood="streams"] #streams,
+#backdrop[data-mood="streams"] #mesh,
+#backdrop[data-mood="streams"] #grid{opacity:1}
+#backdrop[data-mood="streams"] #grid{opacity:.35}
+
+/* 光晕页 */
+#backdrop[data-mood="bloom"] #bloom,
+#backdrop[data-mood="bloom"] #arcs,
+#backdrop[data-mood="bloom"] #mesh{opacity:1}
+#backdrop[data-mood="bloom"] #arcs{opacity:.5}
+
+/* 夜间控制台：只剩光晕与网格 */
+#backdrop[data-mood="glow"] #bloom,
+#backdrop[data-mood="glow"] #mesh,
+#backdrop[data-mood="glow"] #arcs{opacity:1}
+#backdrop[data-mood="glow"] #arcs{opacity:.45}
+
+/* 安静的一页：只留同心弧 */
+#backdrop[data-mood="quiet"] #arcs{opacity:1}
+
+@media (prefers-reduced-motion:reduce){
+  #sheen,#bloom span,#arcs .arc-a,#arcs .arc-b,#arcs .dial,#streams i{animation:none}
+  #sheen{opacity:.35}
+}

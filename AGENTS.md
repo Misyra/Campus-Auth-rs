@@ -99,7 +99,10 @@ campus-auth/
 ├── src/
 │   ├── lib.rs                # 库入口：聚合全部模块 + 统一 ServiceHandle
 │   ├── main.rs               # CLI 解析 → 启动分发
-│   ├── helper_main.rs        # 更新替换助手（独立 binary：campus-auth-helper）
+│   ├── helper_main.rs        # 更新替换 + 卸载助手（独立 binary：campus-auth-helper）
+│   │                         #   --apply-update 等主进程退出后换 exe；--uninstall 等主进程
+│   │                         #   退出后删安装目录（Windows 需两段式：先复制到 %TEMP% 再删）
+│   ├── browser.rs            # 浏览器二进制探测与启动（登录侧共用）
 │   ├── app.rs                # Axum 服务器构建 + 托盘初始化
 │   ├── container.rs          # ServiceContainer: Arc 共享状态（13 服务 + Metrics/uptime 2 横切，共 15 字段）
 │   ├── launcher.rs           # 启动状态机 (full / lightweight / login-once)
@@ -108,7 +111,9 @@ campus-auth/
 │   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
 │   ├── login/                # 登录编排（状态机、去重、抢占、重试）
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）— 源码模块，对应运行时 /config（.gitignore / 锚定，勿混淆）
-│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分：config/profiles/login/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai 等，细粒度 state 注入）
+│   ├── uninstall/            # 卸载计划（删什么 / 拒什么 / 怎么删）——**单一事实源**：
+│   │                         #   界面据此列清单、campus-auth-helper --uninstall 据此执行
+│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分：config/profiles/login/http_tasks/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai 等，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
 │   ├── tasks/                # 任务管理 — 源码模块，对应运行时 /tasks（.gitignore / 锚定）
 │   ├── network/              # 网络接口
@@ -122,7 +127,7 @@ campus-auth/
 ├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略），与 resources/ 职责分离
 ├── python_worker/            # Python Worker 子进程（Playwright + OCR）— 执行侧，对应 Rust 侧 src/bridge/，IPC 契约见 python_worker/README.md
 ├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；原 mock_portal/ 已整体搬迁至 tests/mock-servers/full-portal/
-├── docs/                     # 文档：updatelog（用户）/ changelog（开发）/ known-issues / plan-next / guides / archive；reports/ 与 compose/ 为过程产物（.gitignore 忽略）
+├── docs/                     # 文档：updatelog（用户）/ changelog（开发）/ known-issues / plan-next / guides / assets（README 引用的截图）/ promo（介绍演示页）；reports/ 与 compose/ 为过程产物（.gitignore 忽略）
 ├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入，区别于 frontend/public 与 frontend/dist）
 └── .github/workflows/        # CI（fmt + clippy + test（含 e2e-login-chain + rust-tests-unix）+ 前端构建 + vitest + pytest）
 ```
@@ -181,7 +186,8 @@ NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果
 - 手动更新：两条入口，信任口径**不同**——
   - **本地包复用**（`update/` 根目录扫描，`src/updater/local.rs`）：必须与远程清单声明的 SHA256 一致才复用；探测在 `check_update`（仅回报 `UpdateInfo.local_package` 供前端提示），暂存在 `download_stage_and_pending`（**重新扫描 + 边复制边哈希**，防 check→apply 之间文件被替换使信任锚断裂）；文件名取远程资产名而非本地名（决定解压分派）。不符即忽略并回退下载。
   - **手动选择安装包**（`POST /api/system/update-package`，上传 multipart）：**不比对远程摘要**——自编译包/镜像重打包必不匹配，用户显式选定即采纳，只需能从包里解出可执行文件。硬约束：target 恒取 `current_exe()`、Worker 目录须为内置 `<base>/python_worker`、版本须严格高于当前（同 helper `pending_version_allowed`，否则留下永远无法应用的 pending）、exe 摘要由本进程实算写入 pending。Web 层把 multipart **流式落临时文件**、更新器收路径再复制（不整包进内存）。
-  - 共同点：落盘均走 `finalize_staged_package`（解压产物 → exe 摘要 → `pending.json`），无旁路；`UpdaterError::PackageNotNewer` / `ExtractFailed` 映射 400（用户可纠正），`LoginInProgress` / `UpdateInProgress` 映射 409。
+  - 共同点：落盘均走 `finalize_staged_package`（解压产物 → exe 摘要 → `pending.json`），无旁路；`UpdaterError::PackageNotNewer` / `ExtractFailed` 映射 400（用户可纠正），`LoginInProgress` / `UpdateInProgress` / `Cancelled` 映射 409。
+  - **取消语义**：`cancel_pending_update()`（卸载流程调用）先落 `update_cancelled` 标记并抢占下载互斥，再清 `pending.json` + staging；`finalize_staged_package` 与两个 `apply_*` 入口都会复查该标记，故"取消之后更新还发生"（在途下载跑完写 pending、退出时助手把程序装回来）不存在。返回值是"**确实**取消掉了"（清理后复查 pending 与 staging），不是"此前有 pending"。
   - 清单声明的 `size` 为咨询性字段（同 UPD-7），不符仅告警、以摘要为准
 
 ### 前端嵌入
@@ -280,6 +286,13 @@ Conventional Commits，中文描述：
 - `ddddocr` 是按需能力，源码 `python_worker/pyproject.toml` 不得默认声明；用户安装/卸载时必须分别通过 `uv add "ddddocr>=1.6.1"` / `uv remove ddddocr` 改写部署副本的 `pyproject.toml` + `uv.lock`
 - 禁止用 `uv pip install` / `pip install` 绕过项目声明与锁文件；基础环境用 `uv sync`，开发环境用 `uv sync --group dev`
 - E2E 准备为 `uv sync --dev --frozen`、`uv add "ddddocr==1.6.1"`、`uv run playwright install chromium`，再预热 OCR 模型
+
+### 卸载与更新助手
+
+- 卸载的删除清单与守卫**只在 `src/uninstall/`**（界面列清单、助手执行，同一份事实源）；新增/重命名用户数据目录时必须改 `utils::paths` 的常量（`DATA_DIR_NAMES` 由它拼出，`test_data_dir_names_match_paths` 钉住）
+- **不要在 `target/` 下试卸载**：守卫会拦"源码仓库"（`.git` / `Cargo.toml`）与"cargo 构建输出"（路径含 `target` 且祖先有 `Cargo.toml`），但发布包解压到别处才代表真实场景；本地演练要单独 `--target-dir` 编一份 exe（`docs/reports/uninstall-e2e/rehearse.ps1`）
+- `--uninstall` 是"等主进程退出后删安装目录"，Windows 上必须两段式（第一段把自己复制到 `%TEMP%` 再 spawn 第二段），且最后一份副本靠 `cmd` 兜底删除——那段引号规则不属于 `CommandLineToArgvW` 语义，改动它只能靠真起进程的测试（`test_spawn_delayed_delete_removes_file`）
+- **「保留配置与任务」必须同时保留加密密钥目录**（`~/.campus_network_auth`）：保留的 `config/` 里方案密码是 `ENC:` 密文，密钥一删这些密码就再也解不开——`POST /api/uninstall` 的 `keep_user_data` 与 `purge` 必须传同一个值
 
 ### 配置系统
 

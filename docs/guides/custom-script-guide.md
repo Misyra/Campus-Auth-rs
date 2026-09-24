@@ -39,8 +39,9 @@
 ## 3. 通过 Web 界面创建
 
 1. 打开 Web 控制台 → 侧栏「任务 → 脚本」；
-2. 新建脚本，填脚本 ID（`^[A-Za-z][A-Za-z0-9_]*$`）、名称、描述、执行程序与内容；
-3. 保存后可在列表页点「运行」立即执行一次（`POST /api/scripts/run`）。
+2. 点「新建脚本」进入编辑页。**脚本 ID 就是文件名**（1~64 位字母、数字、下划线或连字符，与任务 ID 同一套判据），必须先填上它，脚本才会落盘——空 ID 时页头会提示「还缺 脚本 ID（1~64 位字母、数字、下划线或连字符），补齐前改动不会保存」，不会留下一个没名字的脚本文件；
+3. 名称、描述、执行程序与脚本内容都是**改动自动保存**（停手半秒落盘，头部状态字显示「已保存 · 刚刚」），没有保存按钮。ID 一旦落盘即固定（「定时任务」按它引用脚本），要换名字请删除后重建；
+4. 落盘后可在列表行尾 ⋯ 里点「立即运行」执行一次（`POST /api/scripts/run`），退出码 0 视为成功；stdout 与 stderr 作为执行结果显示在编辑页侧栏（**不进日志页**，见第 5 节）。
 
 ## 4. 通过 API 创建
 
@@ -85,7 +86,7 @@ curl -X POST http://127.0.0.1:50721/api/scripts/run \
 
 - 统一执行：`POST /api/tasks/{id}/execute`（浏览器/脚本通用）；`POST /api/scripts/run`（脚本直跑，临时任务不落盘）。
 - 成败判定：按**子进程退出码**，`0` 视为成功（`src/tasks/executor.rs::run_command`）。
-- 输出去向：`stdout` / `stderr` 被合并进 `TaskResult.output`（各截断到 `OUTPUT_TRUNCATE_LEN` = 500 字符，超出为 `stdout\nstderr`）随**执行响应的 HTTP 响应体**返回，也是任务历史里显示的内容。**该输出不经 `tracing` 记录、不进 WebSocket 推送**，因此前端实时日志面板与 `GET /api/logs` 看不到脚本的 stdout/stderr——排障请看任务详情/执行结果，而非日志面板。
+- 输出去向：`stdout` / `stderr` 被合并进 `TaskResult.output`（各截断到 `OUTPUT_TRUNCATE_LEN` = 500 字符，超出为 `stdout\nstderr`）随**执行响应的 HTTP 响应体**返回，也是任务历史里显示的内容。**该输出不经 `tracing` 记录、不进 WebSocket 推送**，因此前端实时日志面板与 `GET /api/logs` 看不到脚本的 stdout/stderr——排障请看执行结果，而非日志面板。Web 界面的「立即运行」会把这一次的输出就地留在编辑页侧栏（连带退出码与耗时），失败时提示里也带上输出末行。
 - 环境隔离：子进程以最小环境变量启动（`env_clear` 后仅注入 `PATH`/`HOME`/`TEMP` 及 Windows 关键目录变量），不继承主进程的 token、代理密码等。
 - 超时：走 `tokio::process` 超时取消，超时时 Windows 以 `taskkill /T`（带 `CREATE_NO_WINDOW`）递归杀进程树，Unix 上以独立进程组 `killpg` 回收整棵子树。
 

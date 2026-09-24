@@ -77,6 +77,8 @@ frontend-legacy/
 
 # 构建产物
 *.exe
+# 就地备份（例如替换 exe 前手工留的 campus-auth.exe.bak）：不属于源码，也不该进版本库
+*.bak
 # 打包输出目录（build.ps1 产物，含可执行文件与资源）
 /dist/
 /dist-portable/
