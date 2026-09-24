@@ -251,8 +251,8 @@ onMounted(async () => {
                 <IconApp name="code" :stroke-width="1.5" />
                 <span>暂无自定义脚本</span>
                 <span class="empty-desc">
-                  脚本用于定时执行的辅助动作（打卡、签到等），支持 Python、Shell 或任意可执行程序；
-                  要登录校园网请改用「方案」里的登录方式，不必写代码
+                  脚本用于定时执行的辅助动作（打卡、签到等），也可以作为方案「登录方式 · 自定义脚本」
+                  的登录逻辑；支持 Python、Shell 或任意可执行程序
                 </span>
                 <div class="empty-actions">
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewScript">
@@ -526,7 +526,14 @@ onMounted(async () => {
         <div class="card">
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
-            <p class="tsk-side-hint">脚本只做辅助动作（打卡、签到等），<strong>不参与登录认证</strong>。</p>
+            <p class="tsk-side-hint">
+              脚本既能做辅助动作（打卡、签到等），也能当登录脚本：到「方案」把登录方式设为
+              <strong>自定义脚本</strong>并选中本脚本，凭据以 <code>CAMPUS_*</code> 环境变量传入。
+            </p>
+            <p class="tsk-side-hint">
+              登录脚本按<strong>退出码</strong>判定成败：0 = 本次尝试成功，程序随后仍做一次网络验证；
+              非 0 = 按方案的重试策略重发（次数见「设置 · 检测」的「最大重试次数」）。
+            </p>
             <p class="tsk-side-hint">
               从文件导入：点列表页的「导入」，内容直接进编辑器并自动保存；覆盖同名脚本前会先确认。
             </p>

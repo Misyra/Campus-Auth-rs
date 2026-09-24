@@ -11,7 +11,9 @@
  * 落盘后固定）。
  *
  * 列表数据由 useTaskDirectory 单次拉取提供（任务/脚本共用一个混合列表源）。
- * 依赖方向：本模块与 useTasks 无依赖关系；脚本不参与登录认证，故没有「设为活动任务」入口。
+ * 依赖方向：本模块与 useTasks 无依赖关系；脚本可作为方案「自定义脚本」渠道的登录脚本，
+ * 但绑定关系存在方案侧（`ProfileData.active_script_task`，在方案编辑器里选），
+ * 故脚本面板本身没有「设为活动任务」入口。
  */
 
 import { computed, nextTick, ref, watch } from "vue";
