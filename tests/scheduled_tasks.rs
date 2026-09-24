@@ -215,7 +215,7 @@ async fn scheduled_job_create_update_persists_all_fields() {
 /// 错误分支：重复 id 409、非法 trigger 400、更新不存在 404、toggle 往返、删除
 #[tokio::test]
 async fn scheduled_job_rejects_invalid_input_and_lifecycle() {
-    let (_dir, _instance, api) = setup_env().await;
+    let (dir, _instance, api) = setup_env().await;
     let body = json!({
         "id": "job-x",
         "target_id": "browser-target",
@@ -265,6 +265,12 @@ async fn scheduled_job_rejects_invalid_input_and_lifecycle() {
     let list = api.request("GET", "/api/scheduler/jobs", None).await;
     assert_eq!(find_job(&list, "job-x")["enabled"], true, "{list}");
 
+    // 删除必须连带清掉执行历史：只删任务会让 history/{id}.json 变成孤儿文件
+    // （界面已无入口查看它，却永远留在 tasks/scheduled/history/ 下）
+    let history_file = dir.path().join("tasks/scheduled/history/job-x.json");
+    std::fs::create_dir_all(history_file.parent().unwrap()).unwrap();
+    std::fs::write(&history_file, r#"{"runs":[]}"#).unwrap();
+
     api.request("DELETE", "/api/scheduler/jobs/job-x", None)
         .await;
     let list = api.request("GET", "/api/scheduler/jobs", None).await;
@@ -272,6 +278,11 @@ async fn scheduled_job_rejects_invalid_input_and_lifecycle() {
         list.as_array()
             .is_none_or(|a| !a.iter().any(|j| j["id"] == "job-x")),
         "删除后列表不应再包含 job-x：{list}"
+    );
+    assert!(
+        !history_file.exists(),
+        "删除定时任务后其执行历史文件必须一并清理：{}",
+        history_file.display()
     );
 }
 

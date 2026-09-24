@@ -291,12 +291,18 @@ impl SchedulerService {
     }
 
     /// 删除任务文件并更新缓存，通知主循环重算。
+    ///
+    /// 同时清掉该任务的执行历史（`history/{id}.json`）：只删任务会让历史文件残留成
+    /// 孤儿——用户删掉任务后界面已无入口查看它，文件却永远留在 `tasks/scheduled/history/`
+    /// 下；一旦 id 被复用（旧版本按序号命名）还会把上一次任务的历史当成自己的。
+    /// 清理是**尽力而为**：历史删除失败不影响任务本身的删除结果。
     pub async fn delete_task(&self, id: &str) -> Result<(), SchedulerError> {
         // id 直接拼接路径，必须先校验防止路径穿越（如 `..%5C` 删除任意 .json）
         if !ScheduledTask::is_valid_id(id) {
             return Err(SchedulerError::InvalidTaskId(id.to_string()));
         }
         let path = self.scheduled_dir.join(format!("{}.json", id));
+        let history_path = history_dir_of(&self.scheduled_dir).join(format!("{id}.json"));
         // 与 save_task/update_last_run 串行化，防止 last_run 的读-改-写在删除后
         // 将同名任务文件重新写回磁盘。
         let _file_guard = self.file_mutex.lock().await;
@@ -307,7 +313,16 @@ impl SchedulerService {
             if !path_for_blocking.exists() {
                 return Err(SchedulerError::TaskNotFound(id_for_blocking));
             }
-            std::fs::remove_file(&path_for_blocking).map_err(SchedulerError::IoError)
+            std::fs::remove_file(&path_for_blocking).map_err(SchedulerError::IoError)?;
+            if let Err(error) = std::fs::remove_file(&history_path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %history_path.display(),
+                    "定时任务执行历史清理失败（任务本身已删除）: {error}"
+                );
+            }
+            Ok(())
         })
         .await??;
         self.update_state(|s| s.tasks.retain(|t| t.id != id));
