@@ -47,6 +47,8 @@ fn reserved_default_id_error() -> String {
 /// 带 `url` / `http_method` 两个**展示字段**：任务列表要在行内显示「请求地址摘要 +
 /// GET/POST」，若摘要里没有它们，前端就得对每条任务再发一次详情请求（N+1，且每次
 /// 列表刷新都要重来）。列表读取本来已经把整个 JSON 解析出来了，顺手取字段是免费的。
+/// `modified_at` 同理：文件 mtime 顺手读（扫描已在 `spawn_blocking` 里摸盘），前端
+/// 列表用它展示「最近修改」。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TaskSummary {
     /// 任务 ID（= 文件名 stem）
@@ -61,6 +63,9 @@ pub struct TaskSummary {
     pub url: String,
     /// 直连任务的请求方法；非直连任务为 `None`（前端据此决定是否渲染方法标签）
     pub http_method: Option<HttpRequestMethod>,
+    /// 最近修改时间（任务文件的 mtime，UTC RFC3339）；读不到时为空串
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub modified_at: String,
 }
 
 /// 任务详情（摘要 + 完整配置）
@@ -310,7 +315,20 @@ impl TaskManager {
         atomic_write_json(&path, &task)?;
         for stale in stale_paths {
             if stale.exists() {
-                let _ = std::fs::remove_file(&stale);
+                // 删掉是必须的（同一 id 留两份定义时，加载会按桶优先级取到过时的那份），
+                // 但**必须留痕**：这条路径正常来自"用户主动改了任务类型"，也可能是前端
+                // 两个面板各自取了同一个自动 id（`untitled_N`）——后者意味着另一个列表里
+                // 的一条任务无声消失，日志是唯一的追查线索（前端已按三类 id 并集取号）。
+                match std::fs::remove_file(&stale) {
+                    Ok(()) => tracing::warn!(
+                        "任务 {task_id} 的 id 也存在于其它任务桶，已删除残留文件 {}",
+                        stale.display()
+                    ),
+                    Err(e) => tracing::warn!(
+                        "任务 {task_id} 的其它桶残留文件删除失败 {}: {e}",
+                        stale.display()
+                    ),
+                }
             }
         }
         // 追加到 order（如不存在）
@@ -370,6 +388,8 @@ impl TaskManager {
     /// 加载任务详情（摘要 + 完整配置）
     pub async fn get_task_detail(&self, task_id: &str) -> Result<TaskDetail, TaskError> {
         let task = self.load_task(task_id).await?;
+        // 详情路径不带 mtime：它服务编辑器回填，前端编辑页不展示「最近修改」；
+        // 列表路径（summary_from_value / read_py_summary）才填，避免这里再摸盘
         let summary = TaskSummary {
             id: task_id.to_string(),
             name: task.common().name.clone(),
@@ -377,6 +397,7 @@ impl TaskManager {
             task_type: task.type_name().to_string(),
             url: task.summary_url().to_string(),
             http_method: task.http_request_method(),
+            modified_at: String::new(),
         };
         Ok(TaskDetail {
             summary,
@@ -707,6 +728,43 @@ impl TaskManager {
                         Err(e) => errors.push(format!("pre_request 字段类型不正确: {e}")),
                     }
                 }
+                // 退出登录请求（可选）：与前置请求同一套"形状 + 体积"双闸。
+                // 形状判据在 `HttpActionRequest::validate`（保存与执行同源）；体积按
+                // 本文件常量把关，与该分支对 headers/body 的口径一致。
+                if let Some(raw) = config.get("logout_request").filter(|v| !v.is_null()) {
+                    match serde_json::from_value::<crate::tasks::HttpActionRequest>(raw.clone()) {
+                        Ok(logout) => {
+                            if let Err(e) = logout.validate() {
+                                errors.push(e);
+                            }
+                            for (field, value, limit) in [
+                                (
+                                    "logout_request.url",
+                                    logout.url.as_str(),
+                                    MAX_HTTP_URL_BYTES,
+                                ),
+                                (
+                                    "logout_request.headers",
+                                    logout.headers.as_str(),
+                                    MAX_HTTP_HEADERS_BYTES,
+                                ),
+                                (
+                                    "logout_request.body",
+                                    logout.body.as_str(),
+                                    MAX_HTTP_BODY_BYTES,
+                                ),
+                            ] {
+                                if value.len() > limit {
+                                    errors.push(format!(
+                                        "{field} 超过 {limit} 字节上限（当前 {}）",
+                                        value.len()
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => errors.push(format!("logout_request 字段类型不正确: {e}")),
+                    }
+                }
             }
             other => errors.push(format!("未知任务类型: {other}")),
         }
@@ -905,6 +963,10 @@ impl TaskManager {
     }
 
     /// 从已解析的 JSON 值提取摘要字段（供两个读取入口复用）
+    ///
+    /// `modified_at` 取文件 mtime（UTC RFC3339）：扫描路径本来就要摸文件元数据之外
+    /// 的内容，mtime 是一次 `metadata()` 调用的开销；读不到（平台/权限异常）时留空，
+    /// 前端按无数据显示「—」。
     fn summary_from_value(v: &Value, path: &Path, ttype: &str) -> TaskSummary {
         let stem = path
             .file_stem()
@@ -920,6 +982,12 @@ impl TaskManager {
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_string();
+        let modified_at = systemtime_to_rfc3339(
+            std::fs::metadata(path)
+                .ok()
+                .map(|m| m.modified().ok())
+                .unwrap_or(None),
+        );
         TaskSummary {
             id: stem,
             name,
@@ -935,6 +1003,7 @@ impl TaskManager {
                 .then(|| v.get("method").cloned())
                 .flatten()
                 .and_then(|m| serde_json::from_value(m).ok()),
+            modified_at,
         }
     }
 
@@ -975,6 +1044,12 @@ impl TaskManager {
             (name, desc)
         };
         let name = if name.is_empty() { stem.clone() } else { name };
+        let modified_at = systemtime_to_rfc3339(
+            std::fs::metadata(path)
+                .ok()
+                .map(|m| m.modified().ok())
+                .unwrap_or(None),
+        );
         Some(TaskSummary {
             id: stem,
             name,
@@ -982,8 +1057,43 @@ impl TaskManager {
             task_type: "script".to_string(),
             url: String::new(),
             http_method: None,
+            modified_at,
         })
     }
+}
+
+/// `SystemTime`（可缺省）→ UTC RFC3339 秒级文本；`None`（读不到 / 不可表示）返回空串。
+///
+/// 任务摘要的「最近修改」列数据源。经 UTC 中转避免本地时区参与（列表展示由前端按
+/// 本地时区格式化）。
+///
+/// **不用 `chrono` 的 `From<SystemTime>`**：那个转换内部是 `timestamp_opt(..).unwrap()`，
+/// 超出 chrono 可表示范围（约 ±26 万年）直接 panic。mtime 是文件系统给的任意 i64，
+/// Linux / Docker 下 `touch -d @1e13`、从 tar 里解出畸形 mtime 都能造出来；而列表扫描
+/// 跑在 `spawn_blocking` 里，panic 会被 `JoinError` 吞成"任务目录扫描失败"→ 三桶任务
+/// **全部**从列表消失（文件还在，用户看到的是"任务都没了"），且只要那个文件在就永久复现。
+///
+/// 注：Windows 的 `SystemTime` 上限（约 1.8e12 秒）本身就落在 chrono 可表示范围内，
+/// 所以那条路径只在类 Unix 上会遇到——判据放在 `secs_to_rfc3339` 里才测得动。
+fn systemtime_to_rfc3339(mtime: Option<std::time::SystemTime>) -> String {
+    mtime
+        .map(|t| {
+            // 纪元前（负）也照收：`duration_since` 在那个方向返回 Err 而不是负值
+            match t.duration_since(std::time::UNIX_EPOCH) {
+                Ok(d) => secs_to_rfc3339(i64::try_from(d.as_secs()).unwrap_or(i64::MAX)),
+                Err(e) => {
+                    secs_to_rfc3339(-i64::try_from(e.duration().as_secs()).unwrap_or(i64::MAX))
+                }
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Unix 秒 → UTC RFC3339 秒级文本；超出 chrono 可表示范围时返回空串（不 panic）。
+fn secs_to_rfc3339(secs: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
 }
 
 /// 手动校验 task_id（等价于 `^[a-zA-Z0-9_-]{1,64}$`，避免引入 regex 依赖）
@@ -1034,6 +1144,28 @@ mod tests {
     fn test_is_valid_task_id_empty_rejected() {
         // 空 ID 无效
         assert!(!is_valid_task_id(""));
+    }
+
+    /// 超范围 mtime 必须留空而不是 panic。
+    ///
+    /// 扫描跑在 `spawn_blocking` 里，panic 会被 `JoinError` 吞成"任务目录扫描失败" →
+    /// 三个桶的任务全部从列表消失（文件还在，用户看到的是"任务都没了"），且只要那个
+    /// 文件在就永久复现。Linux / Docker 的 mtime 是任意 i64，能造出来。
+    ///
+    /// 判据放在 `secs_to_rfc3339`（纯函数）而不是 `systemtime_to_rfc3339`：Windows 的
+    /// `SystemTime` 上限本身就在 chrono 范围内，造不出越界值，只有类 Unix 能触发。
+    #[test]
+    fn test_secs_to_rfc3339_out_of_range_is_empty_and_does_not_panic() {
+        // 约公元 31 万年：chrono 表示不了
+        assert_eq!(secs_to_rfc3339(10_000_000_000_000), "");
+        assert_eq!(secs_to_rfc3339(i64::MAX), "");
+        assert_eq!(secs_to_rfc3339(i64::MIN), "");
+        // 正常值（含纪元前）不受影响
+        assert_eq!(secs_to_rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(secs_to_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(secs_to_rfc3339(-1), "1969-12-31T23:59:59Z");
+        // 读不到 mtime：空串（前端显示「—」）
+        assert_eq!(systemtime_to_rfc3339(None), "");
     }
 
     #[test]
@@ -1793,6 +1925,48 @@ mod tests {
         });
         let errors = mgr.validate_task(&oversized_body).unwrap_err();
         assert!(errors.iter().any(|e| e.contains("body 超过")), "{errors:?}");
+    }
+
+    /// `logout_request` 的保存闸口（形状 + 体积）。
+    ///
+    /// 前端每次保存都会把 `logout_request` 一并带上来（未配置时为 `null`），闸口自己
+    /// 必须站得住：字段名取错、体积常量串到别的档位、`.filter(!is_null)` 漏写……
+    /// 这些只有 loader 层抓得到（`models` / `http_login` 的测试都在 validate 与执行层，
+    /// 恰好绕过了"保存时校验"这一段）。
+    #[tokio::test]
+    async fn test_validate_http_logout_request_gate() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let url = "http://portal.example.com/login";
+
+        // 未配置（前端显式发 null）必须放行
+        let absent = serde_json::json!({
+            "type": "http", "name": "无下线", "url": url, "logout_request": null,
+        });
+        assert!(mgr.validate_task(&absent).is_ok());
+
+        // 形状：非 http/https 被拒（判据与执行侧同源，都是 HttpActionRequest::validate）
+        let bad_scheme = serde_json::json!({
+            "type": "http", "name": "下线协议错", "url": url,
+            "logout_request": { "url": "ftp://portal.example.com/logout" },
+        });
+        let errors = mgr.validate_task(&bad_scheme).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("仅支持 http/https")),
+            "{errors:?}"
+        );
+
+        // 体积：按 url 自己那一档把关（常量不得串位）
+        let long_url = serde_json::json!({
+            "type": "http", "name": "下线地址超长", "url": url,
+            "logout_request": {
+                "url": format!("http://portal.example.com/{}", "a".repeat(MAX_HTTP_URL_BYTES)),
+            },
+        });
+        let errors = mgr.validate_task(&long_url).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("logout_request.url 超过")),
+            "{errors:?}"
+        );
     }
 
     #[tokio::test]

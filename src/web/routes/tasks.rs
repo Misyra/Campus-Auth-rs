@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
-use crate::tasks::{TaskApi, TaskRunApi};
+use crate::tasks::{OrderData, TaskApi, TaskRunApi};
 use crate::web::error::{ApiError, data};
 
 /// GET /api/tasks — 列出全部自定义任务
@@ -93,13 +93,15 @@ pub async fn create_task(
 }
 
 /// GET /api/tasks/{id} — 获取单个任务
+///
+/// **不先用 `has_task` 短路**：那样畸形 id（如 `../config/settings`）会被报成"任务不存在"
+/// 的 404，而同一个 id 在 PUT / DELETE 上是 400 —— 同一形态在三个方法上给出两种结论，
+/// 排查方向被带偏（自动保存打来一个畸形 id 时尤其明显）。交给加载路径判：
+/// `InvalidTaskId → 400`、`TaskNotFound → 404`，与写路径同一套口径。
 pub async fn get_task(
     State(task_api): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if !task_api.has_task(&id) {
-        return Err(ApiError::NotFound(format!("任务 {} 不存在", id)));
-    }
     let task = task_api.get_task_detail(&id).await?;
     Ok(data(serde_json::to_value(task)?))
 }
@@ -125,30 +127,49 @@ pub async fn delete_task(
     Ok(data(Value::String("ok".into())))
 }
 
-/// 任务排序请求体（对齐前端 `{ all, scripts }` 契约）
+/// 任务排序请求体（对齐前端 `{ all, scripts, http }` 契约）
+///
+/// `all` 是**浏览器任务**的历史字段名（三类任务里它曾是唯一一类），刻意不改名：
+/// 改名会让「旧后端 + 新前端」这种组合（调试构建运行时读盘、前端先于后端更新时
+/// 真实存在）在拖拽排序时因缺字段而 400。
 #[derive(Deserialize)]
 pub struct OrderBody {
     /// 浏览器任务 ID 顺序
     pub all: Vec<String>,
     /// 脚本任务 ID 顺序
     pub scripts: Vec<String>,
+    /// 直连任务 ID 顺序
+    ///
+    /// 允许缺省：旧前端（尚无此分组）不发该字段，此时直连任务顺序回落为目录扫描
+    /// 顺序——与"加入排序前"的行为一致，不报错、也不丢任务文件。
+    #[serde(default)]
+    pub http: Vec<String>,
 }
 
 /// POST /api/tasks/order — 保存任务排序
 ///
-/// 接受前端 `{ all, scripts }` 结构，合并写入内部 `OrderData.order`。
+/// 接受前端 `{ all, scripts, http }` 结构，合并写入内部 `OrderData.order`
+/// （`.order.json` 是三类任务**共用**的一份扁平 id 列表，见 `tasks/loader.rs`）。
+/// **三组必须全量互传**：本函数整体替换排序表，漏传一组等于把那一组的顺序清空。
+///
+/// 不再"先 load_order 再改"：那是跨两次独立加锁的读改写，与自动保存的
+/// `PUT /api/tasks/{id}`（`save_task` 会把新 id 追进排序表）并发时会丢更新——
+/// 用户看到的是"拖完排序，另一类任务顺序莫名回退"。载荷本来就是全量的，
+/// 直接用请求体整体替换即可。
 pub async fn order_tasks(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<OrderBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut order = tasks.load_order().await;
-    order.order.clear();
-    order.order.extend(body.all);
-    order.order.extend(body.scripts);
-    // 去除可能的重复 ID（all 与 scripts 可能有交叉），保留前端传入顺序
+    // 去除可能的重复 ID（三组之间可能有交叉），保留前端传入顺序
     let mut seen = std::collections::HashSet::new();
-    order.order.retain(|id| seen.insert(id.clone()));
-    tasks.save_order(&order).await?;
+    let order: Vec<String> = body
+        .all
+        .into_iter()
+        .chain(body.scripts)
+        .chain(body.http)
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    tasks.save_order(&OrderData { order }).await?;
     Ok(data(Value::String("ok".into())))
 }
 
@@ -278,13 +299,12 @@ pub async fn import_tasks(
 }
 
 /// GET /api/tasks/export/{id} — 导出指定任务的完整配置
+///
+/// 与 [`get_task`] 同口径：畸形 id 是 400（用户可改），不存在才是 404。
 pub async fn export_task(
     State(task_api): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if !task_api.has_task(&id) {
-        return Err(ApiError::NotFound(format!("任务 {} 不存在", id)));
-    }
     let detail = task_api.get_task_detail(&id).await?;
     Ok(data(serde_json::to_value(detail)?))
 }
@@ -688,7 +708,7 @@ mod tests {
         assert!(inner.lock().unwrap().tasks.is_empty());
     }
 
-    /// 排序合并去重（all 与 scripts 交叉）
+    /// 排序合并去重（all / scripts / http 三组之间交叉）
     #[tokio::test]
     async fn test_order_tasks_dedupes() {
         let (app, inner) = mock_app();
@@ -699,8 +719,12 @@ mod tests {
                     .uri("/api/tasks/order")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"all": ["t1", "t2"], "scripts": ["t2", "s1"]})
-                            .to_string(),
+                        serde_json::json!({
+                            "all": ["t1", "t2"],
+                            "scripts": ["t2", "s1"],
+                            "http": ["h1", "t1"]
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )
@@ -708,7 +732,29 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let order = inner.lock().unwrap().order.clone();
-        assert_eq!(order.order, vec!["t1", "t2", "s1"]);
+        // 顺序 = 浏览器 → 脚本 → 直连，重复 id 只保留首次出现（t1 在 all 里已在位）
+        assert_eq!(order.order, vec!["t1", "t2", "s1", "h1"]);
+    }
+
+    /// 旧前端（不带 `http` 分组）仍被接受：直连任务顺序回落，不报错、不丢其他两组
+    #[tokio::test]
+    async fn test_order_tasks_without_http_group_is_accepted() {
+        let (app, inner) = mock_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/order")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"all": ["t1"], "scripts": ["s1"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(inner.lock().unwrap().order.order, vec!["t1", "s1"]);
     }
 
     /// 导入：合法条目计数、非法条目收集失败原因

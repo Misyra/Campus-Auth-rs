@@ -269,6 +269,7 @@ mod tests {
                     task_type: config.type_name().to_string(),
                     url: config.summary_url().to_string(),
                     http_method: config.http_request_method(),
+                    modified_at: String::new(),
                 },
                 config,
             })

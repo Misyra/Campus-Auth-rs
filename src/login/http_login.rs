@@ -28,7 +28,7 @@ use sha2::Digest;
 use zeroize::Zeroizing;
 
 use crate::bridge::{Outcome, StructuredResult};
-use crate::tasks::{HttpPreRequest, HttpRequestMethod, HttpTaskConfig};
+use crate::tasks::{HttpActionRequest, HttpPreRequest, HttpRequestMethod, HttpTaskConfig};
 
 /// 响应体展示/判定的读取上限（字节）：门户响应通常极小，超限部分截断
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -38,6 +38,11 @@ const MAX_REDIRECTS: usize = 5;
 const PAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// 前置请求（取 CSRF token 之类）超时
 const PRE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// 退出登录动作请求超时：与前置请求同级——都是辅助动作，门户不回也不该拖死登录
+const LOGOUT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// 退出登录请求后的额外等待上限（秒）：与模型层 `HttpActionRequest::MAX_WAIT_SECS`
+/// 同口径的执行侧兜底（任务 JSON 可能绕过保存校验直接构造）
+const LOGOUT_MAX_WAIT_SECS: f64 = 30.0;
 /// 登录请求总超时
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// 用户脚本执行墙钟上限（防死循环拖死会话；引擎内另有指令数兜底）
@@ -78,6 +83,9 @@ pub(crate) struct HttpLoginRequest {
     /// 前置请求（`None` = 不需要）：先取回一个值（如 CSRF token）再渲染登录请求。
     /// 两次请求共用一个 `Client`，故 token 绑定 TCP 连接的门户也能成功。
     pub pre_request: Option<HttpPreRequest>,
+    /// 退出登录请求（`None` = 不需要）：登录前先发一次下线动作，治「IP 已在线拒绝
+    /// 重复登录」类门户。只求触达不求结果——下线请求失败不判终态，登录照常进行。
+    pub logout_request: Option<HttpActionRequest>,
     /// 登录用户名
     pub username: String,
     /// 登录密码（Zeroizing 保护）
@@ -133,6 +141,7 @@ impl HttpLoginRequest {
             failure_pattern: task.failure_pattern.clone(),
             crypto_script: task.crypto_script.clone(),
             pre_request: task.pre_request.clone(),
+            logout_request: task.logout_request.clone(),
             username: username.trim().to_string(),
             password: Zeroizing::new(password.to_string()),
             auth_url: auth_url.trim().to_string(),
@@ -173,6 +182,26 @@ impl HttpLoginRequest {
         )?;
         if let Some(pre) = &self.pre_request {
             Self::validate_pre_request(pre)?;
+        }
+        if let Some(logout) = &self.logout_request {
+            Self::validate_logout_request(logout)?;
+        }
+        Ok(())
+    }
+
+    /// 退出登录请求校验：形状委托给 [`HttpActionRequest::validate`]（保存与执行
+    /// 同源），此处只补执行侧才关心的体积边界。
+    pub fn validate_logout_request(logout: &HttpActionRequest) -> Result<(), String> {
+        logout.validate()?;
+        let checks = [
+            ("退出登录请求 URL", logout.url.len(), MAX_URL_BYTES),
+            ("退出登录请求头", logout.headers.len(), MAX_HEADERS_BYTES),
+            ("退出登录请求体", logout.body.len(), MAX_REQUEST_BODY_BYTES),
+        ];
+        for (label, actual, limit) in checks {
+            if actual > limit {
+                return Err(format!("{label}过长（最多 {limit} 字节）"));
+            }
         }
         Ok(())
     }
@@ -255,6 +284,9 @@ impl HttpLoginRequest {
             || self.pre_request.as_ref().is_some_and(|pre| {
                 mentions(&pre.url) || mentions(&pre.headers) || mentions(&pre.body)
             })
+            || self.logout_request.as_ref().is_some_and(|logout| {
+                mentions(&logout.url) || mentions(&logout.headers) || mentions(&logout.body)
+            })
     }
 
     /// 填充本机地址（供脚本 `ctx.local_ip` / `ctx.local_mac`）。
@@ -313,9 +345,9 @@ impl HttpAttemptReport {
 pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let start = Instant::now();
 
-    // 0. 本次尝试共用的 HTTP 客户端（登录页抓取 / 前置请求 / 登录请求三处都用它）：
-    //    连接池挂在 Client 上，CSRF 令牌绑定 TCP 连接的门户要求取 token 与发登录落在
-    //    同一条 keep-alive 连接，故整次尝试只能建一个。见 [`build_client`]。
+    // 0. 本次尝试共用的 HTTP 客户端（退出登录请求 / 登录页抓取 / 前置请求 / 登录请求
+    //    四处都用它）：连接池挂在 Client 上，CSRF 令牌绑定 TCP 连接的门户要求取 token 与
+    //    发登录落在同一条 keep-alive 连接，故整次尝试只能建一个。见 [`build_client`]。
     let client = match build_client(req.ignore_https_errors) {
         Ok(client) => client,
         Err(e) => {
@@ -330,7 +362,8 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         }
     };
 
-    // 1. 用户脚本值变换：产出可被占位符引用的字段表
+    // 占位符表：先放内置项（下线请求只能用这些，见下方第 1 步），脚本产出的字段在第 2 步
+    // 并入同一张表。
     let mut vars = BTreeMap::new();
     vars.insert("username".to_string(), req.username.clone());
     vars.insert("password".to_string(), req.password.to_string());
@@ -340,6 +373,56 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     vars.insert("local_ip".to_string(), req.local_ip.clone());
     vars.insert("local_mac".to_string(), req.local_mac.clone());
 
+    // 1. 退出登录动作（可选）：治「IP 已在线，拒绝重复登录」类门户——先踢掉旧会话再登录。
+    //    必须在**登录页抓取与凭据变换脚本之前**：这类门户连取令牌的接口都可能被旧会话
+    //    挡住（返回 already-online 类错误），`fetch_login_page` 抓到的会是"已在线"页而不是
+    //    登录表单，脚本据此产出的字段全是错的——正是本功能要治的那类门户。先清场再取令牌。
+    //
+    //    代价：此处只能用**内置占位符**（username / password / auth_url / local_ip /
+    //    local_mac），拿不到脚本产出的字段（脚本还没跑）。下线地址通常只需要账号，
+    //    而"抓到错的登录页"是必然坏、脚本占位符只是可能用到，故取前者。
+    //
+    //    与前置请求的本质差异在**结果语义**：取值失败 = 必然登不上（终态），下线没生效
+    //    = 登录仍可能成功（不判死）。因此这里只记日志、不产生报告分支。
+    //
+    // 步骤编号（与 `docs/guides/http-login-guide.md` 的 3.x 节一致）：
+    // 1 下线 → 2 底层变量表 + 凭据变换脚本 → 3 前置请求 → 4 模板渲染 → 5 发送 → 6 成败判定。
+    // 变量表（`vars`）在这里先建出来，脚本产出合并进它是在第 2 步（紧跟本段之后）。
+    if let Some(logout) = &req.logout_request {
+        let logout_url = substitute(&logout.url, &vars);
+        let logout_headers = substitute(&logout.headers, &vars);
+        let logout_body = substitute(&logout.body, &vars);
+        match send_http(
+            &client,
+            logout.method,
+            &logout_url,
+            &logout_headers,
+            &logout_body,
+            LOGOUT_REQUEST_TIMEOUT,
+        )
+        .await
+        {
+            Ok((status, _body, _headers)) => {
+                tracing::debug!("退出登录请求已发送（HTTP {status}）");
+            }
+            Err(e) => {
+                // best effort：下线失败只说明旧会话可能还在，登录本身仍值得一试。
+                // 错误消息可能拼 URL（GET 下线地址或含凭据），日志走脱敏。
+                let secrets = collect_secrets(&vars);
+                tracing::warn!(
+                    "退出登录请求失败（忽略，继续登录）: {}",
+                    redact_text(&e, &secrets)
+                );
+            }
+        }
+        // 下线通常是异步生效的：等待窗口钳到 30s，防止误配置拖爆登录节奏
+        let wait = logout.wait_secs.clamp(0.0, LOGOUT_MAX_WAIT_SECS);
+        if wait > 0.0 {
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        }
+    }
+
+    // 2. 用户脚本值变换：跑凭据脚本，产出可被占位符引用的字段表（并入上面的 `vars`）
     let mut script_error = None;
     if req.uses_crypto_script() {
         // 登录页原文 best effort 抓取：失败置空串，脚本须容忍缺失
@@ -385,7 +468,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         );
     }
 
-    // 1.5 前置请求（可选）：先取回一个值（如 CSRF token）注册成占位符，供登录请求的
+    // 3. 前置请求（可选）：先取回一个值（如 CSRF token）注册成占位符，供登录请求的
     //     URL / 请求头 / 请求体引用。与登录请求同一个 client，两条请求因此落在同一条
     //     连接上；取不到值就没必要再发登录请求（必然被门户拒），直接终态并把这次
     //     前置请求的请求与响应带进报告，便于在测试面板里看清是哪一步不对。
@@ -457,12 +540,12 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         }
     }
 
-    // 2. 模板渲染
+    // 4. 模板渲染
     let rendered_url = substitute(&req.url, &vars);
     let rendered_headers = substitute(&req.headers, &vars);
     let rendered_body = substitute(&req.body, &vars);
 
-    // 3. 发送请求
+    // 5. 发送请求
     let send = send_http(
         &client,
         req.method,
@@ -494,7 +577,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         }
     };
 
-    // 4. 成败判定
+    // 6. 成败判定
     let secrets = collect_secrets(&vars);
     let body_text = body;
     let failure_hit =
@@ -1128,6 +1211,20 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// 保存闸口（`tasks` 层）与执行闸口（本模块）的体积上限必须同值。
+    ///
+    /// 两处各写一份常量是历史形态，而"保存侧比执行侧松"的后果很具体：用户能存下一份
+    /// **必然登不上**的任务（登录一开始就被 [`HttpLoginRequest::validate`] 拒掉），
+    /// 界面上没有任何提示，`docs/guides/http-login-guide.md` 写的又正是执行侧那个数
+    /// （"请求头 64 KiB …… 超过上限时保存会被拒绝"）。请求头那一档曾经就是 256 KiB vs
+    /// 64 KiB。这条测试是"必须同值"的钉子：改任一处而不改另一处会立刻失败。
+    #[test]
+    fn login_and_task_size_limits_agree() {
+        assert_eq!(MAX_URL_BYTES, crate::tasks::MAX_HTTP_URL_BYTES);
+        assert_eq!(MAX_HEADERS_BYTES, crate::tasks::MAX_HTTP_HEADERS_BYTES);
+        assert_eq!(MAX_REQUEST_BODY_BYTES, crate::tasks::MAX_HTTP_BODY_BYTES);
+    }
+
     fn request(url: String) -> HttpLoginRequest {
         HttpLoginRequest {
             method: HttpRequestMethod::Get,
@@ -1138,6 +1235,7 @@ mod tests {
             failure_pattern: "密码错误".into(),
             crypto_script: String::new(),
             pre_request: None,
+            logout_request: None,
             username: "abc".into(),
             password: Zeroizing::new("abcdef".into()),
             auth_url: "http://portal.example/login".into(),
@@ -1863,5 +1961,234 @@ mod tests {
         // 非字符串值取其 JSON 文本（数字令牌也照用）
         assert_eq!(extract_pre_value("code", "{\"code\":0}").unwrap(), "0");
         assert!(extract_pre_value("missing", "{\"code\":0}").is_err());
+    }
+
+    // ===== 退出登录动作（登录前踢掉旧会话） =====
+
+    /// 起一个对任何请求都回 200「登录成功」、并按序记录 `(来源端口, 路径)` 的极简门户。
+    ///
+    /// 供下线动作的顺序与容错断言使用：响应体恒为成功关键字，下线请求回什么都
+    /// 不影响登录判定；连接不写 `Connection: close`，同一条 keep-alive 上的多个
+    /// 请求保持同端口——这正是要断言的性质。
+    async fn spawn_recording_portal() -> (String, tokio::sync::mpsc::Receiver<(u16, String)>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, peer)) = listener.accept().await else {
+                    break;
+                };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let (mut reader, mut writer) = stream.into_split();
+                    let mut buf: Vec<u8> = Vec::new();
+                    loop {
+                        // 读到"请求头 + Content-Length 指定的体"齐全为止（与 CSRF 门户同构）
+                        let (head_end, content_length) = loop {
+                            if let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                                let len = head
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (k, v) = line.split_once(':')?;
+                                        k.eq_ignore_ascii_case("content-length")
+                                            .then(|| v.trim().parse::<usize>().ok())?
+                                    })
+                                    .unwrap_or(0);
+                                if buf.len() >= head_end + 4 + len {
+                                    break (head_end, len);
+                                }
+                            }
+                            let mut chunk = [0_u8; 4096];
+                            match reader.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        };
+
+                        let request =
+                            String::from_utf8_lossy(&buf[..head_end + 4 + content_length])
+                                .to_string();
+                        buf.drain(..head_end + 4 + content_length);
+                        let path = request.split(' ').nth(1).unwrap_or("/").to_string();
+                        let _ = tx.send((peer.port(), path.clone())).await;
+
+                        let body = "登录成功";
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if writer.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        (format!("http://{addr}"), rx)
+    }
+
+    /// 下线请求必须**先于**登录请求发出，且模板占位符被渲染。
+    ///
+    /// "IP 已在线拒绝重复登录"的门户依赖这个顺序：旧会话还在时先发的登录请求
+    /// 会被拒，先踢后登才有意义。
+    #[tokio::test]
+    async fn logout_request_is_sent_before_login_request() {
+        let (base, mut seen) = spawn_recording_portal().await;
+        let mut req = request(format!("{base}/api/login"));
+        req.method = HttpRequestMethod::Post;
+        req.body = "username={username}&password={password}".into();
+        req.success_pattern = "登录成功".into();
+        req.failure_pattern.clear();
+        req.logout_request = Some(HttpActionRequest {
+            method: HttpRequestMethod::Post,
+            url: format!("{base}/api/logout?u={{username}}"),
+            body: "bye={username}".into(),
+            ..Default::default()
+        });
+
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+
+        let (first_port, first_path) = seen.recv().await.unwrap();
+        let (second_port, second_path) = seen.recv().await.unwrap();
+        assert!(
+            first_path.starts_with("/api/logout"),
+            "下线请求必须先到（实际先到 {first_path:?}）"
+        );
+        assert!(
+            second_path.starts_with("/api/login"),
+            "登录请求必须后到（实际后到 {second_path:?}）"
+        );
+        assert_eq!(
+            first_port, second_port,
+            "下线与登录应落在同一条连接（部分门户要求会话关联）"
+        );
+        // 占位符渲染：下线请求里的 {username} 已被替换
+        assert!(
+            first_path.contains("u=abc"),
+            "下线地址未渲染占位符: {first_path}"
+        );
+        assert!(report.rendered_url.contains("/api/login"));
+    }
+
+    /// 下线必须排在**登录页抓取**之前。
+    ///
+    /// 这类门户在旧会话仍在线时，登录页会被重定向到"已在线"页，脚本据此产出的字段
+    /// 全是错的——本功能要治的正是这类门户，所以"先清场"必须也覆盖取令牌这一步
+    /// （此前只排在前置请求之前，登录页却已经先抓完了）。
+    #[tokio::test]
+    async fn logout_request_precedes_login_page_fetch() {
+        let (base, mut seen) = spawn_recording_portal().await;
+        let mut req = request(format!("{base}/api/login"));
+        req.method = HttpRequestMethod::Post;
+        req.body = "username={username}&password={password}".into();
+        req.success_pattern = "登录成功".into();
+        req.failure_pattern.clear();
+        // 打开抓页开关并带一段脚本：抓登录页这一步才会真的发请求
+        req.fetch_page = true;
+        req.auth_url = format!("{base}/api/login-page");
+        req.crypto_script = "function transform(ctx) { return { token: \"t\" }; }".into();
+        req.logout_request = Some(HttpActionRequest {
+            method: HttpRequestMethod::Post,
+            url: format!("{base}/api/logout"),
+            ..Default::default()
+        });
+
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+
+        let (_, first_path) = seen.recv().await.unwrap();
+        assert!(
+            first_path.starts_with("/api/logout"),
+            "下线请求必须排在登录页抓取之前（实际先到 {first_path:?}）"
+        );
+    }
+
+    /// 下线请求失败**不得**影响登录：动作语义是"触达即可"，门户没开下线接口、
+    /// 地址写错都只留一条 warn 日志，登录照常进行并按自己的判定走。
+    #[tokio::test]
+    async fn logout_request_failure_does_not_block_login() {
+        let (base, mut seen) = spawn_recording_portal().await;
+        let mut req = request(format!("{base}/api/login"));
+        req.method = HttpRequestMethod::Post;
+        req.body = "username={username}&password={password}".into();
+        req.success_pattern = "登录成功".into();
+        req.failure_pattern.clear();
+        req.logout_request = Some(HttpActionRequest {
+            // 指向未监听端口：请求必然网络失败
+            url: "http://127.0.0.1:1/logout".into(),
+            ..Default::default()
+        });
+
+        let report = run_once(&req).await;
+        assert_eq!(
+            report.outcome,
+            Outcome::Success,
+            "下线失败不应拦住登录: {}",
+            report.message
+        );
+        // 登录请求确实发出并成功（下线请求打到了别人的端口，不算门户收到的请求）
+        let login_call = seen.recv().await.unwrap();
+        assert!(login_call.1.starts_with("/api/login"));
+    }
+
+    /// from_task 必须把任务的 logout_request 带到执行参数上（from_task 映射完整性）
+    #[test]
+    fn from_task_carries_logout_request() {
+        let task = HttpTaskConfig {
+            url: "http://10.0.0.1/login".into(),
+            logout_request: Some(HttpActionRequest {
+                url: "http://10.0.0.1/logout".into(),
+                wait_secs: 1.0,
+                ..Default::default()
+            }),
+            ..HttpTaskConfig::default()
+        };
+        let req = HttpLoginRequest::from_task(&task, "u", "p", "", false, true).unwrap();
+        let logout = req.logout_request.expect("logout_request 必须被映射");
+        assert_eq!(logout.url, "http://10.0.0.1/logout");
+        assert!((logout.wait_secs - 1.0).abs() < f64::EPSILON);
+
+        // 默认任务不带下线：老配置照旧
+        let plain = HttpTaskConfig {
+            url: "http://10.0.0.1/login".into(),
+            ..HttpTaskConfig::default()
+        };
+        assert!(
+            HttpLoginRequest::from_task(&plain, "u", "p", "", false, true)
+                .unwrap()
+                .logout_request
+                .is_none()
+        );
+    }
+
+    /// 保存/执行两侧的体积校验同口径：超限下线配置必须在 validate 阶段被拒
+    #[test]
+    fn validate_logout_request_rejects_oversized_fields() {
+        let long_body = "a".repeat(MAX_REQUEST_BODY_BYTES + 1);
+        let err = HttpLoginRequest::validate_logout_request(&HttpActionRequest {
+            url: "http://10.0.0.1/logout".into(),
+            body: long_body,
+            ..Default::default()
+        })
+        .expect_err("超限下线请求体必须被拒");
+        assert!(err.contains("退出登录请求体过长"), "{err}");
+
+        // 执行参数级 validate 也要走到下线分支
+        let mut req = request("http://portal.example/login".into());
+        req.logout_request = Some(HttpActionRequest {
+            url: "http://portal.example/logout".into(),
+            wait_secs: 1.0,
+            ..Default::default()
+        });
+        assert!(req.validate().is_ok());
+        req.logout_request.as_mut().unwrap().url = String::new();
+        assert!(req.validate().is_err(), "空地址的下线配置必须被拒");
     }
 }

@@ -50,7 +50,13 @@ pub const MAX_HTTP_URL_BYTES: usize = 8 * 1024;
 ///
 /// 请求头为纯文本、每行一项，正常门户只有几百字节；上限只为拦住误粘贴的大段
 /// 内容（撑大任务文件、拖慢请求构造），不表达任何安全边界。
-pub const MAX_HTTP_HEADERS_BYTES: usize = 256 * 1024;
+///
+/// 与 `src/login/http_login.rs` 的 `MAX_HEADERS_BYTES` 同口径（**必须是同一个数**）：
+/// 那边是 64 KiB，而这里原先是 256 KiB —— 于是 64~256 KiB 的请求头"存得下、必然登不上"
+/// （登录侧 `from_task → validate` 会在每次登录开始前直接判失败），
+/// `docs/guides/http-login-guide.md` 也明写"请求头 64 KiB、超过上限时保存会被拒绝"。
+/// 两处一致性由 `http_login.rs` 的单测钉住（`login_and_task_size_limits_agree`）。
+pub const MAX_HTTP_HEADERS_BYTES: usize = 64 * 1024;
 /// http 直连任务请求体大小上限（字节，防呆）
 ///
 /// 与请求头同理：POST 表单体通常几十字节，上限只拦误粘贴。
@@ -246,7 +252,7 @@ impl std::fmt::Display for HttpRequestMethod {
 ///
 /// ```json
 /// "pre_request": {
-///   "method": "get",
+///   "method": "GET",
 ///   "url": "http://10.100.51.1/api/csrf-token",
 ///   "extract": "json:csrf_token",
 ///   "name": "csrf"
@@ -331,6 +337,70 @@ impl HttpPreRequest {
     }
 }
 
+/// 直连任务的动作请求（目前用于退出登录）：一次"发了不判成败"的附加请求。
+///
+/// 与 [`HttpPreRequest`] 的分工：前置请求**取值**（取不到即登录流程终态失败），
+/// 动作请求**触达**（门户收没收到都照常走主流程）——退出登录正是这一类：强制下线
+/// 通常只为把「IP 已在线，拒绝重复登录」的旧会话踢掉，门户没开这个接口、或请求
+/// 形状不对时，登录本身仍然可能成功，把整次登录判死反而更糟。
+///
+/// 支持的占位符与登录请求同一套（`{username}` / `{password}` / 脚本产出字段等），
+/// 由执行器在与登录请求**同一条 keep-alive 连接**上发出（部分门户的下线接口
+/// 同样要求会话关联）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct HttpActionRequest {
+    /// 请求方法
+    pub method: HttpRequestMethod,
+    /// 请求地址（支持与登录请求同一套占位符）
+    pub url: String,
+    /// 请求头，每行一项 `名称: 值`
+    pub headers: String,
+    /// 请求体（POST 使用）
+    pub body: String,
+    /// 请求发出后等待秒数（0 = 不等待）。
+    ///
+    /// 典型用途：门户下线是异步生效的（立即重连会被旧会话占住的 IP 拒绝），
+    /// 等 1~3 秒再发登录请求能显著提高一次成功率。上限由执行侧钳制。
+    pub wait_secs: f64,
+}
+
+impl HttpActionRequest {
+    /// 下线后等待秒数的钳制上限：等待的本质是拖慢登录节奏，超过它说明配置
+    /// 写错了用途（比如把轮询间隔写进来），钳到 30 秒防止登录窗口被拖爆。
+    pub const MAX_WAIT_SECS: f64 = 30.0;
+
+    /// 形状校验：请求地址必填且为 http/https、等待秒数在 [0, 30]。
+    ///
+    /// 与 [`HttpPreRequest::validate`] 同口径地放在 tasks 层：保存路径（只拿到
+    /// JSON 值）与执行路径共用同一份判据，避免"存得下、必然错位"的配置。
+    pub fn validate(&self) -> Result<(), String> {
+        let url = self.url.trim();
+        if url.is_empty() {
+            return Err("退出登录请求缺少请求地址（不需要就把整块留空）".to_string());
+        }
+        let (scheme, rest) = url.split_once("://").unwrap_or(("", ""));
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+            return Err("退出登录请求的地址仅支持 http/https".to_string());
+        }
+        if host.is_empty() {
+            return Err("退出登录请求的地址缺少主机名".to_string());
+        }
+        if !self.wait_secs.is_finite() || self.wait_secs < 0.0 {
+            return Err("退出登录请求的等待秒数需 ≥ 0".to_string());
+        }
+        if self.wait_secs > Self::MAX_WAIT_SECS {
+            return Err(format!(
+                "退出登录请求的等待秒数最大 {}（当前 {}）",
+                Self::MAX_WAIT_SECS,
+                self.wait_secs
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// http 直连任务配置（把「直连请求」的登录参数固化为可复用的具名任务）
 ///
 /// 只装请求本身（方法/地址/认证页/头/体/成败判定/凭据变换），**不装凭据**：账号
@@ -347,6 +417,16 @@ impl HttpPreRequest {
 /// 故在任务里加一层可选的前置请求（见 [`HttpPreRequest`]）：它先发一次请求、从响应里
 /// 取出一个值注册成占位符，再渲染并发出登录请求。两次请求由同一个 `reqwest::Client`
 /// 顺序发出，连接池按 `(scheme, host, port)` 复用，token 绑连接的门户因此才能成功。
+///
+/// # 退出登录请求
+///
+/// 与前置请求互补的另一层：[`logout_request`](HttpTaskConfig::logout_request) 在登录前
+/// 先发一次**下线请求**（见 [`HttpActionRequest`]），治「IP 已在线，拒绝重复登录」类
+/// 门户的重复登录失败。动作只求触达：下线请求无论成败都继续登录，不判终态。
+///
+/// 它在整个流程里排在**最前**（先于抓登录页与凭据变换脚本）：旧会话还在线时，这类
+/// 门户的登录页会被重定向到"已在线"页，脚本据此产出的字段全是错的——先清场再取令牌
+/// 才是正确的因果链。代价是下线请求只支持内置占位符（脚本还没跑）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HttpTaskConfig {
@@ -377,6 +457,16 @@ pub struct HttpTaskConfig {
     /// 前置请求：登录前先取回一个值（如 CSRF token）供登录请求引用；`None` = 不需要
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_request: Option<HttpPreRequest>,
+    /// 退出登录请求（可选）：登录前先发一次下线请求；`None` = 不需要
+    ///
+    /// 见 [`HttpActionRequest`]：动作请求只求触达不求结果——门户没配下线接口时
+    /// 登录仍照常进行。写在这里而不是方案：下线地址是门户属性，与登录地址一样
+    /// 属于"同一门户多账号共用"的任务配置。
+    ///
+    /// 请求地址里只能用**内置占位符**（`{username}` / `{password}` / `{auth_url}` /
+    /// `{local_ip}` / `{local_mac}`）：它排在整个流程最前，脚本产出的字段此时还不存在。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logout_request: Option<HttpActionRequest>,
     /// 是否忽略 HTTPS 证书错误；`None` = 跟随全局 `browser.ignore_https_errors`
     pub ignore_https_errors: Option<bool>,
     /// 用户自定义元数据（执行器不使用，供仓库来源等标注）
@@ -396,6 +486,7 @@ impl Default for HttpTaskConfig {
             failure_pattern: String::new(),
             crypto_script: String::new(),
             pre_request: None,
+            logout_request: None,
             ignore_https_errors: None,
             metadata: default_value_obj(),
         }
@@ -1042,6 +1133,13 @@ mod tests {
                 extract: "json:csrf_token".to_string(),
                 name: "csrf".to_string(),
             }),
+            logout_request: Some(crate::tasks::HttpActionRequest {
+                method: HttpRequestMethod::Get,
+                url: "https://portal.example.com/logout".to_string(),
+                headers: String::new(),
+                body: String::new(),
+                wait_secs: 1.5,
+            }),
             ignore_https_errors: None,
             metadata: serde_json::json!({ "source": "repo" }),
         });
@@ -1077,6 +1175,9 @@ mod tests {
         assert_eq!(pre.headers, "X-Requested-With: XMLHttpRequest");
         assert_eq!(pre.extract, "json:csrf_token");
         assert_eq!(pre.name, "csrf");
+        let logout = cfg.logout_request.expect("退出登录请求必须原样往返");
+        assert_eq!(logout.url, "https://portal.example.com/logout");
+        assert!((logout.wait_secs - 1.5).abs() < f64::EPSILON);
         assert_eq!(cfg.ignore_https_errors, None);
         assert_eq!(cfg.metadata["source"], "repo");
 
@@ -1153,6 +1254,7 @@ mod tests {
             panic!("应为 Http 类型");
         };
         assert!(cfg.pre_request.is_none());
+        assert!(cfg.logout_request.is_none(), "退出登录请求同样按缺省关闭");
 
         // 未配置时不落盘该键（不往老文件里塞 `"pre_request": null` 噪音）
         let roundtrip = serde_json::to_string(&TaskKind::Http(cfg)).unwrap();
@@ -1160,6 +1262,81 @@ mod tests {
             !roundtrip.contains("pre_request"),
             "未配置前置请求时不应序列化该键: {roundtrip}"
         );
+        assert!(
+            !roundtrip.contains("logout_request"),
+            "未配置退出登录时不应序列化该键: {roundtrip}"
+        );
+    }
+
+    /// 退出登录请求的往返与缺省：老文件没有该键时照旧解析，配置后原样带回
+    #[test]
+    fn logout_request_roundtrip_and_defaults() {
+        let json = r#"{
+            "type": "http",
+            "name": "带下线的直连",
+            "url": "http://10.0.0.1/login?u={username}",
+            "logout_request": {
+                "method": "POST",
+                "url": "http://10.0.0.1/logout",
+                "headers": "Content-Type: application/x-www-form-urlencoded",
+                "body": "username={username}",
+                "wait_secs": 2
+            }
+        }"#;
+        let TaskKind::Http(cfg) = serde_json::from_str(json).unwrap() else {
+            panic!("应为 Http 类型");
+        };
+        let logout = cfg
+            .logout_request
+            .as_ref()
+            .expect("退出登录请求必须解析出来");
+        assert_eq!(logout.method, HttpRequestMethod::Post);
+        assert_eq!(logout.url, "http://10.0.0.1/logout");
+        assert_eq!(logout.body, "username={username}");
+        assert!((logout.wait_secs - 2.0).abs() < f64::EPSILON);
+
+        // 缺省方法 GET、等待 0
+        let bare = HttpActionRequest::default();
+        assert_eq!(bare.method, HttpRequestMethod::Get);
+        assert_eq!(bare.wait_secs, 0.0);
+
+        // 序列化只带非默认键
+        let roundtrip = serde_json::to_string(&TaskKind::Http(cfg)).unwrap();
+        assert!(roundtrip.contains("logout_request"), "{roundtrip}");
+    }
+
+    /// 退出登录请求的形状校验：地址必填、仅 http(s)、等待秒数钳制
+    #[test]
+    fn logout_request_validate_checks_url_shape_and_wait() {
+        let mut action = HttpActionRequest {
+            url: "http://10.0.0.1/logout".into(),
+            ..Default::default()
+        };
+        assert!(action.validate().is_ok());
+
+        action.url = String::new();
+        assert!(
+            action
+                .validate()
+                .unwrap_err()
+                .contains("退出登录请求缺少请求地址")
+        );
+
+        action.url = "ftp://10.0.0.1/logout".into();
+        assert!(action.validate().unwrap_err().contains("仅支持 http/https"));
+
+        action.url = "http:///logout".into();
+        assert!(action.validate().unwrap_err().contains("缺少主机名"));
+
+        action.url = "http://10.0.0.1/logout".into();
+        action.wait_secs = -1.0;
+        assert!(action.validate().unwrap_err().contains("等待秒数需 ≥ 0"));
+
+        action.wait_secs = HttpActionRequest::MAX_WAIT_SECS + 0.5;
+        assert!(action.validate().unwrap_err().contains("等待秒数最大 30"));
+
+        action.wait_secs = f64::NAN;
+        assert!(action.validate().unwrap_err().contains("等待秒数需 ≥ 0"));
     }
 
     /// 前置请求的取值方式与占位符名（形状判据在 tasks 层，保存与执行共用）

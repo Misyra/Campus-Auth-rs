@@ -212,8 +212,11 @@ impl From<crate::config::ConfigError> for ApiError {
 impl From<crate::tasks::TaskError> for ApiError {
     fn from(e: crate::tasks::TaskError) -> Self {
         match e {
-            crate::tasks::TaskError::TaskNotFound(_)
-            | crate::tasks::TaskError::InvalidTaskId(_) => ApiError::NotFound(e.to_string()),
+            // `InvalidTaskId` 是"这个 id 形态不合法"（用户可改），`TaskNotFound` 才是
+            // "没有这个资源"。两者都映射 404 会把前者说成"任务不存在"，排查方向被带偏
+            // （前端自动保存打过来的是一个畸形 id 时尤其明显）
+            crate::tasks::TaskError::InvalidTaskId(_) => ApiError::BadRequest(e.to_string()),
+            crate::tasks::TaskError::TaskNotFound(_) => ApiError::NotFound(e.to_string()),
             crate::tasks::TaskError::DuplicateTaskId(_)
             | crate::tasks::TaskError::DeleteDefaultTask => ApiError::Conflict(e.to_string()),
             crate::tasks::TaskError::ValidationFailed(msgs) => ApiError::Validation(
@@ -483,6 +486,15 @@ mod tests {
     fn test_from_task_and_bridge_error() {
         let e: ApiError = crate::tasks::TaskError::TaskNotFound("x".into()).into();
         assert!(matches!(e, ApiError::NotFound(_)));
+        // 畸形 id 是"用户可改"的输入错误，不是"资源不存在"：两者都映射 404 时，
+        // 一句"任务不存在"会把排查方向整个带偏（自动保存打来畸形 id 时尤其明显）。
+        // 这条断言是那个区分的护栏——把映射改回 NotFound，测试必须失败。
+        let e: ApiError = crate::tasks::TaskError::InvalidTaskId("../x".into()).into();
+        assert!(
+            matches!(e, ApiError::BadRequest(_)),
+            "InvalidTaskId 应映射 400，实际 {e:?}"
+        );
+        assert_eq!(e.status(), axum::http::StatusCode::BAD_REQUEST);
         let e: ApiError = crate::tasks::TaskError::DuplicateTaskId("x".into()).into();
         assert!(matches!(e, ApiError::Conflict(_)));
         let e: ApiError = crate::tasks::TaskError::ValidationFailed(vec!["a".into()]).into();
