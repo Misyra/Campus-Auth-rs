@@ -305,6 +305,13 @@ impl TaskExecutor {
         // 构建命令
         let python_default = self.env.python_path().to_string_lossy().to_string();
         let (program, args) = build_script_command(cfg, &script_file, &ext, &python_default);
+        // 空程序名落到 spawn 上只会得到 "program path has no file name" 这种不可诊断的
+        // 平台报错；此处提前拦住并说清缺什么（唯一可达路径是项目内解释器解析不出路径）
+        if program.trim().is_empty() {
+            return Err(TaskError::Environment(format!(
+                "未解析到可执行程序（脚本扩展名 .{ext}）：项目内解释器不可用，且任务未指定「执行程序」"
+            )));
+        }
         // .bat/.cmd 是 cmd.exe 专属脚本语义，unix 上无法执行——显式拒绝，
         // 避免落到 spawn ENOENT 的难懂报错（known-issues W16）
         #[cfg(not(windows))]
@@ -537,6 +544,24 @@ impl TaskExecutor {
     }
 }
 
+/// `binary_path` 里显式指定的「执行程序」；**空白串按未指定处理**。
+///
+/// 方案编辑器把「Python (项目内解释器)」这一项存成空串而不是 `null`（见前端
+/// `ScriptsPanel.vue` 的 `binaryOptions`），历史实现只判 `None`，于是空串被当成
+/// 真实路径交给 `Command::new("")`，spawn 直接失败并报
+/// 「IO 错误: program path has no file name」——新建脚本任务在默认配置下**一次都
+/// 跑不起来**（「立即运行」与脚本登录渠道同时中招）。
+///
+/// 判定口径必须与 [`uses_project_python`] 和 [`binary_to_ext`] 一致：它们早就把
+/// 空串当作未指定，同一个字段在三处各有一套解释必然再次分叉。
+fn explicit_binary(cfg: &ScriptTaskConfig) -> Option<String> {
+    cfg.binary_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// 根据扩展名与 binary_path 构建命令（program, args）。
 ///
 /// 自由函数而非方法：`py` 扩展名在未指定 `binary_path` 时需要回退到环境管理器
@@ -549,31 +574,26 @@ fn build_script_command(
     python_default: &str,
 ) -> (String, Vec<String>) {
     let script = script_file.to_string_lossy().to_string();
+    let explicit = explicit_binary(cfg);
     match ext {
         "exe" | "com" => {
             // 直接启动可执行文件
             (script, cfg.args.clone())
         }
         "py" => {
-            let python = cfg
-                .binary_path
-                .clone()
-                .unwrap_or_else(|| python_default.to_string());
+            let python = explicit.unwrap_or_else(|| python_default.to_string());
             let mut args = vec![script];
             args.extend(cfg.args.clone());
             (python, args)
         }
         "bat" | "cmd" => {
-            let cmd = cfg
-                .binary_path
-                .clone()
-                .unwrap_or_else(|| "cmd.exe".to_string());
+            let cmd = explicit.unwrap_or_else(|| "cmd.exe".to_string());
             let mut args = vec!["/c".to_string(), script];
             args.extend(cfg.args.clone());
             (cmd, args)
         }
         "sh" => {
-            let sh = cfg.binary_path.clone().unwrap_or_else(|| "sh".to_string());
+            let sh = explicit.unwrap_or_else(|| "sh".to_string());
             let mut args = vec![script];
             args.extend(cfg.args.clone());
             (sh, args)
@@ -809,6 +829,50 @@ mod tests {
         let (program, args) = build_script_command(&cfg, Path::new("b.py"), "py", "env_python");
         assert_eq!(program, "env_python");
         assert_eq!(args, vec!["b.py".to_string()]);
+    }
+
+    /// 回归：UI 的「Python (项目内解释器)」存的是空串，不是 `null`。
+    ///
+    /// 历史实现只判 `None`，空串被当成真实路径 → `Command::new("")` → spawn 报
+    /// 「program path has no file name」，新建脚本任务在默认配置下跑不起来。
+    #[test]
+    fn test_build_script_command_py_empty_binary_path_falls_back() {
+        for empty in ["", "   "] {
+            let cfg = ScriptTaskConfig {
+                binary_path: Some(empty.into()),
+                ..Default::default()
+            };
+            let (program, args) = build_script_command(&cfg, Path::new("b.py"), "py", "env_python");
+            assert_eq!(
+                program, "env_python",
+                "空白 binary_path({empty:?}) 必须回退默认 Python"
+            );
+            assert_eq!(args, vec!["b.py".to_string()]);
+        }
+    }
+
+    /// 回归同上一并钉住 bat/sh 两个分支：空串不得被当作解释器路径
+    #[test]
+    fn test_build_script_command_empty_binary_path_other_interpreters() {
+        let cfg = ScriptTaskConfig {
+            binary_path: Some(String::new()),
+            ..Default::default()
+        };
+        let (program, args) = build_script_command(&cfg, Path::new("r.bat"), "bat", "python");
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(args, vec!["/c".to_string(), "r.bat".to_string()]);
+
+        let (program, args) = build_script_command(&cfg, Path::new("s.sh"), "sh", "python");
+        assert_eq!(program, "sh");
+        assert_eq!(args, vec!["s.sh".to_string()]);
+    }
+
+    /// 空白 `binary_path` 也要推断出扩展名（供 content 落临时文件用）
+    #[test]
+    fn test_binary_to_ext_ignores_blank() {
+        assert_eq!(binary_to_ext(""), "py");
+        assert_eq!(binary_to_ext("   "), "py");
+        assert_eq!(binary_to_ext("C:\\py\\python.exe"), "py");
     }
 
     #[test]
