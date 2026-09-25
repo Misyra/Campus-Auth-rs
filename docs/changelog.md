@@ -2,6 +2,14 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-24 CI 跨平台 clippy 修复）
+
+- **现象**：推送后 CI 的 `Rust Tests (macos-latest)` 与 `Rust Tests (ubuntu-22.04)` 都卡在「Clippy 零警告（-D warnings）」，`error: constant UNINSTALL_TEMP_PREFIX is never used`（`src/helper_main.rs:449`，`-D dead-code` implied by `-D warnings`），exit 101。
+- **根因**：该常量只被 `#[cfg(windows)] fn spawn_uninstall_phase2` 使用（unix 走单段直删，没有第二段），而常量本身没加 `cfg`。Windows 上引用存在、不告警；macOS/Linux 上整块被门掉，常量就成了死代码。
+- **为什么本地没发现**：Windows 单平台的 `clippy -D warnings` 结构上看不见这类问题——只有 CI 的跨平台矩阵会红。本地试图用 `cargo clippy --target x86_64-unknown-linux-gnu` 复现也走不通（`tray-icon` 的 `pango-sys` 需要交叉 pkg-config 与 sysroot，本机没有），所以这次只能靠 CI 兜住。
+- **修复**：常量加 `#[cfg(windows)]`，并在注释里写明「unix 单段直删、不加 cfg 会让跨平台 clippy 红」，避免后来者把它当成多余的门删掉。
+- 验证：本机 `fmt --check` / `clippy --all-targets --features no-embed -D warnings` / `cargo test --bin campus-auth-helper`（12 例）全绿；跨平台结论以随后一轮 CI 为准。
+
 ## 开发中（2026-09-24 全功能实测排查）
 
 ### 背景
