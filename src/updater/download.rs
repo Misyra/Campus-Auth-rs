@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
-use semver::Version;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
@@ -16,10 +15,12 @@ use crate::updater::apply::EXE_NAME;
 use crate::updater::error::UpdaterError;
 
 /// 已暂存的更新（下载校验 + 解压后的产物）
+///
+/// 不携带版本号：网络下载路径的版本来自远程清单（[`UpdateInfo::latest_version`]），
+/// 上传路径的版本在解压后从产物 exe 中提取（`version_info`），提取时机均在
+/// 解压完成之后——解压本身不该依赖版本号。
 #[derive(Clone, Debug)]
 pub struct StagedUpdate {
-    /// 暂存的版本号
-    pub version: Version,
     /// 解压后的 exe 路径
     pub extracted_exe: PathBuf,
 }
@@ -272,24 +273,19 @@ fn cleanup_tmp(tmp_path: &Path) {
 pub(crate) async fn extract_to_staging(
     archive_path: &Path,
     staging_dir: &Path,
-    version: &str,
 ) -> Result<StagedUpdate, UpdaterError> {
     // 参数为引用，clone 为 owned 后 move 进 spawn_blocking 闭包（闭包需 'static + Send）
     let archive_path = archive_path.to_path_buf();
     let staging_dir = staging_dir.to_path_buf();
-    let version = version.to_string();
-    tokio::task::spawn_blocking(move || {
-        extract_to_staging_blocking(&archive_path, &staging_dir, &version)
-    })
-    .await
-    .map_err(|e| UpdaterError::ExtractFailed(format!("解压任务执行失败: {e}")))?
+    tokio::task::spawn_blocking(move || extract_to_staging_blocking(&archive_path, &staging_dir))
+        .await
+        .map_err(|e| UpdaterError::ExtractFailed(format!("解压任务执行失败: {e}")))?
 }
 
 /// 同步解压实现：实际执行压缩包解压与 exe 校验（由 `extract_to_staging` 在阻塞线程池调用）
 fn extract_to_staging_blocking(
     archive_path: &Path,
     staging_dir: &Path,
-    version: &str,
 ) -> Result<StagedUpdate, UpdaterError> {
     let extracted_dir = staging_dir.join("extracted");
     // 清理上一次残留的 extracted/
@@ -308,10 +304,7 @@ fn extract_to_staging_blocking(
         return Err(UpdaterError::ExtractFailed("解压结果缺少可执行文件".into()));
     }
 
-    Ok(StagedUpdate {
-        version: Version::parse(version).map_err(UpdaterError::VersionParseFailed)?,
-        extracted_exe,
-    })
+    Ok(StagedUpdate { extracted_exe })
 }
 
 #[cfg(test)]

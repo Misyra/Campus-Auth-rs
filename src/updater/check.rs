@@ -127,23 +127,8 @@ pub(crate) async fn fetch_manifest(
     // 处理 GitHub API 速率限制：未认证 REST 配额耗尽回 403 + 配额头耗尽
     // （GitHub 主限流按类型可能回 403 或 429），只认 429 会把主限流误报成
     // ManifestFetchFailed(403)，用户既看不懂也拿不到建议等待时间
-    if matches!(
-        response.status(),
-        reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::FORBIDDEN
-    ) {
-        if let Some(retry_after) = rate_limit_retry_after(response.headers()) {
-            return Err(UpdaterError::RateLimited { retry_after });
-        }
-        // 429 但无配额头（代理/网关限流）：沿用 retry-after 头，缺省 60s
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(60);
-            return Err(UpdaterError::RateLimited { retry_after });
-        }
+    if let Some(e) = rate_limit_error_if_any(response.status(), response.headers()) {
+        return Err(e);
     }
 
     let response = response
@@ -285,6 +270,12 @@ fn releases_list_url(source_url: &str) -> Option<String> {
 ///   无任何预发布时回退正式版清单（避免测试版通道用户长期无更新可检）；
 /// - [`UpdateChannel::All`]：枚举列表取 semver 最高者（正式/预发布一起比）。
 ///
+/// **候选失败回退口径**：首选候选（按通道选取的 semver 最高者）缺当前平台资产或
+/// 缺 `.sha256` 校验文件时，按 semver 降序在**全列表**内继续尝试其余候选——不再
+/// 区分通道类型（预发布候选失败后允许落到更低的正式版，发布流程漏传某平台包
+/// 不应让用户错过紧随其后的完好发布）；其余错误（网络 / 解析 / 限流）立即返回，
+/// 全部候选失败返回最后一个可恢复错误。
+///
 /// 列表枚举依赖 GitHub API 地址形态；自定义 latest.json 镜像无法枚举，
 /// 记 warn 后回退单清单（通道降级为"跟随该清单"）。
 pub(crate) async fn fetch_manifest_for_channel(
@@ -321,6 +312,10 @@ pub(crate) async fn fetch_manifest_for_channel(
     if !is_allowed_update_url(response.url().as_str()) {
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
     }
+    // 列表请求与单清单请求同一限流口径：403/429 + 配额头折算带 retry_after 的错误
+    if let Some(e) = rate_limit_error_if_any(response.status(), response.headers()) {
+        return Err(e);
+    }
     let response = response
         .error_for_status()
         .map_err(UpdaterError::ManifestFetchFailed)?;
@@ -329,7 +324,7 @@ pub(crate) async fn fetch_manifest_for_channel(
         .await
         .map_err(UpdaterError::ManifestFetchFailed)?;
 
-    // 过滤草稿后按通道筛选，取 semver 最高的候选（列表按创建时间排序，
+    // 过滤草稿后按通道筛选首选候选（列表按创建时间排序，
     // 直接取首项可能选中回迁的旧版本发布）
     let best = select_release_for_channel(&releases, channel);
     let Some(best) = best else {
@@ -340,7 +335,48 @@ pub(crate) async fn fetch_manifest_for_channel(
         }
         return Err(UpdaterError::NoMatchingRelease);
     };
-    manifest_from_github_release(client, best).await
+
+    // 首选候选先试；缺平台资产/校验文件时按 semver 降序在全列表内继续尝试
+    // （见函数 doc comment 的回退口径），其余错误立即返回
+    let ordered = releases_sorted_by_version_desc(&releases);
+    let mut last_recoverable: Option<UpdaterError> = None;
+    for candidate in
+        std::iter::once(best).chain(ordered.into_iter().filter(|r| !std::ptr::eq(*r, best)))
+    {
+        let tag = candidate
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        match manifest_from_github_release(client, candidate).await {
+            Ok(manifest) => return Ok(manifest),
+            Err(
+                e @ (UpdaterError::PlatformNotAvailable(_) | UpdaterError::ChecksumUnavailable),
+            ) => {
+                tracing::info!(
+                    tag,
+                    "候选发布缺当前平台资产或校验文件（{e}），尝试更低版本候选"
+                );
+                last_recoverable = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_recoverable.unwrap_or(UpdaterError::NoMatchingRelease))
+}
+
+/// 将 Releases 列表按 semver 降序排序（过滤草稿与 tag 无法解析的条目）
+fn releases_sorted_by_version_desc(releases: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    let mut parsed: Vec<(Version, &serde_json::Value)> = releases
+        .iter()
+        .filter(|r| !r.get("draft").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter_map(|r| {
+            let tag = r.get("tag_name").and_then(|v| v.as_str())?;
+            let v = Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
+            Some((v, r))
+        })
+        .collect();
+    parsed.sort_by(|a, b| b.0.cmp(&a.0));
+    parsed.into_iter().map(|(_, r)| r).collect()
 }
 
 /// 按通道从 Releases 列表中选取目标发布（纯函数，便于单测）
@@ -406,6 +442,37 @@ fn infer_platform_key(name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// 判定响应是否为配额限流，并折算为带建议等待时间的错误
+///
+/// 单清单（[`fetch_manifest`]）与 Releases 列表（[`fetch_manifest_for_channel`]）
+/// 请求共用同一判定口径：403/429 + 配额耗尽（`X-RateLimit-Remaining: 0`）→
+/// [`UpdaterError::RateLimited`]；429 但无配额头（代理/网关限流）沿用
+/// `retry-after` 头，缺省 60s。纯函数（只读状态码与 HeaderMap）便于单测。
+fn rate_limit_error_if_any(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<UpdaterError> {
+    if !matches!(
+        status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return None;
+    }
+    if let Some(retry_after) = rate_limit_retry_after(headers) {
+        return Some(UpdaterError::RateLimited { retry_after });
+    }
+    // 429 但无配额头（代理/网关限流）：沿用 retry-after 头，缺省 60s
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = headers
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60);
+        return Some(UpdaterError::RateLimited { retry_after });
+    }
+    None
 }
 
 /// 从响应头判定是否为配额耗尽，并折算建议等待秒数
@@ -842,5 +909,196 @@ mod tests {
         assert!(select_release_for_channel(&stable_only, UpdateChannel::Prerelease).is_none());
         // 空列表 → None
         assert!(select_release_for_channel(&[], UpdateChannel::All).is_none());
+    }
+
+    /// 全列表 semver 降序：过滤草稿与 tag 无法解析的条目
+    #[test]
+    fn test_releases_sorted_by_version_desc() {
+        let releases: Vec<serde_json::Value> = [
+            r#"{"tag_name": "v1.0.0", "draft": false}"#,
+            r#"{"tag_name": "v9.0.0", "draft": false}"#,
+            r#"{"tag_name": "v3.0.0", "draft": true}"#, // 草稿排除
+            r#"{"tag_name": "legacy", "draft": false}"#, // 无法解析排除
+            r#"{"tag_name": "v2.0.0", "draft": false}"#,
+        ]
+        .iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+        let ordered = releases_sorted_by_version_desc(&releases);
+        let tags: Vec<&str> = ordered
+            .iter()
+            .map(|r| r["tag_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(tags, vec!["v9.0.0", "v2.0.0", "v1.0.0"]);
+    }
+
+    // ============ 回环 mock：候选回退与限流口径 ============
+
+    use std::net::SocketAddr;
+
+    use axum::http::StatusCode;
+    use axum::routing::get as route_get;
+
+    /// 回环直连：测试机代理（如 127.0.0.1:7890）会劫持 reqwest 回环请求导致 502
+    fn loopback_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    /// 起本地 axum 服务
+    async fn serve(app: axum::Router) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    /// 当前平台可识别的资产名（与生产 `infer_platform_key` 的 cfg 矩阵一致）
+    fn platform_asset_name() -> &'static str {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            "app-windows-x64.zip"
+        }
+        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+        {
+            "app-windows-arm64.zip"
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            "app-linux-x64.zip"
+        }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            "app-linux-arm64.zip"
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            "app-macos-arm64.zip"
+        }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            "app-macos-x64.zip"
+        }
+        #[cfg(not(any(
+            all(target_os = "windows", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64")
+        )))]
+        {
+            "app-unknown.zip"
+        }
+    }
+
+    /// 最高候选缺平台资产 → 回退次高候选（P1 实锤项回归：此前直接失败不回退）
+    #[tokio::test]
+    async fn fetch_manifest_for_channel_falls_back_to_next_candidate() {
+        // 先绑定端口拿到地址，让"次高候选"的 .sha256 伴随文件指向本 mock
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sha_url = format!("http://{addr}/pkg.zip.sha256");
+        let app = axum::Router::new()
+            .route(
+                "/repos/o/r/releases",
+                route_get(move || {
+                    let sha_url = sha_url.clone();
+                    async move {
+                        // 最高候选（正式 + 预发布各一）都没有当前平台资产；
+                        // 次高候选资产齐备且带 .sha256 伴随文件
+                        let good = serde_json::json!({
+                            "tag_name": "v2.0.0",
+                            "prerelease": false,
+                            "draft": false,
+                            "assets": [
+                                {
+                                    "name": platform_asset_name(),
+                                    "browser_download_url": format!("http://{addr}/pkg.zip"),
+                                    "size": 16,
+                                },
+                                {
+                                    "name": format!("{}.sha256", platform_asset_name()),
+                                    "browser_download_url": sha_url,
+                                },
+                            ],
+                        });
+                        let bad_stable = serde_json::json!({
+                            "tag_name": "v9.0.0",
+                            "prerelease": false,
+                            "draft": false,
+                            "assets": [
+                                {"name": "tool.zip", "browser_download_url": format!("http://{addr}/tool.zip")},
+                            ],
+                        });
+                        let bad_pre = serde_json::json!({
+                            "tag_name": "v9.5.0-beta.1",
+                            "prerelease": true,
+                            "draft": false,
+                            "assets": [],
+                        });
+                        axum::Json(serde_json::json!([bad_stable, bad_pre, good]))
+                    }
+                }),
+            )
+            .route(
+                "/pkg.zip.sha256",
+                route_get(|| async { "a0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = loopback_client();
+
+        // 全通道：最高正式版缺资产 → 落到 v2.0.0
+        let manifest = fetch_manifest_for_channel(
+            &client,
+            &format!("http://{addr}/repos/o/r/releases/latest"),
+            UpdateChannel::All,
+        )
+        .await
+        .expect("最高候选缺资产应回退次高候选");
+        assert_eq!(manifest.version, Version::parse("2.0.0").unwrap());
+
+        // 测试版通道：最高预发布缺资产 → 继续降序迭代，落到正式版 v2.0.0
+        //（回退口径不区分通道类型，见 fetch_manifest_for_channel doc comment）
+        let manifest = fetch_manifest_for_channel(
+            &client,
+            &format!("http://{addr}/repos/o/r/releases/latest"),
+            UpdateChannel::Prerelease,
+        )
+        .await
+        .expect("预发布候选缺资产应回退更低候选");
+        assert_eq!(manifest.version, Version::parse("2.0.0").unwrap());
+    }
+
+    /// 列表请求命中限流（403 + 配额耗尽头）→ 带 retry_after 的 RateLimited，
+    /// 与单清单请求同一口径（P2：此前列表路径不复用该判定）
+    #[tokio::test]
+    async fn fetch_manifest_for_channel_reports_rate_limit_on_list() {
+        let app = axum::Router::new().route(
+            "/repos/o/r/releases",
+            route_get(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    [("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "1")],
+                    axum::Json(serde_json::json!([])),
+                )
+            }),
+        );
+        let addr = serve(app).await;
+        let client = loopback_client();
+        let err = fetch_manifest_for_channel(
+            &client,
+            &format!("http://{addr}/repos/o/r/releases/latest"),
+            UpdateChannel::All,
+        )
+        .await
+        .expect_err("限流响应应报 RateLimited");
+        assert!(
+            matches!(err, UpdaterError::RateLimited { retry_after: 1 }),
+            "{err}"
+        );
     }
 }

@@ -85,7 +85,7 @@ struct PendingInfo {
     #[serde(default)]
     worker_target_dir: String,
     original_args: Vec<String>,
-    /// 暂存包预期 SHA256（G13：替换前复核；空 = 发布源未提供，降级跳过）
+    /// 暂存包预期 SHA256（G13：替换前复核；空值直接拒绝替换，不降级）
     #[serde(default)]
     sha256: String,
     /// 待应用版本号（见下方 2.5 版本闸门）
@@ -184,7 +184,7 @@ fn run_apply_update(cli: &HelperCli) {
 
     // 1. 等待主进程退出
     log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
-    if !wait_for_process_exit(cli.pid) {
+    if !wait_for_process_exit(cli.pid, &mut log) {
         // 主进程未退出：中止更新，保留 staging 与 pending.json，待主进程下次启动
         // 时由 apply_pending_on_startup 应用（不执行 cleanup，避免摧毁待应用更新）
         std::process::exit(1);
@@ -192,39 +192,44 @@ fn run_apply_update(cli: &HelperCli) {
     // 额外等待一小段时间，确保文件句柄完全释放
     sleep(Duration::from_millis(500));
 
-    // 2. 从 pending.json 读取配置（CLI 参数优先）
+    // 2. 从 pending.json 读取配置（--apply-update 模式的唯一事实源）
+    //
+    // pending 缺失 / 解析失败 / 读取失败一律中止并**保留现场**（不 cleanup）：
+    // 降级"按 CLI 参数继续"必然过不了 SHA 复核闸门（期望值就在 pending 里），
+    // 而被拒绝的路径会调 cleanup 把 staging 与 pending 一并销毁——瞬时 IO 错误
+    // 会永久丢弃待应用更新，日志还自称"已保留"，自相矛盾。
     let pending_path = base_path.join("update").join("pending.json");
-    // 区分三种情形：不存在（正常，按 CLI 参数继续）/ 解析失败（丢失 sha256 与
-    // original_args，告警）/ 其他读取错误（告警）
-    let pending: Option<PendingInfo> = match std::fs::read_to_string(&pending_path) {
+    let pending: PendingInfo = match std::fs::read_to_string(&pending_path) {
         Ok(s) => match serde_json::from_str(&s) {
-            Ok(p) => Some(p),
+            Ok(p) => p,
             Err(e) => {
                 log.error(&format!(
-                    "pending.json 存在但解析失败（{e}），sha256/original_args 信息丢失，将按 CLI 参数继续"
+                    "无法解析待应用更新记录（pending.json 损坏: {e}），已保留现场，更新中止"
                 ));
-                None
+                std::process::exit(1);
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log.debug("无 pending.json，按 CLI 参数继续");
-            None
+            log.error("无法读取待应用更新记录（update/pending.json 不存在），已保留现场，更新中止");
+            std::process::exit(1);
         }
         Err(e) => {
-            log.error(&format!("读取 pending.json 失败（{e}），将按 CLI 参数继续"));
-            None
+            log.error(&format!(
+                "读取待应用更新记录失败（{e}），已保留现场，更新中止"
+            ));
+            std::process::exit(1);
         }
     };
 
-    let staging_dir = match cli
-        .staging
-        .clone()
-        .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.staging_dir)))
-    {
-        Some(p) => p,
-        None => {
-            log.error("缺少 staging 目录路径（需 --staging 或 pending.json）");
-            std::process::exit(1);
+    let staging_dir = match cli.staging.clone() {
+        // CLI 参数优先（非空时）；空参数视同未提供
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => {
+            if pending.staging_dir.is_empty() {
+                log.error("无法确定 staging 目录路径（--staging 与 pending.json 均为空）");
+                std::process::exit(1);
+            }
+            PathBuf::from(&pending.staging_dir)
         }
     };
 
@@ -235,10 +240,12 @@ fn run_apply_update(cli: &HelperCli) {
     let derived_target = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join(exe_name())));
-    let provided_target = cli
-        .target
-        .clone()
-        .or_else(|| pending.as_ref().map(|p| PathBuf::from(&p.target_exe)));
+    let provided_target = match cli.target.clone() {
+        Some(t) => Some(t),
+        // 旧 pending 缺字段时回退 None（校验交给 resolve_target_exe 的推导分支）
+        None if pending.target_exe.is_empty() => None,
+        None => Some(PathBuf::from(&pending.target_exe)),
+    };
     let target_exe = match resolve_target_exe(derived_target, provided_target, &base_path) {
         Some(p) => p,
         None => {
@@ -250,12 +257,15 @@ fn run_apply_update(cli: &HelperCli) {
     // Worker 目标必须由主程序显式传递，并且仍等同于内置目录。外置 Worker、
     // Docker bind mount 等布局由部署系统负责更新，helper 不猜测也不跨目录覆盖。
     let bundled_worker_dir = base_path.join("python_worker");
-    let worker_target_dir = pending
-        .as_ref()
-        .map(|p| p.worker_target_dir.trim())
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| bundled_worker_dir.clone());
+    let worker_target_dir = {
+        let from_pending = pending.worker_target_dir.trim();
+        if from_pending.is_empty() {
+            // 旧 pending 缺字段时回退内置目录（校验在下方统一做）
+            bundled_worker_dir.clone()
+        } else {
+            PathBuf::from(from_pending)
+        }
+    };
     if !worker_target_dir.is_dir()
         || !bundled_worker_dir.is_dir()
         || !same_existing_path(&worker_target_dir, &bundled_worker_dir)
@@ -270,17 +280,15 @@ fn run_apply_update(cli: &HelperCli) {
 
     // 2.5 版本闸门（纵深防御）：pending 版本须严格高于本 helper 版本（helper 与
     // 被替换主程序同版本发布）。不高于或无法解析均拒绝替换并保留现场——
-    // 主进程侧（pin 路径 / apply_pending_on_startup）已有闸门，此处补齐
-    // helper 执行端的最后一环，堵住"篡改 pending 降级替换"的通道。
-    if let Some(p) = pending.as_ref() {
-        if !pending_version_allowed(&p.version, env!("CARGO_PKG_VERSION")) {
-            log.error(&format!(
-                "待应用版本 {} 不高于当前 {} 或无法解析，拒绝替换",
-                p.version,
-                env!("CARGO_PKG_VERSION")
-            ));
-            std::process::exit(1);
-        }
+    // 主进程侧（pin 路径 / apply_pending_on_startup / 上传包提取版本闸门）已有
+    // 闸门，此处补齐 helper 执行端的最后一环，堵住"篡改 pending 降级替换"的通道。
+    if !pending_version_allowed(&pending.version, env!("CARGO_PKG_VERSION")) {
+        log.error(&format!(
+            "待应用版本 {} 不高于当前 {} 或无法解析，拒绝替换",
+            pending.version,
+            env!("CARGO_PKG_VERSION")
+        ));
+        std::process::exit(1);
     }
 
     // G13：staging 是 remove_dir_all 的目标，取值可能来自 pending.json——
@@ -304,11 +312,7 @@ fn run_apply_update(cli: &HelperCli) {
 
     // 3.5 G13：复制前复核 staging exe 的 SHA256（期望值从 pending.json 传入）
     // 校验失败（staging 损坏/被篡改）时中止替换并清理不可信的 staging
-    let expected_sha = pending
-        .as_ref()
-        .map(|p| p.sha256.as_str())
-        .unwrap_or_default();
-    if !verify_staging_sha256(&extracted_exe, expected_sha) {
+    if !verify_staging_sha256(&extracted_exe, &pending.sha256, &mut log) {
         log.error("staging exe SHA256 复核失败，中止替换");
         cleanup(&base_path, &staging_dir, &mut log);
         std::process::exit(1);
@@ -396,10 +400,7 @@ fn run_apply_update(cli: &HelperCli) {
     replace_helper(&extracted_dir, &install_dir, &mut log);
 
     // 6. 启动新 exe（传递原始启动参数）
-    let original_args = pending
-        .as_ref()
-        .map(|p| p.original_args.clone())
-        .unwrap_or_default();
+    let original_args = pending.original_args.clone();
     log.info("启动新版本...");
     match std::process::Command::new(&target_exe)
         .args(&original_args)
@@ -501,7 +502,7 @@ fn run_uninstall(cli: &HelperCli) {
 
     // 1. 等待主进程退出
     log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
-    if !wait_for_process_exit(cli.pid) {
+    if !wait_for_process_exit(cli.pid, &mut log) {
         uninstall_abort(
             &mut log,
             "卸载已中止",
@@ -889,17 +890,19 @@ fn files_identical(a: &Path, b: &Path) -> bool {
 /// 主进程仍存活时覆盖运行中 exe 的替换必然失败，且强制继续会走 cleanup 摧毁 staging
 /// 与 pending.json，导致更新彻底丢失。改为报错退出并保留 staging/pending，把应用机会
 /// 留给主进程下次启动的 `apply_pending_on_startup`。
-fn wait_for_process_exit(pid: u32) -> bool {
+///
+/// 超时信息写入 HelperLog（GUI 子系统下 stderr 不可见，更新失败必须可从 helper.log 诊断）。
+fn wait_for_process_exit(pid: u32, log: &mut HelperLog) -> bool {
     for _ in 0..(PROCESS_EXIT_TIMEOUT_SECS * 1000 / PROCESS_EXIT_POLL_MS) {
         if !is_process_alive(pid) {
             return true;
         }
         sleep(Duration::from_millis(PROCESS_EXIT_POLL_MS));
     }
-    eprintln!(
-        "[helper] 等待进程退出超时（{} 秒），中止更新",
+    log.error(&format!(
+        "等待进程退出超时（{} 秒），中止更新（staging 与 pending 已保留）",
         PROCESS_EXIT_TIMEOUT_SECS
-    );
+    ));
     false
 }
 
@@ -1122,19 +1125,20 @@ fn is_within_base(path: &Path, base_path: &Path) -> bool {
 ///
 /// `expected` 为空直接拒绝（不再降级信任 HTTPS）；非空但与实际不符时返回
 /// false——staging 损坏或被篡改，必须中止替换（调用方随后清理不可信 staging）。
-fn verify_staging_sha256(extracted_exe: &Path, expected: &str) -> bool {
+/// 失败原因写入 HelperLog（GUI 子系统下 stderr 不可见，见模块头说明）。
+fn verify_staging_sha256(extracted_exe: &Path, expected: &str, log: &mut HelperLog) -> bool {
     if expected.is_empty() {
-        eprintln!("[helper] pending.json 未携带 SHA256，已拒绝替换（需补校验值）");
+        log.error("pending.json 未携带 SHA256，已拒绝替换（需补校验值）");
         return false;
     }
     match file_sha256(extracted_exe) {
         Ok(actual) if actual.eq_ignore_ascii_case(expected) => true,
         Ok(actual) => {
-            eprintln!("[helper] SHA256 不匹配: expected={expected}, got={actual}");
+            log.error(&format!("SHA256 不匹配: expected={expected}, got={actual}"));
             false
         }
         Err(e) => {
-            eprintln!("[helper] 计算 staging SHA256 失败: {e}");
+            log.error(&format!("计算 staging SHA256 失败: {e}"));
             false
         }
     }
@@ -1239,21 +1243,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("campus-auth.exe");
         std::fs::write(&exe, b"staged-binary-content").unwrap();
+        let mut log = HelperLog::open_at(&dir.path().join("helper.log"));
 
         use sha2::{Digest, Sha256};
         let correct = hex::encode(Sha256::digest(b"staged-binary-content"));
 
         // 空期望：拒绝（缺失拒绝，不降级跳过）
-        assert!(!verify_staging_sha256(&exe, ""));
+        assert!(!verify_staging_sha256(&exe, "", &mut log));
         // 正确摘要：通过（大小写不敏感）
-        assert!(verify_staging_sha256(&exe, &correct));
-        assert!(verify_staging_sha256(&exe, &correct.to_uppercase()));
+        assert!(verify_staging_sha256(&exe, &correct, &mut log));
+        assert!(verify_staging_sha256(
+            &exe,
+            &correct.to_uppercase(),
+            &mut log
+        ));
         // 错误摘要：拒绝
-        assert!(!verify_staging_sha256(&exe, "deadbeef"));
+        assert!(!verify_staging_sha256(&exe, "deadbeef", &mut log));
         // 文件缺失：拒绝
         assert!(!verify_staging_sha256(
             &dir.path().join("missing.exe"),
-            &correct
+            &correct,
+            &mut log
         ));
     }
 

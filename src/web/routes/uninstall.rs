@@ -397,8 +397,13 @@ pub async fn purge_uninstall(
         tracing::warn!("待应用更新未被取消，卸载后仍可能被更新助手重新安装");
     }
 
-    crate::uninstall::spawn_helper(&install_dir, &base_path, body.keep_user_data)
-        .map_err(ApiError::Internal)?;
+    if let Err(e) = crate::uninstall::spawn_helper(&install_dir, &base_path, body.keep_user_data) {
+        // spawn 失败意味着卸载并未发生（程序文件未被删除）：恢复更新入口，
+        // 否则 cancel_pending_update 落下的取消标记会**永久**拒绝此后所有更新，
+        // 用户只能重启进程才能再次尝试更新
+        state.updater.restore_after_failed_uninstall();
+        return Err(ApiError::Internal(e));
+    }
 
     // 破坏性操作：把"删什么"写进日志（事后追溯的唯一依据——程序目录本身即将消失）
     tracing::info!(
@@ -436,11 +441,19 @@ pub async fn purge_uninstall(
 }
 
 /// 关闭开机自启动：配置标志置 false 并取消系统注册（均尽力而为）
+///
+/// 配置改写走 `modify_settings_tx`（持锁读-改-写）：锁外的 load→改→save 会
+/// 覆盖并发写入的其他设置项（与 PATCH/PUT 的合并保存同一约束）。
 async fn disable_autostart(config: &Arc<dyn ConfigApi>) -> (bool, String) {
-    let mut settings = config.load_settings_async().await;
-    settings.global.app.autostart_enabled = false;
-    if let Err(e) = config.save_settings(&settings).await {
-        return (false, format!("保存配置失败: {e}"));
+    let modify = |mut settings: crate::config::SettingsData| {
+        settings.global.app.autostart_enabled = false;
+        Ok(settings)
+    };
+    match config.modify_settings_tx(Box::new(modify)).await {
+        // 外层 Err 为 IO/隔离态错误；内层 Err(String) 为闭包校验失败（设置未落盘）
+        Err(e) => return (false, format!("保存配置失败: {e}")),
+        Ok(Err(reason)) => return (false, format!("保存配置失败: {reason}")),
+        Ok(Ok(())) => {}
     }
     match tokio::task::spawn_blocking(|| crate::utils::platform::set_self_start(false)).await {
         Ok(Ok(())) => (true, "已关闭".to_string()),

@@ -9,7 +9,9 @@
 //!
 //! 手动更新：用户把发布包放进 `<base_path>/update/` 时，检查阶段比对远程清单声明的
 //! SHA256，命中即复用该文件跳过下载（见 [`local`]）。本地包不是独立信任源，仍须
-//! 通过同一摘要校验，故不影响离线可用性与既有安全模型。
+//! 通过同一摘要校验，故不影响离线可用性与既有安全模型。手动「选择安装包」（上传）
+//! 信任口径不同：不比对远程摘要、不拉取远程清单，版本闸门以解压产物 exe 中的
+//! 真实版本（见 [`version_info`]）为准。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +29,7 @@ pub(crate) mod check;
 pub(crate) mod download;
 pub mod error;
 pub(crate) mod local;
+pub mod version_info;
 
 pub use apply::PendingUpdate;
 pub use check::{PlatformPackage, ReleaseManifest};
@@ -193,6 +196,15 @@ pub trait UpdaterApi: Send + Sync {
     /// `graceful_shutdown` 的 `ensure_helper_for_shutdown` 见到 pending 存在就会唤醒
     /// **更新**助手，把用户刚卸载的程序又"更新"回来并重启。
     async fn cancel_pending_update(&self) -> bool;
+    /// 卸载助手启动失败后恢复更新入口（复位取消标记与下载互斥）
+    ///
+    /// [`Self::cancel_pending_update`] 会**永久**置位取消标记并抢占下载互斥——那是
+    /// "卸载开始后任何更新都不得发生"的闸门。但卸载的第二步是 spawn 卸载助手；
+    /// spawn 失败时卸载并未发生（程序文件未被删除），闸门若不复位，此后所有更新
+    /// 都被永久拒绝，用户只能重启进程。默认空实现供测试替身使用。
+    fn restore_after_failed_uninstall(&self) {
+        let _ = ();
+    }
 }
 
 #[async_trait::async_trait]
@@ -560,6 +572,21 @@ impl UpdaterService {
         self.update_cancelled.load(Ordering::SeqCst)
     }
 
+    /// 卸载助手启动失败后恢复更新入口（卸载路由专用，见 trait 同名方法）
+    ///
+    /// `cancel_pending_update` 落下的两枚标记在这里复位：
+    /// - `update_cancelled` 直接置 false——spawn 失败意味着卸载未发生，
+    ///   "卸载后拒绝一切更新"的前提不再成立；
+    /// - `update_in_progress` 按 CAS 释放（仅 true → false），不干扰其他路径
+    ///   刚刚合法持有的下载互斥。
+    pub fn restore_after_failed_uninstall(&self) {
+        self.update_cancelled.store(false, Ordering::SeqCst);
+        self.update_in_progress
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .ok();
+        tracing::info!("卸载助手启动失败，已恢复更新入口（取消标记与下载互斥已复位）");
+    }
+
     /// 读取上次检查状态（`update/last_check.json`；缺失/损坏返回 `None`）
     pub fn last_check_state(&self) -> Option<LastCheckState> {
         let path = self.base_path.join(LAST_CHECK_FILE_NAME);
@@ -590,6 +617,30 @@ impl UpdaterService {
         // 互斥语义由 pending 文件承载：存在即"已暂存待重启"，进程内
         // AtomicBool 只防真正的并发下载窗口。
         if apply::has_pending_update(&self.base_path) {
+            // 幂等不等于免检：pending 存在但 staging 实物已失效（文件被清/损坏）时，
+            // 补唤醒 helper 只会被路径校验或 SHA 复核拒绝，前端却拿到"更新已就绪"
+            // 的成功——与 ensure_helper_for_shutdown 同口径校验，不符即清理现场并
+            // 显式失败，让用户重新检查、重新下载。
+            match apply::read_pending(&self.base_path) {
+                Ok(p) => {
+                    let exe = PathBuf::from(&p.staging_dir)
+                        .join("extracted")
+                        .join(apply::EXE_NAME);
+                    if !exe.exists() {
+                        tracing::warn!(
+                            staging_dir = %p.staging_dir,
+                            "待应用更新已存在但 staging exe 缺失，清理失效暂存"
+                        );
+                        apply::cleanup_after_apply(&self.base_path).await;
+                        return Err(UpdaterError::StalePending);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("待应用更新已存在但 pending.json 不可读（{e}），清理失效暂存");
+                    apply::cleanup_after_apply(&self.base_path).await;
+                    return Err(UpdaterError::StalePending);
+                }
+            }
             if let Err(e) = self.spawn_helper() {
                 // 补唤醒失败不报错：关机时 ensure_helper_for_shutdown 会再次尝试
                 tracing::warn!("待应用更新已存在，按需补唤醒 helper 失败（关机时会重试）: {e}");
@@ -649,15 +700,20 @@ impl UpdaterService {
     /// - 上传包：用户显式指定"就装这个包"，故不能因摘要不匹配而拒绝（自编译包、
     ///   镜像重打包的包都会不匹配），改为**只要能从包里解出可执行文件就安装**。
     ///
-    /// 由此带来的信任级别下降是**用户显式选择的结果**，但仍有硬约束兜住：
+    /// 版本闸门**不依赖远程清单**：手动上传的核心场景正是"远程没有发布 / 用户想装
+    /// 自编译包"，远程可达性不该成为闸门。改为解压后从产物 exe 中提取真实版本号
+    /// （Windows PE VERSIONINFO，见 [`version_info`]），用提取版本与当前版本比较——
+    /// 远程未发版时自编译新包可装，远程有新版时降级包也会被拒。由此带来的信任
+    /// 级别下降是**用户显式选择的结果**，但仍有硬约束兜住：
     /// - 目标 exe 路径始终取 `current_exe()`（不接受上传方指定的路径）；
     /// - Worker 目录仍须是内置 `<base>/python_worker`（外置/Docker 布局拒绝）；
     /// - 版本仍须**严格高于**当前版本（与 helper 侧 `pending_version_allowed` 同口径），
-    ///   否则 helper 会在替换前拒绝，留下一个永远不会被应用的 pending；
+    ///   且版本号必须能从包内提取——版本号未知的包写进 pending 只会被 helper 拒绝，
+    ///   留下一个永远不会被应用的待定更新，故 fail-closed；
     /// - 落盘仍走 [`Self::finalize_staged_package`]，exe 摘要由本进程实际计算后写入
     ///   `pending.json` 供 helper 复核（不是上传方声明的值）。
     ///
-    /// 返回解出的版本号，供前端提示。
+    /// 返回从包内提取的版本号，供前端提示。
     pub async fn apply_uploaded_package(
         &self,
         archive_name: &str,
@@ -701,51 +757,45 @@ impl UpdaterService {
         // 布局校验：外置 Worker / Docker 拒绝（与本地包复用同一道闸门）
         let worker_target_dir = self_update_worker_dir(&self.base_path)?;
 
-        // 版本闸门依赖远程清单：拿不到清单就没有可用的版本号，也就无法通过 helper
-        // 的版本校验。此处**不**降级放行——一个版本号未知的包写进 pending 只会被
-        // helper 拒绝，徒留一个永远无法应用的待定更新。
-        let settings = self.config.load_settings().global.updater;
-        let manifest = check::fetch_manifest_for_channel(
-            &self.effective_client(),
-            &settings.release_source_url,
-            settings.channel,
-        )
-        .await?;
-        if !check::compare_versions(&self.current_version, &manifest.version) {
-            return Err(UpdaterError::PackageNotNewer {
-                version: manifest.version.to_string(),
-            });
-        }
-
         let staging_dir = self.base_path.join(apply::STAGING_DIR_NAME);
         // 文件名净化：上传方提供的名字只取末段并剥离分隔符，避免路径片段变成落盘名；
         // 扩展名决定解压分派（zip / tar.gz），故保留用户提供的扩展名
         let safe_name = local::sanitize_upload_name(archive_name);
         let written = local::copy_into_staging(archive_path, &staging_dir, &safe_name).await?;
 
-        let info = UpdateInfo {
-            current_version: self.current_version.to_string(),
-            latest_version: manifest.version.to_string(),
-            update_available: true,
-            url: String::new(),
-            sha256: String::new(),
-            size: None,
-            notes: manifest.changelog.clone(),
-            release_date: manifest.release_date.clone(),
-            platform_unavailable: false,
-            // 上传包不经本地包扫描：条目由用户在浏览器里选定，不存在"复用缓存"语义
-            local_package: None,
-        };
-        let staged = download::extract_to_staging(&written, &staging_dir, &info.latest_version)
+        let staged = download::extract_to_staging(&written, &staging_dir)
             .await
             .inspect_err(|e| {
                 tracing::warn!(file = %safe_name, "选定的安装包解压失败: {e}");
             })?;
+        // 版本闸门：从解压产物 exe 提取真实版本号（PE VERSIONINFO），不依赖远程
+        // 清单——见 apply_uploaded_package 的 doc comment
+        let extracted = tokio::task::spawn_blocking({
+            let exe = staged.extracted_exe.clone();
+            move || version_info::extract_exe_version(&exe)
+        })
+        .await
+        .map_err(|e| UpdaterError::ExtractFailed(format!("版本提取任务执行失败: {e}")))?;
+        let version = gate_uploaded_version(&self.current_version, extracted)?;
+
+        let info = UpdateInfo {
+            current_version: self.current_version.to_string(),
+            latest_version: version.to_string(),
+            update_available: true,
+            url: String::new(),
+            sha256: String::new(),
+            size: None,
+            notes: None,
+            release_date: None,
+            platform_unavailable: false,
+            // 上传包不经本地包扫描：条目由用户在浏览器里选定，不存在"复用缓存"语义
+            local_package: None,
+        };
         self.finalize_staged_package(&staged, &info, &worker_target_dir, &staging_dir)
             .await?;
         self.spawn_helper()?;
         self.clear_update_progress();
-        Ok(info.latest_version)
+        Ok(version.to_string())
     }
 
     /// 网络下载 + 校验（本地包未命中/暂存失败时的路径）
@@ -821,8 +871,7 @@ impl UpdaterService {
             None => self.download_archive(info, &staging_dir).await?,
         };
 
-        let staged =
-            download::extract_to_staging(&zip_path, &staging_dir, &info.latest_version).await?;
+        let staged = download::extract_to_staging(&zip_path, &staging_dir).await?;
         self.finalize_staged_package(&staged, info, &worker_target_dir, &staging_dir)
             .await
     }
@@ -854,7 +903,7 @@ impl UpdaterService {
         }
         tracing::info!(
             "更新包已暂存：版本 {}，可执行文件 {}",
-            staged.version,
+            info.latest_version,
             staged.extracted_exe.display()
         );
 
@@ -1145,6 +1194,52 @@ impl UpdaterService {
     }
 }
 
+/// 上传包版本闸门（纯逻辑，便于单测三态）
+///
+/// - 提取结果为 `None`（非 Windows / 非 PE / 缺 VERSIONINFO）或无法归一化为
+///   semver → [`UpdaterError::VersionUnrecognized`]：版本号未知的包写进 pending
+///   只会被 helper 拒绝，必须 fail-closed；
+/// - 提取版本不高于当前版本 → [`UpdaterError::PackageNotNewer`]；
+/// - 成功返回归一化后的 semver 版本（写入 pending，供 helper 复核）。
+fn gate_uploaded_version(
+    current: &Version,
+    extracted: Option<String>,
+) -> Result<Version, UpdaterError> {
+    let raw = extracted.ok_or(UpdaterError::VersionUnrecognized)?;
+    let version = normalize_extracted_version(&raw).ok_or(UpdaterError::VersionUnrecognized)?;
+    if !check::compare_versions(current, &version) {
+        return Err(UpdaterError::PackageNotNewer {
+            version: version.to_string(),
+        });
+    }
+    Ok(version)
+}
+
+/// 将 PE VERSIONINFO 提取的版本字符串归一化为 semver
+///
+/// 常见形态："5.0.2"（semver 直通）、"5.0.2.0"（四段数字，丢 build 段）、
+/// "5.0.2-beta.1"（semver 直通）、"v5.0.2"（剥前缀）。无法取得任何数字段时
+/// 返回 `None`。
+fn normalize_extracted_version(raw: &str) -> Option<Version> {
+    let raw = raw.trim().trim_start_matches(['v', 'V']);
+    if let Ok(v) = Version::parse(raw) {
+        return Some(v);
+    }
+    let mut nums = [0u64; 3];
+    let mut filled = 0;
+    for part in raw.split('.') {
+        if filled == 3 {
+            break;
+        }
+        let Ok(n) = part.parse::<u64>() else {
+            break;
+        };
+        nums[filled] = n;
+        filled += 1;
+    }
+    (filled > 0).then_some(Version::new(nums[0], nums[1], nums[2]))
+}
+
 /// pending 路径校验（G13 防篡改基线，纯函数便于单测）
 ///
 /// - `staging_dir` 是 `remove_dir_all` 的目标，必须锁在 `base_path` 之内，
@@ -1425,6 +1520,188 @@ mod tests {
             !svc.update_in_progress.load(Ordering::SeqCst),
             "跳过路径不得遗留占用标记"
         );
+    }
+
+    /// 上传包版本闸门三态：提取失败拒绝、不高于当前拒绝、高于当前放行
+    #[test]
+    fn test_gate_uploaded_version_three_states() {
+        let current = Version::parse("5.0.2").unwrap();
+        // 提取失败（非 PE / 非 Windows / 缺资源）→ fail-closed
+        assert!(matches!(
+            gate_uploaded_version(&current, None),
+            Err(UpdaterError::VersionUnrecognized)
+        ));
+        // 内容不是版本号 → 同样拒绝
+        assert!(matches!(
+            gate_uploaded_version(&current, Some("not-a-version".into())),
+            Err(UpdaterError::VersionUnrecognized)
+        ));
+        // 低于 / 等于当前 → 拒绝（降级包不得装入）
+        assert!(matches!(
+            gate_uploaded_version(&current, Some("4.9.9".into())),
+            Err(UpdaterError::PackageNotNewer { .. })
+        ));
+        assert!(matches!(
+            gate_uploaded_version(&current, Some("5.0.2".into())),
+            Err(UpdaterError::PackageNotNewer { .. })
+        ));
+        // 高于当前 → 放行
+        assert_eq!(
+            gate_uploaded_version(&current, Some("5.0.3".into())).unwrap(),
+            Version::parse("5.0.3").unwrap()
+        );
+    }
+
+    /// PE 版本串归一化：四段数字丢 build 段、v 前缀剥离、semver 直通、非法拒绝
+    #[test]
+    fn test_normalize_extracted_version() {
+        assert_eq!(
+            normalize_extracted_version("5.0.2.0"),
+            Some(Version::parse("5.0.2").unwrap())
+        );
+        assert_eq!(
+            normalize_extracted_version(" v6.1.0 "),
+            Some(Version::parse("6.1.0").unwrap())
+        );
+        assert_eq!(
+            normalize_extracted_version("6.1.0-beta.1"),
+            Some(Version::parse("6.1.0-beta.1").unwrap())
+        );
+        // 两段数字缺省补 0
+        assert_eq!(
+            normalize_extracted_version("6.1"),
+            Some(Version::parse("6.1.0").unwrap())
+        );
+        assert_eq!(normalize_extracted_version(""), None);
+        assert_eq!(normalize_extracted_version("abc"), None);
+    }
+
+    /// 卸载助手启动失败后恢复更新入口：取消标记复位、CAS 释放互斥
+    #[tokio::test]
+    async fn test_restore_after_failed_uninstall() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+
+        // 模拟 cancel_pending_update 落下的两枚标记
+        svc.cancel_pending_update().await;
+        assert!(svc.update_cancelled(), "前置：取消标记应已置位");
+        assert!(
+            svc.update_in_progress.load(Ordering::SeqCst),
+            "前置：下载互斥应被抢占"
+        );
+
+        svc.restore_after_failed_uninstall();
+        assert!(
+            !svc.update_cancelled(),
+            "spawn 失败即卸载未发生，取消标记必须复位"
+        );
+        assert!(
+            !svc.update_in_progress.load(Ordering::SeqCst),
+            "被本流程抢占的互斥应经 CAS 释放"
+        );
+
+        // 复位后更新入口不再被 Cancelled 拒绝（这里会因布局校验失败，但不是 Cancelled）
+        let info = UpdateInfo {
+            current_version: "5.0.0".into(),
+            latest_version: "5.0.1".into(),
+            update_available: true,
+            url: "https://example.com/x.zip".into(),
+            sha256: String::new(),
+            size: None,
+            notes: None,
+            release_date: None,
+            platform_unavailable: false,
+            local_package: None,
+        };
+        assert!(matches!(
+            svc.apply_update(&info).await,
+            Err(UpdaterError::UnsupportedSelfUpdateLayout(_))
+        ));
+
+        // 互斥未被持有时重复复位无副作用（CAS 不误置）
+        svc.restore_after_failed_uninstall();
+        assert!(!svc.update_in_progress.load(Ordering::SeqCst));
+    }
+
+    /// 幂等分支失效检测：pending 存在但 staging exe 缺失 → StalePending 且现场被清理
+    #[tokio::test]
+    async fn test_apply_update_reports_stale_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+
+        // 造一份"指针还在、实物已丢"的待应用更新
+        let staging = dir.path().join("update/staging/extracted");
+        std::fs::create_dir_all(&staging).unwrap();
+        let pending = PendingUpdate {
+            version: "999.0.0".into(),
+            staging_dir: dir
+                .path()
+                .join("update/staging")
+                .to_string_lossy()
+                .into_owned(),
+            target_exe: dir
+                .path()
+                .join("campus-auth.exe")
+                .to_string_lossy()
+                .into_owned(),
+            worker_target_dir: String::new(),
+            original_args: vec![],
+            sha256: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        apply::write_pending(&pending, dir.path()).unwrap();
+
+        let info = UpdateInfo {
+            current_version: "5.0.0".into(),
+            latest_version: "5.0.1".into(),
+            update_available: true,
+            url: "https://example.com/x.zip".into(),
+            sha256: String::new(),
+            size: None,
+            notes: None,
+            release_date: None,
+            platform_unavailable: false,
+            local_package: None,
+        };
+        assert!(
+            matches!(
+                svc.apply_update(&info).await,
+                Err(UpdaterError::StalePending)
+            ),
+            "staging 实物缺失时不得假装更新已就绪"
+        );
+        assert!(
+            !apply::has_pending_update(dir.path()),
+            "失效的 pending 应被清理"
+        );
+        assert!(!dir.path().join(apply::STAGING_DIR_NAME).exists());
+    }
+
+    /// 幂等分支失效检测：pending.json 损坏 → StalePending 且现场被清理
+    #[tokio::test]
+    async fn test_apply_update_reports_corrupted_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path()).await;
+        std::fs::create_dir_all(dir.path().join("update/staging/extracted")).unwrap();
+        std::fs::write(dir.path().join("update/pending.json"), b"{ not valid json").unwrap();
+
+        let info = UpdateInfo {
+            current_version: "5.0.0".into(),
+            latest_version: "5.0.1".into(),
+            update_available: true,
+            url: "https://example.com/x.zip".into(),
+            sha256: String::new(),
+            size: None,
+            notes: None,
+            release_date: None,
+            platform_unavailable: false,
+            local_package: None,
+        };
+        assert!(matches!(
+            svc.apply_update(&info).await,
+            Err(UpdaterError::StalePending)
+        ));
+        assert!(!apply::has_pending_update(dir.path()));
     }
 
     /// has_pending_update：pending.json 存在与否决定重启入口是否走

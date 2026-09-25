@@ -45,10 +45,10 @@ pub struct PendingUpdate {
     pub worker_target_dir: String,
     /// 主进程原始启动参数（助手用于重启时恢复）
     pub original_args: Vec<String>,
-    /// 暂存包预期 SHA256（hex，空表示未取得校验值）
+    /// 暂存包预期 SHA256（hex，64 字符；缺失即拒绝）
     ///
-    /// G13：helper 替换前据此复核 staging exe 完整性；为空时 helper 侧跳过
-    /// 复核（与 check.rs 的"信任 HTTPS"降级一致）。
+    /// G13：helper 替换前据此复核 staging exe 完整性；空值直接拒绝替换
+    /// （fail-closed，不降级信任 HTTPS），与下载端 MissingChecksum 同口径。
     #[serde(default)]
     pub sha256: String,
     /// 创建时间（ISO 8601）

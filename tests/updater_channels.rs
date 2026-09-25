@@ -723,6 +723,22 @@ fn real_update_zip() -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
+/// 构造一个 exe 携带 PE VERSIONINFO 资源的真实 zip（版本闸门可提取出版本号）
+///
+/// exe 内容来自更新器的测试夹具（最小 PE 镜像，见
+/// `campus_auth::updater::version_info::build_minimal_pe_with_version`）：
+/// 上传路径的版本闸门从解压产物中提取**包内真实版本**，占位字节会被
+/// `VersionUnrecognized` 拒绝。
+fn versioned_update_zip(version: &str) -> Vec<u8> {
+    use std::io::Write;
+    let pe = campus_auth::updater::version_info::build_minimal_pe_with_version(version, true);
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file(exe_name(), zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(&pe).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
 /// 当前平台的可执行文件名（与生产侧 `updater::apply::EXE_NAME` 一致）
 fn exe_name() -> &'static str {
     if cfg!(windows) {
@@ -757,71 +773,97 @@ fn assert_reached_pending(result: Result<String, UpdaterError>, base: &Path) {
     );
 }
 
-/// 正常路径（真实实现）：远程版本更高 + 内置 Worker 布局 + 合法 zip →
-/// 解压、计算 exe 摘要并写出 `pending.json`
+/// 正常路径（真实实现）：包内 exe 携带更高版本（PE VERSIONINFO）+ 内置 Worker
+/// 布局 + 合法 zip → 解压、提取版本、计算 exe 摘要并写出 `pending.json`
+///
+/// 版本闸门**不依赖远程清单**（远程未发版时自编译包也要能装）：更新源指向
+/// 确定无人监听的死端口，更新照常走通——离线可用性被本用例锁定。
+/// 非 Windows 平台没有 PE 版本提取实现，包内 exe 无法识别版本 → `VersionUnrecognized`
+/// （fail-closed，见 `version_info` 模块说明）。
 #[tokio::test]
 async fn apply_uploaded_package_stages_and_writes_pending() {
     ensure_no_proxy();
-    let mock = spawn_github_mock();
-    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("python_worker")).unwrap();
+    // 死端口更新源：上传路径不再拉取远程清单，指向不可达源也应照常走通
     let svc = service_with(
         dir.path(),
-        &format!("http://127.0.0.1:{port}/repos/o/r/releases/latest"),
+        "http://127.0.0.1:9/repos/o/r/releases/latest",
         "stable",
     )
     .await;
-    let path = write_upload_temp(dir.path(), &real_update_zip());
 
-    let result = svc.apply_uploaded_package("pkg.zip", &path).await;
-    assert_reached_pending(result, dir.path());
+    if cfg!(windows) {
+        let path = write_upload_temp(dir.path(), &versioned_update_zip("9.9.9"));
+        let result = svc.apply_uploaded_package("pkg.zip", &path).await;
+        assert_reached_pending(result, dir.path());
 
-    // pending 的 sha256 必须是**解压出的 exe** 的摘要（而非压缩包摘要），
-    // 否则 helper 侧的复核恒失败
-    let pending: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.path().join("update/pending.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(pending["version"], remote_stable_tag());
-    let extracted = dir.path().join("update/staging/extracted").join(exe_name());
-    assert!(extracted.exists(), "解压产物应存在于 staging");
-    assert_eq!(
-        pending["sha256"].as_str().unwrap(),
-        sha256_hex(&std::fs::read(&extracted).unwrap()),
-        "pending.sha256 应为解压后 exe 的摘要"
-    );
+        // pending 的版本是**包内提取**的版本号（而非远程清单）；
+        // sha256 必须是**解压出的 exe** 的摘要（而非压缩包摘要），
+        // 否则 helper 侧的复核恒失败
+        let pending: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("update/pending.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pending["version"], "9.9.9");
+        let extracted = dir.path().join("update/staging/extracted").join(exe_name());
+        assert!(extracted.exists(), "解压产物应存在于 staging");
+        assert_eq!(
+            pending["sha256"].as_str().unwrap(),
+            sha256_hex(&std::fs::read(&extracted).unwrap()),
+            "pending.sha256 应为解压后 exe 的摘要"
+        );
+    } else {
+        // 非 Windows：夹具/占位 exe 均无版本资源可解析 → 明确拒绝且不写 pending
+        let path = write_upload_temp(dir.path(), &real_update_zip());
+        let err = svc
+            .apply_uploaded_package("pkg.zip", &path)
+            .await
+            .expect_err("非 Windows 平台无法从包内提取版本，应拒绝");
+        assert!(matches!(err, UpdaterError::VersionUnrecognized), "{err}");
+        assert!(!dir.path().join("update").join("pending.json").exists());
+    }
 }
 
-/// 版本闸门（真实实现）：远程最新版本不高于当前版本 → 拒绝，且不写 pending
+/// 版本闸门（真实实现）：包内版本不高于当前版本 → 拒绝，且不写 pending
 ///
-/// 这条闸门与 helper 侧 `pending_version_allowed` 同口径——放行会写下一个 helper
-/// 必然拒绝的 pending，留下永远无法应用的待定更新（用户看到"已就绪"却永远更新不了）。
+/// 版本号来自解压产物 exe 的 PE VERSIONINFO（Windows）；这条闸门与 helper 侧
+/// `pending_version_allowed` 同口径——放行会写下一个 helper 必然拒绝的 pending，
+/// 留下永远无法应用的待定更新（用户看到"已就绪"却永远更新不了）。
+/// 非 Windows 平台无法提取版本，在版本闸门之前就以 `VersionUnrecognized` 拒绝。
 #[tokio::test]
-async fn apply_uploaded_package_rejects_when_remote_not_newer() {
+async fn apply_uploaded_package_rejects_when_package_not_newer() {
     ensure_no_proxy();
-    let mock = spawn_github_mock();
-    let port = mock.port;
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("python_worker")).unwrap();
-    // `/mirror/current.json` 的清单版本等于当前版本 → compare_versions 为假
     let svc = service_with(
         dir.path(),
-        &format!("http://127.0.0.1:{port}/mirror/current.json"),
-        "all",
+        "http://127.0.0.1:9/repos/o/r/releases/latest",
+        "stable",
     )
     .await;
-    let path = write_upload_temp(dir.path(), &real_update_zip());
 
-    let err = svc
-        .apply_uploaded_package("pkg.zip", &path)
-        .await
-        .expect_err("远程版本不高于当前时应拒绝");
-    assert!(matches!(err, UpdaterError::PackageNotNewer { .. }), "{err}");
-    assert!(
-        !dir.path().join("update").join("pending.json").exists(),
-        "被拒绝时不得写入 pending"
-    );
+    if cfg!(windows) {
+        // 夹具 PE 的包内版本 0.0.1 低于当前版本
+        let path = write_upload_temp(dir.path(), &versioned_update_zip("0.0.1"));
+        let err = svc
+            .apply_uploaded_package("pkg.zip", &path)
+            .await
+            .expect_err("包内版本不高于当前时应拒绝");
+        assert!(matches!(err, UpdaterError::PackageNotNewer { .. }), "{err}");
+        assert!(
+            !dir.path().join("update").join("pending.json").exists(),
+            "被拒绝时不得写入 pending"
+        );
+    } else {
+        let path = write_upload_temp(dir.path(), &real_update_zip());
+        let err = svc
+            .apply_uploaded_package("pkg.zip", &path)
+            .await
+            .expect_err("非 Windows 平台无法提取版本应拒绝");
+        assert!(matches!(err, UpdaterError::VersionUnrecognized), "{err}");
+        assert!(!dir.path().join("update").join("pending.json").exists());
+    }
 }
 
 /// 布局闸门（真实实现）：外置 Worker（无内置 `<base>/python_worker`）→ 拒绝

@@ -527,10 +527,9 @@ impl ApplyUpdateBody {
             tracing::warn!("拒绝固定版本更新：SHA256 格式非法");
             return None;
         }
-        // 版本闸门：U3 的"pending 版本不高于当前则跳过"只存在于启动
-        // self_replace 路径（updater/mod.rs），helper 替换路径完全没有版本
-        // 检查——缺此闸门时 pin 一个旧版本号可畅通走完"下载 → helper 替换"，
-        // 形成降级通道
+        // 版本闸门：与 helper 侧 pending_version_allowed、启动路径 U3 校验、上传包
+        // 提取版本闸门同口径——不高于当前版本的请求在入口就拒绝，不让它走到
+        // 下载与替换阶段才被拦下
         let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
         let remote = semver::Version::parse(&version).ok()?;
         if !crate::updater::check::compare_versions(&current, &remote) {
@@ -579,9 +578,16 @@ pub async fn apply_update(
     tracing::info!(version = %info.latest_version, "开始下载并暂存更新");
     updater.apply_update(&info).await.map_err(|e| {
         tracing::warn!(version = %info.latest_version, "应用更新失败: {e}");
-        // 走 From 映射：UpdateInProgress / LoginInProgress 等调用时序冲突回 409，
-        // 不再统一包成 500 误导前端走"服务端故障"分支
-        ApiError::from(e)
+        match e {
+            // 并发更新 / 登录进行中属调用时序冲突，回 409，不再统一包成 500
+            // 误导前端走"服务端故障"分支
+            crate::updater::UpdaterError::UpdateInProgress
+            | crate::updater::UpdaterError::LoginInProgress => ApiError::Conflict(e.to_string()),
+            // 暂存已失效（pending 残留但 staging 实物已丢）是用户可纠正的状态，
+            // 回 400 并提示重新检查安装，而非 500
+            crate::updater::UpdaterError::StalePending => ApiError::BadRequest(e.to_string()),
+            other => ApiError::from(other),
+        }
     })?;
     Ok(data(serde_json::json!({
         "message": "更新已暂存，重启后生效",
@@ -655,8 +661,10 @@ pub async fn apply_update_package(
                     crate::updater::UpdaterError::UpdateInProgress
                     | crate::updater::UpdaterError::LoginInProgress
                     | crate::updater::UpdaterError::Cancelled => ApiError::Conflict(e.to_string()),
-                    // 包本身的问题（版本不够新 / 解压失败 / 超限）是用户可纠正的输入错误
+                    // 包本身的问题（版本不够新 / 无法识别版本 / 解压失败 / 超限）
+                    // 是用户可纠正的输入错误
                     crate::updater::UpdaterError::PackageNotNewer { .. }
+                    | crate::updater::UpdaterError::VersionUnrecognized
                     | crate::updater::UpdaterError::ExtractFailed(_)
                     | crate::updater::UpdaterError::DownloadTooLarge { .. }
                     | crate::updater::UpdaterError::MissingChecksum => {
