@@ -212,7 +212,9 @@ pub(crate) fn logging_config_from_value(
         .and_then(|g| g.get("logging"))
         .and_then(|l| l.get("retention_days"))
         .and_then(|v| v.as_u64())
-        .map(|d| d as u32)
+        // u64 → u32 防回绕：直接 `as u32` 会把 2^32+n 截断成 n（如 4294967297 → 1），
+        // 语义完全反转；超界值按"尽量长保留"饱和到 u32::MAX
+        .map(|d| u32::try_from(d).unwrap_or(u32::MAX))
         .unwrap_or(7);
     let file_enabled = value
         .get("global")
@@ -240,6 +242,36 @@ pub fn reload_log_level(level: &str) {
 // 文件保留清理
 // ============================================================
 
+/// 判定日志文件是否为「当前活跃」文件（writer 正持有，不参与任何删除）
+///
+/// `tracing_appender::rolling::daily` 的实际命名是 `app.log.YYYY-MM-DD`——不存在
+/// 裸 `app.log`，旧实现以 `name == "app.log"` 判活跃是死代码，导致当天的
+/// `app.log.<今天>` 被当作轮转文件，可能被过期清理/配额清理误删（Windows 下
+/// 因句柄锁删除失败静默跳过，Unix 下会真删掉正在写入的文件）。
+///
+/// 判定规则：
+/// - 裸 `app.log`（历史非轮转实现可能遗留，无法排除仍被写入）视为活跃；
+/// - `app.log.<日期>` 的日期后缀 == 今天本地日期视为活跃；
+/// - 日期后缀解析失败（如手工改名的文件）回退 mtime 距今 < 24h 判活跃，
+///   偏保守方向：宁可少删，不可误删正在写入的日志。
+fn is_active_log_file(name: &str, modified: std::time::SystemTime) -> bool {
+    if name == "app.log" {
+        return true;
+    }
+    let Some(date_part) = name.strip_prefix("app.log.") else {
+        return false;
+    };
+    if chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d").is_ok() {
+        // 后缀是合法日期：与今天本地日期比对（与 appender 轮转粒度一致的本地时区口径）
+        return date_part == chrono::Local::now().format("%Y-%m-%d").to_string();
+    }
+    // 解析失败回退：mtime 距今不足 24h 视为仍可能活跃
+    modified
+        .elapsed()
+        .map(|age| age < std::time::Duration::from_secs(86_400))
+        .unwrap_or(false)
+}
+
 /// 清理过期日志文件（每日兜底任务的入口；启动时的首次清理在 `init_logging` 内）
 pub fn cleanup_expired_logs(base_path: &Path, retention_days: u32) {
     let logs_dir = crate::utils::paths::logs_dir(base_path);
@@ -256,9 +288,14 @@ const LOG_TOTAL_QUOTA_BYTES: u64 = 200 * 1024 * 1024;
 /// 删除 logs/ 目录下超过保留天数或超出总配额的旧日志文件
 ///
 /// 保留天数优先：仅删除修改时间早于 cutoff 的 `app.log*` 轮转文件，跳过当前
-/// 正在写入的 `app.log`（`tracing_appender::rolling::daily` 生成
-/// `app.log.YYYY-MM-DD`）；随后执行总配额兜底，从最旧文件删起，删除失败
-/// （Windows 句柄锁等）跳过继续。`quota_bytes` 参数化以便测试注入小配额。
+/// 正在写入的活跃文件（判定见 [`is_active_log_file`]；`tracing_appender::rolling::daily`
+/// 实际生成 `app.log.YYYY-MM-DD`，当天的文件由活跃判定保护，不落入删除集合）；
+/// 随后执行总配额兜底，从最旧文件删起，删除失败（Windows 句柄锁等）跳过继续。
+/// `quota_bytes` 参数化以便测试注入小配额。
+///
+/// `retention_days == 0` 语义：仅保留当天活跃文件，其余全删（cutoff = now）。
+/// 前端设置项限定了 min 1（`configRanges.ts`），该值仅可能来自手工编辑配置，
+/// 后端按上述口径兜底而非报错。
 fn cleanup_old_logs(logs_dir: &Path, retention_days: u32, quota_bytes: u64) {
     let Ok(entries) = std::fs::read_dir(logs_dir) else {
         tracing::warn!("读取日志目录失败，跳过过期日志清理");
@@ -281,11 +318,11 @@ fn cleanup_old_logs(logs_dir: &Path, retention_days: u32, quota_bytes: u64) {
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        if name == "app.log" {
-            // 当前活跃文件被 writer 持有，只参与配额计算，不参与删除
-            active_size = meta.len();
+        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if is_active_log_file(name, modified) {
+            // 活跃文件被 writer 持有，只参与配额计算，不参与删除
+            active_size = active_size.saturating_add(meta.len());
         } else {
-            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             rotated.push((path, meta.len(), modified));
         }
     }
@@ -663,5 +700,80 @@ mod tests {
         cleanup_old_logs(dir, 1, u64::MAX);
         assert!(!p.exists(), "超期文件按天数删除");
         assert!(dir.join("app.log.2026-01-03").exists(), "未过期文件不动");
+    }
+
+    /// 活跃文件判定：当天的 `app.log.<今天>` 必须受保护（tracing-appender daily
+    /// 不生成裸 `app.log`，旧实现 `name == "app.log"` 是死代码，当天文件会被
+    /// 过期清理误删——Unix 下会删掉正在写入的文件）
+    #[test]
+    fn test_cleanup_keeps_today_active_file() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        // 当天活跃文件：mtime 设为 23 小时前（当天凌晨写入的场景），retention=0
+        // 的 cutoff = now 也会命中它，必须靠活跃判定保护
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let p = dir.join(format!("app.log.{today}"));
+        std::fs::write(&p, b"active").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(23 * 3600))
+            .unwrap();
+        // 昨天的文件：retention=0 下应删除
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        let py = dir.join(format!("app.log.{yesterday}"));
+        std::fs::write(&py, b"old").unwrap();
+
+        // retention = 0：仅保留当天活跃文件
+        cleanup_old_logs(dir, 0, u64::MAX);
+        assert!(p.exists(), "当天活跃文件不应被删除");
+        assert!(!py.exists(), "昨天文件应被删除");
+
+        // 裸 app.log（历史遗留）同样视为活跃不删
+        let bare = dir.join("app.log");
+        std::fs::write(&bare, b"bare").unwrap();
+        cleanup_old_logs(dir, 0, u64::MAX);
+        assert!(bare.exists(), "裸 app.log 应视为活跃不删");
+    }
+
+    /// 日期后缀解析失败时回退 mtime 判活跃：近期文件保守保留，陈旧文件正常清理。
+    /// 用小配额触发删除路径（按天保留下近期文件本就不会过期，须靠配额路径
+    /// 验证「近期非法后缀文件被活跃判定保护」确实生效）
+    #[test]
+    fn test_cleanup_fallback_for_unparseable_suffix() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        // 非法日期后缀 + 近期 mtime → 回退判活跃，配额清理也不删
+        let recent = dir.join("app.log.not-a-date");
+        std::fs::write(&recent, b"r").unwrap();
+        // 非法日期后缀 + 陈旧 mtime（2 天前）→ 回退判不活跃，配额超限时被删
+        let stale = dir.join("app.log.20260101");
+        std::fs::write(&stale, vec![b's'; 512]).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(2 * 86_400))
+            .unwrap();
+
+        // retention=365（按天不过期）+ 100B 配额：总量远超配额，从最旧轮转文件删起
+        cleanup_old_logs(dir, 365, 100);
+        assert!(recent.exists(), "非法后缀 + 近期 mtime 应保守判活跃");
+        assert!(!stale.exists(), "非法后缀 + 陈旧 mtime 应被配额清理删除");
+    }
+
+    /// retention 配置防回绕：u64 → u32 直接 `as` 截断会把 2^32+n 变成 n，
+    /// 必须饱和而不是回绕（2^32+1 曾被截成 1 天）
+    #[test]
+    fn test_retention_u64_to_u32_no_wraparound() {
+        use serde_json::json;
+        let (_, retention, _) = logging_config_from_value(&json!({
+            "global": {"logging": {"retention_days": 4_294_967_297u64}}
+        }));
+        assert_eq!(retention, u32::MAX);
     }
 }

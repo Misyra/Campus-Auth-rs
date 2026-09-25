@@ -410,7 +410,9 @@ async fn execute_attempt(
     // 任务类型由 target_id 关联的目标任务权威推导（TaskKind），不再冗余存储 task_type。
     let (success, message) = match service.task_manager.load_task(&target_id).await {
         Ok(kind) => {
-            // 定时浏览器任务统一走通用语义（打卡/签到等日常自动化），不注入账号密码。
+            // 定时浏览器任务统一走通用语义（打卡/签到等日常自动化）：不执行登录
+            // 状态机，但注入 Profile 保留变量（username/password/isp 等）供任务
+            // 模板 {{USERNAME}}/{{PASSWORD}}/{{ISP}} 等使用。
             // 登录认证由断网自动触发（LoginSource::Auto）或手动登录按钮负责，二者正交。
             //
             // 超时覆写（默认值 + 浏览器毫秒 / 脚本秒的单位差异 + 钳制）

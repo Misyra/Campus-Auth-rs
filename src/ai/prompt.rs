@@ -243,9 +243,12 @@ pub fn windowed_html_with_note(html: &str, budget: usize) -> (String, String) {
 /// 在 HTML 中定位登录表单锚点（返回字符偏移），按信号强度逐级降级：
 /// 密码输入框 > 用户名/账号类字段 > 提交按钮/登录文案。全部未命中返回 None。
 fn find_login_anchor(html: &str) -> Option<usize> {
-    // 小写副本上扫描（ASCII 小写不改变字节长度，偏移换算安全；中文不受影响）
+    // 小写副本上扫描。注意 `to_lowercase` 对部分 Unicode 字符会改变字节长度
+    //（如 'İ' U+0130 折叠为 "i̇" 两个字符），lower 的字节偏移与原串可能错位，
+    // 直接 `html[..pos]` 会劈开多字节字符触发 char boundary panic，
+    // 因此换算前先经 [`byte_pos_on_boundary`] 回退到最近字符边界。
     let lower = html.to_lowercase();
-    let byte_to_char = |pos: usize| html[..pos].chars().count();
+    let byte_to_char = |pos: usize| html[..byte_pos_on_boundary(html, pos)].chars().count();
 
     // 1) 密码框（引号 / 无引号两种写法）
     for needle in ["type=\"password\"", "type=password", "type='password'"] {
@@ -283,6 +286,20 @@ fn find_login_anchor(html: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// 把 lower 串上的字节偏移换算回原串的安全字节偏移（落在字符边界上）
+///
+/// `to_lowercase` 的 Unicode 大小写折叠可改变字节长度，needle 命中位置之前的
+/// 折叠字符会让 lower 的偏移与原串错位：可能劈开多字节字符，也可能超出原串
+/// 长度。容错策略：clamp 到原串长度后向前回退到最近字符边界——锚点最多前移
+/// 几个字符，对「以锚点为中心开窗口」的用途无实质影响。
+fn byte_pos_on_boundary(html: &str, mut pos: usize) -> usize {
+    pos = pos.min(html.len());
+    while pos > 0 && !html.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
 }
 
 /// 按字符截断（非字节），保证不劈开 UTF-8 多字节字符
@@ -405,6 +422,35 @@ mod tests {
         assert!(text.contains("username"));
         // 未劈开 UTF-8（劈开会产生替换符 U+FFFD）
         assert!(!text.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_windowed_html_turkish_i_anchor_safe() {
+        // 'İ'（U+0130）to_lowercase 折叠为 "i̇"（两字符三字节），lower 的字节
+        // 偏移与原串错位：旧实现直接 html[..pos] 会在 'İ' 中间劈开触发
+        // char boundary panic。锚点位于 'İ' 之后仍须正确定位且不 panic。
+        let mut html = String::from("<html><body><div>\u{0130}");
+        html.push_str(&"页".repeat(50_000));
+        html.push_str("<input type=\"password\">");
+        html.push_str(&"页".repeat(50_000));
+        html.push_str("</div></body></html>");
+        let (text, note) = windowed_html_with_note(&html, 800);
+        assert_eq!(note, "已以登录表单为中心截取");
+        assert!(text.contains("type=\"password\""));
+        assert!(!text.contains('\u{FFFD}'), "不得劈开 UTF-8 多字节字符");
+    }
+
+    #[test]
+    fn test_byte_pos_on_boundary_fallbacks() {
+        // 错位偏移落在多字节字符中间 → 回退到最近边界
+        let s = "a页b"; // '页' 占 3 字节：边界为 0/1/4/5
+        assert_eq!(byte_pos_on_boundary(s, 2), 1);
+        assert_eq!(byte_pos_on_boundary(s, 3), 1);
+        // 超出原串长度 → clamp
+        assert_eq!(byte_pos_on_boundary(s, 100), 5);
+        // 本就对齐的偏移原样返回
+        assert_eq!(byte_pos_on_boundary(s, 4), 4);
+        assert_eq!(byte_pos_on_boundary(s, 0), 0);
     }
 
     #[test]

@@ -446,8 +446,9 @@ impl TaskExecutor {
                 return Err(TaskError::IoError(e));
             }
         };
-        // Windows 下用 KILL_ON_JOB_CLOSE 约束整棵任务进程树。任务超时、调度器
-        // 关闭或 future 被取消时，守卫析构都会由内核回收脚本拉起的后代进程。
+        // Windows 下用 KILL_ON_JOB_CLOSE 约束整棵任务进程树。守卫析构（Job 句柄
+        // 关闭）时由内核回收脚本拉起的全部后代进程——不仅限超时/取消/调度器关闭，
+        // **任务正常返回的路径同样回收**：脚本不要依赖自身拉起的常驻进程继续存活。
         #[cfg(windows)]
         let _job = crate::bridge::job::try_assign_job(&child);
         // 记录 PID：超时后需 taskkill /T 递归强杀整个进程树（kill_on_drop 只杀直接子进程）

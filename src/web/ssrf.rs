@@ -10,7 +10,9 @@
 //! 2. 通过 `ClientBuilder::resolve(host, ip)` 把域名钉扎到已校验的 IP，
 //!    reqwest 不再自行解析；
 //! 3. 禁用自动重定向，手动跟随（最多 5 跳）并对每一跳重新校验，
-//!    防止"公网 URL 302 → 内网地址"的二次跳转攻击。
+//!    防止"公网 URL 302 → 内网地址"的二次跳转攻击；
+//! 4. 经代理请求时钉扎不生效（域名由代理解析），代理路径改为不跟随
+//!    重定向（见 [`secure_get_proxied`] doc comment 的剩余风险口径）。
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -38,6 +40,32 @@ pub fn is_restricted_ip(ip: IpAddr) -> bool {
                 return is_restricted_ipv4(v4);
             }
             let segments = v6.segments();
+            // NAT64（64:ff9b::/96，RFC 6052）：低 32 位内嵌 IPv4。
+            // 不解包则 ::64:ff9b:... 形式的地址既不命中 V6 判定也不经过 V4 规则，
+            // 可携带内网 IPv4 绕过校验（部分网关会按 NAT64 直接路由到该 IPv4）。
+            if segments[0] == 0x0064
+                && segments[1] == 0xff9b
+                && segments[2..6].iter().all(|segment| *segment == 0)
+            {
+                let v4 = std::net::Ipv4Addr::new(
+                    (segments[6] >> 8) as u8,
+                    (segments[6] & 0xff) as u8,
+                    (segments[7] >> 8) as u8,
+                    (segments[7] & 0xff) as u8,
+                );
+                return is_restricted_ipv4(v4);
+            }
+            // 6to4（2002::/16，RFC 3056）：第 2-5 字节内嵌公网 IPv4 中继地址。
+            // 攻击者可构造 2002::<内网 IPv4 编码>::... 指向内网目标，须解包判定。
+            if segments[0] == 0x2002 {
+                let v4 = std::net::Ipv4Addr::new(
+                    (segments[1] >> 8) as u8,
+                    (segments[1] & 0xff) as u8,
+                    (segments[2] >> 8) as u8,
+                    (segments[2] & 0xff) as u8,
+                );
+                return is_restricted_ipv4(v4);
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
@@ -153,7 +181,17 @@ pub async fn secure_get(
 /// [`secure_get`] 的代理版本：请求经 `proxy`（如 `http://127.0.0.1:7890`）转发。
 ///
 /// 用于仓库任务/背景图等下载场景（国内访问 GitHub raw 常需代理）。
-/// 校验流程与 [`secure_get`] 完全一致。
+/// scheme / DNS 前置校验与 [`secure_get`] 完全一致，重定向策略不同：
+///
+/// - **直连**（`proxy == None`）：逐跳手动跟随重定向，每跳重新解析并钉扎校验；
+/// - **代理**：不跟随重定向，3xx 响应原样返回。原因是经代理请求时 reqwest 以
+///   绝对 URI 把请求交给代理，`ClientBuilder::resolve` 钉扎不生效，目标域名由
+///   代理解析——逐跳校验与实际连接目标之间存在代理解析的 TOCTOU，本模块无法
+///   钉扎代理侧行为，故保守放弃跟随，把重定向交给调用方按非成功状态处理。
+///
+/// 剩余风险口径：代理开启时，首次请求前的 [`resolve_public`] 校验只做前置
+/// 过滤（拦下解析结果即内网的 host），代理解析到哪个 IP 由代理自身决定，
+/// 不受本模块控制；重定向后的目标同样未经本模块校验。
 pub async fn secure_get_proxied(
     url: &str,
     timeout: Duration,
@@ -194,8 +232,13 @@ pub async fn secure_get_proxied(
             return Err(format!("请求失败: {last_err}"));
         };
 
-        // 手动跟随重定向：Location 相对当前 URL 解析后重新走完整校验
+        // 重定向处理：直连逐跳手动跟随（Location 相对当前 URL 解析后重新走完整
+        // 校验）；代理路径不跟随（钉扎经代理不生效，见函数 doc comment），3xx
+        // 原样交还调用方。
         if resp.status().is_redirection() {
+            if proxy.is_some() {
+                return Ok((resp, current));
+            }
             let loc = resp
                 .headers()
                 .get(header::LOCATION)
@@ -267,6 +310,36 @@ mod tests {
         // 映射公网地址不受影响
         assert!(!is_restricted_ip(IpAddr::V6(
             "::ffff:8.8.8.8".parse().unwrap()
+        )));
+    }
+
+    /// NAT64（64:ff9b::/96）与 6to4（2002::/16）：低 32 位内嵌 IPv4 必须解包后按 V4 规则判定，
+    /// 否则 2002::0a00:0001（= 2002:10.0.0.1 编码）等地址可绕过校验直连内网
+    #[test]
+    fn test_is_restricted_rejects_nat64_and_6to4_embedded_ipv4() {
+        // NAT64 携带内网 IPv4（64:ff9b:: 后 32 位 = 10.0.0.1 / 192.168.1.1 / 127.0.0.1）
+        assert!(is_restricted_ip(IpAddr::V6(
+            "64:ff9b::a00:1".parse().unwrap()
+        )));
+        assert!(is_restricted_ip(IpAddr::V6(
+            "64:ff9b::c0a8:101".parse().unwrap()
+        )));
+        assert!(is_restricted_ip(IpAddr::V6(
+            "64:ff9b::7f00:1".parse().unwrap()
+        )));
+        // 6to4 携带内网 IPv4（2002: 前缀后 32 位 = 10.0.0.1 / 169.254.1.1）
+        assert!(is_restricted_ip(IpAddr::V6(
+            "2002:a00:1::1".parse().unwrap()
+        )));
+        assert!(is_restricted_ip(IpAddr::V6(
+            "2002:a9fe:101::1".parse().unwrap()
+        )));
+        // NAT64 / 6to4 携带公网 IPv4 不受影响
+        assert!(!is_restricted_ip(IpAddr::V6(
+            "64:ff9b::808:808".parse().unwrap()
+        )));
+        assert!(!is_restricted_ip(IpAddr::V6(
+            "2002:808:808::1".parse().unwrap()
         )));
     }
 

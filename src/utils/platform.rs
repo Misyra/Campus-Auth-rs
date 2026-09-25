@@ -34,15 +34,47 @@ mod imp {
                 bail!("注册自启动失败（reg add 返回非零退出码）");
             }
         } else {
-            let status = Command::new("reg")
+            // reg delete 的退出码 1 无法区分「键值本就不存在（幂等成功）」与
+            // 「真实删除失败」，且退出码 0 也不能证明键值确实被删（如空 Run 键
+            // 已被外部清理的竞态）——删除后一律用 reg query 复核键值是否真的
+            // 消失：消失即成功（含键值本就不存在的幂等情形），仍存在才是失败。
+            Command::new("reg")
                 .args(["delete", RUN_KEY, "/v", "Campus-Auth", "/f"])
                 .status()?;
-            // 键值本就不存在：视为已取消（幂等），不算失败
-            if !status.success() && status.code() != Some(1) {
-                bail!("取消自启动失败（reg delete 返回非零退出码）");
+            if reg_value_exists(RUN_KEY, "Campus-Auth")? {
+                bail!("关闭自启动失败：注册表键值仍存在");
             }
         }
         Ok(())
+    }
+
+    /// 用 `reg query` 复核指定键值是否仍存在
+    ///
+    /// 查询命中（exit 0）= 存在；查询未命中（非 0）= 已消失；reg 无法启动等
+    /// 基础设施失败向上传播（此时无法给出可信结论，不应静默判成功）。
+    fn reg_value_exists(key: &str, value: &str) -> Result<bool> {
+        let status = Command::new("reg")
+            .args(["query", key, "/v", value])
+            .status()?;
+        Ok(status.success())
+    }
+
+    /// 幂等取消：键值不存在时 reg delete 返回非零，复核查询确认消失即成功
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 只读查询：不存在的键值必须判定为「已消失」（删除路径幂等成功的前提）。
+        /// 用专用的探针值名，绝不触碰真实的 Campus-Auth 键值。
+        #[test]
+        fn reg_query_reports_missing_value_as_gone() {
+            let exists = reg_value_exists(
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "Campus-Auth-Probe-Definitely-Missing",
+            )
+            .expect("reg query 应能正常执行");
+            assert!(!exists);
+        }
     }
 }
 

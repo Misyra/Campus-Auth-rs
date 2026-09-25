@@ -524,6 +524,12 @@ pub async fn set_pure_mode(
         Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
         Err(e) => return Err(e.into()),
     }
+    // 落盘成功后必须 reload 发布 RuntimeConfig，否则内存快照滞后、纯净模式开关不生效
+    //（对照同文件 PUT/PATCH 的 reload_and_flat_response 口径）。reload 失败仅告警不阻断：
+    // 文件已落盘，下次 reload / 重启后自然生效，此时回滚响应反而会让前端与磁盘状态不一致。
+    if let Err(e) = config.reload().await {
+        tracing::warn!(error = %e, "纯净模式切换后 reload RuntimeConfig 失败（文件已落盘，待下次 reload 生效）");
+    }
     // 回读终值（并发 toggle 下以落盘结果为准）
     let new_enabled = config.load_settings_async().await.global.browser.pure_mode;
     Ok(data(
@@ -1546,6 +1552,8 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["data"]["enabled"], false);
         assert!(!inner.lock().unwrap().settings.global.browser.pure_mode);
+        // 落盘后必须 reload 发布 RuntimeConfig，否则纯净模式开关不生效（P1 修复回归）
+        assert_eq!(inner.lock().unwrap().reload_calls, 1);
     }
 
     // ============ updater 段：自动更新设置往返（channel/auto_check_enabled） ============

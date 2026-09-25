@@ -673,7 +673,7 @@ fn update_tray(
     if status_item.is_enabled() != running {
         status_item.set_enabled(running);
     }
-    // 动态切换「启动检测/停止检测」菜单项文本
+    // 动态切换「启动监测/停止监测」菜单项文本
     toggle_item.set_text(monitor_toggle_label(snap.engine_state));
 
     // 登录行：成功/失败时附带上次登录结果信息
@@ -709,7 +709,7 @@ fn update_tray(
 /// ```text
 /// 状态：运行中 · 在线         ← 信息行，随状态刷新；运行中为正常色、未运行灰化
 /// ──────────────────────    ← 分隔线：把只读状态与可点操作用视觉分开
-/// 停止检测 / 启动检测        ← 随引擎状态切换文本
+/// 停止监测 / 启动监测        ← 随引擎状态切换文本
 /// 手动登录
 /// 打开控制台
 /// 退出

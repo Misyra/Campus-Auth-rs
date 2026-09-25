@@ -266,6 +266,11 @@ impl SchedulerService {
         if !self.task_manager.has_task(&to_save.target_id) {
             return Err(SchedulerError::TargetNotFound(to_save.target_id.clone()));
         }
+        // 按绑定任务类型钳制 timeout 覆写（回写保存，见 clamp_scheduled_timeout）。
+        // 判型失败（目标任务 JSON 损坏等）不阻断保存，维持原值由执行侧兜底钳制。
+        if let Ok(kind) = self.task_manager.load_task(&to_save.target_id).await {
+            clamp_scheduled_timeout(&mut to_save, kind.type_name());
+        }
 
         let path = self.scheduled_dir.join(format!("{}.json", id));
         // 文件写入串行化：与 update_last_run 同锁，防读-改-写互相覆盖
@@ -585,6 +590,35 @@ impl SchedulerService {
     }
 }
 
+/// 按绑定任务类型钳制定时任务的 timeout 覆写（单位：秒），并**回写**到任务上
+///
+/// 执行侧口径（`tasks::executor` / `tasks::models`）：浏览器任务超时最终钳制到
+/// `[MIN_TASK_TIMEOUT_MS, MAX_TASK_TIMEOUT_MS]` 毫秒（即 [1, 600] 秒），脚本任务
+/// 钳到 `[MIN_SCRIPT_TIMEOUT, MAX_SCRIPT_TIMEOUT]` 秒。保存时不钳会让越界值落盘、
+/// 运行时被静默改写，界面显示与实际执行口径不一致——此处按同一常量钳制并写回，
+/// 保证保存值所见即所执行。http 直连任务不支持超时覆写（`execute_with_timeout_override`
+/// 对其拒绝执行），不处理。
+pub(crate) fn clamp_scheduled_timeout(task: &mut ScheduledTask, type_name: &str) {
+    let Some(timeout) = task.timeout.as_mut() else {
+        return;
+    };
+    match type_name {
+        "browser" => {
+            *timeout = (*timeout).clamp(
+                crate::tasks::MIN_TASK_TIMEOUT_MS / 1000,
+                crate::tasks::MAX_TASK_TIMEOUT_MS / 1000,
+            );
+        }
+        "script" => {
+            *timeout = (*timeout).clamp(
+                crate::tasks::MIN_SCRIPT_TIMEOUT,
+                crate::tasks::MAX_SCRIPT_TIMEOUT,
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Web 层消费的调度器抽象（M1 细粒度 state：scheduler 域）。
 ///
 /// handler 通过 `State<Arc<dyn SchedulerApi>>` 提取依赖，不再触达
@@ -669,6 +703,40 @@ fn systemtime_to_iso(t: std::time::SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 按绑定任务类型钳制 timeout 覆写：浏览器 [1,600] 秒、脚本 [1,3600] 秒，
+    /// 与执行侧钳制常量一致；钳制值回写，None 不处理
+    #[test]
+    fn test_clamp_scheduled_timeout_by_kind() {
+        let mut t = ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string());
+        // 浏览器：越界值钳回 [1, 600]
+        t.timeout = Some(0);
+        clamp_scheduled_timeout(&mut t, "browser");
+        assert_eq!(t.timeout, Some(1));
+        t.timeout = Some(100_000);
+        clamp_scheduled_timeout(&mut t, "browser");
+        assert_eq!(
+            t.timeout,
+            Some(crate::tasks::MAX_TASK_TIMEOUT_MS / 1000),
+            "浏览器任务不应超过 MAX_TASK_TIMEOUT_MS 换算的秒数"
+        );
+        // 脚本：越界值钳回 [1, 3600]
+        t.timeout = Some(99_999);
+        clamp_scheduled_timeout(&mut t, "script");
+        assert_eq!(t.timeout, Some(crate::tasks::MAX_SCRIPT_TIMEOUT));
+        // 界内值原样保留
+        t.timeout = Some(120);
+        clamp_scheduled_timeout(&mut t, "script");
+        assert_eq!(t.timeout, Some(120));
+        // http 直连任务不支持超时覆写，不处理
+        t.timeout = Some(99_999);
+        clamp_scheduled_timeout(&mut t, "http");
+        assert_eq!(t.timeout, Some(99_999));
+        // timeout = None 不动
+        t.timeout = None;
+        clamp_scheduled_timeout(&mut t, "browser");
+        assert_eq!(t.timeout, None);
+    }
 
     /// next_fire_at 序列化带本地时区偏移（known-issues #3）：
     /// 定时任务按本地时间触发，不得再输出 UTC `Z` 后缀造成时区误读

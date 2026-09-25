@@ -330,11 +330,14 @@ pub(crate) fn map_history_records(raw: &serde_json::Value) -> Vec<serde_json::Va
                 .unwrap_or(false);
             let message = record.get("message").cloned().unwrap_or(Value::Null);
             let trigger = record.get("trigger").cloned().unwrap_or(Value::Null);
+            // 落盘数据里本就带有 duration，透传给前端耗时列展示；缺失回退 null
+            let duration = record.get("duration").cloned().unwrap_or(Value::Null);
             serde_json::json!({
                 "run_at": run_at,
                 "success": success,
                 "message": message,
-                "trigger": trigger
+                "trigger": trigger,
+                "duration": duration
             })
         })
         .collect()
@@ -593,6 +596,9 @@ mod tests {
         // success 由 status == "success" 推导
         assert_eq!(mapped[0]["success"], serde_json::json!(true));
         assert_eq!(mapped[1]["success"], serde_json::json!(false));
+        // duration 透传：落盘带值时原样输出，缺失时为 null
+        assert_eq!(mapped[0]["duration"], serde_json::json!(1.2));
+        assert_eq!(mapped[1]["duration"], serde_json::Value::Null);
         // 无 status 时 success 为 false；无 timestamp 时为 null
         assert_eq!(mapped[2]["success"], serde_json::json!(true));
         assert_eq!(mapped[2]["run_at"], serde_json::Value::Null);
