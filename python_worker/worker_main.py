@@ -37,6 +37,7 @@ from playwright_worker import (  # noqa: E402
     cancel_registry,
     worker_core,
 )
+from step_handlers import _sanitize_error  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -316,41 +317,44 @@ def _structured_result(exc: WorkerError, *, success: bool, start: float | None =
     duration_ms 取 0（兼容直接调用）。
     """
     duration_ms = int((time.perf_counter() - start) * 1000) if start is not None else 0
+    # 错误消息剥 URL query/fragment：异常文本可能携带门户重定向的临时 token，
+    # 不得进入 IPC / 日志 / 登录历史（见 _sanitize_error）
+    message = _sanitize_error(exc.message)
     return {
         "success": success,
         "data": {
             "outcome": exc.outcome,
-            "message": exc.message,
+            "message": message,
             "duration_ms": duration_ms,
             "screenshots": [],
         },
-        "error": exc.message if not success else None,
+        "error": message if not success else None,
     }
 
 
 def _command_timeout(params: dict) -> float:
     """从命令参数推导命令级超时（秒）。
 
-    固定兜底 270s = Rust 侧 ``execute``/``execute_with_timeout`` 默认 300s 的
-    0.9 倍（B6 竞速修复）：两端同时起跑时 Python 侧必须**先于** Rust 超时
-    触发轻量自愈（取消任务 + 关页打断挂起的 CDP await → 响应错误 → Rust 收到
-    结果而非超时），否则同值 300s 下 Python 自愈基本抢不到，Rust 超时后还要
-    走 Cancel + 10s 宽限 + 可能的强杀回收，代价高得多。
-    0.9 倍预留 30s（≥10s 宽限期的 3 倍）确保自愈完成并回包。
+    BRG-1：Rust 侧下发 ``rust_timeout_ms``（本次请求的真实超时预算，可达
+    600s 任务级钳制上限）时，**全程权威**取 ``0.9 × 预算``——两端同时起跑时
+    Python 侧必须先于 Rust 超时触发轻量自愈（取消任务 + 关页打断挂起的
+    CDP await → 响应错误 → Rust 收到结果而非超时），否则 Rust 超时后还要走
+    Cancel + 10s 宽限 + 可能的强杀回收，代价高得多。0.9 倍预留的余量
+    （预算 600s 时 60s，预算 8s 时 0.8s）保证自愈完成并回包；不与单步放大
+    基准取 min，否则固定地板/放大基准会把长任务提前判死而 Rust 仍在等待，
+    与「Rust 超时才是权威」相悖。
 
-    BRG-1：Rust 侧下发 ``rust_timeout_ms``（本次请求的真实超时预算）时，取
-    ``min(单步放大基准, 0.9 × 预算)``——预算可达 600s（任务级钳制上限），
-    固定地板会让长任务被 Python 侧提前中断判失败而 Rust 仍在等待，与「Rust
-    超时才是权威」相悖；0.9x 保证 Python 自愈始终抢跑。字段缺省（旧 Rust
-    主程序）回退固定兜底公式；旧 Python 忽略该字段，双向向后兼容。
+    字段缺省或非正（旧 Rust 主程序）时回退固定兜底公式：
+    270s = Rust 侧 ``execute``/``execute_with_timeout`` 默认 300s 的 0.9 倍，
+    或单步超时 × 20 放大（取较高者）。旧 Python 忽略 ``rust_timeout_ms``，
+    双向向后兼容。
     """
-    bs = params.get("browser_settings") or {}
-    step_ms = _to_ms(bs, "timeout", 10000)
-    base = max(270.0, step_ms / 1000 * 20)
     rust_budget_ms = params.get("rust_timeout_ms")
     if isinstance(rust_budget_ms, (int, float)) and rust_budget_ms > 0:
-        return min(base, float(rust_budget_ms) / 1000 * 0.9)
-    return base
+        return float(rust_budget_ms) / 1000 * 0.9
+    bs = params.get("browser_settings") or {}
+    step_ms = _to_ms(bs, "timeout", 10000)
+    return max(270.0, step_ms / 1000 * 20)
 
 
 def _error_result(message: str) -> dict:
@@ -359,7 +363,10 @@ def _error_result(message: str) -> dict:
     P6：补 outcome 字段，保证与结构化响应结构一致（Rust 侧 failure 时仅读
     error 字段，此处补全 data 仅为协议一致性）。原 ``_timeout_result`` 与本
     函数逐字段相同，已合并（调用处以注释区分语义）。
+    消息经 ``_sanitize_error`` 剥 URL query/fragment：未捕获异常文本可能携带
+    门户重定向的临时 token，不得进入 IPC / 日志 / 历史。
     """
+    message = _sanitize_error(message)
     return {
         "success": False,
         "data": {
@@ -380,15 +387,20 @@ async def _dispatch_guarded(msg: dict) -> None:
     仅取消协程无法打断 CDP 调用），随后按 ``UNKNOWN_ERROR`` 回错误响应，
     避免一条挂起命令永久堵死后续所有命令（A1 自愈）。
 
+    畸形命令防护：``params`` 非对象（列表/字符串）会让 ``_command_timeout``
+    内 AttributeError 穿透本协程杀死整个 Worker；``method`` 不可哈希会让
+    ``COMMANDS.get`` 抛 TypeError 且永不回包。两者均在入口统一拦截并回错误
+    响应，Worker 继续服务后续命令。
+
     单次回包守卫（BRG-4）：handler 恰在超时判定返回后、``cancel`` 生效前完成
     的窄窗口内，真实结果与超时错误会竞争同一 id——经 ``emit_once`` 仅首个
     回包生效，杜绝同 id 双响应（第二发会触发 Rust 侧"未知响应"告警）。
+    ``emit_once`` 写出失败（如 stdout 损坏）时解除守卫，允许错误响应重试回包，
+    避免该 id 永远悬挂。
     """
     msg_id = msg.get("id")
     method = msg.get("method")
-    params = msg.get("params") or {}
-    timeout_s = _command_timeout(params)
-    responded = False
+    params = msg.get("params")
 
     def emit_once(mid, payload):
         nonlocal responded
@@ -396,15 +408,39 @@ async def _dispatch_guarded(msg: dict) -> None:
             logger.debug("命令 %s 已有响应在先，忽略重复回包", method)
             return
         responded = True
-        emit_response(mid, payload)
+        try:
+            emit_response(mid, payload)
+        except Exception:  # noqa: BLE001
+            # 首发回包写出失败：解除守卫，让错误响应有机会补发（防同 id 悬挂）
+            responded = False
+            raise
+
+    # 畸形命令防护：method 必须是非空字符串（否则 COMMANDS.get 可能因不可
+    # 哈希抛 TypeError），params 必须是对象（否则 _command_timeout 取
+    # browser_settings 时 AttributeError）。命中即回错误响应，命令不入执行。
+    if not isinstance(method, str) or not method:
+        emit_response(msg_id, _error_result(f"未知命令: {method!r}"))
+        return
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        emit_response(msg_id, _error_result(f"命令 {method} 的 params 必须是 JSON 对象"))
+        return
+    timeout_s = _command_timeout(params)
+    responded = False
 
     task = asyncio.ensure_future(_dispatch(msg, emit=emit_once))
     done, _pending = await asyncio.wait({task}, timeout=timeout_s)
     if task in done:
         exc = task.exception()
         if exc is not None:
-            # _dispatch 已捕获绝大多数异常，此处仅兜底
+            # _dispatch 已捕获绝大多数异常，此处兜底 emit 自身抛错等漏网情形；
+            # 补发错误响应防止 Rust 侧该 id 永久悬挂
             logger.error(f"命令 {method} 内部异常: {exc}")
+            try:
+                emit_once(msg_id, _error_result(f"命令 {method} 内部异常: {exc}"))
+            except Exception:  # noqa: BLE001 — 回包失败只记日志，不得杀死 Worker
+                logger.exception("命令 %s 异常兜底回包失败", method)
         return
     # 超时：取消任务并强制中断挂起的 Playwright 操作
     logger.error(f"命令 {method} 超时（{timeout_s:.0f}s），强制中断自愈")

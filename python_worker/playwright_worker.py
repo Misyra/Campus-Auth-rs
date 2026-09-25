@@ -261,6 +261,9 @@ def _to_ms(bs: dict, key: str, default_ms: int) -> int:
 
     Rust 侧 ``BrowserSettings`` 中 ``timeout`` / ``navigation_timeout`` 为
     u32 秒，而 Playwright API 需要毫秒，统一 ×1000；缺省值已是毫秒，原样返回。
+    key 缺失、非法值与**非正值（≤0）**统一回退 ``default_ms``：0 会让
+    Playwright 每个操作瞬间超时失败（如 close_browser 的 timeout=0 直接把
+    所有步骤打成 1ms 超时），此处一处保护所有消费点。
     """
     val = bs.get(key)
     if val is None:
@@ -268,6 +271,8 @@ def _to_ms(bs: dict, key: str, default_ms: int) -> int:
     try:
         ival = int(val)
     except (TypeError, ValueError):
+        return default_ms
+    if ival <= 0:
         return default_ms
     return ival * 1000
 
@@ -902,8 +907,27 @@ class _ResourceSink:
         return True
 
 
+def _iter_cdp_frame_resources(frame_tree: Any) -> list[tuple[str, list]]:
+    """递归收集 CDP frameTree 中各 frame 的 (frameId, resources) 对。
+
+    资源树以主 frame 为根、``childFrames`` 挂子 frame；iframe 门户（登录表单
+    全在 iframe 里）的 CSS/JS 都在子 frame 的 ``resources`` 里，只取根节点
+    会让离线副本缺资源。畸形节点（非 dict / 缺 id）容错跳过。
+    """
+    out: list[tuple[str, list]] = []
+    if not isinstance(frame_tree, dict):
+        return out
+    frame_id = str((frame_tree.get("frame") or {}).get("id") or "")
+    entries = frame_tree.get("resources") or []
+    if isinstance(entries, list):
+        out.append((frame_id, entries))
+    for child in frame_tree.get("childFrames") or []:
+        out.extend(_iter_cdp_frame_resources(child))
+    return out
+
+
 async def _cdp_resource_snapshot(page: Any, sink: _ResourceSink) -> None:
-    """经 CDP 抓取主框架已加载的 Script/Stylesheet 资源并写入 sink。
+    """经 CDP 抓取全部 frame（含 iframe）已加载的 Script/Stylesheet 资源并写入 sink。
 
     逐项容错：缓存已逐出/取回失败的单个资源跳过，不中断整体快照。CDP 内容与
     页面实际执行的版本一致，优先级高于 HTTP 回补，故先跑这条路径。
@@ -914,29 +938,29 @@ async def _cdp_resource_snapshot(page: Any, sink: _ResourceSink) -> None:
         # 不会自动启用，缺省时报 "Agent is not enabled"）
         await cdp.send("Page.enable")
         tree = await cdp.send("Page.getResourceTree")
-        frame_tree = tree.get("frameTree", {})
-        frame_id = frame_tree.get("frame", {}).get("id", "")
-        entries = frame_tree.get("resources", []) or []
-        for res in entries:
-            if not sink.admit():
-                break
-            rtype = (res.get("type") or "").lower()
-            if rtype not in ("stylesheet", "script"):
-                continue
-            url = res.get("url") or ""
-            if not url.startswith(("http://", "https://")) or url in sink.saved:
-                continue
-            try:
-                got = await cdp.send(
-                    "Page.getResourceContent", {"frameId": frame_id, "url": url}
-                )
-            except Exception:  # noqa: BLE001 — 缓存逐出等，逐项跳过
-                continue
-            if got.get("base64Encoded"):
-                data = base64.b64decode(got.get("content") or "")
-            else:
-                data = (got.get("content") or "").encode("utf-8")
-            sink.store(url, data, res.get("mimeType") or "", rtype)
+        for frame_id, entries in _iter_cdp_frame_resources(tree.get("frameTree", {})):
+            for res in entries:
+                if not sink.admit():
+                    return
+                if not isinstance(res, dict):
+                    continue
+                rtype = (res.get("type") or "").lower()
+                if rtype not in ("stylesheet", "script"):
+                    continue
+                url = res.get("url") or ""
+                if not url.startswith(("http://", "https://")) or url in sink.saved:
+                    continue
+                try:
+                    got = await cdp.send(
+                        "Page.getResourceContent", {"frameId": frame_id, "url": url}
+                    )
+                except Exception:  # noqa: BLE001 — 缓存逐出等，逐项跳过
+                    continue
+                if got.get("base64Encoded"):
+                    data = base64.b64decode(got.get("content") or "")
+                else:
+                    data = (got.get("content") or "").encode("utf-8")
+                sink.store(url, data, res.get("mimeType") or "", rtype)
     finally:
         await cdp.detach()
 
@@ -979,24 +1003,47 @@ _PAGE_RESOURCE_PROBE_JS = r"""
 
 
 async def _http_resource_snapshot(page: Any, sink: _ResourceSink) -> str | None:
-    """引擎无关兜底：枚举页面已加载的 script/stylesheet，按 URL 回补正文。
+    """引擎无关兜底：逐 frame 枚举已加载的 script/stylesheet，按 URL 回补正文。
 
     CDP 不可用（firefox / webkit）时这是唯一能拿到 CSS/JS 正文的路径；Chromium
-    下作为补充，捞 CDP 内存缓存已逐出或导航后才插入的资源。``context.request``
-    走浏览器网络栈（带 context 的 cookie / UA），逐项容错，返回说明文本或 None。
+    下作为补充，捞 CDP 内存缓存已逐出或导航后才插入的资源。按 ``page.frames``
+    逐 frame 执行枚举脚本并按 URL 去重汇总，iframe 门户的资源才能进离线副本；
+    单个 frame（跨域/销毁中）枚举失败跳过，全部失败才报枚举不可用。
+    ``context.request`` 走浏览器网络栈（带 context 的 cookie / UA），逐项容错，
+    返回说明文本或 None。
     """
-    try:
-        entries = await page.evaluate(_PAGE_RESOURCE_PROBE_JS)
-    except Exception as exc:  # noqa: BLE001 — 枚举失败则本兜底整体不可用
-        return f"页面资源枚举失败: {exc}"
+    # 按 URL 去重汇总各 frame 的枚举结果（首见优先，保留原始书写形态）
+    entries_all: list[Any] = []
+    seen: set[str] = set()
+    first_error = ""
+    frames = list(getattr(page, "frames", None) or [])
+    if not frames:
+        # 测试替身兼容：无 frames 属性时按单页处理
+        frames = [page]
+    for frame in frames:
+        try:
+            entries = await frame.evaluate(_PAGE_RESOURCE_PROBE_JS)
+        except Exception as exc:  # noqa: BLE001 — 跨域/销毁中的 frame 单独跳过
+            if not first_error:
+                first_error = str(exc)
+            continue
+        for entry in entries or []:
+            if not isinstance(entry, (list, tuple)) or not entry:
+                continue
+            url = str(entry[0] or "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            entries_all.append(entry)
+    if not entries_all and first_error:
+        # 所有 frame 枚举都失败，本兜底整体不可用
+        return f"页面资源枚举失败: {first_error}"
     fetched = 0
     failed = 0
-    first_error = ""
-    for entry in entries or []:
+    first_fetch_error = ""
+    for entry in entries_all:
         if not sink.admit():
             break
-        if not isinstance(entry, (list, tuple)) or not entry:
-            continue
         url = str(entry[0] or "")
         raw = str(entry[1] or "") if len(entry) > 1 else ""
         kind = str(entry[2] or "") if len(entry) > 2 else ""
@@ -1010,20 +1057,20 @@ async def _http_resource_snapshot(page: Any, sink: _ResourceSink) -> str | None:
             resp = await page.context.request.get(url, timeout=_RESOURCE_FETCH_TIMEOUT_MS)
             if not resp.ok:
                 failed += 1
-                if not first_error:
-                    first_error = f"HTTP {resp.status}"
+                if not first_fetch_error:
+                    first_fetch_error = f"HTTP {resp.status}"
                 continue
             data = await resp.body()
             mime = resp.headers.get("content-type", "")
         except Exception as exc:  # noqa: BLE001 — 单个资源取回失败不中断整体
             failed += 1
-            if not first_error:
-                first_error = str(exc)[:120]
+            if not first_fetch_error:
+                first_fetch_error = str(exc)[:120]
             continue
         if sink.store(url, data, mime, kind, aliases=[raw]):
             fetched += 1
     if failed:
-        return f"{fetched} 个资源经 HTTP 回补成功，{failed} 个失败（首个原因: {first_error}）"
+        return f"{fetched} 个资源经 HTTP 回补成功，{failed} 个失败（首个原因: {first_fetch_error}）"
     return None
 
 
@@ -1553,6 +1600,10 @@ class WorkerCore:
             and self._browser.is_connected()
         ):
             try:
+                # 旧 context 已随会话级释放关闭，其页面对象 id 可能被 Python
+                # 复用：重建 context 前先清空防重复绑定集合，否则新页会被
+                # 误判为"已绑定"而漏装 dialog 处理器（对齐 _close_session）
+                self._wired_page_ids.clear()
                 self._context = await self._browser.new_context(
                     **self._build_context_options(bs)
                 )
@@ -1640,6 +1691,9 @@ class WorkerCore:
         if self._context is not None and self._browser is not None:
             await self._safe_close(self._context, "上下文")
             self._context = None
+        # 关页后清空防重复绑定集合：Python 复用对象 id 时，新页会被误判为
+        # "已绑定"而漏装 dialog 处理器（与 close_browser / _prepare_session_page 同款）
+        self._wired_page_ids.clear()
         # 与 close_browser 同款兜底：截图与 cancel 注册统一释放。
         self._teardown_all_debug_sessions()
         logger.info("会话级资源已释放（浏览器进程保留）")
@@ -1841,8 +1895,9 @@ class WorkerCore:
             # B5 取舍：任务失败后在共享 context 上清除 cookies，避免上次任务的残留会话
             # （登录态等）污染下一个任务。不重建整个页面/浏览器——那会显著增加下一次
             # 任务的重启开销；在现有 context 复用结构下，清除 cookies 已覆盖绝大多数
-            # 跨任务污染场景（登录态隔离）。重试同任务由 Rust 侧重新调用，页面按
-            # "_run_task 顶部 reload 复用"逻辑刷新，不受此处影响。
+            # 跨任务污染场景（登录态隔离）。重试同任务由 Rust 侧重新调用，_run_task
+            # 顶部经 _prepare_session_page 关闭全部旧页并新建会话页（无 reload 复用），
+            # 不受此处影响。
             # 按**最终** outcome 清理：success_condition 未命中也是失败，同样需要隔离
             if result.outcome not in (Outcome.SUCCESS.value, Outcome.CANCELLED.value):
                 if self._context is not None:
@@ -1902,9 +1957,9 @@ class WorkerCore:
         channel = str(bs.get("browser_channel") or "playwright").strip().lower()
         custom_path = str(bs.get("browser_custom_path") or "").strip()
         try:
-            # _ensure_browser 内部用 sync_playwright，在 asyncio 事件循环内直接调用会抛
-            # "Sync API inside the asyncio loop" 被吞掉而误判 healthy=false（Worker 启动超时）。
-            # 丢到线程池执行，与 OCR classification 的同步 CPU 推理处理一致。
+            # _ensure_browser 现为纯文件系统/registry 探测（不再冷启 sync_playwright
+            # driver），但目录遍历与 registry 读取仍是同步 IO：丢到线程池执行，
+            # 避免慢盘上阻塞事件循环，与 OCR classification 的同步 CPU 推理处理一致。
             healthy = await asyncio.to_thread(_ensure_browser, channel, custom_path)
         except Exception as exc:  # noqa: BLE001 — 健康检查失败本身即结果（healthy=False），不能向 IPC 抛异常
             logger.warning(f"健康检查异常: {exc}")
@@ -2562,18 +2617,31 @@ class WorkerCore:
 
         极端情况下 close 可能挂起（如 driver 未及时退出），保留内部超时兜底，
         避免一条挂起命令阻塞 Worker 命令队列。
+
+        内部兜底必须先于命令级自愈触发：Rust 下发 ``rust_timeout_ms``（如
+        close_browser 的 8s 预算）时，命令级超时为 0.9×预算（7.2s），若内部
+        兜底仍用固定 8s，慢关闭会被命令级自愈拦腰打断成半关闭（页关了、
+        context/进程没收）。故有预算时内部兜底取 ``min(8s, 0.9×预算 - 0.5s)``，
+        先以 TimeoutError 收尾返回（浏览器清理在本函数的超时里继续尽力完成），
+        命令级自愈不再有机会触发。
         """
         self._cancel_browser_idle_release()
         if params.get("preserve_state"):
             logger.info("keep_alive 常驻：登录成功，保留页面与登录状态")
             return {}
+        internal_timeout = _WAIT_TIMEOUT_SECS
+        budget_ms = params.get("rust_timeout_ms")
+        if isinstance(budget_ms, (int, float)) and budget_ms > 0:
+            internal_timeout = max(
+                0.5, min(_WAIT_TIMEOUT_SECS, float(budget_ms) / 1000 * 0.9 - 0.5)
+            )
         try:
             if _WORKER_KEEP_ALIVE:
-                await asyncio.wait_for(self._close_session(), timeout=_WAIT_TIMEOUT_SECS)
+                await asyncio.wait_for(self._close_session(), timeout=internal_timeout)
             else:
-                await asyncio.wait_for(self.close_browser(), timeout=_WAIT_TIMEOUT_SECS)
+                await asyncio.wait_for(self.close_browser(), timeout=internal_timeout)
         except asyncio.TimeoutError:
-            logger.warning("close_browser 超时（8s），跳过等待继续")
+            logger.warning("close_browser 超时（%.1fs），跳过等待继续", internal_timeout)
         return {}
 
     async def _capture_navigate(self, url: str, bs: dict, cancel_event: Any) -> None:
@@ -2685,21 +2753,30 @@ class WorkerCore:
         bs = params.get("browser_settings", {}) or {}
         cancel_id = params.get("cancel_id", "")
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+
+        def _ensure_not_cancelled(stage: str) -> None:
+            """阶段边界取消检查（对齐 debug_start 的分阶段模式）。"""
+            if cancel_event is not None and cancel_event.is_set():
+                raise StepCancelled(f"页面捕获已取消（{stage}）")
+
         try:
             await self._capture_navigate(url, bs, cancel_event)
             # 落盘目录与 _debug_screenshot_dir 同语义：锚定运行时 worker 工程目录，
             # 不依赖进程 CWD；固定 captures/latest 每次覆盖，避免产物无界堆积
+            _ensure_not_cancelled("HTML 获取前")
             cap_dir = _capture_dir()
             shutil.rmtree(cap_dir, ignore_errors=True)
             cap_dir.mkdir(parents=True, exist_ok=True)
             html = await self._page.content()
             (cap_dir / "page.html").write_text(html, encoding="utf-8")
+            _ensure_not_cancelled("截图前")
             png_bytes = await self._page.screenshot(full_page=True)
             screenshot_note: str | None = None
             if len(png_bytes) > _CAPTURE_MAX_SCREENSHOT_BYTES:
                 png_bytes = await self._page.screenshot(full_page=False)
                 screenshot_note = "全页截图过大，已改为当前视口截图"
             (cap_dir / "screenshot.png").write_bytes(png_bytes)
+            _ensure_not_cancelled("结构提取前")
             try:
                 structure = await _capture_page_structure(self._page)
             except Exception as exc:  # noqa: BLE001 — 原始 HTML 仍可作为生成兜底
@@ -2721,6 +2798,7 @@ class WorkerCore:
             # 资源快照那条统一给出（避免日志里出现无意义的英文 CDP 异常）
             if _channel_supports_cdp(bs):
                 mhtml_ok = await self._capture_mhtml(self._page, cap_dir / "page.mhtml")
+            _ensure_not_cancelled("资源快照前")
             resources: dict[str, str] = {}
             aliases: dict[str, str] = {}
             note: str | None = None
@@ -2730,6 +2808,7 @@ class WorkerCore:
                 )
             except Exception as exc:  # noqa: BLE001 — 资源快照失败不阻断 HTML/截图
                 note = f"资源快照失败: {exc}"
+            _ensure_not_cancelled("离线副本生成前")
             # 离线副本：把 HTML 中的资源引用改写成 resources/ 相对路径，解压后直接
             # 双击即可还原（无 MHTML 的渠道下这是唯一可离线查看的形态）。原始
             # page.html 保持不变——它是 Rust 侧喂给 LLM 的材质，URL 语义不该被污染。
@@ -2791,73 +2870,108 @@ class WorkerCore:
         落盘到 resources/，并生成引用改写后的 page.html 供源码级离线还原。
         非 Chromium 渠道没有 CDP：MHTML 直接跳过，CSS/JS 由页面枚举 + HTTP 回补
         抓取（见 ``_capture_page_resources``），产物同样可用于离线还原。
+
+        与 page_capture 对齐：注册 cancel_id 并在关键阶段检查取消；入口取消
+        待触发的浏览器空闲回收；CDP detach 放入 finally，抓取失败也不泄漏会话。
         """
         if self._page is None:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "无活跃页面，无法捕获")
-        # 落盘根目录先定（资源快照需要直接写入子目录），避免 IPC 1MiB 超限
-        stamp = str(int(time.time() * 1000))
-        fb_dir = _feedback_capture_dir(stamp)
-        # 会话用的浏览器设置决定 CDP 是否可用（MHTML 与资源快照都只存在于 Chromium）
-        bs = self._last_browser_settings or {}
-        # 尝试 MHTML（完整离线快照，含样式与图片），失败回退 HTML；
-        # 非 Chromium 渠道不尝试：CDP 在协议层不存在，只会白记一条英文异常
-        mhtml_bytes: bytes | None = None
-        if _channel_supports_cdp(bs):
-            try:
-                cdp = await self._page.context.new_cdp_session(self._page)
-                mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
-                cdp_data = mhtml.get("data", "")
-                if cdp_data:
-                    mhtml_bytes = cdp_data.encode("utf-8") if isinstance(cdp_data, str) else bytes(cdp_data)
-                await cdp.detach()
-            except Exception as exc:  # noqa: BLE001 — CDP 不可用时回退 content()
-                logger.debug("CDP MHTML 快照失败，回退 HTML: %s", exc)
-                mhtml_bytes = None
-        # CSS/JS 资源快照：MHTML 不含 JS，这里补齐脚本与样式表（主框架资源）
-        resources: dict[str, str] = {}  # url -> resources/<name>
-        aliases: dict[str, str] = {}  # HTML 里的原始书写形态 -> resources/<name>
-        resource_note: str | None = None
+        cancel_id = str(params.get("cancel_id") or "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+
+        def _ensure_not_cancelled(stage: str) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise StepCancelled(f"页面捕获已取消（{stage}）")
+
+        # 与 test_redirect / page_capture 一致：捕获类命令先取消空闲自动释放
+        self._cancel_browser_idle_release()
         try:
-            resources, aliases, resource_note = await _capture_page_resources(
-                self._page, fb_dir / "resources", bs=bs
-            )
-        except Exception as exc:  # noqa: BLE001 — 资源快照失败不影响其余产物
-            resource_note = f"资源快照失败: {exc}"
-        # 有资源时 HTML 也必须导出（MHTML 内无 JS，resources 需要引用方）；
-        # MHTML 不可用时同样回退 HTML
-        html: str | None = None
-        if mhtml_bytes is None or resources:
+            _ensure_not_cancelled("开始前")
+            # 落盘根目录先定（资源快照需要直接写入子目录），避免 IPC 1MiB 超限
+            stamp = str(int(time.time() * 1000))
+            fb_dir = _feedback_capture_dir(stamp)
+            # 会话用的浏览器设置决定 CDP 是否可用（MHTML 与资源快照都只存在于 Chromium）
+            bs = self._last_browser_settings or {}
+            # 尝试 MHTML（完整离线快照，含样式与图片），失败回退 HTML；
+            # 非 Chromium 渠道不尝试：CDP 在协议层不存在，只会白记一条英文异常
+            mhtml_bytes: bytes | None = None
+            if _channel_supports_cdp(bs):
+                cdp = None
+                try:
+                    cdp = await self._page.context.new_cdp_session(self._page)
+                    mhtml = await cdp.send("Page.captureSnapshot", {"format": "mhtml"})
+                    cdp_data = mhtml.get("data", "")
+                    if cdp_data:
+                        mhtml_bytes = (
+                            cdp_data.encode("utf-8")
+                            if isinstance(cdp_data, str)
+                            else bytes(cdp_data)
+                        )
+                except Exception as exc:  # noqa: BLE001 — CDP 不可用时回退 content()
+                    logger.debug("CDP MHTML 快照失败，回退 HTML: %s", exc)
+                    mhtml_bytes = None
+                finally:
+                    # detach 必须无条件执行：抓取失败时也要释放 CDP 会话，
+                    # 否则泄漏的会话会占住与页面的绑定直到页面对象销毁
+                    if cdp is not None:
+                        try:
+                            await cdp.detach()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("MHTML CDP 会话释放失败（忽略）: %s", exc)
+            _ensure_not_cancelled("MHTML 后")
+            # CSS/JS 资源快照：MHTML 不含 JS，这里补齐脚本与样式表（全部 frame）
+            resources: dict[str, str] = {}  # url -> resources/<name>
+            aliases: dict[str, str] = {}  # HTML 里的原始书写形态 -> resources/<name>
+            resource_note: str | None = None
             try:
-                html = _rewrite_resource_urls(
-                    await self._page.content(), {**resources, **aliases}
+                resources, aliases, resource_note = await _capture_page_resources(
+                    self._page, fb_dir / "resources", bs=bs
                 )
+            except Exception as exc:  # noqa: BLE001 — 资源快照失败不影响其余产物
+                resource_note = f"资源快照失败: {exc}"
+            _ensure_not_cancelled("资源快照后")
+            # 有资源时 HTML 也必须导出（MHTML 内无 JS，resources 需要引用方）；
+            # MHTML 不可用时同样回退 HTML
+            html: str | None = None
+            if mhtml_bytes is None or resources:
+                try:
+                    html = _rewrite_resource_urls(
+                        await self._page.content(), {**resources, **aliases}
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise WorkerError(Outcome.UNKNOWN_ERROR, f"获取页面内容失败: {exc}") from exc
+            _ensure_not_cancelled("截图前")
+            try:
+                png_bytes = await self._page.screenshot(full_page=True)
             except Exception as exc:  # noqa: BLE001
-                raise WorkerError(Outcome.UNKNOWN_ERROR, f"获取页面内容失败: {exc}") from exc
-        try:
-            png_bytes = await self._page.screenshot(full_page=True)
-        except Exception as exc:  # noqa: BLE001
-            raise WorkerError(Outcome.UNKNOWN_ERROR, f"截图失败: {exc}") from exc
-        try:
-            fb_dir.mkdir(parents=True, exist_ok=True)
-            png_path = fb_dir / "screenshot.png"
-            png_path.write_bytes(png_bytes)
-            result: dict = {"png_path": str(png_path)}
-            if mhtml_bytes is not None:
-                mhtml_path = fb_dir / "page.mhtml"
-                mhtml_path.write_bytes(mhtml_bytes)
-                result["mhtml_path"] = str(mhtml_path)
-            if html is not None:
-                html_path = fb_dir / "page.html"
-                html_path.write_bytes(html.encode("utf-8"))
-                result["html_path"] = str(html_path)
-            if resources:
-                result["resources_dir"] = str(fb_dir / "resources")
-                result["resources_count"] = len(resources)
-            if resource_note:
-                result["resources_note"] = resource_note
-            return result
-        except Exception as exc:  # noqa: BLE001
-            raise WorkerError(Outcome.UNKNOWN_ERROR, f"落盘失败: {exc}") from exc
+                raise WorkerError(Outcome.UNKNOWN_ERROR, f"截图失败: {exc}") from exc
+            _ensure_not_cancelled("落盘前")
+            try:
+                fb_dir.mkdir(parents=True, exist_ok=True)
+                png_path = fb_dir / "screenshot.png"
+                png_path.write_bytes(png_bytes)
+                result: dict = {"png_path": str(png_path)}
+                if mhtml_bytes is not None:
+                    mhtml_path = fb_dir / "page.mhtml"
+                    mhtml_path.write_bytes(mhtml_bytes)
+                    result["mhtml_path"] = str(mhtml_path)
+                if html is not None:
+                    html_path = fb_dir / "page.html"
+                    html_path.write_bytes(html.encode("utf-8"))
+                    result["html_path"] = str(html_path)
+                if resources:
+                    result["resources_dir"] = str(fb_dir / "resources")
+                    result["resources_count"] = len(resources)
+                if resource_note:
+                    result["resources_note"] = resource_note
+                return result
+            except Exception as exc:  # noqa: BLE001
+                raise WorkerError(Outcome.UNKNOWN_ERROR, f"落盘失败: {exc}") from exc
+        finally:
+            # finally 而非 except Exception：命令级超时的 task.cancel() 产生
+            # CancelledError（BaseException），except Exception 拦不住会跳过注销
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
 
     async def handle_ocr_recognize(self, params: dict) -> dict:
         """识别 base64 图片中的文本（ddddocr），模型加载与推理共享总超时预算。

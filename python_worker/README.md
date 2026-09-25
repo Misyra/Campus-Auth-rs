@@ -63,17 +63,19 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 
 - `cancel_id`：取消通知的匹配键（Worker 收到 `{"cancel": ...}` 时按它命中在途命令）；
 - `rust_timeout_ms`：Rust 侧本次请求的超时预算（毫秒）。Worker 按
-  `min(0.9 × 预算, max(270s, 单步超时 × 20))` 设置命令级自愈超时，保证
-  Python 自愈先于 Rust 超时触发。字段缺省时回退固定兜底公式（旧主程序兼容）。
+  `0.9 × 预算` 设置命令级自愈超时（全程权威，不与兜底公式取 min），保证
+  Python 自愈先于 Rust 超时触发。字段缺省时回退固定兜底公式
+  `max(270s, 单步超时 × 20)`（旧主程序兼容）。
 
 ## 支持的命令
 
-与 `playwright_worker.py` 的 `COMMANDS` 注册表逐项对应（14 项）。
+与 `playwright_worker.py` 的 `COMMANDS` 注册表逐项对应（15 项）。
 
 | 命令 | 说明 |
 |------|------|
 | `worker_health_check` | Worker 进程级健康探测，上报运行时能力（`capabilities.ocr`，Rust 侧缓存并供 `/api/ocr/status` 消费） |
 | `browser_health_check` | 浏览器/Worker 健康探测，未安装 Playwright 时返回 `healthy: false` |
+| `test_redirect` | 用独立可见的临时浏览器验证触发地址能否到达校园网认证页。params：`trigger_url`（必需，http/https）、`browser_settings`、`cancel_id`；返回 `{"status": "detected" \| "online" \| "not_detected"}`（刻意不含最终 URL 与页面正文，避免门户 token 进入 IPC） |
 | `execute_login_attempt` | 执行一次登录尝试（按 TaskConfig 的步骤序列） |
 | `execute_browser_task` | 执行通用浏览器任务（自定义步骤序列） |
 | `close_browser` | 登录会话终态后的浏览器资源回收（三种档位见 `preserve_state` / `CAMPUS_AUTH_WORKER_KEEP_ALIVE`） |
@@ -84,14 +86,14 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 | `debug_status` | 查询调试会话详情（无副作用，供前端刷新后恢复步骤数据） |
 | `feedback_capture` | 捕获当前调试页的完整 MHTML、截图与 CSS/JS 资源（供导出离线问题报告） |
 | `page_capture` | 清理旧登录态后导航到目标页，落盘 MHTML（仅 Chromium 渠道，走 CDP）、原始 HTML、离线副本 `page.offline.html`（资源引用改写为 `resources/`，解压即可脱网还原）、结构化控件摘要与脱敏局部 HTML、CSS-JS 资源及截图到 `captures/latest/`（**非 Chromium 渠道无 CDP**，CSS/JS 改由页面枚举 + HTTP 回补抓取；超大全页截图自动降为视口截图；由 `POST /api/ai/capture` 触发） |
-| `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖；与任意会话并发的轻量旁路，不占用单会话槽位） |
+| `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖；不占单会话槽位、不被 WorkerBusy 拒绝，但 Worker 内仍串行排队执行） |
 | `shutdown` | 优雅关闭 Worker 进程 |
 
 > **会话互斥与轻量旁路**：`execute_login_attempt` / `execute_browser_task` 占用
-> Worker 的**单会话槽位**；`ocr_recognize` / `feedback_capture` 属轻量旁路，可与任意
-> 会话并发，且**不参与** Worker 回收时的全量取消（Rust 侧 `CancelRegistry` 为其
-> 单独分区）。Rust → Worker 的命令始终串行执行（`_serve` 主循环 `await` 至该条命令
-> 结束），故同一时刻只有一个命令真正操作浏览器。
+> Worker 的**单会话槽位**；`ocr_recognize` / `feedback_capture` 不占会话槽位、
+> 不被 WorkerBusy 拒绝，但 Worker 内仍串行排队执行（Rust → Worker 的命令始终
+> 串行，`_serve` 主循环 `await` 至该条命令结束），且**不参与** Worker 回收时的
+> 全量取消（Rust 侧 `CancelRegistry` 为其单独分区）。
 
 ## 依赖安装
 

@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from models import Outcome, StepConfig
 # OCR 实例缓存/图片预处理已迁至 ocr_runtime.py；顶部导入同时兼作再导出，
@@ -193,6 +194,36 @@ _CONNECTION_ERROR_PATTERNS = (
     "ERR_PROXY_CONNECTION_FAILED",
 )
 
+# 错误文本中的 http(s) URL（用于剥 query/fragment，见 _sanitize_error）
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def _sanitize_error(text: str) -> str:
+    """剥掉错误文本中所有 http(s) URL 的 query/fragment，保留 scheme+path。
+
+    动机：门户重定向场景下，Playwright 异常文本（导航超时 / goto 失败等）经常
+    携带带临时 token 的最终 URL（如 ``...srun_portal?token=xxx``）。这些文本会
+    经 IPC 响应、stderr 日志与登录历史扩散，token 属于会话敏感信息。与
+    ``_classify_redirect_test``「返回值刻意不含最终 URL」同一纪律：本函数在
+    全部错误出口统一应用（``_error_result`` / ``_structured_result`` /
+    ``_classify_navigation_error`` / ``_safe_op``），用正则定位 URL 后重组为
+    仅含 scheme + host + path 的形态，非 URL 部分原样保留。
+    """
+    if not text:
+        return text
+
+    def _strip(match: "re.Match[str]") -> str:
+        raw = match.group(0)
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            return raw
+        if not parts.query and not parts.fragment:
+            return raw
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+    return _URL_IN_TEXT_RE.sub(_strip, text)
+
 # click/input 降级路径希望至少预留的等待预算（毫秒）；小 timeout 会自动按比例收缩
 _MIN_ATTACHED_MS = 500
 
@@ -234,8 +265,14 @@ _FORCE_INPUT_JS = """(el, params) => {
 
 
 def _classify_navigation_error(exc: Exception, url: str) -> WorkerError:
-    """按异常消息细分导航错误。"""
-    msg = str(exc)
+    """按异常消息细分导航错误。
+
+    异常文本与 url 都先经 ``_sanitize_error`` 剥掉 URL 的 query/fragment：
+    门户重定向会让 Playwright 异常消息带上带 token 的最终地址，不得进入
+    IPC / 日志 / 登录历史（与 ``_classify_redirect_test`` 不回传最终 URL 同纪律）。
+    """
+    msg = _sanitize_error(str(exc))
+    url = _sanitize_error(url)
     if any(pattern in msg for pattern in _CONNECTION_ERROR_PATTERNS):
         return WorkerError(Outcome.NETWORK_ERROR, f"导航失败（网络连接错误）: {url}: {msg}")
     if isinstance(exc, PlaywrightTimeoutError):
@@ -476,13 +513,20 @@ def _primary_timeout_ms(total_ms: int) -> int:
 
 
 async def _safe_op(coro: Any, outcome_on_timeout: Outcome) -> Any:
-    """执行 Playwright 操作并归一化超时/瞬时元素异常。"""
+    """执行 Playwright 操作并归一化超时/瞬时元素异常。
+
+    异常文本先经 ``_sanitize_error`` 剥掉 URL 的 query/fragment：Playwright
+    会把当前/目标 URL 拼进超时消息，门户重定向时其中可能带临时 token，
+    不得进入 IPC / 日志 / 登录历史（见 ``_sanitize_error`` docstring）。
+    """
     try:
         return await coro
     except PlaywrightTimeoutError as exc:
-        raise WorkerError(outcome_on_timeout, f"操作超时: {exc}") from exc
+        raise WorkerError(outcome_on_timeout, f"操作超时: {_sanitize_error(str(exc))}") from exc
     except PlaywrightError as exc:
-        raise WorkerError(Outcome.SELECTOR_FAILED, f"元素操作失败: {exc}") from exc
+        raise WorkerError(
+            Outcome.SELECTOR_FAILED, f"元素操作失败: {_sanitize_error(str(exc))}"
+        ) from exc
 
 
 async def _sleep_cancellable(seconds: float, context: StepContext, *, slice_s: float = 0.2) -> None:
