@@ -2,6 +2,60 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-25 全项目功能 Bug 审查修复）
+
+### 背景
+
+- 用户要求全面审查并实测修复：8 个审查/验证子代理（分批并发 ≤2）覆盖 src/ 全模块、frontend/ 全量、python_worker/ 全量与前后端契约，产出 37 个确认问题 + 13 个待确认项；随后 13 个待确认项全部实测（临时测试跑完即删），实锤 7 / 部分成立 5 / 证伪 1（带出 2 个次生缺陷）。完整审查与实测证据在 `docs/reports/full-audit-2026-09-25.md`（本地不提交）。
+- 本轮共修复 40 项（5 个 P1 + 33 个 P2/P3），另有少量低风险项（SSRF 代理面收敛等）按保守口径处理。
+
+### 一、登录与引擎（login/engine）
+
+- **P1** `login/session.rs` emit：终态关浏览器补渠道门控（`uses_bridge`）——此前脚本/直连会话终态会关掉共享 Worker 上无关的浏览器（任务页立即运行的浏览器任务、keep_alive 常驻门户页受害）；补正反两条单测。
+- **实锤** `login/session.rs`：`bridge.execute` 的 `Err(WorkerCrashed | WorkerStartupTimeout)` 不再直接终态失败，映射为 `Outcome::NetworkError` 走既有重试+回收路径（Worker 死亡实际表现为 Err，原实现让浏览器自动登录一次崩溃即判死且不消耗重试预算）；其余 Err 保持终态。
+- **实锤** `login/session.rs`：`verify_network_after_login` 纳入 `login_timeout` 剩余预算（post_login_delay + 探测原先完全在总超时之外，最坏多挂约 1 分钟）。
+- **实锤** `login/mod.rs`：会话 panic 补偿改为**无条件**写结果槽——被抢占后 panic 的窄竞态不再让 `await_result` 永挂、自动登录失效到重启。
+- **P2** `login/session.rs`：Worker 侧取消终态改用 `make_cancelled_result`，保留 cancel_reason（「用户取消」「被更高优先级登录抢占」不再被笼统的「登录已取消」覆盖）。
+- **P2** `login/mod.rs`：清除四处残留的旧「13s」抢占预算注释（实际 18s）；`launcher.rs` 取消原因 `engine_crashed` 改中文。
+
+### 二、更新器与助手（updater/helper）
+
+- **P1** 上传包版本闸门改用**包内真实版本**：新增 `updater/version_info.rs`（手写 PE VERSIONINFO 解析，零新依赖，非 Windows 返回 None），`apply_uploaded_package` 不再拉远程清单、以提取版本做闸门并写入 pending.version——修掉「远程未发版时自编译包被误拒 / 远程有新版时可装入降级包」双向失真；`VersionUnrecognized` 映射 400。
+- **实锤** `updater/check.rs`：通道候选按 semver 降序逐个尝试，`PlatformNotAvailable`/`ChecksumUnavailable` 回退次高（原先最高候选缺平台资产即整体失败，跨通道回退覆盖）；releases 列表请求复用 403/429 限流判定（`RateLimited` 带 retry_after）。
+- **P2** `updater/mod.rs`：`apply_update` 幂等分支对齐 `ensure_helper_for_shutdown` 校验（pending 可读 + staging exe 存在），staging 失效返回新错误 `StalePending`（400）而非假装成功；卸载助手 spawn 失败时调用新增的 `restore_after_failed_uninstall()` 复位 `update_cancelled`/`update_in_progress`，修掉「卸载中止后更新被永久拒绝」。
+- **实锤次生** `helper_main.rs`：`--apply-update` 下 pending 缺失/损坏 fail-fast 保留现场（不再走必然被 SHA 闸门拒绝的「按 CLI 参数继续」死路径，不再 cleanup 销毁可重试的 staging）；`wait_for_process_exit`/`verify_staging_sha256` 失败原因写入 helper.log（GUI 子系统 stderr 不可见）。
+- **P2** `web/routes/uninstall.rs`：`disable_autostart` 改 `modify_settings_tx`（原锁外读改写与并发 PATCH 丢更新）；注释修正 `apply.rs`/`system.rs` 两处过时描述。
+
+### 三、Web / 配置 / 杂项后端
+
+- **P1** `web/routes/config.rs`：`POST /api/pure-mode` 落盘后补 `reload()`——原实现 ArcSwap 快照滞后，纯净模式开关实际不生效（Worker 永远拿旧值）。
+- **P2** `web/ssrf.rs`：`is_restricted_ip` 覆盖 NAT64（64:ff9b::/96）与 6to4（2002::/16）内嵌 IPv4；代理路径不再跟随重定向（DNS 钉扎经代理失效，3xx 原样返回，剩余风险写明）。
+- **P2** `logging.rs`：日志清理的「活跃文件」判定改按日期后缀 == 今天（原 `name == "app.log"` 是死代码，Unix 下 retention=0 会删掉正在写的当日日志）；retention `u64→u32` 防回绕；0 = 仅保留当天语义写入 doc comment。
+- **P2** `ai/prompt.rs`：`find_login_anchor` 字节偏移容错回退字符边界（Unicode 折叠长度变化不再 panic）。
+- **P2** `utils/platform.rs`：`reg delete` 后 `reg query` 复核——退出码 1 不再一律当幂等成功，真实失败（键值仍在）会报错。
+- **P2** `scheduler/mod.rs`：定时任务 timeout 按绑定任务类型钳制并回写（浏览器 [1,600]、脚本 [1,3600]，与执行侧常量一致）；**补上 `scheduler/task.rs` `map_history_records` 输出 `duration` 字段**（落盘数据本就带值，前端耗时列此前永不渲染）；`cron_loop.rs`/`tasks/executor.rs`/`tray/mod.rs` 三处注释修正（凭据注入实情、Job Object 成功路径同样回收、监测文案）。
+
+### 四、Python Worker
+
+- **P1** `worker_main.py` `_command_timeout`：预算存在时 `0.9 × rust_timeout_ms` 全程权威，删除 `min(base, …)` 的 270s 地板（预算 600s 的长任务不再在 270s 被 Python 判死；close_browser 8s→7.2s 行为保持）。
+- **实锤** `playwright_worker.py` `_to_ms`：timeout ≤0 回退默认值（原 0 → 步骤 1ms 瞬间失败，前端仅警告不阻断可写入 0）。
+- **P2** `worker_main.py`：畸形命令防护——`params` 非对象 / `method` 非 str 回错误响应而非杀死整个 Worker；task 异常与 emit 失败路径补发回包防悬挂。
+- **P2** `playwright_worker.py`：`_close_session` 与热恢复清理 `_wired_page_ids`（page 对象 id 复用不再漏绑 dialog 处理器）；close_browser 内部兜底让位命令级自愈（7.2s 前先触发，慢关闭不再被打成半关闭）；feedback_capture 补 cancel_id 注册 / 取消空闲回收计时 / finally detach；page_capture 分阶段取消检查；资源快照递归 childFrames + 逐 frame HTTP 回补（iframe 门户离线副本不再缺资源）。
+- **实锤** 新增 `_sanitize_error()`：四个异常出口统一剥 URL query/fragment——Playwright 异常文本里的门户重定向 token 不再进 IPC、WS 推送与磁盘登录历史。
+- 文档：`python_worker/README.md` 命令清单 14→15 项（补 `test_redirect`）、「轻量旁路可并发」改为如实的「不占槽位但串行排队」；两处过时注释修正。
+
+### 五、前端
+
+- **P1** `api/index.ts`：`systemApi.update` 超时放宽 600000ms（默认 30s 必然中断 >30s 的更新包下载，更新永远失败在半路）。
+- **P2** 三个任务面板行尾菜单 document 监听器改 `onBeforeUnmount` 直接摘除（原 watch 写法卸载时永不执行，监听器泄漏）；批量导入展示后端 `failed` 明细、`imported=0` 不再弹绿色成功；HttpLoginWizard 步骤 1 文案改为可行的操作指引（原指向被向导遮住的编辑器）；AppTopbar「凭证→凭据」、重试按钮 title 与实际行为对齐；AiTaskView `crypto.randomUUID` 非安全上下文兜底；仪表盘「开始检测时长→已检测时长」+ `formatDuration` 中文紧凑式（测试同步）；`scheduledTasksApi` 四处 id 插值补 `pathSegment`。
+- **P3 清扫**：useCarrierField / useRepoImport 过时注释、useScripts 重复注释、半角括号统一、删除无调用方的 `executeTask`/`executingIds` 死代码。
+
+### 六、验证
+
+- `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` 零告警；`cargo test` 全绿（lib 1068 + helper 12 + 集成套件，含本轮新增约 40 条用例）。
+- `vue-tsc --noEmit` 0 错误、`vitest` 451 例全绿、`npm run build` 成功。
+- `python_worker`：`uv run pytest` 220 例全绿（基线 200 + 新增 20）、`compileall` 通过。
+
 ## 开发中（2026-09-24 文档站链接修正）
 
 ### 背景
