@@ -856,8 +856,11 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
             let was_monitoring =
                 status.borrow().engine_state == crate::status::EngineState::Running;
 
-            // 通知 Orchestrator 取消 source=auto 的在途登录
-            orchestrator.cancel_auto_pending("engine_crashed").await;
+            // 通知 Orchestrator 取消 source=auto 的在途登录（reason 进用户可见的
+            // 取消文案，须为中文而非英文标识符）
+            orchestrator
+                .cancel_auto_pending("引擎异常重启，自动登录已中止")
+                .await;
 
             restart_count += 1;
             if restart_count > MAX_RESTART_ATTEMPTS {
@@ -1126,7 +1129,8 @@ pub(crate) fn collect_args_without_restarting() -> Vec<std::ffi::OsString> {
     args
 }
 
-/// spawn 带 `--restarting` 标记的后继进程（定时自重启与 Web 重启接口共用）///
+/// spawn 带 `--restarting` 标记的后继进程（定时自重启与 Web 重启接口共用）
+///
 /// 后继进程会先等待本进程释放实例锁再启动（见 [`wait_for_lock_release`]），
 /// 因此调用方必须**先 spawn 后继、再触发本进程优雅关闭**。
 pub(crate) fn spawn_restart_successor() -> Result<(), String> {

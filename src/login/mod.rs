@@ -339,7 +339,8 @@ pub struct LoginOrchestrator {
     state: Arc<AsyncMutex<OrchestratorState>>,
     /// submit 串行门：覆盖“抢占决策 → 等旧会话完全收尾 → 新会话占槽”的整个窗口。
     ///
-    /// 与 `state` 锁分离，因此等待旧会话的最长 13s 期间不会阻塞 cancel_current；
+    /// 与 `state` 锁分离，因此等待旧会话完全收尾（最长 [`PREEMPT_WAIT_BUDGET`]）
+    /// 期间不会阻塞 cancel_current；
     /// 只阻止其他 submit 趁 active_session 被 take 后的空窗插队，避免优先级反转。
     submit_gate: AsyncMutex<()>,
     /// 已接纳、尚未成为活跃会话的请求（准备阶段取消登记）
@@ -562,7 +563,8 @@ impl LoginOrchestrator {
         }
 
         // 3. 从抢占决策开始串行化所有 submit，直到新会话真正占据 active_session。
-        // 不能只依赖 state 锁：抢占会 take 旧会话后释放 state 锁并 await 最长 13s，
+        // 不能只依赖 state 锁：抢占会 take 旧会话后释放 state 锁并 await 最长
+        // PREEMPT_WAIT_BUDGET（按各段超时常量推导，见其文档），
         // 若无本 gate，低优先级 submit 可趁空槽抢先写入，反而把高优先级请求挤掉。
         let _submit_guard = self.submit_gate.lock().await;
 
@@ -598,7 +600,7 @@ impl LoginOrchestrator {
                 "登录请求被更高优先级抢占，取消旧会话"
             );
             old.propagate_cancel(&self.bridge, "被更高优先级登录抢占");
-            // 抢占等待（最长 13s）同样处于取消边界内：等待期间点取消即放弃本次提交
+            // 抢占等待（最长 PREEMPT_WAIT_BUDGET）同样处于取消边界内：等待期间点取消即放弃本次提交
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     return self.cancelled_handle(source, profile.id.clone()).await;
@@ -648,7 +650,7 @@ impl LoginOrchestrator {
                 script_plan,
             },
             cancel_token.clone(),
-            result_slot,
+            result_slot.clone(),
             attempt_cancel_id.clone(),
             shutdown_token,
             cancel_reason.clone(),
@@ -686,8 +688,16 @@ impl LoginOrchestrator {
         // 6. 仅当成功占据活跃会话槽位时才计数并 spawn 状态机 task
         if became_active {
             // 句柄为 Arc 共享槽：槽位内已有一份 clone（见上），spawn 任务不再需要本体，
-            // 本体留给末尾 return（与原内联写法一致：panic 补偿取的是槽位内的 handle）
-            self.spawn_session_task(session_id, source, profile.id.clone(), finished, session);
+            // 本体留给末尾 return。panic 补偿需直接持有结果槽：会话可能已被抢占
+            // （active_session 不再指向本会话），补偿必须无条件写入而非依赖槽位归属判断
+            self.spawn_session_task(
+                session_id,
+                source,
+                profile.id.clone(),
+                result_slot.clone(),
+                finished,
+                session,
+            );
         } else {
             // 活跃槽位已被占用，立即写入终态（避免 await_result 永久挂起）
             // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
@@ -1126,13 +1136,14 @@ impl LoginOrchestrator {
 
     /// 计数并 spawn 会话状态机 task（仅占据活跃槽位时调用）。
     ///
-    /// 双层 spawn 保证 run() panic 时补写失败终态 + 清槽位 + 触发收尾通知，
-    /// 避免 await_result 永挂与自动登录静默失效（见内联注释）。
+    /// 双层 spawn 保证 run() panic 时**无条件**补写失败终态 + 清槽位 + 触发收尾
+    /// 通知，避免 await_result 永挂与自动登录静默失效（见内联注释）。
     fn spawn_session_task(
         &self,
         session_id: u64,
         source: LoginSource,
         profile_id: String,
+        result_slot: Arc<LoginHandleInner>,
         finished: Arc<tokio::sync::Notify>,
         session: LoginSession,
     ) {
@@ -1159,49 +1170,42 @@ impl LoginOrchestrator {
             });
             let panicked = run.await.is_err();
             if panicked {
-                // panic 路径：run() 未写终态。锁内补写结果槽并取出历史条目
-                // （锁不得跨 await），广播与历史在锁外按 M4 协议补齐——此前
-                // 只写结果槽，StatusManager 停留 Running 会误导引擎与前端
-                let failure = {
-                    let g = state_arc.lock().await;
-                    // 用 match 直接取引用而非 matches! + expect：本分支是 run() panic 的
-                    // 补偿路径，补偿逻辑自身一旦再 panic，下方的 notify_one 与清槽位
-                    // 都会被跳过（抢占方白等 13s 且槽位滞留），故不留 panic 点
-                    match &g.active_session {
-                        Some(a) if a.session_id == session_id => {
-                            a.handle.inner.set_result(LoginResult {
-                                terminal: LoginTerminal::Failed,
-                                message: "登录会话内部异常，已中止".into(),
-                                source,
-                                duration: Duration::ZERO,
-                                attempts: 0,
-                            });
-                            Some(LoginHistoryEntry {
-                                timestamp: chrono::Local::now(),
-                                source,
-                                profile_id,
-                                result: HistoryResult::Failed,
-                                message: "登录会话内部异常，已中止".to_string(),
-                                duration_secs: 0.0,
-                            })
-                        }
-                        _ => None,
-                    }
+                // panic 路径：run() 未写终态。**无条件**补写结果槽——会话可能
+                // 已被抢占（active_session 不再指向本会话甚至已换成新会话），
+                // 若仅在槽位归属匹配时补写，被抢占会话的等待方 await_result 将
+                // 永久挂起；watch 槽重复写入幂等无害，无需先判归属。结果槽由
+                // 参数直接持有（spawn_session_task 的调用方已 clone），补偿不再
+                // 依赖 state 锁，自然也不存在"锁内再 panic 跳过 notify/清槽位"
+                // 的连锁风险。状态广播与历史按 M4 协议一并补齐——会话确实
+                // panic 过，StatusManager 停留 Running 会误导引擎与前端。
+                let message = "登录会话内部异常，已中止";
+                result_slot.set_result(LoginResult {
+                    terminal: LoginTerminal::Failed,
+                    message: message.into(),
+                    source,
+                    duration: Duration::ZERO,
+                    attempts: 0,
+                });
+                tracing::error!("登录会话 task panic，已补写失败终态（含状态广播与历史记录）");
+                if let Some(m) = &metrics {
+                    m.inc_login_failure();
+                }
+                status_manager.merge(PartialSnapshot::Login {
+                    status: LoginStatus::Failed,
+                    source: None,
+                    message: Some(message.to_string()),
+                    retry_count: 0,
+                });
+                let entry = LoginHistoryEntry {
+                    timestamp: chrono::Local::now(),
+                    source,
+                    profile_id,
+                    result: HistoryResult::Failed,
+                    message: message.to_string(),
+                    duration_secs: 0.0,
                 };
-                if let Some(entry) = failure {
-                    tracing::error!("登录会话 task panic，已补写失败终态（含状态广播与历史记录）");
-                    if let Some(m) = &metrics {
-                        m.inc_login_failure();
-                    }
-                    status_manager.merge(PartialSnapshot::Login {
-                        status: LoginStatus::Failed,
-                        source: None,
-                        message: Some(entry.message.clone()),
-                        retry_count: 0,
-                    });
-                    if let Err(e) = history.record(&entry).await {
-                        warn!("登录历史写入失败: {e}");
-                    }
+                if let Err(e) = history.record(&entry).await {
+                    warn!("登录历史写入失败: {e}");
                 }
             }
             // F6：run() 返回即全部收尾动作（含 emit 的 close_browser）完成，
@@ -1223,8 +1227,10 @@ impl LoginOrchestrator {
     /// 复位掉新会话的上下文。
     ///
     /// 时序设计：改为等待 `finished` 通知（run() 返回 = set_result + 指标 +
-    /// 状态广播 + 历史落盘 + close_browser 全部完成）。总预算 13s = 5s 等终态
-    /// 结果 + 8s close_browser 上限（与 emit 内 close_browser 的命令级超时对齐）。
+    /// 状态广播 + 历史落盘 + close_browser 全部完成）。总预算由
+    /// [`PREEMPT_WAIT_BUDGET`] 按各段超时常量推导（close_browser 命令级超时 +
+    /// Bridge 宽限期，见常量文档与 `preempt_budget_covers_close_and_grace` 测试），
+    /// 不再手写秒数以免与常量漂移。
     /// 超时兜底：`force_recycle` Worker——kill 掉旧会话可能仍挂起的
     /// close_browser/execute（pending 被 drain、取消令牌全部触发），确保旧会话
     /// 失去对 Worker 的一切影响后再放行新会话；旧会话随后收尾时

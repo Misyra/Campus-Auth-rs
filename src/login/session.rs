@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::bridge::{IpcResponse, Outcome, StructuredResult};
+use crate::bridge::{BridgeError, IpcResponse, Outcome, StructuredResult};
 use crate::config::ConfigService;
 use crate::login::history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
 use crate::login::http_login;
@@ -327,11 +327,30 @@ impl LoginSession {
                     }
                     let bridge = bridge.clone();
                     Box::pin(async move {
-                        bridge
-                            .execute(method, params)
-                            .await
-                            .map_err(|e| format!("Bridge 执行失败: {e}"))
-                            .map(Self::parse_ipc_response)
+                        match bridge.execute(method, params).await {
+                            Ok(resp) => Ok(Self::parse_ipc_response(resp)),
+                            // Worker 崩溃 / 启动超时到达调用方是 Err 而非 Outcome：
+                            // Worker 可能已被 Supervisor 重建或仅是瞬时故障，与
+                            // Outcome::NetworkError 同属可重试失败——转成 NetworkError
+                            // 结构化结果走既有 classify/try_retry 路径（此前直接终态
+                            // 失败，Worker 崩溃一次即放弃整场登录；重试前的
+                            // force_recycle_if_unowned 对已死 Worker 幂等安全）。
+                            Err(
+                                e @ (BridgeError::WorkerCrashed { .. }
+                                | BridgeError::WorkerStartupTimeout),
+                            ) => Ok(StructuredResult {
+                                outcome: Outcome::NetworkError,
+                                message: format!("Worker 异常: {e}"),
+                                data: Value::Null,
+                                screenshot_url: None,
+                                duration_ms: 0,
+                            }),
+                            // 其余 Err（WorkerBusy / WorkerNotInstalled /
+                            // WorkerSpawnBlocked / WorkerEnvironmentInvalid /
+                            // Cancelled / Timeout / SupervisorNotRunning 等）保持
+                            // 终态失败：重试不会变好，或取消/超时语义要求立即退出
+                            Err(e) => Err(format!("Bridge 执行失败: {e}")),
+                        }
                     })
                 };
 
@@ -440,7 +459,13 @@ impl LoginSession {
                         // 步骤全部成功后做真实网络验证：避免 Worker 假成功（步骤未抛异常
                         // 但页面实际未登录成功）被误报。参考老实现 _check_success：
                         // 等待 post_login_delay 让认证生效 → check_once → 仅 Online 才算真成功。
-                        match self.verify_network_after_login().await {
+                        // 延迟 + 探测消耗会话总超时预算：传入剩余预算，不得叠加在
+                        // login_timeout 之外拖延整场登录
+                        let remaining = self
+                            .params
+                            .login_timeout
+                            .saturating_sub(session_start.elapsed());
+                        match self.verify_network_after_login(remaining).await {
                             NetworkVerification::Online => {
                                 self.emit(self.make_result(
                                     LoginTerminal::Success,
@@ -487,13 +512,10 @@ impl LoginSession {
                         }
                     }
                     LoginTerminal::Cancelled => {
-                        self.emit(self.make_result(
-                            LoginTerminal::Cancelled,
-                            "登录已取消".into(),
-                            session_start,
-                            attempts_used,
-                        ))
-                        .await;
+                        // 取消原因（用户取消/抢占/应用关闭等）存于 cancel_reason，
+                        // 经 make_cancelled_result 带出，不得硬编码覆盖
+                        self.finish_with_cancelled(session_start, attempts_used, None)
+                            .await;
                         return;
                     }
                     LoginTerminal::Failed => {
@@ -662,14 +684,22 @@ impl LoginSession {
     /// 仅当探测结果为 [`NetworkStatus::Online`] 时返回 [`NetworkVerification::Online`]；
     /// 取消独立返回 `Cancelled`，其余结果返回 `RetryableFailure`。
     ///
+    /// `remaining` 为会话总超时（`login_timeout`）的剩余预算：延迟 + 探测整体经
+    /// `tokio::time::timeout` 收敛在该预算内，不得叠加在 `login_timeout` 之外
+    /// （否则慢探测会把整场登录拖过总超时）；预算已耗尽时跳过验证并按未通过
+    /// 处理，走既有失败/重试语义。
+    ///
     /// 与老实现 `BrowserTaskRunner._network_detection_check` 等价：防止 Worker 步骤
     /// 全部成功但页面实际未登录成功（如填入字面量 `{{USERNAME}}` 却没点登录按钮）。
-    async fn verify_network_after_login(&self) -> NetworkVerification {
+    async fn verify_network_after_login(&self, remaining: Duration) -> NetworkVerification {
+        // 预算耗尽：跳过验证（视为未通过），由调用方走失败/重试路径
+        if remaining.is_zero() {
+            warn!("登录总超时预算已耗尽，跳过登录后网络验证");
+            return NetworkVerification::RetryableFailure;
+        }
         let monitor = &self.deps.monitor;
         // 登录后等待 portal 生效的延迟（可配置，默认 5s）：钳制上限 60s 对齐
-        // 前端输入与本注释，防手改 settings.json 填大值导致登录后无限干等；
-        // 期间监听 cancel_token / shutdown_token，取消立即返回独立终态，
-        // 避免用户点"取消"后仍阻塞至多 60s+探测耗时才退出
+        // 前端输入，防手改 settings.json 填大值导致登录后无限干等
         let delay = self
             .deps
             .config_service
@@ -678,23 +708,16 @@ impl LoginSession {
             .monitor
             .post_login_delay
             .min(60);
-        let sleep_ok = tokio::select! {
-            biased;
-            _ = self.cancel_token.cancelled() => NetworkVerification::Cancelled,
-            _ = self.shutdown_token.cancelled() => {
-                *recover_lock(self.cancel_reason.as_ref()) = Some("应用关闭".to_string());
-                NetworkVerification::Cancelled
-            },
-            _ = tokio::time::sleep(Duration::from_secs(delay as u64)) => NetworkVerification::Online,
+        // 延迟与探测合并为一个被预算超时包裹的 future；取消/shutdown 由外层
+        // select 独立监听（立即返回取消终态，不等预算或探测耗时到期）
+        let verify = async {
+            tokio::time::sleep(Duration::from_secs(delay as u64)).await;
+            monitor.verify_internet().await
         };
-        if sleep_ok == NetworkVerification::Cancelled {
-            info!("登录后网络验证已取消（等待 portal 延迟期间）");
-            return NetworkVerification::Cancelled;
-        }
         let report = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
-                info!("登录后网络验证已取消（探测期间）");
+                info!("登录后网络验证已取消");
                 return NetworkVerification::Cancelled;
             }
             _ = self.shutdown_token.cancelled() => {
@@ -702,7 +725,18 @@ impl LoginSession {
                 info!("登录后网络验证已取消（应用关闭）");
                 return NetworkVerification::Cancelled;
             }
-            r = monitor.verify_internet() => r,
+            r = tokio::time::timeout(remaining, verify) => match r {
+                Ok(inner) => inner,
+                // 剩余预算内未完成（延迟 + 探测超预算）：按未通过处理，
+                // 走既有失败/重试语义，不得在 login_timeout 之外继续等待
+                Err(_) => {
+                    warn!(
+                        remaining = ?remaining,
+                        "登录后网络验证超出剩余会话预算，按未通过处理"
+                    );
+                    return NetworkVerification::RetryableFailure;
+                }
+            },
         };
         match report {
             Ok(report) => {
@@ -807,14 +841,20 @@ impl LoginSession {
             warn!("登录历史写入失败: {e}");
         }
 
-        // 会话终态后回收浏览器资源（Worker 进程保留）。默认全量关闭浏览器
-        // （会话内重试复用同一浏览器，终态即关闭）；worker.keep_alive 启用时
-        // 改会话级释放，登录成功更是整页保留登录状态（门户页 JS 心跳不中断）。
-        // 进程已被回收（force_recycle / 空闲超时）时跳过，避免仅为关浏览器
-        // 而重新 spawn 一个 Worker。
+        // 会话终态后回收浏览器资源（Worker 进程保留）。**仅浏览器渠道执行**：
+        // 直连/脚本会话不经 Bridge 驱动 Worker，没有自己的浏览器可关——若不按
+        // 渠道门控，脚本会话终态会把共享 Worker 上其他在途浏览器任务（如定时
+        // 任务）的页面关掉。判定口径与 run() 的 uses_bridge 一致。默认全量
+        // 关闭浏览器（会话内重试复用同一浏览器，终态即关闭）；worker.keep_alive
+        // 启用时改会话级释放，登录成功更是整页保留登录状态（门户页 JS 心跳不
+        // 中断）。进程已被回收（force_recycle / 空闲超时）时跳过，避免仅为关
+        // 浏览器而重新 spawn 一个 Worker。
         {
             let b = &self.deps.bridge;
-            if b.has_live_worker() {
+            if self.params.http_plan.is_none()
+                && self.params.script_plan.is_none()
+                && b.has_live_worker()
+            {
                 // preserve_state 仅在 keep_alive 且登录成功时为真，非成功终态
                 // 走会话级释放、默认配置走全量关闭，三档语义由 Worker 侧实现
                 let preserve = result.is_success()
@@ -1119,6 +1159,9 @@ mod tests {
         methods: std::sync::Mutex<Vec<String>>,
         calls: std::sync::atomic::AtomicU32,
         recycled: std::sync::atomic::AtomicU32,
+        /// has_live_worker 的可控返回值：现有用例恒 false，终态不关浏览器；
+        /// 终态关浏览器门控测试据此模拟「共享 Worker 上有存活 Worker」
+        live: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -1164,6 +1207,49 @@ mod tests {
         }
 
         fn has_live_worker(&self) -> bool {
+            self.live.load(Ordering::SeqCst)
+        }
+
+        async fn recycle_if_running(&self) {}
+
+        async fn shutdown(&self) {}
+    }
+
+    /// 恒定返回指定 Bridge 错误的 mock：验证 bridge.execute Err 分流的
+    /// 终态/重试语义（BridgeError 含 io::Error 变体不可 Clone，存工厂按次构造）
+    struct FailingBridge {
+        make_error: Box<dyn Fn() -> BridgeError + Send + Sync>,
+        calls: std::sync::atomic::AtomicU32,
+        recycled: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::bridge::BridgeApi for FailingBridge {
+        async fn execute(
+            &self,
+            _method: &str,
+            _params: Value,
+        ) -> Result<crate::bridge::IpcResponse, BridgeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err((self.make_error)())
+        }
+
+        fn cancel(&self, _cancel_id: &str) {}
+
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: Value,
+            _timeout: Duration,
+        ) -> Result<crate::bridge::IpcResponse, BridgeError> {
+            self.execute(method, params).await
+        }
+
+        async fn force_recycle(&self) {
+            self.recycled.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn has_live_worker(&self) -> bool {
             false
         }
 
@@ -1172,8 +1258,8 @@ mod tests {
         async fn shutdown(&self) {}
     }
 
-    /// 构造带脚本 Bridge 的会话依赖集（真实 ConfigService/StatusManager/History）
-    async fn make_deps(bridge: Arc<ScriptedBridge>) -> SessionDeps {
+    /// 构造带 mock Bridge 的会话依赖集（真实 ConfigService/StatusManager/History）
+    async fn make_deps(bridge: Arc<dyn crate::bridge::BridgeApi>) -> SessionDeps {
         let dir = tempfile::TempDir::new().unwrap();
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
         let config = ConfigService::new(dir.path().to_path_buf(), reload_tx)
@@ -1271,6 +1357,7 @@ mod tests {
             methods: std::sync::Mutex::new(Vec::new()),
             calls: std::sync::atomic::AtomicU32::new(0),
             recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
         });
         let deps = make_deps(bridge.clone()).await;
         let (result_tx, result_rx) = tokio::sync::watch::channel(None);
@@ -1312,6 +1399,7 @@ mod tests {
             methods: std::sync::Mutex::new(Vec::new()),
             calls: std::sync::atomic::AtomicU32::new(0),
             recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
         });
         let deps = make_deps(bridge.clone()).await;
         let (result_tx, result_rx) = tokio::sync::watch::channel(None);
@@ -1345,6 +1433,7 @@ mod tests {
             methods: std::sync::Mutex::new(Vec::new()),
             calls: std::sync::atomic::AtomicU32::new(0),
             recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
         });
         let deps = make_deps(bridge.clone()).await;
         let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
@@ -1373,5 +1462,186 @@ mod tests {
         assert_eq!(result.terminal, LoginTerminal::Cancelled);
         assert!(!result.message.contains("重试耗尽"));
         assert_eq!(result.attempts, 1);
+    }
+
+    // ============ 终态关浏览器的渠道门控（P1） ============
+
+    /// 构造脚本登录计划（状态机单测不真跑脚本：StubScriptRunner 恒 Err →
+    /// UnknownError 终态失败，正好触发 emit 收尾路径）
+    fn script_plan() -> crate::login::script_login::ScriptLoginPlan {
+        use crate::tasks::models::{CommonFields, ScriptTaskConfig};
+        crate::login::script_login::ScriptLoginPlan {
+            task: ScriptTaskConfig {
+                common: CommonFields {
+                    task_id: "login-script".to_string(),
+                    name: "登录脚本".to_string(),
+                    description: String::new(),
+                },
+                script_path: None,
+                content: Some("print(1)".to_string()),
+                args: Vec::new(),
+                work_dir: None,
+                timeout: 30,
+                binary_path: None,
+            },
+            extra_env: Vec::new(),
+        }
+    }
+
+    /// P1：脚本渠道会话终态不得向共享 Worker 发 close_browser——mock
+    /// has_live_worker()=true（模拟共享 Worker 上有定时浏览器任务在跑）时，
+    /// 脚本会话终态收尾绝不能把别人的浏览器关掉。
+    #[tokio::test(start_paused = true)]
+    async fn test_script_session_terminal_does_not_close_shared_worker_browser() {
+        let bridge = Arc::new(ScriptedBridge {
+            // 脚本渠道不经 bridge.execute，队列留空：若门控失效误发
+            // close_browser，execute 会因脚本耗尽 panic 而让测试失败
+            script: std::sync::Mutex::new(VecDeque::new()),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(true),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.script_plan = Some(script_plan());
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        let methods = bridge.methods.lock().unwrap();
+        assert!(
+            !methods.iter().any(|m| m == "close_browser"),
+            "脚本会话终态不得关闭共享 Worker 上的浏览器: {methods:?}"
+        );
+    }
+
+    /// 对照组：浏览器渠道会话终态在 has_live_worker()=true 时应照常发
+    /// close_browser（门控只挡直连/脚本渠道，不挡浏览器渠道自身的收尾）
+    #[tokio::test(start_paused = true)]
+    async fn test_browser_session_terminal_closes_browser_when_worker_live() {
+        let bridge = Arc::new(ScriptedBridge {
+            // 第 1 条：登录尝试本身返回 UnknownError（终态失败）；第 2 条：
+            // 终态收尾的 close_browser 响应（emit 忽略其内容）
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (false, "unknown_error", "意外错误"),
+                (true, "success", "已关闭"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(true),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        let methods = bridge.methods.lock().unwrap();
+        assert!(
+            methods.iter().any(|m| m == "close_browser"),
+            "浏览器渠道终态应照常关闭浏览器: {methods:?}"
+        );
+    }
+
+    // ============ bridge.execute Err 分流（WorkerCrashed 可重试） ============
+
+    /// Worker 崩溃（Err(WorkerCrashed)）必须走重试路径而非一次即终态失败：
+    /// max_retries=2 时应试满 3 次并以「重试耗尽」终态收尾，错误详情进入
+    /// 终态消息；每次重试前经归属感知回收已死 Worker（幂等安全）。
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_crashed_error_is_retryable_until_exhausted() {
+        let bridge = Arc::new(FailingBridge {
+            make_error: Box::new(|| BridgeError::WorkerCrashed {
+                reason: "管道关闭".to_string(),
+            }),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            3,
+            "max_retries=2 时 WorkerCrashed 应试满 3 次"
+        );
+        assert_eq!(
+            bridge.recycled.load(Ordering::SeqCst),
+            2,
+            "每次重试前应回收已死 Worker"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 3);
+        assert!(result.message.contains("重试耗尽"), "{}", result.message);
+        assert!(
+            result.message.contains("Worker"),
+            "错误详情应进入终态消息: {}",
+            result.message
+        );
+    }
+
+    /// 对照组：Timeout 等其余 Err 保持终态失败，不消耗重试预算、不回收 Worker
+    #[tokio::test(start_paused = true)]
+    async fn test_bridge_timeout_error_stays_terminal_without_retry() {
+        let bridge = Arc::new(FailingBridge {
+            make_error: Box::new(|| BridgeError::Timeout),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            1,
+            "Timeout 属终态失败，不得重试"
+        );
+        assert_eq!(bridge.recycled.load(Ordering::SeqCst), 0);
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 1);
+        assert!(
+            result.message.contains("Bridge 执行失败"),
+            "{}",
+            result.message
+        );
     }
 }
