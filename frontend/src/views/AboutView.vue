@@ -6,7 +6,7 @@ import { useRouter } from "vue-router";
 import { systemApi, autostartApi } from "@/api";
 import { useUninstall } from "@/composables/useUninstall";
 import { frontendLogger } from "@/utils/logger";
-import { BILIBILI_SPACE_URL } from "@/utils/constants";
+import { BILIBILI_SPACE_URL, DOCS } from "@/utils/constants";
 
 const router = useRouter();
 
@@ -142,7 +142,7 @@ const {
 
       <div class="about-footer card">
         <div class="about-links">
-          <a href="https://campus-auth.misyra.com/docs/getting-started/start" target="_blank" rel="noopener noreferrer" class="docs-link">
+          <a :href="DOCS.gettingStarted" target="_blank" rel="noopener noreferrer" class="docs-link">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
               <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>

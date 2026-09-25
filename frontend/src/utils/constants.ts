@@ -86,6 +86,37 @@ export const BILIBILI_SPACE_URL = "https://space.bilibili.com/5608024";
  */
 export const TUTORIAL_VIDEO_URL = "https://www.bilibili.com/video/BV1EdNg6VEbp/?t=209";
 
+/**
+ * 文档站（`campus-auth-website`）路由的**单一事实源**。
+ *
+ * 界面里凡是「某某文档」按钮都指向这里的一格。此前这些地址以字面量散在四个组件里，
+ * 其中脚本渠道的按钮写的是 `/docs/guides/custom-script`——**该路由从未存在**（文档站
+ * 的章节只有 getting-started / profiles / tasks / automation / maintenance / reference /
+ * faq / performance），点过去落到默认首页，用户找不到任何脚本说明。
+ *
+ * 两侧不同仓，没有编译期约束，因此约定：**改这里的路径必须同时确认文档站存在该路由**
+ * （`campus-auth-website` 的 `pnpm check:docs` 只扫它自己的源码，覆盖不到本仓），
+ * 删改文档站路由时在它的 `LEGACY_REDIRECTS` 里留旧路径重定向。
+ */
+const DOCS_BASE = "https://campus-auth.misyra.com/docs";
+
+/** 按「章节/条目」取文档站地址（`item` 省略则指向该章节首页） */
+const docUrl = (section: string, item?: string): string =>
+  item ? `${DOCS_BASE}/${section}/${item}` : `${DOCS_BASE}/${section}`;
+
+export const DOCS = {
+  /** 新手上路 */
+  gettingStarted: docUrl("getting-started", "start"),
+  /** 配置方案概览（三条登录渠道的取舍） */
+  profiles: docUrl("profiles", "overview"),
+  /** 直连请求登录 */
+  httpLogin: docUrl("profiles", "http-login"),
+  /** 脚本登录（脚本渠道的契约、示例与排障） */
+  scriptLogin: docUrl("profiles", "script-login"),
+  /** 无法自动登录（常见问题） */
+  faqLogin: docUrl("faq", "login"),
+} as const;
+
 /** 仓库导入的源类型：两个预设镜像 + 用户自填地址 */
 export type TaskRepoSourceId = TaskRepoMirrorId | "custom";
 

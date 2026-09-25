@@ -26,6 +26,7 @@ import Modal from "@/components/common/Modal.vue";
 import { computed, ref, watch } from "vue";
 import { useHttpTaskTest } from "@/composables/useHttpTaskTest";
 import { useToast } from "@/composables/useToast";
+import { DOCS } from "@/utils/constants";
 import { httpTaskPayload } from "@/utils/httpTask";
 import {
   HTTP_BODY_EXAMPLE,
@@ -258,7 +259,7 @@ function fillScriptSkeleton(): void {
         </div>
 
         <div class="wz-actions-inline">
-          <a class="btn btn-sm btn-ghost" href="https://campus-auth.misyra.com/docs/profiles/http-login" target="_blank" rel="noopener noreferrer">
+          <a class="btn btn-sm btn-ghost" :href="DOCS.httpLogin" target="_blank" rel="noopener noreferrer">
             <IconApp name="file-text" class="icon-sm" />
             打开完整使用文档
           </a>

@@ -27,7 +27,7 @@ import { computed } from "vue";
 import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useHttpTaskTest } from "@/composables/useHttpTaskTest";
 import { useToast } from "@/composables/useToast";
-import { DEFAULT_TASK_ID } from "@/utils/constants";
+import { DEFAULT_TASK_ID, DOCS } from "@/utils/constants";
 import {
   browserTaskOptions,
   httpTaskOptions,
@@ -313,7 +313,7 @@ async function runTest(): Promise<void> {
       </div>
 
       <div class="http-test-actions">
-        <a class="btn btn-ghost" href="https://campus-auth.misyra.com/docs/guides/custom-script" target="_blank" rel="noopener noreferrer">
+        <a class="btn btn-ghost" :href="DOCS.scriptLogin" target="_blank" rel="noopener noreferrer">
           <IconApp name="file-text" class="icon-sm" />
           脚本登录文档
         </a>
@@ -354,7 +354,7 @@ async function runTest(): Promise<void> {
             {{ httpTestRunning ? '正在发送…' : '发送测试请求' }}
           </button>
           <FieldHelp :text="HELP.test" />
-          <a class="btn btn-ghost" href="https://campus-auth.misyra.com/docs/profiles/http-login" target="_blank" rel="noopener noreferrer">
+          <a class="btn btn-ghost" :href="DOCS.httpLogin" target="_blank" rel="noopener noreferrer">
             <IconApp name="file-text" class="icon-sm" />
             使用文档
           </a>
