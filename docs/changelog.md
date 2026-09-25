@@ -2,6 +2,25 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-24 文档站链接修正）
+
+### 背景
+
+- 用户反馈：「脚本的链接根本没有那个文档啊，你去文档站写一下文档」——脚本渠道卡片上的「脚本登录文档」按钮指向 `https://campus-auth.misyra.com/docs/guides/custom-script`，而文档站（`Misyra/campus-auth-website`）的章节只有 getting-started / profiles / tasks / automation / maintenance / reference / faq / performance，**从来没有 `guides` 章节**，点过去落回默认文档首页。
+- 文档站侧已新增 `2.5-script-login.md`（「脚本登录」，路由 `/docs/profiles/script-login`）并补 `LEGACY_REDIRECTS['guides/custom-script']` → 新路由，两处修复互为兜底：旧链接在文档站重定向，新链接由本仓指向正确路由。
+- 顺带把用户给出的三条渠道定位写进文档：**浏览器自动化**给想开箱即用的小白/简单门户；**直连请求**给需要轻量运行的场景；**自定义脚本**给自己维护登录逻辑的用户。
+
+### 一、文档站地址收敛到单一事实源
+
+- `frontend/src/utils/constants.ts` 新增 `DOCS`（`gettingStarted` / `profiles` / `httpLogin` / `scriptLogin` / `faqLogin`），由 `DOCS_BASE` + `docUrl()` 拼出。此前这些地址以字面量散在四个组件里（`AboutView` / `HttpLoginWizard` / `SetupWizard` / `LoginChannelField`），漂移没有任何拦截——正是这次「链接指向不存在的路由」能悄悄发出去的原因。
+- 四个组件改用该常量（模板侧走 `:href`）。注释里写明跨仓约束：**改这里的路径必须同时确认文档站存在该路由**，因为文档站的 `pnpm check:docs` 只扫它自己的源码，覆盖不到本仓；删改文档站路由时由它的 `LEGACY_REDIRECTS` 保留旧路径。
+- 这一处修的正是脚本渠道的按钮（`/docs/guides/custom-script` → `/docs/profiles/script-login`），直连渠道的按钮同步改走常量（原地址本身是对的）。
+
+### 二、验证
+
+- `vue-tsc --noEmit` 零错误、`vitest` **449** 例全绿（文档地址不进单测，等价于未改行为）。
+- 文档站侧：`pnpm check:docs`（28 篇 / 36 条路由，相对链接与绝对路由全部有效）、`tsc -b`、`eslint`（0 error）、`vite build` + `prerender`（33 页，含 `/docs/profiles/script-login`）、`smoke`（7 项）、`smoke-routes`（33 条路由：无控制台错误、无裂图、无横向溢出）。
+
 ## 开发中（2026-09-24 CI 跨平台 clippy 修复）
 
 - **现象**：推送后 CI 的 `Rust Tests (macos-latest)` 与 `Rust Tests (ubuntu-22.04)` 都卡在「Clippy 零警告（-D warnings）」，`error: constant UNINSTALL_TEMP_PREFIX is never used`（`src/helper_main.rs:449`，`-D dead-code` implied by `-D warnings`），exit 101。
