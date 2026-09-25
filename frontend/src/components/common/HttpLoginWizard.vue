@@ -216,7 +216,7 @@ function fillScriptSkeleton(): void {
             <dd>
               <template v-if="draft.name.trim()">{{ draft.name }}</template>
               <span v-else class="wz-missing">未命名</span>
-              <span class="wz-muted"> · 任务名与备注请在右侧编辑器里改</span>
+              <span class="wz-muted"> · 任务名与备注请先关闭向导，在任务页编辑器中修改</span>
             </dd>
           </div>
           <div>
@@ -224,7 +224,7 @@ function fillScriptSkeleton(): void {
             <dd>
               <template v-if="testUsername">{{ testUsername }}</template>
               <span v-else class="wz-missing">
-                未填写 —— 请在右侧编辑器的测试账号一栏填写（仅用于发送测试，不会存进任务）
+                未填写 —— 请先关闭向导，在任务页的「发送一次测试请求」卡片中填写测试账号后重新打开向导（仅用于发送测试，不会存进任务）
               </span>
             </dd>
           </div>
@@ -234,7 +234,7 @@ function fillScriptSkeleton(): void {
               <template v-if="testPassword">已填写</template>
               <template v-else-if="hasSavedProfile">未填写 —— 已有已保存配置，会使用本机已保存的密码</template>
               <span v-else class="wz-missing">
-                未填写 —— 请在右侧编辑器的测试密码一栏填写（仅用于发送测试，不会存进任务）
+                未填写 —— 请先关闭向导，在任务页的「发送一次测试请求」卡片中填写测试密码后重新打开向导（仅用于发送测试，不会存进任务）
               </span>
             </dd>
           </div>

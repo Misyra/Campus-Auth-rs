@@ -47,7 +47,6 @@ const editingTask = ref<BrowserTaskDraft | null>(null);
 const jsonError = ref("");
 
 // A11：执行类操作 busy 守卫（响应式 Set），防止连点重复提交
-const executingIds = useBusyIds(); // executeTask 执行中
 const duplicatingIds = useBusyIds(); // duplicateTask 复制中
 const exportingIds = useBusyIds(); // exportTask 导出中
 
@@ -85,66 +84,6 @@ watch(
     toastOnly(false, "正在编辑的任务已不存在，已退出编辑");
   },
 );
-
-/** 该任务是否声明了成功条件（决定"执行完成"提示的可信度）
- *
- * 目录列表只有摘要，需按需取详情；取不到时保守返回 false，避免给出过强承诺。
- * 结果按任务 id 缓存，执行多次不重复请求。
- */
-const successConditionCache = new Map<string, boolean>();
-
-async function hasSuccessCondition(taskId: string): Promise<boolean> {
-  const cached = successConditionCache.get(taskId);
-  if (cached !== undefined) return cached;
-  try {
-    const detail = await tasksApi.get(taskId);
-    const condition = String(
-      (detail?.config as { success_condition?: unknown } | undefined)?.success_condition ?? "",
-    ).trim();
-    const has = condition.length > 0;
-    successConditionCache.set(taskId, has);
-    return has;
-  } catch (error) {
-    frontendLogger.debug("tasks", "读取任务成功条件失败，按未声明处理", error);
-    return false;
-  }
-}
-
-/** 立即执行任务（通用语义：浏览器打卡/脚本，不注入账号密码） */
-async function executeTask(taskId: string): Promise<void> {
-  // A11：busy 守卫，执行中连点直接忽略，避免重复提交
-  if (executingIds.has(taskId)) return;
-  executingIds.add(taskId);
-  try {
-    frontendLogger.info("tasks", `执行任务: ${taskId}`);
-    const data = await tasksApi.execute(taskId);
-    // 任务执行失败同样以 HTTP 200 返回（后端 execute_task 直接 Ok），成败由
-    // 业务字段 success 表达；此外信封 success 只表示"命令完成并回包"，步骤
-    // 失败（如 OCR 依赖缺失）也会返回 success=true 的信封。因此必须按
-    // data.success 分流，否则任务实际失败时弹的是绿色"执行完成"。
-    const ok = data?.success === true;
-    if (!ok) {
-      // 失败：优先展示后端错误消息（output 截断到 500 字符，不适合整段塞进 toast）
-      frontendLogger.warn("tasks", `执行失败: ${data?.error || data?.output || taskId}`);
-      toastOnly(false, data?.error || "执行失败");
-      return;
-    }
-    // 成功语义分流：浏览器任务的成功 = "步骤都执行完了"，**不校验业务结果**
-    // （后端 executor 明确不做登录后网络验证，见 src/tasks/executor.rs）。
-    // 未声明 success_condition 时若笼统提示"执行完成"，用户会把"脚本跑完"误读为
-    // "已认证上网"——实测验证码识别出错时任务仍报成功但门户实际拒绝登录。
-    if (!(await hasSuccessCondition(taskId))) {
-      toastOnly(true, "已执行完成（未校验结果）");
-      return;
-    }
-    toastOnly(true, "执行完成");
-  } catch (error) {
-    frontendLogger.error("tasks", "执行任务异常", error);
-    toastOnly(false, extractApiError(error, "执行失败"));
-  } finally {
-    executingIds.delete(taskId);
-  }
-}
 
 /** 扫描任务步骤中的危险类型（执行 JS 类）。保留导出：仓库导入预览等场景复用。 */
 export function detectDangerousSteps(config: { steps?: Array<Record<string, unknown>> }): DangerStep[] {
@@ -556,13 +495,21 @@ async function importTask(): Promise<void> {
     const result = await tasksApi.import(browserItems);
     const imported = result?.imported ?? browserItems.length;
     const ignored = payload.length - browserItems.length;
+    // 后端逐条导入互不中止且恒回 200：imported=0 + failed 非空时若仍按成功弹
+    // "已导入 0 个任务"会把失败伪装成成功，必须把失败明细透出
+    const failed = result?.failed ?? [];
     await fetchTasks(true);
-    toastOnly(
-      true,
-      ignored
-        ? `已导入 ${imported} 个任务，忽略 ${ignored} 个非浏览器条目`
-        : `已导入 ${imported} 个任务`,
-    );
+    const ignoredNote = ignored ? `，忽略 ${ignored} 个非浏览器条目` : "";
+    if (failed.length > 0) {
+      const reason = failed[0]?.reason ?? "未知原因";
+      if (imported === 0) {
+        toastOnly(false, `导入失败：${failed.length} 个任务未通过校验（${reason}）${ignoredNote}`);
+      } else {
+        toastOnly(false, `已导入 ${imported} 个任务，${failed.length} 个失败（${reason}）${ignoredNote}`);
+      }
+      return;
+    }
+    toastOnly(true, ignored ? `已导入 ${imported} 个任务${ignoredNote}` : `已导入 ${imported} 个任务`);
   } catch (e) {
     frontendLogger.warn("tasks", "导入失败: " + (e as Error).message);
     toastOnly(false, "导入失败：" + extractApiError(e, "文件不是有效的任务 JSON"));
@@ -609,11 +556,9 @@ export function useTasks() {
     jsonError,
     dangerousSteps,
     autosaveState: autosave.autosaveState,
-    executingIds,
     duplicatingIds,
     exportingIds,
     fetchTasks,
-    executeTask,
     deleteTask,
     showTaskEditor,
     createTask,

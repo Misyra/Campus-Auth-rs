@@ -49,13 +49,23 @@ describe("formatTimeValue", () => {
 });
 
 describe("formatDuration", () => {
-  it("0 秒显示全零", () => {
-    expect(formatDuration(0)).toBe("0h 0m 0s");
+  it("0 秒显示 0秒", () => {
+    expect(formatDuration(0)).toBe("0秒");
   });
 
-  it("时分秒拆分", () => {
-    expect(formatDuration(3725)).toBe("1h 2m 5s");
-    expect(formatDuration(3600)).toBe("1h 0m 0s");
+  it("不足 1 秒显示 <1秒", () => {
+    expect(formatDuration(0.4)).toBe("<1秒");
+  });
+
+  it("纯秒与分秒组合", () => {
+    expect(formatDuration(45)).toBe("45秒");
+    expect(formatDuration(90)).toBe("1分30秒");
+    expect(formatDuration(120)).toBe("2分");
+  });
+
+  it("小时档丢秒，仅整小时省略分钟", () => {
+    expect(formatDuration(3725)).toBe("1小时2分");
+    expect(formatDuration(3600)).toBe("1小时");
   });
 });
 

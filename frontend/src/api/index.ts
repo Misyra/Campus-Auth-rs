@@ -134,10 +134,12 @@ export const systemApi = {
   agree: () => http.post<MutationResult>("/api/agree"),
   shutdown: () => http.post<MutationResult>("/api/system/shutdown"),
   restart: () => http.post<MutationResult>("/api/system/restart"),
+  // 后端在该请求内同步完成整个更新包下载，可能远超默认 30s 超时，放宽到 10 分钟
   update: (pin?: UpdatePin) =>
     http.post<MutationResult & { message?: string; version?: string }>(
       "/api/system/update",
       pin ?? null,
+      { timeout: 600000 },
     ),
   /**
    * 用手动选择的本地安装包更新（multipart 上传）。
@@ -512,7 +514,12 @@ export const tasksApi = {
   // （`all` 是浏览器任务的历史字段名，后端保留同名以免"旧后端 + 新前端"时缺字段 400）
   order: (order: { all: string[]; scripts: string[]; http: string[] }) =>
     http.post<MutationResult>("/api/tasks/order", order),
-  import: (payload: unknown) => http.post<MutationResult & { imported?: number }>("/api/tasks/import", payload),
+  // 后端逐条导入互不中止：imported 计数 + failed 明细（{ id, reason }）一并回传
+  import: (payload: unknown) =>
+    http.post<MutationResult & { imported?: number; failed?: { id?: string; reason?: string }[] }>(
+      "/api/tasks/import",
+      payload,
+    ),
   export: (id: string) => http.get<Record<string, unknown>>(`/api/tasks/export/${pathSegment(id)}`),
 };
 
@@ -532,11 +539,16 @@ export const httpTasksApi = {
 export const scheduledTasksApi = {
   list: () => http.get<ScheduledTask[]>("/api/scheduler/jobs"),
   create: (payload: ScheduledTaskPayload) => http.post<MutationResult>("/api/scheduler/jobs", payload),
-  update: (id: string, payload: ScheduledTaskPayload) => http.put<MutationResult>(`/api/scheduler/jobs/${id}`, payload),
-  delete: (id: string) => http.delete<MutationResult>(`/api/scheduler/jobs/${id}`),
-  toggle: (id: string) => http.post<MutationResult & { enabled: boolean }>(`/api/scheduler/jobs/${id}/toggle`),
+  update: (id: string, payload: ScheduledTaskPayload) =>
+    http.put<MutationResult>(`/api/scheduler/jobs/${pathSegment(id)}`, payload),
+  delete: (id: string) => http.delete<MutationResult>(`/api/scheduler/jobs/${pathSegment(id)}`),
+  toggle: (id: string) =>
+    http.post<MutationResult & { enabled: boolean }>(`/api/scheduler/jobs/${pathSegment(id)}/toggle`),
   // 手动触发只表示"已排入执行"：后端 spawn 后立刻回 200，成败要等执行历史，
   // 故没有 message / run_id（run_id 曾是死数据，后端已不再返回）
   run: (id: string) => http.post<MutationResult>(`/api/scheduler/jobs/${pathSegment(id)}/run`),
-  history: (id: string) => http.get<{ runs: ScheduledTaskHistoryItem[] } | ScheduledTaskHistoryItem[]>(`/api/scheduler/jobs/${id}/history`),
+  history: (id: string) =>
+    http.get<{ runs: ScheduledTaskHistoryItem[] } | ScheduledTaskHistoryItem[]>(
+      `/api/scheduler/jobs/${pathSegment(id)}/history`,
+    ),
 };

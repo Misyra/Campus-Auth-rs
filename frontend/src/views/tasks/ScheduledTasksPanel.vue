@@ -208,7 +208,11 @@ watch(openMenuId, (open) => {
   }
 });
 
+// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
+// 必须在 onBeforeUnmount 里直接摘掉 document 监听
 onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocumentPointerDown);
+  document.removeEventListener("keydown", onDocumentKeydown);
   closeRowMenu();
 });
 

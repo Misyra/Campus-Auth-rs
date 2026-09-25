@@ -356,10 +356,20 @@ async function importHttpTask(): Promise<void> {
     await fetchHttpTasks(true);
     const imported = result?.imported ?? httpItems.length;
     const skipped = items.length - httpItems.length;
-    toastOnly(
-      true,
-      skipped > 0 ? `已导入 ${imported} 个直连任务，忽略 ${skipped} 个非直连条目` : `已导入 ${imported} 个直连任务`,
-    );
+    // 后端逐条导入互不中止且恒回 200：imported=0 + failed 非空时若仍按成功弹
+    // "已导入 0 个任务"会把失败伪装成成功，必须把失败明细透出
+    const failed = result?.failed ?? [];
+    const skippedNote = skipped > 0 ? `，忽略 ${skipped} 个非直连条目` : "";
+    if (failed.length > 0) {
+      const reason = failed[0]?.reason ?? "未知原因";
+      if (imported === 0) {
+        toastOnly(false, `导入失败：${failed.length} 个直连任务未通过校验（${reason}）${skippedNote}`);
+      } else {
+        toastOnly(false, `已导入 ${imported} 个直连任务，${failed.length} 个失败（${reason}）${skippedNote}`);
+      }
+      return;
+    }
+    toastOnly(true, `已导入 ${imported} 个直连任务${skippedNote}`);
   } catch (e) {
     frontendLogger.warn("http-task", "导入失败: " + (e as Error).message);
     toastOnly(false, "导入失败：" + extractApiError(e, "文件不是有效的任务 JSON"));

@@ -612,7 +612,7 @@ async function confirmImport(): Promise<void> {
         <div class="import-file-name">{{ importPreview.fileName }}</div>
 
         <div v-if="importProfileBody" class="import-summary">
-          <span class="import-summary-name">{{ importProfileBody.name || '(未命名)' }}</span>
+          <span class="import-summary-name">{{ importProfileBody.name || '（未命名）' }}</span>
           <span class="import-summary-meta">
             {{ loginChannelLabel(String(importProfileBody.login_channel ?? "")) }}
             <template v-if="importProfileBody.login_channel !== 'browser'">（免 Python 与浏览器）</template>

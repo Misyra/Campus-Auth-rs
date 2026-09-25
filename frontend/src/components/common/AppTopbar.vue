@@ -26,7 +26,7 @@ const reconnectHint = computed(() => {
     return "后端无响应，请检查后端是否已启动；若刚更新/重启过可点重试";
   }
   if (wsDisconnectReason.value === "unauthorized") {
-    return "疑似后端重启，正在刷新凭证重连…";
+    return "疑似后端重启，正在刷新凭据重连…";
   }
   return `重连中 (第 ${wsRetryCount.value + 1} 次)`;
 });
@@ -68,7 +68,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
       <div v-if="wsReconnecting" class="ws-reconnect-bar ws-reconnect-inline" :title="reconnectHint">
         <span class="spinner"></span>
         <span class="ws-reconnect-text">{{ reconnectHint }}</span>
-        <button class="btn btn-xs" @click="retryNow()" title="不清退避计时，立即重连一次">立即重试</button>
+        <button class="btn btn-xs" @click="retryNow()" title="跳过退避等待，立即以最短间隔重连">立即重试</button>
       </div>
       <div ref="notificationWrapperRef" class="notification-wrapper">
         <button

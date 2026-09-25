@@ -121,8 +121,6 @@ const draftGapsNow = computed<string[]>(() =>
 
 // ---- 自动保存 ----
 
-// ---- 自动保存 ----
-
 /** 落盘载荷指纹（比对用；载荷不含 `_isNew` 这类界面态，故可作磁盘状态代表） */
 function fingerprint(draft: ScriptDraft): string {
   return JSON.stringify(scriptDraftPayload(draft));
@@ -288,7 +286,7 @@ async function runScript(taskId: string): Promise<void> {
     // 根本看不到脚本为什么失败——故连结果一起留下。
     lastRunResult.value = data ? { id: taskId, result: data } : null;
     // 执行失败同样是 HTTP 200（后端脚本执行把成败放在业务字段里），只看 HTTP
-    // 会把它弹成绿色的"执行完成"——与浏览器任务 executeTask 同一口径分流。
+    // 会把它弹成绿色的"执行完成"——按业务字段 success 分流。
     if (data?.success) {
       toastOnly(true, `脚本执行成功（${data.duration_ms}ms）`);
       return;

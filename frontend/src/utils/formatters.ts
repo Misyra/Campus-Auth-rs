@@ -18,11 +18,18 @@ export function formatTimeValue(seconds: number): string {
   return `${Math.round(seconds / 60)}分钟`;
 }
 
-/** 秒 → "Xh Ym Zs" 开始监控时长（仪表盘统计卡） */
+/**
+ * 秒 → 中文紧凑时长（仪表盘「已检测时长」统计卡）。
+ *
+ * 小时档丢秒、分钟档保留秒，秒以下不足 1s 显示 "<1秒"，与站内 "45秒" 风格一致。
+ */
 export function formatDuration(sec: number): string {
-  if (sec === 0) return "0h 0m 0s";
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  return `${h}h ${m}m ${s}s`;
+  if (!sec || sec <= 0) return "0秒";
+  if (sec < 1) return "<1秒";
+  const s = Math.floor(sec % 60), m = Math.floor((sec % 3600) / 60), h = Math.floor(sec / 3600);
+  if (h > 0) return m > 0 ? `${h}小时${m}分` : `${h}小时`;
+  if (m > 0) return s > 0 ? `${m}分${s}秒` : `${m}分`;
+  return `${s}秒`;
 }
 
 /** 当前本地时间 → "YYYY-MM-DD HH:mm:ss"（前端生成的日志条目用，与后端日志时间戳格式/时区一致） */

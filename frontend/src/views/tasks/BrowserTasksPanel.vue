@@ -167,8 +167,11 @@ watch(openMenuId, (open) => {
   }
 });
 
-// 切走时菜单还开着的话，那两个 document 监听会永久留着（Esc 会调到已卸载组件的作用域里）
+// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
+// 必须在 onBeforeUnmount 里直接摘掉 document 监听
 onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocumentPointerDown);
+  document.removeEventListener("keydown", onDocumentKeydown);
   closeRowMenu();
 });
 

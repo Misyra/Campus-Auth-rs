@@ -943,12 +943,13 @@ export interface ScheduledTaskPayload {
   [key: string]: unknown;
 }
 
-/** 定时任务执行历史条目（后端 job_history 扁平数组：{ run_at, success, message, duration }） */
+/** 定时任务执行历史条目（后端 map_history_records 输出：{ run_at, success, message, duration, trigger }） */
 export interface ScheduledTaskHistoryItem {
   run_at: string;
   success: boolean;
   message: string;
-  duration?: number;
+  /** 执行耗时秒数；存量历史记录缺 duration 时为 null（同 trigger 口径） */
+  duration?: number | null;
   /** 触发来源（cron/startup/manual；存量记录缺省为 null） */
   trigger?: string | null;
   [key: string]: unknown;

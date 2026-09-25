@@ -600,7 +600,10 @@ async function saveTask(): Promise<void> {
     delete task.id;
     delete task.source;
     delete task.version;
-    task.task_id = `ai-${crypto.randomUUID()}`;
+    // crypto.randomUUID 仅在安全上下文（HTTPS / localhost）存在，局域网 IP 访问时是
+    // undefined——兜底用时间戳 + 随机后缀，避免保存时直接抛 TypeError
+    const uuid = crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    task.task_id = `ai-${uuid}`;
     task.type = "browser";
     task.url = "{{LOGIN_URL}}";
     savingTask.value = true;
