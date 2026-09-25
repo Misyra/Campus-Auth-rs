@@ -446,6 +446,11 @@ fn run_apply_update(cli: &HelperCli) {
 // ═══ 卸载模式 ═══
 
 /// 卸载第二段所在的临时目录名前缀
+///
+/// 只被 `#[cfg(windows)]` 的 [`spawn_uninstall_phase2`] 使用——**必须一并加 `cfg`**：
+/// unix 走单段直删，常量在那里没有任何引用，不加会让 `clippy -D warnings` 在
+/// macOS / Linux 上以 `dead-code` 失败（Windows 本地看不出来，只有 CI 的跨平台矩阵会红）。
+#[cfg(windows)]
 const UNINSTALL_TEMP_PREFIX: &str = "campus-auth-uninst-";
 
 /// 卸载模式：等待主进程退出后删除安装目录，并把结果写进系统提示框
