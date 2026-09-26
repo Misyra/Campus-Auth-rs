@@ -35,7 +35,6 @@ const settingsChildFiles = [
   "BrowserSettings.vue",
   "TaskEnvironmentSettings.vue",
   "SystemSettings.vue",
-  "NetworkSettings.vue",
 ];
 
 describe("设置页表单提交守卫", () => {

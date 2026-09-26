@@ -114,3 +114,143 @@
   margin: 0 auto 0 0;
   text-align: left;
 }
+
+/* ==================== 自动更新（原「网络与更新」Tab 并入，作用域类 .system-update-page） ==================== */
+
+/* about.css 的 update-available / update-latest 与本页共用一套，但两者细节不同，
+   故保留页面作用域避免改动 about 页样式 */
+.system-update-page .update-result {
+  margin-top: 10px;
+}
+
+.system-update-page .update-available,
+.system-update-page .update-latest,
+.system-update-page .update-success,
+.system-update-page .update-error {
+  margin-top: 10px;
+  font-size: var(--text-sm);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.system-update-page .update-available {
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.08);
+  border-radius: var(--radius-md);
+}
+
+.system-update-page .update-latest {
+  color: var(--success);
+}
+
+.system-update-page .update-success {
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--success-rgb), 0.24);
+  background: rgba(var(--success-rgb), 0.08);
+  border-radius: var(--radius-md);
+  color: var(--success);
+}
+
+.system-update-page .update-error {
+  color: var(--error);
+}
+
+/* 本地安装包命中提示：与 update-available 同色系但更弱，避免与主按钮抢注意力 */
+.system-update-page .update-local-package {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  color: var(--success);
+}
+
+/* 手动放置安装包说明：默认折叠（低频操作，不与常用开关争版面） */
+.system-update-page .manual-update-tip {
+  margin-bottom: var(--space-md);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(var(--slate-rgb), 0.04);
+}
+
+.system-update-page .manual-update-tip > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+/* 去掉 Chrome/Safari 默认的三角标记（自绘 chevron 保持与其余折叠区一致） */
+.system-update-page .manual-update-tip > summary::-webkit-details-marker {
+  display: none;
+}
+
+.system-update-page .manual-update-tip > summary svg {
+  flex-shrink: 0;
+}
+
+/* chevron 与 info 图标：IconApp 的 svg 无宽高属性时默认 300×150，必须显式限尺寸 */
+.system-update-page .manual-update-chevron {
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+  color: var(--text-secondary);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.system-update-page .manual-update-tip[open] > summary {
+  margin-bottom: 10px;
+}
+
+.system-update-page .manual-update-tip[open] .manual-update-chevron {
+  transform: rotate(180deg);
+}
+
+.system-update-page .manual-update-body {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.system-update-page .manual-update-body p {
+  margin: 0;
+}
+
+.system-update-page .manual-update-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+
+/* 路径可能很长：允许折行，避免撑破卡片（Windows 绝对路径尤其） */
+.system-update-page .manual-update-path code {
+  word-break: break-all;
+  color: var(--text-primary);
+}
+
+.system-update-page .manual-update-notes {
+  margin: 10px 0 0;
+  padding-left: 1.2em;
+}
+
+.system-update-page .manual-update-notes li {
+  margin-bottom: 4px;
+}
+
+.system-update-page .manual-update-notes li:last-child {
+  margin-bottom: 0;
+}

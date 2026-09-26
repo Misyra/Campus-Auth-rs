@@ -109,7 +109,7 @@ function navigate(name: string): void {
         </div>
       </div>
 
-      <button class="nav-item" :class="{ active: onSettings }" @click="navigate('settings')" title="设置（检测 / 浏览器 / 任务与环境 / 系统 / 网络与更新 / 外观）">
+      <button class="nav-item" :class="{ active: onSettings }" @click="navigate('settings')" title="设置（检测 / 浏览器 / 任务与环境 / 系统与更新 / 外观）">
         <IconApp name="settings" class="nav-icon" />
         <span>设置</span>
       </button>

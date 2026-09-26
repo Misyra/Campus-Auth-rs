@@ -2,6 +2,25 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-26 设置页「系统」与「网络与更新」合并为「系统与更新」）
+
+### 背景
+
+- 设置页 Tab 数量偏多，「系统」与「网络与更新」都是低频全局项，合并为单一「系统与更新」Tab 降低导航成本。
+
+### 前端
+
+- `SystemSettings.vue`：并入原 `NetworkSettings.vue` 全部内容（网络端口与代理 / 自动更新 / 维护操作三张卡片），页根作用域类 `.network-page` → `.system-update-page`，模块 doc 同步；分区顺序为运行模式 → 启动与运行 + 界面行为 → 日志设置 + 网络端口与代理 → 自动更新 → 维护操作——半宽卡两两同排填满网格（半宽卡后直接接宽卡会留整行空洞，首版顺序实测如此，浏览器截图复核修正），网络卡由宽卡改半宽后代理地址输入不再通栏拉宽。
+- 删除 `NetworkSettings.vue` 与 `styles/pages/settings/network.css`；规则并入 `settings/system.css`（作用域前缀同步改为 `.system-update-page`，保留页面作用域避免污染 about.css 的同名全局类），`styles/index.css` 移除 network.css 引入并留注释防回潮。
+- `constants.ts`：`SETTINGS_TABS` 移除 network 项，「系统」改名「系统与更新」（hint 汇总两侧内容）。
+- `router/index.ts`：`settings-network` 具名路由退役，`/settings/network` 保留重定向到 `settings-system`（旧深链与书签不 404，同「环境」Tab 先例）；system 路由 title 改「设置 · 系统与更新」。
+- `AppSidebar.vue` 设置项 title、`useUi.ts` 注释、`settingsForm.test.ts` 子组件清单同步（移除 NetworkSettings）。
+- `docs/guides/user-guide.md`：导航表、托盘说明、手动更新章节三处 Tab 名同步。
+
+### 验证
+
+- `vitest run` 470 通过；`vue-tsc --noEmit` 零错误；`npm run build` 通过（产物已无 NetworkSettings 独立 chunk）。
+
 ## 开发中（2026-09-26 教程视频链接分拆）
 
 ### 背景

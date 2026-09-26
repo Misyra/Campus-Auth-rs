@@ -56,8 +56,9 @@ const routes = [
       { path: "tasks", name: "settings-tasks", meta: { title: "设置 · 任务与环境" }, component: () => import("@/views/settings/TaskEnvironmentSettings.vue") },
       // 旧「环境」Tab 深链与书签重定向到合并后的 Tab
       { path: "environment", redirect: { name: "settings-tasks" } },
-      { path: "system", name: "settings-system", meta: { title: "设置 · 系统" }, component: () => import("@/views/settings/SystemSettings.vue") },
-      { path: "network", name: "settings-network", meta: { title: "设置 · 网络与更新" }, component: () => import("@/views/settings/NetworkSettings.vue") },
+      { path: "system", name: "settings-system", meta: { title: "设置 · 系统与更新" }, component: () => import("@/views/settings/SystemSettings.vue") },
+      // 旧「网络与更新」Tab 已并入「系统与更新」：保留深链与书签重定向
+      { path: "network", redirect: { name: "settings-system" } },
       // 外观原为侧栏独立页，并入设置页：它是纯本机显示偏好，与其余设置同类
       { path: "appearance", name: "settings-appearance", meta: { title: "设置 · 外观" }, component: () => import("@/views/AppearanceView.vue") },
     ],
