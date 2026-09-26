@@ -78,6 +78,13 @@ pub(crate) struct HttpLoginRequest {
     pub success_pattern: String,
     /// 失败判定关键字（命中即终态失败）
     pub failure_pattern: String,
+    /// 成败判定方式：`Response` 响应关键字（默认）/ `Network` 网络检测
+    ///
+    /// `Network` 模式下响应体与状态码都不参与成功判定——请求发出且未命中
+    /// `failure_pattern` 即为候选成功，最终成败由会话层登录后网络验证判定
+    /// （直连不构造 worker_config，该验证对直连恒生效）。`failure_pattern`
+    /// 仍用于快速失败：门户明确报错时没必要等探测结果。
+    pub success_check: crate::tasks::HttpSuccessCheck,
     /// 加密脚本（空 = 不变换）
     pub crypto_script: String,
     /// 前置请求（`None` = 不需要）：先取回一个值（如 CSRF token）再渲染登录请求。
@@ -144,6 +151,7 @@ impl HttpLoginRequest {
             body: task.body.clone(),
             success_pattern: task.success_pattern.clone(),
             failure_pattern: task.failure_pattern.clone(),
+            success_check: task.success_check,
             crypto_script: task.crypto_script.clone(),
             pre_request: task.pre_request.clone(),
             logout_request: task.logout_request.clone(),
@@ -595,6 +603,10 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let success_pattern = req.success_pattern.trim();
     let success = if failure_hit {
         false
+    } else if req.success_check == crate::tasks::HttpSuccessCheck::Network {
+        // 网络检测模式：响应体与状态码都不参与成功判定（见 HttpSuccessCheck 文档），
+        // 此处一律判候选成功，最终成败由会话层登录后网络验证决定
+        true
     } else if success_pattern.is_empty() {
         status.is_success()
     } else {
@@ -611,7 +623,12 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             ),
         )
     } else if success {
-        (Outcome::Success, format!("直连请求成功（HTTP {status}）"))
+        let message = if req.success_check == crate::tasks::HttpSuccessCheck::Network {
+            format!("已发送登录请求（HTTP {status}），成功与否由登录后网络检测判定")
+        } else {
+            format!("直连请求成功（HTTP {status}）")
+        };
+        (Outcome::Success, message)
     } else {
         (
             Outcome::AssertionFailed,
@@ -1247,6 +1264,7 @@ mod tests {
             body: String::new(),
             success_pattern: "登录成功".into(),
             failure_pattern: "密码错误".into(),
+            success_check: crate::tasks::HttpSuccessCheck::default(),
             crypto_script: String::new(),
             pre_request: None,
             logout_request: None,
@@ -1320,6 +1338,39 @@ mod tests {
         assert!(
             !raw.contains("mozilla/5.0"),
             "兜底 UA 不应与显式配置同时发出:\n{raw}"
+        );
+    }
+
+    /// 网络检测判定模式：响应体与状态码都不参与成功判定——成功关键字未命中
+    /// 也判候选成功（Outcome::Success），最终成败由会话层登录后网络验证决定。
+    #[tokio::test]
+    async fn network_check_mode_ignores_response_body() {
+        let (url, _rx) = spawn_capturing_response(200, "门户返回了意料之外的内容", "").await;
+        let mut req = request(url);
+        req.success_check = crate::tasks::HttpSuccessCheck::Network;
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        assert!(
+            report.message.contains("网络检测"),
+            "消息应说明将由网络检测判定: {}",
+            report.message
+        );
+    }
+
+    /// 网络检测模式下失败关键字仍生效：门户明确报错（密码错误等）快速失败，
+    /// 不必等探测结果。
+    #[tokio::test]
+    async fn network_check_mode_still_honors_failure_pattern() {
+        let (url, _rx) =
+            spawn_capturing_response(200, "{\"code\":1,\"msg\":\"密码错误\"}", "").await;
+        let mut req = request(url);
+        req.success_check = crate::tasks::HttpSuccessCheck::Network;
+        let report = run_once(&req).await;
+        assert_eq!(
+            report.outcome,
+            Outcome::InvalidCredential,
+            "{}",
+            report.message
         );
     }
 

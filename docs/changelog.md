@@ -2,6 +2,21 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-26 直连任务网络检测判定模式）
+
+### 背景
+
+- 用户需求：响应内容不可靠的门户（dr1003 这类 JSONP 回调名恒等于 callback、业务码含义不明）用成功关键字判定不可靠，希望以「登录后能否上外网」作为成功的最终判据。
+
+### 登录
+
+- `tasks/models.rs`：`HttpTaskConfig` 新增 `success_check` 字段（`HttpSuccessCheck` 枚举：`response` 响应关键字默认 / `network` 网络检测），serde default 保证老任务语义不变；serde roundtrip/缺省值测试覆盖两态。
+- `login/http_login.rs`：`network` 模式下响应体与状态码都不参与**成功**判定——登录请求发出且未命中失败关键字即判候选成功（消息注明"由登录后网络检测判定"），最终成败由会话层既有的登录后网络验证一锤定音（直连不构造 `worker_config`，`has_explicit_success_condition` 恒为 false，该验证对直连恒生效，未通过走可重试路径）；`failure_pattern` 在两种模式下都生效（门户明确报错时快速失败，不必等探测）。新增 2 个单测（忽略响应体 / 失败关键字仍生效）。
+
+### 前端 / 文档
+
+- 直连任务编辑器第 3 步新增「判定方式」下拉（`loginChannel.HTTP_SUCCESS_CHECK_OPTIONS`，CustomSelect 消费）；草稿互转（`httpTask.ts`）与类型（`types.ts`）同步，老配置缺键按 `response` 兜底；`http-login-guide.md` §3.4 增补判定方式说明。
+
 ## 开发中（2026-09-26 直连渠道 ISP 支持）
 
 ### 背景

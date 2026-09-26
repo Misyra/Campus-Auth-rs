@@ -8,7 +8,7 @@
  * 一份任务），故此处没有也不应有对应字段。
  */
 
-import type { HttpIgnoreHttpsErrors, HttpLoginMethod, HttpTaskConfig } from "@/api/types";
+import type { HttpIgnoreHttpsErrors, HttpLoginMethod, HttpSuccessCheck, HttpTaskConfig } from "@/api/types";
 
 /** 任务 ID 校验：与后端 `TASK_ID_PATTERN` 同口径（ASCII，允许 - 与 _） */
 export const HTTP_TASK_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -29,6 +29,8 @@ export interface HttpTaskDraft {
   body: string;
   success_pattern: string;
   failure_pattern: string;
+  /** 成败判定方式（默认 "response" 响应关键字；"network" = 网络检测） */
+  success_check: HttpSuccessCheck;
   crypto_script: string;
   /**
    * 前置请求（可选）：**地址留空 = 不需要**，不额外加一个开关。
@@ -75,6 +77,7 @@ export function emptyHttpTaskDraft(): HttpTaskDraft {
     body: "",
     success_pattern: "",
     failure_pattern: "",
+    success_check: "response",
     crypto_script: "",
     pre_request_method: "GET",
     pre_request_url: "",
@@ -105,6 +108,8 @@ export function httpTaskDraftFromConfig(config: HttpTaskConfig): HttpTaskDraft {
     body: config.body ?? "",
     success_pattern: config.success_pattern ?? "",
     failure_pattern: config.failure_pattern ?? "",
+    // 成败判定方式：老配置没有这个键，缺省按响应关键字（与后端 serde default 同口径）
+    success_check: config.success_check === "network" ? "network" : "response",
     crypto_script: config.crypto_script ?? "",
     // 前置请求：老配置没有这个键（`undefined`）与显式 null 都按"不需要"处理
     pre_request_method: config.pre_request?.method ?? "GET",
@@ -141,6 +146,7 @@ export function httpTaskPayload(draft: HttpTaskDraft): HttpTaskConfig & { type: 
     body: draft.body,
     success_pattern: draft.success_pattern,
     failure_pattern: draft.failure_pattern,
+    success_check: draft.success_check,
     crypto_script: draft.crypto_script,
     // 地址留空 = 不需要前置请求（null 与缺省同义；后端 Option<HttpPreRequest> 收 null）
     pre_request: draft.pre_request_url.trim()

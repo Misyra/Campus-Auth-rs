@@ -22,6 +22,7 @@ import {
   HTTP_HEADERS_EXAMPLE,
   HTTP_MAC_FORMAT_NOTE,
   HTTP_METHOD_OPTIONS,
+  HTTP_SUCCESS_CHECK_OPTIONS,
   HTTP_TEMPLATE_PLACEHOLDERS,
   certPolicyFromValue,
   certPolicyHint as certPolicyHintText,
@@ -29,6 +30,7 @@ import {
   isCredentialExposedViaGet,
 } from "@/utils/loginChannel";
 import type { HttpCertPolicy } from "@/utils/loginChannel";
+import type { HttpSuccessCheck } from "@/api/types";
 import type { HttpTaskDraft } from "@/utils/httpTask";
 
 const props = defineProps<{
@@ -69,7 +71,15 @@ const HELP = {
   verdict:
     "填响应里出现的文字即可；留空则只要返回 2xx 就算成功。\n\n" +
     "判定顺序：先看失败关键字，再看成功关键字。门户响应恒为 HTTP 200 时" +
-    "（JSONP 接口很常见）两个关键字都要填，否则凭据错误也会被判成成功。",
+    "（JSONP 接口很常见）两个关键字都要填，否则凭据错误也会被判成成功。\n\n" +
+    "响应内容不可靠的门户（如 dr1003 回调名恒等于 callback）可把判定方式" +
+    "换成「网络检测」：不看响应，直接以能否上外网作为登录成功的判据。",
+  successCheck:
+    "「响应关键字」= 按下方的成功/失败关键字判定（默认）。\n\n" +
+    "「网络检测」= 发出登录请求后不再看响应内容，稍等片刻做一次公网连通探测，" +
+    "能上外网才算登录成功，未通过会自动重试。适合响应内容不可靠、或成功标识" +
+    "难以确定的门户。失败关键字在两种方式下都生效——门户明确报错（密码错误等）" +
+    "时立即判失败，不必等探测。",
   success:
     "响应内容里出现这段文字即判定成功。留空时以 HTTP 2xx 判断，" +
     "但部分门户（如 Dr.COM / eportal）即使密码错误也返回 200，此时必须填写。",
@@ -139,6 +149,14 @@ const passwordInUrl = computed(() => isCredentialExposedViaGet(props.model.metho
 function setCertPolicy(value: string): void {
   props.model.ignore_https_errors = certPolicyToValue(value as HttpCertPolicy);
 }
+
+/** 判定方式（CustomSelect 回传 string，此处收窄回枚举，未知值按默认处理） */
+const successCheck = computed<HttpSuccessCheck>({
+  get: () => props.model.success_check,
+  set: (value) => {
+    props.model.success_check = value === "network" ? "network" : "response";
+  },
+});
 
 function fillUrlExample(): void {
   props.model.url = "http://10.0.0.1/login?username={username}&password={password}";
@@ -268,6 +286,14 @@ function fillScriptSkeleton(): void {
           <strong>告诉程序怎么判断登录成功</strong>
           <FieldHelp :text="HELP.verdict" wide />
         </div>
+      </div>
+
+      <div class="form-group">
+        <div class="field-label-row">
+          <label :for="`${uid}-success-check`">判定方式</label>
+          <FieldHelp :text="HELP.successCheck" />
+        </div>
+        <CustomSelect :id="`${uid}-success-check`" v-model="successCheck" :options="HTTP_SUCCESS_CHECK_OPTIONS" />
       </div>
 
       <div class="form-row">

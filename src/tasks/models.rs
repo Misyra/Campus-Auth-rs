@@ -452,6 +452,14 @@ pub struct HttpTaskConfig {
     pub success_pattern: String,
     /// 失败判定模式（响应体匹配）
     pub failure_pattern: String,
+    /// 成败判定方式（默认 `response` 响应关键字；`network` = 网络检测）
+    ///
+    /// `network` 模式下响应体与状态码都不参与**成功**判定：登录请求发出且未命中
+    /// 失败关键字即视为"候选成功"，交给登录后的网络检测一锤定音（公网可达才算真
+    /// 成功，未通过走既有可重试路径）。适用于响应体不可靠的门户（如 dr1003 的
+    /// JSONP 回调名恒等于 callback、业务码含义不明）。失败关键字在两种模式下都
+    /// 生效——门户明确报错（密码错误等）时没必要等探测结果。
+    pub success_check: HttpSuccessCheck,
     /// 凭据变换脚本（生成加密后的表单字段等）
     pub crypto_script: String,
     /// 前置请求：登录前先取回一个值（如 CSRF token）供登录请求引用；`None` = 不需要
@@ -484,6 +492,7 @@ impl Default for HttpTaskConfig {
             body: String::new(),
             success_pattern: String::new(),
             failure_pattern: String::new(),
+            success_check: HttpSuccessCheck::default(),
             crypto_script: String::new(),
             pre_request: None,
             logout_request: None,
@@ -491,6 +500,24 @@ impl Default for HttpTaskConfig {
             metadata: default_value_obj(),
         }
     }
+}
+
+/// 直连登录的成败判定方式（`HttpTaskConfig::success_check`）
+///
+/// 会话层对直连渠道本就有"模式判成功 → 登录后网络验证兜底"的链路（直连不构造
+/// `worker_config`，`has_explicit_success_condition` 恒为 false）；`network` 模式
+/// 正是把这条既有兜底从"第二道关"提升为"唯一判据"——响应体不再参与成功判定。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HttpSuccessCheck {
+    /// 响应关键字（默认）：命中 `success_pattern` 即成功（为空时退回 HTTP 2xx），
+    /// 命中 `failure_pattern` 即失败
+    #[default]
+    #[serde(rename = "response")]
+    Response,
+    /// 网络检测：响应体与状态码都不参与成功判定，登录请求发出（且未命中失败
+    /// 关键字）即交由登录后网络验证判定；`failure_pattern` 仍用于快速失败
+    #[serde(rename = "network")]
+    Network,
 }
 
 /// 统一任务类型（内部标记枚举）
@@ -1076,6 +1103,8 @@ mod tests {
         assert!(cfg.body.is_empty());
         assert!(cfg.success_pattern.is_empty());
         assert!(cfg.failure_pattern.is_empty());
+        // 判定方式默认响应关键字（老任务没有该键时 serde default 补齐）
+        assert_eq!(cfg.success_check, HttpSuccessCheck::Response);
         assert!(cfg.crypto_script.is_empty());
         assert_eq!(cfg.ignore_https_errors, None);
         assert!(cfg.metadata.is_object());
@@ -1101,6 +1130,8 @@ mod tests {
             assert!(cfg.body.contains("{password}"));
             // 未写 ignore_https_errors → None（跟随全局），而非静默 false
             assert_eq!(cfg.ignore_https_errors, None);
+            // 未写 success_check → response（响应关键字），老配置语义不变
+            assert_eq!(cfg.success_check, HttpSuccessCheck::Response);
             // 未写 auth_url → 空串（回退方案的认证地址），不是解析失败
             assert!(cfg.auth_url.is_empty());
         } else {
@@ -1124,6 +1155,7 @@ mod tests {
             body: "username={username}&password={password}".to_string(),
             success_pattern: "登录成功".to_string(),
             failure_pattern: "密码错误".to_string(),
+            success_check: HttpSuccessCheck::Network,
             crypto_script: "function transform(ctx) { return ctx; }".to_string(),
             pre_request: Some(HttpPreRequest {
                 method: HttpRequestMethod::Get,
@@ -1168,6 +1200,7 @@ mod tests {
         assert_eq!(cfg.body, "username={username}&password={password}");
         assert_eq!(cfg.success_pattern, "登录成功");
         assert_eq!(cfg.failure_pattern, "密码错误");
+        assert_eq!(cfg.success_check, HttpSuccessCheck::Network, "判定方式必须原样往返");
         assert_eq!(cfg.crypto_script, "function transform(ctx) { return ctx; }");
         let pre = cfg.pre_request.expect("前置请求必须原样往返");
         assert_eq!(pre.method, HttpRequestMethod::Get);

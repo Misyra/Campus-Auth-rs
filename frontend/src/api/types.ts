@@ -499,6 +499,15 @@ export type HttpLoginMethod = "GET" | "POST";
  */
 export type HttpIgnoreHttpsErrors = boolean | null;
 
+/**
+ * 直连登录的成败判定方式。
+ *
+ * `"response"`（默认）= 响应关键字：命中成功关键字即成功（为空时退回 HTTP 2xx）；
+ * `"network"` = 网络检测：响应体与状态码都不参与成功判定，登录请求发出且未命中
+ * 失败关键字即交给登录后的网络检测判定（公网可达才算真成功）。
+ */
+export type HttpSuccessCheck = "response" | "network";
+
 /** 配置方案 */
 export interface Profile {
   id: string;
@@ -617,6 +626,15 @@ export interface HttpTaskConfig {
   logout_request?: HttpActionRequest | null;
   /** null = 跟随全局证书策略（`browser.ignore_https_errors`） */
   ignore_https_errors: HttpIgnoreHttpsErrors;
+  /**
+   * 成败判定方式（默认 `"response"` 响应关键字）。
+   *
+   * `"network"` = 网络检测：响应体与状态码都不参与成功判定，登录请求发出且未命中
+   * 失败关键字即交给登录后的网络检测一锤定音（公网可达才算真成功）。适用于响应体
+   * 不可靠的门户（如 dr1003 的 JSONP 回调名恒等于 callback）。失败关键字两种模式下
+   * 都生效（门户明确报错时快速失败，不必等探测）。
+   */
+  success_check?: HttpSuccessCheck;
   /** 任务元数据（执行器不用；仓库来源等标注可放这里） */
   metadata?: Record<string, unknown>;
 }

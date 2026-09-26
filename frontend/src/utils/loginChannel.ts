@@ -5,7 +5,7 @@
  * 均由此派生，避免同一枚举在多处各写一套中文标签而漂移。
  */
 
-import type { HttpLoginMethod, LoginChannel } from "../api/types";
+import type { HttpLoginMethod, HttpSuccessCheck, LoginChannel } from "../api/types";
 
 /** 登录渠道 → 用户可见标签 */
 export function loginChannelLabel(channel: LoginChannel | string | undefined): string {
@@ -82,6 +82,12 @@ export const HTTP_CERT_POLICY_OPTIONS: Array<{ value: HttpCertPolicy; label: str
   { value: "follow", label: "跟随全局设置（默认）" },
   { value: "ignore", label: "忽略证书错误" },
   { value: "strict", label: "严格校验证书" },
+];
+
+/** 直连成败判定方式选项（CustomSelect 消费；取值与后端 `HttpSuccessCheck` 同源） */
+export const HTTP_SUCCESS_CHECK_OPTIONS: Array<{ value: HttpSuccessCheck; label: string }> = [
+  { value: "response", label: "响应关键字（默认）" },
+  { value: "network", label: "网络检测" },
 ];
 
 /**
