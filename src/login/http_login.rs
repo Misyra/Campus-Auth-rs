@@ -395,9 +395,9 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     //    挡住（返回 already-online 类错误），`fetch_login_page` 抓到的会是"已在线"页而不是
     //    登录表单，脚本据此产出的字段全是错的——正是本功能要治的那类门户。先清场再取令牌。
     //
-    //    代价：此处只能用**内置占位符**（username / password / auth_url / local_ip /
-    //    local_mac），拿不到脚本产出的字段（脚本还没跑）。下线地址通常只需要账号，
-    //    而"抓到错的登录页"是必然坏、脚本占位符只是可能用到，故取前者。
+    //    代价：此处只能用**内置占位符**（username / password / isp / auth_url /
+    //    local_ip / local_mac），拿不到脚本产出的字段（脚本还没跑）。下线地址通常只需
+    //    要账号，而"抓到错的登录页"是必然坏、脚本占位符只是可能用到，故取前者。
     //
     //    与前置请求的本质差异在**结果语义**：取值失败 = 必然登不上（终态），下线没生效
     //    = 登录仍可能成功（不判死）。因此这里只记日志、不产生报告分支。

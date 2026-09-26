@@ -2,6 +2,26 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-26 配置字段审计清理）
+
+### 背景
+
+- 发版前全面配置审计（schema 字段 / 占位符契约 / openapi 路径 / 版本三端 / 死字段）后，按复核结论清理确认无消费的死字段与注释漂移；`proxy_port` 默认 7890 经复核为设计行为（前端 `useConfig` 加载时有意从 `proxy_port` 派生地址回显，注释明说与后端 `resolved_proxy_url` 保持一致），不改动。
+
+### 配置 / Web
+
+- `config/schema.rs`：删除 `AppSettings.developer_mode` 死字段——初始版本里它唯一的作用是给环境管理器开启 MinGit 下载（`git_download_enabled`），环境下载链切 npmmirror 后消费点已随 git 路径移除，此后只落盘、无任何代码读取，也无前端 UI。serde 读旧 settings.json 忽略该键、下次保存自然消失，无需迁移。
+- `web/routes/config.rs`：`GET /api/config` 扁平响应删除恒为空串的 `"carrier_custom": ""` 回显（v5「自定义运营商」字段，v6 起由 `isp` 单字段承载，现前端零消费）；PATCH 对该键的显式忽略**保留**（防旧客户端回传时被深合并写进 settings.json 顶层成脏数据），对应路由测试改为断言响应不含该键。
+
+### 前端
+
+- `api/types.ts`：`ConfigResponse` 删除 `carrier_custom` 与 `password?: string` 两个死类型字段（后端从不发送 `password`，两个键前端均零消费）。
+
+### 注释修正
+
+- `tasks/models.rs` 与 `login/http_login.rs`：退出登录请求的允许占位符清单补上 `{isp}`（vars 在下线请求之前建好且含 isp，代码事实一直支持，两处注释漏列；指南 §3.6 本就正确）。
+- 顺带 `cargo fmt` 修正 `models.rs` 一处超宽 assert 行（上一轮提交遗留，恢复 fmt --check 零告警）。
+
 ## 开发中（2026-09-26 直连任务网络检测判定模式）
 
 ### 背景

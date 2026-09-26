@@ -100,7 +100,6 @@ async fn apply_flat_settings_patch(
         "auth_url",
         "trigger_url",
         "isp",
-        "carrier_custom",
         "active_task",
         // 登录渠道与「渠道 → 任务」绑定：GET 扁平响应会回传，客户端原样回传时必须落回
         // Profile；否则落入 other_patch 被 json_merge 写到 settings 顶层成脏数据。
@@ -127,8 +126,9 @@ async fn apply_flat_settings_patch(
 
     for (k, v) in obj {
         if k == "carrier_custom" {
-            // 纯前端展示字段（自定义运营商输入框），后端无对应存储；
-            // 实际运营商名已由 `isp` 字段承载。显式忽略，避免落入 other_patch 污染 settings.json。
+            // 历史字段（v5 及以前的「自定义运营商」文本，v6 起由 `isp` 单字段承载）。
+            // 后端已无对应存储，但旧客户端仍可能原样回传：显式忽略，
+            // 避免落入 other_patch 被 json_merge 写到 settings 顶层成脏数据。
             continue;
         }
         changed_fields.push(k.clone());
@@ -360,7 +360,6 @@ fn settings_flat_response(
         "auth_url": profile.auth_url,
         "trigger_url": profile.trigger_url,
         "isp": profile.isp,
-        "carrier_custom": "",
         "active_task": profile.active_task,
         "has_password": has_password,
         // 活跃方案的登录渠道与「渠道 → 任务」绑定：设置页「账号」Tab 与引导向导据此编辑、
@@ -1679,15 +1678,15 @@ mod tests {
         assert_eq!(g.profile.username, "alice");
         assert_eq!(g.profile.isp, "cmcc");
         assert_eq!(g.profile.password, format!("ENC:mock:{}", raw_password));
-        // carrier_custom 是纯前端展示字段，不落盘
+        // carrier_custom 是 v6 前的历史字段：必须被显式忽略，不写入 Profile 也不写脏 settings
         // 全局字段保存 + reload
         assert!(g.settings.global.pause.enabled);
         assert_eq!(g.save_calls, 1);
         assert_eq!(g.reload_calls, 1);
-        // 响应回显凭证与 has_password
+        // 响应回显凭证与 has_password（不再回显已废弃的 carrier_custom）
         assert_eq!(d["username"], "alice");
         assert_eq!(d["isp"], "cmcc");
-        assert_eq!(d["carrier_custom"], "");
+        assert!(d.get("carrier_custom").is_none());
         assert_eq!(d["has_password"], true);
     }
 

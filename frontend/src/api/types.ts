@@ -459,14 +459,12 @@ export interface ConfigResponse {
   auth_url: string;
   trigger_url: string;
   isp: string;
-  carrier_custom: string;
   /** 活跃方案的登录渠道与直连任务绑定（属 Profile 域，非全局设置） */
   login_channel: LoginChannel;
   /** 直连渠道绑定的直连任务 ID（空 = 未绑定；请求参数在任务里，不在本响应里） */
   active_http_task: string;
   /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本正文在任务里，不在本响应里） */
   active_script_task: string;
-  password?: string;
 }
 
 /**

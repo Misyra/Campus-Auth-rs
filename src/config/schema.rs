@@ -365,8 +365,6 @@ pub struct AppSettings {
     pub autostart_enabled: bool,
     /// 是否发送任务相关系统通知（任务完成后经 notification 日志源提示）
     pub task_notification: bool,
-    /// 是否启用开发者模式（开放开发者辅助能力）
-    pub developer_mode: bool,
     /// 是否显示系统托盘图标（关闭后程序仅在 Web 控制台运行，无桌面图标）
     pub show_tray: bool,
     /// 定时自重启间隔（小时，0 = 不启用）
@@ -386,7 +384,6 @@ impl Default for AppSettings {
             port: 50721,
             autostart_enabled: false,
             task_notification: true,
-            developer_mode: false,
             show_tray: true,
             // 默认启用 24h 周期自重启：长期运行内存缓慢增长的主要回收手段，
             // 新装即受保护；存量用户 settings.json 已显式存值，不受默认值影响

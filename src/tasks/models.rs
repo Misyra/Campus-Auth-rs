@@ -471,8 +471,9 @@ pub struct HttpTaskConfig {
     /// 登录仍照常进行。写在这里而不是方案：下线地址是门户属性，与登录地址一样
     /// 属于"同一门户多账号共用"的任务配置。
     ///
-    /// 请求地址里只能用**内置占位符**（`{username}` / `{password}` / `{auth_url}` /
-    /// `{local_ip}` / `{local_mac}`）：它排在整个流程最前，脚本产出的字段此时还不存在。
+    /// 请求地址里只能用**内置占位符**（`{username}` / `{password}` / `{isp}` /
+    /// `{auth_url}` / `{local_ip}` / `{local_mac}`）：它排在整个流程最前，脚本产出的
+    /// 字段此时还不存在。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logout_request: Option<HttpActionRequest>,
     /// 是否忽略 HTTPS 证书错误；`None` = 跟随全局 `browser.ignore_https_errors`
@@ -1200,7 +1201,11 @@ mod tests {
         assert_eq!(cfg.body, "username={username}&password={password}");
         assert_eq!(cfg.success_pattern, "登录成功");
         assert_eq!(cfg.failure_pattern, "密码错误");
-        assert_eq!(cfg.success_check, HttpSuccessCheck::Network, "判定方式必须原样往返");
+        assert_eq!(
+            cfg.success_check,
+            HttpSuccessCheck::Network,
+            "判定方式必须原样往返"
+        );
         assert_eq!(cfg.crypto_script, "function transform(ctx) { return ctx; }");
         let pre = cfg.pre_request.expect("前置请求必须原样往返");
         assert_eq!(pre.method, HttpRequestMethod::Get);
