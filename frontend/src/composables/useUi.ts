@@ -86,18 +86,31 @@ async function checkInitStatus(): Promise<void> {
   }
 }
 
-async function finishWizard(): Promise<void> {
+/**
+ * 向导第一步「同意协议」：写入同意标记（config/.agreed）。
+ * 不在此关闭向导——首次启动还有登录方式、环境与任务匹配等后续步骤，
+ * 关闭时机由向导最后一步（或用户跳过）显式调用 closeWizard。
+ * 返回是否写入成功（失败已 toast），供向导决定能否进入下一步。
+ */
+async function agreeWizardTerms(): Promise<boolean> {
   busy.save = true;
   try {
     await systemApi.agree();
-    state.showWizard = false;
     state.agreedToTerms = false;
     frontendLogger.info("app", "已同意协议");
+    return true;
   } catch (error) {
     toastOnly(false, extractApiError(error, "操作失败"));
+    return false;
   } finally {
     busy.save = false;
   }
+}
+
+/** 关闭向导浮层：完成全部步骤或跳过时调用（同意标记已在第一步写入） */
+function closeWizard(): void {
+  state.showWizard = false;
+  state.agreedToTerms = false;
 }
 
 async function autoCheckUpdateOnStartup(): Promise<void> {
@@ -378,7 +391,8 @@ export function useUi() {
     init,
     fetchLoginHistory,
     clearLoginHistory,
-    finishWizard,
+    agreeWizardTerms,
+    closeWizard,
     toggleMonitor,
     manualLogin,
     cancelLogin,

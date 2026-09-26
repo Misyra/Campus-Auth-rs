@@ -56,7 +56,7 @@ vi.mock("../router", () => ({
   router: { push: routerPushMock },
 }));
 
-const { useRepoImport } = await import("./useRepoImport");
+const { useRepoImport, filterRepoTasks } = await import("./useRepoImport");
 const { repoApi } = await import("../api");
 
 const repo = useRepoImport();
@@ -393,5 +393,96 @@ describe("索引状态与异类条目", () => {
     repo.showRepoImport("browser");
     repo.repoImport.value.tasks = [makeTypedTask("b1"), makeTypedTask("b2", "browser")];
     expect(repo.foreignRepoTaskCount.value).toBe(0);
+  });
+});
+
+describe("向导预置打开（showRepoImport opts）", () => {
+  it("预置源/关键词生效，autoFetch 拉索引后保留关键词（keepSearch）", async () => {
+    vi.mocked(repoApi.fetchIndex).mockResolvedValue([makeTask("a"), makeTask("b")]);
+    repo.showRepoImport("http", {
+      source: "gitee",
+      keyword: "电子科大",
+      autoFetch: true,
+    });
+    // 源与索引地址按 (类别, 源) 回填，关键词已预填
+    expect(repo.repoImport.value.source).toBe("gitee");
+    expect(repo.repoImport.value.url).toBe(presetRepoIndexUrl("http", "gitee"));
+    expect(repo.repoImport.value.searchQuery).toBe("电子科大");
+    // autoFetch 已在后台拉索引
+    expect(repo.repoImport.value.loading).toBe(true);
+    await vi.waitFor(() => expect(repo.repoImport.value.loading).toBe(false));
+    // 拉取完成且关键词未被清掉（默认行为是清空，预置场景必须保留）
+    expect(repo.repoImport.value.loaded).toBe(true);
+    expect(repo.repoImport.value.searchQuery).toBe("电子科大");
+  });
+
+  it("不带 opts 的普通打开不受向导预置残留影响（关键词复位、不自动拉取）", async () => {
+    vi.mocked(repoApi.fetchIndex).mockResolvedValue([]);
+    repo.showRepoImport("http", { source: "gitee", keyword: "某学校", autoFetch: true });
+    await vi.waitFor(() => expect(repo.repoImport.value.loading).toBe(false));
+
+    repo.showRepoImport("browser");
+    expect(repo.repoImport.value.searchQuery).toBe("");
+    expect(repo.repoImport.value.loading).toBe(false);
+    expect(repo.repoImport.value.tasks).toEqual([]);
+  });
+
+  it("afterImport 提供时接管收尾：不打开编辑器、不跳路由，回调收到最终 id", async () => {
+    const afterImport = vi.fn(async () => {});
+    repo.showRepoImport("http", { afterImport });
+    repo.repoImport.value.disclaimer = makeTypedTask("dorm", "http");
+    vi.mocked(repoApi.fetchTask).mockResolvedValue({
+      type: "http",
+      name: "宿舍直连登录",
+      method: "GET",
+      url: "http://10.0.0.1/login",
+    });
+
+    await repo.acceptRepoDisclaimer();
+
+    expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
+    expect(afterImport).toHaveBeenCalledWith("dorm");
+    expect(showHttpTaskEditorMock).not.toHaveBeenCalled();
+    expect(routerPushMock).not.toHaveBeenCalled();
+    expect(repo.repoImport.value.visible).toBe(false);
+  });
+
+  it("afterImport 抛错时任务仍算导入成功（已落盘），弹窗关闭并如实提示后续失败", async () => {
+    const afterImport = vi.fn(async () => {
+      throw new Error("绑定失败");
+    });
+    repo.showRepoImport("browser", { afterImport });
+    repo.repoImport.value.disclaimer = makeTask("campus");
+    vi.mocked(repoApi.fetchTask).mockResolvedValue({ type: "browser", name: "校园登录", steps: [] });
+
+    await repo.acceptRepoDisclaimer();
+
+    expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
+    expect(repo.repoImport.value.visible).toBe(false);
+    const [ok, message] = toastOnlyMock.mock.calls.at(-1) as [boolean, string];
+    expect(ok).toBe(false);
+    expect(message).toContain("已导入");
+    expect(message).toContain("绑定失败");
+  });
+});
+
+describe("filterRepoTasks（向导与弹窗共用的匹配口径）", () => {
+  const mixed = [
+    { ...makeTask("b1"), description: "电子科技大学校园网登录" },
+    { ...makeTypedTask("h1", "http"), tags: ["电子科大"] },
+    { ...makeTypedTask("s1", "script"), name: "电子科大脚本" },
+  ];
+
+  it("先按类别收窄再做关键词匹配，大小写不敏感", () => {
+    // 关键词命中的 script 条目不得越界出现；browser 条目按 description 命中。
+    // 注意匹配是**连续子串** includes：缩写「电子科大」不是全名的子串（跳字），
+    // 故这里用连续片段「科技大学」验证，向导空态文案也据此引导"换个说法再搜"。
+    expect(filterRepoTasks(mixed, "browser", "科技大学").map((t) => t.id)).toEqual(["b1"]);
+    expect(filterRepoTasks(mixed, "http", "电子科大").map((t) => t.id)).toEqual(["h1"]);
+    expect(filterRepoTasks([{ ...makeTask("x"), author: "Misyra" }], "browser", "MISYRA").map((t) => t.id)).toEqual(["x"]);
+  });
+
+  it("空查询返回全部同类条目", () => {
+    expect(filterRepoTasks(mixed, "browser", "  ").map((t) => t.id)).toEqual(["b1"]);
   });
 });

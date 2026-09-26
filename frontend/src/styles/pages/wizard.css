@@ -150,3 +150,489 @@
   font-weight: 500;
   color: var(--text-primary);
 }
+
+/* ============ 分步向导（首次启动配置） ============ */
+
+/* 步骤条：横向排布，已完成可点回看、未到达禁用（交互与直连配置向导一致） */
+.wizard-steps {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-md) var(--space-lg) 0;
+  flex-wrap: wrap;
+}
+
+.wizard-step {
+  list-style: none;
+}
+
+.wizard-step-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.wizard-step-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.wizard-step.active .wizard-step-btn {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.wizard-step.done .wizard-step-btn {
+  color: var(--success);
+  border-color: var(--success-border);
+}
+
+.wizard-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: currentColor;
+  overflow: hidden;
+}
+
+/* 编号文字取反色：背景为 currentColor 圆点，内部数字/对勾用容器底色 */
+.wizard-step-num,
+.wizard-step-num .icon-sm {
+  color: var(--bg-card);
+}
+
+.wizard-step-num {
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+/* 内容区各步骤通用的小节/说明样式 */
+.wizard-section {
+  margin-bottom: var(--space-lg);
+}
+
+.wizard-section h3 {
+  font-size: var(--text-md);
+  font-weight: 600;
+  margin-bottom: var(--space-sm);
+}
+
+.wizard-section-sub {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-sm);
+}
+
+.wizard-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  margin-top: var(--space-sm);
+}
+
+.wizard-note .icon-sm {
+  flex: none;
+  margin-top: 3px;
+}
+
+.wizard-note--warn {
+  border-color: var(--warning-border, var(--border));
+  color: var(--warning-text, var(--text-secondary));
+}
+
+.wizard-note--error {
+  border-color: var(--error-border, var(--border));
+  color: var(--error);
+}
+
+.wizard-note--ok {
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.wizard-note--muted {
+  color: var(--text-tertiary);
+}
+
+/* 无匹配引导面板：标题 + 选项列表 + 文档链接 + 浏览全部 */
+.wizard-nomatch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+}
+
+.wizard-nomatch-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wizard-nomatch-title .icon-sm {
+  flex: none;
+  color: var(--accent);
+}
+
+.wizard-nomatch-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wizard-nomatch-options li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
+
+.wizard-nomatch-options strong {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.wizard-nomatch-options span {
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.wizard-nomatch-docs {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.wizard-nomatch-docs a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.wizard-nomatch-docs a:hover {
+  text-decoration: underline;
+}
+
+.wizard-nomatch > .btn {
+  align-self: flex-start;
+}
+
+/* 登录方式：两张渠道卡（复用方案页渠道卡的交互语义） */
+.wizard-channel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.wizard-channel-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: var(--space-lg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.wizard-channel-card:hover {
+  background: var(--bg-hover);
+}
+
+.wizard-channel-card.selected {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.wizard-channel-icon {
+  width: 24px;
+  height: 24px;
+  color: var(--accent);
+}
+
+.wizard-channel-card strong {
+  font-size: var(--text-md);
+}
+
+.wizard-channel-card span {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* 环境就绪清单 */
+.wizard-env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: var(--space-sm);
+}
+
+.wizard-env-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  list-style: none;
+}
+
+.wizard-env-ok {
+  color: var(--success);
+}
+
+.wizard-env-missing {
+  color: var(--text-tertiary);
+}
+
+.wizard-env-state {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+/* 浏览器选择列表 */
+.wizard-browser-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wizard-browser-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+button.wizard-browser-item {
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+button.wizard-browser-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+button.wizard-browser-item.selected {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+button.wizard-browser-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.wizard-browser-name {
+  font-weight: 500;
+}
+
+.wizard-browser-state {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  text-decoration: none;
+}
+
+a.wizard-browser-state:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.wizard-browser-install {
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 学校输入与测速结果 */
+.wizard-field {
+  margin-bottom: var(--space-md);
+}
+
+.wizard-field label {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.wizard-field-row {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+/* 学校输入框外包 form-group：wrapper 占满剩余宽度，margin 由 --flush 清零 */
+.wizard-field-row .wizard-field-input {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.wizard-speed {
+  display: flex;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-sm);
+}
+
+.wizard-speed-item {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+}
+
+.wizard-speed-item em {
+  font-style: normal;
+  margin-left: 6px;
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+
+.wizard-speed-fail {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+}
+
+.wizard-speed-best {
+  border-color: var(--accent);
+}
+
+/* 匹配结果列表 */
+.wizard-matches {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wizard-match-title {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.wizard-match-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.wizard-match-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wizard-match-text span {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.wizard-match-cta {
+  align-self: flex-start;
+}
+
+/* 完成步 */
+.wizard-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-md);
+  text-align: center;
+}
+
+.wizard-done-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--success);
+}
+
+.wizard-mode-note {
+  max-width: 34em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.wizard-mode-note strong {
+  color: var(--accent);
+}
+
+.wizard-mode-note p {
+  font-size: var(--text-md);
+  line-height: 1.7;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.wizard-done-list {
+  text-align: left;
+  max-width: 34em;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wizard-done-list li {
+  list-style: disc;
+  margin-left: 20px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* 窄屏：渠道卡改单列，步骤条换行 */
+@media (max-width: 640px) {
+  .wizard-channel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wizard-field-row {
+    flex-direction: column;
+  }
+}

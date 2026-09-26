@@ -83,18 +83,27 @@ const foreignRepoTaskCount = computed(
     ).length,
 );
 
-const filteredRepoTasks = computed(() => {
-  // 先按类型过滤再按关键词：搜索不该把另一类条目"搜"出来（导入会写错编辑器）
-  const sameKind = repoImport.value.tasks.filter(
-    (t) => normalizeRepoTaskKind(t.type) === repoImport.value.repoKind,
-  );
-  const q = repoImport.value.searchQuery.trim().toLowerCase();
+/**
+ * 按类别 + 关键词过滤仓库条目。
+ *
+ * 弹窗的列表（`filteredRepoTasks`）与首次启动向导的学校名匹配共用这一个口径：
+ * 先按条目类型收窄到当前类别，再对 name/description/author/tags 拼串做小写
+ * includes。单独导出纯函数是为了两处永不分叉——向导"找到 3 个匹配"而弹窗里
+ * 搜不出来，比没有向导更糟。
+ */
+export function filterRepoTasks(tasks: RepoTask[], kind: RepoKind, query: string): RepoTask[] {
+  const sameKind = tasks.filter((t) => normalizeRepoTaskKind(t.type) === kind);
+  const q = query.trim().toLowerCase();
   if (!q) return sameKind;
   return sameKind.filter((t) => {
     const searchable = [t.name, t.description, t.author, ...(t.tags || [])].filter(Boolean).join(" ").toLowerCase();
     return searchable.includes(q);
   });
-});
+}
+
+const filteredRepoTasks = computed(() =>
+  filterRepoTasks(repoImport.value.tasks, repoImport.value.repoKind, repoImport.value.searchQuery),
+);
 
 /** 当前源的选项（含说明文案）；未知源回退到自定义，避免取到 undefined */
 const currentSource = computed(
@@ -140,13 +149,37 @@ function selectRepoSource(source: TaskRepoSourceId) {
 }
 
 /**
+ * 打开导入弹窗时的预置项（首次启动向导等外部流程使用）。
+ *
+ * `afterImport` 提供时由调用方接管导入后的流程：不再跳转编辑器
+ * （向导需要停留在向导页），落盘后的最终任务 id 经回调交还（用于绑定方案）。
+ */
+export interface RepoImportOptions {
+  /** 打开后预选的仓库源（自定义源无预设地址，传了也只切标签不换地址） */
+  source?: TaskRepoSourceId;
+  /** 打开后预填的搜索关键词（向导场景 = 学校名） */
+  keyword?: string;
+  /** 打开后立即拉取索引，免去再点一次「加载索引」 */
+  autoFetch?: boolean;
+  /** 导入成功后的回调（参数为落盘后的最终任务 id）；提供时抑制跳转编辑器 */
+  afterImport?: (id: string) => void | Promise<void>;
+}
+
+/** 当次打开的预置项；showRepoImport 时写入、acceptRepoDisclaimer 消费后清空 */
+let importOptions: RepoImportOptions | null = null;
+
+/**
  * 打开导入弹窗并复位上次残留的搜索词/列表/错误，避免旧内容闪现。
  *
  * `kind` 必须由调用方声明：任务页两个 Tab（浏览器/直连）、设置页入口各自知道
  * 自己要哪一类，默认值会让"忘了传"变成静默导入错类型（列表看着空空如也）。
  * 换类别同时意味着**换索引文件**，故一并重取预设地址。
+ *
+ * 传入 `opts` 时为外部流程预置：先复位再套用 source/keyword，`autoFetch`
+ * 直接拉索引（keepSearch 保留刚填入的关键词，否则拉取完成会把过滤词清掉）。
  */
-function showRepoImport(kind: RepoKind) {
+function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
+  importOptions = opts ?? null;
   repoImport.value.visible = true;
   repoImport.value.repoKind = kind;
   applyPresetIndexUrl();
@@ -157,6 +190,16 @@ function showRepoImport(kind: RepoKind) {
   repoImport.value.loading = false;
   repoImport.value.disclaimer = null;
   repoImport.value.selected = null;
+  if (opts?.source) {
+    // 切源会按 (类别, 源) 回填预设索引地址；自定义源只切标签、地址留给用户手填
+    selectRepoSource(opts.source);
+  }
+  if (opts?.keyword) {
+    repoImport.value.searchQuery = opts.keyword;
+  }
+  if (opts?.autoFetch) {
+    void fetchRepoIndex({ keepSearch: true });
+  }
 }
 
 /** 关闭导入弹窗（不清理状态，下次打开时由 showRepoImport 统一复位） */
@@ -164,8 +207,14 @@ function closeRepoImport() {
   repoImport.value.visible = false;
 }
 
-/** 按当前输入的索引地址拉取远程任务列表；结果非数组视为失败，空数组是"该源暂无条目" */
-async function fetchRepoIndex() {
+/**
+ * 按当前输入的索引地址拉取远程任务列表；结果非数组视为失败，空数组是"该源暂无条目"。
+ *
+ * `keepSearch` 供向导预置场景：拉取完成保留预填关键词（默认行为是清空搜索词，
+ * 供「加载索引」按钮换源重载时复位过滤）。
+ */
+async function fetchRepoIndex(opts?: { keepSearch?: boolean }) {
+  const keepSearch = opts?.keepSearch ?? false;
   const url = repoImport.value.url.trim();
   if (!url) {
     repoImport.value.error = "请输入索引地址";
@@ -178,7 +227,7 @@ async function fetchRepoIndex() {
   repoImport.value.error = "";
   repoImport.value.loaded = false;
   repoImport.value.tasks = [];
-  repoImport.value.searchQuery = "";
+  if (!keepSearch) repoImport.value.searchQuery = "";
   repoImport.value.selected = null;
   try {
     const data = await repoApi.fetchIndex(url);
@@ -229,6 +278,9 @@ async function acceptRepoDisclaimer() {
   const task = repoImport.value.disclaimer;
   repoImport.value.disclaimer = null;
   if (!task) return;
+  // 一次性消费：无论成败都不留给下一次打开（残留回调会让下次普通导入误跳向导流程）
+  const external = importOptions;
+  importOptions = null;
 
   try {
     const data = (await repoApi.fetchTask(task.url)) as Record<string, unknown>;
@@ -276,9 +328,7 @@ async function acceptRepoDisclaimer() {
       Object.assign(payload, httpTaskPayload(draftPayload), { task_id: id });
       await tasksApi.save(id, payload);
       await httpTasks.fetchHttpTasks(true);
-      await httpTasks.showHttpTaskEditor(id);
-      // 跳到编辑页（面板消费 ?task=<id>）
-      await navigateToTaskEditor("tasks-http", id);
+      await finishImport(external, id, name, task, "tasks-http", () => httpTasks.showHttpTaskEditor(id));
     } else {
       // 浏览器任务 ID 除字符集外还要求以字母开头，故数字开头的 id 补前缀
       let id = String(task.id || name || "imported").replace(/[^A-Za-z0-9_]/g, "_");
@@ -300,18 +350,48 @@ async function acceptRepoDisclaimer() {
       delete payload.source;
       await tasksApi.save(id, payload);
       await tasks.fetchTasks(true);
-      await tasks.showTaskEditor(id);
-      await navigateToTaskEditor("tasks-browser", id);
+      await finishImport(external, id, name, task, "tasks-browser", () => tasks.showTaskEditor(id));
     }
 
-    closeRepoImport();
     frontendLogger.info("tasks", `已从仓库导入: ${task.name}`);
-    toastOnly(true, `已导入「${name || task.name}」，已打开编辑器`);
   } catch (e) {
     const msg = extractApiError(e, "下载任务失败");
     frontendLogger.error("tasks", "远程任务下载失败", msg);
     toastOnly(false, `远程任务下载失败: ${msg}`);
   }
+}
+
+/**
+ * 导入收尾：外部流程（`external.afterImport`，即首次启动向导）接管后续——
+ * 不打开编辑器、不跳路由，回调失败如实说"任务已导入但后续配置失败"（任务本身
+ * 已落盘，不能让用户以为白导了）；默认流程维持原行为：打开编辑器并跳转过去。
+ */
+async function finishImport(
+  external: RepoImportOptions | null,
+  id: string,
+  name: string,
+  task: RepoTask,
+  routeName: string,
+  openEditor: () => Promise<unknown>,
+): Promise<void> {
+  const label = name || task.name;
+  if (external?.afterImport) {
+    closeRepoImport();
+    try {
+      await external.afterImport(id);
+      toastOnly(true, `已导入「${label}」`);
+    } catch (e) {
+      const msg = extractApiError(e, "后续配置失败");
+      frontendLogger.error("tasks", "导入后续处理失败", msg);
+      toastOnly(false, `已导入「${label}」，但后续配置失败: ${msg}`);
+    }
+    return;
+  }
+  await openEditor();
+  // 跳到编辑页（面板消费 ?task=<id>）
+  await navigateToTaskEditor(routeName, id);
+  closeRepoImport();
+  toastOnly(true, `已导入「${label}」，已打开编辑器`);
 }
 
 /** 导入后跳转到对应面板的编辑页（?task=<id> 由面板消费） */

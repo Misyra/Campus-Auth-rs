@@ -21,6 +21,7 @@ import type {
   HttpLoginTestResult,
   HttpTaskTestPayload,
   InitStatus,
+  LoginChannel,
   LoginResultResponse,
   LoginHistoryItem,
   LogEntry,
@@ -98,6 +99,18 @@ export const configApi = {
   setLogLevel: (level: string) => http.put<MutationResult>("/api/config/log-level", { level }),
   fetchStealthScript: () => http.get<{ script: string }>("/api/config/default-stealth-script"),
   reload: () => http.post<MutationResult>("/api/config/reload"),
+  /**
+   * 直改活跃方案的「渠道 → 任务」绑定（PATCH /api/config 的方案域顶层字段）。
+   *
+   * 全局设置保存（saveConfig）刻意不含方案字段，登录渠道的即时切换只有这条路径。
+   * 后端按**合并后**的状态校验 `validate_login_task_binding`：切到直连渠道必须与
+   * 已存在的 `active_http_task` 在同一次提交里，否则 400（保存被拦）。
+   */
+  patchProfileBinding: (payload: {
+    login_channel?: LoginChannel;
+    active_task?: string;
+    active_http_task?: string;
+  }) => http.patch<MutationResult>("/api/config", payload),
 };
 
 /** 监控与登录操作 */

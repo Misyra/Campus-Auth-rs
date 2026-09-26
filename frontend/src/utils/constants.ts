@@ -113,6 +113,8 @@ export const DOCS = {
   httpLogin: docUrl("profiles", "http-login"),
   /** 脚本登录（脚本渠道的契约、示例与排障） */
   scriptLogin: docUrl("profiles", "script-login"),
+  /** 浏览器任务（任务章节；首次启动向导无匹配引导引用，2026-09-26 依文档站导航核实） */
+  taskBrowser: docUrl("tasks", "browser"),
   /** 无法自动登录（常见问题） */
   faqLogin: docUrl("faq", "login"),
 } as const;

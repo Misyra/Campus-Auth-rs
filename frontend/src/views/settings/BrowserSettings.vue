@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 设置 · 浏览器页：浏览器选择与安装、会话保持及反检测等浏览器行为配置 */
 import IconApp from "@/components/common/IconApp.vue";
+import BrowserIcon from "@/components/common/BrowserIcon.vue";
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
@@ -188,14 +189,7 @@ async function stopBrowser() {
               :aria-disabled="pythonNotReady && !b.installed && playwrightInstallable.has(b.channel)"
               @click="handleBrowserClick(b)">
               <div class="browser-icon">
-                <img v-if="b.channel === 'chromium'" src="/icons/chromium.svg" width="32" height="32" alt="chromium" />
-                <img v-else-if="b.channel === 'msedge'" src="/icons/edge.svg" width="32" height="32" alt="edge" />
-                <img v-else-if="b.channel === 'chrome'" src="/icons/chrome.svg" width="32" height="32" alt="chrome" />
-                <img v-else-if="b.channel === 'firefox'" src="/icons/firefox.svg" width="32" height="32" alt="firefox" />
-                <img v-else-if="b.channel === 'webkit'" src="/icons/webkit.svg" width="32" height="32" alt="webkit" />
-                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="32" height="32">
-                  <circle cx="12" cy="12" r="10"/><text x="12" y="16" text-anchor="middle" font-size="10" fill="currentColor">W</text>
-                </svg>
+                <BrowserIcon :channel="b.channel" />
               </div>
               <div class="browser-info">
                 <div class="browser-name">{{ b.name }}</div>
