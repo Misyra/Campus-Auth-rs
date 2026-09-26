@@ -28,6 +28,7 @@ const {
   scripts,
   availableBinaries,
   editingTask,
+  legacyMigrationId,
   isNewDraft,
   runningIds,
   exportingIds,
@@ -298,6 +299,7 @@ onMounted(async () => {
             </td>
             <td>
               <span class="tsk-name">{{ script.name || script.id }}</span>
+              <span v-if="script.id.includes('.')" class="tsk-name-sub">旧版脚本，打开后另存为新 ID</span>
               <span v-if="script.description" class="tsk-name-sub">{{ script.description }}</span>
             </td>
             <td class="tsk-cell-id tsk-cell-ellipsis"><span class="tsk-mono">{{ script.id }}</span></td>
@@ -308,7 +310,7 @@ onMounted(async () => {
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(script.modified_at) }}</span></td>
             <td class="tsk-actions" @click.stop>
-              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${script.name || script.id}`" @click="openEditor(script.id)">
+              <button type="button" class="btn btn-sm btn-icon-only" :title="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" @click="openEditor(script.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
               <button
@@ -388,6 +390,11 @@ onMounted(async () => {
         <IconApp name="trash" class="icon-sm" />
         放弃
       </button>
+    </div>
+
+    <div v-if="legacyMigrationId" class="tsk-gaps">
+      <IconApp name="info" class="icon-sm" />
+      <span>旧脚本「{{ legacyMigrationId }}.py」需要新 ID。填写合法 ID 并按回车保存后，原文件才会移除；新 ID 已存在时请换一个。</span>
     </div>
 
     <!-- 缺口提示：自动保存被缺口拦住时状态字已经改口，这里把"缺什么"说全 -->

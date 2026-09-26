@@ -179,6 +179,49 @@ describe("useScripts 自动保存", () => {
 });
 
 describe("useScripts 新建脚本的 ID 确认", () => {
+  it("旧版点号文件要求另存新 ID，保存成功后才删除原文件", async () => {
+    vi.useFakeTimers();
+    try {
+      scriptsApiMock.get.mockResolvedValue(serverScript({ id: "campus.login" }));
+      const s = useScripts();
+      await s.showScriptEditor("campus.login");
+      expect(s.legacyMigrationId.value).toBe("campus.login");
+      expect(s.editingTask.value?.id).toBe("");
+      expect(s.editingTask.value?._isNew).toBe(true);
+      await vi.advanceTimersByTimeAsync(600);
+      expect(scriptsApiMock.save).not.toHaveBeenCalled();
+      expect(scriptsApiMock.delete).not.toHaveBeenCalled();
+
+      s.editingTask.value!.id = "campus_login";
+      s.commitScriptId();
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scriptsApiMock.save.mock.calls[0][0]).toBe("campus_login");
+      expect(scriptsApiMock.delete).toHaveBeenCalledWith("campus.login");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("迁移目标 ID 已存在时拒绝覆盖，保留旧文件", async () => {
+    vi.useFakeTimers();
+    try {
+      scriptsApiMock.get.mockResolvedValue(serverScript({ id: "campus.login" }));
+      tasksApiMock.list.mockResolvedValueOnce([{ id: "campus_login" }] as never);
+      const s = useScripts();
+      await s.showScriptEditor("campus.login");
+      s.editingTask.value!.id = "campus_login";
+      s.commitScriptId();
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scriptsApiMock.save).not.toHaveBeenCalled();
+      expect(scriptsApiMock.delete).not.toHaveBeenCalled();
+      expect(s.legacyMigrationId.value).toBe("campus.login");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("名字打到一半的停顿不会落盘（否则 ID 会被锁成半截名字）", async () => {
     vi.useFakeTimers();
     try {

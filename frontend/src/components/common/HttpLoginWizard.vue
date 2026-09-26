@@ -411,10 +411,10 @@ function fillScriptSkeleton(): void {
 
       <!-- 步骤 4：发送测试（未落盘的任务草稿内联发出） -->
       <section v-else class="wz-page">
-        <h4>发一次真实请求确认配置可用</h4>
+        <h4>发送一次真实请求检查配置</h4>
         <p class="wz-lead">
           这一步会按上面的配置真的向门户发一次登录请求，用的是右侧编辑器里的测试账号与密码。
-          <strong>不会保存任务</strong>，也不会改变自动登录状态；测试通过后再保存任务即可生效。
+          <strong>不会保存任务</strong>，也不会改变自动登录状态；网络检测模式需要在正式登录后验证连通性。
         </p>
 
         <ul v-if="gaps.length" class="wz-gaps">
@@ -431,11 +431,18 @@ function fillScriptSkeleton(): void {
 
         <HttpTestResult v-if="testResult" :result="testResult" />
 
-        <div v-if="testResult?.outcome === 'success'" class="wz-done">
+        <div v-if="testResult?.outcome === 'success' && !testResult.verification_pending" class="wz-done">
           <IconApp name="check-circle" />
           <div>
             <strong>配置可用</strong>
             <span>保存后，方案里选择这个直连任务即可直连登录，无需 Python 与浏览器。</span>
+          </div>
+        </div>
+        <div v-else-if="testResult?.verification_pending" class="wz-done wz-done--pending">
+          <IconApp name="info" />
+          <div>
+            <strong>请求阶段通过，登录结果待验证</strong>
+            <span>保存并绑定到方案后执行正式登录，程序会检测是否真正联网。</span>
           </div>
         </div>
       </section>
@@ -452,7 +459,7 @@ function fillScriptSkeleton(): void {
         下一步
       </button>
       <button v-else type="button" class="btn btn-primary" @click="emit('close')">
-        {{ testResult?.outcome === "success" ? "完成" : "关闭" }}
+        {{ testResult?.outcome === "success" && !testResult.verification_pending ? "完成" : "关闭" }}
       </button>
     </template>
   </Modal>
@@ -732,6 +739,15 @@ function fillScriptSkeleton(): void {
   width: 20px;
   height: 20px;
   color: var(--success);
+}
+
+.wz-done--pending {
+  border-color: var(--border-accent-strong);
+  background: rgba(var(--accent-rgb), 0.05);
+}
+
+.wz-done--pending svg {
+  color: var(--accent);
 }
 
 .wz-done strong {

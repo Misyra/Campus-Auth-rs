@@ -281,7 +281,7 @@ async fn probe_target(
 /// 仅拒绝环回、链路本地与通配地址——**不拦 RFC1918 私网**：校园门户普遍部署在
 /// 内网段，全私网拦截会破坏核心场景（判定规则独立于 `web::ssrf` 的全私网
 /// 口径）。域名先经系统解析器展开、对全部候选地址判定（防「IP 字面量白名单」
-/// 被 DNS 解析绕过），并把域名钉扎到首个已校验地址（`ClientBuilder::resolve`，
+/// 被 DNS 解析绕过），并把域名钉扎到全部已校验地址（`ClientBuilder::resolve_to_addrs`，
 /// 与 `web::ssrf` 同手法），杜绝 reqwest 二次解析 TOCTOU。IP 字面量无解析面，
 /// 返回 `Ok(None)` 沿用共享客户端。解析失败或无结果一律拒绝跟随。
 async fn ensure_redirect_target(
@@ -304,22 +304,22 @@ async fn ensure_redirect_target(
     if !all_addrs_allowed(&addrs) {
         return Err(());
     }
-    build_pinned_client(host, addrs[0], disable_proxy).map(Some)
+    build_pinned_client(host, &addrs, disable_proxy).map(Some)
 }
 
-/// 按已校验地址构造钉扎客户端（域名 → 指定地址）
+/// 按已校验地址构造钉扎客户端（域名 → 地址列表，由客户端连接失败时回退）
 ///
 /// 与 `web::ssrf` 同手法：`ClientBuilder::resolve` 让 reqwest 不再自行解析域名，
 /// 杜绝「校验用 A 地址、连接用 B 地址」的 TOCTOU。独立成函数是为了能在无真实 DNS
 /// 的前提下锁定「解析通过后确实按该地址连接」这条放行分支（B5）。
 fn build_pinned_client(
     host: &str,
-    addr: SocketAddr,
+    addrs: &[SocketAddr],
     disable_proxy: bool,
 ) -> Result<reqwest::Client, ()> {
     let mut builder = reqwest::Client::builder()
         .redirect(Policy::none())
-        .resolve(host, addr);
+        .resolve_to_addrs(host, addrs);
     if disable_proxy {
         builder = builder.no_proxy();
     }
@@ -593,7 +593,7 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        let client = build_pinned_client("portal.example.com", addr, true)
+        let client = build_pinned_client("portal.example.com", &[addr], true)
             .expect("已校验地址应能构造出钉扎客户端");
         let resp = client
             .get(format!(
@@ -604,6 +604,34 @@ mod tests {
             .await
             .expect("钉扎客户端应连到已校验地址而非重新解析域名");
         assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    /// 首个已校验地址不可达时，客户端仍须尝试同一解析结果中的下一地址。
+    #[tokio::test]
+    async fn test_pinned_client_falls_back_to_next_resolved_addr() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ])
+        .await;
+        let live: SocketAddr = url
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let dead = SocketAddr::new("127.0.0.2".parse().unwrap(), live.port());
+        let client = build_pinned_client("portal.example.com", &[dead, live], true).unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            client
+                .get(format!("http://portal.example.com:{}/", live.port()))
+                .send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
     }
 
     /// 204 直通 → Online（提示先退出登录）

@@ -18,7 +18,7 @@
 
 import { computed, nextTick, ref, watch } from "vue";
 import type { BinaryInfo, TaskExecuteResult } from "../api/types";
-import { scriptsApi } from "../api";
+import { scriptsApi, tasksApi } from "../api";
 import { extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { downloadBlob, pickFile, getBinaryName } from "../utils/file";
@@ -33,7 +33,7 @@ import {
   type ScriptDraft,
   type ScriptGapContext,
 } from "../utils/scriptDraft";
-import { useTaskDirectory } from "./useTaskDirectory";
+import { useTaskDirectory, allTaskIds } from "./useTaskDirectory";
 import { initialReconcileState, reconcileDraft } from "../utils/draftReconcile";
 import { useToast } from "./useToast";
 import { useConfirm } from "./useConfirm";
@@ -44,6 +44,8 @@ export type { ScriptDraft };
 const { scripts, fetchDirectory } = useTaskDirectory();
 const availableBinaries = ref<BinaryInfo[]>([]);
 const editingTask = ref<ScriptDraft | null>(null);
+/** 旧版多段 .py 文件正被显式另存为合法任务 ID。 */
+const legacyMigrationId = ref("");
 
 /**
  * 新建脚本的 ID 是否已确认（见 `ScriptGapContext.idPending`）。
@@ -138,7 +140,23 @@ const autosave = createAutosaveController<ScriptDraft>({
   fingerprintOf: fingerprint,
   blockReasonOf: gapBlocker((draft) => scriptDraftGaps(draft, gapContext())),
   persist: async (draft) => {
+    if (legacyMigrationId.value) {
+      const ids = allTaskIds();
+      const current = await tasksApi.list();
+      if (ids.has(draft.id.trim()) || current.some((task) => task.id === draft.id.trim())) {
+        throw new Error(`任务 ID「${draft.id.trim()}」已存在，请换一个 ID`);
+      }
+    }
     await scriptsApi.save(draft.id.trim(), scriptDraftPayload(draft));
+    if (legacyMigrationId.value) {
+      const oldId = legacyMigrationId.value;
+      legacyMigrationId.value = "";
+      try {
+        await scriptsApi.delete(oldId);
+      } catch (error) {
+        toastOnly(false, `新脚本已保存，但旧文件「${oldId}.py」清理失败：${extractApiError(error, "请手动处理")}`);
+      }
+    }
     await fetchScripts(true);
   },
   onSaved: (draft) => {
@@ -160,6 +178,7 @@ async function closeScriptEditor(): Promise<void> {
 
 /** 清空编辑器状态（删除脚本等无需再保存的场景）；草稿由控制器一并关掉 */
 function clearScriptDraft(): void {
+  legacyMigrationId.value = "";
   scriptIdPending.value = false;
   autosave.clear();
 }
@@ -176,6 +195,7 @@ function clearScriptDraft(): void {
  * 调 `commitScriptId()`。
  */
 function createScriptDraft(): void {
+  legacyMigrationId.value = "";
   const draft = emptyScriptDraft(NEW_SCRIPT_STUB);
   editingTask.value = draft;
   scriptIdPending.value = true;
@@ -209,14 +229,24 @@ async function showScriptEditor(taskId?: string): Promise<void> {
     return;
   }
   if (!availableBinaries.value.length) await fetchAvailableBinaries();
+  legacyMigrationId.value = "";
   try {
     const data = await scriptsApi.get(taskId);
     const draft = scriptDraftFromServer(data, availableBinaries.value);
+    if (taskId.includes(".")) {
+      // 文件名含点号无法作为任务 ID；保留原文件直到新 ID 保存成功。
+      legacyMigrationId.value = taskId;
+      draft.id = "";
+      draft._isNew = true;
+      scriptIdPending.value = true;
+    } else {
+      legacyMigrationId.value = "";
+      scriptIdPending.value = false;
+    }
     editingTask.value = draft;
-    // 已存在的脚本：ID 早已定下，不存在"还在输入中"
-    scriptIdPending.value = false;
-    // 刚载入的草稿就是磁盘现状：基线对上了，用户不动它就不会发请求
-    autosave.markBaseline(draft);
+    // 迁移草稿的新 ID 在磁盘上不存在；即使载荷的名称没变，确认 ID 后也必须创建新文件。
+    if (legacyMigrationId.value) autosave.markUnsaved();
+    else autosave.markBaseline(draft);
   } catch (error) {
     frontendLogger.error("scripts", "加载脚本失败: " + taskId, error);
     toastOnly(false, extractApiError(error, "加载脚本失败"));
@@ -435,6 +465,7 @@ export function useScripts() {
     scripts,
     availableBinaries,
     editingTask,
+    legacyMigrationId,
     isNewDraft,
     runningIds,
     exportingIds,

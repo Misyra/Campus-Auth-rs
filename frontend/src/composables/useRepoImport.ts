@@ -165,7 +165,7 @@ export interface RepoImportOptions {
   afterImport?: (id: string) => void | Promise<void>;
 }
 
-/** 当次打开的预置项；showRepoImport 时写入、acceptRepoDisclaimer 消费后清空 */
+/** 当次打开的预置项；导入成功或关闭弹窗时清空，失败后允许重试。 */
 let importOptions: RepoImportOptions | null = null;
 
 /**
@@ -179,6 +179,7 @@ let importOptions: RepoImportOptions | null = null;
  * 直接拉索引（keepSearch 保留刚填入的关键词，否则拉取完成会把过滤词清掉）。
  */
 function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
+  ++fetchIndexSeq;
   importOptions = opts ?? null;
   repoImport.value.visible = true;
   repoImport.value.repoKind = kind;
@@ -204,6 +205,8 @@ function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
 
 /** 关闭导入弹窗（不清理状态，下次打开时由 showRepoImport 统一复位） */
 function closeRepoImport() {
+  ++fetchIndexSeq;
+  importOptions = null;
   repoImport.value.visible = false;
 }
 
@@ -231,7 +234,7 @@ async function fetchRepoIndex(opts?: { keepSearch?: boolean }) {
   repoImport.value.selected = null;
   try {
     const data = await repoApi.fetchIndex(url);
-    if (seq !== fetchIndexSeq) return;
+    if (seq !== fetchIndexSeq || !repoImport.value.visible) return;
     if (!Array.isArray(data)) {
       repoImport.value.error = "索引格式不正确（应为 JSON 数组）";
       return;
@@ -242,13 +245,13 @@ async function fetchRepoIndex(opts?: { keepSearch?: boolean }) {
     repoImport.value.tasks = data;
   } catch (e) {
     // 被取代的旧请求失败同样不写状态：否则会用一个已过期的错误覆盖新请求的结果
-    if (seq !== fetchIndexSeq) return;
+    if (seq !== fetchIndexSeq || !repoImport.value.visible) return;
     const msg = extractApiError(e, "加载失败，请检查地址是否正确");
     repoImport.value.error = msg;
     toastOnly(false, `获取${label}索引失败: ${msg}`);
   } finally {
     // 仅最新请求负责复位 loading：旧请求提前清掉会让界面在 B 仍在途时误示"已完成"
-    if (seq === fetchIndexSeq) repoImport.value.loading = false;
+    if (seq === fetchIndexSeq && repoImport.value.visible) repoImport.value.loading = false;
   }
 }
 
@@ -278,9 +281,7 @@ async function acceptRepoDisclaimer() {
   const task = repoImport.value.disclaimer;
   repoImport.value.disclaimer = null;
   if (!task) return;
-  // 一次性消费：无论成败都不留给下一次打开（残留回调会让下次普通导入误跳向导流程）
   const external = importOptions;
-  importOptions = null;
 
   try {
     const data = (await repoApi.fetchTask(task.url)) as Record<string, unknown>;
@@ -376,9 +377,9 @@ async function finishImport(
 ): Promise<void> {
   const label = name || task.name;
   if (external?.afterImport) {
-    closeRepoImport();
     try {
       await external.afterImport(id);
+      closeRepoImport();
       toastOnly(true, `已导入「${label}」`);
     } catch (e) {
       const msg = extractApiError(e, "后续配置失败");

@@ -16,13 +16,13 @@ defineProps<{
 </script>
 
 <template>
-  <div class="http-test-result" :class="result.outcome === 'success' ? 'success' : 'failed'">
+  <div class="http-test-result" :class="result.verification_pending ? 'pending' : result.outcome === 'success' ? 'success' : 'failed'">
     <div class="http-test-result-head">
       <span class="http-test-result-icon">
-        <IconApp :name="result.outcome === 'success' ? 'check-circle' : 'alert-triangle'" />
+        <IconApp :name="result.verification_pending ? 'info' : result.outcome === 'success' ? 'check-circle' : 'alert-triangle'" />
       </span>
       <div class="http-test-result-title">
-        <strong>{{ httpTestOutcomeLabel(result.outcome) }}</strong>
+        <strong>{{ result.verification_pending ? '请求已发送，登录结果未验证' : httpTestOutcomeLabel(result.outcome) }}</strong>
         <span v-if="result.status">HTTP {{ result.status }}</span>
         <span v-else>无响应</span>
         <span>{{ result.duration_ms }} ms</span>
@@ -30,7 +30,7 @@ defineProps<{
     </div>
 
     <p class="http-test-result-message">{{ result.message }}</p>
-    <p class="http-test-result-hint">{{ httpTestOutcomeHint(result.outcome) }}</p>
+    <p class="http-test-result-hint">{{ result.verification_pending ? '请在方案中绑定此任务并执行正式登录，由登录后网络检测确认是否真正联网。' : httpTestOutcomeHint(result.outcome) }}</p>
 
     <div v-if="result.script_error" class="http-test-script-error">
       <strong>脚本错误</strong>
@@ -75,6 +75,11 @@ defineProps<{
   background: var(--success-bg);
 }
 
+.http-test-result.pending {
+  border-color: var(--accent);
+  background: rgba(var(--slate-rgb), 0.08);
+}
+
 .http-test-result-head {
   display: flex;
   align-items: center;
@@ -88,6 +93,10 @@ defineProps<{
 
 .http-test-result.success .http-test-result-icon {
   color: var(--success);
+}
+
+.http-test-result.pending .http-test-result-icon {
+  color: var(--accent);
 }
 
 .http-test-result-icon svg {

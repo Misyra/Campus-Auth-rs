@@ -25,6 +25,7 @@ import {
   httpTaskDraftFromConfig,
   httpTaskDraftGaps,
   httpTaskPayload,
+  HTTP_TASK_PLACEHOLDER_URL,
   type HttpTaskDraft,
 } from "../utils/httpTask";
 import { useTaskDirectory } from "./useTaskDirectory";
@@ -38,12 +39,9 @@ export type { HttpTaskDraft };
 /**
  * 新建直连任务种子的请求地址占位符。
  *
- * 后端保存闸口拒绝空地址（"存得下但必然失败"的配置不落盘），新建即落盘的
- * 种子因此需要一个非空但明确表达"待填"的值。执行时该占位符无对应变量、
- * 原样保留在 URL 里，请求必然失败——不会误登录到任何真实地址。
- * 面板的测试按钮据此提示用户先替换（见 HttpTasksPanel 的 sendTestRequest）。
+ * 界面占位值在缺口校验中视为空地址，填入真实 URL 前不会自动落盘。
  */
-export const NEW_TASK_PLACEHOLDER_URL = "{gateway_host}";
+export const NEW_TASK_PLACEHOLDER_URL = HTTP_TASK_PLACEHOLDER_URL;
 
 /**
  * 任务详情里的 config 在接口层是宽类型 `TaskConfig`（三类任务共用信封字段）。
@@ -202,9 +200,8 @@ async function showHttpTaskEditor(taskId: string): Promise<void> {
  * `untitled_N.json`）：首次真实改动触发自动保存时才创建文件；`_isNew` 期间
  * 「删除」是放弃、导出走内存。
  *
- * 种子带一个**非空**请求地址占位符 `{gateway_host}`：后端 `validate_task` 对
- * http 类型拒绝空地址，用户改完第一个字段时这份草稿必须能通过保存校验。占位符
- * 原样保留在 URL 里、请求必然失败，绝不会误登录到真实地址（面板测试按钮据此提示先替换）。
+ * 草稿的请求地址是界面占位值 `{gateway_host}`；缺口校验会阻止自动保存，
+ * 直到用户填写真实地址。
  */
 function createHttpTask(): void {
   // 新建也是"换编辑对象"：先补发上一份草稿在途的改动（否则那半秒内的编辑静默丢失）

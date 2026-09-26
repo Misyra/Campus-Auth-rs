@@ -89,6 +89,7 @@ beforeEach(() => {
   repo.repoImport.value.disclaimer = null;
   repo.repoImport.value.searchQuery = "";
   repo.repoImport.value.error = "";
+  repo.repoImport.value.visible = true;
 });
 
 describe("仓库导入点选预览", () => {
@@ -268,6 +269,19 @@ describe("索引地址：类别 × 源", () => {
 });
 
 describe("索引拉取的 epoch 守卫", () => {
+  it("关闭后重新打开但暂不请求时，旧弹窗的响应不能填入新列表", async () => {
+    let resolveOld: (v: RepoTask[]) => void = () => {};
+    vi.mocked(repoApi.fetchIndex).mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+    repo.showRepoImport("browser");
+    const pending = repo.fetchRepoIndex();
+    repo.closeRepoImport();
+    repo.showRepoImport("http");
+    resolveOld([makeTask("old")]);
+    await pending;
+    expect(repo.repoImport.value.tasks).toEqual([]);
+    expect(repo.repoImport.value.loaded).toBe(false);
+  });
+
   it("迟到的旧响应不得覆盖新请求的列表", async () => {
     // A 慢、B 快：先发 A（挂起），再发 B（立即返回）
     let resolveA: (v: RepoTask[]) => void = () => {};
@@ -447,7 +461,7 @@ describe("向导预置打开（showRepoImport opts）", () => {
     expect(repo.repoImport.value.visible).toBe(false);
   });
 
-  it("afterImport 抛错时任务仍算导入成功（已落盘），弹窗关闭并如实提示后续失败", async () => {
+  it("afterImport 抛错时保留向导回调和弹窗，供用户重试后续配置", async () => {
     const afterImport = vi.fn(async () => {
       throw new Error("绑定失败");
     });
@@ -458,11 +472,27 @@ describe("向导预置打开（showRepoImport opts）", () => {
     await repo.acceptRepoDisclaimer();
 
     expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
-    expect(repo.repoImport.value.visible).toBe(false);
+    expect(repo.repoImport.value.visible).toBe(true);
     const [ok, message] = toastOnlyMock.mock.calls.at(-1) as [boolean, string];
     expect(ok).toBe(false);
     expect(message).toContain("已导入");
     expect(message).toContain("绑定失败");
+  });
+
+  it("首次下载失败后重试成功仍回调向导", async () => {
+    const afterImport = vi.fn(async () => {});
+    repo.showRepoImport("browser", { afterImport });
+    const task = makeTask("campus");
+    vi.mocked(repoApi.fetchTask)
+      .mockRejectedValueOnce(new Error("网络中断"))
+      .mockResolvedValueOnce({ type: "browser", name: "校园登录", steps: [] });
+    repo.repoImport.value.disclaimer = task;
+    await repo.acceptRepoDisclaimer();
+    expect(afterImport).not.toHaveBeenCalled();
+    repo.repoImport.value.disclaimer = task;
+    await repo.acceptRepoDisclaimer();
+    expect(afterImport).toHaveBeenCalledWith("campus");
+    expect(routerPushMock).not.toHaveBeenCalled();
   });
 });
 

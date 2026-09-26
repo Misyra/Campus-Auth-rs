@@ -186,6 +186,8 @@ pub async fn test_http_task(
     };
 
     let report = run_http_login_once(&request).await;
+    let verification_pending = task.success_check == crate::tasks::HttpSuccessCheck::Network
+        && report.outcome == crate::bridge::Outcome::Success;
     registration.finish();
     Ok(data(serde_json::json!({
         "rendered_url": report.rendered_url,
@@ -195,6 +197,7 @@ pub async fn test_http_task(
         "response_headers": report.response_headers,
         "response_snippet": report.response_snippet,
         "outcome": report.outcome,
+        "verification_pending": verification_pending,
         "message": report.message,
         "script_error": report.script_error,
         "duration_ms": report.duration_ms,
@@ -422,6 +425,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["data"]["outcome"], "success", "{json}");
+        assert_eq!(json["data"]["verification_pending"], false);
         // 渲染后的地址必须来自内联草稿（而不是任何已保存任务/方案里的地址）
         assert!(
             json["data"]["rendered_url"]
@@ -430,6 +434,28 @@ mod tests {
                 .starts_with(&portal),
             "rendered_url 未命中内联地址: {json}"
         );
+    }
+
+    /// 网络检测模式只证明请求已发送，测试 API 必须显式告知前端尚未验证联网。
+    #[tokio::test]
+    async fn test_network_mode_reports_verification_pending() {
+        let portal = spawn_gate_portal("p=hand-typed").await;
+        let (app, _inner) = mock_app("http://10.1.1.55/login");
+        let resp = app
+            .oneshot(post(serde_json::json!({
+                "task": {
+                    "type": "http", "task_id": "draft", "name": "草稿直连",
+                    "method": "GET", "url": format!("{portal}?p={{password}}"),
+                    "success_check": "network"
+                },
+                "username": "student", "password": "hand-typed"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["data"]["outcome"], "success", "{json}");
+        assert_eq!(json["data"]["verification_pending"], true);
     }
 
     /// 主干二：task_id + profile_id 且密码留空 → 用方案已保存密码，且响应不回显密码

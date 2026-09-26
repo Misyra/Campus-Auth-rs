@@ -176,6 +176,12 @@ describe("httpTaskDraftGaps", () => {
     expect(gaps).toEqual(["请求地址"]);
   });
 
+  it("新建草稿的网关占位地址不触发自动保存，填入真实地址后可保存", () => {
+    const draft = { ...emptyHttpTaskDraft(), id: "dorm", name: "宿舍", url: "{gateway_host}" };
+    expect(httpTaskDraftGaps(draft)).toContain("请求地址");
+    expect(httpTaskDraftGaps({ ...draft, url: "http://10.0.0.1/login" })).toEqual([]);
+  });
+
   it("ID 与地址同时缺失时两条都报（一次说清要补什么）", () => {
     expect(httpTaskDraftGaps(emptyHttpTaskDraft())).toHaveLength(2);
   });

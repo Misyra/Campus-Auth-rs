@@ -37,7 +37,7 @@ async function runHttpTaskTest(payload: HttpTaskTestPayload): Promise<HttpLoginT
   try {
     const report = await httpTasksApi.test(payload);
     result.value = report;
-    toastOnly(report.outcome === "success", report.message);
+    if (!report.verification_pending) toastOnly(report.outcome === "success", report.message);
     return report;
   } catch (error) {
     const message = extractApiError(error, "测试请求失败");

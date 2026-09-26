@@ -7,7 +7,7 @@
 //! 2. 用户加密脚本：内置 boa 引擎在无网络/文件沙箱中执行 `transform(ctx)`
 //! 3. 模板替换：URL/请求头/请求体中的 `{username}` `{password}` 与脚本返回的
 //!    任意字段按名替换（值原样替换不转义，特殊字符可用 `url_encode()`）
-//! 4. 发送请求（不跟随系统代理，重定向上限 5 跳）
+//! 4. 发送请求（不跟随系统代理；跨源跳转重建无凭据请求，上限 5 跳）
 //! 5. 成败判定：失败关键字命中 → 终态失败；成功关键字命中（或留空时 HTTP 2xx）
 //!    → 交由会话状态机做登录后网络探测复核
 //!
@@ -670,7 +670,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 /// `RequestBuilder::timeout` 单独给：抓登录页 5s / 前置请求 10s / 登录 20s。
 fn build_client(ignore_https_errors: bool) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .redirect(Policy::limited(MAX_REDIRECTS))
+        .redirect(Policy::none())
         .no_proxy()
         .danger_accept_invalid_certs(ignore_https_errors)
         .user_agent(DEFAULT_USER_AGENT)
@@ -678,16 +678,32 @@ fn build_client(ignore_https_errors: bool) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("客户端构建失败: {e}"))
 }
 
+/// 凭据模板仅在同源路径间沿用；协议、主机或有效端口变化须清理请求。
+fn redirect_has_same_origin(origin: &url::Url, target: &url::Url) -> bool {
+    target.scheme() == origin.scheme()
+        && target.host_str() == origin.host_str()
+        && target.port_or_known_default() == origin.port_or_known_default()
+}
+
+/// HTTPS 响应中的跳转不能把目标 URL 中的一次性令牌暴露给明文链路。
+fn redirect_is_https_downgrade(origin: &url::Url, target: &url::Url) -> bool {
+    origin.scheme() == "https" && target.scheme() == "http"
+}
+
 /// 抓取登录页原文（best effort）：脚本 ctx.page 数据源，失败返回空串
 async fn fetch_login_page(client: &reqwest::Client, auth_url: &str) -> String {
     if auth_url.is_empty() {
         return String::new();
     }
-    match client
-        .get(auth_url)
-        .timeout(PAGE_FETCH_TIMEOUT)
-        .send()
-        .await
+    match send_with_redirects(
+        client,
+        HttpRequestMethod::Get,
+        auth_url,
+        "",
+        "",
+        PAGE_FETCH_TIMEOUT,
+    )
+    .await
     {
         Ok(resp) => match read_limited_body(resp).await {
             Ok(body) => body.0,
@@ -715,41 +731,94 @@ async fn send_http(
     body: &str,
     timeout: Duration,
 ) -> Result<(reqwest::StatusCode, String, String), String> {
-    let mut request = match method {
-        HttpRequestMethod::Get => client.get(url),
-        HttpRequestMethod::Post => {
-            let mut r = client.post(url);
-            if !body.is_empty() {
-                r = r.body(body.to_string());
-            }
-            r
-        }
-    };
-
-    // 请求头模板逐行解析；POST 带体且未显式指定 Content-Type 时补默认表单类型
-    let parsed = parse_headers(headers);
-    for (k, v) in &parsed {
-        request = request.header(k, v);
-    }
-    if method == HttpRequestMethod::Post && !body.is_empty() {
-        let has_content_type = parsed
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
-        if !has_content_type {
-            request = request.header("Content-Type", "application/x-www-form-urlencoded");
-        }
-    }
-
-    let resp = request
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp = send_with_redirects(client, method, url, headers, body, timeout).await?;
     let status = resp.status();
     // 响应头先快照再消费响应体（流式读取会拿走所有权）
     let headers_text = format_response_headers(resp.headers());
     let (body, _charset) = read_limited_body(resp).await?;
     Ok((status, body, headers_text))
+}
+
+/// 逐跳发送请求；跨源后永久清除模板头和请求体，防止后续跳回原站时恢复凭据。
+async fn send_with_redirects(
+    client: &reqwest::Client,
+    method: HttpRequestMethod,
+    url: &str,
+    headers: &str,
+    body: &str,
+    timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    let mut current = url::Url::parse(url).map_err(|e| e.to_string())?;
+    let mut method = method;
+    let mut headers = headers;
+    let mut body = body;
+    let started = Instant::now();
+    for hop in 0..=MAX_REDIRECTS {
+        let remaining = timeout
+            .checked_sub(started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| "直连请求超时".to_string())?;
+        let mut request = match method {
+            HttpRequestMethod::Get => client.get(current.clone()),
+            HttpRequestMethod::Post => {
+                let mut request = client.post(current.clone());
+                if !body.is_empty() {
+                    request = request.body(body.to_string());
+                }
+                request
+            }
+        };
+        let parsed = parse_headers(headers);
+        for (name, value) in &parsed {
+            request = request.header(name, value);
+        }
+        if method == HttpRequestMethod::Post
+            && !body.is_empty()
+            && !parsed
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            request = request.header("Content-Type", "application/x-www-form-urlencoded");
+        }
+        let response = request
+            .timeout(remaining)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = response.status();
+        if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let Some(location) = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return Ok(response);
+        };
+        if hop == MAX_REDIRECTS {
+            return Err("直连请求重定向次数过多".to_string());
+        }
+        let next = current.join(location).map_err(|e| e.to_string())?;
+        if !matches!(next.scheme(), "http" | "https") || next.host_str().is_none() {
+            return Err("直连请求重定向地址不是 HTTP(S) URL".to_string());
+        }
+        if redirect_is_https_downgrade(&current, &next) {
+            return Err("直连请求拒绝 HTTPS 降级跳转".to_string());
+        }
+        if !redirect_has_same_origin(&current, &next) {
+            headers = "";
+            body = "";
+        }
+        if status == reqwest::StatusCode::SEE_OTHER
+            || (matches!(status.as_u16(), 301 | 302) && method == HttpRequestMethod::Post)
+        {
+            method = HttpRequestMethod::Get;
+            body = "";
+        }
+        current = next;
+    }
+    Err("直连请求重定向次数过多".to_string())
 }
 
 /// 从前置请求的响应体里取出值（字符串取原值，其余类型取 JSON 文本）。
@@ -1339,6 +1408,95 @@ mod tests {
             !raw.contains("mozilla/5.0"),
             "兜底 UA 不应与显式配置同时发出:\n{raw}"
         );
+    }
+
+    /// 跨源跳转继续访问目标，但新请求不能带自定义凭据头或 POST 凭据体。
+    #[tokio::test]
+    async fn cross_origin_redirect_never_sends_credentials() {
+        for status in [302, 307, 308] {
+            let (target, received) = spawn_capturing_response(200, "登录成功", "").await;
+            let (source, original) =
+                spawn_capturing_response(status, "", &format!("Location: {target}\r\n")).await;
+            let mut req = request(source);
+            req.method = HttpRequestMethod::Post;
+            req.headers = "X-Password: {password}".into();
+            req.body = "password={password}".into();
+            let report = run_once(&req).await;
+            assert_eq!(
+                report.outcome,
+                Outcome::Success,
+                "{status}: {}",
+                report.message
+            );
+            let original = original.await.unwrap();
+            assert!(
+                original.to_ascii_lowercase().contains("x-password: abcdef"),
+                "{status}: {original}"
+            );
+            let redirected = received.await.unwrap();
+            assert!(
+                !redirected.to_ascii_lowercase().contains("x-password"),
+                "{status}: {redirected}"
+            );
+            assert!(
+                !redirected.contains("password=abcdef"),
+                "{status}: {redirected}"
+            );
+            if status == 302 {
+                assert!(redirected.starts_with("GET "), "{redirected}");
+            } else {
+                assert!(redirected.starts_with("POST "), "{redirected}");
+            }
+        }
+    }
+
+    /// 门户自己的相对跳转仍可正常落到结果页，不影响常见登录流程。
+    #[tokio::test]
+    async fn same_origin_redirect_is_followed() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for response in [
+                "HTTP/1.1 302 Found\r\nLocation: /done\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n登录成功",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let report = run_once(&request(format!("http://{addr}/login"))).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+    }
+
+    #[test]
+    fn redirect_origin_and_downgrade_are_distinguished() {
+        let origin = url::Url::parse("https://portal.example/login").unwrap();
+        assert!(redirect_has_same_origin(
+            &origin,
+            &url::Url::parse("https://portal.example/done").unwrap()
+        ));
+        for target in [
+            "http://portal.example/done",
+            "https://other.example/done",
+            "https://portal.example:8443/done",
+        ] {
+            assert!(!redirect_has_same_origin(
+                &origin,
+                &url::Url::parse(target).unwrap()
+            ));
+        }
+        assert!(redirect_is_https_downgrade(
+            &origin,
+            &url::Url::parse("http://other.example/done").unwrap()
+        ));
+        assert!(!redirect_is_https_downgrade(
+            &origin,
+            &url::Url::parse("https://other.example/done").unwrap()
+        ));
     }
 
     /// 网络检测判定模式：响应体与状态码都不参与成功判定——成功关键字未命中

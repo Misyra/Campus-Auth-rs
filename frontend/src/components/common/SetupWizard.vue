@@ -123,6 +123,8 @@ const channelBusy = ref(false);
  * 残留的测速结果/已导入 id 会把 A 渠道的任务绑进 B 渠道的方案。
  */
 function resetMatchState() {
+  ++schoolMatchSeq;
+  speedRunning.value = false;
   speedResults.value = [];
   speedDone.value = false;
   matchedTasks.value = [];
@@ -162,6 +164,10 @@ const envStatus = ref<EnvironmentStatus | null>(null);
 const envError = ref("");
 const envPreparing = ref(false);
 let envPollTimer: ReturnType<typeof setInterval> | undefined;
+let bootstrapSeq = 0;
+let bootstrapPolling = false;
+let bootstrapRequestSettled = false;
+let bootstrapObservedRunning = false;
 
 const BROWSER_OFFICIAL_URL: Record<string, string> = {
   msedge: "https://www.microsoft.com/edge/download",
@@ -244,24 +250,40 @@ function startBootstrap() {
   if (envPreparing.value) return;
   envPreparing.value = true;
   envError.value = "";
+  bootstrapRequestSettled = false;
+  bootstrapObservedRunning = false;
+  const seq = ++bootstrapSeq;
   // 同步端点最长可达数十分钟（uv 下载×3 重试 + uv sync + 浏览器安装），不能 await：
   // 请求超时也不代表后端停止，进度一律以轮询 init-status 为准
-  void environmentApi.bootstrap().catch(() => undefined);
+  void environmentApi.bootstrap().catch(() => undefined).finally(() => {
+    if (seq !== bootstrapSeq) return;
+    bootstrapRequestSettled = true;
+    if (envPreparing.value) void pollBootstrapStatus();
+  });
   stopBootstrapPoll();
   envPollTimer = setInterval(() => void pollBootstrapStatus(), 2000);
   void pollBootstrapStatus();
 }
 
 async function pollBootstrapStatus() {
+  if (bootstrapPolling || !envPreparing.value) return;
+  bootstrapPolling = true;
+  const seq = bootstrapSeq;
   try {
     const status = await environmentApi.fetchStatus();
+    if (seq !== bootstrapSeq || !envPreparing.value) return;
     if (status) envStatus.value = status;
   } catch {
     // 单次轮询失败忽略，下一轮再试
     return;
+  } finally {
+    bootstrapPolling = false;
   }
   const e = envStatus.value;
   if (!e) return;
+  if (e.stage !== "Idle" && e.stage !== "Error") bootstrapObservedRunning = true;
+  // 新请求进入后端前可能读到上一轮 Error；等到本轮运行或 POST 结束再判定。
+  if (!bootstrapObservedRunning && !bootstrapRequestSettled) return;
   if (e.capability_ready) {
     frontendLogger.info("wizard", "环境初始化完成");
     await finishBootstrapPoll(true);
@@ -348,6 +370,7 @@ const schoolName = ref("");
 const speedRunning = ref(false);
 const speedDone = ref(false);
 const speedResults = ref<RepoSourceTiming[]>([]);
+let schoolMatchSeq = 0;
 const matchedTasks = ref<RepoTask[]>([]);
 const importedId = ref("");
 /** 直连渠道未导入任务时用户显式确认「保持浏览器渠道并继续」 */
@@ -369,21 +392,32 @@ function sourceLabel(source: TaskRepoSourceId): string {
 async function runSchoolMatch() {
   const q = schoolName.value.trim();
   if (!q || speedRunning.value) return;
+  const kind = repoKind.value;
+  const seq = ++schoolMatchSeq;
   speedRunning.value = true;
   speedDone.value = false;
   matchedTasks.value = [];
   try {
-    const results = await measureRepoSources(repoKind.value);
+    const results = await measureRepoSources(kind);
+    if (seq !== schoolMatchSeq || schoolName.value.trim() !== q || repoKind.value !== kind) return;
     speedResults.value = results;
     speedDone.value = true;
     const fastest = pickFastestSource(results);
     if (!fastest) return;
     const winner = results.find((r) => r.source === fastest)!;
-    matchedTasks.value = filterRepoTasks(winner.tasks, repoKind.value, q);
+    matchedTasks.value = filterRepoTasks(winner.tasks, kind, q);
   } finally {
-    speedRunning.value = false;
+    if (seq === schoolMatchSeq) speedRunning.value = false;
   }
 }
+
+watch(schoolName, () => {
+  ++schoolMatchSeq;
+  speedRunning.value = false;
+  speedDone.value = false;
+  speedResults.value = [];
+  matchedTasks.value = [];
+});
 
 /**
  * 打开复用的仓库导入弹窗：预置胜出源与关键词（浏览全部时不带关键词），

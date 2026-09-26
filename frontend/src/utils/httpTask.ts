@@ -13,6 +13,9 @@ import type { HttpIgnoreHttpsErrors, HttpLoginMethod, HttpSuccessCheck, HttpTask
 /** 任务 ID 校验：与后端 `TASK_ID_PATTERN` 同口径（ASCII，允许 - 与 _） */
 export const HTTP_TASK_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
+/** 新建任务尚未填写请求地址时的界面占位值，不是可解析的模板变量。 */
+export const HTTP_TASK_PLACEHOLDER_URL = "{gateway_host}";
+
 /** 新建草稿的默认名称 */
 export const HTTP_TASK_DEFAULT_NAME = "新直连任务";
 
@@ -192,7 +195,7 @@ export function httpTaskDraftGaps(draft: HttpTaskDraft): string[] {
   if (draft._isNew && !HTTP_TASK_ID_PATTERN.test(draft.id.trim())) {
     gaps.push("任务 ID（1~64 位字母、数字、下划线或连字符）");
   }
-  if (!draft.url.trim()) {
+  if (!draft.url.trim() || draft.url.trim() === HTTP_TASK_PLACEHOLDER_URL) {
     gaps.push("请求地址");
   }
   if (draft.pre_request_url.trim()) {

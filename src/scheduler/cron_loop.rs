@@ -71,8 +71,7 @@ pub(crate) struct TaskSchedule {
 
 /// 将用户输入的 5 字段 cron 转换为 cron crate 所需的 7 字段表达式并解析。
 ///
-/// 转换规则：`{prefix}{five_field}{suffix}` = `"0 " + 原5字段 + " *"`，
-/// 例如 `"0 8 * * *"` → `"0 0 8 * * * *"`。
+/// 数字星期按标准 5 字段语义转换：0/7 为周日、1 为周一；名称保持原样。
 pub(crate) fn parse_cron_expr(five_field: &str) -> Result<Schedule, SchedulerError> {
     let trimmed = five_field.trim();
     let field_count = trimmed.split_whitespace().count();
@@ -90,10 +89,54 @@ pub(crate) fn parse_cron_expr(five_field: &str) -> Result<Schedule, SchedulerErr
 
 /// 拼接 5→7 字段字符串（导出供测试复用）。
 pub(crate) fn parse_cron_5_to_7(five_field_trimmed: &str) -> String {
+    let mut fields: Vec<&str> = five_field_trimmed.split_whitespace().collect();
+    if fields.len() != 5 {
+        return format!("{CRON_PARSE_PREFIX}{five_field_trimmed}{CRON_PARSE_SUFFIX}");
+    }
+    let weekday = normalize_weekday(fields.pop().unwrap_or_default());
     format!(
-        "{}{}{}",
-        CRON_PARSE_PREFIX, five_field_trimmed, CRON_PARSE_SUFFIX
+        "{CRON_PARSE_PREFIX}{} {weekday}{CRON_PARSE_SUFFIX}",
+        fields.join(" ")
     )
+}
+
+/// 把数字星期的列表、范围与步长展开后映射到 cron crate 的 1=周日、2=周一。
+fn normalize_weekday(field: &str) -> String {
+    if field == "*" {
+        return field.to_string();
+    }
+    let mut parts = Vec::new();
+    for part in field.split(',') {
+        let (base, step) = match part.split_once('/') {
+            Some((base, step)) => match step.parse::<usize>() {
+                Ok(step) if step > 0 => (base, step),
+                _ => return field.to_string(),
+            },
+            None => (part, 1),
+        };
+        let range = if base == "*" {
+            Some((0, 7))
+        } else if let Some((start, end)) = base.split_once('-') {
+            start.parse::<usize>().ok().zip(end.parse::<usize>().ok())
+        } else {
+            base.parse::<usize>()
+                .ok()
+                .map(|start| (start, if part.contains('/') { 7 } else { start }))
+        };
+        let Some((start, end)) = range else {
+            parts.push(part.to_string());
+            continue;
+        };
+        if start > 7 || end > 7 || start > end {
+            return field.to_string();
+        }
+        parts.extend(
+            (start..=end)
+                .step_by(step)
+                .map(|day| (day % 7 + 1).to_string()),
+        );
+    }
+    parts.join(",")
 }
 
 /// 将目标墙钟时间转换为调度睡眠动作。
@@ -797,6 +840,36 @@ mod tests {
         assert_eq!(seven, "0 0 8 * * * *");
         let next = s.upcoming(Local).next().unwrap();
         assert_eq!(next.hour(), 8);
+    }
+
+    #[test]
+    fn test_numeric_weekdays_follow_standard_five_field_cron() {
+        use chrono::{Datelike, TimeZone, Weekday};
+        let after = Utc.with_ymd_and_hms(2026, 9, 26, 0, 0, 0).single().unwrap();
+        for expr in ["0 8 * * 1", "0 8 * * 0,1", "0 8 * * 1-5/2"] {
+            let next = parse_cron_expr(expr).unwrap().after(&after).next().unwrap();
+            assert_eq!(
+                next.weekday(),
+                if expr.contains("0,") {
+                    Weekday::Sun
+                } else {
+                    Weekday::Mon
+                },
+                "{expr}"
+            );
+        }
+        for expr in ["0 8 * * 0", "0 8 * * 7"] {
+            let next = parse_cron_expr(expr).unwrap().after(&after).next().unwrap();
+            assert_eq!(next.weekday(), Weekday::Sun, "{expr}");
+        }
+        let step_next = parse_cron_expr("0 8 * * */2")
+            .unwrap()
+            .after(&after)
+            .next()
+            .unwrap();
+        assert_eq!(step_next.weekday(), Weekday::Sat);
+        assert_eq!(normalize_weekday("1-5"), "2,3,4,5,6");
+        assert_eq!(normalize_weekday("MON"), "MON");
     }
 
     #[test]

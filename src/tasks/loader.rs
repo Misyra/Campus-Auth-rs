@@ -220,13 +220,17 @@ impl TaskManager {
 
     /// 加载单个任务完整 JSON
     pub async fn load_task(&self, task_id: &str) -> Result<TaskKind, TaskError> {
+        if is_valid_legacy_py_id(task_id) {
+            let _guard = self.lock.lock().await;
+            return self.load_legacy_py_task(task_id).await;
+        }
         if !is_valid_task_id(task_id) {
             return Err(TaskError::InvalidTaskId(task_id.to_string()));
         }
         let _guard = self.lock.lock().await;
-        let path = self
-            .find_task_file(task_id)
-            .ok_or_else(|| TaskError::TaskNotFound(task_id.to_string()))?;
+        let Some(path) = self.find_task_file(task_id) else {
+            return self.load_legacy_py_task(task_id).await;
+        };
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(TaskError::IoError)?;
@@ -244,6 +248,25 @@ impl TaskManager {
             }
         }
         Ok(task)
+    }
+
+    /// 兼容旧版裸 Python 文件，构造只读的内联脚本配置供详情、导出和迁移使用。
+    async fn load_legacy_py_task(&self, task_id: &str) -> Result<TaskKind, TaskError> {
+        let path = self.scripts_dir.join(format!("{task_id}.py"));
+        let summary = Self::read_py_summary(&path)
+            .ok_or_else(|| TaskError::TaskNotFound(task_id.to_string()))?;
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(TaskError::IoError)?;
+        Ok(TaskKind::Script(ScriptTaskConfig {
+            common: CommonFields {
+                task_id: task_id.to_string(),
+                name: summary.name,
+                description: summary.description,
+            },
+            content: Some(content),
+            ..Default::default()
+        }))
     }
 
     /// 将浏览器任务配置嵌入 `params["task_config"]`（供 Python Worker 执行步骤）。
@@ -342,6 +365,23 @@ impl TaskManager {
 
     /// 删除任务文件 + 更新 order + 处理 active 回退
     pub async fn delete_task(&self, task_id: &str) -> Result<(), TaskError> {
+        if is_valid_legacy_py_id(task_id) {
+            let _guard = self.lock.lock().await;
+            let path = self.scripts_dir.join(format!("{task_id}.py"));
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(TaskError::IoError)?;
+            let meta = self.scripts_dir.join(format!("{task_id}.meta.json"));
+            if meta.exists() {
+                tokio::fs::remove_file(&meta)
+                    .await
+                    .map_err(TaskError::IoError)?;
+            }
+            let mut order = self.read_order();
+            order.order.retain(|id| id != task_id);
+            self.write_order(&order)?;
+            return Ok(());
+        }
         if !is_valid_task_id(task_id) {
             return Err(TaskError::InvalidTaskId(task_id.to_string()));
         }
@@ -372,6 +412,8 @@ impl TaskManager {
         if py.exists() {
             if let Err(e) = tokio::fs::remove_file(&py).await {
                 tracing::debug!(path = %py.display(), error = %e, "清理关联 .py 文件失败");
+            } else {
+                found = true;
             }
         }
 
@@ -1103,6 +1145,18 @@ fn is_valid_task_id(id: &str) -> bool {
     }
     id.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// 仅允许旧版裸 Python 文件名中的点号；拒绝路径分隔符与空路径段。
+fn is_valid_legacy_py_id(id: &str) -> bool {
+    id.len() <= 128
+        && id.contains('.')
+        && id.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
 }
 
 /// 剥离 UTF-8 BOM 前缀（TSK-1）
@@ -2187,6 +2241,27 @@ mod tests {
         let foo = tasks.iter().find(|t| t.id == "foo").unwrap();
         assert_eq!(foo.name, "foo 脚本");
         assert_eq!(foo.task_type, "script");
+    }
+
+    #[tokio::test]
+    async fn test_legacy_dotted_python_script_can_be_migrated_without_overwrite() {
+        let (_tmp, mgr) = make_task_manager().await;
+        let old = mgr.scripts_dir.join("campus.login.py");
+        std::fs::write(&old, "# name: 校园登录\nprint('ok')\n").unwrap();
+        let listed = mgr.list_all_tasks().await;
+        assert!(listed.iter().any(|task| task.id == "campus.login"));
+        let mut task = mgr.load_task("campus.login").await.unwrap();
+        let TaskKind::Script(script) = &task else {
+            panic!("应为脚本");
+        };
+        assert!(script.content.as_deref().unwrap().contains("print('ok')"));
+        assert!(mgr.load_task("../campus.login").await.is_err());
+        task.common_mut().task_id = "campus_login".to_string();
+        mgr.save_task("campus_login", &task).await.unwrap();
+        assert!(old.exists(), "新 ID 落盘之前不得移动原文件");
+        mgr.delete_task("campus.login").await.unwrap();
+        assert!(!old.exists());
+        assert!(mgr.load_task("campus_login").await.is_ok());
     }
     // ============ 首启播种内置默认任务 ============
 

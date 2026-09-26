@@ -715,6 +715,8 @@ export interface HttpTaskTestPayload {
 
 /** 直连登录测试结果（请求内容与响应片段均已由后端脱敏） */
 export interface HttpLoginTestResult {
+  /** 网络检测模式只证明请求已发送，正式登录后的连通性尚未验证。 */
+  verification_pending: boolean;
   rendered_url: string;
   rendered_headers: string;
   rendered_body: string;
