@@ -170,7 +170,7 @@ async function stopBrowser() {
       </div>
       <div class="card-body">
         <div v-if="pythonNotReady" class="browser-safe-info browser-safe-info--warning browser-notice--top">
-          <p>Python 环境未就绪，浏览器功能不可用。请先前往 <a class="inline-link" @click.prevent="router.push({ name: 'settings-tasks' })">设置 · 任务与环境 → Python 环境</a> 初始化。</p>
+          <p>运行环境未就绪，浏览器功能不可用。请先前往 <a class="inline-link" @click.prevent="router.push({ name: 'settings-tasks' })">设置 · 任务与环境 → 运行环境</a> 初始化。</p>
         </div>
         <p class="form-help-text">选择用于自动登录的浏览器，推荐 Chromium / Edge / Chrome。</p>
         <div class="browser-selection">

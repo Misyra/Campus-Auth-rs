@@ -559,7 +559,7 @@ async function skipWizard() {
         <!-- 第 3 步：环境准备（仅浏览器渠道，直连流程不含此步） -->
         <div v-else-if="currentKey === 'environment'" class="wizard-page">
           <div class="wizard-section">
-            <h3>Python 环境</h3>
+            <h3>运行环境</h3>
             <ul class="wizard-env-list">
               <li v-for="item in envItems" :key="item.label" class="wizard-env-item">
                 <IconApp :name="item.ready ? 'check-circle' : 'x-circle'" class="icon-sm" :class="item.ready ? 'wizard-env-ok' : 'wizard-env-missing'" />

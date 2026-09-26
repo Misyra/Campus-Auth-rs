@@ -336,7 +336,7 @@ export const DEFAULT_CONFIG: Config = {
 export const SETTINGS_TABS = [
   { id: "monitor", label: "检测", hint: "在线检测、登录重试与暂停时段" },
   { id: "browser", label: "浏览器", hint: "浏览器选择、超时与反检测参数" },
-  { id: "tasks", label: "任务与环境", hint: "Python 环境、录制器与 OCR" },
+  { id: "tasks", label: "任务与环境", hint: "运行环境、录制器与 OCR" },
   { id: "system", label: "系统", hint: "启动行为、日志与界面" },
   { id: "network", label: "网络与更新", hint: "端口、代理、自动更新与维护" },
   { id: "appearance", label: "外观", hint: "主题、背景与卡片样式" },

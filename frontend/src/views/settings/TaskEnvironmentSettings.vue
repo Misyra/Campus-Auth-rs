@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 设置 · 任务与环境页：任务概览与录制器入口 + Python 环境状态、OCR 依赖与验证码识别测试。
+/** 设置 · 任务与环境页：任务概览与录制器入口 + 运行环境状态、OCR 依赖与验证码识别测试。
  * 原「任务」「环境」两个 Tab 合并而来：任务定义与它依赖的运行环境同域，且两页均为动作/状态卡、无配置保存栏。 */
 import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, watch, onMounted, onActivated, onUnmounted } from "vue";
@@ -12,6 +12,7 @@ import { useEnvironment } from "@/composables/useEnvironment";
 import { ocrApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import { pickFile } from "@/utils/file";
+import { environmentChecklist } from "@/utils/environmentStatus";
 import { TASK_REPO_URL, TUTORIAL_VIDEO_URL } from "@/utils/constants";
 import { useToast } from "@/composables/useToast";
 
@@ -54,7 +55,10 @@ const activeTaskName = computed(() => {
 
 const envReady = computed(() => Boolean(envStatus.value?.capability_ready));
 
-/** Python 环境卡折叠态：就绪自动折叠、异常/初始化中自动展开；头部可手动切换，下次状态变化仍自动跟随 */
+/** 组件清单（uv/Python/认证核心/浏览器/OCR）由共享工具派生，本页只负责渲染 */
+const envChecks = computed(() => (envStatus.value ? environmentChecklist(envStatus.value) : []));
+
+/** 运行环境卡折叠态：就绪自动折叠、异常/初始化中自动展开；头部可手动切换，下次状态变化仍自动跟随 */
 const envCollapsed = ref(false);
 watch(envReady, (ready) => { envCollapsed.value = ready; }, { immediate: true });
 const envStageLabel = computed(() => {
@@ -205,7 +209,7 @@ async function recognizeOcr() {
 
 <template>
   <div class="settings-panel-grid settings-panel-grid--cols2 environment-page">
-    <!-- Python 环境：可折叠卡，环境就绪自动收起、异常或初始化中自动展开 -->
+    <!-- 运行环境：可折叠卡，环境就绪自动收起、异常或初始化中自动展开 -->
     <section class="card settings-panel settings-panel--wide env-collapse-card" :class="{ 'env-collapsed': envCollapsed }">
       <div
         class="settings-card-header env-collapse-header"
@@ -217,7 +221,7 @@ async function recognizeOcr() {
         @keydown.space.prevent="envCollapsed = !envCollapsed"
       >
         <IconApp name="terminal" class="settings-card-icon" />
-        <h2>Python 环境</h2>
+        <h2>运行环境</h2>
         <span v-if="!envLoading && envStatus" class="badge badge--sm" :class="envReady ? 'badge--success' : 'badge--warn'">{{ envReady ? '已就绪' : '未就绪' }}</span>
         <span v-if="envStageLabel" class="badge badge--sm">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
         <IconApp name="chevron-down" class="env-collapse-chevron" />
@@ -228,21 +232,15 @@ async function recognizeOcr() {
           <span v-if="envLoading" class="hint">检测中…</span>
           <template v-else-if="envError && !envStatus"> <span class="env-error">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
           <template v-else-if="envStatus">
+            <!-- 清单口径来自 utils/environmentStatus（与仪表盘横幅、关于页共用） -->
             <div class="env-checklist" aria-label="环境组件状态">
-              <div class="env-check-item" :class="envStatus.uv_ready ? 'ready' : 'missing'">
-                <span class="env-check-dot"></span><span class="env-check-name">uv</span><span class="env-check-value">{{ envStatus.uv_ready ? '可用' : '未就绪' }}</span>
-              </div>
-              <div class="env-check-item" :class="envStatus.python_ready ? 'ready' : 'missing'">
-                <span class="env-check-dot"></span><span class="env-check-name">Python</span><span class="env-check-value">{{ envStatus.python_ready ? '可运行' : '未就绪' }}</span>
-              </div>
-              <div class="env-check-item" :class="envStatus.worker_ready && envStatus.manifest_current ? 'ready' : 'missing'">
-                <span class="env-check-dot"></span><span class="env-check-name">认证核心</span><span class="env-check-value">{{ envStatus.worker_ready && envStatus.manifest_current ? '已验证' : (envStatus.worker_ready ? '需要同步' : '未就绪') }}</span>
-              </div>
-              <div class="env-check-item" :class="envStatus.playwright_ready || envStatus.system_browser_ready ? 'ready' : 'missing'">
-                <span class="env-check-dot"></span><span class="env-check-name">浏览器</span><span class="env-check-value">{{ envStatus.playwright_ready ? 'Chromium 可用' : (envStatus.system_browser_ready ? '系统浏览器可用' : '未就绪') }}</span>
-              </div>
-              <div class="env-check-item" :class="!envStatus.ocr_enabled ? 'optional' : (envStatus.ocr_ready ? 'ready' : 'missing')">
-                <span class="env-check-dot"></span><span class="env-check-name">OCR</span><span class="env-check-value">{{ !envStatus.ocr_enabled ? '未启用（可选）' : (envStatus.ocr_ready ? '已就绪' : '未就绪') }}</span>
+              <div
+                v-for="c in envChecks"
+                :key="c.key"
+                class="env-check-item"
+                :class="c.optional ? 'optional' : c.ready ? 'ready' : 'missing'"
+              >
+                <span class="env-check-dot"></span><span class="env-check-name">{{ c.name }}</span><span class="env-check-value">{{ c.value }}</span>
               </div>
             </div>
           </template>
@@ -258,7 +256,7 @@ async function recognizeOcr() {
             class="btn btn-secondary btn-sm"
             :disabled="busy.env"
             @click="void bootstrapEnv()"
-            title="重新同步 Python 虚拟环境与浏览器"
+            title="重新同步运行环境（Python 依赖与浏览器）"
           >
             <IconApp v-if="busy.env" name="refresh" class="spin" />
             {{ busy.env ? "同步中..." : "重新同步" }}
@@ -269,10 +267,10 @@ async function recognizeOcr() {
             class="btn btn-primary btn-sm"
             :disabled="busy.env"
             @click="void bootstrapEnv()"
-            title="初始化 Python 虚拟环境（uv sync）"
+            title="初始化运行环境（uv sync + 浏览器）"
           >
             <IconApp v-if="busy.env" name="refresh" class="spin" />
-            {{ busy.env ? "初始化中..." : "初始化 Python 环境" }}
+            {{ busy.env ? "初始化中..." : "初始化环境" }}
           </button>
         </div>
       </div>
@@ -323,7 +321,7 @@ async function recognizeOcr() {
             </a>
           </div>
           <div class="task-recorder-note">需先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 扩展，再安装录制器脚本；在登录页点击浮动按钮开始录制。</div>
-          <div class="task-recorder-note">不会用？看 <a :href="TUTORIAL_VIDEO_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>（从 03:29 的录制演示开始）；编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
+          <div class="task-recorder-note">不会用？看 <a :href="TUTORIAL_VIDEO_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>；编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
         </div>
       </div>
     </section>

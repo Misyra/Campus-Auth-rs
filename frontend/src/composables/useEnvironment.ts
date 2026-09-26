@@ -1,5 +1,5 @@
 /**
- * Python 环境状态与初始化（uv sync + Chromium，单例）。
+ * 运行环境状态与初始化（uv / Python / 认证核心 / 浏览器 / OCR，单例）。
  * 后端经 BootstrapGate 保证并发幂等；前端用 busy.env 串行化按钮。
  */
 
@@ -41,7 +41,7 @@ async function bootstrapEnv(): Promise<boolean> {
     // 后端同步等待完成，直接可得最新状态
     await refreshEnv();
     const ok = Boolean((res as unknown as { capability_ready?: boolean }).capability_ready ?? envStatus.value?.capability_ready);
-    if (ok) toastOnly(true, "Python 环境初始化完成");
+    if (ok) toastOnly(true, "环境初始化完成");
     else toastOnly(false, envStatus.value?.last_error || "环境初始化完成但仍未就绪，请查看日志");
     return Boolean(ok);
   } catch (e) {

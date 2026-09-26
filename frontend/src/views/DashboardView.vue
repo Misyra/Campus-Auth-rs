@@ -10,6 +10,7 @@ import { useUi } from "@/composables/useUi";
 import { throttleRaf } from "@/utils/debounce";
 import { LOG_SOURCE_LABELS } from "@/utils/constants";
 import { channelNeedsRuntimeEnvironment } from "@/utils/loginChannel";
+import { missingRequiredComponents } from "@/utils/environmentStatus";
 import { formatDuration, formatTimestamp, formatShortTime } from "@/utils/formatters";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
@@ -19,7 +20,7 @@ const s = useStatus();
 const logs = useLogs();
 const ui = useUi();
 const router = useRouter();
-const { envStatus, refreshEnv } = useEnvironment();
+const { envStatus, refreshEnv, bootstrapEnv } = useEnvironment();
 const { profiles, activeProfileId } = useProfiles();
 
 // 直连请求渠道在 Rust 进程内完成登录，不拉起 Python Worker 与浏览器，
@@ -36,6 +37,19 @@ const showEnvBanner = computed(
     envStatus.value != null &&
     !envStatus.value.capability_ready,
 );
+
+// 横幅点名缺失的组件（口径与关于页/环境页共用 environmentStatus），
+// 不再笼统说「Python 环境未就绪」——缺认证核心/浏览器时说 Python 会误导排查方向
+const envMissingText = computed(() => {
+  if (!envStatus.value) return "";
+  const missing = missingRequiredComponents(envStatus.value);
+  return missing.length ? missing.join("、") : "部分组件";
+});
+
+/** 横幅就地初始化：成功后 bootstrapEnv 内部会刷新状态，showEnvBanner 随之消失 */
+async function initEnvNow() {
+  await bootstrapEnv();
+}
 
 // FE2-8：延迟复查句柄须可清理——组件卸载后触发的 refreshEnv 虽是幂等 GET，
 // 但仍会更新已卸载页面关联的单例状态，提前离开时取消
@@ -153,10 +167,21 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
       <span v-else class="status-detail">{{ s.networkStatusDetail.value }}</span>
     </div>
 
-    <!-- 环境未就绪提示（非阻塞，仅链接到 环境 → Python 环境） -->
+    <!-- 环境未就绪提示：点名缺失组件（口径与关于页/环境页共用 environmentStatus），
+         并就地提供「初始化环境」入口；整条横幅仍可点击跳转设置页 -->
     <div v-if="showEnvBanner" class="network-status-banner disconnected env-banner" @click="router.push({ name: 'settings-tasks' })">
       <span class="status-dot"></span>
-      <span>Python 环境未就绪，手动登录将自动初始化或可前往 设置 · 任务与环境 手动修复</span>
+      <span class="status-text">运行环境未就绪（缺 {{ envMissingText }}），手动登录时会自动初始化</span>
+      <button
+        class="btn btn-sm env-banner-action"
+        :disabled="s.busy.env"
+        @click.stop="void initEnvNow()"
+        title="自动下载并安装缺失的组件（首次可能耗时数分钟）"
+      >
+        <IconApp v-if="s.busy.env" name="refresh" class="spin" />
+        {{ s.busy.env ? "初始化中..." : "初始化环境" }}
+      </button>
+      <button class="btn btn-sm btn-link env-banner-detail" @click.stop="router.push({ name: 'settings-tasks' })">前往设置查看</button>
     </div>
 
     <!-- 统计卡片 -->

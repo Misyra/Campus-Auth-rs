@@ -2,6 +2,27 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-26 环境状态口径统一）
+
+### 背景
+
+- 用户反馈三处页面环境状态自相矛盾：仪表盘横幅笼统报「Python 环境未就绪」（实际可能缺的是认证核心或浏览器）、关于页只看 `python_ready` 单字段显示「Python 已就绪」、环境页才说清缺的是认证核心。统一各页对 uv / Python / 认证核心 / 浏览器 / OCR 的判定与措辞，并在仪表盘就地提供「初始化环境」入口。
+- 分组件展示先做了仪表盘、环境页与关于页三处；关于页一版后用户决定**维持原样**（仅报 Python 单项的极简摘要，不做分组件行），已还原 `AboutView.vue` / `about.css`——关于页与整体就绪状态的口径差异属用户知情选择。
+
+### 前端
+
+- 新增 `utils/environmentStatus.ts`：`environmentChecklist()` 从 `EnvironmentStatus` 派生五项组件检查（名称/就绪判定/展示文案的单一事实源，判定口径与后端 `derive_capability_ready` 一致：认证核心 = worker_ready && manifest_current，浏览器 = Playwright Chromium 或系统浏览器，OCR 未启用视为可选不参与整体判定）；`missingRequiredComponents()` 点名缺失的必需组件。配套单测 `environmentStatus.test.ts`（5 例）。
+- `DashboardView.vue`：环境横幅改为「运行环境未就绪（缺 X、Y）」点名缺失组件，新增「初始化环境」按钮（复用 `useEnvironment.bootstrapEnv`，busy 态禁用、成功后横幅随状态刷新自动消失）与「前往设置查看」链接；横幅整体点击跳设置保留，按钮 `stopPropagation` 防双触发；`dashboard.css` 补横幅内按钮样式（描边幽灵样式取 currentColor，避免红色横幅里撞色）。
+- `TaskEnvironmentSettings.vue`：五项组件清单改为渲染共享 `environmentChecklist`（删除页内重复的判定与文案），卡片标题「Python 环境」→「运行环境」，按钮「初始化 Python 环境」→「初始化环境」。
+- `SetupWizard.vue`：环境准备小节标题同步「运行环境」（清单仍为安装语境独立展示，不改判定）。
+- `BrowserSettings.vue`：未就绪提示改「运行环境未就绪」，指向「设置 · 任务与环境 → 运行环境」（原指向已不存在的「Python 环境」小节名）。
+- `constants.ts`：设置 Tab「任务与环境」的 hint 同步「运行环境、录制器与 OCR」。
+- `useEnvironment.ts`：初始化成功 toast「Python 环境初始化完成」→「环境初始化完成」；模块 doc 同步。
+
+### 验证
+
+- `vitest run` 470 通过（含新增 5 例）；`vue-tsc` 零错误；`npm run build` 通过。
+
 ## 开发中（2026-09-26 配置字段审计清理）
 
 ### 背景

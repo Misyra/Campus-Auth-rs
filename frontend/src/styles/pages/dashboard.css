@@ -415,9 +415,37 @@
   animation: pulse 2s ease-in-out infinite;
 }
 
-/* 环境未就绪提示横幅：整条可点击跳转设置页（仅此元素可点，不影响状态横幅） */
+/* 环境未就绪提示横幅：整条可点击跳转设置页；横幅内的初始化/详情按钮用
+   stopPropagation 自行处理，点击不触发整条跳转 */
 .network-status-banner.env-banner {
   cursor: pointer;
+}
+
+/* 横幅内操作按钮跟随横幅文字色（错误色调）：描边幽灵样式压过默认按钮底色，
+   链接按钮同样取 currentColor 而非全局 --accent，避免在红色横幅里撞色 */
+.network-status-banner.env-banner .env-banner-action {
+  background: transparent;
+  color: inherit;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.network-status-banner.env-banner .env-banner-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+  transform: none;
+}
+
+.network-status-banner.env-banner .env-banner-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.network-status-banner.env-banner .env-banner-detail {
+  color: inherit;
+  opacity: 0.85;
+  white-space: nowrap;
 }
 
 .network-status-banner.idle {
