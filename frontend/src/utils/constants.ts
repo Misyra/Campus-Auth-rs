@@ -78,13 +78,19 @@ export function releaseTagUrl(version: string | undefined | null): string {
  */
 export const BILIBILI_SPACE_URL = "https://space.bilibili.com/5608024";
 /**
- * 使用教程视频，直达 03:29 的录制器演示片段。
+ * 手动录制任务教程视频（[认证喵]手动录制校园网自动认证任务）。
  *
- * 任务页的「使用教程」入口、录制器卡片（`设置 · 任务与环境`）与 AI 页的排障提示共用。
- * 此前 AI 页指引写「按照视频教程操作」，但全仓没有任何视频地址，用户照做找不到内容。
- * 链接去掉了分享追踪参数（`share_source` / `vd_source`），只保留 `t=209` 的起播时间。
+ * 任务页的「任务录制器」入口与录制器卡片（`设置 · 任务与环境`）共用；
+ * 全片即录制器演示，不再需要旧视频 `t=209` 的起播时间。
  */
-export const TUTORIAL_VIDEO_URL = "https://www.bilibili.com/video/BV1EdNg6VEbp/?t=209";
+export const TUTORIAL_VIDEO_RECORD_URL = "https://www.bilibili.com/video/BV1uLh66VEvp/";
+/**
+ * AI 生成登录任务教程视频（使用 deepseek 实现自动登录校园网）。
+ *
+ * AI 任务页的排障提示专用，与手动录制教程分开：两页指引的能力不同，
+ * 共用一条链接会让 AI 页用户点进去看到的是录制器演示。
+ */
+export const TUTORIAL_VIDEO_AI_URL = "https://www.bilibili.com/video/BV1P8hk6rEmx/";
 
 /**
  * 文档站（`campus-auth-website`）路由的**单一事实源**。

@@ -2,6 +2,18 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-26 教程视频链接分拆）
+
+### 背景
+
+- 上线两支新教程视频：手动录制任务（[认证喵]手动录制校园网自动认证任务 `BV1uLh66VEvp`）与 AI 生成登录任务（使用 deepseek 实现自动登录校园网 `BV1P8hk6rEmx`）。旧 `TUTORIAL_VIDEO_URL`（`BV1EdNg6VEbp/?t=209`）是一支泛用教程，被任务页录制器入口、录制器卡片与 AI 页排障提示三处共用——AI 页用户点进去看到的是录制器演示，指引与内容错位。
+
+### 前端
+
+- `utils/constants.ts`：`TUTORIAL_VIDEO_URL` 拆为 `TUTORIAL_VIDEO_RECORD_URL`（手动录制教程）与 `TUTORIAL_VIDEO_AI_URL`（AI 生成教程）两个常量，按指向能力命名；新链接不带起播时间（录制教程全片即演示）。
+- `views/tasks/BrowserTasksPanel.vue`（「任务录制器」入口）与 `views/settings/TaskEnvironmentSettings.vue`（录制器卡片）改指录制教程；卡片文案删去「（从 03:29 的录制演示开始）」——该时间戳属于旧视频，新视频不再适用。
+- `views/AiTaskView.vue`（排障提示「使用教程视频」）改指 AI 生成教程。
+
 ## 开发中（2026-09-26 环境状态口径统一）
 
 ### 背景

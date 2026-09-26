@@ -24,7 +24,7 @@ import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
 import { autosaveLabel } from "@/utils/autosave";
 import { formatMtime } from "@/utils/formatters";
-import { TASK_REPO_URL, TUTORIAL_VIDEO_URL } from "@/utils/constants";
+import { TASK_REPO_URL, TUTORIAL_VIDEO_RECORD_URL } from "@/utils/constants";
 import type { ProfileSummary } from "@/api/types";
 
 const t = useTasks();
@@ -526,7 +526,7 @@ onMounted(async () => {
           <div class="card-body tsk-side-body">
             <p class="tsk-side-hint">任务本身不会自动运行：到「方案」页选中它并保存，自动登录才会使用。</p>
             <p class="tsk-side-hint">
-              不想手写 JSON？<button type="button" class="btn btn-link" @click="repo.showRepoImport('browser')">从仓库导入</button>现成任务，或用<a :href="TUTORIAL_VIDEO_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成。
+              不想手写 JSON？<button type="button" class="btn btn-link" @click="repo.showRepoImport('browser')">从仓库导入</button>现成任务，或用<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成。
             </p>
             <p class="tsk-side-hint">步骤类型与字段说明见<a href="/api/docs/task-writing-guide" target="_blank" rel="noopener noreferrer">编写指南</a>。</p>
           </div>

@@ -13,7 +13,7 @@ import { ocrApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import { pickFile } from "@/utils/file";
 import { environmentChecklist } from "@/utils/environmentStatus";
-import { TASK_REPO_URL, TUTORIAL_VIDEO_URL } from "@/utils/constants";
+import { TASK_REPO_URL, TUTORIAL_VIDEO_RECORD_URL } from "@/utils/constants";
 import { useToast } from "@/composables/useToast";
 
 const { busy } = useStatus();
@@ -321,7 +321,7 @@ async function recognizeOcr() {
             </a>
           </div>
           <div class="task-recorder-note">需先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 扩展，再安装录制器脚本；在登录页点击浮动按钮开始录制。</div>
-          <div class="task-recorder-note">不会用？看 <a :href="TUTORIAL_VIDEO_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>；编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
+          <div class="task-recorder-note">不会用？看 <a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>；编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
         </div>
       </div>
     </section>
