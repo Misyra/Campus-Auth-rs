@@ -90,6 +90,10 @@ pub(crate) struct HttpLoginRequest {
     pub username: String,
     /// 登录密码（Zeroizing 保护）
     pub password: Zeroizing<String>,
+    /// 方案的运营商字段（原样透传：预设为「移动/联通/电信」，自定义时为用户输入的
+    /// 关键字，未选择时为空串）。供脚本 `ctx.isp` 与模板 `{isp}` 占位符使用——
+    /// 门户侧的运营商表示法（如 Dr.COM 的 `@cmcc` 后缀）由任务脚本自行映射。
+    pub isp: String,
     /// 认证地址（供脚本 ctx.auth_url 与登录页抓取）
     pub auth_url: String,
     /// 本机主用接口 IPv4（供脚本 ctx.local_ip；取不到时为空串）
@@ -124,6 +128,7 @@ impl HttpLoginRequest {
         task: &HttpTaskConfig,
         username: &str,
         password: &str,
+        isp: &str,
         auth_url: &str,
         fetch_page: bool,
         global_ignore_https_errors: bool,
@@ -144,6 +149,7 @@ impl HttpLoginRequest {
             logout_request: task.logout_request.clone(),
             username: username.trim().to_string(),
             password: Zeroizing::new(password.to_string()),
+            isp: isp.trim().to_string(),
             auth_url: auth_url.trim().to_string(),
             // 本机地址需异步查询网卡，由调用方（持有 MonitorService）按需填充，
             // 见 [`HttpLoginRequest::with_local_address`]
@@ -367,6 +373,9 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let mut vars = BTreeMap::new();
     vars.insert("username".to_string(), req.username.clone());
     vars.insert("password".to_string(), req.password.to_string());
+    // 方案运营商：预设「移动/联通/电信」或自定义关键字原样透传，未选择为空串。
+    // 门户侧的表示法（Dr.COM 的 @cmcc 后缀等）由任务脚本映射，不在引擎里写死
+    vars.insert("isp".to_string(), req.isp.clone());
     vars.insert("auth_url".to_string(), req.auth_url.clone());
     // 本机地址同样注册为占位符：脚本可以不用 ctx 而直接在 URL/body 里写
     // {local_ip}，也能在 transform 中引用；取不到时为空串（脚本须容忍）
@@ -435,6 +444,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             &req.crypto_script,
             &req.username,
             &req.password,
+            &req.isp,
             &req.auth_url,
             (&req.local_ip, &req.local_mac),
             page,
@@ -979,7 +989,7 @@ fn redact_url(url: &str, secrets: &[String]) -> String {
 ///
 /// 契约：脚本需定义 `function transform(ctx)`，返回对象；其字符串/数字/布尔
 /// 字段成为可被模板引用的占位符值。ctx 含
-/// `username/password/auth_url/page/local_ip/local_mac`。
+/// `username/password/isp/auth_url/page/local_ip/local_mac`。
 ///
 /// `local` 为本机主用接口的 (IPv4, MAC)，取不到时均为空串——部分门户（eportal /
 /// Dr.COM）的字段密钥由来源 IP 推导，没有它就只能从页面里找补。
@@ -987,6 +997,7 @@ async fn execute_crypto_script(
     script: &str,
     username: &str,
     password: &Zeroizing<String>,
+    isp: &str,
     auth_url: &str,
     local: (&str, &str),
     page: String,
@@ -994,6 +1005,7 @@ async fn execute_crypto_script(
     let script = script.to_string();
     let username = username.to_string();
     let password = Zeroizing::new(password.to_string());
+    let isp = isp.to_string();
     let auth_url = auth_url.to_string();
     let local_ip = local.0.to_string();
     let local_mac = local.1.to_string();
@@ -1001,7 +1013,7 @@ async fn execute_crypto_script(
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let result = run_script_in_sandbox(
-            &script, &username, &password, &auth_url, &local_ip, &local_mac, page,
+            &script, &username, &password, &isp, &auth_url, &local_ip, &local_mac, page,
         );
         // 接收端已超时丢弃时发送失败，静默即可
         let _ = tx.send(result);
@@ -1023,6 +1035,7 @@ fn run_script_in_sandbox(
     script: &str,
     username: &str,
     password: &Zeroizing<String>,
+    isp: &str,
     auth_url: &str,
     local_ip: &str,
     local_mac: &str,
@@ -1045,6 +1058,7 @@ fn run_script_in_sandbox(
         &json!({
             "username": username,
             "password": password.as_str(),
+            "isp": isp,
             "auth_url": auth_url,
             "page": page,
             "local_ip": local_ip,
@@ -1238,6 +1252,7 @@ mod tests {
             logout_request: None,
             username: "abc".into(),
             password: Zeroizing::new("abcdef".into()),
+            isp: String::new(),
             auth_url: "http://portal.example/login".into(),
             local_ip: String::new(),
             local_mac: String::new(),
@@ -1359,7 +1374,7 @@ mod tests {
     fn from_task_rejects_empty_url() {
         let task = HttpTaskConfig::default();
         // HttpLoginRequest 未派生 Debug（内含 Zeroizing 凭据），故不能用 expect_err/unwrap_err
-        let err = match HttpLoginRequest::from_task(&task, "u", "p", "", false, true) {
+        let err = match HttpLoginRequest::from_task(&task, "u", "p", "", "", false, true) {
             Ok(_) => panic!("空地址必须被拒"),
             Err(e) => e,
         };
@@ -1371,7 +1386,7 @@ mod tests {
             url: "   ".into(),
             ..HttpTaskConfig::default()
         };
-        assert!(HttpLoginRequest::from_task(&blank, "u", "p", "", false, true).is_err());
+        assert!(HttpLoginRequest::from_task(&blank, "u", "p", "", "", false, true).is_err());
     }
 
     /// 证书策略缺省解析：任务未设置时跟随全局（与浏览器渠道同口径），
@@ -1383,10 +1398,10 @@ mod tests {
             ..HttpTaskConfig::default()
         };
 
-        let followed = HttpLoginRequest::from_task(&task, "u", "p", "", false, true).unwrap();
+        let followed = HttpLoginRequest::from_task(&task, "u", "p", "", "", false, true).unwrap();
         assert!(followed.ignore_https_errors, "未设置时应跟随全局 true");
 
-        let followed_strict = HttpLoginRequest::from_task(&task, "u", "p", "", false, false)
+        let followed_strict = HttpLoginRequest::from_task(&task, "u", "p", "", "", false, false)
             .expect("全局 false 同样可构成合法请求");
         assert!(
             !followed_strict.ignore_https_errors,
@@ -1398,7 +1413,8 @@ mod tests {
             ignore_https_errors: Some(false),
             ..task.clone()
         };
-        let overridden = HttpLoginRequest::from_task(&strict, "u", "p", "", false, true).unwrap();
+        let overridden =
+            HttpLoginRequest::from_task(&strict, "u", "p", "", "", false, true).unwrap();
         assert!(!overridden.ignore_https_errors, "任务显式设置必须覆盖全局");
     }
 
@@ -1420,6 +1436,7 @@ mod tests {
             &task,
             " 20230001 ",
             "pw",
+            " 移动 ",
             " http://10.0.0.1/ ",
             true,
             true,
@@ -1434,6 +1451,7 @@ mod tests {
         assert!(req.uses_crypto_script());
         assert_eq!(req.username, "20230001", "账号须 trim");
         assert_eq!(req.password.as_str(), "pw");
+        assert_eq!(req.isp, "移动", "运营商须 trim");
         assert_eq!(req.auth_url, "http://10.0.0.1/", "认证地址须 trim");
         assert!(req.fetch_page, "抓页开关由调用方决定（测试端点可关）");
     }
@@ -1485,6 +1503,7 @@ mod tests {
             "function transform(ctx) { return { digest: md5(ctx.password), encoded: url_encode(ctx.password), flag: true, count: 2 }; }",
             "user",
             &password,
+            "",
             "http://portal.example/",
             "",
             "",
@@ -1507,6 +1526,7 @@ mod tests {
             "",
             "",
             "",
+            "",
             String::new(),
         )
         .unwrap_err();
@@ -1522,6 +1542,7 @@ mod tests {
             "function transform(ctx) { return { ip: ctx.local_ip, mac: ctx.local_mac }; }",
             "user",
             &password,
+            "",
             "http://portal.example/",
             "10.20.30.40",
             "00:1a:2b:3c:4d:5e",
@@ -1530,6 +1551,25 @@ mod tests {
         .unwrap();
         assert_eq!(values["ip"], "10.20.30.40");
         assert_eq!(values["mac"], "00:1a:2b:3c:4d:5e");
+    }
+
+    /// ctx 暴露方案运营商（原样透传，门户侧表示法由任务脚本映射——Dr.COM
+    /// eportal 的 @cmcc 后缀类任务依赖它把方案的「移动/联通/电信」转成后缀）。
+    #[test]
+    fn script_ctx_exposes_profile_isp() {
+        let password = Zeroizing::new("pw".to_string());
+        let values = run_script_in_sandbox(
+            "function transform(ctx) { return { suffix: ctx.isp === \"移动\" ? \"@cmcc\" : ctx.isp }; }",
+            "user",
+            &password,
+            "移动",
+            "http://portal.example/",
+            "",
+            "",
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(values["suffix"], "@cmcc");
     }
 
     /// 取不到本机地址时 ctx 字段为空串（而非 undefined/报错），脚本据此可
@@ -1541,6 +1581,7 @@ mod tests {
             "function transform(ctx) { return { ip: ctx.local_ip, hasIp: ctx.local_ip.length > 0 }; }",
             "user",
             &password,
+            "",
             "",
             "",
             "",
@@ -2150,7 +2191,7 @@ mod tests {
             }),
             ..HttpTaskConfig::default()
         };
-        let req = HttpLoginRequest::from_task(&task, "u", "p", "", false, true).unwrap();
+        let req = HttpLoginRequest::from_task(&task, "u", "p", "", "", false, true).unwrap();
         let logout = req.logout_request.expect("logout_request 必须被映射");
         assert_eq!(logout.url, "http://10.0.0.1/logout");
         assert!((logout.wait_secs - 1.0).abs() < f64::EPSILON);
@@ -2161,7 +2202,7 @@ mod tests {
             ..HttpTaskConfig::default()
         };
         assert!(
-            HttpLoginRequest::from_task(&plain, "u", "p", "", false, true)
+            HttpLoginRequest::from_task(&plain, "u", "p", "", "", false, true)
                 .unwrap()
                 .logout_request
                 .is_none()

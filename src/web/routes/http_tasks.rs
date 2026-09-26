@@ -156,6 +156,12 @@ pub async fn test_http_task(
         &task,
         &body.username,
         password.as_str(),
+        // 运营商跟随方案（测试面板的账号可覆盖、运营商不单独提供）：与正式登录同口径
+        profile_runtime
+            .as_ref()
+            .map(|runtime| runtime.profile.isp.trim().to_string())
+            .unwrap_or_default()
+            .as_str(),
         &auth_url,
         body.fetch_page,
         ignore_https_errors,

@@ -146,13 +146,14 @@ export function httpTestOutcomeHint(outcome: string | undefined): string {
 /**
  * 请求地址 / 请求头 / 请求体可用的模板占位符。
  *
- * 前四类是执行器内置字段，其余为凭据变换脚本 `transform()` 的返回字段
+ * 前五类是执行器内置字段，其余为凭据变换脚本 `transform()` 的返回字段
  * （脚本返回同名键会覆盖内置值）。契约见 `src/login/http_login.rs` 的
  * `run_once`（内置 vars）与 `substitute`（未知占位符原样保留）。
  */
 export const HTTP_TEMPLATE_PLACEHOLDERS = [
   "{username}",
   "{password}",
+  "{isp}",
   "{auth_url}",
   "{local_ip}",
   "{local_mac}",
@@ -180,6 +181,8 @@ export const HTTP_CRYPTO_BUILTINS = [
 /**
  * `transform()` 的 `ctx` 参数字段（与执行器的 `JsValue::from_json` 构造一一对应）。
  *
+ * `isp` 为方案的运营商字段原样透传（预设「移动/联通/电信」或自定义关键字，
+ * 未选择为空串），门户侧的表示法（Dr.COM 的 @cmcc 后缀等）由脚本自行映射；
  * `page` 为认证页原文（抓取失败时为空串）；`local_ip` / `local_mac` 为本机主用
  * 接口地址，取不到时为空串，脚本必须容忍——eportal / Dr.COM 类门户的字段密钥
  * 由来源 IP 推导，没有它就只能退回从 `page` 里找补。
@@ -187,6 +190,7 @@ export const HTTP_CRYPTO_BUILTINS = [
 export const HTTP_CRYPTO_CTX_FIELDS = [
   "username",
   "password",
+  "isp",
   "auth_url",
   "page",
   "local_ip",

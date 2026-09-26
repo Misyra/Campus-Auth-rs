@@ -402,6 +402,7 @@ function fillScriptSkeleton(): void {
               脚本需定义 <code>transform(ctx)</code>，返回对象的字段可直接用
               <code>{字段名}</code> 引用。没有网络与文件访问能力，执行上限 500 毫秒；
               <code>page</code>、<code>local_ip</code>、<code>local_mac</code> 取不到时是空串，脚本要能容忍。
+              <code>isp</code> 是方案的运营商字段（未选择时为空串），门户侧写法由脚本映射。
             </p>
             <p class="wz-note">{{ HTTP_MAC_FORMAT_NOTE }}</p>
           </div>

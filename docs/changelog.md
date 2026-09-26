@@ -2,6 +2,46 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-26 直连渠道 ISP 支持）
+
+### 背景
+
+- 任务仓库新增景德镇陶瓷大学（Dr.COM eportal）直连任务需要把方案的运营商映射为门户账号后缀（`@cmcc` 等）；此前 ISP 只有浏览器渠道可用（`build_worker_config` 下发给 Worker），直连请求拿不到。引擎**不做任何写死映射**：`isp` 原样透传，门户侧表示法由任务凭据变换脚本自行映射。
+
+### 登录
+
+- `login/http_login.rs`：`HttpLoginRequest` 增加 `isp` 字段（方案运营商原样透传，未选择为空串），`from_task` 增加 `isp` 参数；`{isp}` 注册为内置模板占位符（下线请求 / 前置请求同样可用），凭据变换脚本 `ctx` 增加 `isp` 键。
+- 调用点同步：正式登录（`login/mod.rs`）传 `profile.isp`；直连测试端点（`web/routes/http_tasks.rs`）跟随方案 isp（测试面板的账号可覆盖、运营商不单独提供，与正式登录同口径）。
+- 测试：`ctx.isp` 透传、`from_task` 映射与 trim 断言（http_login 模块 33 用例全过；全仓 1119 过）。
+
+### 前端 / 文档
+
+- `loginChannel.ts`：`HTTP_TEMPLATE_PLACEHOLDERS` 增加 `{isp}`、`HTTP_CRYPTO_CTX_FIELDS` 增加 `isp`；任务编辑器（HttpTaskFields）与直连向导（HttpLoginWizard）的脚本文案同步说明 isp 的语义与映射责任。
+- `docs/guides/http-login-guide.md`：占位符表、前置请求与退出登录请求的内置占位符清单补 `{isp}`。
+
+## 开发中（2026-09-25 首次启动配置向导）
+
+### 背景
+
+- 用户需求：首次启动除协议确认外，追加一份分步配置向导——选登录方式 →（浏览器渠道）Python/浏览器环境准备 → 输入学校名并对两个任务仓库测速、择优拉索引做关键词匹配 → 有匹配提示导入（复用仓库导入 UI）、无匹配回退默认任务 → 完成时切换到调试模式并提示后续操作路径；直连渠道走同一流程。存量用户处理口径经确认：**仅全新安装显示**（同意协议即视为配置完成，中途退出不再续显）。
+
+### 前端
+
+- `SetupWizard.vue`：由单页协议确认重构为五步向导（协议 → 登录方式 → 环境准备 → 任务匹配 → 完成），沿用全屏阻断 + `!agreed` 显隐门槛；步骤条交互对齐 `HttpLoginWizard`（已到达可回看、未到达禁用）。协议步保留原文案，同意改走 `agreeWizardTerms`（写 `.agreed` 但不关向导）；环境准备步仅浏览器渠道显示（直连免 Python/浏览器），Python 侧采用 fire-and-forget `POST /api/environment/bootstrap` + 2s 轮询 `init-status` 的 stage/progress（同步端点最长可达数十分钟不能 await），浏览器侧复用 `GET /api/browsers` 探测/选择 + `POST /api/install/playwright` 安装，选择与 `useRunMode` 同口径整段 PATCH 后回读。
+- 登录渠道切换遵循 `validate_login_task_binding` 合并态校验：浏览器渠道在方式步即时写 `login_channel`；直连渠道延后到任务导入成功后与 `active_http_task` **同一次** PATCH（新增 `configApi.patchProfileBinding` 承载方案域直改），无匹配导入时经确认保持浏览器渠道并在完成步如实展示。
+- 任务匹配步：新增 `utils/repoSpeed.ts`——对 GitHub/Gitee 两个预设镜像源并行计时拉索引（复用 `GET /api/repo/fetch` 代理链路），`pickFastestSource` 选成功且最快者（全失败提示离线可重试）；匹配口径抽为 `useRepoImport.filterRepoTasks` 纯函数与弹窗共用（连续子串 includes，name/description/author/tags）。有匹配列出条目并打开复用的 `RepoImportModals`（预置胜出源 + 关键词 + 自动拉索引），导入经 `afterImport` 回调绑定方案（浏览器绑 `active_task`，直连同提交渠道+绑定）并自动进入完成步，不跳编辑器；无匹配时浏览器渠道提示回退内置默认任务，直连渠道提示可浏览全部任务或稍后再配。
+- 完成步自动应用「调试模式」预设（`useRunMode.applyRunMode("debug")`），展示后续指引（方案页填凭据 → 设置·系统切回默认模式）；第 2 步起提供「跳过向导」。
+- 新增 `components/common/BrowserIcon.vue`：按 channel 渲染 `public/icons/` 的品牌 SVG（chromium/msedge/chrome/firefox/webkit，未收录渠道回退通用图标），向导浏览器列表与「设置 · 浏览器」卡片共用（原先设置页内联的 v-if 链收敛到此，新增渠道图标只改一处）。
+- `useRepoImport.ts`：`showRepoImport` 新增可选 `opts`（`source`/`keyword`/`autoFetch`/`afterImport`），`afterImport` 存在时导入收尾不打开编辑器不跳路由（回调失败仍如实提示「任务已导入但后续配置失败」）；`fetchRepoIndex` 新增 `keepSearch`（预置关键词不被拉取复位）。
+- `useUi.ts`：`finishWizard` 拆为 `agreeWizardTerms()`（返回成功与否）+ `closeWizard()`。
+- 样式：`wizard.css` 增补步骤条/渠道卡/环境清单/浏览器列表/测速结果/匹配列表/完成步样式（窄屏单列适配）。
+- 任务匹配步视觉与无匹配引导优化（实测反馈）：学校名输入框接入全局 `.form-group` 皮肤（此前裸 input 无边框圆角，观感突兀）；无匹配提示重构为结构化面板——「当前无适配『X』的任务」+ 选项列表（浏览器渠道含「尝试默认任务」「尝试自定义任务」，直连渠道仅后者）+「详细请查看文档」链接（浏览器→`/docs/tasks/browser` 新增 `DOCS.taskBrowser`，直连→既有 `httpLogin`，排障→`faqLogin`；`/docs/tasks/browser` 已对文档站导航核实）+「浏览全部任务」按钮（两渠道均提供）。
+- 测试：新增 `utils/repoSpeed.test.ts`（选源 9 例 + 测速 4 例）；`useRepoImport.test.ts` 增补向导预置打开、afterImport 接管/失败语义与 `filterRepoTasks` 用例。注意：匹配为连续子串 includes，缩写（如「电子科大」）不是全名子串——用例中已注释说明。
+
+### 文档
+
+- `docs/guides/user-guide.md`：增补「首次启动向导」小节（五步流程、调试模式含义与切回路径、跳过语义）。
+
 ## 开发中（2026-09-25 全项目功能 Bug 审查修复）
 
 ### 背景
