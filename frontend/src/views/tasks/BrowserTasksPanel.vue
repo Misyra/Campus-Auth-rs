@@ -208,6 +208,17 @@ const jsonValid = computed(
 /** 内置默认任务是浏览器渠道的兜底（未绑定方案时用它），不可删除 */
 const isDefaultTask = computed(() => currentId.value === "default");
 
+/**
+ * 内置默认任务没被任何方案显式绑定时显示的状态徽章（列表「绑定方案」列与编辑态
+ * 侧栏同一份文案）。
+ *
+ * default 即使零引用也**在用**——浏览器渠道未绑定任务时回退它。照普通任务渲染成
+ * 「未绑定」会把"没有方案显式引用"读成"这条任务没人用"，与编辑页「内置默认任务」
+ * 的说明直接矛盾；徽章代替绑定 pills 回答"它实际会不会被用到"。
+ */
+const DEFAULT_FALLBACK_BADGE_TEXT = "内置兜底";
+const DEFAULT_FALLBACK_BADGE_TITLE = "方案未选中任何任务时，浏览器登录会回退使用这个内置默认任务";
+
 onMounted(async () => {
   await t.fetchTasks();
   // 目录就绪后再消费 ?task=<id>：未就绪时不判定"任务不存在"（见 useTaskEditorQuery）
@@ -330,6 +341,11 @@ onMounted(async () => {
               <template v-else-if="bindingIndex.get(task.id)?.length">
                 <span v-for="name in bindingIndex.get(task.id)" :key="name" class="badge badge--sm badge--success">{{ name }}</span>
               </template>
+              <span
+                v-else-if="task.id === 'default'"
+                class="badge badge--sm badge--info"
+                :title="DEFAULT_FALLBACK_BADGE_TITLE"
+              >{{ DEFAULT_FALLBACK_BADGE_TEXT }}</span>
               <span v-else class="tsk-muted">未绑定</span>
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(task.modified_at) }}</span></td>
@@ -515,6 +531,11 @@ onMounted(async () => {
                   <span v-for="name in bindingIndex.get(currentId)" :key="name" class="badge badge--sm badge--success">{{ name }}</span>
                 </template>
                 <span v-else-if="!bindingsReady" class="tsk-muted">—</span>
+                <span
+                  v-else-if="isDefaultTask"
+                  class="badge badge--sm badge--info"
+                  :title="DEFAULT_FALLBACK_BADGE_TITLE"
+                >{{ DEFAULT_FALLBACK_BADGE_TEXT }}</span>
                 <span v-else class="tsk-muted">尚未被任何方案引用</span>
               </dd>
             </dl>
