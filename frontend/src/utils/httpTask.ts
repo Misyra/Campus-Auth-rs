@@ -77,7 +77,9 @@ export function emptyHttpTaskDraft(): HttpTaskDraft {
     body: "",
     success_pattern: "",
     failure_pattern: "",
-    success_check: "response",
+    // 新任务默认网络检测：不看响应内容，以登录后能否上外网作为成功判据——
+    // 响应格式拿不准的门户（大多数）开箱即用；响应关键字作为可选项保留
+    success_check: "network",
     crypto_script: "",
     pre_request_method: "GET",
     pre_request_url: "",

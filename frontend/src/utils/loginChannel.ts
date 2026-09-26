@@ -84,10 +84,12 @@ export const HTTP_CERT_POLICY_OPTIONS: Array<{ value: HttpCertPolicy; label: str
   { value: "strict", label: "严格校验证书" },
 ];
 
-/** 直连成败判定方式选项（CustomSelect 消费；取值与后端 `HttpSuccessCheck` 同源） */
+/** 直连成败判定方式选项（CustomSelect 消费；取值与后端 `HttpSuccessCheck` 同源）。
+ * 新任务默认「网络检测」（见 httpTask.emptyHttpTaskDraft）；已有任务里未写
+ * `success_check` 键的仍按后端 serde default 走「响应关键字」，行为不变 */
 export const HTTP_SUCCESS_CHECK_OPTIONS: Array<{ value: HttpSuccessCheck; label: string }> = [
-  { value: "response", label: "响应关键字（默认）" },
   { value: "network", label: "网络检测" },
+  { value: "response", label: "响应关键字" },
 ];
 
 /**

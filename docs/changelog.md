@@ -15,7 +15,8 @@
 
 ### 前端 / 文档
 
-- 直连任务编辑器第 3 步新增「判定方式」下拉（`loginChannel.HTTP_SUCCESS_CHECK_OPTIONS`，CustomSelect 消费）；草稿互转（`httpTask.ts`）与类型（`types.ts`）同步，老配置缺键按 `response` 兜底；`http-login-guide.md` §3.4 增补判定方式说明。
+- 直连任务编辑器第 3 步新增「判定方式」下拉（`loginChannel.HTTP_SUCCESS_CHECK_OPTIONS`，CustomSelect 消费）；草稿互转（`httpTask.ts`）与类型（`types.ts`）同步，已有任务里缺键按 `response` 兜底；`http-login-guide.md` §3.4 增补判定方式说明。
+- 按用户反馈调整：**新任务默认「网络检测」**（`emptyHttpTaskDraft`；后端 serde default 仍为 `response`——已有任务里未写该键的语义不变），且网络检测模式下隐藏成功/失败关键字输入（响应内容不参与成功判定，此前填过的失败关键字仍留在配置里生效，切回响应关键字即恢复显示）。
 
 ## 开发中（2026-09-26 直连渠道 ISP 支持）
 
