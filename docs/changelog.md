@@ -1,6 +1,17 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.1.0”。
+
+## 开发中（2026-09-27 向导登录方式卡文案与图标优化）
+
+### 前端
+
+- 首次配置向导「登录方式」步两张渠道卡改为讲清各自登录原理：浏览器自动化 = 「使用浏览器自动化进行登录，模拟实际的登录流程」；直连请求 = 「直接使用 GET/POST 请求进行登录，可能需要逆向前端」（原两行环境/适用场景说明移除，环境要求仍由向导「环境准备」步与方案页渠道卡承载）。
+- 渠道图标语义化：`IconApp` 注册表新增 `window-cursor`（浏览器窗口 + 光标，自动化"替人操作页面"）与 `send`（纸飞机，直接发送请求）；向导与方案页渠道卡、方案列表徽标（`loginChannelIcon()` 单一事实源）同步换用——原 `chrome`（简化的 Chrome 圆圈，视觉近似瞄准镜）与 `globe`（泛网络语义）不再用于渠道标识，其余使用处（浏览器设置、导航、系统设置等）保持不变。`loginChannel.test.ts` 钉住项同步更新。
+
+### 验证
+
+- `vitest` 475 通过（41 文件）；`vue-tsc` + `vite build` 通过；release 包重打并冒烟（`--version` / `--status`）。
 
 ## 开发中（2026-09-26 文档过期内容与临时产物清理）
 
@@ -1106,6 +1117,22 @@
 - `cargo fmt` 零差异；`cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --features no-embed --lib` 全绿（**993 passed / 0 failed / 1 ignored**）。
 - 新增测试：`models.rs` 的 `logout_request_roundtrip_and_defaults`（serde 往返 + 缺省 + 未配置不落盘）、`logout_request_validate_checks_url_shape_and_wait`（地址 / 等待钳制）；`http_login.rs` 的 `logout_request_is_sent_before_login_request`（专用记录型 mock 门户断言下线先于登录、同连接、占位符渲染）、`logout_request_failure_does_not_block_login`（下线网络失败登录照常成功）、`from_task_carries_logout_request`（任务 → 执行参数映射）、`validate_logout_request_rejects_oversized_fields`（体积闸）。
 - 前端 `npm run typecheck` / `npm run build` 通过。
+
+## v5.1.0（2026-09-27 正式版发布）
+
+自 `v5.0.2`（`f9ae50a`）起共 44 个提交，功能改动（直连任务独立化与前置 / 退出登录请求、自定义脚本渠道、首次启动配置向导、任务页四面板重构与自动保存、卸载流程落地、AI 生成页与调试面板增强、Host 头校验与全项目审计 P2 批量修复、向导登录方式卡文案与图标优化等）逐项记录见上方各「开发中」条目，本节只登记版本与文档同步。
+
+### 版本提升
+
+- 主程序版本由 `5.0.2` 提升为 `5.1.0`，同步 `Cargo.toml`、`Cargo.lock`、`frontend/package.json`、`frontend/package-lock.json`、`openapi.json`（`info.version`，路径表未变）。
+- 引用版本号的文档同步：`AGENTS.md`、`docs/plan-next.md`、`README.md` 与 `docker/README.md`（Docker 固定版本示例 `ghcr.io/misyra/campus-auth-rs:v5.1.0`）、`docs/guides/user-guide.md`、本文件头。
+- `docs/updatelog.md` 的「尚未发布（开发中）」段落冻结为 `## v5.1.0（2026-09-27）` 发布章节，并补入 Host 头校验与全项目审计 P2 批量修复的用户可感知条目（此前两批修复仅记录在本文件）；经 `release.yml:197` 同款 awk 前缀边界提取验证：`v5.1.0` 精确命中该章节且不含相邻的 `v5.0.2` 正文。
+- Python Worker 版本独立固定为 `1.0.0`，不随本次提升变动。
+
+### 验证
+
+- `cargo fmt --check` 零差异；`cargo clippy --all-targets -- -D warnings` 零警告；`cargo test --lib` 全绿（1086 passed / 0 failed / 1 ignored，含 2 个 09-26 新增回归测试）。
+- 前端 `vitest` 475 通过（41 文件）；`vue-tsc` + `vite build` 通过；release 便携包本地重打并冒烟（`--version` / `--status`）。
 
 ## v5.0.2（2026-09-20 正式版发布）
 
