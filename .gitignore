@@ -96,6 +96,8 @@ issues-report.md
 # 新报告写入 /docs/reports/；历史报告已删除，有效结论只在 known-issues / plan-next
 /docs/reports/
 /docs/compose/
+# 项目介绍演示页（纯本地展示用，历史版本见 changelog 2026-09-21 条目）
+/docs/promo/
 /docs/bugreporter/
 /docs/bugreporter-*
 /docs/*-audit-*.md
