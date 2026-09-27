@@ -620,7 +620,16 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        let dead = SocketAddr::new("127.0.0.2".parse().unwrap(), live.port());
+        // 死地址不用 127.0.0.2 这类"未分配的环回地址"：macOS CI 上对它的连接会
+        // 黑洞（不回 RST）直至超时，Linux 则立即拒绝。改用 127.0.0.1 上刚关闭的
+        // 端口——无监听端口在所有平台都立即 ECONNREFUSED，「首个已校验地址不可达
+        // → 回退下一地址」的钉扎语义不变。
+        let dead_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = SocketAddr::new(
+            "127.0.0.1".parse().unwrap(),
+            dead_listener.local_addr().unwrap().port(),
+        );
+        drop(dead_listener);
         let client = build_pinned_client("portal.example.com", &[dead, live], true).unwrap();
         let response = tokio::time::timeout(
             Duration::from_secs(3),
