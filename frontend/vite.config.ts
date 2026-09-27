@@ -12,10 +12,16 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:50721",
+      // changeOrigin: 后端启用 Host 头校验（DNS rebinding 防线，web::host），
+      // 代理默认保留原始 Host（localhost:5173）会被拒，需改写为 target
+      "/api": {
+        target: "http://127.0.0.1:50721",
+        changeOrigin: true,
+      },
       "/ws": {
         target: "ws://127.0.0.1:50721",
         ws: true,
+        changeOrigin: true,
       },
     },
   },

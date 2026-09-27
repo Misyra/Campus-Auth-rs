@@ -10,6 +10,9 @@
 //! - 启动时生成并持久化到 `config/.auth_token`（仅当前用户可读的目录内）；
 //! - 前端通过 `GET /api/auth/token` 获取：跨域恶意网页虽能发送该请求，
 //!   但响应读取受 CORS 限制（仅放行 localhost Origin），无法获得 token；
+//! - DNS rebinding 可把恶意网页与本地服务「同源化」绕开 CORS——该路径由
+//!   独立的 Host 头校验防线兜住（见 `web::host` 模块说明），回环绑定下
+//!   攻击者域名的 Host 与白名单不匹配即被拒，token 端点因此保持免鉴权；
 //! - 本机同用户进程可读取 token 文件——这与"能直接读配置/杀进程"的
 //!   权限等价，不构成额外暴露面。
 
@@ -100,7 +103,8 @@ pub fn read_token_file(base_path: &Path) -> Option<String> {
 /// GET /api/auth/token — 向前端发放鉴权 token
 ///
 /// 响应读取受 CORS 保护（仅 localhost Origin 可读），跨域恶意网页
-/// 无法获取 token，因此该端点可以豁免鉴权开放。
+/// 无法获取 token；DNS rebinding 的同源化路径由 Host 头校验拦截
+/// （web::host），因此该端点可以豁免鉴权开放。
 pub async fn token_handler(State(state): State<AppState>) -> Response {
     let mut response = data(serde_json::json!({ "token": &*state.auth_token })).into_response();
     response.headers_mut().insert(
@@ -159,7 +163,7 @@ fn token_from_query(query: Option<&str>) -> Option<&str> {
 /// 豁免规则：
 /// - 非 `/api`、`/ws` 前缀（静态资源 / openapi.json）
 /// - `OPTIONS` 请求（CORS 预检不携带自定义头）
-/// - `/api/auth/token`（token 发放端点，受 CORS 读保护）
+/// - `/api/auth/token`（token 发放端点，CORS 读保护 + Host 校验双防线）
 /// - `/api/health`（无信息量的存活探测）
 /// - `GET /api/system/info` / `GET /api/monitor/status`（B 方案只读状态开放，轮询/探活）
 /// - `GET /api/background/*`（CSS `url()` / `<img>` 引用无法携带自定义头，

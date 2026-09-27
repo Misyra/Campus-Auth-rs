@@ -5,7 +5,7 @@
 //! - `start_axum()`：组装 Router → serve → 记录运行端口
 //! - `stop_axum()`：优雅关闭
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::container::ServiceContainer;
+use crate::web::host::HostPolicy;
 use crate::web::state::{AppState, LogEntry};
 
 /// WebSocket 通用事件通道容量
@@ -67,6 +68,8 @@ pub struct PreparedAxumListener {
     listener: TcpListener,
     /// 实际监听端口
     pub port: u16,
+    /// 实际绑定地址（决定 Host 头校验策略，见 `web::host::HostPolicy`）
+    pub bind_ip: IpAddr,
 }
 
 /// 构建完整 Router（含中间件、State 注入、路由挂载）
@@ -74,6 +77,7 @@ pub fn build_router(
     container: Arc<ServiceContainer>,
     log_tx: broadcast::Sender<LogEntry>,
     shutdown_tx: tokio::sync::watch::Sender<()>,
+    host_policy: HostPolicy,
 ) -> anyhow::Result<axum::Router> {
     // 通用 WebSocket 事件通道（screenshot / step_progress 等），供 Bridge 推送
     let (ws_tx, _) = broadcast::channel::<String>(WS_EVENT_CAPACITY);
@@ -81,7 +85,14 @@ pub fn build_router(
     container.bridge.set_event_tx(ws_tx.clone());
     // 本地 API 鉴权 token：加载或生成并持久化到 config/.auth_token
     let auth_token = crate::web::auth::load_or_create_token(&container.config.base_path())?;
-    let state = AppState::new(container, log_tx, ws_tx, shutdown_tx, auth_token.into());
+    let state = AppState::new(
+        container,
+        log_tx,
+        ws_tx,
+        shutdown_tx,
+        auth_token.into(),
+        host_policy,
+    );
 
     // CORS 与 gzip 均由内层 `web::build_router` 统一处理（历史遗留 #16）：
     // 此处不再叠加 CompressionLayer，避免双层 gzip 判定（外层因 `Content-Encoding`
@@ -149,6 +160,7 @@ pub async fn prepare_axum_listener(
     Ok(PreparedAxumListener {
         listener,
         port: actual_port,
+        bind_ip,
     })
 }
 
@@ -160,9 +172,16 @@ pub fn start_axum_with_listener(
     log_tx: broadcast::Sender<LogEntry>,
     prepared: PreparedAxumListener,
 ) -> anyhow::Result<AxumServeHandle> {
-    let PreparedAxumListener { listener, port } = prepared;
+    let PreparedAxumListener {
+        listener,
+        port,
+        bind_ip,
+    } = prepared;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-    let router = build_router(container.clone(), log_tx, shutdown_tx)?;
+    // Host 校验策略随绑定地址推导：回环绑定强制校验（阻断 DNS rebinding），
+    // Docker/LAN 显式暴露跳过（见 web::host）
+    let host_policy = HostPolicy::from_bind_ip(bind_ip);
+    let router = build_router(container.clone(), log_tx, shutdown_tx, host_policy)?;
 
     // Router 构建成功后才发布运行端口，避免 auth token 等初始化失败时留下
     // “已有 Web 服务”的陈旧端口记录。

@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod host;
 mod operations;
 mod routes;
 mod ssrf;
@@ -403,6 +404,9 @@ pub fn build_router(state: AppState) -> Router {
     // CORS：仅放行本机 Origin（开发期 Vite dev server 与生产同源均覆盖）。
     // 此前使用 mirror_request 镜像任意 Origin，等于允许任意网站跨域读写
     // 本地 API（配合无鉴权可触发删除任务、关闭应用等危险操作）。
+    // 注意 CORS 只防「跨源读」：DNS rebinding 把攻击者域名解析到 127.0.0.1
+    // 后请求同源化，CORS 失效——回环绑定下的 Host 头校验（host 模块）补足
+    // 这条路径。
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _| {
             let s = origin.to_str().unwrap_or("");
@@ -416,6 +420,9 @@ pub fn build_router(state: AppState) -> Router {
     // Gzip 压缩
     let compression = CompressionLayer::new();
 
+    // Host 校验策略随 AppState 注入（监听绑定回环时强制校验，Docker/LAN 跳过）
+    let host_policy = state.host_policy;
+
     Router::new()
         .merge(api)
         // WebSocket
@@ -424,6 +431,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/openapi.json", get(static_files::openapi_handler))
         // 静态文件（所有未匹配路由 → SPA 回退）
         .fallback(static_files::handler)
+        // Host 头校验：阻断 DNS rebinding（绑定回环时生效，详见 web::host）
+        .layer(middleware::from_fn(move |req, next| {
+            host::validate_host(host_policy, req, next)
+        }))
         // 本地 API 鉴权：所有 /api/* 与 /ws/* 请求必须携带有效 token，
         // 防止本地恶意网页（CSRF）与其他进程调用危险接口
         .layer(middleware::from_fn_with_state(

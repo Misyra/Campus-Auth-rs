@@ -65,6 +65,9 @@ pub struct AppState {
     pub shutdown_tx: watch::Sender<()>,
     /// 本地 API 鉴权 token（见 `web::auth` 模块说明）
     pub auth_token: Arc<str>,
+    /// Host 头校验策略（见 `web::host` 模块说明；由监听绑定地址推导，
+    /// 回环绑定强制校验以阻断 DNS rebinding，Docker/LAN 显式暴露时跳过）
+    pub host_policy: super::host::HostPolicy,
     /// Web 长操作生命周期登记（AI 单飞、OCR 并发取消与卸载排空）
     pub(crate) operations: Arc<WebOperations>,
 }
@@ -77,6 +80,7 @@ impl AppState {
         ws_tx: broadcast::Sender<String>,
         shutdown_tx: watch::Sender<()>,
         auth_token: Arc<str>,
+        host_policy: super::host::HostPolicy,
     ) -> Self {
         // 细粒度依赖从容器抽出（trait object 化），handler 不再触达 container
         let history: Arc<dyn HistoryStore> = container.history.clone();
@@ -111,6 +115,7 @@ impl AppState {
             ws_tx,
             shutdown_tx,
             auth_token,
+            host_policy,
             operations: Arc::new(WebOperations::new()),
         }
     }
