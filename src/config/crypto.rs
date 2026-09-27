@@ -385,11 +385,13 @@ impl PasswordCrypto {
         let mut arr = [0u8; KEY_LEN];
         arr.copy_from_slice(&bytes);
         tracing::info!("检测到 Python 旧版密钥，已继承（新旧版本密码互通）");
-        // 写入 `.enc_key.rs`，后续统一从该文件读取；写入失败不阻断（内存中已持有密钥）
+        // 写入 `.enc_key.rs`，后续统一从该文件读取；写入失败不阻断（内存中已持有密钥）。
+        // 原子写（tmp + fsync + rename）：密钥半写损坏会让全部 ENC: 密文永久不可解
+        // （下次启动按长度校验失败换新钥），必须与配置文件同等的落盘保证
         if let Some(parent) = key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match std::fs::write(key_path, arr.as_ref()) {
+        match crate::utils::io::atomic_write_bytes(key_path, arr.as_ref()) {
             Ok(()) => Self::set_key_permissions(key_path),
             Err(e) => tracing::warn!("写入继承密钥到 {} 失败: {e}", key_path.display()),
         }
@@ -417,7 +419,9 @@ impl PasswordCrypto {
         if let Some(parent) = key_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(key_path, key.as_ref())?;
+        // 原子写（tmp + fsync + rename）：就地 std::fs::write 半写损坏的密钥
+        // 会让全部 ENC: 密文永久不可解（下次启动按长度校验失败换新钥）
+        crate::utils::io::atomic_write_bytes(key_path, key.as_ref())?;
         // 首次生成新密钥属关键安全事件：旧密文（若有）此后均不可解，必须留痕
         tracing::info!(
             path = %key_path.display(),

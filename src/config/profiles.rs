@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::config::schema::{LoginChannel, ProfileData};
 use crate::config::service::ConfigService;
 use crate::config::service::is_valid_profile_id;
-use crate::config::{ConfigError, ConfigReloadSignal};
+use crate::config::{ConfigError, ConfigReloadSignal, ProfileMergeFn};
 
 /// Profile 摘要（不含密码），用于列表展示
 #[derive(Debug, Clone, serde::Serialize)]
@@ -70,6 +70,31 @@ pub trait ProfileApi: Send + Sync {
         data: ProfileData,
         clear_password: bool,
     ) -> Result<(), ConfigError>;
+    /// Profile 更新事务：闭包在 `profiles_lock` 临界区内收到**锁内读取**的
+    /// 完整 `ProfileData`（含既有密码密文），完成合并/校验/密码语义后返回
+    /// 最终值或校验错误（`String`，Web 层映射 400）。
+    ///
+    /// 并发保存同一 Profile 时整文档后写覆盖先写、清除密码被并发的
+    /// 「保留原密码」交错复活——Web 的 `PUT /api/profiles/{id}` 必须走本
+    /// 事务而非先 load 再 [`Self::update_profile`]。默认实现供测试替身
+    /// （锁外 get_profile → 闭包 → update_profile，语义等价）；生产实现持锁。
+    async fn update_profile_tx(
+        &self,
+        id: &str,
+        f: ProfileMergeFn,
+    ) -> Result<Result<ProfileData, String>, ConfigError> {
+        let current = self.get_profile(id)?;
+        let updated = match f(current.clone()).await {
+            Ok(p) => p,
+            Err(msg) => return Ok(Err(msg)),
+        };
+        // 闭包产出的是最终密码形态；默认实现经 update_profile 落盘时需把
+        // 「闭包把非空密码清空了」翻译为 clear_password=true，否则空串会被
+        // save_password 的「保留原密码」契约撤销。生产实现直写无此翻译层。
+        let cleared = updated.password.is_empty() && !current.password.is_empty();
+        self.update_profile(id, updated.clone(), cleared).await?;
+        Ok(Ok(updated))
+    }
     /// 删除 Profile（不允许删除 default）。
     async fn delete_profile(&self, id: &str) -> Result<(), ConfigError>;
     /// 切换活跃 Profile。
@@ -103,6 +128,14 @@ impl ProfileApi for ProfileService {
         clear_password: bool,
     ) -> Result<(), ConfigError> {
         ProfileService::update_profile(self, id, data, clear_password).await
+    }
+
+    async fn update_profile_tx(
+        &self,
+        id: &str,
+        f: ProfileMergeFn,
+    ) -> Result<Result<ProfileData, String>, ConfigError> {
+        ProfileService::update_profile_tx(self, id, f).await
     }
 
     async fn delete_profile(&self, id: &str) -> Result<(), ConfigError> {
@@ -184,6 +217,11 @@ impl ProfileService {
     ///
     /// `clear_password` 为真时先把密码置空并跳过 `save_password`——后者的空串契约
     /// 是「保留原密码」，若把清空后的空串再交给它，清除会被静默撤销。
+    ///
+    /// **非事务**：旧密码在 `profiles_lock` 外读取，仅适合调用方已持有最终
+    /// `ProfileData` 的场景（测试 / 导入回填）。Web 的 `PUT /api/profiles/{id}`
+    /// 必须走 [`Self::update_profile_tx`]（F7 Profile 侧事务），否则并发保存
+    /// 会互相覆盖丢字段。
     pub async fn update_profile(
         &self,
         id: &str,
@@ -226,6 +264,35 @@ impl ProfileService {
             tracing::warn!("更新 Profile 后配置重载失败（快照可能滞后）: {e}");
         }
         Ok(())
+    }
+
+    /// Profile 更新事务（F7 Profile 侧）：转调 [`ConfigService::modify_profile_tx`]，
+    /// 提交成功后发送 ProfileSwitched 信号同步 ArcSwap 快照（与
+    /// [`Self::update_profile`] 同口径；重载失败仅告警不回滚）。
+    ///
+    /// 密码语义由闭包基于锁内读到的既有密文完成：`clear_password` → 置空；
+    /// 非空新密码 → 调用方已加密的密文直写；未提供 → 保留既有值。
+    pub async fn update_profile_tx(
+        &self,
+        id: &str,
+        f: ProfileMergeFn,
+    ) -> Result<Result<ProfileData, String>, ConfigError> {
+        let result = self.config.modify_profile_tx(id, f).await?;
+        match result {
+            Ok(profile) => {
+                // 写盘后同步 ArcSwap 快照（CFG-3）：运行中 Engine/Monitor 可能正
+                // 持有旧凭据；重载失败仅告警不回滚（文件已落盘，重试即可恢复）
+                if let Err(e) = self
+                    .config
+                    .reload_with_signal(ConfigReloadSignal::ProfileSwitched { id: id.to_string() })
+                    .await
+                {
+                    tracing::warn!("更新 Profile 后配置重载失败（快照可能滞后）: {e}");
+                }
+                Ok(Ok(profile))
+            }
+            Err(msg) => Ok(Err(msg)),
+        }
     }
 
     /// 删除 Profile（不允许删除 default）
@@ -606,6 +673,54 @@ mod tests {
             "",
             "clear_password 必须真的清空密码"
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_profile_tx_concurrent_saves_no_lost_update() {
+        // F7 Profile 侧事务：两个并发事务各改不同字段，合并都在 profiles_lock
+        // 临界区内基于最新值执行，双方字段互不丢失。旧实现锁外 load→改→save
+        // 时后写整文档覆盖先写，先写方字段会被清回旧值（丢失更新）。
+        let (_tmp, config) = make_config_service().await;
+        let svc = std::sync::Arc::new(ProfileService::new(config.clone()));
+        svc.create_profile(
+            "dorm",
+            ProfileData {
+                id: "dorm".to_string(),
+                name: "宿舍".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let a = svc.clone();
+        let b = svc.clone();
+        let (ra, rb) = tokio::join!(
+            a.update_profile_tx(
+                "dorm",
+                Box::new(|mut p| {
+                    Box::pin(async move {
+                        p.name = "名字A".to_string();
+                        Ok(p)
+                    })
+                })
+            ),
+            b.update_profile_tx(
+                "dorm",
+                Box::new(|mut p| {
+                    Box::pin(async move {
+                        p.isp = "运营商B".to_string();
+                        Ok(p)
+                    })
+                })
+            ),
+        );
+        ra.unwrap().unwrap();
+        rb.unwrap().unwrap();
+
+        let final_profile = svc.get_profile("dorm").unwrap();
+        assert_eq!(final_profile.name, "名字A", "并发保存不得丢失 name 字段");
+        assert_eq!(final_profile.isp, "运营商B", "并发保存不得丢失 isp 字段");
     }
 
     // ============ detect_matching_profile ============

@@ -132,6 +132,28 @@ def _res(url, rtype, mime=""):
     return {"url": url, "type": rtype, "mimeType": mime}
 
 
+def test_sanitize_capture_url_strips_query_and_fragment():
+    """page_capture 的 final_url 纪律：剥 query/fragment，保留 scheme+host+path。
+
+    门户登录后的最终 URL 携带 token= 等临时凭证，meta.json 与 IPC 响应
+    统一经 _sanitize_capture_url 脱敏（与 _classify_redirect_test 同一口径）。
+    """
+    from playwright_worker import _sanitize_capture_url
+
+    assert (
+        _sanitize_capture_url("https://portal.school.com/srun_portal_success?token=abc&sid=1")
+        == "https://portal.school.com/srun_portal_success"
+    )
+    assert (
+        _sanitize_capture_url("http://10.1.2.3/index.html#frag")
+        == "http://10.1.2.3/index.html"
+    )
+    # 无 query/fragment 原样返回；非法输入不抛错
+    assert _sanitize_capture_url("http://portal/success") == "http://portal/success"
+    assert _sanitize_capture_url("") == ""
+    assert _sanitize_capture_url("not-a-url") == "not-a-url"
+
+
 def test_channel_supports_cdp():
     """CDP 可用性口径：仅 Chromium 系为真，custom 按所配引擎判定。"""
     assert _channel_supports_cdp(None) is True

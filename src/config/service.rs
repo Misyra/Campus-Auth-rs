@@ -28,6 +28,7 @@ use crate::config::crypto::PasswordCrypto;
 use crate::config::migration::run_migrations;
 use crate::config::runtime::{ConfigReloadSignal, RuntimeConfig, build_runtime_config};
 use crate::config::schema::{ProfileData, SettingsData};
+use crate::config::{ProfileMergeFn, SettingsMergeFn};
 use crate::utils::recover_lock;
 
 /// 配置错误类型
@@ -548,6 +549,93 @@ impl ConfigService {
             tracing::warn!("settings+Profile 事务提交后配置重载失败（快照可能滞后）: {e}");
         }
         Ok(Ok(()))
+    }
+
+    /// Profile 域读-改-写事务（F7 的 Profile 侧补齐）
+    ///
+    /// 与 [`Self::modify_settings_tx`] 同型：持 `profiles_lock` 完成「锁内
+    /// 读取 → 闭包合并/校验 → 持久化」。此前 `PUT /api/profiles/{id}` 等路径
+    /// 锁外 load→改→save，两个并发保存同一 Profile 的请求整文档后写覆盖
+    /// 先写（丢字段），且「清除密码」可能被并发的「保留原密码」交错复活。
+    /// 闭包在临界区内收到锁内读取的完整 ProfileData（含既有密码密文）。
+    /// 不在此处 reload：调用方按各自语义发布快照（ProfileSwitched 信号 /
+    /// reload_and_flat_response）。
+    pub async fn modify_profile_tx(
+        &self,
+        id: &str,
+        f: ProfileMergeFn,
+    ) -> Result<Result<ProfileData, String>, ConfigError> {
+        if !is_valid_profile_id(id) {
+            return Err(ConfigError::InvalidProfileId { id: id.to_string() });
+        }
+        let _guard = self.profiles_lock.lock().await;
+        let profile = self.load_profile(id)?;
+        let new_profile = match f(profile).await {
+            Ok(p) => p,
+            Err(msg) => return Ok(Err(msg)),
+        };
+        let mut new_profile = new_profile;
+        // 防闭包改写 id 造成「改 A 存 B」
+        new_profile.id = id.to_string();
+        self.save_profile_locked(&new_profile).await?;
+        Ok(Ok(new_profile))
+    }
+
+    /// 同一请求原子提交「Profile 合并事务 + 可选 settings 合并事务」
+    ///
+    /// 锁序固定为 `profiles_lock -> settings_lock`（与删除路径、
+    /// [`Self::modify_settings_and_profile_tx`] 一致）。Profile 合并（可为
+    /// async——任务绑定校验须在临界区内完成）成功后才执行 settings 合并
+    /// 校验；Profile 先落盘，settings 写入失败时回滚 Profile（与既有双域
+    /// 事务同一补偿语义）。`settings_merge` 为 `None` 时等价于
+    /// [`Self::modify_profile_tx`]。不在此处 reload（调用方负责发布快照）。
+    pub async fn modify_profile_and_settings_tx(
+        &self,
+        id: &str,
+        profile_merge: ProfileMergeFn,
+        settings_merge: Option<SettingsMergeFn>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        if !is_valid_profile_id(id) {
+            return Err(ConfigError::InvalidProfileId { id: id.to_string() });
+        }
+        let tx_result: Result<Result<(), String>, ConfigError> = async {
+            let _profiles_guard = self.profiles_lock.lock().await;
+            let old_profile = self.load_profile(id)?;
+            let new_profile = match profile_merge(old_profile.clone()).await {
+                Ok(p) => p,
+                Err(msg) => return Ok(Err(msg)),
+            };
+            let mut new_profile = new_profile;
+            // 防闭包改写 id 造成「改 A 存 B」
+            new_profile.id = id.to_string();
+            if let Some(settings_merge) = settings_merge {
+                let _settings_guard = self.settings_lock.lock().await;
+                let new_settings = match settings_merge(self.load_settings()) {
+                    Ok(s) => s,
+                    Err(msg) => return Ok(Err(msg)),
+                };
+                self.save_profile_locked(&new_profile).await?;
+                if let Err(settings_error) = self.write_settings_locked(&new_settings).await {
+                    if let Err(rollback_error) = self.save_profile_locked(&old_profile).await {
+                        return Err(ConfigError::ConfigWriteError {
+                            reason: format!(
+                                "settings 写入失败（{settings_error}），且 Profile 回滚失败（{rollback_error}）"
+                            ),
+                        });
+                    }
+                    return Err(settings_error);
+                }
+                Ok(Ok(()))
+            } else {
+                self.save_profile_locked(&new_profile).await?;
+                Ok(Ok(()))
+            }
+        }
+        .await;
+        match tx_result {
+            Ok(inner) => Ok(inner),
+            Err(e) => Err(e),
+        }
     }
 
     /// 写入 settings.json 并同步内存缓存（调用方必须已持有 settings_lock）

@@ -345,7 +345,21 @@ impl LoginSession {
                                 screenshot_url: None,
                                 duration_ms: 0,
                             }),
-                            // 其余 Err（WorkerBusy / WorkerNotInstalled /
+                            // WorkerBusy（调试会话 / 重定向检测占用会话槽位）是
+                            // 典型的**瞬时**冲突：占用方可短则数秒（调试单步）、
+                            // 长则贯穿调试会话。此前归为终态失败，调试期间自动
+                            // 登录被静默压制且登录历史被 WorkerBusy 刷屏。转成
+                            // NetworkError 走既有重试/退避路径（与上方崩溃分支
+                            // 同一处理）；随后的归属感知回收（force_recycle_
+                            // if_unowned）发现槽位不属于本会话时不会误杀占用方。
+                            Err(e @ BridgeError::WorkerBusy) => Ok(StructuredResult {
+                                outcome: Outcome::NetworkError,
+                                message: format!("Worker 忙（被其他任务占用，将重试）: {e}"),
+                                data: Value::Null,
+                                screenshot_url: None,
+                                duration_ms: 0,
+                            }),
+                            // 其余 Err（WorkerNotInstalled /
                             // WorkerSpawnBlocked / WorkerEnvironmentInvalid /
                             // Cancelled / Timeout / SupervisorNotRunning 等）保持
                             // 终态失败：重试不会变好，或取消/超时语义要求立即退出
@@ -1643,5 +1657,39 @@ mod tests {
             "{}",
             result.message
         );
+    }
+
+    /// WorkerBusy（调试会话/重定向检测占用槽位）是瞬时冲突：必须走可重试
+    /// 路径消耗重试预算，而非一次即终态失败（此前调试期间自动登录被静默
+    /// 压制且历史被 WorkerBusy 刷屏）。
+    #[tokio::test(start_paused = true)]
+    async fn test_bridge_worker_busy_retries_until_budget_exhausted() {
+        let bridge = Arc::new(FailingBridge {
+            make_error: Box::new(|| BridgeError::WorkerBusy),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        // max_retries=2：初次 + 2 次重试全部打满（对照 Timeout 用例的 calls==1）
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            3,
+            "WorkerBusy 属可重试失败，应消耗完整重试预算"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 3);
+        assert!(result.message.contains("Worker 忙"), "{}", result.message);
     }
 }

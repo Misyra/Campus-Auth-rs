@@ -342,16 +342,20 @@ fn run_apply_update(cli: &HelperCli) {
         }
     }
 
-    // 5. 替换 exe（helper 复制新文件覆盖旧 exe，而非替换自身）
+    // 5. 替换 exe（原子替换：先复制到同目录临时名再 rename 覆盖。就地
+    // fs::copy 在 helper 中途被杀/断电时会把主程序截断成半写状态且无自愈
+    // 出口——pending/staging/备份虽在，但主程序已无法启动；rename 语义下
+    // 目标要么是完整旧版要么是完整新版，Windows 同卷 rename 原子覆盖）
     if !already_replaced {
         log.info(&format!(
             "替换 {} -> {}",
             extracted_exe.display(),
             target_exe.display()
         ));
-        if let Err(e) = std::fs::copy(&extracted_exe, &target_exe) {
+        if let Err(e) = atomic_replace_file(&extracted_exe, &target_exe) {
             log.error(&format!("替换失败: {e}"));
-            // 尝试回退：从备份恢复
+            // 尝试回退：从备份恢复（rename 原子语义下目标应保持旧版完整，
+            // 此分支仅兜底异常半写态）
             if backup_path.exists() {
                 match std::fs::copy(&backup_path, &target_exe) {
                     Ok(_) => log.error("已回退到备份版本"),
@@ -884,6 +888,28 @@ fn files_identical(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// 原子替换文件：先复制到同目录 `<原名>.new` 临时名，再 rename 覆盖目标。
+///
+/// 就地 `fs::copy`（截断 + 写入）在进程中途被杀/断电时留下半写目标且无代码
+/// 运行兜底；本函数把不可中断窗口收缩为 rename 一次系统调用——目标要么是
+/// 完整旧版要么是完整新版。Windows 上 `std::fs::rename` 走
+/// `MOVEFILE_REPLACE_EXISTING`，同卷覆盖已存在文件；失败时清理临时文件，
+/// 目标保持旧版不变。
+fn atomic_replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let tmp = dst.with_file_name(format!(
+        "{}.new",
+        dst.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let result = std::fs::copy(src, &tmp).and_then(|_| std::fs::rename(&tmp, dst));
+    if result.is_err() {
+        // 清理残留临时文件（copy 成功但 rename 失败的场景），目标未被修改
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map(|_| ())
+}
+
 /// 轮询等待指定 PID 的进程退出（最多等待 [`PROCESS_EXIT_TIMEOUT_SECS`] 秒）
 ///
 /// 返回 `true` 表示主进程已退出；超时返回 `false`。5.3：超时后**不再强制继续**——
@@ -1187,6 +1213,32 @@ mod tests {
             &base.path().join("does-not-exist"),
             base.path()
         ));
+    }
+
+    /// 原子替换：覆盖已有目标、内容正确、失败时目标保持旧版且无 .new 残留
+    #[test]
+    fn test_atomic_replace_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("extracted.exe");
+        let dst = dir.path().join("campus-auth.exe");
+        std::fs::write(&src, b"new-binary").unwrap();
+        std::fs::write(&dst, b"old-binary").unwrap();
+
+        atomic_replace_file(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new-binary");
+        // 临时文件已被 rename 消费，不留残留
+        assert!(!dir.path().join("campus-auth.exe.new").exists());
+
+        // 失败路径（源不存在）：目标保持旧版，且清理 .new 残留
+        let missing = dir.path().join("missing.exe");
+        assert!(atomic_replace_file(&missing, &dst).is_err());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new-binary");
+        assert!(!dir.path().join("campus-auth.exe.new").exists());
+
+        // 目标不存在时首次替换同样成立
+        let dst2 = dir.path().join("fresh.exe");
+        atomic_replace_file(&src, &dst2).unwrap();
+        assert_eq!(std::fs::read(&dst2).unwrap(), b"new-binary");
     }
 
     /// target 解析三分支：推导命中且一致放行 / 不一致拒绝 / 推导缺失按 base 内约束兜底

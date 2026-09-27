@@ -507,66 +507,95 @@ pub async fn update_profile(
     Path(id): Path<String>,
     Json(body): Json<ProfileUpdateBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut profile = config.load_profile(&id)?;
-    if let Some(name) = body.name {
-        profile.name = name;
-    }
-    if let Some(p) = body.password {
-        // GET /api/profiles/{id} 会出于安全考虑把密码清空，前端编辑后保存时
-        // 因此会回传 password=""。空串的既有契约是“未修改，保留原密码”，
-        // 不能先加密成合法 ENC: 再交给 ProfileService，否则会把原密码覆盖为空。
-        if !p.is_empty() {
-            // 非空新密码仍需显式传播加密失败，不能返回 ok 但实际未更新。
-            profile.password = config
-                .encrypt_password(&p)
-                .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?;
-        }
-    }
-    if let Some(username) = body.username {
-        profile.username = username;
-    }
-    if let Some(auth_url) = body.auth_url {
-        profile.auth_url = validate_http_url("认证地址", &auth_url)?;
-    }
-    if let Some(trigger_url) = body.trigger_url {
-        profile.trigger_url = validate_http_url("重定向触发地址", &trigger_url)?;
-    }
-    if let Some(isp) = body.isp {
-        profile.isp = isp;
-    }
-    if let Some(gateway_ip) = body.gateway_ip {
-        profile.gateway_ip = gateway_ip;
-    }
-    if let Some(wifi_ssid) = body.wifi_ssid {
-        profile.wifi_ssid = wifi_ssid;
-    }
-    if let Some(active_task) = body.active_task {
-        profile.active_task = active_task;
-    }
-    if let Some(login_channel) = body.login_channel {
-        profile.login_channel = login_channel;
-    }
-    if let Some(active_http_task) = body.active_http_task {
-        profile.active_http_task = active_http_task;
-    }
-    if let Some(active_script_task) = body.active_script_task {
-        profile.active_script_task = active_script_task;
-    }
-    // 直连 / 脚本渠道必须有可用的任务绑定（与 create 同一口径，见
-    // validate_login_task_binding）。注意这里判的是**合并后**的渠道与绑定：只改渠道
-    // 不改绑定（或反之）时也必须整体有效。
-    validate_login_task_binding(
-        &tasks,
-        profile.login_channel,
-        &profile.active_http_task,
-        &profile.active_script_task,
-    )
-    .await?;
-    profiles
-        .update_profile(&id, profile, body.clear_password)
+    // 密码加密在事务外完成（纯函数，不依赖锁内状态）：事务闭包的错误只来自
+    // 校验（400），加密失败保持 500 语义。空串契约是“未修改，保留原密码”
+    // （GET 会清空密码，前端编辑后保存会回传 ""），不能加密成合法 ENC: 覆盖原密码。
+    let encrypted_password = match body.password.as_deref() {
+        Some(p) if !p.is_empty() => Some(
+            config
+                .encrypt_password(p)
+                .map_err(|e| ApiError::Internal(format!("密码加密失败: {e}")))?,
+        ),
+        _ => None,
+    };
+    let clear_password = body.clear_password;
+    let tasks = tasks.clone();
+    // F7 Profile 侧事务：合并/校验在 profiles_lock 临界区内完成——并发保存
+    // 同一 Profile 不再互相覆盖丢字段、清除密码不会被并发的「保留原密码」
+    // 交错复活（旧实现锁外 load→改→save 存在丢失更新窗口）
+    let result = profiles
+        .update_profile_tx(
+            &id,
+            Box::new(move |mut profile| {
+                let tasks = tasks.clone();
+                Box::pin(async move {
+                    // 密码语义（与 ProfileService::update_profile 同口径）：
+                    // clear_password 优先 → 显式清除；非空新密码 → 已加密密文直写；
+                    // 其余（None / 空串 = 未修改）→ 保留锁内读到的既有密文
+                    if clear_password {
+                        profile.password = String::new();
+                    } else if let Some(enc) = encrypted_password {
+                        profile.password = enc;
+                    }
+                    if let Some(name) = body.name {
+                        profile.name = name;
+                    }
+                    if let Some(username) = body.username {
+                        profile.username = username;
+                    }
+                    if let Some(auth_url) = body.auth_url {
+                        profile.auth_url =
+                            validate_http_url("认证地址", &auth_url).map_err(|e| e.to_string())?;
+                    }
+                    if let Some(trigger_url) = body.trigger_url {
+                        profile.trigger_url = validate_http_url("重定向触发地址", &trigger_url)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    if let Some(isp) = body.isp {
+                        profile.isp = isp;
+                    }
+                    if let Some(gateway_ip) = body.gateway_ip {
+                        profile.gateway_ip = gateway_ip;
+                    }
+                    if let Some(wifi_ssid) = body.wifi_ssid {
+                        profile.wifi_ssid = wifi_ssid;
+                    }
+                    if let Some(active_task) = body.active_task {
+                        profile.active_task = active_task;
+                    }
+                    if let Some(login_channel) = body.login_channel {
+                        profile.login_channel = login_channel;
+                    }
+                    if let Some(active_http_task) = body.active_http_task {
+                        profile.active_http_task = active_http_task;
+                    }
+                    if let Some(active_script_task) = body.active_script_task {
+                        profile.active_script_task = active_script_task;
+                    }
+                    // 直连 / 脚本渠道必须有可用的任务绑定（与 create 同一口径，见
+                    // validate_login_task_binding）。注意这里判的是**合并后**的渠道与绑定：只改渠道
+                    // 不改绑定（或反之）时也必须整体有效。校验在事务临界区内完成，
+                    // 避免校验通过后、落盘前被并发保存改掉绑定。
+                    validate_login_task_binding(
+                        &tasks,
+                        profile.login_channel,
+                        &profile.active_http_task,
+                        &profile.active_script_task,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    Ok(profile)
+                })
+            }),
+        )
         .await?;
-    tracing::info!(profile_id = %id, "更新 Profile");
-    Ok(data(Value::String("ok".into())))
+    match result {
+        Ok(_) => {
+            tracing::info!(profile_id = %id, "更新 Profile");
+            Ok(data(Value::String("ok".into())))
+        }
+        Err(msg) => Err(ApiError::BadRequest(msg)),
+    }
 }
 
 /// DELETE /api/profiles/{id} — 删除 Profile

@@ -23,6 +23,13 @@ pub const CURRENT_CONFIG_VERSION: u32 = 10;
 pub const DEFAULT_TRIGGER_URL: &str = "http://www.msftconnecttest.com/connecttest.txt";
 // 运行时目录布局单一事实源（见 `utils::paths`）：此处 re-export 保持调用路径稳定。
 pub use crate::utils::paths::{CONFIG_DIR, PROFILES_DIR, SETTINGS_FILE};
+/// Profile 读-改-写事务闭包的返回 future（见 [`ConfigApi::modify_profile_tx`]）
+pub type ProfileMergeFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<ProfileData, String>> + Send>>;
+/// Profile 读-改-写事务闭包（接收锁内读到的 ProfileData，返回最终值或校验错误）
+pub type ProfileMergeFn = Box<dyn FnOnce(ProfileData) -> ProfileMergeFuture + Send>;
+/// settings 读-改-写事务闭包（接收当前设置，返回修改后完整设置或校验错误）
+pub type SettingsMergeFn = Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>;
 /// 损坏文件备份前缀
 pub const CORRUPT_PREFIX: &str = "settings.corrupt.";
 /// 原子写入临时文件前缀（`utils::io::atomic_write_bytes` 生成的 `.tmp_XXXX.json`）
@@ -80,6 +87,54 @@ pub trait ConfigApi: Send + Sync {
         }
         Ok(result)
     }
+    /// Profile 域读-改-写事务（F7 的 Profile 侧补齐）：持 `profiles_lock`
+    /// 完成「锁内读取 → 闭包合并/校验 → 持久化」，两个并发修改同一 Profile
+    /// 的请求不再互相覆盖丢字段。
+    ///
+    /// 闭包在临界区内收到**锁内读取**的完整 `ProfileData`（含既有密码密文），
+    /// 返回最终 `ProfileData` 或校验错误（`String`，Web 层映射 400）。
+    /// 默认实现供测试替身使用（锁外执行，语义等价）；生产实现持锁。
+    /// Web 的 `PUT /api/profiles/{id}` 必须走本事务；锁外 load→改→save 会丢并发更新。
+    async fn modify_profile_tx(
+        &self,
+        id: &str,
+        f: ProfileMergeFn,
+    ) -> Result<Result<ProfileData, String>, ConfigError> {
+        let profile = self.load_profile(id)?;
+        let new_profile = match f(profile).await {
+            Ok(p) => p,
+            Err(msg) => return Ok(Err(msg)),
+        };
+        self.save_profile(&new_profile).await?;
+        Ok(Ok(new_profile))
+    }
+    /// 同一请求原子提交「Profile 合并事务 + 可选 settings 合并事务」。
+    ///
+    /// 锁序固定为 `profiles_lock -> settings_lock`（与删除路径、既有双域事务
+    /// 一致）。Profile 合并（可为 async，任务绑定校验在临界区内完成）成功后
+    /// 才执行 settings 合并校验；Profile 先落盘，settings 写入失败时回滚
+    /// Profile，避免半提交。`settings_merge` 为 `None` 时等价于
+    /// [`Self::modify_profile_tx`]。默认实现供测试替身使用。
+    async fn modify_profile_and_settings_tx(
+        &self,
+        id: &str,
+        profile_merge: ProfileMergeFn,
+        settings_merge: Option<SettingsMergeFn>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        let profile = self.load_profile(id)?;
+        let new_profile = match profile_merge(profile).await {
+            Ok(p) => p,
+            Err(msg) => return Ok(Err(msg)),
+        };
+        if let Some(f) = settings_merge {
+            match self.modify_settings_tx(f).await? {
+                Ok(()) => {}
+                Err(msg) => return Ok(Err(msg)),
+            }
+        }
+        self.save_profile(&new_profile).await?;
+        Ok(Ok(()))
+    }
     /// 加载单个 Profile。
     fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError>;
     /// 保存 Profile。
@@ -133,6 +188,23 @@ impl ConfigApi for ConfigService {
         f: Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>,
     ) -> Result<Result<(), String>, ConfigError> {
         ConfigService::modify_settings_and_profile_tx(self, profile, f).await
+    }
+
+    async fn modify_profile_tx(
+        &self,
+        id: &str,
+        f: ProfileMergeFn,
+    ) -> Result<Result<ProfileData, String>, ConfigError> {
+        ConfigService::modify_profile_tx(self, id, f).await
+    }
+
+    async fn modify_profile_and_settings_tx(
+        &self,
+        id: &str,
+        profile_merge: ProfileMergeFn,
+        settings_merge: Option<SettingsMergeFn>,
+    ) -> Result<Result<(), String>, ConfigError> {
+        ConfigService::modify_profile_and_settings_tx(self, id, profile_merge, settings_merge).await
     }
 
     fn load_profile(&self, id: &str) -> Result<ProfileData, ConfigError> {

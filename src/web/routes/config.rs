@@ -11,7 +11,7 @@ use axum::extract::State;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::config::{ConfigApi, ProfileApi};
+use crate::config::{ConfigApi, ProfileApi, ProfileMergeFn, SettingsMergeFn};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
 use crate::web::routes::profiles::validate_login_task_binding;
@@ -191,99 +191,129 @@ async fn apply_flat_settings_patch(
             return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
         }
     }
-    let profile_to_save = if !profile_patch.is_empty() {
+    // Profile 合并事务（F7 Profile 侧）：合并/校验/密码语义整体移入
+    // ConfigService 的 profiles_lock 临界区执行——旧实现锁外 load→合并→校验→
+    // 落盘，并发保存同一 Profile 时整文档后写覆盖先写（丢字段）。若同一请求
+    // 还包含全局字段，由双域事务一起落盘，禁止先写凭证形成半提交。
+    let profile_tx: Option<(String, ProfileMergeFn)> = if !profile_patch.is_empty() {
         let active_id = match obj.get("active_profile_id").and_then(|v| v.as_str()) {
             Some(id) if !id.is_empty() => id.to_string(),
             _ => config.load_settings_async().await.active_profile_id,
         };
         // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
         // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
-        let mut profile = config.load_profile(&active_id).map_err(|e| {
+        // （事务内会在锁内重新加载，此处预检仅为保留既有的 400 文案口径）
+        config.load_profile(&active_id).map_err(|e| {
             ApiError::BadRequest(format!(
                 "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
             ))
         })?;
-        if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
-            profile.username = username.to_string();
-        }
-        if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
-            let trimmed = auth_url.trim();
-            if !trimmed.is_empty() {
-                validate_auth_url(trimmed)?;
-            }
-            profile.auth_url = trimmed.to_string();
-        }
-        if let Some(trigger_url) = profile_patch.get("trigger_url").and_then(|v| v.as_str()) {
-            let trimmed = trigger_url.trim();
-            if !trimmed.is_empty() {
-                validate_trigger_url(trimmed)?;
-            }
-            profile.trigger_url = trimmed.to_string();
-        }
-        if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
-            profile.isp = isp.to_string();
-        }
-        if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str()) {
-            profile.active_task = active_task.to_string();
-        }
-        // 登录渠道是枚举（"browser"/"http"/"script"），不走字符串校验分支；
-        // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
-        if let Some(channel) = profile_patch.get("login_channel") {
-            profile.login_channel =
-                serde_json::from_value::<crate::config::LoginChannel>(channel.clone()).map_err(
-                    |_| ApiError::BadRequest("login_channel 仅支持 browser、http 或 script".into()),
-                )?;
-        }
-        // 任务绑定：字符串（空串 = 未绑定）
-        if let Some(v) = profile_patch
-            .get("active_http_task")
-            .and_then(|v| v.as_str())
-        {
-            profile.active_http_task = v.to_string();
-        }
-        if let Some(v) = profile_patch
-            .get("active_script_task")
-            .and_then(|v| v.as_str())
-        {
-            profile.active_script_task = v.to_string();
-        }
-        // 直连 / 脚本渠道必须有可用的任务绑定。**与 `POST/PUT /api/profiles/{id}`
-        // 完全同一口径**（共用 `validate_login_task_binding`）：三条保存路径若只有一条
-        // 放宽，用户从设置页存一次就能把方案改成登录时必失败的状态，且毫无提示。
-        // 校验的是**合并后**的渠道与绑定，故只改渠道不改绑定（或反之）同样整体判定。
-        validate_login_task_binding(
-            tasks,
-            profile.login_channel,
-            &profile.active_http_task,
-            &profile.active_script_task,
-        )
-        .await?;
-        if let Some(password) = profile_patch.get("password") {
-            // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
-            // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
-            match password {
-                Value::Null => {}
-                Value::String(pwd_str) if pwd_str.is_empty() => profile.password.clear(),
-                Value::String(pwd_str) => {
-                    profile.password = profiles.save_password(Some(pwd_str), &profile.password);
-                }
-                _ => return Err(ApiError::BadRequest("password 必须是字符串或 null".into())),
-            }
-        }
-        Some(profile)
+        let profiles = profiles.clone();
+        let tasks = tasks.clone();
+        let profile_patch = profile_patch;
+        Some((
+            active_id,
+            Box::new(move |mut profile| {
+                let tasks = tasks.clone();
+                Box::pin(async move {
+                    if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
+                        profile.username = username.to_string();
+                    }
+                    if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
+                        let trimmed = auth_url.trim();
+                        if !trimmed.is_empty() {
+                            validate_auth_url(trimmed).map_err(|e| e.to_string())?;
+                        }
+                        profile.auth_url = trimmed.to_string();
+                    }
+                    if let Some(trigger_url) =
+                        profile_patch.get("trigger_url").and_then(|v| v.as_str())
+                    {
+                        let trimmed = trigger_url.trim();
+                        if !trimmed.is_empty() {
+                            validate_trigger_url(trimmed).map_err(|e| e.to_string())?;
+                        }
+                        profile.trigger_url = trimmed.to_string();
+                    }
+                    if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
+                        profile.isp = isp.to_string();
+                    }
+                    if let Some(active_task) =
+                        profile_patch.get("active_task").and_then(|v| v.as_str())
+                    {
+                        profile.active_task = active_task.to_string();
+                    }
+                    // 登录渠道是枚举（"browser"/"http"/"script"），不走字符串校验分支；
+                    // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
+                    if let Some(channel) = profile_patch.get("login_channel") {
+                        profile.login_channel =
+                            serde_json::from_value::<crate::config::LoginChannel>(channel.clone())
+                                .map_err(|_| {
+                                    ApiError::BadRequest(
+                                        "login_channel 仅支持 browser、http 或 script".into(),
+                                    )
+                                })
+                                .map_err(|e| e.to_string())?;
+                    }
+                    // 任务绑定：字符串（空串 = 未绑定）
+                    if let Some(v) = profile_patch
+                        .get("active_http_task")
+                        .and_then(|v| v.as_str())
+                    {
+                        profile.active_http_task = v.to_string();
+                    }
+                    if let Some(v) = profile_patch
+                        .get("active_script_task")
+                        .and_then(|v| v.as_str())
+                    {
+                        profile.active_script_task = v.to_string();
+                    }
+                    // 直连 / 脚本渠道必须有可用的任务绑定。**与 `POST/PUT /api/profiles/{id}`
+                    // 完全同一口径**（共用 `validate_login_task_binding`）：三条保存路径若只有一条
+                    // 放宽，用户从设置页存一次就能把方案改成登录时必失败的状态，且毫无提示。
+                    // 校验的是**合并后**的渠道与绑定，故只改渠道不改绑定（或反之）同样整体判定。
+                    validate_login_task_binding(
+                        &tasks,
+                        profile.login_channel,
+                        &profile.active_http_task,
+                        &profile.active_script_task,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    if let Some(password) = profile_patch.get("password") {
+                        // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
+                        // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
+                        match password {
+                            Value::Null => {}
+                            Value::String(pwd_str) if pwd_str.is_empty() => {
+                                profile.password.clear()
+                            }
+                            Value::String(pwd_str) => {
+                                profile.password =
+                                    profiles.save_password(Some(pwd_str), &profile.password);
+                            }
+                            _ => return Err("password 必须是字符串或 null".to_string()),
+                        }
+                    }
+                    Ok(profile)
+                })
+            }),
+        ))
     } else {
         None
     };
 
-    // 全局设置合并：提交事务（持锁读-改-写，闭包失败不落盘）
-    if !global_patch.is_empty() || !other_patch.is_empty() {
+    // 全局设置合并闭包（持锁读-改-写，闭包失败不落盘）
+    let settings_merge: Option<SettingsMergeFn> = if !global_patch.is_empty()
+        || !other_patch.is_empty()
+    {
         // 空否以前置 Map 判定为准：Value::Object 包裹后 as_object() 恒为 Some，
         // 此处不再 unwrap（此前写法正确但制造 panic 观感）
         let global_empty = global_patch.is_empty();
         let other_empty = other_patch.is_empty();
         let global_patch = Value::Object(global_patch);
         let other_patch = Value::Object(other_patch);
-        let merge = Box::new(move |settings| {
+        Some(Box::new(move |settings| {
             let mut current_value =
                 serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
             // 合并 global 字段
@@ -297,18 +327,28 @@ async fn apply_flat_settings_patch(
                 json_merge(&mut current_value, &other_patch);
             }
             serde_json::from_value(current_value).map_err(|e| format!("设置合并后校验失败: {e}"))
-        });
-        let result = match profile_to_save {
-            Some(profile) => config.modify_settings_and_profile_tx(profile, merge).await,
-            None => config.modify_settings_tx(merge).await,
-        };
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
-            Err(e) => return Err(e.into()),
+        }))
+    } else {
+        None
+    };
+
+    // 提交：Profile 与全局设置同时变更走双域事务；仅其一走各自单域事务
+    let result = match profile_tx {
+        Some((profile_id, profile_merge)) => {
+            config
+                .modify_profile_and_settings_tx(&profile_id, profile_merge, settings_merge)
+                .await
         }
-    } else if let Some(profile) = profile_to_save {
-        config.save_profile(&profile).await?;
+        None => match settings_merge {
+            Some(merge) => config.modify_settings_tx(merge).await,
+            // 两个 patch 均为空：无可提交内容（原实现同口径，直接跳过落盘）
+            None => Ok(Ok(())),
+        },
+    };
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => return Err(ApiError::BadRequest(msg)),
+        Err(e) => return Err(e.into()),
     }
 
     // 保存成功后统一记录变更字段名列表（严禁记录字段值，尤其密码/密钥）

@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from html import escape as _html_escape
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from models import (
     Outcome,
@@ -92,6 +92,23 @@ _WAIT_TIMEOUT_SECS = 8.0
 _REDIRECT_TEST_SETTLE_SECS = 5.0
 # 重定向检测最多读取的可见文本，避免异常页面造成无界 IPC 前内存增长。
 _REDIRECT_TEST_TEXT_LIMIT = 64 * 1024
+
+
+def _sanitize_capture_url(url: str) -> str:
+    """剥掉 URL 的 query/fragment，仅保留 scheme + host + path。
+
+    门户登录后的最终 URL 常携带 ``token=`` / ``sid=`` 等临时会话凭证。
+    ``page_capture`` 的 final_url 会写入常驻磁盘的 meta.json 并经 IPC 回传
+    （进入 AI 提示词链路与 bundle 下载），与 ``_classify_redirect_test``
+    「返回值刻意不包含最终 URL query」同一纪律，在写入前统一脱敏。
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.query and not parts.fragment:
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _classify_redirect_test(
@@ -2714,7 +2731,9 @@ class WorkerCore:
         meta: dict[str, Any] = {
             "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "request_url": url,
-            "final_url": final_url,
+            # final_url 统一剥 query/fragment：门户重定向后的 URL 常携带
+            # 临时会话凭证（token= 等），此处是 meta 落盘与 IPC 响应的单一出口
+            "final_url": _sanitize_capture_url(final_url),
             "title": title,
             "html_path": str(cap_dir / "page.html"),
             "screenshot_path": str(cap_dir / "screenshot.png"),

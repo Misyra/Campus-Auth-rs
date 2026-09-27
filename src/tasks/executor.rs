@@ -453,6 +453,9 @@ impl TaskExecutor {
         let _job = crate::bridge::job::try_assign_job(&child);
         // 记录 PID：超时后需 taskkill /T 递归强杀整个进程树（kill_on_drop 只杀直接子进程）
         let pid = child.id();
+        // Unix 取消路径的进程组回收（Windows 由上方 Job Handle 兜底）
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupGuard::new(pid);
         let stdout = child
             .stdout
             .take()
@@ -473,6 +476,10 @@ impl TaskExecutor {
 
         match waited {
             Ok(Ok((status, stdout_bytes, stderr_bytes))) => {
+                // 正常完成：解除进程组守卫，保持既有成功语义（不追杀成功退出
+                // 脚本的残留组成员；Windows 侧 Job 关闭语义不受影响）
+                #[cfg(unix)]
+                process_group_guard.disarm();
                 let stdout = String::from_utf8_lossy(&stdout_bytes);
                 let stderr = String::from_utf8_lossy(&stderr_bytes);
                 let success = status.success();
@@ -499,6 +506,26 @@ impl TaskExecutor {
             }
             Ok(Err(e)) => Err(TaskError::IoError(e)),
             Err(_) => {
+                // 极窄窗口：子进程可能在上方 500ms 排空宽限内已退出、但读未
+                // 收敛时外层超时先到期——此时强杀无意义且会抹掉真实退出码，
+                // 先探一次状态按实际结果收尾（输出不可恢复，报空）
+                if let Ok(Some(status)) = child.try_wait() {
+                    tracing::debug!(
+                        program = %program,
+                        "任务子进程已退出（超时窗口边缘），按实际退出码收尾"
+                    );
+                    return Ok(TaskResult {
+                        success: status.success(),
+                        output: String::new(),
+                        exit_code: status.code().unwrap_or(-1),
+                        duration_ms,
+                        error: if status.success() {
+                            None
+                        } else {
+                            Some(String::new())
+                        },
+                    });
+                }
                 tracing::warn!(
                     program = %program,
                     timeout_secs = timeout,
@@ -630,7 +657,7 @@ fn resolve_work_dir(cfg: &ScriptTaskConfig, script_file: &Path, scripts_dir: &Pa
         .unwrap_or_else(|| scripts_dir.to_path_buf())
 }
 
-/// 钳制脚本超时到 `[MIN_SCRIPT_TIMEOUT, MAX_SCRIPT_TIMEOUT]`
+/// 等待子进程退出并排空两路管道输出（上限 [`OUTPUT_TRUNCATE_LEN`] 的安全余量）
 async fn wait_with_bounded_output(
     child: &mut tokio::process::Child,
     stdout: tokio::process::ChildStdout,
@@ -638,12 +665,74 @@ async fn wait_with_bounded_output(
 ) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
     // UTF-8 单字符最多 4 字节，额外保留少量空间覆盖无效编码与截断提示场景。
     const CAPTURE_LIMIT: usize = OUTPUT_TRUNCATE_LEN * 4 + 4096;
-    let (status, stdout, stderr) = tokio::join!(
-        child.wait(),
-        read_bounded(stdout, CAPTURE_LIMIT),
-        read_bounded(stderr, CAPTURE_LIMIT)
-    );
-    Ok((status?, stdout?, stderr?))
+    // 管道排空必须与子进程执行**并发**进行：等待期间不读会撑满管道缓冲，
+    // 把正常输出的子进程卡死在 write 上。读任务以 owned pipe 启动（'static）。
+    let out_task = tokio::spawn(read_bounded(stdout, CAPTURE_LIMIT));
+    let err_task = tokio::spawn(read_bounded(stderr, CAPTURE_LIMIT));
+    let status = child.wait().await?;
+
+    // 子进程已退出。正常情况写端随之关闭、读任务立刻 EOF；但脚本拉起的
+    // 孙进程若继承管道写端（`start /b`、未重定向 stdio 的 Popen 等），
+    // EOF 要等孙进程退出才出现——此前 join! 卡死直到外层超时，退出码 0
+    // 被误报为执行超时且同任务执行锁被占满。短宽限兜底后放弃等待，按
+    // 实际退出码收尾；孙进程树回收由 Job Object（Windows）/进程组守卫
+    // （Unix）负责，不依赖管道关闭。
+    // 注意 tokio::join! 宏内部自带 await（产出元组值而非 Future），须经
+    // async 块包装才能挂上 timeout。
+    const DRAIN_GRACE: Duration = Duration::from_millis(500);
+    let drain = async {
+        let (out, err) = tokio::join!(out_task, err_task);
+        let out = out.map_err(|e| std::io::Error::other(format!("stdout 读取任务失败: {e}")))?;
+        let err = err.map_err(|e| std::io::Error::other(format!("stderr 读取任务失败: {e}")))?;
+        Ok::<(std::process::ExitStatus, Vec<u8>, Vec<u8>), std::io::Error>((status, out?, err?))
+    };
+    match tokio::time::timeout(DRAIN_GRACE, drain).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::debug!(
+                "子进程退出后管道排空宽限超时（孙进程可能持有写端），按实际退出码收尾；\
+                 读取任务脱离句柄随 EOF 自行结束（缓冲受 CAPTURE_LIMIT 约束）"
+            );
+            Ok((status, Vec::new(), Vec::new()))
+        }
+    }
+}
+
+/// Unix 进程组守卫：run_command 的 future 被 `select!` 取消丢弃时，
+/// `kill_on_drop` 只 SIGKILL 直接子进程，脚本拉起的孙进程会残留为孤儿
+/// （Windows 由 JobHandle Drop 兜住整棵树，Unix 此前无对等回收——超时
+/// 路径有 killpg，取消路径没有）。守卫仅在**未正常完成**（即取消/丢弃
+/// 路径）的 Drop 时按进程组整树强杀；正常完成路径 disarm，不改变既有
+/// 成功语义。
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: Option<u32>,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Some(pid) = self.pid
+        {
+            // 进程可能已自行退出（ESRCH），返回值忽略
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// 排空异步读取器并最多保留 `limit` 字节，其余内容丢弃但继续读取以免子进程阻塞。
