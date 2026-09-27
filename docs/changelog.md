@@ -2,6 +2,19 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.0.2”。
 
+## 开发中（2026-09-26 文档过期内容与临时产物清理）
+
+### 过程产物删除
+
+- 删除 `docs/compose/` 全部 4 份设计对比稿（任务页结构 v1–v3、http 任务 UI 选项）——对应改版均已落地，方案已定。
+- 删除 `docs/reports/` 已消化的过程产物约 94MB（103MB → 9.2MB）：13 个快照/截图/运行时目录（ui-check、stray-from-root、gui-test-20260925、promo-preview、ui、wizard-demo、debug-panel-harness、promo-ui-captures、update-dialog-preview、ui-review-runtime、login-url-runtime、promo-runtime、perf-scripts）与顶层散件（`changelog-full.md` 过期全量拷贝、`build-portable.log`、`code-review-2026-09-19.md`、`perf-*` 报告、`csp-*.json`、各 probe/verify/ui_check 探针脚本、`login-url-ui.png`）。
+- 保留仍被引用或在途的项：`full-audit-2026-09-26.md`（审计 P2 批量修复依据）、`ui-audit/`（`audit.mjs` / `visual-check.py` 被 plan-next 标注可复跑）、`uninstall-e2e/rehearse.ps1`（plan-next 与 AGENTS.md 引用）、`ia-verify/`（changelog 引用的可复现探针），以及 09-24/25 审计报告等已消化但留有来源注记的两可档。
+
+### 跟踪文档清理
+
+- `docs/known-issues.md`：删除已修条目 #2 / #3 / #19 / W13 与 #7、#23 注① 的已修部分；删除已清空的「三、低危清理项」节（其后节次重编号）；「更新通道相关」节压缩为指引（顺带消除与 `AGENTS.md`「All 通道无回退」口径矛盾的「回退单包」过时表述）；「工程化缺口」表移除对已删复核报告的悬空引用。
+- `docs/plan-next.md`：删除全收口节「未提交更改的全面审查与修复」「C 组收尾」；删除已完结待办（自动保存状态机抽取消、编辑器不自动关、直连拖拽排序、`useConfig` 快照）并压缩各「已落地」节的过程叙述（细节在 changelog 同日条目）；「直连请求渠道待办」移除已被前置请求落地覆盖的实现路径②；「登录历史不记渠道」三处重复口径收敛为一处权威条目（「全功能实测排查与修复」节）。
+
 ## 开发中（2026-09-26 功能 Bug 审计修复）
 
 - 调度器把五字段 cron 的数字星期、列表、范围与步长转换为标准语义（0/7=周日、1=周一），补下次触发时间回归测试。
