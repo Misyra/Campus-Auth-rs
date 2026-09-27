@@ -114,7 +114,7 @@ campus-auth/
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）— 源码模块，对应运行时 /config（.gitignore / 锚定，勿混淆）
 │   ├── uninstall/            # 卸载计划（删什么 / 拒什么 / 怎么删）——**单一事实源**：
 │   │                         #   界面据此列清单、campus-auth-helper --uninstall 据此执行
-│   ├── web/                  # Web API + WebSocket（routes/ 按域拆分：config/profiles/login/http_tasks/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai 等，细粒度 state 注入）
+│   ├── web/                  # Web API + WebSocket（host.rs 回环 Host 头校验防 DNS rebinding，挂载于鉴权层之前；routes/ 按域拆分：config/profiles/login/http_tasks/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai 等，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
 │   ├── tasks/                # 任务管理 — 源码模块，对应运行时 /tasks（.gitignore / 锚定）
 │   ├── network/              # 网络接口
@@ -304,6 +304,11 @@ Conventional Commits，中文描述：
 - **成败判定是退出码**：`0` 视为本次尝试成功，但 `worker_config` 必须是 `{}`——这样 `has_explicit_success_condition()` 恒为 false，登录后网络验证兜底才生效（"脚本说成功但没登上"不会被记成成功）。非 0 用 `Outcome::AssertionFailed`（可重试、**不**回收 Worker），与直连「未命中成功标识」同一口径
 - 脚本失败**不得**触发 Worker 回收：`should_force_recycle` 的判定点必须同时受 `uses_bridge` 保护，否则一次脚本失败会去杀另一条在跑的浏览器登录
 - 三条保存路径（`POST` / `PUT /api/profiles/{id}`、`PATCH /api/config`）共用 `validate_login_task_binding`：直连与脚本渠道都**没有内置兜底任务**，未绑定或绑错类型必须在保存时拦下（放过去等于把配置错误伪装成运行错误）
+
+### Web 服务安全防线
+
+- 回环绑定时 `src/web/host.rs` 强制校验 Host 头是 CORS 之外的独立防线（防 DNS rebinding——恶意域名解析到 127.0.0.1 后与本地服务「同源」，CORS 与浏览器 PNA 均失效）：只接受 `127.0.0.1` / `localhost` / `[::1]`（精确等值、端口忽略），策略按 `PreparedAxumListener` 携带的实际绑定地址推导（绑定非回环 = Docker/LAN 显式暴露，跳过校验）。新增监听入口时必须沿用该推导，不要绕过校验层；Host 缺失放行（HTTP/1.0 与 oneshot 测试基建无 Host，rebinding 路径必然携带域名）
+- 前端 Vite dev 代理（`vite.config.ts` 的 `/api`、`/ws`）必须保留 `changeOrigin: true`——代理默认透传原始 Host（localhost:5173）会被回环校验拒绝；改动前端代理时勿删
 
 ### 配置系统
 
