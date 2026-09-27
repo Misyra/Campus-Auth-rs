@@ -15,6 +15,57 @@
 - `docs/known-issues.md`：删除已修条目 #2 / #3 / #19 / W13 与 #7、#23 注① 的已修部分；删除已清空的「三、低危清理项」节（其后节次重编号）；「更新通道相关」节压缩为指引（顺带消除与 `AGENTS.md`「All 通道无回退」口径矛盾的「回退单包」过时表述）；「工程化缺口」表移除对已删复核报告的悬空引用。
 - `docs/plan-next.md`：删除全收口节「未提交更改的全面审查与修复」「C 组收尾」；删除已完结待办（自动保存状态机抽取消、编辑器不自动关、直连拖拽排序、`useConfig` 快照）并压缩各「已落地」节的过程叙述（细节在 changelog 同日条目）；「直连请求渠道待办」移除已被前置请求落地覆盖的实现路径②；「登录历史不记渠道」三处重复口径收敛为一处权威条目（「全功能实测排查与修复」节）。
 
+## 开发中（2026-09-26 审计 P2 批量修复）
+
+> 依据 `docs/reports/full-audit-2026-09-26.md`（含复核结论）逐项修复；uv 供应链信任锚一条按「问题不大」评估登记 `docs/known-issues.md` #29 不修。
+
+### 配置加密与持久化
+
+- 密钥文件写入改走 `utils::io::atomic_write_bytes`（tmp + fsync + rename）：生成（`generate_and_write_key`）与 Python 继承（`try_inherit_python_key`）两条路径同步收敛——就地 `std::fs::write` 半写损坏会让全部 ENC: 密文永久不可解。
+- Profile 域读-改-写事务（F7 的 Profile 侧补齐）：`ConfigApi` 新增 `modify_profile_tx` / `modify_profile_and_settings_tx`（均带测试替身默认实现，生产实现持 `profiles_lock`，后者锁序 profiles→settings、settings 写入失败回滚 Profile，与既有双域事务同补偿语义）；`ProfileApi` 新增 `update_profile_tx`（默认实现翻译清除语义）。`PUT /api/profiles/{id}` 与 `PATCH /api/config` 的方案合并分支整体移入事务——此前锁外 load→改→save，并发保存同方案丢字段、清除密码可被并发的「保留原密码」交错复活。补并发回归测试 `test_update_profile_tx_concurrent_saves_no_lost_update`；事务闭包类型收敛为 `ProfileMergeFn` / `SettingsMergeFn` 别名。
+
+### 自更新与助手
+
+- helper 替换主 exe 改为原子替换（`atomic_replace_file`：同目录 `.new` 临时名 + rename 覆盖）：就地 `fs::copy` 在 helper 中途被杀/断电时把主程序截断成半写且无自愈出口；失败时清理临时文件、目标保持旧版。补单测 `test_atomic_replace_file`。
+- `POST /api/system/update` 主入口错误映射对齐契约（与上传入口同口径）：`Cancelled`→409，`PackageNotNewer`/`VersionUnrecognized`/`ExtractFailed`/`DownloadTooLarge`/`MissingChecksum`→400，不再落 500。
+- AGENTS.md 两处「All 通道枚举为空回退单包」口径修正为现实：仅 `Prerelease` 有空列表回退，`All` 无回退（默认 GitHub 源下 releases 列表为空即 releases/latest 同样不可用）。
+
+### 登录与任务执行
+
+- `BridgeError::WorkerBusy`（调试会话/重定向检测占用槽位）从终态失败改归可重试：转 `Outcome::NetworkError` 走既有重试/退避与失败预算，占用方不会被误杀（`force_recycle_if_unowned` 归属感知：槽位不属于本会话时不回收）。补回归测试 `test_bridge_worker_busy_retries_until_budget_exhausted`（对照既有 Timeout 终态用例）。
+- 任务进程管道排空重构（`wait_with_bounded_output`）：读任务与子进程执行并发启动，子进程退出后 500ms 宽限兜底——修复「脚本拉起的孙进程持有管道写端导致正常退出（码 0）被误报为执行超时且占满同任务执行锁」；外层超时分支先 `try_wait` 探真实退出码（超时窗口边缘不再抹掉真实结果）。
+- Unix 取消路径进程组回收：新增 `ProcessGroupGuard`，run_command future 被 `select!` 取消丢弃时按进程组整树强杀（此前仅 `kill_on_drop` 杀直接子进程，孙进程残留为孤儿；超时路径本有 killpg）。正常完成路径 disarm 保持既有语义。
+
+### Python Worker
+
+- `page_capture` 的 `final_url` 统一经 `_sanitize_capture_url` 剥 query/fragment（meta.json 落盘与 IPC 响应单一出口）：门户重定向后的 URL 常携带 `token=` 等临时凭证，此前原样写入常驻磁盘并进入 AI 提示词链路与 bundle 下载。补测试 `test_sanitize_capture_url_strips_query_and_fragment`。
+
+### 验证
+
+- `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` 零警告；`cargo test --lib` 1086 通过（含 2 个新增回归测试）。
+- Worker：`compileall` 通过；`uv run pytest`（无实例依赖的单测子集 8 个文件）169 通过。全量 pytest 需先启动 mock + 主实例（本地环境限制，CI 亦同口径）。
+
+### 杂项
+
+- `docs/promo/`（项目介绍演示页）退出版本跟踪并加入 `.gitignore`（`/docs/promo/`）：纯本地展示用途，历史条目见本文件 2026-09-21 记录，本地文件保留不删除。
+
+## 开发中（2026-09-26 Web 服务 Host 头校验（DNS rebinding 防线））
+
+### 背景
+
+- 全项目审计（见 `docs/reports/full-audit-2026-09-26.md`）确认唯一 P0：CORS 仅按 Origin 前缀放行且全仓无入站 Host 头校验，恶意网页经 DNS rebinding 把攻击者域名解析到 127.0.0.1 后与本地服务「同源」，CORS 与浏览器 PNA 均不适用，可直接读走免鉴权的 `/api/auth/token` 接管全部 API。补 Host 头校验作为 CORS 之外的独立防线。
+
+### 后端
+
+- 新增 `src/web/host.rs`：`HostPolicy`（`LoopbackOnly` / `AllowAny`，按监听绑定地址推导——绑定回环强制校验 Host ∈ {127.0.0.1, localhost, ::1}（精确等值，端口忽略；IPv6 接受方括号形态并拒绝方括号后缀伪装），绑定非回环（Docker/LAN 显式暴露）跳过校验）+ 校验中间件（拒绝时返回统一信封 403 `FORBIDDEN_HOST`；Host 缺失放行——HTTP/1.0 与 oneshot 测试基建无 Host，rebinding 路径必然携带攻击者域名）。
+- `web::build_router` 在鉴权层之前挂载校验层；`AppState` 新增 `host_policy` 字段；`PreparedAxumListener` 携带实际绑定地址，`start_axum_with_listener` 据此推导策略（修复不改变 Docker 0.0.0.0 部署行为）。
+- `web::auth` 模块 doc 与 token 端点注释同步：token 免鉴权的依据更新为「CORS 读保护 + Host 校验双防线」；`web::build_router` 的 CORS 注释标注 rebinding 盲区。
+- 测试：host 模块 6 项（回环/伪装 Host 判定、策略推导、中间件 403/放行、信封格式）；全量 `cargo test --lib` 1084 通过，`cargo clippy --all-targets -- -D warnings` 零警告。
+
+### 前端
+
+- `vite.config.ts`：dev server 代理 `/api` 与 `/ws` 增加 `changeOrigin: true`——Vite 代理默认保留原始 Host（localhost:5173）会被新校验拒绝；不影响生产构建与 vitest（475 测试通过）。
+
 ## 开发中（2026-09-26 功能 Bug 审计修复）
 
 - 调度器把五字段 cron 的数字星期、列表、范围与步长转换为标准语义（0/7=周日、1=周一），补下次触发时间回归测试。

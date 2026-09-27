@@ -180,7 +180,7 @@ NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果
 
 ### Updater（更新器）
 
-- 通道：`UpdateChannel::{Stable,Prerelease,All}`（`src/config/schema.rs`），`All` 下正式/预发布一起按 semver 取最高；列表为空时回退单包口径
+- 通道：`UpdateChannel::{Stable,Prerelease,All}`（`src/config/schema.rs`），`All` 下正式/预发布一起按 semver 取最高；`Prerelease` 枚举为空时回退正式版清单（单包口径），`All` 无回退——列表为空即 `NoMatchingRelease`（默认 GitHub 源下 releases 列表为空意味着 releases/latest 同样不可用，回退无意义）
 - 状态落盘：`update/last_check.json`（UTC RFC3339，`GET /api/update-state` 回放，前端“上次检查”数据源）；每次检查无论成败均刷新
 - 开关：全局 `auto_check_enabled` 为总开关（关后仅手动检查）；`check_interval_hours==0` 仅启动检查；有周期检查时 `check_on_startup` 与首轮 due_now 语义等价
 - 代理收敛：`resolved_proxy_url()`（`proxy_url` 显式优先，回退旧 `proxy_port` 兼容）
@@ -328,4 +328,4 @@ Conventional Commits，中文描述：
 
 ### 更新通道
 
-`config.global.updater.channel`（`UpdateChannel::Stable/Prerelease/All`）。`Stable` 仅正式版（等价 releases/latest 单包），`Prerelease` 仅预发布，`All` 取最高；`All` 在枚举为空时回退单包，避免“切通道后无候选”回归。检查记录无论成败均落盘 `update/last_check.json`，前端经 `GET /api/update-state` 展示。
+`config.global.updater.channel`（`UpdateChannel::Stable/Prerelease/All`）。`Stable` 仅正式版（等价 releases/latest 单包），`Prerelease` 仅预发布（枚举为空时回退正式版清单），`All` 取最高（枚举为空时报 `NoMatchingRelease`，**不**回退单包——默认 GitHub 源下 releases 列表为空即 releases/latest 同样不可用）。检查记录无论成败均落盘 `update/last_check.json`，前端经 `GET /api/update-state` 展示。
