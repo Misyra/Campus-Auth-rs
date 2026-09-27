@@ -236,7 +236,7 @@ async function runTest(): Promise<void> {
         :class="{ active: !isHttp && !isScript }"
         @click="setChannel('browser')"
       >
-        <span class="channel-card-icon"><IconApp name="chrome" /></span>
+        <span class="channel-card-icon"><IconApp name="window-cursor" /></span>
         <span class="channel-card-copy">
           <strong>浏览器自动化</strong>
           <small>按任务步骤操作登录页，兼容验证码与动态表单</small>
@@ -252,7 +252,7 @@ async function runTest(): Promise<void> {
         :class="{ active: isHttp }"
         @click="setChannel('http')"
       >
-        <span class="channel-card-icon"><IconApp name="globe" /></span>
+        <span class="channel-card-icon"><IconApp name="send" /></span>
         <span class="channel-card-copy">
           <strong>直连请求</strong>
           <small>直接向校园网网关发登录请求，不开浏览器、更快更省资源</small>

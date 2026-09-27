@@ -570,10 +570,9 @@ async function skipWizard() {
               :class="{ selected: selectedChannel === 'browser' }"
               @click="chooseChannel('browser')"
             >
-              <IconApp name="chrome" class="wizard-channel-icon" />
+              <IconApp name="window-cursor" class="wizard-channel-icon" />
               <strong>浏览器自动化</strong>
-              <span>需要 Python 与浏览器环境</span>
-              <span>适合有验证码、动态表单或复杂交互的门户</span>
+              <span>使用浏览器自动化进行登录，模拟实际的登录流程</span>
             </button>
             <button
               type="button"
@@ -581,10 +580,9 @@ async function skipWizard() {
               :class="{ selected: selectedChannel === 'http' }"
               @click="chooseChannel('http')"
             >
-              <IconApp name="globe" class="wizard-channel-icon" />
+              <IconApp name="send" class="wizard-channel-icon" />
               <strong>直连请求</strong>
-              <span>免 Python 与浏览器环境</span>
-              <span>适合门户登录接口可直接调用、无验证码的情况</span>
+              <span>直接使用 GET/POST 请求进行登录，可能需要逆向前端</span>
             </button>
           </div>
           <p class="wizard-note">自定义脚本渠道属高级用法，可在「方案」页的登录方式中配置；不确定选哪个时，先选浏览器自动化。</p>

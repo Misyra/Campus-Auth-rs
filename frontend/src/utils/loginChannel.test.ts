@@ -86,8 +86,8 @@ describe("loginChannelLabel", () => {
 
   it("每个渠道都有徽标图标与悬停说明", () => {
     // 图标名必须落在 IconApp 注册表里（返回类型已收窄，这里是运行时兜底）
-    expect(loginChannelIcon("browser")).toBe("chrome");
-    expect(loginChannelIcon("http")).toBe("globe");
+    expect(loginChannelIcon("browser")).toBe("window-cursor");
+    expect(loginChannelIcon("http")).toBe("send");
     expect(loginChannelIcon("script")).toBe("code");
     for (const channel of ["browser", "http", "script"] as const) {
       expect(loginChannelHint(channel).length).toBeGreaterThan(0);

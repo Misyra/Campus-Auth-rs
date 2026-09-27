@@ -25,15 +25,17 @@ export function loginChannelShortLabel(channel: LoginChannel | string | undefine
  * 登录渠道 → 徽标图标名（`IconApp` 的 name）。
  *
  * 与标签同处一地：换了图标名或加了渠道，列表卡与其它入口不必各自去猜。
+ * 渠道卡（向导 / 方案页）与本函数共用同一套图标，保证"同概念同图形"：
+ * 浏览器自动化 = 浏览器窗口 + 光标，直连请求 = 纸飞机（发送请求）。
  * 返回类型收窄成字面量联合而非 `string`——`IconApp` 的 `name` 是注册表键的联合，
  * 返回 `string` 会在每个宿主处编译不过。
  */
 export function loginChannelIcon(
   channel: LoginChannel | string | undefined,
-): "chrome" | "globe" | "code" {
-  if (channel === "http") return "globe";
+): "window-cursor" | "send" | "code" {
+  if (channel === "http") return "send";
   if (channel === "script") return "code";
-  return "chrome";
+  return "window-cursor";
 }
 
 /**
