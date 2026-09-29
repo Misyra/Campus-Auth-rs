@@ -446,6 +446,56 @@ impl HttpAttemptReport {
     }
 }
 
+/// 两种任务格式共用的内置占位符，脚本产出和步骤提取值随后覆盖到同一张表。
+fn initial_vars(req: &HttpLoginRequest) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("username".to_string(), req.username.clone()),
+        ("password".to_string(), req.password.to_string()),
+        // 运营商值原样透传，门户特有的后缀由任务脚本映射。
+        ("isp".to_string(), req.isp.clone()),
+        ("auth_url".to_string(), req.auth_url.clone()),
+        // 本机地址取不到时保留空串，让模板和脚本自行处理。
+        ("local_ip".to_string(), req.local_ip.clone()),
+        ("local_mac".to_string(), req.local_mac.clone()),
+    ])
+}
+
+/// 最终响应的判定；消息与诊断格式仍由各自的任务路径生成。
+enum HttpResponseVerdict {
+    Failure(Outcome),
+    Success,
+    MissingSuccess,
+}
+
+fn classify_response(
+    req: &HttpLoginRequest,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> HttpResponseVerdict {
+    let failure_pattern = req.failure_pattern.trim();
+    if !failure_pattern.is_empty() && body.contains(failure_pattern) {
+        let outcome = match req.failure_action {
+            crate::tasks::HttpFailureAction::Credential => Outcome::InvalidCredential,
+            crate::tasks::HttpFailureAction::Retry => Outcome::AssertionFailed,
+            crate::tasks::HttpFailureAction::Manual => Outcome::ManualRequired,
+        };
+        return HttpResponseVerdict::Failure(outcome);
+    }
+
+    // 网络模式只把响应当作候选成功；最终由会话层网络验证决定。
+    if req.success_check == crate::tasks::HttpSuccessCheck::Network {
+        return HttpResponseVerdict::Success;
+    }
+    let success_pattern = req.success_pattern.trim();
+    if (success_pattern.is_empty() && status.is_success())
+        || (!success_pattern.is_empty() && body.contains(success_pattern))
+    {
+        HttpResponseVerdict::Success
+    } else {
+        HttpResponseVerdict::MissingSuccess
+    }
+}
+
 /// 执行一次直连登录尝试（不发网络验证，验证由会话状态机负责）
 pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     if !req.steps.is_empty() {
@@ -472,17 +522,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 
     // 占位符表：先放内置项（下线请求只能用这些，见下方第 1 步），脚本产出的字段在第 2 步
     // 并入同一张表。
-    let mut vars = BTreeMap::new();
-    vars.insert("username".to_string(), req.username.clone());
-    vars.insert("password".to_string(), req.password.to_string());
-    // 方案运营商：预设「移动/联通/电信」或自定义关键字原样透传，未选择为空串。
-    // 门户侧的表示法（Dr.COM 的 @cmcc 后缀等）由任务脚本映射，不在引擎里写死
-    vars.insert("isp".to_string(), req.isp.clone());
-    vars.insert("auth_url".to_string(), req.auth_url.clone());
-    // 本机地址同样注册为占位符：脚本可以不用 ctx 而直接在 URL/body 里写
-    // {local_ip}，也能在 transform 中引用；取不到时为空串（脚本须容忍）
-    vars.insert("local_ip".to_string(), req.local_ip.clone());
-    vars.insert("local_mac".to_string(), req.local_mac.clone());
+    let mut vars = initial_vars(req);
     let mut secrets = collect_secrets(&vars);
 
     // 1. 退出登录动作（可选）：治「IP 已在线，拒绝重复登录」类门户——先踢掉旧会话再登录。
@@ -693,50 +733,30 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 
     // 6. 成败判定
     normalize_secrets(&mut secrets);
-    let body_text = body;
-    let failure_hit =
-        !req.failure_pattern.trim().is_empty() && body_text.contains(req.failure_pattern.trim());
-    let success_pattern = req.success_pattern.trim();
-    let success = if failure_hit {
-        false
-    } else if req.success_check == crate::tasks::HttpSuccessCheck::Network {
-        // 网络检测模式：响应体与状态码都不参与成功判定（见 HttpSuccessCheck 文档），
-        // 此处一律判候选成功，最终成败由会话层登录后网络验证决定
-        true
-    } else if success_pattern.is_empty() {
-        status.is_success()
-    } else {
-        body_text.contains(success_pattern)
-    };
-
-    let snippet = truncate_snippet(&body_text);
-    let (outcome, message) = if failure_hit {
-        (
-            match req.failure_action {
-                crate::tasks::HttpFailureAction::Credential => Outcome::InvalidCredential,
-                crate::tasks::HttpFailureAction::Retry => Outcome::AssertionFailed,
-                crate::tasks::HttpFailureAction::Manual => Outcome::ManualRequired,
-            },
+    let snippet = truncate_snippet(&body);
+    let (outcome, message) = match classify_response(req, status, &body) {
+        HttpResponseVerdict::Failure(outcome) => (
+            outcome,
             format!(
                 "门户返回失败标识（HTTP {status}）: {}",
                 redact_text(&snippet, &secrets)
             ),
-        )
-    } else if success {
-        let message = if req.success_check == crate::tasks::HttpSuccessCheck::Network {
-            format!("已发送登录请求（HTTP {status}），成功与否由登录后网络检测判定")
-        } else {
-            format!("直连请求成功（HTTP {status}）")
-        };
-        (Outcome::Success, message)
-    } else {
-        (
+        ),
+        HttpResponseVerdict::Success => {
+            let message = if req.success_check == crate::tasks::HttpSuccessCheck::Network {
+                format!("已发送登录请求（HTTP {status}），成功与否由登录后网络检测判定")
+            } else {
+                format!("直连请求成功（HTTP {status}）")
+            };
+            (Outcome::Success, message)
+        }
+        HttpResponseVerdict::MissingSuccess => (
             Outcome::AssertionFailed,
             format!(
                 "未命中成功标识（HTTP {status}）: {}",
                 redact_text(&snippet, &secrets)
             ),
-        )
+        ),
     };
 
     HttpAttemptReport {
@@ -771,14 +791,7 @@ async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             );
         }
     };
-    let mut vars = BTreeMap::from([
-        ("username".to_string(), req.username.clone()),
-        ("password".to_string(), req.password.to_string()),
-        ("isp".to_string(), req.isp.clone()),
-        ("auth_url".to_string(), req.auth_url.clone()),
-        ("local_ip".to_string(), req.local_ip.clone()),
-        ("local_mac".to_string(), req.local_mac.clone()),
-    ]);
+    let mut vars = initial_vars(req);
     // 步骤可覆盖内置变量；后面统一脱敏时仍须记住前面请求用过的旧值。
     let mut secrets = collect_secrets(&vars);
     let result_id = if req.result_step_id.is_empty() {
@@ -1117,38 +1130,23 @@ async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             &secrets,
         );
     };
-    let failure_hit =
-        !req.failure_pattern.trim().is_empty() && body.contains(req.failure_pattern.trim());
-    let success = if failure_hit {
-        false
-    } else if req.success_check == crate::tasks::HttpSuccessCheck::Network {
-        true
-    } else if req.success_pattern.trim().is_empty() {
-        status.is_success()
-    } else {
-        body.contains(req.success_pattern.trim())
-    };
-    let (outcome, message) = if failure_hit {
-        (
-            match req.failure_action {
-                crate::tasks::HttpFailureAction::Credential => Outcome::InvalidCredential,
-                crate::tasks::HttpFailureAction::Retry => Outcome::AssertionFailed,
-                crate::tasks::HttpFailureAction::Manual => Outcome::ManualRequired,
-            },
+    let (outcome, message) = match classify_response(req, status, &body) {
+        HttpResponseVerdict::Failure(outcome) => (
+            outcome,
             format!("步骤「{result_id}」命中失败标识（HTTP {status}）"),
-        )
-    } else if success {
-        let message = if req.success_check == crate::tasks::HttpSuccessCheck::Network {
-            format!("已完成 HTTP 登录流程（HTTP {status}），由登录后网络检测判断结果")
-        } else {
-            format!("HTTP 登录流程成功（HTTP {status}）")
-        };
-        (Outcome::Success, message)
-    } else {
-        (
+        ),
+        HttpResponseVerdict::Success => {
+            let message = if req.success_check == crate::tasks::HttpSuccessCheck::Network {
+                format!("已完成 HTTP 登录流程（HTTP {status}），由登录后网络检测判断结果")
+            } else {
+                format!("HTTP 登录流程成功（HTTP {status}）")
+            };
+            (Outcome::Success, message)
+        }
+        HttpResponseVerdict::MissingSuccess => (
             Outcome::AssertionFailed,
             format!("步骤「{result_id}」未命中成功标识（HTTP {status}）"),
-        )
+        ),
     };
     normalize_secrets(&mut secrets);
     for report in &mut reports {
@@ -2919,6 +2917,96 @@ mod tests {
                 crate::login::session::LoginTerminal::Failed
             )
         );
+    }
+
+    /// 旧式任务与单请求有序流程必须保持同一判定口径；消息可按各自格式展示。
+    #[tokio::test]
+    async fn legacy_and_flow_response_verdicts_match() {
+        use crate::tasks::{HttpFailureAction, HttpSuccessCheck};
+
+        let cases = [
+            (
+                200,
+                "登录成功，但密码错误",
+                HttpFailureAction::Credential,
+                HttpSuccessCheck::Response,
+                "登录成功",
+                "密码错误",
+                Outcome::InvalidCredential,
+            ),
+            (
+                200,
+                "网关繁忙",
+                HttpFailureAction::Retry,
+                HttpSuccessCheck::Response,
+                "登录成功",
+                "网关繁忙",
+                Outcome::AssertionFailed,
+            ),
+            (
+                200,
+                "请完成短信验证",
+                HttpFailureAction::Manual,
+                HttpSuccessCheck::Network,
+                "登录成功",
+                "短信验证",
+                Outcome::ManualRequired,
+            ),
+            (
+                503,
+                "未知响应",
+                HttpFailureAction::Credential,
+                HttpSuccessCheck::Network,
+                "登录成功",
+                "密码错误",
+                Outcome::Success,
+            ),
+            (
+                503,
+                "未知响应",
+                HttpFailureAction::Credential,
+                HttpSuccessCheck::Response,
+                "",
+                "密码错误",
+                Outcome::AssertionFailed,
+            ),
+            (
+                503,
+                "登录成功",
+                HttpFailureAction::Credential,
+                HttpSuccessCheck::Response,
+                "登录成功",
+                "密码错误",
+                Outcome::Success,
+            ),
+        ];
+        for (status, body, action, check, success, failure, expected) in cases {
+            for use_flow in [false, true] {
+                let url = spawn_response(status, body).await;
+                let mut req = request(url.clone());
+                req.failure_action = action;
+                req.success_check = check;
+                req.success_pattern = success.into();
+                req.failure_pattern = failure.into();
+                if use_flow {
+                    req.steps = vec![HttpFlowStep {
+                        id: "login".into(),
+                        name: "登录请求".into(),
+                        url,
+                        ..Default::default()
+                    }];
+                    req.result_step_id = "login".into();
+                }
+                let report = run_once(&req).await;
+                assert_eq!(
+                    report.outcome, expected,
+                    "flow={use_flow}: {}",
+                    report.message
+                );
+                assert!(!report.rendered_url.contains("abcdef"));
+                assert!(!report.response_snippet.contains("abcdef"));
+            }
+        }
     }
 
     #[tokio::test]
