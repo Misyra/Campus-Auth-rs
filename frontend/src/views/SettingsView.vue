@@ -80,8 +80,8 @@ function handleSave() {
       <router-view />
     </form>
 
-    <!-- 外观页改的是本机显示偏好（即时生效、存 localStorage），无服务端草稿可提交 -->
-    <div v-if="!isAppearanceTab" class="save-bar">
+    <!-- 有待提交的服务端配置时才占用视口；外观偏好即时生效，不走保存栏。 -->
+    <div v-if="!isAppearanceTab && !configLoadFailed && (config.dirty.value || saveFailed || busy.save)" class="save-bar">
       <button
         class="btn btn-primary save-btn"
         :class="{

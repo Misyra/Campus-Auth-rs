@@ -46,11 +46,11 @@ async function timeSource(kind: TaskRepoKind, source: TaskRepoSourceId): Promise
 /**
  * 并行测速两个预设镜像源。
  *
- * 只测 `TASK_REPO_SOURCES` 里带预设索引地址的源（GitHub / Gitee）；自定义源
+ * 只测 `TASK_REPO_SOURCES` 里为当前类别配置了索引地址的源（GitHub / Gitee）；自定义源
  * 需要用户手填地址，不属于"自动选一个可用源"的范畴，向导不测它。
  */
 export async function measureRepoSources(kind: TaskRepoKind): Promise<RepoSourceTiming[]> {
-  const mirrors = TASK_REPO_SOURCES.filter((s) => s.indexUrl).map((s) => s.id);
+  const mirrors = TASK_REPO_SOURCES.filter((s) => s.indexUrls?.[kind]).map((s) => s.id);
   return Promise.all(mirrors.map((source) => timeSource(kind, source)));
 }
 

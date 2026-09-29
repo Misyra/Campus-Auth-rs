@@ -20,14 +20,12 @@
   display: flex;
   align-items: center;
   gap: var(--space-md);
-  backdrop-filter: blur(10px);
-  transition: transform var(--dur-slow) var(--ease-out), border-color var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out);
+  transition: border-color var(--dur-base) var(--ease-out), background-color var(--dur-base) var(--ease-out);
 }
 
 .stat-card:hover {
-  transform: translateY(-2px);
   border-color: var(--border-hover);
-  box-shadow: var(--shadow-float);
+  background: var(--bg-card);
 }
 
 .stat-icon {
@@ -40,9 +38,6 @@
   transition: transform var(--dur-slow) var(--ease-out);
 }
 
-.stat-card:hover .stat-icon {
-  transform: scale(1.08);
-}
 
 .stat-icon svg {
   width: 24px;
@@ -124,23 +119,6 @@
   min-height: 0;
 }
 
-.action-buttons {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.action-buttons .btn {
-  justify-content: flex-start;
-  width: 100%;
-}
-
-.action-buttons .btn svg {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-}
-
 .log-card {
   display: flex;
   flex-direction: column;
@@ -162,7 +140,6 @@
   min-height: 0;
   font-family: var(--font-mono);
   font-size: var(--text-md);
-  will-change: scroll-position;
 }
 
 .log-viewer::-webkit-scrollbar {
@@ -327,6 +304,35 @@
   gap: 10px;
 }
 
+.quick-actions-card { flex: none; }
+.quick-actions-card .card-header { padding: 10px 16px; }
+.quick-actions-card .card-body { padding: 12px 16px; }
+
+.action-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.action-buttons .btn {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px;
+  gap: 6px;
+  font-size: var(--text-md);
+}
+
+.action-buttons .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+.history-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+
 .history-row--meta {
   flex-wrap: wrap;
   gap: 4px 8px;
@@ -394,11 +400,6 @@
   flex-shrink: 0;
 }
 
-/* 正常态说明收纳进 ? 悬浮气泡（复用 FieldHelp），紧随标题、防挤压 */
-.network-status-banner .field-help {
-  flex-shrink: 0;
-}
-
 .network-status-banner.connected {
   background: rgba(var(--success-rgb), 0.08);
   border-color: rgba(var(--success-rgb), 0.2);
@@ -420,11 +421,21 @@
   animation: pulse 2s ease-in-out infinite;
 }
 
-/* 环境未就绪提示横幅：整条可点击跳转设置页；横幅内的初始化/详情按钮用
-   stopPropagation 自行处理，点击不触发整条跳转 */
+/* 环境提示只保留两个明确的操作入口，避免横幅本身也承担隐含点击行为。 */
 .network-status-banner.env-banner {
-  cursor: pointer;
+  min-height: 0;
+  padding: 10px 16px;
+  flex-wrap: wrap;
+  backdrop-filter: none;
 }
+
+.network-status-banner.env-banner .status-text {
+  flex: 1 1 260px;
+  line-height: 1.45;
+}
+
+.env-message-compact,
+.env-action-compact { display: none; }
 
 /* 横幅内操作按钮跟随横幅文字色（错误色调）：描边幽灵样式压过默认按钮底色，
    链接按钮同样取 currentColor 而非全局 --accent，避免在红色横幅里撞色 */
@@ -483,4 +494,111 @@
   font-size: var(--text-sm);
   opacity: 0.8;
   margin-left: auto;
+}
+
+/* 主状态区只占一行，避免吃掉历史与日志的可视高度。 */
+.dashboard-page > .network-status-hero {
+  gap: 12px;
+  min-height: 0;
+  padding: 12px 16px;
+  border-radius: var(--radius-xl);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  backdrop-filter: none;
+  box-shadow: var(--shadow);
+}
+
+.dashboard-page > .network-status-hero.connected { border-color: var(--success-border); }
+.dashboard-page > .network-status-hero.disconnected { border-color: var(--error-border); }
+.dashboard-page > .network-status-hero.checking { border-color: rgba(var(--primary-rgb), 0.35); }
+.dashboard-page > .network-status-hero.idle { border-color: var(--border); }
+
+.network-status-symbol {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: var(--radius-xl);
+  background: rgba(var(--slate-rgb), 0.12);
+  color: var(--text-secondary);
+}
+
+.network-status-symbol svg { width: 20px; height: 20px; }
+.connected .network-status-symbol { background: var(--success-bg); color: var(--success); }
+.disconnected .network-status-symbol { background: var(--error-bg); color: var(--error); }
+.checking .network-status-symbol { background: rgba(var(--primary-rgb), 0.12); color: var(--primary); }
+
+.network-status-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dashboard-page > .network-status-hero .status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.network-status-hero .status-dot {
+  width: 7px;
+  height: 7px;
+  animation: none;
+}
+
+.dashboard-page > .network-status-hero .status-detail {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  opacity: 1;
+}
+
+@media (max-width: 1100px) {
+  .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
+  .dashboard-page .dashboard-grid { flex: none; }
+  .dashboard-page .history-card,
+  .dashboard-page .log-card { min-height: 300px; }
+  .dashboard-page .log-card { min-height: 420px; }
+}
+
+@media (max-height: 700px) {
+  .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
+  .dashboard-page .dashboard-grid { flex: none; }
+  .dashboard-page .history-card { min-height: 280px; }
+  .dashboard-page .log-card { min-height: 340px; }
+}
+
+@media (max-width: 900px) {
+  .dashboard-page > .network-status-hero { flex-wrap: wrap; }
+}
+
+@media (max-width: 640px) {
+  .dashboard-page > .network-status-hero {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .dashboard-page > .network-status-hero .network-status-symbol { display: none; }
+  .network-status-banner.env-banner { gap: 6px 8px; padding: 8px 12px; }
+  .network-status-banner.env-banner .status-text { flex: 1 1 calc(100% - 18px); }
+  .env-message-full,
+  .env-action-full { display: none; }
+  .env-message-compact,
+  .env-action-compact { display: inline; }
+  .network-status-banner.env-banner .btn { min-height: 30px; padding: 4px 8px; }
+  .dashboard-page .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .dashboard-page .stat-card { padding: 12px; gap: 8px; min-width: 0; }
+  .dashboard-page .stat-icon { width: 34px; height: 34px; flex: none; }
+  .dashboard-page .stat-icon svg { width: 18px; height: 18px; }
+  .dashboard-page .stat-info { min-width: 0; }
+  .dashboard-page .stat-label { font-size: var(--text-xs); }
+  .dashboard-page .stat-value { font-size: var(--text-lg); }
 }

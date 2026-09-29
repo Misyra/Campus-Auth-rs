@@ -32,6 +32,7 @@ const reconnectHint = computed(() => {
 });
 
 const pageTitle = computed(() => (route.meta.title as string) || "认证喵");
+const compactPageTitle = computed(() => pageTitle.value.split(" · ").pop() || pageTitle.value);
 const showDirty = computed(() => dirty.value && String(route.name).startsWith("settings"));
 
 function onActionClick(action: NotificationAction | null): void {
@@ -59,17 +60,17 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
 <template>
   <header class="top-bar">
     <div class="top-title-area">
-      <h1 class="page-title">{{ pageTitle }}</h1>
+      <h1 class="page-title"><span class="page-title-full">{{ pageTitle }}</span><span class="page-title-compact">{{ compactPageTitle }}</span></h1>
       <span v-if="showDirty" class="top-dirty-hint">
         <span class="top-dirty-dot"></span>未保存
       </span>
     </div>
+    <div v-if="wsReconnecting" class="ws-reconnect-bar ws-reconnect-inline" :title="reconnectHint">
+      <span class="spinner"></span>
+      <span class="ws-reconnect-text">{{ reconnectHint }}</span>
+      <button class="btn btn-xs" @click="retryNow()" title="跳过退避等待，立即以最短间隔重连">立即重试</button>
+    </div>
     <div class="top-actions">
-      <div v-if="wsReconnecting" class="ws-reconnect-bar ws-reconnect-inline" :title="reconnectHint">
-        <span class="spinner"></span>
-        <span class="ws-reconnect-text">{{ reconnectHint }}</span>
-        <button class="btn btn-xs" @click="retryNow()" title="跳过退避等待，立即以最短间隔重连">立即重试</button>
-      </div>
       <div ref="notificationWrapperRef" class="notification-wrapper">
         <button
           class="btn btn-icon-only"
@@ -110,10 +111,11 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
         @click="toggleMonitor"
         :disabled="busy.monitor"
         :title="status.monitoring ? '停止网络检测和自动登录' : '开始检测网络，断网时自动登录'"
+        :aria-label="status.monitoring ? '停止检测' : '启动检测'"
       >
         <span v-if="busy.monitor" class="spinner" :class="{ 'spinner-on-accent': !status.monitoring }"></span>
         <IconApp v-else class="btn-icon" :name="status.monitoring ? 'pause' : 'play'" />
-        {{ busy.monitor ? "处理中..." : (status.monitoring ? "停止检测" : "启动检测") }}
+        <span class="monitor-action-label">{{ busy.monitor ? "处理中..." : (status.monitoring ? "停止检测" : "启动检测") }}</span>
       </button>
     </div>
   </header>

@@ -428,7 +428,6 @@ function openImport(withKeyword: boolean) {
   showRepoImport(repoKind.value, {
     ...(fastest ? { source: fastest } : {}),
     ...(withKeyword && schoolName.value.trim() ? { keyword: schoolName.value.trim() } : {}),
-    autoFetch: true,
     afterImport: (id) => onImported(id),
   });
 }

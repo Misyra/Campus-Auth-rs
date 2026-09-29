@@ -1,9 +1,9 @@
 /* system.css — 系统设置子页（模板徽标已统一走通用 .badge，此处旧类退役保留注释防回潮）
  * .autostart-method-badge -> .badge.badge--sm.badge--mono；.env-pill -> .badge.badge--sm（成功/警告走 --success/--warn） */
 
-/* ==================== 运行模式（默认 / 调试 / 自定义） ==================== */
+/* ==================== 配置预设（默认 / 调试） ==================== */
 
-/* 三栏并排：两个可点预设 + 一个只读的「自定义」态。窄屏由 .run-mode-options
+/* 两个预设并排；自定义状态只显示在卡头，避免重复展示一张不可点击的选项卡。窄屏由 .run-mode-options
    的 flex-wrap 折行（min-width 保证折行后仍不至于挤成窄条）。 */
 .run-mode-options {
   display: flex;
@@ -38,11 +38,6 @@
   background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.1), rgba(var(--purple-rgb), 0.1));
 }
 
-/* 自定义态不可点：它是"手动改过"的自然结果，不是一个可选目标 */
-.run-mode-option--custom {
-  cursor: default;
-}
-
 .run-mode-option:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -72,6 +67,23 @@
 
 .run-mode-hint {
   display: block;
+  margin-top: var(--space-sm);
+}
+
+.system-update-page .settings-subsection {
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border);
+}
+
+.system-update-page .settings-subsection h3 {
+  margin: 0 0 var(--space-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.system-update-page .settings-subsection .form-group {
   margin-top: var(--space-sm);
 }
 

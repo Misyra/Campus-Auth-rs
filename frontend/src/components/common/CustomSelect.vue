@@ -23,11 +23,13 @@ const props = withDefaults(
     modelValue: string;
     options: SelectOption[];
     placeholder?: string;
+    ariaLabel?: string;
     compact?: boolean;
     disabled?: boolean;
   }>(),
   {
     placeholder: "请选择...",
+    ariaLabel: "",
     compact: false,
     disabled: false,
   },
@@ -133,6 +135,7 @@ onBeforeUnmount(() => {
       type="button"
       class="custom-select-trigger"
       role="combobox"
+      :aria-label="ariaLabel || selectedLabel || placeholder"
       :aria-expanded="open"
       aria-haspopup="listbox"
       :aria-activedescendant="open && activeIndex >= 0 ? selectUid + '-opt-' + activeIndex : undefined"

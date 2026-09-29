@@ -44,7 +44,7 @@ const giteeRaw = (file: string): string =>
   `https://raw.giteeusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/raw/master/${file}`;
 
 /**
- * 仓库条目的类别。统一索引中每条都显式写 type，旧条目缺省仍按 browser 读取。
+ * 仓库条目的类别。浏览器旧条目缺省 type，仍按 browser 读取。
  */
 export type TaskRepoKind = "browser" | "http" | "script";
 
@@ -126,7 +126,7 @@ export type TaskRepoSourceId = TaskRepoMirrorId | "custom";
 /**
  * 仓库导入的「源」选项表（单一事实源）。
  *
- * 两个字段各有用途：`indexUrl` 是给程序 GET 的统一 raw JSON 地址，
+ * 两个字段各有用途：`indexUrls` 是按任务类别给程序 GET 的 raw JSON 地址，
  * `homeUrl` 是给人点开浏览的仓库页面——真实缺陷：空态里
  * 「直接查看仓库」原先把索引地址当作可读页面链接，点开是一屏 raw JSON 而不是仓库首页。
  * 自定义源两项皆空（用户自填的地址未必有对应主页）。
@@ -136,38 +136,47 @@ export const TASK_REPO_SOURCES: readonly {
   label: string;
   /** 该源在「源」选择器旁的补充说明（空则不显示） */
   hint: string;
-  /** 该源的统一索引地址；自定义源为 null，由用户手填 */
-  indexUrl: string | null;
+  /** 该源按类别划分的索引地址；自定义源为 null，由用户手填 */
+  indexUrls: Record<TaskRepoKind, string> | null;
   homeUrl: string;
 }[] = [
   {
     id: "github",
     label: "GitHub",
     hint: "国内访问可能较慢或加载失败，卡住时请改用 Gitee 镜像",
-    indexUrl: githubRaw("index.json"),
+    indexUrls: {
+      browser: githubRaw("index.json"),
+      http: githubRaw("index.http.json"),
+      // 仓库尚无脚本专属索引；保留旧索引作为可读取的空列表来源。
+      script: githubRaw("index.json"),
+    },
     homeUrl: TASK_REPO_URL,
   },
   {
     id: "gitee",
     label: "Gitee",
     hint: "国内访问更快，推荐国内用户使用",
-    indexUrl: giteeRaw("index.gitee.json"),
+    indexUrls: {
+      browser: giteeRaw("index.gitee.json"),
+      http: giteeRaw("index.http.gitee.json"),
+      script: giteeRaw("index.gitee.json"),
+    },
     homeUrl: TASK_REPO_URL_GITEE,
   },
   {
     id: "custom",
     label: "自定义",
     hint: "",
-    indexUrl: null,
+    indexUrls: null,
     homeUrl: "",
   },
 ];
 
 /**
- * 取某源下的统一索引地址；保留类别参数供现有调用方传递筛选目标。
+ * 按任务类别和来源取索引地址；自定义来源由用户填写。
  */
-export function presetRepoIndexUrl(_kind: TaskRepoKind, source: TaskRepoSourceId): string {
-  return TASK_REPO_SOURCES.find((s) => s.id === source)?.indexUrl ?? "";
+export function presetRepoIndexUrl(kind: TaskRepoKind, source: TaskRepoSourceId): string {
+  return TASK_REPO_SOURCES.find((s) => s.id === source)?.indexUrls?.[kind] ?? "";
 }
 
 export const LIMITS = {

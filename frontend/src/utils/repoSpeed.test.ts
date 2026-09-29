@@ -64,7 +64,7 @@ describe("measureRepoSources", () => {
     expect(results[0].ms).not.toBeNull();
   });
 
-  it("直连类别沿用共享索引地址，按镜像源测速", async () => {
+  it("直连类别按镜像源测速专用 HTTP 索引", async () => {
     fetchIndexMock.mockResolvedValue([]);
     await measureRepoSources("http");
     expect(fetchIndexMock).toHaveBeenCalledWith(presetRepoIndexUrl("http", "github"));

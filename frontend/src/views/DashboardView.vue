@@ -13,7 +13,6 @@ import { channelNeedsRuntimeEnvironment } from "@/utils/loginChannel";
 import { missingRequiredComponents } from "@/utils/environmentStatus";
 import { formatDuration, formatTimestamp, formatShortTime } from "@/utils/formatters";
 import CustomSelect from "@/components/common/CustomSelect.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import type { LoginChannel } from "@/api/types";
 
@@ -169,31 +168,35 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
 </script>
 
 <template>
-  <div class="page-content" :class="{ 'has-banner': s.status.monitoring }">
-    <!-- 网络状态横幅 -->
-    <div v-if="s.status.monitoring" class="network-status-banner" :class="s.networkStatus.value">
-      <span class="status-dot"></span>
-      <span class="status-text">{{ s.networkStatusText.value }}</span>
-      <!-- 一切正常时说明依据是噪音：收纳进 ? 悬浮气泡；异常态（门户/离线/冷却/暂停）指引需被看见，保持直显 -->
-      <FieldHelp v-if="s.networkAllGood.value" :text="s.networkStatusDetail.value" />
-      <span v-else class="status-detail">{{ s.networkStatusDetail.value }}</span>
+  <div class="page-content dashboard-page">
+    <!-- 主状态只负责展示网络结论，操作集中在下方的小卡片。 -->
+    <div class="network-status-banner network-status-hero" :class="s.networkStatus.value">
+      <div class="network-status-symbol"><IconApp :name="s.status.monitoring ? 'wifi' : 'pause'" /></div>
+      <div class="network-status-copy">
+        <strong class="status-text"><span class="status-dot"></span>{{ s.status.monitoring ? s.networkStatusText.value : '自动监测已停止' }}</strong>
+        <span v-if="s.status.monitoring" class="status-detail">{{ s.networkStatusDetail.value }}</span>
+      </div>
     </div>
 
-    <!-- 环境未就绪提示：点名缺失组件（口径与关于页/环境页共用 environmentStatus），
-         并就地提供「初始化环境」入口；整条横幅仍可点击跳转设置页 -->
-    <div v-if="showEnvBanner" class="network-status-banner disconnected env-banner" @click="router.push({ name: 'settings-tasks' })">
+    <!-- 环境未就绪提示：点名缺失组件，并就地提供初始化和设置入口。 -->
+    <div v-if="showEnvBanner" class="network-status-banner disconnected env-banner">
       <span class="status-dot"></span>
-      <span class="status-text">运行环境未就绪（缺 {{ envMissingText }}），手动登录时会自动初始化</span>
+      <span class="status-text" :title="`运行环境未就绪（缺 ${envMissingText}），手动登录时会自动初始化`">
+        <span class="env-message-full">运行环境未就绪（缺 {{ envMissingText }}），手动登录时会自动初始化</span>
+        <span class="env-message-compact">运行环境缺少{{ envMissingText }}</span>
+      </span>
       <button
         class="btn btn-sm env-banner-action"
         :disabled="s.busy.env"
         @click.stop="void initEnvNow()"
         title="自动下载并安装缺失的组件（首次可能耗时数分钟）"
+        aria-label="初始化运行环境"
       >
         <IconApp v-if="s.busy.env" name="refresh" class="spin" />
-        {{ s.busy.env ? "初始化中..." : "初始化环境" }}
+        <span v-if="s.busy.env">初始化中...</span>
+        <template v-else><span class="env-action-full">初始化环境</span><span class="env-action-compact">初始化</span></template>
       </button>
-      <button class="btn btn-sm btn-link env-banner-detail" @click.stop="router.push({ name: 'settings-tasks' })">前往设置查看</button>
+      <button class="btn btn-sm btn-link env-banner-detail" @click.stop="router.push({ name: 'settings-tasks' })" aria-label="查看任务与环境设置"><span class="env-action-full">前往设置查看</span><span class="env-action-compact">设置</span></button>
     </div>
 
     <!-- 统计卡片 -->
@@ -242,23 +245,14 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
 
     <div class="dashboard-grid">
       <div class="dashboard-left">
-        <!-- 快捷操作 -->
-        <div class="card">
+        <!-- 常用操作与登录历史相邻，避免在状态横幅两端分散。 -->
+        <div class="card quick-actions-card">
           <div class="card-header"><h2>快捷操作</h2></div>
           <div class="card-body">
             <div class="action-buttons">
-              <button v-if="s.busy.login" class="btn btn-danger" @click="ui.cancelLogin()" title="取消正在执行的登录">
-                <IconApp name="close" />
-                取消登录
-              </button>
-              <button v-else class="btn btn-secondary" @click="ui.manualLogin()" :disabled="s.busy.action || s.busy.loginCooldown" title="立即执行一次登录认证">
-                <IconApp name="log-in" />
-                手动登录
-              </button>
-              <button class="btn btn-secondary" @click="ui.testNetwork()" :disabled="s.busy.action">
-                <IconApp name="wifi" />
-                网络测试
-              </button>
+              <button v-if="s.busy.login" class="btn btn-danger" @click="ui.cancelLogin()" title="取消正在执行的登录"><IconApp name="close" />取消登录</button>
+              <button v-else class="btn btn-secondary" @click="ui.manualLogin()" :disabled="s.busy.action || s.busy.loginCooldown" title="立即执行一次登录认证"><IconApp name="log-in" />手动登录</button>
+              <button class="btn btn-secondary" @click="ui.testNetwork()" :disabled="s.busy.action" title="立即检测当前网络连接"><IconApp name="wifi" />网络测试</button>
             </div>
           </div>
         </div>
@@ -267,11 +261,11 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         <div class="card history-card">
           <div class="card-header">
             <h2>登录历史</h2>
-            <div class="flex-row gap-sm">
-              <button class="btn btn-icon-only" @click="fetchLoginHistory(true)" title="刷新">
+            <div class="history-actions">
+              <button class="btn btn-sm btn-icon-only" @click="fetchLoginHistory(true)" title="刷新" aria-label="刷新登录历史">
                 <IconApp name="refresh" />
               </button>
-              <button class="btn btn-icon-only" @click="clearLoginHistory" title="清空" :disabled="!loginHistory.length">
+              <button class="btn btn-sm btn-icon-only" @click="clearLoginHistory" title="清空" aria-label="清空登录历史" :disabled="!loginHistory.length">
                 <IconApp name="trash" />
               </button>
             </div>
@@ -283,10 +277,6 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
               <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
               <div class="empty-actions">
                 <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'profiles' })">去配置账号</button>
-                <button class="btn btn-sm btn-primary" type="button" :disabled="s.busy.login || s.busy.loginCooldown" @click="void ui.manualLogin()">
-                  <IconApp name="log-in" />
-                  {{ s.busy.login ? '登录中...' : '手动登录' }}
-                </button>
               </div>
             </div>
             <div v-else class="history-list">
@@ -330,8 +320,8 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         </div>
         <div class="card-body">
           <div class="log-toolbar">
-            <CustomSelect v-model="logs.logFilter.level" :options="logLevelOptions" compact />
-            <CustomSelect v-model="logs.logFilter.source" :options="logSourceOptions" compact />
+            <CustomSelect v-model="logs.logFilter.level" :options="logLevelOptions" aria-label="日志级别" compact />
+            <CustomSelect v-model="logs.logFilter.source" :options="logSourceOptions" aria-label="日志来源" compact />
             <input v-model="logs.logFilter.search" type="text" placeholder="搜索日志..." class="log-search" />
           </div>
           <div ref="logViewer" class="log-viewer" @scroll="onLogScroll">

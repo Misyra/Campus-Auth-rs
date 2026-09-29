@@ -22,12 +22,12 @@
   color: var(--text-primary);
   font-size: var(--text-base);
   transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
-  color-scheme: light dark;
+  color-scheme: inherit;
 }
 
-.form-group input:hover,
-.form-group select:hover,
-.form-group textarea:hover {
+.form-group input:hover:not(:disabled),
+.form-group select:hover:not(:disabled),
+.form-group textarea:hover:not(:disabled) {
   background: var(--bg-glass-heavy);
 }
 
@@ -37,6 +37,11 @@
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
+}
+
+.form-group :is(input, select, textarea):disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* ========== Custom Select Dropdown ==========
@@ -58,9 +63,9 @@
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3Epolyline points='6 9 12 15 18'%3E/svg%3E");
 }
 
-.form-group select:hover,
-.form-group textarea:hover,
-.form-group input:hover {
+.form-group select:hover:not(:disabled),
+.form-group textarea:hover:not(:disabled),
+.form-group input:hover:not(:disabled) {
   border-color: var(--border-hover);
 }
 

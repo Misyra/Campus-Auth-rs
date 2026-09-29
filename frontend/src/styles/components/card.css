@@ -6,9 +6,7 @@
   -webkit-backdrop-filter: var(--card-blur, var(--blur-md));
   backdrop-filter: var(--card-blur, var(--blur-md));
   box-shadow: var(--shadow);
-  transition: border-color var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
-  /* 提前告知浏览器将有 transform 变化，优化毛玻璃动画 */
-  will-change: transform;
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 
 .card:hover {

@@ -26,9 +26,9 @@ import {
 /** 主程序仓库（**不应**被任务类入口引用） */
 const APP_REPO = "https://github.com/Misyra/Campus-Auth-rs";
 
-/** 选项表里全部预设索引地址（两个镜像各一份共享索引） */
+/** 选项表里全部不同的预设索引地址（浏览器 / HTTP 各有双镜像） */
 function allPresetIndexUrls(): string[] {
-  return TASK_REPO_SOURCES.flatMap((s) => s.indexUrl ? [s.indexUrl] : []);
+  return [...new Set(TASK_REPO_SOURCES.flatMap((s) => s.indexUrls ? Object.values(s.indexUrls) : []))];
 }
 
 describe("任务仓库坐标", () => {
@@ -38,30 +38,30 @@ describe("任务仓库坐标", () => {
     expect(TASK_REPO_NAME).not.toBe("Campus-Auth-rs");
   });
 
-  it("两个索引地址都指向任务仓库（github 与 gitee 镜像同仓）", () => {
+  it("四个索引地址都指向任务仓库（github 与 gitee 镜像同仓）", () => {
     const urls = allPresetIndexUrls();
-    expect(urls).toHaveLength(2);
+    expect(urls).toHaveLength(4);
     for (const url of urls) {
       expect(url).toContain(`/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/`);
       expect(url).not.toContain("/Campus-Auth-rs/");
     }
   });
 
-  it("索引地址是可直接 GET 的 raw 地址，三类任务共用同一文件", () => {
+  it("浏览器与 HTTP 各取仓库实际发布的索引，脚本暂沿用旧索引", () => {
     expect(presetRepoIndexUrl("browser", "github")).toMatch(
       /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.json$/,
     );
     expect(presetRepoIndexUrl("http", "github")).toMatch(
-      /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.json$/,
+      /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.http\.json$/,
     );
     expect(presetRepoIndexUrl("browser", "gitee")).toMatch(
       /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.gitee\.json$/,
     );
     expect(presetRepoIndexUrl("http", "gitee")).toMatch(
-      /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.gitee\.json$/,
+      /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.http\.gitee\.json$/,
     );
-    expect(presetRepoIndexUrl("browser", "github")).toBe(presetRepoIndexUrl("http", "github"));
-    expect(presetRepoIndexUrl("script", "gitee")).toBe(presetRepoIndexUrl("http", "gitee"));
+    expect(presetRepoIndexUrl("browser", "github")).not.toBe(presetRepoIndexUrl("http", "github"));
+    expect(presetRepoIndexUrl("script", "gitee")).toBe(presetRepoIndexUrl("browser", "gitee"));
   });
 });
 
@@ -105,14 +105,14 @@ describe("仓库来源选项表", () => {
     expect(TASK_REPO_SOURCES.map((s) => s.id)).toEqual(["github", "gitee", "custom"]);
     const github = TASK_REPO_SOURCES.find((s) => s.id === "github")!;
     const gitee = TASK_REPO_SOURCES.find((s) => s.id === "gitee")!;
-    expect(presetRepoIndexUrl("browser", "github")).toBe(github.indexUrl);
-    expect(presetRepoIndexUrl("http", "github")).toBe(github.indexUrl);
-    expect(presetRepoIndexUrl("script", "gitee")).toBe(gitee.indexUrl);
+    expect(presetRepoIndexUrl("browser", "github")).toBe(github.indexUrls?.browser);
+    expect(presetRepoIndexUrl("http", "github")).toBe(github.indexUrls?.http);
+    expect(presetRepoIndexUrl("script", "gitee")).toBe(gitee.indexUrls?.script);
     expect(github.homeUrl).toBe(TASK_REPO_URL);
     expect(gitee.homeUrl).toBe(TASK_REPO_URL_GITEE);
     // 自定义源无预设地址（由用户手填）：取地址一律回空串，不抛错
     const custom = TASK_REPO_SOURCES.find((s) => s.id === "custom")!;
-    expect(custom.indexUrl).toBeNull();
+    expect(custom.indexUrls).toBeNull();
     expect(custom.homeUrl).toBe("");
     expect(presetRepoIndexUrl("browser", "custom")).toBe("");
     expect(presetRepoIndexUrl("http", "custom")).toBe("");
@@ -131,8 +131,8 @@ describe("仓库来源选项表", () => {
   it("索引地址（raw JSON）与仓库主页（人类浏览）是两个不同的地址", () => {
     // 真实缺陷：把索引地址当作可读页面链接，点开是一屏 raw JSON
     for (const s of TASK_REPO_SOURCES) {
-      if (!s.indexUrl) continue;
-      expect(s.indexUrl).not.toBe(s.homeUrl);
+      if (!s.indexUrls) continue;
+      for (const url of Object.values(s.indexUrls)) expect(url).not.toBe(s.homeUrl);
       expect(s.homeUrl).toMatch(/^https:\/\/[^/]*gitee\.com\/|^https:\/\/github\.com\//);
       expect(s.homeUrl).not.toMatch(/raw\./);
     }

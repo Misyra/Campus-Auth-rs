@@ -317,7 +317,7 @@ async function recognizeOcr() {
       </div>
       <div class="card-body">
         <div class="task-recorder-section">
-          <p class="task-recorder-desc">在登录页点选账号框、密码框、登录按钮等元素，录制器会把这些整理成一段 AI 提示词；点「📋 复制 AI 提示词」复制后发给大模型，即可生成任务步骤。</p>
+          <p class="task-recorder-desc">在登录页点选表单元素，录制器会生成可交给 AI 的任务提示词。</p>
           <div class="task-recorder-actions">
             <a href="/api/tools/task-recorder.user.js" class="btn btn-primary">
               <IconApp name="upload" class="icon-sm" />
@@ -328,68 +328,63 @@ async function recognizeOcr() {
               下载编写指南
             </a>
           </div>
-          <div class="task-recorder-note">需先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> 扩展，再安装录制器脚本；在登录页点击浮动按钮开始录制。</div>
-          <div class="task-recorder-note">不会用？看 <a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>；编写规范见 <a href="/api/docs/task-writing-guide">任务编写指南</a> 与 <a href="/api/docs/task-manual">任务手册</a>（点击即下载）。</div>
+          <div class="task-recorder-note">先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a>，再安装脚本；打开登录页，点击浮动按钮开始。<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">查看教程视频</a> · <a href="/api/docs/task-manual">下载任务手册</a></div>
         </div>
       </div>
     </section>
 
-    <!-- OCR 依赖 -->
+    <!-- 依赖安装与识别测试属于同一流程，合并后可直接看到下一步。 -->
     <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
         <IconApp name="file-check" class="settings-card-icon" />
-        <h2>OCR 依赖</h2>
+        <h2>验证码识别（OCR）</h2>
       </div>
-      <div class="card-body">
-        <p class="ocr-description">OCR 用于自动识别验证码图片，仅在任务中使用 <code>ocr</code> 步骤时才需要安装，约占用 120MB 磁盘空间。</p>
-        <div class="ocr-status-row">
-          <span v-if="ocrStatusLoading" class="ocr-status detecting">检测中…</span>
-          <span v-else-if="ocrStatusError" class="ocr-status error">状态检测失败 <button class="btn btn-sm btn-link" type="button" @click="refreshOcrStatus">重试</button></span>
-          <span v-else-if="ocrStatus.installed" class="ocr-status ok">已安装</span>
-          <span v-else class="ocr-status none">未安装</span>
-        </div>
-        <div v-if="ocrStatus.installed && ocrStatus.size_mb && ocrStatus.size_mb > 0" class="ocr-size-hint">当前占用约 {{ ocrStatus.size_mb }} MB</div>
-        <!-- 区分「依赖已装入环境」与「Worker 正在跑且已加载」：runtime_ocr 为 null 时
-             只表示 Worker 当前未运行（按需拉起），不代表依赖有问题；不说明会被误读为
-             装了空壳。识别测试按钮始终可用，实际能力以识别结果为准。 -->
-        <div v-if="ocrStatus.installed" class="ocr-size-hint">
-          {{ runtimeOcrLabel }}
-        </div>
-        <div class="env-card-actions">
-          <button v-if="!ocrStatus.installed" class="btn btn-primary btn-sm" type="button" @click="installOcr" :disabled="busy.ocr">
-            {{ busy.ocr ? '安装中...' : '安装 OCR 依赖' }}
-          </button>
-          <button v-else class="btn btn-danger-ghost btn-sm" type="button" @click="uninstallOcr" :disabled="busy.ocr">
-            {{ busy.ocr ? '卸载中...' : '卸载 OCR 依赖' }}
-          </button>
-        </div>
-      </div>
-    </section>
-
-    <!-- 验证码识别 -->
-    <section class="card settings-panel settings-panel--wide">
-      <div class="settings-card-header">
-        <IconApp name="layout-content" class="settings-card-icon" />
-        <h2>验证码识别</h2>
-      </div>
-      <div class="card-body">
-        <p class="ocr-description">选择本地验证码图片进行识别，用于验证 OCR 是否正常工作，需先安装 OCR 依赖。</p>
-        <div v-if="!ocrStatus.installed" class="ocr-hint">请先安装 OCR 依赖，再进行识别。</div>
-        <template v-else>
-          <div class="ocr-pick-row">
-            <button class="btn btn-secondary btn-sm" type="button" @click="pickOcrImage" :disabled="busy.ocrRec">选择图片</button>
-            <span v-if="ocrImageName" class="ocr-filename" :title="ocrImageName">{{ ocrImageName }}</span>
-            <span v-else class="hint">未选择图片</span>
+      <div class="card-body ocr-settings-grid">
+        <div class="ocr-setup">
+          <h3>安装依赖</h3>
+          <p class="ocr-description">仅在任务中使用 <code>ocr</code> 步骤时需要，约占用 120MB 磁盘空间。</p>
+          <div class="ocr-status-row">
+            <span v-if="ocrStatusLoading" class="ocr-status detecting">检测中…</span>
+            <span v-else-if="ocrStatusError" class="ocr-status error">状态检测失败 <button class="btn btn-sm btn-link" type="button" @click="refreshOcrStatus">重试</button></span>
+            <span v-else-if="ocrStatus.installed" class="ocr-status ok">已安装</span>
+            <span v-else class="ocr-status none">未安装</span>
           </div>
-          <div v-if="ocrImagePreview" class="ocr-preview-wrap">
-            <img :src="ocrImagePreview" alt="验证码预览" class="ocr-preview" />
+          <div v-if="ocrStatus.installed && ocrStatus.size_mb && ocrStatus.size_mb > 0" class="ocr-size-hint">当前占用约 {{ ocrStatus.size_mb }} MB</div>
+          <!-- 区分「依赖已装入环境」与「Worker 正在跑且已加载」：runtime_ocr 为 null 时
+               只表示 Worker 当前未运行（按需拉起），不代表依赖有问题；不说明会被误读为
+               装了空壳。识别测试按钮始终可用，实际能力以识别结果为准。 -->
+          <div v-if="ocrStatus.installed" class="ocr-size-hint">
+            {{ runtimeOcrLabel }}
           </div>
-          <button class="btn btn-primary ocr-recognize-btn" type="button" :disabled="busy.ocrRec || !ocrImageFile" @click="recognizeOcr">
-            {{ busy.ocrRec ? '识别中...' : '开始识别' }}
-          </button>
-          <div v-if="ocrResult" class="ocr-result"><span>识别结果：</span><code class="ocr-result-text">{{ ocrResult }}</code></div>
-          <div v-if="ocrError" class="ocr-error">识别失败：{{ ocrError }}</div>
-        </template>
+          <div class="env-card-actions">
+            <button v-if="!ocrStatus.installed" class="btn btn-primary btn-sm" type="button" @click="installOcr" :disabled="busy.ocr">
+              {{ busy.ocr ? '安装中...' : '安装 OCR 依赖' }}
+            </button>
+            <button v-else class="btn btn-danger-ghost btn-sm" type="button" @click="uninstallOcr" :disabled="busy.ocr">
+              {{ busy.ocr ? '卸载中...' : '卸载 OCR 依赖' }}
+            </button>
+          </div>
+        </div>
+        <div class="ocr-tryout">
+          <h3>测试识别</h3>
+          <p class="ocr-description">选择本地验证码图片，验证 OCR 是否正常工作。</p>
+          <div v-if="!ocrStatus.installed" class="ocr-hint">安装依赖后可在这里测试。</div>
+          <template v-else>
+            <div class="ocr-pick-row">
+              <button class="btn btn-secondary btn-sm" type="button" @click="pickOcrImage" :disabled="busy.ocrRec">选择图片</button>
+              <span v-if="ocrImageName" class="ocr-filename" :title="ocrImageName">{{ ocrImageName }}</span>
+              <span v-else class="hint">未选择图片</span>
+            </div>
+            <div v-if="ocrImagePreview" class="ocr-preview-wrap">
+              <img :src="ocrImagePreview" alt="验证码预览" class="ocr-preview" />
+            </div>
+            <button class="btn btn-primary ocr-recognize-btn" type="button" :disabled="busy.ocrRec || !ocrImageFile" @click="recognizeOcr">
+              {{ busy.ocrRec ? '识别中...' : '开始识别' }}
+            </button>
+            <div v-if="ocrResult" class="ocr-result"><span>识别结果：</span><code class="ocr-result-text">{{ ocrResult }}</code></div>
+            <div v-if="ocrError" class="ocr-error">识别失败：{{ ocrError }}</div>
+          </template>
+        </div>
       </div>
     </section>
   </div>

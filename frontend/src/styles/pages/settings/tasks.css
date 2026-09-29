@@ -77,6 +77,7 @@
 
 .task-recorder-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -106,7 +107,32 @@
   font-size: var(--text-sm);
 }
 
-/* 快捷操作 */
+/* 安装与测试在宽屏并排，窄屏按流程上下排列。 */
+.ocr-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-lg);
+}
+
+.ocr-settings-grid > div { min-width: 0; }
+
+.ocr-settings-grid h3 {
+  margin: 0 0 var(--space-sm);
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.ocr-tryout {
+  border-left: 1px solid var(--border);
+  padding-left: var(--space-lg);
+}
+
+@media (max-width: 768px) {
+  .ocr-settings-grid { grid-template-columns: 1fr; gap: var(--space-md); }
+  .ocr-tryout { border-left: 0; border-top: 1px solid var(--border); padding: var(--space-md) 0 0; }
+}
+
 /* ---- OCR 依赖管理 ---- */
 .ocr-status-row {
   display: flex;

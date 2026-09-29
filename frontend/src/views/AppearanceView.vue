@@ -204,22 +204,22 @@ function swatchCheckColor(value: string): string {
         </div>
       </div>
 
-      <!-- 卡片 4：侧边栏 -->
+      <!-- 卡片 4：侧栏与顶栏共用底色，选中高亮只作用于侧栏。 -->
       <div class="card appearance-section-card">
         <div class="appearance-card-header">
           <IconApp name="sidebar" class="appearance-card-icon" />
-          <h3>侧边栏</h3>
+          <h3>侧栏与顶栏</h3>
           <button v-if="cardDirty('sidebar')" type="button" class="appearance-reset-btn" @click="resetCard('sidebar')">恢复默认</button>
         </div>
         <div class="appearance-card-body appearance-grid-2col">
           <div class="appearance-slider-item">
-            <label for="sidebar-opacity">不透明度</label>
+            <label for="sidebar-opacity">背景不透明度</label>
             <input id="sidebar-opacity" type="range" v-model.number="appearance.sidebar_opacity" min="0.3" max="1" step="0.05" />
             <span>{{ Math.round(appearance.sidebar_opacity * 100) }}%</span>
           </div>
           <div></div>
           <div class="appearance-field">
-            <div class="appearance-field-label">侧边栏色</div>
+            <div class="appearance-field-label">导航背景色</div>
             <div class="appearance-color-row">
               <div class="appearance-colors">
                 <button
@@ -244,7 +244,7 @@ function swatchCheckColor(value: string): string {
             <input type="color" data-color-picker="sidebar" class="sr-only" @change="onCustomColorPicked('sidebar', $event)" />
           </div>
           <div class="appearance-field">
-            <div class="appearance-field-label">高亮色</div>
+            <div class="appearance-field-label">侧栏高亮色</div>
             <div class="appearance-color-row">
               <div class="appearance-colors">
                 <button

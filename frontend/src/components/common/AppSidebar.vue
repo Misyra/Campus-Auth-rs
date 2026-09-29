@@ -59,7 +59,10 @@ function navigate(name: string): void {
     <div class="sidebar-header">
       <div class="logo">
         <span class="logo-icon logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
-        <span class="logo-text">认证喵</span>
+        <span class="logo-copy">
+          <span class="logo-text">认证喵</span>
+          <span class="logo-caption">校园网连接助手</span>
+        </span>
       </div>
     </div>
 
@@ -93,7 +96,8 @@ function navigate(name: string): void {
           <IconApp name="chevron-down" class="nav-caret" :class="{ 'nav-caret--collapsed': !tasksExpanded }" />
         </button>
 
-        <div v-show="tasksExpanded" id="nav-tasks-children" class="nav-children">
+        <div id="nav-tasks-children" class="nav-children" :class="{ 'nav-children--open': tasksExpanded }" :aria-hidden="!tasksExpanded" :inert="!tasksExpanded">
+          <div class="nav-children-inner">
           <button
             v-for="child in TASK_NAV_CHILDREN"
             :key="child.id"
@@ -106,6 +110,7 @@ function navigate(name: string): void {
           >
             {{ child.label }}
           </button>
+          </div>
         </div>
       </div>
 

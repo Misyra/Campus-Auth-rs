@@ -1,4 +1,17 @@
-/* browser.css — 浏览器设置子页（纯净模式提示 / 视口输入 / 浏览器选择卡片 / 反检测脚本） */
+/* browser.css — 浏览器设置子页（双列独立堆叠 / 浏览器选择 / 反检测脚本） */
+.browser-settings-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-self: start;
+  min-width: 0;
+}
+
+.browser-settings-column > .settings-panel {
+  height: auto;
+  min-height: 0;
+}
+
 .browser-safe-info {
   padding: 12px 14px;
   background: rgba(var(--accent-rgb), 0.06);

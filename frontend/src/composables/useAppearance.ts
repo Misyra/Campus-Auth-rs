@@ -18,6 +18,7 @@ const appearance = reactive<Appearance>(
 );
 
 const { toastOnly } = useToast();
+let themeTransitionTimer: ReturnType<typeof setTimeout> | null = null;
 
 function saveStoredAppearance(): void {
   localStorage.setItem("appearance", JSON.stringify(appearance));
@@ -101,7 +102,18 @@ function applyAppearance(): void {
   }
 
   const isLight = getEffectiveTheme() === "light";
-  root.setAttribute("data-theme", isLight ? "light" : "dark");
+  const nextTheme = isLight ? "light" : "dark";
+  const previousTheme = root.getAttribute("data-theme");
+  // 只在真正切换明暗主题时短暂过渡；滑杆实时预览不引发全页动画。
+  if (previousTheme && previousTheme !== nextTheme && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    root.classList.add("theme-changing");
+    if (themeTransitionTimer !== null) clearTimeout(themeTransitionTimer);
+    themeTransitionTimer = setTimeout(() => {
+      root.classList.remove("theme-changing");
+      themeTransitionTimer = null;
+    }, 280);
+  }
+  root.setAttribute("data-theme", nextTheme);
   const _p = (k: string, v: string) => root.style.setProperty(k, v);
 
   // 主题色：先把 `mono` 哨兵按有效主题解析为日间黑 / 夜间白，再做后续一切派生
@@ -197,20 +209,15 @@ function applyAppearance(): void {
   _p("--border-accent-hover", accentBorder(0.25));
   _p("--border-accent-strong", accentBorder(0.3));
 
-  _p("--sidebar-opacity", String(appearance.sidebar_opacity));
-
-  if (appearance.sidebar_color) {
-    const sidebarRgb = hexToRgb(appearance.sidebar_color);
-    if (sidebarRgb) {
-      _p("--sidebar-bg-1", `rgba(${sidebarRgb.r}, ${sidebarRgb.g}, ${sidebarRgb.b}, var(--sidebar-opacity))`);
-      _p("--sidebar-bg-2", `rgba(${sidebarRgb.r}, ${sidebarRgb.g}, ${sidebarRgb.b}, calc(var(--sidebar-opacity) + 0.03))`);
-    }
+  _p("--navigation-opacity", String(appearance.sidebar_opacity));
+  // 侧栏与顶栏始终使用同一底色；保留旧字段名以兼容已保存的外观偏好。
+  const hasCustomNavigationColor = !!appearance.sidebar_color;
+  const navigationRgb = hexToRgb(appearance.sidebar_color || appearance.background_color || (isLight ? "#dfe4ec" : "#0f172a"));
+  if (navigationRgb) {
+    const offset = hasCustomNavigationColor ? 0 : 15;
+    _p("--navigation-bg", `rgba(${Math.min(navigationRgb.r + offset, 255)}, ${Math.min(navigationRgb.g + offset, 255)}, ${Math.min(navigationRgb.b + offset, 255)}, var(--navigation-opacity))`);
   } else {
-    const bgRgb = hexToRgb(appearance.background_color || (isLight ? "#dfe4ec" : "#0f172a"));
-    if (bgRgb) {
-      _p("--sidebar-bg-1", `rgba(${Math.min(bgRgb.r + 15, 255)}, ${Math.min(bgRgb.g + 15, 255)}, ${Math.min(bgRgb.b + 15, 255)}, var(--sidebar-opacity))`);
-      _p("--sidebar-bg-2", `rgba(${Math.max(bgRgb.r - 10, 0)}, ${Math.max(bgRgb.g - 10, 0)}, ${Math.max(bgRgb.b - 10, 0)}, calc(var(--sidebar-opacity) + 0.03))`);
-    }
+    root.style.removeProperty("--navigation-bg");
   }
 
   if (appearance.sidebar_accent) {

@@ -244,6 +244,7 @@
   position: static;
   border: none;
   border-radius: var(--radius-md);
+  min-width: 0;
 }
 
 .ws-reconnect-bar .spinner {
@@ -253,6 +254,7 @@
 /* 重连条文本：长指引窄屏省略，完整文案见 title 悬停 */
 .ws-reconnect-text {
   max-width: 420px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

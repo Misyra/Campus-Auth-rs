@@ -1,4 +1,129 @@
-/* monitor.css — 监控检测设置子页（检测列布局 / 紧凑信息框） */
+/* monitor.css — 监控检测设置子页（运行节奏 / 检测方式） */
+.monitor-timing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-lg);
+}
+
+.monitor-timing-group {
+  min-width: 0;
+}
+
+.monitor-timing-group--retry {
+  border-left: 1px solid var(--border);
+  padding-left: var(--space-lg);
+}
+
+.monitor-timing-group--pause {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: var(--space-md);
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-md);
+}
+
+.monitor-timing-group h3 {
+  margin: 0 0 var(--space-md);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.monitor-timing-group--pause h3 {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.monitor-timing-group .form-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.monitor-timing-group .form-group {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.monitor-timing-group--retry .form-group:last-child {
+  grid-column: 1 / -1;
+}
+
+.monitor-pause-controls {
+  display: grid;
+  grid-template-columns: auto minmax(240px, 320px) minmax(0, 1fr);
+  gap: var(--space-md);
+  align-items: center;
+}
+
+.monitor-pause-controls .toggle-group,
+.monitor-pause-controls .hint {
+  margin: 0;
+}
+
+@media (min-width: 1600px) {
+  .monitor-timing-group--retry .form-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .monitor-timing-group--retry .form-group:last-child {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 1100px) {
+  .monitor-pause-controls {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .monitor-pause-controls .hint {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .monitor-timing-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-md);
+  }
+
+  .monitor-timing-group--retry {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding-left: 0;
+    padding-top: var(--space-md);
+  }
+
+  .monitor-timing-group--pause {
+    grid-column: auto;
+    display: block;
+  }
+
+  .monitor-timing-group--pause h3 {
+    margin-bottom: var(--space-md);
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .monitor-pause-controls {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-md);
+  }
+
+  .monitor-pause-controls .hint {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .monitor-timing-group .form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .settings-detect-col {
   display: flex;
   flex-direction: column;
@@ -17,15 +142,4 @@
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-/* 暂停卡与检测卡等高对齐：压缩底部提示行高 */
-.pause-card .card-body {
-  display: flex;
-  flex-direction: column;
-}
-.pause-card .hint {
-  margin-top: auto;
-  padding-top: 8px;
-  font-size: var(--text-sm);
 }

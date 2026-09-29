@@ -15,7 +15,7 @@
   font-size: var(--text-base);
   font-weight: 500;
   cursor: pointer;
-  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+  transition: background-color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out), transform var(--dur-fast) var(--ease-out);
   min-height: 40px;
   white-space: nowrap;
   text-decoration: none;
@@ -25,12 +25,10 @@
   background: var(--bg-hover);
   border-color: var(--border-hover);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-hover);
 }
 
 .btn:active:not(:disabled) {
-  transform: translateY(0) scale(0.97);
-  box-shadow: none;
+  transform: scale(0.98);
 }
 
 .btn:disabled {
@@ -39,7 +37,7 @@
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  background: var(--accent);
   color: var(--on-accent);
   /* 透明边框而非 border:none：与 .btn 的 1px 边框保持同一盒模型，否则同一行里
      主按钮（无边框）比次按钮（1px 边框）矮 1px，实测 40px vs 41px，肉眼可见错位。 */
@@ -50,7 +48,7 @@
 }
 
 .btn-primary:hover:not(:disabled) {
-  box-shadow: 0 0 24px rgba(var(--accent-rgb), 0.35), var(--shadow-hover);
+  background: var(--accent-hover);
   transform: translateY(-1px);
 }
 

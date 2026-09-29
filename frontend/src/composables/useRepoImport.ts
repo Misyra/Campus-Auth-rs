@@ -2,7 +2,7 @@
  * 云端仓库任务导入（单例）。
  * 从 useTasks 拆出：仓库索引拉取、免责声明与导入到编辑器。
  *
- * 三类任务共享索引，按条目 type 筛选并分别导入浏览器、直连和脚本编辑器。
+ * 索引按类别与镜像源选取，再按条目 type 校验并导入对应编辑器。
  */
 
 import { ref, computed } from "vue";
@@ -23,6 +23,7 @@ import { useTasks } from "./useTasks";
 import { useHttpTasks } from "./useHttpTasks";
 import { useScripts } from "./useScripts";
 import { SCRIPT_MAX_BYTES, scriptContentBytes } from "../utils/scriptDraft";
+import { readRepoIndexCache, writeRepoIndexCache, REPO_INDEX_CACHE_TTL_MS } from "../utils/repoIndexCache";
 
 /** 仓库条目的归属类型；与 `constants` 的 `TaskRepoKind` 同源 */
 export type RepoKind = TaskRepoKind;
@@ -59,6 +60,10 @@ const repoImport = ref({
   previewLoading: false,
   /** 最近一次拉取是否成功（含"合法但为空"）：空态据此区分「还没加载」与「该源没有条目」 */
   loaded: false,
+  /** 当前列表对应的完整索引地址与获取时间，用于刷新时判断能否保留旧列表 */
+  loadedUrl: "",
+  fetchedAt: 0,
+  fromCache: false,
   error: "",
   tasks: [] as RepoTask[],
   searchQuery: "",
@@ -122,9 +127,9 @@ let pendingScript: Record<string, unknown> | null = null;
 let previewSeq = 0;
 
 /**
- * 按当前源回填统一索引地址。
+ * 按当前类别和源回填索引地址。
  *
- * 预设源取统一索引；自定义源是用户手填的地址，
+ * 预设源按类别取索引；自定义源是用户手填的地址，
  * 只在确实存过手输内容时回填（否则会把输入框清空，比保留上一个源的地址更差）。
  */
 function applyPresetIndexUrl() {
@@ -136,16 +141,31 @@ function applyPresetIndexUrl() {
   }
 }
 
-/** 切换仓库源并回填对应索引地址（自定义源恢复上次手输的 URL） */
-function selectRepoSource(source: TaskRepoSourceId) {
+/** 切换仓库源并自动读取其索引；自定义源无地址时等待用户输入。 */
+function selectRepoSource(source: TaskRepoSourceId, load = true) {
+  if (source === repoImport.value.source && load) return;
   // 离开自定义源前先记住手输内容：否则误点一下 GitHub 再点回来，已填的地址就没了
   if (repoImport.value.source === "custom" && source !== "custom") {
     repoImport.value.customUrl = repoImport.value.url;
   }
+  const emptyCustom = source === "custom" && repoImport.value.source !== "custom" && !repoImport.value.customUrl;
   repoImport.value.source = source;
   // 地址取自 TASK_REPO_SOURCES（经 presetRepoIndexUrl，按类别），不在此处各写一份：
   // 同一 host 曾在多处硬编码，正是「分享适配」指向错仓库那类缺陷的成因
-  applyPresetIndexUrl();
+  if (emptyCustom) repoImport.value.url = "";
+  else applyPresetIndexUrl();
+  ++fetchIndexSeq;
+  repoImport.value.loading = false;
+  repoImport.value.loaded = false;
+  repoImport.value.loadedUrl = "";
+  repoImport.value.fetchedAt = 0;
+  repoImport.value.fromCache = false;
+  repoImport.value.tasks = [];
+  repoImport.value.selected = null;
+  repoImport.value.error = "";
+  if (load && repoImport.value.visible && repoImport.value.url.trim()) {
+    void fetchRepoIndex({ preferCache: true });
+  }
 }
 
 /**
@@ -159,8 +179,6 @@ export interface RepoImportOptions {
   source?: TaskRepoSourceId;
   /** 打开后预填的搜索关键词（向导场景 = 学校名） */
   keyword?: string;
-  /** 打开后立即拉取索引，免去再点一次「加载索引」 */
-  autoFetch?: boolean;
   /** 导入成功后的回调（参数为落盘后的最终任务 id）；提供时抑制跳转编辑器 */
   afterImport?: (id: string) => void | Promise<void>;
 }
@@ -173,10 +191,9 @@ let importOptions: RepoImportOptions | null = null;
  *
  * `kind` 必须由调用方声明：任务页三个 Tab、设置页入口各自知道
  * 自己要哪一类，默认值会让"忘了传"变成静默导入错类型（列表看着空空如也）。
- * 换类别只改变筛选和导入去向，预设地址仍指向共享索引。
+ * 换类别时预设地址也随之切换。
  *
- * 传入 `opts` 时为外部流程预置：先复位再套用 source/keyword，`autoFetch`
- * 直接拉索引（keepSearch 保留刚填入的关键词，否则拉取完成会把过滤词清掉）。
+ * 传入 `opts` 时为外部流程预置：先复位再套用 source/keyword，随后读取缓存或拉索引。
  */
 function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
   ++fetchIndexSeq;
@@ -187,6 +204,9 @@ function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
   applyPresetIndexUrl();
   repoImport.value.error = "";
   repoImport.value.loaded = false;
+  repoImport.value.loadedUrl = "";
+  repoImport.value.fetchedAt = 0;
+  repoImport.value.fromCache = false;
   repoImport.value.tasks = [];
   repoImport.value.searchQuery = "";
   repoImport.value.loading = false;
@@ -197,14 +217,12 @@ function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
   repoImport.value.selected = null;
   if (opts?.source) {
     // 切源会按 (类别, 源) 回填预设索引地址；自定义源只切标签、地址留给用户手填
-    selectRepoSource(opts.source);
+    selectRepoSource(opts.source, false);
   }
   if (opts?.keyword) {
     repoImport.value.searchQuery = opts.keyword;
   }
-  if (opts?.autoFetch) {
-    void fetchRepoIndex({ keepSearch: true });
-  }
+  if (repoImport.value.url.trim()) void fetchRepoIndex({ preferCache: true });
 }
 
 /** 关闭导入弹窗（不清理状态，下次打开时由 showRepoImport 统一复位） */
@@ -219,13 +237,10 @@ function closeRepoImport() {
 }
 
 /**
- * 按当前输入的索引地址拉取远程任务列表；结果非数组视为失败，空数组是"该源暂无条目"。
- *
- * `keepSearch` 供向导预置场景：拉取完成保留预填关键词（默认行为是清空搜索词，
- * 供「加载索引」按钮换源重载时复位过滤）。
+ * 打开/切源时优先读取未过期缓存；手动调用默认强制刷新网络。
+ * 结果非数组视为失败，空数组是"该源暂无条目"。
  */
-async function fetchRepoIndex(opts?: { keepSearch?: boolean }) {
-  const keepSearch = opts?.keepSearch ?? false;
+async function fetchRepoIndex(opts?: { preferCache?: boolean }) {
   const url = repoImport.value.url.trim();
   if (!url) {
     repoImport.value.error = "请输入索引地址";
@@ -233,13 +248,32 @@ async function fetchRepoIndex(opts?: { keepSearch?: boolean }) {
   }
   // 取号：迟到的旧响应据此丢弃（见 fetchIndexSeq 声明处注释）
   const seq = ++fetchIndexSeq;
+  const cached = opts?.preferCache ? readRepoIndexCache(url) : null;
+  if (cached) {
+    repoImport.value.loading = false;
+    repoImport.value.error = "";
+    repoImport.value.loaded = true;
+    repoImport.value.loadedUrl = url;
+    repoImport.value.fetchedAt = cached.fetchedAt;
+    repoImport.value.fromCache = true;
+    repoImport.value.tasks = cached.tasks;
+    repoImport.value.selected = null;
+    return;
+  }
   const label = repoKindLabel(repoImport.value.repoKind);
+  const retainCurrent = repoImport.value.loaded && repoImport.value.loadedUrl === url
+    && Date.now() - repoImport.value.fetchedAt < REPO_INDEX_CACHE_TTL_MS;
+  const selectedId = retainCurrent ? repoImport.value.selected?.id : undefined;
   repoImport.value.loading = true;
   repoImport.value.error = "";
-  repoImport.value.loaded = false;
-  repoImport.value.tasks = [];
-  if (!keepSearch) repoImport.value.searchQuery = "";
-  repoImport.value.selected = null;
+  if (!retainCurrent) {
+    repoImport.value.loaded = false;
+    repoImport.value.loadedUrl = "";
+    repoImport.value.fetchedAt = 0;
+    repoImport.value.fromCache = false;
+    repoImport.value.tasks = [];
+    repoImport.value.selected = null;
+  }
   try {
     const data = await repoApi.fetchIndex(url);
     if (seq !== fetchIndexSeq || !repoImport.value.visible) return;
@@ -250,7 +284,12 @@ async function fetchRepoIndex(opts?: { keepSearch?: boolean }) {
     // 空数组不是失败：这一类的索引里暂时没有条目是合法状态（新仓库、镜像源尚未收录），
     // 由空态文案说明"该源暂无条目"，不弹失败提示
     repoImport.value.loaded = true;
+    repoImport.value.loadedUrl = url;
+    repoImport.value.fetchedAt = Date.now();
+    repoImport.value.fromCache = false;
     repoImport.value.tasks = data;
+    repoImport.value.selected = data.find((task) => task.id === selectedId) ?? null;
+    writeRepoIndexCache(url, data, repoImport.value.fetchedAt);
   } catch (e) {
     // 被取代的旧请求失败同样不写状态：否则会用一个已过期的错误覆盖新请求的结果
     if (seq !== fetchIndexSeq || !repoImport.value.visible) return;

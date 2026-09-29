@@ -43,84 +43,84 @@ const urlCheckText = computed({
 
 <template>
   <div class="settings-panel-grid settings-panel-grid--cols2">
-    <!-- 检测与重试 -->
-    <section class="card settings-panel">
+    <!-- 同一运行节奏的设置集中展示，宽屏并排使用空间。 -->
+    <section class="card settings-panel settings-panel--wide monitor-timing-panel">
       <div class="settings-card-header">
         <IconApp name="eye" class="settings-card-icon" />
-        <h2>检测与重试</h2>
+        <h2>检测、重试与暂停</h2>
       </div>
-      <div class="card-body">
-        <div class="form-row">
-          <div class="form-group">
-            <div class="field-label-row">
-              <label for="settings-interval">检测间隔（秒）</label>
-              <FieldHelp text="两次网络检测之间的间隔。过短增加资源消耗，过长延迟断线发现。建议 60~300 秒，默认 120 秒（后端钳制 20~1200 秒）。" />
+      <div class="card-body monitor-timing-grid">
+        <div class="monitor-timing-group">
+          <h3>网络检测</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <div class="field-label-row">
+                <label for="settings-interval">检测间隔（秒）</label>
+                <FieldHelp text="两次网络检测之间的间隔。过短增加资源消耗，过长延迟断线发现。建议 60~300 秒，默认 120 秒（后端钳制 20~1200 秒）。" />
+              </div>
+              <input id="settings-interval" v-model.number="config.config.monitor.check_interval_seconds" type="number" min="20" max="1200" />
             </div>
-            <input id="settings-interval" v-model.number="config.config.monitor.check_interval_seconds" type="number" min="20" max="1200" />
-          </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label for="settings-network-check-timeout">检测超时（秒）</label>
-              <FieldHelp text="单次检测的等待上限。默认 2 秒，弱网环境可放宽至 5 秒。" />
+            <div class="form-group">
+              <div class="field-label-row">
+                <label for="settings-network-check-timeout">检测超时（秒）</label>
+                <FieldHelp text="单次检测的等待上限。默认 2 秒，弱网环境可放宽至 5 秒。" />
+              </div>
+              <input id="settings-network-check-timeout" v-model.number="config.config.monitor.network_check_timeout" type="number" min="1" max="30" />
             </div>
-            <input id="settings-network-check-timeout" v-model.number="config.config.monitor.network_check_timeout" type="number" min="1" max="30" />
           </div>
         </div>
-        <div class="form-row settings-toggle-spacer">
-          <div class="form-group">
-            <div class="field-label-row">
-              <label for="settings-max-retries">最大重试次数</label>
-              <FieldHelp text="登录失败后的最大重试次数。默认 3 次。" />
+        <div class="monitor-timing-group monitor-timing-group--retry">
+          <h3>登录重试</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <div class="field-label-row">
+                <label for="settings-max-retries">最大重试次数</label>
+                <FieldHelp text="登录失败后的最大重试次数。默认 3 次。" />
+              </div>
+              <input id="settings-max-retries" v-model.number="config.config.retry.max_retries" type="number" min="1" max="5" />
             </div>
-            <input id="settings-max-retries" v-model.number="config.config.retry.max_retries" type="number" min="1" max="5" />
-          </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label for="settings-retry-interval">重试间隔（秒）</label>
-              <FieldHelp text="首次重试的等待间隔，之后每次重试翻倍（如 5 → 10 → 20 秒）。过短可能触发登录页限流。默认 5 秒。" />
+            <div class="form-group">
+              <div class="field-label-row">
+                <label for="settings-retry-interval">重试间隔（秒）</label>
+                <FieldHelp text="首次重试的等待间隔，之后每次重试翻倍（如 5 → 10 → 20 秒）。过短可能触发登录页限流。默认 5 秒。" />
+              </div>
+              <input id="settings-retry-interval" v-model.number="config.config.retry.retry_interval" type="number" min="1" max="300" />
             </div>
-            <input id="settings-retry-interval" v-model.number="config.config.retry.retry_interval" type="number" min="1" max="300" />
-          </div>
-        </div>
-        <div class="form-row settings-toggle-spacer">
-          <div class="form-group">
-            <div class="field-label-row">
-              <label for="settings-post-login-delay">登录后延迟（秒）</label>
-              <FieldHelp text="登录完成后等待认证生效的时间，之后再复查网络。默认 5 秒。" />
+            <div class="form-group">
+              <div class="field-label-row">
+                <label for="settings-post-login-delay">登录后延迟（秒）</label>
+                <FieldHelp text="登录完成后等待认证生效的时间，之后再复查网络。默认 5 秒。" />
+              </div>
+              <input id="settings-post-login-delay" v-model.number="config.config.monitor.post_login_delay" type="number" min="0" max="60" />
             </div>
-            <input id="settings-post-login-delay" v-model.number="config.config.monitor.post_login_delay" type="number" min="0" max="60" />
           </div>
         </div>
-      </div>
-    </section>
-    <!-- 暂停时段 -->
-    <section class="card settings-panel pause-card">
-      <div class="settings-card-header">
-        <IconApp name="clock" class="settings-card-icon" />
-        <h2>暂停时段</h2>
-      </div>
-      <div class="card-body">
-        <div class="toggle-group">
-          <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline">
-              <input type="checkbox" v-model="config.config.pause.enabled" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">启用暂停时段</span>
-            </label>
-            <FieldHelp text="启用后在该时段内暂停检测与登录，适用于定时断网时段。" />
+        <div class="monitor-timing-group monitor-timing-group--pause">
+          <h3>暂停时段</h3>
+          <div class="monitor-pause-controls">
+            <div class="toggle-group">
+              <div class="toggle-with-help">
+                <label class="toggle toggle-help-inline">
+                  <input type="checkbox" v-model="config.config.pause.enabled" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">启用暂停时段</span>
+                </label>
+                <FieldHelp text="启用后在该时段内暂停检测与登录，适用于定时断网时段。" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="settings-pause-start">开始时间（时）</label>
+                <input id="settings-pause-start" v-model.number="config.config.pause.start_hour" type="number" min="0" max="23" :disabled="!config.config.pause.enabled" />
+              </div>
+              <div class="form-group">
+                <label for="settings-pause-end">结束时间（时）</label>
+                <input id="settings-pause-end" v-model.number="config.config.pause.end_hour" type="number" min="0" max="23" :disabled="!config.config.pause.enabled" />
+              </div>
+            </div>
+            <span class="hint">支持跨天，例如开始 22、结束 6 表示每晚 22:00 至次日 6:00</span>
           </div>
         </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="settings-pause-start">开始时间（时）</label>
-            <input id="settings-pause-start" v-model.number="config.config.pause.start_hour" type="number" min="0" max="23" />
-          </div>
-          <div class="form-group">
-            <label for="settings-pause-end">结束时间（时）</label>
-            <input id="settings-pause-end" v-model.number="config.config.pause.end_hour" type="number" min="0" max="23" />
-          </div>
-        </div>
-        <span class="hint">支持跨天，例如开始 22、结束 6 表示每晚 22:00 至次日 6:00</span>
       </div>
     </section>
 

@@ -27,18 +27,9 @@ const { currentMode, applying: modeApplying, applyRunMode, diffFor } = useRunMod
 /** 更新弹窗：本页的「立即检查」命中与「查看更新日志」入口都指向它 */
 const update = useUpdateDialog();
 
-/** 「自定义」不是可点的选项，只作为当前态的展示——它由手动改过设置自然落入 */
 const modeOptions = computed(() =>
   RUN_MODE_PRESETS.map((p) => ({ id: p.id, label: p.label, description: p.description })),
 );
-
-/** 当前模式的说明文案（含自定义） */
-const modeHint = computed(() => {
-  if (currentMode.value === "custom") {
-    return "检测到你手动调整过相关设置，已不在任何预设内。可点上方模式一键回到常规配置。";
-  }
-  return RUN_MODE_PRESETS.find((p) => p.id === currentMode.value)?.description ?? "";
-});
 
 /**
  * 切换模式：先弹确认并列出**将要改动的项**。
@@ -331,11 +322,11 @@ onMounted(() => {
 
 <template>
   <div class="settings-panel-grid settings-panel-grid--cols2 system-update-page">
-    <!-- 运行模式：一组设置的命名组合，一键在「稳定跑」与「看得见、好排查」之间切换 -->
+    <!-- 配置预设会同时调整多项设置，区别于下方只控制服务形态的单项设置。 -->
     <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
         <IconApp name="sliders" class="settings-card-icon" />
-        <h2>运行模式</h2>
+        <h2>配置预设</h2>
         <span class="badge badge--sm" :class="currentMode === 'custom' ? 'badge--warn' : 'badge--success'">
           当前：{{ currentMode === "custom" ? "自定义" : (RUN_MODE_PRESETS.find((p) => p.id === currentMode)?.label ?? "") }}
         </span>
@@ -357,16 +348,8 @@ onMounted(() => {
             </span>
             <span class="run-mode-option-desc">{{ opt.description }}</span>
           </button>
-          <!-- 自定义态：由手动改动自然落入，不可点选，只作说明 -->
-          <div class="run-mode-option run-mode-option--custom" :class="{ active: currentMode === 'custom' }">
-            <span class="run-mode-option-head">
-              <span class="run-mode-option-label">自定义</span>
-              <IconApp v-if="currentMode === 'custom'" name="check" class="icon-sm" />
-            </span>
-            <span class="run-mode-option-desc">手动调整过下方任一设置后自动进入此状态。</span>
-          </div>
         </div>
-        <span class="hint run-mode-hint">{{ modeHint }}</span>
+        <span v-if="currentMode === 'custom'" class="hint run-mode-hint">当前设置已手动调整；选择预设前会列出将要改动的项目。</span>
       </div>
     </section>
 
@@ -383,7 +366,7 @@ onMounted(() => {
           <span class="hint">{{ startupActionHint }}</span>
         </div>
         <div class="form-group">
-          <div class="field-label-row"><label>运行模式</label><FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" /></div>
+          <div class="field-label-row"><label>服务模式</label><FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" /></div>
           <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
           <span class="hint">{{ runtimeModeHint }}</span>
         </div>
@@ -401,13 +384,21 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- 界面行为：与「启动与运行」同排（同为开关/下拉类）；半宽卡后不能直接接宽卡，否则网格留空洞 -->
+    <!-- 控制台、通知与托盘都影响应用在桌面上的呈现。 -->
     <section class="card settings-panel">
       <div class="settings-card-header">
         <IconApp name="monitor" class="settings-card-icon" />
-        <h2>界面行为</h2>
+        <h2>控制台与通知</h2>
       </div>
       <div class="card-body">
+        <div class="form-group">
+          <div class="field-label-row">
+            <label for="settings-app-port">控制台端口</label>
+            <FieldHelp text="Web 控制台的监听端口。修改后重启生效，默认 50721。" />
+          </div>
+          <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1" max="65535" />
+          <span class="hint">本机访问地址一般为 http://127.0.0.1:端口</span>
+        </div>
         <div class="toggle-group">
           <div class="toggle-with-help">
             <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.auto_start_browser" /><span class="toggle-slider"></span><span class="toggle-label">启动时打开控制台</span></label>
@@ -429,8 +420,8 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- 日志设置：与下方「网络、端口与代理」同排（同为输入框类，高度相近） -->
-    <section class="card settings-panel">
+    <!-- 日志设置横跨两列，避免短数字输入与导出说明挤在半宽卡内。 -->
+    <section class="card settings-panel settings-panel--wide">
       <div class="settings-card-header">
         <IconApp name="file-text" class="settings-card-icon" />
         <h2>日志设置</h2>
@@ -467,48 +458,6 @@ onMounted(() => {
         >
           {{ exportingLogs ? "导出中..." : "导出日志压缩包" }}
         </button>
-      </div>
-    </section>
-
-    <!-- 网络、端口与代理：半宽与「日志设置」同排，代理地址输入不再通栏拉宽 -->
-    <section class="card settings-panel">
-      <div class="settings-card-header">
-        <IconApp name="globe" class="settings-card-icon" />
-        <h2>网络、端口与代理</h2>
-      </div>
-      <div class="card-body">
-        <div class="form-group">
-          <div class="field-label-row">
-            <label for="settings-app-port">控制台端口</label>
-            <FieldHelp text="Web 控制台的监听端口。修改后重启生效，默认 50721。" />
-          </div>
-          <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1" max="65535" />
-          <span class="hint">本机访问地址一般为 http://127.0.0.1:端口</span>
-        </div>
-        <div class="toggle-group">
-          <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline">
-              <input type="checkbox" v-model="config.config.updater.use_proxy" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">使用代理下载更新</span>
-            </label>
-            <FieldHelp text="仅影响版本更新检查、下载与任务仓库。检测流量的代理设置见“检测”页。" />
-          </div>
-        </div>
-        <div class="form-group">
-          <div class="field-label-row">
-            <label for="settings-proxy-url">代理地址</label>
-            <FieldHelp text="完整的 HTTP 代理地址，如 http://127.0.0.1:7890。仅在启用后生效。" />
-          </div>
-          <input
-            id="settings-proxy-url"
-            v-model="config.config.updater.proxy_url"
-            type="text"
-            placeholder="http://127.0.0.1:7890"
-            spellcheck="false"
-            :disabled="!config.config.updater.use_proxy"
-          />
-        </div>
       </div>
     </section>
 
@@ -565,6 +514,26 @@ onMounted(() => {
               :options="checkFrequencyOptions"
               :disabled="!config.config.updater.auto_check_enabled"
             />
+          </div>
+          <div class="settings-subsection">
+            <h3>下载与任务仓库代理</h3>
+            <div class="toggle-group">
+              <div class="toggle-with-help">
+                <label class="toggle toggle-help-inline">
+                  <input type="checkbox" v-model="config.config.updater.use_proxy" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">使用代理</span>
+                </label>
+                <FieldHelp text="仅影响版本更新检查、下载与任务仓库。检测流量的代理设置见“检测”页。" />
+              </div>
+            </div>
+            <div v-if="config.config.updater.use_proxy" class="form-group">
+              <div class="field-label-row">
+                <label for="settings-proxy-url">代理地址</label>
+                <FieldHelp text="完整的 HTTP 代理地址，如 http://127.0.0.1:7890。" />
+              </div>
+              <input id="settings-proxy-url" v-model="config.config.updater.proxy_url" type="text" placeholder="http://127.0.0.1:7890" spellcheck="false" />
+            </div>
           </div>
         </div>
         <div>

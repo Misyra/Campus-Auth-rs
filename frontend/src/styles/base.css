@@ -2,6 +2,8 @@
    组件/页面样式在 components/ 与 pages/ 分层文件中，勿在此堆放。 */
 
 :root {
+  /* 原生表单控件跟随应用主题，而不是设备的系统明暗偏好。 */
+  color-scheme: dark;
   /* 背景色 */
   --bg-primary: #0f172a;
   --bg-secondary: #1e293b;
@@ -106,11 +108,9 @@
   --blur-lg: blur(12px);
   --blur-xl: blur(20px);
 
-  /* 字体：正文走远端 Noto Sans SC（@fontsource-variable，index.html 引入），
-     按 unicode-range 分片按需加载；未命中分片或断网时逐级回落本地中文字体栈。
-     中文显式声明避免 Windows/macOS 各自回退链接导致的渲染不一致 */
-  --font-sans: 'Noto Sans SC Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
-    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  /* 校园网未认证时仍需即时显示界面，优先使用系统字形，避免远端字体换入造成布局跳动。 */
+  --font-sans: 'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI',
+    'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
 
   /* 字号 scale（沿用现有实际使用的档位，勿随意新增中间值） */
@@ -126,20 +126,17 @@
   --font-size-base: var(--text-base);
 
   /* 动效节奏：三档时长 + 统一缓动曲线（easeOutCubic，比线性 ease 更利落） */
-  --dur-fast: 0.15s;
-  --dur-base: 0.2s;
-  --dur-slow: 0.3s;
-  --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+  --dur-fast: 0.12s;
+  --dur-base: 0.18s;
+  --dur-slow: 0.26s;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 
   /* 动画/布局尺寸 */
   --collapse-anim-max: 300px;
   --editor-min-height: 300px;
 
-  /* 侧栏/顶栏底色：CSS 静态默认值（与 useAppearance.applyAppearance 注入的
-     默认计算结果一致），配合 index.html 的首屏主题预置脚本消除浅色主题 FOUC；
-     自定义侧栏色时由 JS 运行时覆盖 */
-  --sidebar-bg-1: rgba(30, 38, 57, 0.95);
-  --sidebar-bg-2: rgba(5, 13, 32, 0.98);
+  /* 侧栏与顶栏共用底色；静态值与外观初始化结果一致，避免首屏换色。 */
+  --navigation-bg: rgba(30, 38, 57, 0.95);
 
   /* 帮助气泡（field-help tooltip）底/字/边 */
   --tooltip-bg: rgba(15, 23, 42, 0.96);
@@ -204,6 +201,18 @@ body {
   min-height: 100vh;
   min-height: 100dvh;
   display: flex;
+}
+
+/* 主题切换只给主要表面补短过渡，避免实时日志逐行过渡造成主线程负担。 */
+html.theme-changing body,
+html.theme-changing .sidebar,
+html.theme-changing .top-bar,
+html.theme-changing .card,
+html.theme-changing .stat-card,
+html.theme-changing .nav-item,
+html.theme-changing .btn,
+html.theme-changing .modal-container {
+  transition: background-color var(--dur-slow) var(--ease-out), border-color var(--dur-slow) var(--ease-out), color var(--dur-slow) var(--ease-out);
 }
 
 /* 表单控件与按钮默认不继承 body 字体：浏览器 UA 样式表给 button/input/select/textarea
@@ -309,11 +318,13 @@ textarea {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
 /* ═══ 浅色主题：仅 token 重映射，组件级覆盖在各组件样式文件内 ═══ */
 [data-theme="light"] {
+  color-scheme: light;
   /* 基础色 — 柔和灰调，避免刺眼（与 useAppearance 注入的默认值一致） */
   --bg-primary: #eef2f7;
   --bg-secondary: #e4e9f0;
@@ -370,8 +381,7 @@ textarea {
   --danger: #dc2626;
   --danger-bg: #fef2f2;
   --danger-border: #fecaca;
-  --sidebar-bg-1: rgba(253, 255, 255, 0.95);
-  --sidebar-bg-2: rgba(228, 232, 237, 0.98);
+  --navigation-bg: rgba(238, 243, 251, 0.95);
   --tooltip-bg: rgba(30, 41, 59, 0.96);
   --tooltip-text: rgba(226, 232, 240, 0.95);
   --tooltip-border: rgba(var(--slate-rgb), 0.3);

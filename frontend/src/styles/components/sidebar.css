@@ -1,15 +1,16 @@
 /* sidebar.css — 侧边栏导航（nav-item / quit-btn） */
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px var(--space-md);
-  border: none;
+  padding: 11px 14px;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
   font-size: var(--text-base);
   font-weight: 500;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   cursor: pointer;
   transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
   width: 100%;
@@ -22,14 +23,20 @@
 }
 
 .nav-item.active {
-  /* 渐进增强: 第一行为旧浏览器回退值，第二行为 color-mix() 增强值（回退值同样走 token 跟随主题） */
-  background: rgba(var(--accent-rgb), 0.08);
-  background: linear-gradient(135deg, color-mix(in srgb, var(--sidebar-accent, var(--accent)) 12%, transparent), rgba(var(--accent-rgb), 0.08));
-  color: var(--sidebar-accent, var(--accent));
-  border: 1px solid rgba(var(--accent-rgb), 0.2);
-  border: 1px solid color-mix(in srgb, var(--sidebar-accent, var(--accent)) 20%, transparent);
-  box-shadow: 0 0 20px rgba(var(--accent-rgb), 0.08);
-  box-shadow: 0 0 20px color-mix(in srgb, var(--sidebar-accent, var(--accent)) 8%, transparent);
+  background: rgba(var(--accent-rgb), 0.09);
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 11px;
+  bottom: 11px;
+  width: 3px;
+  border-radius: var(--radius-full);
+  background: var(--sidebar-accent, var(--accent));
 }
 
 .nav-icon {
@@ -58,9 +65,10 @@
 .nav-group--open .nav-item--group.active {
   background: transparent;
   border-color: transparent;
-  box-shadow: none;
   color: var(--text-primary);
 }
+
+.nav-group--open .nav-item--group.active::before { display: none; }
 
 .nav-group--open .nav-item--group.active:hover {
   background: var(--bg-hover);
@@ -94,12 +102,30 @@
 /* 子项块：左侧一根细轨表达"属于上一级"，比纯缩进更省横向空间也更有层级感。
    左内边距让子项文字落在比一级项标签略靠左的位置——一眼看出是下一层而非并列项。 */
 .nav-children {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  margin: 0 0 0 20px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  transition: grid-template-rows var(--dur-slow) var(--ease-out), opacity var(--dur-base) var(--ease-out), visibility var(--dur-slow);
+}
+
+.nav-children--open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+.nav-children-inner {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin: 4px 0 4px 20px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border);
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* 子项：与一级项**同级字号**（14px）。原先小一档的 13px 在侧栏里偏轻，用户实机反馈要"做大一点"——层级改由「无图标 + 左侧细轨 + 弱化色 + 同款圆角」表达，字号与行距不再降档。行高约 40px，与一级项（12px 16px 内边距 → 约 44px）差一档而不塌；矮视口由 `.nav` 的 overflow-y: auto 兜（见 layout.css）。 */
@@ -128,7 +154,7 @@
 
 .nav-child.active {
   background: rgba(var(--accent-rgb), 0.08);
-  color: var(--accent);
+  color: var(--text-primary);
   font-weight: 600;
 }
 
