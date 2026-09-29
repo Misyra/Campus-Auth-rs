@@ -165,6 +165,8 @@
  */
 .field-help::after {
   content: attr(data-tip);
+  /* 隐藏气泡不占横向滚动宽度；仅 opacity: 0 仍会撑宽窄屏表单。 */
+  display: none;
   position: absolute;
   left: calc(100% + 10px);
   top: 50%;
@@ -202,6 +204,7 @@
    使方块中心正好落在接缝上。 */
 .field-help::before {
   content: "";
+  display: none;
   position: absolute;
   top: 50%;
   left: calc(100% + 10px - 4.5px);
@@ -220,12 +223,14 @@
 
 .field-help:hover::after,
 .field-help:focus-visible::after {
+  display: block;
   opacity: 1;
   transform: translateY(-50%) translateX(0);
 }
 
 .field-help:hover::before,
 .field-help:focus-visible::before {
+  display: block;
   opacity: 1;
 }
 
@@ -267,6 +272,7 @@
 }
 
 .field-help--pinned::after {
+  display: block;
   opacity: 1;
   transform: translateY(-50%) translateX(0);
   pointer-events: auto;
@@ -276,6 +282,7 @@
 
 /* 钉住态也要有箭头：气泡还挂着，指向关系不能只在悬停那一瞬间成立 */
 .field-help--pinned::before {
+  display: block;
   opacity: 1;
 }
 
