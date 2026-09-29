@@ -5,8 +5,8 @@
  * `default`（播种名「通用登录」）——同一件事两个条目，用户无从选择；而 `default`
  * 那条又不带说明，看不出它就是"内置默认"。
  *
- * 直连任务的下拉口径**相反**：它必须有一个显式空值项（没有可内置的兜底任务，
- * 未绑定又会让直连登录直接失败），两者放在同一个文件里一并锁定，避免"顺手把两处
+ * HTTP 登录任务的下拉口径**相反**：它必须有一个显式空值项（没有可内置的兜底任务，
+ * 未绑定又会让HTTP 登录直接失败），两者放在同一个文件里一并锁定，避免"顺手把两处
  * 改成一样"式回归。
  *
  * 测试直接调用生产函数（`browserTaskOptions` / `httpTaskOptions` / `taskBindingDisplay`），
@@ -59,9 +59,9 @@ describe("browserTaskOptions", () => {
 });
 
 describe("httpTaskOptions", () => {
-  it("首项是空值「未绑定（直连登录不可用）」", () => {
+  it("首项是空值「未绑定（HTTP 登录不可用）」", () => {
     const opts = httpTaskOptions([{ id: "dorm", name: "宿舍直连" }]);
-    expect(opts[0]).toEqual({ value: "", label: "未绑定（直连登录不可用）" });
+    expect(opts[0]).toEqual({ value: "", label: "未绑定（HTTP 登录不可用）" });
   });
 
   it("空值项只出现一次（其余条目都带任务 id）", () => {
@@ -81,7 +81,7 @@ describe("httpTaskOptions", () => {
     ]);
     expect(opts.map((o) => o.value)).toEqual(["", "b", "a", "c"]);
     expect(opts.map((o) => o.label)).toEqual([
-      "未绑定（直连登录不可用）",
+      "未绑定（HTTP 登录不可用）",
       "第二个",
       "第一个",
       "第三个",
@@ -93,8 +93,8 @@ describe("httpTaskOptions", () => {
     expect(opts[1]).toEqual({ value: "dorm", label: "dorm" });
   });
 
-  it("任务为空时仍保留「未绑定」项（否则用户没法把方案从直连登录上摘下来）", () => {
-    expect(httpTaskOptions([])).toEqual([{ value: "", label: "未绑定（直连登录不可用）" }]);
+  it("任务为空时仍保留「未绑定」项（否则用户没法把方案从HTTP 登录上摘下来）", () => {
+    expect(httpTaskOptions([])).toEqual([{ value: "", label: "未绑定（HTTP 登录不可用）" }]);
   });
 });
 

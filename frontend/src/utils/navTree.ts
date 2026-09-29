@@ -37,9 +37,9 @@ export const TASK_NAV_CHILDREN: readonly NavChild[] = [
   },
   {
     id: "http",
-    label: "直连任务",
+    label: "HTTP 登录",
     name: "tasks-http",
-    title: "直连任务：直接向校园网网关发登录请求，免 Python 与浏览器",
+    title: "HTTP 登录任务：直接向校园网网关发登录请求，免 Python 与浏览器",
     icon: "globe",
   },
   {

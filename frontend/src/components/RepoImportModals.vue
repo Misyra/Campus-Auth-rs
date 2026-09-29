@@ -5,10 +5,7 @@
  * 导致设置·任务页点「从仓库导入」无反应、切到任务列表页才弹出的错位 bug，
  * 故提取为共享组件，两处入口（TasksView / 任务与环境设置页）各自挂载。
  *
- * 两类任务各有一份索引（`index.json` 收浏览器任务、`index.http.json` 收直连任务），
- * 弹窗只读 `repoKind` 那一份：标题、空态与导入去向都随它变化，避免"看着是浏览器任务、
- * 导进去变成直连草稿"这种错位。索引文件里若出现另一类的条目，那是文件写错了，此时
- * 显式提示条数而非静默过滤。
+ * 三类任务共享索引，按 `repoKind` 筛选；脚本正文在确认前完整展示。
  *
  * 列表为左右分栏：左侧任务条目（含 64px 缩略图），点选后右侧展示
  * 截图大图与完整信息；无 screenshot 定义的任务显示「暂无截图」占位。
@@ -32,13 +29,13 @@ const repo = useRepoImport();
 /** 源选项（模板直接遍历，避免在模板里硬编码按钮——增删源只改 constants） */
 const sourceOptions = TASK_REPO_SOURCES;
 
-/** 当前浏览的条目类型（决定读哪份索引、标题与导入去向） */
+/** 当前浏览的条目类型（决定筛选、标题与导入去向） */
 const kind = computed(() => repo.repoImport.value.repoKind);
 
-/** 当前类别的中文名（标题、空态与异类条目提示共用同一处措辞，见 useRepoImport） */
+/** 当前类别的中文名（标题与空态共用，见 useRepoImport） */
 const kindLabel = computed(() => repoKindLabel(kind.value));
 
-/** 弹窗标题：两类任务各有一份索引，标题必须说清在看哪一类 */
+/** 弹窗标题说清当前筛选的是哪一类 */
 const modalTitle = computed(() => `从云端仓库导入${kindLabel.value}`);
 
 /** 图片加载失败的任务 id 集合：缩略图/大图统一回退占位 */
@@ -135,10 +132,9 @@ watch(
     <!-- 来源说明：「国内用户建议用 Gitee」的提示由 TASK_REPO_SOURCES 的 hint 承载，
          自定义源无 hint 故整行不渲染 -->
     <p v-if="repo.currentSource.value.hint" class="repo-source-hint">{{ repo.currentSource.value.hint }}</p>
-    <!-- 异类条目提示：索引文件只承载一类条目，出现不符即该文件写错了（或自定义地址指到了
-         另一类的索引）。数量显式说出来，避免用户对着短列表猜"我的学校去哪了" -->
+    <!-- 未知类型才是索引格式错误；其他两类条目属于共享索引的正常内容。 -->
     <p v-if="repo.foreignRepoTaskCount.value > 0" class="repo-source-hint repo-foreign-hint">
-      索引里有 {{ repo.foreignRepoTaskCount.value }} 个条目不属于{{ kindLabel }}（类型不符），已跳过。
+      索引里有 {{ repo.foreignRepoTaskCount.value }} 个未知类型条目，已跳过。
     </p>
 
     <div v-if="repo.repoImport.value.source === 'custom'" class="repo-custom-url">
@@ -218,12 +214,10 @@ watch(
     </div>
     <div v-else-if="!repo.repoImport.value.loading" class="empty-state empty-state--dashed repo-import-hint">
       <IconApp name="globe-grid" :stroke-width="1.5" />
-      <!-- 「还没点加载」与「加载成功但这一类没有条目」是两件事：另一类任务有各自的索引，
-           空列表在拆分后是合法状态，不能说成"尚未加载"或"格式不正确" -->
+      <!-- 「还没点加载」与「加载成功但这一类没有条目」是两件事。 -->
       <strong class="empty-title">{{ repo.repoImport.value.loaded ? `该来源暂无${kindLabel}条目` : "尚未加载任务列表" }}</strong>
       <span v-if="repo.repoImport.value.loaded" class="empty-desc">
-        索引已读取，但里面没有{{ kindLabel }}。{{ kindLabel === "浏览器任务" ? "直连任务" : "浏览器任务" }}有各自的索引，
-        可到对应子页的「仓库导入」查看；也可以换个来源再试。
+        索引已读取，但里面没有{{ kindLabel }}。可到其他任务子页查看，或换个来源再试。
       </span>
       <span v-else class="empty-desc">点击上方「加载索引」，从任务仓库获取可导入的任务。</span>
       <!-- 指向仓库**主页**而非用户手填的索引地址：索引地址是给程序 GET 的 raw JSON，
@@ -236,7 +230,9 @@ watch(
       </div>
     </div>
     <template #footer>
-      <button v-if="repo.repoImport.value.selected" class="btn btn-primary btn-sm" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">导入此任务</button>
+      <button v-if="repo.repoImport.value.selected" class="btn btn-primary btn-sm" :disabled="repo.repoImport.value.previewLoading" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">
+        {{ repo.repoImport.value.previewLoading ? "下载脚本中…" : "导入此任务" }}
+      </button>
       <!-- 列表为空时左侧根本没有可点的任务，这句引导会指向不存在的东西 -->
       <span v-else-if="repo.repoImport.value.tasks.length" class="repo-footer-hint">点击左侧任务查看详情后导入</span>
       <span v-else class="repo-footer-hint">本页任务来自社区仓库，导入前请核对内容</span>
@@ -245,11 +241,14 @@ watch(
 
   <!-- 免责弹窗：必须显式确认/取消，禁用遮罩与 ESC 关闭 -->
   <Modal :open="!!repo.repoImport.value.disclaimer" title="免责声明" :close-on-overlay="false" :close-on-esc="false" @close="repo.cancelRepoDisclaimer">
-    <p>从远程仓库导入的{{ kind === 'http' ? '直连任务' : '任务' }}由社区成员提供，未经审核验证。</p>
+    <p>从远程仓库导入的{{ kindLabel }}由社区成员提供，未经审核验证。</p>
     <p class="repo-disclaimer-warn">
       <strong>请仔细阅读并确认任务内容后再使用。</strong>
       <template v-if="kind === 'http'">
-        直连任务会把方案里的账号密码提交到任务中写明的地址，请确认该地址是你的校园网网关，而不是被改过的第三者接口。
+        HTTP 登录任务会把方案里的账号密码提交到任务中写明的地址，请确认该地址是你的校园网网关，而不是被改过的第三者接口。
+      </template>
+      <template v-else-if="kind === 'script'">
+        登录脚本运行时会收到方案账号密码等 CAMPUS_* 环境变量。请逐行核对下方代码，确认没有将凭据发送到无关地址。
       </template>
       <template v-else>
         任务中填入的账号密码将在执行时提交到第三方网站，请确认目标网站可靠。
@@ -258,9 +257,13 @@ watch(
     <!-- 凭据变换脚本是要在登录时**执行**的 JavaScript：与浏览器任务的 eval/custom_js
          同级的风险，必须在导入前就说清（保存时另有一次确认，此处不能只剩"未经审核"） -->
     <p v-if="kind === 'http'" class="repo-disclaimer-warn">
-      <strong>直连任务可能包含凭据变换脚本。</strong>
+      <strong>HTTP 登录任务可能包含凭据变换脚本。</strong>
       导入后登录时会执行其中的 JavaScript（沙箱内运行、无网络与文件访问），请确认来源可信。
     </p>
+    <template v-if="kind === 'script'">
+      <p>即将保存的脚本正文（导入后不会自动执行）：</p>
+      <pre class="repo-script-preview">{{ repo.repoImport.value.scriptPreview }}</pre>
+    </template>
     <template #footer>
       <button class="btn btn-secondary" @click="repo.cancelRepoDisclaimer()">取消</button>
       <button class="btn btn-primary" @click="repo.acceptRepoDisclaimer()">确认导入</button>
@@ -289,8 +292,7 @@ watch(
 .repo-source-label { font-size: var(--text-md); color: var(--text-secondary); font-weight: 500; }
 /* 来源补充说明（Gitee 更快 / GitHub 可能慢）：与工具条同样式的次级文字，不抢视线 */
 .repo-source-hint { margin: 0 0 12px; font-size: var(--text-sm); color: var(--text-muted); line-height: 1.5; }
-/* 异类条目提示：诊断口径（索引文件被写混、或自定义地址指到了另一类的索引），
-   用警告色区别于上面的来源说明，但不像 .repo-import-error 那样当失败处理 */
+/* 未知类型条目提示：索引可继续使用，但贡献者需要修正 type。 */
 .repo-foreign-hint { color: var(--warning-text); }
 .repo-custom-url { margin-bottom: 12px; }
 .repo-import-error { color: var(--error); font-size: var(--text-md); margin-bottom: 8px; }
@@ -337,4 +339,5 @@ watch(
 .repo-import-hint .empty-desc { max-width: 34em; line-height: 1.6; }
 
 .repo-disclaimer-warn { color: var(--error); }
+.repo-script-preview { max-height: 46vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-hover); font-size: var(--text-xs); }
 </style>

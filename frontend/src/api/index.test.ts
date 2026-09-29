@@ -54,7 +54,7 @@ describe("systemApi.restart", () => {
 });
 
 describe("httpTasksApi.test", () => {
-  it("把直连任务草稿交给测试端点并使用独立超时", async () => {
+  it("把HTTP 登录任务草稿交给测试端点并使用独立超时", async () => {
     const payload = {
       task: {
         task_id: "dorm",

@@ -1,7 +1,7 @@
 /**
  * useRepoImport 的条目类型分流、点选、截图字段、索引地址（类别 × 源）与索引状态的单元测试。
- * 覆盖：列表只列当前类别（缺省/空串视作浏览器任务，script 两类都不进）、搜索不越过类别边界、
- * 切类别 / 切源都会重取对应的索引文件、空索引与格式错的区分、异类条目计数、
+ * 覆盖：统一索引按三类筛选（旧条目缺省/空串视作浏览器任务）、搜索不越过类别边界、
+ * 切类别保持同源索引、切源换镜像、空索引与格式错的区分、未知类型计数、
  * 点选写入 selected（不触发导入）、打开/加载索引时复位 selected、任务刷新后点选失效自动清空、
  * 「直接查看仓库」用仓库主页地址、确认导入时按 repoKind 写进对应的编辑器草稿。
  */
@@ -14,6 +14,7 @@ import { TASK_REPO_URL, TASK_REPO_URL_GITEE, presetRepoIndexUrl } from "../utils
 // 新契约：列表 + 拉取 + 打开编辑器。
 const { tasksApiMock, showHttpTaskEditorMock, showTaskEditorMock, toastOnlyMock } = vi.hoisted(() => ({
   tasksApiMock: {
+    list: vi.fn(async () => [] as { id: string }[]),
     save: vi.fn(async () => ({ message: "保存成功" })),
   },
   showHttpTaskEditorMock: vi.fn(async () => {}),
@@ -42,6 +43,16 @@ vi.mock("./useHttpTasks", () => ({
     httpTasks: { value: [] },
     fetchHttpTasks: vi.fn(async () => {}),
     showHttpTaskEditor: showHttpTaskEditorMock,
+  }),
+}));
+
+const { showScriptEditorMock } = vi.hoisted(() => ({
+  showScriptEditorMock: vi.fn(async () => {}),
+}));
+vi.mock("./useScripts", () => ({
+  useScripts: () => ({
+    fetchScripts: vi.fn(async () => {}),
+    showScriptEditor: showScriptEditorMock,
   }),
 }));
 
@@ -74,6 +85,9 @@ beforeEach(() => {
   vi.mocked(repoApi.fetchIndex).mockReset();
   vi.mocked(repoApi.fetchTask).mockReset();
   tasksApiMock.save.mockClear();
+  tasksApiMock.list.mockReset();
+  tasksApiMock.list.mockResolvedValue([]);
+  showScriptEditorMock.mockClear();
   showHttpTaskEditorMock.mockClear();
   showTaskEditorMock.mockClear();
   toastOnlyMock.mockClear();
@@ -117,7 +131,7 @@ describe("仓库导入点选预览", () => {
 });
 
 describe("条目按类型分流", () => {
-  it("只列当前类型：缺省/空串/browser 归浏览器任务，http 归直连任务，script 两类都不进", () => {
+  it("只列当前类型：缺省/空串/browser 归浏览器，http 和 script 各归自己的子页", () => {
     const mixed = [
       makeTypedTask("b1"),
       makeTypedTask("b2", ""),
@@ -137,8 +151,10 @@ describe("条目按类型分流", () => {
     repo.repoImport.value.tasks = [...mixed];
     expect(repo.filteredRepoTasks.value.map((t) => t.id)).toEqual(["h1"]);
 
-    // script 不属于任务页这两类，任何一边都不该出现（导进去会落到看不见的地方）
     expect(repo.filteredRepoTasks.value.some((t) => t.id === "s1")).toBe(false);
+    repo.showRepoImport("script");
+    repo.repoImport.value.tasks = [...mixed];
+    expect(repo.filteredRepoTasks.value.map((t) => t.id)).toEqual(["s1"]);
   });
 
   it("搜索不越过类型边界（否则会把另一类条目导进错的编辑器）", () => {
@@ -151,12 +167,74 @@ describe("条目按类型分流", () => {
 });
 
 describe("确认导入的去向由 repoKind 决定", () => {
+  it("script：先展示下载到的正文，再保存同一份内容并打开脚本编辑器", async () => {
+    repo.showRepoImport("script");
+    const entry = makeTypedTask("campus_script", "script");
+    vi.mocked(repoApi.fetchTask).mockResolvedValue({
+      type: "script", name: "校园网脚本", content: "print('ready')",
+    });
+    await repo.confirmRepoImport(entry);
+    expect(repo.repoImport.value.disclaimer?.id).toBe("campus_script");
+    expect(repo.repoImport.value.scriptPreview).toBe("print('ready')");
+    expect(tasksApiMock.save).not.toHaveBeenCalled();
+    await repo.acceptRepoDisclaimer();
+    expect(repoApi.fetchTask).toHaveBeenCalledTimes(1);
+    expect(tasksApiMock.save).toHaveBeenCalledWith("campus_script", expect.objectContaining({
+      type: "script", content: "print('ready')", binary_path: "",
+    }));
+    expect(showScriptEditorMock).toHaveBeenCalledWith("campus_script");
+    expect(routerPushMock).toHaveBeenCalledWith({ name: "tasks-scripts", query: { task: "campus_script" } });
+  });
+
+  it("script：拒绝需要本地路径的远程配置，取消预览后不保存", async () => {
+    repo.showRepoImport("script");
+    const entry = makeTypedTask("unsafe", "script");
+    vi.mocked(repoApi.fetchTask).mockResolvedValue({
+      type: "script", content: "print('ready')", binary_path: "C:\\Other\\runner.exe",
+    });
+    await repo.confirmRepoImport(entry);
+    expect(repo.repoImport.value.disclaimer).toBeNull();
+    expect(tasksApiMock.save).not.toHaveBeenCalled();
+    vi.mocked(repoApi.fetchTask).mockResolvedValue({
+      type: "script", content: "print('ready')",
+    });
+    await repo.confirmRepoImport(entry);
+    repo.cancelRepoDisclaimer();
+    expect(repo.repoImport.value.scriptPreview).toBe("");
+    expect(tasksApiMock.save).not.toHaveBeenCalled();
+  });
+
+  it("script：关闭弹窗后迟到的下载结果不得重新弹出代码确认", async () => {
+    repo.showRepoImport("script");
+    let resolveTask: (task: Record<string, unknown>) => void = () => {};
+    vi.mocked(repoApi.fetchTask).mockImplementationOnce(() => new Promise((resolve) => { resolveTask = resolve; }));
+    const pending = repo.confirmRepoImport(makeTypedTask("late", "script"));
+    expect(repo.repoImport.value.previewLoading).toBe(true);
+    repo.closeRepoImport();
+    resolveTask({ type: "script", content: "print('late')" });
+    await pending;
+    expect(repo.repoImport.value.disclaimer).toBeNull();
+    expect(repo.repoImport.value.scriptPreview).toBe("");
+    expect(repo.repoImport.value.previewLoading).toBe(false);
+  });
+
+  it("跨类型同 ID 时自动改名，不覆盖已存在的脚本", async () => {
+    repo.showRepoImport("http");
+    repo.repoImport.value.disclaimer = makeTypedTask("portal", "http");
+    tasksApiMock.list.mockResolvedValue([{ id: "portal" }]);
+    vi.mocked(repoApi.fetchTask).mockResolvedValue({
+      type: "http", name: "Portal", method: "GET", url: "http://10.0.0.1/login",
+    });
+    await repo.acceptRepoDisclaimer();
+    expect(tasksApiMock.save).toHaveBeenCalledWith("portal_2", expect.anything());
+  });
+
   it("http：下载到的任务直接落盘并打开其编辑器（自动保存模式无草稿态）", async () => {
     repo.showRepoImport("http");
     repo.repoImport.value.disclaimer = makeTypedTask("dorm", "http");
     vi.mocked(repoApi.fetchTask).mockResolvedValue({
       type: "http",
-      name: "宿舍直连登录",
+      name: "宿舍HTTP 登录",
       description: "门户直连",
       method: "GET",
       url: "http://10.0.0.1/login?username={username}&password={password}",
@@ -171,7 +249,7 @@ describe("确认导入的去向由 repoKind 决定", () => {
     expect(payload).toMatchObject({
       type: "http",
       task_id: "dorm",
-      name: "宿舍直连登录",
+      name: "宿舍HTTP 登录",
       url: "http://10.0.0.1/login?username={username}&password={password}",
     });
     // 落盘后打开该任务的编辑器
@@ -180,7 +258,7 @@ describe("确认导入的去向由 repoKind 决定", () => {
     expect(repo.repoImport.value.visible).toBe(false);
   });
 
-  it("http：文件实际不是直连任务时拒绝（索引与文件不一致）", async () => {
+  it("http：文件实际不是HTTP 登录任务时拒绝（索引与文件不一致）", async () => {
     repo.showRepoImport("http");
     repo.repoImport.value.disclaimer = makeTypedTask("bad", "http");
     vi.mocked(repoApi.fetchTask).mockResolvedValue({ type: "browser", name: "浏览器任务", steps: [] });
@@ -190,6 +268,17 @@ describe("确认导入的去向由 repoKind 决定", () => {
     expect(tasksApiMock.save).not.toHaveBeenCalled();
     // 弹窗不自动关闭，用户能看到列表并换一条重试
     expect(repo.repoImport.value.visible).toBe(true);
+  });
+
+  it("http：导出包装层与实际配置的类型冲突时拒绝导入", async () => {
+    repo.showRepoImport("http");
+    repo.repoImport.value.disclaimer = makeTypedTask("conflict", "http");
+    vi.mocked(repoApi.fetchTask).mockResolvedValue({
+      type: "http",
+      config: { type: "script", content: "print('unexpected')" },
+    });
+    await repo.acceptRepoDisclaimer();
+    expect(tasksApiMock.save).not.toHaveBeenCalled();
   });
 });
 
@@ -201,11 +290,10 @@ describe("索引地址：类别 × 源", () => {
     expect(repo.repoImport.value.url).toBe(presetRepoIndexUrl("browser", "github"));
   });
 
-  it("切类别会换到该类别自己的索引文件（两类任务各一份）", () => {
-    // 真实缺陷类：索引地址同时取决于类别与源，切类别不重取就会「在直连列表里拉浏览器索引」
+  it("切类别保持共享索引，切镜像时换对应镜像地址", () => {
     repo.showRepoImport("http");
     expect(repo.repoImport.value.url).toBe(presetRepoIndexUrl("http", "github"));
-    expect(repo.repoImport.value.url).not.toBe(presetRepoIndexUrl("browser", "github"));
+    expect(repo.repoImport.value.url).toBe(presetRepoIndexUrl("browser", "github"));
     // 类别内部再切源：仍留在 http 那一份
     repo.selectRepoSource("gitee");
     expect(repo.repoImport.value.url).toBe(presetRepoIndexUrl("http", "gitee"));
@@ -374,14 +462,14 @@ describe("索引状态与异类条目", () => {
     expect(repo.repoImport.value.loaded).toBe(false);
   });
 
-  it("拉取失败提示带上类别名（两类索引地址不同，说了类别才知道该看哪个来源）", async () => {
+  it("拉取失败提示带上当前筛选类别名", async () => {
     vi.mocked(repoApi.fetchIndex).mockRejectedValue(new Error("连接超时"));
     repo.showRepoImport("http");
     await repo.fetchRepoIndex();
     expect(repo.repoImport.value.loaded).toBe(false);
     const [ok, message] = toastOnlyMock.mock.calls[0] as [boolean, string];
     expect(ok).toBe(false);
-    expect(message).toContain("直连任务索引");
+    expect(message).toContain("HTTP 登录任务索引");
   });
 
   it("打开弹窗复位 loaded：上一次的「该源暂无条目」不得残留到新索引", async () => {
@@ -392,15 +480,16 @@ describe("索引状态与异类条目", () => {
     expect(repo.repoImport.value.loaded).toBe(false);
   });
 
-  it("异类条目被跳过并计数（索引文件被写混时的唯一线索，不静默吞掉）", () => {
+  it("其他已知类别只被过滤，未知类型才计数", () => {
     repo.showRepoImport("http");
     repo.repoImport.value.tasks = [
       makeTypedTask("b1"),
       makeTypedTask("h1", "http"),
       makeTypedTask("s1", "script"),
+      makeTypedTask("x1", "unknown"),
     ];
     expect(repo.filteredRepoTasks.value.map((t) => t.id)).toEqual(["h1"]);
-    expect(repo.foreignRepoTaskCount.value).toBe(2);
+    expect(repo.foreignRepoTaskCount.value).toBe(1);
   });
 
   it("本类索引里全为本类条目时计数为 0（避免提示常驻）", () => {
@@ -447,7 +536,7 @@ describe("向导预置打开（showRepoImport opts）", () => {
     repo.repoImport.value.disclaimer = makeTypedTask("dorm", "http");
     vi.mocked(repoApi.fetchTask).mockResolvedValue({
       type: "http",
-      name: "宿舍直连登录",
+      name: "宿舍HTTP 登录",
       method: "GET",
       url: "http://10.0.0.1/login",
     });

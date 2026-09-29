@@ -2,12 +2,7 @@
  * 云端仓库任务导入（单例）。
  * 从 useTasks 拆出：仓库索引拉取、免责声明与导入到编辑器。
  *
- * 两类任务**各有一份索引**（`index.json` 收浏览器任务、`index.http.json` 收直连任务，
- * 见 `utils/constants.ts` 的 `TaskRepoKind`），故打开弹窗前必须由调用方声明要看哪一类
- * （`showRepoImport("browser" | "http")`）：它同时决定**读哪份索引**、列表的防御性过滤
- * 与导入去向。索引地址同时取决于类别与源（类别 × 源），故切类别、切源都要重取一次
- * （`applyPresetIndexUrl`）——任一处各写一份就会出现「在直连列表里拉了浏览器索引」。
- * 导入确认后需要写入编辑器草稿，通过 useTasks / useHttpTasks 单例获取（无循环依赖）。
+ * 三类任务共享索引，按条目 type 筛选并分别导入浏览器、直连和脚本编辑器。
  */
 
 import { ref, computed } from "vue";
@@ -26,60 +21,61 @@ import { useToast } from "./useToast";
 import { tasksApi } from "../api";
 import { useTasks } from "./useTasks";
 import { useHttpTasks } from "./useHttpTasks";
+import { useScripts } from "./useScripts";
+import { SCRIPT_MAX_BYTES, scriptContentBytes } from "../utils/scriptDraft";
 
-/** 仓库条目的归属类型（本页只处理这两类）；与 `constants` 的 `TaskRepoKind` 同源 */
+/** 仓库条目的归属类型；与 `constants` 的 `TaskRepoKind` 同源 */
 export type RepoKind = TaskRepoKind;
 
 /** 类别的中文名：标题、空态与失败提示共用一处措辞 */
 export function repoKindLabel(kind: RepoKind): string {
-  return kind === "http" ? "直连任务" : "浏览器任务";
+  return kind === "http" ? "HTTP 登录任务" : kind === "script" ? "脚本任务" : "浏览器任务";
 }
 
 /**
  * 归一化条目的类型。
  *
- * 索引文件本身只承载一类条目，故此函数在这里是**防御**（远端索引被写混、或自定义源
- * 指到了另一类的索引），用它与当前类别比对。缺省/空串视为 `browser`：浏览器任务条目
- * 不带 `type`，那是直连任务加入仓库之前唯一的形态；其余类型（如 `script`）返回空串，
- * 即"两类列表都不进"。
+ * 缺省/空串视为旧浏览器条目；未知类型返回空串并在界面提示。
  */
 function normalizeRepoTaskKind(type: string | undefined): RepoKind | "" {
   const value = (type ?? "").trim().toLowerCase();
   if (value === "" || value === "browser") return "browser";
   if (value === "http") return "http";
+  if (value === "script") return "script";
   return "";
 }
 
 const repoImport = ref({
   visible: false,
-  /** 当前索引地址：预设源由 (类别, 源) 决定，自定义源由用户手填 */
+  /** 当前索引地址：预设源由源决定，自定义源由用户手填 */
   url: presetRepoIndexUrl("browser", "github"),
   source: "github" as TaskRepoSourceId,
-  /** 本次要看哪一类条目：决定读哪份索引、列表过滤与导入去向（见 acceptRepoDisclaimer） */
+  /** 本次要看哪一类条目：决定列表过滤与导入去向 */
   repoKind: "browser" as RepoKind,
   /** 用户手输的自定义索引地址：切走再切回时恢复，避免误点一下就把已填内容冲掉 */
   customUrl: "",
   loading: false,
+  /** 正在下载脚本正文，确认弹窗要等下载完成才能展示。 */
+  previewLoading: false,
   /** 最近一次拉取是否成功（含"合法但为空"）：空态据此区分「还没加载」与「该源没有条目」 */
   loaded: false,
   error: "",
   tasks: [] as RepoTask[],
   searchQuery: "",
   disclaimer: null as RepoTask | null,
+  /** 下载后的脚本正文：用户确认前完整展示，与最终保存共用同一份数据 */
+  scriptPreview: "",
   /** 列表点选的任务（右侧详情预览用；导入仍经 disclaimer 二次确认） */
   selected: null as RepoTask | null,
 });
 
 /**
- * 与当前类别不符而被跳过的条目数。
- *
- * 索引文件只承载一类条目，出现不符即该文件写错了（或自定义地址指到了另一类的索引）。
- * 此时静默过滤会让用户对着空列表猜原因，故把它显式暴露给弹窗提示。
+ * 未知类型条目数；其他已知类别只是当前页筛选结果，不算索引错误。
  */
 const foreignRepoTaskCount = computed(
   () =>
     repoImport.value.tasks.filter(
-      (t) => normalizeRepoTaskKind(t.type) !== repoImport.value.repoKind,
+      (t) => normalizeRepoTaskKind(t.type) === "",
     ).length,
 );
 
@@ -120,11 +116,15 @@ const { toastOnly } = useToast();
 // 为 URL B 再点一次 → A 迟到覆盖 B 的列表并提前清 loading，用户会把 A 源的
 // 任务当 B 源导入。与 useConfig 的 saveSeq / fetchConfigEpoch 同口径。
 let fetchIndexSeq = 0;
+/** 待确认的脚本载荷；预览和落盘共用，防止确认前后远端文件变化。 */
+let pendingScript: Record<string, unknown> | null = null;
+/** 关闭或切换条目后，迟到的脚本下载结果不得重新打开确认弹窗。 */
+let previewSeq = 0;
 
 /**
- * 按当前的 (类别, 源) 回填索引地址。
+ * 按当前源回填统一索引地址。
  *
- * 预设源取该类别在该源下的那份索引文件；自定义源是用户手填的地址、与类别无关，
+ * 预设源取统一索引；自定义源是用户手填的地址，
  * 只在确实存过手输内容时回填（否则会把输入框清空，比保留上一个源的地址更差）。
  */
 function applyPresetIndexUrl() {
@@ -136,7 +136,7 @@ function applyPresetIndexUrl() {
   }
 }
 
-/** 切换仓库源并回填该类别下对应的预设索引地址（自定义源恢复上次手输的 URL） */
+/** 切换仓库源并回填对应索引地址（自定义源恢复上次手输的 URL） */
 function selectRepoSource(source: TaskRepoSourceId) {
   // 离开自定义源前先记住手输内容：否则误点一下 GitHub 再点回来，已填的地址就没了
   if (repoImport.value.source === "custom" && source !== "custom") {
@@ -171,15 +171,16 @@ let importOptions: RepoImportOptions | null = null;
 /**
  * 打开导入弹窗并复位上次残留的搜索词/列表/错误，避免旧内容闪现。
  *
- * `kind` 必须由调用方声明：任务页两个 Tab（浏览器/直连）、设置页入口各自知道
+ * `kind` 必须由调用方声明：任务页三个 Tab、设置页入口各自知道
  * 自己要哪一类，默认值会让"忘了传"变成静默导入错类型（列表看着空空如也）。
- * 换类别同时意味着**换索引文件**，故一并重取预设地址。
+ * 换类别只改变筛选和导入去向，预设地址仍指向共享索引。
  *
  * 传入 `opts` 时为外部流程预置：先复位再套用 source/keyword，`autoFetch`
  * 直接拉索引（keepSearch 保留刚填入的关键词，否则拉取完成会把过滤词清掉）。
  */
 function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
   ++fetchIndexSeq;
+  ++previewSeq;
   importOptions = opts ?? null;
   repoImport.value.visible = true;
   repoImport.value.repoKind = kind;
@@ -189,7 +190,10 @@ function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
   repoImport.value.tasks = [];
   repoImport.value.searchQuery = "";
   repoImport.value.loading = false;
+  repoImport.value.previewLoading = false;
   repoImport.value.disclaimer = null;
+  repoImport.value.scriptPreview = "";
+  pendingScript = null;
   repoImport.value.selected = null;
   if (opts?.source) {
     // 切源会按 (类别, 源) 回填预设索引地址；自定义源只切标签、地址留给用户手填
@@ -206,7 +210,11 @@ function showRepoImport(kind: RepoKind, opts?: RepoImportOptions) {
 /** 关闭导入弹窗（不清理状态，下次打开时由 showRepoImport 统一复位） */
 function closeRepoImport() {
   ++fetchIndexSeq;
+  ++previewSeq;
   importOptions = null;
+  pendingScript = null;
+  repoImport.value.scriptPreview = "";
+  repoImport.value.previewLoading = false;
   repoImport.value.visible = false;
 }
 
@@ -260,14 +268,51 @@ function selectRepoTask(task: RepoTask) {
   repoImport.value.selected = task;
 }
 
-/** 确认导入某任务：仅记录待确认项并展示免责声明，实际导入由 acceptRepoDisclaimer 完成 */
-function confirmRepoImport(task: RepoTask) {
+/** 脚本先下载并展示完整正文；其他任务按现有确认流程下载。 */
+async function confirmRepoImport(task: RepoTask) {
+  const seq = ++previewSeq;
+  pendingScript = null;
+  repoImport.value.scriptPreview = "";
+  if (repoImport.value.repoKind === "script") {
+    repoImport.value.previewLoading = true;
+    try {
+      const data = (await repoApi.fetchTask(task.url)) as Record<string, unknown>;
+      if (seq !== previewSeq || !repoImport.value.visible || repoImport.value.repoKind !== "script") return;
+      const config = (data.config && typeof data.config === "object" ? data.config : data) as Record<string, unknown>;
+      if (
+        normalizeRepoTaskKind(config.type as string | undefined) !== "script"
+        || (data.config && data.type !== undefined && normalizeRepoTaskKind(data.type as string | undefined) !== "script")
+      ) {
+        throw new Error("索引与脚本文件的类型不一致");
+      }
+      const content = config.content;
+      if (typeof content !== "string" || !content.trim() || scriptContentBytes(content) > SCRIPT_MAX_BYTES) {
+        throw new Error("脚本内容为空或超过 100 KB");
+      }
+      // 当前编辑器只支持内嵌正文和项目内 Python；拒绝无法正确保存或需要本地路径的远程字段。
+      if (config.script_path || config.args || config.work_dir || config.binary_path || config.timeout) {
+        throw new Error("仓库脚本目前只支持内嵌 Python 正文，请移除本地路径、参数与自定义运行项");
+      }
+      pendingScript = config;
+      repoImport.value.scriptPreview = content;
+    } catch (e) {
+      if (seq !== previewSeq) return;
+      toastOnly(false, extractApiError(e, "脚本下载失败"));
+      return;
+    } finally {
+      if (seq === previewSeq) repoImport.value.previewLoading = false;
+    }
+  }
   repoImport.value.disclaimer = task;
 }
 
 /** 取消免责声明，回到任务列表继续浏览 */
 function cancelRepoDisclaimer() {
+  ++previewSeq;
   repoImport.value.disclaimer = null;
+  repoImport.value.scriptPreview = "";
+  repoImport.value.previewLoading = false;
+  pendingScript = null;
 }
 
 /**
@@ -279,27 +324,44 @@ function cancelRepoDisclaimer() {
  */
 async function acceptRepoDisclaimer() {
   const task = repoImport.value.disclaimer;
+  if (task && repoImport.value.repoKind === "script" && !pendingScript) {
+    toastOnly(false, "请先下载并预览脚本正文");
+    return;
+  }
   repoImport.value.disclaimer = null;
   if (!task) return;
   const external = importOptions;
 
   try {
-    const data = (await repoApi.fetchTask(task.url)) as Record<string, unknown>;
+    const data = (pendingScript ?? (await repoApi.fetchTask(task.url))) as Record<string, unknown>;
+    pendingScript = null;
+    repoImport.value.scriptPreview = "";
     // 兼容导出详情形态（{ summary, config }）：字段都在 config 里，取内层再读
     const config = (data.config && typeof data.config === "object" ? data.config : data) as Record<string, unknown>;
     const kind = repoImport.value.repoKind;
-    const entryKind = normalizeRepoTaskKind(
-      (data.type as string | undefined) ?? (config.type as string | undefined),
-    );
+    const entryKind = normalizeRepoTaskKind(config.type as string | undefined);
+    const wrapperKind = data.config && data.type !== undefined
+      ? normalizeRepoTaskKind(data.type as string | undefined)
+      : entryKind;
     // 防御：列表已按类型过滤，能走到这里说明索引与实际文件不一致
     // （条目声明 browser 而文件是 http 等），此时按声明的类型落盘会得到一堆空字段
-    if (entryKind !== kind) {
-      toastOnly(false, kind === "http" ? '该条目不是直连任务（type 需为 "http"）' : "该条目的类型与当前列表不一致，请在对应列表导入");
+    if (normalizeRepoTaskKind(task.type) !== kind || entryKind !== kind || wrapperKind !== kind) {
+      toastOnly(false, kind === "http" ? '该条目不是HTTP 登录任务（type 需为 "http"）' : "该条目的类型与当前列表不一致，请在对应列表导入");
       return;
     }
 
     const name = String(data.name ?? config.name ?? task.name ?? "");
     const description = String(data.description ?? config.description ?? task.description ?? "");
+    const existing = new Set((await tasksApi.list()).map((item) => item.id));
+    const uniqueId = (base: string): string => {
+      let id = base.slice(0, 64);
+      let n = 2;
+      while (existing.has(id) || id === "default") {
+        const suffix = `_${n++}`;
+        id = base.slice(0, 64 - suffix.length) + suffix;
+      }
+      return id;
+    };
 
     // 自动保存模式下没有"未保存草稿"：仓库导入直接落盘为任务，
     // 再跳到该任务的编辑页（?task=<id>），由用户继续调整（改动自动保存）。
@@ -312,24 +374,35 @@ async function acceptRepoDisclaimer() {
       // 后缀必须拼在**清洗后**的 id 上：拼原始条目名会把非 ASCII 字符带回 id
       // （中文任务名很常见），而后端 `is_valid_task_id` 只收 `[A-Za-z0-9_-]`——
       // 第二次导入同一条目就必然被拒，报错还只显示"任务不存在"。
-      const existingHttp = new Set(httpTasks.httpTasks.value.map((t) => t.id));
-      let n = 2;
-      while (existingHttp.has(id)) {
-        id = `${id}_${n++}`;
-      }
-      const payload: Record<string, unknown> = {
-        ...httpTaskDraftFromConfig({
-          ...(config as unknown as HttpTaskConfig),
-          task_id: id,
-        }) as unknown as Record<string, unknown>,
-      };
+      id = uniqueId(id);
       const draftPayload = httpTaskDraftFromConfig({ ...(config as unknown as HttpTaskConfig), task_id: id });
       if (name) draftPayload.name = name;
       if (description) draftPayload.description = description;
-      Object.assign(payload, httpTaskPayload(draftPayload), { task_id: id });
+      const payload: Record<string, unknown> = {
+        ...httpTaskPayload(draftPayload),
+        task_id: id,
+        // 仓库来源等元数据保留在任务模型自己的 metadata，而非把 UI 草稿字段落盘。
+        metadata: config.metadata ?? {},
+      };
       await tasksApi.save(id, payload);
       await httpTasks.fetchHttpTasks(true);
       await finishImport(external, id, name, task, "tasks-http", () => httpTasks.showHttpTaskEditor(id));
+    } else if (kind === "script") {
+      if (typeof config.content !== "string" || !config.content.trim()) {
+        throw new Error("脚本内容为空");
+      }
+      const id = uniqueId(String(task.id || "imported").replace(/[^A-Za-z0-9_-]/g, "_") || "imported");
+      await tasksApi.save(id, {
+        type: "script",
+        task_id: id,
+        name: name || id,
+        description,
+        content: config.content,
+        binary_path: "",
+      });
+      const scripts = useScripts();
+      await scripts.fetchScripts(true);
+      await finishImport(external, id, name, task, "tasks-scripts", () => scripts.showScriptEditor(id));
     } else {
       // 浏览器任务 ID 除字符集外还要求以字母开头，故数字开头的 id 补前缀
       let id = String(task.id || name || "imported").replace(/[^A-Za-z0-9_]/g, "_");
@@ -337,11 +410,7 @@ async function acceptRepoDisclaimer() {
         id = "task_" + id;
       }
       const tasks = useTasks();
-      const existingBrowser = new Set(tasks.tasks.value.map((t) => t.id));
-      let n = 2;
-      while (existingBrowser.has(id)) {
-        id = `${id}_${n++}`;
-      }
+      id = uniqueId(id || "imported");
       const payload = { ...config } as Record<string, unknown>;
       payload.type = "browser";
       payload.task_id = id;

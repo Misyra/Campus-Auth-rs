@@ -56,7 +56,7 @@ const showEditor = ref(false);
 const router = useRouter();
 
 /**
- * 「配置直连任务」入口：请求参数在任务页编辑（方案只引用一个任务 id），
+ * 「配置HTTP 登录任务」入口：请求参数在任务页编辑（方案只引用一个任务 id），
  * 故此处只负责跳过去并把当前绑定的任务带上——任务页有该任务就直接打开它。
  */
 function openHttpTaskConfig(): void {
@@ -219,7 +219,7 @@ const importProfileBody = computed(() => {
 /**
  * 预览里是否带**旧版**（v9 及以前）内联直连配置。
  *
- * v10 起直连请求参数只存在于独立的直连任务里，方案分享不再携带它们；旧文件里
+ * v10 起HTTP 登录参数只存在于独立的HTTP 登录任务里，方案分享不再携带它们；旧文件里
  * 残留的这些字段会被后端忽略——包括会执行的凭据变换脚本，必须在预览里点名，
  * 否则用户会以为导入后直连可用（脚本也被静默丢弃）。
  */
@@ -245,7 +245,7 @@ const importLegacyHttpConfig = computed(() => {
  */
 const importChannelTaskPage = computed(() => {
   const channel = String(importProfileBody.value?.login_channel ?? "");
-  if (channel === "http") return "「任务 · 直连任务」";
+  if (channel === "http") return "「任务 · HTTP 登录任务」";
   if (channel === "script") return "「任务 · 脚本」";
   return "";
 });
@@ -440,7 +440,7 @@ async function confirmImport(): Promise<void> {
             <div class="form-group">
               <label for="prof-auth-url">认证地址（可选）</label>
               <input id="prof-auth-url" v-model.trim="loginUrl" type="text" placeholder="重定向检测成功时无需填写；无法重定向时手动填写" />
-              <span class="hint" v-if="p.editingProfile.value.login_channel === 'http'">直连登录的请求地址在「直连任务」里；这里是它的兜底来源——任务里留空认证地址时用这个，也用作抓取登录页的地址。</span>
+              <span class="hint" v-if="p.editingProfile.value.login_channel === 'http'">HTTP 登录的请求地址在「HTTP 登录任务」里；这里是它的兜底来源——任务里留空认证地址时用这个，也用作抓取登录页的地址。</span>
               <span class="hint" v-else-if="p.editingProfile.value.login_channel === 'script'">脚本登录不看这个地址：它只作为环境变量 CAMPUS_AUTH_URL 传给登录脚本，脚本用不到就留空。</span>
               <span class="hint" v-else-if="followsRedirect">当前将打开默认触发地址并由浏览器跟随门户跳转；多数校园网无需填写。</span>
               <span class="hint" v-else>已填写时直接打开这个网址，不再经过重定向触发页。</span>
@@ -456,7 +456,7 @@ async function confirmImport(): Promise<void> {
           </div>
 
           <!-- 登录方式：由 LoginChannelField 承载（渠道 + 该渠道用哪个任务 + 直连测试）；
-               直连请求的字段在「任务 · 直连任务」里编辑，此处只选择与验证 -->
+               HTTP 登录的字段在「任务 · HTTP 登录任务」里编辑，此处只选择与验证 -->
           <div class="editor-section">
             <LoginChannelField
               v-if="p.editingProfile.value"
@@ -627,9 +627,9 @@ async function confirmImport(): Promise<void> {
 
         <!-- 旧版分享文件里的直连配置不会被导入（含会被执行的脚本），必须点名 -->
         <div v-if="importLegacyHttpConfig" class="import-script-warn">
-          <strong>该分享文件来自旧版本，其中的直连请求配置不会被导入</strong>
+          <strong>该分享文件来自旧版本，其中的HTTP 登录配置不会被导入</strong>
           <span class="hint">
-            直连参数（含凭据变换脚本）现在是独立的「直连任务」，不再随方案分享。导入后请到「任务 · 直连任务」新建或从任务仓库导入，再在方案里选中它。
+            直连参数（含凭据变换脚本）现在是独立的「HTTP 登录任务」，不再随方案分享。导入后请到「任务 · HTTP 登录任务」新建或从任务仓库导入，再在方案里选中它。
           </span>
         </div>
 

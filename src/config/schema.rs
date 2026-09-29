@@ -491,10 +491,10 @@ pub enum LoginChannel {
 }
 
 impl LoginChannel {
-    /// 是否在 Rust 进程内完成登录（不需要 Python 环境、浏览器与 Worker）。
+    /// 是否由 Rust 控制登录且不需要 Python 环境、浏览器与 Worker。
     ///
-    /// 三种渠道里只有浏览器渠道要拉起 Worker：直连在进程内发 HTTP，脚本在进程内
-    /// 起子进程。凡"是否需要环境就绪 / 是否占用浏览器会话槽位 / 是否能取消 Bridge
+    /// 三种渠道里只有浏览器渠道要拉起 Worker：HTTP 请求在主进程发送，其纯计算
+    /// 脚本在临时子进程执行；自定义脚本也由主进程启动子进程。凡"是否需要环境就绪 / 是否占用浏览器会话槽位 / 是否能取消 Bridge
     /// 任务"这类判定都应走本方法，避免各处各写一遍 `== Http || == Script`。
     pub fn is_in_process(self) -> bool {
         matches!(self, LoginChannel::Http | LoginChannel::Script)

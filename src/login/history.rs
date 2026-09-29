@@ -10,6 +10,7 @@ use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+use crate::config::LoginChannel;
 use crate::status::LoginSource;
 
 /// 历史记录的结果分类
@@ -32,6 +33,9 @@ pub struct LoginHistoryEntry {
     /// 登录来源
     #[serde(serialize_with = "ser_source", deserialize_with = "de_source")]
     pub source: LoginSource,
+    /// 实际执行的登录渠道；旧记录和执行前失败的记录不含此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<LoginChannel>,
     /// 关联 Profile ID
     pub profile_id: String,
     /// 结果分类
@@ -438,6 +442,7 @@ mod tests {
                 .with_ymd_and_hms(2025, 7, 9, 10, 30, 0)
                 .unwrap(),
             source: LoginSource::LoginOnce,
+            channel: Some(LoginChannel::Http),
             profile_id: "p1".into(),
             result: HistoryResult::Success,
             message: "登录成功".into(),
@@ -452,9 +457,18 @@ mod tests {
         let back: LoginHistoryEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.profile_id, "p1");
         assert_eq!(back.source, LoginSource::LoginOnce);
+        assert_eq!(back.channel, Some(LoginChannel::Http));
         assert_eq!(back.result, HistoryResult::Success);
         assert_eq!(back.message, "登录成功");
         assert!((back.duration_secs - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_history_entry_without_channel_still_loads() {
+        let mut value = serde_json::to_value(sample_entry()).unwrap();
+        value.as_object_mut().unwrap().remove("channel");
+        let old: LoginHistoryEntry = serde_json::from_value(value).unwrap();
+        assert_eq!(old.channel, None);
     }
 
     #[test]

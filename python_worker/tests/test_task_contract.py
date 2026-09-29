@@ -25,11 +25,11 @@ def _load() -> dict:
 def test_contract_fixture_loads_and_covers_all_step_types():
     raw = _load()
     task = TaskConfig.from_dict(raw)
-    # 全部 16 个 Rust VALID_STEP_TYPES（sleep/goto/custom_js 为 Python 别名）覆盖
+    # 全部公开 Rust VALID_STEP_TYPES（sleep/goto/custom_js 为 Python 别名）覆盖
     expected_types = {
         "input", "click", "select", "click_select", "wait", "wait_url",
         "eval", "screenshot", "sleep", "ocr", "custom_js", "navigate",
-        "goto", "assert_text", "upload_file", "wait_for_selector",
+        "goto", "assert_text", "manual_check", "upload_file", "wait_for_selector",
     }
     actual_types = {s.step_type for s in task.steps}
     assert actual_types == expected_types, f"步骤类型覆盖缺口: {expected_types ^ actual_types}"

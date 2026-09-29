@@ -167,7 +167,7 @@ describe("useTasks 自动保存", () => {
     vi.useFakeTimers();
     const dir = useTaskDirectory();
     try {
-      // 目录里已有直连任务的 untitled_1 与脚本的 untitled_2：浏览器任务新建时必须跳过它们。
+      // 目录里已有HTTP 登录任务的 untitled_1 与脚本的 untitled_2：浏览器任务新建时必须跳过它们。
       // 只看本类列表取号的话，这里会得到 untitled_1，随后 PUT 到 /api/tasks/untitled_1
       // （type=browser）会把 http 桶里那份文件删掉——静默丢一条任务。
       tasksApiMock.list.mockResolvedValue([

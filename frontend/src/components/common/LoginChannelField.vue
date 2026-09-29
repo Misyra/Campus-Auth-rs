@@ -2,7 +2,7 @@
 /**
  * 登录方式选择器（渠道 + 该渠道用哪个任务）+ 直连测试。
  *
- * **请求参数不在这里编辑**：它们属于「直连任务」（任务页 · 直连任务 Tab，
+ * **请求参数不在这里编辑**：它们属于「HTTP 登录任务」（任务页 · HTTP 登录任务 Tab，
  * `<base>/tasks/http/<id>.json`），方案只引用一个任务 id（`active_http_task`）。
  * 于是同一门户的多个账号共用一份配置，字段编辑也只有一处入口——此前同一份
  * 直连配置既能在方案编辑器改、又能在别处改，排查时说不清哪个生效。
@@ -42,7 +42,7 @@ export interface LoginChannelDraft {
   /** 浏览器渠道使用的任务 ID（空 = 未绑定，登录时回退内置默认任务） */
   active_task: string;
   login_channel: "browser" | "http" | "script";
-  /** 直连渠道使用的直连任务 ID（空 = 未绑定；直连没有内置兜底任务） */
+  /** 直连渠道使用的HTTP 登录任务 ID（空 = 未绑定；直连没有内置兜底任务） */
   active_http_task: string;
   /** 脚本渠道使用的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
   active_script_task: string;
@@ -58,13 +58,13 @@ const props = withDefaults(
     username?: string;
     /** 草稿中的密码；留空时后端回退已保存凭据 */
     password?: string;
-    /** 草稿中的认证地址（直连任务的 auth_url 留空时由后端回退用它） */
+    /** 草稿中的认证地址（HTTP 登录任务的 auth_url 留空时由后端回退用它） */
     authUrl?: string;
     /** 是否展示「发送测试请求」与其结果面板 */
     showTest?: boolean;
     /** 区段标题；传 null 表示由宿主自行渲染标题（无标题的紧凑场景） */
     title?: string | null;
-    /** 是否展示「配置直连任务」入口（跳任务页；紧凑场景可不显示） */
+    /** 是否展示「配置HTTP 登录任务」入口（跳任务页；紧凑场景可不显示） */
     showGuide?: boolean;
   }>(),
   {
@@ -88,24 +88,24 @@ const { running: httpTestRunning, result: testResult, runHttpTaskTest, clearTest
 /**
  * 说明文案集中在此（`\n` 分段，气泡按 pre-line 渲染）。
  *
- * 直连的字段说明在任务页（`HttpTaskFields`）、脚本的契约说明由
+ * HTTP 登录的字段说明在任务页（`HttpFlowFields`）、脚本的契约说明由
  * `SCRIPT_LOGIN_CONTRACT_NOTE` 提供；这里只讲"渠道怎么选、任务是什么"，
  * 两处不重复。
  */
 const HELP = {
   channel:
     "浏览器自动化兼容验证码、动态表单等复杂门户，但需要 Python 与浏览器。\n\n" +
-    "直连请求在程序内直接向门户发登录请求，免 Python 与浏览器、更快；" +
+    "HTTP 登录在程序内直接向门户发登录请求，免 Python 与浏览器、更快；" +
     "失败后仍按方案的重试策略重发，不会自动切回浏览器。\n\n" +
     "自定义脚本把登录整个交给你自己写的脚本任务，同样免 Python 与浏览器，" +
-    "适合门户逻辑特殊、直连请求表达不出来的场景——代价是登录逻辑要自己维护。",
+    "适合门户逻辑特殊、HTTP 登录表达不出来的场景——代价是登录逻辑要自己维护。",
   browserTask:
     "本方案自动登录时执行的任务。任务内容在「任务 · 浏览器任务」里编辑；每个方案可各绑定一个，" +
     "切换方案即切换任务。选「通用登录（内置默认）」即使用程序自带的任务。",
   httpTask:
-    "本方案直连登录时使用哪份直连任务（请求地址、请求头、判定关键字、凭据变换脚本都在任务里）。\n\n" +
-    "同一门户的多个账号共用一份任务，字段在「任务 · 直连任务」里编辑。" +
-    "直连没有内置兜底任务——门户地址没法内置，所以未绑定时直连登录会直接失败。",
+    "本方案HTTP 登录时使用哪份HTTP 登录任务（请求地址、请求头、判定关键字、凭据变换脚本都在任务里）。\n\n" +
+    "同一门户的多个账号共用一份任务，字段在「任务 · HTTP 登录任务」里编辑。" +
+    "直连没有内置兜底任务——门户地址没法内置，所以未绑定时HTTP 登录会直接失败。",
   scriptTask:
     "本方案脚本登录时执行哪个脚本任务。脚本正文在「任务 · 脚本」里编辑，" +
     "与列表里的「立即运行」是同一条执行路径。\n\n" + SCRIPT_LOGIN_CONTRACT_NOTE,
@@ -134,7 +134,7 @@ const browserTaskSelectOptions = computed<SelectOption[]>(() =>
   browserTaskOptions(browserTasks.value, DEFAULT_TASK_ID),
 );
 
-/** 直连任务下拉选项：首项是"未绑定"，因为直连没有兜底任务可回退 */
+/** HTTP 登录任务下拉选项：首项是"未绑定"，因为直连没有兜底任务可回退 */
 const httpTaskSelectOptions = computed<SelectOption[]>(() =>
   httpTaskOptions(httpTasks.value),
 );
@@ -144,7 +144,7 @@ const scriptTaskSelectOptions = computed<SelectOption[]>(() =>
   scriptTaskOptions(scripts.value),
 );
 
-/** 已绑定直连任务是否存在于当前任务清单（被删掉的任务要当场看得见） */
+/** 已绑定HTTP 登录任务是否存在于当前任务清单（被删掉的任务要当场看得见） */
 const boundHttpTaskMissing = computed(
   () =>
     props.modelValue.active_http_task.trim() !== "" &&
@@ -183,7 +183,7 @@ function onScriptTaskChange(value: string): void {
 
 async function runTest(): Promise<void> {
   if (!props.modelValue.active_http_task.trim()) {
-    toastOnly(false, "请先选择一个直连任务");
+    toastOnly(false, "请先选择一个HTTP 登录任务");
     return;
   }
   if (!(props.username ?? "").trim()) {
@@ -218,11 +218,11 @@ async function runTest(): Promise<void> {
         v-if="showGuide"
         href="#"
         class="channel-guide-link"
-        title="直连请求参数在「任务 · 直连任务」里配置，同一门户的账号共用一份"
+        title="HTTP 登录参数在「任务 · HTTP 登录任务」里配置，同一门户的账号共用一份"
         @click.prevent="emit('openGuide')"
       >
         <IconApp name="sparkles" class="icon-sm" />
-        配置直连任务
+        配置HTTP 登录任务
       </a>
     </div>
 
@@ -254,7 +254,7 @@ async function runTest(): Promise<void> {
       >
         <span class="channel-card-icon"><IconApp name="send" /></span>
         <span class="channel-card-copy">
-          <strong>直连请求</strong>
+          <strong>HTTP 登录</strong>
           <small>直接向校园网网关发登录请求，不开浏览器、更快更省资源</small>
         </span>
         <span class="channel-card-cost channel-card-cost--free">免 Python 与浏览器</span>
@@ -324,7 +324,7 @@ async function runTest(): Promise<void> {
     <div v-else class="channel-panel">
       <div class="form-group">
         <div class="field-label-row">
-          <label :for="`${uid}-http-task`">直连任务</label>
+          <label :for="`${uid}-http-task`">HTTP 登录任务</label>
           <FieldHelp :text="HELP.httpTask" wide />
         </div>
         <CustomSelect
@@ -335,14 +335,14 @@ async function runTest(): Promise<void> {
         />
       </div>
 
-      <!-- 未绑定 / 绑定的任务已被删除：两种都会让直连登录直接失败，故当场提示并给出出口 -->
+      <!-- 未绑定 / 绑定的任务已被删除：两种都会让HTTP 登录直接失败，故当场提示并给出出口 -->
       <div v-if="boundHttpTaskMissing" class="note note--warn">
         <IconApp name="alert-triangle" class="icon-sm" />
-        <span>绑定的直连任务已不存在，请重新选择；直连登录在选中任务前不可用。</span>
+        <span>绑定的HTTP 登录任务已不存在，请重新选择；HTTP 登录在选中任务前不可用。</span>
       </div>
       <div v-else-if="!modelValue.active_http_task.trim()" class="note">
         <IconApp name="info" class="icon-sm" />
-        <span>尚未绑定直连任务，直连登录会直接失败。</span>
+        <span>尚未绑定HTTP 登录任务，HTTP 登录会直接失败。</span>
         <a href="#" class="http-task-link" @click.prevent="emit('openGuide')">去新建 →</a>
       </div>
 
@@ -369,7 +369,7 @@ async function runTest(): Promise<void> {
 
 <style scoped>
 /* 登录方式：渠道卡 + 该渠道的任务选择器（字段编辑在任务页，此处只管"用哪个"）。
-   与「任务 · 直连任务」的编辑器形成对照：这里一眼看清两渠道的取舍。 */
+   与「任务 · HTTP 登录任务」的编辑器形成对照：这里一眼看清两渠道的取舍。 */
 
 .channel-section-label {
   /* 区段标题样式由 profiles.css 提供；此处仅保证在 head 行内不被压扁 */

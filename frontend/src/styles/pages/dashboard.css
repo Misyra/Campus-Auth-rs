@@ -327,6 +327,11 @@
   gap: 10px;
 }
 
+.history-row--meta {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
 .history-time {
   font-size: var(--text-md);
   color: var(--text-primary);

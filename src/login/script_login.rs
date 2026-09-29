@@ -154,6 +154,16 @@ pub(crate) fn to_structured(
             Outcome::Success,
             format!("登录脚本 {task_id} 退出码 0{detail}"),
         )
+    } else if result.exit_code == 2 {
+        (
+            Outcome::ManualRequired,
+            format!("登录脚本 {task_id} 需要人工验证（退出码 2）{detail}"),
+        )
+    } else if result.exit_code == 3 {
+        (
+            Outcome::InvalidCredential,
+            format!("登录脚本 {task_id} 拒绝凭据（退出码 3）{detail}"),
+        )
     } else {
         // 与直连「未命中成功标识」同类：本次尝试失败但成因未知（网络/门户改版/凭据），
         // 交重试预算处理，不直接判死，也不回收 Worker（脚本渠道本就没有 Worker）
@@ -323,7 +333,7 @@ mod tests {
         }
     }
 
-    /// 退出码 0 → 成功；非 0 → 可重试（与直连「未命中成功标识」同类）
+    /// 退出码 0 成功、2 人工验证、3 凭据无效，其他非零退出码可重试。
     #[test]
     fn exit_code_decides_outcome() {
         let ok = to_structured("portal-login", &result(true, 0, "login ok"), "pw");
@@ -331,15 +341,32 @@ mod tests {
         assert!(ok.message.contains("退出码 0"), "{}", ok.message);
         assert_eq!(ok.data["script_exit_code"], 0);
 
-        let bad = to_structured("portal-login", &result(false, 3, "boom"), "pw");
+        let bad = to_structured("portal-login", &result(false, 4, "boom"), "pw");
         assert_eq!(bad.outcome, Outcome::AssertionFailed);
         assert_eq!(
             crate::login::session::classify(bad.outcome),
             crate::login::session::ResultAction::Retry,
             "脚本失败必须走重试预算，而不是直接终态"
         );
-        assert!(bad.message.contains("退出码 3"), "{}", bad.message);
+        assert!(bad.message.contains("退出码 4"), "{}", bad.message);
         assert!(bad.message.contains("boom"), "{}", bad.message);
+    }
+
+    #[test]
+    fn script_terminal_exit_codes_do_not_retry() {
+        for (code, outcome) in [
+            (2, Outcome::ManualRequired),
+            (3, Outcome::InvalidCredential),
+        ] {
+            let actual = to_structured("portal-login", &result(false, code, ""), "pw");
+            assert_eq!(actual.outcome, outcome);
+            assert_eq!(
+                crate::login::session::classify(actual.outcome),
+                crate::login::session::ResultAction::Terminal(
+                    crate::login::session::LoginTerminal::Failed
+                )
+            );
+        }
     }
 
     /// 脚本失败**不得**触发 Worker 回收（脚本渠道没有 Worker；误判会去杀别人的浏览器会话）

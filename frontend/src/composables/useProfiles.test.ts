@@ -206,6 +206,6 @@ describe("保存方案的「渠道 → 任务」闸口", () => {
     p.editingProfile.value = draft({ login_channel: "http" as const, active_http_task: "" });
 
     expect(await p.saveProfile()).toBe(false);
-    expect(lastToast()).toContain("直连任务");
+    expect(lastToast()).toContain("HTTP 登录任务");
   });
 });

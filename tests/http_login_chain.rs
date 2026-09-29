@@ -292,4 +292,112 @@ async fn http_login_succeeds_without_python_or_worker_setup() {
         !dir.path().join("python_worker").exists(),
         "直连登录不应创建或复制 Python Worker"
     );
+
+    // 新式流程的计算步骤必须走真实主程序拉起的计算子进程，而非库测试的直调路径。
+    api.request(
+        "PUT",
+        "/api/tasks/portal-http-flow",
+        Some(json!({
+            "type": "http",
+            "schema_version": 2,
+            "task_id": "portal-http-flow",
+            "name": "计算后登录",
+            "steps": [
+                {
+                    "id": "compute",
+                    "name": "准备字段",
+                    "kind": "transform",
+                    "script": "function transform(ctx) { return { login_user: ctx.username, login_pass: ctx.password }; }"
+                },
+                {
+                    "id": "login",
+                    "name": "登录请求",
+                    "kind": "request",
+                    "method": "POST",
+                    "url": format!("{portal_base}/login"),
+                    "body": "username={login_user}&password={login_pass}"
+                }
+            ],
+            "result_step_id": "login",
+            "success_pattern": "登录成功"
+        })),
+    )
+    .await;
+    let flow_probe = api
+        .request(
+            "POST",
+            "/api/http-tasks/test",
+            Some(json!({
+                "task_id": "portal-http-flow",
+                "profile_id": "default",
+                "username": "testuser",
+                "password": "",
+                "fetch_page": false
+            })),
+        )
+        .await;
+    assert_eq!(
+        flow_probe["outcome"], "success",
+        "计算子进程应完成流程: {flow_probe}"
+    );
+    assert_eq!(flow_probe["steps"].as_array().map(Vec::len), Some(2));
+    assert!(!flow_probe.to_string().contains("testpass"));
+
+    // 展开多次原生哈希调用，验证循环次数保护之外的耗时计算受墙钟限制。
+    let costly_script = format!(
+        "function transform() {{ const x = 'x'.repeat(65536); {} return {{ ready: '1' }}; }}",
+        "sha256(x);".repeat(4000)
+    );
+    api.request(
+        "PUT",
+        "/api/tasks/portal-http-slow",
+        Some(json!({
+            "type": "http",
+            "schema_version": 2,
+            "task_id": "portal-http-slow",
+            "name": "慢计算",
+            "steps": [
+                {
+                    "id": "compute",
+                    "kind": "transform",
+                    "script": costly_script
+                },
+                {
+                    "id": "login",
+                    "kind": "request",
+                    "method": "POST",
+                    "url": format!("{portal_base}/login"),
+                    "body": "username={username}&password={password}"
+                }
+            ],
+            "result_step_id": "login"
+        })),
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let timed_out = api
+        .request(
+            "POST",
+            "/api/http-tasks/test",
+            Some(json!({
+                "task_id": "portal-http-slow",
+                "profile_id": "default",
+                "username": "testuser",
+                "password": "",
+                "fetch_page": false
+            })),
+        )
+        .await;
+    assert_eq!(timed_out["outcome"], "unknown_error", "{timed_out}");
+    assert!(
+        timed_out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("超时"),
+        "{timed_out}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "计算超时应及时返回"
+    );
 }

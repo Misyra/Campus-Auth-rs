@@ -226,7 +226,7 @@ export const profilesApi = {
       wifi_ssid?: string;
       active_task?: string;
       login_channel?: Profile["login_channel"];
-      /** 直连渠道绑定的直连任务 ID（空 = 未绑定；直连没有内置兜底任务） */
+      /** 直连渠道绑定的HTTP 登录任务 ID（空 = 未绑定；直连没有内置兜底任务） */
       active_http_task?: string;
       /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
       active_script_task?: string;
@@ -537,7 +537,7 @@ export const tasksApi = {
 };
 
 /**
- * 直连任务（`type: "http"`）。
+ * HTTP 登录任务（`type: "http"`）。
  *
  * 列表 / 详情 / 保存 / 删除 / 排序 / 导入导出都复用 `tasksApi`（后端一套 CRUD 认
  * `type` 分派），只有测试请求走独立端点：它接受**未保存的草稿**或已保存任务 id，

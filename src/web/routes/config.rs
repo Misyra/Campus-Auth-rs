@@ -988,9 +988,7 @@ mod tests {
 
         async fn load_task(&self, task_id: &str) -> Result<crate::tasks::TaskKind, TaskError> {
             match task_id {
-                "portal-http" => Ok(crate::tasks::TaskKind::Http(
-                    crate::tasks::HttpTaskConfig::default(),
-                )),
+                "portal-http" => Ok(crate::tasks::TaskKind::Http(Box::default())),
                 "portal-browser" => Ok(crate::tasks::TaskKind::Browser(
                     crate::tasks::TaskConfig::default(),
                 )),

@@ -1032,6 +1032,23 @@ async def handle_assert_text(page, step: StepConfig, context: StepContext) -> No
     logger.info("[assert_text] 检测到文本: '%s'", value)
 
 
+async def handle_manual_check(page, step: StepConfig, context: StepContext) -> None:
+    """检查门户是否出现需要人工处理的提示；未出现时继续后续步骤。"""
+    _check_cancel(context)
+    if not step.selector and not step.value:
+        raise WorkerError(Outcome.UNKNOWN_ERROR, "manual_check 需要 selector 或 value")
+    scope = _locator(context, step.selector or "body")
+    try:
+        if step.value:
+            found = await scope.filter(has_text=step.value).first.is_visible()
+        else:
+            found = await scope.first.is_visible()
+    except Exception as exc:  # noqa: BLE001
+        raise WorkerError(Outcome.UNKNOWN_ERROR, f"人工验证提示检查失败: {exc}") from exc
+    if found:
+        raise WorkerError(Outcome.MANUAL_REQUIRED, "门户要求人工验证，请打开门户完成操作")
+
+
 async def handle_upload_file(page, step: StepConfig, context: StepContext) -> None:
     """向文件输入上传本地文件，兼容 path/value 两种历史写法。"""
     _check_cancel(context)
@@ -1149,6 +1166,7 @@ _STEP_HANDLERS: dict[str, Callable] = {
     "navigate": handle_navigate,
     "goto": handle_navigate,
     "assert_text": handle_assert_text,
+    "manual_check": handle_manual_check,
     "upload_file": handle_upload_file,
     "ocr": handle_ocr,
 }

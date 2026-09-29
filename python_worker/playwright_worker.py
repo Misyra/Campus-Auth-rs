@@ -401,7 +401,7 @@ async def run_steps(page: Any, steps: list[StepConfig], context: StepContext) ->
             except WorkerError as exc:
                 if isinstance(exc, StepCancelled):
                     raise
-                if step.required:
+                if step.required or exc.outcome == Outcome.MANUAL_REQUIRED.value:
                     raise
                 failed_ids.append(step.id or f"#{idx}")
                 logger.warning(f"步骤 {step.id} 失败但非必须，继续执行: {exc.message}")

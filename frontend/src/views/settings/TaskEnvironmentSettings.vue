@@ -5,6 +5,7 @@ import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, watch, onMounted, onActivated, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useProfiles } from "@/composables/useProfiles";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useStatus } from "@/composables/useStatus";
@@ -20,6 +21,7 @@ const { busy } = useStatus();
 const { envStatus, envLoading, envError, refreshEnv, bootstrapEnv } = useEnvironment();
 const { toastOnly } = useToast();
 const t = useTasks();
+const { httpTasks, scripts } = useTaskDirectory();
 const { profiles, activeProfileId } = useProfiles();
 const repo = useRepoImport();
 const router = useRouter();
@@ -36,16 +38,22 @@ onActivated(() => { void refreshEnv(); });
  *
  * 必须按渠道取：三条渠道各绑各的字段，拿浏览器任务的 `active_task` 去代表直连或
  * 脚本渠道，会显示一个登录时**根本不会执行**的任务名——用户据此排查会走错方向。
- * 直连/脚本侧直接显示任务 id（任务页列表里的标识），浏览器侧沿用友好名称。
+ * HTTP/脚本显示名称与 ID，自动生成的 HTTP ID 不再单独占据概览主文案。
  */
 const activeTaskName = computed(() => {
   const profile = profiles.value[activeProfileId.value];
   if (!profile) return "内置默认任务";
   if (profile.login_channel === "http") {
-    return profile.active_http_task?.trim() || "未绑定（直连登录不可用）";
+    const id = profile.active_http_task?.trim();
+    if (!id) return "未绑定（HTTP 登录不可用）";
+    const name = httpTasks.value.find((task) => task.id === id)?.name;
+    return name ? `${name}（${id}）` : id;
   }
   if (profile.login_channel === "script") {
-    return profile.active_script_task?.trim() || "未绑定（脚本登录不可用）";
+    const id = profile.active_script_task?.trim();
+    if (!id) return "未绑定（脚本登录不可用）";
+    const name = scripts.value.find((task) => task.id === id)?.name;
+    return name ? `${name}（${id}）` : id;
   }
   const id = profile.active_task;
   if (!id) return "内置默认任务";

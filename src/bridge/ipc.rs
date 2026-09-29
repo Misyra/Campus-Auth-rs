@@ -87,6 +87,8 @@ pub enum Outcome {
     CaptchaFailed,
     /// 凭证无效
     InvalidCredential,
+    /// 门户要求用户完成验证码、短信或其他人工验证
+    ManualRequired,
     /// 网络错误（可重试；重试前由 should_force_recycle 强制回收 Worker）
     NetworkError,
     /// 未知错误（终态失败：classify 在 try_retry 之前终结，不触发回收）

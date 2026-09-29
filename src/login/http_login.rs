@@ -1,7 +1,7 @@
 //! 直连登录执行器：按方案的直连任务构造并发送登录请求。
 //!
-//! 与浏览器渠道（Python Worker + Playwright）完全独立：整个流程在 Rust 进程内
-//! 完成，不要求 Python 环境与浏览器就绪。流水线：
+//! 与浏览器渠道（Python Worker + Playwright）完全独立：请求由 Rust 主进程发送，
+//! 纯计算脚本在同一可执行文件的受限子进程中运行，不要求 Python 环境与浏览器就绪。流水线：
 //!
 //! 1. （配置了加密脚本时）抓取登录页原文，供脚本从页面取盐值等参数
 //! 2. 用户加密脚本：内置 boa 引擎在无网络/文件沙箱中执行 `transform(ctx)`
@@ -28,7 +28,10 @@ use sha2::Digest;
 use zeroize::Zeroizing;
 
 use crate::bridge::{Outcome, StructuredResult};
-use crate::tasks::{HttpActionRequest, HttpPreRequest, HttpRequestMethod, HttpTaskConfig};
+use crate::tasks::{
+    HttpActionRequest, HttpExtractRule, HttpFlowStep, HttpFlowStepKind, HttpPreRequest,
+    HttpRequestMethod, HttpStepOnError, HttpTaskConfig,
+};
 
 /// 响应体展示/判定的读取上限（字节）：门户响应通常极小，超限部分截断
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -45,8 +48,13 @@ const LOGOUT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const LOGOUT_MAX_WAIT_SECS: f64 = 30.0;
 /// 登录请求总超时
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-/// 用户脚本执行墙钟上限（防死循环拖死会话；引擎内另有指令数兜底）
-const SCRIPT_TIMEOUT: Duration = Duration::from_millis(500);
+/// 新式多步骤流程的一次尝试总时限。
+const FLOW_TIMEOUT: Duration = Duration::from_secs(120);
+/// 用户计算脚本的子进程总时限；超时后回收进程，避免孤儿计算线程累积。
+#[cfg(not(test))]
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(2);
+/// 子进程协议上限，覆盖脚本、页面文本及前面步骤的变量。
+const MAX_TRANSFORM_IPC_BYTES: usize = 512 * 1024;
 /// 消息中响应片段的最大长度
 const SNIPPET_LEN: usize = 240;
 const MAX_URL_BYTES: usize = 8 * 1024;
@@ -54,6 +62,9 @@ const MAX_HEADERS_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024;
 const MAX_PATTERN_BYTES: usize = 8 * 1024;
 const MAX_SCRIPT_BYTES: usize = 128 * 1024;
+/// 单个响应变量和本次登录所有变量的内存预算，避免异常门户放大后续脚本输入。
+const MAX_EXTRACT_VALUE_BYTES: usize = 8 * 1024;
+const MAX_FLOW_VARIABLE_BYTES: usize = 128 * 1024;
 /// 响应头回显上限（字节）：门户响应头通常只有几百字节，超限截断防异常门户撑爆面板
 const MAX_RESPONSE_HEADERS_BYTES: usize = 8 * 1024;
 /// 未配置 User-Agent 时使用的兜底值。
@@ -66,6 +77,10 @@ const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 /// 一次直连登录尝试的完整请求参数（由方案绑定的直连任务构造）
 #[derive(Clone)]
 pub(crate) struct HttpLoginRequest {
+    /// 新式有序流程；非空时取代旧固定请求链。
+    pub steps: Vec<HttpFlowStep>,
+    /// 结果判断所引用的请求步骤 ID；空串表示最后一个请求步骤。
+    pub result_step_id: String,
     /// 请求方法
     pub method: HttpRequestMethod,
     /// 请求 URL（完整地址）
@@ -76,8 +91,10 @@ pub(crate) struct HttpLoginRequest {
     pub body: String,
     /// 成功判定关键字（空 = HTTP 2xx 即成功）
     pub success_pattern: String,
-    /// 失败判定关键字（命中即终态失败）
+    /// 失败判定关键字（命中后由 failure_action 决定停止或重试）
     pub failure_pattern: String,
+    /// 失败关键字命中后的动作（凭据错误立即停止 / 临时故障重试）。
+    pub failure_action: crate::tasks::HttpFailureAction,
     /// 成败判定方式：`Response` 响应关键字（默认）/ `Network` 网络检测
     ///
     /// `Network` 模式下响应体与状态码都不参与成功判定——请求发出且未命中
@@ -140,17 +157,23 @@ impl HttpLoginRequest {
         fetch_page: bool,
         global_ignore_https_errors: bool,
     ) -> Result<Self, String> {
-        if task.url.trim().is_empty() {
+        task.validate_flow()?;
+        if task.steps.is_empty() && task.url.trim().is_empty() {
             return Err("直连任务缺少请求地址，请在「任务 · 直连任务」里填写".into());
         }
-        Self::validate_url(&task.url)?;
+        if task.steps.is_empty() {
+            Self::validate_url(&task.url)?;
+        }
         let request = Self {
+            steps: task.steps.clone(),
+            result_step_id: task.result_step_id.clone(),
             method: task.method,
             url: task.url.trim().to_string(),
             headers: task.headers.clone(),
             body: task.body.clone(),
             success_pattern: task.success_pattern.clone(),
             failure_pattern: task.failure_pattern.clone(),
+            failure_action: task.failure_action,
             success_check: task.success_check,
             crypto_script: task.crypto_script.clone(),
             pre_request: task.pre_request.clone(),
@@ -185,7 +208,17 @@ impl HttpLoginRequest {
 
     /// 校验直连配置的协议与体积边界，避免异常配置造成过量内存/脚本开销。
     pub fn validate(&self) -> Result<(), String> {
-        Self::validate_url(&self.url)?;
+        if self.steps.is_empty() {
+            Self::validate_url(&self.url)?;
+        } else {
+            let task = HttpTaskConfig {
+                schema_version: 2,
+                steps: self.steps.clone(),
+                result_step_id: self.result_step_id.clone(),
+                ..HttpTaskConfig::default()
+            };
+            task.validate_flow()?;
+        }
         Self::validate_templates(
             &self.url,
             &self.headers,
@@ -278,7 +311,13 @@ impl HttpLoginRequest {
     /// 调用方据此决定是否值得查询本机地址（见 [`Self::with_local_address`]）：
     /// 无脚本时脚本根本不会执行，`local_ip`/`local_mac` 也就无人读取。
     pub fn uses_crypto_script(&self) -> bool {
-        !self.crypto_script.trim().is_empty()
+        if self.steps.is_empty() {
+            !self.crypto_script.trim().is_empty()
+        } else {
+            self.steps
+                .iter()
+                .any(|step| step.kind == HttpFlowStepKind::Transform)
+        }
     }
 
     /// 是否需要本机地址（决定是否值得做一次网卡探测）。
@@ -292,6 +331,10 @@ impl HttpLoginRequest {
             text.contains("{local_ip}") || text.contains("{local_mac}")
         }
         self.uses_crypto_script()
+            || self
+                .steps
+                .iter()
+                .any(|step| mentions(&step.url) || mentions(&step.headers) || mentions(&step.body))
             || mentions(&self.url)
             || mentions(&self.headers)
             || mentions(&self.body)
@@ -314,9 +357,57 @@ impl HttpLoginRequest {
     }
 }
 
+/// 多步骤流程中单个步骤的脱敏诊断。
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct HttpStepReport {
+    /// 稳定步骤 ID。
+    pub id: String,
+    /// 用户设置的步骤名称。
+    pub name: String,
+    /// 步骤类型。
+    pub kind: HttpFlowStepKind,
+    /// `success`、`ignored` 或 `failed`。
+    pub outcome: &'static str,
+    /// 该步骤的简短说明。
+    pub message: String,
+    /// 本步骤生成的变量名；仅回传名称，不回传敏感值。
+    pub produced_vars: Vec<String>,
+    /// 脱敏后的请求地址。
+    pub rendered_url: String,
+    /// 脱敏后的请求头。
+    pub rendered_headers: String,
+    /// 脱敏后的请求体。
+    pub rendered_body: String,
+    /// HTTP 状态码。
+    pub status: Option<u16>,
+    /// 脱敏后的响应头。
+    pub response_headers: String,
+    /// 脱敏后的响应片段。
+    pub response_snippet: String,
+    /// 耗时毫秒数。
+    pub duration_ms: u64,
+}
+
+impl HttpStepReport {
+    /// 在步骤变量全部收集后统一脱敏，覆盖后来才提取出的令牌。
+    fn redact(&mut self, secrets: &[String]) {
+        self.message = redact_text(&self.message, secrets);
+        for name in &mut self.produced_vars {
+            *name = redact_text(name, secrets);
+        }
+        self.rendered_url = redact_url(&self.rendered_url, secrets);
+        self.rendered_headers = redact_text(&self.rendered_headers, secrets);
+        self.rendered_body = redact_text(&self.rendered_body, secrets);
+        self.response_headers = redact_text(&self.response_headers, secrets);
+        self.response_snippet = redact_text(&self.response_snippet, secrets);
+    }
+}
+
 /// 一次直连尝试的执行报告（登录会话与测试端点共用）
 #[derive(Debug)]
 pub(crate) struct HttpAttemptReport {
+    /// 多步骤流程的逐步诊断；旧任务为空。
+    pub step_reports: Vec<HttpStepReport>,
     /// 结果分类
     pub outcome: Outcome,
     /// 人类可读消息（已脱敏）
@@ -357,6 +448,9 @@ impl HttpAttemptReport {
 
 /// 执行一次直连登录尝试（不发网络验证，验证由会话状态机负责）
 pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
+    if !req.steps.is_empty() {
+        return run_flow_once(req).await;
+    }
     let start = Instant::now();
 
     // 0. 本次尝试共用的 HTTP 客户端（退出登录请求 / 登录页抓取 / 前置请求 / 登录请求
@@ -389,6 +483,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     // {local_ip}，也能在 transform 中引用；取不到时为空串（脚本须容忍）
     vars.insert("local_ip".to_string(), req.local_ip.clone());
     vars.insert("local_mac".to_string(), req.local_mac.clone());
+    let mut secrets = collect_secrets(&vars);
 
     // 1. 退出登录动作（可选）：治「IP 已在线，拒绝重复登录」类门户——先踢掉旧会话再登录。
     //    必须在**登录页抓取与凭据变换脚本之前**：这类门户连取令牌的接口都可能被旧会话
@@ -425,7 +520,6 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
             Err(e) => {
                 // best effort：下线失败只说明旧会话可能还在，登录本身仍值得一试。
                 // 错误消息可能拼 URL（GET 下线地址或含凭据），日志走脱敏。
-                let secrets = collect_secrets(&vars);
                 tracing::warn!(
                     "退出登录请求失败（忽略，继续登录）: {}",
                     redact_text(&e, &secrets)
@@ -465,6 +559,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
                         // 覆盖内置字段是合法用法（如盐值拼接后的密码）
                         tracing::debug!("脚本字段覆盖内置占位符: {k}");
                     }
+                    add_secret(&mut secrets, &v);
                     vars.insert(k, v);
                 }
             }
@@ -476,12 +571,13 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 
     // 脚本失败直接终态：凭证变换错误时发出去的请求必错，重试无意义
     if let Some(e) = &script_error {
+        normalize_secrets(&mut secrets);
         return abort_report(
             Outcome::UnknownError,
-            format!("加密脚本执行失败: {e}"),
+            redact_text(&format!("加密脚本执行失败: {e}"), &secrets),
             None,
             None,
-            Some(e.clone()),
+            Some(redact_text(e, &secrets)),
             start.elapsed().as_millis() as u64,
         );
     }
@@ -494,7 +590,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         let pre_url = substitute(&pre.url, &vars);
         let pre_headers = substitute(&pre.headers, &vars);
         let pre_body = substitute(&pre.body, &vars);
-        let secrets = collect_secrets(&vars);
+        normalize_secrets(&mut secrets);
         let rendered = (
             redact_url(&pre_url, &secrets),
             redact_text(&pre_headers, &secrets),
@@ -524,8 +620,8 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
                             "前置请求（HTTP {status}）取到占位符 `{placeholder}`（{} 字节）",
                             value.len()
                         );
-                        // 取到的值进 vars 后即属"秘密"：collect_secrets 会把非内置键
-                        // 全部纳入脱敏字典，后续日志/历史/前端回显都不会漏出令牌
+                        // 取到的值并入本次尝试的脱敏字典，后续报告不会回显令牌。
+                        add_secret(&mut secrets, &value);
                         vars.insert(placeholder, value);
                     }
                     Err(e) => {
@@ -576,7 +672,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let (status, body, response_headers) = match send {
         Ok(triple) => triple,
         Err(e) => {
-            let secrets = collect_secrets(&vars);
+            normalize_secrets(&mut secrets);
             // reqwest 的 Error::Display 会把完整 URL 拼进消息（"for url (...)"），
             // GET 渠道下 URL 含明文凭据，必须先脱敏再进 message——它会流入日志、
             // 登录历史与前端；rendered_url 的自有脱敏无法覆盖这条错误路径。
@@ -596,7 +692,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     };
 
     // 6. 成败判定
-    let secrets = collect_secrets(&vars);
+    normalize_secrets(&mut secrets);
     let body_text = body;
     let failure_hit =
         !req.failure_pattern.trim().is_empty() && body_text.contains(req.failure_pattern.trim());
@@ -616,7 +712,11 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let snippet = truncate_snippet(&body_text);
     let (outcome, message) = if failure_hit {
         (
-            Outcome::InvalidCredential,
+            match req.failure_action {
+                crate::tasks::HttpFailureAction::Credential => Outcome::InvalidCredential,
+                crate::tasks::HttpFailureAction::Retry => Outcome::AssertionFailed,
+                crate::tasks::HttpFailureAction::Manual => Outcome::ManualRequired,
+            },
             format!(
                 "门户返回失败标识（HTTP {status}）: {}",
                 redact_text(&snippet, &secrets)
@@ -640,6 +740,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     };
 
     HttpAttemptReport {
+        step_reports: Vec::new(),
         outcome,
         message,
         rendered_url: redact_url(&rendered_url, &secrets),
@@ -652,6 +753,494 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         script_error,
         duration_ms: start.elapsed().as_millis() as u64,
     }
+}
+
+/// 执行可编辑的有序 HTTP 登录流程；旧任务仍走上面的固定链。
+async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
+    let start = Instant::now();
+    let client = match build_client(req.ignore_https_errors) {
+        Ok(client) => client,
+        Err(error) => {
+            return abort_report(
+                Outcome::UnknownError,
+                format!("HTTP 客户端构建失败: {error}"),
+                None,
+                None,
+                None,
+                start.elapsed().as_millis() as u64,
+            );
+        }
+    };
+    let mut vars = BTreeMap::from([
+        ("username".to_string(), req.username.clone()),
+        ("password".to_string(), req.password.to_string()),
+        ("isp".to_string(), req.isp.clone()),
+        ("auth_url".to_string(), req.auth_url.clone()),
+        ("local_ip".to_string(), req.local_ip.clone()),
+        ("local_mac".to_string(), req.local_mac.clone()),
+    ]);
+    // 步骤可覆盖内置变量；后面统一脱敏时仍须记住前面请求用过的旧值。
+    let mut secrets = collect_secrets(&vars);
+    let result_id = if req.result_step_id.is_empty() {
+        req.steps
+            .iter()
+            .rev()
+            .find(|step| step.kind == HttpFlowStepKind::Request)
+            .map_or("", |step| step.id.as_str())
+    } else {
+        req.result_step_id.as_str()
+    };
+    let mut reports = Vec::with_capacity(req.steps.len());
+    let mut page: Option<String> = None;
+    // 状态码、响应体/头、实际发出的请求：结果判断可引用中间请求，不能只保存最后一条。
+    let mut result_response: Option<(reqwest::StatusCode, String, String, String, String, String)> =
+        None;
+
+    for step in &req.steps {
+        if start.elapsed() >= FLOW_TIMEOUT {
+            return flow_abort(
+                Outcome::NetworkError,
+                "HTTP 登录流程超时".into(),
+                None,
+                None,
+                None,
+                start,
+                reports,
+                &secrets,
+            );
+        }
+        let step_start = Instant::now();
+        if step.kind == HttpFlowStepKind::Transform {
+            let page_text = if req.fetch_page {
+                if page.is_none() {
+                    page = Some(fetch_login_page(&client, &req.auth_url).await);
+                }
+                page.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            match execute_crypto_script_with_vars(
+                &step.script,
+                &req.username,
+                &req.password,
+                &req.isp,
+                &req.auth_url,
+                (&req.local_ip, &req.local_mac),
+                page_text,
+                vars.clone(),
+            )
+            .await
+            {
+                Ok(values) => {
+                    let count = values.len();
+                    let produced_vars = values.keys().cloned().collect();
+                    if values
+                        .values()
+                        .any(|value| value.len() > MAX_EXTRACT_VALUE_BYTES)
+                        || vars.values().map(String::len).sum::<usize>()
+                            + values.values().map(String::len).sum::<usize>()
+                            > MAX_FLOW_VARIABLE_BYTES
+                    {
+                        reports.push(flow_step_report(
+                            step,
+                            "failed",
+                            "计算结果中的变量超过大小限制".into(),
+                            ("", "", ""),
+                            None,
+                            step_start,
+                        ));
+                        return flow_abort(
+                            Outcome::UnknownError,
+                            "HTTP 流程变量超过大小限制".into(),
+                            None,
+                            None,
+                            None,
+                            start,
+                            reports,
+                            &secrets,
+                        );
+                    }
+                    for value in values.values() {
+                        add_secret(&mut secrets, value);
+                    }
+                    vars.extend(values);
+                    reports.push(flow_step_report(
+                        step,
+                        "success",
+                        format!("计算完成，生成 {count} 个字段"),
+                        ("", "", ""),
+                        None,
+                        step_start,
+                    ));
+                    if let Some(report) = reports.last_mut() {
+                        report.produced_vars = produced_vars;
+                    }
+                }
+                Err(error) => {
+                    reports.push(flow_step_report(
+                        step,
+                        "failed",
+                        format!("计算失败: {error}"),
+                        ("", "", ""),
+                        None,
+                        step_start,
+                    ));
+                    return flow_abort(
+                        Outcome::UnknownError,
+                        format!("步骤「{}」计算失败: {error}", step.name),
+                        None,
+                        None,
+                        Some(error),
+                        start,
+                        reports,
+                        &secrets,
+                    );
+                }
+            }
+            continue;
+        }
+
+        let url = substitute(&step.url, &vars);
+        let headers = substitute(&step.headers, &vars);
+        let body = substitute(&step.body, &vars);
+        let rendered = (url.as_str(), headers.as_str(), body.as_str());
+        let remaining = FLOW_TIMEOUT.saturating_sub(start.elapsed());
+        let timeout = REQUEST_TIMEOUT.min(remaining);
+        let response = send_http_detailed(
+            &client,
+            step.method,
+            &url,
+            &headers,
+            &body,
+            timeout,
+            step.stop_on_redirect,
+        )
+        .await;
+        let HttpResponse {
+            status,
+            body: response_body,
+            headers: response_header_map,
+            headers_text: response_headers,
+            final_url,
+        } = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let ignored = step.on_error == HttpStepOnError::Continue;
+                reports.push(flow_step_report(
+                    step,
+                    if ignored { "ignored" } else { "failed" },
+                    format!("请求失败: {error}"),
+                    rendered,
+                    None,
+                    step_start,
+                ));
+                if ignored {
+                    if !wait_flow_step(step.wait_secs, start).await {
+                        return flow_abort(
+                            Outcome::NetworkError,
+                            "HTTP 登录流程超时".into(),
+                            None,
+                            None,
+                            None,
+                            start,
+                            reports,
+                            &secrets,
+                        );
+                    }
+                    continue;
+                }
+                return flow_abort(
+                    Outcome::NetworkError,
+                    format!("步骤「{}」请求失败: {error}", step.name),
+                    Some(rendered),
+                    None,
+                    None,
+                    start,
+                    reports,
+                    &secrets,
+                );
+            }
+        };
+        let response_tuple = (
+            status.as_u16(),
+            response_headers.as_str(),
+            response_body.as_str(),
+        );
+        let is_result = step.id == result_id;
+        let mut issue = None;
+        let mut produced_vars = Vec::new();
+        if !step.extracts.is_empty() {
+            // 一步中的多条取值要整体提交；忽略后半段失败时不能留下已覆盖的半份变量。
+            let mut pending_vars = Vec::<(String, String)>::with_capacity(step.extracts.len());
+            let mut variable_bytes = vars.values().map(String::len).sum::<usize>();
+            for rule in &step.extracts {
+                match extract_flow_value(rule, &response_body, &response_header_map, &final_url) {
+                    Ok(value) => {
+                        let previous_len = pending_vars
+                            .iter()
+                            .rev()
+                            .find(|(name, _)| name == &rule.name)
+                            .map(|(_, value)| value.len())
+                            .or_else(|| vars.get(&rule.name).map(String::len))
+                            .unwrap_or(0);
+                        if value.len() > MAX_EXTRACT_VALUE_BYTES
+                            || variable_bytes - previous_len + value.len() > MAX_FLOW_VARIABLE_BYTES
+                        {
+                            issue = Some((
+                                format!("提取 `{}` 失败: 变量超过大小限制", rule.name),
+                                Outcome::UnknownError,
+                            ));
+                            break;
+                        }
+                        variable_bytes = variable_bytes - previous_len + value.len();
+                        // 即便整步最终失败，已读到的值仍可能出现在该步响应与错误报告里。
+                        add_secret(&mut secrets, &value);
+                        pending_vars.push((rule.name.clone(), value));
+                    }
+                    Err(error) => {
+                        issue = Some((
+                            format!("提取 `{}` 失败: {error}", rule.name),
+                            Outcome::UnknownError,
+                        ));
+                        break;
+                    }
+                }
+            }
+            if issue.is_none() {
+                for (name, value) in pending_vars {
+                    produced_vars.push(name.clone());
+                    vars.insert(name, value);
+                }
+            }
+        } else if !step.extract.trim().is_empty() {
+            let pre = HttpPreRequest {
+                extract: step.extract.clone(),
+                name: step.extract_as.clone(),
+                ..HttpPreRequest::default()
+            };
+            match pre
+                .extract_path()
+                .and_then(|path| extract_pre_value(path, &response_body))
+            {
+                Ok(value) => {
+                    if value.len() > MAX_EXTRACT_VALUE_BYTES
+                        || vars.values().map(String::len).sum::<usize>() + value.len()
+                            > MAX_FLOW_VARIABLE_BYTES
+                    {
+                        issue = Some((
+                            "提取变量失败: 变量超过大小限制".into(),
+                            Outcome::UnknownError,
+                        ));
+                    } else {
+                        add_secret(&mut secrets, &value);
+                        let name = pre.placeholder_name();
+                        vars.insert(name.clone(), value);
+                        produced_vars.push(name);
+                    }
+                }
+                Err(error) => {
+                    // 旧式前置请求取不到字段会直接终止；打开旧任务后编辑步骤不能
+                    // 把同一错误悄悄改成重复请求。取到字段时也沿用旧式“响应可用”口径。
+                    issue = Some((format!("提取变量失败: {error}"), Outcome::UnknownError));
+                }
+            }
+        }
+        if issue.is_none()
+            && !status.is_success()
+            && !is_result
+            && step.extract.trim().is_empty()
+            && step.extracts.is_empty()
+        {
+            issue = Some((format!("HTTP {status}"), Outcome::AssertionFailed));
+        }
+        let ignored = issue.is_some() && step.on_error == HttpStepOnError::Continue;
+        let step_message = issue
+            .as_ref()
+            .map_or_else(|| format!("HTTP {status}"), |(error, _)| error.clone());
+        reports.push(flow_step_report(
+            step,
+            if ignored {
+                "ignored"
+            } else if issue.is_some() {
+                "failed"
+            } else {
+                "success"
+            },
+            step_message,
+            rendered,
+            Some(response_tuple),
+            step_start,
+        ));
+        if let Some(report) = reports.last_mut() {
+            report.produced_vars = produced_vars;
+        }
+        if let Some((error, outcome)) = issue {
+            if !ignored {
+                return flow_abort(
+                    outcome,
+                    format!("步骤「{}」失败: {error}", step.name),
+                    Some(rendered),
+                    Some(response_tuple),
+                    None,
+                    start,
+                    reports,
+                    &secrets,
+                );
+            }
+        }
+        if is_result {
+            result_response = Some((status, response_body, response_headers, url, headers, body));
+        }
+        if !wait_flow_step(step.wait_secs, start).await {
+            return flow_abort(
+                Outcome::NetworkError,
+                "HTTP 登录流程超时".into(),
+                None,
+                None,
+                None,
+                start,
+                reports,
+                &secrets,
+            );
+        }
+    }
+
+    let Some((status, body, response_headers, url, headers, request_body)) = result_response else {
+        return flow_abort(
+            Outcome::UnknownError,
+            "结果判断引用的请求没有得到响应".into(),
+            None,
+            None,
+            None,
+            start,
+            reports,
+            &secrets,
+        );
+    };
+    let failure_hit =
+        !req.failure_pattern.trim().is_empty() && body.contains(req.failure_pattern.trim());
+    let success = if failure_hit {
+        false
+    } else if req.success_check == crate::tasks::HttpSuccessCheck::Network {
+        true
+    } else if req.success_pattern.trim().is_empty() {
+        status.is_success()
+    } else {
+        body.contains(req.success_pattern.trim())
+    };
+    let (outcome, message) = if failure_hit {
+        (
+            match req.failure_action {
+                crate::tasks::HttpFailureAction::Credential => Outcome::InvalidCredential,
+                crate::tasks::HttpFailureAction::Retry => Outcome::AssertionFailed,
+                crate::tasks::HttpFailureAction::Manual => Outcome::ManualRequired,
+            },
+            format!("步骤「{result_id}」命中失败标识（HTTP {status}）"),
+        )
+    } else if success {
+        let message = if req.success_check == crate::tasks::HttpSuccessCheck::Network {
+            format!("已完成 HTTP 登录流程（HTTP {status}），由登录后网络检测判断结果")
+        } else {
+            format!("HTTP 登录流程成功（HTTP {status}）")
+        };
+        (Outcome::Success, message)
+    } else {
+        (
+            Outcome::AssertionFailed,
+            format!("步骤「{result_id}」未命中成功标识（HTTP {status}）"),
+        )
+    };
+    normalize_secrets(&mut secrets);
+    for report in &mut reports {
+        report.redact(&secrets);
+    }
+    HttpAttemptReport {
+        step_reports: reports,
+        outcome,
+        message: redact_text(&message, &secrets),
+        rendered_url: redact_url(&url, &secrets),
+        rendered_headers: redact_text(&headers, &secrets),
+        rendered_body: redact_text(&request_body, &secrets),
+        status: Some(status.as_u16()),
+        response_headers: redact_text(&response_headers, &secrets),
+        response_snippet: redact_text(&truncate_snippet(&body), &secrets),
+        script_error: None,
+        duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+/// 请求失败被忽略时也要执行等待，保持旧式下线动作的时序。
+async fn wait_flow_step(wait_secs: f64, start: Instant) -> bool {
+    if wait_secs <= 0.0 {
+        return true;
+    }
+    let wait = Duration::from_secs_f64(wait_secs);
+    if wait > FLOW_TIMEOUT.saturating_sub(start.elapsed()) {
+        return false;
+    }
+    tokio::time::sleep(wait).await;
+    true
+}
+
+/// 生成流程步骤诊断；变量全部收集后才统一脱敏。
+fn flow_step_report(
+    step: &HttpFlowStep,
+    outcome: &'static str,
+    message: String,
+    rendered: (&str, &str, &str),
+    response: Option<(u16, &str, &str)>,
+    start: Instant,
+) -> HttpStepReport {
+    let (status, response_headers, response_body) = response.unwrap_or((0, "", ""));
+    HttpStepReport {
+        id: step.id.clone(),
+        name: step.name.clone(),
+        kind: step.kind,
+        outcome,
+        message,
+        produced_vars: Vec::new(),
+        rendered_url: rendered.0.to_string(),
+        rendered_headers: rendered.1.to_string(),
+        rendered_body: rendered.2.to_string(),
+        status: (status != 0).then_some(status),
+        response_headers: response_headers.to_string(),
+        response_snippet: truncate_snippet(response_body),
+        duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+/// 统一构造流程中止报告，并在返回前脱敏每一个已执行步骤。
+#[allow(clippy::too_many_arguments)]
+fn flow_abort(
+    outcome: Outcome,
+    message: String,
+    rendered: Option<(&str, &str, &str)>,
+    response: Option<(u16, &str, &str)>,
+    script_error: Option<String>,
+    start: Instant,
+    mut reports: Vec<HttpStepReport>,
+    secrets: &[String],
+) -> HttpAttemptReport {
+    let mut secrets = secrets.to_vec();
+    normalize_secrets(&mut secrets);
+    for report in &mut reports {
+        report.redact(&secrets);
+    }
+    let mut result = abort_report(
+        outcome,
+        redact_text(&message, &secrets),
+        rendered,
+        response,
+        script_error.map(|error| redact_text(&error, &secrets)),
+        start.elapsed().as_millis() as u64,
+    );
+    result.rendered_url = redact_url(&result.rendered_url, &secrets);
+    result.rendered_headers = redact_text(&result.rendered_headers, &secrets);
+    result.rendered_body = redact_text(&result.rendered_body, &secrets);
+    result.response_headers = redact_text(&result.response_headers, &secrets);
+    result.response_snippet = redact_text(&truncate_snippet(&result.response_snippet), &secrets);
+    result.step_reports = reports;
+    result
 }
 
 /// 构建直连请求客户端（登录请求与登录页抓取共用同一策略）。
@@ -671,6 +1260,8 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 fn build_client(ignore_https_errors: bool) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .redirect(Policy::none())
+        // 每次登录尝试只建一个 Client，Cookie 仅在该次流程和所属域名内复用。
+        .cookie_store(true)
         .no_proxy()
         .danger_accept_invalid_certs(ignore_https_errors)
         .user_agent(DEFAULT_USER_AGENT)
@@ -702,6 +1293,7 @@ async fn fetch_login_page(client: &reqwest::Client, auth_url: &str) -> String {
         "",
         "",
         PAGE_FETCH_TIMEOUT,
+        false,
     )
     .await
     {
@@ -731,12 +1323,52 @@ async fn send_http(
     body: &str,
     timeout: Duration,
 ) -> Result<(reqwest::StatusCode, String, String), String> {
-    let resp = send_with_redirects(client, method, url, headers, body, timeout).await?;
+    let response = send_http_detailed(client, method, url, headers, body, timeout, false).await?;
+    Ok((response.status, response.body, response.headers_text))
+}
+
+/// 请求的可提取信息；原始响应头只留在执行期，不直接序列化进测试报告。
+struct HttpResponse {
+    status: reqwest::StatusCode,
+    body: String,
+    headers: reqwest::header::HeaderMap,
+    headers_text: String,
+    final_url: url::Url,
+}
+
+/// 为多变量取值保留最终 URL 与响应头；结果展示仍使用脱敏文本。
+#[allow(clippy::too_many_arguments)]
+async fn send_http_detailed(
+    client: &reqwest::Client,
+    method: HttpRequestMethod,
+    url: &str,
+    headers: &str,
+    body: &str,
+    timeout: Duration,
+    stop_on_redirect: bool,
+) -> Result<HttpResponse, String> {
+    let resp = send_with_redirects(
+        client,
+        method,
+        url,
+        headers,
+        body,
+        timeout,
+        stop_on_redirect,
+    )
+    .await?;
     let status = resp.status();
-    // 响应头先快照再消费响应体（流式读取会拿走所有权）
-    let headers_text = format_response_headers(resp.headers());
+    let final_url = resp.url().clone();
+    let response_headers = resp.headers().clone();
+    let headers_text = format_response_headers(&response_headers);
     let (body, _charset) = read_limited_body(resp).await?;
-    Ok((status, body, headers_text))
+    Ok(HttpResponse {
+        status,
+        body,
+        headers: response_headers,
+        headers_text,
+        final_url,
+    })
 }
 
 /// 逐跳发送请求；跨源后永久清除模板头和请求体，防止后续跳回原站时恢复凭据。
@@ -747,6 +1379,7 @@ async fn send_with_redirects(
     headers: &str,
     body: &str,
     timeout: Duration,
+    stop_on_redirect: bool,
 ) -> Result<reqwest::Response, String> {
     let mut current = url::Url::parse(url).map_err(|e| e.to_string())?;
     let mut method = method;
@@ -787,6 +1420,9 @@ async fn send_with_redirects(
             .map_err(|e| e.to_string())?;
         let status = response.status();
         if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        if stop_on_redirect {
             return Ok(response);
         }
         let Some(location) = response
@@ -855,6 +1491,121 @@ fn extract_pre_value(path: &str, body: &str) -> Result<String, String> {
     })
 }
 
+/// 从单次响应的正文、响应头或地址提取字段；多字段规则与旧 JSON 规则共享终止语义。
+fn extract_flow_value(
+    rule: &HttpExtractRule,
+    body: &str,
+    headers: &reqwest::header::HeaderMap,
+    final_url: &url::Url,
+) -> Result<String, String> {
+    let (kind, arg) = rule
+        .source
+        .trim()
+        .split_once(':')
+        .ok_or_else(|| "取值来源格式错误".to_string())?;
+    let arg = arg.trim();
+    match kind {
+        "json" => extract_pre_value(arg, body),
+        "header" => headers
+            .get(arg)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| format!("响应头没有 `{arg}`")),
+        "url" => query_value(final_url, arg),
+        "redirect" => {
+            let location = headers
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "响应没有 Location 头；请在本步骤启用停止自动跳转".to_string())?;
+            let target = final_url
+                .join(location)
+                .map_err(|_| "Location 不是有效地址".to_string())?;
+            query_value(&target, arg)
+        }
+        "html" => html_input_value(body, arg),
+        "regex" => regex::Regex::new(arg)
+            .map_err(|e| format!("取值正则无效: {e}"))?
+            .captures(body)
+            .and_then(|capture| capture.get(1))
+            .map(|value| value.as_str().to_string())
+            .ok_or_else(|| "响应未命中正则的第一个捕获组".to_string()),
+        _ => Err("不支持的取值来源".into()),
+    }
+}
+
+/// 查找响应或跳转 URL 中的第一个同名查询参数。
+fn query_value(url: &url::Url, name: &str) -> Result<String, String> {
+    url.query_pairs()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(|| format!("地址中没有参数 `{name}`"))
+}
+
+/// 读取常见门户表单的 input[name] 值；标签与属性顺序、单双引号均可变化。
+fn html_input_value(body: &str, name: &str) -> Result<String, String> {
+    use std::sync::OnceLock;
+    static INPUT_TAG: OnceLock<regex::Regex> = OnceLock::new();
+    static ATTRIBUTE: OnceLock<regex::Regex> = OnceLock::new();
+    let tags = INPUT_TAG.get_or_init(|| {
+        regex::Regex::new(r#"(?is)<input\b(?:[^>"']|"[^"]*"|'[^']*')*>"#)
+            .expect("静态 input 标签表达式有效")
+    });
+    let attributes = ATTRIBUTE.get_or_init(|| {
+        regex::Regex::new(r#"(?is)([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#)
+            .expect("静态 HTML 属性表达式有效")
+    });
+    for tag in tags.find_iter(body) {
+        let mut field_name = None;
+        let mut field_value = None;
+        for capture in attributes.captures_iter(tag.as_str()) {
+            let key = capture.get(1).map_or("", |value| value.as_str());
+            let value = (2..=4)
+                .find_map(|index| capture.get(index))
+                .map_or("", |value| value.as_str());
+            if key.eq_ignore_ascii_case("name") {
+                field_name = Some(value);
+            } else if key.eq_ignore_ascii_case("value") {
+                field_value = Some(value);
+            }
+        }
+        if field_name == Some(name) {
+            return field_value
+                .map(decode_html_entities)
+                .ok_or_else(|| format!("HTML 输入框 `{name}` 没有 value"));
+        }
+    }
+    Err(format!("HTML 中没有名为 `{name}` 的输入框"))
+}
+
+/// 解码表单值里常见的 HTML 字符实体，避免把 `&amp;` 原样发回门户。
+fn decode_html_entities(value: &str) -> String {
+    use std::sync::OnceLock;
+    static ENTITY: OnceLock<regex::Regex> = OnceLock::new();
+    let pattern = ENTITY.get_or_init(|| {
+        regex::Regex::new(r"&(?:amp|lt|gt|quot|apos|#(?:[0-9]+|[xX][0-9a-fA-F]+));")
+            .expect("静态字符实体表达式有效")
+    });
+    pattern
+        .replace_all(value, |captures: &regex::Captures<'_>| match &captures[0] {
+            "&amp;" => "&".to_string(),
+            "&lt;" => "<".to_string(),
+            "&gt;" => ">".to_string(),
+            "&quot;" => "\"".to_string(),
+            "&apos;" => "'".to_string(),
+            raw => {
+                let number = raw.trim_start_matches("&#").trim_end_matches(';');
+                let parsed = number
+                    .strip_prefix(['x', 'X'])
+                    .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                    .or_else(|| number.parse::<u32>().ok());
+                parsed
+                    .and_then(char::from_u32)
+                    .map_or_else(|| raw.to_string(), |ch| ch.to_string())
+            }
+        })
+        .into_owned()
+}
+
 /// 组装"还没走到登录请求就终结"的报告（客户端构建失败 / 脚本失败 / 前置请求失败）。
 ///
 /// `rendered` 传**实际卡住的那一步**的渲染结果（前置请求就传前置请求的），测试面板要
@@ -870,6 +1621,7 @@ fn abort_report(
     let (url, headers, body) = rendered.unwrap_or(("", "", ""));
     let (status, response_headers, response_snippet) = response.unwrap_or((0, "", ""));
     HttpAttemptReport {
+        step_reports: Vec::new(),
         outcome,
         message,
         script_error,
@@ -887,6 +1639,10 @@ fn abort_report(
 fn format_response_headers(headers: &reqwest::header::HeaderMap) -> String {
     let mut out = String::new();
     for (name, value) in headers {
+        if name == reqwest::header::SET_COOKIE {
+            out.push_str("set-cookie: ***\n");
+            continue;
+        }
         // 头值按可见字符展示；非 UTF-8（罕见）以 lossy 兜底，绝不因为一个头解析失败而丢整份回显
         let value = String::from_utf8_lossy(value.as_bytes());
         out.push_str(name.as_str());
@@ -1042,19 +1798,28 @@ fn collect_secrets(vars: &BTreeMap<String, String>) -> Vec<String> {
         if matches!(key.as_str(), "auth_url" | "local_ip" | "local_mac") {
             continue;
         }
-        if v.is_empty() {
-            continue;
-        }
-        secrets.push(v.clone());
-        let encoded = url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
-        if encoded != *v {
-            secrets.push(encoded);
-        }
+        add_secret(&mut secrets, v);
     }
-    // 先替换长值，避免短值是长值前缀时只遮住前半段；去重减少重复扫描。
-    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
-    secrets.dedup();
+    normalize_secrets(&mut secrets);
     secrets
+}
+
+/// 同时保留原文与 URL 编码形态；变量覆盖前的值也必须持续参与脱敏。
+fn add_secret(secrets: &mut Vec<String>, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    secrets.push(value.to_string());
+    let encoded = url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
+    if encoded != value {
+        secrets.push(encoded);
+    }
+}
+
+/// 长值优先替换，按字典序让同值相邻后完整去重。
+fn normalize_secrets(secrets: &mut Vec<String>) {
+    secrets.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    secrets.dedup();
 }
 
 /// 文本脱敏：命中凭证（原样或 URL 编码形态）替换为 ***
@@ -1071,7 +1836,7 @@ fn redact_url(url: &str, secrets: &[String]) -> String {
     redact_text(url, secrets)
 }
 
-/// 在无 IO 沙箱内执行用户加密脚本（阻塞调用，内部走 spawn_blocking + 墙钟超时）
+/// 在无 IO 沙箱内执行用户加密脚本；正式运行时由临时子进程承载并受墙钟时限约束。
 ///
 /// 契约：脚本需定义 `function transform(ctx)`，返回对象；其字符串/数字/布尔
 /// 字段成为可被模板引用的占位符值。ctx 含
@@ -1088,6 +1853,78 @@ async fn execute_crypto_script(
     local: (&str, &str),
     page: String,
 ) -> Result<BTreeMap<String, String>, String> {
+    execute_crypto_script_with_vars(
+        script,
+        username,
+        password,
+        isp,
+        auth_url,
+        local,
+        page,
+        BTreeMap::new(),
+    )
+    .await
+}
+
+/// 纯计算子进程的输入；密码只经匿名 stdin 管道下发，不进入命令行与环境变量。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TransformWorkerInput {
+    script: String,
+    username: String,
+    password: String,
+    isp: String,
+    auth_url: String,
+    local_ip: String,
+    local_mac: String,
+    page: String,
+    vars: BTreeMap<String, String>,
+}
+
+/// 同一可执行文件的隐藏计算模式；只读 stdin、只写 JSON 结果到 stdout。
+pub fn run_transform_worker() -> std::io::Result<()> {
+    use std::io::{Read, Write};
+
+    let mut bytes = Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .take((MAX_TRANSFORM_IPC_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_TRANSFORM_IPC_BYTES {
+        return Err(std::io::Error::other("计算脚本输入过大"));
+    }
+    let input: TransformWorkerInput =
+        serde_json::from_slice(&bytes).map_err(|_| std::io::Error::other("计算脚本输入无效"))?;
+    let password = Zeroizing::new(input.password);
+    let mut result = run_script_in_sandbox_with_vars(
+        &input.script,
+        &input.username,
+        &password,
+        &input.isp,
+        &input.auth_url,
+        &input.local_ip,
+        &input.local_mac,
+        input.page,
+        input.vars,
+    );
+    let mut output = serde_json::to_vec(&result)?;
+    if output.len() > MAX_TRANSFORM_IPC_BYTES {
+        result = Err("计算结果过大".into());
+        output = serde_json::to_vec(&result)?;
+    }
+    std::io::stdout().write_all(&output)
+}
+
+/// 执行流程中的计算步骤，并把前面步骤提取的变量提供给 `ctx.vars`。
+#[allow(clippy::too_many_arguments)]
+async fn execute_crypto_script_with_vars(
+    script: &str,
+    username: &str,
+    password: &Zeroizing<String>,
+    isp: &str,
+    auth_url: &str,
+    local: (&str, &str),
+    page: String,
+    vars: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, String> {
     let script = script.to_string();
     let username = username.to_string();
     let password = Zeroizing::new(password.to_string());
@@ -1096,27 +1933,80 @@ async fn execute_crypto_script(
     let local_ip = local.0.to_string();
     let local_mac = local.1.to_string();
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let result = run_script_in_sandbox(
-            &script, &username, &password, &isp, &auth_url, &local_ip, &local_mac, page,
-        );
-        // 接收端已超时丢弃时发送失败，静默即可
-        let _ = tx.send(result);
-    });
+    #[cfg(test)]
+    {
+        // 单元测试运行在 cargo 的测试可执行文件内，直接测同一纯函数；真实
+        // 子进程路径由独立集成测试覆盖。
+        run_script_in_sandbox_with_vars(
+            &script, &username, &password, &isp, &auth_url, &local_ip, &local_mac, page, vars,
+        )
+    }
 
-    match tokio::time::timeout(SCRIPT_TIMEOUT, rx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err("脚本执行线程异常退出".into()),
-        Err(_) => Err(format!(
-            "脚本执行超时（上限 {}ms）",
-            SCRIPT_TIMEOUT.as_millis()
-        )),
+    #[cfg(not(test))]
+    {
+        use tokio::io::AsyncWriteExt;
+
+        let input = TransformWorkerInput {
+            script,
+            username,
+            password: password.to_string(),
+            isp,
+            auth_url,
+            local_ip,
+            local_mac,
+            page,
+            vars,
+        };
+        let payload = Zeroizing::new(
+            serde_json::to_vec(&input).map_err(|_| "计算脚本输入编码失败".to_string())?,
+        );
+        if payload.len() > MAX_TRANSFORM_IPC_BYTES {
+            return Err("计算脚本输入过大".into());
+        }
+        let exe = std::env::current_exe().map_err(|_| "无法定位计算子进程".to_string())?;
+        let mut command = tokio::process::Command::new(exe);
+        command
+            .arg("--http-transform-worker")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .env_clear()
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+
+        let mut child = command
+            .spawn()
+            .map_err(|_| "计算子进程启动失败".to_string())?;
+        let execution = async {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "计算子进程输入管道不可用".to_string())?;
+            stdin
+                .write_all(&payload)
+                .await
+                .map_err(|_| "计算子进程输入失败".to_string())?;
+            drop(stdin);
+            let output = child
+                .wait_with_output()
+                .await
+                .map_err(|_| "计算子进程等待失败".to_string())?;
+            if !output.status.success() {
+                return Err("计算子进程异常退出".to_string());
+            }
+            serde_json::from_slice::<Result<BTreeMap<String, String>, String>>(&output.stdout)
+                .map_err(|_| "计算子进程结果无效".to_string())?
+        };
+        tokio::time::timeout(SCRIPT_TIMEOUT, execution)
+            .await
+            .map_err(|_| format!("脚本执行超时（上限 {}ms）", SCRIPT_TIMEOUT.as_millis()))?
     }
 }
 
 /// boa 沙箱执行：注册内置函数 → eval 脚本 → 调用 transform(ctx) → 序列化返回值
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn run_script_in_sandbox(
     script: &str,
     username: &str,
@@ -1126,6 +2016,32 @@ fn run_script_in_sandbox(
     local_ip: &str,
     local_mac: &str,
     page: String,
+) -> Result<BTreeMap<String, String>, String> {
+    run_script_in_sandbox_with_vars(
+        script,
+        username,
+        password,
+        isp,
+        auth_url,
+        local_ip,
+        local_mac,
+        page,
+        BTreeMap::new(),
+    )
+}
+
+/// 沙箱计算的完整入口；新增变量仅经 `ctx.vars` 传入，不改旧脚本的入参。
+#[allow(clippy::too_many_arguments)]
+fn run_script_in_sandbox_with_vars(
+    script: &str,
+    username: &str,
+    password: &Zeroizing<String>,
+    isp: &str,
+    auth_url: &str,
+    local_ip: &str,
+    local_mac: &str,
+    page: String,
+    vars: BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut context = Context::default();
 
@@ -1149,6 +2065,7 @@ fn run_script_in_sandbox(
             "page": page,
             "local_ip": local_ip,
             "local_mac": local_mac,
+            "vars": vars,
         }),
         &mut context,
     )
@@ -1268,6 +2185,47 @@ fn register_builtins(context: &mut Context) -> Result<(), String> {
             Ok(boa_engine::JsString::from(format!("{:x}", mac.finalize().into_bytes())).into())
         })
     );
+    // 深澜 challenge 协议：token 作为 HMAC-MD5 密钥，密码作为消息。
+    register!(
+        boa_engine::JsString::from("hmac_md5"),
+        2,
+        NativeFunction::from_copy_closure(|_this, args, ctx| {
+            let key = js_arg(args, 0, ctx)?;
+            let data = js_arg(args, 1, ctx)?;
+            type HmacMd5 = hmac::Hmac<md5::Md5>;
+            let mut mac = HmacMd5::new_from_slice(key.as_bytes()).map_err(|e| {
+                boa_engine::JsError::from_opaque(boa_engine::JsString::from(e.to_string()).into())
+            })?;
+            mac.update(data.as_bytes());
+            Ok(boa_engine::JsString::from(format!("{:x}", mac.finalize().into_bytes())).into())
+        })
+    );
+    register!(
+        boa_engine::JsString::from("srun_info"),
+        2,
+        NativeFunction::from_copy_closure(|_this, args, ctx| {
+            let info = js_arg(args, 0, ctx)?;
+            let challenge = js_arg(args, 1, ctx)?;
+            let encoded = crate::login::srun::encode_info(&info, &challenge).map_err(|error| {
+                boa_engine::JsError::from_opaque(boa_engine::JsString::from(error).into())
+            })?;
+            Ok(boa_engine::JsString::from(encoded).into())
+        })
+    );
+    // 仅适用于参考项目中的上海大学锐捷公钥与 MAC 拼接规则。
+    register!(
+        boa_engine::JsString::from("shu_ruijie_password"),
+        2,
+        NativeFunction::from_copy_closure(|_this, args, ctx| {
+            let password = js_arg(args, 0, ctx)?;
+            let mac = js_arg(args, 1, ctx)?;
+            let encrypted =
+                crate::login::ruijie::shu_password(&password, &mac).map_err(|error| {
+                    boa_engine::JsError::from_opaque(boa_engine::JsString::from(error).into())
+                })?;
+            Ok(boa_engine::JsString::from(encrypted).into())
+        })
+    );
 
     // 零参：当前毫秒时间戳
     register!(
@@ -1327,12 +2285,15 @@ mod tests {
 
     fn request(url: String) -> HttpLoginRequest {
         HttpLoginRequest {
+            steps: Vec::new(),
+            result_step_id: String::new(),
             method: HttpRequestMethod::Get,
             url,
             headers: "X-User: {username}".into(),
             body: String::new(),
             success_pattern: "登录成功".into(),
             failure_pattern: "密码错误".into(),
+            failure_action: crate::tasks::HttpFailureAction::Credential,
             success_check: crate::tasks::HttpSuccessCheck::default(),
             crypto_script: String::new(),
             pre_request: None,
@@ -1762,6 +2723,27 @@ mod tests {
         assert_eq!(values["mac"], "00:1a:2b:3c:4d:5e");
     }
 
+    #[test]
+    fn script_exposes_srun_helpers() {
+        let password = Zeroizing::new("p".to_string());
+        let values = run_script_in_sandbox(
+            "function transform(ctx) { return { digest: hmac_md5('abc', ctx.password), info: srun_info('{\"username\":\"u\",\"password\":\"p\",\"ip\":\"1.2.3.4\",\"acid\":1,\"enc_ver\":\"srun_bx1\"}', 'abc') }; }",
+            "u", &password, "", "", "", "", String::new(),
+        ).unwrap();
+        assert_eq!(values["digest"], "05f894e7889213b5f9bb6aaae84f75f6");
+        assert!(values["info"].starts_with("{SRBX1}"));
+    }
+
+    #[test]
+    fn script_exposes_shu_ruijie_helper() {
+        let password = Zeroizing::new("123".to_string());
+        let values = run_script_in_sandbox(
+            "function transform(ctx) { return { encrypted: shu_ruijie_password(ctx.password, '5ae915bf808f82732e98e01f704f00cd') }; }",
+            "u", &password, "", "", "", "", String::new(),
+        ).unwrap();
+        assert!(values["encrypted"].starts_with("91a0e02175f6a0b22ad"));
+    }
+
     /// ctx 暴露方案运营商（原样透传，门户侧表示法由任务脚本映射——Dr.COM
     /// eportal 的 @cmcc 后缀类任务依赖它把方案的「移动/联通/电信」转成后缀）。
     #[test]
@@ -1911,6 +2893,32 @@ mod tests {
         let url = spawn_response(200, "登录成功，但密码错误").await;
         let report = run_once(&request(url)).await;
         assert_eq!(report.outcome, Outcome::InvalidCredential);
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_pattern_uses_retry_path() {
+        let url = spawn_response(200, "网关繁忙，请稍后重试").await;
+        let mut req = request(url);
+        req.failure_pattern = "网关繁忙".into();
+        req.failure_action = crate::tasks::HttpFailureAction::Retry;
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::AssertionFailed);
+    }
+
+    #[tokio::test]
+    async fn manual_failure_pattern_stops_retry() {
+        let url = spawn_response(200, "请完成短信验证").await;
+        let mut req = request(url);
+        req.failure_pattern = "短信验证".into();
+        req.failure_action = crate::tasks::HttpFailureAction::Manual;
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::ManualRequired);
+        assert_eq!(
+            crate::login::session::classify(report.outcome),
+            crate::login::session::ResultAction::Terminal(
+                crate::login::session::LoginTerminal::Failed
+            )
+        );
     }
 
     #[tokio::test]
@@ -2075,6 +3083,249 @@ mod tests {
         assert!(report.rendered_headers.contains("***"));
     }
 
+    /// 有序流程能在取回令牌之后计算字段，再发送登录请求；每一步的报告都须脱敏。
+    #[tokio::test]
+    async fn flow_extract_transform_and_login_share_state() {
+        let (base, mut seen) = spawn_csrf_portal().await;
+        let mut req = request(String::new());
+        req.success_pattern = "\"code\":0".into();
+        req.failure_pattern.clear();
+        req.result_step_id = "login".into();
+        req.steps = vec![
+            HttpFlowStep {
+                id: "challenge".into(),
+                name: "获取令牌".into(),
+                url: format!("{base}/api/csrf-token"),
+                extract: "json:csrf_token".into(),
+                extract_as: "csrf".into(),
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "sign".into(),
+                name: "计算字段".into(),
+                kind: HttpFlowStepKind::Transform,
+                script: "function transform(ctx) { return { signed: ctx.vars.csrf }; }".into(),
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "login".into(),
+                name: "提交登录".into(),
+                method: HttpRequestMethod::Post,
+                url: format!("{base}/api/account/login"),
+                headers: "X-CSRF-Token: {signed}".into(),
+                body: "username={username}&password={password}".into(),
+                ..Default::default()
+            },
+        ];
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        assert_eq!(report.step_reports.len(), 3);
+        assert!(
+            report
+                .step_reports
+                .iter()
+                .all(|step| step.outcome == "success")
+        );
+        assert!(!report.step_reports[0].response_snippet.contains("tok-"));
+        assert!(!report.step_reports[2].rendered_headers.contains("tok-"));
+        assert!(report.step_reports[2].rendered_headers.contains("***"));
+        let challenge = seen.recv().await.unwrap();
+        let login = seen.recv().await.unwrap();
+        assert_eq!(challenge.0, login.0);
+    }
+
+    /// 同一步骤的取值必须整体生效：忽略第二条取值失败时，第一条不能覆盖已有变量。
+    #[tokio::test]
+    async fn flow_ignored_extract_failure_keeps_previous_variables() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel(1);
+        let app = axum::Router::new()
+            .route(
+                "/extract",
+                axum::routing::get(|| async { r#"{"token":"new-secret"}"# }),
+            )
+            .route(
+                "/check",
+                axum::routing::get(move |uri: axum::http::Uri| {
+                    let seen_tx = seen_tx.clone();
+                    async move {
+                        seen_tx.send(uri.to_string()).await.unwrap();
+                        "登录成功"
+                    }
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut req = request(String::new());
+        req.result_step_id = "check".into();
+        req.steps = vec![
+            HttpFlowStep {
+                id: "extract".into(),
+                name: "提取字段".into(),
+                url: format!("{base}/extract"),
+                extracts: vec![
+                    crate::tasks::HttpExtractRule {
+                        source: "json:token".into(),
+                        name: "password".into(),
+                    },
+                    crate::tasks::HttpExtractRule {
+                        source: "json:missing".into(),
+                        name: "missing".into(),
+                    },
+                ],
+                on_error: HttpStepOnError::Continue,
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "check".into(),
+                name: "检查变量".into(),
+                url: format!("{base}/check?value={{password}}"),
+                ..Default::default()
+            },
+        ];
+
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        assert_eq!(report.step_reports[0].outcome, "ignored");
+        assert!(report.step_reports[0].produced_vars.is_empty());
+        assert!(
+            !report.step_reports[0]
+                .response_snippet
+                .contains("new-secret")
+        );
+        assert_eq!(seen_rx.recv().await.as_deref(), Some("/check?value=abcdef"));
+    }
+
+    /// 同一次流程的后续请求能带上门户设置的 Cookie，且无需把它写入任务模板。
+    #[tokio::test]
+    async fn flow_reuses_portal_cookie() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .route(
+                "/session",
+                axum::routing::get(|| async {
+                    (
+                        [(axum::http::header::SET_COOKIE, "sid=flow-test; Path=/")],
+                        "ok",
+                    )
+                }),
+            )
+            .route(
+                "/login",
+                axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                    if headers
+                        .get(axum::http::header::COOKIE)
+                        .is_some_and(|value| {
+                            value
+                                .as_bytes()
+                                .windows(13)
+                                .any(|part| part == b"sid=flow-test")
+                        })
+                    {
+                        "logged-in"
+                    } else {
+                        "missing-cookie"
+                    }
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut req = request(String::new());
+        req.success_pattern = "logged-in".into();
+        req.failure_pattern = "missing-cookie".into();
+        req.result_step_id = "login".into();
+        req.steps = vec![
+            HttpFlowStep {
+                id: "session".into(),
+                name: "创建会话".into(),
+                url: format!("{base}/session"),
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "login".into(),
+                name: "提交登录".into(),
+                url: format!("{base}/login"),
+                ..Default::default()
+            },
+        ];
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        assert!(
+            report.step_reports[0]
+                .response_headers
+                .contains("set-cookie: ***")
+        );
+    }
+
+    /// 后续计算覆盖密码时，先前步骤的请求与响应仍须用原密码脱敏。
+    #[tokio::test]
+    async fn flow_redacts_values_before_and_after_override() {
+        let (base, mut seen) = spawn_recording_portal().await;
+        let mut req = request(String::new());
+        req.password = Zeroizing::new("old pass".into());
+        req.result_step_id = "login".into();
+        req.steps = vec![
+            HttpFlowStep {
+                id: "first".into(),
+                name: "首次请求".into(),
+                method: HttpRequestMethod::Post,
+                url: format!("{base}/first?secret={{password}}"),
+                body: "password={password}".into(),
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "change".into(),
+                name: "变换密码".into(),
+                kind: HttpFlowStepKind::Transform,
+                script: "function transform(ctx) { const out = { password: 'newpass' }; out[ctx.password] = 'x'; return out; }".into(),
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "login".into(),
+                name: "登录请求".into(),
+                method: HttpRequestMethod::Post,
+                url: format!("{base}/login"),
+                body: "password={password}".into(),
+                ..Default::default()
+            },
+        ];
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        let diagnostics = serde_json::to_string(&report.step_reports).unwrap();
+        assert!(!diagnostics.contains("old pass"), "{diagnostics}");
+        assert!(!diagnostics.contains("old%20pass"), "{diagnostics}");
+        assert!(!diagnostics.contains("newpass"), "{diagnostics}");
+        assert!(diagnostics.contains("***"));
+        assert_eq!(seen.recv().await.unwrap().1, "/first?secret=old%20pass");
+        assert_eq!(seen.recv().await.unwrap().1, "/login");
+    }
+
+    /// 旧式任务的脚本异常也可能包含凭据，错误消息和结构化字段都必须脱敏。
+    #[tokio::test]
+    async fn legacy_script_error_redacts_password() {
+        let mut req = request("http://127.0.0.1/login".into());
+        req.password = Zeroizing::new("legacy-secret".into());
+        req.crypto_script = "function transform(ctx) { throw new Error(ctx.password); }".into();
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::UnknownError);
+        assert!(!report.message.contains("legacy-secret"));
+        assert!(
+            !report
+                .script_error
+                .unwrap_or_default()
+                .contains("legacy-secret")
+        );
+    }
+
     /// 对照组：不带前置请求时同一门户直接拒登——证明上一条测试不是白过
     #[tokio::test]
     async fn csrf_portal_rejects_login_without_token() {
@@ -2129,6 +3380,41 @@ mod tests {
             "报告应带回前置请求的响应: {}",
             report.response_snippet
         );
+    }
+
+    /// 旧任务改成有序步骤后，取不到前置字段仍是终态，不额外重试登录。
+    #[tokio::test]
+    async fn flow_missing_pre_request_field_keeps_legacy_terminal_outcome() {
+        let (base, mut seen) = spawn_csrf_portal().await;
+        let mut req = request(String::new());
+        req.result_step_id = "login".into();
+        req.steps = vec![
+            HttpFlowStep {
+                id: "prepare".into(),
+                name: "获取登录参数".into(),
+                url: format!("{base}/api/csrf-token"),
+                extract: "json:not_here".into(),
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "login".into(),
+                name: "登录请求".into(),
+                method: HttpRequestMethod::Post,
+                url: format!("{base}/api/account/login"),
+                body: "token={not_here}".into(),
+                ..Default::default()
+            },
+        ];
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::UnknownError);
+        assert_eq!(report.step_reports.len(), 1);
+        assert!(
+            report.message.contains("提取变量失败"),
+            "{}",
+            report.message
+        );
+        assert!(seen.recv().await.unwrap().1.starts_with("/api/csrf-token"));
+        assert!(seen.try_recv().is_err(), "登录请求不应继续发送");
     }
 
     /// 前置请求的地址/取值方式在保存（validate）阶段就要拦：空地址、非法取值前缀
@@ -2211,6 +3497,104 @@ mod tests {
         // 非字符串值取其 JSON 文本（数字令牌也照用）
         assert_eq!(extract_pre_value("code", "{\"code\":0}").unwrap(), "0");
         assert!(extract_pre_value("missing", "{\"code\":0}").is_err());
+    }
+
+    #[test]
+    fn flow_extraction_reads_header_url_redirect_html_and_regex() {
+        let url = url::Url::parse("http://portal.example/entry?session=a%2Bb").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-session", "header-token".parse().unwrap());
+        headers.insert(
+            reqwest::header::LOCATION,
+            "/next?challenge=redirect-token".parse().unwrap(),
+        );
+        let body = r#"<INPUT value='a&amp;b' type='hidden' name='sign'><p>code: 1234</p>"#;
+        for (source, expected) in [
+            ("header:x-session", "header-token"),
+            ("url:session", "a+b"),
+            ("redirect:challenge", "redirect-token"),
+            ("html:sign", "a&b"),
+            ("regex:code: ([0-9]+)", "1234"),
+        ] {
+            let rule = HttpExtractRule {
+                source: source.into(),
+                name: "value".into(),
+            };
+            rule.validate().unwrap();
+            assert_eq!(
+                extract_flow_value(&rule, body, &headers, &url).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_uses_two_redirect_fields_in_later_request() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .route(
+                "/entry",
+                axum::routing::get(|| async {
+                    (
+                        axum::http::StatusCode::FOUND,
+                        [(
+                            axum::http::header::LOCATION,
+                            "/login?token=t-123&account=alice",
+                        )],
+                        "",
+                    )
+                }),
+            )
+            .route(
+                "/login",
+                axum::routing::get(|url: axum::extract::OriginalUri| async move {
+                    if url.0.query().unwrap_or_default() == "token=t-123&account=alice" {
+                        "ok"
+                    } else {
+                        "bad"
+                    }
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut req = request(String::new());
+        req.success_pattern = "ok".into();
+        req.result_step_id = "login".into();
+        req.steps = vec![
+            HttpFlowStep {
+                id: "entry".into(),
+                url: format!("{base}/entry"),
+                stop_on_redirect: true,
+                extracts: vec![
+                    HttpExtractRule {
+                        source: "redirect:token".into(),
+                        name: "token".into(),
+                    },
+                    HttpExtractRule {
+                        source: "redirect:account".into(),
+                        name: "account".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+            HttpFlowStep {
+                id: "login".into(),
+                url: format!("{base}/login?token={{token}}&account={{account}}"),
+                ..Default::default()
+            },
+        ];
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        assert_eq!(report.step_reports[0].produced_vars, ["token", "account"]);
+        assert!(
+            !serde_json::to_string(&report.step_reports)
+                .unwrap()
+                .contains("t-123")
+        );
     }
 
     // ===== 退出登录动作（登录前踢掉旧会话） =====

@@ -37,6 +37,27 @@ defineProps<{
       <code>{{ result.script_error }}</code>
     </div>
 
+    <div v-if="result.steps?.length" class="http-test-steps">
+      <h4>逐步骤结果</h4>
+      <details v-for="(step, index) in result.steps" :key="step.id" class="http-test-step">
+        <summary>
+          <strong>步骤 {{ index + 1 }} · {{ step.name || step.id }}</strong>
+          <span>{{ step.outcome === 'success' ? '成功' : step.outcome === 'ignored' ? '已忽略失败' : '失败' }}</span>
+          <span v-if="step.status">HTTP {{ step.status }}</span>
+          <span>{{ step.duration_ms }} ms</span>
+        </summary>
+        <p>{{ step.message }}</p>
+        <p v-if="step.produced_vars?.length" class="http-test-produced-vars">已生成变量：<code v-for="name in step.produced_vars" :key="name">{{ name }}</code><span>下一步可写成 <code>{变量名}</code>，计算脚本中用 <code>ctx.vars.变量名</code>。</span></p>
+        <dl>
+          <template v-if="step.rendered_url"><dt>请求地址</dt><dd><code>{{ step.rendered_url }}</code></dd></template>
+          <template v-if="step.rendered_headers"><dt>请求头</dt><dd><code>{{ step.rendered_headers }}</code></dd></template>
+          <template v-if="step.rendered_body"><dt>请求内容</dt><dd><code>{{ step.rendered_body }}</code></dd></template>
+          <template v-if="step.response_headers"><dt>响应头</dt><dd><code>{{ step.response_headers }}</code></dd></template>
+          <template v-if="step.response_snippet"><dt>响应片段</dt><dd><code>{{ step.response_snippet }}</code></dd></template>
+        </dl>
+      </details>
+    </div>
+
     <details class="http-test-detail">
       <summary>查看实际发出的请求与响应</summary>
       <dl>
@@ -62,6 +83,14 @@ defineProps<{
 </template>
 
 <style scoped>
+.http-test-steps { margin-top: var(--space-md); }
+.http-test-steps h4 { margin: 0 0 8px; }
+.http-test-produced-vars { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.http-test-produced-vars code { padding: 2px 5px; border-radius: 5px; background: var(--surface-subtle, #eef1f5); }
+.http-test-step { margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.http-test-step summary { display: flex; flex-wrap: wrap; gap: 8px; cursor: pointer; }
+.http-test-step summary span { color: var(--text-muted); font-size: var(--text-xs); }
+.http-test-step dl { overflow-wrap: anywhere; }
 .http-test-result {
   margin-top: var(--space-md);
   padding: var(--space-md);

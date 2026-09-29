@@ -113,7 +113,7 @@ const visibleTasks = computed(() => {
 /**
  * 方案绑定索引：任务 id → 引用它的方案名（列表「绑定方案」列的数据源）。
  *
- * 浏览器任务的绑定关系存 `ProfileSummary.active_task`（直连任务才走
+ * 浏览器任务的绑定关系存 `ProfileSummary.active_task`（HTTP 登录任务才走
  * `active_http_task`，见 utils/httpTaskList 的同构实现）。按方案名排序保证
  * pill 顺序稳定。profiles 未就绪（空表）时返回空 Map，列显示「—」而不是
  * 误导性的"未绑定"。

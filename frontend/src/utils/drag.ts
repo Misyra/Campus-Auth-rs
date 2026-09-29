@@ -19,7 +19,7 @@ interface DragSortOptions {
   tasks: Ref<{ id: string }[]>;
   /** 脚本 id 全量序列（持久化到 `order.scripts`） */
   scripts: Ref<{ id: string }[]>;
-  /** 直连任务 id 全量序列（持久化到 `order.http`） */
+  /** HTTP 登录任务 id 全量序列（持久化到 `order.http`） */
   http: Ref<{ id: string }[]>;
 }
 

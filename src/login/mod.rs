@@ -10,8 +10,10 @@
 pub mod history;
 pub mod http_login;
 pub mod preemption;
+mod ruijie;
 pub mod script_login;
 pub mod session;
+mod srun;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
@@ -448,13 +450,16 @@ impl LoginOrchestrator {
         // 方案级绑定是「切方案即切任务」的唯一来源。
         let effective_task_id = self.resolve_active_task(&task_id, profile).await;
 
-        // 1a. 进程内渠道判定：直连与脚本都在 Rust 进程内完成登录（直连发 HTTP、脚本起
-        // 子进程），浏览器任务来源（显式 task 执行）不适用，仍按浏览器路径处理。两者都
+        // 1a. Rust 控制的渠道判定：HTTP 在主进程发请求、计算另起临时子进程，自定义脚本也起
+        // 子进程；浏览器任务来源（显式 task 执行）不适用，仍按浏览器路径处理。两者都
         // 跳过 1b/1c 的浏览器与环境准备，也不要求启用任务（无 Worker 参与）。
-        let use_http =
-            profile.login_channel == LoginChannel::Http && !matches!(source, LoginSource::Browser);
-        let use_script = profile.login_channel == LoginChannel::Script
-            && !matches!(source, LoginSource::Browser);
+        let effective_channel = if matches!(source, LoginSource::Browser) {
+            LoginChannel::Browser
+        } else {
+            profile.login_channel
+        };
+        let use_http = effective_channel == LoginChannel::Http;
+        let use_script = effective_channel == LoginChannel::Script;
 
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
         if let Some(handle) = self
@@ -536,7 +541,7 @@ impl LoginOrchestrator {
         };
 
         // 进程内渠道（直连 / 脚本）：不涉及浏览器、Python 环境与 Worker
-        let in_process = use_http || use_script;
+        let in_process = effective_channel.is_in_process();
 
         // 1b. 浏览器渠道预检 + 1c. 可用性终验：返回本次生效的渠道覆盖
         // （进程内渠道无浏览器/环境参与，整体跳过）
@@ -623,19 +628,32 @@ impl LoginOrchestrator {
             inner: result_slot.clone(),
         };
 
-        // 进程内渠道不执行任务步骤：worker_config 置空占位，确保
-        // has_explicit_success_condition 恒为 false，登录后网络验证兜底始终生效
-        // （脚本渠道同理：脚本退出码 0 只代表"脚本自称成功"，真终态仍由网络验证确认）
-        let worker_config = if in_process {
-            serde_json::json!({})
-        } else {
-            self.build_worker_config(
-                &rt,
-                &resolved_profile,
-                effective_task_id.as_deref().unwrap_or(""),
-                browser_override.as_deref(),
-            )
-            .await
+        // 执行计划只有一个渠道；进程内渠道不会持有虚假的 Worker 配置，
+        // 因而成功后始终走网络验证兜底。
+        let plan = match (effective_channel, http_plan, script_plan) {
+            (LoginChannel::Http, Some(plan), _) => session::LoginAttemptPlan::Http(Box::new(plan)),
+            (LoginChannel::Script, _, Some(plan)) => {
+                session::LoginAttemptPlan::Script(Box::new(plan))
+            }
+            (LoginChannel::Browser, _, _) => session::LoginAttemptPlan::Browser(
+                self.build_worker_config(
+                    &rt,
+                    &resolved_profile,
+                    effective_task_id.as_deref().unwrap_or(""),
+                    browser_override.as_deref(),
+                )
+                .await,
+            ),
+            _ => {
+                return self
+                    .immediate_handle(
+                        source,
+                        false,
+                        "登录任务计划缺失，请检查方案绑定".into(),
+                        profile.id.clone(),
+                    )
+                    .await;
+            }
         };
 
         let session = LoginSession::new(
@@ -646,9 +664,7 @@ impl LoginOrchestrator {
                 retry_interval: Duration::from_secs(rt.retry.retry_interval as u64),
                 login_timeout: Duration::from_secs((rt.browser.login_timeout as u64).max(1)),
                 profile_id: profile.id.clone(),
-                worker_config,
-                http_plan,
-                script_plan,
+                plan,
             },
             cancel_token.clone(),
             result_slot.clone(),
@@ -811,7 +827,7 @@ impl LoginOrchestrator {
             return Err("方案未绑定直连任务，请在「任务 · 直连任务」里选择或新建一个".into());
         }
         match self.tasks.load_task(id).await {
-            Ok(crate::tasks::TaskKind::Http(cfg)) => Ok(cfg),
+            Ok(crate::tasks::TaskKind::Http(cfg)) => Ok(*cfg),
             Ok(other) => {
                 // 与 is_usable_browser_task 同口径：任务被改成别类后仅查存在性会放行，
                 // 直连拿不到请求参数只能失败，必须在取值阶段就按类型拒绝并留痕
@@ -1148,6 +1164,7 @@ impl LoginOrchestrator {
         finished: Arc<tokio::sync::Notify>,
         session: LoginSession,
     ) {
+        let channel = session.channel();
         if let Some(m) = &self.metrics {
             m.inc_login();
             self.status.merge(PartialSnapshot::Totals {
@@ -1200,6 +1217,7 @@ impl LoginOrchestrator {
                 let entry = LoginHistoryEntry {
                     timestamp: chrono::Local::now(),
                     source,
+                    channel: Some(channel),
                     profile_id,
                     result: HistoryResult::Failed,
                     message: message.to_string(),
@@ -1345,6 +1363,7 @@ impl LoginOrchestrator {
         let entry = LoginHistoryEntry {
             timestamp: chrono::Local::now(),
             source,
+            channel: None,
             profile_id,
             result: HistoryResult::Cancelled,
             message: "登录已取消（准备阶段）".into(),
@@ -1390,6 +1409,7 @@ impl LoginOrchestrator {
         let entry = LoginHistoryEntry {
             timestamp: chrono::Local::now(),
             source,
+            channel: None,
             profile_id,
             result: if success {
                 HistoryResult::Success

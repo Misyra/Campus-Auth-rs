@@ -26,11 +26,9 @@ import {
 /** 主程序仓库（**不应**被任务类入口引用） */
 const APP_REPO = "https://github.com/Misyra/Campus-Auth-rs";
 
-/** 选项表里全部预设索引地址（2 源 × 2 类 = 4 个） */
+/** 选项表里全部预设索引地址（两个镜像各一份共享索引） */
 function allPresetIndexUrls(): string[] {
-  return TASK_REPO_SOURCES.flatMap((s) =>
-    s.indexUrls ? [s.indexUrls.browser, s.indexUrls.http] : [],
-  );
+  return TASK_REPO_SOURCES.flatMap((s) => s.indexUrl ? [s.indexUrl] : []);
 }
 
 describe("任务仓库坐标", () => {
@@ -40,32 +38,30 @@ describe("任务仓库坐标", () => {
     expect(TASK_REPO_NAME).not.toBe("Campus-Auth-rs");
   });
 
-  it("四个索引地址都指向任务仓库（github 与 gitee 镜像同仓）", () => {
-    // 索引按 (源, 类别) 两维给：两个源 × 两类任务
+  it("两个索引地址都指向任务仓库（github 与 gitee 镜像同仓）", () => {
     const urls = allPresetIndexUrls();
-    expect(urls).toHaveLength(4);
+    expect(urls).toHaveLength(2);
     for (const url of urls) {
       expect(url).toContain(`/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/`);
       expect(url).not.toContain("/Campus-Auth-rs/");
     }
   });
 
-  it("索引地址是可直接 GET 的 raw 地址（非仓库页面），两类任务的文件不同名", () => {
+  it("索引地址是可直接 GET 的 raw 地址，三类任务共用同一文件", () => {
     expect(presetRepoIndexUrl("browser", "github")).toMatch(
       /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.json$/,
     );
     expect(presetRepoIndexUrl("http", "github")).toMatch(
-      /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.http\.json$/,
+      /^https:\/\/raw\.githubusercontent\.com\/.*\/index\.json$/,
     );
     expect(presetRepoIndexUrl("browser", "gitee")).toMatch(
       /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.gitee\.json$/,
     );
     expect(presetRepoIndexUrl("http", "gitee")).toMatch(
-      /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.http\.gitee\.json$/,
+      /^https:\/\/raw\.giteeusercontent\.com\/.*\/index\.gitee\.json$/,
     );
-    // 两类任务不得共用同一个文件（那正是"混装"要根治的东西）
-    expect(presetRepoIndexUrl("browser", "github")).not.toBe(presetRepoIndexUrl("http", "github"));
-    expect(presetRepoIndexUrl("browser", "gitee")).not.toBe(presetRepoIndexUrl("http", "gitee"));
+    expect(presetRepoIndexUrl("browser", "github")).toBe(presetRepoIndexUrl("http", "github"));
+    expect(presetRepoIndexUrl("script", "gitee")).toBe(presetRepoIndexUrl("http", "gitee"));
   });
 });
 
@@ -109,16 +105,14 @@ describe("仓库来源选项表", () => {
     expect(TASK_REPO_SOURCES.map((s) => s.id)).toEqual(["github", "gitee", "custom"]);
     const github = TASK_REPO_SOURCES.find((s) => s.id === "github")!;
     const gitee = TASK_REPO_SOURCES.find((s) => s.id === "gitee")!;
-    // 表里另写一份字面量就会与常量漂移，故逐项对齐（地址按 (类别, 源) 两维取）
-    expect(presetRepoIndexUrl("browser", "github")).toBe(github.indexUrls!.browser);
-    expect(presetRepoIndexUrl("http", "github")).toBe(github.indexUrls!.http);
-    expect(presetRepoIndexUrl("browser", "gitee")).toBe(gitee.indexUrls!.browser);
-    expect(presetRepoIndexUrl("http", "gitee")).toBe(gitee.indexUrls!.http);
+    expect(presetRepoIndexUrl("browser", "github")).toBe(github.indexUrl);
+    expect(presetRepoIndexUrl("http", "github")).toBe(github.indexUrl);
+    expect(presetRepoIndexUrl("script", "gitee")).toBe(gitee.indexUrl);
     expect(github.homeUrl).toBe(TASK_REPO_URL);
     expect(gitee.homeUrl).toBe(TASK_REPO_URL_GITEE);
     // 自定义源无预设地址（由用户手填）：取地址一律回空串，不抛错
     const custom = TASK_REPO_SOURCES.find((s) => s.id === "custom")!;
-    expect(custom.indexUrls).toBeNull();
+    expect(custom.indexUrl).toBeNull();
     expect(custom.homeUrl).toBe("");
     expect(presetRepoIndexUrl("browser", "custom")).toBe("");
     expect(presetRepoIndexUrl("http", "custom")).toBe("");
@@ -137,10 +131,8 @@ describe("仓库来源选项表", () => {
   it("索引地址（raw JSON）与仓库主页（人类浏览）是两个不同的地址", () => {
     // 真实缺陷：把索引地址当作可读页面链接，点开是一屏 raw JSON
     for (const s of TASK_REPO_SOURCES) {
-      if (!s.indexUrls) continue;
-      for (const url of [s.indexUrls.browser, s.indexUrls.http]) {
-        expect(url).not.toBe(s.homeUrl);
-      }
+      if (!s.indexUrl) continue;
+      expect(s.indexUrl).not.toBe(s.homeUrl);
       expect(s.homeUrl).toMatch(/^https:\/\/[^/]*gitee\.com\/|^https:\/\/github\.com\//);
       expect(s.homeUrl).not.toMatch(/raw\./);
     }
@@ -167,7 +159,7 @@ describe("来源切换实现", () => {
     expect(repoImport).toContain("applyPresetIndexUrl");
     const modal = readFileSync(resolve(__dirname, "../components/RepoImportModals.vue"), "utf-8");
     // 弹窗不再解释混合索引：拆分后文件即类别，那句提示成了噪音
-    expect(modal).not.toContain("当前只显示直连任务条目");
+    expect(modal).not.toContain("当前只显示HTTP 登录任务条目");
   });
 
   it("「直接查看仓库」用仓库主页，不用索引地址", () => {

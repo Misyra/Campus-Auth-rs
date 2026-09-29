@@ -29,6 +29,18 @@ fn resolve_base_path(cli: &CliArgs) -> PathBuf {
 }
 
 fn main() -> anyhow::Result<()> {
+    // 计算子进程不初始化日志、Web 服务或 GUI 控制台；stdin 中含凭据，
+    // 任何协议错误都只以退出码表示，避免把原始输入写入 stderr。
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--http-transform-worker")
+    {
+        if campus_auth::login::http_login::run_transform_worker().is_err() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // 0. GUI 子系统下从终端启动时重新接回控制台输出（必须在任何 println 之前）
     #[cfg(windows)]
     attach_parent_console();

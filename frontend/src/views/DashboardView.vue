@@ -15,6 +15,7 @@ import { formatDuration, formatTimestamp, formatShortTime } from "@/utils/format
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
+import type { LoginChannel } from "@/api/types";
 
 const s = useStatus();
 const logs = useLogs();
@@ -23,7 +24,7 @@ const router = useRouter();
 const { envStatus, refreshEnv, bootstrapEnv } = useEnvironment();
 const { profiles, activeProfileId } = useProfiles();
 
-// 直连请求渠道在 Rust 进程内完成登录，不拉起 Python Worker 与浏览器，
+// HTTP 登录渠道在 Rust 进程内完成登录，不拉起 Python Worker 与浏览器，
 // 故环境未就绪与之无关——否则免 Python/浏览器的用户会一直看到无意义的
 // "环境未就绪"横幅。
 // 渠道取自活跃方案的摘要（ProfileSummary.login_channel）：它已是方案字段，
@@ -76,6 +77,17 @@ const loginHistory = ui.loginHistory;
 const fetchLoginHistory = ui.fetchLoginHistory;
 // 清空登录历史：复用 useUi 带确认逻辑的版本（遮蔽本地无确认实现）
 const clearLoginHistory = ui.clearLoginHistory;
+const historySourceLabels: Record<string, string> = {
+  auto: "自动登录",
+  manual: "手动登录",
+  login_once: "单次登录",
+  browser: "任务执行",
+};
+const historyChannelLabels: Record<LoginChannel, string> = {
+  browser: "浏览器",
+  http: "HTTP",
+  script: "脚本",
+};
 
 // ---- 日志 ----
 const logViewer = ref<HTMLElement | null>(null);
@@ -288,8 +300,9 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
                     <span class="history-time">{{ formatTimestamp(item.timestamp) }}</span>
                     <span class="history-duration">{{ item.duration_secs.toFixed(1) }}s</span>
                   </div>
-                  <div class="history-row">
-                    <span class="history-profile">{{ item.profile_id || '默认方案' }} · {{ item.source }}</span>
+                  <div class="history-row history-row--meta">
+                    <span class="history-profile">{{ item.profile_id || '默认方案' }} · {{ historySourceLabels[item.source] || item.source }}</span>
+                    <span v-if="item.channel" class="badge badge--sm" :class="{ 'badge-browser': item.channel === 'browser', 'badge--info': item.channel === 'http', 'badge-script': item.channel === 'script' }">{{ historyChannelLabels[item.channel] }}</span>
                   </div>
                   <span v-if="item.result !== 'success'" class="history-error">{{ item.message }}</span>
                 </div>

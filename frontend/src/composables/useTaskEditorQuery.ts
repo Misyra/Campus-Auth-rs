@@ -33,7 +33,7 @@ export interface TaskEditorQueryOptions {
   /**
    * 列表是否已就绪（未就绪时不判定"不存在"）。
    *
-   * 默认取任务目录的 `loaded`（浏览器任务 / 直连任务 / 脚本三面板共用同一份混合列表）；
+   * 默认取任务目录的 `loaded`（浏览器任务 / HTTP 登录任务 / 脚本三面板共用同一份混合列表）；
    * 定时任务的面板另有自己的列表（`GET /api/scheduler/jobs`），故注入自己的就绪标记。
    */
   ready?: () => boolean;

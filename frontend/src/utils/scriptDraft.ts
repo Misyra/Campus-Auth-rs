@@ -10,7 +10,7 @@
  * 脚本的 ID 是**文件名**（`<base>/tasks/scripts/<id>.json` 的 stem；脚本正文在该 JSON
  * 的 `content` 字段里，`<id>.<ext>` 只出现在"导出"文件名上），也是「定时任务」
  * 指向脚本的引用值，故创建后不可修改——新建时先由用户命名，ID 合法前不落盘
- * （见 `scriptDraftGaps`，与直连任务"种子即落盘"的差别正在于此：直连任务的 ID 没有
+ * （见 `scriptDraftGaps`，与HTTP 登录任务"种子即落盘"的差别正在于此：HTTP 登录任务的 ID 没有
  * 外部引用，随便取一个 `untitled_N` 就行，脚本 ID 却是用户要认的名字）。
  */
 
@@ -45,7 +45,7 @@ export interface ScriptDraft {
   /**
    * 尚未落盘（新建尚未命名 / 导入的新 ID）。
    *
-   * 与直连任务同名的字段语义一致：只影响"是否允许改 ID"与展示，不参与落盘载荷。
+   * 与HTTP 登录任务同名的字段语义一致：只影响"是否允许改 ID"与展示，不参与落盘载荷。
    */
   _isNew: boolean;
 }

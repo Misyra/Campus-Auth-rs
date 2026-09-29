@@ -1,24 +1,23 @@
 <script setup lang="ts">
-/** 直连任务面板：**列表页 + 二级编辑页**（方案 G 终稿，自动保存模式）。
+/** HTTP 登录任务面板：**列表页 + 二级编辑页**（方案 G 终稿，自动保存模式）。
  *
  * 与浏览器任务面板同构：列表态整页任务表格，编辑态独占全宽、面包屑返回，
- * 深链 `?task=<id>` 直达编辑器（方案编辑器的「配置直连任务」入口沿用）。
- * 字段编辑由 `HttpTaskFields` 平铺呈现（无 JSON 文本框），变更 debounce
+ * 深链 `?task=<id>` 直达编辑器（方案编辑器的「配置HTTP 登录任务」入口沿用）。
+ * 字段编辑由 `HttpFlowFields` 展示有序请求步骤与独立结果判断，变更 debounce
  * 静默 PUT；请求地址等缺口未补齐前自动保存不发请求（发了必 400），
  * 此时状态字改口「有 N 处待补全」并在编辑页顶部列出缺什么。
  *
- * 编辑器里没有「调试」——直连任务不经 Python Worker，无法单步执行，
+ * 编辑器里没有「调试」——HTTP 登录任务不经 Python Worker，无法单步执行，
  * 验证路径是发一次测试请求（凭据由宿主传入，见 useHttpTaskTest）。
  *
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
  */
 import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
-import HttpTaskFields from "@/components/common/HttpTaskFields.vue";
+import HttpFlowFields from "@/components/common/HttpFlowFields.vue";
 import HttpTestResult from "@/components/common/HttpTestResult.vue";
-import HttpLoginWizard from "@/components/common/HttpLoginWizard.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useHttpTasks, NEW_TASK_PLACEHOLDER_URL } from "@/composables/useHttpTasks";
+import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useHttpTaskTest } from "@/composables/useHttpTaskTest";
 import { useProfiles } from "@/composables/useProfiles";
 import { useRepoImport } from "@/composables/useRepoImport";
@@ -83,11 +82,8 @@ function dragIndex(taskId: string): number {
 const testUsername = ref("");
 const testPassword = ref("");
 
-/** 表单控件 id 前缀：与 HttpTaskFields 同页共存，避免 label/for 撞车 */
+/** 表单控件 id 前缀：与流程编辑器同页共存，避免 label/for 撞车 */
 const uid = `http-tasks-${Math.random().toString(36).slice(2, 8)}`;
-
-/** 直连配置向导的开关：向导编辑的是同一份草稿（不持有第二份状态），故只是显隐控制 */
-const showWizard = ref(false);
 
 // ===== 列表态 / 编辑态（编辑态判据只有一个：草稿非空） =====
 const isEditing = computed(() => !!httpTaskDraft.value);
@@ -186,14 +182,6 @@ onBeforeUnmount(() => {
  */
 watch(httpTaskDraft, () => clearTestResult(), { deep: true });
 
-/** 草稿被换掉或关掉时收起向导（向导编辑的是某一份草稿） */
-watch(
-  () => httpTaskDraft.value?.id,
-  () => {
-    showWizard.value = false;
-  },
-);
-
 /** 发送一次测试请求：用的是编辑器里的当前草稿（自动保存后的最新内容） */
 async function sendTestRequest(): Promise<void> {
   const draft = httpTaskDraft.value;
@@ -206,12 +194,8 @@ async function sendTestRequest(): Promise<void> {
     toastOnly(false, "请先填写测试密码");
     return;
   }
-  if (!draft.url.trim()) {
-    toastOnly(false, "请先填写请求地址");
-    return;
-  }
-  if (draft.url.trim() === NEW_TASK_PLACEHOLDER_URL) {
-    toastOnly(false, "请求地址还是新建时的占位符，请先替换成你的门户地址");
+  if (draftGapsNow.value.length) {
+    toastOnly(false, `请先补齐：${draftGapsNow.value.join("、")}`);
     return;
   }
   await runHttpTaskTest({
@@ -224,7 +208,7 @@ async function sendTestRequest(): Promise<void> {
 
 /** 归属提示（编辑器页头 ? 气泡） */
 const NOTICE_HELP =
-  "直连请求要生效，需在侧边栏「方案」里把登录方式设为「直连请求」并选中一个任务。\n\n" +
+  "HTTP 登录要生效，需在侧边栏「方案」里把登录方式设为「HTTP 登录」并选中一个任务。\n\n" +
   "本页只负责编辑与测试：任务本身不含账号密码，凭据与匹配规则留在方案里。";
 
 /** 自动保存状态字（缺口优先：缺口态说的是「有 N 处待补全，改动暂未保存」） */
@@ -245,7 +229,7 @@ onMounted(async () => {
   <div v-if="!isEditing" class="tsk-list-page">
     <div class="tsk-toolbar">
       <h2 class="tsk-title">
-        直连任务
+        HTTP 登录任务
         <FieldHelp :text="NOTICE_HELP" wide />
       </h2>
       <input
@@ -253,13 +237,13 @@ onMounted(async () => {
         class="tsk-search"
         type="text"
         placeholder="搜索名称 / ID / 描述 / 请求地址"
-        aria-label="搜索直连任务"
+        aria-label="搜索HTTP 登录任务"
       />
-      <button type="button" class="btn btn-sm" title="从文件导入直连任务" @click="importHttpTask">
+      <button type="button" class="btn btn-sm" title="从文件导入HTTP 登录任务" @click="importHttpTask">
         <IconApp name="upload" class="icon-sm" />
         导入
       </button>
-      <button type="button" class="btn btn-sm" title="从云端仓库导入直连任务" @click="repo.showRepoImport('http')">
+      <button type="button" class="btn btn-sm" title="从云端仓库导入HTTP 登录任务" @click="repo.showRepoImport('http')">
         <IconApp name="globe-grid" class="icon-sm" />
         仓库导入
       </button>
@@ -270,14 +254,14 @@ onMounted(async () => {
         target="_blank"
         rel="noopener"
         class="btn btn-sm"
-        title="把你的直连任务分享到任务仓库，供他人一键导入"
+        title="把你的HTTP 登录任务分享到任务仓库，供他人一键导入"
       >
         <IconApp name="share-2" class="icon-sm" />
         分享适配
       </a>
       <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
         <IconApp name="plus" class="icon-sm" />
-        新建直连任务
+        新建HTTP 登录任务
       </button>
     </div>
 
@@ -308,11 +292,11 @@ onMounted(async () => {
             <td colspan="7">
               <div class="empty-state">
                 <IconApp name="globe" :stroke-width="1.5" />
-                <span>暂无直连任务</span>
-                <span class="empty-desc">直连任务直接向网关发登录请求，不开浏览器、不需要 Python 与 Playwright</span>
+                <span>暂无HTTP 登录任务</span>
+                <span class="empty-desc">HTTP 登录任务直接向网关发登录请求，不开浏览器、不需要 Python 与 Playwright</span>
                 <div class="empty-actions">
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
-                    <IconApp name="plus" />新建直连任务
+                    <IconApp name="plus" />新建HTTP 登录任务
                   </button>
                   <button type="button" class="btn btn-sm" @click="repo.showRepoImport('http')">
                     <IconApp name="globe-grid" class="icon-sm" />仓库导入
@@ -325,7 +309,7 @@ onMounted(async () => {
             <td colspan="7">
               <div class="empty-state">
                 <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的直连任务</span>
+                <span>没有匹配「{{ searchQuery }}」的HTTP 登录任务</span>
               </div>
             </td>
           </tr>
@@ -367,7 +351,7 @@ onMounted(async () => {
                   v-for="name in row.boundProfiles"
                   :key="name"
                   class="badge badge--sm badge--success"
-                  :title="`方案「${name}」的直连登录指向本任务`"
+                  :title="`方案「${name}」的HTTP 登录指向本任务`"
                 >{{ name }}</span>
               </template>
               <span v-else class="tsk-muted">未绑定</span>
@@ -418,7 +402,7 @@ onMounted(async () => {
     </div>
 
     <div class="tsk-editor-head">
-      <h2 class="tsk-editor-title">{{ httpTaskDraft.name || '未命名直连任务' }}</h2>
+      <h2 class="tsk-editor-title">{{ httpTaskDraft.name || '未命名HTTP 登录任务' }}</h2>
       <span :class="autosaveText.cls">{{ autosaveText.text }}</span>
       <span class="tsk-spacer"></span>
       <button type="button" class="btn btn-sm" title="导出任务 JSON" @click="exportHttpTask(httpTaskDraft.id)">
@@ -446,20 +430,7 @@ onMounted(async () => {
       <!-- 主列 -->
       <div class="tsk-main">
         <div class="card">
-          <div class="card-header">
-            <h3>基本信息</h3>
-            <div class="card-actions">
-              <button
-                type="button"
-                class="http-wizard-link"
-                title="分步引导填写请求参数，并在最后一步当场发一次测试请求"
-                @click="showWizard = true"
-              >
-                <IconApp name="sparkles" class="icon-sm" />
-                配置向导
-              </button>
-            </div>
-          </div>
+          <div class="card-header"><h3>基本信息</h3></div>
           <div class="card-body">
             <div class="form-row">
               <div class="form-group">
@@ -471,7 +442,7 @@ onMounted(async () => {
               </div>
               <div class="form-group">
                 <label :for="`${uid}-name`">任务名称</label>
-                <input :id="`${uid}-name`" v-model="httpTaskDraft.name" type="text" placeholder="宿舍直连登录" />
+                <input :id="`${uid}-name`" v-model="httpTaskDraft.name" type="text" placeholder="宿舍HTTP 登录" />
               </div>
             </div>
             <div class="form-group">
@@ -481,11 +452,11 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- 请求形状（地址/请求头/成败判定/前置请求/退出登录/变换脚本）：与直连配置向导共用同一组件 -->
+        <!-- HTTP 登录步骤与结果判断共用一份草稿；旧任务首次调整步骤后迁移。 -->
         <div class="card">
-          <div class="card-header"><h3>请求配置</h3></div>
+          <div class="card-header"><h3>HTTP 登录流程</h3></div>
           <div class="card-body">
-            <HttpTaskFields :model="httpTaskDraft" />
+            <HttpFlowFields :model="httpTaskDraft" />
           </div>
         </div>
 
@@ -526,36 +497,33 @@ onMounted(async () => {
         <div class="card">
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
-            <p class="tsk-side-hint">直连请求要生效：到「方案」页把登录方式设为「直连请求」并选中本任务。</p>
-            <p class="tsk-side-hint">不知道怎么填？<button type="button" class="btn btn-link" @click="showWizard = true">配置向导</button>分步带你填，最后一步当场测试。</p>
-            <p class="tsk-side-hint">任务仓库里有别人适配好的门户任务，<button type="button" class="btn btn-link" @click="repo.showRepoImport('http')">从仓库导入</button>一键获取。</p>
+            <ol class="http-start-list">
+              <li><span>1</span><p>按顺序添加请求与计算步骤。</p></li>
+              <li><span>2</span><p>指定结果来源，发送一次测试请求。</p></li>
+              <li><span>3</span><p>在「方案」中选择 HTTP 登录并绑定任务。</p></li>
+            </ol>
+            <button type="button" class="http-repo-link" @click="repo.showRepoImport('http')">从仓库导入已有任务 <IconApp name="arrow-right" class="icon-sm" /></button>
           </div>
         </div>
 
         <div class="card">
           <div class="card-header"><h3>字段速查</h3></div>
           <div class="card-body tsk-side-body">
+            <p class="http-ref-title">请求占位符</p>
             <div class="chip-row">
               <code v-for="ph in HTTP_TEMPLATE_PLACEHOLDERS" :key="ph" class="chip">{{ ph }}</code>
             </div>
-            <div class="chip-row">
-              <code v-for="fn in HTTP_CRYPTO_BUILTINS" :key="fn" class="chip chip--fn">{{ fn }}</code>
-            </div>
-            <p class="tsk-side-hint">每个字段怎么填，见编辑器内该字段旁的 <code>?</code>。</p>
+            <details class="http-ref-functions">
+              <summary>计算函数 <span>{{ HTTP_CRYPTO_BUILTINS.length }} 项</span><IconApp name="chevron-down" class="icon-sm" /></summary>
+              <div class="chip-row">
+                <code v-for="fn in HTTP_CRYPTO_BUILTINS" :key="fn" class="chip chip--fn">{{ fn }}</code>
+              </div>
+            </details>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- 直连配置向导：内部走 Modal（挂到 body），与测试区共用同一对凭据 ref -->
-    <HttpLoginWizard
-      v-if="httpTaskDraft"
-      :draft="httpTaskDraft"
-      :open="showWizard"
-      :test-username="testUsername"
-      :test-password="testPassword"
-      @close="showWizard = false"
-    />
   </div>
 </template>
 
@@ -569,27 +537,19 @@ onMounted(async () => {
   width: 24%;
 }
 
-/* 配置向导入口（对齐 HttpTaskFields 的胶囊样式） */
-.http-wizard-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border: 1px solid var(--border-accent-strong);
-  border-radius: var(--radius-full);
-  background: rgba(var(--accent-rgb), 0.08);
-  color: var(--accent);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  cursor: pointer;
-  transition: background var(--dur-base) var(--ease-out);
-}
+.http-start-list { display: flex; flex-direction: column; gap: 14px; margin: 0; padding: 0; list-style: none; }
+.http-start-list li { display: flex; align-items: flex-start; gap: 10px; }
+.http-start-list li > span { display: inline-flex; flex: 0 0 22px; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; background: rgba(var(--accent-rgb), .1); font-size: 11px; font-weight: 700; }
+.http-start-list p { margin: 2px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.http-repo-link { display: inline-flex; align-items: center; gap: 5px; width: fit-content; margin-top: 8px; padding: 5px 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+.http-repo-link:hover { color: var(--accent); text-decoration: underline; }
+.http-repo-link:focus-visible, .http-ref-functions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.http-ref-title { margin: 0; color: var(--text-secondary); font-size: 12px; font-weight: 650; }
+.http-ref-functions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.http-ref-functions summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; font-weight: 650; list-style: none; }
+.http-ref-functions summary::-webkit-details-marker { display: none; }
+.http-ref-functions summary span { margin-left: auto; color: var(--text-secondary); font-weight: 400; }
+.http-ref-functions[open] summary svg { transform: rotate(180deg); }
+.http-ref-functions .chip-row { margin-top: 12px; }
 
-.http-wizard-link:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-}
-
-/* 字段速查词条改用全局 `.chip` / `.chip--fn` / `.chip-row`（components/chip.css）。
-   此处原来那份与 HttpTaskFields 的 scoped 副本规则体逐字相同——scoped 样式无法
-   跨组件复用，故只能各写一份；收敛到全局后副本删除。 */
 </style>

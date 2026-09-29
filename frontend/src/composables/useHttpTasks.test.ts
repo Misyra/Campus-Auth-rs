@@ -76,6 +76,38 @@ describe("自动保存的缺口校验（经 showHttpTaskEditor + debounce）", (
   });
 });
 
+describe("新建 HTTP 登录流程", () => {
+  it("先用本机 IP 计算示例，再发送登录请求；填真实地址后才落盘", async () => {
+    vi.useFakeTimers();
+    try {
+      const http = useHttpTasks();
+      http.createHttpTask();
+      const draft = http.httpTaskDraft.value;
+      expect(draft?.steps.map((step) => [step.id, step.kind])).toEqual([
+        ["compute_ip", "transform"],
+        ["login", "request"],
+      ]);
+      expect(draft?.steps[0]?.script).toContain("ip: ctx.local_ip");
+      expect(draft?.steps[1]?.url).toBe("{gateway_host}");
+      expect(draft?.result_step_id).toBe("login");
+      expect(http.draftGapsNow.value).toContain("步骤 2 请求地址");
+      await vi.advanceTimersByTimeAsync(600);
+      expect(tasksApiMock.save).not.toHaveBeenCalled();
+
+      draft!.steps[1]!.url = "http://10.0.0.1/login?ip={ip}";
+      await vi.advanceTimersByTimeAsync(600);
+      expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
+      const saved = tasksApiMock.save.mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(saved.schema_version).toBe(2);
+      expect(saved.result_step_id).toBe("login");
+      expect((saved.steps as { kind: string; url: string }[]).map((step) => step.kind)).toEqual(["transform", "request"]);
+      expect((saved.steps as { kind: string; url: string }[])[1]?.url).toBe("http://10.0.0.1/login?ip={ip}");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("换编辑对象时补发在途改动", () => {
   it("改动还在 debounce 窗口内就切走：仍然落盘，且不污染新草稿", async () => {
     vi.useFakeTimers();
@@ -119,7 +151,7 @@ describe("删除路径", () => {
     await http.deleteHttpTask("dorm");
     expect(tasksApiMock.delete).toHaveBeenCalledWith("dorm");
     expect(http.httpTaskDraft.value).toBeNull();
-    expect(toastOnlyMock).toHaveBeenCalledWith(true, "直连任务已删除");
+    expect(toastOnlyMock).toHaveBeenCalledWith(true, "HTTP 登录任务已删除");
   });
 
   it("用户取消确认时不删除", async () => {

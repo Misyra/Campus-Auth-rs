@@ -17,7 +17,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::bridge::{BridgeError, IpcResponse, Outcome, StructuredResult};
-use crate::config::ConfigService;
+use crate::config::{ConfigService, LoginChannel};
 use crate::login::history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
 use crate::login::http_login;
 use crate::login::script_login;
@@ -90,7 +90,7 @@ enum NetworkVerification {
 /// 分类规则：
 /// - `Success` → 终态（成功）
 /// - `Cancelled` → 终态（取消）
-/// - `InvalidCredential` / `UnknownError` → 终态（失败，不重试）
+/// - `InvalidCredential` / `ManualRequired` / `UnknownError` → 终态（失败，不重试）
 /// - `CaptchaFailed` / `NavigationTimeout` / `SelectorFailed` / `NetworkError` → 可重试
 ///
 /// 验证码失败（OCR 误识别）与网络/导航失败同属瞬时性失败，难以可靠区分具体成因，
@@ -103,6 +103,7 @@ pub fn classify(outcome: Outcome) -> ResultAction {
         Outcome::Success => ResultAction::Terminal(LoginTerminal::Success),
         Outcome::Cancelled => ResultAction::Terminal(LoginTerminal::Cancelled),
         Outcome::InvalidCredential => ResultAction::Terminal(LoginTerminal::Failed),
+        Outcome::ManualRequired => ResultAction::Terminal(LoginTerminal::Failed),
         Outcome::UnknownError => ResultAction::Terminal(LoginTerminal::Failed),
         Outcome::CaptchaFailed => ResultAction::Retry,
         Outcome::NavigationTimeout => ResultAction::Retry,
@@ -176,6 +177,44 @@ pub(crate) struct SessionDeps {
     pub metrics: Option<std::sync::Arc<Metrics>>,
 }
 
+/// 本次登录的执行计划；三种渠道互斥，避免多个 Option 组合出非法状态。
+pub(crate) enum LoginAttemptPlan {
+    /// 浏览器 Worker 配置。
+    Browser(Value),
+    /// Rust 进程内直连请求。
+    Http(Box<crate::login::http_login::HttpLoginRequest>),
+    /// Rust 进程内脚本任务。
+    Script(Box<crate::login::script_login::ScriptLoginPlan>),
+}
+
+impl LoginAttemptPlan {
+    /// 由唯一执行计划得到本次实际登录渠道。
+    fn channel(&self) -> LoginChannel {
+        match self {
+            Self::Browser(_) => LoginChannel::Browser,
+            Self::Http(_) => LoginChannel::Http,
+            Self::Script(_) => LoginChannel::Script,
+        }
+    }
+
+    /// 仅浏览器渠道会占用 Bridge 会话并需要取消 Worker attempt。
+    fn uses_bridge(&self) -> bool {
+        matches!(self, Self::Browser(_))
+    }
+
+    /// 仅浏览器任务可声明跳过登录后网络验证的成功条件。
+    fn has_explicit_success_condition(&self) -> bool {
+        match self {
+            Self::Browser(config) => config
+                .get("task_config")
+                .and_then(|t| t.get("success_condition"))
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty()),
+            Self::Http(_) | Self::Script(_) => false,
+        }
+    }
+}
+
 /// 单次会话的值参数（从配置快照派生，A-2）
 pub(crate) struct SessionParams {
     /// 登录来源
@@ -190,13 +229,8 @@ pub(crate) struct SessionParams {
     pub login_timeout: Duration,
     /// 关联 Profile ID（写入历史）
     pub profile_id: String,
-    /// 发送给 Worker 的配置字典（凭证、auth_url、浏览器设置等）
-    pub worker_config: Value,
-    /// 直连请求参数（Some = 直连渠道：尝试在 Rust 进程内执行，不经 Bridge/Worker）
-    pub http_plan: Option<crate::login::http_login::HttpLoginRequest>,
-    /// 脚本登录计划（Some = 脚本渠道：尝试在 Rust 进程内起子进程跑脚本任务，不经
-    /// Bridge/Worker）。与 `http_plan` 互斥——方案只有一个登录渠道，两者不会同时有值。
-    pub script_plan: Option<crate::login::script_login::ScriptLoginPlan>,
+    /// 本次唯一执行计划。
+    pub plan: LoginAttemptPlan,
 }
 
 /// 登录会话：持有会话参数、取消原语与服务依赖，驱动单次登录状态机
@@ -239,6 +273,11 @@ impl LoginSession {
         }
     }
 
+    /// 获取本次会话计划实际使用的登录渠道。
+    pub(super) fn channel(&self) -> LoginChannel {
+        self.params.plan.channel()
+    }
+
     /// 会话主循环：执行 → 分类 → 重试/终态
     pub async fn run(self) {
         let session_start = Instant::now();
@@ -259,11 +298,8 @@ impl LoginSession {
 
         let total_attempts = self.params.max_retries + 1;
         let mut attempts_used: u32 = 0;
-        let is_http = self.params.http_plan.is_some();
-        // 只有浏览器渠道经 Bridge 驱动 Worker：直连在进程内发请求、脚本在进程内起
-        // 子进程，两者都没有可取消的 Bridge attempt，也不该去回收别人的 Worker 会话
-        // （脚本失败被误判成"网络错误强制回收"会直接打断另一条在跑的浏览器登录）。
-        let uses_bridge = !is_http && self.params.script_plan.is_none();
+        // 只有浏览器渠道经 Bridge 驱动 Worker，脚本失败不能回收别人的浏览器会话。
+        let uses_bridge = self.params.plan.uses_bridge();
 
         loop {
             // 取消检查（状态机任意阶段）
@@ -305,67 +341,75 @@ impl LoginSession {
             // Result<StructuredResult, String> 的可取消 future，取消/shutdown/超时边界对
             // 三种渠道一致（进程内路径无 Bridge 可取消，靠丢弃 future 回收子进程）。
             let mut work: Pin<Box<dyn Future<Output = Result<StructuredResult, String>> + Send>> =
-                if let Some(plan) = self.params.http_plan.clone() {
-                    Box::pin(async move { Ok(http_login::run_once(&plan).await.to_structured()) })
-                } else if let Some(plan) = self.params.script_plan.clone() {
-                    // 取消时本 future 被 `select!` 直接丢弃，`run_command` 里带
-                    // `kill_on_drop` 的子进程随之回收（Windows 另有 Job Object 兜住
-                    // 整棵进程树），故脚本渠道不需要 Bridge 那种 cancel_id 收尾。
-                    let runner = self.deps.script_runner.clone();
-                    Box::pin(async move { Ok(script_login::run_once(&runner, &plan).await) })
-                } else {
-                    // 根据来源选择 Bridge 命令
-                    let method = match self.params.source {
-                        LoginSource::Browser => "execute_browser_task",
-                        _ => "execute_login_attempt",
-                    };
-
-                    let mut params = self.params.worker_config.clone();
-                    params["cancel_id"] = json!(cancel_id.clone());
-                    if let Some(tid) = &self.params.task_id {
-                        params["task_id"] = json!(tid.clone());
+                match &self.params.plan {
+                    LoginAttemptPlan::Http(plan) => {
+                        let plan = plan.clone();
+                        Box::pin(
+                            async move { Ok(http_login::run_once(&plan).await.to_structured()) },
+                        )
                     }
-                    let bridge = bridge.clone();
-                    Box::pin(async move {
-                        match bridge.execute(method, params).await {
-                            Ok(resp) => Ok(Self::parse_ipc_response(resp)),
-                            // Worker 崩溃 / 启动超时到达调用方是 Err 而非 Outcome：
-                            // Worker 可能已被 Supervisor 重建或仅是瞬时故障，与
-                            // Outcome::NetworkError 同属可重试失败——转成 NetworkError
-                            // 结构化结果走既有 classify/try_retry 路径（此前直接终态
-                            // 失败，Worker 崩溃一次即放弃整场登录；重试前的
-                            // force_recycle_if_unowned 对已死 Worker 幂等安全）。
-                            Err(
-                                e @ (BridgeError::WorkerCrashed { .. }
-                                | BridgeError::WorkerStartupTimeout),
-                            ) => Ok(StructuredResult {
-                                outcome: Outcome::NetworkError,
-                                message: format!("Worker 异常: {e}"),
-                                data: Value::Null,
-                                screenshot_url: None,
-                                duration_ms: 0,
-                            }),
-                            // WorkerBusy（调试会话 / 重定向检测占用会话槽位）是
-                            // 典型的**瞬时**冲突：占用方可短则数秒（调试单步）、
-                            // 长则贯穿调试会话。此前归为终态失败，调试期间自动
-                            // 登录被静默压制且登录历史被 WorkerBusy 刷屏。转成
-                            // NetworkError 走既有重试/退避路径（与上方崩溃分支
-                            // 同一处理）；随后的归属感知回收（force_recycle_
-                            // if_unowned）发现槽位不属于本会话时不会误杀占用方。
-                            Err(e @ BridgeError::WorkerBusy) => Ok(StructuredResult {
-                                outcome: Outcome::NetworkError,
-                                message: format!("Worker 忙（被其他任务占用，将重试）: {e}"),
-                                data: Value::Null,
-                                screenshot_url: None,
-                                duration_ms: 0,
-                            }),
-                            // 其余 Err（WorkerNotInstalled /
-                            // WorkerSpawnBlocked / WorkerEnvironmentInvalid /
-                            // Cancelled / Timeout / SupervisorNotRunning 等）保持
-                            // 终态失败：重试不会变好，或取消/超时语义要求立即退出
-                            Err(e) => Err(format!("Bridge 执行失败: {e}")),
+                    LoginAttemptPlan::Script(plan) => {
+                        let plan = plan.clone();
+                        // 取消时本 future 被 `select!` 直接丢弃，`run_command` 里带
+                        // `kill_on_drop` 的子进程随之回收（Windows 另有 Job Object 兜住
+                        // 整棵进程树），故脚本渠道不需要 Bridge 那种 cancel_id 收尾。
+                        let runner = self.deps.script_runner.clone();
+                        Box::pin(async move { Ok(script_login::run_once(&runner, &plan).await) })
+                    }
+                    LoginAttemptPlan::Browser(worker_config) => {
+                        // 根据来源选择 Bridge 命令
+                        let method = match self.params.source {
+                            LoginSource::Browser => "execute_browser_task",
+                            _ => "execute_login_attempt",
+                        };
+
+                        let mut params = worker_config.clone();
+                        params["cancel_id"] = json!(cancel_id.clone());
+                        if let Some(tid) = &self.params.task_id {
+                            params["task_id"] = json!(tid.clone());
                         }
-                    })
+                        let bridge = bridge.clone();
+                        Box::pin(async move {
+                            match bridge.execute(method, params).await {
+                                Ok(resp) => Ok(Self::parse_ipc_response(resp)),
+                                // Worker 崩溃 / 启动超时到达调用方是 Err 而非 Outcome：
+                                // Worker 可能已被 Supervisor 重建或仅是瞬时故障，与
+                                // Outcome::NetworkError 同属可重试失败——转成 NetworkError
+                                // 结构化结果走既有 classify/try_retry 路径（此前直接终态
+                                // 失败，Worker 崩溃一次即放弃整场登录；重试前的
+                                // force_recycle_if_unowned 对已死 Worker 幂等安全）。
+                                Err(
+                                    e @ (BridgeError::WorkerCrashed { .. }
+                                    | BridgeError::WorkerStartupTimeout),
+                                ) => Ok(StructuredResult {
+                                    outcome: Outcome::NetworkError,
+                                    message: format!("Worker 异常: {e}"),
+                                    data: Value::Null,
+                                    screenshot_url: None,
+                                    duration_ms: 0,
+                                }),
+                                // WorkerBusy（调试会话 / 重定向检测占用会话槽位）是
+                                // 典型的**瞬时**冲突：占用方可短则数秒（调试单步）、
+                                // 长则贯穿调试会话。此前归为终态失败，调试期间自动
+                                // 登录被静默压制且登录历史被 WorkerBusy 刷屏。转成
+                                // NetworkError 走既有重试/退避路径（与上方崩溃分支
+                                // 同一处理）；随后的归属感知回收（force_recycle_
+                                // if_unowned）发现槽位不属于本会话时不会误杀占用方。
+                                Err(e @ BridgeError::WorkerBusy) => Ok(StructuredResult {
+                                    outcome: Outcome::NetworkError,
+                                    message: format!("Worker 忙（被其他任务占用，将重试）: {e}"),
+                                    data: Value::Null,
+                                    screenshot_url: None,
+                                    duration_ms: 0,
+                                }),
+                                // 其余 Err（WorkerNotInstalled /
+                                // WorkerSpawnBlocked / WorkerEnvironmentInvalid /
+                                // Cancelled / Timeout / SupervisorNotRunning 等）保持
+                                // 终态失败：重试不会变好，或取消/超时语义要求立即退出
+                                Err(e) => Err(format!("Bridge 执行失败: {e}")),
+                            }
+                        })
+                    }
                 };
 
             // 等待尝试完成，期间监听会话级取消、应用 shutdown 与会话总超时
@@ -684,13 +728,7 @@ impl LoginSession {
     /// 声明时 Worker 已用变量真值判定过成功，登录路径应跳过网络检测兜底
     /// （对齐原项目 v4.2.3 `login_attempt` 的 `has_explicit_condition` 分支）。
     fn has_explicit_success_condition(&self) -> bool {
-        self.params
-            .worker_config
-            .get("task_config")
-            .and_then(|t| t.get("success_condition"))
-            .and_then(|v| v.as_str())
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
+        self.params.plan.has_explicit_success_condition()
     }
 
     /// 登录后真实网络验证：等待 post_login_delay 让认证生效，再调用 MonitorService 做一次完整探测。
@@ -846,6 +884,7 @@ impl LoginSession {
         let entry = LoginHistoryEntry {
             timestamp: chrono::Local::now(),
             source: result.source,
+            channel: Some(self.params.plan.channel()),
             profile_id: self.params.profile_id.clone(),
             result: history,
             message: result.message.clone(),
@@ -865,10 +904,7 @@ impl LoginSession {
         // 浏览器而重新 spawn 一个 Worker。
         {
             let b = &self.deps.bridge;
-            if self.params.http_plan.is_none()
-                && self.params.script_plan.is_none()
-                && b.has_live_worker()
-            {
+            if self.params.plan.uses_bridge() && b.has_live_worker() {
                 // preserve_state 仅在 keep_alive 且登录成功时为真，非成功终态
                 // 走会话级释放、默认配置走全量关闭，三档语义由 Worker 侧实现
                 let preserve = result.is_success()
@@ -1046,6 +1082,14 @@ mod tests {
         // 凭证无效属于终态失败，重试无意义
         assert_eq!(
             classify(Outcome::InvalidCredential),
+            ResultAction::Terminal(LoginTerminal::Failed)
+        );
+    }
+
+    #[test]
+    fn test_classify_manual_required_is_terminal_failed() {
+        assert_eq!(
+            classify(Outcome::ManualRequired),
             ResultAction::Terminal(LoginTerminal::Failed)
         );
     }
@@ -1350,10 +1394,20 @@ mod tests {
             retry_interval: Duration::from_secs(0),
             login_timeout: Duration::from_secs(30),
             profile_id: "default".to_string(),
-            worker_config: serde_json::json!({}),
-            http_plan: None,
-            script_plan: None,
+            plan: LoginAttemptPlan::Browser(serde_json::json!({})),
         }
+    }
+
+    #[test]
+    fn test_attempt_plan_success_condition_only_applies_to_browser() {
+        let config = serde_json::json!({
+            "task_config": { "success_condition": "logged_in" }
+        });
+        assert!(LoginAttemptPlan::Browser(config).has_explicit_success_condition());
+        assert!(
+            !LoginAttemptPlan::Script(Box::new(script_plan())).has_explicit_success_condition()
+        );
+        assert!(!LoginAttemptPlan::Script(Box::new(script_plan())).uses_bridge());
     }
 
     /// 可重试失败持续到预算耗尽：验证重试次数与终态 Failed
@@ -1519,7 +1573,7 @@ mod tests {
         let deps = make_deps(bridge.clone()).await;
         let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
         let mut params = make_params();
-        params.script_plan = Some(script_plan());
+        params.plan = LoginAttemptPlan::Script(Box::new(script_plan()));
         let session = LoginSession::new(
             params,
             CancellationToken::new(),

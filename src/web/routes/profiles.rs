@@ -1026,7 +1026,7 @@ mod tests {
     fn http_task(id: &str) -> (String, TaskKind) {
         (
             id.to_string(),
-            TaskKind::Http(crate::tasks::HttpTaskConfig {
+            TaskKind::Http(Box::new(crate::tasks::HttpTaskConfig {
                 common: crate::tasks::CommonFields {
                     task_id: id.to_string(),
                     name: format!("直连任务 {id}"),
@@ -1034,7 +1034,7 @@ mod tests {
                 },
                 url: "http://10.1.1.55/login".into(),
                 ..Default::default()
-            }),
+            })),
         )
     }
 

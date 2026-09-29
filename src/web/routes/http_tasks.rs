@@ -74,7 +74,7 @@ pub async fn test_http_task(
         {
             Some(id) => match tasks.get_task_detail(id).await {
                 Ok(detail) => match detail.config {
-                    TaskKind::Http(cfg) => cfg,
+                    TaskKind::Http(cfg) => *cfg,
                     // 类型不对与"不存在"分开报（400/404）：前者改任务类型即可，
                     // 后者要去任务页重新选。实际类型进日志而不进文案，保持
                     // 错误文案与其它直连入口一致，便于前端统一匹配。
@@ -146,11 +146,15 @@ pub async fn test_http_task(
 
     // 7. 地址基础校验先做：空地址给的是"请填写"而不是任务页文案——用户在测试面板
     // 里填的任务草稿还没保存，指向任务页会让人先去保存再回来改
-    let url = task.url.trim();
-    if url.is_empty() {
-        return Err(ApiError::BadRequest("请填写直连请求地址".into()));
+    if task.steps.is_empty() {
+        let url = task.url.trim();
+        if url.is_empty() {
+            return Err(ApiError::BadRequest("请填写 HTTP 登录请求地址".into()));
+        }
+        HttpLoginRequest::validate_url(url).map_err(ApiError::BadRequest)?;
+    } else {
+        task.validate_flow().map_err(ApiError::BadRequest)?;
     }
-    HttpLoginRequest::validate_url(url).map_err(ApiError::BadRequest)?;
 
     let request = HttpLoginRequest::from_task(
         &task,
@@ -201,6 +205,7 @@ pub async fn test_http_task(
         "message": report.message,
         "script_error": report.script_error,
         "duration_ms": report.duration_ms,
+        "steps": report.step_reports,
     })))
 }
 
@@ -229,7 +234,7 @@ mod tests {
     impl MockTaskApi {
         fn config_for(&self, task_id: &str) -> Result<TaskKind, TaskError> {
             match task_id {
-                "portal-http" => Ok(TaskKind::Http(HttpTaskConfig {
+                "portal-http" => Ok(TaskKind::Http(Box::new(HttpTaskConfig {
                     common: CommonFields {
                         task_id: "portal-http".into(),
                         name: "门户直连".into(),
@@ -239,7 +244,7 @@ mod tests {
                     success_pattern: "登录成功".into(),
                     failure_pattern: "密码错误".into(),
                     ..HttpTaskConfig::default()
-                })),
+                }))),
                 "portal-browser" => Ok(TaskKind::Browser(crate::tasks::TaskConfig::default())),
                 other => Err(TaskError::TaskNotFound(other.to_string())),
             }
@@ -619,7 +624,7 @@ mod tests {
             json["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("请填写直连请求地址"),
+                .contains("请填写 HTTP 登录请求地址"),
             "{json}"
         );
     }

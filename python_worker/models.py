@@ -29,6 +29,7 @@ class Outcome(str, Enum):
     CAPTCHA_FAILED = "captcha_failed"
     # 由 Rust 侧设置（凭证预校验失败），Worker 不产生（P10）
     INVALID_CREDENTIAL = "invalid_credential"
+    MANUAL_REQUIRED = "manual_required"
     NETWORK_ERROR = "network_error"
     UNKNOWN_ERROR = "unknown_error"
 

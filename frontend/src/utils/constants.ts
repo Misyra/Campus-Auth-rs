@@ -44,14 +44,9 @@ const giteeRaw = (file: string): string =>
   `https://raw.giteeusercontent.com/${TASK_REPO_OWNER}/${TASK_REPO_NAME}/raw/master/${file}`;
 
 /**
- * 仓库条目的类别：**两类任务各有一份索引文件**，读哪一份由它决定。
- *
- * 浏览器任务（步骤式 JSON）与直连任务（HTTP 请求形状）曾共用一份混合索引，靠条目上
- * 可选的 `type` 字段分类、缺省当 `browser`——贡献者忘写 `type` 就得到「列在列表里、
- * 点导入又被文件类型校验拒掉」的死条目，用户也会在错的 Tab 里搜不到自己学校。
- * 拆开后**文件即类别**：`index.json` 收浏览器任务，`index.http.json` 收直连任务。
+ * 仓库条目的类别。统一索引中每条都显式写 type，旧条目缺省仍按 browser 读取。
  */
-export type TaskRepoKind = "browser" | "http";
+export type TaskRepoKind = "browser" | "http" | "script";
 
 /** 预设镜像源 id（自定义源没有预设索引地址，故不在内） */
 export type TaskRepoMirrorId = "github" | "gitee";
@@ -115,7 +110,7 @@ export const DOCS = {
   gettingStarted: docUrl("getting-started", "start"),
   /** 配置方案概览（三条登录渠道的取舍） */
   profiles: docUrl("profiles", "overview"),
-  /** 直连请求登录 */
+  /** HTTP 登录 */
   httpLogin: docUrl("profiles", "http-login"),
   /** 脚本登录（脚本渠道的契约、示例与排障） */
   scriptLogin: docUrl("profiles", "script-login"),
@@ -131,51 +126,48 @@ export type TaskRepoSourceId = TaskRepoMirrorId | "custom";
 /**
  * 仓库导入的「源」选项表（单一事实源）。
  *
- * 两个字段各有用途，**不可合并**：`indexUrls` 是给程序 GET 的 raw JSON 地址（每类任务
- * 一份索引，故按类别分别给），`homeUrl` 是给人点开浏览的仓库页面——真实缺陷：空态里
+ * 两个字段各有用途：`indexUrl` 是给程序 GET 的统一 raw JSON 地址，
+ * `homeUrl` 是给人点开浏览的仓库页面——真实缺陷：空态里
  * 「直接查看仓库」原先把索引地址当作可读页面链接，点开是一屏 raw JSON 而不是仓库首页。
- * 自定义源两项皆空（用户自填的地址未必有对应主页，也可能只指向某一类索引）。
+ * 自定义源两项皆空（用户自填的地址未必有对应主页）。
  */
 export const TASK_REPO_SOURCES: readonly {
   id: TaskRepoSourceId;
   label: string;
   /** 该源在「源」选择器旁的补充说明（空则不显示） */
   hint: string;
-  /** 该源的索引地址（按条目类别；自定义源为 null，由用户手填） */
-  indexUrls: Record<TaskRepoKind, string> | null;
+  /** 该源的统一索引地址；自定义源为 null，由用户手填 */
+  indexUrl: string | null;
   homeUrl: string;
 }[] = [
   {
     id: "github",
     label: "GitHub",
     hint: "国内访问可能较慢或加载失败，卡住时请改用 Gitee 镜像",
-    indexUrls: { browser: githubRaw("index.json"), http: githubRaw("index.http.json") },
+    indexUrl: githubRaw("index.json"),
     homeUrl: TASK_REPO_URL,
   },
   {
     id: "gitee",
     label: "Gitee",
     hint: "国内访问更快，推荐国内用户使用",
-    indexUrls: { browser: giteeRaw("index.gitee.json"), http: giteeRaw("index.http.gitee.json") },
+    indexUrl: giteeRaw("index.gitee.json"),
     homeUrl: TASK_REPO_URL_GITEE,
   },
   {
     id: "custom",
     label: "自定义",
     hint: "",
-    indexUrls: null,
+    indexUrl: null,
     homeUrl: "",
   },
 ];
 
 /**
- * 取某类别在某源下的预设索引地址；自定义源（或未知源）返回空串，表示"应由用户手填"。
- *
- * 切源与切类别都走这个函数：索引地址同时取决于**类别**与**源**，任一处各写一份就会出现
- * 「在直连列表里拉了浏览器索引」这类静默错配。
+ * 取某源下的统一索引地址；保留类别参数供现有调用方传递筛选目标。
  */
-export function presetRepoIndexUrl(kind: TaskRepoKind, source: TaskRepoSourceId): string {
-  return TASK_REPO_SOURCES.find((s) => s.id === source)?.indexUrls?.[kind] ?? "";
+export function presetRepoIndexUrl(_kind: TaskRepoKind, source: TaskRepoSourceId): string {
+  return TASK_REPO_SOURCES.find((s) => s.id === source)?.indexUrl ?? "";
 }
 
 export const LIMITS = {
@@ -426,7 +418,7 @@ export const DEFAULT_PROFILE_SETTINGS: Profile = {
   active_task: "",
   isp: "",
   login_channel: "browser",
-  /** 直连渠道绑定的直连任务 ID（空 = 未绑定；直连没有内置兜底任务，故必须显式选） */
+  /** 直连渠道绑定的HTTP 登录任务 ID（空 = 未绑定；直连没有内置兜底任务，故必须显式选） */
   active_http_task: "",
   /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
   active_script_task: "",

@@ -6,7 +6,7 @@
  * - 全屏阻断例外：无 Teleport/关闭入口，打开期间锁定背景滚动（沿用原协议向导口径）。
  * - 显隐门槛仍是 init-status 的 `agreed`（仅全新安装显示；同意即写标记，中途退出不再续显）。
  * - 登录方式：浏览器渠道无绑定校验，选定即写 `login_channel`；直连渠道受
- *   `validate_login_task_binding` 约束——必须与已存在的直连任务绑定同一次提交，
+ *   `validate_login_task_binding` 约束——必须与已存在的HTTP 登录任务绑定同一次提交，
  *   故延后到任务匹配步导入成功后才一并 PATCH，无匹配则保持浏览器渠道。
  * - 环境准备：bootstrap 是同步端点（最长可达数十分钟），采用 fire-and-forget +
  *   轮询 init-status 的 stage/progress 观察进度；浏览器选择与「设置 · 浏览器」同口径。
@@ -71,7 +71,7 @@ const STEP_HEADER: Record<StepKey, { title: string; sub: string }> = {
   },
   channel: {
     title: "选择你的登录方式",
-    sub: "决定用浏览器自动化还是直连请求完成校园网认证，后续可在「方案」页修改",
+    sub: "决定用浏览器自动化还是HTTP 登录完成校园网认证，后续可在「方案」页修改",
   },
   environment: {
     title: "准备运行环境",
@@ -448,9 +448,9 @@ async function onImported(id: string) {
 async function proceedFromSchool() {
   if (selectedChannel.value === "http" && !importedId.value) {
     const ok = await confirm({
-      title: "未导入直连任务",
+      title: "未导入HTTP 登录任务",
       message:
-        "直连渠道需要一个直连任务才能登录，未导入时将保持浏览器渠道。可以稍后在任务页的「仓库导入」中再导入。确定继续吗？",
+        "直连渠道需要一个HTTP 登录任务才能登录，未导入时将保持浏览器渠道。可以稍后在任务页的「仓库导入」中再导入。确定继续吗？",
       confirmText: "保持浏览器渠道并继续",
       cancelText: "返回",
     });
@@ -478,7 +478,7 @@ async function applyDebugMode() {
 
 /** 完成步展示的最终登录方式：直连未导入任务时实际保持浏览器渠道 */
 const appliedChannelLabel = computed(() => {
-  if (selectedChannel.value === "http" && importedId.value) return "直连请求";
+  if (selectedChannel.value === "http" && importedId.value) return "HTTP 登录";
   return "浏览器自动化";
 });
 
@@ -506,7 +506,7 @@ async function skipWizard() {
         <p>{{ STEP_HEADER[currentKey].sub }}</p>
       </div>
 
-      <!-- 步骤条：已到达步骤可点回看，未到达禁用（与直连配置向导同一交互口径） -->
+      <!-- 步骤条：已到达步骤可点回看，未到达禁用。 -->
       <ol class="wizard-steps">
         <li
           v-for="(step, i) in visibleSteps"
@@ -581,7 +581,7 @@ async function skipWizard() {
               @click="chooseChannel('http')"
             >
               <IconApp name="send" class="wizard-channel-icon" />
-              <strong>直连请求</strong>
+              <strong>HTTP 登录</strong>
               <span>直接使用 GET/POST 请求进行登录，可能需要逆向前端</span>
             </button>
           </div>
@@ -738,12 +738,12 @@ async function skipWizard() {
                 </li>
                 <li>
                   <strong>尝试自定义任务</strong>
-                  <span>{{ repoKind === "http" ? "到「任务」页新建直连任务，编辑器内的配置向导可引导完成登录请求配置" : "到「任务」页新建或录制浏览器任务，也可用 AI 生成" }}</span>
+                  <span>{{ repoKind === "http" ? "到「任务 → HTTP 登录」新建任务，按顺序添加请求或计算步骤，再设置结果判断" : "到「任务」页新建或录制浏览器任务，也可用 AI 生成" }}</span>
                 </li>
               </ul>
               <p class="wizard-nomatch-docs">
                 详细请查看文档：
-                <a v-if="repoKind === 'http'" :href="DOCS.httpLogin" target="_blank" rel="noopener noreferrer">直连请求登录</a>
+                <a v-if="repoKind === 'http'" :href="DOCS.httpLogin" target="_blank" rel="noopener noreferrer">HTTP 登录指南</a>
                 <a v-else :href="DOCS.taskBrowser" target="_blank" rel="noopener noreferrer">浏览器任务</a>
                 ·
                 <a :href="DOCS.faqLogin" target="_blank" rel="noopener noreferrer">无法自动登录排查</a>

@@ -83,6 +83,7 @@ pub const VALID_STEP_TYPES: &[&str] = &[
     "navigate",
     "goto",
     "assert_text",
+    "manual_check",
     "upload_file",
     "wait_for_selector",
 ];
@@ -401,6 +402,212 @@ impl HttpActionRequest {
     }
 }
 
+/// HTTP 登录流程步骤类型。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpFlowStepKind {
+    /// 发送 HTTP 请求，并可从响应中提取一个占位符。
+    #[default]
+    Request,
+    /// 在隔离的 JavaScript 引擎中计算后续请求所需的字段。
+    Transform,
+}
+
+/// 请求失败时流程的处理方式。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpStepOnError {
+    /// 停止本次登录尝试。
+    #[default]
+    Stop,
+    /// 记录失败并继续执行后续步骤，供下线等尽力而为的请求使用。
+    Continue,
+}
+
+/// 从一次 HTTP 响应中取出一个供后续步骤使用的变量。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpExtractRule {
+    /// 来源：`json:path`、`header:name`、`url:key`、`redirect:key`、
+    /// `html:input-name` 或带一个捕获组的 `regex:pattern`。
+    pub source: String,
+    /// 后续步骤引用的变量名。
+    pub name: String,
+}
+
+impl HttpExtractRule {
+    /// 在保存与执行前验证来源及变量名，防止错误任务在运行时才失败。
+    pub fn validate(&self) -> Result<(), String> {
+        let source = self.source.trim();
+        if source.len() > 1024 {
+            return Err("取值规则超过 1024 字节".into());
+        }
+        let Some((kind, arg)) = source.split_once(':') else {
+            return Err(
+                "取值来源需写成 json:、header:、url:、redirect:、html: 或 regex: 开头".into(),
+            );
+        };
+        if arg.trim().is_empty() {
+            return Err("取值来源缺少字段或表达式".into());
+        }
+        match kind {
+            "json" | "header" | "url" | "redirect" | "html" => {}
+            "regex" => {
+                let pattern = regex::Regex::new(arg).map_err(|e| format!("取值正则无效: {e}"))?;
+                if pattern.captures_len() < 2 {
+                    return Err("取值正则必须包含一个捕获组".into());
+                }
+            }
+            _ => return Err("不支持的取值来源".into()),
+        }
+        if self.name.is_empty()
+            || self.name.len() > 64
+            || !self
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err("变量名需为 1～64 位字母、数字或下划线".into());
+        }
+        Ok(())
+    }
+}
+
+/// HTTP 登录流程中的一个顺序步骤。
+///
+/// `kind=request` 使用请求字段，可选 `extract=json:字段路径`；`kind=transform`
+/// 使用 `script`，其 `transform(ctx)` 返回值成为后续步骤的占位符。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpFlowStep {
+    /// 稳定步骤 ID，供结果判断引用。
+    pub id: String,
+    /// 编辑器展示名称。
+    pub name: String,
+    /// 步骤类型。
+    pub kind: HttpFlowStepKind,
+    /// 请求方法。
+    pub method: HttpRequestMethod,
+    /// 请求地址模板。
+    pub url: String,
+    /// 请求头模板。
+    pub headers: String,
+    /// 请求体模板。
+    pub body: String,
+    /// 可选响应取值路径，例如 `json:data.token`。
+    pub extract: String,
+    /// 提取值注册的占位符名；留空时取路径最后一段。
+    pub extract_as: String,
+    /// 可选的多字段取值规则；非空时取代旧单字段 `extract`。
+    pub extracts: Vec<HttpExtractRule>,
+    /// 为读取 3xx 的 Location 而停止自动跳转；缺省仍自动跟随。
+    pub stop_on_redirect: bool,
+    /// 计算步骤的 JavaScript 源码。
+    pub script: String,
+    /// 请求失败或取值失败后的动作。
+    pub on_error: HttpStepOnError,
+    /// 请求完成后的等待秒数，限制在 0～30 秒。
+    pub wait_secs: f64,
+}
+
+impl HttpFlowStep {
+    /// 验证步骤的结构和大小，供保存与执行共用。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty()
+            || self.id.len() > 64
+            || !self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err("步骤 ID 需为 1～64 位字母、数字、下划线或连字符".into());
+        }
+        if self.name.len() > 128 {
+            return Err("步骤名称超过 128 字节".into());
+        }
+        match self.kind {
+            HttpFlowStepKind::Request => {
+                if !self.script.trim().is_empty() {
+                    return Err("请求步骤不能包含计算脚本".into());
+                }
+                let url = self.url.trim();
+                let (scheme, rest) = url.split_once("://").unwrap_or(("", ""));
+                let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+                if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+                    || host.is_empty()
+                {
+                    return Err("请求步骤地址需为带主机名的 http/https URL".into());
+                }
+                for (label, len, limit) in [
+                    ("请求地址", self.url.len(), 8 * 1024),
+                    ("请求头", self.headers.len(), 64 * 1024),
+                    ("请求体", self.body.len(), 256 * 1024),
+                    ("取值方式", self.extract.len(), 8 * 1024),
+                    ("占位符名", self.extract_as.len(), 128),
+                ] {
+                    if len > limit {
+                        return Err(format!("{label}超过 {limit} 字节"));
+                    }
+                }
+                if self.extracts.len() > 12 {
+                    return Err("每个请求步骤最多提取 12 个变量".into());
+                }
+                let mut names = std::collections::HashSet::new();
+                for rule in &self.extracts {
+                    rule.validate()?;
+                    if !names.insert(rule.name.as_str()) {
+                        return Err(format!("变量名 `{}` 重复", rule.name));
+                    }
+                }
+                if !self.extracts.is_empty() && !self.extract.trim().is_empty() {
+                    return Err("多字段取值与旧单字段取值不能同时使用".into());
+                }
+                if !self.extract.trim().is_empty() {
+                    HttpPreRequest {
+                        extract: self.extract.clone(),
+                        ..HttpPreRequest::default()
+                    }
+                    .extract_path()?;
+                } else if !self.extract_as.trim().is_empty() {
+                    return Err("填写占位符名时还需填写取值方式".into());
+                }
+                if !self.extract_as.trim().is_empty()
+                    && !self
+                        .extract_as
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return Err("占位符名仅支持字母、数字与下划线".into());
+                }
+                if !self.wait_secs.is_finite() || !(0.0..=30.0).contains(&self.wait_secs) {
+                    return Err("步骤等待秒数需在 0～30 之间".into());
+                }
+            }
+            HttpFlowStepKind::Transform => {
+                if !self.url.trim().is_empty()
+                    || !self.headers.trim().is_empty()
+                    || !self.body.trim().is_empty()
+                    || !self.extract.trim().is_empty()
+                    || !self.extract_as.trim().is_empty()
+                    || !self.extracts.is_empty()
+                    || self.stop_on_redirect
+                    || self.on_error != HttpStepOnError::Stop
+                    || self.wait_secs != 0.0
+                {
+                    return Err("计算步骤只接受脚本内容，请把请求参数放入请求步骤".into());
+                }
+                if self.script.trim().is_empty() {
+                    return Err("计算步骤缺少脚本内容".into());
+                }
+                if self.script.len() > 128 * 1024 {
+                    return Err("计算步骤脚本超过 131072 字节".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// http 直连任务配置（把「直连请求」的登录参数固化为可复用的具名任务）
 ///
 /// 只装请求本身（方法/地址/认证页/头/体/成败判定/凭据变换），**不装凭据**：账号
@@ -433,6 +640,12 @@ pub struct HttpTaskConfig {
     /// 共享字段（扁平嵌入）
     #[serde(flatten)]
     pub common: CommonFields,
+    /// 流程结构版本；旧任务缺省为 1，新步骤任务使用 2。
+    pub schema_version: u32,
+    /// 有序 HTTP 登录步骤；非空时按此流程执行，旧的固定请求字段仅用于读取旧任务。
+    pub steps: Vec<HttpFlowStep>,
+    /// 用于结果判断的请求步骤 ID；留空时选择最后一个请求步骤。
+    pub result_step_id: String,
     /// 请求方法
     pub method: HttpRequestMethod,
     /// 直连请求地址（支持 `{username}` 等占位符替换）
@@ -452,6 +665,8 @@ pub struct HttpTaskConfig {
     pub success_pattern: String,
     /// 失败判定模式（响应体匹配）
     pub failure_pattern: String,
+    /// 命中失败关键字后的动作；旧任务缺省按凭据错误立即停止。
+    pub failure_action: HttpFailureAction,
     /// 成败判定方式（默认 `response` 响应关键字；`network` = 网络检测）
     ///
     /// `network` 模式下响应体与状态码都不参与**成功**判定：登录请求发出且未命中
@@ -486,6 +701,9 @@ impl Default for HttpTaskConfig {
     fn default() -> Self {
         Self {
             common: CommonFields::default(),
+            schema_version: 1,
+            steps: Vec::new(),
+            result_step_id: String::new(),
             method: HttpRequestMethod::default(),
             url: String::new(),
             auth_url: String::new(),
@@ -493,6 +711,7 @@ impl Default for HttpTaskConfig {
             body: String::new(),
             success_pattern: String::new(),
             failure_pattern: String::new(),
+            failure_action: HttpFailureAction::default(),
             success_check: HttpSuccessCheck::default(),
             crypto_script: String::new(),
             pre_request: None,
@@ -501,6 +720,85 @@ impl Default for HttpTaskConfig {
             metadata: default_value_obj(),
         }
     }
+}
+
+impl HttpTaskConfig {
+    /// 新流程里用于列表摘要与结果判断的请求步骤。
+    pub fn result_step(&self) -> Option<&HttpFlowStep> {
+        if self.result_step_id.is_empty() {
+            self.steps
+                .iter()
+                .rev()
+                .find(|step| step.kind == HttpFlowStepKind::Request)
+        } else {
+            self.steps.iter().find(|step| {
+                step.id == self.result_step_id && step.kind == HttpFlowStepKind::Request
+            })
+        }
+    }
+
+    /// 校验新式有序流程；旧任务的固定字段由原有校验路径处理。
+    pub fn validate_flow(&self) -> Result<(), String> {
+        if self.steps.is_empty() {
+            if self.schema_version != 1 {
+                return Err(
+                    "HTTP 流程版本无效，旧任务使用 1，新流程需使用 2 且至少有一个步骤".into(),
+                );
+            }
+            return Ok(());
+        }
+        if self.schema_version != 2 {
+            return Err("HTTP 步骤任务的 schema_version 必须为 2".into());
+        }
+        if self.steps.len() > 16 {
+            return Err("HTTP 登录流程最多支持 16 个步骤".into());
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut last_request = None;
+        for (index, step) in self.steps.iter().enumerate() {
+            step.validate()
+                .map_err(|e| format!("步骤 {}：{e}", index + 1))?;
+            if !ids.insert(&step.id) {
+                return Err(format!("步骤 ID 重复：{}", step.id));
+            }
+            if step.kind == HttpFlowStepKind::Request {
+                last_request = Some(step.id.as_str());
+            }
+        }
+        let selected = if self.result_step_id.is_empty() {
+            last_request.ok_or("HTTP 登录流程至少需要一个请求步骤")?
+        } else {
+            self.result_step_id.as_str()
+        };
+        if !self
+            .steps
+            .iter()
+            .any(|step| step.id == selected && step.kind == HttpFlowStepKind::Request)
+        {
+            return Err("结果判断必须引用一个现有的请求步骤".into());
+        }
+        if self
+            .steps
+            .iter()
+            .any(|step| step.id == selected && step.on_error == HttpStepOnError::Continue)
+        {
+            return Err("结果判断引用的请求步骤不能忽略失败".into());
+        }
+        Ok(())
+    }
+}
+
+/// 直连请求命中失败关键字后的动作。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpFailureAction {
+    /// 凭据错误，立即停止重试（兼容旧版行为）。
+    #[default]
+    Credential,
+    /// 临时失败，使用方案的重试预算。
+    Retry,
+    /// 需要用户在门户中完成验证码、短信等人工验证，停止重试。
+    Manual,
 }
 
 /// 直连登录的成败判定方式（`HttpTaskConfig::success_check`）
@@ -535,7 +833,7 @@ pub enum TaskKind {
     /// 脚本任务
     Script(ScriptTaskConfig),
     /// http 直连任务
-    Http(HttpTaskConfig),
+    Http(Box<HttpTaskConfig>),
 }
 
 impl TaskKind {
@@ -574,14 +872,14 @@ impl TaskKind {
         match self {
             TaskKind::Browser(c) => &c.url,
             TaskKind::Script(_) => "",
-            TaskKind::Http(c) => &c.url,
+            TaskKind::Http(c) => c.result_step().map_or(c.url.as_str(), |step| &step.url),
         }
     }
 
     /// 直连任务的请求方法；非直连任务为 `None`（前端据此决定要不要渲染方法标签）
     pub fn http_request_method(&self) -> Option<HttpRequestMethod> {
         match self {
-            TaskKind::Http(c) => Some(c.method),
+            TaskKind::Http(c) => Some(c.result_step().map_or(c.method, |step| step.method)),
             _ => None,
         }
     }
@@ -615,9 +913,9 @@ impl<'de> Deserialize<'de> for TaskKind {
             "script" => Ok(TaskKind::Script(
                 parse::<ScriptTaskConfig>(value).map_err(serde::de::Error::custom)?,
             )),
-            "http" => Ok(TaskKind::Http(
+            "http" => Ok(TaskKind::Http(Box::new(
                 parse::<HttpTaskConfig>(value).map_err(serde::de::Error::custom)?,
-            )),
+            ))),
             // Shell 任务已移除：历史存量 type=shell 明确报错，提示改用脚本任务
             "shell" => Err(serde::de::Error::custom(
                 "任务类型 shell 已移除，请改用 script 类型（.sh/.bat/.py/.exe）",
@@ -993,6 +1291,7 @@ mod tests {
         // 功能对齐 v4.2.3：goto / assert_text / navigate 应为合法步骤类型
         assert!(VALID_STEP_TYPES.contains(&"goto"));
         assert!(VALID_STEP_TYPES.contains(&"assert_text"));
+        assert!(VALID_STEP_TYPES.contains(&"manual_check"));
         assert!(VALID_STEP_TYPES.contains(&"navigate"));
     }
 
@@ -1104,6 +1403,7 @@ mod tests {
         assert!(cfg.body.is_empty());
         assert!(cfg.success_pattern.is_empty());
         assert!(cfg.failure_pattern.is_empty());
+        assert_eq!(cfg.failure_action, HttpFailureAction::Credential);
         // 判定方式默认响应关键字（老任务没有该键时 serde default 补齐）
         assert_eq!(cfg.success_check, HttpSuccessCheck::Response);
         assert!(cfg.crypto_script.is_empty());
@@ -1133,6 +1433,7 @@ mod tests {
             assert_eq!(cfg.ignore_https_errors, None);
             // 未写 success_check → response（响应关键字），老配置语义不变
             assert_eq!(cfg.success_check, HttpSuccessCheck::Response);
+            assert_eq!(cfg.failure_action, HttpFailureAction::Credential);
             // 未写 auth_url → 空串（回退方案的认证地址），不是解析失败
             assert!(cfg.auth_url.is_empty());
         } else {
@@ -1143,12 +1444,15 @@ mod tests {
     #[test]
     fn test_http_task_config_serde_roundtrip() {
         // 序列化带 "type":"http" → 反序列化字段一致（None 与 Some(false) 两态都覆盖）
-        let original = TaskKind::Http(HttpTaskConfig {
+        let original = TaskKind::Http(Box::new(HttpTaskConfig {
             common: CommonFields {
                 task_id: "portal_http".to_string(),
                 name: "门户直连".to_string(),
                 description: "复用直连参数".to_string(),
             },
+            schema_version: 1,
+            steps: Vec::new(),
+            result_step_id: String::new(),
             method: HttpRequestMethod::Post,
             url: "https://portal.example.com/auth".to_string(),
             auth_url: "https://portal.example.com/login".to_string(),
@@ -1156,6 +1460,7 @@ mod tests {
             body: "username={username}&password={password}".to_string(),
             success_pattern: "登录成功".to_string(),
             failure_pattern: "密码错误".to_string(),
+            failure_action: HttpFailureAction::Retry,
             success_check: HttpSuccessCheck::Network,
             crypto_script: "function transform(ctx) { return ctx; }".to_string(),
             pre_request: Some(HttpPreRequest {
@@ -1175,7 +1480,7 @@ mod tests {
             }),
             ignore_https_errors: None,
             metadata: serde_json::json!({ "source": "repo" }),
-        });
+        }));
         let json = serde_json::to_string(&original).unwrap();
         assert!(
             json.contains(r#""type":"http""#),
@@ -1201,6 +1506,7 @@ mod tests {
         assert_eq!(cfg.body, "username={username}&password={password}");
         assert_eq!(cfg.success_pattern, "登录成功");
         assert_eq!(cfg.failure_pattern, "密码错误");
+        assert_eq!(cfg.failure_action, HttpFailureAction::Retry);
         assert_eq!(
             cfg.success_check,
             HttpSuccessCheck::Network,
@@ -1220,10 +1526,10 @@ mod tests {
         assert_eq!(cfg.metadata["source"], "repo");
 
         // 显式 Some(false)：必须原样往返，不得被当作「未设置」而退回 None
-        let strict = TaskKind::Http(HttpTaskConfig {
+        let strict = TaskKind::Http(Box::new(HttpTaskConfig {
             ignore_https_errors: Some(false),
             ..HttpTaskConfig::default()
-        });
+        }));
         let json = serde_json::to_string(&strict).unwrap();
         let back: TaskKind = serde_json::from_str(&json).unwrap();
         if let TaskKind::Http(cfg) = back {
@@ -1244,16 +1550,13 @@ mod tests {
             TaskKind::Script(ScriptTaskConfig::default()).type_name(),
             "script"
         );
-        assert_eq!(
-            TaskKind::Http(HttpTaskConfig::default()).type_name(),
-            "http"
-        );
+        assert_eq!(TaskKind::Http(Box::default()).type_name(), "http");
     }
 
     #[test]
     fn test_task_kind_http_common_accessors() {
         // 新臂同样可经 common()/common_mut() 读写共享字段
-        let mut task = TaskKind::Http(HttpTaskConfig::default());
+        let mut task = TaskKind::Http(Box::default());
         assert_eq!(task.common().name, "未命名任务");
         task.common_mut().task_id = "h1".to_string();
         assert_eq!(task.common().task_id, "h1");

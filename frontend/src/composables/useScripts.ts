@@ -5,7 +5,7 @@
  * debounce 静默 PUT，头部状态字 idle→saving→saved/error；缺口（见 `utils/scriptDraft`）
  * 会拦住落盘并把状态字改成「有 N 处待补全，改动暂未保存」。
  *
- * 与另两个面板的唯一差异在**新建**：直连任务的 ID 没有外部含义，新建即落盘一个
+ * 与另两个面板的唯一差异在**新建**：HTTP 登录任务的 ID 没有外部含义，新建即落盘一个
  * `untitled_N` 种子；脚本的 ID 是文件名、也是「定时任务」引用它的值，得由用户命名，
  * 故新建先给一份空 ID 草稿、ID 合法后第一次自动保存才创建文件（`_isNew` 期间 ID 可改，
  * 落盘后固定）。
@@ -348,7 +348,7 @@ function truncate(text: string, max: number): string {
 }
 
 async function exportScript(taskId: string): Promise<void> {
-  // A11：busy 守卫，与浏览器任务 / 直连任务的导出同口径
+  // A11：busy 守卫，与浏览器任务 / HTTP 登录任务的导出同口径
   if (exportingIds.has(taskId)) return;
   exportingIds.add(taskId);
   try {

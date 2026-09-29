@@ -209,7 +209,7 @@ async function saveProfile(): Promise<boolean> {
   // 只能自己写；浏览器渠道才有内置 default），故未绑定时直接拒绝保存：放过去只会
   // 在登录时才失败，且失败点在别处
   if (settings.login_channel === "http" && !String(settings.active_http_task ?? "").trim()) {
-    toastOnly(false, "请为直连渠道选择一个直连任务（任务页 · 直连任务）");
+    toastOnly(false, "请为直连渠道选择一个HTTP 登录任务（任务页 · HTTP 登录任务）");
     return false;
   }
   if (settings.login_channel === "script" && !String(settings.active_script_task ?? "").trim()) {
@@ -378,7 +378,7 @@ async function importProfile(payload: unknown): Promise<string | null> {
     // 旧版分享文件里的直连配置（方案内联 http_* 字段）在 v10 已无法承载：
     // 后端忽略它们，这里必须说一声，否则用户以为导入后直连还能用
     if (legacy_http_config_dropped) {
-      toastOnly(false, "该分享文件包含旧版直连配置，已忽略；请在「任务 · 直连任务」里重新配置");
+      toastOnly(false, "该分享文件包含旧版直连配置，已忽略；请在「任务 · HTTP 登录任务」里重新配置");
     }
     return id;
   } catch (error) {

@@ -1,5 +1,5 @@
 /**
- * 直连任务草稿 ⇄ 载荷互转与缺口校验的单元测试。
+ * HTTP 登录任务草稿 ⇄ 载荷互转与缺口校验的单元测试。
  *
  * 锁定三类易错点：
  * 1. 证书策略是**三态**（`null` 跟随全局 / `true` / `false`），不能把 `null` 与 `false`
@@ -45,6 +45,7 @@ describe("emptyHttpTaskDraft", () => {
     // method 缺省必须是 GET：后端 HttpRequestMethod::default() 也是 GET，
     // 若这里默认 POST，缺字段的任务打开后会显示成另一个方法
     expect(draft.method).toBe("GET");
+    expect(draft.failure_action).toBe("credential");
     // null = 跟随全局 browser.ignore_https_errors，不是"忽略证书"也不是"严格校验"
     expect(draft.ignore_https_errors).toBeNull();
     expect(draft._isNew).toBe(true);
@@ -68,6 +69,82 @@ describe("emptyHttpTaskDraft", () => {
     }
     // 前置请求的方法与主请求同口径（后端 HttpRequestMethod::default() = GET）
     expect(draft.pre_request_method).toBe("GET");
+  });
+});
+
+describe("有序 HTTP 登录流程", () => {
+  it("旧任务按实际执行顺序显示，未编辑时仍按旧格式保存", () => {
+    const draft = httpTaskDraftFromConfig(makeConfig({
+      logout_request: { method: "GET", url: "http://10.0.0.1/logout", headers: "", body: "", wait_secs: 1 },
+      crypto_script: "function transform(ctx) { return { sign: ctx.password }; }",
+      pre_request: { method: "GET", url: "http://10.0.0.1/token", headers: "", body: "", extract: "json:token", name: "csrf" },
+    }));
+    expect(draft.steps.map((step) => step.id)).toEqual(["logout", "credentials", "prepare", "login"]);
+    expect(draft.steps[2]?.extracts).toEqual([{ source: "json:token", name: "csrf" }]);
+    expect(draft.result_step_id).toBe("login");
+    expect(draft._flowEnabled).toBe(false);
+    expect(httpTaskPayload(draft).schema_version).toBeUndefined();
+  });
+
+  it("编辑步骤后写入 v2 流程，不再留下会被旧执行器误用的请求字段", () => {
+    const draft = httpTaskDraftFromConfig(makeConfig());
+    draft._flowEnabled = true;
+    draft.steps[0]!.url = " http://10.0.0.1/login ";
+    const payload = httpTaskPayload(draft);
+    expect(payload.schema_version).toBe(2);
+    expect(payload.steps?.[0]?.url).toBe("http://10.0.0.1/login");
+    expect(payload.result_step_id).toBe("login");
+    expect(payload.url).toBe("");
+    expect(httpTaskDraftGaps(draft)).toEqual([]);
+  });
+
+  it("结果来源删除、重复步骤 ID 与取值方式错误会阻止自动保存", () => {
+    const draft = httpTaskDraftFromConfig(makeConfig());
+    draft._flowEnabled = true;
+    draft.steps.push({ ...draft.steps[0]!, extracts: [{ source: "bad:token", name: "token" }] });
+    draft.result_step_id = "missing";
+    const gaps = httpTaskDraftGaps(draft);
+    expect(gaps.some((gap) => gap.includes("ID"))).toBe(true);
+    expect(gaps.some((gap) => gap.includes("取值来源"))).toBe(true);
+    expect(gaps.some((gap) => gap.includes("结果判断"))).toBe(true);
+  });
+
+  it("结果来源步骤不能设置为忽略失败", () => {
+    const draft = httpTaskDraftFromConfig(makeConfig());
+    draft._flowEnabled = true;
+    draft.steps[0]!.on_error = "continue";
+    expect(httpTaskDraftGaps(draft)).toContain("结果来源步骤不能忽略失败");
+  });
+
+  it("请求步骤的地址有内容但缺协议或主机名时仍阻止保存", () => {
+    const draft = httpTaskDraftFromConfig(makeConfig());
+    draft._flowEnabled = true;
+    draft.steps[0]!.url = "/login";
+    expect(httpTaskDraftGaps(draft)).toContain("步骤 1 请求地址（需为带主机名的 http/https URL）");
+    draft.steps[0]!.url = "https://?token=abc";
+    expect(httpTaskDraftGaps(draft)).toContain("步骤 1 请求地址（需为带主机名的 http/https URL）");
+    draft.steps[0]!.url = "https://{gateway_host}/login";
+    expect(httpTaskDraftGaps(draft)).toEqual([]);
+  });
+
+  it("多来源变量与重定向策略经编辑器往返保持原样", () => {
+    const draft = httpTaskDraftFromConfig(makeConfig({
+      schema_version: 2,
+      steps: [{
+        id: "challenge", name: "获取参数", kind: "request", method: "GET",
+        url: "http://10.0.0.1/redirect", headers: "", body: "", extract: "", extract_as: "",
+        extracts: [{ source: "redirect:ip", name: "ip" }, { source: "header:X-Token", name: "token" }],
+        stop_on_redirect: true, script: "", on_error: "stop", wait_secs: 0,
+      }],
+      result_step_id: "challenge",
+    }));
+    expect(httpTaskDraftGaps(draft)).toEqual([]);
+    const payload = httpTaskPayload(draft);
+    expect(payload.steps?.[0]?.extracts).toEqual([
+      { source: "redirect:ip", name: "ip" },
+      { source: "header:X-Token", name: "token" },
+    ]);
+    expect(payload.steps?.[0]?.stop_on_redirect).toBe(true);
   });
 });
 
@@ -102,6 +179,15 @@ describe("httpTaskDraftFromConfig", () => {
     expect(httpTaskDraftFromConfig(makeConfig({ ignore_https_errors: true })).ignore_https_errors).toBe(true);
     // false 必须原样保留：塌成 null 会把"严格校验"改回"跟随全局"
     expect(httpTaskDraftFromConfig(makeConfig({ ignore_https_errors: false })).ignore_https_errors).toBe(false);
+  });
+
+  it("失败动作默认兼容旧任务，并在草稿与载荷间保留重试选项", () => {
+    expect(httpTaskDraftFromConfig(makeConfig()).failure_action).toBe("credential");
+    const draft = httpTaskDraftFromConfig(makeConfig({ failure_action: "retry" }));
+    expect(draft.failure_action).toBe("retry");
+    expect(httpTaskPayload(draft).failure_action).toBe("retry");
+    const manual = httpTaskDraftFromConfig(makeConfig({ failure_action: "manual" }));
+    expect(httpTaskPayload(manual).failure_action).toBe("manual");
   });
 
   it("字段缺失时逐项兜底（老文件/手工编辑的 JSON 也要能打开）", () => {
@@ -174,6 +260,24 @@ describe("httpTaskDraftGaps", () => {
   it("请求地址必填（缺了必然登不上）", () => {
     const gaps = httpTaskDraftGaps({ ...emptyHttpTaskDraft(), id: "dorm", url: "   " });
     expect(gaps).toEqual(["请求地址"]);
+  });
+
+  it("有内容但不能发送的旧式地址和可选地址也在草稿里提示", () => {
+    const draft = {
+      ...emptyHttpTaskDraft(),
+      id: "dorm",
+      url: "ftp://portal/login",
+      auth_url: "/portal",
+      pre_request_url: "http://",
+      pre_request_extract: "json:token",
+      logout_url: "file:///logout",
+    };
+    expect(httpTaskDraftGaps(draft)).toEqual([
+      "认证页面地址（需为带主机名的 http/https URL）",
+      "请求地址（需为带主机名的 http/https URL）",
+      "前置请求地址（需为带主机名的 http/https URL）",
+      "退出登录地址（需为带主机名的 http/https URL）",
+    ]);
   });
 
   it("新建草稿的网关占位地址不触发自动保存，填入真实地址后可保存", () => {

@@ -98,6 +98,7 @@ custom
 navigate
 goto
 assert_text
+manual_check
 upload_file
 wait_for_selector
 ```
@@ -398,6 +399,16 @@ OCR 模型冷启动与 CPU 推理共享 OCR 总预算，避免模型加载和识
 ```
 
 `value` 必填；`selector` 可选，省略时等待页面正文包含指定文本。超时归类为断言失败。
+
+### 检查是否需要人工验证
+
+在提交登录表单后，可以增加 `manual_check` 步骤。它立即检查所选元素是否可见，或页面是否包含指定文字；命中时返回“需要人工操作”并停止自动重试，未命中则继续后续步骤。它不会自动完成短信、滑块或扫码。
+
+```json
+{ "id": "manual", "type": "manual_check", "value": "短信验证码" }
+```
+
+`selector` 与 `value` 至少填一个；同时填写时仅在该元素内搜索文字。若门户异步显示提示，应先加等待步骤。该步骤应保留默认的 `required: true`。
 
 ## 18. Frame / iframe
 

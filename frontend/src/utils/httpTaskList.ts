@@ -1,5 +1,5 @@
 /**
- * 直连任务列表的纯派生数据：行摘要、搜索过滤、方案绑定索引。
+ * HTTP 登录任务列表的纯派生数据：行摘要、搜索过滤、方案绑定索引。
  *
  * 抽成纯函数的理由：这三段都是「输入 → 输出」的映射，无状态、不碰 DOM，面板只负责
  * 渲染。前端没有组件测试环境（vite.config.ts 的 `environment: "node"`、无
@@ -42,7 +42,7 @@ function pickString(value: unknown): string {
  * 任务 ID → 绑定它的方案名索引。
  *
  * 数据源是 `ProfileSummary.active_http_task`（后端列表接口同步返回，无需额外请求）：
- * 直连任务与方案的引用关系只存这一个方向，故列表页要回答「这条任务被谁在用」只能
+ * HTTP 登录任务与方案的引用关系只存这一个方向，故列表页要回答「这条任务被谁在用」只能
  * 反向聚合。按方案名排序是为了皮儿顺序稳定——对象键序取决于后端返回顺序，同一份
  * 配置刷新两次不该让 pill 换位置。
  */
@@ -52,7 +52,7 @@ export function buildHttpTaskBindingIndex(
   const index = new Map<string, string[]>();
   for (const profile of Object.values(profiles)) {
     const taskId = pickString(profile?.active_http_task);
-    // 未绑定直连任务的方案不进索引（空/纯空白都算未绑定，与后端判定一致）
+    // 未绑定HTTP 登录任务的方案不进索引（空/纯空白都算未绑定，与后端判定一致）
     if (!taskId) continue;
     const displayName = pickString(profile?.name) || pickString(profile?.id);
     index.set(taskId, [...(index.get(taskId) ?? []), displayName]);

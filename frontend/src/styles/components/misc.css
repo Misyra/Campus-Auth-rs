@@ -66,10 +66,7 @@
  * 需要图标时把 <IconApp class="icon-sm"> 放成首个子元素，`.note svg` 已处理对齐。
  * 需要去掉下边距时加 --flush。
  *
- * 为什么不各写各的：`.wz-warn`（HttpLoginWizard）与 `.http-risk-note`（HttpTaskFields）
- * 此前**规则体逐字相同**，`.http-task-alert`（LoginChannelField）是同族的第三份
- * （只差 padding 8px 10px 与 align-items:center），`.browser-info-tip` 是同款的
- * accent 色调变体（只差色调与字号）。四份平行实现意味着改一处观感、其余三处不动。
+ * 任务编辑器和方案页共用这一组提示样式，避免各组件分别维护近似规则。
  *
  * 与"横幅"的分工：`.network-status-banner`（dashboard.css）与 `.detect-banner`
  * （profiles.css）带毛玻璃、图标块与更大的圆角，属另一档（页面级状态横幅），

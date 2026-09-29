@@ -1,7 +1,7 @@
 /**
  * 任务目录（模块级单例）：任务 + 脚本混合列表的单一拉取源。
  *
- * GET /api/tasks 一次返回三类条目（浏览器任务 + 脚本 + 直连任务），
+ * GET /api/tasks 一次返回三类条目（浏览器任务 + 脚本 + HTTP 登录任务），
  * 此前 useTasks / useScripts 各发一次请求各过滤一半，useUi.init 与每次 WS 重连
  * 都会发出两个一模一样的请求。本模块收敛为：
  * 单次拉取 + 单一 5 秒守卫 + 单一失败计数 + task_type/type 归一化函数，
@@ -54,7 +54,7 @@ const { toastOnly } = useToast();
  */
 let fetchEpoch = 0;
 
-/** 单次拉取混合列表并填充浏览器任务 / 脚本 / 直连任务三个过滤视图（force 语义与其他 fetch 一致） */
+/** 单次拉取混合列表并填充浏览器任务 / 脚本 / HTTP 登录任务三个过滤视图（force 语义与其他 fetch 一致） */
 async function fetchDirectory(force = false): Promise<void> {
   if (!fetchGuard.shouldFetch(force)) return;
   const mine = ++fetchEpoch;
@@ -97,7 +97,7 @@ async function fetchDirectory(force = false): Promise<void> {
  *
  * 取号必须对**整个目录**唯一，不能只看自己那一类：后端 `save_task` 写盘时会删掉
  * **另外两个桶**里同 id 的文件（那是给"用户主动改任务类型"清残留用的）。各面板若
- * 只看自己的列表取号，浏览器任务与直连任务都会从 `untitled_1` 起算，于是"新建第二类
+ * 只看自己的列表取号，浏览器任务与HTTP 登录任务都会从 `untitled_1` 起算，于是"新建第二类
  * 的第一个任务并改一下"就会静默删掉另一类那份文件。副本的 `_copy` 后缀同理。
  */
 export function allTaskIds(): Set<string> {

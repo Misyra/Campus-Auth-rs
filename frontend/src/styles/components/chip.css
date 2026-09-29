@@ -7,11 +7,7 @@
  *   表格行内密集    .chip--dense（更小一档，表格行高有限）
  *   弱化            .chip--muted
  *
- * 为什么必须放在全局而非 scoped：这套视觉此前在三个文件里各写一份，其中
- * `HttpTaskFields.vue` 的 `.http-chip` 与 `views/tasks/HttpTasksPanel.vue` 的 `.http-chip`
- * **规则体逐字相同**、与 `HttpLoginWizard.vue` 的 `.wz-chip` 也只差容器类的名字。
- * scoped 样式无法跨组件复用，于是每加一处新面板就得再抄一遍——收敛到这里后
- * 任何面板直接引用即可，无需再起 `xx-chip` 这样的新前缀。
+ * 全局词条可由任务列表和流程编辑器直接引用，避免在各组件重复定义 scoped 样式。
  *
  * 与 `.badge`（badge.css）的分工：`.badge` 是有语义色的小胶囊（成功/警告/类型），
  * 用于状态与分类；`.chip` 是**等宽取值**（占位符名字、函数名、HTTP 方法），

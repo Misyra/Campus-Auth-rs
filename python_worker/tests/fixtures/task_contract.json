@@ -110,6 +110,11 @@
       "timeout": 6000
     },
     {
+      "id": "s_manual_check",
+      "type": "manual_check",
+      "value": "短信验证码"
+    },
+    {
       "id": "s_upload_avatar",
       "type": "upload_file",
       "selector": "input[type=file]",

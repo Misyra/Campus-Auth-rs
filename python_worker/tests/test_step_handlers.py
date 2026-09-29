@@ -600,3 +600,71 @@ def test_assert_text_scopes_text_to_selected_element():
     assert page.selector == "#result"
     assert page.fake_locator.has_text == "登录成功"
     assert page.fake_locator.waited == ("visible", 500)
+
+
+def test_manual_check_reports_intervention_without_exposing_page_text():
+    """命中人工验证提示时报告终态；未命中则继续。"""
+    import asyncio
+
+    import pytest
+
+    from models import Outcome
+    from step_handlers import WorkerError, handle_manual_check
+
+    class FakeLocator:
+        def __init__(self, visible):
+            self.visible = visible
+
+        def filter(self, *, has_text):
+            self.searched = has_text
+            return self
+
+        @property
+        def first(self):
+            return self
+
+        async def is_visible(self):
+            return self.visible
+
+    class FakePage:
+        def __init__(self, visible):
+            self.target = FakeLocator(visible)
+
+        def locator(self, selector):
+            assert selector == "body"
+            return self.target
+
+    step = StepConfig.from_dict({"id": "manual", "type": "manual_check", "value": "短信验证码"})
+    asyncio.run(handle_manual_check(FakePage(False), step, StepContext(page=FakePage(False))))
+    page = FakePage(True)
+    with pytest.raises(WorkerError) as error:
+        asyncio.run(handle_manual_check(page, step, StepContext(page=page)))
+    assert error.value.outcome == Outcome.MANUAL_REQUIRED.value
+    assert "短信验证码" not in error.value.message
+
+
+def test_manual_check_stops_even_when_step_marked_optional():
+    """人工验证不能被普通非必须步骤的容错逻辑吞掉。"""
+    import asyncio
+
+    from playwright_worker import run_steps
+
+    class FakeLocator:
+        def filter(self, *, has_text):
+            return self
+
+        @property
+        def first(self):
+            return self
+
+        async def is_visible(self):
+            return True
+
+    class FakePage:
+        def locator(self, selector):
+            return FakeLocator()
+
+    page = FakePage()
+    step = StepConfig.from_dict({"id": "manual", "type": "manual_check", "value": "短信验证码", "required": False})
+    result = asyncio.run(run_steps(page, [step], StepContext(page=page)))
+    assert result.outcome == Outcome.MANUAL_REQUIRED.value

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 脚本面板：**列表页 + 二级编辑页**（方案 G 终稿，自动保存模式）。
  *
- * 与浏览器任务 / 直连任务面板同构：列表态整页脚本表格（拖拽柄 / 名称 / ID /
+ * 与浏览器任务 / HTTP 登录任务面板同构：列表态整页脚本表格（拖拽柄 / 名称 / ID /
  * 描述 / 执行程序 / 最近修改 / 操作），点行或「新建脚本」进入编辑态，编辑器独占
  * 全宽、面包屑返回，两态由 `?task=<id>` 表达（刷新与深链直达编辑态）。
  *
@@ -19,6 +19,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
 import { useHttpTasks } from "@/composables/useHttpTasks";
+import { useRepoImport } from "@/composables/useRepoImport";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
 import { useDragSort } from "@/utils/drag";
 import { autosaveLabel } from "@/utils/autosave";
@@ -49,8 +50,9 @@ const {
   loadScriptTemplate,
   onBinarySelectChange,
 } = useScripts();
+const repo = useRepoImport();
 
-// B1：拖拽排序复用 useDragSort——本列表（脚本）重排，浏览器任务 / 脚本 / 直连任务
+// B1：拖拽排序复用 useDragSort——本列表（脚本）重排，浏览器任务 / 脚本 / HTTP 登录任务
 // 三组顺序均随请求全量持久化（后端 order 接口整体替换，漏传的一组会被清空）
 const { tasks: browserTasks } = useTasks();
 const { httpTasks } = useHttpTasks();
@@ -222,6 +224,9 @@ onMounted(async () => {
         <IconApp name="upload" class="icon-sm" />
         导入
       </button>
+      <button type="button" class="btn btn-sm" title="从云端仓库导入脚本任务" @click="repo.showRepoImport('script')">
+        <IconApp name="download" class="icon-sm" />从仓库导入
+      </button>
       <button type="button" class="btn btn-sm btn-primary" @click="onNewScript">
         <IconApp name="plus" class="icon-sm" />
         新建脚本
@@ -264,6 +269,9 @@ onMounted(async () => {
                   </button>
                   <button type="button" class="btn btn-sm" @click="onImportScript">
                     <IconApp name="upload" class="icon-sm" />导入
+                  </button>
+                  <button type="button" class="btn btn-sm" @click="repo.showRepoImport('script')">
+                    <IconApp name="download" class="icon-sm" />从仓库导入
                   </button>
                 </div>
               </div>
@@ -507,6 +515,7 @@ onMounted(async () => {
               <IconApp :name="runningIds.has(currentId) ? 'refresh' : 'play'" class="icon-sm" :class="{ spin: runningIds.has(currentId) }" />
               {{ runningIds.has(currentId) ? '运行中…' : '立即运行' }}
             </button>
+            <p class="tsk-side-hint">「立即运行」只测试脚本进程，不注入登录方案的 CAMPUS_* 凭据，也不做登录后网络验证。登录效果请在「方案」页测试。</p>
             <dl class="tsk-kv">
               <dt>调度</dt>
               <dd><span class="tsk-side-hint">在「定时任务」里引用本脚本才会自动执行</span></dd>
@@ -545,7 +554,7 @@ onMounted(async () => {
               非 0 = 按方案的重试策略重发（次数见「设置 · 检测」的「最大重试次数」）。
             </p>
             <p class="tsk-side-hint">
-              从文件导入：点列表页的「导入」，内容直接进编辑器并自动保存；覆盖同名脚本前会先确认。
+              可从文件或仓库导入。仓库脚本会在确认前显示完整代码；导入后请检查方案绑定与目标地址。
             </p>
             <p class="tsk-side-hint">默认超时 60 秒，退出码 0 视为成功；stderr 输出不影响判定。</p>
             <p class="tsk-side-hint">脚本内容上限 100 KB。</p>

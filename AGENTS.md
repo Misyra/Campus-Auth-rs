@@ -301,7 +301,7 @@ Conventional Commits，中文描述：
 
 - **脚本渠道复用 `TaskExecutor`，不要另写一套进程执行**：`login/script_login.rs` 经 `TaskExecutor::execute_script_with_env`（= 任务页「立即运行」那条路径 + 叠加 `CAMPUS_*` 环境变量）跑脚本。另起一套会让解释器回退、路径约束、按任务串行、超时与进程树回收在两处各自演化
 - 脚本渠道的凭据只经环境变量下发（`CAMPUS_USERNAME` / `CAMPUS_PASSWORD` / `CAMPUS_ISP` / `CAMPUS_AUTH_URL`，见 `script_login::login_env`）：脚本任务**不做** `{{USERNAME}}` 模板替换（那是浏览器任务在 Worker 侧的变量解析）。四个名字改动必须同步 `docs/guides/custom-script-guide.md` 与前端 `loginChannel.ts` 的 `SCRIPT_LOGIN_ENV_VARS`（有测试钉住）
-- **成败判定是退出码**：`0` 视为本次尝试成功，但 `worker_config` 必须是 `{}`——这样 `has_explicit_success_condition()` 恒为 false，登录后网络验证兜底才生效（"脚本说成功但没登上"不会被记成成功）。非 0 用 `Outcome::AssertionFailed`（可重试、**不**回收 Worker），与直连「未命中成功标识」同一口径
+- **成败判定是退出码**：`0` 视为本次尝试成功，但 `worker_config` 必须是 `{}`——这样 `has_explicit_success_condition()` 恒为 false，登录后网络验证兜底才生效（"脚本说成功但没登上"不会被记成成功）。`2` 为 `ManualRequired`、`3` 为 `InvalidCredential`，两者终态停止；其他非 0 为 `AssertionFailed`（可重试、**不**回收 Worker）
 - 脚本失败**不得**触发 Worker 回收：`should_force_recycle` 的判定点必须同时受 `uses_bridge` 保护，否则一次脚本失败会去杀另一条在跑的浏览器登录
 - 三条保存路径（`POST` / `PUT /api/profiles/{id}`、`PATCH /api/config`）共用 `validate_login_task_binding`：直连与脚本渠道都**没有内置兜底任务**，未绑定或绑错类型必须在保存时拦下（放过去等于把配置错误伪装成运行错误）
 

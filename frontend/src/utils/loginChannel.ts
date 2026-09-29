@@ -1,22 +1,22 @@
 /**
- * 登录渠道（浏览器自动化 / 直连请求 / 自定义脚本）展示映射。
+ * 登录渠道（浏览器自动化 / HTTP 登录 / 自定义脚本）展示映射。
  *
  * 单一事实源：方案列表卡徽标、直连面板标题、后续设置页与引导向导的分流文案
  * 均由此派生，避免同一枚举在多处各写一套中文标签而漂移。
  */
 
-import type { HttpLoginMethod, HttpSuccessCheck, LoginChannel } from "../api/types";
+import type { HttpFailureAction, HttpLoginMethod, HttpSuccessCheck, LoginChannel } from "../api/types";
 
 /** 登录渠道 → 用户可见标签 */
 export function loginChannelLabel(channel: LoginChannel | string | undefined): string {
-  if (channel === "http") return "直连请求";
+  if (channel === "http") return "HTTP 登录";
   if (channel === "script") return "自定义脚本";
   return "浏览器自动化";
 }
 
 /** 登录渠道 → 列表卡等紧凑场景的短标签 */
 export function loginChannelShortLabel(channel: LoginChannel | string | undefined): string {
-  if (channel === "http") return "直连请求";
+  if (channel === "http") return "HTTP 登录";
   if (channel === "script") return "脚本";
   return "浏览器";
 }
@@ -26,7 +26,7 @@ export function loginChannelShortLabel(channel: LoginChannel | string | undefine
  *
  * 与标签同处一地：换了图标名或加了渠道，列表卡与其它入口不必各自去猜。
  * 渠道卡（向导 / 方案页）与本函数共用同一套图标，保证"同概念同图形"：
- * 浏览器自动化 = 浏览器窗口 + 光标，直连请求 = 纸飞机（发送请求）。
+ * 浏览器自动化 = 浏览器窗口 + 光标，HTTP 登录 = 纸飞机（发送请求）。
  * 返回类型收窄成字面量联合而非 `string`——`IconApp` 的 `name` 是注册表键的联合，
  * 返回 `string` 会在每个宿主处编译不过。
  */
@@ -51,6 +51,8 @@ export function httpTestOutcomeLabel(outcome: string | undefined): string {
       return "请求判定成功";
     case "invalid_credential":
       return "门户拒绝凭据";
+    case "manual_required":
+      return "需要人工操作";
     case "assertion_failed":
       return "未命中成功标识";
     case "network_error":
@@ -64,7 +66,7 @@ export function httpTestOutcomeLabel(outcome: string | undefined): string {
   }
 }
 
-/** 直连请求方法选项（CustomSelect 消费） */
+/** HTTP 登录方法选项（CustomSelect 消费） */
 export const HTTP_METHOD_OPTIONS: Array<{ value: HttpLoginMethod; label: string }> = [
   { value: "GET", label: "GET" },
   { value: "POST", label: "POST" },
@@ -92,6 +94,13 @@ export const HTTP_CERT_POLICY_OPTIONS: Array<{ value: HttpCertPolicy; label: str
 export const HTTP_SUCCESS_CHECK_OPTIONS: Array<{ value: HttpSuccessCheck; label: string }> = [
   { value: "network", label: "网络检测" },
   { value: "response", label: "响应关键字" },
+];
+
+/** 命中失败关键字后的动作；旧任务缺省按凭据错误立即停止。 */
+export const HTTP_FAILURE_ACTION_OPTIONS: Array<{ value: HttpFailureAction; label: string }> = [
+  { value: "credential", label: "账号或密码错误，停止重试" },
+  { value: "retry", label: "临时失败，按策略重试" },
+  { value: "manual", label: "需要人工验证，停止重试" },
 ];
 
 /**
@@ -135,11 +144,13 @@ export function certPolicyHint(policy: HttpCertPolicy): string {
 export function httpTestOutcomeHint(outcome: string | undefined): string {
   switch (outcome) {
     case "success":
-      // 文案保持"上下文中立"：测试入口有两个（直连任务编辑器 / 方案编辑器），
+      // 文案保持"上下文中立"：测试入口有两个（HTTP 登录任务编辑器 / 方案编辑器），
       // 说「保存方案」会让任务页的用户去点一个不存在的按钮
-      return "请求已按预期判定成功。保存后，方案里选中这个直连任务即会走直连，无需 Python 与浏览器。";
+      return "请求已按预期判定成功。保存后，方案里选中这个HTTP 登录任务即会走直连，无需 Python 与浏览器。";
     case "invalid_credential":
-      return "门户明确拒绝了这次请求：先确认账号密码正确；若门户要求密码加密或附加签名字段，请在直连任务的「凭据变换脚本」里按门户逻辑生成。";
+      return "门户明确拒绝了这次请求：先确认账号密码正确；若门户要求密码加密或附加签名字段，请在HTTP 登录任务的「凭据变换脚本」里按门户逻辑生成。";
+    case "manual_required":
+      return "门户要求人工完成验证码、短信或设备确认。请打开门户完成操作，再重新测试；程序不会反复重试。";
     case "assertion_failed":
       return "请求送达了，但没在响应里找到成功标识。请核对「成功关键字」是否与门户真实响应一致；若该门户响应总是 HTTP 200，必须填写成功与失败关键字，否则错误凭据也会被当成成功。";
     case "network_error":
@@ -173,7 +184,7 @@ export const HTTP_TEMPLATE_PLACEHOLDERS = [
  * 凭据变换脚本可用的内置函数（与执行器 `register_builtins` 注册的全局函数一一对应）。
  *
  * 这里是纯计算函数，无网络与文件访问；沙箱另有递归深度 64、循环 10 万次与
- * 500ms 墙钟上限。**新增内置函数时必须同步此表**，否则面板与向导会漏报，
+ * 2 秒墙钟上限（包括计算子进程启动）。**新增内置函数时必须同步此表**，否则面板与向导会漏报，
  * 用户只能靠试错发现（`loginChannel.test.ts` 锁定该清单）。
  */
 export const HTTP_CRYPTO_BUILTINS = [
@@ -181,6 +192,9 @@ export const HTTP_CRYPTO_BUILTINS = [
   "sha1(text)",
   "sha256(text)",
   "hmac_sha256(key, data)",
+  "hmac_md5(key, data)",
+  "srun_info(info_json, challenge)",
+  "shu_ruijie_password(password, mac)",
   "base64_encode(text)",
   "base64_decode(text)",
   "hex_encode(text)",
@@ -268,7 +282,7 @@ export function isCredentialExposedViaGet(
 /**
  * 该登录渠道是否需要 Python / 浏览器运行环境。
  *
- * 直连请求与自定义脚本都在 Rust 进程内完成登录（前者发 HTTP、后者起本地子进程），
+ * HTTP 登录由 Rust 主进程发请求（计算步骤起临时子进程），自定义脚本也起本地子进程，
  * 不拉起 Python Worker 与 Playwright，因此环境未就绪（python/worker/playwright
  * 任一缺失）对它们没有任何影响——仪表盘据此抑制「环境未就绪」横幅，避免免
  * Python/浏览器的用户被无意义的提示长期打扰。浏览器自动化需要该环境。
@@ -306,17 +320,17 @@ export function browserTaskOptions(
 }
 
 /**
- * 直连任务下拉选项。
+ * HTTP 登录任务下拉选项。
  *
  * 与浏览器任务不同，首项是显式的「未绑定」：直连没有可内置的兜底任务（门户地址
- * 因人而异），空值必须能被表达出来，否则用户没法把一个方案从直连任务上摘下来。
- * 未绑定的后果是直连登录直接失败，故文案讲清而不是留个空项。
+ * 因人而异），空值必须能被表达出来，否则用户没法把一个方案从HTTP 登录任务上摘下来。
+ * 未绑定的后果是HTTP 登录直接失败，故文案讲清而不是留个空项。
  */
 export function httpTaskOptions(
   tasks: Array<{ id: string; name?: string }>,
 ): Array<{ value: string; label: string }> {
   return [
-    { value: "", label: "未绑定（直连登录不可用）" },
+    { value: "", label: "未绑定（HTTP 登录不可用）" },
     ...tasks.map((t) => ({ value: t.id, label: t.name || t.id })),
   ];
 }
@@ -338,7 +352,7 @@ export function scriptTaskOptions(
 
 /** 渠道徽标的悬停说明（列在网络匹配标签旁，一句话讲清这个渠道怎么登） */
 export function loginChannelHint(channel: LoginChannel | string | undefined): string {
-  if (channel === "http") return "直连请求：在程序内发登录请求，不启动浏览器";
+  if (channel === "http") return "HTTP 登录：在程序内发登录请求，不启动浏览器";
   if (channel === "script") return "自定义脚本：由绑定的脚本任务完成登录，不启动浏览器";
   return "浏览器自动化：按任务步骤操作登录页";
 }
@@ -364,7 +378,7 @@ export const SCRIPT_LOGIN_CONTRACT_NOTE =
   `脚本从环境变量取凭据：${SCRIPT_LOGIN_ENV_VARS.map((v) => v).join(" / ")}` +
   `（脚本任务本身不做 {{USERNAME}} 这类模板替换）。\n\n` +
   `退出码 0 = 本次尝试成功，程序随后仍会做一次登录后网络验证来确认真登上了；` +
-  `非 0 = 本次尝试失败，按方案的重试策略重发，重试预算耗尽才判失败。\n\n` +
+  `退出码 2 = 需要人工操作，退出码 3 = 账号或密码错误；其他非 0 退出码按方案重试。\n\n` +
   `超时取脚本任务自己的「超时」设置；脚本的 stdout/stderr 末尾会写进登录历史，` +
   `其中出现的密码会被抹成 ***。`;
 

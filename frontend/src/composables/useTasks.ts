@@ -245,14 +245,14 @@ async function showTaskEditor(taskId: string): Promise<void> {
  * 没人改过的 `untitled_N.json`）。改成：首次**真实改动**触发自动保存时才创建文件
  * （`_isNew` 期间删除即放弃、导出走内存、调试运行禁用）。
  *
- * ID 仍是本地生成的 `untitled_N`（撞目录里的已有 id 时递增）：直连任务与浏览器
+ * ID 仍是本地生成的 `untitled_N`（撞目录里的已有 id 时递增）：HTTP 登录任务与浏览器
  * 任务的 ID 没有外部含义，不像脚本 ID 那样是文件名兼定时任务引用值，不必让用户先命名。
  */
 function createTask(): void {
   // 新建也是"换编辑对象"：先补发上一份草稿在途的改动（否则那半秒内的编辑静默丢失）
   void autosave.flush("switch");
   // 取号对**三类任务**唯一：后端写盘时会把另外两个桶里同 id 的文件删掉，只看本类列表
-  // 会让"浏览器任务与直连任务都叫 untitled_1"这种撞车静默删掉一份文件
+  // 会让"浏览器任务与HTTP 登录任务都叫 untitled_1"这种撞车静默删掉一份文件
   const existingIds = allTaskIds();
   let newId = "untitled_1";
   let counter = 2;

@@ -349,7 +349,7 @@ export interface RetryConfig {
 /**
  * 凭据字段集合（已不属于 `Config`）。
  *
- * 这些字段都是 `ProfileData` 的成员，仅在「配置方案」页编辑（直连任务的请求参数
+ * 这些字段都是 `ProfileData` 的成员，仅在「配置方案」页编辑（HTTP 登录任务的请求参数
  * 已独立成 `HttpTaskConfig`，不在此列）。`Config` 里曾有一份 `credentials` 投影
  * （由 `GET /api/config` 的扁平响应填充），使同一份数据有了两个可写入口，现已移除。
  */
@@ -367,9 +367,9 @@ export interface CredentialsConfig {
   /** 登录执行渠道 */
   login_channel: LoginChannel;
   /**
-   * 直连渠道绑定的直连任务 ID（空 = 未绑定）。
+   * 直连渠道绑定的HTTP 登录任务 ID（空 = 未绑定）。
    *
-   * 直连**没有内置兜底任务**（门户地址无法内置），故空值意味着直连登录会直接失败。
+   * 直连**没有内置兜底任务**（门户地址无法内置），故空值意味着HTTP 登录会直接失败。
    */
   active_http_task: string;
   /**
@@ -459,9 +459,9 @@ export interface ConfigResponse {
   auth_url: string;
   trigger_url: string;
   isp: string;
-  /** 活跃方案的登录渠道与直连任务绑定（属 Profile 域，非全局设置） */
+  /** 活跃方案的登录渠道与HTTP 登录任务绑定（属 Profile 域，非全局设置） */
   login_channel: LoginChannel;
-  /** 直连渠道绑定的直连任务 ID（空 = 未绑定；请求参数在任务里，不在本响应里） */
+  /** 直连渠道绑定的HTTP 登录任务 ID（空 = 未绑定；请求参数在任务里，不在本响应里） */
   active_http_task: string;
   /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本正文在任务里，不在本响应里） */
   active_script_task: string;
@@ -485,7 +485,7 @@ export interface SaveConfigPayload {
   updater: UpdaterConfig;
 }
 
-/** 登录渠道与直连请求方法 */
+/** 登录渠道与HTTP 登录方法 */
 export type LoginChannel = "browser" | "http" | "script";
 export type HttpLoginMethod = "GET" | "POST";
 
@@ -493,18 +493,21 @@ export type HttpLoginMethod = "GET" | "POST";
  * 直连 HTTPS 证书策略（三态）。
  *
  * `null` = 未设置，登录时跟随全局 `browser.ignore_https_errors`（默认 true，
- * 与浏览器渠道同口径）；`true`/`false` = 本直连任务显式覆盖。
+ * 与浏览器渠道同口径）；`true`/`false` = 本HTTP 登录任务显式覆盖。
  */
 export type HttpIgnoreHttpsErrors = boolean | null;
 
 /**
- * 直连登录的成败判定方式。
+ * HTTP 登录的成败判定方式。
  *
  * `"response"`（默认）= 响应关键字：命中成功关键字即成功（为空时退回 HTTP 2xx）；
  * `"network"` = 网络检测：响应体与状态码都不参与成功判定，登录请求发出且未命中
  * 失败关键字即交给登录后的网络检测判定（公网可达才算真成功）。
  */
 export type HttpSuccessCheck = "response" | "network";
+
+/** 直连失败关键字命中后的动作；旧任务缺省 credential。 */
+export type HttpFailureAction = "credential" | "retry" | "manual";
 
 /** 配置方案 */
 export interface Profile {
@@ -520,10 +523,10 @@ export interface Profile {
   active_task: string;
   login_channel: LoginChannel;
   /**
-   * 直连渠道绑定的直连任务 ID（空 = 未绑定）。
+   * 直连渠道绑定的HTTP 登录任务 ID（空 = 未绑定）。
    *
    * 与 `active_task` 同语义，但**没有内置兜底任务**：门户地址无法内置，故未绑定时
-   * 直连登录直接以明确原因失败（浏览器渠道则会回退到内置默认任务）。
+   * HTTP 登录直接以明确原因失败（浏览器渠道则会回退到内置默认任务）。
    */
   active_http_task: string;
   /**
@@ -538,7 +541,7 @@ export interface Profile {
 }
 
 /**
- * 直连登录的前置请求（`HttpTaskConfig.pre_request`）。
+ * HTTP 登录的前置请求（`HttpTaskConfig.pre_request`）。
  *
  * 先发一次请求、取出一个值（如 CSRF token），再发登录请求；登录请求的地址、请求头
  * 与请求体里用 `{name}` 引用这个值。取值方式目前只支持 `json:字段路径`。
@@ -558,7 +561,7 @@ export interface HttpPreRequest {
 }
 
 /**
- * 直连任务的动作请求（`HttpTaskConfig.logout_request`）：发了不判成败的附加请求。
+ * HTTP 登录任务的动作请求（`HttpTaskConfig.logout_request`）：发了不判成败的附加请求。
  *
  * 与 `HttpPreRequest` 的分工：前置请求**取值**（取不到即登录流程终态失败），
  * 动作请求**触达**（门户收没收到都照常走主流程）。退出登录正是这一类——强制下线
@@ -576,13 +579,42 @@ export interface HttpActionRequest {
   wait_secs: number;
 }
 
+/** HTTP 登录流程中的一个顺序步骤；计算步骤的变量可供后续请求引用。 */
+export interface HttpExtractRule {
+  source: string;
+  name: string;
+}
+
+export interface HttpFlowStep {
+  id: string;
+  name: string;
+  kind: "request" | "transform";
+  method: HttpLoginMethod;
+  url: string;
+  headers: string;
+  body: string;
+  extract: string;
+    extract_as: string;
+    extracts: HttpExtractRule[];
+    stop_on_redirect: boolean;
+  script: string;
+  on_error: "stop" | "continue";
+  wait_secs: number;
+}
+
 /**
- * 直连任务配置（`tasks/http/<id>.json`，`type: "http"`）。
+ * HTTP 登录任务配置（`tasks/http/<id>.json`，`type: "http"`）。
  *
  * 只描述**请求形状**：账号、密码与认证地址仍属方案——同一门户的不同账号共用一份
- * 直连任务，这正是把它从方案里独立出来的意义。仓库分享的也是这个对象。
+ * HTTP 登录任务，这正是把它从方案里独立出来的意义。仓库分享的也是这个对象。
  */
 export interface HttpTaskConfig {
+  /** 旧任务缺省为 1；有序步骤任务为 2。 */
+  schema_version?: number;
+  /** 有序步骤；非空时取代旧版的固定请求链。 */
+  steps?: HttpFlowStep[];
+  /** 结果判断引用的请求步骤 ID；留空时使用最后一个请求。 */
+  result_step_id?: string;
   task_id: string;
   name: string;
   description: string;
@@ -603,6 +635,8 @@ export interface HttpTaskConfig {
   body: string;
   success_pattern: string;
   failure_pattern: string;
+  /** 凭据错误立即停止，或临时失败按方案策略重试。 */
+  failure_action?: HttpFailureAction;
   /** 凭据变换脚本（JS `transform(ctx)`；空 = 不变换） */
   crypto_script: string;
   /**
@@ -661,7 +695,7 @@ export interface ProfileImportResult {
   /**
    * 分享文件里带着旧版「方案内联直连配置」（v9 及以前的 `http_*` 字段）时为 true。
    *
-   * v10 起直连参数只存在于直连任务里，后端会忽略这些残留字段——必须让用户知道，
+   * v10 起直连参数只存在于HTTP 登录任务里，后端会忽略这些残留字段——必须让用户知道，
    * 否则会以为导入后直连开箱可用。
    */
   legacy_http_config_dropped?: boolean;
@@ -701,9 +735,9 @@ export interface ProfileUpdatePayload extends Partial<Profile> {
  * 与正式登录同口径，避免「测试能过、自动登录用了另一个地址」的错位。
  */
 export interface HttpTaskTestPayload {
-  /** 已保存的直连任务 ID；与 `task` 二选一，`task` 优先 */
+  /** 已保存的HTTP 登录任务 ID；与 `task` 二选一，`task` 优先 */
   task_id?: string;
-  /** 编辑器内尚未保存的直连任务草稿 */
+  /** 编辑器内尚未保存的HTTP 登录任务草稿 */
   task?: HttpTaskConfig;
   /** 凭据（以及认证地址回退）的来源方案（可省） */
   profile_id?: string;
@@ -713,8 +747,25 @@ export interface HttpTaskTestPayload {
   fetch_page: boolean;
 }
 
-/** 直连登录测试结果（请求内容与响应片段均已由后端脱敏） */
+/** HTTP 登录测试结果（请求内容与响应片段均已由后端脱敏） */
 export interface HttpLoginTestResult {
+  /** 有序流程逐步骤诊断；旧任务为空。 */
+  steps?: Array<{
+    id: string;
+    name: string;
+    kind: "request" | "transform";
+    outcome: "success" | "ignored" | "failed";
+    message: string;
+    /** 本步骤生成的变量名；值不回传。 */
+    produced_vars?: string[];
+    rendered_url: string;
+    rendered_headers: string;
+    rendered_body: string;
+    status: number | null;
+    response_headers: string;
+    response_snippet: string;
+    duration_ms: number;
+  }>;
   /** 网络检测模式只证明请求已发送，正式登录后的连通性尚未验证。 */
   verification_pending: boolean;
   rendered_url: string;
@@ -732,6 +783,7 @@ export interface HttpLoginTestResult {
     | "assertion_failed"
     | "captcha_failed"
     | "invalid_credential"
+    | "manual_required"
     | "network_error"
     | "unknown_error";
   message: string;
@@ -746,7 +798,7 @@ export interface ProfileSummary {
   username: string;
   isp: string;
   active_task: string;
-  /** 直连渠道绑定的直连任务 ID（空 = 未绑定）；任务页据此标出"这条任务被谁在用" */
+  /** 直连渠道绑定的HTTP 登录任务 ID（空 = 未绑定）；任务页据此标出"这条任务被谁在用" */
   active_http_task: string;
   /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定）；用途同 `active_http_task` */
   active_script_task: string;
@@ -809,7 +861,7 @@ export interface OcrStatus {
   runtime_ocr?: boolean | null;
 }
 
-/** 任务（浏览器任务 / 脚本 / 直连任务的列表项） */
+/** 任务（浏览器任务 / 脚本 / HTTP 登录任务的列表项） */
 export interface TaskItem {
   id: string;
   name: string;
@@ -818,7 +870,7 @@ export interface TaskItem {
   task_type?: string;
   /** 任务地址：浏览器=登录页，直连=请求地址；摘要自带，任务列表行直接显示 */
   url?: string;
-  /** 直连任务的请求方法（GET/POST）；非直连任务缺省 */
+  /** HTTP 登录任务的请求方法（GET/POST）；非HTTP 登录任务缺省 */
   http_method?: string;
   /** 任务文件最近修改时间（UTC RFC3339）；读不到时缺省——列表「最近修改」列数据源 */
   modified_at?: string;
@@ -830,7 +882,7 @@ export interface TaskSummary {
   id: string;
   name: string;
   description: string;
-  /** 任务类型：browser / script / http（http = 直连任务） */
+  /** 任务类型：browser / script / http（http = HTTP 登录任务） */
   task_type: string;
 }
 
@@ -862,7 +914,7 @@ export interface RepoTask {
   /**
    * 条目类型（`browser` / `script` / `http`）。
    *
-   * 缺省视为 `browser`：直连任务加入索引之前发布的老条目没有这个字段，
+   * 缺省视为 `browser`：HTTP 登录任务加入索引之前发布的老条目没有这个字段，
    * 把缺省当 browser 才能让同一个仓库同时承载两类条目而不破坏既有条目。
    */
   type?: string;
@@ -977,6 +1029,8 @@ export interface ScheduledTaskHistoryItem {
 export interface LoginHistoryItem {
   timestamp: string;
   source: string;
+  /** 实际执行渠道；旧记录及执行前失败的记录缺省。 */
+  channel?: LoginChannel | null;
   profile_id: string;
   result: "success" | "failed" | "cancelled";
   message: string;

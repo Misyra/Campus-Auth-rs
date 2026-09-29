@@ -50,7 +50,7 @@ async function timeSource(kind: TaskRepoKind, source: TaskRepoSourceId): Promise
  * 需要用户手填地址，不属于"自动选一个可用源"的范畴，向导不测它。
  */
 export async function measureRepoSources(kind: TaskRepoKind): Promise<RepoSourceTiming[]> {
-  const mirrors = TASK_REPO_SOURCES.filter((s) => s.indexUrls).map((s) => s.id);
+  const mirrors = TASK_REPO_SOURCES.filter((s) => s.indexUrl).map((s) => s.id);
   return Promise.all(mirrors.map((source) => timeSource(kind, source)));
 }
 

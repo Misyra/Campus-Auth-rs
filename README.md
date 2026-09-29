@@ -29,7 +29,7 @@
 </div>
 
 检测到校园网强制门户（captive portal）时自动打开认证页面并完成登录：支持多 Profile 自动匹配、
-浏览器自动化与直连请求两种登录方式、验证码 OCR、cron 定时任务、系统托盘与内置 Web 控制台。
+浏览器自动化、HTTP 登录与自定义脚本三种登录方式，以及验证码 OCR、cron 定时任务、系统托盘与内置 Web 控制台。
 
 Rust 重写版为**便携式单二进制 + Python 子进程**：网络监测、登录状态机、调度、配置、Web API、
 系统托盘等控制平面全部在 Rust 侧；浏览器自动化按需拉起 Python Worker（Playwright），空闲自动
@@ -41,7 +41,7 @@ Rust 重写版为**便携式单二进制 + Python 子进程**：网络监测、�
 
 - **自动认证**：断网 / 被劫持时自动触发登录，支持重试、冷却与失败去重提醒
 - **多 Profile**：按网关 IP / WiFi SSID 自动匹配（约束条件多者优先），支持手动切换
-- **三种登录方式**：浏览器自动化（Playwright）、直连请求（Rust 内直接发 HTTP，免 Python、免浏览器，见[直连登录指南](docs/guides/http-login-guide.md)）或自定义脚本（把登录整个交给绑定的本地脚本，见[自定义脚本指南](docs/guides/custom-script-guide.md)）
+- **三种登录方式**：浏览器自动化（Playwright）、HTTP 登录（Rust 内按可编辑步骤发送请求，免 Python、免浏览器，见[HTTP 登录指南](docs/guides/http-login-guide.md)）或自定义脚本（把登录整个交给绑定的本地脚本，见[自定义脚本指南](docs/guides/custom-script-guide.md)）
 - **验证码识别**：OCR 识别登录验证码，识别失败自动重试整个流程
 
 **自动化**
@@ -55,7 +55,7 @@ Rust 重写版为**便携式单二进制 + Python 子进程**：网络监测、�
 - **Web 控制台**：内置 Vue 3 Web UI，状态查看、任务编辑、日志与实时 WebSocket 推送
 - **系统托盘**：常驻托盘；首行为状态行（引擎 · 网络 · 登录态，运行中高亮、未运行灰化），提供启动 / 停止监测、手动登录、打开控制台、退出
 - **运行模式预设**：「日常使用」与「排查问题」两套预设一键切换，确认前列出具体改动项
-- **方案导入导出**：认证方案（认证地址、匹配规则等）导出 JSON 分享，导入前展示内容与脚本原文，凭据不随包导出（直连请求参数在「任务」页的直连任务里，随任务导出 / 任务仓库分享）
+- **方案导入导出**：认证方案（认证地址、匹配规则等）导出 JSON 分享，导入前展示内容与脚本原文，凭据不随包导出（HTTP 登录流程在「任务」页的 HTTP 登录任务里，随任务导出 / 任务仓库分享）
 
 **运维**
 
@@ -71,7 +71,7 @@ Rust 重写版为**便携式单二进制 + Python 子进程**：网络监测、�
 <img src="docs/assets/preview-profiles.webp" alt="认证方案编辑" width="49.5%" />
 <img src="docs/assets/preview-tasks.webp" alt="任务管理" width="49.5%" />
 
-<p><sub>仪表盘（运行状态 · 快捷操作 · 实时日志） · 认证方案编辑 · 任务管理（浏览器任务 / 直连任务 / 脚本 / 定时任务 / AI 生成）</sub></p>
+<p><sub>仪表盘（运行状态 · 快捷操作 · 实时日志） · 认证方案编辑 · 任务管理（浏览器任务 / HTTP 登录任务 / 脚本 / 定时任务 / AI 生成）</sub></p>
 </div>
 
 ## 快速开始
@@ -157,9 +157,9 @@ docker run -d --name campus-auth --restart unless-stopped --stop-timeout 40 \
 - **Profile（认证方案）**：含认证地址、用户名 / 密码（AES-256-GCM 加密落盘）、网关 / SSID 匹配规则与关联任务，可在方案间手动切换
 - **登录方式**（每方案三选一）：
   - **浏览器渠道**：填写认证网址即直接使用，留空由浏览器跟随校园网重定向登录；支持「重定向检测」辅助判断是否需要填写
-  - **直连渠道**：Rust 内直接发 HTTP 请求完成认证，请求参数在「任务」页的**直连任务**里配置（可复用、可分享），支持占位符与沙箱凭据变换脚本，见 [docs/guides/http-login-guide.md](docs/guides/http-login-guide.md)
+  - **HTTP 登录渠道**：Rust 内按可编辑流程发送 HTTP 请求完成认证，请求与计算步骤在「任务」页的 **HTTP 登录任务** 里配置（可复用、可分享），支持占位符、响应取值与沙箱计算脚本，见 [docs/guides/http-login-guide.md](docs/guides/http-login-guide.md)
   - **脚本渠道**：登录整个交给绑定的本地脚本任务执行，凭据经 `CAMPUS_USERNAME` 等环境变量下发给脚本（退出码 0 即本次成功，之后仍有网络验证兜底），见 [docs/guides/custom-script-guide.md](docs/guides/custom-script-guide.md)
-- **任务**：浏览器任务（JSON 步骤序列）、直连任务（直连登录的请求参数）与本地脚本任务三类；浏览器与脚本任务可被定时调度，直连任务用「发送测试请求」验证；内置任务录制器（油猴脚本）在浏览器上录制点选操作并整理成 AI 提示词，由大模型生成任务 JSON 后导入
+- **任务**：浏览器任务（JSON 步骤序列）、HTTP 登录任务（有序请求与计算步骤）与本地脚本任务三类；浏览器与脚本任务可被定时调度，HTTP 登录任务用「发送测试请求」验证；内置任务录制器（油猴脚本）在浏览器上录制点选操作并整理成 AI 提示词，由大模型生成任务 JSON 后导入
 - **更新**：设置页选择通道 `stable`（正式版）/ `prerelease`（测试版）/ `all`（全通道最新），`auto_check_enabled` 为总开关；也支持手动更新——将安装包放入 `update/` 目录，或在更新页直接选择安装包
 
 ## 文档
@@ -171,7 +171,7 @@ docker run -d --name campus-auth --restart unless-stopped --stop-timeout 40 \
 | [任务使用手册](docs/guides/task-manual.md) | 任务的日常使用（存储位置、关联方案、调度） |
 | [浏览器任务编写指南](docs/guides/task-writing-guide.md) | 浏览器任务 JSON 的步骤类型与字段语义 |
 | [自定义脚本指南](docs/guides/custom-script-guide.md) | 本地脚本任务的编写与执行 |
-| [直连登录指南](docs/guides/http-login-guide.md) | HTTP 直连登录的参数配置 |
+| [HTTP 登录指南](docs/guides/http-login-guide.md) | HTTP 登录的步骤与结果判断配置 |
 | [项目介绍演示](docs/promo/index.html) | 15 页可放映的图文介绍（点击翻页或自动播放，纯 HTML/CSS/JS/SVG 无构建）；分镜与旁白讲稿见 [script.html](docs/promo/script.html) |
 | [用户更新日志](docs/updatelog.md) / [开发更改日志](docs/changelog.md) / [已知问题](docs/known-issues.md) | 版本变化与遗留问题 |
 

@@ -77,11 +77,11 @@ pub async fn create_task(
         // 直连任务：这里只建最小骨架（地址 + 名称），请求头/体/判定关键字/脚本等
         // 由任务编辑器随后补齐。地址允许先留空——save_task 的校验只要求 http 任务
         // 的地址在**非空时**必须合法，占位保存后再填也不报错。
-        Some("http") => crate::tasks::TaskKind::Http(crate::tasks::HttpTaskConfig {
+        Some("http") => crate::tasks::TaskKind::Http(Box::new(crate::tasks::HttpTaskConfig {
             common,
             url: body.url.unwrap_or_default(),
             ..Default::default()
-        }),
+        })),
         Some(other) => {
             return Err(ApiError::BadRequest(format!(
                 "未知任务类型 kind: {other}（支持 browser / script / http）"

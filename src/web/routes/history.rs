@@ -128,6 +128,7 @@ mod tests {
     use chrono::TimeZone;
     use tower::ServiceExt; // oneshot
 
+    use crate::config::LoginChannel;
     use crate::login::{LoginHistoryEntry, LoginSource};
 
     /// 内存 HistoryStore：handler 级单测无需磁盘与完整 ServiceContainer（M1）
@@ -175,6 +176,7 @@ mod tests {
         LoginHistoryEntry {
             timestamp: Local.with_ymd_and_hms(2026, 8, 17, 12, ts_min, 0).unwrap(),
             source: LoginSource::Manual,
+            channel: Some(LoginChannel::Http),
             profile_id: "default".into(),
             result,
             message: "test".into(),
@@ -224,6 +226,7 @@ mod tests {
         // success 计算字段
         assert_eq!(data[0]["success"], false);
         assert_eq!(data[1]["success"], true);
+        assert_eq!(data[1]["channel"], "http");
     }
 
     /// 分页：total 反映 limit 截断后的条目数，首页返回最新条目

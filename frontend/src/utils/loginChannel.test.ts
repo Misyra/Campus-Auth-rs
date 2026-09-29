@@ -69,7 +69,7 @@ describe("certPolicy 三态映射", () => {
 describe("loginChannelLabel", () => {
   it("浏览器、直连与脚本各自有稳定中文标签", () => {
     expect(loginChannelLabel("browser")).toBe("浏览器自动化");
-    expect(loginChannelLabel("http")).toBe("直连请求");
+    expect(loginChannelLabel("http")).toBe("HTTP 登录");
     expect(loginChannelLabel("script")).toBe("自定义脚本");
   });
 
@@ -79,7 +79,7 @@ describe("loginChannelLabel", () => {
   });
 
   it("紧凑标签与完整标签对 http 一致、对 browser 更短", () => {
-    expect(loginChannelShortLabel("http")).toBe("直连请求");
+    expect(loginChannelShortLabel("http")).toBe("HTTP 登录");
     expect(loginChannelShortLabel("browser")).toBe("浏览器");
     expect(loginChannelShortLabel("script")).toBe("脚本");
   });
@@ -111,6 +111,8 @@ describe("脚本登录渠道的契约文案", () => {
       expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain(key);
     }
     expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("退出码 0");
+    expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("退出码 2");
+    expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("退出码 3");
     expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("网络验证");
     expect(SCRIPT_LOGIN_CONTRACT_NOTE).toContain("***");
   });
@@ -128,6 +130,8 @@ describe("httpTestOutcomeLabel", () => {
   it("直连路径可能产生的 outcome 均有专门文案", () => {
     expect(httpTestOutcomeLabel("success")).toBe("请求判定成功");
     expect(httpTestOutcomeLabel("invalid_credential")).toBe("门户拒绝凭据");
+    expect(httpTestOutcomeLabel("manual_required")).toBe("需要人工操作");
+    expect(httpTestOutcomeHint("manual_required")).toContain("人工");
     expect(httpTestOutcomeLabel("assertion_failed")).toBe("未命中成功标识");
     expect(httpTestOutcomeLabel("network_error")).toBe("请求未送达");
     expect(httpTestOutcomeLabel("unknown_error")).toBe("配置或脚本错误");
@@ -146,10 +150,10 @@ describe("HTTP_METHOD_OPTIONS", () => {
 });
 
 describe("channelNeedsRuntimeEnvironment", () => {
-  // 仪表盘据此抑制「环境未就绪」横幅：直连请求与自定义脚本都在 Rust 进程内
+  // 仪表盘据此抑制「环境未就绪」横幅：HTTP 登录与自定义脚本都在 Rust 进程内
   // 完成登录（前者发 HTTP、后者起子进程），不拉起 Python Worker 与浏览器；
   // 浏览器自动化必须依赖该环境
-  it("直连请求不需要运行环境", () => {
+  it("HTTP 登录不需要运行环境", () => {
     expect(channelNeedsRuntimeEnvironment("http")).toBe(false);
   });
 
@@ -175,6 +179,7 @@ describe("httpTestOutcomeHint", () => {
     const hinted = [
       "success",
       "invalid_credential",
+      "manual_required",
       "assertion_failed",
       "network_error",
       "unknown_error",
@@ -260,6 +265,9 @@ describe("HTTP_CRYPTO_BUILTINS", () => {
       "sha1(text)",
       "sha256(text)",
       "hmac_sha256(key, data)",
+      "hmac_md5(key, data)",
+      "srun_info(info_json, challenge)",
+      "shu_ruijie_password(password, mac)",
       "base64_encode(text)",
       "base64_decode(text)",
       "hex_encode(text)",

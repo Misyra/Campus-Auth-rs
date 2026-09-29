@@ -4,7 +4,7 @@ import IconApp from "@/components/common/IconApp.vue";
 // 路由驱动高亮。导航按「配置对象」组织而非功能清单——每项对应唯一的数据归属：
 //   仪表盘 = 状态总览
 //   方案   = ProfileData（账号/认证/匹配规则/登录方式，保存走 /api/profiles/{id}）
-//   任务   = tasks/（浏览器任务/直连任务/脚本/定时/AI 生成，保存走 /api/tasks|/api/scripts）
+//   任务   = tasks/（浏览器任务/HTTP 登录任务/脚本/定时/AI 生成，保存走 /api/tasks|/api/scripts）
 //   设置   = GlobalConfig（检测/浏览器/环境/系统/网络/外观，全局保存栏）
 //   关于
 //
@@ -85,7 +85,7 @@ function navigate(name: string): void {
           :class="{ active: onTasks }"
           :aria-expanded="tasksExpanded"
           aria-controls="nav-tasks-children"
-          :title="tasksExpanded ? '任务（浏览器任务 / 直连任务 / 脚本 / 定时任务 / AI 生成）— 点击收起' : '任务（浏览器任务 / 直连任务 / 脚本 / 定时任务 / AI 生成）— 点击展开'"
+          :title="tasksExpanded ? '任务（浏览器任务 / HTTP 登录任务 / 脚本 / 定时任务 / AI 生成）— 点击收起' : '任务（浏览器任务 / HTTP 登录任务 / 脚本 / 定时任务 / AI 生成）— 点击展开'"
           @click="toggleTasks"
         >
           <IconApp name="file-text" class="nav-icon" />

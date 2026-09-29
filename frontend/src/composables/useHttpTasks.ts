@@ -1,5 +1,5 @@
 /**
- * 直连任务（`type: "http"`）状态与操作（单例）——自动保存模式。
+ * HTTP 登录任务（`type: "http"`）状态与操作（单例）——自动保存模式。
  *
  * 结构与 `useTasks` 同构：列表来自 `useTaskDirectory` 单次拉取的 httpTasks 视图，
  * 编辑是平铺的 `HttpTaskDraft`（草稿 ⇄ 落盘载荷的互转与缺口校验见 `utils/httpTask`），
@@ -9,7 +9,7 @@
  * 缺口校验（id 形态 / 请求地址）只影响"是否值得发请求"，不再阻断编辑。
  * 「放弃未保存的修改？」确认链随草稿态一并退役。
  *
- * 没有「执行」入口：直连任务不经 Python Worker，验证路径是发一次测试请求
+ * 没有「执行」入口：HTTP 登录任务不经 Python Worker，验证路径是发一次测试请求
  * （见 `useHttpTaskTest`，凭据由宿主传入，本模块不关心）。
  */
 
@@ -25,7 +25,7 @@ import {
   httpTaskDraftFromConfig,
   httpTaskDraftGaps,
   httpTaskPayload,
-  HTTP_TASK_PLACEHOLDER_URL,
+  initialHttpFlowSteps,
   type HttpTaskDraft,
 } from "../utils/httpTask";
 import { useTaskDirectory } from "./useTaskDirectory";
@@ -37,20 +37,13 @@ import { useConfirm } from "./useConfirm";
 export type { HttpTaskDraft };
 
 /**
- * 新建直连任务种子的请求地址占位符。
- *
- * 界面占位值在缺口校验中视为空地址，填入真实 URL 前不会自动落盘。
- */
-export const NEW_TASK_PLACEHOLDER_URL = HTTP_TASK_PLACEHOLDER_URL;
-
-/**
  * 任务详情里的 config 在接口层是宽类型 `TaskConfig`（三类任务共用信封字段）。
- * 直连任务的实际形状由后端 `TaskKind::Http` 保证，此处按 `HttpTaskConfig` 读取，
+ * HTTP 登录任务的实际形状由后端 `TaskKind::Http` 保证，此处按 `HttpTaskConfig` 读取，
  * 缺字段由 `httpTaskDraftFromConfig` 逐项兜底，故转换是安全的。
  */
 type TaskConfigAsHttp = HttpTaskConfig & { type?: string };
 
-// 列表复用任务目录的混合拉取（含 5 秒守卫与首败通知），只取其中的直连任务视图
+// 列表复用任务目录的混合拉取（含 5 秒守卫与首败通知），只取其中的HTTP 登录任务视图
 const { httpTasks: tasks, fetchDirectory, allTaskIds } = useTaskDirectory();
 const httpTaskDraft = ref<HttpTaskDraft | null>(null);
 
@@ -152,7 +145,7 @@ const autosave = createAutosaveController<HttpTaskDraft>({
   },
   toast: toastOnly,
   logScope: "http-task",
-  detachedSubject: "上一份直连任务",
+  detachedSubject: "上一份HTTP 登录任务",
 });
 
 /** 关闭编辑器：在途 debounce 立即落盘（「退出即生效」承诺） */
@@ -166,7 +159,7 @@ function clearHttpTaskDraft(): void {
   autosave.clear();
 }
 
-/** 打开指定直连任务的编辑器（先取详情再转草稿）。 */
+/** 打开指定HTTP 登录任务的编辑器（先取详情再转草稿）。 */
 async function showHttpTaskEditor(taskId: string): Promise<void> {
   // 换编辑对象：上一份草稿在途的改动先补发（不 await——打开必须立刻发生；那一发
   // 以 detached 方式落盘，不会回头改这份新草稿的指纹）
@@ -177,8 +170,8 @@ async function showHttpTaskEditor(taskId: string): Promise<void> {
     const taskType = data?.summary?.task_type || config.type || "";
     if (taskType && taskType !== "http") {
       // 目录列表已按 task_type 过滤，正常流程不会走到这里；留着是为了深链/陈旧列表
-      // 传错 id 时给出可执行的指引，而不是把浏览器任务当直连任务渲染成一片空字段
-      toastOnly(false, "该任务不是直连任务，请切换到对应列表编辑");
+      // 传错 id 时给出可执行的指引，而不是把浏览器任务当HTTP 登录任务渲染成一片空字段
+      toastOnly(false, "该任务不是HTTP 登录任务，请切换到对应列表编辑");
       return;
     }
     const draft =
@@ -188,13 +181,13 @@ async function showHttpTaskEditor(taskId: string): Promise<void> {
     // 刚载入的草稿就是磁盘现状：基线对上了，用户不动它就不会发请求
     autosave.markBaseline(draft);
   } catch (error) {
-    frontendLogger.error("http-task", "加载直连任务失败: " + taskId, error);
-    toastOnly(false, extractApiError(error, "加载直连任务失败"));
+    frontendLogger.error("http-task", "加载HTTP 登录任务失败: " + taskId, error);
+    toastOnly(false, extractApiError(error, "加载HTTP 登录任务失败"));
   }
 }
 
 /**
- * 新建直连任务：只在内存里起一份草稿，**不落盘**。
+ * 新建HTTP 登录任务：只在内存里起一份草稿，**不落盘**。
  *
  * 与 `useTasks.createTask` 同口径（点开又退出不该在磁盘上留下一个没人改过的
  * `untitled_N.json`）：首次真实改动触发自动保存时才创建文件；`_isNew` 期间
@@ -217,7 +210,8 @@ function createHttpTask(): void {
   const draft: HttpTaskDraft = {
     ...emptyHttpTaskDraft(),
     id: newId,
-    url: NEW_TASK_PLACEHOLDER_URL,
+    _flowEnabled: true,
+    steps: initialHttpFlowSteps(),
   };
   httpTaskDraft.value = draft;
   // 种子即"磁盘现状"的替身：基线对上 → 没改过就不会落盘
@@ -229,10 +223,10 @@ async function deleteHttpTask(taskId: string): Promise<void> {
   const draft = httpTaskDraft.value;
   const discard = !!draft && draft._isNew === true && draft.id === taskId;
   const ok = await confirm({
-    title: discard ? "放弃新建直连任务" : "删除直连任务",
+    title: discard ? "放弃新建 HTTP 登录任务" : "删除 HTTP 登录任务",
     message: discard
-      ? "这个直连任务还没有保存过（改动后才会创建文件），放弃后当前内容会丢掉。"
-      : `确定要删除直连任务「${taskId}」吗？绑定它的方案将无法再用直连方式登录。`,
+      ? "这个 HTTP 登录任务还没有保存过（改动后才会创建文件），放弃后当前内容会丢掉。"
+      : `确定要删除 HTTP 登录任务「${taskId}」吗？绑定它的方案将无法再登录。`,
     danger: true,
   });
   if (!ok) return;
@@ -247,10 +241,10 @@ async function deleteHttpTask(taskId: string): Promise<void> {
     }
     await tasksApi.delete(taskId);
     await fetchHttpTasks(true);
-    frontendLogger.info("http-task", "直连任务删除成功: " + taskId);
-    toastOnly(true, "直连任务已删除");
+    frontendLogger.info("http-task", "HTTP 登录任务删除成功: " + taskId);
+    toastOnly(true, "HTTP 登录任务已删除");
   } catch (error) {
-    frontendLogger.error("http-task", "删除直连任务失败: " + taskId, error);
+    frontendLogger.error("http-task", "删除HTTP 登录任务失败: " + taskId, error);
     toastOnly(false, extractApiError(error, "删除失败"));
   }
 }
@@ -286,9 +280,9 @@ async function duplicateHttpTask(taskId: string): Promise<void> {
     await tasksApi.save(newId, payload);
     await fetchHttpTasks(true);
     await showHttpTaskEditor(newId);
-    frontendLogger.info("http-task", `已复制直连任务: ${taskId} → ${newId}`);
+    frontendLogger.info("http-task", `已复制HTTP 登录任务: ${taskId} → ${newId}`);
   } catch (error) {
-    frontendLogger.error("http-task", "复制直连任务失败: " + taskId, error);
+    frontendLogger.error("http-task", "复制HTTP 登录任务失败: " + taskId, error);
     toastOnly(false, extractApiError(error, "复制失败"));
   } finally {
     duplicatingIds.delete(taskId);
@@ -309,9 +303,9 @@ async function exportHttpTask(taskId: string): Promise<void> {
     // 经后端导出端点获取完整任务配置（与 /api/tasks/import 格式对应，可直接回导）
     const data = await tasksApi.export(taskId);
     downloadBlob(JSON.stringify(data, null, 2), `${taskId}.json`, "application/json");
-    frontendLogger.info("http-task", "直连任务已导出: " + taskId);
+    frontendLogger.info("http-task", "HTTP 登录任务已导出: " + taskId);
   } catch (error) {
-    frontendLogger.error("http-task", "导出直连任务失败: " + taskId, error);
+    frontendLogger.error("http-task", "导出HTTP 登录任务失败: " + taskId, error);
     toastOnly(false, extractApiError(error, "导出失败"));
   } finally {
     exportingIds.delete(taskId);
@@ -319,7 +313,7 @@ async function exportHttpTask(taskId: string): Promise<void> {
 }
 
 /**
- * 导入条目是否为直连任务。
+ * 导入条目是否为HTTP 登录任务。
  *
  * 兼容三种形态：磁盘文件（顶层 `type`）、导出详情（`config.type`）、
  * 以及 `{ data: {...} }` 信封（取内层再次判定）。导入接口认的是后端的
@@ -346,7 +340,7 @@ async function importHttpTask(): Promise<void> {
     const items: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
     const httpItems = items.filter(isHttpImportEntry);
     if (httpItems.length === 0) {
-      toastOnly(false, '文件里没有直连任务（条目的 type 需为 "http"）');
+      toastOnly(false, '文件里没有HTTP 登录任务（条目的 type 需为 "http"）');
       return;
     }
     const result = await tasksApi.import(httpItems);
@@ -360,13 +354,13 @@ async function importHttpTask(): Promise<void> {
     if (failed.length > 0) {
       const reason = failed[0]?.reason ?? "未知原因";
       if (imported === 0) {
-        toastOnly(false, `导入失败：${failed.length} 个直连任务未通过校验（${reason}）${skippedNote}`);
+        toastOnly(false, `导入失败：${failed.length} 个HTTP 登录任务未通过校验（${reason}）${skippedNote}`);
       } else {
-        toastOnly(false, `已导入 ${imported} 个直连任务，${failed.length} 个失败（${reason}）${skippedNote}`);
+        toastOnly(false, `已导入 ${imported} 个HTTP 登录任务，${failed.length} 个失败（${reason}）${skippedNote}`);
       }
       return;
     }
-    toastOnly(true, `已导入 ${imported} 个直连任务${skippedNote}`);
+    toastOnly(true, `已导入 ${imported} 个HTTP 登录任务${skippedNote}`);
   } catch (e) {
     frontendLogger.warn("http-task", "导入失败: " + (e as Error).message);
     toastOnly(false, "导入失败：" + extractApiError(e, "文件不是有效的任务 JSON"));
