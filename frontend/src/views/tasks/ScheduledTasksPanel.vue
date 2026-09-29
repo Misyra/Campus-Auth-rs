@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 定时任务面板：**列表页 + 二级编辑页**（与浏览器任务 / 直连任务 / 脚本同构）。
+/** 定时任务面板：**列表页 + 二级编辑页**（与浏览器任务 / HTTP 登录任务 / 脚本同构）。
  *
  * 列表态是整页表格（名称 / 类型 / 触发 / 目标 / 超时 / 最近结果 / 启用 / 操作），
  * 点行或「新建定时任务」进入编辑态；编辑态独占全宽、面包屑返回，两态由 `?task=<id>`
@@ -167,6 +167,7 @@ function targetMissing(task: ScheduledTask): boolean {
 
 /** 最近结果徽标：成功 / 失败 / 尚未执行 */
 function lastRunBadge(task: ScheduledTask): { cls: string; text: string } {
+  if (st.runningIds.has(task.id)) return { cls: "badge badge--sm badge--info", text: "执行中" };
   if (!task.last_run) return { cls: "badge badge--sm", text: "尚未执行" };
   const ok = task.last_result?.startsWith("[success]");
   return ok
@@ -211,6 +212,7 @@ watch(openMenuId, (open) => {
 // 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
 // 必须在 onBeforeUnmount 里直接摘掉 document 监听
 onBeforeUnmount(() => {
+  st.stopScheduledRunPolling();
   document.removeEventListener("pointerdown", onDocumentPointerDown);
   document.removeEventListener("keydown", onDocumentKeydown);
   closeRowMenu();
@@ -218,7 +220,7 @@ onBeforeUnmount(() => {
 
 const NOTICE_HELP =
   "定时任务按计划执行「浏览器任务」或「脚本」：定时执行是每天固定时间，启动后执行是程序每次启动后自动跑一次。\n\n" +
-  "直连任务不在这里调度——它的验证入口是任务编辑器里的「发送测试请求」。";
+  "HTTP 登录任务不在这里调度——它的验证入口是任务编辑器里的「发送测试请求」。";
 
 onMounted(async () => {
   await st.loadScheduledTasks();
@@ -311,7 +313,7 @@ onMounted(async () => {
             </td>
             <td class="sch-cell-result">
               <span :class="lastRunBadge(task).cls">{{ lastRunBadge(task).text }}</span>
-              <span class="sch-sub">{{ task.last_run ? formatMtime(task.last_run) : '' }}</span>
+              <span class="sch-sub">{{ st.runningIds.has(task.id) ? '等待本次结果' : task.last_run ? formatMtime(task.last_run) : '' }}</span>
             </td>
             <td class="sch-cell-enabled" @click.stop>
               <ToggleSwitch
@@ -532,7 +534,7 @@ onMounted(async () => {
               <dt v-if="canRun">最近结果</dt>
               <dd v-if="canRun">
                 <span class="tsk-side-hint">
-                  {{ currentTask?.last_run ? `${currentTask.last_result?.startsWith('[success]') ? '成功' : '失败'} · ${formatMtime(currentTask.last_run)}` : '尚未执行' }}
+                  {{ st.runningIds.has(currentId) ? '执行中，等待本次结果' : currentTask?.last_run ? `${currentTask.last_result?.startsWith('[success]') ? '成功' : '失败'} · ${formatMtime(currentTask.last_run)}` : '尚未执行' }}
                 </span>
               </dd>
             </dl>
@@ -543,7 +545,7 @@ onMounted(async () => {
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
             <p class="tsk-side-hint">定时任务只调度<strong>「浏览器任务」或「脚本」</strong>，它本身不含登录参数。</p>
-            <p class="tsk-side-hint">直连任务不在这里调度——它的验证入口是任务编辑器里的「发送测试请求」。</p>
+            <p class="tsk-side-hint">HTTP 登录任务不在这里调度——它的验证入口是任务编辑器里的「发送测试请求」。</p>
             <p class="tsk-side-hint">改动自动保存；名称与目标没补齐前不会落盘，新建任务因此不会在磁盘上留下半成品。</p>
             <p class="tsk-side-hint">立即运行只是「排入执行」，成败与耗时见「执行历史」。</p>
           </div>

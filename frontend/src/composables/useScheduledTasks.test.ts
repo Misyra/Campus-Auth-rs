@@ -301,6 +301,87 @@ describe("列表行操作", () => {
     expect(toastOnlyMock).toHaveBeenCalledWith(true, "已触发执行，结果见「执行历史」");
   });
 
+  it("异步执行完成后补拉最近结果，期间保持运行中状态", async () => {
+    vi.useFakeTimers();
+    try {
+      const before = listTask({ last_run: "2026-09-28T08:00:00Z", last_result: "[success] 上次成功" });
+      const after = listTask({ last_run: "2026-09-28T08:01:00Z", last_result: "[failed] 本次失败" });
+      st.scheduledTasks.value.splice(0, 0, before);
+      apiMock.list.mockResolvedValueOnce([before]).mockResolvedValueOnce([after]);
+
+      const running = st.runScheduledTask("sched_a");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(st.runningIds.has("sched_a")).toBe(true);
+      expect(st.scheduledTasks.value[0].last_result).toBe("[success] 上次成功");
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await running;
+      expect(st.runningIds.has("sched_a")).toBe(false);
+      expect(st.scheduledTasks.value[0].last_result).toBe("[failed] 本次失败");
+      expect(apiMock.list).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("执行结果一直未写回时按任务超时停止轮询", async () => {
+    vi.useFakeTimers();
+    try {
+      const before = listTask({ timeout: 1, last_run: null, last_result: null });
+      st.scheduledTasks.value.splice(0, 0, before);
+      apiMock.list.mockResolvedValue([before]);
+
+      const running = st.runScheduledTask("sched_a");
+      await vi.advanceTimersByTimeAsync(20_000);
+      await running;
+      expect(st.runningIds.has("sched_a")).toBe(false);
+      expect(toastOnlyMock).toHaveBeenCalledWith(false, "执行结果暂未更新，请稍后查看「执行历史」");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("退出页面后停止等待和后续查询，再进入时强制刷新一次", async () => {
+    vi.useFakeTimers();
+    try {
+      const before = listTask({ timeout: 3600, last_run: null, last_result: null });
+      st.scheduledTasks.value.splice(0, 0, before);
+      apiMock.list.mockResolvedValue([before]);
+
+      const running = st.runScheduledTask("sched_a");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiMock.list).toHaveBeenCalledTimes(1);
+      expect(st.runningIds.has("sched_a")).toBe(true);
+
+      st.stopScheduledRunPolling();
+      await running;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(st.runningIds.has("sched_a")).toBe(false);
+      expect(apiMock.list, "退出后不应继续查询").toHaveBeenCalledTimes(1);
+      expect(toastOnlyMock).not.toHaveBeenCalledWith(false, "执行结果暂未更新，请稍后查看「执行历史」");
+
+      await st.loadScheduledTasks();
+      expect(apiMock.list, "返回页面时需绕过五秒缓存刷新结果").toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("排入执行的请求尚未回包就离开页面时不启动轮询", async () => {
+    let release: (value: { message: string }) => void = () => {};
+    apiMock.run.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    st.scheduledTasks.value.splice(0, 0, listTask());
+
+    const running = st.runScheduledTask("sched_a");
+    st.stopScheduledRunPolling();
+    release({ message: "ok" });
+    await running;
+
+    expect(apiMock.run).toHaveBeenCalledTimes(1);
+    expect(apiMock.list).not.toHaveBeenCalled();
+    expect(st.runningIds.has("sched_a")).toBe(false);
+  });
+
   it("运行中连点只发一次请求", async () => {
     let release: (v: { message: string }) => void = () => {};
     apiMock.run.mockImplementationOnce(

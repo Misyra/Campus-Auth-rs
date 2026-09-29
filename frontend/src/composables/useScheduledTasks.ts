@@ -54,6 +54,9 @@ const selectedScheduledTaskId = ref<string | null>(null);
 
 // A11：手动运行 busy 守卫（响应式 Set），防止连点重复提交
 const runningIds = useBusyIds();
+/** 每次手动运行对应一个结果轮询；页面退出时只停止轮询，不撤回已排入的任务。 */
+const runPollingControllers = new Map<string, AbortController>();
+let refreshAfterPollStopped = false;
 // 启停开关 busy 守卫：toggle 无 in-flight 防护时快速双击会发出两次请求，终态取决于响应顺序
 const togglingIds = useBusyIds();
 
@@ -77,7 +80,8 @@ const loadFail = createFirstFailNotifier();
 let loadEpoch = 0;
 
 async function loadScheduledTasks(force = false): Promise<void> {
-  if (!fetchGuard.shouldFetch(force)) return;
+  if (!fetchGuard.shouldFetch(force || refreshAfterPollStopped)) return;
+  refreshAfterPollStopped = false;
   const mine = ++loadEpoch;
   try {
     const data = await scheduledTasksApi.list();
@@ -295,16 +299,65 @@ async function runScheduledTask(taskId: string): Promise<void> {
   // A11：busy 守卫，运行中连点直接忽略，避免重复触发定时任务
   if (runningIds.has(taskId)) return;
   runningIds.add(taskId);
+  const polling = new AbortController();
+  runPollingControllers.set(taskId, polling);
+  const previous = scheduledTasks.value.find((task) => task.id === taskId);
   try {
     // 后端只表示"已排入执行"（spawn 手动运行后立刻回包），成败要等执行历史。
     // 原来读 `data?.message` 恒为 undefined，于是无论任务成败都弹绿色的"执行成功"。
     await scheduledTasksApi.run(taskId);
+    if (polling.signal.aborted) return;
     toastOnly(true, "已触发执行，结果见「执行历史」");
-    await loadScheduledTasks(true);
+    await waitForScheduledRun(taskId, previous, polling.signal);
   } catch (e) {
     toastOnly(false, extractApiError(e, "执行失败"));
   } finally {
+    runPollingControllers.delete(taskId);
     runningIds.delete(taskId);
+  }
+}
+
+/** 页面退出时结束本页发起的结果轮询；下次进入强制刷新一次列表。 */
+function stopScheduledRunPolling(): void {
+  if (runPollingControllers.size === 0) return;
+  refreshAfterPollStopped = true;
+  for (const controller of runPollingControllers.values()) controller.abort();
+}
+
+/** 等待下轮查询时监听退出事件，避免卸载后仍悬挂一个最长五秒的定时器。 */
+function waitForPollInterval(interval: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, interval);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+/** 等待异步执行写回最近结果；按任务超时封顶，避免首次立即拉取仍读到旧值。 */
+async function waitForScheduledRun(taskId: string, previous: ScheduledTask | undefined, signal: AbortSignal): Promise<void> {
+  const timeoutSeconds = Math.min(3600, Math.max(1, Number(previous?.timeout) || 60));
+  const deadline = Date.now() + (timeoutSeconds + 15) * 1000;
+  let interval = 1000;
+  while (!signal.aborted) {
+    await loadScheduledTasks(true);
+    if (signal.aborted) return;
+    const current = scheduledTasks.value.find((task) => task.id === taskId);
+    if (!current) return;
+    if (current.last_run && (current.last_run !== previous?.last_run || current.last_result !== previous?.last_result)) {
+      if (selectedScheduledTaskId.value === taskId) await loadScheduledTaskHistory(taskId);
+      return;
+    }
+    if (Date.now() >= deadline) {
+      toastOnly(false, "执行结果暂未更新，请稍后查看「执行历史」");
+      return;
+    }
+    await waitForPollInterval(interval, signal);
+    interval = Math.min(Math.round(interval * 1.5), 5000);
   }
 }
 
@@ -363,6 +416,7 @@ export function useScheduledTasks() {
     deleteScheduledTask,
     toggleScheduledTask,
     runScheduledTask,
+    stopScheduledRunPolling,
     loadScheduledTaskHistory,
     closeScheduledTaskHistory,
     formatTaskType,
