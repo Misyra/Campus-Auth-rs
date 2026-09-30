@@ -1168,6 +1168,12 @@ export interface SystemInfo {
   port: number;
   active_profile_id: string;
   platform: string;
+  /** 后端运行指标；缺省兼容旧版响应。 */
+  metrics?: {
+    /** 文件日志队列累计丢弃条数；关闭文件日志时为 0。 */
+    file_log_dropped_lines?: number;
+    [key: string]: number | undefined;
+  };
 }
 
 /** 危险步骤（保存任务前确认） */

@@ -18,6 +18,31 @@ use tracing_subscriber::prelude::*;
 
 pub use tracing_appender::non_blocking::WorkerGuard;
 
+/// 文件日志队列容量：槽位会预分配，4096 条兼顾常驻内存与短时日志突发。
+const FILE_LOG_BUFFERED_LINES_LIMIT: usize = 4096;
+
+/// 保留异步写入器的丢弃计数，避免队列满时丢日志却无法排查。
+static FILE_LOG_ERROR_COUNTER: OnceLock<tracing_appender::non_blocking::ErrorCounter> =
+    OnceLock::new();
+
+/// 文件日志队列累计丢弃条数；文件日志关闭或尚未初始化时返回 0。
+pub fn file_log_dropped_lines() -> usize {
+    FILE_LOG_ERROR_COUNTER.get().map_or(
+        0,
+        tracing_appender::non_blocking::ErrorCounter::dropped_lines,
+    )
+}
+
+/// 保持队列满时丢弃的既有语义，避免慢磁盘反向阻塞认证与调度线程。
+fn build_file_log_writer<W: std::io::Write + Send + 'static>(
+    writer: W,
+) -> (tracing_appender::non_blocking::NonBlocking, WorkerGuard) {
+    tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(FILE_LOG_BUFFERED_LINES_LIMIT)
+        .lossy(true)
+        .finish(writer)
+}
+
 /// WebSocket 日志条目（由内部事件推入广播通道，供 /ws/logs 订阅）
 #[derive(Clone, Debug, Serialize)]
 pub struct LogEntry {
@@ -519,7 +544,10 @@ pub fn init_logging(
     // 文件层：JSON 格式按日轮转；关闭时整体跳过（`registry().with(Option<Layer>)` 合法）
     let file_appender = file_enabled
         .then(|| tracing_appender::rolling::daily(&logs_dir, "app.log"))
-        .map(tracing_appender::non_blocking);
+        .map(build_file_log_writer);
+    if let Some((writer, _)) = &file_appender {
+        let _ = FILE_LOG_ERROR_COUNTER.set(writer.error_counter());
+    }
     let file_layer = file_appender.as_ref().map(|(writer, _)| {
         tracing_subscriber::fmt::layer()
             .with_writer(writer.clone())
@@ -547,6 +575,65 @@ pub fn init_logging(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 慢写入时队列满不会阻塞业务，丢弃可计数，关闭仍刷新已接纳的日志。
+    #[test]
+    fn test_file_log_queue_overflow_and_shutdown_flush() {
+        use std::io::Write;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct SlowWriter {
+            bytes: Arc<Mutex<Vec<u8>>>,
+            started: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl Write for SlowWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(started) = self.started.take() {
+                    let _ = started.send(());
+                    self.release
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(std::io::Error::other)?;
+                }
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (mut writer, guard) = build_file_log_writer(SlowWriter {
+            bytes: bytes.clone(),
+            started: Some(started_tx),
+            release: release_rx,
+        });
+        let errors = writer.error_counter();
+        writer.write_all(b"first\n").unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        for _ in 0..FILE_LOG_BUFFERED_LINES_LIMIT + 16 {
+            writer.write_all(b"queued\n").unwrap();
+        }
+        let dropped = errors.dropped_lines();
+        release_tx.send(()).unwrap();
+        drop(writer);
+        drop(guard);
+
+        assert_eq!(dropped, 16);
+        let output = bytes.lock().unwrap();
+        assert_eq!(
+            output.len(),
+            b"first\n".len() + FILE_LOG_BUFFERED_LINES_LIMIT * b"queued\n".len()
+        );
+        assert!(output.starts_with(b"first\n"));
+        assert!(output.ends_with(b"queued\n"));
+    }
 
     /// 来源归一化：前后端来源过滤与徽章展示依赖五大域映射一致
     #[test]

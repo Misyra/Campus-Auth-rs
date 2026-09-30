@@ -85,8 +85,12 @@ fn main() -> anyhow::Result<()> {
         return handle_autostart(action);
     }
 
+    // 控制平面以网络等待为主，限制常驻线程开销；低核设备按实际可用核数创建。
+    let worker_threads = std::thread::available_parallelism().map_or(1, |cpus| cpus.get().min(8));
+
     // 4. 构建 tokio Runtime -> block_on(launcher::run)
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
         .enable_all()
         .build()?;
 

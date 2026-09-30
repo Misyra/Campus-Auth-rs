@@ -44,6 +44,7 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
             "probe_duration_ms_avg": m.probe_duration_ms_avg.load(Ordering::Relaxed),
             "worker_spawn_total": m.worker_spawn_total.load(Ordering::Relaxed),
             "worker_crash_total": m.worker_crash_total.load(Ordering::Relaxed),
+            "file_log_dropped_lines": crate::logging::file_log_dropped_lines(),
             "uptime_seconds": m.uptime_seconds.load(Ordering::Relaxed),
         },
     });
