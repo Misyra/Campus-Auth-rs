@@ -293,7 +293,14 @@ impl From<crate::updater::UpdaterError> for ApiError {
         match e {
             // 并发更新/登录进行中是调用时序冲突，500 会误导前端走"服务端故障"分支
             crate::updater::UpdaterError::UpdateInProgress
-            | crate::updater::UpdaterError::LoginInProgress => ApiError::Conflict(e.to_string()),
+            | crate::updater::UpdaterError::LoginInProgress
+            | crate::updater::UpdaterError::Cancelled => ApiError::Conflict(e.to_string()),
+            crate::updater::UpdaterError::StalePending
+            | crate::updater::UpdaterError::PackageNotNewer { .. }
+            | crate::updater::UpdaterError::VersionUnrecognized
+            | crate::updater::UpdaterError::ExtractFailed(_)
+            | crate::updater::UpdaterError::DownloadTooLarge { .. }
+            | crate::updater::UpdaterError::MissingChecksum => ApiError::BadRequest(e.to_string()),
             _ => ApiError::Internal(e.to_string()),
         }
     }

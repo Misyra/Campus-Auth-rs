@@ -37,7 +37,7 @@ const NONCE_LEN: usize = 12;
 ///
 /// 文件名带 `.rs` 后缀以避免与 Python 版的 `.enc_key`（base64 格式）冲突，
 /// 允许两个版本在同一用户目录下共存。`.enc_key.rs` 不存在时会优先继承
-/// Python 旧版的 `.enc_key`（见 [`PasswordCrypto::read_or_create_key`]），
+/// Python 旧版的 `.enc_key`（见 `PasswordCrypto::read_or_create_key`），
 /// 保证新旧版本共用同一密钥、密码互通（历史遗留：两版密钥各自生成导致冲突）。
 pub fn default_key_path() -> PathBuf {
     let mut dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -157,7 +157,7 @@ impl PasswordCrypto {
     /// 纯查询：给定密文在当前密钥下是否可解密
     ///
     /// 供 `can_decrypt_password`（前端 has_password 判断）使用。必须走无副作用
-    /// 的 [`Self::decrypt_core`]：历史实现经 `decrypt_inner` 带置位/清位副作用，
+    /// 的 `Self::decrypt_core`：历史实现经 `decrypt_inner` 带置位/清位副作用，
     /// 一次查询就会污染失败标志集合（F10）。
     pub fn can_decrypt(&self, ciphertext: &str) -> bool {
         if ciphertext.is_empty() || !ciphertext.starts_with(ENC_PREFIX) {
@@ -402,15 +402,14 @@ impl PasswordCrypto {
     fn generate_and_write_key(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
         // 跨进程双写防御：磁盘锁降级时另一进程可能刚生成完，写前读回，
         // 避免后写者覆盖磁盘密钥而各进程内存密钥不一致（已加密密码将无法解密）
-        if key_path.exists() {
-            if let Ok(bytes) = std::fs::read(key_path) {
-                if bytes.len() == KEY_LEN {
-                    tracing::warn!("检测到加密密钥文件已被并发生成，读回复用（避免双写覆盖）");
-                    let mut arr = [0u8; KEY_LEN];
-                    arr.copy_from_slice(&bytes);
-                    return Ok(Zeroizing::new(arr));
-                }
-            }
+        if key_path.exists()
+            && let Ok(bytes) = std::fs::read(key_path)
+            && bytes.len() == KEY_LEN
+        {
+            tracing::warn!("检测到加密密钥文件已被并发生成，读回复用（避免双写覆盖）");
+            let mut arr = [0u8; KEY_LEN];
+            arr.copy_from_slice(&bytes);
+            return Ok(Zeroizing::new(arr));
         }
         let mut arr = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut arr);

@@ -34,10 +34,28 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), std::io::Erro
     }
     tmp.persist(path).map_err(|e| e.error)?;
     // 父目录 fsync（确保重命名后的目录项持久化）
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// 流式原子复制文件，保持源权限；失败时目标仍为旧文件。
+pub fn atomic_copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let dir = dst.parent().unwrap_or_else(|| Path::new("."));
+    let mut source = std::fs::File::open(src)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".tmp_copy_")
+        .tempfile_in(dir)?;
+    std::io::copy(&mut source, tmp.as_file_mut())?;
+    tmp.as_file()
+        .set_permissions(source.metadata()?.permissions())?;
+    fsync_full(tmp.as_file())?;
+    tmp.persist(dst).map_err(|e| e.error)?;
+    if let Ok(parent) = std::fs::File::open(dir) {
+        let _ = parent.sync_all();
     }
     Ok(())
 }
@@ -372,9 +390,17 @@ pub enum DownloadError {
     /// 落盘错误（创建 / 写入 / flush）
     Io(std::io::Error),
     /// 响应体超过调用方给定上限。
-    TooLarge { limit: u64 },
+    TooLarge {
+        /// 允许的最大字节数。
+        limit: u64,
+    },
     /// 下载停滞：超过阈值未收到任何数据
-    Stalled { idle_secs: u64, received_bytes: u64 },
+    Stalled {
+        /// 无数据传输的超时秒数。
+        idle_secs: u64,
+        /// 超时前已经接收的字节数。
+        received_bytes: u64,
+    },
     /// 协作式取消（ENV-3）：调用方取消令牌在传输中触发
     Cancelled,
 }

@@ -2,7 +2,7 @@
 //!
 //! 任务以 JSON 文件形式存储于 `<tasks_dir>/<类型桶>/` 子目录——`browser/`、`scripts/`、
 //! `http/` 三类各占一桶，任务类型与存储桶一一对应（目录选择、残留清理、列表类型标注
-//! 全部经 [`TaskManager::bucket_dir`] 单点分派，避免新增类型时漏改某一处）。
+//! 全部经 `TaskManager::bucket_dir` 单点分派，避免新增类型时漏改某一处）。
 //! 任务排序记录于 `<tasks_dir>/.order.json`（一个扁平 id 列表，三类任务共用同一份排序）。
 //! 所有写操作通过 `tokio::sync::Mutex` 串行化，避免并发写冲突。`task_id` 校验采用手动
 //! ASCII 检查（避免引入 `regex` 依赖）。
@@ -140,14 +140,14 @@ impl TaskManager {
         };
 
         // 不存在则创建默认 .order.json
-        if !mgr.order_path().exists() {
-            if let Err(e) = mgr.write_order(&OrderData::default()) {
-                tracing::warn!(
-                    path = %mgr.order_path().display(),
-                    error = %e,
-                    "初始化默认 .order.json 失败，后续任务排序可能异常"
-                );
-            }
+        if !mgr.order_path().exists()
+            && let Err(e) = mgr.write_order(&OrderData::default())
+        {
+            tracing::warn!(
+                path = %mgr.order_path().display(),
+                error = %e,
+                "初始化默认 .order.json 失败，后续任务排序可能异常"
+            );
         }
         // 首启播种：缺内置默认任务则写入（新装开箱即用；启用状态由各方案绑定）
         mgr.ensure_default_task();
@@ -238,14 +238,14 @@ impl TaskManager {
             serde_json::from_str(&strip_bom(content)).map_err(TaskError::JsonError)?;
         // 「保存强校验、加载宽校验 + 告警」（G8）：磁盘上被外部工具改坏的任务仍尽量
         // 加载（容错，不拒绝），但通过日志暴露校验失败，便于排查"看似正常却执行异常"
-        if let Ok(value) = serde_json::to_value(&task) {
-            if let Err(errors) = self.validate_task(&value) {
-                tracing::warn!(
-                    "任务 {} 语义校验失败（仍按原样加载）: {:?}",
-                    task_id,
-                    errors
-                );
-            }
+        if let Ok(value) = serde_json::to_value(&task)
+            && let Err(errors) = self.validate_task(&value)
+        {
+            tracing::warn!(
+                "任务 {} 语义校验失败（仍按原样加载）: {:?}",
+                task_id,
+                errors
+            );
         }
         Ok(task)
     }
@@ -403,10 +403,10 @@ impl TaskManager {
         }
         // 清理关联 .meta.json / .py（best-effort，失败仅 debug；这类附属文件只存在于 scripts/ 桶）
         let meta = self.scripts_dir.join(format!("{task_id}.meta.json"));
-        if meta.exists() {
-            if let Err(e) = tokio::fs::remove_file(&meta).await {
-                tracing::debug!(path = %meta.display(), error = %e, "清理关联 .meta.json 失败");
-            }
+        if meta.exists()
+            && let Err(e) = tokio::fs::remove_file(&meta).await
+        {
+            tracing::debug!(path = %meta.display(), error = %e, "清理关联 .meta.json 失败");
         }
         let py = self.scripts_dir.join(format!("{task_id}.py"));
         if py.exists() {
@@ -464,14 +464,14 @@ impl TaskManager {
     /// 返回脚本任务的文件路径（供执行器定位）
     pub async fn get_script_path(&self, task_id: &str) -> Option<PathBuf> {
         let task = self.load_task(task_id).await.ok()?;
-        if let TaskKind::Script(cfg) = task {
-            if let Some(p) = cfg.script_path {
-                return Some(if Path::new(&p).is_absolute() {
-                    PathBuf::from(p)
-                } else {
-                    self.scripts_dir.join(p)
-                });
-            }
+        if let TaskKind::Script(cfg) = task
+            && let Some(p) = cfg.script_path
+        {
+            return Some(if Path::new(&p).is_absolute() {
+                PathBuf::from(p)
+            } else {
+                self.scripts_dir.join(p)
+            });
         }
         None
     }
@@ -683,13 +683,12 @@ impl TaskManager {
                         errors.push(format!("script_path 含非法穿越: {sp}"));
                     }
                 }
-                if let Some(wd) = config.get("work_dir").and_then(|v| v.as_str()) {
-                    if std::path::Path::new(wd)
+                if let Some(wd) = config.get("work_dir").and_then(|v| v.as_str())
+                    && std::path::Path::new(wd)
                         .components()
                         .any(|c| matches!(c, std::path::Component::ParentDir))
-                    {
-                        errors.push(format!("work_dir 含非法穿越: {wd}"));
-                    }
+                {
+                    errors.push(format!("work_dir 含非法穿越: {wd}"));
                 }
             }
             // Shell 任务已移除：历史存量 type=shell 明确拒绝，提示改用 script

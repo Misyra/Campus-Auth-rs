@@ -500,13 +500,11 @@ async fn collect_page_capture(
                 }
             }
         }
-    } else if capture.mhtml.is_none() {
-        if let Some(s) = data.get("html_b64").and_then(|v| v.as_str()) {
-            if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
-            {
-                capture.html = String::from_utf8(bytes).ok();
-            }
-        }
+    } else if capture.mhtml.is_none()
+        && let Some(s) = data.get("html_b64").and_then(|v| v.as_str())
+        && let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+    {
+        capture.html = String::from_utf8(bytes).ok();
     }
     collect_resource_files(resources_dir, &guard, &mut capture).await;
     if let Some(path) = png_path {
@@ -522,10 +520,10 @@ async fn collect_page_capture(
                 }
             }
         }
-    } else if let Some(s) = data.get("png_b64").and_then(|v| v.as_str()) {
-        if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s) {
-            capture.png = Some(bytes);
-        }
+    } else if let Some(s) = data.get("png_b64").and_then(|v| v.as_str())
+        && let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+    {
+        capture.png = Some(bytes);
     }
     if let Some(note) = data.get("resources_note").and_then(|v| v.as_str()) {
         capture.push_note(note.to_string());
@@ -533,16 +531,16 @@ async fn collect_page_capture(
     let cleanup_path = mhtml_path.or(html_path).or(png_path).or(resources_dir);
     if let Some(p) = cleanup_path {
         // 仅 debug 目录内才清理，防任意目录删除
-        if guard.allows(p) {
-            if let Some(dir) = std::path::Path::new(p).parent() {
-                // 二次确认父目录仍在允许区内
-                if let (Ok(canon), Ok(base)) = (dir.canonicalize(), guard.base.canonicalize()) {
-                    if canon.starts_with(&base) {
-                        let _ = tokio::fs::remove_dir_all(dir).await;
-                    }
-                } else if dir.starts_with(&guard.base) {
+        if guard.allows(p)
+            && let Some(dir) = std::path::Path::new(p).parent()
+        {
+            // 二次确认父目录仍在允许区内
+            if let (Ok(canon), Ok(base)) = (dir.canonicalize(), guard.base.canonicalize()) {
+                if canon.starts_with(&base) {
                     let _ = tokio::fs::remove_dir_all(dir).await;
                 }
+            } else if dir.starts_with(&guard.base) {
+                let _ = tokio::fs::remove_dir_all(dir).await;
             }
         }
     }

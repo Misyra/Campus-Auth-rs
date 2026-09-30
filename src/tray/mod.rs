@@ -1,7 +1,7 @@
 //! 系统托盘模块：图标加载、菜单构建、事件转发与异步泵任务
 //!
 //! 设计要点：
-//! - 托盘图标与菜单事件循环运行在**独立的 OS 线程**上（[`tray-icon`] 要求）。
+//! - 托盘图标与菜单事件循环运行在**独立的 OS 线程**上（`tray-icon` 要求）。
 //! - OS 线程只负责构建菜单、显示图标，并把菜单选择通过通道转发为 [`TrayAction`]，
 //!   所有真正的业务逻辑（Engine 命令派发、更新检查、打开浏览器）都在 tokio 泵任务中
 //!   完成，保持 OS 线程极简。
@@ -357,14 +357,11 @@ fn run_os_thread(
             button_state,
             ..
         } = event
+            && button == tray_icon::MouseButton::Left
+            && button_state == tray_icon::MouseButtonState::Up
+            && let Err(e) = action_tx_tray.try_send(TrayAction::OpenWeb)
         {
-            if button == tray_icon::MouseButton::Left
-                && button_state == tray_icon::MouseButtonState::Up
-            {
-                if let Err(e) = action_tx_tray.try_send(TrayAction::OpenWeb) {
-                    debug!("托盘点击事件转发失败（通道满或泵任务已退出）: {e}");
-                }
-            }
+            debug!("托盘点击事件转发失败（通道满或泵任务已退出）: {e}");
         }
     }));
 
@@ -696,10 +693,10 @@ fn update_tray(
         EngineState::Running => active,
         EngineState::Stopped | EngineState::Dead => inactive,
     };
-    if let Some(icon) = target {
-        if let Err(e) = tray.set_icon(Some(icon.clone())) {
-            debug!("更新托盘图标失败: {e}");
-        }
+    if let Some(icon) = target
+        && let Err(e) = tray.set_icon(Some(icon.clone()))
+    {
+        debug!("更新托盘图标失败: {e}");
     }
 }
 

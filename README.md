@@ -96,7 +96,7 @@ cargo run
 
 > 前端未构建时可用 `cargo check --features no-embed` 跳过嵌入完成编译检查。
 >
-> 要求：Rust 1.85+（Edition 2024）与 Node.js。仓库经 `rust-toolchain.toml` 固定 1.98 构建工具链，装有 rustup 时本地与 CI 自动采用；自编译环境只需满足 1.85+。
+> 要求：Rust 1.91+（Edition 2024）与 Node.js。仓库经 `rust-toolchain.toml` 固定 1.98 构建工具链，装有 rustup 时本地与 CI 自动采用；自编译环境只需满足 1.91+。
 
 ### Docker 部署
 

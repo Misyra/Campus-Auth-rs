@@ -56,17 +56,17 @@ pub fn check_archive_block(exe: &Path, base: &Path, allow_temp: bool) -> Option<
     // 2) 次强特征：位于系统临时目录 + 缺失同级资源（仅 Windows 启用，避免 Linux /tmp 常见误伤）
     #[cfg(windows)]
     {
-        if base_is_exe_dir {
-            if let Some(parent) = exe_parent {
-                if is_in_temp_dir(parent) && !has_required_siblings(parent) {
-                    return Some(format_block_message(
-                        BlockReason::TempMissingSiblings,
-                        exe,
-                        base,
-                        base_is_exe_dir,
-                    ));
-                }
-            }
+        if base_is_exe_dir
+            && let Some(parent) = exe_parent
+            && is_in_temp_dir(parent)
+            && !has_required_siblings(parent)
+        {
+            return Some(format_block_message(
+                BlockReason::TempMissingSiblings,
+                exe,
+                base,
+                base_is_exe_dir,
+            ));
         }
     }
     #[cfg(not(windows))]
@@ -104,16 +104,16 @@ fn temp_dir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     out.push(std::env::temp_dir());
     for key in ["TEMP", "TMP"] {
-        if let Ok(v) = std::env::var(key) {
-            if !v.is_empty() {
-                out.push(PathBuf::from(v));
-            }
+        if let Ok(v) = std::env::var(key)
+            && !v.is_empty()
+        {
+            out.push(PathBuf::from(v));
         }
     }
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        if !local.is_empty() {
-            out.push(PathBuf::from(local).join("Temp"));
-        }
+    if let Ok(local) = std::env::var("LOCALAPPDATA")
+        && !local.is_empty()
+    {
+        out.push(PathBuf::from(local).join("Temp"));
     }
     out
 }

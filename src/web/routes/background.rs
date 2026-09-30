@@ -107,12 +107,12 @@ fn validate_background_image(bytes: &[u8], content_type: &str) -> Result<&'stati
     let detected = ext_from_magic(bytes).ok_or_else(|| {
         ApiError::BadRequest("无法识别图片格式，仅支持 PNG/JPEG/GIF/WebP/BMP/ICO".into())
     })?;
-    if let Some(declared) = ext_from_content_type(content_type) {
-        if declared != detected {
-            return Err(ApiError::BadRequest(format!(
-                "图片声明类型与实际内容不一致: {declared} != {detected}"
-            )));
-        }
+    if let Some(declared) = ext_from_content_type(content_type)
+        && declared != detected
+    {
+        return Err(ApiError::BadRequest(format!(
+            "图片声明类型与实际内容不一致: {declared} != {detected}"
+        )));
     }
     Ok(detected)
 }

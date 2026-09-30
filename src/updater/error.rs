@@ -8,6 +8,9 @@ use thiserror::Error;
 /// 更新器统一错误类型
 #[derive(Debug, Error)]
 pub enum UpdaterError {
+    /// 独立更新任务异常退出。
+    #[error("更新任务执行失败: {0}")]
+    OperationFailed(String),
     /// 拉取发布清单（latest.json）失败（网络/超时/非 2xx）
     #[error("拉取发布清单失败: {0}")]
     ManifestFetchFailed(#[source] reqwest::Error),
@@ -41,18 +44,31 @@ pub enum UpdaterError {
 
     /// 下载停滞：等待响应头或相邻数据块超过上限时间仍未收到数据
     #[error("下载停滞：{idle_secs} 秒内未收到数据（已接收 {received_bytes} 字节）")]
-    DownloadStalled { idle_secs: u64, received_bytes: u64 },
+    DownloadStalled {
+        /// 无数据传输的超时秒数。
+        idle_secs: u64,
+        /// 超时前已经接收的字节数。
+        received_bytes: u64,
+    },
 
     /// SHA256 校验不匹配
     #[error("校验和不匹配（预期 {expected}，实际 {actual}）")]
-    ChecksumMismatch { expected: String, actual: String },
+    ChecksumMismatch {
+        /// 期望的摘要。
+        expected: String,
+        /// 实际计算得到的摘要。
+        actual: String,
+    },
 
     /// 更新包缺失 SHA256（已拒绝安装，不再降级信任 HTTPS）
     #[error("更新包缺失 SHA256 校验值，已拒绝安装")]
     MissingChecksum,
     /// 下载包超过允许大小
     #[error("更新包超过大小上限 {limit} 字节")]
-    DownloadTooLarge { limit: u64 },
+    DownloadTooLarge {
+        /// 允许的最大字节数。
+        limit: u64,
+    },
 
     /// 手动选择的安装包版本不高于当前版本
     ///
@@ -60,7 +76,10 @@ pub enum UpdaterError {
     /// VERSIONINFO），不依赖远程清单。此时无更新可应用，也不能像本地包复用那样
     /// 静默忽略——要明确告知用户"这个包用不上"。
     #[error("安装包版本 {version} 不高于当前版本，无需安装")]
-    PackageNotNewer { version: String },
+    PackageNotNewer {
+        /// 安装包版本。
+        version: String,
+    },
 
     /// 无法从安装包中识别版本号（手动「选择安装包」路径）
     ///
@@ -137,5 +156,8 @@ pub enum UpdaterError {
 
     /// GitHub API 速率限制（429），需等待后重试
     #[error("请求过于频繁，请在 {retry_after} 秒后重试")]
-    RateLimited { retry_after: u64 },
+    RateLimited {
+        /// 建议等待后再试的秒数。
+        retry_after: u64,
+    },
 }

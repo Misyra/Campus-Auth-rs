@@ -14,30 +14,39 @@ pub enum AiError {
     Cancelled,
     /// reqwest 请求级超时（可重试）
     #[error("LLM 请求超时（>{seconds}s）")]
-    RequestTimeout { seconds: u64 },
+    RequestTimeout {
+        /// 超时时间（秒）。
+        seconds: u64,
+    },
     /// TCP 建连失败（可重试）
     #[error("无法连接 LLM 服务（{url}）: {source}")]
     ConnectFailed {
+        /// 请求地址。
         url: String,
         #[source]
+        /// 底层错误原因。
         source: reqwest::Error,
     },
     /// 非超时/建连的其他 reqwest 错误（不可重试）
     #[error("LLM 请求失败: {source}")]
     RequestFailed {
         #[source]
+        /// 底层错误原因。
         source: reqwest::Error,
     },
     /// HTTP 客户端构建失败（服务端配置问题，不可重试）
     #[error("HTTP 客户端构建失败: {source}")]
     ClientBuild {
         #[source]
+        /// 底层错误原因。
         source: reqwest::Error,
     },
     /// LLM 远端返回非 2xx（429/5xx 可重试）
     #[error("LLM 服务返回 {status}: {snippet}")]
     LlmServiceError {
+        /// 服务器返回的 HTTP 状态码。
         status: reqwest::StatusCode,
+        /// 用于诊断的响应内容片段。
         snippet: String,
     },
     /// 流式传输中连接中断（可重试）
@@ -45,7 +54,10 @@ pub enum AiError {
     StreamInterrupted(#[from] reqwest::Error),
     /// 流式空闲超时（可重试）
     #[error("LLM 流式空闲超时（>{seconds}s 无输出），请检查网络或稍后重试")]
-    IdleTimeout { seconds: u64 },
+    IdleTimeout {
+        /// 超时时间（秒）。
+        seconds: u64,
+    },
     /// 流式总时长预算耗尽（致命，不可重试）
     #[error("LLM 流式响应总时长超出 10 分钟上限")]
     TotalBudgetExceeded,
@@ -61,25 +73,36 @@ pub enum AiError {
     #[error("LLM 响应不是合法 JSON: {source}")]
     InvalidJson {
         #[from]
+        /// 底层错误原因。
         source: serde_json::Error,
     },
     /// 非流式响应缺 content（数组部件兜底亦空）
     #[error("LLM 响应缺少 choices[0].message.content: {snippet}")]
-    MissingContent { snippet: String },
+    MissingContent {
+        /// 用于诊断的响应内容片段。
+        snippet: String,
+    },
     /// 模型输出中抽不出任务 JSON（围栏剥离 + 首尾花括号兜底均失败）
     #[error("无法从模型输出中提取 JSON（输出前 200 字符: {snippet}）")]
-    ExtractJsonFailed { snippet: String },
+    ExtractJsonFailed {
+        /// 用于诊断的响应内容片段。
+        snippet: String,
+    },
     /// 自纠轮耗尽仍未通过任务校验
     #[error("连续 {max_attempts} 轮生成均未通过任务校验，最后错误：\n{}", errors.join("\n"))]
     ValidationExhausted {
+        /// 允许的最大尝试次数。
         max_attempts: u32,
+        /// 本次执行或校验的错误列表。
         errors: Vec<String>,
     },
     /// 生成编排包装的单轮 LLM 调用失败（保留轮次上下文）
     #[error("第 {attempt} 轮生成失败: {source}")]
     ChatAttemptFailed {
+        /// 当前尝试序号。
         attempt: u32,
         #[source]
+        /// 底层错误原因。
         source: Box<AiError>,
     },
     /// Base URL 为空
@@ -114,7 +137,10 @@ pub enum AiError {
     InvalidStreamUtf8,
     /// `GET /models` 响应里没有任何可识别的模型 id
     #[error("未能从 /models 响应解析出模型列表（响应前 200 字符: {snippet}）")]
-    ModelListUnavailable { snippet: String },
+    ModelListUnavailable {
+        /// 用于诊断的响应内容片段。
+        snippet: String,
+    },
 }
 
 impl AiError {

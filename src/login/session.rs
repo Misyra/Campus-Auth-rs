@@ -311,10 +311,8 @@ impl LoginSession {
 
             // 会话总超时检查（login_timeout 至少 1s，见 SessionParams 构造 clamp）
             if session_start.elapsed() > self.params.login_timeout.max(Duration::from_secs(1)) {
-                if uses_bridge {
-                    if let Some(cid) = self.attempt_cancel_id.load_full() {
-                        bridge.cancel(cid.as_str());
-                    }
+                if uses_bridge && let Some(cid) = self.attempt_cancel_id.load_full() {
+                    bridge.cancel(cid.as_str());
                 }
                 self.finish_with_failure(session_start, attempts_used, "登录超时".into())
                     .await;

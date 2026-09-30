@@ -232,7 +232,10 @@ pub enum BridgeError {
 
     /// Worker 进程崩溃
     #[error("Worker 进程崩溃: {reason}")]
-    WorkerCrashed { reason: String },
+    WorkerCrashed {
+        /// 失败原因。
+        reason: String,
+    },
 
     /// Worker 正忙（调试会话进行中）
     #[error("Worker 忙: 调试会话进行中")]
@@ -249,7 +252,9 @@ pub enum BridgeError {
     /// Python 侧返回错误结果
     #[error("Worker 执行错误: {message}")]
     ExecutionError {
+        /// 供用户或日志展示的说明。
         message: String,
+        /// 可选事件数据。
         data: Option<Value>,
     },
 
@@ -570,7 +575,7 @@ impl BridgeSupervisor {
     /// `select!` 分支胜出，用户可见「请求已取消」），症状是
     /// "任务自己失败"，根因却在登录路径上。
     ///
-    /// 判定口径与 [`grace_wait_slot_release`] / [`wait_cancel_ack_or_kill`] 一致：
+    /// 判定口径与 `grace_wait_slot_release` / `wait_cancel_ack_or_kill` 一致：
     /// 仅当 `current_cancel_id` 为空（槽位空闲）或不等于他人 id 时放行。
     /// `owner_cancel_id` 为 `None`（调用方无身份，如本轮 attempt 已结束）时，
     /// 槽位非空即视为他人占用而跳过——宁可少回收一次（下次 `ensure_worker`
@@ -628,10 +633,9 @@ impl BridgeSupervisor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+            && let Err(e) = tx.send(true)
         {
-            if let Err(e) = tx.send(true) {
-                debug!("发送停止信号失败（无活跃接收端）: {e}");
-            }
+            debug!("发送停止信号失败（无活跃接收端）: {e}");
         }
     }
 
@@ -990,30 +994,28 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
                         }
                         None => info!(target: "campus_auth::tasks", "步骤 {idx}: {desc}"),
                     }
-                } else if ev.event == "dialog" {
-                    if let Some(msg) = ev
+                } else if ev.event == "dialog"
+                    && let Some(msg) = ev
                         .data
                         .get("message")
                         .and_then(|v| v.as_str())
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
-                    {
-                        info!(target: "campus_auth::tasks", "弹窗提示: {msg}");
-                    }
+                {
+                    info!(target: "campus_auth::tasks", "弹窗提示: {msg}");
                 }
                 // screenshot 事件负载为本地落盘 path，浏览器不可达；换算成
                 // HTTP 预览 URL（GET /api/debug/screenshot/{filename}）供前端 <img> 使用
-                if ev.event == "screenshot" {
-                    if let Some(path_str) = ev.data.get("path").and_then(|v| v.as_str()) {
-                        if let Some(name) = std::path::Path::new(path_str).file_name() {
-                            let url = format!("/api/debug/screenshot/{}", name.to_string_lossy());
-                            ev.data["url"] = json!(url);
-                            this.inner
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .last_screenshot_url = Some(url);
-                        }
-                    }
+                if ev.event == "screenshot"
+                    && let Some(path_str) = ev.data.get("path").and_then(|v| v.as_str())
+                    && let Some(name) = std::path::Path::new(path_str).file_name()
+                {
+                    let url = format!("/api/debug/screenshot/{}", name.to_string_lossy());
+                    ev.data["url"] = json!(url);
+                    this.inner
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .last_screenshot_url = Some(url);
                 }
                 if let Some(tx) = this
                     .event_tx
@@ -1469,12 +1471,12 @@ async fn ensure_worker(
             Ok(process) => process,
             Err(error) if attempt == 0 && environment.is_some() => {
                 warn!(target: "python_worker", "Worker 进程首次启动失败，尝试修复运行时: {error}");
-                if let Some(environment) = &environment {
-                    if let Err(repair_error) = environment.repair_worker_runtime().await {
-                        return Err(BridgeError::WorkerEnvironmentInvalid(
-                            repair_error.to_string(),
-                        ));
-                    }
+                if let Some(environment) = &environment
+                    && let Err(repair_error) = environment.repair_worker_runtime().await
+                {
+                    return Err(BridgeError::WorkerEnvironmentInvalid(
+                        repair_error.to_string(),
+                    ));
                 }
                 continue;
             }
@@ -1884,18 +1886,17 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
         h.health_task.abort();
     }
     // 调试会话因崩溃被强制终止：通知 WebSocket 日志流
-    if crashed_session == Some(SessionType::Debug) {
-        if let Some(tx) = this
+    if crashed_session == Some(SessionType::Debug)
+        && let Some(tx) = this
             .event_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-        {
-            let payload =
-                json!({ "type": "debug_session_closed", "data": { "reason": "worker_crashed" } });
-            if let Ok(s) = serde_json::to_string(&payload) {
-                let _ = tx.send(s);
-            }
+    {
+        let payload =
+            json!({ "type": "debug_session_closed", "data": { "reason": "worker_crashed" } });
+        if let Ok(s) = serde_json::to_string(&payload) {
+            let _ = tx.send(s);
         }
     }
 }

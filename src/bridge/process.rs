@@ -32,7 +32,12 @@ pub enum ParsedMessage {
     ///
     /// 携带原始 id，供 Supervisor 以错误回收对应的在途请求，避免请求永久泄漏、
     /// 调试会话槽位卡死（历史遗留 F1）。
-    ResponseError { id: u64, error: String },
+    ResponseError {
+        /// 关联命令的请求 ID。
+        id: u64,
+        /// Worker 返回的错误信息。
+        error: String,
+    },
     /// 事件推送
     Event(IpcEvent),
     /// 无法解析的 IPC 行
@@ -302,12 +307,13 @@ async fn stdout_reader_task(stdout: ChildStdout, ipc_tx: mpsc::Sender<ParsedMess
         if !found_newline {
             // EOF 且无更多完整行
             // 处理缓冲区中剩余的数据（最后一行可能没有换行符）
-            if !exceeded && !line_buf.is_empty() {
-                if let Ok(line_str) = std::str::from_utf8(&line_buf) {
-                    let trimmed = line_str.trim_end_matches(['\n', '\r']);
-                    if !trimmed.is_empty() {
-                        parse_and_send_line(trimmed, &ipc_tx).await;
-                    }
+            if !exceeded
+                && !line_buf.is_empty()
+                && let Ok(line_str) = std::str::from_utf8(&line_buf)
+            {
+                let trimmed = line_str.trim_end_matches(['\n', '\r']);
+                if !trimmed.is_empty() {
+                    parse_and_send_line(trimmed, &ipc_tx).await;
                 }
             }
             break;

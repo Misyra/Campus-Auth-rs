@@ -113,6 +113,18 @@ jobs:
       - name: Release 构建
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: 校验 Windows 真实产物版本资源
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          foreach ($binary in @("campus-auth.exe", "campus-auth-helper.exe")) {
+            $built = Get-Item -LiteralPath "target/$env:RELEASE_TARGET/release/$binary"
+            if ($built.VersionInfo.ProductVersion -ne $version) {
+              throw "$binary 缺少正确的版本资源，停止发布"
+            }
+          }
+
       # 组装口径与 build.ps1 一致；额外排除 __pycache__（运行时自动再生）
       - name: 组装便携包（Windows）
         if: runner.os == 'Windows'
@@ -122,13 +134,14 @@ jobs:
           New-Item -ItemType Directory -Path "$out/python_worker" | Out-Null
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth.exe" $out
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth-helper.exe" $out
+          Set-Content -LiteralPath "$out/campus-auth.portable" -Value "campus-auth-portable-v1" -Encoding utf8NoBOM
           Copy-Item "resources" "$out/resources" -Recurse
           Copy-Item "src" "$out/src" -Recurse
           New-Item -ItemType Directory -Path "$out/frontend" | Out-Null
           Get-ChildItem "frontend" -Force |
             Where-Object { $_.Name -notin @("node_modules", "dist", ".vite", "coverage") } |
             ForEach-Object { Copy-Item $_.FullName (Join-Path "$out/frontend" $_.Name) -Recurse -Force }
-          foreach ($file in @("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "openapi.json")) {
+          foreach ($file in @("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs", "openapi.json")) {
             Copy-Item $file "$out/$file" -Force
           }
           New-Item -ItemType Directory -Path "$out/docs/guides" -Force | Out-Null
@@ -159,11 +172,12 @@ jobs:
           mkdir -p pkg/python_worker
           cp "target/$RELEASE_TARGET/release/campus-auth" pkg/
           cp "target/$RELEASE_TARGET/release/campus-auth-helper" pkg/
+          printf '%s\n' 'campus-auth-portable-v1' > pkg/campus-auth.portable
           cp -R resources pkg/resources
           cp -R src pkg/src
           mkdir -p pkg/frontend
           tar -C frontend --exclude=node_modules --exclude=dist --exclude=.vite --exclude=coverage -cf - . | tar -C pkg/frontend -xf -
-          cp Cargo.toml Cargo.lock rust-toolchain.toml openapi.json pkg/
+          cp Cargo.toml Cargo.lock rust-toolchain.toml build.rs openapi.json pkg/
           mkdir -p pkg/docs/guides
           cp docs/updatelog.md docs/changelog.md docs/known-issues.md pkg/docs/
           cp docs/guides/*.md pkg/docs/guides/

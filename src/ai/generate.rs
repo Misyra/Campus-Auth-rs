@@ -33,12 +33,11 @@ pub fn extract_json(text: &str) -> Result<Value, AiError> {
         return Ok(v);
     }
     // 兜底：从首个 { 到最后一个 } 再试一次（围栏嵌套/前后缀污染）
-    if let (Some(start), Some(end)) = (candidate.find('{'), candidate.rfind('}')) {
-        if end > start {
-            if let Ok(v) = serde_json::from_str::<Value>(&candidate[start..=end]) {
-                return Ok(v);
-            }
-        }
+    if let (Some(start), Some(end)) = (candidate.find('{'), candidate.rfind('}'))
+        && end > start
+        && let Ok(v) = serde_json::from_str::<Value>(&candidate[start..=end])
+    {
+        return Ok(v);
     }
     Err(AiError::ExtractJsonFailed {
         snippet: text.chars().take(200).collect(),
@@ -96,7 +95,7 @@ fn extract_candidate(text: &str) -> &str {
 ///
 /// `validate` 为任务 JSON 强校验闭包（错误列表非空即校验失败；异步以适配
 /// `TaskApi::validate_task_json`，注意 future 不能持有入参引用，注入实现请先 clone）；
-/// `chat` 为 LLM 调用实现（生产传 [`llm::chat_completion`] 适配闭包，测试可注入桩）。
+/// `chat` 为 LLM 调用实现（生产传 `llm::chat_completion` 适配闭包，测试可注入桩）。
 pub async fn generate_with<V, Fut, C, CFut>(
     ctx: &CaptureContext,
     extra_prompt: Option<&str>,
@@ -256,35 +255,58 @@ where
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
+    /// 开始一次生成尝试。
     AttemptStart {
+        /// 当前尝试序号。
         attempt: u32,
+        /// 允许的最大尝试次数。
         max: u32,
     },
+    /// 收到生成内容增量。
     Delta {
+        /// 当前尝试序号。
         attempt: u32,
+        /// 本次生成增量内容。
         text: String,
     },
+    /// 本次生成内容接收完毕。
     AttemptDeltaDone {
+        /// 当前尝试序号。
         attempt: u32,
+        /// 累计生成内容的 UTF-8 字节数。
         text_len: usize,
     },
+    /// 本次任务通过校验。
     Validated {
+        /// 当前尝试序号。
         attempt: u32,
     },
+    /// 本次任务校验失败。
     ValidationFailed {
+        /// 当前尝试序号。
         attempt: u32,
+        /// 本次执行或校验的错误列表。
         errors: Vec<String>,
     },
+    /// 准备重试生成。
     Retrying {
+        /// 当前尝试序号。
         attempt: u32,
+        /// 下一次尝试序号。
         next: u32,
     },
+    /// 生成成功并返回完整任务。
     Done {
+        /// 已执行的尝试次数。
         attempts: u32,
+        /// 生成结果的提示列表。
         warnings: Vec<String>,
+        /// 通过校验的任务数据。
         task: Value,
     },
+    /// 生成失败并返回错误说明。
     Error {
+        /// 供用户或日志展示的说明。
         message: String,
     },
 }

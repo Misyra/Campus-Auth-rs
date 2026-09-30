@@ -14,7 +14,7 @@
 //!
 //! - **全删**（默认）：`install_dir` 整体 `remove_dir_all`；
 //! - **保留用户数据**：逐项删 `install_dir` 的子项，只跳过数据目录名（见
-//!   [`DATA_DIR_NAMES`]）——未知文件一样删掉，口径仍是"整个目录消失，只保数据"。
+//!   [`DATA_DIR_NAMES`]）——未知文件一样删掉；数据在目录内时，目录本身一起保留。
 //!
 //! ## 守卫（误删比残留严重得多）
 //!
@@ -69,13 +69,29 @@ pub fn helper_exe_name() -> &'static str {
     }
 }
 
+/// 打包脚本生成的便携分发标记；源码仓库本身不应生成该文件。
+pub const PORTABLE_MARKER_FILE: &str = "campus-auth.portable";
+/// 分发标记的固定内容（与本地及 CI 打包脚本一致）。
+pub const PORTABLE_MARKER_CONTENT: &str = "campus-auth-portable-v1";
+
+/// 标记有效且主程序与助手齐全的便携分发目录。
+///
+/// 标记用于区分随包源码与开发工程，不代表包的真实性或完整性认证。
+pub fn is_portable_distribution(dir: &Path) -> bool {
+    let marker = dir.join(PORTABLE_MARKER_FILE);
+    let marker_ok = std::fs::symlink_metadata(&marker)
+        .is_ok_and(|meta| meta.is_file() && meta.len() <= 64)
+        && std::fs::read_to_string(marker).is_ok_and(|text| text.trim() == PORTABLE_MARKER_CONTENT);
+    marker_ok && dir.join(main_exe_name()).is_file() && dir.join(helper_exe_name()).is_file()
+}
+
 /// 该目录是否为源码仓库 / 构建树（而非解压即用的安装目录）
 ///
-/// 判据取 `.git` 与 `Cargo.toml`：发布包两者都不含（`build.ps1` / release.yml 均不打包），
-/// 而仓库根与 `cargo` 工程根两者必居其一。命中即拒绝——把用户的项目源码当成安装目录
-/// 删掉是不可逆的事故。
+/// `.git` 始终视为源码仓库；带 `Cargo.toml` 的目录只有具备完整便携分发标记才放行。
+/// 发布包为了支持 Docker 源码构建也包含 Cargo 清单，不能再仅凭该文件误判。
 pub fn is_source_checkout(dir: &Path) -> bool {
-    dir.join(".git").exists() || dir.join("Cargo.toml").is_file()
+    dir.join(".git").exists()
+        || (dir.join("Cargo.toml").is_file() && !is_portable_distribution(dir))
 }
 
 /// 该目录是否位于 cargo 构建输出（`target/`）之下
@@ -110,18 +126,18 @@ pub fn validate_install_dir(install_dir: &Path) -> Result<(), String> {
             install_dir.display()
         ));
     }
-    if let Some(home) = dirs::home_dir() {
-        if same_dir(install_dir, &home) {
-            return Err("拒绝执行：该目录是用户主目录".to_string());
-        }
+    if let Some(home) = dirs::home_dir()
+        && same_dir(install_dir, &home)
+    {
+        return Err("拒绝执行：该目录是用户主目录".to_string());
     }
     if same_dir(install_dir, &std::env::temp_dir()) {
         return Err("拒绝执行：该目录是系统临时目录".to_string());
     }
     if is_source_checkout(install_dir) {
         return Err(format!(
-            "拒绝执行：{} 看起来是源码仓库（含 .git 或 Cargo.toml），不是解压即用的安装目录。\
-             若是开发环境，请手动清理 target/ 或改用安装包目录。",
+            "拒绝执行：{} 看起来是源码仓库（含 .git，或含 Cargo.toml 但缺少有效便携分发标记）。\
+             源码工程不支持自动卸载；旧便携包请重新解压新版完整发布包后卸载。",
             install_dir.display()
         ));
     }
@@ -158,10 +174,10 @@ pub fn validate_base_path(base_path: &Path) -> Result<(), String> {
             base_path.display()
         ));
     }
-    if let Some(home) = dirs::home_dir() {
-        if same_dir(base_path, &home) {
-            return Err("拒绝执行：数据目录是用户主目录".to_string());
-        }
+    if let Some(home) = dirs::home_dir()
+        && same_dir(base_path, &home)
+    {
+        return Err("拒绝执行：数据目录是用户主目录".to_string());
     }
     Ok(())
 }
@@ -186,7 +202,7 @@ pub fn existing_data_dirs(base_path: &Path) -> Vec<(String, PathBuf)> {
 /// 卸载计划（Web 路由据此渲染清单，助手据此执行）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UninstallPlan {
-    /// 程序文件所在目录（exe 与助手所在处），整体删除
+    /// 程序文件所在目录；保留数据时只删除程序内容，必要时留下目录容纳数据
     pub install_dir: PathBuf,
     /// 数据根目录（数据目录的父目录）
     pub base_path: PathBuf,
@@ -209,6 +225,14 @@ pub fn build_plan(
     validate_install_dir(install_dir)?;
     validate_base_path(base_path)?;
     let same_dir = same_dir(install_dir, base_path);
+    // 嵌套数据根不在顶层目录白名单内，保留分支会删掉它的祖先；必须提前拒绝。
+    if keep_user_data
+        && !same_dir
+        && let (Ok(install), Ok(base)) = (install_dir.canonicalize(), base_path.canonicalize())
+        && base.starts_with(install)
+    {
+        return Err("无法保留嵌套在程序目录内的数据根目录：请先将数据迁移到程序目录外，或使用与程序相同的数据目录。".to_string());
+    }
     let data_dirs = if keep_user_data {
         Vec::new()
     } else {
@@ -228,7 +252,9 @@ pub fn build_plan(
 pub struct UninstallStep {
     /// 展示名（「程序目录」「配置与方案」…）
     pub label: String,
+    /// 相关文件或目录路径。
     pub path: PathBuf,
+    /// 该卸载步骤是否成功。
     pub success: bool,
     /// 成功时为结果说明（如「已删除」「已保留」），失败时为原因
     pub message: String,
@@ -237,6 +263,7 @@ pub struct UninstallStep {
 /// 卸载执行报告（助手的系统提示框据此渲染）
 #[derive(Debug, Clone, Default)]
 pub struct UninstallReport {
+    /// 逐项卸载执行结果。
     pub steps: Vec<UninstallStep>,
     /// 因「保留用户数据」而跳过的目录名（提示框要明确说没删什么）
     pub kept: Vec<String>,
@@ -453,8 +480,14 @@ pub fn report_text(report: &UninstallReport, plan: &UninstallPlan) -> String {
             lines.push("　　下次运行仍可使用这些数据。".to_string());
         }
     } else {
-        lines.push("已删除：".to_string());
-        lines.push(format!("　　程序目录　{}", plan.install_dir.display()));
+        if report
+            .steps
+            .iter()
+            .any(|step| step.success && step.path == plan.install_dir)
+        {
+            lines.push("已删除：".to_string());
+            lines.push(format!("　　程序目录　{}", plan.install_dir.display()));
+        }
         for step in &report.steps {
             // 按路径字面比较（不能用 same_dir：安装目录此刻已被删掉，canonicalize
             // 必然失败，会把程序目录自己也当成数据目录再列一遍）
@@ -480,6 +513,21 @@ pub fn report_text(report: &UninstallReport, plan: &UninstallPlan) -> String {
     }
 
     lines.join("\n")
+}
+
+/// 卸载结果摘要：默认只展示结果与数据去向，详细清单另行展开。
+pub fn report_summary(report: &UninstallReport, plan: &UninstallPlan) -> String {
+    if !report.all_ok() {
+        return "部分文件未能删除。请展开详细结果，关闭占用文件的程序后再手动清理；已保留的数据不要删除。".to_string();
+    }
+    if !report.kept.is_empty() {
+        format!(
+            "程序文件已移除，用户数据保留在原位置。\n数据目录：{}\n请在原目录重新解压程序，或将数据迁移到新目录。",
+            plan.base_path.display()
+        )
+    } else {
+        "程序文件已移除，卸载已完成。详细删除清单可展开查看。".to_string()
+    }
 }
 
 /// 删除目录下除 `except` 之外的全部子项
@@ -563,7 +611,7 @@ mod tests {
         }
     }
 
-    /// 源码仓库识别：.git 与 Cargo.toml 各自足矣（发布包两者都没有）
+    /// 未标记工程保持拒绝；分发标记只能放行完整的便携目录，不能放行 Git 仓库。
     #[test]
     fn test_is_source_checkout() {
         let tmp = tempfile::tempdir().unwrap();
@@ -580,6 +628,21 @@ mod tests {
         // 解压即用的安装目录：既无 .git 也无 Cargo.toml
         let install = make_install_dir(tmp.path());
         assert!(!is_source_checkout(&install));
+        std::fs::write(install.join("Cargo.toml"), b"[package]").unwrap();
+        assert!(is_source_checkout(&install));
+        std::fs::write(install.join(PORTABLE_MARKER_FILE), b"invalid").unwrap();
+        assert!(is_source_checkout(&install));
+        std::fs::write(install.join(PORTABLE_MARKER_FILE), PORTABLE_MARKER_CONTENT).unwrap();
+        assert!(!is_source_checkout(&install));
+        assert!(validate_install_dir(&install).is_ok());
+        std::fs::create_dir(install.join(".git")).unwrap();
+        assert!(
+            is_source_checkout(&install),
+            "便携标记不可绕过 Git 仓库保护"
+        );
+        std::fs::remove_dir(install.join(".git")).unwrap();
+        std::fs::remove_file(install.join(helper_exe_name())).unwrap();
+        assert!(is_source_checkout(&install), "不完整标记不可放行工程");
     }
 
     /// 守卫必须拦住真实的误删风险：仓库根放着主程序时不得当成安装目录
@@ -705,6 +768,8 @@ mod tests {
         std::fs::create_dir_all(install.join("logs")).unwrap();
         std::fs::create_dir_all(install.join("resources").join("icons")).unwrap();
         std::fs::write(install.join("README.md"), b"readme").unwrap();
+        std::fs::write(install.join("Cargo.toml"), b"[package]").unwrap();
+        std::fs::write(install.join(PORTABLE_MARKER_FILE), PORTABLE_MARKER_CONTENT).unwrap();
 
         let plan = build_plan(&install, &install, true).unwrap();
         let report = execute(&plan);
@@ -718,6 +783,8 @@ mod tests {
         assert!(!install.join(main_exe_name()).exists());
         assert!(!install.join(helper_exe_name()).exists());
         assert!(!install.join("resources").exists());
+        assert!(!install.join("Cargo.toml").exists());
+        assert!(!install.join(PORTABLE_MARKER_FILE).exists());
         assert!(
             !install.join("README.md").exists(),
             "未知文件也应删除（整目录口径）"
@@ -796,6 +863,38 @@ mod tests {
         assert!(report.kept.iter().any(|k| k.contains("配置与方案")));
     }
 
+    /// 嵌套数据根不能按顶层白名单保留，计划阶段拒绝，不能删掉数据根的祖先。
+    #[test]
+    fn test_reject_keep_nested_data_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = make_install_dir(tmp.path());
+        let base = install.join("custom-data");
+        std::fs::create_dir_all(base.join("config")).unwrap();
+        std::fs::write(base.join("config/settings.json"), b"preserve").unwrap();
+        let error = build_plan(&install, &base, true).unwrap_err();
+        assert!(error.contains("嵌套"), "{error}");
+        assert!(install.join(main_exe_name()).exists());
+        assert_eq!(
+            std::fs::read(base.join("config/settings.json")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    /// 同时携带 Cargo 清单和便携标记的发布包全量卸载，包含未知文件与数据目录。
+    #[test]
+    fn test_execute_marked_source_distribution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = make_install_dir(tmp.path());
+        std::fs::write(install.join("Cargo.toml"), b"[package]").unwrap();
+        std::fs::write(install.join(PORTABLE_MARKER_FILE), PORTABLE_MARKER_CONTENT).unwrap();
+        std::fs::create_dir_all(install.join("src")).unwrap();
+        std::fs::write(install.join("src/lib.rs"), b"source").unwrap();
+        std::fs::create_dir_all(install.join("config")).unwrap();
+        let plan = build_plan(&install, &install, false).unwrap();
+        assert!(execute(&plan).all_ok());
+        assert!(!install.exists());
+    }
+
     /// 幂等：目录已不存在时重复执行不报错
     #[test]
     fn test_execute_idempotent_on_missing() {
@@ -870,6 +969,10 @@ mod tests {
         assert!(text.contains("配置与方案"), "{text}");
         assert!(text.contains("任务与脚本"), "{text}");
         assert!(text.contains("保留配置与任务"), "{text}");
+        let summary = report_summary(&report, &plan);
+        assert!(summary.contains("原位置"));
+        assert!(summary.contains(&plan.base_path.display().to_string()));
+        assert!(summary.contains("迁移"));
     }
 
     /// 报告文案：失败项逐条列出（每一项都意味着现场还留着东西）
@@ -894,6 +997,11 @@ mod tests {
         let text = report_text(&report, &plan);
         assert!(text.contains("未能删除（1 项）"), "{text}");
         assert!(text.contains("拒绝访问"), "{text}");
+        assert!(
+            !text.contains("已删除："),
+            "失败不能显示程序目录已删除: {text}"
+        );
+        assert!(report_summary(&report, &plan).contains("未能删除"));
     }
 
     /// 助手参数：`--keep-user-data` 只在勾选时出现（多一个参数就等于多删一块数据）

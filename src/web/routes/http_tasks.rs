@@ -115,10 +115,10 @@ pub async fn test_http_task(
     };
 
     let mut password = body.password;
-    if password.is_empty() {
-        if let Some(runtime) = &profile_runtime {
-            password = Zeroizing::new(runtime.profile.password.to_string());
-        }
+    if password.is_empty()
+        && let Some(runtime) = &profile_runtime
+    {
+        password = Zeroizing::new(runtime.profile.password.to_string());
     }
     if password.is_empty() {
         return Err(ApiError::BadRequest(

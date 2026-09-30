@@ -99,16 +99,16 @@ pub(crate) fn read_pending(base_path: &Path) -> Result<PendingUpdate, UpdaterErr
 /// NotFound 属正常路径（可能已被此前清理），不告警。
 pub(crate) async fn cleanup_after_apply(base_path: &Path) {
     let path = pending_path(base_path);
-    if let Err(e) = tokio::fs::remove_file(&path).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("清理 pending 标记失败: {e}");
-        }
+    if let Err(e) = tokio::fs::remove_file(&path).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("清理 pending 标记失败: {e}");
     }
     let staging = base_path.join(STAGING_DIR_NAME);
-    if let Err(e) = tokio::fs::remove_dir_all(&staging).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("清理 staging 目录失败: {e}");
-        }
+    if let Err(e) = tokio::fs::remove_dir_all(&staging).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("清理 staging 目录失败: {e}");
     }
 }
 

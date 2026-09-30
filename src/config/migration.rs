@@ -161,34 +161,34 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             rename_field(monitor, "test_urls", "http_targets");
             // v5 把 URL 与期望正文编码成 `url|expected`；v6 拆成目标数组与映射。
             // 不能只重命名，否则带 `|` 的整串会被当成非法 URL。
-            if let Some(m) = monitor.as_object_mut() {
-                if let Some(Value::Array(items)) = m.remove("url_check_urls") {
-                    let mut targets = Vec::with_capacity(items.len());
-                    let mut expected = serde_json::Map::new();
-                    for item in items {
-                        let Some(raw) = item.as_str() else {
-                            continue;
-                        };
-                        if let Some((url, response)) = raw.split_once('|') {
-                            let url = url.trim().to_string();
-                            if !url.is_empty() {
-                                targets.push(Value::String(url.clone()));
-                                expected.insert(url, Value::String(response.trim().to_string()));
-                            }
-                        } else {
-                            let url = raw.trim();
-                            if !url.is_empty() {
-                                targets.push(Value::String(url.to_string()));
-                            }
+            if let Some(m) = monitor.as_object_mut()
+                && let Some(Value::Array(items)) = m.remove("url_check_urls")
+            {
+                let mut targets = Vec::with_capacity(items.len());
+                let mut expected = serde_json::Map::new();
+                for item in items {
+                    let Some(raw) = item.as_str() else {
+                        continue;
+                    };
+                    if let Some((url, response)) = raw.split_once('|') {
+                        let url = url.trim().to_string();
+                        if !url.is_empty() {
+                            targets.push(Value::String(url.clone()));
+                            expected.insert(url, Value::String(response.trim().to_string()));
+                        }
+                    } else {
+                        let url = raw.trim();
+                        if !url.is_empty() {
+                            targets.push(Value::String(url.to_string()));
                         }
                     }
-                    // v5 语义：列表非空即启用 URL 内容检测，与 Web 层旧客户端的
-                    // “非空即启用”派生口径一致
-                    let url_enabled = !targets.is_empty();
-                    m.insert("url_targets".into(), Value::Array(targets));
-                    m.insert("url_expected_responses".into(), Value::Object(expected));
-                    m.insert("url_enabled".into(), Value::Bool(url_enabled));
                 }
+                // v5 语义：列表非空即启用 URL 内容检测，与 Web 层旧客户端的
+                // “非空即启用”派生口径一致
+                let url_enabled = !targets.is_empty();
+                m.insert("url_targets".into(), Value::Array(targets));
+                m.insert("url_expected_responses".into(), Value::Object(expected));
+                m.insert("url_enabled".into(), Value::Bool(url_enabled));
             }
             // 废弃字段清理
             if let Some(m) = monitor.as_object_mut() {
@@ -247,10 +247,10 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
     }
 
     // 6. 迁移成功，清理备份目录
-    if let Some(dir) = backup_dir {
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            tracing::warn!("清理迁移备份目录失败: {e}");
-        }
+    if let Some(dir) = backup_dir
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        tracing::warn!("清理迁移备份目录失败: {e}");
     }
 
     Ok(())
@@ -260,13 +260,13 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
 ///
 /// 接收 `&mut Value`，内部按需取 object map，兼容 `profiles` 与 `global` 两种调用场景。
 fn rename_field(obj: &mut Value, from: &str, to: &str) {
-    if let Some(map) = obj.as_object_mut() {
-        if let Some(v) = map.remove(from) {
-            if map.contains_key(to) {
-                tracing::warn!("迁移重命名跳过：{to} 已存在，丢弃旧字段 {from}");
-            } else {
-                map.insert(to.to_string(), v);
-            }
+    if let Some(map) = obj.as_object_mut()
+        && let Some(v) = map.remove(from)
+    {
+        if map.contains_key(to) {
+            tracing::warn!("迁移重命名跳过：{to} 已存在，丢弃旧字段 {from}");
+        } else {
+            map.insert(to.to_string(), v);
         }
     }
 }
@@ -341,13 +341,13 @@ fn migrate_v6_to_v7(_config_dir: &Path, value: &mut Value) -> Result<(), ConfigE
     let Some(updater) = value.get_mut("global").and_then(|g| g.get_mut("updater")) else {
         return Ok(());
     };
-    if updater.get("release_source_url").and_then(Value::as_str) == Some(OLD_SOURCE_URL) {
-        if let Some(obj) = updater.as_object_mut() {
-            obj.insert(
-                "release_source_url".to_string(),
-                Value::String(NEW_SOURCE_URL.to_string()),
-            );
-        }
+    if updater.get("release_source_url").and_then(Value::as_str) == Some(OLD_SOURCE_URL)
+        && let Some(obj) = updater.as_object_mut()
+    {
+        obj.insert(
+            "release_source_url".to_string(),
+            Value::String(NEW_SOURCE_URL.to_string()),
+        );
     }
     Ok(())
 }
@@ -361,13 +361,13 @@ fn migrate_v7_to_v8(_config_dir: &Path, value: &mut Value) -> Result<(), ConfigE
     let Some(browser) = value.get_mut("global").and_then(|g| g.get_mut("browser")) else {
         return Ok(());
     };
-    if browser.get("browser_channel").and_then(Value::as_str) == Some("playwright") {
-        if let Some(obj) = browser.as_object_mut() {
-            obj.insert(
-                "browser_channel".to_string(),
-                Value::String("chromium".to_string()),
-            );
-        }
+    if browser.get("browser_channel").and_then(Value::as_str) == Some("playwright")
+        && let Some(obj) = browser.as_object_mut()
+    {
+        obj.insert(
+            "browser_channel".to_string(),
+            Value::String("chromium".to_string()),
+        );
     }
     Ok(())
 }
@@ -754,14 +754,14 @@ fn append_to_order(tasks_dir: &Path, task_id: &str) {
     }
     order.push(Value::String(task_id.to_string()));
     let json = serde_json::json!({ "order": order });
-    if let Ok(text) = serde_json::to_string_pretty(&json) {
-        if let Err(e) = std::fs::write(&path, text) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "v10 迁移：写入任务排序表失败（不影响任务可用，仅顺序不固定）"
-            );
-        }
+    if let Ok(text) = serde_json::to_string_pretty(&json)
+        && let Err(e) = std::fs::write(&path, text)
+    {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "v10 迁移：写入任务排序表失败（不影响任务可用，仅顺序不固定）"
+        );
     }
 }
 

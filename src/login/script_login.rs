@@ -7,8 +7,8 @@
 //! # 脚本契约（写入 `docs/guides/custom-script-guide.md`，改这里必须同步改那里）
 //!
 //! - **凭据经环境变量下发**。脚本任务本身不做模板替换（`{{USERNAME}}` 那一套是浏览器
-//!   任务专属，由 Worker 的变量解析器处理），所以登录渠道另行注入 [`LOGIN_ENV_KEYS`]：
-//!   [`ENV_USERNAME`] / [`ENV_PASSWORD`] / [`ENV_ISP`] / [`ENV_AUTH_URL`]。变量在最小
+//!   任务专属，由 Worker 的变量解析器处理），所以登录渠道另行注入 `LOGIN_ENV_KEYS`：
+//!   `ENV_USERNAME` / `ENV_PASSWORD` / `ENV_ISP` / `ENV_AUTH_URL`。变量在最小
 //!   环境变量之上叠加，主进程的 Web token、代理密码等**仍然不继承**（`env_clear` 语义
 //!   不变，见 `TaskExecutor::execute_script_with_env`）。
 //! - **成败按子进程退出码**：`0` = 脚本自称成功，随后仍走登录后网络验证兜底（与浏览器
@@ -16,10 +16,10 @@
 //!   方案的重试策略重试（与直连「未命中成功标识」同属可重试），重试预算耗尽才判终态失败。
 //! - **超时取脚本任务自己的 `timeout`**（1~3600 秒，钳制），超时按平台强杀整棵进程树。
 //! - 脚本正文、解释器、参数、工作目录全部来自脚本任务（`tasks/scripts/<id>.json`）——
-//!   与任务页的「立即运行」是同一条执行路径（[`TaskExecutor::execute_script_with_env`]），
+//!   与任务页的「立即运行」是同一条执行路径（`TaskExecutor::execute_script_with_env`），
 //!   不另起一套实现，否则两条路径的行为迟早分叉。
 //! - 脚本 `stdout` 会进入登录历史消息（截断后），故**密码会被从输出里抹掉**
-//!   （见 [`redact_secret`]）：脚本打印含凭据的 URL 是常见写法，历史要落盘。
+//!   （见 `redact_secret`）：脚本打印含凭据的 URL 是常见写法，历史要落盘。
 
 use std::sync::Arc;
 
@@ -191,26 +191,21 @@ pub(crate) fn to_structured(
     }
 }
 
-/// 短到可能到处命中子串的密码（低于此长度只按**词边界**替换，见下）
-///
-/// 真机实测踩过一次：用一位密码的验证方案跑通脚本渠道后，脚本打印的 `isp=` 被替换成
-/// `is***=`——`replace` 是纯子串替换，密码里的每个字符都会命中无关字段名。这属于
-/// "脱敏把消息改烂"，用户看到的失败原因连字段名都不再是原样。
-///
-/// 判据用**词边界**而不是长度阈值：`PW=<任何长度的密码>` 这种最常见形态前后都是
-/// 分隔符，长密码短密码一律命中；而 `isp` 里的 `p` 前后都是字母数字，不受影响。
+/// 短密码按词边界匹配，避免单字符凭据破坏无关字段名称。
 pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
 /// 把 `secret` 从文本里抹掉（空 `secret` 原样返回）。
 ///
-/// **只在词边界上替换**：命中的子串前后若还有字母/数字/下划线，说明它只是更长标识符的
-/// 一段，不替换（见 [`is_word_char`] 的实测背景）。逐段扫描而非一次 `replace`，是为了
-/// 能在 byte 索引上判断边界；不做正则（本仓不引 `regex` 依赖）。
+/// 四个字符及以上的完整凭据无条件替换，覆盖 URL 和拼接字段；
+/// 短凭据保留词边界规则，避免把普通错误描述中的单字符全部抹掉。
 pub(crate) fn redact_secret(text: &str, secret: &str) -> String {
     if secret.is_empty() {
         return text.to_string();
+    }
+    if secret.chars().count() >= 4 {
+        return text.replace(secret, "***");
     }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -404,8 +399,17 @@ mod tests {
     /// 词边界之外不替换：更长标识符里的一段不算"密码出现"
     #[test]
     fn redact_respects_identifier_boundaries() {
-        assert_eq!(redact_secret("xpass2", "pass"), "xpass2");
-        assert_eq!(redact_secret("password=pass", "pass"), "password=***");
+        assert_eq!(redact_secret("xpass2", "pass"), "x***2");
+        assert_eq!(
+            redact_secret("password=Secret789_suffix", "Secret789"),
+            "password=***_suffix"
+        );
+        assert_eq!(
+            redact_secret("url=/userSecret789", "Secret789"),
+            "url=/user***"
+        );
+        assert_eq!(redact_secret("isp=p;", "p"), "isp=***;");
+        assert_eq!(redact_secret("password=pass", "pass"), "***word=***");
         assert_eq!(redact_secret("pass", "pass"), "***");
         // 多字节密码（中文）同样按边界替换
         assert_eq!(redact_secret("pw=密码;", "密码"), "pw=***;");

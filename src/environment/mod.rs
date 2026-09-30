@@ -141,7 +141,10 @@ pub const PROGRESS_PLAYWRIGHT: (u8, u8) = (60, 85);
 pub enum EnvironmentError {
     /// environment 目录无写权限
     #[error("environment 目录无写权限: {path}；可能原因：目录被设为只读、被安全软件占用或权限不足")]
-    DirectoryNotWritable { path: PathBuf },
+    DirectoryNotWritable {
+        /// 相关文件或目录路径。
+        path: PathBuf,
+    },
 
     /// 并发等待者复用前一轮引导的失败结果（F1）
     ///
@@ -157,19 +160,31 @@ pub enum EnvironmentError {
     /// uv 下载失败（HTTP 层错误）
     #[error("uv 下载失败 (重试 {retries} 次): {source}")]
     UvDownloadFailed {
+        /// 执行时采用的重试次数。
         retries: u32,
+        /// 底层错误原因。
         source: reqwest::Error,
     },
 
     /// uv 下载失败（超时/IO 等非 HTTP 错误）
     #[error("uv 下载失败 (重试 {retries} 次): {message}")]
-    UvDownloadIoFailed { retries: u32, message: String },
+    UvDownloadIoFailed {
+        /// 执行时采用的重试次数。
+        retries: u32,
+        /// 供用户或日志展示的说明。
+        message: String,
+    },
 
     /// uv 下载文件 SHA256 校验失败
     #[error(
         "uv 下载文件 SHA256 校验失败: expected={expected}, got={got}；可能原因：下载被网关劫持或镜像缓存异常，可稍后重试"
     )]
-    UvChecksumMismatch { expected: String, got: String },
+    UvChecksumMismatch {
+        /// 期望的摘要。
+        expected: String,
+        /// 实际计算得到的摘要。
+        got: String,
+    },
 
     /// uv 解压失败
     #[error("uv 解压失败: {0}；可能原因：磁盘空间不足、安全软件拦截写入或目录被占用")]
@@ -186,34 +201,53 @@ pub enum EnvironmentError {
         "uv sync 失败 (exit code={exit_code:?}): {stderr}；可能原因：依赖源不可达/被限速或依赖冲突，详见 stderr 末尾"
     )]
     UvSyncFailed {
+        /// 子进程退出码；无法取得时为空。
         exit_code: Option<i32>,
+        /// 子进程标准错误输出。
         stderr: String,
     },
 
     /// uv sync 超时
     #[error("uv sync 超时 (>{timeout_secs}s)；可能原因：网络过慢或依赖源响应缓慢，可重试")]
-    UvSyncTimeout { timeout_secs: u64 },
+    UvSyncTimeout {
+        /// 超时时间（秒）。
+        timeout_secs: u64,
+    },
     /// uv add/remove 失败（OCR 依赖增删；stderr 预截断为末尾 400 字符）
     #[error(
         "uv {op} 失败 (exit code={exit_code:?}): {stderr}；可能原因：依赖源不可达/被限速或依赖冲突，详见 stderr 末尾"
     )]
     UvPackageAlterFailed {
+        /// 失败的环境管理操作。
         op: &'static str,
+        /// 子进程退出码；无法取得时为空。
         exit_code: Option<i32>,
+        /// 子进程标准错误输出。
         stderr: String,
     },
 
     /// Playwright 安装失败（message 由 python.rs 归类生成，已含 原因/建议/详情）
     #[error("Playwright 安装失败 (重试 {retries} 次): {message}")]
-    PlaywrightInstallFailed { retries: u32, message: String },
+    PlaywrightInstallFailed {
+        /// 执行时采用的重试次数。
+        retries: u32,
+        /// 供用户或日志展示的说明。
+        message: String,
+    },
 
     /// Playwright 安装超时
     #[error("Playwright 安装超时 (>{timeout_secs}s)；可能原因：网络过慢或 CDN 响应缓慢，可重试")]
-    PlaywrightInstallTimeout { timeout_secs: u64 },
+    PlaywrightInstallTimeout {
+        /// 超时时间（秒）。
+        timeout_secs: u64,
+    },
 
     /// 请求安装了不受支持的 Playwright 浏览器
     #[error("不支持的 Playwright 浏览器: {browser}")]
-    UnsupportedPlaywrightBrowser { browser: String },
+    UnsupportedPlaywrightBrowser {
+        /// 浏览器类型。
+        browser: String,
+    },
 
     /// .venv 损坏，需要重建
     #[error(".venv 损坏，需要重建；可能原因：上次安装被中断或安全软件改动过环境，可重新初始化")]
@@ -222,27 +256,42 @@ pub enum EnvironmentError {
     /// 损坏 venv 隔离或回滚失败
     #[error("无法安全重建虚拟环境 {}: {source}", path.display())]
     VenvRebuildFailed {
+        /// 相关文件或目录路径。
         path: PathBuf,
         #[source]
+        /// 底层错误原因。
         source: std::io::Error,
     },
 
     /// python_worker/ 目录不存在
     #[error("python_worker/ 目录不存在: {}；可能原因：安装包解压不完整或程序目录被移动", path.display())]
-    WorkerProjectNotFound { path: PathBuf },
+    WorkerProjectNotFound {
+        /// 相关文件或目录路径。
+        path: PathBuf,
+    },
     /// Worker 核心包导入或协议版本验证失败
     #[error("Python Worker 运行时不可用: {reason}")]
-    WorkerRuntimeInvalid { reason: String },
+    WorkerRuntimeInvalid {
+        /// 失败原因。
+        reason: String,
+    },
     /// 环境状态文件读写失败
     #[error("环境状态文件读写失败 {}: {source}", path.display())]
     StateIo {
+        /// 相关文件或目录路径。
         path: PathBuf,
         #[source]
+        /// 底层错误原因。
         source: std::io::Error,
     },
     /// 环境状态文件内容损坏
     #[error("环境状态文件无效 {}: {reason}", path.display())]
-    StateDataInvalid { path: PathBuf, reason: String },
+    StateDataInvalid {
+        /// 相关文件或目录路径。
+        path: PathBuf,
+        /// 失败原因。
+        reason: String,
+    },
     /// 安装被取消
     #[error("安装被取消")]
     Cancelled,

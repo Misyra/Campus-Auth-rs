@@ -15,7 +15,7 @@ use std::path::Path;
 /// Windows 上解析 PE 的 VERSIONINFO 资源（优先 `StringFileInfo` 中的
 /// `ProductVersion` / `FileVersion` 字符串，缺失时回退 `VS_FIXEDFILEINFO` 的
 /// 数字 FileVersion）；非 Windows、非 PE、缺资源或解析失败一律返回 `None`。
-pub(crate) fn extract_exe_version(path: &Path) -> Option<String> {
+pub fn extract_exe_version(path: &Path) -> Option<String> {
     #[cfg(windows)]
     {
         let data = std::fs::read(path).ok()?;
@@ -197,8 +197,8 @@ fn parse_product_version(vs: &[u8]) -> Option<String> {
     if vs.len() < 40 {
         return None;
     }
-    // 头部：wLength / wValueLength / wType + 宽字符 szKey "VS_VERSIONINFO"
-    if read_wide_str(vs, 6)? != "VS_VERSIONINFO" {
+    // 头部：wLength / wValueLength / wType + 宽字符 szKey "VS_VERSION_INFO"
+    if read_wide_str(vs, 6)? != "VS_VERSION_INFO" {
         return None;
     }
     let value_len = u16le(vs, 2)? as usize;
@@ -383,7 +383,7 @@ fn build_version_info_blob(version: &str, include_string_table: bool) -> Vec<u8>
     vs.extend_from_slice(&0u16.to_le_bytes()); // wLength（最后回填）
     vs.extend_from_slice(&52u16.to_le_bytes()); // wValueLength
     vs.extend_from_slice(&0u16.to_le_bytes()); // wType（二进制）
-    for unit in "VS_VERSIONINFO\0".encode_utf16() {
+    for unit in "VS_VERSION_INFO\0".encode_utf16() {
         vs.extend_from_slice(&unit.to_le_bytes());
     }
     vs.resize(40, 0); // szKey 后按 4 字节对齐

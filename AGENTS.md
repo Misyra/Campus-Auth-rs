@@ -10,7 +10,7 @@ Campus-Auth（中文名「认证喵」）是一个校园网自动认证工具。
 
 | 领域 | 选型 |
 |------|------|
-| 语言 / Edition | Rust 2024, MSRV 1.85（构建工具链由 rust-toolchain.toml 固定 1.98） |
+| 语言 / Edition | Rust 2024, MSRV 1.91（构建工具链由 rust-toolchain.toml 固定 1.98） |
 | 异步运行时 | tokio（按需裁剪，原 full：rt-multi-thread / macros / net / fs / process / signal / sync / time / io-util，见 Cargo.toml） |
 | HTTP 框架 | axum 0.8 + tower-http |
 | HTTP 客户端 | reqwest (rustls-tls) |
@@ -188,7 +188,7 @@ NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果
   - **本地包复用**（`update/` 根目录扫描，`src/updater/local.rs`）：必须与远程清单声明的 SHA256 一致才复用；探测在 `check_update`（仅回报 `UpdateInfo.local_package` 供前端提示），暂存在 `download_stage_and_pending`（**重新扫描 + 边复制边哈希**，防 check→apply 之间文件被替换使信任锚断裂）；文件名取远程资产名而非本地名（决定解压分派）。不符即忽略并回退下载。
   - **手动选择安装包**（`POST /api/system/update-package`，上传 multipart）：**不比对远程摘要**——自编译包/镜像重打包必不匹配，用户显式选定即采纳，只需能从包里解出可执行文件。硬约束：target 恒取 `current_exe()`、Worker 目录须为内置 `<base>/python_worker`、版本须严格高于当前（同 helper `pending_version_allowed`，否则留下永远无法应用的 pending）、exe 摘要由本进程实算写入 pending。Web 层把 multipart **流式落临时文件**、更新器收路径再复制（不整包进内存）。
   - 共同点：落盘均走 `finalize_staged_package`（解压产物 → exe 摘要 → `pending.json`），无旁路；`UpdaterError::PackageNotNewer` / `ExtractFailed` 映射 400（用户可纠正），`LoginInProgress` / `UpdateInProgress` / `Cancelled` 映射 409。
-  - **取消语义**：`cancel_pending_update()`（卸载流程调用）先落 `update_cancelled` 标记并抢占下载互斥，再清 `pending.json` + staging；`finalize_staged_package` 与两个 `apply_*` 入口都会复查该标记，故"取消之后更新还发生"（在途下载跑完写 pending、退出时助手把程序装回来）不存在。返回值是"**确实**取消掉了"（清理后复查 pending 与 staging），不是"此前有 pending"。
+  - **取消语义**：`cancel_pending_update()`（卸载流程调用）先在状态临界区置 `update_cancelled` 标记，等待独立任务持有的操作互斥释放，再清 `pending.json` + staging；最终 pending 提交、助手唤醒与取消标记共用临界区，阻止在途操作于取消完成后重新提交。调用方中断不提前释放正在执行的阻塞 I/O 所有权；失败卸载的恢复只复位取消标记。返回值是"**确实**取消掉了"（存在 pending 且清理后复查 pending 与 staging 均消失），不是仅"此前有 pending"。
   - 清单声明的 `size` 为咨询性字段（同 UPD-7），不符仅告警、以摘要为准
 
 ### 前端嵌入

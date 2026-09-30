@@ -10,7 +10,7 @@
 //! - 限时封禁（`/ban` 首次拒绝，重试跨过封禁窗口成功）
 //! - kick 掉线 → 监测发现 captive → 引擎自动重登（全自动，无手动触发）
 //!
-//! 环境门槛（任一缺失即跳过，非失败）：
+//! 环境门槛（本地允许跳过，CI 设置 CAMPUS_AUTH_REQUIRE_E2E 后必须满足）：
 //! - 本地 Python 且可 `import PIL, ddddocr`（mock 验证码生成 + Worker OCR）
 //! - Playwright chromium 已安装（`ms-playwright/chromium*`）
 //! - 本地回环未被代理劫持（测试内自带 `no_proxy` 回环）
@@ -35,6 +35,20 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 环境预检：返回可用的 Python 解释器，缺失任一条件则打印原因后跳过
 fn preflight() -> Option<PathBuf> {
+    require_e2e_component(optional_preflight(), "缺少必要 Python / 浏览器环境")
+}
+
+/// 严格模式覆盖所有可跳过的初始化步骤，不能因 mock 启动失败而报通过。
+fn require_e2e_component<T>(result: Option<T>, reason: &str) -> Option<T> {
+    assert!(
+        std::env::var("CAMPUS_AUTH_REQUIRE_E2E").as_deref() != Ok("1") || result.is_some(),
+        "严格 E2E 模式初始化失败：{reason}；不能把跳过报告成通过，具体原因见预检输出"
+    );
+    result
+}
+
+/// 本地按需检查依赖，严格模式由上层决定是否允许缺失。
+fn optional_preflight() -> Option<PathBuf> {
     let python = locate_python()?;
     let check = |module: &str| {
         std::process::Command::new(&python)
@@ -42,7 +56,7 @@ fn preflight() -> Option<PathBuf> {
             .output()
             .is_ok_and(|o| o.status.success())
     };
-    for module in ["PIL", "ddddocr"] {
+    for module in ["PIL", "ddddocr", "playwright"] {
         if !check(module) {
             eprintln!(
                 "跳过 login_chain：Python 缺少 {module}（mock 需 PIL，Worker OCR 需 ddddocr）"
@@ -189,7 +203,7 @@ struct TestEnv {
 
 async fn setup_env(python: &PathBuf, mock_script: &str) -> Option<TestEnv> {
     ensure_loopback_bypass();
-    let mock = spawn_mock_on(python, mock_script)?;
+    let mock = require_e2e_component(spawn_mock_on(python, mock_script), "mock 门户启动失败")?;
     let dir = tempfile::TempDir::new().expect("创建临时目录失败");
     // 登录用例依赖 OCR 识别验证码：预置偏好启用，实例引导会把 ddddocr
     // `uv add` 进 base 内的 worker 副本（等价真实用户点「安装 OCR 依赖」）
@@ -258,7 +272,6 @@ async fn setup_profile_and_task(env: &TestEnv, auth_url: &str) {
                     "test_urls": [format!("{mock_base}/generate_204")],
                     "enable_http_check": true,
                     "enable_tcp_check": false,
-                    "enable_local_check": false,
                     "network_check_timeout": 5,
                 },
                 "pause": { "enabled": false },
@@ -302,12 +315,11 @@ async fn wait_for_login_count(
         if start.elapsed() > timeout {
             return false;
         }
-        if let Ok(resp) = client.get(format!("{mock_base}/status")).send().await {
-            if let Ok(v) = resp.json::<Value>().await {
-                if v["login_count"].as_u64().unwrap_or(0) >= min {
-                    return true;
-                }
-            }
+        if let Ok(resp) = client.get(format!("{mock_base}/status")).send().await
+            && let Ok(v) = resp.json::<Value>().await
+            && v["login_count"].as_u64().unwrap_or(0) >= min
+        {
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(1000)).await;
     }

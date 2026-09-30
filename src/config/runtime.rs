@@ -29,7 +29,7 @@ pub enum ConfigReloadSignal {
 
 /// 活跃 Profile 的不可变快照（含解密后的密码）
 ///
-/// 内嵌于 [`RuntimeConfig`]，不独立序列化。密码字段为 [`Zeroizing<String>]，
+/// 内嵌于 [`RuntimeConfig`]，不独立序列化。密码字段为 `Zeroizing<String>`，
 /// drop 时自动清零。
 ///
 /// 手动实现 `Debug`（G25）：`Zeroizing<String>` 的派生 Debug 会输出明文密码，

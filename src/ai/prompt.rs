@@ -225,10 +225,10 @@ pub fn windowed_html_with_note(html: &str, budget: usize) -> (String, String) {
     }
     let lt = chars[start..end].iter().rposition(|&c| c == '<');
     let gt = chars[start..end].iter().rposition(|&c| c == '>');
-    if let (Some(l), Some(g)) = (lt, gt) {
-        if l > g {
-            end = (start + g + 1).min(total);
-        }
+    if let (Some(l), Some(g)) = (lt, gt)
+        && l > g
+    {
+        end = (start + g + 1).min(total);
     }
 
     let head_omitted = start;

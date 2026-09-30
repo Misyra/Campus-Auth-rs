@@ -70,7 +70,7 @@ impl EngineSlot {
         }
     }
 
-    /// 执行一次网络探测并等待回复（超时 [`TEST_NETWORK_TIMEOUT_SECS`]，Web /api/monitor/test 使用）
+    /// 执行一次网络探测并等待回复（超时 `TEST_NETWORK_TIMEOUT_SECS`，Web /api/monitor/test 使用）
     ///
     /// 派发 `EngineCommand::TestNetwork` 到当前活跃 Engine 并等待 oneshot 回复；
     /// reply 通道被对端丢弃（Engine 崩溃）映射为 [`EngineError::ChannelClosed`]，

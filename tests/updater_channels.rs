@@ -7,6 +7,23 @@
 
 mod common;
 
+/// 发布构建使用的真实主程序和助手均必须携带完整版本，不能只验证人工 PE。
+#[cfg(windows)]
+#[test]
+fn built_binaries_have_product_version() {
+    for path in [
+        env!("CARGO_BIN_EXE_campus-auth"),
+        env!("CARGO_BIN_EXE_campus-auth-helper"),
+    ] {
+        assert_eq!(
+            campus_auth::updater::version_info::extract_exe_version(std::path::Path::new(path))
+                .as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "构建产物缺少真实版本资源：{path}"
+        );
+    }
+}
+
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -358,7 +375,7 @@ impl Drop for GithubMockGuard {
     }
 }
 
-/// 构造带指定更新源与通道的服务（settings.json 先落盘再由 ConfigService 加载）
+/// 构造带指定更新源与通道的服务，保存后 reload 发布运行时快照。
 async fn service_with(base: &Path, source_url: &str, channel: &str) -> Arc<UpdaterService> {
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
     let config = ConfigService::new(base.to_path_buf(), tx)
@@ -370,6 +387,7 @@ async fn service_with(base: &Path, source_url: &str, channel: &str) -> Arc<Updat
         serde_json::from_value(serde_json::json!(channel)).expect("合法通道值");
     settings.global.updater.auto_check_enabled = true;
     config.save_settings(&settings).await.expect("写入设置失败");
+    config.reload().await.expect("发布配置快照失败");
     UpdaterService::new(config, Arc::new(StatusManager::new()), base.to_path_buf())
 }
 

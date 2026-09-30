@@ -132,10 +132,10 @@ impl OperationRegistration {
 impl Drop for OperationRegistration {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if !self.finished {
-            if let Some(action) = self.cancel_action.take() {
-                action(&self.id);
-            }
+        if !self.finished
+            && let Some(action) = self.cancel_action.take()
+        {
+            action(&self.id);
         }
         self.state
             .lock()

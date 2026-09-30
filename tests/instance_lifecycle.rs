@@ -105,10 +105,11 @@ fn occupied_port_falls_back_and_records_actual_port() {
     let err_log = instance.stderr_path().to_path_buf();
     let deadline = Instant::now() + Duration::from_secs(15);
     let actual = loop {
-        if let Some(info) = campus_auth::utils::lock::query_instance(dir.path()) {
-            if info.running && info.port > 0 {
-                break info.port;
-            }
+        if let Some(info) = campus_auth::utils::lock::query_instance(dir.path())
+            && info.running
+            && info.port > 0
+        {
+            break info.port;
         }
         assert!(
             Instant::now() < deadline,

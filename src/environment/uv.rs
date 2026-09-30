@@ -603,13 +603,13 @@ async fn download_text(mgr: &EnvironmentManager, url: &str) -> Result<String, En
     // 异常/被劫持镜像的超大 body 全量读入内存（二进制下载走 256MB 上限的
     // 流式路径，文本此前无任何上限）
     const SHA_TEXT_MAX_BYTES: usize = 1024 * 1024;
-    if let Some(len) = resp.content_length() {
-        if len as usize > SHA_TEXT_MAX_BYTES {
-            return Err(EnvironmentError::UvDownloadIoFailed {
-                retries: 0,
-                message: format!("SHA256 文件大小 {len} 字节超过上限 {SHA_TEXT_MAX_BYTES}"),
-            });
-        }
+    if let Some(len) = resp.content_length()
+        && len as usize > SHA_TEXT_MAX_BYTES
+    {
+        return Err(EnvironmentError::UvDownloadIoFailed {
+            retries: 0,
+            message: format!("SHA256 文件大小 {len} 字节超过上限 {SHA_TEXT_MAX_BYTES}"),
+        });
     }
     let mut body: Vec<u8> = Vec::with_capacity(256);
     while let Some(chunk) = resp
@@ -1082,10 +1082,10 @@ impl ProjectFilesBackup {
                     continue;
                 }
                 let _ = tokio::fs::remove_file(bak).await;
-            } else if let Err(e) = tokio::fs::remove_file(orig).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!("回滚新建文件 {} 失败: {e}", orig.display());
-                }
+            } else if let Err(e) = tokio::fs::remove_file(orig).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("回滚新建文件 {} 失败: {e}", orig.display());
             }
         }
     }
@@ -1318,10 +1318,10 @@ mod tests {
 
     #[test]
     fn streaming_lines_child_process() {
-        if let Ok(secs) = std::env::var("CAMPUS_AUTH_STREAM_SLEEP_SECS") {
-            if let Ok(secs) = secs.parse::<u64>() {
-                std::thread::sleep(std::time::Duration::from_secs(secs));
-            }
+        if let Ok(secs) = std::env::var("CAMPUS_AUTH_STREAM_SLEEP_SECS")
+            && let Ok(secs) = secs.parse::<u64>()
+        {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
         }
         let Ok(count) = std::env::var("CAMPUS_AUTH_STREAM_LINES") else {
             return;

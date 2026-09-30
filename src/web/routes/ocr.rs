@@ -128,10 +128,10 @@ fn dir_size_inner(path: &std::path::Path, depth: u8) -> u64 {
         for entry in entries.flatten() {
             let p = entry.path();
             // 不跟随链接：链接本身不计入，避免环与外部目录放大
-            if let Ok(ft) = entry.file_type() {
-                if ft.is_symlink() {
-                    continue;
-                }
+            if let Ok(ft) = entry.file_type()
+                && ft.is_symlink()
+            {
+                continue;
             }
             if let Ok(meta) = entry.metadata() {
                 if meta.is_dir() {

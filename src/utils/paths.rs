@@ -187,10 +187,9 @@ pub fn worker_project_dir(base_path: &Path) -> PathBuf {
         .parent()
         .and_then(|p| p.parent())
         .map(|p| p.join(WORKER_PROJECT_DIR))
+        && repo.is_dir()
     {
-        if repo.is_dir() {
-            return repo;
-        }
+        return repo;
     }
     let mf = Path::new(env!("CARGO_MANIFEST_DIR")).join(WORKER_PROJECT_DIR);
     if mf.is_dir() { mf } else { candidate }

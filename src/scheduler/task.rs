@@ -82,13 +82,13 @@ pub struct ScheduledTask {
     /// 触发方式（缺省 cron，兼容存量任务文件）。
     #[serde(default)]
     pub trigger: TaskTrigger,
-    /// 启动触发：每日成功执行次数上限（None = [`DEFAULT_STARTUP_MAX_RUNS_PER_DAY`]）。
+    /// 启动触发：每日成功执行次数上限（None = `DEFAULT_STARTUP_MAX_RUNS_PER_DAY`）。
     #[serde(default)]
     pub max_runs_per_day: Option<u32>,
-    /// 启动触发：单轮失败后最大重试次数（None = [`DEFAULT_STARTUP_MAX_RETRIES`]）。
+    /// 启动触发：单轮失败后最大重试次数（None = `DEFAULT_STARTUP_MAX_RETRIES`）。
     #[serde(default)]
     pub max_retries: Option<u32>,
-    /// 启动触发：延迟执行秒数（None = [`DEFAULT_STARTUP_DELAY_SECS`]）。
+    /// 启动触发：延迟执行秒数（None = `DEFAULT_STARTUP_DELAY_SECS`）。
     #[serde(default)]
     pub startup_delay_secs: Option<u64>,
     /// 启动触发：当日成功次数簿记（跨重启判断"今天是否已成功过"）。

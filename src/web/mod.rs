@@ -1,7 +1,7 @@
 //! Web 模块：Axum Router 构建
 //!
 //! 负责组装所有 HTTP 路由、WebSocket 端点与静态文件服务。
-//! `/api/*` 路由以 [`route_table`] 为单一来源声明式注册，
+//! `/api/*` 路由以 `route_table` 为单一来源声明式注册，
 //! 契约测试据此与根目录 `openapi.json` 做双向一致性校验。
 
 pub mod auth;

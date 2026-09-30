@@ -80,34 +80,34 @@ fn normalize_repo_url(raw: &str) -> String {
     let path = parsed.path();
 
     // GitHub: github.com/USER/REPO/blob/BRANCH/PATH → raw.githubusercontent.com/USER/REPO/BRANCH/PATH
-    if host == "github.com" {
-        if let Some(rest) = path.strip_prefix('/') {
-            let parts: Vec<&str> = rest.splitn(4, '/').collect();
-            if parts.len() >= 4 && parts[2] == "blob" {
-                let extra: Vec<&str> = parts[3..].to_vec();
-                return format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}",
-                    parts[0],
-                    parts[1],
-                    extra.join("/"),
-                );
-            }
+    if host == "github.com"
+        && let Some(rest) = path.strip_prefix('/')
+    {
+        let parts: Vec<&str> = rest.splitn(4, '/').collect();
+        if parts.len() >= 4 && parts[2] == "blob" {
+            let extra: Vec<&str> = parts[3..].to_vec();
+            return format!(
+                "https://raw.githubusercontent.com/{}/{}/{}",
+                parts[0],
+                parts[1],
+                extra.join("/"),
+            );
         }
     }
 
     // Gitee: gitee.com/USER/REPO/blob/BRANCH/PATH → gitee.com/USER/REPO/raw/BRANCH/PATH
-    if host == "gitee.com" {
-        if let Some(rest) = path.strip_prefix('/') {
-            let parts: Vec<&str> = rest.splitn(4, '/').collect();
-            if parts.len() >= 4 && parts[2] == "blob" {
-                let extra: Vec<&str> = parts[3..].to_vec();
-                return format!(
-                    "https://gitee.com/{}/{}/raw/{}",
-                    parts[0],
-                    parts[1],
-                    extra.join("/"),
-                );
-            }
+    if host == "gitee.com"
+        && let Some(rest) = path.strip_prefix('/')
+    {
+        let parts: Vec<&str> = rest.splitn(4, '/').collect();
+        if parts.len() >= 4 && parts[2] == "blob" {
+            let extra: Vec<&str> = parts[3..].to_vec();
+            return format!(
+                "https://gitee.com/{}/{}/raw/{}",
+                parts[0],
+                parts[1],
+                extra.join("/"),
+            );
         }
     }
 

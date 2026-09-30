@@ -326,6 +326,16 @@ fn run_apply_update(cli: &HelperCli) {
         log.info("目标 exe 已是新版内容（此前 helper 已完成替换），跳过复制步骤");
     }
 
+    let extracted_dir = staging_dir.join("extracted");
+    if let Err(error) = campus_auth::updater::distribution::sync_distribution_files(
+        &extracted_dir,
+        &base_path,
+        &worker_target_dir,
+    ) {
+        log.error(&format!("分发文件同步失败，保留待应用更新: {error}"));
+        std::process::exit(1);
+    }
+
     // 4. 备份旧 exe（统一 "<原名>.bak"：unix 上 with_extension("exe.bak") 会产出
     // campus-auth.exe.bak 的怪名——无扩展名文件被凭空拼出 .exe）
     let backup_path = target_exe
@@ -392,8 +402,6 @@ fn run_apply_update(cli: &HelperCli) {
     // 文件、新增缺失文件、绝不删除目标侧多余内容（python_worker/.venv 是
     // 用户运行态，config/tasks/logs 等用户数据不在 staging 内天然不受影响）。
     // resources/docs 跟随 base_path；Worker 使用 pending 中已经校验的明确目标。
-    let extracted_dir = staging_dir.join("extracted");
-    sync_distribution_files(&extracted_dir, &base_path, &worker_target_dir);
     // helper 自更新落点必须是 exe 所在目录，而非 base_path：spawn_helper 从主程序
     // 同级目录查找 helper，--base-path 与 exe 目录分离时，写进 base_path 的 helper
     // 永远不会被调用（同时在数据目录留下一份无用副本）。
@@ -401,7 +409,15 @@ fn run_apply_update(cli: &HelperCli) {
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| base_path.clone());
-    replace_helper(&extracted_dir, &install_dir, &mut log);
+    if let Err(error) =
+        campus_auth::updater::distribution::replace_helper(&extracted_dir, &install_dir)
+    {
+        log.error(&format!(
+            "更新助手同步失败，保留 pending 供启动修复: {error}"
+        ));
+        std::process::exit(1);
+    }
+    sync_portable_marker(&extracted_dir, &install_dir, &mut log);
 
     // 6. 启动新 exe（传递原始启动参数）
     let original_args = pending.original_args.clone();
@@ -497,10 +513,8 @@ fn run_uninstall(cli: &HelperCli) {
 
     // 守卫：纵深防御。Web 路由已校验过一次（用户能当场看到拒绝原因），
     // 此处再校验一次，堵住"直接用 CLI 参数指定任意目录"的通道。
-    if let Err(e) = campus_auth::uninstall::validate_install_dir(&install_dir) {
-        uninstall_abort(&mut log, "卸载已中止", &e);
-    }
-    if let Err(e) = campus_auth::uninstall::validate_base_path(&base_path) {
+    if let Err(e) = campus_auth::uninstall::build_plan(&install_dir, &base_path, cli.keep_user_data)
+    {
         uninstall_abort(&mut log, "卸载已中止", &e);
     }
 
@@ -556,6 +570,7 @@ fn run_uninstall(cli: &HelperCli) {
     // 4. 结果提示框：主进程已退出，这是唯一还能传达信息的出口
     let ok = report.all_ok();
     let text = campus_auth::uninstall::report_text(&report, &plan);
+    let summary = campus_auth::uninstall::report_summary(&report, &plan);
     notify(
         ok,
         if ok {
@@ -563,6 +578,7 @@ fn run_uninstall(cli: &HelperCli) {
         } else {
             "认证喵 · 卸载未完全成功"
         },
+        &summary,
         &text,
     );
 
@@ -594,7 +610,28 @@ fn uninstall_install_dir(cli: &HelperCli) -> Result<PathBuf, String> {
 /// 现场还剩什么。
 fn uninstall_abort(log: &mut HelperLog, title: &str, message: &str) -> ! {
     log.error(&format!("{title}：{message}"));
-    notify(false, &format!("认证喵 · {title}"), message);
+    notify(
+        false,
+        &format!("认证喵 · {title}"),
+        "卸载未能继续，请查看详细原因。",
+        message,
+    );
+    // 第二段失败也要清理自身；只接受本程序在系统临时目录直接创建的专用子目录。
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let is_stage = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(UNINSTALL_TEMP_PREFIX))
+            && dir
+                .parent()
+                .is_some_and(|parent| same_existing_path(parent, &std::env::temp_dir()));
+        if is_stage {
+            schedule_self_delete(log);
+        }
+    }
     std::process::exit(1);
 }
 
@@ -639,7 +676,12 @@ fn spawn_uninstall_phase2(
 
 /// 系统提示框（Windows）/ stderr（其它平台）
 #[cfg(windows)]
-fn notify(success: bool, title: &str, text: &str) {
+fn notify(success: bool, title: &str, summary: &str, text: &str) {
+    // MSVC 发布包内嵌公共控件 v6 清单；其它 Windows 工具链保持原生提示框兜底。
+    #[cfg(target_env = "msvc")]
+    if show_result_dialog(success, title, summary, text, None) >= 0 {
+        return;
+    }
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MessageBoxW,
@@ -651,7 +693,7 @@ fn notify(success: bool, title: &str, text: &str) {
             .chain(std::iter::once(0))
             .collect()
     };
-    let text_w = wide(text);
+    let text_w = wide(&format!("{summary}\n\n{text}"));
     let title_w = wide(title);
     let icon = if success {
         MB_ICONINFORMATION
@@ -672,8 +714,73 @@ fn notify(success: bool, title: &str, text: &str) {
 
 /// 非 Windows 平台：主进程已退出，stderr 可能无人接收，但至少留下痕迹
 #[cfg(not(windows))]
-fn notify(_success: bool, title: &str, text: &str) {
-    eprintln!("[helper] {title}\n{text}");
+fn notify(_success: bool, title: &str, summary: &str, text: &str) {
+    eprintln!("[helper] {title}\n{summary}\n\n{text}");
+}
+
+/// 系统任务对话框：简短摘要与可展开的详细结果，宽度固定以避免长路径撑满屏幕。
+#[cfg(all(windows, target_env = "msvc"))]
+fn show_result_dialog(
+    success: bool,
+    title: &str,
+    summary: &str,
+    details: &str,
+    callback: windows_sys::Win32::UI::Controls::PFTASKDIALOGCALLBACK,
+) -> i32 {
+    use windows_sys::Win32::UI::Controls::{
+        TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TD_INFORMATION_ICON, TD_WARNING_ICON,
+        TDCBF_CLOSE_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TaskDialogIndirect,
+    };
+    let wide = |text: &str| {
+        text.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let title_w = wide("认证喵");
+    let instruction_w = wide(title.trim_start_matches("认证喵 · "));
+    let summary_w = wide(summary);
+    let details_w = wide(details);
+    let expand_w = wide("查看详细结果");
+    let collapse_w = wide("收起详细结果");
+    let config = TASKDIALOGCONFIG {
+        cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION,
+        dwCommonButtons: TDCBF_CLOSE_BUTTON,
+        pszWindowTitle: title_w.as_ptr(),
+        Anonymous1: TASKDIALOGCONFIG_0 {
+            pszMainIcon: if success {
+                TD_INFORMATION_ICON
+            } else {
+                TD_WARNING_ICON
+            },
+        },
+        pszMainInstruction: instruction_w.as_ptr(),
+        pszContent: summary_w.as_ptr(),
+        pszExpandedInformation: details_w.as_ptr(),
+        pszExpandedControlText: expand_w.as_ptr(),
+        pszCollapsedControlText: collapse_w.as_ptr(),
+        pfCallback: callback,
+        cxWidth: 320,
+        ..Default::default()
+    };
+    // SAFETY: 配置与所有 NUL 结尾的宽字符串在模态调用期间存活，未提供输出指针。
+    unsafe {
+        TaskDialogIndirect(
+            &config,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// 更新时同步发布标记到程序目录，让旧版随包源码不再误触卸载守卫。
+fn sync_portable_marker(extracted_dir: &Path, install_dir: &Path, log: &mut HelperLog) {
+    if let Err(error) =
+        campus_auth::updater::distribution::sync_portable_marker(extracted_dir, install_dir)
+    {
+        log.error(&format!("同步便携分发标记失败: {error}"));
+    }
 }
 
 /// （Windows）把自身与所在临时目录删掉
@@ -837,11 +944,11 @@ fn schedule_self_delete(_log: &mut HelperLog) {}
 /// 锁被同伴持有则安静退出（exit 0，先行者负责完成替换与清理）。
 /// 返回的 `File` 须保持存活至进程退出（进程退出即释放）。
 fn acquire_helper_lock(lock_path: &Path, log: &mut HelperLog) -> std::fs::File {
-    if let Some(parent) = lock_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            log.error(&format!("创建 update 目录失败: {e}"));
-            std::process::exit(1);
-        }
+    if let Some(parent) = lock_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        log.error(&format!("创建 update 目录失败: {e}"));
+        std::process::exit(1);
     }
     let file = match OpenOptions::new()
         .create(true)
@@ -932,146 +1039,6 @@ fn wait_for_process_exit(pid: u32, log: &mut HelperLog) -> bool {
     false
 }
 
-/// overlay 同步更新包内的分发目录到 base_path（步骤 5.5）
-///
-/// 覆盖 `resources/`、`docs/`、`python_worker/`（Python 源码与 pyproject/uv.lock）。
-/// `skip_names` 命中的目录名整棵子树跳过——发布包本就不含这些（release.yml 已排除），
-/// 此处是防御性双保险：`.venv` 是用户引导出的运行态，`__pycache__` 运行时自动再生。
-/// best-effort：单文件失败仅告警继续，不回滚（exe 已替换，半新半旧由下次更新收敛）。
-fn sync_distribution_files(extracted_dir: &Path, base_path: &Path, worker_target_dir: &Path) {
-    // 必须在 overlay 前比较并写标记：成功覆盖后源/目标必然相同；先写标记还可
-    // 覆盖“清单已替换、helper 随后异常退出”的崩溃窗口。标记只会在主程序
-    // 完成 uv sync + Worker 探针 + 指纹记录后清除。
-    let manifests_changed = dependency_manifests_changed(extracted_dir, worker_target_dir);
-    if manifests_changed {
-        let marker = worker_target_dir.join(campus_auth::environment::RESYNC_MARKER);
-        let marker_result = std::fs::create_dir_all(worker_target_dir)
-            .and_then(|()| std::fs::write(&marker, Local::now().to_rfc3339()));
-        match marker_result {
-            Ok(()) => println!("[helper] Python 依赖清单变更，已预写重同步标记"),
-            Err(e) => eprintln!("[helper] 写重同步标记失败: {e}"),
-        }
-    }
-
-    for dir in ["resources", "docs", "python_worker"] {
-        let src = extracted_dir.join(dir);
-        if !src.exists() {
-            continue;
-        }
-        let dst = if dir == "python_worker" {
-            worker_target_dir.to_path_buf()
-        } else {
-            base_path.join(dir)
-        };
-        println!("[helper] 同步 {dir}/ -> {}", dst.display());
-        if let Err(e) = copy_dir_overlay(&src, &dst, &[".venv", "__pycache__"]) {
-            eprintln!("[helper] 同步 {dir}/ 失败（继续）: {e}");
-        }
-    }
-}
-
-/// 在 overlay 前判断 Python 依赖清单是否变化。
-fn dependency_manifests_changed(extracted_dir: &Path, worker_target_dir: &Path) -> bool {
-    let py_src = extracted_dir.join("python_worker").join("pyproject.toml");
-    let lock_src = extracted_dir.join("python_worker").join("uv.lock");
-    let py_dst = worker_target_dir.join("pyproject.toml");
-    let lock_dst = worker_target_dir.join("uv.lock");
-    (py_src.exists() && file_differs(&py_src, &py_dst))
-        || (lock_src.exists() && file_differs(&lock_src, &lock_dst))
-}
-
-/// 两个文件内容是否不同（任一侧读取失败/缺失视为不同）
-fn file_differs(a: &Path, b: &Path) -> bool {
-    match (std::fs::read(a), std::fs::read(b)) {
-        (Ok(x), Ok(y)) => x != y,
-        _ => true,
-    }
-}
-
-/// 递归 overlay 复制目录：目标侧不存在的路径创建，已存在的文件覆盖
-fn copy_dir_overlay(src: &Path, dst: &Path, skip_names: &[&str]) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    let mut first_error = None;
-    for entry in std::fs::read_dir(src)? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                first_error.get_or_insert(e);
-                continue;
-            }
-        };
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        if skip_names.contains(&name_str) {
-            continue;
-        }
-        let src_path = entry.path();
-        let dst_path = dst.join(&name);
-        let result = if src_path.is_dir() {
-            copy_dir_overlay(&src_path, &dst_path, skip_names)
-        } else {
-            std::fs::copy(&src_path, &dst_path).map(|_| ())
-        };
-        if let Err(e) = result {
-            first_error.get_or_insert(e);
-        }
-    }
-    match first_error {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
-}
-
-/// 替换 helper 自身（步骤 5.5，best-effort）
-///
-/// Windows 不允许覆盖写运行中的 exe，但允许 rename：先把旧 helper 改名
-/// `<原名>.old` 让位，再复制新版本；最后尝试删 .old（运行中删除会失败，
-/// 残留一个无害文件，下次更新覆盖重试）。任一步失败仅告警——旧 helper
-/// 依然能完成未来的 exe 替换（接口仅依赖 pending.json 文件，保持稳定）。
-fn replace_helper(extracted_dir: &Path, base_path: &Path, log: &mut HelperLog) {
-    // 名字取自 `uninstall`（与卸载路径共用，避免两处各写一份平台分支）
-    let helper_name = campus_auth::uninstall::helper_exe_name();
-    let new_helper = extracted_dir.join(helper_name);
-    if !new_helper.exists() {
-        return;
-    }
-    let target = base_path.join(helper_name);
-    let old = base_path.join(format!("{helper_name}.old"));
-    if let Err(e) = std::fs::remove_file(&old) {
-        log.debug(&format!("清理残留的 {} 失败: {e}", old.display()));
-    }
-    if target.exists() {
-        if let Err(e) = std::fs::rename(&target, &old) {
-            eprintln!("[helper] 旧 helper 改名失败，跳过 helper 自更新: {e}");
-            return;
-        }
-    }
-    if let Err(e) = std::fs::copy(&new_helper, &target) {
-        eprintln!("[helper] helper 替换失败: {e}，恢复旧版本");
-        if let Err(e) = std::fs::rename(&old, &target) {
-            log.debug(&format!(
-                "恢复旧 helper 失败（{} -> {}）: {e}",
-                old.display(),
-                target.display()
-            ));
-        }
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)) {
-            log.debug(&format!("设置新 helper 可执行权限失败: {e}"));
-        }
-    }
-    println!("[helper] helper 已更新");
-    if let Err(e) = std::fs::remove_file(&old) {
-        log.debug(&format!("清理 {} 失败: {e}", old.display()));
-    }
-}
-
 /// 清理 pending.json 标记与 staging 目录（staging 目录用 CLI --staging 传入的实际路径）
 ///
 /// G13：staging 取值可能来自被篡改的 pending.json，remove_dir_all 前复核其
@@ -1119,10 +1086,10 @@ fn resolve_target_exe(
 ) -> Option<PathBuf> {
     match (derived, provided) {
         (Some(derived), provided) if derived.is_file() => {
-            if let Some(p) = provided {
-                if !same_existing_path(&p, &derived) {
-                    return None;
-                }
+            if let Some(p) = provided
+                && !same_existing_path(&p, &derived)
+            {
+                return None;
             }
             Some(derived)
         }
@@ -1195,6 +1162,71 @@ fn decide_backup_deletion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 原生任务对话框必须能够启动；创建后自动关闭，避免测试等待人工点击。
+    #[cfg(all(windows, target_env = "msvc"))]
+    #[test]
+    fn test_uninstall_result_dialog() {
+        use windows_sys::Win32::UI::Controls::{TDM_CLICK_BUTTON, TDN_CREATED};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IDCLOSE, SendMessageW};
+        unsafe extern "system" fn close_dialog(
+            hwnd: windows_sys::Win32::Foundation::HWND,
+            notification: u32,
+            _wparam: usize,
+            _lparam: isize,
+            _data: isize,
+        ) -> i32 {
+            if notification == TDN_CREATED as u32 {
+                // SAFETY: 回调中的 hwnd 由任务对话框提供，按钮 ID 与其公共关闭按钮一致。
+                unsafe {
+                    SendMessageW(hwnd, TDM_CLICK_BUTTON as u32, IDCLOSE as usize, 0);
+                }
+            }
+            0
+        }
+        let result = show_result_dialog(
+            true,
+            "认证喵 · 卸载完成",
+            "隔离测试，不执行任何删除。",
+            "详细测试结果",
+            Some(close_dialog),
+        );
+        assert!(result >= 0, "任务对话框启动失败: {result:#x}");
+    }
+
+    /// 更新将分发标记送到程序目录，不标记 Git 工程或普通来源目录。
+    #[test]
+    fn test_sync_portable_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let install = tmp.path().join("install");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&install).unwrap();
+        let mut log = HelperLog::open_at(&tmp.path().join("helper.log"));
+        let marker = campus_auth::uninstall::PORTABLE_MARKER_FILE;
+        sync_portable_marker(&source, &install, &mut log);
+        assert!(!install.join(marker).exists());
+        std::fs::write(source.join(campus_auth::uninstall::main_exe_name()), b"exe").unwrap();
+        std::fs::write(
+            source.join(campus_auth::uninstall::helper_exe_name()),
+            b"helper",
+        )
+        .unwrap();
+        std::fs::write(
+            source.join(marker),
+            campus_auth::uninstall::PORTABLE_MARKER_CONTENT,
+        )
+        .unwrap();
+        std::fs::create_dir(install.join(".git")).unwrap();
+        sync_portable_marker(&source, &install, &mut log);
+        assert!(!install.join(marker).exists());
+        std::fs::remove_dir(install.join(".git")).unwrap();
+        sync_portable_marker(&source, &install, &mut log);
+        assert_eq!(
+            std::fs::read_to_string(install.join(marker)).unwrap(),
+            campus_auth::uninstall::PORTABLE_MARKER_CONTENT
+        );
+    }
 
     /// G13：路径逃逸防护——base_path 内的路径放行，外部路径与不存在路径拒绝
     #[test]
@@ -1358,7 +1390,8 @@ mod tests {
         .unwrap();
         std::fs::write(dst.join("user-config-only.txt"), b"KEEP").unwrap();
 
-        copy_dir_overlay(&src, &dst, &[".venv", "__pycache__"]).unwrap();
+        campus_auth::updater::distribution::copy_dir_overlay(&src, &dst, &[".venv", "__pycache__"])
+            .unwrap();
 
         // 同名覆盖
         assert_eq!(
@@ -1392,7 +1425,12 @@ mod tests {
         std::fs::write(dst_worker.join("pyproject.toml"), b"old-project").unwrap();
         std::fs::write(dst_worker.join("uv.lock"), b"old-lock").unwrap();
 
-        sync_distribution_files(extracted.path(), base.path(), &dst_worker);
+        campus_auth::updater::distribution::sync_distribution_files(
+            extracted.path(),
+            base.path(),
+            &dst_worker,
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read(dst_worker.join("pyproject.toml")).unwrap(),
@@ -1418,7 +1456,12 @@ mod tests {
             std::fs::write(worker.join("uv.lock"), b"same-lock").unwrap();
         }
 
-        sync_distribution_files(extracted.path(), base.path(), &dst_worker);
+        campus_auth::updater::distribution::sync_distribution_files(
+            extracted.path(),
+            base.path(),
+            &dst_worker,
+        )
+        .unwrap();
 
         assert!(
             !base

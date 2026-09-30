@@ -8,7 +8,7 @@
 //!   （无跳转可取，只能提示用户手动复制地址栏）；
 //! - 检测目标固定为监测配置中的 `http_targets + url_targets`（内置 generate_204 类明文
 //!   地址），不接受客户端传参；重定向目标由网关下发，逐跳做最小目的地址校验
-//!   （仅拒环回/链路本地/通配地址，内网门户放行，见 [`probe_target`]）。
+//!   （仅拒环回/链路本地/通配地址，内网门户放行，见 `probe_target`）。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};

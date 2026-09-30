@@ -579,25 +579,7 @@ pub async fn apply_update(
     tracing::info!(version = %info.latest_version, "开始下载并暂存更新");
     updater.apply_update(&info).await.map_err(|e| {
         tracing::warn!(version = %info.latest_version, "应用更新失败: {e}");
-        match e {
-            // 并发更新 / 登录进行中 / 卸载已取消更新属调用时序冲突，回 409，
-            // 不再统一包成 500 误导前端走"服务端故障"分支
-            crate::updater::UpdaterError::UpdateInProgress
-            | crate::updater::UpdaterError::LoginInProgress
-            | crate::updater::UpdaterError::Cancelled => ApiError::Conflict(e.to_string()),
-            // 暂存已失效（pending 残留但 staging 实物已丢）是用户可纠正的状态，
-            // 回 400 并提示重新检查安装，而非 500
-            crate::updater::UpdaterError::StalePending => ApiError::BadRequest(e.to_string()),
-            // 包本身的问题（版本不够新 / 无法识别版本 / 解压失败 / 超限 / 摘要缺失）
-            // 是用户可纠正的输入错误——与上传入口（POST /api/system/update-package）
-            // 同一契约：400，而非 500
-            crate::updater::UpdaterError::PackageNotNewer { .. }
-            | crate::updater::UpdaterError::VersionUnrecognized
-            | crate::updater::UpdaterError::ExtractFailed(_)
-            | crate::updater::UpdaterError::DownloadTooLarge { .. }
-            | crate::updater::UpdaterError::MissingChecksum => ApiError::BadRequest(e.to_string()),
-            other => ApiError::from(other),
-        }
+        ApiError::from(e)
     })?;
     Ok(data(serde_json::json!({
         "message": "更新已暂存，重启后生效",
@@ -665,23 +647,7 @@ pub async fn apply_update_package(
             .await
             .map_err(|e| {
                 tracing::warn!(file = %file_name, "使用上传的安装包失败: {e}");
-                match e {
-                    // 登录进行中 / 已有待应用更新 / 更新已被取消（程序正在卸载）属调用时序
-                    // 冲突，500 会误导前端
-                    crate::updater::UpdaterError::UpdateInProgress
-                    | crate::updater::UpdaterError::LoginInProgress
-                    | crate::updater::UpdaterError::Cancelled => ApiError::Conflict(e.to_string()),
-                    // 包本身的问题（版本不够新 / 无法识别版本 / 解压失败 / 超限）
-                    // 是用户可纠正的输入错误
-                    crate::updater::UpdaterError::PackageNotNewer { .. }
-                    | crate::updater::UpdaterError::VersionUnrecognized
-                    | crate::updater::UpdaterError::ExtractFailed(_)
-                    | crate::updater::UpdaterError::DownloadTooLarge { .. }
-                    | crate::updater::UpdaterError::MissingChecksum => {
-                        ApiError::BadRequest(e.to_string())
-                    }
-                    other => ApiError::from(other),
-                }
+                ApiError::from(e)
             })?;
         return Ok(data(serde_json::json!({
             "message": "更新已暂存，重启后生效",
@@ -1365,6 +1331,8 @@ mod tests {
         async fn cancel_pending_update(&self) -> bool {
             false
         }
+
+        fn restore_after_failed_uninstall(&self) {}
     }
 
     fn sample_info() -> UpdateInfo {
@@ -1643,6 +1611,8 @@ mod tests {
         async fn cancel_pending_update(&self) -> bool {
             false
         }
+
+        fn restore_after_failed_uninstall(&self) {}
     }
 
     fn upload_app(recorder: UploadRecorder, outcome: UploadOutcome) -> axum::Router {

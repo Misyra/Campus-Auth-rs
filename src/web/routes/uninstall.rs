@@ -167,7 +167,7 @@ fn current_install_dir() -> Result<PathBuf, ApiError> {
 ///
 /// 返回卸载时将清理的**全部**内容（不执行任何删除）：
 /// - `items`：`base_path` 之外的系统残留（用户数据目录 / Playwright 缓存 / 自启动）；
-/// - `program`：程序目录（`purge` 会整体删除）；
+/// - `program`：程序目录（保留数据时只移除程序文件）；
 /// - `helper`：卸载助手是否在位（不在位时 `purge` 必失败，界面据此先拦下）；
 /// - `data`：`base_path` 下的用户数据目录（勾选「保留配置与任务」则保留）；
 /// - `blocked`：非 `null` 表示**拒绝卸载**及原因（如该目录是源码仓库、cargo 构建输出）。
@@ -219,6 +219,11 @@ pub async fn detect_uninstall(
     let blocked = crate::uninstall::build_plan(&install_dir, &base_path, false)
         .err()
         .map(|e| e.to_string());
+    let keep_data_blocked = if blocked.is_none() {
+        crate::uninstall::build_plan(&install_dir, &base_path, true).err()
+    } else {
+        None
+    };
 
     let inventory = build_inventory(&base_path, &install_dir);
     Ok(data(serde_json::json!({
@@ -227,6 +232,7 @@ pub async fn detect_uninstall(
         "helper": inventory["helper"].clone(),
         "data": inventory["data"].clone(),
         "blocked": blocked,
+        "keep_data_blocked": keep_data_blocked,
     })))
 }
 

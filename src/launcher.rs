@@ -244,21 +244,22 @@ async fn run_after_logging(
                 // 而是打开运行中实例的 Web 控制台后正常退出——GUI 双击无控制台，
                 // 浏览器就是"已在运行"的用户可见信号。轻量模式（端口 0）没有
                 // Web 入口，维持原报错。
-                if !cli.force {
-                    if let Some(info) = crate::utils::lock::query_instance(&app_config.base_path) {
-                        if info.running && info.port > 0 && app_config.auto_open_browser {
-                            let url = format!("http://127.0.0.1:{}", info.port);
-                            if open::that(&url).is_ok() {
-                                // 控制台层写 stderr（终端启动可见）；本路径提前返回后，
-                                // run 外层统一 drop log_guard 并 flush 该条日志
-                                info!(
-                                    pid = info.pid,
-                                    url = %url,
-                                    "已有实例运行中，已在浏览器打开其 Web 控制台"
-                                );
-                                return Ok(());
-                            }
-                        }
+                if !cli.force
+                    && let Some(info) = crate::utils::lock::query_instance(&app_config.base_path)
+                    && info.running
+                    && info.port > 0
+                    && app_config.auto_open_browser
+                {
+                    let url = format!("http://127.0.0.1:{}", info.port);
+                    if open::that(&url).is_ok() {
+                        // 控制台层写 stderr（终端启动可见）；本路径提前返回后，
+                        // run 外层统一 drop log_guard 并 flush 该条日志
+                        info!(
+                            pid = info.pid,
+                            url = %url,
+                            "已有实例运行中，已在浏览器打开其 Web 控制台"
+                        );
+                        return Ok(());
                     }
                 }
                 return Err(e);
@@ -541,24 +542,24 @@ fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
         Ok(lock) => Ok(lock),
         Err(_) if force => {
             warn!("已有实例运行中，--force 终止...");
-            if let Some(info) = crate::utils::lock::query_instance(base_path) {
-                if info.running {
-                    // PID 复用防护：非本程序进程拒绝误杀，仅清理残留后抢锁
-                    if !crate::utils::lock::is_own_process(info.pid) {
-                        warn!(
-                            pid = info.pid,
-                            "目标 PID 非本程序实例（疑似 PID 复用/残留），跳过 kill，仅清理后抢锁"
-                        );
-                    } else {
-                        crate::utils::lock::force_kill(info.pid);
-                        for retry in 0..5 {
-                            std::thread::sleep(std::time::Duration::from_millis(200 * (retry + 1)));
-                            if let Ok(lock) = InstanceLock::try_acquire(base_path) {
-                                return Ok(lock);
-                            }
+            if let Some(info) = crate::utils::lock::query_instance(base_path)
+                && info.running
+            {
+                // PID 复用防护：非本程序进程拒绝误杀，仅清理残留后抢锁
+                if !crate::utils::lock::is_own_process(info.pid) {
+                    warn!(
+                        pid = info.pid,
+                        "目标 PID 非本程序实例（疑似 PID 复用/残留），跳过 kill，仅清理后抢锁"
+                    );
+                } else {
+                    crate::utils::lock::force_kill(info.pid);
+                    for retry in 0..5 {
+                        std::thread::sleep(std::time::Duration::from_millis(200 * (retry + 1)));
+                        if let Ok(lock) = InstanceLock::try_acquire(base_path) {
+                            return Ok(lock);
                         }
-                        anyhow::bail!("强制终止后无法获取锁");
                     }
+                    anyhow::bail!("强制终止后无法获取锁");
                 }
             }
             if let Err(e) = std::fs::remove_file(crate::utils::paths::instance_info_path(base_path))
@@ -618,10 +619,10 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
     let handle = app::start_axum_with_listener(container, state.log_tx.clone(), prepared)
         .context("Web 控制台启动失败")?;
     let port = handle.port;
-    if let Some(lock) = &state.instance_lock {
-        if let Err(e) = lock.record_port(port) {
-            warn!(port = port, error = %e, "记录运行端口到实例锁失败");
-        }
+    if let Some(lock) = &state.instance_lock
+        && let Err(e) = lock.record_port(port)
+    {
+        warn!(port = port, error = %e, "记录运行端口到实例锁失败");
     }
     state.axum_handle = Some(handle);
     let bind_host = state.app_config.host.as_deref().unwrap_or("127.0.0.1");
@@ -687,10 +688,10 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     // `.instance` 文件仍提供 PID/存活状态供 --status 查询，但 --stop 不会向
     // 未监听端口发无效请求。真实端口在 Axum 绑定后由托盘按需启动路径
     // （write_instance_port）回写。
-    if let Some(ref lock) = state.instance_lock {
-        if let Err(e) = lock.record_port(0) {
-            tracing::debug!(error = %e, "记录哨兵端口 0 失败（--status 将看不到端口）");
-        }
+    if let Some(ref lock) = state.instance_lock
+        && let Err(e) = lock.record_port(0)
+    {
+        tracing::debug!(error = %e, "记录哨兵端口 0 失败（--status 将看不到端口）");
     }
 
     spawn_background_update_check(state);

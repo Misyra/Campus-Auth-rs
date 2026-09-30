@@ -92,12 +92,11 @@ pub(crate) async fn validate_host(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if policy == HostPolicy::LoopbackOnly {
-        if let Some(host) = req.headers().get(header::HOST) {
-            if !is_trusted_loopback_host(host.to_str().unwrap_or("")) {
-                return forbidden_host();
-            }
-        }
+    if policy == HostPolicy::LoopbackOnly
+        && let Some(host) = req.headers().get(header::HOST)
+        && !is_trusted_loopback_host(host.to_str().unwrap_or(""))
+    {
+        return forbidden_host();
     }
     next.run(req).await
 }

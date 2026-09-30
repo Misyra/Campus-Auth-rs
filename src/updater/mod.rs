@@ -8,7 +8,7 @@
 //! 并以其 `original_args` 重启，最后清理 staging 与 pending 标记。
 //!
 //! 手动更新：用户把发布包放进 `<base_path>/update/` 时，检查阶段比对远程清单声明的
-//! SHA256，命中即复用该文件跳过下载（见 [`local`]）。本地包不是独立信任源，仍须
+//! SHA256，命中即复用该文件跳过下载（见 `local`）。本地包不是独立信任源，仍须
 //! 通过同一摘要校验，故不影响离线可用性与既有安全模型。手动「选择安装包」（上传）
 //! 信任口径不同：不比对远程摘要、不拉取远程清单，版本闸门以解压产物 exe 中的
 //! 真实版本（见 [`version_info`]）为准。
@@ -26,9 +26,11 @@ use crate::status::{InstallProgress, LoginStatus, PartialSnapshot, StatusManager
 
 mod apply;
 pub(crate) mod check;
+pub mod distribution;
 pub(crate) mod download;
 pub mod error;
 pub(crate) mod local;
+mod operation;
 pub mod version_info;
 
 pub use apply::PendingUpdate;
@@ -85,16 +87,18 @@ pub struct LastCheckState {
 }
 
 /// 将检查结果写入状态文件（best-effort：失败仅 warn，不影响检查流程本身）
-fn record_last_check(base_path: &std::path::Path, state: &LastCheckState) {
+async fn record_last_check(base_path: &std::path::Path, state: &LastCheckState) {
     let path = base_path.join(LAST_CHECK_FILE_NAME);
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("创建更新状态目录失败: {e}");
-            return;
+    let state = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-    }
-    if let Err(e) = crate::utils::io::atomic_write_json(&path, state) {
-        tracing::warn!("写入上次检查状态失败: {e}");
+        crate::utils::io::atomic_write_json(&path, &state)
+    })
+    .await;
+    if !matches!(result, Ok(Ok(()))) {
+        tracing::warn!("写入上次检查状态失败: {result:?}");
     }
 }
 
@@ -145,6 +149,7 @@ pub struct UpdateInfo {
 }
 
 /// 更新器服务：封装版本检查、下载、暂存与助手替换
+#[derive(Clone)]
 pub struct UpdaterService {
     /// 配置服务（读取 `global.updater` 段）
     config: Arc<ConfigService>,
@@ -160,6 +165,10 @@ pub struct UpdaterService {
     update_in_progress: Arc<AtomicBool>,
     /// 更新是否已被取消（卸载流程置位；置位后任何更新入口都拒绝，见 `Cancelled`）
     update_cancelled: Arc<AtomicBool>,
+    /// 操作所有权跨调用方取消存活，阻塞复制结束前不开放下一次更新。
+    operation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 串行化取消、最终提交以及检查结果对快照的写入。
+    state_lock: Arc<std::sync::Mutex<()>>,
 }
 
 /// Web 层消费的更新器抽象（M1 细粒度 state：updater 域）
@@ -196,15 +205,13 @@ pub trait UpdaterApi: Send + Sync {
     /// `graceful_shutdown` 的 `ensure_helper_for_shutdown` 见到 pending 存在就会唤醒
     /// **更新**助手，把用户刚卸载的程序又"更新"回来并重启。
     async fn cancel_pending_update(&self) -> bool;
-    /// 卸载助手启动失败后恢复更新入口（复位取消标记与下载互斥）
+    /// 卸载助手启动失败后恢复更新入口（复位取消标记）
     ///
-    /// [`Self::cancel_pending_update`] 会**永久**置位取消标记并抢占下载互斥——那是
+    /// [`Self::cancel_pending_update`] 会置位取消标记并等待在途操作退出——那是
     /// "卸载开始后任何更新都不得发生"的闸门。但卸载的第二步是 spawn 卸载助手；
     /// spawn 失败时卸载并未发生（程序文件未被删除），闸门若不复位，此后所有更新
-    /// 都被永久拒绝，用户只能重启进程。默认空实现供测试替身使用。
-    fn restore_after_failed_uninstall(&self) {
-        let _ = ();
-    }
+    /// 都被永久拒绝，用户只能重启进程。实现方必须显式实现恢复，避免静默漏转发。
+    fn restore_after_failed_uninstall(&self);
 }
 
 #[async_trait::async_trait]
@@ -235,6 +242,10 @@ impl UpdaterApi for UpdaterService {
 
     async fn cancel_pending_update(&self) -> bool {
         UpdaterService::cancel_pending_update(self).await
+    }
+
+    fn restore_after_failed_uninstall(&self) {
+        UpdaterService::restore_after_failed_uninstall(self);
     }
 }
 
@@ -274,6 +285,8 @@ impl UpdaterService {
             current_version,
             update_in_progress: Arc::new(AtomicBool::new(false)),
             update_cancelled: Arc::new(AtomicBool::new(false)),
+            operation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            state_lock: Arc::new(std::sync::Mutex::new(())),
         })
     }
 
@@ -281,123 +294,71 @@ impl UpdaterService {
     ///
     /// 委托 [`effective_client_for`]：显式代理优先，未配置/构建失败回退系统代理。
     fn effective_client(&self) -> reqwest::Client {
-        let settings = self.config.load_settings().global.updater;
+        let settings = self.config.runtime().load().updater.clone();
         effective_client_for(&settings, self.http_client.clone())
     }
 
-    /// 启动后台版本检查任务（循环：启动时检查一次，之后按 check_interval_hours 定时检查）
+    /// 启动自动检查任务，订阅配置变化以立即重算开关、周期和代理。
     ///
-    /// 延迟 [`STARTUP_CHECK_DELAY`] 后拉取清单，发现更新则
-    /// `merge(PartialSnapshot::Update { .. })`；失败静默忽略。
-    /// `cancel` 用于优雅中止。
-    ///
-    /// 语义（U6 修复）：`check_on_startup` 只决定"启动是否立即检查一次"（循环外读一次），
-    /// 循环内的周期检查不受其影响——否则关闭该开关会连定时检查一并消失。
-    /// 关闭该开关后循环内不再补"启动首查"（旧实现的 `due_now = !check_on_startup`
-    /// 会让开关形同虚设），首轮检查按 `check_interval_hours` 周期等待。
-    ///
-    /// 双查修复：循环改为"先等待再检查"。旧实现每轮"先查再睡"，与启动检查
-    /// 相邻执行造成同一时刻 2×清单 + 2N×伴随 sha 拉取。
-    ///
-    /// `auto_check_enabled` 为总开关（设置页"自动检查更新"）：关闭后启动检查与
-    /// 周期检查全部静默，仅保留手动"立即检查"；循环低频轮询该值，重新打开无需重启，
-    /// 且由关到开的跃迁会立即补查一次（不等完整周期）。
-    /// 返回后台任务句柄（UPD-9：由 launcher 登记供关闭流程统一 abort）
+    /// 启动检查遵循 check_on_startup；重新开启总开关立即补查；周期为零时
+    /// 不定期检查。取消令牌可中断启动等待、周期等待和清单请求。
     pub fn start_background_check(&self, cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
-        let config = self.config.clone();
-        let status = self.status.clone();
-        // 回退客户端（跟随系统代理）；每次检查按当前配置构建实际客户端，
-        // 运行时修改 use_proxy / proxy_url 无需重启即生效
-        let fallback_client = self.http_client.clone();
-        let current_version = self.current_version.clone();
-        let base_path = self.base_path.clone();
-        // UPD-1：下载/应用进行中时检查不得覆盖更新状态（进度清零/可用性回退）
-        let update_in_progress = Arc::clone(&self.update_in_progress);
-
+        let service = self.clone();
+        let mut version_rx = self.config.subscribe_version();
         tokio::spawn(async move {
-            tokio::time::sleep(STARTUP_CHECK_DELAY).await;
-            // 启动即查：读一次决定，不随循环迭代变化
-            let startup_settings = config.load_settings().global.updater;
-            if startup_settings.auto_check_enabled && startup_settings.check_on_startup {
-                let client = effective_client_for(&startup_settings, fallback_client.clone());
-                if let Err(e) = perform_update_check(
-                    &config,
-                    &status,
-                    &client,
-                    &current_version,
-                    &base_path,
-                    update_in_progress.load(Ordering::SeqCst),
-                )
-                .await
-                {
-                    log_check_failure("启动时", &e);
-                    record_last_check(
-                        &base_path,
-                        &LastCheckState {
-                            error: e.to_string(),
-                            ..last_check_now()
-                        },
-                    );
-                }
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(STARTUP_CHECK_DELAY) => {}
             }
-            // 启动是否检查完全由 check_on_startup 决定（上方循环外分支）；
-            // 循环内 due_now 仅用于"总开关由关到开"的立即补查
-            let mut due_now = false;
-            let mut prev_auto_enabled = startup_settings.auto_check_enabled;
+            let startup = service.config.runtime().load().updater.clone();
+            let mut previous_enabled = startup.auto_check_enabled;
+            let mut due_now = startup.auto_check_enabled && startup.check_on_startup;
+            let mut last_check = tokio::time::Instant::now();
             loop {
-                // 每次迭代重新读取配置（支持运行时修改）
-                let settings = config.load_settings().global.updater;
-                // 总开关关闭：不自动检查，低频轮询配置等待重新打开
-                if !settings.auto_check_enabled {
-                    prev_auto_enabled = false;
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = tokio::time::sleep(SETTINGS_POLL_INTERVAL) => continue,
-                    }
-                }
-                // 总开关由关到开：立即补查一次，无需等待完整周期
-                if !prev_auto_enabled {
+                let settings = service.config.runtime().load().updater.clone();
+                if settings.auto_check_enabled && !previous_enabled {
                     due_now = true;
                 }
-                prev_auto_enabled = true;
-                if !due_now {
-                    if settings.check_interval_hours == 0 {
-                        // 定时检查已禁用（启动检查已完成或未要求）：低频轮询配置，
-                        // 运行时改回非 0 无需重启。原实现在此永久阻塞 cancelled()，
-                        // 导致 0 → 非 0 的热改永远不生效（除非重启）。
-                        tokio::select! {
-                            _ = cancel.cancelled() => break,
-                            _ = tokio::time::sleep(SETTINGS_POLL_INTERVAL) => continue,
-                        }
-                    }
-                    let interval_secs = (settings.check_interval_hours as u64).saturating_mul(3600);
-                    let interval = std::time::Duration::from_secs(interval_secs.max(300)); // 最少 5 分钟
-                    tokio::select! {
+                previous_enabled = settings.auto_check_enabled;
+                let deadline = next_check_deadline(&settings, last_check);
+                if settings.auto_check_enabled
+                    && (due_now || deadline.is_some_and(|time| time <= tokio::time::Instant::now()))
+                {
+                    let client = effective_client_for(&settings, service.http_client.clone());
+                    let result = tokio::select! {
                         _ = cancel.cancelled() => break,
-                        _ = tokio::time::sleep(interval) => {},
+                        result = perform_update_check(
+                            &service.config, &service.status, &client,
+                            &service.current_version, &service.base_path,
+                            &service.update_in_progress, &service.state_lock,
+                        ) => result,
+                    };
+                    if let Err(error) = result {
+                        log_check_failure("自动", &error);
+                        record_last_check(
+                            &service.base_path,
+                            &LastCheckState {
+                                error: error.to_string(),
+                                ..last_check_now()
+                            },
+                        )
+                        .await;
                     }
+                    last_check = tokio::time::Instant::now();
+                    due_now = false;
+                    continue;
                 }
                 due_now = false;
-                // 每周期等待结束后执行一次检查
-                let client = effective_client_for(&settings, fallback_client.clone());
-                if let Err(e) = perform_update_check(
-                    &config,
-                    &status,
-                    &client,
-                    &current_version,
-                    &base_path,
-                    update_in_progress.load(Ordering::SeqCst),
-                )
-                .await
-                {
-                    log_check_failure("定期", &e);
-                    record_last_check(
-                        &base_path,
-                        &LastCheckState {
-                            error: e.to_string(),
-                            ..last_check_now()
-                        },
-                    );
+                // 配置通知立即重算周期；低频轮询兜底重新读取权威快照。
+                let wake = deadline
+                    .unwrap_or_else(|| tokio::time::Instant::now() + SETTINGS_POLL_INTERVAL);
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    changed = version_rx.changed() => {
+                        if changed.is_err() { break; }
+                    }
+                    _ = tokio::time::sleep_until(wake) => {},
+                    _ = tokio::time::sleep(SETTINGS_POLL_INTERVAL) => {},
                 }
             }
         })
@@ -409,7 +370,7 @@ impl UpdaterService {
     /// 网络路径同下载：显式代理（use_proxy）优先，未配置跟随系统代理。
     /// 无论成败均刷新 `update/last_check.json`（设置页"上次检查时间"数据源）。
     pub async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
-        let settings = self.config.load_settings().global.updater;
+        let settings = self.config.runtime().load().updater.clone();
         let client = self.effective_client();
         let manifest = match check::fetch_manifest_for_channel(
             &client,
@@ -426,7 +387,8 @@ impl UpdaterService {
                         error: e.to_string(),
                         ..last_check_now()
                     },
-                );
+                )
+                .await;
                 return Err(e);
             }
         };
@@ -443,9 +405,14 @@ impl UpdaterService {
                         platform_unavailable: true,
                         ..last_check_now()
                     },
-                );
+                )
+                .await;
                 // 与后台检查同样 merge 快照：托盘"发现新版本"文案保持一致；
                 // UPD-1：下载/应用进行中不得覆盖更新状态
+                let _state = self
+                    .state_lock
+                    .lock()
+                    .unwrap_or_else(crate::utils::recover_lock);
                 if !self.update_in_progress.load(Ordering::SeqCst) {
                     self.status.merge(PartialSnapshot::Update {
                         available: false,
@@ -477,14 +444,21 @@ impl UpdaterService {
                 latest_version: manifest.version.to_string(),
                 ..last_check_now()
             },
-        );
-        // 与后台检查同样 merge 快照：手动发现新版本后托盘菜单文本即时更新；
-        // UPD-1：下载/应用进行中不得覆盖更新状态（进度清零/可用性回退）
-        if !self.update_in_progress.load(Ordering::SeqCst) {
-            self.status.merge(PartialSnapshot::Update {
-                available: has_update,
-                progress: None,
-            });
+        )
+        .await;
+        {
+            // 与后台检查同样 merge 快照：手动发现新版本后托盘菜单文本即时更新；
+            // UPD-1：下载/应用进行中不得覆盖更新状态（进度清零/可用性回退）
+            let _state = self
+                .state_lock
+                .lock()
+                .unwrap_or_else(crate::utils::recover_lock);
+            if !self.update_in_progress.load(Ordering::SeqCst) {
+                self.status.merge(PartialSnapshot::Update {
+                    available: has_update,
+                    progress: None,
+                });
+            }
         }
         if !has_update {
             return Ok(None);
@@ -526,42 +500,39 @@ impl UpdaterService {
 
     /// 取消待应用更新（卸载前调用）
     ///
-    /// 复用"替换成功后"的同一套清理（[`apply::cleanup_after_apply`]）：`pending.json`
+    /// 复用"替换成功后"的同一套清理（`apply::cleanup_after_apply`）：`pending.json`
     /// 与 staging 是"待应用"的全部状态，两者都清掉后 [`Self::has_pending_update`] 即为
     /// false，关机路径不会再唤醒更新助手。
     ///
     /// **返回值是"这次调用真的把更新取消掉了"**，而不是"此前有 pending"：
     /// - 清理是 best-effort（warn-only），不复查就会把"没删掉"报成"已取消"，而卸载流程
     ///   正是靠这个布尔值决定要不要提示用户；
-    /// - 先落 `update_cancelled` 标记并抢占下载互斥，堵住两条"取消之后更新还发生"的路径：
+    /// - 先落 `update_cancelled` 标记并等待在途操作退出，堵住两条"取消之后更新还发生"的路径：
     ///   ① 在途下载跑完后无条件写 `pending.json` 并 spawn 助手（用户刚卸载的程序被装回来）；
     ///   ② cancel 之后又开一轮新的下载。两条都不是理论问题——①正是这个函数存在的理由。
     pub async fn cancel_pending_update(&self) -> bool {
-        self.update_cancelled.store(true, Ordering::SeqCst);
-        let _ = self.update_in_progress.compare_exchange(
-            false,
-            true,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        );
-        if !apply::has_pending_update(&self.base_path) {
-            return false;
+        {
+            let _state = self
+                .state_lock
+                .lock()
+                .unwrap_or_else(crate::utils::recover_lock);
+            self.update_cancelled.store(true, Ordering::SeqCst);
         }
-        apply::cleanup_after_apply(&self.base_path).await;
-        // 复查：清理失败（文件被占用等）时不能对调用方谎称"已取消"
-        let pending_left = apply::has_pending_update(&self.base_path);
-        let staging_left = self.base_path.join(apply::STAGING_DIR_NAME).exists();
-        let cancelled = !pending_left && !staging_left;
-        if cancelled {
-            tracing::info!("已取消待应用更新（卸载前清理 pending.json 与 staging）");
-        } else {
-            tracing::warn!(
-                pending_left,
-                staging_left,
-                "取消待应用更新未完全成功（卸载后仍可能被更新助手装回来）"
-            );
-        }
-        cancelled
+        let service = self.clone();
+        // 清理也由独立任务持有：HTTP 请求断开不能中断卸载闸门的收尾。
+        tokio::spawn(async move {
+            let _operation = service.operation_lock.lock().await;
+            let had_pending = apply::has_pending_update(&service.base_path);
+            apply::cleanup_after_apply(&service.base_path).await;
+            had_pending
+                && !apply::has_pending_update(&service.base_path)
+                && !service.base_path.join(apply::STAGING_DIR_NAME).exists()
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!("取消更新任务失败: {error}");
+            false
+        })
     }
 
     /// 更新是否已被取消（卸载流程置位）
@@ -572,19 +543,14 @@ impl UpdaterService {
         self.update_cancelled.load(Ordering::SeqCst)
     }
 
-    /// 卸载助手启动失败后恢复更新入口（卸载路由专用，见 trait 同名方法）
-    ///
-    /// `cancel_pending_update` 落下的两枚标记在这里复位：
-    /// - `update_cancelled` 直接置 false——spawn 失败意味着卸载未发生，
-    ///   "卸载后拒绝一切更新"的前提不再成立；
-    /// - `update_in_progress` 按 CAS 释放（仅 true → false），不干扰其他路径
-    ///   刚刚合法持有的下载互斥。
+    /// 卸载助手启动失败后恢复入口；操作互斥只由持有者释放。
     pub fn restore_after_failed_uninstall(&self) {
+        let _state = self
+            .state_lock
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock);
         self.update_cancelled.store(false, Ordering::SeqCst);
-        self.update_in_progress
-            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            .ok();
-        tracing::info!("卸载助手启动失败，已恢复更新入口（取消标记与下载互斥已复位）");
+        tracing::info!("卸载助手启动失败，已恢复更新入口");
     }
 
     /// 读取上次检查状态（`update/last_check.json`；缺失/损坏返回 `None`）
@@ -606,6 +572,13 @@ impl UpdaterService {
     /// 解压 → 写 `pending.json` → spawn 助手进程（助手等待本进程退出后完成替换与重启）。
     /// 调用方在收到 `Ok` 后应执行优雅关闭并使主进程退出，以放行助手替换。
     pub async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
+        let info = info.clone();
+        self.run_operation(move |service| async move { service.apply_update_inner(&info).await })
+            .await
+    }
+
+    /// 在独立任务的操作所有权内完成网络更新或唤醒已有助手。
+    async fn apply_update_inner(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
         // 卸载已开始：一律拒绝（含"补唤醒助手"那条分支——取消之后唤醒助手正是要防的事）
         if self.update_cancelled() {
             tracing::warn!("更新已被取消（程序正在卸载），拒绝应用更新");
@@ -614,8 +587,7 @@ impl UpdaterService {
         // 已有待应用更新（本进程此前发起或上次会话遗留）：不重复下载，
         // 补唤醒 helper（上次 spawn 的 helper 等待本进程退出超时 60s 后可能已退出）
         // 并按成功返回——前端继续展示"更新已就绪，重启后生效"。
-        // 互斥语义由 pending 文件承载：存在即"已暂存待重启"，进程内
-        // AtomicBool 只防真正的并发下载窗口。
+        // 操作锁保护检查、暂存和提交；pending 文件承载"已暂存待重启"状态。
         if apply::has_pending_update(&self.base_path) {
             // 幂等不等于免检：pending 存在但 staging 实物已失效（文件被清/损坏）时，
             // 补唤醒 helper 只会被路径校验或 SHA 复核拒绝，前端却拿到"更新已就绪"
@@ -648,36 +620,23 @@ impl UpdaterService {
             return Ok(());
         }
 
-        if self
-            .update_in_progress
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err(UpdaterError::UpdateInProgress);
-        }
-
         // 前置检查：登录进行中则拒绝
         let snapshot = self.status.borrow();
         if snapshot.login_status == LoginStatus::Running {
-            self.update_in_progress.store(false, Ordering::SeqCst);
             return Err(UpdaterError::LoginInProgress);
         }
 
         if let Err(e) = self.download_stage_and_pending(info).await {
             // 失败释放互斥，允许后续重试
-            self.update_in_progress.store(false, Ordering::SeqCst);
             self.clear_update_progress();
             return Err(e);
         }
-        // 下载暂存完成即"更新已就绪"：释放进程内互斥（后续重复请求由
-        // pending 存在性幂等接管），spawn 失败同样释放——关机时
-        // ensure_helper_for_shutdown 会按需补唤醒，允许重新发起。
+        // 暂存完成后唤醒助手，操作守卫在本任务退出时释放互斥；后续请求由
+        // pending 存在性幂等接管。spawn 失败时关机路径仍可按需补唤醒。
         if let Err(e) = self.spawn_helper() {
-            self.update_in_progress.store(false, Ordering::SeqCst);
             self.clear_update_progress();
             return Err(e);
         }
-        self.update_in_progress.store(false, Ordering::SeqCst);
         self.clear_update_progress();
         Ok(())
     }
@@ -710,7 +669,7 @@ impl UpdaterService {
     /// - 版本仍须**严格高于**当前版本（与 helper 侧 `pending_version_allowed` 同口径），
     ///   且版本号必须能从包内提取——版本号未知的包写进 pending 只会被 helper 拒绝，
     ///   留下一个永远不会被应用的待定更新，故 fail-closed；
-    /// - 落盘仍走 [`Self::finalize_staged_package`]，exe 摘要由本进程实际计算后写入
+    /// - 落盘仍走 `Self::finalize_staged_package`，exe 摘要由本进程实际计算后写入
     ///   `pending.json` 供 helper 复核（不是上传方声明的值）。
     ///
     /// 返回从包内提取的版本号，供前端提示。
@@ -719,29 +678,15 @@ impl UpdaterService {
         archive_name: &str,
         archive_path: &Path,
     ) -> Result<String, UpdaterError> {
-        // 卸载已开始：不接收新包（与 apply_update 同一道闸）
-        if self.update_cancelled() {
-            return Err(UpdaterError::Cancelled);
-        }
-        // 已有待应用更新：不覆盖（与 apply_update 同语义，避免把已就绪的更新换掉）
-        if apply::has_pending_update(&self.base_path) {
-            return Err(UpdaterError::UpdateInProgress);
-        }
-        if self
-            .update_in_progress
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err(UpdaterError::UpdateInProgress);
-        }
-        let result = self
-            .apply_uploaded_package_inner(archive_name, archive_path)
-            .await;
-        self.update_in_progress.store(false, Ordering::SeqCst);
-        if result.is_err() {
-            self.clear_update_progress();
-        }
-        result
+        let name = archive_name.to_owned();
+        let path = archive_path.to_path_buf();
+        self.run_operation(move |service| async move {
+            if apply::has_pending_update(&service.base_path) {
+                return Err(UpdaterError::UpdateInProgress);
+            }
+            service.apply_uploaded_package_inner(&name, &path).await
+        })
+        .await
     }
 
     /// [`Self::apply_uploaded_package`] 的实际执行体（调用方已持有互斥标记）
@@ -932,12 +877,33 @@ impl UpdaterService {
             sha256: exe_sha256,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        apply::write_pending(&pending, &self.base_path)?;
-        Ok(())
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || service.commit_pending(&pending))
+            .await
+            .map_err(|e| UpdaterError::OperationFailed(e.to_string()))?
+    }
+
+    /// 摘要完成后的最终提交与取消共用临界区。
+    fn commit_pending(&self, pending: &PendingUpdate) -> Result<(), UpdaterError> {
+        let _state = self
+            .state_lock
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock);
+        if self.update_cancelled() {
+            return Err(UpdaterError::Cancelled);
+        }
+        apply::write_pending(pending, &self.base_path)
     }
 
     /// spawn 助手进程（不在此处退出主进程）
     fn spawn_helper(&self) -> Result<(), UpdaterError> {
+        let _state = self
+            .state_lock
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock);
+        if self.update_cancelled() {
+            return Err(UpdaterError::Cancelled);
+        }
         let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
         let helper_path = current_exe
             .parent()
@@ -1021,33 +987,27 @@ impl UpdaterService {
 
     /// 启动时检测并应用待处理更新
     ///
-    /// 若 `pending.json` 存在且 staging/extracted exe 完好，则直接 `self_replace`
-    /// 替换当前运行中的 exe 并清理；否则清理残留并返回 `false`。
+    /// 若 `pending.json` 存在且暂存完好，同步完整分发并替换当前程序。
+    /// 同步失败保留暂存重试；非法或缺失的暂存清理后返回 `false`。
     ///
-    /// F9：与手动 `apply_update` 统一走 `update_in_progress` 原子标记互斥——
-    /// 后台路径抢不到标记说明手动"立即更新"正在进行（可能正在重写
-    /// pending.json / 重复 spawn helper），此时跳过本次后台应用并记日志，
-    /// pending.json 留待下次启动处理，不再依赖 sleep 错峰。
+    /// 与手动更新共用独立任务的操作所有权；占用时保留 pending 待后续重试。
     pub async fn apply_pending_on_startup(&self) -> Result<bool, UpdaterError> {
-        if !apply::has_pending_update(&self.base_path) {
-            // 无 pending 时顺带清理长期残留的 staging（用户点了"立即更新"却
-            // 长期不重启时，旧版本压缩包会一直堆积在 update/staging/）
-            self.cleanup_stale_staging().await;
-            return Ok(false);
+        let result = self
+            .run_operation(|service| async move {
+                if !apply::has_pending_update(&service.base_path) {
+                    service.cleanup_stale_staging().await;
+                    return Ok(false);
+                }
+                if service.status.borrow().login_status == LoginStatus::Running {
+                    return Err(UpdaterError::LoginInProgress);
+                }
+                service.apply_pending_locked().await
+            })
+            .await;
+        match result {
+            Err(UpdaterError::UpdateInProgress | UpdaterError::Cancelled) => Ok(false),
+            result => result,
         }
-        // F9：抢不到标记 = 手动更新正在进行 → 跳过（不清理、不替换）
-        if self
-            .update_in_progress
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            tracing::info!("手动更新进行中，跳过后台待定更新应用（下次启动再试）");
-            return Ok(false);
-        }
-        let result = self.apply_pending_locked().await;
-        // 无论成败均释放互斥（后台应用为一次性启动动作，手动路径可继续）
-        self.update_in_progress.store(false, Ordering::SeqCst);
-        result
     }
 
     /// 清理超过 [`STALE_STAGING_AGE`] 未变动的 staging 残留（best-effort）
@@ -1069,10 +1029,10 @@ impl UpdaterService {
             return;
         }
         tracing::info!("清理超过 3 天未变动的 staging 残留: {}", staging.display());
-        if let Err(e) = tokio::fs::remove_dir_all(&staging).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("清理 staging 残留失败: {e}");
-            }
+        if let Err(e) = tokio::fs::remove_dir_all(&staging).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("清理 staging 残留失败: {e}");
         }
     }
 
@@ -1121,7 +1081,13 @@ impl UpdaterService {
             return Ok(false);
         }
         // 复核 staging exe 摘要（与 helper 同逻辑）
-        match crate::utils::io::file_sha256(&extracted_exe) {
+        let actual_sha = tokio::task::spawn_blocking({
+            let exe = extracted_exe.clone();
+            move || crate::utils::io::file_sha256(&exe)
+        })
+        .await
+        .map_err(|e| UpdaterError::OperationFailed(e.to_string()))?;
+        match actual_sha {
             Ok(actual) if actual.eq_ignore_ascii_case(&pending.sha256) => {}
             Ok(actual) => {
                 tracing::error!(
@@ -1138,9 +1104,8 @@ impl UpdaterService {
             }
         }
 
-        // U3 二次校验：pending 版本不高于当前版本则跳过并清理（下载与启动之间的时间窗内
-        // staging 产物或版本可能已过期/被替换）；版本号无法解析同样拒绝——
-        // 故障模式须 fail-closed，不给被篡改的 pending 留静默放行通道
+        // 二次校验拒绝降级和非法版本；同版本仅在当前 exe 摘要一致时允许修复
+        // 分发文件，覆盖主程序已提交、助手同步尚未完成的崩溃窗口。
         let pending_ver = match Version::parse(&pending.version) {
             Ok(v) => v,
             Err(e) => {
@@ -1152,7 +1117,20 @@ impl UpdaterService {
                 return Ok(false);
             }
         };
-        if pending_ver <= self.current_version {
+        let same_version_recovery = pending_ver == self.current_version;
+        let current_matches = if same_version_recovery {
+            let exe = current_exe.clone();
+            let expected = pending.sha256.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::utils::io::file_sha256(&exe)
+                    .is_ok_and(|actual| actual.eq_ignore_ascii_case(&expected))
+            })
+            .await
+            .map_err(|e| UpdaterError::OperationFailed(e.to_string()))?
+        } else {
+            false
+        };
+        if pending_ver < self.current_version || (same_version_recovery && !current_matches) {
             tracing::warn!(
                 "pending 版本 {pending_ver} 不高于当前 {}，跳过应用并清理",
                 self.current_version
@@ -1160,37 +1138,45 @@ impl UpdaterService {
             apply::cleanup_after_apply(&self.base_path).await;
             return Ok(false);
         }
-        let backup_path = self.base_path.join(".backup_exe");
-        if let Err(e) = std::fs::copy(&current_exe, &backup_path) {
-            tracing::warn!("备份当前 exe 失败，跳过回滚保护: {}", e);
-        }
-
-        match self_replace::self_replace(extracted_exe.as_path()) {
-            Ok(()) => {
-                // 替换成功，删除备份并清理 staging
-                if let Err(e) = std::fs::remove_file(&backup_path) {
-                    tracing::debug!("删除更新前 exe 备份失败（忽略）: {e}");
-                }
-                apply::cleanup_after_apply(&self.base_path).await;
-                tracing::info!("启动时已应用更新: v{}", pending.version);
-                Ok(true)
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _state = service
+                .state_lock
+                .lock()
+                .unwrap_or_else(crate::utils::recover_lock);
+            if service.update_cancelled() {
+                return Err(UpdaterError::Cancelled);
             }
-            Err(e) => {
-                tracing::error!("启动时替换失败，回退旧版本: {}", e);
-                // 从备份回滚当前 exe
-                if backup_path.exists() {
-                    if let Err(re) = std::fs::copy(&backup_path, &current_exe) {
-                        tracing::error!(
-                            "回滚失败: {}",
-                            UpdaterError::RollbackFailed(re.to_string())
-                        );
-                    }
-                    let _ = std::fs::remove_file(&backup_path);
-                }
-                apply::cleanup_after_apply(&self.base_path).await;
-                Err(UpdaterError::SelfReplaceFailed(e.to_string()))
+            let worker_target_dir = self_update_worker_dir(&service.base_path)?;
+            let install_dir = current_exe
+                .parent()
+                .ok_or_else(|| UpdaterError::SelfReplaceFailed("无法确定程序目录".into()))?;
+            let extracted_dir = staging_dir.join("extracted");
+            distribution::sync_distribution_files(
+                &extracted_dir,
+                &service.base_path,
+                &worker_target_dir,
+            )
+            .map_err(|e| {
+                UpdaterError::SelfReplaceFailed(format!("分发同步失败，暂存已保留: {e}"))
+            })?;
+            if !same_version_recovery {
+                self_replace::self_replace(&extracted_exe)
+                    .map_err(|e| UpdaterError::SelfReplaceFailed(e.to_string()))?;
             }
-        }
+            // 主程序提交之后更新助手；失败保留 pending，下次用同版本摘要修复分发。
+            distribution::replace_helper(&extracted_dir, install_dir).map_err(|e| {
+                UpdaterError::SelfReplaceFailed(format!("助手同步失败，暂存已保留: {e}"))
+            })?;
+            distribution::sync_portable_marker(&extracted_dir, install_dir)
+                .map_err(|e| UpdaterError::SelfReplaceFailed(e.to_string()))?;
+            Ok(true)
+        })
+        .await
+        .map_err(|e| UpdaterError::OperationFailed(e.to_string()))??;
+        apply::cleanup_after_apply(&self.base_path).await;
+        tracing::info!("启动时已完整应用更新: v{}", pending.version);
+        Ok(true)
     }
 }
 
@@ -1337,9 +1323,10 @@ async fn perform_update_check(
     http_client: &reqwest::Client,
     current_version: &Version,
     base_path: &std::path::Path,
-    update_in_progress: bool,
+    update_in_progress: &AtomicBool,
+    state_lock: &std::sync::Mutex<()>,
 ) -> Result<(), UpdaterError> {
-    let settings = config.load_settings().global.updater;
+    let settings = config.runtime().load().updater.clone();
     let manifest = check::fetch_manifest_for_channel(
         http_client,
         &settings.release_source_url,
@@ -1357,8 +1344,10 @@ async fn perform_update_check(
             platform_unavailable: !platform_available,
             ..last_check_now()
         },
-    );
-    if update_in_progress {
+    )
+    .await;
+    let _state = state_lock.lock().unwrap_or_else(crate::utils::recover_lock);
+    if update_in_progress.load(Ordering::SeqCst) {
         // 下载/应用进行中：available 恒为 true 且进度由下载回调维护，不动快照
         return Ok(());
     }
@@ -1377,6 +1366,21 @@ async fn perform_update_check(
         });
     }
     Ok(())
+}
+
+/// 按最新开关与周期计算截止时刻，不沿用修改前的长时间睡眠。
+fn next_check_deadline(
+    settings: &crate::config::schema::UpdaterSettings,
+    last_check: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    (settings.auto_check_enabled && settings.check_interval_hours > 0).then(|| {
+        last_check
+            + Duration::from_secs(
+                u64::from(settings.check_interval_hours)
+                    .saturating_mul(3600)
+                    .max(300),
+            )
+    })
 }
 
 /// 更新检查失败的分级日志：远程发布没有当前平台的安装包或校验缺失
@@ -1401,6 +1405,158 @@ fn log_check_failure(stage: &str, e: &UpdaterError) {
 mod tests {
     use super::*;
 
+    /// 关闭和缩短周期都使用最新设置，不能继续等待旧周期。
+    #[test]
+    fn automatic_deadline_tracks_current_settings() {
+        let last = tokio::time::Instant::now() - Duration::from_secs(7200);
+        let mut settings = crate::config::schema::UpdaterSettings::default();
+        assert!(next_check_deadline(&settings, last).unwrap() > tokio::time::Instant::now());
+        settings.check_interval_hours = 1;
+        assert!(next_check_deadline(&settings, last).unwrap() <= tokio::time::Instant::now());
+        settings.auto_check_enabled = false;
+        assert!(next_check_deadline(&settings, last).is_none());
+        settings.auto_check_enabled = true;
+        settings.check_interval_hours = 0;
+        assert!(next_check_deadline(&settings, last).is_none());
+    }
+
+    /// 模拟摘要刚结束时取消已生效：最终提交不得留下 pending。
+    #[tokio::test]
+    async fn cancelled_final_commit_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = make_service(dir.path()).await;
+        service.cancel_pending_update().await;
+        let pending = PendingUpdate {
+            version: "999.0.0".into(),
+            staging_dir: String::new(),
+            target_exe: String::new(),
+            worker_target_dir: String::new(),
+            original_args: vec![],
+            sha256: "0".repeat(64),
+            created_at: String::new(),
+        };
+        assert!(matches!(
+            service.commit_pending(&pending),
+            Err(UpdaterError::Cancelled)
+        ));
+        assert!(!service.has_pending_update());
+        assert!(matches!(
+            service.spawn_helper(),
+            Err(UpdaterError::Cancelled)
+        ));
+    }
+
+    /// 延迟清单响应期间开始更新，后台结果不得清除实时进度。
+    #[tokio::test]
+    async fn delayed_check_preserves_new_download_progress() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let service = make_service(dir.path()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut settings = service.config.load_settings();
+        settings.global.updater.release_source_url = format!("http://{address}/latest.json");
+        service.config.save_settings(&settings).await.unwrap();
+        service.config.reload().await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            assert!(stream.read(&mut buffer).await.unwrap() > 0);
+            started_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            let body = r#"{"version":"999.0.0","platforms":{}}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let check = tokio::spawn({
+            let service = service.clone();
+            async move {
+                let client = reqwest::Client::builder().no_proxy().build().unwrap();
+                perform_update_check(
+                    &service.config,
+                    &service.status,
+                    &client,
+                    &service.current_version,
+                    &service.base_path,
+                    &service.update_in_progress,
+                    &service.state_lock,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(3), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        service.update_in_progress.store(true, Ordering::SeqCst);
+        service.status.merge(PartialSnapshot::Update {
+            available: true,
+            progress: Some(InstallProgress {
+                phase: "downloading_update".into(),
+                percent: 37,
+                message: "下载中".into(),
+            }),
+        });
+        release_tx.send(()).unwrap();
+        check.await.unwrap().unwrap();
+        server.await.unwrap();
+        assert!(service.status.borrow().update_available);
+        assert_eq!(service.status.borrow().update_progress.unwrap().percent, 37);
+    }
+
+    /// 总开关从关闭变为开启时通过通知立即检查，不等待旧轮询或旧周期。
+    #[tokio::test]
+    async fn automatic_check_wakes_on_configuration_change() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let service = make_service(dir.path()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut settings = service.config.load_settings();
+        settings.global.updater.auto_check_enabled = false;
+        settings.global.updater.check_on_startup = false;
+        settings.global.updater.release_source_url =
+            format!("http://{}/latest.json", listener.local_addr().unwrap());
+        service.config.save_settings(&settings).await.unwrap();
+        service.config.reload().await.unwrap();
+        let mut service = (*service).clone();
+        service.http_client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let cancel = CancellationToken::new();
+        let background = service.start_background_check(cancel.clone());
+        tokio::time::sleep(STARTUP_CHECK_DELAY + Duration::from_millis(100)).await;
+        settings.global.updater.auto_check_enabled = true;
+        service.config.save_settings(&settings).await.unwrap();
+        service.config.reload().await.unwrap();
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut buffer = [0; 4096];
+        assert!(stream.read(&mut buffer).await.unwrap() > 0);
+        let body = r#"{"version":"999.0.0","platforms":{}}"#;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        cancel.cancel();
+        background.await.unwrap();
+    }
+
     /// 应用内更新只允许覆盖 base_path 自带的 Worker，防止外置部署版本分裂。
     #[test]
     fn test_self_update_worker_dir_requires_bundled_worker() {
@@ -1420,7 +1576,7 @@ mod tests {
     }
 
     /// 构造测试用 UpdaterService（base_path = tempdir）
-    async fn make_service(base_path: &std::path::Path) -> Arc<UpdaterService> {
+    pub(super) async fn make_service(base_path: &std::path::Path) -> Arc<UpdaterService> {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let config = crate::config::ConfigService::new(base_path.to_path_buf(), tx)
             .await
@@ -1576,28 +1732,29 @@ mod tests {
         assert_eq!(normalize_extracted_version("abc"), None);
     }
 
-    /// 卸载助手启动失败后恢复更新入口：取消标记复位、CAS 释放互斥
+    /// 通过动态接口恢复失败卸载，只复位取消标记而不抢占操作互斥。
     #[tokio::test]
     async fn test_restore_after_failed_uninstall() {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path()).await;
 
-        // 模拟 cancel_pending_update 落下的两枚标记
+        // 取消只设置取消标记，正在运行状态仍归操作守卫所有。
         svc.cancel_pending_update().await;
         assert!(svc.update_cancelled(), "前置：取消标记应已置位");
         assert!(
-            svc.update_in_progress.load(Ordering::SeqCst),
-            "前置：下载互斥应被抢占"
+            !svc.update_in_progress.load(Ordering::SeqCst),
+            "取消状态不应伪装为正在运行"
         );
 
-        svc.restore_after_failed_uninstall();
+        let api: Arc<dyn UpdaterApi> = svc.clone();
+        api.restore_after_failed_uninstall();
         assert!(
             !svc.update_cancelled(),
             "spawn 失败即卸载未发生，取消标记必须复位"
         );
         assert!(
             !svc.update_in_progress.load(Ordering::SeqCst),
-            "被本流程抢占的互斥应经 CAS 释放"
+            "恢复入口不应伪造正在运行状态"
         );
 
         // 复位后更新入口不再被 Cancelled 拒绝（这里会因布局校验失败，但不是 Cancelled）

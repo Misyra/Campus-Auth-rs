@@ -1,8 +1,8 @@
 //! 登录历史持久化：JSONL 追加写入 + 按日期查询 + 清空
 //!
-//! 每次登录终态（成功/失败/取消）由 [`LoginSession`] 调用 [`LoginHistoryService::record`]
+//! 每次登录终态（成功/失败/取消）由 `LoginSession` 调用 [`LoginHistoryService::record`]
 //! 写入 `logs/login_history/YYYY-MM-DD.jsonl`（每天一个文件，每行一条 JSON 对象）。
-//! Web 层 `GET /api/history` 与 `DELETE /api/history` 直接调用 [`query`] 与 [`clear`]。
+//! Web 层 `GET /api/history` 与 `DELETE /api/history` 直接调用 `query` 与 `clear`。
 
 use std::path::{Path, PathBuf};
 

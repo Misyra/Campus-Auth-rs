@@ -12,7 +12,7 @@
 //!    → 交由会话状态机做登录后网络探测复核
 //!
 //! 判定结果映射为既有 `Outcome` 复用会话状态机的重试/历史/通知逻辑；
-//! 日志与返回消息中的凭证与派生值一律脱敏（见 [`collect_secrets`]）——
+//! 日志与返回消息中的凭证与派生值一律脱敏（见 `collect_secrets`）——
 //! 含 reqwest 错误消息（其 `Display` 会拼上完整 URL，GET 渠道下即含明文凭据）。
 //! 响应体按 `Content-Type` charset 解码、UTF-8 → GBK 兜底，兼容中文门户。
 
@@ -1087,19 +1087,19 @@ async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         if let Some(report) = reports.last_mut() {
             report.produced_vars = produced_vars;
         }
-        if let Some((error, outcome)) = issue {
-            if !ignored {
-                return flow_abort(
-                    outcome,
-                    format!("步骤「{}」失败: {error}", step.name),
-                    Some(rendered),
-                    Some(response_tuple),
-                    None,
-                    start,
-                    reports,
-                    &secrets,
-                );
-            }
+        if let Some((error, outcome)) = issue
+            && !ignored
+        {
+            return flow_abort(
+                outcome,
+                format!("步骤「{}」失败: {error}", step.name),
+                Some(rendered),
+                Some(response_tuple),
+                None,
+                start,
+                reports,
+                &secrets,
+            );
         }
         if is_result {
             result_response = Some((status, response_body, response_headers, url, headers, body));
@@ -1737,16 +1737,16 @@ fn substitute(template: &str, vars: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(template.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(end) = template[i + 1..].find('}') {
-                let name = &template[i + 1..i + 1 + end];
-                if is_placeholder_name(name) {
-                    if let Some(v) = vars.get(name) {
-                        out.push_str(v);
-                        i += end + 2;
-                        continue;
-                    }
-                }
+        if bytes[i] == b'{'
+            && let Some(end) = template[i + 1..].find('}')
+        {
+            let name = &template[i + 1..i + 1 + end];
+            if is_placeholder_name(name)
+                && let Some(v) = vars.get(name)
+            {
+                out.push_str(v);
+                i += end + 2;
+                continue;
             }
         }
         // 逐字符推进（多字节字符按字节步进安全：非 '{' 直接拷贝）

@@ -161,7 +161,7 @@ fn build_targets(
 }
 
 impl SharedTargets {
-    /// 构造默认规则（见 [`build_targets`]）
+    /// 构造默认规则（见 `build_targets`）
     fn build(lf: tracing_subscriber::filter::LevelFilter) -> Self {
         Self::new(build_targets(lf))
     }
@@ -252,7 +252,7 @@ pub(crate) fn logging_config_from_value(
 
 /// 热更新全局日志级别（由 `set_log_level` 调用）
 ///
-/// 项目 target 白名单与启动时保持一致（见 [`build_targets`]）。无效级别回退 INFO。
+/// 项目 target 白名单与启动时保持一致（见 `build_targets`）。无效级别回退 INFO。
 pub fn reload_log_level(level: &str) {
     let lf = parse_level(level);
     let Some(shared) = LOG_TARGETS.get() else {

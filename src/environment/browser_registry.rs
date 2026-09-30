@@ -72,10 +72,11 @@ fn fallback_prefixes(engine: &str) -> &'static [&'static str] {
 
 /// Playwright 浏览器缓存根目录（`PLAYWRIGHT_BROWSERS_PATH` 优先，空 / `"0"` 走 OS 默认）
 pub fn browser_cache_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
-        if !dir.is_empty() && dir != "0" {
-            return Some(PathBuf::from(dir));
-        }
+    if let Some(dir) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH")
+        && !dir.is_empty()
+        && dir != "0"
+    {
+        return Some(PathBuf::from(dir));
     }
     #[cfg(target_os = "windows")]
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);

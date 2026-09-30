@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 # 利用 Cargo 依赖缓存：先拷贝清单拉依赖，再拷贝源码
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY openapi.json ./
 # 创建空入口骗过 cargo fetch 的路径检查
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > src/helper_main.rs
