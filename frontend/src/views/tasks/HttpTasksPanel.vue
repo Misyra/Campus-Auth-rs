@@ -8,7 +8,7 @@
  * 此时状态字改口「有 N 处待补全」并在编辑页顶部列出缺什么。
  *
  * 编辑器里没有「调试」——HTTP 登录任务不经 Python Worker，无法单步执行，
- * 验证路径是发一次测试请求（凭据由宿主传入，见 useHttpTaskTest）。
+ * 验证路径是试运行整个 HTTP 流程（凭据由宿主传入，见 useHttpTaskTest）。
  *
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
  */
@@ -27,7 +27,7 @@ import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
 import { useToast } from "@/composables/useToast";
 import { autosaveLabel } from "@/utils/autosave";
 import { useDragSort } from "@/utils/drag";
-import { HTTP_CRYPTO_BUILTINS, HTTP_TEMPLATE_PLACEHOLDERS } from "@/utils/loginChannel";
+import { HTTP_CRYPTO_BUILTINS } from "@/utils/loginChannel";
 import { httpTaskPayload } from "@/utils/httpTask";
 import { buildHttpTaskBindingIndex, buildHttpTaskRows, filterHttpTaskRows } from "@/utils/httpTaskList";
 import { formatMtime } from "@/utils/formatters";
@@ -182,7 +182,7 @@ onBeforeUnmount(() => {
  */
 watch(httpTaskDraft, () => clearTestResult(), { deep: true });
 
-/** 发送一次测试请求：用的是编辑器里的当前草稿（自动保存后的最新内容） */
+/** 试运行整个流程：直接使用当前草稿，测试凭据不进入任务配置。 */
 async function sendTestRequest(): Promise<void> {
   const draft = httpTaskDraft.value;
   if (!draft) return;
@@ -241,11 +241,7 @@ onMounted(async () => {
       />
       <button type="button" class="btn btn-sm" title="从文件导入HTTP 登录任务" @click="importHttpTask">
         <IconApp name="upload" class="icon-sm" />
-        导入
-      </button>
-      <button type="button" class="btn btn-sm" title="从云端仓库导入HTTP 登录任务" @click="repo.showRepoImport('http')">
-        <IconApp name="globe-grid" class="icon-sm" />
-        仓库导入
+        从文件导入
       </button>
       <!-- 与浏览器任务面板同一处修正：工具栏里的动作要用按钮外观，不用 `btn-ghost`
            （它同时抹掉底色与边框，会变成"夹在按钮中间的裸文字"） -->
@@ -297,9 +293,6 @@ onMounted(async () => {
                 <div class="empty-actions">
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
                     <IconApp name="plus" />新建HTTP 登录任务
-                  </button>
-                  <button type="button" class="btn btn-sm" @click="repo.showRepoImport('http')">
-                    <IconApp name="globe-grid" class="icon-sm" />仓库导入
                   </button>
                 </div>
               </div>
@@ -432,46 +425,45 @@ onMounted(async () => {
         <div class="card">
           <div class="card-header"><h3>基本信息</h3></div>
           <div class="card-body">
-            <div class="form-row">
-              <div class="form-group">
-                <div class="field-label-row">
-                  <label :for="`${uid}-id`">任务 ID</label>
-                  <FieldHelp text="落盘文件名（<base>/tasks/http/<id>.json），也是方案里 active_http_task 引用的值。创建时生成，不可修改——改 ID 等于换一个任务，请用「复制」。" wide />
-                </div>
-                <input :id="`${uid}-id`" :value="httpTaskDraft.id" type="text" disabled />
-              </div>
-              <div class="form-group">
-                <label :for="`${uid}-name`">任务名称</label>
-                <input :id="`${uid}-name`" v-model="httpTaskDraft.name" type="text" placeholder="宿舍HTTP 登录" />
-              </div>
-            </div>
             <div class="form-group">
-              <label :for="`${uid}-desc`">描述</label>
-              <input :id="`${uid}-desc`" v-model="httpTaskDraft.description" type="text" placeholder="任务描述（可选）" />
+              <label :for="`${uid}-name`">任务名称</label>
+              <input :id="`${uid}-name`" v-model="httpTaskDraft.name" type="text" placeholder="宿舍 HTTP 登录" />
             </div>
+            <details class="http-optional-info" :open="!!httpTaskDraft.description">
+              <summary>描述与任务 ID <span>可选信息</span></summary>
+              <div class="form-group">
+                <label :for="`${uid}-desc`">描述（可选）</label>
+                <input :id="`${uid}-desc`" v-model="httpTaskDraft.description" type="text" placeholder="适用学校、门户或需要注意的事项" />
+              </div>
+              <div class="form-group">
+                <label :for="`${uid}-id`">任务 ID</label>
+                <input :id="`${uid}-id`" :value="httpTaskDraft.id" type="text" disabled />
+                <span class="hint">自动生成，用来绑定方案；如需另一份任务，请复制。</span>
+              </div>
+            </details>
           </div>
         </div>
 
         <!-- HTTP 登录步骤与结果判断共用一份草稿；旧任务首次调整步骤后迁移。 -->
         <div class="card">
-          <div class="card-header"><h3>HTTP 登录流程</h3></div>
+          <div class="card-header"><h3>编写登录请求</h3></div>
           <div class="card-body">
-            <HttpFlowFields :model="httpTaskDraft" />
+            <HttpFlowFields :model="httpTaskDraft" :result-target="`#${uid}-result`" />
           </div>
         </div>
 
         <!-- 测试区：任务里不含凭据（凭据属于方案），本页没有方案上下文，故手填一次 -->
         <div class="card">
           <div class="card-header">
-            <h3>发送一次测试请求</h3>
+            <h3>试运行任务</h3>
             <FieldHelp
-              text="这里只用来验证「请求形状」对不对：任务本身不含账号密码（凭据属于方案），所以测试时要手填一次。填写的凭据仅用于本次请求，不会写进任务文件。"
+              text="按顺序执行当前任务的全部步骤，并显示请求和响应。测试账号密码仅用于本次试运行，不会写进任务文件。采用联网检测时，还需要在方案中执行正式登录确认网络结果。"
               wide
             />
             <div class="card-actions">
               <button type="button" class="btn btn-sm btn-primary" :disabled="running" @click="sendTestRequest">
                 <IconApp :name="running ? 'refresh' : 'play'" class="icon-sm" :class="{ spin: running }" />
-                {{ running ? '正在发送…' : '发送测试请求' }}
+                {{ running ? '正在试运行…' : '试运行' }}
               </button>
             </div>
           </div>
@@ -486,7 +478,7 @@ onMounted(async () => {
                 <input :id="`${uid}-test-pass`" v-model="testPassword" type="password" placeholder="仅本次测试使用" />
               </div>
             </div>
-            <p class="hint">测试用的是编辑器里的当前内容（已自动保存），点右上「发送测试请求」发送。</p>
+            <p class="hint">按顺序执行当前填写的全部步骤。测试凭据不会保存到任务；任务配置补齐后自动保存。</p>
             <HttpTestResult v-if="testResult" :result="testResult" />
           </div>
         </div>
@@ -498,29 +490,28 @@ onMounted(async () => {
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
             <ol class="http-start-list">
-              <li><span>1</span><p>按顺序添加请求与计算步骤。</p></li>
-              <li><span>2</span><p>指定结果来源，发送一次测试请求。</p></li>
-              <li><span>3</span><p>在「方案」中选择 HTTP 登录并绑定任务。</p></li>
+              <li><span>1</span><p>填写登录接口，选择 GET / POST。</p></li>
+              <li><span>2</span><p>选择判断方式，试运行并查看返回内容。</p></li>
+              <li><span>3</span><p>在「方案」中绑定任务，填写正式账号密码。</p></li>
             </ol>
-            <button type="button" class="http-repo-link" @click="repo.showRepoImport('http')">从仓库导入已有任务 <IconApp name="arrow-right" class="icon-sm" /></button>
+            <button type="button" class="http-repo-link" @click="repo.showRepoImport()">选择现成任务 <IconApp name="arrow-right" class="icon-sm" /></button>
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-header"><h3>字段速查</h3></div>
+        <div :id="`${uid}-result`"></div>
+        <details class="card http-writing-help">
+          <summary>什么时候需要更多步骤？</summary>
           <div class="card-body tsk-side-body">
-            <p class="http-ref-title">请求占位符</p>
-            <div class="chip-row">
-              <code v-for="ph in HTTP_TEMPLATE_PLACEHOLDERS" :key="ph" class="chip">{{ ph }}</code>
-            </div>
+            <p class="hint">直接提交账号密码的接口，一个请求就够。先获取 token 再登录的接口，用两个请求，并在第一步“从返回内容取值”。</p>
+            <p class="hint">需要加密密码或计算签名时，添加计算脚本。函数只在计算脚本中使用。</p>
             <details class="http-ref-functions">
-              <summary>计算函数 <span>{{ HTTP_CRYPTO_BUILTINS.length }} 项</span><IconApp name="chevron-down" class="icon-sm" /></summary>
+              <summary>计算脚本可用函数 <span>{{ HTTP_CRYPTO_BUILTINS.length }} 项</span><IconApp name="chevron-down" class="icon-sm" /></summary>
               <div class="chip-row">
                 <code v-for="fn in HTTP_CRYPTO_BUILTINS" :key="fn" class="chip chip--fn">{{ fn }}</code>
               </div>
             </details>
           </div>
-        </div>
+        </details>
       </div>
     </div>
 
@@ -544,7 +535,12 @@ onMounted(async () => {
 .http-repo-link { display: inline-flex; align-items: center; gap: 5px; width: fit-content; margin-top: 8px; padding: 5px 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
 .http-repo-link:hover { color: var(--accent); text-decoration: underline; }
 .http-repo-link:focus-visible, .http-ref-functions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.http-ref-title { margin: 0; color: var(--text-secondary); font-size: 12px; font-weight: 650; }
+.http-optional-info > summary, .http-writing-help > summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+.http-optional-info > summary { padding: 3px 0 12px; }
+.http-optional-info > summary span { margin-left: 8px; font-size: 12px; }
+.http-writing-help > summary { padding: 16px 20px; }
+.http-writing-help > .card-body { padding-top: 0; }
+.http-optional-info summary:focus-visible, .http-writing-help summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .http-ref-functions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .http-ref-functions summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; font-weight: 650; list-style: none; }
 .http-ref-functions summary::-webkit-details-marker { display: none; }

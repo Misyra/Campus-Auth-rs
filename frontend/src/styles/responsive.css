@@ -2,7 +2,7 @@
  *
  * ═══ 断点尺（全站只用这四个值，勿再新增中间值）═══
  *   640  手机窄屏（单列、满宽按钮、贴边弹窗）
- *   768  窄屏（侧栏收成 64px 图标条、内边距收一档、表单行变单列）
+ *   768  窄屏（底部导航、内边距收一档、表单行变单列）
  *   900  平板窄区（双列栅格降为单列、调试面板双栏改纵排、表格开始让列）
  *   1100 平板宽区 / 小笔记本（设置页签与面板栅格降为单列、看板栅格降列）
  * 反向（≥）只有 1100 一档，用于「够宽时才开双列」（settings/common.css、
@@ -15,7 +15,6 @@
  */
 
 @media (max-width: 1100px) {
-  .settings-tabs,
   .settings-panel-grid {
     grid-template-columns: 1fr;
   }
@@ -27,7 +26,13 @@
 
   .dashboard-grid {
     grid-template-columns: 1fr;
+    flex: none;
   }
+
+  /* 单列看板按内容滚动，避免历史记录把下方实时日志挤出可见区域。 */
+  .content-wrapper > .page-content:has(.stats-grid) { height: auto; min-height: 100%; overflow: visible; }
+  .history-card .card-body { max-height: 300px; }
+  .dashboard-page .log-card { height: 440px; min-height: 320px; }
 }
 
 /* 调试面板双栏（步骤 + 截图）：截图列最小 360px，窄弹窗下会把步骤列挤到
@@ -42,21 +47,35 @@
   .page-title-full { display: none; }
   .page-title-compact { display: inline; }
   .sidebar {
-    width: 64px;
-    padding: var(--space-md) var(--space-sm);
+    inset: auto 0 0;
+    width: 100%;
+    height: calc(72px + env(safe-area-inset-bottom, 0px));
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom, 0px));
+    border-right: none;
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -2px 12px #00000006;
   }
 
   .sidebar-header {
-    margin-bottom: var(--space-lg);
+    display: none;
   }
 
   .logo-text,
   .logo-caption,
-  .nav-item span {
+  .sidebar-footer,
+  .nav-group {
     display: none;
   }
 
-  /* 移动端状态徽标只藏文字留圆点，在线/离线状态不丢失 */
+  .nav-links { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; overflow: visible; }
+  .nav-item span { display: inline; font-size: var(--text-xs); }
+  .nav-item.nav-task-mobile,
+  .nav-item.nav-settings-mobile { display: flex; }
+  .nav-item { flex-direction: column; gap: 5px; text-align: center; min-height: 58px; }
+  .nav-item.active::before { top: 3px; bottom: auto; left: 50%; width: 16px; height: 2px; transform: translateX(-50%); }
+  .btn.mobile-quit { display: inline-flex; }
+
+  /* 监测状态在仪表盘和顶栏开关中保留，底栏只展示导航。 */
   .status-badge {
     font-size: 0;
     gap: 0;
@@ -70,26 +89,25 @@
 
   .nav-item {
     justify-content: center;
-    padding: 12px;
+    padding: 8px 2px 5px;
   }
 
-  /* 图标模式下侧栏只有 64px：二级子项的文字放不下，整块隐藏（caret 也随之隐藏——
-     它是一级项的展开指示器，藏了子项就没有指示的对象）。
-     代价是窄屏在侧栏里到达不了其余四个任务面板，故任务页内会亮出一条横向
-     pill 行兜底（`.tasks-narrow-nav`，见 styles/pages/tasks.css）。 */
+  /* 底栏只保留一级导航，任务类别在页内导航中切换。 */
   .nav-children,
   .nav-caret {
     display: none;
   }
 
   .main-content {
-    margin-left: 64px;
+    margin-left: 0;
+    height: calc(100dvh - 72px - env(safe-area-inset-bottom, 0px));
   }
 
   .top-bar {
     padding: var(--space-md);
     grid-template-columns: minmax(0, 1fr) auto;
     row-gap: 8px;
+    min-height: 64px;
   }
 
   .top-actions {
@@ -114,8 +132,20 @@
     right: 0;
   }
 
+  /* 弹层相对顶栏定位，避免铃铛右侧的操作把弹层推到视口外。 */
+  .notification-wrapper { position: static; }
+  .notification-wrapper > .btn { position: relative; }
+  .top-bar .notification-dropdown {
+    right: 16px;
+    top: calc(100% + 4px);
+    margin-top: 0;
+    width: min(360px, calc(100vw - 32px));
+    max-height: min(400px, calc(100dvh - 160px));
+  }
+
   .content-wrapper {
     padding: var(--space-md);
+    scrollbar-gutter: auto;
   }
 
   .form-row {
@@ -192,7 +222,7 @@
   .toast {
     left: 16px;
     right: 16px;
-    bottom: 16px;
+    bottom: calc(84px + env(safe-area-inset-bottom, 0px));
   }
 
   .notification-dropdown {
@@ -211,25 +241,6 @@
     padding-left: 20px;
     padding-right: 20px;
   }
-}
-
-/* 五个设置页签在手机上分为 3+2 两行，第二行均分，避免孤零零的第三行。 */
-@media (max-width: 500px) {
-  .settings-tabs {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 4px;
-    padding: 4px;
-  }
-
-  .settings-tab {
-    grid-column: span 2;
-    min-height: 38px;
-    padding: 6px 2px;
-  }
-
-  .settings-tab:nth-last-child(-n + 2) { grid-column: span 3; }
-  .settings-tab span { font-size: var(--text-sm); }
 }
 
 @media (max-width: 360px) {

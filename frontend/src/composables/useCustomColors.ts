@@ -1,6 +1,6 @@
 /**
  * 外观自定义颜色（单例）。
- * 从 useAppearance 拆出：自定义色新增/删除/取色/长按删除与颜色列表拼装。
+ * 从 useAppearance 拆出：自定义色新增/删除/取色与颜色列表拼装。
  * 需要读写 appearance 当前色并跟随有效主题，经 useAppearance() 单例获取。
  */
 
@@ -9,25 +9,27 @@ import {
   DEFAULT_APPEARANCE,
   DEFAULT_CUSTOM_COLORS,
   ACCENT_COLORS,
+  SIDEBAR_ACCENT_COLORS,
   DARK_BG_COLORS,
   LIGHT_BG_COLORS,
 } from "../utils/constants";
 import type { Appearance, CustomColors } from "../utils/appearance-types";
-import { loadStored } from "../utils/storage";
+import { loadStored, saveStored } from "../utils/storage";
+import { normalizeCustomColors, validHex } from "../utils/appearance";
 import { useConfirm } from "./useConfirm";
 import { useAppearance } from "./useAppearance";
 
 const customColors = reactive<CustomColors>(
-  loadStored<CustomColors>("appearance.custom_colors", {
+  normalizeCustomColors(loadStored<CustomColors>("appearance.custom_colors", {
     accent: [],
     bg: [],
     sidebar: [],
     sidebar_accent: [],
-  }),
+  })),
 );
 
 function saveStoredColors(): void {
-  localStorage.setItem("appearance.custom_colors", JSON.stringify(customColors));
+  saveStored("appearance.custom_colors", customColors);
 }
 
 /** 自定义颜色类型 → Appearance 上的当前色字段：removeCustomColor 回落默认值与 onCustomColorPicked 应用新色共用一份映射 */
@@ -44,14 +46,16 @@ watch(customColors, () => {
 
 /** 新增自定义颜色：与系统色及已有自定义色去重（大小写不敏感），避免列表出现等值重复项 */
 function addCustomColor(type: keyof CustomColors, hex: string): void {
-  if (!hex || !Object.hasOwn(DEFAULT_CUSTOM_COLORS, type)) return;
+  if (!validHex(hex) || !Object.hasOwn(DEFAULT_CUSTOM_COLORS, type)) return;
   const lower = hex.toLowerCase();
   const systemColors =
     type === "accent"
       ? ACCENT_COLORS
-      : type === "bg"
-        ? [...DARK_BG_COLORS, ...LIGHT_BG_COLORS]
-        : [];
+      : type === "sidebar_accent"
+        ? SIDEBAR_ACCENT_COLORS
+        : type === "bg" || type === "sidebar"
+          ? [...DARK_BG_COLORS, ...LIGHT_BG_COLORS]
+          : [];
   if (systemColors.some((c) => c.value.toLowerCase() === lower)) return;
   if (customColors[type].some((c) => c.toLowerCase() === lower)) return;
   customColors[type].push(lower);
@@ -78,16 +82,16 @@ function pickCustomColor(type: keyof CustomColors): void {
   input?.click();
 }
 
-/** 取色器选中回调：入库自定义色并立即应用为当前色；随后清空 input 便于再次取同色也能触发 change */
+/** 取色器选中后立即应用；保留输入值，下次打开仍从当前色开始。 */
 function onCustomColorPicked(type: keyof CustomColors, event: Event): void {
   const hex = (event.target as HTMLInputElement).value;
+  if (!validHex(hex)) return;
   addCustomColor(type, hex);
   const { appearance } = useAppearance();
   (appearance as Record<string, unknown>)[COLOR_TYPE_TO_APPEARANCE_FIELD[type]] = hex;
-  (event.target as HTMLInputElement).value = "#000000";
 }
 
-/** 长按生效后的删除确认（移动端无右键/悬停，长按是唯一的删除入口） */
+/** 删除色板前确认，管理按钮与右键入口共用。 */
 function onColorLongPress(type: keyof CustomColors, hex: string): void {
   const { confirm } = useConfirm();
   void confirm({
@@ -98,30 +102,15 @@ function onColorLongPress(type: keyof CustomColors, hex: string): void {
   });
 }
 
-/**
- * 触摸长按入口：按住 600ms 不松开（也不滑动）才视为长按，触发删除确认。
- * 松开或滑动即取消计时器——600ms 阈值用于区分"点击选色"与"长按删除"两种手势。
- */
-function startLongPress(type: keyof CustomColors, hex: string, event: TouchEvent): void {
-  event.preventDefault();
-  const target = event.target as EventTarget;
-  const timer = setTimeout(() => onColorLongPress(type, hex), 600);
-  const cancel = () => {
-    clearTimeout(timer);
-    target.removeEventListener("touchend", cancel);
-    target.removeEventListener("touchmove", cancel);
-  };
-  target.addEventListener("touchend", cancel);
-  target.addEventListener("touchmove", cancel);
-}
-
 /** 拼装选色列表：系统色在前、自定义色在后；背景色按当前有效主题取深/浅色板 */
 function getColorList(type: keyof CustomColors): { value: string; label: string; custom?: boolean }[] {
   let systemColors: { value: string; label: string }[] = [];
-  if (type === "bg") {
+  if (type === "bg" || type === "sidebar") {
     systemColors = useAppearance().getEffectiveTheme() === "dark" ? DARK_BG_COLORS : LIGHT_BG_COLORS;
   } else if (type === "accent") {
     systemColors = ACCENT_COLORS;
+  } else if (type === "sidebar_accent") {
+    systemColors = SIDEBAR_ACCENT_COLORS;
   }
   const custom = (customColors[type] || []).map((hex) => ({ value: hex, label: hex, custom: true }));
   return [...systemColors, ...custom];
@@ -132,7 +121,6 @@ export function useCustomColors() {
     pickCustomColor,
     onCustomColorPicked,
     onColorLongPress,
-    startLongPress,
     getColorList,
   };
 }

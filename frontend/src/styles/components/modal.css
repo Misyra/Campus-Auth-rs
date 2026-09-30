@@ -125,8 +125,15 @@
 }
 
 .confirm-dialog.danger .confirm-title {
-  color: var(--error);
+  color: var(--text-primary);
 }
+
+.confirm-sections { margin-bottom: var(--space-lg); border: 1px solid var(--border); border-radius: var(--radius-md); padding-inline: 14px; }
+.confirm-section { padding-block: 12px; }
+.confirm-section + .confirm-section { border-top: 1px solid var(--border); }
+.confirm-section h4 { margin: 0 0 4px; font-size: var(--text-base); font-weight: 500; color: var(--text-primary); }
+.confirm-section p { margin: 0; color: var(--text-secondary); font-size: var(--text-md); line-height: 1.6; overflow-wrap: anywhere; white-space: pre-line; }
+.confirm-dialog:has(.confirm-sections) { max-height: 85vh; overflow-y: auto; }
 
 .confirm-message {
   font-size: var(--text-base);

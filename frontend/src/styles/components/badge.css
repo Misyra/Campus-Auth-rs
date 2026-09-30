@@ -35,7 +35,7 @@
 
 .badge--info {
   background: rgba(var(--accent-rgb), 0.12);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 /* 脚本类：主色系 */

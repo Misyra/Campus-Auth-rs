@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /** 设置 · 浏览器页：浏览器选择与安装、会话保持及反检测等浏览器行为配置 */
-import IconApp from "@/components/common/IconApp.vue";
+import SettingsRow from "@/components/common/SettingsRow.vue";
 import BrowserIcon from "@/components/common/BrowserIcon.vue";
+import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
@@ -162,222 +163,394 @@ async function stopBrowser() {
 </script>
 
 <template>
-  <div class="settings-panel-grid settings-panel-grid--cols2">
-    <section class="card settings-panel settings-panel--wide">
+  <div class="settings-list-page">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="chrome" class="settings-card-icon" />
         <h2>浏览器选择</h2>
       </div>
       <div class="card-body">
         <div v-if="pythonNotReady" class="browser-safe-info browser-safe-info--warning browser-notice--top">
-          <p>运行环境未就绪，浏览器功能不可用。请先前往 <a class="inline-link" @click.prevent="router.push({ name: 'settings-tasks' })">设置 · 任务与环境 → 运行环境</a> 初始化。</p>
+          <p>
+            运行环境未就绪，浏览器功能不可用。请先前往
+            <a class="inline-link" @click.prevent="router.push({ name: 'settings-tasks' })">设置 · 任务与环境 → 运行环境</a>
+            初始化。
+          </p>
         </div>
-        <p class="form-help-text">选择用于自动登录的浏览器，推荐 Chromium / Edge / Chrome。</p>
-        <div class="browser-selection">
-          <div v-if="browserLoading" class="hint">正在检测浏览器...</div>
-          <div v-else-if="browserError" class="form-help-text">
+        <SettingsRow label="登录浏览器" description="选择用于自动登录的浏览器，推荐 Chromium / Edge / Chrome">
+          <span v-if="browserLoading" class="hint">正在检测浏览器…</span>
+          <div v-else-if="browserError" class="hint">
             {{ browserError }}
-            <button class="btn btn-sm btn-link" type="button" @click="fetchBrowsers()">重试</button>
+            <button type="button" class="btn btn-sm btn-link" @click="fetchBrowsers()">重试</button>
           </div>
-          <div v-else class="browser-cards">
-            <div v-for="b in browsers" :key="b.channel" class="browser-card"
-              :class="{
-                active: config.config.browser.browser_channel === b.channel,
-                uninstalled: !b.installed,
-                blocked: pythonNotReady && !b.installed && playwrightInstallable.has(b.channel),
-              }"
-              :aria-disabled="pythonNotReady && !b.installed && playwrightInstallable.has(b.channel)"
-              @click="handleBrowserClick(b)">
-              <div class="browser-icon">
-                <BrowserIcon :channel="b.channel" />
-              </div>
-              <div class="browser-info">
-                <div class="browser-name">{{ b.name }}</div>
-                <div class="browser-status">
-                  <span v-if="b.installed" class="status-installed"><IconApp name="check" width="14" height="14" /> 已安装</span>
-                  <span v-else-if="installingBrowser === b.channel" class="status-downloading"><IconApp name="refresh" width="14" height="14" class="spin" /> 下载中...</span>
-                  <span v-else-if="playwrightInstallable.has(b.channel) && pythonNotReady" class="status-not-installed"><IconApp name="alert-triangle" width="14" height="14" /> 环境未就绪</span>
-                  <span v-else-if="playwrightInstallable.has(b.channel)" class="status-not-installed"><IconApp name="upload" width="14" height="14" /> 点击安装</span>
-                  <span v-else class="status-not-installed"><IconApp name="upload" width="14" height="14" /> 未安装</span>
-                </div>
-              </div>
-              <div v-if="config.config.browser.browser_channel === b.channel" class="browser-check"><IconApp name="check" width="20" height="20" /></div>
-            </div>
+          <div v-else-if="browsers.some(b => b.installed)" class="browser-choices" role="group" aria-label="登录浏览器">
+            <button
+              v-for="b in browsers.filter(b => b.installed)"
+              :key="b.channel"
+              type="button"
+              class="browser-choice"
+              :aria-pressed="config.config.browser.browser_channel === b.channel"
+              :disabled="installingBrowser !== null"
+              @click="handleBrowserClick(b)"
+            >
+              <BrowserIcon :channel="b.channel" :size="30" aria-hidden="true" />
+              <span>{{ b.name }}</span>
+              <IconApp
+                v-if="config.config.browser.browser_channel === b.channel"
+                name="check"
+                class="browser-choice-check"
+                aria-hidden="true"
+              />
+            </button>
           </div>
-        </div>
+          <span v-else class="hint">未检测到已安装的浏览器，请先安装</span>
+        </SettingsRow>
+        <SettingsRow
+          v-if="!browserLoading && !browserError && browsers.some(b => !b.installed)"
+          label="安装浏览器"
+          description="Playwright 浏览器可直接安装；Edge 与 Chrome 请从官网下载"
+        >
+          <button
+            v-for="b in browsers.filter(b => !b.installed)"
+            :key="b.channel"
+            type="button"
+            class="btn btn-secondary btn-sm"
+            :disabled="installingBrowser !== null || (pythonNotReady && playwrightInstallable.has(b.channel))"
+            @click="handleBrowserClick(b)"
+          >
+            <BrowserIcon :channel="b.channel" :size="20" aria-hidden="true" />
+            {{ installingBrowser === b.channel ? '安装中…' : b.name }}
+          </button>
+        </SettingsRow>
         <p v-if="browserInstallError" class="form-help-text">
           <template v-if="firstErrorUrl">
-            {{ browserInstallError.slice(0, firstErrorUrl.index) }}<a :href="firstErrorUrl.url" target="_blank" rel="noopener noreferrer" class="inline-link">{{ firstErrorUrl.url }}</a>{{ browserInstallError.slice(firstErrorUrl.index + firstErrorUrl.url.length) }}
+            {{ browserInstallError.slice(0, firstErrorUrl.index) }}
+            <a :href="firstErrorUrl.url" target="_blank" rel="noopener noreferrer" class="inline-link">
+              {{ firstErrorUrl.url }}
+            </a>
+            {{ browserInstallError.slice(firstErrorUrl.index + firstErrorUrl.url.length) }}
           </template>
           <template v-else>{{ browserInstallError }}</template>
         </p>
         <div v-if="currentNotInstalled" class="browser-safe-info browser-safe-info--warning">
           <div class="browser-warning-copy">
-            <p>当前选择的浏览器未安装，启动将失败。请先安装 <strong>{{ config.config.browser.browser_channel }}</strong><template v-if="currentOfficialUrl">，或前往 <a :href="currentOfficialUrl" target="_blank" rel="noopener noreferrer" class="inline-link">官网下载</a></template>，或切换到已安装的浏览器后保存。</p>
-            <button v-if="installedChromium" type="button" class="btn btn-sm btn-secondary" @click="switchToInstalledChromium">
+            <p>
+              当前选择的浏览器未安装，启动将失败。请先安装
+              <strong>{{ config.config.browser.browser_channel }}</strong>
+              <template v-if="currentOfficialUrl">
+                ，或前往
+                <a :href="currentOfficialUrl" target="_blank" rel="noopener noreferrer" class="inline-link">官网下载</a>
+              </template>
+              ，或切换到已安装的浏览器后保存。
+            </p>
+            <button
+              v-if="installedChromium"
+              type="button"
+              class="btn btn-sm btn-secondary"
+              @click="switchToInstalledChromium"
+            >
               切换到 Chromium
             </button>
           </div>
         </div>
       </div>
     </section>
-
-    <div class="browser-settings-column">
-      <section class="card settings-panel">
-        <div class="settings-card-header">
-          <IconApp name="sliders" class="settings-card-icon" />
-          <h2>基本设置</h2>
-        </div>
-        <div class="card-body">
-          <div class="form-row">
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-browser-timeout">页面操作超时（秒）</label><FieldHelp text="单次页面操作的等待上限。默认 30 秒。" /></div>
-              <input id="settings-browser-timeout" v-model.number="config.config.browser.timeout" type="number" min="1" max="120" />
-            </div>
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-browser-navigation-timeout">页面打开超时（秒）</label><FieldHelp text="打开认证页面的最长等待时间。默认 15 秒。" /></div>
-              <input id="settings-browser-navigation-timeout" v-model.number="config.config.browser.navigation_timeout" type="number" min="3" max="120" />
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-login-timeout">登录等待上限（秒）</label><FieldHelp text="手动登录的最长等待时间。默认 120 秒。" /></div>
-              <input id="settings-login-timeout" v-model.number="config.config.browser.login_timeout" type="number" min="10" max="600" />
-            </div>
-          </div>
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.browser.headless" /><span class="toggle-slider"></span><span class="toggle-label">后台运行</span></label>
-              <FieldHelp text="不显示浏览器窗口。首次配置任务或排查问题时可关闭。" />
-            </div>
-          </div>
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.browser.low_resource_mode" /><span class="toggle-slider"></span><span class="toggle-label">低资源模式</span></label>
-              <FieldHelp text="不加载图片，降低资源占用。登录页使用图片验证码时请关闭。" />
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-browser-locale">浏览器语言</label><FieldHelp text="发送给网站的语言偏好。默认 zh-CN。" /></div>
-              <input id="settings-browser-locale" v-model.trim="config.config.browser.locale" type="text" placeholder="zh-CN" />
-            </div>
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-browser-timezone">浏览器时区</label><FieldHelp text="标准时区名称，留空跟随系统。默认 Asia/Shanghai。" /></div>
-              <input id="settings-browser-timezone" v-model.trim="config.config.browser.timezone_id" type="text" placeholder="Asia/Shanghai" />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="card settings-panel">
-        <div class="settings-card-header">
-          <IconApp name="shield" class="settings-card-icon" />
-          <h2>安全与反检测</h2>
-        </div>
-        <div class="card-body">
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.browser.disable_web_security" /><span class="toggle-slider"></span><span class="toggle-label">禁用网页安全限制</span></label>
-              <FieldHelp text="仅在登录页出现跨域错误时启用，日常保持关闭。" />
-            </div>
-          </div>
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.browser.stealth_mode" /><span class="toggle-slider"></span><span class="toggle-label">反自动化检测</span></label>
-              <FieldHelp text="隐藏自动化特征。仅在被登录页拦截时启用。" />
-            </div>
-          </div>
-          <div v-show="config.config.browser.stealth_mode" class="form-group">
-            <div class="stealth-script-actions"><span class="hint">自定义脚本，留空使用内置脚本</span><button type="button" class="btn btn-sm btn-secondary" @click="loadDefaultStealthScript()">填入内置脚本</button></div>
-            <textarea v-model="config.config.browser.stealth_custom_script" rows="6" placeholder="留空使用内置默认脚本..." class="textarea--mono"></textarea>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <div class="browser-settings-column">
-      <!-- 会话保持：浏览器相关，应归浏览器页（从环境页迁回） -->
-      <section class="card settings-panel">
-        <div class="settings-card-header">
-          <IconApp name="monitor" class="settings-card-icon" />
-          <h2>会话保持</h2>
-        </div>
-        <div class="card-body">
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline">
-                <input type="checkbox" v-model="config.config.worker.keep_alive" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">登录完成后保持浏览器进程</span>
-              </label>
-              <FieldHelp text="常驻进程可加快下次登录，但持续占用内存。关闭后空闲超时自动回收。" />
-            </div>
-          </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label for="settings-worker-idle-timeout">空闲超时（秒）</label>
-              <FieldHelp text="Worker 空闲达到该时长后自动回收，释放内存。仅在未保持常驻时生效，默认 300 秒。" />
-            </div>
-            <input id="settings-worker-idle-timeout" v-model.number="config.config.worker.idle_timeout_seconds" type="number" min="60" max="3600" :disabled="config.config.worker.keep_alive" />
-            <span class="hint">常驻开启时不自动回收；关闭后按此超时回收</span>
-          </div>
-          <div class="toggle-group" v-if="config.config.browser.browser_channel !== 'firefox'">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline">
-                <input type="checkbox" v-model="config.config.browser.persistent_context" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">保存浏览器数据</span>
-              </label>
-              <FieldHelp text="将 Cookie 等浏览数据持久化到独立目录，重启后仍保持登录态。不同浏览器数据相互隔离，Firefox 不支持。" />
-            </div>
-          </div>
-          <div v-if="config.config.browser.persistent_context && config.config.browser.browser_channel !== 'firefox'" class="note note--info">
-            <IconApp name="info" width="16" height="16" />
-            <div>数据目录: <code>config/browser-data/{{ config.config.browser.browser_channel }}/</code></div>
-          </div>
-          <div class="browser-close-row">
-            <button type="button" class="btn btn-sm btn-danger-ghost" :disabled="stoppingBrowser" @click="stopBrowser()">
-              {{ stoppingBrowser ? "正在关闭..." : "立即关闭浏览器" }}
-            </button>
-            <span class="hint">仅在调试或更换配置时使用，会中断正在进行的登录</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="card settings-panel">
-        <div class="settings-card-header">
-          <IconApp name="star" class="settings-card-icon" />
-          <h2>高级设置</h2>
-        </div>
-        <div class="card-body">
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline"><input type="checkbox" :checked="pureMode" @click.prevent="togglePureMode()" /><span class="toggle-slider"></span><span class="toggle-label">纯净模式（推荐）</span></label>
-              <FieldHelp text="启用后忽略下方自定义参数。登录异常时建议先恢复纯净模式排查。" />
-            </div>
-          </div>
-          <template v-if="!pureMode">
-            <div class="form-group">
-              <div class="field-label-row"><label>浏览器窗口尺寸</label><FieldHelp text="登录页面的渲染分辨率。默认 1280×720。" /></div>
-              <div class="viewport-input-row">
-                <div class="viewport-input-group"><label for="settings-vp-w" class="viewport-label">宽</label><input id="settings-vp-w" v-model.number="config.config.browser.viewport_width" type="number" min="320" max="3840" class="viewport-input" /></div>
-                <span class="viewport-separator">×</span>
-                <div class="viewport-input-group"><label for="settings-vp-h" class="viewport-label">高</label><input id="settings-vp-h" v-model.number="config.config.browser.viewport_height" type="number" min="240" max="2160" class="viewport-input" /></div>
-              </div>
-            </div>
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-browser-ua">用户代理（UA）</label><FieldHelp text="伪装的浏览器标识。留空使用当前通道的默认值。" /></div>
-              <input id="settings-browser-ua" v-model.trim="config.config.browser.user_agent" type="text" placeholder="留空使用当前浏览器的默认值" />
-            </div>
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-browser-args">启动参数（Playwright args）</label><FieldHelp text="每行一个参数，附加到浏览器启动命令，# 开头为注释。--proxy-server、--load-extension、--remote-debugging-port 等安全敏感参数会被自动过滤；非 Chromium 引擎下 Chromium 专属参数不生效。" /></div>
-              <textarea id="settings-browser-args" v-model="config.config.browser.browser_args" rows="4" class="textarea--mono" placeholder="每行一个，例如：--disable-notifications"></textarea>
-              <div class="form-row"><button type="button" class="btn btn-sm" title="将推荐反检测参数并入上方输入框（去重保留手写内容）" @click="loadRecommendedArgs">加载推荐参数</button></div>
+    <section class="settings-panel">
+      <div class="settings-card-header">
+        <IconApp name="sliders" class="settings-card-icon" />
+        <h2>基本设置</h2>
+      </div>
+      <div class="card-body">
+        <SettingsRow description="单次页面操作的等待上限">
+          <template #label>
+            <label for="settings-browser-timeout">页面操作超时（秒）</label>
+            <FieldHelp text="单次页面操作的等待上限。默认 30 秒。" />
+          </template>
+          <input
+            id="settings-browser-timeout"
+            v-model.number="config.config.browser.timeout"
+            type="number"
+            min="1"
+            max="120"
+          />
+        </SettingsRow>
+        <SettingsRow description="打开认证页面的最长等待时间">
+          <template #label>
+            <label for="settings-browser-navigation-timeout">页面打开超时（秒）</label>
+            <FieldHelp text="打开认证页面的最长等待时间。默认 15 秒。" />
+          </template>
+          <input
+            id="settings-browser-navigation-timeout"
+            v-model.number="config.config.browser.navigation_timeout"
+            type="number"
+            min="3"
+            max="120"
+          />
+        </SettingsRow>
+        <SettingsRow description="手动登录的最长等待时间">
+          <template #label>
+            <label for="settings-login-timeout">登录等待上限（秒）</label>
+            <FieldHelp text="手动登录的最长等待时间。默认 120 秒。" />
+          </template>
+          <input
+            id="settings-login-timeout"
+            v-model.number="config.config.browser.login_timeout"
+            type="number"
+            min="10"
+            max="600"
+          />
+        </SettingsRow>
+        <SettingsRow description="不显示浏览器窗口">
+          <template #label>
+            后台运行
+            <FieldHelp text="不显示浏览器窗口。首次配置任务或排查问题时可关闭。" />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.browser.headless" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">后台运行</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow description="不加载图片，降低资源占用">
+          <template #label>
+            低资源模式
+            <FieldHelp text="不加载图片，降低资源占用。登录页使用图片验证码时请关闭。" />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.browser.low_resource_mode" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">低资源模式</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow description="发送给网站的语言偏好">
+          <template #label>
+            <label for="settings-browser-locale">浏览器语言</label>
+            <FieldHelp text="发送给网站的语言偏好。默认 zh-CN。" />
+          </template>
+          <input
+            id="settings-browser-locale"
+            v-model.trim="config.config.browser.locale"
+            type="text"
+            placeholder="zh-CN"
+          />
+        </SettingsRow>
+        <SettingsRow description="标准时区名称，留空跟随系统">
+          <template #label>
+            <label for="settings-browser-timezone">浏览器时区</label>
+            <FieldHelp text="标准时区名称，留空跟随系统。默认 Asia/Shanghai。" />
+          </template>
+          <input
+            id="settings-browser-timezone"
+            v-model.trim="config.config.browser.timezone_id"
+            type="text"
+            placeholder="Asia/Shanghai"
+          />
+        </SettingsRow>
+      </div>
+    </section>
+    <section class="settings-panel">
+      <div class="settings-card-header">
+        <IconApp name="shield" class="settings-card-icon" />
+        <h2>安全与反检测</h2>
+      </div>
+      <div class="card-body">
+        <SettingsRow description="仅在登录页出现跨域错误时启用，日常保持关闭">
+          <template #label>
+            禁用网页安全限制
+            <FieldHelp text="仅在登录页出现跨域错误时启用，日常保持关闭。" />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.browser.disable_web_security" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">禁用网页安全限制</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow>
+          <template #label>
+            反自动化检测
+            <FieldHelp text="隐藏自动化特征。仅在被登录页拦截时启用。" />
+          </template>
+          <template #description>
+            <p id="settings-stealth-description">隐藏自动化特征；脚本留空使用内置版本，仅在需要自定义时填写</p>
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.browser.stealth_mode" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">反自动化检测</span>
+          </label>
+          <template v-if="config.config.browser.stealth_mode" #details>
+            <div class="setting-row-control form-group">
+              <textarea
+                v-model="config.config.browser.stealth_custom_script"
+                rows="6"
+                placeholder="留空使用内置脚本"
+                class="textarea--mono"
+                aria-label="自定义反检测脚本"
+                aria-describedby="settings-stealth-description"
+              ></textarea>
+              <button type="button" class="btn btn-sm btn-secondary" @click="loadDefaultStealthScript()">填入内置脚本</button>
             </div>
           </template>
-        </div>
-      </section>
-    </div>
+        </SettingsRow>
+      </div>
+    </section>
+    <!-- 会话保持：浏览器相关，应归浏览器页（从环境页迁回） -->
+    <section class="settings-panel">
+      <div class="settings-card-header">
+        <IconApp name="monitor" class="settings-card-icon" />
+        <h2>会话保持</h2>
+      </div>
+      <div class="card-body">
+        <SettingsRow description="保持进程可加快下次登录，但持续占用内存；关闭后按空闲超时回收">
+          <template #label>
+            登录完成后保持浏览器进程
+            <FieldHelp text="常驻进程可加快下次登录，但持续占用内存。关闭后空闲超时自动回收。" />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.worker.keep_alive" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">登录完成后保持浏览器进程</span>
+          </label>
+          <template #details>
+            <SettingsRow description="默认 300 秒，关闭进程保持后生效">
+              <template #label>
+                <label for="settings-worker-idle-timeout">空闲超时（秒）</label>
+                <FieldHelp text="Worker 空闲达到该时长后自动回收，释放内存。仅在未保持常驻时生效，默认 300 秒。" />
+              </template>
+              <input
+                id="settings-worker-idle-timeout"
+                v-model.number="config.config.worker.idle_timeout_seconds"
+                type="number"
+                min="60"
+                max="3600"
+                :disabled="config.config.worker.keep_alive"
+              />
+            </SettingsRow>
+          </template>
+        </SettingsRow>
+        <SettingsRow
+          v-if="config.config.browser.browser_channel !== 'firefox'"
+          description="将 Cookie 等浏览数据持久化到独立目录，重启后仍保持登录态"
+        >
+          <template #label>
+            保存浏览器数据
+            <FieldHelp text="将 Cookie 等浏览数据持久化到独立目录，重启后仍保持登录态。不同浏览器数据相互隔离，Firefox 不支持。" />
+          </template>
+          <template v-if="config.config.browser.persistent_context" #description>
+            <p class="browser-data-path">数据目录：<code>config/browser-data/{{ config.config.browser.browser_channel }}/</code></p>
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.browser.persistent_context" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">保存浏览器数据</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow label="关闭浏览器" description="会中断正在进行的登录，仅在调试或更换配置时使用">
+          <button
+            type="button"
+            class="btn btn-sm btn-danger-ghost"
+            :disabled="stoppingBrowser"
+            @click="stopBrowser()"
+          >
+            {{ stoppingBrowser ? "正在关闭..." : "立即关闭浏览器" }}
+          </button>
+        </SettingsRow>
+      </div>
+    </section>
+    <section class="settings-panel">
+      <div class="settings-card-header">
+        <IconApp name="star" class="settings-card-icon" />
+        <h2>高级设置</h2>
+      </div>
+      <div class="card-body">
+        <SettingsRow description="开启后使用默认参数；关闭后可自定义窗口尺寸、用户代理和启动参数">
+          <template #label>
+            纯净模式（推荐）
+            <FieldHelp text="启用后忽略下方自定义参数。登录异常时建议先恢复纯净模式排查。" />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" :checked="pureMode" @click.prevent="togglePureMode()" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">纯净模式（推荐）</span>
+          </label>
+          <template v-if="!pureMode" #details>
+            <SettingsRow description="登录页面的渲染分辨率">
+              <template #label>
+                <label>浏览器窗口尺寸</label>
+                <FieldHelp text="登录页面的渲染分辨率。默认 1280×720。" />
+              </template>
+              <div class="viewport-input-row">
+                <div class="viewport-input-group">
+                  <label for="settings-vp-w" class="viewport-label">宽</label>
+                  <input
+                    id="settings-vp-w"
+                    v-model.number="config.config.browser.viewport_width"
+                    type="number"
+                    min="320"
+                    max="3840"
+                    class="viewport-input"
+                  />
+                </div>
+                <span class="viewport-separator">×</span>
+                <div class="viewport-input-group">
+                  <label for="settings-vp-h" class="viewport-label">高</label>
+                  <input
+                    id="settings-vp-h"
+                    v-model.number="config.config.browser.viewport_height"
+                    type="number"
+                    min="240"
+                    max="2160"
+                    class="viewport-input"
+                  />
+                </div>
+              </div>
+            </SettingsRow>
+            <SettingsRow description="伪装的浏览器标识">
+              <template #label>
+                <label for="settings-browser-ua">用户代理（UA）</label>
+                <FieldHelp text="伪装的浏览器标识。留空使用当前通道的默认值。" />
+              </template>
+              <input
+                id="settings-browser-ua"
+                v-model.trim="config.config.browser.user_agent"
+                type="text"
+                placeholder="留空使用当前浏览器的默认值"
+              />
+            </SettingsRow>
+            <SettingsRow>
+              <template #label>
+                <label for="settings-browser-args">额外启动参数</label>
+                <FieldHelp
+                  text="每行一个参数，附加到浏览器启动命令，# 开头为注释。--proxy-server、--load-extension、--remote-debugging-port 等安全敏感参数会被自动过滤；非 Chromium 引擎下 Chromium 专属参数不生效。"
+                />
+              </template>
+              <template #description>
+                <p id="settings-browser-args-description">附加到浏览器启动命令，每行一个，# 开头为注释</p>
+              </template>
+              <template #details>
+                <div class="setting-row-control form-group">
+                  <textarea
+                    id="settings-browser-args"
+                    aria-describedby="settings-browser-args-description"
+                    v-model="config.config.browser.browser_args"
+                    rows="4"
+                    class="textarea--mono"
+                    placeholder="每行一个，例如：--disable-notifications"
+                  ></textarea>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-secondary"
+                    title="将推荐反检测参数并入上方输入框（去重保留手写内容）"
+                    @click="loadRecommendedArgs"
+                  >
+                    加载推荐参数
+                  </button>
+                </div>
+              </template>
+            </SettingsRow>
+          </template>
+        </SettingsRow>
+      </div>
+    </section>
   </div>
 </template>

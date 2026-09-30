@@ -16,6 +16,11 @@ beforeEach(() => {
 });
 
 describe("任务索引本地缓存", () => {
+  it("混合索引中不同类别同 ID 可以缓存，按原类型回放", () => {
+    const tasks = [{ ...task, type: "browser" }, { ...task, type: "http" }, { ...task, type: "script" }];
+    writeRepoIndexCache(github, tasks, 1000);
+    expect(readRepoIndexCache(github, 1001)?.tasks).toEqual(tasks);
+  });
   it("按完整 URL 区分来源，空索引也能缓存", () => {
     writeRepoIndexCache(github, [task], 1000);
     writeRepoIndexCache(gitee, [], 1000);
@@ -44,5 +49,11 @@ describe("任务索引本地缓存", () => {
     });
     expect(readRepoIndexCache(github)).toBeNull();
     expect(() => writeRepoIndexCache(github, [task])).not.toThrow();
+  });
+  it("缓存数组内条目损坏或重复时视为未命中", () => {
+    for (const tasks of [[null], [{ ...task, tags: "坏字段" }], [task, task]]) {
+      saved.set("campus-auth.repo-index-cache.v1", JSON.stringify([{ url: github, fetchedAt: 1000, tasks }]));
+      expect(readRepoIndexCache(github, 1001)).toBeNull();
+    }
   });
 });

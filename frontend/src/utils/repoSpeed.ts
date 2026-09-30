@@ -13,6 +13,7 @@
 import type { RepoTask } from "../api/types";
 import { repoApi } from "../api";
 import { extractApiError } from "../api/client";
+import { isRepoTaskIndex } from "./repoTask";
 import { presetRepoIndexUrl, TASK_REPO_SOURCES, type TaskRepoKind, type TaskRepoSourceId } from "./constants";
 
 /** 单个源的测速结果：`ms` 为 null 表示该源失败（原因在 `error`） */
@@ -32,10 +33,12 @@ async function timeSource(kind: TaskRepoKind, source: TaskRepoSourceId): Promise
   const started = Date.now();
   try {
     const data = await repoApi.fetchIndex(url);
-    // 索引必须是 JSON 数组（与 useRepoImport.fetchRepoIndex 同一校验口径）：
-    // 格式不对按失败处理，否则关键词过滤会对非数组取 filter 而抛错
+    // 向导与导入弹窗共用条目校验，避免把损坏索引误判为可用镜像。
     if (!Array.isArray(data)) {
       return { source, ms: null, error: "索引格式不正确（应为 JSON 数组）", tasks: [] };
+    }
+    if (!isRepoTaskIndex(data)) {
+      return { source, ms: null, error: "索引条目无效（请检查任务 ID、名称、地址与标签）", tasks: [] };
     }
     return { source, ms: Date.now() - started, error: "", tasks: data };
   } catch (e) {

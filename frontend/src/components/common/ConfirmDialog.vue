@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 确认对话框（替代原生 confirm()）。读取单例 confirmState，点击后调用 resolveConfirm。
-// 键盘可达性对齐 Modal：Esc=取消、Enter=确认、打开时聚焦确认按钮、Tab 循环。
+// 键盘可达性对齐 Modal：Esc=取消、按钮原生处理 Enter/空格、危险操作默认聚焦取消、Tab 循环。
 
 import { nextTick, watch } from "vue";
 import IconApp from "@/components/common/IconApp.vue";
@@ -31,7 +31,7 @@ function dialogButtons(): HTMLElement[] {
   );
 }
 
-// 打开时聚焦确认按钮（危险操作也聚焦确认，配合红色样式强化感知）+ 锁定背景滚动
+// 危险操作先聚焦取消，避免无意按 Enter 即执行；普通操作聚焦确认按钮。
 // 注意：confirmState 是 reactive 对象（非 ref），此处不能写 .value，
 // 否则 getter 求值抛 TypeError，上报为 watcher getter（生产构建 runtime-2）异常
 // FE2-3：滚动锁走全局计数（此前无条件清空 body.overflow，会提前解锁叠加中的 Modal）
@@ -45,7 +45,7 @@ watch(
     lockBodyScroll();
     await nextTick();
     const buttons = dialogButtons();
-    buttons[buttons.length - 1]?.focus();
+    (confirmState.danger ? buttons[0] : buttons[buttons.length - 1])?.focus();
   },
   { immediate: true },
 );
@@ -61,11 +61,16 @@ watch(
       @click.self="resolveConfirm(false)"
       @keydown="onTrapKeydown"
       @keydown.esc.prevent="resolveConfirm(false)"
-      @keydown.enter.prevent="resolveConfirm(true)"
     >
       <div class="confirm-dialog" :class="{ danger: confirmState.danger }" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
         <h3 id="confirm-dialog-title" class="confirm-title">{{ confirmState.title }}</h3>
         <p class="confirm-message" :class="{ 'confirm-message--tight': confirmState.changes.length }">{{ confirmState.message }}</p>
+        <div v-if="confirmState.sections.length" class="confirm-sections">
+          <section v-for="section in confirmState.sections" :key="section.title" class="confirm-section">
+            <h4>{{ section.title }}</h4>
+            <p>{{ section.text }}</p>
+          </section>
+        </div>
         <!-- 结构化改动清单：字段名与旧/新值分列着色。旧值弱化、新值强调，
              使"会变成什么"一眼可见（拼接成整段文本做不到这点） -->
         <ul v-if="confirmState.changes.length" class="confirm-changes">

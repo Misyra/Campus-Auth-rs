@@ -53,7 +53,8 @@ describe("设置页表单提交守卫", () => {
     for (const file of settingsChildFiles) {
       const src = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
       // 逐个取出开标签，检查其中是否含 type= 属性
-      const tags = src.match(/<button\b[^>]*>/g) ?? [];
+      // 属性中的箭头表达式包含 >，需完整跳过引号内容，避免把已有 type 截掉。
+      const tags = src.match(/<button\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/g) ?? [];
       for (const tag of tags) {
         if (!/\btype\s*=/.test(tag)) {
           offenders.push(`${file}: ${tag.replace(/\s+/g, " ").slice(0, 80)}`);
@@ -62,7 +63,7 @@ describe("设置页表单提交守卫", () => {
     }
     // AppearanceView 在 views/ 而非 views/settings/，单独读
     const appearance = readFileSync(new URL("../AppearanceView.vue", import.meta.url), "utf8");
-    for (const tag of appearance.match(/<button\b[^>]*>/g) ?? []) {
+    for (const tag of appearance.match(/<button\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/g) ?? []) {
       if (!/\btype\s*=/.test(tag)) {
         offenders.push(`AppearanceView.vue: ${tag.replace(/\s+/g, " ").slice(0, 80)}`);
       }

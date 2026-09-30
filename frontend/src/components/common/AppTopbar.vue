@@ -18,7 +18,7 @@ const { dirty } = useConfig();
 const { status, busy } = useStatus();
 const { notifications, unreadNotifications, showNotifications, toggleNotifications } = useNotifications();
 const { wsReconnecting, wsRetryCount, wsDisconnectReason, retryNow } = useWebSocket();
-const { toggleMonitor } = useUi();
+const { toggleMonitor, quitApp } = useUi();
 
 /** 重连条文案：首轮为通用重连中，连续失败后按原因给出检查/重启指引 */
 const reconnectHint = computed(() => {
@@ -76,6 +76,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
           class="btn btn-icon-only"
           @click="toggleNotifications"
           title="通知历史"
+          aria-label="通知历史"
           aria-haspopup="true"
           :aria-expanded="showNotifications"
         >
@@ -117,6 +118,7 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
         <IconApp v-else class="btn-icon" :name="status.monitoring ? 'pause' : 'play'" />
         <span class="monitor-action-label">{{ busy.monitor ? "处理中..." : (status.monitoring ? "停止检测" : "启动检测") }}</span>
       </button>
+      <button type="button" class="btn btn-icon-only mobile-quit" @click="quitApp" :disabled="busy.monitor" title="退出应用" aria-label="退出应用"><IconApp name="log-out" /></button>
     </div>
   </header>
 </template>

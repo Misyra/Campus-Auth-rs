@@ -51,16 +51,17 @@ const routes = [
       // 账号/认证地址/登录方式已全部移交「配置方案」页（单一入口）：保留
       // 旧深链与书签的重定向，避免用户手上的 /settings/account 变成 404
       { path: "account", redirect: { name: "profiles" } },
-      { path: "monitor", name: "settings-monitor", meta: { title: "设置 · 网络检测" }, component: () => import("@/views/settings/MonitorSettings.vue") },
-      { path: "browser", name: "settings-browser", meta: { title: "设置 · 浏览器" }, component: () => import("@/views/settings/BrowserSettings.vue") },
-      { path: "tasks", name: "settings-tasks", meta: { title: "设置 · 任务与环境" }, component: () => import("@/views/settings/TaskEnvironmentSettings.vue") },
-      // 旧「环境」Tab 深链与书签重定向到合并后的 Tab
+      // 所有分类由父页同时挂载，保留路由名称以兼容书签与其它页面入口。
+      { path: "monitor", name: "settings-monitor", meta: { title: "设置" }, components: {} },
+      { path: "browser", name: "settings-browser", meta: { title: "设置" }, components: {} },
+      { path: "tasks", name: "settings-tasks", meta: { title: "设置" }, components: {} },
+      // 分类路由仅表达长页定位，旧环境深链继续定位到任务与环境。
       { path: "environment", redirect: { name: "settings-tasks" } },
-      { path: "system", name: "settings-system", meta: { title: "设置 · 系统与更新" }, component: () => import("@/views/settings/SystemSettings.vue") },
+      { path: "system", name: "settings-system", meta: { title: "设置" }, components: {} },
       // 旧「网络与更新」Tab 已并入「系统与更新」：保留深链与书签重定向
       { path: "network", redirect: { name: "settings-system" } },
       // 外观原为侧栏独立页，并入设置页：它是纯本机显示偏好，与其余设置同类
-      { path: "appearance", name: "settings-appearance", meta: { title: "设置 · 外观" }, component: () => import("@/views/AppearanceView.vue") },
+      { path: "appearance", name: "settings-appearance", meta: { title: "设置" }, components: {} },
     ],
   },
   // 旧「AI 生成任务」独立页已并入「任务」页 Tab：保留深链与书签重定向

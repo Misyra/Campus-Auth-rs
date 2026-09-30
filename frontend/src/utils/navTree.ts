@@ -6,12 +6,20 @@
  * 而正文又与顶栏页标题不在同一列上。收进侧栏后，导航与它归属的一级项长在一起，
  * 任务页只剩正文（`.tasks-page` 只负责限宽，见 styles/pages/tasks.css）。
  *
- * 子项定义放这里而不是 TasksView：消费方有两个——AppSidebar（展开渲染）与
- * TasksView（侧栏在 ≤768px 只剩图标、子项文字放不下时，页面内退化为横向 pill 行）。
- * 一份数据两个渲染出口，避免两处硬编码同一份路由表后各自漂移。
+ * 子项定义统一在这里：任务供侧栏与窄屏 pill 行共用，设置供侧栏、正文区域与窄屏
+ * 定位菜单共用，避免目录顺序、名称与路由各自漂移。
  */
 
 import type { IconName } from "@/components/common/IconApp.vue";
+
+/** 设置长页的目录：侧栏、窄屏定位菜单与正文共用顺序和名称。 */
+export const SETTINGS_NAV_CHILDREN: readonly NavChild[] = [
+  { id: "monitor", label: "网络检测", name: "settings-monitor", title: "网络检测、登录重试与暂停时段", icon: "wifi" },
+  { id: "browser", label: "浏览器", name: "settings-browser", title: "浏览器选择、超时与反检测参数", icon: "chrome" },
+  { id: "tasks", label: "任务与环境", name: "settings-tasks", title: "运行环境、录制器与 OCR", icon: "file-text" },
+  { id: "system", label: "系统与更新", name: "settings-system", title: "启动行为、日志、端口代理、更新与维护", icon: "settings" },
+  { id: "appearance", label: "外观", name: "settings-appearance", title: "主题、背景与卡片样式", icon: "palette" },
+];
 
 export interface NavChild {
   /** 稳定标识：激活判定按它比较（不是路由名，路由名可能被深度链接改名） */

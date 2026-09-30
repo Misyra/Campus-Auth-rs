@@ -11,6 +11,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, it, expect } from "vitest";
+import { parse, type TemplateChildNode } from "@vue/compiler-dom";
+import { parse as parseSfc } from "@vue/compiler-sfc";
 import { CONFIG_RANGES, validateRangeValues } from "./configRanges";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -28,20 +30,30 @@ function collectDeclaredRanges(): Declared[] {
   const out: Declared[] = [];
   for (const file of readdirSync(settingsDir)) {
     if (!file.endsWith(".vue")) continue;
-    const lines = readFileSync(join(settingsDir, file), "utf8").split("\n");
-    lines.forEach((line, i) => {
-      const model = /v-model\.number="config\.config\.([\w.]+)"/.exec(line);
-      if (!model) return;
-      const min = /min="(-?\d+)"/.exec(line);
-      const max = /max="(-?\d+)"/.exec(line);
-      if (!min || !max) return;
-      out.push({
-        path: model[1],
-        min: Number(min[1]),
-        max: Number(max[1]),
-        where: `${file}:${i + 1}`,
-      });
-    });
+    const source = readFileSync(join(settingsDir, file), "utf8");
+    const { descriptor } = parseSfc(source);
+    if (!descriptor.template) continue;
+    const visit = (node: TemplateChildNode): void => {
+      if (node.type !== 1) return;
+      const model = node.props.find(
+        (prop) => prop.type === 7 && prop.name === "model" && prop.modifiers.some((m) => m.content === "number"),
+      );
+      const path = model?.type === 7 && model.exp?.type === 4
+        ? /^config\.config\.([\w.]+)$/.exec(model.exp.content)?.[1]
+        : undefined;
+      const numberAttr = (name: string): number | undefined => {
+        const attr = node.props.find((prop) => prop.type === 6 && prop.name === name);
+        if (attr?.type !== 6 || !attr.value || !/^-?\d+$/.test(attr.value.content)) return undefined;
+        return Number(attr.value.content);
+      };
+      const min = numberAttr("min");
+      const max = numberAttr("max");
+      if (path && min !== undefined && max !== undefined) {
+        out.push({ path, min, max, where: `${file}:${node.loc.start.line}` });
+      }
+      node.children.forEach(visit);
+    };
+    parse(descriptor.template.content).children.forEach(visit);
   }
   return out;
 }

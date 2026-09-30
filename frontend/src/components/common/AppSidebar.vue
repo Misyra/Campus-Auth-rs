@@ -13,14 +13,14 @@ import IconApp from "@/components/common/IconApp.vue";
 // 同一列上。现在改为在左侧栏本层展开子项——导航与它归属的一级项长在一起，任务页
 // 只剩正文。子项数据在 `utils/navTree.ts`（窄屏 pill 行兜底共用同一份）。
 //
-// 「设置」的六个 Tab 仍留在设置页内的横向页签：它不产生"孤岛"，且窄屏下横排页签
-// 比侧栏展开更省纵向空间，故不做同款收编。
+// 设置同样展开二级目录，子项定位长页中的区域，滚动位置决定当前高亮。
 
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
 import { useUi } from "@/composables/useUi";
-import { activeChildId, TASK_NAV_CHILDREN } from "@/utils/navTree";
+import { activeChildId, TASK_NAV_CHILDREN, SETTINGS_NAV_CHILDREN } from "@/utils/navTree";
+import { useSettingsNavigation } from "@/composables/useSettingsNavigation";
 
 const route = useRoute();
 const router = useRouter();
@@ -30,6 +30,14 @@ const { quitApp } = useUi();
 /** 任务页各子路由的名字都以 tasks 开头；设置页同理用 settings 前缀判定高亮 */
 const onTasks = computed(() => String(route.name).startsWith("tasks"));
 const onSettings = computed(() => String(route.name).startsWith("settings"));
+const settingsNavigation = useSettingsNavigation();
+const settingsExpanded = ref(onSettings.value);
+watch(onSettings, (active) => { if (active) settingsExpanded.value = true; });
+
+function navigateSettings(id: string, name: string): void {
+  if (route.name === name) settingsNavigation.requestScroll(id);
+  else void router.push({ name });
+}
 
 /** 「任务」分组当前激活的子项 id（不在该分组时为 null） */
 const activeTaskChild = computed(() => activeChildId(TASK_NAV_CHILDREN, String(route.name)));
@@ -55,7 +63,7 @@ function navigate(name: string): void {
 </script>
 
 <template>
-  <nav class="sidebar">
+  <nav class="sidebar" aria-label="主要导航">
     <div class="sidebar-header">
       <div class="logo">
         <span class="logo-icon logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
@@ -67,12 +75,12 @@ function navigate(name: string): void {
     </div>
 
     <div class="nav-links">
-      <button class="nav-item" :class="{ active: route.name === 'dashboard' }" @click="navigate('dashboard')" title="仪表盘">
+      <button class="nav-item" :class="{ active: route.name === 'dashboard' }" :aria-current="route.name === 'dashboard' ? 'page' : undefined" @click="navigate('dashboard')" title="仪表盘">
         <IconApp name="grid" class="nav-icon" />
         <span>仪表盘</span>
       </button>
 
-      <button class="nav-item" :class="{ active: route.name === 'profiles' }" @click="navigate('profiles')" title="配置方案（账号、认证地址、匹配规则、登录方式）">
+      <button class="nav-item" :class="{ active: route.name === 'profiles' }" :aria-current="route.name === 'profiles' ? 'page' : undefined" @click="navigate('profiles')" title="配置方案（账号、认证地址、匹配规则、登录方式）">
         <IconApp name="wifi" class="nav-icon" />
         <span>方案</span>
       </button>
@@ -114,12 +122,39 @@ function navigate(name: string): void {
         </div>
       </div>
 
-      <button class="nav-item" :class="{ active: onSettings }" @click="navigate('settings')" title="设置（检测 / 浏览器 / 任务与环境 / 系统与更新 / 外观）">
-        <IconApp name="settings" class="nav-icon" />
-        <span>设置</span>
+      <!-- 手机底栏直接进入任务页，再由页内导航选择任务类别。 -->
+      <button type="button" class="nav-item nav-task-mobile" :class="{ active: onTasks }" :aria-current="onTasks ? 'page' : undefined" @click="navigate('tasks-browser')" title="任务">
+        <IconApp name="file-text" class="nav-icon" /><span>任务</span>
       </button>
 
-      <button class="nav-item" :class="{ active: route.name === 'about' }" @click="navigate('about')" title="关于">
+      <div class="nav-group" :class="{ 'nav-group--open': settingsExpanded }">
+        <button type="button" class="nav-item nav-item--group" :class="{ active: onSettings }"
+          :aria-expanded="settingsExpanded" aria-controls="nav-settings-children"
+          :title="settingsExpanded ? '设置 — 点击收起' : '设置 — 点击展开'"
+          @click="settingsExpanded = !settingsExpanded">
+          <IconApp name="settings" class="nav-icon" /><span>设置</span>
+          <IconApp name="chevron-down" class="nav-caret" :class="{ 'nav-caret--collapsed': !settingsExpanded }" />
+        </button>
+        <div id="nav-settings-children" class="nav-children" :class="{ 'nav-children--open': settingsExpanded }"
+          :aria-hidden="!settingsExpanded" :inert="!settingsExpanded">
+          <div class="nav-children-inner">
+            <button v-for="child in SETTINGS_NAV_CHILDREN" :key="child.id" type="button" class="nav-child"
+              :class="{ active: onSettings && settingsNavigation.activeSection.value === child.id }"
+              :aria-current="onSettings && settingsNavigation.activeSection.value === child.id ? 'location' : undefined"
+              :title="child.title" @click="navigateSettings(child.id, child.name)">
+              {{ child.label }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 手机底栏直接进入长页，分类定位由页内菜单提供。 -->
+      <button type="button" class="nav-item nav-settings-mobile" :class="{ active: onSettings }"
+        :aria-current="onSettings ? 'page' : undefined" @click="navigate('settings')" title="设置">
+        <IconApp name="settings" class="nav-icon" /><span>设置</span>
+      </button>
+
+      <button class="nav-item" :class="{ active: route.name === 'about' }" :aria-current="route.name === 'about' ? 'page' : undefined" @click="navigate('about')" title="关于">
         <IconApp name="info" class="nav-icon" />
         <span>关于</span>
       </button>

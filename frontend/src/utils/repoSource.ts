@@ -10,7 +10,13 @@
 /** 可安全渲染的来源地址（非 http(s) / 空值一律返回空串，调用方据此不渲染链接） */
 export function repoSourceUrl(raw?: string | null): string {
   const trimmed = (raw ?? "").trim();
-  return /^https?:\/\/[^\s]+$/i.test(trimmed) ? trimmed : "";
+  if (!/^https?:\/\/[^\s]+$/i.test(trimmed)) return "";
+  try {
+    const url = new URL(trimmed);
+    return url.hostname && (url.protocol === "http:" || url.protocol === "https:") ? trimmed : "";
+  } catch {
+    return "";
+  }
 }
 
 /**

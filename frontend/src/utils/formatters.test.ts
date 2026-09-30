@@ -1,7 +1,7 @@
 /**
  * 格式化与颜色工具函数的单元测试。
  * 重点覆盖被界面直接消费的边界值（0、缺字段、非法输入）与
- * pickOnColor 的亮度阈值（两种默认主题强调色必须落在正确一侧）。
+ * pickOnColor 按实际对比度选择前景色。
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -132,7 +132,7 @@ describe("relativeLuminance / pickOnColor", () => {
     expect(pickOnColor("#22d3ee")).toBe("#0f172a");
   });
 
-  it("浅色主题默认强调色（深青）配白字", () => {
-    expect(pickOnColor("#0891b2")).toBe("#ffffff");
+  it("中等亮度的深青配对比度更高的深字", () => {
+    expect(pickOnColor("#0891b2")).toBe("#0f172a");
   });
 });

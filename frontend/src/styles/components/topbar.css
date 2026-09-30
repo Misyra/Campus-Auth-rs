@@ -1,4 +1,9 @@
 /* topbar.css — 顶栏状态（status-badge / status-dot） */
+.top-dirty-hint {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .status-badge {
   display: flex;
   align-items: center;

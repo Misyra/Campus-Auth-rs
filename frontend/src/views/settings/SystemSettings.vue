@@ -1,5 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 系统与更新页：启动与运行、日志、界面行为、端口代理、自动更新及数据维护操作 */
+import SettingsRow from "@/components/common/SettingsRow.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
@@ -321,154 +322,208 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="settings-panel-grid settings-panel-grid--cols2 system-update-page">
+  <div class="settings-list-page system-update-page">
     <!-- 配置预设会同时调整多项设置，区别于下方只控制服务形态的单项设置。 -->
-    <section class="card settings-panel settings-panel--wide">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="sliders" class="settings-card-icon" />
         <h2>配置预设</h2>
         <span class="badge badge--sm" :class="currentMode === 'custom' ? 'badge--warn' : 'badge--success'">
-          当前：{{ currentMode === "custom" ? "自定义" : (RUN_MODE_PRESETS.find((p) => p.id === currentMode)?.label ?? "") }}
+          当前：
+          {{ currentMode === "custom" ? "自定义" : (RUN_MODE_PRESETS.find((p) => p.id === currentMode)?.label ?? "") }}
         </span>
       </div>
       <div class="card-body">
-        <div class="run-mode-options">
-          <button
-            v-for="opt in modeOptions" :key="opt.id"
-            type="button"
-            class="run-mode-option"
-            :class="{ active: currentMode === opt.id }"
-            :disabled="modeApplying"
-            :aria-pressed="currentMode === opt.id"
-            @click="switchMode(opt.id)"
-          >
-            <span class="run-mode-option-head">
-              <span class="run-mode-option-label">{{ opt.label }}</span>
-              <IconApp v-if="currentMode === opt.id" name="check" class="icon-sm" />
-            </span>
-            <span class="run-mode-option-desc">{{ opt.description }}</span>
-          </button>
-        </div>
-        <span v-if="currentMode === 'custom'" class="hint run-mode-hint">当前设置已手动调整；选择预设前会列出将要改动的项目。</span>
+        <SettingsRow label="配置预设" description="一次调整多项运行设置，应用前会列出具体改动">
+          <template #description>{{ modeOptions.find(opt => opt.id === currentMode)?.description }}</template>
+          <div class="run-mode-options">
+            <button
+              v-for="opt in modeOptions"
+              :key="opt.id"
+              type="button"
+              class="run-mode-option"
+              :class="{ active: currentMode === opt.id }"
+              :disabled="modeApplying"
+              :aria-pressed="currentMode === opt.id"
+              :title="opt.description"
+              @click="switchMode(opt.id)"
+            >
+              <span class="run-mode-option-head">
+                <span class="run-mode-option-label">{{ opt.label }}</span>
+                <IconApp v-if="currentMode === opt.id" name="check" class="icon-sm" />
+              </span>
+              <span class="run-mode-option-desc">{{ opt.description }}</span>
+            </button>
+          </div>
+        </SettingsRow>
       </div>
     </section>
-
     <!-- 启动与运行 -->
-    <section class="card settings-panel">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="power" class="settings-card-icon" />
         <h2>启动与运行</h2>
       </div>
       <div class="card-body">
-        <div class="form-group">
-          <div class="field-label-row"><label for="settings-startup-action">启动后执行</label><FieldHelp text="程序启动后自动执行的操作。" /></div>
+        <SettingsRow>
+          <template #label>
+            <label for="settings-startup-action">启动后执行</label>
+            <FieldHelp text="程序启动后自动执行的操作。" />
+          </template>
+          <template #description>
+            <span class="hint">{{ startupActionHint }}</span>
+          </template>
           <CustomSelect v-model="config.config.app_settings.startup_action" :options="loginActionOptions" />
-          <span class="hint">{{ startupActionHint }}</span>
-        </div>
-        <div class="form-group">
-          <div class="field-label-row"><label>服务模式</label><FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" /></div>
+        </SettingsRow>
+        <SettingsRow>
+          <template #label>
+            <label>服务模式</label>
+            <FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" />
+          </template>
+          <template #description>
+            <span class="hint">{{ runtimeModeHint }}</span>
+          </template>
           <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
-          <span class="hint">{{ runtimeModeHint }}</span>
-        </div>
-        <div class="toggle-group">
-          <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline">
-              <input type="checkbox" :checked="autostart.enabled" @change="config.toggleAutostart(!autostart.enabled)" :disabled="busy.autostart" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">开机自启动</span>
-              <span v-if="autostart.method !== '-'" class="badge badge--sm badge--mono">{{ autostart.method }}</span>
-            </label>
-            <FieldHelp text="开机登录后自动启动本程序，注册方式显示于开关右侧。" />
-          </div>
-        </div>
+        </SettingsRow>
+        <SettingsRow description="开机登录后自动启动本程序，注册方式显示在名称旁">
+          <template #label>
+            开机自启动
+            <span v-if="autostart.method !== '-'" class="badge badge--sm badge--mono">{{ autostart.method }}</span>
+            <FieldHelp text="开机登录后自动启动本程序，注册方式显示在名称旁。" />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input
+              type="checkbox"
+              :checked="autostart.enabled"
+              @change="config.toggleAutostart(!autostart.enabled)"
+              :disabled="busy.autostart"
+            />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">开机自启动</span>
+          </label>
+        </SettingsRow>
       </div>
     </section>
-
     <!-- 控制台、通知与托盘都影响应用在桌面上的呈现。 -->
-    <section class="card settings-panel">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="monitor" class="settings-card-icon" />
         <h2>控制台与通知</h2>
       </div>
       <div class="card-body">
-        <div class="form-group">
-          <div class="field-label-row">
+        <SettingsRow description="修改后重启生效，默认 50721">
+          <template #label>
             <label for="settings-app-port">控制台端口</label>
             <FieldHelp text="Web 控制台的监听端口。修改后重启生效，默认 50721。" />
-          </div>
-          <input id="settings-app-port" v-model.number="config.config.app_settings.port" type="number" min="1" max="65535" />
-          <span class="hint">本机访问地址一般为 http://127.0.0.1:端口</span>
-        </div>
-        <div class="toggle-group">
-          <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.auto_start_browser" /><span class="toggle-slider"></span><span class="toggle-label">启动时打开控制台</span></label>
+          </template>
+          <template #description>
+            <span class="hint">本机访问地址一般为 http://127.0.0.1:端口</span>
+          </template>
+          <input
+            id="settings-app-port"
+            v-model.number="config.config.app_settings.port"
+            type="number"
+            min="1"
+            max="65535"
+          />
+        </SettingsRow>
+        <SettingsRow description="启用后，程序启动时自动打开 Web 控制台">
+          <template #label>
+            启动时打开控制台
             <FieldHelp text="启用后，程序启动时自动打开 Web 控制台。" />
-          </div>
-        </div>
-        <div class="toggle-group">
-          <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.task_notification" /><span class="toggle-slider"></span><span class="toggle-label">任务通知</span></label>
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.app_settings.auto_start_browser" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">启动时打开控制台</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow description="关键事件完成时弹出系统通知">
+          <template #label>
+            任务通知
             <FieldHelp text="关键事件完成时弹出系统通知。" />
-          </div>
-        </div>
-        <div class="toggle-group">
-          <div class="toggle-with-help">
-            <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.app_settings.show_tray" /><span class="toggle-slider"></span><span class="toggle-label">显示系统托盘图标</span></label>
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.app_settings.task_notification" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">任务通知</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow description="关闭后无托盘图标，仅可通过 Web 控制台操作">
+          <template #label>
+            显示系统托盘图标
             <FieldHelp text="关闭后无托盘图标，仅可通过 Web 控制台操作。修改后重启生效。" />
-          </div>
-        </div>
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.app_settings.show_tray" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">显示系统托盘图标</span>
+          </label>
+        </SettingsRow>
       </div>
     </section>
-
-    <!-- 日志设置横跨两列，避免短数字输入与导出说明挤在半宽卡内。 -->
-    <section class="card settings-panel settings-panel--wide">
+    <!-- 日志设置与导出操作按设置行顺序展示。 -->
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="file-text" class="settings-card-icon" />
         <h2>日志设置</h2>
       </div>
       <div class="card-body settings-grid-2col">
-        <div>
-          <div class="form-row">
-            <div class="form-group">
-              <div class="field-label-row"><label for="settings-log-retention">日志保留天数</label><FieldHelp text="日志和失败截图按天归档，超过设定天数自动清理。" /></div>
-              <input id="settings-log-retention" v-model.number="config.config.logging.retention_days" type="number" min="1" max="365" />
-            </div>
-          </div>
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline"><input type="checkbox" v-model="config.config.logging.file_enabled" /><span class="toggle-slider"></span><span class="toggle-label">启用文件日志</span></label>
-            </div>
-          </div>
-        </div>
-        <div>
-          <div class="form-group">
-            <div class="field-label-row"><label>全局日志级别</label><FieldHelp text="低于该级别的日志将被过滤。选择后即时热更新。" /></div>
-            <CustomSelect :model-value="config.config.logging.level" :options="logLevelOptions" @update:model-value="config.setLogLevel($event as string)" />
-          </div>
-        </div>
+        <SettingsRow description="日志和失败截图按天归档，超过设定天数自动清理">
+          <template #label>
+            <label for="settings-log-retention">日志保留天数</label>
+            <FieldHelp text="日志和失败截图按天归档，超过设定天数自动清理。" />
+          </template>
+          <input
+            id="settings-log-retention"
+            v-model.number="config.config.logging.retention_days"
+            type="number"
+            min="1"
+            max="365"
+          />
+        </SettingsRow>
+        <SettingsRow>
+          <template #label>启用文件日志</template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.logging.file_enabled" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">启用文件日志</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow description="低于该级别的日志将被过滤">
+          <template #label>
+            <label>全局日志级别</label>
+            <FieldHelp text="低于该级别的日志将被过滤。选择后即时热更新。" />
+          </template>
+          <CustomSelect
+            :model-value="config.config.logging.level"
+            :options="logLevelOptions"
+            @update:model-value="config.setLogLevel($event as string)"
+          />
+        </SettingsRow>
       </div>
-      <div class="card-footer log-export-footer">
-        <p class="hint">导出日志压缩包：打包运行日志、登录历史与脱敏环境摘要（不含密码），可随 bug 反馈一并上传。</p>
-        <button
-          class="btn btn-secondary btn-sm"
-          type="button"
-          :disabled="exportingLogs"
-          @click="handleExportLogs"
-          title="打包运行日志与登录历史，用于反馈问题"
-        >
-          {{ exportingLogs ? "导出中..." : "导出日志压缩包" }}
-        </button>
+      <div class="card-body">
+        <SettingsRow label="导出诊断日志" description="打包运行日志、登录历史与脱敏环境摘要，不含密码，可用于反馈问题">
+          <button
+            class="btn btn-secondary btn-sm"
+            type="button"
+            :disabled="exportingLogs"
+            @click="handleExportLogs"
+            title="打包运行日志与登录历史，用于反馈问题"
+          >
+            {{ exportingLogs ? "导出中..." : "导出日志压缩包" }}
+          </button>
+        </SettingsRow>
       </div>
     </section>
-
     <!-- 自动更新 -->
-    <section class="card settings-panel settings-panel--wide">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="download" class="settings-card-icon" />
         <h2>自动更新</h2>
       </div>
       <div class="card-body">
-        <!-- 手动放置安装包：跨两列的说明条（手动更新是低频操作，放折叠区避免占位） -->
+        <!-- 手动放置安装包的说明默认折叠，按需查看。 -->
         <details class="manual-update-tip">
           <summary>
             <IconApp name="info" width="15" height="15" />
@@ -485,158 +540,203 @@ onMounted(() => {
               <button type="button" class="btn btn-ghost btn-sm" @click="copyUpdateDir">复制路径</button>
             </div>
             <ul class="manual-update-notes">
-              <li>按 <strong>内容</strong>（SHA256）判断，改过文件名也能用；放着旧版本的包不会被误用。</li>
+              <li>
+                按
+                <strong>内容</strong>
+                （SHA256）判断，改过文件名也能用；放着旧版本的包不会被误用。
+              </li>
               <li>仍需能连上发布源：版本号与校验值来自远程，完全离线时请改用整包覆盖。</li>
-              <li>该目录下的 <code>pending.json</code>、<code>staging/</code> 等是程序自己的文件，可与之共存。</li>
+              <li>
+                该目录下的
+                <code>pending.json</code>
+                、
+                <code>staging/</code>
+                等是程序自己的文件，可与之共存。
+              </li>
             </ul>
           </div>
         </details>
       </div>
       <div class="card-body settings-grid-2col">
-        <div>
-          <div class="toggle-group">
-            <div class="toggle-with-help">
-              <label class="toggle toggle-help-inline">
-                <input type="checkbox" v-model="config.config.updater.auto_check_enabled" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">自动检查更新</span>
-              </label>
-              <FieldHelp text="关闭后不再自动检查更新，仅保留手动“立即检查”。保存后即时生效。" />
-            </div>
-          </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label>检查频率</label>
-              <FieldHelp text="每次启动：仅启动时检查一次；每天/每周：启动时先检查一次，之后按周期自动检查。" />
-            </div>
-            <CustomSelect
-              v-model="checkFrequency"
-              :options="checkFrequencyOptions"
-              :disabled="!config.config.updater.auto_check_enabled"
+        <SettingsRow description="关闭后不再自动检查更新，仅保留手动“立即检查”">
+          <template #label>
+            自动检查更新
+            <FieldHelp text="关闭后不再自动检查更新，仅保留手动“立即检查”。保存后即时生效。" />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.updater.auto_check_enabled" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">自动检查更新</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow description="选择启动时检查或定期检查">
+          <template #label>
+            <label>检查频率</label>
+            <FieldHelp text="每次启动：仅启动时检查一次；每天/每周：启动时先检查一次，之后按周期自动检查。" />
+          </template>
+          <CustomSelect
+            v-model="checkFrequency"
+            :options="checkFrequencyOptions"
+            :disabled="!config.config.updater.auto_check_enabled"
+          />
+        </SettingsRow>
+        <div class="settings-subsection">
+          <h3>下载与任务仓库代理</h3>
+          <SettingsRow description="仅影响版本更新检查、下载与任务仓库">
+            <template #label>
+              使用代理
+              <FieldHelp text="仅影响版本更新检查、下载与任务仓库。检测流量的代理设置见“检测”页。" />
+            </template>
+            <label class="toggle setting-row-switch">
+              <input type="checkbox" v-model="config.config.updater.use_proxy" />
+              <span class="toggle-slider"></span>
+              <span class="sr-only">使用代理</span>
+            </label>
+          </SettingsRow>
+          <SettingsRow v-if="config.config.updater.use_proxy" description="完整的 HTTP 代理地址，如 http://127.0.0.1:7890">
+            <template #label>
+              <label for="settings-proxy-url">代理地址</label>
+              <FieldHelp text="完整的 HTTP 代理地址，如 http://127.0.0.1:7890。" />
+            </template>
+            <input
+              id="settings-proxy-url"
+              v-model="config.config.updater.proxy_url"
+              type="text"
+              placeholder="http://127.0.0.1:7890"
+              spellcheck="false"
             />
-          </div>
-          <div class="settings-subsection">
-            <h3>下载与任务仓库代理</h3>
-            <div class="toggle-group">
-              <div class="toggle-with-help">
-                <label class="toggle toggle-help-inline">
-                  <input type="checkbox" v-model="config.config.updater.use_proxy" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">使用代理</span>
-                </label>
-                <FieldHelp text="仅影响版本更新检查、下载与任务仓库。检测流量的代理设置见“检测”页。" />
-              </div>
-            </div>
-            <div v-if="config.config.updater.use_proxy" class="form-group">
-              <div class="field-label-row">
-                <label for="settings-proxy-url">代理地址</label>
-                <FieldHelp text="完整的 HTTP 代理地址，如 http://127.0.0.1:7890。" />
-              </div>
-              <input id="settings-proxy-url" v-model="config.config.updater.proxy_url" type="text" placeholder="http://127.0.0.1:7890" spellcheck="false" />
-            </div>
-          </div>
+          </SettingsRow>
         </div>
-        <div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label>更新通道</label>
-              <FieldHelp text="正式版仅跟随稳定发布；测试版跟随预发布（alpha/beta）；全通道最新版取两者中更高者。" />
-            </div>
-            <div class="segmented" role="group" aria-label="更新通道">
-              <button
-                v-for="opt in channelOptions"
-                :key="opt.value"
-                type="button"
-                :class="{ active: config.config.updater.channel === opt.value }"
-                @click="config.config.updater.channel = opt.value"
+        <SettingsRow description="选择正式版、测试版或全通道最新版">
+          <template #label>
+            <label>更新通道</label>
+            <FieldHelp text="正式版仅跟随稳定发布；测试版跟随预发布（alpha/beta）；全通道最新版取两者中更高者。" />
+          </template>
+          <div class="segmented" role="group" aria-label="更新通道">
+            <button
+              v-for="opt in channelOptions"
+              :key="opt.value"
+              type="button"
+              :class="{ active: config.config.updater.channel === opt.value }"
+              @click="config.config.updater.channel = opt.value"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+        </SettingsRow>
+        <SettingsRow description="从本地挑一个已下载好的发布包直接安装，不联网下载">
+          <template #label>
+            <label>手动选择安装包</label>
+            <FieldHelp text="从本地挑一个已下载好的发布包直接安装，不联网下载。适用于下载慢、或用自编译/镜像包的情况；版本须高于当前版本。" />
+          </template>
+          <div class="update-check-row">
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              :disabled="updating"
+              @click="selectUpdatePackage"
+            >
+              <IconApp v-if="updating" name="refresh" class="spin" />
+              {{ updating ? "处理中..." : "选择安装包" }}
+            </button>
+            <span class="hint">支持 .zip / .tar.gz / .tgz，上限 512 MB</span>
+          </div>
+        </SettingsRow>
+        <SettingsRow description="记录最近一次手动或自动检查的结果，重启后保留">
+          <template #label>
+            <label>上次检查时间</label>
+            <FieldHelp text="记录最近一次手动或自动检查的结果，重启后保留。" />
+          </template>
+          <template #description>
+            <span
+              v-if="updateCheckHint && !updateInfo"
+              class="hint update-check-hint"
+              :class="{ 'update-check-error': !!updateState?.error }"
+            >
+              {{ updateCheckHint }}
+            </span>
+          </template>
+          <div class="update-check-row">
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              :disabled="updateChecking"
+              @click="manualCheckUpdate"
+            >
+              <IconApp v-if="updateChecking" name="refresh" class="spin" />
+              {{ updateChecking ? "检查中..." : "立即检查" }}
+            </button>
+            <!-- 更新日志统一在弹窗里看（大区域 + 可滚动），本页只留紧凑状态行 -->
+            <button type="button" class="btn btn-ghost btn-sm" @click="update.openDialog()">查看更新日志</button>
+            <span v-if="lastCheckLabel" class="hint">{{ lastCheckLabel }}</span>
+          </div>
+          <!-- 检查结果：与关于页原逻辑一致，检查后原地展示更新/下载入口 -->
+          <div v-if="updateInfo && !updateInfo.error && !updateInfo.message" class="update-result">
+            <div v-if="updateInfo.has_update" class="update-available">
+              <IconApp name="upload" width="16" height="16" />
+              <span>
+                发现新版本
+                <strong>v{{ updateInfo.latest }}</strong>
+                <template v-if="updateInfo.size">（约 {{ (updateInfo.size / 1048576).toFixed(1) }} MB）</template>
+              </span>
+              <button type="button" class="btn btn-primary btn-sm" :disabled="updating" @click="applyUpdate">
+                {{ updating ? "更新中..." : localPackageHint ? "使用本地包更新" : "立即更新" }}
+              </button>
+              <a
+                v-if="updateInfo.url"
+                :href="updateInfo.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn btn-ghost btn-sm"
               >
-                {{ opt.label }}
-              </button>
+                前往下载
+              </a>
             </div>
-          </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label>手动选择安装包</label>
-              <FieldHelp text="从本地挑一个已下载好的发布包直接安装，不联网下载。适用于下载慢、或用自编译/镜像包的情况；版本须高于当前版本。" />
-            </div>
-            <div class="update-check-row">
-              <button type="button" class="btn btn-secondary btn-sm" :disabled="updating" @click="selectUpdatePackage">
-                <IconApp v-if="updating" name="refresh" class="spin" />
-                {{ updating ? "处理中..." : "选择安装包" }}
-              </button>
-              <span class="hint">支持 .zip / .tar.gz / .tgz，上限 512 MB</span>
-            </div>
-          </div>
-          <div class="form-group">
-            <div class="field-label-row">
-              <label>上次检查时间</label>
-              <FieldHelp text="记录最近一次手动或自动检查的结果，重启后保留。" />
-            </div>
-            <div class="update-check-row">
-              <button type="button" class="btn btn-secondary btn-sm" :disabled="updateChecking" @click="manualCheckUpdate">
-                <IconApp v-if="updateChecking" name="refresh" class="spin" />
-                {{ updateChecking ? "检查中..." : "立即检查" }}
-              </button>
-              <!-- 更新日志统一在弹窗里看（大区域 + 可滚动），本页只留紧凑状态行 -->
-              <button type="button" class="btn btn-ghost btn-sm" @click="update.openDialog()">
-                查看更新日志
-              </button>
-              <span v-if="lastCheckLabel" class="hint">{{ lastCheckLabel }}</span>
-            </div>
-            <span v-if="updateCheckHint && !updateInfo" class="hint update-check-hint" :class="{ 'update-check-error': !!updateState?.error }">{{ updateCheckHint }}</span>
-            <!-- 检查结果：与关于页原逻辑一致，检查后原地展示更新/下载入口 -->
-            <div v-if="updateInfo && !updateInfo.error && !updateInfo.message" class="update-result">
-              <div v-if="updateInfo.has_update" class="update-available">
-                <IconApp name="upload" width="16" height="16" />
-                <span>发现新版本 <strong>v{{ updateInfo.latest }}</strong><template v-if="updateInfo.size">（约 {{ (updateInfo.size / 1048576).toFixed(1) }} MB）</template></span>
-                <button type="button" class="btn btn-primary btn-sm" :disabled="updating" @click="applyUpdate">{{ updating ? "更新中..." : localPackageHint ? "使用本地包更新" : "立即更新" }}</button>
-                <a v-if="updateInfo.url" :href="updateInfo.url" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm">前往下载</a>
-              </div>
-              <div v-else class="update-latest">
-                <IconApp name="check" width="16" height="16" />
-                <span>{{ updateInfo.platform_unavailable ? "远程发布暂无当前平台的安装包" : "当前已是最新版本" }}</span>
-              </div>
-              <!-- 本地安装包命中：说明将跳过下载（应用阶段服务端会重新扫描校验） -->
-              <p v-if="updateInfo.has_update && localPackageHint" class="hint update-local-package">
-                <IconApp name="check" width="14" height="14" />
-                {{ localPackageHint }}
-              </p>
-              <div v-if="updating && updateProgress" class="hint">下载更新 {{ updateProgress.percent }}%</div>
-            </div>
-            <div v-else-if="updateInfo && updateInfo.message" class="update-success">
+            <div v-else class="update-latest">
               <IconApp name="check" width="16" height="16" />
-              <span>{{ updateInfo.message }}，请重启程序生效</span>
+              <span>{{ updateInfo.platform_unavailable ? "远程发布暂无当前平台的安装包" : "当前已是最新版本" }}</span>
             </div>
-            <div v-else-if="updateInfo && updateInfo.error" class="update-error">{{ updateInfo.error }}</div>
+            <!-- 本地安装包命中：说明将跳过下载（应用阶段服务端会重新扫描校验） -->
+            <p v-if="updateInfo.has_update && localPackageHint" class="hint update-local-package">
+              <IconApp name="check" width="14" height="14" />
+              {{ localPackageHint }}
+            </p>
+            <div v-if="updating && updateProgress" class="hint">下载更新 {{ updateProgress.percent }}%</div>
           </div>
-        </div>
+          <div v-else-if="updateInfo && updateInfo.message" class="update-success">
+            <IconApp name="check" width="16" height="16" />
+            <span>{{ updateInfo.message }}，请重启程序生效</span>
+          </div>
+          <div v-else-if="updateInfo && updateInfo.error" class="update-error">{{ updateInfo.error }}</div>
+        </SettingsRow>
       </div>
     </section>
-
     <!-- 维护操作 -->
-    <section class="card settings-panel settings-panel--wide">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="sliders" class="settings-card-icon" />
         <h2>维护操作</h2>
       </div>
       <div class="card-body settings-grid-2col">
-        <div class="form-group">
-          <div class="field-label-row">
+        <SettingsRow description="按运行时长周期性重启本程序，以回收内存">
+          <template #label>
             <label for="settings-auto-restart">定时自重启</label>
             <FieldHelp text="按运行时长周期性重启本程序，以回收内存。先启动新进程再退出旧进程，修改即时生效。" />
-          </div>
+          </template>
           <CustomSelect v-model="autoRestartHours" :options="autoRestartOptions" />
-        </div>
-        <div class="form-group">
-          <div class="field-label-row">
+        </SettingsRow>
+        <SettingsRow description="从磁盘重新读取配置文件并应用，无需重启">
+          <template #label>
             <label>配置热重载</label>
             <FieldHelp text="从磁盘重新读取配置文件并应用，无需重启。日常修改请使用下方的保存按钮。" />
-          </div>
+          </template>
+          <template #description>
+            <span v-if="reloadMsg" class="hint">{{ reloadMsg }}</span>
+          </template>
           <button type="button" class="btn btn-secondary btn-sm" @click="reloadConfig" :disabled="reloading">
             {{ reloading ? "加载中..." : "重新加载配置" }}
           </button>
-          <span v-if="reloadMsg" class="hint">{{ reloadMsg }}</span>
-        </div>
+        </SettingsRow>
       </div>
     </section>
   </div>

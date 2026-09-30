@@ -15,6 +15,8 @@ const props = withDefaults(
     closeOnOverlay?: boolean;
     /** 是否允许 ESC 键关闭（默认 true；调试面板等误触代价高的场景设为 false） */
     closeOnEsc?: boolean;
+    /** 保存等关键操作在途时统一禁用关闭入口，避免按钮看似可点却无效。 */
+    closeDisabled?: boolean;
     /** 沉浸预览模式：加深遮罩（截图放大/背景预览等大图场景） */
     preview?: boolean;
   }>(),
@@ -23,6 +25,7 @@ const props = withDefaults(
     size: "default",
     closeOnOverlay: true,
     closeOnEsc: true,
+    closeDisabled: false,
     preview: false,
   },
 );
@@ -32,6 +35,7 @@ const emit = defineEmits<{ close: [] }>();
 const containerRef = ref<HTMLElement | null>(null);
 
 function onClose(): void {
+  if (props.closeDisabled) return;
   emit("close");
 }
 
@@ -113,7 +117,7 @@ onBeforeUnmount(() => {
         >
           <div class="modal-header">
             <h3>{{ title }}</h3>
-            <button class="btn btn-icon-only" @click="onClose" aria-label="关闭" title="关闭">
+            <button class="btn btn-icon-only" :disabled="closeDisabled" @click="onClose" aria-label="关闭" title="关闭">
               <IconApp name="close" />
             </button>
           </div>

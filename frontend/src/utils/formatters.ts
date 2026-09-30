@@ -107,7 +107,18 @@ export function relativeLuminance(hex: string): number {
   return 0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b);
 }
 
-/** 强调色底上的文字色：亮底配深字、深底配白字（阈值取两种默认主题强调色的分界） */
+/** 两个颜色之间的亮度对比，用于选择可读的前景色。 */
+export function contrastRatio(first: string, second: string): number {
+  const a = relativeLuminance(first);
+  const b = relativeLuminance(second);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+/** 强调色底上的文字色：在深字和白字中选择对比度更高的一种。 */
 export function pickOnColor(hex: string): string {
-  return relativeLuminance(hex) > 0.4 ? "#0f172a" : "#ffffff";
+  const darkContrast = contrastRatio(hex, "#0f172a");
+  const lightContrast = contrastRatio(hex, "#ffffff");
+  // 中间亮度的紫色等可能让深蓝字和白字都偏弱，此时用纯黑补足对比度。
+  if (Math.max(darkContrast, lightContrast) < 4.5) return "#000000";
+  return darkContrast >= lightContrast ? "#0f172a" : "#ffffff";
 }

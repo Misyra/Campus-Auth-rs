@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { UninstallTarget } from "../api/types";
+import type { ConfirmOptions } from "./useConfirm";
 
 const { apiMock, confirmMock, loggerWarnMock } = vi.hoisted(() => ({
   apiMock: {
@@ -31,7 +32,7 @@ vi.mock("../utils/logger", () => ({
   frontendLogger: { info: vi.fn(), warn: loggerWarnMock, error: vi.fn(), debug: vi.fn() },
 }));
 
-const { useUninstall, purgeConfirmMessage } = await import("./useUninstall");
+const { useUninstall } = await import("./useUninstall");
 
 function target(key: string, label: string, exists = true): UninstallTarget {
   return { key, label, path: `/base/${key}`, exists };
@@ -141,32 +142,75 @@ describe("删除清单随勾选变化", () => {
 });
 
 describe("确认文案", () => {
-  it("逐项点名将删除的内容（用户要求「说清删哪些」）", () => {
-    const program: UninstallTarget = { label: "程序目录", path: "/base", exists: true };
-    const text = purgeConfirmMessage(
-      program,
-      [target("config", "配置与方案"), target("tasks", "任务与脚本")],
-      [],
-    );
-    expect(text).toContain("将永久删除");
+  it("实际确认框逐项点名将删除的内容", async () => {
+    confirmMock.mockResolvedValue(false);
+    const u = useUninstall();
+    await u.openDialog();
+    await u.run();
+    const options = confirmMock.mock.calls[0][0] as ConfirmOptions;
+    const text = options.sections?.find(section => section.title === "删除")?.text;
     expect(text).toContain("程序目录");
     expect(text).toContain("配置与方案");
     expect(text).toContain("任务与脚本");
-    expect(text).toContain("不可恢复");
+    expect(options.message).toContain("无法恢复");
   });
 
-  it("勾选保留时说清保留了几项", () => {
-    const text = purgeConfirmMessage(
-      { label: "程序目录", path: "/base", exists: true },
-      [],
-      [target("config", "配置与方案"), target("tasks", "任务与脚本")],
-    );
-    expect(text).toContain("保留 2 项用户数据");
-    expect(text).toContain("程序目录");
+  it("勾选保留时，删除、保留与系统清理分组准确", async () => {
+    confirmMock.mockResolvedValue(false);
+    const u = useUninstall();
+    await u.openDialog();
+    u.keepUserData.value = true;
+    await u.run();
+    const options = confirmMock.mock.calls[0][0] as ConfirmOptions;
+    const sections = options.sections ?? [];
+    expect(sections.find(s => s.title === "删除")?.text).toBe("程序文件（保留用户数据）");
+    const kept = sections.find(s => s.title === "保留")?.text;
+    expect(kept).toContain("配置与方案");
+    expect(kept).toContain("任务与脚本");
+    expect(kept).toContain("加密密钥也会保留");
+    expect(kept).toContain("原路径");
+    expect(sections.find(s => s.title === "系统清理")?.text).not.toContain("加密密钥");
+  });
+
+  it("没有已有数据时，保留选项仍保留密钥", async () => {
+    confirmMock.mockResolvedValue(false);
+    apiMock.detect.mockResolvedValue(detectResult({ data: [] }));
+    const u = useUninstall();
+    await u.openDialog();
+    u.keepUserData.value = true;
+    await u.run();
+    const options = confirmMock.mock.calls[0][0] as ConfirmOptions;
+    expect(options.sections?.find(s => s.title === "保留")?.text).toContain("加密密钥也会保留");
+    expect(options.sections?.find(s => s.title === "系统清理")?.text).not.toContain("加密密钥");
   });
 });
 
 describe("执行卸载", () => {
+  it("嵌套数据根不能保留时，先拦下而不清理密钥或系统残留", async () => {
+    apiMock.detect.mockResolvedValue(detectResult({ keep_data_blocked: "嵌套数据根请先迁移" }));
+    const u = useUninstall();
+    await u.openDialog();
+    u.keepUserData.value = true;
+    await u.run();
+    expect(u.keepDataBlockReason.value).toContain("迁移");
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(apiMock.uninstall).not.toHaveBeenCalled();
+    expect(apiMock.purge).not.toHaveBeenCalled();
+  });
+
+  it("确认时确定的保留选项在两步请求之间保持一致", async () => {
+    const u = useUninstall();
+    await u.openDialog();
+    u.keepUserData.value = true;
+    apiMock.uninstall.mockImplementation(async () => {
+      u.keepUserData.value = false;
+      return { results: [], message: "ok" };
+    });
+    await u.run();
+    expect(apiMock.uninstall).toHaveBeenCalledWith(true);
+    expect(apiMock.purge).toHaveBeenCalledWith(true);
+  });
+
   it("用户取消确认：一个请求都不发", async () => {
     confirmMock.mockResolvedValue(false);
     const u = useUninstall();

@@ -38,19 +38,12 @@ export function emptyHttpRequestStep(id = "login", name = "登录请求"): HttpF
   };
 }
 
-/** 新建任务的计算示例：把本机 IP 原样存为 ip，供后续请求引用。 */
+/** 计算步骤可选示例：把本机 IP 原样存为 ip，供后续请求引用。 */
 export const HTTP_IP_EXAMPLE_SCRIPT = "function transform(ctx) {\n  return { ip: ctx.local_ip };\n}";
 
-/** 新建任务的两步示例；请求地址保留无效占位值，填写真实门户地址前不落盘。 */
+/** 新建任务从一个空白登录请求开始，填写真实门户地址前不落盘。 */
 export function initialHttpFlowSteps(): HttpFlowStep[] {
-  return [
-    {
-      ...emptyHttpRequestStep("compute_ip", "计算字段（IP 示例）"),
-      kind: "transform",
-      script: HTTP_IP_EXAMPLE_SCRIPT,
-    },
-    { ...emptyHttpRequestStep(), url: HTTP_TASK_PLACEHOLDER_URL },
-  ];
+  return [emptyHttpRequestStep()];
 }
 
 /** 旧式固定链在编辑器中的等价有序步骤；打开旧文件本身不会触发迁移保存。 */

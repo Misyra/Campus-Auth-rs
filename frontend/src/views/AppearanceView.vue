@@ -1,297 +1,388 @@
 <script setup lang="ts">
-/** 外观设置页：主题/卡片/侧栏样式、背景图与自定义颜色。
- * 原为侧栏独立页，现作为「设置」的一个 Tab 渲染（路由 /settings/appearance）：
- * 它是纯本机显示偏好（localStorage），与其余设置同类，不再占用一级导航。
- * 因此不再自带 .page-content 外壳——那层间距/入场动画由设置页框架统一提供，
- * 嵌套会导致重复动画。改动即时生效，无保存栏（见 SettingsView 的 isAppearanceTab）。 */
+/** 本浏览器外观设置：主题与材质分区、快捷风格、阅读偏好和即时反馈。 */
+import { computed } from "vue";
+import SettingsRow from "@/components/common/SettingsRow.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import Modal from "@/components/common/Modal.vue";
+import AppearanceColors from "@/components/common/AppearanceColors.vue";
 import { useAppearance } from "@/composables/useAppearance";
 import { useBackgroundImage } from "@/composables/useBackgroundImage";
-import { useCustomColors } from "@/composables/useCustomColors";
-import { MONO_ACCENT } from "@/utils/constants";
-import { pickOnColor } from "@/utils/formatters";
+import { useConfirm } from "@/composables/useConfirm";
+import { APPEARANCE_PRESETS } from "@/utils/appearance";
 
-const { appearance, cardDirty, resetCard, resetThemeBackground, getResolvedAccent } = useAppearance();
+const { appearance, storageAvailable, cardDirty, resetCard, resetAll } = useAppearance();
+const { confirm } = useConfirm();
 const {
-  randomWallpaperDialog,
-  bgLightbox,
-  selectBackgroundImage,
-  clearBackgroundImage,
-  openRandomWallpaperDialog,
-  closeRandomWallpaperDialog,
-  confirmRandomWallpaper,
-  openBgLightbox,
-  closeBgLightbox,
+  randomWallpaperDialog, bgLightbox, uploading, removing, selectBackgroundImage, clearBackgroundImage,
+  openRandomWallpaperDialog, closeRandomWallpaperDialog, confirmRandomWallpaper, openBgLightbox, closeBgLightbox,
 } = useBackgroundImage();
-const {
-  getColorList,
-  pickCustomColor,
-  onCustomColorPicked,
-  onColorLongPress,
-  startLongPress,
-} = useCustomColors();
-
-/**
- * 色板色块的背景：`mono` 哨兵不是合法 CSS 颜色（直接当 background 会渲染成透明），
- * 需解析为当前有效主题下的实际色——浅色主题显示黑、深色主题显示白，
- * 即「选了它现在会得到什么」。对半色块（左黑右白）看似信息更全，
- * 但勾选图标必然落在同色那一半而看不清，故不用。
- */
-function swatchBackground(value: string): string {
-  return value === MONO_ACCENT ? getResolvedAccent() : value;
-}
-
-/**
- * 色块内勾选图标的颜色：按该色块的实际底色取对比色。
- * 此前勾选继承文字色，深色主题下 `--text-primary` 是白色，
- * 叠在纯白色块（单色的夜间态）上会完全看不见。
- */
-function swatchCheckColor(value: string): string {
-  return pickOnColor(swatchBackground(value));
+const activePreset = computed(() => APPEARANCE_PRESETS.find((preset) => Object.entries(preset.values).every(([key, value]) => appearance[key as keyof typeof appearance] === value))?.id);
+async function restoreAppearance(): Promise<void> {
+  if (await confirm({ title: "恢复默认外观", message: "恢复本浏览器的主题、背景和显示偏好？自定义色板及已上传的图片文件会保留。" })) resetAll();
 }
 </script>
 
 <template>
-  <div class="appearance-page">
-    <!-- 卡片 1：背景与氛围 -->
-    <div class="card appearance-section-card">
+  <div class="appearance-page settings-list-page">
+    <div class="appearance-intro">
+      <p role="status">{{ storageAvailable ? '修改即时生效，自动保存在本浏览器。' : '浏览器存储不可用，当前修改关闭后可能无法保留。' }}</p>
+      <button
+        type="button"
+        class="btn btn-secondary btn-sm"
+        :disabled="uploading || removing || randomWallpaperDialog.loading"
+        @click="restoreAppearance"
+      >
+        恢复全部默认
+      </button>
+    </div>
+    <section class="appearance-section-card">
       <div class="appearance-card-header">
-        <IconApp name="image" class="appearance-card-icon" />
-        <h3>背景与氛围</h3>
-        <button v-if="cardDirty('background')" type="button" class="appearance-reset-btn" @click="resetCard('background')">恢复默认</button>
+        <h3>主题与配色</h3>
+        <button
+          type="button"
+          class="appearance-reset-btn"
+          :disabled="!cardDirty('theme')"
+          @click="resetCard('theme')"
+        >
+          恢复默认
+        </button>
       </div>
-        <div class="appearance-card-body appearance-grid-2col">
+      <div class="appearance-card-body">
+        <SettingsRow label="显示模式" description="选择浅色、深色，或跟随系统自动切换">
+          <div class="segmented" role="group" aria-label="显示模式">
+            <button
+              type="button"
+              :class="{ active: appearance.theme === 'light' }"
+              :aria-pressed="appearance.theme === 'light'"
+              @click="appearance.theme = 'light'"
+            >
+              浅色
+            </button>
+            <button
+              type="button"
+              :class="{ active: appearance.theme === 'dark' }"
+              :aria-pressed="appearance.theme === 'dark'"
+              @click="appearance.theme = 'dark'"
+            >
+              深色
+            </button>
+            <button
+              type="button"
+              :class="{ active: appearance.theme === 'auto' }"
+              :aria-pressed="appearance.theme === 'auto'"
+              @click="appearance.theme = 'auto'"
+            >
+              跟随系统
+            </button>
+          </div>
+        </SettingsRow>
+        <AppearanceColors type="accent" label="主题色" />
+        <AppearanceColors type="bg" label="页面背景色" default-label="自动" />
+      </div>
+    </section>
+    <section class="appearance-section-card">
+      <div class="appearance-card-header">
+        <h3>卡片与层次</h3>
+        <button
+          type="button"
+          class="appearance-reset-btn"
+          :disabled="!cardDirty('card')"
+          @click="resetCard('card')"
+        >
+          恢复默认
+        </button>
+      </div>
+      <div class="appearance-card-body">
+        <SettingsRow label="快捷风格" description="调整卡片与导航材质，保留配色和背景图片">
+          <div class="appearance-presets" role="group" aria-label="快捷风格">
+            <button
+              v-for="preset in APPEARANCE_PRESETS"
+              :key="preset.id"
+              type="button"
+              class="appearance-preset"
+              :class="[{ active: activePreset === preset.id }, 'appearance-preset--' + preset.id]"
+              :aria-pressed="activePreset === preset.id"
+              :title="preset.hint"
+              @click="Object.assign(appearance, preset.values)"
+            >
+              <span class="appearance-preset-sample" aria-hidden="true">
+                <i></i>
+                <i></i>
+                <i></i>
+              </span>
+              <strong>{{ preset.label }}</strong>
+            </button>
+          </div>
+        </SettingsRow>
+        <SettingsRow description="控制卡片底色的可见度">
+          <template #label>
+            <label for="card-opacity">卡片不透明度</label>
+          </template>
+          <div class="appearance-slider-item">
+            <input
+              id="card-opacity"
+              type="range"
+              v-model.number="appearance.card_opacity"
+              min="0"
+              max="1"
+              step="0.05"
+            />
+            <output for="card-opacity">{{ Math.round(appearance.card_opacity * 100) }}%</output>
+          </div>
+        </SettingsRow>
+        <SettingsRow>
+          <template #label>
+            <label for="border-intensity">边框强度</label>
+          </template>
+          <div class="appearance-slider-item">
+            <input
+              id="border-intensity"
+              type="range"
+              v-model.number="appearance.border_intensity"
+              min="0"
+              max="2"
+              step="0.1"
+            />
+            <output for="border-intensity">{{ appearance.border_intensity.toFixed(1) }}×</output>
+          </div>
+        </SettingsRow>
+        <SettingsRow label="毛玻璃效果" description="模糊卡片背后的内容；设备性能有限时可关闭">
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="appearance.backdrop_filter" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">毛玻璃效果</span>
+          </label>
+        </SettingsRow>
+        <SettingsRow :class="{ disabled: !appearance.backdrop_filter }" description="开启毛玻璃后可调节，搭配背景图片更明显">
+          <template #label>
+            <label for="card-blur">玻璃模糊度</label>
+          </template>
+          <div class="appearance-slider-item">
+            <input
+              id="card-blur"
+              type="range"
+              v-model.number="appearance.card_blur"
+              min="0"
+              max="24"
+              step="1"
+              :disabled="!appearance.backdrop_filter"
+            />
+            <output for="card-blur">{{ appearance.card_blur }}px</output>
+          </div>
+        </SettingsRow>
+      </div>
+    </section>
+    <section class="appearance-section-card">
+      <div class="appearance-card-header">
+        <h3>背景图片</h3>
+        <button
+          type="button"
+          class="appearance-reset-btn"
+          :disabled="uploading || removing || randomWallpaperDialog.loading || !cardDirty('background')"
+          @click="resetCard('background')"
+        >
+          恢复默认
+        </button>
+      </div>
+      <div class="appearance-card-body">
+        <SettingsRow label="背景图片" description="支持常见图片格式，文件最大 5MB">
           <div class="appearance-bg-thumb-group">
-            <div v-if="appearance.background_url" class="appearance-bg-thumb" @click="openBgLightbox">
-              <img :src="appearance.background_url" alt="背景预览" />
-              <div class="appearance-bg-thumb-zoom">
+            <button
+              v-if="appearance.background_url"
+              type="button"
+              class="appearance-bg-thumb"
+              @click="openBgLightbox"
+              aria-label="放大背景图片预览"
+            >
+              <img :src="appearance.background_url" alt="背景图片" />
+              <span class="appearance-bg-thumb-zoom">
                 <IconApp name="zoom-in" class="icon-sm" />
-              </div>
-              <button type="button" class="appearance-bg-thumb-remove" @click.stop="clearBackgroundImage" title="移除背景">
-                <IconApp name="close" class="icon-sm" />
+              </span>
+            </button>
+            <button
+              v-else
+              type="button"
+              class="appearance-bg-thumb empty"
+              @click="selectBackgroundImage"
+              :disabled="uploading || removing || randomWallpaperDialog.loading"
+            >
+              <IconApp name="image" class="appearance-bg-thumb-icon" />
+              <span>选择图片</span>
+            </button>
+            <div class="appearance-bg-thumb-actions">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                @click="selectBackgroundImage"
+                :disabled="uploading || removing || randomWallpaperDialog.loading"
+              >
+                {{ uploading ? '上传中…' : appearance.background_url ? '更换图片' : '选择图片' }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                @click="openRandomWallpaperDialog"
+                :disabled="uploading || removing || randomWallpaperDialog.loading"
+              >
+                从链接下载
+              </button>
+              <button
+                v-if="appearance.background_url"
+                type="button"
+                class="btn btn-text btn-sm"
+                @click="clearBackgroundImage"
+                :disabled="uploading || removing || randomWallpaperDialog.loading"
+              >
+                移除图片
               </button>
             </div>
-            <div v-else class="appearance-bg-thumb empty" @click="selectBackgroundImage">
-              <IconApp name="image" :stroke-width="1.5" class="appearance-bg-thumb-icon" />
-              <span>选择图片</span>
-            </div>
-            <div class="appearance-bg-thumb-actions">
-              <button type="button" class="btn btn-secondary btn-sm" @click="selectBackgroundImage">选择图片</button>
-              <button type="button" class="btn btn-secondary btn-sm" @click="openRandomWallpaperDialog">从链接下载</button>
-            </div>
           </div>
-
-          <div class="appearance-sliders-col">
-            <div class="appearance-slider-item">
-              <label for="bg-blur">背景模糊</label>
-              <input id="bg-blur" type="range" v-model.number="appearance.background_blur" min="0" max="30" step="1" />
-              <span>{{ appearance.background_blur }}px</span>
-            </div>
-            <div class="appearance-slider-item">
-              <label for="bg-opacity">背景可见度</label>
-              <input id="bg-opacity" type="range" v-model.number="appearance.background_opacity" min="0" max="0.8" step="0.05" />
-              <span>{{ Math.round(appearance.background_opacity * 100) }}%</span>
-            </div>
-            <div class="appearance-slider-item" :class="{ disabled: !appearance.backdrop_filter }">
-              <label for="card-blur">玻璃模糊度</label>
-              <input id="card-blur" type="range" v-model.number="appearance.card_blur" min="0" max="24" step="1" :disabled="!appearance.backdrop_filter" />
-              <span>{{ appearance.card_blur }}px</span>
-            </div>
-            <label class="toggle appearance-toggle-row">
-              <input type="checkbox" v-model="appearance.backdrop_filter" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">毛玻璃效果</span>
-            </label>
-            <span v-if="!appearance.backdrop_filter" class="hint appearance-dependency-hint">开启毛玻璃效果后，才能调节上方的玻璃模糊度</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 卡片 2：主题与配色 -->
-      <div class="card appearance-section-card">
-        <div class="appearance-card-header">
-          <IconApp name="contrast" class="appearance-card-icon" />
-          <h3>主题与配色</h3>
-          <button v-if="cardDirty('theme')" type="button" class="appearance-reset-btn" @click="resetCard('theme')">恢复默认</button>
-        </div>
-        <div class="appearance-card-body appearance-grid-2col">
-          <div class="appearance-field">
-            <div class="appearance-field-label">主题</div>
-            <div class="segmented appearance-segmented">
-              <button type="button" :class="{ active: appearance.theme === 'light' }" @click="appearance.theme = 'light'">浅色</button>
-              <button type="button" :class="{ active: appearance.theme === 'dark' }" @click="appearance.theme = 'dark'">深色</button>
-              <button type="button" :class="{ active: appearance.theme === 'auto' }" @click="appearance.theme = 'auto'">跟随系统</button>
-            </div>
-          </div>
-          <div></div>
-          <!-- 主题色 -->
-          <div class="appearance-field">
-            <div class="appearance-field-label">主题色</div>
-            <div class="appearance-color-row">
-              <div class="appearance-colors">
-                <button
-                  v-for="color in getColorList('accent')" :key="color.value"
-                  type="button" class="appearance-color-btn"
-                  :class="{ active: appearance.accent_color === color.value, custom: color.custom }"
-                  :style="{ background: swatchBackground(color.value) }"
-                  @click="appearance.accent_color = color.value"
-                  @contextmenu.prevent="color.custom ? onColorLongPress('accent', color.value) : null"
-                  @touchstart="color.custom ? startLongPress('accent', color.value, $event) : null"
-                  :title="color.label"
-                >
-                  <IconApp
-                    name="check" v-if="appearance.accent_color === color.value"
-                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
-                  />
-                </button>
-                <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('accent')" title="自定义颜色">+</button>
-              </div>
-              <span class="appearance-color-hex">{{ getResolvedAccent() }}</span>
-            </div>
-            <input type="color" data-color-picker="accent" class="sr-only" @change="onCustomColorPicked('accent', $event)" />
-          </div>
-          <!-- 背景色 -->
-          <div class="appearance-field">
-            <div class="appearance-field-label">
-              背景颜色
-              <button v-if="appearance.background_color" type="button" class="appearance-reset-btn-inline" @click="resetThemeBackground">恢复默认</button>
-            </div>
-            <div class="appearance-color-row">
-              <div class="appearance-colors">
-                <button
-                  v-for="color in getColorList('bg')" :key="color.value"
-                  type="button" class="appearance-color-btn"
-                  :class="{ active: appearance.background_color === color.value, custom: color.custom }"
-                  :style="{ background: color.value }"
-                  @click="appearance.background_color = color.value"
-                  @contextmenu.prevent="color.custom ? onColorLongPress('bg', color.value) : null"
-                  @touchstart="color.custom ? startLongPress('bg', color.value, $event) : null"
-                  :title="color.label"
-                >
-                  <IconApp
-                    name="check" v-if="appearance.background_color === color.value"
-                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
-                  />
-                </button>
-                <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('bg')" title="自定义颜色">+</button>
-              </div>
-              <span class="appearance-color-hex">{{ appearance.background_color }}</span>
-            </div>
-            <input type="color" data-color-picker="bg" class="sr-only" @change="onCustomColorPicked('bg', $event)" />
-          </div>
-        </div>
-      </div>
-
-      <!-- 卡片 3：卡片样式 -->
-      <div class="card appearance-section-card">
-        <div class="appearance-card-header">
-          <IconApp name="grid" class="appearance-card-icon" />
-          <h3>卡片样式</h3>
-          <button v-if="cardDirty('card')" type="button" class="appearance-reset-btn" @click="resetCard('card')">恢复默认</button>
-        </div>
-        <div class="appearance-card-body appearance-grid-2col">
+        </SettingsRow>
+        <SettingsRow :class="{ disabled: !appearance.background_url }" description="添加背景图片后可调节">
+          <template #label>
+            <label for="bg-blur">图片模糊</label>
+          </template>
           <div class="appearance-slider-item">
-            <label for="card-opacity">不透明度</label>
-            <input id="card-opacity" type="range" v-model.number="appearance.card_opacity" min="0" max="1" step="0.05" />
-            <span>{{ Math.round(appearance.card_opacity * 100) }}%</span>
+            <input
+              id="bg-blur"
+              type="range"
+              v-model.number="appearance.background_blur"
+              min="0"
+              max="30"
+              step="1"
+              :disabled="!appearance.background_url"
+            />
+            <output for="bg-blur">{{ appearance.background_blur }}px</output>
           </div>
+        </SettingsRow>
+        <SettingsRow :class="{ disabled: !appearance.background_url }">
+          <template #label>
+            <label for="bg-opacity">图片可见度</label>
+          </template>
           <div class="appearance-slider-item">
-            <label for="border-intensity">边框</label>
-            <input id="border-intensity" type="range" v-model.number="appearance.border_intensity" min="0" max="2" step="0.1" />
-            <span>{{ appearance.border_intensity.toFixed(1) }}x</span>
+            <input
+              id="bg-opacity"
+              type="range"
+              v-model.number="appearance.background_opacity"
+              min="0"
+              max="0.8"
+              step="0.05"
+              :disabled="!appearance.background_url"
+            />
+            <output for="bg-opacity">{{ Math.round(appearance.background_opacity * 100) }}%</output>
           </div>
-        </div>
+        </SettingsRow>
       </div>
-
-      <!-- 卡片 4：侧栏与顶栏共用底色，选中高亮只作用于侧栏。 -->
-      <div class="card appearance-section-card">
-        <div class="appearance-card-header">
-          <IconApp name="sidebar" class="appearance-card-icon" />
-          <h3>侧栏与顶栏</h3>
-          <button v-if="cardDirty('sidebar')" type="button" class="appearance-reset-btn" @click="resetCard('sidebar')">恢复默认</button>
-        </div>
-        <div class="appearance-card-body appearance-grid-2col">
+    </section>
+    <section class="appearance-section-card">
+      <div class="appearance-card-header">
+        <h3>导航栏</h3>
+        <button
+          type="button"
+          class="appearance-reset-btn"
+          :disabled="!cardDirty('sidebar')"
+          @click="resetCard('sidebar')"
+        >
+          恢复默认
+        </button>
+      </div>
+      <div class="appearance-card-body">
+        <AppearanceColors type="sidebar" label="导航背景色" default-label="跟随背景" />
+        <AppearanceColors type="sidebar_accent" label="选中标记色" default-label="跟随主题" />
+        <SettingsRow description="同时作用于侧栏与顶栏，手机端使用底部导航">
+          <template #label>
+            <label for="sidebar-opacity">导航不透明度</label>
+          </template>
           <div class="appearance-slider-item">
-            <label for="sidebar-opacity">背景不透明度</label>
-            <input id="sidebar-opacity" type="range" v-model.number="appearance.sidebar_opacity" min="0.3" max="1" step="0.05" />
-            <span>{{ Math.round(appearance.sidebar_opacity * 100) }}%</span>
+            <input
+              id="sidebar-opacity"
+              type="range"
+              v-model.number="appearance.sidebar_opacity"
+              min="0.3"
+              max="1"
+              step="0.05"
+            />
+            <output for="sidebar-opacity">{{ Math.round(appearance.sidebar_opacity * 100) }}%</output>
           </div>
-          <div></div>
-          <div class="appearance-field">
-            <div class="appearance-field-label">导航背景色</div>
-            <div class="appearance-color-row">
-              <div class="appearance-colors">
-                <button
-                  v-for="color in getColorList('sidebar')" :key="color.value"
-                  type="button" class="appearance-color-btn"
-                  :class="{ active: appearance.sidebar_color === color.value, custom: color.custom }"
-                  :style="{ background: color.value }"
-                  @click="appearance.sidebar_color = color.value"
-                  @contextmenu.prevent="color.custom ? onColorLongPress('sidebar', color.value) : null"
-                  @touchstart="color.custom ? startLongPress('sidebar', color.value, $event) : null"
-                  :title="color.label"
-                >
-                  <IconApp
-                    name="check" v-if="appearance.sidebar_color === color.value"
-                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
-                  />
-                </button>
-                <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('sidebar')" title="自定义颜色">+</button>
-              </div>
-              <span class="appearance-color-hex">{{ appearance.sidebar_color || '跟随背景色' }}</span>
-            </div>
-            <input type="color" data-color-picker="sidebar" class="sr-only" @change="onCustomColorPicked('sidebar', $event)" />
-          </div>
-          <div class="appearance-field">
-            <div class="appearance-field-label">侧栏高亮色</div>
-            <div class="appearance-color-row">
-              <div class="appearance-colors">
-                <button
-                  v-for="color in getColorList('sidebar_accent')" :key="color.value"
-                  type="button" class="appearance-color-btn"
-                  :class="{ active: appearance.sidebar_accent === color.value, custom: color.custom }"
-                  :style="{ background: color.value }"
-                  @click="appearance.sidebar_accent = color.value"
-                  @contextmenu.prevent="color.custom ? onColorLongPress('sidebar_accent', color.value) : null"
-                  @touchstart="color.custom ? startLongPress('sidebar_accent', color.value, $event) : null"
-                  :title="color.label"
-                >
-                  <IconApp
-                    name="check" v-if="appearance.sidebar_accent === color.value"
-                    class="icon-sm" :style="{ color: swatchCheckColor(color.value) }"
-                  />
-                </button>
-                <button type="button" class="appearance-color-btn appearance-color-add" @click="pickCustomColor('sidebar_accent')" title="自定义颜色">+</button>
-              </div>
-              <span class="appearance-color-hex">{{ appearance.sidebar_accent || '跟随主题色' }}</span>
-            </div>
-            <input type="color" data-color-picker="sidebar_accent" class="sr-only" @change="onCustomColorPicked('sidebar_accent', $event)" />
-          </div>
-        </div>
+        </SettingsRow>
       </div>
-
-    <!-- 背景图放大预览：复用公共 Modal（Teleport + modal-fade + ESC + Focus Trap，沉浸预览加深遮罩） -->
+    </section>
+    <section class="appearance-section-card appearance-reading">
+      <div class="appearance-card-header">
+        <h3>阅读与动效</h3>
+        <button
+          type="button"
+          class="appearance-reset-btn"
+          :disabled="!cardDirty('reading')"
+          @click="resetCard('reading')"
+        >
+          恢复默认
+        </button>
+      </div>
+      <div class="appearance-card-body">
+        <SettingsRow label="文字大小" description="调整整个界面的文字与控件大小">
+          <div class="segmented" role="group" aria-label="文字大小">
+            <button
+              v-for="size in [{ value: 1, label: '标准' }, { value: 1.1, label: '较大' }, { value: 1.2, label: '大' }]"
+              :key="size.value"
+              type="button"
+              :class="{ active: appearance.font_scale === size.value }"
+              :aria-pressed="appearance.font_scale === size.value"
+              @click="appearance.font_scale = size.value"
+            >
+              {{ size.label }}
+            </button>
+          </div>
+        </SettingsRow>
+        <SettingsRow label="减少界面动效" description="减少切换和悬停动画，同时遵循系统的减少动效偏好">
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="appearance.reduce_motion" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">减少界面动效</span>
+          </label>
+        </SettingsRow>
+      </div>
+    </section>
     <Modal :open="bgLightbox.visible" title="背景预览" size="lg" preview @close="closeBgLightbox">
       <div class="bg-preview-body">
         <img :src="appearance.background_url" alt="背景预览" />
       </div>
     </Modal>
-
-    <!-- 从链接下载壁纸弹窗：复用公共 Modal（open prop 控制显隐，与 TasksView 用法一致） -->
     <Modal
       :open="randomWallpaperDialog.visible"
-      title="从链接下载壁纸"
+      title="从链接下载背景图片"
+      :close-disabled="randomWallpaperDialog.loading"
       @close="closeRandomWallpaperDialog"
     >
-      <p class="random-wallpaper-hint">输入图片链接地址，将下载并设置为背景（如 https://picsum.photos/1920/1080）</p>
-      <div class="form-group"><input type="text" v-model="randomWallpaperDialog.url"
-        placeholder="https://t.alcy.cc/pc" @keyup.enter="confirmRandomWallpaper" /></div>
+      <p class="random-wallpaper-hint">输入 HTTP 或 HTTPS 图片链接，下载后会立即设为背景。</p>
+      <div class="form-group">
+        <label for="wallpaper-url">图片链接</label>
+        <input
+          id="wallpaper-url"
+          type="url"
+          v-model="randomWallpaperDialog.url"
+          placeholder="https://example.com/wallpaper.jpg"
+          :disabled="randomWallpaperDialog.loading"
+          @keyup.enter="confirmRandomWallpaper"
+        />
+      </div>
       <template #footer>
-        <button type="button" class="btn btn-secondary btn-sm" @click="closeRandomWallpaperDialog" :disabled="randomWallpaperDialog.loading">取消</button>
-        <button type="button" class="btn btn-primary btn-sm" @click="confirmRandomWallpaper" :disabled="randomWallpaperDialog.loading">
-          <IconApp name="refresh" v-if="randomWallpaperDialog.loading" class="spin icon-sm" />
-          {{ randomWallpaperDialog.loading ? '加载中...' : '确定' }}
+        <button
+          type="button"
+          class="btn btn-secondary btn-sm"
+          @click="closeRandomWallpaperDialog"
+          :disabled="randomWallpaperDialog.loading"
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary btn-sm"
+          @click="confirmRandomWallpaper"
+          :disabled="randomWallpaperDialog.loading"
+        >
+          <IconApp v-if="randomWallpaperDialog.loading" name="refresh" class="spin icon-sm" />
+          {{ randomWallpaperDialog.loading ? '下载中…' : '下载并设为背景' }}
         </button>
       </template>
     </Modal>

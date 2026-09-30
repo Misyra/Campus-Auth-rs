@@ -56,7 +56,7 @@
 /* 三步卡片单列纵向排列，全幅占满内容区 */
 .ai-task-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: start;
 }
@@ -409,10 +409,11 @@
   .ai-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
-  .ai-step-label { font-size: var(--text-sm); }
-  .ai-step-sep { margin: 0 6px; }
+  .ai-step-label { font-size: var(--text-sm); white-space: normal; text-align: center; }
+  .ai-step { flex-direction: column; gap: 6px; min-width: 0; }
+  .ai-step-sep { display: none; }
   .ai-provider-grid { grid-template-columns: 1fr; }
-  .ai-stepper { padding-inline: 10px; }
+  .ai-stepper { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-inline: 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ai-bottom-dot.active,

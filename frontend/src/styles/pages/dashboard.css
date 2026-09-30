@@ -51,7 +51,7 @@
 
 .stat-icon.blue {
   background: rgba(var(--accent-rgb), 0.15);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .stat-icon.orange {

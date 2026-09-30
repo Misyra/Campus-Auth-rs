@@ -179,6 +179,12 @@ export function presetRepoIndexUrl(kind: TaskRepoKind, source: TaskRepoSourceId)
   return TASK_REPO_SOURCES.find((s) => s.id === source)?.indexUrls?.[kind] ?? "";
 }
 
+/** 统一任务库一次读取来源的全部索引，共用地址只请求一次。 */
+export function presetRepoIndexUrls(source: TaskRepoSourceId): string[] {
+  const indexes = TASK_REPO_SOURCES.find((item) => item.id === source)?.indexUrls;
+  return indexes ? [...new Set(Object.values(indexes))] : [];
+}
+
 export const LIMITS = {
   LOG_MAX_ENTRIES: 100,
   FILE_UPLOAD_MAX: 5 * 1024 * 1024,
@@ -258,7 +264,7 @@ export const DEFAULT_CONFIG: Config = {
     keep_alive: false,
   },
   monitor: {
-    check_interval_seconds: 120,
+    check_interval_seconds: 300,
     network_check_timeout: 2,
     ping_targets: ["8.8.8.8:53", "114.114.114.114:53", "www.baidu.com:443"],
     enable_tcp_check: false,
@@ -270,14 +276,12 @@ export const DEFAULT_CONFIG: Config = {
       "http://wifi.vivo.com.cn/generate_204",
     ],
     enable_url_check: false,
-    check_auth_url: false,
     auth_url_targets: [],
     url_check_urls: [
       "http://captive.apple.com/hotspot-detect.html|Success",
       "http://www.msftconnecttest.com/connecttest.txt|Microsoft Connect Test",
       "http://detectportal.firefox.com/success.txt|success",
     ],
-    enable_local_check: false,
     // 严格登录模式默认开启：仅探测给出明确门户结论才自动登录，与历史行为一致。
     // 关闭后为宽松口径（网卡已连接且未确认在线即尝试），面向「学校门户 → 校园网认证」
     // 两级认证；代价是配置有误时会反复拉起浏览器
@@ -336,23 +340,11 @@ export const DEFAULT_CONFIG: Config = {
   },
 };
 
-/** 设置页 Tab 清单（SettingsView 消费的单一来源；hint 作为 Tab 的悬停提示）。
- *
- * **只列 `GlobalConfig` 域的设置**：账号/认证地址/登录方式/直连参数都是方案字段，
- * 统一在「配置方案」页编辑（单一入口），此处不再有「账号」Tab。 */
-export const SETTINGS_TABS = [
-  { id: "monitor", label: "检测", hint: "在线检测、登录重试与暂停时段" },
-  { id: "browser", label: "浏览器", hint: "浏览器选择、超时与反检测参数" },
-  { id: "tasks", label: "任务与环境", hint: "运行环境、录制器与 OCR" },
-  { id: "system", label: "系统与更新", hint: "启动行为、日志、界面、端口代理、自动更新与维护" },
-  { id: "appearance", label: "外观", hint: "主题、背景与卡片样式" },
-] as const;
-
 /**
  * 单色主题色的哨兵值：不落具体色值，应用时按**有效主题**解析为浅色黑 / 深色白。
  *
  * 主题色只存一个 hex，而 `theme` 可以是 light/dark/auto，纯 hex 无法同时表达
- * 「日间黑、夜间白」；故默认值用该哨兵，由 `useAppearance::resolveAccentColor`
+ * 「日间黑、夜间白」；故默认值用该哨兵，由 `useAppearance::applyAppearance`
  * 在应用与渲染时解析。它不是合法 CSS 颜色，任何直接当作色值使用的位置都必须先解析。
  */
 export const MONO_ACCENT = "mono";
@@ -362,6 +354,8 @@ export const MONO_ACCENT_LIGHT = "#000000";
 export const MONO_ACCENT_DARK = "#ffffff";
 
 export const DEFAULT_APPEARANCE: Appearance = {
+  reduce_motion: false,
+  font_scale: 1,
   background_url: "",
   background_filename: "",
   wallpaper_api_url: "",
@@ -409,10 +403,14 @@ export const ACCENT_COLORS = [
   { value: "#22d3ee", label: "青色" },
   { value: "#3b82f6", label: "蓝色" },
   { value: "#8b5cf6", label: "紫色" },
-  { value: "#ec4899", label: "粉色" },
-  { value: "#f59e0b", label: "橙色" },
   { value: "#10b981", label: "绿色" },
   { value: "#ef4444", label: "红色" },
+];
+
+/** 导航标记同样提供六种默认颜色；单色主题由“跟随主题”入口承接。 */
+export const SIDEBAR_ACCENT_COLORS = [
+  ...ACCENT_COLORS.filter((color) => color.value !== MONO_ACCENT),
+  { value: "#f59e0b", label: "橙色" },
 ];
 
 export const DEFAULT_PROFILE_SETTINGS: Profile = {

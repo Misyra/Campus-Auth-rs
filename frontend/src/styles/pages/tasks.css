@@ -55,7 +55,7 @@
   .tasks-narrow-nav-item.active {
     border-color: rgba(var(--accent-rgb), 0.3);
     background: rgba(var(--accent-rgb), 0.08);
-    color: var(--accent);
+    color: var(--accent-text, var(--accent));
   }
 
   .tasks-narrow-nav-icon {
@@ -577,7 +577,7 @@
 }
 
 .tsk-side-hint a {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   cursor: pointer;
 }
 
@@ -709,7 +709,7 @@
 }
 
 .debug-status-pill.active {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: rgba(var(--accent-rgb), 0.1);
   border-color: rgba(var(--accent-rgb), 0.25);
 }
@@ -739,7 +739,7 @@
 .debug-step-counter {
   font-family: var(--font-mono);
   font-size: var(--text-md);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: rgba(var(--accent-rgb), 0.1);
   padding: var(--space-xs) 10px;
   border-radius: var(--radius-sm);
@@ -821,7 +821,7 @@
 }
 
 .debug-step-item.current .debug-step-index {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   border-color: rgba(var(--accent-rgb), 0.35);
 }
 
@@ -836,10 +836,10 @@
 .step-check { color: var(--success); }
 .step-cross { color: var(--error); }
 .step-running {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   animation: debug-step-pulse 1.2s ease-in-out infinite;
 }
-.step-arrow { color: var(--accent); }
+.step-arrow { color: var(--accent-text, var(--accent)); }
 .step-dot { color: var(--text-muted); }
 
 @keyframes debug-step-pulse {

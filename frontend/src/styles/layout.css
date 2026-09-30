@@ -6,6 +6,14 @@
 }
 
 .sidebar {
+  --accent-text: var(--sidebar-accent);
+  --error: var(--navigation-error);
+  --success: var(--navigation-success);
+  --text-primary: var(--navigation-text, #000000);
+  --text-secondary: var(--navigation-secondary, #333333);
+  --text-muted: var(--navigation-secondary, #555555);
+  --bg-hover: var(--navigation-hover);
+  color: var(--text-primary);
   width: 228px;
   background: var(--navigation-bg);
   border-right: 1px solid var(--border);
@@ -49,10 +57,7 @@
 }
 
 .logo-text {
-  /* 品牌名跟随全站正文字体（--font-sans = 远端 Noto Sans SC 可变字重）。
-     字重与 .page-title 对齐（同为 --text-2xl / 600）：两者在视觉上同属「页面主标题」
-     层级，此前品牌字为 500（霞鹜文楷时期为取真实 Medium 字形而定），
-     与 600 的页标题并置时明显偏轻。可变字体 100–900 全覆盖，600 是真实字形 */
+  /* 品牌名使用本机系统字体，与页面标题保持相近字重。 */
   font-family: var(--font-sans);
   font-size: var(--text-xl);
   font-weight: 600;
@@ -91,6 +96,12 @@
 }
 
 .top-bar {
+  --accent-text: var(--sidebar-accent);
+  --text-primary: var(--navigation-text, #000000);
+  --text-secondary: var(--navigation-secondary, #333333);
+  --text-muted: var(--navigation-secondary, #555555);
+  --bg-hover: var(--navigation-hover);
+  color: var(--text-primary);
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto;
   column-gap: 12px;
@@ -162,7 +173,15 @@
   padding: 24px 32px 32px;
   overflow-y: auto;
   min-height: 0;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 20px;
 }
+
+.nav-item.nav-task-mobile,
+.nav-item.nav-settings-mobile,
+.btn.mobile-quit { display: none; }
+
+.top-actions > .btn-secondary { background: var(--navigation-hover); }
 
 /* ═══ 页面入场动画（全站唯一出处）═══
    `.content-wrapper` 是三个 router-view 里最外层那个的落点，故 `> *` 恰好覆盖每一个

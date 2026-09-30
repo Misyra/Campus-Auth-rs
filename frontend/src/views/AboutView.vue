@@ -57,6 +57,7 @@ const {
   data: uninstallData,
   // 只用合成后的 blockReason（守卫拒绝 或 卸载助手缺失）：单看 blocked 会漏掉后者
   blockReason: uninstallBlockReason,
+  keepDataBlockReason: uninstallKeepBlockReason,
   keepUserData: uninstallKeepUserData,
   phase: uninstallPhase,
   running: uninstallRunning,
@@ -175,13 +176,13 @@ const {
           <IconApp name="trash" width="20" height="20" />
           <div>
             <h3>卸载程序</h3>
-            <p class="uninstall-desc">删除程序文件（可勾选保留配置与任务），并关闭开机自启动、清理加密密钥目录与 Playwright 浏览器缓存。</p>
+            <p class="uninstall-desc">移除程序、关闭开机自启动并清理浏览器缓存。可选择保留用户数据与加密密钥。</p>
           </div>
         </div>
         <button class="btn btn-danger-ghost btn-sm" @click="openUninstall">卸载</button>
       </div>
 
-      <Modal :open="uninstallOpen" title="卸载程序" :close-on-overlay="!uninstallRunning" :close-on-esc="!uninstallRunning" @close="closeUninstall">
+      <Modal :open="uninstallOpen" title="卸载程序" :close-on-overlay="!uninstallRunning" :close-on-esc="!uninstallRunning" :close-disabled="uninstallRunning" @close="closeUninstall">
         <div v-if="uninstallDetecting" class="uninstall-scanning"><span class="spinner"></span>正在检测...</div>
 
         <!-- 卸载已启动：后端随时消失，只回执不提供操作 -->
@@ -214,30 +215,32 @@ const {
           <!-- 拦下卸载的原因：守卫拒绝 或 卸载助手缺失（后者一定导致"清完残留却删不掉程序"） -->
           <div v-else-if="uninstallBlockReason" class="uninstall-blocked">{{ uninstallBlockReason }}</div>
           <template v-else>
-            <p class="uninstall-subtitle">将删除以下内容（不可恢复）</p>
+            <p class="uninstall-subtitle">核对本次卸载范围，删除后无法恢复</p>
 
-            <div v-if="uninstallProgram" class="uninstall-item disabled">
+            <div v-if="uninstallProgram" class="uninstall-item" :class="{ disabled: !uninstallProgram.exists }">
               <div class="uninstall-item-info">
-                <span class="uninstall-item-label">{{ uninstallProgram.label }}</span>
+                <span class="uninstall-item-label">{{ uninstallKeepUserData ? "程序文件" : uninstallProgram.label }}</span>
                 <span class="uninstall-item-path">{{ uninstallProgram.path }}</span>
+                <span v-if="uninstallKeepUserData" class="uninstall-note">仅移除程序内容；若目录内有保留的数据，目录本身会留下。</span>
               </div>
               <span class="uninstall-item-tag" :class="uninstallProgram.exists ? 'tag-exists' : 'tag-missing'">
-                {{ uninstallProgram.exists ? "将删除" : "无" }}
+                {{ uninstallProgram.exists ? (uninstallKeepUserData ? "删除程序文件" : "删除整个目录") : "不存在" }}
               </span>
             </div>
 
             <!-- 保留勾选：默认不勾（默认真卸载）。放在数据目录上方，勾选后下方行的标签
                  立刻从「将删除」变成「保留」，后果在按下按钮前就看得见 -->
             <label class="toggle toggle-help-inline uninstall-keep">
-              <input type="checkbox" v-model="uninstallKeepUserData" :disabled="uninstallRunning" />
+              <input type="checkbox" v-model="uninstallKeepUserData" :disabled="uninstallRunning || !!uninstallKeepBlockReason" />
               <span class="toggle-slider"></span>
               <span class="toggle-label">保留配置与任务</span>
             </label>
             <p class="uninstall-keep-hint">
-              勾选后下列用户数据整棵保留，重装到别处后仍可用；程序文件照常删除。
+              保留下面已有的数据与加密密钥，位置不变。在原目录重新解压即可继续使用；换目录重装时需自行迁移数据。
             </p>
+            <p v-if="uninstallKeepBlockReason" class="uninstall-blocked">{{ uninstallKeepBlockReason }}</p>
 
-            <div v-for="d in uninstallData" :key="d.key" class="uninstall-item" :class="{ disabled: !d.exists || uninstallKeepUserData }">
+            <div v-for="d in uninstallData" :key="d.key" class="uninstall-item" :class="{ disabled: !d.exists }">
               <div class="uninstall-item-info">
                 <span class="uninstall-item-label">{{ d.label }}</span>
                 <span class="uninstall-item-path">{{ d.path }}</span>
@@ -246,19 +249,21 @@ const {
                    藏起来会让一个在用的类被报成死类 -->
               <span
                 class="uninstall-item-tag"
-                :class="uninstallKeepUserData ? 'tag-kept' : d.exists ? 'tag-exists' : 'tag-missing'"
+                :class="!d.exists ? 'tag-missing' : uninstallKeepUserData ? 'tag-kept' : 'tag-exists'"
               >
-                {{ uninstallKeepUserData ? "保留" : d.exists ? "将删除" : "无" }}
+                {{ !d.exists ? "不存在" : uninstallKeepUserData ? "保留" : "将删除" }}
               </span>
             </div>
 
             <p class="uninstall-subtitle">并清理以下系统残留</p>
-            <div v-for="item in uninstallItems" :key="item.key" class="uninstall-item disabled">
+            <div v-for="item in uninstallItems" :key="item.key" class="uninstall-item" :class="{ disabled: !item.exists }">
               <div class="uninstall-item-info">
                 <span class="uninstall-item-label">{{ item.label }}</span>
                 <span class="uninstall-item-path">{{ item.description }}</span>
               </div>
-              <span class="uninstall-item-tag" :class="item.exists ? 'tag-exists' : 'tag-missing'">{{ item.exists ? "存在" : "无" }}</span>
+              <span class="uninstall-item-tag" :class="!item.exists ? 'tag-missing' : item.key === 'user_data' && uninstallKeepUserData ? 'tag-kept' : 'tag-exists'">
+                {{ !item.exists ? "不存在" : item.key === 'user_data' && uninstallKeepUserData ? "保留" : item.key === 'autostart' ? "关闭" : "清理" }}
+              </span>
             </div>
 
             <div class="uninstall-hint-box">

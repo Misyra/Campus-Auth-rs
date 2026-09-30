@@ -1,16 +1,45 @@
-/* browser.css — 浏览器设置子页（双列独立堆叠 / 浏览器选择 / 反检测脚本） */
-.browser-settings-column {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  align-self: start;
+/* browser.css — 浏览器设置：提示、视口尺寸与脚本操作辅助 */
+/* 与外观快捷风格保持相同的轻边框卡片，浏览器同时可见并可直接选择。 */
+.browser-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+  gap: 8px;
+  width: 100%;
   min-width: 0;
 }
 
-.browser-settings-column > .settings-panel {
-  height: auto;
-  min-height: 0;
+.browser-choice {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 82px;
+  padding: 12px 6px;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
+
+.browser-choice:hover:not(:disabled) { background: rgba(var(--accent-rgb), .06); }
+.browser-choice[aria-pressed="true"] {
+  border-color: var(--accent-text);
+  background: rgba(var(--accent-rgb), .04);
+  color: var(--text-primary);
+}
+
+.browser-choice:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; }
+.browser-choice:disabled { opacity: .55; cursor: not-allowed; }
+.browser-choice > :is(img, svg) { flex-shrink: 0; }
+.browser-choice-check { position: absolute; top: 5px; right: 5px; width: 12px; height: 12px; color: var(--accent-text); }
 
 .browser-safe-info {
   padding: 12px 14px;
@@ -56,20 +85,8 @@
 .inline-link {
   cursor: pointer;
   text-decoration: underline;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
-/* 关闭浏览器：危险按钮 + 说明同行 */
-.browser-close-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  margin-top: 0.5rem;
-}
-.browser-close-row .hint {
-  margin-top: 0;
-}
-
 /* 视口尺寸输入 */
 .viewport-input-row {
   display: flex;
@@ -96,128 +113,8 @@
   color: var(--text-secondary);
 }
 
-/* 反检测脚本操作按钮 */
-.stealth-script-actions {
-  display: flex;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-sm);
-}
-
-/* Shell 自定义路径输入 */
-/* 浏览器选择 */
-.browser-selection {
-  margin-top: var(--space-sm);
-}
-
-.browser-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.browser-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  border: 2px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-md);
-  cursor: pointer;
-  transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
-  position: relative;
-  background: var(--bg-card);
-}
-
-.browser-card:hover {
-  border-color: var(--accent);
-  background: var(--bg-hover);
-}
-
-.browser-card.active {
-  border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.08);
-}
-
-.browser-card.uninstalled {
-  opacity: 0.68;
-}
-
-.browser-card.uninstalled.active {
-  opacity: 0.82;
-}
-
-.browser-card.blocked {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.browser-card.blocked:hover {
-  border-color: var(--border);
-  background: var(--bg-card);
-}
-
-.browser-icon {
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.browser-icon img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.browser-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.browser-name {
-  font-weight: 600;
-  font-size: var(--text-base);
-  margin-bottom: 2px;
-  color: var(--text-primary);
-}
-
-.browser-status {
-  font-size: var(--text-md);
-  margin-bottom: 2px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.browser-status svg {
-  flex-shrink: 0;
-}
-
-.status-installed {
-  color: var(--success);
-}
-
-.status-not-installed {
-  color: var(--warning);
-}
-
-.status-downloading {
-  color: var(--accent);
-}
-
-.browser-check {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  color: var(--accent);
-}
-
-/* 数据目录提示改用全局 `.note .note--info`（components/misc.css）：
-   原 `.browser-info-tip` 是同款的 accent 色调变体，只差字号（13px vs 12px）与
-   margin-top（12px，上方 `.toggle-group` 已有 16px 下边距，本就重复）。
-   该提示的宿主见 BrowserSettings.vue 的 persistent_context 区块。 */
+/* 数据目录跟随说明换行，避免窄屏被长路径撑开。 */
+.browser-data-path code { white-space: normal; overflow-wrap: anywhere; }
 
 @media (max-width: 640px) {
   .browser-warning-copy {

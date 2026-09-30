@@ -1,59 +1,8 @@
-/* common.css — 设置页共享框架（页签 / 面板网格 / 卡片头 / 保存栏 / settings 域按钮覆盖） */
+/* common.css — 设置页共享框架（连续表单 / 面板网格 / 卡片头 / 保存栏 / settings 域按钮覆盖） */
 .settings-page {
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
-}
-
-.settings-tabs {
-  display: flex;
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  padding: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg-card-elevated);
-  border-radius: var(--radius-lg);
-}
-
-.settings-tab {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  flex: 1 1 0;
-  min-height: 46px;
-  min-width: 0;
-  gap: 1px;
-  padding: 6px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-lg);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
-}
-
-.settings-tab span {
-  font-size: var(--text-md);
-  font-weight: 600;
-  text-align: center;
-}
-
-.settings-tab small {
-  display: none;
-}
-
-.settings-tab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.settings-tab.active {
-  background: var(--bg-card);
-  color: var(--text-primary);
-  border-color: var(--border-hover);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
 .settings-form {
@@ -113,7 +62,7 @@
 .settings-card-icon {
   width: 20px;
   height: 20px;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   opacity: 0.7;
   flex-shrink: 0;
 }
@@ -215,67 +164,16 @@
   flex-shrink: 0;
 }
 
-/* ---- 保存按钮（右下角浮动）：渐变主按钮语义同 .btn-primary，此处只留浮动条定位与尺寸差异 ---- */
+/* 保存操作区使用主按钮配色，失败信息由状态文字表达。 */
 .save-bar {
-  position: sticky;
-  bottom: 20px;
   display: flex;
-  justify-content: flex-end;
-  margin-top: var(--space-lg);
-  z-index: var(--z-sticky);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-shrink: 0;
 }
 
-.btn.save-btn {
-  min-width: 130px;
-  padding: 14px 28px;
-  min-height: 48px;
-}
-
-.save-btn svg {
-  width: 18px;
-  height: 18px;
-}
-
-.btn.save-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(var(--accent-rgb), 0.4);
-}
-
-/* 未保存：黄色高亮（静态，不用呼吸动画，避免与全局克制动效冲突） */
-.btn.save-btn-dirty {
-  background: linear-gradient(135deg, var(--warning), var(--warning-deep));
-  color: var(--on-warning);
-  box-shadow: var(--shadow-hover);
-}
-
-.btn.save-btn-dirty:hover:not(:disabled) {
-  box-shadow: 0 6px 24px rgba(var(--warning-rgb), 0.45);
-}
-
-/* 保存中 */
-.save-btn-saving {
-  cursor: not-allowed;
-}
-
-/* 保存失败 */
-.btn.save-btn-failed {
-  background: var(--error-bg);
-  color: var(--error);
-  border-color: var(--error-border);
-}
-
-.save-btn-failed:hover:not(:disabled) {
-  box-shadow: 0 6px 20px rgba(var(--error-rgb), 0.3);
-}
-
-@media (max-width: 640px) {
-  .save-bar {
-    justify-content: stretch;
-  }
-  .save-btn {
-    width: 100%;
-  }
-}
+.save-btn svg { width: 16px; height: 16px; }
 
 .settings-panel .card-body p {
   margin: 0;
@@ -299,7 +197,7 @@
   padding: 2px 6px;
   border-radius: var(--radius-xs);
   font-size: var(--text-xs);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .settings-page .btn-sm {

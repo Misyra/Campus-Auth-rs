@@ -92,7 +92,7 @@
 }
 
 .task-recorder-note a {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   text-decoration: none;
 }
 
@@ -168,7 +168,7 @@
 .ocr-status .btn-link {
   padding: 0 var(--space-xs);
   height: auto;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   background: none;
   border: none;
   text-decoration: underline;
@@ -191,7 +191,7 @@
   padding: 1px 5px;
   border-radius: var(--radius-xs);
   font-size: var(--text-sm);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .ocr-hint {
@@ -232,7 +232,7 @@
   padding: 3px var(--space-sm);
   border-radius: var(--radius-xs);
   font-size: var(--text-base);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   word-break: break-all;
 }
 

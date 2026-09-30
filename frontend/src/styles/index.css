@@ -32,7 +32,6 @@
 @import "./pages/settings/common.css";
 /* account.css 已删除：`/settings/account` 自「账号移交配置方案页」起只是重定向到
    /profiles，该文件里的 `.current-profile-hint` / `.hint-link` 零引用（2026-09-24 静态审计） */
-@import "./pages/settings/monitor.css";
 @import "./pages/settings/browser.css";
 @import "./pages/settings/system.css";
 @import "./pages/settings/tasks.css";
@@ -47,3 +46,4 @@
 
 /* 响应式断点 */
 @import "./responsive.css";
+@import "./pages/settings/list.css";

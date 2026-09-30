@@ -64,6 +64,11 @@
 }
 
 .notification-dropdown {
+  --accent-text: var(--content-accent-text);
+  --text-primary: var(--content-text-primary);
+  --text-secondary: var(--content-text-secondary);
+  --text-muted: var(--content-text-muted);
+  color: var(--text-primary);
   position: absolute;
   top: calc(100% + 8px);
   right: 0;

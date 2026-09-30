@@ -1,7 +1,11 @@
 /* form.css — 表单（form-group / select 美化 / form-row / hint / field-help / radio-group） */
 .form-group {
+  min-width: 0;
   margin-bottom: var(--space-md);
 }
+
+/* 地址与模板变量也要在窄屏换行，不能撑开表单网格。 */
+.hint code { overflow-wrap: anywhere; }
 
 .form-group label {
   display: block;
@@ -154,7 +158,7 @@
 .field-help:focus-visible {
   border-color: rgba(var(--accent-rgb), 0.5);
   background: rgba(var(--accent-rgb), 0.12);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 /*
@@ -273,7 +277,7 @@
 .field-help--pinned:focus-visible {
   border-color: rgba(var(--accent-rgb), 0.5);
   background: rgba(var(--accent-rgb), 0.12);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .field-help--pinned::after {

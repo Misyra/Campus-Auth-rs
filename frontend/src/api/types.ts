@@ -194,7 +194,7 @@ export interface UninstallTarget {
 export interface UninstallDetectResult {
   /** 程序目录与用户数据目录之外的系统残留（用户数据目录 / Playwright 缓存 / 自启动） */
   items: UninstallDetectItem[];
-  /** 程序目录：卸载时整体删除（含 resources/ docs/ python_worker/ 与随包源码副本） */
+  /** 程序目录：全量卸载时整体删除，保留数据时只移除程序内容 */
   program: UninstallTarget;
   /**
    * 卸载助手（`campus-auth-helper`）是否在位。
@@ -207,6 +207,8 @@ export interface UninstallDetectResult {
   data: UninstallTarget[];
   /** 非 null = 拒绝卸载及原因（如该目录是源码仓库而非安装目录），界面据此禁用卸载 */
   blocked: string | null;
+  /** 仅保留数据模式不支持时的原因（如数据根嵌套于程序目录）；老后端可不返回 */
+  keep_data_blocked?: string | null;
 }
 
 /** 真卸载响应（POST /api/uninstall/purge） */
@@ -306,10 +308,8 @@ export interface MonitorConfig {
   enable_http_check: boolean;
   test_urls: string[];
   enable_url_check: boolean;
-  check_auth_url: boolean;
   auth_url_targets: string[];
   url_check_urls: string[];
-  enable_local_check: boolean;
   /**
    * 严格登录模式（默认开启）：仅在探测给出明确门户结论时才自动登录。
    * 关闭后为宽松口径——网卡已连接且探测未确认在线即尝试登录，适用于

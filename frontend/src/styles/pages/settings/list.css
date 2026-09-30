@@ -1,0 +1,159 @@
+/* 设置列表：所有分类共用名称、说明与控件列，跟随现有主题和材质。 */
+.settings-page {
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
+  height: 100%;
+  min-height: 0;
+  gap: 0;
+}
+
+/* 表单独立滚动，操作栏占据正常布局空间，避免透出或遮住正在编辑的行。 */
+.content-wrapper:has(> .settings-page) { overflow: hidden; }
+.settings-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; scroll-padding-block: 16px; padding-inline: 2px 12px; }
+.settings-scroll > .settings-form { margin-top: 0; padding-bottom: 16px; gap: 48px; }
+.settings-category { min-width: 0; scroll-margin-top: 16px; }
+.settings-category + .settings-category { padding-top: 28px; border-top: 1px solid var(--border); }
+.settings-category-heading { margin: 0 2px 22px; font-size: var(--text-xl); font-weight: 650; color: var(--text-primary); }
+.settings-mobile-jump { display: none; }
+.settings-page .save-bar { margin-top: 12px; padding: 14px 2px 0; border-top: 1px solid var(--border); }
+.settings-save-status { color: var(--text-secondary); font-size: var(--text-md); }
+.settings-save-status--error { color: var(--error); }
+.settings-page .btn.save-btn { min-height: 38px; min-width: 80px; padding: 9px 20px; box-shadow: none; }
+.settings-page .btn.save-btn:hover:not(:disabled) { transform: none; box-shadow: none; }
+.settings-list-page { display: flex; flex-direction: column; align-items: stretch; gap: 28px; min-width: 0; }
+
+/* 分组标题放在边框之外，取消同页内的多列卡片与嵌套阴影。 */
+.settings-list-page :is(.settings-panel, .appearance-section-card) {
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  overflow: visible;
+  backdrop-filter: none;
+}
+.settings-list-page :is(.settings-card-header, .appearance-card-header) {
+  height: auto;
+  min-height: 32px;
+  padding: 0 2px 12px;
+  border: 0;
+  background: transparent;
+}
+.settings-list-page .settings-card-icon { display: none; }
+.settings-list-page :is(.settings-card-header h2, .appearance-card-header h3) { font-size: var(--text-lg); font-weight: 600; }
+.settings-list-page :is(.card-body, .appearance-card-body) {
+  flex: none;
+  padding: 0 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  -webkit-backdrop-filter: var(--card-blur, var(--blur-md));
+  backdrop-filter: var(--card-blur, var(--blur-md));
+}
+.settings-list-page .card-body + .card-body { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+.settings-list-page .card-body:has(+ .card-body) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.settings-list-page :is(.settings-grid-2col, .ocr-settings-grid) { display: block; }
+.settings-list-page .settings-grid-2col > div:not(.setting-row),
+.settings-list-page .card-body .form-row { display: contents; }
+
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 340px);
+  align-items: center;
+  gap: 28px;
+  min-height: 78px;
+  padding-block: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.setting-row:last-child { border-bottom: 0; }
+/* 开关的附属输入归入同一组，只在独立设置之间画分隔线。 */
+.setting-row:has(> .setting-row-details) { row-gap: 12px; }
+.setting-row-details { grid-column: 1 / -1; min-width: 0; padding-left: 16px; }
+.setting-row-details:has(> .setting-row-control) { padding-left: 0; }
+.setting-row-details > .setting-row { min-height: 0; padding-block: 0; border-bottom: 0; }
+.setting-row-details > .setting-row + .setting-row { margin-top: 16px; }
+.setting-row-copy { min-width: 0; }
+.setting-row-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: var(--text-base); font-weight: 500; color: var(--text-primary); line-height: 1.5; }
+.setting-row-title label { margin: 0; }
+.setting-row-description { margin-top: 4px; color: color-mix(in srgb, var(--text-primary) 62%, var(--bg-secondary)); font-size: var(--text-md); line-height: 1.6; overflow-wrap: anywhere; }
+.setting-row .setting-row-description :is(p, .hint, .ocr-description, .ocr-size-hint) { margin: 0; font-size: inherit; line-height: inherit; color: inherit; }
+.setting-row-description .hint { display: block; }
+.setting-row-control { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin: 0; }
+.setting-row-control > :is(input, select, textarea, .custom-select, .segmented, .appearance-slider-item, .appearance-presets) { width: 100%; min-width: 0; }
+.setting-row-control > input[type="number"] { max-width: 128px; }
+.setting-row-control > :is(input, select) { padding: 9px 12px; min-height: 38px; }
+.setting-row-control > select { padding-right: 36px; }
+.setting-row-control > textarea { min-height: 112px; line-height: 1.65; }
+.setting-row-control > .custom-select { max-width: 260px; }
+.setting-row-control .segmented button { flex: 1; padding-inline: 8px; }
+.setting-row-control .setting-row-switch { flex: none; width: 44px; margin: 0; }
+.setting-row-control .setting-row-switch .toggle-slider { order: 0; }
+.setting-row .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.setting-row.disabled .setting-row-control { opacity: .55; }
+.setting-row-control .form-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; justify-content: flex-end; }
+.setting-row-control .viewport-input-row { min-width: 0; }
+.setting-row-control .viewport-input { width: 100%; max-width: 100px; padding: 9px; }
+.setting-row-control .viewport-input-group { min-width: 0; }
+
+.settings-list-page .appearance-slider-item { grid-template-columns: minmax(48px, 1fr) 48px; }
+.settings-list-page .appearance-colors { justify-content: end; }
+.settings-list-page .appearance-extra-colors { justify-content: flex-end; }
+.settings-list-page .appearance-custom-manager { width: 100%; text-align: right; }
+.settings-list-page .appearance-custom-list { justify-content: flex-end; }
+.settings-list-page .appearance-preset { padding: 8px; gap: 6px; }
+.settings-list-page .appearance-preset-sample { height: 28px; }
+.settings-list-page .appearance-intro { padding: 0; font-size: var(--text-sm); color: var(--text-secondary); }
+.settings-list-page .appearance-bg-thumb-group { align-items: center; width: 100%; }
+.settings-list-page .appearance-bg-thumb { width: 72px; height: 72px; }
+.settings-list-page .appearance-bg-thumb-actions { justify-content: flex-end; flex: 1; }
+.settings-list-page .run-mode-options { width: 100%; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; }
+.settings-list-page .run-mode-option { min-width: 0; padding: 10px 8px; align-items: center; justify-content: center; }
+.settings-list-page .run-mode-option-desc { display: none; }
+.settings-list-page .update-check-row { justify-content: flex-end; gap: 8px; }
+.settings-list-page .update-check-row .hint { width: 100%; text-align: right; }
+.settings-list-page .card-body > :is(.browser-safe-info, .form-help-text, .note, .manual-update-tip) { margin: 16px 0; }
+.settings-list-page .env-lead { margin: 0; padding-top: 18px; }
+.settings-list-page .env-status-row { padding-block: 12px; }
+.settings-list-page.environment-page .env-checklist { grid-template-columns: minmax(0, 1fr); gap: 0; margin: 0; }
+.settings-list-page.environment-page .env-check-item { padding: 14px 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; }
+.settings-list-page.environment-page .env-check-value { white-space: normal; overflow-wrap: anywhere; }
+.settings-list-page .ocr-status-row { margin: 4px 0; }
+.settings-list-page .ocr-pick-row { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+.settings-list-page .ocr-preview-wrap { width: 100%; }
+.settings-list-page .ocr-preview { margin-left: auto; }
+.settings-list-page .ocr-recognize-btn { width: auto; margin: 0; }
+.settings-list-page .ocr-result { width: 100%; justify-content: flex-end; }
+.settings-list-page .ocr-description { font-size: inherit; }
+.settings-list-page section:has(.field-help:hover),
+.settings-list-page section:has(.field-help:focus-visible),
+.settings-list-page section:has(.field-help--pinned) { position: relative; z-index: var(--z-overlay); }
+
+@media (max-width: 768px) {
+  .settings-mobile-jump { display: flex; align-items: center; gap: 12px; margin: 0 2px 16px; flex: none; }
+  .settings-mobile-jump label { flex: none; margin: 0; font-size: var(--text-md); color: var(--text-secondary); }
+  .settings-mobile-jump select { flex: 1; min-width: 0; width: auto; padding-block: 9px; }
+  .settings-scroll > .settings-form { gap: 36px; }
+  .settings-category + .settings-category { padding-top: 24px; }
+  /* 手机已经有底部保存状态，顶栏保留完整页面名称。 */
+  .main-content:has(> .content-wrapper > .settings-page .save-bar) .top-dirty-hint { display: none; }
+  .settings-scroll { padding-inline: 2px; scrollbar-gutter: auto; }
+  .settings-page .save-bar { padding-top: 12px; }
+  .settings-list-page { gap: 22px; }
+  .settings-list-page :is(.card-body, .appearance-card-body) { padding-inline: 14px; }
+  .setting-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-block: 16px; }
+  .setting-row-control { justify-content: flex-start; }
+  .setting-row-control > .custom-select { max-width: none; }
+  .setting-row:has(> .setting-row-control > .setting-row-switch) { grid-template-columns: minmax(0, 1fr) 44px; gap: 14px; }
+  .setting-row:has(> .setting-row-control > input[type="number"]) { grid-template-columns: minmax(0, 1fr) 88px; gap: 14px; }
+  .setting-row-control > input[type="number"] { max-width: none; }
+  .settings-list-page .appearance-colors { justify-content: start; }
+  .settings-list-page .appearance-extra-colors { justify-content: flex-start; }
+  .settings-list-page .appearance-custom-manager { text-align: left; }
+  .settings-list-page .appearance-custom-list { justify-content: flex-start; }
+  .settings-list-page .appearance-bg-thumb-actions { justify-content: flex-start; }
+  .settings-list-page :is(.update-check-row, .ocr-pick-row, .ocr-result) { justify-content: flex-start; }
+  .settings-list-page .update-check-row .hint { text-align: left; }
+  .settings-list-page .ocr-preview { margin-left: 0; }
+}

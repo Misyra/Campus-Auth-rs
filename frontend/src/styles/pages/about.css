@@ -22,17 +22,6 @@
   overflow: hidden;
 }
 
-.about-hero::before {
-  content: '';
-  position: absolute;
-  top: -50%;
-  left: -50%;
-  width: 200%;
-  height: 200%;
-  background: radial-gradient(ellipse at center, rgba(var(--accent-rgb), 0.08) 0%, transparent 60%);
-  pointer-events: none;
-}
-
 .about-logo {
   width: 96px;
   height: 96px;
@@ -52,7 +41,7 @@
 }
 
 .version {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-family: var(--font-mono);
   font-size: var(--text-base);
   margin-bottom: var(--space-sm);
@@ -70,7 +59,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   padding: 10px var(--space-md);
   background: rgba(var(--accent-rgb), 0.08);
   border: 1px solid rgba(var(--accent-rgb), 0.2);
@@ -278,7 +267,7 @@
 .sponsor-link svg {
   width: 20px;
   height: 20px;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 /* B 站：官方粉，辨识来源 */
@@ -296,7 +285,7 @@
 }
 
 .qq-group strong {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-family: var(--font-mono);
 }
 
@@ -366,12 +355,7 @@
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-out);
-}
-
-.uninstall-item:hover:not(.disabled) {
-  border-color: var(--accent);
+  cursor: default;
 }
 
 .uninstall-item.disabled {
@@ -403,9 +387,8 @@
   font-size: var(--text-sm);
   color: var(--text-muted);
   font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .uninstall-item-tag {

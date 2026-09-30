@@ -110,6 +110,7 @@ export const configApi = {
     login_channel?: LoginChannel;
     active_task?: string;
     active_http_task?: string;
+    active_script_task?: string;
   }) => http.patch<MutationResult>("/api/config", payload),
 };
 

@@ -115,7 +115,7 @@ async function proceedFromTerms() {
 
 /* ============ 第 2 步：登录方式 ============ */
 
-const selectedChannel = ref<"browser" | "http" | "">("");
+const selectedChannel = ref<"browser" | "http" | "script" | "">("");
 const channelBusy = ref(false);
 
 /**
@@ -425,20 +425,23 @@ watch(schoolName, () => {
  */
 function openImport(withKeyword: boolean) {
   const fastest = fastestSource.value;
-  showRepoImport(repoKind.value, {
+  showRepoImport({
     ...(fastest ? { source: fastest } : {}),
     ...(withKeyword && schoolName.value.trim() ? { keyword: schoolName.value.trim() } : {}),
-    afterImport: (id) => onImported(id),
+    afterImport: (id, kind) => onImported(id, kind),
   });
 }
 
 /** 导入落盘后的绑定：直连渠道必须「渠道 + 绑定」同一次提交（后端校验合并后状态） */
-async function onImported(id: string) {
-  if (selectedChannel.value === "http") {
+async function onImported(id: string, kind: TaskRepoKind) {
+  if (kind === "http") {
     await configApi.patchProfileBinding({ login_channel: "http", active_http_task: id });
+  } else if (kind === "script") {
+    await configApi.patchProfileBinding({ login_channel: "script", active_script_task: id });
   } else {
-    await configApi.patchProfileBinding({ active_task: id });
+    await configApi.patchProfileBinding({ login_channel: "browser", active_task: id });
   }
+  selectedChannel.value = kind;
   importedId.value = id;
   // 导入即配置完成，直接进入完成步（调试模式提示）
   goNext();
@@ -478,6 +481,7 @@ async function applyDebugMode() {
 /** 完成步展示的最终登录方式：直连未导入任务时实际保持浏览器渠道 */
 const appliedChannelLabel = computed(() => {
   if (selectedChannel.value === "http" && importedId.value) return "HTTP 登录";
+  if (selectedChannel.value === "script" && importedId.value) return "脚本登录";
   return "浏览器自动化";
 });
 

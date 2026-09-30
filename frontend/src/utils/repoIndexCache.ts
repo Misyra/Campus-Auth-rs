@@ -1,6 +1,7 @@
 /** 任务仓库索引的本地缓存：按完整 URL 区分来源，两小时后重新获取。 */
 
 import type { RepoTask } from "../api/types";
+import { isRepoTaskIndex } from "./repoTask";
 
 const STORAGE_KEY = "campus-auth.repo-index-cache.v1";
 const MAX_ENTRIES = 8;
@@ -22,7 +23,7 @@ function readEntries(): CacheEntry[] {
       && typeof item.url === "string"
       && typeof item.fetchedAt === "number"
       && Number.isFinite(item.fetchedAt)
-      && Array.isArray(item.tasks),
+      && isRepoTaskIndex(item.tasks),
     );
   } catch {
     return [];

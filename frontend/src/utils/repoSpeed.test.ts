@@ -92,4 +92,10 @@ describe("measureRepoSources", () => {
     expect(results[0].ms).toBeNull();
     expect(results[0].error).toContain("JSON 数组");
   });
+  it("数组内条目损坏时不作为向导的可用镜像", async () => {
+    fetchIndexMock.mockResolvedValue([null] as never);
+    const results = await measureRepoSources("http");
+    expect(results.every((result) => result.ms === null && result.tasks.length === 0)).toBe(true);
+    expect(results[0].error).toContain("索引条目无效");
+  });
 });

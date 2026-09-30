@@ -77,31 +77,29 @@ describe("自动保存的缺口校验（经 showHttpTaskEditor + debounce）", (
 });
 
 describe("新建 HTTP 登录流程", () => {
-  it("先用本机 IP 计算示例，再发送登录请求；填真实地址后才落盘", async () => {
+  it("从一个登录请求开始；填真实地址后才落盘", async () => {
     vi.useFakeTimers();
     try {
       const http = useHttpTasks();
       http.createHttpTask();
       const draft = http.httpTaskDraft.value;
       expect(draft?.steps.map((step) => [step.id, step.kind])).toEqual([
-        ["compute_ip", "transform"],
         ["login", "request"],
       ]);
-      expect(draft?.steps[0]?.script).toContain("ip: ctx.local_ip");
-      expect(draft?.steps[1]?.url).toBe("{gateway_host}");
+      expect(draft?.steps[0]?.url).toBe("");
       expect(draft?.result_step_id).toBe("login");
-      expect(http.draftGapsNow.value).toContain("步骤 2 请求地址");
+      expect(http.draftGapsNow.value).toContain("步骤 1 请求地址");
       await vi.advanceTimersByTimeAsync(600);
       expect(tasksApiMock.save).not.toHaveBeenCalled();
 
-      draft!.steps[1]!.url = "http://10.0.0.1/login?ip={ip}";
+      draft!.steps[0]!.url = "http://10.0.0.1/login?ip={local_ip}";
       await vi.advanceTimersByTimeAsync(600);
       expect(tasksApiMock.save).toHaveBeenCalledTimes(1);
       const saved = tasksApiMock.save.mock.calls[0]?.[1] as Record<string, unknown>;
       expect(saved.schema_version).toBe(2);
       expect(saved.result_step_id).toBe("login");
-      expect((saved.steps as { kind: string; url: string }[]).map((step) => step.kind)).toEqual(["transform", "request"]);
-      expect((saved.steps as { kind: string; url: string }[])[1]?.url).toBe("http://10.0.0.1/login?ip={ip}");
+      expect((saved.steps as { kind: string; url: string }[]).map((step) => step.kind)).toEqual(["request"]);
+      expect((saved.steps as { kind: string; url: string }[])[0]?.url).toBe("http://10.0.0.1/login?ip={local_ip}");
     } finally {
       vi.useRealTimers();
     }

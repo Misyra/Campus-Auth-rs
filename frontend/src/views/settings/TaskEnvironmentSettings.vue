@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 设置 · 任务与环境页：任务概览与录制器入口 + 运行环境状态、OCR 依赖与验证码识别测试。
  * 原「任务」「环境」两个 Tab 合并而来：任务定义与它依赖的运行环境同域，且两页均为动作/状态卡、无配置保存栏。 */
+import SettingsRow from "@/components/common/SettingsRow.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import { ref, computed, watch, onMounted, onActivated, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
@@ -216,9 +217,12 @@ async function recognizeOcr() {
 </script>
 
 <template>
-  <div class="settings-panel-grid settings-panel-grid--cols2 environment-page">
+  <div class="settings-list-page environment-page">
     <!-- 运行环境：可折叠卡，环境就绪自动收起、异常或初始化中自动展开 -->
-    <section class="card settings-panel settings-panel--wide env-collapse-card" :class="{ 'env-collapsed': envCollapsed }">
+    <section
+      class="settings-panel env-collapse-card"
+      :class="{ 'env-collapsed': envCollapsed }"
+    >
       <div
         class="settings-card-header env-collapse-header"
         role="button"
@@ -230,15 +234,29 @@ async function recognizeOcr() {
       >
         <IconApp name="terminal" class="settings-card-icon" />
         <h2>运行环境</h2>
-        <span v-if="!envLoading && envStatus" class="badge badge--sm" :class="envReady ? 'badge--success' : 'badge--warn'">{{ envReady ? '已就绪' : '未就绪' }}</span>
-        <span v-if="envStageLabel" class="badge badge--sm">{{ envStageLabel }}<template v-if="envStatus?.progress?.percent != null"> {{ envStatus.progress.percent }}%</template></span>
+        <span
+          v-if="!envLoading && envStatus"
+          class="badge badge--sm"
+          :class="envReady ? 'badge--success' : 'badge--warn'"
+        >
+          {{ envReady ? '已就绪' : '未就绪' }}
+        </span>
+        <span v-if="envStageLabel" class="badge badge--sm">
+          {{ envStageLabel }}
+          <template v-if="envStatus?.progress?.percent != null">{{ envStatus.progress.percent }}%</template>
+        </span>
         <IconApp name="chevron-down" class="env-collapse-chevron" />
       </div>
       <div v-show="!envCollapsed" class="card-body">
-        <p class="hint env-lead">自动登录需要 Python 环境、认证核心和可用浏览器三项就绪。每次启动前都会自动检测，缺失的组件会先自动安装再继续；验证码识别（OCR）是可选功能，按需安装即可。</p>
+        <p class="hint env-lead">
+          自动登录需要 Python 环境、认证核心和可用浏览器三项就绪。每次启动前都会自动检测，缺失的组件会先自动安装再继续；验证码识别（OCR）是可选功能，按需安装即可。
+        </p>
         <div class="env-status-row">
           <span v-if="envLoading" class="hint">检测中…</span>
-          <template v-else-if="envError && !envStatus"> <span class="env-error">{{ envError }}</span> <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button> </template>
+          <template v-else-if="envError && !envStatus">
+            <span class="env-error">{{ envError }}</span>
+            <button class="btn btn-sm btn-link" type="button" @click="void refreshEnv()">重试</button>
+          </template>
           <template v-else-if="envStatus">
             <!-- 清单口径来自 utils/environmentStatus（与仪表盘横幅、关于页共用） -->
             <div class="env-checklist" aria-label="环境组件状态">
@@ -248,7 +266,9 @@ async function recognizeOcr() {
                 class="env-check-item"
                 :class="c.optional ? 'optional' : c.ready ? 'ready' : 'missing'"
               >
-                <span class="env-check-dot"></span><span class="env-check-name">{{ c.name }}</span><span class="env-check-value">{{ c.value }}</span>
+                <span class="env-check-dot"></span>
+                <span class="env-check-name">{{ c.name }}</span>
+                <span class="env-check-value">{{ c.value }}</span>
               </div>
             </div>
           </template>
@@ -257,7 +277,7 @@ async function recognizeOcr() {
         <p v-if="envStatus?.progress?.message" class="hint">{{ envStatus.progress.message }}</p>
         <p v-if="envStatus?.last_error" class="hint env-error env-preline">{{ envStatus.last_error }}</p>
         <p v-if="envError && envStatus" class="hint env-error">{{ envError }}</p>
-        <div class="env-card-actions">
+        <SettingsRow label="同步运行环境" description="安装缺失组件或重新同步现有依赖">
           <button
             v-if="envReady"
             type="button"
@@ -280,111 +300,143 @@ async function recognizeOcr() {
             <IconApp v-if="busy.env" name="refresh" class="spin" />
             {{ busy.env ? "初始化中..." : "初始化环境" }}
           </button>
-        </div>
+        </SettingsRow>
       </div>
     </section>
-
     <!-- 任务概览 -->
-    <section class="card settings-panel task-overview-card">
+    <section class="settings-panel task-overview-card">
       <div class="settings-card-header">
         <IconApp name="grid" class="settings-card-icon" />
         <h2>任务概览</h2>
       </div>
       <div class="card-body">
-        <div class="task-overview-compact">
-          <div class="task-overview-left">
-            <span class="task-overview-label">当前任务</span>
-            <span class="task-overview-name">{{ activeTaskName || '未设置' }}</span>
-          </div>
-          <div class="task-overview-right">
-            <button class="btn btn-primary btn-sm" type="button" @click="router.push({ name: 'tasks' })">管理任务</button>
-          </div>
-        </div>
-        <div class="task-overview-actions">
-          <button class="btn btn-secondary btn-sm" type="button" @click="t.importTask()">从文件导入</button>
-          <button class="btn btn-secondary btn-sm" type="button" @click="repo.showRepoImport('browser')">从仓库导入</button>
-          <button class="btn btn-secondary btn-sm" type="button" @click="t.fetchTasks(true)">刷新列表</button>
+        <SettingsRow label="当前任务" :description="activeTaskName || '未设置'">
+          <button class="btn btn-primary btn-sm" type="button" @click="router.push({ name: 'tasks' })">管理任务</button>
+        </SettingsRow>
+        <SettingsRow label="现成任务库" description="选择社区已有任务，无需自己编写；导入后绑定到方案即可使用">
+          <button class="btn btn-secondary btn-sm" type="button" @click="repo.showRepoImport()">选择现成任务</button>
           <a :href="TASK_REPO_URL" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">任务仓库 →</a>
-        </div>
+        </SettingsRow>
+        <SettingsRow label="导入任务文件" description="从本地文件导入浏览器任务">
+          <button class="btn btn-secondary btn-sm" type="button" @click="t.importTask()">从文件导入</button>
+        </SettingsRow>
+        <SettingsRow label="刷新任务列表" description="重新读取当前可用任务">
+          <button class="btn btn-secondary btn-sm" type="button" @click="t.fetchTasks(true)">刷新列表</button>
+        </SettingsRow>
       </div>
     </section>
-
     <!-- 任务录制器 -->
-    <section class="card settings-panel">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="target" class="settings-card-icon" />
         <h2>任务录制器</h2>
       </div>
       <div class="card-body">
-        <div class="task-recorder-section">
-          <p class="task-recorder-desc">在登录页点选表单元素，录制器会生成可交给 AI 的任务提示词。</p>
-          <div class="task-recorder-actions">
-            <a href="/api/tools/task-recorder.user.js" class="btn btn-primary">
-              <IconApp name="upload" class="icon-sm" />
-              安装录制器脚本
+        <SettingsRow label="录制登录流程" description="先安装 Tampermonkey，再安装录制脚本。在登录页点选表单元素，生成交给 AI 的任务提示词">
+          <template #description>
+            <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener" class="inline-link">
+              安装 Tampermonkey
             </a>
-            <a href="/api/docs/task-writing-guide" class="btn btn-secondary">
-              <IconApp name="file-text" class="icon-sm" />
-              下载编写指南
-            </a>
-          </div>
-          <div class="task-recorder-note">先安装 <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a>，再安装脚本；打开登录页，点击浮动按钮开始。<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">查看教程视频</a> · <a href="/api/docs/task-manual">下载任务手册</a></div>
-        </div>
+          </template>
+          <a href="/api/tools/task-recorder.user.js" class="btn btn-primary">
+            <IconApp name="upload" class="icon-sm" />
+            安装录制器脚本
+          </a>
+        </SettingsRow>
+        <SettingsRow label="任务编写指南" description="查看任务格式与步骤说明，或观看录制教程">
+          <a href="/api/docs/task-writing-guide" class="btn btn-secondary">
+            <IconApp name="file-text" class="icon-sm" />
+            下载编写指南
+          </a>
+          <a
+            :href="TUTORIAL_VIDEO_RECORD_URL"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn-ghost btn-sm"
+          >
+            教程视频
+          </a>
+          <a href="/api/docs/task-manual" class="btn btn-ghost btn-sm">任务手册</a>
+        </SettingsRow>
       </div>
     </section>
-
     <!-- 依赖安装与识别测试属于同一流程，合并后可直接看到下一步。 -->
-    <section class="card settings-panel settings-panel--wide">
+    <section class="settings-panel">
       <div class="settings-card-header">
         <IconApp name="file-check" class="settings-card-icon" />
         <h2>验证码识别（OCR）</h2>
       </div>
       <div class="card-body ocr-settings-grid">
-        <div class="ocr-setup">
-          <h3>安装依赖</h3>
-          <p class="ocr-description">仅在任务中使用 <code>ocr</code> 步骤时需要，约占用 120MB 磁盘空间。</p>
-          <div class="ocr-status-row">
-            <span v-if="ocrStatusLoading" class="ocr-status detecting">检测中…</span>
-            <span v-else-if="ocrStatusError" class="ocr-status error">状态检测失败 <button class="btn btn-sm btn-link" type="button" @click="refreshOcrStatus">重试</button></span>
-            <span v-else-if="ocrStatus.installed" class="ocr-status ok">已安装</span>
-            <span v-else class="ocr-status none">未安装</span>
-          </div>
-          <div v-if="ocrStatus.installed && ocrStatus.size_mb && ocrStatus.size_mb > 0" class="ocr-size-hint">当前占用约 {{ ocrStatus.size_mb }} MB</div>
-          <!-- 区分「依赖已装入环境」与「Worker 正在跑且已加载」：runtime_ocr 为 null 时
-               只表示 Worker 当前未运行（按需拉起），不代表依赖有问题；不说明会被误读为
-               装了空壳。识别测试按钮始终可用，实际能力以识别结果为准。 -->
-          <div v-if="ocrStatus.installed" class="ocr-size-hint">
-            {{ runtimeOcrLabel }}
-          </div>
-          <div class="env-card-actions">
-            <button v-if="!ocrStatus.installed" class="btn btn-primary btn-sm" type="button" @click="installOcr" :disabled="busy.ocr">
-              {{ busy.ocr ? '安装中...' : '安装 OCR 依赖' }}
-            </button>
-            <button v-else class="btn btn-danger-ghost btn-sm" type="button" @click="uninstallOcr" :disabled="busy.ocr">
-              {{ busy.ocr ? '卸载中...' : '卸载 OCR 依赖' }}
-            </button>
-          </div>
-        </div>
-        <div class="ocr-tryout">
-          <h3>测试识别</h3>
-          <p class="ocr-description">选择本地验证码图片，验证 OCR 是否正常工作。</p>
+        <SettingsRow label="OCR 依赖">
+          <template #description>
+            <p class="ocr-description">
+              仅在任务中使用
+              <code>ocr</code>
+              步骤时需要，约占用 120MB 磁盘空间。
+            </p>
+            <div class="ocr-status-row">
+              <span v-if="ocrStatusLoading" class="ocr-status detecting">检测中…</span>
+              <span v-else-if="ocrStatusError" class="ocr-status error">
+                状态检测失败
+                <button class="btn btn-sm btn-link" type="button" @click="refreshOcrStatus">重试</button>
+              </span>
+              <span v-else-if="ocrStatus.installed" class="ocr-status ok">已安装</span>
+              <span v-else class="ocr-status none">未安装</span>
+            </div>
+            <div v-if="ocrStatus.installed && ocrStatus.size_mb && ocrStatus.size_mb > 0" class="ocr-size-hint">
+              当前占用约
+              {{ ocrStatus.size_mb }}
+              MB
+            </div>
+            <div v-if="ocrStatus.installed" class="ocr-size-hint">{{ runtimeOcrLabel }}</div>
+          </template>
+          <button
+            v-if="!ocrStatus.installed"
+            class="btn btn-primary btn-sm"
+            type="button"
+            @click="installOcr"
+            :disabled="busy.ocr"
+          >
+            {{ busy.ocr ? '安装中...' : '安装 OCR 依赖' }}
+          </button>
+          <button
+            v-else
+            class="btn btn-danger-ghost btn-sm"
+            type="button"
+            @click="uninstallOcr"
+            :disabled="busy.ocr"
+          >
+            {{ busy.ocr ? '卸载中...' : '卸载 OCR 依赖' }}
+          </button>
+        </SettingsRow>
+        <SettingsRow label="验证码识别测试" description="选择本地验证码图片，验证 OCR 是否正常工作">
           <div v-if="!ocrStatus.installed" class="ocr-hint">安装依赖后可在这里测试。</div>
           <template v-else>
             <div class="ocr-pick-row">
-              <button class="btn btn-secondary btn-sm" type="button" @click="pickOcrImage" :disabled="busy.ocrRec">选择图片</button>
+              <button class="btn btn-secondary btn-sm" type="button" @click="pickOcrImage" :disabled="busy.ocrRec">
+                选择图片
+              </button>
               <span v-if="ocrImageName" class="ocr-filename" :title="ocrImageName">{{ ocrImageName }}</span>
               <span v-else class="hint">未选择图片</span>
             </div>
             <div v-if="ocrImagePreview" class="ocr-preview-wrap">
               <img :src="ocrImagePreview" alt="验证码预览" class="ocr-preview" />
             </div>
-            <button class="btn btn-primary ocr-recognize-btn" type="button" :disabled="busy.ocrRec || !ocrImageFile" @click="recognizeOcr">
+            <button
+              class="btn btn-primary ocr-recognize-btn"
+              type="button"
+              :disabled="busy.ocrRec || !ocrImageFile"
+              @click="recognizeOcr"
+            >
               {{ busy.ocrRec ? '识别中...' : '开始识别' }}
             </button>
-            <div v-if="ocrResult" class="ocr-result"><span>识别结果：</span><code class="ocr-result-text">{{ ocrResult }}</code></div>
+            <div v-if="ocrResult" class="ocr-result">
+              <span>识别结果：</span>
+              <code class="ocr-result-text">{{ ocrResult }}</code>
+            </div>
             <div v-if="ocrError" class="ocr-error">识别失败：{{ ocrError }}</div>
           </template>
-        </div>
+        </SettingsRow>
       </div>
     </section>
   </div>

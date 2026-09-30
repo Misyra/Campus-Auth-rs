@@ -19,9 +19,12 @@ import IconApp from "@/components/common/IconApp.vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { activeChildId, TASK_NAV_CHILDREN } from "@/utils/navTree";
+import { useRepoImport } from "@/composables/useRepoImport";
 
 const route = useRoute();
 const router = useRouter();
+const repo = useRepoImport();
+const showReadyTasks = computed(() => ["tasks-browser", "tasks-http", "tasks-scripts"].includes(String(route.name)));
 
 /** 当前子项：供窄屏 pill 行点亮（宽屏由侧栏点亮） */
 const activeChild = computed(() => activeChildId(TASK_NAV_CHILDREN, String(route.name)));
@@ -53,6 +56,22 @@ function setTab(name: string): void {
       </button>
     </nav>
 
+    <div v-if="showReadyTasks" class="ready-tasks-banner">
+      <div>
+        <strong>使用现成登录任务</strong>
+        <p>搜索学校，选择社区已做好的登录流程。浏览器、HTTP 直连和脚本任务统一浏览，导入后自动归类。</p>
+      </div>
+      <button type="button" class="btn btn-primary" @click="repo.showRepoImport()"><IconApp name="globe-grid" class="icon-sm" />选择现成任务</button>
+    </div>
     <router-view />
   </div>
 </template>
+
+<style scoped>
+.ready-tasks-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; margin-bottom: 20px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-md); background: var(--bg-card); }
+.ready-tasks-banner > div { min-width: 0; }
+.ready-tasks-banner strong { font-size: var(--text-lg); font-weight: 600; }
+.ready-tasks-banner p { margin: 5px 0 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.6; }
+.ready-tasks-banner button { flex: none; }
+@media (max-width: 768px) { .ready-tasks-banner { align-items: stretch; flex-direction: column; gap: 12px; padding: 14px; } .ready-tasks-banner button { align-self: flex-start; } }
+</style>

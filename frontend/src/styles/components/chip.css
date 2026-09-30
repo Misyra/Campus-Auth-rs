@@ -43,7 +43,7 @@
 }
 
 .chip--fn {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 /* 表格行内密集变体：原 .tsk-chip（tasks.css）。表格行高有限，字号与内边距各收一档，

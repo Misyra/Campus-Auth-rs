@@ -9,6 +9,10 @@ export type { Config, Profile };
 
 /** 外观设置 */
 export interface Appearance {
+  /** 在系统偏好之外主动减少界面动效 */
+  reduce_motion: boolean;
+  /** 文字比例，兼顾默认排版与阅读需求 */
+  font_scale: number;
   background_url: string;
   background_filename: string;
   wallpaper_api_url: string;

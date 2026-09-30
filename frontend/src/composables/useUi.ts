@@ -210,13 +210,7 @@ async function testNetwork(): Promise<void> {
       conflicting_evidence: "不同探测结果相互冲突",
       no_probes_enabled: "没有启用有效公网探测",
     }[data.reason];
-    const local = {
-      available: "本地链路正常",
-      unavailable: "未发现有效本地网络接口",
-      probe_failed: "本地链路检查失败",
-      not_checked: "本地链路未检查",
-    }[data.local_link];
-    toastOnly(data.status === "online", `${summary}；${reason}；${local}（${data.duration_ms}ms）`);
+    toastOnly(data.status === "online", `${summary}；${reason}（${data.duration_ms}ms）`);
   } catch (error) {
     toastOnly(false, extractApiError(error, "网络测试失败"));
   } finally {

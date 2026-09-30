@@ -246,15 +246,11 @@ onMounted(async () => {
       />
       <button type="button" class="btn btn-sm" title="从文件导入任务" @click="t.importTask()">
         <IconApp name="upload" class="icon-sm" />
-        导入
-      </button>
-      <button type="button" class="btn btn-sm" title="从云端仓库导入" @click="repo.showRepoImport('browser')">
-        <IconApp name="globe-grid" class="icon-sm" />
-        仓库导入
+        从文件导入
       </button>
       <!-- 外链但仍是工具栏里的一个动作：这里不能用 `btn-ghost`——它同时抹掉底色与边框，
            于是这个 108px 的盒子变成"夹在两个按钮中间的裸文字"，看着不像能点。
-           与旁边的「导入 / 仓库导入」同一套外观（外部去向由 title 说明）。 -->
+           与旁边的「导入」同一套外观（外部去向由 title 说明）。 -->
       <a :href="TASK_REPO_URL" target="_blank" rel="noopener" class="btn btn-sm" title="把你的登录任务分享到任务仓库，供他人一键导入">
         <IconApp name="share-2" class="icon-sm" />
         分享适配
@@ -291,13 +287,10 @@ onMounted(async () => {
               <div class="empty-state">
                 <IconApp name="layout" :stroke-width="1.5" />
                 <span>暂无任务配置</span>
-                <span class="empty-desc">从任务仓库导入现成的登录任务，或点「新建任务」开始</span>
+                <span class="empty-desc">点击上方「选择现成任务」使用已有登录流程，或新建任务</span>
                 <div class="empty-actions">
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
                     <IconApp name="plus" />新建任务
-                  </button>
-                  <button type="button" class="btn btn-sm" @click="repo.showRepoImport('browser')">
-                    <IconApp name="globe-grid" class="icon-sm" />仓库导入
                   </button>
                 </div>
               </div>
@@ -547,7 +540,7 @@ onMounted(async () => {
           <div class="card-body tsk-side-body">
             <p class="tsk-side-hint">任务本身不会自动运行：到「方案」页选中它并保存，自动登录才会使用。</p>
             <p class="tsk-side-hint">
-              不想手写 JSON？<button type="button" class="btn btn-link" @click="repo.showRepoImport('browser')">从仓库导入</button>现成任务，或用<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成。
+              可以<button type="button" class="btn btn-link" @click="repo.showRepoImport()">选择现成任务</button>，或用<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成。
             </p>
             <p class="tsk-side-hint">步骤类型与字段说明见<a href="/api/docs/task-writing-guide" target="_blank" rel="noopener noreferrer">编写指南</a>。</p>
           </div>

@@ -31,6 +31,7 @@ const program = ref<UninstallTarget | null>(null);
 const helper = ref<UninstallTarget | null>(null);
 const data = ref<UninstallTarget[]>([]);
 const blocked = ref<string | null>(null);
+const keepDataBlockReason = ref<string | null>(null);
 /** 「保留配置与任务」：默认不勾——默认真卸载是既定口径 */
 const keepUserData = ref(false);
 const phase = ref<UninstallPhase>("idle");
@@ -74,37 +75,17 @@ const dataToDelete = computed<UninstallTarget[]>(() =>
 function plannedDeletions(
   program: UninstallTarget | null,
   dataToDelete: readonly UninstallTarget[],
+  keepUserData = false,
 ): string[] {
   const names: string[] = [];
-  if (program) names.push(program.label);
+  if (program?.exists) names.push(keepUserData ? "程序文件（保留用户数据）" : program.label);
   for (const d of dataToDelete) names.push(d.label);
   return names;
 }
 
-/**
- * 确认弹窗文案：**逐项点名**将删除的内容。
- *
- * 用户明确要求"删除时要说清会删哪些内容"。「清理残留并卸载程序」这种笼统说法会让
- * 人在按下按钮前不知道自己会失去什么（方案？脚本？定时任务？日志？），而这一步不可恢复。
- */
-export function purgeConfirmMessage(
-  program: UninstallTarget | null,
-  dataToDelete: readonly UninstallTarget[],
-  kept: readonly UninstallTarget[],
-): string {
-  const names = plannedDeletions(program, dataToDelete);
-  const deleted = names.length > 0 ? `将永久删除：${names.join("、")}。` : "";
-  const keptNote =
-    kept.length > 0 ? `已按你的勾选保留 ${kept.length} 项用户数据。` : "";
-  return (
-    `${deleted}${keptNote}同时关闭开机自启动、删除加密密钥目录并清理 Playwright ` +
-    "浏览器缓存。程序会立即退出，此操作不可恢复。"
-  );
-}
-
 /** 本次将删除的条目总数（0 表示没有任何可删目标） */
 const deleteCount = computed(
-  () => plannedDeletions(program.value, dataToDelete.value).length,
+  () => plannedDeletions(program.value, dataToDelete.value, keepUserData.value).length,
 );
 
 /**
@@ -113,7 +94,7 @@ const deleteCount = computed(
  * 既供确认文案使用，也供"卸载已启动"回执使用：那时后端随时会消失，用户最后看到的
  * 那份清单必须与将要执行的删除一致。
  */
-const deletionLabels = computed(() => plannedDeletions(program.value, dataToDelete.value));
+const deletionLabels = computed(() => plannedDeletions(program.value, dataToDelete.value, keepUserData.value));
 
 function reset(): void {
   detecting.value = false;
@@ -123,6 +104,7 @@ function reset(): void {
   helper.value = null;
   data.value = [];
   blocked.value = null;
+  keepDataBlockReason.value = null;
   keepUserData.value = false;
   phase.value = "idle";
   cleanupResults.value = [];
@@ -148,6 +130,7 @@ async function openDialog(): Promise<void> {
     helper.value = result.helper ?? null;
     data.value = result.data ?? [];
     blocked.value = result.blocked ?? null;
+    keepDataBlockReason.value = result.keep_data_blocked ?? null;
     if (blocked.value) {
       // 守卫拒绝（如该目录是源码仓库）：这不是错误而是"当前环境不支持卸载"，
       // 记一条日志便于排查用户为什么没有卸载按钮
@@ -169,11 +152,18 @@ async function openDialog(): Promise<void> {
  * - 第二步失败必须说清"程序文件一个都没删"，否则用户会以为卸载过了、直接去删目录。
  */
 async function run(): Promise<void> {
-  if (running.value || blockReason.value !== null || deleteCount.value === 0) return;
+  if (running.value || blockReason.value !== null || deleteCount.value === 0
+    || (keepUserData.value && keepDataBlockReason.value !== null)) return;
+  const keep = keepUserData.value;
 
   const ok = await confirm({
     title: "确认卸载",
-    message: purgeConfirmMessage(program.value, dataToDelete.value, keptData.value),
+    message: "程序将退出，删除操作无法恢复。请确认以下范围。",
+    sections: [
+      { title: "删除", text: plannedDeletions(program.value, dataToDelete.value, keep).join("、") },
+      ...(keep ? [{ title: "保留", text: `${keptData.value.map(d => d.label).join("、") || "没有已有的数据目录"}；加密密钥也会保留。数据留在原路径，所在目录不会被整目录删除。换位置重装时需自行迁移。` }] : []),
+      { title: "系统清理", text: `关闭开机自启动，清理 Playwright 浏览器缓存${keep ? "" : "与加密密钥目录"}。` },
+    ],
     confirmText: "卸载并退出",
     danger: true,
   });
@@ -188,7 +178,7 @@ async function run(): Promise<void> {
   // config/ 里那些 ENC: 方案密码再也解不开——"保留配置与任务"就成了半句空话。
   phase.value = "cleanup";
   try {
-    const cleaned = await uninstallApi.uninstall(keepUserData.value);
+    const cleaned = await uninstallApi.uninstall(keep);
     cleanupResults.value = cleaned.results ?? [];
     cleanupMessage.value = cleaned.message ?? "";
   } catch (e) {
@@ -199,7 +189,7 @@ async function run(): Promise<void> {
   // 第二步：删程序并退出。响应回来后本页面的后端随时会消失
   phase.value = "purge";
   try {
-    const purged = await uninstallApi.purge(keepUserData.value);
+    const purged = await uninstallApi.purge(keep);
     pendingUpdateLeft.value = purged.pending_update_left === true;
     phase.value = "done";
     frontendLogger.info(
@@ -233,6 +223,7 @@ export function useUninstall() {
     data,
     blocked,
     blockReason,
+    keepDataBlockReason,
     keepUserData,
     phase,
     running,

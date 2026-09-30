@@ -19,7 +19,6 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
 import { useHttpTasks } from "@/composables/useHttpTasks";
-import { useRepoImport } from "@/composables/useRepoImport";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
 import { useDragSort } from "@/utils/drag";
 import { autosaveLabel } from "@/utils/autosave";
@@ -50,7 +49,6 @@ const {
   loadScriptTemplate,
   onBinarySelectChange,
 } = useScripts();
-const repo = useRepoImport();
 
 // B1：拖拽排序复用 useDragSort——本列表（脚本）重排，浏览器任务 / 脚本 / HTTP 登录任务
 // 三组顺序均随请求全量持久化（后端 order 接口整体替换，漏传的一组会被清空）
@@ -222,10 +220,7 @@ onMounted(async () => {
       />
       <button type="button" class="btn btn-sm" title="从文件导入脚本（.py / .sh / .bat / .cmd / .txt）" @click="onImportScript">
         <IconApp name="upload" class="icon-sm" />
-        导入
-      </button>
-      <button type="button" class="btn btn-sm" title="从云端仓库导入脚本任务" @click="repo.showRepoImport('script')">
-        <IconApp name="download" class="icon-sm" />从仓库导入
+        从文件导入
       </button>
       <button type="button" class="btn btn-sm btn-primary" @click="onNewScript">
         <IconApp name="plus" class="icon-sm" />
@@ -268,10 +263,7 @@ onMounted(async () => {
                     <IconApp name="plus" />新建脚本
                   </button>
                   <button type="button" class="btn btn-sm" @click="onImportScript">
-                    <IconApp name="upload" class="icon-sm" />导入
-                  </button>
-                  <button type="button" class="btn btn-sm" @click="repo.showRepoImport('script')">
-                    <IconApp name="download" class="icon-sm" />从仓库导入
+                    <IconApp name="upload" class="icon-sm" />从文件导入
                   </button>
                 </div>
               </div>

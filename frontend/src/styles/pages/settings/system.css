@@ -51,7 +51,7 @@
 }
 
 .run-mode-option.active .run-mode-option-head {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .run-mode-option-label {

@@ -23,7 +23,7 @@
 }
 
 .nav-item.active {
-  background: rgba(var(--accent-rgb), 0.09);
+  background: rgba(var(--navigation-accent-rgb), 0.09);
   color: var(--text-primary);
   font-weight: 650;
 }
@@ -45,7 +45,7 @@
   flex-shrink: 0;
 }
 
-/* ===== 二级导航：一级项下展开的一层子项（当前仅「任务」） ===== */
+/* ===== 二级导航：任务与设置在一级项下展开子项 ===== */
 
 .nav-group {
   display: flex;
@@ -92,7 +92,7 @@
 }
 
 .nav-group--open .nav-item--group.active .nav-caret {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .nav-caret--collapsed {
@@ -153,7 +153,7 @@
 }
 
 .nav-child.active {
-  background: rgba(var(--accent-rgb), 0.08);
+  background: rgba(var(--navigation-accent-rgb), 0.08);
   color: var(--text-primary);
   font-weight: 600;
 }

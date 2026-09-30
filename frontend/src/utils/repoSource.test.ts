@@ -29,6 +29,8 @@ describe("repoSourceUrl", () => {
       "  ",
       "github.com/Misyra/campus-auth-tasks",
       "https://",
+      "https://?query=1",
+      "https://example.com:bad/path",
       null,
       undefined,
     ]) {

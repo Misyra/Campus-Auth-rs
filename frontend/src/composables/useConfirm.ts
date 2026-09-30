@@ -26,6 +26,8 @@ export interface ConfirmOptions {
   message: string;
   /** 可选的结构化改动清单；有值时渲染为对齐列表，message 只作引导语 */
   changes?: ConfirmChange[];
+  /** 可选的分组摘要，如危险操作中分别列出删除与保留范围 */
+  sections?: Array<{ title: string; text: string }>;
   confirmText?: string;
   cancelText?: string;
   danger?: boolean;
@@ -36,6 +38,7 @@ interface ConfirmState {
   title: string;
   message: string;
   changes: ConfirmChange[];
+  sections: Array<{ title: string; text: string }>;
   confirmText: string;
   cancelText: string;
   danger: boolean;
@@ -46,6 +49,7 @@ const state = reactive<ConfirmState>({
   title: "",
   message: "",
   changes: [],
+  sections: [],
   confirmText: "确定",
   cancelText: "取消",
   danger: false,
@@ -68,6 +72,7 @@ function confirm(options: ConfirmOptions): Promise<boolean | null> {
   state.message = options.message;
   // 拷一份：调用方常在 computed/循环里构造数组，共享引用会被后续渲染改动
   state.changes = options.changes ? options.changes.map((c) => ({ ...c })) : [];
+  state.sections = options.sections ? options.sections.map((section) => ({ ...section })) : [];
   state.confirmText = options.confirmText || "确定";
   state.cancelText = options.cancelText || "取消";
   state.danger = options.danger || false;
