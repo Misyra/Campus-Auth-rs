@@ -72,8 +72,6 @@ pub struct MonitorConfig {
     pub url_targets: Vec<String>,
     /// URL 期望响应（URL -> 期望包含的标题片段）
     pub url_expected_responses: HashMap<String, String>,
-    /// 是否启用物理网卡连接检查
-    pub local_check_enabled: bool,
     /// 严格登录模式：仅在拿到明确门户结论时才建议自动登录（默认开启）
     ///
     /// 关闭后退化为宽松触发：自动监测会额外采集本地链路证据（`list_interfaces`），
@@ -103,7 +101,6 @@ impl MonitorConfig {
             http_targets: m.http_targets.clone(),
             url_targets: m.url_targets.clone(),
             url_expected_responses: m.url_expected_responses.clone(),
-            local_check_enabled: m.local_check_enabled,
             strict_login_mode: m.strict_login_mode,
             tcp_timeout: Duration::from_secs(m.tcp_timeout as u64),
             http_timeout: Duration::from_secs(m.http_timeout as u64),
@@ -118,7 +115,7 @@ impl MonitorConfig {
 enum CheckPurpose {
     /// 周期监测：补充认证入口证据并生成自动恢复建议
     AutoMonitor,
-    /// 用户主动诊断：可采集本地链路，但绝不生成自动恢复动作
+    /// 用户主动诊断：仅检测公网，不采集本地链路或生成自动恢复动作
     ManualDiagnostic,
     /// 登录后验证：只确认公网是否恢复
     PostLoginVerification,
@@ -240,7 +237,7 @@ impl MonitorService {
         self.check_once(CheckPurpose::AutoMonitor).await
     }
 
-    /// 执行用户主动诊断：允许采集本地链路，不触发任何自动恢复动作。
+    /// 执行用户主动诊断：仅检测公网，不采集本地链路或探测认证入口。
     pub async fn diagnose_once(&self) -> Result<ProbeReport, MonitorError> {
         self.check_once(CheckPurpose::ManualDiagnostic).await
     }
@@ -395,7 +392,7 @@ impl MonitorService {
         }
 
         // 本地链路证据按需采集（串行，在公网探测之后）：
-        // - 手动诊断：按用户开关采集，是诊断说明的一部分；
+        // - 手动诊断：不采集，避免额外枚举网卡拖慢用户主动测试；
         // - 自动监测：仅当严格模式**关闭**（宽松口径）且严格判定未确认在线时才采集
         //   ——此时它是「升级还是等待」的唯一变量；已确认在线或已由严格判定接管
         //   （配置错误/无有效探测）时采集毫无用处，而 `list_interfaces` 要 spawn
@@ -409,12 +406,11 @@ impl MonitorService {
             && rt.profile.uses_redirect_login()
             && redirect_fallback_candidate(&assessment);
         let want_local_link = match purpose {
-            CheckPurpose::ManualDiagnostic => cfg.local_check_enabled,
             CheckPurpose::AutoMonitor => {
                 redirect_fallback
                     || (!cfg.strict_login_mode && lenient_trigger_candidate(&assessment))
             }
-            CheckPurpose::PostLoginVerification => false,
+            CheckPurpose::ManualDiagnostic | CheckPurpose::PostLoginVerification => false,
         };
         if want_local_link {
             evidence.local_link = self.probe_local_link().await;
@@ -738,7 +734,6 @@ mod tests {
         settings.global.monitor.http_enabled = true;
         settings.global.monitor.http_targets = vec![http_target.to_string()];
         settings.global.monitor.http_timeout = 1;
-        settings.global.monitor.local_check_enabled = false;
         settings.global.monitor.strict_login_mode = strict_mode;
         settings.global.monitor.auth_url_timeout = 1;
         config.save_settings(&settings).await.unwrap();
@@ -768,6 +763,66 @@ mod tests {
         config.reload().await.unwrap();
 
         Arc::new(MonitorService::new(config, detect, None, None).unwrap())
+    }
+
+    /// 手动诊断始终跳过网卡与认证入口，即使旧配置开启检查或自动触发采用宽松口径。
+    #[tokio::test]
+    async fn test_manual_diagnostic_never_checks_link_or_auth_endpoint() {
+        for strict_mode in [true, false] {
+            for redirect_login in [true, false] {
+                let tmp = tempfile::tempdir().unwrap();
+                let detect = Arc::new(WiredDetect::new());
+                let monitor = monitor_with_http_target(
+                    &tmp,
+                    detect.clone(),
+                    strict_mode,
+                    "http://127.0.0.1:9/generate_204",
+                    redirect_login,
+                )
+                .await;
+                let mut legacy =
+                    serde_json::to_value(monitor.config_service.load_settings()).unwrap();
+                legacy["global"]["monitor"]["local_check_enabled"] = true.into();
+                legacy["global"]["monitor"]["check_auth_url"] = true.into();
+                monitor
+                    .config_service
+                    .save_settings(&serde_json::from_value(legacy).unwrap())
+                    .await
+                    .unwrap();
+
+                // 独立入口监听器证明没有 TCP 预检，避免仅断言报告未显示结果。
+                let auth_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                if !redirect_login {
+                    let profiles =
+                        crate::config::ProfileService::new(monitor.config_service.clone());
+                    let mut profile = profiles.get_profile("default").unwrap();
+                    profile.auth_url =
+                        format!("http://{}/login", auth_listener.local_addr().unwrap());
+                    profiles
+                        .update_profile("default", profile, false)
+                        .await
+                        .unwrap();
+                }
+                monitor.config_service.reload().await.unwrap();
+
+                let report = monitor.diagnose_once().await.unwrap();
+                assert_eq!(report.evidence.local_link, LocalLinkState::NotChecked);
+                assert_eq!(
+                    report.assessment.auth_endpoint,
+                    AuthEndpointState::NotChecked
+                );
+                assert_eq!(
+                    report.assessment.recovery_advice,
+                    RecoveryAdvice::NotEvaluated
+                );
+                assert_eq!(detect.calls(), 0);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(30), auth_listener.accept())
+                        .await
+                        .is_err()
+                );
+            }
+        }
     }
 
     /// 严格模式关闭（宽松口径）+ 网卡可用：全 Fail 的 Offline 必须被升级为建议登录，

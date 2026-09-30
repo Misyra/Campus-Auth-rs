@@ -249,7 +249,6 @@ async fn http_login_succeeds_without_python_or_worker_setup() {
                 "enable_http_check": true,
                 "enable_tcp_check": false,
                 "enable_url_check": false,
-                "enable_local_check": false,
                 "post_login_delay": 0
             }
         })),

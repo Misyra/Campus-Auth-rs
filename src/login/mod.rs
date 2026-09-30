@@ -1,6 +1,6 @@
 //! 登录编排：LoginOrchestrator 公共接口 + 子模块 re-export
 //!
-//! 本模块实现登录统一入口：配置校验 → auth_url 预检 → 去重/抢占判断 → 创建会话 →
+//! 本模块实现登录统一入口：配置校验 → 去重/抢占判断 → 创建会话 →
 //! 驱动状态机 → 返回 [`LoginHandle`]。活跃会话由 `Mutex<OrchestratorState>` 保护，
 //! 同一时刻最多一个。底层 Worker 执行经 `BridgeSupervisor` 完成，历史经
 //! [`LoginHistoryService`] 落盘。
@@ -33,7 +33,6 @@ use crate::config::LoginChannel;
 use crate::config::runtime::ProfileSnapshot;
 use crate::config::runtime::RuntimeConfig;
 use crate::environment::EnvironmentManager;
-use crate::monitor::AuthEndpointState;
 use crate::status::{LoginStatus, PartialSnapshot, StatusManager};
 use crate::tasks::TaskManager;
 use crate::utils::metrics::Metrics;
@@ -347,7 +346,7 @@ pub struct LoginOrchestrator {
     submit_gate: AsyncMutex<()>,
     /// 已接纳、尚未成为活跃会话的请求（准备阶段取消登记）
     ///
-    /// 见 [`PendingGuard`]：键为会话 ID，值为（来源, 取消令牌）。会话创建后
+    /// 见 `PendingGuard`：键为会话 ID，值为（来源, 取消令牌）。会话创建后
     /// 复用同一令牌，登记项随 submit 返回自动注销。
     pending_cancels: StdMutex<HashMap<u64, (LoginSource, CancellationToken)>>,
     /// 浏览器渠道可用性探测缓存："channel|path|playwright_ready|system_browser_ready"
@@ -405,12 +404,12 @@ impl LoginOrchestrator {
 
     /// 提交一次登录，返回控制句柄
     ///
-    /// 流程：配置校验 → auth_url 预检（仅 manual/login_once）→ 去重/抢占判断 →
+    /// 流程：配置校验 → 去重/抢占判断 →
     /// 创建会话并 `spawn` 状态机 → 返回 [`LoginHandle`]。本方法不返回 `Result`：
     /// 校验失败等会以“立即终态失败”的句柄体现。
     ///
     /// 取消边界覆盖完整生命周期：接纳请求即创建操作 ID 与取消令牌并登记
-    /// （[`PendingGuard`]），环境初始化、auth_url 预检、抢占等待与随后的
+    /// （`PendingGuard`），环境初始化、auth_url 预检、抢占等待与随后的
     /// 会话执行/重试共享同一令牌——准备阶段点取消即可中断整个流程，而非
     /// 仅取消「已创建活跃会话」之后的部分。
     pub async fn submit(
@@ -557,17 +556,7 @@ impl LoginOrchestrator {
             }
         };
 
-        // 2. auth_url TCP 预检（仅 manual / login_once；重定向登录跳过；
-        // 进程内渠道的可达性由各自的执行结果报告，且 auth_url 允许为空，跳过）
-        if !in_process {
-            if let Some(handle) = self
-                .precheck_auth_url(source, profile, &rt, &cancel_token)
-                .await
-            {
-                return handle;
-            }
-        }
-
+        // 手动与单次登录直接执行登录流程，不能用网卡或认证地址预检拦截。
         // 3. 从抢占决策开始串行化所有 submit，直到新会话真正占据 active_session。
         // 不能只依赖 state 锁：抢占会 take 旧会话后释放 state 锁并 await 最长
         // PREEMPT_WAIT_BUDGET（按各段超时常量推导，见其文档），
@@ -1095,62 +1084,6 @@ impl LoginOrchestrator {
         Ok(browser_override)
     }
 
-    /// auth_url TCP 预检（仅 manual / login_once；重定向登录跳过：触发器是
-    /// 公网 http，劫持下 TCP 必失败，交给 Worker 导航跟随 302）。
-    ///
-    /// 地址解析统一走 MonitorService 的单点实现（parse_url_host_port，
-    /// 支持 IPv6 方括号与裸地址），登录侧不再维护私有副本。
-    /// `Some(handle)` = 预检失败/取消携带的终态句柄；`None` = 通过或跳过。
-    async fn precheck_auth_url(
-        &self,
-        source: LoginSource,
-        profile: &ProfileSnapshot,
-        rt: &RuntimeConfig,
-        cancel_token: &CancellationToken,
-    ) -> Option<LoginHandle> {
-        if !(matches!(source, LoginSource::Manual | LoginSource::LoginOnce)
-            && !profile.uses_redirect_login())
-        {
-            return None;
-        }
-        // 默认关闭：裸 TCP 直连在部分校园网会被限制，误判不可达会拦掉本可成功的登录。
-        // 注意本开关**只**管登录前预检；监测侧「外网失败 + 认证地址可达 → 判为门户劫持」
-        // 的二次纠正（check_once 步骤 5）不受影响，否则会退化成 Offline 而永不触发自动登录。
-        if !rt.monitor.check_auth_url {
-            return None;
-        }
-        let timeout = Duration::from_secs(rt.monitor.auth_url_timeout as u64);
-        let endpoint_state = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                return Some(self.cancelled_handle(source, profile.id.clone()).await);
-            }
-            r = self.monitor.inspect_auth_endpoint(&profile.auth_url, timeout) => r,
-        };
-        let message = match endpoint_state {
-            AuthEndpointState::Invalid => {
-                format!(
-                    "认证地址格式无效: {}（请检查 Profile 配置）",
-                    profile.auth_url
-                )
-            }
-            AuthEndpointState::Unreachable => format!(
-                "认证地址不可达: {}（请检查地址或校园网连接）",
-                profile.auth_url
-            ),
-            AuthEndpointState::Missing => "未配置认证地址（请检查 Profile 配置）".to_string(),
-            // Reachable（预检通过放行登录）与 NotChecked/SkippedRedirectMode
-            // （预检不适用）同样直接放行，不产生预检失败提示
-            AuthEndpointState::Reachable
-            | AuthEndpointState::NotChecked
-            | AuthEndpointState::SkippedRedirectMode => return None,
-        };
-        warn!(state = ?endpoint_state, "认证地址预检未通过: {message}");
-        Some(
-            self.immediate_handle(source, false, message, profile.id.clone())
-                .await,
-        )
-    }
-
     /// 计数并 spawn 会话状态机 task（仅占据活跃槽位时调用）。
     ///
     /// 双层 spawn 保证 run() panic 时**无条件**补写失败终态 + 清槽位 + 触发收尾
@@ -1330,10 +1263,10 @@ impl LoginOrchestrator {
     /// 可能漏取消 auto 会话）。
     pub async fn cancel_auto_pending(&self, reason: &str) {
         let guard = self.state.lock().await;
-        if let Some(active) = &guard.active_session {
-            if active.source == LoginSource::Auto {
-                active.propagate_cancel(&self.bridge, reason);
-            }
+        if let Some(active) = &guard.active_session
+            && active.source == LoginSource::Auto
+        {
+            active.propagate_cancel(&self.bridge, reason);
         }
         // Engine 崩溃清理同样覆盖准备阶段的 Auto 请求（环境初始化可达分钟级）
         for (source, token) in self
@@ -1456,10 +1389,10 @@ impl LoginOrchestrator {
                 .channel_probe_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some((at, available)) = cache.get(&key) {
-                if at.elapsed() < CHANNEL_PROBE_TTL {
-                    return *available;
-                }
+            if let Some((at, available)) = cache.get(&key)
+                && at.elapsed() < CHANNEL_PROBE_TTL
+            {
+                return *available;
             }
         }
         let available = browser::is_channel_available(&*self.environment, channel, custom_path);
@@ -1493,10 +1426,11 @@ impl LoginOrchestrator {
                 .first_available_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some((cached_key, at, cached)) = guard.as_ref() {
-                if *cached_key == key && at.elapsed() < CHANNEL_PROBE_TTL {
-                    return *cached;
-                }
+            if let Some((cached_key, at, cached)) = guard.as_ref()
+                && *cached_key == key
+                && at.elapsed() < CHANNEL_PROBE_TTL
+            {
+                return *cached;
             }
         }
         let probed = browser::first_available_channel(&*self.environment);

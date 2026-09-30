@@ -239,10 +239,10 @@ impl ConfigService {
 
         std::fs::create_dir_all(&config_dir)?;
         std::fs::create_dir_all(&profiles_dir)?;
-        if let Some(p) = key_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(p) {
-                tracing::debug!(path = %p.display(), error = %e, "创建密钥目录失败");
-            }
+        if let Some(p) = key_path.parent()
+            && let Err(e) = std::fs::create_dir_all(p)
+        {
+            tracing::debug!(path = %p.display(), error = %e, "创建密钥目录失败");
         }
 
         // 清理上次崩溃残留的临时文件：原子写入（utils::io::atomic_write_bytes）
@@ -253,14 +253,14 @@ impl ConfigService {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with(crate::config::TMP_PREFIX) {
-                        if let Err(e) = std::fs::remove_file(entry.path()) {
-                            tracing::debug!(
-                                path = %entry.path().display(),
-                                error = %e,
-                                "清理崩溃残留的临时配置文件失败"
-                            );
-                        }
+                    if name.starts_with(crate::config::TMP_PREFIX)
+                        && let Err(e) = std::fs::remove_file(entry.path())
+                    {
+                        tracing::debug!(
+                            path = %entry.path().display(),
+                            error = %e,
+                            "清理崩溃残留的临时配置文件失败"
+                        );
                     }
                 }
             }
@@ -393,10 +393,10 @@ impl ConfigService {
             .and_then(|m| m.modified().ok());
         {
             let cache = self.settings_cache.lock().unwrap_or_else(recover_lock);
-            if let (Some(data), Some(mt)) = (&cache.data, &cache.mtime) {
-                if Some(*mt) == mtime {
-                    return data.clone();
-                }
+            if let (Some(data), Some(mt)) = (&cache.data, &cache.mtime)
+                && Some(*mt) == mtime
+            {
+                return data.clone();
             }
         }
         match Self::read_settings_from_disk(&self.settings_path) {
@@ -661,10 +661,10 @@ impl ConfigService {
             .and_then(|m| m.modified().ok());
         {
             let cache = self.profile_cache.lock().unwrap_or_else(recover_lock);
-            if let Some(pc) = cache.get(id) {
-                if Some(pc.mtime) == mtime {
-                    return Ok(pc.data.clone());
-                }
+            if let Some(pc) = cache.get(id)
+                && Some(pc.mtime) == mtime
+            {
+                return Ok(pc.data.clone());
             }
         }
         let p = Self::read_profile_file(&path)?;

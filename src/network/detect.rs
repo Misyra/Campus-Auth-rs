@@ -13,20 +13,29 @@ pub enum NetworkError {
     /// 子进程执行失败
     #[error("子进程执行失败: {command}")]
     SubprocessFailed {
+        /// 执行的系统命令。
         command: String,
         #[source]
+        /// 底层错误原因。
         source: std::io::Error,
     },
 
     /// 子进程超时
     #[error("子进程超时: {command} ({timeout_secs}s)")]
-    SubprocessTimeout { command: String, timeout_secs: u64 },
+    SubprocessTimeout {
+        /// 执行的系统命令。
+        command: String,
+        /// 超时时间（秒）。
+        timeout_secs: u64,
+    },
 
     /// 解析系统命令输出失败
     #[error("解析系统命令输出失败: {command}")]
     ParseFailed {
+        /// 执行的系统命令。
         command: String,
         #[source]
+        /// 底层错误原因。
         source: anyhow::Error,
     },
 
@@ -208,10 +217,11 @@ fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
             || trimmed.to_ascii_lowercase().contains("adapter"))
             && trimmed.ends_with(':');
         if is_header {
-            if in_block && !current.is_empty() {
-                if let Some(info) = parse_adapter_block(&current_header, &current) {
-                    result.push(info);
-                }
+            if in_block
+                && !current.is_empty()
+                && let Some(info) = parse_adapter_block(&current_header, &current)
+            {
+                result.push(info);
             }
             current.clear();
             current_header = trimmed.to_string();
@@ -222,10 +232,11 @@ fn parse_ipconfig(text: &str) -> Vec<InterfaceInfo> {
             current.push('\n');
         }
     }
-    if in_block && !current.is_empty() {
-        if let Some(info) = parse_adapter_block(&current_header, &current) {
-            result.push(info);
-        }
+    if in_block
+        && !current.is_empty()
+        && let Some(info) = parse_adapter_block(&current_header, &current)
+    {
+        result.push(info);
     }
     result
 }
@@ -283,10 +294,10 @@ fn parse_adapter_block(header: &str, block: &str) -> Option<InterfaceInfo> {
         // 网关续行：仅当窗口开启、行内无冒号（无标签）、值恰为 IPv4 时命中。
         // 已有 IPv4 网关（标签行直接给出）时不再覆盖。
         if gateway_continuation && !trimmed.contains(':') && !trimmed.is_empty() {
-            if gateway.is_none() {
-                if let Ok(ip) = trimmed.parse::<Ipv4Addr>() {
-                    gateway = Some(ip);
-                }
+            if gateway.is_none()
+                && let Ok(ip) = trimmed.parse::<Ipv4Addr>()
+            {
+                gateway = Some(ip);
             }
             gateway_continuation = false;
             continue;
@@ -384,8 +395,9 @@ fn parse_netsh_ssid(text: &str) -> Option<String> {
 /// 合法 hex、可解码为 UTF-8、且解码结果含非 ASCII 可打印字符时才还原，避免把
 /// 名字恰好是 hex 形态的普通 SSID（如 "12345678"、"41424344"）误转换。
 fn decode_netsh_ssid_hex(ssid: &str) -> String {
-    let looks_hex =
-        ssid.len() >= 8 && ssid.len() % 2 == 0 && ssid.bytes().all(|b| b.is_ascii_hexdigit());
+    let looks_hex = ssid.len() >= 8
+        && ssid.len().is_multiple_of(2)
+        && ssid.bytes().all(|b| b.is_ascii_hexdigit());
     if !looks_hex {
         return ssid.to_string();
     }
@@ -431,12 +443,12 @@ impl NetworkDetect for WindowsDetect {
         for line in out.lines() {
             let cols: Vec<&str> = line.split_whitespace().collect();
             // 0.0.0.0 行：第一列是目标网络，第二列是网关
-            if cols.len() >= 3 && cols[0] == "0.0.0.0" {
-                if let Ok(ip) = cols[2].parse::<Ipv4Addr>() {
-                    if seen.insert(ip) {
-                        gateways.push(ip);
-                    }
-                }
+            if cols.len() >= 3
+                && cols[0] == "0.0.0.0"
+                && let Ok(ip) = cols[2].parse::<Ipv4Addr>()
+                && seen.insert(ip)
+            {
+                gateways.push(ip);
             }
         }
         Ok(gateways)
@@ -481,12 +493,12 @@ impl NetworkDetect for LinuxDetect {
         let mut gateways = Vec::new();
         for line in out.lines() {
             let mut parts = line.split_whitespace();
-            if parts.next() == Some("default") && parts.next() == Some("via") {
-                if let Some(gw) = parts.next() {
-                    if let Ok(ip) = gw.parse::<Ipv4Addr>() {
-                        gateways.push(ip);
-                    }
-                }
+            if parts.next() == Some("default")
+                && parts.next() == Some("via")
+                && let Some(gw) = parts.next()
+                && let Ok(ip) = gw.parse::<Ipv4Addr>()
+            {
+                gateways.push(ip);
             }
         }
         Ok(gateways)
@@ -560,11 +572,11 @@ impl NetworkDetect for MacosDetect {
         while let Some(line) = lines.next() {
             if line.contains("Hardware Port:") && line.to_ascii_lowercase().contains("wi-fi") {
                 // 下一行是 Device: enX
-                if let Some(dev_line) = lines.next() {
-                    if let Some(rest) = dev_line.strip_prefix("Device:") {
-                        wifi_device = Some(rest.trim().to_string());
-                        break;
-                    }
+                if let Some(dev_line) = lines.next()
+                    && let Some(rest) = dev_line.strip_prefix("Device:")
+                {
+                    wifi_device = Some(rest.trim().to_string());
+                    break;
                 }
             }
         }
@@ -633,20 +645,20 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
                 .unwrap_or("")
                 .trim();
             // 保存上一个接口
-            if in_block {
-                if let Some(ipv4) = current_ipv4 {
-                    if !is_linux_virtual(&current_name) && current_is_up {
-                        let is_wifi = current_name.starts_with("wl");
-                        result.push(InterfaceInfo {
-                            name: current_name.clone(),
-                            ipv4,
-                            gateway: None,
-                            is_wifi,
-                            ssid: None,
-                            mac: current_mac.clone(),
-                        });
-                    }
-                }
+            if in_block
+                && let Some(ipv4) = current_ipv4
+                && !is_linux_virtual(&current_name)
+                && current_is_up
+            {
+                let is_wifi = current_name.starts_with("wl");
+                result.push(InterfaceInfo {
+                    name: current_name.clone(),
+                    ipv4,
+                    gateway: None,
+                    is_wifi,
+                    ssid: None,
+                    mac: current_mac.clone(),
+                });
             }
             current_name = name.to_string();
             current_ipv4 = None;
@@ -678,20 +690,20 @@ fn parse_ip_addr(text: &str) -> Vec<InterfaceInfo> {
         }
     }
     // 最后一个接口
-    if in_block {
-        if let Some(ipv4) = current_ipv4 {
-            if !is_linux_virtual(&current_name) && current_is_up {
-                let is_wifi = current_name.starts_with("wl");
-                result.push(InterfaceInfo {
-                    name: current_name,
-                    ipv4,
-                    gateway: None,
-                    is_wifi,
-                    ssid: None,
-                    mac: current_mac,
-                });
-            }
-        }
+    if in_block
+        && let Some(ipv4) = current_ipv4
+        && !is_linux_virtual(&current_name)
+        && current_is_up
+    {
+        let is_wifi = current_name.starts_with("wl");
+        result.push(InterfaceInfo {
+            name: current_name,
+            ipv4,
+            gateway: None,
+            is_wifi,
+            ssid: None,
+            mac: current_mac,
+        });
     }
     result
 }
@@ -715,20 +727,20 @@ fn parse_ifconfig(text: &str) -> Vec<InterfaceInfo> {
         // 接口标题行: "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500"
         if !line.starts_with(' ') && !line.is_empty() && line.contains("flags=") {
             // 保存上一个接口
-            if in_block {
-                if let Some(ipv4) = current_ipv4 {
-                    if !is_macos_virtual(&current_name) && current_is_up {
-                        let is_wifi = current_name == "en0" || current_name == "en1";
-                        result.push(InterfaceInfo {
-                            name: current_name.clone(),
-                            ipv4,
-                            gateway: None,
-                            is_wifi,
-                            ssid: None,
-                            mac: current_mac.clone(),
-                        });
-                    }
-                }
+            if in_block
+                && let Some(ipv4) = current_ipv4
+                && !is_macos_virtual(&current_name)
+                && current_is_up
+            {
+                let is_wifi = current_name == "en0" || current_name == "en1";
+                result.push(InterfaceInfo {
+                    name: current_name.clone(),
+                    ipv4,
+                    gateway: None,
+                    is_wifi,
+                    ssid: None,
+                    mac: current_mac.clone(),
+                });
             }
             current_name = line.split(':').next().unwrap_or("").trim().to_string();
             current_ipv4 = None;
@@ -757,20 +769,20 @@ fn parse_ifconfig(text: &str) -> Vec<InterfaceInfo> {
         }
     }
     // 最后一个接口
-    if in_block {
-        if let Some(ipv4) = current_ipv4 {
-            if !is_macos_virtual(&current_name) && current_is_up {
-                let is_wifi = current_name == "en0" || current_name == "en1";
-                result.push(InterfaceInfo {
-                    name: current_name,
-                    ipv4,
-                    gateway: None,
-                    is_wifi,
-                    ssid: None,
-                    mac: current_mac,
-                });
-            }
-        }
+    if in_block
+        && let Some(ipv4) = current_ipv4
+        && !is_macos_virtual(&current_name)
+        && current_is_up
+    {
+        let is_wifi = current_name == "en0" || current_name == "en1";
+        result.push(InterfaceInfo {
+            name: current_name,
+            ipv4,
+            gateway: None,
+            is_wifi,
+            ssid: None,
+            mac: current_mac,
+        });
     }
     result
 }

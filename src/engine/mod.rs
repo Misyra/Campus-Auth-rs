@@ -22,7 +22,7 @@ use crate::status::StatusManager;
 /// mpsc channel 容量
 pub const CMD_CHANNEL_CAPACITY: usize = 64;
 /// 网络检查默认间隔（秒）
-pub const DEFAULT_CHECK_INTERVAL_SECS: u64 = 120;
+pub const DEFAULT_CHECK_INTERVAL_SECS: u64 = 300;
 /// Profile 切换检测默认间隔（秒）
 pub const DEFAULT_PROFILE_CHECK_INTERVAL_SECS: u64 = 180;
 /// 无事件时最大休眠时间（秒）

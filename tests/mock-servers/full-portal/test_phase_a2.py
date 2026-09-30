@@ -35,7 +35,6 @@ patch = {
         "ping_targets": ["127.0.0.1:18765", "127.0.0.1:9"],
         "url_check_urls": ["http://127.0.0.1:18765/status|authenticated"],
         "network_check_timeout": 5,
-        "enable_local_check": False,
     }
 }
 r = api("/api/config", "PATCH", patch)

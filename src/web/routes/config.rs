@@ -317,10 +317,8 @@ async fn apply_flat_settings_patch(
             let mut current_value =
                 serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
             // 合并 global 字段
-            if !global_empty {
-                if let Some(global) = current_value.get_mut("global") {
-                    json_merge(global, &global_patch);
-                }
+            if !global_empty && let Some(global) = current_value.get_mut("global") {
+                json_merge(global, &global_patch);
             }
             // 合并其他字段（如 active_profile_id 等）
             if !other_empty {
@@ -600,10 +598,8 @@ fn monitor_backend_to_frontend(m: &crate::config::MonitorSettings) -> Value {
         "enable_http_check": m.http_enabled,
         "test_urls": m.http_targets,
         "enable_url_check": m.url_enabled,
-        "check_auth_url": m.check_auth_url,
         "auth_url_targets": [],
         "url_check_urls": url_check_urls,
-        "enable_local_check": m.local_check_enabled,
         "strict_login_mode": m.strict_login_mode,
         "disable_proxy": m.disable_proxy,
         "script_timeout": 60,
@@ -677,9 +673,6 @@ impl MonitorPatch {
         if let Some(value) = self.enable_http_check {
             backend.insert("http_enabled".into(), Value::from(value));
         }
-        if let Some(value) = self.enable_local_check {
-            backend.insert("local_check_enabled".into(), Value::from(value));
-        }
         if let Some(value) = self.strict_login_mode {
             backend.insert("strict_login_mode".into(), Value::from(value));
         }
@@ -692,10 +685,9 @@ impl MonitorPatch {
         if let Some(value) = self.post_login_delay {
             backend.insert("post_login_delay".into(), Value::from(value));
         }
-        if let Some(value) = self.check_auth_url {
-            backend.insert("check_auth_url".into(), Value::from(value));
-        }
 
+        // 旧客户端的手动检查开关仅兼容接收，不能重新启用已删除的检查。
+        let _ = (self.enable_local_check, self.check_auth_url);
         // 显式消费保真字段，表明它们经过类型校验但不进入后端配置。
         let _ = (self.auth_url_targets, self.script_timeout);
         Value::Object(backend)
@@ -775,7 +767,6 @@ mod tests {
             tcp_enabled: true,
             http_enabled: false,
             url_enabled: true,
-            local_check_enabled: false,
             strict_login_mode: true,
             disable_proxy: true,
             profile_check_interval: 300,
@@ -783,7 +774,6 @@ mod tests {
             http_timeout: 5,
             url_timeout: 5,
             auth_url_timeout: 5,
-            check_auth_url: false,
             post_login_delay: 5,
         }
     }
@@ -852,19 +842,19 @@ mod tests {
     }
 
     #[test]
-    fn monitor_roundtrip_preserves_check_auth_url() {
-        // 开关须真实往返：GET 给出后端值，PATCH 能写回（不再是被忽略的保真字段）
-        let mut original = sample_monitor();
-        assert!(!original.check_auth_url, "默认应关闭");
-        assert_eq!(
-            monitor_backend_to_frontend(&original)["check_auth_url"],
-            serde_json::json!(false)
-        );
-        original.check_auth_url = true;
-        let front = monitor_backend_to_frontend(&original);
-        assert_eq!(front["check_auth_url"], serde_json::json!(true));
-        let back = monitor_frontend_to_backend(&front).unwrap();
-        assert_eq!(back["check_auth_url"], serde_json::json!(true));
+    fn monitor_legacy_manual_checks_are_ignored() {
+        let front = monitor_backend_to_frontend(&sample_monitor());
+        assert!(front.get("enable_local_check").is_none());
+        assert!(front.get("check_auth_url").is_none());
+        let back = monitor_frontend_to_backend(&serde_json::json!({
+            "enable_local_check": true,
+            "check_auth_url": true,
+            "strict_login_mode": false,
+        }))
+        .unwrap();
+        assert!(back.get("local_check_enabled").is_none());
+        assert!(back.get("check_auth_url").is_none());
+        assert_eq!(back["strict_login_mode"], false);
     }
 
     #[test]

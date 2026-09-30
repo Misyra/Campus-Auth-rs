@@ -145,7 +145,7 @@ impl Default for BrowserSettings {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct MonitorSettings {
-    /// 探测间隔（秒，默认 120；Engine 消费时钳制到 20~1200）
+    /// 探测间隔（秒，默认 300；Engine 消费时钳制到 20~1200）
     pub check_interval: u32,
     /// TCP 探测目标列表（host:port）
     pub tcp_targets: Vec<String>,
@@ -161,8 +161,6 @@ pub struct MonitorSettings {
     pub http_enabled: bool,
     /// 是否启用 URL 标题探测
     pub url_enabled: bool,
-    /// 是否启用物理网卡连接检查（步骤 2：list_interfaces 判定是否存在在线网卡）
-    pub local_check_enabled: bool,
     /// 网络检测是否禁用代理（默认 true：检测直连，避免代理故障误判离线；
     /// 关闭后 HTTP/URL 探测跟随系统代理）
     pub disable_proxy: bool,
@@ -176,12 +174,6 @@ pub struct MonitorSettings {
     pub url_timeout: u32,
     /// 认证页探测超时（秒）
     pub auth_url_timeout: u32,
-    /// 登录前是否先用 TCP 直连确认认证地址可达（不可达则直接判失败，不启动浏览器）
-    ///
-    /// 仅作用于**手动登录 / 单次登录**：自动登录由监测侧的 Captive 判定驱动，不走此预检。
-    /// 默认关闭——部分校园网对裸 TCP 直连有限制，开启后一旦误判不可达会拦掉本可成功的
-    /// 登录；且手动登录失败与否浏览器都会给出明确错误，预检的止损价值有限。
-    pub check_auth_url: bool,
     /// 严格登录模式：仅在拿到明确门户结论时才尝试自动登录（默认开启）
     ///
     /// 开启（默认）＝严格口径：要求探测给出明确门户证据（Captive 命中，或外网全失败且
@@ -193,7 +185,7 @@ pub struct MonitorSettings {
     /// 预检可能失败；严格口径下这些情况都落 WaitForNetwork，自动登录永不触发。
     ///
     /// 关闭严格模式后以「本地链路可用」为触发下限：多启用一次网卡枚举
-    /// （`list_interfaces`，与手动诊断同一路径），凡未确认在线即升级为门户并建议登录。
+    /// （`list_interfaces`），凡未确认在线即升级为门户并建议登录。
     /// 认证地址 TCP 预检仍不参与（预检失败一律不构成拦截理由）。
     ///
     /// 代价：认证地址填错或门户确实无需登录时，会真去拉起浏览器，靠连续失败冷却
@@ -219,7 +211,7 @@ impl Default for MonitorSettings {
             "Microsoft Connect Test".to_string(),
         );
         Self {
-            check_interval: 120,
+            check_interval: 300,
             tcp_targets: vec![
                 "8.8.8.8:53".to_string(),
                 "114.114.114.114:53".to_string(),
@@ -244,14 +236,12 @@ impl Default for MonitorSettings {
             // 是误判率最低的单探测方案；URL 内容探测、TCP 探测与网卡检查默认关闭，按需启用
             http_enabled: true,
             url_enabled: false,
-            local_check_enabled: false,
             disable_proxy: true,
             profile_check_interval: 180,
             tcp_timeout: 2,
             http_timeout: 10,
             url_timeout: 10,
             auth_url_timeout: 5,
-            check_auth_url: false,
             // 默认开启严格模式：只有明确门户证据才自动登录，行为与历史版本一致；
             // 关闭后退化为「网卡连着就试」，属行为变化，须用户显式选择
             strict_login_mode: true,
@@ -516,7 +506,7 @@ impl LoginChannel {
 /// 单个 Profile 文件内容（`config/profiles/{id}.json`）
 ///
 /// 凭证类字段（如 [`ProfileData::password`]）在磁盘上以 `ENC:` 前缀的密文存储，
-/// 内存 [`RuntimeConfig`] 中解密为明文。
+/// 内存 `RuntimeConfig` 中解密为明文。
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct ProfileData {
@@ -599,12 +589,25 @@ mod tests {
         assert!(!monitor.tcp_enabled, "TCP 仅作为可选补充证据");
         assert!(monitor.http_enabled, "HTTP 204 是默认主探测");
         assert!(!monitor.url_enabled, "URL 内容探测默认关闭");
-        assert!(!monitor.local_check_enabled, "本地链路诊断默认关闭");
-        assert!(!monitor.check_auth_url, "手动登录前认证入口预检默认关闭");
         assert!(
             monitor.strict_login_mode,
             "严格登录模式默认开启（关闭即退化为宽松触发，属行为变化）"
         );
+    }
+
+    /// 旧配置的手动检查开关不再生效，也不会再次写入配置文件。
+    #[test]
+    fn legacy_manual_checks_are_discarded() {
+        let monitor: MonitorSettings = serde_json::from_value(serde_json::json!({
+            "local_check_enabled": true,
+            "check_auth_url": true,
+            "strict_login_mode": false,
+        }))
+        .unwrap();
+        let stored = serde_json::to_value(&monitor).unwrap();
+        assert!(stored.get("local_check_enabled").is_none());
+        assert!(stored.get("check_auth_url").is_none());
+        assert!(!monitor.strict_login_mode);
     }
 
     /// 登录渠道枚举的 serde 字面量与判定方法。

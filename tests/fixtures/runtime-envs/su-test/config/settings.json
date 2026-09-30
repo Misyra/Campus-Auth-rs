@@ -51,7 +51,6 @@
       "tcp_enabled": false,
       "http_enabled": true,
       "url_enabled": true,
-      "local_check_enabled": true,
       "profile_check_interval": 180,
       "tcp_timeout": 2,
       "http_timeout": 10,

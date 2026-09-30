@@ -40,7 +40,6 @@
       "tcp_enabled": false,
       "http_enabled": false,
       "url_enabled": false,
-      "local_check_enabled": true,
       "profile_check_interval": 180,
       "tcp_timeout": 5,
       "http_timeout": 10,

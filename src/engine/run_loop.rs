@@ -31,7 +31,7 @@ const COOLING_DOWN_THRESHOLD: u32 = 3;
 /// 冷却期持续时间（秒）
 const COOLING_DOWN_DURATION_SECS: u64 = 300;
 /// 自适应探测的异常态周期（秒）：CaptivePortal/Offline 状态下的探测间隔。
-/// 断网感知延迟从最差一个 check_interval（默认 120s）降到此值
+/// 断网感知延迟从最差一个 check_interval（默认 300s）降到此值
 const PROBE_ONLINE_BACKOFF_BASE_SECS: u64 = 30;
 
 /// 后台探测任务的回传消息
@@ -1409,7 +1409,7 @@ mod tests {
     /// 构造完整 EngineDeps 并启动 run_loop（真实服务 + 挂起检测器）
     ///
     /// 监测配置：HTTP 目标指向只接受连接但不响应的本地服务，使自动探测挂在
-    /// HTTP 超时；物理网卡检查同时开启，使手动诊断也会执行本地链路诊断。
+    /// HTTP 超时；手动诊断仅等待公网探测，不额外执行本地链路诊断。
     /// `pause_all_day` 为 true 时配置全天定时暂停窗口（start == end）。
     #[allow(clippy::type_complexity)]
     async fn make_engine_with_hanging_probe(
@@ -1466,7 +1466,6 @@ mod tests {
         // 都不会越过本用例 4s 的虚拟时钟推进量（§monitor_with_http_target 同范式）
         settings.global.monitor.auth_url_timeout = 1;
         settings.global.monitor.url_enabled = false;
-        settings.global.monitor.local_check_enabled = true;
         // 周期定时器调大：测试期间不产生周期 tick 干扰断言
         settings.global.monitor.check_interval = 3600;
         settings.global.monitor.profile_check_interval = 600;
@@ -1657,6 +1656,14 @@ mod tests {
         tokio::time::advance(Duration::from_secs(4)).await;
         let result = reply_rx.await.unwrap().unwrap();
         assert_eq!(result.status, NetworkStatus::Offline);
+        assert_eq!(
+            result.local_link,
+            crate::monitor::LocalLinkState::NotChecked
+        );
+        assert_eq!(
+            result.auth_endpoint,
+            crate::monitor::AuthEndpointState::NotChecked
+        );
         assert_eq!(metrics.probe_total.load(Ordering::Relaxed), 1);
 
         // 正常场景：先 Start（探测 1 在途），再下发 TestNetwork（探测 2 独立执行），
@@ -1678,6 +1685,8 @@ mod tests {
         tokio::time::advance(Duration::from_secs(4)).await;
         let result = reply_rx.await.unwrap().unwrap();
         assert_eq!(result.status, NetworkStatus::Offline);
+        // 手动诊断不再等待网卡枚举，可能先于自动探测完成；分别等待实际完成信号。
+        wait_for(|| metrics2.probe_total.load(Ordering::Relaxed) == 2).await;
         // Start 的探测 + TestNetwork 的探测各计一次（G23 单点递增）
         assert_eq!(metrics2.probe_total.load(Ordering::Relaxed), 2);
     }
