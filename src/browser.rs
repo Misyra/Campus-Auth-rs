@@ -42,15 +42,14 @@ pub fn is_chrome_installed() -> bool {
     if std::path::Path::new("/Applications/Google Chrome.app").exists() {
         return true;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        if std::path::Path::new(&format!(
+    if let Some(home) = std::env::var_os("HOME")
+        && std::path::Path::new(&format!(
             "{}/Applications/Google Chrome.app",
             home.to_string_lossy()
         ))
         .exists()
-        {
-            return true;
-        }
+    {
+        return true;
     }
     false
 }
@@ -100,15 +99,14 @@ pub fn is_edge_installed() -> bool {
     if std::path::Path::new("/Applications/Microsoft Edge.app").exists() {
         return true;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        if std::path::Path::new(&format!(
+    if let Some(home) = std::env::var_os("HOME")
+        && std::path::Path::new(&format!(
             "{}/Applications/Microsoft Edge.app",
             home.to_string_lossy()
         ))
         .exists()
-        {
-            return true;
-        }
+    {
+        return true;
     }
     false
 }
