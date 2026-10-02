@@ -1,6 +1,12 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.1.0”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.1.1”。
+
+## v5.1.1（2026-10-02 发布）
+
+- 将 5.1.0 之后已提交的登录流程、任务库、界面、默认检测配置、资源占用及更新 / 卸载修复汇总为补丁版本 5.1.1，新增面向用户的更新摘要与新 HTTP 任务格式兼容性说明。
+- 同步 Cargo.toml、Cargo.lock、frontend/package.json、frontend/package-lock.json 与 openapi.json 的主程序版本；AGENTS.md、README Docker 固定版本示例及活跃计划口径同步，Python Worker 保持 1.0.0。
+- 按用户要求不安装本地 Rust 工具链，Rust 检查、测试与六平台打包交由 GitHub Actions；发布通过主分支推送及 v5.1.1 标签触发。
 
 ## 开发中（2026-09-30 代码审查问题修复）
 
