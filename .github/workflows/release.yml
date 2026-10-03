@@ -212,7 +212,7 @@ jobs:
 
       # Release 创建存在并发竞态（六个 job 同时打首个包）：
       # 只在已存在时容忍 create 竞态，其他失败不得被吞掉
-      # 发布说明 = 本版更新日志（docs/updatelog.md 对应章节）+ 三端运行前提；
+      # 发布说明 = 固定官网下载提示 + 本版更新日志 + 三端运行前提；
       # 六个 job 算出同一份内容，首个 create 生效（macOS quarantine 指引 W9、Linux GTK 依赖 W8）
       - name: 上传到 GitHub Release
         shell: bash
@@ -224,7 +224,14 @@ jobs:
             echo "docs/updatelog.md 中未找到标签 $GITHUB_REF_NAME 对应的版本章节" >&2
             exit 1
           fi
+          download_note="$(awk '/^<!-- 固定下载提示：开始 -->/{on=1;next} /^<!-- 固定下载提示：结束 -->/{on=0} on{sub(/\r$/,"");print}' docs/updatelog.md)"
+          if [ -z "$download_note" ]; then
+            echo "docs/updatelog.md 中缺少固定官网下载提示" >&2
+            exit 1
+          fi
           {
+            printf '%s\n' "$download_note"
+            echo
             echo "## 更新日志"
             echo
             printf '%s\n' "$section"
