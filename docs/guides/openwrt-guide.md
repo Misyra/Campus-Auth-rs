@@ -44,7 +44,7 @@ SSH 登录路由器后执行 `uname -m` 与 `ubus call system board` 确认设�
 在装有项目指定 Rust 工具链、Node.js、npm、Python、binutils 的 Linux 开发机上构建。安装交叉构建工具并添加所需 Rust 目标：
 
 ```sh
-python3 -m pip install 'cargo-zigbuild==0.20.1' 'ziglang==0.14.1'
+python3 -m pip install 'cargo-zigbuild==0.23.4' 'ziglang==0.14.1'
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf
 npm --prefix frontend ci
 bash openwrt/build.sh aarch64-unknown-linux-musl
