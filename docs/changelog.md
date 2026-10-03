@@ -1,6 +1,12 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.1.1”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.1.2”。
+
+## v5.1.2（2026-10-03 发布准备）
+
+- 汇总 OpenWrt 无桌面构建、procd / UCI 服务、LuCI 插件、IPK / SDK 打包、默认路由识别及固定官网下载提示，形成 5.1.2 补丁版本；用户更新日志明确标注没有 OpenWrt 真机验证，后续按使用反馈跟进。
+- 同步 Cargo.toml / Cargo.lock、前端 package.json / package-lock.json、OpenAPI、两份 OpenWrt 包定义及当前版本文档，更新安装示例；Python Worker 保持 1.0.0。
+- 先推送开发改动，再将发布版本同步主分支运行普通 CI 与 OpenWrt CI；检查通过后推送版本标签，发布产物与 SDK 包由 Release 流程生成并检查。
 
 ## 开发中（2026-10-03 固定官网下载提示）
 

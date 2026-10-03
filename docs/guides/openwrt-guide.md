@@ -12,10 +12,10 @@ OpenWrt 24.10 及更早版本使用 opkg / IPK；25.12 起改用 APK，不能把
 
 ```sh
 cd /tmp
-sha256sum -c campus-auth_5.1.1-1_x86_64.ipk.sha256
-sha256sum -c luci-app-campus-auth_5.1.1-1_all.ipk.sha256
+sha256sum -c campus-auth_5.1.2-1_x86_64.ipk.sha256
+sha256sum -c luci-app-campus-auth_5.1.2-1_all.ipk.sha256
 opkg update
-opkg install ./campus-auth_5.1.1-1_x86_64.ipk ./luci-app-campus-auth_5.1.1-1_all.ipk
+opkg install ./campus-auth_5.1.2-1_x86_64.ipk ./luci-app-campus-auth_5.1.2-1_all.ipk
 ```
 
 安装后刷新或重新登录 LuCI，在“服务 → 认证喵”查看状态，按需点击“开启开机启动”。IPK 首次安装启动服务，但不强制开启开机启动；升级保留已有开机启动开关。SDK 包使用固件标准的服务安装钩子，安装后检查实际开机启动状态。包依赖 `ca-bundle`、`ip-full`、`luci-base` 和 `rpcd-mod-file`，离线设备需一并准备对应固件的依赖包。
@@ -106,7 +106,7 @@ CI 另外配置了固定 24.10.0 / 25.12.0 SDK 的 x86_64 打包检查，分别�
 
 ```sh
 mkdir -p /opt/campus-auth
-tar -xzf /tmp/campus-auth-v5.1.1-openwrt-aarch64-unknown-linux-musl.tar.gz -C /opt/campus-auth
+tar -xzf /tmp/campus-auth-v5.1.2-openwrt-aarch64-unknown-linux-musl.tar.gz -C /opt/campus-auth
 chmod 755 /opt/campus-auth/campus-auth
 cp /opt/campus-auth/openwrt/files/campus-auth.init /etc/init.d/campus-auth
 chmod 755 /etc/init.d/campus-auth
