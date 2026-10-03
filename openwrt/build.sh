@@ -10,7 +10,7 @@ case "$target" in
     *) echo "不支持的目标: $target；MIPS 等设备须使用对应 OpenWrt SDK 单独验证" >&2; exit 1 ;;
 esac
 command -v readelf >/dev/null || { echo "缺少 readelf，请安装 binutils" >&2; exit 1; }
-cargo zigbuild --version >/dev/null
+cargo zigbuild --help >/dev/null
 (
     cd frontend
     VITE_OPENWRT=true npm run build -- --outDir dist-openwrt

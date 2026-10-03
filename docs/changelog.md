@@ -7,6 +7,8 @@
 - 汇总 OpenWrt 无桌面构建、procd / UCI 服务、LuCI 插件、IPK / SDK 打包、默认路由识别及固定官网下载提示，形成 5.1.2 补丁版本；用户更新日志明确标注没有 OpenWrt 真机验证，后续按使用反馈跟进。
 - 同步 Cargo.toml / Cargo.lock、前端 package.json / package-lock.json、OpenAPI、两份 OpenWrt 包定义及当前版本文档，更新安装示例；Python Worker 保持 1.0.0。
 - 先推送开发改动，再将发布版本同步主分支运行普通 CI 与 OpenWrt CI；检查通过后推送版本标签，发布产物与 SDK 包由 Release 流程生成并检查。
+- 修正远程 CI 暴露的 OpenWrt 工具预检参数：`cargo zigbuild` 子命令不支持 `--version`，改用 `--help` 检查命令可用性，避免三个架构在交叉编译前退出。
+- 修正 Windows 直连全链路测试门户的套接字属性：接收连接后显式切回阻塞读取，避免继承非阻塞监听器后在请求尚未到达时提前断开；保留读取超时及真实二进制登录断言。
 
 ## 开发中（2026-10-03 固定官网下载提示）
 

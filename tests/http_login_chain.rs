@@ -63,6 +63,8 @@ impl Drop for DirectPortal {
 }
 
 fn handle_portal_request(mut stream: TcpStream, authenticated: &AtomicBool) {
+    // Windows 接收的套接字继承监听器的非阻塞属性，显式复位才能等待完整请求。
+    stream.set_nonblocking(false).unwrap();
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut request = Vec::new();
     let mut buf = [0_u8; 4096];
