@@ -35,6 +35,8 @@ Rust 重写版为**便携式单二进制 + Python 子进程**：网络监测、�
 系统托盘等控制平面全部在 Rust 侧；浏览器自动化按需拉起 Python Worker（Playwright），空闲自动
 关闭释放内存。Windows 便携版解压即用，另有 Docker 多架构镜像。
 
+OpenWrt 路由器提供 `campus-auth` 服务包与 `luci-app-campus-auth` 管理插件的打包入口，可在“服务 → 认证喵”中管理进程、开机启动和控制台入口；支持 HTTP 与脚本登录，按 procd 服务运行。IPK 构建、APK 的 SDK 打包及部署见 [OpenWrt 指南](docs/guides/openwrt-guide.md)。浏览器登录与 OCR 仅保留在桌面 / Docker 版本，MIPS 等架构暂需设备 SDK 单独验证。
+
 ## 功能特性
 
 **认证核心**

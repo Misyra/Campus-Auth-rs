@@ -17,7 +17,13 @@ pub async fn get_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let settings = config.load_settings_async().await;
+    #[cfg(not(all(target_os = "linux", feature = "openwrt")))]
     let enabled = settings.global.app.autostart_enabled;
+    #[cfg(all(target_os = "linux", feature = "openwrt"))]
+    let enabled = tokio::task::spawn_blocking(crate::utils::platform::openwrt_self_start_enabled)
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
     let runtime_mode = serde_json::to_value(&settings.global.app.startup_action)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
@@ -26,6 +32,7 @@ pub async fn get_autostart(
         match std::env::consts::OS {
             "windows" => "Registry",
             "macos" => "LaunchAgent",
+            "linux" if cfg!(feature = "openwrt") => "procd",
             _ => "desktop file",
         }
     } else {

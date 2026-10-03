@@ -1,0 +1,177 @@
+name: OpenWrt
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      publish-release:
+        type: boolean
+        default: false
+  push:
+    branches: [master]
+    paths: ["Cargo.*", "rust-toolchain.toml", "build.rs", "src/**", "frontend/**", "openwrt/**", "tests/openwrt*", ".github/workflows/openwrt.yml"]
+  pull_request:
+    paths: ["Cargo.*", "rust-toolchain.toml", "build.rs", "src/**", "frontend/**", "openwrt/**", "tests/openwrt*", ".github/workflows/openwrt.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    name: OpenWrt ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            emulator: ""
+          - target: aarch64-unknown-linux-musl
+            emulator: qemu-aarch64
+          - target: armv7-unknown-linux-musleabihf
+            emulator: qemu-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 读取工具链版本
+        id: rust
+        run: |
+          channel=$(sed -n 's/channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: 安装交叉构建与执行工具
+        run: |
+          python -m pip install 'cargo-zigbuild==0.20.1' 'ziglang==0.14.1'
+          sudo apt-get update
+          sudo apt-get install -y binutils qemu-user
+          npm --prefix frontend ci
+      - name: 服务脚本检查
+        run: |
+          bash -n openwrt/build.sh
+          sh -n openwrt/files/campus-auth.init
+          python tests/openwrt_service_test.py
+          python tests/openwrt_package_test.py
+          node tests/openwrt_luci_test.mjs
+      - name: 无桌面 Clippy 与定向测试
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          cargo clippy --locked --all-targets --no-default-features --features openwrt,no-embed -- -D warnings
+          cargo test --locked --lib --no-default-features --features openwrt,no-embed openwrt
+          cargo test --locked --lib --no-default-features --features openwrt,no-embed network::detect::tests
+          cargo test --locked --lib --no-default-features --features openwrt,no-embed updater::check::tests
+          VITE_OPENWRT=true npm --prefix frontend test -- src/utils/platform.test.ts
+      - name: 构建并校验静态包
+        run: bash openwrt/build.sh '${{ matrix.target }}'
+      - name: 原生或 QEMU 执行检查
+        env:
+          EMULATOR: ${{ matrix.emulator }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $EMULATOR "target/$TARGET/release/campus-auth" --version
+      - name: 保存 OpenWrt 包
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: campus-auth-openwrt-${{ matrix.target }}
+          path: |
+            openwrt/dist/campus-auth-*
+            openwrt/dist/campus-auth_*
+            openwrt/dist/luci-app-campus-auth_*
+          if-no-files-found: error
+      - name: 上传已有 GitHub Release
+        if: inputs['publish-release'] == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # LuCI 为架构无关包，只由 x86_64 任务上传，避免矩阵并发覆盖。
+          assets=(openwrt/dist/campus-auth-* openwrt/dist/campus-auth_*)
+          if [ '${{ matrix.target }}' = x86_64-unknown-linux-musl ]; then
+            assets+=(openwrt/dist/luci-app-campus-auth_*)
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+
+  sdk-packages:
+    name: SDK ${{ matrix.version }} x86_64
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "24.10.0"
+            archive: openwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            sha256: 94f55f15599b57e3b341681d6deffa8e6ce38fc829e0ed14ad5c4f4a4d85a4dc
+            format: ipk
+          - version: "25.12.0"
+            archive: openwrt-sdk-25.12.0-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+            sha256: 9f371906ce6d2f95418f69fac06df58bf9df0ffc4abed6206c30f1b547fcfc12
+            format: apk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: 安装 SDK 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison gawk gcc-multilib gettext libncurses-dev libssl-dev python3-setuptools rsync unzip zlib1g-dev file wget zstd
+      - name: 下载已构建主程序与固定 SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_ARCHIVE: ${{ matrix.archive }}
+          SDK_SHA256: ${{ matrix.sha256 }}
+          SDK_VERSION: ${{ matrix.version }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name campus-auth-openwrt-x86_64-unknown-linux-musl --dir prebuilt-download
+          mkdir prebuilt sdk
+          tar -xzf prebuilt-download/campus-auth-v*-openwrt-x86_64-unknown-linux-musl.tar.gz -C prebuilt
+          curl --fail --location --retry 3 "https://downloads.openwrt.org/releases/$SDK_VERSION/targets/x86/64/$SDK_ARCHIVE" --output "$SDK_ARCHIVE"
+          printf '%s  %s\n' "$SDK_SHA256" "$SDK_ARCHIVE" | sha256sum -c -
+          tar --zstd -xf "$SDK_ARCHIVE" --strip-components=1 -C sdk
+          python openwrt/prepare_sdk.py openwrt/dist/sdk-package
+          cp -R openwrt/dist/sdk-package/* sdk/package/
+          cp prebuilt/campus-auth sdk/package/campus-auth/campus-auth
+      - name: 使用 SDK 生成软件包
+        working-directory: sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install luci-base rpcd-mod-file ip-full ca-bundle
+          printf '%s\n' 'CONFIG_ALL=n' 'CONFIG_ALL_KMODS=n' 'CONFIG_ALL_NONSHARED=n' 'CONFIG_PACKAGE_campus-auth=m' 'CONFIG_PACKAGE_luci-app-campus-auth=m' >> .config
+          make defconfig
+          make package/campus-auth/compile V=s
+          make package/luci-app-campus-auth/compile V=s
+      - name: 收集 SDK 软件包
+        env:
+          FORMAT: ${{ matrix.format }}
+        run: |
+          mkdir -p sdk-output
+          find sdk/bin/packages -name "*campus-auth*.$FORMAT" -exec cp {} sdk-output/ \;
+          test "$(find sdk-output -name "*.$FORMAT" | wc -l)" -eq 2
+          cd sdk-output
+          for package in *; do sha256sum "$package" > "$package.sha256"; done
+      - name: 保存 SDK 软件包
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: campus-auth-sdk-${{ matrix.version }}-x86_64
+          path: sdk-output/*
+          if-no-files-found: error
+      - name: 上传已有 GitHub Release 的 APK
+        if: inputs['publish-release'] == true && matrix.format == 'apk'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" sdk-output/* --clobber

@@ -294,7 +294,8 @@ impl From<crate::updater::UpdaterError> for ApiError {
             // 并发更新/登录进行中是调用时序冲突，500 会误导前端走"服务端故障"分支
             crate::updater::UpdaterError::UpdateInProgress
             | crate::updater::UpdaterError::LoginInProgress
-            | crate::updater::UpdaterError::Cancelled => ApiError::Conflict(e.to_string()),
+            | crate::updater::UpdaterError::Cancelled
+            | crate::updater::UpdaterError::ServiceManaged => ApiError::Conflict(e.to_string()),
             crate::updater::UpdaterError::StalePending
             | crate::updater::UpdaterError::PackageNotNewer { .. }
             | crate::updater::UpdaterError::VersionUnrecognized
@@ -308,7 +309,12 @@ impl From<crate::updater::UpdaterError> for ApiError {
 
 impl From<crate::environment::EnvironmentError> for ApiError {
     fn from(e: crate::environment::EnvironmentError) -> Self {
-        ApiError::Internal(e.to_string())
+        match e {
+            crate::environment::EnvironmentError::UnsupportedPlatform => {
+                ApiError::BadRequest(e.to_string())
+            }
+            _ => ApiError::Internal(e.to_string()),
+        }
     }
 }
 

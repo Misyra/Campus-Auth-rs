@@ -483,9 +483,13 @@ impl NetworkDetect for LinuxDetect {
     async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
         let out = run_command("ip", &["addr", "show"]).await?;
         // 解析后兜底过滤：排除虚拟/回环/链路本地/未指定地址
-        Ok(crate::network::interfaces::filter_interfaces(
-            parse_ip_addr(&out),
-        ))
+        let mut interfaces = crate::network::interfaces::filter_interfaces(parse_ip_addr(&out));
+        // 路由器常同时有 LAN 与 WAN，接口枚举顺序不能代表认证出口。
+        match run_command("ip", &["route", "show", "default"]).await {
+            Ok(routes) => prioritize_linux_default_route(&mut interfaces, &routes),
+            Err(error) => tracing::debug!(%error, "无法关联默认路由，保留接口枚举顺序"),
+        }
+        Ok(interfaces)
     }
 
     async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
@@ -614,6 +618,50 @@ impl NetworkDetect for MacosDetect {
 fn parse_inet_ipv4(ip_part: &str) -> Option<Ipv4Addr> {
     let ip = ip_part.parse::<Ipv4Addr>().ok()?;
     (ip != Ipv4Addr::LOCALHOST).then_some(ip)
+}
+
+/// 将默认路由出口排在首位，并填充对应网关；兼容 PPP 无 via 的默认路由。
+fn prioritize_linux_default_route(interfaces: &mut [InterfaceInfo], text: &str) {
+    let mut routes = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        if parts.first() != Some(&"default") {
+            continue;
+        }
+        let value = |key| {
+            parts
+                .windows(2)
+                .find(|pair| pair[0] == key)
+                .map(|pair| pair[1])
+        };
+        if let Some(device) = value("dev") {
+            let gateway = value("via").and_then(|value| value.parse::<Ipv4Addr>().ok());
+            let metric = value("metric")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0);
+            routes.push((device, gateway, metric));
+        }
+    }
+    routes.sort_by_key(|route| route.2);
+    // 只标记最优默认出口；备选路由的 via 不能使选卡逻辑跳过无 via 的 PPP 出口。
+    if let Some(primary) = routes
+        .iter()
+        .find(|route| interfaces.iter().any(|interface| route.0 == interface.name))
+    {
+        for interface in interfaces.iter_mut() {
+            interface.gateway = if primary.0 == interface.name {
+                primary.1
+            } else {
+                None
+            };
+        }
+    }
+    interfaces.sort_by_key(|interface| {
+        routes
+            .iter()
+            .position(|route| route.0 == interface.name)
+            .unwrap_or(usize::MAX)
+    });
 }
 
 /// 解析 `ip addr show` 输出（Linux），提取各网络接口信息

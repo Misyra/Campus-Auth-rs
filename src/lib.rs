@@ -22,6 +22,7 @@ pub mod network;
 pub mod scheduler;
 pub mod status;
 pub mod tasks;
+#[cfg(feature = "desktop")]
 pub mod tray;
 pub mod uninstall;
 pub mod updater;

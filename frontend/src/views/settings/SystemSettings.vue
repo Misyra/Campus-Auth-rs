@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 设置 · 系统与更新页：启动与运行、日志、界面行为、端口代理、自动更新及数据维护操作 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
+import { IS_OPENWRT } from "@/utils/platform";
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
@@ -71,7 +72,7 @@ const startupActionHint = computed(() => {
 
 const autostartModeOptions: SelectOption[] = [
   { value: "full", label: "完整模式" },
-  { value: "lightweight", label: "轻量模式" },
+  ...(!IS_OPENWRT ? [{ value: "lightweight", label: "轻量模式" }] : []),
 ];
 const runtimeModeHint = computed(() =>
   config.config.app_settings.runtime_mode === "lightweight"
@@ -411,7 +412,7 @@ onMounted(() => {
         <h2>控制台与通知</h2>
       </div>
       <div class="card-body">
-        <SettingsRow description="修改后重启生效，默认 50721">
+        <SettingsRow v-if="!IS_OPENWRT" description="修改后重启生效，默认 50721">
           <template #label>
             <label for="settings-app-port">控制台端口</label>
             <FieldHelp text="Web 控制台的监听端口。修改后重启生效，默认 50721。" />
@@ -427,7 +428,7 @@ onMounted(() => {
             max="65535"
           />
         </SettingsRow>
-        <SettingsRow description="启用后，程序启动时自动打开 Web 控制台">
+        <SettingsRow v-if="!IS_OPENWRT" description="启用后，程序启动时自动打开 Web 控制台">
           <template #label>
             启动时打开控制台
             <FieldHelp text="启用后，程序启动时自动打开 Web 控制台。" />
@@ -449,7 +450,7 @@ onMounted(() => {
             <span class="sr-only">任务通知</span>
           </label>
         </SettingsRow>
-        <SettingsRow description="关闭后无托盘图标，仅可通过 Web 控制台操作">
+        <SettingsRow v-if="!IS_OPENWRT" description="关闭后无托盘图标，仅可通过 Web 控制台操作">
           <template #label>
             显示系统托盘图标
             <FieldHelp text="关闭后无托盘图标，仅可通过 Web 控制台操作。修改后重启生效。" />
@@ -624,7 +625,7 @@ onMounted(() => {
             </button>
           </div>
         </SettingsRow>
-        <SettingsRow description="从本地挑一个已下载好的发布包直接安装，不联网下载">
+        <SettingsRow v-if="!IS_OPENWRT" description="从本地挑一个已下载好的发布包直接安装，不联网下载">
           <template #label>
             <label>手动选择安装包</label>
             <FieldHelp text="从本地挑一个已下载好的发布包直接安装，不联网下载。适用于下载慢、或用自编译/镜像包的情况；版本须高于当前版本。" />
@@ -671,6 +672,7 @@ onMounted(() => {
             <span v-if="lastCheckLabel" class="hint">{{ lastCheckLabel }}</span>
           </div>
           <!-- 检查结果：与关于页原逻辑一致，检查后原地展示更新/下载入口 -->
+          <p v-if="IS_OPENWRT" class="hint">OpenWrt 版请通过 SSH 停止 campus-auth 服务，替换程序后再启动；开机启动和进程重启由 procd 管理。</p>
           <div v-if="updateInfo && !updateInfo.error && !updateInfo.message" class="update-result">
             <div v-if="updateInfo.has_update" class="update-available">
               <IconApp name="upload" width="16" height="16" />
@@ -679,7 +681,7 @@ onMounted(() => {
                 <strong>v{{ updateInfo.latest }}</strong>
                 <template v-if="updateInfo.size">（约 {{ (updateInfo.size / 1048576).toFixed(1) }} MB）</template>
               </span>
-              <button type="button" class="btn btn-primary btn-sm" :disabled="updating" @click="applyUpdate">
+              <button v-if="!IS_OPENWRT" type="button" class="btn btn-primary btn-sm" :disabled="updating" @click="applyUpdate">
                 {{ updating ? "更新中..." : localPackageHint ? "使用本地包更新" : "立即更新" }}
               </button>
               <a

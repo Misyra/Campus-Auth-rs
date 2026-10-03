@@ -270,6 +270,9 @@ pub async fn download_uv(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<std::path::PathBuf, EnvironmentError> {
+    if cfg!(feature = "openwrt") {
+        return Err(EnvironmentError::UnsupportedPlatform);
+    }
     let env_path = mgr.env_path();
     let uv_dest = env_path.join(UV_EXE_NAME);
 

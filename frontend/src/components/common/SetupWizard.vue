@@ -16,6 +16,7 @@
  */
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import IconApp from "./IconApp.vue";
+import { IS_OPENWRT } from "../../utils/platform";
 import BrowserIcon from "./BrowserIcon.vue";
 import { useStatus } from "../../composables/useStatus";
 import { useUi } from "../../composables/useUi";
@@ -568,6 +569,7 @@ async function skipWizard() {
         <div v-else-if="currentKey === 'channel'" class="wizard-page">
           <div class="wizard-channel-grid" role="radiogroup" aria-label="登录方式">
             <button
+              v-if="!IS_OPENWRT"
               type="button"
               class="wizard-channel-card"
               :class="{ selected: selectedChannel === 'browser' }"
@@ -588,7 +590,8 @@ async function skipWizard() {
               <span>直接使用 GET/POST 请求进行登录，可能需要逆向前端</span>
             </button>
           </div>
-          <p class="wizard-note">自定义脚本渠道属高级用法，可在「方案」页的登录方式中配置；不确定选哪个时，先选浏览器自动化。</p>
+          <p v-if="IS_OPENWRT" class="wizard-note">OpenWrt 版支持 HTTP 登录与自定义脚本。脚本渠道可在「方案」页配置，并选择设备上已安装的解释器。</p>
+          <p v-else class="wizard-note">自定义脚本渠道属高级用法，可在「方案」页的登录方式中配置；不确定选哪个时，先选浏览器自动化。</p>
         </div>
 
         <!-- 第 3 步：环境准备（仅浏览器渠道，直连流程不含此步） -->

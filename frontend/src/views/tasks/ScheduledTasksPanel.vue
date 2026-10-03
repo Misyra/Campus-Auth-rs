@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { IS_OPENWRT } from "@/utils/platform";
 /** 定时任务面板：**列表页 + 二级编辑页**（与浏览器任务 / HTTP 登录任务 / 脚本同构）。
  *
  * 列表态是整页表格（名称 / 类型 / 触发 / 目标 / 超时 / 最近结果 / 启用 / 操作），
@@ -84,7 +85,7 @@ const currentTask = computed(() => st.scheduledTasks.value.find((t) => t.id === 
 
 // 类型仅用于切换目标下拉：保存不上传 task_type，后端从 target 推导
 const taskTypeOptions: SelectOption[] = [
-  { value: "browser", label: "浏览器任务" },
+  ...(!IS_OPENWRT ? [{ value: "browser", label: "浏览器任务" }] : []),
   { value: "script", label: "自定义脚本" },
 ];
 

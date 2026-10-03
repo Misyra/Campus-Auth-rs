@@ -1385,6 +1385,12 @@ async fn ensure_worker(
     worker_only_health_check: bool,
 ) -> Result<(), BridgeError> {
     // 快速路径：已就绪
+    if cfg!(feature = "openwrt") {
+        return Err(BridgeError::ExecutionError {
+            message: "OpenWrt 版不提供浏览器自动化和 OCR Worker".into(),
+            data: None,
+        });
+    }
     if is_worker_ready(this) {
         return Ok(());
     }

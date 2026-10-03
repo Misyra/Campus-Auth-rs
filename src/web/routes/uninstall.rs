@@ -266,6 +266,11 @@ pub async fn uninstall(
     body: Option<Json<CleanupRequest>>,
 ) -> Result<Json<Value>, ApiError> {
     let keep_user_data = body.map(|b| b.0.keep_user_data).unwrap_or(false);
+    if cfg!(feature = "openwrt") {
+        return Err(ApiError::BadRequest(
+            "OpenWrt 版请通过 SSH 停止并禁用 campus-auth 服务后卸载".into(),
+        ));
+    }
     // 卸载为破坏性操作（删用户数据/加密密钥/浏览器缓存/自启动注册），info 留痕各步骤
     tracing::info!(
         keep_user_data,
@@ -378,6 +383,11 @@ pub async fn purge_uninstall(
     State(state): State<AppState>,
     Json(body): Json<PurgeRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    if cfg!(feature = "openwrt") {
+        return Err(ApiError::BadRequest(
+            "OpenWrt 版请通过 SSH 停止并禁用 campus-auth 服务后卸载".into(),
+        ));
+    }
     let base_path = state.config.base_path();
     let install_dir = current_install_dir()?;
 

@@ -4,6 +4,51 @@
 use super::*;
 use crate::network::interfaces::is_excluded;
 
+#[test]
+fn openwrt_default_route_prefers_wan_over_lan() {
+    let mut interfaces = parse_ip_addr(
+        "2: eth0: <UP>\n    link/ether 00:11:22:33:44:55\n    inet 192.168.1.1/24\n3: wan: <UP>\n    link/ether 00:11:22:33:44:66\n    inet 10.0.0.2/24\n",
+    );
+    prioritize_linux_default_route(&mut interfaces, "default via 10.0.0.1 dev wan metric 10\n");
+    let address = crate::network::interfaces::local_address_from(&interfaces);
+    assert_eq!(address.ipv4, "10.0.0.2");
+    assert_eq!(address.mac, "00:11:22:33:44:66");
+    assert_eq!(interfaces[0].gateway, Some(Ipv4Addr::new(10, 0, 0, 1)));
+}
+
+#[test]
+fn openwrt_default_route_preserves_ppp_without_gateway() {
+    let mut interfaces = parse_ip_addr(
+        "2: eth0: <UP>\n    inet 192.168.1.1/24\n3: pppoe-wan: <UP>\n    inet 10.0.0.2/32\n",
+    );
+    prioritize_linux_default_route(
+        &mut interfaces,
+        "default dev pppoe-wan metric 5\ndefault via 192.168.1.2 dev eth0 metric 100\n",
+    );
+    assert_eq!(interfaces[0].name, "pppoe-wan");
+    assert_eq!(interfaces[0].gateway, None);
+    assert_eq!(
+        crate::network::interfaces::local_address_from(&interfaces).ipv4,
+        "10.0.0.2"
+    );
+}
+
+#[test]
+fn openwrt_default_route_orders_by_metric_and_handles_empty_routes() {
+    let mut interfaces = parse_ip_addr(
+        "2: eth0: <UP>\n    inet 192.168.1.2/24\n3: wan: <UP>\n    inet 10.0.0.2/24\n",
+    );
+    prioritize_linux_default_route(
+        &mut interfaces,
+        "default via 192.168.1.1 dev eth0 metric 100\ndefault via 10.0.0.1 dev wan metric 10\n",
+    );
+    assert_eq!(interfaces[0].name, "wan");
+    let before = interfaces.clone();
+    prioritize_linux_default_route(&mut interfaces, "");
+    assert_eq!(interfaces[0].name, before[0].name);
+    assert_eq!(interfaces[1].name, before[1].name);
+}
+
 // ============ extract_ipv4 测试 ============
 
 #[test]

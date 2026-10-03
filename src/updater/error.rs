@@ -8,6 +8,9 @@ use thiserror::Error;
 /// 更新器统一错误类型
 #[derive(Debug, Error)]
 pub enum UpdaterError {
+    /// 路由器版交由系统服务管理升级，避免助手与 procd 同时启动后继进程。
+    #[error("OpenWrt 版请先停止 campus-auth 服务，再手动替换安装包并启动服务")]
+    ServiceManaged,
     /// 独立更新任务异常退出。
     #[error("更新任务执行失败: {0}")]
     OperationFailed(String),

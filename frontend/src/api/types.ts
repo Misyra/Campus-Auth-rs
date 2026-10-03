@@ -1163,6 +1163,8 @@ export interface HealthInfo {
 /** 系统信息（GET /api/system/info） */
 export interface SystemInfo {
   version: string;
+  /** 当前程序是否为限制浏览器 / Worker 能力的 OpenWrt 构建。 */
+  openwrt?: boolean;
   /** 程序数据目录（运行时 base_path）；配置、任务、日志与 update/ 都相对它 */
   base_path: string;
   port: number;

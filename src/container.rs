@@ -256,6 +256,9 @@ impl ServiceContainer {
         environment: &Arc<EnvironmentManager>,
         shutdown_token: &CancellationToken,
     ) {
+        if cfg!(feature = "openwrt") {
+            return;
+        }
         let env_bg = environment.clone();
         let shutdown_for_probe = shutdown_token.clone();
         tokio::spawn(async move {

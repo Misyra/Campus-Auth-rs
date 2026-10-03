@@ -459,6 +459,16 @@ impl LoginOrchestrator {
         };
         let use_http = effective_channel == LoginChannel::Http;
         let use_script = effective_channel == LoginChannel::Script;
+        if !effective_channel.is_supported() {
+            return self
+                .immediate_handle(
+                    source,
+                    false,
+                    "OpenWrt 版不支持浏览器登录，请选择 HTTP 登录或自定义脚本".into(),
+                    profile.id.clone(),
+                )
+                .await;
+        }
 
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
         if let Some(handle) = self

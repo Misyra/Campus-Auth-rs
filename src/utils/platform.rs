@@ -129,7 +129,7 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "openwrt")))]
 mod imp {
     use anyhow::Result;
 
@@ -166,6 +166,39 @@ mod imp {
             std::fs::write(&desktop_path, content)?;
         } else if desktop_path.exists() {
             std::fs::remove_file(&desktop_path)?;
+        }
+        Ok(())
+    }
+}
+#[cfg(all(target_os = "linux", feature = "openwrt"))]
+mod imp {
+    use anyhow::{Result, bail};
+
+    /// 查询 procd 服务是否已注册开机启动，不依赖可能被 SSH 操作绕过的配置标记。
+    pub fn openwrt_self_start_enabled() -> Result<bool> {
+        let script = std::path::Path::new("/etc/init.d/campus-auth");
+        if !script.is_file() {
+            return Ok(false);
+        }
+        let status = std::process::Command::new(script).arg("enabled").status()?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!("无法查询 procd 自启动状态: {status}"),
+        }
+    }
+
+    /// 使用已安装的 procd 服务注册或取消开机启动。
+    pub fn set_self_start(enabled: bool) -> Result<()> {
+        let script = std::path::Path::new("/etc/init.d/campus-auth");
+        if !script.is_file() {
+            bail!("请先按 OpenWrt 部署指南安装 /etc/init.d/campus-auth 服务脚本");
+        }
+        let status = std::process::Command::new(script)
+            .arg(if enabled { "enable" } else { "disable" })
+            .status()?;
+        if !status.success() {
+            bail!("procd 自启动设置失败，退出状态: {status}");
         }
         Ok(())
     }

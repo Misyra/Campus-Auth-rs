@@ -4,6 +4,7 @@
  */
 
 import { createRouter, createWebHistory } from "vue-router";
+import { IS_OPENWRT } from "../utils/platform";
 import { useConfig } from "../composables/useConfig";
 import { useConfirm } from "../composables/useConfirm";
 
@@ -27,7 +28,7 @@ const routes = [
     name: "tasks",
     meta: { title: "任务" },
     component: () => import("@/views/TasksView.vue"),
-    redirect: { name: "tasks-browser" },
+    redirect: { name: IS_OPENWRT ? "tasks-http" : "tasks-browser" },
     children: [
       { path: "", name: "tasks-browser", meta: { title: "任务 · 浏览器任务" }, component: () => import("@/views/tasks/BrowserTasksPanel.vue") },
       // HTTP 登录任务：字段编辑在任务页，方案只引用一个任务 id（active_http_task），
@@ -82,6 +83,12 @@ export const router = createRouter({
 
 // 离开设置页且存在未保存修改时，确认是否放弃
 router.beforeEach(async (to, from) => {
+  if (IS_OPENWRT && ["tasks-browser", "tasks-ai"].includes(String(to.name))) {
+    return { name: "tasks-http" };
+  }
+  if (IS_OPENWRT && ["settings-browser", "settings-tasks"].includes(String(to.name))) {
+    return { name: "settings-system" };
+  }
   const { dirty, fetchConfig, saveFailed } = useConfig();
   // 仅当真正离开设置区域（含子路由）才拦截；设置页内部切换不打扰用户
   if (dirty.value && from.path.startsWith("/settings") && !to.path.startsWith("/settings")) {

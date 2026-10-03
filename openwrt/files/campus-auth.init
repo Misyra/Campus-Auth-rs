@@ -1,0 +1,59 @@
+#!/bin/sh /etc/rc.common
+# 使用 procd 管理前台主进程；网络断开由程序自行监测，无需热插拔反复重启。
+
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+    local enabled binary data_dir resolved_data host port
+    config_load campus-auth
+    config_get_bool enabled main enabled 1
+    [ "$enabled" = 1 ] || return 0
+    config_get binary main binary /usr/bin/campus-auth
+    config_get data_dir main data_dir /etc/campus-auth
+    config_get host main host 127.0.0.1
+    config_get port main port 50721
+
+    [ -x "$binary" ] || { echo "campus-auth: 主程序不存在或不可执行: $binary" >&2; return 1; }
+    case "$data_dir" in
+        /) echo "campus-auth: 数据目录不能是根目录" >&2; return 1 ;;
+        /*) ;;
+        *) echo "campus-auth: 数据目录必须是绝对路径" >&2; return 1 ;;
+    esac
+    case "$port" in
+        ''|*[!0-9]*) echo "campus-auth: 端口必须为数字" >&2; return 1 ;;
+    esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+    mkdir -p "$data_dir" || return 1
+    # 用户可从 LuCI 更改目录，必须先解析符号链接，避免 chmod 修改系统目录权限。
+    resolved_data=$(readlink -f "$data_dir") || return 1
+    case "$resolved_data" in
+        /|/etc|/etc/config|/etc/init.d|/etc/rc.d|/root|/root/.ssh|/home|/tmp|/opt|/mnt|/overlay|/rom|/www|/var|/run|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/usr|/usr/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*)
+            echo "campus-auth: 请使用专用数据目录，不能修改系统目录权限: $data_dir" >&2
+            return 1
+            ;;
+    esac
+    chmod 700 "$data_dir" || return 1
+
+    # 仅首次创建配置，升级与重启不得覆盖已有账号、任务和用户设置。
+    if [ ! -f "$data_dir/config/settings.json" ]; then
+        mkdir -p "$data_dir/config" || return 1
+        printf '%s\n' '{"global":{"app":{"runtime_mode":"full","show_tray":false,"auto_start_browser":false,"auto_restart_hours":0},"logging":{"file_enabled":false},"updater":{"auto_check_enabled":false}}}' > "$data_dir/config/settings.json" || return 1
+    fi
+
+    procd_open_instance
+    procd_set_param command "$binary" --base-path "$data_dir" --mode full --host "$host" --port "$port" --no-browser --no-tray
+    procd_set_param env CAMPUS_AUTH_PROCD=1
+    procd_set_param respawn 3600 5 5
+    # 完整关闭看门狗为 30 秒，给 runtime 收尾额外留出时间。
+    procd_set_param term_timeout 40
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param file /etc/config/campus-auth
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger campus-auth
+}

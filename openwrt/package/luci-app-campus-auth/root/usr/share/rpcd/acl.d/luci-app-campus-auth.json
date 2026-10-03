@@ -1,0 +1,20 @@
+{
+  "luci-app-campus-auth": {
+    "description": "管理认证喵服务及其 UCI 设置",
+    "read": {
+      "uci": ["campus-auth"],
+      "ubus": { "service": ["list"], "file": ["exec"] },
+      "file": { "/etc/init.d/campus-auth enabled": ["exec"] }
+    },
+    "write": {
+      "uci": ["campus-auth"],
+      "file": {
+        "/etc/init.d/campus-auth start": ["exec"],
+        "/etc/init.d/campus-auth stop": ["exec"],
+        "/etc/init.d/campus-auth restart": ["exec"],
+        "/etc/init.d/campus-auth enable": ["exec"],
+        "/etc/init.d/campus-auth disable": ["exec"]
+      }
+    }
+  }
+}

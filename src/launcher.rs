@@ -20,6 +20,7 @@ use crate::app::{self, AxumServeHandle};
 use crate::config::schema::StartupAction;
 use crate::container::{ServiceContainer, StartupHandles};
 use crate::engine::{EngineDeps, MAX_RESTART_ATTEMPTS, RESTART_DELAY_SECS};
+#[cfg(feature = "desktop")]
 use crate::tray::TrayManager;
 use crate::utils::lock::InstanceLock;
 
@@ -113,6 +114,7 @@ struct AppConfig {
     host: Option<String>,
     base_path: PathBuf,
     runtime_mode: RuntimeMode,
+    #[cfg(feature = "desktop")]
     no_tray: bool,
     /// 自动打开浏览器：CLI --no-browser 或 settings.json 关闭时为 false。
     /// 同时约束"启动后打开"与"重复启动时打开已有实例的 Web 控制台"两条路径
@@ -134,8 +136,10 @@ pub(crate) struct LauncherState {
     /// 完整模式在服务初始化前预绑定的监听器；启动 Axum 时消费。
     prepared_axum: Option<app::PreparedAxumListener>,
     axum_handle: Option<AxumServeHandle>,
+    #[cfg(feature = "desktop")]
     tray_manager: Option<Arc<TrayManager>>,
     /// 托盘泵任务句柄（spawn 后填充，优雅关闭时 stop）
+    #[cfg(feature = "desktop")]
     tray_handle: Option<crate::tray::ServiceHandle>,
     shutdown_token: CancellationToken,
     log_tx: tokio::sync::broadcast::Sender<LogEntry>,
@@ -334,7 +338,9 @@ async fn run_after_logging(
         startup_handles: Some(handles),
         prepared_axum,
         axum_handle: None,
+        #[cfg(feature = "desktop")]
         tray_manager: None,
+        #[cfg(feature = "desktop")]
         tray_handle: None,
         shutdown_token,
         log_tx,
@@ -345,7 +351,10 @@ async fn run_after_logging(
     // macOS 也照常创建（纯通道结构，无副作用），真正的禁用拦截在
     // TrayManager::spawn 内部单点执行——macOS 返回空句柄，托盘永不启动
     // Docker 环境无显示服务器，强制禁用托盘
-    let no_tray_effective = state.app_config.no_tray || crate::app::is_docker_env();
+    #[cfg(feature = "desktop")]
+    let no_tray_effective =
+        state.app_config.no_tray || crate::app::is_docker_env() || cfg!(feature = "openwrt");
+    #[cfg(feature = "desktop")]
     if !no_tray_effective {
         let tray = TrayManager::new(crate::tray::TrayDeps {
             config: container.config.clone(),
@@ -392,18 +401,20 @@ fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig>
     // macOS：托盘已禁用（用户决策，W6——tray-icon 要求主线程 NSApplication
     // 事件循环，主线程运行 tokio runtime 无法满足）；轻量模式在 mac 上会既无
     // 托盘也无 Web 入口，统一降级为完整模式保证可用
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", not(feature = "desktop"), feature = "openwrt"))]
     let runtime_mode = match runtime_mode {
         RuntimeMode::Lightweight => {
-            warn!("macOS 暂不支持托盘，轻量模式降级为完整模式");
+            warn!("当前构建不支持托盘，轻量模式降级为完整模式");
             RuntimeMode::Full
         }
         other => other,
     };
     // 托盘显示：CLI --no-tray 显式禁用，或配置 show_tray=false
+    #[cfg(feature = "desktop")]
     let no_tray = cli.no_tray || !startup.show_tray;
     // CLI --no-browser 与 settings.json 的 auto_start_browser 任一关闭即不打开
-    let auto_open_browser = !cli.no_browser && startup.auto_open_browser;
+    let auto_open_browser =
+        !cfg!(feature = "openwrt") && !cli.no_browser && startup.auto_open_browser;
     // 绑定地址：CLI --host 显式指定时优先生效；否则 Docker 环境默认 0.0.0.0
     let host = cli.host.clone().or_else(|| {
         if crate::app::is_docker_env() {
@@ -418,6 +429,7 @@ fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig>
         host,
         base_path,
         runtime_mode,
+        #[cfg(feature = "desktop")]
         no_tray,
         auto_open_browser,
         log_level: startup.log_level,
@@ -433,6 +445,7 @@ fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig>
 /// 避免 `launcher` / `logging` 重复 I/O。
 struct StartupSettings {
     port: u16,
+    #[cfg(feature = "desktop")]
     show_tray: bool,
     mode: RuntimeMode,
     auto_open_browser: bool,
@@ -450,6 +463,7 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
     use tracing_subscriber::filter::LevelFilter;
     let default = StartupSettings {
         port: crate::app::DEFAULT_PORT,
+        #[cfg(feature = "desktop")]
         show_tray: true,
         mode: RuntimeMode::Full,
         auto_open_browser: true,
@@ -484,6 +498,7 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         .and_then(|p| p.as_u64())
         .and_then(|p| u16::try_from(p).ok())
         .unwrap_or(default.port);
+    #[cfg(feature = "desktop")]
     let show_tray = app
         .and_then(|a| a.get("show_tray"))
         .and_then(|t| t.as_bool())
@@ -508,6 +523,7 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         crate::logging::logging_config_from_value(&value);
     StartupSettings {
         port,
+        #[cfg(feature = "desktop")]
         show_tray,
         mode,
         auto_open_browser,
@@ -645,6 +661,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
 
     // 启动托盘（在专用 OS 线程上构建图标与菜单）
     // macOS 的禁用拦截收敛在 TrayManager::spawn 内部单点执行（W6 用户决策）
+    #[cfg(feature = "desktop")]
     if let Some(tray) = state.tray_manager.as_ref() {
         state.tray_handle = Some(tray.spawn());
     }
@@ -676,6 +693,7 @@ async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     let watch_handle = watch_engine(state);
 
     // 启动托盘（轻量模式也显示托盘；macOS 由 spawn 内部单点拦截返回空句柄）
+    #[cfg(feature = "desktop")]
     if let Some(tray) = state.tray_manager.as_ref() {
         state.tray_handle = Some(tray.spawn());
     }
@@ -960,11 +978,13 @@ async fn graceful_shutdown(state: &mut LauncherState) {
     state.shutdown_token.cancel();
 
     // 1. 关闭 TrayManager（先停泵任务，再 drop）
+    #[cfg(feature = "desktop")]
     if let Some(handle) = state.tray_handle.take() {
         handle
             .stop_with_timeout(std::time::Duration::from_secs(3))
             .await;
     }
+    #[cfg(feature = "desktop")]
     if let Some(tray) = state.tray_manager.take() {
         drop(tray);
     }
@@ -1135,6 +1155,10 @@ pub(crate) fn collect_args_without_restarting() -> Vec<std::ffi::OsString> {
 /// 后继进程会先等待本进程释放实例锁再启动（见 [`wait_for_lock_release`]），
 /// 因此调用方必须**先 spawn 后继、再触发本进程优雅关闭**。
 pub(crate) fn spawn_restart_successor() -> Result<(), String> {
+    // procd 会在进程退出后重启，另起后继会让服务管理器丢失实际进程归属。
+    if cfg!(feature = "openwrt") && std::env::var("CAMPUS_AUTH_PROCD").as_deref() == Ok("1") {
+        return Ok(());
+    }
     let exe = std::env::current_exe().map_err(|e| format!("获取可执行文件路径失败: {e}"))?;
     let mut args = collect_args_without_restarting();
     args.push("--restarting".into());

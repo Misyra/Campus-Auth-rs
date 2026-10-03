@@ -41,14 +41,32 @@ pub const GITHUB_API_MIRRORS: &[&str] = &[
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const UV_TARGET: &str = "x86_64-pc-windows-msvc";
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+/// uv 下载目标三元组（按操作系统与 ABI 选择）。
 pub const UV_TARGET: &str = "aarch64-pc-windows-msvc";
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(target_env = "musl")))]
+/// uv 下载目标三元组（按操作系统与 ABI 选择）。
 pub const UV_TARGET: &str = "x86_64-unknown-linux-gnu";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(all(target_os = "linux", target_arch = "aarch64", not(target_env = "musl")))]
+/// uv 下载目标三元组（按操作系统与 ABI 选择）。
 pub const UV_TARGET: &str = "aarch64-unknown-linux-gnu";
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "musl"))]
+/// uv 下载目标三元组（按操作系统与 ABI 选择）。
+pub const UV_TARGET: &str = "x86_64-unknown-linux-musl";
+#[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "musl"))]
+/// uv 下载目标三元组（按操作系统与 ABI 选择）。
+pub const UV_TARGET: &str = "aarch64-unknown-linux-musl";
+// 其它路由器架构不提供 uv 预编译包，OpenWrt 引导入口会在下载前明确拒绝。
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+/// 不提供 uv 预编译包的架构；环境引导应在下载前拒绝。
+pub const UV_TARGET: &str = "unsupported";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+/// uv 下载目标三元组（按操作系统与 ABI 选择）。
 pub const UV_TARGET: &str = "x86_64-apple-darwin";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// uv 下载目标三元组（按操作系统与 ABI 选择）。
 pub const UV_TARGET: &str = "aarch64-apple-darwin";
 /// uv 可执行文件名
 #[cfg(target_os = "windows")]
@@ -139,6 +157,9 @@ pub const PROGRESS_PLAYWRIGHT: (u8, u8) = (60, 85);
 /// 环境安装错误
 #[derive(Debug, thiserror::Error)]
 pub enum EnvironmentError {
+    /// 路由器版不自动部署 Python、浏览器或 OCR 环境。
+    #[error("OpenWrt 版不支持自动安装 Python、浏览器或 OCR；脚本请显式选择设备上的解释器")]
+    UnsupportedPlatform,
     /// environment 目录无写权限
     #[error("environment 目录无写权限: {path}；可能原因：目录被设为只读、被安全软件占用或权限不足")]
     DirectoryNotWritable {

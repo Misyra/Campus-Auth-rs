@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
+import { IS_OPENWRT } from "@/utils/platform";
 import Modal from "@/components/common/Modal.vue";
 import { ref } from "vue";
 import { useRouter } from "vue-router";
@@ -171,7 +172,7 @@ const {
       </div>
 
       <!-- 卸载 -->
-      <div class="uninstall-section card">
+      <div v-if="!IS_OPENWRT" class="uninstall-section card">
         <div class="uninstall-header">
           <IconApp name="trash" width="20" height="20" />
           <div>
@@ -181,6 +182,8 @@ const {
         </div>
         <button class="btn btn-danger-ghost btn-sm" @click="openUninstall">卸载</button>
       </div>
+
+      <p v-else class="hint">OpenWrt 版请通过 SSH 停止并禁用 campus-auth 服务后卸载，保留配置时也需保留加密密钥。</p>
 
       <Modal :open="uninstallOpen" title="卸载程序" :close-on-overlay="!uninstallRunning" :close-on-esc="!uninstallRunning" :close-disabled="uninstallRunning" @close="closeUninstall">
         <div v-if="uninstallDetecting" class="uninstall-scanning"><span class="spinner"></span>正在检测...</div>

@@ -572,6 +572,9 @@ impl UpdaterService {
     /// 解压 → 写 `pending.json` → spawn 助手进程（助手等待本进程退出后完成替换与重启）。
     /// 调用方在收到 `Ok` 后应执行优雅关闭并使主进程退出，以放行助手替换。
     pub async fn apply_update(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
+        if cfg!(feature = "openwrt") {
+            return Err(UpdaterError::ServiceManaged);
+        }
         let info = info.clone();
         self.run_operation(move |service| async move { service.apply_update_inner(&info).await })
             .await
@@ -678,6 +681,9 @@ impl UpdaterService {
         archive_name: &str,
         archive_path: &Path,
     ) -> Result<String, UpdaterError> {
+        if cfg!(feature = "openwrt") {
+            return Err(UpdaterError::ServiceManaged);
+        }
         let name = archive_name.to_owned();
         let path = archive_path.to_path_buf();
         self.run_operation(move |service| async move {
@@ -955,6 +961,9 @@ impl UpdaterService {
     /// 重复 spawn 的双 helper 由 `<base>/update/helper.lock` 文件锁互斥（helper
     /// 启动即抢锁，后到者安静退出），且 helper 侧有"目标已是新版内容"的幂等跳过。
     pub(crate) fn ensure_helper_for_shutdown(&self) {
+        if cfg!(feature = "openwrt") {
+            return;
+        }
         // 卸载流程取消更新后**不能**再唤醒助手：那正是"卸载完又被装回来"的入口
         if self.update_cancelled() {
             tracing::warn!("更新已被取消（程序正在卸载），关机时不唤醒更新助手");
@@ -992,6 +1001,9 @@ impl UpdaterService {
     ///
     /// 与手动更新共用独立任务的操作所有权；占用时保留 pending 待后续重试。
     pub async fn apply_pending_on_startup(&self) -> Result<bool, UpdaterError> {
+        if cfg!(feature = "openwrt") {
+            return Ok(false);
+        }
         let result = self
             .run_operation(|service| async move {
                 if !apply::has_pending_update(&service.base_path) {

@@ -14,6 +14,7 @@ import type {
 import { profilesApi } from "../api";
 import { extractApiError } from "../api/client";
 import { DEFAULT_PROFILE_SETTINGS } from "../utils/constants";
+import { IS_OPENWRT } from "../utils/platform";
 import { pickFile } from "../utils/file";
 import { createFetchGuard, createFirstFailNotifier } from "../utils/guards";
 import { frontendLogger } from "../utils/logger";
@@ -116,6 +117,7 @@ async function showProfileEditor(profileId?: string): Promise<void> {
   } else {
     editingProfile.value = {
       ...DEFAULT_PROFILE_SETTINGS,
+      login_channel: IS_OPENWRT ? "http" : DEFAULT_PROFILE_SETTINGS.login_channel,
       id: "",
       _isNew: true,
       _clearPassword: false,

@@ -30,6 +30,7 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
     let info = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "base_path": base_path.to_string_lossy(),
+        "openwrt": cfg!(feature = "openwrt"),
         // 实际监听端口优先读运行时端口文件：`--port` CLI 覆盖与冲突重试
         // 只体现在该文件；无文件（如轻量模式未启动 Web）时回退配置值。
         "port": crate::utils::paths::read_runtime_port(&base_path).unwrap_or(rt.app.port),

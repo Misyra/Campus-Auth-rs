@@ -20,6 +20,7 @@
  * 它同时被方案编辑器与向导宿主使用。
  */
 import IconApp from "@/components/common/IconApp.vue";
+import { IS_OPENWRT } from "@/utils/platform";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import HttpTestResult from "@/components/common/HttpTestResult.vue";
@@ -229,6 +230,7 @@ async function runTest(): Promise<void> {
     <!-- 渠道卡片：三个渠道各自说明「要不要环境、适合谁」，比纯文字分段控件更可判 -->
     <div class="channel-cards" role="radiogroup" aria-label="登录方式">
       <button
+        v-if="!IS_OPENWRT"
         type="button"
         class="channel-card"
         role="radio"
@@ -278,7 +280,8 @@ async function runTest(): Promise<void> {
     </div>
 
     <div v-if="!isHttp && !isScript" class="browser-channel-panel">
-      <div class="form-group">
+      <p v-if="IS_OPENWRT" class="hint">当前方案使用浏览器渠道，OpenWrt 版无法执行。请切换到 HTTP 登录或自定义脚本，并绑定对应任务。</p>
+      <div v-else class="form-group">
         <div class="field-label-row">
           <label :for="`${uid}-task`">浏览器任务</label>
           <FieldHelp :text="HELP.browserTask" wide />

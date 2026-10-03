@@ -1,4 +1,4 @@
-//! rust-embed 静态文件服务（frontend/dist 经编译嵌入）
+//! rust-embed 静态文件服务（桌面 dist / OpenWrt dist-openwrt 分别嵌入）
 
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
@@ -38,7 +38,8 @@ fn guess_mime(path: &str) -> &'static str {
 
 #[cfg(not(feature = "no-embed"))]
 #[derive(rust_embed::RustEmbed)]
-#[folder = "frontend/dist/"]
+#[cfg_attr(feature = "openwrt", folder = "frontend/dist-openwrt/")]
+#[cfg_attr(not(feature = "openwrt"), folder = "frontend/dist/")]
 struct Assets;
 
 /// 根目录 `openapi.json` 的嵌入（供 `/openapi.json` 路由服务，生产环境可用）

@@ -2,6 +2,9 @@
 # 仓库 core.autocrlf=true 会把 CRLF 写回 Windows 工作区，
 # 导致容器里 `exec: /entrypoint.sh: no such file or directory`（shebang 行带 \r）。
 docker/*.sh text eol=lf
+openwrt/*.sh text eol=lf
+openwrt/files/* text eol=lf
+openwrt/package/** text eol=lf
 Dockerfile text eol=lf
 .dockerignore text eol=lf
 docker-compose*.yml text eol=lf

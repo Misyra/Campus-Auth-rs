@@ -1,0 +1,8 @@
+{
+  "admin/services/campus-auth": {
+    "title": "认证喵",
+    "order": 60,
+    "action": { "type": "view", "path": "campus-auth" },
+    "depends": { "acl": ["luci-app-campus-auth"], "uci": { "campus-auth": true } }
+  }
+}

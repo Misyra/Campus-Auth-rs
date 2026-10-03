@@ -1,0 +1,3 @@
+# 固件升级必须同时保留加密配置和密钥，避免账号密码无法解密。
+/etc/campus-auth/
+/root/.campus_network_auth/

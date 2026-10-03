@@ -17,6 +17,7 @@
  */
 
 import { computed, ref, watch } from "vue";
+import { IS_OPENWRT } from "../utils/platform";
 import type { ScheduledTask, ScheduledTaskHistoryItem } from "../api/types";
 import { scheduledTasksApi } from "../api";
 import { extractApiError, isConflictError } from "../api/client";
@@ -212,6 +213,7 @@ async function closeScheduledTaskEditor(): Promise<void> {
  */
 function createScheduledDraft(): void {
   const draft = emptyScheduledDraft();
+  if (IS_OPENWRT) draft.task_type = "script";
   scheduledTaskDraft.value = draft;
   // 名称与目标都空着，本来就是缺口（发不出去）：登记基线只是省掉一发注定被拦的定时器
   autosave.markBaseline(draft);

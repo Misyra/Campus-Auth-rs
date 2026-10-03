@@ -11,15 +11,21 @@
  */
 
 import type { IconName } from "@/components/common/IconApp.vue";
+import { IS_OPENWRT } from "./platform";
+
+/** 路由器版不展示需要浏览器或 Worker 的功能入口。 */
+function supportedNav(children: readonly NavChild[]): readonly NavChild[] {
+  return IS_OPENWRT ? children.filter((child) => !["browser", "ai", "tasks"].includes(child.id)) : children;
+}
 
 /** 设置长页的目录：侧栏、窄屏定位菜单与正文共用顺序和名称。 */
-export const SETTINGS_NAV_CHILDREN: readonly NavChild[] = [
+export const SETTINGS_NAV_CHILDREN: readonly NavChild[] = supportedNav([
   { id: "monitor", label: "网络检测", name: "settings-monitor", title: "网络检测、登录重试与暂停时段", icon: "wifi" },
   { id: "browser", label: "浏览器", name: "settings-browser", title: "浏览器选择、超时与反检测参数", icon: "chrome" },
   { id: "tasks", label: "任务与环境", name: "settings-tasks", title: "运行环境、录制器与 OCR", icon: "file-text" },
   { id: "system", label: "系统与更新", name: "settings-system", title: "启动行为、日志、端口代理、更新与维护", icon: "settings" },
   { id: "appearance", label: "外观", name: "settings-appearance", title: "主题、背景与卡片样式", icon: "palette" },
-];
+]);
 
 export interface NavChild {
   /** 稳定标识：激活判定按它比较（不是路由名，路由名可能被深度链接改名） */
@@ -35,7 +41,7 @@ export interface NavChild {
 }
 
 /** 「任务」分组的子项（顺序即侧栏顺序，也是窄屏 pill 行的顺序） */
-export const TASK_NAV_CHILDREN: readonly NavChild[] = [
+export const TASK_NAV_CHILDREN: readonly NavChild[] = supportedNav([
   {
     id: "browser",
     label: "浏览器任务",
@@ -72,7 +78,7 @@ export const TASK_NAV_CHILDREN: readonly NavChild[] = [
     title: "AI 生成浏览器任务：用自然语言描述生成浏览器任务",
     icon: "sparkles",
   },
-];
+]);
 
 /**
  * 当前路由名命中的子项 id。

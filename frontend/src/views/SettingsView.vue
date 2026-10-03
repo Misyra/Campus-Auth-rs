@@ -23,8 +23,11 @@ const { toastOnly } = useToast();
 const navigation = useSettingsNavigation();
 const scrollContainer = ref<HTMLElement | null>(null);
 const settingsForm = ref<HTMLElement | null>(null);
-const sectionComponents = [MonitorSettings, BrowserSettings, TaskEnvironmentSettings, SystemSettings, AppearanceView];
-const sections = SETTINGS_NAV_CHILDREN.map((child, index) => ({ ...child, component: sectionComponents[index] }));
+const sectionComponents: Record<string, typeof MonitorSettings> = {
+  monitor: MonitorSettings, browser: BrowserSettings, tasks: TaskEnvironmentSettings,
+  system: SystemSettings, appearance: AppearanceView,
+};
+const sections = SETTINGS_NAV_CHILDREN.map((child) => ({ ...child, component: sectionComponents[child.id] }));
 let resizeObserver: ResizeObserver | null = null;
 let anchoredSection: string | null = null;
 

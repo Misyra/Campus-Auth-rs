@@ -30,6 +30,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  openwrt:
+    name: OpenWrt 服务包与 LuCI 插件
+    # 桌面发布任务已创建 Release 后再上传，复用版本说明并避免创建竞态。
+    needs: build
+    uses: ./.github/workflows/openwrt.yml
+    permissions:
+      actions: read
+      contents: write
+    with:
+      publish-release: true
+
   build:
     name: 构建 ${{ matrix.target }}
     runs-on: ${{ matrix.os }}

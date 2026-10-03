@@ -66,10 +66,40 @@ pub struct PlatformPackage {
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "windows-x64";
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "windows-arm64";
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    not(feature = "openwrt"),
+    not(target_env = "musl")
+))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "linux-x64";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    not(feature = "openwrt"),
+    not(target_env = "musl")
+))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "linux-arm64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "openwrt"))]
+pub(crate) const CURRENT_PLATFORM_KEY: &str = "openwrt-x64";
+#[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "openwrt"))]
+pub(crate) const CURRENT_PLATFORM_KEY: &str = "openwrt-arm64";
+#[cfg(all(target_os = "linux", target_arch = "arm", feature = "openwrt"))]
+pub(crate) const CURRENT_PLATFORM_KEY: &str = "openwrt-armv7";
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "musl",
+    not(feature = "openwrt")
+))]
+pub(crate) const CURRENT_PLATFORM_KEY: &str = "linux-musl-x64";
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    target_env = "musl",
+    not(feature = "openwrt")
+))]
+pub(crate) const CURRENT_PLATFORM_KEY: &str = "linux-musl-arm64";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) const CURRENT_PLATFORM_KEY: &str = "macos-arm64";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -79,6 +109,7 @@ pub(crate) const CURRENT_PLATFORM_KEY: &str = "macos-x64";
     all(target_os = "windows", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "arm", feature = "openwrt"),
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "macos", target_arch = "x86_64")
 )))]
@@ -414,13 +445,31 @@ fn select_release_for_channel(
 
 /// 从资产文件名推断平台键（`"{os}-{arch}"`，G11）
 ///
-/// windows / linux 按 `x86_64|x64|amd64` 与 `aarch64|arm64|arm` 关键字区分
-/// 架构；macos 保持旧语义（无架构词默认 x64，兼容 universal 包按 x64 归类）。
+/// Linux 区分 OpenWrt、musl 与 glibc，并严格区分 ARMv7 / ARM64；
+/// macos 保持旧语义（无架构词默认 x64，兼容 universal 包按 x64 归类）。
 /// 返回 `None` 表示无法识别的组合，调用方 warn 后跳过。
 fn infer_platform_key(name: &str) -> Option<&'static str> {
     let is_x64 = name.contains("x86_64") || name.contains("x64") || name.contains("amd64");
-    let is_arm = name.contains("aarch64") || name.contains("arm64") || name.contains("arm");
-    if name.contains("windows") {
+    let is_arm64 = name.contains("aarch64") || name.contains("arm64");
+    let is_arm = is_arm64 || name.contains("arm");
+    // OpenWrt、musl 与桌面 glibc 资产不可互相覆盖；32 位 ARM 不得归为 ARM64。
+    if name.contains("openwrt") {
+        if !name.contains("musl") {
+            return None;
+        }
+        match (is_x64, is_arm64, name.contains("armv7")) {
+            (true, false, false) => Some("openwrt-x64"),
+            (false, true, false) => Some("openwrt-arm64"),
+            (false, false, true) => Some("openwrt-armv7"),
+            _ => None,
+        }
+    } else if name.contains("linux") && name.contains("musl") {
+        match (is_x64, is_arm64) {
+            (true, false) => Some("linux-musl-x64"),
+            (false, true) => Some("linux-musl-arm64"),
+            _ => None,
+        }
+    } else if name.contains("windows") {
         match (is_x64, is_arm) {
             (true, _) => Some("windows-x64"),
             (_, true) => Some("windows-arm64"),
@@ -428,7 +477,7 @@ fn infer_platform_key(name: &str) -> Option<&'static str> {
             _ => None,
         }
     } else if name.contains("linux") {
-        match (is_x64, is_arm) {
+        match (is_x64, is_arm64) {
             (true, _) => Some("linux-x64"),
             (_, true) => Some("linux-arm64"),
             _ => None,
@@ -956,40 +1005,51 @@ mod tests {
 
     /// 当前平台可识别的资产名（与生产 `infer_platform_key` 的 cfg 矩阵一致）
     fn platform_asset_name() -> &'static str {
-        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        {
-            "app-windows-x64.zip"
+        match CURRENT_PLATFORM_KEY {
+            "windows-x64" => "app-windows-x64.zip",
+            "windows-arm64" => "app-windows-arm64.zip",
+            "linux-x64" => "app-linux-x64.zip",
+            "linux-arm64" => "app-linux-arm64.zip",
+            "linux-musl-x64" => "app-x86_64-unknown-linux-musl.tar.gz",
+            "linux-musl-arm64" => "app-aarch64-unknown-linux-musl.tar.gz",
+            "openwrt-x64" => "app-openwrt-x86_64-unknown-linux-musl.tar.gz",
+            "openwrt-arm64" => "app-openwrt-aarch64-unknown-linux-musl.tar.gz",
+            "openwrt-armv7" => "app-openwrt-armv7-unknown-linux-musleabihf.tar.gz",
+            "macos-x64" => "app-macos-x64.zip",
+            "macos-arm64" => "app-macos-arm64.zip",
+            _ => "app-unknown.zip",
         }
-        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-        {
-            "app-windows-arm64.zip"
-        }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        {
-            "app-linux-x64.zip"
-        }
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        {
-            "app-linux-arm64.zip"
-        }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            "app-macos-arm64.zip"
-        }
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        {
-            "app-macos-x64.zip"
-        }
-        #[cfg(not(any(
-            all(target_os = "windows", target_arch = "x86_64"),
-            all(target_os = "windows", target_arch = "aarch64"),
-            all(target_os = "linux", target_arch = "x86_64"),
-            all(target_os = "linux", target_arch = "aarch64"),
-            all(target_os = "macos", target_arch = "aarch64"),
-            all(target_os = "macos", target_arch = "x86_64")
-        )))]
-        {
-            "app-unknown.zip"
+    }
+
+    #[test]
+    fn openwrt_assets_do_not_replace_desktop_or_other_architectures() {
+        for (name, key) in [
+            (
+                "app-openwrt-x86_64-unknown-linux-musl.tar.gz",
+                Some("openwrt-x64"),
+            ),
+            (
+                "app-openwrt-aarch64-unknown-linux-musl.tar.gz",
+                Some("openwrt-arm64"),
+            ),
+            (
+                "app-openwrt-armv7-unknown-linux-musleabihf.tar.gz",
+                Some("openwrt-armv7"),
+            ),
+            (
+                "app-x86_64-unknown-linux-musl.tar.gz",
+                Some("linux-musl-x64"),
+            ),
+            (
+                "app-aarch64-unknown-linux-musl.tar.gz",
+                Some("linux-musl-arm64"),
+            ),
+            ("app-x86_64-unknown-linux-gnu.tar.gz", Some("linux-x64")),
+            ("app-openwrt-mipsel-unknown-linux-musl.tar.gz", None),
+            ("app-openwrt-aarch64-unknown-linux-gnu.tar.gz", None),
+            ("app-armv7-unknown-linux-gnueabihf.tar.gz", None),
+        ] {
+            assert_eq!(infer_platform_key(name), key, "{name}");
         }
     }
 

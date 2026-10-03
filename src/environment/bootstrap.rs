@@ -22,6 +22,9 @@ pub async fn bootstrap_python_runtime(
     mgr: &EnvironmentManager,
     cancel: &CancellationToken,
 ) -> Result<PythonBootstrapOutcome, EnvironmentError> {
+    if cfg!(feature = "openwrt") {
+        return Err(EnvironmentError::UnsupportedPlatform);
+    }
     tracing::info!("开始引导 Python 运行时...");
 
     // ── 阶段 1: 确保 uv 就绪 ──
@@ -100,6 +103,9 @@ async fn bootstrap_capability_inner(
     force_worker_sync: bool,
 ) -> Result<(), EnvironmentError> {
     tracing::info!("开始引导浏览器自动化能力...");
+    if cfg!(feature = "openwrt") {
+        return Err(EnvironmentError::UnsupportedPlatform);
+    }
     bootstrap_worker_runtime(mgr, cancel, force_worker_sync).await?;
 
     // ── 阶段 3: 安装 Playwright Chromium 浏览器 ──
@@ -174,6 +180,9 @@ pub async fn bootstrap_worker_runtime(
     cancel: &CancellationToken,
     force_sync: bool,
 ) -> Result<(), EnvironmentError> {
+    if cfg!(feature = "openwrt") {
+        return Err(EnvironmentError::UnsupportedPlatform);
+    }
     let python = bootstrap_python_runtime(mgr, cancel).await?;
     mgr.write_status(|s| s.stage = BootstrapStage::VerifyingWorker);
     mgr.report_progress(
@@ -448,6 +457,28 @@ fn mark_error(mgr: &EnvironmentManager, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "openwrt")]
+    #[tokio::test]
+    async fn openwrt_bootstrap_rejects_before_creating_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = std::sync::Arc::new(crate::status::StatusManager::new());
+        let mgr = EnvironmentManager::new(temp.path().to_path_buf(), status);
+        let cancel = CancellationToken::new();
+        assert!(matches!(
+            bootstrap_python_runtime(&mgr, &cancel).await,
+            Err(EnvironmentError::UnsupportedPlatform)
+        ));
+        assert!(matches!(
+            bootstrap_capability(&mgr, &cancel).await,
+            Err(EnvironmentError::UnsupportedPlatform)
+        ));
+        assert!(matches!(
+            bootstrap_worker_runtime(&mgr, &cancel, false).await,
+            Err(EnvironmentError::UnsupportedPlatform)
+        ));
+        assert!(!mgr.env_path().exists());
+    }
 
     #[test]
     fn system_browser_cannot_mask_missing_worker_package() {

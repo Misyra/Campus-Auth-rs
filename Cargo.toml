@@ -17,7 +17,10 @@ name = "campus-auth-helper"
 path = "src/helper_main.rs"
 
 [features]
-default = []
+default = ["desktop"]
+# OpenWrt 使用 --no-default-features --features openwrt，避免链接 GTK 等桌面库。
+desktop = ["dep:tray-icon", "dep:image", "dep:gtk"]
+openwrt = []
 no-embed = []
 
 [dependencies]
@@ -74,8 +77,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 cron = "0.13"
 
 # 系统 & 桌面
-tray-icon = "0.24"
-image = { version = "0.25", default-features = false, features = ["png"] }
+tray-icon = { version = "0.24", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 open = "5"
 fs4 = { version = "1", features = ["tokio"] }
 dirs = "6"
@@ -144,7 +147,7 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 # tray-icon Linux 后端要求 gtk::init 与 gtk 主循环运行在同一线程，
 # 托盘/菜单事件经 glib 主循环分发（与 tray-icon 内部依赖同版本，共享 gtk 状态）
-gtk = "0.18"
+gtk = { version = "0.18", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

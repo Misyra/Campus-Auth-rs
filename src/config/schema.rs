@@ -481,6 +481,11 @@ pub enum LoginChannel {
 }
 
 impl LoginChannel {
+    /// 当前构建是否允许使用该渠道；路由器版不提供浏览器自动化。
+    pub fn is_supported(self) -> bool {
+        !cfg!(feature = "openwrt") || self.is_in_process()
+    }
+
     /// 是否由 Rust 控制登录且不需要 Python 环境、浏览器与 Worker。
     ///
     /// 三种渠道里只有浏览器渠道要拉起 Worker：HTTP 请求在主进程发送，其纯计算
@@ -642,6 +647,16 @@ mod tests {
             Some("active_script_task")
         );
         assert_eq!(LoginChannel::default(), LoginChannel::Browser);
+    }
+
+    #[test]
+    fn openwrt_channel_support_preserves_in_process_login() {
+        assert!(LoginChannel::Http.is_supported());
+        assert!(LoginChannel::Script.is_supported());
+        assert_eq!(
+            LoginChannel::Browser.is_supported(),
+            !cfg!(feature = "openwrt")
+        );
     }
 
     /// 存量方案文件没有 `active_script_task` 时必须照旧解析（缺省空串 = 未绑定）

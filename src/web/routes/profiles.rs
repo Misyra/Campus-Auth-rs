@@ -86,6 +86,11 @@ pub(crate) async fn validate_login_task_binding(
     active_http_task: &str,
     active_script_task: &str,
 ) -> Result<(), ApiError> {
+    if !login_channel.is_supported() {
+        return Err(ApiError::BadRequest(
+            "OpenWrt 版不支持浏览器登录，请选择 HTTP 登录或自定义脚本".into(),
+        ));
+    }
     // 浏览器渠道不看这两个字段：切回浏览器后残留的绑定无害，不强制用户清空
     let (id, field, kind, want_http) = match login_channel {
         LoginChannel::Browser => return Ok(()),
