@@ -2,6 +2,7 @@
 /** 设置 · 系统与更新页：启动与运行、日志、界面行为、端口代理、自动更新及数据维护操作 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
 import { IS_OPENWRT } from "@/utils/platform";
+import { autostartDescription } from "@/utils/autostart";
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
@@ -386,12 +387,13 @@ onMounted(() => {
           </template>
           <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
         </SettingsRow>
-        <SettingsRow description="开机登录后自动启动本程序，注册方式显示在名称旁">
+        <SettingsRow :description="autostartDescription(autostart)">
           <template #label>
             开机自启动
             <span v-if="autostart.method !== '-'" class="badge badge--sm badge--mono">{{ autostart.method }}</span>
-            <FieldHelp text="开机登录后自动启动本程序，注册方式显示在名称旁。" />
+            <FieldHelp text="Windows 状态来自系统注册与启动审批检查。移动程序后请重新启用修复；程序不会自动覆盖任务管理器的禁用选择。" />
           </template>
+          <button v-if="!autostart.enabled && (autostart.registered || autostart.error)" class="btn btn-sm btn-secondary" :disabled="busy.autostart" @click="config.toggleAutostart(false)">取消注册</button>
           <label class="toggle setting-row-switch">
             <input
               type="checkbox"
@@ -402,6 +404,10 @@ onMounted(() => {
             <span class="toggle-slider"></span>
             <span class="sr-only">开机自启动</span>
           </label>
+          <template v-if="autostart.registered && !autostart.enabled" #details>
+            <p class="text-muted">当前程序：{{ autostart.expected_path }}</p>
+            <p class="text-muted">已注册路径：{{ autostart.registry_path || "无法解析" }}</p>
+          </template>
         </SettingsRow>
       </div>
     </section>

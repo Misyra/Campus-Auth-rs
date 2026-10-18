@@ -75,6 +75,10 @@ pub struct CliArgs {
     #[arg(long, value_enum)]
     pub autostart: Option<AutostartAction>,
 
+    /// 系统登录启动来源标记，与 --autostart enable/disable 管理命令分开。
+    #[arg(long, hide = true)]
+    pub startup_launch: bool,
+
     /// 启动动作（覆盖 settings.json 中的 startup_action）
     #[arg(long, value_enum)]
     pub startup_action: Option<StartupAction>,
@@ -234,6 +238,29 @@ async fn run_after_logging(
     app_config: AppConfig,
     log_tx: tokio::sync::broadcast::Sender<LogEntry>,
 ) -> Result<()> {
+    info!(
+        startup_source = if cli.startup_launch { "system_autostart" } else { "manual_or_other" },
+        exe_path = ?std::env::current_exe().ok(),
+        base_path = %app_config.base_path.display(),
+        "启动来源"
+    );
+    #[cfg(windows)]
+    {
+        let base = app_config.base_path.clone();
+        match tokio::task::spawn_blocking(move || crate::utils::platform::self_start_status(&base))
+            .await
+        {
+            Ok(Ok(status)) => {
+                if status.registered && !status.enabled {
+                    warn!(autostart = ?status, "自启动注册异常，请在设置中检查并显式修复");
+                } else {
+                    info!(autostart = ?status, "系统自启动状态");
+                }
+            }
+            Ok(Err(error)) => warn!(%error, "无法读取系统自启动状态"),
+            Err(error) => warn!(%error, "自启动诊断任务失败"),
+        }
+    }
     // 3. 目录权限检查
     check_directory_permissions(&app_config.base_path)?;
 
@@ -1262,6 +1289,19 @@ async fn wait_terminate_signal() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn autostart_launch_marker_is_separate_from_management_action() {
+        use clap::Parser;
+        let cli = super::CliArgs::try_parse_from(["campus-auth", "--startup-launch"]).unwrap();
+        assert!(cli.startup_launch);
+        assert!(cli.autostart.is_none());
+        let cli = super::CliArgs::try_parse_from(["campus-auth", "--autostart", "enable"]).unwrap();
+        assert!(!cli.startup_launch);
+        assert!(matches!(
+            cli.autostart,
+            Some(super::AutostartAction::Enable)
+        ));
+    }
     use super::should_auto_restart;
 
     #[test]

@@ -377,6 +377,10 @@ pub async fn export_logs(
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "generated_at": now.to_rfc3339(),
+        "exe_path": std::env::current_exe().ok(),
+        "base_path": base,
+        "autostart": super::autostart::diagnostic_status(base.clone()).await,
+        "autostart_cached_enabled": settings.global.app.autostart_enabled,
         "log_level": settings.global.logging.level,
         "log_file_enabled": settings.global.logging.file_enabled,
         "log_retention_days": settings.global.logging.retention_days,
@@ -1504,6 +1508,10 @@ mod tests {
             .read_to_string(&mut meta)
             .unwrap();
         assert!(meta.contains("\"has_password\":false"), "{meta}");
+        let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        assert_eq!(meta["base_path"], tmp.path().to_string_lossy().as_ref());
+        assert!(meta["exe_path"].is_string());
+        assert!(meta["autostart"].is_object());
     }
 
     /// logs 目录缺失：仍返回有效包（README + meta），不 500

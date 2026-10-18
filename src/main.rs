@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
         return handle_stop(&base_path);
     }
     if let Some(ref action) = cli.autostart {
-        return handle_autostart(action);
+        return handle_autostart(action, &base_path);
     }
 
     // 控制平面以网络等待为主，限制常驻线程开销；低核设备按实际可用核数创建。
@@ -160,8 +160,11 @@ fn handle_stop(base_path: &Path) -> anyhow::Result<()> {
 }
 
 /// 注册 / 取消开机自启动
-fn handle_autostart(action: &AutostartAction) -> anyhow::Result<()> {
+fn handle_autostart(action: &AutostartAction, _base_path: &Path) -> anyhow::Result<()> {
     let enabled = matches!(action, AutostartAction::Enable);
+    #[cfg(windows)]
+    campus_auth::utils::platform::set_self_start_for_base(enabled, _base_path)?;
+    #[cfg(not(windows))]
     campus_auth::utils::platform::set_self_start(enabled)?;
     if enabled {
         println!("已注册开机自启动");

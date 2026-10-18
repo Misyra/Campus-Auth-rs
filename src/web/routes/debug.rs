@@ -290,6 +290,9 @@ pub async fn feedback_bundle(
     let meta = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "timestamp": now.to_rfc3339(),
+        "exe_path": std::env::current_exe().ok(),
+        "base_path": config.base_path(),
+        "autostart": super::autostart::diagnostic_status(config.base_path()).await,
         "active_task": active_task_id,
         "active_profile": rt.profile.id,
         "browser_channel": rt.browser.browser_channel,
@@ -1129,6 +1132,10 @@ mod tests {
         std::io::Read::read_to_string(&mut zip.by_name("meta.json").unwrap(), &mut meta).unwrap();
         assert!(meta.contains("\"has_password\":true") || meta.contains("\"has_password\": true"));
         assert!(!meta.contains("s3cr3t-pw"), "密码明文不得进包: {meta}");
+        let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        assert_eq!(meta["base_path"], tmp.path().to_string_lossy().as_ref());
+        assert!(meta["exe_path"].is_string());
+        assert!(meta["autostart"].is_object());
     }
 
     /// 问题报告落盘路径与 Worker 统一在 `<base>/python_worker/debug`。
