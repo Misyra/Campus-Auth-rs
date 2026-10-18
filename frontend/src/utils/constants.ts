@@ -258,6 +258,7 @@ export const DEFAULT_CONFIG: Config = {
     persistent_context: false,
     ignore_https_errors: true,
     bind_proxy: "",
+    redirect_test_use_proxy: false,
   },
   worker: {
     idle_timeout_seconds: 300,

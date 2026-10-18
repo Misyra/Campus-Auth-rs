@@ -291,6 +291,8 @@ export interface BrowserConfig {
   persistent_context: boolean;
   ignore_https_errors: boolean;
   bind_proxy: string;
+  /** 重定向检测使用代理，默认关闭；不影响正式登录 */
+  redirect_test_use_proxy: boolean;
 }
 
 /** Worker（浏览器进程）配置 */

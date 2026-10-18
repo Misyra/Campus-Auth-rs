@@ -2088,6 +2088,10 @@ class WorkerCore:
         from playwright.async_api import async_playwright
 
         bs = dict(params.get("browser_settings") or {})
+        # 默认直连以观察校园网劫持；用户可单独允许检测使用代理，不修改原配置。
+        use_proxy = bool(bs.get("redirect_test_use_proxy", False))
+        if not use_proxy:
+            bs.pop("bind_proxy", None)
         channel = str(bs.get("browser_channel") or "playwright").strip().lower()
         custom_path = str(bs.get("browser_custom_path") or "").strip()
         pure_mode = bool(bs.get("pure_mode", False))
@@ -2103,6 +2107,9 @@ class WorkerCore:
                 self._playwright = await async_playwright().start()
                 created_playwright = True
             launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
+            # Chromium 默认继承系统代理；关闭开关时须显式绕过，纯净模式同样生效。
+            if not use_proxy and self._is_chromium_channel(bs, channel):
+                launch_args.append("--no-proxy-server")
             # 用户明确要求看到真实跳转过程：无论全局 headless 设置如何，检测恒为可见窗口。
             browser = await self._launch_browser(
                 self._playwright,

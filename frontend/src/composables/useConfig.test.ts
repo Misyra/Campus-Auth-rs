@@ -55,6 +55,21 @@ beforeEach(() => {
 });
 
 describe("dirty 快照比对", () => {
+  it("旧配置默认直连，检测代理开关可保存并重新加载", async () => {
+    await config.fetchConfig();
+    expect(config.config.browser.redirect_test_use_proxy).toBe(false);
+    config.config.browser.redirect_test_use_proxy = true;
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+    await config.saveConfig();
+    const payload = patchMock.mock.calls[0][0];
+    expect((payload.browser as Record<string, unknown>).redirect_test_use_proxy).toBe(true);
+    fetchMock.mockResolvedValue({ browser: payload.browser });
+    await config.fetchConfig();
+    expect(config.config.browser.redirect_test_use_proxy).toBe(true);
+    expect(config.dirty.value).toBe(false);
+  });
+
   it("加载配置后 dirty 为 false", async () => {
     await config.fetchConfig();
     expect(config.dirty.value).toBe(false);

@@ -420,7 +420,7 @@ async function confirmImport(): Promise<void> {
             <div v-if="p.editingProfile.value.login_channel === 'browser'" class="redirect-test-card">
               <div class="redirect-test-copy">
                 <strong>先测试是否需要认证地址</strong>
-                <span>请先退出校园网登录，再点击检测；检测时会打开一个浏览器窗口。</span>
+                <span>请先退出校园网登录，再点击检测；默认直连，可在「设置 → 浏览器」开启「重定向检测使用代理」。若需绕过 TUN / VPN，请先暂停该模式。</span>
                 <span
                   v-if="redirectTest.result.value"
                   class="redirect-test-result"

@@ -311,6 +311,17 @@ async function stopBrowser() {
             <span class="sr-only">后台运行</span>
           </label>
         </SettingsRow>
+        <SettingsRow description="默认关闭，检测窗口直连；开启后沿用浏览器代理设置">
+          <template #label>
+            重定向检测使用代理
+            <FieldHelp text="关闭时，检测窗口忽略绑定代理，Edge / Chrome / Chromium 同时绕过系统代理。开启后使用绑定代理，未绑定时沿用浏览器的系统代理行为。仅影响重定向检测，不改变正式登录；TUN / VPN 路由仍需手动暂停。修改后请保存设置。" wide />
+          </template>
+          <label class="toggle setting-row-switch">
+            <input type="checkbox" v-model="config.config.browser.redirect_test_use_proxy" />
+            <span class="toggle-slider"></span>
+            <span class="sr-only">重定向检测使用代理</span>
+          </label>
+        </SettingsRow>
         <SettingsRow description="不加载图片，降低资源占用">
           <template #label>
             低资源模式

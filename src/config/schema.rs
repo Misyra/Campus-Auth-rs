@@ -107,6 +107,8 @@ pub struct BrowserSettings {
     pub login_timeout: u32,
     /// 绑定的代理地址
     pub bind_proxy: String,
+    /// 重定向检测是否使用代理；关闭时检测窗口直连，不影响正式登录
+    pub redirect_test_use_proxy: bool,
 }
 
 impl Default for BrowserSettings {
@@ -134,6 +136,7 @@ impl Default for BrowserSettings {
             navigation_timeout: 15,
             login_timeout: 120,
             bind_proxy: String::new(),
+            redirect_test_use_proxy: false,
         }
     }
 }
@@ -671,6 +674,18 @@ mod tests {
         .expect("老文件必须能解析（字段带 serde default）");
         assert_eq!(legacy.active_script_task, "");
         assert_eq!(legacy.login_channel, LoginChannel::Browser);
+    }
+
+    #[test]
+    fn redirect_test_proxy_defaults_off_and_roundtrips() {
+        let legacy: BrowserSettings = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.redirect_test_use_proxy);
+        let configured: BrowserSettings =
+            serde_json::from_str(r#"{"redirect_test_use_proxy":true}"#).unwrap();
+        assert!(configured.redirect_test_use_proxy);
+        let restored: BrowserSettings =
+            serde_json::from_value(serde_json::to_value(configured).unwrap()).unwrap();
+        assert!(restored.redirect_test_use_proxy);
     }
 
     #[test]

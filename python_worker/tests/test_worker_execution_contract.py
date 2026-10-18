@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from debug_session import DebugSession, _build_steps_info
 from models import Outcome, StepConfig, TaskConfig
 import playwright_worker
@@ -193,10 +195,19 @@ def test_redirect_classifier_distinguishes_portal_online_and_generic_login():
     assert generic["status"] == "not_detected"
 
 
-def test_redirect_test_forces_visible_isolated_browser(monkeypatch):
+@pytest.mark.parametrize("pure_mode", [False, True])
+@pytest.mark.parametrize("channel", ["msedge", "chrome", "chromium", "firefox", "webkit"])
+@pytest.mark.parametrize("use_proxy", [False, True])
+def test_redirect_test_forces_visible_isolated_browser(monkeypatch, pure_mode, channel, use_proxy):
     core = WorkerCore()
     core._playwright = object()
     launched: dict = {}
+    settings = {
+        "browser_channel": channel,
+        "pure_mode": pure_mode,
+        "bind_proxy": "http://127.0.0.1:7890",
+        "redirect_test_use_proxy": use_proxy,
+    }
 
     class FakeLocator:
         def __init__(self, selector: str):
@@ -248,7 +259,11 @@ def test_redirect_test_forces_visible_isolated_browser(monkeypatch):
             launched["context_closed"] = True
 
     class FakeBrowser:
-        async def new_context(self, **_kwargs):
+        async def new_context(self, **kwargs):
+            if use_proxy:
+                assert kwargs["proxy"] == {"server": settings["bind_proxy"]}
+            else:
+                assert "proxy" not in kwargs
             return FakeContext()
 
         async def close(self):
@@ -256,6 +271,10 @@ def test_redirect_test_forces_visible_isolated_browser(monkeypatch):
 
     async def fake_launch(*args, **_kwargs):
         launched["headless"] = args[3]
+        assert ("--no-proxy-server" in args[4]) == (
+            not use_proxy and channel not in ("firefox", "webkit")
+        )
+        assert ("bind_proxy" in args[5]) == use_proxy
         return FakeBrowser()
 
     monkeypatch.setattr(core, "_launch_browser", fake_launch)
@@ -264,7 +283,7 @@ def test_redirect_test_forces_visible_isolated_browser(monkeypatch):
         core.handle_test_redirect(
             {
                 "trigger_url": "http://www.msftconnecttest.com/connecttest.txt",
-                "browser_settings": {},
+                "browser_settings": settings,
             }
         )
     )
@@ -277,6 +296,7 @@ def test_redirect_test_forces_visible_isolated_browser(monkeypatch):
     }
     assert core._context is None
     assert core._page is None
+    assert settings["bind_proxy"] == "http://127.0.0.1:7890"
 
 
 def test_custom_webkit_filters_chromium_only_flags():
