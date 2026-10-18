@@ -1,6 +1,12 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.1.2”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.1.3”。
+
+## v5.1.3（2026-10-18）
+
+- 将重定向检测代理修复与 HTTP 试运行运营商修复汇总为补丁版本，两个修复各自保留独立提交；本次不包含其它本地工作目录。
+- 同步 Cargo.toml / Cargo.lock、前端 package.json / package-lock.json、OpenAPI、OpenWrt 两份包定义及当前版本文档，新增用户更新摘要；Python Worker 版本保持 1.0.0。
+- 发布按主分支 CI 与 OpenWrt 检查通过后推送 v5.1.3 标签，由既有 Release 流程生成多平台包与 Docker 镜像。
 
 ## 开发中（2026-10-18 重定向检测代理开关）
 
