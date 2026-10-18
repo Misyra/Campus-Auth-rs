@@ -16,9 +16,11 @@ import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import HttpFlowFields from "@/components/common/HttpFlowFields.vue";
 import HttpTestResult from "@/components/common/HttpTestResult.vue";
+import CustomSelect from "@/components/common/CustomSelect.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useHttpTaskTest } from "@/composables/useHttpTaskTest";
+import { useCarrierField } from "@/composables/useCarrierField";
 import { useProfiles } from "@/composables/useProfiles";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useScripts } from "@/composables/useScripts";
@@ -31,7 +33,7 @@ import { HTTP_CRYPTO_BUILTINS } from "@/utils/loginChannel";
 import { httpTaskPayload } from "@/utils/httpTask";
 import { buildHttpTaskBindingIndex, buildHttpTaskRows, filterHttpTaskRows } from "@/utils/httpTaskList";
 import { formatMtime } from "@/utils/formatters";
-import { TASK_REPO_URL } from "@/utils/constants";
+import { CARRIER_OPTIONS, TASK_REPO_URL } from "@/utils/constants";
 
 const {
   httpTasks,
@@ -81,6 +83,8 @@ function dragIndex(taskId: string): number {
  */
 const testUsername = ref("");
 const testPassword = ref("");
+const testIsp = ref("");
+const { showCustomCarrier, carrierSelection, customCarrierValue } = useCarrierField(testIsp);
 
 /** 表单控件 id 前缀：与流程编辑器同页共存，避免 label/for 撞车 */
 const uid = `http-tasks-${Math.random().toString(36).slice(2, 8)}`;
@@ -181,6 +185,7 @@ onBeforeUnmount(() => {
  * 结果卡写着具体请求地址与判定结论，字段改过之后它就不再代表当前配置。
  */
 watch(httpTaskDraft, () => clearTestResult(), { deep: true });
+watch([testUsername, testPassword, testIsp], () => clearTestResult());
 
 /** 试运行整个流程：直接使用当前草稿，测试凭据不进入任务配置。 */
 async function sendTestRequest(): Promise<void> {
@@ -198,10 +203,15 @@ async function sendTestRequest(): Promise<void> {
     toastOnly(false, `请先补齐：${draftGapsNow.value.join("、")}`);
     return;
   }
+  if (testIsp.value === "自定义") {
+    toastOnly(false, "请填写自定义运营商关键字");
+    return;
+  }
   await runHttpTaskTest({
     task: httpTaskPayload(draft),
     username: testUsername.value,
     password: testPassword.value,
+    isp: testIsp.value,
     fetch_page: true,
   });
 }
@@ -457,7 +467,7 @@ onMounted(async () => {
           <div class="card-header">
             <h3>试运行任务</h3>
             <FieldHelp
-              text="按顺序执行当前任务的全部步骤，并显示请求和响应。测试账号密码仅用于本次试运行，不会写进任务文件。采用联网检测时，还需要在方案中执行正式登录确认网络结果。"
+              text="按顺序执行当前任务的全部步骤，并显示请求和响应。测试账号、密码与运营商仅用于本次试运行，不会写进任务文件。采用联网检测时，还需要在方案中执行正式登录确认网络结果。"
               wide
             />
             <div class="card-actions">
@@ -476,6 +486,16 @@ onMounted(async () => {
               <div class="form-group">
                 <label :for="`${uid}-test-pass`">测试密码</label>
                 <input :id="`${uid}-test-pass`" v-model="testPassword" type="password" placeholder="仅本次测试使用" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>测试运营商</label>
+                <CustomSelect v-model="carrierSelection" :options="CARRIER_OPTIONS" aria-label="测试运营商" />
+              </div>
+              <div v-if="showCustomCarrier" class="form-group">
+                <label :for="`${uid}-test-carrier-custom`">自定义运营商</label>
+                <input :id="`${uid}-test-carrier-custom`" v-model.trim="customCarrierValue" type="text" placeholder="校园专网" />
               </div>
             </div>
             <p class="hint">按顺序执行当前填写的全部步骤。测试凭据不会保存到任务；任务配置补齐后自动保存。</p>

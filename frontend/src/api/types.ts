@@ -745,6 +745,8 @@ export interface HttpTaskTestPayload {
   profile_id?: string;
   username: string;
   password: string;
+  /** 本次测试的运营商；省略时沿用来源方案，空串表示不选择 */
+  isp?: string;
   /** 是否在运行脚本前抓取认证页原文 */
   fetch_page: boolean;
 }

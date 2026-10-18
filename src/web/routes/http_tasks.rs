@@ -34,6 +34,8 @@ pub struct HttpTaskTestBody {
     pub username: String,
     /// 登录密码；留空时若给了 `profile_id` 则用该方案已保存的密码
     pub password: Zeroizing<String>,
+    /// 本次测试的运营商；省略时沿用来源方案，显式空串表示不选择
+    pub isp: Option<String>,
     /// 是否在运行脚本前抓取认证页原文（脚本 `ctx.page` 的来源）
     pub fetch_page: bool,
 }
@@ -160,12 +162,15 @@ pub async fn test_http_task(
         &task,
         &body.username,
         password.as_str(),
-        // 运营商跟随方案（测试面板的账号可覆盖、运营商不单独提供）：与正式登录同口径
-        profile_runtime
-            .as_ref()
-            .map(|runtime| runtime.profile.isp.trim().to_string())
-            .unwrap_or_default()
-            .as_str(),
+        body.isp
+            .as_deref()
+            .unwrap_or_else(|| {
+                profile_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.profile.isp.as_str())
+                    .unwrap_or_default()
+            })
+            .trim(),
         &auth_url,
         body.fetch_page,
         ignore_https_errors,
@@ -439,6 +444,58 @@ mod tests {
                 .starts_with(&portal),
             "rendered_url 未命中内联地址: {json}"
         );
+    }
+
+    /// 运营商可由测试覆盖；省略保留方案回退，显式空串清空且不改写方案。
+    #[tokio::test]
+    async fn test_isp_override_and_profile_fallback() {
+        for (isp, expected) in [
+            (None, "profile-isp"),
+            (Some(" custom-isp "), "custom-isp"),
+            (Some(""), ""),
+        ] {
+            let portal = spawn_gate_portal(&format!("isp={expected}&end=1")).await;
+            let (app, inner) = mock_app(&format!("{portal}?isp={{isp}}&end=1"));
+            inner.lock().unwrap().runtime.profile.isp = "profile-isp".into();
+            let mut payload = serde_json::json!({
+                "task_id": "portal-http", "profile_id": "dorm",
+                "username": "student", "password": "pw"
+            });
+            if let Some(isp) = isp {
+                payload["isp"] = serde_json::json!(isp);
+            }
+            let resp = app.oneshot(post(payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let json = body_json(resp).await;
+            assert_eq!(json["data"]["outcome"], "success", "{json}");
+            assert_eq!(inner.lock().unwrap().runtime.profile.isp, "profile-isp");
+        }
+    }
+
+    /// 任务页不提供方案时，也能将自定义运营商传入流程脚本。
+    #[tokio::test]
+    async fn test_inline_draft_isp_reaches_transform() {
+        let portal = spawn_gate_portal("isp=campus").await;
+        let (app, _inner) = mock_app("http://unused.example/");
+        let resp = app
+            .oneshot(post(serde_json::json!({
+                "task": {
+                    "type": "http", "schema_version": 2, "task_id": "draft", "name": "运营商测试",
+                    "steps": [
+                        { "id": "prepare", "kind": "transform",
+                          "script": "function transform(ctx) { return { carrier: ctx.isp }; }" },
+                        { "id": "send", "kind": "request", "method": "GET",
+                          "url": format!("{portal}?isp={{carrier}}") }
+                    ],
+                    "success_pattern": "登录成功", "failure_pattern": "密码错误"
+                },
+                "username": "student", "password": "pw", "isp": "campus"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["data"]["outcome"], "success", "{json}");
     }
 
     /// 网络检测模式只证明请求已发送，测试 API 必须显式告知前端尚未验证联网。
