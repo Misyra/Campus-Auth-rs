@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
 import { IS_OPENWRT } from "@/utils/platform";
+import { autostartDescription } from "@/utils/autostart";
 import Modal from "@/components/common/Modal.vue";
 import { ref } from "vue";
 import { useRouter } from "vue-router";
@@ -16,7 +17,7 @@ const version = ref("unknown");
 const pythonStatus = ref("未知");
 const pythonReady = ref<boolean | null>(null);
 const platform = ref("");
-const autostartEnabled = ref(false);
+const autostartText = ref("无法确认");
 
 /** 并行拉取版本/自启动/环境状态；各请求独立降级，避免单点失败遮掉其它信息 */
 async function loadInfo() {
@@ -32,7 +33,7 @@ async function loadInfo() {
   }
   if (autoResult.status === "fulfilled") {
     platform.value = autoResult.value.platform;
-    autostartEnabled.value = autoResult.value.enabled;
+    autostartText.value = autostartDescription(autoResult.value);
   } else {
     frontendLogger.warn("about", "自启动信息加载失败", autoResult.reason);
   }
@@ -135,7 +136,7 @@ const {
               </div>
               <div class="info-item">
                 <span class="info-label">自启动</span>
-                <span class="info-value">{{ autostartEnabled ? "已启用" : "未启用" }}</span>
+                <span class="info-value">{{ autostartText }}</span>
               </div>
             </div>
           </div>

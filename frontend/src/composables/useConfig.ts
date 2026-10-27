@@ -279,13 +279,17 @@ async function toggleAutostart(enable: boolean): Promise<void> {
     const data = await autostartApi.toggle(enable);
     frontendLogger.info("autostart", data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
     toastOnly(true, data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
+    if (typeof data?.warning === "string") {
+      frontendLogger.warn("autostart", data.warning);
+      toastOnly(false, `系统设置已生效，但配置缓存保存失败：${data.warning}`);
+    }
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
       frontendLogger.warn("autostart", "后端不支持开机自启动");
       toastOnly(false, "当前后端版本不支持开机自启动，请重启后端");
     } else {
       frontendLogger.error("autostart", `${enable ? "启用" : "关闭"}自启动异常`, error);
-      toastOnly(false, `${enable ? "启用" : "关闭"}自启动失败`);
+      toastOnly(false, extractApiError(error, `${enable ? "启用" : "关闭"}自启动失败`));
     }
   } finally {
     await useStatus().fetchAutostart();

@@ -354,7 +354,7 @@ pub struct AppSettings {
     pub startup_action: StartupAction,
     /// Web 服务监听端口
     pub port: u16,
-    /// 是否已注册系统自启动
+    /// 自启动配置标记；Windows 仅作缓存，有效状态以系统注册与审批为准。
     pub autostart_enabled: bool,
     /// 是否发送任务相关系统通知（任务完成后经 notification 日志源提示）
     pub task_notification: bool,

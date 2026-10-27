@@ -273,7 +273,11 @@ campus-auth --force   # 终止后抢占
 
 ### 自启动被拦截
 
-Windows 自启动为计划任务，部分杀毒软件可能拦截，建议将 `campus-auth.exe` 加入白名单后重试 `--autostart enable`。
+Windows 自启动使用当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Campus-Auth` 注册项，无需管理员权限。「设置 → 系统与更新」读取实际注册路径和 Windows 启动审批状态，区分未注册、路径或参数不符、Windows 已禁用和无法确认。若有异常，可重新启用以修复，也可点击「取消注册」关闭残留项。
+
+移动或重命名程序目录后，请从新位置运行程序并重新启用自启动。程序启动时只诊断和记录，不会自动覆盖任务管理器或安全软件的选择。启用操作会清除该项的 Windows 禁用记录，并立即及短暂延迟后回读；若安全软件随后撤销注册，界面轮询会更新为未注册，不能把一次写入成功视为未来必然启动。请根据安全软件的提示检查拦截原因。
+
+也可在终端执行 `campus-auth.exe --autostart enable` / `--autostart disable`，使用自定义数据目录时加上 `--base-path "数据目录"`。新注册命令带有 `--startup-launch` 来源标记，日志会记录 `system_autostart`；旧版不带参数的注册仍兼容，需重新启用后才有来源标记。日志导出包和反馈包的 `meta.json` 包含当前程序路径、数据目录以及自启动状态或读取错误。
 
 ## 11. 相关文档
 

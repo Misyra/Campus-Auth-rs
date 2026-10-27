@@ -2808,6 +2808,7 @@
   },
   "/api/autostart/status": {
    "get": {
+    "description": "Windows 读取 HKCU Run 与 StartupApproved；enabled 由路径、数据目录、参数及审批观测计算，配置位仅为 cached_enabled。未知审批不判为启用，读取失败返回 500。其它平台沿用既有口径，source 标注 system 或 config。",
     "operationId": "get___api_autostart_status",
     "responses": {
      "200": {

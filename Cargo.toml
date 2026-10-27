@@ -141,6 +141,10 @@ windows-sys = { version = "0.61", features = [
     # GUI 子系统下重新附着父控制台（AttachConsole / SetStdHandle）
     "Win32_System_Console",
     "Win32_Networking_WinSock",
+    # 自启动状态使用原生注册表读取，保留访问拒绝与值不存在的区别。
+    "Win32_System_Registry",
+    "Win32_Security",
+    "Win32_UI_Shell",
     # CONOUT$ 标准句柄重建（CreateFileW）
     "Win32_Storage_FileSystem",
     # 孤儿浏览器清理的 kill 前复核：CreateToolhelp32Snapshot 读实时父 PID
