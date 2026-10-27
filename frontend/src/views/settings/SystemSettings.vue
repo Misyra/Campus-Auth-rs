@@ -393,7 +393,7 @@ onMounted(() => {
             <span v-if="autostart.method !== '-'" class="badge badge--sm badge--mono">{{ autostart.method }}</span>
             <FieldHelp text="Windows 状态来自系统注册与启动审批检查。移动程序后请重新启用修复；程序不会自动覆盖任务管理器的禁用选择。" />
           </template>
-          <button v-if="!autostart.enabled && (autostart.registered || autostart.error)" class="btn btn-sm btn-secondary" :disabled="busy.autostart" @click="config.toggleAutostart(false)">取消注册</button>
+          <button v-if="!autostart.enabled && (autostart.registered || autostart.error)" type="button" class="btn btn-sm btn-secondary" :disabled="busy.autostart" @click="config.toggleAutostart(false)">取消注册</button>
           <label class="toggle setting-row-switch">
             <input
               type="checkbox"
