@@ -1,11 +1,12 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-preview.1”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.1”。
 
-## v5.2.0-preview.1（2026-10-27）
+## v5.2.0-beta.1（2026-10-27）
 
+- 发布前将版本标识由 preview.1 统一调整为 beta.1，明确首个 Beta 测试版本；Git 标签与发布包使用标准 SemVer 预发布版本 `5.2.0-beta.1`。
 - 整合校园网统一出口与网卡 / DNS 绑定、调用链修复、下拉交互优化，以及 Windows 系统自启动状态复核与取消注册按钮修复，形成预发布版本。
-- 同步 Cargo.toml / Cargo.lock、frontend/package.json / package-lock.json、OpenAPI 和 OpenWrt 两份包定义为 `5.2.0-preview.1`；Python Worker 继续固定为 `1.0.0`。
+- 同步 Cargo.toml / Cargo.lock、frontend/package.json / package-lock.json、OpenAPI 和 OpenWrt 两份包定义为 `5.2.0-beta.1`；Python Worker 继续固定为 `1.0.0`。
 - 从逐项开发记录汇总面向用户的更新日志；发布使用带预发布标识的 Git 标签与 GitHub prerelease，正式版稳定通道不切换到此测试版。
 - 整合验证：Rust 库 1145 项通过（3 项默认忽略），前端 570 项与 OpenWrt 包装器 10 项通过；版本及锁文件一致性检查通过。
 
