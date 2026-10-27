@@ -222,6 +222,9 @@ impl BridgeApi for BridgeSupervisor {
 /// Bridge 相关错误
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
+    /// 所选网络出口暂不可用；可冷却重试，但不改走其他网卡。
+    #[error("校园网出口不可用: {0}")]
+    NetworkEgress(String),
     /// Python 环境未安装
     #[error("Worker 环境未安装")]
     WorkerNotInstalled,
@@ -353,6 +356,8 @@ pub use crate::ServiceHandle;
 
 /// Python Bridge 公共入口
 pub struct BridgeSupervisor {
+    /// 浏览器当前出口租约；跨 IPC 命令保活，禁止保留无主转发监听器。
+    browser_egress: Mutex<Option<Arc<crate::network::egress::PreparedEgress>>>,
     inner: Mutex<BridgeInner>,
     config: Arc<ConfigService>,
     status: Arc<StatusManager>,
@@ -390,6 +395,7 @@ impl BridgeSupervisor {
         // 避免 spawn 检查与环境就绪判定各说各话（曾导致 cargo run 下误报"Worker 环境未安装"）
         let worker_project_dir = worker_project_dir(&base_path);
         Arc::new_cyclic(|weak| Self {
+            browser_egress: Mutex::new(None),
             orphan_cleanup_done: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(BridgeInner {
                 debug_session_open: false,
@@ -560,6 +566,10 @@ impl BridgeSupervisor {
         }
         // 强杀子进程并标记 Error
         kill_worker_now(self).await;
+        self.browser_egress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     /// 归属感知的强制回收：仅当会话槽位空闲或属于调用方时才强杀 Worker。
@@ -1047,7 +1057,7 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
 async fn execute_inner(
     this: &Arc<BridgeSupervisor>,
     method: &str,
-    params: Value,
+    mut params: Value,
 ) -> Result<
     (
         oneshot::Receiver<Result<IpcResponse, BridgeError>>,
@@ -1118,6 +1128,35 @@ async fn execute_inner(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let token = CancellationToken::new();
 
+    let browser_egress = if params.get("browser_settings").is_some() && !is_lightweight {
+        let settings = params
+            .get("network")
+            .cloned()
+            .map(serde_json::from_value::<crate::network::settings::NetworkSettings>)
+            .transpose()
+            .map_err(|_| BridgeError::IpcWriteError(std::io::Error::other("网络出口配置无效")))?
+            .unwrap_or_else(|| this.config.runtime().load().network.clone());
+        let previous = this
+            .browser_egress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let route = if let Some(previous) = previous
+            && previous.settings == settings
+            && previous.still_current().await
+        {
+            previous
+        } else {
+            crate::network::egress::PreparedEgress::prepare(&settings)
+                .await
+                .map_err(|e| BridgeError::NetworkEgress(e.to_string()))?
+        };
+        route.apply_browser(&mut params["browser_settings"]);
+        Some(route)
+    } else {
+        None
+    };
+
     // 4. 单一原子临界区：互斥检查 → 分配 id → 注册 pending → 发送请求 → 注册 cancel/设置会话。
     // 全程同步操作，一次加锁完成，消除各步骤之间的窗口。原实现分 6 次独立加解锁，
     // “compat 检查”与“会话赋值”不原子，两个并发请求可能都通过互斥检查后各自赋值会话；
@@ -1159,6 +1198,12 @@ async fn execute_inner(
             }
         }
 
+        if let Some(route) = browser_egress {
+            *this
+                .browser_egress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(route);
+        }
         // 4.4 发送成功后再改动会话/取消状态（此后不再有可失败操作）。
         // cancel_registry 支持多活跃 token 共存：InLogin 时新命令 supersede 会话槽位
         // （current_cancel_id 更新为新请求），但**不移除旧命令的 cancel_id**——
@@ -1676,6 +1721,10 @@ async fn send_health_check(
 
 /// 强杀当前 Worker 子进程并标记 Error（不清理 cancel 注册表/会话）
 async fn kill_worker_now(this: &BridgeSupervisor) {
+    this.browser_egress
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     let proc = this
         .inner
         .lock()

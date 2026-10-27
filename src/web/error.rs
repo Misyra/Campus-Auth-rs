@@ -261,7 +261,8 @@ impl From<crate::bridge::BridgeError> for ApiError {
             crate::bridge::BridgeError::WorkerNotInstalled => {
                 ApiError::WorkerNotInstalled(e.to_string())
             }
-            crate::bridge::BridgeError::WorkerStartupTimeout => {
+            crate::bridge::BridgeError::NetworkEgress(_)
+            | crate::bridge::BridgeError::WorkerStartupTimeout => {
                 ApiError::ServiceUnavailable(e.to_string())
             }
             crate::bridge::BridgeError::WorkerSpawnBlocked => {

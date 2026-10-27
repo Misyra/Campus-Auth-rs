@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import { monitorApi } from "@/api";
 import { extractApiError } from "@/api/client";
-import type { RedirectTestResult } from "@/api/types";
+import type { NetworkSettings, RedirectTestResult } from "@/api/types";
 import { useToast } from "@/composables/useToast";
 
 export function useRedirectTest() {
@@ -11,12 +11,12 @@ export function useRedirectTest() {
   const result = ref<RedirectTestResult | null>(null);
 
   /** 启动一次可见浏览器检测；所有结果只展示，不回填或保存 URL。 */
-  async function testRedirect(triggerUrl: string): Promise<RedirectTestResult | null> {
+  async function testRedirect(triggerUrl: string, network?: NetworkSettings): Promise<RedirectTestResult | null> {
     if (testing.value) return null;
     testing.value = true;
     result.value = null;
     try {
-      const next = await monitorApi.testRedirect(triggerUrl);
+      const next = network ? await monitorApi.testRedirect(triggerUrl, network) : await monitorApi.testRedirect(triggerUrl);
       result.value = next;
       toastOnly(next.status === "detected", next.message);
       return next;

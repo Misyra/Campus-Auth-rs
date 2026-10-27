@@ -143,13 +143,8 @@ impl ServiceContainer {
         // ---- Layer 6：网络探测 & 监测（login 前置，供构造注入）----
         let detector = create_detector();
         let monitor = Arc::new(
-            MonitorService::new(
-                config.clone(),
-                detector.clone(),
-                None,
-                Some(metrics.clone()),
-            )
-            .context("初始化 MonitorService 失败")?,
+            MonitorService::new(config.clone(), detector.clone(), Some(metrics.clone()))
+                .context("初始化 MonitorService 失败")?,
         );
 
         // ---- Layer 7：登录编排器（构造注入全部依赖，无 setter）----

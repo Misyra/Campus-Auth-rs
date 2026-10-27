@@ -129,6 +129,8 @@ impl std::fmt::Debug for ProfileSnapshot {
 /// 合并全局配置与活跃 Profile。构建后不可变，配置变更时整体原子替换。
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
+    /// 当前方案的统一校园网网络出口。
+    pub network: crate::network::settings::NetworkSettings,
     /// 浏览器启动参数
     pub browser: BrowserSettings,
     /// 网络探测参数
@@ -195,6 +197,7 @@ pub fn build_runtime_config(
     };
 
     Ok(RuntimeConfig {
+        network: crate::network::settings::NetworkSettings::effective(profile, &settings.global),
         browser: settings.global.browser.clone(),
         monitor: settings.global.monitor.clone(),
         pause: settings.global.pause.clone(),
@@ -264,6 +267,7 @@ mod tests {
         // RuntimeConfig 的派生 Debug 嵌套输出 ProfileSnapshot 时同样脱敏
         let snapshot = snapshot_with_password("NESTED_SECRET");
         let rc = RuntimeConfig {
+            network: Default::default(),
             browser: BrowserSettings::default(),
             monitor: MonitorSettings::default(),
             pause: PauseSettings::default(),

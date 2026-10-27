@@ -1,6 +1,6 @@
 [package]
 name = "campus-auth"
-version = "5.1.3"
+version = "5.2.0-beta.1"
 edition = "2024"
 rust-version = "1.91"
 default-run = "campus-auth"
@@ -42,7 +42,9 @@ tokio = { version = "1", features = [
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 async-stream = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy", "cookies", "socks"] }
+socket2 = { version = "0.6", features = ["all"] }
+percent-encoding = "2"
 
 # HTTP 框架 & 中间件
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
@@ -138,6 +140,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
     # GUI 子系统下重新附着父控制台（AttachConsole / SetStdHandle）
     "Win32_System_Console",
+    "Win32_Networking_WinSock",
     # 自启动状态使用原生注册表读取，保留访问拒绝与值不存在的区别。
     "Win32_System_Registry",
     "Win32_Security",

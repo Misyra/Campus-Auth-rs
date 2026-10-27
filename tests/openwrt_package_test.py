@@ -2,6 +2,9 @@
 
 import io
 import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 import struct
 import sys
@@ -85,6 +88,33 @@ class PackageTests(unittest.TestCase):
             self.assertIn(f"PKG_VERSION:={version}\n",
                           (ROOT / "openwrt/package" / package / "Makefile").read_text(encoding="utf-8"))
 
+    @unittest.skipUnless(shutil.which("make"), "需要 GNU make 验证 SDK 包定义")
+    def test_sdk_versions_preserve_prerelease_ordering_formats(self):
+        sdk = self.base / "sdk"
+        sdk.mkdir()
+        (sdk / "rules.mk").write_text("", encoding="utf-8")
+        (sdk / "package.mk").write_text("", encoding="utf-8")
+        for package in ["campus-auth", "luci-app-campus-auth"]:
+            source = (ROOT / "openwrt/package" / package / "Makefile").read_text(encoding="utf-8")
+            for version, apk, ipk in [
+                ("5.2.0-alpha.1", "5.2.0_alpha1", "5.2.0~alpha.1"),
+                ("5.2.0-beta.1", "5.2.0_beta1", "5.2.0~beta.1"),
+                ("5.2.0-beta.10", "5.2.0_beta10", "5.2.0~beta.10"),
+                ("5.2.0-rc.1", "5.2.0_rc1", "5.2.0~rc.1"),
+                ("5.2.0", "5.2.0", "5.2.0"),
+            ]:
+                makefile = sdk / "Makefile"
+                makefile.write_text(re.sub(r"(?m)^PKG_VERSION:=.*$", f"PKG_VERSION:={version}", source, count=1),
+                                    encoding="utf-8")
+                for use_apk, expected in [("y", apk), ("", ipk)]:
+                    with self.subTest(package=package, version=version, use_apk=use_apk):
+                        result = subprocess.run([
+                            "make", "--no-print-directory", "-s", "-f", str(makefile),
+                            "--eval=print-version:;@echo $(PKG_VERSION)", "print-version",
+                            f"TOPDIR={sdk}", f"INCLUDE_DIR={sdk}", f"CONFIG_USE_APK={use_apk}",
+                        ], check=True, capture_output=True, text=True)
+                        self.assertEqual(result.stdout.strip(), expected)
+
     def test_cli_packages_each_supported_architecture_and_keeps_data_unowned(self):
         binary = self.base / "fixture-binary"
         binary.write_bytes(b"fixture")
@@ -100,6 +130,10 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(data["etc/config/campus-auth"][1], 0o600)
                 self.assertFalse(any(name.startswith("etc/campus-auth/") or name.startswith("root/") for name in data))
                 scripts = unpack(outer["control.tar.gz"][0])
+                version = package_ipk.tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+                expected_version = version.replace("-", "~", 1) + "-1"
+                self.assertIn(f"Version: {expected_version}\n".encode(), scripts["control"][0])
+                self.assertIn(expected_version, path.name)
                 self.assertIn(b"PKG_UPGRADE", scripts["prerm"][0])
                 self.assertNotIn(b" disable", scripts["postinst"][0])
                 self.assertNotIn(b" enable", scripts["postinst"][0])

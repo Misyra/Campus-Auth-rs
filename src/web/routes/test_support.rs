@@ -16,6 +16,7 @@ use crate::config::{
 /// 构造测试用 RuntimeConfig（类型未派生 Default，字段逐个填充默认值）
 pub fn test_runtime_config() -> RuntimeConfig {
     RuntimeConfig {
+        network: Default::default(),
         browser: BrowserSettings::default(),
         monitor: MonitorSettings::default(),
         pause: PauseSettings::default(),

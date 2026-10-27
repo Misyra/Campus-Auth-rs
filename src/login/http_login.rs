@@ -7,7 +7,7 @@
 //! 2. 用户加密脚本：内置 boa 引擎在无网络/文件沙箱中执行 `transform(ctx)`
 //! 3. 模板替换：URL/请求头/请求体中的 `{username}` `{password}` 与脚本返回的
 //!    任意字段按名替换（值原样替换不转义，特殊字符可用 `url_encode()`）
-//! 4. 发送请求（不跟随系统代理；跨源跳转重建无凭据请求，上限 5 跳）
+//! 4. 经方案统一出口发送请求（跨源跳转重建无凭据请求，上限 5 跳）
 //! 5. 成败判定：失败关键字命中 → 终态失败；成功关键字命中（或留空时 HTTP 2xx）
 //!    → 交由会话状态机做登录后网络探测复核
 //!
@@ -77,6 +77,8 @@ const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 /// 一次直连登录尝试的完整请求参数（由方案绑定的直连任务构造）
 #[derive(Clone)]
 pub(crate) struct HttpLoginRequest {
+    /// 本次登录与网络探测共用的出口配置。
+    pub network: crate::network::settings::NetworkSettings,
     /// 新式有序流程；非空时取代旧固定请求链。
     pub steps: Vec<HttpFlowStep>,
     /// 结果判断所引用的请求步骤 ID；空串表示最后一个请求步骤。
@@ -165,6 +167,7 @@ impl HttpLoginRequest {
             Self::validate_url(&task.url)?;
         }
         let request = Self {
+            network: Default::default(),
             steps: task.steps.clone(),
             result_step_id: task.result_step_id.clone(),
             method: task.method,
@@ -506,7 +509,24 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     // 0. 本次尝试共用的 HTTP 客户端（退出登录请求 / 登录页抓取 / 前置请求 / 登录请求
     //    四处都用它）：连接池挂在 Client 上，CSRF 令牌绑定 TCP 连接的门户要求取 token 与
     //    发登录落在同一条 keep-alive 连接，故整次尝试只能建一个。见 [`build_client`]。
-    let client = match build_client(req.ignore_https_errors) {
+    let egress = match crate::network::egress::PreparedEgress::prepare(&req.network).await {
+        Ok(route) => route,
+        Err(error) => {
+            return abort_report(
+                Outcome::NavigationTimeout,
+                error.to_string(),
+                None,
+                None,
+                None,
+                start.elapsed().as_millis() as u64,
+            );
+        }
+    };
+    let bound_request = egress
+        .local_address()
+        .map(|address| req.clone().with_local_address(&address));
+    let req = bound_request.as_ref().unwrap_or(req);
+    let client = match build_client(req.ignore_https_errors, &egress) {
         Ok(client) => client,
         Err(e) => {
             return abort_report(
@@ -778,7 +798,24 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 /// 执行可编辑的有序 HTTP 登录流程；旧任务仍走上面的固定链。
 async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     let start = Instant::now();
-    let client = match build_client(req.ignore_https_errors) {
+    let egress = match crate::network::egress::PreparedEgress::prepare(&req.network).await {
+        Ok(route) => route,
+        Err(error) => {
+            return abort_report(
+                Outcome::NavigationTimeout,
+                error.to_string(),
+                None,
+                None,
+                None,
+                start.elapsed().as_millis() as u64,
+            );
+        }
+    };
+    let bound_request = egress
+        .local_address()
+        .map(|address| req.clone().with_local_address(&address));
+    let req = bound_request.as_ref().unwrap_or(req);
+    let client = match build_client(req.ignore_https_errors, &egress) {
         Ok(client) => client,
         Err(error) => {
             return abort_report(
@@ -1245,7 +1282,7 @@ fn flow_abort(
 ///
 /// 统一收口三件事，避免两处各自构造时策略漂移：
 /// - 证书策略：按 `ignore_https_errors`（自签门户必需，与浏览器渠道同口径）
-/// - 代理：显式 `no_proxy`（校园网网关是本机直连可达的内网地址，走代理必失败）
+/// - 出口：与登录和探测共用方案网络策略，不在执行器另行决定代理
 /// - User-Agent：未显式配置时补浏览器 UA（reqwest 默认完全不发该头）
 ///
 /// **整次直连尝试只建一个**，由调用方传给登录页抓取 / 前置请求 / 登录请求三处：
@@ -1255,12 +1292,16 @@ fn flow_abort(
 ///
 /// 超时因此不设在 Client 上（一个 Client 只能有一个全局超时），改由每个请求的
 /// `RequestBuilder::timeout` 单独给：抓登录页 5s / 前置请求 10s / 登录 20s。
-fn build_client(ignore_https_errors: bool) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+fn build_client(
+    ignore_https_errors: bool,
+    egress: &crate::network::egress::PreparedEgress,
+) -> Result<reqwest::Client, String> {
+    egress
+        .client_builder()
+        .map_err(|e| e.to_string())?
         .redirect(Policy::none())
         // 每次登录尝试只建一个 Client，Cookie 仅在该次流程和所属域名内复用。
         .cookie_store(true)
-        .no_proxy()
         .danger_accept_invalid_certs(ignore_https_errors)
         .user_agent(DEFAULT_USER_AGENT)
         .build()
@@ -2283,6 +2324,7 @@ mod tests {
 
     fn request(url: String) -> HttpLoginRequest {
         HttpLoginRequest {
+            network: Default::default(),
             steps: Vec::new(),
             result_step_id: String::new(),
             method: HttpRequestMethod::Get,

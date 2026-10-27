@@ -2,6 +2,8 @@
 /** 认证方案页：方案列表与编辑器、重定向检测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
 import LoginChannelField from "@/components/common/LoginChannelField.vue";
+import ProxyBypassHelp from "@/components/common/ProxyBypassHelp.vue";
+import NetworkEgressFields from "@/components/common/NetworkEgressFields.vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useProfiles } from "@/composables/useProfiles";
@@ -30,7 +32,7 @@ const { toastOnly } = useToast();
 
 /** 用草稿中的自定义触发地址（空值即内置默认）启动一次可见浏览器检测。 */
 async function testRedirectForEditor(): Promise<void> {
-  await redirectTest.testRedirect(p.editingProfile.value?.trigger_url ?? "");
+  await redirectTest.testRedirect(p.editingProfile.value?.trigger_url ?? "", p.editingProfile.value?.network ?? undefined);
 }
 
 /**
@@ -420,7 +422,7 @@ async function confirmImport(): Promise<void> {
             <div v-if="p.editingProfile.value.login_channel === 'browser'" class="redirect-test-card">
               <div class="redirect-test-copy">
                 <strong>先测试是否需要认证地址</strong>
-                <span>请先退出校园网登录，再点击检测；默认直连，可在「设置 → 浏览器」开启「重定向检测使用代理」。若需绕过 TUN / VPN，请先暂停该模式。</span>
+                <span>请先退出校园网登录，再点击检测；检测使用下方“校园网出口”，与正式登录一致。TUN / DNS 排查说明也在下方。</span>
                 <span
                   v-if="redirectTest.result.value"
                   class="redirect-test-result"
@@ -445,6 +447,8 @@ async function confirmImport(): Promise<void> {
               <span class="hint" v-else-if="followsRedirect">当前将打开默认触发地址并由浏览器跟随门户跳转；多数校园网无需填写。</span>
               <span class="hint" v-else>已填写时直接打开这个网址，不再经过重定向触发页。</span>
             </div>
+            <NetworkEgressFields v-model="p.editingProfile.value.network" :script-channel="p.editingProfile.value.login_channel === 'script'" />
+            <ProxyBypassHelp />
             <details v-if="followsRedirect" class="redirect-advanced">
               <summary>重定向高级设置</summary>
               <div class="form-group">

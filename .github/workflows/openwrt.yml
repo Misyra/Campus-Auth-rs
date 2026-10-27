@@ -159,6 +159,16 @@ jobs:
         env:
           FORMAT: ${{ matrix.format }}
         run: |
+          if [ "$FORMAT" = apk ]; then
+            # 使用 SDK 自带包管理器验证格式及 Beta 到正式版的升级顺序。
+            version=$(sed -n 's/^PKG_VERSION:=\([0-9][^$]*\)$/\1/p' openwrt/package/campus-auth/Makefile)
+            package_version=$(printf '%s' "$version" | sed 's/-alpha\./_alpha/;s/-beta\./_beta/;s/-rc\./_rc/')
+            apk=sdk/staging_dir/host/bin/apk
+            "$apk" version -c "$package_version-r1"
+            expected="="
+            case "$version" in *-*) expected="<";; esac
+            test "$("$apk" version -t "$package_version-r1" "${version%%-*}-r1")" = "$expected"
+          fi
           mkdir -p sdk-output
           find sdk/bin/packages -name "*campus-auth*.$FORMAT" -exec cp {} sdk-output/ \;
           test "$(find sdk-output -name "*.$FORMAT" | wc -l)" -eq 2

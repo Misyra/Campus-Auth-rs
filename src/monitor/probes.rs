@@ -102,8 +102,21 @@ pub fn parse_url_host_port(input: &str) -> Option<(String, u16)> {
 }
 
 /// TCP 连接
-async fn tcp_connect(host: &str, port: u16, timeout: Duration) -> std::io::Result<()> {
-    match tokio::time::timeout(timeout, TcpStream::connect((host, port))).await {
+async fn tcp_connect(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    egress: Option<&crate::network::egress::PreparedEgress>,
+) -> std::io::Result<()> {
+    match tokio::time::timeout(timeout, async {
+        if let Some(route) = egress {
+            route.connect(host, port).await
+        } else {
+            TcpStream::connect((host, port)).await
+        }
+    })
+    .await
+    {
         Ok(Ok(_stream)) => Ok(()),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(std::io::Error::new(
@@ -120,6 +133,15 @@ impl TcpProbe {
     /// 并发连接所有目标，取首个成功。
     #[instrument(skip_all)]
     pub async fn run(targets: &[String], timeout: Duration) -> (ProbeOutcome, Vec<PerProbeDetail>) {
+        Self::run_via(targets, timeout, None).await
+    }
+
+    /// 使用与登录一致的出口执行 TCP 探测。
+    pub async fn run_via(
+        targets: &[String],
+        timeout: Duration,
+        egress: Option<std::sync::Arc<crate::network::egress::PreparedEgress>>,
+    ) -> (ProbeOutcome, Vec<PerProbeDetail>) {
         if targets.is_empty() {
             return (ProbeOutcome::Disabled, Vec::new());
         }
@@ -129,13 +151,16 @@ impl TcpProbe {
             .iter()
             .map(|target| {
                 let target = target.clone();
+                let egress = egress.clone();
                 Box::pin(async move {
                     let start = Instant::now();
                     let (success, err) = match parse_host_port(&target) {
-                        Some((host, port)) => match tcp_connect(&host, port, timeout).await {
-                            Ok(()) => (true, None),
-                            Err(e) => (false, Some(e.to_string())),
-                        },
+                        Some((host, port)) => {
+                            match tcp_connect(&host, port, timeout, egress.as_deref()).await {
+                                Ok(()) => (true, None),
+                                Err(e) => (false, Some(e.to_string())),
+                            }
+                        }
                         None => (false, Some("非法地址格式".to_string())),
                     };
                     PerProbeDetail::new(target, success, start, None, err)

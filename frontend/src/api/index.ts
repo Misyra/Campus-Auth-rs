@@ -120,10 +120,11 @@ export const monitorApi = {
   start: () => http.post<MutationResult>("/api/monitor/start"),
   stop: () => http.post<MutationResult>("/api/monitor/stop"),
   /** 重定向检测：用可见浏览器验证能否进入校园网认证页，不回填最终地址。 */
-  testRedirect: (triggerUrl: string) =>
+  interfaces: () => http.get<import("./types").EgressAdapter[]>("/api/network/interfaces"),
+  testRedirect: (triggerUrl: string, network?: import("./types").NetworkSettings) =>
     http.post<RedirectTestResult>(
       "/api/monitor/test-redirect",
-      { trigger_url: triggerUrl },
+      { trigger_url: triggerUrl, ...(network ? { network } : {}) },
       { timeout: 60000 },
     ),
 };

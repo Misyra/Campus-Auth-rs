@@ -10,6 +10,7 @@
 
 ## 功能指南
 
+- [校园网统一出口与 Clash / TUN 配置](proxy-bypass-guide.md) — 按方案绑定网卡、统一登录与探测代理、学校 DNS、Clash 绕过与冷却恢复
 - [直连请求登录使用指南](http-login-guide.md) — 免 Python / 浏览器的 HTTP 直连登录：怎么抓门户请求、占位符、成功/失败判定、凭据变换脚本、常见问题（软件内「直连配置向导」位于「任务」页的直连任务编辑器里，是本指南的分步版本）
 - [任务使用手册](task-manual.md) — 日常管理、录制器、调试、API 一览
 - [任务编写指南](task-writing-guide.md) — 浏览器任务 JSON 详解（步骤类型、变量、frame、success_condition、选择器）

@@ -238,6 +238,7 @@ async function saveProfile(): Promise<boolean> {
         login_channel: settings.login_channel ?? "browser",
         active_http_task: settings.active_http_task ?? "",
         active_script_task: settings.active_script_task ?? "",
+        ...(settings.network ? { network: settings.network } : {}),
       });
     } else {
       data = await profilesApi.save(profileId, {

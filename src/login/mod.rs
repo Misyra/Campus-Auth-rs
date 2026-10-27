@@ -173,6 +173,7 @@ impl LoginHandle {
             Err(_) => None,
         }
         .unwrap_or_else(|| LoginResult {
+            network_retryable: false,
             terminal: LoginTerminal::Failed,
             message: "登录结果通道关闭".into(),
             source: self.source,
@@ -436,12 +437,12 @@ impl LoginOrchestrator {
         );
 
         // 读取最新运行时配置（每次 submit 重新读取，不缓存）
-        let rt = self.config.runtime().load_full();
-        let resolved_profile = match self.resolve_profile(source, &rt, &profile_id).await {
-            Ok(p) => p,
+        let active_rt = self.config.runtime().load_full();
+        let rt = match self.resolve_runtime(source, &active_rt, &profile_id).await {
+            Ok(rt) => rt,
             Err(handle) => return handle,
         };
-        let profile = &resolved_profile;
+        let profile = &rt.profile;
 
         // 本次生效的浏览器任务：显式 task_id（定时任务/任务页立即执行）优先，
         // 其次取当前方案的 active_task（「账号 / 配置方案」页按方案绑定），
@@ -459,6 +460,16 @@ impl LoginOrchestrator {
         };
         let use_http = effective_channel == LoginChannel::Http;
         let use_script = effective_channel == LoginChannel::Script;
+        if use_script && rt.network.mode == crate::network::settings::NetworkMode::Interface {
+            return self
+                .immediate_handle(
+                    source,
+                    false,
+                    "脚本渠道无法强制绑定网卡，请使用浏览器或 HTTP 登录".into(),
+                    profile.id.clone(),
+                )
+                .await;
+        }
         if !effective_channel.is_supported() {
             return self
                 .immediate_handle(
@@ -503,12 +514,17 @@ impl LoginOrchestrator {
                         true,
                         rt.browser.ignore_https_errors,
                     ) {
-                        Ok(p) => {
+                        Ok(mut p) => {
+                            p.network = rt.network.clone();
                             // 本机地址（脚本 ctx.local_ip / ctx.local_mac，或模板里的
                             // {local_ip} 占位符）按需查询：网卡探测要 spawn 子进程，
                             // 用不到就白跑一次。查询失败不阻断登录——脚本自身可回退到
                             // 从页面提取。
-                            if p.needs_local_address() {
+                            // 绑定模式由执行器准备出口后取实际地址，避免这里重复枚举或读取活动方案。
+                            if p.needs_local_address()
+                                && rt.network.mode
+                                    != crate::network::settings::NetworkMode::Interface
+                            {
                                 let addr = self.monitor.local_address().await;
                                 Some(p.with_local_address(&addr))
                             } else {
@@ -637,7 +653,7 @@ impl LoginOrchestrator {
             (LoginChannel::Browser, _, _) => session::LoginAttemptPlan::Browser(
                 self.build_worker_config(
                     &rt,
-                    &resolved_profile,
+                    profile,
                     effective_task_id.as_deref().unwrap_or(""),
                     browser_override.as_deref(),
                 )
@@ -663,6 +679,7 @@ impl LoginOrchestrator {
                 retry_interval: Duration::from_secs(rt.retry.retry_interval as u64),
                 login_timeout: Duration::from_secs((rt.browser.login_timeout as u64).max(1)),
                 profile_id: profile.id.clone(),
+                network: rt.network.clone(),
                 plan,
             },
             cancel_token.clone(),
@@ -719,6 +736,7 @@ impl LoginOrchestrator {
             // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
             warn!("登录请求未能占据活跃会话槽位，写入终态「被更新的登录请求取代」");
             handle.inner.set_result(LoginResult {
+                network_retryable: false,
                 terminal: LoginTerminal::Cancelled,
                 message: "被更新的登录请求取代".into(),
                 source,
@@ -732,27 +750,27 @@ impl LoginOrchestrator {
         handle
     }
 
-    /// 解析凭据来源 Profile：`profile_id` 指定时加载该快照，否则用全局活跃 Profile。
+    /// 解析本次完整运行时策略：指定方案的凭据和出口必须一起使用。
     ///
-    /// 多 Profile 场景下的定时浏览器任务可借此使用各自独立的账号凭据。
+    /// 多方案任务不会切换活动方案，也不能沿用活动方案的网络出口。
     /// `Err(handle)` = 指定 Profile 加载失败携带的立即终态句柄（不回退全局，
     /// 避免账号 A/B 错配）。
-    async fn resolve_profile(
+    async fn resolve_runtime(
         &self,
         source: LoginSource,
         rt: &RuntimeConfig,
         profile_id: &Option<String>,
-    ) -> Result<ProfileSnapshot, LoginHandle> {
+    ) -> Result<RuntimeConfig, LoginHandle> {
         match profile_id {
             Some(pid) if !pid.is_empty() => match self.config.runtime_config_for_profile(pid) {
-                Ok(rc) => Ok(rc.profile),
+                Ok(rc) => Ok(rc),
                 Err(e) => {
                     let msg = format!("指定 Profile {pid} 加载失败，已拒绝登录: {e}");
                     warn!("{msg}");
                     Err(self.immediate_handle(source, false, msg, pid.clone()).await)
                 }
             },
-            _ => Ok(rt.profile.clone()),
+            _ => Ok(rt.clone()),
         }
     }
 
@@ -1141,6 +1159,7 @@ impl LoginOrchestrator {
                 // panic 过，StatusManager 停留 Running 会误导引擎与前端。
                 let message = "登录会话内部异常，已中止";
                 result_slot.set_result(LoginResult {
+                    network_retryable: false,
                     terminal: LoginTerminal::Failed,
                     message: message.into(),
                     source,
@@ -1316,6 +1335,7 @@ impl LoginOrchestrator {
             warn!("登录历史写入失败: {e}");
         }
         LoginHandle::immediate(LoginResult {
+            network_retryable: false,
             terminal: LoginTerminal::Cancelled,
             message: "登录已取消".into(),
             source,
@@ -1366,6 +1386,7 @@ impl LoginOrchestrator {
             warn!("登录历史写入失败: {e}");
         }
         LoginHandle::immediate(LoginResult {
+            network_retryable: false,
             terminal: if success {
                 LoginTerminal::Success
             } else {
@@ -1499,6 +1520,7 @@ impl LoginOrchestrator {
             "username": profile.username,
             "password": profile.password.as_str(),
             "auth_url": profile.auth_url,
+            "network": rt.network,
             "trigger_url": trigger_url,
             "isp": profile.isp,
             "gateway_ip": profile.gateway_ip,
@@ -1535,6 +1557,9 @@ pub use history::{
 };
 pub use preemption::{PreemptionDecision, decide};
 pub use session::{LoginResult, LoginSession, LoginTerminal, ResultAction};
+
+#[cfg(test)]
+mod network_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1712,6 +1737,12 @@ mod tests {
     /// 仅依赖 config/status/bridge 等可空构造的依赖，其余用 dummy 填充；
     /// 测试只调用 cancel_current，不触碰其它字段。
     async fn make_orchestrator() -> Arc<LoginOrchestrator> {
+        let dir = tempfile::TempDir::new().unwrap();
+        make_orchestrator_at(dir.path()).await
+    }
+
+    /// 由调用方持有临时目录，供需要保存方案与任务的集成式单测使用。
+    pub(super) async fn make_orchestrator_at(dir: &std::path::Path) -> Arc<LoginOrchestrator> {
         use crate::config::{ConfigService, ProfileService};
         use crate::environment::EnvironmentManager;
         use crate::login::history::LoginHistoryService;
@@ -1720,31 +1751,30 @@ mod tests {
         use crate::tasks::TaskManager;
         use crate::utils::metrics::Metrics;
 
-        let dir = tempfile::TempDir::new().unwrap();
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
-        let config = ConfigService::new(dir.path().to_path_buf(), reload_tx)
+        let config = ConfigService::new(dir.to_path_buf(), reload_tx)
             .await
             .expect("ConfigService 构造失败");
         let status = Arc::new(StatusManager::new());
         let bridge = crate::bridge::BridgeSupervisor::new(
-            dir.path().to_path_buf(),
+            dir.to_path_buf(),
             config.clone(),
             status.clone(),
             None,
         );
-        let environment = EnvironmentManager::new(dir.path().to_path_buf(), status.clone());
-        let tasks = TaskManager::new(dir.path());
-        let history = LoginHistoryService::new(dir.path());
+        let environment = EnvironmentManager::new(dir.to_path_buf(), status.clone());
+        let tasks = TaskManager::new(dir);
+        let history = LoginHistoryService::new(dir);
         let detector = create_detector();
         let monitor = Arc::new(
-            MonitorService::new(config.clone(), detector.clone(), None, Some(Metrics::new()))
+            MonitorService::new(config.clone(), detector.clone(), Some(Metrics::new()))
                 .expect("MonitorService 构造失败"),
         );
         let _ = Arc::new(ProfileService::new(config.clone()));
         // 脚本登录渠道的执行能力：与生产同一条路径（TaskExecutor 构造本身只是装配
         // 几个 Arc，不需要真起进程）
         let script_runner = crate::tasks::TaskExecutor::new(
-            dir.path(),
+            dir,
             status.clone(),
             bridge.clone(),
             environment.clone(),
@@ -1912,6 +1942,7 @@ mod tests {
         let finished = old.finished.clone();
         // 模拟旧会话 emit：set_result 后仍需 150ms 才完成 close_browser
         old.handle.inner.set_result(LoginResult {
+            network_retryable: false,
             terminal: LoginTerminal::Cancelled,
             message: "被抢占".into(),
             source: LoginSource::Manual,

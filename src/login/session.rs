@@ -50,6 +50,8 @@ pub enum ResultAction {
 /// 登录终态结果（句柄 `await_result` 返回、历史与调度器读取）
 #[derive(Debug, Clone)]
 pub struct LoginResult {
+    /// 仅导航或网络故障允许引擎在冷却后重启谨慎登录。
+    pub network_retryable: bool,
     /// 唯一终态语义；调用方不得再用布尔值猜测取消与失败。
     pub terminal: LoginTerminal,
     /// 结果消息（成功提示 / 失败原因 / 取消原因）
@@ -229,12 +231,16 @@ pub(crate) struct SessionParams {
     pub login_timeout: Duration,
     /// 关联 Profile ID（写入历史）
     pub profile_id: String,
+    /// 本次方案的出口；验证不能因活动方案切换而改走其他网卡。
+    pub network: crate::network::settings::NetworkSettings,
     /// 本次唯一执行计划。
     pub plan: LoginAttemptPlan,
 }
 
 /// 登录会话：持有会话参数、取消原语与服务依赖，驱动单次登录状态机
 pub struct LoginSession {
+    /// 最后一次已分类的执行结果，不通过错误文案猜测重试资格。
+    last_outcome: Option<Outcome>,
     /// 会话参数（来源/重试预算/凭证等）
     params: SessionParams,
     /// 会话级取消令牌（整个会话生命周期）
@@ -263,6 +269,7 @@ impl LoginSession {
         deps: SessionDeps,
     ) -> Self {
         Self {
+            last_outcome: None,
             params,
             cancel_token,
             result_slot,
@@ -279,7 +286,7 @@ impl LoginSession {
     }
 
     /// 会话主循环：执行 → 分类 → 重试/终态
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let session_start = Instant::now();
         self.deps.status_manager.merge(PartialSnapshot::Login {
             status: LoginStatus::Running,
@@ -378,7 +385,8 @@ impl LoginSession {
                                 // force_recycle_if_unowned 对已死 Worker 幂等安全）。
                                 Err(
                                     e @ (BridgeError::WorkerCrashed { .. }
-                                    | BridgeError::WorkerStartupTimeout),
+                                    | BridgeError::WorkerStartupTimeout
+                                    | BridgeError::NetworkEgress(_)),
                                 ) => Ok(StructuredResult {
                                     outcome: Outcome::NetworkError,
                                     message: format!("Worker 异常: {e}"),
@@ -470,6 +478,8 @@ impl LoginSession {
                 }
             };
 
+            self.last_outcome = Some(structured.outcome);
+
             // 本轮 attempt 结束，清除在途 cancel_id。清除前留一份：Bridge 强杀
             // Worker 前要用它证明会话槽位属于本会话（见 try_retry 的归属感知回收）。
             let finished_attempt_cancel_id = self.attempt_cancel_id.load_full();
@@ -537,7 +547,9 @@ impl LoginSession {
                                     .await;
                                 return;
                             }
-                            NetworkVerification::RetryableFailure => {}
+                            NetworkVerification::RetryableFailure => {
+                                self.last_outcome = Some(Outcome::NetworkError);
+                            }
                         }
                         // 网络验证未通过：不直接判终态失败，而是走可重试路径。
                         // 理由：网络探测可能因瞬时波动误判，重试一次登录比直接判死更稳妥。
@@ -762,7 +774,7 @@ impl LoginSession {
         // select 独立监听（立即返回取消终态，不等预算或探测耗时到期）
         let verify = async {
             tokio::time::sleep(Duration::from_secs(delay as u64)).await;
-            monitor.verify_internet().await
+            monitor.verify_internet_via(&self.params.network).await
         };
         let report = tokio::select! {
             biased;
@@ -826,6 +838,11 @@ impl LoginSession {
         attempts_used: u32,
     ) -> LoginResult {
         LoginResult {
+            network_retryable: terminal == LoginTerminal::Failed
+                && matches!(
+                    self.last_outcome,
+                    Some(Outcome::NetworkError | Outcome::NavigationTimeout)
+                ),
             terminal,
             message,
             source: self.params.source,
@@ -840,6 +857,7 @@ impl LoginSession {
             .clone()
             .unwrap_or_else(|| "已取消".to_string());
         LoginResult {
+            network_retryable: false,
             terminal: LoginTerminal::Cancelled,
             message: reason,
             source: self.params.source,
@@ -1327,7 +1345,6 @@ mod tests {
                 crate::monitor::MonitorService::new(
                     config.clone(),
                     crate::network::detect::create_detector(),
-                    None,
                     Some(crate::utils::metrics::Metrics::new()),
                 )
                 .expect("MonitorService 构造失败"),
@@ -1392,6 +1409,7 @@ mod tests {
             retry_interval: Duration::from_secs(0),
             login_timeout: Duration::from_secs(30),
             profile_id: "default".to_string(),
+            network: Default::default(),
             plan: LoginAttemptPlan::Browser(serde_json::json!({})),
         }
     }

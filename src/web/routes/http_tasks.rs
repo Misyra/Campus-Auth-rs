@@ -110,9 +110,7 @@ pub async fn test_http_task(
     // 4/5 共用一次方案快照解析（密码回退与认证地址回退同源）。只有真正需要时才
     // 加载：草稿测试可以完全不传 profile_id，此时连一次方案读取都不做。
     let profile_runtime = match profile_id {
-        Some(id) if body.password.is_empty() || task.auth_url.trim().is_empty() => {
-            Some(config.runtime_config_for_profile(id)?)
-        }
+        Some(id) => Some(config.runtime_config_for_profile(id)?),
         _ => None,
     };
 
@@ -158,7 +156,7 @@ pub async fn test_http_task(
         task.validate_flow().map_err(ApiError::BadRequest)?;
     }
 
-    let request = HttpLoginRequest::from_task(
+    let mut request = HttpLoginRequest::from_task(
         &task,
         &body.username,
         password.as_str(),
@@ -176,6 +174,11 @@ pub async fn test_http_task(
         ignore_https_errors,
     )
     .map_err(ApiError::BadRequest)?;
+
+    request.network = profile_runtime
+        .as_ref()
+        .map(|runtime| runtime.network.clone())
+        .unwrap_or_else(|| config.runtime_snapshot().network.clone());
 
     // 测试端点与正式登录同源：地址用得到本机 IP 时才查（脚本读 ctx.local_ip，
     // 或模板里直接写了 {local_ip}）；否则白跑一次网卡探测。测试端点无

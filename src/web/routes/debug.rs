@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::bridge::BridgeApi;
 use crate::config::{ConfigApi, DEFAULT_TRIGGER_URL};
-use crate::monitor::{MonitorConfig, PortalDetectStatus, detect_portal};
+use crate::monitor::{MonitorConfig, PortalDetectStatus};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
 
@@ -99,13 +99,17 @@ pub async fn start_debug(
     if no_login_url_configured {
         let m = &rt.monitor;
         let cfg = MonitorConfig::from_runtime(&rt);
-        let preflight = detect_portal(
+        let route = crate::network::egress::PreparedEgress::prepare(&rt.network)
+            .await
+            .map_err(|e| ApiError::ServiceUnavailable(e.to_string()))?;
+        let preflight = crate::monitor::portal::detect_portal_via(
             &m.http_targets,
             cfg.http_timeout.min(DEBUG_PREFLIGHT_TIMEOUT),
             &m.url_targets,
             &m.url_expected_responses,
             cfg.url_timeout.min(DEBUG_PREFLIGHT_TIMEOUT),
             m.disable_proxy,
+            Some(route),
         )
         .await;
         if preflight.status == PortalDetectStatus::Online {

@@ -199,7 +199,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 - 通道（`config.global.updater.channel`）：`stable` 仅正式版（`releases/latest` 单包语义）、`prerelease` 仅预发布、`all` 正式+预发布一起按 semver 取最高；`all` 在 releases 列表为空时回退单包口径（`src/updater/check.rs::fetch_manifest_for_channel`）。
 - 总开关：`auto_check_enabled` 关闭后后台循环与启动检查均静默，仅保留手动检查；`check_interval_hours==0` 仅做启动检查（`src/updater/mod.rs` 的 `due_now` 语义）。
 - 状态落盘：每次检查无论成败均刷新 `update/last_check.json`（UTC RFC3339，`last_check_at`/`has_update`/`latest_version`/`error`），前端据此展示“上次检查”。
-- 代理：显式 `proxy_url`（支持非本机）优先，回退旧 `proxy_port` 兼容（`resolved_proxy_url()`）；监测与更新代理解耦（`monitor.disable_proxy` 默认直连）。
+- 校园网登录、探测与 DNS 的出口统一在“方案 → 认证设置 → 校园网出口”配置，可选择直连、指定物理网卡、指定 HTTP / SOCKS5 代理或系统默认，详见[统一出口与 TUN 配置](proxy-bypass-guide.md)。更新下载代理独立，仍由 `updater.proxy_url` / 旧 `proxy_port` 管理。
 
 更新 staging 为 `update/staging/`（相对 `base_path`），helper 以 `campus-auth-helper` 完成自替换；uv 与 Python 运行时状态落在 `environment/`，Worker 虚拟环境在 `python_worker/.venv`。
 

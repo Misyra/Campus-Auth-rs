@@ -313,6 +313,120 @@ def test_custom_webkit_filters_chromium_only_flags():
     assert args == ["--custom-safe-flag"]
 
 
+@pytest.mark.parametrize("pure_mode", [False, True])
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("bind_proxy", ["", "http://127.0.0.1:7890"])
+@pytest.mark.parametrize(
+    ("channel", "engine", "is_chromium"),
+    [
+        ("msedge", "auto", True),
+        ("chrome", "auto", True),
+        ("playwright", "auto", True),
+        ("chromium", "auto", True),
+        ("firefox", "auto", False),
+        ("webkit", "auto", False),
+        ("custom", "chromium", True),
+        ("custom", "firefox", False),
+        ("custom", "webkit", False),
+    ],
+)
+def test_login_bypasses_system_proxy_unless_explicitly_bound(
+    monkeypatch, tmp_path, pure_mode, persistent, bind_proxy, channel, engine, is_chromium,
+):
+    """锁定正式会话所有启动分支的直连行为，避免纯净或持久模式遗漏。"""
+    core = WorkerCore()
+    core._playwright = object()
+    launched: dict = {}
+    options: dict = {}
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            options.update(kwargs)
+            return object()
+
+    async def fake_launch(_playwright, _channel, _path, _headless, args, _bs):
+        launched["args"] = args
+        launched["persistent"] = False
+        return FakeBrowser()
+
+    async def fake_persistent(_playwright, _channel, _path, _headless, args, _data, opts, _bs):
+        launched["args"] = args
+        launched["persistent"] = True
+        options.update(opts)
+        return object()
+
+    monkeypatch.setattr(core, "_launch_browser", fake_launch)
+    monkeypatch.setattr(core, "_launch_persistent_context", fake_persistent)
+    monkeypatch.setattr(core, "_new_page", lambda: asyncio.sleep(0, result=object()))
+    monkeypatch.setattr(playwright_worker, "_browser_data_dir", lambda: tmp_path)
+    asyncio.run(core._start_browser({"browser_settings": {
+        "browser_channel": channel,
+        "custom_browser_engine": engine,
+        "pure_mode": pure_mode,
+        "persistent_context": persistent,
+        "bind_proxy": bind_proxy,
+    }}))
+
+    expected_bypass = is_chromium and not bind_proxy
+    assert launched["args"].count("--no-proxy-server") == int(expected_bypass)
+    assert launched["persistent"] is persistent
+    if bind_proxy:
+        assert options["proxy"] == {"server": bind_proxy}
+    else:
+        assert "proxy" not in options
+    if pure_mode:
+        assert launched["args"] == (["--no-proxy-server"] if expected_bypass else [])
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("pure_mode", [False, True])
+@pytest.mark.parametrize("mode", ["direct", "system", "proxy"])
+def test_unified_network_policy_overrides_legacy_proxy(monkeypatch, tmp_path, persistent, pure_mode, mode):
+    """新出口策略优先于旧绑定字段，正式会话的全部启动分支保持一致。"""
+    core = WorkerCore()
+    core._playwright = object()
+    launched: dict = {}
+    proxy = {"server": "http://127.0.0.1:12345", "username": "campus", "password": "lease-token"}
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            launched["context"] = kwargs
+            return object()
+
+    async def launch(_pw, _channel, _path, _headless, args, _bs):
+        launched["args"] = args
+        return FakeBrowser()
+
+    async def launch_persistent(_pw, _channel, _path, _headless, args, _data, context, _bs):
+        launched["args"] = args
+        launched["context"] = context
+        return object()
+
+    monkeypatch.setattr(core, "_launch_browser", launch)
+    monkeypatch.setattr(core, "_launch_persistent_context", launch_persistent)
+    monkeypatch.setattr(core, "_new_page", lambda: asyncio.sleep(0, result=object()))
+    monkeypatch.setattr(playwright_worker, "_browser_data_dir", lambda: tmp_path)
+    asyncio.run(core._start_browser({"browser_settings": {
+        "browser_channel": "msedge", "pure_mode": pure_mode, "persistent_context": persistent,
+        "bind_proxy": "http://obsolete-proxy:7890",
+        "network_policy": {"mode": mode, "proxy": proxy if mode == "proxy" else None},
+    }}))
+    assert ("--no-proxy-server" in launched["args"]) == (mode == "direct")
+    assert launched["context"].get("proxy") == (proxy if mode == "proxy" else None)
+
+
+def test_firefox_network_policy_resets_persistent_proxy_preference():
+    core = WorkerCore()
+    assert core._network_launch_options({"network_policy": {"mode": "direct"}}, "firefox") == {
+        "firefox_user_prefs": {"network.proxy.type": 0}
+    }
+    assert core._network_launch_options({"network_policy": {"mode": "system"}}, "firefox") == {
+        "firefox_user_prefs": {"network.proxy.type": 5}
+    }
+    assert core._network_launch_options({"network_policy": {"mode": "proxy"}}, "firefox") == {}
+    assert core._network_launch_options({"network_policy": {"mode": "direct"}}, "msedge") == {}
+
+
 def test_pure_mode_keeps_context_options(monkeypatch):
     core = WorkerCore()
     core._playwright = object()

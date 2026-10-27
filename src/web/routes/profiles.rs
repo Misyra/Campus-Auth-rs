@@ -20,6 +20,8 @@ use crate::web::error::{ApiError, data};
 /// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
 #[derive(Deserialize)]
 pub struct ProfileCreateBody {
+    /// 本方案统一网络出口。
+    pub network: Option<crate::network::settings::NetworkSettings>,
     /// 与路径参数冗余的历史字段：路径已携带 id，body 内可省略（路径优先）
     pub id: Option<String>,
     pub name: String,
@@ -39,6 +41,21 @@ pub struct ProfileCreateBody {
     pub active_http_task: Option<String>,
     /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）
     pub active_script_task: Option<String>,
+}
+
+/// 所有保存路径共用的出口校验；任意脚本无法由本程序强制绑定网卡。
+pub(crate) fn validate_profile_network(profile: &ProfileData) -> Result<(), String> {
+    if let Some(network) = &profile.network {
+        network.validate()?;
+        if profile.login_channel == LoginChannel::Script
+            && network.mode == crate::network::settings::NetworkMode::Interface
+        {
+            return Err(
+                "指定网卡出口适用于浏览器或 HTTP 登录，任意脚本不能保证绑定，请更换登录渠道".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
@@ -145,6 +162,8 @@ pub(crate) async fn validate_login_task_binding(
 /// PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）
 #[derive(Deserialize)]
 pub struct ProfileUpdateBody {
+    /// 本方案统一网络出口。
+    pub network: Option<crate::network::settings::NetworkSettings>,
     pub name: Option<String>,
     pub username: Option<String>,
     pub password: Option<Zeroizing<String>>,
@@ -217,6 +236,10 @@ pub async fn get_profile(
         crate::web::routes::config::effective_has_password(config.as_ref(), &profile);
     // 避免将密码（密文）泄露给前端
     profile.password = String::new();
+    profile.network = Some(crate::network::settings::NetworkSettings::effective(
+        &profile,
+        &config.load_settings_async().await.global,
+    ));
     Ok(data(serde_json::json!({
         "settings": serde_json::to_value(profile)?,
         "has_password": has_password,
@@ -491,6 +514,11 @@ pub async fn create_profile(
     if let Some(active_script_task) = body.active_script_task {
         profile.active_script_task = active_script_task;
     }
+    if let Some(network) = body.network {
+        network.validate().map_err(ApiError::BadRequest)?;
+        profile.network = Some(network);
+    }
+    validate_profile_network(&profile).map_err(ApiError::BadRequest)?;
     // 直连 / 脚本渠道必须有可用的任务绑定（见 validate_login_task_binding 的说明）
     validate_login_task_binding(
         &tasks,
@@ -577,6 +605,11 @@ pub async fn update_profile(
                     if let Some(active_script_task) = body.active_script_task {
                         profile.active_script_task = active_script_task;
                     }
+                    if let Some(network) = body.network {
+                        network.validate()?;
+                        profile.network = Some(network);
+                    }
+                    validate_profile_network(&profile)?;
                     // 直连 / 脚本渠道必须有可用的任务绑定（与 create 同一口径，见
                     // validate_login_task_binding）。注意这里判的是**合并后**的渠道与绑定：只改渠道
                     // 不改绑定（或反之）时也必须整体有效。校验在事务临界区内完成，
@@ -1157,6 +1190,76 @@ mod tests {
         assert_eq!(d["profiles"]["dorm"]["active_script_task"], "");
         // 密码等敏感字段不得出现在摘要中
         assert!(d["profiles"]["dorm"].get("password").is_none());
+    }
+
+    /// 统一出口完整保存与回读，非法更新不得覆盖已有有效配置。
+    #[tokio::test]
+    async fn profile_network_roundtrip_and_invalid_update_is_atomic() {
+        let (app, inner) = mock_app();
+        let network = serde_json::json!({"mode":"interface", "interface_id":"campus-adapter", "proxy_url":"", "dns_servers":["10.0.0.53"]});
+        let response = app.clone().oneshot(Request::builder().method("POST").uri("/api/profiles/net")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"name":"校园网", "username":"u", "password":"", "network":network}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/profiles/net")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            body_json(response).await["data"]["settings"]["network"],
+            network
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/net")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"network":{"mode":"interface","interface_id":""}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let saved = inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "net")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            serde_json::to_value(saved.network.as_ref().unwrap()).unwrap(),
+            network
+        );
+        assert!(
+            build_share_payload(&saved)["profile"]
+                .get("network")
+                .is_none(),
+            "网卡标识和代理凭据不应随分享文件泄露"
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/net")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"login_channel":"script"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     /// 切换到存在的 Profile 成功且派发 Engine ApplyProfile；不存在的返回错误

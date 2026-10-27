@@ -4,6 +4,7 @@ import SettingsRow from "@/components/common/SettingsRow.vue";
 import { computed } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import FieldHelp from "@/components/common/FieldHelp.vue";
+import ProxyBypassHelp from "@/components/common/ProxyBypassHelp.vue";
 
 const config = useConfig();
 
@@ -290,17 +291,8 @@ const urlCheckText = computed({
             </span>
           </label>
         </SettingsRow>
-        <SettingsRow description="直接检测真实网络，避免代理故障影响判断">
-          <template #label>
-            检测不走代理
-            <FieldHelp text="启用后公网检测流量直连，避免系统代理故障造成误判；关闭则跟随系统代理。保存后下一轮检测生效。" />
-          </template>
-          <label class="toggle setting-row-switch">
-            <input type="checkbox" v-model="config.config.monitor.disable_proxy" />
-            <span class="toggle-slider"></span>
-            <span class="sr-only">检测不走代理</span>
-          </label>
-        </SettingsRow>
+        <p class="hint">登录、重定向检测和网络探测统一使用方案中的“校园网出口”。<RouterLink to="/profiles">前往方案设置出口、网卡与 DNS</RouterLink></p>
+        <ProxyBypassHelp />
       </div>
     </section>
   </div>
