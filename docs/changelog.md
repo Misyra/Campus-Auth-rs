@@ -4,6 +4,7 @@
 
 ## v5.2.0-beta.1（2026-10-27）
 
+- 修复 OpenWrt SDK 的预发布版本兼容：APK 将 alpha / beta / rc 后缀转换为原生格式（本版 `5.2.0_beta1-r1`），IPK 原生与直接打包入口使用 `~` 后缀（本版 `5.2.0~beta.1-1`），保证预发布排在同版正式版之前；程序自身版本不变。
 - 发布前将版本标识由 preview.1 统一调整为 beta.1，明确首个 Beta 测试版本；Git 标签与发布包使用标准 SemVer 预发布版本 `5.2.0-beta.1`。
 - 整合校园网统一出口与网卡 / DNS 绑定、调用链修复、下拉交互优化，以及 Windows 系统自启动状态复核与取消注册按钮修复，形成预发布版本。
 - 同步 Cargo.toml / Cargo.lock、frontend/package.json / package-lock.json、OpenAPI 和 OpenWrt 两份包定义为 `5.2.0-beta.1`；Python Worker 继续固定为 `1.0.0`。

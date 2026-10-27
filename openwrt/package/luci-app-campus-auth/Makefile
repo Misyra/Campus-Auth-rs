@@ -4,6 +4,13 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=luci-app-campus-auth
 PKG_VERSION:=5.2.0-beta.1
 PKG_RELEASE:=1
+
+# 程序保留 SemVer；包管理器使用能排在同版正式版之前的预发布格式。
+ifeq ($(CONFIG_USE_APK),y)
+PKG_VERSION:=$(subst -beta.,_beta,$(subst -alpha.,_alpha,$(subst -rc.,_rc,$(PKG_VERSION))))
+else
+PKG_VERSION:=$(subst -,~,$(PKG_VERSION))
+endif
 PKG_LICENSE:=AGPL-3.0-only
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 

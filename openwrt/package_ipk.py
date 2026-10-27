@@ -94,7 +94,9 @@ def main():
         if cpu not in ARMV7_CPUS:
             parser.error("ARM 包的 CPU 子型号须为已支持的 ARMv7 / ARMv8 CPU")
     verify_binary(args.binary, args.target, args.readelf)
-    version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"] + "-1"
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+    # opkg 的波浪号排序低于空后缀，确保 Beta 能正常升级至同版正式版。
+    version = version.replace("-", "~", 1) + "-1"
     data = {"usr/bin/campus-auth": (args.binary.read_bytes(), 0o755)}
     for name, path, mode in [
         ("campus-auth.init", "etc/init.d/campus-auth", 0o755),
