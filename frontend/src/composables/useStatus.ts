@@ -12,7 +12,7 @@ import type {
   StatusSnapshot,
 } from "../api/types";
 import { monitorApi, autostartApi } from "../api";
-import { ApiError } from "../api/client";
+import { ApiError, extractApiError } from "../api/client";
 import { frontendLogger } from "../utils/logger";
 import { createFirstFailNotifier } from "../utils/guards";
 import { useNotifications } from "./useNotifications";
@@ -49,6 +49,7 @@ const autostart = reactive<AutostartStatus>({
   method: "-",
   location: "",
   runtime_mode: "full",
+  state: "unknown",
 });
 
 /** 全局并发锁，跨多个 composable 共享 */
@@ -310,9 +311,11 @@ async function fetchAutostart(): Promise<void> {
   autostartInFlight = true;
   try {
     const data = await autostartApi.fetchStatus();
-    Object.assign(autostart, data);
+    Object.assign(autostart, { error: undefined, state: undefined, registered: undefined }, data);
   } catch (error) {
     frontendLogger.warn("autostart", "获取自启动状态失败", error);
+    // 读取失败后不能继续展示上一次的绿色开关，未知状态与关闭状态须明确区分。
+    Object.assign(autostart, { enabled: false, state: "unknown", error: `无法读取系统自启动状态：${extractApiError(error)}` });
     if (error instanceof ApiError && error.status === 404) {
       Object.assign(autostart, {
         platform: "-",

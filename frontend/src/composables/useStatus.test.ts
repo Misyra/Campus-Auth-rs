@@ -175,6 +175,18 @@ describe("fetchAutostart 与失败通知", () => {
     expect(autostart.platform).toBe("windows");
   });
 
+  it("系统状态读取失败不能保留绿色开关，恢复后清除错误", async () => {
+    fetchAutostartMock.mockRejectedValueOnce(new Error("注册表读取失败"));
+    await fetchAutostart();
+    expect(autostart.enabled).toBe(false);
+    expect(autostart.state).toBe("unknown");
+    expect(autostart.error).toContain("无法读取");
+    await fetchAutostart();
+    expect(autostart.enabled).toBe(true);
+    expect(autostart.error).toBeUndefined();
+    expect(autostart.state).toBeUndefined();
+  });
+
   it("首次失败通知一次，后续失败静默且状态不变", async () => {
     const before = notifications.length;
     fetchStatusMock.mockRejectedValueOnce(new Error("down"));

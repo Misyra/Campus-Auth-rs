@@ -152,6 +152,21 @@ export interface AutostartStatus {
   method: string;
   location: string;
   runtime_mode: string;
+  /** Windows 状态来自系统观测；旧版及其它平台可能没有诊断字段。 */
+  source?: "system" | "config";
+  state?: "enabled" | "not_registered" | "blocked" | "path_mismatch" | "command_mismatch" | "unknown";
+  registered?: boolean;
+  path_match?: boolean;
+  base_path_match?: boolean;
+  target_exists?: boolean;
+  blocked_by_windows?: boolean | null;
+  expected_path?: string;
+  expected_base_path?: string;
+  registry_path?: string | null;
+  registry_command?: string | null;
+  startup_approved?: string | null;
+  cached_enabled?: boolean;
+  error?: string;
 }
 
 /** 卸载检测项（GET /api/uninstall/detect） */
