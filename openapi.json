@@ -11,6 +11,19 @@
   }
  ],
  "paths": {
+  "/api/network/interfaces": {
+   "get": {
+    "summary": "列出校园网可用物理出口接口",
+    "responses": {
+     "200": {
+      "description": "当前 IPv4 网卡及 DNS"
+     },
+     "503": {
+      "description": "网卡枚举失败"
+     }
+    }
+   }
+  },
   "/api/monitor/status": {
    "get": {
     "operationId": "get___api_monitor_status",

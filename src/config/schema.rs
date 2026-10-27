@@ -105,9 +105,9 @@ pub struct BrowserSettings {
     pub navigation_timeout: u32,
     /// 登录超时（秒）
     pub login_timeout: u32,
-    /// 绑定的代理地址
+    /// 旧版浏览器绑定代理；无方案网络配置时用于推导统一策略
     pub bind_proxy: String,
-    /// 重定向检测是否使用代理；关闭时检测窗口直连，不影响正式登录
+    /// 旧 Worker 的重定向检测代理兼容字段；统一策略存在时不再单独生效
     pub redirect_test_use_proxy: bool,
 }
 
@@ -518,6 +518,8 @@ impl LoginChannel {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(default)]
 pub struct ProfileData {
+    /// 统一校园网出口；缺省时在运行时兼容旧代理设置。
+    pub network: Option<crate::network::settings::NetworkSettings>,
     /// Profile 唯一 ID
     pub id: String,
     /// 显示名称
@@ -552,6 +554,7 @@ pub struct ProfileData {
 impl Default for ProfileData {
     fn default() -> Self {
         Self {
+            network: None,
             id: "default".to_string(),
             name: "默认网络".to_string(),
             username: String::new(),

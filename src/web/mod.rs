@@ -42,6 +42,9 @@ type RouteBuilder = fn() -> MethodRouter<AppState>;
 /// 重复 `route()` 调用自动合并）。
 fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
     vec![
+        ("GET", "/api/network/interfaces", || {
+            get(routes::monitor::get_network_interfaces)
+        }),
         // ---- 监控（monitor）----
         ("GET", "/api/monitor/status", || {
             get(routes::monitor::get_status)

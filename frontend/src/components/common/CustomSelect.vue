@@ -4,6 +4,7 @@
 export interface SelectOption {
   value: string;
   label: string;
+  disabled?: boolean;
 }
 </script>
 
@@ -54,6 +55,9 @@ function toggle(): void {
   open.value = !open.value;
   if (open.value) {
     activeIndex.value = props.options.findIndex((o) => o.value === props.modelValue);
+    if (activeIndex.value < 0 || props.options[activeIndex.value]?.disabled) {
+      activeIndex.value = props.options.findIndex((o) => !o.disabled);
+    }
     nextTick(() => {
       scrollToActive();
       document.addEventListener("mousedown", onDocClick);
@@ -64,11 +68,23 @@ function toggle(): void {
 }
 
 function select(opt: SelectOption): void {
+  if (props.disabled || opt.disabled) return;
   emit("update:modelValue", opt.value);
   emit("change", opt.value);
   open.value = false;
   document.removeEventListener("mousedown", onDocClick);
   triggerRef.value?.focus();
+}
+
+// 禁用项保留说明，但鼠标与键盘都不能将其选为有效配置。
+function moveActive(step: number): void {
+  for (let i = activeIndex.value + step; i >= 0 && i < props.options.length; i += step) {
+    if (!props.options[i].disabled) {
+      activeIndex.value = i;
+      scrollToActive();
+      return;
+    }
+  }
 }
 
 function onDocClick(e: MouseEvent): void {
@@ -89,13 +105,11 @@ function onKeydown(e: KeyboardEvent): void {
   switch (e.key) {
     case "ArrowDown":
       e.preventDefault();
-      activeIndex.value = Math.min(activeIndex.value + 1, props.options.length - 1);
-      scrollToActive();
+      moveActive(1);
       break;
     case "ArrowUp":
       e.preventDefault();
-      activeIndex.value = Math.max(activeIndex.value - 1, 0);
-      scrollToActive();
+      moveActive(-1);
       break;
     case "Enter":
     case " ":
@@ -137,13 +151,14 @@ onBeforeUnmount(() => {
       role="combobox"
       :aria-label="ariaLabel || selectedLabel || placeholder"
       :aria-expanded="open"
+      :disabled="disabled"
       aria-haspopup="listbox"
       :aria-activedescendant="open && activeIndex >= 0 ? selectUid + '-opt-' + activeIndex : undefined"
       @click="toggle"
       @keydown="onKeydown"
     >
       <span v-if="!selectedLabel" class="custom-select-placeholder">{{ placeholder }}</span>
-      <span v-else>{{ selectedLabel }}</span>
+      <span v-else class="custom-select-value" :title="selectedLabel">{{ selectedLabel }}</span>
       <IconApp name="chevron-down" class="custom-select-arrow" stroke-linecap="round" stroke-linejoin="round" />
     </button>
     <div v-if="open" class="custom-select-dropdown" role="listbox">
@@ -154,9 +169,10 @@ onBeforeUnmount(() => {
         class="custom-select-option"
         role="option"
         :aria-selected="opt.value === modelValue"
-        :class="{ selected: opt.value === modelValue, active: i === activeIndex }"
+        :aria-disabled="opt.disabled || undefined"
+        :class="{ selected: opt.value === modelValue, active: i === activeIndex && !opt.disabled, disabled: opt.disabled }"
         @mousedown.prevent="select(opt)"
-        @mouseenter="activeIndex = i"
+        @mouseenter="!opt.disabled && (activeIndex = i)"
       >
         {{ opt.label }}
       </div>

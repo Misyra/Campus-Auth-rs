@@ -202,6 +202,23 @@ describe("保存方案的「渠道 → 任务」闸口", () => {
     expect(payload.active_script_task).toBe("portal-login");
   });
 
+  it("新建和编辑都保存同一份出口、网卡和 DNS，重载后保留", async () => {
+    const network = { mode: "interface" as const, interface_id: "adapter-guid", proxy_url: "", dns_servers: ["10.0.0.53"] };
+    createMock.mockResolvedValue({ message: "ok" });
+    saveMock.mockResolvedValue({ message: "ok" });
+    listMock.mockResolvedValue({ profiles: {}, active_profile: "default", auto_switch: false });
+    p.editingProfile.value = draft({ network });
+    expect(await p.saveProfile()).toBe(true);
+    expect(createMock.mock.calls.at(-1)?.[1].network).toEqual(network);
+    p.editingProfile.value = draft({ network, _isNew: false });
+    expect(await p.saveProfile()).toBe(true);
+    expect(saveMock.mock.calls.at(-1)?.[1].network).toEqual(network);
+    p.profiles.value = { dorm: summary("dorm", "宿舍") };
+    getMock.mockResolvedValue({ settings: { ...draft(), network }, has_password: true });
+    await p.showProfileEditor("dorm");
+    expect(p.editingProfile.value?.network).toEqual(network);
+  });
+
   it("直连渠道的既有闸口未被新分支放宽（回归）", async () => {
     p.editingProfile.value = draft({ login_channel: "http" as const, active_http_task: "" });
 

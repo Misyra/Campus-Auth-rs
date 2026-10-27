@@ -110,6 +110,8 @@ export const DOCS = {
   gettingStarted: docUrl("getting-started", "start"),
   /** 配置方案概览（三条登录渠道的取舍） */
   profiles: docUrl("profiles", "overview"),
+  /** 校园网统一出口、学校 DNS 与 Clash / TUN 配置 */
+  networkEgress: docUrl("profiles", "network-egress"),
   /** HTTP 登录 */
   httpLogin: docUrl("profiles", "http-login"),
   /** 脚本登录（脚本渠道的契约、示例与排障） */
@@ -415,6 +417,7 @@ export const SIDEBAR_ACCENT_COLORS = [
 ];
 
 export const DEFAULT_PROFILE_SETTINGS: Profile = {
+  network: { mode: "direct", interface_id: "", proxy_url: "", dns_servers: [] },
   id: "",
   name: "",
   gateway_ip: "",

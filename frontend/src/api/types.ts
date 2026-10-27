@@ -291,7 +291,7 @@ export interface BrowserConfig {
   persistent_context: boolean;
   ignore_https_errors: boolean;
   bind_proxy: string;
-  /** 重定向检测使用代理，默认关闭；不影响正式登录 */
+  /** 旧 Worker 兼容字段；主程序统一使用方案的 network 配置 */
   redirect_test_use_proxy: boolean;
 }
 
@@ -511,8 +511,26 @@ export type HttpSuccessCheck = "response" | "network";
 /** 直连失败关键字命中后的动作；旧任务缺省 credential。 */
 export type HttpFailureAction = "credential" | "retry" | "manual";
 
+/** 按方案保存的统一校园网出口。 */
+export interface NetworkSettings {
+  mode: "direct" | "system" | "proxy" | "interface";
+  interface_id: string;
+  proxy_url: string;
+  dns_servers: string[];
+}
+
+/** 可绑定的物理网卡及当前地址。 */
+export interface EgressAdapter {
+  id: string;
+  name: string;
+  index: number;
+  ipv4: string;
+  dns_servers: string[];
+}
+
 /** 配置方案 */
 export interface Profile {
+  network?: NetworkSettings | null;
   id: string;
   name: string;
   username: string;

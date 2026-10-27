@@ -25,11 +25,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
 use futures::future::{BoxFuture, join_all};
-use reqwest::Client;
 use reqwest::redirect::Policy;
-use tokio::net::TcpStream;
 use tracing::{debug, instrument, warn};
 
 use crate::config::ConfigService;
@@ -123,22 +120,12 @@ enum CheckPurpose {
 
 /// 网络监测服务
 ///
-/// 持有长生命周期 reqwest 连接池与原子计数器。配置每次探测前从 ConfigService 热读取。
+/// 持有配置与原子计数器；每轮检测持有独立出口租约，避免旧网卡连接继续复用。
 pub struct MonitorService {
     /// 配置服务（用于热读取 RuntimeConfig）
     config_service: Arc<ConfigService>,
     /// 物理网络检测器
     network_detect: Arc<dyn NetworkDetect>,
-    /// HTTP/URL 探测共用的长生命周期客户端（连接池复用）
-    ///
-    /// 代理/证书策略按当前设置热重建（见 `ensure_client`），不再需重启生效
-    http_client: Arc<ArcSwap<Client>>,
-    /// 上次构建客户端时的 `disable_proxy` 快照（热重建比对用）
-    last_disable_proxy: std::sync::atomic::AtomicBool,
-    /// 上次构建客户端时的 `ignore_https_errors` 快照（热重建比对用）
-    last_ignore_certs: std::sync::atomic::AtomicBool,
-    /// 构造时传入的网卡绑定代理（热重建时复用）
-    bind_proxy: std::sync::Mutex<Option<String>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
     /// 累计检测次数
@@ -150,82 +137,28 @@ pub struct MonitorService {
 impl MonitorService {
     /// 构造监测服务并构建 reqwest 客户端。
     ///
-    /// `proxy` 为可选的 SOCKS5 代理地址（网卡绑定场景）；构建失败返回 [`MonitorError::ClientBuild`]。
+    /// 出口在每轮检测前从运行时方案读取，构造时不缓存独立代理。
     pub fn new(
         config: Arc<ConfigService>,
         detect: Arc<dyn NetworkDetect>,
-        proxy: Option<&str>,
         metrics: Option<Arc<Metrics>>,
     ) -> Result<Self, MonitorError> {
-        let settings = config.load_settings();
-        let disable_proxy = settings.global.monitor.disable_proxy;
-        let ignore_certs = settings.global.browser.ignore_https_errors;
-        let http_client = Self::build_client(proxy, disable_proxy, ignore_certs)?;
         Ok(Self {
             config_service: config,
             network_detect: detect,
-            http_client: Arc::new(ArcSwap::from_pointee(http_client)),
-            last_disable_proxy: std::sync::atomic::AtomicBool::new(disable_proxy),
-            last_ignore_certs: std::sync::atomic::AtomicBool::new(ignore_certs),
-            bind_proxy: std::sync::Mutex::new(proxy.map(|s| s.to_string())),
             metrics,
             check_count: AtomicU64::new(0),
             all_disabled_warned: AtomicBool::new(false),
         })
     }
 
-    /// 探测前热重建客户端：代理/证书开关变化即重建，无需重启
-    fn ensure_client(&self) {
-        let settings = self.config_service.load_settings();
-        let disable_proxy = settings.global.monitor.disable_proxy;
-        let ignore_certs = settings.global.browser.ignore_https_errors;
-        let last_disable = self
-            .last_disable_proxy
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let last_ignore = self
-            .last_ignore_certs
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if disable_proxy == last_disable && ignore_certs == last_ignore {
-            return;
-        }
-        let bind = self.bind_proxy.lock().ok().and_then(|g| g.clone());
-        match Self::build_client(bind.as_deref(), disable_proxy, ignore_certs) {
-            Ok(client) => {
-                self.http_client.store(std::sync::Arc::new(client));
-                self.last_disable_proxy
-                    .store(disable_proxy, std::sync::atomic::Ordering::Relaxed);
-                self.last_ignore_certs
-                    .store(ignore_certs, std::sync::atomic::Ordering::Relaxed);
-                tracing::info!("检测客户端已按新配置重建");
-            }
-            Err(e) => tracing::warn!("检测客户端重建失败，沿用旧客户端: {e}"),
-        }
-    }
-
-    /// 构建 reqwest 客户端（redirect=none、忽略证书错误、连接池复用）
-    ///
-    /// `disable_system_proxy=true`（监测设置"禁用代理"默认值）时显式 no_proxy——
-    /// 网络检测直连，避免系统代理故障时误判 Offline（与原版 `set_block_proxy()`
-    /// 一致）；false 时跟随系统代理。
-    fn build_client(
-        proxy: Option<&str>,
-        disable_system_proxy: bool,
-        ignore_certs: bool,
-    ) -> Result<Client, MonitorError> {
-        let mut builder = Client::builder()
-            .redirect(Policy::none())
-            .danger_accept_invalid_certs(ignore_certs)
-            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT);
-        if disable_system_proxy {
-            builder = builder.no_proxy();
-        }
-        if let Some(p) = proxy {
-            let proxy =
-                reqwest::Proxy::all(p).map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
-            builder = builder.proxy(proxy);
-        }
-        builder
-            .build()
+    /// 准备当前方案的统一网络出口，失败时不使用旧连接或其他网卡。
+    pub async fn prepare_egress(
+        &self,
+    ) -> Result<Arc<crate::network::egress::PreparedEgress>, MonitorError> {
+        let settings = self.config_service.runtime().load().network.clone();
+        crate::network::egress::PreparedEgress::prepare(&settings)
+            .await
             .map_err(|e| MonitorError::ClientBuild(e.to_string()))
     }
 
@@ -247,10 +180,27 @@ impl MonitorService {
         self.check_once(CheckPurpose::PostLoginVerification).await
     }
 
+    /// 使用本次登录方案的出口验证公网，其他全局探测配置仍按次读取。
+    pub async fn verify_internet_via(
+        &self,
+        network: &crate::network::settings::NetworkSettings,
+    ) -> Result<ProbeReport, MonitorError> {
+        self.check_once_via(CheckPurpose::PostLoginVerification, Some(network))
+            .await
+    }
+
     /// 按用途执行一次检测；暂停属于 Engine 调度策略。
     #[instrument(skip_all)]
     async fn check_once(&self, purpose: CheckPurpose) -> Result<ProbeReport, MonitorError> {
-        self.ensure_client();
+        self.check_once_via(purpose, None).await
+    }
+
+    /// 显式出口仅限本次操作，不改写活动方案或缓存全局配置。
+    async fn check_once_via(
+        &self,
+        purpose: CheckPurpose,
+        network: Option<&crate::network::settings::NetworkSettings>,
+    ) -> Result<ProbeReport, MonitorError> {
         let rt = self.config_service.runtime().load();
         let cfg = MonitorConfig::from_runtime(&rt);
 
@@ -286,9 +236,19 @@ impl MonitorService {
             self.all_disabled_warned.store(false, Ordering::Relaxed);
         }
 
-        // 并发执行已启用的三类公网探测（不绑定出口网卡，走系统默认路由）
-        // 客户端已按当前配置热重建（ensure_client）
-        let client = self.http_client.load();
+        // 所有探测共用本轮出口租约，网卡或 DNS 准备失败时禁止降级。
+        let egress =
+            crate::network::egress::PreparedEgress::prepare(network.unwrap_or(&rt.network))
+                .await
+                .map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
+        let client = egress
+            .client_builder()
+            .map_err(|e| MonitorError::ClientBuild(e.to_string()))?
+            .redirect(Policy::none())
+            .danger_accept_invalid_certs(rt.browser.ignore_https_errors)
+            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+            .build()
+            .map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
         let start = Instant::now();
 
         let mut tasks: Vec<BoxFuture<(ProbeKind, ProbeOutcome, Vec<PerProbeDetail>)>> = Vec::new();
@@ -300,8 +260,9 @@ impl MonitorService {
             );
             let targets = cfg.tcp_targets.clone();
             let timeout = cfg.tcp_timeout;
+            let route = egress.clone();
             tasks.push(Box::pin(async move {
-                let (o, d) = probes::TcpProbe::run(&targets, timeout).await;
+                let (o, d) = probes::TcpProbe::run_via(&targets, timeout, Some(route)).await;
                 (ProbeKind::Tcp, o, d)
             }));
         }
@@ -382,7 +343,7 @@ impl MonitorService {
             } else if rt.profile.auth_url.trim().is_empty() {
                 AuthEndpointState::Missing
             } else {
-                self.inspect_auth_endpoint(&rt.profile.auth_url, cfg.auth_url_timeout)
+                self.inspect_auth_endpoint_via(&rt.profile.auth_url, cfg.auth_url_timeout, &egress)
                     .await
             };
             assessment = apply_auth_endpoint(assessment, auth_endpoint);
@@ -470,20 +431,26 @@ impl MonitorService {
 
     /// 检查认证入口的 TCP 可达性，并区分配置错误与网络不可达。
     ///
-    /// 必须直连（`TcpStream::connect`），禁止走系统代理/`http_client`：
-    /// `auth_url` 指向校园内网认证服务器（常见 `10.x`/`172.16.x` 或校内域名的私网 IP），
-    /// Captive 态下尚未获得公网访问能力，公网代理此时不可达且不会回源内网；若走代理
-    /// 会把认证入口误判为不可达，干扰监测层的恢复建议。外网三类探测已由
-    /// `build_client(disable_proxy=true → no_proxy)` 屏蔽代理，本方法将该原则贯彻到
-    /// 内网：内网更不应经过代理。
-    ///
-    /// 地址解析统一走 [`probes::parse_url_host_port`] 单点实现（G2）：
-    /// 支持 IPv6 方括号与裸地址形式，返回的 host 已剥除方括号。
+    /// 与公网探测和登录共用出口；指定网卡时 DNS 与 TCP 都绑定该接口。
+    /// 明确指定代理时经同一代理执行 CONNECT，不能用默认路由的可达性代替。
     #[instrument(skip(self))]
     pub async fn inspect_auth_endpoint(
         &self,
         auth_url: &str,
         timeout: Duration,
+    ) -> AuthEndpointState {
+        let Ok(egress) = self.prepare_egress().await else {
+            return AuthEndpointState::Unreachable;
+        };
+        self.inspect_auth_endpoint_via(auth_url, timeout, &egress)
+            .await
+    }
+
+    async fn inspect_auth_endpoint_via(
+        &self,
+        auth_url: &str,
+        timeout: Duration,
+        egress: &crate::network::egress::PreparedEgress,
     ) -> AuthEndpointState {
         let (host, port) = match parse_url_host_port(auth_url) {
             Some(hp) => hp,
@@ -492,11 +459,10 @@ impl MonitorService {
                 return AuthEndpointState::Invalid;
             }
         };
-        let reachable =
-            match tokio::time::timeout(timeout, TcpStream::connect((host.as_str(), port))).await {
-                Ok(Ok(_)) => true,
-                Ok(Err(_)) | Err(_) => false,
-            };
+        let reachable = match tokio::time::timeout(timeout, egress.connect(&host, port)).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(_)) | Err(_) => false,
+        };
         debug!("auth_url 可达性: {host}:{port} -> {reachable}");
         if reachable {
             AuthEndpointState::Reachable
@@ -514,6 +480,16 @@ impl MonitorService {
     ///
     /// 网卡为空时返回「无地址」而不是错误——脚本据此判断拿不到本机 IP。
     pub async fn local_address(&self) -> crate::network::LocalAddress {
+        if self.config_service.runtime().load().network.mode
+            == crate::network::settings::NetworkMode::Interface
+        {
+            return self
+                .prepare_egress()
+                .await
+                .ok()
+                .and_then(|route| route.local_address())
+                .unwrap_or_default();
+        }
         match tokio::time::timeout(
             INTERFACE_CHECK_TIMEOUT,
             self.network_detect.list_interfaces(),
@@ -762,7 +738,7 @@ mod tests {
         );
         config.reload().await.unwrap();
 
-        Arc::new(MonitorService::new(config, detect, None, None).unwrap())
+        Arc::new(MonitorService::new(config, detect, None).unwrap())
     }
 
     /// 手动诊断始终跳过网卡与认证入口，即使旧配置开启检查或自动触发采用宽松口径。

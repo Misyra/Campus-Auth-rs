@@ -9,6 +9,7 @@ import { useConfig } from "@/composables/useConfig";
 import { useEnvironment } from "@/composables/useEnvironment";
 import { useToast } from "@/composables/useToast";
 import FieldHelp from "@/components/common/FieldHelp.vue";
+import ProxyBypassHelp from "@/components/common/ProxyBypassHelp.vue";
 import { browsersApi, configApi, workerApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import type { BrowserInfo } from "@/api/types";
@@ -311,17 +312,8 @@ async function stopBrowser() {
             <span class="sr-only">后台运行</span>
           </label>
         </SettingsRow>
-        <SettingsRow description="默认关闭，检测窗口直连；开启后沿用浏览器代理设置">
-          <template #label>
-            重定向检测使用代理
-            <FieldHelp text="关闭时，检测窗口忽略绑定代理，Edge / Chrome / Chromium 同时绕过系统代理。开启后使用绑定代理，未绑定时沿用浏览器的系统代理行为。仅影响重定向检测，不改变正式登录；TUN / VPN 路由仍需手动暂停。修改后请保存设置。" wide />
-          </template>
-          <label class="toggle setting-row-switch">
-            <input type="checkbox" v-model="config.config.browser.redirect_test_use_proxy" />
-            <span class="toggle-slider"></span>
-            <span class="sr-only">重定向检测使用代理</span>
-          </label>
-        </SettingsRow>
+        <p class="hint">登录、重定向检测和网络探测统一使用方案中的“校园网出口”。<RouterLink to="/profiles">前往方案设置出口、网卡与 DNS</RouterLink></p>
+        <ProxyBypassHelp />
         <SettingsRow description="不加载图片，降低资源占用">
           <template #label>
             低资源模式

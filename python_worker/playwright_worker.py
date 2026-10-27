@@ -1229,6 +1229,9 @@ class WorkerCore:
         "--remote-allow-origins",
         "--proxy-server",
         "--proxy-bypass-list",
+        "--proxy-pac-url",
+        "--proxy-auto-detect",
+        "--no-proxy-server",
     }
 
     def __init__(self) -> None:
@@ -1313,9 +1316,21 @@ class WorkerCore:
         extra_headers = self._get_extra_http_headers(bs)
         if extra_headers:
             ctx_opts["extra_http_headers"] = extra_headers
-        if bs.get("bind_proxy"):
+        policy = bs.get("network_policy")
+        if isinstance(policy, dict):
+            if policy.get("mode") == "proxy" and policy.get("proxy"):
+                ctx_opts["proxy"] = policy["proxy"]
+        elif bs.get("bind_proxy"):
             ctx_opts["proxy"] = {"server": bs["bind_proxy"]}
         return ctx_opts
+
+    @staticmethod
+    def _bypass_system_proxy(bs: dict) -> bool:
+        """统一出口优先；缺省时兼容旧版未绑定代理即直连的行为。"""
+        policy = bs.get("network_policy")
+        if isinstance(policy, dict):
+            return policy.get("mode") == "direct"
+        return not bs.get("bind_proxy")
 
     def _get_extra_http_headers(self, bs: dict) -> dict[str, str]:
         """解析自定义 HTTP 请求头（extra_headers_json）。"""
@@ -1382,6 +1397,20 @@ class WorkerCore:
         """
         return _channel_supports_cdp({**(bs or {}), "browser_channel": channel})
 
+    def _network_launch_options(self, bs: dict, channel: str) -> dict[str, Any]:
+        """Firefox 使用偏好设置切换直连与系统代理，避免持久配置残留。"""
+        is_firefox = channel == "firefox" or (
+            channel == "custom" and bs.get("custom_browser_engine") == "firefox"
+        )
+        if not is_firefox:
+            return {}
+        policy = bs.get("network_policy")
+        if self._bypass_system_proxy(bs):
+            return {"firefox_user_prefs": {"network.proxy.type": 0}}
+        if isinstance(policy, dict) and policy.get("mode") == "system":
+            return {"firefox_user_prefs": {"network.proxy.type": 5}}
+        return {}
+
     async def _launch_browser(
         self,
         playwright: Any,
@@ -1398,6 +1427,7 @@ class WorkerCore:
         # 用户侧仍被黑名单拦截，仅后端内置可配；仅 Chromium 支持该参数）
         if self._is_chromium_channel(bs or {}, channel):
             kwargs["ignore_default_args"] = ["--enable-automation"]
+        kwargs.update(self._network_launch_options(bs or {}, channel))
         if resolved_path:
             kwargs["executable_path"] = resolved_path
         elif channel in ("msedge", "chrome"):
@@ -1420,6 +1450,7 @@ class WorkerCore:
         kwargs: dict[str, Any] = {"headless": headless, "args": launch_args, **ctx_opts}
         if self._is_chromium_channel(bs or {}, channel):
             kwargs["ignore_default_args"] = ["--enable-automation"]
+        kwargs.update(self._network_launch_options(bs or {}, channel))
         if resolved_path:
             kwargs["executable_path"] = resolved_path
         elif channel in ("msedge", "chrome"):
@@ -1448,6 +1479,12 @@ class WorkerCore:
         pure_mode = bs.get("pure_mode", False)
         channel = str(bs.get("browser_channel") or "playwright").strip().lower()
         custom_path = str(bs.get("browser_custom_path") or "").strip()
+        launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
+        # 正式登录也需绕过系统代理；否则检测直连成功后，登录仍可能被失效代理阻断。
+        # 纯净模式只关闭可选定制，不应关闭直连保障；显式绑定代理时保留用户选择。
+        if self._bypass_system_proxy(bs) and self._is_chromium_channel(bs, channel):
+            if "--no-proxy-server" not in launch_args:
+                launch_args.append("--no-proxy-server")
 
         if self._playwright is None:
             self._playwright = await async_playwright().start()
@@ -1466,7 +1503,6 @@ class WorkerCore:
                     data_key = channel
                 user_data_dir = _browser_data_dir() / data_key
                 user_data_dir.mkdir(parents=True, exist_ok=True)
-                launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
                 ctx_opts = self._build_context_options(bs)
                 self._context = await self._launch_persistent_context(
                     self._playwright, channel, custom_path, headless,
@@ -1478,7 +1514,7 @@ class WorkerCore:
                     await self._apply_stealth_and_routes(bs)
             elif pure_mode:
                 self._browser = await self._launch_browser(
-                    self._playwright, channel, custom_path, headless, [], bs
+                    self._playwright, channel, custom_path, headless, launch_args, bs
                 )
                 # pure mode 只禁用额外启动参数、stealth 与资源路由；
                 # locale/timezone/UA/header/proxy 等 BrowserContext 契约仍应一致生效。
@@ -1486,7 +1522,6 @@ class WorkerCore:
                 self._context = await self._browser.new_context(**ctx_opts)
                 self._wire_context()
             else:
-                launch_args = self._build_launch_args(bs, channel)
                 self._browser = await self._launch_browser(
                     self._playwright, channel, custom_path, headless, launch_args, bs
                 )
@@ -1497,10 +1532,11 @@ class WorkerCore:
 
             self._page = await self._new_page()
             logger.info(
-                "浏览器已启动: channel=%s, headless=%s, persistent=%s",
+                "浏览器已启动: channel=%s, headless=%s, persistent=%s, system_proxy_bypassed=%s",
                 channel,
                 headless,
                 persistent,
+                "--no-proxy-server" in launch_args,
             )
         except Exception:  # noqa: BLE001 — 启动环节异常源众多（driver 崩溃/参数非法等），统一回滚后原样上抛
             logger.error("浏览器启动失败，回滚资源", exc_info=True)
@@ -2089,7 +2125,8 @@ class WorkerCore:
 
         bs = dict(params.get("browser_settings") or {})
         # 默认直连以观察校园网劫持；用户可单独允许检测使用代理，不修改原配置。
-        use_proxy = bool(bs.get("redirect_test_use_proxy", False))
+        policy = bs.get("network_policy")
+        use_proxy = policy.get("mode") != "direct" if isinstance(policy, dict) else bool(bs.get("redirect_test_use_proxy", False))
         if not use_proxy:
             bs.pop("bind_proxy", None)
         channel = str(bs.get("browser_channel") or "playwright").strip().lower()

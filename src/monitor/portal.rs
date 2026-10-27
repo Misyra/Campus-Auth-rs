@@ -78,9 +78,45 @@ pub async fn detect_portal(
     url_timeout: Duration,
     disable_proxy: bool,
 ) -> PortalDetectResult {
-    let mut builder = reqwest::Client::builder().redirect(Policy::none());
-    if disable_proxy {
-        // 检测直连：captive 态下系统代理不可达，走代理会把劫持误判为不可达
+    detect_portal_via(
+        http_targets,
+        http_timeout,
+        url_targets,
+        url_expected,
+        url_timeout,
+        disable_proxy,
+        None,
+    )
+    .await
+}
+
+/// 重定向检测与登录共用统一出口，保留原入口用于旧调用方。
+pub async fn detect_portal_via(
+    http_targets: &[String],
+    http_timeout: Duration,
+    url_targets: &[String],
+    url_expected: &HashMap<String, String>,
+    url_timeout: Duration,
+    disable_proxy: bool,
+    egress: Option<std::sync::Arc<crate::network::egress::PreparedEgress>>,
+) -> PortalDetectResult {
+    let mut builder = match &egress {
+        Some(route) => match route.client_builder() {
+            Ok(builder) => builder,
+            Err(_) => {
+                return PortalDetectResult {
+                    status: PortalDetectStatus::Offline,
+                    portal_url: None,
+                    message: "统一出口客户端构建失败".into(),
+                    checked: Vec::new(),
+                };
+            }
+        },
+        None => reqwest::Client::builder(),
+    }
+    .redirect(Policy::none());
+    if egress.is_none() && disable_proxy {
+        // 旧开关仅用于兼容入口；统一出口可能通过本地代理实现网卡绑定，不能清除。
         builder = builder.no_proxy();
     }
     let client = match builder.build() {
@@ -105,6 +141,7 @@ pub async fn detect_portal(
             None,
             http_timeout,
             disable_proxy,
+            egress.as_deref(),
         ));
     }
     for url in url_targets {
@@ -114,6 +151,7 @@ pub async fn detect_portal(
             url_expected.get(url),
             url_timeout,
             disable_proxy,
+            egress.as_deref(),
         ));
     }
     let checked: Vec<String> = http_targets
@@ -180,6 +218,7 @@ async fn probe_target(
     expected: Option<&String>,
     timeout: Duration,
     disable_proxy: bool,
+    egress: Option<&crate::network::egress::PreparedEgress>,
 ) -> TargetOutcome {
     let mut current = url;
     let mut followed = false;
@@ -234,7 +273,7 @@ async fn probe_target(
                 })
                 .unwrap_or(false);
             if !same_host {
-                match ensure_redirect_target(&next_url, disable_proxy).await {
+                match ensure_redirect_target_via(&next_url, disable_proxy, egress).await {
                     Ok(pinned_client) => pinned = pinned_client,
                     Err(()) => {
                         return if followed {
@@ -284,9 +323,18 @@ async fn probe_target(
 /// 被 DNS 解析绕过），并把域名钉扎到全部已校验地址（`ClientBuilder::resolve_to_addrs`，
 /// 与 `web::ssrf` 同手法），杜绝 reqwest 二次解析 TOCTOU。IP 字面量无解析面，
 /// 返回 `Ok(None)` 沿用共享客户端。解析失败或无结果一律拒绝跟随。
+#[cfg(test)]
 async fn ensure_redirect_target(
     url: &url::Url,
     disable_proxy: bool,
+) -> Result<Option<reqwest::Client>, ()> {
+    ensure_redirect_target_via(url, disable_proxy, None).await
+}
+
+async fn ensure_redirect_target_via(
+    url: &url::Url,
+    disable_proxy: bool,
+    egress: Option<&crate::network::egress::PreparedEgress>,
 ) -> Result<Option<reqwest::Client>, ()> {
     let host = url.host_str().ok_or(())?;
     let port = url.port_or_known_default().unwrap_or(80);
@@ -297,12 +345,26 @@ async fn ensure_redirect_target(
             Ok(None)
         };
     }
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| ())?
-        .collect();
+    let addrs: Vec<SocketAddr> = if let Some(route) = egress {
+        route.resolve(host, port).await.map_err(|_| ())?
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| ())?
+            .collect()
+    };
     if !all_addrs_allowed(&addrs) {
         return Err(());
+    }
+    if let Some(route) = egress {
+        return route
+            .client_builder()
+            .map_err(|_| ())?
+            .redirect(Policy::none())
+            .resolve_to_addrs(host, &addrs)
+            .build()
+            .map(Some)
+            .map_err(|_| ());
     }
     build_pinned_client(host, &addrs, disable_proxy).map(Some)
 }
@@ -395,6 +457,54 @@ mod tests {
 
     fn http_targets_of(url: &str) -> Vec<String> {
         vec![url.to_string()]
+    }
+
+    /// 模拟默认出口和指定出口返回相反结果，锁定旧开关不能覆盖统一出口。
+    #[tokio::test]
+    async fn unified_egress_preflight_ignores_legacy_proxy_toggle() {
+        use crate::network::{
+            egress::PreparedEgress,
+            settings::{NetworkMode, NetworkSettings},
+        };
+        let online = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+        let captive = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nlogin";
+        for old_toggle in [true, false] {
+            for expected_online in [true, false] {
+                let direct =
+                    serve_responses(vec![if expected_online { captive } else { online }]).await;
+                let proxy =
+                    serve_responses(vec![if expected_online { online } else { captive }]).await;
+                let route = PreparedEgress::prepare(&NetworkSettings {
+                    mode: NetworkMode::Proxy,
+                    proxy_url: url::Url::parse(&proxy)
+                        .unwrap()
+                        .origin()
+                        .ascii_serialization(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+                let result = detect_portal_via(
+                    &http_targets_of(&direct),
+                    Duration::from_secs(2),
+                    &[],
+                    &HashMap::new(),
+                    Duration::from_secs(2),
+                    old_toggle,
+                    Some(route),
+                )
+                .await;
+                assert_eq!(
+                    result.status,
+                    if expected_online {
+                        PortalDetectStatus::Online
+                    } else {
+                        PortalDetectStatus::CaptiveNoRedirect
+                    },
+                    "预检必须使用指定出口：旧开关={old_toggle}"
+                );
+            }
+        }
     }
 
     /// 302 绝对 Location → Found

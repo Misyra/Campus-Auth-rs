@@ -95,6 +95,7 @@ async fn apply_flat_settings_patch(
 
     // 凭证字段属于 Profile 而非全局设置
     let profile_keys = [
+        "network",
         "username",
         "password",
         "auth_url",
@@ -216,6 +217,12 @@ async fn apply_flat_settings_patch(
             Box::new(move |mut profile| {
                 let tasks = tasks.clone();
                 Box::pin(async move {
+                    if let Some(network) = profile_patch.get("network") {
+                        profile.network = Some(
+                            serde_json::from_value(network.clone())
+                                .map_err(|_| "网络出口配置格式无效")?,
+                        );
+                    }
                     if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
                         profile.username = username.to_string();
                     }
@@ -295,6 +302,7 @@ async fn apply_flat_settings_patch(
                             _ => return Err("password 必须是字符串或 null".to_string()),
                         }
                     }
+                    super::profiles::validate_profile_network(&profile)?;
                     Ok(profile)
                 })
             }),
@@ -394,6 +402,7 @@ fn settings_flat_response(
         "app_settings": settings.global.app,
         "worker": settings.global.worker,
         "updater": settings.global.updater,
+        "network": crate::network::settings::NetworkSettings::effective(profile, &settings.global),
         "username": profile.username,
         "auth_url": profile.auth_url,
         "trigger_url": profile.trigger_url,
@@ -1114,6 +1123,7 @@ mod tests {
             ProfileSnapshot, RetrySettings, RuntimeConfig, UpdaterSettings, WorkerSettings,
         };
         RuntimeConfig {
+            network: Default::default(),
             browser: BrowserSettings::default(),
             monitor: MonitorSettings::default(),
             pause: PauseSettings::default(),
@@ -1673,6 +1683,40 @@ mod tests {
     // ============ patch_settings 扁平映射（双 state 提取，M1） ============
 
     /// 凭证字段路由到 Profile、密码走 save_password 语义、全局字段落 settings
+    /// 网络字段必须落在活跃方案，非法 DNS 不得部分覆盖已有设置。
+    #[tokio::test]
+    async fn patch_network_is_profile_scoped_and_invalid_dns_is_atomic() {
+        let (app, inner) = mock_app();
+        let network = serde_json::json!({"mode":"interface", "interface_id":"campus-adapter", "proxy_url":"", "dns_servers":["10.0.0.53"]});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"network":network}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            serde_json::to_value(inner.lock().unwrap().profile.network.as_ref().unwrap()).unwrap(),
+            network
+        );
+        let response = app.oneshot(Request::builder().method("PATCH").uri("/api/config")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"network":{"mode":"interface","interface_id":"campus-adapter","dns_servers":["invalid"]}}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::to_value(inner.lock().unwrap().profile.network.as_ref().unwrap()).unwrap(),
+            network
+        );
+    }
+
     #[tokio::test]
     async fn test_patch_settings_routes_credentials_and_global() {
         let raw_password =

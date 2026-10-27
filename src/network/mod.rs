@@ -1,7 +1,11 @@
 //! 网络接口：网卡检测
 //!
 //! 网卡枚举（[`detect`]）用于 Profile 自动切换与网关/SSID 检测；
-//! 浏览器与探测流量一律走系统默认路由（不做网卡绑定）。
+//! 登录、探测与 DNS 共用按方案选择的出口，指定网卡不可用时禁止回退。
+
+pub mod adapters;
+pub mod egress;
+pub mod settings;
 
 pub mod detect;
 pub mod interfaces;

@@ -72,6 +72,8 @@ struct EngineInner {
     /// `AttemptLoginOnce`。同一轮持续门户状态、同一配置版本仅放行一次，防止错误
     /// 地址导致每轮探测都拉起浏览器；网络重新确认非门户或配置变化后恢复预算。
     cautious_attempted_config_version: Option<u64>,
+    /// 网络故障后的谨慎登录冷却截止；凭据及人工验证失败没有此预算。
+    cautious_retry_after: Option<Instant>,
     /// 上次网络检测时间
     ///
     /// 仅在真实探测结果回传时更新（G3）：登录结果等非检测路径合并引擎状态时
@@ -116,6 +118,26 @@ struct EngineInner {
 }
 
 impl EngineInner {
+    /// 仅网络故障恢复谨慎预算，凭据、人工验证和手动操作保持原限制。
+    fn observe_cautious_result(&mut self, result: &LoginResult) {
+        if result.source == LoginSource::Auto && self.cautious_attempted_config_version.is_some() {
+            self.cautious_retry_after =
+                if result.terminal == LoginTerminal::Failed && result.network_retryable {
+                    tracing::info!("谨慎登录遇到临时网络故障，将在冷却后重新尝试");
+                    Some(Instant::now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS))
+                } else {
+                    None
+                };
+        }
+    }
+
+    fn cautious_blocked(&self, config_version: u64) -> bool {
+        self.cautious_attempted_config_version == Some(config_version)
+            && self
+                .cautious_retry_after
+                .is_none_or(|until| Instant::now() < until)
+    }
+
     fn new(
         probe_result_tx: mpsc::Sender<ProbeMessage>,
         login_result_tx: mpsc::Sender<LoginResult>,
@@ -125,6 +147,7 @@ impl EngineInner {
             last_assessment: ConnectivityAssessment::default(),
             last_evidence: None,
             cautious_attempted_config_version: None,
+            cautious_retry_after: None,
             last_check_time: None,
             manual_paused: false,
             last_profile_check: Instant::now(),
@@ -457,6 +480,7 @@ async fn handle_shutdown(inner: &mut EngineInner, deps: &EngineDeps) {
 /// 自动登录功能从此永久失效。
 fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &EngineDeps) {
     inner.auto_login_in_flight = false;
+    inner.observe_cautious_result(&result);
     // 当前活跃 Profile 作为通知去重的键
     let profile_id = deps.config_service.runtime().load().profile.id.clone();
     match login_failure_budget_action(result.terminal, result.source) {
@@ -635,6 +659,7 @@ impl Drop for AutoLoginReturnGuard {
             return;
         }
         let _ = self.tx.try_send(LoginResult {
+            network_retryable: false,
             terminal: LoginTerminal::Failed,
             message: "自动登录任务异常退出（panic）".to_string(),
             source: LoginSource::Auto,
@@ -730,6 +755,7 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
     if status != NetworkStatus::CaptivePortal {
         // 离开门户态即结束本次认证事件；以后再次进入门户态可重新谨慎尝试一次。
         inner.cautious_attempted_config_version = None;
+        inner.cautious_retry_after = None;
     }
     if status != old_status {
         tracing::info!(
@@ -816,7 +842,7 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
         RecoveryAdvice::AttemptLogin | RecoveryAdvice::AttemptLoginOnce
     ) {
         let cautious_already_attempted = advice == RecoveryAdvice::AttemptLoginOnce
-            && inner.cautious_attempted_config_version == Some(probe_config_version);
+            && inner.cautious_blocked(probe_config_version);
 
         if !inner.monitoring {
             tracing::debug!("检测已停止，跳过本轮自动登录（迟到探测结果）");
@@ -839,6 +865,7 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
         } else {
             if advice == RecoveryAdvice::AttemptLoginOnce {
                 inner.cautious_attempted_config_version = Some(probe_config_version);
+                inner.cautious_retry_after = None;
                 tracing::info!("检测到门户劫持但认证入口预检失败，谨慎尝试一次自动登录");
             } else {
                 tracing::info!("检测结论建议恢复认证，触发自动登录");
@@ -1136,6 +1163,36 @@ mod tests {
             inner.consecutive_failures, 0,
             "冷却期满应重置失败计数，恢复完整的连续失败预算"
         );
+    }
+
+    /// 网络故障冷却后重新放行，人工验证或凭据失败仍保留谨慎门禁。
+    #[tokio::test(start_paused = true)]
+    async fn cautious_network_failure_recovers_without_configuration_change() {
+        let (probe_tx, _) = mpsc::channel(1);
+        let (login_tx, _) = mpsc::channel(1);
+        let mut inner = EngineInner::new(probe_tx, login_tx);
+        inner.cautious_attempted_config_version = Some(7);
+        let mut result = LoginResult {
+            network_retryable: true,
+            terminal: LoginTerminal::Failed,
+            message: "导航失败".into(),
+            source: LoginSource::Auto,
+            duration: Duration::ZERO,
+            attempts: 1,
+        };
+        inner.observe_cautious_result(&result);
+        assert!(inner.cautious_blocked(7));
+        assert!(!inner.cautious_blocked(8));
+        tokio::time::advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1)).await;
+        assert!(!inner.cautious_blocked(7));
+        result.network_retryable = false;
+        inner.observe_cautious_result(&result);
+        tokio::time::advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1)).await;
+        assert!(inner.cautious_blocked(7));
+        result.network_retryable = true;
+        result.source = LoginSource::Manual;
+        inner.observe_cautious_result(&result);
+        assert!(inner.cautious_blocked(7));
     }
 
     /// P2-5：探测任务 panic 时守卫补发失败消息（否则 `probe_in_flight` 永久卡住）
@@ -1498,13 +1555,7 @@ mod tests {
         let metrics = Metrics::new();
         let detector: Arc<dyn NetworkDetect> = Arc::new(HangingDetect);
         let monitor = Arc::new(
-            MonitorService::new(
-                config.clone(),
-                detector.clone(),
-                None,
-                Some(metrics.clone()),
-            )
-            .unwrap(),
+            MonitorService::new(config.clone(), detector.clone(), Some(metrics.clone())).unwrap(),
         );
         let history = Arc::new(LoginHistoryService::new(tmp.path()));
         let profiles = Arc::new(ProfileService::new(config.clone()));

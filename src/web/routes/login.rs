@@ -140,6 +140,7 @@ mod tests {
 
     fn result(success: bool) -> LoginResult {
         LoginResult {
+            network_retryable: false,
             terminal: if success {
                 LoginTerminal::Success
             } else {

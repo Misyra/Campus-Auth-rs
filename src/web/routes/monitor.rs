@@ -16,7 +16,7 @@ use crate::bridge::BridgeApi;
 use crate::config::{ConfigApi, DEFAULT_TRIGGER_URL};
 use crate::engine::{EngineApi, EngineCommand};
 use crate::environment::EnvironmentApi;
-use crate::monitor::{MonitorConfig, PortalDetectStatus, detect_portal};
+use crate::monitor::{MonitorConfig, PortalDetectStatus};
 use crate::status::StatusManager;
 use crate::web::error::{ApiError, data};
 
@@ -29,6 +29,8 @@ pub struct RedirectTestRequest {
     /// 用户尚未保存的自定义触发地址；空值使用内置默认地址。
     #[serde(default)]
     pub trigger_url: String,
+    /// 方案编辑器尚未保存的出口配置。
+    pub network: Option<crate::network::settings::NetworkSettings>,
 }
 
 /// 重定向检测结论。
@@ -137,13 +139,19 @@ pub async fn test_redirect(
     let rt = config.runtime_snapshot();
     let m = &rt.monitor;
     let cfg = MonitorConfig::from_runtime(&rt);
-    let preflight = detect_portal(
+    let egress = crate::network::egress::PreparedEgress::prepare(
+        body.network.as_ref().unwrap_or(&rt.network),
+    )
+    .await
+    .map_err(|e| ApiError::ServiceUnavailable(e.to_string()))?;
+    let preflight = crate::monitor::portal::detect_portal_via(
         &m.http_targets,
         cfg.http_timeout,
         &m.url_targets,
         &m.url_expected_responses,
         cfg.url_timeout,
         m.disable_proxy,
+        Some(egress.clone()),
     )
     .await;
     if preflight.status == PortalDetectStatus::Online {
@@ -164,12 +172,14 @@ pub async fn test_redirect(
         .ok_or_else(|| ApiError::Internal("浏览器设置序列化结果无效".into()))?;
     // 本功能的目的就是让用户亲眼确认跳转，不能继承全局无头模式。
     settings.insert("headless".into(), Value::Bool(false));
+    egress.apply_browser(&mut browser_settings);
     let response = bridge
         .execute_with_timeout(
             "test_redirect",
             serde_json::json!({
                 "trigger_url": trigger_url,
                 "browser_settings": browser_settings,
+                "network": body.network.as_ref().unwrap_or(&rt.network),
             }),
             REDIRECT_TEST_TIMEOUT,
         )
@@ -193,6 +203,14 @@ pub async fn test_redirect(
     let result = redirect_test_result(status);
     tracing::info!(status = ?result.status, "重定向检测完成");
     Ok(data(serde_json::to_value(result)?))
+}
+
+/// GET /api/network/interfaces：物理网卡及当前 IPv4 / DNS，供方案选择出口。
+pub async fn get_network_interfaces() -> Result<Json<Value>, ApiError> {
+    let adapters = crate::network::adapters::list_adapters()
+        .await
+        .map_err(|e| ApiError::ServiceUnavailable(format!("网卡读取失败: {e}")))?;
+    Ok(data(serde_json::to_value(adapters)?))
 }
 
 #[cfg(test)]
