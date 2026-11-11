@@ -11,13 +11,6 @@ export function formatScheduleTime(schedule: { hour?: number; minute?: number } 
   return `${hour}:${minute}`;
 }
 
-/** 秒 → 分钟/秒文本 */
-export function formatTimeValue(seconds: number): string {
-  if (!seconds) return "-";
-  if (seconds < 60) return `${seconds}秒`;
-  return `${Math.round(seconds / 60)}分钟`;
-}
-
 /**
  * 秒 → 中文紧凑时长（仪表盘「已检测时长」统计卡）。
  *
