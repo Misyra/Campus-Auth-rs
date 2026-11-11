@@ -401,7 +401,13 @@ mod proxy_client_tests {
     /// 非法代理 URL 转错误而非 panic（代理值来自用户配置，曾 expect 直接砸掉请求任务）
     #[test]
     fn pinned_client_rejects_invalid_proxy_url() {
-        for bad in ["http://", "http://[::1", "not a url!!!", "http://a b"] {
+        for bad in [
+            "http://",
+            "http://[::1",
+            "not a url!!!",
+            "http://a b",
+            "http://user:secret@",
+        ] {
             let err = pinned_client(
                 "example.com",
                 loopback(),
@@ -411,6 +417,9 @@ mod proxy_client_tests {
             )
             .unwrap_err();
             assert!(err.contains("代理 URL 非法"), "{bad}: {err}");
+            // 防回归钉住 reqwest 行为假设：构造错误的 Display 不得回显代理 URL
+            // 原文（可能内嵌 user:pass 凭据）
+            assert!(!err.contains("secret"), "{bad}: {err}");
         }
     }
 

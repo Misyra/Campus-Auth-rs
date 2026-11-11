@@ -1287,11 +1287,21 @@ fn sanitize_proxy_url(proxy_url: &str) -> String {
 fn build_proxied_client(proxy_url: &str) -> Result<reqwest::Client, String> {
     let lower = proxy_url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        // 错误串只带脱敏 URL：proxy_url 可能内嵌 user:pass 凭据，原样进错误文本
+        // 会被 effective_client_for 写入日志并随日志导出外泄
         return Err(format!(
-            "代理地址必须是 http:// 或 https:// 开头：{proxy_url}"
+            "代理地址必须是 http:// 或 https:// 开头：{}",
+            sanitize_proxy_url(proxy_url)
         ));
     }
-    let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| e.to_string())?;
+    // 防御性包装：reqwest 0.12 构造错误虽已核实不内嵌 URL 原文（Display 只输出
+    // "builder error"），但该保证属上游实现细节，本地化措辞避免升级后回退
+    let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| {
+        format!(
+            "代理 URL 解析失败（{}）：{e}",
+            sanitize_proxy_url(proxy_url)
+        )
+    })?;
     reqwest::Client::builder()
         .proxy(proxy)
         .connect_timeout(download::DOWNLOAD_CONNECT_TIMEOUT)
@@ -1430,6 +1440,17 @@ mod tests {
         settings.auto_check_enabled = true;
         settings.check_interval_hours = 0;
         assert!(next_check_deadline(&settings, last).is_none());
+    }
+
+    /// 代理客户端构建失败的错误文本必须脱敏：凭据不进日志（防随日志导出外泄）
+    #[test]
+    fn build_proxied_client_error_sanitizes_credentials() {
+        let err = build_proxied_client("ftp://user:secret@127.0.0.1:1").unwrap_err();
+        assert!(!err.contains("secret"), "{err}");
+        assert!(err.contains("127.0.0.1:1"), "{err}");
+
+        let err = build_proxied_client("http://user:secret@").unwrap_err();
+        assert!(!err.contains("secret"), "{err}");
     }
 
     /// 模拟摘要刚结束时取消已生效：最终提交不得留下 pending。
