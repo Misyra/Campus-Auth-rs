@@ -150,7 +150,8 @@ pub(crate) async fn fetch_manifest(
         .send()
         .await
         .map_err(UpdaterError::ManifestFetchFailed)?;
-    // 重定向收敛：最终 URL 仍须通过白名单（防 https→http evil 跳转）
+    // 重定向已由客户端策略逐跳前置校验，此处兜底：最终 URL 仍须通过白名单
+    // （防 https→http evil 跳转；custom policy 下恒通过，无行为漂移）
     if !is_allowed_update_url(response.url().as_str()) {
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
     }
@@ -340,6 +341,7 @@ pub(crate) async fn fetch_manifest_for_channel(
         .send()
         .await
         .map_err(UpdaterError::ManifestFetchFailed)?;
+    // 重定向已由客户端策略逐跳前置校验，此处兜底（custom policy 下恒通过）
     if !is_allowed_update_url(response.url().as_str()) {
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
     }

@@ -268,9 +268,11 @@ impl UpdaterService {
         };
         // 回退客户端跟随系统/环境代理（system-proxy feature 已启用）：
         // 显式代理未启用/构建失败时使用。连接超时与下载停滞超时同源配置，
-        // 避免握手挂死（总超时已移除，见 download.rs）
+        // 避免握手挂死（总超时已移除，见 download.rs）；
+        // 重定向逐跳前置白名单校验，与显式代理客户端同策略
         let http_client = reqwest::Client::builder()
             .connect_timeout(download::DOWNLOAD_CONNECT_TIMEOUT)
+            .redirect(updater_redirect_policy())
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!("默认 HTTP 客户端构建失败，回退无配置客户端: {e}");
@@ -1280,6 +1282,25 @@ fn sanitize_proxy_url(proxy_url: &str) -> String {
     }
 }
 
+/// 更新器重定向策略：逐跳前置白名单复核（https 任意主机 / http 精确回环），上限 5 跳。
+///
+/// 禁用 reqwest 默认「先跟随、后由调用方复核」的时序——中间跳请求在复核前已真实
+/// 发出（带 UA）。与 `web::ssrf` 的自家标准（先校验后发请求）对齐；检查与下载
+/// 三个网络入口（manifest / Releases 列表 / 主包下载）共用本策略。
+pub(crate) fn updater_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("更新源重定向超过 5 跳，已中止");
+        }
+        if check::is_allowed_update_url(attempt.url().as_str()) {
+            attempt.follow()
+        } else {
+            // 静态文案：不回显被拒目标（目标来自清单/302 Location，不可信）
+            attempt.error("重定向目标未通过更新源白名单，已中止")
+        }
+    })
+}
+
 /// 构建走显式代理的 HTTP 客户端
 ///
 /// 每次调用新建（Client 构造纯配置无 I/O，开销可忽略）；检查/下载为低频操作，
@@ -1305,6 +1326,7 @@ fn build_proxied_client(proxy_url: &str) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .proxy(proxy)
         .connect_timeout(download::DOWNLOAD_CONNECT_TIMEOUT)
+        .redirect(updater_redirect_policy())
         .build()
         .map_err(|e| e.to_string())
 }

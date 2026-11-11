@@ -82,7 +82,8 @@ pub(crate) async fn download_and_verify(
             });
         }
     };
-    // 重定向收敛：最终 URL 仍须通过白名单
+    // 重定向已由客户端策略逐跳前置校验（updater_redirect_policy），此处兜底：
+    // 最终 URL 仍须通过白名单（custom policy 下恒通过，无行为漂移）
     if !crate::updater::check::is_allowed_update_url(response.url().as_str()) {
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
     }
@@ -314,6 +315,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::StatusCode;
+    use axum::response::Redirect;
     use axum::routing::get;
 
     fn test_info(url: &str, sha256: &str) -> crate::updater::UpdateInfo {
@@ -407,6 +409,153 @@ mod tests {
         );
         let mut rd = tokio::fs::read_dir(tmp.path()).await.unwrap();
         assert!(rd.next_entry().await.unwrap().is_none());
+    }
+
+    /// 携带更新器重定向策略的回环直连客户端（生产 effective_client* 同款策略）
+    fn policy_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(crate::updater::updater_redirect_policy())
+            .build()
+            .unwrap()
+    }
+
+    /// 起本地 302 跳转服务：`/a` 请求计数后 302 → `redirect_target`，`/b` 回固定字节。
+    /// 返回 (监听地址, `/a` 命中计数器)——跟随与否以计数器观察
+    async fn serve_redirect(
+        redirect_target: &'static str,
+        payload: Vec<u8>,
+    ) -> (SocketAddr, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_route = hits.clone();
+        let app = axum::Router::new()
+            .route(
+                "/a",
+                get(move || {
+                    let hits = hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Redirect::temporary(redirect_target)
+                    }
+                }),
+            )
+            .route(
+                "/b",
+                get(move || {
+                    let payload = payload.clone();
+                    async move {
+                        (
+                            StatusCode::OK,
+                            [("content-type", "application/zip")],
+                            Body::from(payload),
+                        )
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (addr, hits)
+    }
+
+    /// 汇总错误及其 source 链的全部文本（reqwest Display 是否内嵌 source 属上游
+    /// 实现细节，走链收集断言更稳）
+    fn error_chain_text(err: &UpdaterError) -> String {
+        let mut text = err.to_string();
+        let mut source = std::error::Error::source(err);
+        while let Some(s) = source {
+            text.push_str(" | ");
+            text.push_str(&s.to_string());
+            source = s.source();
+        }
+        text
+    }
+
+    /// 白名单内回环 302（/a → /b）正常跟随：下载成功、SHA256 匹配（策略放行路径）
+    #[tokio::test]
+    async fn download_follows_allowed_loopback_redirect() {
+        let payload = b"redirected-payload-67890".to_vec();
+        let (addr, _hits) = serve_redirect("/b", payload.clone()).await;
+        let url = format!("http://{addr}/a");
+        let info = test_info(&url, &sha256_hex(&payload));
+        let tmp = tempfile::tempdir().unwrap();
+        let client = policy_client();
+
+        let path = download_and_verify(&client, &info, tmp.path(), None)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), payload);
+    }
+
+    /// 跳出白名单（回环 302 → http 非回环假域）被客户端策略逐跳前置拦截：
+    /// 第二次带 UA 请求从未真实发出（源路由计数恒 1），错误链含策略静态文案
+    /// 即证明拦在策略层而非目标域 DNS 失败，且错误文本不回显被拒目标。
+    /// 目标用 http（非回环）：白名单对 https 任意主机放行，https 假域测不出拒绝路径
+    #[tokio::test]
+    async fn download_rejects_redirect_off_whitelist() {
+        let payload = b"never-fetched".to_vec();
+        let (addr, hits) = serve_redirect("http://example.invalid/x.zip", payload).await;
+        let url = format!("http://{addr}/a");
+        let info = test_info(&url, &"0".repeat(64));
+        let tmp = tempfile::tempdir().unwrap();
+        let client = policy_client();
+
+        let err = download_and_verify(&client, &info, tmp.path(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpdaterError::DownloadFailed(_)), "{err}");
+        // 源路由仅命中一次：302 后的带 UA 请求被策略前置拦下
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // 拦截发生在客户端策略层（含静态文案），不是目标域 DNS 失败碰巧通过
+        let text = error_chain_text(&err);
+        assert!(text.contains("重定向目标未通过更新源白名单"), "{text}");
+        // 错误不回显被拒目标 URL（目标来自不可信 302 Location）
+        assert!(!text.contains("example.invalid"), "{text}");
+    }
+
+    /// 白名单内连续 302 超过 5 跳被策略中止（上限 5 跳分支）：
+    /// 第 6 个跳转目标在前置复核中被拒，链尾 200 永不抵达（若策略缺失，
+    /// 走到链尾会因 SHA 不匹配以 ChecksumMismatch 失败，测试不空洞）
+    #[tokio::test]
+    async fn download_rejects_redirect_hop_limit() {
+        use axum::extract::Path;
+        use axum::response::IntoResponse;
+
+        let app = axum::Router::new().route(
+            "/hop/{n}",
+            get(|Path(n): Path<usize>| async move {
+                if n < 8 {
+                    Redirect::temporary(&format!("/hop/{}", n + 1)).into_response()
+                } else {
+                    (StatusCode::OK, Body::from(b"never-reached".to_vec())).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/hop/1");
+        let info = test_info(&url, &"0".repeat(64));
+        let tmp = tempfile::tempdir().unwrap();
+        let client = policy_client();
+
+        let err = download_and_verify(&client, &info, tmp.path(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpdaterError::DownloadFailed(_)), "{err}");
+        assert!(
+            error_chain_text(&err).contains("更新源重定向超过 5 跳"),
+            "{}",
+            error_chain_text(&err)
+        );
     }
 
     /// 文件名净化：正常资产名透传；`..` / 空段 / 超长 / 反斜杠回退或剥离
