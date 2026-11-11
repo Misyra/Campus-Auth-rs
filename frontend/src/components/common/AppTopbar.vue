@@ -2,7 +2,7 @@
 // 顶栏（替代原 topbar.html）。
 // 展示页面标题、未保存提示、WebSocket 重连状态、通知中心、监控开关。
 
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import IconApp from "./IconApp.vue";
 import type { NotificationAction } from "../../api/types";
@@ -54,7 +54,22 @@ function onDocClick(e: MouseEvent): void {
 }
 
 onMounted(() => document.addEventListener("click", onDocClick));
-onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
+
+// 面板打开期间支持 Esc 关闭（对齐 HttpTasksPanel 行菜单的既有键盘约定）。
+// 监听随开合挂/卸不常驻；卸载路径兜底移除，防打开状态下组件销毁泄漏。
+function onDocKeydown(e: KeyboardEvent): void {
+  if (e.key === "Escape") showNotifications.value = false;
+}
+
+watch(showNotifications, (open) => {
+  if (open) document.addEventListener("keydown", onDocKeydown);
+  else document.removeEventListener("keydown", onDocKeydown);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("click", onDocClick);
+  document.removeEventListener("keydown", onDocKeydown);
+});
 </script>
 
 <template>
@@ -77,13 +92,14 @@ onBeforeUnmount(() => document.removeEventListener("click", onDocClick));
           @click="toggleNotifications"
           title="通知历史"
           aria-label="通知历史"
-          aria-haspopup="true"
+          aria-haspopup="dialog"
           :aria-expanded="showNotifications"
         >
           <IconApp name="bell" />
           <span v-if="unreadNotifications > 0" class="notification-badge">{{ unreadNotifications > 9 ? "9+" : unreadNotifications }}</span>
         </button>
-        <div v-if="showNotifications" class="notification-dropdown" role="menu">
+        <!-- 通知历史是信息面板而非命令菜单（子项非 menuitem），dialog 语义才与实际交互一致 -->
+        <div v-if="showNotifications" class="notification-dropdown" role="dialog" aria-label="通知历史">
           <div class="notification-header">
             <span>通知历史</span>
             <button class="btn btn-text btn-xs" @click="notifications.splice(0, notifications.length)">清空</button>
