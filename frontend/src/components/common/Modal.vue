@@ -1,10 +1,18 @@
 <script setup lang="ts">
-// 通用模态框。使用 Teleport 挂载到 body，支持标题、尺寸、footer 插槽、
-// ESC 关闭和基础 Focus Trap（Tab 键在模态框内循环）。
+// 通用模态框（Reka Dialog headless）。开合状态机、Esc、遮罩点击、焦点陷阱、
+// 关闭后焦点归还触发器、body 滚动锁全部由 reka-ui Dialog 承担（E1 的手写
+// 触发器记录/还原逻辑随之退役）；本组件只保留既有 props/emits
+// API 与 .modal-* 外观（样式见 styles/components/modal.css）。
+//
+// 结构：DialogOverlay(as-child) 包住原 .modal-overlay（遮罩 + flex 居中容器），
+// DialogContent(as-child) 落在原 .modal-container 面板上——DOM 与迁移前逐层
+// 一致，role/aria 位置不变，遮罩点击=面板外按下，走 reka 的 dismiss 通道。
+// force-mount 供 Transition 离场渐隐期间维持 DOM：reka 的 presence 依据 open
+// 状态会在关闭瞬间卸载节点，会把还在渐隐的面板/遮罩提前抽走；滚动锁与焦点
+// 归还同样依据 open 状态（而非节点存活），时序不受影响。
 
-import { ref, watch, onBeforeUnmount, nextTick } from "vue";
+import { DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import IconApp from "./IconApp.vue";
-import { lockBodyScroll, unlockBodyScroll } from "../../composables/useBodyScrollLock";
 
 const props = withDefaults(
   defineProps<{
@@ -32,117 +40,62 @@ const props = withDefaults(
 
 const emit = defineEmits<{ close: [] }>();
 
-const containerRef = ref<HTMLElement | null>(null);
-
 function onClose(): void {
   if (props.closeDisabled) return;
   emit("close");
 }
 
-function onOverlayClick(): void {
-  if (props.closeOnOverlay) onClose();
+// reka 的各 dismiss 路径（Esc / 遮罩点击）在受控模式下统一汇为
+// update:open(false)，宿主不响应则弹窗保持打开——closeDisabled 在此统一否决
+function onOpenChange(value: boolean): void {
+  if (value || props.closeDisabled) return;
+  emit("close");
 }
 
-// ESC 键关闭
-function onKeydown(e: KeyboardEvent): void {
-  if (e.key === "Escape") {
-    e.stopPropagation();
-    if (props.closeOnEsc) onClose();
-  }
+function onEscapeKeyDown(event: KeyboardEvent): void {
+  if (!props.closeOnEsc) event.preventDefault();
 }
 
-// 基础 Focus Trap：Tab / Shift+Tab 在模态框内循环
-function onTrapKeydown(e: KeyboardEvent): void {
-  if (e.key !== "Tab") return;
-  const container = containerRef.value;
-  if (!container) return;
-  const focusable = container.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  );
-  if (focusable.length === 0) return;
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (e.shiftKey) {
-    if (document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    }
-  } else {
-    if (document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }
+function onPointerDownOutside(event: Event): void {
+  if (!props.closeOnOverlay) event.preventDefault();
 }
-
-// 打开时聚焦第一个可聚焦元素 + 锁定背景滚动
-// FE2-2：锁定计数收口到模块级 useBodyScrollLock——此前计数声明在
-// <script setup> 顶层即每实例各一份，嵌套/叠加弹窗内层关闭就把 body.overflow
-// 复位，外层弹窗背后页面恢复滚动
-
-// E1：关闭后把焦点归还给打开前的触发元素——此前关闭分支只解锁滚动，
-// 键盘用户每关一弹窗焦点就掉回 <body>。detached 元素 focus() 是无害 no-op
-// （触发器可能已被卸载，如列表行删除后确认框关闭）；preventScroll 防
-// 触发器在视口外时页面跳动
-let lastTrigger: HTMLElement | null = null;
-
-function restoreTriggerFocus(): void {
-  lastTrigger?.focus({ preventScroll: true });
-  lastTrigger = null;
-}
-
-// 打开时聚焦第一个可聚焦元素
-watch(
-  () => props.open,
-  async (val) => {
-    if (val) {
-      lastTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      lockBodyScroll();
-      await nextTick();
-      const firstFocusable = containerRef.value?.querySelector<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
-      );
-      firstFocusable?.focus();
-    } else {
-      unlockBodyScroll();
-      restoreTriggerFocus();
-    }
-  },
-  { immediate: true },
-);
-
-onBeforeUnmount(() => {
-  if (props.open) unlockBodyScroll();
-  restoreTriggerFocus();
-});
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition name="modal-fade">
-      <div v-if="open" class="modal-overlay" :class="{ 'modal-overlay--preview': preview }" @click.self="onOverlayClick" @keydown="onKeydown">
-        <div
-          ref="containerRef"
-          class="modal-container"
-          :class="{ 'modal-lg': size === 'lg', 'modal-xl': size === 'xl', 'modal-xxl': size === 'xxl' }"
-          role="dialog"
-          aria-modal="true"
-          @keydown="onTrapKeydown"
-        >
-          <div class="modal-header">
-            <h3>{{ title }}</h3>
-            <button class="btn btn-icon-only" :disabled="closeDisabled" @click="onClose" aria-label="关闭" title="关闭">
-              <IconApp name="close" />
-            </button>
+  <DialogRoot :open="open" @update:open="onOpenChange">
+    <DialogPortal>
+      <Transition name="modal-fade">
+        <DialogOverlay v-if="open" force-mount as-child>
+          <div class="modal-overlay" :class="{ 'modal-overlay--preview': preview }">
+            <DialogContent
+              as-child
+              force-mount
+              aria-modal="true"
+              :aria-describedby="undefined"
+              @escape-key-down="onEscapeKeyDown"
+              @pointer-down-outside="onPointerDownOutside"
+            >
+              <div
+                class="modal-container"
+                :class="{ 'modal-lg': size === 'lg', 'modal-xl': size === 'xl', 'modal-xxl': size === 'xxl' }"
+              >
+                <div class="modal-header">
+                  <DialogTitle as="h3">{{ title }}</DialogTitle>
+                  <button class="btn btn-icon-only" :disabled="closeDisabled" aria-label="关闭" title="关闭" @click="onClose">
+                    <IconApp name="close" />
+                  </button>
+                </div>
+                <div class="modal-body">
+                  <slot />
+                </div>
+                <div v-if="$slots.footer" class="modal-footer">
+                  <slot name="footer" />
+                </div>
+              </div>
+            </DialogContent>
           </div>
-          <div class="modal-body">
-            <slot />
-          </div>
-          <div v-if="$slots.footer" class="modal-footer">
-            <slot name="footer" />
-          </div>
-        </div>
-      </div>
-    </Transition>
-  </Teleport>
+        </DialogOverlay>
+      </Transition>
+    </DialogPortal>
+  </DialogRoot>
 </template>
