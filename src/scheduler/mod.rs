@@ -275,16 +275,25 @@ impl SchedulerService {
             clamp_scheduled_timeout(&mut to_save, kind.type_name());
         }
 
-        let path = self.scheduled_dir.join(format!("{}.json", id));
         // 文件写入串行化：与 update_last_run 同锁，防读-改-写互相覆盖
         let _file_guard = self.file_mutex.lock().await;
+        self.save_task_locked(id, to_save).await
+    }
+
+    /// 锁内保存：落盘 + 更新缓存 + 通知主循环（A14 自 `save_task` 拆出）。
+    ///
+    /// 调用方必须已持有 `file_mutex`（tokio Mutex 不可重入，锁内不得再走
+    /// `save_task` 公共入口）；校验/钳制由调用方在锁前完成。
+    async fn save_task_locked(
+        &self,
+        id: &str,
+        to_save: ScheduledTask,
+    ) -> Result<(), SchedulerError> {
         // 同步 fs 写入放入 spawn_blocking，避免阻塞 tokio worker 线程（历史遗留 #12）
-        let path_for_blocking = path.clone();
+        let path = self.scheduled_dir.join(format!("{}.json", id));
         let to_save_for_blocking = to_save.clone();
-        tokio::task::spawn_blocking(move || {
-            ScheduledTask::save_to(&path_for_blocking, &to_save_for_blocking)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || ScheduledTask::save_to(&path, &to_save_for_blocking))
+            .await??;
         self.update_state(|s| {
             if let Some(existing) = s.tasks.iter_mut().find(|t| t.id == id) {
                 *existing = to_save.clone();
@@ -340,13 +349,32 @@ impl SchedulerService {
         Ok(())
     }
 
-    /// 启用/禁用任务（复用 save_task 的持久化与通知逻辑）。
+    /// 启用/禁用任务（持久化与通知逻辑同 [`Self::save_task`]，见 `save_task_locked`）。
+    ///
+    /// A14：与 `delete_task` 的读-改-写全程串行化，并在锁内按**磁盘**复核存在性——
+    /// 缓存读到 ≠ 磁盘还在（外部直接删除文件要等 5 分钟兜底扫描才从缓存移除），
+    /// 若只信缓存，锁内 `save_task` 会把已删除的任务文件重建（下一轮 reload 复活）。
     pub async fn toggle_task(&self, id: &str, enabled: bool) -> Result<(), SchedulerError> {
-        let mut task = self
-            .get_task(id)
-            .ok_or_else(|| SchedulerError::TaskNotFound(id.to_string()))?;
+        // id 直接拼接路径，必须先校验防止路径穿越（与 delete_task 同口径）
+        if !ScheduledTask::is_valid_id(id) {
+            return Err(SchedulerError::InvalidTaskId(id.to_string()));
+        }
+        let _file_guard = self.file_mutex.lock().await;
+        // 存在性检查在阻塞线程完成（历史遗留 #12）
+        let path = self.scheduled_dir.join(format!("{id}.json"));
+        let exists = tokio::task::spawn_blocking(move || path.exists())
+            .await
+            .map_err(SchedulerError::JoinError)?;
+        if !exists {
+            // 主动收敛内存缓存，不等 5 分钟兜底扫描
+            self.update_state(|s| s.tasks.retain(|t| t.id != id));
+            return Err(SchedulerError::TaskNotFound(id.to_string()));
+        }
+        let Some(mut task) = self.get_task(id) else {
+            return Err(SchedulerError::TaskNotFound(id.to_string()));
+        };
         task.enabled = enabled;
-        self.save_task(id, &task).await
+        self.save_task_locked(id, task).await
     }
 
     /// 向主循环发送 `TaskChange::Reload` 信号（buffer 满时静默丢弃，重载幂等）。
@@ -810,6 +838,158 @@ mod tests {
         assert!(
             service.get_task("t1").is_some(),
             "锁中毒后 get_task 必须恢复读取缓存，而非静默返回 None"
+        );
+    }
+
+    // ============ A13：cron/手动触发执行前以内存缓存重验最新定义 ============
+
+    /// A13：任务既不在内存缓存也不在磁盘时，`execute_scheduled_task` 应立即放弃——
+    /// 不执行、不写历史、不落任何文件（此前直接按触发时的快照执行）。
+    #[tokio::test]
+    async fn test_execute_scheduled_task_skips_when_task_missing() {
+        let (service, _tmp) = make_test_service().await;
+        let task = ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string());
+        // 任务未落盘、不在缓存（复现"到期瞬间已被删除"）：执行应立即放弃
+        cron_loop::execute_scheduled_task(task, service.clone(), RunSource::Cron).await;
+
+        let task_path = service.scheduled_dir.join("t1.json");
+        let history_path = history_dir_of(&service.scheduled_dir).join("t1.json");
+        assert!(!history_path.exists(), "不应写入执行历史");
+        assert!(!task_path.exists(), "不应写回任务文件（last_run 未写入）");
+        assert!(service.get_task("t1").is_none(), "缓存不应出现该任务");
+    }
+
+    /// A13：任务在缓存中但已禁用时，`execute_scheduled_task` 应放弃触发
+    ///（与 `fire_due_tasks` 的禁用跳过构成双检，覆盖两跳之间被禁用的窗口）。
+    #[tokio::test]
+    async fn test_execute_scheduled_task_skips_when_task_disabled() {
+        let (service, _tmp) = make_test_service().await;
+        let mut task =
+            ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string());
+        task.enabled = false;
+        service.update_state(|s| s.tasks.push(task));
+        cron_loop::execute_scheduled_task(
+            ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string()),
+            service.clone(),
+            RunSource::Manual,
+        )
+        .await;
+
+        let history_path = history_dir_of(&service.scheduled_dir).join("t1.json");
+        assert!(!history_path.exists(), "禁用任务不应执行并写入历史");
+    }
+
+    /// A13 对照组：任务落盘且 enabled（经磁盘加载进缓存）→ 执行尝试发生，
+    /// 历史文件与 last_run 均写入。目标绑定任务不存在时执行以失败收场，
+    /// 但执行链路（last_run/历史落盘）必须完整走完，避免浏览器等重依赖。
+    #[tokio::test]
+    async fn test_execute_scheduled_task_runs_enabled_task_and_writes_history() {
+        let (service, _tmp) = make_test_service().await;
+        let task = ScheduledTask::new(
+            "t1".to_string(),
+            "0 8 * * *".to_string(),
+            "missing_target".to_string(),
+        );
+        let task_path = service.scheduled_dir.join("t1.json");
+        ScheduledTask::save_to(&task_path, &task).unwrap();
+        // 从磁盘加载进内存缓存（与调度循环 reload 同口径）
+        cron_loop::load_and_parse_all(&service);
+        assert!(service.get_task("t1").is_some(), "前置：任务应在内存缓存中");
+
+        cron_loop::execute_scheduled_task(task, service.clone(), RunSource::Cron).await;
+
+        let history_path = history_dir_of(&service.scheduled_dir).join("t1.json");
+        assert!(
+            history_path.exists(),
+            "enabled 任务应完成执行尝试并写入历史文件"
+        );
+        let on_disk = ScheduledTask::load_from(&task_path).unwrap();
+        assert!(on_disk.last_run.is_some(), "执行后 last_run 应已写入磁盘");
+    }
+
+    // ============ A14：toggle_task 与 delete_task/外部删除的竞态 ============
+
+    /// 构造一个通过 `TaskManager` 真实落盘的目标任务（browser 单步 goto），
+    /// 使 `SchedulerService::save_task` 的关联校验可以通过。
+    async fn seed_target_task(service: &SchedulerService, id: &str) {
+        let kind: crate::tasks::TaskKind = serde_json::from_value(serde_json::json!({
+            "type": "browser",
+            "name": "目标任务",
+            "steps": [{ "id": "go", "type": "goto", "selector": "https://example.com/login" }]
+        }))
+        .unwrap();
+        service
+            .task_manager
+            .save_task(id, &kind)
+            .await
+            .expect("播种目标任务应成功");
+    }
+
+    /// A14：磁盘上已被外部删除（缓存尚未收敛）的任务，toggle 必须报
+    /// `TaskNotFound` 且不得把任务文件重建（此前锁内 save_task 会复活已删任务），
+    /// 同时主动收敛内存缓存。
+    #[tokio::test]
+    async fn test_toggle_deleted_task_returns_not_found_without_resurrecting() {
+        let (service, _tmp) = make_test_service().await;
+        seed_target_task(&service, "x").await;
+        service
+            .save_task(
+                "t1",
+                &ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string()),
+            )
+            .await
+            .unwrap();
+        let task_path = service.scheduled_dir.join("t1.json");
+        assert!(
+            task_path.exists() && service.get_task("t1").is_some(),
+            "前置：任务应已落盘并入缓存"
+        );
+
+        // 模拟外部删除（绕过 delete_task，制造"磁盘已删、缓存仍在"的失步窗口）
+        std::fs::remove_file(&task_path).unwrap();
+
+        let err = service.toggle_task("t1", false).await.unwrap_err();
+        assert!(
+            matches!(err, SchedulerError::TaskNotFound(_)),
+            "应报 TaskNotFound，实际 {err:?}"
+        );
+        assert!(!task_path.exists(), "toggle 不得复活已删除的任务文件");
+        assert!(
+            service.get_task("t1").is_none(),
+            "缓存应同步收敛移除已删任务"
+        );
+    }
+
+    /// A14 对照组：正常 toggle 翻转 enabled 且落盘文件同步（防 save_task 拆分
+    /// 重构弄丢落盘），双向各翻一次。
+    #[tokio::test]
+    async fn test_toggle_existing_task_flips_enabled() {
+        let (service, _tmp) = make_test_service().await;
+        seed_target_task(&service, "x").await;
+        service
+            .save_task(
+                "t1",
+                &ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string()),
+            )
+            .await
+            .unwrap();
+        let task_path = service.scheduled_dir.join("t1.json");
+
+        let before = service.get_task("t1").unwrap().enabled;
+        service.toggle_task("t1", !before).await.unwrap();
+        assert_eq!(
+            service.get_task("t1").unwrap().enabled,
+            !before,
+            "内存缓存的 enabled 应翻转"
+        );
+        let on_disk = ScheduledTask::load_from(&task_path).unwrap();
+        assert_eq!(on_disk.enabled, !before, "落盘文件的 enabled 应同步翻转");
+
+        service.toggle_task("t1", before).await.unwrap();
+        assert_eq!(service.get_task("t1").unwrap().enabled, before);
+        assert_eq!(
+            ScheduledTask::load_from(&task_path).unwrap().enabled,
+            before
         );
     }
 }
