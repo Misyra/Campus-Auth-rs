@@ -9,9 +9,9 @@
   --accent-text: var(--sidebar-accent);
   --error: var(--navigation-error);
   --success: var(--navigation-success);
-  --text-primary: var(--navigation-text, #000000);
-  --text-secondary: var(--navigation-secondary, #333333);
-  --text-muted: var(--navigation-secondary, #555555);
+  --text-primary: var(--navigation-text, #000000); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-secondary: var(--navigation-secondary, #333333); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-muted: var(--navigation-secondary, #555555); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
   --bg-hover: var(--navigation-hover);
   color: var(--text-primary);
   width: 228px;
@@ -97,9 +97,9 @@
 
 .top-bar {
   --accent-text: var(--sidebar-accent);
-  --text-primary: var(--navigation-text, #000000);
-  --text-secondary: var(--navigation-secondary, #333333);
-  --text-muted: var(--navigation-secondary, #555555);
+  --text-primary: var(--navigation-text, #000000); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-secondary: var(--navigation-secondary, #333333); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-muted: var(--navigation-secondary, #555555); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
   --bg-hover: var(--navigation-hover);
   color: var(--text-primary);
   display: grid;

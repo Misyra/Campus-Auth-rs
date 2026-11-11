@@ -4,14 +4,14 @@
   /* 技术徽章品牌色。与 AboutView.vue 的 tech-stack 清单**一一对应**：
      清单里出现的每个修饰类，这里必须有一条同名 token，否则徽标没有配色
      （`.rust` / `.tokio` / `.vue` 曾因此长期无配色，见下方 .tech-badge 注释）。 */
-  --tech-rust: #f74c00;
-  --tech-tokio: #7b6bff;
-  --tech-vue: #42b883;
-  --tech-playwright: #2eaa55;
-  --tech-websockets: #6495ed;
-  --tech-ddddocr: #a855f7;
+  --tech-rust: #f74c00; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-tokio: #7b6bff; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-vue: #42b883; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-playwright: #2eaa55; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-websockets: #6495ed; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-ddddocr: #a855f7; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
   --tech-uv: var(--accent);
-  --tech-python: #3776ab;
+  --tech-python: #3776ab; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
 }
 
 .about-hero {
@@ -272,7 +272,7 @@
 
 /* B 站：官方粉，辨识来源 */
 .bilibili-link svg {
-  color: #fb7299;
+  color: #fb7299; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
 }
 
 .muted {

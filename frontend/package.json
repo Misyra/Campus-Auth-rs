@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit -p tsconfig.app.json && vite build",
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json",
+    "lint:css": "stylelint \"src/styles/**/*.css\"",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -22,6 +23,8 @@
     "@vue/compiler-dom": "3.5.39",
     "@vue/compiler-sfc": "3.5.39",
     "happy-dom": "^21.0.4",
+    "stylelint": "^16.26.1",
+    "stylelint-config-recommended": "^17.0.0",
     "typescript": "~5.7.0",
     "vite": "^6.0.0",
     "vitest": "^4.1.11",

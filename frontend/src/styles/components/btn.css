@@ -185,5 +185,5 @@
 }
 .btn-danger-ghost:hover {
     background: var(--error);
-    color: white;
+    color: var(--text-on-accent);
 }

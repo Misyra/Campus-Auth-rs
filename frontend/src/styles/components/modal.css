@@ -8,7 +8,7 @@
   position: fixed;
   inset: 0;
   z-index: var(--z-top);
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -24,7 +24,7 @@
 
 /* 沉浸预览修饰：截图放大/背景预览等大图场景加深遮罩（与普通 0.6 区分） */
 .modal-overlay--preview {
-  background: rgba(0, 0, 0, 0.85);
+  background: var(--overlay-heavy);
 }
 
 .modal-container {
