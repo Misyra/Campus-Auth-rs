@@ -988,7 +988,10 @@ impl LoginSession {
 
     /// 将 `IpcResponse` 解析为 [`StructuredResult`]
     ///
-    /// 成功时从 `result.data` 反序列化；失败时构造 `UnknownError` 兜底结果。
+    /// 成功时从 `result.data` 反序列化；失败信封（`success=false`，Worker 端
+    /// WorkerError 路径见 worker_main._structured_result）同样在 `result.data`
+    /// 携带可分类 outcome——从中恢复，供 classify 做重试/终态判定；`data`
+    /// 缺失或宣称 Success（矛盾信封）时回退 `UnknownError` 兜底。
     fn parse_ipc_response(resp: IpcResponse) -> StructuredResult {
         if resp.result.success {
             match serde_json::from_value::<StructuredResult>(resp.result.data.clone()) {
@@ -1005,16 +1008,35 @@ impl LoginSession {
                 }
             }
         } else {
-            StructuredResult {
-                outcome: Outcome::UnknownError,
-                message: resp
-                    .result
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Worker 返回失败".into()),
-                data: Value::Null,
-                screenshot_url: None,
-                duration_ms: 0,
+            // 失败信封仍携带可分类 outcome（Worker 端 WorkerError 路径，见
+            // worker_main._structured_result）：从中恢复 outcome 供 classify 做重试/终态
+            // 判定。仅当 data 可解析且未宣称 Success 时采信（防御矛盾信封），
+            // 其余回退 UnknownError，与旧行为一致。
+            let recovered = serde_json::from_value::<StructuredResult>(resp.result.data.clone())
+                .ok()
+                .filter(|s| s.outcome != Outcome::Success);
+            match recovered {
+                Some(mut s) => {
+                    if s.message.is_empty() {
+                        s.message = resp
+                            .result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Worker 返回失败".into());
+                    }
+                    s
+                }
+                None => StructuredResult {
+                    outcome: Outcome::UnknownError,
+                    message: resp
+                        .result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Worker 返回失败".into()),
+                    data: Value::Null,
+                    screenshot_url: None,
+                    duration_ms: 0,
+                },
             }
         }
     }
@@ -1761,5 +1783,222 @@ mod tests {
         assert_eq!(result.terminal, LoginTerminal::Failed);
         assert_eq!(result.attempts, 3);
         assert!(result.message.contains("Worker 忙"), "{}", result.message);
+    }
+
+    // ============ 失败信封 outcome 恢复（C1） ============
+
+    /// C1：失败信封（success=false）的 data.outcome 必须被恢复——首导航超时
+    /// 属可重试失败，不得被终态化成一次即放弃。脚本第 2 次尝试返回成功，
+    /// 断言会话确实发起了第二次尝试、终态记录 2 次尝试（首次失败未终态化）。
+    /// 注：计划声明 success_condition 以跳过登录后真实网络探测（测试环境
+    /// 探测结果随环境波动，同 test_retry_exhaustion 注释），终态确定性为 Success。
+    #[tokio::test(start_paused = true)]
+    async fn test_failure_envelope_navigation_timeout_is_retryable() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (false, "navigation_timeout", "导航超时: #auth-page"),
+                (true, "success", "步骤执行成功"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.plan = LoginAttemptPlan::Browser(serde_json::json!({
+            "task_config": { "success_condition": "logged_in" }
+        }));
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        let mut result_rx = result_rx;
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            2,
+            "失败信封中的 navigation_timeout 应恢复为可重试并发起第二次尝试"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(
+            result.attempts, 2,
+            "首次失败不得终态化，终态应记录 2 次尝试"
+        );
+        assert_eq!(result.terminal, LoginTerminal::Success);
+    }
+
+    /// C1：失败信封恢复出 NetworkError 后，重试前应触发既有的
+    /// `should_force_recycle` 强制回收（该路径在失败信封上此前从未生效）。
+    /// max_retries=1：首试失败 → 回收 → 重试一次 → 预算耗尽终态失败。
+    #[tokio::test(start_paused = true)]
+    async fn test_failure_envelope_network_error_triggers_force_recycle() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (false, "network_error", "门户不可达"),
+                (false, "network_error", "门户不可达"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = 1;
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        let mut result_rx = result_rx;
+        session.run().await;
+        assert_eq!(bridge.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            bridge.recycled.load(Ordering::SeqCst),
+            1,
+            "NetworkError 重试前应强制回收 Worker（仅首试失败后一次）"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 2);
+        assert!(result.message.contains("重试耗尽"), "{}", result.message);
+        assert!(
+            result.message.contains("门户不可达"),
+            "失败详情应进入终态消息: {}",
+            result.message
+        );
+    }
+
+    /// C1：失败信封恢复出 manual_required 后仍走 classify 终态失败分支——
+    /// 恢复 outcome 不得把本应终态的业务失败改成可重试。
+    #[tokio::test(start_paused = true)]
+    async fn test_failure_envelope_manual_required_is_terminal_failed() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![(
+                false,
+                "manual_required",
+                "门户要求人工完成验证",
+            )])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        let mut result_rx = result_rx;
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            1,
+            "manual_required 必须一次即终态，不得重试"
+        );
+        assert_eq!(bridge.recycled.load(Ordering::SeqCst), 0);
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 1);
+        assert!(result.message.contains("门户要求人工完成验证"));
+    }
+
+    /// C1 防御：失败信封的 data 宣称 success 属矛盾信封，一律不采信并回退
+    /// UnknownError 终态失败——否则损坏/恶意回包可伪造「恢复成功」绕过防线。
+    #[tokio::test(start_paused = true)]
+    async fn test_failure_envelope_data_claiming_success_falls_back_to_unknown() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![(false, "success", "伪造成功")])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let session = LoginSession::new(
+            make_params(),
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        let mut result_rx = result_rx;
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            1,
+            "矛盾信封必须立即终态，不得进入成功验证/重试路径"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 1);
+        // 回退消息取自 result.error；ScriptedBridge 恒置 None → 兜底文案
+        assert!(
+            result.message.contains("Worker 返回失败"),
+            "应回退 UnknownError 兜底文案: {}",
+            result.message
+        );
+    }
+
+    /// C1：失败信封 `data` 缺失（Value::Null）→ 回退 UnknownError，消息取
+    /// `result.error`（与旧失败分支行为一致）。
+    #[test]
+    fn test_parse_ipc_response_failure_envelope_data_missing_falls_back_to_unknown() {
+        let resp = crate::bridge::IpcResponse {
+            id: 1,
+            result: crate::bridge::IpcResult {
+                success: false,
+                data: Value::Null,
+                error: Some("导航超时".to_string()),
+            },
+        };
+        let s = LoginSession::parse_ipc_response(resp);
+        assert_eq!(s.outcome, Outcome::UnknownError);
+        assert_eq!(s.message, "导航超时");
+        assert_eq!(s.duration_ms, 0);
+    }
+
+    /// C1：失败信封 `data` 可解析且未宣称 Success → 恢复 outcome 与耗时；
+    /// message 为空时回填 `result.error`（WorkerError 路径的 error 与 data.message
+    /// 同源，兜底覆盖异常构造的信封）。
+    #[test]
+    fn test_parse_ipc_response_failure_envelope_recovers_outcome_and_fills_message() {
+        let resp = crate::bridge::IpcResponse {
+            id: 1,
+            result: crate::bridge::IpcResult {
+                success: false,
+                data: serde_json::json!({
+                    "outcome": "navigation_timeout",
+                    "message": "",
+                    "duration_ms": 1200,
+                }),
+                error: Some("导航超时: #auth-page".to_string()),
+            },
+        };
+        let s = LoginSession::parse_ipc_response(resp);
+        assert_eq!(s.outcome, Outcome::NavigationTimeout);
+        assert_eq!(s.message, "导航超时: #auth-page");
+        assert_eq!(s.duration_ms, 1200);
     }
 }
