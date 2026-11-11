@@ -70,17 +70,20 @@ pub async fn patch_settings(
 ///
 /// `tasks` 仅用于校验直连任务绑定（见 [`validate_login_task_binding`]）——这里不复用
 /// `ProfileApi`，因为绑定校验是**任务域的事实**，与方案业务无关。
-async fn apply_flat_settings_patch(
-    config: &Arc<dyn ConfigApi>,
-    profiles: &Arc<dyn ProfileApi>,
-    tasks: &Arc<dyn TaskApi>,
-    patch: &Value,
-) -> Result<(), ApiError> {
-    let Some(obj) = patch.as_object() else {
-        // 非对象 patch：无字段可合并（与旧实现一致，不落盘直接成功）
-        return Ok(());
-    };
+/// 扁平 patch 按 key 分类后的产物（[`split_patch_keys`] 输出）
+struct FlatPatchParts {
+    global_patch: serde_json::Map<String, Value>,
+    profile_patch: serde_json::Map<String, Value>,
+    other_patch: serde_json::Map<String, Value>,
+    /// 变更字段名（仅字段名，绝不记录值：payload 可能含密码/密钥）
+    changed_fields: Vec<String>,
+}
 
+/// 按前端字段名把扁平 patch 分拣到 global / Profile / 其它三个桶
+///
+/// monitor 字段在此完成前端→后端 DTO 映射；未知字段进 other 桶由合并闭包
+/// 写到 settings 顶层（历史字段 `carrier_custom` 显式忽略）。
+fn split_patch_keys(obj: &serde_json::Map<String, Value>) -> Result<FlatPatchParts, ApiError> {
     let mut global_patch = serde_json::Map::new();
     let mut profile_patch = serde_json::Map::new();
     let mut other_patch = serde_json::Map::new();
@@ -150,10 +153,218 @@ async fn apply_flat_settings_patch(
         }
     }
 
+    Ok(FlatPatchParts {
+        global_patch,
+        profile_patch,
+        other_patch,
+        changed_fields,
+    })
+}
+
+/// 构造活跃 Profile 的合并事务（含 WEB-7 字段类型预检与活跃 Profile 预检）
+///
+/// `profile_patch` 为空时返回 `None`（无可提交内容）。
+async fn build_profile_tx(
+    config: &Arc<dyn ConfigApi>,
+    profiles: &Arc<dyn ProfileApi>,
+    tasks: &Arc<dyn TaskApi>,
+    profile_patch: serde_json::Map<String, Value>,
+    active_profile_id: Option<&str>,
+) -> Result<Option<(String, ProfileMergeFn)>, ApiError> {
+    if profile_patch.is_empty() {
+        return Ok(None);
+    }
+
+    // WEB-7：profile 字段类型错误显式 400（与 password 口径对齐），不再静默
+    // 跳过——静默丢字段会让用户误以为已保存
+    for key in [
+        "username",
+        "auth_url",
+        "trigger_url",
+        "isp",
+        "active_task",
+        "active_http_task",
+        "active_script_task",
+    ] {
+        if profile_patch.get(key).is_some_and(|v| !v.is_string()) {
+            return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
+        }
+    }
+
+    let active_id = match active_profile_id {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => config.load_settings_async().await.active_profile_id,
+    };
+    // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
+    // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
+    // （事务内会在锁内重新加载，此处预检仅为保留既有的 400 文案口径）
+    config.load_profile(&active_id).map_err(|e| {
+        ApiError::BadRequest(format!(
+            "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
+        ))
+    })?;
+
+    let profiles = profiles.clone();
+    let tasks = tasks.clone();
+    Ok(Some((
+        active_id,
+        Box::new(move |mut profile| {
+            let tasks = tasks.clone();
+            Box::pin(async move {
+                if let Some(network) = profile_patch.get("network") {
+                    profile.network = Some(
+                        serde_json::from_value(network.clone())
+                            .map_err(|_| "网络出口配置格式无效")?,
+                    );
+                }
+                if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
+                    profile.username = username.to_string();
+                }
+                if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
+                    let trimmed = auth_url.trim();
+                    if !trimmed.is_empty() {
+                        validate_auth_url(trimmed).map_err(|e| e.to_string())?;
+                    }
+                    profile.auth_url = trimmed.to_string();
+                }
+                if let Some(trigger_url) = profile_patch.get("trigger_url").and_then(|v| v.as_str())
+                {
+                    let trimmed = trigger_url.trim();
+                    if !trimmed.is_empty() {
+                        validate_trigger_url(trimmed).map_err(|e| e.to_string())?;
+                    }
+                    profile.trigger_url = trimmed.to_string();
+                }
+                if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
+                    profile.isp = isp.to_string();
+                }
+                if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str())
+                {
+                    profile.active_task = active_task.to_string();
+                }
+                // 登录渠道是枚举（"browser"/"http"/"script"），不走字符串校验分支；
+                // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
+                if let Some(channel) = profile_patch.get("login_channel") {
+                    profile.login_channel =
+                        serde_json::from_value::<crate::config::LoginChannel>(channel.clone())
+                            .map_err(|_| {
+                                ApiError::BadRequest(
+                                    "login_channel 仅支持 browser、http 或 script".into(),
+                                )
+                            })
+                            .map_err(|e| e.to_string())?;
+                }
+                // 任务绑定：字符串（空串 = 未绑定）
+                if let Some(v) = profile_patch
+                    .get("active_http_task")
+                    .and_then(|v| v.as_str())
+                {
+                    profile.active_http_task = v.to_string();
+                }
+                if let Some(v) = profile_patch
+                    .get("active_script_task")
+                    .and_then(|v| v.as_str())
+                {
+                    profile.active_script_task = v.to_string();
+                }
+                // 直连 / 脚本渠道必须有可用的任务绑定。**与 `POST/PUT /api/profiles/{id}`
+                // 完全同一口径**（共用 `validate_login_task_binding`）：三条保存路径若只有一条
+                // 放宽，用户从设置页存一次就能把方案改成登录时必失败的状态，且毫无提示。
+                // 校验的是**合并后**的渠道与绑定，故只改渠道不改绑定（或反之）同样整体判定。
+                validate_login_task_binding(
+                    &tasks,
+                    profile.login_channel,
+                    &profile.active_http_task,
+                    &profile.active_script_task,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                if let Some(password) = profile_patch.get("password") {
+                    // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
+                    // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
+                    match password {
+                        Value::Null => {}
+                        Value::String(pwd_str) if pwd_str.is_empty() => profile.password.clear(),
+                        Value::String(pwd_str) => {
+                            profile.password =
+                                profiles.save_password(Some(pwd_str), &profile.password);
+                        }
+                        _ => return Err("password 必须是字符串或 null".to_string()),
+                    }
+                }
+                super::profiles::validate_profile_network(&profile)?;
+                Ok(profile)
+            })
+        }),
+    )))
+}
+
+/// 构造全局设置的合并闭包（持锁读-改-写，闭包失败不落盘）
+///
+/// 两个桶均为空时返回 `None`（无可提交内容）。
+fn build_settings_merge(
+    global_patch: serde_json::Map<String, Value>,
+    other_patch: serde_json::Map<String, Value>,
+) -> Option<SettingsMergeFn> {
+    if global_patch.is_empty() && other_patch.is_empty() {
+        return None;
+    }
+    // 空否以前置 Map 判定为准：Value::Object 包裹后 as_object() 恒为 Some，
+    // 此处不再 unwrap（此前写法正确但制造 panic 观感）
+    let global_empty = global_patch.is_empty();
+    let other_empty = other_patch.is_empty();
+    let global_patch = Value::Object(global_patch);
+    let other_patch = Value::Object(other_patch);
+    Some(Box::new(move |settings| {
+        let mut current_value =
+            serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
+        // 合并 global 字段
+        if !global_empty && let Some(global) = current_value.get_mut("global") {
+            json_merge(global, &global_patch);
+        }
+        // 合并其他字段（如 active_profile_id 等）
+        if !other_empty {
+            json_merge(&mut current_value, &other_patch);
+        }
+        serde_json::from_value(current_value).map_err(|e| format!("设置合并后校验失败: {e}"))
+    }))
+}
+
+/// 将前端扁平 patch 应用并保存（PATCH /api/config）
+///
+/// 凭证字段（username/password/auth_url/isp/active_task/active_http_task）直接写入
+/// 活跃 Profile；全局设置经 [`ConfigApi::modify_settings_tx`] 的提交事务落盘——
+/// 「读取→合并→校验→持久化」在同一 `settings_lock` 临界区内完成。历史实现锁外读取
+/// 合并整份设置再 `save_settings`（仅锁最终写入），两个并发修改不同字段的请求
+/// 会相互覆盖（丢更新）。
+///
+/// `tasks` 仅用于校验直连任务绑定（见 [`validate_login_task_binding`]）——这里不复用
+/// `ProfileApi`，因为绑定校验是**任务域的事实**，与方案业务无关。
+/// 编排顺序：`split_patch_keys` 分拣 → WEB-9 / 端口预检 → `build_profile_tx` /
+/// `build_settings_merge` → 双域或单域事务提交。
+async fn apply_flat_settings_patch(
+    config: &Arc<dyn ConfigApi>,
+    profiles: &Arc<dyn ProfileApi>,
+    tasks: &Arc<dyn TaskApi>,
+    patch: &Value,
+) -> Result<(), ApiError> {
+    let Some(obj) = patch.as_object() else {
+        // 非对象 patch：无字段可合并（与旧实现一致，不落盘直接成功）
+        return Ok(());
+    };
+
+    let FlatPatchParts {
+        global_patch,
+        profile_patch,
+        other_patch,
+        changed_fields,
+    } = split_patch_keys(obj)?;
+
     // WEB-9：active_profile_id 切换必须在合并前校验目标 Profile 存在——悬空 id
     // 落盘后读取配置会加载失败并静默回退 ProfileData::default()（空凭据），
     // 用户看到与设置不符且无错误提示
-    if let Some(id) = obj.get("active_profile_id").and_then(|v| v.as_str()) {
+    let explicit_profile_id = obj.get("active_profile_id").and_then(|v| v.as_str());
+    if let Some(id) = explicit_profile_id {
         if id.is_empty() {
             return Err(ApiError::BadRequest("active_profile_id 不能为空".into()));
         }
@@ -177,166 +388,10 @@ async fn apply_flat_settings_patch(
 
     // 先在内存中构造待提交 Profile；若同一请求还包含全局字段，必须等全局合并校验
     // 成功后由 ConfigService 双域事务一起落盘，禁止先写凭证形成半提交。
-    // WEB-7：profile 字段类型错误显式 400（与 password 口径对齐），不再静默
-    // 跳过——静默丢字段会让用户误以为已保存
-    for key in [
-        "username",
-        "auth_url",
-        "trigger_url",
-        "isp",
-        "active_task",
-        "active_http_task",
-        "active_script_task",
-    ] {
-        if profile_patch.get(key).is_some_and(|v| !v.is_string()) {
-            return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
-        }
-    }
-    // Profile 合并事务（F7 Profile 侧）：合并/校验/密码语义整体移入
-    // ConfigService 的 profiles_lock 临界区执行——旧实现锁外 load→合并→校验→
-    // 落盘，并发保存同一 Profile 时整文档后写覆盖先写（丢字段）。若同一请求
-    // 还包含全局字段，由双域事务一起落盘，禁止先写凭证形成半提交。
-    let profile_tx: Option<(String, ProfileMergeFn)> = if !profile_patch.is_empty() {
-        let active_id = match obj.get("active_profile_id").and_then(|v| v.as_str()) {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => config.load_settings_async().await.active_profile_id,
-        };
-        // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
-        // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
-        // （事务内会在锁内重新加载，此处预检仅为保留既有的 400 文案口径）
-        config.load_profile(&active_id).map_err(|e| {
-            ApiError::BadRequest(format!(
-                "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
-            ))
-        })?;
-        let profiles = profiles.clone();
-        let tasks = tasks.clone();
-        let profile_patch = profile_patch;
-        Some((
-            active_id,
-            Box::new(move |mut profile| {
-                let tasks = tasks.clone();
-                Box::pin(async move {
-                    if let Some(network) = profile_patch.get("network") {
-                        profile.network = Some(
-                            serde_json::from_value(network.clone())
-                                .map_err(|_| "网络出口配置格式无效")?,
-                        );
-                    }
-                    if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
-                        profile.username = username.to_string();
-                    }
-                    if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
-                        let trimmed = auth_url.trim();
-                        if !trimmed.is_empty() {
-                            validate_auth_url(trimmed).map_err(|e| e.to_string())?;
-                        }
-                        profile.auth_url = trimmed.to_string();
-                    }
-                    if let Some(trigger_url) =
-                        profile_patch.get("trigger_url").and_then(|v| v.as_str())
-                    {
-                        let trimmed = trigger_url.trim();
-                        if !trimmed.is_empty() {
-                            validate_trigger_url(trimmed).map_err(|e| e.to_string())?;
-                        }
-                        profile.trigger_url = trimmed.to_string();
-                    }
-                    if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
-                        profile.isp = isp.to_string();
-                    }
-                    if let Some(active_task) =
-                        profile_patch.get("active_task").and_then(|v| v.as_str())
-                    {
-                        profile.active_task = active_task.to_string();
-                    }
-                    // 登录渠道是枚举（"browser"/"http"/"script"），不走字符串校验分支；
-                    // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
-                    if let Some(channel) = profile_patch.get("login_channel") {
-                        profile.login_channel =
-                            serde_json::from_value::<crate::config::LoginChannel>(channel.clone())
-                                .map_err(|_| {
-                                    ApiError::BadRequest(
-                                        "login_channel 仅支持 browser、http 或 script".into(),
-                                    )
-                                })
-                                .map_err(|e| e.to_string())?;
-                    }
-                    // 任务绑定：字符串（空串 = 未绑定）
-                    if let Some(v) = profile_patch
-                        .get("active_http_task")
-                        .and_then(|v| v.as_str())
-                    {
-                        profile.active_http_task = v.to_string();
-                    }
-                    if let Some(v) = profile_patch
-                        .get("active_script_task")
-                        .and_then(|v| v.as_str())
-                    {
-                        profile.active_script_task = v.to_string();
-                    }
-                    // 直连 / 脚本渠道必须有可用的任务绑定。**与 `POST/PUT /api/profiles/{id}`
-                    // 完全同一口径**（共用 `validate_login_task_binding`）：三条保存路径若只有一条
-                    // 放宽，用户从设置页存一次就能把方案改成登录时必失败的状态，且毫无提示。
-                    // 校验的是**合并后**的渠道与绑定，故只改渠道不改绑定（或反之）同样整体判定。
-                    validate_login_task_binding(
-                        &tasks,
-                        profile.login_channel,
-                        &profile.active_http_task,
-                        &profile.active_script_task,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    if let Some(password) = profile_patch.get("password") {
-                        // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
-                        // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
-                        match password {
-                            Value::Null => {}
-                            Value::String(pwd_str) if pwd_str.is_empty() => {
-                                profile.password.clear()
-                            }
-                            Value::String(pwd_str) => {
-                                profile.password =
-                                    profiles.save_password(Some(pwd_str), &profile.password);
-                            }
-                            _ => return Err("password 必须是字符串或 null".to_string()),
-                        }
-                    }
-                    super::profiles::validate_profile_network(&profile)?;
-                    Ok(profile)
-                })
-            }),
-        ))
-    } else {
-        None
-    };
+    let profile_tx =
+        build_profile_tx(config, profiles, tasks, profile_patch, explicit_profile_id).await?;
 
-    // 全局设置合并闭包（持锁读-改-写，闭包失败不落盘）
-    let settings_merge: Option<SettingsMergeFn> = if !global_patch.is_empty()
-        || !other_patch.is_empty()
-    {
-        // 空否以前置 Map 判定为准：Value::Object 包裹后 as_object() 恒为 Some，
-        // 此处不再 unwrap（此前写法正确但制造 panic 观感）
-        let global_empty = global_patch.is_empty();
-        let other_empty = other_patch.is_empty();
-        let global_patch = Value::Object(global_patch);
-        let other_patch = Value::Object(other_patch);
-        Some(Box::new(move |settings| {
-            let mut current_value =
-                serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
-            // 合并 global 字段
-            if !global_empty && let Some(global) = current_value.get_mut("global") {
-                json_merge(global, &global_patch);
-            }
-            // 合并其他字段（如 active_profile_id 等）
-            if !other_empty {
-                json_merge(&mut current_value, &other_patch);
-            }
-            serde_json::from_value(current_value).map_err(|e| format!("设置合并后校验失败: {e}"))
-        }))
-    } else {
-        None
-    };
+    let settings_merge = build_settings_merge(global_patch, other_patch);
 
     // 提交：Profile 与全局设置同时变更走双域事务；仅其一走各自单域事务
     let result = match profile_tx {
