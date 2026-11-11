@@ -6,6 +6,7 @@
 //! 处理（模式与登录结果 `LoginResult` channel 一致），命令保持即时响应。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Local, Timelike};
 use tokio::sync::mpsc;
@@ -113,6 +114,10 @@ struct EngineInner {
     probe_result_tx: mpsc::Sender<ProbeMessage>,
     /// 登录结果回传 sender（后台 spawn 的登录任务完成后通知主循环）
     login_result_tx: mpsc::Sender<LoginResult>,
+    /// TestNetwork 并发名额（A23）：诊断探测耗时数十秒，无上限时 Web 端高频
+    /// 点击会无界堆积后台任务。`Arc<AtomicUsize>` 使名额守卫能移入 spawn 的
+    /// 后台任务，Drop 时归还（panic 路径同样回收）。
+    test_network_in_flight: Arc<AtomicUsize>,
     /// 登录失败通知去重器（同 Profile 仅提醒一次，切换/成功后重置）
     notifier: Notifier,
 }
@@ -166,6 +171,7 @@ impl EngineInner {
             probe_pending: false,
             probe_result_tx,
             login_result_tx,
+            test_network_in_flight: Arc::new(AtomicUsize::new(0)),
             notifier: Notifier::new(),
         }
     }
@@ -288,7 +294,7 @@ async fn handle_command(cmd: EngineCommand, inner: &mut EngineInner, deps: &Engi
             false
         }
         EngineCommand::TestNetwork { reply } => {
-            handle_test_network(deps, reply);
+            handle_test_network(inner, deps, reply);
             false
         }
         EngineCommand::Pause => {
@@ -397,19 +403,56 @@ async fn handle_apply_profile(
     }
 }
 
+/// TestNetwork 最大并发数（A23）：诊断探测单次可达数十秒，超过即拒绝新请求
+const TEST_NETWORK_MAX_IN_FLIGHT: usize = 3;
+
+/// 尝试占用一个 TestNetwork 并发名额；已达上限返回 `false`（A23）
+///
+/// 仅由主循环（`&mut EngineInner` 串行处理命令）调用，检查与自增之间无并发。
+fn try_acquire_test_network_slot(inner: &EngineInner) -> bool {
+    let in_flight = inner.test_network_in_flight.load(Ordering::SeqCst);
+    if in_flight >= TEST_NETWORK_MAX_IN_FLIGHT {
+        return false;
+    }
+    inner.test_network_in_flight.fetch_add(1, Ordering::SeqCst);
+    true
+}
+
+/// TestNetwork 名额守卫：随后台任务结束（含 panic / abort）归还名额（A23）
+struct TestNetworkSlotGuard(Arc<AtomicUsize>);
+
+impl Drop for TestNetworkSlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// 处理 TestNetwork 命令：探测在后台任务执行并直接回传 oneshot（F5）
 ///
 /// 手动诊断探测不参与 `probe_in_flight` 在途合并（与周期检测语义独立，
 /// 并发执行无害），也不修改引擎状态——结果仅供命令发起方消费。
+/// 并发上限 [`TEST_NETWORK_MAX_IN_FLIGHT`]（A23）：超限时直接拒绝并回传错误，
+/// 不再 spawn 任务。
 fn handle_test_network(
+    inner: &EngineInner,
     deps: &EngineDeps,
     reply: oneshot::Sender<Result<TestNetworkResult, EngineError>>,
 ) {
+    if !try_acquire_test_network_slot(inner) {
+        tracing::warn!("网络测试并发已达上限（{TEST_NETWORK_MAX_IN_FLIGHT}），拒绝本次请求");
+        let _ = reply.send(Err(EngineError::ProbeError(format!(
+            "网络测试并发已达上限（{TEST_NETWORK_MAX_IN_FLIGHT}），请稍后重试"
+        ))));
+        return;
+    }
     tracing::info!("开始网络连通性测试");
     // 探测移入后台任务：check_once 可能耗时数十秒，内联 await 会阻塞
     // 命令通道（Shutdown/Stop 排队，F5）
     let monitor = deps.monitor_service.clone();
+    // Drop 守卫：diagnose_once panic 或任务被 abort 时名额同样回收（A23）
+    let slot = TestNetworkSlotGuard(inner.test_network_in_flight.clone());
     tokio::spawn(async move {
+        let _slot = slot;
         let start = Instant::now();
         let result = match monitor.diagnose_once().await {
             Ok(report) => {
@@ -1193,6 +1236,26 @@ mod tests {
         result.source = LoginSource::Manual;
         inner.observe_cautious_result(&result);
         assert!(inner.cautious_blocked(7));
+    }
+
+    /// A23：TestNetwork 并发名额达上限即拒绝，守卫 Drop（panic / abort 路径）归还名额
+    #[tokio::test]
+    async fn test_network_slot_limit_and_guard_release() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (ltx, _lrx) = mpsc::channel(1);
+        let inner = EngineInner::new(tx, ltx);
+
+        for _ in 0..TEST_NETWORK_MAX_IN_FLIGHT {
+            assert!(try_acquire_test_network_slot(&inner), "上限内应放行");
+        }
+        assert!(
+            !try_acquire_test_network_slot(&inner),
+            "达到上限后应拒绝新名额"
+        );
+
+        // 守卫 Drop 归还名额：diagnose_once panic 或任务被 abort 时同样生效
+        drop(TestNetworkSlotGuard(inner.test_network_in_flight.clone()));
+        assert!(try_acquire_test_network_slot(&inner), "守卫释放后应放行");
     }
 
     /// P2-5：探测任务 panic 时守卫补发失败消息（否则 `probe_in_flight` 永久卡住）
