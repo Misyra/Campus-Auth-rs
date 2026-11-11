@@ -322,7 +322,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           <div class="log-toolbar">
             <CustomSelect v-model="logs.logFilter.level" :options="logLevelOptions" aria-label="日志级别" compact />
             <CustomSelect v-model="logs.logFilter.source" :options="logSourceOptions" aria-label="日志来源" compact />
-            <input v-model="logs.logFilter.search" type="text" placeholder="搜索日志..." class="log-search" />
+            <input v-model="logs.logFilter.search" type="text" placeholder="搜索日志..." class="log-search" aria-label="搜索日志" />
           </div>
           <div ref="logViewer" class="log-viewer" @scroll="onLogScroll">
             <div v-if="!logs.filteredLogs.value.length" class="empty-state">
