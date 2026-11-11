@@ -187,6 +187,12 @@ impl LoginHandle {
         self.source
     }
 
+    /// 终态是否已写入结果槽（会话已 emit、正在 close_browser 收尾）。
+    /// 复用此类会话只会立刻拿到旧结果并被重复计数（见 submit 的决策点）。
+    pub(crate) fn is_resolved(&self) -> bool {
+        self.inner.result_tx.borrow().is_some()
+    }
+
     /// 由既有终态结果构造「立即终态」句柄
     ///
     /// 结果创建时已就绪：`await_result` 立即返回、`cancel` 无副作用。
@@ -594,6 +600,18 @@ impl LoginOrchestrator {
             let mut guard = self.state.lock().await;
             let decision = match &guard.active_session {
                 None => PreemptionDecision::Create,
+                Some(active) if active.handle.is_resolved() => {
+                    // 已写入终态的会话不再复用：Reuse 只会立刻拿到旧结果，
+                    // 让引擎/调用方把同一次登录重复计数（Auto 去重窗口竞态，
+                    // 失败预算被同一次失败双计、冷却期提前触发）。降级为抢占，
+                    // 由 wait_old_session_finished 等其 close_browser 收尾后建新会话。
+                    tracing::info!(
+                        old_source = ?active.source,
+                        new_source = ?source,
+                        "活跃会话已写入终态（收尾中），不复用，按抢占处理"
+                    );
+                    PreemptionDecision::Preempt
+                }
                 Some(active) => decide(source, Some(active.source), Some(active.handle.clone())),
             };
             match decision {
@@ -2038,6 +2056,117 @@ mod tests {
         assert!(
             matches!(ws, crate::status::WorkerStatus::Error),
             "持有者回收后 Worker 应为 Error，实际 {ws:?}"
+        );
+    }
+
+    // ============ A1：去重窗口竞态——已终态会话不得复用 ============
+
+    /// `LoginHandle::is_resolved` 纯单元：结果槽写入前后与 immediate 句柄
+    #[test]
+    fn test_login_handle_is_resolved() {
+        let handle = make_handle(LoginSource::Auto);
+        assert!(!handle.is_resolved(), "未写入终态时应为 false");
+        handle.inner.set_result(LoginResult {
+            network_retryable: false,
+            terminal: LoginTerminal::Failed,
+            message: "旧终态".into(),
+            source: LoginSource::Auto,
+            duration: Duration::ZERO,
+            attempts: 1,
+        });
+        assert!(handle.is_resolved(), "写入终态后应为 true");
+        // immediate 句柄创建即已就绪
+        let immediate = LoginHandle::immediate(LoginResult {
+            network_retryable: false,
+            terminal: LoginTerminal::Failed,
+            message: "立即终态".into(),
+            source: LoginSource::Auto,
+            duration: Duration::ZERO,
+            attempts: 0,
+        });
+        assert!(immediate.is_resolved(), "immediate 句柄结果已就绪应为 true");
+    }
+
+    /// A1：活跃会话已写入终态（emit 完成、close_browser 收尾中）时，同来源
+    /// Auto submit 不得 Reuse 旧句柄——否则 `await_result` 立即返回旧结果，
+    /// 引擎把同一次失败重复计入失败预算、冷却期被提前触发。降级为抢占后
+    /// 应等待收尾并创建新会话。
+    #[tokio::test]
+    async fn test_resolved_session_is_not_reused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let orch = make_orchestrator_at(dir.path()).await;
+
+        // default 方案走直连渠道（进程内路径跳过浏览器/环境准备，直达 submit 决策点）
+        let mut settings = orch.config.load_settings();
+        settings.global.retry_settings.max_retries = 0;
+        settings.global.monitor.tcp_enabled = false;
+        settings.global.monitor.url_enabled = false;
+        settings.global.monitor.http_enabled = false;
+        settings.global.monitor.post_login_delay = 0;
+        orch.config.save_settings(&settings).await.unwrap();
+        let mut default_profile = orch.config.load_profile("default").unwrap();
+        default_profile.login_channel = crate::config::LoginChannel::Http;
+        default_profile.username = "account-a".into();
+        default_profile.password = orch.config.encrypt_password("password-a").unwrap();
+        default_profile.active_http_task = "mock-login".into();
+        orch.config.save_profile(&default_profile).await.unwrap();
+        // 登录目标指向无监听端口：新会话连接拒绝快速终态，测试不挂起
+        let task = crate::tasks::HttpTaskConfig {
+            method: crate::tasks::HttpRequestMethod::Get,
+            url: "http://127.0.0.1:9/login?account={username}".into(),
+            ..Default::default()
+        };
+        orch.tasks
+            .save_task("mock-login", &crate::tasks::TaskKind::Http(Box::new(task)))
+            .await
+            .unwrap();
+        orch.config.reload().await.unwrap();
+
+        // 预置活跃 Auto 会话：终态已写入（模拟 emit 后 close_browser 仍在途），
+        // finished 通知先于抢占等待发出（许可已存储，等待立即返回）
+        let old_handle = make_handle(LoginSource::Auto);
+        old_handle.inner.set_result(LoginResult {
+            network_retryable: true,
+            terminal: LoginTerminal::Failed,
+            message: "旧终态：登录失败".into(),
+            source: LoginSource::Auto,
+            duration: Duration::ZERO,
+            attempts: 1,
+        });
+        let old_finished = Arc::new(tokio::sync::Notify::new());
+        old_finished.notify_one();
+        {
+            let mut state = orch.state.lock().await;
+            state.active_session = Some(ActiveSession {
+                session_id: 1,
+                source: LoginSource::Auto,
+                cancel_token: CancellationToken::new(),
+                cancel_reason: Arc::new(StdMutex::new(None)),
+                attempt_cancel_id: Arc::new(arc_swap::ArcSwapOption::new(None)),
+                handle: old_handle.clone(),
+                finished: old_finished,
+            });
+        }
+
+        let new_handle = orch.submit(LoginSource::Auto, None, None).await;
+
+        // 关键断言：返回的不是旧句柄（修复前 decide → Reuse 会原样返回旧句柄）
+        assert!(
+            !Arc::ptr_eq(&new_handle.inner, &old_handle.inner),
+            "已终态会话不得被复用，submit 必须创建新会话"
+        );
+        // 旧句柄结果原样保留（同一次失败只此一份，不被二次计数）
+        let old_result = old_handle.await_result().await;
+        assert_eq!(old_result.message, "旧终态：登录失败");
+        // 新句柄对应真实执行的新会话（连接拒绝快速终态），而非旧结果回放
+        let new_result = tokio::time::timeout(Duration::from_secs(10), new_handle.await_result())
+            .await
+            .expect("新会话应快速终态");
+        assert_eq!(new_result.terminal, LoginTerminal::Failed);
+        assert_ne!(new_result.message, old_result.message);
+        assert!(
+            !new_result.message.contains("配置不完整"),
+            "新请求应通过校验并实际执行会话，实际 {new_result:?}"
         );
     }
 }
