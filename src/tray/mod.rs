@@ -818,7 +818,8 @@ fn resolve_web_port(deps: &TrayDeps, axum_handle: &Arc<Mutex<Option<AxumServeHan
 fn write_instance_port(base_path: &Path, port: u16) {
     let info_path = base_path.join("config").join(".instance");
     let data = format!("{}\n{port}\n", std::process::id());
-    if let Err(e) = std::fs::write(&info_path, data) {
+    // 与 record_port 同样走原子写，避免崩溃残留半截 `.instance` 文件
+    if let Err(e) = crate::utils::atomic_write_bytes(&info_path, data.as_bytes()) {
         warn!("更新实例端口信息失败: {e}");
     }
 }

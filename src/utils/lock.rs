@@ -77,7 +77,9 @@ impl InstanceLock {
     pub fn record_port(&self, port: u16) -> anyhow::Result<()> {
         let pid = std::process::id();
         let data = format!("{pid}\n{port}\n");
-        std::fs::write(&self.info_path, data)?;
+        // 原子写（tempfile + persist + fsync）：崩溃只可能留下旧完整内容或新完整内容，
+        // 不会留半截文件导致 query_instance 解析失败
+        crate::utils::atomic_write_bytes(&self.info_path, data.as_bytes())?;
         Ok(())
     }
 }
@@ -323,5 +325,23 @@ mod tests {
             assert!(query_instance(dir.path()).is_some());
         }
         assert!(query_instance(dir.path()).is_none());
+    }
+
+    /// record_port 走原子写：persist 后 config 目录不留 `.tmp_` 临时残留
+    #[test]
+    fn test_record_port_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let lock = InstanceLock::try_acquire(dir.path()).expect("加锁");
+        lock.record_port(54323).expect("记录端口");
+        let config_dir = crate::utils::paths::config_dir(dir.path());
+        let leftovers: Vec<_> = std::fs::read_dir(&config_dir)
+            .expect("读 config 目录")
+            .map(|e| e.expect("目录项"))
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp_"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "record_port 后不应残留临时文件: {leftovers:?}"
+        );
     }
 }
