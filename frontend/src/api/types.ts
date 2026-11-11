@@ -629,9 +629,9 @@ export interface HttpFlowStep {
   headers: string;
   body: string;
   extract: string;
-    extract_as: string;
-    extracts: HttpExtractRule[];
-    stop_on_redirect: boolean;
+  extract_as: string;
+  extracts: HttpExtractRule[];
+  stop_on_redirect: boolean;
   script: string;
   on_error: "stop" | "continue";
   wait_secs: number;
