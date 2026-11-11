@@ -244,8 +244,11 @@ impl SchedulerService {
     pub fn get_task(&self, id: &str) -> Option<ScheduledTask> {
         self.state
             .lock()
-            .ok()
-            .and_then(|s| s.tasks.iter().find(|t| t.id == id).cloned())
+            .unwrap_or_else(|e| e.into_inner())
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
     }
 
     /// 保存任务（创建或更新）到磁盘与缓存，并通知主循环重算。
@@ -400,7 +403,7 @@ impl SchedulerService {
         let now_for_blocking = now.clone();
         let result_for_blocking = result.clone();
         let task_id_for_blocking = task_id.to_string();
-        let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = tokio::task::spawn_blocking(move || {
             if let Ok(mut task) = ScheduledTask::load_from(&path_for_blocking) {
                 task.last_run = Some(now_for_blocking);
                 task.last_result = Some(result_for_blocking);
@@ -409,7 +412,11 @@ impl SchedulerService {
                 }
             }
         })
-        .await;
+        .await
+        {
+            // 阻塞任务 panic/被取消：磁盘更新已丢失，仅内存快照仍正确——必须留痕
+            tracing::warn!(task_id = %task_id, "定时任务持久化的阻塞任务失败: {e}");
+        }
         self.update_state(|s| {
             if let Some(t) = s.tasks.iter_mut().find(|t| t.id == task_id) {
                 t.last_run = Some(now);
@@ -431,7 +438,7 @@ impl SchedulerService {
         let path_for_blocking = path.clone();
         let today_for_blocking = today.clone();
         let task_id_for_blocking = task_id.to_string();
-        let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = tokio::task::spawn_blocking(move || {
             if let Ok(mut task) = ScheduledTask::load_from(&path_for_blocking) {
                 task.startup_success = Some(next_success_count(
                     task.startup_success.as_ref(),
@@ -442,7 +449,11 @@ impl SchedulerService {
                 }
             }
         })
-        .await;
+        .await
+        {
+            // 阻塞任务 panic/被取消：磁盘更新已丢失，仅内存快照仍正确——必须留痕
+            tracing::warn!(task_id = %task_id, "启动成功计数持久化的阻塞任务失败: {e}");
+        }
         self.update_state(|s| {
             if let Some(t) = s.tasks.iter_mut().find(|t| t.id == task_id) {
                 t.startup_success = Some(next_success_count(t.startup_success.as_ref(), &today));
@@ -749,6 +760,56 @@ mod tests {
         assert!(
             offset.starts_with('+') || offset.starts_with('-'),
             "缺少时区偏移: {iso}"
+        );
+    }
+
+    /// 构造仅装配依赖的真实 `SchedulerService`（不起调度循环、不落任务）。
+    /// 各依赖均为廉价的内存级构造，装配方式参考 `engine::run_loop` 测试。
+    /// 返回 TempDir 一并交给调用方持有，避免目录被提前清理。
+    async fn make_test_service() -> (Arc<SchedulerService>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(8);
+        let config = crate::config::ConfigService::new(tmp.path().to_path_buf(), reload_tx)
+            .await
+            .unwrap();
+        let status = Arc::new(crate::status::StatusManager::new());
+        let bridge = crate::bridge::BridgeSupervisor::new(
+            tmp.path().to_path_buf(),
+            config.clone(),
+            status.clone(),
+            None,
+        );
+        let environment =
+            crate::environment::EnvironmentManager::new(tmp.path().to_path_buf(), status.clone());
+        let tasks = crate::tasks::TaskManager::new(tmp.path());
+        let executor = crate::tasks::TaskExecutor::new(
+            tmp.path(),
+            status.clone(),
+            bridge,
+            environment,
+            config.clone(),
+        );
+        let service = SchedulerService::new(config, tasks, executor, status, reload_rx).unwrap();
+        (service, tmp)
+    }
+
+    /// A2 回归：`get_task` 与同文件其余方法同口径——锁中毒时恢复读取内存缓存，
+    /// 而非静默返回 None（此前 `.ok()` 口径下调度会因此瘫痪且无任何留痕）。
+    #[tokio::test]
+    async fn test_get_task_recovers_from_poisoned_state() {
+        let (service, _tmp) = make_test_service().await;
+        let task = ScheduledTask::new("t1".to_string(), "0 8 * * *".to_string(), "x".to_string());
+        service.update_state(|s| s.tasks.push(task));
+
+        // 持锁 panic 制造中毒（catch_unwind 吞掉 panic 本身，不波及测试进程）
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = service.state.lock().unwrap();
+            panic!("poison state lock");
+        }));
+
+        assert!(
+            service.get_task("t1").is_some(),
+            "锁中毒后 get_task 必须恢复读取缓存，而非静默返回 None"
         );
     }
 }
