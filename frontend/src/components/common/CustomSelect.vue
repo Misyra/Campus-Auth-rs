@@ -120,8 +120,8 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     case "Escape":
       e.preventDefault();
-      // 只关下拉不关弹窗：keydown 会冒泡到 Modal overlay 的 onKeydown，
-      // 不阻断会让外层弹窗跟着一起关闭（表单内嵌下拉的场景）
+      // 只关下拉不关弹窗：keydown 会冒泡到 reka Dialog 的 window 级 Esc 监听，
+      // stopPropagation 阻断冒泡后监听收不到，外层弹窗不跟随关闭（表单内嵌下拉场景）
       e.stopPropagation();
       open.value = false;
       document.removeEventListener("mousedown", onDocClick);
