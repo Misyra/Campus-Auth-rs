@@ -45,7 +45,7 @@ vi.mock("../api", () => {
 });
 
 describe("useUi 模块求值", () => {
-  it("导入不抛错且暴露 init", async () => {
+  it("导入不抛错且暴露 init", { timeout: 20_000 }, async () => {
     const mod = await import("./useUi");
     expect(typeof mod.useUi).toBe("function");
     expect(typeof mod.useUi().init).toBe("function");

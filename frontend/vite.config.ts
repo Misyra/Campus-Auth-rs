@@ -34,5 +34,8 @@ export default defineConfig({
     // 纯函数与 composable 测试，无需 DOM
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // 全量并行冷启动时动态导入整棵单例图可抖过 5s；常规用例实测 <3s，
+    // 10s 仅对真挂起生效
+    testTimeout: 10_000,
   },
 });
