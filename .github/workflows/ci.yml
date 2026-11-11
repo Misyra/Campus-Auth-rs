@@ -204,6 +204,10 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
+      - name: 前端样式守卫（stylelint）
+        working-directory: frontend
+        run: npm run lint:css
+
       - name: 前端单元测试（vitest）
         working-directory: frontend
         run: npm test
