@@ -665,6 +665,89 @@ def test_dispatch_guarded_timeout_emits_unknown_error(monkeypatch, capsys):
     asyncio.run(_run())
 
 
+def test_timeout_self_heal_skips_interrupt_for_non_browser_commands(monkeypatch, capsys):
+    """C5：非浏览器类命令超时只取消任务，不触发 force_interrupt_pending 关页。
+
+    以 OCR 类挂起命令为例：关 self._page 会误伤 keep_alive preserve_state
+    保留的门户心跳页，白名单外的命令超时应跳过强制中断，错误响应照常发出。
+    """
+
+    async def _run():
+        import worker_main
+        from playwright_worker import worker_core
+
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
+        interrupt_calls = []
+
+        async def _spy():
+            interrupt_calls.append(1)
+
+        monkeypatch.setattr(worker_core, "force_interrupt_pending", _spy)
+
+        async def hang_handler(params):
+            await asyncio.sleep(3600)  # 永久挂起
+            return {}
+
+        worker_main.COMMANDS["test_hang_ocr"] = hang_handler
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 11, "method": "test_hang_ocr", "params": {}}
+            )
+            lines = capsys.readouterr().out.strip().splitlines()
+            assert len(lines) == 1
+            msg = json.loads(lines[0])
+            assert msg["id"] == 11
+            assert msg["result"]["success"] is False
+            assert msg["result"]["data"]["outcome"] == "unknown_error"
+        finally:
+            del worker_main.COMMANDS["test_hang_ocr"]
+
+        assert interrupt_calls == []  # 白名单外：spy 未被调用
+
+    asyncio.run(_run())
+
+
+def test_timeout_self_heal_interrupts_browser_commands(monkeypatch, capsys):
+    """C5：浏览器类命令（白名单内）超时仍触发一次 force_interrupt_pending。
+
+    handler 挂起时关页打断挂起的 CDP await；响应仍为 unknown_error。
+    """
+
+    async def _run():
+        import worker_main
+        from playwright_worker import worker_core
+
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
+        interrupt_calls = []
+
+        async def _spy():
+            interrupt_calls.append(1)
+
+        monkeypatch.setattr(worker_core, "force_interrupt_pending", _spy)
+
+        async def hang_handler(params):
+            await asyncio.sleep(3600)  # 永久挂起
+            return {}
+
+        worker_main.COMMANDS["execute_browser_task"] = hang_handler
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 12, "method": "execute_browser_task", "params": {}}
+            )
+            lines = capsys.readouterr().out.strip().splitlines()
+            assert len(lines) == 1
+            msg = json.loads(lines[0])
+            assert msg["id"] == 12
+            assert msg["result"]["success"] is False
+            assert msg["result"]["data"]["outcome"] == "unknown_error"
+        finally:
+            del worker_main.COMMANDS["execute_browser_task"]
+
+        assert interrupt_calls == [1]  # 白名单内：spy 恰被调用一次
+
+    asyncio.run(_run())
+
+
 def test_handle_evaluate_hung_script_times_out():
     """handle_evaluate 挂起脚本被单独超时中断。"""
 

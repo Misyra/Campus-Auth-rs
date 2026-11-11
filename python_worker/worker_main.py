@@ -49,6 +49,18 @@ shutdown_event = threading.Event()
 # 避免超大 JSON 解析耗尽内存（P9）
 _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 
+#: 命令级超时自愈允许 force_interrupt_pending（关闭当前页打断挂起的 CDP
+#: await）的命令白名单。排除项及理由：
+#: - ocr_recognize / worker_health_check / browser_health_check / shutdown：
+#:   不使用 self._page，超时不应误伤 keep_alive preserve_state 保留页；
+#: - test_redirect：使用自建临时浏览器/页面，关 self._page 打不断它；
+#: - close_browser：自带内部超时收敛，无需再关页。
+#: 白名单遗漏新命令时默认「不关页」，方向安全（宁可少自愈，不可误伤）。
+_INTERRUPTIBLE_METHODS = frozenset({
+    "execute_login_attempt", "execute_browser_task", "page_capture",
+    "feedback_capture", "debug_start", "debug_step", "debug_run_all", "debug_stop",
+})
+
 # OCR 运行时能力（任务 10）：由 _preload_ocr_deps 探测结果填充，
 # 随 worker_health_check 响应上报给 Rust 侧缓存（/api/ocr/status 消费）。
 # 仅 ddddocr 完整加载成功才视为 True；numpy-only/均缺失为 False
@@ -390,10 +402,12 @@ def _error_result(message: str) -> dict:
 async def _dispatch_guarded(msg: dict) -> None:
     """分发单条命令，带命令级超时兜底。
 
-    每条命令在独立 ``asyncio.Task`` 中执行；超时则取消任务并强制关闭当前页面，
-    以中断挂起的 Playwright await（``page.evaluate``/``goto`` 挂在无限循环时
-    仅取消协程无法打断 CDP 调用），随后按 ``UNKNOWN_ERROR`` 回错误响应，
-    避免一条挂起命令永久堵死后续所有命令（A1 自愈）。
+    每条命令在独立 ``asyncio.Task`` 中执行；超时则取消任务，且仅对以
+    ``self._page`` 为执行目标的浏览器类命令（``_INTERRUPTIBLE_METHODS``）
+    追加强制关闭当前页面，以中断挂起的 Playwright await（``page.evaluate``/
+    ``goto`` 挂在无限循环时仅取消协程无法打断 CDP 调用），随后按
+    ``UNKNOWN_ERROR`` 回错误响应，避免一条挂起命令永久堵死后续所有命令
+    （A1 自愈；不使用页面的命令超时不得误关 keep_alive 保留页，见 C5）。
 
     畸形命令防护：``params`` 非对象（列表/字符串）会让 ``_command_timeout``
     内 AttributeError 穿透本协程杀死整个 Worker；``method`` 不可哈希会让
@@ -450,13 +464,17 @@ async def _dispatch_guarded(msg: dict) -> None:
             except Exception:  # noqa: BLE001 — 回包失败只记日志，不得杀死 Worker
                 logger.exception("命令 %s 异常兜底回包失败", method)
         return
-    # 超时：取消任务并强制中断挂起的 Playwright 操作
+    # 超时：取消任务；仅对以 self._page 为执行目标的浏览器类命令追加
+    # 强制中断（关页打断挂起的 CDP await）。不使用页面的命令（OCR /
+    # 健康检查）或使用自建临时浏览器的命令（test_redirect）超时关页只会
+    # 误伤 keep_alive preserve_state 保留的门户心跳页等无关页面。
     logger.error(f"命令 {method} 超时（{timeout_s:.0f}s），强制中断自愈")
     task.cancel()
-    try:
-        await worker_core.force_interrupt_pending()
-    except Exception:  # noqa: BLE001
-        logger.exception("强制中断挂起操作失败")
+    if method in _INTERRUPTIBLE_METHODS:
+        try:
+            await worker_core.force_interrupt_pending()
+        except Exception:  # noqa: BLE001
+            logger.exception("强制中断挂起操作失败")
     # 超时自愈错误响应（原 _timeout_result，与 _error_result 同构已合一；
     # emit_once 保证 handler 恰在超时瞬间完成时不会双回包）
     emit_once(msg_id, _error_result(f"命令 {method} 执行超时（{timeout_s:.0f}s）"))
