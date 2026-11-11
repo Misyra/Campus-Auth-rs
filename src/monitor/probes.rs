@@ -183,13 +183,17 @@ impl TcpProbe {
         let (outcome, details) = match select_ok(futs).await {
             Ok((ok_detail, remaining)) => {
                 // Race 已赢：首个成功即视为通过，不再等待慢速剩余 future
-                // 以免整体耗时退化为 max(单目标超时)。剩余 pending 的 future
-                // 仅给 50ms 宽限用于收集已快速失败的明细，超时则丢弃
+                // 以免整体耗时退化为 max(单目标超时)。剩余 future 以 50ms
+                // **总**宽限并行收集已快速失败/完成的明细（此前逐个 50ms 串行，
+                // N 目标最坏多等 (N-1)×50ms）；总宽限耗尽整体丢弃——结果判定
+                // 恒为 Pass，明细仅为诊断
                 let mut details: Vec<PerProbeDetail> = Vec::with_capacity(remaining.len() + 1);
-                for f in remaining {
-                    if let Ok(detail) = tokio::time::timeout(Duration::from_millis(50), f).await {
-                        details.push(detail.unwrap_or_else(|d| d));
-                    }
+                if let Ok(results) =
+                    tokio::time::timeout(Duration::from_millis(50), join_all(remaining)).await
+                {
+                    details.extend(results.into_iter().map(|r| match r {
+                        Ok(detail) | Err(detail) => detail,
+                    }));
                 }
                 details.push(ok_detail);
                 (ProbeOutcome::Pass, details)
@@ -674,5 +678,39 @@ mod tests {
         // 裸 IPv6 无端口：拒绝而非误拆（怪癖修正）
         assert_eq!(parse_host_port("::1"), None);
         assert_eq!(parse_host_port("[::1]:53"), Some(("::1".to_string(), 53)));
+    }
+
+    /// TCP 竞速成功后，剩余 future 以 50ms **总**宽限并行回收：快速失败目标的
+    /// 明细必须进 details，且总耗时不得因逐个串行等待而放大（回归 A16）。
+    #[tokio::test]
+    async fn test_tcp_race_collects_fast_losers_within_grace() {
+        // 立即成功 listener：loopback 连接完成握手，竞速赢家
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ok_target = listener.local_addr().unwrap().to_string();
+
+        // 占用后立即释放端口，得到确定已关闭的本地地址（连接立即被拒，快速失败）
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_target = closed.local_addr().unwrap().to_string();
+        drop(closed);
+
+        let targets = vec![ok_target.clone(), closed_target];
+        let start = Instant::now();
+        let (outcome, details) = TcpProbe::run(&targets, Duration::from_secs(2)).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(outcome, ProbeOutcome::Pass);
+        assert_eq!(
+            details.len(),
+            2,
+            "竞速成功后快速失败目标的明细必须被收集: {details:?}"
+        );
+        assert!(
+            details.iter().any(|d| d.target == ok_target && d.success),
+            "赢家明细必须存在且成功: {details:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "剩余 future 必须以 50ms 总宽限并行回收，不得退化为逐个 50ms 串行等待（实际 {elapsed:?}）"
+        );
     }
 }
