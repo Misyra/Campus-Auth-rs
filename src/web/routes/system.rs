@@ -171,6 +171,17 @@ pub(crate) fn read_log_tail(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// 解析 GET /api/logs 的 `limit` 查询参数
+///
+/// 缺省 / 非数字 / `0` 一律回退默认 200——`0` 会让 `take(0)` 得到空数组，等同
+/// 坏参而非"真要 0 条"；超出上限时钳制到 2000，避免传 99999999 全量解析 MB 级日志。
+fn parse_limit_param(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(200)
+        .min(2000)
+}
+
 /// GET /api/logs — 读取最新日志文件内容（实时日志通过 WebSocket 推送）
 ///
 /// 日志文件为 tracing JSON 格式（每行一个 JSON 对象），解析后返回前端期望的
@@ -179,12 +190,7 @@ pub async fn fetch_logs(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(200)
-        // 钳制上限，避免传 99999999 全量解析 MB 级日志
-        .min(2000);
+    let limit = parse_limit_param(params.get("limit").map(String::as_str));
     let logs_dir = state.config.base_path().join("logs");
     // 日志文件可能达 MB 级，read_dir + 尾部读取 + JSON 解析为阻塞 I/O 与 CPU 密集操作，
     // 整体放入 spawn_blocking 避免阻塞 tokio worker 线程
@@ -1278,6 +1284,23 @@ mod tests {
         // 缺少 fields.message 时回退为空字符串而非报错
         let entry = parse_tracing_json_log(r#"{"level":"WARN"}"#).expect("结构不完整也应解析");
         assert_eq!(entry.message, "");
+    }
+
+    /// limit 参数：缺省 / 非数字 / `0` / 超上限的回退与钳制
+    ///
+    /// 回归：`limit=0` 此前会 `take(0)` 返回空数组，等同坏参而非"要 0 条"。
+    #[test]
+    fn parse_limit_param_falls_back_on_zero_and_garbage() {
+        assert_eq!(parse_limit_param(None), 200, "缺省回退 200");
+        assert_eq!(parse_limit_param(Some("0")), 200, "0 视为坏参回退 200");
+        assert_eq!(parse_limit_param(Some("abc")), 200, "非数字回退 200");
+        assert_eq!(parse_limit_param(Some("")), 200, "空串回退 200");
+        assert_eq!(parse_limit_param(Some("5")), 5, "合法值原样保留");
+        assert_eq!(
+            parse_limit_param(Some("99999999")),
+            2000,
+            "超上限钳制到 2000"
+        );
     }
 
     // ============ check_update handler 级单测（内存 MockUpdaterApi，M1） ============
