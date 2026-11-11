@@ -141,10 +141,6 @@ pub enum UpdaterError {
     #[error("替换可执行文件失败: {0}")]
     SelfReplaceFailed(String),
 
-    /// 回滚操作失败（仅记录，不中断流程）
-    #[error("回滚失败: {0}")]
-    RollbackFailed(String),
-
     /// URL 非 HTTPS，安全策略拒绝
     #[error("仅允许 HTTPS 下载源: {0}")]
     HttpsRequired(String),
