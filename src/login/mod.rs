@@ -68,6 +68,11 @@ pub(crate) fn recover_lock<T>(m: &StdMutex<T>) -> MutexGuard<'_, T> {
 /// 浏览器渠道可用性探测缓存 TTL：登录重试连打时避免逐轮扫盘
 const CHANNEL_PROBE_TTL: Duration = Duration::from_secs(60);
 
+/// 「方案未绑定直连任务」的统一文案（validate_profile 与 resolve_http_task 共用，防漂移）
+const MSG_UNBOUND_HTTP_TASK: &str = "方案未绑定直连任务，请在「任务 · 直连任务」里选择或新建一个";
+/// 「方案未绑定登录脚本」的统一文案（validate_profile 与 resolve_script_task 共用）
+const MSG_UNBOUND_SCRIPT_TASK: &str = "方案未绑定登录脚本，请在「任务 · 脚本」里选择或新建一个";
+
 /// 抢占时等待旧会话**完全收尾**的预算。
 ///
 /// 必须覆盖最坏路径的每一段：`close_browser` 命令级超时
@@ -859,7 +864,7 @@ impl LoginOrchestrator {
         let id = profile.active_http_task.trim();
         // 空绑定不是"用默认"，而是"直连登录不可用"（见 ProfileSnapshot 字段说明）
         if id.is_empty() {
-            return Err("方案未绑定直连任务，请在「任务 · 直连任务」里选择或新建一个".into());
+            return Err(MSG_UNBOUND_HTTP_TASK.into());
         }
         match self.tasks.load_task(id).await {
             Ok(crate::tasks::TaskKind::Http(cfg)) => Ok(*cfg),
@@ -892,7 +897,7 @@ impl LoginOrchestrator {
     ) -> Result<crate::tasks::ScriptTaskConfig, String> {
         let id = profile.active_script_task.trim();
         if id.is_empty() {
-            return Err("方案未绑定登录脚本，请在「任务 · 脚本」里选择或新建一个".into());
+            return Err(MSG_UNBOUND_SCRIPT_TASK.into());
         }
         match self.tasks.load_task(id).await {
             Ok(crate::tasks::TaskKind::Script(cfg)) => Ok(cfg),
@@ -937,10 +942,10 @@ impl LoginOrchestrator {
         // 由浏览器跟随网关重定向。（账号密码对脚本渠道同样必需：它们是脚本取凭据的
         // 唯一来源——`CAMPUS_USERNAME` / `CAMPUS_PASSWORD`，见 script_login。）
         if use_http && profile.active_http_task.trim().is_empty() {
-            missing.push("未绑定直连任务，请在「任务 · 直连任务」里选择或新建一个");
+            missing.push(MSG_UNBOUND_HTTP_TASK);
         }
         if use_script && profile.active_script_task.trim().is_empty() {
-            missing.push("未绑定登录脚本，请在「任务 · 脚本」里选择或新建一个");
+            missing.push(MSG_UNBOUND_SCRIPT_TASK);
         }
         // 浏览器路径必须有可执行的浏览器任务；进程内渠道无 Worker 参与，不要求
         if !use_http && !use_script && effective_task_id.is_none() {
@@ -963,6 +968,87 @@ impl LoginOrchestrator {
             )
             .await,
         )
+    }
+
+    /// 浏览器渠道的环境就绪保障（Browser 与 Manual/LoginOnce/Auto 两分支共用）。
+    ///
+    /// 流程：就绪检查 → （`announce` 时向前端推送"正在初始化 Python 环境..."）→
+    /// 与取消令牌竞速执行 `ensure_capability` → 失败时读 `last_error` 拼终态文案 →
+    /// 就绪复查仍未就绪同样终态。环境初始化可达分钟级，准备阶段即可被取消中断。
+    ///
+    /// `msg_unready` / `msg_still_unready` 为两段终态文案的前缀（`: {detail}` 与
+    /// `no_browser_hint` 尾缀由本方法统一拼接——Browser 分支原先不带 hint，统一后
+    /// 缺浏览器场景的错误信息也会带"无可用浏览器"子串、触发前端下载引导弹窗，
+    /// 属期望行为）；`announce` 控制是否推送初始化中状态（Browser 定时任务路径
+    /// 不推，手动/自动触发才推）。
+    async fn ensure_environment_ready(
+        &self,
+        source: LoginSource,
+        profile: &ProfileSnapshot,
+        cancel_token: &CancellationToken,
+        msg_unready: &str,
+        msg_still_unready: &str,
+        announce: bool,
+    ) -> Result<(), LoginHandle> {
+        if self.environment.capability_ready() {
+            return Ok(());
+        }
+        tracing::info!("登录触发环境自动初始化（来源: {source:?}）...");
+        if announce {
+            self.status.merge(crate::status::PartialSnapshot::Login {
+                status: crate::status::LoginStatus::Running,
+                source: Some(source),
+                message: Some("正在初始化 Python 环境...".into()),
+                retry_count: 0,
+            });
+        }
+        let init_result = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(self.cancelled_handle(source, profile.id.clone()).await);
+            }
+            r = self.environment.ensure_capability() => r,
+        };
+        if let Err(e) = init_result {
+            let detail = self
+                .environment
+                .status()
+                .last_error
+                .unwrap_or_else(|| e.to_string());
+            warn!("登录环境自动初始化失败: {detail}");
+            return Err(self
+                .immediate_handle(
+                    source,
+                    false,
+                    format!(
+                        "{msg_unready}: {detail}{}",
+                        Self::no_browser_hint(&*self.environment)
+                    ),
+                    profile.id.clone(),
+                )
+                .await);
+        }
+        if !self.environment.capability_ready() {
+            let detail = self
+                .environment
+                .status()
+                .last_error
+                .unwrap_or_else(|| "未知原因".to_string());
+            // 环境初始化完成后仍未就绪直接失败，需留痕（原两分支告警口径一致）
+            warn!("环境初始化完成但仍未就绪: {detail}");
+            return Err(self
+                .immediate_handle(
+                    source,
+                    false,
+                    format!(
+                        "{msg_still_unready}: {detail}{}",
+                        Self::no_browser_hint(&*self.environment)
+                    ),
+                    profile.id.clone(),
+                )
+                .await);
+        }
+        tracing::info!("环境自动初始化成功，继续执行登录");
+        Ok(())
     }
 
     /// 浏览器渠道预检（1b）+ 可用性终验（1c），返回本次登录生效的渠道覆盖。
@@ -991,47 +1077,16 @@ impl LoginOrchestrator {
         // Manual 场景不走此分支——其 Worker 缺失会在会话内 Bridge 执行阶段以 WorkerNotInstalled 失败，
         // 已在 session 层统一处理；此处仅守 Browser 定时任务路径。
         // 环境初始化可达分钟级：与取消令牌竞速，准备阶段即可被取消中断。
-        if source == LoginSource::Browser && !self.environment.capability_ready() {
-            tracing::info!("浏览器能力未就绪，尝试自动初始化环境...");
-            let init_result = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return Err(self.cancelled_handle(source, profile.id.clone()).await);
-                }
-                r = self.environment.ensure_capability() => r,
-            };
-            if let Err(e) = init_result {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| e.to_string());
-                warn!("浏览器任务环境自动初始化失败: {detail}");
-                return Err(self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!("浏览器能力未就绪，自动初始化失败: {detail}"),
-                        profile.id.clone(),
-                    )
-                    .await);
-            }
-            if !self.environment.capability_ready() {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| "未知原因".to_string());
-                warn!("环境初始化完成但仍未就绪: {detail}");
-                return Err(self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!("浏览器能力未就绪（初始化后仍未就绪）: {detail}"),
-                        profile.id.clone(),
-                    )
-                    .await);
-            }
-            tracing::info!("浏览器任务环境自动初始化成功，继续执行登录");
+        if source == LoginSource::Browser {
+            self.ensure_environment_ready(
+                source,
+                profile,
+                cancel_token,
+                "浏览器能力未就绪，自动初始化失败",
+                "浏览器能力未就绪（初始化后仍未就绪）",
+                false,
+            )
+            .await?;
         }
 
         // 手动/引擎自动登录同样自动初始化：未安装时直接拒绝会让全新安装用户
@@ -1040,61 +1095,16 @@ impl LoginOrchestrator {
         if matches!(
             source,
             LoginSource::Manual | LoginSource::LoginOnce | LoginSource::Auto
-        ) && !self.environment.capability_ready()
-        {
-            tracing::info!("登录触发环境自动初始化（来源: {source:?}）...");
-            self.status.merge(crate::status::PartialSnapshot::Login {
-                status: crate::status::LoginStatus::Running,
-                source: Some(source),
-                message: Some("正在初始化 Python 环境...".into()),
-                retry_count: 0,
-            });
-            let init_result = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    return Err(self.cancelled_handle(source, profile.id.clone()).await);
-                }
-                r = self.environment.ensure_capability() => r,
-            };
-            if let Err(e) = init_result {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| e.to_string());
-                warn!("登录环境自动初始化失败: {detail}");
-                return Err(self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!(
-                            "环境未就绪，自动初始化失败: {detail}{}",
-                            Self::no_browser_hint(&*self.environment)
-                        ),
-                        profile.id.clone(),
-                    )
-                    .await);
-            }
-            if !self.environment.capability_ready() {
-                let detail = self
-                    .environment
-                    .status()
-                    .last_error
-                    .unwrap_or_else(|| "未知原因".to_string());
-                // 与 Browser 分支的告警口径一致：环境初始化后仍未就绪直接失败，需留痕
-                warn!("环境初始化完成但仍未就绪: {detail}");
-                return Err(self
-                    .immediate_handle(
-                        source,
-                        false,
-                        format!(
-                            "环境初始化后仍未就绪: {detail}{}",
-                            Self::no_browser_hint(&*self.environment)
-                        ),
-                        profile.id.clone(),
-                    )
-                    .await);
-            }
-            tracing::info!("手动登录环境自动初始化成功，继续执行登录");
+        ) {
+            self.ensure_environment_ready(
+                source,
+                profile,
+                cancel_token,
+                "环境未就绪，自动初始化失败",
+                "环境初始化后仍未就绪",
+                true,
+            )
+            .await?;
         }
 
         // 1c. 浏览器可用性终验（环境引导兜底之后）：引导中新装好的 Chromium
