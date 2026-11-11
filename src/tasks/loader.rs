@@ -335,30 +335,41 @@ impl TaskManager {
         // 将 task_id 写回 common（避免 JSON 中遗漏）
         task.common_mut().task_id = task_id.to_string();
 
-        atomic_write_json(&path, &task)?;
-        for stale in stale_paths {
-            if stale.exists() {
-                // 删掉是必须的（同一 id 留两份定义时，加载会按桶优先级取到过时的那份），
-                // 但**必须留痕**：这条路径正常来自"用户主动改了任务类型"，也可能是前端
-                // 两个面板各自取了同一个自动 id（`untitled_N`）——后者意味着另一个列表里
-                // 的一条任务无声消失，日志是唯一的追查线索（前端已按三类 id 并集取号）。
-                match std::fs::remove_file(&stale) {
-                    Ok(()) => tracing::warn!(
-                        "任务 {task_id} 的 id 也存在于其它任务桶，已删除残留文件 {}",
-                        stale.display()
-                    ),
-                    Err(e) => tracing::warn!(
-                        "任务 {task_id} 的其它桶残留文件删除失败 {}: {e}",
-                        stale.display()
-                    ),
+        // 原子写（含 fsync）与残留删除均为阻塞 I/O，放入 spawn_blocking 执行，
+        // 避免持锁阻塞 tokio worker 线程（与 scheduler 历史遗留 #12 同口径收敛）
+        let task_id_owned = task_id.to_string();
+        let path_for_blocking = path.clone();
+        let task_for_blocking = task.clone();
+        let stale_for_blocking = stale_paths;
+        tokio::task::spawn_blocking(move || -> Result<(), TaskError> {
+            atomic_write_json(&path_for_blocking, &task_for_blocking)?;
+            for stale in &stale_for_blocking {
+                if stale.exists() {
+                    // 删掉是必须的（同一 id 留两份定义时，加载会按桶优先级取到过时的那份），
+                    // 但**必须留痕**：这条路径正常来自"用户主动改了任务类型"，也可能是前端
+                    // 两个面板各自取了同一个自动 id（`untitled_N`）——后者意味着另一个列表里
+                    // 的一条任务无声消失，日志是唯一的追查线索（前端已按三类 id 并集取号）。
+                    match std::fs::remove_file(stale) {
+                        Ok(()) => tracing::warn!(
+                            "任务 {task_id_owned} 的 id 也存在于其它任务桶，已删除残留文件 {}",
+                            stale.display()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "任务 {task_id_owned} 的其它桶残留文件删除失败 {}: {e}",
+                            stale.display()
+                        ),
+                    }
                 }
             }
-        }
+            Ok(())
+        })
+        .await
+        .map_err(|e| TaskError::IoError(std::io::Error::other(e.to_string())))??;
         // 追加到 order（如不存在）
-        let mut order = self.read_order();
+        let mut order = self.read_order_blocking().await;
         if !order.order.contains(&task_id.to_string()) {
             order.order.push(task_id.to_string());
-            self.write_order(&order)?;
+            self.write_order_blocking(&order).await?;
         }
         Ok(())
     }
@@ -377,9 +388,9 @@ impl TaskManager {
                     .await
                     .map_err(TaskError::IoError)?;
             }
-            let mut order = self.read_order();
+            let mut order = self.read_order_blocking().await;
             order.order.retain(|id| id != task_id);
-            self.write_order(&order)?;
+            self.write_order_blocking(&order).await?;
             return Ok(());
         }
         if !is_valid_task_id(task_id) {
@@ -421,9 +432,9 @@ impl TaskManager {
             return Err(TaskError::TaskNotFound(task_id.to_string()));
         }
 
-        let mut order = self.read_order();
+        let mut order = self.read_order_blocking().await;
         order.order.retain(|id| id != task_id);
-        self.write_order(&order)?;
+        self.write_order_blocking(&order).await?;
         Ok(())
     }
 
@@ -449,7 +460,7 @@ impl TaskManager {
 
     /// 读取 `.order.json`
     pub async fn load_order(&self) -> OrderData {
-        self.read_order()
+        self.read_order_blocking().await
     }
 
     /// 保存 `.order.json`
@@ -458,7 +469,7 @@ impl TaskManager {
             return Err(TaskError::InvalidTaskId(invalid.clone()));
         }
         let _guard = self.lock.lock().await;
-        self.write_order(order)
+        self.write_order_blocking(order).await
     }
 
     /// 返回脚本任务的文件路径（供执行器定位）
@@ -914,9 +925,15 @@ impl TaskManager {
         self.tasks_dir.join(".order.json")
     }
 
-    /// 同步读取 `.order.json`（缺失或损坏时返回默认）
-    fn read_order(&self) -> OrderData {
-        Self::read_order_at(&self.order_path())
+    /// `.order.json` 异步读（阻塞 I/O 入 spawn_blocking）
+    async fn read_order_blocking(&self) -> OrderData {
+        let path = self.order_path();
+        tokio::task::spawn_blocking(move || Self::read_order_at(&path))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("读取 .order.json 的阻塞任务失败: {e}");
+                OrderData::default()
+            })
     }
 
     /// 按路径同步读取 `.order.json`（供 spawn_blocking 闭包内使用，无需 &self）
@@ -939,9 +956,18 @@ impl TaskManager {
         }
     }
 
-    /// 同步写入 `.order.json`（原子）
+    /// 同步写入 `.order.json`（原子；仅供构造器 `TaskManager::new` 在 runtime 之外使用）
     fn write_order(&self, order: &OrderData) -> Result<(), TaskError> {
         atomic_write_json(&self.order_path(), order)
+    }
+
+    /// `.order.json` 异步原子写（阻塞 I/O 入 spawn_blocking）
+    async fn write_order_blocking(&self, order: &OrderData) -> Result<(), TaskError> {
+        let path = self.order_path();
+        let order = order.clone();
+        tokio::task::spawn_blocking(move || atomic_write_json(&path, &order))
+            .await
+            .map_err(|e| TaskError::IoError(std::io::Error::other(e.to_string())))?
     }
 
     /// 查找任务文件（按桶优先级 browser → script → http）
