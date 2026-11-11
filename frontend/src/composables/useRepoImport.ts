@@ -9,6 +9,7 @@ import { ref, computed, watch } from "vue";
 import type { HttpTaskConfig, RepoTask } from "../api/types";
 import { repoApi } from "../api";
 import { extractApiError } from "../api/client";
+import { router } from "../router";
 import { frontendLogger } from "../utils/logger";
 import {
   TASK_REPO_SOURCES,
@@ -568,7 +569,6 @@ async function finishImport(
 
 /** 导入后跳转到对应面板的编辑页（?task=<id> 由面板消费） */
 async function navigateToTaskEditor(routeName: string, taskId: string): Promise<void> {
-  const { router } = await import("../router");
   await router.push({ name: routeName, query: { task: taskId } });
 }
 
