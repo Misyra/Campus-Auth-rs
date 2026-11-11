@@ -913,16 +913,19 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
                 error!("Engine 重启次数耗尽（{MAX_RESTART_ATTEMPTS} 次），标记为 Dead");
                 // 清空 slot，后续命令派发按 ChannelClosed 快速失败
                 container.engine.clear();
+                // 仅 state 置 Dead，其余字段回填崩溃前快照：避免用 Unknown/默认值
+                // 覆盖最后的真实网络结论；last_check 沿用旧值（非检测事件不刷新，G3）
+                let snap = status.borrow();
                 status.merge(crate::status::PartialSnapshot::Engine {
                     state: crate::status::EngineState::Dead,
-                    network: crate::status::NetworkStatus::Unknown,
-                    assessment: crate::monitor::ConnectivityAssessment::default(),
-                    evidence: None,
-                    last_check: chrono::Local::now(),
-                    pause: false,
-                    cooling_down: false,
-                    cooling_down_remaining: None,
-                    consecutive_failures: 0,
+                    network: snap.network_status,
+                    assessment: snap.connectivity.clone(),
+                    evidence: snap.last_probe_evidence.clone(),
+                    last_check: snap.last_check_time.unwrap_or_else(chrono::Local::now),
+                    pause: snap.pause_active,
+                    cooling_down: snap.cooling_down,
+                    cooling_down_remaining: snap.cooling_down_remaining,
+                    consecutive_failures: snap.consecutive_failures,
                 });
                 return;
             }
