@@ -59,11 +59,11 @@ watch(mode, next => { if (next === "interface") void refreshAdapters(); }, { imm
         <label>校园网网卡</label>
         <div class="network-adapter-control">
           <CustomSelect v-model="interfaceId" :options="adapterOptions" aria-label="校园网网卡"
-            :placeholder="loading ? '正在读取网卡…' : '请选择连接校园网的物理网卡'" :disabled="loading" />
+            :placeholder="loading ? '正在读取网卡…' : '请选择连接校园网的网卡'" :disabled="loading" />
           <button type="button" class="btn btn-secondary btn-sm" :disabled="loading" @click="refreshAdapters">{{ loading ? '读取中…' : '刷新网卡' }}</button>
         </div>
         <span v-if="error" class="hint" role="alert">{{ error }}</span>
-        <span v-else-if="!loading && !adapters.length" class="hint">没有可用物理网卡，请检查校园网连接。</span>
+        <span v-else-if="!loading && !adapters.length" class="hint">没有可用网卡，请检查校园网连接。</span>
         <span class="hint">网卡不可用时停止连接，不切换到其他网卡。</span>
       </div>
       <div class="form-group">

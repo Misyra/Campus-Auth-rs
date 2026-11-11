@@ -11,6 +11,13 @@
 - 从逐项开发记录汇总面向用户的更新日志；发布使用带预发布标识的 Git 标签与 GitHub prerelease，正式版稳定通道不切换到此测试版。
 - 整合验证：Rust 库 1145 项通过（3 项默认忽略），前端 570 项与 OpenWrt 包装器 10 项通过；版本及锁文件一致性检查通过。
 
+## 开发中（2026-11-11 网卡枚举放行 Hyper-V 虚拟网卡）
+
+- 修复 Hyper-V 主机看不到实际出口网卡：外部 vSwitch 的 `vEthernet` 网卡 `HardwareInterface` 为 `false`，原先在 PowerShell 侧按该标记过滤会把它整条丢弃。改为连同 `HardwareInterface` 与 `InterfaceDescription` 一起取回，在 Rust 侧按“硬件网卡，或 Hyper-V Virtual Ethernet Adapter”筛选；其余虚拟网卡、未分配地址、回环与 link-local 继续排除，接口读取失败仍明确报错、不回退其他接口。
+- 筛选逻辑抽成纯函数 `select_windows_adapters` 并补单元测试，固定“物理网卡与 Hyper-V 外网网卡入选、普通虚拟网卡与 link-local 落选”，测试不再限定 Windows 平台，Linux CI 亦可回归。
+- 界面占位文案与 `EgressAdapter` 类型注释中的“物理网卡”改为“网卡”，与实际可选范围一致。
+- 验证：Rust 库回归 1148 项通过、3 项默认忽略（含新增的 Hyper-V 筛选用例）；未在 Hyper-V 实机验收真实出口登录。
+
 ## 开发中（2026-10-27 统一校园网出口下拉组件）
 
 - 校园网出口与物理网卡选择复用已有 `CustomSelect`，统一展开菜单、选中态与键盘交互；网卡刷新按钮同行排列，窄屏自动换行。

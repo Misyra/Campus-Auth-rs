@@ -1,4 +1,4 @@
-//! 可绑定出口的物理网卡清单与稳定标识
+//! 可绑定出口的网卡清单与稳定标识
 
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
@@ -14,12 +14,38 @@ pub struct EgressAdapter {
     pub index: u32,
     /// 当前 IPv4 地址。
     pub ipv4: Ipv4Addr,
-    /// 当前物理 MAC，供门户凭据变换使用。
+    /// 当前接口 MAC，供门户凭据变换使用。
     #[serde(default)]
     pub mac: String,
     /// 当前接口配置的 IPv4 DNS。
     #[serde(default)]
     pub dns_servers: Vec<String>,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Deserialize)]
+struct WindowsAdapter {
+    #[serde(flatten)]
+    adapter: EgressAdapter,
+    hardware: bool,
+    description: String,
+}
+
+#[cfg(any(windows, test))]
+fn select_windows_adapters(rows: Vec<WindowsAdapter>) -> Vec<EgressAdapter> {
+    rows.into_iter()
+        .filter(|row| {
+            (row.hardware
+                || row
+                    .description
+                    .to_ascii_lowercase()
+                    .contains("hyper-v virtual ethernet adapter"))
+                && !row.adapter.ipv4.is_unspecified()
+                && !row.adapter.ipv4.is_loopback()
+                && !row.adapter.ipv4.is_link_local()
+        })
+        .map(|row| row.adapter)
+        .collect()
 }
 
 /// 枚举网卡；超时或读取失败明确返回错误，不回退到其他接口。
@@ -30,7 +56,7 @@ pub async fn list_adapters() -> std::io::Result<Vec<EgressAdapter>> {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $rows = @(Get-NetIPConfiguration -All | Where-Object {
-    $_.NetAdapter.Status -eq 'Up' -and $_.NetAdapter.HardwareInterface
+    $_.NetAdapter.Status -eq 'Up'
 } | ForEach-Object {
     $config = $_
     foreach ($address in @($config.IPv4Address)) {
@@ -42,6 +68,8 @@ $rows = @(Get-NetIPConfiguration -All | Where-Object {
                 ipv4 = $address.IPAddress
                 mac = ($config.NetAdapter.MacAddress -replace '-', ':').ToLowerInvariant()
                 dns_servers = @($config.DNSServer.ServerAddresses | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' })
+                hardware = [bool]$config.NetAdapter.HardwareInterface
+                description = [string]$config.NetAdapter.InterfaceDescription
             }
         }
     }
@@ -62,18 +90,15 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "网卡枚举超时"))??;
         if !output.status.success() {
-            return Err(std::io::Error::other("无法读取物理网卡信息"));
+            return Err(std::io::Error::other("无法读取网卡信息"));
         }
         let bytes = output
             .stdout
             .strip_prefix(b"\xef\xbb\xbf")
             .unwrap_or(&output.stdout);
-        let mut list: Vec<EgressAdapter> =
+        let list: Vec<WindowsAdapter> =
             serde_json::from_slice(bytes).map_err(std::io::Error::other)?;
-        list.retain(|a| {
-            !a.ipv4.is_unspecified() && !a.ipv4.is_loopback() && !a.ipv4.is_link_local()
-        });
-        Ok(list)
+        Ok(select_windows_adapters(list))
     }
     #[cfg(not(windows))]
     {
@@ -106,11 +131,27 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn windows_selection_includes_hyper_v_but_not_other_virtual_adapters() {
+        let rows: Vec<WindowsAdapter> = serde_json::from_str(r#"[
+            {"id":"physical","name":"Ethernet","index":1,"ipv4":"192.168.1.2","hardware":true,"description":"Ethernet"},
+            {"id":"hyperv","name":"vEthernet (External)","index":2,"ipv4":"10.0.0.2","hardware":false,"description":"Hyper-V Virtual Ethernet Adapter #2"},
+            {"id":"vpn","name":"VPN","index":3,"ipv4":"10.0.0.3","hardware":false,"description":"Other virtual adapter"},
+            {"id":"linklocal","name":"vEthernet (Internal)","index":4,"ipv4":"169.254.1.1","hardware":false,"description":"Hyper-V Virtual Ethernet Adapter"}
+        ]"#).unwrap();
+        let selected = select_windows_adapters(rows);
+        assert_eq!(
+            selected.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["physical", "hyperv"]
+        );
+    }
+
     /// 只读系统网卡，需在真实 Windows 主机手动执行。
+    #[cfg(windows)]
     #[tokio::test]
     #[ignore = "依赖宿主物理网卡与 PowerShell，仅手动冒烟"]
     async fn windows_adapter_inventory_smoke() {

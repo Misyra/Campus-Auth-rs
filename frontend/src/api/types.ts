@@ -534,7 +534,7 @@ export interface NetworkSettings {
   dns_servers: string[];
 }
 
-/** 可绑定的物理网卡及当前地址。 */
+/** 可绑定的网卡及当前地址。 */
 export interface EgressAdapter {
   id: string;
   name: string;
