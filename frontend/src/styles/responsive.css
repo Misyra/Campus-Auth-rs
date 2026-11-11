@@ -148,10 +148,6 @@
     scrollbar-gutter: auto;
   }
 
-  .form-row {
-    grid-template-columns: 1fr;
-  }
-
   /* 日志行四列在窄屏下折为两行：时间+徽章一行，消息独占一行，避免挤出视口 */
   .log-entry {
     grid-template-columns: auto 1fr;

@@ -87,6 +87,11 @@ cd frontend && npm run build
 
 启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（含 `rust-tests-unix` 真机）/ `frontend build + vitest` / `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路，见 `.github/workflows/ci.yml`）。
 
+### 前端样式
+
+- 新代码归属判据（详见 `frontend/src/styles/index.css` 文件头）：跨组件复用 / 含 `[data-theme]` 分支 / 涉及 `tsk-*` `settings-*` 等共享类 → `frontend/src/styles/` 分层文件；单组件私有、无主题分支 → `<style scoped>`（建议 ≤200 行，超出即考虑上提）。
+- 禁止在 scoped 中改写共享类的声明值——需要分叉时给共享类加 `--xxx` 变量，scoped 只声明变量（参考 `tsk-table` 名称列的 `--tsk-col-name-w`）。
+
 ## 项目结构
 
 ```

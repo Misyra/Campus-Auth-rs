@@ -138,9 +138,10 @@
 /* 列宽口径三面板统一：同一列在任何面板里都落在同一个 x 位置，切子页时表格不跳形。
    比例列用百分比、固定列用 px；`tsk-col-flex` 是"吃剩余空间"的那一列（直连任务的
    请求列）。浏览器任务与脚本列表已把描述并进名称格，由各自的 scoped 规则把
-   **名称列**改成 auto 来吃剩余宽度。 */
+   **名称列**改成 auto 来吃剩余宽度。单表要分叉名称列宽度时改走 `--tsk-col-name-w`
+   变量（如 HTTP 面板 24%），不在 scoped 里改写共享值（判据见 index.css 文件头）。 */
 .tsk-table col.tsk-col-drag { width: 44px; }
-.tsk-table col.tsk-col-name { width: 20%; }
+.tsk-table col.tsk-col-name { width: var(--tsk-col-name-w, 20%); }
 .tsk-table col.tsk-col-id { width: 14%; }
 .tsk-table col.tsk-col-flex { width: auto; }
 .tsk-table col.tsk-col-bind { width: 13%; }

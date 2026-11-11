@@ -2,7 +2,7 @@
 /** HTTP 登录任务面板：**列表页 + 二级编辑页**（方案 G 终稿，自动保存模式）。
  *
  * 与浏览器任务面板同构：列表态整页任务表格，编辑态独占全宽、面包屑返回，
- * 深链 `?task=<id>` 直达编辑器（方案编辑器的「配置HTTP 登录任务」入口沿用）。
+ * 深链 `?task=<id>` 直达编辑器（方案编辑器的「配置 HTTP 登录任务」入口沿用）。
  * 字段编辑由 `HttpFlowFields` 展示有序请求步骤与独立结果判断，变更 debounce
  * 静默 PUT；请求地址等缺口未补齐前自动保存不发请求（发了必 400），
  * 此时状态字改口「有 N 处待补全」并在编辑页顶部列出缺什么。
@@ -221,7 +221,6 @@ const NOTICE_HELP =
   "HTTP 登录要生效，需在侧边栏「方案」里把登录方式设为「HTTP 登录」并选中一个任务。\n\n" +
   "本页只负责编辑与测试：任务本身不含账号密码，凭据与匹配规则留在方案里。";
 
-/** 自动保存状态字（缺口优先：缺口态说的是「有 N 处待补全，改动暂未保存」） */
 /** 自动保存状态字（缺口优先；新建未落盘时也不能说"改动自动保存"） */
 const autosaveText = computed(() =>
   autosaveLabel(autosaveState.value, draftGapsNow.value, isNewDraft.value),
@@ -247,9 +246,9 @@ onMounted(async () => {
         class="tsk-search"
         type="text"
         placeholder="搜索名称 / ID / 描述 / 请求地址"
-        aria-label="搜索HTTP 登录任务"
+        aria-label="搜索 HTTP 登录任务"
       />
-      <button type="button" class="btn btn-sm" title="从文件导入HTTP 登录任务" @click="importHttpTask">
+      <button type="button" class="btn btn-sm" title="从文件导入 HTTP 登录任务" @click="importHttpTask">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
       </button>
@@ -260,19 +259,19 @@ onMounted(async () => {
         target="_blank"
         rel="noopener"
         class="btn btn-sm"
-        title="把你的HTTP 登录任务分享到任务仓库，供他人一键导入"
+        title="把你的 HTTP 登录任务分享到任务仓库，供他人一键导入"
       >
         <IconApp name="share-2" class="icon-sm" />
         分享适配
       </a>
       <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
         <IconApp name="plus" class="icon-sm" />
-        新建HTTP 登录任务
+        新建 HTTP 登录任务
       </button>
     </div>
 
     <div class="card tsk-table-card">
-      <table class="tsk-table">
+      <table class="tsk-table http-tasks-table">
         <colgroup>
           <col class="tsk-col-drag" />
           <col class="tsk-col-name" />
@@ -298,11 +297,11 @@ onMounted(async () => {
             <td colspan="7">
               <div class="empty-state">
                 <IconApp name="globe" :stroke-width="1.5" />
-                <span>暂无HTTP 登录任务</span>
+                <span>暂无 HTTP 登录任务</span>
                 <span class="empty-desc">HTTP 登录任务直接向网关发登录请求，不开浏览器、不需要 Python 与 Playwright</span>
                 <div class="empty-actions">
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
-                    <IconApp name="plus" />新建HTTP 登录任务
+                    <IconApp name="plus" />新建 HTTP 登录任务
                   </button>
                 </div>
               </div>
@@ -312,7 +311,7 @@ onMounted(async () => {
             <td colspan="7">
               <div class="empty-state">
                 <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的HTTP 登录任务</span>
+                <span>没有匹配「{{ searchQuery }}」的 HTTP 登录任务</span>
               </div>
             </td>
           </tr>
@@ -354,7 +353,7 @@ onMounted(async () => {
                   v-for="name in row.boundProfiles"
                   :key="name"
                   class="badge badge--sm badge--success"
-                  :title="`方案「${name}」的HTTP 登录指向本任务`"
+                  :title="`方案「${name}」的 HTTP 登录指向本任务`"
                 >{{ name }}</span>
               </template>
               <span v-else class="tsk-muted">未绑定</span>
@@ -405,7 +404,7 @@ onMounted(async () => {
     </div>
 
     <div class="tsk-editor-head">
-      <h2 class="tsk-editor-title">{{ httpTaskDraft.name || '未命名HTTP 登录任务' }}</h2>
+      <h2 class="tsk-editor-title">{{ httpTaskDraft.name || '未命名 HTTP 登录任务' }}</h2>
       <span :class="autosaveText.cls">{{ autosaveText.text }}</span>
       <span class="tsk-spacer"></span>
       <button type="button" class="btn btn-sm" title="导出任务 JSON" @click="exportHttpTask(httpTaskDraft.id)">
@@ -542,10 +541,11 @@ onMounted(async () => {
 /* 面板专属样式：共享版式（列表页 / 表格 / 菜单 / 二级页 / 状态字 / 缺口条）在
    styles/pages/tasks.css 的 `tsk-*` 组里，这里只留本面板独有的两处。 */
 
-/* 名称列略宽于共享值：本表的名称格是两行（名称 + 描述副行），20% 会把描述挤成半句；
-   剩余宽度仍由「请求」列（`tsk-col-flex` = auto）吃。 */
-.tsk-table col.tsk-col-name {
-  width: 24%;
+/* 名称列略宽于共享默认值：本表的名称格是两行（名称 + 描述副行），20% 会把描述挤成
+   半句；剩余宽度仍由「请求」列（`tsk-col-flex` = auto）吃。共享列宽已改走
+   `--tsk-col-name-w` 变量（见 styles/pages/tasks.css），这里只声明变量，不改写共享值。 */
+.http-tasks-table {
+  --tsk-col-name-w: 24%;
 }
 
 .http-start-list { display: flex; flex-direction: column; gap: 14px; margin: 0; padding: 0; list-style: none; }
