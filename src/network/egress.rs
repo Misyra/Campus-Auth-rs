@@ -2,12 +2,14 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -126,6 +128,20 @@ impl PreparedEgress {
             builder = builder.proxy(reqwest::Proxy::all(proxy.as_str())?);
         }
         Ok(builder)
+    }
+
+    /// 监测客户端缓存身份：`None` 表示出口每轮必变（Interface 的本地回环代理端口
+    /// 随机），调用方不得缓存客户端；`Some` 为「静态代理 URL 或空串」，同身份可复用。
+    pub(crate) fn cacheable_identity(&self) -> Option<String> {
+        if self.binding.is_some() {
+            return None;
+        }
+        Some(
+            self.proxy
+                .as_ref()
+                .map(|url| url.as_str().to_string())
+                .unwrap_or_default(),
+        )
     }
 
     /// TCP 探测和入口预检使用同一出口，代理模式通过 HTTP CONNECT 或 SOCKS5 连接。
@@ -511,16 +527,107 @@ impl LocalProxy {
     }
 }
 
-async fn read_http_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    let mut head = Vec::new();
-    loop {
-        if head.len() >= 32 * 1024 {
-            return Err(io::Error::other("代理请求头过大"));
+/// 回环代理请求头 / 上游响应头的字节上限
+const HTTP_HEAD_LIMIT: usize = 32 * 1024;
+
+/// 请求头整块读取的单次 read 缓冲（A24）：替代逐字节 read_u8 的每字节一次
+/// await 路径。
+const HTTP_HEAD_CHUNK: usize = 4096;
+
+/// 回环代理连接的读取适配层（A24）。
+///
+/// `read_http_head` 整块读取时，单次 `read` 可能越过 `\r\n\r\n` 预读后续字节
+///（请求/响应消息体、CONNECT 隧道数据、keep-alive 流水线的下一请求）。这些
+/// 字节既不能丢弃也不能回写套接字，暂存在本层；之后的读取（消息体拷贝、
+/// 双向隧道、下一轮请求头）先于底层流消费它们，字节序与逐字节读取一致。
+struct HeadBufferedReader {
+    stream: TcpStream,
+    pending: Vec<u8>,
+}
+
+impl HeadBufferedReader {
+    fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            pending: Vec::new(),
         }
-        head.push(stream.read_u8().await?);
-        if head.ends_with(b"\r\n\r\n") {
+    }
+
+    /// 头读取完成时回收越读字节，供后续消息体 / 隧道 / 下一请求消费。
+    /// 新旧字节按时间序拼接（新越读在前，尚未消费的旧 pending 在后）。
+    fn push_back(&mut self, mut extra: Vec<u8>) {
+        extra.extend_from_slice(&std::mem::take(&mut self.pending));
+        self.pending = extra;
+    }
+
+    /// 头读取后回收底层流：仅当头后没有越读字节时允许，否则数据会静默丢失。
+    /// 用于 CONNECT 引导（目的端只会在收到请求后回包，正常不会带头后数据）。
+    fn finish(self) -> io::Result<TcpStream> {
+        if self.pending.is_empty() {
+            Ok(self.stream)
+        } else {
+            Err(io::Error::other("代理响应头后存在未预期的数据"))
+        }
+    }
+}
+
+impl AsyncRead for HeadBufferedReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.pending.is_empty() {
+            let n = self.pending.len().min(buf.remaining());
+            buf.put_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for HeadBufferedReader {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+async fn read_http_head(stream: &mut HeadBufferedReader) -> io::Result<Vec<u8>> {
+    let mut head = Vec::new();
+    let mut chunk = [0u8; HTTP_HEAD_CHUNK];
+    loop {
+        if let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n".as_slice()) {
+            let end = end + 4;
+            // 越读的尾字节留在适配层，供消息体拷贝 / 隧道 / 下一请求头消费
+            stream.push_back(head.split_off(end));
             return Ok(head);
         }
+        if head.len() >= HTTP_HEAD_LIMIT {
+            return Err(io::Error::other("代理请求头过大"));
+        }
+        // want 限制单次读取量，头总长不超过 32KB（与逐字节实现一致）
+        let want = (HTTP_HEAD_LIMIT - head.len()).min(chunk.len());
+        let read = stream.read(&mut chunk[..want]).await?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "代理请求头不完整（对端关闭）",
+            ));
+        }
+        head.extend_from_slice(&chunk[..read]);
     }
 }
 
@@ -531,7 +638,11 @@ fn header_value<'a>(headers: &'a [(&str, &str)], name: &str) -> Option<&'a str> 
         .map(|(_, value)| value.trim())
 }
 
-async fn copy_fixed(input: &mut TcpStream, output: &mut TcpStream, length: u64) -> io::Result<()> {
+async fn copy_fixed(
+    input: &mut (impl AsyncRead + Unpin),
+    output: &mut (impl AsyncWrite + Unpin),
+    length: u64,
+) -> io::Result<()> {
     let copied = tokio::io::copy(&mut (&mut *input).take(length), output).await?;
     if copied != length {
         return Err(io::Error::new(
@@ -542,7 +653,10 @@ async fn copy_fixed(input: &mut TcpStream, output: &mut TcpStream, length: u64) 
     Ok(())
 }
 
-async fn copy_chunked(input: &mut TcpStream, output: &mut TcpStream) -> io::Result<()> {
+async fn copy_chunked(
+    input: &mut (impl AsyncRead + Unpin),
+    output: &mut (impl AsyncWrite + Unpin),
+) -> io::Result<()> {
     loop {
         let mut line = Vec::new();
         while !line.ends_with(b"\r\n") {
@@ -596,8 +710,8 @@ fn body_length(headers: &[(&str, &str)]) -> io::Result<Option<u64>> {
 }
 
 async fn copy_message_body(
-    input: &mut TcpStream,
-    output: &mut TcpStream,
+    input: &mut (impl AsyncRead + Unpin),
+    output: &mut (impl AsyncWrite + Unpin),
     headers: &[(&str, &str)],
     response: bool,
 ) -> io::Result<bool> {
@@ -616,8 +730,10 @@ async fn copy_message_body(
     Ok(true)
 }
 
-async fn serve_proxy(mut incoming: TcpStream, binding: Arc<Binding>, auth: &str) -> io::Result<()> {
-    let mut connection: Option<(String, TcpStream)> = None;
+async fn serve_proxy(incoming: TcpStream, binding: Arc<Binding>, auth: &str) -> io::Result<()> {
+    // A24：请求头整块读取，两侧连接包一层适配层缓存越读字节
+    let mut incoming = HeadBufferedReader::new(incoming);
+    let mut connection: Option<(String, HeadBufferedReader)> = None;
     loop {
         let head = tokio::time::timeout(
             Duration::from_secs(if connection.is_some() { 90 } else { 8 }),
@@ -664,7 +780,7 @@ async fn serve_proxy(mut incoming: TcpStream, binding: Arc<Binding>, auth: &str)
             let connected =
                 tokio::time::timeout(CONNECT_TIMEOUT, binding.connect(host, port)).await;
             match connected {
-                Ok(Ok(stream)) => connection = Some((key, stream)),
+                Ok(Ok(stream)) => connection = Some((key, HeadBufferedReader::new(stream))),
                 failure => {
                     let message = match failure {
                         Ok(Err(error)) => error.to_string(),
@@ -906,7 +1022,10 @@ async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Resu
             format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth}\r\n").as_bytes(),
         )
         .await?;
-    let response = read_http_head(&mut stream).await?;
+    // A24：响应头整块读取；CONNECT 引导后不能带越读字节（隧道数据会丢失），
+    // finish 对此显式报错而非静默吞掉
+    let mut reader = HeadBufferedReader::new(stream);
+    let response = read_http_head(&mut reader).await?;
     let first = std::str::from_utf8(&response)
         .map_err(io::Error::other)?
         .split("\r\n")
@@ -915,7 +1034,7 @@ async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Resu
     if first.split_whitespace().nth(1) != Some("200") {
         return Err(io::Error::other("代理拒绝 TCP CONNECT"));
     }
-    Ok(stream)
+    reader.finish()
 }
 
 #[cfg(test)]
