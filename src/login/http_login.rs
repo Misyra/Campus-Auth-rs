@@ -594,7 +594,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     }
 
     // 2. 用户脚本值变换：跑凭据脚本，产出可被占位符引用的字段表（并入上面的 `vars`）
-    let mut script_error = None;
+    let mut script_error: Option<ScriptExecError> = None;
     if req.uses_crypto_script() {
         // 登录页原文 best effort 抓取：失败置空串，脚本须容忍缺失
         let page = if req.fetch_page {
@@ -629,15 +629,17 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         }
     }
 
-    // 脚本失败直接终态：凭证变换错误时发出去的请求必错，重试无意义
+    // 脚本失败在发送请求前短路：凭证变换错误时发出去的请求必错。其中超时属
+    // 瞬时环境抖动（子进程首次 spawn 常被 AV 扫描拖慢），映射为可重试的
+    // NavigationTimeout；其余（脚本/配置问题）重试无意义，保持终态失败。
     if let Some(e) = &script_error {
         normalize_secrets(&mut secrets);
         return abort_report(
-            Outcome::UnknownError,
-            redact_text(&format!("加密脚本执行失败: {e}"), &secrets),
+            script_failure_outcome(e),
+            redact_text(&format!("加密脚本执行失败: {}", e.message()), &secrets),
             None,
             None,
-            Some(redact_text(e, &secrets)),
+            Some(redact_text(e.message(), &secrets)),
             start.elapsed().as_millis() as u64,
         );
     }
@@ -745,7 +747,8 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
                     &redact_text(&rendered_body, &secrets),
                 )),
                 None,
-                script_error,
+                // 能走到这里说明脚本已成功，字段恒为 None；仍按文本口径透传
+                script_error.map(|e| e.message().to_string()),
                 start.elapsed().as_millis() as u64,
             );
         }
@@ -790,7 +793,8 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         // 响应头同样按凭据字典脱敏：门户回显参数、回跳地址里可能带回提交过的凭据
         response_headers: redact_text(&response_headers, &secrets),
         response_snippet: redact_text(&snippet, &secrets),
-        script_error,
+        // 能走到这里说明脚本已成功，字段恒为 None；仍按文本口径透传
+        script_error: script_error.map(|e| e.message().to_string()),
         duration_ms: start.elapsed().as_millis() as u64,
     }
 }
@@ -930,17 +934,18 @@ async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
                     reports.push(flow_step_report(
                         step,
                         "failed",
-                        format!("计算失败: {error}"),
+                        format!("计算失败: {}", error.message()),
                         ("", "", ""),
                         None,
                         step_start,
                     ));
+                    // 超时 → 可重试的 NavigationTimeout（瞬时环境抖动），其余终态失败
                     return flow_abort(
-                        Outcome::UnknownError,
-                        format!("步骤「{}」计算失败: {error}", step.name),
+                        script_failure_outcome(&error),
+                        format!("步骤「{}」计算失败: {}", step.name, error.message()),
                         None,
                         None,
-                        Some(error),
+                        Some(error.message().to_string()),
                         start,
                         reports,
                         &secrets,
@@ -1875,6 +1880,37 @@ fn redact_url(url: &str, secrets: &[String]) -> String {
     redact_text(url, secrets)
 }
 
+/// 凭据变换脚本执行失败的两类成因；Timeout 属瞬时环境抖动（可重试），
+/// Failed 属脚本/配置问题（重试无意义）。
+enum ScriptExecError {
+    Timeout(String),
+    Failed(String),
+}
+
+impl ScriptExecError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Timeout(m) | Self::Failed(m) => m,
+        }
+    }
+}
+
+/// 其余执行期错误（编码/落盘/管道等环境性问题）一律归入 Failed
+impl From<String> for ScriptExecError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+/// 脚本失败 → Outcome 的唯一映射（纯函数，便于单测钉住重试语义）
+fn script_failure_outcome(err: &ScriptExecError) -> Outcome {
+    match err {
+        // NavigationTimeout 经 classify → Retry，且计入 network_retryable
+        ScriptExecError::Timeout(_) => Outcome::NavigationTimeout,
+        ScriptExecError::Failed(_) => Outcome::UnknownError,
+    }
+}
+
 /// 在无 IO 沙箱内执行用户加密脚本；正式运行时由临时子进程承载并受墙钟时限约束。
 ///
 /// 契约：脚本需定义 `function transform(ctx)`，返回对象；其字符串/数字/布尔
@@ -1891,7 +1927,7 @@ async fn execute_crypto_script(
     auth_url: &str,
     local: (&str, &str),
     page: String,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<BTreeMap<String, String>, ScriptExecError> {
     execute_crypto_script_with_vars(
         script,
         username,
@@ -1963,7 +1999,7 @@ async fn execute_crypto_script_with_vars(
     local: (&str, &str),
     page: String,
     vars: BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<BTreeMap<String, String>, ScriptExecError> {
     let script = script.to_string();
     let username = username.to_string();
     let password = Zeroizing::new(password.to_string());
@@ -1979,6 +2015,7 @@ async fn execute_crypto_script_with_vars(
         run_script_in_sandbox_with_vars(
             &script, &username, &password, &isp, &auth_url, &local_ip, &local_mac, page, vars,
         )
+        .map_err(ScriptExecError::Failed)
     }
 
     #[cfg(not(test))]
@@ -2000,7 +2037,7 @@ async fn execute_crypto_script_with_vars(
             serde_json::to_vec(&input).map_err(|_| "计算脚本输入编码失败".to_string())?,
         );
         if payload.len() > MAX_TRANSFORM_IPC_BYTES {
-            return Err("计算脚本输入过大".into());
+            return Err(ScriptExecError::Failed("计算脚本输入过大".into()));
         }
         let exe = std::env::current_exe().map_err(|_| "无法定位计算子进程".to_string())?;
         let mut command = tokio::process::Command::new(exe);
@@ -2039,7 +2076,13 @@ async fn execute_crypto_script_with_vars(
         };
         tokio::time::timeout(SCRIPT_TIMEOUT, execution)
             .await
-            .map_err(|_| format!("脚本执行超时（上限 {}ms）", SCRIPT_TIMEOUT.as_millis()))?
+            .map_err(|_| {
+                ScriptExecError::Timeout(format!(
+                    "脚本执行超时（上限 {}ms）",
+                    SCRIPT_TIMEOUT.as_millis()
+                ))
+            })?
+            .map_err(ScriptExecError::Failed)
     }
 }
 
@@ -3437,6 +3480,32 @@ mod tests {
         assert!(diagnostics.contains("***"));
         assert_eq!(seen.recv().await.unwrap().1, "/first?secret=old%20pass");
         assert_eq!(seen.recv().await.unwrap().1, "/login");
+    }
+
+    /// A12：脚本失败 → Outcome 的映射钉死重试语义——超时属瞬时环境抖动（子进程
+    /// 首次 spawn 常被 AV 扫描拖慢），映射为可重试的 NavigationTimeout；其余属
+    /// 脚本/配置问题，保持终态失败（重试无意义）。超时分支本体在 cfg(test) 下
+    /// 不可达（SCRIPT_TIMEOUT 仅非 test 编译），映射以纯函数单测钉住。
+    #[test]
+    fn test_script_failure_outcome_mapping() {
+        let timeout = ScriptExecError::Timeout("脚本执行超时（上限 2000ms）".into());
+        let failed = ScriptExecError::Failed("function transform is not defined".into());
+        assert_eq!(script_failure_outcome(&timeout), Outcome::NavigationTimeout);
+        assert_eq!(script_failure_outcome(&failed), Outcome::UnknownError);
+        // 映射的意义：Timeout 走会话状态机的可重试通道，Failed 仍是终态
+        assert_eq!(
+            crate::login::session::classify(Outcome::NavigationTimeout),
+            crate::login::session::ResultAction::Retry
+        );
+        assert_eq!(
+            crate::login::session::classify(Outcome::UnknownError),
+            crate::login::session::ResultAction::Terminal(
+                crate::login::session::LoginTerminal::Failed
+            )
+        );
+        // 报告字段透传 message()（后续经 redact_text 脱敏展示）
+        assert_eq!(timeout.message(), "脚本执行超时（上限 2000ms）");
+        assert_eq!(failed.message(), "function transform is not defined");
     }
 
     /// 旧式任务的脚本异常也可能包含凭据，错误消息和结构化字段都必须脱敏。
