@@ -389,7 +389,8 @@ async fn http_login_succeeds_without_python_or_worker_setup() {
             })),
         )
         .await;
-    assert_eq!(timed_out["outcome"], "unknown_error", "{timed_out}");
+    // A12：慢脚本超时由 unknown_error 类型化为 navigation_timeout（可重试）
+    assert_eq!(timed_out["outcome"], "navigation_timeout", "{timed_out}");
     assert!(
         timed_out["message"]
             .as_str()
