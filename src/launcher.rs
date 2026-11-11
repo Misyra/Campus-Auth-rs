@@ -218,14 +218,18 @@ pub async fn run(cli: CliArgs, base_path: PathBuf) -> Result<()> {
         app_config.log_file_enabled,
     );
 
-    // WorkerGuard 由最外层持有到启动流程（含失败日志）结束。此前它被放进
-    // LauncherState，graceful_shutdown 会先释放 guard，main 随后打印的最终
-    // “启动失败”只能出现在控制台，文件日志可能缺失最关键的一行。
+    // WorkerGuard 存入全局唯一托管点（`logging::stash_log_guard`）：正常退出由
+    // 本函数末尾统一 flush；优雅关闭卡死被 exit watchdog 强杀时同样先 flush 再
+    // exit——exit 跳过 Drop，不 flush 则 non-blocking writer 缓冲的文件日志
+    // （含定位卡死最关键的尾段）全部丢失。
+    crate::logging::stash_log_guard(log_guard);
     let result = run_after_logging(cli, app_config, log_tx).await;
     if let Err(error) = &result {
         error!(error = %format!("{error:#}"), "启动失败");
     }
-    drop(log_guard);
+    // 取出并 drop guard：non-blocking writer flush 后关闭后台线程，
+    // 保证上面的“启动失败”及全部启动期日志落盘
+    crate::logging::flush_stashed_log_guard();
     result
 }
 
@@ -268,7 +272,7 @@ async fn run_after_logging(
     let instance_lock = if cli.restarting {
         wait_for_lock_release(&app_config.base_path).await?
     } else {
-        match acquire_lock(&app_config.base_path, cli.force) {
+        match acquire_lock(&app_config.base_path, cli.force).await {
             Ok(lock) => lock,
             Err(e) => {
                 // 已有实例运行时（典型的双击 exe 重复启动场景）不再直接报错退出，
@@ -580,7 +584,11 @@ fn check_directory_permissions(base_path: &Path) -> Result<()> {
 // ============================================================
 
 /// 获取实例锁
-fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
+///
+/// async fn：`--force` 抢锁重试期间用 `tokio::time::sleep` 让出执行权——
+/// 本函数在 tokio worker 线程上被 await，改用 `std::thread::sleep` 会阻塞
+/// executor 线程最多 3s（5 次退避累加），同 [`wait_for_lock_release`] 口径。
+async fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
     match InstanceLock::try_acquire(base_path) {
         Ok(lock) => Ok(lock),
         Err(_) if force => {
@@ -597,7 +605,8 @@ fn acquire_lock(base_path: &Path, force: bool) -> Result<InstanceLock> {
                 } else {
                     crate::utils::lock::force_kill(info.pid);
                     for retry in 0..5 {
-                        std::thread::sleep(std::time::Duration::from_millis(200 * (retry + 1)));
+                        tokio::time::sleep(std::time::Duration::from_millis(200 * (retry + 1)))
+                            .await;
                         if let Ok(lock) = InstanceLock::try_acquire(base_path) {
                             return Ok(lock);
                         }
@@ -1213,7 +1222,10 @@ pub(crate) fn spawn_restart_successor() -> Result<(), String> {
 pub(crate) fn spawn_exit_watchdog(secs: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        // 顺序关键：warn 先进 non-blocking 缓冲，统一 flush 落盘后再 exit——
+        // exit 跳过 WorkerGuard 的 Drop，不 flush 会丢掉缓冲中的全部文件日志
         tracing::warn!("优雅关闭超时 {secs}s，强制退出");
+        crate::logging::flush_stashed_log_guard();
         std::process::exit(0);
     });
 }

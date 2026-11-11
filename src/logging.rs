@@ -572,9 +572,45 @@ pub fn init_logging(
 
     file_appender.map(|(_, guard)| guard)
 }
+
+// ============================================================
+// WorkerGuard 全局托管
+// ============================================================
+
+/// WorkerGuard 唯一托管点：launcher 存入，正常退出路径与 exit watchdog 共用 flush。
+/// 用 `Mutex<Option<_>>` 而非 OnceLock——正常退出需要 take 出来 drop（flush），
+/// watchdog 在优雅关闭卡死时同样要 flush 后再 exit。
+static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
+
+/// 存入全局日志 guard（覆盖式；重复调用以前一次为准，仅供 launcher::run 使用）
+pub fn stash_log_guard(guard: Option<WorkerGuard>) {
+    *LOG_GUARD.lock().unwrap_or_else(|e| e.into_inner()) = guard;
+}
+
+/// 取出并 drop 全局日志 guard（触发 non-blocking writer flush 后关闭后台线程）
+pub fn flush_stashed_log_guard() {
+    if let Some(guard) = LOG_GUARD.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        drop(guard);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// guard 全局托管点 roundtrip：stash 后 flush 安全取出，空槽二次 flush 为
+    /// no-op 不 panic，None 覆盖式 stash 后 flush 依旧安全（exit watchdog 幂等）
+    #[test]
+    fn test_stash_and_flush_log_guard_roundtrip() {
+        let (_, guard) = build_file_log_writer(Vec::new());
+        stash_log_guard(Some(guard));
+        // 取出即 flush（触发 non-blocking writer 关闭），不得 panic
+        flush_stashed_log_guard();
+        // 空槽 flush 为 no-op（幂等），不得 panic
+        flush_stashed_log_guard();
+        // 覆盖式 stash：None 同样可存入，flush 依旧安全
+        stash_log_guard(None);
+        flush_stashed_log_guard();
+    }
 
     /// 慢写入时队列满不会阻塞业务，丢弃可计数，关闭仍刷新已接纳的日志。
     #[test]
