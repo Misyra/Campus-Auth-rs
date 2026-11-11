@@ -23,8 +23,3 @@ export function unlockBodyScroll(): void {
     lockApplied = false;
   }
 }
-
-/** 当前是否处于锁定状态（调试/测试用） */
-export function isBodyScrollLocked(): boolean {
-  return lockCount > 0;
-}

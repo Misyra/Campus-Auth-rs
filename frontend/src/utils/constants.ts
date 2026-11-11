@@ -354,10 +354,6 @@ export const DEFAULT_CONFIG: Config = {
  * 在应用与渲染时解析。它不是合法 CSS 颜色，任何直接当作色值使用的位置都必须先解析。
  */
 export const MONO_ACCENT = "mono";
-/** 单色主题色在浅色主题下的取值（日间黑） */
-export const MONO_ACCENT_LIGHT = "#000000";
-/** 单色主题色在深色主题下的取值（夜间白） */
-export const MONO_ACCENT_DARK = "#ffffff";
 
 export const DEFAULT_APPEARANCE: Appearance = {
   reduce_motion: false,

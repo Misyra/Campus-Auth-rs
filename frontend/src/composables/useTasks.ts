@@ -85,8 +85,8 @@ watch(
   },
 );
 
-/** 扫描任务步骤中的危险类型（执行 JS 类）。保留导出：仓库导入预览等场景复用。 */
-export function detectDangerousSteps(config: { steps?: Array<Record<string, unknown>> }): DangerStep[] {
+/** 扫描任务步骤中的危险类型（执行 JS 类）。仅本模块编辑器侧使用；仓库导入侧有自己的类型校验，不经此函数。 */
+function detectDangerousSteps(config: { steps?: Array<Record<string, unknown>> }): DangerStep[] {
   const steps = config.steps || [];
   const warnings: DangerStep[] = [];
   for (let i = 0; i < steps.length; i++) {
