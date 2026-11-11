@@ -648,6 +648,17 @@ async fn fetch_sha256_assoc(
     if url.is_empty() {
         return String::new();
     }
+    // 与主包下载同一白名单：清单指向的校验文件也可能被诱导到 http/内网地址；
+    // 未通过按「缺失」处理，沿用既有 ChecksumUnavailable → 下一候选回退口径
+    if !is_allowed_update_url(url) {
+        // 只记 host：该 URL 完全由清单控制，可能携带 query/userinfo，勿整串进日志
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        tracing::warn!(host, ".sha256 伴随文件 URL 未通过更新源白名单，按缺失处理");
+        return String::new();
+    }
     // 当前平台的校验失败不重试：网络错误或空体直接返回空串，调用方仅记一条
     // 失败原因，不刷屏（旧逻辑重试一次并固定 WARN）。
     let resp = match client
@@ -1161,6 +1172,24 @@ mod tests {
         assert!(
             matches!(err, UpdaterError::RateLimited { retry_after: 1 }),
             "{err}"
+        );
+    }
+
+    /// `.sha256` 伴随文件 URL 未通过更新源白名单 → 按「缺失」处理返回空串（B4）
+    ///
+    /// 白名单在 `client.get` 前短路，无需起 mock 服务；`http://example.com`
+    /// 非 loopback 主机，恒被拒绝。
+    #[tokio::test]
+    async fn fetch_sha256_assoc_rejects_non_whitelisted_url() {
+        let assets = [serde_json::json!({
+            "name": "app.zip.sha256",
+            "browser_download_url": "http://example.com/app.zip.sha256",
+        })];
+        let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
+        let sha = fetch_sha256_assoc(&loopback_client(), &asset_refs, "app.zip").await;
+        assert!(
+            sha.is_empty(),
+            "非白名单伴随 URL 应按缺失返回空串，实际 {sha:?}"
         );
     }
 }
