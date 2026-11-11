@@ -114,14 +114,13 @@ const DEFAULT_TIMEOUT_MS = 30000;
 async function request<T>(method: string, path: string, opts: RequestOptions = {}, retried = false): Promise<T> {
   const controller = new AbortController();
   const timeoutMs = opts.timeout ?? DEFAULT_TIMEOUT_MS;
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   const abortFromCaller = () => controller?.abort(opts.signal?.reason);
   if (controller && opts.signal) {
     if (opts.signal.aborted) abortFromCaller();
     else opts.signal.addEventListener("abort", abortFromCaller, { once: true });
   }
-  timeoutId = setTimeout(() => {
+  const timeoutId: ReturnType<typeof setTimeout> = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, timeoutMs);

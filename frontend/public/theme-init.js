@@ -13,5 +13,5 @@
     if (a.background_color) {
       document.documentElement.style.setProperty("--bg-primary", a.background_color);
     }
-  } catch (e) {}
+  } catch (e) { /* localStorage 不可用或数据损坏时放弃预置，保持 base.css 默认主题 */ }
 })();

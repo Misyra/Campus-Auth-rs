@@ -201,7 +201,7 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(false, "方案 ID 只能包含字母、数字、下划线和连字符");
     return false;
   }
-  const { id, _isNew, _clearPassword, ...settings } = profile;
+  const { id: _id, _isNew, _clearPassword, ...settings } = profile;
   // 自定义运营商：选中"自定义"但未输入关键字时拒绝保存（修复 P1-17）
   if (settings.isp === "自定义") {
     toastOnly(false, "请填写自定义运营商关键字");

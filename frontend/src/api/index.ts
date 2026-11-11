@@ -419,7 +419,7 @@ export const aiApi = {
       // 处理尾部残留
       const tail = buf.trim();
       if (tail.startsWith("data:")) {
-        try { deliver(JSON.parse(tail.slice(5).trim()) as Record<string, unknown>); } catch {}
+        try { deliver(JSON.parse(tail.slice(5).trim()) as Record<string, unknown>); } catch { /* 尾部残包非完整 JSON，可忽略 */ }
       }
       if (!terminalReceived) throw new Error("生成连接意外结束，未收到完成状态，请重试");
     } catch (e) {

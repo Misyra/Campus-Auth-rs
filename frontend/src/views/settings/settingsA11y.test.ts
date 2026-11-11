@@ -29,14 +29,14 @@ describe("系统设置页控件可访问性", () => {
       "config.config.logging.file_enabled",
     ]) {
       const input = switchInputs.find((tag) => tag.includes(`:aria-checked="${state}"`));
-      expect(input, `开关缺少 :aria-checked=\"${state}\" 绑定`).toBeTruthy();
+      expect(input, `开关缺少 :aria-checked="${state}" 绑定`).toBeTruthy();
     }
   });
 
   it("三个下拉的 CustomSelect 触发器绑定设置项名称（不再回退为当前值）", () => {
     for (const label of ["启动后执行", "服务模式", "全局日志级别"]) {
       const usage = systemSettings.match(new RegExp(`<CustomSelect[^>]*aria-label="${label}"[^>]*>`));
-      expect(usage, `CustomSelect 缺少 aria-label=\"${label}\"`).not.toBeNull();
+      expect(usage, `CustomSelect 缺少 aria-label="${label}"`).not.toBeNull();
     }
   });
 

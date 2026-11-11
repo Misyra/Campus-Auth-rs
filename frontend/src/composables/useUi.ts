@@ -269,7 +269,7 @@ function extractMsg(data: unknown, fallback: string): string {
 function stripScreenshotHint(message: string): string {
   const text = String(message || "");
   return text
-    .replace(/\s*[\[(]?\s*截图[:：]\s*\/(?:logs|debug|temp)\/\S+\.(?:png|jpg|jpeg|webp|gif)\s*[\])]?/gi, "")
+    .replace(/\s*[[(]?\s*截图[:：]\s*\/(?:logs|debug|temp)\/\S+\.(?:png|jpg|jpeg|webp|gif)\s*[\])]?/gi, "")
     .trim();
 }
 

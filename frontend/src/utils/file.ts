@@ -67,6 +67,7 @@ export function getBinaryName(path: string): string {
 export function shareFileName(profileName: string, profileId: string): string {
   const source = profileName.trim() || profileId.trim() || "profile";
   const safe = source
+    // eslint-disable-next-line no-control-regex -- \u0000-\u001f 正是要剔除的控制字符（文件名清洗，见上注释）
     .replace(/[/\\:*?"<>|\u0000-\u001f]/g, "-")
     .replace(/\s+/g, "-")
     .replace(/-{2,}/g, "-")
