@@ -210,12 +210,27 @@ impl Drop for WsLogsConnGuard {
     }
 }
 
+/// 尝试为一条 /ws/logs 连接占用并发名额
+///
+/// 名额的占用必须在升级回调**内**完成：握手中途断开时回调不会执行（或刚被
+/// poll 一次就 drop），若在升级前 `fetch_add`，这个名额将随守卫一起永不释放
+/// （计数泄漏不可自愈，满 16 后 /ws/logs 永久 503）。满员时回退计数并返回
+/// `None`，由调用方静默放弃。
+fn ws_conn_gate() -> Option<WsLogsConnGuard> {
+    if WS_LOGS_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= WS_LOGS_MAX_CONNECTIONS {
+        WS_LOGS_ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return None;
+    }
+    Some(WsLogsConnGuard)
+}
+
 /// GET /ws/logs → 升级为 WebSocket，持续推送日志与状态
 pub async fn logs_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> axum::response::Response {
-    // 并发上限检查：超限直接拒绝升级（HTTP 响应，前端 WS 连接失败走既有重连/降级路径）
+    // 并发上限快速拒绝（HTTP 响应，前端 WS 连接失败走既有重连/降级路径）；
+    // 这里只做低成本的预检，名额的实际占用在升级回调内的 ws_conn_gate 完成
     if WS_LOGS_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) >= WS_LOGS_MAX_CONNECTIONS {
         tracing::warn!("WebSocket 并发连接数达上限（{WS_LOGS_MAX_CONNECTIONS}），拒绝新连接");
         return (
@@ -224,14 +239,20 @@ pub async fn logs_handler(
         )
             .into_response();
     }
-    WS_LOGS_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let conn_id = WS_CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ws.max_message_size(WS_LOGS_MAX_MESSAGE_SIZE)
         .max_frame_size(WS_LOGS_MAX_MESSAGE_SIZE)
         .read_buffer_size(WS_LOGS_READ_BUFFER_SIZE)
         .write_buffer_size(WS_LOGS_WRITE_BUFFER_SIZE)
         .on_upgrade(move |socket| async move {
-            let _guard = WsLogsConnGuard;
+            // 预检与回调之间存在竞态窗口（快满时多个升级同时放行），这里是
+            // 权威闸门：拒绝即静默断开，前端走既有重连/降级路径
+            let Some(_guard) = ws_conn_gate() else {
+                tracing::warn!(
+                    "WebSocket 并发连接数达上限（{WS_LOGS_MAX_CONNECTIONS}），关闭新连接"
+                );
+                return;
+            };
             handle_logs(socket, state, conn_id).await;
         })
 }
@@ -391,6 +412,38 @@ async fn handle_logs(mut socket: WebSocket, state: AppState, conn_id: u64) {
 #[cfg(test)]
 mod tests {
     use super::debug_screenshot_filename;
+    use super::{WS_LOGS_ACTIVE, WS_LOGS_MAX_CONNECTIONS, ws_conn_gate};
+    use std::sync::atomic::Ordering;
+
+    /// 并发名额：拿满 → 拒绝 → 守卫 drop 归还 → 可再取
+    ///
+    /// 回归：计数此前在升级前 `fetch_add`、守卫却在升级回调内才创建，
+    /// 握手中途断开会让名额永久泄漏（不可自愈）。
+    #[test]
+    fn ws_conn_gate_releases_slot_on_drop() {
+        // 全局计数仅本测试触碰；显式归零保证结论与执行顺序无关
+        WS_LOGS_ACTIVE.store(0, Ordering::SeqCst);
+        let mut guards: Vec<_> = (0..WS_LOGS_MAX_CONNECTIONS)
+            .filter_map(|_| ws_conn_gate())
+            .collect();
+        assert_eq!(guards.len(), WS_LOGS_MAX_CONNECTIONS, "空位应全部可取");
+        assert!(ws_conn_gate().is_none(), "满员后必须拒绝");
+        // 满员拒绝路径回退计数，不残留 +1
+        assert_eq!(
+            WS_LOGS_ACTIVE.load(Ordering::SeqCst),
+            WS_LOGS_MAX_CONNECTIONS
+        );
+        drop(guards.remove(0));
+        // 用绑定持有新名额：`ws_conn_gate().is_some()` 的临时值会在语句末 drop、
+        // 立刻归还名额，后续计数断言就失真了
+        let extra = ws_conn_gate();
+        assert!(extra.is_some(), "守卫 drop 后名额必须归还");
+        assert_eq!(
+            WS_LOGS_ACTIVE.load(Ordering::SeqCst),
+            WS_LOGS_MAX_CONNECTIONS
+        );
+        drop(extra);
+    }
 
     #[test]
     fn debug_screenshot_filename_strips_parent_path() {
