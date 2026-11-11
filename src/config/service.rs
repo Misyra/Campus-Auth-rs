@@ -407,14 +407,14 @@ impl ConfigService {
                 s
             }
             Err(e) => {
-                // 损坏时绝不静默用默认值覆盖：有缓存则沿用旧快照（正常路径恒命中，
+                // 损坏/缺失时绝不静默用默认值覆盖：有缓存则沿用旧快照（正常路径恒命中，
                 // new_sync 起缓存即为 Some 且无置空写点）；无缓存分支仅防御性保留。
                 let c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 if let Some(prev) = c.data.clone() {
-                    tracing::warn!("settings.json 解析失败，沿用内存缓存: {e}");
+                    tracing::warn!("settings.json 读取失败，沿用内存缓存: {e}");
                     return prev;
                 }
-                tracing::error!("settings.json 解析失败且无缓存可用，回退默认配置: {e}");
+                tracing::error!("settings.json 读取失败且无缓存可用，回退默认配置: {e}");
                 SettingsData::default()
             }
         }
@@ -855,7 +855,7 @@ impl ConfigService {
         .await
         .map_err(|e| ConfigError::Io(std::io::Error::other(format!("配置重读任务失败: {e}"))))?;
         let (settings_res, mtime) = disk;
-        // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照；无缓存（防御性
+        // 与 load_settings 的读取失败处理一致：有缓存沿用旧快照；无缓存（防御性
         // 保留的分支）中止 reload——绝不用默认值替换运行时，否则端口 /
         // active_profile 等关键字段全部回退默认，污染正在运行的服务
         let settings = match settings_res {
@@ -868,15 +868,15 @@ impl ConfigService {
             Err(e) => {
                 let c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 if let Some(prev) = c.data.clone() {
-                    tracing::warn!("settings.json 解析失败，reload 沿用内存缓存: {e}");
+                    tracing::warn!("settings.json 读取失败，reload 沿用内存缓存: {e}");
                     prev
                 } else {
                     tracing::error!(
-                        "settings.json 解析失败且无缓存可用，reload 中止并拒绝保存: {e}"
+                        "settings.json 读取失败且无缓存可用，reload 中止并拒绝保存: {e}"
                     );
                     return Err(ConfigError::ConfigWriteError {
                         reason: format!(
-                            "settings.json 解析失败，已保留当前运行时配置并拒绝保存: {e}"
+                            "settings.json 读取失败，已保留当前运行时配置并拒绝保存: {e}"
                         ),
                     });
                 }
@@ -1061,8 +1061,12 @@ impl ConfigService {
 
     /// 从磁盘直接读取 settings.json（不做迁移，假设为当前版本）
     fn read_settings_from_disk(path: &Path) -> Result<SettingsData, ConfigError> {
+        // 运行期缺失按错误处理（调用方沿用内存缓存），不得静默换成默认值：
+        // 否则文件被删/瞬时不可见时端口、活跃 Profile、updater 配置整体回退
         if !path.exists() {
-            return Ok(SettingsData::default());
+            return Err(ConfigError::ConfigNotFound {
+                path: path.to_string_lossy().into_owned(),
+            });
         }
         let raw = std::fs::read_to_string(path)?;
         serde_json::from_str(&raw).map_err(|e| ConfigError::ConfigParseError {
@@ -1497,6 +1501,59 @@ mod tests {
         // 两次成功 reload → 版本恰好 2；发布顺序受 reload_lock 串行保证，
         // 后完成者读到的磁盘状态不早于先完成者 → 终态必为最新值
         assert_eq!(svc.config_version(), 2);
+        assert_eq!(svc.runtime().load().monitor.check_interval, 222);
+    }
+
+    /// 运行期 settings.json 被删：load/reload 沿用内存缓存，绝不静默回退默认值
+    ///
+    /// （区别于首启动的文件不存在——后者由 load_or_init_settings 生成默认文件，
+    /// 不经过本路径。）
+    #[tokio::test]
+    async fn deleted_settings_falls_back_to_cached_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        svc.modify_settings(|s| s.global.monitor.check_interval = 77)
+            .await
+            .unwrap();
+
+        std::fs::remove_file(&svc.settings_path).unwrap();
+
+        // mtime 缓存失配 → 重读盘 → ConfigNotFound → Err 分支沿用缓存值
+        assert_eq!(svc.load_settings().global.monitor.check_interval, 77);
+
+        svc.reload().await.unwrap();
+        assert_eq!(svc.runtime().load().monitor.check_interval, 77);
+    }
+
+    /// 被删的 settings.json 恢复后：mtime 失配触发重读，配置回到磁盘最新值
+    #[tokio::test]
+    async fn deleted_settings_recovers_when_file_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        svc.modify_settings(|s| s.global.monitor.check_interval = 77)
+            .await
+            .unwrap();
+        std::fs::remove_file(&svc.settings_path).unwrap();
+        assert_eq!(svc.load_settings().global.monitor.check_interval, 77);
+
+        // 绕过 save_settings 直接落盘 222：确保断言的是 reload 的磁盘重读，
+        // 而非缓存写入路径
+        let mut restored = svc.load_settings();
+        restored.global.monitor.check_interval = 222;
+        std::fs::write(
+            &svc.settings_path,
+            serde_json::to_string_pretty(&restored).unwrap(),
+        )
+        .unwrap();
+
+        svc.reload().await.unwrap();
+        assert_eq!(svc.load_settings().global.monitor.check_interval, 222);
         assert_eq!(svc.runtime().load().monitor.check_interval, 222);
     }
 
