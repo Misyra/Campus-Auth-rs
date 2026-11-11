@@ -13,6 +13,7 @@ import { useStatus } from "@/composables/useStatus";
 import { useToast } from "@/composables/useToast";
 import { useSettingsNavigation } from "@/composables/useSettingsNavigation";
 import { activeChildId, SETTINGS_NAV_CHILDREN } from "@/utils/navTree";
+import { applySettingsSearch, type SettingsSearchResult } from "@/utils/settingsSearch";
 
 const route = useRoute();
 const router = useRouter();
@@ -31,11 +32,37 @@ const sections = SETTINGS_NAV_CHILDREN.map((child) => ({ ...child, component: se
 let resizeObserver: ResizeObserver | null = null;
 let anchoredSection: string | null = null;
 
+// ===== 设置搜索（纯前端过滤，见 utils/settingsSearch.ts） =====
+const searchInput = ref<HTMLInputElement | null>(null);
+const searchQuery = ref("");
+const searchStats = ref<SettingsSearchResult>({ totalSections: 0, matchedSections: 0, matchedRows: 0 });
+/** 关键词非空且没有任何分区命中时提示空态 */
+const searchEmpty = computed(() => searchQuery.value.trim() !== "" && searchStats.value.matchedSections === 0);
+
+/** 关键词变化后等 DOM 稳定再扫分区可见性；空关键词即恢复完整列表。 */
+function applySearch(): void {
+  searchStats.value = applySettingsSearch(settingsForm.value, searchQuery.value);
+}
+
+/** 清空并回到输入框，键盘用户不丢焦点。 */
+function clearSearch(): void {
+  searchQuery.value = "";
+  searchInput.value?.focus();
+}
+
+watch(searchQuery, () => { void nextTick(applySearch); });
+
+/** 分区元素；被搜索隐藏的分区视同不存在（display:none 时 offsetParent 为 null）。 */
+function visibleSection(id: string): HTMLElement | null {
+  const element = settingsForm.value?.querySelector<HTMLElement>(`#settings-section-${id}`) ?? null;
+  return element && element.offsetParent === null ? null : element;
+}
+
 /** 旧分类深链仍可定位；所有区域保持挂载，目录跳转不会重建输入框。 */
 async function scrollToSection(id: string): Promise<void> {
   await nextTick();
   const container = scrollContainer.value;
-  const section = settingsForm.value?.querySelector<HTMLElement>(`#settings-section-${id}`);
+  const section = visibleSection(id);
   if (!container || !section) return;
   anchoredSection = id;
   container.scrollTop += section.getBoundingClientRect().top - container.getBoundingClientRect().top - 16;
@@ -49,17 +76,21 @@ function selectSection(id: string): void {
   else void router.push({ name: child.name });
 }
 
-/** 以视口顶部正在阅读的区域高亮目录，滚动到底时选中最后一类。 */
+/** 以视口顶部正在阅读的区域高亮目录，滚动到底时选中最后一类；搜索隐藏的分区不参与。 */
 function updateActiveSection(): void {
   const container = scrollContainer.value;
   if (!container) return;
   const top = container.getBoundingClientRect().top + 32;
   let active = sections[0].id;
   for (const section of sections) {
-    const element = settingsForm.value?.querySelector<HTMLElement>(`#settings-section-${section.id}`);
+    const element = visibleSection(section.id);
     if (element && element.getBoundingClientRect().top <= top) active = section.id;
   }
-  if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) active = sections[sections.length - 1].id;
+  if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
+    for (const section of [...sections].reverse()) {
+      if (visibleSection(section.id)) { active = section.id; break; }
+    }
+  }
   navigation.setActiveSection(active);
 }
 
@@ -71,6 +102,7 @@ watch(() => route.name, (name) => {
 });
 watch(navigation.scrollRequest, (request) => { if (request) void scrollToSection(request.id); });
 onMounted(() => {
+  applySearch();
   void scrollToSection(activeChildId(SETTINGS_NAV_CHILDREN, String(route.name)) ?? "monitor");
   // 环境状态和默认配置异步加载会改变前面区域的高度，首次定位随之校准。
   resizeObserver = new ResizeObserver(() => {
@@ -106,6 +138,29 @@ function handleSave() {
         @change="selectSection(($event.target as HTMLSelectElement).value)">
         <option v-for="section in sections" :key="section.id" :value="section.id">{{ section.label }}</option>
       </select>
+    </div>
+    <!-- 搜索常驻工具条：过滤纯前端完成，无命中的分区隐藏，命中行高亮（utils/settingsSearch.ts）。 -->
+    <div class="settings-search">
+      <input
+        ref="searchInput"
+        v-model="searchQuery"
+        type="text"
+        class="settings-search-input"
+        placeholder="搜索设置项、说明或分区标题"
+        aria-label="搜索设置"
+        autocomplete="off"
+      />
+      <button
+        v-if="searchQuery"
+        type="button"
+        class="btn btn-sm btn-ghost settings-search-clear"
+        aria-label="清空搜索"
+        title="清空搜索"
+        @click="clearSearch"
+      >
+        <IconApp name="close" width="16" height="16" />
+      </button>
+      <span v-if="searchEmpty" class="settings-search-empty" role="status">无匹配的设置项</span>
     </div>
     <div ref="scrollContainer" class="settings-scroll" @scroll.passive="updateActiveSection"
       @wheel.passive="releaseAnchor" @touchstart.passive="releaseAnchor" @pointerdown="releaseAnchor" @keydown="releaseAnchor">

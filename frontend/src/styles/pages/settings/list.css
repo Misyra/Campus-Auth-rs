@@ -16,6 +16,40 @@
 .settings-category + .settings-category { padding-top: 28px; border-top: 1px solid var(--border); }
 .settings-category-heading { margin: 0 2px 22px; font-size: var(--text-xl); font-weight: 650; color: var(--text-primary); }
 .settings-mobile-jump { display: none; }
+
+/* 设置搜索：常驻工具条（输入框对齐 .form-group input 的材质，字段同 token）。
+   过滤逻辑在 utils/settingsSearch.ts：无命中的分区整体隐藏，命中行加 .settings-search-hit。 */
+.settings-search { flex: none; display: flex; align-items: center; gap: 10px; margin: 0 2px 16px; }
+.settings-search-input {
+  flex: 1;
+  min-width: 0;
+  max-width: 380px;
+  padding: 9px 12px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--text-base);
+  color-scheme: inherit;
+}
+.settings-search-input:hover { background: var(--bg-glass-heavy); }
+.settings-search-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
+}
+.settings-search-input::placeholder { color: var(--text-secondary); }
+.settings-search-clear { flex: none; }
+.settings-search-empty { color: var(--text-secondary); font-size: var(--text-md); }
+.settings-category.settings-search-hidden { display: none; }
+/* 相邻分隔线挂在「前一个分区存在」上：分区被过滤掉后不再给后继分区留上边框 */
+.settings-category.settings-search-hidden + .settings-category { padding-top: 0; border-top: 0; }
+.settings-search-hit {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+  border-radius: var(--radius-sm);
+}
+
 .settings-page .save-bar { margin-top: 12px; padding: 14px 2px 0; border-top: 1px solid var(--border); }
 .settings-save-status { color: var(--text-secondary); font-size: var(--text-md); }
 .settings-save-status--error { color: var(--error); }
