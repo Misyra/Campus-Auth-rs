@@ -93,7 +93,7 @@ async fn local_proxy_requires_auth_and_forwards_origin_form_without_proxy_secret
     .await
     .unwrap();
     let proxy_addr = (proxy.url.host_str().unwrap(), proxy.url.port().unwrap());
-    let mut unauthorized = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut unauthorized = HeadBufferedReader::new(TcpStream::connect(proxy_addr).await.unwrap());
     unauthorized
         .write_all(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .await
@@ -101,7 +101,8 @@ async fn local_proxy_requires_auth_and_forwards_origin_form_without_proxy_secret
     let head = read_http_head(&mut unauthorized).await.unwrap();
     assert!(head.starts_with(b"HTTP/1.1 407"));
     let served = tokio::spawn(async move {
-        let (mut stream, _) = target.accept().await.unwrap();
+        let (stream, _) = target.accept().await.unwrap();
+        let mut stream = HeadBufferedReader::new(stream);
         let head = read_http_head(&mut stream).await.unwrap();
         let text = String::from_utf8(head).unwrap();
         assert!(text.starts_with("GET /portal?step=1 HTTP/1.1\r\n"));
@@ -148,7 +149,8 @@ async fn test_proxy_upstream_head_timeout_returns_504() {
     // 结束、上游连接已建立，之后必然以响应头超时收场。
     let (forwarded_tx, forwarded_rx) = tokio::sync::oneshot::channel();
     let silent = tokio::spawn(async move {
-        let (mut stream, _) = upstream.accept().await.unwrap();
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut stream = HeadBufferedReader::new(stream);
         read_http_head(&mut stream).await.unwrap();
         let _ = forwarded_tx.send(());
         // 转发 task 超时退出后会关闭上游连接：以 EOF 收尾证明 task 已结束
@@ -160,7 +162,7 @@ async fn test_proxy_upstream_head_timeout_returns_504() {
         );
     });
 
-    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut client = HeadBufferedReader::new(TcpStream::connect(proxy_addr).await.unwrap());
     let auth = format!(
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(format!(
@@ -241,7 +243,8 @@ async fn http_keep_alive_preserves_one_connection_across_token_and_login() {
     .await
     .unwrap();
     let served = tokio::spawn(async move {
-        let (mut stream, _) = target.accept().await.unwrap();
+        let (stream, _) = target.accept().await.unwrap();
+        let mut stream = HeadBufferedReader::new(stream);
         let first = read_http_head(&mut stream).await.unwrap();
         assert!(first.starts_with(b"GET /token HTTP/1.1"));
         stream
@@ -419,7 +422,8 @@ async fn windows_bound_browser_and_dns_smoke() {
     let seen = visits.clone();
     let portal_task = tokio::spawn(async move {
         loop {
-            let (mut stream, peer) = portal.accept().await.unwrap();
+            let (stream, peer) = portal.accept().await.unwrap();
+            let mut stream = HeadBufferedReader::new(stream);
             assert_eq!(peer.ip(), source, "门户连接必须使用同一网卡源地址");
             let _ = read_http_head(&mut stream).await.unwrap();
             seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -495,4 +499,57 @@ asyncio.run(main())
     );
     assert!(queries.load(std::sync::atomic::Ordering::Relaxed) > 0);
     assert!(visits.load(std::sync::atomic::Ordering::Relaxed) > 0);
+}
+
+// ============ read_http_head（A24：整块读取 + 越读暂存替代逐字节 read_u8） ============
+
+/// 建立一对回环 TCP 连接（client 为裸流，server 已包越读适配层）
+async fn loopback_pair() -> (TcpStream, HeadBufferedReader) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    (client, HeadBufferedReader::new(server))
+}
+
+#[tokio::test]
+async fn read_http_head_stops_at_crlf_crlf_and_keeps_body_bytes() {
+    let (mut client, mut server) = loopback_pair().await;
+    // 头与消息体一次性到达：整块读取会越过 \r\n\r\n 预读 BODY，
+    // 适配层必须把越读字节暂存并在后续读取中先于底层流吐出
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nBODY")
+        .await
+        .unwrap();
+    let head = read_http_head(&mut server).await.unwrap();
+    assert_eq!(head, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    // 头之后的字节不被吞掉、不被重复
+    let mut rest = [0u8; 4];
+    server.read_exact(&mut rest).await.unwrap();
+    assert_eq!(&rest, b"BODY");
+}
+
+#[tokio::test]
+async fn read_http_head_rejects_head_at_32kib_limit() {
+    let (mut client, mut server) = loopback_pair().await;
+    let payload = vec![b'a'; 32 * 1024];
+    let reader = tokio::spawn(async move { read_http_head(&mut server).await });
+    client.write_all(&payload).await.unwrap();
+    client.flush().await.unwrap();
+    // 读满 32KB 仍无头终止符即拒绝，不会无限缓冲对端流量
+    let error = reader.await.unwrap().unwrap_err();
+    assert_eq!(error.to_string(), "代理请求头过大");
+}
+
+#[tokio::test]
+async fn read_http_head_reports_eof_when_peer_closes_mid_head() {
+    let (mut client, mut server) = loopback_pair().await;
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: x")
+        .await
+        .unwrap();
+    drop(client);
+    let error = read_http_head(&mut server).await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
 }
