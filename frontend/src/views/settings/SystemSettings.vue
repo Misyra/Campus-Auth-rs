@@ -338,7 +338,7 @@ onMounted(() => {
       <div class="card-body">
         <SettingsRow label="配置预设" description="一次调整多项运行设置，应用前会列出具体改动">
           <template #description>{{ modeOptions.find(opt => opt.id === currentMode)?.description }}</template>
-          <div class="run-mode-options">
+          <div class="run-mode-options" role="group" aria-label="配置预设">
             <button
               v-for="opt in modeOptions"
               :key="opt.id"
@@ -375,7 +375,7 @@ onMounted(() => {
           <template #description>
             <span class="hint">{{ startupActionHint }}</span>
           </template>
-          <CustomSelect v-model="config.config.app_settings.startup_action" :options="loginActionOptions" />
+          <CustomSelect v-model="config.config.app_settings.startup_action" :options="loginActionOptions" aria-label="启动后执行" />
         </SettingsRow>
         <SettingsRow>
           <template #label>
@@ -385,7 +385,7 @@ onMounted(() => {
           <template #description>
             <span class="hint">{{ runtimeModeHint }}</span>
           </template>
-          <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" />
+          <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" aria-label="服务模式" />
         </SettingsRow>
         <SettingsRow :description="autostartDescription(autostart)">
           <template #label>
@@ -397,6 +397,8 @@ onMounted(() => {
           <label class="toggle setting-row-switch">
             <input
               type="checkbox"
+              role="switch"
+              :aria-checked="autostart.enabled"
               :checked="autostart.enabled"
               @change="config.toggleAutostart(!autostart.enabled)"
               :disabled="busy.autostart"
@@ -440,7 +442,7 @@ onMounted(() => {
             <FieldHelp text="启用后，程序启动时自动打开 Web 控制台。" />
           </template>
           <label class="toggle setting-row-switch">
-            <input type="checkbox" v-model="config.config.app_settings.auto_start_browser" />
+            <input type="checkbox" role="switch" :aria-checked="config.config.app_settings.auto_start_browser" v-model="config.config.app_settings.auto_start_browser" />
             <span class="toggle-slider"></span>
             <span class="sr-only">启动时打开控制台</span>
           </label>
@@ -451,7 +453,7 @@ onMounted(() => {
             <FieldHelp text="关键事件完成时弹出系统通知。" />
           </template>
           <label class="toggle setting-row-switch">
-            <input type="checkbox" v-model="config.config.app_settings.task_notification" />
+            <input type="checkbox" role="switch" :aria-checked="config.config.app_settings.task_notification" v-model="config.config.app_settings.task_notification" />
             <span class="toggle-slider"></span>
             <span class="sr-only">任务通知</span>
           </label>
@@ -462,7 +464,7 @@ onMounted(() => {
             <FieldHelp text="关闭后无托盘图标，仅可通过 Web 控制台操作。修改后重启生效。" />
           </template>
           <label class="toggle setting-row-switch">
-            <input type="checkbox" v-model="config.config.app_settings.show_tray" />
+            <input type="checkbox" role="switch" :aria-checked="config.config.app_settings.show_tray" v-model="config.config.app_settings.show_tray" />
             <span class="toggle-slider"></span>
             <span class="sr-only">显示系统托盘图标</span>
           </label>
@@ -492,7 +494,7 @@ onMounted(() => {
         <SettingsRow>
           <template #label>启用文件日志</template>
           <label class="toggle setting-row-switch">
-            <input type="checkbox" v-model="config.config.logging.file_enabled" />
+            <input type="checkbox" role="switch" :aria-checked="config.config.logging.file_enabled" v-model="config.config.logging.file_enabled" />
             <span class="toggle-slider"></span>
             <span class="sr-only">启用文件日志</span>
           </label>
@@ -505,6 +507,7 @@ onMounted(() => {
           <CustomSelect
             :model-value="config.config.logging.level"
             :options="logLevelOptions"
+            aria-label="全局日志级别"
             @update:model-value="config.setLogLevel($event as string)"
           />
         </SettingsRow>
