@@ -85,7 +85,7 @@ cd frontend && npm run build
 
 ### Lint
 
-启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（含 `rust-tests-unix` 真机）/ `frontend build + vitest` / `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路，见 `.github/workflows/ci.yml`）。
+启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（含 `rust-tests-unix` 真机）/ frontend `typecheck + eslint + stylelint + build + vitest` / `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路，见 `.github/workflows/ci.yml`）。
 
 ### 前端样式
 
