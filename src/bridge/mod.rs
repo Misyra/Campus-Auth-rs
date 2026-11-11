@@ -528,10 +528,28 @@ impl BridgeSupervisor {
 
     /// 触发跨进程取消：向 Worker stdin 发送 {"cancel": cancel_id}
     pub fn cancel(&self, cancel_id: &str) {
-        if let Err(e) = self.cmd_tx.try_send(SupervisorCommand::Cancel {
+        let msg = SupervisorCommand::Cancel {
             cancel_id: cancel_id.to_string(),
-        }) {
-            debug!("发送取消命令失败（supervisor 可能已停止）: {e}");
+        };
+        match self.cmd_tx.try_send(msg) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(msg)) => {
+                // 通道满（64）：取消通知不得静默丢弃，独立 task 阻塞投递。
+                // 仅在 tokio 运行时内可 spawn；所有现行调用方均在 async 上下文。
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let cmd_tx = self.cmd_tx.clone();
+                    handle.spawn(async move {
+                        if let Err(e) = cmd_tx.send(msg).await {
+                            debug!("发送取消命令失败（supervisor 可能已停止）: {e}");
+                        }
+                    });
+                } else {
+                    debug!("发送取消命令失败：无 tokio 运行时且命令通道已满");
+                }
+            }
+            Err(e) => {
+                debug!("发送取消命令失败（supervisor 可能已停止）: {e}");
+            }
         }
     }
 
@@ -2246,6 +2264,71 @@ mod tests {
             BridgeSupervisor::new(dir.path().to_path_buf(), config, status, None),
             dir,
         )
+    }
+
+    /// C7：cancel 在 Supervisor 未运行（命令接收端已丢弃，通道 Closed）时
+    /// 不得 panic——Closed 路径静默降级为 debug 日志。
+    #[tokio::test]
+    async fn cancel_在_supervisor_未运行时不panic() {
+        let (bridge, _dir) = make_bridge().await;
+        // 丢弃命令接收端：模拟 supervisor 已停止
+        drop(
+            bridge
+                .cmd_rx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        );
+        // 前置校验：确认 try_send 走的是 Closed 错误路径（而非静默入队）
+        let probe = SupervisorCommand::Cancel {
+            cancel_id: "probe".to_string(),
+        };
+        assert!(matches!(
+            bridge.cmd_tx.try_send(probe),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        ));
+        // 连调多次：只 debug 日志，不得 panic
+        for _ in 0..3 {
+            bridge.cancel("x");
+        }
+    }
+
+    /// C7：命令通道满（cap 64）时 cancel 升级为「spawn + await send」可靠投递，
+    /// 不再静默丢弃——排空通道后取消命令最终送达。
+    #[tokio::test]
+    async fn cancel_通道满时升级为可靠投递() {
+        let (bridge, _dir) = make_bridge().await;
+        // 塞满命令通道（64）：后续 try_send 必走 Full 分支
+        for i in 0..64 {
+            assert!(
+                bridge
+                    .cmd_tx
+                    .try_send(SupervisorCommand::Cancel {
+                        cancel_id: format!("fill-{i}"),
+                    })
+                    .is_ok(),
+                "填充消息 {i} 应成功入队"
+            );
+        }
+        bridge.cancel("late"); // Full → 独立 task 阻塞投递
+        // 手动消费：64 条填充消息之后，应收到 cancel("late")——证明未静默丢弃
+        let mut rx = bridge
+            .cmd_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("接收端应仍在");
+        let mut got_late = false;
+        for _ in 0..65 {
+            match rx.recv().await.expect("通道不应关闭") {
+                SupervisorCommand::Cancel { cancel_id } if cancel_id == "late" => {
+                    got_late = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(got_late, "通道满时 cancel 仍应经阻塞投递送达");
     }
 
     /// F2：宽限期内槽位仍被**同一**超时请求占用 → 判定卡死，强杀回收。
