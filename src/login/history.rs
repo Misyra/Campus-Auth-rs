@@ -71,6 +71,8 @@ fn de_source<'de, D: Deserializer<'de>>(de: D) -> Result<LoginSource, D::Error> 
 pub struct LoginHistoryService {
     /// 基准路径（与 ConfigService 的 base_path 一致）
     base_path: PathBuf,
+    /// 写串行化锁：`record` 全程持有，杜绝并发追加同一 JSONL 时写缓冲交错
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 /// Web 层消费的历史存储抽象（M1 细粒度 state 试点）
@@ -139,6 +141,7 @@ impl LoginHistoryService {
     pub fn new(base_path: &Path) -> Self {
         Self {
             base_path: base_path.to_path_buf(),
+            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -155,6 +158,12 @@ impl LoginHistoryService {
 
     /// 追加写入一条历史记录（每天一个 JSONL 文件，每行一个 JSON 对象）
     pub async fn record(&self, entry: &LoginHistoryEntry) -> Result<(), std::io::Error> {
+        // 全程持有写锁串行化追加：tokio `File` 内含写缓冲、drop 时仅尽力异步
+        // flush，并发追加同一文件时两条记录的字节可能交错产生半行损坏（损坏行
+        // 在 query 时被静默丢弃，表现为记录凭空丢失）。登录终态由会话状态机
+        // 上报，重试场景下确有并发调用。锁粒度为服务实例，不影响跨 base_path
+        // 的其他实例（如测试并行）。
+        let _write_guard = self.write_lock.lock().await;
         let dir = self.history_dir();
         tokio::fs::create_dir_all(&dir).await?;
         let path = self.file_for(entry.timestamp.date_naive());
@@ -582,6 +591,47 @@ mod tests {
         // 目录不存在时 clear 不报错
         let (_dir, svc) = make_service();
         svc.clear().await.unwrap();
+    }
+
+    /// A20：并发 record 必须全部完整落盘（写锁串行化回归锚点）。
+    ///
+    /// 无锁时各任务新开 tokio `File` 并发写同一文件，写缓冲交错会产生半行
+    /// 损坏，损坏行在 query 时被静默丢弃——表现为记录条数变少。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_history_record_concurrent_appends_all_persist() {
+        let (_dir, svc) = make_service();
+        let svc = std::sync::Arc::new(svc);
+        let day = d(2025, 7, 9);
+
+        let mut handles = Vec::new();
+        for i in 0..64usize {
+            let svc = svc.clone();
+            let mut e = sample_entry();
+            e.timestamp = chrono::Local
+                .from_local_datetime(
+                    &(day.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::seconds(i as i64)),
+                )
+                .unwrap();
+            e.message = format!("c{i:03}");
+            handles.push(tokio::spawn(async move {
+                svc.record(&e).await.unwrap();
+                e.message
+            }));
+        }
+        let mut sent: Vec<String> = Vec::new();
+        for h in handles {
+            sent.push(h.await.unwrap());
+        }
+
+        let from = chrono::Local.with_ymd_and_hms(2025, 7, 9, 0, 0, 0).unwrap();
+        let to = chrono::Local
+            .with_ymd_and_hms(2025, 7, 9, 23, 59, 59)
+            .unwrap();
+        let rows = svc.query(from, to).await.unwrap();
+        assert_eq!(rows.len(), 64, "并发写入的 64 条记录必须全部落盘");
+        let got: std::collections::BTreeSet<String> = rows.into_iter().map(|r| r.message).collect();
+        let want: std::collections::BTreeSet<String> = sent.into_iter().collect();
+        assert_eq!(got, want, "落盘内容须与写入内容一一对应");
     }
 
     #[tokio::test]
