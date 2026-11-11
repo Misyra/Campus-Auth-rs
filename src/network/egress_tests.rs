@@ -125,6 +125,76 @@ async fn local_proxy_requires_auth_and_forwards_origin_form_without_proxy_secret
     served.await.unwrap();
 }
 
+/// 门户 accept 后永不回包时，上游响应头等待在超时上限内以 504 收场，
+/// 转发 task 结束并关闭上游连接（信号量许可与半开连接得以释放）。
+///
+/// 有意不用 `start_paused` + `advance`：tokio 暂停时钟的 auto-advance 在
+/// 单线程运行时会无视刚就绪的真实套接字事件直接跳到下一个定时器，令
+/// serve_proxy 内固有的连接/请求头定时器被虚假触发。真实回环往返在微秒
+/// 量级完成，故配合测试常量缩至 500ms 走真实时钟即可确定性覆盖行为。
+#[tokio::test]
+async fn test_proxy_upstream_head_timeout_returns_504() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let proxy = LocalProxy::start(Arc::new(Binding {
+        adapter: None,
+        dns: Vec::new(),
+    }))
+    .await
+    .unwrap();
+    let proxy_addr = (proxy.url.host_str().unwrap(), proxy.url.port().unwrap());
+
+    // 门户 accept 后持有连接、不回包；收到代理转发的请求头说明请求阶段已
+    // 结束、上游连接已建立，之后必然以响应头超时收场。
+    let (forwarded_tx, forwarded_rx) = tokio::sync::oneshot::channel();
+    let silent = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        read_http_head(&mut stream).await.unwrap();
+        let _ = forwarded_tx.send(());
+        // 转发 task 超时退出后会关闭上游连接：以 EOF 收尾证明 task 已结束
+        let mut byte = [0; 1];
+        let eof = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
+        assert!(
+            matches!(eof, Ok(Ok(0)) | Ok(Err(_))),
+            "上游连接应在响应头超时后由代理关闭"
+        );
+    });
+
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            proxy.url.username(),
+            proxy.url.password().unwrap_or("")
+        ))
+    );
+    client
+        .write_all(
+            format!(
+                "GET http://{upstream_addr}/portal HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 Proxy-Authorization: {auth}\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    forwarded_rx.await.unwrap();
+
+    let head = tokio::time::timeout(Duration::from_secs(2), read_http_head(&mut client))
+        .await
+        .expect("客户端应在响应头超时上限内收到回包")
+        .unwrap();
+    assert!(
+        head.starts_with(b"HTTP/1.1 504"),
+        "{}",
+        String::from_utf8_lossy(&head)
+    );
+    silent.await.unwrap();
+}
+
 #[tokio::test]
 async fn connect_tunnel_relays_bytes_and_lease_drop_closes_connections() {
     let target = TcpListener::bind("127.0.0.1:0").await.unwrap();

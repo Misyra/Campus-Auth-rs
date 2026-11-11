@@ -19,6 +19,18 @@ use super::settings::{NetworkMode, NetworkSettings};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const DNS_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 已转发请求后等待上游响应头（含 1xx 过渡响应的每一读）的上限。
+/// 客户端自带请求级超时，此处只兜住「门户 accept 后永不回包」的悬挂。
+///
+/// 测试下缩短为 500ms 并走真实时钟：tokio 暂停时钟（start_paused）的
+/// auto-advance 在单线程运行时会无视刚就绪的真实套接字事件直接跳到下一个
+/// 定时器，serve_proxy 内固有的连接/请求头定时器会被虚假触发，回环转发
+/// 测试无法以虚拟时钟驱动真实 30s（详见 egress_tests 中的回归用例）。
+#[cfg(not(test))]
+const UPSTREAM_HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const UPSTREAM_HEAD_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// 网络出口准备失败，不允许静默降级到系统默认出口。
 #[derive(Debug, thiserror::Error)]
 pub enum EgressError {
@@ -718,7 +730,25 @@ async fn serve_proxy(mut incoming: TcpStream, binding: Arc<Binding>, auth: &str)
         }
         copy_message_body(&mut incoming, upstream, &headers, false).await?;
         loop {
-            let response = read_http_head(upstream).await?;
+            let response = match tokio::time::timeout(
+                UPSTREAM_HEAD_TIMEOUT,
+                read_http_head(upstream),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    // 让客户端拿到明确的 504 而非连接重置；返回错误后 task 结束，
+                    // 信号量许可与半开连接随之释放。
+                    let _ = incoming
+                            .write_all(b"HTTP/1.1 504 Gateway Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "上游响应头等待超时",
+                    ));
+                }
+            };
             let text = String::from_utf8_lossy(&response);
             let mut lines = text.split("\r\n");
             let status_line = lines
