@@ -13,7 +13,6 @@
 .appearance-card-body { padding: 20px; }
 .appearance-controls { display: flex; flex-direction: column; gap: 18px; }
 .appearance-field { display: flex; flex-direction: column; gap: 9px; min-width: 0; position: relative; }
-.appearance-field .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
 .appearance-field-label { font-size: var(--text-md); color: var(--text-secondary); font-weight: 600; }
 .appearance-segmented button { flex: 1; }
 .appearance-colors { display: grid; grid-template-columns: repeat(7, minmax(0, 32px)); align-items: center; gap: 6px; width: 100%; max-width: 260px; }

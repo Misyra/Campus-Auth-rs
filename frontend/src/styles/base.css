@@ -171,6 +171,20 @@
   display: none;
 }
 
+/* 视觉隐藏但读屏可达（toggle 备用文本 / 隐藏的原生控件触发器）。
+   全局 utility：历史上曾限定在 .setting-row/.appearance-field 内，组件挪出父级即失效。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* skip-to-content 链接 */
 .skip-link {
   position: absolute;
