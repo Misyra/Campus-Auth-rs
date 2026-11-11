@@ -80,11 +80,23 @@ function onTrapKeydown(e: KeyboardEvent): void {
 // <script setup> 顶层即每实例各一份，嵌套/叠加弹窗内层关闭就把 body.overflow
 // 复位，外层弹窗背后页面恢复滚动
 
+// E1：关闭后把焦点归还给打开前的触发元素——此前关闭分支只解锁滚动，
+// 键盘用户每关一弹窗焦点就掉回 <body>。detached 元素 focus() 是无害 no-op
+// （触发器可能已被卸载，如列表行删除后确认框关闭）；preventScroll 防
+// 触发器在视口外时页面跳动
+let lastTrigger: HTMLElement | null = null;
+
+function restoreTriggerFocus(): void {
+  lastTrigger?.focus({ preventScroll: true });
+  lastTrigger = null;
+}
+
 // 打开时聚焦第一个可聚焦元素
 watch(
   () => props.open,
   async (val) => {
     if (val) {
+      lastTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       lockBodyScroll();
       await nextTick();
       const firstFocusable = containerRef.value?.querySelector<HTMLElement>(
@@ -93,6 +105,7 @@ watch(
       firstFocusable?.focus();
     } else {
       unlockBodyScroll();
+      restoreTriggerFocus();
     }
   },
   { immediate: true },
@@ -100,6 +113,7 @@ watch(
 
 onBeforeUnmount(() => {
   if (props.open) unlockBodyScroll();
+  restoreTriggerFocus();
 });
 </script>
 

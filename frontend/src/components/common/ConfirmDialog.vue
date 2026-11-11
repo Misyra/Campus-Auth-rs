@@ -35,13 +35,26 @@ function dialogButtons(): HTMLElement[] {
 // 注意：confirmState 是 reactive 对象（非 ref），此处不能写 .value，
 // 否则 getter 求值抛 TypeError，上报为 watcher getter（生产构建 runtime-2）异常
 // FE2-3：滚动锁走全局计数（此前无条件清空 body.overflow，会提前解锁叠加中的 Modal）
+
+// E1：关闭后把焦点归还给弹出前的触发元素（同 Modal）。初挂载 val=false 分支
+// 在 lastTrigger=null 下 no-op；被新 confirm 抢占时以 null 结算且不经过
+// false 分支，不会误还原
+let lastTrigger: HTMLElement | null = null;
+
+function restoreTriggerFocus(): void {
+  lastTrigger?.focus({ preventScroll: true });
+  lastTrigger = null;
+}
+
 watch(
   () => confirmState.visible,
   async (val) => {
     if (!val) {
       unlockBodyScroll();
+      restoreTriggerFocus();
       return;
     }
+    lastTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     lockBodyScroll();
     await nextTick();
     const buttons = dialogButtons();
