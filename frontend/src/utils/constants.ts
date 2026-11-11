@@ -60,6 +60,9 @@ export type TaskRepoMirrorId = "github" | "gitee";
 export const APP_REPO_URL = "https://github.com/Misyra/Campus-Auth-rs";
 export const APP_RELEASES_URL = `${APP_REPO_URL}/releases`;
 
+/** 仓库内 LICENSE 文件地址（关于页引用） */
+export const APP_LICENSE_URL = `${APP_REPO_URL}/blob/master/LICENSE`;
+
 /** 具体版本的发布页地址；版本号为空时退回发布列表页 */
 export function releaseTagUrl(version: string | undefined | null): string {
   const v = (version ?? "").trim();
