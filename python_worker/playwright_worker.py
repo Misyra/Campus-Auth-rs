@@ -92,6 +92,10 @@ _WAIT_TIMEOUT_SECS = 8.0
 _REDIRECT_TEST_SETTLE_SECS = 5.0
 # 重定向检测最多读取的可见文本，避免异常页面造成无界 IPC 前内存增长。
 _REDIRECT_TEST_TEXT_LIMIT = 64 * 1024
+# 单条弹窗文案上限：门户 alert 可能携带超长 HTML，整段进入 IPC 会撑爆
+# Rust 侧 1MiB NDJSON 行上限（整行丢弃 → 成功信封丢失 → 登录误判失败），
+# 与 Rust 侧 IPC_LOG_PREVIEW_LEN 同一截断纪律
+_DIALOG_MESSAGE_MAX_CHARS = 500
 
 
 def _sanitize_capture_url(url: str) -> str:
@@ -282,6 +286,11 @@ def _to_ms(bs: dict, key: str, default_ms: int) -> int:
     Playwright 每个操作瞬间超时失败（如 close_browser 的 timeout=0 直接把
     所有步骤打成 1ms 超时），此处一处保护所有消费点。
     """
+    if not isinstance(bs, dict):
+        # 畸形 browser_settings（非 dict）不得让超时推导抛 AttributeError
+        # 杀死 Worker（_command_timeout 在 _dispatch_guarded 的 try 之外），
+        # 统一回退默认值
+        return default_ms
     val = bs.get(key)
     if val is None:
         return default_ms
@@ -1628,7 +1637,7 @@ class WorkerCore:
         try:
             message = getattr(dialog, "message", None)
             if message:
-                msg = str(message)
+                msg = str(message)[:_DIALOG_MESSAGE_MAX_CHARS]
                 self.emit("dialog", {"message": msg, "action": "accept"})
                 # 收集进当前任务的弹窗列表（限长防泄漏），随 StructuredResult 上报，
                 # 使“账号或密码错误”等页面提示能进入 Rust 侧登录日志

@@ -75,6 +75,24 @@ def test_to_ms_non_positive_falls_back_to_default():
     assert _to_ms({"timeout": "15"}, "timeout", 10000) == 15000
 
 
+def test_to_ms_non_dict_falls_back_to_default():
+    """畸形 browser_settings（truthy 非 dict）不得抛 AttributeError：统一回退默认值。"""
+    assert _to_ms(["x"], "timeout", 10000) == 10000
+    assert _to_ms("str", "timeout", 10000) == 10000
+
+
+def test_command_timeout_survives_non_dict_browser_settings():
+    """_command_timeout 在 _dispatch_guarded 的 try 之外调用 _to_ms：
+    畸形 browser_settings 不得炸穿 Worker 进程。"""
+    # 有 rust_timeout_ms 预算时短路返回，畸形 settings 不参与推导
+    assert (
+        worker_main._command_timeout({"browser_settings": ["a"], "rust_timeout_ms": 60000})
+        == 54.0
+    )
+    # 无预算字段时走 _to_ms 推导路径（C4 实际崩溃路径）：回退默认 10s → 270s 地板
+    assert worker_main._command_timeout({"browser_settings": ["a"]}) == 270.0
+
+
 # ── 修复 3：畸形命令防护 ──
 
 

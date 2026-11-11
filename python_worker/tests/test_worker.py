@@ -432,6 +432,50 @@ def test_emit_event_format(capsys):
     assert msg["data"] == {"path": "a.png"}
 
 
+def test_write_line_survives_lone_surrogate(monkeypatch):
+    """C6：stdout 编码 errors="replace"——孤立代理字符降级 '?'，响应行总能写出。
+
+    strict 模式下 json.dumps(ensure_ascii=False) 保留的孤立代理（页面 JS 可产生）
+    会让 sys.stdout.write 抛 UnicodeEncodeError，该 id 的响应永不写出 →
+    Rust 超时 → Cancel → 可能强杀。replace 降级后整行仍是合法 UTF-8 + 合法 JSON，
+    在途请求得以正常结算。
+    """
+    import io
+    import sys
+
+    import worker_main
+
+    out_buf = io.BytesIO()
+    # 严格模式构造：未修复前对孤立代理写出必抛 UnicodeEncodeError
+    out_wrapper = io.TextIOWrapper(out_buf, encoding="utf-8", errors="strict")
+
+    def _fake_stream():
+        return io.TextIOWrapper(io.BytesIO(b""), encoding="utf-8", errors="strict")
+
+    monkeypatch.setattr(sys, "stdin", _fake_stream())
+    monkeypatch.setattr(sys, "stdout", out_wrapper)
+    monkeypatch.setattr(sys, "stderr", _fake_stream())
+
+    # 修复点：_force_utf8_stdio 应把 stdout 从 strict 重配为 replace
+    worker_main._force_utf8_stdio()
+
+    worker_main.emit_response(
+        1, {"success": True, "data": {"message": "\ud800bad"}, "error": None}
+    )
+    line = out_buf.getvalue().decode("utf-8")  # 不抛：整行必为合法 UTF-8
+    msg = json.loads(line)  # 不抛：整行必为合法 JSON
+    assert msg["id"] == 1
+    assert msg["result"]["data"]["message"] == "?bad", "孤立代理应降级为 '?'"
+
+    # 边界回归：不含 surrogate 的正常中文经此路径逐字节不变
+    worker_main.emit_response(
+        2, {"success": True, "data": {"message": "账号或密码错误"}, "error": None}
+    )
+    lines = out_buf.getvalue().decode("utf-8").strip().splitlines()
+    msg2 = json.loads(lines[1])
+    assert msg2["result"]["data"]["message"] == "账号或密码错误"
+
+
 def test_oversized_request_id_only_reads_bounded_prefix():
     import worker_main
 
@@ -683,6 +727,60 @@ def test_new_page_registers_dialog_accept():
         await asyncio.sleep(0.05)
         assert accepted == [True], "dialog 处理器应调用 accept"
         # 弹窗文案被收集进当前任务列表（随 StructuredResult 上报给 Rust 登录日志）
+        assert core._task_dialogs == ["账号或密码错误！"]
+
+    asyncio.run(_run())
+
+
+def test_task_dialog_message_truncated():
+    """C3：超长弹窗文案在源头截断到 500 字符（emit 负载与 _task_dialogs 同时受益）。
+
+    门户 alert 可能携带超长 HTML：整段进入 IPC 会撑爆 Rust 侧 1MiB NDJSON
+    行上限，整行被丢弃并以错误结算，登录成功被误记为失败。
+    """
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        emitted = []
+        core.emit = lambda event_type, data: emitted.append((event_type, data))
+
+        class FakeDialog:
+            message = "A" * 10000
+
+            async def accept(self):
+                pass
+
+        await core._handle_page_dialog(FakeDialog())
+
+        assert len(emitted) == 1, "应 emit 一次 dialog 事件"
+        event_type, payload = emitted[0]
+        assert event_type == "dialog"
+        assert len(payload["message"]) <= 500, "emit 负载 message 应被截断"
+        assert payload["action"] == "accept"
+        assert len(core._task_dialogs) == 1, "截断后仍应收集进任务弹窗列表"
+        assert len(core._task_dialogs[0]) <= 500, "_task_dialogs 单条应被截断"
+
+    asyncio.run(_run())
+
+
+def test_task_dialog_normal_message_unchanged():
+    """C3 回归：正常短弹窗文案（如「登录成功！」）截断逻辑不影响内容。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        core.emit = lambda event_type, data: None
+
+        class FakeDialog:
+            message = "账号或密码错误！"
+
+            async def accept(self):
+                pass
+
+        await core._handle_page_dialog(FakeDialog())
         assert core._task_dialogs == ["账号或密码错误！"]
 
     asyncio.run(_run())

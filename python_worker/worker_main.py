@@ -139,7 +139,10 @@ def _force_utf8_stdio() -> None:
             if stream is sys.stdin:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             else:
-                stream.reconfigure(encoding="utf-8")
+                # stdout 用 replace 而非 strict：孤立代理字符（页面 JS 可产生）无法编码，
+                # strict 会让响应行写出失败、请求悬挂到 Rust 超时强杀；replace 降级为 '?'
+                # 后整行仍是合法 UTF-8 + 合法 JSON，响应总能写出。stderr 同理，防日志抛错。
+                stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             # reconfigure 失败时检查实际编码：stdout 非 UTF-8 则 IPC 必然乱码，
             # 静默继续只会让 Rust 侧持续丢弃响应行、在途请求全部超时——
