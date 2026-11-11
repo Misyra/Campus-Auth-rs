@@ -547,6 +547,18 @@ pub(crate) async fn execute_scheduled_task(
         task_id: task_id.clone(),
     };
 
+    // 以内存缓存最新定义执行（A13）：到期瞬间任务可能已被删除/禁用/改配置，
+    // 按触发时的快照执行会按旧定义跑一轮。口径对齐 execute_startup_round，
+    // 重验从内存缓存取，不引入额外磁盘 I/O（外部删除由 5 分钟兜底扫描收敛）。
+    let Some(latest) = service.get_task(&task_id) else {
+        tracing::info!(task_id = %task_id, "定时任务已不存在，放弃本轮触发");
+        return;
+    };
+    if !latest.enabled {
+        tracing::info!(task_id = %task_id, "定时任务已被禁用，放弃本轮触发");
+        return;
+    }
+    let task = latest;
     let (success, message, duration) = execute_attempt(&task, &service, source, None).await;
 
     if success {
