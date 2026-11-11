@@ -11,6 +11,29 @@
 - 从逐项开发记录汇总面向用户的更新日志；发布使用带预发布标识的 Git 标签与 GitHub prerelease，正式版稳定通道不切换到此测试版。
 - 整合验证：Rust 库 1145 项通过（3 项默认忽略），前端 570 项与 OpenWrt 包装器 10 项通过；版本及锁文件一致性检查通过。
 
+## 开发中（2026-11-12 全面审查修复战役）
+
+> 依据 `docs/reports/full-review-2026-11-12.md`（76 项发现）与五份 fixplaybook 按阶段实施；过程性进度与心跳记录在 gitignored 的 `docs/reports/`。
+
+- **A2/A15 调度器**：`SchedulerService::get_task` 由 `.ok()` 静默吞中毒改为 `unwrap_or_else(|e| e.into_inner())`，与同文件其他方法口径一致——锁中毒后恢复读内存缓存，不再静默返回 None 致调度瘫痪；`update_last_run` / `record_startup_success` 两处 `spawn_blocking` 的 JoinError 从 `let _ =` 丢弃改为 warn 留痕。新增中毒回归测试与可复用 `make_test_service` fixture（后续 A13/A14 共用）。
+- **B1 更新器凭据脱敏**：`build_proxied_client` 的 scheme 校验分支错误文本改用 `sanitize_proxy_url` 脱敏，`reqwest::Proxy::all` 构造错误加防御性包装（本地化措辞 + 脱敏 URL），代理凭据不再可能经日志及其导出/feedback-bundle 外泄；新增脱敏测试，并在 `web::ssrf` 测试中钉住「reqwest 构造错误 Display 不回显 URL 原文」的行为假设（仅测试模块，生产代码未动——reqwest 0.12.28 行为已核实）。
+- **B5 死变体清理**：删除零构造零引用的 `UpdaterError::RollbackFailed`。
+- **C4 Worker 畸形设置守卫**：`playwright_worker.py` 的 `_to_ms` 单点加 `isinstance(browser_settings, dict)` 守卫，非 dict 的 browser_settings 统一回退默认超时，`_command_timeout` / `_nav_timeout` / `_make_context` 全部受保护，不再以码 1 杀死 Worker；补 2 个健壮性测试（其一加严：去掉 `rust_timeout_ms` 短路、真正走 `_to_ms` 推导路径）。
+- **C3 弹窗文案截断**：`_handle_page_dialog` 在源头按 `_DIALOG_MESSAGE_MAX_CHARS = 500` 截断一次，emit 负载与 `_task_dialogs` 同时受益，登录成功信封不再可能因超长弹窗被 1MiB 行上限整行丢弃；补短文案不变化的回归测试。
+- **C6 stdout 编码兜底**：`_force_utf8_stdio` 的 stdout/stderr 包装由 strict 改 `errors="replace"`（fail-fast 的 SystemExit(3) 分支保留），孤立代理字符降级 `?` 后整行仍是合法 UTF-8 + 合法 JSON，响应总能写出、在途请求正常结算；补孤立代理字符测试（含中文逐字节不变断言）。
+- **C7 bridge 取消可靠投递**：`BridgeSupervisor::cancel` 保留 `try_send` 快路径，通道 Full 时经 `Handle::try_current` 守卫 spawn 阻塞投递，Closed/无运行时降级 debug 日志，签名不变；新增 Closed 不 panic 与 Full 可靠送达两个测试（后者加严：端到端证明 late 取消最终送达而非静默丢弃）。
+- **A7 StatusError 死代码**：删除 notifier.rs 中零使用的 `StatusError` 枚举与 `thiserror::Error` 导入，`status::mod` re-export 收窄为 `Notifier`；全仓 grep 确认无残留引用。
+- **A8 `.instance` 原子写**：`record_port` 与托盘 `write_instance_port` 两处 `std::fs::write` 直写改走 `atomic_write_bytes`（tempfile + persist + fsync），崩溃不再可能留半截文件破坏 `--status`/防重复启动的解析；新增「无 `.tmp_` 残留」测试。
+- **A9 Engine Dead 保留网络快照**：`watch_engine` Dead 分支不再用 Unknown/默认值覆盖崩溃前结论——仅 `state` 置 Dead，network/assessment/evidence/pause/cooling 等逐字段回填快照，`last_check` 沿用旧值（G3：非检测事件不刷新）。注：playbook 该节标题写「重置为 Unknown」系笔误，其根因分析与代码块均为保留方向，按代码块实施。
+- **D1 前端测试抖动**：vitest 全局 `testTimeout` 提到 10s、useUi 冷启动用例单独 20s——全量并行冷启动动态导入整棵单例图可抖过 5s，常规用例实测 <3s；修复后 570 项连跑两遍均绿无抖动。
+- **D2 链接单一事实源**：AboutView 两处硬编码 GitHub 地址改用 `APP_REPO_URL`，新增 `APP_LICENSE_URL` 供 License 链接使用。
+- **D4 构建警告**：useRepoImport 的 `router` 改静态导入，消除「静态+动态双导入」构建警告。
+- **D5/D6/D7/D8 前端死代码清理批**：删除 loginChannel 七个死导出常量（含整块 HTTP_SUCCESS_CHECK_OPTIONS、模板占位符、ctx 字段、示例文案等）；删除 `MONO_ACCENT_LIGHT/DARK`、`isBodyScrollLocked`，`detectDangerousSteps` 收敛为模块私有；运行时死代码 `formatTimeValue` 连其 3 个测试一起删除（§9 口径升级：删而非留注释）；修复 types.ts `HttpFlowStep` 局部缩进损坏。
+- **E4 sr-only 全局化**：`.sr-only` 提为 base.css 全局 utility（补齐 `white-space: nowrap` 完整版），删除 settings/appearance 两处容器限定版本（历史上组件挪出父级即失效的隐患），新增守卫测试钉住「全局规则存在 + 容器限定版本不回归 + 仪表盘搜索框可访问名」。
+- **E5 仪表盘可访问名**：日志搜索框补 `aria-label="搜索日志"`（不再只靠 placeholder）。
+- **过程事故**：03:25-06:02 编排会话一度挂起，域D/域E子代理因 Provider 服务端错误中断；两者改动遗产完整保留在工作区，经主代理逐项核对 diff 并复跑全量门禁后按项提交，无丢失无返工。
+- 验证（阶段0收口）：`cargo clippy --all-targets -- -D warnings` 零警告、`cargo fmt --check` 通过、`cargo test` 与 `cargo test --features rust-tests-unix` 全过（含 e2e login_chain 5 项）；vitest 570 项连跑两遍无抖动、`npm run typecheck` 零错误、`npm run build` 通过（index 306.72 kB / gzip 110.97 kB，D9 维持不拆决策）。
+
 ## 开发中（2026-11-11 网卡枚举放行 Hyper-V 虚拟网卡）
 
 - 修复 Hyper-V 主机看不到实际出口网卡：外部 vSwitch 的 `vEthernet` 网卡 `HardwareInterface` 为 `false`，原先在 PowerShell 侧按该标记过滤会把它整条丢弃。改为连同 `HardwareInterface` 与 `InterfaceDescription` 一起取回，在 Rust 侧按“硬件网卡，或 Hyper-V Virtual Ethernet Adapter”筛选；其余虚拟网卡、未分配地址、回环与 link-local 继续排除，接口读取失败仍明确报错、不回退其他接口。
