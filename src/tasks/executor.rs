@@ -25,6 +25,8 @@ use crate::config::ConfigService;
 use crate::environment::EnvironmentManager;
 use crate::status::{PartialSnapshot, StatusManager, WorkerStatus};
 use crate::tasks::TaskError;
+use crate::tasks::io_error;
+use crate::tasks::io_error_at;
 use crate::tasks::models::*;
 
 /// 任务执行统一结果
@@ -363,10 +365,10 @@ impl TaskExecutor {
             let mut tmp = tempfile::Builder::new()
                 .suffix(&format!(".{ext}"))
                 .tempfile()
-                .map_err(TaskError::IoError)?;
+                .map_err(|e| TaskError::IoError(io_error("创建脚本临时文件", e)))?;
             use std::io::Write;
             tmp.write_all(content.as_bytes())
-                .map_err(TaskError::IoError)?;
+                .map_err(|e| TaskError::IoError(io_error_at("写入脚本临时文件", tmp.path(), e)))?;
             let path = tmp.path().to_path_buf();
             Ok((path, Some(tmp)))
         } else if let Some(sp) = &cfg.script_path {
@@ -443,7 +445,12 @@ impl TaskExecutor {
                     error = %e,
                     "任务进程启动失败"
                 );
-                return Err(TaskError::IoError(e));
+                // 原始报错只有 os error 码（如「系统找不到指定的文件」）不带程序名；
+                // 程序名与失败类别在这里补齐，原始文本仍保留在文案末尾
+                return Err(TaskError::IoError(io_error(
+                    &format!("启动任务程序（{program}）"),
+                    e,
+                )));
             }
         };
         // Windows 下用 KILL_ON_JOB_CLOSE 约束整棵任务进程树。守卫析构（Job 句柄
@@ -456,14 +463,12 @@ impl TaskExecutor {
         // Unix 取消路径的进程组回收（Windows 由上方 Job Handle 兜底）
         #[cfg(unix)]
         let mut process_group_guard = ProcessGroupGuard::new(pid);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| TaskError::IoError(std::io::Error::other("无法捕获子进程 stdout")))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| TaskError::IoError(std::io::Error::other("无法捕获子进程 stderr")))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            TaskError::IoError(std::io::Error::other("无法捕获任务进程的标准输出管道"))
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            TaskError::IoError(std::io::Error::other("无法捕获任务进程的错误输出管道"))
+        })?;
 
         let timeout_dur = Duration::from_secs(timeout);
         let waited = tokio::time::timeout(
@@ -504,7 +509,10 @@ impl TaskExecutor {
                     error,
                 })
             }
-            Ok(Err(e)) => Err(TaskError::IoError(e)),
+            Ok(Err(e)) => Err(TaskError::IoError(io_error(
+                "等待任务进程退出并读取输出",
+                e,
+            ))),
             Err(_) => {
                 // 极窄窗口：子进程可能在上方 500ms 排空宽限内已退出、但读未
                 // 收敛时外层超时先到期——此时强杀无意义且会抹掉真实退出码，
@@ -682,8 +690,10 @@ async fn wait_with_bounded_output(
     const DRAIN_GRACE: Duration = Duration::from_millis(500);
     let drain = async {
         let (out, err) = tokio::join!(out_task, err_task);
-        let out = out.map_err(|e| std::io::Error::other(format!("stdout 读取任务失败: {e}")))?;
-        let err = err.map_err(|e| std::io::Error::other(format!("stderr 读取任务失败: {e}")))?;
+        let out =
+            out.map_err(|e| std::io::Error::other(format!("读取标准输出的后台任务异常中断: {e}")))?;
+        let err =
+            err.map_err(|e| std::io::Error::other(format!("读取错误输出的后台任务异常中断: {e}")))?;
         Ok::<(std::process::ExitStatus, Vec<u8>, Vec<u8>), std::io::Error>((status, out?, err?))
     };
     match tokio::time::timeout(DRAIN_GRACE, drain).await {

@@ -15,6 +15,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::tasks::TaskError;
+use crate::tasks::io_error_at;
 use crate::tasks::models::*;
 /// 任务排序记录（`.order.json`）
 ///
@@ -233,7 +234,7 @@ impl TaskManager {
         };
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(TaskError::IoError)?;
+            .map_err(|e| TaskError::IoError(io_error_at("读取任务文件", &path, e)))?;
         let task: TaskKind =
             serde_json::from_str(&strip_bom(content)).map_err(TaskError::JsonError)?;
         // 「保存强校验、加载宽校验 + 告警」（G8）：磁盘上被外部工具改坏的任务仍尽量
@@ -257,7 +258,7 @@ impl TaskManager {
             .ok_or_else(|| TaskError::TaskNotFound(task_id.to_string()))?;
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(TaskError::IoError)?;
+            .map_err(|e| TaskError::IoError(io_error_at("读取旧版脚本文件", &path, e)))?;
         Ok(TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 task_id: task_id.to_string(),
@@ -342,7 +343,7 @@ impl TaskManager {
         let task_for_blocking = task.clone();
         let stale_for_blocking = stale_paths;
         tokio::task::spawn_blocking(move || -> Result<(), TaskError> {
-            atomic_write_json(&path_for_blocking, &task_for_blocking)?;
+            atomic_write_json("保存任务文件", &path_for_blocking, &task_for_blocking)?;
             for stale in &stale_for_blocking {
                 if stale.exists() {
                     // 删掉是必须的（同一 id 留两份定义时，加载会按桶优先级取到过时的那份），
@@ -364,7 +365,12 @@ impl TaskManager {
             Ok(())
         })
         .await
-        .map_err(|e| TaskError::IoError(std::io::Error::other(e.to_string())))??;
+        .map_err(|e| {
+            // JoinError：后台写入任务 panic 或被取消，原始信息保留在括号里供日志
+            TaskError::IoError(std::io::Error::other(format!(
+                "保存任务文件失败：后台写入任务异常中断（{e}）"
+            )))
+        })??;
         // 追加到 order（如不存在）
         let mut order = self.read_order_blocking().await;
         if !order.order.contains(&task_id.to_string()) {
@@ -381,12 +387,12 @@ impl TaskManager {
             let path = self.scripts_dir.join(format!("{task_id}.py"));
             tokio::fs::remove_file(&path)
                 .await
-                .map_err(TaskError::IoError)?;
+                .map_err(|e| TaskError::IoError(io_error_at("删除旧版脚本文件", &path, e)))?;
             let meta = self.scripts_dir.join(format!("{task_id}.meta.json"));
             if meta.exists() {
                 tokio::fs::remove_file(&meta)
                     .await
-                    .map_err(TaskError::IoError)?;
+                    .map_err(|e| TaskError::IoError(io_error_at("删除脚本元数据文件", &meta, e)))?;
             }
             let mut order = self.read_order_blocking().await;
             order.order.retain(|id| id != task_id);
@@ -408,7 +414,7 @@ impl TaskManager {
             if path.exists() {
                 tokio::fs::remove_file(&path)
                     .await
-                    .map_err(TaskError::IoError)?;
+                    .map_err(|e| TaskError::IoError(io_error_at("删除任务文件", &path, e)))?;
                 found = true;
             }
         }
@@ -958,16 +964,21 @@ impl TaskManager {
 
     /// 同步写入 `.order.json`（原子；仅供构造器 `TaskManager::new` 在 runtime 之外使用）
     fn write_order(&self, order: &OrderData) -> Result<(), TaskError> {
-        atomic_write_json(&self.order_path(), order)
+        atomic_write_json("保存任务排序", &self.order_path(), order)
     }
 
     /// `.order.json` 异步原子写（阻塞 I/O 入 spawn_blocking）
     async fn write_order_blocking(&self, order: &OrderData) -> Result<(), TaskError> {
         let path = self.order_path();
         let order = order.clone();
-        tokio::task::spawn_blocking(move || atomic_write_json(&path, &order))
+        tokio::task::spawn_blocking(move || atomic_write_json("保存任务排序", &path, &order))
             .await
-            .map_err(|e| TaskError::IoError(std::io::Error::other(e.to_string())))?
+            .map_err(|e| {
+                // JoinError：后台写入任务 panic 或被取消，原始信息保留在括号里供日志
+                TaskError::IoError(std::io::Error::other(format!(
+                    "保存任务排序失败：后台写入任务异常中断（{e}）"
+                )))
+            })?
     }
 
     /// 查找任务文件（按桶优先级 browser → script → http）
@@ -1270,8 +1281,12 @@ fn strip_bom(content: String) -> String {
 }
 
 /// 原子写入 JSON（委托给 utils::io::atomic_write_json）
-fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), TaskError> {
-    crate::utils::atomic_write_json(path, value).map_err(TaskError::IoError)
+///
+/// `action` 说明写入的是哪一类文件（任务文件 / 任务排序），失败文案据此区分
+/// 动作与路径，底层 `std::io` 原文仍保留在文案末尾。
+fn atomic_write_json<T: Serialize>(action: &str, path: &Path, value: &T) -> Result<(), TaskError> {
+    crate::utils::atomic_write_json(path, value)
+        .map_err(|e| TaskError::IoError(io_error_at(action, path, e)))
 }
 
 #[cfg(test)]
@@ -2461,5 +2476,122 @@ mod tests {
             mgr.browser_dir.join("default.json").exists(),
             "缺失的种子仍应补上"
         );
+    }
+
+    // ============ TaskError::IoError 人话化（动作 + 路径 + 失败类别） ============
+
+    /// 助手文案形状：动作 + 路径 + 类别 + 原始错误；`ErrorKind` 必须原样保留。
+    #[test]
+    fn test_io_error_helpers_produce_human_readable_messages() {
+        // ErrorKind 构造出的原始文案跨平台一致（与具体 OS 无关）
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let wrapped = crate::tasks::io_error_at("读取任务文件", Path::new("/data/tasks/a.json"), e);
+        let msg = wrapped.to_string();
+        assert!(
+            msg.starts_with("读取任务文件失败（/data/tasks/a.json）："),
+            "应说明动作与路径: {msg}"
+        );
+        assert!(msg.contains("没有访问权限"), "应含失败类别: {msg}");
+        assert!(
+            msg.contains("permission denied"),
+            "应保留 std::io 原文供日志比对: {msg}"
+        );
+        // 按类别分支的调用方不受人话化影响
+        assert_eq!(wrapped.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // 无路径场景（临时文件/管道）同样保留类别与原文
+        let e2 = std::io::Error::other("pipe closed");
+        let msg2 = crate::tasks::io_error("写入脚本临时文件", e2).to_string();
+        assert!(msg2.starts_with("写入脚本临时文件失败："), "{msg2}");
+        assert!(msg2.contains("pipe closed"), "应保留原始错误: {msg2}");
+    }
+
+    #[test]
+    fn test_io_kind_label_covers_common_file_kinds() {
+        use std::io::ErrorKind;
+        assert_eq!(
+            crate::tasks::io_kind_label(ErrorKind::NotFound),
+            "文件或目录不存在"
+        );
+        assert_eq!(
+            crate::tasks::io_kind_label(ErrorKind::PermissionDenied),
+            "没有访问权限"
+        );
+        assert_eq!(
+            crate::tasks::io_kind_label(ErrorKind::IsADirectory),
+            "目标是目录而非文件"
+        );
+        // 未逐一列出的类别走兜底
+        assert_eq!(
+            crate::tasks::io_kind_label(ErrorKind::Other),
+            "系统 IO 异常"
+        );
+    }
+
+    /// 任务文件位置被目录占位（外部工具/同步盘的典型坏现场）：读失败必须报
+    /// 「读取任务文件失败 + 具体路径」，不得把裸 `std::io` 原文直接抛给用户。
+    ///
+    /// 用目录替身触发（`read_to_string` 对目录跨平台必失败），避开依赖
+    /// chmod 的权限拒绝——Windows 上权限位形同虚设，那种写法不可移植。
+    #[tokio::test]
+    async fn test_load_task_io_failure_message_is_human_readable() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::create_dir_all(tmp.path().join("tasks").join("browser").join("ghost.json"))
+            .unwrap();
+        let err = mgr.load_task("ghost").await.unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("读取任务文件失败"), "应说明失败动作: {msg}");
+        assert!(msg.contains("ghost.json"), "应带上具体文件路径: {msg}");
+        assert!(!msg.contains("IO 错误"), "不得再出现裸 IO 前缀: {msg}");
+    }
+
+    /// 删除任务失败（文件被目录占位）必须报「删除任务文件失败 + 路径」。
+    #[tokio::test]
+    async fn test_delete_task_io_failure_message_is_human_readable() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::create_dir_all(tmp.path().join("tasks").join("browser").join("locked.json"))
+            .unwrap();
+        let err = mgr.delete_task("locked").await.unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("删除任务文件失败"), "应说明失败动作: {msg}");
+        assert!(msg.contains("locked.json"), "应带上具体文件路径: {msg}");
+    }
+
+    /// 旧版裸 .py 的删除失败同样要说清动作与文件。
+    #[tokio::test]
+    async fn test_delete_legacy_py_io_failure_message_is_human_readable() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::create_dir_all(tmp.path().join("tasks").join("scripts").join("old.task.py"))
+            .unwrap();
+        let err = mgr.delete_task("old.task").await.unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("删除旧版脚本文件失败"),
+            "应说明失败动作: {msg}"
+        );
+        assert!(msg.contains("old.task.py"), "应带上具体文件路径: {msg}");
+    }
+
+    /// 保存落盘失败必须报「保存任务文件失败 + 路径」。
+    ///
+    /// `tasks/browser` 的位置被一个普通文件占住：原子写的临时文件落在该路径
+    /// 下必然失败（父路径不是目录），且该现场跨平台稳定。
+    #[tokio::test]
+    async fn test_save_task_io_failure_message_is_human_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+        std::fs::write(tmp.path().join("tasks").join("browser"), "not a dir").unwrap();
+        let mgr = TaskManager::new(tmp.path());
+        let err = mgr
+            .save_task("stubborn", &browser_task("存不进"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("保存任务文件失败"), "应说明失败动作: {msg}");
+        assert!(msg.contains("stubborn.json"), "应带上具体文件路径: {msg}");
     }
 }
