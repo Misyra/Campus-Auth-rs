@@ -59,6 +59,13 @@ for line in sys.stdin:
         secs = (msg.get("params") or {}).get("secs", 10)
         time.sleep(float(secs))
         emit({"id": mid, "result": {"success": True, "data": {}, "error": None}})
+    elif method == "slow_then_start":
+        # BRG-1b：出队即 emit command_started（模拟真实 Worker 的起算点通知），
+        # 再挂起指定秒数（默认 2s）后回包
+        secs = (msg.get("params") or {}).get("secs", 2)
+        emit({"event": "command_started", "data": {"id": mid}})
+        time.sleep(float(secs))
+        emit({"id": mid, "result": {"success": True, "data": {"echo": method}, "error": None}})
     else:
         emit({"id": mid, "result": {"success": True, "data": {"echo": method}, "error": None}})
 "#;
@@ -575,6 +582,79 @@ async fn supervisor_session_busy_反映真实槽位占用() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(!bridge.session_busy(), "请求结束后槽位应释放，不再报告忙");
+
+    handle.stop().await;
+}
+
+/// C2 / BRG-1b：FIFO 排队命令的超时预算应自「Python 真正开始执行」起算，
+/// 排队时间不再吃掉预算——否则排队命令超时后经 Cancel → 归属校验（发送时
+/// 已 supersede 槽位，必然命中）→ 强杀，连带摧毁 Worker 侧实际正在执行的
+/// 前序长命令。
+///
+/// 时序：A（sleep 2s）占住串行 Worker；0.3s 后 B（slow_then_start：出队即发
+/// command_started，再 sleep 2s 回包）入队，预算仅 3s。
+/// - 旧语义（预算自发送起算）：B 在 t≈3.3s 超时 → Cancel → 强杀整棵进程树；
+/// - 新语义：B 在 t≈2s 出队，command_started 把截止时刻重置到 t≈5s，
+///   B 在 t≈4s 正常回包 → 成功。
+#[tokio::test]
+async fn supervisor_排队命令_起算点后移_不因排队时间超时() {
+    let Some(venv) = locate_venv() else {
+        eprintln!("跳过 bridge_supervisor BRG-1b：未找到本地 Python venv");
+        return;
+    };
+    let Some(tree) = setup_worker_tree(&venv) else {
+        eprintln!("跳过 bridge_supervisor BRG-1b：无法创建 .venv 目录链接");
+        return;
+    };
+
+    let (bridge, handle, _config) = make_supervisor(&tree.base).await;
+
+    // 预热：确保 Worker 已 spawn 并通过健康检查
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, Duration::from_secs(40))
+        .await;
+
+    // A：占住串行 Worker 2s（不发 command_started 的旧式命令，走旧语义不受影响）
+    let bridge_a = bridge.clone();
+    let task_a = tokio::spawn(async move {
+        bridge_a
+            .execute_with_timeout("sleep", json!({ "secs": 2 }), Duration::from_secs(40))
+            .await
+    });
+
+    // 等 A 真正被 Worker 取走后发送 B：B 排队至 A 结束（t≈2s）才开始执行
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let bridge_b = bridge.clone();
+    let task_b = tokio::spawn(async move {
+        bridge_b
+            .execute_with_timeout(
+                "slow_then_start",
+                json!({ "secs": 2 }),
+                Duration::from_secs(3),
+            )
+            .await
+    });
+
+    // A 正常完成
+    let r_a = join_with_timeout(task_a, 30).await;
+    assert!(r_a.is_ok(), "前序命令应正常完成，实际 {r_a:?}");
+
+    // B：排队 ~2s + 执行 2s = 响应于发送后 ~4s，超过 3s 预算的「发送起算」
+    // 旧判定，但 command_started 已把预算重启——应成功而非 Timeout
+    let r_b = join_with_timeout(task_b, 30).await;
+    match r_b {
+        Ok(resp) => {
+            assert!(resp.result.success, "B 应成功，实际 {resp:?}");
+            assert_eq!(
+                resp.result.data.get("echo").and_then(Value::as_str),
+                Some("slow_then_start")
+            );
+        }
+        Err(BridgeError::Timeout) => {
+            panic!("B 不应超时：command_started 后预算应自真正执行起算（旧语义回归）")
+        }
+        other => panic!("期望 B 成功，实际 {other:?}"),
+    }
 
     handle.stop().await;
 }

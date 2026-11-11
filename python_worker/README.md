@@ -57,6 +57,19 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 {"event": "step_progress", "data": {"step_id": "s1", "status": "running"}}
 ```
 
+其中 `command_started` 为内部信令事件（不进 WebSocket 转发白名单、不留痕）：
+Worker 主循环从命令队列取出带数字 `id` 的命令、即将开始执行（命令级超时守卫
+同时起跑）时发出，每命令恰好一次：
+
+```json
+{"event": "command_started", "data": {"id": 1}}
+```
+
+Rust 侧收到后把该请求的超时截止时刻重置为「now + 完整预算」（BRG-1b）——
+FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python 守卫在排队
+场景重新对齐；`id=0` shutdown 哨兵同样发出（Rust 侧无注册项即忽略）。旧 Rust
+忽略未知事件，双向向后兼容。
+
 **命令级超时协商（BRG-1）**
 
 `execute_*` 类命令的 params 由 Rust 侧注入两个保留字段：

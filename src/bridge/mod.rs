@@ -301,6 +301,10 @@ enum SupervisorCommand {
         method: String,
         params: Value,
         response_tx: mpsc::Sender<Result<IpcResponse, BridgeError>>,
+        /// BRG-1b：命令开始执行通知。execute_inner 注册到 pending_starts，
+        /// Worker emit `command_started` 事件时触发，execute_with_timeout
+        /// 据此把超时截止时刻重置为「now + 完整预算」。
+        start_notify: Arc<tokio::sync::Notify>,
     },
     /// 发送取消通知
     Cancel { cancel_id: String },
@@ -347,6 +351,12 @@ struct BridgeInner {
     /// Worker 回收/退出时失效。供 `/api/ocr/status` 在 Worker 存活时
     /// 优先展示运行时能力，替代文件探测。
     worker_capabilities: Option<Value>,
+    /// 请求 id → 命令开始执行通知（BRG-1b）。execute_with_timeout 借此把
+    /// 超时起算点改到 Python 真正开始执行；生命周期与 pending_requests 严格
+    /// 同生共死（响应命中 / 注册回滚 / guard 清理 / drain 一并清理）。
+    /// request_id 单调递增永不复用（含 id=0 shutdown 哨兵），不存在陈旧
+    /// Notify 误唤醒新请求的可能。
+    pending_starts: HashMap<u64, Arc<tokio::sync::Notify>>,
 }
 
 /// 连续 spawn 失败熔断阈值：达到后 ensure_worker 直接快速失败（不再 spawn）
@@ -414,6 +424,7 @@ impl BridgeSupervisor {
                 ipc_tx: None,
                 consecutive_spawn_failures: 0,
                 worker_capabilities: None,
+                pending_starts: HashMap::new(),
             }),
             config,
             status,
@@ -482,20 +493,29 @@ impl BridgeSupervisor {
                 Value::from(timeout.as_millis() as u64),
             );
         }
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(1);
+        let start_notify = Arc::new(tokio::sync::Notify::new());
         self.cmd_tx
             .send(SupervisorCommand::Execute {
                 method: method.to_string(),
                 params,
                 response_tx: tx,
+                start_notify: start_notify.clone(),
             })
             .await
             .map_err(|_| BridgeError::SupervisorNotRunning)?;
-        match tokio::time::timeout(timeout, rx.recv()).await {
+        // BRG-1b：截止时刻循环——截止时刻自「发送时刻」起算，但收到 Python 的
+        // command_started 事件（该命令已出队并真正开始执行）后重置为
+        // 「now + 完整预算」。修复：FIFO 排队时间此前会吃掉预算，排队命令超时
+        // 后经 Cancel → 归属校验（发送时已 supersede 槽位，必然命中）→ 强杀，
+        // 连带摧毁 Python 侧实际正在执行的前序长命令。旧 Worker 不发该事件 →
+        // 截止时刻永不重置 → 行为与固定超时完全一致（双向向后兼容）。
+        let result = recv_with_start_deadline(rx, start_notify, timeout).await;
+        match result {
             // 超时返回前发送 Cancel：cancel_registry.trigger 立即唤醒本地 token，
             // 转发 task 等 Worker 确认停止或强制回收后再 drop guard，释放槽位与 pending。
             // 幂等：若请求恰在超时瞬间已响应/已取消，trigger 与 stdin 发送均为 no-op。
-            Err(_elapsed) => {
+            Err(BridgeError::Timeout) => {
                 self.cmd_tx
                     .send(SupervisorCommand::Cancel {
                         cancel_id: cancel_id.clone(),
@@ -521,8 +541,7 @@ impl BridgeSupervisor {
                 }
                 Err(BridgeError::Timeout)
             }
-            Ok(Some(r)) => r,
-            Ok(None) => Err(BridgeError::SupervisorNotRunning),
+            other => other,
         }
     }
 
@@ -822,6 +841,42 @@ async fn grace_wait_slot_release(this: &BridgeSupervisor, stuck_request_id: u64,
     }
 }
 
+/// BRG-1b：等待命令响应的可重置截止时刻循环
+///
+/// 截止时刻自调用时刻起算为 `now + timeout`；收到 `start_notify`（Python 侧
+/// `command_started` 事件：该命令已出队并真正开始执行）后重置为
+/// `now + timeout`——排队时间不再吃掉执行预算。旧 Worker 不发事件时截止时刻
+/// 永不重置，语义与固定 `tokio::time::timeout(timeout, rx.recv())` 完全一致。
+///
+/// 使用 [`tokio::time::Instant`] 而非 [`std::time::Instant`]：与
+/// `tokio::time::sleep` 同一时钟，单测可在 `tokio::time::pause` 下控时断言。
+/// 三个等待分支均 cancel-safe，循环重入无副作用。
+async fn recv_with_start_deadline(
+    mut rx: mpsc::Receiver<Result<IpcResponse, BridgeError>>,
+    start_notify: Arc<tokio::sync::Notify>,
+    timeout: Duration,
+) -> Result<IpcResponse, BridgeError> {
+    let mut deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(BridgeError::Timeout);
+        }
+        tokio::select! {
+            // Python 已真正开始执行：预算全额重启（Python 侧 0.9×预算守卫同时
+            // 起跑，BRG-1「Python 自愈先于 Rust 超时」在排队场景重新成立）
+            _ = start_notify.notified() => {
+                deadline = tokio::time::Instant::now() + timeout;
+            }
+            r = rx.recv() => match r {
+                Some(r) => return r,
+                None => return Err(BridgeError::SupervisorNotRunning),
+            },
+            _ = tokio::time::sleep(remaining) => return Err(BridgeError::Timeout),
+        }
+    }
+}
+
 /// 处理 supervisor 命令
 /// 等待 Worker 对取消的确认回包；宽限期内未确认且仍持有会话槽位则强杀。
 ///
@@ -864,6 +919,7 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
             method,
             params,
             response_tx,
+            start_notify,
         } => {
             // 整个 execute_inner 在独立 task 中执行：ensure_worker 内的健康检查
             // 需 await Worker 回传的响应，而响应必须经 supervisor 主循环路由。若在主循环内
@@ -871,7 +927,7 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
             // 因此此处把 execute_inner 整体 spawn，主循环保持空闲以接收响应。
             let sup = Arc::clone(this);
             tokio::spawn(async move {
-                match execute_inner(&sup, &method, params).await {
+                match execute_inner(&sup, &method, params, start_notify).await {
                     Ok((mut rx, _guard, token, cancel_id)) => {
                         // 取消后保持 guard/会话槽位，直到 Worker 回包确认已经停止；
                         // 若 Worker 未响应则强制回收。不能仅因本地 token 触发就释放
@@ -953,12 +1009,13 @@ async fn handle_supervisor_command(this: &Arc<BridgeSupervisor>, cmd: Supervisor
 async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
     match msg {
         ParsedMessage::Response(resp) => {
-            let tx = this
-                .inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending_requests
-                .remove(&resp.id);
+            let tx = {
+                let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let tx = inner.pending_requests.remove(&resp.id);
+                // BRG-1b：响应已结算，命令开始通知随之清理（与 pending 同生共死）
+                inner.pending_starts.remove(&resp.id);
+                tx
+            };
             if let Some(tx) = tx {
                 // oneshot::send 是同步操作，不会阻塞 supervisor 主循环
                 let _ = tx.send(Ok(resp));
@@ -973,12 +1030,12 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
         ParsedMessage::ResponseError { id, error } => {
             // 带有效 id 但反序列化失败：以内部错误回收对应在途请求，防止永久泄漏
             // 与调试会话槽位卡死（历史遗留 F1）
-            let tx = this
-                .inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending_requests
-                .remove(&id);
+            let tx = {
+                let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let tx = inner.pending_requests.remove(&id);
+                inner.pending_starts.remove(&id);
+                tx
+            };
             if let Some(tx) = tx {
                 let _ = tx.send(Err(BridgeError::Internal(format!(
                     "IPC 响应解析失败: {error}"
@@ -991,6 +1048,24 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
             }
         }
         ParsedMessage::Event(mut ev) => {
+            // BRG-1b 内部信令：Worker 已出队并开始执行该命令 → 触发对应请求的
+            // 超时截止时刻重置（recv_with_start_deadline）。无注册项（健康检查
+            // 直发路径 / 旧请求已结算 / id=0 shutdown 哨兵）时为 no-op。
+            // 内部信令事件：不进 WS 白名单、不留痕（早于 trace 原始 dump 返回）。
+            if ev.event == "command_started" {
+                if let Some(id) = ev.data.get("id").and_then(Value::as_u64) {
+                    let notify = this
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pending_starts
+                        .remove(&id);
+                    if let Some(notify) = notify {
+                        notify.notify_one();
+                    }
+                }
+                return;
+            }
             // 事件转发白名单（step_progress/screenshot/dialog，均由 Python 侧实际
             // emit）转发到 WebSocket 日志流；其余事件仅 debug 记录。
             // 曾经白名单中的 `ocr_result` 为死臂：Python 侧从未 emit 该事件
@@ -1076,6 +1151,7 @@ async fn execute_inner(
     this: &Arc<BridgeSupervisor>,
     method: &str,
     mut params: Value,
+    start_notify: Arc<tokio::sync::Notify>,
 ) -> Result<
     (
         oneshot::Receiver<Result<IpcResponse, BridgeError>>,
@@ -1195,6 +1271,9 @@ async fn execute_inner(
         inner.next_request_id += 1;
         let (resp_tx, resp_rx) = oneshot::channel::<Result<IpcResponse, BridgeError>>();
         inner.pending_requests.insert(request_id, resp_tx);
+        // BRG-1b：命令开始执行通知与 pending 同步注册（同生共死：响应命中 /
+        // 下方两处回滚 / reset_session / lightweight_cleanup / drain 一并清理）
+        inner.pending_starts.insert(request_id, start_notify);
 
         // 4.3 发送请求（可失败）。失败则回滚 pending；此时会话/取消状态尚未改动，无需额外回滚。
         match &inner.process {
@@ -1205,6 +1284,7 @@ async fn execute_inner(
                     params,
                 })) {
                     inner.pending_requests.remove(&request_id);
+                    inner.pending_starts.remove(&request_id);
                     return Err(BridgeError::IpcWriteError(std::io::Error::other(format!(
                         "IPC channel send failed: {e}"
                     ))));
@@ -1212,6 +1292,7 @@ async fn execute_inner(
             }
             None => {
                 inner.pending_requests.remove(&request_id);
+                inner.pending_starts.remove(&request_id);
                 return Err(BridgeError::SupervisorNotRunning);
             }
         }
@@ -1331,6 +1412,8 @@ fn reset_session(this: &Arc<BridgeSupervisor>, session: SessionType, request_id:
     }
     if let Some(id) = inner.current_request_id.take() {
         inner.pending_requests.remove(&id);
+        // BRG-1b：命令已结束，开始执行通知随 pending 一并清理
+        inner.pending_starts.remove(&id);
     }
     inner.worker_state = WorkerState::Idle;
     inner.last_activity = Instant::now();
@@ -1382,6 +1465,8 @@ fn debug_guard_cleanup(
 fn lightweight_cleanup(this: &BridgeSupervisor, request_id: u64, cancel_id: &str) {
     let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
     inner.pending_requests.remove(&request_id);
+    // BRG-1b：轻量命令结束，开始执行通知随 pending 一并清理
+    inner.pending_starts.remove(&request_id);
     inner.cancel_registry.remove(cancel_id);
 }
 
@@ -1817,6 +1902,8 @@ async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
 fn drain_pending_requests(this: &BridgeSupervisor, reason: &str) {
     let pending: Vec<_> = {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // BRG-1b：进程已终结，在途请求全部结算，开始执行通知一并清空
+        inner.pending_starts.clear();
         inner.pending_requests.drain().map(|(_, tx)| tx).collect()
     };
     for tx in pending {
@@ -1926,6 +2013,9 @@ async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32) {
     let (pending, handles, crashed_session) = {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         let pending: Vec<_> = inner.pending_requests.drain().map(|(_, tx)| tx).collect();
+        // BRG-1b：崩溃路径独立于 drain_pending_requests 结算在途请求，
+        // 开始执行通知必须一并清空（否则残留 Arc 泄漏且永无唤醒意义）
+        inner.pending_starts.clear();
         // 崩溃时以 pending 通道向在途请求送达定性错误（WorkerCrashed / DebugSessionClosed），
         // 此处仅清空 token 注册表而不触发取消：避免与 pending 送达形成 select! 竞态导致崩溃
         // 请求非确定地报 Cancelled（Cancelled 语义保留给显式 cancel）。
@@ -2561,6 +2651,59 @@ mod tests {
                 Err(BridgeError::WorkerBusy)
             ) || inner.debug_session_open,
             "重复 debug_start 必须被拒"
+        );
+    }
+
+    // ============ C2 / BRG-1b：command_started 重置超时预算 ============
+
+    /// 收到 command_started（notify）后截止时刻重置为「now + 完整预算」：
+    /// 排队 2s + 执行 2s 回包，自发送起算 4s > 3s 预算（旧固定超时必判
+    /// Timeout），但起算点后移后应正常收到响应。
+    #[tokio::test]
+    async fn command_started_重置超时预算() {
+        tokio::time::pause();
+        let (tx, rx) = mpsc::channel::<Result<IpcResponse, BridgeError>>(1);
+        let start_notify = Arc::new(tokio::sync::Notify::new());
+        let jh = tokio::spawn(recv_with_start_deadline(
+            rx,
+            start_notify.clone(),
+            Duration::from_secs(3),
+        ));
+        // 排队 2s（未超 3s 预算）后命令才真正开始执行 → 预算重启
+        tokio::time::advance(Duration::from_secs(2)).await;
+        start_notify.notify_one();
+        // 让等待循环确定性地消费 started 通知（重置截止时刻）后再推进时间
+        tokio::task::yield_now().await;
+        // 执行 2s 后回包：自发送起算 4s > 3s（旧语义必超时），
+        // 自 command_started 起算仅 2s < 3s（新语义应收到响应）
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tx.send(ok_resp()).await.expect("发送响应失败");
+        let r = tokio::time::timeout(Duration::from_secs(1), jh)
+            .await
+            .expect("循环应在收到响应后立即返回")
+            .expect("循环 task 不应 panic");
+        assert!(
+            matches!(r, Ok(ref resp) if resp.result.success),
+            "command_started 后预算应重启，响应不应被判超时，实际 {r:?}"
+        );
+    }
+
+    /// 旧 Worker 兼容：不发 command_started 时截止时刻永不重置，
+    /// 预算耗尽即超时（与固定 tokio::time::timeout 语义一致）。
+    #[tokio::test]
+    async fn 无command_started_预算自发送起算() {
+        tokio::time::pause();
+        let (_tx, rx) = mpsc::channel::<Result<IpcResponse, BridgeError>>(1);
+        let jh = tokio::spawn(recv_with_start_deadline(
+            rx,
+            Arc::new(tokio::sync::Notify::new()),
+            Duration::from_secs(3),
+        ));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let r = jh.await.expect("循环 task 不应 panic");
+        assert!(
+            matches!(r, Err(BridgeError::Timeout)),
+            "无 started 事件应按固定预算超时（旧语义保持），实际 {r:?}"
         );
     }
 }

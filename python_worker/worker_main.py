@@ -187,7 +187,12 @@ def emit_response(msg_id: int | None, result: dict) -> None:
 
 
 def emit_event(event_type: str, data: dict) -> None:
-    """向 stdout 推送事件（实际事件类型：step_progress / screenshot / dialog）。"""
+    """向 stdout 推送事件。
+
+    实际事件类型：step_progress / screenshot / dialog（业务事件，经 Rust 白名单
+    转发 WebSocket）与 command_started（BRG-1b 内部信令，不进白名单，Rust 据此
+    重置对应请求的超时起算点）。
+    """
     _write_line({"event": event_type, "data": data})
 
 
@@ -488,6 +493,13 @@ async def _serve() -> None:
             if msg is None:
                 break
             method = msg.get("method")
+            # BRG-1b：通知 Rust 该命令已真正开始执行，其超时预算自此起算
+            #（此前 Rust 预算自发送起算，FIFO 排队时间会吃掉预算，导致排队命令
+            # 超时强杀连带中断 Python 侧实际在跑的前序命令）。仅对带数字 id 的
+            # 命令发出；id=0 shutdown 哨兵同样发出无害（Rust 侧无注册项即忽略）。
+            msg_id = msg.get("id")
+            if isinstance(msg_id, int):
+                emit_event("command_started", {"id": msg_id})
             # 每条命令独立 Task + 超时兜底，避免一条挂起命令堵死后续命令（A1）
             await _dispatch_guarded(msg)
             if method == "shutdown":

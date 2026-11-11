@@ -1490,5 +1490,80 @@ def test_serve_drains_queue_after_eof(monkeypatch, capsys):
 
     asyncio.run(_run())
     lines = capsys.readouterr().out.strip().splitlines()
-    ids = [json.loads(line)["id"] for line in lines]
+    # BRG-1b 起响应行前会有 command_started 事件行（无顶层 id），只统计响应行
+    msgs = [json.loads(line) for line in lines]
+    ids = [m["id"] for m in msgs if "id" in m]
     assert 1 in ids and 2 in ids, f"EOF 前的命令应全部执行: {ids}"
+
+
+# ── BRG-1b: 每命令恰好一次 command_started 起算点通知 ──
+
+def test_serve_emits_command_started_once_per_command(monkeypatch, capsys):
+    """主循环出队即将执行时对每条命令恰好发一次 command_started 事件，
+    顺序先于该命令的响应行；非 int id 的命令不发出（BRG-1b 协议契约）。"""
+    started_events: list[dict] = []
+
+    async def _run():
+        import io
+        import sys
+
+        import worker_main
+
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                '{"id": 1, "method": "worker_health_check"}\n'
+                '{"id": 2, "method": "worker_health_check"}\n'
+                # 非 int id（协议防御）：不应发出 command_started
+                '{"id": "not-int", "method": "worker_health_check"}\n'
+            ),
+        )
+
+        real_emit_event = worker_main.emit_event
+
+        def spy_emit_event(event_type, data):
+            if event_type == "command_started":
+                started_events.append(data)
+            real_emit_event(event_type, data)
+
+        monkeypatch.setattr(worker_main, "emit_event", spy_emit_event)
+
+        async def noop_close():
+            return None
+
+        monkeypatch.setattr(worker_main.worker_core, "close_browser", noop_close)
+        try:
+            await asyncio.wait_for(worker_main._serve(), timeout=10)
+        finally:
+            worker_main.shutdown_event.clear()
+
+    asyncio.run(_run())
+    # 每条带数字 id 的命令各一次、按队列顺序；非 int id 不发
+    assert started_events == [{"id": 1}, {"id": 2}], (
+        f"应按序对每条 int id 命令恰好各发一次 command_started: {started_events}"
+    )
+    # stdout 行序：每条命令的 command_started 事件行先于其响应行
+    msgs = [
+        json.loads(line)
+        for line in capsys.readouterr().out.strip().splitlines()
+        if line.strip()
+    ]
+    started_positions = {
+        m["data"]["id"]: i
+        for i, m in enumerate(msgs)
+        if m.get("event") == "command_started"
+    }
+    responses = [(i, m) for i, m in enumerate(msgs) if "result" in m]
+    assert len(responses) == 3, f"三条命令应各有一次响应: {responses}"
+    for i, m in responses:
+        mid = m["id"]
+        if isinstance(mid, int):
+            assert mid in started_positions, f"命令 {mid} 缺少 command_started 事件"
+            assert started_positions[mid] < i, (
+                f"命令 {mid} 的 command_started 应先于其响应行"
+            )
+        else:
+            assert mid not in started_positions, (
+                f"非 int id {mid!r} 不应发出 command_started"
+            )
