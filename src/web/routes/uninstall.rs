@@ -355,6 +355,10 @@ pub async fn uninstall(
 }
 
 /// POST /api/uninstall/purge 的请求体
+///
+/// **本端点不处理用户数据目录（加密密钥 `~/.campus_network_auth`）**——那由第一步
+/// `POST /api/uninstall` 负责；完整卸载须先调 `POST /api/uninstall` 且两步的
+/// `keep_user_data` 传同一个值。
 #[derive(Debug, Deserialize)]
 pub struct PurgeRequest {
     /// 保留用户数据（`config` / `tasks` / `logs` / `environment` / `update`）
@@ -363,6 +367,24 @@ pub struct PurgeRequest {
     /// 程序文件照样删掉，但方案/任务/日志留着，重装后直接可用。
     #[serde(default)]
     pub keep_user_data: bool,
+}
+
+/// 组装 purge 响应的 message：基础文案 + 按需追加提示（抽成纯函数便于单测）
+fn purge_message(pending_update_left: bool, user_data_left: bool) -> String {
+    let mut message = if pending_update_left {
+        "正在卸载，程序即将退出（注意：待应用的更新未能取消，程序可能被重新安装）".to_string()
+    } else {
+        "正在卸载，程序即将退出".to_string()
+    };
+    if user_data_left {
+        // 本端点只删程序本身；base_path 之外的加密密钥目录归第一步 /api/uninstall 管，
+        // keep_user_data=false 单独调 purge 时它会留在盘上——出声提示，别让用户
+        // 以为卸载已"片甲不留"，也别误导他手动去删（保留配置场景下删了就解不开密文）
+        message.push_str(
+            "；注意：用户数据目录（加密密钥）尚未清理，完整卸载须先调 POST /api/uninstall 且 keep_user_data 同值",
+        );
+    }
+    message
 }
 
 /// POST /api/uninstall/purge — 删除程序本身并退出（卸载第二步）
@@ -434,12 +456,12 @@ pub async fn purge_uninstall(
     let _ = state.shutdown_tx.send(());
     crate::launcher::spawn_exit_watchdog(30);
 
+    // keep_user_data=false 单独调 purge（未先走第一步 /api/uninstall）时，加密密钥
+    // 目录会留在盘上：存在即追加 message 提示；勾选保留的场景属刻意保留，不提示
+    let user_data_left = !body.keep_user_data && user_data_dir().is_some_and(|p| p.exists());
+
     Ok(data(serde_json::json!({
-        "message": if pending_update_left {
-            "正在卸载，程序即将退出（注意：待应用的更新未能取消，程序可能被重新安装）"
-        } else {
-            "正在卸载，程序即将退出"
-        },
+        "message": purge_message(pending_update_left, user_data_left),
         "kept_user_data": body.keep_user_data,
         "install_dir": plan.install_dir.to_string_lossy(),
         "data_dirs": plan
@@ -556,6 +578,29 @@ mod tests {
         assert_eq!(v["label"], "标签");
         assert_eq!(v["success"], true);
         assert_eq!(v["message"], "ok");
+    }
+
+    /// purge 响应 message：仅在密钥目录未清理时追加提示
+    ///
+    /// 回归：purge 单独调用不删 `~/.campus_network_auth`（刻意设计），但静默
+    /// 留下密钥目录会让用户误以为卸载已彻底完成。
+    #[test]
+    fn purge_message_appends_user_data_hint_only_when_left() {
+        assert_eq!(purge_message(false, false), "正在卸载，程序即将退出");
+        let pending = purge_message(true, false);
+        assert!(pending.contains("更新未能取消"), "更新未取消的警示不得丢失");
+        assert!(
+            !pending.contains("加密密钥"),
+            "密钥不残留时不得出现未清理提示"
+        );
+        let hint = purge_message(false, true);
+        assert!(hint.contains("用户数据目录（加密密钥）尚未清理"));
+        assert!(
+            hint.contains("POST /api/uninstall"),
+            "提示须给出补做第一步的路径"
+        );
+        let both = purge_message(true, true);
+        assert!(both.contains("更新未能取消") && both.contains("尚未清理"));
     }
 
     /// 卸载清单：程序目录 + 五个数据目录，逐项给出路径与存在性
