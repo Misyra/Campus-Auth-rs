@@ -5,7 +5,7 @@
  * 均由此派生，避免同一枚举在多处各写一套中文标签而漂移。
  */
 
-import type { HttpFailureAction, HttpLoginMethod, HttpSuccessCheck, LoginChannel } from "../api/types";
+import type { HttpFailureAction, HttpLoginMethod, LoginChannel } from "../api/types";
 
 /** 登录渠道 → 用户可见标签 */
 export function loginChannelLabel(channel: LoginChannel | string | undefined): string {
@@ -88,14 +88,6 @@ export const HTTP_CERT_POLICY_OPTIONS: Array<{ value: HttpCertPolicy; label: str
   { value: "strict", label: "严格校验证书" },
 ];
 
-/** 直连成败判定方式选项（CustomSelect 消费；取值与后端 `HttpSuccessCheck` 同源）。
- * 新任务默认「网络检测」（见 httpTask.emptyHttpTaskDraft）；已有任务里未写
- * `success_check` 键的仍按后端 serde default 走「响应关键字」，行为不变 */
-export const HTTP_SUCCESS_CHECK_OPTIONS: Array<{ value: HttpSuccessCheck; label: string }> = [
-  { value: "network", label: "网络检测" },
-  { value: "response", label: "响应关键字" },
-];
-
 /** 命中失败关键字后的动作；旧任务缺省按凭据错误立即停止。 */
 export const HTTP_FAILURE_ACTION_OPTIONS: Array<{ value: HttpFailureAction; label: string }> = [
   { value: "credential", label: "账号或密码错误，停止重试" },
@@ -165,22 +157,6 @@ export function httpTestOutcomeHint(outcome: string | undefined): string {
 }
 
 /**
- * 请求地址 / 请求头 / 请求体可用的模板占位符。
- *
- * 前五类是执行器内置字段，其余为凭据变换脚本 `transform()` 的返回字段
- * （脚本返回同名键会覆盖内置值）。契约见 `src/login/http_login.rs` 的
- * `run_once`（内置 vars）与 `substitute`（未知占位符原样保留）。
- */
-export const HTTP_TEMPLATE_PLACEHOLDERS = [
-  "{username}",
-  "{password}",
-  "{isp}",
-  "{auth_url}",
-  "{local_ip}",
-  "{local_mac}",
-] as const;
-
-/**
  * 凭据变换脚本可用的内置函数（与执行器 `register_builtins` 注册的全局函数一一对应）。
  *
  * 这里是纯计算函数，无网络与文件访问；沙箱另有递归深度 64、循环 10 万次与
@@ -201,48 +177,6 @@ export const HTTP_CRYPTO_BUILTINS = [
   "url_encode(text)",
   "now_ms()",
 ] as const;
-
-/**
- * `transform()` 的 `ctx` 参数字段（与执行器的 `JsValue::from_json` 构造一一对应）。
- *
- * `isp` 为方案的运营商字段原样透传（预设「移动/联通/电信」或自定义关键字，
- * 未选择为空串），门户侧的表示法（Dr.COM 的 @cmcc 后缀等）由脚本自行映射；
- * `page` 为认证页原文（抓取失败时为空串）；`local_ip` / `local_mac` 为本机主用
- * 接口地址，取不到时为空串，脚本必须容忍——eportal / Dr.COM 类门户的字段密钥
- * 由来源 IP 推导，没有它就只能退回从 `page` 里找补。
- */
-export const HTTP_CRYPTO_CTX_FIELDS = [
-  "username",
-  "password",
-  "isp",
-  "auth_url",
-  "page",
-  "local_ip",
-  "local_mac",
-] as const;
-
-/** 请求头模板示例（表单 placeholder 与向导预填共用，避免两处文案漂移） */
-export const HTTP_HEADERS_EXAMPLE =
-  "Content-Type: application/x-www-form-urlencoded\nReferer: {auth_url}";
-
-/** 请求体模板示例（POST 场景） */
-export const HTTP_BODY_EXAMPLE = "username={username}&password={password}";
-
-/**
- * 凭据变换脚本骨架：直接可跑的最小 transform（向导「脚本」步可一键填入） */
-export const HTTP_CRYPTO_SCRIPT_SKELETON = `function transform(ctx) {
-  // 返回对象的字段可被 {字段名} 占位符引用
-  return {
-    password: md5(ctx.password),
-  };
-}`;
-
-/**
- * MAC 形态转换示例：{local_mac} 固定为小写冒号分隔（aa:bb:cc:dd:ee:ff），
- * 门户常要求裸十六进制 / 大写 / 连字符形态，直接引用会提交错误格式。
- * 注入占位符说明与 ctx 字段说明两处（`http-template-help` 与脚本卡）。
- */
-export const HTTP_MAC_FORMAT_NOTE = `{local_mac} 固定为小写冒号分隔（如 aa:bb:cc:dd:ee:ff）。门户要求裸十六进制 / 大写 / 连字符时，请在脚本里转换后引用，如：ctx.local_mac.replace(/:/g, "") → aabbccddeeff、toUpperCase() → 大写。eportal / Dr.COM 类门户靠来源 IP 防串号，多数场景 MAC 提交空值即可。`;
 
 /**
  * 直连配置的必填缺口清单（向导据此决定能否进入下一步 / 发送测试）。
