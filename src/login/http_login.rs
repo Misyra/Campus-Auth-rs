@@ -278,7 +278,7 @@ impl HttpLoginRequest {
         Ok(())
     }
 
-    /// 纯模板体积校验（不含 URL 合法性）：保存路径使用。
+    /// 纯模板校验（不含 URL 合法性）：体积边界 + 请求头头名合法性。保存路径使用。
     ///
     /// 保存与执行必须同一口径——此前只在执行/测试时校验体积，超限配置能静默
     /// 落盘，用户要到真正登录失败才知道（且失败文案指向"过长"而非"保存被拒"，
@@ -304,6 +304,15 @@ impl HttpLoginRequest {
         for (label, actual, limit) in checks {
             if actual > limit {
                 return Err(format!("{label}过长（最多 {limit} 字节）"));
+            }
+        }
+        // 头名合法性：非法头名在执行期会让 reqwest 拒绝整个请求，保存时直接
+        // 指出问题头名比留到登录失败再排查（且失败文案不含头名）更可用
+        for (name, _) in parse_header_lines(headers) {
+            if !is_valid_header_name_template(&name) {
+                return Err(format!(
+                    "直连请求头含非法头名「{name}」（头名仅允许英文字母、数字与 !#$%&'*+-.^_`|~）"
+                ));
             }
         }
         Ok(())
@@ -1759,8 +1768,8 @@ fn decode_body(bytes: &[u8], charset: Option<&str>) -> String {
     }
 }
 
-/// 解析请求头模板：每行 `Key: Value`，空行与无冒号行忽略
-fn parse_headers(raw: &str) -> Vec<(String, String)> {
+/// 解析请求头模板行：每行 `Key: Value`，空行与无冒号行忽略（不判断头名合法性）
+fn parse_header_lines(raw: &str) -> Vec<(String, String)> {
     raw.lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -1773,6 +1782,74 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
                 return None;
             }
             Some((k.to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// RFC 7230 token 字符（头名合法字符全集）：字母数字加上 ``!#$%&'*+-.^_`|~``
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+        )
+}
+
+/// 头名是否为合法 RFC 7230 token（非空且全为 token 字符）
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(is_token_char)
+}
+
+/// 模板态头名合法性：token 字符之外放行 `{占位符}` 段。
+///
+/// 执行期先做模板替换再解析请求头（`substitute` → [`parse_headers`]），占位符
+/// 替换后即为 token 字符序列；故保存闸口以一个 token 字符代表每段合法占位符
+/// 后再做 token 判定，避免误拒「头名由变量拼成」的既有可用配置。
+fn is_valid_header_name_template(name: &str) -> bool {
+    let mut normalized = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some((head, tail)) = rest.split_once('{') {
+        normalized.push_str(head);
+        normalized.push('a');
+        let Some((inner, after)) = tail.split_once('}') else {
+            return false;
+        };
+        if !is_placeholder_name(inner) {
+            return false;
+        }
+        rest = after;
+    }
+    normalized.push_str(rest);
+    is_valid_header_name(&normalized)
+}
+
+/// 执行期请求头解析：在 [`parse_header_lines`] 基础上跳过非法头名的行。
+///
+/// 非法头名会让 reqwest 拒绝整个请求（而非只丢这一个头）；与其一个坏行否决
+/// 整次登录，不如跳过并留 debug 痕迹。新配置由保存闸口拦截（见
+/// [`HttpLoginRequest::validate_templates`]），此处只兜底绕过校验的存量配置。
+fn parse_headers(raw: &str) -> Vec<(String, String)> {
+    parse_header_lines(raw)
+        .into_iter()
+        .filter(|(name, _)| {
+            let valid = is_valid_header_name(name);
+            if !valid {
+                tracing::debug!(name = %name, "请求头模板头名非法，已跳过该行");
+            }
+            valid
         })
         .collect()
 }
@@ -1988,6 +2065,28 @@ pub fn run_transform_worker() -> std::io::Result<()> {
     std::io::stdout().write_all(&output)
 }
 
+/// 拼接「基础文案 + 子进程 stderr 摘录」的诊断消息；stderr 为空时只保留基础文案。
+///
+/// 计算子进程的 panic 与运行时错误只写 stderr，此前 stderr 直连 null，子进程
+/// 异常退出时只剩一句「异常退出」，无从定位是脚本语法错误还是环境问题。
+/// 摘录上限 500 字符（按字符截断，不撕裂多字节 UTF-8），防止超长刷屏。
+///
+/// 仅正式子进程路径（`#[cfg(not(test))]` 分支）持有 stderr；测试构建走沙箱
+/// 路径没有 stderr，故测试构建下允许暂不使用（纯函数由单测直接钉住）。
+#[cfg_attr(test, allow(dead_code))]
+fn stderr_detail(base: &str, stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.is_empty() {
+        return base.to_string();
+    }
+    let mut excerpt: String = text.chars().take(500).collect();
+    if text.chars().count() > 500 {
+        excerpt.push('…');
+    }
+    format!("{base}: {excerpt}")
+}
+
 /// 执行流程中的计算步骤，并把前面步骤提取的变量提供给 `ctx.vars`。
 #[allow(clippy::too_many_arguments)]
 async fn execute_crypto_script_with_vars(
@@ -2045,7 +2144,9 @@ async fn execute_crypto_script_with_vars(
             .arg("--http-transform-worker")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            // stderr 接管为管道：失败诊断要取子进程的 panic/报错输出，
+            // wait_with_output 会并发读空管道，不会因写满而卡死子进程
+            .stderr(std::process::Stdio::piped())
             .env_clear()
             .kill_on_drop(true);
         #[cfg(windows)]
@@ -2069,10 +2170,10 @@ async fn execute_crypto_script_with_vars(
                 .await
                 .map_err(|_| "计算子进程等待失败".to_string())?;
             if !output.status.success() {
-                return Err("计算子进程异常退出".to_string());
+                return Err(stderr_detail("计算子进程异常退出", &output.stderr));
             }
             serde_json::from_slice::<Result<BTreeMap<String, String>, String>>(&output.stdout)
-                .map_err(|_| "计算子进程结果无效".to_string())?
+                .map_err(|_| stderr_detail("计算子进程结果无效", &output.stderr))?
         };
         tokio::time::timeout(SCRIPT_TIMEOUT, execution)
             .await
@@ -2619,6 +2720,107 @@ mod tests {
         let err = HttpLoginRequest::validate_templates("", "", &long_body, "", "", "")
             .expect_err("超限请求体必须被拒");
         assert!(err.contains("直连请求体过长"), "{err}");
+    }
+
+    /// A18：保存闸口拦下非法头名；合法头名与 `{占位符}` 头名放行
+    #[test]
+    fn validate_templates_rejects_invalid_header_names() {
+        let ok = HttpLoginRequest::validate_templates(
+            "http://p/login",
+            "X-Test: one\nX-{username}: v",
+            "",
+            "",
+            "",
+            "",
+        );
+        assert!(ok.is_ok(), "合法头名与占位符头名应放行: {ok:?}");
+
+        let err =
+            HttpLoginRequest::validate_templates("", "X-Test: one\nBad Name: two", "", "", "", "")
+                .expect_err("含空格的非法头名必须被拒");
+        assert!(err.contains("非法头名"), "{err}");
+        assert!(err.contains("Bad Name"), "文案须指出问题头名: {err}");
+
+        let err = HttpLoginRequest::validate_templates("", "X-书名: v", "", "", "", "")
+            .expect_err("非 ASCII 头名必须被拒");
+        assert!(err.contains("非法头名"), "{err}");
+
+        // 占位符未闭合：替换后也不可能是合法 token
+        let err = HttpLoginRequest::validate_templates("", "X-{username: v", "", "", "", "")
+            .expect_err("未闭合占位符的头名必须被拒");
+        assert!(err.contains("非法头名"), "{err}");
+
+        // 空请求头模板与纯值行（无冒号）不受影响
+        assert!(HttpLoginRequest::validate_templates("", "", "", "", "", "").is_ok());
+        assert!(
+            HttpLoginRequest::validate_templates("", "just-a-value-line", "", "", "", "").is_ok()
+        );
+    }
+
+    /// A18：RFC 7230 token 边界——合法 token 全集与常见非法写法
+    #[test]
+    fn is_valid_header_name_rfc7230_token_boundaries() {
+        assert!(is_valid_header_name("X-Test"));
+        assert!(is_valid_header_name("x"));
+        assert!(is_valid_header_name("!#$%&'*+-.^_`|~0A"));
+
+        assert!(!is_valid_header_name(""), "空头名非法");
+        assert!(!is_valid_header_name("X Test"), "空格非法");
+        assert!(!is_valid_header_name("中文名"), "非 ASCII 非法");
+        assert!(!is_valid_header_name("X@Test"), "token 字符集之外非法");
+        assert!(
+            !is_valid_header_name("{username}"),
+            "占位符段须走模板态校验"
+        );
+        assert!(is_valid_header_name_template("{username}"));
+        assert!(is_valid_header_name_template("X-{username}-Tag"));
+        assert!(
+            !is_valid_header_name_template("X-{bad name}"),
+            "段内非法占位符名"
+        );
+    }
+
+    /// A18：执行期解析对非法头名的行记 debug 跳过（合法行不受影响）
+    #[test]
+    fn parse_headers_skips_invalid_header_names() {
+        assert_eq!(
+            parse_headers("X-Test: one\nBad Name: two\n中文名: three\nGood-Name: four"),
+            vec![
+                ("X-Test".into(), "one".into()),
+                ("Good-Name".into(), "four".into()),
+            ]
+        );
+        // 执行期收到的是替换后的文本：未替换的占位符段同样不是合法 token
+        assert_eq!(
+            parse_headers("X-{missing}: v"),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    /// A19：stderr 摘录拼进错误文案——空/纯空白不拼尾巴，非 UTF-8 lossy 解码，
+    /// 超 500 字符按字符截断（不撕裂多字节）并以省略号标记
+    #[test]
+    fn stderr_detail_appends_truncated_excerpt() {
+        assert_eq!(
+            stderr_detail("计算子进程异常退出", b""),
+            "计算子进程异常退出"
+        );
+        assert_eq!(
+            stderr_detail("计算子进程异常退出", b"  \n "),
+            "计算子进程异常退出"
+        );
+        assert_eq!(
+            stderr_detail("计算子进程异常退出", b"panicked at boom"),
+            "计算子进程异常退出: panicked at boom"
+        );
+        assert_eq!(stderr_detail("x", b"a\xffb"), "x: a\u{FFFD}b");
+
+        let long = "你".repeat(600);
+        let out = stderr_detail("x", long.as_bytes());
+        let excerpt = out.strip_prefix("x: ").unwrap();
+        assert_eq!(excerpt.chars().count(), 501, "500 字符 + 省略号");
+        assert!(excerpt.ends_with('…'));
+        assert!(excerpt.starts_with("你"));
     }
 
     /// 空请求地址必须明确指向「任务 · 直连任务」而不是方案——直连配置已整体搬到
