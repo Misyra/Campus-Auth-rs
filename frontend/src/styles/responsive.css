@@ -127,18 +127,9 @@
     flex: 1;
   }
 
+  /* E6 起通知面板由 AppPopover portal 到 body、floating-ui 定位（视口避让由库负责，
+     旧的 .top-bar 后代定位覆盖已随之失效删除），这里只保留窄屏的尺寸收窄。 */
   .notification-dropdown {
-    width: 280px;
-    right: 0;
-  }
-
-  /* 弹层相对顶栏定位，避免铃铛右侧的操作把弹层推到视口外。 */
-  .notification-wrapper { position: static; }
-  .notification-wrapper > .btn { position: relative; }
-  .top-bar .notification-dropdown {
-    right: 16px;
-    top: calc(100% + 4px);
-    margin-top: 0;
     width: min(360px, calc(100vw - 32px));
     max-height: min(400px, calc(100dvh - 160px));
   }

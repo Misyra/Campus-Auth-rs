@@ -12,10 +12,12 @@
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组：三个面板此前各复制一份
  * 约 350 行的 scoped 样式，改一处漏一处就漂移。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
 import { useHttpTasks } from "@/composables/useHttpTasks";
@@ -119,48 +121,8 @@ const visibleScripts = computed(() => {
   );
 });
 
-// ===== 行尾 ⋯ 菜单（对齐另两个面板）：同一时刻只开一个 =====
-const openMenuId = ref("");
-
-function toggleRowMenu(scriptId: string): void {
-  openMenuId.value = openMenuId.value === scriptId ? "" : scriptId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-/** 全局监听只在菜单打开期间挂载 */
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
-// 必须在 onBeforeUnmount 里直接摘掉 document 监听
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-  closeRowMenu();
-});
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
 /**
  * 导入脚本文件：内容进编辑器交给自动保存落盘，并把 `?task=` 写上。
@@ -313,27 +275,18 @@ onMounted(async () => {
               <button type="button" class="btn btn-sm btn-icon-only" :title="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" @click="openEditor(script.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${script.name || script.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === script.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(script.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === script.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button
-                  type="button"
-                  role="menuitem"
-                  :disabled="runningIds.has(script.id)"
-                  @click="runRowAction(() => runScript(script.id))"
-                >{{ runningIds.has(script.id) ? '运行中…' : '立即运行' }}</button>
-                <button type="button" role="menuitem" :disabled="exportingIds.has(script.id)" @click="runRowAction(() => exportScript(script.id))">导出脚本文件</button>
-                <button type="button" role="menuitem" class="tsk-menu-danger" @click="runRowAction(() => deleteScript(script.id))">删除</button>
-              </div>
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${script.name || script.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="runningIds.has(script.id)" @select="runScript(script.id)">
+                  {{ runningIds.has(script.id) ? '运行中…' : '立即运行' }}
+                </AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="exportingIds.has(script.id)" @select="exportScript(script.id)">导出脚本文件</AppDropdownMenuItem>
+                <AppDropdownMenuItem class="tsk-menu-danger" @select="deleteScript(script.id)">删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>

@@ -37,7 +37,10 @@ function bellButton(): HTMLButtonElement {
 }
 
 function pressEscape(): void {
-  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  // E6 起面板的 Esc 由 Reka（DismissableLayer，监听挂在 window）接管：
+  // 真实键盘事件沿 document 冒泡到 window，这里合成事件补 bubbles 对齐该路径，
+  // 断言语义（Esc 关闭 / 卸载后 Esc 不影响单例）不变。
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 }
 
 describe("通知下拉语义与键盘路径（E2）", () => {

@@ -11,9 +11,11 @@
  *
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useTasks } from "@/composables/useTasks";
 import { useScripts } from "@/composables/useScripts";
 import { useHttpTasks } from "@/composables/useHttpTasks";
@@ -133,47 +135,8 @@ const bindingIndex = computed(() => {
 /** 绑定索引是否可用（profiles 已拉取）：未就绪时绑定列显示「—」 */
 const bindingsReady = computed(() => Object.keys(profiles.value).length > 0);
 
-// ===== 行尾 ⋯ 菜单：同一时刻只开一个 =====
-const openMenuId = ref("");
-
-function toggleRowMenu(taskId: string): void {
-  openMenuId.value = openMenuId.value === taskId ? "" : taskId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
-// 必须在 onBeforeUnmount 里直接摘掉 document 监听
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-  closeRowMenu();
-});
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
 // ===== 编辑态派生 =====
 /**
@@ -355,30 +318,22 @@ onMounted(async () => {
               >
                 <IconApp :name="debug.loading.value ? 'refresh' : 'bug'" class="icon-sm" :class="{ spin: debug.loading.value }" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${task.name || task.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === task.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(task.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === task.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button type="button" role="menuitem" :disabled="debug.loading.value" @click="runRowAction(() => debug.startDebug(task.id))">调试</button>
-                <button type="button" role="menuitem" :disabled="t.duplicatingIds.has(task.id)" @click="runRowAction(() => t.duplicateTask(task.id))">复制为新任务</button>
-                <button type="button" role="menuitem" :disabled="t.exportingIds.has(task.id)" @click="runRowAction(() => t.exportTask(task.id))">导出 JSON</button>
-                <button
-                  type="button"
-                  role="menuitem"
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="debug.loading.value" @select="debug.startDebug(task.id)">调试</AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="t.duplicatingIds.has(task.id)" @select="t.duplicateTask(task.id)">复制为新任务</AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="t.exportingIds.has(task.id)" @select="t.exportTask(task.id)">导出 JSON</AppDropdownMenuItem>
+                <AppDropdownMenuItem
                   class="tsk-menu-danger"
                   :disabled="task.id === 'default'"
                   :title="task.id === 'default' ? '内置默认任务是浏览器渠道的兜底，不可删除' : ''"
-                  @click="runRowAction(() => t.deleteTask(task.id))"
-                >删除</button>
-              </div>
+                  @select="t.deleteTask(task.id)"
+                >删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>

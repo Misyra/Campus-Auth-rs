@@ -12,12 +12,14 @@
  *
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import HttpFlowFields from "@/components/common/HttpFlowFields.vue";
 import HttpTestResult from "@/components/common/HttpTestResult.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useHttpTaskTest } from "@/composables/useHttpTaskTest";
 import { useCarrierField } from "@/composables/useCarrierField";
@@ -139,44 +141,8 @@ const rows = computed(() => buildHttpTaskRows(httpTasks.value, bindingIndex.valu
 
 const visibleRows = computed(() => filterHttpTaskRows(rows.value, searchQuery.value));
 
-// ===== 行尾 ⋯ 菜单 =====
-const openMenuId = ref("");
-
-function toggleRowMenu(taskId: string): void {
-  openMenuId.value = openMenuId.value === taskId ? "" : taskId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-});
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
 // ===== 编辑态 =====
 
@@ -363,22 +329,16 @@ onMounted(async () => {
               <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${row.name || row.id}`" @click="openEditor(row.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${row.name || row.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === row.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(row.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === row.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button type="button" role="menuitem" :disabled="duplicatingIds.has(row.id)" @click="runRowAction(() => duplicateHttpTask(row.id))">复制为新任务</button>
-                <button type="button" role="menuitem" :disabled="exportingIds.has(row.id)" @click="runRowAction(() => exportHttpTask(row.id))">导出 JSON</button>
-                <button type="button" role="menuitem" class="tsk-menu-danger" @click="runRowAction(() => deleteHttpTask(row.id))">删除</button>
-              </div>
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${row.name || row.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="duplicatingIds.has(row.id)" @select="duplicateHttpTask(row.id)">复制为新任务</AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="exportingIds.has(row.id)" @select="exportHttpTask(row.id)">导出 JSON</AppDropdownMenuItem>
+                <AppDropdownMenuItem class="tsk-menu-danger" @select="deleteHttpTask(row.id)">删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>

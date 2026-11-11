@@ -348,11 +348,10 @@
   flex: 1;
 }
 
-/* 行尾 ⋯ 菜单：绝对定位于操作列，同一时刻只开一个（面板持状态） */
+/* 行尾 ⋯ 菜单（AppDropdownMenu 的 Content）。E6 起菜单由 Reka portal 出表格、
+   floating-ui 按触发器定位（.tsk-menu 自身不再绝对定位——旧 top/right 三行已删）：
+   表格横向滚动时菜单跟随触发器，窄屏自动翻转避让；z-index 会被库抄到定位包装层上。 */
 .tsk-menu {
-  position: absolute;
-  top: 100%;
-  right: 8px;
   z-index: var(--z-dropdown);
   display: flex;
   flex-direction: column;

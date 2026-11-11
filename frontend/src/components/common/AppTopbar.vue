@@ -2,8 +2,9 @@
 // 顶栏（替代原 topbar.html）。
 // 展示页面标题、未保存提示、WebSocket 重连状态、通知中心、监控开关。
 
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import AppPopover from "./AppPopover.vue";
 import IconApp from "./IconApp.vue";
 import type { NotificationAction } from "../../api/types";
 import { useConfig } from "../../composables/useConfig";
@@ -16,7 +17,7 @@ const route = useRoute();
 const router = useRouter();
 const { dirty } = useConfig();
 const { status, busy } = useStatus();
-const { notifications, unreadNotifications, showNotifications, toggleNotifications } = useNotifications();
+const { notifications, unreadNotifications, showNotifications } = useNotifications();
 const { wsReconnecting, wsRetryCount, wsDisconnectReason, retryNow } = useWebSocket();
 const { toggleMonitor, quitApp } = useUi();
 
@@ -42,34 +43,16 @@ function onActionClick(action: NotificationAction | null): void {
   }
 }
 
-// 通知面板点击外部/路由跳转后关闭（此前只能再次点铃铛，容易残留遮挡）
-const notificationWrapperRef = ref<HTMLElement | null>(null);
-
-function onDocClick(e: MouseEvent): void {
-  if (!showNotifications.value) return;
-  const wrapper = notificationWrapperRef.value;
-  if (wrapper && e.target instanceof Node && !wrapper.contains(e.target)) {
-    showNotifications.value = false;
-  }
+/**
+ * 通知面板开合（E6 收口进 AppPopover/Reka Popover 后本组件不再持监听）：
+ * 外部点击、Esc、焦点归还全由库承担；这里只补两件事——
+ * 打开时刻清零未读（与原 toggleNotifications 的时机一致，仅打开时清）；
+ * 关闭时把面板合上（外部点击/路由跳转后的 update:open(false) 也走这里）。
+ */
+function onNotifOpen(open: boolean): void {
+  showNotifications.value = open;
+  if (open) unreadNotifications.value = 0;
 }
-
-onMounted(() => document.addEventListener("click", onDocClick));
-
-// 面板打开期间支持 Esc 关闭（对齐 HttpTasksPanel 行菜单的既有键盘约定）。
-// 监听随开合挂/卸不常驻；卸载路径兜底移除，防打开状态下组件销毁泄漏。
-function onDocKeydown(e: KeyboardEvent): void {
-  if (e.key === "Escape") showNotifications.value = false;
-}
-
-watch(showNotifications, (open) => {
-  if (open) document.addEventListener("keydown", onDocKeydown);
-  else document.removeEventListener("keydown", onDocKeydown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener("click", onDocClick);
-  document.removeEventListener("keydown", onDocKeydown);
-});
 </script>
 
 <template>
@@ -86,20 +69,16 @@ onBeforeUnmount(() => {
       <button class="btn btn-xs" @click="retryNow()" title="跳过退避等待，立即以最短间隔重连">立即重试</button>
     </div>
     <div class="top-actions">
-      <div ref="notificationWrapperRef" class="notification-wrapper">
-        <button
-          class="btn btn-icon-only"
-          @click="toggleNotifications"
-          title="通知历史"
-          aria-label="通知历史"
-          aria-haspopup="dialog"
-          :aria-expanded="showNotifications"
-        >
-          <IconApp name="bell" />
-          <span v-if="unreadNotifications > 0" class="notification-badge">{{ unreadNotifications > 9 ? "9+" : unreadNotifications }}</span>
-        </button>
-        <!-- 通知历史是信息面板而非命令菜单（子项非 menuitem），dialog 语义才与实际交互一致 -->
-        <div v-if="showNotifications" class="notification-dropdown" role="dialog" aria-label="通知历史">
+      <div class="notification-wrapper">
+        <AppPopover :open="showNotifications" class="notification-dropdown" aria-label="通知历史" @update:open="onNotifOpen">
+          <template #trigger>
+            <button class="btn btn-icon-only" title="通知历史" aria-label="通知历史" @pointerdown.stop>
+              <IconApp name="bell" />
+              <span v-if="unreadNotifications > 0" class="notification-badge">{{ unreadNotifications > 9 ? "9+" : unreadNotifications }}</span>
+            </button>
+          </template>
+          <!-- 通知历史是信息面板而非命令菜单（子项非 menuitem），dialog 语义才与实际交互一致；
+               aria-haspopup=dialog / aria-expanded / role=dialog 由 Reka 输出。 -->
           <div class="notification-header">
             <span>通知历史</span>
             <button class="btn btn-text btn-xs" @click="notifications.splice(0, notifications.length)">清空</button>
@@ -120,7 +99,7 @@ onBeforeUnmount(() => {
               <a v-if="n.action" class="notify-action" @click.prevent="onActionClick(n.action)">{{ n.action.label }}</a>
             </div>
           </div>
-        </div>
+        </AppPopover>
       </div>
       <button
         class="btn"

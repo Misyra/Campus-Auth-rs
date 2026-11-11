@@ -12,13 +12,15 @@ import { IS_OPENWRT } from "@/utils/platform";
  *
  * 版式走 `styles/pages/tasks.css` 的 `tsk-*` 共享组，本页只写自己的列宽与单元格结构。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import ToggleSwitch from "@/components/common/ToggleSwitch.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import Modal from "@/components/common/Modal.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, watch } from "vue";
 import { useScheduledTasks } from "@/composables/useScheduledTasks";
 import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
@@ -176,47 +178,11 @@ function lastRunBadge(task: ScheduledTask): { cls: string; text: string } {
     : { cls: "badge badge--sm badge--warn", text: "失败" };
 }
 
-// ===== 行尾 ⋯ 菜单（与任务页三个面板同口径：同一时刻只开一个） =====
-const openMenuId = ref("");
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
-function toggleRowMenu(taskId: string): void {
-  openMenuId.value = openMenuId.value === taskId ? "" : taskId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
-// 必须在 onBeforeUnmount 里直接摘掉 document 监听
 onBeforeUnmount(() => {
   st.stopScheduledRunPolling();
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-  closeRowMenu();
 });
 
 const NOTICE_HELP =
@@ -341,25 +307,19 @@ onMounted(async () => {
               >
                 <IconApp name="pencil" class="icon-sm" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${task.name || task.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === task.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(task.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === task.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button type="button" role="menuitem" :disabled="st.runningIds.has(task.id)" @click="runRowAction(() => st.runScheduledTask(task.id))">
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="st.runningIds.has(task.id)" @select="st.runScheduledTask(task.id)">
                   {{ st.runningIds.has(task.id) ? '运行中…' : '立即运行' }}
-                </button>
-                <button type="button" role="menuitem" @click="runRowAction(() => st.loadScheduledTaskHistory(task.id))">查看历史</button>
-                <button type="button" role="menuitem" @click="runRowAction(() => openEditor(task.id))">编辑</button>
-                <button type="button" role="menuitem" class="tsk-menu-danger" @click="runRowAction(() => st.deleteScheduledTask(task.id))">删除</button>
-              </div>
+                </AppDropdownMenuItem>
+                <AppDropdownMenuItem @select="st.loadScheduledTaskHistory(task.id)">查看历史</AppDropdownMenuItem>
+                <AppDropdownMenuItem @select="openEditor(task.id)">编辑</AppDropdownMenuItem>
+                <AppDropdownMenuItem class="tsk-menu-danger" @select="st.deleteScheduledTask(task.id)">删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>
