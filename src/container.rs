@@ -146,13 +146,16 @@ impl ServiceContainer {
         // 启动即后台探测环境真实状态（只读，不触发下载，不阻断启动）。
         Self::spawn_environment_probe(&environment, &shutdown_token);
 
-        // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment）----
-        let executor = TaskExecutor::new(
+        // ---- Layer 5：TaskExecutor（依赖 Bridge + Environment + EventBus）----
+        // 任务终态（TaskFinished / TaskFailed）经 execute / execute_with_timeout_override
+        // 统一入口发布，手动执行与定时调度两条触发共用同一收敛点
+        let executor = TaskExecutor::new_with_events(
             base_path,
             status.clone(),
             bridge.clone(),
             environment.clone(),
             config.clone(),
+            events.clone(),
         );
 
         // ---- Layer 6：网络探测 & 监测（login 前置，供构造注入）----
