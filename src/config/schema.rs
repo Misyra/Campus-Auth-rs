@@ -515,7 +515,8 @@ fn default_notification_timeout() -> u32 {
 /// 推送通道类型
 ///
 /// `Webhook` 为自定义 POST JSON 通道；`Bark` / `Serverchan` / `Telegram`
-/// 为预设通道（各自只需凭据字段，消息格式内建模板化，无需用户写模板）。
+/// 为预设通道（各自只需凭据字段，消息格式内建模板化，无需用户写模板）；
+/// `Os` 为本机桌面系统通知（无凭据、无远端端点）。
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationChannelKind {
@@ -528,6 +529,8 @@ pub enum NotificationChannelKind {
     Serverchan,
     /// Telegram Bot
     Telegram,
+    /// 系统通知（本机桌面通知中心）
+    Os,
 }
 
 impl NotificationChannelKind {
@@ -538,6 +541,7 @@ impl NotificationChannelKind {
             Self::Bark => "Bark",
             Self::Serverchan => "Server酱",
             Self::Telegram => "Telegram",
+            Self::Os => "系统通知",
         }
     }
 }
@@ -555,7 +559,7 @@ pub struct NotificationHeader {
 /// 单个推送通道（serde tagged，`type` 为判别字段，snake_case）
 ///
 /// 各通道共有 `id` / `name` / `enabled` / `timeout_seconds`；预设通道只需
-/// 凭据字段，webhook 额外携带自定义头与 JSON 模板。
+/// 凭据字段，webhook 额外携带自定义头与 JSON 模板，系统通知无任何凭据字段。
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NotificationChannel {
@@ -627,6 +631,22 @@ pub enum NotificationChannel {
         #[serde(default = "default_notification_timeout")]
         timeout_seconds: u32,
     },
+    /// 系统通知：本机桌面通知中心（Windows toast / macOS 通知中心 / Linux freedesktop）
+    ///
+    /// 无凭据字段（走本机桌面会话，没有远端端点可配）；`timeout_seconds`
+    /// 对系统通知语义较弱（是阻塞发送调用的放弃上限，而非 HTTP 超时），
+    /// 保留共字段一致性便于统一校验与展示。
+    Os {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// 阻塞发送调用的放弃上限（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
 }
 
 impl NotificationChannel {
@@ -637,6 +657,7 @@ impl NotificationChannel {
             Self::Bark { .. } => NotificationChannelKind::Bark,
             Self::Serverchan { .. } => NotificationChannelKind::Serverchan,
             Self::Telegram { .. } => NotificationChannelKind::Telegram,
+            Self::Os { .. } => NotificationChannelKind::Os,
         }
     }
 
@@ -646,7 +667,8 @@ impl NotificationChannel {
             Self::Webhook { id, .. }
             | Self::Bark { id, .. }
             | Self::Serverchan { id, .. }
-            | Self::Telegram { id, .. } => id,
+            | Self::Telegram { id, .. }
+            | Self::Os { id, .. } => id,
         }
     }
 
@@ -656,7 +678,8 @@ impl NotificationChannel {
             Self::Webhook { name, .. }
             | Self::Bark { name, .. }
             | Self::Serverchan { name, .. }
-            | Self::Telegram { name, .. } => name,
+            | Self::Telegram { name, .. }
+            | Self::Os { name, .. } => name,
         }
     }
 
@@ -676,7 +699,8 @@ impl NotificationChannel {
             Self::Webhook { enabled, .. }
             | Self::Bark { enabled, .. }
             | Self::Serverchan { enabled, .. }
-            | Self::Telegram { enabled, .. } => *enabled,
+            | Self::Telegram { enabled, .. }
+            | Self::Os { enabled, .. } => *enabled,
         }
     }
 
@@ -693,6 +717,9 @@ impl NotificationChannel {
                 timeout_seconds, ..
             }
             | Self::Telegram {
+                timeout_seconds, ..
+            }
+            | Self::Os {
                 timeout_seconds, ..
             } => *timeout_seconds,
         }
@@ -880,6 +907,8 @@ impl NotificationSettings {
                         return Err("推送通道 Telegram 的 Chat ID 不能为空".to_string());
                     }
                 }
+                // 系统通知无凭据字段可错：id 唯一/非空与超时上下界已由上方公共校验覆盖
+                NotificationChannel::Os { .. } => {}
             }
         }
         for event in &self.events {
@@ -1379,6 +1408,42 @@ mod tests {
         .unwrap();
         assert_eq!(channel.timeout_seconds(), 10, "缺省超时回退 10 秒");
         assert_eq!(channel.display_name(), "Bark", "空 name 回退类型名");
+    }
+
+    /// os 通道：serde tagged 往返 + 无凭据字段（缺 timeout_seconds 用默认）+ 校验通过
+    #[test]
+    fn notification_channel_os_serde_and_validate() {
+        let channel = NotificationChannel::Os {
+            id: "os-1".into(),
+            name: "桌面提醒".into(),
+            enabled: true,
+            timeout_seconds: 5,
+        };
+        let value = serde_json::to_value(&channel).unwrap();
+        assert_eq!(value["type"], "os");
+        assert_eq!(value["id"], "os-1");
+        assert_eq!(value["timeout_seconds"], 5);
+        let back: NotificationChannel = serde_json::from_value(value).unwrap();
+        assert_eq!(back, channel, "os 通道 serde 往返保形");
+
+        // 缺 timeout_seconds：走共字段默认值；空 name 回退类型中文名
+        let minimal: NotificationChannel = serde_json::from_value(serde_json::json!({
+            "type": "os", "id": "os-1", "name": "", "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(minimal.timeout_seconds(), 10, "缺省超时回退 10 秒");
+        assert_eq!(minimal.display_name(), "系统通知", "空 name 回退类型名");
+
+        // 无字段可错：默认校验基线直接通过
+        let s = NotificationSettings {
+            channels: vec![channel],
+            ..NotificationSettings::default()
+        };
+        assert!(
+            s.validate().is_ok(),
+            "os 通道应通过校验: {:?}",
+            s.validate()
+        );
     }
 
     /// 默认值：总开关关、事件集默认 login_failed + network_down、免打扰 22:00-08:00

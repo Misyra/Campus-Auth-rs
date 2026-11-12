@@ -218,6 +218,24 @@ pub fn telegram_body(message: &MessageContent, chat_id: &str) -> serde_json::Val
     })
 }
 
+/// 系统通知正文长度上限（字符数；桌面通知正文过长会被折叠或截断）
+const OS_BODY_MAX_CHARS: usize = 200;
+
+/// 系统通知内容：`(标题, 正文)`
+///
+/// 标题取一句话摘要 `summary`，正文取人话拼接 `detail` 并裁剪到
+/// [`OS_BODY_MAX_CHARS`] 字符——按字符边界截断（不切半多字节字符），
+/// 截断时补省略号提示。
+pub fn os_body(message: &MessageContent) -> (String, String) {
+    let mut chars = message.detail.chars();
+    let body: String = chars.by_ref().take(OS_BODY_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        (message.summary.clone(), format!("{body}…"))
+    } else {
+        (message.summary.clone(), body)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +343,36 @@ mod tests {
         })));
         assert_eq!(message.summary, "网络已断开");
         assert_eq!(message.detail, "档案 p1 · 原因：tcp_timeout");
+    }
+
+    /// 系统通知内容：标题取摘要，正文短于上限原样透出，超长按字符边界裁剪补省略号
+    #[test]
+    fn test_os_body_truncates_on_char_boundary() {
+        let message = MessageContent {
+            event_type: "network_down".into(),
+            summary: "网络已断开".into(),
+            detail: "档案 p1 · 原因：tcp_timeout".into(),
+            profile: "p1".into(),
+            time: "2026-01-01 08:00:00".into(),
+        };
+        let (title, body) = os_body(&message);
+        assert_eq!(title, "网络已断开");
+        assert_eq!(body, "档案 p1 · 原因：tcp_timeout", "未超长不裁剪");
+
+        // 超长：正好 200 字符 + 1 个多字节字符，验证按字符而非字节截断
+        let long = "喵".repeat(201);
+        let message = MessageContent {
+            detail: long,
+            ..message
+        };
+        let (title, body) = os_body(&message);
+        assert_eq!(title, "网络已断开");
+        assert_eq!(body.chars().count(), 201, "200 字符正文 + 1 个省略号");
+        assert!(body.ends_with('…'), "截断时补省略号");
+        assert!(
+            body.starts_with("喵".repeat(200).as_str()),
+            "按字符边界截断"
+        );
     }
 
     /// 样例载荷与测试消息：供校验与端点使用，形状完整

@@ -1,4 +1,4 @@
-//! 通道发送：reqwest 出站 POST + 重试退避（注入时钟可测）+ 错误脱敏
+//! 通道发送：reqwest 出站 POST + 系统通知（os 通道）+ 重试退避（注入时钟可测）+ 错误脱敏
 //!
 //! # 信任口径
 //!
@@ -7,6 +7,15 @@
 //! / 内网 webhook（自建 ntfy、企业微信机器人等）是合法目标，与 AI 模块的
 //! `client_for` 同口径：本地/私网基址强制直连（系统代理会把 `127.0.0.1` 转给
 //! 代理并回 502），公网基址沿用系统代理。
+//!
+//! # os 通道特殊口径
+//!
+//! 系统通知（`NotificationChannel::Os`）走 `notify-rust`（Windows toast /
+//! macOS 通知中心 / Linux freedesktop 三平台统一实现）：调用属**阻塞 IO**
+//! （winrt/freedesktop 可能百 ms 级），包在 [`tokio::task::spawn_blocking`]
+//! 里执行，外层再套共字段 `timeout_seconds` 超时——超时即放弃该次通知。
+//! 失败**静默且不重试**：无桌面会话 / 权限拒绝 / SSH 环境下重发同样失败，
+//! 系统通知重试无意义，与 webhook 等远端通道的瞬时网络错误语义不同。
 //!
 //! # 错误脱敏红线
 //!
@@ -28,6 +37,75 @@ const BARK_DEFAULT_SERVER: &str = "https://api.day.app";
 const SERVERCHAN_BASE: &str = "https://sctapi.ftqq.com";
 /// 出站请求 User-Agent
 const USER_AGENT: &str = concat!("Campus-Auth/", env!("CARGO_PKG_VERSION"));
+/// 系统通知应用名（Windows toast / macOS 通知中心 / Linux freedesktop 展示用）
+///
+/// 仅生产构建存在（测试构建走 `os_stub` 桩，不触达 `notify-rust`）
+#[cfg(not(test))]
+const OS_NOTIFICATION_APP_NAME: &str = "认证喵";
+
+/// 测试桩：隔离 `notify-rust` 真发调用点（本机/CI 弹真通知会打扰用户）
+///
+/// 仅测试构建存在，生产构建零开销。进程级共享状态，触碰桩的测试须先取
+/// [`OS_STUB_LOCK`] 串行化。
+#[cfg(test)]
+mod os_stub {
+    use std::sync::Mutex;
+
+    /// 注入的发送结果（`None` = 成功，`Some` = 返回该错误文本）
+    pub static RESULT: Mutex<Option<String>> = Mutex::new(None);
+    /// 注入的阻塞时长（毫秒；模拟 winrt/freedesktop 的阻塞 IO，供超时测试）
+    pub static DELAY_MS: Mutex<u64> = Mutex::new(0);
+    /// 已发生的（标题, 正文）调用记录
+    pub static CALLS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    /// 重置桩并注入本次测试的返回结果与阻塞时长
+    pub fn configure(result: Option<String>, delay_ms: u64) {
+        *RESULT.lock().unwrap_or_else(|e| e.into_inner()) = result;
+        *DELAY_MS.lock().unwrap_or_else(|e| e.into_inner()) = delay_ms;
+        CALLS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// 桩共享状态串行化锁（见 `os_stub` doc）
+///
+/// 用 tokio 异步锁：测试须跨 `.await` 持有它，`std::sync::MutexGuard`
+/// 会触发 clippy 的 await_holding_lock 拒绝
+#[cfg(test)]
+static OS_STUB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 阻塞发送系统通知（`notify-rust` 平台实现；调用方须在 `spawn_blocking` 内调用）
+///
+/// 测试构建替换为桩（见 `os_stub`）：真弹桌面通知会打扰用户且依赖桌面会话，
+/// 测试只覆盖分派 / 超时 / 失败静默路径。失败返回脱敏短语（notify-rust 的
+/// 错误文本不含远端凭据，但保持与其他通道一致的短语风格）。
+fn show_os_notification_blocking(title: &str, body: &str) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let delay = *os_stub::DELAY_MS.lock().unwrap_or_else(|e| e.into_inner());
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        os_stub::CALLS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((title.to_string(), body.to_string()));
+        return os_stub::RESULT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .map_or(Ok(()), Err);
+    }
+    #[cfg(not(test))]
+    {
+        notify_rust::Notification::new()
+            .summary(title)
+            .body(body)
+            .appname(OS_NOTIFICATION_APP_NAME)
+            .show()
+            .map(|_handle| ())
+            .map_err(|e| format!("系统通知发送失败: {e}"))
+    }
+}
 
 /// 判断 URL 基址是否为本地/私网目标（与 ai::llm 同口径：这类目标强制直连）
 fn is_local_base_url(url: &str) -> bool {
@@ -198,6 +276,21 @@ pub async fn send_once(
                 .map_err(|e| describe_reqwest_error(&e))?;
             finish_response(response).await
         }
+        NotificationChannel::Os { .. } => {
+            // 系统通知调用是阻塞 IO（winrt/freedesktop 可能百 ms 级），移入专用
+            // 阻塞线程池执行，绝不占用异步工作线程；外层 timeout 让共字段
+            // timeout_seconds 生效——超时即放弃该次通知（阻塞线程无法强杀，
+            // 自然结束后其结果随 JoinHandle 被丢弃）
+            let (title, body) = template::os_body(message);
+            let handle =
+                tokio::task::spawn_blocking(move || show_os_notification_blocking(&title, &body));
+            match tokio::time::timeout(timeout, handle).await {
+                Ok(Ok(result)) => result,
+                // 阻塞任务 panic：join 错误只留短语（不透出 panic 现场细节）
+                Ok(Err(join_err)) => Err(format!("系统通知任务异常终止: {join_err}")),
+                Err(_) => Err("系统通知超时".to_string()),
+            }
+        }
     }
 }
 
@@ -270,6 +363,10 @@ impl RetryClock for RealClock {
 
 /// 带重试退避的发送：首次 + `max_attempts` 次重试，间隔 base → 2·base → 4·base
 ///
+/// 系统通知（`NotificationChannel::Os`）**不参与重试**：失败多为环境性的
+/// （无桌面会话 / 权限拒绝 / SSH 环境），重发同样失败，与 webhook 等远端
+/// 通道的瞬时网络错误语义不同（见模块 doc「os 通道特殊口径」）。
+///
 /// 全部尝试失败时返回**最后一次**的脱敏错误；发送方对失败只 warn 不上抛
 /// （失败静默口径见 `super` 模块 doc）。
 pub async fn send_with_retry(
@@ -279,7 +376,12 @@ pub async fn send_with_retry(
     clock: &dyn RetryClock,
 ) -> Result<(), String> {
     let timeout = Duration::from_secs(channel.timeout_seconds().max(1) as u64);
-    let total = policy.max_attempts.saturating_add(1);
+    // os 通道固定单次：RetryPolicy 的退避节奏对它无意义
+    let total = if matches!(channel, NotificationChannel::Os { .. }) {
+        1
+    } else {
+        policy.max_attempts.saturating_add(1)
+    };
     let mut last_error = String::new();
     for attempt in 0..total {
         match send_once(channel, message, timeout).await {
@@ -438,5 +540,87 @@ mod tests {
         assert!(is_local_base_url("http://[::1]:8080"));
         assert!(!is_local_base_url("https://api.day.app"));
         assert!(!is_local_base_url("https://sctapi.ftqq.com"));
+    }
+
+    // ============ os 通道（系统通知；桩隔离真发调用，见 os_stub） ============
+
+    /// os 通道基线构造
+    fn os_channel(timeout_seconds: u32) -> NotificationChannel {
+        NotificationChannel::Os {
+            id: "os-1".into(),
+            name: "桌面提醒".into(),
+            enabled: true,
+            timeout_seconds,
+        }
+    }
+
+    /// 成功路径：走 spawn_blocking 分派，标题/正文按 os_body 形状送达桩
+    #[tokio::test]
+    async fn test_os_channel_dispatch_success() {
+        let _guard = OS_STUB_LOCK.lock().await;
+        os_stub::configure(None, 0);
+        let result = send_with_retry(
+            &os_channel(5),
+            &message(),
+            &RetryPolicy::single_shot(),
+            &RealClock,
+        )
+        .await;
+        assert!(result.is_ok(), "桩默认成功: {result:?}");
+        let calls = os_stub::CALLS.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 1, "恰好一次阻塞调用");
+        assert_eq!(calls[0].0, "登录失败", "标题取 summary");
+        assert_eq!(calls[0].1, "档案 p1", "正文取 detail（未超长不裁剪）");
+    }
+
+    /// 失败静默：桩注入错误（模拟无桌面会话/权限拒绝），返回 Err 由上层 warn
+    /// 留痕——不 panic、不重试（见 os 通道特殊口径）
+    #[tokio::test]
+    async fn test_os_channel_failure_is_silent_error_without_retry() {
+        let _guard = OS_STUB_LOCK.lock().await;
+        os_stub::configure(Some("无桌面会话".into()), 0);
+        // 即使重试策略给足 3 次，os 通道也只发一次（RecordedClock 零延迟记录）
+        let clock = Arc::new(RecordedClock::default());
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            base_interval: Duration::from_millis(500),
+        };
+        let result = send_with_retry(&os_channel(5), &message(), &policy, clock.as_ref()).await;
+        assert!(result.is_err(), "桩注入失败必须以 Err 透出");
+        assert!(
+            result.unwrap_err().contains("无桌面会话"),
+            "错误文本透传供 warn 留痕"
+        );
+        assert!(
+            clock.delays_ms.lock().unwrap().is_empty(),
+            "os 通道失败不重试：无退避等待"
+        );
+        assert_eq!(
+            os_stub::CALLS.lock().unwrap().len(),
+            1,
+            "只调用一次阻塞发送"
+        );
+    }
+
+    /// 超时放弃：阻塞桩注入 2s 延迟、通道超时 1s，外层 timeout 生效返回超时错误
+    #[tokio::test]
+    async fn test_os_channel_timeout_abandons_send() {
+        let _guard = OS_STUB_LOCK.lock().await;
+        os_stub::configure(None, 2000);
+        let started = std::time::Instant::now();
+        let result = send_with_retry(
+            &os_channel(1),
+            &message(),
+            &RetryPolicy::single_shot(),
+            &RealClock,
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "超时必须放弃该次通知");
+        assert!(result.unwrap_err().contains("超时"), "错误标注超时语义");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "1 秒超时即返回，不等阻塞调用自然结束（实际 {elapsed:?}）"
+        );
     }
 }

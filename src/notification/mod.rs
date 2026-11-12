@@ -1,4 +1,4 @@
-//! 推送通知服务：订阅 EventBus，按配置把事件经 webhook / Bark / Server酱 / Telegram 推送
+//! 推送通知服务：订阅 EventBus，按配置把事件经系统通知 / webhook / Bark / Server酱 / Telegram 推送
 //!
 //! # 服务形态
 //!
@@ -10,7 +10,8 @@
 //!
 //! # 失败静默口径（与登录主链路的边界）
 //!
-//! 发送失败——包括重试退避（[`sender::send_with_retry`]，指数退避）耗尽——只
+//! 发送失败——包括重试退避（[`sender::send_with_retry`]，指数退避；os 通道
+//! 例外：失败多为环境性，不重试）耗尽——只
 //! `tracing::warn` 留痕并继续服务：**绝不 panic、绝不影响登录主链路**。事件
 //! 发布方对通知零感知（broadcast 发布不等待）；单事件投递也在独立任务执行，
 //! 慢 HTTP 不会阻塞事件消费循环。

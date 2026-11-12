@@ -89,6 +89,11 @@ uuid = { version = "1", features = ["v4"] }
 # 三个 C 依赖，_unix 交叉编译与构建速度都受累
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# 系统通知（os 通道）：Windows toast / macOS 通知中心 / Linux freedesktop 由它统一实现
+# 默认特性仅 "z"——Linux 走纯 Rust zbus 客户端（无需 libdbus C 库）；显式关掉
+# default 并点名 "z"，防未来默认特性膨胀（如 images 会拉 rayon 与全套图像解码）
+notify-rust = { version = "4.19", default-features = false, features = ["z"] }
+
 # 网络 & 硬件
 # （网卡检测自研实现，无 mac_address 依赖）
 
