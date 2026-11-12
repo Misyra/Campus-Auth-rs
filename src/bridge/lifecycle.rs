@@ -307,7 +307,7 @@ async fn send_health_check(
                 })) {
                     inner.pending_requests.remove(&request_id);
                     return Err(BridgeError::IpcWriteError(std::io::Error::other(format!(
-                        "IPC channel send failed: {e}"
+                        "Worker 通道已关闭或消息队列拥塞: {e}"
                     ))));
                 }
             }
@@ -406,7 +406,7 @@ pub(super) async fn kill_worker_now(this: &BridgeSupervisor) {
     }
     // 进程已终止，在途请求不可能再得到响应：立即 drain 并结算，
     // 否则对应 execute_inner 要挂满 300s 超时才返回（且只能拿到 Timeout 错误）
-    drain_pending_requests(this, "worker killed by supervisor");
+    drain_pending_requests(this, "Worker 已被强制停止");
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Error;
@@ -441,7 +441,7 @@ pub(super) async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
         info!(target: "python_worker", "Worker 已关闭");
     }
     // 与 kill_worker_now 同理：进程已回收，drain 在途请求避免悬挂至超时
-    drain_pending_requests(this, "worker shut down");
+    drain_pending_requests(this, "Worker 已关闭");
     {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.worker_state = WorkerState::Idle;
@@ -524,7 +524,7 @@ pub(super) async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32
     if code == 0 {
         info!(target: "python_worker", "Worker 正常退出，exit_code=0");
         // 正常退出时通常不应有在途请求；仍 drain 防御，调用方收到定性错误
-        drain_pending_requests(this, "worker exited (code 0)");
+        drain_pending_requests(this, "Worker 已退出（退出码 0）");
         let handles = {
             let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.cancel_registry.clear();
@@ -595,7 +595,7 @@ pub(super) async fn handle_worker_exited(this: &Arc<BridgeSupervisor>, code: i32
         let err = match crashed_session {
             Some(SessionType::Debug) => BridgeError::DebugSessionClosed,
             _ => BridgeError::WorkerCrashed {
-                reason: format!("exit_code={code}"),
+                reason: format!("退出码 {code}"),
             },
         };
         // oneshot::send 是同步操作

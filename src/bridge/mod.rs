@@ -47,7 +47,9 @@ pub use ipc::{
     CancelNotification, IpcEvent, IpcRequest, IpcResponse, IpcResult, Outcome, StructuredResult,
 };
 pub use process::{IpcMessage, ParsedMessage, ProcessHandles, WorkerProcess, spawn_worker};
-pub use session::{CancelRegistry, SessionGuard, SessionType};
+pub use session::{
+    CancelRegistry, ConfigSessionOwner, ConfigSessionRegistry, SessionGuard, SessionType,
+};
 pub use worker::{WorkerState, worker_state_to_status};
 
 use std::collections::HashMap;
@@ -91,6 +93,17 @@ const CANCEL_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// 登录流程既有默认预算 300s 对齐，实际外界由会话总超时（`login_timeout`，
 /// 默认 120s）经 cancel_id 取消兜底，命令级预算只防 Worker 侧自愈失灵。
 pub const PERSISTENT_AUTO_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 配置会话启动命令（`profile_session_start`）的命令级超时预算。
+///
+/// 覆盖「确保 Worker → headed 持久浏览器真实拉起 → 门户页导航 → 录制器注入」
+/// 整段：冷启动含 Worker spawn + 健康检查 + Playwright/浏览器启动，取 90s
+/// 宽裕值。会话**存续期**不在此预算内（Worker 契约：对齐 debug session，
+/// start 返回后用户手动登录可停留任意久，stop 命令另有预算）。
+pub const CONFIG_SESSION_START_TIMEOUT: Duration = Duration::from_secs(90);
+/// 配置会话停止命令（`profile_session_stop`）的命令级超时预算：关闭持久浏览器
+/// 与独占 Playwright 连接 + 汇聚录制结果，纯收尾操作取 30s。
+pub const CONFIG_SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 命令级超时后，等待 Worker 自愈（取消任务 + 关页打断挂起的 CDP await）的宽限期。
 ///
@@ -997,7 +1010,7 @@ async fn execute_inner(
                     inner.pending_requests.remove(&request_id);
                     inner.pending_starts.remove(&request_id);
                     return Err(BridgeError::IpcWriteError(std::io::Error::other(format!(
-                        "IPC channel send failed: {e}"
+                        "Worker 通道已关闭或消息队列拥塞: {e}"
                     ))));
                 }
             }

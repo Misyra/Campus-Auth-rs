@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use crate::bridge::ipc::{CancelNotification, IpcEvent, IpcRequest, IpcResponse, IpcResult};
 use crate::bridge::{BridgeError, IPC_DELIMITER, IPC_MAX_LINE_LEN, IPC_WRITE_CHANNEL_CAP};
+use crate::utils::io_human::io_kind_label;
 
 /// 发送给 stdin writer task 的消息
 pub enum IpcMessage {
@@ -150,7 +151,14 @@ pub async fn spawn_worker(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().map_err(BridgeError::SpawnFailed)?;
+    // spawn 失败载荷用「失败类别 + 原始错误」人话化（io_error 的「XX失败：」句式
+    // 会与变体 Display 的「Worker 进程启动失败：」重复，故只拼类别短语）
+    let mut child = cmd.spawn().map_err(|e| {
+        BridgeError::SpawnFailed(std::io::Error::new(
+            e.kind(),
+            format!("{}（{e}）", io_kind_label(e.kind())),
+        ))
+    })?;
     tracing::info!(pid = ?child.id(), "Worker 子进程已启动");
 
     // Windows：spawn 后立即加入 KILL_ON_JOB_CLOSE 的 Job Object（内核级进程树
