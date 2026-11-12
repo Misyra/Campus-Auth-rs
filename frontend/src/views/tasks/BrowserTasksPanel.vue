@@ -512,9 +512,10 @@ onMounted(async () => {
 
 /* 描述并入名称格之后本表不再有独立的弹性列，故让**名称列**吃剩余宽度
    （fixed 布局下 auto 列分得剩余空间；不改的话剩下 5 列会被等比例放大，
-   名称两行反而分不到最宽）。 */
-.tsk-table col.tsk-col-name {
-  width: auto;
+   名称两行反而分不到最宽）。列宽分叉走共享类的 --tsk-col-name-w 变量口，
+   不在 scoped 直改共享类声明值。 */
+.tsk-table-card .tsk-table {
+  --tsk-col-name-w: auto;
 }
 
 /* JSON 正文编辑器：等宽 + 可纵向拉伸（中文描述与长步骤数组都要能读） */

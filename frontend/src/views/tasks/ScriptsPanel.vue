@@ -522,8 +522,9 @@ onMounted(async () => {
    Python 是默认项故弱化显示，其余（自定义程序）按默认主色提示。 */
 
 /* 描述并入名称格后本表没有独立的弹性列，让名称列吃剩余宽度
-   （fixed 布局下 auto 列分得剩余空间） */
-.tsk-table col.tsk-col-name {
-  width: auto;
+   （fixed 布局下 auto 列分得剩余空间）。列宽分叉走共享类的 --tsk-col-name-w
+   变量口，不在 scoped 直改共享类声明值。 */
+.tsk-table-card .tsk-table {
+  --tsk-col-name-w: auto;
 }
 </style>
