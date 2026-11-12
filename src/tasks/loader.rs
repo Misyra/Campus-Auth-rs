@@ -594,306 +594,16 @@ impl TaskManager {
             errors.push(reserved_default_id_error());
         }
 
+        // 类型专属校验按类别拆为纯函数（T7-5）：只读 config、向 errors 追加文案；
+        // 错误顺序 = name / 保留 ID → 类型内各规则遍历顺序，供前端一次性整体展示
         match kind {
-            "browser" => {
-                // 浏览器任务 timeout 钳制：与脚本任务 clamp_timeout 口径对齐。
-                // 无校验时导入的第三方 JSON 可传 0（执行时 max(1) 变 1ms 永远
-                // 秒超时）或超大值（会话槽位被占一天，期间所有浏览器任务/登录被拒）
-                let timeout = config
-                    .get("timeout")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(crate::tasks::DEFAULT_TASK_TIMEOUT_MS);
-                if !(MIN_TASK_TIMEOUT_MS..=MAX_TASK_TIMEOUT_MS).contains(&timeout) {
-                    errors.push(format!(
-                        "timeout 需在 {MIN_TASK_TIMEOUT_MS}-{MAX_TASK_TIMEOUT_MS} 毫秒之间（当前 {timeout}）"
-                    ));
-                }
-                let steps = config.get("steps").and_then(|s| s.as_array());
-                match steps {
-                    None => errors.push("steps 必须为数组".to_string()),
-                    Some(arr) => {
-                        if arr.is_empty() {
-                            errors.push("steps 不能为空".to_string());
-                        }
-                        let mut ids = std::collections::HashSet::new();
-                        for (i, step) in arr.iter().enumerate() {
-                            let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                            if id.is_empty() {
-                                errors.push(format!("步骤[{i}] 缺少 id"));
-                            } else if !is_valid_task_id(id) {
-                                errors.push(format!("步骤[{i}] id 非法: {id}"));
-                            } else if !ids.insert(id.to_string()) {
-                                errors.push(format!("步骤 id 重复: {id}"));
-                            }
-                            let stype = step.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            if !VALID_STEP_TYPES.contains(&stype) {
-                                errors.push(format!("步骤[{i}] 未知类型: {stype}"));
-                                continue;
-                            }
-                            // H5：步型字段约束表驱动（STEP_FIELD_RULES）——替代
-                            // 逐臂手写校验；wait 的"selector 或 duration>0"双语义
-                            // 无法用纯字段表表达，保留特判（口径对齐 Python 执行器
-                            // handle_wait，与 AI 提示词 prompt.rs 一致）
-                            for (types, required, any_of, any_msg) in Self::STEP_FIELD_RULES {
-                                if !types.contains(&stype) {
-                                    continue;
-                                }
-                                for field in required.iter() {
-                                    if Self::is_blank_field(step, field) {
-                                        errors.push(format!("步骤[{i}] 需要 {field}"));
-                                    }
-                                }
-                                if !any_of.is_empty()
-                                    && any_of.iter().all(|f| Self::is_blank_field(step, f))
-                                {
-                                    errors.push(format!("步骤[{i}] {any_msg}"));
-                                }
-                            }
-                            if stype == "wait" {
-                                let has_selector = !step
-                                    .get("selector")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .is_empty();
-                                // as_f64 兼容合法浮点（如 1.5s）：as_u64 对小数返回
-                                // None 会被误判为「未配置 duration」
-                                let has_duration =
-                                    step.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0)
-                                        > 0.0;
-                                if !has_selector && !has_duration {
-                                    errors.push(format!("步骤[{i}] 需要 selector 或 duration"));
-                                }
-                            }
-                            if stype == "manual_check"
-                                && Self::is_blank_field(step, "selector")
-                                && Self::is_blank_field(step, "value")
-                            {
-                                errors.push(format!("步骤[{i}] 需要 selector 或 value"));
-                            }
-                        }
-                    }
-                }
-            }
-            "script" => {
-                let has_content = config
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| !s.is_empty());
-                let has_path = config
-                    .get("script_path")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| !s.is_empty());
-                if !has_content && !has_path {
-                    errors.push("script 任务需提供 content 或 script_path".to_string());
-                }
-                // 统一拦截 PowerShell：与 `web/routes/scripts.rs:check_supported_binary`
-                // + `executor::is_supported_ext` 同口径，避免经 `POST /api/tasks`
-                // 创建 script 任务绕过 PUT /api/scripts/{id} 的拦截
-                if let Some(bp) = config.get("binary_path").and_then(|v| v.as_str()) {
-                    let lower = bp.to_lowercase();
-                    if lower.contains("powershell")
-                        || lower.contains("pwsh")
-                        || lower.ends_with(".ps1")
-                    {
-                        errors.push(
-                            "不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本"
-                                .to_string(),
-                        );
-                    }
-                }
-                if let Some(sp) = config.get("script_path").and_then(|v| v.as_str()) {
-                    if sp.to_lowercase().ends_with(".ps1") {
-                        errors.push(
-                            "不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".to_string(),
-                        );
-                    }
-                    // 显式含 `..` 的穿越写法提前拦截（与 executor::resolve_script_source 同口径）
-                    if std::path::Path::new(sp)
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                    {
-                        errors.push(format!("script_path 含非法穿越: {sp}"));
-                    }
-                }
-                if let Some(wd) = config.get("work_dir").and_then(|v| v.as_str())
-                    && std::path::Path::new(wd)
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
-                    errors.push(format!("work_dir 含非法穿越: {wd}"));
-                }
-            }
+            "browser" => Self::validate_browser_task(config, &mut errors),
+            "script" => Self::validate_script_task(config, &mut errors),
             // Shell 任务已移除：历史存量 type=shell 明确拒绝，提示改用 script
             "shell" => {
                 errors.push("任务类型 shell 已移除，请改用 script 类型".to_string());
             }
-            "http" => {
-                let flow_task = config.get("steps").is_some_and(|steps| {
-                    !steps.is_null() && !steps.as_array().is_some_and(Vec::is_empty)
-                }) || config
-                    .get("schema_version")
-                    .is_some_and(|version| !version.is_null() && version.as_u64() != Some(1));
-                if flow_task {
-                    match serde_json::from_value::<HttpTaskConfig>(config.clone()) {
-                        Ok(task) => {
-                            if let Err(error) = task.validate_flow() {
-                                errors.push(error);
-                            }
-                            let auth_url = task.auth_url.trim();
-                            if !auth_url.is_empty() {
-                                let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
-                                let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-                                if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
-                                    || host.is_empty()
-                                {
-                                    errors.push(
-                                        "HTTP 登录任务的认证地址需为带主机名的 http/https URL"
-                                            .into(),
-                                    );
-                                }
-                            }
-                            for (field, bytes, limit) in [
-                                ("auth_url", task.auth_url.len(), MAX_HTTP_URL_BYTES),
-                                (
-                                    "success_pattern",
-                                    task.success_pattern.len(),
-                                    MAX_HTTP_URL_BYTES,
-                                ),
-                                (
-                                    "failure_pattern",
-                                    task.failure_pattern.len(),
-                                    MAX_HTTP_URL_BYTES,
-                                ),
-                            ] {
-                                if bytes > limit {
-                                    errors.push(format!(
-                                        "{field} 超过 {limit} 字节上限（当前 {bytes}）"
-                                    ));
-                                }
-                            }
-                        }
-                        Err(error) => errors.push(format!("HTTP 流程字段类型不正确: {error}")),
-                    }
-                } else {
-                    // 直连任务没有可内置的通用门户地址，地址缺失时执行层连请求都拼不出来，
-                    // 属于"存得下但必然失败"的配置，必须在保存/导入闸口就拒绝
-                    let url = config.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    if url.trim().is_empty() {
-                        errors.push("直连任务缺少请求地址".to_string());
-                    }
-                    // 认证页地址允许为空（运行时回退方案的 auth_url，老配置因此照旧可用）；
-                    // 非空时只要求「协议 http/https + 有主机名」，口径对齐
-                    // `login::http_login::HttpLoginRequest::validate_url`——但在此手写判断而
-                    // 不调用它，避免 tasks → login 的反向依赖
-                    let auth_url = config
-                        .get("auth_url")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .trim();
-                    if !auth_url.is_empty() {
-                        let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
-                        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-                        if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-                            errors.push("直连任务的认证地址仅支持 http/https".to_string());
-                        } else if host.is_empty() {
-                            errors.push("直连任务的认证地址缺少主机名".to_string());
-                        }
-                    }
-                    // 与 src/login/http_login.rs 的 MAX_SCRIPT_BYTES 同口径：任务里的
-                    // crypto_script 与方案里的 http_crypto_script 由同一套脚本引擎执行，
-                    // 任务侧放行更大体积会造成「保存通过、登录必然失败」的错位
-                    let script_bytes = config
-                        .get("crypto_script")
-                        .and_then(|v| v.as_str())
-                        .map_or(0, str::len);
-                    if script_bytes > MAX_HTTP_SCRIPT_BYTES {
-                        errors.push(format!(
-                        "crypto_script 超过 {MAX_HTTP_SCRIPT_BYTES} 字节上限（当前 {script_bytes}）"
-                    ));
-                    }
-                    // 请求头/请求体/URL 的上限是防呆（拦住误粘贴的大段内容），不表达安全边界
-                    for (field, limit) in [
-                        ("url", MAX_HTTP_URL_BYTES),
-                        ("headers", MAX_HTTP_HEADERS_BYTES),
-                        ("body", MAX_HTTP_BODY_BYTES),
-                    ] {
-                        let bytes = config
-                            .get(field)
-                            .and_then(|v| v.as_str())
-                            .map_or(0, str::len);
-                        if bytes > limit {
-                            errors.push(format!("{field} 超过 {limit} 字节上限（当前 {bytes}）"));
-                        }
-                    }
-                    // 前置请求（可选）：形状校验委托给 `HttpPreRequest::validate`，
-                    // 与执行层同一份判据（取值方式写错属于"保存通过、登录必然失败"）。
-                    // 体积上限另按本文件常量把关，与该分支对 headers/body 的口径一致。
-                    if let Some(raw) = config.get("pre_request").filter(|v| !v.is_null()) {
-                        match serde_json::from_value::<HttpPreRequest>(raw.clone()) {
-                            Ok(pre) => {
-                                if let Err(e) = pre.validate() {
-                                    errors.push(e);
-                                }
-                                for (field, value, limit) in [
-                                    ("pre_request.url", pre.url.as_str(), MAX_HTTP_URL_BYTES),
-                                    (
-                                        "pre_request.headers",
-                                        pre.headers.as_str(),
-                                        MAX_HTTP_HEADERS_BYTES,
-                                    ),
-                                    ("pre_request.body", pre.body.as_str(), MAX_HTTP_BODY_BYTES),
-                                ] {
-                                    if value.len() > limit {
-                                        errors.push(format!(
-                                            "{field} 超过 {limit} 字节上限（当前 {}）",
-                                            value.len()
-                                        ));
-                                    }
-                                }
-                            }
-                            Err(e) => errors.push(format!("pre_request 字段类型不正确: {e}")),
-                        }
-                    }
-                    // 退出登录请求（可选）：与前置请求同一套"形状 + 体积"双闸。
-                    // 形状判据在 `HttpActionRequest::validate`（保存与执行同源）；体积按
-                    // 本文件常量把关，与该分支对 headers/body 的口径一致。
-                    if let Some(raw) = config.get("logout_request").filter(|v| !v.is_null()) {
-                        match serde_json::from_value::<crate::tasks::HttpActionRequest>(raw.clone())
-                        {
-                            Ok(logout) => {
-                                if let Err(e) = logout.validate() {
-                                    errors.push(e);
-                                }
-                                for (field, value, limit) in [
-                                    (
-                                        "logout_request.url",
-                                        logout.url.as_str(),
-                                        MAX_HTTP_URL_BYTES,
-                                    ),
-                                    (
-                                        "logout_request.headers",
-                                        logout.headers.as_str(),
-                                        MAX_HTTP_HEADERS_BYTES,
-                                    ),
-                                    (
-                                        "logout_request.body",
-                                        logout.body.as_str(),
-                                        MAX_HTTP_BODY_BYTES,
-                                    ),
-                                ] {
-                                    if value.len() > limit {
-                                        errors.push(format!(
-                                            "{field} 超过 {limit} 字节上限（当前 {}）",
-                                            value.len()
-                                        ));
-                                    }
-                                }
-                            }
-                            Err(e) => errors.push(format!("logout_request 字段类型不正确: {e}")),
-                        }
-                    }
-                }
-            }
+            "http" => Self::validate_http_task(config, &mut errors),
             other => errors.push(format!("未知任务类型: {other}")),
         }
 
@@ -905,6 +615,322 @@ impl TaskManager {
     }
 
     // ---------------- 私有辅助 ----------------
+
+    // ---------------- 任务校验（validate_task 按类别拆分的纯函数，T7-5） ----------------
+
+    /// 浏览器任务校验：timeout 区间钳制 + steps 步型字段约束
+    fn validate_browser_task(config: &Value, errors: &mut Vec<String>) {
+        // 浏览器任务 timeout 钳制：与脚本任务 clamp_timeout 口径对齐。
+        // 无校验时导入的第三方 JSON 可传 0（执行时 max(1) 变 1ms 永远
+        // 秒超时）或超大值（会话槽位被占一天，期间所有浏览器任务/登录被拒）
+        let timeout = config
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(crate::tasks::DEFAULT_TASK_TIMEOUT_MS);
+        if !(MIN_TASK_TIMEOUT_MS..=MAX_TASK_TIMEOUT_MS).contains(&timeout) {
+            errors.push(format!(
+                "timeout 需在 {MIN_TASK_TIMEOUT_MS}-{MAX_TASK_TIMEOUT_MS} 毫秒之间（当前 {timeout}）"
+            ));
+        }
+        let steps = config.get("steps").and_then(|s| s.as_array());
+        match steps {
+            None => errors.push("steps 必须为数组".to_string()),
+            Some(arr) => Self::validate_browser_steps(arr, errors),
+        }
+    }
+
+    /// steps 数组整体校验：非空 + 逐步骤字段约束（去重 id 集合贯穿整轮）
+    fn validate_browser_steps(steps: &[Value], errors: &mut Vec<String>) {
+        if steps.is_empty() {
+            errors.push("steps 不能为空".to_string());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for (i, step) in steps.iter().enumerate() {
+            Self::validate_browser_step(step, i, &mut ids, errors);
+        }
+    }
+
+    /// 单个步骤的字段约束：id 合法性与唯一性 / 类型合法性 / 表驱动必填
+    /// （STEP_FIELD_RULES）/ wait 与 manual_check 的双语义特判
+    fn validate_browser_step(
+        step: &Value,
+        index: usize,
+        ids: &mut std::collections::HashSet<String>,
+        errors: &mut Vec<String>,
+    ) {
+        let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            errors.push(format!("步骤[{index}] 缺少 id"));
+        } else if !is_valid_task_id(id) {
+            errors.push(format!("步骤[{index}] id 非法: {id}"));
+        } else if !ids.insert(id.to_string()) {
+            errors.push(format!("步骤 id 重复: {id}"));
+        }
+        let stype = step.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if !VALID_STEP_TYPES.contains(&stype) {
+            errors.push(format!("步骤[{index}] 未知类型: {stype}"));
+            return;
+        }
+        // H5：步型字段约束表驱动（STEP_FIELD_RULES）——替代
+        // 逐臂手写校验；wait 的"selector 或 duration>0"双语义
+        // 无法用纯字段表表达，保留特判（口径对齐 Python 执行器
+        // handle_wait，与 AI 提示词 prompt.rs 一致）
+        for (types, required, any_of, any_msg) in Self::STEP_FIELD_RULES {
+            if !types.contains(&stype) {
+                continue;
+            }
+            for field in required.iter() {
+                if Self::is_blank_field(step, field) {
+                    errors.push(format!("步骤[{index}] 需要 {field}"));
+                }
+            }
+            if !any_of.is_empty() && any_of.iter().all(|f| Self::is_blank_field(step, f)) {
+                errors.push(format!("步骤[{index}] {any_msg}"));
+            }
+        }
+        if stype == "wait" {
+            let has_selector = !step
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty();
+            // as_f64 兼容合法浮点（如 1.5s）：as_u64 对小数返回
+            // None 会被误判为「未配置 duration」
+            let has_duration = step.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0;
+            if !has_selector && !has_duration {
+                errors.push(format!("步骤[{index}] 需要 selector 或 duration"));
+            }
+        }
+        if stype == "manual_check"
+            && Self::is_blank_field(step, "selector")
+            && Self::is_blank_field(step, "value")
+        {
+            errors.push(format!("步骤[{index}] 需要 selector 或 value"));
+        }
+    }
+
+    /// 脚本任务校验：正文/路径二选一 + PowerShell 与路径穿越拦截
+    fn validate_script_task(config: &Value, errors: &mut Vec<String>) {
+        let has_content = config
+            .get("content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        let has_path = config
+            .get("script_path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !has_content && !has_path {
+            errors.push("script 任务需提供 content 或 script_path".to_string());
+        }
+        // 统一拦截 PowerShell：与 `web/routes/scripts.rs:check_supported_binary`
+        // + `executor::is_supported_ext` 同口径，避免经 `POST /api/tasks`
+        // 创建 script 任务绕过 PUT /api/scripts/{id} 的拦截
+        if let Some(bp) = config.get("binary_path").and_then(|v| v.as_str()) {
+            let lower = bp.to_lowercase();
+            if lower.contains("powershell") || lower.contains("pwsh") || lower.ends_with(".ps1") {
+                errors.push(
+                    "不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本".to_string(),
+                );
+            }
+        }
+        if let Some(sp) = config.get("script_path").and_then(|v| v.as_str()) {
+            if sp.to_lowercase().ends_with(".ps1") {
+                errors.push("不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".to_string());
+            }
+            // 显式含 `..` 的穿越写法提前拦截（与 executor::resolve_script_source 同口径）
+            if std::path::Path::new(sp)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                errors.push(format!("script_path 含非法穿越: {sp}"));
+            }
+        }
+        if let Some(wd) = config.get("work_dir").and_then(|v| v.as_str())
+            && std::path::Path::new(wd)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            errors.push(format!("work_dir 含非法穿越: {wd}"));
+        }
+    }
+
+    /// 直连任务分派：按形状判定是否为流程任务（steps 非空数组或
+    /// schema_version 显式非 1），分别走两代校验
+    fn validate_http_task(config: &Value, errors: &mut Vec<String>) {
+        let flow_task = config
+            .get("steps")
+            .is_some_and(|steps| !steps.is_null() && !steps.as_array().is_some_and(Vec::is_empty))
+            || config
+                .get("schema_version")
+                .is_some_and(|version| !version.is_null() && version.as_u64() != Some(1));
+        if flow_task {
+            Self::validate_http_flow_task(config, errors);
+        } else {
+            Self::validate_http_direct_task(config, errors);
+        }
+    }
+
+    /// HTTP 流程任务校验：结构反序列化 + validate_flow + 认证地址协议/主机 +
+    /// 字段体积上限
+    fn validate_http_flow_task(config: &Value, errors: &mut Vec<String>) {
+        match serde_json::from_value::<HttpTaskConfig>(config.clone()) {
+            Ok(task) => {
+                if let Err(error) = task.validate_flow() {
+                    errors.push(error);
+                }
+                let auth_url = task.auth_url.trim();
+                if !auth_url.is_empty() {
+                    let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
+                    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+                    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+                        || host.is_empty()
+                    {
+                        errors.push("HTTP 登录任务的认证地址需为带主机名的 http/https URL".into());
+                    }
+                }
+                for (field, bytes, limit) in [
+                    ("auth_url", task.auth_url.len(), MAX_HTTP_URL_BYTES),
+                    (
+                        "success_pattern",
+                        task.success_pattern.len(),
+                        MAX_HTTP_URL_BYTES,
+                    ),
+                    (
+                        "failure_pattern",
+                        task.failure_pattern.len(),
+                        MAX_HTTP_URL_BYTES,
+                    ),
+                ] {
+                    Self::push_over_limit(errors, field, bytes, limit);
+                }
+            }
+            Err(error) => errors.push(format!("HTTP 流程字段类型不正确: {error}")),
+        }
+    }
+
+    /// 传统直连任务校验：请求地址 + 认证地址协议/主机 + 加密脚本与请求各段
+    /// 体积上限 + 前置/退出登录请求
+    fn validate_http_direct_task(config: &Value, errors: &mut Vec<String>) {
+        // 直连任务没有可内置的通用门户地址，地址缺失时执行层连请求都拼不出来，
+        // 属于"存得下但必然失败"的配置，必须在保存/导入闸口就拒绝
+        let url = config.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        if url.trim().is_empty() {
+            errors.push("直连任务缺少请求地址".to_string());
+        }
+        // 认证页地址允许为空（运行时回退方案的 auth_url，老配置因此照旧可用）；
+        // 非空时只要求「协议 http/https + 有主机名」，口径对齐
+        // `login::http_login::HttpLoginRequest::validate_url`——但在此手写判断而
+        // 不调用它，避免 tasks → login 的反向依赖
+        let auth_url = config
+            .get("auth_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if !auth_url.is_empty() {
+            let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+                errors.push("直连任务的认证地址仅支持 http/https".to_string());
+            } else if host.is_empty() {
+                errors.push("直连任务的认证地址缺少主机名".to_string());
+            }
+        }
+        // 与 src/login/http_login.rs 的 MAX_SCRIPT_BYTES 同口径：任务里的
+        // crypto_script 与方案里的 http_crypto_script 由同一套脚本引擎执行，
+        // 任务侧放行更大体积会造成「保存通过、登录必然失败」的错位
+        let script_bytes = config
+            .get("crypto_script")
+            .and_then(|v| v.as_str())
+            .map_or(0, str::len);
+        if script_bytes > MAX_HTTP_SCRIPT_BYTES {
+            errors.push(format!(
+                "crypto_script 超过 {MAX_HTTP_SCRIPT_BYTES} 字节上限（当前 {script_bytes}）"
+            ));
+        }
+        // 请求头/请求体/URL 的上限是防呆（拦住误粘贴的大段内容），不表达安全边界
+        for (field, limit) in [
+            ("url", MAX_HTTP_URL_BYTES),
+            ("headers", MAX_HTTP_HEADERS_BYTES),
+            ("body", MAX_HTTP_BODY_BYTES),
+        ] {
+            let bytes = config
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map_or(0, str::len);
+            Self::push_over_limit(errors, field, bytes, limit);
+        }
+        Self::validate_http_pre_request(config, errors);
+        Self::validate_http_logout_request(config, errors);
+    }
+
+    /// 前置请求（可选）校验：形状校验委托给 `HttpPreRequest::validate`，
+    /// 与执行层同一份判据（取值方式写错属于"保存通过、登录必然失败"）。
+    /// 体积上限另按本文件常量把关，与直连对 headers/body 的口径一致。
+    fn validate_http_pre_request(config: &Value, errors: &mut Vec<String>) {
+        if let Some(raw) = config.get("pre_request").filter(|v| !v.is_null()) {
+            match serde_json::from_value::<HttpPreRequest>(raw.clone()) {
+                Ok(pre) => {
+                    if let Err(e) = pre.validate() {
+                        errors.push(e);
+                    }
+                    for (field, value, limit) in [
+                        ("pre_request.url", pre.url.as_str(), MAX_HTTP_URL_BYTES),
+                        (
+                            "pre_request.headers",
+                            pre.headers.as_str(),
+                            MAX_HTTP_HEADERS_BYTES,
+                        ),
+                        ("pre_request.body", pre.body.as_str(), MAX_HTTP_BODY_BYTES),
+                    ] {
+                        Self::push_over_limit(errors, field, value.len(), limit);
+                    }
+                }
+                Err(e) => errors.push(format!("pre_request 字段类型不正确: {e}")),
+            }
+        }
+    }
+
+    /// 退出登录请求（可选）校验：与前置请求同一套"形状 + 体积"双闸。
+    /// 形状判据在 `HttpActionRequest::validate`（保存与执行同源）；体积按
+    /// 本文件常量把关，与直连对 headers/body 的口径一致。
+    fn validate_http_logout_request(config: &Value, errors: &mut Vec<String>) {
+        if let Some(raw) = config.get("logout_request").filter(|v| !v.is_null()) {
+            match serde_json::from_value::<crate::tasks::HttpActionRequest>(raw.clone()) {
+                Ok(logout) => {
+                    if let Err(e) = logout.validate() {
+                        errors.push(e);
+                    }
+                    for (field, value, limit) in [
+                        (
+                            "logout_request.url",
+                            logout.url.as_str(),
+                            MAX_HTTP_URL_BYTES,
+                        ),
+                        (
+                            "logout_request.headers",
+                            logout.headers.as_str(),
+                            MAX_HTTP_HEADERS_BYTES,
+                        ),
+                        (
+                            "logout_request.body",
+                            logout.body.as_str(),
+                            MAX_HTTP_BODY_BYTES,
+                        ),
+                    ] {
+                        Self::push_over_limit(errors, field, value.len(), limit);
+                    }
+                }
+                Err(e) => errors.push(format!("logout_request 字段类型不正确: {e}")),
+            }
+        }
+    }
+
+    /// 单字段体积上限防呆：超过即追加统一文案
+    fn push_over_limit(errors: &mut Vec<String>, field: &str, bytes: usize, limit: usize) {
+        if bytes > limit {
+            errors.push(format!("{field} 超过 {limit} 字节上限（当前 {bytes}）"));
+        }
+    }
 
     /// 按任务类型选存储桶（三类任务目录分派的唯一出口）
     ///
