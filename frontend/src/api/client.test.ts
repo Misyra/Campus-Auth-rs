@@ -1,13 +1,21 @@
+// @vitest-environment happy-dom
 /**
- * 无浏览器文案握手测试：后端 `browser::NO_BROWSER_MESSAGE`（及登录侧离线兜底
- * 后缀 `；当前无可用浏览器，…`）必须命中 `isNoBrowserMessage`，否则手动登录
- * 的弹窗引导会静默退化成普通通知。改动任一侧文案时先改这里，再同步另一侧。
+ * 鉴权引导（bootstrap 握手）与请求层测试。
  *
- * 另含 `request()` 的超时/取消/401/信封解包路径：此前该文件只测
- * `isNoBrowserMessage`，对请求层零覆盖。
+ * 背景：免鉴权的 GET /api/auth/token 已移除，token 只能经 POST /api/auth/exchange
+ * 换取——凭据为 URL fragment 的引导秘钥（`#auth=<hex>`，托盘打开界面时携带）或
+ * 管理密码（远程访问引导页）。本文件锁定：
+ * - hash 秘钥交换成功流（两级缓存写入 + history.replaceState 剥除 fragment）；
+ * - 交换 401 失败走引导态（fragment 保留、不写缓存）；
+ * - 无 hash 时 sessionStorage 缓存复用（同 tab 刷新不再依赖 fragment）；
+ * - submitManagementPassword 的 AUTH_NOT_CONFIGURED 透传与密码错误/网络失败分支；
+ * - 引导交换用裸 fetch 直连（不经 request()：会因 ensureAuthToken 递归，且
+ *   request 的 401 重试/信封语义不适用于引导端点）。
+ *
+ * 另含 `isNoBrowserMessage` 文案握手与 `request()` 的超时/取消/401/信封解包路径。
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { ApiError, http, isNoBrowserMessage } from "./client";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { ApiError, http, isNoBrowserMessage, ensureAuthToken, refreshAuthToken, submitManagementPassword, parseBootstrapSecret } from "./client";
 
 /** 与后端 `browser::NO_BROWSER_MESSAGE` 逐字同步 */
 const BACKEND_NO_BROWSER_MESSAGE =
@@ -69,20 +77,148 @@ function hangingBodyResponse(signal: AbortSignal): Response {
   } as unknown as Response;
 }
 
-/** 安装 fetch 桩：token 端点返回固定 token，业务端点走 handler */
+/** 安装 fetch 桩：所有 URL（含 /api/auth/exchange）一律走 handler */
 function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
-  const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
-    if (String(url).includes("/api/auth/token")) {
-      return jsonResponse({ data: { token: "test-token" } });
-    }
-    return handler(String(url), init);
-  });
+  const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) =>
+    handler(String(url), init),
+  );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
 
+/** 测试秘钥（64 位 hex） */
+const BOOTSTRAP_SECRET = "a".repeat(64);
+
+beforeEach(async () => {
+  // 清空三类凭据来源，保证每条用例从「干净引导态」出发：
+  // fragment / sessionStorage 直接清；内存缓存经 refreshAuthToken 重置
+  //（无 hash 无缓存时它不发任何请求）
+  sessionStorage.clear();
+  location.hash = "";
+  await refreshAuthToken();
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("ensureAuthToken bootstrap 握手", () => {
+  it("hash 秘钥交换成功：写两级缓存、剥除 fragment、后续命中内存缓存", async () => {
+    location.hash = `#auth=${BOOTSTRAP_SECRET}`;
+    const fetchMock = stubFetch((url, init) => {
+      expect(String(url)).toContain("/api/auth/exchange");
+      // 裸 fetch 直连：不得携带业务请求的鉴权头；axum Json 提取器要求显式 Content-Type
+      expect(init?.method).toBe("POST");
+      expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+      expect((init?.headers as Record<string, string>)["X-Auth-Token"]).toBeUndefined();
+      expect(JSON.parse(String(init?.body))).toEqual({ bootstrap: BOOTSTRAP_SECRET });
+      return jsonResponse({ data: { token: "tok-1" } });
+    });
+
+    await expect(ensureAuthToken()).resolves.toBe("tok-1");
+    // fragment 已剥除（防刷新/分享泄露），sessionStorage 已写入
+    expect(location.hash).toBe("");
+    expect(sessionStorage.getItem("campus_auth_token")).toBe("tok-1");
+    // 第二次调用命中内存缓存：不再发请求
+    await expect(ensureAuthToken()).resolves.toBe("tok-1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hash 交换 401 失败：返回 null 走引导态，fragment 保留、不写缓存", async () => {
+    location.hash = `#auth=${BOOTSTRAP_SECRET}`;
+    stubFetch(() =>
+      jsonResponse(
+        { error: { code: "BOOTSTRAP_INVALID", message: "引导秘钥无效" } },
+        { status: 401 },
+      ),
+    );
+    await expect(ensureAuthToken()).resolves.toBeNull();
+    expect(location.hash).toBe(`#auth=${BOOTSTRAP_SECRET}`);
+    expect(sessionStorage.getItem("campus_auth_token")).toBeNull();
+  });
+
+  it("无 hash 时复用 sessionStorage 缓存，且不发任何请求", async () => {
+    sessionStorage.setItem("campus_auth_token", "tok-2");
+    const fetchMock = stubFetch(() => jsonResponse({ data: { token: "不应被取用" } }));
+    await expect(ensureAuthToken()).resolves.toBe("tok-2");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("无 hash 无缓存时返回 null（引导态），anonymous 请求兜底", async () => {
+    const fetchMock = stubFetch(() => jsonResponse({ data: { token: "不应被取用" } }));
+    await expect(ensureAuthToken()).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("campus_auth_token")).toBeNull();
+  });
+
+  it("parseBootstrapSecret：接受完整带 #auth= 的 URL 与裸秘钥，拒绝非法输入", () => {
+    const short = "abcdef01";
+    expect(parseBootstrapSecret(`http://127.0.0.1:50721/#auth=${BOOTSTRAP_SECRET}`)).toBe(
+      BOOTSTRAP_SECRET,
+    );
+    expect(parseBootstrapSecret(`#auth=${BOOTSTRAP_SECRET}`)).toBe(BOOTSTRAP_SECRET);
+    expect(parseBootstrapSecret(BOOTSTRAP_SECRET)).toBe(BOOTSTRAP_SECRET);
+    expect(parseBootstrapSecret(short)).toBe(short); // 8~128 位 hex 均接受
+    expect(parseBootstrapSecret("short")).toBeNull();
+    expect(parseBootstrapSecret("#auth=xyz")).toBeNull();
+    expect(parseBootstrapSecret("http://127.0.0.1:50721/")).toBeNull();
+    expect(parseBootstrapSecret("")).toBeNull();
+    expect(parseBootstrapSecret("  ")).toBeNull();
+  });
+});
+
+describe("submitManagementPassword", () => {
+  it("密码换取成功：缓存 token（内存 + sessionStorage）并剥除残留 fragment", async () => {
+    location.hash = `#auth=${BOOTSTRAP_SECRET}`;
+    const fetchMock = stubFetch((url, init) => {
+      expect(String(url)).toContain("/api/auth/exchange");
+      expect(JSON.parse(String(init?.body))).toEqual({ password: "pw-123" });
+      return jsonResponse({ data: { token: "tok-3" } });
+    });
+    const outcome = await submitManagementPassword("pw-123");
+    expect(outcome).toEqual({ ok: true, token: "tok-3" });
+    expect(sessionStorage.getItem("campus_auth_token")).toBe("tok-3");
+    expect(location.hash).toBe("");
+    // 缓存对后续 ensureAuthToken 可见
+    await expect(ensureAuthToken()).resolves.toBe("tok-3");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("AUTH_NOT_CONFIGURED 原样透传（服务端未配置管理密码）", async () => {
+    stubFetch(() =>
+      jsonResponse(
+        { error: { code: "AUTH_NOT_CONFIGURED", message: "未配置管理密码" } },
+        { status: 401 },
+      ),
+    );
+    const outcome = await submitManagementPassword("pw-123");
+    expect(outcome).toEqual({
+      ok: false,
+      code: "AUTH_NOT_CONFIGURED",
+      message: "未配置管理密码",
+    });
+    expect(sessionStorage.getItem("campus_auth_token")).toBeNull();
+  });
+
+  it("其他 401 报密码错误（带后端中文消息）", async () => {
+    stubFetch(() =>
+      jsonResponse({ error: { code: "BAD_PASSWORD", message: "管理密码不正确" } }, { status: 401 }),
+    );
+    const outcome = await submitManagementPassword("wrong");
+    expect(outcome).toEqual({ ok: false, code: "AUTH_REJECTED", message: "管理密码不正确" });
+  });
+
+  it("网络失败报 NETWORK_ERROR（中文提示）", async () => {
+    stubFetch(() => {
+      throw new TypeError("network down");
+    });
+    const outcome = await submitManagementPassword("pw-123");
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.code).toBe("NETWORK_ERROR");
+      expect(outcome.message).toContain("无法连接服务");
+    }
+  });
 });
 
 describe("request 超时与取消", () => {
@@ -122,15 +258,35 @@ describe("request 超时与取消", () => {
     expect((err as ApiError).message).toBe("Worker 忙");
   });
 
-  it("401 时重置 token 并仅重试一次", async () => {
-    let calls = 0;
-    const fetchMock = stubFetch(() => {
-      calls += 1;
-      // 首次 401，重试后 200
-      return calls === 1 ? jsonResponse({ error: {} }, { status: 401 }) : jsonResponse({ data: "ok" });
+  it("401 时重置 token 并仅重试一次；无凭据可用时以匿名请求失败", async () => {
+    // 新信任模型下没有免鉴权取 token 的端点：401 重试仍拿不到凭据（无 hash 无缓存），
+    // 第二次仍匿名 → 401 → 抛出；且重试路径不得触发 bootstrap 交换
+    const fetchMock = stubFetch(() => jsonResponse({ error: {} }, { status: 401 }));
+    const err = await http.get("/api/x").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(401);
+    // 业务请求 + 401 重试 = 2 次；ensureAuthToken 无凭据来源不发起交换
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("交换成功剥除 fragment 后，401 重试不再有凭据来源（匿名重试）", async () => {
+    // 首个业务请求带着交换来的 token：401 → reset → 重试时 fragment 已剥除、
+    // 缓存已清，ensureAuthToken 返回 null → 匿名重试一次。此处锁定
+    // 「交换仅一次 + 重试仅一次」的防循环边界
+    location.hash = `#auth=${BOOTSTRAP_SECRET}`;
+    let businessCalls = 0;
+    const fetchMock = stubFetch((url) => {
+      if (String(url).includes("/api/auth/exchange")) {
+        return jsonResponse({ data: { token: "tok-4" } });
+      }
+      businessCalls += 1;
+      return businessCalls === 1
+        ? jsonResponse({ error: {} }, { status: 401 })
+        : jsonResponse({ data: "ok" });
     });
     await expect(http.get("/api/x")).resolves.toBe("ok");
-    // token 请求 + 首次业务请求 + 重试 = 3 次
+    expect(location.hash).toBe("");
+    // 交换 1 次 + 业务 2 次（原始 + 重试）
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
