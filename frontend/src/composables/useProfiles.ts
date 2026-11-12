@@ -206,7 +206,12 @@ async function saveProfile(): Promise<boolean> {
     toastOnly(false, "方案 ID 只能包含字母、数字、下划线和连字符");
     return false;
   }
-  const { id: _id, _isNew, _clearPassword, ...settings } = profile;
+  // recorded_actions 不随保存通道回传：它是配置会话（config-session/stop）写入的
+  // 后端权威数据，编辑器打开期间拿到的是打开时刻的旧副本；若随 PUT 上去而后端
+  // 恰好接受该字段，会把配置会话刚落盘的新录制覆盖回旧值（当前后端未声明该字段
+  // 时 serde 亦会忽略——剥离是双侧保险）。开关 persistent_session_enabled 保留：
+  // 那是用户在本分区可改的字段，走既有保存通道（PUT 仅覆盖出现的字段）。
+  const { id: _id, _isNew, _clearPassword, recorded_actions: _recordedActions, ...settings } = profile;
   // 自定义运营商：选中"自定义"但未输入关键字时拒绝保存（修复 P1-17）
   if (settings.isp === "自定义") {
     toastOnly(false, "请填写自定义运营商关键字");
@@ -243,6 +248,8 @@ async function saveProfile(): Promise<boolean> {
         login_channel: settings.login_channel ?? "browser",
         active_http_task: settings.active_http_task ?? "",
         active_script_task: settings.active_script_task ?? "",
+        // 持久会话开关与 PUT 同语义（新建时勾选也要能一次落齐；后端接受前会被忽略）
+        persistent_session_enabled: settings.persistent_session_enabled === true,
         ...(settings.network ? { network: settings.network } : {}),
       });
     } else {

@@ -16,6 +16,8 @@ import type {
   BinaryInfo,
   BrowserListResponse,
   ConfigResponse,
+  ConfigSessionStartResult,
+  ConfigSessionStopResult,
   DebugSession,
   DiagnosticReport,
   EnvironmentStatus,
@@ -240,7 +242,9 @@ export const profilesApi = {
     http.get<ProfileDetailResponse>(`/api/profiles/${pathSegment(id)}`),
   // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password；
   // 可选设置字段（auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task/
-  // active_http_task/login_channel）与 PUT 同语义
+  // active_http_task/login_channel/persistent_session_enabled）与 PUT 同语义
+  //（后端 ProfileCreateBody 接受 persistent_session_enabled 前该字段会被忽略：
+  // 新建时勾选的开关需在保存后的编辑里再确认一次）
   create: (
     id: string,
     payload: {
@@ -259,6 +263,8 @@ export const profilesApi = {
       active_http_task?: string;
       /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
       active_script_task?: string;
+      /** 持久会话开关（浏览器渠道）；录制动作由配置会话落盘，不经创建载荷 */
+      persistent_session_enabled?: boolean;
     },
   ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   save: (id: string, payload: ProfileUpdatePayload) =>
@@ -273,6 +279,28 @@ export const profilesApi = {
   detect: () => http.post<NetworkDetectResult>("/api/profiles/detect"),
   toggleAutoSwitch: (enabled: boolean) =>
     http.post<MutationResult & { active_profile?: string }>("/api/profiles/auto-switch", { enabled }),
+};
+
+/**
+ * 浏览器持久会话的「配置会话」（headed 配置浏览器 + 交互录制）。
+ *
+ * start 打开以方案认证地址为门户地址的配置浏览器并开启录制；stop 结束会话并把
+ * 录制动作落盘方案（recorded_actions + persistent_session_enabled=true）。会话全局
+ * 互斥：已有活跃会话时 start 返回 409（前端显示固定文案「已有配置会话进行中」），
+ * 无活跃会话时 stop 也返回 409（后端 message 直显）。start 要等浏览器真实拉起并
+ * 就绪，放宽客户端超时（与重定向检测同量级）。
+ */
+export const configSessionApi = {
+  start: (profileId: string) =>
+    http.post<ConfigSessionStartResult>(
+      `/api/profiles/${pathSegment(profileId)}/config-session/start`,
+      null,
+      { timeout: 60000 },
+    ),
+  stop: (profileId: string) =>
+    http.post<ConfigSessionStopResult>(
+      `/api/profiles/${pathSegment(profileId)}/config-session/stop`,
+    ),
 };
 
 /** 开机自启动 */

@@ -720,6 +720,27 @@ export interface EgressAdapter {
   dns_servers: string[];
 }
 
+/**
+ * 持久会话录制动作（配置会话 `profile_session_stop` 取回的单个动作）。
+ *
+ * 与后端 `RecordedAction`（src/config/schema.rs）/ Python Worker 的录制契约逐字对齐：
+ * `type` / `strategy` 保持 string 而非枚举——两者都是 Worker 侧演进的受控词表
+ * （当前 `type` 为 `click`/`change`，`strategy` 为 `id`/`name`/`data-testid`/…），
+ * 前端只做展示，按字面值透传即可。
+ */
+export interface RecordedAction {
+  /** 动作类型：`click`（按钮/提交类点击）或 `change`（`<select>` 选择） */
+  type: string;
+  /** 目标元素选择器（Worker 按启发式优先级取首个命中） */
+  selector: string;
+  /** 选择器采用的启发式级别（与 selector 配对） */
+  strategy: string;
+  /** 事件时间戳（毫秒；按此升序） */
+  ts: number;
+  /** `change` 动作的选中值；`click` 无此键 */
+  value?: string;
+}
+
 /** 配置方案 */
 export interface Profile {
   network?: NetworkSettings | null;
@@ -749,6 +770,20 @@ export interface Profile {
    * 脚本退出码 0 视为本次尝试成功（真终态仍由登录后网络验证确认）。
    */
   active_script_task: string;
+  /**
+   * 是否启用持久浏览器会话（门户「记住密码」模式；仅浏览器渠道生效）。
+   *
+   * 启用后浏览器渠道登录走「持久上下文打开门户页 + 回放 recorded_actions +
+   * 网络验证兜底」；开关随方案保存通道（PUT）落盘。
+   */
+  persistent_session_enabled?: boolean;
+  /**
+   * 持久会话录制动作（配置会话 stop 时由后端落盘，按 ts 升序）。
+   *
+   * 不是用户手编字段：编辑器保存**不回传**它（载荷中已剥离，见 useProfiles.saveProfile
+   * 的注释），防止编辑器打开期间的旧草稿把配置会话刚写入的新录制覆盖回去。
+   */
+  recorded_actions?: RecordedAction[];
   [key: string]: unknown;
 }
 
@@ -934,6 +969,26 @@ export interface ProfileUpdatePayload extends Partial<Profile> {
    * 两者等价。清除只能经本字段完成。
    */
   clear_password?: boolean;
+}
+
+/** POST /api/profiles/{id}/config-session/start 结果：配置浏览器已拉起、录制已开启 */
+export interface ConfigSessionStartResult {
+  started: boolean;
+}
+
+/**
+ * POST /api/profiles/{id}/config-session/stop 结果：会话已结束且录制动作已由后端
+ * 落盘方案（recorded_actions + persistent_session_enabled=true）。
+ *
+ * 响应只带计数不带动作数组——编辑器需要完整数组时应重新 GET 方案详情。
+ */
+export interface ConfigSessionStopResult {
+  /** 本次会话录制的动作数（Worker 侧截断后落盘的数量） */
+  recorded_count: number;
+  /** 动作数超出单次上限被截断时为 true */
+  truncated: boolean;
+  /** 后端是否已置位持久会话开关（契约恒为 true；前端据此反映开关） */
+  persistent_session_enabled: boolean;
 }
 
 /**

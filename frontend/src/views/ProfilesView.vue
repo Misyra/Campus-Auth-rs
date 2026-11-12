@@ -23,6 +23,7 @@ import Modal from "@/components/common/Modal.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import type { ProfileSharePayload } from "@/api/types";
+import PersistentSessionSection from "@/views/profiles/PersistentSessionSection.vue";
 import { useToast } from "@/composables/useToast";
 import { frontendLogger } from "@/utils/logger";
 
@@ -476,6 +477,15 @@ async function confirmImport(): Promise<void> {
               @open-guide="openHttpTaskConfig"
             />
           </div>
+
+          <!-- 持久会话（浏览器记住密码）：仅浏览器渠道有意义（后端登录编排按渠道
+               门控）；新建草稿传入 undefined profile-id，分区只给开关与指引 -->
+          <PersistentSessionSection
+            v-if="p.editingProfile.value.login_channel === 'browser'"
+            v-model="p.editingProfile.value"
+            :profile-id="p.editingProfile.value._isNew ? undefined : p.editingProfile.value.id"
+            @session-stopped="p.fetchProfiles(true)"
+          />
         </div>
         <div class="card-footer">
           <button class="btn btn-secondary" @click="closeEditor">取消</button>
