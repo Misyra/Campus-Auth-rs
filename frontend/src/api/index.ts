@@ -154,6 +154,13 @@ export const notificationApi = {
 export const diagnosticsApi = {
   run: () =>
     http.post<DiagnosticReport>("/api/diagnostics/run", null, { timeout: 30000 }),
+  /** 导出诊断包（zip 附件）：manifest + 脱敏配置快照 + 事件流 + 日志 + 环境观测 */
+  async exportBundle(): Promise<Blob> {
+    const token = await ensureAuthToken();
+    return fetchBundleWithTimeout("/api/diagnostics/bundle", {
+      headers: token ? { "X-Auth-Token": token } : undefined,
+    });
+  },
 };
 
 /** 系统 */

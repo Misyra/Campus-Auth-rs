@@ -6,6 +6,10 @@
  * 门户 / 近期登录失败归因），整体受 15s 总限时约束，前端超时放宽到 30s 兜底。
  * 诊断失败是数据不是请求错误：逐项 ✓/⚠/✗/– + 耗时 + 摘要，细节可折叠，
  * 总结论高亮。样式全部走 token，深浅主题由 base.css 的变量定义自动生效。
+ *
+ * 「导出诊断包」与「开始诊断」并排：GET /api/diagnostics/bundle 返回 zip
+ * 附件（manifest + 脱敏配置快照 + 事件流 + 日志 + 环境观测），blob 下载 +
+ * a.download 命名，导出失败就地报错（与诊断错误互不覆盖）。
  */
 import { ref } from "vue";
 import IconApp from "@/components/common/IconApp.vue";
@@ -16,6 +20,9 @@ import type { DiagnosticCheck, DiagnosticReport, DiagnosticStatus } from "@/api/
 const running = ref(false);
 const report = ref<DiagnosticReport | null>(null);
 const errorText = ref("");
+/** 导出诊断包进行中（防连点）与失败信息 */
+const exporting = ref(false);
+const exportError = ref("");
 /** 已展开细节的检查项 key 集合 */
 const expandedKeys = ref<Set<string>>(new Set());
 
@@ -120,21 +127,59 @@ async function startDiagnostics(): Promise<void> {
     running.value = false;
   }
 }
+
+/** 诊断包下载文件名：campus-auth-diagnostics-<日期>.zip */
+function bundleFilename(): string {
+  return `campus-auth-diagnostics-${new Date().toISOString().slice(0, 10)}.zip`;
+}
+
+/** 导出诊断包：blob 下载 + a.download 命名；防连点，失败就地报错 */
+async function exportBundle(): Promise<void> {
+  if (exporting.value) return;
+  exporting.value = true;
+  exportError.value = "";
+  try {
+    const blob = await diagnosticsApi.exportBundle();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = bundleFilename();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    exportError.value = extractApiError(e, "诊断包导出失败，请稍后重试");
+  } finally {
+    exporting.value = false;
+  }
+}
 </script>
 
 <template>
   <div class="card diag-card">
     <div class="card-header">
       <h2>网络诊断</h2>
-      <button
-        class="btn btn-sm btn-secondary"
-        :disabled="running"
-        data-testid="diag-start"
-        @click="startDiagnostics"
-      >
-        <IconApp :name="running ? 'refresh' : 'activity'" :class="{ spin: running }" />
-        {{ running ? "诊断中..." : "开始诊断" }}
-      </button>
+      <div class="diag-actions">
+        <button
+          class="btn btn-sm btn-secondary"
+          :disabled="exporting"
+          data-testid="diag-export"
+          @click="exportBundle"
+        >
+          <IconApp :name="exporting ? 'refresh' : 'download'" :class="{ spin: exporting }" />
+          {{ exporting ? "导出中..." : "导出诊断包" }}
+        </button>
+        <button
+          class="btn btn-sm btn-secondary"
+          :disabled="running"
+          data-testid="diag-start"
+          @click="startDiagnostics"
+        >
+          <IconApp :name="running ? 'refresh' : 'activity'" :class="{ spin: running }" />
+          {{ running ? "诊断中..." : "开始诊断" }}
+        </button>
+      </div>
     </div>
     <div class="card-body">
       <p v-if="!report && !errorText && !running" class="diag-hint">
@@ -142,6 +187,14 @@ async function startDiagnostics(): Promise<void> {
       </p>
 
       <div v-if="errorText" class="diag-error" role="alert">{{ errorText }}</div>
+      <div
+        v-if="exportError"
+        class="diag-error"
+        role="alert"
+        data-testid="diag-export-error"
+      >
+        {{ exportError }}
+      </div>
 
       <template v-if="report">
         <div class="diag-verdict" :class="VERDICT_META[report.verdict].cls" data-testid="diag-verdict">
@@ -185,6 +238,12 @@ async function startDiagnostics(): Promise<void> {
 
 <style scoped>
 /* 全部走 token，无 [data-theme] 分支：深浅主题由变量定义自动生效 */
+.diag-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
 .diag-hint {
   margin: 0;
   color: var(--text-muted);
