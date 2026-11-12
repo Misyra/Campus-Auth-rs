@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 认证方案页：方案列表与编辑器、重定向检测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import LoginChannelField from "@/components/common/LoginChannelField.vue";
 import ProxyBypassHelp from "@/components/common/ProxyBypassHelp.vue";
 import NetworkEgressFields from "@/components/common/NetworkEgressFields.vue";
@@ -331,7 +332,9 @@ async function confirmImport(): Promise<void> {
               @keydown.space.prevent="matchExpanded = !matchExpanded"
             >
               网络匹配
-              <span class="field-help" tabindex="0" role="note" data-tip="设置匹配规则后，自动切换时会根据当前网络环境选择对应方案。两项都留空则仅手动切换。">?</span>
+              <!-- 这里曾是裸拷贝的 .field-help span（靠伪元素气泡）；收编进组件，
+                   点击 ? 钉住说明不再误触发折叠头的展开/收起（组件内部 click.stop） -->
+              <FieldHelp text="设置匹配规则后，自动切换时会根据当前网络环境选择对应方案。两项都留空则仅手动切换。" />
               <!-- 折叠时把已配置的值透出来，避免"看不见就以为没配" -->
               <span v-if="!matchExpanded && matchSummary" class="editor-collapse-summary">{{ matchSummary }}</span>
               <IconApp name="chevron-down" class="editor-collapse-chevron" />

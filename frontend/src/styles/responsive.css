@@ -172,13 +172,9 @@
 }
 
 @media (max-width: 640px) {
-  .field-help::after {
-    left: calc(100% + 8px);
-    /* 窄屏收一档但不低于 420px：本规则同时作用于 `--wide` 变体，写太小会把长说明
-       压成一条竖线；真正"放不下"的场景由组件按触发点两侧实测剩余空间写入的
-       `--tip-max` 收（见 FieldHelp.syncAutoFlip），必须一并尊重，否则本规则会把它覆盖掉 */
-    max-width: min(var(--tip-max, 420px), calc(100vw - 48px));
-  }
+  /* 帮助气泡（.field-help-tip）窄屏不再需要覆盖规则：Reka Tooltip 迁移后，
+     碰撞定位按视口实测收（collisionPadding 32px + --reka-tooltip-content-available-width），
+     旧 ::after 的 8px 间距 / 100vw-48px 上界已被库级取值取代（form.css 气泡段）。 */
 
   /* 通用弹窗窄屏：全幅贴边（复用向导的全幅模式），确认框同理 */
   .modal-overlay {
