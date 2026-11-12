@@ -7,15 +7,20 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Local, Timelike};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-// 时间源统一用 tokio 时钟：冷却到期判定（cooling_down_until）与 check_timer /
-// 测试的 `tokio::time::advance` 同源。原先用 std::time::Instant 会与虚拟时钟
-// 完全解耦（advance(600s) 后 std 仅走 百微秒级），导致「冷却期满重置失败计数」
-// 这条恢复路径在任何测试中都走不到——回归保护形同虚设。
-use tokio::time::{Duration, Instant, Interval};
+// 时间源分界线（P2-2 墙钟化）：
+// - 业务周期（冷却 / 谨慎重试间隔 / 探测周期 / Profile 切换检测周期）按墙钟
+//   `SystemTime` 判定——类 Unix 平台系统睡眠期间单调钟停摆，合盖数小时唤醒后
+//   睡眠中到期的周期若按单调钟计需再等满一个周期，「唤醒即重认证」被显著推迟。
+//   经可注入的 [`WallClock`] 判定，测试注入伪造时钟显式推进（tokio 虚拟时钟
+//   `advance` 不影响 `SystemTime`，无法驱动墙钟判定）。
+// - 纯性能测量（TestNetwork 耗时统计）与超时护栏（单次探测 timeout）保持
+//   tokio 单调钟不动：护栏要的就是单调，防墙钟跳变（NTP 校时）误伤。
+use tokio::time::Duration;
 
 use crate::engine::{
     Engine, EngineCommand, EngineDeps, EngineError, MAX_IDLE_SLEEP_SECS,
@@ -34,6 +39,69 @@ const COOLING_DOWN_DURATION_SECS: u64 = 300;
 /// 自适应探测的异常态周期（秒）：CaptivePortal/Offline 状态下的探测间隔。
 /// 断网感知延迟从最差一个 check_interval（默认 300s）降到此值
 const PROBE_ONLINE_BACKOFF_BASE_SECS: u64 = 30;
+
+/// 周期探测到期睡眠的单片上限：长睡眠切成 ≤60s 的短片，每片醒来按墙钟重估
+/// 剩余时长（口径同 `scheduler::cron_loop::MAX_SLEEP_SLICE`），抵御类 Unix
+/// 休眠唤醒（CLOCK_MONOTONIC 不计入挂起时间）与墙钟前跳导致的过睡
+const MAX_SLEEP_SLICE: Duration = Duration::from_secs(60);
+
+/// 业务周期判定的墙钟时钟源（可注入）
+///
+/// Engine 的冷却计时 / 谨慎重试间隔 / 探测周期 / Profile 切换检测周期均按
+/// 墙钟（[`SystemTime`]）判定：类 Unix 平台系统睡眠期间单调钟（tokio
+/// `Instant`）停摆，合盖数小时唤醒后睡眠中到期的周期会再等满一个周期才触发，
+/// 「唤醒即重认证」恰是校园网场景刚需，故与 `scheduler::cron_loop` 对齐改用
+/// 墙钟口径。
+///
+/// [`WallClock::system`] 为生产实现（= `SystemTime::now`）；测试经
+/// [`WallClock::fake`] 注入伪造时钟并显式推进（原先业务周期用 tokio
+/// `Instant` 与虚拟时钟 `advance` 同源驱动，墙钟化后改由注入时钟承担）。
+#[derive(Clone)]
+pub(crate) struct WallClock {
+    now_fn: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+}
+
+impl WallClock {
+    /// 系统墙钟（生产实现）
+    pub(crate) fn system() -> Self {
+        Self {
+            now_fn: Arc::new(SystemTime::now),
+        }
+    }
+
+    /// 当前墙钟时刻
+    pub(crate) fn now(&self) -> SystemTime {
+        (self.now_fn)()
+    }
+
+    /// 测试用伪造时钟：返回时钟与推进句柄，`handle` 前进/回拨即时生效
+    #[cfg(test)]
+    fn fake() -> (Self, FakeClockHandle) {
+        let shared = Arc::new(std::sync::Mutex::new(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        ));
+        let handle = FakeClockHandle(Arc::clone(&shared));
+        (
+            Self {
+                now_fn: Arc::new(move || *shared.lock().expect("伪造时钟互斥锁不应中毒")),
+            },
+            handle,
+        )
+    }
+}
+
+/// 测试用伪造墙钟的推进句柄（clone / 传引用共享同一时刻）
+#[cfg(test)]
+struct FakeClockHandle(Arc<std::sync::Mutex<SystemTime>>);
+
+#[cfg(test)]
+impl FakeClockHandle {
+    /// 把伪造墙钟向前推进（模拟系统睡眠 / 墙钟前跳）
+    fn advance(&self, d: Duration) {
+        let mut t = self.0.lock().expect("伪造时钟互斥锁不应中毒");
+        *t += d;
+    }
+}
 
 /// 后台探测任务的回传消息
 ///
@@ -74,7 +142,8 @@ struct EngineInner {
     /// 地址导致每轮探测都拉起浏览器；网络重新确认非门户或配置变化后恢复预算。
     cautious_attempted_config_version: Option<u64>,
     /// 网络故障后的谨慎登录冷却截止；凭据及人工验证失败没有此预算。
-    cautious_retry_after: Option<Instant>,
+    /// 墙钟计时（可注入）：系统睡眠期间到期的冷却在唤醒后立即视为期满。
+    cautious_retry_after: Option<SystemTime>,
     /// 上次网络检测时间
     ///
     /// 仅在真实探测结果回传时更新（G3）：登录结果等非检测路径合并引擎状态时
@@ -82,10 +151,22 @@ struct EngineInner {
     last_check_time: Option<DateTime<Local>>,
     /// 手动暂停标记
     manual_paused: bool,
-    /// 上次 Profile 切换检测时间
-    last_profile_check: Instant,
-    /// 网络检查定时器（常驻，由 monitoring + 暂停状态门控）
-    check_timer: Interval,
+    /// 上次 Profile 切换检测时间（墙钟，可注入）
+    last_profile_check: SystemTime,
+    /// 业务周期判定的墙钟时钟源（冷却 / 谨慎重试 / 探测周期 / 切换检测共用）
+    clock: WallClock,
+    /// 下一次周期探测的墙钟到期点
+    ///
+    /// 取代原先的 tokio `Interval`（单调钟）：系统睡眠期间单调钟停摆，唤醒后
+    /// 首探最多推迟一个检测周期（钳制上限 20 分钟）；墙钟到期点在睡眠期间越过
+    /// 后唤醒即到期。到期睡眠按 [`MAX_SLEEP_SLICE`] 分片，每片醒来由主循环按
+    /// 墙钟重估剩余（由 monitoring + 暂停状态门控是否真正探测）。
+    next_check_at: SystemTime,
+    /// 当前探测周期（秒）：到期点越过后的 Skip 前移与自适应重算共用
+    ///
+    /// 取值来源：EngineInner::new / reset_check_deadline 用配置钳制值；
+    /// 探测结果回传后按自适应间隔更新。到期触发时只前移不改值（Skip 语义）。
+    check_period_secs: u64,
     /// 连续登录失败次数
     consecutive_failures: u32,
     /// 连续 Online 探测次数（自适应间隔的退避进度）
@@ -93,8 +174,8 @@ struct EngineInner {
     /// 非 Online 结果归零；Online 连续次数越多，下一次探测间隔按指数退避
     /// 越接近配置的 check_interval（见 [`adaptive_check_interval_secs`]）。
     online_streak: u32,
-    /// 冷却期截止时刻（None 表示不在冷却中）
-    cooling_down_until: Option<Instant>,
+    /// 冷却期截止时刻（None 表示不在冷却中；墙钟计时，可注入）
+    cooling_down_until: Option<SystemTime>,
     /// 是否有 source=Auto 的登录会话在途
     ///
     /// 每轮 CaptivePortal 检测都会提交 Auto 登录，若上一轮会话仍在运行，
@@ -129,7 +210,7 @@ impl EngineInner {
             self.cautious_retry_after =
                 if result.terminal == LoginTerminal::Failed && result.network_retryable {
                     tracing::info!("谨慎登录遇到临时网络故障，将在冷却后重新尝试");
-                    Some(Instant::now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS))
+                    Some(self.clock.now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS))
                 } else {
                     None
                 };
@@ -140,13 +221,17 @@ impl EngineInner {
         self.cautious_attempted_config_version == Some(config_version)
             && self
                 .cautious_retry_after
-                .is_none_or(|until| Instant::now() < until)
+                .is_none_or(|until| self.clock.now() < until)
     }
 
     fn new(
         probe_result_tx: mpsc::Sender<ProbeMessage>,
         login_result_tx: mpsc::Sender<LoginResult>,
+        clock: WallClock,
     ) -> Self {
+        // 初始到期点：一个默认探测周期后（受 monitoring=false 门控，到期只
+        // 前移不探测；Start/结果回传后按配置/自适应周期重算）
+        let now = clock.now();
         Self {
             monitoring: false,
             last_assessment: ConnectivityAssessment::default(),
@@ -155,14 +240,10 @@ impl EngineInner {
             cautious_retry_after: None,
             last_check_time: None,
             manual_paused: false,
-            last_profile_check: Instant::now(),
-            check_timer: {
-                let mut t = tokio::time::interval(Duration::from_secs(
-                    crate::engine::DEFAULT_CHECK_INTERVAL_SECS,
-                ));
-                t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                t
-            },
+            last_profile_check: now,
+            clock,
+            next_check_at: now + Duration::from_secs(crate::engine::DEFAULT_CHECK_INTERVAL_SECS),
+            check_period_secs: crate::engine::DEFAULT_CHECK_INTERVAL_SECS,
             consecutive_failures: 0,
             online_streak: 0,
             cooling_down_until: None,
@@ -181,19 +262,43 @@ impl EngineInner {
     /// 恢复完整的「连续失败 N 次」预算；若只清冷却不重置计数，第二轮起会退化为
     /// 「失败 1 次即再次冷却」。
     ///
-    /// 单独成函数以便直接测试：该路径原先依赖 `std::time::Instant`，与测试所用
-    /// 的 tokio 虚拟时钟完全解耦，导致任何 `start_paused` 测试都走不到这里。
-    /// 现用 [`tokio::time::Instant`]（见文件头 import 注释），可被 `advance` 驱动。
+    /// 冷却按墙钟判定（可注入时钟）：系统睡眠期间到期的冷却在唤醒后立即期满
+    /// （原 tokio 单调钟实现下，合盖睡眠不计入挂起时间，唤醒后冷却要重新计满
+    /// 一个周期，登录恢复被无谓推迟）。单独成函数以便直接测试。
     fn clear_expired_cooling_down(&mut self) {
         if self
             .cooling_down_until
-            .map(|until| Instant::now() >= until)
-            .unwrap_or(false)
+            .is_some_and(|until| self.clock.now() >= until)
         {
             self.cooling_down_until = None;
             self.consecutive_failures = 0;
         }
     }
+
+    /// 周期探测是否已到期（墙钟判定；到期点被墙钟回拨推回未来时自然推迟）
+    fn check_due(&self) -> bool {
+        self.clock.now() >= self.next_check_at
+    }
+
+    /// 到期触发后的 Skip 前移：从当前墙钟起算一个当前周期
+    ///
+    /// 对齐原 tokio `Interval` + `MissedTickBehavior::Skip` 语义：一次到期只
+    /// 触发一轮（在途探测期间反复到期被忽略），探测结果回传后再按自适应间隔
+    /// 重算。前移必须先于门控判定执行——否则未监测/暂停期间到期点滞留过去，
+    /// 主循环会在 select 分支上热自旋。
+    fn advance_check_deadline(&mut self) {
+        self.next_check_at = self.clock.now() + Duration::from_secs(self.check_period_secs);
+    }
+}
+
+/// 距下次周期探测的睡眠时长：剩余墙钟时间钳制到 ≤[`MAX_SLEEP_SLICE`]，
+/// 每片醒来由主循环按墙钟重估剩余（到期点已过返回 0，立即唤醒）
+fn periodic_check_slice(inner: &EngineInner) -> Duration {
+    let remaining = inner
+        .next_check_at
+        .duration_since(inner.clock.now())
+        .unwrap_or(Duration::ZERO);
+    remaining.min(MAX_SLEEP_SLICE)
 }
 
 /// 主循环
@@ -201,12 +306,13 @@ pub(crate) async fn run_loop(
     _engine: Arc<Engine>,
     deps: EngineDeps,
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
+    clock: WallClock,
 ) {
     // 探测结果回传 channel（后台探测任务 → 主循环，F5）
     let (probe_result_tx, mut probe_result_rx) = mpsc::channel::<ProbeMessage>(8);
     // 登录结果回传 channel（后台 spawn 的登录任务完成后通知主循环，携带完整结果以区分来源）
     let (login_result_tx, mut login_result_rx) = mpsc::channel::<LoginResult>(16);
-    let mut inner = EngineInner::new(probe_result_tx, login_result_tx);
+    let mut inner = EngineInner::new(probe_result_tx, login_result_tx, clock);
     // 配置版本订阅：任何入口的配置变更（Web 保存 / 切换 Profile / CLI）都会经
     // ConfigService reload 广播版本号，Engine 据此重建派生状态。此前只有
     // Scheduler 收到 reload 信号，Engine 的检测定时器等派生状态不随保存刷新
@@ -239,23 +345,31 @@ pub(crate) async fn run_loop(
             }
             Some(msg) = probe_result_rx.recv() => {
                 // 探测结果回传：更新网络状态并决策是否触发登录（F5）
-                handle_probe_message(msg, &mut inner, &deps).await;
+                handle_probe_message(msg, &mut inner, &deps);
             }
             Ok(()) = config_version_rx.changed() => {
                 // 配置版本变化：RuntimeConfig 已由 ConfigService 原子替换，
-                // Engine 只需重建派生状态（检测定时器间隔等），不再二次 reload。
+                // Engine 只需重建派生状态（检测周期等），不再二次 reload。
                 // Ok 模式：通道关闭（Err）时本分支在本轮 select 中被禁用，
                 // 等待其它分支事件，不会忙轮询
                 let _ = config_version_rx.borrow_and_update();
-                tracing::debug!("配置版本变化，重建引擎派生状态（检测定时器）");
-                reset_check_timer(&mut inner, &deps).await;
+                tracing::debug!("配置版本变化，重建引擎派生状态（检测周期）");
+                reset_check_deadline(&mut inner, &deps);
             }
-            _ = inner.check_timer.tick() => {
-                // 定时器常驻，仅在监测中且未暂停时执行探测
-                if inner.monitoring && !is_any_pause_active(&inner, &deps) {
-                    handle_network_check(&mut inner, &deps);
+            _ = tokio::time::sleep(periodic_check_slice(&inner)) => {
+                // 周期探测到期点（墙钟）的分片睡眠（口径同 scheduler::cron_loop）：
+                // 醒来后按墙钟重估——仅当到期点已越过才前移到期点（Skip 语义，
+                // 防在途探测 / 未监测 / 暂停期间反复到期空转）并执行探测；分片
+                // 唤醒（剩余仍为正）只重估剩余时长，不改到期点
+                if inner.check_due() {
+                    inner.advance_check_deadline();
+                    if inner.monitoring && !is_any_pause_active(&inner, &deps) {
+                        handle_network_check(&mut inner, &deps);
+                    }
                 }
             }
+            // 无事件空转唤醒：冷却清理、切换检测等低频判定与墙钟到期点重估的
+            // 兜底节奏（分片上限之外的第二重保险）
             _ = tokio::time::sleep(Duration::from_secs(MAX_IDLE_SLEEP_SECS)) => {}
         }
 
@@ -263,10 +377,10 @@ pub(crate) async fn run_loop(
         if inner.monitoring
             && !is_any_pause_active(&inner, &deps)
             && deps.config_service.runtime().load().auto_switch
-            && inner.last_profile_check.elapsed() >= profile_check_interval_duration(&deps)
+            && profile_check_due(&inner, &deps)
         {
             check_profile_switch(&mut inner, &deps).await;
-            inner.last_profile_check = Instant::now();
+            inner.last_profile_check = inner.clock.now();
         }
     }
     // 主循环退出（Shutdown / 命令端全关）后在途探测任务自然终结：
@@ -339,8 +453,8 @@ async fn handle_start(inner: &mut EngineInner, deps: &EngineDeps) {
     if !immediate_check_blocked_by_pause(inner, deps) {
         handle_network_check_with_priority(inner, deps, true);
     }
-    // 用配置间隔重建定时器（内部会消费首个立即 tick，避免紧随本次手动检测再探测一轮）
-    reset_check_timer(inner, deps).await;
+    // 用配置间隔重置到期点（从现在起算一个周期，避免紧随本次手动检测再探测一轮）
+    reset_check_deadline(inner, deps);
     tracing::info!("检测已启动");
 }
 
@@ -364,8 +478,8 @@ async fn handle_reload(inner: &mut EngineInner, deps: &EngineDeps) {
             // 继续使用旧配置运行
         }
     }
-    // 用新配置重置检查间隔（Reload 语义只改间隔，不应意外触发一次即时探测）
-    reset_check_timer(inner, deps).await;
+    // 用新配置重置检查周期（Reload 语义只改周期，不应意外触发一次即时探测）
+    reset_check_deadline(inner, deps);
 }
 
 async fn handle_apply_profile(
@@ -399,7 +513,7 @@ async fn handle_apply_profile(
     // 与 Start/Resume 相同的暂停门控（F4）：暂停窗口内只切换不探测
     if inner.monitoring && !immediate_check_blocked_by_pause(inner, deps) {
         handle_network_check_with_priority(inner, deps, true);
-        reset_check_timer(inner, deps).await;
+        reset_check_deadline(inner, deps);
     }
 }
 
@@ -453,7 +567,8 @@ fn handle_test_network(
     let slot = TestNetworkSlotGuard(inner.test_network_in_flight.clone());
     tokio::spawn(async move {
         let _slot = slot;
-        let start = Instant::now();
+        // 纯耗时测量，保持单调钟（分界线见文件头 import 注释）
+        let start = tokio::time::Instant::now();
         let result = match monitor.diagnose_once().await {
             Ok(report) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
@@ -500,7 +615,7 @@ async fn handle_resume(inner: &mut EngineInner, deps: &EngineDeps) {
     // 定时暂停窗口可能仍然生效——沿用同一门控跳过检测（F4）
     if inner.monitoring && !immediate_check_blocked_by_pause(inner, deps) {
         handle_network_check_with_priority(inner, deps, true);
-        reset_check_timer(inner, deps).await;
+        reset_check_deadline(inner, deps);
     }
     tracing::info!("检测已恢复");
 }
@@ -550,7 +665,7 @@ fn handle_login_result(result: LoginResult, inner: &mut EngineInner, deps: &Engi
                 && inner.cooling_down_until.is_none()
             {
                 inner.cooling_down_until =
-                    Some(Instant::now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS));
+                    Some(inner.clock.now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS));
                 tracing::warn!(
                     "连续失败达到 {} 次，进入冷却期（{}s）",
                     inner.consecutive_failures,
@@ -724,7 +839,7 @@ impl Drop for AutoLoginReturnGuard {
 ///   结果中基于旧配置的判断（auth_url 可达性）不得触发自动登录。
 ///
 /// 状态合并不受前三者影响——迟到的网络事实仍值得呈现给前端。
-async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
+fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
     // 无论成败都先复位在途标记，否则后续检测被永久忽略
     inner.probe_in_flight = false;
     // 若在途期间有优先级检测排队，立即补发一次（仅一次，避免无限自激）
@@ -756,18 +871,12 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
             // ENG-2：失败同样刷新「最近检测」——monitor 系统性故障期间前端
             // 时间冻结在最后一次成功值，会让用户误判检测停摆。合并最小快照：
             // 网络结论与证据沿用上次（失败不产生新证据，evidence 置 None），
-            // 仅刷新 last_check；探测定时器维持原周期不重建（有意设计，见下）
+            // 仅刷新 last_check；探测到期点维持原值不重算（有意设计，见下）
             let now = Local::now();
             inner.last_check_time = Some(now);
             let paused = is_any_pause_active(inner, deps);
             let cooling_down = inner.cooling_down_until.is_some();
-            let cooling_down_remaining = cooling_down.then(|| {
-                inner
-                    .cooling_down_until
-                    .unwrap()
-                    .saturating_duration_since(Instant::now())
-                    .as_secs() as u32
-            });
+            let cooling_down_remaining = cooling_down.then(|| cooling_remaining_secs(inner));
             let state = if inner.monitoring {
                 EngineState::Running
             } else {
@@ -823,16 +932,16 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
     inner.last_assessment = report.assessment.clone();
     inner.last_evidence = Some(report.evidence.clone());
     // 自适应探测间隔（C4）：异常态（CaptivePortal/Offline）短周期加密探测，
-    // 稳定在线按指数退避放大到配置的 check_interval。原地重建定时器并消费
-    // 首 tick——与 reset_check_timer 同语义：刚做完一轮探测，不消费会导致
-    // 立即重复探测形成风暴。探测 Failed 分支不重建（monitor 系统性故障时
-    // 维持原周期，不放大故障）；暂停期无结果回传，间隔自然保持
+    // 稳定在线按指数退避放大到配置的 check_interval。按墙钟从结果时刻重算
+    // 到期点——与 reset_check_deadline 同语义：刚做完一轮探测，到期点从现在
+    // 起算，不会立即重复探测形成风暴。探测 Failed 分支不重算（monitor 系统性
+    // 故障时维持原到期点，不放大故障）；暂停期无结果回传，周期自然保持
     if status == NetworkStatus::Online {
         inner.online_streak = inner.online_streak.saturating_add(1);
     } else {
         inner.online_streak = 0;
     }
-    let configured_interval = check_interval_duration(deps).as_secs();
+    let configured_interval = check_interval_secs(deps);
     let next_secs = if report.assessment.recovery_advice == RecoveryAdvice::NoProbeEvidence {
         // 没有任何有效探测时没有需要快速追踪的异常；沿用用户配置周期，
         // 避免空配置退化成每 30 秒一次的无意义循环。
@@ -840,17 +949,12 @@ async fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: 
     } else {
         adaptive_check_interval_secs(status, inner.online_streak, configured_interval)
     };
-    inner.check_timer = new_check_timer(Duration::from_secs(next_secs)).await;
+    inner.check_period_secs = next_secs;
+    inner.next_check_at = inner.clock.now() + Duration::from_secs(next_secs);
     let paused = is_any_pause_active(inner, deps);
     // 冷却期内检查：若仍在冷却则跳过登录
     let cooling_down = inner.cooling_down_until.is_some();
-    let cooling_remaining = if cooling_down {
-        inner
-            .cooling_down_until
-            .map(|until| until.saturating_duration_since(Instant::now()).as_secs() as u32)
-    } else {
-        None
-    };
+    let cooling_remaining = cooling_down.then(|| cooling_remaining_secs(inner));
     // 监测已停止时不得把状态合并回 Running（探测可能在 Stop 后才完成，
     // 与登录结果回传路径同一约束）
     let state = if inner.monitoring {
@@ -1005,23 +1109,24 @@ fn engine_state_for(inner: &EngineInner) -> EngineState {
     }
 }
 
-/// 新建网络检查定时器：`MissedTickBehavior::Skip` + 消费首个立即 tick
+/// 重置周期探测到期点（墙钟）：从当前时刻起算一个配置周期
 ///
-/// `tokio::time::interval` 的第一次 `tick()` 立即完成；调用方通常刚做过一次
-/// 检测（探测处理/Start/Resume/ApplyProfile），不消费首 tick 会导致紧接着
-/// 重复探测一轮；Reload 语义只改间隔，更不应意外触发即时探测。
-/// （EngineInner::new 的初始定时器受 monitoring=false 门控、不消费首 tick，
-/// 语义不同，不在此复用。）
-async fn new_check_timer(period: Duration) -> tokio::time::Interval {
-    let mut t = tokio::time::interval(period);
-    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let _ = t.tick().await;
-    t
+/// 原 `reset_check_timer` 语义（重建 `Interval` 并消费首个立即 tick）：调用方
+/// 通常刚做过一次检测（探测处理/Start/Resume/ApplyProfile），到期点从「现在 +
+/// 周期」起算，不会紧随其后重复探测一轮；Reload 语义只改周期，更不应意外触发
+/// 即时探测。墙钟计业务周期，睡眠期间越过即唤醒后立即到期（P2-2）。
+fn reset_check_deadline(inner: &mut EngineInner, deps: &EngineDeps) {
+    inner.check_period_secs = check_interval_secs(deps);
+    inner.advance_check_deadline();
 }
 
-/// 重建网络检查定时器（构造细节见 [`new_check_timer`]）
-async fn reset_check_timer(inner: &mut EngineInner, deps: &EngineDeps) {
-    inner.check_timer = new_check_timer(check_interval_duration(deps)).await;
+/// 冷却剩余秒数（墙钟）：到期点已过（墙钟回拨越过等）返回 0
+fn cooling_remaining_secs(inner: &EngineInner) -> u32 {
+    inner
+        .cooling_down_until
+        .and_then(|until| until.duration_since(inner.clock.now()).ok())
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0)
 }
 
 /// 合并 Engine 状态到 StatusManager 快照
@@ -1033,12 +1138,9 @@ fn merge_engine_state(inner: &EngineInner, deps: &EngineDeps, state: EngineState
     let last_check = inner.last_check_time.unwrap_or_else(Local::now);
     let cooling_down = inner
         .cooling_down_until
-        .map(|until| Instant::now() < until)
-        .unwrap_or(false);
+        .is_some_and(|until| inner.clock.now() < until);
     let cooling_down_remaining = if cooling_down {
-        inner
-            .cooling_down_until
-            .map(|until| until.saturating_duration_since(Instant::now()).as_secs() as u32)
+        Some(cooling_remaining_secs(inner))
     } else {
         None
     };
@@ -1103,13 +1205,27 @@ fn is_in_pause_window(
     }
 }
 
-/// 网络检查间隔（从 RuntimeConfig 读取，钳制到 20~1200s，见 [`crate::engine::CHECK_INTERVAL_MIN`]）
-fn check_interval_duration(deps: &EngineDeps) -> Duration {
+/// 网络检查周期（从 RuntimeConfig 读取，钳制到 20~1200s，见 [`crate::engine::CHECK_INTERVAL_MIN`]）
+fn check_interval_secs(deps: &EngineDeps) -> u64 {
     let secs = deps.config_service.runtime().load().monitor.check_interval as u64;
-    Duration::from_secs(secs.clamp(
+    secs.clamp(
         crate::engine::CHECK_INTERVAL_MIN,
         crate::engine::CHECK_INTERVAL_MAX,
-    ))
+    )
+}
+
+/// Profile 切换检测是否到期（墙钟判定）
+///
+/// 墙钟回拨把 `last_profile_check` 推到未来时 `duration_since` 为 Err，视为
+/// 未到期、等墙钟追平再查——与 `scheduler::cron_loop` 的回拨容忍口径一致。
+fn profile_check_due(inner: &EngineInner, deps: &EngineDeps) -> bool {
+    let interval = profile_check_interval_secs(deps);
+    inner
+        .clock
+        .now()
+        .duration_since(inner.last_profile_check)
+        .map(|elapsed| elapsed >= Duration::from_secs(interval))
+        .unwrap_or(false)
 }
 
 /// 按探测结果计算下一次探测间隔（自适应，纯函数）
@@ -1129,15 +1245,15 @@ fn adaptive_check_interval_secs(status: NetworkStatus, online_streak: u32, base_
     }
 }
 
-/// Profile 切换检测间隔（从 RuntimeConfig 读取，clamp 到合法范围）
-fn profile_check_interval_duration(deps: &EngineDeps) -> Duration {
+/// Profile 切换检测周期（从 RuntimeConfig 读取，clamp 到合法范围）
+fn profile_check_interval_secs(deps: &EngineDeps) -> u64 {
     let secs = deps
         .config_service
         .runtime()
         .load()
         .monitor
         .profile_check_interval as u64;
-    Duration::from_secs(secs.clamp(PROFILE_CHECK_INTERVAL_MIN, PROFILE_CHECK_INTERVAL_MAX))
+    secs.clamp(PROFILE_CHECK_INTERVAL_MIN, PROFILE_CHECK_INTERVAL_MAX)
 }
 
 #[cfg(test)]
@@ -1172,19 +1288,21 @@ mod tests {
 
     /// 冷却恢复路径：期满清冷却标记 + 失败计数归零（P2-13 的回归锚点）
     ///
-    /// 该路径此前用 `std::time::Instant`，而测试用 tokio 虚拟时钟，二者完全解耦
-    /// ——`advance(300s)` 无法让 std 时钟走过冷却期，于是这条恢复逻辑**从未**被
-    /// 任何测试执行过。改用 tokio 时钟后可被 `advance` 真实驱动。
-    #[tokio::test(start_paused = true)]
-    async fn test_cooling_down_expiry_resets_failure_count() {
+    /// 冷却按墙钟判定后由注入的伪造时钟驱动：tokio 虚拟时钟 `advance` 不影响
+    /// `SystemTime`，注入时钟是推进墙钟判定的唯一途径。大步推进同时模拟
+    /// 「合盖睡眠 8h 唤醒」场景——睡眠期间到期的冷却应在唤醒后立即期满，
+    /// 而非按单调钟重新计满一个周期（P2-2）。
+    #[test]
+    fn test_cooling_down_expiry_resets_failure_count() {
         let (tx, _rx) = mpsc::channel(1);
         let (ltx, _lrx) = mpsc::channel(1);
-        let mut inner = EngineInner::new(tx, ltx);
+        let (clock, fake) = WallClock::fake();
+        let mut inner = EngineInner::new(tx, ltx, clock);
 
         // 进入冷却期：3 次失败后置位（模拟 handle_login_result 的冷却分支）
         inner.consecutive_failures = COOLING_DOWN_THRESHOLD;
         inner.cooling_down_until =
-            Some(Instant::now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS));
+            Some(inner.clock.now() + Duration::from_secs(COOLING_DOWN_DURATION_SECS));
 
         // 未到期：不得清除
         inner.clear_expired_cooling_down();
@@ -1194,13 +1312,13 @@ mod tests {
             "冷却未到期不应重置失败计数"
         );
 
-        // 推进虚拟时钟越过冷却期（此前 std 时钟不受 advance 影响，恒不到期）
-        tokio::time::advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1)).await;
+        // 模拟系统睡眠：伪造墙钟大步前进越过冷却期（合盖 8h 唤醒）
+        fake.advance(Duration::from_secs(8 * 3600));
         inner.clear_expired_cooling_down();
 
         assert!(
             inner.cooling_down_until.is_none(),
-            "冷却期满应清除标记（若仍用 std 时钟，此处会失败）"
+            "睡眠期间到期的冷却应在唤醒后立即期满（若仍用单调钟，此处会失败）"
         );
         assert_eq!(
             inner.consecutive_failures, 0,
@@ -1209,11 +1327,12 @@ mod tests {
     }
 
     /// 网络故障冷却后重新放行，人工验证或凭据失败仍保留谨慎门禁。
-    #[tokio::test(start_paused = true)]
-    async fn cautious_network_failure_recovers_without_configuration_change() {
+    #[test]
+    fn cautious_network_failure_recovers_without_configuration_change() {
         let (probe_tx, _) = mpsc::channel(1);
         let (login_tx, _) = mpsc::channel(1);
-        let mut inner = EngineInner::new(probe_tx, login_tx);
+        let (clock, fake) = WallClock::fake();
+        let mut inner = EngineInner::new(probe_tx, login_tx, clock);
         inner.cautious_attempted_config_version = Some(7);
         let mut result = LoginResult {
             network_retryable: true,
@@ -1226,11 +1345,11 @@ mod tests {
         inner.observe_cautious_result(&result);
         assert!(inner.cautious_blocked(7));
         assert!(!inner.cautious_blocked(8));
-        tokio::time::advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1)).await;
+        fake.advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1));
         assert!(!inner.cautious_blocked(7));
         result.network_retryable = false;
         inner.observe_cautious_result(&result);
-        tokio::time::advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1)).await;
+        fake.advance(Duration::from_secs(COOLING_DOWN_DURATION_SECS + 1));
         assert!(inner.cautious_blocked(7));
         result.network_retryable = true;
         result.source = LoginSource::Manual;
@@ -1238,12 +1357,56 @@ mod tests {
         assert!(inner.cautious_blocked(7));
     }
 
+    /// 睡眠模拟（P2-2 墙钟化）：伪造墙钟大步前进（系统睡眠 8h）后，周期探测
+    /// 到期点立即视为到期、睡眠分片归零（唤醒即首探）；到期触发一次后按 Skip
+    /// 语义前移一个周期，不会连续到期形成热循环；剩余远超单片上限时按
+    /// [`MAX_SLEEP_SLICE`] 分片。
+    #[test]
+    fn test_probe_deadline_due_immediately_after_clock_jump() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (ltx, _lrx) = mpsc::channel(1);
+        let (clock, fake) = WallClock::fake();
+        let mut inner = EngineInner::new(tx, ltx, clock);
+        // 模拟刚完成一轮探测（Offline）：自适应短周期后再探
+        inner.check_period_secs = PROBE_ONLINE_BACKOFF_BASE_SECS;
+        inner.next_check_at =
+            inner.clock.now() + Duration::from_secs(PROBE_ONLINE_BACKOFF_BASE_SECS);
+
+        assert!(!inner.check_due(), "未到期不应探测");
+        assert_eq!(
+            periodic_check_slice(&inner),
+            Duration::from_secs(PROBE_ONLINE_BACKOFF_BASE_SECS),
+            "剩余时长应完整作为睡眠时长（短于单片上限）"
+        );
+
+        // 模拟合盖睡眠 8h：墙钟大步前进。原单调钟实现下该跳变不影响 tokio
+        // Instant，唤醒后首探要再等满一个周期——正是被修复的缺陷。
+        fake.advance(Duration::from_secs(8 * 3600));
+        assert!(
+            inner.check_due(),
+            "睡眠期间越过到期点，唤醒后应立即到期（若仍用单调钟，此处会失败）"
+        );
+        assert_eq!(
+            periodic_check_slice(&inner),
+            Duration::ZERO,
+            "到期后睡眠分片应为 0（立即唤醒执行探测）"
+        );
+
+        // 到期处理（Skip 语义）：前移一个周期后不再立即到期
+        inner.advance_check_deadline();
+        assert!(!inner.check_due(), "前移一个周期后不应立即到期");
+
+        // 剩余远超单片上限：只睡 ≤MAX_SLEEP_SLICE，每片醒来按墙钟重估
+        inner.next_check_at = inner.clock.now() + Duration::from_secs(8 * 3600);
+        assert_eq!(periodic_check_slice(&inner), MAX_SLEEP_SLICE);
+    }
+
     /// A23：TestNetwork 并发名额达上限即拒绝，守卫 Drop（panic / abort 路径）归还名额
     #[tokio::test]
     async fn test_network_slot_limit_and_guard_release() {
         let (tx, _rx) = mpsc::channel(1);
         let (ltx, _lrx) = mpsc::channel(1);
-        let inner = EngineInner::new(tx, ltx);
+        let inner = EngineInner::new(tx, ltx, WallClock::system());
 
         for _ in 0..TEST_NETWORK_MAX_IN_FLIGHT {
             assert!(try_acquire_test_network_slot(&inner), "上限内应放行");
@@ -1531,9 +1694,12 @@ mod tests {
     /// 监测配置：HTTP 目标指向只接受连接但不响应的本地服务，使自动探测挂在
     /// HTTP 超时；手动诊断仅等待公网探测，不额外执行本地链路诊断。
     /// `pause_all_day` 为 true 时配置全天定时暂停窗口（start == end）。
+    /// `clock` 注入业务周期判定的墙钟时钟源（常规用例传 [`WallClock::system`]，
+    /// 睡眠模拟用例传伪造时钟）。
     #[allow(clippy::type_complexity)]
     async fn make_engine_with_hanging_probe(
         pause_all_day: bool,
+        clock: WallClock,
     ) -> (
         tempfile::TempDir,
         mpsc::Sender<EngineCommand>,
@@ -1661,7 +1827,7 @@ mod tests {
         };
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(8);
         let engine = Arc::new(Engine::from_sender(cmd_tx.clone()));
-        tokio::spawn(run_loop(engine, deps, cmd_rx));
+        tokio::spawn(run_loop(engine, deps, cmd_rx, clock));
         (tmp, cmd_tx, status, metrics)
     }
 
@@ -1681,7 +1847,8 @@ mod tests {
     /// 结果回传主循环统一处理；Stop 后完成的探测不得回写 Running。
     #[tokio::test(start_paused = true)]
     async fn test_background_probe_keeps_commands_responsive_and_merges_reentry() {
-        let (_tmp, cmd_tx, status, _metrics) = make_engine_with_hanging_probe(false).await;
+        let (_tmp, cmd_tx, status, _metrics) =
+            make_engine_with_hanging_probe(false, WallClock::system()).await;
         let snap = || status.borrow();
 
         // Start：监测开启，立即检测转入后台（挂在网卡检查上，3s 后才完成）
@@ -1723,7 +1890,8 @@ mod tests {
     /// F4：定时暂停窗口内 Start/Resume 只切状态、不触发立即检测
     #[tokio::test(start_paused = true)]
     async fn test_scheduled_pause_blocks_immediate_probes() {
-        let (_tmp, cmd_tx, status, metrics) = make_engine_with_hanging_probe(true).await;
+        let (_tmp, cmd_tx, status, metrics) =
+            make_engine_with_hanging_probe(true, WallClock::system()).await;
         let snap = || status.borrow();
 
         // Start：仍应置 monitoring=true（Running），但跳过立即检测
@@ -1760,7 +1928,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_test_network_reply_from_background() {
         // 暂停场景：手动诊断不受自动监测暂停影响，仍在后台执行
-        let (_tmp, cmd_tx, _status, metrics) = make_engine_with_hanging_probe(true).await;
+        let (_tmp, cmd_tx, _status, metrics) =
+            make_engine_with_hanging_probe(true, WallClock::system()).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
             .send(EngineCommand::TestNetwork { reply: reply_tx })
@@ -1782,7 +1951,8 @@ mod tests {
 
         // 正常场景：先 Start（探测 1 在途），再下发 TestNetwork（探测 2 独立执行），
         // 紧接着 Stop——Stop 在两个探测完成前即被处理（命令不被探测阻塞）
-        let (_tmp2, cmd_tx2, status2, metrics2) = make_engine_with_hanging_probe(false).await;
+        let (_tmp2, cmd_tx2, status2, metrics2) =
+            make_engine_with_hanging_probe(false, WallClock::system()).await;
         let snap2 = || status2.borrow();
         cmd_tx2.send(EngineCommand::Start).await.unwrap();
         wait_for(|| snap2().engine_state == EngineState::Running).await;
@@ -1803,5 +1973,56 @@ mod tests {
         wait_for(|| metrics2.probe_total.load(Ordering::Relaxed) == 2).await;
         // Start 的探测 + TestNetwork 的探测各计一次（G23 单点递增）
         assert_eq!(metrics2.probe_total.load(Ordering::Relaxed), 2);
+    }
+
+    /// 睡眠模拟（端到端，P2-2 墙钟化）：伪造墙钟大步前进（模拟合盖睡眠 8h）后，
+    /// 周期探测的墙钟到期点已在睡眠期间越过，主循环应立即触发下一次探测
+    /// ——原单调钟实现（tokio Interval）下该跳变不影响到期点，唤醒后首探要
+    /// 再等满一个周期（本用例等待预算 ≪ 30s 自适应周期，单调钟下必然超时）。
+    #[tokio::test(start_paused = true)]
+    async fn test_wall_clock_probe_fires_after_sleep_jump() {
+        let (clock, fake) = WallClock::fake();
+        let (_tmp, cmd_tx, status, _metrics) = make_engine_with_hanging_probe(false, clock).await;
+        let snap = || status.borrow();
+
+        // Start：立即探测 #1（HTTP 目标挂 3s 超时后以 Offline 完成并回传）。
+        // 分步推进虚拟时钟（单步 100ms）：给真实 I/O（连接本地 stall 服务）与
+        // 探测超时定时器的注册留出被轮询的机会——一次性大步 advance 可能在
+        // 探测任务尚未被首次轮询时就越过其超时时刻
+        cmd_tx.send(EngineCommand::Start).await.unwrap();
+        wait_for(|| snap().engine_state == EngineState::Running).await;
+        let mut probe1_done = false;
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            if snap().probe_total == 1 {
+                probe1_done = true;
+                break;
+            }
+        }
+        assert!(probe1_done, "4s 虚拟时间内探测 #1 未完成（3s 超时 + 余量）");
+
+        // 探测结果（Offline）→ 自适应短周期 30s：到期点 = 结果时刻 + 30s。
+        // 模拟合盖睡眠 8h：伪造墙钟大步前进（tokio 虚拟时钟不动）
+        fake.advance(Duration::from_secs(8 * 3600));
+
+        // 唤醒：到期点已在睡眠期间越过 → 应立即触发探测 #2。空转唤醒 ≤5s +
+        // 探测 3s 完成，10s 虚拟时钟预算足够；若按单调钟计到期点，探测 #2 在
+        // 结果时刻 + 30s 前不会发生，远超预算
+        let mut probe2_done = false;
+        for _ in 0..100 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            if snap().probe_total == 2 {
+                probe2_done = true;
+                break;
+            }
+        }
+        assert!(
+            probe2_done,
+            "睡眠唤醒后 10s 虚拟时间内首探未立即到期（若按单调钟计到期点，30s 周期内不会发生）"
+        );
+        assert!(
+            snap().last_check_time.is_some(),
+            "唤醒后的首探应产生真实检测时间"
+        );
     }
 }

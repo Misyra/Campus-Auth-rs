@@ -127,7 +127,7 @@ impl Engine {
         };
         let join_handle = tokio::spawn(async move {
             let _guard = guard;
-            run_loop::run_loop(engine_for_task, deps, cmd_rx).await;
+            run_loop::run_loop(engine_for_task, deps, cmd_rx, run_loop::WallClock::system()).await;
         });
 
         EngineHandle {

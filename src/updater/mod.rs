@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use semver::Version;
 use tokio_util::sync::CancellationToken;
@@ -44,6 +44,11 @@ const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(5);
 
 /// 设置轮询间隔（总开关关闭 / 定时检查禁用时的低频轮询，热改配置无需重启）
 const SETTINGS_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 检查周期到期睡眠的单片上限（口径同 `scheduler::cron_loop::MAX_SLEEP_SLICE`）：
+/// 长睡眠切成 ≤60s 的短片，每片醒来按 `SystemTime` 重估剩余时长，抵御类 Unix
+/// 休眠唤醒（CLOCK_MONOTONIC 不计入挂起时间）与墙钟前跳导致的过睡
+const MAX_CHECK_SLEEP_SLICE: Duration = Duration::from_secs(60);
 
 /// 上次检查状态文件路径（相对 base_path，与 staging 同级不被清理波及）
 const LAST_CHECK_FILE_NAME: &str = "update/last_check.json";
@@ -315,7 +320,10 @@ impl UpdaterService {
             let startup = service.config.runtime().load().updater.clone();
             let mut previous_enabled = startup.auto_check_enabled;
             let mut due_now = startup.auto_check_enabled && startup.check_on_startup;
-            let mut last_check = tokio::time::Instant::now();
+            // 检查周期按墙钟（SystemTime）计业务周期：类 Unix 平台系统睡眠期间
+            // 单调钟停摆，24h 周期会退化成 24h 开机时长；墙钟睡眠期间照常推进，
+            // 唤醒后到期即查（last_check.json 的落盘/回放口径不变）
+            let mut last_check = SystemTime::now();
             loop {
                 let settings = service.config.runtime().load().updater.clone();
                 if settings.auto_check_enabled && !previous_enabled {
@@ -324,7 +332,7 @@ impl UpdaterService {
                 previous_enabled = settings.auto_check_enabled;
                 let deadline = next_check_deadline(&settings, last_check);
                 if settings.auto_check_enabled
-                    && (due_now || deadline.is_some_and(|time| time <= tokio::time::Instant::now()))
+                    && auto_check_due(deadline, SystemTime::now(), due_now)
                 {
                     let client = effective_client_for(&settings, service.http_client.clone());
                     let result = tokio::select! {
@@ -346,20 +354,22 @@ impl UpdaterService {
                         )
                         .await;
                     }
-                    last_check = tokio::time::Instant::now();
+                    last_check = SystemTime::now();
                     due_now = false;
                     continue;
                 }
                 due_now = false;
                 // 配置通知立即重算周期；低频轮询兜底重新读取权威快照。
-                let wake = deadline
-                    .unwrap_or_else(|| tokio::time::Instant::now() + SETTINGS_POLL_INTERVAL);
+                // 到期等待按墙钟分片（≤60s/片，每片醒来由外层循环按墙钟重估剩余，
+                // 口径同 scheduler::cron_loop）；无到期点（开关关闭/周期禁用）时
+                // 睡一个轮询间隔
+                let wake = deadline.unwrap_or_else(|| SystemTime::now() + SETTINGS_POLL_INTERVAL);
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     changed = version_rx.changed() => {
                         if changed.is_err() { break; }
                     }
-                    _ = tokio::time::sleep_until(wake) => {},
+                    _ = sleep_until_wallclock(wake) => {},
                     _ = tokio::time::sleep(SETTINGS_POLL_INTERVAL) => {},
                 }
             }
@@ -1412,11 +1422,16 @@ async fn perform_update_check(
     Ok(())
 }
 
-/// 按最新开关与周期计算截止时刻，不沿用修改前的长时间睡眠。
+/// 按最新开关与周期计算墙钟截止时刻，不沿用修改前的长时间睡眠。
+///
+/// 截止时刻按墙钟（`SystemTime`）计业务周期：系统睡眠期间照常推进，唤醒后
+/// 到期即查（原 tokio `Instant` 单调钟实现下，24h 周期实际变成 24h 开机时长）。
+/// 与落盘 `update/last_check.json` 的时间戳口径无关（后者仅记录 RFC3339 展示），
+/// last_check 落盘/回放语义不受影响。
 fn next_check_deadline(
     settings: &crate::config::schema::UpdaterSettings,
-    last_check: tokio::time::Instant,
-) -> Option<tokio::time::Instant> {
+    last_check: SystemTime,
+) -> Option<SystemTime> {
     (settings.auto_check_enabled && settings.check_interval_hours > 0).then(|| {
         last_check
             + Duration::from_secs(
@@ -1425,6 +1440,31 @@ fn next_check_deadline(
                     .max(300),
             )
     })
+}
+
+/// 自动检查是否到期：`due_now`（启动检查 / 总开关刚开启的立即补查）优先，
+/// 否则按墙钟到期点与当前时刻比较（到期点被墙钟回拨推回未来时自然推迟，
+/// 容忍语义与 `scheduler::cron_loop` 一致）。
+fn auto_check_due(deadline: Option<SystemTime>, now: SystemTime, due_now: bool) -> bool {
+    due_now || deadline.is_some_and(|time| time <= now)
+}
+
+/// 分片睡眠直到墙钟时刻（口径同 `scheduler::cron_loop::sleep_until_wallclock`）。
+///
+/// 长睡眠切成 ≤[`MAX_CHECK_SLEEP_SLICE`] 的短片，每片醒来按 `SystemTime` 重估
+/// 剩余时长：类 Unix 平台 CLOCK_MONOTONIC 不计入系统挂起时间，一次性换算的
+/// 单调睡眠会在休眠唤醒后过睡；墙钟回拨越过目标时 `duration_since` 返回 Err，
+/// 立即返回交由主循环按墙钟重算。
+async fn sleep_until_wallclock(target: SystemTime) {
+    loop {
+        let Ok(remaining) = target.duration_since(SystemTime::now()) else {
+            return;
+        };
+        if remaining.is_zero() {
+            return;
+        }
+        tokio::time::sleep(remaining.min(MAX_CHECK_SLEEP_SLICE)).await;
+    }
 }
 
 /// 更新检查失败的分级日志：远程发布没有当前平台的安装包或校验缺失
@@ -1450,18 +1490,53 @@ mod tests {
     use super::*;
 
     /// 关闭和缩短周期都使用最新设置，不能继续等待旧周期。
+    ///
+    /// 到期点按墙钟计算：`last` 相对显式 `now` 回退 7200s，周期 ≥300s 时到期点
+    /// 在未来、1h 周期时已过期——比较对象同为显式 `now`，不依赖真实时刻推进。
     #[test]
     fn automatic_deadline_tracks_current_settings() {
-        let last = tokio::time::Instant::now() - Duration::from_secs(7200);
+        let now = SystemTime::now();
+        let last = now - Duration::from_secs(7200);
         let mut settings = crate::config::schema::UpdaterSettings::default();
-        assert!(next_check_deadline(&settings, last).unwrap() > tokio::time::Instant::now());
+        assert!(next_check_deadline(&settings, last).unwrap() > now);
         settings.check_interval_hours = 1;
-        assert!(next_check_deadline(&settings, last).unwrap() <= tokio::time::Instant::now());
+        assert!(next_check_deadline(&settings, last).unwrap() <= now);
         settings.auto_check_enabled = false;
         assert!(next_check_deadline(&settings, last).is_none());
         settings.auto_check_enabled = true;
         settings.check_interval_hours = 0;
         assert!(next_check_deadline(&settings, last).is_none());
+    }
+
+    /// 到期判定（墙钟）：到期点已在睡眠期间越过（模拟合盖 8h 后墙钟大步前进）
+    /// 应立即到期；`due_now` 优先于到期点；无到期点且无 due_now 时不查；
+    /// 墙钟回拨把到期点推回未来则推迟（容忍语义）。
+    #[test]
+    fn auto_check_due_follows_wallclock_deadline() {
+        let now = SystemTime::now();
+        let past = now - Duration::from_secs(8 * 3600);
+        let future = now + Duration::from_secs(3600);
+        assert!(
+            auto_check_due(Some(past), now, false),
+            "睡眠期间越过到期点，唤醒后应立即到期（若按单调钟计，此处会失败）"
+        );
+        assert!(!auto_check_due(Some(future), now, false));
+        assert!(auto_check_due(None, now, true), "due_now 应立即到期");
+        assert!(!auto_check_due(None, now, false));
+        // 墙钟回拨容忍：到期点被推回未来则推迟，待墙钟追平
+        assert!(!auto_check_due(
+            Some(now + Duration::from_secs(60)),
+            now,
+            false
+        ));
+    }
+
+    /// 分片睡眠：目标已过（墙钟回拨越过）立即返回，不悬挂
+    #[tokio::test]
+    async fn sleep_until_wallclock_returns_immediately_when_due() {
+        let past = SystemTime::now() - Duration::from_secs(8 * 3600);
+        sleep_until_wallclock(past).await;
+        sleep_until_wallclock(SystemTime::now()).await;
     }
 
     /// 代理客户端构建失败的错误文本必须脱敏：凭据不进日志（防随日志导出外泄）
