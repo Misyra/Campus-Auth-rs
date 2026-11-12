@@ -15,7 +15,9 @@ vi.mock("../api", () => ({
     restart: vi.fn(async () => ({})),
   },
   monitorApi: { start: vi.fn(), stop: vi.fn() },
-  autostartApi: { status: vi.fn(), set: vi.fn() },
+  // 键名对齐 api 层 autostartApi 现状（fetchStatus / toggle）：本组合函数只用 systemApi，
+  // 补齐键是给连带 mock 的 useStatus 等传递依赖兜底（旧 mock 的 status / set 是历史形状）。
+  autostartApi: { fetchStatus: vi.fn(), toggle: vi.fn() },
 }));
 
 // node 测试环境没有 localStorage：用内存替身，顺带断言 snooze 记下的版本号
