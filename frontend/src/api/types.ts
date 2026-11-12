@@ -145,6 +145,40 @@ export interface NetworkTestResult {
   duration_ms: number;
 }
 
+// ==================== 一键网络诊断（POST /api/diagnostics/run） ====================
+
+/** 诊断单项结论（诊断失败是数据不是请求错误：端点恒 200 + 逐项状态） */
+export type DiagnosticStatus = "ok" | "warn" | "fail" | "skip";
+
+/** 诊断总结论：fail 优先于 warn，skip 不降级 */
+export type DiagnosticVerdict = "healthy" | "degraded" | "faulty";
+
+/** 诊断单项结果（details 结构随 key 变化，已由后端脱敏） */
+export interface DiagnosticCheck {
+  /** 检查项标识：interfaces / gateway / dns / portal / history */
+  key: string;
+  /** 检查项中文名 */
+  name: string;
+  status: DiagnosticStatus;
+  /** 耗时（毫秒） */
+  elapsed_ms: number;
+  /** 一句话摘要 */
+  summary: string;
+  /** 结构化细节（脱敏后：不含凭据 / token / 带查询串的 URL） */
+  details: unknown;
+}
+
+/** 一键网络诊断报告 */
+export interface DiagnosticReport {
+  /** 逐项结果（顺序固定：interfaces → gateway → dns → portal → history） */
+  checks: DiagnosticCheck[];
+  verdict: DiagnosticVerdict;
+  /** 总结论一句话 */
+  conclusion: string;
+  /** 整体耗时（毫秒） */
+  total_ms: number;
+}
+
 /** 开机自启动状态 */
 export interface AutostartStatus {
   platform: string;

@@ -16,6 +16,7 @@ import type {
   BrowserListResponse,
   ConfigResponse,
   DebugSession,
+  DiagnosticReport,
   EnvironmentStatus,
   HealthInfo,
   HttpLoginTestResult,
@@ -135,6 +136,12 @@ export const actionsApi = {
     http.post<LoginResultResponse>("/api/login", null, { timeout: timeoutMs }),
   cancelLogin: () => http.post<MutationResult>("/api/login/cancel"),
   testNetwork: () => http.post<NetworkTestResult>("/api/monitor/test", null, { timeout: 30000 }),
+};
+
+/** 一键网络诊断：后端五项并发探测，整体受 15s 总限时约束，放宽到 30s 兜底 */
+export const diagnosticsApi = {
+  run: () =>
+    http.post<DiagnosticReport>("/api/diagnostics/run", null, { timeout: 30000 }),
 };
 
 /** 系统 */

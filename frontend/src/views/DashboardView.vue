@@ -13,6 +13,7 @@ import { channelNeedsRuntimeEnvironment } from "@/utils/loginChannel";
 import { missingRequiredComponents } from "@/utils/environmentStatus";
 import { formatDuration, formatTimestamp, formatShortTime } from "@/utils/formatters";
 import CustomSelect from "@/components/common/CustomSelect.vue";
+import NetworkDiagnosticsPanel from "@/components/NetworkDiagnosticsPanel.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import type { LoginChannel } from "@/api/types";
 
@@ -256,6 +257,9 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
             </div>
           </div>
         </div>
+
+        <!-- 一键网络诊断：五项并发探测 + 结构化结论（轻量内嵌面板，不单独建页） -->
+        <NetworkDiagnosticsPanel />
 
         <!-- 登录历史 -->
         <div class="card history-card">
