@@ -42,7 +42,6 @@ const { confirm } = useConfirm();
 let initialized = false;
 // F9：记录 init 启动的轮询定时器 id，quitApp 时统一清理
 const statusPollTimerIds: Array<ReturnType<typeof setInterval>> = [];
-const autostartPollTimerIds: Array<ReturnType<typeof setInterval>> = [];
 
 // F9：5s 守卫——init 与 Dashboard mount 双触发不再重复请求；force 供显式刷新绕过
 const historyFetchGuard = createFetchGuard(5000);
@@ -227,8 +226,6 @@ async function quitApp(): Promise<void> {
     // 只有后端确认收到关闭请求后才停止前端活动；请求失败时保留可恢复的现有会话。
     statusPollTimerIds.forEach((id) => clearInterval(id));
     statusPollTimerIds.length = 0;
-    autostartPollTimerIds.forEach((id) => clearInterval(id));
-    autostartPollTimerIds.length = 0;
     useWebSocket().destroy();
     showExitOverlay();
   } catch (error) {
@@ -370,8 +367,9 @@ async function init(): Promise<void> {
     statusPollTimerIds.push(statusPollTimer);
   };
   armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
-  const autostartPollTimer = setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
-  autostartPollTimerIds.push(autostartPollTimer);
+  // 自启动不再全局轮询：状态只在设置页挂载时拉取、操作（开关/应用预设）后刷新，
+  // 见 SystemSettings 的 onMounted 与 useConfig.toggleAutostart / useRunMode.applyRunMode。
+  // init 此处的一次拉取供向导运行模式判定与其它展示点读缓存值。
 
   // 应用外观
   appearance.applyAppearance();

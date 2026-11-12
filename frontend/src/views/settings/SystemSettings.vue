@@ -22,7 +22,7 @@ import FieldHelp from "@/components/common/FieldHelp.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 
 const config = useConfig();
-const { busy, autostart } = useStatus();
+const { busy, autostart, fetchAutostart } = useStatus();
 const { status } = useStatus();
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
@@ -323,6 +323,9 @@ async function reloadConfig() {
 onMounted(() => {
   void refreshUpdateState();
   void loadBasePath();
+  // 自启动已无全局轮询（后台不再常驻查询）：进入本页时拉取一次，
+  // 之后靠开关/配置预设操作后的刷新（toggleAutostart / applyRunMode）保持新鲜
+  void fetchAutostart();
 });
 </script>
 
