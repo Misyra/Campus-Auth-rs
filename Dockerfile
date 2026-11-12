@@ -23,9 +23,11 @@ COPY openapi.json ./
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > src/helper_main.rs
 RUN cargo fetch --locked
 # 拷贝真实源码与前端产物
+# 注意：不要把 python_worker 拷进本阶段——Rust 编译期零引用（嵌入面仅
+# frontend/dist、openapi.json、docs/guides、tray.png），多拷只会让 Worker
+# 侧任何改动都毒化 Rust 层缓存、整段重编
 COPY src ./src
 COPY resources ./resources
-COPY python_worker ./python_worker
 COPY docs/guides ./docs/guides
 COPY --from=frontend-builder /build/frontend/dist ./frontend/dist
 # 复写 dummy 入口后再正式编译
