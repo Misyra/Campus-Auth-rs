@@ -10,7 +10,12 @@
 
 /* 表单独立滚动，操作栏占据正常布局空间，避免透出或遮住正在编辑的行。 */
 .content-wrapper:has(> .settings-page) { overflow: hidden; }
-.settings-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; scroll-padding-block: 16px; padding-inline: 2px 12px; }
+/* position: relative 必须有：全局 sr-only 隐藏类是绝对定位（base.css），若本容器为
+   static，其包含块会逃逸到 html——绝对定位的隐藏输入（外观页 4 个颜色控件）会把
+   documentElement.scrollHeight 撑到整页内容高度，滚轮在容器到底后链式滚动 window，
+   表现为「页面可以无限往下滚」。建立包含块后这些控件被本容器裁剪，与旧版
+   容器限定隐藏类的行为一致（守卫测试位于 styles/utility.test.ts）。 */
+.settings-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; scroll-padding-block: 16px; padding-inline: 2px 12px; }
 .settings-scroll > .settings-form { margin-top: 0; padding-bottom: 16px; gap: 48px; }
 .settings-category { min-width: 0; scroll-margin-top: 16px; }
 .settings-category + .settings-category { padding-top: 28px; border-top: 1px solid var(--border); }
