@@ -12,16 +12,158 @@ use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::bridge::BridgeApi;
 use crate::browser::{is_chrome_installed, is_edge_installed};
 use crate::updater::UpdaterApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::state::AppState;
 
+// ---- 契约 DTO（T5-0 样板域）----
+//
+// 以下 `XxxData` 是 openapi 生成管线的 schema 载荷（信封与引用规范见
+// `crate::web::openapi::schemas` 模块说明）。样板阶段以「注解 + DTO」声明
+// 契约，handler 仍走 `data(json!({...}))` 组装；后续批次以 [`health_check`]
+// 为模板逐步把 handler 换成强类型返回 `Json<DataEnvelope<XxxData>>`。
+
+/// GET /api/health 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HealthData {
+    /// 固定为 "ok"
+    pub status: String,
+    /// 主程序版本
+    pub version: String,
+}
+
+/// GET /api/init-status 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InitStatusData {
+    /// 用户是否已同意使用协议（`config/.agreed` 标记文件）
+    pub agreed: bool,
+    /// 环境能力是否整体就绪（等价 `environment.capability_ready`）
+    pub ready: bool,
+    /// 方案密码解密是否失败（true 时前端提示重新输入密码）
+    pub password_decryption_failed: bool,
+    /// 环境就绪明细
+    pub environment: EnvReadiness,
+}
+
+/// 环境就绪明细（uv / Python / Worker / Playwright / OCR）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EnvReadiness {
+    /// uv 是否已下载就绪
+    pub uv_ready: bool,
+    /// Python 虚拟环境是否就绪
+    pub python_ready: bool,
+    /// Playwright Python 包与 Worker 模块是否可导入且版本匹配
+    pub worker_ready: bool,
+    /// 当前依赖清单是否已有成功验证过的同指纹状态
+    pub manifest_current: bool,
+    /// Playwright 浏览器是否已安装
+    pub playwright_ready: bool,
+    /// 系统 Edge/Chrome 是否可作为无需下载的浏览器后端
+    pub system_browser_ready: bool,
+    /// 用户是否希望启用 OCR 可选能力
+    pub ocr_enabled: bool,
+    /// ddddocr 是否已存在于当前 venv
+    pub ocr_ready: bool,
+    /// 浏览器自动化能力是否完全就绪
+    pub capability_ready: bool,
+    /// 当前安装阶段名（`BootstrapStage` 的 Debug 字面量，如 "Idle"）
+    pub stage: String,
+    /// 安装进度（进行中才有）
+    pub progress: Option<EnvProgress>,
+    /// 最后的错误消息
+    pub last_error: Option<String>,
+}
+
+/// 安装进度（对齐 `crate::status::snapshot::InstallProgress` 的线格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EnvProgress {
+    /// 阶段标识
+    pub phase: String,
+    /// 百分比 0~100
+    pub percent: u8,
+    /// 人类可读消息
+    pub message: String,
+}
+
+/// GET /api/system/info 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SystemInfoData {
+    /// 主程序版本
+    pub version: String,
+    /// 数据根目录（安装目录）
+    pub base_path: String,
+    /// 是否路由器版构建（openwrt feature）
+    pub openwrt: bool,
+    /// 实际监听端口（运行时端口文件优先，回退配置值）
+    pub port: u16,
+    /// 活跃方案 ID
+    pub active_profile_id: String,
+    /// 操作系统（`std::env::consts::OS`）
+    pub platform: String,
+    /// 运行指标快照
+    pub metrics: MetricsSummary,
+}
+
+/// 运行指标快照（`crate::utils::metrics::Metrics` 的原子计数读数）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MetricsSummary {
+    /// 累计登录次数
+    pub login_total: u64,
+    /// 累计登录成功次数
+    pub login_success_total: u64,
+    /// 累计登录失败次数
+    pub login_failure_total: u64,
+    /// 累计登录取消次数
+    pub login_cancel_total: u64,
+    /// 累计探测次数
+    pub probe_total: u64,
+    /// 探测平均耗时（毫秒）
+    pub probe_duration_ms_avg: u64,
+    /// Worker 启动次数
+    pub worker_spawn_total: u64,
+    /// Worker 崩溃次数
+    pub worker_crash_total: u64,
+    /// 文件日志丢弃行数（写入失败时的丢包计数）
+    pub file_log_dropped_lines: u64,
+    /// 运行时长（秒）
+    pub uptime_seconds: u64,
+}
+
+/// POST /api/worker/stop 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WorkerStopData {
+    /// 是否已触发停止
+    pub stopped: bool,
+}
+
+/// POST /api/install/playwright 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InstallPlaywrightData {
+    /// 实际安装的浏览器引擎名（归一化小写）
+    pub browser: String,
+    /// 恒为 true（失败直接走错误响应）
+    pub installed: bool,
+    /// 面向用户的提示消息
+    pub message: String,
+}
+
 /// GET /api/system/info — 系统基本信息
+#[utoipa::path(
+    get,
+    path = "/api/system/info",
+    operation_id = "get_api_system_info",
+    tag = "system",
+    responses(
+        (status = 200, description = "版本、数据目录、监听端口与运行指标", body = DataEnvelope<SystemInfoData>),
+    )
+)]
 pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 读无锁运行时快照，避免每次请求走磁盘 mtime 校验（A2）
     let rt = state.config.runtime_snapshot();
@@ -65,6 +207,16 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
 /// （os error 32，曾导致"下载完成却无法更新"）。此时走纯退出，由已等待的
 /// 更新助手完成替换并用新 exe 重启（关机路径 `ensure_helper_for_shutdown`
 /// 会兜底补唤醒助手）。
+#[utoipa::path(
+    post,
+    path = "/api/system/restart",
+    operation_id = "post_api_system_restart",
+    tag = "system",
+    responses(
+        (status = 200, description = "已开始优雅关闭，后继进程正在生成", body = DataEnvelope<String>),
+        (status = 500, description = "后继进程生成失败", body = ErrorResponse),
+    )
+)]
 pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     if state.updater.has_pending_update() {
         // 生命周期事件：重启是关键用户操作，info 留痕（分支措辞与实际行为一致，
@@ -86,6 +238,15 @@ pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, A
 /// 不再使用 exit(0)；launcher 收到 shutdown_tx 信号后依次停止 Engine/Scheduler/
 /// Bridge/Tray/Axum，所有服务在各自 event loop 内清理资源后再退出进程。
 /// 若 30s 后仍未退出（优雅关闭挂死），最后防线才是 exit(0)。
+#[utoipa::path(
+    post,
+    path = "/api/system/shutdown",
+    operation_id = "post_api_system_shutdown",
+    tag = "system",
+    responses(
+        (status = 200, description = "已开始优雅关闭", body = DataEnvelope<String>),
+    )
+)]
 pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 生命周期事件：关闭是关键用户操作，info 留痕
     tracing::info!("收到关闭请求，开始优雅关闭");
@@ -97,6 +258,16 @@ pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, 
 }
 
 /// POST /api/agree — 用户同意协议（设置向导完成）
+#[utoipa::path(
+    post,
+    path = "/api/agree",
+    operation_id = "post_api_agree",
+    tag = "system",
+    responses(
+        (status = 200, description = "同意时间已写入 config/.agreed", body = DataEnvelope<String>),
+        (status = 500, description = "标记文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn agree_terms(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 标记用户已同意协议（写入配置或标记文件）
     let config_dir = state.config.base_path().join("config");
@@ -106,14 +277,38 @@ pub async fn agree_terms(State(state): State<AppState>) -> Result<Json<Value>, A
 }
 
 /// GET /api/health — 健康检查
-pub async fn health_check() -> Json<Value> {
-    data(serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
+///
+/// 样板域全链路参考实现：handler 直接返回强类型 `Json<DataEnvelope<HealthData>>`，
+/// 线格式与旧 `data(json!({...}))` 完全一致（`{"data":{"status":"ok","version":…}}`），
+/// 后续域批次可照此把注解 DTO 升级为真实返回类型。
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    operation_id = "get_api_health",
+    tag = "system",
+    responses(
+        (status = 200, description = "服务存活与版本信息", body = DataEnvelope<HealthData>),
+    )
+)]
+pub async fn health_check() -> Json<DataEnvelope<HealthData>> {
+    Json(DataEnvelope {
+        data: HealthData {
+            status: "ok".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    })
 }
 
 /// GET /api/init-status — 初始化状态
+#[utoipa::path(
+    get,
+    path = "/api/init-status",
+    operation_id = "get_api_init_status",
+    tag = "system",
+    responses(
+        (status = 200, description = "协议同意状态与环境就绪明细", body = DataEnvelope<InitStatusData>),
+    )
+)]
 pub async fn init_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let config_dir = state.config.base_path().join("config");
     let agreed = config_dir.join(".agreed").exists();
@@ -772,6 +967,20 @@ async fn perform_playwright_install(
 ///
 /// `?browser=chromium|firefox|webkit`；省略参数保持旧行为，默认 Chromium。
 /// 请求会等待安装完成：后端失败直接返回错误，避免前端只能长时间轮询猜测结果。
+#[utoipa::path(
+    post,
+    path = "/api/install/playwright",
+    operation_id = "post_api_install_playwright",
+    tag = "system",
+    params(
+        ("browser" = Option<String>, Query, description = "要安装的浏览器引擎：chromium/firefox/webkit；省略或空值回退 chromium"),
+    ),
+    responses(
+        (status = 200, description = "安装完成", body = DataEnvelope<InstallPlaywrightData>),
+        (status = 400, description = "不支持的浏览器名", body = ErrorResponse),
+        (status = 500, description = "下载或安装失败", body = ErrorResponse),
+    )
+)]
 pub async fn install_playwright(
     State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
     Query(params): Query<InstallPlaywrightQuery>,
@@ -961,6 +1170,15 @@ pub async fn http_login_guide(
 ///
 /// 停止当前运行的 Worker 进程及其浏览器实例。Supervisor 保持运行，
 /// 下次任务到来时会自动重新启动 Worker。
+#[utoipa::path(
+    post,
+    path = "/api/worker/stop",
+    operation_id = "post_api_worker_stop",
+    tag = "system",
+    responses(
+        (status = 200, description = "已通知关闭 Worker", body = DataEnvelope<WorkerStopData>),
+    )
+)]
 pub async fn stop_worker(
     State(bridge): State<Arc<dyn BridgeApi>>,
 ) -> Result<Json<Value>, ApiError> {

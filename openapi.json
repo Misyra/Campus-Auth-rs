@@ -1,2218 +1,948 @@
 {
- "openapi": "3.0.3",
- "info": {
-  "title": "Campus-Auth Web API",
-  "version": "5.2.0-beta.1",
-  "description": "Baseline OpenAPI document for Campus-Auth. Scope: this file is a manual snapshot of the route table (method + path) only — `components.schemas` is intentionally absent and every `responses.*.content.application/json.schema` is `{}`. Field-level contracts are NOT described here; the hand-written `frontend/src/api/types.ts` is the source of truth for payload shapes. There is no codegen step: `npm run typegen` and its `openapi-typescript` dependency were removed (see docs/changelog.md, C6). Handlers are not yet annotated with `utoipa` derive macros; once that integration lands this file should be generated from `#[derive(utoipa::OpenApi)]` and then carry real schemas. Drift protection today is limited to the method+path set, asserted by `openapi_json_matches_route_table` (src/web/mod.rs)."
- },
- "servers": [
-  {
-   "url": "http://127.0.0.1:50721"
+ "components": {
+  "schemas": {
+   "DataEnvelope_HealthData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/health 响应载荷",
+      "properties": {
+       "status": {
+        "description": "固定为 \"ok\"",
+        "type": "string"
+       },
+       "version": {
+        "description": "主程序版本",
+        "type": "string"
+       }
+      },
+      "required": [
+       "status",
+       "version"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_InitStatusData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/init-status 响应载荷",
+      "properties": {
+       "agreed": {
+        "description": "用户是否已同意使用协议（`config/.agreed` 标记文件）",
+        "type": "boolean"
+       },
+       "environment": {
+        "$ref": "#/components/schemas/EnvReadiness",
+        "description": "环境就绪明细"
+       },
+       "password_decryption_failed": {
+        "description": "方案密码解密是否失败（true 时前端提示重新输入密码）",
+        "type": "boolean"
+       },
+       "ready": {
+        "description": "环境能力是否整体就绪（等价 `environment.capability_ready`）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "agreed",
+       "ready",
+       "password_decryption_failed",
+       "environment"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_InstallPlaywrightData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/install/playwright 响应载荷",
+      "properties": {
+       "browser": {
+        "description": "实际安装的浏览器引擎名（归一化小写）",
+        "type": "string"
+       },
+       "installed": {
+        "description": "恒为 true（失败直接走错误响应）",
+        "type": "boolean"
+       },
+       "message": {
+        "description": "面向用户的提示消息",
+        "type": "string"
+       }
+      },
+      "required": [
+       "browser",
+       "installed",
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_String": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_SystemInfoData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/system/info 响应载荷",
+      "properties": {
+       "active_profile_id": {
+        "description": "活跃方案 ID",
+        "type": "string"
+       },
+       "base_path": {
+        "description": "数据根目录（安装目录）",
+        "type": "string"
+       },
+       "metrics": {
+        "$ref": "#/components/schemas/MetricsSummary",
+        "description": "运行指标快照"
+       },
+       "openwrt": {
+        "description": "是否路由器版构建（openwrt feature）",
+        "type": "boolean"
+       },
+       "platform": {
+        "description": "操作系统（`std::env::consts::OS`）",
+        "type": "string"
+       },
+       "port": {
+        "description": "实际监听端口（运行时端口文件优先，回退配置值）",
+        "format": "int32",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "version": {
+        "description": "主程序版本",
+        "type": "string"
+       }
+      },
+      "required": [
+       "version",
+       "base_path",
+       "openwrt",
+       "port",
+       "active_profile_id",
+       "platform",
+       "metrics"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_WorkerStopData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/worker/stop 响应载荷",
+      "properties": {
+       "stopped": {
+        "description": "是否已触发停止",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "stopped"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "EnvProgress": {
+    "description": "安装进度（对齐 `crate::status::snapshot::InstallProgress` 的线格式）",
+    "properties": {
+     "message": {
+      "description": "人类可读消息",
+      "type": "string"
+     },
+     "percent": {
+      "description": "百分比 0~100",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "phase": {
+      "description": "阶段标识",
+      "type": "string"
+     }
+    },
+    "required": [
+     "phase",
+     "percent",
+     "message"
+    ],
+    "type": "object"
+   },
+   "EnvReadiness": {
+    "description": "环境就绪明细（uv / Python / Worker / Playwright / OCR）",
+    "properties": {
+     "capability_ready": {
+      "description": "浏览器自动化能力是否完全就绪",
+      "type": "boolean"
+     },
+     "last_error": {
+      "description": "最后的错误消息",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "manifest_current": {
+      "description": "当前依赖清单是否已有成功验证过的同指纹状态",
+      "type": "boolean"
+     },
+     "ocr_enabled": {
+      "description": "用户是否希望启用 OCR 可选能力",
+      "type": "boolean"
+     },
+     "ocr_ready": {
+      "description": "ddddocr 是否已存在于当前 venv",
+      "type": "boolean"
+     },
+     "playwright_ready": {
+      "description": "Playwright 浏览器是否已安装",
+      "type": "boolean"
+     },
+     "progress": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/components/schemas/EnvProgress",
+        "description": "安装进度（进行中才有）"
+       }
+      ]
+     },
+     "python_ready": {
+      "description": "Python 虚拟环境是否就绪",
+      "type": "boolean"
+     },
+     "stage": {
+      "description": "当前安装阶段名（`BootstrapStage` 的 Debug 字面量，如 \"Idle\"）",
+      "type": "string"
+     },
+     "system_browser_ready": {
+      "description": "系统 Edge/Chrome 是否可作为无需下载的浏览器后端",
+      "type": "boolean"
+     },
+     "uv_ready": {
+      "description": "uv 是否已下载就绪",
+      "type": "boolean"
+     },
+     "worker_ready": {
+      "description": "Playwright Python 包与 Worker 模块是否可导入且版本匹配",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "uv_ready",
+     "python_ready",
+     "worker_ready",
+     "manifest_current",
+     "playwright_ready",
+     "system_browser_ready",
+     "ocr_enabled",
+     "ocr_ready",
+     "capability_ready",
+     "stage"
+    ],
+    "type": "object"
+   },
+   "ErrorDetail": {
+    "description": "错误详情（`error.details`，因错误码而异，可省略）",
+    "properties": {
+     "code": {
+      "description": "稳定的机器可读错误码（如 `BAD_REQUEST`，全表见\n[`crate::web::error::ApiError::code`]）",
+      "type": "string"
+     },
+     "details": {
+      "description": "补充详情（如 VALIDATION_ERROR 的字段级错误列表），可省略",
+      "type": [
+       "object",
+       "null"
+      ]
+     },
+     "message": {
+      "description": "人类可读消息",
+      "type": "string"
+     }
+    },
+    "required": [
+     "code",
+     "message",
+     "details"
+    ],
+    "type": "object"
+   },
+   "ErrorResponse": {
+    "description": "统一错误响应信封 `{ \"error\": { ... } }`",
+    "properties": {
+     "error": {
+      "$ref": "#/components/schemas/ErrorDetail",
+      "description": "错误对象"
+     }
+    },
+    "required": [
+     "error"
+    ],
+    "type": "object"
+   },
+   "HealthData": {
+    "description": "GET /api/health 响应载荷",
+    "properties": {
+     "status": {
+      "description": "固定为 \"ok\"",
+      "type": "string"
+     },
+     "version": {
+      "description": "主程序版本",
+      "type": "string"
+     }
+    },
+    "required": [
+     "status",
+     "version"
+    ],
+    "type": "object"
+   },
+   "InitStatusData": {
+    "description": "GET /api/init-status 响应载荷",
+    "properties": {
+     "agreed": {
+      "description": "用户是否已同意使用协议（`config/.agreed` 标记文件）",
+      "type": "boolean"
+     },
+     "environment": {
+      "$ref": "#/components/schemas/EnvReadiness",
+      "description": "环境就绪明细"
+     },
+     "password_decryption_failed": {
+      "description": "方案密码解密是否失败（true 时前端提示重新输入密码）",
+      "type": "boolean"
+     },
+     "ready": {
+      "description": "环境能力是否整体就绪（等价 `environment.capability_ready`）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "agreed",
+     "ready",
+     "password_decryption_failed",
+     "environment"
+    ],
+    "type": "object"
+   },
+   "InstallPlaywrightData": {
+    "description": "POST /api/install/playwright 响应载荷",
+    "properties": {
+     "browser": {
+      "description": "实际安装的浏览器引擎名（归一化小写）",
+      "type": "string"
+     },
+     "installed": {
+      "description": "恒为 true（失败直接走错误响应）",
+      "type": "boolean"
+     },
+     "message": {
+      "description": "面向用户的提示消息",
+      "type": "string"
+     }
+    },
+    "required": [
+     "browser",
+     "installed",
+     "message"
+    ],
+    "type": "object"
+   },
+   "MetricsSummary": {
+    "description": "运行指标快照（`crate::utils::metrics::Metrics` 的原子计数读数）",
+    "properties": {
+     "file_log_dropped_lines": {
+      "description": "文件日志丢弃行数（写入失败时的丢包计数）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "login_cancel_total": {
+      "description": "累计登录取消次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "login_failure_total": {
+      "description": "累计登录失败次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "login_success_total": {
+      "description": "累计登录成功次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "login_total": {
+      "description": "累计登录次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "probe_duration_ms_avg": {
+      "description": "探测平均耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "probe_total": {
+      "description": "累计探测次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "uptime_seconds": {
+      "description": "运行时长（秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "worker_crash_total": {
+      "description": "Worker 崩溃次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "worker_spawn_total": {
+      "description": "Worker 启动次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "login_total",
+     "login_success_total",
+     "login_failure_total",
+     "login_cancel_total",
+     "probe_total",
+     "probe_duration_ms_avg",
+     "worker_spawn_total",
+     "worker_crash_total",
+     "file_log_dropped_lines",
+     "uptime_seconds"
+    ],
+    "type": "object"
+   },
+   "SystemInfoData": {
+    "description": "GET /api/system/info 响应载荷",
+    "properties": {
+     "active_profile_id": {
+      "description": "活跃方案 ID",
+      "type": "string"
+     },
+     "base_path": {
+      "description": "数据根目录（安装目录）",
+      "type": "string"
+     },
+     "metrics": {
+      "$ref": "#/components/schemas/MetricsSummary",
+      "description": "运行指标快照"
+     },
+     "openwrt": {
+      "description": "是否路由器版构建（openwrt feature）",
+      "type": "boolean"
+     },
+     "platform": {
+      "description": "操作系统（`std::env::consts::OS`）",
+      "type": "string"
+     },
+     "port": {
+      "description": "实际监听端口（运行时端口文件优先，回退配置值）",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "version": {
+      "description": "主程序版本",
+      "type": "string"
+     }
+    },
+    "required": [
+     "version",
+     "base_path",
+     "openwrt",
+     "port",
+     "active_profile_id",
+     "platform",
+     "metrics"
+    ],
+    "type": "object"
+   },
+   "WorkerStopData": {
+    "description": "POST /api/worker/stop 响应载荷",
+    "properties": {
+     "stopped": {
+      "description": "是否已触发停止",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "stopped"
+    ],
+    "type": "object"
+   }
   }
- ],
+ },
+ "info": {
+  "contact": {
+   "name": "Misyra",
+   "url": "https://github.com/Misyra/Campus-Auth-rs"
+  },
+  "description": "认证喵本地管理界面 API。字段级契约以前端 frontend/src/api/types.ts 为准；手写 baseline 中未注解域的响应 schema 仍为 `{}` 占位，已注解域（生成源条目）携带真实 schema——两者按路径合并产出最终文档，全量切换后本说明随 baseline 退役。",
+  "license": {
+   "identifier": "AGPL-3.0-only",
+   "name": "AGPL-3.0-only"
+  },
+  "title": "Campus-Auth Web API",
+  "version": "5.2.0-beta.1"
+ },
+ "openapi": "3.1.0",
  "paths": {
-  "/api/network/interfaces": {
-   "get": {
-    "summary": "列出校园网可用物理出口接口",
-    "responses": {
-     "200": {
-      "description": "当前 IPv4 网卡及 DNS"
-     },
-     "503": {
-      "description": "网卡枚举失败"
-     }
-    }
-   }
-  },
-  "/api/monitor/status": {
-   "get": {
-    "operationId": "get___api_monitor_status",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/monitor/test": {
+  "/api/agree": {
    "post": {
-    "operationId": "post___api_monitor_test",
+    "operationId": "post_api_agree",
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/monitor/start": {
-   "post": {
-    "operationId": "post___api_monitor_start",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/monitor/stop": {
-   "post": {
-    "operationId": "post___api_monitor_stop",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/monitor/test-redirect": {
-   "post": {
-    "operationId": "post___api_monitor_test-redirect",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/notification/test": {
-   "post": {
-    "operationId": "post___api_notification_test",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "404": {
-      "description": "Not Found",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/diagnostics/run": {
-   "post": {
-    "operationId": "post___api_diagnostics_run",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/diagnostics/bundle": {
-   "get": {
-    "operationId": "get___api_diagnostics_bundle",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/zip": {
         "schema": {
-         "type": "string",
-         "format": "binary"
+         "$ref": "#/components/schemas/DataEnvelope_String"
         }
        }
-      }
+      },
+      "description": "同意时间已写入 config/.agreed"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
-      }
-     }
-    }
-   }
-  },
-  "/api/config": {
-   "get": {
-    "operationId": "get___api_config",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "patch": {
-    "operationId": "patch___api_config",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
+      },
+      "description": "标记文件写入失败"
      }
     },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
+    "summary": "POST /api/agree — 用户同意协议（设置向导完成）",
+    "tags": [
+     "system"
+    ]
    }
   },
-  "/api/config/reload": {
+  "/api/ai/capture": {
    "post": {
-    "operationId": "post___api_config_reload",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
+    "operationId": "post___api_ai_capture",
     "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/config/log-levels": {
-   "get": {
-    "operationId": "get___api_config_log-levels",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/config/log-level": {
-   "put": {
-    "operationId": "put___api_config_log-level",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/config/default-stealth-script": {
-   "get": {
-    "operationId": "get___api_config_default-stealth-script",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/pure-mode": {
-   "get": {
-    "operationId": "get___api_pure-mode",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "post": {
-    "operationId": "post___api_pure-mode",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/profiles": {
-   "get": {
-    "operationId": "get___api_profiles",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/profiles/{id}/export": {
-   "get": {
-    "operationId": "get___api_profiles_id_export",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/profiles/import": {
-   "post": {
-    "operationId": "post___api_profiles_import",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/profiles/{id}": {
-   "post": {
-    "operationId": "post___api_profiles_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   },
-   "get": {
-    "operationId": "get___api_profiles_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "put": {
-    "operationId": "put___api_profiles_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   },
-   "delete": {
-    "operationId": "delete___api_profiles_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/profiles/switch": {
-   "post": {
-    "operationId": "post___api_profiles_switch",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/profiles/detect": {
-   "post": {
-    "operationId": "post___api_profiles_detect",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/profiles/auto-switch": {
-   "post": {
-    "operationId": "post___api_profiles_auto-switch",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/tasks": {
-   "get": {
-    "operationId": "get___api_tasks",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "post": {
-    "operationId": "post___api_tasks",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/tasks/import": {
-   "post": {
-    "operationId": "post___api_tasks_import",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/tasks/order": {
-   "post": {
-    "operationId": "post___api_tasks_order",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/tasks/export/{id}": {
-   "get": {
-    "operationId": "get___api_tasks_export_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/tasks/{id}": {
-   "get": {
-    "operationId": "get___api_tasks_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "put": {
-    "operationId": "put___api_tasks_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   },
-   "delete": {
-    "operationId": "delete___api_tasks_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/tasks/{id}/execute": {
-   "post": {
-    "operationId": "post___api_tasks_id_execute",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/http-tasks/test": {
-   "post": {
-    "operationId": "post___api_http-tasks_test",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "404": {
-      "description": "Not Found",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "409": {
-      "description": "已有直连测试正在进行",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/login": {
-   "post": {
-    "operationId": "post___api_login",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/login/cancel": {
-   "post": {
-    "operationId": "post___api_login_cancel",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/login/status": {
-   "get": {
-    "operationId": "get___api_login_status",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/login/once": {
-   "post": {
-    "operationId": "post___api_login_once",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/debug/start": {
-   "post": {
-    "operationId": "post___api_debug_start",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/debug/step": {
-   "post": {
-    "operationId": "post___api_debug_step",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/debug/stop": {
-   "post": {
-    "operationId": "post___api_debug_stop",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/debug/run-all": {
-   "post": {
-    "operationId": "post___api_debug_run-all",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/scheduler/jobs": {
-   "get": {
-    "operationId": "get___api_scheduler_jobs",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "post": {
-    "operationId": "post___api_scheduler_jobs",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/scheduler/jobs/{id}": {
-   "put": {
-    "operationId": "put___api_scheduler_jobs_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   },
-   "delete": {
-    "operationId": "delete___api_scheduler_jobs_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/scheduler/jobs/{id}/toggle": {
-   "post": {
-    "operationId": "post___api_scheduler_jobs_id_toggle",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/scheduler/jobs/{id}/run": {
-   "post": {
-    "operationId": "post___api_scheduler_jobs_id_run",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/scheduler/jobs/{id}/history": {
-   "get": {
-    "operationId": "get___api_scheduler_jobs_id_history",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/history": {
-   "get": {
-    "operationId": "get___api_history",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "delete": {
-    "operationId": "delete___api_history",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/system/info": {
-   "get": {
-    "operationId": "get___api_system_info",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/system/shutdown": {
-   "post": {
-    "operationId": "post___api_system_shutdown",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/system/restart": {
-   "post": {
-    "operationId": "post___api_system_restart",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/system/update": {
-   "post": {
-    "operationId": "post___api_system_update",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
      "content": {
       "application/json": {
        "schema": {
-        "type": "object",
         "properties": {
-         "version": {
-          "type": "string"
-         },
          "url": {
+          "description": "登录页地址（http/https）",
           "type": "string"
-         },
-         "sha256": {
-          "type": "string"
-         }
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/system/update-package": {
-   "post": {
-    "operationId": "post___api_system_update-package",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "409": {
-      "description": "Conflict",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": true,
-     "content": {
-      "multipart/form-data": {
-       "schema": {
-        "type": "object",
-        "properties": {
-         "file": {
-          "type": "string",
-          "format": "binary",
-          "description": "手动选择的安装包（.zip / .tar.gz），上限 512 MB"
          }
         },
         "required": [
-         "file"
-        ]
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/update-state": {
-   "get": {
-    "operationId": "get___api_update-state",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
+         "url"
+        ],
+        "type": "object"
        }
       }
      },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/check-update": {
-   "get": {
-    "operationId": "get___api_check-update",
+     "required": true
+    },
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Worker Busy（调试会话互斥）"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Internal Error"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Service Unavailable（Python 环境未就绪）"
      }
     }
    }
   },
-  "/api/health": {
+  "/api/ai/capture/bundle": {
    "get": {
-    "operationId": "get___api_health",
+    "operationId": "get___api_ai_capture_bundle",
     "responses": {
      "200": {
-      "description": "OK",
+      "content": {
+       "application/zip": {
+        "schema": {
+         "format": "binary",
+         "type": "string"
+        }
+       }
+      },
+      "description": "zip（MHTML + 原始 HTML + 结构化页面摘要 + resources + 截图 + meta）"
+     },
+     "404": {
       "content": {
        "application/json": {
         "schema": {}
        }
+      },
+      "description": "尚无捕获产物"
+     }
+    }
+   }
+  },
+  "/api/ai/capture/screenshot": {
+   "get": {
+    "operationId": "get___api_ai_capture_screenshot",
+    "responses": {
+     "200": {
+      "content": {
+       "image/png": {
+        "schema": {
+         "format": "binary",
+         "type": "string"
+        }
+       }
+      },
+      "description": "PNG 截图"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "尚无捕获截图"
+     }
+    }
+   }
+  },
+  "/api/ai/capture/status": {
+   "get": {
+    "description": "查询最近一次捕获产物是否可用（页面刷新后恢复状态用）",
+    "operationId": "get___api_ai_capture_status",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "properties": {
+          "available": {
+           "description": "meta.json、page.html 与 screenshot.png 是否齐备",
+           "type": "boolean"
+          },
+          "final_url": {
+           "description": "捕获结束 URL（不可用时缺省）",
+           "type": "string"
+          },
+          "request_url": {
+           "description": "捕获请求 URL（不可用时缺省）",
+           "type": "string"
+          },
+          "structure_summary": {
+           "description": "frame、表单、控件和验证码候选数量",
+           "type": "object"
+          },
+          "title": {
+           "description": "页面标题（不可用时缺省）",
+           "type": "string"
+          }
+         },
+         "type": "object"
+        }
+       }
+      },
+      "description": "捕获状态与 meta 回显字段"
+     }
+    }
+   }
+  },
+  "/api/ai/generate/stream": {
+   "post": {
+    "description": "流式生成（SSE text/event-stream）：增量推送 LLM 输出与校验状态，含传输重试和自纠轮在内的全流程总预算为 10 分钟。事件帧（data: <json>）type 枚举：started / attempt_start / delta / attempt_delta_done / validation_failed / retrying / validated / done / error；\": keepalive\" 注释帧仅证明连接存活不重置前端空闲计时。同一时刻至多一个生成任务（重复发起返回 409）；客户端断连将取消后端 LLM 调用",
+    "operationId": "post___api_ai_generate_stream",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "properties": {
+         "extra_prompt": {
+          "maxLength": 4000,
+          "type": "string"
+         }
+        },
+        "type": "object"
+       }
       }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "text/event-stream": {
+        "schema": {
+         "description": "SSE 帧序列：data: {type: started|attempt_start{attempt,max}|delta{attempt,text}|attempt_delta_done{attempt,text_len}|validation_failed{attempt,errors}|retrying{attempt,next}|validated{attempt}|done{attempts,warnings,task}|error{message}}",
+         "type": "string"
+        }
+       }
+      },
+      "description": "SSE stream（事件帧 schema 见 description；每帧 JSON 带 type 标签）"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "已有生成任务进行中"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/ai/llm-config": {
+   "get": {
+    "operationId": "get___api_ai_llm_config",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     }
+    }
+   },
+   "put": {
+    "operationId": "put___api_ai_llm_config",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "properties": {
+         "api_key": {
+          "description": "缺省=保持不变；空串=清除；非空=更新（AES-GCM 加密落盘，响应永不回显）",
+          "type": "string"
+         },
+         "base_url": {
+          "description": "OpenAI 兼容 API 根地址；不允许 query、fragment 或 userinfo",
+          "type": "string"
+         },
+         "max_tokens": {
+          "description": "最长输出 token；默认 16384，null 表示交由服务商决定",
+          "maximum": 200000,
+          "minimum": 1,
+          "nullable": true,
+          "type": "integer"
+         },
+         "model": {
+          "description": "视觉模型名",
+          "type": "string"
+         },
+         "provider": {
+          "description": "服务商标识；API Key 按服务商独立保存",
+          "enum": [
+           "glm",
+           "deepseek",
+           "custom"
+          ],
+          "type": "string"
+         }
+        },
+        "required": [
+         "base_url",
+         "model"
+        ],
+        "type": "object"
        }
       }
      },
-     "500": {
-      "description": "Internal Error",
+     "required": true
+    },
+    "responses": {
+     "200": {
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/ai/llm-config/test": {
+   "post": {
+    "description": "使用已保存配置向实际 chat/completions 地址发送最小请求；30 秒超时",
+    "operationId": "post___api_ai_llm_config_test",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "连接成功，返回实际请求地址与耗时"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "配置缺失或 Key 无法解密"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "连接、鉴权或模型请求失败"
+     }
+    }
+   }
+  },
+  "/api/ai/models": {
+   "post": {
+    "description": "拉取服务商 GET {base_url}/models 的模型列表（AI 页模型下拉框）；api_key 缺省或为空时回退到该服务商已保存的 Key",
+    "operationId": "post___api_ai_models",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "返回 { count, models[] }，顺序与服务端一致"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "base_url 缺失或非法、服务商与地址不匹配、Key 无法解密、远端非 2xx 或响应中无模型 id"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "连接失败、超时或远端 5xx"
      }
     }
    }
@@ -2220,716 +950,117 @@
   "/api/auth/exchange": {
    "post": {
     "operationId": "post___api_auth_exchange",
-    "summary": "以 bootstrap 握手秘钥（界面 URL fragment 携带）或管理密码（仅非回环绑定接受）换取鉴权 token；请求体恰含其一，成功 200 返回 data.token，失败 401（管理密码未配置时 error.code=AUTH_NOT_CONFIGURED）",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
       }
      },
-     "400": {
-      "description": "Bad Request",
+     "required": true
+    },
+    "responses": {
+     "200": {
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
      },
      "401": {
-      "description": "Unauthorized",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Unauthorized"
      }
     },
+    "summary": "以 bootstrap 握手秘钥（界面 URL fragment 携带）或管理密码（仅非回环绑定接受）换取鉴权 token；请求体恰含其一，成功 200 返回 data.token，失败 401（管理密码未配置时 error.code=AUTH_NOT_CONFIGURED）"
+   }
+  },
+  "/api/autostart/disable": {
+   "post": {
+    "operationId": "post___api_autostart_disable",
     "requestBody": {
-     "required": true,
      "content": {
       "application/json": {
        "schema": {}
       }
-     }
-    }
-   }
-  },
-  "/api/init-status": {
-   "get": {
-    "operationId": "get___api_init-status",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
      },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/agree": {
-   "post": {
-    "operationId": "post___api_agree",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
+     "required": false
     },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/autostart/enable": {
+   "post": {
+    "operationId": "post___api_autostart_enable",
     "requestBody": {
-     "required": false,
      "content": {
       "application/json": {
        "schema": {}
       }
-     }
-    }
-   }
-  },
-  "/api/logs": {
-   "get": {
-    "operationId": "get___api_logs",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
      },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/logs/export": {
-   "get": {
-    "operationId": "get___api_logs_export",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/zip": {
-        "schema": {
-         "type": "string",
-         "format": "binary"
-        }
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/repo/fetch": {
-   "get": {
-    "operationId": "get___api_repo_fetch",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/repo/task": {
-   "get": {
-    "operationId": "get___api_repo_task",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/repo/image": {
-   "get": {
-    "operationId": "get___api_repo_image",
-    "description": "代理获取仓库任务截图（返回图片字节；出站仅限任务站 raw 域）",
-    "responses": {
-     "200": {
-      "description": "图片字节",
-      "content": {
-       "image/png": {
-        "schema": {
-         "type": "string",
-         "format": "binary"
-        }
-       },
-       "image/jpeg": {
-        "schema": {
-         "type": "string",
-         "format": "binary"
-        }
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/worker/stop": {
-   "post": {
-    "operationId": "post___api_worker_stop",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/browsers": {
-   "get": {
-    "operationId": "get___api_browsers",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/install/playwright": {
-   "post": {
-    "operationId": "post___api_install_playwright",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
+     "required": false
     },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/uninstall/detect": {
-   "get": {
-    "operationId": "get___api_uninstall_detect",
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
-     }
-    }
-   }
-  },
-  "/api/uninstall": {
-   "post": {
-    "operationId": "post___api_uninstall",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/uninstall/purge": {
-   "post": {
-    "operationId": "post___api_uninstall_purge",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/background/{filename}": {
-   "get": {
-    "operationId": "get___api_background_filename",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "delete": {
-    "operationId": "delete___api_background_filename",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/background/upload": {
-   "post": {
-    "operationId": "post___api_background_upload",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/background/fetch-url": {
-   "post": {
-    "operationId": "post___api_background_fetch-url",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/docs/task-writing-guide": {
-   "get": {
-    "operationId": "get___api_docs_task-writing-guide",
-    "responses": {
-     "200": {
-      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）",
-      "content": {
-       "text/markdown": {
-        "schema": {
-         "type": "string"
-        }
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/docs/http-login-guide": {
-   "get": {
-    "operationId": "get___api_docs_http-login-guide",
-    "responses": {
-     "200": {
-      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）",
-      "content": {
-       "text/markdown": {
-        "schema": {
-         "type": "string"
-        }
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/docs/task-manual": {
-   "get": {
-    "operationId": "get___api_docs_task-manual",
-    "responses": {
-     "200": {
-      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）",
-      "content": {
-       "text/markdown": {
-        "schema": {
-         "type": "string"
-        }
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
+      },
+      "description": "Internal Error"
      }
     }
    }
@@ -2940,510 +1071,517 @@
     "operationId": "get___api_autostart_status",
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/autostart/enable": {
+  "/api/background/fetch-url": {
    "post": {
-    "operationId": "post___api_autostart_enable",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
+    "operationId": "post___api_background_fetch-url",
     "requestBody": {
-     "required": false,
      "content": {
       "application/json": {
        "schema": {}
       }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/autostart/disable": {
+  "/api/background/upload": {
    "post": {
-    "operationId": "post___api_autostart_disable",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
+    "operationId": "post___api_background_upload",
     "requestBody": {
-     "required": false,
      "content": {
       "application/json": {
        "schema": {}
       }
-     }
-    }
-   }
-  },
-  "/api/ocr/recognize": {
-   "post": {
-    "operationId": "post___api_ocr_recognize",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
      },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
+     "required": false
     },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/ocr/status": {
-   "get": {
-    "operationId": "get___api_ocr_status",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/ocr/install": {
-   "post": {
-    "operationId": "post___api_ocr_install",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/ocr/uninstall": {
-   "post": {
-    "operationId": "post___api_ocr_uninstall",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "409": {
-      "description": "有任务正在执行，请稍后再试",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/scripts/run": {
-   "post": {
-    "operationId": "post___api_scripts_run",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   }
-  },
-  "/api/scripts/binaries": {
-   "get": {
-    "operationId": "get___api_scripts_binaries",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/scripts/{task_id}": {
-   "get": {
-    "operationId": "get___api_scripts_task_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    }
-   },
-   "put": {
-    "operationId": "put___api_scripts_task_id",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     }
-    }
-   },
+  "/api/background/{filename}": {
    "delete": {
-    "operationId": "delete___api_scripts_task_id",
+    "operationId": "delete___api_background_filename",
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "get": {
+    "operationId": "get___api_background_filename",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/tools/task-recorder.user.js": {
+  "/api/browsers": {
    "get": {
-    "operationId": "get___api_tools_task-recorder_user_js",
+    "operationId": "get___api_browsers",
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/ws/logs": {
+  "/api/check-update": {
    "get": {
-    "operationId": "get___ws_logs",
-    "description": "WebSocket：日志实时推送 + 状态 watch 推送（双通道）",
+    "operationId": "get___api_check-update",
     "responses": {
-     "101": {
-      "description": "Switching Protocols"
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/debug/status": {
+  "/api/config": {
    "get": {
-    "operationId": "get___api_debug_status",
+    "operationId": "get___api_config",
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "patch": {
+    "operationId": "patch___api_config",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
       }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/config/default-stealth-script": {
+   "get": {
+    "operationId": "get___api_config_default-stealth-script",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/config/log-level": {
+   "put": {
+    "operationId": "put___api_config_log-level",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/config/log-levels": {
+   "get": {
+    "operationId": "get___api_config_log-levels",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/config/reload": {
+   "post": {
+    "operationId": "post___api_config_reload",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/debug/feedback-bundle": {
+   "post": {
+    "operationId": "post___api_debug_feedback-bundle",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/zip": {
+        "schema": {
+         "format": "binary",
+         "type": "string"
+        }
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/debug/run-all": {
+   "post": {
+    "operationId": "post___api_debug_run-all",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
@@ -3453,8 +1591,8 @@
     "operationId": "get___api_debug_screenshot__filename_",
     "parameters": [
      {
-      "name": "filename",
       "in": "path",
+      "name": "filename",
       "required": true,
       "schema": {
        "type": "string"
@@ -3463,31 +1601,327 @@
     ],
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "image/png": {
         "schema": {
-         "type": "string",
-         "format": "binary"
+         "format": "binary",
+         "type": "string"
         }
        }
-      }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
      },
      "404": {
-      "description": "Not Found",
       "content": {
        "application/json": {
         "schema": {}
        }
+      },
+      "description": "Not Found"
+     }
+    }
+   }
+  },
+  "/api/debug/start": {
+   "post": {
+    "operationId": "post___api_debug_start",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
       }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/debug/status": {
+   "get": {
+    "operationId": "get___api_debug_status",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/debug/step": {
+   "post": {
+    "operationId": "post___api_debug_step",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/debug/stop": {
+   "post": {
+    "operationId": "post___api_debug_stop",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/diagnostics/bundle": {
+   "get": {
+    "operationId": "get___api_diagnostics_bundle",
+    "responses": {
+     "200": {
+      "content": {
+       "application/zip": {
+        "schema": {
+         "format": "binary",
+         "type": "string"
+        }
+       }
+      },
+      "description": "OK"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/diagnostics/run": {
+   "post": {
+    "operationId": "post___api_diagnostics_run",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/docs/http-login-guide": {
+   "get": {
+    "operationId": "get___api_docs_http-login-guide",
+    "responses": {
+     "200": {
+      "content": {
+       "text/markdown": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      },
+      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/docs/task-manual": {
+   "get": {
+    "operationId": "get___api_docs_task-manual",
+    "responses": {
+     "200": {
+      "content": {
+       "text/markdown": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      },
+      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/docs/task-writing-guide": {
+   "get": {
+    "operationId": "get___api_docs_task-writing-guide",
+    "responses": {
+     "200": {
+      "content": {
+       "text/markdown": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      },
+      "description": "Markdown 文件（Content-Disposition: attachment，浏览器访问即触发保存）"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
@@ -3495,355 +1929,2504 @@
   "/api/environment/bootstrap": {
    "post": {
     "operationId": "post___api_environment_bootstrap",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
     "requestBody": {
-     "required": false,
      "content": {
       "application/json": {
        "schema": {}
       }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/debug/feedback-bundle": {
-   "post": {
-    "operationId": "post___api_debug_feedback-bundle",
+  "/api/health": {
+   "get": {
+    "description": "样板域全链路参考实现：handler 直接返回强类型 `Json<DataEnvelope<HealthData>>`，\n线格式与旧 `data(json!({...}))` 完全一致（`{\"data\":{\"status\":\"ok\",\"version\":…}}`），\n后续域批次可照此把注解 DTO 升级为真实返回类型。",
+    "operationId": "get_api_health",
     "responses": {
      "200": {
-      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_HealthData"
+        }
+       }
+      },
+      "description": "服务存活与版本信息"
+     }
+    },
+    "summary": "GET /api/health — 健康检查",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/history": {
+   "delete": {
+    "operationId": "delete___api_history",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "get": {
+    "operationId": "get___api_history",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/http-tasks/test": {
+   "post": {
+    "operationId": "post___api_http-tasks_test",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Not Found"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "已有直连测试正在进行"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/init-status": {
+   "get": {
+    "operationId": "get_api_init_status",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_InitStatusData"
+        }
+       }
+      },
+      "description": "协议同意状态与环境就绪明细"
+     }
+    },
+    "summary": "GET /api/init-status — 初始化状态",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/install/playwright": {
+   "post": {
+    "description": "`?browser=chromium|firefox|webkit`；省略参数保持旧行为，默认 Chromium。\n请求会等待安装完成：后端失败直接返回错误，避免前端只能长时间轮询猜测结果。",
+    "operationId": "post_api_install_playwright",
+    "parameters": [
+     {
+      "description": "要安装的浏览器引擎：chromium/firefox/webkit；省略或空值回退 chromium",
+      "in": "query",
+      "name": "browser",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_InstallPlaywrightData"
+        }
+       }
+      },
+      "description": "安装完成"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "不支持的浏览器名"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "下载或安装失败"
+     }
+    },
+    "summary": "POST /api/install/playwright — 安装 Playwright 管理浏览器",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/login": {
+   "post": {
+    "operationId": "post___api_login",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/login/cancel": {
+   "post": {
+    "operationId": "post___api_login_cancel",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/login/once": {
+   "post": {
+    "operationId": "post___api_login_once",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/login/status": {
+   "get": {
+    "operationId": "get___api_login_status",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/logs": {
+   "get": {
+    "operationId": "get___api_logs",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/logs/export": {
+   "get": {
+    "operationId": "get___api_logs_export",
+    "responses": {
+     "200": {
       "content": {
        "application/zip": {
         "schema": {
-         "type": "string",
-         "format": "binary"
+         "format": "binary",
+         "type": "string"
         }
        }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
+      },
+      "description": "OK"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
-     }
-    },
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/ai/llm-config": {
-   "get": {
-    "operationId": "get___api_ai_llm_config",
+  "/api/monitor/start": {
+   "post": {
+    "operationId": "post___api_monitor_start",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/monitor/status": {
+   "get": {
+    "operationId": "get___api_monitor_status",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/monitor/stop": {
+   "post": {
+    "operationId": "post___api_monitor_stop",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
       }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/monitor/test": {
+   "post": {
+    "operationId": "post___api_monitor_test",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/monitor/test-redirect": {
+   "post": {
+    "operationId": "post___api_monitor_test-redirect",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/network/interfaces": {
+   "get": {
+    "responses": {
+     "200": {
+      "description": "当前 IPv4 网卡及 DNS"
+     },
+     "503": {
+      "description": "网卡枚举失败"
+     }
+    },
+    "summary": "列出校园网可用物理出口接口"
+   }
+  },
+  "/api/notification/test": {
+   "post": {
+    "operationId": "post___api_notification_test",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Not Found"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/ocr/install": {
+   "post": {
+    "operationId": "post___api_ocr_install",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/ocr/recognize": {
+   "post": {
+    "operationId": "post___api_ocr_recognize",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/ocr/status": {
+   "get": {
+    "operationId": "get___api_ocr_status",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/ocr/uninstall": {
+   "post": {
+    "operationId": "post___api_ocr_uninstall",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "有任务正在执行，请稍后再试"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/profiles": {
+   "get": {
+    "operationId": "get___api_profiles",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/profiles/auto-switch": {
+   "post": {
+    "operationId": "post___api_profiles_auto-switch",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/profiles/detect": {
+   "post": {
+    "operationId": "post___api_profiles_detect",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/profiles/import": {
+   "post": {
+    "operationId": "post___api_profiles_import",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/profiles/switch": {
+   "post": {
+    "operationId": "post___api_profiles_switch",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/profiles/{id}": {
+   "delete": {
+    "operationId": "delete___api_profiles_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "get": {
+    "operationId": "get___api_profiles_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "post": {
+    "operationId": "post___api_profiles_id",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    },
    "put": {
-    "operationId": "put___api_ai_llm_config",
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "400": {
-      "description": "Bad Request",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     },
-     "500": {
-      "description": "Internal Error",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
+    "operationId": "put___api_profiles_id",
     "requestBody": {
-     "required": true,
      "content": {
       "application/json": {
-       "schema": {
-        "type": "object",
-        "properties": {
-         "provider": {
-          "type": "string",
-          "enum": ["glm", "deepseek", "custom"],
-          "description": "服务商标识；API Key 按服务商独立保存"
-         },
-         "base_url": {
-          "type": "string",
-          "description": "OpenAI 兼容 API 根地址；不允许 query、fragment 或 userinfo"
-         },
-         "model": {
-          "type": "string",
-          "description": "视觉模型名"
-         },
-         "api_key": {
-          "type": "string",
-          "description": "缺省=保持不变；空串=清除；非空=更新（AES-GCM 加密落盘，响应永不回显）"
-         },
-         "max_tokens": {
-          "type": "integer",
-          "nullable": true,
-          "minimum": 1,
-          "maximum": 200000,
-          "description": "最长输出 token；默认 16384，null 表示交由服务商决定"
-         }
-        },
-        "required": [
-         "base_url",
-         "model"
-        ]
-       }
+       "schema": {}
       }
-     }
-    }
-   }
-  },
-  "/api/ai/llm-config/test": {
-   "post": {
-    "operationId": "post___api_ai_llm_config_test",
-    "description": "使用已保存配置向实际 chat/completions 地址发送最小请求；30 秒超时",
-    "responses": {
-     "200": { "description": "连接成功，返回实际请求地址与耗时", "content": { "application/json": { "schema": {} } } },
-     "400": { "description": "配置缺失或 Key 无法解密", "content": { "application/json": { "schema": {} } } },
-     "503": { "description": "连接、鉴权或模型请求失败", "content": { "application/json": { "schema": {} } } }
-    }
-   }
-  },
-  "/api/ai/models": {
-   "post": {
-    "operationId": "post___api_ai_models",
-    "description": "拉取服务商 GET {base_url}/models 的模型列表（AI 页模型下拉框）；api_key 缺省或为空时回退到该服务商已保存的 Key",
-    "responses": {
-     "200": { "description": "返回 { count, models[] }，顺序与服务端一致", "content": { "application/json": { "schema": {} } } },
-     "400": { "description": "base_url 缺失或非法、服务商与地址不匹配、Key 无法解密、远端非 2xx 或响应中无模型 id", "content": { "application/json": { "schema": {} } } },
-     "503": { "description": "连接失败、超时或远端 5xx", "content": { "application/json": { "schema": {} } } }
-    }
-   }
-  },
-  "/api/ai/capture": {
-   "post": {
-    "operationId": "post___api_ai_capture",
+     },
+     "required": false
+    },
     "responses": {
      "200": {
-      "description": "OK",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "OK"
      },
      "400": {
-      "description": "Bad Request",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
-     },
-     "409": {
-      "description": "Worker Busy（调试会话互斥）",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
+      },
+      "description": "Bad Request"
      },
      "500": {
-      "description": "Internal Error",
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
-     },
-     "503": {
-      "description": "Service Unavailable（Python 环境未就绪）",
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      }
-     }
-    },
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "type": "object",
-        "properties": {
-         "url": {
-          "type": "string",
-          "description": "登录页地址（http/https）"
-         }
-        },
-        "required": [
-         "url"
-        ]
-       }
-      }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/ai/capture/status": {
+  "/api/profiles/{id}/export": {
    "get": {
-    "operationId": "get___api_ai_capture_status",
-    "description": "查询最近一次捕获产物是否可用（页面刷新后恢复状态用）",
+    "operationId": "get___api_profiles_id_export",
     "responses": {
      "200": {
-      "description": "捕获状态与 meta 回显字段",
       "content": {
        "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/pure-mode": {
+   "get": {
+    "operationId": "get___api_pure-mode",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "post": {
+    "operationId": "post___api_pure-mode",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/repo/fetch": {
+   "get": {
+    "operationId": "get___api_repo_fetch",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/repo/image": {
+   "get": {
+    "description": "代理获取仓库任务截图（返回图片字节；出站仅限任务站 raw 域）",
+    "operationId": "get___api_repo_image",
+    "responses": {
+     "200": {
+      "content": {
+       "image/jpeg": {
         "schema": {
-         "type": "object",
-         "properties": {
-          "available": { "type": "boolean", "description": "meta.json、page.html 与 screenshot.png 是否齐备" },
-          "request_url": { "type": "string", "description": "捕获请求 URL（不可用时缺省）" },
-          "final_url": { "type": "string", "description": "捕获结束 URL（不可用时缺省）" },
-          "title": { "type": "string", "description": "页面标题（不可用时缺省）" },
-          "structure_summary": { "type": "object", "description": "frame、表单、控件和验证码候选数量" }
-         }
+         "format": "binary",
+         "type": "string"
         }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/ai/capture/screenshot": {
-   "get": {
-    "operationId": "get___api_ai_capture_screenshot",
-    "responses": {
-     "200": {
-      "description": "PNG 截图",
-      "content": {
+       },
        "image/png": {
         "schema": {
-         "type": "string",
-         "format": "binary"
+         "format": "binary",
+         "type": "string"
         }
        }
-      }
+      },
+      "description": "图片字节"
      },
-     "404": {
-      "description": "尚无捕获截图",
+     "400": {
       "content": {
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
   },
-  "/api/ai/generate/stream": {
-   "post": {
-    "operationId": "post___api_ai_generate_stream",
-    "description": "流式生成（SSE text/event-stream）：增量推送 LLM 输出与校验状态，含传输重试和自纠轮在内的全流程总预算为 10 分钟。事件帧（data: <json>）type 枚举：started / attempt_start / delta / attempt_delta_done / validation_failed / retrying / validated / done / error；\": keepalive\" 注释帧仅证明连接存活不重置前端空闲计时。同一时刻至多一个生成任务（重复发起返回 409）；客户端断连将取消后端 LLM 调用",
-    "responses": {
-     "200": {
-      "description": "SSE stream（事件帧 schema 见 description；每帧 JSON 带 type 标签）",
-      "content": {
-       "text/event-stream": {
-        "schema": {
-         "type": "string",
-         "description": "SSE 帧序列：data: {type: started|attempt_start{attempt,max}|delta{attempt,text}|attempt_delta_done{attempt,text_len}|validation_failed{attempt,errors}|retrying{attempt,next}|validated{attempt}|done{attempts,warnings,task}|error{message}}"
-        }
-       }
-      }
-     },
-     "400": { "description": "Bad Request", "content": { "application/json": { "schema": {} } } },
-     "409": { "description": "已有生成任务进行中", "content": { "application/json": { "schema": {} } } },
-     "500": { "description": "Internal Error", "content": { "application/json": { "schema": {} } } }
-    },
-    "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "extra_prompt": { "type": "string", "maxLength": 4000 } } } } } }
-   }
-  },
-  "/api/ai/capture/bundle": {
+  "/api/repo/task": {
    "get": {
-    "operationId": "get___api_ai_capture_bundle",
+    "operationId": "get___api_repo_task",
     "responses": {
      "200": {
-      "description": "zip（MHTML + 原始 HTML + 结构化页面摘要 + resources + 截图 + meta）",
-      "content": {
-       "application/zip": {
-        "schema": {
-         "type": "string",
-         "format": "binary"
-        }
-       }
-      }
-     },
-     "404": {
-      "description": "尚无捕获产物",
       "content": {
        "application/json": {
         "schema": {}
        }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scheduler/jobs": {
+   "get": {
+    "operationId": "get___api_scheduler_jobs",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "post": {
+    "operationId": "post___api_scheduler_jobs",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
       }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scheduler/jobs/{id}": {
+   "delete": {
+    "operationId": "delete___api_scheduler_jobs_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "put": {
+    "operationId": "put___api_scheduler_jobs_id",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scheduler/jobs/{id}/history": {
+   "get": {
+    "operationId": "get___api_scheduler_jobs_id_history",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scheduler/jobs/{id}/run": {
+   "post": {
+    "operationId": "post___api_scheduler_jobs_id_run",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scheduler/jobs/{id}/toggle": {
+   "post": {
+    "operationId": "post___api_scheduler_jobs_id_toggle",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scripts/binaries": {
+   "get": {
+    "operationId": "get___api_scripts_binaries",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scripts/run": {
+   "post": {
+    "operationId": "post___api_scripts_run",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/scripts/{task_id}": {
+   "delete": {
+    "operationId": "delete___api_scripts_task_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "get": {
+    "operationId": "get___api_scripts_task_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "put": {
+    "operationId": "put___api_scripts_task_id",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/system/info": {
+   "get": {
+    "operationId": "get_api_system_info",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_SystemInfoData"
+        }
+       }
+      },
+      "description": "版本、数据目录、监听端口与运行指标"
+     }
+    },
+    "summary": "GET /api/system/info — 系统基本信息",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/system/restart": {
+   "post": {
+    "description": "新进程带 `--restarting` 标记，launcher 会先等待旧进程释放实例锁再启动，\n避免双方争锁导致\"重启变退出\"（旧实现直接 spawn 原参数 + 200ms 后\n`exit(0)` 硬退出，新进程抢锁失败即死，最终两个进程都消失）。\n旧进程通过 shutdown_tx 走完整优雅关闭流程（而非 exit(0) 跳过清理）。\n后继进程生成逻辑与定时自重启共用 [`crate::launcher::spawn_restart_successor`]。\n\n例外：存在待应用更新（`update/pending.json`）时**不得生成后继进程**——\n后继进程运行的是旧 exe，会锁住目标文件，更新助手替换必然失败\n（os error 32，曾导致\"下载完成却无法更新\"）。此时走纯退出，由已等待的\n更新助手完成替换并用新 exe 重启（关机路径 `ensure_helper_for_shutdown`\n会兜底补唤醒助手）。",
+    "operationId": "post_api_system_restart",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
+       }
+      },
+      "description": "已开始优雅关闭，后继进程正在生成"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "后继进程生成失败"
+     }
+    },
+    "summary": "POST /api/system/restart — 重启应用（spawn 带 `--restarting` 的新进程后优雅退出）",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/system/shutdown": {
+   "post": {
+    "description": "不再使用 exit(0)；launcher 收到 shutdown_tx 信号后依次停止 Engine/Scheduler/\nBridge/Tray/Axum，所有服务在各自 event loop 内清理资源后再退出进程。\n若 30s 后仍未退出（优雅关闭挂死），最后防线才是 exit(0)。",
+    "operationId": "post_api_system_shutdown",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
+       }
+      },
+      "description": "已开始优雅关闭"
+     }
+    },
+    "summary": "POST /api/system/shutdown — 优雅关闭（通知 launcher 执行完整关闭流程）",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/system/update": {
+   "post": {
+    "operationId": "post___api_system_update",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "properties": {
+         "sha256": {
+          "type": "string"
+         },
+         "url": {
+          "type": "string"
+         },
+         "version": {
+          "type": "string"
+         }
+        },
+        "type": "object"
+       }
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/system/update-package": {
+   "post": {
+    "operationId": "post___api_system_update-package",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {
+       "schema": {
+        "properties": {
+         "file": {
+          "description": "手动选择的安装包（.zip / .tar.gz），上限 512 MB",
+          "format": "binary",
+          "type": "string"
+         }
+        },
+        "required": [
+         "file"
+        ],
+        "type": "object"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Conflict"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/tasks": {
+   "get": {
+    "operationId": "get___api_tasks",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "post": {
+    "operationId": "post___api_tasks",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/tasks/export/{id}": {
+   "get": {
+    "operationId": "get___api_tasks_export_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/tasks/import": {
+   "post": {
+    "operationId": "post___api_tasks_import",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/tasks/order": {
+   "post": {
+    "operationId": "post___api_tasks_order",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/tasks/{id}": {
+   "delete": {
+    "operationId": "delete___api_tasks_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "get": {
+    "operationId": "get___api_tasks_id",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   },
+   "put": {
+    "operationId": "put___api_tasks_id",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/tasks/{id}/execute": {
+   "post": {
+    "operationId": "post___api_tasks_id_execute",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/tools/task-recorder.user.js": {
+   "get": {
+    "operationId": "get___api_tools_task-recorder_user_js",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/uninstall": {
+   "post": {
+    "operationId": "post___api_uninstall",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/uninstall/detect": {
+   "get": {
+    "operationId": "get___api_uninstall_detect",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/uninstall/purge": {
+   "post": {
+    "operationId": "post___api_uninstall_purge",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {}
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
+     }
+    }
+   }
+  },
+  "/api/update-state": {
+   "get": {
+    "operationId": "get___api_update-state",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     }
+    }
+   }
+  },
+  "/api/worker/stop": {
+   "post": {
+    "description": "停止当前运行的 Worker 进程及其浏览器实例。Supervisor 保持运行，\n下次任务到来时会自动重新启动 Worker。",
+    "operationId": "post_api_worker_stop",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_WorkerStopData"
+        }
+       }
+      },
+      "description": "已通知关闭 Worker"
+     }
+    },
+    "summary": "POST /api/worker/stop — 手动关闭浏览器（优雅停止 Python Worker）",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/ws/logs": {
+   "get": {
+    "description": "WebSocket：日志实时推送 + 状态 watch 推送（双通道）",
+    "operationId": "get___ws_logs",
+    "responses": {
+     "101": {
+      "description": "Switching Protocols"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Bad Request"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Internal Error"
      }
     }
    }
   }
- }
+ },
+ "servers": [
+  {
+   "description": "本机管理界面默认端口",
+   "url": "http://127.0.0.1:50721"
+  }
+ ]
 }

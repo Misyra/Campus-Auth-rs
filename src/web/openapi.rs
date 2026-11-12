@@ -66,7 +66,8 @@ pub mod schemas {
 /// OpenAPI 文档骨架（utoipa 生成源）
 ///
 /// `info`/`servers` 由本骨架权威持有；`paths` 随域批次逐个挂载
-/// `#[utoipa::path]` 注解处理器（当前为空骨架，首个域样板随后接入）。
+/// `#[utoipa::path]` 注解处理器（当前：system 域样板切片——状态与生命周期
+/// 8 个端点，见 `routes::system` 各注解）。
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -80,6 +81,34 @@ pub mod schemas {
     servers(
         (url = "http://127.0.0.1:50721", description = "本机管理界面默认端口"),
     ),
+    paths(
+        crate::web::routes::system::system_info,
+        crate::web::routes::system::restart_app,
+        crate::web::routes::system::shutdown_app,
+        crate::web::routes::system::agree_terms,
+        crate::web::routes::system::health_check,
+        crate::web::routes::system::init_status,
+        crate::web::routes::system::stop_worker,
+        crate::web::routes::system::install_playwright,
+    ),
+    components(schemas(
+        schemas::ErrorDetail,
+        schemas::ErrorResponse,
+        schemas::DataEnvelope<String>,
+        schemas::DataEnvelope<crate::web::routes::system::HealthData>,
+        schemas::DataEnvelope<crate::web::routes::system::InitStatusData>,
+        schemas::DataEnvelope<crate::web::routes::system::SystemInfoData>,
+        schemas::DataEnvelope<crate::web::routes::system::WorkerStopData>,
+        schemas::DataEnvelope<crate::web::routes::system::InstallPlaywrightData>,
+        crate::web::routes::system::HealthData,
+        crate::web::routes::system::InitStatusData,
+        crate::web::routes::system::EnvReadiness,
+        crate::web::routes::system::EnvProgress,
+        crate::web::routes::system::SystemInfoData,
+        crate::web::routes::system::MetricsSummary,
+        crate::web::routes::system::WorkerStopData,
+        crate::web::routes::system::InstallPlaywrightData,
+    )),
 )]
 pub struct ApiDoc;
 
@@ -184,6 +213,73 @@ mod tests {
             render_snapshot(&first),
             render_snapshot(&second),
             "两次生成的快照必须逐字节一致"
+        );
+    }
+
+    /// 样板域条目必须是生成源，未注解域保留手写条目
+    ///
+    /// 生成源判据：响应携带真实 schema（`$ref` / `properties`，非 `{}` 空占位）；
+    /// 反例取 monitor 域（尚未注解），其条目应原样保留 baseline 的 `{}` 占位。
+    /// 该测试钉住「合并真的发生了」——若 paths 覆盖逻辑退化为纯 baseline，
+    /// 样板域 schema 会消失、测试即失败。
+    #[test]
+    fn sample_domain_entries_come_from_generated_source() {
+        let spec = merged_openapi_json();
+
+        let health_schema = &spec["paths"]["/api/health"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"];
+        assert!(
+            health_schema.is_object() && health_schema.as_object().is_some_and(|o| !o.is_empty()),
+            "样板域 /api/health 应携带生成 schema，实际 {health_schema}"
+        );
+
+        let monitor_schema = &spec["paths"]["/api/monitor/status"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"];
+        assert!(
+            monitor_schema.is_object() && monitor_schema.as_object().is_some_and(|o| o.is_empty()),
+            "未注解域 /api/monitor/status 应保留手写占位 schema，实际 {monitor_schema}"
+        );
+
+        // 错误信封与 data 包装必须进入 components（共享 schema 模块的出口）
+        let schemas = spec
+            .pointer("/components/schemas")
+            .and_then(|s| s.as_object())
+            .expect("合并 spec 应含 components.schemas");
+        assert!(
+            schemas.keys().any(|k| k.starts_with("ErrorResponse")),
+            "错误信封应注册到 components，实际键: {:?}",
+            schemas.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            schemas.keys().any(|k| k.starts_with("DataEnvelope")),
+            "data 包装应注册到 components，实际键: {:?}",
+            schemas.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// 生成快照保护测试：committed 的 openapi.json 必须与生成产物逐字节一致
+    ///
+    /// 日常 `cargo test`（未设环境变量）校验文件与生成产物一致，不一致即失败
+    /// 并提示重写命令；`UPDATE_OPENAPI=1 cargo test` 时重写文件并失败退出，
+    /// 防止环境变量残留导致 CI 静默改文件。重写后请人工核对 diff 再提交。
+    #[test]
+    fn openapi_json_snapshot_matches_generated() {
+        let rendered = render_snapshot(&merged_openapi_json());
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("openapi.json");
+        let current = std::fs::read_to_string(&file).unwrap_or_else(|e| {
+            panic!("读取 {} 失败: {e}", file.display());
+        });
+        if std::env::var("UPDATE_OPENAPI").as_deref() == Ok("1") {
+            std::fs::write(&file, &rendered).expect("写入 openapi.json 失败");
+            panic!(
+                "openapi.json 已按生成产物重写（{rendered} 字节），请核对 diff 后提交；\
+                 未设 UPDATE_OPENAPI 时本测试应直接通过"
+            );
+        }
+        assert_eq!(
+            current, rendered,
+            "openapi.json 与生成产物不一致（路由或注解变更后请运行 \
+             UPDATE_OPENAPI=1 cargo test 重新生成并核对 diff）"
         );
     }
 }
