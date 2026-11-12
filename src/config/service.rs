@@ -269,12 +269,13 @@ impl ConfigService {
         // 读取并（必要时）迁移 settings
         let settings = Self::load_or_init_settings(&settings_path, &config_dir)?;
 
-        // 确保 default profile 存在
+        // 确保 default profile 存在（原子写：首建瞬间崩溃不得留下截断文件——
+        // 截断的 default.json 会被 load_all_profiles 永久跳过，活跃凭据静默回退）
         let default_path = profiles_dir.join("default.json");
         if !default_path.exists() {
             let default = ProfileData::default();
             let json = serde_json::to_string_pretty(&default)?;
-            std::fs::write(&default_path, json)?;
+            crate::utils::io::atomic_write_bytes(&default_path, json.as_bytes())?;
         }
 
         // 解析活跃 Profile（缺失则 fallback 到 default）
@@ -971,7 +972,11 @@ impl ConfigService {
             let default = SettingsData::default();
             match serde_json::to_string_pretty(&default) {
                 Ok(json) => {
-                    if let Err(e) = std::fs::write(settings_path, json) {
+                    // 原子写：首建瞬间崩溃不得留下截断的 settings.json（截断文件
+                    // 在下次启动会走「解析失败隔离」路径，平白多一次告警）
+                    if let Err(e) =
+                        crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())
+                    {
                         tracing::debug!(
                             path = %settings_path.display(),
                             error = %e,

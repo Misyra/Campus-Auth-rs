@@ -150,8 +150,15 @@ impl TaskManager {
                 "初始化默认 .order.json 失败，后续任务排序可能异常"
             );
         }
-        // 首启播种：缺内置默认任务则写入（新装开箱即用；启用状态由各方案绑定）
-        mgr.ensure_default_task();
+        // 首启播种：缺内置默认任务则写入、损坏则重播自愈（新装开箱即用；启用
+        // 状态由各方案绑定）。播种/自愈失败不阻断启动（best-effort），在此统一告警
+        if let Err(e) = mgr.ensure_default_task() {
+            tracing::warn!(
+                path = %mgr.browser_dir.join(format!("{DEFAULT_TASK_ID}.json")).display(),
+                error = %e,
+                "写入内置默认登录任务失败，登录前需手动检查 tasks/browser/default.json"
+            );
+        }
         Arc::new(mgr)
     }
 
@@ -998,29 +1005,43 @@ impl TaskManager {
         None
     }
 
-    /// 首启播种内置默认任务（幂等）。
+    /// 首启播种内置默认任务（幂等），写入结果经 `Result` 上抛供调用方留痕。
     ///
-    /// 仅当 `browser/default.json` 缺失时写入种子（用户删改过的不碰——`default`
-    /// 本就不可删除，能缺失只会是新装/手工清目录）。
-    /// 任务的启用状态不在本层：它属于各方案的 `ProfileData::active_task`，
-    /// 未绑定的方案由登录解析回退到本内置任务，从而保证新装开箱可用。
-    fn ensure_default_task(&self) {
+    /// - `browser/default.json` 缺失：写入种子（`default` 本就不可删除，能缺失
+    ///   只会是新装/手工清目录）；
+    /// - 已存在但 JSON 解析失败（截断/写坏）：重播种子自愈——损坏文件会被列表
+    ///   扫描与登录解析永久跳过，`default` 又不可删除，用户没有任何 UI 手段
+    ///   修复，此处不再让截断文件永久固化；
+    /// - 已存在且 JSON 合法（含用户定制）：不碰（读取失败视为状态未知，同样不碰）。
+    ///
+    /// 写入统一走原子替换：播种/自愈中途崩溃不得留下截断文件。任务的启用状态
+    /// 不在本层：它属于各方案的 `ProfileData::active_task`，未绑定的方案由登录
+    /// 解析回退到本内置任务，从而保证新装开箱可用。
+    fn ensure_default_task(&self) -> std::io::Result<()> {
         let seed_path = self.browser_dir.join(format!("{DEFAULT_TASK_ID}.json"));
-        if !seed_path.exists() {
-            match std::fs::write(&seed_path, DEFAULT_TASK_SEED) {
-                Ok(()) => tracing::info!(
-                    path = %seed_path.display(),
-                    "已内置默认登录任务 default（通用登录），新装开箱即用"
-                ),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %seed_path.display(),
-                        error = %e,
-                        "写入内置默认登录任务失败，登录前需手动创建任务"
-                    );
-                }
+        if seed_path.exists() {
+            // 自愈检测只看 JSON 能否解析（对齐列表扫描的宽口径）：schema 校验
+            // 交给加载路径，避免把合法但精简的定制任务误判为损坏
+            let corrupted = std::fs::read_to_string(&seed_path)
+                .map(|content| serde_json::from_str::<Value>(&strip_bom(content)).is_err())
+                .unwrap_or(false);
+            if !corrupted {
+                return Ok(());
             }
+            // 成功才算自愈完成，留痕放在写入成功之后；失败经 Err 交调用方告警
+            crate::utils::io::atomic_write_bytes(&seed_path, DEFAULT_TASK_SEED.as_bytes())?;
+            tracing::warn!(
+                path = %seed_path.display(),
+                "内置默认任务文件已损坏，已重播内置默认任务"
+            );
+            return Ok(());
         }
+        crate::utils::io::atomic_write_bytes(&seed_path, DEFAULT_TASK_SEED.as_bytes())?;
+        tracing::info!(
+            path = %seed_path.display(),
+            "已内置默认登录任务 default（通用登录），新装开箱即用"
+        );
+        Ok(())
     }
 
     /// 读取任务 JSON 的 `type` 字段并构造摘要（单次读盘，A 组小尾巴）
@@ -2476,6 +2497,107 @@ mod tests {
             mgr.browser_dir.join("default.json").exists(),
             "缺失的种子仍应补上"
         );
+    }
+
+    #[tokio::test]
+    async fn test_seed_self_heals_corrupted_default_task() {
+        // 截断/损坏的 default.json：default 不可删除、损坏文件又被列表与登录
+        // 解析永久跳过，构造管理器时应重播内置种子自愈
+        let tmp = tempfile::tempdir().unwrap();
+        let browser = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::write(browser.join("default.json"), r#"{"type":"browser","na"#).unwrap();
+
+        let mgr = TaskManager::new(tmp.path());
+
+        let healed = std::fs::read_to_string(browser.join("default.json")).unwrap();
+        assert_eq!(healed, DEFAULT_TASK_SEED, "损坏文件应被内置种子覆盖");
+        let kind = mgr
+            .load_task("default")
+            .await
+            .expect("自愈后的种子应为合法任务");
+        assert!(matches!(kind, TaskKind::Browser(_)));
+    }
+
+    #[tokio::test]
+    async fn test_seed_leaves_no_tmp_residue() {
+        // 首启播种走原子写（tmp + rename）：完成后任何任务目录内都不得有
+        // `.tmp_` 前缀的临时文件残留
+        let (_tmp, mgr) = make_task_manager().await;
+        for dir in [&mgr.browser_dir, &mgr.scripts_dir, &mgr.http_dir] {
+            let residue: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+                .collect();
+            assert!(residue.is_empty(), "播种后不得残留临时文件: {residue:?}");
+        }
+        let order_residue: Vec<String> = std::fs::read_dir(&mgr.tasks_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+            .collect();
+        assert!(
+            order_residue.is_empty(),
+            "初始化 .order.json 后不得残留临时文件: {order_residue:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seed_failure_propagates_without_partial_file() {
+        // 注入播种失败：Unix 让 browser 目录只读（建临时文件即失败）；Windows 让
+        // 损坏的目标文件只读（rename 覆盖被拒绝）。失败必须以 io::Error 上抛
+        // （经 ? 传播，按现有错误类型收敛，不扩枚举），且不留下半截文件
+        let tmp = tempfile::tempdir().unwrap();
+        let browser = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&browser).unwrap().permissions();
+            perm.set_mode(0o555);
+            std::fs::set_permissions(&browser, perm).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let seed = browser.join("default.json");
+            std::fs::write(&seed, "{\"type\":\"browser\",\"na").unwrap();
+            let mut perm = std::fs::metadata(&seed).unwrap().permissions();
+            perm.set_readonly(true);
+            std::fs::set_permissions(&seed, perm).unwrap();
+        }
+
+        let mgr = TaskManager::new(tmp.path());
+        let result = mgr.ensure_default_task();
+
+        // 立即恢复权限，保证临时目录能被清理
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&browser).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&browser, perm).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let seed = browser.join("default.json");
+            let mut perm = std::fs::metadata(&seed).unwrap().permissions();
+            perm.set_readonly(false);
+            std::fs::set_permissions(&seed, perm).unwrap();
+        }
+
+        assert!(result.is_err(), "播种失败应以 io::Error 上抛");
+        #[cfg(unix)]
+        assert!(
+            !browser.join("default.json").exists(),
+            "失败不得产生半截文件"
+        );
+        let residue: Vec<String> = std::fs::read_dir(&browser)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+            .collect();
+        assert!(residue.is_empty(), "失败不得残留临时文件: {residue:?}");
     }
 
     // ============ TaskError::IoError 人话化（动作 + 路径 + 失败类别） ============
