@@ -1828,3 +1828,19 @@ def test_test_redirect_goto_responds_to_cancel(monkeypatch):
 
     asyncio.run(_run())
 
+
+def test_cancel_registry_pending_cap_evicts_oldest():
+    """P2-7：pending 上限触顶逐项淘汰最旧，不再 clear() 全清连坐。"""
+    from playwright_worker import CancelRegistry
+
+    reg = CancelRegistry()
+    cap = reg._MAX_PENDING
+    for i in range(cap):
+        reg.trigger(f"old_{i}")
+    reg.trigger("newest")  # 触顶：淘汰最旧的 old_0，而不是清空全部
+    assert len(reg._pending) == cap
+    ev_old = reg.register("old_0")
+    assert ev_old.is_set() is False, "被淘汰的最旧 pending 不再预置取消"
+    ev_new = reg.register("newest")
+    assert ev_new.is_set() is True, "新近 pending 必须存活（clear() 旧口径会连坐清掉）"
+

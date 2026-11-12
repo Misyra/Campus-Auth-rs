@@ -1152,7 +1152,8 @@ class CancelRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._events: dict[str, threading.Event] = {}
-        self._pending: set[str] = set()
+        # dict 当有序集合用：键为到达顺序，逐项淘汰最旧需要保序（P2-7）
+        self._pending: dict[str, None] = {}
 
     # pending 集合上限：限制从未被注册的 cancel_id 永久堆积（历史遗留 F10）
     _MAX_PENDING = 256
@@ -1162,7 +1163,7 @@ class CancelRegistry:
         ev = threading.Event()
         with self._lock:
             if cancel_id in self._pending:
-                self._pending.discard(cancel_id)
+                self._pending.pop(cancel_id, None)
                 ev.set()
             self._events[cancel_id] = ev
         return ev
@@ -1174,17 +1175,19 @@ class CancelRegistry:
             if ev is not None:
                 ev.set()
             else:
-                # 记录 pending 以支持“取消先于注册到达”；若某些 cancel_id 从未被注册
-                # （请求已完成），达到上限时清空防止永久堆积（历史遗留 F10）
-                if len(self._pending) >= self._MAX_PENDING:
-                    self._pending.clear()
-                self._pending.add(cancel_id)
+                # 记录 pending 以支持“取消先于注册到达”；达到上限时逐项淘汰
+                # 最旧一条（对齐 Rust 逐项 TTL 语义）：clear() 会把刚到达的取消
+                # 连同历史残留一起清空，等于给新取消无中生有地重置了窗口（P2-7）
+                if cancel_id not in self._pending:
+                    if len(self._pending) >= self._MAX_PENDING:
+                        self._pending.pop(next(iter(self._pending)))
+                    self._pending[cancel_id] = None
 
     def unregister(self, cancel_id: str) -> None:
         """清理 cancel_id 注册项。"""
         with self._lock:
             self._events.pop(cancel_id, None)
-            self._pending.discard(cancel_id)
+            self._pending.pop(cancel_id, None)
 
 
 # ── Worker 核心 ──
@@ -2349,7 +2352,13 @@ class WorkerCore:
             "ISP": "isp",
             "LOGIN_URL": "auth_url",
         }
-        out = {sys_key: str(params[src_key]) for sys_key, src_key in mapping.items() if src_key in params}
+        # 值为 None（Rust 侧 serde null）时跳过注入：str(None) 会把字面 "None"
+        # 当成凭据/地址注入任务模板（P2-7）；空串仍原样注入，保持既有语义
+        out = {
+            sys_key: str(params[src_key])
+            for sys_key, src_key in mapping.items()
+            if params.get(src_key) is not None
+        }
         trigger = params.get("trigger_url", "") or ""
         if isinstance(trigger, str) and trigger.strip():
             out["LOGIN_URL"] = trigger
