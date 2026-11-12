@@ -8,19 +8,71 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::config::{ConfigApi, ProfileApi, ProfileMergeFn, SettingsMergeFn};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::routes::profiles::validate_login_task_binding;
+
+// ---- 契约 DTO（T5-1a config 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`：成功响应一律
+// `body = DataEnvelope<XxxData>`，非 2xx 一律 `body = ErrorResponse`。
+// GET/PATCH /api/config 的扁平设置大对象暂以 `body = Value` 标注（形状由
+// 前端 `frontend/src/api/types.ts` 护航，且含 monitor 前后端字段名映射），
+// 待强类型化批次收敛为具名 DTO。
+
+/// GET /api/config/log-levels 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LogLevelData {
+    /// 当前落盘的日志级别（TRACE/DEBUG/INFO/WARN/ERROR）
+    pub level: String,
+}
+
+/// GET /api/config/default-stealth-script 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DefaultStealthScriptData {
+    /// 默认反检测脚本全文（JavaScript，任务页「恢复默认」的数据源）
+    pub script: String,
+}
+
+/// GET /api/pure-mode 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PureModeData {
+    /// 纯净模式是否启用（config.browser.pure_mode）
+    pub enabled: bool,
+}
+
+/// POST /api/pure-mode 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PureModeToggleData {
+    /// 切换后的终值（并发 toggle 下以落盘结果为准）
+    pub enabled: bool,
+    /// 面向用户的提示消息
+    pub message: String,
+}
 
 /// GET /api/config — 获取当前全局设置
 ///
 /// 返回扁平结构，前端期望的格式：
 /// { browser, monitor, pause, logging, retry, app_settings, credentials, active_task }
 /// monitor 字段做后端→前端字段名映射
+///
+/// 契约注解：扁平设置大对象暂以 `body = Value` 标注（待强类型化批次收敛）；
+/// password 不回传，仅 `has_password` 布尔位。
+#[utoipa::path(
+    get,
+    path = "/api/config",
+    operation_id = "get_api_config",
+    tag = "config",
+    responses(
+        (status = 200, description = "全局设置 + 活跃方案凭据的扁平结构；password 不回传，仅 has_password 布尔位", body = Value),
+    )
+)]
 pub async fn get_settings(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -50,6 +102,21 @@ pub async fn get_settings(
 /// 后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }
 /// 扁平 key → global 子结构 / 活跃 Profile 的映射由
 /// [`apply_flat_settings_patch`] 统一实现（与 PUT 共用）
+///
+/// 契约注解：请求体为宽松 `Value`（未知键交由 schema 丢弃、历史字段
+/// `carrier_custom` 显式忽略），响应与 GET 同形，均待强类型化批次收敛。
+#[utoipa::path(
+    patch,
+    path = "/api/config",
+    operation_id = "patch_api_config",
+    tag = "config",
+    request_body(content = Value, description = "扁平设置 patch：全局域（browser/monitor/pause/logging/retry/app_settings/worker/updater/notification）与凭证域（username/password/auth_url/trigger_url/isp/active_task/login_channel/active_http_task/active_script_task/active_profile_id）按 key 分拣；password 三态：null 保留、空串清除、非空字符串加密更新"),
+    responses(
+        (status = 200, description = "合并保存并重载后回读的扁平设置（与 GET 同形）", body = Value),
+        (status = 400, description = "字段类型或取值非法（monitor patch 未知字段、端口越界、悬空 active_profile_id、渠道任务绑定缺失、推送通知校验失败等）", body = ErrorResponse),
+        (status = 500, description = "配置事务提交或重载失败", body = ErrorResponse),
+    )
+)]
 pub async fn patch_settings(
     State(config): State<Arc<dyn ConfigApi>>,
     State(profiles): State<Arc<dyn ProfileApi>>,
@@ -526,6 +593,16 @@ pub(crate) fn effective_has_password(
 }
 
 /// POST /api/config/reload — 重新加载配置
+#[utoipa::path(
+    post,
+    path = "/api/config/reload",
+    operation_id = "post_api_config_reload",
+    tag = "config",
+    responses(
+        (status = 200, description = "配置已重新加载并发布 RuntimeConfig", body = DataEnvelope<String>),
+        (status = 500, description = "配置重载失败", body = ErrorResponse),
+    )
+)]
 pub async fn reload_settings(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -534,6 +611,15 @@ pub async fn reload_settings(
 }
 
 /// GET /api/config/log-levels — 返回当前日志级别
+#[utoipa::path(
+    get,
+    path = "/api/config/log-levels",
+    operation_id = "get_api_config_log_levels",
+    tag = "config",
+    responses(
+        (status = 200, description = "当前落盘的日志级别", body = DataEnvelope<LogLevelData>),
+    )
+)]
 pub async fn get_log_levels(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -543,12 +629,26 @@ pub async fn get_log_levels(
     ))
 }
 
-#[derive(Deserialize)]
+/// PUT /api/config/log-level 请求体
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SetLogLevelBody {
+    /// 目标日志级别（TRACE/DEBUG/INFO/WARN/ERROR，大小写不敏感，WARNING 归一为 WARN）
     pub level: String,
 }
 
 /// PUT /api/config/log-level — 设置日志级别
+#[utoipa::path(
+    put,
+    path = "/api/config/log-level",
+    operation_id = "put_api_config_log_level",
+    tag = "config",
+    request_body(content = SetLogLevelBody, description = "目标日志级别（大小写不敏感）"),
+    responses(
+        (status = 200, description = "归一化后的日志级别字符串（大写）", body = DataEnvelope<String>),
+        (status = 400, description = "级别名仅支持 TRACE、DEBUG、INFO、WARN、ERROR，或落盘校验失败", body = ErrorResponse),
+        (status = 500, description = "配置事务提交失败", body = ErrorResponse),
+    )
+)]
 pub async fn set_log_level(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<SetLogLevelBody>,
@@ -586,6 +686,15 @@ pub async fn set_log_level(
 }
 
 /// GET /api/config/default-stealth-script — 默认反检测脚本
+#[utoipa::path(
+    get,
+    path = "/api/config/default-stealth-script",
+    operation_id = "get_api_config_default_stealth_script",
+    tag = "config",
+    responses(
+        (status = 200, description = "默认反检测脚本全文", body = DataEnvelope<DefaultStealthScriptData>),
+    )
+)]
 pub async fn get_default_stealth_script() -> Result<Json<Value>, ApiError> {
     Ok(data(serde_json::json!({
         "script": r#"// Campus-Auth 默认反检测脚本
@@ -629,6 +738,15 @@ pub async fn get_default_stealth_script() -> Result<Json<Value>, ApiError> {
 }
 
 /// GET /api/pure-mode — 获取纯净模式状态
+#[utoipa::path(
+    get,
+    path = "/api/pure-mode",
+    operation_id = "get_api_pure_mode",
+    tag = "config",
+    responses(
+        (status = 200, description = "纯净模式当前开关状态", body = DataEnvelope<PureModeData>),
+    )
+)]
 pub async fn get_pure_mode(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -641,6 +759,17 @@ pub async fn get_pure_mode(
 /// POST /api/pure-mode — 切换纯净模式（toggle，无需请求体）
 ///
 /// 前端不发送请求体，后端读取当前值取反后保存。
+#[utoipa::path(
+    post,
+    path = "/api/pure-mode",
+    operation_id = "post_api_pure_mode",
+    tag = "config",
+    responses(
+        (status = 200, description = "切换后的终值（并发 toggle 下以落盘结果为准）", body = DataEnvelope<PureModeToggleData>),
+        (status = 400, description = "落盘校验失败", body = ErrorResponse),
+        (status = 500, description = "配置事务提交失败", body = ErrorResponse),
+    )
+)]
 pub async fn set_pure_mode(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {

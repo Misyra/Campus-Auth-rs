@@ -1,6 +1,86 @@
 {
  "components": {
   "schemas": {
+   "AutoSwitchBody": {
+    "description": "POST /api/profiles/auto-switch 请求体：启用/禁用自动切换",
+    "properties": {
+     "enabled": {
+      "description": "是否启用按网关/SSID 自动切换活跃方案",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "enabled"
+    ],
+    "type": "object"
+   },
+   "AutoSwitchData": {
+    "description": "POST /api/profiles/auto-switch 响应载荷",
+    "properties": {
+     "active_profile": {
+      "description": "当前活跃方案 ID",
+      "type": "string"
+     },
+     "message": {
+      "description": "面向用户的提示消息",
+      "type": "string"
+     }
+    },
+    "required": [
+     "active_profile",
+     "message"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_AutoSwitchData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/profiles/auto-switch 响应载荷",
+      "properties": {
+       "active_profile": {
+        "description": "当前活跃方案 ID",
+        "type": "string"
+       },
+       "message": {
+        "description": "面向用户的提示消息",
+        "type": "string"
+       }
+      },
+      "required": [
+       "active_profile",
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_DefaultStealthScriptData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/config/default-stealth-script 响应载荷",
+      "properties": {
+       "script": {
+        "description": "默认反检测脚本全文（JavaScript，任务页「恢复默认」的数据源）",
+        "type": "string"
+       }
+      },
+      "required": [
+       "script"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_HealthData": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -97,6 +177,321 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_LogLevelData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/config/log-levels 响应载荷",
+      "properties": {
+       "level": {
+        "description": "当前落盘的日志级别（TRACE/DEBUG/INFO/WARN/ERROR）",
+        "type": "string"
+       }
+      },
+      "required": [
+       "level"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_LoginOnceData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/login/once 响应载荷",
+      "properties": {
+       "message": {
+        "description": "登录结果消息",
+        "type": "string"
+       },
+       "once": {
+        "description": "恒为 true（标识 login_once 模式）",
+        "type": "boolean"
+       },
+       "success": {
+        "description": "登录是否成功",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "once",
+       "success",
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_LoginTriggerData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/login 响应载荷",
+      "properties": {
+       "duration": {
+        "description": "登录耗时（秒，含重试）",
+        "format": "double",
+        "type": "number"
+       },
+       "message": {
+        "description": "登录结果消息（成功文案或失败原因）",
+        "type": "string"
+       },
+       "success": {
+        "description": "登录是否成功（失败也是 200 响应：业务终态而非服务端错误）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "success",
+       "message",
+       "duration"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_ProfileDetailData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/profiles/{id} 响应载荷",
+      "properties": {
+       "has_password": {
+        "description": "密码是否可用（口径同 GET /api/config：能解密而非仅字段非空）",
+        "type": "boolean"
+       },
+       "settings": {
+        "description": "方案详情：`ProfileData` 序列化（password 恒为空串——响应前已清空，\n不回传密文；network 为运行时 effective 出口）。形状随\n`crate::config::ProfileData` 演进，待强类型化批次收敛",
+        "type": "object"
+       }
+      },
+      "required": [
+       "settings",
+       "has_password"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_ProfileDetectData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/profiles/detect 响应载荷",
+      "properties": {
+       "gateway_ip": {
+        "description": "检测到的网关 IP（未检测到时为 null）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "matched_profile_id": {
+        "description": "匹配到的方案 ID（无匹配时为 null）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "matched_profile_name": {
+        "description": "匹配到的方案名称（无匹配时为 null）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "ssid": {
+        "description": "检测到的 WiFi SSID（未检测到时为 null）",
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      },
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_ProfileImportData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/profiles/import 响应载荷",
+      "properties": {
+       "id": {
+        "description": "实际落盘的方案 ID（与既有方案冲突时自动追加 -2/-3 后缀）",
+        "type": "string"
+       },
+       "legacy_http_config_dropped": {
+        "description": "分享文件是否携带 v9 内联直连配置（已忽略；前端据此提示到任务页重配直连任务）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "id",
+       "legacy_http_config_dropped"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_ProfileListData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/profiles 响应载荷",
+      "properties": {
+       "active_profile": {
+        "description": "活跃方案 ID",
+        "type": "string"
+       },
+       "auto_switch": {
+        "description": "是否启用按网关/SSID 自动切换",
+        "type": "boolean"
+       },
+       "profiles": {
+        "additionalProperties": {
+         "$ref": "#/components/schemas/ProfileSummaryData"
+        },
+        "description": "全部方案摘要（不含密码字段），键为 Profile ID",
+        "propertyNames": {
+         "type": "string"
+        },
+        "type": "object"
+       }
+      },
+      "required": [
+       "profiles",
+       "active_profile",
+       "auto_switch"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_ProfileShareData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/profiles/{id}/export 响应载荷（分享文件信封）",
+      "properties": {
+       "app_version": {
+        "description": "导出方应用版本",
+        "type": "string"
+       },
+       "campus_auth_profile": {
+        "description": "分享格式版本号（当前 1；导入方遇到更高版本提示升级）",
+        "format": "int32",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "exported_at": {
+        "description": "导出时间（UTC RFC3339）",
+        "type": "string"
+       },
+       "profile": {
+        "$ref": "#/components/schemas/ProfileShareProfileData",
+        "description": "方案内容（已剔除账号与密码、任务绑定置空）"
+       },
+       "suggested_id": {
+        "description": "建议的导入 ID（取源方案 id；仅建议，被占用时自动追加后缀）",
+        "type": "string"
+       }
+      },
+      "required": [
+       "campus_auth_profile",
+       "exported_at",
+       "app_version",
+       "suggested_id",
+       "profile"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_PureModeData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/pure-mode 响应载荷",
+      "properties": {
+       "enabled": {
+        "description": "纯净模式是否启用（config.browser.pure_mode）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "enabled"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_PureModeToggleData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/pure-mode 响应载荷",
+      "properties": {
+       "enabled": {
+        "description": "切换后的终值（并发 toggle 下以落盘结果为准）",
+        "type": "boolean"
+       },
+       "message": {
+        "description": "面向用户的提示消息",
+        "type": "string"
+       }
+      },
+      "required": [
+       "enabled",
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_String": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -182,6 +577,19 @@
     },
     "required": [
      "data"
+    ],
+    "type": "object"
+   },
+   "DefaultStealthScriptData": {
+    "description": "GET /api/config/default-stealth-script 响应载荷",
+    "properties": {
+     "script": {
+      "description": "默认反检测脚本全文（JavaScript，任务页「恢复默认」的数据源）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "script"
     ],
     "type": "object"
    },
@@ -394,6 +802,66 @@
     ],
     "type": "object"
    },
+   "LogLevelData": {
+    "description": "GET /api/config/log-levels 响应载荷",
+    "properties": {
+     "level": {
+      "description": "当前落盘的日志级别（TRACE/DEBUG/INFO/WARN/ERROR）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "level"
+    ],
+    "type": "object"
+   },
+   "LoginOnceData": {
+    "description": "POST /api/login/once 响应载荷",
+    "properties": {
+     "message": {
+      "description": "登录结果消息",
+      "type": "string"
+     },
+     "once": {
+      "description": "恒为 true（标识 login_once 模式）",
+      "type": "boolean"
+     },
+     "success": {
+      "description": "登录是否成功",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "once",
+     "success",
+     "message"
+    ],
+    "type": "object"
+   },
+   "LoginTriggerData": {
+    "description": "POST /api/login 响应载荷",
+    "properties": {
+     "duration": {
+      "description": "登录耗时（秒，含重试）",
+      "format": "double",
+      "type": "number"
+     },
+     "message": {
+      "description": "登录结果消息（成功文案或失败原因）",
+      "type": "string"
+     },
+     "success": {
+      "description": "登录是否成功（失败也是 200 响应：业务终态而非服务端错误）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "success",
+     "message",
+     "duration"
+    ],
+    "type": "object"
+   },
    "MetricsSummary": {
     "description": "运行指标快照（`crate::utils::metrics::Metrics` 的原子计数读数）",
     "properties": {
@@ -469,6 +937,503 @@
      "worker_crash_total",
      "file_log_dropped_lines",
      "uptime_seconds"
+    ],
+    "type": "object"
+   },
+   "ProfileCreateBody": {
+    "description": "POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）",
+    "properties": {
+     "active_http_task": {
+      "description": "直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "active_script_task": {
+      "description": "脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "active_task": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "auth_url": {
+      "description": "编辑器同屏的可选匹配/认证设置：创建即完整落盘（此前仅收 4 字段，\n网关/SSID/认证地址等会被静默丢弃，须再编辑一次才能保存）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "gateway_ip": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "id": {
+      "description": "与路径参数冗余的历史字段：路径已携带 id，body 内可省略（路径优先）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "isp": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "login_channel": {
+      "description": "登录执行渠道：browser（默认）/ http（直连）/ script（自定义脚本）",
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "network": {
+      "description": "本方案统一网络出口。形状：`{mode: direct|system|proxy|interface,\ninterface_id, proxy_url, dns_servers[]}`（整体结构见\n`crate::network::settings::NetworkSettings`，待强类型化批次收敛）",
+      "type": "object"
+     },
+     "password": {
+      "description": "登录密码明文；空串 = 不设独立密码（服务端加密为 `ENC:` 密文存储，响应不回传）",
+      "type": "string"
+     },
+     "trigger_url": {
+      "description": "自定义重定向触发地址；认证地址留空时生效，空值使用内置默认值",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "username": {
+      "type": "string"
+     },
+     "wifi_ssid": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "network",
+     "name",
+     "username",
+     "password",
+     "login_channel"
+    ],
+    "type": "object"
+   },
+   "ProfileDetailData": {
+    "description": "GET /api/profiles/{id} 响应载荷",
+    "properties": {
+     "has_password": {
+      "description": "密码是否可用（口径同 GET /api/config：能解密而非仅字段非空）",
+      "type": "boolean"
+     },
+     "settings": {
+      "description": "方案详情：`ProfileData` 序列化（password 恒为空串——响应前已清空，\n不回传密文；network 为运行时 effective 出口）。形状随\n`crate::config::ProfileData` 演进，待强类型化批次收敛",
+      "type": "object"
+     }
+    },
+    "required": [
+     "settings",
+     "has_password"
+    ],
+    "type": "object"
+   },
+   "ProfileDetectData": {
+    "description": "POST /api/profiles/detect 响应载荷",
+    "properties": {
+     "gateway_ip": {
+      "description": "检测到的网关 IP（未检测到时为 null）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "matched_profile_id": {
+      "description": "匹配到的方案 ID（无匹配时为 null）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "matched_profile_name": {
+      "description": "匹配到的方案名称（无匹配时为 null）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "ssid": {
+      "description": "检测到的 WiFi SSID（未检测到时为 null）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "ProfileImportData": {
+    "description": "POST /api/profiles/import 响应载荷",
+    "properties": {
+     "id": {
+      "description": "实际落盘的方案 ID（与既有方案冲突时自动追加 -2/-3 后缀）",
+      "type": "string"
+     },
+     "legacy_http_config_dropped": {
+      "description": "分享文件是否携带 v9 内联直连配置（已忽略；前端据此提示到任务页重配直连任务）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "id",
+     "legacy_http_config_dropped"
+    ],
+    "type": "object"
+   },
+   "ProfileListData": {
+    "description": "GET /api/profiles 响应载荷",
+    "properties": {
+     "active_profile": {
+      "description": "活跃方案 ID",
+      "type": "string"
+     },
+     "auto_switch": {
+      "description": "是否启用按网关/SSID 自动切换",
+      "type": "boolean"
+     },
+     "profiles": {
+      "additionalProperties": {
+       "$ref": "#/components/schemas/ProfileSummaryData"
+      },
+      "description": "全部方案摘要（不含密码字段），键为 Profile ID",
+      "propertyNames": {
+       "type": "string"
+      },
+      "type": "object"
+     }
+    },
+    "required": [
+     "profiles",
+     "active_profile",
+     "auto_switch"
+    ],
+    "type": "object"
+   },
+   "ProfileShareData": {
+    "description": "GET /api/profiles/{id}/export 响应载荷（分享文件信封）",
+    "properties": {
+     "app_version": {
+      "description": "导出方应用版本",
+      "type": "string"
+     },
+     "campus_auth_profile": {
+      "description": "分享格式版本号（当前 1；导入方遇到更高版本提示升级）",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "exported_at": {
+      "description": "导出时间（UTC RFC3339）",
+      "type": "string"
+     },
+     "profile": {
+      "$ref": "#/components/schemas/ProfileShareProfileData",
+      "description": "方案内容（已剔除账号与密码、任务绑定置空）"
+     },
+     "suggested_id": {
+      "description": "建议的导入 ID（取源方案 id；仅建议，被占用时自动追加后缀）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "campus_auth_profile",
+     "exported_at",
+     "app_version",
+     "suggested_id",
+     "profile"
+    ],
+    "type": "object"
+   },
+   "ProfileShareProfileData": {
+    "description": "方案分享载荷中的 profile 部分（`GET /api/profiles/{id}/export` 导出格式）",
+    "properties": {
+     "active_http_task": {
+      "description": "恒为空串：直连任务绑定不随方案迁移",
+      "type": "string"
+     },
+     "active_script_task": {
+      "description": "恒为空串：脚本任务绑定不随方案迁移",
+      "type": "string"
+     },
+     "active_task": {
+      "description": "恒为空串：任务绑定属本机资源，不随方案迁移",
+      "type": "string"
+     },
+     "auth_url": {
+      "description": "固定登录网址",
+      "type": "string"
+     },
+     "gateway_ip": {
+      "description": "网关 IP 匹配规则",
+      "type": "string"
+     },
+     "isp": {
+      "description": "运营商",
+      "type": "string"
+     },
+     "login_channel": {
+      "description": "登录执行渠道（browser/http/script；渠道本身是方案属性，随方案走）",
+      "type": "string"
+     },
+     "name": {
+      "description": "显示名称",
+      "type": "string"
+     },
+     "password": {
+      "description": "恒为空串：导出剔除密码（密文跨机器不可解，原样带出会被接收方二次加密）",
+      "type": "string"
+     },
+     "trigger_url": {
+      "description": "自定义重定向触发地址",
+      "type": "string"
+     },
+     "username": {
+      "description": "恒为空串：导出剔除账号（接收方填自己的账号）",
+      "type": "string"
+     },
+     "wifi_ssid": {
+      "description": "WiFi SSID 匹配规则",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "username",
+     "password",
+     "auth_url",
+     "trigger_url",
+     "isp",
+     "gateway_ip",
+     "wifi_ssid",
+     "active_task",
+     "login_channel",
+     "active_http_task",
+     "active_script_task"
+    ],
+    "type": "object"
+   },
+   "ProfileSummaryData": {
+    "description": "GET /api/profiles 列表项（镜像 `crate::config::ProfileSummary` 的线格式）",
+    "properties": {
+     "active_http_task": {
+      "description": "直连渠道绑定的直连任务 ID（空 = 未绑定）",
+      "type": "string"
+     },
+     "active_script_task": {
+      "description": "脚本渠道绑定的脚本任务 ID（空 = 未绑定）",
+      "type": "string"
+     },
+     "active_task": {
+      "description": "活跃任务 ID",
+      "type": "string"
+     },
+     "gateway_ip": {
+      "description": "网关 IP 匹配规则（空 = 无匹配规则）",
+      "type": "string"
+     },
+     "id": {
+      "description": "Profile ID",
+      "type": "string"
+     },
+     "isp": {
+      "description": "运营商",
+      "type": "string"
+     },
+     "login_channel": {
+      "description": "登录执行渠道（browser=浏览器自动化 / http=直连请求 / script=自定义脚本）",
+      "type": "string"
+     },
+     "name": {
+      "description": "显示名称",
+      "type": "string"
+     },
+     "username": {
+      "description": "登录用户名",
+      "type": "string"
+     },
+     "wifi_ssid": {
+      "description": "WiFi SSID 匹配规则（空 = 无匹配规则）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "username",
+     "isp",
+     "active_task",
+     "active_http_task",
+     "active_script_task",
+     "login_channel",
+     "gateway_ip",
+     "wifi_ssid"
+    ],
+    "type": "object"
+   },
+   "ProfileUpdateBody": {
+    "description": "PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）",
+    "properties": {
+     "active_http_task": {
+      "description": "直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "active_script_task": {
+      "description": "脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "active_task": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "auth_url": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "clear_password": {
+      "description": "显式清除已保存密码。\n\n`password` 的空串语义是「未修改，保留原密码」，因此**无法**用它表达清除\n（`Some(\"\")` 与 `None` 在此接口等价）。清除曾只能通过 `PATCH /api/config`\n对活跃方案完成——那是「设置 · 账号」页专用路径。账号页并入方案页后，\n该能力必须在本接口可用，否则「清除已保存密码」这个入口会整体消失。\n与 `password` 同现时以本字段为准（显式清除优先于「保留」）。",
+      "type": "boolean"
+     },
+     "gateway_ip": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "isp": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "login_channel": {
+      "description": "登录执行渠道：browser（默认）/ http（直连）/ script（自定义脚本）",
+      "type": "string"
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "network": {
+      "description": "本方案统一网络出口。形状：`{mode: direct|system|proxy|interface,\ninterface_id, proxy_url, dns_servers[]}`（整体结构见\n`crate::network::settings::NetworkSettings`，待强类型化批次收敛）",
+      "type": "object"
+     },
+     "password": {
+      "description": "登录密码明文；空串 = 未修改（保留原密码），非空由服务端加密为 `ENC:` 密文",
+      "type": "string"
+     },
+     "trigger_url": {
+      "description": "自定义重定向触发地址；认证地址留空时生效，空值使用内置默认值",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "username": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "wifi_ssid": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "network",
+     "password",
+     "login_channel"
+    ],
+    "type": "object"
+   },
+   "PureModeData": {
+    "description": "GET /api/pure-mode 响应载荷",
+    "properties": {
+     "enabled": {
+      "description": "纯净模式是否启用（config.browser.pure_mode）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "enabled"
+    ],
+    "type": "object"
+   },
+   "PureModeToggleData": {
+    "description": "POST /api/pure-mode 响应载荷",
+    "properties": {
+     "enabled": {
+      "description": "切换后的终值（并发 toggle 下以落盘结果为准）",
+      "type": "boolean"
+     },
+     "message": {
+      "description": "面向用户的提示消息",
+      "type": "string"
+     }
+    },
+    "required": [
+     "enabled",
+     "message"
+    ],
+    "type": "object"
+   },
+   "SetLogLevelBody": {
+    "description": "PUT /api/config/log-level 请求体",
+    "properties": {
+     "level": {
+      "description": "目标日志级别（TRACE/DEBUG/INFO/WARN/ERROR，大小写不敏感，WARNING 归一为 WARN）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "level"
+    ],
+    "type": "object"
+   },
+   "SwitchBody": {
+    "description": "POST /api/profiles/switch 请求体：要切换到的目标 Profile ID",
+    "properties": {
+     "profile_id": {
+      "description": "目标 Profile ID（须已存在）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "profile_id"
     ],
     "type": "object"
    },
@@ -1299,7 +2264,8 @@
   },
   "/api/config": {
    "get": {
-    "operationId": "get___api_config",
+    "description": "返回扁平结构，前端期望的格式：\n{ browser, monitor, pause, logging, retry, app_settings, credentials, active_task }\nmonitor 字段做后端→前端字段名映射\n\n契约注解：扁平设置大对象暂以 `body = Value` 标注（待强类型化批次收敛）；\npassword 不回传，仅 `has_password` 布尔位。",
+    "operationId": "get_api_config",
     "responses": {
      "200": {
       "content": {
@@ -1307,35 +2273,25 @@
         "schema": {}
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "全局设置 + 活跃方案凭据的扁平结构；password 不回传，仅 has_password 布尔位"
      }
-    }
+    },
+    "summary": "GET /api/config — 获取当前全局设置",
+    "tags": [
+     "config"
+    ]
    },
    "patch": {
-    "operationId": "patch___api_config",
+    "description": "前端发送扁平结构 { browser, monitor, pause, logging, retry, app_settings, ... }\n后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }\n扁平 key → global 子结构 / 活跃 Profile 的映射由\n[`apply_flat_settings_patch`] 统一实现（与 PUT 共用）\n\n契约注解：请求体为宽松 `Value`（未知键交由 schema 丢弃、历史字段\n`carrier_custom` 显式忽略），响应与 GET 同形，均待强类型化批次收敛。",
+    "operationId": "patch_api_config",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "扁平设置 patch：全局域（browser/monitor/pause/logging/retry/app_settings/worker/updater/notification）与凭证域（username/password/auth_url/trigger_url/isp/active_task/login_channel/active_http_task/active_script_task/active_profile_id）按 key 分拣；password 三态：null 保留、空串清除、非空字符串加密更新",
+     "required": true
     },
     "responses": {
      "200": {
@@ -1344,165 +2300,158 @@
         "schema": {}
        }
       },
-      "description": "OK"
+      "description": "合并保存并重载后回读的扁平设置（与 GET 同形）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "字段类型或取值非法（monitor patch 未知字段、端口越界、悬空 active_profile_id、渠道任务绑定缺失、推送通知校验失败等）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "配置事务提交或重载失败"
      }
-    }
+    },
+    "summary": "PATCH /api/config — 局部更新全局设置（合并后保存）",
+    "tags": [
+     "config"
+    ]
    }
   },
   "/api/config/default-stealth-script": {
    "get": {
-    "operationId": "get___api_config_default-stealth-script",
+    "operationId": "get_api_config_default_stealth_script",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_DefaultStealthScriptData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "默认反检测脚本全文"
      }
-    }
+    },
+    "summary": "GET /api/config/default-stealth-script — 默认反检测脚本",
+    "tags": [
+     "config"
+    ]
    }
   },
   "/api/config/log-level": {
    "put": {
-    "operationId": "put___api_config_log-level",
+    "operationId": "put_api_config_log_level",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/SetLogLevelBody"
+       }
       }
      },
-     "required": false
+     "description": "目标日志级别（大小写不敏感）",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "归一化后的日志级别字符串（大写）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "级别名仅支持 TRACE、DEBUG、INFO、WARN、ERROR，或落盘校验失败"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "配置事务提交失败"
      }
-    }
+    },
+    "summary": "PUT /api/config/log-level — 设置日志级别",
+    "tags": [
+     "config"
+    ]
    }
   },
   "/api/config/log-levels": {
    "get": {
-    "operationId": "get___api_config_log-levels",
+    "operationId": "get_api_config_log_levels",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_LogLevelData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "当前落盘的日志级别"
      }
-    }
+    },
+    "summary": "GET /api/config/log-levels — 返回当前日志级别",
+    "tags": [
+     "config"
+    ]
    }
   },
   "/api/config/reload": {
    "post": {
-    "operationId": "post___api_config_reload",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_config_reload",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "配置已重新加载并发布 RuntimeConfig"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "配置重载失败"
      }
-    }
+    },
+    "summary": "POST /api/config/reload — 重新加载配置",
+    "tags": [
+     "config"
+    ]
    }
   },
   "/api/debug/feedback-bundle": {
@@ -2178,124 +3127,91 @@
   },
   "/api/login": {
    "post": {
-    "operationId": "post___api_login",
+    "description": "前端可能发送 `null` 或 `{source, task_id}`，用 `Json<Value>` 宽松接收。",
+    "operationId": "post_api_login",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "宽松接收：null 或 {source?, task_id?, profile_id?}；source 为 \"browser\" 时走浏览器渠道，其余（含缺省）为手动触发",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_LoginTriggerData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "登录终态（配置缺失、凭证无效等业务失败同样以 200 + success:false 返回，不用 500）"
      }
-    }
+    },
+    "summary": "POST /api/login — 触发手动登录",
+    "tags": [
+     "login"
+    ]
    }
   },
   "/api/login/cancel": {
    "post": {
-    "operationId": "post___api_login_cancel",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_login_cancel",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "已请求取消当前登录流程（无论是否确有在途登录）"
      }
-    }
+    },
+    "summary": "POST /api/login/cancel — 取消当前登录流程",
+    "tags": [
+     "login"
+    ]
    }
   },
   "/api/login/once": {
    "post": {
-    "operationId": "post___api_login_once",
+    "description": "与 trigger_login 保持一致：登录失败返回 200 + {success: false}，而非 500。",
+    "operationId": "post_api_login_once",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "宽松接收：null 或 {source?, task_id?, profile_id?}；source 为 \"browser\" 时走浏览器渠道，其余（含缺省）为 login_once 触发",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_LoginOnceData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "登录终态（失败同样以 200 + success:false 返回）"
      }
-    }
+    },
+    "summary": "POST /api/login/once — login_once 模式（执行一次登录后退出）",
+    "tags": [
+     "login"
+    ]
    }
   },
   "/api/login/status": {
    "get": {
-    "operationId": "get___api_login_status",
+    "description": "契约注解：响应是全局状态快照（`crate::status::snapshot::StatusSnapshot`\n整体序列化），暂以 `body = Value` 标注，待 status 域批次强类型化。",
+    "operationId": "get_api_login_status",
     "responses": {
      "200": {
       "content": {
@@ -2303,25 +3219,13 @@
         "schema": {}
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "全局状态快照（含登录状态、引擎状态、探测证据、调度器与 Worker 状态等，形状见 crate::status::snapshot::StatusSnapshot）"
      }
-    }
+    },
+    "summary": "GET /api/login/status — 查询当前登录状态",
+    "tags": [
+     "login"
+    ]
    }
   },
   "/api/logs": {
@@ -2786,422 +3690,580 @@
   },
   "/api/profiles": {
    "get": {
-    "operationId": "get___api_profiles",
+    "operationId": "get_api_profiles",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_ProfileListData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "全部方案摘要（不含密码）+ 活跃方案与自动切换开关"
      }
-    }
+    },
+    "summary": "GET /api/profiles — 列出全部 Profile",
+    "tags": [
+     "profiles"
+    ]
    }
   },
   "/api/profiles/auto-switch": {
    "post": {
-    "operationId": "post___api_profiles_auto-switch",
+    "operationId": "post_api_profiles_auto_switch",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/AutoSwitchBody"
+       }
       }
      },
-     "required": false
+     "description": "启用/禁用按网关/SSID 自动切换活跃方案",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_AutoSwitchData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "开关已落库并回显当前活跃方案"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "设置落盘失败"
      }
-    }
+    },
+    "summary": "POST /api/profiles/auto-switch — 设置自动切换开关",
+    "tags": [
+     "profiles"
+    ]
    }
   },
   "/api/profiles/detect": {
    "post": {
-    "operationId": "post___api_profiles_detect",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "description": "复用 ProfileService.detect_matching_profile 做网关 IP / WiFi SSID 匹配，\n支持 AND/OR 匹配逻辑。",
+    "operationId": "post_api_profiles_detect",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_ProfileDetectData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "网关 IP / SSID 检测结果与匹配到的方案（无匹配时对应字段为 null）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "网关或 SSID 检测失败"
      }
-    }
+    },
+    "summary": "POST /api/profiles/detect — 检测当前网络环境并自动匹配 Profile",
+    "tags": [
+     "profiles"
+    ]
    }
   },
   "/api/profiles/import": {
    "post": {
-    "operationId": "post___api_profiles_import",
+    "description": "ID 冲突时自动追加 `-2`/`-3` 后缀而非报 409：导入的语义是\"新增一份可用方案\"，\n让用户先解决命名冲突再重试属于把内部标识泄漏成用户负担；同时绝不覆盖既有\n方案（覆盖会连带清掉对方的账号密码）。\n\n契约注解：请求体为宽松 `Value`——格式仅认「本应用导出的信封」（须含\n`campus_auth_profile` 版本标记），兼容 `{ data: {...} }` 外壳写法，\n载荷内的账号/密码字段一律忽略，故不声明强类型请求体。",
+    "operationId": "post_api_profiles_import",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "方案分享文件（GET /api/profiles/{id}/export 的导出格式；须含 campus_auth_profile 版本标记，载荷中的账号与密码字段被忽略）",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_ProfileImportData"
+        }
        }
       },
-      "description": "OK"
+      "description": "导入结果（id 冲突时自动追加 -2/-3 后缀，绝不覆盖既有方案）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "非本应用导出的分享文件（缺版本标记 / 格式更新 / 方案名缺失 / URL 或渠道值非法）"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "同名方案过多（自动后缀超过 10000 个）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "方案写入失败"
      }
-    }
+    },
+    "summary": "POST /api/profiles/import — 导入分享的方案 JSON",
+    "tags": [
+     "profiles"
+    ]
    }
   },
   "/api/profiles/switch": {
    "post": {
-    "operationId": "post___api_profiles_switch",
+    "description": "切换本体同步完成（保留前端「响应即已生效」的时序契约：切换后立即\nfetchConfig 必须拿到新 Profile 凭证），随后派发 Engine 的 ApplyProfile\n命令同步引擎派生状态（ActiveProfile 状态广播 + 监测中的即时探测与\n定时器重建）。历史实现只调 ProfileService、绕过 Engine：切换后引擎内\n的探测上下文不随切换刷新，Web 与自动切换两个入口的生效行为不一致。",
+    "operationId": "post_api_profiles_switch",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/SwitchBody"
+       }
       }
      },
-     "required": false
+     "description": "要切换到的目标 Profile ID",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "切换已持久化（Engine 派生状态同步失败仅告警，经 reload 收敛）"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "目标方案不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "切换落盘失败"
      }
-    }
+    },
+    "summary": "POST /api/profiles/switch — 切换活跃 Profile",
+    "tags": [
+     "profiles"
+    ]
    }
   },
   "/api/profiles/{id}": {
    "delete": {
-    "operationId": "delete___api_profiles_id",
+    "operationId": "delete_api_profiles_id",
+    "parameters": [
+     {
+      "description": "Profile ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "删除成功"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "方案不存在"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "default 方案不可删除"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "方案删除失败"
      }
-    }
+    },
+    "summary": "DELETE /api/profiles/{id} — 删除 Profile",
+    "tags": [
+     "profiles"
+    ]
    },
    "get": {
-    "operationId": "get___api_profiles_id",
+    "description": "响应带 `has_password`（口径同 `GET /api/config`）：方案编辑器据此显示\n「已保存 / 未设置」并决定是否提供「清除已保存密码」。只回 `settings` 一个\n空串密码时，前端无法区分「没设密码」和「有密码但被抹掉了」——两者都会渲染成\n空输入框，占位文案只能猜。\n\n契约注解：`settings` 为 `ProfileData` 整体序列化，暂以 `Value` 标注\n（待强类型化批次收敛）；其中 password 恒为空串（响应前清空，不回传密文）。",
+    "operationId": "get_api_profiles_id",
+    "parameters": [
+     {
+      "description": "Profile ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_ProfileDetailData"
+        }
        }
       },
-      "description": "OK"
+      "description": "方案详情（settings.password 恒为空串，network 为运行时 effective 出口）+ has_password"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "方案不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "方案读取或序列化失败"
      }
-    }
+    },
+    "summary": "GET /api/profiles/{id} — 获取单个 Profile",
+    "tags": [
+     "profiles"
+    ]
    },
    "post": {
-    "operationId": "post___api_profiles_id",
+    "description": "body 必填 `name/username/password`（password 空串=不设独立密码）；\n可选 `auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task/active_http_task`\n与 PUT 同语义，支持创建时一次带上编辑器内的全部字段。",
+    "operationId": "post_api_profiles_id",
+    "parameters": [
+     {
+      "description": "Profile ID（路径优先于 body.id；两者皆空则 400）",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/ProfileCreateBody"
+       }
       }
      },
-     "required": false
+     "description": "创建载荷：name/username/password 必填，其余可选字段与 PUT 同语义，创建即完整落盘",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "创建成功（纯新建语义：命中既有 id 由 Service 层拒绝为 409）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "缺少 id、URL 格式非法、网络出口无效、或渠道任务绑定校验失败"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Profile ID 已存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "密码加密或方案写入失败"
      }
-    }
+    },
+    "summary": "POST /api/profiles/{id} — 创建 Profile",
+    "tags": [
+     "profiles"
+    ]
    },
    "put": {
-    "operationId": "put___api_profiles_id",
+    "operationId": "put_api_profiles_id",
+    "parameters": [
+     {
+      "description": "Profile ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/ProfileUpdateBody"
+       }
       }
      },
-     "required": false
+     "description": "更新载荷：仅覆盖出现的字段；password 空串 = 保留原密码，clear_password = true 显式清除（优先于 password）",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "更新成功（合并/校验在 profiles_lock 事务临界区内完成）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "字段校验失败（URL 非法、网络出口无效、渠道任务绑定缺失等）"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "方案不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "密码加密或方案写入失败"
      }
-    }
+    },
+    "summary": "PUT /api/profiles/{id} — 更新 Profile",
+    "tags": [
+     "profiles"
+    ]
    }
   },
   "/api/profiles/{id}/export": {
    "get": {
-    "operationId": "get___api_profiles_id_export",
+    "operationId": "get_api_profiles_id_export",
+    "parameters": [
+     {
+      "description": "Profile ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_ProfileShareData"
+        }
        }
       },
-      "description": "OK"
+      "description": "分享文件信封（username/password 恒为空串，任务绑定置空；可直接作为 POST /api/profiles/import 的请求体）"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "方案不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "方案读取失败"
      }
-    }
+    },
+    "summary": "GET /api/profiles/{id}/export — 导出方案为可分享的 JSON（剔除账号与密码）",
+    "tags": [
+     "profiles"
+    ]
    }
   },
   "/api/pure-mode": {
    "get": {
-    "operationId": "get___api_pure-mode",
+    "operationId": "get_api_pure_mode",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_PureModeData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "纯净模式当前开关状态"
      }
-    }
+    },
+    "summary": "GET /api/pure-mode — 获取纯净模式状态",
+    "tags": [
+     "config"
+    ]
    },
    "post": {
-    "operationId": "post___api_pure-mode",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "description": "前端不发送请求体，后端读取当前值取反后保存。",
+    "operationId": "post_api_pure_mode",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_PureModeToggleData"
+        }
        }
       },
-      "description": "OK"
+      "description": "切换后的终值（并发 toggle 下以落盘结果为准）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "落盘校验失败"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "配置事务提交失败"
      }
-    }
+    },
+    "summary": "POST /api/pure-mode — 切换纯净模式（toggle，无需请求体）",
+    "tags": [
+     "config"
+    ]
    }
   },
   "/api/repo/fetch": {

@@ -7,15 +7,57 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use serde::Serialize;
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::login::LoginApi;
 use crate::status::{LoginSource, StatusManager};
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::DataEnvelope;
+
+// ---- 契约 DTO（T5-1a login 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`：成功响应一律
+// `body = DataEnvelope<XxxData>`。GET /api/login/status 的响应是全局状态
+// 快照（`crate::status::snapshot::StatusSnapshot` 整体序列化，形状随 status
+// 域演进），暂以 `body = Value` 标注，待 status 域批次强类型化。
+
+/// POST /api/login 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoginTriggerData {
+    /// 登录是否成功（失败也是 200 响应：业务终态而非服务端错误）
+    pub success: bool,
+    /// 登录结果消息（成功文案或失败原因）
+    pub message: String,
+    /// 登录耗时（秒，含重试）
+    pub duration: f64,
+}
+
+/// POST /api/login/once 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoginOnceData {
+    /// 恒为 true（标识 login_once 模式）
+    pub once: bool,
+    /// 登录是否成功
+    pub success: bool,
+    /// 登录结果消息
+    pub message: String,
+}
 
 /// POST /api/login — 触发手动登录
 ///
 /// 前端可能发送 `null` 或 `{source, task_id}`，用 `Json<Value>` 宽松接收。
+#[utoipa::path(
+    post,
+    path = "/api/login",
+    operation_id = "post_api_login",
+    tag = "login",
+    request_body(content = Value, description = "宽松接收：null 或 {source?, task_id?, profile_id?}；source 为 \"browser\" 时走浏览器渠道，其余（含缺省）为手动触发"),
+    responses(
+        (status = 200, description = "登录终态（配置缺失、凭证无效等业务失败同样以 200 + success:false 返回，不用 500）", body = DataEnvelope<LoginTriggerData>),
+    )
+)]
 pub async fn trigger_login(
     State(login): State<Arc<dyn LoginApi>>,
     Json(body): Json<Value>,
@@ -44,6 +86,15 @@ pub async fn trigger_login(
 }
 
 /// POST /api/login/cancel — 取消当前登录流程
+#[utoipa::path(
+    post,
+    path = "/api/login/cancel",
+    operation_id = "post_api_login_cancel",
+    tag = "login",
+    responses(
+        (status = 200, description = "已请求取消当前登录流程（无论是否确有在途登录）", body = DataEnvelope<String>),
+    )
+)]
 pub async fn cancel_login(State(login): State<Arc<dyn LoginApi>>) -> Result<Json<Value>, ApiError> {
     // await 等待状态锁，避免撞上 submit 持锁窗口时取消被静默丢弃（B2）
     login.cancel_current().await;
@@ -51,6 +102,18 @@ pub async fn cancel_login(State(login): State<Arc<dyn LoginApi>>) -> Result<Json
 }
 
 /// GET /api/login/status — 查询当前登录状态
+///
+/// 契约注解：响应是全局状态快照（`crate::status::snapshot::StatusSnapshot`
+/// 整体序列化），暂以 `body = Value` 标注，待 status 域批次强类型化。
+#[utoipa::path(
+    get,
+    path = "/api/login/status",
+    operation_id = "get_api_login_status",
+    tag = "login",
+    responses(
+        (status = 200, description = "全局状态快照（含登录状态、引擎状态、探测证据、调度器与 Worker 状态等，形状见 crate::status::snapshot::StatusSnapshot）", body = Value),
+    )
+)]
 pub async fn get_login_status(
     State(status): State<Arc<StatusManager>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -61,6 +124,16 @@ pub async fn get_login_status(
 /// POST /api/login/once — login_once 模式（执行一次登录后退出）
 ///
 /// 与 trigger_login 保持一致：登录失败返回 200 + {success: false}，而非 500。
+#[utoipa::path(
+    post,
+    path = "/api/login/once",
+    operation_id = "post_api_login_once",
+    tag = "login",
+    request_body(content = Value, description = "宽松接收：null 或 {source?, task_id?, profile_id?}；source 为 \"browser\" 时走浏览器渠道，其余（含缺省）为 login_once 触发"),
+    responses(
+        (status = 200, description = "登录终态（失败同样以 200 + success:false 返回）", body = DataEnvelope<LoginOnceData>),
+    )
+)]
 pub async fn login_once(
     State(login): State<Arc<dyn LoginApi>>,
     Json(body): Json<Value>,

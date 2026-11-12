@@ -8,24 +8,164 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 use zeroize::Zeroizing;
 
 use crate::config::{ConfigApi, LoginChannel, ProfileApi, ProfileData};
 use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1a profiles 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`：成功响应一律
+// `body = DataEnvelope<XxxData>`，非 2xx 一律 `body = ErrorResponse`。
+// `ProfileSummaryData` / `ProfileShareData` 是对 `crate::config` 侧序列化
+// 形状的**镜像声明**（handler 仍走 `data(json!({...}))` 组装），后续强类型化
+// 批次再让 handler 直接返回这些 DTO；`ProfileDetailData.settings` 暂以
+// `Value` 标注（整体为 `ProfileData` 序列化，形状随 `src/config/schema.rs`
+// 演进，待强类型化批次收敛）。
+
+/// GET /api/profiles 列表项（镜像 `crate::config::ProfileSummary` 的线格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileSummaryData {
+    /// Profile ID
+    pub id: String,
+    /// 显示名称
+    pub name: String,
+    /// 登录用户名
+    pub username: String,
+    /// 运营商
+    pub isp: String,
+    /// 活跃任务 ID
+    pub active_task: String,
+    /// 直连渠道绑定的直连任务 ID（空 = 未绑定）
+    pub active_http_task: String,
+    /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定）
+    pub active_script_task: String,
+    /// 登录执行渠道（browser=浏览器自动化 / http=直连请求 / script=自定义脚本）
+    pub login_channel: String,
+    /// 网关 IP 匹配规则（空 = 无匹配规则）
+    pub gateway_ip: String,
+    /// WiFi SSID 匹配规则（空 = 无匹配规则）
+    pub wifi_ssid: String,
+}
+
+/// GET /api/profiles 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileListData {
+    /// 全部方案摘要（不含密码字段），键为 Profile ID
+    pub profiles: std::collections::HashMap<String, ProfileSummaryData>,
+    /// 活跃方案 ID
+    pub active_profile: String,
+    /// 是否启用按网关/SSID 自动切换
+    pub auto_switch: bool,
+}
+
+/// GET /api/profiles/{id} 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileDetailData {
+    /// 方案详情：`ProfileData` 序列化（password 恒为空串——响应前已清空，
+    /// 不回传密文；network 为运行时 effective 出口）。形状随
+    /// `crate::config::ProfileData` 演进，待强类型化批次收敛
+    #[schema(value_type = Object)]
+    pub settings: Value,
+    /// 密码是否可用（口径同 GET /api/config：能解密而非仅字段非空）
+    pub has_password: bool,
+}
+
+/// 方案分享载荷中的 profile 部分（`GET /api/profiles/{id}/export` 导出格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileShareProfileData {
+    /// 显示名称
+    pub name: String,
+    /// 恒为空串：导出剔除账号（接收方填自己的账号）
+    pub username: String,
+    /// 恒为空串：导出剔除密码（密文跨机器不可解，原样带出会被接收方二次加密）
+    pub password: String,
+    /// 固定登录网址
+    pub auth_url: String,
+    /// 自定义重定向触发地址
+    pub trigger_url: String,
+    /// 运营商
+    pub isp: String,
+    /// 网关 IP 匹配规则
+    pub gateway_ip: String,
+    /// WiFi SSID 匹配规则
+    pub wifi_ssid: String,
+    /// 恒为空串：任务绑定属本机资源，不随方案迁移
+    pub active_task: String,
+    /// 登录执行渠道（browser/http/script；渠道本身是方案属性，随方案走）
+    pub login_channel: String,
+    /// 恒为空串：直连任务绑定不随方案迁移
+    pub active_http_task: String,
+    /// 恒为空串：脚本任务绑定不随方案迁移
+    pub active_script_task: String,
+}
+
+/// GET /api/profiles/{id}/export 响应载荷（分享文件信封）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileShareData {
+    /// 分享格式版本号（当前 1；导入方遇到更高版本提示升级）
+    pub campus_auth_profile: u32,
+    /// 导出时间（UTC RFC3339）
+    pub exported_at: String,
+    /// 导出方应用版本
+    pub app_version: String,
+    /// 建议的导入 ID（取源方案 id；仅建议，被占用时自动追加后缀）
+    pub suggested_id: String,
+    /// 方案内容（已剔除账号与密码、任务绑定置空）
+    pub profile: ProfileShareProfileData,
+}
+
+/// POST /api/profiles/import 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileImportData {
+    /// 实际落盘的方案 ID（与既有方案冲突时自动追加 -2/-3 后缀）
+    pub id: String,
+    /// 分享文件是否携带 v9 内联直连配置（已忽略；前端据此提示到任务页重配直连任务）
+    pub legacy_http_config_dropped: bool,
+}
+
+/// POST /api/profiles/detect 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileDetectData {
+    /// 检测到的网关 IP（未检测到时为 null）
+    pub gateway_ip: Option<String>,
+    /// 检测到的 WiFi SSID（未检测到时为 null）
+    pub ssid: Option<String>,
+    /// 匹配到的方案 ID（无匹配时为 null）
+    pub matched_profile_id: Option<String>,
+    /// 匹配到的方案名称（无匹配时为 null）
+    pub matched_profile_name: Option<String>,
+}
+
+/// POST /api/profiles/auto-switch 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AutoSwitchData {
+    /// 当前活跃方案 ID
+    pub active_profile: String,
+    /// 面向用户的提示消息
+    pub message: String,
+}
 
 /// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ProfileCreateBody {
-    /// 本方案统一网络出口。
+    /// 本方案统一网络出口。形状：`{mode: direct|system|proxy|interface,
+    /// interface_id, proxy_url, dns_servers[]}`（整体结构见
+    /// `crate::network::settings::NetworkSettings`，待强类型化批次收敛）
+    #[schema(value_type = Object)]
     pub network: Option<crate::network::settings::NetworkSettings>,
     /// 与路径参数冗余的历史字段：路径已携带 id，body 内可省略（路径优先）
     pub id: Option<String>,
     pub name: String,
     pub username: String,
+    /// 登录密码明文；空串 = 不设独立密码（服务端加密为 `ENC:` 密文存储，响应不回传）
+    #[schema(value_type = String)]
     pub password: Zeroizing<String>,
     /// 编辑器同屏的可选匹配/认证设置：创建即完整落盘（此前仅收 4 字段，
     /// 网关/SSID/认证地址等会被静默丢弃，须再编辑一次才能保存）
@@ -36,6 +176,8 @@ pub struct ProfileCreateBody {
     pub gateway_ip: Option<String>,
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
+    /// 登录执行渠道：browser（默认）/ http（直连）/ script（自定义脚本）
+    #[schema(value_type = String)]
     pub login_channel: Option<LoginChannel>,
     /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
     pub active_http_task: Option<String>,
@@ -160,12 +302,17 @@ pub(crate) async fn validate_login_task_binding(
 }
 
 /// PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ProfileUpdateBody {
-    /// 本方案统一网络出口。
+    /// 本方案统一网络出口。形状：`{mode: direct|system|proxy|interface,
+    /// interface_id, proxy_url, dns_servers[]}`（整体结构见
+    /// `crate::network::settings::NetworkSettings`，待强类型化批次收敛）
+    #[schema(value_type = Object)]
     pub network: Option<crate::network::settings::NetworkSettings>,
     pub name: Option<String>,
     pub username: Option<String>,
+    /// 登录密码明文；空串 = 未修改（保留原密码），非空由服务端加密为 `ENC:` 密文
+    #[schema(value_type = String)]
     pub password: Option<Zeroizing<String>>,
     /// 显式清除已保存密码。
     ///
@@ -183,6 +330,8 @@ pub struct ProfileUpdateBody {
     pub gateway_ip: Option<String>,
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
+    /// 登录执行渠道：browser（默认）/ http（直连）/ script（自定义脚本）
+    #[schema(value_type = String)]
     pub login_channel: Option<LoginChannel>,
     /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
     pub active_http_task: Option<String>,
@@ -191,18 +340,29 @@ pub struct ProfileUpdateBody {
 }
 
 /// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct SwitchBody {
+    /// 目标 Profile ID（须已存在）
     pub profile_id: String,
 }
 
 /// POST /api/profiles/auto-switch 请求体：启用/禁用自动切换
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct AutoSwitchBody {
+    /// 是否启用按网关/SSID 自动切换活跃方案
     pub enabled: bool,
 }
 
 /// GET /api/profiles — 列出全部 Profile
+#[utoipa::path(
+    get,
+    path = "/api/profiles",
+    operation_id = "get_api_profiles",
+    tag = "profiles",
+    responses(
+        (status = 200, description = "全部方案摘要（不含密码）+ 活跃方案与自动切换开关", body = DataEnvelope<ProfileListData>),
+    )
+)]
 pub async fn list_profiles(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -227,6 +387,23 @@ pub async fn list_profiles(
 /// 「已保存 / 未设置」并决定是否提供「清除已保存密码」。只回 `settings` 一个
 /// 空串密码时，前端无法区分「没设密码」和「有密码但被抹掉了」——两者都会渲染成
 /// 空输入框，占位文案只能猜。
+///
+/// 契约注解：`settings` 为 `ProfileData` 整体序列化，暂以 `Value` 标注
+/// （待强类型化批次收敛）；其中 password 恒为空串（响应前清空，不回传密文）。
+#[utoipa::path(
+    get,
+    path = "/api/profiles/{id}",
+    operation_id = "get_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    responses(
+        (status = 200, description = "方案详情（settings.password 恒为空串，network 为运行时 effective 出口）+ has_password", body = DataEnvelope<ProfileDetailData>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 500, description = "方案读取或序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_profile(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(id): Path<String>,
@@ -391,6 +568,20 @@ fn parse_share_payload(body: &Value) -> Result<(ProfileData, String, bool), ApiE
 }
 
 /// GET /api/profiles/{id}/export — 导出方案为可分享的 JSON（剔除账号与密码）
+#[utoipa::path(
+    get,
+    path = "/api/profiles/{id}/export",
+    operation_id = "get_api_profiles_id_export",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    responses(
+        (status = 200, description = "分享文件信封（username/password 恒为空串，任务绑定置空；可直接作为 POST /api/profiles/import 的请求体）", body = DataEnvelope<ProfileShareData>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 500, description = "方案读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn export_profile(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(id): Path<String>,
@@ -405,6 +596,23 @@ pub async fn export_profile(
 /// ID 冲突时自动追加 `-2`/`-3` 后缀而非报 409：导入的语义是"新增一份可用方案"，
 /// 让用户先解决命名冲突再重试属于把内部标识泄漏成用户负担；同时绝不覆盖既有
 /// 方案（覆盖会连带清掉对方的账号密码）。
+///
+/// 契约注解：请求体为宽松 `Value`——格式仅认「本应用导出的信封」（须含
+/// `campus_auth_profile` 版本标记），兼容 `{ data: {...} }` 外壳写法，
+/// 载荷内的账号/密码字段一律忽略，故不声明强类型请求体。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/import",
+    operation_id = "post_api_profiles_import",
+    tag = "profiles",
+    request_body(content = Value, description = "方案分享文件（GET /api/profiles/{id}/export 的导出格式；须含 campus_auth_profile 版本标记，载荷中的账号与密码字段被忽略）"),
+    responses(
+        (status = 200, description = "导入结果（id 冲突时自动追加 -2/-3 后缀，绝不覆盖既有方案）", body = DataEnvelope<ProfileImportData>),
+        (status = 400, description = "非本应用导出的分享文件（缺版本标记 / 格式更新 / 方案名缺失 / URL 或渠道值非法）", body = ErrorResponse),
+        (status = 409, description = "同名方案过多（自动后缀超过 10000 个）", body = ErrorResponse),
+        (status = 500, description = "方案写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn import_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     Json(body): Json<Value>,
@@ -449,6 +657,22 @@ pub async fn import_profile(
 /// body 必填 `name/username/password`（password 空串=不设独立密码）；
 /// 可选 `auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task/active_http_task`
 /// 与 PUT 同语义，支持创建时一次带上编辑器内的全部字段。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/{id}",
+    operation_id = "post_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID（路径优先于 body.id；两者皆空则 400）"),
+    ),
+    request_body(content = ProfileCreateBody, description = "创建载荷：name/username/password 必填，其余可选字段与 PUT 同语义，创建即完整落盘"),
+    responses(
+        (status = 200, description = "创建成功（纯新建语义：命中既有 id 由 Service 层拒绝为 409）", body = DataEnvelope<String>),
+        (status = 400, description = "缺少 id、URL 格式非法、网络出口无效、或渠道任务绑定校验失败", body = ErrorResponse),
+        (status = 409, description = "Profile ID 已存在", body = ErrorResponse),
+        (status = 500, description = "密码加密或方案写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn create_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -533,6 +757,22 @@ pub async fn create_profile(
 }
 
 /// PUT /api/profiles/{id} — 更新 Profile
+#[utoipa::path(
+    put,
+    path = "/api/profiles/{id}",
+    operation_id = "put_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    request_body(content = ProfileUpdateBody, description = "更新载荷：仅覆盖出现的字段；password 空串 = 保留原密码，clear_password = true 显式清除（优先于 password）"),
+    responses(
+        (status = 200, description = "更新成功（合并/校验在 profiles_lock 事务临界区内完成）", body = DataEnvelope<String>),
+        (status = 400, description = "字段校验失败（URL 非法、网络出口无效、渠道任务绑定缺失等）", body = ErrorResponse),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 500, description = "密码加密或方案写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn update_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -637,6 +877,21 @@ pub async fn update_profile(
 }
 
 /// DELETE /api/profiles/{id} — 删除 Profile
+#[utoipa::path(
+    delete,
+    path = "/api/profiles/{id}",
+    operation_id = "delete_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    responses(
+        (status = 200, description = "删除成功", body = DataEnvelope<String>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 409, description = "default 方案不可删除", body = ErrorResponse),
+        (status = 500, description = "方案删除失败", body = ErrorResponse),
+    )
+)]
 pub async fn delete_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     Path(id): Path<String>,
@@ -653,6 +908,18 @@ pub async fn delete_profile(
 /// 命令同步引擎派生状态（ActiveProfile 状态广播 + 监测中的即时探测与
 /// 定时器重建）。历史实现只调 ProfileService、绕过 Engine：切换后引擎内
 /// 的探测上下文不随切换刷新，Web 与自动切换两个入口的生效行为不一致。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/switch",
+    operation_id = "post_api_profiles_switch",
+    tag = "profiles",
+    request_body(content = SwitchBody, description = "要切换到的目标 Profile ID"),
+    responses(
+        (status = 200, description = "切换已持久化（Engine 派生状态同步失败仅告警，经 reload 收敛）", body = DataEnvelope<String>),
+        (status = 404, description = "目标方案不存在", body = ErrorResponse),
+        (status = 500, description = "切换落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn switch_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(engine): State<Arc<dyn EngineApi>>,
@@ -676,6 +943,16 @@ pub async fn switch_profile(
 ///
 /// 复用 ProfileService.detect_matching_profile 做网关 IP / WiFi SSID 匹配，
 /// 支持 AND/OR 匹配逻辑。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/detect",
+    operation_id = "post_api_profiles_detect",
+    tag = "profiles",
+    responses(
+        (status = 200, description = "网关 IP / SSID 检测结果与匹配到的方案（无匹配时对应字段为 null）", body = DataEnvelope<ProfileDetectData>),
+        (status = 500, description = "网关或 SSID 检测失败", body = ErrorResponse),
+    )
+)]
 pub async fn detect_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -705,6 +982,17 @@ pub async fn detect_profile(
 }
 
 /// POST /api/profiles/auto-switch — 设置自动切换开关
+#[utoipa::path(
+    post,
+    path = "/api/profiles/auto-switch",
+    operation_id = "post_api_profiles_auto_switch",
+    tag = "profiles",
+    request_body(content = AutoSwitchBody, description = "启用/禁用按网关/SSID 自动切换活跃方案"),
+    responses(
+        (status = 200, description = "开关已落库并回显当前活跃方案", body = DataEnvelope<AutoSwitchData>),
+        (status = 500, description = "设置落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn auto_switch(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
