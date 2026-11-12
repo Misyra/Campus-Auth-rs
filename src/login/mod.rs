@@ -1266,7 +1266,7 @@ impl LoginOrchestrator {
                 events.publish(crate::events::AppEvent::LoginFailed(
                     crate::events::LoginSummary {
                         profile_id: profile_id.clone(),
-                        channel: session::login_channel_code(channel.clone()).to_string(),
+                        channel: session::login_channel_code(channel).to_string(),
                         reason: Some(message.to_string()),
                         attempt: None,
                     },
