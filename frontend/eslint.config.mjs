@@ -8,10 +8,14 @@ export default tseslint.config(
 
   js.configs.recommended,
   ...tseslint.configs.recommended,
-  // 起步只取 essential（正确性类：缺 key、v-if/v-for 同级、重复属性等）；
-  // strongly-recommended/recommended 里的风格规则（缩进/属性顺序/单行闭合）
-  // 一次性全开会产出数百条报错，留待后续 PR 渐进（见 fixplaybook-D D3 渐进策略）
-  ...pluginVue.configs["flat/essential"],
+  // strongly-recommended：在 essential 的正确性类之上加可读性约定（v-for 带
+  // key、v-if/v-for 优先级、组件名风格、props 定义形态等）。
+  // 紧随其后的 no-layout-rules 是 v10 官方规则补丁，整体关掉排版类规则
+  // （html-indent / max-attributes-per-line / html-self-closing 等 9+ 条）：
+  // 本仓无 Prettier 权威、模板排版以人工为准，一次性按排版规则重排全仓
+  // 模板属于纯噪音 diff，故显式剥离（早年 essential 起步决策的正式收敛）
+  ...pluginVue.configs["flat/strongly-recommended"],
+  pluginVue.configs["no-layout-rules"],
 
   // .vue 模板由 vue-eslint-parser 托管，<script lang="ts"> 内容交给 TS 解析器
   {
@@ -48,6 +52,19 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-empty-object-type": "off",
+    },
+  },
+  // 两个挂载测试文件的"多组件"是有意的测试基建：AppTopbar.notif.test.ts 的
+  // 路由桩只为注入 router、外层壳只为挂载被测组件；Modal.focus.test.ts 的
+  // mountHost 是文件头注释明确文档化的宿主组件（触发按钮 + Modal 模拟真实
+  // 使用方）。匿名桩不承载业务语义，拆成独立文件收益为负
+  {
+    files: [
+      "src/components/common/AppTopbar.notif.test.ts",
+      "src/components/common/Modal.focus.test.ts",
+    ],
+    rules: {
+      "vue/one-component-per-file": "off",
     },
   },
 );

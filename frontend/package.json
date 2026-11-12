@@ -27,7 +27,7 @@
     "@vue/compiler-dom": "3.5.39",
     "@vue/compiler-sfc": "3.5.39",
     "eslint": "^9.39.4",
-    "eslint-plugin-vue": "^9.33.0",
+    "eslint-plugin-vue": "^10.12.1",
     "happy-dom": "^21.0.4",
     "stylelint": "^18.0.0",
     "stylelint-config-recommended": "^19.0.0",
