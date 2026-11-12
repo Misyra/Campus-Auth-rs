@@ -14,6 +14,7 @@ pub mod config;
 pub mod container;
 pub mod engine;
 pub mod environment;
+pub mod events;
 pub mod launcher;
 pub mod logging;
 pub mod login;

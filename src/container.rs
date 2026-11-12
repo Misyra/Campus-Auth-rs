@@ -1,7 +1,7 @@
-//! ServiceContainer：15 服务拓扑排序构造 + DI 容器
+//! ServiceContainer：16 字段拓扑排序构造 + DI 容器（13 服务 + EventBus/Metrics/uptime 3 横切）
 //!
 //! 所有长生命周期服务通过 `Arc<T>` 持有，构造顺序按依赖拓扑严格编排。
-//! `startup()` 启动后台服务（Engine / Scheduler / Bridge），返回启动句柄供 Launcher 管理生命周期。
+//! `startup()` 启动后台服务（EventSink / Scheduler / Bridge），返回启动句柄供 Launcher 管理生命周期。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use crate::bridge::BridgeSupervisor;
 use crate::config::{ConfigReloadSignal, ConfigService, ProfileService};
 use crate::engine::{Engine, EngineDeps, EngineSlot};
 use crate::environment::EnvironmentManager;
+use crate::events::EventBus;
 use crate::login::{LoginHistoryService, LoginOrchestrator};
 use crate::monitor::MonitorService;
 use crate::network::detect::create_detector;
@@ -29,11 +30,14 @@ pub struct StartupHandles {
     pub scheduler_handle: crate::scheduler::ServiceHandle,
     /// Bridge Supervisor 句柄
     pub bridge_handle: crate::bridge::ServiceHandle,
+    /// 事件流落盘任务句柄（同时受应用关闭令牌驱动：令牌取消即排空退出，
+    /// Launcher 无需显式 stop；句柄保留供测试与后续源头接入方显式停用）
+    pub event_sink: crate::ServiceHandle,
 }
 
 /// 服务容器：持有全部服务的 Arc 句柄
 ///
-/// 构造顺序严格按拓扑排序（15 层），新增服务在此插入。
+/// 构造顺序严格按拓扑排序（16 字段），新增服务在此插入。
 ///
 /// 字段设计：服务句柄均为 `pub` 的不可变 `Arc<T>`（DI 容器语义），
 /// 外部只能克隆句柄、无法修改内部状态；唯一可变状态 `uptime_cancel` 保持私有。
@@ -81,7 +85,10 @@ pub struct ServiceContainer {
     /// Web/托盘/关闭流程经此取「当前活跃」Engine（引用收口）
     pub engine: EngineSlot,
 
-    // ---- 横切关注点：运行指标 ----
+    // ---- 横切关注点：事件总线 & 运行指标 ----
+    /// 事件总线（类型化发布/订阅；源头接入与消费方见 `src/events/` 模块 doc，
+    /// JSONL 落盘订阅者由 `startup()` 启动的 EventSink 承担）
+    pub events: Arc<EventBus>,
     /// 共享运行指标（AtomicU64 计数器，通过 `/api/system/info` 暴露）
     pub metrics: Arc<Metrics>,
     /// uptime 定时器取消令牌（应用级关闭令牌的 child，父令牌取消时自动传播）
@@ -91,14 +98,17 @@ pub struct ServiceContainer {
 impl ServiceContainer {
     /// 构造服务容器（拓扑排序）
     ///
-    /// 按依赖顺序创建 15 个服务，确保被依赖的服务先于依赖方初始化。
+    /// 按依赖顺序创建 16 个组件（13 服务 + 3 横切），确保被依赖的服务先于依赖方初始化。
     /// `shutdown_token` 为应用级关闭令牌（由 Launcher 持有），容器内据此派生
     /// 登录 shutdown 与 uptime 各自的 child，父令牌取消时自动传播（A3）。
     pub async fn new(
         base_path: &Path,
         shutdown_token: CancellationToken,
     ) -> Result<(Arc<Self>, StartupHandles)> {
-        // ---- Layer 0：配置重载信号通道 ----
+        // ---- Layer 0：横切通道 & 信号 ----
+        // 事件总线最先构造：登录 / 监测 / 任务 / 更新等所有潜在发布方都排在它之后，
+        // 消费方（通知 / 诊断 / Dashboard）与发布方互不感知，仅经总线解耦
+        let events = Arc::new(EventBus::new());
         let (reload_tx, reload_rx) = mpsc::channel::<ConfigReloadSignal>(32);
 
         // ---- 横切关注点：运行指标 ----
@@ -215,6 +225,7 @@ impl ServiceContainer {
             monitor,
             updater,
             engine: EngineSlot::new(engine_handle),
+            events,
             metrics,
             // uptime 定时器取消信号：应用级关闭令牌的 child
             uptime_cancel: shutdown_token.child_token(),
@@ -224,7 +235,7 @@ impl ServiceContainer {
         Self::spawn_log_cleanup_task(&container);
 
         // ---- 启动后台服务 ----
-        let scheduler_handle = container.startup().await?;
+        let scheduler_handle = container.startup(&shutdown_token).await?;
 
         Ok((container, scheduler_handle))
     }
@@ -340,27 +351,48 @@ impl ServiceContainer {
                             Ok(_) => {}
                             Err(e) => tracing::debug!("清理登录历史失败: {e}"),
                         }
+                        // 事件流与登录历史同口径固定 30 天（EVENT_RETENTION_DAYS）：
+                        // 启动清理已在 sink 任务内做过，这里只管跨日兜底
+                        let expired_events = crate::events::sink::cleanup_expired_event_files(
+                            &crate::utils::paths::events_dir(&config_for_task.base_path()),
+                            crate::events::sink::EVENT_RETENTION_DAYS,
+                        );
+                        if expired_events > 0 {
+                            tracing::info!("清理过期事件流文件 {expired_events} 个");
+                        }
                     }
                 }
             }
         });
     }
 
-    /// 启动后台服务：Scheduler + Bridge Supervisor
+    /// 启动后台服务：EventSink + Scheduler + Bridge Supervisor
     ///
     /// Engine 已在 `new()` 中通过 `Engine::spawn` 启动。
     /// 返回句柄由 Launcher 持有，优雅关闭时调用。
-    async fn startup(self: &Arc<Self>) -> Result<StartupHandles> {
+    async fn startup(
+        self: &Arc<Self>,
+        shutdown_token: &CancellationToken,
+    ) -> Result<StartupHandles> {
+        // 启动事件流落盘（订阅 EventBus；关闭令牌 + stop 双驱动，退出前排空并 flush。
+        // 句柄经 StartupHandles 交给 Launcher 持有——直接 drop 会停用 stop 信号源）
+        let event_sink = crate::events::spawn_event_sink(
+            self.config.base_path(),
+            self.events.clone(),
+            shutdown_token.child_token(),
+        );
+
         // 启动定时任务调度器
         let scheduler_handle = self.scheduler.clone().start().await;
 
         // 启动 Bridge Supervisor（懒加载 Worker，仅启动 supervisor 主循环）
         let bridge_handle = self.bridge.spawn();
 
-        tracing::info!("后台服务已启动（定时调度器 + Bridge）");
+        tracing::info!("后台服务已启动（事件流落盘 + 定时调度器 + Bridge）");
         Ok(StartupHandles {
             scheduler_handle,
             bridge_handle,
+            event_sink,
         })
     }
 }

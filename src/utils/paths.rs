@@ -33,6 +33,8 @@ pub const SCHEDULED_DIR_NAME: &str = "scheduled";
 pub const HISTORY_DIR_NAME: &str = "history";
 /// 日志根目录名
 pub const LOGS_DIR: &str = "logs";
+/// 事件流根目录名（AppEvent JSONL 落盘，按日分文件）
+pub const EVENTS_DIR: &str = "events";
 /// 登录历史子目录名（位于 logs/ 下）
 pub const LOGIN_HISTORY_DIR: &str = "login_history";
 /// 环境根目录名
@@ -138,6 +140,11 @@ pub fn login_history_dir(base: &Path) -> PathBuf {
     logs_dir(base).join(LOGIN_HISTORY_DIR)
 }
 
+/// 事件流目录 `<base>/events`
+pub fn events_dir(base: &Path) -> PathBuf {
+    base.join(EVENTS_DIR)
+}
+
 /// 环境根目录 `<base>/environment`
 pub fn env_dir(base: &Path) -> PathBuf {
     base.join(ENV_DIR)
@@ -215,8 +222,8 @@ pub fn same_existing_path(a: &Path, b: &Path) -> bool {
 /// 启动时一次性预建全部运行时目录（幂等）
 ///
 /// 覆盖：`config/`、`config/profiles/`、`tasks/browser`、`tasks/scripts`、
-/// `tasks/http`、`tasks/scheduled/history`、`logs/login_history`、`environment/`。
-/// 各服务构造内的 `create_dir_all` 保留为防御性幂等调用（测试直构服务时仍可用），
+/// `tasks/http`、`tasks/scheduled/history`、`logs/login_history`、`events/`、
+/// `environment/`。各服务构造内的 `create_dir_all` 保留为防御性幂等调用（测试直构服务时仍可用），
 /// 但启动权威路径只此一处。
 pub fn ensure_runtime_dirs(base: &Path) -> std::io::Result<()> {
     for dir in [
@@ -226,6 +233,7 @@ pub fn ensure_runtime_dirs(base: &Path) -> std::io::Result<()> {
         http_tasks_dir(base),
         scheduled_history_dir(base),
         login_history_dir(base),
+        events_dir(base),
         env_dir(base),
     ] {
         std::fs::create_dir_all(&dir)?;
