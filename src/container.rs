@@ -33,6 +33,9 @@ pub struct StartupHandles {
     /// 事件流落盘任务句柄（同时受应用关闭令牌驱动：令牌取消即排空退出，
     /// Launcher 无需显式 stop；句柄保留供测试与后续源头接入方显式停用）
     pub event_sink: crate::ServiceHandle,
+    /// 推送通知服务句柄（订阅 EventBus 按配置过滤投递；发送失败静默，
+    /// 绝不影响登录主链路；句柄交 Launcher 随应用关闭统一 stop）
+    pub notification: crate::ServiceHandle,
 }
 
 /// 服务容器：持有全部服务的 Arc 句柄
@@ -412,7 +415,7 @@ impl ServiceContainer {
         removed
     }
 
-    /// 启动后台服务：EventSink + Scheduler + Bridge Supervisor
+    /// 启动后台服务：EventSink + 推送通知 + Scheduler + Bridge Supervisor
     ///
     /// Engine 已在 `new()` 中通过 `Engine::spawn` 启动。
     /// 返回句柄由 Launcher 持有，优雅关闭时调用。
@@ -428,17 +431,29 @@ impl ServiceContainer {
             shutdown_token.child_token(),
         );
 
+        // 启动推送通知服务（订阅 EventBus，按配置的事件集合与免打扰时段过滤投递；
+        // 全局开关关闭或通道为空时空转，仅周期重读配置，发送失败静默不影响主链路）。
+        // NotificationConfigSource 实现挂在 Arc<dyn ConfigApi> 包装类型上，
+        // 故先归一为 dyn 再包一层 Arc 以得到 Arc<dyn NotificationConfigSource>
+        let config_api: std::sync::Arc<dyn crate::config::ConfigApi> = self.config.clone();
+        let notification = crate::notification::spawn_notification_service(
+            self.events.clone(),
+            std::sync::Arc::new(config_api),
+            self.config.base_path(),
+        );
+
         // 启动定时任务调度器
         let scheduler_handle = self.scheduler.clone().start().await;
 
         // 启动 Bridge Supervisor（懒加载 Worker，仅启动 supervisor 主循环）
         let bridge_handle = self.bridge.spawn();
 
-        tracing::info!("后台服务已启动（事件流落盘 + 定时调度器 + Bridge）");
+        tracing::info!("后台服务已启动（事件流落盘 + 推送通知 + 定时调度器 + Bridge）");
         Ok(StartupHandles {
             scheduler_handle,
             bridge_handle,
             event_sink,
+            notification,
         })
     }
 }
