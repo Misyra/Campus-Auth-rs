@@ -93,8 +93,10 @@ async function connectWebSocket(): Promise<void> {
     return;
   }
   connecting = true;
-  // 重连（非首次建连）先强制刷新 token：后端重启会换发 token，缓存旧值
-  // 建连必被 401 关掉；刷新失败（后端没起）返回 null，以匿名建连走正常退避。
+  // 重连（非首次建连）经 refreshAuthToken 清内存缓存后重读：token 已由后端持久化
+  // （重启不变），恢复出的仍是同一 token，重连直接复用（口径见 client.ts
+  // refreshAuthToken 注释；401 只在凭据被吊销/轮换时出现，由 request() 统一处理）。
+  // 读取失败（后端没起）返回 null，以匿名建连走正常退避。
   // 首次建连走缓存路径：页面加载时 http 请求已并行取过 token，避免重复请求。
   const token = wasConnected || retryCount > 0 ? await refreshAuthToken() : await ensureAuthToken();
   if (destroyed) {
