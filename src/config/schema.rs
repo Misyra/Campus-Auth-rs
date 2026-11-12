@@ -966,6 +966,32 @@ impl LoginChannel {
     }
 }
 
+/// 持久会话录制动作（`profile_session_stop` 返回的 `recorded_actions` 元素）
+///
+/// 字段与 Python Worker 的录制契约逐字对齐（`python_worker/config_session.py`
+/// 的汇聚逻辑 + README「录制契约」一节）：`type`/`selector`/`strategy`/`ts` 恒存在，
+/// `value` 仅 `change` 动作携带（点击不录值，缺键反序列化为 `None`）。
+///
+/// `type` 与 `strategy` 刻意保持 `String` 而非枚举：两者都是 Worker 侧演进的
+/// 受控词表（当前 `type` 为 `click`/`change`，`strategy` 为 `id`/`name`/
+/// `data-testid`/`data`/`text`/`structure`），枚举会在未来 Worker 新增词表值时
+/// 让旧主程序读不动方案文件；存储与回放按字面值处理即可。
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct RecordedAction {
+    /// 动作类型：`click`（按钮/提交类点击）或 `change`（`<select>` 选择）
+    #[serde(rename = "type")]
+    pub action_type: String,
+    /// 目标元素选择器（Worker 按启发式优先级取首个命中）
+    pub selector: String,
+    /// 选择器采用的启发式级别（同上，与 [`RecordedAction::selector`] 配对）
+    pub strategy: String,
+    /// 事件时间戳（毫秒；Worker 侧按此升序返回并做 500ms 去重）
+    pub ts: i64,
+    /// `change` 动作的选中值；`click` 无此键（序列化时跳过，与 Worker 返回形状一致）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
 /// 单个 Profile 文件内容（`config/profiles/{id}.json`）
 ///
 /// 凭证类字段（如 [`ProfileData::password`]）在磁盘上以 `ENC:` 前缀的密文存储，
@@ -1004,6 +1030,18 @@ pub struct ProfileData {
     /// 与 `active_http_task` 同一口径：脚本渠道**没有**内置兜底任务（登录逻辑只能
     /// 由用户写），故空值不是"用默认"，而是"脚本登录不可用"，保存与登录两侧都会拦。
     pub active_script_task: String,
+    /// 是否启用持久浏览器会话（门户「记住密码」模式）
+    ///
+    /// 启用后浏览器渠道的登录走「无头持久上下文打开门户页 + 回放
+    /// [`ProfileData::recorded_actions`] + 网络验证兜底」；会话数据持久在
+    /// `<base>/browser_profiles/<id>/`（见 `utils::paths::browser_profile_dir`）。
+    /// 字段在结构体末尾追加：serde 按声明序序列化，追加不打乱既有键序。
+    pub persistent_session_enabled: bool,
+    /// 持久会话录制动作（配置会话 `profile_session_stop` 取回，按 `ts` 升序）
+    ///
+    /// 由「配置会话」编排写入（Worker 返回什么存什么，上不封顶条数由 Worker 侧
+    /// 截断并给 `truncated` 标记），不是用户在界面上手编的字段。
+    pub recorded_actions: Vec<RecordedAction>,
 }
 
 impl Default for ProfileData {
@@ -1023,6 +1061,8 @@ impl Default for ProfileData {
             login_channel: LoginChannel::default(),
             active_http_task: String::new(),
             active_script_task: String::new(),
+            persistent_session_enabled: false,
+            recorded_actions: Vec::new(),
         }
     }
 }
@@ -1109,6 +1149,86 @@ mod tests {
             Some("active_script_task")
         );
         assert_eq!(LoginChannel::default(), LoginChannel::Browser);
+    }
+
+    /// 持久会话字段免迁移：旧方案 JSON 无新字段 → 反序列化得默认值，无需 bump
+    /// config_version；再序列化时新字段追加在末尾（serde 按声明序产出），不打乱
+    /// 既有键在磁盘文件里的先后。
+    #[test]
+    fn persistent_session_fields_default_and_key_order() {
+        let legacy = serde_json::json!({
+            "network": null,
+            "id": "dorm",
+            "name": "宿舍",
+            "username": "2023xxxx",
+            "password": "",
+            "auth_url": "",
+            "trigger_url": "",
+            "isp": "telecom",
+            "gateway_ip": "",
+            "wifi_ssid": "",
+            "active_task": "",
+            "login_channel": "browser",
+            "active_http_task": "",
+            "active_script_task": "",
+        });
+        let profile: ProfileData = serde_json::from_value(legacy).unwrap();
+        assert!(!profile.persistent_session_enabled, "缺省关闭");
+        assert!(profile.recorded_actions.is_empty(), "缺省空表");
+
+        // 新字段声明在结构体末尾：磁盘序列化时既有键序保持不变（json! 的 Map 是
+        // BTreeMap 测不出顺序，这里直接对 struct 序列化文本断言相对位置）
+        let text = serde_json::to_string_pretty(&profile).unwrap();
+        let script_task_pos = text
+            .find("\"active_script_task\"")
+            .expect("既有字段不得丢失");
+        let enabled_pos = text
+            .find("\"persistent_session_enabled\"")
+            .expect("新开关应落盘");
+        let actions_pos = text.find("\"recorded_actions\"").expect("新动作表应落盘");
+        assert!(
+            script_task_pos < enabled_pos && enabled_pos < actions_pos,
+            "新字段必须追加在既有字段之后，避免方案文件键序漂移"
+        );
+    }
+
+    /// RecordedAction 与 Worker 录制契约（python_worker/config_session.py）逐字对齐：
+    /// `type`/`selector`/`strategy`/`ts` 恒存在，`value` 仅 change 携带（click 缺键
+    /// → None，回写时同样不带 value 键，与 Worker 返回形状一致）。
+    #[test]
+    fn recorded_action_matches_worker_contract() {
+        let worker_shape = serde_json::json!([
+            {
+                "type": "click",
+                "selector": "#login-btn",
+                "strategy": "id",
+                "ts": 1731475200123i64,
+            },
+            {
+                "type": "change",
+                "selector": "[name=\"isp\"]",
+                "strategy": "name",
+                "ts": 1731475200456i64,
+                "value": "telecom",
+            },
+        ]);
+        let actions: Vec<RecordedAction> = serde_json::from_value(worker_shape).unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].action_type, "click");
+        assert_eq!(actions[0].selector, "#login-btn");
+        assert_eq!(actions[0].strategy, "id");
+        assert_eq!(actions[0].ts, 1731475200123);
+        assert_eq!(actions[0].value, None, "click 无 value 键");
+        assert_eq!(actions[1].action_type, "change");
+        assert_eq!(actions[1].value.as_deref(), Some("telecom"));
+
+        // 回写形状：click 不得出现 "value": null（Worker 契约里 click 不带该键）
+        let click_json = serde_json::to_value(&actions[0]).unwrap();
+        assert!(click_json.get("value").is_none(), "{click_json}");
+        assert_eq!(click_json["type"], "click");
+        // change 回写保留 value
+        let change_json = serde_json::to_value(&actions[1]).unwrap();
+        assert_eq!(change_json["value"], "telecom");
     }
 
     #[test]
