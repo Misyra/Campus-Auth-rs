@@ -4,55 +4,8 @@
 #[path = "platform_windows.rs"]
 mod imp;
 #[cfg(target_os = "macos")]
-mod imp {
-    use anyhow::Result;
-
-    /// LaunchAgent 标识（同时也是 plist 文件名前缀）
-    const LAUNCH_AGENT_LABEL: &str = "com.misyra.Campus-Auth";
-
-    /// 注册/取消系统自启动（macOS：~/Library/LaunchAgents/ 下的 LaunchAgent plist）
-    ///
-    /// 写入 plist 后由 launchd 在用户登录时自动加载，语义等价于 Windows schtasks 的 ONLOGON。
-    pub fn set_self_start(enabled: bool) -> Result<()> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("无法确定用户主目录"))?;
-        let dir = home.join("Library/LaunchAgents");
-        let plist_path = dir.join(format!("{}.plist", LAUNCH_AGENT_LABEL));
-
-        if enabled {
-            let exe = std::env::current_exe()?;
-            // plist 字符串做最小 XML 转义，避免路径中的特殊字符破坏文档
-            let exe_escaped = exe
-                .display()
-                .to_string()
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            let plist = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-                 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-                 <plist version=\"1.0\">\n\
-                 <dict>\n\
-                 \t<key>Label</key>\n\
-                 \t<string>{label}</string>\n\
-                 \t<key>ProgramArguments</key>\n\
-                 \t<array>\n\
-                 \t\t<string>{exe}</string>\n\
-                 \t</array>\n\
-                 \t<key>RunAtLoad</key>\n\
-                 \t<true/>\n\
-                 </dict>\n\
-                 </plist>\n",
-                label = LAUNCH_AGENT_LABEL,
-                exe = exe_escaped,
-            );
-            std::fs::create_dir_all(&dir)?;
-            std::fs::write(&plist_path, plist)?;
-        } else if plist_path.exists() {
-            std::fs::remove_file(&plist_path)?;
-        }
-        Ok(())
-    }
-}
+#[path = "platform_macos.rs"]
+mod imp;
 
 #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
 mod imp {

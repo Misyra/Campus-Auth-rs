@@ -17,7 +17,8 @@ pub async fn get_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
     let settings = config.load_settings_async().await;
-    #[cfg(windows)]
+    // Windows/macOS：自启动有效状态以系统观测为准（注册表 / LaunchAgent plist + launchd）
+    #[cfg(any(windows, target_os = "macos"))]
     let observed = {
         let base = config.base_path();
         tokio::task::spawn_blocking(move || crate::utils::platform::self_start_status(&base))
@@ -25,9 +26,13 @@ pub async fn get_autostart(
             .map_err(ApiError::internal)?
             .map_err(|error| ApiError::internal(format!("{error:#}")))?
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let enabled = observed.enabled;
-    #[cfg(not(any(windows, all(target_os = "linux", feature = "openwrt"))))]
+    #[cfg(not(any(
+        windows,
+        target_os = "macos",
+        all(target_os = "linux", feature = "openwrt")
+    )))]
     let enabled = settings.global.app.autostart_enabled;
     #[cfg(all(target_os = "linux", feature = "openwrt"))]
     let enabled = tokio::task::spawn_blocking(crate::utils::platform::openwrt_self_start_enabled)
@@ -73,8 +78,26 @@ pub async fn get_autostart(
         status["location"] =
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Campus-Auth".into();
     }
+    // macOS：launchd 观测字段并入响应（形状兼容 Windows 口径，前端忽略未知字段）
+    #[cfg(target_os = "macos")]
+    {
+        status
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("自启动响应序列化失败"))?
+            .extend(
+                serde_json::to_value(&observed)
+                    .map_err(ApiError::internal)?
+                    .as_object()
+                    .ok_or_else(|| ApiError::internal("自启动状态序列化失败"))?
+                    .clone(),
+            );
+        status["source"] = "system".into();
+        status["cached_enabled"] = settings.global.app.autostart_enabled.into();
+        status["method"] = "LaunchAgent".into();
+        status["location"] = observed.plist_path.clone().unwrap_or_default().into();
+    }
     // 其它平台保留既有注册机制与兼容字段。
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         status["source"] = if cfg!(feature = "openwrt") {
             "system"
@@ -100,7 +123,19 @@ pub(super) async fn diagnostic_status(_base: std::path::PathBuf) -> Value {
             Err(error) => serde_json::json!({ "source": "system", "error": error.to_string() }),
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        match tokio::task::spawn_blocking(move || crate::utils::platform::self_start_status(&_base))
+            .await
+        {
+            Ok(Ok(status)) => serde_json::json!({ "source": "system", "status": status }),
+            Ok(Err(error)) => {
+                serde_json::json!({ "source": "system", "error": format!("{error:#}") })
+            }
+            Err(error) => serde_json::json!({ "source": "system", "error": error.to_string() }),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         serde_json::json!({ "source": "unavailable" })
     }
@@ -123,17 +158,17 @@ pub async fn enable_autostart(
             Ok(s)
         }))
         .await;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         mutation_result(res, true)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     if let Err(msg) = res? {
         // 落盘失败时回滚系统注册，保持一致
         let _ = register_self_start(false, config.base_path()).await;
         return Err(ApiError::BadRequest(msg));
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         tracing::info!("已启用开机自启动");
         Ok(data(serde_json::json!({ "message": "已启用开机自启动" })))
@@ -155,16 +190,16 @@ pub async fn disable_autostart(
             Ok(s)
         }))
         .await;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         mutation_result(res, false)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     if let Err(msg) = res? {
         let _ = register_self_start(true, config.base_path()).await;
         return Err(ApiError::BadRequest(msg));
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         tracing::info!("已禁用开机自启动");
         Ok(data(serde_json::json!({ "message": "已禁用开机自启动" })))
@@ -172,7 +207,7 @@ pub async fn disable_autostart(
 }
 
 /// 系统操作已完成时，缓存失败只告警，不能通过反向系统操作覆盖用户选择。
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn mutation_result(
     result: Result<Result<(), String>, crate::config::ConfigError>,
     enabled: bool,
@@ -198,14 +233,14 @@ fn mutation_result(
 
 /// 注册/取消系统自启动（同步阻塞 I/O，置于 spawn_blocking 中执行）
 ///
-/// 显式用户操作触发；Windows 将当前数据目录一同登记并回读系统状态。
+/// 显式用户操作触发；Windows/macOS 将当前数据目录一同登记并回读系统状态。
 async fn register_self_start(enabled: bool, _base: std::path::PathBuf) -> Result<(), ApiError> {
     let join = tokio::task::spawn_blocking(move || {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             crate::utils::platform::set_self_start_for_base(enabled, &_base)
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             crate::utils::platform::set_self_start(enabled)
         }
@@ -239,7 +274,8 @@ mod tests {
     }
 
     /// 默认关闭：enabled=false，method 占位 "-"，platform 与编译目标一致
-    #[cfg(not(windows))]
+    /// （macOS 走系统观测，enabled 取决于真机登记状态，不适用配置缓存口径）
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[tokio::test]
     async fn status_reports_disabled_by_default() {
         let (app, _) = mock_app();
@@ -260,7 +296,7 @@ mod tests {
     }
 
     /// 开启后 method 不再是占位符（Windows=Registry，其余见实现）
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[tokio::test]
     async fn status_reports_method_when_enabled() {
         let (app, inner) = mock_app();
@@ -278,6 +314,34 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["data"]["enabled"], true);
         assert_ne!(v["data"]["method"], "-");
+    }
+
+    /// macOS：enabled 来自 launchd 系统观测，配置缓存翻转不影响系统口径，
+    /// 观测字段（registered/state 等）并入响应且形状与 Windows 兼容。
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn autostart_status_uses_launchd_observation_on_macos() {
+        let (app, inner) = mock_app();
+        let request = || {
+            Request::builder()
+                .uri("/api/autostart/status")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = body_json(first).await;
+        assert_eq!(first["data"]["platform"], "macos");
+        assert_eq!(first["data"]["source"], "system");
+        // method 与 Windows 块同口径：无条件标注机制名（LaunchAgent），enabled 决定开关语义
+        assert_eq!(first["data"]["method"], "LaunchAgent");
+        assert!(first["data"]["enabled"].is_boolean());
+        assert!(first["data"]["registered"].is_boolean());
+        assert!(first["data"]["state"].is_string());
+        inner.lock().unwrap().settings.global.app.autostart_enabled = true;
+        let second = body_json(app.oneshot(request()).await.unwrap()).await;
+        assert_eq!(first["data"]["enabled"], second["data"]["enabled"]);
+        assert_eq!(second["data"]["cached_enabled"], true);
     }
 
     /// 配置缓存翻转不能改变系统状态，查询本身不得写入注册表。

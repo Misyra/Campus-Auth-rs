@@ -162,9 +162,10 @@ fn handle_stop(base_path: &Path) -> anyhow::Result<()> {
 /// 注册 / 取消开机自启动
 fn handle_autostart(action: &AutostartAction, _base_path: &Path) -> anyhow::Result<()> {
     let enabled = matches!(action, AutostartAction::Enable);
-    #[cfg(windows)]
+    // Windows/macOS 同口径：把数据目录与来源标记一并登记，便于启动状态复核
+    #[cfg(any(windows, target_os = "macos"))]
     campus_auth::utils::platform::set_self_start_for_base(enabled, _base_path)?;
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     campus_auth::utils::platform::set_self_start(enabled)?;
     if enabled {
         println!("已注册开机自启动");
