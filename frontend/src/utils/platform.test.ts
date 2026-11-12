@@ -11,7 +11,13 @@ describe("OpenWrt 功能入口", () => {
     vi.resetModules();
     const nav = await import("./navTree");
     expect(nav.TASK_NAV_CHILDREN.map((child) => child.id)).toEqual(["http", "scripts", "scheduled"]);
-    expect(nav.SETTINGS_NAV_CHILDREN.map((child) => child.id)).toEqual(["monitor", "system", "appearance"]);
+    // 推送通知由后端发送（不经浏览器/Worker），路由器版保留
+    expect(nav.SETTINGS_NAV_CHILDREN.map((child) => child.id)).toEqual([
+      "monitor",
+      "system",
+      "notification",
+      "appearance",
+    ]);
   });
 
   it("桌面构建继续提供浏览器与环境设置", async () => {

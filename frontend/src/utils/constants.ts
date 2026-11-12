@@ -344,6 +344,20 @@ export const DEFAULT_CONFIG: Config = {
     proxy_url: "",
     proxy_port: 7890,
   },
+  // 推送通知：与后端 NotificationSettings::default() 一致（总开关关、
+  // 事件集 login_failed + network_down、免打扰 22:00-08:00 未启用）
+  notification: {
+    enabled: false,
+    channels: [],
+    events: ["login_failed", "network_down"],
+    quiet_enabled: false,
+    quiet_start_hour: 22,
+    quiet_start_minute: 0,
+    quiet_end_hour: 8,
+    quiet_end_minute: 0,
+    retry_max_attempts: 3,
+    retry_base_interval_seconds: 2,
+  },
   // 远程访问引导凭据（管理密码）：与后端 GlobalConfig.management_password 的
   // serde 默认值（空串）一致；Docker 场景可经环境变量注入，界面留空即可
   management_password: "",

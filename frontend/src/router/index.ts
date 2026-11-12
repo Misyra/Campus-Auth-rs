@@ -61,6 +61,8 @@ const routes = [
       { path: "system", name: "settings-system", meta: { title: "设置" }, components: {} },
       // 旧「网络与更新」Tab 已并入「系统与更新」：保留深链与书签重定向
       { path: "network", redirect: { name: "settings-system" } },
+      // 推送通知：通道增删改与测试发送、触发事件与免打扰时段
+      { path: "notification", name: "settings-notification", meta: { title: "设置" }, components: {} },
       // 外观原为侧栏独立页，并入设置页：它是纯本机显示偏好，与其余设置同类
       { path: "appearance", name: "settings-appearance", meta: { title: "设置" }, components: {} },
     ],

@@ -5,6 +5,7 @@ import MonitorSettings from "@/views/settings/MonitorSettings.vue";
 import BrowserSettings from "@/views/settings/BrowserSettings.vue";
 import TaskEnvironmentSettings from "@/views/settings/TaskEnvironmentSettings.vue";
 import SystemSettings from "@/views/settings/SystemSettings.vue";
+import NotificationSettings from "@/views/settings/NotificationSettings.vue";
 import AppearanceView from "@/views/AppearanceView.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -26,7 +27,7 @@ const scrollContainer = ref<HTMLElement | null>(null);
 const settingsForm = ref<HTMLElement | null>(null);
 const sectionComponents: Record<string, typeof MonitorSettings> = {
   monitor: MonitorSettings, browser: BrowserSettings, tasks: TaskEnvironmentSettings,
-  system: SystemSettings, appearance: AppearanceView,
+  system: SystemSettings, notification: NotificationSettings, appearance: AppearanceView,
 };
 const sections = SETTINGS_NAV_CHILDREN.map((child) => ({ ...child, component: sectionComponents[child.id] }));
 let resizeObserver: ResizeObserver | null = null;

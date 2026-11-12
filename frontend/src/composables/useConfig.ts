@@ -86,6 +86,9 @@ async function fetchConfig(): Promise<void> {
     // 本 composable 明确不接收——它们属于 Profile，归方案页编辑。
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
+    // 推送通知：旧后端不下发时整体取默认值；通道列表以后端下发为准（不能与
+    // 默认值浅合并——那会把后端的通道列表和默认空数组拼错）
+    config.notification = { ...DEFAULT_CONFIG.notification, ...(data.notification || {}) };
     // 远程访问引导凭据：GET 扁平响应的可选顶层字段，旧后端不下发时以空串兜底
     config.management_password = typeof data.management_password === "string" ? data.management_password : "";
     // 旧配置只有 proxy_port（可能非默认值）：派生完整地址，
@@ -199,6 +202,7 @@ async function saveConfig(force = false): Promise<void> {
     retry: config.retry,
     app_settings: config.app_settings,
     updater: config.updater,
+    notification: config.notification,
     management_password: config.management_password,
   };
 

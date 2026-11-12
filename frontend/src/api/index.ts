@@ -138,6 +138,18 @@ export const actionsApi = {
   testNetwork: () => http.post<NetworkTestResult>("/api/monitor/test", null, { timeout: 30000 }),
 };
 
+/**
+ * 推送通知：测试发送（POST /api/notification/test）。
+ *
+ * body 传通道草稿配置（channels，优先）或已保存通道 id（channel_id）；
+ * 后端用测试消息实际发送一次，逐通道返回回执。整体超时 60s：后端单通道
+ * 测试超时截断到 15s 且最多 3 个通道（45s），留余量兜底。
+ */
+export const notificationApi = {
+  test: (payload: { channels?: import("./types").NotificationChannelConfig[]; channel_id?: string }) =>
+    http.post<import("./types").NotificationTestResult>("/api/notification/test", payload, { timeout: 60000 }),
+};
+
 /** 一键网络诊断：后端五项并发探测，整体受 15s 总限时约束，放宽到 30s 兜底 */
 export const diagnosticsApi = {
   run: () =>

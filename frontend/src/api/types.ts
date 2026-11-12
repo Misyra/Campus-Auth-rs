@@ -478,6 +478,112 @@ export interface UpdateState {
 }
 
 /**
+ * 推送通知事件类型（与后端 `AppEvent::kind()` 同值的 snake_case 字面量）。
+ * 空集合 = 不推送任何事件。
+ */
+export type NotificationEventType =
+  | "login_succeeded"
+  | "login_failed"
+  | "network_down"
+  | "network_up"
+  | "task_finished"
+  | "task_failed"
+  | "update_available"
+  | "environment_ready"
+  | "profile_switched";
+
+/** webhook 自定义请求头（value 可为密钥，与后端明文存储口径一致） */
+export interface NotificationHeader {
+  name: string;
+  value: string;
+}
+
+/** 通道判别字段（serde tagged `type`，与后端 NotificationChannelKind 同值） */
+export type NotificationChannelType = "webhook" | "bark" | "serverchan" | "telegram";
+
+/** 通道公共字段（各判别变体都带） */
+interface NotificationChannelBase {
+  /** 通道唯一 id（同一配置内去重） */
+  id: string;
+  /** 显示名（空时展示回退类型名） */
+  name: string;
+  enabled: boolean;
+  /** 单次请求超时（秒，1-60） */
+  timeout_seconds: number;
+}
+
+/** 自定义 Webhook 通道：POST 渲染后的 JSON 模板 */
+export interface WebhookChannelConfig extends NotificationChannelBase {
+  type: "webhook";
+  url: string;
+  headers: NotificationHeader[];
+  /** JSON 模板，占位符 {{event_type}}/{{summary}}/{{profile}}/{{time}}/{{detail}}；空 = 内建默认 */
+  body_template: string;
+}
+
+/** Bark 通道 */
+export interface BarkChannelConfig extends NotificationChannelBase {
+  type: "bark";
+  /** 自建服务器（空 = 官方 https://api.day.app） */
+  server: string;
+  device_key: string;
+}
+
+/** Server酱通道 */
+export interface ServerchanChannelConfig extends NotificationChannelBase {
+  type: "serverchan";
+  send_key: string;
+}
+
+/** Telegram Bot 通道 */
+export interface TelegramChannelConfig extends NotificationChannelBase {
+  type: "telegram";
+  bot_token: string;
+  chat_id: string;
+}
+
+/** 推送通道（可辨识联合：切 type 即切对应字段表单） */
+export type NotificationChannelConfig =
+  | WebhookChannelConfig
+  | BarkChannelConfig
+  | ServerchanChannelConfig
+  | TelegramChannelConfig;
+
+/** 推送通知设置（GET/PATCH /api/config 的 notification 段） */
+export interface NotificationConfig {
+  /** 总开关（关闭后不推送任何通知；测试发送不受此开关限制） */
+  enabled: boolean;
+  channels: NotificationChannelConfig[];
+  /** 触发通知的事件类型集合 */
+  events: NotificationEventType[];
+  /** 免打扰时段（支持跨零点；时段内只记日志不发送） */
+  quiet_enabled: boolean;
+  quiet_start_hour: number;
+  quiet_start_minute: number;
+  quiet_end_hour: number;
+  quiet_end_minute: number;
+  /** 发送失败重试次数（不含首次，指数退避；0 = 只发一次） */
+  retry_max_attempts: number;
+  /** 首次重试前等待的基准秒数，之后逐次翻倍 */
+  retry_base_interval_seconds: number;
+}
+
+/** 单通道测试发送回执（POST /api/notification/test） */
+export interface NotificationTestChannelResult {
+  id: string;
+  name: string;
+  type: NotificationChannelType;
+  success: boolean;
+  /** 失败原因（已脱敏：URL 去 query/userinfo，不回显凭据） */
+  error?: string;
+}
+
+/** POST /api/notification/test 响应 */
+export interface NotificationTestResult {
+  results: NotificationTestChannelResult[];
+}
+
+/**
  * 完整全局配置（前端内部表示）。
  *
  * 只含 `GlobalConfig` 域字段：账号与登录方式属于 Profile，由「配置方案」页
@@ -492,6 +598,7 @@ export interface Config {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
+  notification: NotificationConfig;
   /** 远程访问引导凭据（管理密码）：仅服务端非回环监听时用于界面引导换取 token */
   management_password: string;
 }
@@ -506,6 +613,8 @@ export interface ConfigResponse {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater?: UpdaterConfig;
+  /** 推送通知设置：旧后端不下发，按可选处理（useConfig 以默认值合并） */
+  notification?: NotificationConfig;
   active_task: string;
   has_password: boolean;
   username: string;
@@ -538,6 +647,12 @@ export interface SaveConfigPayload {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
+  /**
+   * 推送通知设置：可选——PATCH 为局部合并语义，缺省 = 保持不变。全局设置
+   * 保存（useConfig.saveConfig）显式携带；引导向导/运行模式预设等其他
+   * SaveConfigPayload 构造点不携带（它们不编辑推送配置）。
+   */
+  notification?: NotificationConfig;
   /**
    * 远程访问引导凭据（管理密码）：PATCH 为局部合并语义，缺省 = 保持不变；
    * 全局设置保存（useConfig.saveConfig）显式携带它（空串 = 清除）。

@@ -24,6 +24,7 @@ export const SETTINGS_NAV_CHILDREN: readonly NavChild[] = supportedNav([
   { id: "browser", label: "浏览器", name: "settings-browser", title: "浏览器选择、超时与反检测参数", icon: "chrome" },
   { id: "tasks", label: "任务与环境", name: "settings-tasks", title: "运行环境、录制器与 OCR", icon: "file-text" },
   { id: "system", label: "系统与更新", name: "settings-system", title: "启动行为、日志、端口代理、更新与维护", icon: "settings" },
+  { id: "notification", label: "推送通知", name: "settings-notification", title: "推送通道、触发事件与免打扰时段", icon: "bell" },
   { id: "appearance", label: "外观", name: "settings-appearance", title: "主题、背景与卡片样式", icon: "palette" },
 ]);
 

@@ -1,0 +1,141 @@
+/* notification.css — 设置页「推送通知」分区（事件类型开关组 / 通道卡片 / 测试结果）。
+   颜色一律走主题 token（含 [data-theme] 派生语义色），无裸色值。 */
+
+/* ===== 触发事件类型开关组 ===== */
+.notif-event-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
+.notif-event-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  user-select: none;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.notif-event-chip input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.notif-event-chip:hover {
+  border-color: var(--border-hover);
+}
+
+/* 选中态：强调色描边 + 半透明强调底，chip 与全局强调色（含单色主题）同步 */
+.notif-event-chip--on {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text-primary);
+}
+
+/* ===== 推送通道卡片 ===== */
+.notif-channel-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.notif-channel-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.notif-channel-header .custom-select {
+  width: auto;
+  min-width: 130px;
+}
+
+.notif-channel-name {
+  flex: 1;
+  min-width: 140px;
+}
+
+.notif-channel-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-sm);
+}
+
+/* 通道字段两列网格：左标签右控件；--full 变体让单控件占满整行（模板 textarea） */
+.notif-field-grid {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.notif-field-grid--full {
+  grid-template-columns: 110px minmax(0, 1fr);
+}
+
+.notif-field-grid label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.notif-field-grid input,
+.notif-field-grid textarea {
+  width: 100%;
+}
+
+.notif-header-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+/* ===== 测试发送结果三分支 ===== */
+.notif-test-result {
+  margin: 0;
+}
+
+.notif-test-result--ok {
+  color: var(--success);
+}
+
+.notif-test-result--fail {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+/* ===== 添加通道行 ===== */
+.notif-add-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.notif-add-row .custom-select {
+  width: 220px;
+}
+
+/* 窄屏：字段网格与请求头行退化为单列，按阅读顺序排列 */
+@media (max-width: 640px) {
+  .notif-field-grid {
+    grid-template-columns: 1fr;
+  }
+  .notif-header-row {
+    grid-template-columns: 1fr;
+  }
+}
