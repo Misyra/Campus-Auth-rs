@@ -25,8 +25,9 @@
 
 **本轮登记的待办**：
 
-- **系统设置页的部分控件不在可访问性树里**：启动后执行 / 运行模式 / 开机自启动 / 启用文件日志 / 全局日志级别 / 启动时打开控制台 / 任务通知 / 显示系统托盘图标都不带 role，读屏与自动化取不到（功能本身正常）。
-- **`TaskError::IoError` 全量人话化**：本轮只堵住「程序名为空」这一条最常踩的路径，其余 IO 失败仍会把 `std::io` 原文抛给用户。
+- ~~**系统设置页的部分控件不在可访问性树里**~~ **已落地（2026-11-12 全面审查修复战役）**：8 项控件全部补齐（5 个开关 `role="switch"`+`aria-checked`、「服务模式」/「全局日志级别」CustomSelect 补 aria-label、配置预设分段组补 `role="group"`），并加 5 例静态守卫测试钉住；附带新增设置页搜索特性（关键词过滤/高亮定位/空态/清空，14 例测试）。
+- ~~**`TaskError::IoError` 全量人话化**~~ **已落地（2026-11-12 全面审查修复战役）**：新增 `io_kind_label`（14 类 ErrorKind）与 `io_error_at`/`io_error` 包装器，loader/executor 全部构造点改为「动作失败（路径）：类别（std::io 原文）」形状；`tasks::` 136 项全过（含 5 条跨平台文案断言）。
+- **2026-11-12 全面审查修复战役收官**：`docs/reports/full-review-2026-11-12.md` 的全部 76 项发现处理完毕（74 修复 + B9/D9 两项记录决策），阶段3 Reka UI 落地（菜单收口/Modal/FieldHelp 迁移，Toast 评估后决策不迁移——现有实现健康）。逐项结果见 `docs/reports/fix-round-2026-11-12.md` 与 `docs/changelog.md` 同日条目；42 条 stylelint 基线 warnings、E-P3 第 7 条对比度、Toast live-region 改持久容器等已登记为后续小项。
 
 **本轮未能覆盖的验证面**：浏览器渠道的真机链路（`tests/login_chain`）在本机走 skip 分支——它的 `preflight()` 要求 `locate_python()` 命中的解释器能 `import PIL, ddddocr`，而仓库 `python_worker/.venv` 只装了 playwright（PIL/ddddocr 是可选能力，按设计不默认声明）；卸载全流程演练未复跑（需单独 `--target-dir` 编 exe），只验了守卫拒绝路径。
 
