@@ -4,6 +4,91 @@
 > 当前活跃：`v5.1.3`（`docs/changelog.md`）。P0/P1 与更新子系统待办的权威摘要以本文件与 `docs/known-issues.md` 为准（原 defect-recheck / updater-audit 过程报告已于 2026-09-12 删除）。
 > 验证块：`cargo clippy --all-targets -- -D warnings` / `cargo test` 双 feature（含 `rust-tests-unix`）/ `cargo fmt --check` / `uv run pytest` / `npm run build` + `vitest` / `e2e-login-chain` 全链路。
 
+## 全面重构优化战役（2026-11-13 立项，进行中）
+
+> 依据两轮全栈审查（`docs/reports/refactor-optimization-review-2026-11-12.md` / `-2026-11-13.md`，本地不提交）与用户选定增量立项，共 10 阶段，总盘子约 14-18 周（单线口径）。完整任务书（依赖图 / 逐项设计要点 / 备选池 / 分歧清单）见 `docs/reports/campaign-plan-draft-2026-11-13.md`。
+> 用户已确认（2026-11-13）：阶段 8 全量执行；四项可选项全部纳入（OS 系统通知 / Dashboard 图表 / Ctrl+K 命令面板 / 主题跟随系统）；**连续推进不停等**——遇方案级分歧跳过并记入分歧清单，全部完成后统一呈报裁决；主代理派发+验收，子代理并发上限 4 滚动回填；每小时心跳自动化守护/续跑。
+> 每阶段统一验收门禁：`cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` / `cargo test`（默认 + no-embed 双 feature）/ `uv run pytest` / 前端 `vitest` / `lint` / `lint:css` / `typecheck` / `build`；涉登录链阶段加跑 `e2e-login-chain`；涉前端视觉批次深浅两主题目检。
+
+### 阶段 0：热修批次（3-5 天）——先于一切
+
+- [ ] **T0a-1** `/api/auth/token` 免鉴权裸发收口（P0 链：本地跨用户取 token → `/api/scripts/run` 任意脚本 RCE，auth.rs:191/108-115）：移除该端点，改 **0600 bootstrap 握手文件**（`config/.auth_bootstrap`，与 token 同生命周期配对生成）+ `POST /api/auth/exchange`（常量时间比对）；应用侧打开界面经 URL fragment（`#auth=`）携带握手秘钥，前端换取后即剥除 fragment；手动打开走前端引导页（托盘「复制界面链接」兜底）；预留 viewer 只读 token 权限矩阵设计注释
+- [ ] **T0a-2** Docker/LAN 收口（host.rs:34-43、entrypoint.sh:31）：非回环绑定且未配置 `management_password` 且未显式 `--allow-unauthenticated-bind` → 拒绝启动（fail closed）；新配置字段 `config.global.app.management_password`（serde default 免迁移，env 映射 + 设置 UI），`POST /api/auth/exchange` 仅在非回环监听下接受 `{password}` 引导
+- [ ] **T0a-3** AI 生成任务禁 `eval`/`custom_js` 步型（validate_generated_task，ai/generate.rs:48-78；堵 prompt 注入面）
+- [ ] **T0a-4** token/密钥/bootstrap 文件 `OpenOptions::mode(0o600)` 创建后写（auth.rs:65-74、crypto.rs:402-433）+ Windows icacls 返回值检查
+- [ ] **T0b-1** 迁移落盘原子化：v8→v9（migration.rs:440）/v9→v10（:544/:576）改 atomic_write_bytes；v9→v10 写回失败传播 Err 阻断版本提交（:62-67/:576-582 注释修正）；v8/v9 进入口 `.backup.*` 备份；补 3 个中断续跑测试
+- [ ] **T0b-2** 首启播种原子化 + 自愈（config/service.rs:277/:974、tasks/loader.rs:1010）：default.json / settings.json / ensure_default_task 原子写 + 解析失败重播
+- [ ] **T0c-1** page_capture 改独立非持久化临时浏览器（playwright_worker.py:2726-2728 clear_cookies / :1604-1617 关旧页摧毁 keep_alive；学 test_redirect :2121-2127 纪律）+「捕获不触碰常驻会话」回归测试
+- [ ] **T0c-2** Worker 脱敏收口：`_dispatch` 写响应前对 message/error 统一 `_sanitize_error`（worker_main.py:321 主信封、step_handlers.py 5 处裸拼、playwright_worker.py:363）+ 主信封脱敏测试
+- [ ] **T0d-1** CI 三件套：Swatinem/rust-cache（SHA-pin，per-job；release 按 matrix.target prefix-key）；ci.yml `permissions: contents: read`；各 job timeout-minutes；cargo test 加 `--locked`；`.github/dependabot.yml`（npm/cargo/github-actions weekly）
+- [ ] **T0d-2** release.yml docker job 加 `needs: build`（版本门禁覆盖镜像产物）
+
+### 阶段 1：事件总线 + 推送通知（1.5-2 周）【用户选定】
+
+- [ ] **T1a** EventBus：类型化事件枚举（LoginSucceeded/LoginFailed(reason)/NetworkDown/NetworkUp/TaskFinished/TaskFailed/UpdateAvailable/EnvironmentReady/ProfileSwitched，serde + 时间戳 + 证据摘要）；tokio broadcast + 订阅注册 API；container 拓扑插入（15 服务口径同步 AGENTS.md）；关键源头接入（LoginOrchestrator 终态 / Engine 网络翻转 / Scheduler 任务终态 / Updater 结果，渐进吸收不改现有 watch）；事件流 JSONL 落盘 events/（30 天轮转）
+- [ ] **T1b** notification/ 服务：webhook 泛化（URL+自定义模板+超时+重试退避+密钥头），订阅事件子集可配置；预设 Bark / Server酱 / Telegram；settings UI 配置区 + 「测试发送」；失败静默（只记日志/事件，绝不影响登录主链路）
+- [ ] **T1c** OS 系统通知【已确认纳入】：notify-rust / 平台原生 toast（Windows toast / macOS notification），事件开关复用 T1b 配置
+
+### 阶段 2：诊断体验（1 周）【用户选定】
+
+- [ ] **T2-1** 网络诊断面板：接口/网关/DNS/门户可达性逐项探测 + 最近失败归因（复用 monitor 证据结构），前端结构化展示
+- [ ] **T2-2** 诊断包一键导出：日志 + 脱敏配置（凭据/密钥/token 全剥除，脱敏校验测试钉住）+ 环境信息 + 最近 30 天事件流（T1a）→ zip
+- [ ] **T2-3** 前端诊断页入口 + 导出按钮 + 结果展示
+
+### 阶段 3：浏览器持久会话配置模式（1.5-2 周）【用户指定】
+
+> 设计基础=**门户侧「记住密码」**（凭据存 cookies/localStorage，门户自己的 JS 无头自动回填，非浏览器密码管理器），自动化只需**录制登录点击**。方案级 `persistent_session_enabled` + `recorded_actions`；每方案 `browser_profiles/<id>/` 持久化 user_data_dir（**utils::paths 常量 + uninstall 清单红线**）；Worker `profile_session_start`（headed+持久 context）/交互录制（默认=一次登录点击，ISP select 按序录）/`profile_session_stop`（先落 playwright_worker.py，T7-4 模块化时吸收）；无头持久 context 回放 recorded_actions + 网络验证兜底；失效→标记并提示重开配置会话。
+
+- [ ] T3-1 数据与路径（含卸载红线与测试钉住）
+- [ ] T3-2 Worker 配置会话命令 + 交互录制
+- [ ] T3-3 Rust 编排（复用 debug session 基建模式 + run_steps 引擎回放）
+- [ ] T3-4 失效回退（「过期回填方案凭据」进备选池）
+- [ ] T3-5 前端开关 / 打开浏览器配置按钮 / 配置会话横幅 / 重新录制
+- [ ] T3-6 测试（pytest 点击捕获 + 回放；Rust mock 门户全链路；并发占用互斥）
+- [ ] T3-7 安全面（profile 目录权限 / 共享机器提示 / 卸载 purge/keep 口径）
+
+### 阶段 4：质量护栏（1.5-2 周）
+
+- [ ] T4-1 前端浏览器级 e2e（Playwright 驱动真实二进制 + UI 全流程，CI 接线）
+- [ ] T4-2 proptest（迁移往返 / IPC 解析 / PATCH 合并 / 登录抢占不变量）
+- [ ] T4-3 cargo-fuzz（IPC / 配置 JSON / 迁移三 target）
+- [ ] T4-4 覆盖率门禁（cargo-llvm-cov + vitest coverage，核心 crate 阈值进 CI）
+- [ ] T4-5 cargo-auditable + 月度 audit job
+- [ ] T4-6 bridge_supervisor 测试墙钟窗口改 timeout+轮询
+- [ ] T4-7 lightweight / login-once 集成测试两用例
+- [ ] T4-8 小项打包（.dockerignore tests / updater_channels 注释诚实化 / Worker P2-7 杂项）
+
+### 阶段 5：契约战役（1.5-2 周）
+
+- [ ] T5-1 utoipa 全端点注解（~80+ 分域并行）+ schemars 导出 config JSON Schema
+- [ ] T5-2 openapi-typescript 生成前端类型；route_table↔openapi 契约测试切换；AGENTS.md 口径更新
+- [ ] T5-3 settings API 资源化（section 化 PATCH / 严格 Merge Patch，全量 PATCH deprecated 过渡）
+- [ ] T5-4 WsMessage / AiStreamEvent 从生成契约派生
+- [ ] T5-5 api/index.ts 内联类型上收（与生成类型合并收口）
+
+### 阶段 6：平台补全（1.5 周）
+
+- [ ] T6-1 is_own_process mac 分支 proc_pidpath + 真机单测；T6-2 版本 marker 文件（与 T6-4 一次设计）；T6-3 launchd 自启动（--base-path/--startup-launch）；T6-4 manifest ed25519 离线签名 + 版本单调/回滚保护；T6-5 helper 卸载结果 osascript dialog；T6-6 build.ps1 mac 适配；T6-7 Docker 降权 + 四镜像 digest pin + 删 Dockerfile:28 COPY python_worker + 工具链一致性 CI 检查；T6-8 CI mac job 加 e2e-login-chain；T6-9 Windows 版本资源 + app.ico
+
+### 阶段 7：后端结构（2-3 周）
+
+- [ ] T7-1 launcher.rs（1332 行）按职责拆模块；T7-2 http_login.rs 双路径收敛（两步走，e2e 护航）；T7-3 bridge/mod.rs（2709）拆 error/registry/worker/debug 四子模块 + environment/uv.rs 拆 download/verify/mirror；T7-4 playwright_worker.py 模块化（吸收 T3-2 新命令；OCR 三件下沉 ocr_runtime 消影子模块）；T7-5 四长函数拆分（submit / session::run / validate_task / handle_probe_message）；T7-6 Engine 冷却与 Updater 周期改墙钟（对齐 cron_loop 范本，保留可注入时钟）；T7-7 清理盲区（.trash 30 天 housekeeping + 卸载清单 / .tmp_ 扫三桶+environment / scan_json_bucket 跳过 `.` 开头）；T7-8 环境引导磁盘空间预检 + 中文文案；T7-9 AppState.container 移除 + container 构造前移 + resolve_*_task 收敛 + 直连测试 local_ip 同源；T7-10 Worker P2 群（evaluate 超时改 ASSERTION_FAILED / idle release 加锁 / test_redirect goto 可取消 / docstring 口径 / OCR 缓存 LRU）；T7-11 维持 ServiceHandle/EngineSlot 成文模式仅拆文件不换抽象
+
+### 阶段 8：前端结构（3-4 周）【已确认全量】
+
+- [ ] T8-1 设置页 schema 驱动（灰度：schema 模型+渲染器→单分区原型→行为等价验证→铺开）
+- [ ] T8-2 AiTaskView（957 行）拆 3 composable + 测试；SSE 事件类型化（走 T5-4 生成契约）
+- [ ] T8-3 UI 修复批：HttpTestResult chip 深色 1.13:1（P0）+ 未定义变量守卫测试；tsk-col-name 两面板迁移；15 处 aria-label；SetupWizard 迁 Reka Dialog+焦点陷阱测试；Toast live region 常驻；UpdateDialog token 化；设置域死规则群清理；badge--mono 迁移；--warning-text 加深；transition:all；日志双套色 token 化；首拉加载态
+- [ ] T8-4 前端结构批：App.vue 四浮层异步化；autostart 轮询页面驱动；死代码清理；autostartApi.toggle 具名返回
+- [ ] T8-5 依赖升级四线（vue-tsc3+TS5.9 / vitest5 / vite7-8+plugin-vue6 / stylelint18）+ eslint-plugin-vue 10 strongly-recommended + engines 字段
+- [ ] T8-6【已确认纳入】Dashboard 图表（echarts 按需 chunk，消费 T1a-3 事件流）+ 命令面板 Ctrl+K + 主题跟随系统/强调色
+
+### 阶段 9：收尾（3-5 天）
+
+- [ ] T9-1 错误文案人话化扩展到全部域 + 错误码目录（可选）；T9-2 known-issues 坐标刷新 + #5 结论；T9-3 AGENTS.md 版本刷新（5.2.0-beta.1）+ 服务拓扑（EventBus）更新；T9-4 changelog/updatelog 汇总 + plan-next 勾销 + mermaid 架构图；**分歧清单统一呈报 + 总验收（全量门禁 + 深浅两主题视觉检查）**
+
+> 备选池（协议模板库、过期回填凭据、Profile 环境匹配、IPv6 专项、viewer token 落地、Worker 池化、mac 托盘、i18n、URL scheme、CLI 子命令、配置快照回滚）与执行纪律细节见评审稿；过程报告一律落 gitignored `docs/reports/`；changelog/plan-next 由主代理按阶段集中维护。
+
 ## 登录新增第三种渠道：自定义脚本（2026-09-24 **已落地**）
 
 > 用户诉求：「给登录任务增加一种渠道，就是自定义脚本，允许使用自定义脚本进行登录」。实现与验证见 `docs/changelog.md` 同日条目，脚本契约见 `docs/guides/custom-script-guide.md` 第 2 节。
