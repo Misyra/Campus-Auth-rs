@@ -134,7 +134,12 @@ impl ServiceContainer {
             status.clone(),
             Some(metrics.clone()),
         );
-        let environment = EnvironmentManager::new(base_path.to_path_buf(), status.clone());
+        let environment = EnvironmentManager::new_with_events(
+            base_path.to_path_buf(),
+            status.clone(),
+            // 引导完成（fire_bootstrap_done）发布 EnvironmentReady 的事件源
+            events.clone(),
+        );
         // 环境重建成功后复位 Bridge 连续 spawn 失败熔断（B3），解除熔断允许重新 spawn。
         Self::wire_environment_bridge(&bridge, &environment);
 

@@ -20,6 +20,7 @@ use std::time::Duration;
 use reqwest::Client;
 use tokio_util::sync::CancellationToken;
 
+use crate::events::{AppEvent, EnvironmentSummary, EventBus};
 use crate::status::{InstallProgress, PartialSnapshot, StatusManager};
 
 /// uv GitHub Releases 基础 URL（主站）
@@ -474,6 +475,8 @@ pub struct EnvironmentManager {
     current_cancel_token: RwLock<CancellationToken>,
     /// 引导完成回调（成功重建环境时触发，用于复位 Bridge 熔断计数 B3）
     on_bootstrap_done: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// 事件总线（引导完成发布 EnvironmentReady；构造注入，测试兼容入口发往孤立总线）
+    events: Arc<EventBus>,
     /// 引导互斥门（F1）：串行化并发 ensure_capability / retry_install
     pub(crate) bootstrap_gate: BootstrapGate,
     /// 浏览器自愈是否已尝试过（进程内单次保护）
@@ -585,7 +588,21 @@ impl EnvironmentApi for EnvironmentManager {
 
 impl EnvironmentManager {
     /// 构造环境管理器
+    ///
+    /// 事件发往**孤立总线**（无订阅者）：仅供既有测试装配等不关心事件发布的调用方
+    /// 使用；生产入口是 [`Self::new_with_events`]，由容器注入共享 [`EventBus`]。
     pub fn new(base_path: PathBuf, status_manager: Arc<StatusManager>) -> Arc<Self> {
+        Self::new_with_events(base_path, status_manager, Arc::new(EventBus::new()))
+    }
+
+    /// 构造环境管理器并注入事件总线（容器生产入口）
+    ///
+    /// 引导完成（[`Self::fire_bootstrap_done`]）时发布 [`AppEvent::EnvironmentReady`]。
+    pub fn new_with_events(
+        base_path: PathBuf,
+        status_manager: Arc<StatusManager>,
+        events: Arc<EventBus>,
+    ) -> Arc<Self> {
         let env_path = crate::utils::paths::env_dir(&base_path);
         let worker_project_path = crate::utils::paths::worker_project_dir(&base_path);
         Arc::new(Self {
@@ -610,6 +627,7 @@ impl EnvironmentManager {
             http_client: build_environment_http_client(),
             current_cancel_token: RwLock::new(CancellationToken::new()),
             on_bootstrap_done: Mutex::new(None),
+            events,
             bootstrap_gate: BootstrapGate::new(),
             browser_repair_attempted: std::sync::atomic::AtomicBool::new(false),
         })
@@ -627,7 +645,20 @@ impl EnvironmentManager {
     }
 
     /// 触发引导完成回调（内部，引导成功路径调用）
+    ///
+    /// 渐进吸收：在既有回调旁追加发布 [`AppEvent::EnvironmentReady`]——载荷取
+    /// 当前状态快照的就绪摘要（uv / Python），属白名单布尔字段，不携带路径或
+    /// 输出等敏感内容。引导失败无对应事件变体，不发布。
     pub(crate) fn fire_bootstrap_done(&self) {
+        let (uv_ready, python_ready) = {
+            let status = self.read_status();
+            (status.uv_ready, status.python_ready)
+        };
+        self.events
+            .publish(AppEvent::EnvironmentReady(EnvironmentSummary {
+                python_ready,
+                uv_ready,
+            }));
         let cb = self
             .on_bootstrap_done
             .lock()
@@ -1082,5 +1113,37 @@ mod tests {
         // 引导只执行一次，三个并发调用者全部成功
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(ready.load(Ordering::SeqCst));
+    }
+
+    /// 引导完成发布 EnvironmentReady：载荷取状态快照的 uv / Python 就绪摘要
+    /// （白名单布尔字段；引导失败无对应事件变体，不发布）
+    #[tokio::test]
+    async fn test_fire_bootstrap_done_publishes_environment_ready() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let events = Arc::new(EventBus::new());
+        let manager = EnvironmentManager::new_with_events(
+            dir.path().to_path_buf(),
+            Arc::new(StatusManager::new()),
+            events.clone(),
+        );
+        let mut rx = events.subscribe();
+        // 模拟引导成功后的状态翻转（真实引导链在 fire 前已写入 uv/python 就绪）
+        manager.write_status(|s| {
+            s.uv_ready = true;
+            s.python_ready = true;
+        });
+
+        manager.fire_bootstrap_done();
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.event.kind(), "environment_ready");
+        match &envelope.event {
+            AppEvent::EnvironmentReady(summary) => {
+                assert!(summary.uv_ready);
+                assert!(summary.python_ready);
+            }
+            other => panic!("应为 EnvironmentReady，实际 {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "每次引导完成只应发布一条事件");
     }
 }
