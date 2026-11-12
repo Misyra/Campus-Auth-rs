@@ -6,6 +6,7 @@
 支持链式引用（递归解析）：任务 ``variables`` 中可定义
 ``{"username": "{{USERNAME}}"}``，``USERNAME`` 再由外部凭证映射提供实际值。
 解析时遇到替换结果仍含 ``{{...}}`` 会继续展开，并检测循环引用与深度限制。
+系统保留变量的值不再链式展开（见 ``_SYSTEM_VARIABLE_KEYS``）。
 """
 
 from __future__ import annotations
@@ -22,6 +23,12 @@ _VAR_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
 # 递归展开最大深度，防止恶意/误配置导致无限递归
 _MAX_DEPTH = 8
+
+#: 系统保留变量名（值来自 Profile 凭据/触发地址，原样注入）。这些变量的值
+#: **跳过链式再展开**：凭据本身若恰好包含字面 ``{{X}}``（例如密码含该序列），
+#: 再展开会把凭据内容替换成变量映射值，破坏原始凭据（P2-7）。链式引用的
+#: 合法入口是任务自定义变量（``{"user": "{{USERNAME}}"}``），不受影响。
+_SYSTEM_VARIABLE_KEYS = frozenset({"USERNAME", "PASSWORD", "ISP", "LOGIN_URL"})
 
 
 def resolve(
@@ -61,6 +68,9 @@ def resolve(
             # 未找到：保留原占位符
             logger.debug("变量未命中，保留原占位符: %s", key)
             return match.group(0)
+        if key in _SYSTEM_VARIABLE_KEYS:
+            # 系统保留变量值原样返回，跳过链式再展开（见 _SYSTEM_VARIABLE_KEYS）
+            return str(val)
         # 值中若仍含 {{...}}，递归展开（如 username -> {{USERNAME}} -> admin）
         if isinstance(val, str) and "{{" in val:
             return resolve(val, variables, _depth + 1, visited | {key})
@@ -220,7 +230,11 @@ def resolve_javascript(template: str, variables: dict[str, str]) -> str:
             logger.debug("JavaScript 变量未命中，保留原占位符: %s", key)
             return match.group(0)
         raw = variables[key]
-        value = resolve(str(raw), variables) if isinstance(raw, str) else str(raw)
+        if key in _SYSTEM_VARIABLE_KEYS:
+            # 系统保留变量值原样使用，跳过链式再展开（见 _SYSTEM_VARIABLE_KEYS）
+            value = str(raw)
+        else:
+            value = resolve(str(raw), variables) if isinstance(raw, str) else str(raw)
         context = _javascript_context_at(template, match.start())
         quote = {"single": "'", "double": '"', "template": "`"}.get(context)
         if quote is not None:
