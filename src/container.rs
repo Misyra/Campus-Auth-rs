@@ -217,6 +217,9 @@ impl ServiceContainer {
             status_manager: status.clone(),
             monitor_service: monitor.clone(),
             network_detect: detector,
+            // 网络状态翻转（NetworkDown/NetworkUp）与 Profile 切换（ProfileSwitched）
+            // 的事件发布源
+            events: events.clone(),
         };
         let engine_handle = Engine::spawn(engine_deps);
 

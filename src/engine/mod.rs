@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{ConfigService, ProfileService};
+use crate::events::EventBus;
 use crate::login::LoginOrchestrator;
 use crate::monitor::MonitorService;
 use crate::network::detect::NetworkDetect;
@@ -74,6 +75,9 @@ pub struct EngineDeps {
     pub monitor_service: Arc<MonitorService>,
     /// 网络检测器
     pub network_detect: Arc<dyn NetworkDetect>,
+    /// 事件总线（网络状态翻转 NetworkDown/NetworkUp 与 Profile 切换
+    /// ProfileSwitched 的发布源；载荷为白名单摘要，见 `src/events/` 模块 doc）
+    pub events: Arc<EventBus>,
 }
 
 /// 调度引擎公共接口

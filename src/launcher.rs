@@ -1011,6 +1011,8 @@ fn watch_engine(state: &LauncherState) -> JoinHandle<()> {
                 status_manager: status.clone(),
                 monitor_service: monitor_service.clone(),
                 network_detect: network_detect.clone(),
+                // 重启实例与初始实例共用同一事件总线（容器横切持有）
+                events: container.events.clone(),
             };
             let new_handle = crate::engine::Engine::spawn(deps);
             let new_completed = new_handle.completed.clone();

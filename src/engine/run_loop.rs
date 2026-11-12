@@ -27,8 +27,11 @@ use crate::engine::{
     PROFILE_CHECK_INTERVAL_MAX, PROFILE_CHECK_INTERVAL_MIN, ProbeDetails, ProfileSwitchSource,
     TestNetworkResult,
 };
+use crate::events::{AppEvent, NetworkSummary, ProfileSwitchSummary};
 use crate::login::{LoginResult, LoginTerminal};
-use crate::monitor::{ConnectivityAssessment, ProbeEvidence, ProbeReport, RecoveryAdvice};
+use crate::monitor::{
+    AssessmentReason, ConnectivityAssessment, ProbeEvidence, ProbeReport, RecoveryAdvice,
+};
 use crate::status::Notifier;
 use crate::status::{EngineState, LoginSource, NetworkStatus, PartialSnapshot};
 
@@ -506,6 +509,15 @@ async fn handle_apply_profile(
     // 实际发生切换才记 info；幂等重复 ApplyProfile（Web 路由已切换）降为 debug
     if switched {
         tracing::info!("Profile 已切换: {} (来源: {:?})", profile_id, _source);
+        // 事件发布（渐进吸收，紧邻现有切换日志）：档案切换实际生效的收敛点——
+        // 自动切换（check_profile_switch）与手动 ApplyProfile 命令共用本路径，
+        // 仅在实际发生切换时发布一次；幂等重复应用同 Profile 不发布。
+        // 载荷为 from/to id 白名单摘要（不含名称/凭据）
+        deps.events
+            .publish(AppEvent::ProfileSwitched(ProfileSwitchSummary {
+                from_profile_id: Some(current),
+                to_profile_id: profile_id.to_string(),
+            }));
     } else {
         tracing::debug!("Profile 无变化（已确认）: {}", profile_id);
     }
@@ -921,6 +933,26 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             report.evidence.url,
             report.latency_ms
         );
+        // 事件发布（渐进吸收，紧邻现有状态翻转日志）：仅在「通 ⇄ 断」真实翻转
+        // 边界发布，宁缺勿滥——
+        // - 初始未知态（Unknown）只是「尚未探测过」，不构成由断转通/由通转断，
+        //   首探结论不发布；
+        // - 断态之间迁移（Offline ⇄ CaptivePortal）同属"未联网"，同态不重复发。
+        // 探测执行失败分支不发布（无新证据、状态未翻转）。
+        if old_status == NetworkStatus::Online && status != NetworkStatus::Online {
+            deps.events.publish(AppEvent::NetworkDown(NetworkSummary {
+                profile_id: None,
+                reason: Some(assessment_reason_code(&report.assessment.reason)),
+            }));
+        } else if old_status != NetworkStatus::Unknown
+            && old_status != NetworkStatus::Online
+            && status == NetworkStatus::Online
+        {
+            deps.events.publish(AppEvent::NetworkUp(NetworkSummary {
+                profile_id: None,
+                reason: Some(assessment_reason_code(&report.assessment.reason)),
+            }));
+        }
     } else {
         tracing::debug!(
             status = ?status,
@@ -1065,6 +1097,18 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
         tracing::debug!("补发排队的优先级探测");
         handle_network_check(inner, deps);
     }
+}
+
+/// 探测结论的原因码（事件载荷 `NetworkSummary.reason`）
+///
+/// 取 [`AssessmentReason`] 的 serde 序列化结果（snake_case），与监测层对外
+/// API 的原因码口径一致；枚举词表固定、不含任何用户数据，满足事件载荷
+/// 脱敏红线（发布方保证短语本身不含敏感片段）。
+fn assessment_reason_code(reason: &AssessmentReason) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{reason:?}"))
 }
 
 /// 低频 Profile 切换检测：网关/SSID 变化 → 自动匹配并切换
@@ -1267,6 +1311,7 @@ mod tests {
     use crate::bridge::BridgeSupervisor;
     use crate::config::{ConfigService, ProfileService};
     use crate::environment::EnvironmentManager;
+    use crate::events::{EventBus, EventEnvelope};
     use crate::login::{LoginHistoryService, LoginOrchestrator};
     use crate::monitor::MonitorService;
     use crate::network::detect::{InterfaceInfo, NetworkDetect, NetworkError};
@@ -1695,7 +1740,7 @@ mod tests {
     /// HTTP 超时；手动诊断仅等待公网探测，不额外执行本地链路诊断。
     /// `pause_all_day` 为 true 时配置全天定时暂停窗口（start == end）。
     /// `clock` 注入业务周期判定的墙钟时钟源（常规用例传 [`WallClock::system`]，
-    /// 睡眠模拟用例传伪造时钟）。
+    /// 睡眠模拟用例传伪造时钟）。同时返回装配内的事件总线供事件断言订阅。
     #[allow(clippy::type_complexity)]
     async fn make_engine_with_hanging_probe(
         pause_all_day: bool,
@@ -1705,6 +1750,7 @@ mod tests {
         mpsc::Sender<EngineCommand>,
         Arc<StatusManager>,
         Arc<Metrics>,
+        Arc<EventBus>,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let (reload_tx, _reload_rx) = mpsc::channel(8);
@@ -1780,26 +1826,45 @@ mod tests {
              probe_local_link()，而 HangingDetect 永久 pending，探测永不回传"
         );
 
-        let status = Arc::new(StatusManager::new());
         let metrics = Metrics::new();
         let detector: Arc<dyn NetworkDetect> = Arc::new(HangingDetect);
+        let (status, bus, deps) =
+            build_test_deps_with_events(tmp.path(), config, detector, metrics.clone());
+        let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(8);
+        let engine = Arc::new(Engine::from_sender(cmd_tx.clone()));
+        tokio::spawn(run_loop(engine, deps, cmd_rx, clock));
+        (tmp, cmd_tx, status, metrics, bus)
+    }
+
+    /// 测试装配：真实服务 + 注入检测器 + 独立事件总线（不 spawn run_loop）
+    ///
+    /// 供两类用例复用：`make_engine_with_hanging_probe` 经此装配驱动完整主循环；
+    /// 事件发布断言用例直接构造 `EngineInner` 调用内部处理函数。事件总线随
+    /// 返回值交出，供测试订阅断言。
+    fn build_test_deps_with_events(
+        base: &std::path::Path,
+        config: Arc<ConfigService>,
+        detector: Arc<dyn NetworkDetect>,
+        metrics: Arc<Metrics>,
+    ) -> (Arc<StatusManager>, Arc<EventBus>, EngineDeps) {
+        let status = Arc::new(StatusManager::new());
         let monitor = Arc::new(
             MonitorService::new(config.clone(), detector.clone(), Some(metrics.clone())).unwrap(),
         );
-        let history = Arc::new(LoginHistoryService::new(tmp.path()));
+        let history = Arc::new(LoginHistoryService::new(base));
         let profiles = Arc::new(ProfileService::new(config.clone()));
         let bridge = BridgeSupervisor::new(
-            tmp.path().to_path_buf(),
+            base.to_path_buf(),
             config.clone(),
             status.clone(),
             Some(metrics.clone()),
         );
-        let environment = EnvironmentManager::new(tmp.path().to_path_buf(), status.clone());
-        let tasks = TaskManager::new(tmp.path());
+        let environment = EnvironmentManager::new(base.to_path_buf(), status.clone());
+        let tasks = TaskManager::new(base);
         // 脚本登录渠道的执行能力：与生产同一条路径（TaskExecutor 构造本身只是装配
         // 几个 Arc，不需要真起进程）
         let script_runner = crate::tasks::TaskExecutor::new(
-            tmp.path(),
+            base,
             status.clone(),
             bridge.clone(),
             environment.clone(),
@@ -1815,7 +1880,7 @@ mod tests {
             script_runner,
             monitor.clone(),
             tokio_util::sync::CancellationToken::new(),
-            Some(metrics.clone()),
+            Some(metrics),
         ));
         let deps = EngineDeps {
             config_service: config,
@@ -1824,11 +1889,10 @@ mod tests {
             status_manager: status.clone(),
             monitor_service: monitor,
             network_detect: detector,
+            events: Arc::new(EventBus::new()),
         };
-        let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(8);
-        let engine = Arc::new(Engine::from_sender(cmd_tx.clone()));
-        tokio::spawn(run_loop(engine, deps, cmd_rx, clock));
-        (tmp, cmd_tx, status, metrics)
+        let bus = deps.events.clone();
+        (status, bus, deps)
     }
 
     /// 轮询等待条件成立（虚拟时钟下每次 sleep 1ms；预算 1.5s 虚拟时间，
@@ -1847,7 +1911,7 @@ mod tests {
     /// 结果回传主循环统一处理；Stop 后完成的探测不得回写 Running。
     #[tokio::test(start_paused = true)]
     async fn test_background_probe_keeps_commands_responsive_and_merges_reentry() {
-        let (_tmp, cmd_tx, status, _metrics) =
+        let (_tmp, cmd_tx, status, _metrics, _bus) =
             make_engine_with_hanging_probe(false, WallClock::system()).await;
         let snap = || status.borrow();
 
@@ -1890,7 +1954,7 @@ mod tests {
     /// F4：定时暂停窗口内 Start/Resume 只切状态、不触发立即检测
     #[tokio::test(start_paused = true)]
     async fn test_scheduled_pause_blocks_immediate_probes() {
-        let (_tmp, cmd_tx, status, metrics) =
+        let (_tmp, cmd_tx, status, metrics, _bus) =
             make_engine_with_hanging_probe(true, WallClock::system()).await;
         let snap = || status.borrow();
 
@@ -1928,7 +1992,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_test_network_reply_from_background() {
         // 暂停场景：手动诊断不受自动监测暂停影响，仍在后台执行
-        let (_tmp, cmd_tx, _status, metrics) =
+        let (_tmp, cmd_tx, _status, metrics, _bus) =
             make_engine_with_hanging_probe(true, WallClock::system()).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
@@ -1951,7 +2015,7 @@ mod tests {
 
         // 正常场景：先 Start（探测 1 在途），再下发 TestNetwork（探测 2 独立执行），
         // 紧接着 Stop——Stop 在两个探测完成前即被处理（命令不被探测阻塞）
-        let (_tmp2, cmd_tx2, status2, metrics2) =
+        let (_tmp2, cmd_tx2, status2, metrics2, _bus2) =
             make_engine_with_hanging_probe(false, WallClock::system()).await;
         let snap2 = || status2.borrow();
         cmd_tx2.send(EngineCommand::Start).await.unwrap();
@@ -1982,7 +2046,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_wall_clock_probe_fires_after_sleep_jump() {
         let (clock, fake) = WallClock::fake();
-        let (_tmp, cmd_tx, status, _metrics) = make_engine_with_hanging_probe(false, clock).await;
+        let (_tmp, cmd_tx, status, _metrics, _bus) =
+            make_engine_with_hanging_probe(false, clock).await;
         let snap = || status.borrow();
 
         // Start：立即探测 #1（HTTP 目标挂 3s 超时后以 Offline 完成并回传）。
@@ -2024,5 +2089,190 @@ mod tests {
             snap().last_check_time.is_some(),
             "唤醒后的首探应产生真实检测时间"
         );
+    }
+
+    // ================================================================
+    // 事件总线接入：网络状态翻转 / Profile 切换的发布断言
+    // ================================================================
+
+    /// 取下一条事件（超时即 panic，防悬挂）
+    async fn next_event(rx: &mut tokio::sync::broadcast::Receiver<EventEnvelope>) -> AppEvent {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Ok(envelope)) => envelope.event,
+            other => panic!("等待事件超时或失败: {other:?}"),
+        }
+    }
+
+    /// 断言窗口期内无事件到达（「宁可少发不错发」的回归锚点）
+    async fn assert_no_event(rx: &mut tokio::sync::broadcast::Receiver<EventEnvelope>) {
+        let got = tokio::time::timeout(Duration::from_millis(80), rx.recv()).await;
+        assert!(got.is_err(), "不应有事件到达，实际: {got:?}");
+    }
+
+    /// 构造探测结果回传消息：advice 恒为非登录建议（NoAction），避免触发
+    /// 自动登录路径——本组用例只关注事件发布，不驱动登录编排
+    fn probe_msg(status: NetworkStatus, reason: AssessmentReason, version: u64) -> ProbeMessage {
+        ProbeMessage::Report(
+            ProbeReport {
+                evidence: ProbeEvidence::default(),
+                assessment: ConnectivityAssessment {
+                    status,
+                    confidence: crate::monitor::AssessmentConfidence::High,
+                    reason,
+                    auth_endpoint: crate::monitor::AuthEndpointState::NotChecked,
+                    recovery_advice: RecoveryAdvice::NoAction,
+                },
+                latency_ms: 0,
+                check_number: 1,
+            },
+            version,
+        )
+    }
+
+    /// 事件接入（NetworkDown / NetworkUp）：探测结果仅在「通 ⇄ 断」翻转边界发布。
+    /// 初始未知态（Unknown）首探不发布；断态之间（Offline ⇄ CaptivePortal）
+    /// 同态不发布；探测执行失败不发布；翻转各恰好一次。
+    #[tokio::test]
+    async fn test_probe_flip_publishes_network_up_down_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (reload_tx, _reload_rx) = mpsc::channel(8);
+        let config = ConfigService::new(tmp.path().to_path_buf(), reload_tx)
+            .await
+            .unwrap();
+        let detector: Arc<dyn NetworkDetect> = Arc::new(HangingDetect);
+        let (_status, bus, deps) =
+            build_test_deps_with_events(tmp.path(), config, detector, Metrics::new());
+        let mut rx = bus.subscribe();
+        let (probe_tx, _probe_rx) = mpsc::channel(1);
+        let (login_tx, _login_rx) = mpsc::channel(1);
+        let (clock, _fake) = WallClock::fake();
+        let mut inner = EngineInner::new(probe_tx, login_tx, clock);
+        let version = deps.config_service.config_version();
+
+        // 首探 Online：上一态 Unknown（既非通也非断），不发布
+        handle_probe_message(
+            probe_msg(
+                NetworkStatus::Online,
+                AssessmentReason::InternetVerified,
+                version,
+            ),
+            &mut inner,
+            &deps,
+        );
+        assert_no_event(&mut rx).await;
+        assert_eq!(inner.last_assessment.status, NetworkStatus::Online);
+
+        // Online → Offline：发布 NetworkDown（原因为探测结论原因码）
+        handle_probe_message(
+            probe_msg(
+                NetworkStatus::Offline,
+                AssessmentReason::AllProbesFailed,
+                version,
+            ),
+            &mut inner,
+            &deps,
+        );
+        match next_event(&mut rx).await {
+            AppEvent::NetworkDown(summary) => {
+                assert_eq!(summary.reason.as_deref(), Some("all_probes_failed"));
+                assert!(summary.profile_id.is_none(), "周期探测不绑定具体档案");
+            }
+            other => panic!("应为 NetworkDown，实际: {other:?}"),
+        }
+
+        // Offline → CaptivePortal：同为断态，同态不发布
+        handle_probe_message(
+            probe_msg(
+                NetworkStatus::CaptivePortal,
+                AssessmentReason::CaptiveDetected,
+                version,
+            ),
+            &mut inner,
+            &deps,
+        );
+        assert_no_event(&mut rx).await;
+
+        // CaptivePortal → Online：发布 NetworkUp
+        handle_probe_message(
+            probe_msg(
+                NetworkStatus::Online,
+                AssessmentReason::InternetVerified,
+                version,
+            ),
+            &mut inner,
+            &deps,
+        );
+        match next_event(&mut rx).await {
+            AppEvent::NetworkUp(summary) => {
+                assert_eq!(summary.reason.as_deref(), Some("internet_verified"));
+            }
+            other => panic!("应为 NetworkUp，实际: {other:?}"),
+        }
+
+        // Online → Online：同态不发布
+        handle_probe_message(
+            probe_msg(
+                NetworkStatus::Online,
+                AssessmentReason::InternetVerified,
+                version,
+            ),
+            &mut inner,
+            &deps,
+        );
+        assert_no_event(&mut rx).await;
+
+        // 探测执行失败：无新证据、状态未翻转，不发布
+        handle_probe_message(
+            ProbeMessage::Failed("模拟探测执行失败".into(), version),
+            &mut inner,
+            &deps,
+        );
+        assert_no_event(&mut rx).await;
+        assert_eq!(inner.last_assessment.status, NetworkStatus::Online);
+    }
+
+    /// 事件接入（ProfileSwitched）：实际生效的 Profile 切换发布一次 from/to
+    /// 白名单摘要（自动切换与手动 ApplyProfile 共用 handle_apply_profile 收敛点）；
+    /// 幂等重复 ApplyProfile（目标即当前 Profile）不发布。
+    #[tokio::test]
+    async fn test_apply_profile_publishes_switch_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (reload_tx, _reload_rx) = mpsc::channel(8);
+        let config = ConfigService::new(tmp.path().to_path_buf(), reload_tx)
+            .await
+            .unwrap();
+        let detector: Arc<dyn NetworkDetect> = Arc::new(HangingDetect);
+        let (_status, bus, deps) =
+            build_test_deps_with_events(tmp.path(), config, detector, Metrics::new());
+
+        // 预置第二个 Profile 作为切换目标
+        let mut data = deps.profile_service.get_profile("default").unwrap();
+        data.name = "Second".into();
+        deps.profile_service
+            .create_profile("second", data)
+            .await
+            .unwrap();
+
+        let mut rx = bus.subscribe();
+        let (probe_tx, _probe_rx) = mpsc::channel(1);
+        let (login_tx, _login_rx) = mpsc::channel(1);
+        let (clock, _fake) = WallClock::fake();
+        let mut inner = EngineInner::new(probe_tx, login_tx, clock);
+        // 关闭监测：切换分支不触发后续探测（本用例只关注事件发布）
+        inner.monitoring = false;
+
+        // 幂等路径：ApplyProfile 目标即当前 Profile → 不发布
+        handle_apply_profile("default", ProfileSwitchSource::Manual, &mut inner, &deps).await;
+        assert_no_event(&mut rx).await;
+
+        // 实际切换 default → second：发布 ProfileSwitched
+        handle_apply_profile("second", ProfileSwitchSource::AutoSwitch, &mut inner, &deps).await;
+        match next_event(&mut rx).await {
+            AppEvent::ProfileSwitched(summary) => {
+                assert_eq!(summary.from_profile_id.as_deref(), Some("default"));
+                assert_eq!(summary.to_profile_id, "second");
+            }
+            other => panic!("应为 ProfileSwitched，实际: {other:?}"),
+        }
     }
 }
