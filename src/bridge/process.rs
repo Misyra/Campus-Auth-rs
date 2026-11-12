@@ -837,4 +837,462 @@ mod tests {
         settle_oversized_line(b"garbage without id field", &tx).await;
         assert!(rx.try_recv().is_err());
     }
+
+    // ============ 属性测试（proptest）：随机输入下解析器永不 panic、产出有界 ============
+    //
+    // 生成器策略覆盖面：
+    // - 任意字符串（乱码 / 半截 JSON / 非 JSON 文本）；字节级任意序列单独覆盖 settle 路径
+    // - 合法 JSON 值（嵌套对象 / 数组 / 非 JSON-RPC 形状 / 超大字段 / 任意 Unicode）
+    // - 形似响应信封（合法与畸形 result、杂散外字段、id 与 event 并存）
+    // - 形似事件信封（event 名为任意字符串）
+    // - 空行 / 纯空白 / CRLF 残留（读侧已 trim 的边界形态）
+    //
+    // 注：`arb_json_value` 与 src/login/session.rs 测试模块中的同名策略互为镜像，
+    // 各自独立维护（跨模块共用会引入生产文件上的 cfg(test) 桥）。
+
+    use proptest::prelude::*;
+
+    /// 属性测试统一口径：512 cases（CI 亲和，无秒级超时；随机失败必可 shrink 复现）
+    fn prop_config() -> proptest::test_runner::Config {
+        proptest::test_runner::Config::with_cases(512)
+    }
+
+    /// 递归 JSON 值策略核心：对象 / 数组 / 字符串（任意 Unicode）/ 数值 /
+    /// 布尔 / null，嵌套至多 4 层；键名混入协议关键字以提高「形似信封」密度。
+    /// `allow_floats=false` 时数值叶子仅限整数（供 roundtrip 类属性使用，
+    /// 见 [`arb_json_value_exact`] 文档）。
+    fn arb_json_value_impl(
+        allow_floats: bool,
+    ) -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+        // 数值叶子：allow_floats 时混入任意有限浮点（非有限浮点进不了 serde_json）
+        let numeric: proptest::strategy::BoxedStrategy<serde_json::Value> = if allow_floats {
+            any::<f64>()
+                .prop_filter("非有限浮点不可序列化", |f| f.is_finite())
+                .prop_map(|f| serde_json::json!(f))
+                .boxed()
+        } else {
+            any::<i64>().prop_map(|n| serde_json::json!(n)).boxed()
+        };
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            numeric,
+            any::<String>().prop_map(serde_json::Value::String),
+            // 协议关键字键名（对象字段撞名时提高信封相似度）
+            prop_oneof![
+                Just("id".to_string()),
+                Just("result".to_string()),
+                Just("event".to_string()),
+                Just("data".to_string()),
+                Just("success".to_string()),
+                Just("error".to_string()),
+            ]
+            .prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(
+            4,  // 嵌套深度
+            64, // 期望规模
+            8,  // 分支大小
+            |inner| {
+                prop_oneof![
+                    // 对象（键可重复，Map 收敛为 last-wins，属合法 JSON 语义）
+                    proptest::collection::vec((any::<String>(), inner.clone()), 0..8).prop_map(
+                        |entries| serde_json::Value::Object(entries.into_iter().collect())
+                    ),
+                    // 数组
+                    proptest::collection::vec(inner, 0..8).prop_map(serde_json::Value::Array),
+                ]
+            },
+        )
+        .boxed()
+    }
+
+    /// 递归 JSON 值策略（含任意有限浮点）：用于不要求数值位保真的
+    /// never-panic / 分派类属性
+    fn arb_json_value() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
+        arb_json_value_impl(true)
+    }
+
+    /// roundtrip 安全变体（不含任意浮点）。
+    ///
+    /// 属性测试实测：serde_json 对部分 f64 的序列化→解析往返存在 1 ulp 保真
+    /// 损失（其解析器非全区间正确舍入，如 -1.0443002892504437e-284 往返后
+    /// 末位差 1）。数值位保真不属 IPC 解析器契约（数据透传以 serde_json 为界），
+    /// 故逐字段相等类属性用整数域版本钉住其余结构的无损性；浮点路径的
+    /// never-panic 覆盖由 [`arb_json_value`] 承担。
+    fn arb_json_value_exact() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
+        arb_json_value_impl(false)
+    }
+
+    /// 任意 IPC 行策略（parse_and_send_line 的输入域）
+    fn arb_ipc_line() -> impl proptest::strategy::Strategy<Value = String> {
+        prop_oneof![
+            // 完全乱码 / 非 JSON 文本
+            3 => any::<String>(),
+            // 合法 JSON（含数组 / 字符串 / 数字等非对象信封形状）
+            3 => arb_json_value().prop_map(|v| v.to_string()),
+            // 形似响应信封：{"id": u64, "result": {...}} + 杂散外字段（可与 event 并存）
+            3 => (any::<u64>(), arb_json_value(), any::<Option<String>>(), any::<bool>())
+                .prop_map(|(id, data, err, with_event)| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("id".into(), serde_json::json!(id));
+                    obj.insert(
+                        "result".into(),
+                        serde_json::json!({ "success": true, "data": data, "error": err }),
+                    );
+                    if with_event {
+                        obj.insert("event".into(), serde_json::json!("screenshot"));
+                    }
+                    serde_json::Value::Object(obj).to_string()
+                }),
+            // 形似事件信封
+            2 => (any::<String>(), arb_json_value()).prop_map(|(event, data)| {
+                serde_json::json!({ "event": event, "data": data }).to_string()
+            }),
+            // 空行 / 纯空白 / CRLF 残留（读侧已 trim \r\n 后可能残留的形态）
+            1 => prop_oneof![
+                Just(String::new()),
+                Just("   ".to_string()),
+                Just("\t\r\n".to_string()),
+                Just(" ".to_string()),
+            ],
+        ]
+    }
+
+    /// 同步驱动单行解析并收走 channel 中的全部消息。
+    ///
+    /// 解析 future 内部仅含容量充足的 mpsc send（立即就绪），单次 poll 必完成，
+    /// 无需 tokio runtime——属性测试保持纯同步，prop_assert 的 early-return
+    /// 语义才能直接作用于测试函数本体。
+    fn parse_line_collect(line: &str) -> Vec<ParsedMessage> {
+        let (tx, mut rx) = mpsc::channel(8);
+        let fut = parse_and_send_line(line, &tx);
+        tokio::pin!(fut);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::future::Future::poll(fut.as_mut(), &mut cx) {
+            std::task::Poll::Ready(()) => {}
+            std::task::Poll::Pending => panic!("单行解析 future 不应挂起"),
+        }
+        let mut msgs = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            msgs.push(msg);
+        }
+        msgs
+    }
+
+    /// 同步驱动超限行结算并收走 channel 中的全部消息（同上：单次 poll 必完成）
+    fn settle_line_collect(prefix: &[u8]) -> Vec<ParsedMessage> {
+        let (tx, mut rx) = mpsc::channel(8);
+        let fut = settle_oversized_line(prefix, &tx);
+        tokio::pin!(fut);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::future::Future::poll(fut.as_mut(), &mut cx) {
+            std::task::Poll::Ready(()) => {}
+            std::task::Poll::Pending => panic!("超限结算 future 不应挂起"),
+        }
+        let mut msgs = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            msgs.push(msg);
+        }
+        msgs
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        /// 【不变量 P1】任意行输入下解析器永不 panic，且单行至多产出一条消息，
+        /// 消息只能是 Response / ResponseError / Event 之一（绝不 WorkerExited /
+        /// InvalidLine 等越界变体）；产出的信封必然可再序列化（结构有界合法）
+        #[test]
+        fn prop_parse_line_never_panics_and_yields_bounded_envelope(line in arb_ipc_line()) {
+            let msgs = parse_line_collect(&line);
+            prop_assert!(msgs.len() <= 1, "单行至多产出一条消息");
+            if let Some(msg) = msgs.into_iter().next() {
+                match &msg {
+                    ParsedMessage::Response(resp) => {
+                        prop_assert!(serde_json::to_string(resp).is_ok());
+                    }
+                    ParsedMessage::ResponseError { error, .. } => {
+                        prop_assert!(!error.is_empty());
+                    }
+                    ParsedMessage::Event(ev) => {
+                        prop_assert!(serde_json::to_string(ev).is_ok());
+                    }
+                    // WorkerExited / InvalidLine 只能由读循环与健康监控产生，
+                    // 单行解析路径绝不发出
+                    other => {
+                        prop_assert!(
+                            !matches!(other, ParsedMessage::WorkerExited(_) | ParsedMessage::InvalidLine(_)),
+                            "行解析不得产出越界变体: {other:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// 【不变量 P2】任意合法 IpcResponse 序列化为 NDJSON 行后必须无损还原：
+        /// 响应信封解析对协议自身产出的所有信封是完备的（id / success / data /
+        /// error 逐字段一致），这是在途请求结算语义的根基
+        /// （data 用整数域策略：serde_json 浮点往返保真限制见 arb_json_value_exact）
+        #[test]
+        fn prop_response_envelope_roundtrip(
+            id in any::<u64>(),
+            success in any::<bool>(),
+            data in arb_json_value_exact(),
+            error in any::<Option<String>>(),
+        ) {
+            let resp = IpcResponse {
+                id,
+                result: IpcResult { success, data, error },
+            };
+            let line = serde_json::to_string(&resp).unwrap();
+            let msgs = parse_line_collect(&line);
+            let [ParsedMessage::Response(parsed)] = msgs.as_slice() else {
+                panic!("合法响应信封必须还原为 Response: {msgs:?}");
+            };
+            prop_assert_eq!(parsed.id, resp.id);
+            prop_assert_eq!(parsed.result.success, resp.result.success);
+            prop_assert_eq!(&parsed.result.data, &resp.result.data);
+            prop_assert_eq!(&parsed.result.error, &resp.result.error);
+        }
+
+        /// 【不变量 P3】事件信封同样无损还原（event 名与 data 逐字段一致）；
+        /// data 缺省与任意负载（含对象内协议关键字撞名）均不得改变分派
+        /// （data 用整数域策略：serde_json 浮点往返保真限制见 arb_json_value_exact）
+        #[test]
+        fn prop_event_envelope_roundtrip(event in any::<String>(), data in arb_json_value_exact()) {
+            let ev = IpcEvent { event, data };
+            let line = serde_json::to_string(&ev).unwrap();
+            let msgs = parse_line_collect(&line);
+            let [ParsedMessage::Event(parsed)] = msgs.as_slice() else {
+                panic!("合法事件信封必须还原为 Event: {msgs:?}");
+            };
+            prop_assert_eq!(&parsed.event, &ev.event);
+            prop_assert_eq!(&parsed.data, &ev.data);
+        }
+
+        /// 【不变量 P4】顶层 id 为 u64 的任意 JSON 行必以同一 id 结算在途请求：
+        /// 要么还原为合法 Response，要么产出 ResponseError{同 id}——绝不误派发
+        /// 为 Event、也绝不静默丢弃（历史遗留 F1 的防回归口径）；信封分派中
+        /// id 优先于 event（两者并存时按响应处理）
+        #[test]
+        fn prop_id_bearing_line_always_settles_with_same_id(id in any::<u64>(), rest in arb_json_value()) {
+            // rest 以对象形式铺进信封顶层（可含畸形 result / event / 杂散字段），
+            // id 最后写入，保证顶层 id 恒为 u64
+            let mut obj = serde_json::Map::new();
+            if let serde_json::Value::Object(map) = rest {
+                obj.extend(map);
+            } else {
+                obj.insert("payload".into(), rest);
+            }
+            obj.insert("id".into(), serde_json::json!(id));
+            let line = serde_json::Value::Object(obj).to_string();
+            // 期望口径直接以 serde 为准：能否反序列化为 IpcResponse 决定分支
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let expect_response = serde_json::from_value::<IpcResponse>(v).is_ok();
+            let msgs = parse_line_collect(&line);
+            prop_assert!(msgs.len() == 1, "带 u64 id 的行必须恰好结算一条: {msgs:?}");
+            match &msgs[0] {
+                ParsedMessage::Response(resp) => {
+                    prop_assert!(expect_response, "反序列化失败的信封不得伪装为 Response");
+                    prop_assert_eq!(resp.id, id);
+                }
+                ParsedMessage::ResponseError { id: got, .. } => {
+                    prop_assert!(!expect_response, "合法响应信封不得降级为 ResponseError");
+                    prop_assert_eq!(*got, id, "ResponseError 必须携带原始 id");
+                }
+                other => panic!("带 u64 id 的行不得派发为 {other:?}"),
+            }
+        }
+
+        /// 【不变量 P5】顶层 id 非 u64（字符串 / 浮点 / 负数 / 对象等）的响应形行
+        /// 不得派发任何消息——无有效 id 无法定位在途请求，宁可留痕也不误结算
+        #[test]
+        fn prop_non_u64_id_line_yields_no_message(id in arb_non_u64_json()) {
+            let line = serde_json::json!({
+                "id": id,
+                "result": { "success": true, "data": null, "error": null },
+            })
+            .to_string();
+            let msgs = parse_line_collect(&line);
+            prop_assert!(msgs.is_empty(), "非 u64 id 的行不得派发消息: {msgs:?}");
+        }
+
+        /// 【不变量 P6】既无 id 也无 event 键的 JSON 行不派发消息（未知格式仅留痕）
+        #[test]
+        fn prop_id_and_event_less_line_yields_no_message(v in arb_json_value()) {
+            // 剥掉顶层 id / event 键后喂入（非对象形状原样保留）
+            let line = match v {
+                serde_json::Value::Object(map) => serde_json::Value::Object(
+                    map.into_iter()
+                        .filter(|(k, _)| k != "id" && k != "event")
+                        .collect(),
+                ),
+                other => other,
+            }
+            .to_string();
+            let msgs = parse_line_collect(&line);
+            prop_assert!(msgs.is_empty(), "无 id/event 的行不得派发消息: {msgs:?}");
+        }
+
+        /// 【不变量 P7】extract_leading_id 对规范形态（任意 ASCII 空白穿插 +
+        /// 任意非数字起始后缀）精确接受：Some(id) 当且仅当数字段等于 id（G18）
+        #[test]
+        fn prop_extract_leading_id_accepts_canonical_prefix(
+            id in any::<u64>(),
+            ws in proptest::collection::vec(arb_ascii_ws(), 0..4),
+            suffix in arb_non_digit_starting_string(),
+        ) {
+            // ws[0] 行首 / ws[1] { 与 "id" 之间 / ws[2] "id" 与 : 之间 /
+            // ws[3] : 与数字之间；后缀必须非数字起始（数字扫描停在 id 之后）
+            let w = |i: usize| ws.get(i).copied().unwrap_or("");
+            let head = format!(
+                "{}{{{}\"id\"{}:{}{}{}",
+                w(0), w(1), w(2), w(3), id, suffix
+            );
+            prop_assert_eq!(extract_leading_id(&head), Some(id), "head: {:?}", head);
+        }
+
+        /// 【不变量 P8】非规范前缀形态一律拒绝（近失语料逐形钉住）：
+        /// 缺冒号 / 字符串 id / 缺数字 / 键名大小写 / id 非行首 / 缺括号 /
+        /// 行首杂散字符 / 数字溢出 u64 / 空串
+        #[test]
+        fn prop_extract_leading_id_rejects_near_misses(id in any::<u64>(), mutation in 0usize..9) {
+            let heads = [
+                format!("{{\"id\" {id}}}"),
+                format!("{{\"id\":\"{id}\"}}"),
+                "{\"id\":}".to_string(),
+                format!("{{ \"ID\": {id} }}"),
+                format!("{{\"result\":{{\"id\":{id}}}}}"),
+                format!("\"id\":{id}"),
+                format!("x{{\"id\":{id}}}"),
+                // 数字段溢出 u64：提取循环吃满数字但 parse 失败 → None
+                format!("{{\"id\":{id}999999999999999999999999}}"),
+                String::new(),
+            ];
+            prop_assert_eq!(
+                extract_leading_id(&heads[mutation]),
+                None,
+                "head: {:?}",
+                heads[mutation]
+            );
+        }
+
+        /// 【不变量 P9】任意字符串下 extract_leading_id 永不 panic（多字节 UTF-8
+        /// 边界、截断的 "id" 键、超长数字等边界全部落入 None 或合法 u64）
+        #[test]
+        fn prop_extract_leading_id_never_panics(s in any::<String>()) {
+            // 结果域由 P7/P8 钉住，此处只钉全域无 panic
+            let _ = extract_leading_id(&s);
+        }
+
+        /// 【不变量 P10】settle_oversized_line 对任意字节序列不 panic，且：
+        /// 产消息 ⟺ 前 512 字节为合法 UTF-8 且前缀可提取 id；产出的必为
+        /// success=false 的 Response，id 与提取结果一致（G18 结算口径）
+        #[test]
+        fn prop_settle_oversized_line_bounded_settlement(prefix in arb_oversized_prefix()) {
+            let head_len = prefix.len().min(512);
+            let expect = std::str::from_utf8(&prefix[..head_len])
+                .ok()
+                .and_then(extract_leading_id);
+            let msgs = settle_line_collect(&prefix);
+            match (expect, msgs.as_slice()) {
+                (Some(id), [ParsedMessage::Response(resp)]) => {
+                    prop_assert_eq!(resp.id, id);
+                    prop_assert!(!resp.result.success, "超限结算必为失败信封");
+                    let err = resp.result.error.clone().unwrap_or_default();
+                    prop_assert!(err.contains("MiB"), "错误消息应说明单行上限: {err}");
+                }
+                (Some(id), other) => {
+                    panic!("可提取 id={id} 的超长前缀必须结算: {other:?}");
+                }
+                (None, []) => {}
+                (None, other) => panic!("无法提取 id 的前缀不得产消息: {other:?}"),
+            }
+        }
+
+        /// 【不变量 P11】日志预览按 UTF-8 字符边界安全截断：任意字符串不 panic、
+        /// 结果必为原行前缀且不超过 200 字节、短行原样返回
+        #[test]
+        fn prop_log_line_preview_is_char_boundary_safe_prefix(line in any::<String>()) {
+            let preview = log_line_preview(&line);
+            prop_assert!(line.starts_with(preview), "预览必为原行前缀");
+            prop_assert!(preview.len() <= 200);
+            if line.len() <= 200 {
+                prop_assert_eq!(preview, line.as_str());
+            }
+        }
+
+        /// 【不变量 P12】Worker stderr 行解析对任意输入不 panic，且级别词
+        /// 要么为空（无格式续行）要么命中已知档位（大小写归一后）
+        #[test]
+        fn prop_parse_worker_stderr_line_level_domain(line in any::<String>()) {
+            let (level, _message) = parse_worker_stderr_line(&line);
+            prop_assert!(
+                level.is_empty()
+                    || [
+                        "TRACE", "DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL", "FATAL",
+                    ]
+                    .contains(&level.as_str()),
+                "未知级别词 {level}"
+            );
+        }
+
+        /// 【不变量 P13】stderr 转发对任意字节（含非 UTF-8 与空行）不 panic，
+        /// 且非 UTF-8 行与空白行不改继承状态（traceback 块语义的边界）
+        #[test]
+        fn prop_log_stderr_line_preserves_inheritance_on_undecodable(
+            bytes in proptest::collection::vec(any::<u8>(), 0..=256),
+            prev in any::<bool>(),
+        ) {
+            let got = log_stderr_line(&bytes, prev);
+            let inherits_neutral = std::str::from_utf8(&bytes)
+                .map(|s| s.trim_end().is_empty())
+                .unwrap_or(true);
+            if inherits_neutral {
+                prop_assert_eq!(got, prev, "非 UTF-8 / 空白行不改继承状态");
+            }
+        }
+    }
+
+    /// 任意非负 ASCII 空白串（空格 / \t / \r / 换行 / 换页），至多 3 字符
+    fn arb_ascii_ws() -> impl proptest::strategy::Strategy<Value = &'static str> {
+        prop_oneof![
+            Just(""),
+            Just(" "),
+            Just("\t"),
+            Just("\r"),
+            Just("\n"),
+            Just("\u{0c}"),
+            Just(" \t"),
+            Just("\r\n "),
+        ]
+    }
+
+    /// 不以 ASCII 数字起始的任意字符串（G18 后缀域：数字扫描必须停在 id 之后）
+    fn arb_non_digit_starting_string() -> impl proptest::strategy::Strategy<Value = String> {
+        any::<String>().prop_filter("后缀不得以数字起始", |s| {
+            !s.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        })
+    }
+
+    /// 非 u64 可表示的 JSON 值策略（id 字段的畸形域：字符串 / 浮点 / 负数 /
+    /// 对象 / 数组 / null / 布尔）
+    fn arb_non_u64_json() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
+        arb_json_value().prop_filter("排除 as_u64 可命中的值", |v| v.as_u64().is_none())
+    }
+
+    /// 超限行前缀策略：任意字节序列 + 嵌入 `{"id":N` 规范前缀的变体
+    /// （后者保证 id 提取成功路径有足够密度）
+    fn arb_oversized_prefix() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            1 => proptest::collection::vec(any::<u8>(), 0..=1200),
+            2 => (any::<u64>(), proptest::collection::vec(any::<u8>(), 0..=1100))
+                .prop_map(|(id, tail)| {
+                    let mut b = format!("{{\"id\":{id},\"result\":{{").into_bytes();
+                    b.extend(tail);
+                    b
+                }),
+        ]
+    }
 }

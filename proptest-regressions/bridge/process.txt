@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 98eea763a4615c150f349747b4db7ab778faeaa1f773240c1bcbd1539f39e4d3 # shrinks to event = "", data = Object {"": Number(1.7872078615939353e+91)}
+cc 9c63ca96877023f71a1d0c3e3f0ee01bc6503dbaa731da7341c6824bb0d596b4 # shrinks to id = 0, success = false, data = Array [Number(-1.0443002892504437e-284)], error = None

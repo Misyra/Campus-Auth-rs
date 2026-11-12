@@ -2002,4 +2002,279 @@ mod tests {
         assert_eq!(s.message, "导航超时: #auth-page");
         assert_eq!(s.duration_ms, 1200);
     }
+
+    // ============ 随机信封属性测试（proptest） ============
+    //
+    // 注：`arb_json_value` 与 src/bridge/process.rs 测试模块中的同名策略互为镜像，
+    // 各自独立维护（跨模块共用会引入生产文件上的 cfg(test) 桥）。
+
+    use proptest::prelude::*;
+
+    /// 属性测试统一口径：512 cases（CI 亲和，无秒级超时；随机失败必可 shrink 复现）
+    fn prop_config() -> proptest::test_runner::Config {
+        proptest::test_runner::Config::with_cases(512)
+    }
+
+    /// 递归 JSON 值策略核心：对象 / 数组 / 字符串（任意 Unicode）/ 数值 /
+    /// 布尔 / null，嵌套至多 4 层；键名混入协议关键字以提高「形似信封」密度。
+    /// `allow_floats=false` 时数值叶子仅限整数（供 roundtrip 类属性使用，
+    /// 见 [`arb_json_value_exact`] 文档）。
+    fn arb_json_value_impl(
+        allow_floats: bool,
+    ) -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+        // 数值叶子：allow_floats 时混入任意有限浮点（非有限浮点进不了 serde_json）
+        let numeric: proptest::strategy::BoxedStrategy<serde_json::Value> = if allow_floats {
+            any::<f64>()
+                .prop_filter("非有限浮点不可序列化", |f| f.is_finite())
+                .prop_map(|f| serde_json::json!(f))
+                .boxed()
+        } else {
+            any::<i64>().prop_map(|n| serde_json::json!(n)).boxed()
+        };
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            numeric,
+            any::<String>().prop_map(serde_json::Value::String),
+            // 协议关键字键名（对象字段撞名时提高信封相似度）
+            prop_oneof![
+                Just("id".to_string()),
+                Just("result".to_string()),
+                Just("event".to_string()),
+                Just("data".to_string()),
+                Just("success".to_string()),
+                Just("error".to_string()),
+            ]
+            .prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(
+            4,  // 嵌套深度
+            64, // 期望规模
+            8,  // 分支大小
+            |inner| {
+                prop_oneof![
+                    // 对象（键可重复，Map 收敛为 last-wins，属合法 JSON 语义）
+                    proptest::collection::vec((any::<String>(), inner.clone()), 0..8).prop_map(
+                        |entries| serde_json::Value::Object(entries.into_iter().collect())
+                    ),
+                    // 数组
+                    proptest::collection::vec(inner, 0..8).prop_map(serde_json::Value::Array),
+                ]
+            },
+        )
+        .boxed()
+    }
+
+    /// 递归 JSON 值策略（含任意有限浮点）：用于不要求数值位保真的
+    /// 信封契约类属性
+    fn arb_json_value() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
+        arb_json_value_impl(true)
+    }
+
+    /// roundtrip 安全变体（不含任意浮点）。
+    ///
+    /// 属性测试实测：serde_json 对部分 f64 的序列化→解析往返存在 1 ulp 保真
+    /// 损失（其解析器非全区间正确舍入）。数值位保真不属 IPC 契约（数据透传以
+    /// serde_json 为界），故逐字段相等类属性（S2）用整数域版本钉住其余结构的
+    /// 无损性；浮点路径的信封契约覆盖由 [`arb_json_value`] 承担。
+    fn arb_json_value_exact() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
+        arb_json_value_impl(false)
+    }
+
+    /// 全部 10 个声明 outcome 变体的均匀策略。Outcome 为 `#[non_exhaustive]`，
+    /// 未来新增变体时本策略需同步（同 crate 内 S4 的 match 穷尽检查会编译失败兜底）。
+    fn arb_outcome() -> impl proptest::strategy::Strategy<Value = Outcome> {
+        prop_oneof![
+            Just(Outcome::Success),
+            Just(Outcome::Cancelled),
+            Just(Outcome::NavigationTimeout),
+            Just(Outcome::SelectorFailed),
+            Just(Outcome::AssertionFailed),
+            Just(Outcome::CaptchaFailed),
+            Just(Outcome::InvalidCredential),
+            Just(Outcome::ManualRequired),
+            Just(Outcome::NetworkError),
+            Just(Outcome::UnknownError),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        /// 【不变量 S1】任意 (success, data, error) 信封解析永不 panic，且满足契约：
+        /// 成功信封 data 可解析则逐字段透传，否则 UnknownError +「结果解析失败」；
+        /// 失败信封绝不产出 Success（矛盾信封防御）、可恢复且未宣称 Success 则
+        /// 精确恢复 outcome、否则 UnknownError 兜底且消息必非空
+        #[test]
+        fn prop_parse_ipc_response_envelope_contract(
+            success in any::<bool>(),
+            data in arb_json_value(),
+            error in any::<Option<String>>(),
+        ) {
+            let resp = IpcResponse {
+                id: 1,
+                result: crate::bridge::IpcResult {
+                    success,
+                    data: data.clone(),
+                    error: error.clone(),
+                },
+            };
+            let s = LoginSession::parse_ipc_response(resp);
+            if success {
+                match serde_json::from_value::<StructuredResult>(data.clone()) {
+                    Ok(expect) => {
+                        prop_assert_eq!(s.outcome, expect.outcome, "成功信封应逐字段透传");
+                        prop_assert_eq!(&s.message, &expect.message);
+                        prop_assert_eq!(&s.data, &expect.data);
+                        prop_assert_eq!(&s.screenshot_url, &expect.screenshot_url);
+                        prop_assert_eq!(s.duration_ms, expect.duration_ms);
+                    }
+                    Err(_) => {
+                        prop_assert_eq!(
+                            s.outcome,
+                            Outcome::UnknownError,
+                            "不可解析的成功信封必须回退 UnknownError"
+                        );
+                        prop_assert!(
+                            s.message.starts_with("结果解析失败"),
+                            "回退消息口径: {}",
+                            s.message
+                        );
+                        prop_assert_eq!(s.duration_ms, 0);
+                    }
+                }
+            } else {
+                // 矛盾信封防御：失败信封任何情况下不得产出 Success
+                prop_assert_ne!(s.outcome, Outcome::Success);
+                let recoverable = serde_json::from_value::<StructuredResult>(data.clone())
+                    .ok()
+                    .filter(|s| s.outcome != Outcome::Success);
+                match recoverable {
+                    Some(expect) => {
+                        prop_assert_eq!(s.outcome, expect.outcome, "失败信封应精确恢复 outcome");
+                        let expect_msg = if expect.message.is_empty() {
+                            // 回退口径：error 非空串才采信，空串/缺失一律兜底文案
+                            error
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "Worker 返回失败".into())
+                        } else {
+                            expect.message
+                        };
+                        prop_assert_eq!(&s.message, &expect_msg);
+                        prop_assert_eq!(s.duration_ms, expect.duration_ms);
+                        prop_assert_eq!(&s.screenshot_url, &expect.screenshot_url);
+                    }
+                    None => {
+                        prop_assert_eq!(s.outcome, Outcome::UnknownError);
+                        prop_assert_eq!(
+                            &s.message,
+                            &error
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "Worker 返回失败".into())
+                        );
+                        prop_assert_eq!(s.duration_ms, 0);
+                    }
+                }
+                prop_assert!(!s.message.is_empty(), "失败信封消息必非空");
+            }
+        }
+
+        /// 【不变量 S2】成功信封对任意 StructuredResult 无损透传（round-trip 完备性）：
+        /// 任意 outcome / message / data / screenshot_url / duration_ms 组合经序列化
+        /// 成信封后逐字段还原（data 用整数域策略：serde_json 浮点往返保真限制
+        /// 见 arb_json_value_exact）
+        #[test]
+        fn prop_success_envelope_passthrough(
+            outcome in arb_outcome(),
+            message in any::<String>(),
+            data in arb_json_value_exact(),
+            screenshot_url in any::<Option<String>>(),
+            duration_ms in any::<u64>(),
+        ) {
+            let s = StructuredResult { outcome, message, data, screenshot_url, duration_ms };
+            let resp = IpcResponse {
+                id: 1,
+                result: crate::bridge::IpcResult {
+                    success: true,
+                    data: serde_json::to_value(&s).unwrap(),
+                    error: None,
+                },
+            };
+            let parsed = LoginSession::parse_ipc_response(resp);
+            prop_assert_eq!(parsed.outcome, s.outcome);
+            prop_assert_eq!(parsed.message, s.message);
+            prop_assert_eq!(parsed.data, s.data);
+            prop_assert_eq!(parsed.screenshot_url, s.screenshot_url);
+            prop_assert_eq!(parsed.duration_ms, s.duration_ms);
+        }
+
+        /// 【不变量 S3】失败信封恢复 outcome 后必须保持 classify 语义：恢复出的
+        /// outcome 与直接拿到该 outcome 的重试/终态/回收判定完全一致——
+        /// manual_required / invalid_credential / unknown_error 恢复后仍是终态失败，
+        /// 可重试 outcome 恢复后仍可重试（C1 修复的核心回归口径）
+        #[test]
+        fn prop_failure_envelope_recovery_preserves_classification(
+            outcome in arb_outcome().prop_filter("Success 由矛盾信封分支覆盖", |o| *o != Outcome::Success),
+            error in any::<Option<String>>(),
+        ) {
+            // 可恢复失败信封：data 为合法 StructuredResult 且未宣称 Success
+            let data = serde_json::json!({
+                "outcome": serde_json::to_value(outcome).unwrap(),
+                "message": "",
+                "duration_ms": 1234u64,
+            });
+            let resp = IpcResponse {
+                id: 1,
+                result: crate::bridge::IpcResult { success: false, data, error: error.clone() },
+            };
+            let s = LoginSession::parse_ipc_response(resp);
+            prop_assert_eq!(s.outcome, outcome, "可恢复失败信封必须精确恢复 outcome");
+            prop_assert_eq!(
+                s.message,
+                error
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Worker 返回失败".into()),
+                "空 message 必须回填非空 error（空串错误视为缺失，兜底文案）"
+            );
+            prop_assert_eq!(s.duration_ms, 1234);
+            prop_assert_eq!(
+                classify(s.outcome),
+                classify(outcome),
+                "恢复不得改判重试/终态语义"
+            );
+            prop_assert_eq!(
+                should_force_recycle(s.outcome),
+                should_force_recycle(outcome),
+                "恢复不得改判 Worker 回收语义"
+            );
+        }
+
+        /// 【不变量 S4】classify 全变体不变量：可重试集合恰为
+        /// {CaptchaFailed, NavigationTimeout, SelectorFailed, AssertionFailed,
+        /// NetworkError}；manual_required / invalid_credential / unknown_error
+        /// 终态失败（manual_required 终态不得被改判可重试）；Success/Cancelled
+        /// 各归其终态；should_force_recycle 仅 NetworkError
+        #[test]
+        fn prop_classify_invariants(outcome in arb_outcome()) {
+            match outcome {
+                Outcome::Success => {
+                    prop_assert_eq!(classify(outcome), ResultAction::Terminal(LoginTerminal::Success));
+                }
+                Outcome::Cancelled => {
+                    prop_assert_eq!(classify(outcome), ResultAction::Terminal(LoginTerminal::Cancelled));
+                }
+                Outcome::ManualRequired | Outcome::InvalidCredential | Outcome::UnknownError => {
+                    prop_assert_eq!(classify(outcome), ResultAction::Terminal(LoginTerminal::Failed));
+                }
+                Outcome::CaptchaFailed
+                | Outcome::NavigationTimeout
+                | Outcome::SelectorFailed
+                | Outcome::AssertionFailed
+                | Outcome::NetworkError => {
+                    prop_assert_eq!(classify(outcome), ResultAction::Retry);
+                }
+            }
+            prop_assert_eq!(should_force_recycle(outcome), outcome == Outcome::NetworkError);
+        }
+    }
 }

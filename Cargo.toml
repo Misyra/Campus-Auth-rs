@@ -164,6 +164,8 @@ predicates = "3"
 tower = { version = "0.5", features = ["util"] }
 # 集成测试构造真实发布包结构（上传路径会真的解压并校验 extracted exe 存在）
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 属性测试：NDJSON IPC 解析与登录抢占决策的高风险纯逻辑面（随机输入 + shrink）
+proptest = "1"
 
 [profile.release]
 strip = true
