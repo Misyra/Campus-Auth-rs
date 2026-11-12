@@ -91,7 +91,7 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 | 命令 | 说明 |
 |------|------|
 | `worker_health_check` | Worker 进程级健康探测，上报运行时能力（`capabilities.ocr`，Rust 侧缓存并供 `/api/ocr/status` 消费） |
-| `browser_health_check` | 浏览器/Worker 健康探测，未安装 Playwright 时返回 `healthy: false` |
+| `browser_health_check` | 浏览器/Worker 健康探测，浏览器二进制缺失时返回 `healthy: false`（附 `missing` 组件明细；Playwright Python 包缺失时 Worker 进程根本无法启动，该场景由环境引导闭环兜底，不会走到本命令） |
 | `test_redirect` | 用独立可见的临时浏览器验证触发地址能否到达校园网认证页；优先遵循统一 `network_policy`；缺省时兼容 `browser_settings.redirect_test_use_proxy`（默认 `false`）：忽略 `bind_proxy`，Chromium 系显式禁用系统代理（纯净模式同样生效）；设为 `true` 时保留绑定代理及浏览器默认系统代理行为。不修改全局代理或正式登录设置；TUN / VPN 路由需用户配置直连或临时暂停。params：`trigger_url`（必需，http/https）、`browser_settings`、`cancel_id`；返回 `{"status": "detected" \| "online" \| "not_detected"}`（刻意不含最终 URL 与页面正文，避免门户 token 进入 IPC） |
 | `execute_login_attempt` | 执行一次登录尝试（按 TaskConfig 的步骤序列） |
 | `execute_browser_task` | 执行通用浏览器任务（自定义步骤序列） |

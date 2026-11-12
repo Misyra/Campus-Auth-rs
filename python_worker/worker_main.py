@@ -26,8 +26,11 @@ import threading
 import time
 from typing import Callable
 
-# 标准库导入完成后，导入本 Worker 模块（其顶层导入 playwright 等重型依赖，
-# 放在此处延后加载，避免 import 阶段即因缺失依赖而崩溃）
+# 标准库导入完成后，导入本 Worker 模块（其顶层导入 playwright 等重型依赖）。
+# 注意：playwright_worker 顶层又导入 step_handlers，后者顶层即 import playwright
+# ——依赖缺失时本 import 同样会崩，"延后加载防崩溃"并不成立。依赖完整性的
+# 兜底由环境引导闭环（Rust EnvironmentManager 引导安装 + uv sync）保证；
+# 此处崩溃是期望行为：fail-fast 让 BridgeSupervisor 立即感知并走重装/重启链路。
 from models import Outcome  # noqa: E402
 from playwright_worker import (  # noqa: E402
     COMMANDS,
