@@ -130,8 +130,19 @@ jobs:
             throw "tag $env:GITHUB_REF_NAME 与 Cargo.toml version=$cargo 不一致，请先同步版本号"
           }
 
+      # 供应链审计：构建经 cargo-auditable 包装，把依赖清单审计信息嵌入产物二进制的
+      # 版本控制信息段——不影响产物行为；campus-auth 与 campus-auth-helper 两个
+      # binary 都经此步构建，均被覆盖
+      # 安装走 taiki-e/install-action 预编译二进制（SHA pin 与 fuzz.yml 一致）而非
+      # cargo install：后者从源码编译要数分钟，rust-cache 只省二次编译，缓存 miss
+      # 时六矩阵各付一次全量编译
+      - name: 安装 cargo-auditable
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-auditable
+
       - name: Release 构建
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo auditable build --release --locked --target ${{ matrix.target }}
 
       - name: 校验 Windows 真实产物版本资源
         if: runner.os == 'Windows'
