@@ -554,8 +554,13 @@ async function confirmImport(): Promise<void> {
         </div>
       </div>
 
+      <!-- 首拉加载态：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无配置方案」） -->
+      <div v-if="p.profilesLoading.value && !Object.keys(p.profiles.value).length" class="card">
+        <div class="loading-state"><div class="spinner"></div><p>正在加载方案…</p></div>
+      </div>
+
       <!-- 空状态：复用全局 .empty-state（misc.css），标题/描述走通用工具类 -->
-      <div v-if="!Object.keys(p.profiles.value).length" class="card">
+      <div v-else-if="!Object.keys(p.profiles.value).length" class="card">
         <div class="empty-state">
           <IconApp name="wifi" :stroke-width="1.5" />
           <strong class="empty-title">暂无配置方案</strong>

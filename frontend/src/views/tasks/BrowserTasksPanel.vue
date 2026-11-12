@@ -22,6 +22,7 @@ import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useProfiles } from "@/composables/useProfiles";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
 import { autosaveLabel } from "@/utils/autosave";
@@ -42,6 +43,10 @@ const drag = useDragSort(t.tasks, { tasks: t.tasks, scripts: s.scripts, http: h.
 
 /** 实际列表（任务目录的浏览器任务视图） */
 const browserTasks = computed(() => t.tasks.value);
+
+// 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无任务配置」）
+const directory = useTaskDirectory();
+const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
 
 /**
  * 行下标 → 拖拽用的**全量**下标。
@@ -245,7 +250,12 @@ onMounted(async () => {
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!browserTasks.length">
+          <tr v-if="listLoading">
+            <td colspan="6">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载任务…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!browserTasks.length">
             <td colspan="6">
               <div class="empty-state">
                 <IconApp name="layout" :stroke-width="1.5" />

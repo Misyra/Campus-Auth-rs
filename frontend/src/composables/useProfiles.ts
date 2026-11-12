@@ -39,6 +39,8 @@ export type EditingProfile = Profile & {
 };
 
 const profiles = ref<Record<string, ProfileSummary>>({});
+/** 方案列表拉取是否在途：供列表页区分「正在加载」与「确实为空」两种空态（配合 fetchGuard 首拉语义） */
+const profilesLoading = ref(false);
 const activeProfileId = ref("default");
 // 与后端 SettingsData::default 一致（2026-09-16 起默认关闭自动切换）；
 // 加载后即以服务端下发为准，此处只是首帧占位
@@ -78,6 +80,7 @@ const fetchGuard = createFetchGuard(5000);
 
 async function fetchProfiles(force = false): Promise<void> {
   if (!fetchGuard.shouldFetch(force)) return;
+  profilesLoading.value = true;
   try {
     const data = await profilesApi.list();
     Object.keys(profiles.value).forEach((k) => delete profiles.value[k]);
@@ -92,6 +95,8 @@ async function fetchProfiles(force = false): Promise<void> {
     if (fetchProfilesFail.trackFailure()) {
       toastOnly(false, "加载配置方案失败");
     }
+  } finally {
+    profilesLoading.value = false;
   }
 }
 
@@ -411,6 +416,7 @@ async function readShareFile(): Promise<{ payload: unknown; fileName: string } |
 export function useProfiles() {
   return {
     profiles,
+    profilesLoading,
     activeProfileId,
     autoSwitch,
     editingProfile,

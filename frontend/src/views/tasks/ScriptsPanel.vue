@@ -22,6 +22,7 @@ import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
 import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useDragSort } from "@/utils/drag";
 import { autosaveLabel } from "@/utils/autosave";
 import { formatMtime } from "@/utils/formatters";
@@ -57,6 +58,10 @@ const {
 const { tasks: browserTasks } = useTasks();
 const { httpTasks } = useHttpTasks();
 const drag = useDragSort(scripts, { tasks: browserTasks, scripts, http: httpTasks });
+
+// 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无自定义脚本」）
+const directory = useTaskDirectory();
+const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
 
 /**
  * 行下标 → 拖拽用的**全量**下标。
@@ -211,7 +216,12 @@ onMounted(async () => {
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!scripts.length">
+          <tr v-if="listLoading">
+            <td colspan="6">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载脚本…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!scripts.length">
             <td colspan="6">
               <div class="empty-state">
                 <IconApp name="code" :stroke-width="1.5" />

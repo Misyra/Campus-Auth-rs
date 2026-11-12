@@ -235,7 +235,12 @@ onMounted(async () => {
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!st.scheduledTasks.value.length">
+          <tr v-if="st.scheduledLoading.value && !st.scheduledLoaded.value">
+            <td colspan="8">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载定时任务…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!st.scheduledTasks.value.length">
             <td colspan="8">
               <div class="empty-state">
                 <IconApp name="calendar" :stroke-width="1.5" />

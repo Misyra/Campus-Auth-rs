@@ -28,6 +28,7 @@ import { useRepoImport } from "@/composables/useRepoImport";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useToast } from "@/composables/useToast";
 import { autosaveLabel } from "@/utils/autosave";
 import { useDragSort } from "@/utils/drag";
@@ -64,6 +65,10 @@ const { running, result: testResult, runHttpTaskTest, clearTestResult } = useHtt
 const { tasks: browserTasks } = useTasks();
 const { scripts } = useScripts();
 const drag = useDragSort(httpTasks, { tasks: browserTasks, scripts, http: httpTasks });
+
+// 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无 HTTP 登录任务」）
+const directory = useTaskDirectory();
+const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
 
 /**
  * 行下标 → 拖拽用的**全量**下标。
@@ -259,7 +264,12 @@ onMounted(async () => {
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!httpTasks.length">
+          <tr v-if="listLoading">
+            <td colspan="7">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载 HTTP 登录任务…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!httpTasks.length">
             <td colspan="7">
               <div class="empty-state">
                 <IconApp name="globe" :stroke-width="1.5" />
