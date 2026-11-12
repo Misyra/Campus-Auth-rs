@@ -17,8 +17,10 @@ from pathlib import Path
 
 import pytest
 
+import browser_lifecycle
 import playwright_worker
 import worker_main
+import worker_paths
 from playwright_worker import (
     _PAGE_RESOURCE_PROBE_JS,
     _capture_page_resources,
@@ -270,14 +272,14 @@ def test_close_browser_internal_timeout_yields_to_command_budget(monkeypatch):
         async def fake_session(self):
             released.append(True)
 
-        orig_env = pw._WORKER_KEEP_ALIVE
+        orig_env = browser_lifecycle._WORKER_KEEP_ALIVE
         orig_session = WorkerCore._close_session
-        pw._WORKER_KEEP_ALIVE = True
+        browser_lifecycle._WORKER_KEEP_ALIVE = True
         WorkerCore._close_session = fake_session
         try:
             await core.handle_close_browser({"rust_timeout_ms": 8_000})
         finally:
-            pw._WORKER_KEEP_ALIVE = orig_env
+            browser_lifecycle._WORKER_KEEP_ALIVE = orig_env
             WorkerCore._close_session = orig_session
         assert released == [True]
         assert timeouts == [pytest.approx(7.2 - 0.5)]
@@ -285,12 +287,12 @@ def test_close_browser_internal_timeout_yields_to_command_budget(monkeypatch):
         # 无预算（旧主程序）：保持 8s 固定兜底
         timeouts.clear()
         released.clear()
-        pw._WORKER_KEEP_ALIVE = True
+        browser_lifecycle._WORKER_KEEP_ALIVE = True
         WorkerCore._close_session = fake_session
         try:
             await core.handle_close_browser({})
         finally:
-            pw._WORKER_KEEP_ALIVE = orig_env
+            browser_lifecycle._WORKER_KEEP_ALIVE = orig_env
             WorkerCore._close_session = orig_session
         assert timeouts == [pw._WAIT_TIMEOUT_SECS]
 
@@ -357,7 +359,7 @@ def _feedback_core(monkeypatch, tmp_path: Path, page: _FeedbackPage) -> WorkerCo
     core = WorkerCore()
     core._page = page
     core._last_browser_settings = {"browser_channel": "chromium"}
-    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
     return core
 
 
@@ -664,10 +666,10 @@ def test_page_capture_cancelled_between_stages(monkeypatch, tmp_path):
 
         core._launch_browser = fake_launch
         monkeypatch.setattr(
-            playwright_worker, "_capture_dir", lambda: tmp_path / "latest"
+            worker_paths, "_capture_dir", lambda: tmp_path / "latest"
         )
         # finally 会武装空闲回收：置 keep_alive 使其成为 no-op，避免悬挂任务
-        monkeypatch.setattr(playwright_worker, "_WORKER_KEEP_ALIVE", True)
+        monkeypatch.setattr(browser_lifecycle, "_WORKER_KEEP_ALIVE", True)
 
         with pytest.raises(StepCancelled):
             await core.handle_page_capture({"url": "http://portal.example.com/", "cancel_id": "pc-cancel"})
@@ -790,10 +792,10 @@ def test_page_capture_preserves_keep_alive_session(monkeypatch, tmp_path):
 
         core._launch_browser = fake_launch
         monkeypatch.setattr(
-            playwright_worker, "_capture_dir", lambda: tmp_path / "latest"
+            worker_paths, "_capture_dir", lambda: tmp_path / "latest"
         )
         # finally 会武装空闲回收：置 keep_alive 使其成为 no-op，避免悬挂任务
-        monkeypatch.setattr(playwright_worker, "_WORKER_KEEP_ALIVE", True)
+        monkeypatch.setattr(browser_lifecycle, "_WORKER_KEEP_ALIVE", True)
 
         result = await core.handle_page_capture({"url": "http://portal.example.com/"})
 

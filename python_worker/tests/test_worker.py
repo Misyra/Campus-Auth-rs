@@ -16,6 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import browser_detect
+import browser_lifecycle as worker_lifecycle
+import debug_commands
+import worker_paths
+
 
 # ── 超时归一化 ──
 
@@ -41,11 +46,12 @@ def test_custom_browser_health_requires_existing_file():
 
 
 def test_task_screenshot_cleanup_is_deferred(monkeypatch):
+    import debug_commands
     import playwright_worker
     from playwright_worker import WorkerCore
     from step_handlers import StepContext
 
-    monkeypatch.setattr(playwright_worker, "TASK_SCREENSHOT_RETENTION_SECS", 0)
+    monkeypatch.setattr(debug_commands, "TASK_SCREENSHOT_RETENTION_SECS", 0)
 
     async def run(path: Path):
         core = WorkerCore()
@@ -210,6 +216,7 @@ def test_force_interrupt_tears_down_debug_session(tmp_path):
 
 def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
     import playwright_worker as worker
+    import worker_paths
 
     files = [tmp_path / "old.png", tmp_path / "old.jpg", tmp_path / "old.jpeg"]
     keep = tmp_path / "note.txt"
@@ -217,8 +224,8 @@ def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
         path.write_bytes(b"x")
         # 固定早于模块加载时刻，避免文件系统时间精度导致边界不稳定。
         os.utime(path, (1, 1))
-    monkeypatch.setattr(worker, "_debug_screenshot_dir", lambda: tmp_path)
-    monkeypatch.setattr(worker, "_MODULE_LOAD_TIME", 2)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_MODULE_LOAD_TIME", 2)
 
     worker._purge_stale_debug_screenshots()
 
@@ -228,13 +235,14 @@ def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
 
 def test_purge_stale_debug_screenshots_removes_feedback_directory(monkeypatch, tmp_path):
     import playwright_worker as worker
+    import worker_paths
 
     stale = tmp_path / "feedback-old"
     stale.mkdir()
     (stale / "page.html").write_text("secret", encoding="utf-8")
     os.utime(stale, (1, 1))
-    monkeypatch.setattr(worker, "_debug_screenshot_dir", lambda: tmp_path)
-    monkeypatch.setattr(worker, "_MODULE_LOAD_TIME", 2)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_MODULE_LOAD_TIME", 2)
 
     worker._purge_stale_debug_screenshots()
 
@@ -1006,15 +1014,15 @@ def test_handle_close_browser_keep_alive_session_release():
         async def _fail_close(self):
             raise AssertionError("keep_alive 会话级档不应全量 close_browser")
 
-        orig_env = pw._WORKER_KEEP_ALIVE
+        orig_env = worker_lifecycle._WORKER_KEEP_ALIVE
         orig_session, orig_close = WorkerCore._close_session, WorkerCore.close_browser
-        pw._WORKER_KEEP_ALIVE = True
+        worker_lifecycle._WORKER_KEEP_ALIVE = True
         WorkerCore._close_session = fake_session
         WorkerCore.close_browser = _fail_close
         try:
             result = await core.handle_close_browser({})
         finally:
-            pw._WORKER_KEEP_ALIVE = orig_env
+            worker_lifecycle._WORKER_KEEP_ALIVE = orig_env
             WorkerCore._close_session = orig_session
             WorkerCore.close_browser = orig_close
         assert result == {}
@@ -1183,11 +1191,11 @@ def test_browser_idle_release_fires_and_cancels():
         # 空闲回收在生命周期锁内直接走锁内关闭（close_browser 公开入口会二次
         # 加锁），故探针挂在 _close_browser_locked 上
         orig_close = WorkerCore._close_browser_locked
-        orig_secs = pw.BROWSER_IDLE_RELEASE_SECS
-        orig_env = pw._WORKER_KEEP_ALIVE
+        orig_secs = worker_lifecycle.BROWSER_IDLE_RELEASE_SECS
+        orig_env = worker_lifecycle._WORKER_KEEP_ALIVE
         WorkerCore._close_browser_locked = fake_close
-        pw.BROWSER_IDLE_RELEASE_SECS = 0.05
-        pw._WORKER_KEEP_ALIVE = False
+        worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = 0.05
+        worker_lifecycle._WORKER_KEEP_ALIVE = False
         try:
             # 到期触发
             core._arm_browser_idle_release()
@@ -1202,13 +1210,13 @@ def test_browser_idle_release_fires_and_cancels():
             await asyncio.sleep(0.1)
             assert closed == [True], "取消后不应触发"
             # keep_alive 时武装为 no-op
-            pw._WORKER_KEEP_ALIVE = True
+            worker_lifecycle._WORKER_KEEP_ALIVE = True
             core._arm_browser_idle_release()
             assert core._browser_idle_task is None, "keep_alive 时不装空闲回收"
         finally:
             WorkerCore._close_browser_locked = orig_close
-            pw.BROWSER_IDLE_RELEASE_SECS = orig_secs
-            pw._WORKER_KEEP_ALIVE = orig_env
+            worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = orig_secs
+            worker_lifecycle._WORKER_KEEP_ALIVE = orig_env
 
     asyncio.run(_run())
 
@@ -1252,9 +1260,11 @@ def _chromium_registry(tmp: Path, revision: str = "1234") -> Path:
 
 def _bind_probe_paths(monkeypatch, pw, cache_dir: Path, registry: Path | None) -> None:
     """把缓存目录与 registry 指到临时位置，并清空必需目录名缓存"""
-    monkeypatch.setattr(pw, "_browser_cache_dir", lambda: cache_dir)
-    monkeypatch.setattr(pw, "_registry_path", lambda: registry)
-    monkeypatch.setattr(pw, "_REQUIRED_DIRS_CACHE", {})
+    # 探测逻辑归属 browser_detect 伴生模块（playwright_worker 已门面化），
+    # monkeypatch 统一打在属主模块上
+    monkeypatch.setattr(browser_detect, "_browser_cache_dir", lambda: cache_dir)
+    monkeypatch.setattr(browser_detect, "_registry_path", lambda: registry)
+    monkeypatch.setattr(browser_detect, "_REQUIRED_DIRS_CACHE", {})
 
 
 def _write_browser_dir(cache_dir: Path, name: str, *, complete: bool) -> None:
@@ -1353,8 +1363,8 @@ def test_managed_probe_honours_browsers_path_override(monkeypatch):
         _write_browser_dir(cache, "chromium-1234", complete=True)
         _write_browser_dir(cache, "chromium_headless_shell-1234", complete=True)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
-        monkeypatch.setattr(pw, "_registry_path", lambda: _chromium_registry(tmp_path))
-        monkeypatch.setattr(pw, "_REQUIRED_DIRS_CACHE", {})
+        monkeypatch.setattr(browser_detect, "_registry_path", lambda: _chromium_registry(tmp_path))
+        monkeypatch.setattr(browser_detect, "_REQUIRED_DIRS_CACHE", {})
 
         assert pw._browser_cache_dir() == cache
         assert pw._ensure_browser("chromium") is True
@@ -1794,12 +1804,12 @@ def test_idle_release_close_serializes_with_command_ensure(monkeypatch):
 
         orig_close = WorkerCore._close_browser_locked
         orig_start = WorkerCore._start_browser
-        orig_secs = pw.BROWSER_IDLE_RELEASE_SECS
-        orig_env = pw._WORKER_KEEP_ALIVE
+        orig_secs = worker_lifecycle.BROWSER_IDLE_RELEASE_SECS
+        orig_env = worker_lifecycle._WORKER_KEEP_ALIVE
         WorkerCore._close_browser_locked = slow_close_locked
         WorkerCore._start_browser = fake_start
-        pw.BROWSER_IDLE_RELEASE_SECS = 0.02
-        pw._WORKER_KEEP_ALIVE = False
+        worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = 0.02
+        worker_lifecycle._WORKER_KEEP_ALIVE = False
         try:
             core._arm_browser_idle_release()
             await close_entered.wait()
@@ -1818,8 +1828,8 @@ def test_idle_release_close_serializes_with_command_ensure(monkeypatch):
         finally:
             WorkerCore._close_browser_locked = orig_close
             WorkerCore._start_browser = orig_start
-            pw.BROWSER_IDLE_RELEASE_SECS = orig_secs
-            pw._WORKER_KEEP_ALIVE = orig_env
+            worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = orig_secs
+            worker_lifecycle._WORKER_KEEP_ALIVE = orig_env
             core._cancel_browser_idle_release()
 
     asyncio.run(_run())

@@ -31,6 +31,38 @@ WORKER_LOG_LEVEL=DEBUG python worker_main.py
 `worker_main.py` 启动后阻塞等待 stdin 命令，收到 `shutdown` 命令或 stdin EOF 时
 干净退出并释放浏览器资源。
 
+## 模块结构（伴生模块范式）
+
+`playwright_worker.py` 是**组装门面**：按职责拆分的伴生模块以 Mixin 形式
+多继承回 `WorkerCore`，命令注册表 `COMMANDS` 在此收敛为单一事实源，并向
+`worker_main` / tests / Rust 环境探针统一再导出符号。拆分纪律与既有的纯逻辑
+伴生模块（`models` / `step_handlers` / `ocr_runtime` / `debug_session` /
+`config_session` / `auto_login` / `variable_resolver`）一致：方法签名与行为
+逐字段保留，只搬移与接线。
+
+| 文件 | 职责 |
+|------|------|
+| `worker_main.py` | IPC 入口：stdin 读取线程、命令分发与超时自愈（`_dispatch_guarded`）、响应信封脱敏 |
+| `playwright_worker.py` | 组装门面：`WorkerCore`（`__init__` 状态拓扑 + 健康检查/shutdown）、`COMMANDS` 注册表（18 条）、`WORKER_VERSION`、符号再导出 |
+| `cancel_registry.py` | 取消注册表（cancel_id → Event，跨线程；含「取消先于注册到达」pending 语义） |
+| `worker_paths.py` | 产物路径锚定（debug 截图 / 反馈快照 / AI 捕获 / 浏览器持久数据）与启动残留清理 |
+| `browser_detect.py` | 浏览器环境探测（registry + 安装完成标记；语义与 Rust `environment::browser_registry` 一致） |
+| `browser_launch.py` | 上下文准备：启动参数构建（黑名单过滤）、launcher 解析、stealth/直连/低资源路由、`_to_ms` 超时契约换算、`_channel_supports_cdp` 渠道判定 |
+| `browser_lifecycle.py` | 浏览器生命周期：start/close/keep_alive 三档回收/空闲回收/生命周期锁、页面接线与弹窗自动确认（dialog 事件） |
+| `step_engine.py` | 步骤执行引擎：`run_steps`、失败归一（`_normalize_step_failure`）、首导航地址解析 |
+| `task_runner.py` | 任务执行：`_run_task`（首导航三级取值、success_condition 真值判定、按最终 outcome 的 cookie 清理矩阵）、`execute_*` 命令、系统变量注入 |
+| `debug_commands.py` | 调试会话：debug_* 命令编排、步骤补拍截图、任务截图延迟清理 |
+| `profile_commands.py` | 持久配置会话与自动登录：`profile_session_*` / `profile_auto_login` 命令编排（占用注册表/幽灵收尾/user_data_dir 只写不清） |
+| `capture_kit.py` | 页面结构提取（跨 shadow DOM 控件摘要 + 脱敏局部 HTML）与 CSS/JS 资源快照（CDP 优先 + HTTP 回补兜底） |
+| `capture_commands.py` | 临时浏览器捕获类命令：`test_redirect`（结果判定）、`page_capture`（meta.json 落盘）、`feedback_capture` |
+| `ocr_commands.py` | `ocr_recognize` 命令编排（模型加载 + 推理共享 `OCR_TIMEOUT_SECS` 总预算，阶段级取消） |
+| `ocr_runtime.py` | OCR 运行时：模型实例缓存、图片预处理、依赖主线程预加载与能力探测（`OCR_CAPABILITIES` 单一事实源） |
+
+> 补丁语义约定：测试 monkeypatch 一律打在**属主模块**上（如
+> `step_handlers.run_step_async`、`worker_paths._debug_screenshot_dir`、
+> `browser_lifecycle._WORKER_KEEP_ALIVE`）；`playwright_worker` 的再导出仅保证
+> 导入面兼容，不保证可替换语义。
+
 ## IPC 协议
 
 **Rust → Worker（命令）**

@@ -13,7 +13,11 @@ import pytest
 
 from debug_session import DebugSession, _build_steps_info
 from models import Outcome, StepConfig, StructuredResult, TaskConfig
+import capture_commands
 import playwright_worker
+import step_engine
+import step_handlers
+import worker_paths
 from playwright_worker import WorkerCore
 from step_handlers import StepCancelled, StepContext, WorkerError
 
@@ -45,7 +49,7 @@ def test_optional_failure_is_reported_in_formal_result(monkeypatch):
     async def fail(*_args, **_kwargs):
         raise WorkerError(Outcome.SELECTOR_FAILED, "missing")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fail)
+    monkeypatch.setattr(step_handlers, "run_step_async", fail)
     context = StepContext(page=object())
     result = asyncio.run(
         playwright_worker.run_steps(
@@ -70,7 +74,7 @@ def test_debug_step_uses_current_command_cancel_id(monkeypatch):
             await asyncio.sleep(0.01)
         raise StepCancelled("调试步骤已取消")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", wait_for_cancel)
+    monkeypatch.setattr(step_handlers, "run_step_async", wait_for_cancel)
 
     async def run():
         pending = asyncio.create_task(
@@ -119,7 +123,7 @@ def test_navigation_wait_uses_cancellable_sleep(monkeypatch):
     async def fake_sleep(seconds: float, ctx: StepContext) -> None:
         calls.append((seconds, ctx))
 
-    monkeypatch.setattr(playwright_worker, "_sleep_cancellable", fake_sleep)
+    monkeypatch.setattr(step_handlers, "_sleep_cancellable", fake_sleep)
     asyncio.run(WorkerCore._wait_after_navigation(task, context))
 
     assert calls == [(2.5, context)]
@@ -134,7 +138,7 @@ def test_navigation_wait_zero_skips_sleep(monkeypatch):
         nonlocal called
         called = True
 
-    monkeypatch.setattr(playwright_worker, "_sleep_cancellable", fake_sleep)
+    monkeypatch.setattr(step_handlers, "_sleep_cancellable", fake_sleep)
     asyncio.run(WorkerCore._wait_after_navigation(task, context))
 
     assert called is False
@@ -278,7 +282,7 @@ def test_redirect_test_forces_visible_isolated_browser(monkeypatch, pure_mode, c
         return FakeBrowser()
 
     monkeypatch.setattr(core, "_launch_browser", fake_launch)
-    monkeypatch.setattr(playwright_worker, "_REDIRECT_TEST_SETTLE_SECS", 0.0)
+    monkeypatch.setattr(capture_commands, "_REDIRECT_TEST_SETTLE_SECS", 0.0)
     result = asyncio.run(
         core.handle_test_redirect(
             {
@@ -358,7 +362,7 @@ def test_login_bypasses_system_proxy_unless_explicitly_bound(
     monkeypatch.setattr(core, "_launch_browser", fake_launch)
     monkeypatch.setattr(core, "_launch_persistent_context", fake_persistent)
     monkeypatch.setattr(core, "_new_page", lambda: asyncio.sleep(0, result=object()))
-    monkeypatch.setattr(playwright_worker, "_browser_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_browser_data_dir", lambda: tmp_path)
     asyncio.run(core._start_browser({"browser_settings": {
         "browser_channel": channel,
         "custom_browser_engine": engine,
@@ -405,7 +409,7 @@ def test_unified_network_policy_overrides_legacy_proxy(monkeypatch, tmp_path, pe
     monkeypatch.setattr(core, "_launch_browser", launch)
     monkeypatch.setattr(core, "_launch_persistent_context", launch_persistent)
     monkeypatch.setattr(core, "_new_page", lambda: asyncio.sleep(0, result=object()))
-    monkeypatch.setattr(playwright_worker, "_browser_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_browser_data_dir", lambda: tmp_path)
     asyncio.run(core._start_browser({"browser_settings": {
         "browser_channel": "msedge", "pure_mode": pure_mode, "persistent_context": persistent,
         "bind_proxy": "http://obsolete-proxy:7890",
@@ -678,7 +682,7 @@ def _debug_start_core(monkeypatch, tmp_path, page):
     monkeypatch.setattr(core, "ensure_browser", fake_ensure_browser)
     monkeypatch.setattr(core, "_prepare_session_page", fake_prepare_session_page)
     monkeypatch.setattr(core, "_make_context", fake_make_context)
-    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
     return core
 
 
@@ -816,7 +820,7 @@ def _run_task_core(monkeypatch, run_steps_impl):
     monkeypatch.setattr(core, "ensure_browser", fake_ensure_browser)
     monkeypatch.setattr(core, "_prepare_session_page", fake_prepare_session_page)
     monkeypatch.setattr(core, "_make_context", fake_make_context)
-    monkeypatch.setattr(playwright_worker, "run_steps", run_steps_impl)
+    monkeypatch.setattr(step_engine, "run_steps", run_steps_impl)
     return core, ctx
 
 
@@ -946,8 +950,8 @@ def test_debug_run_all_continues_after_optional_failure_and_applies_delay(monkey
     async def fake_sleep(seconds: float, _context: StepContext) -> None:
         delays.append(seconds)
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
-    monkeypatch.setattr(playwright_worker, "_sleep_cancellable", fake_sleep)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "_sleep_cancellable", fake_sleep)
 
     response = asyncio.run(core.handle_debug_run_all({"session_id": session.session_id}))
 
@@ -973,7 +977,7 @@ def test_debug_run_all_stops_after_required_failure(monkeypatch):
         if step.id == "required":
             raise WorkerError(Outcome.SELECTOR_FAILED, "必需步骤失败")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
 
     response = asyncio.run(core.handle_debug_run_all({"session_id": session.session_id}))
 
@@ -994,7 +998,7 @@ def test_debug_run_all_records_unexpected_exception_and_stops(monkeypatch):
     async def fake_run_step(_page, _step, _context, **_kwargs) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
 
     response = asyncio.run(core.handle_debug_run_all({"session_id": session.session_id}))
 
@@ -1032,12 +1036,12 @@ def _framing_core(monkeypatch, tmp_path, page, events):
         steps_info=_build_steps_info(task),
     )
     core._debug_sessions[session.session_id] = session
-    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
 
     async def fake_run_step(_page, _step, _context, **_kwargs) -> None:
         return None
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
     return core, session
 
 

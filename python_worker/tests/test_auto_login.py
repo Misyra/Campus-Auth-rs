@@ -227,10 +227,10 @@ def _make_udd(tmp_path: Path) -> Path:
 @pytest.fixture(autouse=True)
 def _fast_settle_and_clean_cancel_registry(monkeypatch):
     """stub 级加速：沉降窗口压到最小（真浏览器批次保留真实窗口）+ 注册表隔离。"""
-    import playwright_worker
+    import auto_login
 
-    monkeypatch.setattr(playwright_worker, "AUTO_LOGIN_BACKFILL_SETTLE_MS", 10)
-    monkeypatch.setattr(playwright_worker, "AUTO_LOGIN_LOAD_STATE_TIMEOUT_MS", 50)
+    monkeypatch.setattr(auto_login, "AUTO_LOGIN_BACKFILL_SETTLE_MS", 10)
+    monkeypatch.setattr(auto_login, "AUTO_LOGIN_LOAD_STATE_TIMEOUT_MS", 50)
     yield
     cancel_registry._events.clear()
     cancel_registry._pending.clear()
@@ -327,7 +327,7 @@ def _stub_run_steps(monkeypatch, *, calls: list | None = None, fail_at: int | No
         if fail_at is not None and step_index == fail_at and exc is not None:
             raise exc
 
-    monkeypatch.setattr("playwright_worker.run_step_async", fake_run_step)
+    monkeypatch.setattr("step_handlers.run_step_async", fake_run_step)
     return calls
 
 
@@ -466,7 +466,7 @@ def test_auto_login_ghost_context_close_mid_run(monkeypatch, tmp_path):
         await asyncio.sleep(0)
         raise WorkerError(Outcome.SELECTOR_FAILED, "Target page closed")
 
-    monkeypatch.setattr("playwright_worker.run_step_async", dying_step)
+    monkeypatch.setattr("step_handlers.run_step_async", dying_step)
     with pytest.raises(WorkerError) as ei:
         asyncio.run(core.handle_profile_auto_login(_auto_params(udd)))
     assert ei.value.outcome == Outcome.ASSERTION_FAILED.value
