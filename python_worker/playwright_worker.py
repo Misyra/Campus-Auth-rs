@@ -2224,8 +2224,12 @@ class WorkerCore:
                 pages.append(page)
             if cancel_event is not None and cancel_event.is_set():
                 raise StepCancelled("重定向检测已取消")
-            try:
-                response = await page.goto(
+            # goto 放入独立任务并轮询取消事件（与 _dispatch_guarded 同款）：
+            # 挂死的 goto 只靠 task.cancel() 无法打断 CDP await，但取消能在
+            # 轮询间隙即时生效并放弃该任务，不再被动等满 goto 上限
+            # min(nav_timeout, 15s)（P2-4）。
+            goto_task = asyncio.ensure_future(
+                page.goto(
                     trigger_url,
                     wait_until="domcontentloaded",
                     timeout=min(_nav_timeout(bs), 15000),
@@ -2237,6 +2241,16 @@ class WorkerCore:
                 return {"status": "not_detected"}
 
             deadline = time.monotonic() + _REDIRECT_TEST_SETTLE_SECS
+            )
+            response: Any = None
+            try:
+                while not goto_task.done():
+                    if cancel_event is not None and cancel_event.is_set():
+                        goto_task.cancel()
+                        await _suppress_task(goto_task)
+                        raise StepCancelled("重定向检测已取消")
+                    await asyncio.wait({goto_task}, timeout=0.1)
+                response = goto_task.result()
             while time.monotonic() < deadline:
                 if cancel_event is not None and cancel_event.is_set():
                     raise StepCancelled("重定向检测已取消")

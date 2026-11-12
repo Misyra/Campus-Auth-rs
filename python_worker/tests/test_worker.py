@@ -1765,3 +1765,66 @@ def test_idle_release_close_serializes_with_command_ensure(monkeypatch):
 
     asyncio.run(_run())
 
+
+def test_test_redirect_goto_responds_to_cancel(monkeypatch):
+    """P2-4：test_redirect 首导航挂死时取消即时生效（不再被动等满 15s 上限）。"""
+
+    async def _run():
+        import playwright_worker as pw
+        from playwright_worker import WorkerCore, cancel_registry
+        from step_handlers import StepCancelled
+
+        core = WorkerCore()
+        goto_started = asyncio.Event()
+        goto_cancelled = []
+
+        class FakePage:
+            async def goto(self, url, wait_until=None, timeout=None):
+                goto_started.set()
+                try:
+                    await asyncio.sleep(3600)  # 挂死的导航（CDP await 不返回）
+                except asyncio.CancelledError:
+                    goto_cancelled.append(True)
+                    raise
+
+        class FakeContext:
+            def on(self, *_args):
+                pass
+
+            async def new_page(self):
+                return FakePage()
+
+            async def close(self):
+                pass
+
+        class FakeBrowser:
+            async def new_context(self, **_kwargs):
+                return FakeContext()
+
+            async def close(self):
+                pass
+
+        async def fake_launch_browser(*_args, **_kwargs):
+            return FakeBrowser()
+
+        monkeypatch.setattr(core, "_launch_browser", fake_launch_browser)
+        core._playwright = object()  # 跳过 async_playwright().start()
+
+        task = asyncio.ensure_future(
+            core.handle_test_redirect(
+                {"trigger_url": "http://portal.example/", "cancel_id": "redirect-cancel-p24"}
+            )
+        )
+        try:
+            await asyncio.wait_for(goto_started.wait(), timeout=2)
+            cancel_registry.trigger("redirect-cancel-p24")
+            with pytest.raises(StepCancelled):
+                await asyncio.wait_for(task, timeout=2)
+            assert goto_cancelled == [True], "挂死的 goto 任务应被取消"
+        finally:
+            cancel_registry.unregister("redirect-cancel-p24")
+            if not task.done():
+                task.cancel()
+
+    asyncio.run(_run())
+
