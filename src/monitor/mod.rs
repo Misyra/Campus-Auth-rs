@@ -5,6 +5,7 @@
 //! 保证运行期修改即时生效。
 
 pub mod decision;
+pub mod diagnostics;
 pub mod model;
 pub mod portal;
 pub mod probes;

@@ -61,6 +61,12 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/monitor/test-redirect", || {
             post(routes::monitor::test_redirect)
         }),
+        // ---- 一键网络诊断（diagnostics）----
+        // 诊断失败是数据不是请求错误：端点恒 200 + 结构化逐项结果（见
+        // monitor::diagnostics 模块说明），结果已脱敏
+        ("POST", "/api/diagnostics/run", || {
+            post(routes::diagnostics::run_diagnostics)
+        }),
         // ---- 配置（config）----
         ("GET", "/api/config", || get(routes::config::get_settings)),
         ("PATCH", "/api/config", || {
