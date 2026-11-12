@@ -1,14 +1,20 @@
 //! 直连登录执行器：按方案的直连任务构造并发送登录请求。
 //!
 //! 与浏览器渠道（Python Worker + Playwright）完全独立：请求由 Rust 主进程发送，
-//! 纯计算脚本在同一可执行文件的受限子进程中运行，不要求 Python 环境与浏览器就绪。流水线：
+//! 纯计算脚本在同一可执行文件的受限子进程中运行，不要求 Python 环境与浏览器就绪。
 //!
-//! 1. （配置了加密脚本时）抓取登录页原文，供脚本从页面取盐值等参数
-//! 2. 用户加密脚本：内置 boa 引擎在无网络/文件沙箱中执行 `transform(ctx)`
-//! 3. 模板替换：URL/请求头/请求体中的 `{username}` `{password}` 与脚本返回的
-//!    任意字段按名替换（值原样替换不转义，特殊字符可用 `url_encode()`）
-//! 4. 经方案统一出口发送请求（跨源跳转重建无凭据请求，上限 5 跳）
-//! 5. 成败判定：失败关键字命中 → 终态失败；成功关键字命中（或留空时 HTTP 2xx）
+//! 执行层只有一条步骤编排路径（[`run_flow_once`]）：新式任务按 `steps` 逐序执行；
+//! 旧任务的固定字段（加密脚本 / 前置请求 / 单请求本体）在进入编排前脱糖为等价的
+//! 有序步骤（见 [`desugar_legacy_request`]），不再有第二套管线。整体时序：
+//!
+//! 1. （配置了下线动作时）前置 logout 钩子：先踢旧会话（best effort），治
+//!    「IP 已在线拒绝重复登录」类门户
+//! 2. 计算步骤（若有）：抓取登录页原文 → 内置 boa 引擎在无网络/文件沙箱中执行
+//!    `transform(ctx)`，产出并入累计变量表
+//! 3. 请求步骤：模板替换（URL/请求头/请求体中的 `{username}` `{password}` 与
+//!    变量表字段按名替换，值原样不转义，特殊字符可用 `url_encode()`）→
+//!    经方案统一出口发送（跨源跳转重建无凭据请求，上限 5 跳）
+//! 4. 成败判定：失败关键字命中 → 终态失败；成功关键字命中（或留空时 HTTP 2xx）
 //!    → 交由会话状态机做登录后网络探测复核
 //!
 //! 判定结果映射为既有 `Outcome` 复用会话状态机的重试/历史/通知逻辑；
@@ -39,16 +45,14 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_REDIRECTS: usize = 5;
 /// 登录页抓取超时（best effort，失败不影响主流程）
 const PAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-/// 前置请求（取 CSRF token 之类）超时
-const PRE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// 退出登录动作请求超时：与前置请求同级——都是辅助动作，门户不回也不该拖死登录
+/// 退出登录动作请求超时：与登录页抓取同级——都是辅助动作，门户不回也不该拖死登录
 const LOGOUT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// 退出登录请求后的额外等待上限（秒）：与模型层 `HttpActionRequest::MAX_WAIT_SECS`
 /// 同口径的执行侧兜底（任务 JSON 可能绕过保存校验直接构造）
 const LOGOUT_MAX_WAIT_SECS: f64 = 30.0;
-/// 登录请求总超时
+/// 单个请求步骤的超时上限（实际取 `min(REQUEST_TIMEOUT, 总预算剩余)`）
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-/// 新式多步骤流程的一次尝试总时限。
+/// 一次直连登录尝试的总时限（所有步骤、等待与下线动作共享）。
 const FLOW_TIMEOUT: Duration = Duration::from_secs(120);
 /// 用户计算脚本的子进程总时限；超时后回收进程，避免孤儿计算线程累积。
 #[cfg(not(test))]
@@ -508,27 +512,18 @@ fn classify_response(
     }
 }
 
-/// 一次直连登录尝试的共享前提：旧固定链（[`run_once`]）与新式流程（[`run_flow_once`]）
-/// 在「构造尝试输入」段的单一实现。
+/// 一次直连登录尝试的共享前提：[`run_once`] 构造、前置 logout 钩子与流程编排
+/// （[`run_flow_once`]）共用同一份输入。
 ///
-/// 两路径的步骤编排各自独立，但尝试开始前的输入构造此前是逐字重复的两份代码：
-/// 出口路由准备 → 出口绑定地址填充本机 IP/MAC → 共用 HTTP 客户端 → 内置占位符表
-/// 与脱敏字典。现统一在 [`AttemptContext::prepare`] 构造，调用方解构取用各字段，
-/// 各自执行段保持原样。
+/// 尝试开始前的输入构造统一在 [`AttemptContext::prepare`] 完成：出口路由准备 →
+/// 出口绑定地址填充本机 IP/MAC → 共用 HTTP 客户端 → 内置占位符表与脱敏字典。
+/// 调用方解构取用各字段（`bound` 由 [`run_once`] 持有以遮蔽原请求，其余传给
+/// [`run_flow_once`]）。
 ///
 /// 共用 HTTP 客户端的口径（原 run_once 内联注释随实现上收至此）：退出登录请求 /
-/// 登录页抓取 / 前置请求 / 登录请求四处都用它——连接池挂在 `Client` 上，CSRF 令牌
-/// 绑定 TCP 连接的门户要求取 token 与发登录落在同一条 keep-alive 连接，故整次尝试
-/// 只建一个（见 [`build_client`]）。
-///
-/// 两路径执行段尚未收敛的口径差异（本结构不做统一，收敛留给后续脱糖批次）：
-/// - 总时限：旧路径仅逐请求 `REQUEST_TIMEOUT`；流程路径另有 `FLOW_TIMEOUT` 总预算，
-///   单步超时取 `min(REQUEST_TIMEOUT, 剩余预算)`
-/// - 变量预算：`MAX_EXTRACT_VALUE_BYTES` / `MAX_FLOW_VARIABLE_BYTES` 上限只有流程
-///   路径执行，旧路径的脚本产出没有本地预算（仅 IPC 层 `MAX_TRANSFORM_IPC_BYTES`）
-/// - 退出登录动作：`logout_request` 两种任务形态都可配置（保存闸口不区分），但
-///   只有旧路径执行，新式流程静默跳过——风险是「带 steps 的任务配了下线动作却不
-///   生效」无任何提示
+/// 登录页抓取 / 各请求步骤都用它——连接池挂在 `Client` 上，CSRF 令牌绑定 TCP 连接
+/// 的门户要求取 token 与发登录落在同一条 keep-alive 连接，故整次尝试只建一个
+/// （见 [`build_client`]）。
 struct AttemptContext {
     /// 按出口绑定地址填充本机 IP/MAC 后的请求副本（脚本 ctx 与模板 `{local_ip}` 的
     /// 数据源）；`None` = 出口未指定绑定地址，沿用调用方传入的原始请求。
@@ -600,41 +595,39 @@ impl AttemptContext {
     }
 }
 
-/// 执行一次直连登录尝试（不发网络验证，验证由会话状态机负责）
+/// 执行一次直连登录尝试（不发网络验证，验证由会话状态机负责）。
+///
+/// 结构：共享前提构造（[`AttemptContext::prepare`]）→ 前置 logout 钩子（可选）→
+/// 流程编排（[`run_flow_once`]）。旧任务的固定字段在编排入口脱糖为等价步骤，
+/// 执行层只有一条管线。
 pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
-    if !req.steps.is_empty() {
-        return run_flow_once(req).await;
-    }
     // 共享尝试前提：出口路由 → 本机地址绑定 → 共用客户端 → 内置占位符表与脱敏字典
     let AttemptContext {
         bound,
         client,
-        mut vars,
-        mut secrets,
+        vars,
+        secrets,
         start,
     } = match AttemptContext::prepare(req).await {
         Ok(context) => context,
         Err(report) => return report,
     };
-    // 出口绑定副本遮蔽原请求；占位符表先只有内置项（下线请求只能用这些，见第 1 步），
-    // 脚本产出的字段在第 2 步并入同一张表
+    // 出口绑定副本遮蔽原请求；占位符表先只有内置项（下线请求只能用这些），
+    // 脚本产出与步骤提取值随后并入同一张表
     let req = bound.as_ref().unwrap_or(req);
 
-    // 1. 退出登录动作（可选）：治「IP 已在线，拒绝重复登录」类门户——先踢掉旧会话再登录。
-    //    必须在**登录页抓取与凭据变换脚本之前**：这类门户连取令牌的接口都可能被旧会话
-    //    挡住（返回 already-online 类错误），`fetch_login_page` 抓到的会是"已在线"页而不是
-    //    登录表单，脚本据此产出的字段全是错的——正是本功能要治的那类门户。先清场再取令牌。
+    // 前置钩子：退出登录动作（可选）：治「IP 已在线，拒绝重复登录」类门户——先踢掉
+    // 旧会话再登录。必须在**登录页抓取与凭据变换脚本之前**：这类门户连取令牌的接口
+    // 都可能被旧会话挡住（返回 already-online 类错误），`fetch_login_page` 抓到的会是
+    // "已在线"页而不是登录表单，脚本据此产出的字段全是错的——正是本功能要治的那类
+    // 门户。先清场再取令牌。
     //
-    //    代价：此处只能用**内置占位符**（username / password / isp / auth_url /
-    //    local_ip / local_mac），拿不到脚本产出的字段（脚本还没跑）。下线地址通常只需
-    //    要账号，而"抓到错的登录页"是必然坏、脚本占位符只是可能用到，故取前者。
+    // 代价：此处只能用**内置占位符**（username / password / isp / auth_url /
+    // local_ip / local_mac），拿不到脚本产出的字段（脚本还没跑）。下线地址通常只需
+    // 要账号，而"抓到错的登录页"是必然坏、脚本占位符只是可能用到，故取前者。
     //
-    //    与前置请求的本质差异在**结果语义**：取值失败 = 必然登不上（终态），下线没生效
-    //    = 登录仍可能成功（不判死）。因此这里只记日志、不产生报告分支。
-    //
-    // 步骤编号（与 `docs/guides/http-login-guide.md` 的 3.x 节一致）：
-    // 1 下线 → 2 底层变量表 + 凭据变换脚本 → 3 前置请求 → 4 模板渲染 → 5 发送 → 6 成败判定。
-    // 变量表（`vars`）已由共享尝试前提建出，脚本产出合并进它是在第 2 步（紧跟本段之后）。
+    // 与取值类请求的本质差异在**结果语义**：取值失败 = 必然登不上（终态），下线没
+    // 生效 = 登录仍可能成功（不判死）。因此这里只记日志、不产生报告分支。
     if let Some(logout) = &req.logout_request {
         let logout_url = substitute(&logout.url, &vars);
         let logout_headers = substitute(&logout.headers, &vars);
@@ -668,230 +661,89 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         }
     }
 
-    // 2. 用户脚本值变换：跑凭据脚本，产出可被占位符引用的字段表（并入上面的 `vars`）
-    let mut script_error: Option<ScriptExecError> = None;
-    if req.uses_crypto_script() {
-        // 登录页原文 best effort 抓取：失败置空串，脚本须容忍缺失
-        let page = if req.fetch_page {
-            fetch_login_page(&client, &req.auth_url).await
-        } else {
-            String::new()
-        };
-        match execute_crypto_script(
-            &req.crypto_script,
-            &req.username,
-            &req.password,
-            &req.isp,
-            &req.auth_url,
-            (&req.local_ip, &req.local_mac),
-            page,
-        )
-        .await
-        {
-            Ok(values) => {
-                for (k, v) in values {
-                    if k == "username" || k == "password" || vars.contains_key(&k) {
-                        // 覆盖内置字段是合法用法（如盐值拼接后的密码）
-                        tracing::debug!("脚本字段覆盖内置占位符: {k}");
-                    }
-                    add_secret(&mut secrets, &v);
-                    vars.insert(k, v);
-                }
-            }
-            Err(e) => {
-                script_error = Some(e);
-            }
-        }
-    }
-
-    // 脚本失败在发送请求前短路：凭证变换错误时发出去的请求必错。其中超时属
-    // 瞬时环境抖动（子进程首次 spawn 常被 AV 扫描拖慢），映射为可重试的
-    // NavigationTimeout；其余（脚本/配置问题）重试无意义，保持终态失败。
-    if let Some(e) = &script_error {
-        normalize_secrets(&mut secrets);
-        return abort_report(
-            script_failure_outcome(e),
-            redact_text(&format!("加密脚本执行失败: {}", e.message()), &secrets),
-            None,
-            None,
-            Some(redact_text(e.message(), &secrets)),
-            start.elapsed().as_millis() as u64,
-        );
-    }
-
-    // 3. 前置请求（可选）：先取回一个值（如 CSRF token）注册成占位符，供登录请求的
-    //     URL / 请求头 / 请求体引用。与登录请求同一个 client，两条请求因此落在同一条
-    //     连接上；取不到值就没必要再发登录请求（必然被门户拒），直接终态并把这次
-    //     前置请求的请求与响应带进报告，便于在测试面板里看清是哪一步不对。
-    if let Some(pre) = &req.pre_request {
-        let pre_url = substitute(&pre.url, &vars);
-        let pre_headers = substitute(&pre.headers, &vars);
-        let pre_body = substitute(&pre.body, &vars);
-        normalize_secrets(&mut secrets);
-        let rendered = (
-            redact_url(&pre_url, &secrets),
-            redact_text(&pre_headers, &secrets),
-            redact_text(&pre_body, &secrets),
-        );
-
-        match send_http(
-            &client,
-            pre.method,
-            &pre_url,
-            &pre_headers,
-            &pre_body,
-            PRE_REQUEST_TIMEOUT,
-        )
-        .await
-        {
-            Ok((status, body, response_headers)) => {
-                let body_snippet = truncate_snippet(&body);
-                let extracted = match pre.extract_path() {
-                    Ok(path) => extract_pre_value(path, &body),
-                    Err(e) => Err(e),
-                };
-                match extracted {
-                    Ok(value) => {
-                        let placeholder = pre.placeholder_name();
-                        tracing::debug!(
-                            "前置请求（HTTP {status}）取到占位符 `{placeholder}`（{} 字节）",
-                            value.len()
-                        );
-                        // 取到的值并入本次尝试的脱敏字典，后续报告不会回显令牌。
-                        add_secret(&mut secrets, &value);
-                        vars.insert(placeholder, value);
-                    }
-                    Err(e) => {
-                        return abort_report(
-                            Outcome::UnknownError,
-                            redact_text(&format!("前置请求未取到占位符: {e}"), &secrets),
-                            Some((&rendered.0, &rendered.1, &rendered.2)),
-                            Some((
-                                status.as_u16(),
-                                &redact_text(&response_headers, &secrets),
-                                &redact_text(&body_snippet, &secrets),
-                            )),
-                            None,
-                            start.elapsed().as_millis() as u64,
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                // reqwest 的错误消息会拼上完整 URL，前置请求地址同样可能带凭据参数
-                return abort_report(
-                    Outcome::NetworkError,
-                    redact_text(&format!("前置请求失败: {e}"), &secrets),
-                    Some((&rendered.0, &rendered.1, &rendered.2)),
-                    None,
-                    None,
-                    start.elapsed().as_millis() as u64,
-                );
-            }
-        }
-    }
-
-    // 4. 模板渲染
-    let rendered_url = substitute(&req.url, &vars);
-    let rendered_headers = substitute(&req.headers, &vars);
-    let rendered_body = substitute(&req.body, &vars);
-
-    // 5. 发送请求
-    let send = send_http(
-        &client,
-        req.method,
-        &rendered_url,
-        &rendered_headers,
-        &rendered_body,
-        REQUEST_TIMEOUT,
-    )
-    .await;
-    let (status, body, response_headers) = match send {
-        Ok(triple) => triple,
-        Err(e) => {
-            normalize_secrets(&mut secrets);
-            // reqwest 的 Error::Display 会把完整 URL 拼进消息（"for url (...)"），
-            // GET 渠道下 URL 含明文凭据，必须先脱敏再进 message——它会流入日志、
-            // 登录历史与前端；rendered_url 的自有脱敏无法覆盖这条错误路径。
-            return abort_report(
-                Outcome::NetworkError,
-                redact_text(&format!("直连请求失败: {e}"), &secrets),
-                Some((
-                    &redact_url(&rendered_url, &secrets),
-                    &redact_text(&rendered_headers, &secrets),
-                    &redact_text(&rendered_body, &secrets),
-                )),
-                None,
-                // 能走到这里说明脚本已成功，字段恒为 None；仍按文本口径透传
-                script_error.map(|e| e.message().to_string()),
-                start.elapsed().as_millis() as u64,
-            );
-        }
-    };
-
-    // 6. 成败判定
-    normalize_secrets(&mut secrets);
-    let snippet = truncate_snippet(&body);
-    let (outcome, message) = match classify_response(req, status, &body) {
-        HttpResponseVerdict::Failure(outcome) => (
-            outcome,
-            format!(
-                "门户返回失败标识（HTTP {status}）: {}",
-                redact_text(&snippet, &secrets)
-            ),
-        ),
-        HttpResponseVerdict::Success => {
-            let message = if req.success_check == crate::tasks::HttpSuccessCheck::Network {
-                format!("已发送登录请求（HTTP {status}），成功与否由登录后网络检测判定")
-            } else {
-                format!("直连请求成功（HTTP {status}）")
-            };
-            (Outcome::Success, message)
-        }
-        HttpResponseVerdict::MissingSuccess => (
-            Outcome::AssertionFailed,
-            format!(
-                "未命中成功标识（HTTP {status}）: {}",
-                redact_text(&snippet, &secrets)
-            ),
-        ),
-    };
-
-    HttpAttemptReport {
-        step_reports: Vec::new(),
-        outcome,
-        message,
-        rendered_url: redact_url(&rendered_url, &secrets),
-        rendered_headers: redact_text(&rendered_headers, &secrets),
-        rendered_body: redact_text(&rendered_body, &secrets),
-        status: Some(status.as_u16()),
-        // 响应头同样按凭据字典脱敏：门户回显参数、回跳地址里可能带回提交过的凭据
-        response_headers: redact_text(&response_headers, &secrets),
-        response_snippet: redact_text(&snippet, &secrets),
-        // 能走到这里说明脚本已成功，字段恒为 None；仍按文本口径透传
-        script_error: script_error.map(|e| e.message().to_string()),
-        duration_ms: start.elapsed().as_millis() as u64,
-    }
+    run_flow_once(req, client, vars, secrets, start).await
 }
 
-/// 执行可编辑的有序 HTTP 登录流程；旧任务仍走上面的固定链。
-async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
-    // 共享尝试前提：出口路由 → 本机地址绑定 → 共用客户端 → 内置占位符表与脱敏字典
-    let AttemptContext {
-        bound,
-        client,
-        mut vars,
-        mut secrets,
-        start,
-    } = match AttemptContext::prepare(req).await {
-        Ok(context) => context,
-        Err(report) => return report,
+/// 旧任务脱糖后的步骤 ID / 展示名：结果判定文案会引用 ID（「步骤「login」…」），
+/// 测试面板逐步骤展示两者，故取与功能对应的固定命名。
+const LEGACY_TRANSFORM_STEP_ID: &str = "transform";
+const LEGACY_PRE_STEP_ID: &str = "pre";
+const LEGACY_LOGIN_STEP_ID: &str = "login";
+
+/// 把旧任务的固定字段脱糖为等价的有序步骤（见 [`run_flow_once`]）。
+///
+/// 顺序沿用旧六步管线「下线 → 脚本 → 前置请求 → 渲染 → 发送 → 判定」中除下线外
+/// 的五步——下线动作与步骤无关，由 [`run_once`] 的前置钩子承担。脱糖后旧任务的
+/// 执行口径与流程任务完全一致：单步 `min(REQUEST_TIMEOUT, 剩余)` 超时与 120s 总预算、
+/// `MAX_EXTRACT_VALUE_BYTES` / `MAX_FLOW_VARIABLE_BYTES` 变量预算、flow 形态的判定
+/// 文案、脚本 `ctx.vars` 带累计变量表（详见 docs/changelog.md 同批条目）。
+fn desugar_legacy_request(req: &HttpLoginRequest) -> Vec<HttpFlowStep> {
+    let mut steps = Vec::new();
+    // 加密脚本 → 计算步骤（登录页抓取沿用 `fetch_page` 开关，由编排分支处理）
+    if !req.crypto_script.trim().is_empty() {
+        steps.push(HttpFlowStep {
+            id: LEGACY_TRANSFORM_STEP_ID.into(),
+            name: "凭据变换".into(),
+            kind: HttpFlowStepKind::Transform,
+            script: req.crypto_script.clone(),
+            ..Default::default()
+        });
+    }
+    // 前置请求 → 带 `extract` 取值的请求步骤：取值失败与旧口径一样终态失败
+    // （步骤缺省 on_error=Stop），只是消息改为流程形态「步骤「前置请求」失败: …」
+    if let Some(pre) = &req.pre_request {
+        steps.push(HttpFlowStep {
+            id: LEGACY_PRE_STEP_ID.into(),
+            name: "前置请求".into(),
+            kind: HttpFlowStepKind::Request,
+            method: pre.method,
+            url: pre.url.clone(),
+            headers: pre.headers.clone(),
+            body: pre.body.clone(),
+            extract: pre.extract.clone(),
+            extract_as: pre.name.clone(),
+            ..Default::default()
+        });
+    }
+    // 登录请求本体 → 最后一个请求步骤 = 结果判断步骤（`result_step_id` 留空时的
+    // 兜底口径正是"最后一个请求步骤"）
+    steps.push(HttpFlowStep {
+        id: LEGACY_LOGIN_STEP_ID.into(),
+        name: "登录请求".into(),
+        kind: HttpFlowStepKind::Request,
+        method: req.method,
+        url: req.url.clone(),
+        headers: req.headers.clone(),
+        body: req.body.clone(),
+        ..Default::default()
+    });
+    steps
+}
+
+/// 执行直连登录流程；新式任务按 `steps` 编排，旧任务（无 `steps`）先脱糖为等价步骤。
+///
+/// 共享前提（客户端/变量表/脱敏字典/计时）由 [`run_once`] 构造并执行过前置 logout
+/// 钩子后传入，本函数专注步骤编排与终局判定。
+async fn run_flow_once(
+    req: &HttpLoginRequest,
+    client: reqwest::Client,
+    mut vars: BTreeMap<String, String>,
+    mut secrets: Vec<String>,
+    start: Instant,
+) -> HttpAttemptReport {
+    // 旧任务脱糖：执行层只有这一条步骤路径（`steps` 引用 `legacy`，其存活覆盖整个编排）
+    let legacy = if req.steps.is_empty() {
+        desugar_legacy_request(req)
+    } else {
+        Vec::new()
     };
-    // 出口绑定副本遮蔽原请求；步骤可覆盖内置变量，后面统一脱敏时
-    // 仍须记住前面请求用过的旧值。
-    let req = bound.as_ref().unwrap_or(req);
+    let steps = if req.steps.is_empty() {
+        &legacy
+    } else {
+        &req.steps
+    };
     let result_id = if req.result_step_id.is_empty() {
-        req.steps
+        steps
             .iter()
             .rev()
             .find(|step| step.kind == HttpFlowStepKind::Request)
@@ -899,13 +751,13 @@ async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     } else {
         req.result_step_id.as_str()
     };
-    let mut reports = Vec::with_capacity(req.steps.len());
+    let mut reports = Vec::with_capacity(steps.len());
     let mut page: Option<String> = None;
     // 状态码、响应体/头、实际发出的请求：结果判断可引用中间请求，不能只保存最后一条。
     let mut result_response: Option<(reqwest::StatusCode, String, String, String, String, String)> =
         None;
 
-    for step in &req.steps {
+    for step in steps {
         if start.elapsed() >= FLOW_TIMEOUT {
             return flow_abort(
                 Outcome::NetworkError,
@@ -969,7 +821,13 @@ async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
                             &secrets,
                         );
                     }
-                    for value in values.values() {
+                    for (name, value) in &values {
+                        // 覆盖已有占位符（内置字段或前序变量）是合法用法（如盐值拼接
+                        // 后的密码），但也可能是变量名撞车的意外遮蔽——记 info 留痕，
+                        // 旧管线的覆盖日志随脱糖并入这条共享路径
+                        if vars.contains_key(name) {
+                            tracing::info!("计算字段覆盖已有占位符: {name}");
+                        }
                         add_secret(&mut secrets, value);
                     }
                     vars.extend(values);
@@ -1345,13 +1203,15 @@ fn flow_abort(
 /// - 出口：与登录和探测共用方案网络策略，不在执行器另行决定代理
 /// - User-Agent：未显式配置时补浏览器 UA（reqwest 默认完全不发该头）
 ///
-/// **整次直连尝试只建一个**，由调用方传给登录页抓取 / 前置请求 / 登录请求三处：
-/// reqwest 的连接池挂在 `Client` 上，而部分门户把 CSRF 令牌绑在 TCP 连接上（取 token
-/// 与发登录必须同一条 keep-alive 连接，换连接服务器回 `CSRF token mismatch`）。
-/// 此前每个请求各建一个 Client，等于每次登录都新开一条连接，这类门户必然失败。
+/// **整次直连尝试只建一个**，由调用方传给前置 logout 钩子 / 登录页抓取 / 各请求
+/// 步骤：reqwest 的连接池挂在 `Client` 上，而部分门户把 CSRF 令牌绑在 TCP 连接上
+/// （取 token 与发登录必须同一条 keep-alive 连接，换连接服务器回
+/// `CSRF token mismatch`）。此前每个请求各建一个 Client，等于每次登录都新开一条
+/// 连接，这类门户必然失败。
 ///
 /// 超时因此不设在 Client 上（一个 Client 只能有一个全局超时），改由每个请求的
-/// `RequestBuilder::timeout` 单独给：抓登录页 5s / 前置请求 10s / 登录 20s。
+/// `RequestBuilder::timeout` 单独给：抓登录页 5s / 下线请求 10s / 请求步骤
+/// `min(REQUEST_TIMEOUT, 总预算剩余)`。
 fn build_client(
     ignore_https_errors: bool,
     egress: &crate::network::egress::PreparedEgress,
@@ -1412,8 +1272,9 @@ async fn fetch_login_page(client: &reqwest::Client, auth_url: &str) -> String {
 
 /// 发送一次请求，返回 (状态码, 响应体原文, 响应头逐行文本)。
 ///
-/// 登录请求与前置请求共用（差别只有方法/地址/体积与超时），`client` 由调用方传入而
-/// 非在此新建——两次请求必须落在同一条连接上，见 [`build_client`]。
+/// 仅前置 logout 钩子使用（该动作不取值、不判成败，无需完整响应细节），
+/// `client` 由调用方传入而非在此新建——必须与后续登录请求落在同一条连接上，
+/// 见 [`build_client`]；取值类请求走 [`send_http_detailed`]。
 async fn send_http(
     client: &reqwest::Client,
     method: HttpRequestMethod,
@@ -1705,10 +1566,11 @@ fn decode_html_entities(value: &str) -> String {
         .into_owned()
 }
 
-/// 组装"还没走到登录请求就终结"的报告（客户端构建失败 / 脚本失败 / 前置请求失败）。
+/// 组装"还没进入步骤编排就终结"的报告（出口准备 / 客户端构建失败）。
 ///
-/// `rendered` 传**实际卡住的那一步**的渲染结果（前置请求就传前置请求的），测试面板要
-/// 能看到失败那一步真实发出的东西，而不是一片空白。
+/// `rendered` 传**实际卡住的那一步**的渲染结果，测试面板要能看到失败那一步
+/// 真实发出的东西，而不是一片空白；步骤编排期的中止统一经 [`flow_abort`]
+/// （它先脱敏步骤报告再复用本函数）。
 fn abort_report(
     outcome: Outcome,
     message: String,
@@ -2034,36 +1896,6 @@ fn script_failure_outcome(err: &ScriptExecError) -> Outcome {
     }
 }
 
-/// 在无 IO 沙箱内执行用户加密脚本；正式运行时由临时子进程承载并受墙钟时限约束。
-///
-/// 契约：脚本需定义 `function transform(ctx)`，返回对象；其字符串/数字/布尔
-/// 字段成为可被模板引用的占位符值。ctx 含
-/// `username/password/isp/auth_url/page/local_ip/local_mac`。
-///
-/// `local` 为本机主用接口的 (IPv4, MAC)，取不到时均为空串——部分门户（eportal /
-/// Dr.COM）的字段密钥由来源 IP 推导，没有它就只能从页面里找补。
-async fn execute_crypto_script(
-    script: &str,
-    username: &str,
-    password: &Zeroizing<String>,
-    isp: &str,
-    auth_url: &str,
-    local: (&str, &str),
-    page: String,
-) -> Result<BTreeMap<String, String>, ScriptExecError> {
-    execute_crypto_script_with_vars(
-        script,
-        username,
-        password,
-        isp,
-        auth_url,
-        local,
-        page,
-        BTreeMap::new(),
-    )
-    .await
-}
-
 /// 纯计算子进程的输入；密码只经匿名 stdin 管道下发，不进入命令行与环境变量。
 #[derive(serde::Serialize, serde::Deserialize)]
 struct TransformWorkerInput {
@@ -2133,7 +1965,16 @@ fn stderr_detail(base: &str, stderr: &[u8]) -> String {
     format!("{base}: {excerpt}")
 }
 
-/// 执行流程中的计算步骤，并把前面步骤提取的变量提供给 `ctx.vars`。
+/// 在无 IO 沙箱内执行流程中的计算步骤，并把累计变量表提供给 `ctx.vars`；
+/// 正式运行时由临时子进程承载并受墙钟时限约束。
+///
+/// 契约：脚本需定义 `function transform(ctx)`，返回对象；其字符串/数字/布尔
+/// 字段成为可被模板引用的占位符值。ctx 含
+/// `username/password/isp/auth_url/page/local_ip/local_mac` 与
+/// `vars`（此前步骤提取/计算出的累计变量，覆盖同名内置字段后的最新值）。
+///
+/// `local` 为本机主用接口的 (IPv4, MAC)，取不到时均为空串——部分门户（eportal /
+/// Dr.COM）的字段密钥由来源 IP 推导，没有它就只能从页面里找补。
 #[allow(clippy::too_many_arguments)]
 async fn execute_crypto_script_with_vars(
     script: &str,
@@ -3252,7 +3093,8 @@ mod tests {
         );
     }
 
-    /// 旧式任务与单请求有序流程必须保持同一判定口径；消息可按各自格式展示。
+    /// 旧式任务与单请求有序流程必须保持同一判定口径；脱糖后两者走同一条
+    /// 编排路径，判定与消息格式天然一致。
     #[tokio::test]
     async fn legacy_and_flow_response_verdicts_match() {
         use crate::tasks::{HttpFailureAction, HttpSuccessCheck};
@@ -3798,7 +3640,8 @@ mod tests {
     }
 
     /// 前置请求取不到字段 → 终态失败，并把**前置请求**的请求与响应带进报告
-    /// （否则测试面板只会显示一片空白，用户无从判断是 token 接口还是登录接口不对）
+    /// （否则测试面板只会显示一片空白，用户无从判断是 token 接口还是登录接口不对）。
+    /// 旧管线脱糖后，前置请求即带 `extract` 的请求步骤，消息为流程形态。
     #[tokio::test]
     async fn pre_request_missing_field_is_terminal_and_reports_its_own_exchange() {
         let (base, _seen) = spawn_csrf_portal().await;
@@ -3812,11 +3655,14 @@ mod tests {
         let report = run_once(&req).await;
         assert_eq!(report.outcome, Outcome::UnknownError);
         assert!(
-            report.message.contains("前置请求未取到占位符"),
+            report.message.contains("提取变量失败"),
             "{}",
             report.message
         );
         assert!(report.message.contains("`not_here`"), "{}", report.message);
+        assert!(report.message.contains("前置请求"), "{}", report.message);
+        assert_eq!(report.step_reports.len(), 1);
+        assert_eq!(report.step_reports[0].outcome, "failed");
         assert!(
             report.rendered_url.ends_with("/api/csrf-token"),
             "报告应展示前置请求的地址: {}",
@@ -4271,5 +4117,280 @@ mod tests {
         assert!(req.validate().is_ok());
         req.logout_request.as_mut().unwrap().url = String::new();
         assert!(req.validate().is_err(), "空地址的下线配置必须被拒");
+    }
+
+    // ===== 旧管线脱糖与统一口径对照（T7-2 第二步） =====
+
+    /// 决策⑤对照用的日志捕获：把当前线程的 fmt 事件行收进内存（Info 级及以上）。
+    #[derive(Clone)]
+    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let line = String::from_utf8_lossy(buf);
+            let line = line.trim();
+            if !line.is_empty() {
+                self.0.lock().unwrap().push(line.to_string());
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 旧任务固定字段 → 等价步骤的映射钉死：顺序沿用旧管线（脚本 → 前置请求 →
+    /// 登录请求），取值失败保持终态口径，跳转/等待为旧管线同款缺省。
+    #[test]
+    fn desugar_legacy_request_maps_fixed_fields_to_steps() {
+        let mut req = request("http://portal.example/login".into());
+        req.method = HttpRequestMethod::Post;
+        req.body = "u={username}".into();
+        req.crypto_script = "function transform(ctx) { return { t: '1' }; }".into();
+        req.pre_request = Some(HttpPreRequest {
+            method: HttpRequestMethod::Get,
+            url: "http://portal.example/token".into(),
+            extract: "json:token".into(),
+            name: "tok".into(),
+            ..Default::default()
+        });
+
+        let steps = desugar_legacy_request(&req);
+        assert_eq!(steps.len(), 3);
+        assert_eq!(
+            (steps[0].id.as_str(), steps[0].kind),
+            (LEGACY_TRANSFORM_STEP_ID, HttpFlowStepKind::Transform)
+        );
+        assert_eq!(steps[0].script, req.crypto_script);
+        assert_eq!(
+            (steps[1].id.as_str(), steps[1].kind),
+            (LEGACY_PRE_STEP_ID, HttpFlowStepKind::Request)
+        );
+        assert_eq!(steps[1].url, "http://portal.example/token");
+        assert_eq!(steps[1].extract, "json:token");
+        assert_eq!(steps[1].extract_as, "tok");
+        assert_eq!(
+            steps[1].on_error,
+            HttpStepOnError::Stop,
+            "前置请求取值失败保持旧口径：终态失败"
+        );
+        assert_eq!(steps[2].id.as_str(), LEGACY_LOGIN_STEP_ID);
+        assert_eq!(steps[2].method, HttpRequestMethod::Post);
+        assert_eq!(steps[2].body, "u={username}");
+        assert!(
+            !steps[2].stop_on_redirect,
+            "跳转策略与旧管线一致：自动跟随（跨源清凭据由共享发送层保证）"
+        );
+        assert_eq!(steps[2].wait_secs, 0.0);
+
+        // 最小旧任务：只有登录请求一个步骤
+        let bare = desugar_legacy_request(&request("http://portal.example/login".into()));
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].id.as_str(), LEGACY_LOGIN_STEP_ID);
+    }
+
+    /// 决策①对照：带步骤的任务配了下线动作不再静默跳过——前置钩子对**所有**
+    /// 任务形态生效，在第一个步骤之前执行（脱糖前只有旧管线执行 logout）。
+    /// 旧任务侧的顺序断言见 logout_request_is_sent_before_login_request。
+    #[tokio::test]
+    async fn flow_task_logout_request_runs_before_first_step() {
+        let (base, mut seen) = spawn_recording_portal().await;
+        let mut req = request(String::new());
+        req.success_pattern = "登录成功".into();
+        req.failure_pattern.clear();
+        req.result_step_id = "login".into();
+        req.steps = vec![HttpFlowStep {
+            id: "login".into(),
+            name: "提交登录".into(),
+            method: HttpRequestMethod::Post,
+            url: format!("{base}/api/login"),
+            body: "username={username}".into(),
+            ..Default::default()
+        }];
+        req.logout_request = Some(HttpActionRequest {
+            method: HttpRequestMethod::Post,
+            url: format!("{base}/api/logout"),
+            ..Default::default()
+        });
+
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        let (first_port, first_path) = seen.recv().await.unwrap();
+        let (second_port, second_path) = seen.recv().await.unwrap();
+        assert!(
+            first_path.starts_with("/api/logout"),
+            "下线请求必须先到（实际先到 {first_path:?}）"
+        );
+        assert!(
+            second_path.starts_with("/api/login"),
+            "登录请求必须后到（实际后到 {second_path:?}）"
+        );
+        assert_eq!(
+            first_port, second_port,
+            "下线与登录应落在同一条连接（部分门户要求会话关联）"
+        );
+    }
+
+    /// 决策②对照：旧管线的脚本产出原本没有本地预算（仅 IPC 层上限）；脱糖后
+    /// 与流程任务共用 8KiB/值 + 128KiB/尝试，超限产出在计算步骤即被拒。
+    #[tokio::test]
+    async fn legacy_script_output_is_subject_to_variable_budget() {
+        // 超预算：9 KiB 产出 > 8 KiB/值 → 计算步骤失败、整次尝试终态（无网络请求发出）
+        let mut req = request("http://127.0.0.1:1/login".into());
+        req.crypto_script =
+            "function transform(ctx) { return { blob: 'x'.repeat(9 * 1024) }; }".into();
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::UnknownError, "{}", report.message);
+        assert!(
+            report.message.contains("变量超过大小限制"),
+            "{}",
+            report.message
+        );
+        assert_eq!(report.step_reports.len(), 1);
+        assert_eq!(report.step_reports[0].outcome, "failed");
+
+        // 对照组：预算内产出照常并入变量表并进入请求
+        let (url, received) = spawn_capturing_response(200, "登录成功", "").await;
+        let mut ok = request(url);
+        ok.crypto_script = "function transform(ctx) { return { tag: 'ok-tag' }; }".into();
+        ok.headers = "X-Tag: {tag}".into();
+        let report = run_once(&ok).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        let raw = received.await.unwrap().to_ascii_lowercase();
+        assert!(raw.contains("x-tag: ok-tag"), "{raw}");
+    }
+
+    /// 决策③对照：总预算兜底——单步等待超出剩余预算时立即中止「HTTP 登录流程超时」，
+    /// 不真等。任务保存闸口把 wait 钳在 0～30，此处手工构造以越过闸口验证执行侧；
+    /// 旧任务脱糖后与流程任务走**同一个**编排循环与超时判据（单步
+    /// `min(REQUEST_TIMEOUT, 剩余)`、120s 总预算），旧口径「无总预算、固定 20s/请求」退役。
+    #[tokio::test]
+    async fn step_wait_beyond_total_budget_aborts_immediately() {
+        let (url, _rx) = spawn_capturing_response(200, "登录成功", "").await;
+        let mut req = request(String::new());
+        req.success_pattern = "登录成功".into();
+        req.failure_pattern.clear();
+        req.result_step_id = "login".into();
+        req.steps = vec![HttpFlowStep {
+            id: "login".into(),
+            name: "登录请求".into(),
+            url,
+            wait_secs: 1000.0,
+            ..Default::default()
+        }];
+        let started = Instant::now();
+        let report = run_once(&req).await;
+        assert_eq!(report.outcome, Outcome::NetworkError, "{}", report.message);
+        assert!(
+            report.message.contains("HTTP 登录流程超时"),
+            "{}",
+            report.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "预算耗尽必须立即中止而非真等 1000s"
+        );
+    }
+
+    /// 决策④对照：旧任务的判定文案统一为流程形态——「直连请求成功」旧文案退役，
+    /// 结果步骤（脱糖后的 `login`）出现在失败/未命中文案里。登录历史对脱糖后的
+    /// 新条目生效，旧历史记录不动。
+    #[tokio::test]
+    async fn legacy_attempt_adopts_flow_verdict_messages() {
+        // 成功
+        let url = spawn_response(200, "登录成功").await;
+        let report = run_once(&request(url)).await;
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        assert!(
+            report.message.contains("HTTP 登录流程成功（HTTP 200 OK）"),
+            "{}",
+            report.message
+        );
+        assert!(
+            !report.message.contains("直连请求成功"),
+            "旧文案应退役: {}",
+            report.message
+        );
+
+        // 失败标识命中
+        let url = spawn_response(200, "登录成功，但密码错误").await;
+        let report = run_once(&request(url)).await;
+        assert_eq!(
+            report.outcome,
+            Outcome::InvalidCredential,
+            "{}",
+            report.message
+        );
+        assert!(
+            report
+                .message
+                .contains("步骤「login」命中失败标识（HTTP 200 OK）"),
+            "{}",
+            report.message
+        );
+
+        // 未命中成功标识
+        let url = spawn_response(503, "维护中").await;
+        let report = run_once(&request(url)).await;
+        assert_eq!(
+            report.outcome,
+            Outcome::AssertionFailed,
+            "{}",
+            report.message
+        );
+        assert!(
+            report
+                .message
+                .contains("步骤「login」未命中成功标识（HTTP 503"),
+            "{}",
+            report.message
+        );
+    }
+
+    /// 决策⑤对照：脚本上下文统一为累计变量表（`ctx.vars` 含内置字段），且旧管线的
+    /// 覆盖日志并入共享路径——覆盖已有占位符记 info，新增变量不记。
+    #[tokio::test]
+    async fn transform_overwrite_of_existing_placeholder_is_logged_and_applied() {
+        let (url, received) = spawn_capturing_response(200, "登录成功", "").await;
+        let sink = LogSink(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let writer = sink.clone();
+        // 当前线程默认订阅（current_thread 测试运行时，await 点仍在本线程），
+        // 测试结束 drop 归还，不影响其他测试
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_ansi(false)
+                .without_time()
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        let mut req = request(url);
+        // password 覆盖内置占位符（合法用法：盐值拼接后的密码）；fresh 是新增变量。
+        // ctx.vars.username 读取累计变量表里的内置字段。
+        req.crypto_script = "function transform(ctx) { return { password: 'hashed-abc', fresh: 'fresh-value', user_echo: ctx.vars.username }; }".into();
+        req.headers = "X-User: {user_echo}\nX-Pass: {password}\nX-Fresh: {fresh}".into();
+        let report = run_once(&req).await;
+        drop(guard);
+
+        assert_eq!(report.outcome, Outcome::Success, "{}", report.message);
+        // 覆盖生效：后续模板引用到的是脚本产出的新值
+        let raw = received.await.unwrap().to_ascii_lowercase();
+        assert!(raw.contains("x-pass: hashed-abc"), "{raw}");
+        assert!(raw.contains("x-user: abc"), "{raw}");
+        assert!(raw.contains("x-fresh: fresh-value"), "{raw}");
+        // 覆盖日志：password 被覆盖记 info；fresh / user_echo 是新增不记
+        let logs = sink.0.lock().unwrap().join("\n");
+        assert!(
+            logs.contains("计算字段覆盖已有占位符: password"),
+            "覆盖应记 info 日志: {logs}"
+        );
+        assert!(
+            !logs.contains("计算字段覆盖已有占位符: fresh"),
+            "新增变量不应记覆盖日志: {logs}"
+        );
+        assert!(
+            !logs.contains("计算字段覆盖已有占位符: user_echo"),
+            "新增变量不应记覆盖日志: {logs}"
+        );
     }
 }
