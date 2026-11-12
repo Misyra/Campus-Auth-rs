@@ -265,6 +265,9 @@ jobs:
 
   docker:
     name: 构建 Docker ${{ matrix.platform }}
+    # 版本门禁（tag 与 Cargo.toml 一致）只在 build job 校验，架构镜像推送必须排在其后，
+    # 否则门禁失败时镜像仍会被推上 ghcr（代价：发布串行，约 +10-15 分钟）
+    needs: build
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
