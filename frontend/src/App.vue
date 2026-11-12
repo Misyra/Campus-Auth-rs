@@ -11,13 +11,29 @@ import SetupWizard from "./components/common/SetupWizard.vue";
 import DebugPanel from "./components/DebugPanel.vue";
 import RepoImportModals from "./components/RepoImportModals.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
-import { onMounted } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { useDebug } from "./composables/useDebug";
 import { useUpdateDialog } from "./composables/useUpdateDialog";
+import AuthBootstrapGuide from "./components/AuthBootstrapGuide.vue";
+import { hasUsableAuthToken } from "./api/client";
 
 const { state } = useUi();
 const debug = useDebug();
 const updateDialog = useUpdateDialog();
+
+/**
+ * 鉴权引导态：首检完成（isLoading 翻转为 false）仍无可用 token 时接管界面。
+ * URL fragment 的 bootstrap 握手在首个 API 请求前的 ensureAuthToken 内完成，
+ * 到此刻已有结论——此处只区分「换到了 token」与「需要引导页」两种结局。
+ */
+const bootstrapNeeded = ref(false);
+watch(
+  () => state.isLoading,
+  (loading) => {
+    if (!loading) bootstrapNeeded.value = !hasUsableAuthToken();
+  },
+  { immediate: true },
+);
 
 // 启动时恢复服务端仍活跃的调试会话：否则页面刷新后界面"失忆"，
 // 用户既看不到会话在跑也没有停止入口，登录会一直撞"Worker 忙"错误
@@ -53,6 +69,9 @@ onMounted(() => {
     <RepoImportModals />
     <!-- 更新弹窗同样全局挂载：启动/周期检查命中时任意页面都能直接弹出 -->
     <UpdateDialog />
+
+    <!-- 鉴权引导页：无 token 且无可用秘钥/密码时全屏接管（样式见组件 scoped） -->
+    <AuthBootstrapGuide v-if="bootstrapNeeded" />
 
     <div v-if="state.isLoading" class="init-overlay">
       <span class="spinner"></span>
