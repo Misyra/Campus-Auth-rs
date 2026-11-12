@@ -1,8 +1,9 @@
 //! 配置 schema 版本迁移 pipeline（v5 → v6 → v7 → v8 → v9 → v10）
 //!
 //! 启动时若 `settings.json` 的 `config_version` 低于当前版本，按 `MIGRATIONS` 顺序
-//! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用覆盖写入，
-//! `settings.json` 的 `config_version` 更新是 commit point。
+//! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用原子覆盖
+//! 写入（tmp + rename，不产生截断文件），`settings.json` 的 `config_version` 更新是
+//! commit point——任一迁移返回 Err 都不会提交新版本号，下次启动重跑迁移。
 //!
 //! v10 起迁移可能**跨文件**（`migrate_v9_to_v10` 把方案里的直连字段搬成
 //! `<base>/tasks/http/<id>.json`），因此每个迁移函数都要能安全重跑：先判断
@@ -17,6 +18,7 @@ use serde_json::Value;
 use crate::config::ConfigError;
 use crate::config::schema::SettingsData;
 use crate::config::service::is_valid_profile_id;
+use crate::utils::io::{atomic_copy_file, atomic_write_bytes};
 
 /// 单个迁移函数的签名
 ///
@@ -59,6 +61,8 @@ pub fn run_migrations(config_dir: &Path, value: &mut Value) -> Result<u32, Confi
     // 写回迁移后的版本号：仅改返回值会导致落盘的 settings.json 永远停在
     // 迁移前版本，每次启动重跑迁移链并重写盘（CFG-1）；v5→v6 内硬编码的
     // 中间 checkpoint（=6）保留，供迁移中途失败的下次续跑定位。
+    // 本处即版本 commit point：上方任一迁移返回 Err 都到不了这里，盘上版本号
+    // 保持迁移前值，下次启动重跑迁移（如 v10 方案写回失败的注入重试）。
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
             "config_version".to_string(),
@@ -289,13 +293,70 @@ fn backup_config_dir(config_dir: &Path) -> std::io::Result<PathBuf> {
 /// `remove_dir_all` 会把他人尚未回滚的备份连带误删。冲突时加 `-2`、`-3` …
 /// 序号后缀重试，保证每次迁移都得到独立的新目录。
 fn unique_backup_dir(config_dir: &Path, stamp: &str) -> PathBuf {
-    let mut candidate = config_dir.join(format!("{}{}", crate::config::BACKUP_PREFIX, stamp));
+    unique_backup_dir_with_prefix(config_dir, stamp, crate::config::BACKUP_PREFIX)
+}
+
+/// [`unique_backup_dir`] 的前缀参数化版本
+///
+/// 供按版本命名的方案文件备份复用（`.backup.v8.{ts}` / `.backup.v9.{ts}`），
+/// 冲突加后缀的口径与整目录备份完全一致。
+fn unique_backup_dir_with_prefix(config_dir: &Path, stamp: &str, prefix: &str) -> PathBuf {
+    let mut candidate = config_dir.join(format!("{prefix}{stamp}"));
     let mut n: u32 = 2;
     while candidate.exists() {
-        candidate = config_dir.join(format!("{}{}-{n}", crate::config::BACKUP_PREFIX, stamp));
+        candidate = config_dir.join(format!("{prefix}{stamp}-{n}"));
         n += 1;
     }
     candidate
+}
+
+/// 迁移写回前备份将被改写的方案文件到 `<config_dir>/.backup.v{version}.{ts}/`
+///
+/// 落点与命名口径同 v5→v6 的整目录备份（[`backup_config_dir`]），区别是只拷贝
+/// 将被改写的单个方案文件。`backup_dir` 由调用方跨多次调用复用（同一轮迁移
+/// 共享一个备份目录），首次调用时创建（同秒冲突加 `-2` 后缀，口径同
+/// [`unique_backup_dir`]）。
+///
+/// 备份是 best-effort：失败仅告警，不阻断迁移——写回本身已是原子替换（不产生
+/// 截断文件），备份只提供内容层面的回滚副本。备份必须先于写回执行，且单份
+/// 备份经 [`atomic_copy_file`] 落盘，崩溃不会留下半截的备份原文误导用户回滚。
+fn backup_profile_before_rewrite(
+    config_dir: &Path,
+    version: u32,
+    backup_dir: &mut Option<PathBuf>,
+    profile_path: &Path,
+) {
+    if backup_dir.is_none() {
+        let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
+        let dir =
+            unique_backup_dir_with_prefix(config_dir, &stamp, &format!(".backup.v{version}."));
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => *backup_dir = Some(dir),
+            Err(e) => {
+                tracing::warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "创建方案备份目录失败（迁移继续，仅失去本次写回的回滚副本）"
+                );
+                return;
+            }
+        }
+    }
+    let Some(dir) = backup_dir else {
+        return;
+    };
+    let Some(name) = profile_path.file_name() else {
+        return;
+    };
+    let dest = dir.join(name);
+    if let Err(e) = atomic_copy_file(profile_path, &dest) {
+        tracing::warn!(
+            from = %profile_path.display(),
+            to = %dest.display(),
+            error = %e,
+            "备份将被改写的方案文件失败（迁移继续，仅失去该文件的回滚副本）"
+        );
+    }
 }
 
 /// 递归拷贝目录内容（跳过备份目录自身，避免自我嵌套）
@@ -436,8 +497,13 @@ fn migrate_v8_to_v9(config_dir: &Path, _value: &mut Value) -> Result<(), ConfigE
         if let Some(obj) = profile.as_object_mut() {
             obj.insert("active_task".to_string(), Value::String(task_id.clone()));
         }
+        // 写回前先备份原文（best-effort，口径见 backup_profile_before_rewrite）
+        let mut backup_dir: Option<PathBuf> = None;
+        backup_profile_before_rewrite(config_dir, 8, &mut backup_dir, &profile_path);
+        // 原子写回：迁移中途断电/ENOSPC 不得留下截断的方案文件（截断会被
+        // load_all_profiles 永久跳过，凭据再也找不回来）
         let json = serde_json::to_string_pretty(&profile)?;
-        std::fs::write(&profile_path, json)?;
+        atomic_write_bytes(&profile_path, json.as_bytes())?;
         tracing::info!(
             profile_id = %active_id,
             task_id = %task_id,
@@ -472,18 +538,26 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
 
     let entries = match std::fs::read_dir(&profiles_dir) {
         Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 方案目录不存在：即零个方案，v10 迁移无事可做（幂等 no-op，
+            // 生产路径 profiles 目录已在 ConfigService 构造期预建）
+            return Ok(());
+        }
         Err(e) => {
-            // 方案目录不可读：不动任何东西，留给下次启动重试（迁移版本号未提交）
-            tracing::warn!(
+            // 方案目录不可读：中止迁移而非跳过——此刻提交版本号会让所有方案的
+            // 内联直连键在下次保存时静默丢弃，必须留待下次启动重试
+            tracing::error!(
                 path = %profiles_dir.display(),
                 error = %e,
-                "v10 迁移跳过：方案目录不可读"
+                "v10 迁移中止：方案目录不可读（版本号不提交，下次启动重试）"
             );
-            return Ok(());
+            return Err(e.into());
         }
     };
 
     let mut created: Vec<String> = Vec::new();
+    // 同一轮迁移共享一个备份目录，首个将被改写的方案文件触发创建（惰性）
+    let mut backup_dir: Option<PathBuf> = None;
     let mut profile_paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -535,25 +609,25 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
         if !path_has_task(&http_dir, &task_id) {
             let task = build_legacy_http_task(&task_id, &profile);
             if let Err(e) = std::fs::create_dir_all(&http_dir) {
-                tracing::warn!(path = %http_dir.display(), error = %e, "v10 迁移：创建直连任务目录失败");
-                continue;
+                // 传播 Err 而非跳过：跳过会照常提交版本号，该方案的内联直连键在
+                // 下次保存时被 v10 schema 静默丢弃——中断重跑比静默丢失安全
+                tracing::error!(
+                    path = %http_dir.display(),
+                    error = %e,
+                    "v10 迁移中止：创建直连任务目录失败（版本号不提交，下次启动重试）"
+                );
+                return Err(e.into());
             }
+            // 原子写入直连任务：中途断电/ENOSPC 不得留下截断的任务文件
             let task_path = http_dir.join(format!("{task_id}.json"));
-            match serde_json::to_string_pretty(&task) {
-                Ok(json) => {
-                    if let Err(e) = std::fs::write(&task_path, json) {
-                        tracing::warn!(
-                            path = %task_path.display(),
-                            error = %e,
-                            "v10 迁移：写入直连任务失败，保留方案里的原配置"
-                        );
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "v10 迁移：序列化直连任务失败");
-                    continue;
-                }
+            let json = serde_json::to_string_pretty(&task)?;
+            if let Err(e) = atomic_write_bytes(&task_path, json.as_bytes()) {
+                tracing::error!(
+                    path = %task_path.display(),
+                    error = %e,
+                    "v10 迁移中止：写入直连任务失败（版本号不提交，下次启动重试）"
+                );
+                return Err(e.into());
             }
             created.push(task_id.clone());
             append_to_order(&tasks_dir, &task_id);
@@ -571,19 +645,19 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
                 obj.remove(key);
             }
         }
-        match serde_json::to_string_pretty(&profile) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    tracing::warn!(
-                        profile_id = %profile_id,
-                        error = %e,
-                        "v10 迁移：写回方案失败（直连任务已就绪，下次启动会重试绑定）"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(profile_id = %profile_id, error = %e, "v10 迁移：序列化方案失败")
-            }
+        // 写回前先备份原文（best-effort：备份失败仅告警，不阻断迁移）
+        backup_profile_before_rewrite(config_dir, 9, &mut backup_dir, &path);
+        // 原子写回 + 失败传播：写回失败若吞掉告警继续走，版本号照常提交、
+        // 方案内联键注定静默丢弃（原「下次启动重试」的承诺并不成立）——
+        // 改为传播 Err 阻断版本提交，下次启动重跑迁移补上绑定与清理
+        let json = serde_json::to_string_pretty(&profile)?;
+        if let Err(e) = atomic_write_bytes(&path, json.as_bytes()) {
+            tracing::error!(
+                profile_id = %profile_id,
+                error = %e,
+                "v10 迁移中止：写回方案失败（版本号不提交，下次启动重试）"
+            );
+            return Err(e.into());
         }
     }
 
@@ -755,7 +829,7 @@ fn append_to_order(tasks_dir: &Path, task_id: &str) {
     order.push(Value::String(task_id.to_string()));
     let json = serde_json::json!({ "order": order });
     if let Ok(text) = serde_json::to_string_pretty(&json)
-        && let Err(e) = std::fs::write(&path, text)
+        && let Err(e) = atomic_write_bytes(&path, text.as_bytes())
     {
         tracing::warn!(
             path = %path.display(),
@@ -1500,6 +1574,208 @@ mod tests {
         assert_eq!(
             read_profile(&config_dir, "default")["active_http_task"],
             "default"
+        );
+    }
+
+    // ============ 中断续跑：写回失败传播 + 写回前备份 + 幂等重跑（T0b-1）============
+
+    /// 列出 config_dir 下以指定前缀命名的备份目录（排序保证稳定）
+    fn list_backup_dirs(config_dir: &Path, prefix: &str) -> Vec<std::path::PathBuf> {
+        let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(config_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with(prefix))
+                    .unwrap_or(false)
+            })
+            .collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// v9→v10 方案写回失败必须传播 Err 阻断版本提交：config_version 停在 9、
+    /// 方案文件保持原文；修复后下次迁移重跑成功（中断轮已写出的任务被复用）
+    #[test]
+    fn test_migrate_v9_to_v10_write_back_failure_blocks_version_commit() {
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let profiles_dir = config_dir.join("profiles");
+        let profile_path = profiles_dir.join("default.json");
+        let original = std::fs::read_to_string(&profile_path).unwrap();
+
+        // 注入写回失败：Unix 让方案目录只读（atomic_write_bytes 建临时文件即失败）；
+        // Windows 让目标文件只读（rename 覆盖只读文件被拒绝）
+        let dir_perm = std::fs::metadata(&profiles_dir).unwrap().permissions();
+        #[cfg(windows)]
+        let file_perm = std::fs::metadata(&profile_path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut readonly = dir_perm.clone();
+            readonly.set_mode(0o555);
+            std::fs::set_permissions(&profiles_dir, readonly).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut readonly = file_perm.clone();
+            readonly.set_readonly(true);
+            std::fs::set_permissions(&profile_path, readonly).unwrap();
+        }
+
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        let result = run_migrations(&config_dir, &mut v);
+
+        // 立即恢复权限：后续重跑与临时目录清理都需要可写
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut writable = dir_perm.clone();
+            writable.set_mode(0o755);
+            std::fs::set_permissions(&profiles_dir, writable).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut writable = file_perm.clone();
+            writable.set_readonly(false);
+            std::fs::set_permissions(&profile_path, writable).unwrap();
+        }
+
+        assert!(result.is_err(), "写回失败必须传播 Err 阻断版本提交");
+        assert_eq!(v["config_version"], 9, "版本号不得提交，下次启动重跑迁移");
+        assert_eq!(
+            std::fs::read_to_string(&profile_path).unwrap(),
+            original,
+            "原子写失败不得改动方案文件（无截断、无半截内容）"
+        );
+        // 原子写语义兜住：失败后无 .tmp_ 残留
+        let residue: Vec<String> = std::fs::read_dir(&profiles_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+            .collect();
+        assert!(residue.is_empty(), "写回失败不得残留临时文件: {residue:?}");
+
+        // 修复权限后重跑：迁移成功，中断轮已写出的直连任务被复用（不重复建 -2）
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        let version = run_migrations(&config_dir, &mut v).unwrap();
+        assert_eq!(version, crate::config::CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default"
+        );
+        assert!(
+            !tmp.path()
+                .join("tasks")
+                .join("http")
+                .join("default-2.json")
+                .exists(),
+            "重跑应复用中断轮已写出的任务"
+        );
+    }
+
+    /// 写回前备份：`.backup.v8.*` / `.backup.v9.*` 保存改写前原文
+    #[test]
+    fn test_migrate_backs_up_profiles_before_rewrite() {
+        // v9→v10：备份内联直连键尚未搬走的方案原文
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let original =
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        let backups = list_backup_dirs(&config_dir, ".backup.v9.");
+        assert_eq!(backups.len(), 1, "应产生恰好一个 v9 备份目录");
+        assert_eq!(
+            std::fs::read_to_string(backups[0].join("default.json")).unwrap(),
+            original,
+            "备份必须是改写前原文"
+        );
+        assert!(original.contains("\"http_url\""), "原文应含内联直连键");
+        assert!(!original.contains("active_http_task"), "原文应无新绑定");
+
+        // v8→v9：同口径备份
+        let tmp8 = v8_fixture(Some("mytask"), None);
+        let config_dir8 = tmp8.path().join("config");
+        let original8 =
+            std::fs::read_to_string(config_dir8.join("profiles").join("default.json")).unwrap();
+        let mut v8 = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+        migrate_v8_to_v9(&config_dir8, &mut v8).unwrap();
+
+        let backups8 = list_backup_dirs(&config_dir8, ".backup.v8.");
+        assert_eq!(backups8.len(), 1, "应产生恰好一个 v8 备份目录");
+        assert_eq!(
+            std::fs::read_to_string(backups8[0].join("default.json")).unwrap(),
+            original8,
+            "v8 备份必须是改写前原文"
+        );
+        assert!(!original8.contains("\"active_task\""), "原文应无任务绑定");
+    }
+
+    /// 迁移完成后幂等重跑为 no-op：不改写文件、不产生新备份、不重复建任务
+    #[test]
+    fn test_migrate_rerun_after_success_is_noop() {
+        // v9→v10：首轮已绑定并清掉内联键，重跑不应再改写任何文件
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+        let profile_after =
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap();
+        let task_after =
+            std::fs::read_to_string(tmp.path().join("tasks").join("http").join("default.json"))
+                .unwrap();
+        let backup_count = list_backup_dirs(&config_dir, ".backup.v9.").len();
+
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap(),
+            profile_after,
+            "重跑不得改写方案文件"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("tasks").join("http").join("default.json"))
+                .unwrap(),
+            task_after,
+            "重跑不得改写已生成的任务"
+        );
+        assert_eq!(
+            list_backup_dirs(&config_dir, ".backup.v9.").len(),
+            backup_count,
+            "重跑未发生改写，不得产生新备份"
+        );
+        assert!(
+            !tmp.path()
+                .join("tasks")
+                .join("http")
+                .join("default-2.json")
+                .exists()
+        );
+
+        // v8→v9：首轮已绑定，重跑不覆盖、不备份
+        let tmp8 = v8_fixture(Some("mytask"), None);
+        let config_dir8 = tmp8.path().join("config");
+        let mut v8 = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+        migrate_v8_to_v9(&config_dir8, &mut v8).unwrap();
+        let profile8_after =
+            std::fs::read_to_string(config_dir8.join("profiles").join("default.json")).unwrap();
+        let backup8_count = list_backup_dirs(&config_dir8, ".backup.v8.").len();
+
+        let mut v8 = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+        migrate_v8_to_v9(&config_dir8, &mut v8).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir8.join("profiles").join("default.json")).unwrap(),
+            profile8_after,
+            "重跑不得改写方案文件"
+        );
+        assert_eq!(
+            list_backup_dirs(&config_dir8, ".backup.v8.").len(),
+            backup8_count,
+            "重跑未发生改写，不得产生新备份"
         );
     }
 }
