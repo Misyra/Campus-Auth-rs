@@ -22,4 +22,5 @@
 - [更改日志](../changelog.md) — 每项开发变动与问题修复记录
 - [已知问题](../known-issues.md) — 仍有效的未修复项
 - [后续计划](../plan-next.md) — 活跃计划入口
+- [架构总览与模块地图](architecture.md) — 整体拓扑 mermaid 图、src/ 逐目录模块地图、模块依赖方向与测试地图（开发者向，模块边界以代码为准）
 - [架构与开发规范](../../AGENTS.md) — ServiceContainer、Bridge、Updater 通道等
