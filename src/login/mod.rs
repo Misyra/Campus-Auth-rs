@@ -33,6 +33,7 @@ use crate::config::LoginChannel;
 use crate::config::runtime::ProfileSnapshot;
 use crate::config::runtime::RuntimeConfig;
 use crate::environment::EnvironmentManager;
+use crate::events::EventBus;
 use crate::status::{LoginStatus, PartialSnapshot, StatusManager};
 use crate::tasks::TaskManager;
 use crate::utils::metrics::Metrics;
@@ -370,15 +371,24 @@ pub struct LoginOrchestrator {
     first_available_cache: StdMutex<Option<(String, std::time::Instant, Option<&'static str>)>>,
     /// 运行指标（可选）
     metrics: Option<Arc<Metrics>>,
+    /// 事件总线（登录终态经 [`LoginSession::emit`] 单点发布
+    /// [`crate::events::AppEvent::LoginSucceeded`] / [`crate::events::AppEvent::LoginFailed`]；
+    /// 构造注入，测试兼容入口发往孤立总线）
+    events: Arc<EventBus>,
     /// 应用级 shutdown 信号（会话在 shutdown 时立即退出）
     shutdown_token: CancellationToken,
 }
 
 impl LoginOrchestrator {
-    /// 构造登录编排器
+    /// 构造登录编排器（测试兼容入口）
     ///
     /// 全部依赖通过构造注入（无 setter）：依赖关系在组装期即确定，
     /// 避免运行时未注入导致的隐性空值路径。
+    ///
+    /// 事件发往**孤立总线**（无订阅者，广播 send 的 Err 被忽略）：登录终态事件
+    /// （`LoginSucceeded` / `LoginFailed`）会静默丢弃。仅供既有测试装配等不关心
+    /// 事件发布的调用方使用；生产入口是 [`Self::new_with_events`]，由容器注入
+    /// 共享 [`EventBus`]。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<ConfigService>,
@@ -391,6 +401,41 @@ impl LoginOrchestrator {
         monitor: Arc<crate::monitor::MonitorService>,
         shutdown_token: CancellationToken,
         metrics: Option<Arc<Metrics>>,
+    ) -> Self {
+        Self::new_with_events(
+            config,
+            history,
+            status,
+            bridge,
+            environment,
+            tasks,
+            script_runner,
+            monitor,
+            shutdown_token,
+            metrics,
+            Arc::new(EventBus::new()),
+        )
+    }
+
+    /// 构造登录编排器并注入事件总线（容器生产入口）
+    ///
+    /// 登录终态经 [`LoginSession::emit`]（结果槽写入的单一发射点）向注入的
+    /// [`EventBus`] 发布 [`crate::events::AppEvent::LoginSucceeded`] /
+    /// [`crate::events::AppEvent::LoginFailed`]（白名单摘要载荷）；取消终态、
+    /// 重试预算内的中间失败与校验失败的立即终态句柄均不发布。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_events(
+        config: Arc<ConfigService>,
+        history: Arc<LoginHistoryService>,
+        status: Arc<StatusManager>,
+        bridge: Arc<BridgeSupervisor>,
+        environment: Arc<EnvironmentManager>,
+        tasks: Arc<TaskManager>,
+        script_runner: Arc<dyn crate::tasks::ScriptRunnerApi>,
+        monitor: Arc<crate::monitor::MonitorService>,
+        shutdown_token: CancellationToken,
+        metrics: Option<Arc<Metrics>>,
+        events: Arc<EventBus>,
     ) -> Self {
         Self {
             config,
@@ -410,6 +455,7 @@ impl LoginOrchestrator {
             channel_probe_cache: StdMutex::new(HashMap::new()),
             first_available_cache: StdMutex::new(None),
             metrics,
+            events,
             shutdown_token,
         }
     }
@@ -725,6 +771,7 @@ impl LoginOrchestrator {
                 status_manager: self.status.clone(),
                 history_service: self.history.clone(),
                 script_runner: self.script_runner.clone(),
+                events: self.events.clone(),
                 metrics: self.metrics.clone(),
             },
         );
@@ -1838,6 +1885,15 @@ mod tests {
 
     /// 由调用方持有临时目录，供需要保存方案与任务的集成式单测使用。
     pub(super) async fn make_orchestrator_at(dir: &std::path::Path) -> Arc<LoginOrchestrator> {
+        make_orchestrator_with_events_at(dir, Arc::new(crate::events::EventBus::new())).await
+    }
+
+    /// 同 [`make_orchestrator_at`] 装配，但注入调用方提供的事件总线
+    /// （登录终态事件发布断言用；不关心事件的装配走 [`make_orchestrator_at`]）
+    async fn make_orchestrator_with_events_at(
+        dir: &std::path::Path,
+        events: Arc<crate::events::EventBus>,
+    ) -> Arc<LoginOrchestrator> {
         use crate::config::{ConfigService, ProfileService};
         use crate::environment::EnvironmentManager;
         use crate::login::history::LoginHistoryService;
@@ -1876,7 +1932,7 @@ mod tests {
             config.clone(),
         );
 
-        Arc::new(LoginOrchestrator::new(
+        Arc::new(LoginOrchestrator::new_with_events(
             config,
             Arc::new(history),
             status,
@@ -1887,6 +1943,7 @@ mod tests {
             monitor,
             CancellationToken::new(),
             Some(Metrics::new()),
+            events,
         ))
     }
 
@@ -2244,6 +2301,194 @@ mod tests {
         assert!(
             !new_result.message.contains("配置不完整"),
             "新请求应通过校验并实际执行会话，实际 {new_result:?}"
+        );
+    }
+
+    // ============ 终态事件发布（事件源接入批三）：Reuse 不双发 ============
+
+    /// 首次 execute 阻塞直到放行的 mock Bridge：模拟「在途会话」，供去重复用
+    /// 场景确定性地控制终态发射时机（oneshot 非时钟等待，不受暂停时钟推进影响）
+    struct BlockingBridge {
+        /// 首次 execute 取走并等待的放行信号（None 后再调用即 panic，暴露误用）
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::bridge::BridgeApi for BlockingBridge {
+        async fn execute(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> Result<crate::bridge::IpcResponse, crate::bridge::BridgeError> {
+            let rx = self
+                .release
+                .lock()
+                .await
+                .take()
+                .expect("BlockingBridge 只应被调用一次");
+            let _ = rx.await;
+            // 放行后返回 manual_required：一次即终态失败，emit 发射唯一事件
+            Ok(crate::bridge::IpcResponse {
+                id: 1,
+                result: crate::bridge::IpcResult {
+                    success: false,
+                    data: serde_json::json!({
+                        "outcome": "manual_required",
+                        "message": "门户要求人工完成验证",
+                        "duration_ms": 1,
+                    }),
+                    error: None,
+                },
+            })
+        }
+
+        fn cancel(&self, _cancel_id: &str) {}
+
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+            _timeout: Duration,
+        ) -> Result<crate::bridge::IpcResponse, crate::bridge::BridgeError> {
+            self.execute(method, params).await
+        }
+
+        async fn force_recycle(&self) {}
+
+        fn has_live_worker(&self) -> bool {
+            false
+        }
+
+        async fn recycle_if_running(&self) {}
+
+        async fn shutdown(&self) {}
+    }
+
+    /// 事件④（本批核心断言）：去重复用不双发——原始终态只在 emit（结果槽首次
+    /// 写入）发射一次事件；Reuse 把旧会话句柄重新交给新提交方只是**读回**，
+    /// 不再经过 emit，事件计数不变。
+    ///
+    /// 流程：真实 LoginSession（Bridge 阻塞模拟在途）安装为编排器活跃会话 →
+    /// 同来源 Auto submit 命中去重复用 → 放行在途会话真实终态 → 全程恰一次
+    /// LoginFailed，且载荷字段正确。
+    #[tokio::test]
+    async fn test_reuse_does_not_double_publish_login_event() {
+        use crate::events::{AppEvent, EventBus};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let events = Arc::new(EventBus::new());
+        let orch = make_orchestrator_with_events_at(dir.path(), events.clone()).await;
+
+        // default 方案走直连渠道并绑定任务：让 submit 的准备阶段通过校验、
+        // 抵达去重决策点（同 test_resolved_session_is_not_reused 的配置套路）
+        let mut default_profile = orch.config.load_profile("default").unwrap();
+        default_profile.login_channel = crate::config::LoginChannel::Http;
+        default_profile.username = "account-a".into();
+        default_profile.password = orch.config.encrypt_password("password-a").unwrap();
+        default_profile.active_http_task = "mock-login".into();
+        orch.config.save_profile(&default_profile).await.unwrap();
+        let task = crate::tasks::HttpTaskConfig {
+            method: crate::tasks::HttpRequestMethod::Get,
+            url: "http://127.0.0.1:9/login?account={username}".into(),
+            ..Default::default()
+        };
+        orch.tasks
+            .save_task("mock-login", &crate::tasks::TaskKind::Http(Box::new(task)))
+            .await
+            .unwrap();
+        orch.config.reload().await.unwrap();
+
+        // 在途会话：真实 LoginSession 直接构造（emit 走真实发射路径），Bridge
+        // 首次 execute 阻塞直到放行；其结果槽句柄安装为编排器活跃会话。
+        // 依赖复用编排器既有实例（config/status/history/monitor/script_runner），
+        // 仅事件总线为测试注入的共享总线——终态事件经它发射
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let bridge = Arc::new(BlockingBridge {
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+        });
+        let session_deps = crate::login::session::SessionDeps {
+            bridge,
+            monitor: orch.monitor.clone(),
+            config_service: orch.config.clone(),
+            status_manager: orch.status.clone(),
+            history_service: orch.history.clone(),
+            script_runner: orch.script_runner.clone(),
+            events: events.clone(),
+            metrics: None,
+        };
+        let (result_tx, _result_rx) = tokio::sync::watch::channel(None);
+        let slot = Arc::new(LoginHandleInner { result_tx });
+        let session = LoginSession::new(
+            session::SessionParams {
+                source: LoginSource::Auto,
+                task_id: None,
+                max_retries: 0,
+                retry_interval: Duration::from_secs(0),
+                login_timeout: Duration::from_secs(30),
+                profile_id: "default".to_string(),
+                network: Default::default(),
+                plan: session::LoginAttemptPlan::Browser(serde_json::json!({})),
+            },
+            CancellationToken::new(),
+            slot.clone(),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(StdMutex::new(None)),
+            session_deps,
+        );
+        {
+            let mut state = orch.state.lock().await;
+            state.active_session = Some(ActiveSession {
+                source: LoginSource::Auto,
+                session_id: 1,
+                cancel_token: CancellationToken::new(),
+                cancel_reason: Arc::new(StdMutex::new(None)),
+                attempt_cancel_id: Arc::new(arc_swap::ArcSwapOption::new(None)),
+                handle: LoginHandle {
+                    source: LoginSource::Auto,
+                    cancel_token: CancellationToken::new(),
+                    inner: slot.clone(),
+                },
+                finished: Arc::new(tokio::sync::Notify::new()),
+            });
+        }
+        let run_task = tokio::spawn(session.run());
+
+        let mut rx = events.subscribe();
+
+        // 同来源 Auto submit：命中去重 → 复用既有在途会话句柄，且此刻零事件
+        let reused = orch.submit(LoginSource::Auto, None, None).await;
+        assert!(
+            Arc::ptr_eq(&reused.inner, &slot),
+            "去重命中必须复用活跃会话句柄（同一结果槽）"
+        );
+        assert!(rx.try_recv().is_err(), "Reuse 读回旧会话不得发布事件");
+
+        // 放行在途会话 → 真实终态发射（唯一一次）
+        let _ = release_tx.send(());
+        let result = reused.await_result().await;
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        let _ = run_task.await;
+
+        // 全程恰一次 LoginFailed，载荷为白名单摘要（profile/channel/attempt/reason）
+        let envelope = rx.try_recv().expect("原始终态发射应发布一次 LoginFailed");
+        assert_eq!(envelope.event.kind(), "login_failed");
+        match &envelope.event {
+            AppEvent::LoginFailed(s) => {
+                assert_eq!(s.profile_id, "default");
+                assert_eq!(s.channel, "browser");
+                assert_eq!(s.attempt, Some(1));
+                let reason = s.reason.as_deref().unwrap_or_default();
+                assert!(
+                    reason.contains("门户要求人工完成验证"),
+                    "reason 应含终态失败短语: {reason}"
+                );
+            }
+            other => panic!("应为 LoginFailed，实际 {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "Reuse 不双发：去重复用后事件计数不变"
         );
     }
 }

@@ -18,6 +18,7 @@ use std::pin::Pin;
 
 use crate::bridge::{BridgeError, IpcResponse, Outcome, StructuredResult};
 use crate::config::{ConfigService, LoginChannel};
+use crate::events::{AppEvent, LoginSummary};
 use crate::login::history::{HistoryResult, LoginHistoryEntry, LoginHistoryService};
 use crate::login::http_login;
 use crate::login::script_login;
@@ -152,6 +153,16 @@ fn dialog_note(data: &Value) -> String {
     }
 }
 
+/// 渠道标识（事件载荷 `LoginSummary.channel`）：与 `LoginChannel` 的 serde
+/// snake_case 序列化同值（browser / http / script），词表固定、不含用户数据
+fn login_channel_code(channel: LoginChannel) -> &'static str {
+    match channel {
+        LoginChannel::Browser => "browser",
+        LoginChannel::Http => "http",
+        LoginChannel::Script => "script",
+    }
+}
+
 /// `close_browser` 的命令级超时。
 ///
 /// 与 Python 侧 `handle_close_browser` 的内部超时一致
@@ -175,6 +186,9 @@ pub(crate) struct SessionDeps {
     /// 脚本执行能力（脚本登录渠道用；trait 化以便状态机单测注入替身，见
     /// [`crate::tasks::ScriptRunnerApi`]）
     pub script_runner: std::sync::Arc<dyn crate::tasks::ScriptRunnerApi>,
+    /// 事件总线（登录终态在 [`LoginSession::emit`] 发布 [`AppEvent::LoginSucceeded`]
+    /// / [`AppEvent::LoginFailed`]；构造注入，测试兼容装配发往孤立总线）
+    pub events: std::sync::Arc<crate::events::EventBus>,
     /// 运行指标（可选）
     pub metrics: Option<std::sync::Arc<Metrics>>,
 }
@@ -897,6 +911,41 @@ impl LoginSession {
             retry_count: result.attempts.saturating_sub(1),
         });
 
+        // 终态事件发布（事件源接入，在既有状态发射旁追加）：emit 是结果槽写入
+        // （终态首次发射、供所有等待方读回）的单一位置，成功发
+        // [`AppEvent::LoginSucceeded`]、最终失败发 [`AppEvent::LoginFailed`]；
+        // 取消终态不发（既非成功也非最终失败）。重试预算内的中间失败在
+        // try_retry 处转入下一轮，不经过终态发射，天然不发。载荷为白名单摘要
+        // （profile_id / channel / reason / attempt），reason 取失败消息首行截断
+        // （口径同 tasks 域 brief_reason），不含凭据/token/URL 查询串。
+        // 发布为同步非阻塞（broadcast 无订阅者时 send 的 Err 被忽略）。
+        // 去重复用（Reuse）读回的是此前已发射过的旧结果、不再经过 emit，
+        // 天然不会双发。
+        let summary = LoginSummary {
+            profile_id: self.params.profile_id.clone(),
+            channel: login_channel_code(self.params.plan.channel()).to_string(),
+            reason: None,
+            attempt: Some(result.attempts),
+        };
+        match result.terminal {
+            LoginTerminal::Success => {
+                self.deps.events.publish(AppEvent::LoginSucceeded(summary));
+            }
+            LoginTerminal::Failed => {
+                self.deps
+                    .events
+                    .publish(AppEvent::LoginFailed(LoginSummary {
+                        reason: Some(crate::tasks::executor::brief_reason(
+                            &result.message,
+                            crate::tasks::executor::TASK_EVENT_REASON_MAX_CHARS,
+                        )),
+                        ..summary
+                    }));
+            }
+            // 取消终态：不发布（通知与事件流口径均只覆盖成功/最终失败）
+            LoginTerminal::Cancelled => {}
+        }
+
         let entry = LoginHistoryEntry {
             timestamp: chrono::Local::now(),
             source: result.source,
@@ -1355,8 +1404,17 @@ mod tests {
         async fn shutdown(&self) {}
     }
 
-    /// 构造带 mock Bridge 的会话依赖集（真实 ConfigService/StatusManager/History）
+    /// 构造带 mock Bridge 的会话依赖集（真实 ConfigService/StatusManager/History；
+    /// 事件发往孤立总线——不关心事件发布的既有用例沿用本入口）
     async fn make_deps(bridge: Arc<dyn crate::bridge::BridgeApi>) -> SessionDeps {
+        make_deps_with_events(bridge, Arc::new(crate::events::EventBus::new())).await
+    }
+
+    /// 同 [`make_deps`]，但注入调用方提供的事件总线（终态事件发布断言用）
+    async fn make_deps_with_events(
+        bridge: Arc<dyn crate::bridge::BridgeApi>,
+        events: Arc<crate::events::EventBus>,
+    ) -> SessionDeps {
         let dir = tempfile::TempDir::new().unwrap();
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
         let config = ConfigService::new(dir.path().to_path_buf(), reload_tx)
@@ -1376,6 +1434,7 @@ mod tests {
             status_manager: Arc::new(StatusManager::new()),
             history_service: Arc::new(LoginHistoryService::new(dir.path())),
             script_runner: Arc::new(StubScriptRunner),
+            events,
             metrics: None,
         }
     }
@@ -2001,6 +2060,216 @@ mod tests {
         assert_eq!(s.outcome, Outcome::NavigationTimeout);
         assert_eq!(s.message, "导航超时: #auth-page");
         assert_eq!(s.duration_ms, 1200);
+    }
+
+    // ============ 终态事件发布（事件源接入批三：emit 单点发射） ============
+
+    /// 在暂停时钟的单线程 runtime 内跑一轮会话，返回 (mock bridge, 终态结果, 收到的事件)
+    ///
+    /// 与 [`run_session_with_script`] 同装配，另注入小事件总线并订阅收集；
+    /// 声明 success_condition 跳过登录后真实网络验证，终态确定性不随环境波动。
+    async fn run_session_collecting_events(
+        script: VecDeque<(bool, &'static str, &'static str)>,
+        max_retries: u32,
+    ) -> (
+        Arc<ScriptedBridge>,
+        LoginResult,
+        Vec<crate::events::EventEnvelope>,
+    ) {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(script),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let events = Arc::new(crate::events::EventBus::new());
+        let mut rx = events.subscribe();
+        let deps = make_deps_with_events(bridge.clone(), events).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = max_retries;
+        params.plan = LoginAttemptPlan::Browser(serde_json::json!({
+            "task_config": { "success_condition": "logged_in" }
+        }));
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        let result = result_rx
+            .borrow_and_update()
+            .clone()
+            .expect("会话 run() 后必须有终态结果");
+        let mut got = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            got.push(envelope);
+        }
+        (bridge, result, got)
+    }
+
+    /// 事件①：成功终态 → 恰一次 `LoginSucceeded`，载荷 channel/profile/attempt 正确、
+    /// 成功不带 reason（attempt 从 1 起直映射 LoginResult.attempts）
+    #[tokio::test(start_paused = true)]
+    async fn test_success_terminal_publishes_login_succeeded_once() {
+        let (_bridge, result, events) = run_session_collecting_events(
+            VecDeque::from(vec![(true, "success", "步骤执行成功")]),
+            2,
+        )
+        .await;
+        assert_eq!(result.terminal, LoginTerminal::Success);
+        assert_eq!(
+            events.len(),
+            1,
+            "成功终态应恰发布一次事件，实际 {:?}",
+            events
+        );
+        assert_eq!(events[0].event.kind(), "login_succeeded");
+        match &events[0].event {
+            AppEvent::LoginSucceeded(s) => {
+                assert_eq!(s.profile_id, "default");
+                assert_eq!(s.channel, "browser");
+                assert_eq!(s.attempt, Some(1));
+                assert_eq!(s.reason, None);
+            }
+            other => panic!("应为 LoginSucceeded，实际 {other:?}"),
+        }
+    }
+
+    /// 事件②：重试耗尽终态 → 恰一次 `LoginFailed`，reason 为失败消息首行摘要、
+    /// attempt 映射总尝试次数
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_exhausted_publishes_login_failed_once() {
+        let (_bridge, result, events) = run_session_collecting_events(
+            VecDeque::from(vec![
+                (true, "selector_failed", "按钮未找到"),
+                (true, "selector_failed", "按钮未找到"),
+                (true, "selector_failed", "按钮未找到"),
+            ]),
+            2,
+        )
+        .await;
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 3);
+        assert_eq!(
+            events.len(),
+            1,
+            "重试耗尽终态应恰发布一次事件，实际 {:?}",
+            events
+        );
+        assert_eq!(events[0].event.kind(), "login_failed");
+        match &events[0].event {
+            AppEvent::LoginFailed(s) => {
+                assert_eq!(s.profile_id, "default");
+                assert_eq!(s.channel, "browser");
+                assert_eq!(s.attempt, Some(3));
+                let reason = s.reason.as_deref().expect("失败事件应携带 reason");
+                assert!(reason.contains("重试耗尽"), "reason 应含耗尽短语: {reason}");
+                assert!(!reason.contains('\n'), "reason 应取首行摘要: {reason}");
+            }
+            other => panic!("应为 LoginFailed，实际 {other:?}"),
+        }
+    }
+
+    /// 事件③：manual_required 终态停止 → 恰一次 `LoginFailed`（一次即终态，随发随停）
+    #[tokio::test(start_paused = true)]
+    async fn test_manual_required_publishes_login_failed() {
+        let (_bridge, result, events) = run_session_collecting_events(
+            VecDeque::from(vec![(false, "manual_required", "门户要求人工完成验证")]),
+            2,
+        )
+        .await;
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 1);
+        assert_eq!(events.len(), 1, "manual_required 终态应恰发布一次事件");
+        match &events[0].event {
+            AppEvent::LoginFailed(s) => {
+                assert_eq!(s.attempt, Some(1));
+                let reason = s.reason.as_deref().unwrap_or_default();
+                assert!(
+                    reason.contains("门户要求人工完成验证"),
+                    "reason 应含终态失败短语: {reason}"
+                );
+            }
+            other => panic!("应为 LoginFailed，实际 {other:?}"),
+        }
+    }
+
+    /// 事件⑤：重试预算内的中间失败（可重试 AssertionFailed）不发布——首试
+    /// assertion_failed 走重试、第二次 manual_required 终态，全程恰一次事件
+    #[tokio::test(start_paused = true)]
+    async fn test_retryable_intermediate_failure_does_not_publish() {
+        let (_bridge, result, events) = run_session_collecting_events(
+            VecDeque::from(vec![
+                (true, "assertion_failed", "断言不匹配"),
+                (false, "manual_required", "门户要求人工完成验证"),
+            ]),
+            2,
+        )
+        .await;
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 2, "首试失败应走重试而非终态");
+        assert_eq!(
+            events.len(),
+            1,
+            "中间失败不得发布，仅终态一次，实际 {:?}",
+            events
+        );
+        assert_eq!(events[0].event.kind(), "login_failed");
+    }
+
+    /// 事件补充：取消终态不发布（既非成功也非最终失败，事件流不覆盖）
+    #[tokio::test(start_paused = true)]
+    async fn test_cancelled_terminal_does_not_publish() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::new()),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let events = Arc::new(crate::events::EventBus::new());
+        let mut rx = events.subscribe();
+        let deps = make_deps_with_events(bridge, events).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let cancel = CancellationToken::new();
+        // 预先取消：run 开头即走 finish_with_cancelled
+        cancel.cancel();
+        let session = LoginSession::new(
+            make_params(),
+            cancel,
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        let result = result_rx.borrow_and_update().clone().expect("应有取消终态");
+        assert_eq!(result.terminal, LoginTerminal::Cancelled);
+        assert!(rx.try_recv().is_err(), "取消终态不发布事件");
+    }
+
+    /// 渠道标识映射：与 LoginChannel 的 serde snake_case 序列化同值
+    #[test]
+    fn test_login_channel_code_matches_serde() {
+        for (channel, expect) in [
+            (LoginChannel::Browser, "browser"),
+            (LoginChannel::Http, "http"),
+            (LoginChannel::Script, "script"),
+        ] {
+            assert_eq!(login_channel_code(channel), expect);
+            assert_eq!(
+                serde_json::to_value(channel).unwrap(),
+                serde_json::json!(expect),
+                "事件载荷渠道标识必须与 serde 序列化同值"
+            );
+        }
     }
 
     // ============ 随机信封属性测试（proptest） ============
