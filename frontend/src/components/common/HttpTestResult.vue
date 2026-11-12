@@ -86,7 +86,8 @@ defineProps<{
 .http-test-steps { margin-top: var(--space-md); }
 .http-test-steps h4 { margin: 0 0 8px; }
 .http-test-produced-vars { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.http-test-produced-vars code { padding: 2px 5px; border-radius: 5px; background: var(--surface-subtle, #eef1f5); }
+/* 徽标底色走主题安全写法（--slate-rgb 深浅两主题重映射），深色下兜底浅灰不可读 */
+.http-test-produced-vars code { padding: 2px 5px; border-radius: 5px; background: rgba(var(--slate-rgb), 0.12); color: var(--text-primary); }
 .http-test-step { margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .http-test-step summary { display: flex; flex-wrap: wrap; gap: 8px; cursor: pointer; }
 .http-test-step summary span { color: var(--text-muted); font-size: var(--text-xs); }
