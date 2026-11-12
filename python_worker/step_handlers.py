@@ -962,8 +962,11 @@ async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
                 raise StepCancelled("JS 执行已取消")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                # 与外层步骤 deadline 的归类口径一致（P2-2）：evaluate 系超时归
+                # ASSERTION_FAILED（Rust 侧可重试、不回收 Worker）——门户 JS 未就绪
+                # 这类瞬时超时不应以 UNKNOWN_ERROR 终态终结登录
                 raise WorkerError(
-                    Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已中断 JS 调用"
+                    Outcome.ASSERTION_FAILED, f"JS 执行超时（{timeout_s}s），已中断 JS 调用"
                 )
             await asyncio.wait({task}, timeout=min(0.1, remaining))
 
@@ -1211,15 +1214,20 @@ async def run_step_async(
     else:
         timeout_ms = int(context.default_timeout)
     timeout_ms = max(1, timeout_ms)
+    # 超时归类的口径：与 wait_url→NAVIGATION_TIMEOUT、assert_text→ASSERTION_FAILED
+    # 一致，evaluate 系超时也归 ASSERTION_FAILED（Rust 侧 classify 可重试、不回收
+    # Worker）——门户 JS 未就绪/验证码接口慢这类瞬时超时不应终态终结登录。
+    # ocr 维持 UNKNOWN_ERROR：模型加载/推理超时与断言语义无关，且识别器状态可疑，
+    # 终态失败比盲目重试更稳妥（口径可辩论，刻意不动）。
     timeout_outcome = {
         "navigate": Outcome.NAVIGATION_TIMEOUT,
         "goto": Outcome.NAVIGATION_TIMEOUT,
         "wait_url": Outcome.NAVIGATION_TIMEOUT,
         "assert_text": Outcome.ASSERTION_FAILED,
-        "evaluate": Outcome.UNKNOWN_ERROR,
-        "eval": Outcome.UNKNOWN_ERROR,
-        "custom_js": Outcome.UNKNOWN_ERROR,
-        "custom": Outcome.UNKNOWN_ERROR,
+        "evaluate": Outcome.ASSERTION_FAILED,
+        "eval": Outcome.ASSERTION_FAILED,
+        "custom_js": Outcome.ASSERTION_FAILED,
+        "custom": Outcome.ASSERTION_FAILED,
         "ocr": Outcome.UNKNOWN_ERROR,
     }.get(step.step_type, Outcome.SELECTOR_FAILED)
 

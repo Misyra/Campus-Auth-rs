@@ -749,7 +749,11 @@ def test_timeout_self_heal_interrupts_browser_commands(monkeypatch, capsys):
 
 
 def test_handle_evaluate_hung_script_times_out():
-    """handle_evaluate 挂起脚本被单独超时中断。"""
+    """handle_evaluate 挂起脚本被单独超时中断。
+
+    P2-2 同步：超时归类由 unknown_error 改为 assertion_failed（可重试，
+    与外层步骤 deadline 及 assert_text 口径一致），消息仍是"超时"。
+    """
 
     async def _run():
         from models import StepConfig
@@ -1650,3 +1654,31 @@ def test_serve_emits_command_started_once_per_command(monkeypatch, capsys):
             assert mid not in started_positions, (
                 f"非 int id {mid!r} 不应发出 command_started"
             )
+
+def test_evaluate_outer_deadline_maps_to_assertion_failed(monkeypatch):
+    """P2-2：run_step_async 外层 deadline 的 evaluate 系超时归 assertion_failed。
+
+    handler 尚未执行（如 frame 解析挂死）时由统一 deadline 兜底，归类必须与
+    assert_text 一致（可重试），不能以 unknown_error 终态终结登录。
+    """
+
+    async def _run():
+        import step_handlers
+        from models import StepConfig
+        from step_handlers import StepContext, WorkerError, run_step_async
+
+        async def hang_resolve_frame_scope(*_args, **_kwargs):
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(step_handlers, "_resolve_frame_scope", hang_resolve_frame_scope)
+        step = StepConfig.from_dict(
+            {"id": "e", "type": "evaluate", "code": "1+1", "frame": "main"}
+        )
+        context = StepContext(page=object(), default_timeout=80)
+        with pytest.raises(WorkerError) as ei:
+            await run_step_async(object(), step, context)
+        assert ei.value.outcome == "assertion_failed"
+        assert "超时" in ei.value.message
+
+    asyncio.run(_run())
+
