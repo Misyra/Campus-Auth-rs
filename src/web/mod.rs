@@ -61,6 +61,12 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/monitor/test-redirect", || {
             post(routes::monitor::test_redirect)
         }),
+        // ---- 推送通知（notification）----
+        // 测试发送：用请求体里的通道配置（草稿）或已保存通道 id 真发一条测试消息；
+        // 不受推送总开关限制，响应逐通道回执且不回显凭据
+        ("POST", "/api/notification/test", || {
+            post(routes::notification::test_notification)
+        }),
         // ---- 一键网络诊断（diagnostics）----
         // 诊断失败是数据不是请求错误：端点恒 200 + 结构化逐项结果（见
         // monitor::diagnostics 模块说明），结果已脱敏

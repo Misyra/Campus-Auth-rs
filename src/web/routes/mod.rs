@@ -10,6 +10,7 @@ pub mod history;
 pub mod http_tasks;
 pub mod login;
 pub mod monitor;
+pub mod notification;
 pub mod ocr;
 pub mod profiles;
 pub mod repo;

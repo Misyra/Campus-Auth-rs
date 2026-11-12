@@ -126,6 +126,7 @@ fn split_patch_keys(obj: &serde_json::Map<String, Value>) -> Result<FlatPatchPar
         "app",
         "worker",
         "updater",
+        "notification",
     ];
 
     for (k, v) in obj {
@@ -326,7 +327,19 @@ fn build_settings_merge(
         if !other_empty {
             json_merge(&mut current_value, &other_patch);
         }
-        serde_json::from_value(current_value).map_err(|e| format!("设置合并后校验失败: {e}"))
+        serde_json::from_value::<crate::config::SettingsData>(current_value)
+            .map_err(|e| format!("设置合并后校验失败: {e}"))
+            // 推送通知节保存侧全量校验（URL scheme / 超时与重试上下界 / 事件类型
+            // 白名单 / 通道结构与凭据）；任何全局保存路径都会跑到这里，保证
+            // notification 不会以非法状态落盘
+            .and_then(|settings| {
+                settings
+                    .global
+                    .notification
+                    .validate()
+                    .map(|()| settings)
+                    .map_err(|msg| format!("推送通知配置无效: {msg}"))
+            })
     }))
 }
 
@@ -457,6 +470,7 @@ fn settings_flat_response(
         "app_settings": settings.global.app,
         "worker": settings.global.worker,
         "updater": settings.global.updater,
+        "notification": settings.global.notification,
         "network": crate::network::settings::NetworkSettings::effective(profile, &settings.global),
         "username": profile.username,
         "auth_url": profile.auth_url,
