@@ -119,7 +119,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 刻意**不含 `strict_login_mode`**：它决定"何时触发登录"，属功能行为而非可观测性；把它放进调试模式会在证据不足时也尝试登录，可能在没预期的时机拉起浏览器。
 
-鉴权：启动时生成随机 token 持久化于 `config/.auth_token`（`0600`），前端经 `/api/auth/token` 懒取并在 `X-Auth-Token` / `Bearer` / `?token=` 中携带；`GET /api/health`、`GET /api/auth/token` 等少数端点豁免，其余 `/api/*` 与 `/ws/*` 强制校验（`src/web/auth.rs`）。
+鉴权：启动时**成对**生成随机 token 与 bootstrap 握手秘钥，分别持久化于 `config/.auth_token` 与 `config/.auth_bootstrap`（创建即 `0600`，任一损坏重建时两者一并轮换）。打开界面时 URL 以 `#auth=<bootstrap>` fragment 携带握手秘钥（fragment 不会发往服务器、不进服务器日志；托盘另有「复制界面链接」菜单项复制带 fragment 的完整链接），前端经 `POST /api/auth/exchange` 用 bootstrap 换取 token，此后在 `X-Auth-Token` / `Bearer` / `?token=` 中携带。**不存在任何免鉴权发放 token 的端点**：`GET /api/health`、`POST /api/auth/exchange` 等少数端点豁免，其余 `/api/*` 与 `/ws/*` 强制校验（`src/web/auth.rs`）——本机其他用户的进程读不到 `0600` 秘钥文件，就没有任何途径取得 token。Docker / 局域网绑定（非回环地址）时 fragment 无法送达远程用户，须配置**管理密码**（设置页 `management_password` 或启动参数 `--management-password`，后者优先）在界面输入换取 token；未配置时程序启动即拒绝（可用 `--allow-unauthenticated-bind` 显式豁免，不推荐），详见 `docker/README.md` 安全模型。
 
 ## 3. 多网络方案（Profiles）
 

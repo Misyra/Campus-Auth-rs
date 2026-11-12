@@ -38,6 +38,28 @@ Web 控制台：`http://localhost:50721`
 
 > 安全提示：默认端口仅绑定宿主机回环地址。内置 token 用于防止本地网页跨站请求，**不是**远程访问认证；不要将容器端口直接暴露到局域网或公网。如确需远程访问，请在反向代理/VPN 层配置独立认证与 TLS。
 
+## 安全模型（管理凭据与暴露面）
+
+鉴权采用「token + 握手凭据」模型（详见 `docs/guides/user-guide.md` 鉴权段）：全部 `/api/*` 与 `/ws/*` 请求必须携带 token，token 只能经 `POST /api/auth/exchange` 用**不经网络发放的凭据**换取——
+
+- **回环绑定**：界面 URL 以 `#auth=<bootstrap>` fragment 携带握手秘钥（fragment 不会发往服务器、不进服务器日志），本机打开界面即自动完成换取；
+- **非回环绑定**（Docker 默认 `0.0.0.0` / 局域网暴露）：fragment 无法送达远程用户，必须配置**管理密码**，远程用户在界面输入管理密码换取 token。
+
+**fail-closed 门禁**：绑定非回环地址且未配置管理密码时启动直接失败（错误信息给出三条出路），除非显式 `--allow-unauthenticated-bind`（env `CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true`）豁免。
+
+设置管理密码的两种方式（CLI/env 覆盖值优先于 settings.json 的 `app.management_password`）：
+
+1. 环境变量 / 启动参数：`CAMPUS_AUTH_MANAGEMENT_PASSWORD`（等价 `--management-password`），docker-compose 示例：
+   ```yaml
+   services:
+     campus-auth:
+       environment:
+         - CAMPUS_AUTH_MANAGEMENT_PASSWORD=你的管理密码
+   ```
+2. 前端设置页 / `PATCH /api/config` 写入 `app_settings.management_password`（明文存储，与代理地址同档；运行期修改即时生效，无需重启）。
+
+**如实说明的风险**：容器内服务默认无 TLS，管理密码与 token 在局域网 HTTP 明文传输中可被同网段嗅探；管理密码明文存于 settings.json（可读取数据卷的进程/用户可见）。因此管理密码只应视为「防同网段扫描器顺手接管」的门槛，**不是**远程访问认证的替代——公网/不可信网络请务必经反向代理（TLS）或 VPN 隧道接入，并在代理层配置独立认证。
+
 ## 持久化
 
 `docker-compose.yml` 默认使用命名卷 `campus-auth-data` 持久化 `/data`（含 `config/` / `tasks/` / `logs/`）。
@@ -72,6 +94,8 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 | `CAMPUS_AUTH_HOST` | `0.0.0.0` | 监听地址（Docker 必须 `0.0.0.0`） |
 | `CAMPUS_AUTH_PORT` | `50721` | 监听端口 |
 | `CAMPUS_AUTH_BASE_PATH` | `/data` | 数据根目录（容器内） |
+| `CAMPUS_AUTH_MANAGEMENT_PASSWORD` | 未设置 | 管理密码（非回环绑定必需，见「安全模型」）；等价 CLI `--management-password`，优先于 settings.json |
+| `CAMPUS_AUTH_ALLOW_UNAUTH_BIND` | 未设置 | `true` 显式豁免「非回环绑定无管理凭据拒绝启动」的门禁（强烈不推荐） |
 | `RUST_LOG` | `info` | 日志级别 |
 | `CAMPUS_AUTH_WORKER_DIR` | 未设置 | Worker 源码路径覆盖；镜像默认自动使用 `/app/python_worker` |
 
@@ -81,7 +105,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 > **定时自重启与容器重启策略**：配置里的 `app.auto_restart_hours` 默认 24 小时，到期后主进程主动优雅退出。compose 已配 `restart: unless-stopped`，容器会自动拉起；手工 `docker run` 需自行加 `--restart unless-stopped`，否则容器会停在 exited。若不需要，可在设置页把该值改为 0。
 
-CLI 参数优先级高于环境变量：`--host` / `--port` / `--base-path`。
+CLI 参数优先级高于环境变量：`--host` / `--port` / `--base-path` / `--management-password`。
 
 ## 端口与网络
 
