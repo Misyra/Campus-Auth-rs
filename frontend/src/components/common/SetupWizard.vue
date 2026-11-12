@@ -3,7 +3,10 @@
  * 首次启动配置向导（此前仅协议确认，现扩为五步）：
  * 使用协议 → 登录方式 → 环境准备（仅浏览器渠道）→ 学校与任务匹配 → 完成。
  *
- * - 全屏阻断例外：无 Teleport/关闭入口，打开期间锁定背景滚动（沿用原协议向导口径）。
+ * - 弹层语义走 Reka Dialog（与 Modal/ConfirmDialog 同范式）：焦点陷阱、初始焦点、
+ *   关闭后焦点归还、body 滚动锁全由库承担；外观类（.wizard-overlay/.wizard-container）
+ *   经 as-child 保留。全屏阻断：Esc/遮罩等 dismiss 路径一律否决，唯一退出路径是
+ *   「跳过向导」的确认流程与完成步的「进入认证喵」。
  * - 显隐门槛仍是 init-status 的 `agreed`（仅全新安装显示；同意即写标记，中途退出不再续显）。
  * - 登录方式：浏览器渠道无绑定校验，选定即写 `login_channel`；直连渠道受
  *   `validate_login_task_binding` 约束——必须与已存在的HTTP 登录任务绑定同一次提交，
@@ -15,6 +18,7 @@
  * - 完成步自动应用「调试模式」预设，引导用户完成方案配置后到「设置 · 系统」切回。
  */
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import IconApp from "./IconApp.vue";
 import { IS_OPENWRT } from "../../utils/platform";
 import BrowserIcon from "./BrowserIcon.vue";
@@ -31,7 +35,6 @@ import { frontendLogger } from "../../utils/logger";
 import { DOCS, type TaskRepoKind, type TaskRepoSourceId } from "../../utils/constants";
 import { measureRepoSources, pickFastestSource, type RepoSourceTiming } from "../../utils/repoSpeed";
 import type { BrowserInfo, EnvironmentStatus, RepoTask } from "../../api/types";
-import { lockBodyScroll, unlockBodyScroll } from "../../composables/useBodyScrollLock";
 
 const { state, agreeWizardTerms, closeWizard } = useUi();
 const { busy } = useStatus();
@@ -41,16 +44,22 @@ const { applyRunMode } = useRunMode();
 const { showRepoImport } = useRepoImport();
 const configStore = useConfig();
 
-// 向导展示期间锁定背景滚动（全屏阻断，无其他关闭路径）
-// FE2-3：滚动锁走全局计数，与 Modal/ConfirmDialog 协调
-watch(
-  () => state.showWizard,
-  (val) => {
-    if (val) lockBodyScroll();
-    else unlockBodyScroll();
-  },
-  { immediate: true },
-);
+// reka 的各 dismiss 路径（Esc / 遮罩点击 / 焦点离开）在受控模式下统一汇为
+// update:open(false)。向导是全屏阻断，唯一退出路径是「跳过向导」确认流程与
+// 完成步的显式按钮，这里一律否决关闭请求。
+function onOpenChange(value: boolean): void {
+  if (!value) return;
+}
+
+function onEscapeKeyDown(event: Event): void {
+  // Esc 不关闭：误触代价高（向导只出现一次，中途退出需显式确认）
+  event.preventDefault();
+}
+
+function onPointerDownOutside(event: Event): void {
+  // 全屏遮罩没有「面板外」，防御性否决（上层确认框/导入弹窗经自身 Portal 打开）
+  event.preventDefault();
+}
 
 /* ============ 步骤定义与导航 ============ */
 
@@ -502,13 +511,23 @@ async function skipWizard() {
 </script>
 
 <template>
-  <div v-if="state.showWizard" class="wizard-overlay" role="dialog" aria-modal="true" aria-label="首次启动配置向导">
-    <div class="wizard-container">
-      <div class="wizard-header">
-        <span class="wizard-logo logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
-        <h1>{{ STEP_HEADER[currentKey].title }}</h1>
-        <p>{{ STEP_HEADER[currentKey].sub }}</p>
-      </div>
+  <DialogRoot :open="state.showWizard" @update:open="onOpenChange">
+    <DialogPortal>
+      <DialogOverlay as-child>
+        <div class="wizard-overlay">
+          <DialogContent
+            as-child
+            aria-modal="true"
+            :aria-describedby="undefined"
+            @escape-key-down="onEscapeKeyDown"
+            @pointer-down-outside="onPointerDownOutside"
+          >
+            <div class="wizard-container">
+              <div class="wizard-header">
+                <span class="wizard-logo logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
+                <DialogTitle as="h1">{{ STEP_HEADER[currentKey].title }}</DialogTitle>
+                <p>{{ STEP_HEADER[currentKey].sub }}</p>
+              </div>
 
       <!-- 步骤条：已到达步骤可点回看，未到达禁用。 -->
       <ol class="wizard-steps">
@@ -808,6 +827,10 @@ async function skipWizard() {
         <!-- 第 5 步：完成 -->
         <button v-else-if="currentKey === 'done'" class="btn btn-primary" @click="closeWizard">进入认证喵</button>
       </div>
-    </div>
-  </div>
+            </div>
+          </DialogContent>
+        </div>
+      </DialogOverlay>
+    </DialogPortal>
+  </DialogRoot>
 </template>
