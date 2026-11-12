@@ -172,7 +172,7 @@ impl ServiceContainer {
         // 从应用级关闭令牌派生登录 shutdown 的 child：父令牌取消时自动传播，
         // 无需在优雅关闭中单独二次取消（A3）。
         let login_shutdown_token = shutdown_token.child_token();
-        let login = Arc::new(LoginOrchestrator::new(
+        let login = Arc::new(LoginOrchestrator::new_with_events(
             config.clone(),
             history.clone(),
             status.clone(),
@@ -185,6 +185,7 @@ impl ServiceContainer {
             monitor.clone(),
             login_shutdown_token,
             Some(metrics.clone()),
+            events.clone(),
         ));
 
         // ---- Layer 8：定时任务调度器 ----
