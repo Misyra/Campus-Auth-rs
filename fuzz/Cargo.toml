@@ -1,0 +1,46 @@
+[package]
+name = "campus-auth-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# 目标内部直接做 JSON 解析（复刻生产解析链的第一步）
+serde_json = "1"
+# 迁移链需要真实盘面目录（备份 / Profile 拆分落盘），与根 crate 同版本口径
+tempfile = "3"
+
+# 仅链接库目标：no-embed 跳过 frontend/dist 嵌入、关闭 desktop 跳过
+# tray-icon/image/gtk——fuzz 只需要 config / bridge 的纯逻辑面
+[dependencies.campus-auth]
+path = ".."
+default-features = false
+features = ["no-embed"]
+
+# 不继承根 crate 的 profile.release（libFuzzer 需要 -O1 + sancov 插桩，
+# 由 cargo-fuzz 自行注入 RUSTFLAGS，保留默认 profile 即可）
+
+[[bin]]
+name = "fuzz_parse_ipc"
+path = "fuzz_targets/fuzz_parse_ipc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_config_json"
+path = "fuzz_targets/fuzz_config_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_migrate"
+path = "fuzz_targets/fuzz_migrate.rs"
+test = false
+doc = false
+bench = false
