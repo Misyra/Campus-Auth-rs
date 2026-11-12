@@ -391,6 +391,9 @@ impl PasswordCrypto {
         if let Some(parent) = key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // atomic_write_bytes（tempfile 默认 0600 创建 + rename）使密钥文件自诞生
+        // 即 0600，不存在「先 0644 落盘再 chmod」窗口；set_key_permissions 是
+        // 对该保证的显式兜底（兼覆盖旧版本遗留的宽权限文件）
         match crate::utils::io::atomic_write_bytes(key_path, arr.as_ref()) {
             Ok(()) => Self::set_key_permissions(key_path),
             Err(e) => tracing::warn!("写入继承密钥到 {} 失败: {e}", key_path.display()),
@@ -419,7 +422,10 @@ impl PasswordCrypto {
             std::fs::create_dir_all(parent)?;
         }
         // 原子写（tmp + fsync + rename）：就地 std::fs::write 半写损坏的密钥
-        // 会让全部 ENC: 密文永久不可解（下次启动按长度校验失败换新钥）
+        // 会让全部 ENC: 密文永久不可解（下次启动按长度校验失败换新钥）。
+        // tempfile 在 Unix 默认以 0600 创建临时文件（mode(0o600)，umask 只能收紧
+        // 无 group/other 位），rename 后密钥文件自诞生即 0600，不存在
+        // 「先 0644 落盘再 chmod」的权限竞态窗口
         crate::utils::io::atomic_write_bytes(key_path, key.as_ref())?;
         // 首次生成新密钥属关键安全事件：旧密文（若有）此后均不可解，必须留痕
         tracing::info!(
@@ -432,35 +438,57 @@ impl PasswordCrypto {
         Ok(key)
     }
 
-    /// 收紧密钥文件权限（尽力而为，失败静默：密钥已写入，仅权限未收紧）
+    /// 收紧密钥文件权限（尽力而为，失败 warn 留痕：密钥已写入，仅权限未收紧）
     ///
     /// Unix 0600；Windows 借 icacls 移除继承权限并授予当前用户完全控制
     /// （仅授 (R) 会导致后续轮转密钥时写入被拒，需授 (F)）。
     /// 生成与 Python 继承两条写入路径共用，避免继承路径遗漏权限收紧。
+    /// icacls 调用的成败必须检查：域账号解析失败等环境问题会让 ACL 收紧
+    /// 静默失效，warn 留痕（含退出码）便于排查。
     fn set_key_permissions(key_path: &Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(key_path, perms);
+            if let Err(e) = std::fs::set_permissions(key_path, perms) {
+                tracing::warn!(
+                    path = %key_path.display(),
+                    error = %e,
+                    "收紧加密密钥文件权限为 0600 失败"
+                );
+            }
         }
         #[cfg(windows)]
         {
             let username = std::env::var("USERNAME").unwrap_or_default();
+            if username.is_empty() {
+                tracing::warn!(
+                    path = %key_path.display(),
+                    "无法确定当前用户名（USERNAME 为空），跳过 Windows ACL 收紧"
+                );
+                return;
+            }
             let domain = std::env::var("USERDOMAIN").unwrap_or_default();
-            if !username.is_empty() {
-                let account = if domain.is_empty() {
-                    username
-                } else {
-                    format!("{domain}\\{username}")
-                };
-                // stderr 重定向到 null，避免环境无域账号解析时刷屏
-                let _ = std::process::Command::new("icacls")
-                    .arg(key_path)
-                    .arg("/inheritance:r")
-                    .arg(format!("/grant:r \"{account}\":(F)"))
-                    .stderr(std::process::Stdio::null())
-                    .status();
+            let account = if domain.is_empty() {
+                username
+            } else {
+                format!("{domain}\\{username}")
+            };
+            // stderr 重定向到 null，避免环境无域账号解析时刷屏；成败必须检查
+            match std::process::Command::new("icacls")
+                .arg(key_path)
+                .arg("/inheritance:r")
+                .arg(format!("/grant:r \"{account}\":(F)"))
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!(
+                    path = %key_path.display(),
+                    code = ?status.code(),
+                    "icacls 收紧加密密钥文件 ACL 失败"
+                ),
+                Err(e) => tracing::warn!(path = %key_path.display(), error = %e, "icacls 调用失败"),
             }
         }
         #[cfg(not(any(unix, windows)))]
