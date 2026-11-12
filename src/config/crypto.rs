@@ -25,6 +25,7 @@ use zeroize::{Zeroize, Zeroizing};
 use fs4::FileExt;
 
 use crate::config::ConfigError;
+use crate::utils::io_human::io_error_at;
 
 /// 加密密文前缀
 pub const ENC_PREFIX: &str = "ENC:";
@@ -310,7 +311,9 @@ impl PasswordCrypto {
     /// 锁保护下的密钥读取/生成核心逻辑
     fn read_or_create_key_inner(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
         if key_path.exists() {
-            let bytes = std::fs::read(key_path)?;
+            // 密钥错误文案只带路径与失败类别，绝不携带密钥内容等敏感信息
+            let bytes = std::fs::read(key_path)
+                .map_err(|e| io_error_at("读取加密密钥文件", key_path, e))?;
             if bytes.len() != KEY_LEN {
                 // 密钥长度异常：备份旧文件并生成新密钥。
                 // 换钥意味着旧密钥加密的全部密码将无法解密（用户需重新输入），
@@ -419,14 +422,16 @@ impl PasswordCrypto {
         let key = Zeroizing::new(arr);
 
         if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| io_error_at("创建加密密钥目录", parent, e))?;
         }
         // 原子写（tmp + fsync + rename）：就地 std::fs::write 半写损坏的密钥
         // 会让全部 ENC: 密文永久不可解（下次启动按长度校验失败换新钥）。
         // tempfile 在 Unix 默认以 0600 创建临时文件（mode(0o600)，umask 只能收紧
         // 无 group/other 位），rename 后密钥文件自诞生即 0600，不存在
         // 「先 0644 落盘再 chmod」的权限竞态窗口
-        crate::utils::io::atomic_write_bytes(key_path, key.as_ref())?;
+        crate::utils::io::atomic_write_bytes(key_path, key.as_ref())
+            .map_err(|e| io_error_at("写入加密密钥文件", key_path, e))?;
         // 首次生成新密钥属关键安全事件：旧密文（若有）此后均不可解，必须留痕
         tracing::info!(
             path = %key_path.display(),

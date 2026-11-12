@@ -19,6 +19,7 @@ use crate::config::ConfigError;
 use crate::config::schema::SettingsData;
 use crate::config::service::is_valid_profile_id;
 use crate::utils::io::{atomic_copy_file, atomic_write_bytes};
+use crate::utils::io_human::io_error_at;
 
 /// 单个迁移函数的签名
 ///
@@ -101,7 +102,8 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
     // 1. 拆分 profiles 到独立文件
     if let Some(profiles) = value.get_mut("profiles").and_then(Value::as_object_mut) {
         let profiles_dir = config_dir.join("profiles");
-        std::fs::create_dir_all(&profiles_dir)?;
+        std::fs::create_dir_all(&profiles_dir)
+            .map_err(|e| io_error_at("创建方案目录", &profiles_dir, e))?;
         // R4：被跳过的非法 id 集合——若其中包含 active_profile_id，
         // 迁移结束后需回退 default，避免活跃 Profile 指向不存在的文件
         let mut skipped_invalid_ids: HashSet<String> = HashSet::new();
@@ -129,7 +131,7 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             // 写入独立文件
             let path = profiles_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(profile)?;
-            std::fs::write(&path, json)?;
+            std::fs::write(&path, json).map_err(|e| io_error_at("写入迁移方案文件", &path, e))?;
         }
         // 被跳过的 id 若是活跃 Profile：回退 default，防止活跃指向悬空文件
         let active = value
@@ -361,10 +363,13 @@ fn backup_profile_before_rewrite(
 
 /// 递归拷贝目录内容（跳过备份目录自身，避免自我嵌套）
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
+    std::fs::create_dir_all(dst).map_err(|e| io_error_at("创建迁移备份目录", dst, e))?;
+    for entry in std::fs::read_dir(src).map_err(|e| io_error_at("读取待备份配置目录", src, e))?
+    {
+        let entry = entry.map_err(|e| io_error_at("读取待备份配置目录", src, e))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| io_error_at("读取待备份配置目录", src, e))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
@@ -381,7 +386,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             }
             copy_dir_recursive(&src_path, &dst_path)?;
         } else if file_type.is_file() {
-            std::fs::copy(&src_path, &dst_path)?;
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| io_error_at("复制配置备份文件", &src_path, e))?;
         }
     }
     Ok(())
@@ -503,7 +509,8 @@ fn migrate_v8_to_v9(config_dir: &Path, _value: &mut Value) -> Result<(), ConfigE
         // 原子写回：迁移中途断电/ENOSPC 不得留下截断的方案文件（截断会被
         // load_all_profiles 永久跳过，凭据再也找不回来）
         let json = serde_json::to_string_pretty(&profile)?;
-        atomic_write_bytes(&profile_path, json.as_bytes())?;
+        atomic_write_bytes(&profile_path, json.as_bytes())
+            .map_err(|e| io_error_at("写回迁移方案文件", &profile_path, e))?;
         tracing::info!(
             profile_id = %active_id,
             task_id = %task_id,
@@ -551,7 +558,7 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
                 error = %e,
                 "v10 迁移中止：方案目录不可读（版本号不提交，下次启动重试）"
             );
-            return Err(e.into());
+            return Err(io_error_at("读取方案目录", &profiles_dir, e).into());
         }
     };
 
@@ -616,7 +623,7 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
                     error = %e,
                     "v10 迁移中止：创建直连任务目录失败（版本号不提交，下次启动重试）"
                 );
-                return Err(e.into());
+                return Err(io_error_at("创建直连任务目录", &http_dir, e).into());
             }
             // 原子写入直连任务：中途断电/ENOSPC 不得留下截断的任务文件
             let task_path = http_dir.join(format!("{task_id}.json"));
@@ -627,7 +634,7 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
                     error = %e,
                     "v10 迁移中止：写入直连任务失败（版本号不提交，下次启动重试）"
                 );
-                return Err(e.into());
+                return Err(io_error_at("写入直连任务文件", &task_path, e).into());
             }
             created.push(task_id.clone());
             append_to_order(&tasks_dir, &task_id);
@@ -657,7 +664,7 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
                 error = %e,
                 "v10 迁移中止：写回方案失败（版本号不提交，下次启动重试）"
             );
-            return Err(e.into());
+            return Err(io_error_at("写回迁移方案文件", &path, e).into());
         }
     }
 

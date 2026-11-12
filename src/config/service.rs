@@ -29,13 +29,19 @@ use crate::config::migration::run_migrations;
 use crate::config::runtime::{ConfigReloadSignal, RuntimeConfig, build_runtime_config};
 use crate::config::schema::{ProfileData, SettingsData};
 use crate::config::{ProfileMergeFn, SettingsMergeFn};
+use crate::utils::io_human::io_error_at;
 use crate::utils::recover_lock;
 
 /// 配置错误类型
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// 文件 IO 错误
-    #[error("文件 IO 错误: {0}")]
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（由
+    /// `utils::io_human::io_error_at` 构造，对齐 tasks 域范式），Display 直接
+    /// 面向用户；原始 `std::io` 错误文本保留在文案末尾供日志比对，`ErrorKind`
+    /// 原样保留供程序化分支。
+    #[error("{0}")]
     Io(#[from] std::io::Error),
     /// JSON 解析/序列化错误
     #[error("JSON 错误: {0}")]
@@ -237,8 +243,10 @@ impl ConfigService {
         let key_path = crate::config::crypto::default_key_path();
         let crypto = PasswordCrypto::new(key_path.clone());
 
-        std::fs::create_dir_all(&config_dir)?;
-        std::fs::create_dir_all(&profiles_dir)?;
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| io_error_at("创建配置目录", &config_dir, e))?;
+        std::fs::create_dir_all(&profiles_dir)
+            .map_err(|e| io_error_at("创建方案目录", &profiles_dir, e))?;
         if let Some(p) = key_path.parent()
             && let Err(e) = std::fs::create_dir_all(p)
         {
@@ -278,7 +286,8 @@ impl ConfigService {
         if !default_path.exists() {
             let default = ProfileData::default();
             let json = serde_json::to_string_pretty(&default)?;
-            crate::utils::io::atomic_write_bytes(&default_path, json.as_bytes())?;
+            crate::utils::io::atomic_write_bytes(&default_path, json.as_bytes())
+                .map_err(|e| io_error_at("写入默认方案文件", &default_path, e))?;
         }
 
         // 解析活跃 Profile（缺失则 fallback 到 default）
@@ -799,9 +808,11 @@ impl ConfigService {
                 .await?;
         }
         let trash_dir = self.config_dir.join(crate::config::TRASH_DIR);
-        std::fs::create_dir_all(&trash_dir)?;
+        std::fs::create_dir_all(&trash_dir)
+            .map_err(|e| io_error_at("创建方案回收目录", &trash_dir, e))?;
         let trash_path = trash_dir.join(format!("{id}.json.{}", timestamp()));
-        std::fs::rename(&path, &trash_path)?;
+        std::fs::rename(&path, &trash_path)
+            .map_err(|e| io_error_at("将待删除方案移入回收目录", &path, e))?;
         self.profile_cache
             .lock()
             .unwrap_or_else(recover_lock)
@@ -1011,7 +1022,8 @@ impl ConfigService {
             }
             return Ok(default);
         }
-        let raw = std::fs::read_to_string(settings_path)?;
+        let raw = std::fs::read_to_string(settings_path)
+            .map_err(|e| io_error_at("读取配置文件", settings_path, e))?;
         let mut value: Value = match serde_json::from_str(&raw) {
             Ok(v) => v,
             Err(e) => {
@@ -1069,7 +1081,8 @@ impl ConfigService {
             })?;
             // 校验通过后落盘（同步 fsync，防止掉电导致版本回退重跑迁移）
             let json = serde_json::to_string_pretty(&value)?;
-            crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())?;
+            crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())
+                .map_err(|e| io_error_at("写入配置文件", settings_path, e))?;
             return Ok(migrated);
         }
 
@@ -1089,7 +1102,8 @@ impl ConfigService {
                 path: path.to_string_lossy().into_owned(),
             });
         }
-        let raw = std::fs::read_to_string(path)?;
+        let raw =
+            std::fs::read_to_string(path).map_err(|e| io_error_at("读取配置文件", path, e))?;
         serde_json::from_str(&raw).map_err(|e| ConfigError::ConfigParseError {
             path: path.to_string_lossy().to_string(),
             reason: e.to_string(),
@@ -1107,7 +1121,8 @@ impl ConfigService {
                     .unwrap_or_default(),
             });
         }
-        let raw = std::fs::read_to_string(path)?;
+        let raw =
+            std::fs::read_to_string(path).map_err(|e| io_error_at("读取方案文件", path, e))?;
         serde_json::from_str(&raw).map_err(|e| ConfigError::ConfigParseError {
             path: path.to_string_lossy().to_string(),
             reason: e.to_string(),
@@ -1121,9 +1136,12 @@ impl ConfigService {
         let path = path.to_path_buf();
         // 阻塞式落盘（fsync 等）移入阻塞线程池，避免占用 tokio worker（对齐 A2）；
         // 底层统一走 utils::io::atomic_write_bytes（含 fsync_full 持久化保证，C3）
-        tokio::task::spawn_blocking(move || crate::utils::io::atomic_write_bytes(&path, &json))
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))??;
+        tokio::task::spawn_blocking(move || {
+            crate::utils::io::atomic_write_bytes(&path, &json)
+                .map_err(|e| io_error_at("写入配置文件", &path, e))
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("配置写入后台任务执行失败: {e}")))??;
         Ok(())
     }
 }
