@@ -1,0 +1,229 @@
+/* update-dialog.css — 更新弹窗正文（挂载于 Modal 默认插槽，UpdateDialog.vue 专用类）。
+   原 UpdateDialog.vue 的 scoped 块（约 220 行，超 200 行判据）整体上提至此；
+   无 [data-theme] 分支、类名 update-dialog-* 不跨组件复用，但按归属判据②
+   「scoped ≤200 行，超出即考虑上提」迁入组件层。字号统一走 --text-* token
+   （含向导字号缩放），不再出现字面字号。 */
+
+.update-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.update-dialog-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+}
+
+.update-dialog-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.update-dialog-versions {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.update-dialog-version-label {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.update-dialog-version-value {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.update-dialog-version-current {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.update-dialog-meta {
+  display: flex;
+  gap: 12px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.update-dialog-hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.update-dialog-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+}
+
+.update-dialog-state--ready {
+  color: var(--success);
+}
+
+.update-dialog-notes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.update-dialog-notes-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+}
+
+/* 更新日志区：固定头部 + 只在日志本身滚动，长正文也不挤掉版本信息。
+   加一层比弹窗底色略深的底与描边，让"可滚动区域"的边界一眼可见 */
+.update-dialog-notes {
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-glass-light);
+  font-size: var(--text-md);
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+/* v-html 内容不经过 scoped 隔离，共享层直接用后代选择器命中 */
+
+.update-dialog-notes > :first-child {
+  margin-top: 0;
+}
+
+.update-dialog-notes p {
+  margin: 0 0 10px;
+}
+
+/* 原为字面 15px（--text-lg=16px 之外的真逃逸）；按 16px token 收编，标题层级不变 */
+.update-dialog-notes h4,
+.update-dialog-notes h5 {
+  margin: 16px 0 8px;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 发布说明最高只用 ## / ###，下沉三级后 h6 即"小节"层（如「修复」「平台运行说明」） */
+.update-dialog-notes h6 {
+  margin: 14px 0 6px;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.update-dialog-notes ul,
+.update-dialog-notes ol {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.update-dialog-notes li {
+  margin: 0 0 6px;
+}
+
+.update-dialog-notes strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.update-dialog-notes code {
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-glass-heavy);
+  font-size: var(--text-sm);
+}
+
+.update-dialog-notes pre {
+  margin: 0 0 10px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-glass-heavy);
+  overflow-x: auto;
+}
+
+.update-dialog-notes pre code {
+  padding: 0;
+  background: none;
+}
+
+.update-dialog-notes blockquote {
+  margin: 0 0 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+}
+
+.update-dialog-notes hr {
+  margin: 14px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.update-dialog-notes a {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 头部「在 GitHub 查看」小链接：与日志区锚点样式区分，按升序特异度排在
+   .update-dialog-notes a 之后（no-descending-specificity） */
+.update-dialog-notes-head a {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.update-dialog-notes-head a:hover {
+  color: var(--text-primary);
+}
+
+.update-dialog-empty {
+  margin: 0;
+  font-size: var(--text-md);
+  color: var(--text-muted);
+}
+
+.update-dialog-error {
+  margin: 0;
+  font-size: var(--text-md);
+  color: var(--error);
+}
+
+.update-dialog-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.update-dialog-progress-bar {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--bg-glass-heavy);
+  overflow: hidden;
+}
+
+.update-dialog-progress-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}

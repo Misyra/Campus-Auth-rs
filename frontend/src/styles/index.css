@@ -27,6 +27,7 @@
 @import "./components/toggle.css";
 @import "./components/notification.css";
 @import "./components/modal.css";
+@import "./components/update-dialog.css";
 @import "./components/log-viewer.css";
 @import "./components/misc.css";
 
@@ -41,6 +42,7 @@
 @import "./pages/settings/system.css";
 @import "./pages/settings/tasks.css";
 @import "./pages/settings/environment.css";
+@import "./pages/settings/notification.css";
 /* network.css 已删除：「网络与更新」Tab 并入「系统与更新」，样式并入 settings/system.css */
 @import "./pages/profiles.css";
 @import "./pages/scheduled_tasks.css";
