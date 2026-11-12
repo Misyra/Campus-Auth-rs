@@ -603,7 +603,7 @@ mod tests {
         assert!(both.contains("更新未能取消") && both.contains("尚未清理"));
     }
 
-    /// 卸载清单：程序目录 + 六个数据目录，逐项给出路径与存在性
+    /// 卸载清单：程序目录 + 七个数据目录，逐项给出路径与存在性
     ///
     /// 「删除时必须明确列出会删哪些内容」是用户拍板的口径，故清单必须逐项可读；
     /// 存在性也要真实（不存在的目录不该被列成"将删除"）。
@@ -623,7 +623,7 @@ mod tests {
         assert_eq!(inv["program"]["label"], "程序目录");
 
         let data = inv["data"].as_array().unwrap();
-        assert_eq!(data.len(), 6, "六个用户数据目录都要列出");
+        assert_eq!(data.len(), 7, "七个用户数据目录都要列出");
         let by_key = |k: &str| {
             data.iter()
                 .find(|d| d["key"] == k)
@@ -634,6 +634,7 @@ mod tests {
         assert_eq!(by_key("config")["exists"], true);
         assert_eq!(by_key("tasks")["label"], "任务与脚本");
         assert_eq!(by_key("events")["label"], "事件流");
+        assert_eq!(by_key("browser_profiles")["label"], "持久浏览器会话");
         assert_eq!(by_key("logs")["exists"], false, "不存在的目录如实标注");
         assert_eq!(
             by_key("config")["path"],

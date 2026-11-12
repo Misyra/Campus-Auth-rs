@@ -38,22 +38,27 @@ use std::path::{Path, PathBuf};
 /// 清单按目录粒度渲染，目录内部不单列条目：`config/` 内含 `.trash/` 回滚区
 /// （已删方案的 ENC: 密文文件，见 `config::service::cleanup_expired_trash_entries`
 /// 的 30 天轮转），purge 时随 `config/` 整目录删除、保留时随 `config/` 一并留下。
-pub const DATA_DIR_NAMES: [&str; 6] = [
+///
+/// `browser_profiles/` 与 `config/` 同进退：里面是门户「记住密码」的持久会话数据
+/// （cookie/localStorage），正是用户勾选「保留配置与任务」时明确要求留下的东西。
+pub const DATA_DIR_NAMES: [&str; 7] = [
     crate::utils::paths::CONFIG_DIR,
     crate::utils::paths::TASKS_DIR,
     crate::utils::paths::LOGS_DIR,
     crate::utils::paths::EVENTS_DIR,
     crate::utils::paths::ENV_DIR,
+    crate::utils::paths::BROWSER_PROFILES_DIR,
     crate::utils::paths::UPDATE_DIR,
 ];
 
 /// 用户数据目录的中文名（界面展示用，与 [`DATA_DIR_NAMES`] 同序）
-pub const DATA_DIR_LABELS: [(&str, &str); 6] = [
+pub const DATA_DIR_LABELS: [(&str, &str); 7] = [
     ("config", "配置与方案"),
     ("tasks", "任务与脚本"),
     ("logs", "日志"),
     ("events", "事件流"),
     ("environment", "Python 环境"),
+    ("browser_profiles", "持久浏览器会话"),
     ("update", "更新缓存"),
 ];
 
@@ -212,7 +217,8 @@ pub struct UninstallPlan {
     pub install_dir: PathBuf,
     /// 数据根目录（数据目录的父目录）
     pub base_path: PathBuf,
-    /// 是否保留用户数据（`config/` `tasks/` `logs/` `events/` `environment/` `update/`）
+    /// 是否保留用户数据（`config/` `tasks/` `logs/` `events/` `environment/`
+    /// `browser_profiles/` `update/`）
     pub keep_user_data: bool,
     /// `install_dir` 与 `base_path` 是否同一目录（便携版常态）
     pub same_dir: bool,
@@ -592,7 +598,7 @@ mod tests {
         dir
     }
 
-    /// 六个数据目录名必须与 `utils::paths` 的常量逐字对应。
+    /// 七个数据目录名必须与 `utils::paths` 的常量逐字对应。
     ///
     /// 失败模式是不可逆的：`DATA_DIR_NAMES` 少一项（或 `paths` 里改了名）时，那个目录会被
     /// 当成"不认识的子项"照删——用户勾了「保留配置与任务」，丢的却是其中一项。
@@ -607,6 +613,7 @@ mod tests {
                 paths::LOGS_DIR,
                 paths::EVENTS_DIR,
                 paths::ENV_DIR,
+                paths::BROWSER_PROFILES_DIR,
                 paths::UPDATE_DIR
             ]
         );

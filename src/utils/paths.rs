@@ -35,6 +35,11 @@ pub const HISTORY_DIR_NAME: &str = "history";
 pub const LOGS_DIR: &str = "logs";
 /// 事件流根目录名（AppEvent JSONL 落盘，按日分文件）
 pub const EVENTS_DIR: &str = "events";
+/// 持久浏览器会话根目录名（门户「记住密码」方案的 user_data_dir 容器）
+///
+/// 其下按方案 id 分目录（见 [`browser_profile_dir`]）。卸载口径与 `config/`
+/// 同进退（勾选保留时整棵保留），见 `uninstall::DATA_DIR_NAMES`。
+pub const BROWSER_PROFILES_DIR: &str = "browser_profiles";
 /// 登录历史子目录名（位于 logs/ 下）
 pub const LOGIN_HISTORY_DIR: &str = "login_history";
 /// 环境根目录名
@@ -145,6 +150,22 @@ pub fn events_dir(base: &Path) -> PathBuf {
     base.join(EVENTS_DIR)
 }
 
+/// 单个方案的持久浏览器会话目录 `<base>/browser_profiles/<profile_id>`
+///
+/// 目录内容是浏览器持久上下文的 `user_data_dir`（cookie/localStorage，即门户
+/// 「记住密码」机制的全部载体），**按需创建**：只有启用持久会话的方案才会产生
+/// 数据，故不进 [`ensure_runtime_dirs`] 的启动预建清单（对比 `events/` 的启动建）。
+/// 创建时机在配置会话/持久登录启动之前（登录编排负责，见 `src/login/`）。
+///
+/// `profile_id` 直接用作目录名，合法性由 `config::service::is_valid_profile_id`
+/// 保障（非空且 ≤64 字节、仅 ASCII 字母/数字/下划线/连字符，天然排除路径分隔符
+/// 与点号；Windows 保留设备名一并拒绝）——Profile 的所有 save/load 路径都会过
+/// 该校验，本函数不再做二次防御。删除方案时对应目录的清理时机归登录编排批
+/// （本模块只负责拼接，不做生命周期联动）。
+pub fn browser_profile_dir(base: &Path, profile_id: &str) -> PathBuf {
+    base.join(BROWSER_PROFILES_DIR).join(profile_id)
+}
+
 /// 环境根目录 `<base>/environment`
 pub fn env_dir(base: &Path) -> PathBuf {
     base.join(ENV_DIR)
@@ -225,6 +246,10 @@ pub fn same_existing_path(a: &Path, b: &Path) -> bool {
 /// `tasks/http`、`tasks/scheduled/history`、`logs/login_history`、`events/`、
 /// `environment/`。各服务构造内的 `create_dir_all` 保留为防御性幂等调用（测试直构服务时仍可用），
 /// 但启动权威路径只此一处。
+///
+/// `browser_profiles/` 刻意不在预建清单：持久会话目录按需创建（只有启用该功能
+/// 的方案才产生数据，见 [`browser_profile_dir`]），给全部用户预建空目录只会
+/// 制造"这个目录是干嘛的"困惑。
 pub fn ensure_runtime_dirs(base: &Path) -> std::io::Result<()> {
     for dir in [
         profiles_dir(base),
@@ -301,5 +326,28 @@ mod tests {
         // 任一不存在 → false
         assert!(!same_existing_path(&file, &dir.path().join("missing.exe")));
         assert!(!same_existing_path(&dir.path().join("missing.exe"), &file));
+    }
+
+    /// 持久会话目录拼接：`<base>/browser_profiles/<profile_id>` 两段齐全，且不进
+    /// 启动预建清单（按需建，避免给未启用该功能的用户预留空目录）。
+    #[test]
+    fn test_browser_profile_dir_join_and_not_prebuilt() {
+        let base = Path::new("/data");
+        assert_eq!(
+            browser_profile_dir(base, "dorm"),
+            PathBuf::from("/data/browser_profiles/dorm")
+        );
+        assert_eq!(
+            browser_profile_dir(Path::new("/data"), "default"),
+            PathBuf::from("/data/browser_profiles/default")
+        );
+
+        // 启动预建不含持久会话目录（按需建的口径钉住）
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_runtime_dirs(tmp.path()).unwrap();
+        assert!(
+            !tmp.path().join(BROWSER_PROFILES_DIR).exists(),
+            "browser_profiles 按需创建，不得出现在启动预建清单"
+        );
     }
 }
