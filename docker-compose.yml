@@ -4,6 +4,9 @@ services:
     image: ${CAMPUS_AUTH_IMAGE:-ghcr.io/misyra/campus-auth-rs:prerelease}
     container_name: campus-auth
     restart: unless-stopped
+    # 非 root 运行：entrypoint 以 root 启动完成存量卷属主迁移后，经 setpriv 降权为
+    # campus(1000) 运行主进程（详见 docker/README.md「容器运行身份」）；存量卷属主
+    # 全部迁移完成后可加 user: "1000:1000"，让 entrypoint 也不以 root 运行
     # 优雅关闭预算 ≈ 26s（托盘 3s + 调度 5s + 引擎 5s + Bridge 8s + Axum 5s），
     # Docker 默认 10s 后即 SIGKILL，会在 Bridge 等待 Worker 退出前强杀，留下
     # 孤儿 chromium；40s 留足余量。init 负责回收浏览器子进程树的僵尸进程。
@@ -14,7 +17,7 @@ services:
       # 本工具的 token 仅用于本地浏览器会话防护，不是远程访问凭证。
       - "127.0.0.1:50721:50721"
     volumes:
-      # 持久化数据：配置 / Profile / 任务 / 日志 / 环境引导状态
+      # 持久化数据：配置 / Profile / 任务 / 日志 / 环境引导状态 / 加密密钥（HOME=/data/home）
       - campus-auth-data:/data
       # 可选：如需持久化浏览器数据（登录态），已包含在 /data/config/browser-data
     environment:

@@ -55,6 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 libxdo3 \
     && rm -rf /var/lib/apt/lists/*
 
+# 非 root 运行：uid/gid 固定 1000（campus）。容器以 root 启动 entrypoint.sh，由它
+# 完成存量卷属主修正后经 setpriv 降权 exec 主进程（postgres 官方镜像同款模式，见
+# entrypoint.sh 头注释）。选 setpriv 而非 gosu/su-exec：它是基础镜像 Essential 包
+# util-linux 的组成部分（/usr/bin/setpriv），零额外安装；gosu 需 apt 引入新包。
+RUN useradd --uid 1000 --user-group --create-home --home-dir /home/campus campus
+
 WORKDIR /app
 
 # 安装 uv（Python 包管理器，Worker 依赖安装用）；digest 取自 GHCR registry API（2026-11-13），
@@ -85,23 +91,40 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv run --project python_worker --frozen --no-dev playwright install --with-deps chromium && \
     uv run --project python_worker --frozen --no-dev python -c "import playwright; import worker_main"
 
+# 构建产物属主收口：以上产物默认属 root，而运行期主进程以 campus(1000) 执行——
+# - python_worker：环境引导的自愈路径（src/environment/health.rs 在清单漂移/探针失败时
+#   执行 uv sync）与 ddddocr 安装/卸载都要写 pyproject.toml、uv.lock 与 .venv
+# - /ms-playwright：Web API「安装浏览器」（system.rs perform_playwright_install）按需补装
+# - /data：预置属主后，新命名卷首次挂载经 copy-up 继承 campus 属主，首启即可写
+RUN chown -R campus:campus /app/python_worker /ms-playwright \
+    && mkdir -p /data && chown campus:campus /data
+
 # 暴露端口
 EXPOSE 50721
 
-# 数据卷：配置 / 任务 / 日志
+# 数据卷：配置 / 任务 / 日志 / 加密密钥（HOME=/data/home，见下）
 VOLUME ["/data"]
 
 # 环境默认：绑定 0.0.0.0、数据目录 /data、禁用托盘与自动打开浏览器
+# HOME 指向数据卷：加密密钥 ~/.campus_network_auth（config/crypto.rs 按 HOME 解析）与
+# uv 缓存随 /data 持久化。旧版以 root 运行时密钥存于容器临时层 /root，重建容器即失，
+# 已加密的方案密码全部失效——升级迁移步骤见 docker/README.md
 ENV CAMPUS_AUTH_HOST=0.0.0.0 \
     CAMPUS_AUTH_BASE_PATH=/data \
-    CAMPUS_AUTH_PORT=50721
+    CAMPUS_AUTH_PORT=50721 \
+    HOME=/data/home
 
 # 健康检查：/api/health 无需鉴权
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:${CAMPUS_AUTH_PORT:-50721}/api/health || exit 1
 
-# 入口：确保 /data 权限后启动
+# 入口：建目录 / 同步资源 / root 启动时修正属主后降权 exec
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+# 显式声明 root（与隐式默认一致）：entrypoint 需要 root 才能修正存量 root 属主命名卷，
+# 然后由它经 setpriv 降权 exec——主进程 / Worker / Chromium 实际均以 campus(1000) 运行。
+# 不以 `USER campus` 收尾的原因：那会让 entrypoint 失去 chown 权限，存量卷迁移就必须
+# 手动执行；绕过 entrypoint 调试时建议显式 `--user 1000:1000`。
+USER root
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["campus-auth", "--no-tray"]
