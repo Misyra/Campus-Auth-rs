@@ -65,6 +65,25 @@ pub fn wait_listening(port: u16) -> bool {
     false
 }
 
+/// 在限期内以固定步进轮询等待谓词成立；成立返回 `true`，超时返回 `false`。
+///
+/// 取代「固定 sleep 后断言」的墙钟窗口：固定窗口在慢机上会踩空（条件尚未达成
+/// 就断言失败），在快机上又白等（条件早已达成还在睡）。轮询到条件成立即提前
+/// 返回，上限给足余量，`assert!(wait_until(...))` 本身即断言「在期限内达成」。
+/// 仅限 tokio 运行时内调用（`#[tokio::test]`）；谓词为同步函数（内部锁均短临界区）。
+pub async fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if predicate() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// 在限期内等待子进程退出；超时则强杀并失败
 ///
 /// `stderr_log` 用于失败诊断：panic 信息附带实例 stderr 落盘内容，
@@ -166,6 +185,15 @@ fn copy_worker_project(base: &str) {
 /// 不需要 OCR 的用例（默认态）不预置任何偏好，即覆盖大部分用户「未启用 OCR」
 /// 的真实引导路径。
 pub fn spawn_instance(base: &str, port: u16) -> InstanceGuard {
+    spawn_instance_mode(base, port, "full")
+}
+
+/// 启动指定运行模式的实例，其余口径同 [`spawn_instance`]。
+///
+/// `--mode` 由调用方指定：lightweight 等启动模式的观测面与 full 完全不同
+/// （G15：lightweight 不常驻 Axum，`.instance` 记录哨兵端口 0），历史用例
+/// 全部 `--mode full` 的硬编码无法覆盖。
+pub fn spawn_instance_mode(base: &str, port: u16, mode: &str) -> InstanceGuard {
     copy_worker_project(base);
     let log = tempfile::NamedTempFile::new().expect("创建 stderr 临时文件失败");
     let err_file = log.reopen().expect("复用 stderr 临时文件失败");
@@ -178,7 +206,7 @@ pub fn spawn_instance(base: &str, port: u16) -> InstanceGuard {
             "--no-tray",
             "--no-browser",
             "--mode",
-            "full",
+            mode,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::from(err_file))
