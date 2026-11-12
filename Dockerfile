@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ── 前端构建 ──
-FROM node:22-alpine AS frontend-builder
+# 基础镜像统一 digest pin（tag 可变，digest 不变），注释保留版本号便于升级时核对。
+# digest 为多架构 OCI index（manifest list），linux/amd64 与 linux/arm64 共用同一值，
+# 与 release.yml 的双架构镜像构建兼容。来源：Docker Hub tag API（library/<name>/tags/<tag>
+# 的 digest 字段）与 GHCR registry API，2026-11-13 查询。
+FROM node:22-alpine@sha256:5b05da3f938f1c604b24c633646d48805a6667f378cb4908438616f3cc48a0bf AS frontend-builder
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
@@ -9,7 +13,10 @@ COPY frontend/ ./
 RUN npm run build
 
 # ── Rust 构建 ──
-FROM rust:1.98-bookworm AS rust-builder
+# tag 的 1.98 与 rust-toolchain.toml 的 channel = "1.98.0" 必须一致（主/次版本相同即可，
+# patch 由 rustup 按 channel 解析），CI（rust-clippy job）有脚本守卫；漂移会让容器内
+# 现场下载另一套工具链，产物与本地构建不可复现。
+FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-builder
 # 编译依赖：tray-icon 的 gtk 在 Docker 运行时不使用，但编译期仍需头文件
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
@@ -35,7 +42,7 @@ RUN touch src/main.rs src/helper_main.rs
 RUN cargo build --release --locked
 
 # ── 运行时 ──
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm@sha256:58525e1a8dada8e72d6f8a11a0ddff8d981fd888549108db52455d577f927f77
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -50,8 +57,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 安装 uv（Python 包管理器，Worker 依赖安装用）
-COPY --from=ghcr.io/astral-sh/uv:0.12.6 /uv /uvx /bin/
+# 安装 uv（Python 包管理器，Worker 依赖安装用）；digest 取自 GHCR registry API（2026-11-13），
+# 为 linux amd64/arm64 双平台的 OCI index
+COPY --from=ghcr.io/astral-sh/uv:0.12.6@sha256:88bc6eb1ccd4b82efd0e1b530caffabddf50dc2bf612e66c14ea25b8ee8a4d3d /uv /uvx /bin/
 
 # 拷贝 Rust 二进制
 COPY --from=rust-builder /build/target/release/campus-auth /usr/local/bin/campus-auth
