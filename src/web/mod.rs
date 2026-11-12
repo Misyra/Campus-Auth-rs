@@ -73,6 +73,11 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/diagnostics/run", || {
             post(routes::diagnostics::run_diagnostics)
         }),
+        // 诊断包导出：zip 附件下载（manifest + 脱敏配置快照 + 事件流 + 日志 +
+        // 环境观测），白名单式收集且深度脱敏，走标准鉴权
+        ("GET", "/api/diagnostics/bundle", || {
+            get(routes::diagnostics::export_bundle)
+        }),
         // ---- 配置（config）----
         ("GET", "/api/config", || get(routes::config::get_settings)),
         ("PATCH", "/api/config", || {

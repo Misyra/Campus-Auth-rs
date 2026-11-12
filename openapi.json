@@ -289,6 +289,32 @@
     }
    }
   },
+  "/api/diagnostics/bundle": {
+   "get": {
+    "operationId": "get___api_diagnostics_bundle",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/zip": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Internal Error",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/config": {
    "get": {
     "operationId": "get___api_config",

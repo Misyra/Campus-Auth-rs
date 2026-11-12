@@ -11,12 +11,17 @@
 //!
 //! 脱敏红线：报告中不出现凭据、token 或带查询串的完整 URL——门户地址统一经
 //! [`sanitize_portal_url`] 剥除查询串 / fragment / 内嵌凭据后再进入结果。
+//!
+//! 本模块同时承载「一键导出诊断包」（[`build_diagnostics_bundle`]，Web 层经
+//! `GET /api/diagnostics/bundle` 下载）：manifest + 深度脱敏配置快照 +
+//! 事件流 JSONL + 运行日志 + 环境观测文本，白名单式收集、总量 20MB 软上限，
+//! 敏感字段清单见 [`BUNDLE_SANITIZED_FIELD_PATHS`]。
 
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde::Serialize;
 use serde_json::json;
 
@@ -921,6 +926,565 @@ fn truncate_chars(text: &str, max: usize) -> String {
     format!("{truncated}…")
 }
 
+// ============ 诊断包导出（zip） ============
+//
+// 与上方「一键网络诊断」（单次探测）的分工：诊断包面向用户随 bug 上传的
+// 离线证据包，收录 manifest / 脱敏配置快照 / 事件流 JSONL / 运行日志 /
+// 环境观测文本五类内容。收集全程白名单式（只按谓词收 events/*.jsonl 与
+// logs/app.log*），`.auth_token` / `.auth_bootstrap` / `update/` 安装包 /
+// `python_worker` venv / 其他二进制大文件一概不会进入包内。
+
+/// 诊断包总软上限（20MB）：events 与 logs 按「新→旧」优先共享剩余额度，
+/// 超限截断并在包内 manifest 注明；manifest / config / environment 文本
+/// 天然有界（KB 级）优先保障
+pub const BUNDLE_MAX_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+
+/// events 收集窗口（天）：与事件流落盘保留期 `EVENT_RETENTION_DAYS` 同口径
+pub const BUNDLE_EVENT_DAYS: i64 = 30;
+
+/// logs 收集窗口（天）：日志默认保留 7 天（LoggingSettings::default 口径）
+pub const BUNDLE_LOG_DAYS: i64 = 7;
+
+/// 脱敏占位值：字段级置空后写入的统一占位（键与结构保留）
+pub const BUNDLE_REDACTED: &str = "[已脱敏]";
+
+/// config.sanitized.json 的敏感字段清单（manifest 原样注明；与
+/// [`sanitize_config_snapshot`] 的实现和模块测试逐字段一一钉住）。
+///
+/// 枚举即事实源——新增敏感字段时先在此登记，再补实现与测试：
+/// - settings.global.app.management_password（管理密码明文）
+/// - settings.global.notification.channels[].webhook.url（可携带 token 的自建
+///   地址；剥 query/fragment/userinfo 而非整体置空，保留 host/路径排障价值）
+/// - settings.global.notification.channels[].webhook.headers[].value（可含密钥头）
+/// - settings.global.notification.channels[].bark.device_key
+/// - settings.global.notification.channels[].bark.server（自建服务器地址，同 URL 口径）
+/// - settings.global.notification.channels[].serverchan.send_key
+/// - settings.global.notification.channels[].telegram.bot_token
+/// - settings.global.browser.bind_proxy（旧代理字段，URL 口径）
+/// - settings.global.browser.extra_headers_json（浏览器附加请求头，可含 Cookie/Authorization）
+/// - settings.global.updater.proxy_url（更新代理，URL 口径）
+/// - active_profile.password（方案密码：内存明文或磁盘 ENC: 密文，一律置空）
+/// - active_profile.network.proxy_url（HTTP/SOCKS5 代理可含 Basic 认证，URL 口径）
+/// - llm.api_key_enc / llm.api_keys_enc.*（AI 任务生成的 API key 密文，按服务商槽位）
+///
+/// 有意保留：profile.username（诊断必需的账号线索，非密钥）、telegram.chat_id
+/// （推送目标非凭据）、webhook.body_template（占位符模板无凭据）、auth_url
+/// （门户地址，与既有 feedback-bundle / logs-export meta 同口径）。
+pub const BUNDLE_SANITIZED_FIELD_PATHS: &[&str] = &[
+    "settings.global.app.management_password",
+    "settings.global.notification.channels[].webhook.url",
+    "settings.global.notification.channels[].webhook.headers[].value",
+    "settings.global.notification.channels[].bark.device_key",
+    "settings.global.notification.channels[].bark.server",
+    "settings.global.notification.channels[].serverchan.send_key",
+    "settings.global.notification.channels[].telegram.bot_token",
+    "settings.global.browser.bind_proxy",
+    "settings.global.browser.extra_headers_json",
+    "settings.global.updater.proxy_url",
+    "active_profile.password",
+    "active_profile.network.proxy_url",
+    "llm.api_key_enc",
+    "llm.api_keys_enc.*",
+];
+
+/// manifest 注明的排除项：白名单收集语义之外的一律不进包
+pub const BUNDLE_EXCLUDED_PATHS: &[&str] = &[
+    ".auth_token / .auth_bootstrap（鉴权凭据）",
+    "update/ 下的安装包与 pending 状态",
+    "python_worker/.venv（虚拟环境，大小也不统计）",
+    "python_worker venv 之外的二进制大文件",
+];
+
+/// 诊断包分项统计（manifest 各节与截断标记的数据源）
+#[derive(Debug, Default)]
+pub struct BundleSection {
+    /// 收入包内的文件数
+    pub files: usize,
+    /// 收入包内的字节数
+    pub bytes: u64,
+    /// 是否有文件因总量超限被截断跳过
+    pub truncated: bool,
+}
+
+/// events/logs 白名单收集产物
+#[derive(Debug)]
+pub struct BundleDataFiles {
+    /// 待入包文件（包内相对路径 + 内容），顺序：events（新→旧）→ logs（新→旧）
+    pub files: Vec<(String, Vec<u8>)>,
+    /// events 分项统计
+    pub events: BundleSection,
+    /// logs 分项统计
+    pub logs: BundleSection,
+    /// 跳过/读取失败说明（manifest skipped_files，逐条注明原因）
+    pub skipped: Vec<String>,
+}
+
+/// 在总量预算内读取单个文件；超限截断 / 失败写说明，绝不中断收集
+fn read_file_within_budget(
+    path: &std::path::Path,
+    rel: &str,
+    remaining: &mut usize,
+    section: &mut BundleSection,
+    skipped: &mut Vec<String>,
+) -> Option<(String, Vec<u8>)> {
+    let size = match std::fs::metadata(path) {
+        // 先读 metadata 防止把超限大文件整块读入内存
+        Ok(m) => m.len() as usize,
+        Err(e) => {
+            skipped.push(format!("{rel}（读取元数据失败: {e}）"));
+            return None;
+        }
+    };
+    if size > *remaining {
+        section.truncated = true;
+        skipped.push(format!("{rel}（超总量上限截断）"));
+        return None;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            // 以实际读到的字节数扣预算（metadata 与读取间文件可能增长，竞态下宁可少收）
+            *remaining = remaining.saturating_sub(bytes.len());
+            section.bytes += bytes.len() as u64;
+            section.files += 1;
+            Some((rel.to_string(), bytes))
+        }
+        Err(e) => {
+            skipped.push(format!("{rel}（读取失败: {e}）"));
+            None
+        }
+    }
+}
+
+/// 收集诊断包的 events 与 logs 文件（纯同步，供 spawn_blocking 与单测直调）
+///
+/// - `events/YYYY-MM-DD.jsonl`：文件名日期在 [`BUNDLE_EVENT_DAYS`] 窗口内；
+///   命名不规范或超窗的文件不收（与 `events::sink` 轮转清理同一谓词口径）
+/// - `logs/app.log`（当前）+ `logs/app.log.YYYY-MM-DD`：日期在 [`BUNDLE_LOG_DAYS`]
+///   窗口内，当前文件无日期后缀、始终收录
+/// - 目录缺失返回空集（manifest 记 files=0、truncated=false，不视为错误）
+pub fn collect_bundle_data_files(
+    base: &std::path::Path,
+    max_total_bytes: usize,
+) -> BundleDataFiles {
+    let mut out = BundleDataFiles {
+        files: Vec::new(),
+        events: BundleSection::default(),
+        logs: BundleSection::default(),
+        skipped: Vec::new(),
+    };
+    let mut remaining = max_total_bytes;
+
+    // ---- events：文件名即 UTC 日期（与落盘切分同口径），按日期降序（新→旧） ----
+    let event_cutoff = Utc::now().date_naive() - chrono::Duration::days(BUNDLE_EVENT_DAYS);
+    let mut event_files: Vec<(NaiveDate, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(crate::utils::paths::events_dir(base))
+        .into_iter()
+        .flatten()
+    {
+        let Ok(entry) = entry else { continue };
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(date_text) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        let Ok(date) = NaiveDate::parse_from_str(date_text, "%Y-%m-%d") else {
+            continue;
+        };
+        if date >= event_cutoff {
+            event_files.push((date, entry.path()));
+        }
+    }
+    event_files.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (_, path) in &event_files {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if let Some(item) = read_file_within_budget(
+            path,
+            &format!("events/{name}"),
+            &mut remaining,
+            &mut out.events,
+            &mut out.skipped,
+        ) {
+            out.files.push(item);
+        }
+    }
+
+    // ---- logs：当前 app.log 优先，其余按日期降序（本地日期，与 tracing-appender 同口径） ----
+    let logs_dir = crate::utils::paths::logs_dir(base);
+    let log_cutoff = Local::now().date_naive() - chrono::Duration::days(BUNDLE_LOG_DAYS);
+    let mut log_files: Vec<(NaiveDate, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&logs_dir).into_iter().flatten() {
+        let Ok(entry) = entry else { continue };
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(date_text) = name.strip_prefix("app.log.") else {
+            continue;
+        };
+        let Ok(date) = NaiveDate::parse_from_str(date_text, "%Y-%m-%d") else {
+            continue;
+        };
+        if date >= log_cutoff {
+            log_files.push((date, entry.path()));
+        }
+    }
+    log_files.sort_by_key(|a| std::cmp::Reverse(a.0));
+    // 当前 app.log（正在写的今天日志）无日期后缀，排在最前；存在才收
+    let current_log = logs_dir.join("app.log");
+    let ordered = std::iter::once(current_log)
+        .filter(|p| p.is_file())
+        .chain(log_files.into_iter().map(|(_, p)| p));
+    for path in ordered {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if let Some(item) = read_file_within_budget(
+            &path,
+            &format!("logs/{name}"),
+            &mut remaining,
+            &mut out.logs,
+            &mut out.skipped,
+        ) {
+            out.files.push(item);
+        }
+    }
+    out
+}
+
+/// 字符串字段级置空：值替换为 [`BUNDLE_REDACTED`]，键与结构保留（缺字段不动）
+fn redact_string_field(obj: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    if obj.contains_key(key) {
+        obj.insert(
+            key.to_string(),
+            serde_json::Value::String(BUNDLE_REDACTED.into()),
+        );
+    }
+}
+
+/// URL 字段脱敏：剥 query / fragment / userinfo（密钥常放这三处），保留
+/// scheme://host:port/path 的排障价值。复用推送通知 [`crate::notification::sender::sanitize_url`]
+/// 范式；空值原样保留（该函数对解析失败才产出占位串，空串不生产占位）。
+fn sanitize_url_field(obj: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    if let Some(serde_json::Value::String(url)) = obj.get(key)
+        && !url.is_empty()
+    {
+        let sanitized = crate::notification::sender::sanitize_url(url);
+        obj.insert(key.to_string(), serde_json::Value::String(sanitized));
+    }
+}
+
+/// 构造 `config.sanitized.json`：当前配置快照深度脱敏（纯同步，供单测直调）
+///
+/// 结构 = `{ settings, active_profile, llm }` 三节（settings.json 全局配置 +
+/// 活跃 Profile 文件 + `config/llm.json` AI 配置，后两者独立落盘故平铺展示）。
+/// 脱敏字段清单见 [`BUNDLE_SANITIZED_FIELD_PATHS`]：字段级置空、值替换为
+/// [`BUNDLE_REDACTED`]、键与结构保留；URL 类字段剥 query/fragment/userinfo。
+pub fn sanitize_config_snapshot(
+    settings: &crate::config::SettingsData,
+    profile: &crate::config::ProfileData,
+    llm: &crate::ai::LlmSettings,
+) -> serde_json::Value {
+    let mut settings_value = serde_json::to_value(settings).unwrap_or(serde_json::Value::Null);
+    if let Some(global) = settings_value
+        .get_mut("global")
+        .and_then(|v| v.as_object_mut())
+    {
+        if let Some(app) = global.get_mut("app").and_then(|v| v.as_object_mut()) {
+            redact_string_field(app, "management_password");
+        }
+        if let Some(browser) = global.get_mut("browser").and_then(|v| v.as_object_mut()) {
+            sanitize_url_field(browser, "bind_proxy");
+            // 附加请求头整串置空：串内可能内嵌 Cookie/Authorization 等凭据
+            redact_string_field(browser, "extra_headers_json");
+        }
+        if let Some(updater) = global.get_mut("updater").and_then(|v| v.as_object_mut()) {
+            sanitize_url_field(updater, "proxy_url");
+        }
+        if let Some(channels) = global
+            .get_mut("notification")
+            .and_then(|v| v.as_object_mut())
+            .and_then(|v| v.get_mut("channels"))
+            .and_then(|v| v.as_array_mut())
+        {
+            // 通道是 serde tagged 枚举：序列化后按 type 判别字段分派脱敏
+            for channel in channels {
+                let Some(obj) = channel.as_object_mut() else {
+                    continue;
+                };
+                match obj.get("type").and_then(|v| v.as_str()) {
+                    Some("webhook") => {
+                        sanitize_url_field(obj, "url");
+                        if let Some(headers) = obj.get_mut("headers").and_then(|v| v.as_array_mut())
+                        {
+                            for header in headers.iter_mut() {
+                                if let Some(header_obj) = header.as_object_mut() {
+                                    redact_string_field(header_obj, "value");
+                                }
+                            }
+                        }
+                    }
+                    Some("bark") => {
+                        redact_string_field(obj, "device_key");
+                        sanitize_url_field(obj, "server");
+                    }
+                    Some("serverchan") => redact_string_field(obj, "send_key"),
+                    Some("telegram") => redact_string_field(obj, "bot_token"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut profile_value = serde_json::to_value(profile).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = profile_value.as_object_mut() {
+        redact_string_field(obj, "password");
+        if let Some(network) = obj.get_mut("network").and_then(|v| v.as_object_mut()) {
+            sanitize_url_field(network, "proxy_url");
+        }
+    }
+
+    let mut llm_value = serde_json::to_value(llm).unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = llm_value.as_object_mut() {
+        redact_string_field(obj, "api_key_enc");
+        if let Some(keys) = obj.get_mut("api_keys_enc").and_then(|v| v.as_object_mut()) {
+            // 按服务商槽位逐一置空：键（服务商标识）保留、值统一占位
+            for value in keys.values_mut() {
+                *value = serde_json::Value::String(BUNDLE_REDACTED.into());
+            }
+        }
+    }
+
+    let mut root = serde_json::Map::new();
+    root.insert("settings".into(), settings_value);
+    root.insert("active_profile".into(), profile_value);
+    root.insert("llm".into(), llm_value);
+    serde_json::Value::Object(root)
+}
+
+/// 递归统计目录占用（字节、文件数）；`skip` 命名的子目录整体跳过（venv），
+/// 条目数超 `max_entries` 即停并返回 capped 标记（防异常深树拖死导出）
+fn measure_dir(
+    dir: &std::path::Path,
+    skip: Option<&str>,
+    max_entries: usize,
+) -> (u64, usize, bool) {
+    let mut total = 0u64;
+    let mut count = 0usize;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            count += 1;
+            if count > max_entries {
+                return (total, count, true);
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                if skip.is_some_and(|name| entry.file_name().to_str() == Some(name)) {
+                    continue;
+                }
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                total += meta.len();
+            }
+        }
+    }
+    (total, count, false)
+}
+
+/// 字节数的人类可读展示（environment.txt 用）
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// 渲染诊断包 `environment.txt`：环境就绪状态 + 数据目录清单与大小
+///
+/// 全部取自现有观测面（[`crate::environment::EnvironmentApi::status`] 与盘面
+/// metadata），不新造探测；目录仅列清单与占用，文件内容不进诊断包。
+pub fn render_environment_text(
+    status: &crate::environment::EnvironmentStatus,
+    python_path: &std::path::Path,
+    base: &std::path::Path,
+) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    let _ = writeln!(text, "== 运行环境状态（EnvironmentApi 观测面）==");
+    let _ = writeln!(text, "uv_ready: {}", status.uv_ready);
+    let _ = writeln!(text, "python_ready: {}", status.python_ready);
+    let _ = writeln!(text, "worker_ready: {}", status.worker_ready);
+    let _ = writeln!(text, "manifest_current: {}", status.manifest_current);
+    let _ = writeln!(text, "playwright_ready: {}", status.playwright_ready);
+    let _ = writeln!(
+        text,
+        "system_browser_ready: {}",
+        status.system_browser_ready
+    );
+    let _ = writeln!(text, "ocr_enabled: {}", status.ocr_enabled);
+    let _ = writeln!(text, "ocr_ready: {}", status.ocr_ready);
+    let _ = writeln!(text, "capability_ready: {}", status.capability_ready);
+    let _ = writeln!(text, "stage: {:?}", status.stage);
+    let _ = writeln!(text, "progress: {:?}", status.progress);
+    let _ = writeln!(
+        text,
+        "last_error: {}",
+        status.last_error.as_deref().unwrap_or("(无)")
+    );
+    let _ = writeln!(text, "python_path: {}", python_path.display());
+
+    let _ = writeln!(text);
+    let _ = writeln!(text, "== 数据目录清单与大小（base={}）==", base.display());
+    let _ = writeln!(text, "仅列清单与占用大小，文件内容不进诊断包：");
+    // 与 utils::paths 的目录常量同源：新增用户数据目录时此处跟着同步
+    let dirs: &[(&str, Option<&str>)] = &[
+        (crate::utils::paths::CONFIG_DIR, None),
+        (crate::utils::paths::TASKS_DIR, None),
+        (crate::utils::paths::LOGS_DIR, None),
+        (crate::utils::paths::EVENTS_DIR, None),
+        (crate::utils::paths::LOGIN_HISTORY_DIR, None),
+        (crate::utils::paths::ENV_DIR, None),
+        (crate::utils::paths::UPDATE_DIR, None),
+        // Worker 工程目录跳过 .venv：几万个小文件的遍历代价高且无诊断价值
+        (
+            crate::utils::paths::WORKER_PROJECT_DIR,
+            Some(crate::utils::paths::VENV_DIR),
+        ),
+    ];
+    for (name, skip) in dirs {
+        let (bytes, count, capped) = measure_dir(&base.join(name), *skip, 50_000);
+        let cap_note = if capped {
+            "，条目数超限仅部分统计"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            text,
+            "{name}/  {}  ({count} 个文件{cap_note})",
+            format_size(bytes)
+        );
+    }
+    let venv = base
+        .join(crate::utils::paths::WORKER_PROJECT_DIR)
+        .join(crate::utils::paths::VENV_DIR);
+    let _ = writeln!(
+        text,
+        "python_worker/.venv  {}（虚拟环境体积不统计、不收录）",
+        if venv.is_dir() { "存在" } else { "不存在" }
+    );
+    text
+}
+
+/// 组装完成的诊断包（zip 字节 + 建议下载文件名）
+#[derive(Debug)]
+pub struct DiagnosticsBundle {
+    /// zip 字节流（HTTP 响应体）
+    pub bytes: Vec<u8>,
+    /// 下载文件名 `campus-auth-diagnostics-<时间戳>.zip`
+    pub filename: String,
+}
+
+/// 构建诊断包（纯同步阻塞：文件 I/O + zip 打包，handler 须放 spawn_blocking）
+///
+/// 包内布局：`manifest.json` + `config.sanitized.json` + `environment.txt` +
+/// `events/*.jsonl` + `logs/app.log*`。收集失败的分项写 manifest 说明而非
+/// 整包报错；任何步骤都不触碰 [`BUNDLE_EXCLUDED_PATHS`] 所列内容。
+pub fn build_diagnostics_bundle(
+    base: &std::path::Path,
+    settings: &crate::config::SettingsData,
+    profile: &crate::config::ProfileData,
+    llm: &crate::ai::LlmSettings,
+    environment_txt: String,
+    uptime_seconds: u64,
+) -> Result<DiagnosticsBundle, String> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    let config_value = sanitize_config_snapshot(settings, profile, llm);
+    let config_bytes =
+        serde_json::to_vec_pretty(&config_value).map_err(|e| format!("配置快照序列化失败: {e}"))?;
+    // events/logs 分享剩余额度：config 与 environment 文本天然有界（KB 级）优先保障
+    let data_budget = BUNDLE_MAX_TOTAL_BYTES
+        .saturating_sub(config_bytes.len())
+        .saturating_sub(environment_txt.len());
+    let data = collect_bundle_data_files(base, data_budget);
+
+    let manifest = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "uptime_seconds": uptime_seconds,
+        "exported_at": Local::now().to_rfc3339(),
+        "total_limit_bytes": BUNDLE_MAX_TOTAL_BYTES,
+        "sections": {
+            "config": {
+                "file": "config.sanitized.json",
+                "sanitized_fields": BUNDLE_SANITIZED_FIELD_PATHS,
+                "note": "凭据/密钥/token 字段级置空（值替换为占位串），结构与键保留；URL 类字段剥 query/fragment/userinfo",
+            },
+            "events": {
+                "files": data.events.files,
+                "bytes": data.events.bytes,
+                "truncated": data.events.truncated,
+                "window_days": BUNDLE_EVENT_DAYS,
+                "note": "事件流 JSONL 原样收录；事件类型为白名单式载荷，设计上无敏感字段（信任链见 events 模块 doc）",
+            },
+            "logs": {
+                "files": data.logs.files,
+                "bytes": data.logs.bytes,
+                "truncated": data.logs.truncated,
+                "window_days": BUNDLE_LOG_DAYS,
+                "note": "运行日志按设计不含凭据；仅收录最近窗口内的 app.log* 文件",
+            },
+            "environment": {
+                "file": "environment.txt",
+                "note": "环境就绪状态与数据目录清单/大小，取自 EnvironmentApi 观测面与盘面 metadata",
+            },
+        },
+        "skipped_files": data.skipped,
+        "excluded": BUNDLE_EXCLUDED_PATHS,
+    });
+    let manifest_bytes =
+        serde_json::to_vec_pretty(&manifest).map_err(|e| format!("manifest 序列化失败: {e}"))?;
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        let mut add = |name: &str, bytes: &[u8]| -> Result<(), String> {
+            zw.start_file(name, opts).map_err(|e| e.to_string())?;
+            zw.write_all(bytes).map_err(|e| e.to_string())
+        };
+        add("manifest.json", &manifest_bytes)?;
+        add("config.sanitized.json", &config_bytes)?;
+        add("environment.txt", environment_txt.as_bytes())?;
+        for (rel, bytes) in &data.files {
+            add(rel, bytes)?;
+        }
+        zw.finish().map_err(|e| format!("zip 收尾失败: {e}"))?;
+    }
+    let filename = format!(
+        "campus-auth-diagnostics-{}.zip",
+        Local::now().format("%Y%m%d-%H%M%S")
+    );
+    Ok(DiagnosticsBundle {
+        bytes: buf.into_inner(),
+        filename,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1480,5 +2044,446 @@ mod tests {
             summarize_checks(&[check(DiagnosticStatus::Warn), check(DiagnosticStatus::Fail)]);
         assert_eq!(verdict, DiagnosticVerdict::Faulty);
         assert!(conclusion.contains("1 项异常"));
+    }
+
+    // ============ 诊断包：脱敏 ============
+
+    use crate::ai::LlmSettings;
+    use crate::config::{NotificationChannel, NotificationHeader, ProfileData, SettingsData};
+    use crate::network::settings::{NetworkMode, NetworkSettings};
+
+    /// 含全部敏感字段的配置夹具（与 BUNDLE_SANITIZED_FIELD_PATHS 一一对应），
+    /// 敏感原值常量供逐字段断言复用
+    const PW_MGMT: &str = "mgmt-pw-123";
+    const PW_PROFILE_ENC: &str = "ENC:profile-cipher";
+    const WH_URL: &str = "https://botuser:botpass@hooks.example.com/chAT?token=tok123";
+    const WH_HEADER_VALUE: &str = "Bearer sk-live-99";
+    const BARK_KEY: &str = "bark-device-key-1";
+    const SEND_KEY: &str = "SCT123456";
+    const TG_TOKEN: &str = "123456:ABC-DEF";
+    const PROXY_UPDATER: &str = "http://upduser:updpass@127.0.0.1:7890";
+    const PROXY_BIND: &str = "socks5://binduser:bindpass@10.0.0.9:1080";
+    const EXTRA_HEADERS: &str = r#"{"Cookie":"session=abc123","Authorization":"Bearer x"}"#;
+    const PROXY_NETWORK: &str = "http://netuser:netpass@10.0.0.8:3128";
+    const AI_KEY_GLM: &str = "ENC:glm-key-cipher";
+    const AI_KEY_DSK: &str = "ENC:dsk-key-cipher";
+
+    fn full_sensitive_settings() -> SettingsData {
+        let mut settings = SettingsData::default();
+        settings.global.app.management_password = PW_MGMT.into();
+        settings.global.updater.proxy_url = PROXY_UPDATER.into();
+        settings.global.browser.bind_proxy = PROXY_BIND.into();
+        settings.global.browser.extra_headers_json = EXTRA_HEADERS.into();
+        settings.global.notification.channels = vec![
+            NotificationChannel::Webhook {
+                id: "ch-wh".into(),
+                name: "自建".into(),
+                enabled: true,
+                url: WH_URL.into(),
+                headers: vec![NotificationHeader {
+                    name: "Authorization".into(),
+                    value: WH_HEADER_VALUE.into(),
+                }],
+                body_template: String::new(),
+                timeout_seconds: 10,
+            },
+            NotificationChannel::Bark {
+                id: "ch-bark".into(),
+                name: String::new(),
+                enabled: true,
+                server: "https://api.day.app".into(),
+                device_key: BARK_KEY.into(),
+                timeout_seconds: 10,
+            },
+            NotificationChannel::Serverchan {
+                id: "ch-sct".into(),
+                name: String::new(),
+                enabled: true,
+                send_key: SEND_KEY.into(),
+                timeout_seconds: 10,
+            },
+            NotificationChannel::Telegram {
+                id: "ch-tg".into(),
+                name: String::new(),
+                enabled: true,
+                bot_token: TG_TOKEN.into(),
+                chat_id: "@campus".into(),
+                timeout_seconds: 10,
+            },
+        ];
+        settings
+    }
+
+    fn full_sensitive_profile() -> ProfileData {
+        ProfileData {
+            username: "stu2024001".into(),
+            password: PW_PROFILE_ENC.into(),
+            network: Some(NetworkSettings {
+                mode: NetworkMode::Proxy,
+                interface_id: String::new(),
+                proxy_url: PROXY_NETWORK.into(),
+                dns_servers: Vec::new(),
+            }),
+            ..ProfileData::default()
+        }
+    }
+
+    fn full_sensitive_llm() -> LlmSettings {
+        let mut llm = LlmSettings::default();
+        llm.api_keys_enc.insert("glm".into(), AI_KEY_GLM.into());
+        llm.api_keys_enc
+            .insert("deepseek".into(), AI_KEY_DSK.into());
+        llm
+    }
+
+    /// 敏感字段逐字段剥除：所有原值不出现在快照文本中，占位与结构保留
+    #[test]
+    fn 脱敏_全敏感字段逐字段剥除且结构保留() {
+        let value = sanitize_config_snapshot(
+            &full_sensitive_settings(),
+            &full_sensitive_profile(),
+            &full_sensitive_llm(),
+        );
+        let text = serde_json::to_string(&value).unwrap();
+        for forbidden in [
+            PW_MGMT,
+            PW_PROFILE_ENC,
+            "botuser",
+            "botpass",
+            "token=tok123",
+            WH_HEADER_VALUE,
+            BARK_KEY,
+            SEND_KEY,
+            TG_TOKEN,
+            "upduser",
+            "updpass",
+            "binduser",
+            "bindpass",
+            "session=abc123",
+            "netuser",
+            "netpass",
+            AI_KEY_GLM,
+            AI_KEY_DSK,
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "快照泄漏敏感片段 {forbidden}: {text}"
+            );
+        }
+        // 结构保留：三节齐全，通道 4 个且 type 判别字段原样
+        assert_eq!(
+            value["settings"]["global"]["app"]["management_password"],
+            BUNDLE_REDACTED
+        );
+        assert_eq!(value["active_profile"]["password"], BUNDLE_REDACTED);
+        // 网络代理走 URL 口径：userinfo 剥除、host:port 保留
+        assert_eq!(
+            value["active_profile"]["network"]["proxy_url"],
+            "http://10.0.0.8:3128/"
+        );
+        let channels = value["settings"]["global"]["notification"]["channels"]
+            .as_array()
+            .expect("通道数组结构保留");
+        assert_eq!(channels.len(), 4);
+        assert_eq!(channels[0]["type"], "webhook");
+        assert_eq!(channels[1]["type"], "bark");
+        assert_eq!(channels[2]["type"], "serverchan");
+        assert_eq!(channels[3]["type"], "telegram");
+    }
+
+    /// URL 类字段剥 query/fragment/userinfo 但保留 host 路径；非 URL 凭据字段值替换占位
+    #[test]
+    fn 脱敏_url字段剥凭据保留host_密钥字段值置占位() {
+        let value = sanitize_config_snapshot(
+            &full_sensitive_settings(),
+            &full_sensitive_profile(),
+            &full_sensitive_llm(),
+        );
+        let channels = value["settings"]["global"]["notification"]["channels"]
+            .as_array()
+            .unwrap();
+        // webhook url：剥 userinfo 与 query，保留 host + 路径
+        assert_eq!(channels[0]["url"], "https://hooks.example.com/chAT");
+        // 自定义头：name 保留、value 占位
+        assert_eq!(channels[0]["headers"][0]["name"], "Authorization");
+        assert_eq!(channels[0]["headers"][0]["value"], BUNDLE_REDACTED);
+        // bark：device_key 占位、官方服务器地址（无凭据）原样
+        assert_eq!(channels[1]["device_key"], BUNDLE_REDACTED);
+        assert_eq!(channels[1]["server"], "https://api.day.app/");
+        assert_eq!(channels[2]["send_key"], BUNDLE_REDACTED);
+        // telegram：bot_token 占位、chat_id 保留（非凭据）
+        assert_eq!(channels[3]["bot_token"], BUNDLE_REDACTED);
+        assert_eq!(channels[3]["chat_id"], "@campus");
+        // 全局与网络代理：host:port 保留、userinfo 剥除（special scheme 的 Url 规范化补路径斜杠，
+        // socks5 等 non-special scheme 不补）
+        assert_eq!(
+            value["settings"]["global"]["updater"]["proxy_url"],
+            "http://127.0.0.1:7890/"
+        );
+        assert_eq!(
+            value["settings"]["global"]["browser"]["bind_proxy"],
+            "socks5://10.0.0.9:1080"
+        );
+        assert_eq!(
+            value["settings"]["global"]["browser"]["extra_headers_json"],
+            BUNDLE_REDACTED
+        );
+        // llm：槽位键保留、密文值占位
+        assert_eq!(value["llm"]["api_keys_enc"]["glm"], BUNDLE_REDACTED);
+        assert_eq!(value["llm"]["api_keys_enc"]["deepseek"], BUNDLE_REDACTED);
+        // 有意保留的账号线索
+        assert_eq!(value["active_profile"]["username"], "stu2024001");
+    }
+
+    /// URL 字段为空/无凭据时的边界：空串保持空串，干净 URL 原样保留
+    #[test]
+    fn 脱敏_空url与干净url保持原样() {
+        let mut settings = SettingsData::default();
+        settings.global.updater.proxy_url = String::new();
+        settings.global.browser.bind_proxy = "http://127.0.0.1:7890".into();
+        let profile = ProfileData::default();
+        let value = sanitize_config_snapshot(&settings, &profile, &LlmSettings::default());
+        assert_eq!(value["settings"]["global"]["updater"]["proxy_url"], "");
+        assert_eq!(
+            value["settings"]["global"]["browser"]["bind_proxy"],
+            "http://127.0.0.1:7890/"
+        );
+    }
+
+    // ============ 诊断包：收集与打包 ============
+
+    fn write_file(path: &std::path::Path, content: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// 事件流文件名（相对今天偏移 day_offset 天）
+    fn events_file_name(day_offset: i64) -> String {
+        format!(
+            "{}.jsonl",
+            (Utc::now().date_naive() - chrono::Duration::days(day_offset))
+        )
+    }
+
+    /// 运行日志文件名（本地日期口径，与 tracing-appender 同名规则）
+    fn logs_file_name(day_offset: i64) -> String {
+        format!(
+            "app.log.{}",
+            (Local::now().date_naive() - chrono::Duration::days(day_offset))
+        )
+    }
+
+    #[test]
+    fn 收集_events缺失目录为空集_窗口外与非规范命名不收() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 今天 + 窗口内旧文件收；31 天前超窗；非 .jsonl 与非日期命名不收；空文件照收
+        write_file(
+            &tmp.path().join("events").join(&events_file_name(0)),
+            b"{\"id\":\"a\"}\n",
+        );
+        write_file(
+            &tmp.path().join("events").join(events_file_name(29)),
+            b"{\"id\":\"b\"}\n",
+        );
+        write_file(
+            &tmp.path().join("events").join(events_file_name(31)),
+            b"{\"id\":\"too-old\"}\n",
+        );
+        write_file(&tmp.path().join("events").join("not-a-date.jsonl"), b"{}\n");
+        write_file(
+            &tmp.path().join("events").join("2020-01-01.txt"),
+            b"binary?\n",
+        );
+        write_file(&tmp.path().join("events").join(events_file_name(2)), b"");
+
+        let out = collect_bundle_data_files(tmp.path(), 1024 * 1024);
+        assert_eq!(out.events.files, 3);
+        assert!(!out.events.truncated);
+        assert!(out.skipped.is_empty());
+        let names: Vec<&str> = out.files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&&format!("events/{}", events_file_name(0))[..]));
+        assert!(names.contains(&&format!("events/{}", events_file_name(29))[..]));
+        assert!(names.contains(&&format!("events/{}", events_file_name(2))[..]));
+        assert!(!names.iter().any(|n| n.contains("too-old")));
+        assert!(!names.iter().any(|n| n.contains("not-a-date")));
+        // 空文件也在列（文件名计数已含），字节为零
+        assert_eq!(out.events.bytes, 22);
+    }
+
+    #[test]
+    fn 收集_events目录缺失为空集() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = collect_bundle_data_files(tmp.path(), 1024 * 1024);
+        assert_eq!(out.events.files, 0);
+        assert_eq!(out.logs.files, 0);
+        assert!(!out.events.truncated);
+        assert!(out.skipped.is_empty());
+        assert!(out.files.is_empty());
+    }
+
+    #[test]
+    fn 收集_logs七日窗口与当前文件() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(&tmp.path().join("logs").join("app.log"), b"current\n");
+        write_file(
+            &tmp.path().join("logs").join(&logs_file_name(3)),
+            b"three days ago\n",
+        );
+        write_file(
+            &tmp.path().join("logs").join(&logs_file_name(10)),
+            b"ten days ago\n",
+        );
+        // 无关文件不进包
+        write_file(&tmp.path().join("logs").join("not-a-log.txt"), b"x\n");
+
+        let out = collect_bundle_data_files(tmp.path(), 1024 * 1024);
+        assert_eq!(out.logs.files, 2, "当前 app.log + 3 天前轮转，10 天前超窗");
+        let names: Vec<&str> = out.files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"logs/app.log"));
+        assert!(names.contains(&&format!("logs/{}", logs_file_name(3))[..]));
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("ten days ago") || n.contains(&logs_file_name(10)))
+        );
+    }
+
+    #[test]
+    fn 收集_总量超限截断新文件优先() {
+        let tmp = tempfile::tempdir().unwrap();
+        // events 两份：新文件 800B 收入后仅剩 200B，旧文件 900B 超限截断
+        write_file(
+            &tmp.path().join("events").join(&events_file_name(0)),
+            &vec![b'a'; 800],
+        );
+        write_file(
+            &tmp.path().join("events").join(events_file_name(1)),
+            &vec![b'b'; 900],
+        );
+        write_file(&tmp.path().join("logs").join("app.log"), &vec![b'c'; 100]);
+
+        let out = collect_bundle_data_files(tmp.path(), 1000);
+        assert_eq!(out.events.files, 1, "仅最新的事件文件入包");
+        assert!(out.events.truncated, "旧文件超限应标记截断");
+        assert_eq!(out.logs.files, 1, "logs 分享剩余预算，放得下就收");
+        assert_eq!(out.skipped.len(), 1);
+        assert!(out.skipped[0].contains(&events_file_name(1)));
+        assert!(out.skipped[0].contains("超总量上限截断"));
+    }
+
+    #[tokio::test]
+    async fn 诊断包_端到端条目齐全且manifest注明截断与排除项() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(
+            &tmp.path().join("events").join(&events_file_name(0)),
+            b"{\"id\":\"e1\"}\n",
+        );
+        write_file(&tmp.path().join("logs").join("app.log"), b"log line\n");
+
+        let bundle = build_diagnostics_bundle(
+            tmp.path(),
+            &full_sensitive_settings(),
+            &full_sensitive_profile(),
+            &full_sensitive_llm(),
+            "== 环境文本 ==\n".into(),
+            3600,
+        )
+        .unwrap();
+        assert!(bundle.filename.starts_with("campus-auth-diagnostics-"));
+        assert!(bundle.filename.ends_with(".zip"));
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bundle.bytes)).unwrap();
+        let mut names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "config.sanitized.json".to_string(),
+                "environment.txt".to_string(),
+                format!("events/{}", events_file_name(0)),
+                "logs/app.log".to_string(),
+                "manifest.json".to_string(),
+            ]
+        );
+
+        let mut manifest = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("manifest.json").unwrap(), &mut manifest)
+            .unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest["os"], std::env::consts::OS);
+        assert_eq!(manifest["arch"], std::env::consts::ARCH);
+        assert_eq!(manifest["uptime_seconds"], 3600);
+        assert!(manifest["exported_at"].as_str().is_some());
+        assert_eq!(manifest["sections"]["events"]["files"], 1);
+        assert_eq!(manifest["sections"]["events"]["truncated"], false);
+        assert_eq!(manifest["sections"]["logs"]["files"], 1);
+        assert_eq!(
+            manifest["sections"]["config"]["sanitized_fields"],
+            serde_json::json!(BUNDLE_SANITIZED_FIELD_PATHS)
+        );
+        assert_eq!(
+            manifest["excluded"],
+            serde_json::json!(BUNDLE_EXCLUDED_PATHS)
+        );
+
+        // 端到端脱敏：包内 config.sanitized.json 不含任何敏感原值
+        let mut config = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("config.sanitized.json").unwrap(),
+            &mut config,
+        )
+        .unwrap();
+        for forbidden in [
+            PW_MGMT,
+            PW_PROFILE_ENC,
+            BARK_KEY,
+            SEND_KEY,
+            TG_TOKEN,
+            AI_KEY_GLM,
+        ] {
+            assert!(
+                !config.contains(forbidden),
+                "包内泄漏 {forbidden}: {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn 环境文本_含状态字段与目录清单() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(&tmp.path().join("config").join("settings.json"), b"{}\n");
+        write_file(
+            &tmp.path().join("python_worker").join(".venv").join("py"),
+            b"x",
+        );
+        let status = crate::environment::EnvironmentStatus {
+            uv_ready: true,
+            python_ready: true,
+            worker_ready: false,
+            manifest_current: true,
+            playwright_ready: false,
+            system_browser_ready: true,
+            ocr_enabled: true,
+            ocr_ready: false,
+            capability_ready: false,
+            stage: crate::environment::BootstrapStage::Idle,
+            progress: None,
+            last_error: Some("浏览器安装失败".into()),
+        };
+        let text =
+            render_environment_text(&status, std::path::Path::new("/venv/python"), tmp.path());
+        assert!(text.contains("uv_ready: true"));
+        assert!(text.contains("worker_ready: false"));
+        assert!(text.contains("last_error: 浏览器安装失败"));
+        assert!(text.contains("python_path: /venv/python"));
+        // 目录清单：config 统计大小；venv 只报存在性
+        assert!(text.contains("config/"), "{text}");
+        assert!(text.contains("events/"), "{text}");
+        assert!(text.contains("python_worker/.venv  存在"), "{text}");
     }
 }
