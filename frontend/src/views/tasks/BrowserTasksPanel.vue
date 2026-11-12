@@ -306,13 +306,14 @@ onMounted(async () => {
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(task.modified_at) }}</span></td>
             <td class="tsk-actions" @click.stop>
-              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${task.name || task.id}`" @click="openEditor(task.id)">
+              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${task.name || task.id}`" :aria-label="`编辑：${task.name || task.id}`" @click="openEditor(task.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
               <button
                 type="button"
                 class="btn btn-sm btn-icon-only"
                 :title="`调试运行：${task.name || task.id}`"
+                :aria-label="`调试运行：${task.name || task.id}`"
                 :disabled="debug.loading.value"
                 @click="debug.startDebug(task.id)"
               >
@@ -320,7 +321,7 @@ onMounted(async () => {
               </button>
               <AppDropdownMenu>
                 <template #trigger>
-                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" :aria-label="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
                     <IconApp name="more-vertical" class="icon-sm" />
                   </button>
                 </template>

@@ -294,6 +294,7 @@ onMounted(async () => {
                 type="button"
                 class="btn btn-sm btn-icon-only"
                 :title="st.runningIds.has(task.id) ? '运行中…' : `立即运行：${task.name || task.id}`"
+                :aria-label="st.runningIds.has(task.id) ? '运行中…' : `立即运行：${task.name || task.id}`"
                 :disabled="st.runningIds.has(task.id)"
                 @click="st.runScheduledTask(task.id)"
               >
@@ -303,13 +304,14 @@ onMounted(async () => {
                 type="button"
                 class="btn btn-sm btn-icon-only"
                 :title="`编辑：${task.name || task.id}`"
+                :aria-label="`编辑：${task.name || task.id}`"
                 @click="openEditor(task.id)"
               >
                 <IconApp name="pencil" class="icon-sm" />
               </button>
               <AppDropdownMenu>
                 <template #trigger>
-                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" :aria-label="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
                     <IconApp name="more-vertical" class="icon-sm" />
                   </button>
                 </template>

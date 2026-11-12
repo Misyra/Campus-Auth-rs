@@ -535,7 +535,7 @@ async function confirmImport(): Promise<void> {
             <span v-if="p.detectResult.value.ssid">SSID "{{ p.detectResult.value.ssid }}"</span>
           </span>
         </div>
-        <button class="btn btn-icon-only btn-sm" @click="p.detectResult.value = null" title="关闭">
+        <button class="btn btn-icon-only btn-sm" @click="p.detectResult.value = null" title="关闭" aria-label="关闭">
           <IconApp name="close" class="icon-sm" />
         </button>
       </div>

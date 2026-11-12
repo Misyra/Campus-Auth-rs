@@ -272,12 +272,12 @@ onMounted(async () => {
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(script.modified_at) }}</span></td>
             <td class="tsk-actions" @click.stop>
-              <button type="button" class="btn btn-sm btn-icon-only" :title="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" @click="openEditor(script.id)">
+              <button type="button" class="btn btn-sm btn-icon-only" :title="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" :aria-label="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" @click="openEditor(script.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
               <AppDropdownMenu>
                 <template #trigger>
-                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${script.name || script.id}`" @pointerdown.stop @click.stop>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${script.name || script.id}`" :aria-label="`更多操作：${script.name || script.id}`" @pointerdown.stop @click.stop>
                     <IconApp name="more-vertical" class="icon-sm" />
                   </button>
                 </template>

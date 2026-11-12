@@ -326,12 +326,12 @@ onMounted(async () => {
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(row.modifiedAt) }}</span></td>
             <td class="tsk-actions" @click.stop>
-              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${row.name || row.id}`" @click="openEditor(row.id)">
+              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${row.name || row.id}`" :aria-label="`编辑：${row.name || row.id}`" @click="openEditor(row.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
               <AppDropdownMenu>
                 <template #trigger>
-                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${row.name || row.id}`" @pointerdown.stop @click.stop>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${row.name || row.id}`" :aria-label="`更多操作：${row.name || row.id}`" @pointerdown.stop @click.stop>
                     <IconApp name="more-vertical" class="icon-sm" />
                   </button>
                 </template>

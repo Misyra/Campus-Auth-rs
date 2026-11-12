@@ -311,13 +311,13 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         <div class="card-header">
           <h2>实时日志</h2>
           <div class="flex-row gap-sm">
-            <button class="btn btn-icon-only" :class="{ 'btn-active': logs.autoScroll.value }" @click="logs.autoScroll.value = !logs.autoScroll.value" :title="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'">
+            <button class="btn btn-icon-only" :class="{ 'btn-active': logs.autoScroll.value }" @click="logs.autoScroll.value = !logs.autoScroll.value" :title="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'" :aria-label="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'">
               <IconApp :name="logs.autoScroll.value ? 'arrow-up' : 'arrow-down'" />
             </button>
-            <button class="btn btn-icon-only" @click="logs.fetchLogs()" title="刷新">
+            <button class="btn btn-icon-only" @click="logs.fetchLogs()" title="刷新" aria-label="刷新">
               <IconApp name="refresh" />
             </button>
-            <button class="btn btn-icon-only" @click="logs.clearLogs()" title="清空">
+            <button class="btn btn-icon-only" @click="logs.clearLogs()" title="清空" aria-label="清空">
               <IconApp name="trash" />
             </button>
           </div>
