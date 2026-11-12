@@ -604,20 +604,28 @@ impl LoginOrchestrator {
         let old_session = {
             let mut guard = self.state.lock().await;
             let decision = match &guard.active_session {
-                None => PreemptionDecision::Create,
-                Some(active) if active.handle.is_resolved() => {
-                    // 已写入终态的会话不再复用：Reuse 只会立刻拿到旧结果，
+                None => decide_submit(source, None),
+                Some(active) => {
+                    // A1：已写入终态的会话不再复用——Reuse 只会立刻拿到旧结果，
                     // 让引擎/调用方把同一次登录重复计数（Auto 去重窗口竞态，
                     // 失败预算被同一次失败双计、冷却期提前触发）。降级为抢占，
                     // 由 wait_old_session_finished 等其 close_browser 收尾后建新会话。
-                    tracing::info!(
-                        old_source = ?active.source,
-                        new_source = ?source,
-                        "活跃会话已写入终态（收尾中），不复用，按抢占处理"
-                    );
-                    PreemptionDecision::Preempt
+                    if active.handle.is_resolved() {
+                        tracing::info!(
+                            old_source = ?active.source,
+                            new_source = ?source,
+                            "活跃会话已写入终态（收尾中），不复用，按抢占处理"
+                        );
+                    }
+                    decide_submit(
+                        source,
+                        Some(ActiveSessionView {
+                            source: active.source,
+                            handle: Some(&active.handle),
+                            resolved: active.handle.is_resolved(),
+                        }),
+                    )
                 }
-                Some(active) => decide(source, Some(active.source), Some(active.handle.clone())),
             };
             match decision {
                 PreemptionDecision::Reuse(handle) => {
@@ -1583,7 +1591,7 @@ pub use crate::status::LoginSource;
 pub use history::{
     HISTORY_RETENTION_DAYS, HistoryResult, HistoryStore, LoginHistoryEntry, LoginHistoryService,
 };
-pub use preemption::{PreemptionDecision, decide};
+pub use preemption::{ActiveSessionView, PreemptionDecision, decide, decide_submit};
 pub use session::{LoginResult, LoginSession, LoginTerminal, ResultAction};
 
 #[cfg(test)]
@@ -1724,6 +1732,65 @@ mod tests {
             Some(handle),
         );
         assert!(!matches!(d, PreemptionDecision::Preempt));
+    }
+
+    // ============ LoginHandle 终态槽位语义属性测试（proptest） ============
+
+    use proptest::prelude::*;
+
+    /// 属性测试统一口径：512 cases（CI 亲和，无秒级超时；随机失败必可 shrink 复现）
+    fn prop_config() -> proptest::test_runner::Config {
+        proptest::test_runner::Config::with_cases(512)
+    }
+
+    /// 构造指定消息的最小终态结果
+    fn prop_login_result(message: &str) -> LoginResult {
+        LoginResult {
+            network_retryable: false,
+            terminal: LoginTerminal::Success,
+            message: message.to_string(),
+            source: LoginSource::Auto,
+            duration: Duration::ZERO,
+            attempts: 0,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        /// 【不变量 H1】LoginHandle 终态槽位语义：未发射句柄 is_resolved=false；
+        /// 一旦 set_result 发射 → is_resolved 单调永真（后续发射不回退）；
+        /// await_result 读到的就是已写入的终态；immediate 句柄出生即已发射。
+        /// 这是「同一会话最多一次终态发射」在槽位层的单调性基础。
+        ///
+        /// 注：proptest 宏把函数体包装为恒返回 Ok 的闭包体，prop_assert 的
+        /// early-return 需穿越 async block——故断言块返回 `Result<(), TestCaseError>`
+        /// 并经 `check?` 从 runner 闭包传播 Err。
+        #[test]
+        fn prop_login_handle_resolution_monotonic_and_exact(
+            writes in proptest::collection::vec(any::<String>(), 1..=4),
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let check = rt.block_on(async {
+                let h = make_handle(LoginSource::Auto);
+                prop_assert!(!h.is_resolved(), "未发射句柄必须为未发射态");
+                let last = writes.last().cloned().unwrap_or_default();
+                for (i, msg) in writes.iter().enumerate() {
+                    h.inner.set_result(prop_login_result(msg));
+                    prop_assert!(h.is_resolved(), "第 {i} 次发射后 is_resolved 必须为真");
+                }
+                let got = h.await_result().await;
+                prop_assert_eq!(got.message, last, "await_result 必须读到已写入的终态");
+                prop_assert_eq!(got.source, LoginSource::Auto);
+                // immediate 句柄：出生即已发射，await_result 立即返回
+                let immediate = LoginHandle::immediate(prop_login_result("出生即终态"));
+                prop_assert!(immediate.is_resolved(), "immediate 句柄必须出生即已发射");
+                let got2 = immediate.await_result().await;
+                prop_assert_eq!(got2.message, "出生即终态");
+                Ok(())
+            });
+            check?;
+        }
     }
 
     // ============ recover_lock 中毒恢复测试 ============

@@ -2277,4 +2277,153 @@ mod tests {
             prop_assert_eq!(should_force_recycle(outcome), outcome == Outcome::NetworkError);
         }
     }
+    /// 可重试 outcome 池（协议串与 Outcome 的 snake_case 序列化一致；
+    /// 下标 4 = NetworkError，供回收计数断言取用）
+    const RETRYABLE_OUTCOMES: [&str; 5] = [
+        "navigation_timeout",
+        "selector_failed",
+        "assertion_failed",
+        "captcha_failed",
+        "network_error",
+    ];
+
+    /// 终态 outcome 池（协议串 → 期望终态；success 依赖 success_condition
+    /// 跳过登录后网络验证，保证测试环境下的终态确定性）
+    const TERMINAL_OUTCOMES: [(&str, LoginTerminal); 4] = [
+        ("success", LoginTerminal::Success),
+        ("invalid_credential", LoginTerminal::Failed),
+        ("manual_required", LoginTerminal::Failed),
+        ("unknown_error", LoginTerminal::Failed),
+    ];
+
+    /// 在暂停时钟的单线程 runtime 内跑一轮会话，返回 (mock bridge, 终态结果)
+    async fn run_session_with_script(
+        script: VecDeque<(bool, &'static str, &'static str)>,
+        max_retries: u32,
+    ) -> (Arc<ScriptedBridge>, LoginResult) {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(script),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = max_retries;
+        // 声明 success_condition：跳过登录后真实网络验证，终态确定性不随环境波动
+        params.plan = LoginAttemptPlan::Browser(serde_json::json!({
+            "task_config": { "success_condition": "logged_in" }
+        }));
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        let result = result_rx
+            .borrow_and_update()
+            .clone()
+            .expect("会话 run() 后必须有终态结果");
+        (bridge, result)
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        /// 【不变量 S5】随机可重试失败序列下会话精确执行「失败 N 次 + 终态一次」：
+        /// 每次 attempt 恰好消费一条 Worker 回包，终态 outcome 一出现立即停止
+        /// （同一会话只发射一次终态、不得再多试）；预算恰够全部可重试时，
+        /// 每个触发重试的 NetworkError 重试前恰好回收一次 Worker
+        ///
+        /// 注：proptest 宏把函数体包装为恒返回 Ok 的闭包体，prop_assert 的
+        /// early-return 需穿越 async block——故断言块返回 `Result<(), TestCaseError>`
+        /// 并经 `check?` 从 runner 闭包传播 Err。
+        #[test]
+        fn prop_session_first_terminal_outcome_stops_session(
+            seq in proptest::collection::vec(0usize..5, 0..=4),
+            terminal in 0usize..4,
+        ) {
+            let ne_count = seq.iter().filter(|&&i| i == 4).count();
+            let (terminal_str, expect_terminal) = TERMINAL_OUTCOMES[terminal];
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let check = rt.block_on(async {
+                let mut script: VecDeque<(bool, &'static str, &'static str)> = seq
+                    .iter()
+                    .map(|&i| (true, RETRYABLE_OUTCOMES[i], "失败详情"))
+                    .collect();
+                script.push_back((true, terminal_str, "终态详情"));
+                // 预算恰够全部可重试（max_retries = N）：终态在第 N+1 次 attempt 到达
+                let (bridge, result) =
+                    run_session_with_script(script, seq.len() as u32).await;
+                prop_assert_eq!(
+                    bridge.calls.load(std::sync::atomic::Ordering::SeqCst),
+                    (seq.len() + 1) as u32,
+                    "终态 outcome 必须立即结束会话，不得再多试一次"
+                );
+                prop_assert_eq!(result.attempts, (seq.len() + 1) as u32);
+                prop_assert_eq!(result.terminal, expect_terminal);
+                prop_assert_eq!(
+                    bridge.recycled.load(std::sync::atomic::Ordering::SeqCst),
+                    ne_count as u32,
+                    "每个触发重试的 NetworkError 应回收一次 Worker"
+                );
+                Ok(())
+            });
+            check?;
+        }
+
+        /// 【不变量 S6】重试预算恰在可重试序列中途耗尽时精确停在 Exhausted：
+        /// 共执行 max_retries+1 次尝试、终态 Failed、消息含「重试耗尽」，
+        /// 且 Exhausted 分支（最后一次失败）不再触发 Worker 回收
+        #[test]
+        fn prop_session_retry_exhaustion_stops_at_budget(
+            seq in proptest::collection::vec(0usize..5, 2..=5),
+            budget_pick in 0usize..4,
+        ) {
+            // 预算必须小于序列长度才能在序列中途耗尽：budget ∈ [1, len-1]
+            let budget = 1 + budget_pick % (seq.len() - 1);
+            let retried_ne = seq[..budget].iter().filter(|&&i| i == 4).count();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let check = rt.block_on(async {
+                let script: VecDeque<(bool, &'static str, &'static str)> = seq
+                    .iter()
+                    .map(|&i| (true, RETRYABLE_OUTCOMES[i], "失败详情"))
+                    .collect();
+                let (bridge, result) = run_session_with_script(script, budget as u32).await;
+                prop_assert_eq!(
+                    bridge.calls.load(std::sync::atomic::Ordering::SeqCst),
+                    (budget + 1) as u32,
+                    "预算耗尽必须恰执行 max_retries+1 次尝试"
+                );
+                prop_assert_eq!(result.attempts, (budget + 1) as u32);
+                prop_assert_eq!(result.terminal, LoginTerminal::Failed);
+                prop_assert!(
+                    result.message.contains("重试耗尽"),
+                    "耗尽终态消息口径: {}",
+                    result.message
+                );
+                prop_assert_eq!(
+                    bridge.recycled.load(std::sync::atomic::Ordering::SeqCst),
+                    retried_ne as u32,
+                    "仅触发重试的 NetworkError 回收；Exhausted 分支不回收"
+                );
+                Ok(())
+            });
+            check?;
+        }
+    }
 }
