@@ -60,6 +60,11 @@ _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 #: - test_redirect / page_capture：使用自建临时浏览器/页面，关 self._page
 #:   打不断它们，反而会误伤 keep_alive 常驻会话（page_capture 已改为独立
 #:   非持久化临时浏览器，取消经 cancel_id 在阶段边界生效）；
+#: - profile_session_start / profile_session_stop：使用独立持久上下文（独立
+#:   Playwright 连接，不复用也不触碰 self._page），强制关页既打不着它们也会
+#:   误伤 keep_alive 常驻会话；且会话存续期（start 返回后到 stop 之间）不处于
+#:   任何命令执行窗口内，命令级超时天然不适用——对齐 debug session 的豁免口径
+#:   （会话生命周期独立于单条命令预算，长会话命令只覆盖 start/stop 本身）；
 #: - close_browser：自带内部超时收敛，无需再关页。
 #: 白名单遗漏新命令时默认「不关页」，方向安全（宁可少自愈，不可误伤）。
 _INTERRUPTIBLE_METHODS = frozenset({
@@ -583,6 +588,13 @@ async def _serve() -> None:
             await asyncio.wait_for(worker_core.close_browser(), timeout=5.0)
         except Exception:  # noqa: BLE001
             logger.warning("退出时关闭浏览器失败", exc_info=True)
+        # 持久配置会话与自动化浏览器相互独立，close_browser 不触碰它；
+        # 随 Worker 退出一并收尾（EOF / shutdown 路径的幽灵会话兜底，
+        # 幂等，user_data_dir 原样保留）
+        try:
+            await asyncio.wait_for(worker_core.close_profile_session(), timeout=5.0)
+        except Exception:  # noqa: BLE001
+            logger.warning("退出时收尾持久配置会话失败", exc_info=True)
 
 
 def main() -> None:

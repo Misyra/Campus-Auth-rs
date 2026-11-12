@@ -48,6 +48,12 @@ from step_handlers import (
 )
 from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image
 from debug_session import DebugSession, _build_steps_info
+from config_session import (
+    ProfileSessionState,
+    RECORDER_BINDING_NAME,
+    RecorderSink,
+    build_recorder_init_script,
+)
 from variable_resolver import resolve
 
 logger = logging.getLogger(__name__)
@@ -1274,6 +1280,9 @@ class WorkerCore:
         self._screenshot_cleanup_tasks: set[asyncio.Task] = set()
         # 防止同一个 Page 重复绑定 dialog 处理器。
         self._wired_page_ids: set[int] = set()
+        # 持久配置会话（profile_session_*）：同一时刻至多一个，与自动化浏览器
+        # 完全独立（独立 Playwright 连接，不共享 context/page，不占单会话槽位）
+        self._profile_session: ProfileSessionState | None = None
 
     # ── 浏览器启动参数构建 ──
 
@@ -1474,17 +1483,19 @@ class WorkerCore:
             kwargs["channel"] = channel
         return await launcher.launch_persistent_context(user_data_dir, **kwargs)
 
-    async def _apply_stealth_and_routes(self, bs: dict) -> None:
-        """应用反检测脚本和路由拦截。"""
-        if self._context is None:
+    async def _apply_stealth_and_routes(self, bs: dict, context: Any = None) -> None:
+        """应用反检测脚本和路由拦截（context 缺省时作用于自动化会话上下文）。"""
+        if context is None:
+            context = self._context
+        if context is None:
             return
         if bs.get("low_resource_mode", False):
-            await self._context.route("**/*", self._handle_low_resource_request)
+            await context.route("**/*", self._handle_low_resource_request)
         if bs.get("stealth_mode", False):
             # 显式 null 时 .get 默认值不生效，需 or 兜底再 strip
             custom = (bs.get("stealth_custom_script") or "").strip()
             script = custom or _STEALTH_INIT_SCRIPT
-            await self._context.add_init_script(script)
+            await context.add_init_script(script)
 
     async def _start_browser(self, config: dict) -> None:
         """启动浏览器（按 browser_channel 选择引擎）。"""
@@ -1760,8 +1771,20 @@ class WorkerCore:
         # 覆盖 debug_stop 未被正确调用（EOF / shutdown 路径）的泄漏场景；
         # 截图与 cancel 注册统一走幂等 teardown，不能只清 map。
         self._teardown_all_debug_sessions()
+        # 注意：本方法只管自动化浏览器（命令回收 / 空闲回收 / 重建回滚共用），
+        # 不触碰持久配置会话——配置会话与自动化实例完全独立，仅随 Worker 退出
+        # 收尾（见 close_profile_session，worker_main._serve 退出路径调用）。
         self._last_browser_settings = None
         logger.info("浏览器及资源已关闭")
+
+    async def close_profile_session(self) -> None:
+        """收尾持久配置会话（Worker 退出路径专用入口；幂等）。
+
+        与 ``close_browser``（自动化浏览器回收）刻意分离：自动化路径的
+        重建回滚 / 空闲回收 / 登录终态回收都不得殃及用户正在手动操作的
+        配置会话窗口。user_data_dir 原样保留，绝不清理。
+        """
+        await self._teardown_profile_session(self._profile_session)
 
     async def _close_session(self) -> None:
         """会话级释放：关闭页面与非持久化 context，保留浏览器进程供热复用。
@@ -2794,6 +2817,242 @@ class WorkerCore:
             logger.warning("close_browser 超时（%.1fs），跳过等待继续", internal_timeout)
         return {}
 
+    # ── 持久配置会话（profile_session_*）──
+    #
+    # 「记住密码」模式：门户登录页自带「记住密码」（凭据存 cookies/localStorage），
+    # 持久化 user_data_dir 即可跨进程保留；下次打开门户页时门户自己的 JS 会把账号
+    # 密码默认填入（纯页面行为，无头可用）。因此自动化只需录制登录点击：本节命令
+    # 开一次 headed 持久会话供用户手动登录（勾选门户记住密码），录下点击/选择序列；
+    # 之后的自动登录 = 无头持久上下文打开门户页（门户 JS 自动回填）+ 回放点击 +
+    # 网络验证兜底（Rust 侧编排）。
+
+    async def _start_profile_playwright(self) -> Any:
+        """为配置会话启动独占的 Playwright 连接。
+
+        不复用 ``self._playwright``：自动化路径的 close_browser / 空闲回收会
+        ``stop()`` 共享连接，配置会话存续期（用户手动登录，可达数分钟）不能被
+        无关登录/任务殃及——独立连接换来与自动化会话的完全隔离。
+        """
+        from playwright.async_api import async_playwright
+
+        return await async_playwright().start()
+
+    def _profile_session_is_alive(self, session: ProfileSessionState) -> bool:
+        """判定配置会话浏览器是否仍存活（供 start 互斥检查与幽灵会话复活）。"""
+        if session.dead:
+            return False
+        context = session.context
+        if context is None:
+            return False
+        try:
+            return not bool(context.is_closed())
+        except Exception:  # noqa: BLE001 — 探活调用任何异常都视为已死亡
+            return False
+
+    def _on_profile_context_closed(self, session: ProfileSessionState) -> None:
+        """持久上下文 close 事件回调：浏览器进程意外退出时收尾幽灵会话。
+
+        只做槽位释放与资源收尾调度（回调为同步上下文，不能 await）；
+        user_data_dir 里的 cookie/localStorage 原样保留，槽位释放后可再次 start。
+        正常 stop 先清槽再关 context，回调命中 ``槽位非本会话`` 即为 no-op。
+        """
+        if self._profile_session is not session:
+            return
+        logger.warning("配置会话浏览器意外退出，收尾幽灵会话（user_data_dir 保留）")
+        self._profile_session = None
+        asyncio.ensure_future(self._teardown_profile_session(session))
+
+    async def _teardown_profile_session(self, session: ProfileSessionState | None) -> None:
+        """收尾配置会话：关持久上下文、停独占 Playwright 连接。幂等。
+
+        **绝不清理 user_data_dir**：目录里的 cookie/localStorage 是门户「记住
+        密码」的载体，收尾（正常 stop / 幽灵回收 / 退出兜底）一律原样保留。
+        资源允许残缺（启动中途失败时仅已创建部分需要回收），逐项判空回收。
+        """
+        if session is None or session.dead:
+            return
+        session.dead = True
+        if self._profile_session is session:
+            self._profile_session = None
+        if session.context is not None:
+            try:
+                await asyncio.wait_for(session.context.close(), timeout=_WAIT_TIMEOUT_SECS)
+            except Exception as exc:  # noqa: BLE001 — 上下文可能已随进程死亡
+                logger.debug("关闭配置会话持久上下文失败（忽略）: %s", exc)
+        if session.own_playwright is not None:
+            try:
+                await asyncio.wait_for(session.own_playwright.stop(), timeout=_WAIT_TIMEOUT_SECS)
+            except Exception as exc:  # noqa: BLE001 — 连接可能已断开
+                logger.debug("停止配置会话 Playwright 连接失败（忽略）: %s", exc)
+        session.context = None
+        session.page = None
+        session.own_playwright = None
+
+    def _profile_session_for(self, session_id: str) -> ProfileSessionState:
+        """解析配置会话：session_id 为空回退唯一活跃会话（单会话语义，对齐 debug）。"""
+        session = self._profile_session
+        if session is None:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "当前没有活跃配置会话，请先启动")
+        if session_id and session.session_id != session_id:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "配置会话不存在，请先启动配置会话")
+        return session
+
+    async def handle_profile_session_start(self, params: dict) -> dict:
+        """启动持久配置会话：headed 持久上下文 + 门户页 + 交互录制。
+
+        params：``user_data_dir``（必需）、``portal_url``（可选，给则打开）、
+        ``record``（默认 true，非布尔拒绝）、``browser_settings``（可选，
+        资源/直连/stealth 口径对齐 _start_browser）、``cancel_id``。
+        返回 ``{session_id, recorded}``。
+
+        占用互斥：同一时刻仅允许一个活跃配置会话（重复 start 报错，口径对齐
+        debug_start；浏览器进程意外退出的幽灵会话先收尾再放行）；与自动化
+        浏览器实例相互独立，不占其单会话槽位。命令级超时只覆盖本命令本身，
+        会话存续期不受约束（见 worker_main._INTERRUPTIBLE_METHODS 的豁免说明）。
+        """
+        user_data_dir = str(params.get("user_data_dir") or "").strip()
+        if not user_data_dir:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "profile_session_start 缺少 user_data_dir")
+        portal_url = str(params.get("portal_url") or "").strip()
+        if portal_url and not portal_url.startswith(("http://", "https://")):
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "portal_url 仅支持 http/https 地址")
+        record = params.get("record", True)
+        if not isinstance(record, bool):
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "record 必须是布尔值")
+        bs = params.get("browser_settings", {}) or {}
+        cancel_id = str(params.get("cancel_id") or "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+
+        def _ensure_not_cancelled(stage: str) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise StepCancelled(f"配置会话已取消（{stage}）")
+
+        # 互斥：活跃会话存续时拒绝重复启动；浏览器进程已退出的幽灵会话
+        # 收尾（清槽、停连接、user_data_dir 原样保留）后放行
+        existing = self._profile_session
+        if existing is not None:
+            if self._profile_session_is_alive(existing):
+                raise WorkerError(
+                    Outcome.UNKNOWN_ERROR, "已存在活跃配置会话，请先停止当前配置会话"
+                )
+            logger.warning("发现浏览器已退出的配置会话，收尾后重新启动")
+            await self._teardown_profile_session(existing)
+
+        session_id = uuid.uuid4().hex
+        channel = str(bs.get("browser_channel") or "playwright").strip().lower()
+        custom_path = str(bs.get("browser_custom_path") or "").strip()
+        pure_mode = bool(bs.get("pure_mode", False))
+        # 对齐 _start_browser：未绑定代理即绕过系统代理（直连保障），纯净模式
+        # 只关闭可选定制、不关闭直连保障
+        launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
+        if self._bypass_system_proxy(bs) and self._is_chromium_channel(bs, channel):
+            if "--no-proxy-server" not in launch_args:
+                launch_args.append("--no-proxy-server")
+        ctx_opts = self._build_context_options(bs)
+
+        # 会话对象先建、资源逐项挂载：任一环节失败，except 统一回收已创建部分
+        session = ProfileSessionState(
+            session_id=session_id,
+            user_data_dir=user_data_dir,
+            portal_url=portal_url,
+            record=record,
+            sink=RecorderSink(),
+        )
+        try:
+            _ensure_not_cancelled("浏览器启动前")
+            session.own_playwright = await self._start_profile_playwright()
+            # headed 持久上下文：headless 恒为 False（用户要在这个窗口里手动登录）
+            session.context = await self._launch_persistent_context(
+                playwright=session.own_playwright,
+                channel=channel,
+                custom_path=custom_path,
+                headless=False,
+                launch_args=launch_args,
+                user_data_dir=user_data_dir,
+                ctx_opts=ctx_opts,
+                bs=bs,
+            )
+            # 资源/直连/stealth 口径对齐 _start_browser：低资源路由与反检测脚本
+            # 作用于配置会话自己的上下文（pure_mode 语义同正式登录：全关闭）
+            if not pure_mode:
+                await self._apply_stealth_and_routes(bs, context=session.context)
+            if record:
+                # 录制器：binding 挂上下文级（覆盖弹窗新页）且跨导航存活；
+                # init 脚本随每个新文档重装监听器（页面 JS 状态不跨导航）
+                await session.context.expose_binding(
+                    RECORDER_BINDING_NAME, session.sink.add_json
+                )
+                await session.context.add_init_script(build_recorder_init_script())
+            # 持久上下文可能自带预开页：统一关掉，维持单活跃页语义
+            for old_page in list(session.context.pages):
+                await self._safe_close(old_page, "config session pre-open page")
+            session.page = await session.context.new_page()
+            # 门户页弹窗就地自动确认：不走共享会话的 dialog 事件通道，
+            # 避免污染 _task_dialogs 与前端事件流（口径同临时捕获浏览器）
+            async def _auto_accept(dialog: Any) -> None:
+                try:
+                    await dialog.accept()
+                except Exception as exc:  # noqa: BLE001 — 弹窗可能已在间隙消失
+                    logger.debug(f"配置会话页弹窗确认失败（忽略）: {exc}")
+
+            page_on = getattr(session.page, "on", None)
+            if callable(page_on):
+                page_on("dialog", lambda d: asyncio.ensure_future(_auto_accept(d)))
+            # 浏览器进程意外退出 → 幽灵会话收尾（槽位释放，user_data_dir 保留）
+            context_on = getattr(session.context, "on", None)
+            if callable(context_on):
+                context_on("close", lambda _c: self._on_profile_context_closed(session))
+
+            _ensure_not_cancelled("会话建立前")
+            self._profile_session = session
+            if portal_url:
+                # 门户页导航放在会话建成后：失败走 except 统一回收整场，
+                # 不留"浏览器开着但 Rust 已收到失败"的半开会话
+                await self._navigate(session.page, portal_url, _nav_timeout(bs))
+        except BaseException:
+            # 启动失败/取消：回收已创建资源，绝不留半开会话（含幽灵收尾语义）
+            await self._teardown_profile_session(session)
+            raise
+        else:
+            # 幽灵取消窗口（对齐 debug_start）：取消恰落在会话建成与响应返回
+            # 之间时，不能留下 Rust 已判定取消、Worker 却仍视为活跃的会话
+            if cancel_event is not None and cancel_event.is_set():
+                await self._teardown_profile_session(session)
+                raise StepCancelled("配置会话已取消（启动完成阶段）")
+            logger.info(
+                "配置会话已启动: id=%s, record=%s, portal=%s, user_data_dir 保留挂载",
+                session_id,
+                record,
+                bool(portal_url),
+            )
+            return {"session_id": session_id, "recorded": record}
+        finally:
+            # cancel_id 只覆盖启动命令本身；会话存续期不注册任何 cancel 令牌
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
+
+    async def handle_profile_session_stop(self, params: dict) -> dict:
+        """停止持久配置会话：返回录制动作并关闭持久浏览器。
+
+        user_data_dir 里的 cookie/localStorage（门户「记住密码」载体）原样
+        保留——只关浏览器，绝不清理目录。无活跃会话时报错（显式契约，对齐
+        debug_stop，不做静默幂等）；session_id 不匹配同样报错。
+        返回 ``{recorded_actions, truncated}``（record=false 或无录制时空数组）。
+        """
+        session_id = str(params.get("session_id") or "")
+        session = self._profile_session_for(session_id)
+        record = session.record
+        actions = session.sink.recorded_actions() if record else []
+        truncated = session.sink.truncated if record else False
+        await self._teardown_profile_session(session)
+        logger.info(
+            "配置会话已停止: id=%s, recorded=%d, truncated=%s",
+            session.session_id,
+            len(actions),
+            truncated,
+        )
+        return {"recorded_actions": actions, "truncated": truncated}
+
     @asynccontextmanager
     async def _temp_capture_browser(self, bs: dict) -> AsyncIterator[Any]:
         """独立非持久化临时浏览器（page_capture 专用）：browser + context + page 自包含。
@@ -3307,6 +3566,8 @@ COMMANDS: dict[str, Callable] = {
     "debug_status": worker_core.handle_debug_status,
     "feedback_capture": worker_core.handle_feedback_capture,
     "page_capture": worker_core.handle_page_capture,
+    "profile_session_start": worker_core.handle_profile_session_start,
+    "profile_session_stop": worker_core.handle_profile_session_stop,
     "ocr_recognize": worker_core.handle_ocr_recognize,
     "shutdown": worker_core.handle_shutdown,
 }

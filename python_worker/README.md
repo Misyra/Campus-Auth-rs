@@ -86,7 +86,7 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 
 缺少统一策略时继续兼容旧的 `bind_proxy` 和 `redirect_test_use_proxy`；新主程序不再暴露两个独立代理入口。自定义浏览器参数中的代理相关标志会被过滤，不能覆盖统一出口。Worker 不修改系统代理或 DNS；TUN 防火墙的强制拦截仍需用户配置例外。
 
-与 `playwright_worker.py` 的 `COMMANDS` 注册表逐项对应（15 项）。
+与 `playwright_worker.py` 的 `COMMANDS` 注册表逐项对应（17 项）。
 
 | 命令 | 说明 |
 |------|------|
@@ -103,6 +103,8 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 | `debug_status` | 查询调试会话详情（无副作用，供前端刷新后恢复步骤数据） |
 | `feedback_capture` | 捕获当前调试页的完整 MHTML、截图与 CSS/JS 资源（供导出离线问题报告） |
 | `page_capture` | 清理旧登录态后导航到目标页，落盘 MHTML（仅 Chromium 渠道，走 CDP）、原始 HTML、离线副本 `page.offline.html`（资源引用改写为 `resources/`，解压即可脱网还原）、结构化控件摘要与脱敏局部 HTML、CSS-JS 资源及截图到 `captures/latest/`（**非 Chromium 渠道无 CDP**，CSS/JS 改由页面枚举 + HTTP 回补抓取；超大全页截图自动降为视口截图；由 `POST /api/ai/capture` 触发） |
+| `profile_session_start` | 启动持久配置会话（headed 持久上下文，详见[持久配置会话](#持久配置会话profile_session_)）：打开门户页供用户手动登录（勾选门户「记住密码」），注入录制器录下登录点击/选择序列 |
+| `profile_session_stop` | 停止配置会话并关闭持久浏览器，返回录制动作；**user_data_dir 的 cookie/localStorage 原样保留，绝不清理**（详见[持久配置会话](#持久配置会话profile_session_)） |
 | `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖；不占单会话槽位、不被 WorkerBusy 拒绝，但 Worker 内仍串行排队执行） |
 | `shutdown` | 优雅关闭 Worker 进程 |
 
@@ -110,7 +112,89 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 > Worker 的**单会话槽位**；`ocr_recognize` / `feedback_capture` 不占会话槽位、
 > 不被 WorkerBusy 拒绝，但 Worker 内仍串行排队执行（Rust → Worker 的命令始终
 > 串行，`_serve` 主循环 `await` 至该条命令结束），且**不参与** Worker 回收时的
-> 全量取消（Rust 侧 `CancelRegistry` 为其单独分区）。
+> 全量取消（Rust 侧 `CancelRegistry` 为其单独分区）。`profile_session_*` 与
+> 自动化浏览器实例相互独立（独占 Playwright 连接，不共享 context/page，不占
+> 单会话槽位），自带「同一时刻仅一个活跃配置会话」互斥（见下节）。
+
+## 持久配置会话（profile_session_*）
+
+「记住密码」模式的工作方式：门户登录页自带「记住密码」，凭据存
+cookies/localStorage；把 `user_data_dir` 持久化后这些登录态跨进程保留，下次
+打开门户页时**门户自己的 JS 会把账号密码默认填入**（纯页面行为，无头可用）。
+因此自动化只需**录制登录点击**：
+
+1. `profile_session_start`：开一次 headed 持久会话，用户手动登录（勾选门户
+   记住密码），Worker 录下点击/选择序列；
+2. `profile_session_stop`：关闭浏览器（登录态保留在 `user_data_dir`），取回
+   录制结果；
+3. 之后的自动登录（Rust 侧编排）：无头持久上下文打开门户页（门户 JS 自动
+   回填）+ 回放录到的点击 + 网络验证兜底。
+
+### 请求 / 响应契约
+
+**`profile_session_start`**
+
+- params：`user_data_dir`（**必需**，Rust 侧给的持久目录，缺失报错）、
+  `portal_url`（可选，给则打开，仅 http/https）、`record`（默认 `true`，
+  非布尔值报错）、`browser_settings`（可选，资源/直连/stealth 口径对齐
+  `_start_browser`：未绑定代理即追加 `--no-proxy-server`，低资源路由与反检测
+  脚本作用于配置会话自己的上下文）、`cancel_id`（可选，只覆盖启动命令本身）；
+- 返回：`{"session_id": "<uuid>", "recorded": true|false}`；
+- 浏览器恒为 **headed**（`headless=False`），持久上下文即浏览器本体；
+- 错误形态：参数缺失/非法与「已存在活跃配置会话」均以
+  `outcome: unknown_error` 的结构化错误返回（不重试语义，与 debug_start 占用
+  口径一致）；门户页导航失败同样报错并整场回收（不留半开会话）。
+
+**`profile_session_stop`**
+
+- params：`session_id`（可选；单会话语义下为空时回退唯一活跃会话，与活跃
+  会话不匹配报错）；
+- 返回：`{"recorded_actions": [...], "truncated": bool}`（`record=false` 或
+  无录制时空数组）；
+- 无活跃会话时 stop 报错（显式契约，不做静默幂等，对齐 debug_stop）。
+
+### 录制契约（recorded_actions 元素）
+
+- `type`：`click`（按钮/提交类点击，捕获范围 `button`、`[type=submit]`、
+  `input[type=submit]`、`[role=button]`，`closest` 兼容按钮内嵌子元素）或
+  `change`（仅 `<select>`，ISP 选择类，附 `value` 为选中值）；**输入类交互
+  不录**——账号密码回填由门户自己的 JS 负责；
+- `selector` / `strategy`：启发式按 `#id → [name=] → [data-testid] → 首个
+  其他 data-* → 可见文本（button 文案，截断转义，Playwright 引号精确匹配
+  形态 `text="..."`）→ 结构路径（nth-child 链，兜底必命中）`取首个命中，
+  `strategy` 标明采用的级别；优先级顺序由 Python 侧
+  `config_session.SELECTOR_STRATEGY_PRIORITY` 常量单一事实源驱动（同时注入
+  录制器 JS 模板）；
+- `ts`：事件时间戳（毫秒）；同一元素（同 type + 同 selector）500ms 内重复
+  事件只记一次（窗口锚点为最近一条已记录动作，跨导航仍有效）；
+- 动作序列按 `ts` 升序返回，上限 50 条（`RECORDER_MAX_ACTIONS`），触顶丢弃
+  后续并在响应 `truncated: true` 标记。
+
+录制机制：动作经 `expose_binding`（挂 BrowserContext 级，覆盖弹窗新页）实时
+推给 Python 汇聚——页面 JS 状态随文档销毁（登录点击后必然跳转），binding 是
+动作跨导航存活的唯一通道；录制脚本经 `add_init_script` 随每个新文档重装监听
+（捕获相位注册，门户 JS `stopPropagation` 不影响录制）。JS 侧文档内触顶会向
+Python 回传 `{"type": "truncated"}` 标记（文档计数随导航归零，需标记补齐才能
+正确覆盖跨文档累计的丢弃），全局上限与 `truncated` 语义由 Python 侧权威收口。
+
+### 生命周期与收尾
+
+- **命令级超时只覆盖 start/stop 命令本身**；会话存续期（start 返回后到 stop
+  之间）不处于任何命令执行窗口内，不受命令级超时约束（对齐 debug session：
+  会话生命周期独立于单条命令预算），也不进 `_INTERRUPTIBLE_METHODS` 强制中断
+  白名单（独立上下文，关 `self._page` 既打不着它也会误伤 keep_alive 常驻
+  会话）；
+- **占用互斥**：同一时刻仅允许一个活跃配置会话，重复 `profile_session_start`
+  报「已存在活跃配置会话」；浏览器进程意外退出的幽灵会话（`is_closed()` 已
+  真或 close 事件已到）在下次 start 时自动收尾后放行；
+- **幽灵会话收尾**：客户端断连 / shutdown 随 Worker 退出
+  （`worker_main._serve` 收尾段调 `close_profile_session`）一并收尾；浏览器
+  进程意外退出经 close 事件触发收尾——两条路径都只关浏览器与独占 Playwright
+  连接，**绝不清理 user_data_dir**（目录里的 cookie/localStorage 就是
+  「记住密码」机制的全部价值）；
+- **与自动化回收完全独立**：`close_browser` 命令 / 浏览器空闲回收 /
+  ensure_browser 重建回滚只管自动化浏览器，不触碰配置会话；
+- stop 后或收尾后可再次 start（`session_id` 每次重新生成）。
 
 ## 依赖安装
 
