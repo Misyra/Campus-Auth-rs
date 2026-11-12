@@ -126,6 +126,23 @@
   margin: 0 auto 0 0;
   text-align: left;
 }
+/* 访问与安全：管理凭据行（输入框占满剩余宽度 + 显隐切换按钮）。
+   尺寸对齐 list.css 的 .setting-row-control > input（9px 12px / 38px），
+   本行输入框不是 control 的直接子元素，那两条规则命中不到，这里自持尺寸 */
+.management-password-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.management-password-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  min-height: 38px;
+}
+.management-password-row .btn {
+  white-space: nowrap;
+}
 
 /* ==================== 自动更新（原「网络与更新」Tab 并入，作用域类 .system-update-page） ==================== */
 

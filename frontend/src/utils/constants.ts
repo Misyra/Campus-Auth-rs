@@ -344,6 +344,9 @@ export const DEFAULT_CONFIG: Config = {
     proxy_url: "",
     proxy_port: 7890,
   },
+  // 远程访问引导凭据（管理密码）：与后端 GlobalConfig.management_password 的
+  // serde 默认值（空串）一致；Docker 场景可经环境变量注入，界面留空即可
+  management_password: "",
 };
 
 /**

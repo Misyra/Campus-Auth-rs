@@ -290,6 +290,9 @@ const autoRestartHours = computed<string>({
   set: (v) => { config.config.app_settings.auto_restart_hours = Number(v); },
 });
 
+/** 管理凭据输入框的明文显隐（默认密文展示，防旁观泄露） */
+const showManagementPassword = ref(false);
+
 const reloading = ref(false);
 const reloadMsg = ref("");
 async function reloadConfig() {
@@ -468,6 +471,42 @@ onMounted(() => {
             <span class="toggle-slider"></span>
             <span class="sr-only">显示系统托盘图标</span>
           </label>
+        </SettingsRow>
+      </div>
+    </section>
+    <!-- 访问与安全：远程访问引导凭据（免鉴权 /api/auth/token 移除后的 bootstrap 信任模型） -->
+    <section class="settings-panel">
+      <div class="settings-card-header">
+        <IconApp name="shield" class="settings-card-icon" />
+        <h2>访问与安全</h2>
+      </div>
+      <div class="card-body">
+        <SettingsRow description="仅远程（非回环）访问时作为界面引导凭据，本机经托盘打开界面无需此密码">
+          <template #label>
+            <label for="settings-management-password">管理凭据（远程访问引导密码）</label>
+            <FieldHelp text="远程打开界面时，引导页要求输入本密码以换取访问凭据。建议 ≥8 字符；Docker 部署可经环境变量 CAMPUS_AUTH_MANAGEMENT_PASSWORD 注入（此时此处留空即可）。随下方保存按钮一并提交。" />
+          </template>
+          <template #description>
+            <span class="hint">仅远程（非回环）访问时作为界面引导凭据，本机经托盘打开界面无需此密码；建议 ≥8 字符</span>
+          </template>
+          <div class="management-password-row">
+            <input
+              id="settings-management-password"
+              v-model="config.config.management_password"
+              :type="showManagementPassword ? 'text' : 'password'"
+              placeholder="留空表示未设置"
+              autocomplete="new-password"
+              spellcheck="false"
+            />
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              :aria-pressed="showManagementPassword"
+              @click="showManagementPassword = !showManagementPassword"
+            >
+              {{ showManagementPassword ? "隐藏" : "显示" }}
+            </button>
+          </div>
         </SettingsRow>
       </div>
     </section>

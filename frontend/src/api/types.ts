@@ -458,6 +458,8 @@ export interface Config {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
+  /** 远程访问引导凭据（管理密码）：仅服务端非回环监听时用于界面引导换取 token */
+  management_password: string;
 }
 
 /** GET /api/config 返回结构（凭据平铺在顶层） */
@@ -482,6 +484,8 @@ export interface ConfigResponse {
   active_http_task: string;
   /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本正文在任务里，不在本响应里） */
   active_script_task: string;
+  /** 远程访问引导凭据（管理密码，serde 默认空串）：旧后端可能不下发，按可选处理 */
+  management_password?: string;
 }
 
 /**
@@ -500,6 +504,11 @@ export interface SaveConfigPayload {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
+  /**
+   * 远程访问引导凭据（管理密码）：PATCH 为局部合并语义，缺省 = 保持不变；
+   * 全局设置保存（useConfig.saveConfig）显式携带它（空串 = 清除）。
+   */
+  management_password?: string;
 }
 
 /** 登录渠道与HTTP 登录方法 */

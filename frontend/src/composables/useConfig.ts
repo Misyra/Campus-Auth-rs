@@ -86,6 +86,8 @@ async function fetchConfig(): Promise<void> {
     // 本 composable 明确不接收——它们属于 Profile，归方案页编辑。
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
+    // 远程访问引导凭据：GET 扁平响应的可选顶层字段，旧后端不下发时以空串兜底
+    config.management_password = typeof data.management_password === "string" ? data.management_password : "";
     // 旧配置只有 proxy_port（可能非默认值）：派生完整地址，
     // 保证输入框显示与后端 resolved_proxy_url 实际使用一致
     if (!config.updater.proxy_url && config.updater.proxy_port > 0) {
@@ -197,6 +199,7 @@ async function saveConfig(force = false): Promise<void> {
     retry: config.retry,
     app_settings: config.app_settings,
     updater: config.updater,
+    management_password: config.management_password,
   };
 
   // ⚠ 快照必须在 `await` **之前**取。

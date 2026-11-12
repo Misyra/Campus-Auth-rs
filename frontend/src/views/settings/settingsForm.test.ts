@@ -75,3 +75,28 @@ describe("设置页表单提交守卫", () => {
     ).toEqual([]);
   });
 });
+
+describe("管理凭据设置项（远程访问引导密码）", () => {
+  /**
+   * 「访问与安全」分区的管理凭据输入框：免鉴权 GET /api/auth/token 移除后，
+   * 远程（非回环）访问的界面引导依赖它。此处静态锁定三要素——绑定字段、
+   * 密文展示与显隐切换（切换按钮缺 type 会被上面的通用守卫拦下，这里锁语义）。
+   */
+  it("密码输入框绑定 management_password 且带显隐切换", () => {
+    const src = readFileSync(new URL("./SystemSettings.vue", import.meta.url), "utf8");
+    expect(src).toContain('id="settings-management-password"');
+    expect(src).toContain('v-model="config.config.management_password"');
+    // 密文展示：type 由显隐状态驱动，默认 password
+    expect(src).toContain(":type=\"showManagementPassword ? 'text' : 'password'\"");
+    const toggle = src.match(/<button[^>]*@click="showManagementPassword = !showManagementPassword"[^>]*>/);
+    expect(toggle, "缺少显隐切换按钮").not.toBeNull();
+    expect(toggle![0]).toContain('type="button"');
+    expect(toggle![0]).toContain(":aria-pressed=");
+  });
+
+  it("说明文案交代使用边界与环境变量注入路径", () => {
+    const src = readFileSync(new URL("./SystemSettings.vue", import.meta.url), "utf8");
+    expect(src).toContain("仅远程（非回环）访问时作为界面引导凭据");
+    expect(src).toContain("CAMPUS_AUTH_MANAGEMENT_PASSWORD");
+  });
+});
