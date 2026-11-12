@@ -43,6 +43,7 @@ from step_handlers import (
     _check_cancel,
     _classify_navigation_error,
     _sleep_cancellable,
+    _suppress_task,
     run_step_async,
 )
 from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image
@@ -1265,14 +1266,14 @@ class WorkerCore:
         self.capabilities: dict[str, bool] = {}
         # 浏览器空闲自动释放计时（keep_alive 关闭时武装，见 _arm_browser_idle_release）
         self._browser_idle_task: asyncio.Task | None = None
-        # 延迟删除普通任务截图，确保 Rust WebSocket 有时间完成异步回读。
-        self._screenshot_cleanup_tasks: set[asyncio.Task] = set()
-        # 防止同一个 Page 重复绑定 dialog 处理器。
-        self._wired_page_ids: set[int] = set()
         # 浏览器生命周期互斥锁：串行化 ensure_browser / close_browser / _close_session
         # 与空闲回收的关闭段，消除"回收关闭进行中命令判定浏览器就绪"的交错
         # （P2-3）。只包生命周期段，命令内的步骤执行在锁外，不串行化命令本身。
         self._browser_lifecycle_lock = asyncio.Lock()
+        # 延迟删除普通任务截图，确保 Rust WebSocket 有时间完成异步回读。
+        self._screenshot_cleanup_tasks: set[asyncio.Task] = set()
+        # 防止同一个 Page 重复绑定 dialog 处理器。
+        self._wired_page_ids: set[int] = set()
 
     # ── 浏览器启动参数构建 ──
 
@@ -1659,7 +1660,10 @@ class WorkerCore:
     async def ensure_browser(self, config: dict) -> None:
         """确保浏览器就绪（复用已存在的实例，仅在未就绪或配置变更时重建）。"""
         bs = config.get("browser_settings", {})
-        # 任何浏览器命令开始都取消待触发的空闲自动释放
+        # 任何浏览器命令开始都取消待触发的空闲自动释放。计时协程在关闭段仍持有
+        # 任务引用（见 _browser_idle_release），此处 cancel 在睡眠期/等锁期/关闭期
+        # 均能送达；关闭可能卡在不可中断的关闭调用上，锁保证其完全退出后命令侧
+        # 再检查状态（P2-3）。
         self._cancel_browser_idle_release()
         # 生命周期段整体持锁：空闲回收的关闭与命令侧的就绪判定/重建互斥，
         # 命令看到的浏览器状态不会在判定与使用之间被并发关闭撕开
@@ -1728,13 +1732,6 @@ class WorkerCore:
 
     async def close_browser(self) -> None:
         """关闭浏览器并释放所有资源（公开接口，供外部清理调用）。"""
-        if self._page is not None:
-            await self._safe_close(self._page, "页面")
-            self._page = None
-        if self._context is not None:
-            await self._safe_close(self._context, "上下文")
-            self._context = None
-            self._wired_page_ids.clear()
         async with self._browser_lifecycle_lock:
             await self._close_browser_locked()
 
@@ -1744,6 +1741,13 @@ class WorkerCore:
         ensure_browser / _start_browser 在临界区内也需要完整关闭，经此入口
         避免对非重入的 asyncio.Lock 二次加锁死锁。
         """
+        if self._page is not None:
+            await self._safe_close(self._page, "页面")
+            self._page = None
+        if self._context is not None:
+            await self._safe_close(self._context, "上下文")
+            self._context = None
+            self._wired_page_ids.clear()
         if self._browser is not None:
             await self._safe_close(self._browser, "浏览器")
             self._browser = None
@@ -1762,11 +1766,20 @@ class WorkerCore:
     async def _close_session(self) -> None:
         """会话级释放：关闭页面与非持久化 context，保留浏览器进程供热复用。
 
+        与 close_browser 同持生命周期锁：空闲回收的关闭可能并发进行
+        （close_browser 命令到达时回收计时已到期），页面/context 字段不得
+        交叉置空。调用方均在命令路径（命令间串行）上，锁不引入新交错。
+
         persistent_context 模式的 context 即浏览器本体（_browser 为 None），
         关闭 context 等于终止进程，故仅清页面，context 由既有 ensure_browser
         快速路径继续复用。_last_browser_settings 必须保留，热恢复分支依赖它
         判定"配置未变"。
         """
+        async with self._browser_lifecycle_lock:
+            await self._close_session_locked()
+
+    async def _close_session_locked(self) -> None:
+        """_close_session 的锁内实现（调用方必须已持有生命周期锁）。"""
         if self._page is not None:
             await self._safe_close(self._page, "页面")
             self._page = None
@@ -1778,11 +1791,6 @@ class WorkerCore:
         self._wired_page_ids.clear()
         # 与 close_browser 同款兜底：截图与 cancel 注册统一释放。
         self._teardown_all_debug_sessions()
-        async with self._browser_lifecycle_lock:
-            await self._close_session_locked()
-
-    async def _close_session_locked(self) -> None:
-        """_close_session 的锁内实现（调用方必须已持有生命周期锁）。"""
         logger.info("会话级资源已释放（浏览器进程保留）")
 
     def _cancel_browser_idle_release(self) -> None:
@@ -1810,16 +1818,6 @@ class WorkerCore:
             await asyncio.sleep(BROWSER_IDLE_RELEASE_SECS)
         except asyncio.CancelledError:
             return
-        self._browser_idle_task = None
-        # 调试会话兜底保护：活跃调试期间绝不回收
-        if self._debug_sessions:
-            return
-        if self._browser is None and self._context is None:
-            return
-        logger.info(
-            "浏览器空闲 %ds，自动释放（worker.keep_alive 未启用）",
-            BROWSER_IDLE_RELEASE_SECS,
-        )
         try:
             async with self._browser_lifecycle_lock:
                 # 调试会话兜底保护：活跃调试期间绝不回收
@@ -1845,6 +1843,12 @@ class WorkerCore:
             logger.warning("浏览器空闲自动释放超时（8s），跳过")
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"浏览器空闲自动释放异常（忽略）: {exc}")
+        finally:
+            # 仅清理仍指向本任务的引用：期间 _arm_browser_idle_release 可能已
+            # 装上新计时器，不得误清（close_browser 不再提前置 None，保证
+            # 关闭段内 cancel 仍可送达）
+            if self._browser_idle_task is asyncio.current_task():
+                self._browser_idle_task = None
 
     async def force_interrupt_pending(self) -> None:
         """强制中断可能挂起的 Playwright 操作：关闭当前页面以打断 CDP await。
@@ -2237,13 +2241,6 @@ class WorkerCore:
                     wait_until="domcontentloaded",
                     timeout=min(_nav_timeout(bs), 15000),
                 )
-                if response is not None:
-                    response_status = response.status
-            except Exception as exc:  # noqa: BLE001 — 导航失败属于“无法跟随”，不是 Worker 故障
-                logger.info("重定向检测导航失败: %s", type(exc).__name__)
-                return {"status": "not_detected"}
-
-            deadline = time.monotonic() + _REDIRECT_TEST_SETTLE_SECS
             )
             response: Any = None
             try:
@@ -2254,6 +2251,19 @@ class WorkerCore:
                         raise StepCancelled("重定向检测已取消")
                     await asyncio.wait({goto_task}, timeout=0.1)
                 response = goto_task.result()
+                if response is not None:
+                    response_status = response.status
+            except StepCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 导航失败属于“无法跟随”，不是 Worker 故障
+                logger.info("重定向检测导航失败: %s", type(exc).__name__)
+                return {"status": "not_detected"}
+            finally:
+                # 命令级超时等路径取消本协程时，弃掉的 goto 任务在此兜底回收
+                if not goto_task.done():
+                    goto_task.cancel()
+
+            deadline = time.monotonic() + _REDIRECT_TEST_SETTLE_SECS
             while time.monotonic() < deadline:
                 if cancel_event is not None and cancel_event.is_set():
                     raise StepCancelled("重定向检测已取消")
