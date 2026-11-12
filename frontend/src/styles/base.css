@@ -58,6 +58,7 @@
   --warning-soft: #fbbf24;
   --warning-deep: #d97706;
   --warning-bg: rgba(var(--warning-rgb), 0.12);
+  --warning-border: rgba(var(--warning-rgb), 0.3);
   --warning-text: var(--warning);
   /* 危险色：--danger 是 --error 的语义别名，供提示条等场景使用（浅色下加深保证对比度） */
   --danger: var(--error);
@@ -407,7 +408,10 @@ html.reduce-motion .btn { transform: none !important; }
   --warning-soft: #f59e0b;
   --warning-deep: #b45309;
   --warning-bg: rgba(var(--warning-rgb), 0.1);
-  --warning-text: #b45309;
+  --warning-border: rgba(var(--warning-rgb), 0.25);
+  /* 警示文字色按浅色底（#eef2f7）测算：#b45309 为 4.47:1，差一线不过 AA 正文线
+     （4.5:1）；加深到 #a34a08 约 5.3:1 达标，色相不变仅压暗 */
+  --warning-text: #a34a08;
   --danger: #dc2626;
   --danger-bg: #fef2f2;
   --danger-border: #fecaca;

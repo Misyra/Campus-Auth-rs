@@ -254,8 +254,8 @@
 }
 
 .wizard-note--warn {
-  border-color: var(--warning-border, var(--border));
-  color: var(--warning-text, var(--text-secondary));
+  border-color: var(--warning-border);
+  color: var(--warning-text);
 }
 
 .wizard-note--error {
