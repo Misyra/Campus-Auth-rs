@@ -84,6 +84,14 @@ pub const DEFAULT_WORKER_STARTUP_TIMEOUT_SECS: u64 = 30;
 /// 取消通知发出后等待 Worker 确认收敛的最长时间；超时则回收进程。
 const CANCEL_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 持久自动登录命令（`profile_auto_login`）的命令级超时预算。
+///
+/// Worker 契约要求 `rust_timeout_ms` ≥45s（回填沉降 ~6.5s + 逐动作回放，
+/// 每步预算为 `browser_settings.timeout`，编排侧已抬到 ≥45s 下限）；此处取
+/// 登录流程既有默认预算 300s 对齐，实际外界由会话总超时（`login_timeout`，
+/// 默认 120s）经 cancel_id 取消兜底，命令级预算只防 Worker 侧自愈失灵。
+pub const PERSISTENT_AUTO_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// 命令级超时后，等待 Worker 自愈（取消任务 + 关页打断挂起的 CDP await）的宽限期。
 ///
 /// 仍未释放会话槽位则判定卡死并强杀回收。该值与 `login::PREEMPT_WAIT_BUDGET`
@@ -885,7 +893,7 @@ async fn execute_inner(
     // 回收 Worker（调试状态随进程销毁）放行本次请求。
     if matches!(
         method,
-        "execute_login_attempt" | "execute_browser_task" | "test_redirect"
+        "execute_login_attempt" | "execute_browser_task" | "test_redirect" | "profile_auto_login"
     ) {
         let stale = {
             let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());

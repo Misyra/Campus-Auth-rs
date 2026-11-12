@@ -225,8 +225,13 @@ pub(super) fn is_lightweight_method(method: &str) -> bool {
 /// - OCR / 反馈捕获等轻量命令可与任意会话并发
 ///
 /// 不兼容（快速失败 [`BridgeError::WorkerBusy`]）：
-/// - InLogin + (debug_step/debug_stop)
-/// - InDebug + (execute_login_attempt/execute_browser_task)：登录请求快速失败
+/// - InLogin + (debug_step/debug_stop/test_redirect)
+/// - InLogin + profile_auto_login：持久自动登录**不与另一登录并发**——双方
+///   都会做「登录后网络验证」兜底（探测与门户流量互相污染判定），排队
+///   进 Worker 也会与前序登录的验证阶段真正并发；快速失败后由登录会话
+///   转 NetworkError 退避重试，等对方完全收尾再进
+/// - InDebug + (execute_login_attempt/execute_browser_task/profile_auto_login)：
+///   登录类请求快速失败
 /// - InDebug + debug_start：已有调试会话
 /// - RedirectTest 与所有非轻量会话互斥：可见临时窗口不得被登录/调试关闭
 ///
@@ -242,6 +247,10 @@ pub(super) fn check_session_compat(
         None => Ok(()),
         Some(SessionType::Login) => match method {
             "debug_step" | "debug_stop" | "test_redirect" => Err(BridgeError::WorkerBusy),
+            // 持久自动登录拥有独立持久上下文，但不与另一登录并发（见函数头）；
+            // 归类先例同 debug_start：自有运行时，不走 OCR 式轻量旁路
+            "profile_auto_login" => Err(BridgeError::WorkerBusy),
+            // execute_login_attempt / execute_browser_task / debug_start：FIFO 排队
             _ => Ok(()),
         },
         Some(SessionType::RedirectTest) => Err(BridgeError::WorkerBusy),
@@ -254,6 +263,8 @@ pub(super) fn check_session_compat(
                     _ => Err(BridgeError::WorkerBusy),
                 }
             } else {
+                // 登录类命令（execute_login_attempt / execute_browser_task /
+                // profile_auto_login）在调试会话存续期一律拒绝：与登录口径一致
                 Err(BridgeError::WorkerBusy)
             }
         }
@@ -361,6 +372,7 @@ mod tests {
             "debug_start",
             "debug_step",
             "debug_stop",
+            "profile_auto_login",
             "ocr_recognize",
             "feedback_capture",
         ] {
@@ -385,6 +397,21 @@ mod tests {
     fn 登录会话_调试步进与停止应忙碌() {
         assert_busy(Some(SessionType::Login), "debug_step");
         assert_busy(Some(SessionType::Login), "debug_stop");
+    }
+
+    /// 持久自动登录的互斥归类：在途登录期间快速失败（不与另一登录并发，
+    /// 双方的网络验证兜底会互相干扰），无会话时可进入
+    #[test]
+    fn 持久自动登录_在途登录期间应忙碌() {
+        assert_busy(Some(SessionType::Login), "profile_auto_login");
+        assert_ok(None, "profile_auto_login");
+    }
+
+    /// 持久自动登录与调试会话 / 可见重定向窗口互斥（登录类命令口径）
+    #[test]
+    fn 持久自动登录_调试与重定向会话期间应忙碌() {
+        assert_busy(Some(SessionType::Debug), "profile_auto_login");
+        assert_busy(Some(SessionType::RedirectTest), "profile_auto_login");
     }
 
     #[test]

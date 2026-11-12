@@ -23,7 +23,7 @@ use arc_swap::ArcSwapOption;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio::time::timeout as tokio_timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::bridge::BridgeSupervisor;
 use crate::browser::{self, NO_BROWSER_MESSAGE};
@@ -98,6 +98,15 @@ fn decide_browser_override(
         return None;
     }
     first_available.map(str::to_string)
+}
+
+/// 持久会话登录分支判定（纯函数）：浏览器渠道 + 方案开关开启 + 真实登录来源。
+///
+/// `LoginSource::Browser`（定时浏览器任务 / 任务页立即执行）是任务执行而非
+/// 登录，不适用持久自动登录（显式 task_id 只随该来源传入）；开关关闭或缺省
+/// 字段的旧方案恒为 false，走原浏览器任务路径（非持久零变化）。
+fn decide_persistent_login(source: LoginSource, channel: LoginChannel, enabled: bool) -> bool {
+    channel == LoginChannel::Browser && enabled && !matches!(source, LoginSource::Browser)
 }
 
 /// 浏览器任务的取值决策结果
@@ -315,6 +324,9 @@ struct PreparedSubmission {
     script_plan: Option<script_login::ScriptLoginPlan>,
     /// 浏览器渠道预检产生的渠道覆盖（`None` 表示沿用配置渠道）
     browser_override: Option<String>,
+    /// 持久会话自动登录载荷（`profile_auto_login` params，仅浏览器渠道 +
+    /// `persistent_session_enabled` 且非任务来源时有值）
+    persistent_login: Option<serde_json::Value>,
 }
 
 /// 提交准入仲裁结果（决策段出口）
@@ -697,9 +709,48 @@ impl LoginOrchestrator {
                 .await);
         }
 
+        // 1-2. 持久会话登录规格（T3-3b）：ProfileSnapshot 不携带持久会话字段，
+        // 按方案 ID 读 ProfileData 权威源；开关关闭或字段缺省恒走原浏览器任务
+        // 路径（非持久零变化）。读取失败降级为非持久路径并告警——快照刚解析
+        // 成功，此处失败仅为罕见竞态，不应拦死登录。
+        // 分支判定收敛在 decide_persistent_login（纯函数，单测钉住）。
+        let persistent_login = if effective_channel == LoginChannel::Browser
+            && !matches!(source, LoginSource::Browser)
+        {
+            match self.config.load_profile(&profile.id) {
+                Ok(pd)
+                    if decide_persistent_login(
+                        source,
+                        effective_channel,
+                        pd.persistent_session_enabled,
+                    ) =>
+                {
+                    Some(self.build_persistent_login_params(&rt, profile, &pd))
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    warn!(
+                        profile = %profile.id,
+                        error = %e,
+                        "读取方案持久会话配置失败，本次按非持久模式登录"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
         if let Some(handle) = self
-            .validate_profile(source, profile, &effective_task_id, use_http, use_script)
+            .validate_profile(
+                source,
+                profile,
+                &effective_task_id,
+                use_http,
+                use_script,
+                persistent_login.is_some(),
+            )
             .await
         {
             return Err(handle);
@@ -753,7 +804,55 @@ impl LoginOrchestrator {
             http_plan,
             script_plan,
             browser_override,
+            persistent_login,
         })
+    }
+
+    /// 装配持久会话自动登录的 Worker 载荷（`profile_auto_login` params）。
+    ///
+    /// - `user_data_dir`：[`crate::utils::paths::browser_profile_dir`] 拼接，
+    ///   派发前 ensure `create_dir_all`（持久目录按需创建口径，A22 接缝 1；
+    ///   失败仅告警——Worker 启动持久上下文时还有兜底，失败归为 unknown_error
+    ///   终态，编排层不额外终态）。
+    /// - `portal_url`：方案浏览器导航有效地址（[`ProfileSnapshot::effective_browser_login_url`]，
+    ///   与配置会话/诊断的门户地址口径一致；auth_url 留空时落触发地址，恒非空）。
+    /// - `recorded_actions`：方案录制动作原样透传（空数组 = 只打开门户页等
+    ///   门户 JS 回填，门户可能记忆了会话直接放行）。
+    /// - `browser_settings`：整体下发 [`RuntimeConfig::browser`]，步骤预算
+    ///   `timeout` 抬到 ≥45s（回填沉降 ~6.5s + 逐动作回放对默认 30s 偏紧）。
+    ///
+    /// 凭据不下发：门户「记住密码」的账号回填由持久目录中的
+    /// cookie/localStorage 承载，回放动作只补点击/选择。
+    fn build_persistent_login_params(
+        &self,
+        rt: &RuntimeConfig,
+        profile: &ProfileSnapshot,
+        data: &crate::config::ProfileData,
+    ) -> serde_json::Value {
+        let user_data_dir =
+            crate::utils::paths::browser_profile_dir(&self.config.base_path(), &profile.id);
+        if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
+            warn!(
+                dir = %user_data_dir.display(),
+                error = %e,
+                "持久会话目录创建失败，交由 Worker 启动持久上下文时兜底"
+            );
+        }
+        // 步骤预算 ≥45s：门户 JS 回填沉降与逐动作回放共用该预算
+        let mut browser = rt.browser.clone();
+        browser.timeout = browser.timeout.max(45);
+        let params = serde_json::json!({
+            "user_data_dir": user_data_dir,
+            "portal_url": profile.effective_browser_login_url(),
+            "recorded_actions": data.recorded_actions,
+            "browser_settings": browser,
+        });
+        info!(
+            profile = %profile.id,
+            actions = data.recorded_actions.len(),
+            "持久会话自动登录已装配（profile_auto_login）"
+        );
+        params
     }
 
     /// 构造直连请求计划（1a-2）：任务缺失/类型不对/地址非法立即终态
@@ -970,15 +1069,24 @@ impl LoginOrchestrator {
             (LoginChannel::Script, _, Some(plan)) => {
                 Ok(session::LoginAttemptPlan::Script(Box::new(plan.clone())))
             }
-            (LoginChannel::Browser, _, _) => Ok(session::LoginAttemptPlan::Browser(
-                self.build_worker_config(
-                    &prepared.rt,
-                    profile,
-                    prepared.effective_task_id.as_deref().unwrap_or(""),
-                    prepared.browser_override.as_deref(),
-                )
-                .await,
-            )),
+            (LoginChannel::Browser, _, _) => {
+                // 持久会话模式（T3-3b）：真实登录来源 + 方案开关开启 → 派发
+                // profile_auto_login（载荷已在 prepare 段装配）；`LoginSource::Browser`
+                // （定时浏览器任务）与开关关闭的方案走原浏览器任务路径（非持久零变化）
+                if let Some(params) = &prepared.persistent_login {
+                    Ok(session::LoginAttemptPlan::BrowserPersistent(params.clone()))
+                } else {
+                    Ok(session::LoginAttemptPlan::Browser(
+                        self.build_worker_config(
+                            &prepared.rt,
+                            profile,
+                            prepared.effective_task_id.as_deref().unwrap_or(""),
+                            prepared.browser_override.as_deref(),
+                        )
+                        .await,
+                    ))
+                }
+            }
             _ => Err(self
                 .immediate_handle(
                     source,
@@ -1145,6 +1253,7 @@ impl LoginOrchestrator {
         effective_task_id: &Option<String>,
         use_http: bool,
         use_script: bool,
+        persistent_login: bool,
     ) -> Option<LoginHandle> {
         let mut missing = Vec::new();
         if profile.username.is_empty() {
@@ -1164,8 +1273,10 @@ impl LoginOrchestrator {
         if use_script && profile.active_script_task.trim().is_empty() {
             missing.push(MSG_UNBOUND_SCRIPT_TASK);
         }
-        // 浏览器路径必须有可执行的浏览器任务；进程内渠道无 Worker 参与，不要求
-        if !use_http && !use_script && effective_task_id.is_none() {
+        // 浏览器路径必须有可执行的浏览器任务；进程内渠道无 Worker 参与，不要求。
+        // 持久会话模式同样不要求：登录步骤由录制动作（recorded_actions）承载，
+        // 不消费任务步骤
+        if !use_http && !use_script && effective_task_id.is_none() && !persistent_login {
             missing.push("当前无可用浏览器任务，请在账号页为当前方案选择一个任务");
         }
         if missing.is_empty() {
@@ -1905,6 +2016,161 @@ mod tests {
         );
         // 不可用 + 全无 → 缺浏览器（调用方报 NO_BROWSER_MESSAGE）
         assert_eq!(decide_browser_override(false, None), None);
+    }
+
+    // ============ 持久会话登录分支（T3-3b） ============
+
+    /// 分支判定真值表：浏览器渠道 + 开关开启 + 真实登录来源才启用；
+    /// 任务来源（Browser）/开关关闭/其他渠道一律走原路径
+    #[test]
+    fn test_decide_persistent_login_truth_table() {
+        use crate::config::LoginChannel;
+        // 开关开启 × 真实登录来源 → 持久模式
+        assert!(decide_persistent_login(
+            LoginSource::Auto,
+            LoginChannel::Browser,
+            true
+        ));
+        assert!(decide_persistent_login(
+            LoginSource::Manual,
+            LoginChannel::Browser,
+            true
+        ));
+        assert!(decide_persistent_login(
+            LoginSource::LoginOnce,
+            LoginChannel::Browser,
+            true
+        ));
+        // 任务来源（定时浏览器任务 / 任务页立即执行）不适用
+        assert!(!decide_persistent_login(
+            LoginSource::Browser,
+            LoginChannel::Browser,
+            true
+        ));
+        // 开关关闭（或旧方案缺省字段）→ 恒走原路径
+        assert!(!decide_persistent_login(
+            LoginSource::Auto,
+            LoginChannel::Browser,
+            false
+        ));
+        // 非浏览器渠道不适用
+        assert!(!decide_persistent_login(
+            LoginSource::Auto,
+            LoginChannel::Http,
+            true
+        ));
+        assert!(!decide_persistent_login(
+            LoginSource::Auto,
+            LoginChannel::Script,
+            true
+        ));
+    }
+
+    /// 装配段分支：持久载荷存在 → BrowserPersistent 计划；不存在（开关关闭 /
+    /// 任务来源）→ 原 Browser 计划（非持久零变化）
+    #[tokio::test]
+    async fn test_build_attempt_plan_branches_on_persistent_payload() {
+        use session::LoginAttemptPlan;
+        let dir = tempfile::TempDir::new().unwrap();
+        let orch = make_orchestrator_at(dir.path()).await;
+        let rt = orch.config.runtime().load_full();
+
+        let make_prepared = |persistent: Option<serde_json::Value>| PreparedSubmission {
+            rt: (*rt).clone(),
+            effective_task_id: Some("default".to_string()),
+            effective_channel: LoginChannel::Browser,
+            http_plan: None,
+            script_plan: None,
+            browser_override: None,
+            persistent_login: persistent,
+        };
+
+        let plan = orch
+            .build_attempt_plan(
+                LoginSource::Auto,
+                &make_prepared(Some(persistent_payload())),
+            )
+            .await
+            .expect("持久分支应装配成功");
+        assert!(
+            matches!(plan, LoginAttemptPlan::BrowserPersistent(_)),
+            "持久载荷必须装配为 BrowserPersistent 计划"
+        );
+
+        let plan = orch
+            .build_attempt_plan(LoginSource::Auto, &make_prepared(None))
+            .await
+            .expect("非持久分支应装配成功");
+        assert!(
+            matches!(plan, LoginAttemptPlan::Browser(_)),
+            "开关关闭必须装配为原 Browser 计划（非持久零变化）"
+        );
+    }
+
+    /// 载荷装配：user_data_dir 按方案 id 拼接且派发前 create_dir_all、
+    /// portal_url 取认证地址口径、recorded_actions 原样透传、
+    /// browser_settings.timeout 抬到 ≥45s
+    #[tokio::test]
+    async fn test_build_persistent_login_params_payload() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let orch = make_orchestrator_at(dir.path()).await;
+        let rt = orch.config.runtime().load_full();
+        let mut profile = rt.profile.clone();
+        profile.id = "pdrop".to_string();
+        profile.auth_url = "http://portal.example/auth".to_string();
+        profile.trigger_url = String::new();
+
+        let data = crate::config::ProfileData {
+            persistent_session_enabled: true,
+            recorded_actions: vec![crate::config::schema::RecordedAction {
+                action_type: "click".to_string(),
+                selector: "text=登录".to_string(),
+                strategy: "text".to_string(),
+                ts: 42,
+                value: None,
+            }],
+            ..crate::config::ProfileData::default()
+        };
+
+        let params = orch.build_persistent_login_params(&rt, &profile, &data);
+
+        let expect_dir = crate::utils::paths::browser_profile_dir(dir.path(), "pdrop");
+        assert_eq!(
+            params["user_data_dir"].as_str().unwrap(),
+            expect_dir.to_string_lossy(),
+            "user_data_dir 必须经 browser_profile_dir 按方案 id 拼接"
+        );
+        assert!(
+            expect_dir.is_dir(),
+            "派发前必须 ensure create_dir_all（A22 接缝 1）"
+        );
+        assert_eq!(
+            params["portal_url"].as_str().unwrap(),
+            "http://portal.example/auth",
+            "portal_url 取方案认证地址口径"
+        );
+        assert_eq!(
+            params["recorded_actions"],
+            serde_json::json!([
+                { "type": "click", "selector": "text=登录", "strategy": "text", "ts": 42 }
+            ]),
+            "录制动作必须原样透传（value 缺省跳过序列化）"
+        );
+        let timeout = params["browser_settings"]["timeout"].as_u64().unwrap();
+        assert!(
+            timeout >= 45,
+            "步骤预算必须抬到 ≥45s（默认 30s 对回填+回放偏紧），实际 {timeout}"
+        );
+    }
+
+    /// 持久自动登录载荷样例（装配形状与 Worker 契约对齐）
+    fn persistent_payload() -> serde_json::Value {
+        serde_json::json!({
+            "user_data_dir": "/tmp/browser_profiles/default",
+            "portal_url": "http://portal.example/auth",
+            "recorded_actions": [],
+            "browser_settings": { "timeout": 45 }
+        })
     }
 
     #[test]

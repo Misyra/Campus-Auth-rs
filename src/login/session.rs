@@ -201,6 +201,15 @@ pub(crate) struct SessionDeps {
 pub(crate) enum LoginAttemptPlan {
     /// 浏览器 Worker 配置。
     Browser(Value),
+    /// 浏览器渠道持久会话自动登录：派发 Worker `profile_auto_login`。
+    ///
+    /// 载荷由编排层预装配完整（`user_data_dir` / `portal_url` /
+    /// `recorded_actions` / `browser_settings`（步骤预算 ≥45s 口径）），会话层
+    /// 仅注入 cancel_id 后经 [`crate::bridge::BridgeApi::execute_persistent_auto_login`]
+    /// 下发。Worker 的 Success 只代表回放完成，登录成败仍走既有网络验证兜底
+    /// （本计划无可声明的 `success_condition`）；持久上下文由 Worker 在命令结束
+    /// 即关闭，终态不再发 `close_browser`。
+    BrowserPersistent(Value),
     /// Rust 进程内直连请求。
     Http(Box<crate::login::http_login::HttpLoginRequest>),
     /// Rust 进程内脚本任务。
@@ -211,7 +220,7 @@ impl LoginAttemptPlan {
     /// 由唯一执行计划得到本次实际登录渠道。
     fn channel(&self) -> LoginChannel {
         match self {
-            Self::Browser(_) => LoginChannel::Browser,
+            Self::Browser(_) | Self::BrowserPersistent(_) => LoginChannel::Browser,
             Self::Http(_) => LoginChannel::Http,
             Self::Script(_) => LoginChannel::Script,
         }
@@ -219,7 +228,12 @@ impl LoginAttemptPlan {
 
     /// 仅浏览器渠道会占用 Bridge 会话并需要取消 Worker attempt。
     fn uses_bridge(&self) -> bool {
-        matches!(self, Self::Browser(_))
+        matches!(self, Self::Browser(_) | Self::BrowserPersistent(_))
+    }
+
+    /// 是否为持久会话自动登录计划（失效提示与终态收尾的门控依据）。
+    fn is_persistent_auto_login(&self) -> bool {
+        matches!(self, Self::BrowserPersistent(_))
     }
 
     /// 仅浏览器任务可声明跳过登录后网络验证的成功条件。
@@ -230,7 +244,8 @@ impl LoginAttemptPlan {
                 .and_then(|t| t.get("success_condition"))
                 .and_then(Value::as_str)
                 .is_some_and(|s| !s.trim().is_empty()),
-            Self::Http(_) | Self::Script(_) => false,
+            // 持久自动登录无任务步骤，成功判定恒走网络验证兜底
+            Self::BrowserPersistent(_) | Self::Http(_) | Self::Script(_) => false,
         }
     }
 }
@@ -417,7 +432,8 @@ impl LoginSession {
     /// 构造本轮尝试的执行 future
     ///
     /// 直连渠道：Rust 进程内构造/发送请求；脚本渠道：Rust 进程内起子进程跑脚本；
-    /// 浏览器渠道：Bridge 驱动 Worker。三者统一为
+    /// 浏览器渠道：Bridge 驱动 Worker（普通任务按来源选择命令，持久会话模式
+    /// 派发 `profile_auto_login`）。三者统一为
     /// `Result<StructuredResult, String>` 的可取消 future，取消/shutdown/超时边界对
     /// 三种渠道一致（进程内路径无 Bridge 可取消，靠丢弃 future 回收子进程）。
     fn build_attempt_work(&self, cancel_id: &str) -> AttemptWork {
@@ -435,30 +451,44 @@ impl LoginSession {
                 Box::pin(async move { Ok(script_login::run_once(&runner, &plan).await) })
             }
             LoginAttemptPlan::Browser(worker_config) => {
-                self.build_browser_work(worker_config, cancel_id)
+                // 普通浏览器任务路径（非持久模式零变化）：按来源选择 Bridge 命令
+                let method = match self.params.source {
+                    LoginSource::Browser => "execute_browser_task",
+                    _ => "execute_login_attempt",
+                };
+                let mut cfg = worker_config.clone();
+                if let Some(tid) = &self.params.task_id {
+                    cfg["task_id"] = json!(tid.clone());
+                }
+                self.build_browser_work(method, &cfg, cancel_id)
+            }
+            LoginAttemptPlan::BrowserPersistent(params) => {
+                self.build_browser_work("profile_auto_login", params, cancel_id)
             }
         }
     }
 
-    /// 浏览器渠道的执行 future：按来源选择 Bridge 命令并驱动 Worker
+    /// 浏览器渠道的执行 future：按给定 Bridge 命令驱动 Worker
     ///
     /// Worker 崩溃 / 启动超时 / 忙归一为 `NetworkError` 结构化结果走既有
     /// classify/try_retry 路径（见各分支注释）；其余 `Err` 保持终态失败。
-    fn build_browser_work(&self, worker_config: &Value, cancel_id: &str) -> AttemptWork {
-        // 根据来源选择 Bridge 命令
-        let method = match self.params.source {
-            LoginSource::Browser => "execute_browser_task",
-            _ => "execute_login_attempt",
-        };
-
+    fn build_browser_work(
+        &self,
+        method: &str,
+        worker_config: &Value,
+        cancel_id: &str,
+    ) -> AttemptWork {
         let mut params = worker_config.clone();
         params["cancel_id"] = json!(cancel_id.to_string());
-        if let Some(tid) = &self.params.task_id {
-            params["task_id"] = json!(tid.clone());
-        }
         let bridge = self.deps.bridge.clone();
+        let method = method.to_string();
         Box::pin(async move {
-            match bridge.execute(method, params).await {
+            let result = if method == "profile_auto_login" {
+                bridge.execute_persistent_auto_login(params).await
+            } else {
+                bridge.execute(&method, params).await
+            };
+            match result {
                 Ok(resp) => Ok(Self::parse_ipc_response(resp)),
                 // Worker 崩溃 / 启动超时到达调用方是 Err 而非 Outcome：
                 // Worker 可能已被 Supervisor 重建或仅是瞬时故障，与
@@ -636,10 +666,11 @@ impl LoginSession {
                     // 口径统一为总尝试次数（含首试），与 try_retry 耗尽分支
                     // 及「尝试 N/M」进度文案一致（历史实现两处各说各话）
                     format!(
-                        "重试耗尽（共 {} 次尝试）: {}{}",
+                        "重试耗尽（共 {} 次尝试）: {}{}{}",
                         total_attempts,
                         structured.message,
-                        dialog_note(&structured.data)
+                        dialog_note(&structured.data),
+                        self.persistent_session_hint(structured.outcome)
                     ),
                 )
                 .await;
@@ -767,10 +798,11 @@ impl LoginSession {
                 session_start,
                 *attempts_used,
                 format!(
-                    "重试耗尽（共 {} 次尝试）: {}{}",
+                    "重试耗尽（共 {} 次尝试）: {}{}{}",
                     self.params.max_retries.saturating_add(1),
                     structured.message,
-                    dialog_note(&structured.data)
+                    dialog_note(&structured.data),
+                    self.persistent_session_hint(structured.outcome)
                 ),
             )
             .await;
@@ -839,6 +871,23 @@ impl LoginSession {
     /// （对齐原项目 v4.2.3 `login_attempt` 的 `has_explicit_condition` 分支）。
     fn has_explicit_success_condition(&self) -> bool {
         self.params.plan.has_explicit_success_condition()
+    }
+
+    /// 持久会话失效提示（T3-4 最小面）：持久模式回放失败（`assertion_failed`）
+    /// 走到终态失败时，在失败短语后追加引导用户重录的提示。
+    ///
+    /// 取舍：不新增 schema 字段——失效态可由「持久模式计划 + assertion_failed
+    /// 终态」推断，前端与历史按失败消息文本呈现即可；`assertion_failed` 在
+    /// classify 中可重试，只有重试耗尽的终态才落到本提示，回放过程中的
+    /// 中间失败不打扰。
+    fn persistent_session_hint(&self, outcome: Outcome) -> &'static str {
+        if matches!(self.params.plan, LoginAttemptPlan::BrowserPersistent(_))
+            && outcome == Outcome::AssertionFailed
+        {
+            "；持久会话疑似失效，请重新打开浏览器配置"
+        } else {
+            ""
+        }
     }
 
     /// 登录后真实网络验证：等待 post_login_delay 让认证生效，再调用 MonitorService 做一次完整探测。
@@ -1045,17 +1094,22 @@ impl LoginSession {
             warn!("登录历史写入失败: {e}");
         }
 
-        // 会话终态后回收浏览器资源（Worker 进程保留）。**仅浏览器渠道执行**：
+        // 会话终态后回收浏览器资源（Worker 进程保留）。**仅普通浏览器计划执行**：
         // 直连/脚本会话不经 Bridge 驱动 Worker，没有自己的浏览器可关——若不按
         // 渠道门控，脚本会话终态会把共享 Worker 上其他在途浏览器任务（如定时
-        // 任务）的页面关掉。判定口径与 run() 的 uses_bridge 一致。默认全量
-        // 关闭浏览器（会话内重试复用同一浏览器，终态即关闭）；worker.keep_alive
-        // 启用时改会话级释放，登录成功更是整页保留登录状态（门户页 JS 心跳不
-        // 中断）。进程已被回收（force_recycle / 空闲超时）时跳过，避免仅为关
-        // 浏览器而重新 spawn 一个 Worker。
+        // 任务）的页面关掉；持久自动登录的持久上下文由 Worker 在
+        // profile_auto_login 命令结束即关闭（README 生命周期），终态再发
+        // close_browser 只是无谓的 Worker 往返，且 keep_alive 语义不应挂到
+        // 持久上下文上，故一并跳过。默认全量关闭浏览器（会话内重试复用同一
+        // 浏览器，终态即关闭）；worker.keep_alive 启用时改会话级释放，登录成功
+        // 更是整页保留登录状态（门户页 JS 心跳不中断）。进程已被回收
+        // （force_recycle / 空闲超时）时跳过，避免仅为关浏览器而重新 spawn 一个 Worker。
         {
             let b = &self.deps.bridge;
-            if self.params.plan.uses_bridge() && b.has_live_worker() {
+            if self.params.plan.uses_bridge()
+                && !self.params.plan.is_persistent_auto_login()
+                && b.has_live_worker()
+            {
                 // preserve_state 仅在 keep_alive 且登录成功时为真，非成功终态
                 // 走会话级释放、默认配置走全量关闭，三档语义由 Worker 侧实现
                 let preserve = result.is_success()
@@ -2780,5 +2834,351 @@ mod tests {
             });
             check?;
         }
+    }
+
+    // ============ 持久会话自动登录（T3-3b）：派发与 outcome 三形态 ============
+
+    /// 参数捕获 mock：固定回包 + 记录每次 execute 的 method 与 params。
+    /// 与 [`ScriptedBridge`] 分开维护：后者被十余个既有用例按字段全量构造，
+    /// 加 params 字段会牵连全部装配；本 mock 仅服务派发载荷断言。
+    struct RecordingBridge {
+        /// 固定回包 (success, outcome, message)，每次调用返回同一值
+        response: (bool, &'static str, &'static str),
+        methods: std::sync::Mutex<Vec<String>>,
+        params_log: std::sync::Mutex<Vec<Value>>,
+        calls: std::sync::atomic::AtomicU32,
+        recycled: std::sync::atomic::AtomicU32,
+        live: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::bridge::BridgeApi for RecordingBridge {
+        async fn execute(
+            &self,
+            method: &str,
+            params: Value,
+        ) -> Result<crate::bridge::IpcResponse, BridgeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.methods.lock().unwrap().push(method.to_string());
+            self.params_log.lock().unwrap().push(params.clone());
+            let (success, outcome, message) = self.response;
+            Ok(crate::bridge::IpcResponse {
+                id: 1,
+                result: crate::bridge::IpcResult {
+                    success,
+                    data: serde_json::json!({
+                        "outcome": outcome,
+                        "message": message,
+                        "duration_ms": 1,
+                    }),
+                    error: None,
+                },
+            })
+        }
+
+        fn cancel(&self, _cancel_id: &str) {}
+
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: Value,
+            _timeout: Duration,
+        ) -> Result<crate::bridge::IpcResponse, BridgeError> {
+            self.execute(method, params).await
+        }
+
+        async fn force_recycle(&self) {
+            self.recycled.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn has_live_worker(&self) -> bool {
+            self.live.load(Ordering::SeqCst)
+        }
+
+        async fn recycle_if_running(&self) {}
+
+        async fn shutdown(&self) {}
+    }
+
+    /// 持久自动登录载荷样例（编排侧装配形状：user_data_dir / portal_url /
+    /// recorded_actions / browser_settings）
+    fn persistent_params() -> Value {
+        serde_json::json!({
+            "user_data_dir": "/tmp/browser_profiles/default",
+            "portal_url": "http://portal.example/auth",
+            "recorded_actions": [
+                { "type": "click", "selector": "text=登录", "strategy": "text", "ts": 1 },
+                { "type": "change", "selector": "#isp", "strategy": "id", "ts": 2, "value": "cmcc" }
+            ],
+            "browser_settings": { "timeout": 45 }
+        })
+    }
+
+    /// 同 [`make_deps`]，但禁用全部网络探测（成功 outcome 的网络验证兜底
+    /// 确定性返回 Unknown → RetryableFailure，不随测试机环境波动）
+    async fn make_deps_verification_disabled(
+        bridge: Arc<dyn crate::bridge::BridgeApi>,
+    ) -> SessionDeps {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(4);
+        let config = ConfigService::new(dir.path().to_path_buf(), reload_tx)
+            .await
+            .expect("ConfigService 构造失败");
+        let mut settings = config.load_settings();
+        settings.global.monitor.tcp_enabled = false;
+        settings.global.monitor.http_enabled = false;
+        settings.global.monitor.url_enabled = false;
+        settings.global.monitor.post_login_delay = 0;
+        config.save_settings(&settings).await.unwrap();
+        config.reload().await.expect("配置重载失败");
+        SessionDeps {
+            bridge,
+            monitor: Arc::new(
+                crate::monitor::MonitorService::new(
+                    config.clone(),
+                    crate::network::detect::create_detector(),
+                    Some(crate::utils::metrics::Metrics::new()),
+                )
+                .expect("MonitorService 构造失败"),
+            ),
+            config_service: config,
+            status_manager: Arc::new(StatusManager::new()),
+            history_service: Arc::new(LoginHistoryService::new(dir.path())),
+            script_runner: Arc::new(StubScriptRunner),
+            events: Arc::new(crate::events::EventBus::new()),
+            metrics: None,
+        }
+    }
+
+    /// 派发载荷：BrowserPersistent 计划走 profile_auto_login 通道，
+    /// cancel_id 由会话层注入，其余字段原样透传
+    #[tokio::test(start_paused = true)]
+    async fn test_persistent_dispatch_payload_and_channel() {
+        let bridge = Arc::new(RecordingBridge {
+            response: (true, "assertion_failed", "断言不匹配"),
+            methods: std::sync::Mutex::new(Vec::new()),
+            params_log: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = 1;
+        params.plan = LoginAttemptPlan::BrowserPersistent(persistent_params());
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        let methods = bridge.methods.lock().unwrap();
+        assert_eq!(
+            methods.first().map(String::as_str),
+            Some("profile_auto_login"),
+            "持久计划必须经 profile_auto_login 通道派发: {methods:?}"
+        );
+        let sent = bridge.params_log.lock().unwrap().remove(0);
+        assert_eq!(sent["user_data_dir"], "/tmp/browser_profiles/default");
+        assert_eq!(sent["portal_url"], "http://portal.example/auth");
+        assert_eq!(
+            sent["recorded_actions"],
+            persistent_params()["recorded_actions"],
+            "录制动作必须原样透传"
+        );
+        let timeout = sent["browser_settings"]["timeout"].as_u64().unwrap();
+        assert!(timeout >= 45, "步骤预算必须满足 ≥45s 口径，实际 {timeout}");
+        assert!(
+            sent["cancel_id"].as_str().is_some_and(|s| !s.is_empty()),
+            "会话层必须注入 cancel_id 供取消传播命中"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+    }
+
+    /// outcome 形态①：Worker Success ≠ 登录成功——必须走既有网络验证兜底，
+    /// 验证未通过（探测全禁用 → Unknown）转可重试路径发起第二次尝试
+    #[tokio::test(start_paused = true)]
+    async fn test_persistent_success_goes_through_network_verification() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (true, "success", "回放完成"),
+                (false, "manual_required", "门户要求人工完成验证"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps_verification_disabled(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = 1;
+        params.plan = LoginAttemptPlan::BrowserPersistent(persistent_params());
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            2,
+            "Worker Success 不得直接终态成功，应经网络验证兜底后重试"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert_eq!(result.attempts, 2);
+        assert!(
+            result.message.contains("门户要求人工完成验证"),
+            "第二次尝试的终态消息: {}",
+            result.message
+        );
+    }
+
+    /// outcome 形态②：assertion_failed 可重试、不回收 Worker；重试耗尽的
+    /// 终态失败追加持久会话失效提示（T3-4 最小面）
+    #[tokio::test(start_paused = true)]
+    async fn test_persistent_assertion_failed_exhaustion_appends_hint() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (true, "assertion_failed", "断言不匹配"),
+                (true, "assertion_failed", "断言不匹配"),
+                (true, "assertion_failed", "断言不匹配"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = 2;
+        params.plan = LoginAttemptPlan::BrowserPersistent(persistent_params());
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            3,
+            "assertion_failed 应消耗完整重试预算"
+        );
+        assert_eq!(
+            bridge.recycled.load(Ordering::SeqCst),
+            0,
+            "assertion_failed 不得触发 Worker 回收"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert!(
+            result.message.contains("重试耗尽"),
+            "耗尽终态消息: {}",
+            result.message
+        );
+        assert!(
+            result
+                .message
+                .contains("持久会话疑似失效，请重新打开浏览器配置"),
+            "终态失败应追加失效提示: {}",
+            result.message
+        );
+    }
+
+    /// outcome 形态③：cancelled 终态停止（Worker 取消语义 = success 信封 +
+    /// cancelled outcome），不再消耗重试预算
+    #[tokio::test(start_paused = true)]
+    async fn test_persistent_cancelled_is_terminal() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![(true, "cancelled", "任务已取消")])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = 2;
+        params.plan = LoginAttemptPlan::BrowserPersistent(persistent_params());
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        assert_eq!(
+            bridge.calls.load(Ordering::SeqCst),
+            1,
+            "取消终态必须立即停止，不得重试"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有取消终态");
+        assert_eq!(result.terminal, LoginTerminal::Cancelled);
+        assert_eq!(result.attempts, 1);
+    }
+
+    /// 非持久对照①：开关关闭的 Browser 计划走原 execute_login_attempt 通道
+    /// （零变化），且终态失败不带持久会话失效提示
+    #[tokio::test(start_paused = true)]
+    async fn test_non_persistent_plan_uses_login_attempt_and_no_hint() {
+        let bridge = Arc::new(ScriptedBridge {
+            script: std::sync::Mutex::new(VecDeque::from(vec![
+                (true, "assertion_failed", "断言不匹配"),
+                (true, "assertion_failed", "断言不匹配"),
+                (true, "assertion_failed", "断言不匹配"),
+            ])),
+            methods: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+            recycled: std::sync::atomic::AtomicU32::new(0),
+            live: std::sync::atomic::AtomicBool::new(false),
+        });
+        let deps = make_deps(bridge.clone()).await;
+        let (result_tx, mut result_rx) = tokio::sync::watch::channel(None);
+        let mut params = make_params();
+        params.max_retries = 2;
+        // 维持 make_params 的 Browser 计划（开关关闭路径）
+        let session = LoginSession::new(
+            params,
+            CancellationToken::new(),
+            Arc::new(crate::login::LoginHandleInner { result_tx }),
+            Arc::new(arc_swap::ArcSwapOption::new(None)),
+            CancellationToken::new(),
+            Arc::new(std::sync::Mutex::new(None)),
+            deps,
+        );
+        session.run().await;
+        let methods = bridge.methods.lock().unwrap();
+        assert_eq!(
+            methods.first().map(String::as_str),
+            Some("execute_login_attempt"),
+            "非持久模式必须走原浏览器任务通道: {methods:?}"
+        );
+        let result = result_rx.borrow_and_update().clone().expect("应有终态结果");
+        assert_eq!(result.terminal, LoginTerminal::Failed);
+        assert!(
+            !result.message.contains("持久会话"),
+            "非持久模式不得出现失效提示: {}",
+            result.message
+        );
     }
 }

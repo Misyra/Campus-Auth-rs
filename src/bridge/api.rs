@@ -24,6 +24,24 @@ pub trait BridgeApi: Send + Sync {
         params: Value,
         timeout: std::time::Duration,
     ) -> Result<IpcResponse, BridgeError>;
+    /// 持久自动登录命令通道：派发 `profile_auto_login`（浏览器渠道 +
+    /// `persistent_session_enabled` 方案的登录执行器）。
+    ///
+    /// 命令级预算固定为 [`super::PERSISTENT_AUTO_LOGIN_TIMEOUT`]（满足 Worker
+    /// 契约 `rust_timeout_ms` ≥45s 口径）；cancel_id 由调用方置于 `params`
+    /// 传入（会话层取消传播依赖该值命中已注册令牌）。默认实现复用
+    /// [`Self::execute_with_timeout`]，内存 mock 等实现无需覆写。
+    async fn execute_persistent_auto_login(
+        &self,
+        params: Value,
+    ) -> Result<IpcResponse, BridgeError> {
+        self.execute_with_timeout(
+            "profile_auto_login",
+            params,
+            super::PERSISTENT_AUTO_LOGIN_TIMEOUT,
+        )
+        .await
+    }
     /// 强制回收当前 Worker（kill 子进程并标记 Error，下次请求重新 spawn）。
     async fn force_recycle(&self);
     /// 归属感知的强制回收：仅当会话槽位**未被其他请求占用**时才强杀 Worker。
