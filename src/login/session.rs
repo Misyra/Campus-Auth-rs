@@ -1015,24 +1015,25 @@ impl LoginSession {
             let recovered = serde_json::from_value::<StructuredResult>(resp.result.data.clone())
                 .ok()
                 .filter(|s| s.outcome != Outcome::Success);
+            // 回退消息源：error 须非空串才采信——空串错误（畸形/部分写入的信封）
+            // 会让空 message 直入历史与状态广播（属性测试 S1 钉住该不变量）
+            let fallback_message = || {
+                resp.result
+                    .error
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Worker 返回失败".into())
+            };
             match recovered {
                 Some(mut s) => {
                     if s.message.is_empty() {
-                        s.message = resp
-                            .result
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "Worker 返回失败".into());
+                        s.message = fallback_message();
                     }
                     s
                 }
                 None => StructuredResult {
                     outcome: Outcome::UnknownError,
-                    message: resp
-                        .result
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "Worker 返回失败".into()),
+                    message: fallback_message(),
                     data: Value::Null,
                     screenshot_url: None,
                     duration_ms: 0,
