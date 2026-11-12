@@ -8,12 +8,52 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::environment::EnvironmentApi;
 use crate::tasks::{TaskApi, TaskRunApi};
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1b scripts 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。脚本执行结果复用 tasks 域
+// 的 `TaskExecuteData`（同一 `TaskResult` 线格式，不重复声明）；脚本详情按
+// GET /api/scripts/{task_id} 的组装字段镜像声明。更新接口的请求体是完整
+// Script 任务 JSON（type 必须为 script，形状随 `src/tasks/models.rs` 演进），
+// 暂以 `body = Value` 标注，不编造具体形状。
+
+/// GET /api/scripts/binaries 列表项
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ScriptBinaryData {
+    /// 解释器名称（python / bash / sh / cmd）
+    pub name: String,
+    /// 可执行文件绝对路径
+    pub path: String,
+}
+
+/// GET /api/scripts/{task_id} 响应载荷（脚本编辑器所需全部字段）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ScriptDetailData {
+    /// 脚本任务 ID（= 路径参数 task_id）
+    pub id: String,
+    /// 显示名称
+    pub name: String,
+    /// 任务描述
+    pub description: String,
+    /// 脚本全文（内联 content 模式取字段；script_path 模式读磁盘文件）
+    pub content: String,
+    /// 执行二进制路径；未显式设置时为空串（自动检测）
+    pub binary_path: String,
+    /// 脚本文件路径（相对 tasks/scripts/ 或绝对路径）；未设置时为 null
+    pub script_path: Option<String>,
+    /// 命令行参数
+    pub args: Vec<String>,
+    /// 超时秒数
+    pub timeout: u64,
+}
 
 /// 校验脚本执行程序：仅允许 shell / bat / python / exe 四类，拒绝 PowerShell 等。
 fn check_supported_binary(
@@ -44,7 +84,7 @@ fn check_supported_binary(
 }
 
 /// POST /api/scripts/run 请求体：按 task_id 运行已保存脚本，或直接运行 script 内容（二选一）
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RunScriptBody {
     /// 脚本任务 ID
     pub task_id: Option<String>,
@@ -57,6 +97,21 @@ pub struct RunScriptBody {
 /// 支持两种调用方式：
 /// - `{"task_id": "<task_id>"}`：运行已保存的脚本任务
 /// - `{"script": "<content>"}`：直接运行临时脚本内容
+#[utoipa::path(
+    post,
+    path = "/api/scripts/run",
+    operation_id = "post_api_scripts_run",
+    tag = "scripts",
+    request_body(content = RunScriptBody, description = "task_id 与 script 二选一：task_id 运行已保存脚本任务，script 直跑临时内容"),
+    responses(
+        (status = 200, description = "执行完成（成败以 success 字段为准，非 HTTP 状态码）", body = DataEnvelope<crate::web::routes::tasks::TaskExecuteData>),
+        (status = 400, description = "task_id 与 script 双缺或任务 ID 非法", body = ErrorResponse),
+        (status = 404, description = "task_id 指向的脚本任务不存在", body = ErrorResponse),
+        (status = 409, description = "Worker 忙（调试会话进行中）", body = ErrorResponse),
+        (status = 500, description = "执行失败（Worker 通信异常等内部错误）", body = ErrorResponse),
+        (status = 503, description = "Python Worker 未安装", body = ErrorResponse),
+    )
+)]
 pub async fn run_script(
     State(tasks): State<Arc<dyn TaskApi>>,
     State(runner): State<Arc<dyn TaskRunApi>>,
@@ -84,6 +139,15 @@ pub async fn run_script(
 /// GET /api/scripts/binaries — 可用可执行文件列表
 ///
 /// 扫描系统 PATH 中的常用解释器/可执行文件。
+#[utoipa::path(
+    get,
+    path = "/api/scripts/binaries",
+    operation_id = "get_api_scripts_binaries",
+    tag = "scripts",
+    responses(
+        (status = 200, description = "受支持的脚本解释器列表（首项恒为 python）", body = DataEnvelope<Vec<ScriptBinaryData>>),
+    )
+)]
 pub async fn list_binaries(
     State(environment): State<Arc<dyn EnvironmentApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -130,6 +194,19 @@ fn find_in_path(exe_name: &str) -> Option<String> {
 ///
 /// 返回编辑器所需的全部字段（name/description/content/binary_path 等）。
 /// 内容来源两种存储模式：内联 `content` 字段或 `script_path` 指向的磁盘文件。
+#[utoipa::path(
+    get,
+    path = "/api/scripts/{task_id}",
+    operation_id = "get_api_scripts_task_id",
+    tag = "scripts",
+    params(("task_id" = String, Path, description = "脚本任务 ID")),
+    responses(
+        (status = 200, description = "脚本完整内容与执行配置", body = DataEnvelope<ScriptDetailData>),
+        (status = 400, description = "任务 ID 形态非法", body = ErrorResponse),
+        (status = 404, description = "任务不存在或不是脚本类型（防编辑器误读）", body = ErrorResponse),
+        (status = 500, description = "脚本文件读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_script(
     State(tasks): State<Arc<dyn TaskApi>>,
     Path(task_id): Path<String>,
@@ -161,6 +238,20 @@ pub async fn get_script(
 /// 显式要求 `type == "script"`：`TaskKind` 反序列化在 type 缺失时默认归为
 /// browser 任务，会把脚本负载静默转存为空的浏览器任务（脚本内容丢失），
 /// 故在此前置拦截，防止前端回归。
+#[utoipa::path(
+    put,
+    path = "/api/scripts/{task_id}",
+    operation_id = "put_api_scripts_task_id",
+    tag = "scripts",
+    params(("task_id" = String, Path, description = "脚本任务 ID（保存的权威 id）")),
+    request_body(content = Value, description = "完整 Script 任务 JSON（type 必须为 \"script\"；binary_path/script_path 仅允许 shell/bat/python/exe，PowerShell 类拒绝）。形状随 src/tasks/models.rs 的 ScriptTaskConfig 演进"),
+    responses(
+        (status = 200, description = "保存成功，data 为任务 ID", body = DataEnvelope<String>),
+        (status = 400, description = "type 非 script、二进制/脚本路径不支持（PowerShell/.ps1）、负载反序列化失败或任务 ID 非法", body = ErrorResponse),
+        (status = 422, description = "脚本任务校验失败（details 携带字段级错误列表）", body = ErrorResponse),
+        (status = 500, description = "脚本文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn update_script(
     State(tasks): State<Arc<dyn TaskApi>>,
     Path(task_id): Path<String>,
@@ -183,6 +274,19 @@ pub async fn update_script(
 }
 
 /// DELETE /api/scripts/{task_id} — 删除脚本
+#[utoipa::path(
+    delete,
+    path = "/api/scripts/{task_id}",
+    operation_id = "delete_api_scripts_task_id",
+    tag = "scripts",
+    params(("task_id" = String, Path, description = "脚本任务 ID")),
+    responses(
+        (status = 200, description = "删除成功", body = DataEnvelope<String>),
+        (status = 400, description = "任务 ID 形态非法", body = ErrorResponse),
+        (status = 404, description = "脚本任务不存在", body = ErrorResponse),
+        (status = 500, description = "脚本文件删除失败", body = ErrorResponse),
+    )
+)]
 pub async fn delete_script(
     State(tasks): State<Arc<dyn TaskApi>>,
     Path(task_id): Path<String>,

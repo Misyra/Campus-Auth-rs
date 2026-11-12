@@ -10,29 +10,101 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 use zeroize::Zeroizing;
 
 use crate::config::{ConfigApi, RuntimeConfig};
 use crate::login::http_login::{HttpLoginRequest, run_once as run_http_login_once};
 use crate::tasks::{HttpTaskConfig, TaskApi, TaskKind};
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::operations::{RegisterError, WebOperations};
 
+// ---- 契约 DTO（T5-1b http_tasks 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。响应载荷是 handler 内
+// `json!` 组装的字段集（与旧端点逐字一致的脱敏报告），按线格式镜像声明；
+// 请求体里的 `task` 草稿是完整 `HttpTaskConfig`（形状随 `src/tasks/models.rs`
+// 演进），暂以 `value_type = Object` 标注，不编造具体形状。
+
+/// POST /api/http-tasks/test 步骤报告条目（镜像 `HttpStepReport` 的线格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HttpStepReportData {
+    /// 步骤 ID
+    pub id: String,
+    /// 用户设置的步骤名称
+    pub name: String,
+    /// 步骤类型（request / transform 等流程步骤种类）
+    pub kind: String,
+    /// 本步骤结论：`success` / `ignored` / `failed`
+    pub outcome: String,
+    /// 该步骤的简短说明（已脱敏）
+    pub message: String,
+    /// 本步骤生成的变量名（仅名称，不回传敏感值，已脱敏）
+    pub produced_vars: Vec<String>,
+    /// 脱敏后的请求地址
+    pub rendered_url: String,
+    /// 脱敏后的请求头（`Key: Value` 逐行）
+    pub rendered_headers: String,
+    /// 脱敏后的请求体
+    pub rendered_body: String,
+    /// HTTP 状态码；请求未发出时为 null
+    pub status: Option<u16>,
+    /// 脱敏后的响应头（逐行文本）
+    pub response_headers: String,
+    /// 脱敏后的响应片段
+    pub response_snippet: String,
+    /// 本步骤耗时（毫秒）
+    pub duration_ms: u64,
+}
+
+/// POST /api/http-tasks/test 响应载荷（无状态直连测试报告，全部字段已脱敏）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HttpTaskTestData {
+    /// 模板渲染后的请求地址（凭据等敏感值已脱敏）
+    pub rendered_url: String,
+    /// 模板渲染后的请求头（`Key: Value` 逐行，已脱敏）
+    pub rendered_headers: String,
+    /// 模板渲染后的请求体（已脱敏）
+    pub rendered_body: String,
+    /// 响应 HTTP 状态码；请求未到达服务器时为 null
+    pub status: Option<u16>,
+    /// 响应头逐行文本（已脱敏）
+    pub response_headers: String,
+    /// 响应体片段（已脱敏）
+    pub response_snippet: String,
+    /// 结果分类（success / assertion_failed / network_error 等，snake_case）
+    pub outcome: String,
+    /// 网络检测模式下请求已发出但尚未验证联网时为 true（前端据此提示）
+    pub verification_pending: bool,
+    /// 人类可读结论消息（已脱敏）
+    pub message: String,
+    /// 流程脚本执行错误；成功执行或无脚本时为 null
+    pub script_error: Option<String>,
+    /// 总耗时（毫秒）
+    pub duration_ms: u64,
+    /// 多步骤流程的逐步诊断；旧格式任务为空数组
+    pub steps: Vec<HttpStepReportData>,
+}
+
 /// POST /api/http-tasks/test 请求体
-#[derive(Deserialize, Default)]
+#[derive(Debug, Deserialize, ToSchema, Default)]
 #[serde(default)]
 pub struct HttpTaskTestBody {
     /// 已保存任务 ID（方案编辑器用：直接测方案绑定的那个任务）
     pub task_id: Option<String>,
-    /// 未保存草稿（任务编辑器用）；存在时优先于 `task_id`
+    /// 未保存草稿（任务编辑器用）；存在时优先于 `task_id`。完整
+    /// `HttpTaskConfig`（type=http 的任务 JSON），形状随 `src/tasks/models.rs` 演进
+    #[schema(value_type = Object)]
     pub task: Option<HttpTaskConfig>,
     /// 凭据与认证地址的来源方案（可省：账号密码手填时不需要）
     pub profile_id: Option<String>,
-    /// 登录账号
+    /// 登录账号（必填，不按方案回退）
     pub username: String,
     /// 登录密码；留空时若给了 `profile_id` 则用该方案已保存的密码
+    #[schema(value_type = String)]
     pub password: Zeroizing<String>,
     /// 本次测试的运营商；省略时沿用来源方案，显式空串表示不选择
     pub isp: Option<String>,
@@ -47,6 +119,21 @@ pub struct HttpTaskTestBody {
 /// 地址校验 → 构造请求 → 执行。按解析阶段拆为
 /// [`resolve_test_task`] / [`resolve_test_credentials`] / [`build_test_request`]
 /// 三个私有函数，本 handler 只保留单飞闸门与执行/响应组装。
+#[utoipa::path(
+    post,
+    path = "/api/http-tasks/test",
+    operation_id = "post_api_http_tasks_test",
+    tag = "http_tasks",
+    request_body(content = HttpTaskTestBody, description = "测试凭据与任务来源：未保存草稿（task）优先于已保存任务（task_id）；账号必填、密码留空按来源方案回退；响应全部字段脱敏，不回显任何凭据"),
+    responses(
+        (status = 200, description = "测试执行完成（成败以 outcome 字段为准，非 HTTP 状态码）", body = DataEnvelope<HttpTaskTestData>),
+        (status = 400, description = "未选择/填错任务、账号密码缺失、请求地址非法、任务类型不是 http 等", body = ErrorResponse),
+        (status = 404, description = "task_id 指向的任务或 profile_id 指向的方案不存在", body = ErrorResponse),
+        (status = 409, description = "已有直连测试正在进行（单飞闸门，请稍候重试）", body = ErrorResponse),
+        (status = 500, description = "响应读取等内部错误", body = ErrorResponse),
+        (status = 503, description = "服务正在停止", body = ErrorResponse),
+    )
+)]
 pub async fn test_http_task(
     State(config): State<Arc<dyn ConfigApi>>,
     State(tasks): State<Arc<dyn TaskApi>>,

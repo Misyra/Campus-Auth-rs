@@ -108,6 +108,94 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_HttpTaskTestData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/http-tasks/test 响应载荷（无状态直连测试报告，全部字段已脱敏）",
+      "properties": {
+       "duration_ms": {
+        "description": "总耗时（毫秒）",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "message": {
+        "description": "人类可读结论消息（已脱敏）",
+        "type": "string"
+       },
+       "outcome": {
+        "description": "结果分类（success / assertion_failed / network_error 等，snake_case）",
+        "type": "string"
+       },
+       "rendered_body": {
+        "description": "模板渲染后的请求体（已脱敏）",
+        "type": "string"
+       },
+       "rendered_headers": {
+        "description": "模板渲染后的请求头（`Key: Value` 逐行，已脱敏）",
+        "type": "string"
+       },
+       "rendered_url": {
+        "description": "模板渲染后的请求地址（凭据等敏感值已脱敏）",
+        "type": "string"
+       },
+       "response_headers": {
+        "description": "响应头逐行文本（已脱敏）",
+        "type": "string"
+       },
+       "response_snippet": {
+        "description": "响应体片段（已脱敏）",
+        "type": "string"
+       },
+       "script_error": {
+        "description": "流程脚本执行错误；成功执行或无脚本时为 null",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "status": {
+        "description": "响应 HTTP 状态码；请求未到达服务器时为 null",
+        "format": "int32",
+        "minimum": 0,
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "steps": {
+        "description": "多步骤流程的逐步诊断；旧格式任务为空数组",
+        "items": {
+         "$ref": "#/components/schemas/HttpStepReportData"
+        },
+        "type": "array"
+       },
+       "verification_pending": {
+        "description": "网络检测模式下请求已发出但尚未验证联网时为 true（前端据此提示）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "rendered_url",
+       "rendered_headers",
+       "rendered_body",
+       "response_headers",
+       "response_snippet",
+       "outcome",
+       "verification_pending",
+       "message",
+       "duration_ms",
+       "steps"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_InitStatusData": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -492,6 +580,92 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_SchedulerToggleData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/scheduler/jobs/{id}/toggle 响应载荷",
+      "properties": {
+       "enabled": {
+        "description": "切换后的启用状态",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "enabled"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_ScriptDetailData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/scripts/{task_id} 响应载荷（脚本编辑器所需全部字段）",
+      "properties": {
+       "args": {
+        "description": "命令行参数",
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "binary_path": {
+        "description": "执行二进制路径；未显式设置时为空串（自动检测）",
+        "type": "string"
+       },
+       "content": {
+        "description": "脚本全文（内联 content 模式取字段；script_path 模式读磁盘文件）",
+        "type": "string"
+       },
+       "description": {
+        "description": "任务描述",
+        "type": "string"
+       },
+       "id": {
+        "description": "脚本任务 ID（= 路径参数 task_id）",
+        "type": "string"
+       },
+       "name": {
+        "description": "显示名称",
+        "type": "string"
+       },
+       "script_path": {
+        "description": "脚本文件路径（相对 tasks/scripts/ 或绝对路径）；未设置时为 null",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "timeout": {
+        "description": "超时秒数",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       }
+      },
+      "required": [
+       "id",
+       "name",
+       "description",
+       "content",
+       "binary_path",
+       "args",
+       "timeout"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_String": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -551,6 +725,388 @@
        "metrics"
       ],
       "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_TaskDetailData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/tasks/{id}、GET /api/tasks/export/{id} 响应载荷",
+      "properties": {
+       "config": {
+        "description": "完整配置：`TaskKind` 序列化（browser/script/http 三态联合；browser 含\nsteps 步骤数组、http 含 headers/body/判定关键字等、script 含 content/\nbinary_path 等）。形状随 `src/tasks/models.rs` 演进，待强类型化批次收敛",
+        "type": "object"
+       },
+       "summary": {
+        "$ref": "#/components/schemas/TaskSummaryData",
+        "description": "任务摘要"
+       }
+      },
+      "required": [
+       "summary",
+       "config"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_TaskExecuteData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/tasks/{id}/execute 响应载荷（镜像 `crate::tasks::TaskResult` 的线格式）",
+      "properties": {
+       "duration_ms": {
+        "description": "执行耗时（毫秒）",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "error": {
+        "description": "失败时的错误消息；成功时为 null",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "exit_code": {
+        "description": "进程退出码（Bridge 任务为 0/1）",
+        "format": "int32",
+        "type": "integer"
+       },
+       "output": {
+        "description": "合并后的输出（stdout + stderr，超长截断）",
+        "type": "string"
+       },
+       "success": {
+        "description": "是否成功（exit_code == 0 或 Bridge 返回 success）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "success",
+       "output",
+       "exit_code",
+       "duration_ms"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_TaskImportData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/tasks/import 响应载荷",
+      "properties": {
+       "failed": {
+        "description": "失败明细（逐条导入互不中止）",
+        "items": {
+         "$ref": "#/components/schemas/TaskImportFailureData"
+        },
+        "type": "array"
+       },
+       "imported": {
+        "description": "成功导入的任务数",
+        "format": "int32",
+        "minimum": 0,
+        "type": "integer"
+       }
+      },
+      "required": [
+       "imported",
+       "failed"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_Value": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {}
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_Vec_SchedulerHistoryData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "items": {
+       "description": "GET /api/scheduler/jobs/{id}/history 条目（落盘记录的透传映射）\n\n`run_at`/`message`/`trigger`/`duration` 为落盘原值透传（通常依次为\nISO 时间字符串 / 文本 / 触发来源 / 耗时毫秒数；历史数据缺失时为 null），\n不编造具体类型。",
+       "properties": {
+        "duration": {
+         "description": "耗时（落盘原值透传，缺失时为 null）"
+        },
+        "message": {
+         "description": "执行结果消息（落盘原值透传，缺失时为 null）"
+        },
+        "run_at": {
+         "description": "执行时间（落盘 timestamp 原值，通常为 ISO 8601 字符串，缺失时为 null）"
+        },
+        "success": {
+         "description": "是否成功（落盘 status == \"success\" 推导，恒为布尔）",
+         "type": "boolean"
+        },
+        "trigger": {
+         "description": "触发来源（落盘原值透传，缺失时为 null）"
+        }
+       },
+       "required": [
+        "run_at",
+        "success",
+        "message",
+        "trigger",
+        "duration"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_Vec_SchedulerJobData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "items": {
+       "description": "GET /api/scheduler/jobs 列表项（`ScheduledTask` + 展示字段镜像）",
+       "properties": {
+        "cron": {
+         "description": "cron 表达式（用户侧 5 字段；启动触发任务为空串）",
+         "type": "string"
+        },
+        "description": {
+         "description": "任务描述",
+         "type": "string"
+        },
+        "enabled": {
+         "description": "是否启用",
+         "type": "boolean"
+        },
+        "id": {
+         "description": "定时任务 ID（= 文件名 stem）",
+         "type": "string"
+        },
+        "last_result": {
+         "description": "上次执行结果；从未执行时为 null",
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "last_run": {
+         "description": "上次执行时间（ISO 8601 字符串）；从未执行时为 null",
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "max_retries": {
+         "description": "启动触发：单轮失败后最大重试次数；null = 默认次数",
+         "format": "int32",
+         "minimum": 0,
+         "type": [
+          "integer",
+          "null"
+         ]
+        },
+        "max_runs_per_day": {
+         "description": "启动触发：每日成功次数上限；null = 默认上限",
+         "format": "int32",
+         "minimum": 0,
+         "type": [
+          "integer",
+          "null"
+         ]
+        },
+        "name": {
+         "description": "显示名称",
+         "type": "string"
+        },
+        "profile_id": {
+         "description": "预留字段：未来「定时登录」可指定凭据 Profile；当前恒为 null（不生效）",
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "schedule_invalid": {
+         "description": "cron 表达式解析失败、enabled 却永不触发的标记（true 时前端应提示修复）",
+         "type": "boolean"
+        },
+        "startup_delay_secs": {
+         "description": "启动触发：延迟执行秒数；null = 不延迟",
+         "format": "int64",
+         "minimum": 0,
+         "type": [
+          "integer",
+          "null"
+         ]
+        },
+        "startup_runs_today": {
+         "description": "启动触发任务补充的当日成功次数（前端展示「今日 x/N 次」）；仅启动触发任务存在",
+         "format": "int32",
+         "minimum": 0,
+         "type": "integer"
+        },
+        "startup_success": {
+         "oneOf": [
+          {
+           "type": "null"
+          },
+          {
+           "$ref": "#/components/schemas/SchedulerDailySuccessData",
+           "description": "启动触发：当日成功次数簿记；非启动触发任务为 null"
+          }
+         ]
+        },
+        "target_id": {
+         "description": "关联目标任务 ID（浏览器/脚本任务）",
+         "type": "string"
+        },
+        "task_type": {
+         "description": "目标任务类型（browser/script/http，由 target 关联任务推导）；无法推导时缺省",
+         "type": "string"
+        },
+        "timeout": {
+         "description": "执行超时秒数；null = 使用全局默认值",
+         "format": "int64",
+         "minimum": 0,
+         "type": [
+          "integer",
+          "null"
+         ]
+        },
+        "trigger": {
+         "description": "触发方式：`cron` / `startup`",
+         "type": "string"
+        }
+       },
+       "required": [
+        "id",
+        "name",
+        "description",
+        "cron",
+        "target_id",
+        "enabled",
+        "trigger",
+        "schedule_invalid"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_Vec_ScriptBinaryData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "items": {
+       "description": "GET /api/scripts/binaries 列表项",
+       "properties": {
+        "name": {
+         "description": "解释器名称（python / bash / sh / cmd）",
+         "type": "string"
+        },
+        "path": {
+         "description": "可执行文件绝对路径",
+         "type": "string"
+        }
+       },
+       "required": [
+        "name",
+        "path"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_Vec_TaskSummaryData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "items": {
+       "description": "GET /api/tasks 列表项（镜像 `crate::tasks::TaskSummary` 的线格式）",
+       "properties": {
+        "description": {
+         "description": "任务描述",
+         "type": "string"
+        },
+        "http_method": {
+         "description": "直连任务的请求方法（\"GET\"/\"POST\"）；非直连任务为 null",
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "id": {
+         "description": "任务 ID（= 任务文件名 stem）",
+         "type": "string"
+        },
+        "modified_at": {
+         "description": "最近修改时间（任务文件的 mtime，UTC RFC3339）；读不到时该字段缺省不出现",
+         "type": "string"
+        },
+        "name": {
+         "description": "显示名称",
+         "type": "string"
+        },
+        "task_type": {
+         "description": "任务类型：`browser` / `script` / `http`",
+         "type": "string"
+        },
+        "url": {
+         "description": "任务地址：浏览器任务=登录页地址，直连任务=请求地址，脚本任务为空串",
+         "type": "string"
+        }
+       },
+       "required": [
+        "id",
+        "name",
+        "description",
+        "task_type",
+        "url",
+        "modified_at"
+       ],
+       "type": "object"
+      },
+      "type": "array"
      }
     },
     "required": [
@@ -751,6 +1307,216 @@
     ],
     "type": "object"
    },
+   "HttpStepReportData": {
+    "description": "POST /api/http-tasks/test 步骤报告条目（镜像 `HttpStepReport` 的线格式）",
+    "properties": {
+     "duration_ms": {
+      "description": "本步骤耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "id": {
+      "description": "步骤 ID",
+      "type": "string"
+     },
+     "kind": {
+      "description": "步骤类型（request / transform 等流程步骤种类）",
+      "type": "string"
+     },
+     "message": {
+      "description": "该步骤的简短说明（已脱敏）",
+      "type": "string"
+     },
+     "name": {
+      "description": "用户设置的步骤名称",
+      "type": "string"
+     },
+     "outcome": {
+      "description": "本步骤结论：`success` / `ignored` / `failed`",
+      "type": "string"
+     },
+     "produced_vars": {
+      "description": "本步骤生成的变量名（仅名称，不回传敏感值，已脱敏）",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "rendered_body": {
+      "description": "脱敏后的请求体",
+      "type": "string"
+     },
+     "rendered_headers": {
+      "description": "脱敏后的请求头（`Key: Value` 逐行）",
+      "type": "string"
+     },
+     "rendered_url": {
+      "description": "脱敏后的请求地址",
+      "type": "string"
+     },
+     "response_headers": {
+      "description": "脱敏后的响应头（逐行文本）",
+      "type": "string"
+     },
+     "response_snippet": {
+      "description": "脱敏后的响应片段",
+      "type": "string"
+     },
+     "status": {
+      "description": "HTTP 状态码；请求未发出时为 null",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "kind",
+     "outcome",
+     "message",
+     "produced_vars",
+     "rendered_url",
+     "rendered_headers",
+     "rendered_body",
+     "response_headers",
+     "response_snippet",
+     "duration_ms"
+    ],
+    "type": "object"
+   },
+   "HttpTaskTestBody": {
+    "description": "POST /api/http-tasks/test 请求体",
+    "properties": {
+     "fetch_page": {
+      "default": false,
+      "description": "是否在运行脚本前抓取认证页原文（脚本 `ctx.page` 的来源）",
+      "type": "boolean"
+     },
+     "isp": {
+      "default": null,
+      "description": "本次测试的运营商；省略时沿用来源方案，显式空串表示不选择",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "password": {
+      "default": "",
+      "description": "登录密码；留空时若给了 `profile_id` 则用该方案已保存的密码",
+      "type": "string"
+     },
+     "profile_id": {
+      "default": null,
+      "description": "凭据与认证地址的来源方案（可省：账号密码手填时不需要）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "task": {
+      "description": "未保存草稿（任务编辑器用）；存在时优先于 `task_id`。完整\n`HttpTaskConfig`（type=http 的任务 JSON），形状随 `src/tasks/models.rs` 演进",
+      "type": "object"
+     },
+     "task_id": {
+      "default": null,
+      "description": "已保存任务 ID（方案编辑器用：直接测方案绑定的那个任务）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "username": {
+      "default": "",
+      "description": "登录账号（必填，不按方案回退）",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "HttpTaskTestData": {
+    "description": "POST /api/http-tasks/test 响应载荷（无状态直连测试报告，全部字段已脱敏）",
+    "properties": {
+     "duration_ms": {
+      "description": "总耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "message": {
+      "description": "人类可读结论消息（已脱敏）",
+      "type": "string"
+     },
+     "outcome": {
+      "description": "结果分类（success / assertion_failed / network_error 等，snake_case）",
+      "type": "string"
+     },
+     "rendered_body": {
+      "description": "模板渲染后的请求体（已脱敏）",
+      "type": "string"
+     },
+     "rendered_headers": {
+      "description": "模板渲染后的请求头（`Key: Value` 逐行，已脱敏）",
+      "type": "string"
+     },
+     "rendered_url": {
+      "description": "模板渲染后的请求地址（凭据等敏感值已脱敏）",
+      "type": "string"
+     },
+     "response_headers": {
+      "description": "响应头逐行文本（已脱敏）",
+      "type": "string"
+     },
+     "response_snippet": {
+      "description": "响应体片段（已脱敏）",
+      "type": "string"
+     },
+     "script_error": {
+      "description": "流程脚本执行错误；成功执行或无脚本时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "status": {
+      "description": "响应 HTTP 状态码；请求未到达服务器时为 null",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "steps": {
+      "description": "多步骤流程的逐步诊断；旧格式任务为空数组",
+      "items": {
+       "$ref": "#/components/schemas/HttpStepReportData"
+      },
+      "type": "array"
+     },
+     "verification_pending": {
+      "description": "网络检测模式下请求已发出但尚未验证联网时为 true（前端据此提示）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "rendered_url",
+     "rendered_headers",
+     "rendered_body",
+     "response_headers",
+     "response_snippet",
+     "outcome",
+     "verification_pending",
+     "message",
+     "duration_ms",
+     "steps"
+    ],
+    "type": "object"
+   },
    "InitStatusData": {
     "description": "GET /api/init-status 响应载荷",
     "properties": {
@@ -800,6 +1566,176 @@
      "installed",
      "message"
     ],
+    "type": "object"
+   },
+   "JobCreateBody": {
+    "description": "POST /api/scheduler/jobs 请求体：新建定时任务（cron 表达式 + 目标任务 target_id）",
+    "properties": {
+     "cron": {
+      "description": "cron 表达式（用户侧 5 字段；触发方式为 startup 时可缺省，落盘为空串）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "description": {
+      "description": "任务描述",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "enabled": {
+      "description": "是否启用；缺省 true",
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "id": {
+      "description": "定时任务 ID（= 落盘文件名 stem，已存在则 409）",
+      "type": "string"
+     },
+     "max_retries": {
+      "description": "启动触发：失败重试次数",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "max_runs_per_day": {
+      "description": "启动触发：每日成功次数上限",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "name": {
+      "description": "显示名称；缺省落盘为「未命名定时任务」",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "startup_delay_secs": {
+      "description": "启动触发：延迟执行秒数",
+      "format": "int64",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "target_id": {
+      "description": "关联目标任务 ID（浏览器/脚本任务，必须已存在；任务类型由目标权威推导）",
+      "type": "string"
+     },
+     "timeout": {
+      "description": "执行超时秒数；缺省按目标任务类型钳制",
+      "format": "int64",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "trigger": {
+      "description": "触发方式（\"cron\"/\"startup\"，缺省 cron）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "target_id"
+    ],
+    "type": "object"
+   },
+   "JobUpdateBody": {
+    "description": "PUT /api/scheduler/jobs/{id} 请求体：字段全可选，仅更新出现的字段",
+    "properties": {
+     "cron": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "description": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "enabled": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "max_retries": {
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "max_runs_per_day": {
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "profile_id": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "startup_delay_secs": {
+      "format": "int64",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "target_id": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "timeout": {
+      "format": "int64",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "trigger": {
+      "description": "触发方式（\"cron\"/\"startup\"）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
     "type": "object"
    },
    "LogLevelData": {
@@ -937,6 +1873,37 @@
      "worker_crash_total",
      "file_log_dropped_lines",
      "uptime_seconds"
+    ],
+    "type": "object"
+   },
+   "OrderBody": {
+    "description": "任务排序请求体（对齐前端 `{ all, scripts, http }` 契约）\n\n`all` 是**浏览器任务**的历史字段名（三类任务里它曾是唯一一类），刻意不改名：\n改名会让「旧后端 + 新前端」这种组合（调试构建运行时读盘、前端先于后端更新时\n真实存在）在拖拽排序时因缺字段而 400。",
+    "properties": {
+     "all": {
+      "description": "浏览器任务 ID 顺序",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "http": {
+      "description": "直连任务 ID 顺序\n\n允许缺省：旧前端（尚无此分组）不发该字段，此时直连任务顺序回落为目录扫描\n顺序——与\"加入排序前\"的行为一致，不报错、也不丢任务文件。",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "scripts": {
+      "description": "脚本任务 ID 顺序",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "all",
+     "scripts"
     ],
     "type": "object"
    },
@@ -1411,6 +2378,292 @@
     ],
     "type": "object"
    },
+   "RepoImageBody": {
+    "description": "GET /api/repo/image 200 响应体 schema 载体\n\nwire 上是原始图片字节流（按 magic bytes 识别的真实 MIME 下发），不是\nJSON 包裹；本类型仅用于把 OpenAPI schema 声明为\n`{\"type\": \"string\", \"format\": \"binary\"}`，不参与序列化。",
+    "format": "binary",
+    "type": "string"
+   },
+   "RunScriptBody": {
+    "description": "POST /api/scripts/run 请求体：按 task_id 运行已保存脚本，或直接运行 script 内容（二选一）",
+    "properties": {
+     "script": {
+      "description": "直接传入脚本内容（与 task_id 二选一）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "task_id": {
+      "description": "脚本任务 ID",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "SchedulerDailySuccessData": {
+    "description": "启动触发的当日成功计数簿记（镜像 `ScheduledTask.startup_success`）",
+    "properties": {
+     "count": {
+      "description": "当日成功执行次数",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "date": {
+      "description": "本地日期（ISO 格式 YYYY-MM-DD）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "date",
+     "count"
+    ],
+    "type": "object"
+   },
+   "SchedulerHistoryData": {
+    "description": "GET /api/scheduler/jobs/{id}/history 条目（落盘记录的透传映射）\n\n`run_at`/`message`/`trigger`/`duration` 为落盘原值透传（通常依次为\nISO 时间字符串 / 文本 / 触发来源 / 耗时毫秒数；历史数据缺失时为 null），\n不编造具体类型。",
+    "properties": {
+     "duration": {
+      "description": "耗时（落盘原值透传，缺失时为 null）"
+     },
+     "message": {
+      "description": "执行结果消息（落盘原值透传，缺失时为 null）"
+     },
+     "run_at": {
+      "description": "执行时间（落盘 timestamp 原值，通常为 ISO 8601 字符串，缺失时为 null）"
+     },
+     "success": {
+      "description": "是否成功（落盘 status == \"success\" 推导，恒为布尔）",
+      "type": "boolean"
+     },
+     "trigger": {
+      "description": "触发来源（落盘原值透传，缺失时为 null）"
+     }
+    },
+    "required": [
+     "run_at",
+     "success",
+     "message",
+     "trigger",
+     "duration"
+    ],
+    "type": "object"
+   },
+   "SchedulerJobData": {
+    "description": "GET /api/scheduler/jobs 列表项（`ScheduledTask` + 展示字段镜像）",
+    "properties": {
+     "cron": {
+      "description": "cron 表达式（用户侧 5 字段；启动触发任务为空串）",
+      "type": "string"
+     },
+     "description": {
+      "description": "任务描述",
+      "type": "string"
+     },
+     "enabled": {
+      "description": "是否启用",
+      "type": "boolean"
+     },
+     "id": {
+      "description": "定时任务 ID（= 文件名 stem）",
+      "type": "string"
+     },
+     "last_result": {
+      "description": "上次执行结果；从未执行时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "last_run": {
+      "description": "上次执行时间（ISO 8601 字符串）；从未执行时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "max_retries": {
+      "description": "启动触发：单轮失败后最大重试次数；null = 默认次数",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "max_runs_per_day": {
+      "description": "启动触发：每日成功次数上限；null = 默认上限",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "name": {
+      "description": "显示名称",
+      "type": "string"
+     },
+     "profile_id": {
+      "description": "预留字段：未来「定时登录」可指定凭据 Profile；当前恒为 null（不生效）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "schedule_invalid": {
+      "description": "cron 表达式解析失败、enabled 却永不触发的标记（true 时前端应提示修复）",
+      "type": "boolean"
+     },
+     "startup_delay_secs": {
+      "description": "启动触发：延迟执行秒数；null = 不延迟",
+      "format": "int64",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "startup_runs_today": {
+      "description": "启动触发任务补充的当日成功次数（前端展示「今日 x/N 次」）；仅启动触发任务存在",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "startup_success": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/components/schemas/SchedulerDailySuccessData",
+        "description": "启动触发：当日成功次数簿记；非启动触发任务为 null"
+       }
+      ]
+     },
+     "target_id": {
+      "description": "关联目标任务 ID（浏览器/脚本任务）",
+      "type": "string"
+     },
+     "task_type": {
+      "description": "目标任务类型（browser/script/http，由 target 关联任务推导）；无法推导时缺省",
+      "type": "string"
+     },
+     "timeout": {
+      "description": "执行超时秒数；null = 使用全局默认值",
+      "format": "int64",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "trigger": {
+      "description": "触发方式：`cron` / `startup`",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "description",
+     "cron",
+     "target_id",
+     "enabled",
+     "trigger",
+     "schedule_invalid"
+    ],
+    "type": "object"
+   },
+   "SchedulerToggleData": {
+    "description": "POST /api/scheduler/jobs/{id}/toggle 响应载荷",
+    "properties": {
+     "enabled": {
+      "description": "切换后的启用状态",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "enabled"
+    ],
+    "type": "object"
+   },
+   "ScriptBinaryData": {
+    "description": "GET /api/scripts/binaries 列表项",
+    "properties": {
+     "name": {
+      "description": "解释器名称（python / bash / sh / cmd）",
+      "type": "string"
+     },
+     "path": {
+      "description": "可执行文件绝对路径",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "path"
+    ],
+    "type": "object"
+   },
+   "ScriptDetailData": {
+    "description": "GET /api/scripts/{task_id} 响应载荷（脚本编辑器所需全部字段）",
+    "properties": {
+     "args": {
+      "description": "命令行参数",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "binary_path": {
+      "description": "执行二进制路径；未显式设置时为空串（自动检测）",
+      "type": "string"
+     },
+     "content": {
+      "description": "脚本全文（内联 content 模式取字段；script_path 模式读磁盘文件）",
+      "type": "string"
+     },
+     "description": {
+      "description": "任务描述",
+      "type": "string"
+     },
+     "id": {
+      "description": "脚本任务 ID（= 路径参数 task_id）",
+      "type": "string"
+     },
+     "name": {
+      "description": "显示名称",
+      "type": "string"
+     },
+     "script_path": {
+      "description": "脚本文件路径（相对 tasks/scripts/ 或绝对路径）；未设置时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "timeout": {
+      "description": "超时秒数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "description",
+     "content",
+     "binary_path",
+     "args",
+     "timeout"
+    ],
+    "type": "object"
+   },
    "SetLogLevelBody": {
     "description": "PUT /api/config/log-level 请求体",
     "properties": {
@@ -1479,6 +2732,191 @@
      "active_profile_id",
      "platform",
      "metrics"
+    ],
+    "type": "object"
+   },
+   "TaskCreateBody": {
+    "properties": {
+     "id": {
+      "description": "任务 ID（= 任务文件名 stem；`default` 保留给内置浏览器登录任务）",
+      "type": "string"
+     },
+     "kind": {
+      "description": "任务类型：browser（缺省/空串）/ script / http；shell 已移除，明确 400",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "name": {
+      "description": "显示名称",
+      "type": "string"
+     },
+     "script": {
+      "description": "脚本内容（kind=script 时使用）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "steps": {
+      "description": "browser 任务的步骤列表：缺省为空（由 save_task 的校验显式报错，\n与 PUT /api/tasks 的口径一致），传入时反序列化为 StepConfig",
+      "items": {},
+      "type": "array"
+     },
+     "url": {
+      "description": "任务地址：浏览器任务=登录页地址，直连任务=请求地址（可后补）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "name"
+    ],
+    "type": "object"
+   },
+   "TaskDetailData": {
+    "description": "GET /api/tasks/{id}、GET /api/tasks/export/{id} 响应载荷",
+    "properties": {
+     "config": {
+      "description": "完整配置：`TaskKind` 序列化（browser/script/http 三态联合；browser 含\nsteps 步骤数组、http 含 headers/body/判定关键字等、script 含 content/\nbinary_path 等）。形状随 `src/tasks/models.rs` 演进，待强类型化批次收敛",
+      "type": "object"
+     },
+     "summary": {
+      "$ref": "#/components/schemas/TaskSummaryData",
+      "description": "任务摘要"
+     }
+    },
+    "required": [
+     "summary",
+     "config"
+    ],
+    "type": "object"
+   },
+   "TaskExecuteData": {
+    "description": "POST /api/tasks/{id}/execute 响应载荷（镜像 `crate::tasks::TaskResult` 的线格式）",
+    "properties": {
+     "duration_ms": {
+      "description": "执行耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "error": {
+      "description": "失败时的错误消息；成功时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "exit_code": {
+      "description": "进程退出码（Bridge 任务为 0/1）",
+      "format": "int32",
+      "type": "integer"
+     },
+     "output": {
+      "description": "合并后的输出（stdout + stderr，超长截断）",
+      "type": "string"
+     },
+     "success": {
+      "description": "是否成功（exit_code == 0 或 Bridge 返回 success）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "success",
+     "output",
+     "exit_code",
+     "duration_ms"
+    ],
+    "type": "object"
+   },
+   "TaskImportData": {
+    "description": "POST /api/tasks/import 响应载荷",
+    "properties": {
+     "failed": {
+      "description": "失败明细（逐条导入互不中止）",
+      "items": {
+       "$ref": "#/components/schemas/TaskImportFailureData"
+      },
+      "type": "array"
+     },
+     "imported": {
+      "description": "成功导入的任务数",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "imported",
+     "failed"
+    ],
+    "type": "object"
+   },
+   "TaskImportFailureData": {
+    "description": "POST /api/tasks/import 失败明细条目",
+    "properties": {
+     "id": {
+      "description": "导入失败条目的任务 ID（按顶层 id / summary.id / task_id 依次识别）",
+      "type": "string"
+     },
+     "reason": {
+      "description": "失败原因（反序列化错误或保存校验错误文案）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "reason"
+    ],
+    "type": "object"
+   },
+   "TaskSummaryData": {
+    "description": "GET /api/tasks 列表项（镜像 `crate::tasks::TaskSummary` 的线格式）",
+    "properties": {
+     "description": {
+      "description": "任务描述",
+      "type": "string"
+     },
+     "http_method": {
+      "description": "直连任务的请求方法（\"GET\"/\"POST\"）；非直连任务为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "id": {
+      "description": "任务 ID（= 任务文件名 stem）",
+      "type": "string"
+     },
+     "modified_at": {
+      "description": "最近修改时间（任务文件的 mtime，UTC RFC3339）；读不到时该字段缺省不出现",
+      "type": "string"
+     },
+     "name": {
+      "description": "显示名称",
+      "type": "string"
+     },
+     "task_type": {
+      "description": "任务类型：`browser` / `script` / `http`",
+      "type": "string"
+     },
+     "url": {
+      "description": "任务地址：浏览器任务=登录页地址，直连任务=请求地址，脚本任务为空串",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "description",
+     "task_type",
+     "url",
+     "modified_at"
     ],
     "type": "object"
    },
@@ -2998,57 +4436,85 @@
   },
   "/api/http-tasks/test": {
    "post": {
-    "operationId": "post___api_http-tasks_test",
+    "description": "解析顺序（每条错误的文案都直接指向用户该去改的地方）：\n单飞登记 → 取任务（草稿优先）/ 账号 / 密码 / 认证地址 / 证书策略 →\n地址校验 → 构造请求 → 执行。按解析阶段拆为\n[`resolve_test_task`] / [`resolve_test_credentials`] / [`build_test_request`]\n三个私有函数，本 handler 只保留单飞闸门与执行/响应组装。",
+    "operationId": "post_api_http_tasks_test",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/HttpTaskTestBody"
+       }
       }
      },
-     "required": false
+     "description": "测试凭据与任务来源：未保存草稿（task）优先于已保存任务（task_id）；账号必填、密码留空按来源方案回退；响应全部字段脱敏，不回显任何凭据",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_HttpTaskTestData"
+        }
        }
       },
-      "description": "OK"
+      "description": "测试执行完成（成败以 outcome 字段为准，非 HTTP 状态码）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "未选择/填错任务、账号密码缺失、请求地址非法、任务类型不是 http 等"
      },
      "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Not Found"
+      "description": "task_id 指向的任务或 profile_id 指向的方案不存在"
      },
      "409": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "已有直连测试正在进行"
+      "description": "已有直连测试正在进行（单飞闸门，请稍候重试）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "响应读取等内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "服务正在停止"
      }
-    }
+    },
+    "summary": "POST /api/http-tasks/test — 发送一次无状态直连测试请求",
+    "tags": [
+     "http_tasks"
+    ]
    }
   },
   "/api/init-status": {
@@ -4268,517 +5734,888 @@
   },
   "/api/repo/fetch": {
    "get": {
-    "operationId": "get___api_repo_fetch",
+    "description": "URL 归一化（GitHub/Gitee blob 页面链接转 raw）+ SSRF 防护后原样透传\n远端 JSON；仅校验顶层为数组，条目形状由远端仓库定义。",
+    "operationId": "get_api_repo_fetch",
+    "parameters": [
+     {
+      "description": "远程仓库资源地址（GitHub blob 页面地址会被归一化为 raw 地址）",
+      "in": "query",
+      "name": "url",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
+      "description": "远程仓库索引 JSON 数组原样透传（data 为任意 JSON 数组，形状由远端定义）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "URL 非法、scheme 不支持、目标为私网地址（SSRF 防护）或响应体超过 8 MiB 上限"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "响应读取失败或响应不是合法 JSON"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "远程返回非成功状态码"
      }
-    }
+    },
+    "summary": "GET /api/repo/fetch — 代理获取远程任务仓库索引（返回 JSON 数组）",
+    "tags": [
+     "repo"
+    ]
    }
   },
   "/api/repo/image": {
    "get": {
-    "description": "代理获取仓库任务截图（返回图片字节；出站仅限任务站 raw 域）",
-    "operationId": "get___api_repo_image",
+    "description": "`<img>` 引用无法携带鉴权头（同背景图/调试截图 GET 豁免先例），且 raw 图片\n直连国内常需代理（与仓库任务共用 updater 代理配置）。豁免 + 代理的组合若\n对任意 URL 开放即成开放 SSRF 出口，故目标 host 限死任务站 raw 三 host；\n响应再做大小上限 + magic bytes 格式校验，MIME 按真实签名下发（防类型混淆）。",
+    "operationId": "get_api_repo_image",
+    "parameters": [
+     {
+      "description": "远程仓库资源地址（GitHub blob 页面地址会被归一化为 raw 地址）",
+      "in": "query",
+      "name": "url",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
+       "image/bmp": {
+        "schema": {
+         "$ref": "#/components/schemas/RepoImageBody"
+        }
+       },
+       "image/gif": {
+        "schema": {
+         "$ref": "#/components/schemas/RepoImageBody"
+        }
+       },
        "image/jpeg": {
         "schema": {
-         "format": "binary",
-         "type": "string"
+         "$ref": "#/components/schemas/RepoImageBody"
         }
        },
        "image/png": {
         "schema": {
-         "format": "binary",
-         "type": "string"
+         "$ref": "#/components/schemas/RepoImageBody"
+        }
+       },
+       "image/webp": {
+        "schema": {
+         "$ref": "#/components/schemas/RepoImageBody"
+        }
+       },
+       "image/x-icon": {
+        "schema": {
+         "$ref": "#/components/schemas/RepoImageBody"
         }
        }
       },
-      "description": "图片字节"
+      "description": "任务站截图原始字节（MIME 按真实 magic bytes 签名下发，非 JSON 信封）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "URL/scheme 非法、目标 host 不在任务站 raw 白名单、重定向终点越界、响应体超过 8 MiB 上限或不是有效位图（SVG 等可执行格式拒绝）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "响应读取失败"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "远程返回非成功状态码"
      }
-    }
+    },
+    "summary": "GET /api/repo/image — 代理获取仓库任务截图（返回图片字节）",
+    "tags": [
+     "repo"
+    ]
    }
   },
   "/api/repo/task": {
    "get": {
-    "operationId": "get___api_repo_task",
+    "description": "URL 归一化 + SSRF 防护后原样透传远端 JSON；仅校验顶层为对象，\n任务配置形状由远端仓库定义（与本地任务文件同源格式）。",
+    "operationId": "get_api_repo_task",
+    "parameters": [
+     {
+      "description": "远程仓库资源地址（GitHub blob 页面地址会被归一化为 raw 地址）",
+      "in": "query",
+      "name": "url",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
+      "description": "远程任务配置 JSON 对象原样透传（data 为任意 JSON 对象，形状由远端定义）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "URL 非法、scheme 不支持、目标为私网地址（SSRF 防护）或响应体超过 8 MiB 上限"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "响应读取失败或响应不是合法 JSON"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "远程返回非成功状态码"
      }
-    }
+    },
+    "summary": "GET /api/repo/task — 代理获取远程任务配置（返回 JSON 对象）",
+    "tags": [
+     "repo"
+    ]
    }
   },
   "/api/scheduler/jobs": {
    "get": {
-    "operationId": "get___api_scheduler_jobs",
+    "description": "返回时补充 `task_type` 展示字段（由 target 关联的任务类型推导），\n以及 `schedule_invalid`（cron 表达式解析失败、enabled 却永不触发的标记）。",
+    "operationId": "get_api_scheduler_jobs",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Vec_SchedulerJobData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "全部定时任务（含 id/task_type/schedule_invalid 展示字段与启动触发的当日次数）"
      }
-    }
+    },
+    "summary": "GET /api/scheduler/jobs — 列出全部定时任务",
+    "tags": [
+     "scheduler"
+    ]
    },
    "post": {
-    "operationId": "post___api_scheduler_jobs",
+    "description": "任务类型由 `target_id` 关联的目标任务权威推导，不再单独存储。\n已存在的 id 返回 409（`save_task` 为 upsert 语义，此处显式拒绝静默覆盖）。",
+    "operationId": "post_api_scheduler_jobs",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/JobCreateBody"
+       }
       }
      },
-     "required": false
+     "description": "新建定时任务：target_id 必须指向已存在的任务；cron 触发须带合法 cron 表达式，startup 触发可缺省",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "创建成功并已通知调度主循环"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "触发方式非法、cron 表达式无法解析或目标任务不存在"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "定时任务 ID 已存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件写入失败"
      }
-    }
+    },
+    "summary": "POST /api/scheduler/jobs — 创建定时任务",
+    "tags": [
+     "scheduler"
+    ]
    }
   },
   "/api/scheduler/jobs/{id}": {
    "delete": {
-    "operationId": "delete___api_scheduler_jobs_id",
+    "operationId": "delete_api_scheduler_jobs_id",
+    "parameters": [
+     {
+      "description": "定时任务 ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "删除成功并已通知调度主循环"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "定时任务不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件删除失败"
      }
-    }
+    },
+    "summary": "DELETE /api/scheduler/jobs/{id} — 删除定时任务",
+    "tags": [
+     "scheduler"
+    ]
    },
    "put": {
-    "operationId": "put___api_scheduler_jobs_id",
+    "operationId": "put_api_scheduler_jobs_id",
+    "parameters": [
+     {
+      "description": "定时任务 ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/JobUpdateBody"
+       }
       }
      },
-     "required": false
+     "description": "字段全可选：仅更新出现的字段（trigger=cron 时 cron 表达式会被重新校验）",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "更新成功并已通知调度主循环"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "触发方式非法、cron 表达式无法解析或目标任务不存在"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "定时任务不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件写入失败"
      }
-    }
+    },
+    "summary": "PUT /api/scheduler/jobs/{id} — 更新定时任务（字段级合并，未提供字段保留原值）",
+    "tags": [
+     "scheduler"
+    ]
    }
   },
   "/api/scheduler/jobs/{id}/history": {
    "get": {
-    "operationId": "get___api_scheduler_jobs_id_history",
+    "description": "id 校验、读盘与字段映射内聚在 `SchedulerApi::read_history`（调度域），\nhandler 仅做转发；前端期望扁平数组 `[{ run_at, success, message }]`。",
+    "operationId": "get_api_scheduler_jobs_id_history",
+    "parameters": [
+     {
+      "description": "定时任务 ID（非法 ID 含路径穿越片段时 400）",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Vec_SchedulerHistoryData"
+        }
        }
       },
-      "description": "OK"
+      "description": "执行历史扁平数组（run_at/message/trigger/duration 为落盘原值透传）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "定时任务 ID 非法（如路径穿越片段）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "历史文件读取失败"
      }
-    }
+    },
+    "summary": "GET /api/scheduler/jobs/{id}/history — 读取任务执行历史",
+    "tags": [
+     "scheduler"
+    ]
    }
   },
   "/api/scheduler/jobs/{id}/run": {
    "post": {
-    "operationId": "post___api_scheduler_jobs_id_run",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
+    "description": "与 cron 触发共用同一并发信号量闸：同一任务正在执行或调度器正在关闭时 409。",
+    "operationId": "post_api_scheduler_jobs_id_run",
+    "parameters": [
+     {
+      "description": "定时任务 ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
       }
-     },
-     "required": false
-    },
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "已接受触发（异步执行，成败见执行历史）"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "定时任务不存在"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务正在执行或调度器正在关闭"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "内部错误"
      }
-    }
+    },
+    "summary": "POST /api/scheduler/jobs/{id}/run — 手动触发定时任务",
+    "tags": [
+     "scheduler"
+    ]
    }
   },
   "/api/scheduler/jobs/{id}/toggle": {
    "post": {
-    "operationId": "post___api_scheduler_jobs_id_toggle",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
+    "operationId": "post_api_scheduler_jobs_id_toggle",
+    "parameters": [
+     {
+      "description": "定时任务 ID",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
       }
-     },
-     "required": false
-    },
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_SchedulerToggleData"
+        }
        }
       },
-      "description": "OK"
+      "description": "切换后的启用状态"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "定时任务不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件写入失败"
      }
-    }
+    },
+    "summary": "POST /api/scheduler/jobs/{id}/toggle — 切换启用/禁用",
+    "tags": [
+     "scheduler"
+    ]
    }
   },
   "/api/scripts/binaries": {
    "get": {
-    "operationId": "get___api_scripts_binaries",
+    "description": "扫描系统 PATH 中的常用解释器/可执行文件。",
+    "operationId": "get_api_scripts_binaries",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Vec_ScriptBinaryData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "受支持的脚本解释器列表（首项恒为 python）"
      }
-    }
+    },
+    "summary": "GET /api/scripts/binaries — 可用可执行文件列表",
+    "tags": [
+     "scripts"
+    ]
    }
   },
   "/api/scripts/run": {
    "post": {
-    "operationId": "post___api_scripts_run",
+    "description": "支持两种调用方式：\n- `{\"task_id\": \"<task_id>\"}`：运行已保存的脚本任务\n- `{\"script\": \"<content>\"}`：直接运行临时脚本内容",
+    "operationId": "post_api_scripts_run",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/RunScriptBody"
+       }
       }
      },
-     "required": false
+     "description": "task_id 与 script 二选一：task_id 运行已保存脚本任务，script 直跑临时内容",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_TaskExecuteData"
+        }
        }
       },
-      "description": "OK"
+      "description": "执行完成（成败以 success 字段为准，非 HTTP 状态码）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "task_id 与 script 双缺或任务 ID 非法"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "task_id 指向的脚本任务不存在"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Worker 忙（调试会话进行中）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "执行失败（Worker 通信异常等内部错误）"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Python Worker 未安装"
      }
-    }
+    },
+    "summary": "POST /api/scripts/run — 运行脚本",
+    "tags": [
+     "scripts"
+    ]
    }
   },
   "/api/scripts/{task_id}": {
    "delete": {
-    "operationId": "delete___api_scripts_task_id",
+    "operationId": "delete_api_scripts_task_id",
+    "parameters": [
+     {
+      "description": "脚本任务 ID",
+      "in": "path",
+      "name": "task_id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "删除成功"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "任务 ID 形态非法"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "脚本任务不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "脚本文件删除失败"
      }
-    }
+    },
+    "summary": "DELETE /api/scripts/{task_id} — 删除脚本",
+    "tags": [
+     "scripts"
+    ]
    },
    "get": {
-    "operationId": "get___api_scripts_task_id",
+    "description": "返回编辑器所需的全部字段（name/description/content/binary_path 等）。\n内容来源两种存储模式：内联 `content` 字段或 `script_path` 指向的磁盘文件。",
+    "operationId": "get_api_scripts_task_id",
+    "parameters": [
+     {
+      "description": "脚本任务 ID",
+      "in": "path",
+      "name": "task_id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_ScriptDetailData"
+        }
        }
       },
-      "description": "OK"
+      "description": "脚本完整内容与执行配置"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "任务 ID 形态非法"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务不存在或不是脚本类型（防编辑器误读）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "脚本文件读取失败"
      }
-    }
+    },
+    "summary": "GET /api/scripts/{task_id} — 获取脚本完整内容",
+    "tags": [
+     "scripts"
+    ]
    },
    "put": {
-    "operationId": "put___api_scripts_task_id",
+    "description": "显式要求 `type == \"script\"`：`TaskKind` 反序列化在 type 缺失时默认归为\nbrowser 任务，会把脚本负载静默转存为空的浏览器任务（脚本内容丢失），\n故在此前置拦截，防止前端回归。",
+    "operationId": "put_api_scripts_task_id",
+    "parameters": [
+     {
+      "description": "脚本任务 ID（保存的权威 id）",
+      "in": "path",
+      "name": "task_id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "完整 Script 任务 JSON（type 必须为 \"script\"；binary_path/script_path 仅允许 shell/bat/python/exe，PowerShell 类拒绝）。形状随 src/tasks/models.rs 的 ScriptTaskConfig 演进",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "保存成功，data 为任务 ID"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "type 非 script、二进制/脚本路径不支持（PowerShell/.ps1）、负载反序列化失败或任务 ID 非法"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "脚本任务校验失败（details 携带字段级错误列表）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "脚本文件写入失败"
      }
-    }
+    },
+    "summary": "PUT /api/scripts/{task_id} — 更新脚本",
+    "tags": [
+     "scripts"
+    ]
    }
   },
   "/api/system/info": {
@@ -4969,307 +6806,517 @@
   },
   "/api/tasks": {
    "get": {
-    "operationId": "get___api_tasks",
+    "description": "返回三类任务的摘要列表（不含完整配置；详情走 `GET /api/tasks/{id}`）。",
+    "operationId": "get_api_tasks",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Vec_TaskSummaryData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "全部自定义任务摘要（浏览器/脚本/直连三类）"
      }
-    }
+    },
+    "summary": "GET /api/tasks — 列出全部自定义任务",
+    "tags": [
+     "tasks"
+    ]
    },
    "post": {
-    "operationId": "post___api_tasks",
+    "description": "直连任务只建最小骨架（地址 + 名称），请求头/体/判定关键字等由任务编辑器\n随后经 `PUT /api/tasks/{id}` 补齐。",
+    "operationId": "post_api_tasks",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/TaskCreateBody"
+       }
       }
      },
-     "required": false
+     "description": "任务创建负载：kind 缺省/空串/browser 为浏览器任务；script 需带 script 内容；http 只建最小骨架",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "创建成功"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "任务 ID 非法、未知任务类型（shell 已移除）、steps 格式错误"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务校验失败（如 browser 任务 steps 为空、保留 ID 非浏览器任务等）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件写入失败"
      }
-    }
+    },
+    "summary": "POST /api/tasks — 创建任务",
+    "tags": [
+     "tasks"
+    ]
    }
   },
   "/api/tasks/export/{id}": {
    "get": {
-    "operationId": "get___api_tasks_export_id",
+    "description": "与 [`get_task`] 同口径：畸形 id 是 400（用户可改），不存在才是 404。\n导出结果（`data` 字段）即标准导入格式，可直接回传 `POST /api/tasks/import`。",
+    "operationId": "get_api_tasks_export_id",
+    "parameters": [
+     {
+      "description": "任务 ID（任务文件名 stem）",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_TaskDetailData"
+        }
        }
       },
-      "description": "OK"
+      "description": "任务摘要 + 完整配置（与 GET /api/tasks/{id} 同形）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "任务 ID 形态非法"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件读取或序列化失败"
      }
-    }
+    },
+    "summary": "GET /api/tasks/export/{id} — 导出指定任务的完整配置",
+    "tags": [
+     "tasks"
+    ]
    }
   },
   "/api/tasks/import": {
    "post": {
-    "operationId": "post___api_tasks_import",
+    "description": "载荷形状契约：任务对象数组、单个任务对象，或 `{\"tasks\": [...]}` 包裹均可；条目\nID 依次取顶层 `id`、导出详情的 `summary.id`、磁盘文件形态的 `task_id`；任务体\n可为完整配置（含 `steps` 等 step 字段）或 `{\"config\": {...}}` 包裹的导出结果。\n逐条导入互不中止，响应回传 `imported` 计数与 `failed` 失败明细。",
+    "operationId": "post_api_tasks_import",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "任务对象数组、单个任务对象或 {\"tasks\"|\"items\"|\"data\": [...]} 包裹均可；标准格式为导出端点原样结果（[{ summary: {id}, config }]），另兼容顶层 id 的扁平对象与磁盘文件的 task_id 形态",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_TaskImportData"
+        }
        }
       },
-      "description": "OK"
+      "description": "导入完成（含部分失败：failed 列出失败条目与原因）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "导入列表为空或载荷中没有任何可识别 ID 的任务记录"
      }
-    }
+    },
+    "summary": "POST /api/tasks/import — 批量导入任务",
+    "tags": [
+     "tasks"
+    ]
    }
   },
   "/api/tasks/order": {
    "post": {
-    "operationId": "post___api_tasks_order",
+    "description": "接受前端 `{ all, scripts, http }` 结构，合并写入内部 `OrderData.order`\n（`.order.json` 是三类任务**共用**的一份扁平 id 列表，见 `tasks/loader.rs`）。\n**三组必须全量互传**：本函数整体替换排序表，漏传一组等于把那一组的顺序清空。\n\n不再\"先 load_order 再改\"：那是跨两次独立加锁的读改写，与自动保存的\n`PUT /api/tasks/{id}`（`save_task` 会把新 id 追进排序表）并发时会丢更新——\n用户看到的是\"拖完排序，另一类任务顺序莫名回退\"。载荷本来就是全量的，\n直接用请求体整体替换即可。",
+    "operationId": "post_api_tasks_order",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/OrderBody"
+       }
       }
      },
-     "required": false
+     "description": "三类任务 ID 顺序（all=浏览器 / scripts=脚本 / http=直连），整体替换排序表；三组必须全量互传",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "排序已保存"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "排序文件写入失败"
      }
-    }
+    },
+    "summary": "POST /api/tasks/order — 保存任务排序",
+    "tags": [
+     "tasks"
+    ]
    }
   },
   "/api/tasks/{id}": {
    "delete": {
-    "operationId": "delete___api_tasks_id",
+    "operationId": "delete_api_tasks_id",
+    "parameters": [
+     {
+      "description": "任务 ID（任务文件名 stem）",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "删除成功"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "任务 ID 形态非法"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务不存在"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "内置默认登录任务（default）不可删除"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件删除失败"
      }
-    }
+    },
+    "summary": "DELETE /api/tasks/{id} — 删除任务",
+    "tags": [
+     "tasks"
+    ]
    },
    "get": {
-    "operationId": "get___api_tasks_id",
+    "description": "**不先用 `has_task` 短路**：那样畸形 id（如 `../config/settings`）会被报成\"任务不存在\"\n的 404，而同一个 id 在 PUT / DELETE 上是 400 —— 同一形态在三个方法上给出两种结论，\n排查方向被带偏（自动保存打来一个畸形 id 时尤其明显）。交给加载路径判：\n`InvalidTaskId → 400`、`TaskNotFound → 404`，与写路径同一套口径。",
+    "operationId": "get_api_tasks_id",
+    "parameters": [
+     {
+      "description": "任务 ID（任务文件名 stem）",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_TaskDetailData"
+        }
        }
       },
-      "description": "OK"
+      "description": "任务摘要 + 完整配置"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "任务 ID 形态非法（如路径穿越片段）"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件读取或序列化失败"
      }
-    }
+    },
+    "summary": "GET /api/tasks/{id} — 获取单个任务",
+    "tags": [
+     "tasks"
+    ]
    },
    "put": {
-    "operationId": "put___api_tasks_id",
+    "operationId": "put_api_tasks_id",
+    "parameters": [
+     {
+      "description": "任务 ID（路径参数为权威 id，body 内 task_id 会被写回对齐）",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "完整 `TaskKind` 配置（type 字段区分 browser/script/http；浏览器任务须带 steps，缺 type 时按 browser 反序列化）",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "保存成功（upsert 语义，任务不存在时创建）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "负载反序列化失败或任务 ID 非法"
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务校验失败（字段缺失/取值非法，details 携带字段级错误列表）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "任务文件写入失败"
      }
-    }
+    },
+    "summary": "PUT /api/tasks/{id} — 更新任务",
+    "tags": [
+     "tasks"
+    ]
    }
   },
   "/api/tasks/{id}/execute": {
    "post": {
-    "operationId": "post___api_tasks_id_execute",
+    "description": "浏览器任务走通用执行（不注入账号密码，用于打卡/签到等日常自动化）；\n带凭据的登录语义请走 `POST /api/login`。",
+    "operationId": "post_api_tasks_id_execute",
+    "parameters": [
+     {
+      "description": "任务 ID（任务文件名 stem）",
+      "in": "path",
+      "name": "id",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_TaskExecuteData"
+        }
        }
       },
-      "description": "OK"
+      "description": "执行完成（成败以 success 字段为准，非 HTTP 状态码）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "任务 ID 形态非法"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "任务不存在"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Worker 忙（调试会话进行中）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "执行失败（Worker 通信异常等内部错误）"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Python Worker 未安装"
      }
-    }
+    },
+    "summary": "POST /api/tasks/{id}/execute — 手动执行任务（通用语义：浏览器/脚本）",
+    "tags": [
+     "tasks"
+    ]
    }
   },
   "/api/tools/task-recorder.user.js": {

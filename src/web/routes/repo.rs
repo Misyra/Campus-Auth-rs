@@ -14,10 +14,31 @@ use axum::response::IntoResponse;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::ssrf::secure_get_proxied;
+
+// ---- 契约 DTO（T5-1b repo 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。索引/任务配置是**远程
+// 仓库内容原样透传**（形状由远端定义，本地只校验数组/对象顶层类型），
+// 故以 `DataEnvelope<Value>` 标注、不编造内部形状；截图代理是二进制
+// 图片响应（非 JSON），按真实下发的六种 MIME 逐一声明 binary 内容。
+
+/// GET /api/repo/image 200 响应体 schema 载体
+///
+/// wire 上是原始图片字节流（按 magic bytes 识别的真实 MIME 下发），不是
+/// JSON 包裹；本类型仅用于把 OpenAPI schema 声明为
+/// `{"type": "string", "format": "binary"}`，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：仅在 OpenAPI 生成时被 utoipa 引用，字段值不参与任何
+// 运行时路径（handler 直接下发字节流），dead_code 属预期
+#[allow(dead_code)]
+pub struct RepoImageBody(Vec<u8>);
 
 /// 代理响应体大小上限（8 MiB）
 ///
@@ -185,6 +206,22 @@ async fn repo_fetch_json(
 }
 
 /// GET /api/repo/fetch — 代理获取远程任务仓库索引（返回 JSON 数组）
+///
+/// URL 归一化（GitHub/Gitee blob 页面链接转 raw）+ SSRF 防护后原样透传
+/// 远端 JSON；仅校验顶层为数组，条目形状由远端仓库定义。
+#[utoipa::path(
+    get,
+    path = "/api/repo/fetch",
+    operation_id = "get_api_repo_fetch",
+    tag = "repo",
+    params(RepoUrlQuery),
+    responses(
+        (status = 200, description = "远程仓库索引 JSON 数组原样透传（data 为任意 JSON 数组，形状由远端定义）", body = DataEnvelope<Value>),
+        (status = 400, description = "URL 非法、scheme 不支持、目标为私网地址（SSRF 防护）或响应体超过 8 MiB 上限", body = ErrorResponse),
+        (status = 503, description = "远程返回非成功状态码", body = ErrorResponse),
+        (status = 500, description = "响应读取失败或响应不是合法 JSON", body = ErrorResponse),
+    )
+)]
 pub async fn repo_fetch_index(
     State(config): State<Arc<dyn ConfigApi>>,
     Query(params): Query<RepoUrlQuery>,
@@ -196,6 +233,22 @@ pub async fn repo_fetch_index(
 }
 
 /// GET /api/repo/task — 代理获取远程任务配置（返回 JSON 对象）
+///
+/// URL 归一化 + SSRF 防护后原样透传远端 JSON；仅校验顶层为对象，
+/// 任务配置形状由远端仓库定义（与本地任务文件同源格式）。
+#[utoipa::path(
+    get,
+    path = "/api/repo/task",
+    operation_id = "get_api_repo_task",
+    tag = "repo",
+    params(RepoUrlQuery),
+    responses(
+        (status = 200, description = "远程任务配置 JSON 对象原样透传（data 为任意 JSON 对象，形状由远端定义）", body = DataEnvelope<Value>),
+        (status = 400, description = "URL 非法、scheme 不支持、目标为私网地址（SSRF 防护）或响应体超过 8 MiB 上限", body = ErrorResponse),
+        (status = 503, description = "远程返回非成功状态码", body = ErrorResponse),
+        (status = 500, description = "响应读取失败或响应不是合法 JSON", body = ErrorResponse),
+    )
+)]
 pub async fn repo_fetch_task(
     State(config): State<Arc<dyn ConfigApi>>,
     Query(params): Query<RepoUrlQuery>,
@@ -212,6 +265,30 @@ pub async fn repo_fetch_task(
 /// 直连国内常需代理（与仓库任务共用 updater 代理配置）。豁免 + 代理的组合若
 /// 对任意 URL 开放即成开放 SSRF 出口，故目标 host 限死任务站 raw 三 host；
 /// 响应再做大小上限 + magic bytes 格式校验，MIME 按真实签名下发（防类型混淆）。
+#[utoipa::path(
+    get,
+    path = "/api/repo/image",
+    operation_id = "get_api_repo_image",
+    tag = "repo",
+    params(RepoUrlQuery),
+    responses(
+        // 图片代理端点：200 是二进制图片而非 JSON 信封，按真实下发的六种
+        // MIME 逐一声明 binary 内容（错误路径仍是统一 JSON 错误信封）
+        (status = 200, description = "任务站截图原始字节（MIME 按真实 magic bytes 签名下发，非 JSON 信封）",
+            content(
+                (RepoImageBody = "image/png"),
+                (RepoImageBody = "image/jpeg"),
+                (RepoImageBody = "image/gif"),
+                (RepoImageBody = "image/webp"),
+                (RepoImageBody = "image/bmp"),
+                (RepoImageBody = "image/x-icon"),
+            ),
+        ),
+        (status = 400, description = "URL/scheme 非法、目标 host 不在任务站 raw 白名单、重定向终点越界、响应体超过 8 MiB 上限或不是有效位图（SVG 等可执行格式拒绝）", body = ErrorResponse),
+        (status = 503, description = "远程返回非成功状态码", body = ErrorResponse),
+        (status = 500, description = "响应读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn repo_image(
     State(config): State<Arc<dyn ConfigApi>>,
     Query(params): Query<RepoUrlQuery>,
@@ -288,7 +365,7 @@ pub async fn repo_image(
 }
 
 /// GET /api/repo/fetch、/api/repo/task 与 /api/repo/image 共用的查询参数
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct RepoUrlQuery {
     /// 远程仓库资源地址（GitHub blob 页面地址会被归一化为 raw 地址）
     pub url: String,

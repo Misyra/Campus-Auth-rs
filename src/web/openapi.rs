@@ -5,7 +5,7 @@
 //!    批次一律引用本模块，不得在各 route 文件内重复定义信封；
 //! 2. [`ApiDoc`]：utoipa 文档骨架——根元数据（openapi/info/servers）由生成侧
 //!    接管，版本号随 `CARGO_PKG_VERSION` 自动同步（三端同版少一处手工项），
-//!    paths 逐批挂载已注解域（当前为空骨架，system 样板切片随后接入）；
+//!    paths 逐批挂载已注解域（system 样板 + T5-1a 三域 + T5-1b 五域）；
 //! 3. [`merged_openapi_json`]：生成管线——utoipa 生成 spec 与手写 baseline
 //!    （根目录 `openapi.json` 的未注解域条目）按路径合并，产出最终文档。
 //!
@@ -66,8 +66,9 @@ pub mod schemas {
 /// OpenAPI 文档骨架（utoipa 生成源）
 ///
 /// `info`/`servers` 由本骨架权威持有；`paths` 随域批次逐个挂载
-/// `#[utoipa::path]` 注解处理器（当前：system 域样板切片——状态与生命周期
-/// 8 个端点，见 `routes::system` 各注解）。
+/// `#[utoipa::path]` 注解处理器（已挂载：system 样板、config/profiles/login
+/// （T5-1a）、tasks/http_tasks/scheduler/scripts/repo（T5-1b）五域第二批，
+/// 见 `routes` 各文件注解；monitor/debug/history 等剩余域随后续批次接入）。
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -115,6 +116,36 @@ pub mod schemas {
         crate::web::routes::login::cancel_login,
         crate::web::routes::login::get_login_status,
         crate::web::routes::login::login_once,
+        // ---- tasks 域（T5-1b）----
+        crate::web::routes::tasks::list_tasks,
+        crate::web::routes::tasks::create_task,
+        crate::web::routes::tasks::get_task,
+        crate::web::routes::tasks::update_task,
+        crate::web::routes::tasks::delete_task,
+        crate::web::routes::tasks::order_tasks,
+        crate::web::routes::tasks::import_tasks,
+        crate::web::routes::tasks::export_task,
+        crate::web::routes::tasks::execute_task,
+        // ---- http_tasks 域（T5-1b）----
+        crate::web::routes::http_tasks::test_http_task,
+        // ---- scheduler 域（T5-1b）----
+        crate::web::routes::scheduler::list_jobs,
+        crate::web::routes::scheduler::create_job,
+        crate::web::routes::scheduler::update_job,
+        crate::web::routes::scheduler::delete_job,
+        crate::web::routes::scheduler::toggle_job,
+        crate::web::routes::scheduler::run_job,
+        crate::web::routes::scheduler::job_history,
+        // ---- scripts 域（T5-1b）----
+        crate::web::routes::scripts::run_script,
+        crate::web::routes::scripts::list_binaries,
+        crate::web::routes::scripts::get_script,
+        crate::web::routes::scripts::update_script,
+        crate::web::routes::scripts::delete_script,
+        // ---- repo 域（T5-1b）----
+        crate::web::routes::repo::repo_fetch_index,
+        crate::web::routes::repo::repo_fetch_task,
+        crate::web::routes::repo::repo_image,
     ),
     components(schemas(
         schemas::ErrorDetail,
@@ -167,6 +198,44 @@ pub mod schemas {
         schemas::DataEnvelope<crate::web::routes::login::LoginOnceData>,
         crate::web::routes::login::LoginTriggerData,
         crate::web::routes::login::LoginOnceData,
+        // ---- tasks 域（T5-1b）----
+        schemas::DataEnvelope<Vec<crate::web::routes::tasks::TaskSummaryData>>,
+        schemas::DataEnvelope<crate::web::routes::tasks::TaskDetailData>,
+        schemas::DataEnvelope<crate::web::routes::tasks::TaskImportData>,
+        schemas::DataEnvelope<crate::web::routes::tasks::TaskExecuteData>,
+        crate::web::routes::tasks::TaskSummaryData,
+        crate::web::routes::tasks::TaskDetailData,
+        crate::web::routes::tasks::TaskImportData,
+        crate::web::routes::tasks::TaskImportFailureData,
+        crate::web::routes::tasks::TaskExecuteData,
+        crate::web::routes::tasks::TaskCreateBody,
+        crate::web::routes::tasks::OrderBody,
+        // ---- http_tasks 域（T5-1b）----
+        schemas::DataEnvelope<crate::web::routes::http_tasks::HttpTaskTestData>,
+        crate::web::routes::http_tasks::HttpTaskTestData,
+        crate::web::routes::http_tasks::HttpStepReportData,
+        crate::web::routes::http_tasks::HttpTaskTestBody,
+        // ---- scheduler 域（T5-1b）----
+        schemas::DataEnvelope<Vec<crate::web::routes::scheduler::SchedulerJobData>>,
+        schemas::DataEnvelope<crate::web::routes::scheduler::SchedulerToggleData>,
+        schemas::DataEnvelope<Vec<crate::web::routes::scheduler::SchedulerHistoryData>>,
+        crate::web::routes::scheduler::SchedulerJobData,
+        crate::web::routes::scheduler::SchedulerDailySuccessData,
+        crate::web::routes::scheduler::SchedulerToggleData,
+        crate::web::routes::scheduler::SchedulerHistoryData,
+        crate::web::routes::scheduler::JobCreateBody,
+        crate::web::routes::scheduler::JobUpdateBody,
+        // ---- scripts 域（T5-1b；run_script 结果复用 tasks 域 TaskExecuteData）----
+        schemas::DataEnvelope<crate::web::routes::scripts::ScriptDetailData>,
+        schemas::DataEnvelope<Vec<crate::web::routes::scripts::ScriptBinaryData>>,
+        crate::web::routes::scripts::ScriptDetailData,
+        crate::web::routes::scripts::ScriptBinaryData,
+        crate::web::routes::scripts::RunScriptBody,
+        // ---- repo 域（T5-1b；索引/任务为远程 JSON 透传，data 为任意值。
+        //      注意 serde_json::Value 不能直接进 components（AnyValue 无名，
+        //      生成代码会碎），只能作为泛型实参随信封注册）----
+        schemas::DataEnvelope<serde_json::Value>,
+        crate::web::routes::repo::RepoImageBody,
     )),
 )]
 pub struct ApiDoc;

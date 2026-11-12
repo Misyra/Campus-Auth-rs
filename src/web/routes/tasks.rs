@@ -8,33 +8,143 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::json;
+use utoipa::ToSchema;
 
 use crate::tasks::{OrderData, TaskApi, TaskRunApi};
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1b tasks 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`：成功响应一律
+// `body = DataEnvelope<XxxData>`，非 2xx 一律 `body = ErrorResponse`。
+// `TaskSummaryData` / `TaskExecuteData` 是对 `crate::tasks` 侧序列化形状的
+// **镜像声明**（handler 仍走 `data(serde_json::to_value(..))` 组装）；
+// `TaskDetailData.config` 为 `TaskKind` 完整配置，三态联合且字段众多，
+// 暂以 `value_type = Object` 标注（形状随 `src/tasks/models.rs` 演进，
+// 待强类型化批次收敛），不编造具体形状。
+
+/// GET /api/tasks 列表项（镜像 `crate::tasks::TaskSummary` 的线格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaskSummaryData {
+    /// 任务 ID（= 任务文件名 stem）
+    pub id: String,
+    /// 显示名称
+    pub name: String,
+    /// 任务描述
+    pub description: String,
+    /// 任务类型：`browser` / `script` / `http`
+    pub task_type: String,
+    /// 任务地址：浏览器任务=登录页地址，直连任务=请求地址，脚本任务为空串
+    pub url: String,
+    /// 直连任务的请求方法（"GET"/"POST"）；非直连任务为 null
+    pub http_method: Option<String>,
+    /// 最近修改时间（任务文件的 mtime，UTC RFC3339）；读不到时该字段缺省不出现
+    #[schema(nullable = false)]
+    pub modified_at: String,
+}
+
+/// GET /api/tasks/{id}、GET /api/tasks/export/{id} 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaskDetailData {
+    /// 任务摘要
+    pub summary: TaskSummaryData,
+    /// 完整配置：`TaskKind` 序列化（browser/script/http 三态联合；browser 含
+    /// steps 步骤数组、http 含 headers/body/判定关键字等、script 含 content/
+    /// binary_path 等）。形状随 `src/tasks/models.rs` 演进，待强类型化批次收敛
+    #[schema(value_type = Object)]
+    pub config: Value,
+}
+
+/// POST /api/tasks/import 失败明细条目
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaskImportFailureData {
+    /// 导入失败条目的任务 ID（按顶层 id / summary.id / task_id 依次识别）
+    pub id: String,
+    /// 失败原因（反序列化错误或保存校验错误文案）
+    pub reason: String,
+}
+
+/// POST /api/tasks/import 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaskImportData {
+    /// 成功导入的任务数
+    pub imported: u32,
+    /// 失败明细（逐条导入互不中止）
+    pub failed: Vec<TaskImportFailureData>,
+}
+
+/// POST /api/tasks/{id}/execute 响应载荷（镜像 `crate::tasks::TaskResult` 的线格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TaskExecuteData {
+    /// 是否成功（exit_code == 0 或 Bridge 返回 success）
+    pub success: bool,
+    /// 合并后的输出（stdout + stderr，超长截断）
+    pub output: String,
+    /// 进程退出码（Bridge 任务为 0/1）
+    pub exit_code: i32,
+    /// 执行耗时（毫秒）
+    pub duration_ms: u64,
+    /// 失败时的错误消息；成功时为 null
+    pub error: Option<String>,
+}
 
 /// GET /api/tasks — 列出全部自定义任务
+///
+/// 返回三类任务的摘要列表（不含完整配置；详情走 `GET /api/tasks/{id}`）。
+#[utoipa::path(
+    get,
+    path = "/api/tasks",
+    operation_id = "get_api_tasks",
+    tag = "tasks",
+    responses(
+        (status = 200, description = "全部自定义任务摘要（浏览器/脚本/直连三类）", body = DataEnvelope<Vec<TaskSummaryData>>),
+    )
+)]
 pub async fn list_tasks(State(tasks): State<Arc<dyn TaskApi>>) -> Result<Json<Value>, ApiError> {
     let tasks = tasks.list_all_tasks().await;
     Ok(data(tasks))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct TaskCreateBody {
+    /// 任务 ID（= 任务文件名 stem；`default` 保留给内置浏览器登录任务）
     pub id: String,
+    /// 显示名称
     pub name: String,
+    /// 任务类型：browser（缺省/空串）/ script / http；shell 已移除，明确 400
     pub kind: Option<String>,
+    /// 任务地址：浏览器任务=登录页地址，直连任务=请求地址（可后补）
     pub url: Option<String>,
+    /// 脚本内容（kind=script 时使用）
     pub script: Option<String>,
     /// browser 任务的步骤列表：缺省为空（由 save_task 的校验显式报错，
     /// 与 PUT /api/tasks 的口径一致），传入时反序列化为 StepConfig
     #[serde(default)]
+    #[schema(value_type = Vec<serde_json::Value>)]
     pub steps: Option<serde_json::Value>,
 }
 
 /// POST /api/tasks — 创建任务
+///
+/// 直连任务只建最小骨架（地址 + 名称），请求头/体/判定关键字等由任务编辑器
+/// 随后经 `PUT /api/tasks/{id}` 补齐。
+#[utoipa::path(
+    post,
+    path = "/api/tasks",
+    operation_id = "post_api_tasks",
+    tag = "tasks",
+    request_body(content = TaskCreateBody, description = "任务创建负载：kind 缺省/空串/browser 为浏览器任务；script 需带 script 内容；http 只建最小骨架"),
+    responses(
+        (status = 200, description = "创建成功", body = DataEnvelope<String>),
+        (status = 400, description = "任务 ID 非法、未知任务类型（shell 已移除）、steps 格式错误", body = ErrorResponse),
+        (status = 422, description = "任务校验失败（如 browser 任务 steps 为空、保留 ID 非浏览器任务等）", body = ErrorResponse),
+        (status = 500, description = "任务文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn create_task(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<TaskCreateBody>,
@@ -98,6 +208,19 @@ pub async fn create_task(
 /// 的 404，而同一个 id 在 PUT / DELETE 上是 400 —— 同一形态在三个方法上给出两种结论，
 /// 排查方向被带偏（自动保存打来一个畸形 id 时尤其明显）。交给加载路径判：
 /// `InvalidTaskId → 400`、`TaskNotFound → 404`，与写路径同一套口径。
+#[utoipa::path(
+    get,
+    path = "/api/tasks/{id}",
+    operation_id = "get_api_tasks_id",
+    tag = "tasks",
+    params(("id" = String, Path, description = "任务 ID（任务文件名 stem）")),
+    responses(
+        (status = 200, description = "任务摘要 + 完整配置", body = DataEnvelope<TaskDetailData>),
+        (status = 400, description = "任务 ID 形态非法（如路径穿越片段）", body = ErrorResponse),
+        (status = 404, description = "任务不存在", body = ErrorResponse),
+        (status = 500, description = "任务文件读取或序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_task(
     State(task_api): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
@@ -107,6 +230,20 @@ pub async fn get_task(
 }
 
 /// PUT /api/tasks/{id} — 更新任务
+#[utoipa::path(
+    put,
+    path = "/api/tasks/{id}",
+    operation_id = "put_api_tasks_id",
+    tag = "tasks",
+    params(("id" = String, Path, description = "任务 ID（路径参数为权威 id，body 内 task_id 会被写回对齐）")),
+    request_body(content = Value, description = "完整 `TaskKind` 配置（type 字段区分 browser/script/http；浏览器任务须带 steps，缺 type 时按 browser 反序列化）"),
+    responses(
+        (status = 200, description = "保存成功（upsert 语义，任务不存在时创建）", body = DataEnvelope<String>),
+        (status = 400, description = "负载反序列化失败或任务 ID 非法", body = ErrorResponse),
+        (status = 422, description = "任务校验失败（字段缺失/取值非法，details 携带字段级错误列表）", body = ErrorResponse),
+        (status = 500, description = "任务文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn update_task(
     State(tasks): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
@@ -119,6 +256,20 @@ pub async fn update_task(
 }
 
 /// DELETE /api/tasks/{id} — 删除任务
+#[utoipa::path(
+    delete,
+    path = "/api/tasks/{id}",
+    operation_id = "delete_api_tasks_id",
+    tag = "tasks",
+    params(("id" = String, Path, description = "任务 ID（任务文件名 stem）")),
+    responses(
+        (status = 200, description = "删除成功", body = DataEnvelope<String>),
+        (status = 400, description = "任务 ID 形态非法", body = ErrorResponse),
+        (status = 404, description = "任务不存在", body = ErrorResponse),
+        (status = 409, description = "内置默认登录任务（default）不可删除", body = ErrorResponse),
+        (status = 500, description = "任务文件删除失败", body = ErrorResponse),
+    )
+)]
 pub async fn delete_task(
     State(tasks): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
@@ -132,7 +283,7 @@ pub async fn delete_task(
 /// `all` 是**浏览器任务**的历史字段名（三类任务里它曾是唯一一类），刻意不改名：
 /// 改名会让「旧后端 + 新前端」这种组合（调试构建运行时读盘、前端先于后端更新时
 /// 真实存在）在拖拽排序时因缺字段而 400。
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct OrderBody {
     /// 浏览器任务 ID 顺序
     pub all: Vec<String>,
@@ -156,6 +307,17 @@ pub struct OrderBody {
 /// `PUT /api/tasks/{id}`（`save_task` 会把新 id 追进排序表）并发时会丢更新——
 /// 用户看到的是"拖完排序，另一类任务顺序莫名回退"。载荷本来就是全量的，
 /// 直接用请求体整体替换即可。
+#[utoipa::path(
+    post,
+    path = "/api/tasks/order",
+    operation_id = "post_api_tasks_order",
+    tag = "tasks",
+    request_body(content = OrderBody, description = "三类任务 ID 顺序（all=浏览器 / scripts=脚本 / http=直连），整体替换排序表；三组必须全量互传"),
+    responses(
+        (status = 200, description = "排序已保存", body = DataEnvelope<String>),
+        (status = 500, description = "排序文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn order_tasks(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<OrderBody>,
@@ -240,6 +402,17 @@ fn normalize_import_item(item: &Value) -> (String, Value) {
 /// ID 依次取顶层 `id`、导出详情的 `summary.id`、磁盘文件形态的 `task_id`；任务体
 /// 可为完整配置（含 `steps` 等 step 字段）或 `{"config": {...}}` 包裹的导出结果。
 /// 逐条导入互不中止，响应回传 `imported` 计数与 `failed` 失败明细。
+#[utoipa::path(
+    post,
+    path = "/api/tasks/import",
+    operation_id = "post_api_tasks_import",
+    tag = "tasks",
+    request_body(content = Value, description = "任务对象数组、单个任务对象或 {\"tasks\"|\"items\"|\"data\": [...]} 包裹均可；标准格式为导出端点原样结果（[{ summary: {id}, config }]），另兼容顶层 id 的扁平对象与磁盘文件的 task_id 形态"),
+    responses(
+        (status = 200, description = "导入完成（含部分失败：failed 列出失败条目与原因）", body = DataEnvelope<TaskImportData>),
+        (status = 400, description = "导入列表为空或载荷中没有任何可识别 ID 的任务记录", body = ErrorResponse),
+    )
+)]
 pub async fn import_tasks(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(body): Json<Value>,
@@ -301,6 +474,20 @@ pub async fn import_tasks(
 /// GET /api/tasks/export/{id} — 导出指定任务的完整配置
 ///
 /// 与 [`get_task`] 同口径：畸形 id 是 400（用户可改），不存在才是 404。
+/// 导出结果（`data` 字段）即标准导入格式，可直接回传 `POST /api/tasks/import`。
+#[utoipa::path(
+    get,
+    path = "/api/tasks/export/{id}",
+    operation_id = "get_api_tasks_export_id",
+    tag = "tasks",
+    params(("id" = String, Path, description = "任务 ID（任务文件名 stem）")),
+    responses(
+        (status = 200, description = "任务摘要 + 完整配置（与 GET /api/tasks/{id} 同形）", body = DataEnvelope<TaskDetailData>),
+        (status = 400, description = "任务 ID 形态非法", body = ErrorResponse),
+        (status = 404, description = "任务不存在", body = ErrorResponse),
+        (status = 500, description = "任务文件读取或序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn export_task(
     State(task_api): State<Arc<dyn TaskApi>>,
     Path(id): Path<String>,
@@ -313,6 +500,21 @@ pub async fn export_task(
 ///
 /// 浏览器任务走通用执行（不注入账号密码，用于打卡/签到等日常自动化）；
 /// 带凭据的登录语义请走 `POST /api/login`。
+#[utoipa::path(
+    post,
+    path = "/api/tasks/{id}/execute",
+    operation_id = "post_api_tasks_id_execute",
+    tag = "tasks",
+    params(("id" = String, Path, description = "任务 ID（任务文件名 stem）")),
+    responses(
+        (status = 200, description = "执行完成（成败以 success 字段为准，非 HTTP 状态码）", body = DataEnvelope<TaskExecuteData>),
+        (status = 400, description = "任务 ID 形态非法", body = ErrorResponse),
+        (status = 404, description = "任务不存在", body = ErrorResponse),
+        (status = 409, description = "Worker 忙（调试会话进行中）", body = ErrorResponse),
+        (status = 500, description = "执行失败（Worker 通信异常等内部错误）", body = ErrorResponse),
+        (status = 503, description = "Python Worker 未安装", body = ErrorResponse),
+    )
+)]
 pub async fn execute_task(
     State(tasks): State<Arc<dyn TaskApi>>,
     State(runner): State<Arc<dyn TaskRunApi>>,
