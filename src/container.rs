@@ -198,7 +198,13 @@ impl ServiceContainer {
         .context("初始化 SchedulerService 失败")?;
 
         // ---- Layer 9：更新器 ----
-        let updater = UpdaterService::new(config.clone(), status.clone(), base_path.to_path_buf());
+        // 检查命中新版本（手动 + 后台自动两条路径）发布 UpdateAvailable 的事件源
+        let updater = UpdaterService::new_with_events(
+            config.clone(),
+            status.clone(),
+            base_path.to_path_buf(),
+            events.clone(),
+        );
 
         // 启动时应用待处理更新：后台 spawn，不在构造内 await（内含网络请求，慢网会阻塞启动）。
         // 并发说明（F9）：与手动 apply_update 统一走 update_in_progress 原子标记互斥，

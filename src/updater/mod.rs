@@ -22,6 +22,7 @@ use semver::Version;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ConfigService;
+use crate::events::{AppEvent, EventBus, UpdateSummary};
 use crate::status::{InstallProgress, LoginStatus, PartialSnapshot, StatusManager};
 
 mod apply;
@@ -160,6 +161,9 @@ pub struct UpdaterService {
     config: Arc<ConfigService>,
     /// 状态管理器（推送 update_available / 下载进度）
     status: Arc<StatusManager>,
+    /// 事件总线（检查命中新版本时发布 [`AppEvent::UpdateAvailable`]；
+    /// 载荷为版本号白名单摘要，见 `src/events/` 模块 doc）
+    events: Arc<EventBus>,
     /// 跟随系统/环境代理的客户端（未配置显式代理时的回退）
     http_client: reqwest::Client,
     /// 项目根目录（用于构造 update/ staging 路径）
@@ -257,12 +261,27 @@ impl UpdaterApi for UpdaterService {
 impl UpdaterService {
     /// 构造更新器服务
     ///
-    /// 解析 `CARGO_PKG_VERSION` 为 `semver::Version`（解析失败时回退 `0.0.0`，
-    /// 该情况下不会误报更新）；返回 `Arc<Self>` 以便共享。参数顺序与类型由容器调用约定固定。
+    /// 事件发往**孤立总线**（无订阅者）：仅供既有测试装配等不关心事件发布的调用方
+    /// 使用；生产入口是 [`Self::new_with_events`]，由容器注入共享 [`EventBus`]。
     pub fn new(
         config: Arc<ConfigService>,
         status: Arc<StatusManager>,
         base_path: PathBuf,
+    ) -> Arc<Self> {
+        Self::new_with_events(config, status, base_path, Arc::new(EventBus::new()))
+    }
+
+    /// 构造更新器服务并注入事件总线（容器生产入口）
+    ///
+    /// 解析 `CARGO_PKG_VERSION` 为 `semver::Version`（解析失败时回退 `0.0.0`，
+    /// 该情况下不会误报更新）；返回 `Arc<Self>` 以便共享。检查命中新版本
+    /// （手动 [`Self::check_update`] 与后台 [`Self::start_background_check`] 两条
+    /// 路径）时发布 [`AppEvent::UpdateAvailable`]。
+    pub fn new_with_events(
+        config: Arc<ConfigService>,
+        status: Arc<StatusManager>,
+        base_path: PathBuf,
+        events: Arc<EventBus>,
     ) -> Arc<Self> {
         let current_version = match Version::parse(env!("CARGO_PKG_VERSION")) {
             Ok(v) => v,
@@ -287,6 +306,7 @@ impl UpdaterService {
         Arc::new(Self {
             config,
             status,
+            events,
             http_client,
             base_path,
             current_version,
@@ -341,6 +361,7 @@ impl UpdaterService {
                             &service.config, &service.status, &client,
                             &service.current_version, &service.base_path,
                             &service.update_in_progress, &service.state_lock,
+                            &service.events,
                         ) => result,
                     };
                     if let Err(error) = result {
@@ -475,6 +496,14 @@ impl UpdaterService {
         if !has_update {
             return Ok(None);
         }
+
+        // 发现可用更新：发布事件（仅命中新版本时发布；无更新 / 检查失败 /
+        // 平台包缺失均不发）。载荷为版本号白名单摘要，不含下载 URL 等细节
+        self.events
+            .publish(AppEvent::UpdateAvailable(UpdateSummary {
+                version: manifest.version.to_string(),
+                current_version: Some(self.current_version.to_string()),
+            }));
 
         // 手动更新：探测 update/ 根目录下是否有摘要一致的本地安装包，命中即提示
         // 前端"将跳过下载"。此处仅回报，不移动文件——应用阶段会重新扫描并按
@@ -1365,12 +1394,16 @@ fn effective_client_for(
     fallback
 }
 
-/// 拉取清单并判断是否存在对当前版本"感兴趣"的更新；有则推送状态快照
+/// 拉取清单并判断是否存在对当前版本"感兴趣"的更新；有则推送状态快照并发布事件
 ///
 /// 成功时同步刷新 `update/last_check.json`（失败由调用方记录 error 态）。
-/// `update_in_progress` 为 true（下载/应用进行中，UPD-1）时跳过状态 merge：
-/// merge 的 `progress: None` 会把下载任务的实时进度清零、`available: false`
-/// 会把"更新中"误报回退；last_check 记录不受影响。
+/// `update_in_progress` 为 true（下载/应用进行中，UPD-1）时跳过状态 merge 与
+/// 事件发布：merge 的 `progress: None` 会把下载任务的实时进度清零、
+/// `available: false` 会把"更新中"误报回退；last_check 记录不受影响。
+/// 命中新版本时发布 [`AppEvent::UpdateAvailable`]（与手动 [`UpdaterService::check_update`]
+/// 同语义，仅命中才发）。
+// events 为追加的发布源参数，参数整体为既有显式依赖注入口径（同 login::http_login 先例）
+#[allow(clippy::too_many_arguments)]
 async fn perform_update_check(
     config: &ConfigService,
     status: &StatusManager,
@@ -1379,6 +1412,7 @@ async fn perform_update_check(
     base_path: &std::path::Path,
     update_in_progress: &AtomicBool,
     state_lock: &std::sync::Mutex<()>,
+    events: &EventBus,
 ) -> Result<(), UpdaterError> {
     let settings = config.runtime().load().updater.clone();
     let manifest = check::fetch_manifest_for_channel(
@@ -1411,6 +1445,11 @@ async fn perform_update_check(
             progress: None,
         });
         tracing::info!("发现新版本: {} → {}", current_version, manifest.version);
+        // 发现可用更新：发布事件（与手动 check_update 同语义，仅命中才发）
+        events.publish(AppEvent::UpdateAvailable(UpdateSummary {
+            version: manifest.version.to_string(),
+            current_version: Some(current_version.to_string()),
+        }));
     } else {
         // 无更新时显式清 false：同进程内一次置 true 后若不清除，
         // 快照会跨"无更新"检查残留（重启归零，但长跑进程会一直误报）
@@ -1488,6 +1527,7 @@ fn log_check_failure(stage: &str, e: &UpdaterError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::EventEnvelope;
 
     /// 关闭和缩短周期都使用最新设置，不能继续等待旧周期。
     ///
@@ -1620,6 +1660,7 @@ mod tests {
                     &service.base_path,
                     &service.update_in_progress,
                     &service.state_lock,
+                    &service.events,
                 )
                 .await
             }
@@ -1713,6 +1754,167 @@ mod tests {
             .expect("构造 ConfigService 失败");
         let status = Arc::new(StatusManager::new());
         UpdaterService::new(config, status, base_path.to_path_buf())
+    }
+
+    /// 构造注入事件总线的测试用 UpdaterService（供 UpdateAvailable 发布断言订阅）
+    async fn make_service_with_events(
+        base_path: &std::path::Path,
+    ) -> (Arc<UpdaterService>, Arc<EventBus>) {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let config = crate::config::ConfigService::new(base_path.to_path_buf(), tx)
+            .await
+            .expect("构造 ConfigService 失败");
+        let status = Arc::new(StatusManager::new());
+        let events = Arc::new(EventBus::new());
+        let service = UpdaterService::new_with_events(
+            config,
+            status,
+            base_path.to_path_buf(),
+            events.clone(),
+        );
+        (service, events)
+    }
+
+    /// 起一个一次性本地清单服务：接受一次连接、读取请求后返回 `body` 并关闭
+    ///（回环 http 在更新源白名单放行范围内）
+    async fn spawn_manifest_server(body: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}/latest.json")
+    }
+
+    /// 命中新版本的清单：平台包齐全（sha256 非空，UPD-5），版本远高于当前
+    fn hit_manifest_body() -> String {
+        format!(
+            r#"{{"version":"999.0.0","platforms":{{"{}":{{"url":"https://example.invalid/pkg.zip","sha256":"{}"}}}}}}"#,
+            check::CURRENT_PLATFORM_KEY,
+            "a".repeat(64)
+        )
+    }
+
+    /// 无更新的清单：平台包齐全（走到版本比较而非平台缺失早退），版本不高于当前
+    fn no_update_manifest_body() -> String {
+        format!(
+            r#"{{"version":"0.0.1","platforms":{{"{}":{{"url":"https://example.invalid/pkg.zip","sha256":"{}"}}}}}}"#,
+            check::CURRENT_PLATFORM_KEY,
+            "a".repeat(64)
+        )
+    }
+
+    /// 把发布源指向一次性本地清单服务
+    async fn point_release_source(service: &UpdaterService, url: &str) {
+        let mut settings = service.config.load_settings();
+        settings.global.updater.release_source_url = url.to_string();
+        service.config.save_settings(&settings).await.unwrap();
+        service.config.reload().await.unwrap();
+    }
+
+    /// 取下一条事件（超时即 panic，防悬挂）
+    async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<EventEnvelope>) -> AppEvent {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Ok(envelope)) => envelope.event,
+            other => panic!("等待事件超时或失败: {other:?}"),
+        }
+    }
+
+    /// 断言窗口期内无事件到达（「仅命中新版本才发」的回归锚点）
+    async fn assert_no_event(rx: &mut tokio::sync::broadcast::Receiver<EventEnvelope>) {
+        let got = tokio::time::timeout(Duration::from_millis(80), rx.recv()).await;
+        assert!(got.is_err(), "不应有事件到达，实际: {got:?}");
+    }
+
+    /// 事件接入（UpdateAvailable）：手动 check_update 命中新版本时发布一次
+    /// （载荷为版本号白名单摘要）；远程版本不高于当前时不发布。
+    #[tokio::test]
+    async fn test_check_update_publishes_update_available_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, bus) = make_service_with_events(dir.path()).await;
+        let mut service = (*service).clone();
+        // 回环请求走显式去代理客户端，避免环境代理拦截本地 mock
+        service.http_client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut rx = bus.subscribe();
+
+        // 命中新版本：发布一次
+        let url = spawn_manifest_server(hit_manifest_body()).await;
+        point_release_source(&service, &url).await;
+        let info = service.check_update().await.unwrap().expect("应有新版本");
+        assert!(info.update_available);
+        assert_eq!(info.latest_version, "999.0.0");
+        let current = service.current_version.to_string();
+        match recv_event(&mut rx).await {
+            AppEvent::UpdateAvailable(summary) => {
+                assert_eq!(summary.version, "999.0.0");
+                assert_eq!(summary.current_version.as_deref(), Some(current.as_str()));
+            }
+            other => panic!("应为 UpdateAvailable，实际: {other:?}"),
+        }
+
+        // 无更新：不发布
+        let url = spawn_manifest_server(no_update_manifest_body()).await;
+        point_release_source(&service, &url).await;
+        let result = service.check_update().await.unwrap();
+        assert!(result.is_none(), "远程版本不高于当前应返回 None");
+        assert_no_event(&mut rx).await;
+    }
+
+    /// 事件接入（UpdateAvailable）：后台自动检查（perform_update_check）与手动
+    /// check_update 同语义——命中新版本发布一次，无更新不发布。
+    #[tokio::test]
+    async fn test_background_check_publishes_update_available_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, bus) = make_service_with_events(dir.path()).await;
+        let mut rx = bus.subscribe();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 无更新：不发布
+        let url = spawn_manifest_server(no_update_manifest_body()).await;
+        point_release_source(&service, &url).await;
+        perform_update_check(
+            &service.config,
+            &service.status,
+            &client,
+            &service.current_version,
+            &service.base_path,
+            &service.update_in_progress,
+            &service.state_lock,
+            &service.events,
+        )
+        .await
+        .unwrap();
+        assert_no_event(&mut rx).await;
+
+        // 命中新版本：发布一次
+        let url = spawn_manifest_server(hit_manifest_body()).await;
+        point_release_source(&service, &url).await;
+        perform_update_check(
+            &service.config,
+            &service.status,
+            &client,
+            &service.current_version,
+            &service.base_path,
+            &service.update_in_progress,
+            &service.state_lock,
+            &service.events,
+        )
+        .await
+        .unwrap();
+        match recv_event(&mut rx).await {
+            AppEvent::UpdateAvailable(summary) => {
+                assert_eq!(summary.version, "999.0.0");
+            }
+            other => panic!("应为 UpdateAvailable，实际: {other:?}"),
+        }
     }
 
     /// 取消待应用更新：待应用状态（pending.json + staging）真的清掉才算成功
