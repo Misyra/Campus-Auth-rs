@@ -6,6 +6,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { nextTick } from "vue";
+import { useToast } from "./useToast";
+import { ApiError } from "../api/client";
+import type { AutostartToggleResult } from "../api/types";
 
 const fetchMock = vi.fn();
 // 显式声明一个参数：否则 vi.fn(async () => ({})) 推断为零参签名，
@@ -15,6 +18,16 @@ const setLogLevelMock = vi.fn(async () => ({ message: "ok" }));
 const fetchLogLevelsMock = vi.fn(async () => ({ level: "INFO" }));
 const pureModeFetchMock = vi.fn(async () => ({ enabled: true }));
 const pureModeToggleMock = vi.fn(async () => ({ enabled: false }));
+// 具名 AutostartToggleResult（对齐后端 { message, warning? }）：status 供
+// toggleAutostart 收尾刷新（finally 里的 fetchAutostart）使用
+const autostartToggleMock = vi.fn(async (_enable: boolean): Promise<AutostartToggleResult> => ({ message: "ok" }));
+const autostartStatusMock = vi.fn(async () => ({
+  platform: "linux",
+  enabled: true,
+  method: "desktop file",
+  location: "",
+  runtime_mode: "full",
+}));
 
 vi.mock("../api", () => ({
   configApi: {
@@ -23,7 +36,10 @@ vi.mock("../api", () => ({
     setLogLevel: (...a: unknown[]) => setLogLevelMock(...(a as [])),
     fetchLogLevels: () => fetchLogLevelsMock(),
   },
-  autostartApi: { toggle: vi.fn() },
+  autostartApi: {
+    toggle: (enable: boolean) => autostartToggleMock(enable),
+    fetchStatus: () => autostartStatusMock(),
+  },
   pureModeApi: {
     fetch: () => pureModeFetchMock(),
     toggle: () => pureModeToggleMock(),
@@ -52,6 +68,8 @@ beforeEach(() => {
   setLogLevelMock.mockClear();
   pureModeFetchMock.mockClear();
   pureModeToggleMock.mockClear();
+  autostartToggleMock.mockClear();
+  autostartStatusMock.mockClear();
 });
 
 describe("dirty 快照比对", () => {
@@ -239,5 +257,41 @@ describe("dirty 快照比对", () => {
     await config.fetchPureMode(true);
     expect(config.pureMode.value).toBe(false);
     expect(config.config.browser.pure_mode).toBe(false);
+  });
+});
+
+describe("toggleAutostart 具名返回消费", () => {
+  it("成功时使用后端 message 提示，并在收尾刷新自启动状态", async () => {
+    const { toast } = useToast();
+    autostartToggleMock.mockResolvedValueOnce({
+      message: "已启用开机自启动并通过系统状态复核",
+    });
+    await config.toggleAutostart(true);
+    expect(autostartToggleMock).toHaveBeenCalledWith(true);
+    expect(toast.message).toBe("已启用开机自启动并通过系统状态复核");
+    // 全局轮询已移除：开关后的 fetchAutostart 是状态刷新的关键路径
+    expect(autostartStatusMock).toHaveBeenCalled();
+  });
+
+  it("warning 字符串时追加「配置缓存保存失败」失败提示（系统注册已生效）", async () => {
+    const { toast } = useToast();
+    autostartToggleMock.mockResolvedValueOnce({ message: "ok", warning: "模拟磁盘故障" });
+    await config.toggleAutostart(false);
+    expect(autostartToggleMock).toHaveBeenCalledWith(false);
+    expect(toast.message).toBe("系统设置已生效，但配置缓存保存失败：模拟磁盘故障");
+  });
+
+  it("message 缺省时回退本地文案", async () => {
+    const { toast } = useToast();
+    autostartToggleMock.mockResolvedValueOnce({});
+    await config.toggleAutostart(true);
+    expect(toast.message).toBe("启用自启动成功");
+  });
+
+  it("后端 404 时提示不支持而非笼统失败", async () => {
+    const { toast } = useToast();
+    autostartToggleMock.mockRejectedValueOnce(new ApiError("not found", 404));
+    await config.toggleAutostart(true);
+    expect(toast.message).toBe("当前后端版本不支持开机自启动，请重启后端");
   });
 });

@@ -11,6 +11,7 @@ import type {
   AiCaptureResult,
   AiLlmConfig,
   AutostartStatus,
+  AutostartToggleResult,
   BackgroundUploadResult,
   BinaryInfo,
   BrowserListResponse,
@@ -277,7 +278,10 @@ export const profilesApi = {
 /** 开机自启动 */
 export const autostartApi = {
   fetchStatus: () => http.get<AutostartStatus>("/api/autostart/status"),
-  toggle: (enable: boolean) => http.post<MutationResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
+  // toggle 走具名 AutostartToggleResult 而非通用 MutationResult：后端 enable/disable
+  // 的负载固定为 { message, warning? }（Windows 端缓存落盘失败时 warning 非 null），
+  // 收紧类型后调用方可直接消费具名字段
+  toggle: (enable: boolean) => http.post<AutostartToggleResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
 };
 
 /** 卸载 */

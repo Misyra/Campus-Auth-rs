@@ -203,6 +203,17 @@ export interface AutostartStatus {
   error?: string;
 }
 
+/**
+ * 开关自启动的业务结果（POST /api/autostart/enable|disable）。
+ *
+ * 后端先改系统注册再落盘配置缓存：Windows 端缓存写失败时系统已生效，
+ * `warning` 携带落盘失败原因（JSON null 或字符串）；其余平台仅返回 `message`。
+ */
+export interface AutostartToggleResult {
+  message?: string;
+  warning?: string | null;
+}
+
 /** 卸载检测项（GET /api/uninstall/detect） */
 export interface UninstallDetectItem {
   key: string;

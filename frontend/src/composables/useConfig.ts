@@ -284,9 +284,11 @@ async function toggleAutostart(enable: boolean): Promise<void> {
   busy.autostart = true;
   try {
     const data = await autostartApi.toggle(enable);
-    frontendLogger.info("autostart", data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
-    toastOnly(true, data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
-    if (typeof data?.warning === "string") {
+    // 具名 AutostartToggleResult：message 为后端业务提示，warning 仅 Windows 端
+    // 缓存落盘失败时非 null（系统注册已生效，只提醒不回滚）
+    frontendLogger.info("autostart", data.message || `${enable ? "启用" : "关闭"}自启动成功`);
+    toastOnly(true, data.message || `${enable ? "启用" : "关闭"}自启动成功`);
+    if (typeof data.warning === "string") {
       frontendLogger.warn("autostart", data.warning);
       toastOnly(false, `系统设置已生效，但配置缓存保存失败：${data.warning}`);
     }
