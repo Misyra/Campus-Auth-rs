@@ -155,7 +155,7 @@ fn dialog_note(data: &Value) -> String {
 
 /// 渠道标识（事件载荷 `LoginSummary.channel`）：与 `LoginChannel` 的 serde
 /// snake_case 序列化同值（browser / http / script），词表固定、不含用户数据
-fn login_channel_code(channel: LoginChannel) -> &'static str {
+pub(crate) fn login_channel_code(channel: LoginChannel) -> &'static str {
     match channel {
         LoginChannel::Browser => "browser",
         LoginChannel::Http => "http",

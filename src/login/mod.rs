@@ -1221,6 +1221,7 @@ impl LoginOrchestrator {
         let history = self.history.clone();
         let status_manager = self.status.clone();
         let metrics = self.metrics.clone();
+        let events = self.events.clone();
         tokio::spawn(async move {
             // 内层独立 spawn：JoinHandle 不会像 watch channel 一样被句柄持有者
             // "保活"——run() panic 时内层返回 Err，外层可据此补写终态。
@@ -1259,6 +1260,17 @@ impl LoginOrchestrator {
                     message: Some(message.to_string()),
                     retry_count: 0,
                 });
+                // 事件总线：会话 panic 同样是登录失败终态——与 emit 的发布口径
+                // 一致（此处是绕过 session 的防御性补偿路径，故就地发布）；
+                // attempt 置 None：补偿发生在尝试计数之外，消费者无需展示次数
+                events.publish(crate::events::AppEvent::LoginFailed(
+                    crate::events::LoginSummary {
+                        profile_id: profile_id.clone(),
+                        channel: session::login_channel_code(channel.clone()).to_string(),
+                        reason: Some(message.to_string()),
+                        attempt: None,
+                    },
+                ));
                 let entry = LoginHistoryEntry {
                     timestamp: chrono::Local::now(),
                     source,
