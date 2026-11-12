@@ -806,6 +806,19 @@ impl ConfigService {
             .lock()
             .unwrap_or_else(recover_lock)
             .remove(id);
+        // 删除方案联动清理持久浏览器会话目录（best-effort）：目录不存在视为
+        // 已清理；失败仅告警不使删除失败——方案删除本身已成功，残留目录只含
+        // 浏览器持久上下文数据（cookie/localStorage），不影响正确性
+        let profile_data_dir = crate::utils::paths::browser_profile_dir(&self.base_path, id);
+        if profile_data_dir.exists()
+            && let Err(e) = std::fs::remove_dir_all(&profile_data_dir)
+        {
+            tracing::warn!(
+                dir = %profile_data_dir.display(),
+                error = %e,
+                "清理方案持久浏览器目录失败（best-effort，忽略）"
+            );
+        }
         // active 已变更：重载使 RuntimeConfig 同步切换到 default 凭证，
         // 避免快照继续暴露已删除 Profile 的凭据；重载失败不回滚删除
         //（文件已移入 .trash，重试 reload 即可恢复一致），仅告警
@@ -1975,6 +1988,42 @@ mod tests {
             .unwrap();
         svc.delete_profile("other").await.unwrap();
         assert_eq!(svc.load_settings().active_profile_id, "home");
+    }
+
+    // ============ 删除方案联动清理持久浏览器目录（T3-3b） ============
+
+    /// 删除方案时 best-effort 清理 browser_profiles/<id>/：有数据则删净，
+    /// 目录不存在（未启用过持久会话）的删除路径同样成功
+    #[tokio::test]
+    async fn test_delete_profile_cleans_browser_profile_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        let profiles = ProfileService::new(svc.clone());
+
+        // 预置启用过持久会话的方案：持久目录含浏览器数据文件
+        profiles
+            .create_profile("dorm", ProfileData::default())
+            .await
+            .unwrap();
+        let data_dir = crate::utils::paths::browser_profile_dir(tmp.path(), "dorm");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("Cookies"), "persistent").unwrap();
+
+        svc.delete_profile("dorm").await.unwrap();
+        assert!(
+            !data_dir.exists(),
+            "删除方案必须联动清理持久浏览器目录（best-effort）"
+        );
+
+        // 目录不存在的方案删除（未启用过持久会话）同样成功：不存在视为已清理
+        profiles
+            .create_profile("plain", ProfileData::default())
+            .await
+            .unwrap();
+        svc.delete_profile("plain").await.unwrap();
     }
 
     // ============ G4：迁移 commit 顺序 ============
