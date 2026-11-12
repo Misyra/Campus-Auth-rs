@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
+use super::BridgeError;
 use crate::utils::recover_lock;
 
 /// pending 取消请求的保留时长
@@ -210,9 +211,59 @@ impl Drop for SessionGuard {
     }
 }
 
+/// 不占用登录/调试单会话槽的轻量命令。
+pub(super) fn is_lightweight_method(method: &str) -> bool {
+    matches!(method, "ocr_recognize" | "feedback_capture")
+}
+
+/// 会话互斥矩阵：判断新请求 `method` 与当前活跃会话 `current` 是否兼容。
+///
+/// 兼容（允许继续）：
+/// - 无活跃会话：任意方法
+/// - InLogin + (execute_login_attempt/execute_browser_task/debug_start)：FIFO 排队
+/// - InDebug + (debug_step/debug_stop/debug_run_all)：FIFO 排队
+/// - OCR / 反馈捕获等轻量命令可与任意会话并发
+///
+/// 不兼容（快速失败 [`BridgeError::WorkerBusy`]）：
+/// - InLogin + (debug_step/debug_stop)
+/// - InDebug + (execute_login_attempt/execute_browser_task)：登录请求快速失败
+/// - InDebug + debug_start：已有调试会话
+/// - RedirectTest 与所有非轻量会话互斥：可见临时窗口不得被登录/调试关闭
+///
+/// `ocr_recognize` / `feedback_capture` 为轻量命令，允许与任意会话并发。
+pub(super) fn check_session_compat(
+    current: Option<SessionType>,
+    method: &str,
+) -> Result<(), BridgeError> {
+    if method == "ocr_recognize" || method == "feedback_capture" {
+        return Ok(());
+    }
+    match current {
+        None => Ok(()),
+        Some(SessionType::Login) => match method {
+            "debug_step" | "debug_stop" | "test_redirect" => Err(BridgeError::WorkerBusy),
+            _ => Ok(()),
+        },
+        Some(SessionType::RedirectTest) => Err(BridgeError::WorkerBusy),
+        Some(SessionType::Debug) => {
+            if method.starts_with("debug_") {
+                match method {
+                    // debug_status / feedback_capture 为无副作用查询，允许在会话存续期随时调用
+                    "debug_step" | "debug_stop" | "debug_run_all" | "debug_status"
+                    | "feedback_capture" => Ok(()),
+                    _ => Err(BridgeError::WorkerBusy),
+                }
+            } else {
+                Err(BridgeError::WorkerBusy)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::test_support::{assert_busy, assert_ok};
 
     /// cancel 先于 register 到达（pending 命中）→ 注册时立即取消
     #[test]
@@ -297,5 +348,92 @@ mod tests {
         reg.clear();
         assert!(!reg.contains("session-9"));
         assert!(!reg.contains("ocr-9"));
+    }
+
+    // ============ 会话互斥矩阵 ============
+
+    #[test]
+    fn 无会话_任意方法均兼容() {
+        for m in [
+            "execute_login_attempt",
+            "execute_browser_task",
+            "test_redirect",
+            "debug_start",
+            "debug_step",
+            "debug_stop",
+            "ocr_recognize",
+            "feedback_capture",
+        ] {
+            assert_ok(None, m);
+        }
+    }
+
+    #[test]
+    fn 登录会话_允许登录与浏览器任务() {
+        assert_ok(Some(SessionType::Login), "execute_login_attempt");
+        assert_ok(Some(SessionType::Login), "execute_browser_task");
+        assert_busy(Some(SessionType::Login), "test_redirect");
+    }
+
+    #[test]
+    fn 登录会话_允许启动调试会话() {
+        // 计划矩阵：InLogin + debug_start 走 FIFO 排队
+        assert_ok(Some(SessionType::Login), "debug_start");
+    }
+
+    #[test]
+    fn 登录会话_调试步进与停止应忙碌() {
+        assert_busy(Some(SessionType::Login), "debug_step");
+        assert_busy(Some(SessionType::Login), "debug_stop");
+    }
+
+    #[test]
+    fn 调试会话_允许步进与停止() {
+        assert_ok(Some(SessionType::Debug), "debug_step");
+        assert_ok(Some(SessionType::Debug), "debug_stop");
+        assert_ok(Some(SessionType::Debug), "debug_run_all");
+    }
+
+    #[test]
+    fn 调试会话_再次启动调试应忙碌() {
+        assert_busy(Some(SessionType::Debug), "debug_start");
+    }
+
+    #[test]
+    fn 调试会话_登录与浏览器任务应忙碌() {
+        assert_busy(Some(SessionType::Debug), "execute_login_attempt");
+        assert_busy(Some(SessionType::Debug), "execute_browser_task");
+        assert_busy(Some(SessionType::Debug), "test_redirect");
+    }
+
+    #[test]
+    fn 重定向检测_独占浏览器会话() {
+        for method in [
+            "execute_login_attempt",
+            "execute_browser_task",
+            "test_redirect",
+            "debug_start",
+            "debug_step",
+            "debug_stop",
+        ] {
+            assert_busy(Some(SessionType::RedirectTest), method);
+        }
+    }
+
+    #[test]
+    fn ocr识别_与任意会话并发兼容() {
+        assert_ok(None, "ocr_recognize");
+        assert_ok(Some(SessionType::Login), "ocr_recognize");
+        assert_ok(Some(SessionType::RedirectTest), "ocr_recognize");
+        assert_ok(Some(SessionType::Debug), "ocr_recognize");
+    }
+
+    #[test]
+    fn 反馈捕获_走轻量路径且与任意会话兼容() {
+        assert!(is_lightweight_method("feedback_capture"));
+        assert_ok(None, "feedback_capture");
+        assert_ok(Some(SessionType::Login), "feedback_capture");
+        assert_ok(Some(SessionType::RedirectTest), "feedback_capture");
+        assert_ok(Some(SessionType::Debug), "feedback_capture");
     }
 }
