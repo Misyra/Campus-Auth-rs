@@ -241,6 +241,25 @@ describe("submitManagementPassword", () => {
     expect(outcome).toEqual({ ok: false, code: "AUTH_REJECTED", message: "管理密码不正确" });
   });
 
+  it("400（双字段/均缺/非法请求体等防御面）映射为 AUTH_REJECTED 而非 NETWORK_ERROR", async () => {
+    // 前端自身请求恒为单字段良构，400 属后端防御面（bootstrap 与 password 双现/
+    // 均缺/非法 JSON，见 src/web/auth.rs respond_exchange）；锁定它落入凭据拒绝
+    // 分支而非网络错误——submitBootstrapSecret 共用同一 helper，行为一致
+    stubFetch(() =>
+      jsonResponse(
+        { error: { code: "BAD_REQUEST", message: "bootstrap 与 password 只能提供其一" } },
+        { status: 400 },
+      ),
+    );
+    const outcome = await submitManagementPassword("pw-123");
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.code).toBe("AUTH_REJECTED");
+      // 非 401 状态走本地 rejectMessage 兜底，不误报「无法连接服务」
+      expect(outcome.message).toBe("管理密码不正确");
+    }
+  });
+
   it("网络失败报 NETWORK_ERROR（中文提示）", async () => {
     stubFetch(() => {
       throw new TypeError("network down");
