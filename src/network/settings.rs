@@ -2,8 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+// JsonSchema：配置树（ProfileData.network）schemars 快照的叶子要求（阶段 5 T5-0）
+use schemars::JsonSchema;
+
 /// 校园网登录、检测和 DNS 的出口模式。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkMode {
     /// 忽略系统代理，使用系统路由。
@@ -18,7 +21,7 @@ pub enum NetworkMode {
 }
 
 /// 校园网流量的唯一出口配置；不影响更新下载等公网业务。
-#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkSettings {
     /// 出口模式。

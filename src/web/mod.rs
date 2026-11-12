@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod error;
 pub mod host;
+pub mod openapi;
 mod operations;
 mod routes;
 mod ssrf;
@@ -546,6 +547,48 @@ mod tests {
             table_only.is_empty(),
             "路由表存在但 openapi.json 未声明（需同步 openapi.json）: {table_only:?}"
         );
+    }
+
+    /// 生成 spec ⊇ 路由表（T5-0 契约管线）
+    ///
+    /// [`openapi::merged_openapi_json`] 是生成侧权威文档（utoipa 注解域 ⊕ 手写
+    /// baseline），合并结果必须完整覆盖路由表——后续批次把更多域改为生成源时，
+    /// 本测试保证"注解 → 生成 spec"链路不丢路由；committed 文件的方法+路径
+    /// 一致性仍由上方 `openapi_json_matches_route_table` 兜底。
+    #[test]
+    fn generated_openapi_covers_route_table() {
+        let spec = crate::web::openapi::merged_openapi_json();
+        const METHODS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
+
+        let mut spec_set = std::collections::BTreeSet::new();
+        for (path, ops) in spec
+            .get("paths")
+            .and_then(|p| p.as_object())
+            .expect("合并 spec 应含 paths 对象")
+        {
+            if !path.starts_with("/api/") && path != "/api" {
+                continue;
+            }
+            for method in ops
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.keys())
+                .filter(|k| METHODS.contains(&k.as_str()))
+            {
+                spec_set.insert(format!(
+                    "{} {}",
+                    method.to_uppercase(),
+                    normalize_path(path)
+                ));
+            }
+        }
+
+        for (method, path, _) in route_table() {
+            assert!(
+                spec_set.contains(&format!("{method} {}", normalize_path(path))),
+                "路由表条目 {method} {path} 未被生成 spec 覆盖"
+            );
+        }
     }
 
     /// CSP 必须同时放行远端字体所需的两个来源

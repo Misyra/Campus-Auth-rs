@@ -7,10 +7,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// JsonSchema：schemars 导出配置树的结构快照（阶段 5 T5-0，测试内快照最小面，
+// 见本文件 tests 的 config_json_schema_contains_core_sections）；仅追加契约
+// 描述能力，不参与 serde 序列化路径
+use schemars::JsonSchema;
+
 /// settings.json 顶层结构（v6 schema）
 ///
 /// 聚合全局配置 [`GlobalConfig`] 与活跃 Profile 引用。
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct SettingsData {
     /// 配置 schema 版本号，当前代码支持最高 [`crate::config::CURRENT_CONFIG_VERSION`]
@@ -38,7 +43,7 @@ impl Default for SettingsData {
 }
 
 /// 全局共享设置（所有 Profile 共享）
-#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(default)]
 pub struct GlobalConfig {
     /// 浏览器启动参数
@@ -62,7 +67,7 @@ pub struct GlobalConfig {
 }
 
 /// 浏览器启动参数
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct BrowserSettings {
     /// 是否无头模式
@@ -147,7 +152,7 @@ impl Default for BrowserSettings {
 ///
 /// 注：原 `enabled` 死字段已删除——监测启停由引擎 Start/Stop 控制，各探测
 /// 类型另有 tcp_enabled/http_enabled/url_enabled 独立开关。
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct MonitorSettings {
     /// 探测间隔（秒，默认 300；Engine 消费时钳制到 20~1200）
@@ -256,7 +261,7 @@ impl Default for MonitorSettings {
 }
 
 /// 暂停时段配置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct PauseSettings {
     /// 是否启用暂停时段（默认启用：23:00–06:00 夜间不自动登录，宿舍定时
@@ -285,7 +290,7 @@ impl Default for PauseSettings {
 }
 
 /// 日志配置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct LoggingSettings {
     /// 日志级别（ERROR/WARN/INFO/DEBUG/TRACE，大小写不敏感；无效值回退 INFO）
@@ -307,7 +312,7 @@ impl Default for LoggingSettings {
 }
 
 /// 会话级重试策略
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct RetrySettings {
     /// 最大重试次数
@@ -326,7 +331,7 @@ impl Default for RetrySettings {
 }
 
 /// Python Worker 管理
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct WorkerSettings {
     /// Worker 空闲超时（秒），超时后关闭释放内存
@@ -345,7 +350,7 @@ impl Default for WorkerSettings {
 }
 
 /// 应用级设置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct AppSettings {
     /// 启动后是否自动打开浏览器控制台
@@ -405,7 +410,7 @@ impl Default for AppSettings {
 /// - `Stable` 正式版：仅跟随稳定发布（GitHub releases/latest 语义）
 /// - `Prerelease` 测试版：仅跟随预发布（alpha/beta 等 prerelease）
 /// - `All` 全通道最新版：正式版与预发布一起比较，哪个高跟哪个
-#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateChannel {
     /// 正式版（默认）
@@ -418,7 +423,7 @@ pub enum UpdateChannel {
 }
 
 /// 自动更新配置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct UpdaterSettings {
     /// 启动时是否检查更新（`auto_check_enabled` 开启时生效）
@@ -517,7 +522,7 @@ fn default_notification_timeout() -> u32 {
 /// `Webhook` 为自定义 POST JSON 通道；`Bark` / `Serverchan` / `Telegram`
 /// 为预设通道（各自只需凭据字段，消息格式内建模板化，无需用户写模板）；
 /// `Os` 为本机桌面系统通知（无凭据、无远端端点）。
-#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationChannelKind {
     /// 自定义 Webhook（POST JSON 模板）
@@ -548,7 +553,7 @@ impl NotificationChannelKind {
 
 /// webhook 自定义请求头（`value` 可为密钥：明文存储，口径与 `proxy_url` 同级，
 /// 暴露面由 GET/PATCH /api/config 的 token 鉴权兜底）
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct NotificationHeader {
     /// 头名称（如 `Authorization`）
     pub name: String,
@@ -560,7 +565,7 @@ pub struct NotificationHeader {
 ///
 /// 各通道共有 `id` / `name` / `enabled` / `timeout_seconds`；预设通道只需
 /// 凭据字段，webhook 额外携带自定义头与 JSON 模板，系统通知无任何凭据字段。
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NotificationChannel {
     /// 自定义 Webhook：向 `url` POST 渲染后的 JSON 模板
@@ -730,7 +735,7 @@ impl NotificationChannel {
 ///
 /// 保存侧校验见 [`Self::validate`]（PATCH /api/config 合并后调用）；
 /// 消费方为 `crate::notification`（订阅 EventBus 后按配置推送）。
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(default)]
 pub struct NotificationSettings {
     /// 总开关（关闭后服务空转，不发送任何通知；测试发送端点不受此开关限制）
@@ -955,7 +960,7 @@ impl NotificationSettings {
 /// 自定义脚本——把登录动作整个交给用户写的脚本任务，由 Rust 起本地子进程执行，
 /// 同样不启动 Worker/浏览器（凭据经环境变量注入，契约见
 /// `docs/guides/custom-script-guide.md` 的「用脚本登录」一节）。
-#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginChannel {
     /// 浏览器自动化（默认）
@@ -1005,7 +1010,7 @@ impl LoginChannel {
 /// 受控词表（当前 `type` 为 `click`/`change`，`strategy` 为 `id`/`name`/
 /// `data-testid`/`data`/`text`/`structure`），枚举会在未来 Worker 新增词表值时
 /// 让旧主程序读不动方案文件；存储与回放按字面值处理即可。
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct RecordedAction {
     /// 动作类型：`click`（按钮/提交类点击）或 `change`（`<select>` 选择）
     #[serde(rename = "type")]
@@ -1025,7 +1030,7 @@ pub struct RecordedAction {
 ///
 /// 凭证类字段（如 [`ProfileData::password`]）在磁盘上以 `ENC:` 前缀的密文存储，
 /// 内存 `RuntimeConfig` 中解密为明文。
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct ProfileData {
     /// 统一校园网出口；缺省时在运行时兼容旧代理设置。
@@ -1097,7 +1102,9 @@ impl Default for ProfileData {
 }
 
 /// 启动动作枚举
-#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, clap::ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 #[clap(rename_all = "snake_case")]
 pub enum StartupAction {
@@ -1594,5 +1601,96 @@ mod tests {
         );
         s.quiet_start_hour = 25;
         assert!(s.quiet_window().is_none(), "越界时/分不得构造窗口");
+    }
+
+    // ============ schemars 配置树 JSON Schema 快照（T5-0） ============
+
+    /// 配置树 JSON Schema 快照必须含核心段
+    ///
+    /// 导出面取「测试内快照」而非新增 API 端点（最小面：契约管线尚不需要
+    /// 运行时 schema 服务，后续有消费方再升为 GET /api/config/schema）。
+    /// schemars 1.x 的形态：`schema_for!` 根类型内联在顶层（properties 直挂根），
+    /// 被引用的嵌套命名类型进 `$defs` 并以 `$ref` 关联——据此 SettingsData /
+    /// ProfileData 的字段断言落在根 properties，GlobalConfig 落在
+    /// `$defs/GlobalConfig/properties`；叶子 NetworkSettings 的 JsonSchema
+    /// derive 由 src/network/settings.rs 提供。
+    #[test]
+    fn config_json_schema_contains_core_sections() {
+        let settings = serde_json::to_value(schemars::schema_for!(SettingsData))
+            .expect("SettingsData schema 应可序列化");
+        let profile = serde_json::to_value(schemars::schema_for!(ProfileData))
+            .expect("ProfileData schema 应可序列化");
+
+        // settings.json 树：根内联 + 嵌套类型入 $defs
+        let defs = settings
+            .get("$defs")
+            .and_then(|d| d.as_object())
+            .expect("schemars 根 schema 应含 $defs");
+        for section in [
+            "GlobalConfig",
+            "BrowserSettings",
+            "MonitorSettings",
+            "PauseSettings",
+            "LoggingSettings",
+            "RetrySettings",
+            "WorkerSettings",
+            "AppSettings",
+            "UpdaterSettings",
+            "NotificationSettings",
+            "NotificationChannel",
+            "UpdateChannel",
+            "StartupAction",
+        ] {
+            assert!(
+                defs.contains_key(section),
+                "配置树 schema 缺少 {section} 定义"
+            );
+        }
+        for key in [
+            "config_version",
+            "active_profile_id",
+            "auto_switch",
+            "global",
+        ] {
+            assert!(
+                settings["properties"].get(key).is_some(),
+                "SettingsData 顶层缺少 {key} 字段"
+            );
+        }
+        let global_props = &defs["GlobalConfig"]["properties"];
+        for key in [
+            "browser",
+            "monitor",
+            "logging",
+            "app",
+            "updater",
+            "notification",
+        ] {
+            assert!(
+                global_props.get(key).is_some(),
+                "GlobalConfig 缺少 {key} 段"
+            );
+        }
+
+        // config/profiles/{id}.json 树：凭据、渠道绑定与持久会话字段齐备
+        let profile_props = &profile["properties"];
+        for key in [
+            "id",
+            "username",
+            "password",
+            "auth_url",
+            "isp",
+            "login_channel",
+            "active_http_task",
+            "active_script_task",
+            "persistent_session_enabled",
+            "recorded_actions",
+            "network",
+        ] {
+            assert!(
+                profile_props.get(key).is_some(),
+                "ProfileData 缺少 {key} 字段"
+            );
+        }
     }
 }

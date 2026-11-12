@@ -118,6 +118,15 @@ url = "2"
 # Trait
 async-trait = "0.1"
 
+# API 契约生成（阶段 5 T5-0）：`#[utoipa::path]` 注解 → OpenAPI 文档生成。
+# 版本选 5.x 线：axum_extras 特性在 5.5 要求 axum ^0.8，与本仓 axum 0.8 匹配
+# （6.0 为另一代大版本，本战役不追）。axum_extras 让 Query/Path 提取器
+# 参与参数 schema 推导
+utoipa = { version = "5.5", features = ["axum_extras"] }
+# 配置树 JSON Schema 导出（schemars 1.x 稳定线，MSRV 1.74 < 本仓 1.91）；
+# 仅用于 config 持久化树的契约快照，与 utoipa 的 ToSchema 体系互不复用
+schemars = "1.2"
+
 # 嵌入
 rust-embed = { version = "8", features = ["include-exclude"] }
 
