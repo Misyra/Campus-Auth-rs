@@ -241,9 +241,15 @@ jobs:
         run: uv sync --dev --frozen && uv run pytest
 
   e2e-login-chain:
-    name: E2E Login Chain
-    runs-on: windows-latest
-    timeout-minutes: 45
+    name: E2E Login Chain (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS 与 Windows 全链路同跑：mac 是发布目标平台（release.yml 双 darwin
+        # target），此前登录链路只在 Windows 验证，mac 侧回归要等打 tag 才暴露
+        os: [windows-latest, macos-latest]
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -294,7 +300,8 @@ jobs:
       # 全链路需要：Playwright chromium（浏览器执行）+ ddddocr（含 Pillow，mock
       # 验证码生成与 Worker OCR 共用；版本 pin 死保证可复现，升级前先本地验证
       # OCR 识别率）+ OCR 模型预热（首载下载约 20MB，预热后计入 uv 缓存，
-      # 不占用测试时间）
+      # 不占用测试时间）。双平台同一套步骤：macOS/Windows runner 上 chromium
+      # 无需系统依赖补装（Linux 才需要 playwright install --with-deps）
       - name: 准备 E2E 环境（浏览器 + OCR）
         working-directory: python_worker
         run: |
