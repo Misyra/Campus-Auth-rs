@@ -182,9 +182,11 @@
   border-left-color: var(--accent);
 }
 
-/* 级别左边框色条：一眼识别严重程度 */
-.log-entry.log-error { border-left-color: var(--error); }
-.log-entry.log-warn, .log-entry.log-warning { border-left-color: var(--warning); }
+/* 级别左边框色条：一眼识别严重程度。error/warn 走 --log-* 语义 token
+   （base.css 定义，与 log-viewer.css 的级别徽标同源）；info 透明、debug 弱化
+   slate 是刻意的弱化设计，不走 token（改这两个需与徽标侧核对观感） */
+.log-entry.log-error { border-left-color: var(--log-error); }
+.log-entry.log-warn, .log-entry.log-warning { border-left-color: var(--log-warn); }
 .log-entry.log-info { border-left-color: transparent; }
 .log-entry.log-debug, .log-entry.log-trace { border-left-color: rgba(var(--slate-rgb), 0.35); }
 
@@ -202,8 +204,8 @@
   color: var(--text-secondary);
 }
 
-.log-entry.log-error .log-message { color: var(--error); }
-.log-entry.log-warn .log-message, .log-entry.log-warning .log-message { color: var(--warning); }
+.log-entry.log-error .log-message { color: var(--log-error); }
+.log-entry.log-warn .log-message, .log-entry.log-warning .log-message { color: var(--log-warn); }
 .log-entry.log-success .log-message { color: var(--success); }
 
 /* 消息 + 截图容器 */

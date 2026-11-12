@@ -70,6 +70,14 @@
   --success-rgb: 16, 185, 129;
   --warning-rgb: 245, 158, 11;
   --error-rgb: 239, 68, 68;
+  /* 日志级别语义色：徽标（log-viewer.css .level-*）与仪表盘日志行左边框/正文
+     （dashboard.css .log-*）共用同一出处，级别配色改动只落这里（var 间接引用
+     随主题重映射自动生效）。info 行左边框透明、debug 行用弱化 slate 是刻意的
+     弱化设计（缺省级别不抢眼），不走 --log-info/--log-debug，改动需同步两文件。 */
+  --log-info: var(--primary);
+  --log-warn: var(--warning);
+  --log-error: var(--error);
+  --log-debug: var(--text-muted);
   --purple: #a78bfa;
   --primary: #3b82f6;
   /* 警示底色上的文字：琥珀/黄色底永远配深字（浅色主题同理，不走 --on-accent 的对比度切换） */
