@@ -157,24 +157,6 @@
   min-width: 0;
 }
 
-/* 圆角补偿：卡片不再裁切，由首尾单元格把圆角带出来。
-   表头不再铺底色（见下），故只有"会被染色的那一行"需要圆角——即悬停时的最后一行；
-   有页脚时底角归页脚，最后一行不再承担。
-   半径取 `--radius-xl`，与卡片自身一致（差一档会在圆角处露出约 2px 方角）。 */
-.tsk-table tbody tr:last-child td:first-child {
-  border-bottom-left-radius: var(--radius-xl);
-}
-
-.tsk-table tbody tr:last-child td:last-child {
-  border-bottom-right-radius: var(--radius-xl);
-}
-
-/* 有页脚时圆角归页脚，最后一行不再承担底角 */
-.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:first-child,
-.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:last-child {
-  border-radius: 0;
-}
-
 .tsk-table th {
   text-align: left;
   padding: 12px var(--space-md);
@@ -214,6 +196,19 @@
   background: var(--bg-hover);
 }
 
+/* 圆角补偿：卡片不再裁切，由首尾单元格把圆角带出来。
+   表头不再铺底色（见上），故只有"会被染色的那一行"需要圆角——即悬停时的最后一行；
+   有页脚时底角归页脚，最后一行不再承担。
+   半径取 `--radius-xl`，与卡片自身一致（差一档会在圆角处露出约 2px 方角）。
+   本组按升序特异度排在基础 td 规则之后。 */
+.tsk-table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: var(--radius-xl);
+}
+
+.tsk-table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: var(--radius-xl);
+}
+
 /* 空态那一行不是数据行（没有 @click），别给它手型光标与悬停变色：
    整块 200px 高的区域变蓝又说"能点"，点下去毫无反应 */
 .tsk-table tbody tr:has(.empty-state) {
@@ -222,6 +217,12 @@
 
 .tsk-table tbody tr:has(.empty-state):hover td {
   background: transparent;
+}
+
+/* 有页脚时圆角归页脚，最后一行不再承担底角 */
+.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:first-child,
+.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:last-child {
+  border-radius: 0;
 }
 
 /* 单元格省略：fixed 布局下省略号需要单元格自己 min-width:0 */
@@ -375,13 +376,14 @@
   transition: background var(--dur-base) var(--ease-out);
 }
 
-.tsk-menu button:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
+/* 禁用态先于 hover 态（升序特异度）；hover 规则带 :not(:disabled) 本就不会命中禁用按钮 */
 .tsk-menu button:disabled {
   color: var(--text-muted);
   cursor: default;
+}
+
+.tsk-menu button:hover:not(:disabled) {
+  background: var(--bg-hover);
 }
 
 .tsk-menu .tsk-menu-danger {

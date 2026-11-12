@@ -324,6 +324,9 @@
   font-size: var(--text-md);
 }
 
+/* 图标尺寸并排声明：本规则特异度低于 .action-buttons .btn svg，按升序特异度排在其前 */
+.network-status-symbol svg { width: 20px; height: 20px; }
+
 .action-buttons .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
 
 .history-actions {
@@ -424,6 +427,11 @@
 }
 
 /* 环境提示只保留两个明确的操作入口，避免横幅本身也承担隐含点击行为。 */
+.network-status-banner .status-text {
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+
 .network-status-banner.env-banner {
   min-height: 0;
   padding: 10px 16px;
@@ -449,15 +457,16 @@
   cursor: pointer;
 }
 
+/* 禁用态先于 hover 态（升序特异度）；hover 规则带 :not(:disabled) 本就不会命中禁用按钮 */
+.network-status-banner.env-banner .env-banner-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .network-status-banner.env-banner .env-banner-action:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
   box-shadow: none;
   transform: none;
-}
-
-.network-status-banner.env-banner .env-banner-action:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .network-status-banner.env-banner .env-banner-detail {
@@ -485,11 +494,6 @@
 .network-status-banner.checking .status-dot {
   background: var(--primary);
   animation: pulse 2s ease-in-out infinite;
-}
-
-.network-status-banner .status-text {
-  font-size: var(--text-base);
-  font-weight: 500;
 }
 
 .network-status-banner .status-detail {
@@ -526,7 +530,6 @@
   color: var(--text-secondary);
 }
 
-.network-status-symbol svg { width: 20px; height: 20px; }
 .connected .network-status-symbol { background: var(--success-bg); color: var(--success); }
 .disconnected .network-status-symbol { background: var(--error-bg); color: var(--error); }
 .checking .network-status-symbol { background: rgba(var(--primary-rgb), 0.12); color: var(--primary); }
@@ -550,7 +553,8 @@
   line-height: 1.25;
 }
 
-.network-status-hero .status-dot {
+/* 与本组其余规则同为 .dashboard-page > 前缀（特异度不低于横幅状态变体，覆盖其 pulse 动画） */
+.dashboard-page > .network-status-hero .status-dot {
   width: 7px;
   height: 7px;
   animation: none;
