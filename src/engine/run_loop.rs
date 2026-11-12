@@ -851,6 +851,11 @@ impl Drop for AutoLoginReturnGuard {
 ///   结果中基于旧配置的判断（auth_url 可达性）不得触发自动登录。
 ///
 /// 状态合并不受前三者影响——迟到的网络事实仍值得呈现给前端。
+///
+/// 结构上按消息类型与处理阶段拆分（T7-5）：失败回传走
+/// [`handle_probe_failure`]，成功回传依次经 [`record_assessment_and_events`] →
+/// [`reschedule_adaptive_probe`] → [`merge_probe_snapshot`] →
+/// [`decide_auto_login`] → [`retrigger_pending_probe_if_due`]。
 fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &EngineDeps) {
     // 无论成败都先复位在途标记，否则后续检测被永久忽略
     inner.probe_in_flight = false;
@@ -872,49 +877,81 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
     let report = match msg {
         ProbeMessage::Report(r, _) => r,
         ProbeMessage::Failed(e, _) => {
-            tracing::warn!("网络探测执行失败: {}", e);
-            // 失败也要消费并立即执行排队的优先级检测；仅归还标记会因本分支提前
-            // 返回而无人消费，最终仍要等下一个常规周期。不要重新置 pending，
-            // 否则下一轮结果会额外触发一次无意义探测。
-            if pending && inner.monitoring && !is_any_pause_active(inner, deps) {
-                tracing::debug!("补发排队的优先级探测");
-                handle_network_check(inner, deps);
-            }
-            // ENG-2：失败同样刷新「最近检测」——monitor 系统性故障期间前端
-            // 时间冻结在最后一次成功值，会让用户误判检测停摆。合并最小快照：
-            // 网络结论与证据沿用上次（失败不产生新证据，evidence 置 None），
-            // 仅刷新 last_check；探测到期点维持原值不重算（有意设计，见下）
-            let now = Local::now();
-            inner.last_check_time = Some(now);
-            let paused = is_any_pause_active(inner, deps);
-            let cooling_down = inner.cooling_down_until.is_some();
-            let cooling_down_remaining = cooling_down.then(|| cooling_remaining_secs(inner));
-            let state = if inner.monitoring {
-                EngineState::Running
-            } else {
-                EngineState::Stopped
-            };
-            deps.status_manager.merge(PartialSnapshot::Engine {
-                state,
-                network: inner.last_assessment.status,
-                assessment: inner.last_assessment.clone(),
-                evidence: None,
-                last_check: now,
-                pause: paused,
-                cooling_down,
-                cooling_down_remaining,
-                consecutive_failures: inner.consecutive_failures,
-            });
+            handle_probe_failure(e, pending, inner, deps);
             return;
         }
     };
 
+    // 成功报告的处理链：记录与事件 → 自适应周期重算 → 快照合并 → 登录决策 → 补发排队探测
     let now = Local::now();
     inner.last_check_time = Some(now);
+    // 上一轮恢复建议供 FixConfiguration 日志去重（更新前取值，见记录段覆写）
+    let old_advice = inner.last_assessment.recovery_advice;
+    record_assessment_and_events(&report, inner, deps);
+    reschedule_adaptive_probe(&report, inner, deps);
+    let paused = is_any_pause_active(inner, deps);
+    // 冷却期内检查：若仍在冷却则跳过登录
+    let cooling_down = inner.cooling_down_until.is_some();
+    let gates = LoginDecisionGates {
+        probe_config_version,
+        config_stale,
+        paused,
+        cooling_down,
+        old_advice,
+    };
+    merge_probe_snapshot(&report, now, paused, cooling_down, inner, deps);
+    decide_auto_login(&report, &gates, inner, deps);
+    retrigger_pending_probe_if_due(pending, inner, deps);
+}
+
+/// 探测执行失败分支：补发排队探测 + 合并最小快照（ENG-2）
+///
+/// 失败同样刷新「最近检测」——monitor 系统性故障期间前端时间冻结在最后一次
+/// 成功值，会让用户误判检测停摆。合并最小快照：网络结论与证据沿用上次
+/// （失败不产生新证据，evidence 置 None），仅刷新 last_check；探测到期点
+/// 维持原值不重算（有意设计，见 [`reschedule_adaptive_probe`] 文档）。
+fn handle_probe_failure(e: String, pending: bool, inner: &mut EngineInner, deps: &EngineDeps) {
+    tracing::warn!("网络探测执行失败: {}", e);
+    // 失败也要消费并立即执行排队的优先级检测；仅归还标记会因本分支提前
+    // 返回而无人消费，最终仍要等下一个常规周期。不要重新置 pending，
+    // 否则下一轮结果会额外触发一次无意义探测。
+    retrigger_pending_probe_if_due(pending, inner, deps);
+    let now = Local::now();
+    inner.last_check_time = Some(now);
+    let paused = is_any_pause_active(inner, deps);
+    let cooling_down = inner.cooling_down_until.is_some();
+    let cooling_down_remaining = cooling_down.then(|| cooling_remaining_secs(inner));
+    let state = if inner.monitoring {
+        EngineState::Running
+    } else {
+        EngineState::Stopped
+    };
+    deps.status_manager.merge(PartialSnapshot::Engine {
+        state,
+        network: inner.last_assessment.status,
+        assessment: inner.last_assessment.clone(),
+        evidence: None,
+        last_check: now,
+        pause: paused,
+        cooling_down,
+        cooling_down_remaining,
+        consecutive_failures: inner.consecutive_failures,
+    });
+}
+
+/// 记录探测结论：状态转换日志 + 事件发布 + 会话内最新结论更新
+///
+/// 事件发布（渐进吸收，紧邻现有状态翻转日志）：仅在「通 ⇄ 断」真实翻转
+/// 边界发布，宁缺勿滥——
+/// - 初始未知态（Unknown）只是「尚未探测过」，不构成由断转通/由通转断，
+///   首探结论不发布；
+/// - 断态之间迁移（Offline ⇄ CaptivePortal）同属"未联网"，同态不重复发。
+///
+/// 探测执行失败分支不发布（无新证据、状态未翻转）。
+fn record_assessment_and_events(report: &ProbeReport, inner: &mut EngineInner, deps: &EngineDeps) {
     // 状态变化日志：仅在状态发生转换时记录 info，未变化保持静默（debug）。
     // 附各通道探测结论作为判定依据——排查"为什么判为离线/劫持"不必再翻 debug 日志
     let old_status = inner.last_assessment.status;
-    let old_advice = inner.last_assessment.recovery_advice;
     let status = report.assessment.status;
     if status != NetworkStatus::CaptivePortal {
         // 离开门户态即结束本次认证事件；以后再次进入门户态可重新谨慎尝试一次。
@@ -933,12 +970,6 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             report.evidence.url,
             report.latency_ms
         );
-        // 事件发布（渐进吸收，紧邻现有状态翻转日志）：仅在「通 ⇄ 断」真实翻转
-        // 边界发布，宁缺勿滥——
-        // - 初始未知态（Unknown）只是「尚未探测过」，不构成由断转通/由通转断，
-        //   首探结论不发布；
-        // - 断态之间迁移（Offline ⇄ CaptivePortal）同属"未联网"，同态不重复发。
-        // 探测执行失败分支不发布（无新证据、状态未翻转）。
         if old_status == NetworkStatus::Online && status != NetworkStatus::Online {
             deps.events.publish(AppEvent::NetworkDown(NetworkSummary {
                 profile_id: None,
@@ -963,11 +994,15 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
     }
     inner.last_assessment = report.assessment.clone();
     inner.last_evidence = Some(report.evidence.clone());
-    // 自适应探测间隔（C4）：异常态（CaptivePortal/Offline）短周期加密探测，
-    // 稳定在线按指数退避放大到配置的 check_interval。按墙钟从结果时刻重算
-    // 到期点——与 reset_check_deadline 同语义：刚做完一轮探测，到期点从现在
-    // 起算，不会立即重复探测形成风暴。探测 Failed 分支不重算（monitor 系统性
-    // 故障时维持原到期点，不放大故障）；暂停期无结果回传，周期自然保持
+}
+
+/// 自适应探测间隔重算（C4）：异常态（CaptivePortal/Offline）短周期加密探测，
+/// 稳定在线按指数退避放大到配置的 check_interval。按墙钟从结果时刻重算
+/// 到期点——与 reset_check_deadline 同语义：刚做完一轮探测，到期点从现在
+/// 起算，不会立即重复探测形成风暴。探测 Failed 分支不重算（monitor 系统性
+/// 故障时维持原到期点，不放大故障）；暂停期无结果回传，周期自然保持
+fn reschedule_adaptive_probe(report: &ProbeReport, inner: &mut EngineInner, deps: &EngineDeps) {
+    let status = report.assessment.status;
     if status == NetworkStatus::Online {
         inner.online_streak = inner.online_streak.saturating_add(1);
     } else {
@@ -983,10 +1018,17 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
     };
     inner.check_period_secs = next_secs;
     inner.next_check_at = inner.clock.now() + Duration::from_secs(next_secs);
-    let paused = is_any_pause_active(inner, deps);
-    // 冷却期内检查：若仍在冷却则跳过登录
-    let cooling_down = inner.cooling_down_until.is_some();
-    let cooling_remaining = cooling_down.then(|| cooling_remaining_secs(inner));
+}
+
+/// 合并本轮探测快照到 StatusManager（含 G23 累计指标推送）
+fn merge_probe_snapshot(
+    report: &ProbeReport,
+    now: DateTime<Local>,
+    paused: bool,
+    cooling_down: bool,
+    inner: &EngineInner,
+    deps: &EngineDeps,
+) {
     // 监测已停止时不得把状态合并回 Running（探测可能在 Stop 后才完成，
     // 与登录结果回传路径同一约束）
     let state = if inner.monitoring {
@@ -996,13 +1038,13 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
     };
     deps.status_manager.merge(PartialSnapshot::Engine {
         state,
-        network: status,
+        network: report.assessment.status,
         assessment: report.assessment.clone(),
         evidence: Some(report.evidence.clone()),
         last_check: now,
         pause: paused,
         cooling_down,
-        cooling_down_remaining: cooling_remaining,
+        cooling_down_remaining: cooling_down.then(|| cooling_remaining_secs(inner)),
         consecutive_failures: inner.consecutive_failures,
     });
     // G23：探测完成后在同一位置推送累计指标（probe_total 已由监测侧
@@ -1013,7 +1055,33 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             login_total,
         });
     }
+}
 
+/// 登录决策的门控输入（探测回传时刻的一次性快照）
+struct LoginDecisionGates {
+    /// 探测发起时的配置版本（谨慎重试预算的判定键）
+    probe_config_version: u64,
+    /// 探测结果基于过期配置（期间发生过 reload，登录决策丢弃）
+    config_stale: bool,
+    /// 暂停生效中（手动或计划暂停）
+    paused: bool,
+    /// 冷却期内
+    cooling_down: bool,
+    /// 上一轮恢复建议（FixConfiguration 日志去重）
+    old_advice: RecoveryAdvice,
+}
+
+/// 登录决策段：监测层给出恢复建议后由 Engine 的运行态门控统一决定是否执行
+///
+/// 建议为自动登录且通过完整门控链（停止/暂停/配置失配/冷却/在途登录/
+/// 谨慎重试预算）时 `tokio::spawn` 自动登录会话，结果经 `login_result_tx`
+/// 回传主循环；其余建议仅记录决策日志。
+fn decide_auto_login(
+    report: &ProbeReport,
+    gates: &LoginDecisionGates,
+    inner: &mut EngineInner,
+    deps: &EngineDeps,
+) {
     // 监测层只给出恢复建议；是否执行由 Engine 的运行态门控统一决定。
     let advice = report.assessment.recovery_advice;
     if matches!(
@@ -1021,15 +1089,15 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
         RecoveryAdvice::AttemptLogin | RecoveryAdvice::AttemptLoginOnce
     ) {
         let cautious_already_attempted = advice == RecoveryAdvice::AttemptLoginOnce
-            && inner.cautious_blocked(probe_config_version);
+            && inner.cautious_blocked(gates.probe_config_version);
 
         if !inner.monitoring {
             tracing::debug!("检测已停止，跳过本轮自动登录（迟到探测结果）");
-        } else if paused {
+        } else if gates.paused {
             tracing::debug!("检测处于暂停状态，跳过本轮自动登录（迟到探测结果）");
-        } else if config_stale {
+        } else if gates.config_stale {
             tracing::info!("探测结果基于过期配置，跳过本轮自动登录");
-        } else if cooling_down {
+        } else if gates.cooling_down {
             tracing::debug!(
                 consecutive_failures = inner.consecutive_failures,
                 "冷却期中，跳过本轮登录"
@@ -1038,12 +1106,12 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             tracing::debug!("自动登录会话仍在途，跳过本轮触发");
         } else if cautious_already_attempted {
             tracing::debug!(
-                config_version = probe_config_version,
+                config_version = gates.probe_config_version,
                 "本次门户事件已执行过谨慎登录，等待网络状态或配置变化"
             );
         } else {
             if advice == RecoveryAdvice::AttemptLoginOnce {
-                inner.cautious_attempted_config_version = Some(probe_config_version);
+                inner.cautious_attempted_config_version = Some(gates.probe_config_version);
                 inner.cautious_retry_after = None;
                 tracing::info!("检测到门户劫持但认证入口预检失败，谨慎尝试一次自动登录");
             } else {
@@ -1069,7 +1137,7 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
     } else {
         match advice {
             RecoveryAdvice::FixConfiguration => {
-                if old_advice != RecoveryAdvice::FixConfiguration {
+                if gates.old_advice != RecoveryAdvice::FixConfiguration {
                     tracing::warn!("认证配置无效，自动恢复暂停，等待用户修正 Profile");
                 } else {
                     tracing::debug!("认证配置仍无效，继续等待用户修正 Profile");
@@ -1090,9 +1158,14 @@ fn handle_probe_message(msg: ProbeMessage, inner: &mut EngineInner, deps: &Engin
             | RecoveryAdvice::AttemptLoginOnce => {}
         }
     }
+}
 
-    // 补发排队的优先级探测（在当前批次的决策与合并完成后触发，避免递归）。
-    // 门控与定时器分支一致：停止/暂停期间不补发，避免停止后又自动开始探测
+/// 补发排队的优先级探测（在途期间有优先级检测排队时，仅一次，避免无限自激）
+///
+/// 门控与定时器分支一致：停止/暂停期间不补发，避免停止后又自动开始探测。
+/// 成功报告路径在决策与合并完成后触发（避免递归）；探测失败分支在最小
+/// 快照合并前立即补发。
+fn retrigger_pending_probe_if_due(pending: bool, inner: &mut EngineInner, deps: &EngineDeps) {
     if pending && inner.monitoring && !is_any_pause_active(inner, deps) {
         tracing::debug!("补发排队的优先级探测");
         handle_network_check(inner, deps);
