@@ -297,6 +297,48 @@ impl Drop for PendingGuard<'_> {
     }
 }
 
+/// 提交前置阶段（参数校验与执行计划装配）的产出集合
+///
+/// 由 [`LoginOrchestrator::prepare_submission`] 产出，供决策段与装配段消费；
+/// `rt` 为本次生效的完整运行时配置（指定 Profile 时为其专属快照，凭据与
+/// 网络出口必须一起使用）。
+struct PreparedSubmission {
+    /// 本次生效的完整运行时配置
+    rt: RuntimeConfig,
+    /// 本次生效的浏览器任务 ID（显式 > 方案绑定 > 默认兜底）
+    effective_task_id: Option<String>,
+    /// 本次生效的登录渠道（`LoginSource::Browser` 来源恒为浏览器渠道）
+    effective_channel: LoginChannel,
+    /// 直连请求计划（仅直连渠道有值）
+    http_plan: Option<crate::login::http_login::HttpLoginRequest>,
+    /// 脚本登录计划（仅脚本渠道有值）
+    script_plan: Option<script_login::ScriptLoginPlan>,
+    /// 浏览器渠道预检产生的渠道覆盖（`None` 表示沿用配置渠道）
+    browser_override: Option<String>,
+}
+
+/// 提交准入仲裁结果（决策段出口）
+enum AdmissionVerdict {
+    /// 去重命中：复用既有会话，直接返回其句柄
+    Reuse(LoginHandle),
+    /// 抢占等待期间提交被取消：立即终态句柄
+    Cancelled(LoginHandle),
+    /// 放行：可装配新会话
+    Proceed,
+}
+
+/// 会话装配段产出：会话本体 + 控制句柄 + 共享槽/收尾通知
+struct AssembledSession {
+    /// 待 `spawn` 的会话状态机
+    session: LoginSession,
+    /// 对外控制句柄（活跃会话登记持其 clone）
+    handle: LoginHandle,
+    /// 结果共享槽（spawn 任务的 panic 补偿需独立持有）
+    result_slot: Arc<LoginHandleInner>,
+    /// 会话完全收尾通知（F6）：spawn 的会话任务在 `run()` 返回后触发
+    finished: Arc<tokio::sync::Notify>,
+}
+
 /// Web 层消费的登录编排抽象（M1 细粒度 state 第二域）
 ///
 /// handler 通过 `State<Arc<dyn LoginApi>>` 提取依赖，测试可注入内存实现
@@ -470,6 +512,10 @@ impl LoginOrchestrator {
     /// （`PendingGuard`），环境初始化、auth_url 预检、抢占等待与随后的
     /// 会话执行/重试共享同一令牌——准备阶段点取消即可中断整个流程，而非
     /// 仅取消「已创建活跃会话」之后的部分。
+    ///
+    /// 结构上分四段协作（T7-5）：参数校验与计划装配 [`Self::prepare_submission`]、
+    /// 去重/抢占仲裁 [`Self::arbitrate_admission`]、会话与句柄装配
+    /// [`Self::assemble_session`]，本函数保留接纳登记与活跃槽位安装的编排骨架。
     pub async fn submit(
         &self,
         source: LoginSource,
@@ -493,11 +539,124 @@ impl LoginOrchestrator {
             cancel_token.clone(),
         );
 
+        // 校验/准备段：配置解析、任务与渠道判定、直连/脚本计划装配、浏览器预检
+        // （各校验失败均以「立即终态」句柄体现，见 prepare_submission）
+        let prepared = match self
+            .prepare_submission(source, &task_id, &profile_id, &cancel_token)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(handle) => return handle,
+        };
+
+        // 手动与单次登录直接执行登录流程，不能用网卡或认证地址预检拦截。
+        // 3. 从抢占决策开始串行化所有 submit，直到新会话真正占据 active_session。
+        // 不能只依赖 state 锁：抢占会 take 旧会话后释放 state 锁并 await 最长
+        // PREEMPT_WAIT_BUDGET（按各段超时常量推导，见其文档），
+        // 若无本 gate，低优先级 submit 可趁空槽抢先写入，反而把高优先级请求挤掉。
+        let _submit_guard = self.submit_gate.lock().await;
+
+        // 4. 决策段：去重/抢占判断与旧会话收尾等待——复用命中或等待期被取消，
+        // 均直接返回既有句柄；放行则继续装配新会话
+        match self
+            .arbitrate_admission(source, &cancel_token, &prepared.rt.profile.id)
+            .await
+        {
+            AdmissionVerdict::Reuse(handle) => return handle,
+            AdmissionVerdict::Cancelled(handle) => return handle,
+            AdmissionVerdict::Proceed => {}
+        }
+
+        // 5. 创建新会话（计数延后到 became_active 判定后，避免抢占失败的“被取代”请求污染 login_total）。
+        // 会话 ID / 取消令牌复用接纳阶段创建的实例：准备阶段与会话阶段共享完整生命周期
+        let AssembledSession {
+            session,
+            handle,
+            result_slot,
+            finished,
+        } = match self
+            .assemble_session(
+                source,
+                &prepared,
+                &cancel_token,
+                &attempt_cancel_id,
+                &cancel_reason,
+            )
+            .await
+        {
+            Ok(assembled) => assembled,
+            Err(handle) => return handle,
+        };
+
+        // 写入活跃会话。submit_gate 保证此窗口没有其他 submit 可写入；
+        // 仍保留 is_none 防御性检查，避免未来新增非 submit 写路径时泄漏会话。
+        let became_active = {
+            let mut g = self.state.lock().await;
+            if g.active_session.is_none() {
+                g.active_session = Some(ActiveSession {
+                    source,
+                    session_id,
+                    cancel_token,
+                    attempt_cancel_id,
+                    cancel_reason,
+                    handle: handle.clone(),
+                    finished: finished.clone(),
+                });
+                true
+            } else {
+                false
+            }
+        };
+
+        // 6. 仅当成功占据活跃会话槽位时才计数并 spawn 状态机 task
+        if became_active {
+            // 句柄为 Arc 共享槽：槽位内已有一份 clone（见上），spawn 任务不再需要本体，
+            // 本体留给末尾 return。panic 补偿需直接持有结果槽：会话可能已被抢占
+            // （active_session 不再指向本会话），补偿必须无条件写入而非依赖槽位归属判断
+            self.spawn_session_task(
+                session_id,
+                source,
+                prepared.rt.profile.id.clone(),
+                result_slot.clone(),
+                finished,
+                session,
+            );
+        } else {
+            // 活跃槽位已被占用，立即写入终态（避免 await_result 永久挂起）
+            // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
+            warn!("登录请求未能占据活跃会话槽位，写入终态「被更新的登录请求取代」");
+            handle.inner.set_result(LoginResult {
+                network_retryable: false,
+                terminal: LoginTerminal::Cancelled,
+                message: "被更新的登录请求取代".into(),
+                source,
+                duration: Duration::ZERO,
+                attempts: 0,
+            });
+        }
+
+        // 7. 返回句柄；_submit_guard 随函数返回释放，后续 submit 此时只能看到
+        // 已安装的新 active_session，不再能看到抢占过程中的临时空槽。
+        handle
+    }
+
+    /// 校验/准备段：配置解析、任务与渠道判定、直连/脚本计划装配、浏览器预检
+    ///
+    /// 各校验失败均以「立即终态」句柄体现（`Err`）；成功返回本次提交的
+    /// [`PreparedSubmission`]。此段尚未进入 submit_gate 串行区——预检
+    /// （环境初始化、auth_url 探测等）允许并发进行，互斥从抢占决策开始。
+    async fn prepare_submission(
+        &self,
+        source: LoginSource,
+        explicit_task_id: &Option<String>,
+        profile_id: &Option<String>,
+        cancel_token: &CancellationToken,
+    ) -> Result<PreparedSubmission, LoginHandle> {
         // 读取最新运行时配置（每次 submit 重新读取，不缓存）
         let active_rt = self.config.runtime().load_full();
-        let rt = match self.resolve_runtime(source, &active_rt, &profile_id).await {
+        let rt = match self.resolve_runtime(source, &active_rt, profile_id).await {
             Ok(rt) => rt,
-            Err(handle) => return handle,
+            Err(handle) => return Err(handle),
         };
         let profile = &rt.profile;
 
@@ -505,7 +664,7 @@ impl LoginOrchestrator {
         // 其次取当前方案的 active_task（「账号 / 配置方案」页按方案绑定），
         // 最后回退全局默认任务 default（未绑定方案的兜底，保证开箱可用）。
         // 方案级绑定是「切方案即切任务」的唯一来源。
-        let effective_task_id = self.resolve_active_task(&task_id, profile).await;
+        let effective_task_id = self.resolve_active_task(explicit_task_id, profile).await;
 
         // 1a. Rust 控制的渠道判定：HTTP 在主进程发请求、计算另起临时子进程，自定义脚本也起
         // 子进程；浏览器任务来源（显式 task 执行）不适用，仍按浏览器路径处理。两者都
@@ -518,24 +677,24 @@ impl LoginOrchestrator {
         let use_http = effective_channel == LoginChannel::Http;
         let use_script = effective_channel == LoginChannel::Script;
         if use_script && rt.network.mode == crate::network::settings::NetworkMode::Interface {
-            return self
+            return Err(self
                 .immediate_handle(
                     source,
                     false,
                     "脚本渠道无法强制绑定网卡，请使用浏览器或 HTTP 登录".into(),
                     profile.id.clone(),
                 )
-                .await;
+                .await);
         }
         if !effective_channel.is_supported() {
-            return self
+            return Err(self
                 .immediate_handle(
                     source,
                     false,
                     "OpenWrt 版不支持浏览器登录，请选择 HTTP 登录或自定义脚本".into(),
                     profile.id.clone(),
                 )
-                .await;
+                .await);
         }
 
         // 1. 配置完整性校验（缺项文案面向用户直写中文，不暴露内部字段名）
@@ -543,64 +702,12 @@ impl LoginOrchestrator {
             .validate_profile(source, profile, &effective_task_id, use_http, use_script)
             .await
         {
-            return handle;
+            return Err(handle);
         }
 
         // 1a-2. 直连请求参数构造（任务缺失/类型不对/地址非法立即终态）
         let http_plan = if use_http {
-            match self.resolve_http_task(profile).await {
-                Ok(task) => {
-                    // 认证地址回退链：任务的 auth_url 优先，留空才回退方案的 auth_url
-                    // （该字段浏览器/直连两渠道共用，老配置不填照旧可用）。**任务优先**
-                    // 是与前端方案编辑器一致的契约——两处口径若不同，会出现"编辑器里
-                    // 显示 A、实际请求用 B"这种无从排查的错位。
-                    let auth_url = if task.auth_url.trim().is_empty() {
-                        profile.auth_url.clone()
-                    } else {
-                        task.auth_url.clone()
-                    };
-                    // 证书策略：任务级 ignore_https_errors 优先，未设置时跟随全局
-                    // browser.ignore_https_errors——后者默认 true，浏览器渠道即靠它登录
-                    // 自签名证书门户；直连若固定严格校验会出现「浏览器能登、直连必失败」。
-                    match crate::login::http_login::HttpLoginRequest::from_task(
-                        &task,
-                        &profile.username,
-                        profile.password.as_str(),
-                        &profile.isp,
-                        &auth_url,
-                        true,
-                        rt.browser.ignore_https_errors,
-                    ) {
-                        Ok(mut p) => {
-                            p.network = rt.network.clone();
-                            // 本机地址（脚本 ctx.local_ip / ctx.local_mac，或模板里的
-                            // {local_ip} 占位符）按需查询：网卡探测要 spawn 子进程，
-                            // 用不到就白跑一次。查询失败不阻断登录——脚本自身可回退到
-                            // 从页面提取。
-                            // 绑定模式由执行器准备出口后取实际地址，避免这里重复枚举或读取活动方案。
-                            if p.needs_local_address()
-                                && rt.network.mode
-                                    != crate::network::settings::NetworkMode::Interface
-                            {
-                                let addr = self.monitor.local_address().await;
-                                Some(p.with_local_address(&addr))
-                            } else {
-                                Some(p)
-                            }
-                        }
-                        Err(e) => {
-                            return self
-                                .immediate_handle(source, false, e, profile.id.clone())
-                                .await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    return self
-                        .immediate_handle(source, false, e, profile.id.clone())
-                        .await;
-                }
-            }
+            Some(self.build_http_plan(source, profile, &rt).await?)
         } else {
             None
         };
@@ -613,9 +720,9 @@ impl LoginOrchestrator {
                     extra_env: script_login::login_env(profile),
                 }),
                 Err(e) => {
-                    return self
+                    return Err(self
                         .immediate_handle(source, false, e, profile.id.clone())
-                        .await;
+                        .await);
                 }
             }
         } else {
@@ -631,21 +738,94 @@ impl LoginOrchestrator {
             None
         } else {
             match self
-                .prepare_browser(source, profile, &rt, &cancel_token)
+                .prepare_browser(source, profile, &rt, cancel_token)
                 .await
             {
                 Ok(ov) => ov,
-                Err(handle) => return handle,
+                Err(handle) => return Err(handle),
             }
         };
 
-        // 手动与单次登录直接执行登录流程，不能用网卡或认证地址预检拦截。
-        // 3. 从抢占决策开始串行化所有 submit，直到新会话真正占据 active_session。
-        // 不能只依赖 state 锁：抢占会 take 旧会话后释放 state 锁并 await 最长
-        // PREEMPT_WAIT_BUDGET（按各段超时常量推导，见其文档），
-        // 若无本 gate，低优先级 submit 可趁空槽抢先写入，反而把高优先级请求挤掉。
-        let _submit_guard = self.submit_gate.lock().await;
+        Ok(PreparedSubmission {
+            rt,
+            effective_task_id,
+            effective_channel,
+            http_plan,
+            script_plan,
+            browser_override,
+        })
+    }
 
+    /// 构造直连请求计划（1a-2）：任务缺失/类型不对/地址非法立即终态
+    async fn build_http_plan(
+        &self,
+        source: LoginSource,
+        profile: &ProfileSnapshot,
+        rt: &RuntimeConfig,
+    ) -> Result<crate::login::http_login::HttpLoginRequest, LoginHandle> {
+        let task = match self.resolve_http_task(profile).await {
+            Ok(task) => task,
+            Err(e) => {
+                return Err(self
+                    .immediate_handle(source, false, e, profile.id.clone())
+                    .await);
+            }
+        };
+        // 认证地址回退链：任务的 auth_url 优先，留空才回退方案的 auth_url
+        // （该字段浏览器/直连两渠道共用，老配置不填照旧可用）。**任务优先**
+        // 是与前端方案编辑器一致的契约——两处口径若不同，会出现"编辑器里
+        // 显示 A、实际请求用 B"这种无从排查的错位。
+        let auth_url = if task.auth_url.trim().is_empty() {
+            profile.auth_url.clone()
+        } else {
+            task.auth_url.clone()
+        };
+        // 证书策略：任务级 ignore_https_errors 优先，未设置时跟随全局
+        // browser.ignore_https_errors——后者默认 true，浏览器渠道即靠它登录
+        // 自签名证书门户；直连若固定严格校验会出现「浏览器能登、直连必失败」。
+        match crate::login::http_login::HttpLoginRequest::from_task(
+            &task,
+            &profile.username,
+            profile.password.as_str(),
+            &profile.isp,
+            &auth_url,
+            true,
+            rt.browser.ignore_https_errors,
+        ) {
+            Ok(mut p) => {
+                p.network = rt.network.clone();
+                // 本机地址（脚本 ctx.local_ip / ctx.local_mac，或模板里的
+                // {local_ip} 占位符）按需查询：网卡探测要 spawn 子进程，
+                // 用不到就白跑一次。查询失败不阻断登录——脚本自身可回退到
+                // 从页面提取。
+                // 绑定模式由执行器准备出口后取实际地址，避免这里重复枚举或读取活动方案。
+                if p.needs_local_address()
+                    && rt.network.mode != crate::network::settings::NetworkMode::Interface
+                {
+                    let addr = self.monitor.local_address().await;
+                    Ok(p.with_local_address(&addr))
+                } else {
+                    Ok(p)
+                }
+            }
+            Err(e) => Err(self
+                .immediate_handle(source, false, e, profile.id.clone())
+                .await),
+        }
+    }
+
+    /// 决策段：去重/抢占判断与旧会话收尾等待
+    ///
+    /// 调用方必须已持有 `submit_gate`（从抢占决策到活跃槽位安装全程串行化）。
+    /// 判断与 take 在同一把 state 锁内完成（避免 TOCTOU 竞态），锁释放后才执行
+    /// 异步取消与收尾等待——期间 submit_gate 仍持有，其他 submit 无法利用
+    /// active_session 的临时空窗插队。
+    async fn arbitrate_admission(
+        &self,
+        source: LoginSource,
+        cancel_token: &CancellationToken,
+        profile_id: &str,
+    ) -> AdmissionVerdict {
         // 4. 去重/抢占判断（决策与 take 在同一把 state 锁内完成，避免 TOCTOU 竞态）
         let old_session = {
             let mut guard = self.state.lock().await;
@@ -682,7 +862,7 @@ impl LoginOrchestrator {
                         new_source = ?source,
                         "登录请求去重命中，复用既有会话"
                     );
-                    return handle;
+                    return AdmissionVerdict::Reuse(handle);
                 }
                 PreemptionDecision::Preempt => guard.active_session.take(),
                 PreemptionDecision::Create => None,
@@ -701,14 +881,31 @@ impl LoginOrchestrator {
             // 抢占等待（最长 PREEMPT_WAIT_BUDGET）同样处于取消边界内：等待期间点取消即放弃本次提交
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    return self.cancelled_handle(source, profile.id.clone()).await;
+                    return AdmissionVerdict::Cancelled(
+                        self.cancelled_handle(source, profile_id.to_string()).await,
+                    );
                 }
                 _ = self.wait_old_session_finished(old) => {}
             }
         }
+        AdmissionVerdict::Proceed
+    }
 
-        // 5. 创建新会话（计数延后到 became_active 判定后，避免抢占失败的“被取代”请求污染 login_total）。
-        // 会话 ID / 取消令牌复用接纳阶段创建的实例：准备阶段与会话阶段共享完整生命周期
+    /// 装配段：执行计划 → 会话 → 控制句柄
+    ///
+    /// 执行计划只有一个渠道；进程内渠道不会持有虚假的 Worker 配置，
+    /// 因而成功后始终走网络验证兜底。计划缺失的防御分支以立即终态句柄
+    /// 返回（`Err`）。
+    async fn assemble_session(
+        &self,
+        source: LoginSource,
+        prepared: &PreparedSubmission,
+        cancel_token: &CancellationToken,
+        attempt_cancel_id: &Arc<ArcSwapOption<String>>,
+        cancel_reason: &Arc<StdMutex<Option<String>>>,
+    ) -> Result<AssembledSession, LoginHandle> {
+        let rt = &prepared.rt;
+        let profile = &rt.profile;
         let shutdown_token = self.shutdown_token.clone();
         // 会话完全收尾通知（F6）：spawn 的会话任务在 run() 返回后触发
         let finished = Arc::new(tokio::sync::Notify::new());
@@ -719,39 +916,11 @@ impl LoginOrchestrator {
             cancel_token: cancel_token.clone(),
             inner: result_slot.clone(),
         };
-
-        // 执行计划只有一个渠道；进程内渠道不会持有虚假的 Worker 配置，
-        // 因而成功后始终走网络验证兜底。
-        let plan = match (effective_channel, http_plan, script_plan) {
-            (LoginChannel::Http, Some(plan), _) => session::LoginAttemptPlan::Http(Box::new(plan)),
-            (LoginChannel::Script, _, Some(plan)) => {
-                session::LoginAttemptPlan::Script(Box::new(plan))
-            }
-            (LoginChannel::Browser, _, _) => session::LoginAttemptPlan::Browser(
-                self.build_worker_config(
-                    &rt,
-                    profile,
-                    effective_task_id.as_deref().unwrap_or(""),
-                    browser_override.as_deref(),
-                )
-                .await,
-            ),
-            _ => {
-                return self
-                    .immediate_handle(
-                        source,
-                        false,
-                        "登录任务计划缺失，请检查方案绑定".into(),
-                        profile.id.clone(),
-                    )
-                    .await;
-            }
-        };
-
+        let plan = self.build_attempt_plan(source, prepared).await?;
         let session = LoginSession::new(
             session::SessionParams {
                 source,
-                task_id: effective_task_id,
+                task_id: prepared.effective_task_id.clone(),
                 max_retries: rt.retry.max_retries,
                 retry_interval: Duration::from_secs(rt.retry.retry_interval as u64),
                 login_timeout: Duration::from_secs((rt.browser.login_timeout as u64).max(1)),
@@ -775,57 +944,50 @@ impl LoginOrchestrator {
                 metrics: self.metrics.clone(),
             },
         );
+        Ok(AssembledSession {
+            session,
+            handle,
+            result_slot,
+            finished,
+        })
+    }
 
-        // 写入活跃会话。submit_gate 保证此窗口没有其他 submit 可写入；
-        // 仍保留 is_none 防御性检查，避免未来新增非 submit 写路径时泄漏会话。
-        let became_active = {
-            let mut g = self.state.lock().await;
-            if g.active_session.is_none() {
-                g.active_session = Some(ActiveSession {
-                    source,
-                    session_id,
-                    cancel_token,
-                    attempt_cancel_id,
-                    cancel_reason,
-                    handle: handle.clone(),
-                    finished: finished.clone(),
-                });
-                true
-            } else {
-                false
+    /// 由唯一执行计划构造会话执行计划（三渠道互斥；缺计划为防御性立即终态）
+    async fn build_attempt_plan(
+        &self,
+        source: LoginSource,
+        prepared: &PreparedSubmission,
+    ) -> Result<session::LoginAttemptPlan, LoginHandle> {
+        let profile = &prepared.rt.profile;
+        match (
+            prepared.effective_channel,
+            &prepared.http_plan,
+            &prepared.script_plan,
+        ) {
+            (LoginChannel::Http, Some(plan), _) => {
+                Ok(session::LoginAttemptPlan::Http(Box::new(plan.clone())))
             }
-        };
-
-        // 6. 仅当成功占据活跃会话槽位时才计数并 spawn 状态机 task
-        if became_active {
-            // 句柄为 Arc 共享槽：槽位内已有一份 clone（见上），spawn 任务不再需要本体，
-            // 本体留给末尾 return。panic 补偿需直接持有结果槽：会话可能已被抢占
-            // （active_session 不再指向本会话），补偿必须无条件写入而非依赖槽位归属判断
-            self.spawn_session_task(
-                session_id,
-                source,
-                profile.id.clone(),
-                result_slot.clone(),
-                finished,
-                session,
-            );
-        } else {
-            // 活跃槽位已被占用，立即写入终态（避免 await_result 永久挂起）
-            // 防御性分支：submit_gate 已保证互斥，走到这里说明互斥假设被破坏，必须告警
-            warn!("登录请求未能占据活跃会话槽位，写入终态「被更新的登录请求取代」");
-            handle.inner.set_result(LoginResult {
-                network_retryable: false,
-                terminal: LoginTerminal::Cancelled,
-                message: "被更新的登录请求取代".into(),
-                source,
-                duration: Duration::ZERO,
-                attempts: 0,
-            });
+            (LoginChannel::Script, _, Some(plan)) => {
+                Ok(session::LoginAttemptPlan::Script(Box::new(plan.clone())))
+            }
+            (LoginChannel::Browser, _, _) => Ok(session::LoginAttemptPlan::Browser(
+                self.build_worker_config(
+                    &prepared.rt,
+                    profile,
+                    prepared.effective_task_id.as_deref().unwrap_or(""),
+                    prepared.browser_override.as_deref(),
+                )
+                .await,
+            )),
+            _ => Err(self
+                .immediate_handle(
+                    source,
+                    false,
+                    "登录任务计划缺失，请检查方案绑定".into(),
+                    profile.id.clone(),
+                )
+                .await),
         }
-
-        // 7. 返回句柄；_submit_guard 随函数返回释放，后续 submit 此时只能看到
-        // 已安装的新 active_session，不再能看到抢占过程中的临时空槽。
-        handle
     }
 
     /// 解析本次完整运行时策略：指定方案的凭据和出口必须一起使用。
