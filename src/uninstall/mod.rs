@@ -34,6 +34,10 @@ use std::path::{Path, PathBuf};
 /// 与"删除其余一切"之间的分界线，两边各写一份时改一处漏一处，后果是用户勾了保留却丢掉
 /// 那一项（`remove_children_except` 把不认识的子项照删）。`test_data_dir_names_match_paths`
 /// 把这条关系钉住。
+///
+/// 清单按目录粒度渲染，目录内部不单列条目：`config/` 内含 `.trash/` 回滚区
+/// （已删方案的 ENC: 密文文件，见 `config::service::cleanup_expired_trash_entries`
+/// 的 30 天轮转），purge 时随 `config/` 整目录删除、保留时随 `config/` 一并留下。
 pub const DATA_DIR_NAMES: [&str; 6] = [
     crate::utils::paths::CONFIG_DIR,
     crate::utils::paths::TASKS_DIR,

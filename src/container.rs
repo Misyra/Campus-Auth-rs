@@ -339,14 +339,19 @@ impl ServiceContainer {
         });
     }
 
-    /// 每日兜底清理过期日志：启动时的 `cleanup_old_logs` 只执行一次，
-    /// 关闭"自动重启"的长驻进程会让轮转文件无限累积。保留天数每次从
-    /// 配置快照读取，跟随热更新。
+    /// 每日兜底清理过期日志与 `.trash` 回滚区：启动时的 `cleanup_old_logs`
+    /// 只执行一次，关闭"自动重启"的长驻进程会让轮转文件无限累积。保留天数
+    /// 每次从配置快照读取，跟随热更新。
     fn spawn_log_cleanup_task(container: &Arc<Self>) {
         let cancel_for_task = container.uptime_cancel.child_token();
         let config_for_task = container.config.clone();
         let history_for_task = container.history.clone();
         tokio::spawn(async move {
+            // 启动即执行一次 .trash 轮转：重启频繁的实例 24h tick 可能长期不
+            // 触发，而 .trash 此前无任何清理点（含 ENC: 密文方案文件）；30 天
+            // mtime 门槛保证首启清理同样安全。日志/历史/事件流的启动清理另有
+            // 入口（init_logging / sink 任务），此处只补 .trash 这一块
+            Self::cleanup_trash_entries(&config_for_task.base_path());
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(86_400));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // 首个 tick 立即完成：启动时的清理已在 init_logging 做过，跳过
@@ -356,6 +361,9 @@ impl ServiceContainer {
                     biased;
                     _ = cancel_for_task.cancelled() => break,
                     _ = interval.tick() => {
+                        // .trash 回滚区按 mtime 轮转 30 天（启动已执行一次，
+                        // 这里管长驻实例的跨日兜底）
+                        Self::cleanup_trash_entries(&config_for_task.base_path());
                         let retention = config_for_task.runtime().load().logging.retention_days;
                         crate::logging::cleanup_expired_logs(&config_for_task.base_path(), retention);
                         // LOG-2：登录历史保留固定 30 天（与 Web 查询窗口对齐），
@@ -383,6 +391,25 @@ impl ServiceContainer {
                 }
             }
         });
+    }
+
+    /// 清理 `.trash` 回滚区过期条目（启动 + 每日兜底共用），返回删除数量
+    ///
+    /// 删除方案移入 `config/.trash/`（含 ENC: 密文方案文件）后此前无任何清理
+    /// 点，长驻实例无限累积；现按文件 mtime 墙钟轮转 30 天
+    /// （`config::service::TRASH_RETENTION_DAYS`）。卸载口径随 `config/` 整目录
+    /// 继承：purge 时一并删除、`keep_user_data` 时一并保留。
+    fn cleanup_trash_entries(base_path: &std::path::Path) -> usize {
+        let trash_dir = crate::utils::paths::config_dir(base_path).join(crate::config::TRASH_DIR);
+        let removed = crate::config::service::cleanup_expired_trash_entries(
+            &trash_dir,
+            crate::config::service::TRASH_RETENTION_DAYS,
+            std::time::SystemTime::now(),
+        );
+        if removed > 0 {
+            tracing::info!("清理 .trash 过期回滚条目 {removed} 个");
+        }
+        removed
     }
 
     /// 启动后台服务：EventSink + Scheduler + Bridge Supervisor

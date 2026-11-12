@@ -1112,6 +1112,63 @@ impl ConfigService {
     }
 }
 
+/// `.trash` 回滚区条目保留天数
+///
+/// 删除方案移入 `config/.trash/` 后此前无任何清理点（含 ENC: 密文方案文件，
+/// 长驻实例无限累积）；由每日 housekeeping 按 mtime 轮转 30 天，与登录历史 /
+/// 事件流的 30 天保留口径一致。
+pub const TRASH_RETENTION_DAYS: u64 = 30;
+
+/// 清理 `.trash` 回滚区中超过保留期的条目，返回删除数量
+///
+/// 过期判定按文件 mtime 墙钟：`now - retention_days` 之前修改的条目删除；
+/// `now` 由调用方注入，测试可构造新旧条目断言「旧的清、新的留」。全部条目
+/// 清空后连空目录一并移除（非空时 `remove_dir` 自然失败，忽略即可）。
+/// mtime 不可读的条目按未过期保守保留，留给下一轮；子目录一律跳过。
+///
+/// 卸载口径：`.trash` 位于 `config/` 内——purge 随 `config/` 整目录删除、
+/// `keep_user_data` 时随 `config/` 保留，卸载清单按目录粒度继承，无需单列条目。
+pub fn cleanup_expired_trash_entries(
+    trash_dir: &Path,
+    retention_days: u64,
+    now: SystemTime,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(trash_dir) else {
+        return 0;
+    };
+    let cutoff = now
+        .checked_sub(std::time::Duration::from_secs(
+            retention_days.saturating_mul(86_400),
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let expired = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime <= cutoff)
+            .unwrap_or(false);
+        if expired {
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "清理 .trash 过期回滚条目失败"
+                    );
+                }
+            }
+        }
+    }
+    // 全清后移除空目录，不留壳
+    let _ = std::fs::remove_dir(trash_dir);
+    removed
+}
+
 /// 生成紧凑时间戳字符串（用于备份/垃圾文件名）
 fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
@@ -1176,6 +1233,58 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("10"));
         assert!(display.contains("6"));
+    }
+
+    // ============ .trash 回滚区轮转清理 ============
+
+    /// 旧条目（mtime 31 天前）清、新条目留；仍有留存时目录保留，全清后空目录一并移除
+    #[test]
+    fn test_cleanup_expired_trash_entries_rotates_by_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let trash = tmp.path().join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let old = trash.join("old.json.20260101000000");
+        let fresh = trash.join("fresh.json.20261113000000");
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+        // 旧条目 mtime 拨回 31 天前（跨平台：std::fs::File::set_modified）
+        let old_mtime = SystemTime::now() - std::time::Duration::from_secs(31 * 86_400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(old_mtime)
+            .unwrap();
+
+        let removed =
+            cleanup_expired_trash_entries(&trash, TRASH_RETENTION_DAYS, SystemTime::now());
+        assert_eq!(removed, 1, "仅超过 30 天保留期的旧条目应被清理");
+        assert!(!old.exists());
+        assert!(fresh.exists(), "保留期内的新条目必须留存");
+        assert!(trash.exists(), "仍有留存条目时目录不得移除");
+
+        // 全清后空目录一并消失
+        std::fs::remove_file(&fresh).unwrap();
+        let removed =
+            cleanup_expired_trash_entries(&trash, TRASH_RETENTION_DAYS, SystemTime::now());
+        assert_eq!(removed, 0);
+        assert!(!trash.exists(), "全清后空目录应一并移除");
+    }
+
+    /// 过期判定完全由 (mtime, retention_days, now) 决定：注入的 now 推进 40 天
+    /// 即可让 mtime 为"现在"的条目过期（纯函数可测性）
+    #[test]
+    fn test_cleanup_expired_trash_entries_uses_injected_now() {
+        let tmp = tempfile::tempdir().unwrap();
+        let trash = tmp.path().join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let entry = trash.join("gone.json.x");
+        std::fs::write(&entry, b"{}").unwrap();
+        let future = SystemTime::now() + std::time::Duration::from_secs(40 * 86_400);
+        let removed = cleanup_expired_trash_entries(&trash, TRASH_RETENTION_DAYS, future);
+        assert_eq!(removed, 1);
+        assert!(!entry.exists());
+        assert!(!trash.exists());
     }
 
     // ============ settings.json 读写往返测试 ============
