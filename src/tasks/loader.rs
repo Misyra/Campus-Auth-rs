@@ -193,6 +193,14 @@ impl TaskManager {
                     if path.extension().and_then(|e| e.to_str()) != Some("py") {
                         continue;
                     }
+                    // 点开头不会是任务条目（与 scan_json_bucket 同口径）：合法任务
+                    // id 与旧版脚本名均不以点开头，外部落进来的残留不得进列表
+                    let Some(file_name) = path.file_name().and_then(|f| f.to_str()) else {
+                        continue;
+                    };
+                    if file_name.starts_with('.') {
+                        continue;
+                    }
                     let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                         continue;
                     };
@@ -1086,11 +1094,14 @@ impl TaskManager {
 
     /// 扫描单个任务桶，把其中的 JSON 任务摘要追加到 `out`
     ///
-    /// 跳过 `.order.json`（排序文件，不在任何桶里，历史上曾混放）与 `.meta.json`
-    /// （脚本附属元数据，不是任务本身）。`dir_type` 为 `Some` 时按桶语义固定标注任务
-    /// 类型，为 `None` 时从文件 `type` 字段推导（缺省 `script`）——`scripts/` 桶混放
-    /// 裸 `.py` 与历史 `.meta.json`，其中 JSON 任务的类型以文件内声明为准，与
-    /// [`TaskManager::load_task`] 的读取口径保持一致。
+    /// 跳过点开头文件与 `.meta.json`（脚本附属元数据，不是任务本身）：点开头的
+    /// `.order.json` 是排序文件（不在任何桶里，历史上曾混放），`.tmp_xxx.json`
+    /// 是原子写（`utils::io::atomic_write_bytes`）崩溃残留——合法任务文件永不以
+    /// 点开头（`is_valid_task_id` 不收点号；与 `scheduler::cron_loop` 的扫描口径
+    /// 一致），放过去会把崩溃残留读成幽灵任务。`dir_type` 为 `Some` 时按桶语义
+    /// 固定标注任务类型，为 `None` 时从文件 `type` 字段推导（缺省 `script`）——
+    /// `scripts/` 桶混放裸 `.py` 与历史 `.meta.json`，其中 JSON 任务的类型以文件内
+    /// 声明为准，与 [`TaskManager::load_task`] 的读取口径保持一致。
     fn scan_json_bucket(dir: &Path, dir_type: Option<&str>, out: &mut Vec<TaskSummary>) {
         // 目录不存在（未预建 / 被外部删除）时静默跳过：其余桶仍应正常列出
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1106,7 +1117,7 @@ impl TaskManager {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            if name == ".order.json" || name.ends_with(".meta.json") {
+            if name.starts_with('.') || name.ends_with(".meta.json") {
                 continue;
             }
             // 单次读盘同时取 type 与摘要（原 read_type + read_summary 各读一次）
@@ -1383,6 +1394,44 @@ mod tests {
     fn test_is_valid_task_id_chinese_rejected() {
         // 中文字符的 ID 无效
         assert!(!is_valid_task_id("任务ID"));
+    }
+
+    // ============ 任务扫描点开头过滤 ============
+
+    /// 崩溃残留的原子写临时文件（`.tmp_xxx.json`）与历史上混放的 `.order.json`
+    /// 不得被当成任务条目读出幽灵任务（与 `scheduler::cron_loop` 扫描口径一致）
+    #[test]
+    fn test_scan_json_bucket_skips_dot_prefixed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("login_probe.json"),
+            r#"{"type":"browser","name":"登录探测"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(".tmp_ab12cd.json"),
+            r#"{"type":"browser","name":"幽灵任务"}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".order.json"), r#"{"order":[]}"#).unwrap();
+
+        let mut out = Vec::new();
+        TaskManager::scan_json_bucket(tmp.path(), Some("browser"), &mut out);
+        assert_eq!(out.len(), 1, "点开头文件不得进入任务条目");
+        assert_eq!(out[0].id, "login_probe");
+        assert_eq!(out[0].name, "登录探测");
+    }
+
+    /// 旧版裸 `.py` 扫描同样跳过点开头文件（合法任务 id 与旧脚本名均不以点开头）
+    #[tokio::test]
+    async fn test_list_tasks_skips_dot_prefixed_py() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::write(tmp.path().join(".hidden.py"), "# name: 隐藏脚本\n").unwrap();
+        let summaries = mgr.list_all_tasks().await;
+        assert!(
+            summaries.iter().all(|s| s.id != ".hidden"),
+            "点开头的 .py 文件不得成为任务条目"
+        );
     }
 
     // ============ TaskKind 访问器（经 TaskManager 写回路径间接覆盖） ============
