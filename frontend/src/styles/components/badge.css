@@ -1,6 +1,6 @@
 /* badge.css — 类型徽标（脚本/浏览器二选一的小胶囊，scripts 与 scheduled_tasks 共用结构）
  *
- * 选用表：行内小胶囊统一走 .badge（尺寸 sm/md + 语义 success/warn/info/primary）；
+ * 选用表：行内小胶囊统一走 .badge（尺寸 sm + 等宽 mono + 语义 success/warn/info/primary）；
  * 脚本/浏览器二选一沿用 .badge-script/.badge-browser（语义别名，勿再新起名字）。 */
 .badge {
   display: inline-flex;
@@ -16,6 +16,11 @@
 .badge--sm {
   font-size: var(--text-xs);
   padding: 1px 6px;
+}
+
+/* 等宽修饰：方法名/版本号等短码文本（自 pages/settings/system.css 上收，2026-11-13） */
+.badge--mono {
+  font-family: var(--font-mono);
 }
 
 .badge--primary {
