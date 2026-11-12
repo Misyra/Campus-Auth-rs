@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 05e5e175d955b7395bd47544f1d4170d1716afceae8a3863860dba12e66f0c2c # shrinks to families = [[("monitor", Object {"url_check_urls": Array []})]]

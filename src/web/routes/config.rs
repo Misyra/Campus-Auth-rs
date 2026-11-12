@@ -1012,6 +1012,87 @@ mod tests {
         );
     }
 
+    /// url_check_urls 是前端回传的**完整**清单：换列表必须移除被删 URL 的旧期望
+    /// 条目、清空列表必须清空整张映射（深合并做不到「清空/移除」，属性测试 P2 挖出）。
+    #[tokio::test]
+    async fn test_patch_monitor_url_check_urls_replaces_expected_map() {
+        let (app, inner) = mock_app();
+        // 预置两个旧条目
+        {
+            let mut g = inner.lock().unwrap();
+            g.settings.global.monitor.url_targets =
+                vec!["http://old.com".into(), "http://keep.com".into()];
+            g.settings
+                .global
+                .monitor
+                .url_expected_responses
+                .insert("http://old.com".into(), "OLD".into());
+            g.settings
+                .global
+                .monitor
+                .url_expected_responses
+                .insert("http://keep.com".into(), "KEEP".into());
+        }
+        // 换成只含 keep.com 的清单：old 条目必须消失、keep 值更新
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "monitor": { "url_check_urls": ["http://keep.com|KEEP2"] }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        {
+            let g = inner.lock().unwrap();
+            let m = &g.settings.global.monitor;
+            assert_eq!(m.url_targets, vec!["http://keep.com".to_string()]);
+            assert_eq!(
+                m.url_expected_responses.len(),
+                1,
+                "被移除 URL 的旧条目必须消失"
+            );
+            assert_eq!(
+                m.url_expected_responses
+                    .get("http://keep.com")
+                    .map(String::as_str),
+                Some("KEEP2")
+            );
+        }
+        // 清空列表：整张期望响应映射必须为空
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "monitor": { "url_check_urls": [] } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let m = &g.settings.global.monitor;
+        assert!(m.url_targets.is_empty());
+        assert!(
+            m.url_expected_responses.is_empty(),
+            "清空 url_check_urls 必须清空期望响应映射，实际: {:?}",
+            m.url_expected_responses
+        );
+    }
+
     // ============ json_merge ============
 
     #[test]
@@ -2092,5 +2173,870 @@ mod tests {
         // 默认值调整后 mock 的初始状态本身就是 true，断言改盯落盘计数即可）
         assert!(g.settings.global.pause.enabled);
         assert_eq!(g.save_calls, 0);
+    }
+
+    // ============ 属性测试：PATCH 合并语义（proptest，T4-2b） ============
+    //
+    // 被测对象为 apply_flat_settings_patch 编排链（split_patch_keys 分拣 →
+    // build_profile_tx / build_settings_merge → 双域或单域事务），以模块上方
+    // 的内存 mock 承载。proptest 用例保持同步外壳、每个用例内建
+    // current_thread 运行时驱动 async：mock 全内存、开销微秒级；不能在
+    // #[tokio::test] 里嵌套 block_on（运行时内禁止再起运行时），故不采用外层
+    // 异步测试。
+    //
+    // 生成器覆盖面：
+    // - 合法字段族：全局各段（pause/logging/retry/app_settings/browser/worker/
+    //   updater/monitor DTO）+ 凭证（username/isp/auth_url/trigger_url/
+    //   active_task/password 三态/network）+ active_profile_id + 渠道与绑定的
+    //   复合族（browser 单独 / http+portal-http / script+portal-login）
+    // - 必拒条目：monitor DTO 违例、各段类型错位、端口越界、非法更新通道、
+    //   非字符串凭证、非法 URL、非法网络出口、空 active_profile_id
+    // - 未知键与 carrier_custom：前者交由 schema 丢弃（无字段污染），后者显式忽略
+    // - 顶层非对象（数组/字符串/数字/null）：无字段可合并，直接成功不落盘
+    //
+    // 生成器排除的跨族冲突：网卡出口（interface）× 脚本渠道的互斥单独由
+    // reject 条目与既有单测覆盖，合法族生成器不混出该组合，保证「合法 patch
+    // 必成功」的前提可被精确断言。
+
+    use proptest::prelude::*;
+    use serde_json::json;
+
+    /// 属性测试统一口径：512 cases（CI 亲和；随机失败必可 shrink 复现）
+    fn prop_config() -> proptest::test_runner::Config {
+        proptest::test_runner::Config::with_cases(512)
+    }
+
+    /// proptest 用例内驱动 async 合并路径（每个用例独立 current_thread 运行时）
+    fn prop_block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试运行时构建失败")
+            .block_on(fut)
+    }
+
+    /// 合法字段族（可含多个顶层键：渠道族同时携带绑定）
+    type PropFamily = Vec<(String, Value)>;
+
+    /// 预置非默认初始状态：让「指定字段生效 / 未指定字段保持」都可观测
+    ///（逐字段赋值而非结构体字面量：预设的是深层嵌套字段，字面量写法更冗长）
+    #[allow(clippy::field_reassign_with_default)]
+    fn prop_preset() -> MockInner {
+        let mut settings = crate::config::SettingsData::default();
+        settings.global.pause.enabled = false;
+        settings.global.pause.start_hour = 1;
+        settings.global.monitor.check_interval = 123;
+        settings.global.monitor.tcp_enabled = false;
+        settings.global.monitor.url_enabled = false;
+        settings.global.monitor.post_login_delay = 9;
+        settings.global.monitor.tcp_targets = vec!["8.8.8.8:53".into()];
+        settings.global.logging.level = "WARN".into();
+        settings.global.logging.retention_days = 3;
+        settings.global.retry_settings.max_retries = 7;
+        settings.global.app.port = 50722;
+        settings.global.app.show_tray = false;
+        settings.global.updater.channel = crate::config::UpdateChannel::All;
+        settings.global.updater.auto_check_enabled = false;
+        settings.global.browser.headless = false;
+        settings.global.worker.keep_alive = true;
+        settings.global.worker.idle_timeout_seconds = 777;
+        let mut profile = ProfileData::default();
+        profile.username = "orig-user".into();
+        profile.isp = "orig-isp".into();
+        profile.active_task = "orig-task".into();
+        MockInner {
+            settings,
+            profile,
+            save_calls: 0,
+            reload_calls: 0,
+            profile_load_fails: false,
+        }
+    }
+
+    /// 属性测试的内存三域 mock 句柄（ConfigApi / ProfileApi / TaskApi + 状态内省）
+    type PropHandles = (
+        Arc<dyn ConfigApi>,
+        Arc<dyn ProfileApi>,
+        Arc<dyn TaskApi>,
+        Arc<std::sync::Mutex<MockInner>>,
+    );
+
+    fn prop_state() -> PropHandles {
+        let inner = Arc::new(std::sync::Mutex::new(prop_preset()));
+        (
+            Arc::new(MockConfigApi(inner.clone())),
+            Arc::new(MockProfileApi),
+            Arc::new(MockTaskApi),
+            inner,
+        )
+    }
+
+    fn prop_settings_json(inner: &std::sync::Mutex<MockInner>) -> Value {
+        serde_json::to_value(&inner.lock().unwrap().settings).unwrap()
+    }
+
+    fn prop_profile_json(inner: &std::sync::Mutex<MockInner>) -> Value {
+        serde_json::to_value(&inner.lock().unwrap().profile).unwrap()
+    }
+
+    /// monitor 前端键（与 MonitorPatch DTO 字段一一对应；往返保真字段不在此列）
+    const PROP_MONITOR_FRONT_KEYS: [&str; 11] = [
+        "check_interval_seconds",
+        "enable_tcp_check",
+        "enable_http_check",
+        "enable_url_check",
+        "strict_login_mode",
+        "disable_proxy",
+        "network_check_timeout",
+        "post_login_delay",
+        "ping_targets",
+        "test_urls",
+        "url_check_urls",
+    ];
+
+    /// monitor DTO 的随机合法局部载荷（1..=4 个子字段，值合法）
+    fn prop_arb_monitor_payload() -> impl proptest::strategy::Strategy<Value = Value> {
+        proptest::collection::vec(
+            prop_oneof![
+                (1u32..=600).prop_map(|v| (0u8, json!(v))),
+                any::<bool>().prop_map(|v| (1u8, json!(v))),
+                any::<bool>().prop_map(|v| (2u8, json!(v))),
+                any::<bool>().prop_map(|v| (3u8, json!(v))),
+                any::<bool>().prop_map(|v| (4u8, json!(v))),
+                any::<bool>().prop_map(|v| (5u8, json!(v))),
+                (1u64..=30).prop_map(|v| (6u8, json!(v))),
+                (0u64..=60).prop_map(|v| (7u8, json!(v))),
+                proptest::collection::vec(
+                    prop_oneof![
+                        Just("10.0.0.53:53".to_owned()),
+                        Just("192.168.1.1:53".to_owned()),
+                    ],
+                    1..=2,
+                )
+                .prop_map(|v| (8u8, json!(v))),
+                proptest::collection::vec(Just("http://portal.edu.cn".to_owned()), 1..=2)
+                    .prop_map(|v| (9u8, json!(v))),
+                proptest::collection::vec(
+                    prop_oneof![
+                        Just("http://a.com|OK".to_owned()),
+                        Just("http://b.com".to_owned()),
+                        Just("http://c.com|成功|备用".to_owned()),
+                    ],
+                    0..=2,
+                )
+                .prop_map(|v| (10u8, json!(v))),
+            ],
+            1..=4,
+        )
+        .prop_map(|entries| {
+            // 子字段去重：Map 后写覆盖先写会让断言与生效条目失去一一对应
+            let mut obj = serde_json::Map::new();
+            let mut seen = std::collections::HashSet::new();
+            for (idx, v) in entries {
+                if seen.insert(idx) {
+                    obj.insert(PROP_MONITOR_FRONT_KEYS[idx as usize].to_owned(), v);
+                }
+            }
+            Value::Object(obj)
+        })
+    }
+
+    /// 网络出口的随机合法载荷。
+    /// interface 模式刻意不进合法族池：它与脚本渠道互斥（validate_profile_network），
+    /// 属跨族冲突，由 reject 条目与既有单测覆盖。
+    fn prop_arb_network_payload() -> impl proptest::strategy::Strategy<Value = Value> {
+        prop_oneof![
+            Just(json!({"mode": "direct", "interface_id": "", "proxy_url": "", "dns_servers": []})),
+            Just(json!({"mode": "system", "interface_id": "", "proxy_url": "", "dns_servers": []})),
+            (0u8..=2).prop_map(|i| {
+                let url = [
+                    "http://127.0.0.1:7890",
+                    "socks5://10.0.0.1:1080",
+                    "socks5h://127.0.0.1:1080",
+                ][i as usize];
+                json!({
+                    "mode": "proxy",
+                    "interface_id": "",
+                    "proxy_url": url,
+                    "dns_servers": [],
+                })
+            }),
+        ]
+    }
+
+    /// 单个必拒条目（每一条在现行口径下都必须整体拒绝且不落盘）
+    fn prop_arb_reject_entry() -> impl proptest::strategy::Strategy<Value = (String, Value)> {
+        prop_oneof![
+            // monitor DTO：未知字段 / 类型错位 / 非对象
+            (0u8..=4).prop_map(|i| (
+                "monitor".to_owned(),
+                match i {
+                    0 => json!({"bogus_field": 1}),
+                    1 => json!({"check_interval_seconds": "soon"}),
+                    2 => json!(5),
+                    3 => Value::Null,
+                    _ => json!({"ping_targets": "not-array"}),
+                },
+            )),
+            // pause：布尔错位 / 整段标量替换 / 子字段类型错位
+            (0u8..=2).prop_map(|i| (
+                "pause".to_owned(),
+                match i {
+                    0 => json!({"enabled": "yes"}),
+                    1 => json!(5),
+                    _ => json!({"start_hour": "7"}),
+                },
+            )),
+            // 端口越界 / 非数值
+            (0u8..=3).prop_map(|i| (
+                "app_settings".to_owned(),
+                match i {
+                    0 => json!({"port": 0}),
+                    1 => json!({"port": 65536}),
+                    2 => json!({"port": -1}),
+                    _ => json!({"port": "8080"}),
+                },
+            )),
+            // updater 非法通道 / 负间隔 / 非字符串通道
+            (0u8..=2).prop_map(|i| (
+                "updater".to_owned(),
+                match i {
+                    0 => json!({"channel": "nightly"}),
+                    1 => json!({"check_interval_hours": -5}),
+                    _ => json!({"channel": 3}),
+                },
+            )),
+            // 各段类型错位
+            Just(("logging".to_owned(), json!({"retention_days": "x"}))),
+            Just(("worker".to_owned(), json!({"idle_timeout_seconds": -1}))),
+            Just(("browser".to_owned(), json!({"headless": "yes"}))),
+            Just(("retry".to_owned(), json!({"max_retries": -2}))),
+            // 渠道与凭证
+            prop_oneof![Just("weird"), Just("")]
+                .prop_map(|v| { ("login_channel".to_owned(), json!(v)) }),
+            (0u8..=3).prop_map(|i| (
+                "username".to_owned(),
+                match i {
+                    0 => json!(123),
+                    1 => Value::Null,
+                    2 => json!([1]),
+                    _ => json!({"u": 1}),
+                },
+            )),
+            (0u8..=2).prop_map(|i| (
+                "password".to_owned(),
+                match i {
+                    0 => json!(42),
+                    1 => json!(true),
+                    _ => json!(["p"]),
+                },
+            )),
+            prop_oneof![Just("ftp://x"), Just("not a url")]
+                .prop_map(|v| { ("auth_url".to_owned(), json!(v)) }),
+            Just(("trigger_url".to_owned(), json!("mailto:a@b"))),
+            (0u8..=3).prop_map(|i| (
+                "network".to_owned(),
+                match i {
+                    0 => json!({"mode": "interface", "dns_servers": ["bad-dns"]}),
+                    1 => json!({"mode": "interface"}),
+                    2 => json!({"mode": "proxy"}),
+                    _ => json!(5),
+                },
+            )),
+            // 空 active_profile_id（WEB-9）
+            Just(("active_profile_id".to_owned(), json!(""))),
+        ]
+    }
+
+    /// 随机合法字段族
+    fn prop_arb_valid_family() -> impl proptest::strategy::Strategy<Value = PropFamily> {
+        prop_oneof![
+            2 => (any::<bool>(), 0u8..=23, 0u8..=59, 0u8..=23, 0u8..=59).prop_map(
+                |(e, sh, sm, eh, em)| {
+                    vec![(
+                        "pause".to_owned(),
+                        json!({
+                            "enabled": e,
+                            "start_hour": sh,
+                            "start_minute": sm,
+                            "end_hour": eh,
+                            "end_minute": em,
+                        }),
+                    )]
+                },
+            ),
+            2 => (
+                prop_oneof![Just("INFO"), Just("DEBUG"), Just("WARN"), Just("ERROR")],
+                1u32..=90,
+                any::<bool>(),
+            )
+                .prop_map(|(lvl, days, fe)| {
+                    vec![(
+                        "logging".to_owned(),
+                        json!({"level": lvl, "retention_days": days, "file_enabled": fe}),
+                    )]
+                }),
+            2 => (0u32..=10, 0u32..=60).prop_map(|(mr, ri)| {
+                vec![("retry".to_owned(), json!({"max_retries": mr, "retry_interval": ri}))]
+            }),
+            2 => (1u16..=65535, any::<bool>(), any::<bool>(), 0u32..=48).prop_map(
+                |(port, asb, st, arh)| {
+                    vec![(
+                        "app_settings".to_owned(),
+                        json!({
+                            "port": port,
+                            "auto_start_browser": asb,
+                            "show_tray": st,
+                            "auto_restart_hours": arh,
+                        }),
+                    )]
+                },
+            ),
+            1 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+                |(h, pm, lrm, pc)| {
+                    vec![(
+                        "browser".to_owned(),
+                        json!({
+                            "headless": h,
+                            "pure_mode": pm,
+                            "low_resource_mode": lrm,
+                            "persistent_context": pc,
+                        }),
+                    )]
+                },
+            ),
+            1 => (60u32..=3600, any::<bool>()).prop_map(|(it, ka)| {
+                vec![(
+                    "worker".to_owned(),
+                    json!({"idle_timeout_seconds": it, "keep_alive": ka}),
+                )]
+            }),
+            2 => (
+                prop_oneof![Just("stable"), Just("prerelease"), Just("all")],
+                any::<bool>(),
+                0u32..=72,
+                any::<bool>(),
+            )
+                .prop_map(|(ch, ace, cih, up)| {
+                    vec![(
+                        "updater".to_owned(),
+                        json!({
+                            "channel": ch,
+                            "auto_check_enabled": ace,
+                            "check_interval_hours": cih,
+                            "use_proxy": up,
+                        }),
+                    )]
+                }),
+            3 => prop_arb_monitor_payload().prop_map(|v| vec![("monitor".to_owned(), v)]),
+            2 => prop_oneof![
+                Just("alice".to_owned()),
+                Just("20230001".to_owned()),
+                Just(String::new()),
+            ].prop_map(
+                |v| vec![("username".to_owned(), json!(v))],
+            ),
+            1 => prop_oneof![Just("cmcc"), Just("电信")].prop_map(|v| {
+                vec![("isp".to_owned(), json!(v))]
+            }),
+            1 => prop_oneof![
+                Just("http://10.0.0.1/".to_owned()),
+                Just("https://portal.edu.cn/login".to_owned()),
+                Just(String::new()),
+            ]
+                .prop_map(|v| vec![("auth_url".to_owned(), json!(v))]),
+            1 => prop_oneof![Just("http://detect.edu.cn/".to_owned()), Just(String::new())].prop_map(|v| {
+                vec![("trigger_url".to_owned(), json!(v))]
+            }),
+            1 => prop_oneof![Just("t1".to_owned()), Just(String::new())].prop_map(|v| {
+                vec![("active_task".to_owned(), json!(v))]
+            }),
+            // 密码三态契约：null 保留 / 空串清除 / 非空串加密更新
+            2 => (0u8..=2).prop_map(|i| {
+                vec![(
+                    "password".to_owned(),
+                    match i {
+                        0 => Value::Null,
+                        1 => json!(""),
+                        _ => json!("new-pass-123"),
+                    },
+                )]
+            }),
+            1 => prop_arb_network_payload().prop_map(|v| vec![("network".to_owned(), v)]),
+            1 => prop_oneof![Just("default"), Just("secondary")].prop_map(|v| {
+                vec![("active_profile_id".to_owned(), json!(v))]
+            }),
+            // 渠道与绑定复合族：单独改渠道会因绑定校验被拒，必须成对出现
+            2 => prop_oneof![
+                Just(vec![("login_channel".to_owned(), json!("browser"))]),
+                Just(vec![
+                    ("login_channel".to_owned(), json!("http")),
+                    ("active_http_task".to_owned(), json!("portal-http")),
+                ]),
+                Just(vec![
+                    ("login_channel".to_owned(), json!("script")),
+                    ("active_script_task".to_owned(), json!("portal-login")),
+                ]),
+            ],
+        ]
+    }
+
+    /// 混生条目（P1）：合法族 / 必拒条目 / 未知键 / carrier_custom
+    fn prop_arb_any_entry() -> impl proptest::strategy::Strategy<Value = PropFamily> {
+        prop_oneof![
+            4 => prop_arb_valid_family(),
+            3 => prop_arb_reject_entry().prop_map(|e| vec![e]),
+            2 => (
+                prop_oneof![
+                    Just("future_field".to_owned()),
+                    Just("hidden_flag".to_owned()),
+                    Just("x_setting".to_owned()),
+                ],
+                prop_oneof![
+                    Just(Value::Null),
+                    any::<bool>().prop_map(|b| json!(b)),
+                    (0i64..=1000).prop_map(|n| json!(n)),
+                    Just(json!({"nested": true})),
+                    Just(json!(["a", 1])),
+                ],
+            )
+                .prop_map(|(k, v)| vec![(k, v)]),
+            1 => Just(vec![("carrier_custom".to_owned(), json!("历史字段"))]),
+        ]
+    }
+
+    /// 未知键不得进入配置：settings 顶层键集恒为 schema 四键（无字段污染）
+    fn prop_assert_no_pollution(
+        settings_out: &Value,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        let keys: Vec<&str> = settings_out
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let expected = [
+            "active_profile_id",
+            "auto_switch",
+            "config_version",
+            "global",
+        ];
+        prop_assert!(
+            keys.len() == expected.len() && keys.iter().all(|k| expected.contains(k)),
+            "settings 顶层出现未知键污染: {:?}",
+            keys
+        );
+        Ok(())
+    }
+
+    /// 断言单个合法键精确生效（深度断言，含前端→后端字段名映射）
+    fn prop_assert_valid_entry(
+        key: &str,
+        payload: &Value,
+        settings_out: &Value,
+        profile_out: &Value,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        match key {
+            // 1:1 段（retry/app_settings 完成前端名映射后逐子键对照）
+            "pause" | "logging" | "retry" | "app_settings" | "browser" | "worker" | "updater" => {
+                let target_key = match key {
+                    "retry" => "retry_settings",
+                    "app_settings" => "app",
+                    other => other,
+                };
+                let section = &settings_out["global"][target_key];
+                let obj = payload.as_object().expect("合法族载荷必为对象");
+                for (k, v) in obj {
+                    prop_assert_eq!(&section[k], v, "合法键 {}.{} 必须精确生效", target_key, k);
+                }
+            }
+            "monitor" => {
+                let mon = &settings_out["global"]["monitor"];
+                let obj = payload.as_object().expect("monitor 载荷必为对象");
+                // 前端名 → 后端名的 1:1 映射子集
+                const MAP: [(&str, &str); 8] = [
+                    ("check_interval_seconds", "check_interval"),
+                    ("enable_tcp_check", "tcp_enabled"),
+                    ("enable_http_check", "http_enabled"),
+                    ("enable_url_check", "url_enabled"),
+                    ("strict_login_mode", "strict_login_mode"),
+                    ("disable_proxy", "disable_proxy"),
+                    ("network_check_timeout", "tcp_timeout"),
+                    ("post_login_delay", "post_login_delay"),
+                ];
+                for (front, back) in MAP {
+                    if let Some(v) = obj.get(front) {
+                        prop_assert_eq!(&mon[back], v, "monitor.{} → {} 必须精确生效", front, back);
+                    }
+                }
+                if let Some(v) = obj.get("ping_targets") {
+                    prop_assert_eq!(&mon["tcp_targets"], v, "monitor.ping_targets → tcp_targets");
+                }
+                if let Some(v) = obj.get("test_urls") {
+                    prop_assert_eq!(&mon["http_targets"], v, "monitor.test_urls → http_targets");
+                }
+                if let Some(items_v) = obj.get("url_check_urls") {
+                    let items = items_v.as_array().expect("url_check_urls 必为数组");
+                    let mut targets = Vec::new();
+                    let mut expected = serde_json::Map::new();
+                    for raw in items {
+                        let raw = raw.as_str().expect("url_check_urls 条目必为字符串");
+                        if let Some((u, e)) = raw.split_once('|') {
+                            let u = u.trim();
+                            targets.push(Value::String(u.to_owned()));
+                            expected.insert(u.to_owned(), Value::String(e.trim().to_owned()));
+                        } else {
+                            targets.push(Value::String(raw.trim().to_owned()));
+                        }
+                    }
+                    prop_assert_eq!(
+                        &mon["url_targets"],
+                        &Value::Array(targets.clone()),
+                        "url_check_urls → url_targets 拆分"
+                    );
+                    prop_assert_eq!(
+                        &mon["url_expected_responses"],
+                        &Value::Object(expected),
+                        "url_check_urls → url_expected_responses 拆分"
+                    );
+                    // 显式 enable_url_check 优先；缺省时沿用「非空即启用」兼容派生
+                    let expected_enabled = obj
+                        .get("enable_url_check")
+                        .cloned()
+                        .unwrap_or_else(|| json!(!targets.is_empty()));
+                    prop_assert_eq!(
+                        &mon["url_enabled"],
+                        &expected_enabled,
+                        "url_enabled 派生口径"
+                    );
+                }
+                // 未指定的子字段不得被历史默认值覆盖（预设哨兵保持）
+                let sentinels: [(&str, &str, Value); 5] = [
+                    ("check_interval_seconds", "check_interval", json!(123)),
+                    ("enable_tcp_check", "tcp_enabled", json!(false)),
+                    ("enable_url_check", "url_enabled", json!(false)),
+                    ("post_login_delay", "post_login_delay", json!(9)),
+                    ("ping_targets", "tcp_targets", json!(["8.8.8.8:53"])),
+                ];
+                for (front, back, preset) in sentinels {
+                    // url_check_urls 在场时 url_enabled 走派生口径（上面已断言），跳过哨兵
+                    let skip = front == "enable_url_check" && obj.contains_key("url_check_urls");
+                    if !obj.contains_key(front) && !skip {
+                        prop_assert_eq!(
+                            &mon[back],
+                            &preset,
+                            "未指定的 monitor.{} 必须保持预设值",
+                            front
+                        );
+                    }
+                }
+            }
+            "username" | "isp" | "auth_url" | "trigger_url" | "active_task" => {
+                prop_assert_eq!(
+                    &profile_out[key],
+                    payload,
+                    "凭证字段 {} 必须写入活跃 Profile",
+                    key
+                );
+            }
+            "password" => match payload {
+                Value::Null => {
+                    prop_assert_eq!(
+                        &profile_out["password"],
+                        &json!(""),
+                        "password=null 保留原值（预设本就为空）"
+                    );
+                }
+                Value::String(s) if s.is_empty() => {
+                    prop_assert_eq!(
+                        &profile_out["password"],
+                        &json!(""),
+                        "password=\"\" 清除密码"
+                    );
+                }
+                Value::String(s) => {
+                    prop_assert_eq!(
+                        &profile_out["password"],
+                        &json!(format!("ENC:mock:{s}")),
+                        "非空密码经 save_password 加密语义"
+                    );
+                }
+                _ => unreachable!("合法族不含非法 password"),
+            },
+            "network" => {
+                prop_assert_eq!(
+                    &profile_out["network"],
+                    payload,
+                    "network 必须写入活跃 Profile"
+                );
+            }
+            "active_profile_id" => {
+                prop_assert_eq!(&settings_out["active_profile_id"], payload);
+            }
+            "login_channel" | "active_http_task" | "active_script_task" => {
+                prop_assert_eq!(
+                    &profile_out[key],
+                    payload,
+                    "渠道/绑定必须写入活跃 Profile（{}）",
+                    key
+                );
+            }
+            other => unreachable!("未知合法族 {}", other),
+        }
+        Ok(())
+    }
+
+    /// 把合法族去重后合成一个 patch，返回（patch, 生效条目）
+    fn prop_build_patch(families: Vec<PropFamily>) -> (Value, PropFamily) {
+        let mut obj = serde_json::Map::new();
+        let mut applied: PropFamily = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for fam in families {
+            if fam.iter().all(|(k, _)| !seen.contains(k.as_str())) {
+                for (k, v) in fam {
+                    seen.insert(k.clone());
+                    obj.insert(k.clone(), v.clone());
+                    applied.push((k, v));
+                }
+            }
+        }
+        (Value::Object(obj), applied)
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        /// 【属性 P1·①④】任意 patch（合法/必拒/未知键混生，含顶层非对象）：
+        /// 永不 panic，仅产出 Ok 或 4xx 类错误；Ok 时 settings 顶层无未知键污染；
+        /// Err 时两域状态与落盘计数完全不变（原子语义的对外面）。
+        #[test]
+        fn prop_patch_mixed_never_panics(
+            entries in proptest::collection::vec(prop_arb_any_entry(), 0..=6),
+            root_shape in 0u8..=4,
+        ) {
+            prop_block_on(async move {
+                let (config, profiles, tasks, inner) = prop_state();
+                let settings_before = prop_settings_json(&inner);
+                let profile_before = prop_profile_json(&inner);
+                let save_before = inner.lock().unwrap().save_calls;
+
+                // 顶层形状：0=对象 / 1..=4=非对象（数组/字符串/数字/null）
+                let patch = if root_shape == 0 {
+                    let mut obj = serde_json::Map::new();
+                    for fam in entries {
+                        for (k, v) in fam {
+                            obj.insert(k, v);
+                        }
+                    }
+                    Value::Object(obj)
+                } else {
+                    match root_shape {
+                        1 => json!([1, 2, 3]),
+                        2 => json!("not-an-object"),
+                        3 => json!(42),
+                        _ => Value::Null,
+                    }
+                };
+
+                let result = apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await;
+                match result {
+                    Ok(()) => {
+                        if root_shape == 0 {
+                            prop_assert_no_pollution(&prop_settings_json(&inner))?;
+                        } else {
+                            // 非对象 patch：无字段可合并，直接成功不落盘
+                            prop_assert_eq!(
+                                prop_settings_json(&inner),
+                                settings_before,
+                                "非对象 patch 不得改动全局设置"
+                            );
+                            prop_assert_eq!(
+                                prop_profile_json(&inner),
+                                profile_before,
+                                "非对象 patch 不得改动活跃 Profile"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        prop_assert!(
+                            e.status().is_client_error(),
+                            "拒绝必须为 4xx 类错误，实际 {e:?}"
+                        );
+                        prop_assert_eq!(
+                            prop_settings_json(&inner),
+                            settings_before,
+                            "拒绝路径不得改动全局设置"
+                        );
+                        prop_assert_eq!(
+                            prop_profile_json(&inner),
+                            profile_before,
+                            "拒绝路径不得改动活跃 Profile"
+                        );
+                        prop_assert_eq!(
+                            inner.lock().unwrap().save_calls,
+                            save_before,
+                            "拒绝路径不得落盘"
+                        );
+                    }
+                }
+                Ok(())
+            })?;
+        }
+
+        /// 【属性 P2·②】合法 patch 精确生效：随机选定字段深度断言新值（含
+        /// monitor 前后端映射与「非空即启用」派生），未指定字段保持预设；
+        /// settings 顶层无未知键污染。
+        #[test]
+        fn prop_valid_patch_precise_effect(
+            families in proptest::collection::vec(prop_arb_valid_family(), 1..=4),
+        ) {
+            prop_block_on(async move {
+                let (config, profiles, tasks, inner) = prop_state();
+                let (patch, applied) = prop_build_patch(families);
+
+                if let Err(e) = apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await {
+                    return Err(proptest::test_runner::TestCaseError::fail(format!(
+                        "合法 patch 必须成功: {e:?}\npatch: {patch:?}"
+                    )));
+                }
+
+                let settings_out = prop_settings_json(&inner);
+                let profile_out = prop_profile_json(&inner);
+                for (k, v) in &applied {
+                    prop_assert_valid_entry(k, v, &settings_out, &profile_out)?;
+                }
+                prop_assert_no_pollution(&settings_out)?;
+                Ok(())
+            })?;
+        }
+
+        /// 【属性 P3·③】含必拒条目的 patch 一律整体拒绝（4xx），且两域状态与
+        /// 落盘计数完全不变——合并是原子语义，绝不部分生效。
+        #[test]
+        fn prop_patch_rejection_is_atomic(
+            rejects in proptest::collection::vec(prop_arb_reject_entry(), 1..=2),
+            extras in proptest::collection::vec(prop_arb_any_entry(), 0..=3),
+        ) {
+            prop_block_on(async move {
+                let (config, profiles, tasks, inner) = prop_state();
+                let settings_before = prop_settings_json(&inner);
+                let profile_before = prop_profile_json(&inner);
+                let save_before = inner.lock().unwrap().save_calls;
+
+                // 与必拒条目同顶层键的额外条目必须剔除：Map 后写覆盖会让
+                // 「必拒」被合法值顶掉，破坏「必拒」前提
+                let mut obj = serde_json::Map::new();
+                let mut reject_keys = std::collections::HashSet::new();
+                for (k, v) in rejects {
+                    reject_keys.insert(k.clone());
+                    obj.insert(k, v);
+                }
+                for fam in extras {
+                    if fam.iter().any(|(k, _)| reject_keys.contains(k.as_str())) {
+                        continue;
+                    }
+                    for (k, v) in fam {
+                        obj.insert(k, v);
+                    }
+                }
+                let patch = Value::Object(obj);
+
+                let result = apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await;
+                match result {
+                    Ok(()) => Err(proptest::test_runner::TestCaseError::fail(format!(
+                        "含必拒条目的 patch 必须被整体拒绝\npatch: {patch:?}"
+                    ))),
+                    Err(e) => {
+                        prop_assert!(
+                            e.status().is_client_error(),
+                            "拒绝必须为 4xx 类错误，实际 {e:?}"
+                        );
+                        prop_assert_eq!(
+                            prop_settings_json(&inner),
+                            settings_before,
+                            "拒绝路径不得改动全局设置（原子性）"
+                        );
+                        prop_assert_eq!(
+                            prop_profile_json(&inner),
+                            profile_before,
+                            "拒绝路径不得改动活跃 Profile（原子性）"
+                        );
+                        prop_assert_eq!(
+                            inner.lock().unwrap().save_calls,
+                            save_before,
+                            "拒绝路径不得落盘（原子性）"
+                        );
+                        Ok(())
+                    }
+                }
+            })?;
+        }
+
+        /// 【属性 P5·⑤】两次合法 patch 的先后应用 ≡ 等价单次合并应用
+        /// （顶层键不相交的族划分抽样；两域终态逐字段相等）。
+        #[test]
+        fn prop_two_valid_patches_associative(
+            families in proptest::collection::vec(prop_arb_valid_family(), 2..=5),
+        ) {
+            prop_block_on(async move {
+                // 全局去重后按奇偶划分到两个不相交 patch（≥2 条保证两侧非空）
+                let mut seen = std::collections::HashSet::new();
+                let mut distinct: Vec<PropFamily> = Vec::new();
+                for fam in families {
+                    if fam.iter().all(|(k, _)| !seen.contains(k.as_str())) {
+                        for (k, _) in &fam {
+                            seen.insert(k.clone());
+                        }
+                        distinct.push(fam);
+                    }
+                }
+                if distinct.len() < 2 {
+                    // 族去重后不足两条：划分退化，跳过本轮抽样（生成器权重下极少发生）
+                    return Ok(());
+                }
+                let mut map1 = serde_json::Map::new();
+                let mut map2 = serde_json::Map::new();
+                for (i, fam) in distinct.iter().enumerate() {
+                    let target = if i % 2 == 0 { &mut map1 } else { &mut map2 };
+                    for (k, v) in fam {
+                        target.insert(k.clone(), v.clone());
+                    }
+                }
+                let p1 = Value::Object(map1);
+                let p2 = Value::Object(map2);
+                let mut merged = serde_json::Map::new();
+                for (k, v) in p1.as_object().unwrap() {
+                    merged.insert(k.clone(), v.clone());
+                }
+                for (k, v) in p2.as_object().unwrap() {
+                    merged.insert(k.clone(), v.clone());
+                }
+                let merged = Value::Object(merged);
+
+                // 状态 A：先后应用两次
+                let (c1, pr1, t1, inner1) = prop_state();
+                apply_flat_settings_patch(&c1, &pr1, &t1, &p1)
+                    .await
+                    .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("P1 合法必须成功: {e:?}")))?;
+                apply_flat_settings_patch(&c1, &pr1, &t1, &p2)
+                    .await
+                    .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("P2 合法必须成功: {e:?}")))?;
+                // 状态 B：单次合并应用
+                let (c2, pr2, t2, inner2) = prop_state();
+                apply_flat_settings_patch(&c2, &pr2, &t2, &merged)
+                    .await
+                    .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("合并 patch 合法必须成功: {e:?}")))?;
+
+                prop_assert_eq!(
+                    prop_settings_json(&inner1),
+                    prop_settings_json(&inner2),
+                    "settings 终态必须等价（先后应用 ≡ 单次合并）"
+                );
+                prop_assert_eq!(
+                    prop_profile_json(&inner1),
+                    prop_profile_json(&inner2),
+                    "Profile 终态必须等价（先后应用 ≡ 单次合并）"
+                );
+                Ok(())
+            })?;
+        }
     }
 }
