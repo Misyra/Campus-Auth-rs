@@ -26,6 +26,10 @@ use crate::login::{LoginHandleInner, recover_lock};
 use crate::status::{LoginSource, LoginStatus, PartialSnapshot, StatusManager};
 use crate::utils::metrics::Metrics;
 
+/// 单轮尝试的执行 future 类型（T7-5）：三渠道统一为
+/// `Result<StructuredResult, String>`，可被 select! 撤销回收
+type AttemptWork = Pin<Box<dyn Future<Output = Result<StructuredResult, String>> + Send>>;
+
 /// 登录终态（成功 / 取消 / 失败）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginTerminal {
@@ -300,6 +304,11 @@ impl LoginSession {
     }
 
     /// 会话主循环：执行 → 分类 → 重试/终态
+    ///
+    /// 每轮尝试按阶段协作（T7-5）：循环头守卫（取消/会话总超时）→
+    /// [`Self::prepare_attempt`] 尝试准备（cancel_id / 进度状态 / 执行 future）→
+    /// [`Self::await_attempt`] 执行等待（取消/关闭/超时/完成竞速）→
+    /// [`Self::handle_attempt_result`] 结果处理（分类 → 终态收尾或重试）。
     pub async fn run(mut self) {
         let session_start = Instant::now();
         self.deps.status_manager.merge(PartialSnapshot::Login {
@@ -313,9 +322,6 @@ impl LoginSession {
             max_retries = self.params.max_retries,
             "登录会话开始"
         );
-
-        // A-2：依赖 trait 化且非 Option——编排器构造会话时必然注入
-        let bridge = self.deps.bridge.clone();
 
         let total_attempts = self.params.max_retries + 1;
         let mut attempts_used: u32 = 0;
@@ -333,153 +339,23 @@ impl LoginSession {
             // 会话总超时检查（login_timeout 至少 1s，见 SessionParams 构造 clamp）
             if session_start.elapsed() > self.params.login_timeout.max(Duration::from_secs(1)) {
                 if uses_bridge && let Some(cid) = self.attempt_cancel_id.load_full() {
-                    bridge.cancel(cid.as_str());
+                    self.deps.bridge.cancel(cid.as_str());
                 }
                 self.finish_with_failure(session_start, attempts_used, "登录超时".into())
                     .await;
                 return;
             }
 
-            // 生成本轮 attempt 的 cancel_id（UUID v4）
-            let cancel_id = uuid::Uuid::new_v4().to_string();
-            if uses_bridge {
-                self.attempt_cancel_id
-                    .store(Some(Arc::new(cancel_id.clone())));
-            }
+            // 尝试准备段：cancel_id 生成/登记 + 进度状态刷新 + 执行 future 构造
+            let (cancel_id, work) =
+                self.prepare_attempt(attempts_used, total_attempts, uses_bridge);
 
-            let attempt_no = attempts_used + 1;
-            self.deps.status_manager.merge(PartialSnapshot::Login {
-                status: LoginStatus::Running,
-                source: Some(self.params.source),
-                message: Some(format!("尝试 {attempt_no}/{total_attempts}")),
-                retry_count: attempts_used,
-            });
-
-            // 直连渠道：Rust 进程内构造/发送请求；脚本渠道：Rust 进程内起子进程跑脚本；
-            // 浏览器渠道：Bridge 驱动 Worker。三者统一为
-            // Result<StructuredResult, String> 的可取消 future，取消/shutdown/超时边界对
-            // 三种渠道一致（进程内路径无 Bridge 可取消，靠丢弃 future 回收子进程）。
-            let mut work: Pin<Box<dyn Future<Output = Result<StructuredResult, String>> + Send>> =
-                match &self.params.plan {
-                    LoginAttemptPlan::Http(plan) => {
-                        let plan = plan.clone();
-                        Box::pin(
-                            async move { Ok(http_login::run_once(&plan).await.to_structured()) },
-                        )
-                    }
-                    LoginAttemptPlan::Script(plan) => {
-                        let plan = plan.clone();
-                        // 取消时本 future 被 `select!` 直接丢弃，`run_command` 里带
-                        // `kill_on_drop` 的子进程随之回收（Windows 另有 Job Object 兜住
-                        // 整棵进程树），故脚本渠道不需要 Bridge 那种 cancel_id 收尾。
-                        let runner = self.deps.script_runner.clone();
-                        Box::pin(async move { Ok(script_login::run_once(&runner, &plan).await) })
-                    }
-                    LoginAttemptPlan::Browser(worker_config) => {
-                        // 根据来源选择 Bridge 命令
-                        let method = match self.params.source {
-                            LoginSource::Browser => "execute_browser_task",
-                            _ => "execute_login_attempt",
-                        };
-
-                        let mut params = worker_config.clone();
-                        params["cancel_id"] = json!(cancel_id.clone());
-                        if let Some(tid) = &self.params.task_id {
-                            params["task_id"] = json!(tid.clone());
-                        }
-                        let bridge = bridge.clone();
-                        Box::pin(async move {
-                            match bridge.execute(method, params).await {
-                                Ok(resp) => Ok(Self::parse_ipc_response(resp)),
-                                // Worker 崩溃 / 启动超时到达调用方是 Err 而非 Outcome：
-                                // Worker 可能已被 Supervisor 重建或仅是瞬时故障，与
-                                // Outcome::NetworkError 同属可重试失败——转成 NetworkError
-                                // 结构化结果走既有 classify/try_retry 路径（此前直接终态
-                                // 失败，Worker 崩溃一次即放弃整场登录；重试前的
-                                // force_recycle_if_unowned 对已死 Worker 幂等安全）。
-                                Err(
-                                    e @ (BridgeError::WorkerCrashed { .. }
-                                    | BridgeError::WorkerStartupTimeout
-                                    | BridgeError::NetworkEgress(_)),
-                                ) => Ok(StructuredResult {
-                                    outcome: Outcome::NetworkError,
-                                    message: format!("Worker 异常: {e}"),
-                                    data: Value::Null,
-                                    screenshot_url: None,
-                                    duration_ms: 0,
-                                }),
-                                // WorkerBusy（调试会话 / 重定向检测占用会话槽位）是
-                                // 典型的**瞬时**冲突：占用方可短则数秒（调试单步）、
-                                // 长则贯穿调试会话。此前归为终态失败，调试期间自动
-                                // 登录被静默压制且登录历史被 WorkerBusy 刷屏。转成
-                                // NetworkError 走既有重试/退避路径（与上方崩溃分支
-                                // 同一处理）；随后的归属感知回收（force_recycle_
-                                // if_unowned）发现槽位不属于本会话时不会误杀占用方。
-                                Err(e @ BridgeError::WorkerBusy) => Ok(StructuredResult {
-                                    outcome: Outcome::NetworkError,
-                                    message: format!("Worker 忙（被其他任务占用，将重试）: {e}"),
-                                    data: Value::Null,
-                                    screenshot_url: None,
-                                    duration_ms: 0,
-                                }),
-                                // 其余 Err（WorkerNotInstalled /
-                                // WorkerSpawnBlocked / WorkerEnvironmentInvalid /
-                                // Cancelled / Timeout / SupervisorNotRunning 等）保持
-                                // 终态失败：重试不会变好，或取消/超时语义要求立即退出
-                                Err(e) => Err(format!("Bridge 执行失败: {e}")),
-                            }
-                        })
-                    }
-                };
-
-            // 等待尝试完成，期间监听会话级取消、应用 shutdown 与会话总超时
-            //
-            // bridge.execute() 内部最长阻塞 300s。此处用 tokio::select! (biased) 同时监听：
-            // - cancel_token 触发（用户/系统取消，最高优先级）
-            // - shutdown_token 触发（应用关闭，立即以取消终态退出）
-            // - 会话总超时到期（防止 Worker 卡死导致整会话永不退出）
-            // - 尝试完成（正常路径）
-            // biased 保证取消类信号先于执行/超时生效，避免取消被延迟。
-            // 取消通知仅对 Bridge 路径有意义（携带 cancel_id 停 Worker 任务），
-            // 直连路径的请求 future 随 select 撤销直接丢弃。
-            let exec = {
-                let ct = self.cancel_token.clone();
-                let remaining = self
-                    .params
-                    .login_timeout
-                    .max(Duration::from_secs(1))
-                    .saturating_sub(session_start.elapsed());
-                tokio::select! {
-                    biased;
-                    _ = ct.cancelled() => {
-                        if uses_bridge {
-                            bridge.cancel(&cancel_id);
-                        }
-                        self.finish_with_cancelled(session_start, attempts_used, None).await;
-                        return;
-                    }
-                    _ = self.shutdown_token.cancelled() => {
-                        if uses_bridge {
-                            bridge.cancel(&cancel_id);
-                        }
-                        self.finish_with_cancelled(
-                            session_start,
-                            attempts_used,
-                            Some("应用关闭".to_string()),
-                        )
-                        .await;
-                        return;
-                    }
-                    _ = sleep(remaining) => {
-                        if uses_bridge {
-                            bridge.cancel(&cancel_id);
-                        }
-                        self.finish_with_failure(session_start, attempts_used, "登录超时".into())
-                            .await;
-                        return;
-                    }
-                    res = &mut work => res,
-                }
+            // 执行等待段：取消/关闭/总超时/完成竞速，命中前三者即已终态收尾
+            let Some(exec) = self
+                .await_attempt(work, &cancel_id, uses_bridge, session_start, attempts_used)
+                .await
+            else {
+                return;
             };
 
             let structured = match exec {
@@ -492,160 +368,370 @@ impl LoginSession {
                 }
             };
 
-            self.last_outcome = Some(structured.outcome);
-
-            // 本轮 attempt 结束，清除在途 cancel_id。清除前留一份：Bridge 强杀
-            // Worker 前要用它证明会话槽位属于本会话（见 try_retry 的归属感知回收）。
-            let finished_attempt_cancel_id = self.attempt_cancel_id.load_full();
-            self.attempt_cancel_id.store(None);
-
-            // 分类结果：可重试但重试预算已耗尽时归入 Exhausted（避免进入 try_retry）
-            // 后再次判断，保持"预算耗尽"这一决策与 classify 一起表达
-            let action = classify(structured.outcome);
-            let action =
-                if action == ResultAction::Retry && attempts_used >= self.params.max_retries {
-                    ResultAction::Exhausted
-                } else {
-                    action
-                };
-            match action {
-                ResultAction::Terminal(kind) => match kind {
-                    LoginTerminal::Success => {
-                        // 汇总成功消息：Worker message（如「成功条件命中」「N 个非必须
-                        // 步骤失败」）与页面弹窗文案（如「登录成功！」）一并进入日志
-                        let note = dialog_note(&structured.data);
-                        let detail = {
-                            let m = structured.message.trim();
-                            if !m.is_empty() && m != "执行成功" {
-                                format!("（{m}）")
-                            } else {
-                                String::new()
-                            }
-                        };
-                        let msg = format!("登录成功{detail}{note}");
-                        // 任务声明 success_condition → 信任 Worker 的变量真值判定，跳过网络检测兜底
-                        // （对齐原项目 v4.2.3 login_attempt 的 has_explicit_condition 分支）
-                        if self.has_explicit_success_condition() {
-                            debug!("任务声明 success_condition，跳过登录后网络检测");
-                            self.emit(self.make_result(
-                                LoginTerminal::Success,
-                                msg,
-                                session_start,
-                                attempts_used,
-                            ))
-                            .await;
-                            return;
-                        }
-                        // 步骤全部成功后做真实网络验证：避免 Worker 假成功（步骤未抛异常
-                        // 但页面实际未登录成功）被误报。参考老实现 _check_success：
-                        // 等待 post_login_delay 让认证生效 → check_once → 仅 Online 才算真成功。
-                        // 延迟 + 探测消耗会话总超时预算：传入剩余预算，不得叠加在
-                        // login_timeout 之外拖延整场登录
-                        let remaining = self
-                            .params
-                            .login_timeout
-                            .saturating_sub(session_start.elapsed());
-                        match self.verify_network_after_login(remaining).await {
-                            NetworkVerification::Online => {
-                                self.emit(self.make_result(
-                                    LoginTerminal::Success,
-                                    msg,
-                                    session_start,
-                                    attempts_used,
-                                ))
-                                .await;
-                                return;
-                            }
-                            NetworkVerification::Cancelled => {
-                                self.finish_with_cancelled(session_start, attempts_used, None)
-                                    .await;
-                                return;
-                            }
-                            NetworkVerification::RetryableFailure => {
-                                self.last_outcome = Some(Outcome::NetworkError);
-                            }
-                        }
-                        // 网络验证未通过：不直接判终态失败，而是走可重试路径。
-                        // 理由：网络探测可能因瞬时波动误判，重试一次登录比直接判死更稳妥。
-                        // 策略与 Worker 返回 NetworkError 时一致（classify → Retry）。
-                        warn!(
-                            attempt = attempts_used + 1,
-                            "Worker 返回 Success 但网络验证未通过，转入重试"
-                        );
-                        // 构造一个 NetworkError 的 structured 以复用下方 Retry 分支
-                        let retry_structured = StructuredResult {
-                            outcome: Outcome::NetworkError,
-                            message: "网络验证未通过".into(),
-                            data: structured.data.clone(),
-                            screenshot_url: structured.screenshot_url.clone(),
-                            duration_ms: structured.duration_ms,
-                        };
-                        if !self
-                            .try_retry(
-                                &retry_structured,
-                                &mut attempts_used,
-                                session_start,
-                                false,
-                                finished_attempt_cancel_id.as_deref().map(String::as_str),
-                            )
-                            .await
-                        {
-                            return;
-                        }
-                    }
-                    LoginTerminal::Cancelled => {
-                        // 取消原因（用户取消/抢占/应用关闭等）存于 cancel_reason，
-                        // 经 make_cancelled_result 带出，不得硬编码覆盖
-                        self.finish_with_cancelled(session_start, attempts_used, None)
-                            .await;
-                        return;
-                    }
-                    LoginTerminal::Failed => {
-                        self.finish_with_failure(
-                            session_start,
-                            attempts_used,
-                            format!("{}{}", structured.message, dialog_note(&structured.data)),
-                        )
-                        .await;
-                        return;
-                    }
-                },
-                ResultAction::Retry => {
-                    if !self
-                        .try_retry(
-                            &structured,
-                            &mut attempts_used,
-                            session_start,
-                            // 直连路径无 Worker 参与，网络类失败不需要回收 Worker
-                            uses_bridge && should_force_recycle(structured.outcome),
-                            finished_attempt_cancel_id.as_deref().map(String::as_str),
-                        )
-                        .await
-                    {
-                        return;
-                    }
-                }
-                ResultAction::Exhausted => {
-                    // 可重试结果但重试预算已耗尽：以"重试耗尽"终态收尾，
-                    // 不再进入 try_retry 重复尝试（由下方 classify 前预算预检产生）。
-                    // 附带最后一次失败的步骤错误与页面弹窗文案，便于定位真实原因。
-                    self.finish_with_failure(
-                        session_start,
-                        attempts_used,
-                        // 口径统一为总尝试次数（含首试），与 try_retry 耗尽分支
-                        // 及「尝试 N/M」进度文案一致（历史实现两处各说各话）
-                        format!(
-                            "重试耗尽（共 {} 次尝试）: {}{}",
-                            total_attempts,
-                            structured.message,
-                            dialog_note(&structured.data)
-                        ),
-                    )
-                    .await;
-                    return;
-                }
+            // 结果处理段：分类 → 终态收尾或重试（false 表示已 emit 终态，退出循环）
+            if !self
+                .handle_attempt_result(
+                    structured,
+                    &mut attempts_used,
+                    session_start,
+                    uses_bridge,
+                    total_attempts,
+                )
+                .await
+            {
+                return;
             }
         }
+    }
+
+    /// 尝试准备段：生成本轮 attempt 的 cancel_id（UUID v4）、刷新进度状态、
+    /// 构造本轮执行的 future
+    ///
+    /// cancel_id 同时登记到 `attempt_cancel_id`（仅浏览器渠道），供取消传播
+    /// 与归属感知回收读取。
+    fn prepare_attempt(
+        &self,
+        attempts_used: u32,
+        total_attempts: u32,
+        uses_bridge: bool,
+    ) -> (String, AttemptWork) {
+        // 生成本轮 attempt 的 cancel_id（UUID v4）
+        let cancel_id = uuid::Uuid::new_v4().to_string();
+        if uses_bridge {
+            self.attempt_cancel_id
+                .store(Some(Arc::new(cancel_id.clone())));
+        }
+
+        let attempt_no = attempts_used + 1;
+        self.deps.status_manager.merge(PartialSnapshot::Login {
+            status: LoginStatus::Running,
+            source: Some(self.params.source),
+            message: Some(format!("尝试 {attempt_no}/{total_attempts}")),
+            retry_count: attempts_used,
+        });
+
+        let work = self.build_attempt_work(&cancel_id);
+        (cancel_id, work)
+    }
+
+    /// 构造本轮尝试的执行 future
+    ///
+    /// 直连渠道：Rust 进程内构造/发送请求；脚本渠道：Rust 进程内起子进程跑脚本；
+    /// 浏览器渠道：Bridge 驱动 Worker。三者统一为
+    /// `Result<StructuredResult, String>` 的可取消 future，取消/shutdown/超时边界对
+    /// 三种渠道一致（进程内路径无 Bridge 可取消，靠丢弃 future 回收子进程）。
+    fn build_attempt_work(&self, cancel_id: &str) -> AttemptWork {
+        match &self.params.plan {
+            LoginAttemptPlan::Http(plan) => {
+                let plan = plan.clone();
+                Box::pin(async move { Ok(http_login::run_once(&plan).await.to_structured()) })
+            }
+            LoginAttemptPlan::Script(plan) => {
+                let plan = plan.clone();
+                // 取消时本 future 被 `select!` 直接丢弃，`run_command` 里带
+                // `kill_on_drop` 的子进程随之回收（Windows 另有 Job Object 兜住
+                // 整棵进程树），故脚本渠道不需要 Bridge 那种 cancel_id 收尾。
+                let runner = self.deps.script_runner.clone();
+                Box::pin(async move { Ok(script_login::run_once(&runner, &plan).await) })
+            }
+            LoginAttemptPlan::Browser(worker_config) => {
+                self.build_browser_work(worker_config, cancel_id)
+            }
+        }
+    }
+
+    /// 浏览器渠道的执行 future：按来源选择 Bridge 命令并驱动 Worker
+    ///
+    /// Worker 崩溃 / 启动超时 / 忙归一为 `NetworkError` 结构化结果走既有
+    /// classify/try_retry 路径（见各分支注释）；其余 `Err` 保持终态失败。
+    fn build_browser_work(&self, worker_config: &Value, cancel_id: &str) -> AttemptWork {
+        // 根据来源选择 Bridge 命令
+        let method = match self.params.source {
+            LoginSource::Browser => "execute_browser_task",
+            _ => "execute_login_attempt",
+        };
+
+        let mut params = worker_config.clone();
+        params["cancel_id"] = json!(cancel_id.to_string());
+        if let Some(tid) = &self.params.task_id {
+            params["task_id"] = json!(tid.clone());
+        }
+        let bridge = self.deps.bridge.clone();
+        Box::pin(async move {
+            match bridge.execute(method, params).await {
+                Ok(resp) => Ok(Self::parse_ipc_response(resp)),
+                // Worker 崩溃 / 启动超时到达调用方是 Err 而非 Outcome：
+                // Worker 可能已被 Supervisor 重建或仅是瞬时故障，与
+                // Outcome::NetworkError 同属可重试失败——转成 NetworkError
+                // 结构化结果走既有 classify/try_retry 路径（此前直接终态
+                // 失败，Worker 崩溃一次即放弃整场登录；重试前的
+                // force_recycle_if_unowned 对已死 Worker 幂等安全）。
+                Err(
+                    e @ (BridgeError::WorkerCrashed { .. }
+                    | BridgeError::WorkerStartupTimeout
+                    | BridgeError::NetworkEgress(_)),
+                ) => Ok(StructuredResult {
+                    outcome: Outcome::NetworkError,
+                    message: format!("Worker 异常: {e}"),
+                    data: Value::Null,
+                    screenshot_url: None,
+                    duration_ms: 0,
+                }),
+                // WorkerBusy（调试会话 / 重定向检测占用会话槽位）是
+                // 典型的**瞬时**冲突：占用方可短则数秒（调试单步）、
+                // 长则贯穿调试会话。此前归为终态失败，调试期间自动
+                // 登录被静默压制且登录历史被 WorkerBusy 刷屏。转成
+                // NetworkError 走既有重试/退避路径（与上方崩溃分支
+                // 同一处理）；随后的归属感知回收（force_recycle_
+                // if_unowned）发现槽位不属于本会话时不会误杀占用方。
+                Err(e @ BridgeError::WorkerBusy) => Ok(StructuredResult {
+                    outcome: Outcome::NetworkError,
+                    message: format!("Worker 忙（被其他任务占用，将重试）: {e}"),
+                    data: Value::Null,
+                    screenshot_url: None,
+                    duration_ms: 0,
+                }),
+                // 其余 Err（WorkerNotInstalled /
+                // WorkerSpawnBlocked / WorkerEnvironmentInvalid /
+                // Cancelled / Timeout / SupervisorNotRunning 等）保持
+                // 终态失败：重试不会变好，或取消/超时语义要求立即退出
+                Err(e) => Err(format!("Bridge 执行失败: {e}")),
+            }
+        })
+    }
+
+    /// 执行等待段：等待尝试完成，期间监听会话级取消、应用 shutdown 与会话总超时
+    ///
+    /// bridge.execute() 内部最长阻塞 300s。此处用 tokio::select! (biased) 同时监听：
+    /// - cancel_token 触发（用户/系统取消，最高优先级）
+    /// - shutdown_token 触发（应用关闭，立即以取消终态退出）
+    /// - 会话总超时到期（防止 Worker 卡死导致整会话永不退出）
+    /// - 尝试完成（正常路径）
+    ///
+    /// biased 保证取消类信号先于执行/超时生效，避免取消被延迟。
+    /// 取消通知仅对 Bridge 路径有意义（携带 cancel_id 停 Worker 任务），
+    /// 直连路径的请求 future 随 select 撤销直接丢弃。
+    ///
+    /// 返回 `None` 表示等待期间会话已以终态收尾（emit 已完成），调用方应立即退出。
+    async fn await_attempt(
+        &self,
+        mut work: AttemptWork,
+        cancel_id: &str,
+        uses_bridge: bool,
+        session_start: Instant,
+        attempts_used: u32,
+    ) -> Option<Result<StructuredResult, String>> {
+        let ct = self.cancel_token.clone();
+        let remaining = self
+            .params
+            .login_timeout
+            .max(Duration::from_secs(1))
+            .saturating_sub(session_start.elapsed());
+        tokio::select! {
+            biased;
+            _ = ct.cancelled() => {
+                if uses_bridge {
+                    self.deps.bridge.cancel(cancel_id);
+                }
+                self.finish_with_cancelled(session_start, attempts_used, None).await;
+                None
+            }
+            _ = self.shutdown_token.cancelled() => {
+                if uses_bridge {
+                    self.deps.bridge.cancel(cancel_id);
+                }
+                self.finish_with_cancelled(
+                    session_start,
+                    attempts_used,
+                    Some("应用关闭".to_string()),
+                )
+                .await;
+                None
+            }
+            _ = sleep(remaining) => {
+                if uses_bridge {
+                    self.deps.bridge.cancel(cancel_id);
+                }
+                self.finish_with_failure(session_start, attempts_used, "登录超时".into())
+                    .await;
+                None
+            }
+            res = &mut work => Some(res),
+        }
+    }
+
+    /// 结果处理段：分类本轮结果 → 终态收尾或转入下一轮
+    ///
+    /// 返回 `true` 表示继续下一轮循环，`false` 表示已 emit 终态结果
+    /// （终态 / 重试耗尽 / 重试等待期被取消）。
+    async fn handle_attempt_result(
+        &mut self,
+        structured: StructuredResult,
+        attempts_used: &mut u32,
+        session_start: Instant,
+        uses_bridge: bool,
+        total_attempts: u32,
+    ) -> bool {
+        self.last_outcome = Some(structured.outcome);
+
+        // 本轮 attempt 结束，清除在途 cancel_id。清除前留一份：Bridge 强杀
+        // Worker 前要用它证明会话槽位属于本会话（见 try_retry 的归属感知回收）。
+        let finished_attempt_cancel_id = self.attempt_cancel_id.load_full();
+        self.attempt_cancel_id.store(None);
+
+        // 分类结果：可重试但重试预算已耗尽时归入 Exhausted（避免进入 try_retry）
+        // 后再次判断，保持"预算耗尽"这一决策与 classify 一起表达
+        let action = classify(structured.outcome);
+        let action = if action == ResultAction::Retry && *attempts_used >= self.params.max_retries {
+            ResultAction::Exhausted
+        } else {
+            action
+        };
+        match action {
+            ResultAction::Terminal(kind) => match kind {
+                LoginTerminal::Success => {
+                    self.handle_success_outcome(
+                        &structured,
+                        attempts_used,
+                        session_start,
+                        finished_attempt_cancel_id.as_deref().map(String::as_str),
+                    )
+                    .await
+                }
+                LoginTerminal::Cancelled => {
+                    // 取消原因（用户取消/抢占/应用关闭等）存于 cancel_reason，
+                    // 经 make_cancelled_result 带出，不得硬编码覆盖
+                    self.finish_with_cancelled(session_start, *attempts_used, None)
+                        .await;
+                    false
+                }
+                LoginTerminal::Failed => {
+                    self.finish_with_failure(
+                        session_start,
+                        *attempts_used,
+                        format!("{}{}", structured.message, dialog_note(&structured.data)),
+                    )
+                    .await;
+                    false
+                }
+            },
+            ResultAction::Retry => {
+                self.try_retry(
+                    &structured,
+                    attempts_used,
+                    session_start,
+                    // 直连路径无 Worker 参与，网络类失败不需要回收 Worker
+                    uses_bridge && should_force_recycle(structured.outcome),
+                    finished_attempt_cancel_id.as_deref().map(String::as_str),
+                )
+                .await
+            }
+            ResultAction::Exhausted => {
+                // 可重试结果但重试预算已耗尽：以"重试耗尽"终态收尾，
+                // 不再进入 try_retry 重复尝试（由下方 classify 前预算预检产生）。
+                // 附带最后一次失败的步骤错误与页面弹窗文案，便于定位真实原因。
+                self.finish_with_failure(
+                    session_start,
+                    *attempts_used,
+                    // 口径统一为总尝试次数（含首试），与 try_retry 耗尽分支
+                    // 及「尝试 N/M」进度文案一致（历史实现两处各说各话）
+                    format!(
+                        "重试耗尽（共 {} 次尝试）: {}{}",
+                        total_attempts,
+                        structured.message,
+                        dialog_note(&structured.data)
+                    ),
+                )
+                .await;
+                false
+            }
+        }
+    }
+
+    /// 成功终态处理：汇总成功消息；显式 `success_condition` 直接受理，否则
+    /// 登录后真实网络验证兜底，验证未通过转可重试路径
+    ///
+    /// 返回 `true` 表示继续下一轮循环（网络验证未过转入重试），`false`
+    /// 表示已 emit 终态结果。
+    async fn handle_success_outcome(
+        &mut self,
+        structured: &StructuredResult,
+        attempts_used: &mut u32,
+        session_start: Instant,
+        finished_owner_cancel_id: Option<&str>,
+    ) -> bool {
+        // 汇总成功消息：Worker message（如「成功条件命中」「N 个非必须
+        // 步骤失败」）与页面弹窗文案（如「登录成功！」）一并进入日志
+        let note = dialog_note(&structured.data);
+        let detail = {
+            let m = structured.message.trim();
+            if !m.is_empty() && m != "执行成功" {
+                format!("（{m}）")
+            } else {
+                String::new()
+            }
+        };
+        let msg = format!("登录成功{detail}{note}");
+        // 任务声明 success_condition → 信任 Worker 的变量真值判定，跳过网络检测兜底
+        // （对齐原项目 v4.2.3 login_attempt 的 has_explicit_condition 分支）
+        if self.has_explicit_success_condition() {
+            debug!("任务声明 success_condition，跳过登录后网络检测");
+            self.emit(self.make_result(LoginTerminal::Success, msg, session_start, *attempts_used))
+                .await;
+            return false;
+        }
+        // 步骤全部成功后做真实网络验证：避免 Worker 假成功（步骤未抛异常
+        // 但页面实际未登录成功）被误报。参考老实现 _check_success：
+        // 等待 post_login_delay 让认证生效 → check_once → 仅 Online 才算真成功。
+        // 延迟 + 探测消耗会话总超时预算：传入剩余预算，不得叠加在
+        // login_timeout 之外拖延整场登录
+        let remaining = self
+            .params
+            .login_timeout
+            .saturating_sub(session_start.elapsed());
+        match self.verify_network_after_login(remaining).await {
+            NetworkVerification::Online => {
+                self.emit(self.make_result(
+                    LoginTerminal::Success,
+                    msg,
+                    session_start,
+                    *attempts_used,
+                ))
+                .await;
+                return false;
+            }
+            NetworkVerification::Cancelled => {
+                self.finish_with_cancelled(session_start, *attempts_used, None)
+                    .await;
+                return false;
+            }
+            NetworkVerification::RetryableFailure => {
+                self.last_outcome = Some(Outcome::NetworkError);
+            }
+        }
+        // 网络验证未通过：不直接判终态失败，而是走可重试路径。
+        // 理由：网络探测可能因瞬时波动误判，重试一次登录比直接判死更稳妥。
+        // 策略与 Worker 返回 NetworkError 时一致（classify → Retry）。
+        warn!(
+            attempt = *attempts_used + 1,
+            "Worker 返回 Success 但网络验证未通过，转入重试"
+        );
+        // 构造一个 NetworkError 的 structured 以复用下方 Retry 分支
+        let retry_structured = StructuredResult {
+            outcome: Outcome::NetworkError,
+            message: "网络验证未通过".into(),
+            data: structured.data.clone(),
+            screenshot_url: structured.screenshot_url.clone(),
+            duration_ms: structured.duration_ms,
+        };
+        self.try_retry(
+            &retry_structured,
+            attempts_used,
+            session_start,
+            false,
+            finished_owner_cancel_id,
+        )
+        .await
     }
 
     /// 尝试重试：更新状态、按需回收 Worker、等待重试间隔。
